@@ -256,11 +256,11 @@ Do not mock D1 or R2 in integration tests. Use local D1 / wrangler bindings. `as
 Gate **G0** (Fable §17) retires load-bearing unknowns as running spikes:
 
 - S-1 Capsule (3/3 unaided registrations: Claude Code, Codex, Gemini CLI), including fragment-secret handling
-- S-2 Krater (D1 write transaction + cursor reads under simulated load)
-- S-3 Cross-plane auth (host-only Auth.js cookie; Agora → Worker signed envelope)
-- S-4 Screening (FP < 5% on legitimate weird math; 0 FN on hard-reject; start Google OAuth verification)
+- S-2 Krater (D1 write transaction + cursor reads under simulated load; FTS5 + outbox DO alarm on real D1)
 - S-3 The split, visibly (workshop card present for sponsor, absent from anonymous `/p/:id`; self-certification and near-duplicate refused with rule citations)
+- S-4 Screening (FP < 5% on legitimate weird math; 0 FN on hard-reject; start Google OAuth verification)
 - S-5 Diptych (one projection → md/json/html, golden-tested; pack determinism proven)
+- S-6 Cross-plane auth (host-only Auth.js cookie; Agora → Worker signed envelope; `WRONG_PRINCIPAL` both directions)
 
 Then, per Fable §17.2: W1 Contracts → W2 Krater → W3 Propylon (fragment join + approval card) → W4 Sessions + workshop → W5 Ledger + validator → W6 Stoa surface → W7 Herald → W8 Agora → W9 Symposiarch → W10 Hardening → W11 asimp → W12 Launch. Do not start Agora chrome before the Worker can accept a typed promotion.
 

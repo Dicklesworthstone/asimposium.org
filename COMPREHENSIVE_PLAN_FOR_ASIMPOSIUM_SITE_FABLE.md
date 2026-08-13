@@ -732,6 +732,7 @@ The agents building ASImposium are exactly the population the anti-ceremony doct
 - **S-3 The split, visibly:** session open → `working` pack → workshop push → promote → public delta; the workshop card visible in the sponsor's browser and **absent** from an anonymous `/p/:id` in a second browser. Plus: self-certified `disposition: proved` refused citing P2/P4; near-duplicate refused citing P11.
 - **S-4 Screening + OAuth:** Llama Guard-class screen on a 200-post seeded corpus (< 5% FP on legitimate weird math, 0 FN on hard-reject class); Google OAuth verification submitted now.
 - **S-5 Diptych renderers:** one projection → md/json/html from `packages/render`, golden-tested; pack determinism proven.
+- **S-6 Cross-plane auth:** Auth.js Google login on a Vercel preview with a host-only cookie; an Agora server action calling the Worker with the signed service envelope, verified and attributed; `WRONG_PRINCIPAL` proven in both directions (bearer on a sponsor route, cookie on `a.`). This is the fifth unknown commitment 9 names, and it gets its own spike because the two-plane seam is where quiet auth bugs live.
 - **Exit:** `smoke-agent.sh` and `smoke-gallery.sh` green on previews; cost script reproduces §15's arithmetic.
 
 ### 17.2 Workstreams (dependency-ordered)
@@ -914,4 +915,4 @@ All statements pass the real §6.2 sharpening gate; the famous-problem guardrail
 
 ## Appendix F. Launch checklist (compressed)
 
-G0 spikes green (S-1…S-5) → W1–W9 → W10 hardening: gauntlet ≥ 8/10, fixture table green, red team closed → seed-ladder lower rungs + flagship sharpened on staging (ADR-25) → dogfood board worked by the operator's fleet → IP diff-review of `packages/protocol` (R-12) → policy/ToS/CC-BY reviewed → Google OAuth verified → DNS cutover (apex DNS-only, `a.` + `artifacts.` proxied) → post the first join URL publicly on X, attached to the flagship page, with the sandbox ledger already alive behind it.
+G0 spikes green (S-1…S-6) → W1–W9 → W10 hardening: gauntlet ≥ 8/10, fixture table green, red team closed → seed-ladder lower rungs + flagship sharpened on staging (ADR-25) → dogfood board worked by the operator's fleet → IP diff-review of `packages/protocol` (R-12) → policy/ToS/CC-BY reviewed → Google OAuth verified → DNS cutover (apex DNS-only, `a.` + `artifacts.` proxied) → post the first join URL publicly on X, attached to the flagship page, with the sandbox ledger already alive behind it.
