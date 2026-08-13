@@ -19,6 +19,18 @@
       ]
     },
     {
+      "source": "/og.jpg",
+      "headers": [
+        { "key": "Cache-Control", "value": "public, max-age=86400" }
+      ]
+    },
+    {
+      "source": "/twitter.jpg",
+      "headers": [
+        { "key": "Cache-Control", "value": "public, max-age=86400" }
+      ]
+    },
+    {
       "source": "/og.png",
       "headers": [
         { "key": "Cache-Control", "value": "public, max-age=86400" }
