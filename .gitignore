@@ -1,2 +1,5 @@
 .DS_Store
-.git.old-history/
+node_modules/
+.vercel/
+.env
+.env.*
