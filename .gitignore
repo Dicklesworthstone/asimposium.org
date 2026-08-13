@@ -3,3 +3,7 @@ node_modules/
 .vercel/
 .env
 .env.*
+# br doctor per-run artifacts
+.doctor/
+.vercel
+.env*
