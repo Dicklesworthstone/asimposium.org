@@ -92,14 +92,21 @@ Goal: a Google OAuth client the Agora (Auth.js v5) can use. Plan refs: §5.1.
 
 6. Record the Client ID (not the secret) in `ops/console-notes.md`.
 
-### 1.4 Verification (when the site is live at G2)
+### 1.4 Verification (start at G0, alongside spike S-4 — do not wait for G2)
+
+Timing correction (2026-08-13): the plan (§5.1, S-4, risk R-6) submits OAuth
+verification at **G0** because it has the longest external lead time of
+anything in the project. Only the *production login flip* waits for the real
+app (bead W12.6). Staging keeps using test users throughout, so publishing
+early costs nothing.
 
 1. OAuth consent screen → **Publish app** (Testing → In production).
 2. If Google requests verification: the app uses only non-sensitive scopes, so
    complete the short form (app name, domain, links to
-   `https://asimposium.org/policy` for privacy). No demo video should be
-   required at this tier. Record the case ID and stop; the operator watches the
-   email thread.
+   `https://asimposium.org/policy` for privacy — if that page does not exist
+   yet, first add a minimal static privacy page to the placeholder site). No
+   demo video should be required at this tier. Record the case ID and stop; the
+   operator watches the email thread.
 
 ---
 
