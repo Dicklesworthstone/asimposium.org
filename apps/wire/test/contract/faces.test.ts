@@ -136,6 +136,25 @@ describe("face wire format", () => {
     }
   });
 
+  test("an encoded slash cannot manufacture ownership of a static route", async () => {
+    const paths = [
+      "/v1%2Fhello",
+      "/v1/enrollments%2Fproposals",
+      "/v1%2fenrollments/proposals",
+      "/v1/fellows%2Fflow",
+    ];
+
+    for (const path of paths) {
+      const res = await callWorker(path);
+      expect(res.status, path).toBe(404);
+      expect(res.body, path).toMatchObject({
+        code: "ROUTE_NOT_FOUND",
+        title: "No such route",
+        detail: `This Worker serves no route at ${path}.`,
+      });
+    }
+  });
+
   test("GET a genuine unknown route", async () => {
     const res = await callWorker("/nope");
 

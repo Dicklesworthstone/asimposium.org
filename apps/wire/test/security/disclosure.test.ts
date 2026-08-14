@@ -196,6 +196,38 @@ describe("the error handler does not leak thrown detail", () => {
     expect(text).not.toContain("at ");
     forbidden(text);
   });
+
+  test("a mutable error name cannot reach the server diagnostic", async () => {
+    const app = createApp();
+    app.get("/test-only/named", () => {
+      const error = new Error("ordinary message");
+      error.name = CANARY_TOKEN;
+      throw error;
+    });
+
+    const originalConsoleError = console.error;
+    const logged: unknown[][] = [];
+    console.error = (...values: unknown[]) => {
+      logged.push(values);
+    };
+    try {
+      const response = await app.fetch(
+        new Request("https://a.asimposium.org/test-only/named"),
+        boundEnv() as Env,
+        executionContext() as unknown as Parameters<typeof app.fetch>[2],
+      );
+
+      expect(response.status).toBe(500);
+      expect(await response.json()).toMatchObject({ code: "INTERNAL_ERROR", status: 500 });
+    } finally {
+      console.error = originalConsoleError;
+    }
+
+    expect(logged).toEqual([
+      ["[wire] unhandled error", { path: "/test-only/named", error: "unhandled" }],
+    ]);
+    expect(JSON.stringify(logged)).not.toContain(CANARY_TOKEN);
+  });
 });
 
 describe("the 404 face teaches without inventing surface", () => {

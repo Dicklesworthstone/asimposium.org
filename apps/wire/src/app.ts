@@ -75,8 +75,10 @@ function isEnrollmentPath(pathname: string): boolean {
     return false;
   }
   const decodedPath = `/${segments.join("/")}`;
+  const exactStaticPath =
+    segments.every((segment) => !segment.includes("/")) && EXACT_ENROLLMENT_PATHS.has(decodedPath);
   return (
-    EXACT_ENROLLMENT_PATHS.has(decodedPath) ||
+    exactStaticPath ||
     (segments.length === 2 && segments[0] === "join" && segments[1] !== "") ||
     (segments.length === 4 &&
       segments[0] === "v1" &&
@@ -226,13 +228,13 @@ export function createApp(): Hono<{ Bindings: Env }> {
 
   app.notFound((c) => routeNotFound(c.req.url));
 
-  app.onError((err, c) => {
+  app.onError((_err, c) => {
     // Server-side breadcrumb without the message: the never-log list (Fable
     // §14.3) treats raw bodies and unredacted error text as unsafe until the
     // observability pipeline that scrubs them exists.
     console.error("[wire] unhandled error", {
       path: redactPathname(new URL(c.req.url).pathname),
-      error: err instanceof Error ? err.name : "unknown",
+      error: "unhandled",
     });
     return problem({
       status: 500,
