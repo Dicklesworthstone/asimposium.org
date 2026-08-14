@@ -9,6 +9,7 @@ import {
   mkdirSync,
   mkdtempSync,
   readFileSync,
+  realpathSync,
   symlinkSync,
   writeFileSync,
 } from "node:fs";
@@ -94,7 +95,7 @@ const SECRET_EMITTER = fileURLToPath(
  * stray `--root /Users/someone` refused in a real run.
  */
 function fixtureRoot(name: string): string {
-  const root = mkdtempSync(join(tmpdir(), `asimposium-harness-${name}-`));
+  const root = realpathSync(mkdtempSync(join(tmpdir(), `asimposium-harness-${name}-`)));
   mkdirSync(join(root, "e2e"));
   writeFileSync(join(root, HARNESS_ROOT_MARKER), "disposable harness root\n");
   return root;
@@ -927,7 +928,7 @@ describe("repository root identity", () => {
   });
 
   test("a disposable root is accepted only once it carries the marker", () => {
-    const disposable = mkdtempSync(join(tmpdir(), "harness-consent-"));
+    const disposable = realpathSync(mkdtempSync(join(tmpdir(), "harness-consent-")));
     expect(() => assertContainedRoot(disposable)).toThrow(/unrelated directory/);
     writeFileSync(join(disposable, HARNESS_ROOT_MARKER), "disposable harness root\n");
     expect(assertContainedRoot(disposable)).toBe(disposable);
