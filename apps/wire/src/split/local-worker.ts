@@ -175,6 +175,8 @@ const LOCAL_S4_REVALIDATION_ATTEMPTS = 2;
 const LOCAL_S4_REPLAY_WINDOW_SECONDS = 24 * 60 * 60;
 const LOCAL_S4_NEGATIVE_DEDUP_WINDOW_SECONDS = 15 * 60;
 const LOCAL_HARNESS_AUTHORITY_TOKEN = /^[a-f0-9]{64}$/u;
+const LOCAL_HARNESS_READINESS_NONCE = /^s3-ready-[a-f0-9]{32}$/u;
+const LOCAL_SPONSOR_ID = "local-sponsor-fixture";
 const ID_PATTERN = /^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$/u;
 const TEST_D1_BIND_FAULT_HEADER = "x-asimp-local-test-fault";
 const TEST_D1_BIND_FAULT = "d1-bind-reject";
@@ -1493,16 +1495,29 @@ function callerOwnedIdRefusal(field: "workshop_id" | "claim_id"): Response {
   return json({ code: "CALLER_OWNED_ID_FORBIDDEN", field }, 400);
 }
 
-function localSponsorId(env: LocalSplitEnv): string {
-  return `local-sponsor-${env.S3_RUN_TOKEN ?? "missing"}`;
-}
-
 function localWorkshopFellowId(request: Request, env: LocalSplitEnv): string {
   if (!hasLocalHarnessAuthority(request, env, TEST_S4_FELLOW_AUTHORITY_HEADER)) {
     return LOCAL_FELLOW_ID;
   }
   const requested = request.headers.get(TEST_S4_FELLOW_ID_HEADER);
   return requested !== null && validId(requested) ? requested : LOCAL_FELLOW_ID;
+}
+
+export function localHarnessPublicReadinessNonce(
+  env: Pick<LocalSplitEnv, "S3_RUN_TOKEN" | "S3_READINESS_NONCE">,
+): string | undefined {
+  const authority = env.S3_RUN_TOKEN;
+  const readiness = env.S3_READINESS_NONCE;
+  if (
+    authority === undefined ||
+    !LOCAL_HARNESS_AUTHORITY_TOKEN.test(authority) ||
+    readiness === undefined ||
+    !LOCAL_HARNESS_READINESS_NONCE.test(readiness) ||
+    readiness === authority
+  ) {
+    return undefined;
+  }
+  return readiness;
 }
 
 function hasLocalHarnessAuthority(
@@ -1664,7 +1679,7 @@ async function pushWorkshop(request: Request, env: LocalSplitEnv): Promise<Respo
        FROM s3_local_fellow_workshop_ids AS ids
        JOIN s3_local_workshop_cursors AS cursor ON cursor.fellow_id = ids.fellow_id
        WHERE ids.fellow_id = ?2 AND cursor.problem_id = ?1`,
-    ).bind(problemId, fellowId, localSponsorId(env), LOCAL_SESSION_ID, bodyKey, digest),
+    ).bind(problemId, fellowId, LOCAL_SPONSOR_ID, LOCAL_SESSION_ID, bodyKey, digest),
   ];
   if (d1FaultRequested(request, env)) {
     // Deliberately trip D1's real primary-key constraint after R2 PUT. D1's
@@ -1715,7 +1730,7 @@ async function privateArtifact(
   if (
     workshop === null ||
     workshop.fellow_id !== LOCAL_FELLOW_ID ||
-    workshop.sponsor_id !== localSponsorId(env) ||
+    workshop.sponsor_id !== LOCAL_SPONSOR_ID ||
     workshop.session_id !== LOCAL_SESSION_ID
   ) {
     return notFound();
@@ -2354,7 +2369,7 @@ async function seedOversizedS4History(
         workshopId,
         problemId,
         LOCAL_FELLOW_ID,
-        localSponsorId(env),
+        LOCAL_SPONSOR_ID,
         LOCAL_SESSION_ID,
         objectKey,
         artifactDigest,
@@ -2519,10 +2534,14 @@ export default {
       await ensureSchema(env.DB);
       const url = new URL(request.url);
       if (request.method === "GET" && url.pathname === "/__s3/health") {
+        const readinessNonce = localHarnessPublicReadinessNonce(env);
+        if (readinessNonce === undefined) {
+          return json({ status: "misconfigured", bindings: ["DB", "ARTIFACTS"] }, 503);
+        }
         return json({
           status: "ok",
           bindings: ["DB", "ARTIFACTS"],
-          readiness_nonce: env.S3_READINESS_NONCE ?? "missing",
+          readiness_nonce: readinessNonce,
         });
       }
       if (request.method === "POST" && url.pathname === "/__s3/workshops") {

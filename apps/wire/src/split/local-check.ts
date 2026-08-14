@@ -60,7 +60,7 @@ const localS4FellowAuthorityHeader = "x-asimp-local-s4-fellow-authority";
 const localS4FellowIdHeader = "x-asimp-local-s4-fellow-id";
 const localS4FixtureAuthorityHeader = "x-asimp-local-s4-fixture-authority";
 const localS4NowSecondsHeader = "x-asimp-local-s4-now-seconds";
-const localSponsorId = `local-sponsor-${localAuthorityToken}`;
+const localSponsorId = "local-sponsor-fixture";
 const authoritativeFieldFixHint =
   "Remove author-writable disposition, proof, confidence, certification, or status-upgrade fields; the ledger computes disposition after independent review.";
 const duplicateClaimFixHint =
