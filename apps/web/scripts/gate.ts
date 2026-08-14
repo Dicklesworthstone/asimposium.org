@@ -54,7 +54,8 @@ const GATES: Record<string, GateSpec> = {
     kind: "run",
     tool: "eslint",
     versionFrom: "eslint",
-    argv: ["eslint", "."],
+    // Warnings are failures: a gate that tolerates them stops being a gate.
+    argv: ["eslint", ".", "--max-warnings", "0"],
   },
   unit: {
     kind: "run",

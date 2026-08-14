@@ -3,6 +3,9 @@
 out/
 next-env.d.ts
 
+# TypeScript incremental build state (next build sets `incremental: true`)
+*.tsbuildinfo
+
 # Dependencies
 node_modules/
 

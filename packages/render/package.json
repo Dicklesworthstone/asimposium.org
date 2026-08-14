@@ -1,0 +1,24 @@
+{
+  "name": "@asimposium/render",
+  "version": "0.0.0",
+  "private": true,
+  "type": "module",
+  "description": "Diptych renderers: one projection -> md / json / html-fragment, with one sanitization path.",
+  "license": "SEE LICENSE IN ../../LICENSE",
+  "exports": {
+    ".": "./src/index.ts"
+  },
+  "scripts": {
+    "typecheck": "tsc --noEmit",
+    "test": "bun test",
+    "test:unit": "bun test test/unit",
+    "test:contract": "bun test test/contract",
+    "test:integration": "bun test test/integration",
+    "test:security": "bun test test/security",
+    "report": "bun run scripts/suite-report.ts"
+  },
+  "devDependencies": {
+    "@types/bun": "1.3.8",
+    "typescript": "5.9.3"
+  }
+}

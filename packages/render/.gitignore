@@ -1,0 +1,7 @@
+node_modules/
+
+# Provisional: this package installs its own dev toolchain until the root bun
+# workspace lands (OPS.1 root scaffold). The workspace lockfile at the repo root
+# is the one that gets committed; a per-package lockfile would compete with it.
+bun.lock
+bun.lockb
