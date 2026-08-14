@@ -22,8 +22,8 @@
  * with a human line on stderr. Records carry repository-relative paths only:
  * no absolute paths, no environment values, no credential-shaped strings.
  *
- * Exit codes: 0 pass · 1 the suite ran and failed · 2 usage · 3 the suite is
- * declared but not implemented here yet.
+ * Exit codes: 0 pass · 1 the suite ran and failed · 2 usage · 78 the suite is
+ * declared but deliberately blocked on named future work.
  */
 
 import { resolve } from "node:path";
@@ -31,6 +31,20 @@ import { resolve } from "node:path";
 const PACKAGE_ROOT = resolve(import.meta.dir, "..");
 /** Repository-relative label. Never an absolute path. */
 const PACKAGE_DIR = "apps/wire";
+
+/**
+ * The root-owned convention for "this gate is deliberately blocked on named future work",
+ * as opposed to "this gate ran and something is broken": 78, `EX_CONFIG` from sysexits(3).
+ * The definition lives at the root (`scripts/suite/policy.ts`, `BLOCKED_EXIT_CODE`), where a
+ * package cannot redefine the meaning of its own gate inside a feature diff (Fable §17.0);
+ * it is repeated as a literal here rather than imported, because a workspace package must not
+ * reach across the boundary into root tooling.
+ *
+ * A blocked suite is never green. This process still exits non-zero and still prints the
+ * blocker; the code only tells a reader which of the two non-zero meanings applies, so that a
+ * real regression landing inside an already-red suite remains visible.
+ */
+const BLOCKED_EXIT_CODE = 78;
 
 interface ImplementedSuite {
   status: "implemented";
@@ -91,6 +105,8 @@ interface Diagnostic {
   suite: string;
   duration_ms: number;
   status: "pass" | "fail" | "not_implemented";
+  /** The process exit code this record was emitted with, so the class is self-describing. */
+  exit_code: number;
   code?: string;
   blocked_on?: string;
   forbidden_substitutes?: string;
@@ -132,14 +148,16 @@ async function runSuite(
       tool_version: "n/a",
       duration_ms: 0,
       status: "not_implemented",
+      exit_code: BLOCKED_EXIT_CODE,
       code: "SUITE_NOT_IMPLEMENTED",
       blocked_on: suite.blockedOn,
       forbidden_substitutes: suite.forbiddenSubstitutes,
     });
-    note(`FAIL ${PACKAGE_DIR} ${name}: SUITE_NOT_IMPLEMENTED`);
+    note(`BLOCKED ${PACKAGE_DIR} ${name}: SUITE_NOT_IMPLEMENTED (exit ${BLOCKED_EXIT_CODE})`);
     note(`  blocked on: ${suite.blockedOn}`);
     note(`  must not be faked with: ${suite.forbiddenSubstitutes}`);
-    return 3;
+    note(`  reproduce: ${base.reproduce}`);
+    return BLOCKED_EXIT_CODE;
   }
 
   const started = performance.now();
@@ -153,14 +171,18 @@ async function runSuite(
   const exitCode = await child.exited;
   const duration = Math.round(performance.now() - started);
 
+  // An implemented suite reports only pass or fail. It never borrows the blocked code: a
+  // suite that actually ran and went red is a regression, whatever else is unfinished.
+  const status = exitCode === 0 ? "pass" : "fail";
   emit({
     ...base,
     tool: "bun test",
     tool_version: Bun.version,
     duration_ms: duration,
-    status: exitCode === 0 ? "pass" : "fail",
+    status,
+    exit_code: status === "pass" ? 0 : 1,
   });
-  return exitCode === 0 ? 0 : 1;
+  return status === "pass" ? 0 : 1;
 }
 
 const command = process.argv[2] ?? "list";
