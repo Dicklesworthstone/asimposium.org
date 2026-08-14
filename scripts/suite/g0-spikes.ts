@@ -90,6 +90,12 @@ export type G0SpikeCode =
    * provably still alive because it is still holding the descriptor.
    */
   | "G0_SPIKE_OUTPUT_HOLDER_LEAKED"
+  /**
+   * The script succeeded, but this platform cannot enforce descendant
+   * containment, so "it left nothing running" was never actually verified.
+   * Blocked, not passed: an unverifiable safety property is not a satisfied one.
+   */
+  | "G0_SPIKE_CONTAINMENT_UNAVAILABLE"
   /** The process table could not be read, so no claim about leaks is possible. */
   | "G0_SPIKE_DESCENDANT_SCAN_FAILED";
 
@@ -161,6 +167,17 @@ export interface G0RunOptions {
    * be exercised honestly rather than assumed unreachable.
    */
   readonly psCommand?: string;
+  /**
+   * Downgrade containment to unavailable. **Downgrade only** — the type admits
+   * no other value, and the runtime rejects one anyway.
+   *
+   * Capability is something this module proves by running the primitive, never
+   * something a caller announces. If an argument could assert `pid-namespace`,
+   * any caller could mint a production-green receipt on a platform that contains
+   * nothing, which defeats the entire boundary. Forcing `none` is always safe
+   * because it can only make a run *less* green.
+   */
+  readonly containment?: { readonly kind: "none"; readonly reason: string };
 }
 
 const BARE_COMMAND = /^[A-Za-z0-9_-]+$/;
@@ -368,15 +385,111 @@ function scanGroup(pgid: number, psCommand: string): SurvivorScan {
   } catch {
     return { kind: "unknown" };
   }
+
+  /**
+   * A scan is only evidence if the listing is recognisably a process table.
+   *
+   * `psCommand: "true"` exits 0 and prints nothing; a truncated or reformatted
+   * listing parses to nothing useful. Both previously produced "zero survivors",
+   * which is the same failure as swallowing the exception: an absent answer
+   * rendered as a clean one. Two conditions now have to hold before any count is
+   * believed — at least one row parsed at all, and, while the supervisor is
+   * known to be alive, *its own row* present. The second is the sharp one: it
+   * proves the listing actually covers this process group rather than merely
+   * being well-formed, so a partial `ps` that happens to omit our group can no
+   * longer read as proof that the group is empty.
+   */
+  let sawSentinel = false;
   let survivors = 0;
-  for (const line of listing.split("\n")) {
-    const match = /^\s*(\d+)\s+(\d+)\s+(\S+)/.exec(line);
-    if (match === null) continue;
-    if (Number(match[2]) !== pgid || Number(match[1]) === pgid) continue;
-    if (match[3]?.startsWith("Z") === true) continue;
+  for (const raw of listing.split("\n")) {
+    const line = raw.trim();
+    if (line.length === 0) continue;
+    const match = /^(\d+)\s+(\d+)\s+(\S+)$/.exec(line);
+    // Every non-empty row must parse. Skipping the ones that do not would let a
+    // listing that is half garbage still produce a confident count, and the
+    // garbage half is exactly where a missed survivor would hide.
+    if (match === null) return { kind: "unknown" };
+    const pid = Number(match[1]);
+    const zombie = match[3]?.startsWith("Z") === true;
+    // The sentinel is *this* process, not the supervisor. The runner is alive by
+    // definition — it is executing this line — so its absence can only mean the
+    // listing does not cover this machine's processes. The supervisor was the
+    // wrong anchor: it is legitimately dead after a timeout, so requiring it
+    // conflated "cancelled spike" with "unreadable process table".
+    if (pid === process.pid) sawSentinel = true;
+    if (Number(match[2]) !== pgid || pid === pgid || zombie) continue;
     survivors += 1;
   }
+  if (!sawSentinel) return { kind: "unknown" };
   return { kind: "ok", survivors };
+}
+
+/**
+ * Whether this platform can actually guarantee that a spike's descendants stay
+ * observable.
+ *
+ * Process groups are a cooperative boundary, not a containment one. A child that
+ * calls `setsid()` leaves the group, and one that also closes its inherited
+ * descriptors leaves no trace in the pipe either — it is invisible to both
+ * checks this module can make, and would be reported as a clean pass while
+ * still running. No amount of polling fixes that: the process is gone from
+ * every namespace the runner can see.
+ *
+ * Real containment needs a kernel boundary the escapee cannot cross. A PID
+ * namespace is that boundary: the supervisor becomes PID 1 inside it, `setsid`
+ * stays within it, and nothing survives its teardown. Where that exists, the
+ * guarantee is real. Where it does not, the guarantee is *absent*, and the only
+ * honest report is a structured blocker — never a pass.
+ */
+export type ContainmentCapability =
+  | { readonly kind: "pid-namespace" }
+  | { readonly kind: "none"; readonly reason: string };
+
+/**
+ * The exact argv the containment boundary is built from.
+ *
+ * Probe and launch share this constant rather than each spelling it out. They
+ * drifted once — the probe verified `--mount-proc` while the launch omitted it —
+ * which meant the capability that was proved and the command that actually ran
+ * were different commands. A capability check that does not exercise the thing
+ * it certifies is not a check.
+ */
+const PID_NAMESPACE_ARGV = ["unshare", "--pid", "--fork", "--mount-proc"] as const;
+
+let containmentCache: ContainmentCapability | undefined;
+
+/**
+ * Detect containment by running the real primitive, never by being told.
+ *
+ * This is deliberately not parameterised. A caller-supplied capability is a
+ * caller-supplied verdict: anything that let an argument assert
+ * `pid-namespace` would let a test — or a careless integration — mint a green
+ * receipt on a platform that cannot contain anything, which is precisely the
+ * failure this boundary exists to prevent. The only thing a caller may do is
+ * *downgrade* to `none`, which can never manufacture a pass.
+ */
+export function probeContainment(force = false): ContainmentCapability {
+  if (containmentCache !== undefined && !force) return containmentCache;
+  if (process.platform !== "linux") {
+    containmentCache = {
+      kind: "none",
+      reason: `${process.platform} exposes no unprivileged PID-namespace primitive; descendant containment cannot be enforced`,
+    };
+    return containmentCache;
+  }
+  try {
+    execFileSync(PID_NAMESPACE_ARGV[0], [...PID_NAMESPACE_ARGV.slice(1), "true"], {
+      stdio: "ignore",
+      timeout: 5_000,
+    });
+    containmentCache = { kind: "pid-namespace" };
+  } catch {
+    containmentCache = {
+      kind: "none",
+      reason: `${PID_NAMESPACE_ARGV.join(" ")} is unavailable or not permitted for this user`,
+    };
+  }
+  return containmentCache;
 }
 
 /**
@@ -541,6 +654,7 @@ interface SpikeRunContext {
   readonly interpreter: string;
   readonly postExitDrainMs: number;
   readonly psCommand: string;
+  readonly containment: ContainmentCapability;
   /** True when the per-spike timeout was clamped by the aggregate deadline. */
   readonly boundedByAggregate: boolean;
 }
@@ -579,17 +693,25 @@ async function runSpike(spike: G0Spike, context: SpikeRunContext): Promise<G0Spi
 
   const startedAt = performance.now();
   let child: ChildProcess;
+  // Under a PID namespace the supervisor is PID 1 of its own namespace, so a
+  // `setsid` descendant cannot escape observation and cannot outlive teardown.
+  const launch =
+    context.containment.kind === "pid-namespace" ? [...PID_NAMESPACE_ARGV, "bash"] : ["bash"];
   try {
-    child = spawn("bash", ["-c", SUPERVISOR_PROGRAM, "g0-supervisor", context.interpreter, path], {
-      cwd: context.root,
-      // `detached` makes the supervisor a session and process-group leader, so
-      // its pid is the pgid every descendant inherits.
-      detached: true,
-      // Never `inherit`: this process's stdout carries the aggregate JSON, and a
-      // spike must not be able to write into that record. fd 3 is the
-      // supervisor's private control channel and never carries spike output.
-      stdio: ["ignore", "pipe", "pipe", "pipe"],
-    });
+    child = spawn(
+      launch[0] as string,
+      [...launch.slice(1), "-c", SUPERVISOR_PROGRAM, "g0-supervisor", context.interpreter, path],
+      {
+        cwd: context.root,
+        // `detached` makes the supervisor a session and process-group leader, so
+        // its pid is the pgid every descendant inherits.
+        detached: true,
+        // Never `inherit`: this process's stdout carries the aggregate JSON, and a
+        // spike must not be able to write into that record. fd 3 is the
+        // supervisor's private control channel and never carries spike output.
+        stdio: ["ignore", "pipe", "pipe", "pipe"],
+      },
+    );
   } catch {
     return immediateResult(spike.id, "G0_SPIKE_SPAWN_FAILED");
   }
@@ -842,7 +964,24 @@ async function runSpike(spike: G0Spike, context: SpikeRunContext): Promise<G0Spi
   }
   if (reason === "abort") return { ...base, status: "fail", code: "G0_SPIKE_ABORTED" };
   if (exitSignal !== undefined) return { ...base, status: "fail", code: "G0_SPIKE_SIGNALLED" };
-  if (exitCode === 0) return { ...base, status: "pass", code: "G0_SPIKE_PASSED" };
+  if (exitCode === 0) {
+    /**
+     * The last gate before green.
+     *
+     * Every check above answers "did something visibly go wrong?". This one
+     * answers "could I have seen it if it had?" — and on a platform without a
+     * containment primitive the answer is no, because a descendant that calls
+     * `setsid` and closes its descriptors is outside every channel this runner
+     * observes. Reporting that as a pass would be claiming a property that was
+     * never tested. Blocked is the accurate word for it: the environment cannot
+     * satisfy the check, which is exactly what 78 means here, and it is never
+     * green.
+     */
+    if (context.containment.kind === "none") {
+      return { ...base, status: "blocked", code: "G0_SPIKE_CONTAINMENT_UNAVAILABLE" };
+    }
+    return { ...base, status: "pass", code: "G0_SPIKE_PASSED" };
+  }
   if (exitCode === BLOCKED_EXIT_CODE)
     return { ...base, status: "blocked", code: "G0_SPIKE_BLOCKED" };
   return {
@@ -913,6 +1052,14 @@ export async function runG0Spikes(options: G0RunOptions): Promise<G0RunSummary> 
   );
   const interpreter = validInterpreter(options.interpreter ?? "bash");
   const psCommand = validInterpreter(options.psCommand ?? "ps");
+  // Runtime guard as well as the type: a cast, a JSON round-trip, or plain JS
+  // could all present something the compiler never saw.
+  if (options.containment !== undefined && options.containment.kind !== "none") {
+    throw new TypeError(
+      "containment may only be downgraded to none; capability is probed, never declared",
+    );
+  }
+  const containment: ContainmentCapability = options.containment ?? probeContainment();
   const spikes = options.spikes ?? G0_SPIKES;
   // An explicit list still has to be coherent; the default list additionally has
   // to be complete.
@@ -952,6 +1099,7 @@ export async function runG0Spikes(options: G0RunOptions): Promise<G0RunSummary> 
         diagnosticSink,
         interpreter,
         psCommand,
+        containment,
         postExitDrainMs,
         boundedByAggregate,
       }),

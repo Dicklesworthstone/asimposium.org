@@ -28,6 +28,7 @@ import {
   type G0RunSummary,
   type G0Spike,
   type G0SpikeResult,
+  probeContainment,
   REQUIRED_G0_SPIKE_IDS,
   runG0Cli,
   runG0Spikes,
@@ -64,6 +65,21 @@ function readableOnly(root: string, id: G0Spike["id"], body: string, mode = 0o64
 function codes(summary: G0RunSummary): string[] {
   return summary.results.map((result) => result.code);
 }
+
+/**
+ * What a spike that genuinely did nothing wrong is allowed to report *here*.
+ *
+ * Only a platform that can enforce containment may call such a run green. Where
+ * it cannot, the honest outcome is blocked — so these constants track the
+ * probe rather than hard-coding a verdict, and the suite asserts `pass`/0 on a
+ * PID-namespace host and `blocked`/78 everywhere else. Hard-coding `pass` would
+ * bake in exactly the false green this module was rewritten to remove.
+ */
+const CONTAINED = probeContainment().kind === "pid-namespace";
+const CLEAN_CODE = CONTAINED ? "G0_SPIKE_PASSED" : "G0_SPIKE_CONTAINMENT_UNAVAILABLE";
+const CLEAN_STATUS = CONTAINED ? "pass" : "blocked";
+const CLEAN_EXIT = CONTAINED ? 0 : BLOCKED_EXIT_CODE;
+const CLEAN_SUMMARY_CODE = CONTAINED ? "G0_SPIKES_PASSED" : "G0_SPIKES_BLOCKED";
 
 /** Whether a bare command resolves on PATH, for fixture prerequisites. */
 function which(command: string): boolean {
@@ -103,7 +119,7 @@ describe("D2 — the entry check requires execute bits, not readability", () => 
       timeoutMs: 2_000,
     });
 
-    expect(summary.results[0]?.code).toBe("G0_SPIKE_PASSED");
+    expect(summary.results[0]?.code).toBe(CLEAN_CODE);
     expect(summary.results[1]?.code).toBe("G0_SPIKE_SCRIPT_NOT_EXECUTABLE");
     expect(summary.exitCode).toBe(1);
   });
@@ -531,8 +547,9 @@ describe("D8 — group cleanup is bounded and never signals a stale group", () =
     });
     const elapsed = performance.now() - startedAt;
 
-    expect(summary.results[0]?.code).toBe("G0_SPIKE_PASSED");
-    expect(summary.exitCode).toBe(0);
+    expect(summary.results[0]?.code).toBe(CLEAN_CODE);
+    expect(summary.results[0]?.status).toBe(CLEAN_STATUS);
+    expect(summary.exitCode).toBe(CLEAN_EXIT);
     expect(elapsed).toBeLessThan(1_500);
   }, 25_000);
 
@@ -555,6 +572,135 @@ describe("D8 — group cleanup is bounded and never signals a stale group", () =
     expect(summary.exitCode).toBe(1);
     expect(summary.results[0]?.code).not.toBe("G0_SPIKE_PASSED");
   }, 25_000);
+
+  test("PLANTED: a setsid child that closes every FD cannot yield a green run", async () => {
+    expect(which("perl")).toBe(true);
+    const root = fixtureRoot();
+    const sentinel = join(root, "double-escaped-wrote");
+    const summary = await runG0Spikes({
+      root,
+      // The worst case: leaves the process group *and* closes every inherited
+      // descriptor, so it is invisible to the group scan and to the drain check
+      // alike. No amount of polling can see it — only a kernel containment
+      // boundary can, and where there is none the run must not claim success.
+      spikes: [
+        executable(
+          root,
+          "s1",
+          "perl -e 'use POSIX qw(setsid); setsid(); close(STDIN); close(STDOUT); close(STDERR); " +
+            `sleep 3; open(F, ">", ${JSON.stringify(sentinel)}); print F "escaped"; close(F);' &\n` +
+            "sleep 0.4\nexit 0",
+        ),
+      ],
+      timeoutMs: 8_000,
+      terminationGraceMs: 200,
+      postExitDrainMs: 150,
+      diagnosticSink: () => {},
+    });
+
+    // Before the containment boundary this reported G0_SPIKE_PASSED with exit 0
+    // while the escapee went on running.
+    expect(summary.exitCode).not.toBe(0);
+    expect(summary.results[0]?.status).not.toBe("pass");
+    if (CONTAINED) {
+      // A PID namespace really can see and tear this down.
+      expect(summary.results[0]?.code).toBe("G0_SPIKE_DESCENDANT_LEAKED");
+      await Bun.sleep(3_400);
+      expect(existsSync(sentinel)).toBe(false);
+    } else {
+      expect(summary.results[0]?.code).toBe("G0_SPIKE_CONTAINMENT_UNAVAILABLE");
+      expect(summary.results[0]?.status).toBe("blocked");
+      expect(summary.exitCode).toBe(BLOCKED_EXIT_CODE);
+    }
+  }, 30_000);
+
+  test("PLANTED: a caller cannot mint containment it does not have", async () => {
+    const root = fixtureRoot();
+    const spikes = [executable(root, "s1", "exit 0")];
+    // The type forbids this; the cast is the whole point — a JSON round-trip or
+    // plain JS caller could present exactly this shape.
+    const forged = { kind: "pid-namespace" } as unknown as { kind: "none"; reason: string };
+    await expect(runG0Spikes({ root, spikes, containment: forged })).rejects.toThrow(TypeError);
+    await expect(runG0Spikes({ root, spikes, containment: forged })).rejects.toThrow(
+      /probed, never declared/,
+    );
+
+    // Downgrading is always permitted: it can only make a run less green.
+    const downgraded = await runG0Spikes({
+      root,
+      spikes,
+      containment: { kind: "none", reason: "pinned by test" },
+      diagnosticSink: () => {},
+    });
+    expect(downgraded.results[0]?.code).toBe("G0_SPIKE_CONTAINMENT_UNAVAILABLE");
+    expect(downgraded.exitCode).toBe(BLOCKED_EXIT_CODE);
+  }, 25_000);
+
+  test("PLANTED: the capability probe exercises the exact argv the launch uses", () => {
+    const source = readFileSync(join(import.meta.dir, "g0-spikes.ts"), "utf8");
+    // One constant, referenced by both, so a proof of `unshare --pid --fork
+    // --mount-proc` can never certify a launch that omits part of it.
+    expect(source).toContain("const PID_NAMESPACE_ARGV");
+    // The literal appears exactly once — inside the shared constant. A second
+    // spelling anywhere is how the probe and the launch drifted apart before,
+    // certifying `--mount-proc` while running without it.
+    expect([...source.matchAll(/"unshare"/g)]).toHaveLength(1);
+    expect(source).toMatch(/const PID_NAMESPACE_ARGV = \["unshare"/);
+    // The probe must report the truth about this host.
+    const capability = probeContainment(true);
+    if (process.platform !== "linux") {
+      expect(capability.kind).toBe("none");
+      expect(capability).toHaveProperty("reason");
+    }
+  });
+
+  test("PLANTED: empty, partially malformed, and sentinel-less ps output all fail closed", async () => {
+    const root = fixtureRoot();
+    // `true` exits 0 and prints nothing: previously parsed as zero survivors.
+    const empty = await runG0Spikes({
+      root,
+      spikes: [executable(root, "s1", "exit 0")],
+      psCommand: "true",
+      diagnosticSink: () => {},
+    });
+    expect(empty.results[0]?.code).toBe("G0_SPIKE_DESCENDANT_SCAN_FAILED");
+    expect(empty.exitCode).toBe(1);
+
+    // A listing that is mostly valid but carries a garbage row. The sentinel is
+    // present, so only the malformed-row rule can reject this — a parser that
+    // skipped unparseable lines would report a confident zero, and the skipped
+    // line is exactly where a survivor would hide.
+    const partial = await withFakePs(
+      root,
+      `printf '%s 1 S\\n' "$$"\nprintf '%s 1 S\\n' "${process.pid}"\nprintf 'not-a-row garbage here\\n'\nprintf '2 1 S\\n'`,
+      () =>
+        runG0Spikes({
+          root,
+          spikes: [executable(root, "s2", "exit 0")],
+          psCommand: "fakeps",
+          diagnosticSink: () => {},
+        }),
+    );
+    expect(partial.results[0]?.code).toBe("G0_SPIKE_DESCENDANT_SCAN_FAILED");
+    expect(partial.exitCode).toBe(1);
+
+    // Perfectly well-formed rows that simply never mention this runner prove
+    // nothing about this machine's process table, so they cannot certify an
+    // empty group either.
+    const sentinelLess = await withFakePs(
+      root,
+      "printf '2 1 S\\n'\nprintf '3 1 S\\n'\nprintf '4 4 S\\n'",
+      () =>
+        runG0Spikes({
+          root,
+          spikes: [executable(root, "s3", "exit 0")],
+          psCommand: "fakeps",
+          diagnosticSink: () => {},
+        }),
+    );
+    expect(sentinelLess.results[0]?.code).toBe("G0_SPIKE_DESCENDANT_SCAN_FAILED");
+    expect(sentinelLess.exitCode).toBe(1);
+  }, 30_000);
 
   test("PLANTED: cleanup signals the owned group and never an individual pid", async () => {
     // Signalling enumerated descendant pids is strictly more dangerous than a
@@ -593,7 +739,7 @@ describe("D8 — group cleanup is bounded and never signals a stale group", () =
     // Either outcome is legitimate — it depends on whether the scan happened to
     // catch the descendant before it exited — but both must converge, and
     // neither may report an unkillable process or a failed signal.
-    const settled: readonly string[] = ["G0_SPIKE_PASSED", "G0_SPIKE_DESCENDANT_LEAKED"];
+    const settled: readonly string[] = [CLEAN_CODE, "G0_SPIKE_DESCENDANT_LEAKED"];
     expect(settled).toContain(String(summary.results[0]?.code));
     expect(summary.results[0]?.code).not.toBe("G0_SPIKE_DESCENDANT_UNKILLABLE");
     expect(summary.results[0]?.code).not.toBe("G0_SPIKE_PROCESS_GROUP_SIGNAL_FAILED");
@@ -696,7 +842,7 @@ describe("D9 — child output stays out of the stdout contract", () => {
     // ...and absent from the one machine-readable line. Under `stdio: inherit`
     // this text landed on the same stdout as the record below.
     expect(serialized).not.toContain(marker);
-    expect(JSON.parse(serialized).code).toBe("G0_SPIKES_PASSED");
+    expect(JSON.parse(serialized).code).toBe(CLEAN_SUMMARY_CODE);
   });
 
   test("child stderr is captured, labelled and still counted as evidence", async () => {
@@ -750,7 +896,7 @@ describe("D9 — child output stays out of the stdout contract", () => {
     expect(summary.results[0]?.outputTruncated).toBe(true);
     expect(JSON.parse(formatG0Summary(summary, root)).spikes[0].output_truncated).toBe(true);
     // Bounding must not turn into a hang: the child still ran to completion.
-    expect(summary.results[0]?.code).toBe("G0_SPIKE_PASSED");
+    expect(summary.results[0]?.code).toBe(CLEAN_CODE);
   }, 25_000);
 
   test("PLANTED: an expired post-exit drain declares truncation instead of claiming a complete log", async () => {
@@ -812,6 +958,11 @@ describe("D9 — child output stays out of the stdout contract", () => {
           "s1",
           `printf '%s\\n' ${JSON.stringify(token)}\n` +
             "perl -e 'use POSIX qw(setsid); setsid(); sleep 3; print \"late-output\\n\";' &\n" +
+            // Give the holder time to actually leave the process group before the
+            // script exits. Without this the scan sometimes catches it first and
+            // reports the (equally correct) DESCENDANT_LEAKED, which would make
+            // the code assertion below racy rather than exact.
+            "sleep 0.4\n" +
             "exit 0",
         ),
       ],
@@ -899,7 +1050,7 @@ describe("exit precedence", () => {
 
     expect(summary.status).toBe("blocked");
     expect(summary.exitCode).toBe(BLOCKED_EXIT_CODE);
-    expect(codes(summary)).toEqual(["G0_SPIKE_PASSED", "G0_SPIKE_BLOCKED"]);
+    expect(codes(summary)).toEqual([CLEAN_CODE, "G0_SPIKE_BLOCKED"]);
   });
 
   test("an unexpected exit code is distinguished from a plain test failure", async () => {
