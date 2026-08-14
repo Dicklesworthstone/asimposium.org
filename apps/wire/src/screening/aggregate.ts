@@ -4,8 +4,15 @@ import type {
   ScreeningObservation,
   ScreeningRunIdentity,
   ScreeningThresholds,
+  SentinelKind,
 } from "./types";
-import { POLICY_CATEGORIES, PROVIDER_STATUSES, S4_THRESHOLDS, SCREENING_DECISIONS } from "./types";
+import {
+  POLICY_CATEGORIES,
+  PROVIDER_STATUSES,
+  S4_THRESHOLDS,
+  SCREENING_DECISIONS,
+  SENTINEL_KINDS,
+} from "./types";
 
 export interface ConfidenceInterval {
   readonly confidence_level: 0.95;
@@ -78,6 +85,12 @@ export interface ScreeningAggregateReport {
   readonly operational_by_observed_category: readonly OperationalCategorySummary[];
   readonly aggregation_pairs: readonly AggregationPairSummary[];
   readonly sentinel_failures: readonly SentinelFailure[];
+  /**
+   * Should-fail controls carried by the corpus, by kind. Reported so that an
+   * empty `sentinel_failures` can be read correctly: without this a run whose
+   * controls all passed is indistinguishable from one that carries none.
+   */
+  readonly sentinel_controls_observed: Readonly<Record<SentinelKind, number>>;
   readonly model_versions: readonly string[];
   readonly policy_versions: readonly string[];
   readonly configuration_digests: readonly string[];
@@ -138,6 +151,22 @@ function rate(numerator: number, denominator: number): RateMetric {
     rate: rounded(numerator / denominator),
     wilson_95: wilson95(numerator, denominator),
   };
+}
+
+/**
+ * Threshold test against the exact ratio rather than the published `rate`.
+ *
+ * `rate` is rounded to six decimals for stable, diffable reports; comparing that
+ * rounded value would let a true rate just under the bar round up onto it and
+ * fail a run that passed. Publication and adjudication are different jobs, so
+ * the report keeps the rounded number and the gate keeps the exact one.
+ *
+ * A zero denominator is not "under the bar": it is no measurement at all, and
+ * preserves the previous `rate !== null` guard exactly.
+ */
+function exceedsExclusiveMax(metric: RateMetric, exclusiveMax: number): boolean {
+  if (metric.denominator === 0) return false;
+  return metric.numerator / metric.denominator >= exclusiveMax;
 }
 
 function isPublicDecision(decision: ScreeningObservation["decision"]): boolean {
@@ -264,15 +293,35 @@ function isSecretShapedMetadata(value: string): boolean {
 /**
  * A diagnostic label is an operator-visible field, not an opaque-token slot.
  * Known credential prefixes are caught above; this closes the remaining
- * accidental-paste case where a bare, high-entropy token has no recognisable
- * provider prefix at all. Structured versions and fixture ids contain
- * separators, so they remain readable without becoming token carriers.
+ * accidental-paste case where a high-entropy token has no recognisable provider
+ * prefix at all.
+ *
+ * The test runs per separator-delimited segment. Testing the whole string was
+ * the bug: a single `.` or `_` made the label stop matching the all-alphanumeric
+ * shape, so `<24-char-token>.h` was admitted while the bare token was refused —
+ * separators were the bypass, not the safety property. Real values are short
+ * words joined by separators (`s4-manifest-2026-08-13-v2`,
+ * `fixture-deterministic-v1-not-a-model`), so no genuine segment reaches 24
+ * characters.
+ *
+ * A long single-class segment is refused too. Requiring two character classes
+ * let a 32+ character all-lowercase paste through, and nothing operator-authored
+ * needs one unbroken 32-character word.
+ *
+ * Honest boundary, as for `safeStratumLabel` below: a single-class segment of
+ * 24-31 characters still passes. This closes the accidental-paste path, not a
+ * malicious corpus author, who owns the corpus anyway.
  */
-function isBareHighEntropyDiagnosticLabel(value: string): boolean {
-  if (!/^[A-Za-z0-9]{24,}$/.test(value)) return false;
+function isHighEntropyDiagnosticSegment(segment: string): boolean {
+  if (!/^[A-Za-z0-9]{24,}$/.test(segment)) return false;
   const characterClasses =
-    Number(/[a-z]/.test(value)) + Number(/[A-Z]/.test(value)) + Number(/[0-9]/.test(value));
-  return characterClasses >= 2 && new Set(value).size >= 10;
+    Number(/[a-z]/.test(segment)) + Number(/[A-Z]/.test(segment)) + Number(/[0-9]/.test(segment));
+  if (new Set(segment).size < 10) return false;
+  return characterClasses >= 2 || segment.length >= 32;
+}
+
+function isBareHighEntropyDiagnosticLabel(value: string): boolean {
+  return value.split(/[._:-]/).some(isHighEntropyDiagnosticSegment);
 }
 
 export function isSafeScreeningDiagnosticLabel(value: unknown): value is string {
@@ -498,6 +547,28 @@ function sentinelFailures(
     .sort((left, right) => asciiCompare(left.example_id, right.example_id));
 }
 
+/**
+ * Counts should-fail controls carried by the corpus, by kind.
+ *
+ * Deliberately counted over every pair rather than the provider-ok subset. A
+ * sentinel whose provider failed is still a control the corpus carries; it is
+ * excluded from `sentinelFailures` above because an outage is incomplete
+ * evidence, not a wrong answer. Counting presence over provider-ok rows would
+ * let an outage read as a missing control and re-open the gap this closes.
+ */
+function sentinelControlCounts(
+  pairs: readonly [ScreeningCorpusExample, ScreeningObservation][],
+): Readonly<Record<SentinelKind, number>> {
+  const counts = Object.fromEntries(SENTINEL_KINDS.map((kind) => [kind, 0])) as Record<
+    SentinelKind,
+    number
+  >;
+  for (const [example] of pairs) {
+    if (example.sentinel !== undefined) counts[example.sentinel] += 1;
+  }
+  return counts;
+}
+
 function expectedOutcomeFor(groundTruth: GroundTruth): ScreeningCorpusExample["expected_outcome"] {
   if (groundTruth === "hard-reject") return "reject";
   if (groundTruth === "quarantine") return "quarantine";
@@ -647,6 +718,15 @@ export function aggregateScreeningRun(
   // denominator. They were quarantined fail-closed, so omitting them would
   // make the published rate look safer as the provider gets less available.
   const eligibleLegitimate = legitimate;
+  // Coverage is a distinct question from the false-positive denominator above.
+  // Adequacy asks how many bodies actually reached the provider, so it counts
+  // only provider-ok legitimates: 150 rows of which 149 timed out is not a
+  // 150-example run. `eligibleLegitimate` stays conservative for the rate and
+  // must not be reused here. Mirrors `s4-legitimate-only.ts`'s
+  // `observedLegitimateCount`.
+  const observedLegitimate = providerOkPairs.filter(
+    ([example]) => example.ground_truth === "legitimate",
+  );
   const eligibleHardReject = providerOkPairs.filter(
     ([example]) => example.ground_truth === "hard-reject",
   );
@@ -678,19 +758,42 @@ export function aggregateScreeningRun(
     pairs.map(([, observation]) => observation.configuration_digest),
   );
   const sentinels = sentinelFailures(pairs);
+  const sentinelControls = sentinelControlCounts(pairs);
   const failures: string[] = [];
 
+  // Outside the completeness guard, deliberately.
+  //
+  // Corpus adequacy is a property of the manifest and of what the provider
+  // actually answered, not a statistic that a separate timeout can make
+  // meaningless. Gating it on a clean run let one timeout convert "this corpus
+  // is two rows against a required 150/50" into "provider unavailable, retry
+  // later", hiding a structural defect behind retryable infrastructure. The
+  // partial-run aggregator already evaluates coverage this way.
+  if (observedLegitimate.length < thresholds.minimum_legitimate_examples)
+    failures.push("LEGITIMATE_SAMPLE_TOO_SMALL");
+  if (eligibleHardReject.length < thresholds.minimum_hard_reject_examples)
+    failures.push("HARD_REJECT_SAMPLE_TOO_SMALL");
+
+  // Likewise a manifest fact: whether the corpus carries the should-fail
+  // controls that prove the FP and FN assertions can still fail. Absence is not
+  // an outage, and it must not be reported as one.
+  if (
+    SENTINEL_KINDS.some(
+      (kind) => sentinelControls[kind] < thresholds.minimum_sentinel_controls[kind],
+    )
+  ) {
+    failures.push("SENTINEL_CONTROLS_MISSING");
+  }
+
   if (providerFailureCount === 0) {
-    if (eligibleLegitimate.length < thresholds.minimum_legitimate_examples)
-      failures.push("LEGITIMATE_SAMPLE_TOO_SMALL");
-    if (eligibleHardReject.length < thresholds.minimum_hard_reject_examples)
-      failures.push("HARD_REJECT_SAMPLE_TOO_SMALL");
     if (eligibleQuarantine.length < thresholds.minimum_quarantine_examples)
       failures.push("QUARANTINE_SAMPLE_TOO_SMALL");
     // A rate, and therefore a statistic: it needs a complete run to mean anything.
     if (
-      quarantineOverRefusalRate.rate !== null &&
-      quarantineOverRefusalRate.rate >= thresholds.quarantine_over_refusal_rate_exclusive_max
+      exceedsExclusiveMax(
+        quarantineOverRefusalRate,
+        thresholds.quarantine_over_refusal_rate_exclusive_max,
+      )
     ) {
       failures.push("QUARANTINE_OVER_REFUSAL_THRESHOLD_FAILED");
     }
@@ -716,8 +819,7 @@ export function aggregateScreeningRun(
   // legitimate sample is directly an over-refusal. Its denominator and the
   // strict FP bar therefore stay live even while the report is incomplete.
   if (
-    falsePositiveRate.rate !== null &&
-    falsePositiveRate.rate >= thresholds.legitimate_false_positive_rate_exclusive_max
+    exceedsExclusiveMax(falsePositiveRate, thresholds.legitimate_false_positive_rate_exclusive_max)
   ) {
     failures.push("LEGITIMATE_FALSE_POSITIVE_THRESHOLD_FAILED");
   }
@@ -768,6 +870,7 @@ export function aggregateScreeningRun(
     operational_by_observed_category: operationalCategoryMatrix(pairs),
     aggregation_pairs: aggregationPairs(pairs),
     sentinel_failures: sentinels,
+    sentinel_controls_observed: sentinelControls,
     model_versions: modelVersions,
     policy_versions: policyVersions,
     configuration_digests: configurationDigests,

@@ -32,7 +32,8 @@ export type PolicyCategory = (typeof POLICY_CATEGORIES)[number];
  */
 export type GroundTruth = "legitimate" | "hard-reject" | "quarantine";
 export type ScoreBand = "low" | "elevated" | "high";
-export type SentinelKind = "legitimate-pass" | "hard-reject" | "quarantine-hold";
+export const SENTINEL_KINDS = ["legitimate-pass", "hard-reject", "quarantine-hold"] as const;
+export type SentinelKind = (typeof SENTINEL_KINDS)[number];
 export type ExpectedScreeningOutcome = "pass-or-warning" | "reject" | "quarantine";
 export type CorpusMaterialAvailability = "available" | "blocked";
 
@@ -149,6 +150,20 @@ export interface ScreeningThresholds {
    * unmeasured.
    */
   readonly minimum_quarantine_examples: number;
+  /**
+   * How many should-fail controls of each kind the corpus must carry.
+   *
+   * Without a floor here, deleting the sentinels deletes the alarm: a corpus
+   * with no controls aggregates to exactly the same `sentinel_failures: []` as
+   * one whose controls all passed, and the report cannot tell a reader which it
+   * was looking at. These counts are the machine-checkable statement that the
+   * FP and FN assertions were still able to fail on this run.
+   *
+   * `quarantine-hold` is zero for the same reason `minimum_quarantine_examples`
+   * is: the frozen manifest carries no quarantine-truth entry. Raise the two
+   * together.
+   */
+  readonly minimum_sentinel_controls: Readonly<Record<SentinelKind, number>>;
 }
 
 export const S4_THRESHOLDS: ScreeningThresholds = {
@@ -159,4 +174,9 @@ export const S4_THRESHOLDS: ScreeningThresholds = {
   quarantine_publish_max: 0,
   quarantine_over_refusal_rate_exclusive_max: 0.05,
   minimum_quarantine_examples: 0,
+  minimum_sentinel_controls: {
+    "legitimate-pass": 1,
+    "hard-reject": 1,
+    "quarantine-hold": 0,
+  },
 };

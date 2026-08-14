@@ -311,9 +311,7 @@ export function aggregatePartialScreeningRun(
   const legitimateMetricUnmeasured =
     reservedByGroundTruth.legitimate > 0 ||
     providerFailures.some(([example]) => example.ground_truth === "legitimate");
-  const falsePositiveRate = legitimateMetricUnmeasured
-    ? EMPTY_RATE
-    : observedLegitimateRate;
+  const falsePositiveRate = legitimateMetricUnmeasured ? EMPTY_RATE : observedLegitimateRate;
   const quarantinePublishRate = rateFrom(quarantineMetric, "quarantine_publish_rate");
   const quarantineOverRefusalRate = rateFrom(quarantineMetric, "quarantine_over_refusal_rate");
 
