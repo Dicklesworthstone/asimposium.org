@@ -195,12 +195,31 @@ function enrollmentOperationalFailure(error: unknown): Response | undefined {
   ) {
     return undefined;
   }
+  return enrollmentUnavailableResponse();
+}
+
+function enrollmentUnavailableResponse(): Response {
   return problem(
     503,
     "ENROLLMENT_UNAVAILABLE",
     "Enrollment is temporarily unavailable",
     "The enrollment service could not complete this request safely.",
     "Retry later with the same Idempotency-Key; do not create a second enrollment request.",
+  );
+}
+
+function decisionBodyInvalidResponse(): Response {
+  return problem(
+    422,
+    "DECISION_BODY_INVALID",
+    "Sponsor decision body is invalid",
+    "The signed JSON body does not match the sponsor decision contract.",
+    "Send a strict approve, deny, or reduce object that includes the enrollment id named by the request path, then sign those exact bytes.",
+    {
+      rule: "ADR-20",
+      schema: "https://a.asimposium.org/schemas/enrollment.v1.json",
+      example: { enrollment_id: "ASIMP-EN-01JXYZ4K6Q", decision: "approve" },
+    },
   );
 }
 
@@ -584,9 +603,15 @@ function mountSponsorRoutes(app: Hono, options: EnrollmentRouterOptions): void {
       );
     }
     try {
-      const parsed = SponsorEnrollmentDecisionSchema.safeParse(verifiedJson(authenticated.rawBody));
+      let decisionBody: unknown;
+      try {
+        decisionBody = verifiedJson(authenticated.rawBody);
+      } catch {
+        return decisionBodyInvalidResponse();
+      }
+      const parsed = SponsorEnrollmentDecisionSchema.safeParse(decisionBody);
       if (!parsed.success) {
-        return enrollmentErrorResponse(new EnrollmentError("PROPOSAL_NOT_PENDING"));
+        return decisionBodyInvalidResponse();
       }
       // The envelope signs the body digest and the route *template*, never the
       // filled path, so this equality is what binds an approve to the proposal
@@ -608,9 +633,9 @@ function mountSponsorRoutes(app: Hono, options: EnrollmentRouterOptions): void {
     } catch (error) {
       const operational = enrollmentOperationalFailure(error);
       if (operational !== undefined) return operational;
-      return enrollmentErrorResponse(
-        error instanceof EnrollmentError ? error : new EnrollmentError("PROPOSAL_NOT_PENDING"),
-      );
+      return error instanceof EnrollmentError
+        ? enrollmentErrorResponse(error)
+        : enrollmentUnavailableResponse();
     }
   });
 

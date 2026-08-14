@@ -30,6 +30,7 @@ const SPONSOR = "usr_01JXYZSPONSOR0000000000";
 
 interface Harness {
   app: ReturnType<typeof createEnrollmentRouter>;
+  service: EnrollmentService;
   sign(
     body: string,
     route: string,
@@ -97,7 +98,7 @@ async function harness(options?: { withSponsorSeam: false }): Promise<Harness> {
         }),
   });
 
-  return { app, sign };
+  return { app, service, sign };
 }
 
 function envelopeRequest(path: string, headers: Headers, method: string, body?: string): Request {
@@ -418,5 +419,59 @@ describe("sponsor enrollment routes", () => {
       ).json(),
     );
     expect(list.proposals.map((proposal) => proposal.enrollment_id)).toEqual([second.enrollmentId]);
+  });
+
+  test("signed malformed decision bodies teach the contract without lying about proposal state", async () => {
+    const h = await harness();
+    const pathTarget = "ASIMP-EN-0000000000";
+    const cases = [
+      "",
+      "{not-json",
+      '{"decision":"approve"}',
+      JSON.stringify({ enrollment_id: pathTarget, decision: "unknown" }),
+      JSON.stringify({ enrollment_id: pathTarget, decision: "deny", extra: true }),
+    ];
+
+    for (const body of cases) {
+      const headers = await h.sign(
+        body,
+        "/v1/enrollments/:enrollmentId/decision",
+        "enrollment.decide",
+      );
+      const response = await h.app.fetch(
+        envelopeRequest(`/v1/enrollments/${pathTarget}/decision`, headers, "POST", body),
+      );
+      expect(response.status).toBe(422);
+      expect(await response.json()).toMatchObject({
+        code: "DECISION_BODY_INVALID",
+        rule: "ADR-20",
+        schema: "https://a.asimposium.org/schemas/enrollment.v1.json",
+        example: { enrollment_id: "ASIMP-EN-01JXYZ4K6Q", decision: "approve" },
+      });
+    }
+  });
+
+  test("an unexpected decision-service fault is an operational refusal, never false state", async () => {
+    const h = await harness();
+    const target = "ASIMP-EN-0000000000";
+    Object.defineProperty(h.service, "decide", {
+      value: async () => {
+        throw new Error("private planted service fault");
+      },
+    });
+    const body = JSON.stringify({ enrollment_id: target, decision: "approve" });
+    const headers = await h.sign(
+      body,
+      "/v1/enrollments/:enrollmentId/decision",
+      "enrollment.decide",
+    );
+    const response = await h.app.fetch(
+      envelopeRequest(`/v1/enrollments/${target}/decision`, headers, "POST", body),
+    );
+    expect(response.status).toBe(503);
+    const responseText = await response.text();
+    expect(JSON.parse(responseText)).toMatchObject({ code: "ENROLLMENT_UNAVAILABLE" });
+    expect(responseText).not.toContain("private planted service fault");
+    expect(responseText).not.toContain("PROPOSAL_NOT_PENDING");
   });
 });
