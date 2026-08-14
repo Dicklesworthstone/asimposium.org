@@ -15,8 +15,15 @@ export function GET(): Response {
     {
       plane: PLANE,
       stage: LAUNCH_STAGE,
-      /** Every write in the system belongs to the Worker, not to Agora. */
-      writes_accepted_at: SITE.stoa,
+      /**
+       * Ownership, not availability. Writes belong to the Worker and never to
+       * Agora — that is architecture and is true today. Whether any write route
+       * answers is a separate fact, and it is currently false: the Worker
+       * serves only its own health face. Rule A4 forbids collapsing the two,
+       * because "writes accepted at <url>" reads as a live endpoint.
+       */
+      writes_owned_by: SITE.stoa,
+      writes_live: false,
       ledger_live: false,
     },
     { headers: { "cache-control": "no-store" } },

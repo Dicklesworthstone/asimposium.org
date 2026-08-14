@@ -37,8 +37,20 @@ bun run lint             # eslint, --max-warnings 0
 bun run test             # unit + contract
 bun run test:unit        # validator rules, each proven able to fail; redaction layer
 bun run test:contract    # the same rules pointed at this package's real tree
+bun run test:security    # owed, unimplemented, exits 2 with its blocker
 bun run build            # next build
 ```
+
+Root policy (`scripts/suite/policy.ts`) assigns this package the baseline
+(`typecheck`, `lint`, `test:unit`) plus `contract` and `security`. Those are the
+scripts that exist. `test:integration`, `test:e2e` and `test:performance` are
+**deliberately not declared**: the dispatcher executes any script it finds
+(resolution rule 1), so declaring a deliberate blocker for a suite this package
+does not owe turned three root suites permanently red while adding no coverage.
+Nothing is lost by their absence — human E2E against staging is Playwright plus
+the Cold-Agent Gauntlet in `e2e/`, which owns that gate; Agora's integration and
+budget work arrives with W8/W10 and will be declared here when there is
+something real to run.
 
 Every gate prints one `ASIMP-GATE {...}` line: package, suite, tool, tool
 version, runner version, duration, status, exit code, and a reproduction
@@ -48,11 +60,10 @@ stderr is not evidence. Record fields pass through the redaction layer in
 env assignments, absolute paths), which is unit-tested against planted
 secret-shaped inputs rather than trusted.
 
-`test:integration`, `test:e2e`, `test:security` and `test:performance` exist and
-**exit 2** with `status:"not_implemented"`, naming the bead that unblocks them.
-They are excluded from the `test` aggregate on purpose: a red gate nothing can
-turn green is noise, and a green gate that ran nothing is a lie. Asked directly,
-they tell the truth.
+`test:security` exists and **exits 2** with `status:"not_implemented"`, naming
+the bead that unblocks it. It is excluded from the `test` aggregate on purpose:
+a red gate nothing can turn green is noise, and a green gate that ran nothing is
+a lie. Asked directly, it tells the truth.
 
 ## Environment
 
@@ -66,6 +77,34 @@ None are needed for `typecheck`, `lint`, `test`, or `build`.
 ## Fixtures
 
 `test/fixtures/` holds one valid App Router tree and eight malformed ones, one
-per rule. They are excluded from `tsconfig.json` and `eslint.config.mjs` because
-several of them are invalid on purpose. A fixture that stops failing is a
-regression in the validator, not a fixture to repair.
+per routing rule, plus `auth/` — a valid Propylon configuration, a valid aliased
+Google import, and ten mutations of it. They are excluded from `tsconfig.json`
+and `eslint.config.mjs` because most of them are invalid on purpose. A fixture
+that stops failing is a regression in the validator, not a fixture to repair.
+
+The `auth/` corpus exists because the first version of these checks was three
+regexes over source text and an adversarial probe defeated all three in one
+pass. Five review rounds followed, each finding a way the property could be true
+in the file and false in the running application:
+
+| Round | Bypass |
+|---|---|
+| 1 | `domain` inline on an existing line · hyphenated provider package · destructured secret |
+| 2 | locally-built provider · imported-but-unused Google · spread provider array · `process["env"]` · aliased `process` |
+| 3 | duplicate Google entry · two factory calls, second one exported · locally-defined `NextAuth` · IIFE · static class initialiser · `globalThis["pro"+"cess"]` · aliased `Bun` |
+| 4 | safe unused call plus a fake exported factory · `await import()` · `require` · `eval` |
+| 5 | Node's `global` root · `Function`/`eval` aliased before being called · `handlers` real while `auth`/`signIn`/`signOut` are fake |
+
+`scripts/auth-contract.ts` is therefore an **allowlist over one small file**, not
+a scanner: enumerating bad shapes is what kept losing. It resolves the single
+imported Auth.js call, requires all four public bindings to be destructured from
+*that* call, requires exactly one provider entry resolving to the imported
+Google module, requires literal cookie options without `domain`, permits exactly
+one environment expression in the whole file (`process.env.NODE_ENV`, written
+that way), allowlists imports to `next-auth` and the Google provider, and
+refuses every reference to `require`, `eval`, `Function` and dynamic `import`.
+Anything it cannot resolve is a refusal — "I did not see it" must never be
+recorded as "it is not there".
+
+It analyses one file's syntax. It does not follow imports, does not evaluate
+code, and proves nothing about the `Set-Cookie` header a running server emits.

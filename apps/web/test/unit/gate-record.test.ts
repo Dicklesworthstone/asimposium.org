@@ -91,13 +91,13 @@ describe("buildGateRecord", () => {
   test("a not_implemented gate names the blocker instead of passing", () => {
     const record = buildGateRecord(
       {
-        suite: "integration",
+        suite: "security",
         tool: "none",
         toolVersion: "n/a",
         status: "not_implemented",
-        exitCode: 2,
+        exitCode: 78,
         durationMs: 0,
-        repro: "bun run --filter @asimposium/web test:integration",
+        repro: "bun run --filter @asimposium/web test:security",
         blockedOn: "asimposiumorg-233",
         note: "No mocks of D1 or R2 are permitted as a substitute.",
       },

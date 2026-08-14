@@ -8,14 +8,16 @@
  * (see `gate-record.ts`) carrying tool, package, suite, version, duration,
  * status, and a reproduction command.
  *
- * Suites without an implementation exit non-zero with `status:"not_implemented"`
- * and the bead that must land first. They are deliberately excluded from the
- * default `bun run test` aggregate: a red gate that nothing can turn green is
- * noise, and a green gate that ran nothing is a lie. `test:<suite>` tells the
- * truth when asked directly.
+ * A suite this package owes but cannot yet honestly run exits non-zero with
+ * `status:"not_implemented"` and the bead that must land first. It is excluded
+ * from the default `bun run test` aggregate: a red gate that nothing can turn
+ * green is noise, and a green gate that ran nothing is a lie. `test:security`
+ * tells the truth when asked directly.
  *
- *   bun run typecheck | lint | test | test:unit | test:contract
- *   bun run test:integration | test:e2e | test:security | test:performance
+ * A suite this package does NOT owe gets no script at all — see the note on
+ * GATES below.
+ *
+ *   bun run typecheck | lint | test | test:unit | test:contract | test:security
  */
 import { existsSync, readFileSync } from "node:fs";
 import { dirname, join } from "node:path";
@@ -27,6 +29,21 @@ import {
 } from "./gate-record.ts";
 
 const PACKAGE_DIR = dirname(import.meta.dir);
+
+/**
+ * Exit code for a gate that is declared, owed, and honestly unimplemented.
+ *
+ * 78 is sysexits' EX_CONFIG, and the point is that it is *distinguishable*: a
+ * root dispatcher must be able to tell "this gate is blocked on something
+ * named" from "this gate ran and found a regression". A real test failure
+ * passes the tool's own exit code through untouched, which for `bun test` and
+ * `tsc` and `eslint` is 1 (or 2 for a tsc diagnostic). Collapsing the two into
+ * one code is how a blocker gets mistaken for a bug and vice versa.
+ */
+const BLOCKED_EXIT_CODE = 78;
+
+/** Usage error: the caller named a gate that does not exist. */
+const USAGE_EXIT_CODE = 64;
 
 type GateSpec =
   | {
@@ -69,29 +86,20 @@ const GATES: Record<string, GateSpec> = {
     versionFrom: "bun",
     argv: ["bun", "test", "test/contract"],
   },
-  integration: {
-    kind: "not_implemented",
-    tool: "none",
-    blockedOn: "asimposiumorg-233",
-    note: "Agora integration tests need the shared harness (OPS.2a) and a Worker to talk to (W4/W6). No mocks of D1 or R2 are permitted as a substitute.",
-  },
-  e2e: {
-    kind: "not_implemented",
-    tool: "none",
-    blockedOn: "asimposiumorg-233",
-    note: "Human E2E lives in e2e/ (Playwright against staging, mock-free) and needs W3 sign-in plus W8 pages. Not in this package's scope at OPS.1.",
-  },
+  // `security` is the only extra suite root policy assigns to apps/web
+  // (scripts/suite/policy.ts). It is declared and unimplemented, and says so.
+  //
+  // integration / e2e / performance are deliberately absent: this package does
+  // not owe them, and declaring a script the dispatcher would then execute
+  // turned three root suites permanently red for no coverage. Human E2E against
+  // staging lives in `e2e/` (Playwright + the Cold-Agent Gauntlet), which owns
+  // the `e2e` suite; Agora's integration and budget work arrives with W8/W10
+  // and will be declared here when there is something real to run.
   security: {
     kind: "not_implemented",
     tool: "none",
     blockedOn: "asimposiumorg-233",
     note: "Web security suite (CSP, XSS corpus, cache-leak paired tests — Fable §14.3) needs rendered pages and a session; W8/W10.",
-  },
-  performance: {
-    kind: "not_implemented",
-    tool: "none",
-    blockedOn: "asimposiumorg-233",
-    note: "Agora performance budgets are measured against real problem pages and OG rendering; W8/W10.",
   },
 };
 
@@ -100,10 +108,7 @@ const REPRO: Record<string, string> = {
   lint: "bun run --filter @asimposium/web lint",
   unit: "bun run --filter @asimposium/web test:unit",
   contract: "bun run --filter @asimposium/web test:contract",
-  integration: "bun run --filter @asimposium/web test:integration",
-  e2e: "bun run --filter @asimposium/web test:e2e",
   security: "bun run --filter @asimposium/web test:security",
-  performance: "bun run --filter @asimposium/web test:performance",
 };
 
 /**
@@ -176,20 +181,20 @@ if (suite === undefined || !(suite in GATES)) {
   console.error(
     `unknown gate '${suite ?? ""}'. known gates: ${Object.keys(GATES).sort().join(", ")}`,
   );
-  process.exit(64);
+  process.exit(USAGE_EXIT_CODE);
 }
 
 const spec = GATES[suite] as GateSpec;
 
 if (spec.kind === "not_implemented") {
-  emit(suite, spec.tool, "n/a", "not_implemented", 2, 0, {
+  emit(suite, spec.tool, "n/a", "not_implemented", BLOCKED_EXIT_CODE, 0, {
     blockedOn: spec.blockedOn,
     note: spec.note,
   });
   console.error(
     `gate '${suite}' has no implementation in this package yet (blocked on ${spec.blockedOn}). ${spec.note}`,
   );
-  process.exit(2);
+  process.exit(BLOCKED_EXIT_CODE);
 }
 
 const version = toolVersion(spec.versionFrom);

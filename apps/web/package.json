@@ -13,10 +13,7 @@
     "test": "bun scripts/gate.ts unit && bun scripts/gate.ts contract",
     "test:unit": "bun scripts/gate.ts unit",
     "test:contract": "bun scripts/gate.ts contract",
-    "test:integration": "bun scripts/gate.ts integration",
-    "test:e2e": "bun scripts/gate.ts e2e",
-    "test:security": "bun scripts/gate.ts security",
-    "test:performance": "bun scripts/gate.ts performance"
+    "test:security": "bun scripts/gate.ts security"
   },
   "dependencies": {
     "next": "16.3.1",
