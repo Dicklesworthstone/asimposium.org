@@ -54,6 +54,7 @@ export type EnvelopeRefusalReason =
   | "unsupported_alg"
   | "wrong_issuer"
   | "wrong_audience"
+  | "wrong_principal_type"
   | "expired"
   | "issued_in_future"
   | "lifetime_too_long"
@@ -121,7 +122,13 @@ const NONCE_MAX_LENGTH = 128;
  * the byte length is still checked explicitly rather than inferred.
  */
 const CLAIM_BOUNDS: Record<string, { pattern: RegExp; maxBytes: number }> = {
+  // These two selectors choose the canonical signing domain and crypto
+  // primitive. Bound them here, before a key lookup or WebCrypto sees any
+  // attacker-controlled bytes. The exact supported values are checked below
+  // so a compact future value can receive an explicit unsupported refusal.
+  v: { pattern: /^[A-Za-z0-9._-]+$/, maxBytes: 32 },
   kid: { pattern: /^[A-Za-z0-9._-]+$/, maxBytes: 64 },
+  alg: { pattern: /^[A-Za-z0-9_-]+$/, maxBytes: 32 },
   iss: { pattern: /^[a-z0-9.-]+$/, maxBytes: 64 },
   aud: { pattern: /^[a-z0-9.-]+$/, maxBytes: 64 },
   method: { pattern: /^(?:GET|HEAD|POST|PUT|PATCH|DELETE|OPTIONS)$/, maxBytes: 7 },
@@ -176,6 +183,8 @@ export function parseEnvelope(value: unknown): ServiceEnvelope | undefined {
     if (expected === "number" && !Number.isSafeInteger(entry)) return undefined;
     if (expected === "string" && (entry as string).length === 0) return undefined;
   }
+
+  if ((claims.iat as number) < 0 || (claims.exp as number) < 0) return undefined;
 
   const nonce = claims.nonce as string;
   if (nonce.length < NONCE_MIN_LENGTH || nonce.length > NONCE_MAX_LENGTH) return undefined;
@@ -242,9 +251,23 @@ export async function verifyServiceEnvelope(
     return refuse("payload_mismatch");
   }
 
+  // S-6 establishes only Agora sponsor actions. A valid envelope naming a
+  // different credential class cannot gain sponsor authority merely because
+  // its issuer key is otherwise trusted. Keep this after signature and body
+  // binding so an unauthenticated caller cannot influence an internal reason.
+  if (claims.principal_type !== "sponsor") return refuse("wrong_principal_type");
+
+  // Expiry is exclusive in every nonce store: `expiresAt <= now` is no longer
+  // a claim. The envelope itself remains acceptable during bounded clock skew,
+  // so retain the nonce through that window plus one second. Otherwise an
+  // attacker can replay a just-expired nonce to a worker whose clock is within
+  // the permitted skew.
+  const nonceExpiresAt = claims.exp + skew + 1;
+  if (!Number.isSafeInteger(nonceExpiresAt)) return refuse("malformed");
+
   let claimed: boolean;
   try {
-    claimed = await options.nonces.claim(claims.nonce, claims.exp, options.now);
+    claimed = await options.nonces.claim(claims.nonce, nonceExpiresAt, options.now);
   } catch (error) {
     // Fail closed. A replay window that cannot answer is not a reason to write.
     if (error instanceof NonceStoreFullError) return refuse("store_unavailable");
