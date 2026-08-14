@@ -14,6 +14,19 @@ e2e/artifacts/
 # bv (beads viewer) local config and caches
 .bv/
 
+# Beads write-lock snapshots moved aside when stale. The hyphenated
+# `stale-*` form misses `.write.lock.stale` and `.write.lock.stale2`.
+.beads/.write.lock.stale
+.beads/.write.lock.stale*
+
+# Agent-swarm root scratch. These are never source; they reappear as
+# untracked junk after local harness/doctor runs.
+/counter
+/safe-counter
+/unsafe-counter
+/opaque-output.cjs
+/bash
+
 # GitHub social-preview card: uploaded via repo Settings (see ops/console-notes.md);
 # the local copy stays on disk as the source file but is not tracked.
 gh_og_share_image.png
