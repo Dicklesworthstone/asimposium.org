@@ -6,8 +6,8 @@ import { join, resolve } from "node:path";
 import {
   buildS2CostMeasurementReceipt,
   S2_COST_RECEIPT_RELATIVE_PATH,
-  type S2CostReceiptMetric,
   type S2CostReceiptProvenance,
+  type S2SettledWriteResult,
   writeS2CostMeasurementReceipt,
 } from "../../src/krater/s2-client.ts";
 
@@ -25,33 +25,93 @@ const COST_PROVENANCE: S2CostReceiptProvenance = {
   source_digest: "b".repeat(64),
 };
 
-const COST_METRICS: readonly S2CostReceiptMetric[] = [
+const COST_WRITES: readonly S2SettledWriteResult[] = [
   {
-    successfulBatchRowsRead: 3,
-    successfulBatchRowsWritten: 2,
-    successfulBatchSqlMs: 1,
-    writePhaseMs: 1,
-    writeClaimWallMs: 100,
-    retryCount: 0,
-    preflight: { rows_read: 4, rows_written: 0, sql_ms: 1, statements: 3, wall_ms: 10 },
+    event_id: "E-s2-001",
+    seq: 1,
+    idempotent: false,
+    pre_cursor: 0,
+    post_cursor: 1,
+    payload_sha256: "1".repeat(64),
+    row_digest: "2".repeat(64),
+    build_digest: "3".repeat(64),
+    chain_digest: "4".repeat(64),
+    checkpoint_digest: "5".repeat(64),
+    write_phase_ms: 1,
+    successful_batch_rows_read: 3,
+    successful_batch_rows_written: 2,
+    successful_batch_sql_ms: 1,
+    successful_batch_metric_scope: "settled-db.batch-only",
+    failed_retry_batch_metrics: "excluded-d1-error-has-no-meta",
+    preflight_rows_read: 4,
+    preflight_rows_written: 0,
+    preflight_sql_ms: 1,
+    preflight_wall_ms: 10,
+    preflight_statements: 3,
+    preflight_fast_path: true,
+    write_claim_wall_ms: 100,
+    write_claim_wall_scope: "writeClaim-entry-to-return",
+    lock_wait_ms: null,
+    retry_count: 0,
+    outbox_handoff: "armed",
   },
   {
-    successfulBatchRowsRead: 5,
-    successfulBatchRowsWritten: 4,
-    successfulBatchSqlMs: 2,
-    writePhaseMs: 20,
-    writeClaimWallMs: 110,
-    retryCount: 1,
-    preflight: { rows_read: 6, rows_written: 1, sql_ms: 2, statements: 4, wall_ms: 5 },
+    event_id: "E-s2-002",
+    seq: 2,
+    idempotent: false,
+    pre_cursor: 1,
+    post_cursor: 2,
+    payload_sha256: "6".repeat(64),
+    row_digest: "7".repeat(64),
+    build_digest: "8".repeat(64),
+    chain_digest: "9".repeat(64),
+    checkpoint_digest: "a".repeat(64),
+    write_phase_ms: 20,
+    successful_batch_rows_read: 5,
+    successful_batch_rows_written: 4,
+    successful_batch_sql_ms: 2,
+    successful_batch_metric_scope: "settled-db.batch-only",
+    failed_retry_batch_metrics: "excluded-d1-error-has-no-meta",
+    preflight_rows_read: 6,
+    preflight_rows_written: 1,
+    preflight_sql_ms: 2,
+    preflight_wall_ms: 5,
+    preflight_statements: 4,
+    preflight_fast_path: true,
+    write_claim_wall_ms: 110,
+    write_claim_wall_scope: "writeClaim-entry-to-return",
+    lock_wait_ms: null,
+    retry_count: 1,
+    outbox_handoff: "armed",
   },
   {
-    successfulBatchRowsRead: 7,
-    successfulBatchRowsWritten: 6,
-    successfulBatchSqlMs: 3,
-    writePhaseMs: 9,
-    writeClaimWallMs: 90,
-    retryCount: 2,
-    preflight: { rows_read: 8, rows_written: 0, sql_ms: 3, statements: 5, wall_ms: 7 },
+    event_id: "E-s2-003",
+    seq: 3,
+    idempotent: false,
+    pre_cursor: 2,
+    post_cursor: 3,
+    payload_sha256: "b".repeat(64),
+    row_digest: "c".repeat(64),
+    build_digest: "d".repeat(64),
+    chain_digest: "e".repeat(64),
+    checkpoint_digest: "f".repeat(64),
+    write_phase_ms: 9,
+    successful_batch_rows_read: 7,
+    successful_batch_rows_written: 6,
+    successful_batch_sql_ms: 3,
+    successful_batch_metric_scope: "settled-db.batch-only",
+    failed_retry_batch_metrics: "excluded-d1-error-has-no-meta",
+    preflight_rows_read: 8,
+    preflight_rows_written: 0,
+    preflight_sql_ms: 3,
+    preflight_wall_ms: 7,
+    preflight_statements: 5,
+    preflight_fast_path: true,
+    write_claim_wall_ms: 90,
+    write_claim_wall_scope: "writeClaim-entry-to-return",
+    lock_wait_ms: null,
+    retry_count: 2,
+    outbox_handoff: "armed",
   },
 ];
 
@@ -115,11 +175,11 @@ describe("S2 to S7 normalized cost receipt", () => {
   test("builds the verifier's exact receipt schema from successful settled write metrics", () => {
     const privateBodySentinel = "s2-private-body-must-not-appear";
     const metricsWithPrivateBody: readonly (
-      | S2CostReceiptMetric
-      | (S2CostReceiptMetric & { readonly privateBody: string })
+      | S2SettledWriteResult
+      | (S2SettledWriteResult & { readonly privateBody: string })
     )[] = [
-      { ...COST_METRICS[0]!, privateBody: privateBodySentinel },
-      ...COST_METRICS.slice(1),
+      { ...COST_WRITES[0]!, privateBody: privateBodySentinel },
+      ...COST_WRITES.slice(1),
     ];
     const receipt = buildS2CostMeasurementReceipt(metricsWithPrivateBody, COST_PROVENANCE);
 
@@ -190,8 +250,8 @@ describe("S2 to S7 normalized cost receipt", () => {
     ).toThrow("S2_COST_RECEIPT_EMPTY");
     expect(existsSync(receiptPath)).toBe(false);
 
-    const malformed = structuredClone(COST_METRICS) as S2CostReceiptMetric[];
-    malformed[0] = { ...malformed[0]!, writePhaseMs: Number.NaN };
+    const malformed = structuredClone(COST_WRITES) as S2SettledWriteResult[];
+    malformed[0] = { ...malformed[0]!, write_phase_ms: Number.NaN };
     expect(() =>
       writeS2CostMeasurementReceipt(malformed, COST_PROVENANCE, { root, receiptPath }),
     ).toThrow("S2_COST_RECEIPT_METRICS_INVALID");
@@ -201,7 +261,7 @@ describe("S2 to S7 normalized cost receipt", () => {
   test("writes one mode-0600 regular receipt, refusing overwrite, symlink, and escaped paths", () => {
     const root = mkdtempSync(join(tmpdir(), "asimposium-s2-cost-receipt-"));
     const receiptPath = join(root, S2_COST_RECEIPT_RELATIVE_PATH);
-    const written = writeS2CostMeasurementReceipt(COST_METRICS, COST_PROVENANCE, {
+    const written = writeS2CostMeasurementReceipt(COST_WRITES, COST_PROVENANCE, {
       root,
       receiptPath,
     });
@@ -221,7 +281,7 @@ describe("S2 to S7 normalized cost receipt", () => {
 
     const original = readFileSync(receiptPath, "utf8");
     expect(() =>
-      writeS2CostMeasurementReceipt(COST_METRICS, COST_PROVENANCE, { root, receiptPath }),
+      writeS2CostMeasurementReceipt(COST_WRITES, COST_PROVENANCE, { root, receiptPath }),
     ).toThrow("S2_COST_RECEIPT_EXISTS");
     expect(readFileSync(receiptPath, "utf8")).toBe(original);
 
@@ -260,7 +320,7 @@ describe("S2 to S7 normalized cost receipt", () => {
     expect(exercise.indexOf("writeS2CostMeasurementReceipt")).toBeLessThan(
       exercise.lastIndexOf('status: "pass"'),
     );
-    expect(exercise).toContain("writes.map(selectedSettledMetric)");
+    expect(exercise).toContain("selectedSettledWrite");
     expect(client).toContain("if (write.idempotent)");
     expect(restartAndUpgrade).not.toContain("writeS2CostMeasurementReceipt(");
     expect(client).toContain("if (import.meta.main)");
