@@ -1,0 +1,27 @@
+{
+  "$id": "https://a.asimposium.org/schemas/contracts-scaffold.v1.json",
+  "title": "Contracts scaffold marker",
+  "description": "Non-product marker for the contracts generation scaffold.",
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "type": "object",
+  "properties": {
+    "schema": {
+      "type": "string",
+      "const": "contracts-scaffold.v1"
+    },
+    "kind": {
+      "type": "string",
+      "const": "contracts-scaffold"
+    },
+    "scope": {
+      "type": "string",
+      "const": "non-product"
+    }
+  },
+  "required": [
+    "schema",
+    "kind",
+    "scope"
+  ],
+  "additionalProperties": false
+}

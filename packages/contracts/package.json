@@ -1,0 +1,27 @@
+{
+  "name": "@asimposium/contracts",
+  "version": "0.0.0",
+  "private": true,
+  "type": "module",
+  "description": "Zod source-of-truth scaffolding for future ASImposium contracts; no product protocol schemas.",
+  "license": "SEE LICENSE IN ../../LICENSE",
+  "exports": {
+    ".": "./src/index.ts"
+  },
+  "scripts": {
+    "generate": "bun run src/generate.ts",
+    "check:drift": "bun run src/check-drift.ts",
+    "typecheck": "tsc --noEmit -p tsconfig.json",
+    "lint": "biome check src test package.json tsconfig.json",
+    "test": "bun test",
+    "test:unit": "bun test test/unit",
+    "test:contract": "bun test test/contract"
+  },
+  "dependencies": {
+    "zod": "4.4.3"
+  },
+  "devDependencies": {
+    "@types/bun": "1.3.14",
+    "typescript": "5.9.3"
+  }
+}

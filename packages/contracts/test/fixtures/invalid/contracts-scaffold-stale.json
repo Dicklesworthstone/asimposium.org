@@ -1,0 +1,6 @@
+{
+  "schema": "contracts-scaffold.v0",
+  "kind": "contracts-scaffold",
+  "scope": "non-product",
+  "unexpected": "reject"
+}
