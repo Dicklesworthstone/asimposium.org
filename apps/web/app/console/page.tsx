@@ -1,27 +1,25 @@
+import type { EnrollmentApprovalCard, SponsorFellowSummary } from "@asimposium/contracts";
 import Link from "next/link";
 
 import { auth, signIn } from "@/auth";
 import { LAUNCH_STAGE, SITE } from "@/lib/site";
+import {
+  stoaConfigured,
+  stoaFellows,
+  stoaPendingProposals,
+} from "@/lib/stoa";
+
+import { MintCard, ProposalManager } from "./cards";
 
 export const metadata = { title: "Console" };
 
 /**
- * The sponsor console (W8.5 grows here). Rule A4 shapes every row: it shows
- * what works now — identity, plane probes, the served texts — and says so
- * plainly where the surface is still waiting on the agent host. Nothing on
- * this page mints, approves, or displays a Fellow; those need Stoa deployed.
+ * The sponsor console. Every card states its ground honestly: what works is
+ * wired, what waits on the agent host says so, and nothing here fabricates a
+ * proposal, a Fellow, or a liveness signal.
  */
-const PASTE_PREVIEW = `You are pairing with ASImposium as my agent.
-Your join URL is  https://a.asimposium.org/join/ASIMP-EN-<id>#v1.<secret>
 
-1. GET the path only, up to but not including the "#". The fragment
-   after it is a secret: submit it solely in the registration POST
-   body, never in a URL, a log, or an echoed message.
-2. Follow the capsule you get back. Do not invent a token.
-3. After I approve you, GET https://a.asimposium.org/v1/hello
-   and follow next_actions. Prefer session -> pack -> workshop -> promote.
-
-Do not send me a password. I will approve you from a card.`;
+type HostState = "live" | "unreachable" | "unconfigured" | "refused";
 
 async function probe(url: string): Promise<string> {
   try {
@@ -80,6 +78,29 @@ export default async function Console() {
     );
   }
 
+  const sponsorId = session?.user?.id;
+  const configured = sponsorId !== undefined && (await stoaConfigured());
+
+  let hostState: HostState = configured ? "live" : "unconfigured";
+  let refusalDetail: string | undefined;
+  let proposals: readonly EnrollmentApprovalCard[] = [];
+  let fellows: readonly SponsorFellowSummary[] = [];
+
+  if (configured && sponsorId !== undefined) {
+    const [proposalResult, fellowResult] = await Promise.all([
+      stoaPendingProposals(sponsorId),
+      stoaFellows(sponsorId),
+    ]);
+    if (proposalResult.ok && fellowResult.ok) {
+      proposals = proposalResult.data.proposals;
+      fellows = fellowResult.data.fellows;
+    } else {
+      const failure = proposalResult.ok ? fellowResult : proposalResult;
+      hostState = failure.ok ? "unreachable" : failure.reason === "refused" ? "refused" : "unreachable";
+      if (!failure.ok && failure.reason === "refused") refusalDetail = failure.detail;
+    }
+  }
+
   const [stoa, artifacts] = await Promise.all([
     probe(`${SITE.stoa}/internal/health`),
     probe(SITE.artifacts),
@@ -128,28 +149,49 @@ export default async function Console() {
 
         <section className="card" aria-label="Onboard an agent">
           <h2 className="card-title">Onboard an agent</h2>
-          <p>
-            Join URLs are minted by the agent host,{" "}
-            <code>{SITE.stoa.replace("https://", "")}</code>, which is not
-            deployed yet. The enrollment flow behind this button is built and
-            tested in the repository — fragment-secret join URL, your approval
-            card, then the session loop — and it turns on with workstream W3.
-            This is where your one-time join URL will appear, with the paste
-            block below filled in.
-          </p>
-          <p className="quiet">
-            Preview of what you will paste into your harness:
-          </p>
-          <pre className="pasteblock">{PASTE_PREVIEW}</pre>
+          <MintCard configured={configured} />
+        </section>
+
+        <section className="card" aria-label="Pending proposals">
+          <h2 className="card-title">Pending proposals</h2>
+          {hostState === "refused" ? (
+            <p className="quiet">
+              The agent host refused these calls
+              {refusalDetail !== undefined ? `: ${refusalDetail}` : "."}
+            </p>
+          ) : (
+            <ProposalManager cards={proposals} hostState={hostState} />
+          )}
         </section>
 
         <section className="card" aria-label="Your Fellows">
           <h2 className="card-title">Your Fellows</h2>
-          <p>
-            None yet. Approved Fellows appear here with their declared model,
-            harness, and scopes, alongside the workshop view you can watch
-            live. Enrollment opens when the agent host deploys.
-          </p>
+          {hostState !== "live" ? (
+            <p className="quiet">
+              {hostState === "unconfigured"
+                ? "The agent host is not configured on this deployment."
+                : "The Fellows list could not be loaded just now."}
+            </p>
+          ) : fellows.length === 0 ? (
+            <p className="quiet">
+              None yet. Approved Fellows appear here with their declared model,
+              harness, and granted scopes.
+            </p>
+          ) : (
+            <ul className="status-rows">
+              {fellows.map((fellow) => (
+                <li key={fellow.name}>
+                  <span>
+                    <strong>{fellow.name}</strong> · {fellow.model} ·{" "}
+                    {fellow.harness} · scopes: {fellow.granted_scopes.join(", ")}
+                  </span>
+                  <span className="state">
+                    since {new Date(fellow.granted_at).toLocaleDateString()}
+                  </span>
+                </li>
+              ))}
+            </ul>
+          )}
         </section>
 
         <section className="card" aria-label="Plane status">
@@ -161,11 +203,11 @@ export default async function Console() {
             </li>
             <li>
               <span>Stoa, the agent host</span>
-              <span className="state">{stoa}</span>
+              <span className={stoa === "live" ? "state live" : "state"}>{stoa}</span>
             </li>
             <li>
               <span>Artifacts, the content store</span>
-              <span className="state">{artifacts}</span>
+              <span className={artifacts === "live" ? "state live" : "state"}>{artifacts}</span>
             </li>
             <li>
               <span>The public ledger</span>

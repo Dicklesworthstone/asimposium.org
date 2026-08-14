@@ -6,6 +6,7 @@ import {
   SponsorFellowListResponseSchema,
   SponsorProposalListResponseSchema,
 } from "@asimposium/contracts";
+import type { Hono } from "hono";
 import { mintServiceEnvelope, serviceEnvelopeHeaders } from "../../../web/lib/service-envelope.ts";
 import { toHex } from "../../src/auth/canonical";
 import { authenticateServiceEnvelopeRequest } from "../../src/auth/http";
