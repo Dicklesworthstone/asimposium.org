@@ -20,6 +20,14 @@ import {
   type SponsorEnrollmentDecision,
 } from "./enrollment.ts";
 import { CONTRACT_SCAFFOLD_SCHEMA_ID, ContractScaffoldSchema } from "./schema.ts";
+import {
+  type S2CostEvidenceManifest,
+  S2CostEvidenceManifestSchema,
+  type S2CostMeasurementReceipt,
+  S2CostMeasurementReceiptSchema,
+  type S2CostReceiptPublication,
+  S2CostReceiptPublicationSchema,
+} from "./s2-cost-receipt.ts";
 
 export interface GeneratedArtifact {
   readonly relativePath: string;
@@ -36,6 +44,9 @@ const JSON_SCHEMA_ARTIFACT = "generated/contracts-scaffold.schema.json";
 const ENROLLMENT_TYPES_ARTIFACT = "generated/enrollment.types.ts";
 const ENROLLMENT_JSON_SCHEMA_ARTIFACT = "generated/enrollment.schema.json";
 const ENROLLMENT_SCHEMA_ID = "https://a.asimposium.org/schemas/enrollment.v1.json";
+const S2_COST_RECEIPT_TYPES_ARTIFACT = "generated/s2-cost-receipt.types.ts";
+const S2_COST_RECEIPT_JSON_SCHEMA_ARTIFACT = "generated/s2-cost-receipt.schema.json";
+const S2_COST_RECEIPT_SCHEMA_ID = "https://a.asimposium.org/schemas/s2-cost-receipt.v1.json";
 
 export function packageDirectory(): string {
   return fileURLToPath(new URL("../", import.meta.url));
@@ -113,12 +124,48 @@ function generatedEnrollmentTypes(): string {
   ].join("\n");
 }
 
+function generatedS2CostReceiptJsonSchema(): string {
+  const document = {
+    $id: S2_COST_RECEIPT_SCHEMA_ID,
+    title: "ASImposium S-2 cost receipt evidence contracts",
+    description:
+      "Closed normalized receipt plus manifest-bound local publication evidence for S-7 verification.",
+    ...z.toJSONSchema(
+      z.strictObject({
+        receipt: S2CostMeasurementReceiptSchema,
+        manifest: S2CostEvidenceManifestSchema,
+        publication: S2CostReceiptPublicationSchema,
+      }),
+    ),
+  };
+  return formatJson(document);
+}
+
+function generatedS2CostReceiptTypes(): string {
+  const typeNames = [
+    "S2CostEvidenceManifest",
+    "S2CostMeasurementReceipt",
+    "S2CostReceiptPublication",
+  ] as const satisfies readonly (keyof {
+    S2CostEvidenceManifest: S2CostEvidenceManifest;
+    S2CostMeasurementReceipt: S2CostMeasurementReceipt;
+    S2CostReceiptPublication: S2CostReceiptPublication;
+  })[];
+  return [
+    "// Generated from src/s2-cost-receipt.ts by `bun run generate`. Do not edit.",
+    `export type { ${typeNames.join(", ")} } from "../src/s2-cost-receipt.ts";`,
+    "",
+  ].join("\n");
+}
+
 export function generatedArtifacts(): readonly GeneratedArtifact[] {
   return [
     { relativePath: JSON_SCHEMA_ARTIFACT, content: generatedJsonSchema() },
     { relativePath: TYPES_ARTIFACT, content: generatedTypes() },
     { relativePath: ENROLLMENT_JSON_SCHEMA_ARTIFACT, content: generatedEnrollmentJsonSchema() },
     { relativePath: ENROLLMENT_TYPES_ARTIFACT, content: generatedEnrollmentTypes() },
+    { relativePath: S2_COST_RECEIPT_JSON_SCHEMA_ARTIFACT, content: generatedS2CostReceiptJsonSchema() },
+    { relativePath: S2_COST_RECEIPT_TYPES_ARTIFACT, content: generatedS2CostReceiptTypes() },
   ];
 }
 
