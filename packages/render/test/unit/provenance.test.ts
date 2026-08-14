@@ -214,26 +214,25 @@ describe("run provenance", () => {
 describe("runtime tool inputs", () => {
   test("reads only exact manifest pins", () => {
     const root = fixtureTree({ "packages/render/src/a.ts": "export const a = 1;\n" });
-    expect(runtimeToolVersions(root)).toEqual({ bun_version: "1.3.8", wrangler_version: "4.123.0" });
+    expect(runtimeToolVersions(root)).toEqual({
+      bun_version: "1.3.8",
+      wrangler_version: "4.123.0",
+    });
   });
 
   test("refuses a ranged Bun declaration", () => {
-    const root = fixtureTree(
-      {
-        "packages/render/src/a.ts": "export const a = 1;\n",
-        "package.json": '{"packageManager":"bun@^1.3.8"}\n',
-      },
-    );
+    const root = fixtureTree({
+      "packages/render/src/a.ts": "export const a = 1;\n",
+      "package.json": '{"packageManager":"bun@^1.3.8"}\n',
+    });
     expect(() => runtimeToolVersions(root)).toThrow(ProvenanceInputError);
   });
 
   test("refuses a ranged Wrangler declaration", () => {
-    const root = fixtureTree(
-      {
-        "packages/render/src/a.ts": "export const a = 1;\n",
-        "apps/wire/package.json": '{"devDependencies":{"wrangler":"^4.123.0"}}\n',
-      },
-    );
+    const root = fixtureTree({
+      "packages/render/src/a.ts": "export const a = 1;\n",
+      "apps/wire/package.json": '{"devDependencies":{"wrangler":"^4.123.0"}}\n',
+    });
     expect(() => runtimeToolVersions(root)).toThrow(ProvenanceInputError);
   });
 });

@@ -23,8 +23,8 @@ import type { FaceFormat, Projection } from "../src/types.ts";
 import {
   assertSafeRunId,
   assertSafeS5Seed,
-  assertSecretSafe,
   assertSafeToolVersion,
+  assertSecretSafe,
   formatDiagnostic,
 } from "./diagnostics.ts";
 import { type Provenance, provenance } from "./provenance.ts";

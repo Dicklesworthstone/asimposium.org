@@ -36,7 +36,6 @@ ORIGIN="http://127.0.0.1:${PORT}"
 readonly WRANGLER="apps/wire/node_modules/.bin/wrangler"
 
 cd "$(dirname "${BASH_SOURCE[0]}")/.." || exit 1
-readonly ROOT="$PWD"
 # Callers may set TMPDIR to an external volume (this swarm does); the repository default stays
 # portable for ordinary developer and CI hosts.
 readonly DEFAULT_SCRATCH_ROOT="/private/tmp"
@@ -321,10 +320,14 @@ positive_pid() {
 }
 
 marker_matches_owned_group() {
-  local current_pgid command
+  local current_pgid controller_pgid command
   positive_pid "${SERVER_MARKER_PID}" && positive_pid "${SERVER_PGID}" || return 1
   current_pgid="$(ps -o pgid= -p "${SERVER_MARKER_PID}" 2>/dev/null | tr -d '[:space:]')" || return 1
   [[ "${current_pgid}" == "${SERVER_PGID}" ]] || return 1
+  controller_pgid="$(ps -o pgid= -p "${CONTROLLER_PID}" 2>/dev/null | tr -d '[:space:]')" || return 1
+  # A cleanup group must be distinct from the controller's group. Without this proof, a
+  # fallback group signal could reach the invoking test runner or CI shell.
+  [[ "${SERVER_PGID}" != "${controller_pgid}" ]] || return 1
   command="$(ps -o command= -p "${SERVER_MARKER_PID}" 2>/dev/null)" || return 1
   [[ "${command}" == *"--s5-owned-marker=${SERVER_PROCESS_MARKER}"* ]]
 }
@@ -356,9 +359,15 @@ owned_group_has_non_marker_member() {
 }
 
 wait_for_owned_group_empty() {
-  local members
+  local members observation_failures=0
   for ((_wait = 1; _wait <= GROUP_EMPTY_RETRY_LIMIT; _wait += 1)); do
-    members="$(owned_group_members)" || return 2
+    if ! members="$(owned_group_members)"; then
+      observation_failures=$((observation_failures + 1))
+      [[ ${observation_failures} -lt 20 ]] || return 2
+      sleep 0.1
+      continue
+    fi
+    observation_failures=0
     [[ -z "${members}" ]] && return 0
     sleep 0.1
   done
@@ -392,19 +401,33 @@ stop_server() {
     return $?
   fi
   kill -TERM -- "-${SERVER_PGID}" 2>/dev/null || { CLEANUP_FAILURE="term_signal_refused"; return 1; }
+  local observation_failures=0
   for _wait in {1..20}; do
     owned_group_has_non_marker_member
     case $? in
-      0) sleep 0.1 ;;
+      0) observation_failures=0; sleep 0.1 ;;
       1) break ;;
-      *) CLEANUP_FAILURE="term_observation_uncertain"; return 1 ;;
+      *)
+        observation_failures=$((observation_failures + 1))
+        if [[ ${observation_failures} -ge 20 ]]; then
+          CLEANUP_FAILURE="term_observation_uncertain"
+          return 1
+        fi
+        sleep 0.1
+        ;;
     esac
   done
 
   # The marker ignores TERM so it remains a fresh ownership proof for the escalation. If a
   # workerd child remains, signal the *verified* group; otherwise kill only the verified
   # marker. There is never a signal based solely on an old numeric PID/PGID.
-  marker_matches_owned_group || { CLEANUP_FAILURE="marker_changed_before_escalation"; return 1; }
+  if ! marker_matches_owned_group; then
+    # TERM can race with the sidecar's own parent-loss reaper. Once the marker is gone we do
+    # not issue a numeric-group escalation; we only wait for a bounded, valid observation that
+    # proves all live members have disappeared.
+    finalize_server_cleanup || { CLEANUP_FAILURE="sidecar_reap_not_proven"; return 1; }
+    return 0
+  fi
   owned_group_has_non_marker_member
   case $? in
     0) kill -KILL -- "-${SERVER_PGID}" 2>/dev/null || { CLEANUP_FAILURE="kill_signal_refused"; return 1; } ;;
@@ -482,9 +505,11 @@ set -m
       # not absence. Uncertainty retries a bounded number of times and then self-expires only
       # after proving this marker still belongs to the exact group it will signal.
       trap "" TERM INT HUP
-      local marker_group
+      local marker_group controller_group
       marker_group="$(ps -o pgid= -p "${BASHPID}" 2>/dev/null | tr -d "[:space:]")" || exit 1
       [[ "${marker_group}" =~ ^[1-9][0-9]*$ ]] || exit 1
+      controller_group="$(ps -o pgid= -p "${controller_pid}" 2>/dev/null | tr -d "[:space:]")" || exit 1
+      [[ "${controller_group}" =~ ^[1-9][0-9]*$ && "${marker_group}" != "${controller_group}" ]] || exit 1
       marker_matches_own_group() {
         current_pgid="$(ps -o pgid= -p "${BASHPID}" 2>/dev/null | tr -d "[:space:]")" || return 1
         [[ "${current_pgid}" == "${marker_group}" ]] || return 1
@@ -524,6 +549,14 @@ set -m
         # setpgid/setsid or execs another program. That construction invariant is the remaining
         # ownership proof when `ps` is permanently unavailable; it expires its own group and
         # cannot select a decoy in another process group by PID or command text.
+        # The controller arms this fallback only after it has independently verified the
+        # marker PID/argv/PGID and the group is distinct from its own process group.
+        # Before that acknowledgement, killing only this marker blocks the launcher from
+        # execing workerd and cannot spill into the caller process group.
+        if [[ ! -f "${owner_ack}" ]]; then
+          kill -KILL "${BASHPID}" 2>/dev/null || return 1
+          return 1
+        fi
         kill -TERM -- "-${marker_group}" 2>/dev/null || return 1
         sleep 0.1
         kill -KILL -- "-${marker_group}" 2>/dev/null || return 1

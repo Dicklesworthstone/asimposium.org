@@ -128,9 +128,10 @@ async function runCheckerWithoutContract(origin: string): Promise<Run> {
 
 const listeners: Server[] = [];
 const httpListeners: HttpServer[] = [];
-afterAll(() => {
-  for (const server of listeners) server.close();
-  for (const server of httpListeners) server.close();
+afterAll(async () => {
+  const close = (server: Server | HttpServer): Promise<void> =>
+    server.listening ? new Promise((done) => server.close(() => done())) : Promise.resolve();
+  await Promise.all([...listeners, ...httpListeners].map(close));
 });
 
 /**
@@ -344,7 +345,10 @@ async function credentialEtagServer(
   });
 }
 
-async function malformedTeachingResponseServer(): Promise<{ origin: string; close: () => Promise<void> }> {
+async function malformedTeachingResponseServer(): Promise<{
+  origin: string;
+  close: () => Promise<void>;
+}> {
   return new Promise((done, fail) => {
     const server = createHttpServer((request, response) => {
       const url = new URL(request.url ?? "/", "http://127.0.0.1");
@@ -731,6 +735,22 @@ describe("the private provenance-drift seam is all-or-none and fail-closed", () 
 });
 
 describe("a run never tests against a server it did not start", () => {
+  for (const rejectedPort of ["not-a-port", "0", "65536", "1+1"] as const) {
+    test(`a syntactically invalid S5_PORT ${rejectedPort} is refused before numeric use`, async () => {
+      const run = await runScript({ S5_PORT: rejectedPort }, 180_000);
+      expect(run.exitCode).toBe(64);
+      const records = run.stdout
+        .trim()
+        .split("\n")
+        .filter(Boolean)
+        .map((line) => JSON.parse(line) as Record<string, unknown>);
+      expect(records.find((record) => record.assertion === "phase2_worker_served")).toMatchObject({
+        status: "fail",
+        detail: "S5_PORT was refused by the closed local-origin boundary",
+      });
+    }, 200_000);
+  }
+
   test("a pinned port that is already occupied is refused, not reused", async () => {
     // We hold this listener for the duration: the script must refuse rather than test
     // against a server it does not own.
@@ -794,7 +814,10 @@ describe("an interrupted run leaves nothing listening", () => {
   test("a transient process-table failure is retried and never treated as an empty owned group", async () => {
     const port = await freePort();
     const fault = psFaultShim("transient");
-    const child = startScript({ S5_PORT: String(port), PATH: `${fault.directory}:${process.env.PATH}` });
+    const child = startScript({
+      S5_PORT: String(port),
+      PATH: `${fault.directory}:${process.env.PATH}`,
+    });
     const completion = collectScript(child, 30_000);
     const marker = `s5-diptych-owner-s5-s5-fixed-seed-v1-${child.pid}`;
     let ownedGroup: number | undefined;
@@ -821,7 +844,10 @@ describe("an interrupted run leaves nothing listening", () => {
   test("permanent process-table uncertainty self-expires only the marked group", async () => {
     const port = await freePort();
     const fault = psFaultShim("permanent");
-    const child = startScript({ S5_PORT: String(port), PATH: `${fault.directory}:${process.env.PATH}` });
+    const child = startScript({
+      S5_PORT: String(port),
+      PATH: `${fault.directory}:${process.env.PATH}`,
+    });
     const completion = collectScript(child, 30_000);
     const marker = `s5-diptych-owner-s5-s5-fixed-seed-v1-${child.pid}`;
     let ownedGroup: number | undefined;

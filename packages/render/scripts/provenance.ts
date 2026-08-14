@@ -113,7 +113,10 @@ function readRequiredRegularText(root: string, path: string): string {
 
   let descriptor: number | undefined;
   try {
-    descriptor = openSync(absolute, constants.O_RDONLY | constants.O_NONBLOCK | constants.O_NOFOLLOW);
+    descriptor = openSync(
+      absolute,
+      constants.O_RDONLY | constants.O_NONBLOCK | constants.O_NOFOLLOW,
+    );
     if (!fstatSync(descriptor).isFile())
       throw new ProvenanceInputError(path, "opened entry is not a regular file");
     return new TextDecoder().decode(readFileSync(descriptor));
@@ -158,14 +161,13 @@ function assertDeclaredTsconfigExtends(root: string): void {
     const extendsValue = config.extends;
     if (extendsValue === undefined) return;
     if (typeof extendsValue !== "string" || !extendsValue.startsWith("."))
-      throw new ProvenanceInputError(path, "extends must name an explicit relative provenance input");
+      throw new ProvenanceInputError(
+        path,
+        "extends must name an explicit relative provenance input",
+      );
     const candidate = extendsValue.endsWith(".json") ? extendsValue : `${extendsValue}.json`;
     const target = relative(root, resolve(root, dirname(path), candidate));
-    if (
-      target === "" ||
-      target.startsWith("..") ||
-      !PROVENANCE_INPUTS.includes(target)
-    ) {
+    if (target === "" || target.startsWith("..") || !PROVENANCE_INPUTS.includes(target)) {
       throw new ProvenanceInputError(path, "extends target is not a declared provenance input");
     }
     visit(target);
@@ -183,12 +185,17 @@ export function runtimeToolVersions(root: string = repoRoot()): RuntimeToolVersi
   const packageManager = rootPackage.packageManager;
   const bunMatch = typeof packageManager === "string" ? /^bun@(.+)$/.exec(packageManager) : null;
   if (bunMatch === null || !EXACT_SEMVER.test(bunMatch[1] ?? ""))
-    throw new ProvenanceInputError("package.json", "packageManager must pin bun to an exact version");
+    throw new ProvenanceInputError(
+      "package.json",
+      "packageManager must pin bun to an exact version",
+    );
 
   const wirePackage = requiredJsonObject(root, "apps/wire/package.json");
   const devDependencies = wirePackage.devDependencies;
   const wrangler =
-    devDependencies !== null && typeof devDependencies === "object" && !Array.isArray(devDependencies)
+    devDependencies !== null &&
+    typeof devDependencies === "object" &&
+    !Array.isArray(devDependencies)
       ? (devDependencies as Record<string, unknown>).wrangler
       : undefined;
   if (typeof wrangler !== "string" || !EXACT_SEMVER.test(wrangler))
