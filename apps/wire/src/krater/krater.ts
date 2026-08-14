@@ -418,6 +418,31 @@ async function readIntegrityBackfill(
 }
 
 /**
+ * The first event of a problem still missing either digest, or null when every envelope is
+ * digested.
+ *
+ * This is the cheap form of "is the upgrade finished?". `LIMIT 1` lets the engine stop at the
+ * first counter-example rather than proving the negative by reading the whole log, and one
+ * column crosses the boundary instead of eleven. Exported for direct unit and property
+ * coverage: its equivalence to the exhaustive predicate it replaced is the load-bearing
+ * claim, so it is tested rather than assumed.
+ */
+export async function firstUndigestedEvent(
+  db: D1Database,
+  problemId: string,
+): Promise<string | null> {
+  requireIdentifier("problemId", problemId);
+  const row = await statement(
+    db,
+    `SELECT id FROM events
+     WHERE problem_id = ? AND (row_digest IS NULL OR chain_digest IS NULL)
+     ORDER BY seq ASC LIMIT 1`,
+    problemId,
+  ).first<{ id: string }>();
+  return row?.id ?? null;
+}
+
+/**
  * Bounded, deterministic replay for an old 0001 database. It derives every
  * value using WebCrypto from stored immutable envelopes; it never substitutes
  * a SQL default or a synthetic digest. Larger or inconsistent histories remain
@@ -440,18 +465,7 @@ export async function backfillKraterIntegrity(
   if (rawHead === null) {
     throw new KraterProblemNotFoundError("problem must exist before integrity replay.");
   }
-  const events = await statement(
-    db,
-    `SELECT id, problem_id, seq, type, object_kind, object_id, object_version, payload_sha256,
-            row_digest, chain_digest, created_at
-     FROM events WHERE problem_id = ? ORDER BY seq ASC`,
-    problemId,
-  ).all<EventRow>();
   const storedBackfill = await readIntegrityBackfill(db, problemId);
-  const complete =
-    storedBackfill?.state === "complete" &&
-    rawHead.chain_digest !== null &&
-    events.results.every((event) => event.row_digest !== null && event.chain_digest !== null);
   // An already-upgraded problem is done, whatever its size. This check must precede the
   // bounded-replay limit below: every write calls this function, so testing the limit first
   // made a healthy, fully-digested problem permanently unwritable once it passed 512 events
@@ -459,7 +473,26 @@ export async function backfillKraterIntegrity(
   // KRATER_INTEGRITY_BACKFILL_REQUIRED, naming a replay that had already completed and that
   // would itself refuse at that size. The limit belongs to the legacy upgrade path, which is
   // the only caller that can actually perform the replay.
-  if (complete) return;
+  //
+  // It also has to be answered *without* materializing the event log. Every write calls this
+  // function, and loading every envelope of a problem to conclude "already upgraded" made
+  // write cost grow with problem history: eleven columns per row crossing the D1 boundary and
+  // an N-element array walked by `.every()`, on every single write. The predicate is
+  // unchanged — the same three conditions in the same order — but the third is now asked as
+  // an existence question, which reads at most one row and short-circuits on the first
+  // counter-example instead of proving the point by exhaustion.
+  if (storedBackfill?.state === "complete" && rawHead.chain_digest !== null) {
+    const undigested = await firstUndigestedEvent(db, problemId);
+    if (undigested === null) return;
+  }
+
+  const events = await statement(
+    db,
+    `SELECT id, problem_id, seq, type, object_kind, object_id, object_version, payload_sha256,
+            row_digest, chain_digest, created_at
+     FROM events WHERE problem_id = ? ORDER BY seq ASC`,
+    problemId,
+  ).all<EventRow>();
 
   if (events.results.length > MAX_INTEGRITY_BACKFILL_EVENTS) {
     backfillRequired(

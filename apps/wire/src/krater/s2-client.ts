@@ -28,6 +28,8 @@ const LEGACY_OVER_LIMIT_EVENTS = 513;
 const LEGACY_AT_LIMIT_EVENTS = 512;
 /** A problem that finished its upgrade and then keeps accepting ordinary writes past 512. */
 const LEGACY_WRITE_BOUNDARY_PROBLEM = "P-legacy-write-boundary";
+/** A completed problem that later grows one undigested envelope. */
+const LEGACY_MIXED_PROBLEM = "P-legacy-mixed-digest";
 
 interface WriteResult {
   event_id: string;
@@ -682,6 +684,61 @@ async function ordinaryWritesPastTheLimit(): Promise<void> {
   );
 }
 
+/**
+ * The completeness check must still notice a single undigested envelope in an otherwise
+ * upgraded log.
+ *
+ * Deciding "already upgraded" used to materialize every envelope and walk them with
+ * `.every()`; it now asks whether any undigested envelope exists and stops at the first one.
+ * Those two agree trivially on an all-digested or an all-NULL log — the only shape that can
+ * tell them apart is a mixed one. So this plants a completed problem, appends one undigested
+ * envelope behind its back, and requires the same refusal the exhaustive walk produced:
+ * partial integrity state is never mistaken for a finished upgrade.
+ */
+async function mixedDigestLogIsNotComplete(): Promise<void> {
+  await plantLegacy(LEGACY_MIXED_PROBLEM, 8, "legacy-mixed-plant");
+  const upgraded = await attemptLegacyBackfill(LEGACY_MIXED_PROBLEM, "legacy-mixed-backfill");
+  assertEqual(upgraded.status, 200, "S2_MIXED_BACKFILL_FAILED");
+
+  // One undigested envelope appended to a log the backfill row still calls complete.
+  const appended = await request(
+    "POST",
+    "/__s2/legacy/plant",
+    "legacy-mixed-append-undigested",
+    { problem_id: LEGACY_MIXED_PROBLEM, event_count: 1, created_at: CREATED_AT, append: true },
+    20_000,
+  );
+  assertEqual(appended.status, 201, "S2_MIXED_APPEND_FAILED");
+
+  const write = await request(
+    "POST",
+    "/__s2/write",
+    "legacy-mixed-write-refused",
+    {
+      problem_id: LEGACY_MIXED_PROBLEM,
+      claim_id: "C-mixed-1",
+      event_id: "E-mixed-1",
+      idempotency_key: "IK-mixed-1",
+      statement: "A write must not proceed while one envelope is undigested.",
+      created_at: CREATED_AT,
+    },
+    20_000,
+  );
+  assertEqual(write.status, 409, "S2_MIXED_WRITE_NOT_REFUSED");
+  assertEqual(
+    stringAt(write.body, "code"),
+    "KRATER_INTEGRITY_BACKFILL_REQUIRED",
+    "S2_MIXED_WRITE_CODE_INVALID",
+  );
+
+  const read = await request(
+    "GET",
+    `/__s2/events?problem_id=${LEGACY_MIXED_PROBLEM}&since=0&limit=10`,
+    "legacy-mixed-read-blocked",
+  );
+  assertEqual(read.status, 409, "S2_MIXED_READ_NOT_BLOCKED");
+}
+
 /** The refusal must survive a restart: it is a property of the data, not of a warm process. */
 async function legacyBoundedBackfillAfterRestart(): Promise<void> {
   const refused = await attemptLegacyBackfill(
@@ -1092,6 +1149,7 @@ async function exercise(): Promise<void> {
   await assertReplay(LARGE_PROBLEM, 201, "large-paginated-full-replay");
   await legacyBoundedBackfill();
   await ordinaryWritesPastTheLimit();
+  await mixedDigestLogIsNotComplete();
   await exerciseOutboxDrainer();
 
   emit({

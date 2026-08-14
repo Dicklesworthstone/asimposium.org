@@ -158,6 +158,15 @@ async function plantLegacyProblemForHarness(
   problemId: string,
   eventCount: number,
   createdAt: string,
+  /**
+   * Append undigested envelopes to a problem that already exists instead of creating one.
+   *
+   * This builds the case that separates a correct completeness check from a lazy one: a
+   * problem whose log is *mostly* digested with an undigested envelope at the end. An
+   * exhaustive `.every()` and a `LIMIT 1` existence probe must agree there, and only a
+   * mixed log can tell them apart from an all-digested or all-NULL one.
+   */
+  append = false,
 ): Promise<{ planted: number; statements: number }> {
   if (!Number.isSafeInteger(eventCount) || eventCount < 1 || eventCount > LEGACY_PLANT_MAX_EVENTS) {
     throw new KraterValidationError(`event_count must be 1 through ${LEGACY_PLANT_MAX_EVENTS}.`);
@@ -166,21 +175,41 @@ async function plantLegacyProblemForHarness(
   // Read before dropping: the restore below uses the schema's own text, never a copy.
   const triggerSql = await chainHeadTriggerSql(db);
 
-  const statements: D1PreparedStatement[] = [
-    db.prepare(`DROP TRIGGER ${CHAIN_HEAD_TRIGGER}`),
-    db
-      .prepare(
-        `INSERT INTO problems (id, public_seq, created_at, updated_at)
-         VALUES (?, ?, ?, ?)`,
-      )
-      .bind(problemId, eventCount, createdAt, createdAt),
-  ];
+  // Appending starts after the log that is already there, so seq stays contiguous.
+  let base = 0;
+  if (append) {
+    const head = await db
+      .prepare("SELECT public_seq FROM problems WHERE id = ?")
+      .bind(problemId)
+      .first<{ public_seq: number }>();
+    if (head === null) {
+      throw new KraterValidationError(
+        "cannot append legacy envelopes to a problem that is absent.",
+      );
+    }
+    base = head.public_seq;
+  }
+
+  const statements: D1PreparedStatement[] = [db.prepare(`DROP TRIGGER ${CHAIN_HEAD_TRIGGER}`)];
+  statements.push(
+    append
+      ? db
+          .prepare("UPDATE problems SET public_seq = ?, updated_at = ? WHERE id = ?")
+          .bind(base + eventCount, createdAt, problemId)
+      : db
+          .prepare(
+            `INSERT INTO problems (id, public_seq, created_at, updated_at)
+             VALUES (?, ?, ?, ?)`,
+          )
+          .bind(problemId, eventCount, createdAt, createdAt),
+  );
 
   for (let start = 1; start <= eventCount; start += LEGACY_PLANT_CHUNK_ROWS) {
     const end = Math.min(start + LEGACY_PLANT_CHUNK_ROWS - 1, eventCount);
     const values: unknown[] = [];
     const tuples: string[] = [];
-    for (let seq = start; seq <= end; seq += 1) {
+    for (let offset = start; offset <= end; offset += 1) {
+      const seq = base + offset;
       // A legacy row: every 0001 column present, both 0004 digest columns left NULL.
       tuples.push("(?, ?, ?, 'claim.created', 'claim', ?, 1, ?, ?)");
       values.push(
@@ -207,10 +236,13 @@ async function plantLegacyProblemForHarness(
   statements.push(
     db
       .prepare(
+        // Appending leaves the existing row untouched: the point of that mode is a problem
+        // still marked complete whose log has stopped being fully digested.
         `INSERT INTO krater_integrity_backfill (problem_id, state, legacy_event_count, completed_at)
-         VALUES (?, 'required', ?, NULL)`,
+         VALUES (?, 'required', ?, NULL)
+         ON CONFLICT(problem_id) DO NOTHING`,
       )
-      .bind(problemId, eventCount),
+      .bind(problemId, base + eventCount),
     db.prepare(triggerSql),
   );
 
@@ -357,6 +389,7 @@ async function handleHarnessRequest(
         requiredString(body, "problem_id"),
         requiredNumber(body, "event_count"),
         requiredString(body, "created_at"),
+        body.append === true,
       );
       return response({ status: "planted", ...planted }, 201);
     }
