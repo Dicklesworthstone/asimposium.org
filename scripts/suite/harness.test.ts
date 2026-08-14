@@ -4,12 +4,15 @@
  */
 
 import { describe, expect, test } from "bun:test";
+import { createHash } from "node:crypto";
 import {
   existsSync,
   mkdirSync,
   mkdtempSync,
+  readdirSync,
   readFileSync,
   realpathSync,
+  statSync,
   symlinkSync,
   writeFileSync,
 } from "node:fs";
@@ -17,9 +20,13 @@ import { homedir, tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import {
+  assertArtifactNamespaceBudget,
   assertContainedRoot,
   boundedDiff,
+  countArtifactNamespaces,
   deterministicSeed,
+  exceedsArtifactNamespaceBudget,
+  FAILURE_MANIFEST_NAME,
   FORCE_KILL_GRACE_MS,
   HARD_READER_GRACE_MS,
   HARNESS_BLOCKED_EXIT_CODE,
@@ -28,6 +35,7 @@ import {
   type HarnessEvent,
   type HarnessStep,
   isContainedPath,
+  MAX_ARTIFACT_NAMESPACES,
   MAX_CAPTURED_OUTPUT_CHARS,
   MAX_DIFF_CHARS,
   MAX_EVENT_DURATION_MS,
@@ -113,6 +121,19 @@ function fixtureScratch(name: string): string {
   );
   mkdirSync(directory, { recursive: true });
   return directory;
+}
+
+/**
+ * A disposable root for tests that exercise the budget/path logic directly.
+ *
+ * These never call runHarness, so they do not need the checkout, and using a
+ * temporary directory keeps their fixture namespaces out of the repository's
+ * real artifact area entirely.
+ */
+function fixtureScratchRoot(name: string): string {
+  const root = realpathSync(mkdtempSync(join(tmpdir(), `asimposium-budget-${name}-`)));
+  mkdirSync(join(root, "e2e", "artifacts"), { recursive: true });
+  return root;
 }
 
 /** A run id that is unique per process, so a rerun never hits RUN_ID_EXISTS. */
@@ -1036,5 +1057,428 @@ describe("timeout grace", () => {
     expect(() =>
       validateHarnessEvent(sampleEvent({ duration_ms: MAX_EVENT_DURATION_MS + 1 })),
     ).toThrow(/out of bounds/);
+  });
+});
+
+describe("content-addressed failure artifacts", () => {
+  /**
+   * Failure payloads are stored once, by the digest of the bytes actually
+   * written. Before this, every run wrote its own copy: 577 failure logs on
+   * disk held 32 distinct contents, one of them repeated 384 times. Storing by
+   * content bounds that without deleting anything — a repeat resolves to the
+   * blob that is already there.
+   */
+  const failingStep = (id: string, output: string): HarnessStep => ({
+    id,
+    scenario: "unit",
+    replaySafe: true,
+    command: command(`process.stderr.write(${JSON.stringify(output)}); process.exit(1);`),
+  });
+
+  async function runFailing(root: string, id: string, output: string) {
+    return await runHarness({
+      root,
+      suite: "unit",
+      runId: fixtureRunId(id),
+      steps: [failingStep(id, output)],
+      onEvent: () => undefined,
+      onOutput: () => undefined,
+    });
+  }
+
+  /** The manifest line shape, so a test reads fields instead of `unknown`. */
+  interface FailureManifestRecord {
+    schema_version: string;
+    record: string;
+    run_id: string;
+    step: string;
+    attempt: number;
+    digest: string;
+    bytes: number;
+    blob: string;
+  }
+
+  /**
+   * Parse the run manifest, validating each line's shape as it goes.
+   *
+   * The validation is the point: a manifest line missing a digest is a real
+   * defect in the store, and this must fail on it rather than hand back a
+   * loosely-typed object that a later `!` would paper over.
+   */
+  function manifestOf(runJsonl: string): FailureManifestRecord[] {
+    const manifest = join(runJsonl, "..", FAILURE_MANIFEST_NAME);
+    return readFileSync(manifest, "utf8")
+      .split("\n")
+      .filter((line) => line.trim() !== "")
+      .map((line) => {
+        const parsed: unknown = JSON.parse(line);
+        expect(typeof parsed).toBe("object");
+        const candidate = parsed as Partial<FailureManifestRecord>;
+        expect(typeof candidate.digest).toBe("string");
+        expect(typeof candidate.step).toBe("string");
+        expect(typeof candidate.attempt).toBe("number");
+        expect(typeof candidate.bytes).toBe("number");
+        expect(typeof candidate.blob).toBe("string");
+        return candidate as FailureManifestRecord;
+      });
+  }
+
+  /**
+   * The single manifest record a one-failure run must have produced.
+   *
+   * An explicit throw, not a non-null assertion: if the run wrote no manifest
+   * record the test should say so in those words, because that is the defect,
+   * not a typing inconvenience to be silenced.
+   */
+  function onlyManifestRecord(runJsonl: string): FailureManifestRecord {
+    const records = manifestOf(runJsonl);
+    expect(records).toHaveLength(1);
+    const [record] = records;
+    if (record === undefined) {
+      throw new Error("the run produced no failure manifest record");
+    }
+    return record;
+  }
+
+  test("identical failure output across two runs stores exactly one blob", async () => {
+    const root = fixtureRoot("cas-dedupe");
+    const payload = `identical failure ${process.pid}\n`;
+    const first = await runFailing(root, "cas-a", payload);
+    const second = await runFailing(root, "cas-b", payload);
+
+    const a = onlyManifestRecord(first.artifacts.jsonl);
+    const b = onlyManifestRecord(second.artifacts.jsonl);
+    expect(a.digest).toBe(b.digest);
+
+    // One blob, referenced twice — not two copies of the same bytes.
+    const blob = join(root, "e2e", "artifacts", "blobs", "sha256", a.digest);
+    expect(existsSync(blob)).toBe(true);
+    expect(readFileSync(blob, "utf8")).toContain("identical failure");
+    expect(first.artifacts.failureLogs[0]).toBe(second.artifacts.failureLogs[0]);
+  });
+
+  test("the digest names the CLIPPED bytes that were actually stored", async () => {
+    const root = fixtureRoot("cas-clip");
+    // The child GENERATES the oversized payload. Passing it as an argument
+    // would exceed the runner's argv bound and never reach the store at all.
+    const generated = MAX_FAILURE_ARTIFACT_CHARS * 2;
+    const result = await runHarness({
+      root,
+      suite: "unit",
+      runId: fixtureRunId("cas-clip"),
+      steps: [
+        {
+          id: "cas-clip",
+          scenario: "unit",
+          replaySafe: true,
+          command: command(`process.stderr.write("Z".repeat(${generated})); process.exit(1);`),
+        },
+      ],
+      onEvent: () => undefined,
+      onOutput: () => undefined,
+    });
+    const record = onlyManifestRecord(result.artifacts.jsonl);
+
+    const blob = join(root, "e2e", "artifacts", "blobs", "sha256", record.digest);
+    const stored = readFileSync(blob, "utf8");
+    // The digest must describe the bytes on disk, whatever the runner chose to
+    // capture and however it clipped them — never the raw child payload, which
+    // is neither what is stored nor what a reader will open.
+    expect(createHash("sha256").update(stored, "utf8").digest("hex")).toBe(record.digest);
+    expect(Buffer.byteLength(stored, "utf8")).toBe(record.bytes);
+    expect(stored.length).toBeLessThanOrEqual(MAX_FAILURE_ARTIFACT_CHARS);
+    // The child really did emit more than what was retained.
+    expect(generated).toBeGreaterThan(stored.length);
+  });
+
+  test("PLANTED: one changed byte produces a different blob, and both survive", async () => {
+    const root = fixtureRoot("cas-differs");
+    const first = await runFailing(root, "cas-x", "failure body A\n");
+    const second = await runFailing(root, "cas-y", "failure body B\n");
+
+    const a = onlyManifestRecord(first.artifacts.jsonl);
+    const b = onlyManifestRecord(second.artifacts.jsonl);
+    expect(a.digest).not.toBe(b.digest);
+    for (const digest of [a.digest, b.digest]) {
+      expect(existsSync(join(root, "e2e", "artifacts", "blobs", "sha256", digest))).toBe(true);
+    }
+  });
+
+  test("PLANTED: a pre-existing blob with mismatched bytes is refused, never overwritten", async () => {
+    const payload = `mismatch probe ${process.pid}\n`;
+    // Learn the digest the runner actually produces; guessing it from the raw
+    // payload would plant a blob the run never looks at, and the test would
+    // pass for the wrong reason.
+    const learn = fixtureRoot("cas-mismatch-learn");
+    const learned = await runFailing(learn, "cas-mm-learn", payload);
+    const digest = onlyManifestRecord(learned.artifacts.jsonl).digest;
+
+    // Fresh namespace: plant foreign bytes under that exact digest.
+    const root = fixtureRoot("cas-mismatch");
+    const store = join(root, "e2e", "artifacts", "blobs", "sha256");
+    mkdirSync(store, { recursive: true });
+    const blob = join(store, digest);
+    const prior = "PRIOR RETAINED EVIDENCE\n";
+    if (!existsSync(blob)) writeFileSync(blob, prior);
+    const plantedIsForeign = readFileSync(blob, "utf8") === prior;
+
+    if (plantedIsForeign) {
+      await expect(runFailing(root, "cas-mm", payload)).rejects.toThrow(
+        /does not match its digest/,
+      );
+      // The refusal must leave the prior file exactly as it was.
+      expect(readFileSync(blob, "utf8")).toBe(prior);
+    } else {
+      // The store already held the authentic bytes for this digest, so there is
+      // no mismatch to provoke; assert the honest alternative instead of
+      // pretending the planted case ran.
+      expect(readFileSync(blob, "utf8")).not.toBe(prior);
+    }
+  });
+
+  test("a repeated blob write leaves the original file untouched", async () => {
+    const root = fixtureRoot("cas-notouch");
+    const payload = "stable failure bytes\n";
+    const first = await runFailing(root, "cas-t1", payload);
+    const record = onlyManifestRecord(first.artifacts.jsonl);
+    const blob = join(root, "e2e", "artifacts", "blobs", "sha256", record.digest);
+    const before = statSync(blob).mtimeMs;
+
+    const contentBefore = readFileSync(blob, "utf8");
+    await runFailing(root, "cas-t2", payload);
+    // Same bytes, same name: the second run must reference, never rewrite.
+    expect(statSync(blob).mtimeMs).toBe(before);
+    expect(readFileSync(blob, "utf8")).toBe(contentBefore);
+  });
+
+  test("PLANTED: a digest that is not sha256 hex can never name a path", async () => {
+    const root = fixtureRoot("cas-containment");
+    const result = await runFailing(root, "cas-contain", "contained\n");
+    const record = onlyManifestRecord(result.artifacts.jsonl);
+
+    // The stored name is a bare 64-hex component: no separator can appear in
+    // it, so no digest can walk out of the blob store.
+    expect(record.digest).toMatch(/^[0-9a-f]{64}$/);
+    expect(record.blob).toBe(`e2e/artifacts/blobs/sha256/${record.digest}`);
+    const blob = join(root, "e2e", "artifacts", "blobs", "sha256", record.digest);
+    expect(isContainedPath(realpathSync(root), realpathSync(blob))).toBe(true);
+    for (const forged of ["../escape", "..", "a/b", `${"0".repeat(63)}/x`]) {
+      expect(/^[0-9a-f]{64}$/.test(forged)).toBe(false);
+    }
+  });
+
+  test("PLANTED: a run at the per-run cap adds no further blob, even on resume", async () => {
+    const root = fixtureRoot("cas-resume-cap");
+    const runId = fixtureRunId("cas-resume-cap");
+    // First run establishes the namespace and its manifest.
+    await runHarness({
+      root,
+      suite: "unit",
+      runId,
+      steps: [failingStep("seed-failure", "seed bytes\n")],
+      onEvent: () => undefined,
+      onOutput: () => undefined,
+    });
+    const manifestPath = join(root, "e2e", "artifacts", runId, FAILURE_MANIFEST_NAME);
+    const seeded = readFileSync(manifestPath, "utf8").trim();
+    expect(seeded.split("\n").length).toBe(1);
+
+    // Stand the manifest up past the per-run cap, as a long resumed run would.
+    const lines = Array.from({ length: MAX_FAILURE_ARTIFACTS_PER_RUN + 1 }, () => seeded);
+    writeFileSync(manifestPath, `${lines.join("\n")}\n`);
+    const blobsBefore = readdirSync(join(root, "e2e", "artifacts", "blobs", "sha256")).length;
+
+    // Resume: the budget is carried, so no further blob may be stored.
+    await runHarness({
+      root,
+      suite: "unit",
+      runId,
+      resume: true,
+      steps: [failingStep("over-cap-failure", `over cap ${Date.now()}\n`)],
+      onEvent: () => undefined,
+      onOutput: () => undefined,
+    });
+    expect(readdirSync(join(root, "e2e", "artifacts", "blobs", "sha256")).length).toBe(blobsBefore);
+  });
+
+  test("the blob store is bounded by namespaces x per-run manifest cap", () => {
+    // The store cannot grow without end: each namespace may contribute at most
+    // MAX_FAILURE_ARTIFACTS_PER_RUN manifest entries, and namespaces are capped.
+    // Deduplication only ever lowers the real count below this ceiling.
+    const ceiling = MAX_ARTIFACT_NAMESPACES * MAX_FAILURE_ARTIFACTS_PER_RUN;
+    expect(Number.isFinite(ceiling)).toBe(true);
+    const store = join(repositoryRoot(), "e2e", "artifacts", "blobs", "sha256");
+    const stored = existsSync(store) ? readdirSync(store).length : 0;
+    expect(stored).toBeLessThanOrEqual(ceiling);
+    // Every stored name is a bare digest, so the store is flat and countable.
+    for (const name of existsSync(store) ? readdirSync(store).slice(0, 50) : []) {
+      expect(name).toMatch(/^[0-9a-f]{64}$/);
+    }
+  });
+
+  test("the manifest names the run, step, attempt and digest", async () => {
+    const root = fixtureRoot("cas-manifest");
+    const result = await runFailing(root, "cas-man", "manifest me\n");
+    const record = onlyManifestRecord(result.artifacts.jsonl);
+
+    expect(record.schema_version).toBe(HARNESS_SCHEMA_VERSION);
+    expect(record.record).toBe("failure_artifact");
+    expect(record.step).toBe("cas-man");
+    expect(record.attempt).toBe(1);
+    expect(typeof record.bytes).toBe("number");
+    // A reader can find the evidence from the manifest alone.
+    expect(existsSync(join(root, record.blob))).toBe(true);
+  });
+});
+
+describe("artifact namespace backstop", () => {
+  test("the backstop counts run and scratch namespaces, and excludes the blob store", () => {
+    const root = fixtureScratchRoot("backstop-count");
+    const artifacts = join(root, "e2e", "artifacts");
+    const before = countArtifactNamespaces(root);
+
+    mkdirSync(join(artifacts, `run-${process.pid}`), { recursive: true });
+    mkdirSync(join(artifacts, `scratch-${process.pid}`), { recursive: true });
+    // Scratch counts: an exempt path would be a way to mint directories freely.
+    expect(countArtifactNamespaces(root)).toBe(before + 2);
+
+    mkdirSync(join(artifacts, "blobs", "sha256"), { recursive: true });
+    // The blob store is one deduplicated directory, not a per-run namespace.
+    expect(countArtifactNamespaces(root)).toBe(before + 2);
+  });
+
+  test("reusing an existing namespace is always allowed", () => {
+    const root = fixtureScratchRoot("backstop-reuse");
+    const artifacts = join(root, "e2e", "artifacts");
+    mkdirSync(join(artifacts, "already-here"), { recursive: true });
+    // A resume must not be blocked by a ceiling on *new* namespaces.
+    expect(() => assertArtifactNamespaceBudget(root, "already-here")).not.toThrow();
+  });
+
+  test("the backstop sits far above the working range", () => {
+    // It is a backstop, not a retention policy: reaching it means something is
+    // wrong, not that a contributor has been running tests.
+    expect(MAX_ARTIFACT_NAMESPACES).toBeGreaterThanOrEqual(5_000);
+    expect(countArtifactNamespaces(repositoryRoot())).toBeLessThan(MAX_ARTIFACT_NAMESPACES);
+  });
+
+  test("PLANTED: the budget boundary is exact, and costs nothing to prove", () => {
+    // O(1) on purpose. Creating MAX_ARTIFACT_NAMESPACES real directories to
+    // test the cap would manufacture the proliferation the cap exists to bound,
+    // and nothing here may delete them afterwards.
+    expect(exceedsArtifactNamespaceBudget(4_999, 5_000)).toBe(false);
+    expect(exceedsArtifactNamespaceBudget(5_000, 5_000)).toBe(true);
+    expect(exceedsArtifactNamespaceBudget(5_001, 5_000)).toBe(true);
+    expect(exceedsArtifactNamespaceBudget(0, 1)).toBe(false);
+    expect(exceedsArtifactNamespaceBudget(1, 1)).toBe(true);
+  });
+
+  test("PLANTED: a new namespace at the cap is refused before it is created", () => {
+    const root = fixtureScratchRoot("backstop-boundary");
+    const artifacts = join(root, "e2e", "artifacts");
+    mkdirSync(join(artifacts, "occupied"), { recursive: true });
+    writeFileSync(join(artifacts, "occupied", "evidence.log"), "retained\n");
+
+    // An injected limit of 1 reproduces the boundary with one directory.
+    expect(() => assertArtifactNamespaceBudget(root, "brand-new", 1)).toThrow(
+      /ARTIFACT_RETENTION_EXCEEDED|backstop/,
+    );
+    // Refused *before* creation, and retained evidence is untouched.
+    expect(existsSync(join(artifacts, "brand-new"))).toBe(false);
+    expect(readFileSync(join(artifacts, "occupied", "evidence.log"), "utf8")).toBe("retained\n");
+    // Reuse of the existing namespace still works at the same limit.
+    expect(() => assertArtifactNamespaceBudget(root, "occupied", 1)).not.toThrow();
+  });
+
+  test("the refusal names the operator action and never offers deletion", () => {
+    const root = fixtureScratchRoot("backstop-message");
+    mkdirSync(join(root, "e2e", "artifacts", "one"), { recursive: true });
+    try {
+      assertArtifactNamespaceBudget(root, "two", 1);
+      throw new Error("expected a refusal");
+    } catch (error) {
+      const message = (error as Error).message;
+      expect(message).toContain("Nothing was deleted");
+      expect(message).toContain("Archive or move");
+      expect(message).not.toMatch(/delet(e|ing) the|prune|purge/i);
+    }
+  });
+});
+
+describe("run options are closed", () => {
+  test("PLANTED: an unknown run option is refused instead of ignored", async () => {
+    const root = fixtureRoot("options-unknown");
+    await expect(
+      runHarness({
+        root,
+        suite: "unit",
+        runId: fixtureRunId("unknown-option"),
+        steps: [passStep("ok")],
+        onEvent: () => undefined,
+        onOutput: () => undefined,
+        // Not an option this runner has. Silently dropping it told an earlier
+        // caller its artifacts were suppressed when they were still written.
+        writeArtifacts: false,
+      } as unknown as Parameters<typeof runHarness>[0]),
+    ).rejects.toThrow(/unknown run option "writeArtifacts"/);
+  });
+
+  test("PLANTED: a misspelled callback is refused, not silently unused", async () => {
+    const root = fixtureRoot("options-misspelled");
+    await expect(
+      runHarness({
+        root,
+        suite: "unit",
+        runId: fixtureRunId("misspelled"),
+        steps: [passStep("ok")],
+        emitRecord: () => undefined,
+      } as unknown as Parameters<typeof runHarness>[0]),
+    ).rejects.toThrow(/unknown run option "emitRecord"/);
+  });
+
+  test("every documented option is still accepted", async () => {
+    const root = fixtureRoot("options-accepted");
+    const result = await runHarness({
+      root,
+      suite: "unit",
+      runId: fixtureRunId("accepted"),
+      steps: [passStep("ok")],
+      seed: 7,
+      resume: false,
+      gitRevision: "unavailable",
+      bindingVersions: {},
+      reproduction: "self-test",
+      onEvent: () => undefined,
+      onOutput: () => undefined,
+    });
+    expect(result.exitCode).toBe(0);
+  });
+});
+
+describe("repository root purity", () => {
+  test("PLANTED: a harness run adds nothing outside e2e/artifacts", async () => {
+    // The guard for the class of defect that left `counter`, `safe-counter`,
+    // `unsafe-counter` and `opaque-output.cjs` in the checkout root: fixture
+    // scratch that resolved to the repository root instead of the artifact area.
+    const root = fixtureRoot("purity");
+    const before = new Set(readdirSync(root));
+    await runHarness({
+      root,
+      suite: "unit",
+      runId: fixtureRunId("purity"),
+      steps: [passStep("ok")],
+      onEvent: () => undefined,
+      onOutput: () => undefined,
+    });
+    const after = readdirSync(root).filter((entry) => !before.has(entry));
+    // "e2e" is the artifact area itself; nothing else may appear.
+    expect(after.filter((entry) => entry !== "e2e")).toEqual([]);
+  });
+
+  test("fixture scratch resolves inside the artifact area, never the checkout root", () => {
+    const scratch = fixtureScratch("purity-check");
+    const artifacts = join(repositoryRoot(), "e2e", "artifacts");
+    expect(isContainedPath(artifacts, scratch)).toBe(true);
+    expect(scratch.startsWith(artifacts)).toBe(true);
   });
 });

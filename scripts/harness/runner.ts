@@ -35,6 +35,24 @@ export const MAX_EVENT_BYTES = 8 * 1024;
 export const MAX_EVENT_LEDGER_BYTES = 2 * 1024 * 1024;
 export const MAX_FAILURE_ARTIFACTS_PER_RUN = 32;
 export const MAX_JUNIT_ARTIFACTS_PER_RUN = 8;
+/**
+ * Ceiling on artifact namespaces (run directories plus fixture scratch) under
+ * `e2e/artifacts`.
+ *
+ * Per-run output is already bounded by the limits above, but the *number* of
+ * runs was not, so the directory grew without end. This is a backstop, not a
+ * retention policy: it sits far above any working range, and reaching it means
+ * something is wrong rather than that a contributor has been busy. It never
+ * deletes or prunes anything — it refuses to create the next namespace and says
+ * what to do, because silently removing retained failure evidence would be the
+ * worse failure.
+ */
+export const MAX_ARTIFACT_NAMESPACES = 5_000;
+/** Reserved directory holding content-addressed failure blobs; never a run. */
+export const ARTIFACT_BLOB_DIRECTORY = "blobs";
+/** Per-run manifest naming the blobs a run produced. */
+export const FAILURE_MANIFEST_NAME = "failures.jsonl";
+const SHA256_HEX = /^[0-9a-f]{64}$/;
 export const MAX_STEPS_PER_RUN = 64;
 export const MAX_RETRIES_PER_STEP = 3;
 export const MAX_TIMEOUT_MS = 60_000;
@@ -213,6 +231,10 @@ class ArtifactStore {
   readonly failureLogs: string[] = [];
   private readonly physicalRoot: string;
   private failureArtifactCount: number;
+  /** `<root>/e2e/artifacts`, parent of both run namespaces and the blob store. */
+  private readonly artifactsDirectory: string;
+  /** `<run>/failures.jsonl`: digests this run produced, in order. */
+  readonly manifest: string;
 
   constructor(
     root: string,
@@ -227,7 +249,11 @@ class ArtifactStore {
     this.physicalRoot = realDirectory(resolvedRoot, "REPOSITORY_ROOT_INVALID");
     const e2e = ensureDirectDirectory(this.physicalRoot, "e2e");
     const artifacts = ensureDirectDirectory(e2e, "artifacts");
+    // Checked before the namespace is created, so the backstop refuses rather
+    // than reporting a limit after the directory already exists.
+    assertArtifactNamespaceBudget(this.physicalRoot, runId);
     this.directory = ensureDirectDirectory(artifacts, runId);
+    this.artifactsDirectory = artifacts;
     this.jsonl = join(this.directory, "events.jsonl");
     assertRegularOrAbsent(this.jsonl, "ARTIFACT_PATH_UNSAFE");
     if (!resume && existsSync(this.jsonl)) {
@@ -237,9 +263,14 @@ class ArtifactStore {
       const descriptor = openSync(this.jsonl, "wx");
       closeSync(descriptor);
     }
-    this.failureArtifactCount = readdirSync(this.directory).filter((name) =>
-      /^failure-[A-Za-z0-9._-]+-attempt-\d+(?:\.\d+)?\.log$/.test(name),
-    ).length;
+    this.manifest = join(this.directory, FAILURE_MANIFEST_NAME);
+    assertRegularOrAbsent(this.manifest, "ARTIFACT_PATH_UNSAFE");
+    // A resumed run continues the same bounded budget it already spent.
+    this.failureArtifactCount = existsSync(this.manifest)
+      ? readFileSync(this.manifest, "utf8")
+          .split("\n")
+          .filter((line) => line.trim() !== "").length
+      : 0;
   }
 
   append(event: HarnessEvent): void {
@@ -257,24 +288,81 @@ class ArtifactStore {
     appendFileSync(this.jsonl, serialized, "utf8");
   }
 
+  /**
+   * Store one failure payload as a content-addressed blob and record it in the
+   * run's manifest.
+   *
+   * The digest covers the *clipped* bytes actually stored, so the name always
+   * describes the file's real content rather than an input that was truncated
+   * on the way in. Identical output — the common case, since a planted failure
+   * emits the same bytes on every run — resolves to one blob that is written
+   * once and thereafter only referenced.
+   *
+   * Blobs are written with `wx` and are never overwritten. If a blob already
+   * exists with different bytes, that is not a duplicate to be reconciled: it
+   * means the store disagrees with itself, so the run stops rather than
+   * silently replacing retained evidence.
+   */
   writeFailureLog(step: HarnessStep, attempt: number, output: string): string | undefined {
     if (output.length === 0) return undefined;
     if (this.failureArtifactCount >= MAX_FAILURE_ARTIFACTS_PER_RUN) return undefined;
     const safeStep = validateStepId(step.id) ? step.id : "invalid-step";
-    for (let collision = 0; collision < 100; collision += 1) {
-      const suffix = collision === 0 ? "" : `.${collision}`;
-      const path = join(this.directory, `failure-${safeStep}-attempt-${attempt}${suffix}.log`);
-      assertContained(this.physicalRoot, path, "ARTIFACT_PATH_UNSAFE");
-      if (existsSync(path) || isSymbolicLink(path)) continue;
-      writeFileSync(path, clip(output, MAX_FAILURE_ARTIFACT_CHARS), {
-        encoding: "utf8",
-        flag: "wx",
-      });
-      this.failureLogs.push(path);
-      this.failureArtifactCount += 1;
-      return path;
+    const stored = clip(output, MAX_FAILURE_ARTIFACT_CHARS);
+    const digest = createHash("sha256").update(stored, "utf8").digest("hex");
+    const path = this.blobPath(digest);
+
+    assertRegularOrAbsent(path, "ARTIFACT_PATH_UNSAFE");
+    if (existsSync(path)) {
+      if (readFileSync(path, "utf8") !== stored) {
+        throw new HarnessError(
+          "ARTIFACT_BLOB_MISMATCH",
+          "a stored blob does not match its digest; retained evidence was left untouched.",
+        );
+      }
+    } else {
+      try {
+        writeFileSync(path, stored, { encoding: "utf8", flag: "wx" });
+      } catch (error) {
+        // A concurrent run may have written the identical blob between the
+        // check and the write. Accept only that: identical bytes, same name.
+        if ((error as NodeJS.ErrnoException).code !== "EEXIST") throw error;
+        if (readFileSync(path, "utf8") !== stored) {
+          throw new HarnessError(
+            "ARTIFACT_BLOB_MISMATCH",
+            "a stored blob does not match its digest; retained evidence was left untouched.",
+          );
+        }
+      }
     }
-    throw new HarnessError("FAILURE_ARTIFACT_LIMIT", "no bounded failure artifact slot remains.");
+
+    const record = {
+      schema_version: HARNESS_SCHEMA_VERSION,
+      record: "failure_artifact",
+      run_id: this.runId,
+      step: safeStep,
+      attempt,
+      digest,
+      bytes: Buffer.byteLength(stored, "utf8"),
+      blob: `e2e/artifacts/${ARTIFACT_BLOB_DIRECTORY}/sha256/${digest}`,
+    };
+    appendFileSync(this.manifest, `${JSON.stringify(record)}\n`, "utf8");
+    this.failureLogs.push(path);
+    this.failureArtifactCount += 1;
+    return path;
+  }
+
+  /** Resolve and contain the path for one digest. */
+  private blobPath(digest: string): string {
+    if (!SHA256_HEX.test(digest)) {
+      throw new HarnessError("ARTIFACT_PATH_UNSAFE", "a blob name must be a sha256 hex digest.");
+    }
+    const store = ensureDirectDirectory(
+      ensureDirectDirectory(this.artifactsDirectory, ARTIFACT_BLOB_DIRECTORY),
+      "sha256",
+    );
+    const path = join(store, digest);
+    assertContained(this.physicalRoot, path, "ARTIFACT_PATH_UNSAFE");
+    return path;
   }
 
   writeJUnit(events: readonly HarnessEvent[]): string {
@@ -496,9 +584,38 @@ export function isContainedPath(root: string, target: string): boolean {
   return relation !== ".." && !relation.startsWith(`..${sep}`) && !isAbsolute(relation);
 }
 
+/**
+ * Every key `HarnessRunOptions` accepts. An option outside this set is a
+ * caller error, not something to ignore: a misspelled or invented option that
+ * is silently dropped reads to the caller as "honoured", which is how a run
+ * ends up doing the opposite of what it was asked.
+ */
+const HARNESS_RUN_OPTION_KEYS: readonly string[] = [
+  "root",
+  "runId",
+  "suite",
+  "steps",
+  "seed",
+  "resume",
+  "gitRevision",
+  "bindingVersions",
+  "reproduction",
+  "signal",
+  "onOutput",
+  "onEvent",
+];
+
 export function validateHarnessRunOptions(options: HarnessRunOptions): void {
-  if (typeof options !== "object" || options === null) {
+  if (typeof options !== "object" || options === null || Array.isArray(options)) {
     throw new HarnessError("RUN_OPTIONS_INVALID", "run options must be an object.");
+  }
+  for (const key of Object.keys(options)) {
+    if (!HARNESS_RUN_OPTION_KEYS.includes(key)) {
+      throw new HarnessError(
+        "RUN_OPTIONS_INVALID",
+        `unknown run option "${key}"; an ignored option would misreport what the run did.`,
+      );
+    }
   }
   assertContainedRoot(options.root);
   if (!validateRunId(options.runId)) {
@@ -1335,6 +1452,67 @@ function isStepStatus(value: unknown): value is StepStatus {
 function isOutside(root: string, target: string): boolean {
   const relation = relative(root, target);
   return relation === ".." || relation.startsWith(`..${sep}`) || isAbsolute(relation);
+}
+
+/**
+ * Count the artifact namespaces already present under `<root>/e2e/artifacts`.
+ *
+ * Both run directories and fixture scratch directories count. Scratch is
+ * deliberately included: if it were exempt, a test could mint unbounded
+ * directories through the exempt path and the backstop would guard nothing.
+ * The reserved blob store is excluded because it is one directory whose
+ * contents are content-addressed and deduplicated, not a per-run namespace.
+ */
+export function countArtifactNamespaces(root: string): number {
+  const artifacts = join(resolve(root), "e2e", "artifacts");
+  if (!existsSync(artifacts)) return 0;
+  let count = 0;
+  for (const entry of readdirSync(artifacts, { withFileTypes: true })) {
+    if (!entry.isDirectory()) continue;
+    if (entry.name === ARTIFACT_BLOB_DIRECTORY) continue;
+    count += 1;
+  }
+  return count;
+}
+
+/**
+ * Refuse to create a new artifact namespace once the backstop is reached.
+ *
+ * Reusing an existing namespace is always allowed — a resume must not be
+ * blocked by a ceiling on *new* directories.
+ */
+/**
+ * The budget decision, as a pure function of two numbers.
+ *
+ * Split out so the boundary is testable in O(1). A test that proved this by
+ * creating `MAX_ARTIFACT_NAMESPACES` real directories would be manufacturing
+ * exactly the proliferation the backstop exists to bound — and because nothing
+ * here may delete, every such run would retain another five thousand
+ * directories forever.
+ */
+export function exceedsArtifactNamespaceBudget(
+  used: number,
+  limit = MAX_ARTIFACT_NAMESPACES,
+): boolean {
+  return used >= limit;
+}
+
+export function assertArtifactNamespaceBudget(
+  root: string,
+  namespace: string,
+  limit = MAX_ARTIFACT_NAMESPACES,
+): void {
+  const artifacts = join(resolve(root), "e2e", "artifacts");
+  if (existsSync(join(artifacts, namespace))) return;
+  const used = countArtifactNamespaces(root);
+  if (exceedsArtifactNamespaceBudget(used, limit)) {
+    throw new HarnessError(
+      "ARTIFACT_RETENTION_EXCEEDED",
+      `e2e/artifacts holds ${used} namespaces, at the ${limit} backstop. ` +
+        "Nothing was deleted. Archive or move the existing run directories elsewhere " +
+        "(they are retained evidence), then re-run.",
+    );
+  }
 }
 
 function assertContained(root: string, target: string, code: string): void {
