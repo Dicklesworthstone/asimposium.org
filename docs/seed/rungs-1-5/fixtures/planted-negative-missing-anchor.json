@@ -1,0 +1,12 @@
+{
+  "id": "negative-missing-anchor",
+  "source": {
+    "id": "missing-anchor-source",
+    "url": "https://example.org/canonical-source",
+    "locator": "",
+    "license_or_rights": "CC0-1.0",
+    "role": "negative-test-only",
+    "access_date": "2026-08-13"
+  },
+  "expected_diagnostic": "E_SOURCE_ANCHOR"
+}

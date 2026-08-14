@@ -1,0 +1,68 @@
+{
+  "schema_version": 1,
+  "visibility": "operator-only; never include this file in participant-facing packs or initial review prompts",
+  "oracles": [
+    {
+      "id": "oracle-calibration-unbounded-primes-v1",
+      "kind": "known-outcome",
+      "data": {
+        "planted_candidate": "For every natural number n, there exists a natural prime p such that p ≤ n.",
+        "planted_defect": "The inequality is reversed relative to the target declaration.",
+        "smallest_counterexample": {"n": 1, "reason": "No natural prime is less than or equal to 1."},
+        "expected_review_verdict": "refuted"
+      },
+      "sha256": "e9fd0265bc6f077f9770e63537d39d2cb6d8d9fec6974aeba8fda601022a59d3"
+    },
+    {
+      "id": "oracle-reproduction-j0-first-zero-v1",
+      "kind": "target-value",
+      "data": {
+        "function": "J_0",
+        "zero": "j_{0,1}",
+        "decimal": "2.404825557695772768621631879326",
+        "precision_digits": 80,
+        "absolute_error_limit": "1e-30",
+        "tool_artifact": {"package": "mpmath", "version": "1.3.0", "sha256": "7a28eb2a9774d00c7bc92411c19a89209d5da7c4c9a9e227be8330a23a25b91f"}
+      },
+      "sha256": "068876d0905f3ddec4d6641eba191136cefce44f0269e69478ac1f09cb518ea1"
+    },
+    {
+      "id": "oracle-counterexample-petersen-hamiltonicity-v1",
+      "kind": "counterexample-target",
+      "data": {
+        "vertices": 10,
+        "edges": [[0,1],[0,4],[0,5],[1,2],[1,6],[2,3],[2,7],[3,4],[3,8],[4,9],[5,7],[5,8],[6,8],[6,9],[7,9]],
+        "is_simple": true,
+        "is_connected": true,
+        "regular_degree": 3,
+        "has_hamiltonian_cycle": false
+      },
+      "sha256": "12e42cb5cd8a39c0741ffb34f4d95e878f2a281af69065060693c4a10ab79f32"
+    },
+    {
+      "id": "oracle-formalization-euclid-mathlib-v1",
+      "kind": "formal-target",
+      "data": {
+        "lean_version": "4.33.0",
+        "mathlib_commit": "db584cd6d46c92f209a44c0f1c829460d327499d",
+        "declaration": "Nat.exists_infinite_primes",
+        "statement": "∀ n : Nat, ∃ p : Nat, n ≤ p ∧ Nat.Prime p",
+        "requires_independent_compile": true,
+        "requires_statement_equivalence_review": true
+      },
+      "sha256": "d601e443fc25d5ede05031fc7260df46af7b99c71ab1c5f78181fa84c5c6b48c"
+    },
+    {
+      "id": "oracle-literature-four-colour-verification-modes-v1",
+      "kind": "source-map",
+      "data": {
+        "search_date": "2026-08-13",
+        "search_terms": ["Appel Haken 1977 four color discharging", "Robertson Sanders Seymour Thomas 1997 four colour", "Gonthier 2008 formal proof four color"],
+        "required_sources": ["appel-haken-1977", "robertson-et-al-1997", "gonthier-2008"],
+        "expected_mode_labels": {"appel-haken-1977": "computer-assisted", "robertson-et-al-1997": "computer-assisted", "gonthier-2008": "formal proof account"},
+        "novelty_verdict": "not asserted"
+      },
+      "sha256": "30271e994abad3bbc67ca9e6786b08ccb89c8be10615f0753bca5d3c61532a97"
+    }
+  ]
+}

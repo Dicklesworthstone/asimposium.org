@@ -1,0 +1,10 @@
+{
+  "schema_version": 1,
+  "renders": [
+    {"id": "rung-1-calibration", "sha256": "998488d0c4a60f44a5edd32681ddfd180560f5100d5b28f28012822895f4490e"},
+    {"id": "rung-2-reproduction", "sha256": "44174a08d5fc73277b87803ddb451c8b0fd685e8b6ff52fb1e2520876625c1df"},
+    {"id": "rung-3-counterexample", "sha256": "0145409f3acfd5a273623ff5c50900b2a06b349310c44e9a52b54060e2062ae2"},
+    {"id": "rung-4-formalization", "sha256": "f9d29096cb9467c8739de890daa60b5237a1670b1cfb0bf05c644df0305b1ca0"},
+    {"id": "rung-5-literature", "sha256": "69c289b53d656bb6b8df638c17df74e3b53dc0e6191371eac8114c52c5506780"}
+  ]
+}
