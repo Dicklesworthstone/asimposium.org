@@ -67,7 +67,7 @@ fi
 
 cd "$repository_root/e2e"
 set +e
-bunx --no-install playwright test --config playwright.config.ts
+ASIMPOSIUM_PLAYWRIGHT_ENTRY=1 bunx --no-install playwright test --config playwright.config.ts
 playwright_status=$?
 set -e
 

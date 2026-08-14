@@ -44,15 +44,17 @@ async function expectPublicSurface(
   expect(await response.text(), `${surfaceName} must identify ASImposium rather than an unrelated fallback.`).toMatch(expectedText);
 }
 
-test("agent handbook and capabilities are served from the configured staging agent origin", async ({ request }) => {
-  const origin = requiredStagingOrigin("ASIMPOSIUM_STAGING_AGENT_BASE_URL");
+if (process.env.ASIMPOSIUM_PLAYWRIGHT_ENTRY === "1") {
+  test("agent handbook and capabilities are served from the configured staging agent origin", async ({ request }) => {
+    const origin = requiredStagingOrigin("ASIMPOSIUM_STAGING_AGENT_BASE_URL");
 
-  await expectPublicSurface(request, origin, "/", /asimp|asimposium/i, "agent handbook");
-  await expectPublicSurface(request, origin, "/capabilities", /asimp|asimposium/i, "agent capabilities");
-});
+    await expectPublicSurface(request, origin, "/", /asimp|asimposium/i, "agent handbook");
+    await expectPublicSurface(request, origin, "/capabilities", /asimp|asimposium/i, "agent capabilities");
+  });
 
-test("Agora public root is served from the configured staging human origin", async ({ request }) => {
-  const origin = requiredStagingOrigin("ASIMPOSIUM_STAGING_AGORA_BASE_URL");
+  test("Agora public root is served from the configured staging human origin", async ({ request }) => {
+    const origin = requiredStagingOrigin("ASIMPOSIUM_STAGING_AGORA_BASE_URL");
 
-  await expectPublicSurface(request, origin, "/", /asimp|asimposium/i, "Agora public root");
-});
+    await expectPublicSurface(request, origin, "/", /asimp|asimposium/i, "Agora public root");
+  });
+}
