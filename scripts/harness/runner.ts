@@ -287,7 +287,10 @@ export function safeReproductionCommand(runId: string, resume: boolean): string 
 
 export async function runHarness(options: HarnessRunOptions): Promise<HarnessRunResult> {
   if (options.steps.length > MAX_STEPS_PER_RUN) {
-    throw new HarnessError("RUN_STEP_LIMIT", "harness runs may contain at most the bounded step limit.");
+    throw new HarnessError(
+      "RUN_STEP_LIMIT",
+      "harness runs may contain at most the bounded step limit.",
+    );
   }
   const seed = options.seed ?? deterministicSeed(options.suite, options.runId);
   const store = new ArtifactStore(options.root, options.runId, options.resume === true);
@@ -484,7 +487,9 @@ async function runAttempt(
       ? {}
       : { request_id: safeMetadata(step.requestId, options.root) }),
     ...(step.eventId === undefined ? {} : { event_id: safeMetadata(step.eventId, options.root) }),
-    ...(step.assertion === undefined ? {} : { assertion: safeMetadata(step.assertion, options.root) }),
+    ...(step.assertion === undefined
+      ? {}
+      : { assertion: safeMetadata(step.assertion, options.root) }),
     ...(step.expected === undefined || step.actual === undefined
       ? {}
       : { diff: boundedDiff(step.expected, step.actual, options.root) }),
@@ -735,11 +740,13 @@ export async function runHarnessSelfTest(
 ): Promise<0 | 1> {
   const runId = `ops.2a-selftest-${Date.now()}-${process.pid}`;
   const secret = "asimp_ag_01JXYZ_selftest_neverlog_canary";
+  const sink =
+    onEvent ?? ((record: HarnessEvent) => process.stdout.write(`${JSON.stringify(record)}\n`));
   const result = await runHarness({
     root,
     runId,
     suite: "ops.2a-harness-self-test",
-    onEvent,
+    onEvent: sink,
     steps: [
       {
         id: "unit-assertion",
@@ -802,6 +809,36 @@ export async function runHarnessSelfTest(
       },
     ],
   });
+  const resumeRunId = `${runId}-resume`;
+  const resumeSteps: HarnessStep[] = [
+    {
+      id: "safe-retry",
+      scenario: "resume",
+      command: command("console.error('synthetic replay-safe interruption'); process.exit(1)"),
+      replaySafe: true,
+    },
+    {
+      id: "unsafe-withheld",
+      scenario: "resume",
+      command: command("console.error('synthetic non-replay-safe interruption'); process.exit(1)"),
+      replaySafe: false,
+    },
+  ];
+  const interrupted = await runHarness({
+    root,
+    runId: resumeRunId,
+    suite: "ops.2a-harness-self-test",
+    steps: resumeSteps,
+    onEvent: sink,
+  });
+  const resumed = await runHarness({
+    root,
+    runId: resumeRunId,
+    suite: "ops.2a-harness-self-test",
+    steps: resumeSteps,
+    resume: true,
+    onEvent: sink,
+  });
   const artifacts = [
     result.artifacts.jsonl,
     result.artifacts.junit,
@@ -820,6 +857,11 @@ export async function runHarnessSelfTest(
     identifiers.includes("evt-selftest-browser") &&
     result.events.every((event) =>
       event.reproduce.startsWith("scripts/e2e-test-harness.sh --run-id "),
+    ) &&
+    interrupted.exitCode === 1 &&
+    resumed.events.some((event) => event.step === "safe-retry" && event.status === "fail") &&
+    resumed.events.some(
+      (event) => event.step === "unsafe-withheld" && event.code === "UNSAFE_REPLAY_WITHHELD",
     );
   const now = new Date().toISOString();
   const event: HarnessEvent = {
@@ -843,8 +885,6 @@ export async function runHarnessSelfTest(
       ? "Harness-only validation passed; no product session, D1 binding, HTTP origin, browser, or Cloudflare behavior is proven."
       : "Harness self-test invariants failed.",
   };
-  const sink =
-    onEvent ?? ((record: HarnessEvent) => process.stdout.write(`${JSON.stringify(record)}\n`));
   sink(event);
   return pass ? 0 : 1;
 }

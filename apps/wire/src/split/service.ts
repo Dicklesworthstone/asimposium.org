@@ -12,12 +12,12 @@ import {
   assertPublicProjectionSafe,
   duplicateClaimRefusal,
   normHash,
+  type PrivateNotFound,
   privateNotFound,
   rejectAuthoritativeFields,
-  sponsorMayReadWorkshop,
-  type PrivateNotFound,
   type SplitPrincipal,
   type SplitProblemRefusal,
+  sponsorMayReadWorkshop,
 } from "./policy";
 
 export const PRIVATE_BODY_THRESHOLD_BYTES = 1024;
@@ -245,7 +245,10 @@ function publicEventFrom(stored: StoredPublicLedgerEvent): PublicLedgerEvent {
   return event;
 }
 
-function publicSnapshot(transaction: KraterSplitTransaction, problemId: string): PublicLedgerSnapshot {
+function publicSnapshot(
+  transaction: KraterSplitTransaction,
+  problemId: string,
+): PublicLedgerSnapshot {
   const snapshot: PublicLedgerSnapshot = {
     status: 200,
     cacheControl: "public, max-age=10",
@@ -265,7 +268,8 @@ export class SplitService {
       return {
         status: 422,
         code: "PRIVATE_CAS_REQUIRED",
-        fixHint: "Bodies above 1 KiB require a private CAS digest before the workshop row is written.",
+        fixHint:
+          "Bodies above 1 KiB require a private CAS digest before the workshop row is written.",
       };
     }
 
@@ -357,7 +361,9 @@ export class SplitService {
       const results = transaction
         .getPublicEvents(problemId)
         .map(publicEventFrom)
-        .filter((event) => `${event.title}\n${event.extract}\n${event.statement}`.toLowerCase().includes(needle));
+        .filter((event) =>
+          `${event.title}\n${event.extract}\n${event.statement}`.toLowerCase().includes(needle),
+        );
       const result: PublicSearchResult = {
         status: 200,
         cacheControl: "public, max-age=10",
