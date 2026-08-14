@@ -22,8 +22,7 @@
     "test:security": "bun scripts/suites.ts security",
     "test:performance": "bun scripts/suites.ts performance",
     "suites": "bun scripts/suites.ts list",
-    "dev": "wrangler dev --config ../../infra/wrangler.toml",
-    "deploy": "wrangler deploy --config ../../infra/wrangler.toml"
+    "dev": "wrangler dev --config ../../infra/wrangler.toml"
   },
   "dependencies": {
     "drizzle-orm": "0.45.2",

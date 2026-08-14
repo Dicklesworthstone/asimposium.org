@@ -49,7 +49,7 @@ export function r2Shaped(): R2Bucket {
 
 /** A fully-bound `Env` whose handles are shape-only. */
 export function boundEnv(overrides: Partial<Record<keyof Env, unknown>> = {}): Env {
-  return { DB: d1Shaped(), CAS: r2Shaped(), ...overrides } as Env;
+  return { DB: d1Shaped(), ARTIFACTS: r2Shaped(), ...overrides } as Env;
 }
 
 /** An `ExecutionContext` stand-in; the scaffold schedules no deferred work. */

@@ -36,6 +36,9 @@ Stated plainly so no one cites it for more than it is:
 - **No D1, R2, or Durable Object operation is proven.** Nothing here opens a transaction, allocates
   a `seq`, writes a projection, or stores a byte. `test/support/bindings.ts` provides binding
   *shapes* whose every method throws; it is not a database and may not be presented as one.
+- **Nothing has run under `workerd`.** The binding-name agreement test reads `infra/wrangler.toml`
+  as text. Agreeing on a name is not evidence that the name resolves to anything, and no load or
+  latency number exists for this Worker at all.
 - **No product capability is proven.** No pairing, no session, no pack, no promotion, no public
   face. Those are W3–W6 and they arrive with `@asimposium/contracts`, not before it.
 - **The contract suite here is not the Fable §16.2 golden corpus.** It pins the wire format of this
@@ -58,18 +61,32 @@ bun run suites           # what each suite covers, or what blocks it
 `test:integration` and `test:performance` exit non-zero with a named blocker. They are declared and
 unimplemented, and they say so rather than returning a green nothing:
 
-- **integration** needs real bindings. Blocked on OPS.3 environments and W2 Krater — there is no
-  wrangler configuration, no D1/R2 namespace, and no `db/migrations` to apply. It must not be faked
-  with mocked D1/R2, with `bun:sqlite`, or with the shape-only shims in `test/support/`.
+- **integration** needs real bindings. Blocked on OPS.3 environments and W2 Krater — the local
+  config exists but carries the all-zero D1 sentinel, there is no real D1/R2 namespace, and
+  `db/migrations` has no numbered SQL to apply. It must not be faked with mocked D1/R2, with
+  `bun:sqlite`, with the shape-only shims in `test/support/`, or with a `wrangler dev` process that
+  merely starts and serves the health face without a read or write crossing D1 or R2.
 - **performance** needs a budget. Blocked on OPS.2a and the Fable §15 numbers. It must not be faked
   with a micro-benchmark of the local handler or a threshold read off the first run.
 
-## Known gap: no Worker configuration
+## Worker configuration: local skeleton only
 
-`bun run dev` and `bun run deploy` point at `../../infra/wrangler.toml`, which does not exist yet.
-The plan's repo layout (Fable §13.1) puts the Worker configuration under `infra/`, not in this
-package, so this package does not create one. Until OPS.3 lands it, this Worker can be typechecked,
-linted, and tested, but not run under `workerd` or deployed.
+`infra/wrangler.toml` exists. It pins this Worker's entrypoint, compatibility date, migrations
+directory, and **binding names** — `DB` and `ARTIFACTS` — and `infra/validate-scaffold.mjs` asserts
+them, so binding names are decided in exactly one place. `src/env.ts` follows that file rather than
+choosing for itself, and `test/contract/bindings.test.ts` fails if the two ever drift apart.
+
+`bun run dev` points at it. What that config is *not*:
+
+- its D1 `database_id` is the all-zero sentinel, and `infra/README.md` states plainly that it must
+  not be used for a remote deployment, so this package ships **no `deploy` script**; remote
+  environments are OPS.3's to configure;
+- `db/migrations/` holds a README and no numbered SQL, so there is no schema to apply;
+- nothing in this package has been run under `workerd`. Typecheck, lint, and the three implemented
+  suites all execute the handler in Bun, in process.
+
+The plan's repo layout (Fable §13.1) keeps Worker configuration under `infra/`, not here, and this
+package does not create a second one.
 
 ## Conventions
 

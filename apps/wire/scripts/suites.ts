@@ -60,7 +60,7 @@ const SUITES: Record<string, Suite> = {
     status: "implemented",
     dir: "test/contract",
     covers:
-      "byte-exact wire format of this scaffold's own faces; NOT the Fable §16.2 golden corpus",
+      "byte-exact wire format of this scaffold's own faces, plus binding-name agreement with infra/wrangler.toml; NOT the Fable §16.2 golden corpus",
   },
   security: {
     status: "implemented",
@@ -70,9 +70,9 @@ const SUITES: Record<string, Suite> = {
   integration: {
     status: "pending",
     blockedOn:
-      "asimposiumorg-p1g (OPS.3) and W2 Krater: there is no wrangler configuration, no D1/R2 namespace and no db/migrations to apply, so there are no real bindings to test against",
+      "asimposiumorg-p1g (OPS.3) and W2 Krater. infra/wrangler.toml does exist and pins this Worker's entrypoint, compatibility date and binding names, but it is a local shape-only skeleton: its D1 database_id is the all-zero sentinel, infra/README.md forbids using it for a remote deployment, db/migrations holds a README and no numbered SQL, and nothing here has ever been run under workerd. What is missing is a real D1/R2 namespace and a first migration to apply",
     forbiddenSubstitutes:
-      "mocked or stubbed D1/R2 (AGENTS.md: do not mock D1 or R2 in integration tests); bun:sqlite standing in for D1; the shape-only shims in test/support/bindings.ts; an in-process fetch relabelled as integration",
+      "mocked or stubbed D1/R2 (AGENTS.md: do not mock D1 or R2 in integration tests); bun:sqlite standing in for D1; the shape-only shims in test/support/bindings.ts; an in-process fetch relabelled as integration; a `wrangler dev` process that starts, serves the health face and is reported as binding proof without a read or write crossing D1 or R2",
   },
   performance: {
     status: "pending",

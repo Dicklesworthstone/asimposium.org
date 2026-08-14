@@ -7,8 +7,8 @@ describe("binding probes", () => {
     expect(isBindingHealthy("DB", d1Shaped())).toBe(true);
   });
 
-  test("an R2-shaped handle passes the CAS probe", () => {
-    expect(isBindingHealthy("CAS", r2Shaped())).toBe(true);
+  test("an R2-shaped handle passes the ARTIFACTS probe", () => {
+    expect(isBindingHealthy("ARTIFACTS", r2Shaped())).toBe(true);
   });
 
   test.each([
@@ -46,7 +46,10 @@ describe("missingBindings", () => {
 
 describe("bindingStates", () => {
   test("maps every required binding to a two-state verdict", () => {
-    expect(bindingStates(boundEnv({ CAS: undefined }))).toEqual({ DB: "bound", CAS: "missing" });
+    expect(bindingStates(boundEnv({ ARTIFACTS: undefined }))).toEqual({
+      DB: "bound",
+      ARTIFACTS: "missing",
+    });
   });
 
   test("emits keys in declaration order so serialisation is deterministic", () => {

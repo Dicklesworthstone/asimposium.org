@@ -47,7 +47,7 @@ describe("faces disclose no environment or binding values", () => {
 
   test("the BINDING_MISSING refusal names bindings, never their values", async () => {
     const res = await callWorker("/internal/health", {
-      CAS: r2Shaped(),
+      ARTIFACTS: r2Shaped(),
       GOOGLE_CLIENT_SECRET: CANARY_SECRET,
       ASIMP_SERVICE_TOKEN: CANARY_TOKEN,
     });

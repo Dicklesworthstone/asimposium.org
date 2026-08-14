@@ -15,7 +15,7 @@ describe("GET /internal/health", () => {
         service: "wire",
         role: "stoa",
         format: "json",
-        bindings: { DB: "bound", CAS: "bound" },
+        bindings: { DB: "bound", ARTIFACTS: "bound" },
       },
       degraded: [],
       next_actions: [],
@@ -57,14 +57,14 @@ describe("GET /internal/health", () => {
 
   // PLANTED NEGATIVE 2 — an absent binding must fail closed, not report healthy.
   test("reports 503 BINDING_MISSING when D1 is not bound", async () => {
-    const res = await callWorker("/internal/health", { CAS: r2Shaped() });
+    const res = await callWorker("/internal/health", { ARTIFACTS: r2Shaped() });
 
     expect(res.status).toBe(503);
     expect(res.contentType).toBe("application/problem+json; charset=utf-8");
     expect(res.body).toMatchObject({
       code: "BINDING_MISSING",
       missing: ["DB"],
-      bindings: { DB: "missing", CAS: "bound" },
+      bindings: { DB: "missing", ARTIFACTS: "bound" },
     });
   });
 
@@ -73,14 +73,14 @@ describe("GET /internal/health", () => {
   test("reports 503 BINDING_MISSING when a binding is present but not a handle", async () => {
     const res = await callWorker("/internal/health", {
       DB: d1Shaped(),
-      CAS: { name: "asimp-cas" },
+      ARTIFACTS: { name: "asimp-cas" },
     });
 
     expect(res.status).toBe(503);
     expect(res.body).toMatchObject({
       code: "BINDING_MISSING",
-      missing: ["CAS"],
-      bindings: { DB: "bound", CAS: "missing" },
+      missing: ["ARTIFACTS"],
+      bindings: { DB: "bound", ARTIFACTS: "missing" },
     });
   });
 
@@ -88,7 +88,7 @@ describe("GET /internal/health", () => {
     const res = await callWorker("/internal/health", {});
 
     expect(res.status).toBe(503);
-    expect((res.body as { missing: string[] }).missing).toEqual(["DB", "CAS"]);
+    expect((res.body as { missing: string[] }).missing).toEqual(["DB", "ARTIFACTS"]);
   });
 
   test("validates format before bindings, so a bad request is a 400 not a 503", async () => {

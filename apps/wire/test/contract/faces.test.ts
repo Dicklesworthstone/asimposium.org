@@ -25,7 +25,7 @@ import { boundEnv, callWorker, executionContext, r2Shaped } from "../support/bin
 const HEALTH_OK =
   '{"schema":"https://a.asimposium.org/schemas/internal.health.v1.json","ok":true,' +
   '"data":{"service":"wire","role":"stoa","format":"json",' +
-  '"bindings":{"DB":"bound","CAS":"bound"}},"degraded":[],"next_actions":[]}';
+  '"bindings":{"DB":"bound","ARTIFACTS":"bound"}},"degraded":[],"next_actions":[]}';
 
 const UNKNOWN_FORMAT =
   '{"type":"https://asimposium.org/errors/UNKNOWN_FORMAT",' +
@@ -38,7 +38,7 @@ const BINDING_MISSING =
   '"title":"Required Worker bindings are not configured","status":503,"code":"BINDING_MISSING",' +
   '"detail":"Missing or wrong-shaped bindings: DB.",' +
   '"fix_hint":"Bind every name in `missing` in the Worker configuration for this environment, ' +
-  'then redeploy.","missing":["DB"],"bindings":{"DB":"missing","CAS":"bound"}}';
+  'then redeploy.","missing":["DB"],"bindings":{"DB":"missing","ARTIFACTS":"bound"}}';
 
 const ROUTE_NOT_FOUND =
   '{"type":"https://asimposium.org/errors/ROUTE_NOT_FOUND","title":"No such route","status":404,' +
@@ -71,7 +71,7 @@ describe("face wire format", () => {
   });
 
   test("GET /internal/health with D1 unbound", async () => {
-    const res = await callWorker("/internal/health", { CAS: r2Shaped() });
+    const res = await callWorker("/internal/health", { ARTIFACTS: r2Shaped() });
 
     expect(res.status).toBe(503);
     expect(res.contentType).toBe("application/problem+json; charset=utf-8");

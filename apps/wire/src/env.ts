@@ -6,15 +6,19 @@ import type { D1Database, R2Bucket } from "@cloudflare/workers-types";
  * Only bindings this scaffold actually needs are declared. Herald's Durable
  * Object namespace (Fable §11) is deliberately absent: a DO binding without an
  * exported DO class is a deploy-time failure, and the class belongs to W7.
+ *
+ * The *names* are not this package's to choose. `infra/wrangler.toml` pins them
+ * and `infra/validate-scaffold.mjs` asserts them, so that one file stays the
+ * single place a binding name is decided. These declarations follow it.
  */
 export interface Env {
   /** Krater's system of record (Fable §10.1). This Worker is its only writer. */
   DB: D1Database;
-  /** Krater's content-addressed body store (Fable §10.4). */
-  CAS: R2Bucket;
+  /** Krater's content-addressed body store (Fable §10.4), bound as ARTIFACTS. */
+  ARTIFACTS: R2Bucket;
 }
 
-export const REQUIRED_BINDINGS = ["DB", "CAS"] as const;
+export const REQUIRED_BINDINGS = ["DB", "ARTIFACTS"] as const;
 
 export type RequiredBinding = (typeof REQUIRED_BINDINGS)[number];
 
@@ -38,7 +42,8 @@ const readProperty = (container: unknown, key: string): unknown =>
 const BINDING_PROBES: Record<RequiredBinding, (value: unknown) => boolean> = {
   DB: (value) =>
     isFunction(readProperty(value, "prepare")) && isFunction(readProperty(value, "batch")),
-  CAS: (value) => isFunction(readProperty(value, "get")) && isFunction(readProperty(value, "put")),
+  ARTIFACTS: (value) =>
+    isFunction(readProperty(value, "get")) && isFunction(readProperty(value, "put")),
 };
 
 /** True when `value` looks like a live handle for the named binding. */
