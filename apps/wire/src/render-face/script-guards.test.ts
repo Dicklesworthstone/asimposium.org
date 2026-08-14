@@ -19,9 +19,9 @@
  */
 
 import { afterAll, describe, expect, test } from "bun:test";
-import { chmodSync, mkdtempSync, writeFileSync } from "node:fs";
+import { chmodSync, mkdtempSync, symlinkSync, writeFileSync } from "node:fs";
 import { createServer as createHttpServer, type Server as HttpServer } from "node:http";
-import { createServer, type Server } from "node:net";
+import { createServer, type Socket } from "node:net";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { provenance } from "../../../../packages/render/scripts/provenance.ts";
@@ -37,11 +37,18 @@ interface Run {
   stderr: string;
 }
 
-function startScript(env: Record<string, string>) {
+function startScript(env: Record<string, string>, unset: readonly string[] = []) {
+  const childEnv: Record<string, string> = {};
+  for (const [key, value] of Object.entries(process.env)) {
+    if (value !== undefined) childEnv[key] = value;
+  }
+  Object.assign(childEnv, env);
+  for (const key of unset) delete childEnv[key];
+
   return Bun.spawn({
     cmd: ["bash", SCRIPT],
     cwd: ROOT,
-    env: { ...process.env, ...env },
+    env: childEnv,
     stdout: "pipe",
     stderr: "pipe",
   });
@@ -61,8 +68,12 @@ async function collectScript(
   return { exitCode, stdout, stderr };
 }
 
-async function runScript(env: Record<string, string>, timeoutMs = 30_000): Promise<Run> {
-  return collectScript(startScript(env), timeoutMs);
+async function runScript(
+  env: Record<string, string>,
+  timeoutMs = 30_000,
+  unset: readonly string[] = [],
+): Promise<Run> {
+  return collectScript(startScript(env, unset), timeoutMs);
 }
 
 async function runChecker(
@@ -126,12 +137,11 @@ async function runCheckerWithoutContract(origin: string): Promise<Run> {
   return { exitCode, stdout, stderr };
 }
 
-const listeners: Server[] = [];
 const httpListeners: HttpServer[] = [];
 afterAll(async () => {
-  const close = (server: Server | HttpServer): Promise<void> =>
+  const close = (server: HttpServer): Promise<void> =>
     server.listening ? new Promise((done) => server.close(() => done())) : Promise.resolve();
-  await Promise.all([...listeners, ...httpListeners].map(close));
+  await Promise.all(httpListeners.map(close));
 });
 
 /**
@@ -139,15 +149,35 @@ afterAll(async () => {
  * fail when another run — or anything else on the host — already holds it, which is the very
  * defect these tests exist to catch.
  */
-function occupyFreePort(): Promise<number> {
+interface OccupiedPort {
+  readonly port: number;
+  readonly close: () => Promise<void>;
+}
+
+function occupyFreePort(): Promise<OccupiedPort> {
   return new Promise((done, fail) => {
     const server = createServer();
-    listeners.push(server);
+    const sockets = new Set<Socket>();
+    server.on("connection", (socket) => {
+      sockets.add(socket);
+      socket.on("close", () => sockets.delete(socket));
+    });
     server.on("error", fail);
     server.listen(0, "127.0.0.1", () => {
       const address = server.address();
-      if (typeof address === "object" && address !== null) done(address.port);
-      else fail(new Error("no port assigned"));
+      if (typeof address !== "object" || address === null) {
+        fail(new Error("no port assigned"));
+        return;
+      }
+      done({
+        port: address.port,
+        close: () => {
+          for (const socket of sockets) socket.destroy();
+          return server.listening
+            ? new Promise((closed) => server.close(() => closed()))
+            : Promise.resolve();
+        },
+      });
     });
   });
 }
@@ -632,6 +662,62 @@ describe("a hostile seed cannot forge a diagnostic record", () => {
   }, 200_000);
 });
 
+describe("scratch-root selection is portable and fail-closed", () => {
+  const hostileSeed = "$(id)";
+
+  test("an unset TMPDIR resolves the host's physical /tmp and reaches the seed boundary", async () => {
+    const run = await runScript({ ASIMP_S5_SEED: hostileSeed }, 30_000, ["TMPDIR"]);
+
+    expect(run.exitCode).toBe(64);
+    const records = run.stdout
+      .trim()
+      .split("\n")
+      .filter(Boolean)
+      .map((line) => JSON.parse(line) as Record<string, unknown>);
+    expect(records).toHaveLength(1);
+    expect(records[0]).toMatchObject({ assertion: "seed_accepted", status: "fail" });
+    expect(records.some((record) => record.assertion === "scratch_dir")).toBe(false);
+  });
+
+  for (const [name, rejectedRoot] of [
+    ["empty", ""],
+    ["relative", "s5-relative-scratch-marker"],
+  ] as const) {
+    test(`an explicitly ${name} TMPDIR is refused without echoing it`, async () => {
+      const run = await runScript({ TMPDIR: rejectedRoot, ASIMP_S5_SEED: hostileSeed });
+
+      expect(run.exitCode).toBe(1);
+      const records = run.stdout
+        .trim()
+        .split("\n")
+        .filter(Boolean)
+        .map((line) => JSON.parse(line) as Record<string, unknown>);
+      expect(records).toHaveLength(1);
+      expect(records[0]).toMatchObject({ assertion: "scratch_dir", status: "fail" });
+      expect(`${run.stdout}${run.stderr}`).not.toContain(rejectedRoot || "TMPDIR");
+    });
+  }
+
+  test("an explicitly symlinked TMPDIR is refused before directory creation", async () => {
+    const parent = mkdtempSync(join(tmpdir(), "asimposium-s5-scratch-root-"));
+    const target = mkdtempSync(join(parent, "target-"));
+    const link = join(parent, "caller-symlink-marker");
+    symlinkSync(target, link);
+
+    const run = await runScript({ TMPDIR: link, ASIMP_S5_SEED: hostileSeed });
+
+    expect(run.exitCode).toBe(1);
+    const records = run.stdout
+      .trim()
+      .split("\n")
+      .filter(Boolean)
+      .map((line) => JSON.parse(line) as Record<string, unknown>);
+    expect(records).toHaveLength(1);
+    expect(records[0]).toMatchObject({ assertion: "scratch_dir", status: "fail" });
+    expect(`${run.stdout}${run.stderr}`).not.toContain("caller-symlink-marker");
+  });
+});
+
 describe("provenance drift is fail-closed at every checkpoint", () => {
   const checkpoints = [
     "before_worker_launch",
@@ -754,8 +840,13 @@ describe("a run never tests against a server it did not start", () => {
   test("a pinned port that is already occupied is refused, not reused", async () => {
     // We hold this listener for the duration: the script must refuse rather than test
     // against a server it does not own.
-    const port = await occupyFreePort();
-    const run = await runScript({ S5_PORT: String(port) }, 180_000);
+    const occupied = await occupyFreePort();
+    let run: Run;
+    try {
+      run = await runScript({ S5_PORT: String(occupied.port) }, 180_000);
+    } finally {
+      await occupied.close();
+    }
 
     expect(run.exitCode).toBe(1);
     const records = run.stdout

@@ -36,13 +36,16 @@ ORIGIN="http://127.0.0.1:${PORT}"
 readonly WRANGLER="apps/wire/node_modules/.bin/wrangler"
 
 cd "$(dirname "${BASH_SOURCE[0]}")/.." || exit 1
-# Callers may set TMPDIR to an external volume (this swarm does); the repository default stays
-# portable for ordinary developer and CI hosts.
-readonly DEFAULT_SCRATCH_ROOT="/private/tmp"
+# Callers may set TMPDIR to an external volume (this swarm does). When it is unset, resolve the
+# host's conventional temporary directory physically: /tmp is a symlink on macOS but a real
+# directory on most Linux CI hosts. An explicit caller value is never canonicalized because a
+# symlink supplied at that trust boundary must be refused, not silently followed.
 if [[ "${TMPDIR+x}" == "x" ]]; then
   SCRATCH_ROOT="${TMPDIR}"
 else
-  SCRATCH_ROOT="${DEFAULT_SCRATCH_ROOT}"
+  if ! SCRATCH_ROOT="$(cd -P -- /tmp 2>/dev/null && pwd -P)"; then
+    SCRATCH_ROOT=""
+  fi
 fi
 # BSD `mktemp -t` chooses the system temporary directory even when TMPDIR points at the USB
 # scratch volume. Validate the supplied root without following a root symlink, then provide
