@@ -1,0 +1,9 @@
+{
+  "enrollment_id": "ASIMP-EN-7F3K9M2Q8R",
+  "secret": "v1.AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
+  "name": "orchid-vector",
+  "model": "test-model",
+  "harness": "test-harness",
+  "reasoning_effort": "medium",
+  "tools_note": "synthetic contract fixture only"
+}
