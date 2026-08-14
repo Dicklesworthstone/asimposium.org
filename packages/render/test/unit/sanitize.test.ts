@@ -4,7 +4,9 @@ import {
   activeHtmlScanDiagnostics,
   escapeHtml,
   fenceFor,
+  firstUnpairedUtf16SurrogateOffset,
   isSafeHeaderValue,
+  isSafeWorkerPath,
   longestBacktickRun,
   neutralizeUntrustedBody,
 } from "../../src/sanitize.ts";
@@ -254,15 +256,23 @@ describe("neutralizeUntrustedBody", () => {
     expect(result.findings).toEqual([{ marker: "active-html", count: 3 }]);
   });
 
-  test("limits javascript URL findings to URL-bearing attributes and Markdown links", () => {
+  test("does not scan autolink-shaped text inside a quoted HTML attribute", () => {
+    const body = '<a title="<javascript: quoted-autolink-data()>">source</a>';
+    expect(neutralizeUntrustedBody(body)).toEqual({ text: body, findings: [] });
+  });
+
+  test("limits javascript URL findings to URL-bearing attributes, links, and standalone autolinks", () => {
     const inert = [
       '<a title="javascript: documentary citation">source</a>',
       '<img alt="javascript: illustrative prose">',
       '<p data-note="javascript: archival label">text</p>',
+      '<A TITLE="<JAVASCRIPT: quoted-case-data()>">source</A>',
+      '＜Ａ TITLE="＜ＪＡＶＡＳＣＲＩＰＴ: quoted-canonical-data()＞"＞source＜／Ａ＞',
       "This prose discusses javascript: as a historical URL scheme.",
       "[A citation label] (javascript: a parenthesized aside, not a link)",
       "\\[escaped Markdown](javascript:shown-as-data())",
       "`[inline code](javascript:shown-as-data())`",
+      "\\<javascript:shown-as-data()>",
     ].join("\n");
     expect(neutralizeUntrustedBody(inert)).toEqual({ text: inert, findings: [] });
 
@@ -272,10 +282,13 @@ describe("neutralizeUntrustedBody", () => {
       '<button formaction="javascript:steal()">submit</button>',
       "[Markdown link](javascript:steal())",
       "![Markdown image](<javascript:steal()>)",
+      "<javascript:steal()>",
+      "<JAVASCRIPT:case-folded-steal()>",
+      "＜ＪＡＶＡＳＣＲＩＰＴ:canonical-steal()＞",
     ].join("\n");
     expect(neutralizeUntrustedBody(controls)).toEqual({
       text: controls,
-      findings: [{ marker: "active-html", count: 5 }],
+      findings: [{ marker: "active-html", count: 8 }],
     });
   });
 
@@ -484,5 +497,82 @@ describe("isSafeHeaderValue", () => {
     expect(isSafeHeaderValue("pack --> <!-- asimp")).toBe(false);
     expect(isSafeHeaderValue("pack\nprofile=working")).toBe(false);
     expect(isSafeHeaderValue("pack>")).toBe(false);
+  });
+});
+
+describe("Unicode scalar and Worker-path guards", () => {
+  test("identifies exactly the first unpaired UTF-16 surrogate without rejecting Unicode scalars", () => {
+    const cases: readonly [string, string, number | undefined][] = [
+      ["ordinary Unicode, math, and a valid astral pair", "∀ k ∈ ℕ; 𝕊(k) ≤ 2ᵏ; 😀", undefined],
+      ["an NFKD-expanding scalar", "ﷺ", undefined],
+      ["a high surrogate at the beginning", "\ud800", 0],
+      ["a low surrogate at the beginning", "\udc00", 0],
+      ["a high surrogate at the end", "a\ud800", 1],
+      ["a low surrogate after ordinary text", "a\udc00", 1],
+      ["a valid pair followed by a lone low surrogate", "😀\udc00", 2],
+      ["a lone high surrogate before a valid pair", "\ud800😀", 0],
+    ];
+
+    for (const [label, value, expected] of cases) {
+      expect(firstUnpairedUtf16SurrogateOffset(value), label).toBe(expected);
+    }
+  });
+
+  test("accepts safe origin-relative Worker paths and keeps ordinary /v1 queries", () => {
+    const longPath = `/v1/${"x".repeat(20_001)}?profile=working`;
+    for (const value of [
+      "/",
+      "/inoculation.md",
+      "/p/demo-bounded-sums.md",
+      "/cursor",
+      "/v1",
+      "/v1/hello",
+      "/v1/sessions/SES-demo/pack?profile=working&cursor=41",
+      longPath,
+    ]) {
+      expect(isSafeWorkerPath(value), value).toBe(true);
+    }
+  });
+
+  test("rejects external, traversing, encoded-path, and unsafe Worker paths exactly", () => {
+    const rejected = [
+      "//attacker.example/v1/hello",
+      "//user:secret@attacker.example/v1/hello",
+      "https://user:secret@attacker.example/v1/hello",
+      "javascript:alert(1)",
+      "mailto:fellow@example.org",
+      "/v1/hello#fragment",
+      "/v1\\hello",
+      "/v1/hello`code`",
+      "/v1/hello\r\nX-Forged: yes",
+      "/v1/hello with-space",
+      "/v1/hello\u007f",
+      "/v1/hello%00",
+      "/v1/hello%0a",
+      "/v1/hello%7F",
+      "/v1/%5chello",
+      "/v1/hello%60code%60",
+      "/v1/../outside",
+      "/p/./claim.md",
+      "/p/%2e%2e/private.md",
+      "/p/%2E/claim.md",
+      "/p/%252e%252e/private.md",
+      "/p/%252E%252E/private.md",
+      "/p/%250a-log",
+      "/p/%250A-log",
+      "/p/%255c-log",
+      "/p/%255C-log",
+    ];
+
+    for (const value of rejected) expect(isSafeWorkerPath(value), value).toBe(false);
+  });
+
+  test("allows percent-encoded query data but never an encoded pathname segment", () => {
+    expect(
+      isSafeWorkerPath(
+        "/v1/sessions/SES-demo/pack?profile=working%20set&cursor=%2Fnext%60&note=%0A%5C",
+      ),
+    ).toBe(true);
+    expect(isSafeWorkerPath("/p/%64emo.md?profile=working")).toBe(false);
   });
 });

@@ -2,7 +2,7 @@ import { describe, expect, test } from "bun:test";
 
 import { renderAllFaces, renderProjection } from "../../src/render.ts";
 import type { Projection } from "../../src/types.ts";
-import { safeWorkingPack } from "../_support/fixtures.ts";
+import { forgedControlPack, safeWorkingPack } from "../_support/fixtures.ts";
 
 /**
  * Rule A1: every public resource has a human face and an agent face rendered
@@ -123,6 +123,23 @@ describe("one projection, three faces", () => {
     expect(faces.json.fingerprint).toBe(faces.md.fingerprint);
     expect(faces["html-fragment"].fingerprint).toBe(faces.md.fingerprint);
     expect(faces.md.fingerprint).toMatch(/^fnv1a64:[0-9a-f]{16}$/);
+  });
+
+  // Load-bearing: renderAllFaces shares one prepared projection. Comparing it
+  // with the public single-face entry point keeps agreement observed, rather
+  // than making it tautological through the shared intermediate.
+  test("renderAllFaces is byte-for-byte equivalent to three individual face renders", () => {
+    const hostile = forgedControlPack();
+    const allAtOnce = renderAllFaces(hostile);
+
+    for (const format of ["md", "json", "html-fragment"] as const) {
+      const individually = renderProjection(hostile, format);
+      expect(allAtOnce[format].body).toBe(individually.body);
+      expect(allAtOnce[format].fingerprint).toBe(individually.fingerprint);
+      expect(allAtOnce[format].neutralized).toEqual(individually.neutralized);
+      expect(allAtOnce[format].bytes).toBe(individually.bytes);
+    }
+    expect(allAtOnce.md.neutralized.length).toBeGreaterThan(0);
   });
 
   test("all three faces carry the same items in the same order", () => {

@@ -7,7 +7,7 @@ import { RenderContractError } from "./errors.ts";
 import { renderHtmlFragmentFace } from "./faces/html.ts";
 import { renderJsonFace } from "./faces/json.ts";
 import { renderMarkdownFace } from "./faces/markdown.ts";
-import { prepareProjection } from "./prepare.ts";
+import { type PreparedProjection, prepareProjection } from "./prepare.ts";
 import { FACE_FORMATS, type FaceFormat, type Projection, type RenderedFace } from "./types.ts";
 
 export const MEDIA_TYPES: Readonly<Record<FaceFormat, string>> = {
@@ -16,11 +16,7 @@ export const MEDIA_TYPES: Readonly<Record<FaceFormat, string>> = {
   "html-fragment": "text/html; charset=utf-8",
 };
 
-/**
- * Render one face. Unknown formats are refused with the allowed list rather
- * than silently falling back (Fable §7.1 axiom 9: never silent-fail).
- */
-export function renderProjection(projection: Projection, format: FaceFormat): RenderedFace {
+function assertKnownFormat(format: FaceFormat): void {
   if (!FACE_FORMATS.includes(format)) {
     throw new RenderContractError({
       code: "UNKNOWN_FORMAT",
@@ -31,8 +27,9 @@ export function renderProjection(projection: Projection, format: FaceFormat): Re
       rule: "A1",
     });
   }
+}
 
-  const prepared = prepareProjection(projection);
+function renderPreparedFace(prepared: PreparedProjection, format: FaceFormat): RenderedFace {
   const body =
     format === "md"
       ? renderMarkdownFace(prepared)
@@ -51,14 +48,24 @@ export function renderProjection(projection: Projection, format: FaceFormat): Re
 }
 
 /**
- * Render every face of one projection. Each face is rendered through the full
- * pipeline independently, so agreement between faces is an observed property of
- * the renderers rather than an artifact of sharing one intermediate value.
+ * Render one face. Unknown formats are refused with the allowed list rather
+ * than silently falling back (Fable §7.1 axiom 9: never silent-fail).
+ */
+export function renderProjection(projection: Projection, format: FaceFormat): RenderedFace {
+  assertKnownFormat(format);
+  return renderPreparedFace(prepareProjection(projection), format);
+}
+
+/**
+ * Render every face from one immutable prepared projection. This is the Diptych
+ * contract in code: neutralization and fingerprinting occur once, then each
+ * renderer projects the same prepared data without redoing that work.
  */
 export function renderAllFaces(projection: Projection): Readonly<Record<FaceFormat, RenderedFace>> {
+  const prepared = prepareProjection(projection);
   return {
-    md: renderProjection(projection, "md"),
-    json: renderProjection(projection, "json"),
-    "html-fragment": renderProjection(projection, "html-fragment"),
+    md: renderPreparedFace(prepared, "md"),
+    json: renderPreparedFace(prepared, "json"),
+    "html-fragment": renderPreparedFace(prepared, "html-fragment"),
   };
 }

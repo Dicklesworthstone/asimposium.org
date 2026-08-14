@@ -90,12 +90,14 @@ import { renderAllFaces, renderProjection } from "@asimposium/render";
 const face = renderProjection(projection, "md");
 // face.body, face.media_type, face.fingerprint, face.bytes, face.neutralized
 
-const faces = renderAllFaces(projection); // md + json + html-fragment, each through the full pipeline
+const faces = renderAllFaces(projection); // md + json + html-fragment from one prepared projection
 ```
 
-`renderAllFaces()` deliberately re-runs the whole pipeline per face rather than sharing one
-intermediate string, so agreement between faces is an *observed* property of the renderers instead
-of an artifact of construction.
+`renderAllFaces()` calls `prepareProjection()` exactly once, then renders each face from that
+immutable prepared projection. The Diptych integration suite compares its bytes, fingerprint, and
+neutralization report with three public `renderProjection()` calls on a hostile projection. That
+load-bearing equivalence regression keeps agreement observed at the public API boundary instead of
+making it tautological through the shared intermediate.
 
 ## Running the suites
 

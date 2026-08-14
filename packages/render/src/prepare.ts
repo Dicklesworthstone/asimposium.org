@@ -10,8 +10,10 @@ import { contentFingerprint, stableStringify } from "./canonical.ts";
 import { RenderContractError } from "./errors.ts";
 import {
   fenceFor,
+  firstUnpairedUtf16SurrogateOffset,
   hasAsimpControlComment,
   isSafeHeaderValue,
+  isSafeWorkerPath,
   type NeutralizationFinding,
   neutralizeUntrustedBody,
 } from "./sanitize.ts";
@@ -96,6 +98,108 @@ function refuse(
   });
 }
 
+interface ProjectionString {
+  readonly field: string;
+  readonly value: string;
+  /** Fields the renderer interpolates as server-authored Markdown prose. */
+  readonly reject_control_comment: boolean;
+}
+
+/**
+ * Enumerate every projection string exactly once before validation can
+ * normalize it or serialization can fingerprint/render it. The list keeps
+ * contract errors field-specific without imposing artificial length limits.
+ */
+function projectionStrings(projection: Projection): ProjectionString[] {
+  const fields: ProjectionString[] = [
+    { field: "schema", value: projection.schema, reject_control_comment: false },
+    { field: "kind", value: projection.kind, reject_control_comment: false },
+    { field: "problem", value: projection.problem, reject_control_comment: false },
+    { field: "profile", value: projection.profile, reject_control_comment: false },
+    { field: "title", value: projection.title, reject_control_comment: true },
+    { field: "preamble", value: projection.preamble, reject_control_comment: true },
+  ];
+
+  for (const [index, item] of projection.items.entries()) {
+    fields.push(
+      { field: `items[${index}].kind`, value: item.kind, reject_control_comment: false },
+      { field: `items[${index}].id`, value: item.id, reject_control_comment: false },
+      { field: `items[${index}].scope`, value: item.scope, reject_control_comment: false },
+      { field: `items[${index}].body`, value: item.body, reject_control_comment: false },
+      {
+        field: `items[${index}].why_included`,
+        value: item.why_included,
+        reject_control_comment: true,
+      },
+    );
+  }
+
+  for (const [index, entry] of projection.omitted.entries()) {
+    fields.push({
+      field: `omitted[${index}].reason`,
+      value: entry.reason,
+      reject_control_comment: true,
+    });
+    if (entry.detail !== undefined) {
+      fields.push({
+        field: `omitted[${index}].detail`,
+        value: entry.detail,
+        reject_control_comment: true,
+      });
+    }
+  }
+
+  for (const [index, action] of projection.next_actions.entries()) {
+    fields.push(
+      {
+        field: `next_actions[${index}].method`,
+        value: action.method,
+        reject_control_comment: true,
+      },
+      { field: `next_actions[${index}].url`, value: action.url, reject_control_comment: true },
+      { field: `next_actions[${index}].why`, value: action.why, reject_control_comment: true },
+    );
+  }
+
+  for (const [index, note] of projection.degraded.entries()) {
+    fields.push({ field: `degraded[${index}]`, value: note, reject_control_comment: true });
+  }
+
+  return fields;
+}
+
+function validateProjectionStrings(projection: Projection): void {
+  const fields = projectionStrings(projection);
+
+  // Complete the scalar-value pass first. `hasAsimpControlComment` uses
+  // Unicode normalization, so it must not run until no field can carry a
+  // malformed half that normalization or TextEncoder would replace.
+  for (const { field, value } of fields) {
+    const offset = firstUnpairedUtf16SurrogateOffset(value);
+    if (offset === undefined) continue;
+    const codeUnit = value.charCodeAt(offset);
+    const half = codeUnit <= 0xdbff ? "high" : "low";
+    refuse(
+      "INVALID_HEADER_VALUE",
+      "Projection text must contain only Unicode scalar values",
+      `${field} contains an unpaired UTF-16 ${half} surrogate at code-unit offset ${offset}; encoding would replace it before the renderer could fingerprint or project the original text`,
+      "Replace the lone surrogate with a Unicode scalar value. Astral characters are valid only as their complete high-surrogate/low-surrogate pair.",
+      "A1",
+    );
+  }
+
+  for (const { field, value, reject_control_comment } of fields) {
+    if (!reject_control_comment || !hasAsimpControlComment(value)) continue;
+    refuse(
+      "INVALID_HEADER_VALUE",
+      "Server-authored Markdown may not contain renderer control comments",
+      `${field} contains an ASImposium control comment; only the renderer may author <!-- asimp … --> face and item delimiters`,
+      "Keep this server-authored field as ordinary Markdown prose and remove the <!-- asimp … --> comment. The renderer adds its own structural delimiters.",
+      "A1",
+    );
+  }
+}
+
 export function prepareProjection(projection: Projection): PreparedProjection {
   if (!Array.isArray(projection.omitted)) {
     refuse(
@@ -106,6 +210,7 @@ export function prepareProjection(projection: Projection): PreparedProjection {
       "A1",
     );
   }
+  validateProjectionStrings(projection);
   if (projection.items.length === 0 && projection.omitted.length === 0) {
     refuse(
       "EMPTY_PROJECTION_WITHOUT_OMISSION",
@@ -150,13 +255,21 @@ export function prepareProjection(projection: Projection): PreparedProjection {
     }
   }
 
-  for (const action of projection.next_actions) {
+  for (const [index, action] of projection.next_actions.entries()) {
     if (action.method !== "GET" && action.method !== "POST") {
       refuse(
         "INVALID_NEXT_ACTION",
         "next_actions are server-authored and typed",
         `next_action method ${JSON.stringify(action.method)} is not GET or POST`,
         "Emit GET or POST. next_actions are never derived from a body (Fable §14.4).",
+      );
+    }
+    if (!isSafeWorkerPath(action.url)) {
+      refuse(
+        "INVALID_NEXT_ACTION",
+        "next_actions URLs must target a safe origin-relative Worker path",
+        `next_actions[${index}].url must be a safe origin-relative a.asimposium.org path without credentials, a fragment, traversal, percent-encoded pathname segments, backslashes, backticks, ASCII controls, or an external scheme`,
+        "Use a Worker path such as /, /cursor, /p/claim.md, or /v1/sessions/SES-1/pack?profile=working. Do not use //, an external or javascript: URL, credentials, a fragment, traversal, percent-encoded pathname segments, backslashes, backticks, or ASCII control characters.",
       );
     }
   }

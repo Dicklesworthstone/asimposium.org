@@ -82,8 +82,11 @@ const URL_BEARING_HTML_ATTRIBUTES = new Set([
 ]);
 const JAVASCRIPT_URL = "javascript:";
 const HTML_ASCII_WHITESPACE = /^[\t\n\f\r ]$/;
+const COMMONMARK_HTML_START_TAG_NAME = /^[a-z][a-z0-9-]*$/;
 
 const BACKTICK_RUN = /`+/g;
+const URL_SCHEME = /^[A-Za-z][A-Za-z0-9+.-]*:/;
+const WORKER_URL_ORIGIN = "https://a.asimposium.org";
 
 function countMatches(text: string, pattern: RegExp): number {
   const scan = new RegExp(
@@ -253,6 +256,9 @@ function htmlCommentEndOffset(value: string, openOffset: number): number {
 
 interface ActiveStartTagScan {
   readonly endOffset: number;
+  /** Whether the candidate ended in `>` rather than reaching end-of-input. */
+  readonly complete: boolean;
+  readonly tagName: string;
   readonly active: boolean;
   readonly javascriptUrlOffsets: readonly number[];
 }
@@ -273,11 +279,15 @@ function findJavascriptUrlOffsets(value: string, startOffset: number, endOffset:
 
 function finishActiveStartTag(
   endOffset: number,
+  complete: boolean,
+  tagName: string,
   active: boolean,
   javascriptUrlOffsets: readonly number[],
 ): ActiveStartTagScan {
   return {
     endOffset,
+    complete,
+    tagName,
     active,
     javascriptUrlOffsets,
   };
@@ -303,10 +313,10 @@ function scanActiveStartTag(value: string, openOffset: number): ActiveStartTagSc
     while (isHtmlAsciiWhitespace(value[cursor]) || value[cursor] === "/") cursor += 1;
 
     if (cursor >= value.length) {
-      return finishActiveStartTag(value.length, active, javascriptUrlOffsets);
+      return finishActiveStartTag(value.length, false, tagName, active, javascriptUrlOffsets);
     }
     if (value[cursor] === ">") {
-      return finishActiveStartTag(cursor + 1, active, javascriptUrlOffsets);
+      return finishActiveStartTag(cursor + 1, true, tagName, active, javascriptUrlOffsets);
     }
 
     const attributeNameStart = cursor;
@@ -358,7 +368,7 @@ function scanActiveStartTag(value: string, openOffset: number): ActiveStartTagSc
     }
   }
 
-  return finishActiveStartTag(value.length, active, javascriptUrlOffsets);
+  return finishActiveStartTag(value.length, false, tagName, active, javascriptUrlOffsets);
 }
 
 /**
@@ -513,6 +523,42 @@ function markdownJavascriptDestinationOffset(
   return undefined;
 }
 
+/**
+ * CommonMark also makes a URI-shaped `<scheme:…>` an autolink. It is a real
+ * Markdown URL surface, unlike a bare `javascript:` spelling in prose. Keep
+ * the scan intentionally narrow: the character after `<` must begin the
+ * forbidden scheme, the URL cannot contain ASCII whitespace or another angle
+ * bracket, and a backslash-escaped opener remains ordinary text.
+ */
+function markdownJavascriptAutolinkOffset(text: string, openOffset: number): number | undefined {
+  if (isMarkdownEscaped(text, openOffset)) return undefined;
+
+  const destinationStart = openOffset + 1;
+  if (!text.startsWith(JAVASCRIPT_URL, destinationStart)) return undefined;
+
+  for (let cursor = destinationStart + JAVASCRIPT_URL.length; cursor < text.length; cursor += 1) {
+    const character = text[cursor] as string;
+    if (character === ">") return destinationStart;
+    if (character === "<" || isHtmlAsciiWhitespace(character)) return undefined;
+  }
+
+  return undefined;
+}
+
+/**
+ * Markdown autolinks are not recognized inside a complete CommonMark HTML
+ * start tag. `scanActiveStartTag` supplies the matching-quote-aware end offset;
+ * retain the CommonMark tag-name grammar here so `<javascript:...>` remains a
+ * standalone autolink rather than being mistaken for a custom HTML element.
+ */
+function completeMarkdownHtmlStartTagEnd(text: string, openOffset: number): number | undefined {
+  const tag = scanActiveStartTag(text, openOffset);
+  if (tag === undefined || !tag.complete || !COMMONMARK_HTML_START_TAG_NAME.test(tag.tagName)) {
+    return undefined;
+  }
+  return tag.endOffset;
+}
+
 function collectActiveMarkdownUrls(text: string): ActiveHtmlFinding[] {
   const findings: ActiveHtmlFinding[] = [];
   let cursor = 0;
@@ -528,6 +574,19 @@ function collectActiveMarkdownUrls(text: string): ActiveHtmlFinding[] {
         cursor = codeEnd;
         continue;
       }
+    }
+    if (text[cursor] === "<") {
+      const startTagEnd = completeMarkdownHtmlStartTagEnd(text, cursor);
+      if (startTagEnd !== undefined) {
+        cursor = startTagEnd;
+        continue;
+      }
+      const autolinkOffset = markdownJavascriptAutolinkOffset(text, cursor);
+      if (autolinkOffset !== undefined) {
+        findings.push({ kind: "javascript", offset: autolinkOffset });
+      }
+      cursor += 1;
+      continue;
     }
     if (text[cursor] !== "[" || isMarkdownEscaped(text, cursor)) {
       cursor += 1;
@@ -690,6 +749,100 @@ export function hasAsimpControlComment(body: string): boolean {
     if (isAsimpControlComment(body, openOffset)) return true;
     searchFrom = openOffset + CONTROL_COMMENT_OPEN.length;
   }
+}
+
+/**
+ * Return the first malformed UTF-16 code-unit offset, if any. JavaScript
+ * strings can carry lone surrogate halves, but Unicode normalization and
+ * `TextEncoder` do not preserve them: the latter serializes a replacement
+ * character. Callers that fingerprint or render a projection must reject them
+ * before either operation so every face and its fingerprint describe the same
+ * scalar-value input.
+ */
+export function firstUnpairedUtf16SurrogateOffset(value: string): number | undefined {
+  for (let offset = 0; offset < value.length; offset += 1) {
+    const codeUnit = value.charCodeAt(offset);
+    const highSurrogate = codeUnit >= 0xd800 && codeUnit <= 0xdbff;
+    const lowSurrogate = codeUnit >= 0xdc00 && codeUnit <= 0xdfff;
+
+    if (highSurrogate) {
+      const next = value.charCodeAt(offset + 1);
+      const nextIsLowSurrogate = next >= 0xdc00 && next <= 0xdfff;
+      if (!nextIsLowSurrogate) return offset;
+      offset += 1;
+      continue;
+    }
+    if (lowSurrogate) return offset;
+  }
+
+  return undefined;
+}
+
+function hasAsciiUrlControlOrSpace(value: string): boolean {
+  for (let offset = 0; offset < value.length; offset += 1) {
+    const codeUnit = value.charCodeAt(offset);
+    if (codeUnit <= 0x20 || codeUnit === 0x7f) return true;
+  }
+  return false;
+}
+
+/** Split raw navigation text before `?`; query data is not part of route matching. */
+function workerPathname(value: string): string {
+  const queryOffset = value.indexOf("?");
+  return queryOffset === -1 ? value : value.slice(0, queryOffset);
+}
+
+/**
+ * Worker routes are declared without encoded pathname segments. Reject every
+ * literal percent in the pathname, including malformed escapes, before URL
+ * parsing can preserve, normalize, or a router can decode one or more layers.
+ * The query is intentionally excluded: percent-encoded query values are data.
+ */
+function hasEncodedWorkerPathSegment(pathname: string): boolean {
+  return pathname.includes("%");
+}
+
+/** Reject dot segments before URL construction silently normalizes them. */
+function hasUnsafeWorkerPathTraversal(pathname: string): boolean {
+  return pathname.split("/").some((segment) => segment === "." || segment === "..");
+}
+
+/**
+ * `next_actions` are executable navigation instructions, not general links.
+ * Keep them on the Worker origin. They may address both public faces and API
+ * routes, while still permitting a normal query string such as
+ * `/v1/sessions/SES-1/pack?profile=working`.
+ */
+export function isSafeWorkerPath(value: string): boolean {
+  const pathname = workerPathname(value);
+
+  if (
+    value.startsWith("//") ||
+    URL_SCHEME.test(value) ||
+    value.includes("\\") ||
+    value.includes("#") ||
+    value.includes("`") ||
+    hasAsciiUrlControlOrSpace(value) ||
+    hasEncodedWorkerPathSegment(pathname) ||
+    hasUnsafeWorkerPathTraversal(pathname) ||
+    !value.startsWith("/")
+  ) {
+    return false;
+  }
+
+  let url: URL;
+  try {
+    url = new URL(value, WORKER_URL_ORIGIN);
+  } catch {
+    return false;
+  }
+
+  return (
+    url.origin === WORKER_URL_ORIGIN &&
+    url.username === "" &&
+    url.password === "" &&
+    url.hash === ""
+  );
 }
 
 /**
