@@ -11,6 +11,8 @@
  * workerd plus local D1 on one machine. It is not deployed proof.
  */
 
+import { closeSync, lstatSync, openSync, readFileSync, realpathSync, writeSync } from "node:fs";
+import { join } from "node:path";
 import {
   mintServiceEnvelope,
   type ServiceEnvelope,
@@ -206,10 +208,168 @@ const ACTION = "s6.probe";
 const PRINCIPAL_ID = "usr_01JXYZ0000000000000000";
 /** Must match the launcher's `--var S6_PSEUDONYM_SALT`. */
 const PSEUDONYM_SALT = "s6-local-salt";
+/** `full` runs the whole suite; the persist phases straddle a worker restart. */
+const PHASE = process.env.S6_PHASE ?? "full";
 const NOW = Number.parseInt(process.env.S6_NOW ?? "", 10);
 const KID = process.env.S6_KID ?? "s6-local";
 /** Never sent as a real credential; asserted to appear nowhere in any output. */
 const COOKIE_CANARY = "s6canary_do_not_echo_0f1e2d3c";
+
+/**
+ * The single filename the restart handoff may occupy, and the cap on reading it.
+ *
+ * An env-supplied *path* was the wrong interface. `S6_PERSIST_ENVELOPE_PATH`
+ * accepted any absolute path and `Bun.write` truncates whatever is there, so a
+ * stray or hostile value turned this checker into an arbitrary-file overwrite
+ * with the harness's own permissions -- and AGENTS.md keeps artifact roots under
+ * the repository's control precisely so a test cannot do that. The launcher now
+ * passes the state *directory* it created, and the filename is fixed here where
+ * no environment can reach it.
+ */
+export const HANDOFF_FILENAME = "persisted-envelope.json";
+/** One envelope and one small body. Anything larger is not our file. */
+export const HANDOFF_MAX_BYTES = 16 * 1024;
+
+export type HandoffPath = { ok: true; path: string } | { ok: false; detail: string };
+
+/**
+ * Resolve the one file this checker may write.
+ *
+ * Every rejection below is a fixed string: no candidate path, no envelope, no
+ * nonce and no body ever reaches a diagnostic.
+ */
+export function resolveHandoffPath(stateDir: string | undefined): HandoffPath {
+  if (stateDir === undefined || stateDir === "" || !stateDir.startsWith("/")) {
+    return { ok: false, detail: "S6_STATE_DIR must be an absolute path" };
+  }
+  let entry: ReturnType<typeof lstatSync>;
+  try {
+    entry = lstatSync(stateDir);
+  } catch {
+    return { ok: false, detail: "S6_STATE_DIR does not exist" };
+  }
+  // `lstat`, not `stat`: a symlinked state dir would resolve elsewhere and the
+  // exclusive create below would land wherever it pointed.
+  if (entry.isSymbolicLink()) return { ok: false, detail: "S6_STATE_DIR must not be a symlink" };
+  if (!entry.isDirectory()) return { ok: false, detail: "S6_STATE_DIR must be a directory" };
+  let resolved: string;
+  try {
+    resolved = realpathSync(stateDir);
+  } catch {
+    return { ok: false, detail: "S6_STATE_DIR could not be resolved" };
+  }
+  // Resolve first, then work from the resolved path, so the destination is
+  // decided once rather than re-walked at open time.
+  //
+  // Requiring `resolved === stateDir` was the obvious-looking rule and it was
+  // wrong: on macOS `mktemp -d` hands back `/var/folders/...` while `/var` is a
+  // system symlink to `/private/var`, so every legitimate run failed. It also
+  // was not the protection it looked like -- resolving to the same place is
+  // exactly what a redirected write does. The containment that actually holds is
+  // below, plus the exclusive create at the leaf.
+  let resolvedEntry: ReturnType<typeof lstatSync>;
+  try {
+    resolvedEntry = lstatSync(resolved);
+  } catch {
+    return { ok: false, detail: "S6_STATE_DIR does not resolve to an existing directory" };
+  }
+  if (!resolvedEntry.isDirectory()) {
+    return { ok: false, detail: "S6_STATE_DIR does not resolve to a directory" };
+  }
+  // The handoff is a per-run scratch credential and belongs in the run's private
+  // temp directory. It must never be written into the checkout -- that is the
+  // artifact-root rule, and a state dir pointing at the repository (or at a
+  // parent of it) is a misconfiguration worth refusing rather than obeying.
+  let cwd: string;
+  try {
+    cwd = realpathSync(process.cwd());
+  } catch {
+    return { ok: false, detail: "the working directory could not be resolved" };
+  }
+  if (resolved === cwd || resolved.startsWith(`${cwd}/`) || cwd.startsWith(`${resolved}/`)) {
+    return { ok: false, detail: "S6_STATE_DIR must be outside the checkout" };
+  }
+  return { ok: true, path: join(resolved, HANDOFF_FILENAME) };
+}
+
+/** The handoff shape, validated rather than trusted on the way back in. */
+interface Handoff {
+  envelope: ServiceEnvelope;
+  body: string;
+}
+
+export function parseHandoff(
+  raw: string,
+): { ok: true; value: Handoff } | { ok: false; detail: string } {
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(raw);
+  } catch {
+    // The parser quotes its input, and the input is a signed envelope.
+    return { ok: false, detail: "the restart handoff is not valid JSON (contents withheld)" };
+  }
+  if (parsed === null || typeof parsed !== "object" || Array.isArray(parsed)) {
+    return { ok: false, detail: "the restart handoff is not an object (contents withheld)" };
+  }
+  const record = parsed as Record<string, unknown>;
+  if (Object.keys(record).sort().join(",") !== "body,envelope") {
+    return { ok: false, detail: "the restart handoff has unexpected top-level members" };
+  }
+  if (typeof record.body !== "string") {
+    return { ok: false, detail: "the restart handoff body is not a string" };
+  }
+  const envelope = record.envelope;
+  if (envelope === null || typeof envelope !== "object" || Array.isArray(envelope)) {
+    return { ok: false, detail: "the restart handoff envelope is not an object" };
+  }
+  const envelopeRecord = envelope as Record<string, unknown>;
+  if (Object.keys(envelopeRecord).sort().join(",") !== "claims,signature") {
+    return { ok: false, detail: "the restart handoff envelope has unexpected members" };
+  }
+  if (typeof envelopeRecord.signature !== "string") {
+    return { ok: false, detail: "the restart handoff signature is not a string" };
+  }
+  const claims = envelopeRecord.claims;
+  if (claims === null || typeof claims !== "object" || Array.isArray(claims)) {
+    return { ok: false, detail: "the restart handoff claims are not an object" };
+  }
+  return { ok: true, value: { envelope: envelope as ServiceEnvelope, body: record.body } };
+}
+
+/**
+ * Create the handoff file, or refuse.
+ *
+ * `wx` is O_CREAT|O_EXCL: it fails on an existing file *and* on an existing
+ * symlink, so this can neither follow a planted link nor truncate anything it
+ * did not create. A plain `w` here -- or `Bun.write`, which is what this
+ * replaced -- silently destroys whatever holds the name.
+ *
+ * Nothing is deleted to make room. If the name is taken, the run says so and
+ * stops, because removing a file to complete a *test* is exactly the behaviour
+ * the no-delete rule exists to forbid.
+ */
+export function writeHandoffExclusively(
+  path: string,
+  payload: string,
+): { ok: true } | { ok: false; detail: string } {
+  let fd: number;
+  try {
+    fd = openSync(path, "wx", 0o600);
+  } catch {
+    return {
+      ok: false,
+      detail: "the restart handoff already existed or could not be created exclusively",
+    };
+  }
+  try {
+    writeSync(fd, payload);
+  } catch {
+    return { ok: false, detail: "the restart handoff could not be written" };
+  } finally {
+    closeSync(fd);
+  }
+  return { ok: true };
+}
 
 let failures = 0;
 
@@ -222,6 +382,28 @@ function emit(record: Record<string, unknown>): void {
 function check(assertion: string, ok: boolean, detail: string): void {
   if (!ok) failures += 1;
   emit({ assertion, status: ok ? "pass" : "fail", detail: ok ? "as expected" : detail });
+}
+
+/**
+ * Emit the run summary and set the exit code.
+ *
+ * Shared by every exit path, including the restart phases. A phase that
+ * returned early without this would exit 0 with failures recorded — the
+ * launcher would read a green exit and the failed assertions would sit in the
+ * NDJSON unnoticed.
+ */
+function finish(): void {
+  emit({
+    assertion: "local_ingress_summary",
+    status: failures === 0 ? "pass" : "fail",
+    detail:
+      failures === 0
+        ? `real local workerd + real local D1 ingress checks passed (phase ${PHASE})`
+        : `${failures} assertion(s) failed`,
+    scope: "local-workerd + local-D1 on one machine; not deployed proof",
+    phase: PHASE,
+  });
+  if (failures > 0) process.exitCode = 1;
 }
 
 /** The refusal vocabulary the adapter is contracted to return. */
@@ -285,15 +467,87 @@ function checkRefusal(
  * same function and salt the Worker uses, so this compares against a computed
  * value rather than whatever the response happened to contain.
  */
+/** `payload_digest_prefix` is this many hex characters. Mirrors `diagnostics.ts`. */
+const DIAGNOSTIC_DIGEST_PREFIX = 12;
+
+/**
+ * Assert the *full* positive shape of an accepted ingress response.
+ *
+ * A 200 is not an acceptance. `status === 200` alone is satisfied by a handler
+ * that answered the wrong request, attributed the effect to nobody, or -- the
+ * one that matters most here -- emitted telemetry labelling attacker-supplied
+ * envelope fields as authenticated. Every refusal assertion in this file can
+ * pass against such a handler, because refusals are the only thing they look at.
+ *
+ * So an acceptance must show all of it: the envelope was honoured (`ok`), it was
+ * honoured *as this action* for *this principal*, against the request actually
+ * presented (route, method, payload digest, byte count), and the diagnostic
+ * record says `accepted`/`OK` with every claim state marked
+ * `authenticated_claim` -- the label a refusal is structurally forbidden from
+ * carrying.
+ */
 async function checkAccepted(assertion: string, sent: Sent, expectedAction: string): Promise<void> {
   const expectedPseudonym = await principalPseudonym(PRINCIPAL_ID, PSEUDONYM_SALT);
+  const ok = sent.body.ok === true;
   const action = String(sent.body.action ?? "");
   const pseudonym = String(sent.body.principal_pseudonym ?? "");
+  const bodyBytes = sent.body.body_bytes;
   check(
     assertion,
-    sent.status === 200 && action === expectedAction && pseudonym === expectedPseudonym,
-    `status ${sent.status} action ${action || "none"} pseudonym ${pseudonym ? "mismatch" : "absent"}`,
+    sent.status === 200 &&
+      ok &&
+      action === expectedAction &&
+      pseudonym === expectedPseudonym &&
+      bodyBytes === sent.sentBytes,
+    `status ${sent.status} ok ${String(sent.body.ok)} action ${action || "none"} ` +
+      `pseudonym ${pseudonym === expectedPseudonym ? "ok" : pseudonym ? "mismatch" : "absent"} ` +
+      `body_bytes ${String(bodyBytes)} expected ${sent.sentBytes}`,
   );
+
+  // The diagnostic is the part that becomes telemetry, so it is asserted in
+  // full rather than sampled.
+  let diagnostic: Record<string, unknown> = {};
+  let parsedDiagnostic = false;
+  try {
+    diagnostic = JSON.parse(sent.diagnostic ?? "") as Record<string, unknown>;
+    parsedDiagnostic = diagnostic !== null && typeof diagnostic === "object";
+  } catch {
+    parsedDiagnostic = false;
+  }
+  const expectedPrefix = sent.sentPayloadSha256.slice(0, DIAGNOSTIC_DIGEST_PREFIX);
+  const duration = diagnostic.duration_ms;
+  const shape: [string, boolean][] = [
+    ["event", diagnostic.event === "cross_plane_auth"],
+    ["outcome", diagnostic.outcome === "accepted"],
+    ["code", diagnostic.code === "OK"],
+    ["reason", diagnostic.reason === "accepted"],
+    ["method", diagnostic.method === sent.sentMethod],
+    ["route", diagnostic.route === sent.sentRoute],
+    ["kid", diagnostic.kid === KID],
+    ["action", diagnostic.action === expectedAction],
+    ["principal_pseudonym", diagnostic.principal_pseudonym === expectedPseudonym],
+    ["payload_digest_prefix", diagnostic.payload_digest_prefix === expectedPrefix],
+    ["kid_claim_state", diagnostic.kid_claim_state === "authenticated_claim"],
+    ["action_claim_state", diagnostic.action_claim_state === "authenticated_claim"],
+    ["payload_digest_claim_state", diagnostic.payload_digest_claim_state === "authenticated_claim"],
+    ["duration_ms", typeof duration === "number" && Number.isInteger(duration) && duration >= 0],
+  ];
+  const wrong = shape.filter(([, held]) => !held).map(([field]) => field);
+  check(
+    `${assertion}__emits_an_authenticated_diagnostic`,
+    parsedDiagnostic && wrong.length === 0,
+    parsedDiagnostic
+      ? `diagnostic fields wrong: ${wrong.join(",")}`
+      : "the response carried no parseable x-s6-diagnostic record",
+  );
+
+  // An accepted request must not have reached for a cookie to get there.
+  check(
+    `${assertion}__consulted_no_cookie`,
+    sent.cookieReads === "0",
+    `x-s6-cookie-reads was ${sent.cookieReads ?? "absent"}, expected "0"`,
+  );
+
   // The pseudonym must be a pseudonym: the raw principal id may never appear.
   check(
     `${assertion}__never_discloses_the_principal_id`,
@@ -307,6 +561,11 @@ interface Sent {
   body: Record<string, unknown>;
   cookieReads: string | null;
   diagnostic: string | null;
+  /** What was actually presented, so the accepted shape is derived not assumed. */
+  sentRoute: string;
+  sentMethod: string;
+  sentBytes: number;
+  sentPayloadSha256: string;
 }
 
 /**
@@ -342,11 +601,22 @@ async function send(
   } catch {
     parsed = {};
   }
+  const route = presentation.route ?? ROUTE;
+  const method = presentation.method ?? "POST";
+  const payloadBytes = new TextEncoder().encode(body);
+  const digest = await crypto.subtle.digest("SHA-256", payloadBytes);
+  const payloadSha256 = Array.from(new Uint8Array(digest), (byte) =>
+    byte.toString(16).padStart(2, "0"),
+  ).join("");
   return {
     status: response.status,
     body: parsed,
     cookieReads: response.headers.get("x-s6-cookie-reads"),
     diagnostic: response.headers.get("x-s6-diagnostic"),
+    sentRoute: route,
+    sentMethod: method,
+    sentBytes: payloadBytes.byteLength,
+    sentPayloadSha256: payloadSha256,
   };
 }
 
@@ -391,6 +661,100 @@ async function main(): Promise<void> {
       principalId: PRINCIPAL_ID,
       body,
     });
+
+  /**
+   * Restart-persistent replay.
+   *
+   * Every other replay assertion in this file runs against one live isolate, so
+   * all of them are equally satisfied by a nonce store that never leaves memory
+   * -- a `Set` on the module scope passes the whole suite. That is the failure
+   * this phase exists to catch: the replay defence has to survive the process
+   * that observed the first presentation.
+   *
+   * The launcher therefore runs this checker twice against the *same*
+   * `--persist-to` directory, stopping and restarting workerd in between.
+   * `persist-mint` spends one envelope and hands the exact bytes to the second
+   * phase; `persist-replay` presents that same envelope to a Worker that has
+   * never seen it in memory. Only a durable D1 row can refuse it.
+   */
+  if (PHASE === "persist-mint" || PHASE === "persist-replay") {
+    const handoffPath = resolveHandoffPath(process.env.S6_STATE_DIR);
+    if (!handoffPath.ok) {
+      check("persist_phase_configured", false, handoffPath.detail);
+      finish();
+      return;
+    }
+    const path = handoffPath.path;
+
+    if (PHASE === "persist-mint") {
+      const body = '{"claim":"C-persist","n":7}';
+      const envelope = await sign(body);
+      await checkAccepted(
+        "a_persisted_envelope_is_accepted_before_restart",
+        await send(envelope, body),
+        ACTION,
+      );
+
+      const created = writeHandoffExclusively(path, JSON.stringify({ envelope, body }));
+      check(
+        "the_restart_handoff_is_created_exclusively",
+        created.ok,
+        created.ok ? "as expected" : created.detail,
+      );
+
+      if (created.ok) {
+        const written = lstatSync(path);
+        check(
+          "the_restart_handoff_is_a_private_regular_file",
+          written.isFile() && !written.isSymbolicLink() && (written.mode & 0o077) === 0,
+          `handoff mode ${(written.mode & 0o777).toString(8)}, regular ${String(written.isFile())}`,
+        );
+        // Structural whitelist: this file writes a credential to disk, and the
+        // one thing that must never join it is key material.
+        const readBack = parseHandoff(readFileSync(path, "utf8"));
+        check(
+          "the_restart_handoff_carries_no_key_material",
+          readBack.ok,
+          readBack.ok ? "as expected" : readBack.detail,
+        );
+      }
+      finish();
+      return;
+    }
+
+    // Replay phase: read back under a size bound, then validate the shape.
+    let entry: ReturnType<typeof lstatSync>;
+    try {
+      entry = lstatSync(path);
+    } catch {
+      check("the_restart_handoff_is_readable", false, "the restart handoff is missing");
+      finish();
+      return;
+    }
+    if (entry.isSymbolicLink() || !entry.isFile() || entry.size > HANDOFF_MAX_BYTES) {
+      check(
+        "the_restart_handoff_is_readable",
+        false,
+        `the restart handoff is not a regular file within ${HANDOFF_MAX_BYTES} bytes`,
+      );
+      finish();
+      return;
+    }
+    const handoff = parseHandoff(readFileSync(path, "utf8"));
+    if (!handoff.ok) {
+      check("the_restart_handoff_is_readable", false, handoff.detail);
+      finish();
+      return;
+    }
+    // Byte-identical to what the pre-restart Worker accepted: not re-signed,
+    // not re-serialised from parts, the same envelope round-tripped.
+    checkRefusal(
+      "the_same_envelope_is_refused_after_a_worker_restart",
+      await send(handoff.value.envelope, handoff.value.body),
+    );
+    finish();
+    return;
+  }
 
   // ── 1. concurrent byte-identical replay: one effect, one refusal ──────────
   {
@@ -721,16 +1085,7 @@ async function main(): Promise<void> {
     );
   }
 
-  emit({
-    assertion: "local_ingress_summary",
-    status: failures === 0 ? "pass" : "fail",
-    detail:
-      failures === 0
-        ? "real local workerd + real local D1 ingress checks passed"
-        : `${failures} assertion(s) failed`,
-    scope: "local-workerd + local-D1 on one machine; not deployed proof",
-  });
-  if (failures > 0) process.exitCode = 1;
+  finish();
 }
 
 if (import.meta.main) await main();

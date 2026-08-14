@@ -14,15 +14,28 @@
  */
 
 import { describe, expect, test } from "bun:test";
-import { readFileSync } from "node:fs";
-import { resolve } from "node:path";
+import {
+  existsSync,
+  lstatSync,
+  mkdirSync,
+  mkdtempSync,
+  readFileSync,
+  symlinkSync,
+  writeFileSync,
+} from "node:fs";
+import { tmpdir } from "node:os";
+import { join, resolve } from "node:path";
 import {
   classifyRefusal,
   EXPECTED_REFUSAL,
+  HANDOFF_FILENAME,
   LOCAL_FETCH_TIMEOUT_MS,
   loadSigningKey,
   localFetch,
+  parseHandoff,
+  resolveHandoffPath,
   validateLoopbackOrigin,
+  writeHandoffExclusively,
 } from "../../src/auth/local-check";
 import { cookieTrappedRequest } from "../../src/auth/local-worker";
 
@@ -241,10 +254,15 @@ describe("lifecycle defects that must not return", () => {
   });
 
   test("the busy-port self-test asserts a real outcome instead of emitting pass", () => {
-    const block = script.slice(
-      script.indexOf("busy_run_id="),
-      script.indexOf("child_process_group_is_reaped"),
-    );
+    // Bounded by the self-test that follows it. This used to end at
+    // `child_process_group_is_reaped`, which has since moved above the
+    // busy-port block into the shared survivor helper -- leaving the slice
+    // empty and the assertions below vacuously true against no text at all.
+    const start = script.indexOf("busy_run_id=");
+    const end = script.indexOf("foreign_readiness_is_rejected");
+    expect(start).toBeGreaterThan(-1);
+    expect(end).toBeGreaterThan(start);
+    const block = script.slice(start, end);
     expect(block.length).toBeGreaterThan(0);
     // A contender must be proven not to win, with failure paths that can fire.
     expect(block).toContain("busy_port_contender_never_wins");
@@ -948,5 +966,160 @@ describe("localFetch never carries a signed envelope to a second origin", () => 
     // Before the spread, a caller passing `redirect: "follow"` silently wins.
     expect(manual).toBeGreaterThan(spread);
     expect(signal).toBeGreaterThan(spread);
+  });
+});
+
+describe("the restart handoff cannot be turned into an arbitrary write", () => {
+  const scratch = (): string => mkdtempSync(join(tmpdir(), "s6-handoff-"));
+
+  /**
+   * The first spelling of this took a full path from the environment and handed
+   * it to `Bun.write`, which truncates whatever is already there. That made the
+   * checker an arbitrary-file overwrite driven by an env var: point
+   * `S6_PERSIST_ENVELOPE_PATH` at anything the harness user can write and the
+   * run destroys it, silently, on the way to reporting a pass.
+   *
+   * The interface is now a *directory* and one filename fixed in source, and
+   * every rejection below is a fixed string carrying no candidate path.
+   */
+  test("a missing, relative or non-absolute state dir is refused", () => {
+    for (const value of [undefined, "", "relative/dir", "./x", "~/tmp"]) {
+      const resolved = resolveHandoffPath(value);
+      expect(resolved.ok).toBe(false);
+    }
+  });
+
+  test("a state dir that does not exist is refused", () => {
+    const missing = join(tmpdir(), "s6-handoff-definitely-not-here-9f3a2b");
+    expect(existsSync(missing)).toBe(false);
+    expect(resolveHandoffPath(missing).ok).toBe(false);
+  });
+
+  test("a file, and a symlink standing in for the state dir, are both refused", () => {
+    const dir = scratch();
+    const asFile = join(dir, "not-a-dir");
+    writeFileSync(asFile, "");
+    expect(resolveHandoffPath(asFile).ok).toBe(false);
+
+    const target = join(dir, "real-target");
+    mkdirSync(target);
+    const link = join(dir, "linked");
+    symlinkSync(target, link);
+    // lstat sees the link itself, so this never reaches the directory it names.
+    expect(resolveHandoffPath(link).ok).toBe(false);
+  });
+
+  test("a state dir inside the checkout is refused", () => {
+    // The handoff is per-run scratch. Writing it into the repository is the
+    // artifact-root violation this rule exists to prevent.
+    const inside = resolveHandoffPath(resolve(root, "apps"));
+    expect(inside.ok).toBe(false);
+    if (!inside.ok) expect(inside.detail).toContain("outside the checkout");
+    expect(resolveHandoffPath(root).ok).toBe(false);
+  });
+
+  test("a real private state dir yields exactly one fixed filename", () => {
+    const dir = scratch();
+    const resolved = resolveHandoffPath(dir);
+    expect(resolved.ok).toBe(true);
+    if (resolved.ok) {
+      expect(resolved.path.endsWith(`/${HANDOFF_FILENAME}`)).toBe(true);
+      // The filename is fixed in source; no environment value contributes to it.
+      expect(HANDOFF_FILENAME).not.toContain("/");
+      expect(HANDOFF_FILENAME).not.toContain("..");
+    }
+  });
+
+  test("no rejection detail ever echoes the path it was given", () => {
+    const dir = scratch();
+    const secretish = join(dir, "S3CRET_PATH_DO_NOT_ECHO_4b2c");
+    writeFileSync(secretish, "");
+    const resolved = resolveHandoffPath(secretish);
+    expect(resolved.ok).toBe(false);
+    if (!resolved.ok) expect(resolved.detail).not.toContain("S3CRET_PATH_DO_NOT_ECHO_4b2c");
+  });
+
+  test("PLANTED: the real write refuses an existing file and never truncates it", () => {
+    const dir = scratch();
+    const target = join(dir, HANDOFF_FILENAME);
+    writeFileSync(target, "PRE_EXISTING_CONTENT_MUST_SURVIVE");
+
+    const result = writeHandoffExclusively(target, "REPLACEMENT");
+    expect(result.ok).toBe(false);
+    // Nothing was truncated: the original bytes are still there.
+    expect(readFileSync(target, "utf8")).toBe("PRE_EXISTING_CONTENT_MUST_SURVIVE");
+  });
+
+  test("PLANTED: the real write refuses a planted symlink and spares its target", () => {
+    const dir = scratch();
+    const victim = join(dir, "victim");
+    writeFileSync(victim, "VICTIM_MUST_SURVIVE");
+    symlinkSync(victim, join(dir, HANDOFF_FILENAME));
+
+    const result = writeHandoffExclusively(join(dir, HANDOFF_FILENAME), "REPLACEMENT");
+    expect(result.ok).toBe(false);
+    // O_EXCL does not follow the link, so the link's target is untouched.
+    expect(readFileSync(victim, "utf8")).toBe("VICTIM_MUST_SURVIVE");
+  });
+
+  test("the real write creates an owner-only regular file when the name is free", () => {
+    const dir = scratch();
+    const target = join(dir, HANDOFF_FILENAME);
+    expect(writeHandoffExclusively(target, '{"ok":true}').ok).toBe(true);
+    expect(readFileSync(target, "utf8")).toBe('{"ok":true}');
+    const entry = lstatSync(target);
+    expect(entry.isFile()).toBe(true);
+    // No group or other bits: this file holds a signed envelope.
+    expect(entry.mode & 0o077).toBe(0);
+    // …and a second attempt on the same name is refused, not silently redone.
+    expect(writeHandoffExclusively(target, "SECOND").ok).toBe(false);
+    expect(readFileSync(target, "utf8")).toBe('{"ok":true}');
+  });
+
+  test("a refused write never echoes the payload it was given", () => {
+    const dir = scratch();
+    const target = join(dir, HANDOFF_FILENAME);
+    writeFileSync(target, "x");
+    const result = writeHandoffExclusively(target, "SIGNED_PAYLOAD_MUST_NOT_ECHO_5d8b");
+    expect(result.ok).toBe(false);
+    if (!result.ok) expect(result.detail).not.toContain("SIGNED_PAYLOAD_MUST_NOT_ECHO_5d8b");
+  });
+
+  test("the handoff schema rejects anything but one envelope and its bytes", () => {
+    const good = JSON.stringify({
+      envelope: { claims: { nonce: "n" }, signature: "sig" },
+      body: "{}",
+    });
+    expect(parseHandoff(good).ok).toBe(true);
+
+    const bad = [
+      "not json at all",
+      JSON.stringify(null),
+      JSON.stringify([1, 2]),
+      JSON.stringify({ envelope: { claims: {}, signature: "s" } }),
+      // an extra member is how key material would arrive
+      JSON.stringify({ envelope: { claims: {}, signature: "s" }, body: "{}", d: "PRIVATE" }),
+      JSON.stringify({ envelope: { claims: {}, signature: "s", d: "PRIVATE" }, body: "{}" }),
+      JSON.stringify({ envelope: { claims: {}, signature: 7 }, body: "{}" }),
+      JSON.stringify({ envelope: { claims: "nope", signature: "s" }, body: "{}" }),
+      JSON.stringify({ envelope: { claims: {}, signature: "s" }, body: 5 }),
+    ];
+    for (const value of bad) {
+      expect(parseHandoff(value).ok).toBe(false);
+    }
+  });
+
+  test("a schema rejection never quotes the handoff it read", () => {
+    const withSecret = JSON.stringify({
+      envelope: { claims: {}, signature: "SIGNATURE_MUST_NOT_BE_ECHOED_7a1f" },
+      body: "{}",
+      extra: 1,
+    });
+    const parsed = parseHandoff(withSecret);
+    expect(parsed.ok).toBe(false);
+    if (!parsed.ok) expect(parsed.detail).not.toContain("SIGNATURE_MUST_NOT_BE_ECHOED_7a1f");
+    const broken = parseHandoff('{"signature":"SIG_IN_BROKEN_JSON_9c2e"');
+    expect(broken.ok).toBe(false);
+    if (!broken.ok) expect(broken.detail).not.toContain("SIG_IN_BROKEN_JSON_9c2e");
   });
 });
