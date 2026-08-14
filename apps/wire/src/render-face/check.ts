@@ -31,6 +31,18 @@ const canary = s5Canary();
 
 let failures = 0;
 
+/**
+ * The validator this checker expects: SHA-256 over the exact bytes the response carried.
+ * Computed here independently, so agreement is evidence rather than a shared helper.
+ */
+async function representationEtag(body: string): Promise<string> {
+  const digest = await crypto.subtle.digest("SHA-256", new TextEncoder().encode(body));
+  const hex = Array.from(new Uint8Array(digest), (byte) => byte.toString(16).padStart(2, "0")).join(
+    "",
+  );
+  return `"sha256:${hex}"`;
+}
+
 function emit(record: Record<string, unknown>): void {
   process.stdout.write(
     `${JSON.stringify({ spike: "s5-diptych", phase: "worker-served", repro: REPRO, ...record })}\n`,
@@ -97,16 +109,49 @@ async function main(): Promise<void> {
         `content-type ${String(response.headers.get("content-type"))}`,
         context,
       );
+      const servedEtag = response.headers.get("etag") ?? "";
       check(
-        `served_${format}_etag_is_the_fingerprint`,
-        response.headers.get("etag") === `"${local.fingerprint}"`,
-        `etag ${String(response.headers.get("etag"))} for fingerprint ${local.fingerprint}`,
+        `served_${format}_etag_is_a_sha256_of_the_representation`,
+        servedEtag === (await representationEtag(served)),
+        `etag ${servedEtag}`,
+        context,
+      );
+      check(
+        `served_${format}_etag_is_not_the_projection_fingerprint`,
+        servedEtag.length > 0 && !servedEtag.includes(local.fingerprint),
+        "a projection-wide checksum cannot be a strong per-representation validator",
+        context,
+      );
+      check(
+        `served_${format}_fingerprint_is_served_separately`,
+        response.headers.get("x-asimp-fingerprint") === local.fingerprint,
+        `x-asimp-fingerprint ${String(response.headers.get("x-asimp-fingerprint"))}`,
+        context,
+      );
+      check(
+        `served_${format}_carries_nosniff`,
+        response.headers.get("x-content-type-options") === "nosniff",
+        `x-content-type-options ${String(response.headers.get("x-content-type-options"))}`,
+        context,
+      );
+
+      // HEAD must agree with GET on every validator-bearing header, and carry no body.
+      const head = await fetch(`${origin}/__s5/face?variant=${variant}&format=${format}`, {
+        method: "HEAD",
+      });
+      check(
+        `served_${format}_head_parity`,
+        head.status === 200 &&
+          head.headers.get("etag") === servedEtag &&
+          head.headers.get("content-type") === MEDIA_TYPES[format] &&
+          (await head.text()).length === 0,
+        `HEAD status ${head.status} etag ${String(head.headers.get("etag"))}`,
         context,
       );
 
       // Conditional replay: same validator, no body, same headers.
       const conditional = await fetch(`${origin}/__s5/face?variant=${variant}&format=${format}`, {
-        headers: { "if-none-match": `"${local.fingerprint}"` },
+        headers: { "if-none-match": servedEtag },
       });
       const conditionalBody = await conditional.text();
       check(
@@ -123,14 +168,35 @@ async function main(): Promise<void> {
       );
       check(
         `served_${format}_304_keeps_the_validator`,
-        conditional.headers.get("etag") === `"${local.fingerprint}"`,
+        conditional.headers.get("etag") === servedEtag,
         `etag ${String(conditional.headers.get("etag"))}`,
+        context,
+      );
+
+      // `*` matches whenever a representation exists (RFC 9110 §13.1.2), and a weak
+      // validator for the same representation matches under weak comparison.
+      const wildcard = await fetch(`${origin}/__s5/face?variant=${variant}&format=${format}`, {
+        headers: { "if-none-match": "*" },
+      });
+      check(
+        `served_${format}_wildcard_validator_is_304`,
+        wildcard.status === 304 && (await wildcard.text()).length === 0,
+        `status ${wildcard.status}`,
+        context,
+      );
+      const weak = await fetch(`${origin}/__s5/face?variant=${variant}&format=${format}`, {
+        headers: { "if-none-match": `W/${servedEtag}` },
+      });
+      check(
+        `served_${format}_weak_validator_matches`,
+        weak.status === 304,
+        `status ${weak.status}`,
         context,
       );
 
       // A stale validator must still get the full body.
       const stale = await fetch(`${origin}/__s5/face?variant=${variant}&format=${format}`, {
-        headers: { "if-none-match": '"fnv1a64:0000000000000000"' },
+        headers: { "if-none-match": `"sha256:${"0".repeat(64)}"` },
       });
       check(
         `served_${format}_stale_validator_returns_200`,
@@ -157,10 +223,45 @@ async function main(): Promise<void> {
     }
   }
 
+  // The cross-representation negative. A validator identifies one representation; if an md
+  // ETag can satisfy the json or html face, a client is told a copy it does not hold is
+  // fresh, and it receives no body to discover otherwise.
+  {
+    const mdResponse = await fetch(`${origin}/__s5/face?variant=public&format=md`);
+    const mdEtag = mdResponse.headers.get("etag") ?? "";
+    for (const other of ["json", "html-fragment"] as const) {
+      const crossed = await fetch(`${origin}/__s5/face?variant=public&format=${other}`, {
+        headers: { "if-none-match": mdEtag },
+      });
+      const crossedBody = await crossed.text();
+      check(
+        `md_validator_cannot_satisfy_the_${other}_face`,
+        crossed.status === 200 && crossedBody.length > 0,
+        `status ${crossed.status} with ${crossedBody.length} bytes`,
+        { variant: "public", face: other },
+      );
+    }
+    const crossedVariant = await fetch(`${origin}/__s5/face?variant=sponsor&format=md`, {
+      headers: { "if-none-match": mdEtag },
+    });
+    check(
+      "public_validator_cannot_satisfy_the_sponsor_face",
+      crossedVariant.status === 200,
+      `status ${crossedVariant.status}`,
+      { variant: "sponsor", face: "md" },
+    );
+  }
+
   // Teaching refusals.
   const unknownFormat = await fetch(`${origin}/__s5/face?format=toon`);
   const unknownBody = (await unknownFormat.json()) as Record<string, unknown>;
   check("unknown_format_is_400", unknownFormat.status === 400, `status ${unknownFormat.status}`);
+  check(
+    "teaching_refusal_carries_nosniff",
+    unknownFormat.headers.get("x-content-type-options") === "nosniff",
+    // It reflects the caller's own string back, which §7.7 wants; it must not be sniffable.
+    `x-content-type-options ${String(unknownFormat.headers.get("x-content-type-options"))}`,
+  );
   check("unknown_format_code", unknownBody.code === "UNKNOWN_FORMAT", String(unknownBody.code));
   check(
     "unknown_format_teaches_the_allowed_set",

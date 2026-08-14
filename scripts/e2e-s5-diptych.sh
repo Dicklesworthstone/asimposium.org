@@ -27,10 +27,11 @@
 set -uo pipefail
 
 readonly BLOCKED_EXIT=78
-readonly SEED="${ASIMP_S5_SEED:-s5-fixed-seed-v1}"
 readonly REPRO="bash scripts/e2e-s5-diptych.sh"
-readonly PORT="${S5_PORT:-8793}"
-readonly ORIGIN="http://127.0.0.1:${PORT}"
+# Not readonly: when the caller does not pin S5_PORT, phase 2 picks a free port so two runs
+# never fight over one listener.
+PORT="${S5_PORT:-8793}"
+ORIGIN="http://127.0.0.1:${PORT}"
 readonly WRANGLER="apps/wire/node_modules/.bin/wrangler"
 
 cd "$(dirname "${BASH_SOURCE[0]}")/.." || exit 1
@@ -43,6 +44,42 @@ fi
 
 SECONDS=0
 
+# The seed is caller-supplied (`ASIMP_S5_SEED`) and lands in a JSON record, so it is the one
+# untrusted string in this script. `printf` into a JSON template cannot escape it: a quote
+# forges keys, a newline forges a whole record, and credential-shaped text lands in a build
+# log unredacted. Rather than escape, restrict: a seed is a short, boring identifier or the
+# run refuses to start. That keeps the emitter provably total — every value it can ever
+# receive is already JSON-safe — instead of correct-looking.
+readonly SEED_PATTERN='^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$'
+
+# A JSON-safe alphabet is not the whole story: `asimp_ag_01J…` is letters, digits and
+# underscores, so the shape check above accepts it while it is exactly a Fellow token. The
+# never-log classes are refused by shape as well, before the value can reach a record.
+readonly SEED_CREDENTIAL_SHAPES='asimp_ag_[A-Za-z0-9_-]{4,}|(sk|rk|pk)-[A-Za-z0-9_-]{12,}|gh[pousr]_[A-Za-z0-9]{16,}|AIza[0-9A-Za-z_-]{20,}|[A-Za-z0-9]{32,}'
+
+seed_rejection() {
+  # Deliberately describes the rule without echoing the value: a rejected seed may be
+  # credential-shaped, and the diagnostic that reports a secret is the same leak with extra
+  # steps. The value never reaches stdout, stderr, argv or a log.
+  printf '{"assertion":"seed_accepted","detail":"%s","duration_ms":0,"repro":"%s","seed":"<rejected>","spike":"s5-diptych","status":"fail"}\n' \
+    "$1" "${REPRO}"
+}
+
+if [[ -n "${ASIMP_S5_SEED:-}" ]]; then
+  if ! [[ "${ASIMP_S5_SEED}" =~ ${SEED_PATTERN} ]]; then
+    seed_rejection "ASIMP_S5_SEED must match ${SEED_PATTERN} (letters, digits, dot, underscore, hyphen; <= 64 chars)"
+    exit 64
+  fi
+  if [[ "${ASIMP_S5_SEED}" =~ ${SEED_CREDENTIAL_SHAPES} ]]; then
+    seed_rejection "ASIMP_S5_SEED is credential-shaped; a seed is an identifier, never a secret"
+    exit 64
+  fi
+fi
+readonly SEED="${ASIMP_S5_SEED:-s5-fixed-seed-v1}"
+
+# Every field below is either a literal owned by this file or SEED, which the guard above
+# has already restricted to a JSON-safe alphabet. There is no path by which an unvalidated
+# string reaches this printf.
 phase_record() {
   local assertion="$1" status="$2" detail="$3" duration="$4"
   printf '{"assertion":"%s","detail":"%s","duration_ms":%s,"repro":"%s","seed":"%s","spike":"s5-diptych","status":"%s"}\n' \
@@ -91,18 +128,101 @@ if [[ ! -x "${WRANGLER}" ]]; then
 fi
 
 readonly SERVER_LOG="${RUN_DIR}/wrangler.log"
+
+# `SERVER_PID` is set the instant the server exists, and the cleanup that reads it is
+# defined *before* the spawn, so there is never a window where a server is running and
+# nothing knows how to stop it. It is idempotent: the trap and the happy path both call it.
+SERVER_PID=""
+stop_server() {
+  [[ -n "${SERVER_PID}" ]] || return 0
+  if kill -0 "${SERVER_PID}" 2>/dev/null; then
+    # Signal the process group: wrangler supervises a workerd child, and killing only the
+    # supervisor leaves that child holding the port.
+    kill -TERM "-${SERVER_PID}" 2>/dev/null || kill -TERM "${SERVER_PID}" 2>/dev/null
+    for _wait in {1..20}; do
+      kill -0 "${SERVER_PID}" 2>/dev/null || break
+      sleep 0.1
+    done
+    kill -KILL "-${SERVER_PID}" 2>/dev/null || kill -KILL "${SERVER_PID}" 2>/dev/null
+    wait "${SERVER_PID}" 2>/dev/null
+  fi
+  SERVER_PID=""
+}
+
+# True when something already answers on the port. Uses bash's own /dev/tcp so the check
+# needs no extra tool and cannot be confused by an HTTP status.
+port_is_busy() {
+  (exec 3<>"/dev/tcp/127.0.0.1/$1") 2>/dev/null && exec 3<&- && return 0
+  return 1
+}
+
+# A fixed port makes two concurrent runs collide, and — worse — lets a server left over from
+# an interrupted run satisfy this run's readiness probe, so fresh local renders get compared
+# against stale served bytes and the spike reports green. Refusing a busy port closes both:
+# either this run owns the listener or it does not start.
+if [[ -n "${S5_PORT:-}" ]]; then
+  if port_is_busy "${PORT}"; then
+    phase_record "phase2_worker_served" "fail" \
+      "S5_PORT is already in use; refusing to test against a server this run did not start" 0
+    exit 1
+  fi
+else
+  chosen=""
+  for offset in {0..39}; do
+    candidate=$((8793 + (($$ + offset) % 200)))
+    if ! port_is_busy "${candidate}"; then
+      chosen="${candidate}"
+      break
+    fi
+  done
+  if [[ -z "${chosen}" ]]; then
+    phase_record "phase2_worker_served" "fail" "no free local port in 8793-8992 for the harness" 0
+    exit 1
+  fi
+  PORT="${chosen}"
+  ORIGIN="http://127.0.0.1:${PORT}"
+fi
+
+# `--inspector-port 0` lets the kernel pick the devtools port. Choosing a free *main* port is
+# not enough: wrangler also binds an inspector, whose default (9231) is fixed, so two runs
+# with different main ports still collided there — one died with
+# "Address already in use 127.0.0.1:9231" while the other passed, which is the worst shape of
+# flake because the survivor reports green. 0 is race-free where probe-then-bind is not.
+#
+# Job control in a non-interactive shell, purely so the next background job becomes its own
+# process-group leader. Without it `kill -- -PID` has no group to signal and wrangler's
+# workerd child outlives the supervisor, still holding the port.
+set -m
 "${WRANGLER}" dev apps/wire/src/render-face/worker.ts \
   --config infra/wrangler.toml \
   --local \
   --persist-to "${RUN_DIR}" \
   --port "${PORT}" \
+  --inspector-port 0 \
   --log-level error \
   --show-interactive-dev-session=false \
   >"${SERVER_LOG}" 2>&1 &
-readonly SERVER_PID=$!
+SERVER_PID=$!
+# Installed immediately: from here to the end of the run, every exit path — normal, `set -e`,
+# Ctrl-C, a CI timeout's SIGTERM, a closed terminal — stops the server.
+#
+# A signal handler must *exit*, not merely clean up: a bare `trap stop_server TERM` runs the
+# handler and then resumes the script, so a killed run would tear its own server down and
+# carry on into phase 2 against nothing. Exit codes follow the 128+signal convention, and
+# the EXIT trap re-runs stop_server harmlessly because it is idempotent.
+trap stop_server EXIT
+trap 'stop_server; exit 130' INT
+trap 'stop_server; exit 143' TERM
+trap 'stop_server; exit 129' HUP
+set +m
 
 ready=0
 for _attempt in {1..40}; do
+  # A dead child can never become ready, and continuing to poll would only succeed against
+  # somebody else's server. Fail fast instead of waiting out the loop.
+  if ! kill -0 "${SERVER_PID}" 2>/dev/null; then
+    break
+  fi
   if curl --silent --output /dev/null --max-time 2 "${ORIGIN}/__s5/face?format=md"; then
     ready=1
     break
@@ -110,16 +230,8 @@ for _attempt in {1..40}; do
   sleep 0.25
 done
 
-stop_server() {
-  if kill -0 "${SERVER_PID}" 2>/dev/null; then
-    kill "${SERVER_PID}" 2>/dev/null
-    wait "${SERVER_PID}" 2>/dev/null
-  fi
-}
-
 if [[ ${ready} -ne 1 ]]; then
   show_redacted "wrangler" "${SERVER_LOG}"
-  stop_server
   phase_record "phase2_worker_served" "fail" "the local Worker did not answer; its log is above" "$((SECONDS * 1000))"
   exit 1
 fi

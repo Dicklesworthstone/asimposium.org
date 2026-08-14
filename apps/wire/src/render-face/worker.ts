@@ -11,9 +11,9 @@
  * also why nothing here needs to be mocked.
  *
  * What it proves that an in-process render cannot: that the bytes survive a real HTTP hop,
- * that the media type and ETag a client sees are the ones the projection dictates, that
- * `If-None-Match` yields a bodiless 304, and that the public variant carries no workshop
- * byte after crossing the wire.
+ * that the media type is the one the format dictates, that the ETag identifies *this*
+ * representation and no other, that `If-None-Match` yields a bodiless 304, and that the
+ * public variant carries no workshop byte after crossing the wire.
  */
 
 import {
@@ -54,6 +54,9 @@ function teachingError(
       headers: {
         "content-type": "application/problem+json; charset=utf-8",
         "cache-control": "no-store",
+        // A teaching refusal reflects the caller's own string back at them. That is the
+        // point (Fable §7.7), but it must never be sniffable into markup.
+        "x-content-type-options": "nosniff",
       },
     },
   );
@@ -78,18 +81,51 @@ function notFound(): Response {
       headers: {
         "content-type": "application/problem+json; charset=utf-8",
         "cache-control": "no-store",
+        // A teaching refusal reflects the caller's own string back at them. That is the
+        // point (Fable §7.7), but it must never be sniffable into markup.
+        "x-content-type-options": "nosniff",
       },
     },
   );
 }
 
 /**
- * The ETag is the projection's own content fingerprint, quoted as a strong validator. It is
- * not invented here: two faces of one projection share it, so a client can tell that an md
- * and a json face describe the same state (Rule A1).
+ * The ETag is a SHA-256 over the **exact representation bytes**, quoted as a strong
+ * validator.
+ *
+ * It deliberately is not the projection fingerprint. That fingerprint is FNV-1a — a
+ * non-cryptographic drift checksum computed over the *projection*, so all three faces of one
+ * projection share it (`packages/render/README.md`: "not an ETag"; `src/canonical.ts`: "ETags
+ * and per-item digests use the Worker's SHA-256, not this"). Using it as a strong validator
+ * had two defects: an md validator matched the json and html faces, so a conditional request
+ * against a different representation answered 304 with no body and told a client its
+ * markdown copy was a fresh JSON one; and a non-collision-resistant checksum over
+ * attacker-influenced ledger bodies is a cache-poisoning primitive waiting for W4–W6.
+ *
+ * The projection fingerprint is still served, in `x-asimp-fingerprint`, which is where a
+ * client that wants to know "do these two faces describe the same state?" should read it.
  */
-function etagFor(fingerprint: string): string {
-  return `"${fingerprint}"`;
+async function representationEtag(body: string): Promise<string> {
+  const digest = await crypto.subtle.digest("SHA-256", new TextEncoder().encode(body));
+  const hex = Array.from(new Uint8Array(digest), (byte) => byte.toString(16).padStart(2, "0")).join(
+    "",
+  );
+  return `"sha256:${hex}"`;
+}
+
+/**
+ * RFC 9110 §13.1.2: `If-None-Match` is evaluated with the *weak* comparison function, and
+ * `*` matches whenever a current representation exists. A `W/` prefix on the client's side
+ * therefore still matches the same representation, and a list is matched member by member.
+ */
+function ifNoneMatchMatches(header: string | null, etag: string): boolean {
+  if (header === null) return false;
+  const trimmed = header.trim();
+  if (trimmed === "*") return true;
+  return trimmed.split(",").some((candidate) => {
+    const tag = candidate.trim();
+    return (tag.startsWith("W/") ? tag.slice(2) : tag) === etag;
+  });
 }
 
 export default {
@@ -131,11 +167,14 @@ export default {
     }
 
     const face = renderProjection(s5SpikeProjection(requestedVariant), format);
-    const etag = etagFor(face.fingerprint);
+    // Computed over the bytes this response actually carries, so HEAD and GET agree and no
+    // other representation can satisfy this validator.
+    const etag = await representationEtag(face.body);
     const headers: Record<string, string> = {
       "content-type": face.media_type,
       etag,
       "cache-control": "no-store",
+      "x-content-type-options": "nosniff",
       "x-asimp-face": format,
       "x-asimp-variant": requestedVariant,
       "x-asimp-fingerprint": face.fingerprint,
@@ -143,8 +182,7 @@ export default {
 
     // A conditional request that already holds this exact face gets no body. The header set
     // stays identical so a client can compare a 304 against its cached 200 without guessing.
-    const ifNoneMatch = request.headers.get("if-none-match");
-    if (ifNoneMatch?.split(",").some((tag) => tag.trim() === etag) === true) {
+    if (ifNoneMatchMatches(request.headers.get("if-none-match"), etag)) {
       return new Response(null, { status: 304, headers });
     }
 
