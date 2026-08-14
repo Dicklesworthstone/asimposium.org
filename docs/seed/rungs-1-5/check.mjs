@@ -5,7 +5,7 @@ import { readFile } from "node:fs/promises";
 import { dirname, relative, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 
-const CHECK_VERSION = "1.2.0";
+const CHECK_VERSION = "1.4.0";
 const root = dirname(fileURLToPath(import.meta.url));
 const args = new Set(process.argv.slice(2));
 const checkLinks = args.has("--check-links");
@@ -60,6 +60,40 @@ function isSha256(value) {
   return typeof value === "string" && /^[a-f0-9]{64}$/.test(value);
 }
 
+function documentationPathVersion(url) {
+  if (typeof url !== "string") return null;
+  try {
+    const segments = new URL(url).pathname.split("/").filter(Boolean);
+    const documentationIndex = segments.findIndex((segment) => segment === "doc" || segment === "docs");
+    if (documentationIndex === -1) return null;
+    const candidate = segments[documentationIndex + 1];
+    return /^\d+(?:\.\d+){1,2}$/.test(candidate ?? "") ? candidate : null;
+  } catch {
+    return null;
+  }
+}
+
+function validateDocumentationVersionEvidence(source, location) {
+  const urlVersion = documentationPathVersion(source.url);
+  if (urlVersion === null) return;
+  const fields = ["url_version", "observed_content_version", "content_version_status", "content_version_evidence"];
+  if (fields.some((field) => typeof source[field] !== "string" || source[field].trim().length === 0)) {
+    diagnostic("E_DOC_CONTENT_VERSION_EVIDENCE", location, "a versioned documentation URL requires observed content-version evidence; its path alone is not a version claim");
+    return;
+  }
+  if (source.url_version !== urlVersion) {
+    diagnostic("E_DOC_URL_VERSION", location, "source.url_version must equal the version segment in the documentation URL");
+  }
+  if (!["matches", "discrepant"].includes(source.content_version_status)) {
+    diagnostic("E_DOC_CONTENT_VERSION_STATUS", location, "content_version_status must be matches or discrepant");
+    return;
+  }
+  const versionsMatch = source.url_version === source.observed_content_version;
+  if ((versionsMatch && source.content_version_status !== "matches") || (!versionsMatch && source.content_version_status !== "discrepant")) {
+    diagnostic("E_DOC_CONTENT_VERSION_STATUS", location, "content_version_status must accurately describe the URL/content version relationship");
+  }
+}
+
 function validateSource(source, location) {
   const valid = isObject(source);
   if (!valid) {
@@ -89,6 +123,7 @@ function validateSource(source, location) {
   if (typeof source.access_date === "string" && !isIsoDate(source.access_date)) {
     diagnostic("E_SOURCE_DATE", location, "source access_date must use YYYY-MM-DD");
   }
+  validateDocumentationVersionEvidence(source, location);
   if (source.pinned_version !== undefined) {
     if (!requireString(source.pinned_version, location, "source.pinned_version")) return;
     if (typeof source.url === "string" && !source.url.includes(source.pinned_version)) {
@@ -341,6 +376,30 @@ async function checkExternalLinks(dossiers) {
       diagnostic("E_LINK_REACHABILITY", location, `${result.status}${result.detail ? ` (${result.detail})` : ""}`);
     }
     console.log(`link source=${source.id} status=${result.status}`);
+    await checkDocumentationContentVersion(source);
+  }
+}
+
+async function checkDocumentationContentVersion(source) {
+  if (documentationPathVersion(source.url) === null || typeof source.observed_content_version !== "string") return;
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), 12_000);
+  try {
+    const response = await fetch(source.url, { method: "GET", redirect: "follow", signal: controller.signal });
+    if (!response.ok) {
+      diagnostic("E_DOC_CONTENT_VERSION_REACHABILITY", `source:${source.id}`, `HTTP ${response.status}`);
+      return;
+    }
+    const title = /<title[^>]*>([\s\S]*?)<\/title>/i.exec(await response.text())?.[1].replace(/\s+/g, " ").trim();
+    if (typeof title !== "string" || !title.includes(source.observed_content_version)) {
+      diagnostic("E_DOC_CONTENT_VERSION_DRIFT", `source:${source.id}`, "rendered documentation title does not contain the declared observed content version");
+      return;
+    }
+    console.log(`content-version source=${source.id} observed=${source.observed_content_version} status=${source.content_version_status}`);
+  } catch (error) {
+    diagnostic("E_DOC_CONTENT_VERSION_REACHABILITY", `source:${source.id}`, error.name === "AbortError" ? "timed out" : "request failed");
+  } finally {
+    clearTimeout(timer);
   }
 }
 
@@ -405,6 +464,17 @@ function runPlantedRenderedDrift(fixture) {
   if (detected) console.log(`planted-negative id=${fixture.id} status=detected diagnostic=${fixture.expected_diagnostic}`);
 }
 
+function runPlantedDocumentationVersionDrift(fixture) {
+  const before = diagnostics.length;
+  validateSource(fixture.source, `fixtures/planted-negative-doc-url-version-alone.json:${fixture.id}`);
+  const detected = diagnostics.slice(before).some((entry) => entry.code === fixture.expected_diagnostic);
+  if (!detected) {
+    diagnostic("E_NEGATIVE_NOT_DETECTED", "fixtures/planted-negative-doc-url-version-alone.json", `expected ${fixture.expected_diagnostic} was not detected`);
+  }
+  diagnostics.splice(before, diagnostics.length - before);
+  if (detected) console.log(`planted-negative id=${fixture.id} status=detected diagnostic=${fixture.expected_diagnostic}`);
+}
+
 function validateCalibrationPlant(dossier, oracle, location) {
   if (!isObject(dossier) || typeof dossier.statement !== "string") {
     diagnostic("E_PLANTED_ERROR_TARGET", location, "calibration target statement is absent or malformed");
@@ -449,12 +519,13 @@ function printDigestCandidates(oracles, dossiers) {
   for (const dossier of dossiers) console.log(`digest render=${dossier.id} sha256=${digest(renderDossier(dossier))}`);
 }
 
-const [manifest, oracleDocument, renderDocument, missingAnchorFixture, renderedDriftFixture, artifactDriftFixture, calibrationDriftFixture] = await Promise.all([
+const [manifest, oracleDocument, renderDocument, missingAnchorFixture, renderedDriftFixture, documentationVersionFixture, artifactDriftFixture, calibrationDriftFixture] = await Promise.all([
   readJson("manifest.json"),
   readJson("oracles.json"),
   readJson("fixtures/render-expectations.json"),
   readJson("fixtures/planted-negative-missing-anchor.json"),
   readJson("fixtures/planted-negative-rendered-statement-drift.json"),
+  readJson("fixtures/planted-negative-doc-url-version-alone.json"),
   readJson("fixtures/planted-negative-artifact-drift.json"),
   readJson("fixtures/planted-negative-calibration-drift.json"),
 ]);
@@ -490,6 +561,7 @@ validateCalibrationPlant(
 await Promise.all(dossiers.map(checkDossierMarkdown));
 if (selfTest) runPlantedNegative(missingAnchorFixture);
 if (selfTest) runPlantedRenderedDrift(renderedDriftFixture);
+if (selfTest) runPlantedDocumentationVersionDrift(documentationVersionFixture);
 if (selfTest) runPlantedArtifactDrift(artifactDriftFixture);
 if (selfTest) runPlantedCalibrationDrift(calibrationDriftFixture);
 if (emitDigests) printDigestCandidates(oracles, dossiers);

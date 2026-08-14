@@ -76,16 +76,19 @@
         {
           "id": "mpmath-besseljzero",
           "url": "https://mpmath.org/doc/1.3.0/functions/bessel.html#besseljzero",
-          "locator": "mpmath 1.3.0 besseljzero API entry for Bessel-function zeros.",
+          "locator": "besseljzero API entry; the URL path says 1.3.0 while the rendered HTML title observed 2026-08-13 says mpmath 1.2.0 documentation.",
           "license_or_rights": "BSD-3-Clause for mpmath; source body is not vendored here.",
-          "role": "reproduction tool interface",
+          "role": "non-authoritative reproduction interface locator; not a documentation-version pin",
           "access_date": "2026-08-13",
-          "pinned_version": "1.3.0"
+          "url_version": "1.3.0",
+          "observed_content_version": "1.2.0",
+          "content_version_status": "discrepant",
+          "content_version_evidence": "Rendered HTML title observed 2026-08-13: mpmath 1.2.0 documentation."
         },
         {
           "id": "mpmath-1.3.0-sdist",
           "url": "https://files.pythonhosted.org/packages/e0/47/dd32fa426cc72114383ac549964eecb20ecfd886d1e5ccf5340b55b02f57/mpmath-1.3.0.tar.gz",
-          "locator": "mpmath-1.3.0 source distribution; SHA-256 recorded in the rung dossier.",
+          "locator": "authoritative mpmath-1.3.0 source distribution; SHA-256 recorded in the rung dossier.",
           "license_or_rights": "BSD-3-Clause.",
           "role": "pinned tool artifact",
           "access_date": "2026-08-13",
@@ -226,13 +229,13 @@
       "rung": 5,
       "file": "05-literature.md",
       "title": "Rung 5 — Literature: verification modes in four-colour theorem sources",
-      "statement": "Produce an anchored, non-exhaustive map of the verification modes reported by the Appel–Haken 1977 proof bundle (Parts I, II, and its published supplement), Robertson–Sanders–Seymour–Thomas (1997), and Gonthier (2008), distinguishing computer-assisted and formally checked work without ranking their authors or asserting novelty.",
-      "falsifier": "An included source does not support its assigned verification-mode description at the cited locator, a source is misidentified, or a search record reveals that the stated scope omitted a directly relevant primary source without disclosure.",
+      "statement": "Produce an anchored, non-exhaustive map of the verification modes reported by Appel–Haken (1977) Parts I and II, Robertson–Sanders–Seymour–Thomas (1997), and Gonthier (2008), distinguishing computer-assisted and formally checked work without ranking their authors or asserting novelty; separately catalog the cited 1977 supplement DOI metadata without inferring its primary text or page characterization pending publisher-side confirmation.",
+      "falsifier": "An included source does not support its assigned verification-mode description at the cited locator, a source is misidentified, a metadata-only source is presented as verified primary text or assigned a verification mode, or a search record reveals that the stated scope omitted a directly relevant primary source without disclosure.",
       "motivation": "The bounded corpus makes citation anchors, rights handling, literature claims, novelty review, and synthesis anchoring testable without asking the ledger to settle the four-colour theorem.",
-      "scope": "Only the named Appel–Haken 1977 proof bundle, Robertson–Sanders–Seymour–Thomas (1997), and Gonthier (2008), with their stated bibliographic/verification-mode descriptions; citations are links plus short locators, never copied papers.",
+      "scope": "Only Appel–Haken (1977) Parts I and II, Robertson–Sanders–Seymour–Thomas (1997), and Gonthier (2008), with their bibliographic and verification-mode descriptions, plus one 1977 supplement DOI metadata record whose primary text, page range, and characterization remain unverified pending publisher-side confirmation; citations are links plus short locators, never copied papers.",
       "out_of_scope": "A new proof, a historical ranking, a claim that the corpus is exhaustive, or a novelty conclusion about any mathematical result.",
       "success_criteria": [
-        "Each literature claim names a primary source, exact locator, retrieval date, and rights status.",
+        "Each verification-mode claim names a primary source, exact locator, retrieval date, and rights status; metadata-only entries are explicitly barred from primary-text or mode claims.",
         "The review records the search terms and dates, nearest known work, and which claims were actually checked.",
         "A synthesis cannot publish a verification-mode assertion that lacks an anchored ledger citation."
       ],
@@ -256,11 +259,11 @@
           "access_date": "2026-08-13"
         },
         {
-          "id": "appel-haken-1977-supplement",
-          "url": "https://projecteuclid.org/journals/illinois-journal-of-mathematics/volume-21/issue-3/Microfiche-supplement-to-Every-planar-map-is-four-colorable-Part-I-and-Part-II/10.1215/ijm/1256049023.full",
-          "locator": "Appel and Haken (1977), Microfiche supplement to Parts I and II, Illinois Journal of Mathematics 21(3), pp. 1–251; published check material accompanying the proof bundle.",
-          "license_or_rights": "Publisher copyright; citation and locator only, with no supplement body stored.",
-          "role": "primary historical check-material source",
+          "id": "appel-haken-1977-supplement-metadata",
+          "url": "https://doi.org/10.1215/ijm/1256049023",
+          "locator": "DOI 10.1215/ijm/1256049023 bibliographic metadata only; the audit reached an access gateway, so primary text, page range, and characterization are unverified pending publisher-side confirmation.",
+          "license_or_rights": "Publisher rights are not inferred; citation metadata only, with no source body stored.",
+          "role": "citation metadata only; excluded from verification-mode and primary-text claims",
           "access_date": "2026-08-13"
         },
         {
@@ -288,11 +291,11 @@
       ],
       "safety_privacy": ["Only bibliographic metadata and locators are prepared; no copyrighted source body is committed.", "No personal data, hidden reasoning, or ranking of models or authors is requested."],
       "freshness_date": "2026-08-13",
-      "no_claim_boundary": "This is a bounded retrieval plan, not a complete history or an independent assessment of any proof. A qualified literature/formal-methods reviewer must verify every mode description before staging publication.",
+      "no_claim_boundary": "This is a bounded retrieval plan, not a complete history or an independent assessment of any proof. The supplement DOI record is not primary-text evidence; a qualified literature/formal-methods reviewer must verify every mode description and obtain publisher-side supplement confirmation before staging publication.",
       "external_review_required": {
         "expertise": "graph theory historian or formal-methods/literature reviewer",
         "independence": "not the dossier author and not dependent on their unreviewed notes",
-        "evidence": "primary-source reading at each locator, documented search terms/dates, and comparison with the hidden source map",
+        "evidence": "primary-source reading at each locator, publisher-side confirmation of the supplement DOI metadata before any text/page characterization, documented search terms/dates, and comparison with the hidden source map",
         "blocking_before": "W12.1 staging exercise"
       }
     }

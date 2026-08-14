@@ -1,0 +1,12 @@
+{
+  "id": "negative-doc-url-version-alone",
+  "source": {
+    "id": "versioned-doc-without-content-evidence",
+    "url": "https://example.com/doc/1.3.0/functions/bessel.html",
+    "locator": "Bessel-function API entry.",
+    "license_or_rights": "Citation only.",
+    "role": "documentation interface locator",
+    "access_date": "2026-08-13"
+  },
+  "expected_diagnostic": "E_DOC_CONTENT_VERSION_EVIDENCE"
+}

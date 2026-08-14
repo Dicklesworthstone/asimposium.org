@@ -57,12 +57,14 @@
       "kind": "source-map",
       "data": {
         "search_date": "2026-08-13",
-        "search_terms": ["Appel Haken 1977 four color discharging", "Appel Haken Koch 1977 four color reducibility supplement", "Robertson Sanders Seymour Thomas 1997 four colour", "Gonthier 2008 formal proof four color"],
-        "required_sources": ["appel-haken-1977", "appel-haken-koch-1977-part-ii", "appel-haken-1977-supplement", "robertson-et-al-1997", "gonthier-2008"],
-        "expected_mode_labels": {"appel-haken-1977": "computer-assisted proof component", "appel-haken-koch-1977-part-ii": "computer-assisted proof component", "appel-haken-1977-supplement": "published check material", "robertson-et-al-1997": "computer-assisted", "gonthier-2008": "formal proof account"},
+        "search_terms": ["Appel Haken 1977 four color discharging", "Appel Haken Koch 1977 four color reducibility", "10.1215/ijm/1256049023 publisher confirmation", "Robertson Sanders Seymour Thomas 1997 four colour", "Gonthier 2008 formal proof four color"],
+        "required_sources": ["appel-haken-1977", "appel-haken-koch-1977-part-ii", "appel-haken-1977-supplement-metadata", "robertson-et-al-1997", "gonthier-2008"],
+        "expected_mode_labels": {"appel-haken-1977": "computer-assisted proof component", "appel-haken-koch-1977-part-ii": "computer-assisted proof component", "robertson-et-al-1997": "computer-assisted", "gonthier-2008": "formal proof account"},
+        "metadata_only_sources": ["appel-haken-1977-supplement-metadata"],
+        "primary_text_status": {"appel-haken-1977-supplement-metadata": "unverified pending publisher-side confirmation; do not assign a verification mode, title, page range, or check-material characterization"},
         "novelty_verdict": "not asserted"
       },
-      "sha256": "1cb4ef92f16cec0a2e4d67d95b94ec46a1fc9dd771e66d74fd7b22d81d3ba2f7"
+      "sha256": "2c6bdd2ff5021e63542ff6813c3b5ea923e7020669a4fe1baec04ca547a18a58"
     }
   ]
 }
