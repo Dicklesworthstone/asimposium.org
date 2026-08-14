@@ -198,6 +198,53 @@ describe("S-6 planted transport negatives", () => {
     expect(observed?.aborted).toBe(true);
   });
 
+  test("PLANTED: the dispatch deadline also bounds a never-resolving signer", async () => {
+    const h = await harness();
+    const startedAt = performance.now();
+    let fetchAttempted = false;
+
+    await expect(
+      dispatchSignedSponsorRequest({
+        ...dispatchOptions(h, '{"requested_scopes":["promote"]}'),
+        timeoutMs: 75,
+        mintEnvelopeImpl: () => new Promise(() => {}),
+        fetchImpl: async () => {
+          fetchAttempted = true;
+          return new Response(null, { status: 204 });
+        },
+      }),
+    ).rejects.toThrow(/timed out/);
+
+    expect(performance.now() - startedAt).toBeLessThan(5_000);
+    expect(fetchAttempted).toBe(false);
+  });
+
+  test("PLANTED: a pre-aborted caller never enters the signer", async () => {
+    const h = await harness();
+    const caller = new AbortController();
+    const reason = new DOMException("cancelled before dispatch", "AbortError");
+    caller.abort(reason);
+    let signingAttempted = false;
+    let caught: unknown;
+
+    try {
+      await dispatchSignedSponsorRequest({
+        ...dispatchOptions(h, '{"requested_scopes":["promote"]}'),
+        privateKey: {} as CryptoKey,
+        signal: caller.signal,
+        mintEnvelopeImpl: async () => {
+          signingAttempted = true;
+          throw new TypeError("pre-aborted dispatch entered signer");
+        },
+      });
+    } catch (error) {
+      caught = error;
+    }
+
+    expect(caught).toBe(reason);
+    expect(signingAttempted).toBe(false);
+  });
+
   test("PLANTED: caller cancellation rejects a dispatch already in flight", async () => {
     const h = await harness();
     const caller = new AbortController();

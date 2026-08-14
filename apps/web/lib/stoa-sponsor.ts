@@ -82,6 +82,8 @@ export interface DispatchSignedSponsorRequestOptions {
   insecureLoopbackOrigin?: string;
   /** Injectable solely for a transport-boundary test; production uses global fetch. */
   fetchImpl?: StoaFetch;
+  /** Injectable solely for signing-deadline tests; production uses the canonical signer. */
+  mintEnvelopeImpl?: typeof mintServiceEnvelope;
 }
 
 /**
@@ -219,6 +221,9 @@ export async function dispatchSignedSponsorRequest(
   }
 
   const callerSignal = options.signal;
+  if (callerSignal?.aborted === true) {
+    throw abortError(callerSignal.reason, "Stoa request cancelled");
+  }
   const controller = new AbortController();
   const onCallerAbort = (): void => {
     controller.abort(abortError(callerSignal?.reason, "Stoa request cancelled"));
@@ -227,25 +232,41 @@ export async function dispatchSignedSponsorRequest(
   let releaseAbortRace: (() => void) | undefined;
 
   try {
-    if (callerSignal?.aborted === true) onCallerAbort();
-    else callerSignal?.addEventListener("abort", onCallerAbort, { once: true });
+    callerSignal?.addEventListener("abort", onCallerAbort, { once: true });
     timer = setTimeout(() => {
       controller.abort(abortError(undefined, "Stoa request timed out"));
     }, timeoutMs);
 
-    // Cancellation observed during signing must not become a network call: the
-    // envelope is already minted at that point and would otherwise be spent.
-    const envelope = await mintServiceEnvelope({
-      privateKey: options.privateKey,
-      kid: options.kid,
-      now: options.now,
-      lifetimeSeconds: options.lifetimeSeconds,
-      method,
-      route: options.route,
-      action: options.action,
-      principalId: options.sponsorId,
-      body: rawBody,
+    // Enforce the deadline ourselves from before body hashing/signing through
+    // the network call. WebCrypto cannot be cancelled once entered, but the
+    // abandoned promise remains observed by Promise.race and can never reach
+    // fetch after the deadline wins.
+    const deadline = new Promise<never>((_resolve, reject) => {
+      const onAbort = (): void => reject(controller.signal.reason);
+      if (controller.signal.aborted) onAbort();
+      else {
+        controller.signal.addEventListener("abort", onAbort, { once: true });
+        releaseAbortRace = () => controller.signal.removeEventListener("abort", onAbort);
+      }
     });
+    // If a signer or transport throws synchronously after causing an abort,
+    // the shared deadline may not reach Promise.race; keep it observed anyway.
+    void deadline.catch(() => undefined);
+
+    const envelope = await Promise.race([
+      (options.mintEnvelopeImpl ?? mintServiceEnvelope)({
+        privateKey: options.privateKey,
+        kid: options.kid,
+        now: options.now,
+        lifetimeSeconds: options.lifetimeSeconds,
+        method,
+        route: options.route,
+        action: options.action,
+        principalId: options.sponsorId,
+        body: rawBody,
+      }),
+      deadline,
+    ]);
     if (controller.signal.aborted) throw controller.signal.reason;
 
     // The bound cannot be delegated to the transport.  Passing `signal` is
@@ -256,18 +277,6 @@ export async function dispatchSignedSponsorRequest(
     // cancellation before returning its promise. `Promise.race` attaches a
     // handler to both sides, so a later rejection from an abandoned dispatch
     // is observed rather than surfacing as an unhandled rejection.
-    const deadline = new Promise<never>((_resolve, reject) => {
-      const onAbort = (): void => reject(controller.signal.reason);
-      if (controller.signal.aborted) onAbort();
-      else {
-        controller.signal.addEventListener("abort", onAbort, { once: true });
-        releaseAbortRace = () => controller.signal.removeEventListener("abort", onAbort);
-      }
-    });
-    // If the transport throws synchronously after causing an abort, this
-    // promise never reaches `Promise.race`; mark that rejection observed while
-    // preserving the original promise for the normal race below.
-    void deadline.catch(() => undefined);
     const dispatched = (options.fetchImpl ?? fetch)(destination, {
       method,
       headers: serviceEnvelopeHeaders(envelope),
