@@ -1,0 +1,30 @@
+{
+  "report_version": "1.0.0",
+  "prepared_at": "2026-08-13",
+  "scope": "Source-preparation review only; this record is not an external mathematical review or publication approval.",
+  "source_digests": {
+    "docs/seed/sp4d/dossier.json": "392b49386bad1189adc64823c112ad57e48088e9f7f0cda46643cb9f309289fb",
+    "docs/seed/frontier-slate/dossiers.json": "45adb7acbc1a276e7d58e3a0a8f99da572c211f8eb7a1022bfcf547cbc8dcd6c"
+  },
+  "reviewer_record": [
+    {
+      "reviewer": "W12.P2 source-preparation author",
+      "expertise": "Documentation-contract implementation and source-anchor hygiene; not a claimed mathematical specialty review.",
+      "independence": "Not independent of the authored source material.",
+      "verdict": "No mathematical validation issued."
+    }
+  ],
+  "external_review": {
+    "required": true,
+    "required_expertise": ["smooth four-manifold topology", "relevant subfield expertise for each frontier dossier"],
+    "independence_requirement": "Reviewers must be independent of the contribution they review and must identify the source anchors and techniques they checked.",
+    "gate": "No dossier may be described as publication-ready, mathematically validated, resolved, or current until this review occurs."
+  },
+  "unresolved_questions": [
+    "External specialists must confirm every SP4D category distinction and primary locator.",
+    "Each frontier dossier needs a fresh domain-expert literature/status check immediately before real sharpening or publication.",
+    "No runtime ingestion, public rendering, or ledger validation has been exercised by this source-preparation item."
+  ],
+  "corrections": [],
+  "approval_state": "external_review_pending"
+}

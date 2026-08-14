@@ -1,0 +1,19 @@
+name = "asimposium-stoa-local"
+main = "../apps/wire/src/index.ts"
+compatibility_date = "2026-08-13"
+compatibility_flags = ["nodejs_compat"]
+workers_dev = false
+
+[dev]
+port = 8787
+local_protocol = "http"
+
+[[d1_databases]]
+binding = "DB"
+database_name = "asimposium-local"
+database_id = "00000000-0000-0000-0000-000000000000"
+migrations_dir = "../db/migrations"
+
+[[r2_buckets]]
+binding = "ARTIFACTS"
+bucket_name = "asimposium-artifacts-local"

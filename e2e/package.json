@@ -1,0 +1,17 @@
+{
+  "name": "@asimposium/e2e",
+  "version": "0.1.0",
+  "private": true,
+  "scripts": {
+    "test": "bun run test:unit && bun run test:contract && bun run test:integration",
+    "test:unit": "bash tests/run-diagnostics.test.sh",
+    "test:contract": "bash tests/run-diagnostics.test.sh",
+    "test:integration": "bash tests/smoke-entrypoints.test.sh",
+    "test:security": "bash tests/smoke-entrypoints.test.sh",
+    "test:e2e": "bash run-playwright.sh",
+    "test:gauntlet": "bash gauntlet/run.sh"
+  },
+  "devDependencies": {
+    "@playwright/test": "1.55.0"
+  }
+}

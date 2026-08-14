@@ -1,0 +1,83 @@
+{
+  "schema_version": "seed-dossier/v1",
+  "id": "SP4D",
+  "title": "Smooth four-dimensional Poincaré formulation and bounded reconnaissance",
+  "formulation": "For every smooth, closed 4-manifold X that is homotopy equivalent to the standard 4-sphere S^4, determine whether X is diffeomorphic to S^4. This dossier uses orientation-preserving diffeomorphism after choosing orientations; any orientation convention used by a subgoal must be stated separately.",
+  "scope": "The flagship is restricted to the smooth category, closed manifolds, and the homotopy-sphere hypothesis. It prepares source material and bounded evidence tasks; it does not treat a candidate as a resolution merely because it is difficult to distinguish from S^4.",
+  "out_of_scope": "Topological classification, PL classification, arbitrary homology 4-spheres, smooth Schoenflies, and claims about every Gluck twist are distinct topics unless a future ledger object states an implication and receives independent review.",
+  "motivation": "Dimension four is where topological and smooth classification pull apart most sharply. A careful flagship can make those category boundaries visible while giving agents bounded, falsifiable work instead of an invitation to announce a famous-problem solution.",
+  "falsifier": "A counterexample to the smooth formulation would be a smooth closed homotopy 4-sphere accompanied by independently checked evidence that it is not diffeomorphic to standard S^4. A claimed proof is falsified by a failed inference, a mismatched hypothesis, or an invariant/certificate that does not establish its stated conclusion.",
+  "settlement_conditions": "No resolution-shaped disposition may be requested from this dossier. Any future result claim must enter under-result-review with a complete statement-to-artifact correspondence, independent reviews by qualified external experts, and a specific account of the category and equivalence relation used.",
+  "no_resolution_language": "This is a draft source dossier, not a solution announcement. It makes no claim that the smooth 4-dimensional Poincaré question has been resolved, and no share text may imply that it has.",
+  "safety": "Mathematical source preparation only. Do not present unreviewed diagrams, computations, or model output as expert certification; do not upload private correspondence or hidden reasoning.",
+  "external_expert_requirements": "Before publication, obtain independent written review from at least two external smooth-4-manifold specialists, with one specifically checking category distinctions and one checking each cited anchor. Any claimed theorem-level advance also requires a reviewer with direct expertise in the technique used (for example, handles, gauge theory, or trisections).",
+  "status_freshness": {
+    "source_audit_date": "2026-08-13",
+    "prepublication_recheck_required": true,
+    "recheck_instruction": "A qualified external reviewer must recheck the formulation, literature anchors, and any purported resolution status immediately before the source enters the real sharpening workflow."
+  },
+  "variant_distinctions": [
+    {
+      "variant": "Smooth versus topological",
+      "distinction": "The smooth formulation asks for a diffeomorphism. A topological homeomorphism theorem is not a diffeomorphism theorem and cannot be used here as a smooth resolution."
+    },
+    {
+      "variant": "PL category",
+      "distinction": "The PL formulation is retained as a separately named category question. This dossier neither identifies PL equivalence with smooth diffeomorphism nor infers one category's conclusion from another without a reviewed theorem."
+    },
+    {
+      "variant": "Homology spheres versus homotopy spheres",
+      "distinction": "A homology 4-sphere is not automatically within this formulation. The flagship requires an explicit homotopy-equivalence hypothesis before a candidate is treated as relevant."
+    },
+    {
+      "variant": "Gluck twists",
+      "distinction": "A Gluck-twist calculation is a bounded construction question. It is not evidence that all Gluck twists are standard or that the smooth Poincaré formulation follows."
+    }
+  ],
+  "bounded_subgoals": [
+    {
+      "id": "SP4D-G1",
+      "question": "For one named 2-knot and one fully supplied Kirby or trisection description, check whether the proposed Gluck-twist handle moves produce the stated manifold.",
+      "falsifier": "A move fails, a framing convention is inconsistent, or an independently recomputed invariant disagrees with the claimed target.",
+      "boundary": "One supplied candidate and one declared convention set only; this task makes no universal claim about Gluck twists or exotic S^4.",
+      "evidence_artifact": "A versioned diagram inventory, explicit move ledger, and two independently generated invariant calculations."
+    },
+    {
+      "id": "SP4D-G2",
+      "question": "For a finite, supplied trisection diagram, compute the explicitly named diagrammatic invariant and test its stated behavior under one listed stabilization move.",
+      "falsifier": "The parser rejects the diagram, the stabilization test changes a purported invariant, or an independent recomputation disagrees.",
+      "boundary": "The task is a finite diagram check and does not assert that the invariant classifies smooth homotopy 4-spheres.",
+      "evidence_artifact": "Machine-readable diagram input, deterministic computation log, stabilization fixture, and a reviewer rerun record."
+    },
+    {
+      "id": "SP4D-G3",
+      "question": "Build a citation-to-claim map for one named candidate construction, distinguishing topological, smooth, and PL conclusions at every edge.",
+      "falsifier": "Any map edge lacks a primary anchor, changes category without a cited theorem, or attributes a stronger conclusion than its source states.",
+      "boundary": "Literature mapping only; it neither validates the candidate nor resolves the flagship.",
+      "evidence_artifact": "Anchored citation table with page or theorem locators and independent category-audit notes."
+    }
+  ],
+  "references": [
+    {
+      "id": "FREEDMAN-1982",
+      "authority": "primary",
+      "url": "https://projecteuclid.org/journals/journal-of-differential-geometry/volume-17/issue-3/The-topology-of-four-dimensional-manifolds/10.4310/jdg/1214437136.full",
+      "locator": "Journal of Differential Geometry 17 (1982), pp. 357–453; use the theorem statement in the published paper, not a secondary synopsis.",
+      "why_here": "Anchor for keeping topological conclusions separate from the smooth formulation."
+    },
+    {
+      "id": "GAY-KIRBY-2016",
+      "authority": "primary",
+      "url": "https://arxiv.org/abs/1205.1565",
+      "locator": "Theorem 1 and abstract; journal reference Geometry & Topology 20 (2016), pp. 3097–3132.",
+      "why_here": "Anchor for the existence and stabilization context of trisections, not a classification claim."
+    },
+    {
+      "id": "DONALDSON-1983",
+      "authority": "primary",
+      "url": "https://doi.org/10.4310/jdg/1214437665",
+      "locator": "Journal of Differential Geometry 18 (1983), pp. 279–315; main theorem and hypotheses must be checked against the published text.",
+      "why_here": "Anchor for the distinctive role of smooth four-manifold constraints."
+    }
+  ]
+}
