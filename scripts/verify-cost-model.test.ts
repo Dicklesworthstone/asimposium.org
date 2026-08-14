@@ -1,12 +1,13 @@
 import { describe, expect, test } from "bun:test";
-import { mkdtempSync, writeFileSync } from "node:fs";
+import { createHash } from "node:crypto";
+import { mkdirSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
 import {
   buildS2CostMeasurementReceipt,
-  type S2CostReceiptMetric,
   type S2CostReceiptProvenance,
+  type S2SettledWriteResult,
 } from "../apps/wire/src/krater/s2-client.ts";
 import {
   buildCostVerifierDiagnostic,
@@ -16,10 +17,16 @@ import {
   FABLE_WORKED_EXAMPLE_ASSUMPTIONS,
   MAX_S2_COST_RECEIPT_BYTES,
   REQUIRED_ROW_TOTAL_EXCLUSIONS,
+  S2_COST_EVIDENCE_MANIFEST_VERSION,
+  S2_COST_MANIFEST_RELATIVE_PATH,
   type ReceiptFileSystem,
   receiptDigest,
   runCostVerifierCli,
   S2_COST_METRIC_SCOPE,
+  S2_COST_PUBLICATION_RECORD,
+  S2_COST_PUBLICATION_RELATIVE_PATH,
+  S2_COST_PUBLICATION_SCHEMA_VERSION,
+  S2_COST_RECEIPT_RELATIVE_PATH,
   S2_COST_RECEIPT_RECORD,
   S2_COST_RECEIPT_SCHEMA_VERSION,
   S2_FAILED_RETRY_SCOPE,
@@ -38,34 +45,54 @@ const PRODUCER_PROVENANCE: S2CostReceiptProvenance = {
   dirty_state: "clean",
   source_digest: SOURCE_DIGEST,
 };
-const PRODUCER_METRICS: readonly S2CostReceiptMetric[] = [
-  {
-    successfulBatchRowsRead: 3,
-    successfulBatchRowsWritten: 2,
-    successfulBatchSqlMs: 1,
-    writePhaseMs: 1,
-    writeClaimWallMs: 100,
-    retryCount: 0,
-    preflight: { rows_read: 4, rows_written: 0, sql_ms: 1, statements: 3, wall_ms: 10 },
-  },
-  {
-    successfulBatchRowsRead: 5,
-    successfulBatchRowsWritten: 4,
-    successfulBatchSqlMs: 2,
-    writePhaseMs: 20,
-    writeClaimWallMs: 110,
-    retryCount: 1,
-    preflight: { rows_read: 6, rows_written: 1, sql_ms: 2, statements: 4, wall_ms: 5 },
-  },
-  {
-    successfulBatchRowsRead: 7,
-    successfulBatchRowsWritten: 6,
-    successfulBatchSqlMs: 3,
-    writePhaseMs: 9,
-    writeClaimWallMs: 90,
-    retryCount: 2,
-    preflight: { rows_read: 8, rows_written: 0, sql_ms: 3, statements: 5, wall_ms: 7 },
-  },
+function producerWrite(
+  index: number,
+  rowsRead: number,
+  rowsWritten: number,
+  writePhaseMs: number,
+  writeClaimWallMs: number,
+  retryCount: number,
+  preflightRowsRead: number,
+  preflightRowsWritten: number,
+  preflightStatements: number,
+  preflightWallMs: number,
+): S2SettledWriteResult {
+  const hex = index.toString(16);
+  return {
+    event_id: `E-s2-${String(index).padStart(3, "0")}`,
+    seq: index,
+    idempotent: false,
+    pre_cursor: index - 1,
+    post_cursor: index,
+    payload_sha256: hex.repeat(64),
+    row_digest: hex.repeat(64),
+    build_digest: hex.repeat(64),
+    chain_digest: hex.repeat(64),
+    checkpoint_digest: hex.repeat(64),
+    write_phase_ms: writePhaseMs,
+    successful_batch_rows_read: rowsRead,
+    successful_batch_rows_written: rowsWritten,
+    successful_batch_sql_ms: index,
+    successful_batch_metric_scope: "settled-db.batch-only",
+    failed_retry_batch_metrics: "excluded-d1-error-has-no-meta",
+    preflight_rows_read: preflightRowsRead,
+    preflight_rows_written: preflightRowsWritten,
+    preflight_sql_ms: index,
+    preflight_wall_ms: preflightWallMs,
+    preflight_statements: preflightStatements,
+    preflight_fast_path: true,
+    write_claim_wall_ms: writeClaimWallMs,
+    write_claim_wall_scope: "writeClaim-entry-to-return",
+    lock_wait_ms: null,
+    retry_count: retryCount,
+    outbox_handoff: "armed",
+  };
+}
+
+const PRODUCER_WRITES: readonly S2SettledWriteResult[] = [
+  producerWrite(1, 3, 2, 1, 100, 0, 4, 0, 3, 10),
+  producerWrite(2, 5, 4, 20, 110, 1, 6, 1, 4, 5),
+  producerWrite(3, 7, 6, 9, 90, 2, 8, 0, 5, 7),
 ];
 
 function validReceipt(overrides: Partial<S2CostMeasurementReceipt> = {}): S2CostMeasurementReceipt {
@@ -137,11 +164,117 @@ function parseJsonOutput(output: string): unknown {
   }
 }
 
-function writeCliReceipt(contents: string | Uint8Array): string {
-  const directory = mkdtempSync(join(tmpdir(), "asimposium-s7-cost-"));
-  const receiptPath = join(directory, "receipt.json");
-  writeFileSync(receiptPath, contents);
-  return receiptPath;
+const ALL_LOCAL_PHASES = {
+  exercise: "pass",
+  restart_verify: "pass",
+  upgrade_existing: "pass",
+  upgrade_empty: "pass",
+  upgrade_journal_existing: "pass",
+  upgrade_journal_empty: "pass",
+} as const;
+
+interface CliEvidence {
+  readonly root: string;
+  readonly receiptPath: string;
+  readonly manifestPath: string;
+  readonly publicationPath: string;
+  readonly args: readonly string[];
+}
+
+function sha256(bytes: Uint8Array): string {
+  return createHash("sha256").update(bytes).digest("hex");
+}
+
+function writeCliEvidence(
+  contents: string | Uint8Array,
+  options: { readonly receipt?: "file" | "missing" | "directory" | "fifo" } = {},
+): CliEvidence {
+  const root = mkdtempSync(join(tmpdir(), "asimposium-s7-cost-"));
+  const receiptPath = join(root, S2_COST_RECEIPT_RELATIVE_PATH);
+  const manifestPath = join(root, S2_COST_MANIFEST_RELATIVE_PATH);
+  const publicationPath = join(root, S2_COST_PUBLICATION_RELATIVE_PATH);
+  const bytes = typeof contents === "string" ? new TextEncoder().encode(contents) : contents;
+  const receiptKind = options.receipt ?? "file";
+  if (receiptKind === "file") {
+    writeFileSync(receiptPath, bytes, { mode: 0o600 });
+  } else if (receiptKind === "directory") {
+    mkdirSync(receiptPath, { mode: 0o700 });
+  } else if (receiptKind === "fifo") {
+    const mkfifo = Bun.spawnSync({ cmd: ["mkfifo", receiptPath], stdout: "pipe", stderr: "pipe" });
+    expect(mkfifo.exitCode).toBe(0);
+  }
+  const manifest = {
+    manifest_version: S2_COST_EVIDENCE_MANIFEST_VERSION,
+    run_id: "s2-cost-fixture",
+    revision: REVISION,
+    dirty_state: "clean",
+    source_digest: SOURCE_DIGEST,
+    exit_code: 78,
+    local_phase_status: ALL_LOCAL_PHASES,
+    retention: {
+      retained: true,
+      deletion_performed: false,
+      max_bytes_per_run: 1_000_000,
+      max_files_per_run: 16,
+      retained_bytes_before_manifest: bytes.byteLength,
+      retained_files_before_manifest: receiptKind === "file" ? 1 : 0,
+    },
+    s2_cost_receipt: {
+      path: S2_COST_RECEIPT_RELATIVE_PATH,
+      digest: sha256(bytes),
+      bytes: bytes.byteLength,
+    },
+    files: [],
+  };
+  const manifestBytes = new TextEncoder().encode(JSON.stringify(manifest));
+  const publication = {
+    schema_version: S2_COST_PUBLICATION_SCHEMA_VERSION,
+    record: S2_COST_PUBLICATION_RECORD,
+    manifest: { path: S2_COST_MANIFEST_RELATIVE_PATH, digest: sha256(manifestBytes) },
+    receipt: {
+      path: S2_COST_RECEIPT_RELATIVE_PATH,
+      digest: sha256(bytes),
+      bytes: bytes.byteLength,
+    },
+    provenance: {
+      run_id: manifest.run_id,
+      revision: manifest.revision,
+      dirty_state: manifest.dirty_state,
+      source_digest: manifest.source_digest,
+    },
+    local_phase_status: ALL_LOCAL_PHASES,
+  };
+  writeFileSync(manifestPath, manifestBytes, { mode: 0o600 });
+  writeFileSync(publicationPath, JSON.stringify(publication), { mode: 0o600 });
+  return {
+    root,
+    receiptPath,
+    manifestPath,
+    publicationPath,
+    args: [
+      "--receipt",
+      receiptPath,
+      "--manifest",
+      manifestPath,
+      "--publication",
+      publicationPath,
+    ],
+  };
+}
+
+function rewriteAttestedManifest(
+  evidence: CliEvidence,
+  mutate: (manifest: Record<string, unknown>) => void,
+): void {
+  const manifest = JSON.parse(readFileSync(evidence.manifestPath, "utf8")) as Record<string, unknown>;
+  mutate(manifest);
+  const manifestBytes = new TextEncoder().encode(JSON.stringify(manifest));
+  const publication = JSON.parse(readFileSync(evidence.publicationPath, "utf8")) as {
+    manifest: { digest: string };
+  };
+  publication.manifest.digest = sha256(manifestBytes);
+  writeFileSync(evidence.manifestPath, manifestBytes, { mode: 0o600 });
+  writeFileSync(evidence.publicationPath, JSON.stringify(publication), { mode: 0o600 });
 }
 
 function runStandaloneCli(args: readonly string[]) {
@@ -178,11 +311,12 @@ function finalFstatChangedFileSystem(
   bytes: Uint8Array,
   finalSize: number,
   calls: ReceiptFileSystemCalls,
+  expectedPath: string,
 ): ReceiptFileSystem {
   return {
     open: (receiptPath) => {
       calls.open += 1;
-      expect(receiptPath).toBe("/Users/sensitive/s7-race-receipt.json");
+      expect(receiptPath).toBe(expectedPath);
       return 41;
     },
     fstat: (descriptor) => {
@@ -289,11 +423,11 @@ describe("S7 cost verifier", () => {
   test("accepts the normalized S2 producer receipt but preserves the terminal exit-78 boundary", () => {
     const privateBodySentinel = "s2-private-body-must-not-echo";
     const metricsWithPrivateBody: readonly (
-      | S2CostReceiptMetric
-      | (S2CostReceiptMetric & { readonly privateBody: string })
+      | S2SettledWriteResult
+      | (S2SettledWriteResult & { readonly privateBody: string })
     )[] = [
-      { ...PRODUCER_METRICS[0]!, privateBody: privateBodySentinel },
-      ...PRODUCER_METRICS.slice(1),
+      { ...PRODUCER_WRITES[0]!, privateBody: privateBodySentinel },
+      ...PRODUCER_WRITES.slice(1),
     ];
     const receipt = buildS2CostMeasurementReceipt(
       metricsWithPrivateBody,
@@ -301,8 +435,8 @@ describe("S7 cost verifier", () => {
     );
     const bytes = new TextEncoder().encode(JSON.stringify(receipt));
     const result = verifyCostModel(FABLE_WORKED_EXAMPLE, bytes, PRODUCER_PROVENANCE);
-    const receiptPath = writeCliReceipt(bytes);
-    const cli = runStandaloneCli(["--receipt", receiptPath]);
+    const evidence = writeCliEvidence(bytes);
+    const cli = runStandaloneCli(evidence.args);
 
     expect(result).toMatchObject({
       status: "blocked",
@@ -666,12 +800,15 @@ describe("S7 cost verifier", () => {
 
     for (const [_name, finalSize] of cases) {
       const calls = freshReceiptFileSystemCalls();
+      const evidence = writeCliEvidence(bytes);
       const diagnostic = runCostVerifierCli(
-        ["--receipt", "/Users/sensitive/s7-race-receipt.json"],
-        createReceiptReader(finalFstatChangedFileSystem(bytes, finalSize, calls)),
+        evidence.args,
+        createReceiptReader(
+          finalFstatChangedFileSystem(bytes, finalSize, calls, evidence.receiptPath),
+        ),
       );
 
-      assertUnreadableDiagnostic(diagnostic, ["/Users/sensitive/s7-race-receipt.json"]);
+      assertUnreadableDiagnostic(diagnostic, [evidence.receiptPath]);
       expect(calls).toEqual({ open: 1, fstat: 2, read: 1, close: 1 });
     }
   });
@@ -699,86 +836,128 @@ describe("S7 cost verifier", () => {
       },
     };
 
-    const diagnostic = runCostVerifierCli(
-      ["--receipt", "/Users/sensitive/s7-eacces-receipt.json"],
-      createReceiptReader(deniedFileSystem),
-    );
+    const evidence = writeCliEvidence(receiptBytes());
+    const diagnostic = runCostVerifierCli(evidence.args, createReceiptReader(deniedFileSystem));
 
     assertUnreadableDiagnostic(diagnostic, [
-      "/Users/sensitive/s7-eacces-receipt.json",
+      evidence.receiptPath,
       "EACCES",
       "s7-eacces-should-not-echo",
     ]);
     expect(calls).toEqual({ open: 1, fstat: 0, read: 0, close: 0 });
   });
 
+  test("requires a manifest-bound receipt length and matching all-pass publication", () => {
+    const receiptOnlyEvidence = writeCliEvidence(receiptBytes());
+    const receiptOnly = runStandaloneCli(["--receipt", receiptOnlyEvidence.receiptPath]);
+    expect(receiptOnly.exitCode).toBe(78);
+    expect(parseJsonOutput(receiptOnly.stdout)).toMatchObject({
+      status: "blocked",
+      code: "COST_MODEL_ARGUMENT_INVALID",
+    });
+
+    const byteCountEvidence = writeCliEvidence(receiptBytes());
+    rewriteAttestedManifest(byteCountEvidence, (manifest) => {
+      const artifact = manifest.s2_cost_receipt as Record<string, unknown>;
+      artifact.bytes = Number(artifact.bytes) + 1;
+    });
+    const phaseEvidence = writeCliEvidence(receiptBytes());
+    rewriteAttestedManifest(phaseEvidence, (manifest) => {
+      const statuses = manifest.local_phase_status as Record<string, unknown>;
+      statuses.exercise = "fail";
+    });
+
+    for (const evidence of [byteCountEvidence, phaseEvidence]) {
+      const completed = runStandaloneCli(evidence.args);
+      expect(completed.exitCode).toBe(78);
+      expect(completed.stderr).toBe("");
+      expect(parseJsonOutput(completed.stdout)).toMatchObject({
+        status: "blocked",
+        code: "S2_COST_RECEIPT_INVALID",
+      });
+      expect(completed.stdout).not.toContain(evidence.root);
+    }
+  });
+
   test("real CLI bounds files, distinguishes unreadable receipts, rejects malformed and extra keys, and never echoes input", () => {
-    const regularPath = writeCliReceipt(receiptText());
-    const oversizedPath = writeCliReceipt(new Uint8Array(MAX_S2_COST_RECEIPT_BYTES + 1));
+    const regular = writeCliEvidence(receiptText());
+    const oversized = writeCliEvidence(new Uint8Array(MAX_S2_COST_RECEIPT_BYTES + 1));
     const malformedContent = "{s7-raw-content-should-not-appear";
-    const malformedPath = writeCliReceipt(malformedContent);
+    const malformed = writeCliEvidence(malformedContent);
     const extraKeyValue = "s7-extra-key-value-should-not-appear";
-    const extraKeyPath = writeCliReceipt(
+    const extraKey = writeCliEvidence(
       JSON.stringify({ ...validReceipt(), unexpected: extraKeyValue }),
     );
-    const missingDirectory = mkdtempSync(join(tmpdir(), "asimposium-s7-cost-missing-"));
-    const missingPath = join(missingDirectory, "receipt-that-does-not-exist.json");
-    const nonRegularDirectory = mkdtempSync(join(tmpdir(), "asimposium-s7-cost-directory-"));
-    const fifoDirectory = mkdtempSync(join(tmpdir(), "asimposium-s7-cost-fifo-"));
-    const fifoPath = join(fifoDirectory, "receipt.fifo");
-    const mkfifo = Bun.spawnSync({ cmd: ["mkfifo", fifoPath], stdout: "pipe", stderr: "pipe" });
-    expect(mkfifo.exitCode).toBe(0);
-    const regular = runStandaloneCli(["--receipt", regularPath]);
-    const missing = runStandaloneCli(["--receipt", missingPath]);
-    const oversized = runStandaloneCli(["--receipt", oversizedPath]);
-    const malformed = runStandaloneCli(["--receipt", malformedPath]);
-    const extraKey = runStandaloneCli(["--receipt", extraKeyPath]);
-    const nonRegular = runStandaloneCli(["--receipt", nonRegularDirectory]);
-    const fifo = runStandaloneCli(["--receipt", fifoPath]);
+    const missing = writeCliEvidence(receiptText(), { receipt: "missing" });
+    const nonRegular = writeCliEvidence(receiptText(), { receipt: "directory" });
+    const fifo = writeCliEvidence(receiptText(), { receipt: "fifo" });
+    const completedRegular = runStandaloneCli(regular.args);
+    const completedMissing = runStandaloneCli(missing.args);
+    const completedOversized = runStandaloneCli(oversized.args);
+    const completedMalformed = runStandaloneCli(malformed.args);
+    const completedExtraKey = runStandaloneCli(extraKey.args);
+    const completedNonRegular = runStandaloneCli(nonRegular.args);
+    const completedFifo = runStandaloneCli(fifo.args);
 
-    for (const completed of [regular, missing, oversized, malformed, extraKey, nonRegular, fifo]) {
+    for (const completed of [
+      completedRegular,
+      completedMissing,
+      completedOversized,
+      completedMalformed,
+      completedExtraKey,
+      completedNonRegular,
+      completedFifo,
+    ]) {
       expect(completed.exitCode).toBe(78);
       expect(completed.stderr).toBe("");
     }
-    expect(parseJsonOutput(regular.stdout)).toMatchObject({
+    expect(parseJsonOutput(completedRegular.stdout)).toMatchObject({
       status: "blocked",
       code: "COST_MODEL_EXTERNAL_MEASUREMENTS_UNAVAILABLE",
       cost_model: { s2: { state: "accepted-local" } },
     });
-    expect(parseJsonOutput(missing.stdout)).toMatchObject({
+    expect(parseJsonOutput(completedMissing.stdout)).toMatchObject({
       status: "blocked",
       code: "S2_COST_RECEIPT_UNREADABLE",
     });
-    expect(parseJsonOutput(oversized.stdout)).toMatchObject({
+    expect(parseJsonOutput(completedOversized.stdout)).toMatchObject({
       status: "blocked",
       code: "S2_COST_RECEIPT_TOO_LARGE",
     });
-    expect(parseJsonOutput(malformed.stdout)).toMatchObject({
+    expect(parseJsonOutput(completedMalformed.stdout)).toMatchObject({
       status: "blocked",
       code: "S2_COST_RECEIPT_INVALID",
     });
-    expect(parseJsonOutput(extraKey.stdout)).toMatchObject({
+    expect(parseJsonOutput(completedExtraKey.stdout)).toMatchObject({
       status: "blocked",
       code: "S2_COST_RECEIPT_INVALID",
     });
-    expect(parseJsonOutput(nonRegular.stdout)).toMatchObject({
+    expect(parseJsonOutput(completedNonRegular.stdout)).toMatchObject({
       status: "blocked",
       code: "S2_COST_RECEIPT_UNREADABLE",
     });
-    expect(parseJsonOutput(fifo.stdout)).toMatchObject({
+    expect(parseJsonOutput(completedFifo.stdout)).toMatchObject({
       status: "blocked",
       code: "S2_COST_RECEIPT_UNREADABLE",
     });
 
-    for (const completed of [regular, missing, oversized, malformed, extraKey, nonRegular, fifo]) {
-      expect(completed.stdout).not.toContain(regularPath);
-      expect(completed.stdout).not.toContain(missingPath);
-      expect(completed.stdout).not.toContain(oversizedPath);
-      expect(completed.stdout).not.toContain(malformedPath);
-      expect(completed.stdout).not.toContain(extraKeyPath);
+    for (const completed of [
+      completedRegular,
+      completedMissing,
+      completedOversized,
+      completedMalformed,
+      completedExtraKey,
+      completedNonRegular,
+      completedFifo,
+    ]) {
+      expect(completed.stdout).not.toContain(regular.receiptPath);
+      expect(completed.stdout).not.toContain(missing.receiptPath);
+      expect(completed.stdout).not.toContain(oversized.receiptPath);
+      expect(completed.stdout).not.toContain(malformed.receiptPath);
+      expect(completed.stdout).not.toContain(extraKey.receiptPath);
       expect(completed.stdout).not.toContain(malformedContent);
       expect(completed.stdout).not.toContain(extraKeyValue);
-      expect(completed.stdout).not.toContain(fifoPath);
+      expect(completed.stdout).not.toContain(fifo.receiptPath);
     }
   });
 

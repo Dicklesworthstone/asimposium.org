@@ -30,6 +30,8 @@ readonly S2_MAX_RETAINED_BYTES=67108864
 readonly S2_MAX_RETAINED_FILES=1024
 readonly S2_EVIDENCE_ROOT="e2e/artifacts/s2-krater"
 readonly S2_COST_RECEIPT_RELATIVE_PATH="s2-cost-input.json"
+readonly S2_COST_MANIFEST_RELATIVE_PATH="manifest.json"
+readonly S2_COST_PUBLICATION_RELATIVE_PATH="s2-cost-publication.json"
 # A parallel child runs the full local D1 suite, including two real migration-journal lanes.
 # Keep the test bounded, but allow its documented work rather than converting a healthy child
 # into a synthetic TERM result before the journal is finished.
@@ -53,6 +55,7 @@ readonly -a S2_SOURCE_PATHS=(
   db/migrations/0004_krater_integrity_v1.sql
   db/migrations/0005_krater_undigested_index.sql
   scripts/verify-cost-model.ts
+  packages/contracts/src/s2-cost-receipt.ts
   scripts/e2e-s2-krater.sh
 )
 readonly -a S2_EXPECTED_MIGRATION_JOURNAL=(
@@ -152,6 +155,8 @@ if ! mkdir "${S2_RUN_DIR}" || ! mkdir "${S2_RUN_DIR}/main"; then
   exit 1
 fi
 readonly S2_COST_RECEIPT_PATH="${S2_RUN_DIR}/${S2_COST_RECEIPT_RELATIVE_PATH}"
+readonly S2_COST_MANIFEST_PATH="${S2_RUN_DIR}/${S2_COST_MANIFEST_RELATIVE_PATH}"
+readonly S2_COST_PUBLICATION_PATH="${S2_RUN_DIR}/${S2_COST_PUBLICATION_RELATIVE_PATH}"
 S2_STATE_DIR="${S2_RUN_DIR}/main"
 readonly S2_STATE_DIR
 readonly S2_SERVER_LOG="${S2_STATE_DIR}/wrangler.log"
@@ -165,6 +170,13 @@ S2_SERVER_PERSIST=""
 S2_SERVER_PORT=""
 S2_ACTIVE_HARNESS_TOKEN=""
 S2_ACTIVE_HARNESS_RUN_ID=""
+S2_COST_PHASE_EXERCISE="not-run"
+S2_COST_PHASE_RESTART_VERIFY="not-run"
+S2_COST_PHASE_UPGRADE_EXISTING="not-run"
+S2_COST_PHASE_UPGRADE_EMPTY="not-run"
+S2_COST_PHASE_UPGRADE_JOURNAL_EXISTING="not-run"
+S2_COST_PHASE_UPGRADE_JOURNAL_EMPTY="not-run"
+S2_COST_LOCAL_PHASES_COMPLETE=0
 S2_LIFECYCLE_CHILD_PID=""
 S2_LIFECYCLE_CHILD_PGID=""
 S2_LIFECYCLE_CHILD_MARKER=""
@@ -546,8 +558,10 @@ start_pinned_supervisor() {
       # an unbounded FIFO wait. The parent-held read end also prevents SIGPIPE on that planted race.
       exec 7<>"${release_fifo}" || return 1
       if ! supervisor_is_owned "${pid}" "${pid}" "${marker}"; then exec 7>&-; return 1; fi
-      if ! group_members "${pid}"; then exec 7>&-; return 1; fi
-      if [[ ${S2_GROUP_MEMBER_COUNT} -ne 1 ]]; then exec 7>&-; return 1; fi
+      if ! pre_release_group_is_stably_pinned "${pid}" "${marker}"; then
+        exec 7>&-
+        return 1
+      fi
       # Arm the watchdog over the already-open descriptor, then prove its parent/supervisor
       # identity before release.  The child command is still blocked, so no workerd descendant
       # can exist in this interval.
@@ -698,6 +712,22 @@ group_contains_pid() {
     [[ "${member}" == "${expected}" ]] && return 0
   done
   return 1
+}
+
+# Before release the fresh session contains only the pinned supervisor, except for a transient
+# helper fork made by the supervisor's own process-table inspection. Two bounded samples prove
+# the exact leader remains the group leader and permit at most that one helper; this avoids
+# treating an observation race as a start failure while still refusing an unexpected pre-release
+# descendant before any real Worker command can run.
+pre_release_group_is_stably_pinned() {
+  local pid="$1" marker="$2" sample
+  for sample in 1 2; do
+    supervisor_is_owned "${pid}" "${pid}" "${marker}" || return 1
+    group_members "${pid}" || return 1
+    [[ ${S2_GROUP_MEMBER_COUNT} -ge 1 && ${S2_GROUP_MEMBER_COUNT} -le 2 ]] || return 1
+    group_contains_pid "${pid}" || return 1
+    (( sample == 2 )) || sleep 0.05
+  done
 }
 
 signal_owned_group() {
@@ -1130,12 +1160,12 @@ cleanup_workers() {
 
 # shellcheck disable=SC2329
 write_evidence_receipt() {
-  local exit_code="$1"
+  local exit_code="$1" publish_cost_receipt="${2:-0}"
   # Environment is the typed input boundary for the Bun receipt writer below.
   # shellcheck disable=SC2034,SC2016
   S2_RECEIPT_ROOT="${S2_RUN_DIR}" \
-  S2_RECEIPT_PATH="${S2_RUN_DIR}/manifest.json" \
-  S2_RECEIPT_RELATIVE_PATH="${S2_RUN_DIR#./}/manifest.json" \
+  S2_RECEIPT_PATH="${S2_COST_MANIFEST_PATH}" \
+  S2_RECEIPT_RELATIVE_PATH="${S2_RUN_DIR#./}/${S2_COST_MANIFEST_RELATIVE_PATH}" \
   S2_RECEIPT_RUN_ID="${S2_RUN_ID}" \
   S2_RECEIPT_REVISION="${S2_GIT_HEAD}" \
   S2_RECEIPT_DIRTY_STATE="${S2_GIT_DIRTY}" \
@@ -1144,10 +1174,28 @@ write_evidence_receipt() {
   S2_RECEIPT_MAX_BYTES="${S2_MAX_RETAINED_BYTES}" \
   S2_RECEIPT_MAX_FILES="${S2_MAX_RETAINED_FILES}" \
   S2_RECEIPT_COST_RELATIVE_PATH="${S2_COST_RECEIPT_RELATIVE_PATH}" \
+  S2_RECEIPT_PUBLISH_COST_RECEIPT="${publish_cost_receipt}" \
+  S2_RECEIPT_PHASE_EXERCISE="${S2_COST_PHASE_EXERCISE}" \
+  S2_RECEIPT_PHASE_RESTART_VERIFY="${S2_COST_PHASE_RESTART_VERIFY}" \
+  S2_RECEIPT_PHASE_UPGRADE_EXISTING="${S2_COST_PHASE_UPGRADE_EXISTING}" \
+  S2_RECEIPT_PHASE_UPGRADE_EMPTY="${S2_COST_PHASE_UPGRADE_EMPTY}" \
+  S2_RECEIPT_PHASE_UPGRADE_JOURNAL_EXISTING="${S2_COST_PHASE_UPGRADE_JOURNAL_EXISTING}" \
+  S2_RECEIPT_PHASE_UPGRADE_JOURNAL_EMPTY="${S2_COST_PHASE_UPGRADE_JOURNAL_EMPTY}" \
   bun --eval '
-    import { lstatSync, readFileSync, readdirSync, writeFileSync } from "node:fs";
-    import { createHash } from "node:crypto";
-    import { relative, resolve } from "node:path";
+    import { createHash, randomUUID } from "node:crypto";
+    import {
+      closeSync,
+      constants,
+      fstatSync,
+      fsyncSync,
+      linkSync,
+      lstatSync,
+      openSync,
+      readFileSync,
+      readdirSync,
+      writeSync,
+    } from "node:fs";
+    import { basename, dirname, relative, resolve } from "node:path";
 
     const root = process.env.S2_RECEIPT_ROOT ?? "";
     const receiptPath = process.env.S2_RECEIPT_PATH ?? "";
@@ -1155,6 +1203,67 @@ write_evidence_receipt() {
     const costReceiptRelativePath = process.env.S2_RECEIPT_COST_RELATIVE_PATH ?? "";
     const maxBytes = Number(process.env.S2_RECEIPT_MAX_BYTES);
     const maxFiles = Number(process.env.S2_RECEIPT_MAX_FILES);
+    const publishCostReceipt = process.env.S2_RECEIPT_PUBLISH_COST_RECEIPT === "1";
+    const localPhaseStatus = {
+      exercise: process.env.S2_RECEIPT_PHASE_EXERCISE,
+      restart_verify: process.env.S2_RECEIPT_PHASE_RESTART_VERIFY,
+      upgrade_existing: process.env.S2_RECEIPT_PHASE_UPGRADE_EXISTING,
+      upgrade_empty: process.env.S2_RECEIPT_PHASE_UPGRADE_EMPTY,
+      upgrade_journal_existing: process.env.S2_RECEIPT_PHASE_UPGRADE_JOURNAL_EXISTING,
+      upgrade_journal_empty: process.env.S2_RECEIPT_PHASE_UPGRADE_JOURNAL_EMPTY,
+    };
+    // A successful call leaves an immutable final name only after the private
+    // sibling has been completely written, fsynced, validated, hard-linked
+    // without replacement, read back, and the owned directory fsynced. The
+    // sibling is intentionally retained on every path: evidence is never
+    // deleted by this harness.
+    const writeExclusiveDurably = (destination, body) => {
+      const directory = dirname(destination);
+      const privateSibling = resolve(
+        directory,
+        `.${basename(destination)}.${randomUUID()}.pending`,
+      );
+      const bytes = Buffer.from(body, "utf8");
+      let descriptor;
+      let directoryDescriptor;
+      try {
+        const directoryStat = lstatSync(directory);
+        if (!directoryStat.isDirectory() || directoryStat.isSymbolicLink()) throw new Error("directory");
+        descriptor = openSync(
+          privateSibling,
+          constants.O_WRONLY | constants.O_CREAT | constants.O_EXCL,
+          0o600,
+        );
+        let offset = 0;
+        while (offset < bytes.byteLength) {
+          const written = writeSync(descriptor, bytes, offset, bytes.byteLength - offset);
+          if (!Number.isSafeInteger(written) || written <= 0) throw new Error("short-write");
+          offset += written;
+        }
+        fsyncSync(descriptor);
+        closeSync(descriptor);
+        descriptor = undefined;
+        const privateStat = lstatSync(privateSibling);
+        if (!privateStat.isFile() || privateStat.isSymbolicLink() || (privateStat.mode & 0o777) !== 0o600) {
+          throw new Error("private-sibling");
+        }
+        if (Buffer.compare(readFileSync(privateSibling), bytes) !== 0) throw new Error("private-readback");
+        // link(2) creates destination only when absent, unlike rename which can replace it.
+        linkSync(privateSibling, destination);
+        directoryDescriptor = openSync(directory, constants.O_RDONLY);
+        fsyncSync(directoryDescriptor);
+        closeSync(directoryDescriptor);
+        directoryDescriptor = undefined;
+        const finalStat = lstatSync(destination);
+        if (!finalStat.isFile() || finalStat.isSymbolicLink() || (finalStat.mode & 0o777) !== 0o600) {
+          throw new Error("final");
+        }
+        if (Buffer.compare(readFileSync(destination), bytes) !== 0) throw new Error("final-readback");
+      } finally {
+        if (descriptor !== undefined) closeSync(descriptor);
+        if (directoryDescriptor !== undefined) closeSync(directoryDescriptor);
+      }
+    };
     const files = [];
     const visit = (directory) => {
       for (const entry of readdirSync(directory, { withFileTypes: true })) {
@@ -1182,7 +1291,7 @@ write_evidence_receipt() {
       if (costReceiptRelativePath !== "s2-cost-input.json") throw new Error("cost-receipt-path");
       const costReceipt = files.find((file) => file.path === costReceiptRelativePath);
       const costReceiptSummary =
-        costReceipt === undefined
+        !publishCostReceipt || costReceipt === undefined
           ? null
           : (() => {
               if (costReceipt.kind !== "file") throw new Error("cost-receipt-kind");
@@ -1195,12 +1304,13 @@ write_evidence_receipt() {
               };
             })();
       const manifest = {
-        manifest_version: "s2-krater-evidence-v1",
+        manifest_version: "s2-krater-evidence-v2",
         run_id: process.env.S2_RECEIPT_RUN_ID,
         revision: process.env.S2_RECEIPT_REVISION,
         dirty_state: process.env.S2_RECEIPT_DIRTY_STATE,
         source_digest: process.env.S2_RECEIPT_SOURCE_DIGEST,
         exit_code: Number(process.env.S2_RECEIPT_EXIT_CODE),
+        local_phase_status: localPhaseStatus,
         retention: {
           retained: true,
           deletion_performed: false,
@@ -1214,7 +1324,7 @@ write_evidence_receipt() {
       };
       const body = `${JSON.stringify(manifest)}\n`;
       if (retainedBytes + Buffer.byteLength(body) > maxBytes) throw new Error("bound");
-      writeFileSync(receiptPath, body, { encoding: "utf8", flag: "wx", mode: 0o600 });
+      writeExclusiveDurably(receiptPath, body);
       const manifestDigest = new Bun.CryptoHasher("sha256").update(body).digest("hex");
       console.log(JSON.stringify({
         tool: "bash+bun",
@@ -1246,6 +1356,124 @@ write_evidence_receipt() {
   '
 }
 
+# A receipt is merely a candidate until every required local phase has passed and this immutable
+# sidecar binds the final generic manifest digest, receipt digest, and exact provenance. A
+# partial/failed sidecar is never accepted by the S-7 CLI; this harness never removes it.
+# shellcheck disable=SC2329
+write_s2_cost_publication() {
+  # shellcheck disable=SC2034,SC2016
+  S2_PUBLICATION_ROOT="${S2_RUN_DIR}" \
+  S2_PUBLICATION_MANIFEST="${S2_COST_MANIFEST_PATH}" \
+  S2_PUBLICATION_RECEIPT="${S2_COST_RECEIPT_PATH}" \
+  S2_PUBLICATION_PATH="${S2_COST_PUBLICATION_PATH}" \
+  bun --eval '
+    import { createHash, randomUUID } from "node:crypto";
+    import {
+      closeSync,
+      constants,
+      fsyncSync,
+      linkSync,
+      lstatSync,
+      openSync,
+      readFileSync,
+      writeSync,
+    } from "node:fs";
+    import { basename, dirname, resolve } from "node:path";
+
+    const root = process.env.S2_PUBLICATION_ROOT ?? "";
+    const manifestPath = process.env.S2_PUBLICATION_MANIFEST ?? "";
+    const receiptPath = process.env.S2_PUBLICATION_RECEIPT ?? "";
+    const publicationPath = process.env.S2_PUBLICATION_PATH ?? "";
+    const digest = (bytes) => createHash("sha256").update(bytes).digest("hex");
+    const writeExclusiveDurably = (destination, body) => {
+      const directory = dirname(destination);
+      const privateSibling = resolve(
+        directory,
+        `.${basename(destination)}.${randomUUID()}.pending`,
+      );
+      const bytes = Buffer.from(body, "utf8");
+      let descriptor;
+      let directoryDescriptor;
+      try {
+        const directoryStat = lstatSync(directory);
+        if (!directoryStat.isDirectory() || directoryStat.isSymbolicLink()) throw new Error("directory");
+        descriptor = openSync(
+          privateSibling,
+          constants.O_WRONLY | constants.O_CREAT | constants.O_EXCL,
+          0o600,
+        );
+        let offset = 0;
+        while (offset < bytes.byteLength) {
+          const written = writeSync(descriptor, bytes, offset, bytes.byteLength - offset);
+          if (!Number.isSafeInteger(written) || written <= 0) throw new Error("short-write");
+          offset += written;
+        }
+        fsyncSync(descriptor);
+        closeSync(descriptor);
+        descriptor = undefined;
+        const privateStat = lstatSync(privateSibling);
+        if (!privateStat.isFile() || privateStat.isSymbolicLink() || (privateStat.mode & 0o777) !== 0o600) {
+          throw new Error("private-sibling");
+        }
+        if (Buffer.compare(readFileSync(privateSibling), bytes) !== 0) throw new Error("private-readback");
+        linkSync(privateSibling, destination);
+        directoryDescriptor = openSync(directory, constants.O_RDONLY);
+        fsyncSync(directoryDescriptor);
+        closeSync(directoryDescriptor);
+        directoryDescriptor = undefined;
+        const finalStat = lstatSync(destination);
+        if (!finalStat.isFile() || finalStat.isSymbolicLink() || (finalStat.mode & 0o777) !== 0o600) {
+          throw new Error("final");
+        }
+        if (Buffer.compare(readFileSync(destination), bytes) !== 0) throw new Error("final-readback");
+      } finally {
+        if (descriptor !== undefined) closeSync(descriptor);
+        if (directoryDescriptor !== undefined) closeSync(directoryDescriptor);
+      }
+    };
+    try {
+      if (!root || lstatSync(root).isSymbolicLink()) throw new Error("root");
+      if (
+        resolve(manifestPath) !== resolve(root, "manifest.json") ||
+        resolve(receiptPath) !== resolve(root, "s2-cost-input.json") ||
+        resolve(publicationPath) !== resolve(root, "s2-cost-publication.json")
+      ) throw new Error("path");
+      for (const pathname of [manifestPath, receiptPath]) {
+        const stat = lstatSync(pathname);
+        if (!stat.isFile() || stat.isSymbolicLink() || (stat.mode & 0o777) !== 0o600) throw new Error("artifact");
+      }
+      const manifestBytes = readFileSync(manifestPath);
+      const receiptBytes = readFileSync(receiptPath);
+      const manifest = JSON.parse(manifestBytes.toString("utf8"));
+      const phases = manifest.local_phase_status;
+      if (
+        manifest.manifest_version !== "s2-krater-evidence-v2" || manifest.exit_code !== 78 ||
+        !manifest.s2_cost_receipt || manifest.s2_cost_receipt.path !== "s2-cost-input.json" ||
+        manifest.s2_cost_receipt.digest !== digest(receiptBytes) ||
+        !phases || Object.values(phases).some((value) => value !== "pass")
+      ) throw new Error("attestation");
+      const publication = {
+        schema_version: "s2-cost-publication-v1",
+        record: "s2_cost_receipt_publication",
+        manifest: { path: "manifest.json", digest: digest(manifestBytes) },
+        receipt: { path: "s2-cost-input.json", digest: digest(receiptBytes), bytes: receiptBytes.byteLength },
+        provenance: {
+          run_id: manifest.run_id,
+          revision: manifest.revision,
+          dirty_state: manifest.dirty_state,
+          source_digest: manifest.source_digest,
+        },
+        local_phase_status: phases,
+      };
+      writeExclusiveDurably(publicationPath, `${JSON.stringify(publication)}\n`);
+      console.log(JSON.stringify({ tool: "bash+bun", package: "apps/wire", suite: "s2-cost-publication", status: "pass", reproduce: "scripts/e2e-s2-krater.sh" }));
+    } catch {
+      console.log(JSON.stringify({ tool: "bash+bun", package: "apps/wire", suite: "s2-cost-publication", status: "fail", code: "S2_COST_PUBLICATION_FAILED", reproduce: "scripts/e2e-s2-krater.sh" }));
+      process.exit(1);
+    }
+  '
+}
+
 create_evidence_subdir() {
   local label="$1" path
   [[ "${label}" =~ ^[a-z0-9][a-z0-9-]{0,31}$ ]] || return 1
@@ -1263,7 +1491,11 @@ on_exit() {
   if ! cleanup_workers; then
     final_status=125
   fi
-  if ! write_evidence_receipt "${final_status}"; then
+  if [[ ${final_status} -eq 78 && ${S2_COST_LOCAL_PHASES_COMPLETE} -eq 1 ]]; then
+    if ! write_evidence_receipt "${final_status}" 1 || ! write_s2_cost_publication; then
+      final_status=125
+    fi
+  elif ! write_evidence_receipt "${final_status}" 0; then
     final_status=125
   fi
   exit "${final_status}"
@@ -1732,9 +1964,10 @@ run_s2_shell_regression_test() {
     status_file="${S2_STATE_DIR}/parent-loss-$(random_hex 8).status"
     start_pinned_supervisor "${status_file}" parent-loss "${S2_STATE_DIR}" "${S2_PORT}" client \
       bash -c 'sleep 30' || return 1
-    printf '%s %s %s %s %s\n' \
+    printf '%s %s %s %s %s %s %s\n' \
       "${S2_STARTED_PID}" "${S2_STARTED_PGID}" "${S2_STARTED_MARKER}" \
-      "${S2_STARTED_WATCHDOG_PID}" "${S2_STARTED_WATCHDOG_HEALTH}" >"${parent_loss_record}"
+      "${S2_STARTED_WATCHDOG_PID}" "${S2_STARTED_WATCHDOG_HEALTH}" \
+      "${S2_STATE_DIR}" "${S2_PORT}" >"${parent_loss_record}"
     # Deliberately bypass the controller EXIT trap: the watchdog in the already-proved group is
     # the subject under test and must TERM/KILL its own group without any parent PID fallback.
     kill -KILL "$$"
@@ -1756,12 +1989,16 @@ run_s2_shell_regression_test() {
     [[ ${parent_loss_status} -eq 137 ]] || return 1
     [[ -f "${parent_loss_record}" && ! -L "${parent_loss_record}" ]] || return 1
     read -r supervisor_pid supervisor_pgid supervisor_marker supervisor_watchdog_pid \
-      supervisor_watchdog_health supervisor_status <"${parent_loss_record}" || return 1
-    is_decimal "${supervisor_pid}" && is_decimal "${supervisor_pgid}" || return 1
-    is_decimal "${supervisor_watchdog_pid}" || return 1
+      supervisor_watchdog_health child_persist child_port <"${parent_loss_record}" || return 1
+    is_decimal "${supervisor_pid}" && is_decimal "${supervisor_pgid}" && \
+      is_decimal "${supervisor_watchdog_pid}" && is_decimal "${child_port}" || return 1
     [[ "${supervisor_pid}" == "${supervisor_pgid}" && -n "${supervisor_marker}" && \
+      -d "${child_persist}" && ! -L "${child_persist}" && \
       -f "${supervisor_watchdog_health}" && ! -L "${supervisor_watchdog_health}" ]] || return 1
-    deadline=$((SECONDS + S2_TERMINATE_WAIT_TICKS + 5))
+    # The payload has a four-second self-expiry. If the retired hook nevertheless leaves its
+    # PPID-1 supervisor alive, reach the exact-marker residual reaper promptly rather than
+    # spending the whole parent test deadline in an unproductive poll.
+    deadline=$((SECONDS + 5))
     while kill -0 -- "-${supervisor_pgid}" 2>/dev/null; do
       if (( SECONDS >= deadline )); then
         # The current hook must never reach this branch. If a deliberately failing old-hook
@@ -1770,7 +2007,9 @@ run_s2_shell_regression_test() {
         if reap_parent_terminated_supervisor_residual \
           "${supervisor_pid}" "${supervisor_pgid}" "${supervisor_marker}" \
           "${child_persist}" "${child_port}"; then
-          emit '{"tool":"bash","package":"apps/wire","suite":"s2-krater-shell","status":"fail","code":"S2_PARENT_TERM_OLD_HOOK_RESIDUAL_REAPED","reproduce":"S2_SHELL_REGRESSION_TEST=term-interrupt-cleanup scripts/e2e-s2-krater.sh"}'
+          emit '{"tool":"bash","package":"apps/wire","suite":"s2-krater-shell","status":"fail","code":"S2_PARENT_LOSS_RESIDUAL_REAPED","reproduce":"S2_SHELL_REGRESSION_TEST=parent-loss scripts/e2e-s2-krater.sh"}'
+        else
+          emit '{"tool":"bash","package":"apps/wire","suite":"s2-krater-shell","status":"fail","code":"S2_PARENT_LOSS_RESIDUAL_UNPROVEN","reproduce":"S2_SHELL_REGRESSION_TEST=parent-loss scripts/e2e-s2-krater.sh"}'
         fi
         return 1
       fi
@@ -1980,9 +2219,21 @@ run_s2_shell_regression_test() {
       -f "${child_status_file}" && ! -L "${child_status_file}" && \
       -p "${child_status_file}.control" && -f "${child_diagnostic}" && ! -L "${child_diagnostic}" ]] || return 1
     [[ "$(<"${child_status_file}")" == "143" ]] || return 1
-    deadline=$((SECONDS + S2_TERMINATE_WAIT_TICKS + 5))
+    # A current cleanup reaches zero before this bound. A deliberately failing
+    # old hook leaves a PPID-1 leader, which must be reaped only by its exact
+    # PID/PGID/marker/persist/port identity rather than merely timing out.
+    deadline=$((SECONDS + 5))
     while kill -0 -- "-${supervisor_pgid}" 2>/dev/null; do
-      (( SECONDS < deadline )) || return 1
+      if (( SECONDS >= deadline )); then
+        if reap_parent_terminated_supervisor_residual \
+          "${supervisor_pid}" "${supervisor_pgid}" "${supervisor_marker}" \
+          "${child_persist}" "${child_port}"; then
+          emit '{"tool":"bash","package":"apps/wire","suite":"s2-krater-shell","status":"fail","code":"S2_PARENT_TERM_OLD_HOOK_RESIDUAL_REAPED","reproduce":"S2_SHELL_REGRESSION_TEST=term-interrupt-cleanup scripts/e2e-s2-krater.sh"}'
+        else
+          emit '{"tool":"bash","package":"apps/wire","suite":"s2-krater-shell","status":"fail","code":"S2_PARENT_TERM_RESIDUAL_UNPROVEN","reproduce":"S2_SHELL_REGRESSION_TEST=term-interrupt-cleanup scripts/e2e-s2-krater.sh"}'
+        fi
+        return 1
+      fi
       sleep 0.1
     done
     assert_no_run_survivors "${child_persist}" "${child_port}" "${supervisor_marker}" || return 1
@@ -2003,7 +2254,10 @@ run_s2_shell_regression_test() {
     # shellcheck disable=SC2016
     S2_PLANT_WATCHDOG_EXIT_ON_TERM=1 \
       start_pinned_supervisor "${status_file}" term-resistant-release "${S2_STATE_DIR}" "${S2_PORT}" client \
-        bash -c 'trap "" TERM; deadline=$((SECONDS + 4)); while (( SECONDS < deadline )); do read -r -t 1 ignored || :; done' || return 1
+        bash -c 'trap "" TERM; deadline=$((SECONDS + 4)); while (( SECONDS < deadline )); do read -r -t 1 ignored || :; done' || {
+          emit '{"tool":"bash","package":"apps/wire","suite":"s2-krater-shell","status":"fail","code":"S2_TERM_RESISTANT_START_FAILED","reproduce":"S2_SHELL_REGRESSION_TEST=term-resistant-release scripts/e2e-s2-krater.sh"}'
+          return 1
+        }
     supervisor_pid="${S2_STARTED_PID}"
     supervisor_pgid="${S2_STARTED_PGID}"
     supervisor_marker="${S2_STARTED_MARKER}"
@@ -2016,14 +2270,23 @@ run_s2_shell_regression_test() {
     # leaving a test process behind after the regression reports failure.
     deadline=$((SECONDS + S2_READY_DEADLINE_SECONDS))
     while :; do
-      group_members "${supervisor_pgid}" || return 1
+      group_members "${supervisor_pgid}" || {
+        emit '{"tool":"bash","package":"apps/wire","suite":"s2-krater-shell","status":"fail","code":"S2_TERM_RESISTANT_GROUP_SCAN_FAILED","reproduce":"S2_SHELL_REGRESSION_TEST=term-resistant-release scripts/e2e-s2-krater.sh"}'
+        return 1
+      }
       # The watchdog briefly runs `sleep`, so there may be a fourth process while it publishes.
       # At least three proves that the TERM-resistant payload has actually started.
       [[ ${S2_GROUP_MEMBER_COUNT} -ge 3 ]] && break
-      (( SECONDS < deadline )) || return 1
+      if (( SECONDS >= deadline )); then
+        emit '{"tool":"bash","package":"apps/wire","suite":"s2-krater-shell","status":"fail","code":"S2_TERM_RESISTANT_PAYLOAD_NOT_READY","reproduce":"S2_SHELL_REGRESSION_TEST=term-resistant-release scripts/e2e-s2-krater.sh"}'
+        return 1
+      fi
       sleep 0.05
     done
-    [[ ${S2_GROUP_MEMBER_COUNT} -ge 3 ]] || return 1
+    if [[ ${S2_GROUP_MEMBER_COUNT} -lt 3 ]]; then
+      emit '{"tool":"bash","package":"apps/wire","suite":"s2-krater-shell","status":"fail","code":"S2_TERM_RESISTANT_PAYLOAD_GROUP_INVALID","reproduce":"S2_SHELL_REGRESSION_TEST=term-resistant-release scripts/e2e-s2-krater.sh"}'
+      return 1
+    fi
     stop_pinned_supervisor "${supervisor_pid}" "${supervisor_pgid}" "${supervisor_marker}" \
       "${supervisor_watchdog_pid}" "${supervisor_watchdog_health}" \
       "${S2_STATE_DIR}" "${S2_PORT}" client || return 1
@@ -2532,8 +2795,9 @@ if [[ "${S2_INTERRUPT_AFTER_READY:-0}" == "1" ]]; then
 fi
 
 if run_phase "exercise"; then
-  :
+  S2_COST_PHASE_EXERCISE="pass"
 else
+  S2_COST_PHASE_EXERCISE="fail"
   S2_CLIENT_EXIT=$?
   stop_worker
   emit_wrangler_failure "LOCAL_D1_SCENARIO_FAILED"
@@ -2547,8 +2811,9 @@ if ! start_worker; then
   exit 1
 fi
 if run_phase "restart-verify"; then
-  :
+  S2_COST_PHASE_RESTART_VERIFY="pass"
 else
+  S2_COST_PHASE_RESTART_VERIFY="fail"
   S2_CLIENT_EXIT=$?
   stop_worker
   emit_wrangler_failure "LOCAL_D1_RESTART_SCENARIO_FAILED"
@@ -2561,14 +2826,16 @@ stop_worker
 # broken upgrade must fail the run rather than be reported alongside a green
 # local proof. Each owns its own port and persistence directory.
 if run_legacy_upgrade_checked "upgrade-existing" "${S2_LEGACY_EXISTING_FIXTURE}" "upgrade-indexed"; then
-  :
+  S2_COST_PHASE_UPGRADE_EXISTING="pass"
 else
+  S2_COST_PHASE_UPGRADE_EXISTING="fail"
   S2_CLIENT_EXIT=$?
   exit "${S2_CLIENT_EXIT}"
 fi
 if run_legacy_upgrade_checked "upgrade-empty" ""; then
-  :
+  S2_COST_PHASE_UPGRADE_EMPTY="pass"
 else
+  S2_COST_PHASE_UPGRADE_EMPTY="fail"
   S2_CLIENT_EXIT=$?
   exit "${S2_CLIENT_EXIT}"
 fi
@@ -2576,17 +2843,20 @@ fi
 # This is distinct from the raw 0004/0005 schema lane above: it begins at the exact 0001
 # fixture and proves the current repository migration journal can advance it in place.
 if run_migration_journal_upgrade "upgrade-journal-existing" "${S2_LEGACY_EXISTING_FIXTURE}"; then
-  :
+  S2_COST_PHASE_UPGRADE_JOURNAL_EXISTING="pass"
 else
+  S2_COST_PHASE_UPGRADE_JOURNAL_EXISTING="fail"
   S2_CLIENT_EXIT=$?
   exit "${S2_CLIENT_EXIT}"
 fi
 if run_migration_journal_upgrade "upgrade-journal-empty" ""; then
-  :
+  S2_COST_PHASE_UPGRADE_JOURNAL_EMPTY="pass"
 else
+  S2_COST_PHASE_UPGRADE_JOURNAL_EMPTY="fail"
   S2_CLIENT_EXIT=$?
   exit "${S2_CLIENT_EXIT}"
 fi
+S2_COST_LOCAL_PHASES_COMPLETE=1
 
 emit "{\"tool\":\"wrangler\",\"tool_version\":\"${S2_WRANGLER_VERSION}\",\"package\":\"apps/wire\",\"suite\":\"s2-krater-local-do-alarm\",\"status\":\"pass\",\"bindings\":{\"d1\":\"DB\",\"durable_object\":\"KRATER_OUTBOX\"},\"reproduce\":\"scripts/e2e-s2-krater.sh\"}"
 emit "{\"tool\":\"wrangler\",\"tool_version\":\"${S2_WRANGLER_VERSION}\",\"package\":\"apps/wire\",\"suite\":\"s2-krater-deployed-do\",\"status\":\"blocked\",\"exit_code\":78,\"code\":\"DEPLOYED_DO_ENVIRONMENT_ABSENT\",\"blocked_on\":\"a deployed Worker with a configured Durable Object namespace and alarm telemetry\",\"forbidden_substitutes\":\"local-workerd behavior presented as deployed Durable Object proof\",\"reproduce\":\"scripts/e2e-s2-krater.sh\"}"

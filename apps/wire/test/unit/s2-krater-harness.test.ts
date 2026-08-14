@@ -4,6 +4,11 @@ import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 
 import {
+  S2_COST_RECEIPT_BINDINGS_KEYS,
+  S2_COST_RECEIPT_ROOT_KEYS,
+} from "@asimposium/contracts";
+
+import {
   buildS2CostMeasurementReceipt,
   S2_COST_RECEIPT_RELATIVE_PATH,
   type S2CostReceiptProvenance,
@@ -183,34 +188,8 @@ describe("S2 to S7 normalized cost receipt", () => {
     ];
     const receipt = buildS2CostMeasurementReceipt(metricsWithPrivateBody, COST_PROVENANCE);
 
-    expect(Object.keys(receipt)).toEqual([
-      "schema_version",
-      "record",
-      "run_id",
-      "phase",
-      "revision",
-      "dirty_state",
-      "source_digest",
-      "scope",
-      "bindings",
-      "status",
-      "metric_scope",
-      "write_receipt_count",
-      "successful_batch_metric_scope",
-      "failed_retry_batch_metrics",
-      "write_claim_wall_scope",
-      "p95_write_phase_ms",
-      "p95_preflight_wall_ms",
-      "p95_write_claim_wall_ms",
-      "sum_successful_batch_rows_read",
-      "sum_successful_batch_rows_written",
-      "sum_preflight_rows_read",
-      "sum_preflight_rows_written",
-      "sum_preflight_statements",
-      "sum_retry_count",
-      "known_row_total_exclusions",
-    ]);
-    expect(Object.keys(receipt.bindings)).toEqual(["d1", "durable_object", "r2"]);
+    expect(Object.keys(receipt)).toEqual([...S2_COST_RECEIPT_ROOT_KEYS]);
+    expect(Object.keys(receipt.bindings)).toEqual([...S2_COST_RECEIPT_BINDINGS_KEYS]);
     expect(receipt).toMatchObject({
       run_id: COST_PROVENANCE.run_id,
       revision: COST_PROVENANCE.revision,
@@ -256,6 +235,12 @@ describe("S2 to S7 normalized cost receipt", () => {
       writeS2CostMeasurementReceipt(malformed, COST_PROVENANCE, { root, receiptPath }),
     ).toThrow("S2_COST_RECEIPT_METRICS_INVALID");
     expect(existsSync(receiptPath)).toBe(false);
+
+    const idempotent = { ...COST_WRITES[0]!, idempotent: true } as unknown as S2SettledWriteResult;
+    expect(() =>
+      writeS2CostMeasurementReceipt([idempotent], COST_PROVENANCE, { root, receiptPath }),
+    ).toThrow("S2_COST_RECEIPT_METRICS_INVALID");
+    expect(existsSync(receiptPath)).toBe(false);
   });
 
   test("writes one mode-0600 regular receipt, refusing overwrite, symlink, and escaped paths", () => {
@@ -289,7 +274,7 @@ describe("S2 to S7 normalized cost receipt", () => {
     const symlinkPath = join(symlinkRoot, S2_COST_RECEIPT_RELATIVE_PATH);
     symlinkSync("untrusted-target", symlinkPath);
     expect(() =>
-      writeS2CostMeasurementReceipt(COST_METRICS, COST_PROVENANCE, {
+      writeS2CostMeasurementReceipt(COST_WRITES, COST_PROVENANCE, {
         root: symlinkRoot,
         receiptPath: symlinkPath,
       }),
@@ -298,7 +283,7 @@ describe("S2 to S7 normalized cost receipt", () => {
 
     const escapedPath = join(root, "nested", S2_COST_RECEIPT_RELATIVE_PATH);
     expect(() =>
-      writeS2CostMeasurementReceipt(COST_METRICS, COST_PROVENANCE, {
+      writeS2CostMeasurementReceipt(COST_WRITES, COST_PROVENANCE, {
         root,
         receiptPath: escapedPath,
       }),
@@ -306,7 +291,7 @@ describe("S2 to S7 normalized cost receipt", () => {
     expect(existsSync(escapedPath)).toBe(false);
   });
 
-  test("keeps receipt creation exercise-only and before its sole pass record", () => {
+  test("keeps receipt creation exercise-only but only publishes it after every local phase", () => {
     const client = readFileSync(
       resolve(REPOSITORY_ROOT, "apps/wire/src/krater/s2-client.ts"),
       "utf8",
@@ -317,9 +302,7 @@ describe("S2 to S7 normalized cost receipt", () => {
     );
     const restartAndUpgrade = client.slice(client.indexOf("async function restartVerify"));
     expect(exercise).toContain("writeS2CostMeasurementReceipt");
-    expect(exercise.indexOf("writeS2CostMeasurementReceipt")).toBeLessThan(
-      exercise.lastIndexOf('status: "pass"'),
-    );
+    expect(exercise.indexOf("writeS2CostMeasurementReceipt")).toBeLessThan(exercise.lastIndexOf('status: "pass"'));
     expect(exercise).toContain("selectedSettledWrite");
     expect(client).toContain("if (write.idempotent)");
     expect(restartAndUpgrade).not.toContain("writeS2CostMeasurementReceipt(");
@@ -330,6 +313,11 @@ describe("S2 to S7 normalized cost receipt", () => {
     expect(shell).toContain('S2_COST_RECEIPT_RELATIVE_PATH="s2-cost-input.json"');
     expect(shell).toContain("s2_cost_receipt: costReceiptSummary");
     expect(shell).toContain('if [[ "${phase}" == "exercise" ]]');
+    expect(shell).toContain("S2_COST_LOCAL_PHASES_COMPLETE=1");
+    expect(shell).toContain("write_s2_cost_publication");
+    expect(shell.indexOf("S2_COST_LOCAL_PHASES_COMPLETE=1")).toBeLessThan(
+      shell.indexOf("write_s2_cost_publication"),
+    );
   });
 
   test("publishes exact supervisor cleanup scope before every normal release write", () => {
@@ -347,6 +335,10 @@ describe("S2 to S7 normalized cost receipt", () => {
     expect(shell).toContain('clear_most_recent_supervisor_if_pid "${S2_SERVER_PID}"');
     expect(shell).toContain("reap_parent_terminated_supervisor_residual");
     expect(shell).toContain("S2_PARENT_TERM_OLD_HOOK_RESIDUAL_REAPED");
+    expect(shell).toContain("S2_PARENT_TERM_RESIDUAL_UNPROVEN");
+    expect(start).toContain("pre_release_group_is_stably_pinned");
+    expect(shell).toContain("S2_GROUP_MEMBER_COUNT -ge 1 && ${S2_GROUP_MEMBER_COUNT} -le 2");
+    expect(shell).toContain("S2_TERM_RESISTANT_START_FAILED");
   });
 });
 

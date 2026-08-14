@@ -76,6 +76,19 @@ const ReceiptArtifactSchema = z.strictObject({
   bytes: NonNegativeSafeIntegerSchema,
 });
 const PhaseStatusSchema = z.enum(["not-run", "pass", "fail", "interrupted"]);
+const RetentionSchema = z.strictObject({
+  retained: z.literal(true),
+  deletion_performed: z.literal(false),
+  max_bytes_per_run: NonNegativeSafeIntegerSchema,
+  max_files_per_run: NonNegativeSafeIntegerSchema,
+  retained_bytes_before_manifest: NonNegativeSafeIntegerSchema,
+  retained_files_before_manifest: NonNegativeSafeIntegerSchema,
+});
+const RetainedFileSchema = z.strictObject({
+  path: z.string().min(1),
+  bytes: NonNegativeSafeIntegerSchema,
+  kind: z.enum(["file", "fifo", "special"]),
+});
 
 export const S2CostReceiptBindingsSchema = z.strictObject({
   d1: z.literal("DB"),
@@ -114,25 +127,25 @@ export const S2CostMeasurementReceiptSchema = z.strictObject({
   ]),
 });
 
-export const S2CostEvidenceManifestSchema = z
-  .object({
-    manifest_version: z.literal(S2_COST_EVIDENCE_MANIFEST_VERSION),
-    run_id: ProvenanceSchema.shape.run_id,
-    revision: ProvenanceSchema.shape.revision,
-    dirty_state: ProvenanceSchema.shape.dirty_state,
-    source_digest: ProvenanceSchema.shape.source_digest,
-    exit_code: z.number().int().min(0).max(255),
-    local_phase_status: z.strictObject({
-      exercise: PhaseStatusSchema,
-      restart_verify: PhaseStatusSchema,
-      upgrade_existing: PhaseStatusSchema,
-      upgrade_empty: PhaseStatusSchema,
-      upgrade_journal_existing: PhaseStatusSchema,
-      upgrade_journal_empty: PhaseStatusSchema,
-    }),
-    s2_cost_receipt: ReceiptArtifactSchema.nullable(),
-  })
-  .passthrough();
+export const S2CostEvidenceManifestSchema = z.strictObject({
+  manifest_version: z.literal(S2_COST_EVIDENCE_MANIFEST_VERSION),
+  run_id: ProvenanceSchema.shape.run_id,
+  revision: ProvenanceSchema.shape.revision,
+  dirty_state: ProvenanceSchema.shape.dirty_state,
+  source_digest: ProvenanceSchema.shape.source_digest,
+  exit_code: z.number().int().min(0).max(255),
+  local_phase_status: z.strictObject({
+    exercise: PhaseStatusSchema,
+    restart_verify: PhaseStatusSchema,
+    upgrade_existing: PhaseStatusSchema,
+    upgrade_empty: PhaseStatusSchema,
+    upgrade_journal_existing: PhaseStatusSchema,
+    upgrade_journal_empty: PhaseStatusSchema,
+  }),
+  retention: RetentionSchema,
+  s2_cost_receipt: ReceiptArtifactSchema.nullable(),
+  files: z.array(RetainedFileSchema),
+});
 
 export const S2CostReceiptPublicationSchema = z.strictObject({
   schema_version: z.literal(S2_COST_PUBLICATION_SCHEMA_VERSION),

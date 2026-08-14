@@ -8,80 +8,60 @@
  */
 
 import { createHash } from "node:crypto";
-import { closeSync, constants, fstatSync, openSync, readSync } from "node:fs";
+import { closeSync, constants, fstatSync, lstatSync, openSync, readSync } from "node:fs";
+import { basename, dirname, resolve } from "node:path";
 
-import type { KraterPreflightCost, KraterWriteResult } from "../apps/wire/src/krater/krater.ts";
+import {
+  MAX_S2_COST_EVIDENCE_MANIFEST_BYTES,
+  MAX_S2_COST_RECEIPT_BYTES,
+  parseS2CostEvidenceManifestBytes,
+  parseS2CostMeasurementReceiptBytes,
+  parseS2CostReceiptPublicationBytes,
+  REQUIRED_ROW_TOTAL_EXCLUSIONS,
+  S2_COST_EVIDENCE_MANIFEST_VERSION,
+  S2_COST_MANIFEST_RELATIVE_PATH,
+  S2_COST_METRIC_SCOPE,
+  S2_COST_PUBLICATION_RELATIVE_PATH,
+  S2_COST_RECEIPT_RECORD,
+  S2_COST_RECEIPT_RELATIVE_PATH,
+  S2_COST_RECEIPT_SCHEMA_VERSION,
+  S2_FAILED_RETRY_SCOPE,
+  S2_LOCAL_SCOPE,
+  type S2CostMeasurementReceipt,
+  type S2CostEvidenceManifest,
+  type S2CostReceiptPublication,
+  S2CostReceiptContractError,
+  S2_SUCCESSFUL_BATCH_SCOPE,
+  S2_WRITE_CLAIM_SCOPE,
+} from "@asimposium/contracts";
 import {
   HARNESS_SCHEMA_VERSION,
   type HarnessEvent,
   validateHarnessEvent,
 } from "./harness/runner.ts";
 
-export const S2_COST_RECEIPT_SCHEMA_VERSION = "s2-cost-input-v1";
-export const S2_COST_RECEIPT_RECORD = "s2_cost_measurement";
-export const S2_COST_METRIC_SCOPE = "selected-settled-write-receipts";
-export const S2_SUCCESSFUL_BATCH_SCOPE = "settled-db.batch-only";
-export const S2_FAILED_RETRY_SCOPE = "excluded-d1-error-has-no-meta";
-export const S2_WRITE_CLAIM_SCOPE = "writeClaim-entry-to-return";
-export const S2_LOCAL_SCOPE = "local-workerd-d1-do";
-/** A receipt is metadata, not an artifact body: fail closed before parsing large input. */
-export const MAX_S2_COST_RECEIPT_BYTES = 64 * 1024;
-
-export const REQUIRED_ROW_TOTAL_EXCLUSIONS = [
-  "head-and-post-write-verification-reads-no-meta",
-  "failed-retry-batches-no-meta",
-] as const;
+export {
+  MAX_S2_COST_RECEIPT_BYTES,
+  REQUIRED_ROW_TOTAL_EXCLUSIONS,
+  S2_COST_METRIC_SCOPE,
+  S2_COST_EVIDENCE_MANIFEST_VERSION,
+  S2_COST_MANIFEST_RELATIVE_PATH,
+  S2_COST_PUBLICATION_RECORD,
+  S2_COST_PUBLICATION_RELATIVE_PATH,
+  S2_COST_PUBLICATION_SCHEMA_VERSION,
+  S2_COST_RECEIPT_RECORD,
+  S2_COST_RECEIPT_RELATIVE_PATH,
+  S2_COST_RECEIPT_SCHEMA_VERSION,
+  S2_FAILED_RETRY_SCOPE,
+  S2_LOCAL_SCOPE,
+  S2_SUCCESSFUL_BATCH_SCOPE,
+  S2_WRITE_CLAIM_SCOPE,
+  type S2CostMeasurementReceipt,
+  type S2CostEvidenceManifest,
+  type S2CostReceiptPublication,
+} from "@asimposium/contracts";
 
 const SAFE_COMPONENT = /^[A-Za-z0-9][A-Za-z0-9._-]{0,79}$/;
-const GIT_REVISION = /^[0-9a-f]{40}$/;
-const SHA256 = /^[0-9a-f]{64}$/;
-const S2_COST_RECEIPT_ROOT_KEYS = [
-  "schema_version",
-  "record",
-  "run_id",
-  "phase",
-  "revision",
-  "dirty_state",
-  "source_digest",
-  "scope",
-  "bindings",
-  "status",
-  "metric_scope",
-  "write_receipt_count",
-  "successful_batch_metric_scope",
-  "failed_retry_batch_metrics",
-  "write_claim_wall_scope",
-  "p95_write_phase_ms",
-  "p95_preflight_wall_ms",
-  "p95_write_claim_wall_ms",
-  "sum_successful_batch_rows_read",
-  "sum_successful_batch_rows_written",
-  "sum_preflight_rows_read",
-  "sum_preflight_rows_written",
-  "sum_preflight_statements",
-  "sum_retry_count",
-  "known_row_total_exclusions",
-] as const;
-const S2_COST_RECEIPT_BINDINGS_KEYS = ["d1", "durable_object", "r2"] as const;
-
-/**
- * This names the existing Krater source of the receipt fields. The cost
- * verifier deliberately consumes a normalized aggregate receipt rather than
- * reaching into the S-2 client's private `WriteResult` decoder.
- */
-export type S2WriteMetricSource = Pick<
-  KraterWriteResult,
-  | "successfulBatchRowsRead"
-  | "successfulBatchRowsWritten"
-  | "successfulBatchSqlMs"
-  | "writeClaimWallMs"
-  | "retryCount"
-> & {
-  readonly preflight: Pick<
-    KraterPreflightCost,
-    "rows_read" | "rows_written" | "sql_ms" | "statements" | "wall_ms"
-  >;
-};
 
 export interface FableWorkedExampleInput {
   readonly problems: number;
@@ -137,38 +117,6 @@ export interface FableWorkloadArithmetic {
   readonly cursor_requests_per_second: number;
   /** Fable §15's stated approximation; retained beside the calculation, not copied into it. */
   readonly fable_stated_cursor_requests_per_second: number;
-}
-
-export interface S2CostMeasurementReceipt {
-  readonly schema_version: typeof S2_COST_RECEIPT_SCHEMA_VERSION;
-  readonly record: typeof S2_COST_RECEIPT_RECORD;
-  readonly run_id: string;
-  readonly phase: "exercise";
-  readonly revision: string;
-  readonly dirty_state: "clean" | "dirty";
-  readonly source_digest: string;
-  readonly scope: typeof S2_LOCAL_SCOPE;
-  readonly bindings: {
-    readonly d1: "DB";
-    readonly durable_object: "KRATER_OUTBOX";
-    readonly r2: null;
-  };
-  readonly status: "pass";
-  readonly metric_scope: typeof S2_COST_METRIC_SCOPE;
-  readonly write_receipt_count: number;
-  readonly successful_batch_metric_scope: typeof S2_SUCCESSFUL_BATCH_SCOPE;
-  readonly failed_retry_batch_metrics: typeof S2_FAILED_RETRY_SCOPE;
-  readonly write_claim_wall_scope: typeof S2_WRITE_CLAIM_SCOPE;
-  readonly p95_write_phase_ms: number;
-  readonly p95_preflight_wall_ms: number;
-  readonly p95_write_claim_wall_ms: number;
-  readonly sum_successful_batch_rows_read: number;
-  readonly sum_successful_batch_rows_written: number;
-  readonly sum_preflight_rows_read: number;
-  readonly sum_preflight_rows_written: number;
-  readonly sum_preflight_statements: number;
-  readonly sum_retry_count: number;
-  readonly known_row_total_exclusions: readonly (typeof REQUIRED_ROW_TOTAL_EXCLUSIONS)[number][];
 }
 
 export interface ExpectedReceiptProvenance {
@@ -377,176 +325,8 @@ function sourceDiscrepancies(workload: FableWorkloadArithmetic): readonly Source
   ];
 }
 
-function asRecord(value: unknown): Record<string, unknown> {
-  if (typeof value !== "object" || value === null || Array.isArray(value)) {
-    throw new CostVerifierError("S2_COST_RECEIPT_INVALID", "receipt must be an object.");
-  }
-  return value as Record<string, unknown>;
-}
-
-function requireExactKeySet(
-  record: Record<string, unknown>,
-  expected: readonly string[],
-  label: string,
-): void {
-  const actual = Object.keys(record);
-  if (
-    actual.length !== expected.length ||
-    expected.some((key) => !Object.hasOwn(record, key)) ||
-    actual.some((key) => !expected.includes(key))
-  ) {
-    throw new CostVerifierError("S2_COST_RECEIPT_INVALID", `${label} has an unexpected key set.`);
-  }
-}
-
-function requireString(record: Record<string, unknown>, field: string): string {
-  const value = record[field];
-  if (typeof value !== "string") {
-    throw new CostVerifierError("S2_COST_RECEIPT_INVALID", `${field} must be a string.`);
-  }
-  return value;
-}
-
-function requireExactString(
-  record: Record<string, unknown>,
-  field: string,
-  expected: string,
-): string {
-  const value = requireString(record, field);
-  if (value !== expected) {
-    throw new CostVerifierError("S2_COST_RECEIPT_INVALID", `${field} has an unexpected scope.`);
-  }
-  return value;
-}
-
-function requireReceiptCount(record: Record<string, unknown>, field: string, minimum = 0): number {
-  const value = record[field];
-  if (!isSafeInteger(value) || value < minimum) {
-    throw new CostVerifierError("S2_COST_RECEIPT_INVALID", `${field} must be a bounded count.`);
-  }
-  return value;
-}
-
-function requireMilliseconds(record: Record<string, unknown>, field: string): number {
-  const value = record[field];
-  if (typeof value !== "number" || !Number.isFinite(value) || value < 0) {
-    throw new CostVerifierError(
-      "S2_COST_RECEIPT_INVALID",
-      `${field} must be non-negative milliseconds.`,
-    );
-  }
-  return value;
-}
-
-function parseBindings(value: unknown): S2CostMeasurementReceipt["bindings"] {
-  const bindings = asRecord(value);
-  requireExactKeySet(bindings, S2_COST_RECEIPT_BINDINGS_KEYS, "receipt bindings");
-  if (bindings.d1 !== "DB" || bindings.durable_object !== "KRATER_OUTBOX" || bindings.r2 !== null) {
-    throw new CostVerifierError(
-      "S2_COST_RECEIPT_INVALID",
-      "receipt bindings have an unexpected scope.",
-    );
-  }
-  return { d1: "DB", durable_object: "KRATER_OUTBOX", r2: null };
-}
-
-function parseExclusions(
-  value: unknown,
-): readonly (typeof REQUIRED_ROW_TOTAL_EXCLUSIONS)[number][] {
-  if (
-    !Array.isArray(value) ||
-    value.length !== REQUIRED_ROW_TOTAL_EXCLUSIONS.length ||
-    value.some((entry, index) => entry !== REQUIRED_ROW_TOTAL_EXCLUSIONS[index])
-  ) {
-    throw new CostVerifierError(
-      "S2_COST_RECEIPT_INVALID",
-      "receipt must declare the exact known row-total exclusions.",
-    );
-  }
-  return REQUIRED_ROW_TOTAL_EXCLUSIONS;
-}
-
-function parseS2CostMeasurementReceiptValue(value: unknown): S2CostMeasurementReceipt {
-  const receipt = asRecord(value);
-  requireExactKeySet(receipt, S2_COST_RECEIPT_ROOT_KEYS, "receipt");
-  requireExactString(receipt, "schema_version", S2_COST_RECEIPT_SCHEMA_VERSION);
-  requireExactString(receipt, "record", S2_COST_RECEIPT_RECORD);
-  const runId = requireString(receipt, "run_id");
-  const revision = requireString(receipt, "revision");
-  const sourceDigest = requireString(receipt, "source_digest");
-  if (!SAFE_COMPONENT.test(runId) || !GIT_REVISION.test(revision) || !SHA256.test(sourceDigest)) {
-    throw new CostVerifierError("S2_COST_RECEIPT_INVALID", "receipt provenance is malformed.");
-  }
-  const dirtyState = requireString(receipt, "dirty_state");
-  if (dirtyState !== "clean" && dirtyState !== "dirty") {
-    throw new CostVerifierError("S2_COST_RECEIPT_INVALID", "receipt dirty_state is invalid.");
-  }
-  requireExactString(receipt, "phase", "exercise");
-  requireExactString(receipt, "scope", S2_LOCAL_SCOPE);
-  requireExactString(receipt, "status", "pass");
-  requireExactString(receipt, "metric_scope", S2_COST_METRIC_SCOPE);
-  requireExactString(receipt, "successful_batch_metric_scope", S2_SUCCESSFUL_BATCH_SCOPE);
-  requireExactString(receipt, "failed_retry_batch_metrics", S2_FAILED_RETRY_SCOPE);
-  requireExactString(receipt, "write_claim_wall_scope", S2_WRITE_CLAIM_SCOPE);
-
-  return {
-    schema_version: S2_COST_RECEIPT_SCHEMA_VERSION,
-    record: S2_COST_RECEIPT_RECORD,
-    run_id: runId,
-    phase: "exercise",
-    revision,
-    dirty_state: dirtyState,
-    source_digest: sourceDigest,
-    scope: S2_LOCAL_SCOPE,
-    bindings: parseBindings(receipt.bindings),
-    status: "pass",
-    metric_scope: S2_COST_METRIC_SCOPE,
-    write_receipt_count: requireReceiptCount(receipt, "write_receipt_count", 1),
-    successful_batch_metric_scope: S2_SUCCESSFUL_BATCH_SCOPE,
-    failed_retry_batch_metrics: S2_FAILED_RETRY_SCOPE,
-    write_claim_wall_scope: S2_WRITE_CLAIM_SCOPE,
-    p95_write_phase_ms: requireMilliseconds(receipt, "p95_write_phase_ms"),
-    p95_preflight_wall_ms: requireMilliseconds(receipt, "p95_preflight_wall_ms"),
-    p95_write_claim_wall_ms: requireMilliseconds(receipt, "p95_write_claim_wall_ms"),
-    sum_successful_batch_rows_read: requireReceiptCount(receipt, "sum_successful_batch_rows_read"),
-    sum_successful_batch_rows_written: requireReceiptCount(
-      receipt,
-      "sum_successful_batch_rows_written",
-    ),
-    sum_preflight_rows_read: requireReceiptCount(receipt, "sum_preflight_rows_read"),
-    sum_preflight_rows_written: requireReceiptCount(receipt, "sum_preflight_rows_written"),
-    sum_preflight_statements: requireReceiptCount(receipt, "sum_preflight_statements"),
-    sum_retry_count: requireReceiptCount(receipt, "sum_retry_count"),
-    known_row_total_exclusions: parseExclusions(receipt.known_row_total_exclusions),
-  };
-}
-
 export function receiptDigest(receiptBytes: Uint8Array): string {
   return createHash("sha256").update(receiptBytes).digest("hex");
-}
-
-/**
- * Receipt bytes are the sole verifier input. The parser deliberately lives at
- * this boundary, so a pre-parsed object can never disagree with the bytes that
- * are digested and reported as the local artifact.
- */
-export function parseS2CostMeasurementReceiptBytes(
-  receiptBytes: Uint8Array,
-): S2CostMeasurementReceipt {
-  if (!(receiptBytes instanceof Uint8Array)) {
-    throw new CostVerifierError("S2_COST_RECEIPT_INVALID", "receipt must be UTF-8 JSON bytes.");
-  }
-  if (receiptBytes.byteLength > MAX_S2_COST_RECEIPT_BYTES) {
-    throw new CostVerifierError("S2_COST_RECEIPT_TOO_LARGE", "receipt exceeds the byte limit.");
-  }
-
-  let value: unknown;
-  try {
-    value = JSON.parse(new TextDecoder("utf-8", { fatal: true }).decode(receiptBytes)) as unknown;
-  } catch {
-    throw new CostVerifierError("S2_COST_RECEIPT_INVALID", "receipt is not valid JSON.");
-  }
-  return parseS2CostMeasurementReceiptValue(value);
 }
 
 function assertExpectedProvenance(
@@ -616,7 +396,7 @@ export function verifyCostModel(
     receipt = parseS2CostMeasurementReceiptBytes(receiptBytes);
     assertExpectedProvenance(receipt, expectedProvenance);
   } catch (error) {
-    if (error instanceof CostVerifierError) {
+    if (error instanceof S2CostReceiptContractError || error instanceof CostVerifierError) {
       const code =
         error.code === "S2_COST_RECEIPT_TOO_LARGE"
           ? "S2_COST_RECEIPT_TOO_LARGE"
@@ -771,7 +551,11 @@ export interface ReceiptFileSystem {
   readonly close: (descriptor: number) => void;
 }
 
-function readReceiptBytes(receiptPath: string, fileSystem: ReceiptFileSystem): Uint8Array {
+function readReceiptBytes(
+  receiptPath: string,
+  fileSystem: ReceiptFileSystem,
+  maximumBytes = MAX_S2_COST_RECEIPT_BYTES,
+): Uint8Array {
   let descriptor: number | undefined;
   let bytes: Uint8Array | undefined;
   let failure: unknown;
@@ -784,7 +568,7 @@ function readReceiptBytes(receiptPath: string, fileSystem: ReceiptFileSystem): U
     if (!before.isFile() || !Number.isSafeInteger(before.size) || before.size < 0) {
       throw new CostVerifierError("S2_COST_RECEIPT_UNREADABLE", "receipt cannot be read.");
     }
-    if (before.size > MAX_S2_COST_RECEIPT_BYTES) {
+    if (before.size > maximumBytes) {
       throw new CostVerifierError("S2_COST_RECEIPT_TOO_LARGE", "receipt exceeds the byte limit.");
     }
 
@@ -837,13 +621,101 @@ export function createReceiptReader(fileSystem: ReceiptFileSystem): ReceiptReade
 }
 
 const defaultReceiptReader = createReceiptReader(NODE_RECEIPT_FILE_SYSTEM);
+const defaultEvidenceReader: ReceiptReader = (receiptPath) =>
+  readReceiptBytes(receiptPath, NODE_RECEIPT_FILE_SYSTEM, MAX_S2_COST_EVIDENCE_MANIFEST_BYTES);
 
-function parseCliArguments(argv: readonly string[]): string | undefined {
+interface CliEvidencePaths {
+  readonly receipt: string;
+  readonly manifest: string;
+  readonly publication: string;
+}
+
+function parseCliArguments(argv: readonly string[]): CliEvidencePaths | undefined {
   if (argv.length === 0) return undefined;
-  if (argv.length === 2 && argv[0] === "--receipt" && argv[1] !== undefined && argv[1] !== "") {
-    return argv[1];
+  if (
+    argv.length === 6 &&
+    argv[0] === "--receipt" &&
+    argv[2] === "--manifest" &&
+    argv[4] === "--publication" &&
+    argv[1] !== undefined &&
+    argv[3] !== undefined &&
+    argv[5] !== undefined &&
+    argv[1] !== "" &&
+    argv[3] !== "" &&
+    argv[5] !== ""
+  ) {
+    return { receipt: argv[1], manifest: argv[3], publication: argv[5] };
   }
   throw new CostVerifierError("COST_MODEL_ARGUMENT_INVALID", "invalid cost-verifier arguments.");
+}
+
+function verifyEvidencePaths(paths: CliEvidencePaths): void {
+  const receipt = resolve(paths.receipt);
+  const root = dirname(receipt);
+  if (
+    basename(receipt) !== S2_COST_RECEIPT_RELATIVE_PATH ||
+    resolve(paths.manifest) !== resolve(root, S2_COST_MANIFEST_RELATIVE_PATH) ||
+    resolve(paths.publication) !== resolve(root, S2_COST_PUBLICATION_RELATIVE_PATH)
+  ) {
+    throw new CostVerifierError("S2_COST_RECEIPT_INVALID", "receipt evidence paths are invalid.");
+  }
+  try {
+    const stat = lstatSync(root);
+    if (!stat.isDirectory() || stat.isSymbolicLink()) {
+      throw new CostVerifierError("S2_COST_RECEIPT_INVALID", "receipt evidence root is invalid.");
+    }
+  } catch (error) {
+    if (error instanceof CostVerifierError) throw error;
+    throw new CostVerifierError("S2_COST_RECEIPT_UNREADABLE", "receipt evidence cannot be read.");
+  }
+}
+
+function attestedReceiptBytes(
+  paths: CliEvidencePaths,
+  readReceipt: ReceiptReader,
+  readEvidence: ReceiptReader,
+): { readonly receipt: Uint8Array; readonly provenance: ExpectedReceiptProvenance } {
+  verifyEvidencePaths(paths);
+  const receipt = readReceipt(paths.receipt);
+  const manifestBytes = readEvidence(paths.manifest);
+  const publicationBytes = readReceipt(paths.publication);
+  const manifest = parseS2CostEvidenceManifestBytes(manifestBytes);
+  const publication = parseS2CostReceiptPublicationBytes(publicationBytes);
+  const digest = receiptDigest(receipt);
+  if (
+    manifest.manifest_version !== S2_COST_EVIDENCE_MANIFEST_VERSION ||
+    manifest.exit_code !== 78 ||
+    manifest.s2_cost_receipt === null ||
+    manifest.s2_cost_receipt.path !== S2_COST_RECEIPT_RELATIVE_PATH ||
+    manifest.s2_cost_receipt.digest !== digest ||
+    manifest.s2_cost_receipt.bytes !== receipt.byteLength ||
+    publication.manifest.digest !== receiptDigest(manifestBytes) ||
+    publication.receipt.digest !== digest ||
+    publication.receipt.bytes !== receipt.byteLength ||
+    publication.provenance.run_id !== manifest.run_id ||
+    publication.provenance.revision !== manifest.revision ||
+    publication.provenance.dirty_state !== manifest.dirty_state ||
+    publication.provenance.source_digest !== manifest.source_digest ||
+    publication.local_phase_status.exercise !== manifest.local_phase_status.exercise ||
+    publication.local_phase_status.restart_verify !== manifest.local_phase_status.restart_verify ||
+    publication.local_phase_status.upgrade_existing !== manifest.local_phase_status.upgrade_existing ||
+    publication.local_phase_status.upgrade_empty !== manifest.local_phase_status.upgrade_empty ||
+    publication.local_phase_status.upgrade_journal_existing !==
+      manifest.local_phase_status.upgrade_journal_existing ||
+    publication.local_phase_status.upgrade_journal_empty !==
+      manifest.local_phase_status.upgrade_journal_empty ||
+    Object.values(manifest.local_phase_status).some((status) => status !== "pass")
+  ) {
+    throw new CostVerifierError("S2_COST_RECEIPT_INVALID", "receipt evidence does not attest local phases.");
+  }
+  return {
+    receipt,
+    provenance: {
+      run_id: manifest.run_id,
+      revision: manifest.revision,
+      source_digest: manifest.source_digest,
+    },
+  };
 }
 
 function cliFailureResult(error: unknown): CostVerificationResult {
@@ -869,14 +741,16 @@ function cliFailureResult(error: unknown): CostVerificationResult {
 export function runCostVerifierCli(
   argv: readonly string[] = process.argv.slice(2),
   readReceipt: ReceiptReader = defaultReceiptReader,
+  readEvidence: ReceiptReader = defaultEvidenceReader,
 ): CostVerifierDiagnostic {
   let result: CostVerificationResult;
   try {
-    const receiptPath = parseCliArguments(argv);
-    if (receiptPath === undefined) {
+    const paths = parseCliArguments(argv);
+    if (paths === undefined) {
       result = verifyCostModel();
     } else {
-      result = verifyCostModel(FABLE_WORKED_EXAMPLE, readReceipt(receiptPath));
+      const attested = attestedReceiptBytes(paths, readReceipt, readEvidence);
+      result = verifyCostModel(FABLE_WORKED_EXAMPLE, attested.receipt, attested.provenance);
     }
   } catch (error) {
     result = cliFailureResult(error);

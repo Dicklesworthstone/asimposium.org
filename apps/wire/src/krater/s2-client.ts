@@ -400,6 +400,17 @@ export function writeS2CostMeasurementReceipt(
     }
     return costReceiptFailure("S2_COST_RECEIPT_WRITE_FAILED");
   }
+  let rootDescriptor: number | undefined;
+  try {
+    rootDescriptor = openSync(resolve(output.root), constants.O_RDONLY);
+    fsyncSync(rootDescriptor);
+  } catch {
+    // The final name may now exist, but without a durable directory entry this
+    // producer must not mint a successful exercise record or manifest claim.
+    return costReceiptFailure("S2_COST_RECEIPT_WRITE_FAILED");
+  } finally {
+    if (rootDescriptor !== undefined) closeSync(rootDescriptor);
+  }
   return {
     receipt,
     artifact: {
