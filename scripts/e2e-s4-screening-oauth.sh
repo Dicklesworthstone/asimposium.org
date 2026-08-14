@@ -4,14 +4,22 @@
 # is BLOCKED, never a simulated pass.
 set -euo pipefail
 
-readonly SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
-readonly REPO_ROOT="$(cd -- "${SCRIPT_DIR}/.." && pwd)"
+SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
+readonly SCRIPT_DIR
+REPO_ROOT="$(cd -- "${SCRIPT_DIR}/.." && pwd)"
+readonly REPO_ROOT
 
 if [[ "${1:-}" == "--self-test" ]]; then
   cd "${REPO_ROOT}"
+  set +e
   bun e2e/screening/s4-runner.ts self-test
+  readonly self_test_status=$?
+  set -e
   bun test e2e/screening/s4-runner.test.ts
-  exit 0
+  if [[ "${self_test_status}" -eq 78 ]]; then
+    printf '%s\n' '{"suite":"s4-screening-oauth","status":"blocked","code":"PROTECTED_HARD_REJECT_BODIES_UNAVAILABLE","detail":"manifest validation passed; no FP/FN accuracy result was produced"}'
+  fi
+  exit "${self_test_status}"
 fi
 
 if [[ $# -ne 0 ]]; then
@@ -30,7 +38,7 @@ case "${runner_status}" in
     printf '%s\n' '{"suite":"s4-screening-oauth","status":"pass","code":"S4_STAGING_DRY_CHECK_GREEN","detail":"staging screening and production configuration dry-check completed"}'
     ;;
   78)
-    printf '%s\n' '{"suite":"s4-screening-oauth","status":"blocked","code":"WORKERS_AI_STAGING_UNAVAILABLE_OR_NOT_CONFIGURED","detail":"no live staging evidence; no provider behavior was simulated"}'
+    printf '%s\n' '{"suite":"s4-screening-oauth","status":"blocked","code":"S4_LIVE_GATE_BLOCKED","detail":"no live screening evidence; inspect the preceding secret-safe runner diagnostic"}'
     ;;
   *)
     printf '%s\n' '{"suite":"s4-screening-oauth","status":"fail","code":"S4_LIVE_SCREENING_OR_OAUTH_DRY_CHECK_FAILED","detail":"inspect the preceding secret-safe runner diagnostics"}'

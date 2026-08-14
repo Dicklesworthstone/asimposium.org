@@ -1,5 +1,11 @@
 import { expect, test } from "bun:test";
-import { aggregateScreeningRun, screeningOpsJsonl, type ScreeningCorpusExample, type ScreeningObservation, type ScreeningRunIdentity } from "../../src/screening";
+import {
+  aggregateScreeningRun,
+  type ScreeningCorpusExample,
+  type ScreeningObservation,
+  type ScreeningRunIdentity,
+  screeningOpsJsonl,
+} from "../../src/screening";
 
 const identity: ScreeningRunIdentity = {
   corpus_revision: "s4-security-v1",
@@ -15,26 +21,51 @@ test("screening OPS JSONL excludes payloads, prompts, raw score bands, and crede
   const forbiddenToken = "asimp_ag_canary000000000000000000";
   const corpus: ScreeningCorpusExample[] = [
     {
+      manifest_version: "s4-manifest-v2",
       id: "legit-001",
-      input_digest: "sha256:legit-security",
+      body_digest: `sha256:${"a".repeat(64)}`,
+      body: "Safe security fixture body.",
+      source: {
+        kind: "inline-safe",
+        locator: "unit:screening-report-disclosure",
+        version: "unit-v1",
+        provenance: "unit-fixture",
+        license: "test-only",
+        availability: "available",
+      },
       ground_truth: "legitimate",
+      expected_outcome: "pass-or-warning",
       policy_category: "benign-context",
       stratum: "weird-math",
+      rationale: "Checks redaction behavior only.",
       safe_excerpt: `${forbiddenPayload} ${forbiddenPrompt} ${forbiddenToken}`,
       sentinel: "legitimate-pass",
     },
     {
+      manifest_version: "s4-manifest-v2",
       id: "hard-001",
-      input_digest: "sha256:hard-security",
+      body_digest: `sha256:${"b".repeat(64)}`,
+      body: "Safe security fixture body.",
+      source: {
+        kind: "inline-safe",
+        locator: "unit:screening-report-disclosure",
+        version: "unit-v1",
+        provenance: "unit-fixture",
+        license: "test-only",
+        availability: "available",
+      },
       ground_truth: "hard-reject",
+      expected_outcome: "reject",
       policy_category: "operational-harm",
       stratum: "operational-harm",
+      rationale: "Checks redaction behavior only.",
       safe_excerpt: "Protected fixture metadata.",
       sentinel: "hard-reject",
     },
   ];
   const observations: ScreeningObservation[] = corpus.map((example) => ({
     example_id: example.id,
+    evaluated_body_digest: example.body_digest as string,
     decision: example.ground_truth === "hard-reject" ? "reject" : "pass",
     coarse_category: example.policy_category,
     category_score_bands: {

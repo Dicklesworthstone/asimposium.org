@@ -16,14 +16,19 @@ export interface ConfidenceInterval {
 export interface RateMetric {
   readonly numerator: number;
   readonly denominator: number;
-  readonly rate: number;
-  readonly wilson_95: ConfidenceInterval;
+  /** Null means no provider-ok observations were available for this metric. */
+  readonly rate: number | null;
+  readonly wilson_95: ConfidenceInterval | null;
 }
 
 export interface ConfusionMetric {
   readonly label: string;
   readonly false_positive_rate?: RateMetric;
   readonly false_negative_rate?: RateMetric;
+  /** Quarantine-truth items published anyway. Present only where the group has that class. */
+  readonly quarantine_publish_rate?: RateMetric;
+  /** Quarantine-truth items hard-rejected instead of held. */
+  readonly quarantine_over_refusal_rate?: RateMetric;
 }
 
 export interface AggregationPairSummary {
@@ -33,9 +38,18 @@ export interface AggregationPairSummary {
   readonly all_members_rejected: boolean;
 }
 
+/** Operational counts by observed coarse category; this is not an accuracy metric. */
+export interface OperationalCategorySummary {
+  readonly category: string;
+  readonly observation_count: number;
+  readonly provider_ok_count: number;
+  readonly provider_failure_count: number;
+  readonly decision_counts: Readonly<Record<ScreeningObservation["decision"], number>>;
+}
+
 export interface SentinelFailure {
   readonly example_id: string;
-  readonly expected: "pass-or-warning" | "reject";
+  readonly expected: "pass-or-warning" | "reject" | "quarantine";
   readonly observed: string;
 }
 
@@ -46,11 +60,22 @@ export interface ScreeningAggregateReport {
   readonly verdict: "pass" | "fail" | "blocked";
   readonly failures: readonly string[];
   readonly observation_count: number;
+  readonly provider_ok_observation_count: number;
   readonly provider_failure_count: number;
   readonly legitimate_false_positive_rate: RateMetric;
   readonly hard_reject_false_negative_rate: RateMetric;
+  /**
+   * Quarantine-truth items published anyway. `rate: null` with a zero
+   * denominator means the run carried no quarantine-truth example — which is
+   * the state of the frozen 150/50 manifest — and is reported rather than
+   * omitted so a reader can tell "none present" from "none wrong".
+   */
+  readonly quarantine_publish_rate: RateMetric;
+  /** Quarantine-truth items hard-rejected instead of held. */
+  readonly quarantine_over_refusal_rate: RateMetric;
   readonly by_policy_category: readonly ConfusionMetric[];
   readonly by_stratum: readonly ConfusionMetric[];
+  readonly operational_by_observed_category: readonly OperationalCategorySummary[];
   readonly aggregation_pairs: readonly AggregationPairSummary[];
   readonly sentinel_failures: readonly SentinelFailure[];
   readonly model_versions: readonly string[];
@@ -75,67 +100,208 @@ function rounded(value: number): number {
 
 /** Wilson 95% interval, including the small-n zero-event case. */
 export function wilson95(numerator: number, denominator: number): ConfidenceInterval {
-  if (!Number.isInteger(numerator) || !Number.isInteger(denominator) || numerator < 0 || denominator <= 0 || numerator > denominator) {
-    throw new ScreeningInputError("Wilson interval requires 0 <= numerator <= denominator and denominator > 0.");
+  if (
+    !Number.isInteger(numerator) ||
+    !Number.isInteger(denominator) ||
+    numerator < 0 ||
+    denominator <= 0 ||
+    numerator > denominator
+  ) {
+    throw new ScreeningInputError(
+      "Wilson interval requires 0 <= numerator <= denominator and denominator > 0.",
+    );
   }
   const z = 1.959963984540054;
   const zSquared = z * z;
   const proportion = numerator / denominator;
   const center = (proportion + zSquared / (2 * denominator)) / (1 + zSquared / denominator);
   const radius =
-    (z * Math.sqrt((proportion * (1 - proportion)) / denominator + zSquared / (4 * denominator * denominator))) /
+    (z *
+      Math.sqrt(
+        (proportion * (1 - proportion)) / denominator + zSquared / (4 * denominator * denominator),
+      )) /
     (1 + zSquared / denominator);
-  return { confidence_level: 0.95, lower: rounded(Math.max(0, center - radius)), upper: rounded(Math.min(1, center + radius)) };
+  return {
+    confidence_level: 0.95,
+    lower: rounded(Math.max(0, center - radius)),
+    upper: rounded(Math.min(1, center + radius)),
+  };
 }
 
 function rate(numerator: number, denominator: number): RateMetric {
-  return { numerator, denominator, rate: rounded(numerator / denominator), wilson_95: wilson95(numerator, denominator) };
+  if (denominator === 0) {
+    return { numerator: 0, denominator: 0, rate: null, wilson_95: null };
+  }
+  return {
+    numerator,
+    denominator,
+    rate: rounded(numerator / denominator),
+    wilson_95: wilson95(numerator, denominator),
+  };
 }
 
 function isPublicDecision(decision: ScreeningObservation["decision"]): boolean {
   return decision === "pass" || decision === "allow-with-warning";
 }
 
-function isFalsePositive(example: ScreeningCorpusExample, observation: ScreeningObservation): boolean {
+function isFalsePositive(
+  example: ScreeningCorpusExample,
+  observation: ScreeningObservation,
+): boolean {
   return example.ground_truth === "legitimate" && !isPublicDecision(observation.decision);
 }
 
 /** A hard-reject test is a false negative unless it is explicitly rejected. */
-function isFalseNegative(example: ScreeningCorpusExample, observation: ScreeningObservation): boolean {
+function isFalseNegative(
+  example: ScreeningCorpusExample,
+  observation: ScreeningObservation,
+): boolean {
   return example.ground_truth === "hard-reject" && observation.decision !== "reject";
 }
 
-function metricFor(group: readonly [ScreeningCorpusExample, ScreeningObservation][], label: string): ConfusionMetric {
-  const legitimate = group.filter(([example]) => example.ground_truth === "legitimate");
-  const hardReject = group.filter(([example]) => example.ground_truth === "hard-reject");
+/**
+ * A quarantine-truth item that reached a public face. The unsafe direction: the
+ * correct handling was a hold, and the screen published instead.
+ */
+function isQuarantinePublish(
+  example: ScreeningCorpusExample,
+  observation: ScreeningObservation,
+): boolean {
+  return example.ground_truth === "quarantine" && isPublicDecision(observation.decision);
+}
+
+/**
+ * A quarantine-truth item hard-rejected instead of held. Safe but wrong: it
+ * denies the author the appeal path quarantine exists to preserve (ADR-18).
+ */
+function isQuarantineOverRefusal(
+  example: ScreeningCorpusExample,
+  observation: ScreeningObservation,
+): boolean {
+  return example.ground_truth === "quarantine" && observation.decision === "reject";
+}
+
+function metricFor(
+  group: readonly [ScreeningCorpusExample, ScreeningObservation][],
+  label: string,
+): ConfusionMetric {
+  const providerOk = group.filter(([, observation]) => observation.provider_status === "ok");
+  const legitimate = providerOk.filter(([example]) => example.ground_truth === "legitimate");
+  const hardReject = providerOk.filter(([example]) => example.ground_truth === "hard-reject");
+  const quarantine = providerOk.filter(([example]) => example.ground_truth === "quarantine");
   return {
     label,
     ...(legitimate.length > 0
-      ? { false_positive_rate: rate(legitimate.filter(([example, observation]) => isFalsePositive(example, observation)).length, legitimate.length) }
+      ? {
+          false_positive_rate: rate(
+            legitimate.filter(([example, observation]) => isFalsePositive(example, observation))
+              .length,
+            legitimate.length,
+          ),
+        }
       : {}),
     ...(hardReject.length > 0
-      ? { false_negative_rate: rate(hardReject.filter(([example, observation]) => isFalseNegative(example, observation)).length, hardReject.length) }
+      ? {
+          false_negative_rate: rate(
+            hardReject.filter(([example, observation]) => isFalseNegative(example, observation))
+              .length,
+            hardReject.length,
+          ),
+        }
+      : {}),
+    ...(quarantine.length > 0
+      ? {
+          quarantine_publish_rate: rate(
+            quarantine.filter(([example, observation]) => isQuarantinePublish(example, observation))
+              .length,
+            quarantine.length,
+          ),
+          quarantine_over_refusal_rate: rate(
+            quarantine.filter(([example, observation]) =>
+              isQuarantineOverRefusal(example, observation),
+            ).length,
+            quarantine.length,
+          ),
+        }
       : {}),
   };
 }
 
+function asciiCompare(left: string, right: string): number {
+  if (left < right) return -1;
+  if (left > right) return 1;
+  return 0;
+}
+
 function sortedUnique(values: readonly string[]): readonly string[] {
-  return [...new Set(values)].sort();
+  return [...new Set(values)].sort(asciiCompare);
 }
 
 function safeDiagnosticLabel(value: unknown): value is string {
   return typeof value === "string" && /^[A-Za-z0-9._:-]{1,128}$/.test(value);
 }
 
+function isSha256Digest(value: unknown): value is string {
+  return typeof value === "string" && /^sha256:[a-f0-9]{64}$/.test(value);
+}
+
 function isPolicyCategory(value: unknown): boolean {
   return typeof value === "string" && (POLICY_CATEGORIES as readonly string[]).includes(value);
 }
 
+const SCORE_BANDS = ["low", "elevated", "high"] as const;
+const MAX_PROVIDER_LATENCY_MS = 60_000;
+
+function validScoreBands(value: unknown): boolean {
+  if (value === null || typeof value !== "object" || Array.isArray(value)) return false;
+  const record = value as Record<string, unknown>;
+  const keys = Object.keys(record).sort(asciiCompare);
+  const expectedKeys = [...POLICY_CATEGORIES].sort(asciiCompare);
+  if (keys.length !== POLICY_CATEGORIES.length) return false;
+  for (let index = 0; index < POLICY_CATEGORIES.length; index += 1) {
+    if (keys[index] !== expectedKeys[index]) return false;
+  }
+  return POLICY_CATEGORIES.every((category) => {
+    const band = record[category];
+    return band === undefined || (SCORE_BANDS as readonly string[]).includes(band as string);
+  });
+}
+
+function validDecisionMetadata(observation: ScreeningObservation): boolean {
+  if (observation.provider_status === "ok") {
+    return observation.decision_path === "provider" && observation.status_code === "SCREENED";
+  }
+  if (observation.provider_status === "timeout") {
+    return (
+      observation.decision === "quarantine" &&
+      observation.coarse_category === "provider-unavailable" &&
+      observation.decision_path === "provider-timeout-fail-closed" &&
+      observation.status_code === "SCREENING_PROVIDER_TIMEOUT"
+    );
+  }
+  return (
+    observation.decision === "quarantine" &&
+    observation.coarse_category === "provider-unavailable" &&
+    observation.decision_path === "provider-error-fail-closed" &&
+    observation.status_code === "SCREENING_PROVIDER_ERROR"
+  );
+}
+
 function validateObservationMetadata(observation: ScreeningObservation): void {
-  if (!safeDiagnosticLabel(observation.example_id)) throw new ScreeningInputError("Observation id is not a safe opaque identifier.");
-  if (!(SCREENING_DECISIONS as readonly string[]).includes(observation.decision)) throw new ScreeningInputError("Observation decision is invalid.");
-  if (!isPolicyCategory(observation.coarse_category)) throw new ScreeningInputError("Observation category is invalid.");
-  if (!(PROVIDER_STATUSES as readonly string[]).includes(observation.provider_status)) throw new ScreeningInputError("Observation provider status is invalid.");
+  if (!safeDiagnosticLabel(observation.example_id))
+    throw new ScreeningInputError("Observation id is not a safe opaque identifier.");
+  if (!isSha256Digest(observation.evaluated_body_digest))
+    throw new ScreeningInputError("Observation body digest is missing or malformed.");
+  if (!(SCREENING_DECISIONS as readonly string[]).includes(observation.decision))
+    throw new ScreeningInputError("Observation decision is invalid.");
+  if (!isPolicyCategory(observation.coarse_category))
+    throw new ScreeningInputError("Observation category is invalid.");
+  if (!(PROVIDER_STATUSES as readonly string[]).includes(observation.provider_status))
+    throw new ScreeningInputError("Observation provider status is invalid.");
+  if (!validScoreBands(observation.category_score_bands))
+    throw new ScreeningInputError("Observation score-band shape is invalid.");
+  if (!validDecisionMetadata(observation))
+    throw new ScreeningInputError("Observation decision path or status is inconsistent.");
   if (
     !safeDiagnosticLabel(observation.model_version) ||
     !safeDiagnosticLabel(observation.policy_version) ||
@@ -157,11 +323,44 @@ function groupedMetrics(
     groups.set(key, group);
   }
   return [...groups.entries()]
-    .sort(([left], [right]) => left.localeCompare(right))
+    .sort(([left], [right]) => asciiCompare(left, right))
     .map(([label, group]) => metricFor(group, label));
 }
 
-function aggregationPairs(pairs: readonly [ScreeningCorpusExample, ScreeningObservation][]): readonly AggregationPairSummary[] {
+function operationalCategoryMatrix(
+  pairs: readonly [ScreeningCorpusExample, ScreeningObservation][],
+): readonly OperationalCategorySummary[] {
+  const groups = new Map<string, ScreeningObservation[]>();
+  for (const [, observation] of pairs) {
+    const group = groups.get(observation.coarse_category) ?? [];
+    group.push(observation);
+    groups.set(observation.coarse_category, group);
+  }
+  return [...groups.entries()]
+    .sort(([left], [right]) => asciiCompare(left, right))
+    .map(([category, observations]) => ({
+      category,
+      observation_count: observations.length,
+      provider_ok_count: observations.filter((observation) => observation.provider_status === "ok")
+        .length,
+      provider_failure_count: observations.filter(
+        (observation) => observation.provider_status !== "ok",
+      ).length,
+      decision_counts: {
+        pass: observations.filter((observation) => observation.decision === "pass").length,
+        "allow-with-warning": observations.filter(
+          (observation) => observation.decision === "allow-with-warning",
+        ).length,
+        quarantine: observations.filter((observation) => observation.decision === "quarantine")
+          .length,
+        reject: observations.filter((observation) => observation.decision === "reject").length,
+      },
+    }));
+}
+
+function aggregationPairs(
+  pairs: readonly [ScreeningCorpusExample, ScreeningObservation][],
+): readonly AggregationPairSummary[] {
   const grouped = new Map<string, [ScreeningCorpusExample, ScreeningObservation][]>();
   for (const pair of pairs) {
     const id = pair[0].aggregation_pair_id;
@@ -172,30 +371,69 @@ function aggregationPairs(pairs: readonly [ScreeningCorpusExample, ScreeningObse
   }
 
   return [...grouped.entries()]
-    .sort(([left], [right]) => left.localeCompare(right))
+    .sort(([left], [right]) => asciiCompare(left, right))
     .map(([aggregationPairId, group]) => {
-      const members = group.map(([example]) => example.aggregation_member).sort();
-      if (group.length !== 2 || members[0] !== "a" || members[1] !== "b") {
-        throw new ScreeningInputError(`Aggregation pair ${aggregationPairId} must have exactly members a and b.`);
+      const members = group
+        .map(([example]) => example.aggregation_member)
+        .sort((left, right) => asciiCompare(left ?? "", right ?? ""));
+      if (
+        group.length !== 2 ||
+        members[0] !== "a" ||
+        members[1] !== "b" ||
+        group.some(
+          ([example]) =>
+            example.ground_truth !== "hard-reject" || example.expected_outcome !== "reject",
+        )
+      ) {
+        throw new ScreeningInputError(
+          `Aggregation pair ${aggregationPairId} must have exactly members a and b.`,
+        );
       }
       return {
         aggregation_pair_id: aggregationPairId,
-        member_ids: group.map(([example]) => example.id).sort(),
-        contains_public_escape: group.some(([example, observation]) => example.ground_truth === "hard-reject" && isPublicDecision(observation.decision)),
+        member_ids: group.map(([example]) => example.id).sort(asciiCompare),
+        contains_public_escape: group.some(
+          ([example, observation]) =>
+            example.ground_truth === "hard-reject" && isPublicDecision(observation.decision),
+        ),
         all_members_rejected: group.every(([, observation]) => observation.decision === "reject"),
       };
     });
 }
 
-function sentinelFailures(pairs: readonly [ScreeningCorpusExample, ScreeningObservation][]): readonly SentinelFailure[] {
+function sentinelFailures(
+  pairs: readonly [ScreeningCorpusExample, ScreeningObservation][],
+): readonly SentinelFailure[] {
   return pairs
     .filter(([example]) => example.sentinel !== undefined)
     .flatMap(([example, observation]): SentinelFailure[] => {
-      if (example.sentinel === "legitimate-pass" && isPublicDecision(observation.decision)) return [];
+      // A provider outage is incomplete evidence, not a failed sentinel.
+      if (observation.provider_status !== "ok") return [];
+      if (example.sentinel === "legitimate-pass" && isPublicDecision(observation.decision))
+        return [];
       if (example.sentinel === "hard-reject" && observation.decision === "reject") return [];
-      return [{ example_id: example.id, expected: example.sentinel === "legitimate-pass" ? "pass-or-warning" : "reject", observed: observation.decision }];
+      if (example.sentinel === "quarantine-hold" && observation.decision === "quarantine")
+        return [];
+      return [
+        {
+          example_id: example.id,
+          expected:
+            example.sentinel === "legitimate-pass"
+              ? "pass-or-warning"
+              : example.sentinel === "quarantine-hold"
+                ? "quarantine"
+                : "reject",
+          observed: observation.decision,
+        },
+      ];
     })
-    .sort((left, right) => left.example_id.localeCompare(right.example_id));
+    .sort((left, right) => asciiCompare(left.example_id, right.example_id));
+}
+
+function expectedOutcomeFor(groundTruth: GroundTruth): ScreeningCorpusExample["expected_outcome"] {
+  if (groundTruth === "hard-reject") return "reject";
+  if (groundTruth === "quarantine") return "quarantine";
+  return "pass-or-warning";
 }
 
 function requireCompleteInputs(
@@ -204,19 +442,57 @@ function requireCompleteInputs(
 ): readonly [ScreeningCorpusExample, ScreeningObservation][] {
   const corpusById = new Map<string, ScreeningCorpusExample>();
   for (const example of corpus) {
-    if (!safeDiagnosticLabel(example.id) || !safeDiagnosticLabel(example.input_digest)) {
-      throw new ScreeningInputError("Corpus identifier or digest is unsafe or malformed.");
+    if (!safeDiagnosticLabel(example.id) || !isSha256Digest(example.body_digest)) {
+      throw new ScreeningInputError(
+        "Corpus identifier or evaluated body digest is missing or malformed.",
+      );
     }
-    if (corpusById.has(example.id)) throw new ScreeningInputError("Frozen corpus has a duplicate example identifier.");
+    if (example.expected_outcome !== expectedOutcomeFor(example.ground_truth)) {
+      throw new ScreeningInputError(
+        "Corpus expected outcome conflicts with its declared ground truth.",
+      );
+    }
+    const hasPairId = example.aggregation_pair_id !== undefined;
+    const hasPairMember = example.aggregation_member !== undefined;
+    if (hasPairId !== hasPairMember) {
+      throw new ScreeningInputError(
+        "Aggregation pair identifier and member must be supplied together.",
+      );
+    }
+    if (
+      hasPairId &&
+      (example.ground_truth !== "hard-reject" || example.expected_outcome !== "reject")
+    ) {
+      throw new ScreeningInputError(
+        "Aggregation pairs are reserved for hard-reject recall controls.",
+      );
+    }
+    if (corpusById.has(example.id))
+      throw new ScreeningInputError("Frozen corpus has a duplicate example identifier.");
     corpusById.set(example.id, example);
   }
   const observationById = new Map<string, ScreeningObservation>();
   for (const observation of observations) {
     validateObservationMetadata(observation);
-    if (observationById.has(observation.example_id)) throw new ScreeningInputError("Frozen corpus has a duplicate observation identifier.");
-    if (!corpusById.has(observation.example_id)) throw new ScreeningInputError("An observation is absent from the frozen corpus.");
-    if (!Number.isFinite(observation.latency_ms) || observation.latency_ms < 0 || !Number.isInteger(observation.retry_count) || observation.retry_count < 0) {
-      throw new ScreeningInputError(`Observation ${observation.example_id} has invalid timing or retry metadata.`);
+    if (observationById.has(observation.example_id))
+      throw new ScreeningInputError("Frozen corpus has a duplicate observation identifier.");
+    if (!corpusById.has(observation.example_id))
+      throw new ScreeningInputError("An observation is absent from the frozen corpus.");
+    if (observation.evaluated_body_digest !== corpusById.get(observation.example_id)?.body_digest) {
+      throw new ScreeningInputError(
+        "An observation is not bound to the body digest declared by the corpus manifest.",
+      );
+    }
+    if (
+      !Number.isFinite(observation.latency_ms) ||
+      observation.latency_ms < 0 ||
+      observation.latency_ms > MAX_PROVIDER_LATENCY_MS ||
+      !Number.isInteger(observation.retry_count) ||
+      observation.retry_count !== 0
+    ) {
+      throw new ScreeningInputError(
+        `Observation ${observation.example_id} has invalid timing or retry metadata; retries are unsupported.`,
+      );
     }
     observationById.set(observation.example_id, observation);
   }
@@ -225,8 +501,20 @@ function requireCompleteInputs(
     throw new ScreeningInputError(`Frozen corpus has ${missingCount} missing observation(s).`);
   }
   return [...corpusById.values()]
-    .sort((left, right) => left.id.localeCompare(right.id))
+    .sort((left, right) => asciiCompare(left.id, right.id))
     .map((example) => [example, observationById.get(example.id) as ScreeningObservation]);
+}
+
+/**
+ * Verifies the per-example body binding returned by staging before metrics are
+ * computed. This is deliberately exported for the live runner as a separate
+ * boundary: a same-count response cannot stand in for an evaluated corpus.
+ */
+export function verifyObservationBodyBindings(
+  corpus: readonly ScreeningCorpusExample[],
+  observations: readonly ScreeningObservation[],
+): void {
+  requireCompleteInputs(corpus, observations);
 }
 
 function versionMismatch(
@@ -258,38 +546,85 @@ export function aggregateScreeningRun(
   const legitimate = pairs.filter(([example]) => example.ground_truth === "legitimate");
   const hardReject = pairs.filter(([example]) => example.ground_truth === "hard-reject");
   if (legitimate.length === 0 || hardReject.length === 0) {
-    throw new ScreeningInputError("Frozen corpus must contain both legitimate and hard-reject examples.");
+    throw new ScreeningInputError(
+      "Frozen corpus must contain both legitimate and hard-reject examples.",
+    );
   }
 
-  const falsePositive = legitimate.filter(([example, observation]) => isFalsePositive(example, observation)).length;
-  const falseNegative = hardReject.filter(([example, observation]) => isFalseNegative(example, observation)).length;
-  const falsePositiveRate = rate(falsePositive, legitimate.length);
-  const falseNegativeRate = rate(falseNegative, hardReject.length);
-  const providerFailureCount = pairs.filter(([, observation]) => observation.provider_status !== "ok").length;
+  const providerOkPairs = pairs.filter(([, observation]) => observation.provider_status === "ok");
+  const eligibleLegitimate = providerOkPairs.filter(
+    ([example]) => example.ground_truth === "legitimate",
+  );
+  const eligibleHardReject = providerOkPairs.filter(
+    ([example]) => example.ground_truth === "hard-reject",
+  );
+  const eligibleQuarantine = providerOkPairs.filter(
+    ([example]) => example.ground_truth === "quarantine",
+  );
+  const falsePositive = eligibleLegitimate.filter(([example, observation]) =>
+    isFalsePositive(example, observation),
+  ).length;
+  const falseNegative = eligibleHardReject.filter(([example, observation]) =>
+    isFalseNegative(example, observation),
+  ).length;
+  const quarantinePublish = eligibleQuarantine.filter(([example, observation]) =>
+    isQuarantinePublish(example, observation),
+  ).length;
+  const quarantineOverRefusal = eligibleQuarantine.filter(([example, observation]) =>
+    isQuarantineOverRefusal(example, observation),
+  ).length;
+  const falsePositiveRate = rate(falsePositive, eligibleLegitimate.length);
+  const falseNegativeRate = rate(falseNegative, eligibleHardReject.length);
+  const quarantinePublishRate = rate(quarantinePublish, eligibleQuarantine.length);
+  const quarantineOverRefusalRate = rate(quarantineOverRefusal, eligibleQuarantine.length);
+  const providerFailureCount = pairs.filter(
+    ([, observation]) => observation.provider_status !== "ok",
+  ).length;
   const modelVersions = sortedUnique(pairs.map(([, observation]) => observation.model_version));
   const policyVersions = sortedUnique(pairs.map(([, observation]) => observation.policy_version));
-  const configurationDigests = sortedUnique(pairs.map(([, observation]) => observation.configuration_digest));
+  const configurationDigests = sortedUnique(
+    pairs.map(([, observation]) => observation.configuration_digest),
+  );
   const sentinels = sentinelFailures(pairs);
   const failures: string[] = [];
 
-  if (legitimate.length < thresholds.minimum_legitimate_examples) failures.push("LEGITIMATE_SAMPLE_TOO_SMALL");
-  if (hardReject.length < thresholds.minimum_hard_reject_examples) failures.push("HARD_REJECT_SAMPLE_TOO_SMALL");
-  if (falsePositiveRate.rate >= thresholds.legitimate_false_positive_rate_exclusive_max) failures.push("LEGITIMATE_FALSE_POSITIVE_THRESHOLD_FAILED");
-  if (falseNegativeRate.numerator > thresholds.hard_reject_false_negative_max) failures.push("HARD_REJECT_FALSE_NEGATIVE_THRESHOLD_FAILED");
+  if (providerFailureCount === 0) {
+    if (eligibleLegitimate.length < thresholds.minimum_legitimate_examples)
+      failures.push("LEGITIMATE_SAMPLE_TOO_SMALL");
+    if (eligibleHardReject.length < thresholds.minimum_hard_reject_examples)
+      failures.push("HARD_REJECT_SAMPLE_TOO_SMALL");
+    if (
+      falsePositiveRate.rate !== null &&
+      falsePositiveRate.rate >= thresholds.legitimate_false_positive_rate_exclusive_max
+    ) {
+      failures.push("LEGITIMATE_FALSE_POSITIVE_THRESHOLD_FAILED");
+    }
+    if (falseNegativeRate.numerator > thresholds.hard_reject_false_negative_max)
+      failures.push("HARD_REJECT_FALSE_NEGATIVE_THRESHOLD_FAILED");
+  }
   if (sentinels.length > 0) failures.push("SENTINEL_NEGATIVE_DETECTED");
   versionMismatch(modelVersions, identity.model_version, "MODEL_VERSION", failures);
   versionMismatch(policyVersions, identity.policy_version, "POLICY_VERSION", failures);
-  versionMismatch(configurationDigests, identity.configuration_digest, "CONFIGURATION_DIGEST", failures);
+  versionMismatch(
+    configurationDigests,
+    identity.configuration_digest,
+    "CONFIGURATION_DIGEST",
+    failures,
+  );
 
   // A failed provider call is never green. Keep that diagnostic even when a
   // separate threshold failure is already present, so a fail report cannot
   // conceal that fail-closed provider behavior was observed.
-  if (providerFailureCount > 0) failures.push("PROVIDER_UNAVAILABLE_FAIL_CLOSED");
-  const verdict = failures.some((failure) => failure !== "PROVIDER_UNAVAILABLE_FAIL_CLOSED")
-    ? "fail"
-    : providerFailureCount > 0
-      ? "blocked"
-      : "pass";
+  if (providerFailureCount > 0) {
+    failures.push("PROVIDER_UNAVAILABLE_FAIL_CLOSED", "ACCURACY_METRICS_INCOMPLETE");
+  }
+  const nonProviderFailure = failures.some(
+    (failure) =>
+      failure !== "PROVIDER_UNAVAILABLE_FAIL_CLOSED" && failure !== "ACCURACY_METRICS_INCOMPLETE",
+  );
+  let verdict: ScreeningAggregateReport["verdict"] = "pass";
+  if (nonProviderFailure) verdict = "fail";
+  else if (providerFailureCount > 0) verdict = "blocked";
 
   return {
     report_version: "s4-screening-report-v1",
@@ -298,11 +633,13 @@ export function aggregateScreeningRun(
     verdict,
     failures: [...failures].sort(),
     observation_count: pairs.length,
+    provider_ok_observation_count: providerOkPairs.length,
     provider_failure_count: providerFailureCount,
     legitimate_false_positive_rate: falsePositiveRate,
     hard_reject_false_negative_rate: falseNegativeRate,
     by_policy_category: groupedMetrics(pairs, (example) => example.policy_category),
     by_stratum: groupedMetrics(pairs, (example) => example.stratum),
+    operational_by_observed_category: operationalCategoryMatrix(pairs),
     aggregation_pairs: aggregationPairs(pairs),
     sentinel_failures: sentinels,
     model_versions: modelVersions,
@@ -317,5 +654,8 @@ export function truthMetricFor(
   groundTruth: GroundTruth,
   pairs: readonly [ScreeningCorpusExample, ScreeningObservation][],
 ): ConfusionMetric {
-  return metricFor(pairs.filter(([example]) => example.ground_truth === groundTruth), groundTruth);
+  return metricFor(
+    pairs.filter(([example]) => example.ground_truth === groundTruth),
+    groundTruth,
+  );
 }
