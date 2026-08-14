@@ -360,6 +360,9 @@ describe("S2 to S7 normalized cost receipt", () => {
     expect(shell).toContain("S2_PARENT_TERM_OLD_HOOK_RESIDUAL_REAPED");
     expect(shell).toContain("S2_PARENT_TERM_RESIDUAL_UNPROVEN");
     expect(start).toContain("pre_release_group_is_stably_pinned");
+    expect(start).not.toContain("blocked_snapshot");
+    expect(start).toContain("FIFO reads are builtins and create no group member");
+    expect(start).toContain("IFS= read -r -t 0.2 value <&8");
     expect(shell).toContain("pre_release_helper_is_expected_snapshot");
     expect(shell).toContain("pre_release_snapshot_line_kind");
     expect(shell).toContain("S2_SHELL_REGRESSION_FAILED");
@@ -374,6 +377,17 @@ describe("S2 to S7 normalized cost receipt", () => {
     expect(shell).toContain("${S2_GROUP_MEMBER_COUNT} -ge 1 && ${S2_GROUP_MEMBER_COUNT} -le 2");
     expect(shell).toContain("S2_PLANT_PERSISTENT_PRE_RELEASE_HELPER");
     expect(shell).toContain("S2_PERSISTENT_PRE_RELEASE_HELPER_ACCEPTED");
+    expect(shell).toContain("emit_release_race_failure()");
+    expect(shell).toContain("S2_RELEASE_RACE_UNEXPECTEDLY_RELEASED");
+    expect(shell).toContain("S2_RELEASE_RACE_PLANTED_IDENTITY_INVALID");
+    expect(shell).toContain("S2_RELEASE_RACE_EXACT_GROUP_SURVIVOR");
+    expect(shell).toContain("emit_persistent_pre_release_helper_failure()");
+    expect(shell).toContain("S2_PERSISTENT_PRE_RELEASE_HELPER_PAYLOAD_PATH_UNSAFE");
+    expect(shell).toContain("S2_PERSISTENT_PRE_RELEASE_HELPER_RESAMPLE_OR_RELEASE_PROOF_FAILED");
+    expect(shell).toContain("S2_PERSISTENT_PRE_RELEASE_HELPER_PGID_INVALID");
+    expect(shell).toContain("S2_PERSISTENT_PRE_RELEASE_HELPER_SURVIVOR");
+    // biome-ignore lint/suspicious/noTemplateCurlyInString: asserts literal shell source text.
+    expect(shell).toContain('[[ -n "${marker}" ]] || return 1');
     expect(shell).toContain("trap '' INT TERM HUP");
     expect(shell).toContain("S2_LIFECYCLE_DEADLINE_TYPED_EXIT_FAILED");
     expect(shell).toContain("return 124");
@@ -442,6 +456,14 @@ describe("registered S2 shell and lifecycle regressions", () => {
       if (mode === "legacy-leader-loss") {
         expect(run.stdout).toContain('"code":"S2_LEGACY_SUPERVISOR_INSPECTION_UNCERTAIN"');
         expect(run.stdout).toContain('"action":"kill-exact-residual-group"');
+      } else if (mode === "persistent-pre-release-helper") {
+        expect(run.stdout).toContain('"pre_release_resample_attempts":40');
+        expect(run.stdout).toContain('"pre_release_accepted_samples":0');
+        expect(run.stdout).toContain('"pre_release_rejected_samples":40');
+        expect(run.stdout).toContain('"pre_release_max_group_members":2');
+        expect(run.stdout).toContain('"payload_release_refused":true');
+        expect(run.stdout).toContain('"exact_pinned_group_reaped":true');
+        expect(run.stdout).toContain('"no_exact_group_survivor":true');
       } else if (mode === "term-interrupt-cleanup") {
         expect(run.stdout).toContain(
           "term-interrupted-parent-after-term-resistant-payload-control-status-cleans-most-recent-untracked-exact-supervisor",

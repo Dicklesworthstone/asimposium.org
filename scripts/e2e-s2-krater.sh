@@ -316,6 +316,51 @@ emit() {
   printf '%s\n' "$1"
 }
 
+json_decimal_or_null() {
+  if is_decimal "$1"; then
+    printf '%s' "$1"
+  else
+    printf 'null'
+  fi
+}
+
+json_bool() {
+  if [[ "$1" == true ]]; then
+    printf 'true'
+  else
+    printf 'false'
+  fi
+}
+
+emit_release_race_failure() {
+  local code="$1" group_survives=false leader_is_exact=false marker_present=false
+  if is_decimal "${S2_PLANTED_RELEASE_PGID}" && \
+    kill -0 -- "-${S2_PLANTED_RELEASE_PGID}" 2>/dev/null; then
+    group_survives=true
+  fi
+  if [[ -n "${S2_PLANTED_RELEASE_PID}" && \
+    "${S2_PLANTED_RELEASE_PID}" == "${S2_PLANTED_RELEASE_PGID}" ]]; then
+    leader_is_exact=true
+  fi
+  [[ -n "${S2_PLANTED_RELEASE_MARKER}" ]] && marker_present=true
+  emit "{\"tool\":\"bash\",\"package\":\"apps/wire\",\"suite\":\"s2-krater-shell\",\"status\":\"fail\",\"code\":\"${code}\",\"planted_release_pid\":$(json_decimal_or_null "${S2_PLANTED_RELEASE_PID}"),\"planted_release_pgid\":$(json_decimal_or_null "${S2_PLANTED_RELEASE_PGID}"),\"planted_release_is_group_leader\":$(json_bool "${leader_is_exact}"),\"planted_release_marker_present\":$(json_bool "${marker_present}"),\"exact_group_survives\":$(json_bool "${group_survives}"),\"reproduce\":\"S2_SHELL_REGRESSION_TEST=release-race scripts/e2e-s2-krater.sh\"}"
+}
+
+emit_persistent_pre_release_helper_failure() {
+  local code="$1" payload_started="$2" group_survives=false exact_reap_recorded=false
+  local most_recent_supervisor_empty=false
+  if is_decimal "${S2_LAST_SUPERVISOR_PGID}" && \
+    kill -0 -- "-${S2_LAST_SUPERVISOR_PGID}" 2>/dev/null; then
+    group_survives=true
+  fi
+  if [[ -n "${S2_PRE_RELEASE_REAPED_PGID}" && \
+    "${S2_PRE_RELEASE_REAPED_PGID}" == "${S2_LAST_SUPERVISOR_PGID}" ]]; then
+    exact_reap_recorded=true
+  fi
+  [[ -z "${S2_MOST_RECENT_SUPERVISOR}" ]] && most_recent_supervisor_empty=true
+  emit "{\"tool\":\"bash\",\"package\":\"apps/wire\",\"suite\":\"s2-krater-shell\",\"status\":\"fail\",\"code\":\"${code}\",\"pre_release_resample_attempts\":$(json_decimal_or_null "${S2_PRE_RELEASE_RESAMPLE_ATTEMPTS}"),\"pre_release_accepted_samples\":$(json_decimal_or_null "${S2_PRE_RELEASE_ACCEPTED_SAMPLES}"),\"pre_release_rejected_samples\":$(json_decimal_or_null "${S2_PRE_RELEASE_REJECTED_SAMPLES}"),\"pre_release_max_group_members\":$(json_decimal_or_null "${S2_PRE_RELEASE_MAX_GROUP_MEMBER_COUNT}"),\"payload_started\":$(json_bool "${payload_started}"),\"exact_pinned_group_reap_recorded\":$(json_bool "${exact_reap_recorded}"),\"most_recent_supervisor_empty\":$(json_bool "${most_recent_supervisor_empty}"),\"exact_group_survives\":$(json_bool "${group_survives}"),\"reproduce\":\"S2_SHELL_REGRESSION_TEST=persistent-pre-release-helper scripts/e2e-s2-krater.sh\"}"
+}
+
 redacted_wrangler_cause() {
   local log_path="${1:-${S2_SERVER_LOG}}"
   # shellcheck disable=SC2016
@@ -374,6 +419,11 @@ S2_PLANTED_RELEASE_PID=""
 S2_PLANTED_RELEASE_PGID=""
 S2_PLANTED_RELEASE_MARKER=""
 S2_LAST_SUPERVISOR_PGID=""
+S2_PRE_RELEASE_RESAMPLE_ATTEMPTS=0
+S2_PRE_RELEASE_ACCEPTED_SAMPLES=0
+S2_PRE_RELEASE_REJECTED_SAMPLES=0
+S2_PRE_RELEASE_MAX_GROUP_MEMBER_COUNT=0
+S2_PRE_RELEASE_REAPED_PGID=""
 # This packed record is published before any release write. It closes the caller-assignment
 # gap: an EXIT trap can still prove and release the exact newest supervisor while a caller is
 # between start_pinned_supervisor and its Worker/lifecycle bookkeeping. Fields are PID, PGID,
@@ -447,6 +497,11 @@ start_pinned_supervisor() {
     *) return 1 ;;
   esac
   marker="${label}-$(random_hex 16)" || return 1
+  S2_PRE_RELEASE_RESAMPLE_ATTEMPTS=0
+  S2_PRE_RELEASE_ACCEPTED_SAMPLES=0
+  S2_PRE_RELEASE_REJECTED_SAMPLES=0
+  S2_PRE_RELEASE_MAX_GROUP_MEMBER_COUNT=0
+  S2_PRE_RELEASE_REAPED_PGID=""
   [[ ! -e "${status_file}" && ! -L "${status_file}" ]] || return 1
   control_fifo="${status_file}.control"
   [[ ! -e "${control_fifo}" && ! -L "${control_fifo}" ]] || return 1
@@ -480,20 +535,15 @@ start_pinned_supervisor() {
     [[ ! -e "${release_fifo}" && ! -L "${release_fifo}" ]] || exit 125
     mkfifo -m 600 "${release_fifo}" || exit 125
     exec 8<>"${release_fifo}" || exit 125
-    blocked_snapshot() {
-      local line seen_pid seen_pgid seen_ppid seen_stat seen_command
-      line="$(LC_ALL=C ps -o pid=,pgid=,ppid=,stat=,command= -p "${supervisor_pid}" 2>/dev/null)" || return 1
-      [[ -n "${line}" ]] || return 1
-      read -r seen_pid seen_pgid seen_ppid seen_stat seen_command <<<"${line}"
-      [[ "${seen_pid}" =~ ^[0-9]+$ && "${seen_pgid}" =~ ^[0-9]+$ && "${seen_ppid}" =~ ^[0-9]+$ ]] || return 1
-      [[ "${seen_pid}" == "${supervisor_pid}" && "${seen_pgid}" == "${supervisor_pid}" ]] || return 1
-      [[ "${seen_ppid}" == "${owner_pid}" && "${seen_command}" == *"s2-pinned-supervisor-${marker}"* ]] || return 1
-      kill -0 "${supervisor_pid}" 2>/dev/null && kill -0 -- "-${supervisor_pid}" 2>/dev/null
-    }
     wait_for_gate_value() {
       local expected="$1" value
+      # The controller owns all process-table observations before it writes either
+      # gate token. Do not run `$(ps ...)` while this supervisor is blocked: Bash
+      # gives that command-substitution shell this pinned process group, so the
+      # observer becomes a transient second descendant in the very proof it races.
+      # FIFO reads are builtins and create no group member; controller-side
+      # `supervisor_is_owned` remains the fail-closed acceptance check.
       while :; do
-        blocked_snapshot || exit 125
         if IFS= read -r -t 0.2 value <&8; then
           [[ "${value}" == "${expected}" ]] || exit 125
           return 0
@@ -502,10 +552,11 @@ start_pinned_supervisor() {
     }
     trap "exit 125" TERM HUP INT
     if [[ "${plant_persistent_pre_release_helper}" == 1 ]]; then
-      # Regression-only: reject this stable child before any real Worker command
-      # can escape the release gate.
-      bash -c "trap '' TERM HUP INT; while :; do sleep 60; done" \
-        "s2-persistent-pre-release-helper-${marker}" &
+      # Regression-only: this one-process helper has no child of its own, but
+      # its argv deliberately carries the supervisor marker. The classifier
+      # must treat that marker match only as a possible fork/exec ghost, exhaust
+      # its bounded resamples, and refuse release before the payload can start.
+      bash -c "exec -a s2-persistent-pre-release-helper-s2-pinned-supervisor-${marker} tail -f /dev/null" &
     fi
     # The controller first arms the parent-loss watchdog while this supervisor remains blocked.
     # Only after it proves the watchdog exact healthy identity does it send the separate
@@ -586,6 +637,7 @@ start_pinned_supervisor() {
         if supervisor_is_owned "${pid}" "${pid}" "${marker}"; then
           kill_owned_group_to_zero "${pid}" "${pid}" "${marker}" "${persist}" "${port}" \
             "${proof_scope}" || return 1
+          S2_PRE_RELEASE_REAPED_PGID="${pid}"
         fi
         return 1
       fi
@@ -747,13 +799,18 @@ group_contains_pid() {
 pre_release_snapshot_line_kind() {
   local line="$1" helper_pid="$2" supervisor_pid="$3" marker="$4"
   local seen_pid seen_pgid seen_ppid seen_stat seen_command expected_arguments
+  # The marker is a correlation proof, not decoration. An empty value would
+  # weaken the forged-supervisor check to a broad prefix match.
+  [[ -n "${marker}" ]] || return 1
   read -r seen_pid seen_pgid seen_ppid seen_stat seen_command <<<"${line}"
   is_decimal "${seen_pid}" && is_decimal "${seen_pgid}" && is_decimal "${seen_ppid}" || return 1
   [[ "${seen_pid}" == "${helper_pid}" && "${seen_pgid}" == "${supervisor_pid}" && \
     "${seen_ppid}" == "${supervisor_pid}" && "${seen_stat}" != T* ]] || return 1
-  # macOS exposes the short interval between fork and exec with the parent's
-  # command line, and may expose the child once more as a zombie. Neither is a
-  # live unexpected descendant; ask the bounded caller to resample it.
+  # macOS can expose a child between fork and exec with the parent's command
+  # line, and may expose it once more as a zombie. Either observation is
+  # ambiguous, not accepted: request a bounded resample. A persistent helper
+  # can forge the same marker in its argv, so repeated ambiguity must exhaust
+  # that bound and refuse release rather than becoming an allow rule.
   if [[ "${seen_stat}" == Z* || \
     "${seen_command}" == *"s2-pinned-supervisor-${marker}"* ]]; then
     return 2
@@ -768,8 +825,9 @@ pre_release_snapshot_line_kind() {
 }
 
 # Classify the only helper that the blocked supervisor is allowed to have. Exit 2 means the
-# sampled helper disappeared before its follow-up inspection, which is an observation race and
-# must be resampled; exit 1 means a still-observable unexpected descendant and fails closed.
+# sample is ambiguous (gone, zombie, or carrying the inherited supervisor argv) and must be
+# resampled; it never authorizes release. Exit 1 means a still-observable unexpected descendant
+# and fails closed.
 pre_release_helper_is_expected_snapshot() {
   local helper_pid="$1" supervisor_pid="$2" marker="$3" line
   if ! line="$(LC_ALL=C ps -o pid=,pgid=,ppid=,stat=,command= -p "${helper_pid}" 2>/dev/null)"; then
@@ -782,14 +840,23 @@ pre_release_helper_is_expected_snapshot() {
 # Before release the fresh session contains only the pinned supervisor, except for its exact
 # process-table helper. Two accepted bounded samples prove the leader remains pinned. A helper
 # that exits between the group scan and its own inspection is resampled; a live non-ps helper is
-# refused immediately. This preserves the unexpected-child fail-closed boundary without making
-# a slow or just-exited `ps` process an aggregate-load startup flake.
+# refused immediately; and a persistent ambiguous helper exhausts the same finite resample
+# budget before release is refused. This preserves the unexpected-child fail-closed boundary
+# without making a slow or just-exited `ps` process an aggregate-load startup flake.
 pre_release_group_is_stably_pinned() {
   local pid="$1" marker="$2" attempts=0 accepted=0 member helper="" helper_status
+  S2_PRE_RELEASE_RESAMPLE_ATTEMPTS=0
+  S2_PRE_RELEASE_ACCEPTED_SAMPLES=0
+  S2_PRE_RELEASE_REJECTED_SAMPLES=0
+  S2_PRE_RELEASE_MAX_GROUP_MEMBER_COUNT=0
   while (( attempts < 40 && accepted < 2 )); do
     attempts=$((attempts + 1))
+    S2_PRE_RELEASE_RESAMPLE_ATTEMPTS="${attempts}"
     supervisor_is_owned "${pid}" "${pid}" "${marker}" || return 1
     group_members "${pid}" || return 1
+    if (( S2_GROUP_MEMBER_COUNT > S2_PRE_RELEASE_MAX_GROUP_MEMBER_COUNT )); then
+      S2_PRE_RELEASE_MAX_GROUP_MEMBER_COUNT="${S2_GROUP_MEMBER_COUNT}"
+    fi
     [[ ${S2_GROUP_MEMBER_COUNT} -ge 1 && ${S2_GROUP_MEMBER_COUNT} -le 2 ]] || return 1
     group_contains_pid "${pid}" || return 1
     if [[ ${S2_GROUP_MEMBER_COUNT} -eq 2 ]]; then
@@ -800,12 +867,15 @@ pre_release_group_is_stably_pinned() {
       [[ -n "${helper}" ]] || return 1
       if pre_release_helper_is_expected_snapshot "${helper}" "${pid}" "${marker}"; then
         accepted=$((accepted + 1))
+        S2_PRE_RELEASE_ACCEPTED_SAMPLES="${accepted}"
       else
         helper_status=$?
         [[ ${helper_status} -eq 2 ]] || return 1
+        S2_PRE_RELEASE_REJECTED_SAMPLES=$((S2_PRE_RELEASE_REJECTED_SAMPLES + 1))
       fi
     else
       accepted=$((accepted + 1))
+      S2_PRE_RELEASE_ACCEPTED_SAMPLES="${accepted}"
     fi
     (( accepted == 2 )) || sleep 0.05
   done
@@ -2256,6 +2326,9 @@ run_s2_shell_regression_test() {
     if pre_release_snapshot_line_kind \
       '128 456 999 S ps -o pid=,pgid=,ppid=,stat=,command= -p 456' 128 456 marker; then \
       return 1; else [[ $? -eq 1 ]] || return 1; fi
+    if pre_release_snapshot_line_kind \
+      '129 456 456 S ps -o pid=,pgid=,ppid=,stat=,command= -p 456' 129 456 ''; then \
+      return 1; else [[ $? -eq 1 ]] || return 1; fi
     emit '{"tool":"bash","package":"apps/wire","suite":"s2-krater-shell","status":"pass","scenario":"pre-release-helper-classifier-accepts-only-the-supervisors-exact-live-ps-child","reproduce":"S2_SHELL_REGRESSION_TEST=pre-release-helper-classification scripts/e2e-s2-krater.sh"}'
     return 0
   fi
@@ -2401,30 +2474,63 @@ run_s2_shell_regression_test() {
     if S2_PLANT_RELEASE_CHILD_EXIT_AFTER_REPROOF=1 \
       start_pinned_supervisor "${status_file}" release-race "${S2_STATE_DIR}" "${S2_PORT}" client \
         bash -c 'sleep 30'; then
+      emit_release_race_failure "S2_RELEASE_RACE_UNEXPECTEDLY_RELEASED"
       return 1
     fi
-    is_decimal "${S2_PLANTED_RELEASE_PID}" && \
-      [[ "${S2_PLANTED_RELEASE_PID}" == "${S2_PLANTED_RELEASE_PGID}" && \
-        -n "${S2_PLANTED_RELEASE_MARKER}" ]] || return 1
-    if kill -0 -- "-${S2_PLANTED_RELEASE_PGID}" 2>/dev/null; then return 1; fi
+    if ! is_decimal "${S2_PLANTED_RELEASE_PID}" || \
+      [[ "${S2_PLANTED_RELEASE_PID}" != "${S2_PLANTED_RELEASE_PGID}" || \
+        -z "${S2_PLANTED_RELEASE_MARKER}" ]]; then
+      emit_release_race_failure "S2_RELEASE_RACE_PLANTED_IDENTITY_INVALID"
+      return 1
+    fi
+    if kill -0 -- "-${S2_PLANTED_RELEASE_PGID}" 2>/dev/null; then
+      emit_release_race_failure "S2_RELEASE_RACE_EXACT_GROUP_SURVIVOR"
+      return 1
+    fi
     emit '{"tool":"bash","package":"apps/wire","suite":"s2-krater-shell","status":"pass","scenario":"planted-child-exits-between-reproof-and-already-open-release-write-is-bounded","reproduce":"S2_SHELL_REGRESSION_TEST=release-race scripts/e2e-s2-krater.sh"}'
     return 0
   fi
 
   if [[ "${mode}" == "persistent-pre-release-helper" ]]; then
+    local payload_started payload_started_bool=false
     status_file="${S2_STATE_DIR}/persistent-pre-release-helper-$(random_hex 8).status"
+    payload_started="${S2_STATE_DIR}/persistent-pre-release-payload-$(random_hex 8).started"
+    if [[ -e "${payload_started}" || -L "${payload_started}" ]]; then
+      emit_persistent_pre_release_helper_failure "S2_PERSISTENT_PRE_RELEASE_HELPER_PAYLOAD_PATH_UNSAFE" true
+      return 1
+    fi
+    # shellcheck disable=SC2016 # The payload's child Bash, not this harness, expands "$1".
     if S2_PLANT_PERSISTENT_PRE_RELEASE_HELPER=1 \
       start_pinned_supervisor "${status_file}" persistent-pre-release-helper \
-        "${S2_STATE_DIR}" "${S2_PORT}" client bash -c 'exit 0'; then
-      emit '{"tool":"bash","package":"apps/wire","suite":"s2-krater-shell","status":"fail","code":"S2_PERSISTENT_PRE_RELEASE_HELPER_ACCEPTED","reproduce":"S2_SHELL_REGRESSION_TEST=persistent-pre-release-helper scripts/e2e-s2-krater.sh"}'
+        "${S2_STATE_DIR}" "${S2_PORT}" client bash -c 'printf released >"$1"' bash "${payload_started}"; then
+      if [[ -e "${payload_started}" || -L "${payload_started}" ]]; then
+        payload_started_bool=true
+      fi
+      emit_persistent_pre_release_helper_failure "S2_PERSISTENT_PRE_RELEASE_HELPER_ACCEPTED" "${payload_started_bool}"
       return 1
     fi
-    is_decimal "${S2_LAST_SUPERVISOR_PGID}" || return 1
+    [[ ${S2_PRE_RELEASE_RESAMPLE_ATTEMPTS} -eq 40 && \
+      ${S2_PRE_RELEASE_ACCEPTED_SAMPLES} -eq 0 && \
+      ${S2_PRE_RELEASE_REJECTED_SAMPLES} -eq 40 && \
+      ${S2_PRE_RELEASE_MAX_GROUP_MEMBER_COUNT} -eq 2 && \
+      "${S2_PRE_RELEASE_REAPED_PGID}" == "${S2_LAST_SUPERVISOR_PGID}" && \
+      -z "${S2_MOST_RECENT_SUPERVISOR}" && \
+      ! -e "${payload_started}" && ! -L "${payload_started}" ]] || {
+      if [[ -e "${payload_started}" || -L "${payload_started}" ]]; then
+        payload_started_bool=true
+      fi
+      emit_persistent_pre_release_helper_failure "S2_PERSISTENT_PRE_RELEASE_HELPER_RESAMPLE_OR_RELEASE_PROOF_FAILED" "${payload_started_bool}"
+      return 1
+    }
+    if ! is_decimal "${S2_LAST_SUPERVISOR_PGID}"; then
+      emit_persistent_pre_release_helper_failure "S2_PERSISTENT_PRE_RELEASE_HELPER_PGID_INVALID" false
+      return 1
+    fi
     if kill -0 -- "-${S2_LAST_SUPERVISOR_PGID}" 2>/dev/null; then
-      emit '{"tool":"bash","package":"apps/wire","suite":"s2-krater-shell","status":"fail","code":"S2_PERSISTENT_PRE_RELEASE_HELPER_SURVIVOR","reproduce":"S2_SHELL_REGRESSION_TEST=persistent-pre-release-helper scripts/e2e-s2-krater.sh"}'
+      emit_persistent_pre_release_helper_failure "S2_PERSISTENT_PRE_RELEASE_HELPER_SURVIVOR" false
       return 1
     fi
-    emit '{"tool":"bash","package":"apps/wire","suite":"s2-krater-shell","status":"pass","scenario":"persistent-pre-release-helper-is-refused-and-exact-pinned-group-is-reaped-before-worker-release","reproduce":"S2_SHELL_REGRESSION_TEST=persistent-pre-release-helper scripts/e2e-s2-krater.sh"}'
+    emit '{"tool":"bash","package":"apps/wire","suite":"s2-krater-shell","status":"pass","scenario":"persistent-marker-bearing-pre-release-helper-exhausts-resamples-refuses-payload-release-and-reaps-exact-pinned-group","pre_release_resample_attempts":40,"pre_release_accepted_samples":0,"pre_release_rejected_samples":40,"pre_release_max_group_members":2,"payload_release_refused":true,"exact_pinned_group_reaped":true,"no_exact_group_survivor":true,"reproduce":"S2_SHELL_REGRESSION_TEST=persistent-pre-release-helper scripts/e2e-s2-krater.sh"}'
     return 0
   fi
 
