@@ -9,8 +9,8 @@
  * byte-identical output (Fable §7.1 axiom 7: determinism is cache money).
  */
 
-export const SCHEMA_BASE = 'https://a.asimposium.org/schemas';
-export const ERROR_BASE = 'https://asimposium.org/errors';
+export const SCHEMA_BASE = "https://a.asimposium.org/schemas";
+export const ERROR_BASE = "https://asimposium.org/errors";
 
 export interface NextAction {
   method: string;
@@ -92,7 +92,7 @@ export function success<T>(input: SuccessInput<T>): Response {
   return new Response(jsonBody(successEnvelope(input)), {
     status: input.status ?? 200,
     headers: {
-      'content-type': 'application/json; charset=utf-8',
+      "content-type": "application/json; charset=utf-8",
       ...input.headers,
     },
   });
@@ -102,7 +102,7 @@ export function problem(input: ProblemInput): Response {
   return new Response(jsonBody(problemEnvelope(input)), {
     status: input.status,
     headers: {
-      'content-type': 'application/problem+json; charset=utf-8',
+      "content-type": "application/problem+json; charset=utf-8",
       ...input.headers,
     },
   });

@@ -1,6 +1,6 @@
-import { z } from 'zod';
-import { bindingStates, missingBindings, type BindingState, type RequiredBinding } from '../env';
-import { SCHEMA_BASE, problem, success } from './envelope';
+import { z } from "zod";
+import { type BindingState, bindingStates, missingBindings, type RequiredBinding } from "../env";
+import { problem, SCHEMA_BASE, success } from "./envelope";
 
 /**
  * `GET /internal/health` — the operational scaffold face.
@@ -11,7 +11,7 @@ import { SCHEMA_BASE, problem, success } from './envelope';
  * *names*, never binding values, ids, or secrets.
  */
 
-export const HEALTH_FORMATS = ['json'] as const;
+export const HEALTH_FORMATS = ["json"] as const;
 
 export type HealthFormat = (typeof HEALTH_FORMATS)[number];
 
@@ -23,12 +23,12 @@ export const HEALTH_SCHEMA = `${SCHEMA_BASE}/internal.health.v1.json`;
  * a second schema tree (AGENTS.md, "Contracts Before Endpoints").
  */
 const HealthQuery = z.object({
-  format: z.enum(HEALTH_FORMATS).default('json'),
+  format: z.enum(HEALTH_FORMATS).default("json"),
 });
 
 export interface HealthData {
-  service: 'wire';
-  role: 'stoa';
+  service: "wire";
+  role: "stoa";
   format: HealthFormat;
   bindings: Record<RequiredBinding, BindingState>;
 }
@@ -49,10 +49,10 @@ export function handleHealth(request: HealthRequest): Response {
   if (!parsed.success) {
     return problem({
       status: 400,
-      code: 'UNKNOWN_FORMAT',
-      title: 'Unsupported response format',
-      detail: 'The ?format= value is not one this route serves.',
-      fixHint: 'Drop ?format= or use one of the values in `allowed`.',
+      code: "UNKNOWN_FORMAT",
+      title: "Unsupported response format",
+      detail: "The ?format= value is not one this route serves.",
+      fixHint: "Drop ?format= or use one of the values in `allowed`.",
       extensions: { allowed: [...HEALTH_FORMATS] },
     });
   }
@@ -65,24 +65,24 @@ export function handleHealth(request: HealthRequest): Response {
   if (missing.length > 0) {
     return problem({
       status: 503,
-      code: 'BINDING_MISSING',
-      title: 'Required Worker bindings are not configured',
-      detail: `Missing or wrong-shaped bindings: ${missing.join(', ')}.`,
+      code: "BINDING_MISSING",
+      title: "Required Worker bindings are not configured",
+      detail: `Missing or wrong-shaped bindings: ${missing.join(", ")}.`,
       fixHint:
-        'Bind every name in `missing` in the Worker configuration for this environment, then redeploy.',
+        "Bind every name in `missing` in the Worker configuration for this environment, then redeploy.",
       extensions: { missing, bindings },
-      headers: { 'cache-control': 'no-store' },
+      headers: { "cache-control": "no-store" },
     });
   }
 
   return success<HealthData>({
     schema: HEALTH_SCHEMA,
     data: {
-      service: 'wire',
-      role: 'stoa',
+      service: "wire",
+      role: "stoa",
       format: parsed.data.format,
       bindings,
     },
-    headers: { 'cache-control': 'no-store' },
+    headers: { "cache-control": "no-store" },
   });
 }

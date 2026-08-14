@@ -1,5 +1,5 @@
-import { drizzle, type DrizzleD1Database } from 'drizzle-orm/d1';
-import { isBindingHealthy, type Env } from '../env';
+import { type DrizzleD1Database, drizzle } from "drizzle-orm/d1";
+import { type Env, isBindingHealthy } from "../env";
 
 /**
  * Krater's client factory (Fable §10.1, ADR-1).
@@ -16,13 +16,13 @@ import { isBindingHealthy, type Env } from '../env';
 
 export class BindingMissingError extends Error {
   /** Stable diagnostic code — the same one the HTTP face reports. */
-  readonly code = 'BINDING_MISSING';
+  readonly code = "BINDING_MISSING";
 
   readonly bindings: readonly string[];
 
   constructor(bindings: readonly string[]) {
-    super(`required Worker bindings are not configured: ${bindings.join(', ')}`);
-    this.name = 'BindingMissingError';
+    super(`required Worker bindings are not configured: ${bindings.join(", ")}`);
+    this.name = "BindingMissingError";
     this.bindings = bindings;
   }
 }
@@ -32,10 +32,10 @@ export class BindingMissingError extends Error {
  *
  * @throws {BindingMissingError} when `DB` is absent or is not a D1 handle.
  */
-export function createDb(env: Pick<Env, 'DB'>): DrizzleD1Database {
+export function createDb(env: Pick<Env, "DB">): DrizzleD1Database {
   const binding: unknown = (env as { DB?: unknown }).DB;
-  if (!isBindingHealthy('DB', binding)) {
-    throw new BindingMissingError(['DB']);
+  if (!isBindingHealthy("DB", binding)) {
+    throw new BindingMissingError(["DB"]);
   }
   return drizzle(env.DB);
 }

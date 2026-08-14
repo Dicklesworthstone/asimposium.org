@@ -1,6 +1,6 @@
-import type { ExecutionContext } from '@cloudflare/workers-types';
-import { createApp } from './app';
-import type { Env } from './env';
+import type { ExecutionContext } from "@cloudflare/workers-types";
+import { createApp } from "./app";
+import type { Env } from "./env";
 
 /**
  * The Worker entrypoint: `a.asimposium.org`.
@@ -16,5 +16,5 @@ export default {
   },
 };
 
-export { createApp };
 export type { Env };
+export { createApp };

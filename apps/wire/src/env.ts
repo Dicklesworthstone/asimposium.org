@@ -1,4 +1,4 @@
-import type { D1Database, R2Bucket } from '@cloudflare/workers-types';
+import type { D1Database, R2Bucket } from "@cloudflare/workers-types";
 
 /**
  * Typed Worker bindings for `apps/wire` (Stoa / Propylon / Symposiarch / Herald).
@@ -14,16 +14,16 @@ export interface Env {
   CAS: R2Bucket;
 }
 
-export const REQUIRED_BINDINGS = ['DB', 'CAS'] as const;
+export const REQUIRED_BINDINGS = ["DB", "CAS"] as const;
 
 export type RequiredBinding = (typeof REQUIRED_BINDINGS)[number];
 
-export type BindingState = 'bound' | 'missing';
+export type BindingState = "bound" | "missing";
 
-const isFunction = (value: unknown): boolean => typeof value === 'function';
+const isFunction = (value: unknown): boolean => typeof value === "function";
 
 const readProperty = (container: unknown, key: string): unknown =>
-  typeof container === 'object' && container !== null
+  typeof container === "object" && container !== null
     ? (container as Record<string, unknown>)[key]
     : undefined;
 
@@ -36,8 +36,9 @@ const readProperty = (container: unknown, key: string): unknown =>
  * from inside a write transaction where the failure is far more expensive.
  */
 const BINDING_PROBES: Record<RequiredBinding, (value: unknown) => boolean> = {
-  DB: (value) => isFunction(readProperty(value, 'prepare')) && isFunction(readProperty(value, 'batch')),
-  CAS: (value) => isFunction(readProperty(value, 'get')) && isFunction(readProperty(value, 'put')),
+  DB: (value) =>
+    isFunction(readProperty(value, "prepare")) && isFunction(readProperty(value, "batch")),
+  CAS: (value) => isFunction(readProperty(value, "get")) && isFunction(readProperty(value, "put")),
 };
 
 /** True when `value` looks like a live handle for the named binding. */
@@ -59,7 +60,7 @@ export function bindingStates(env: unknown): Record<RequiredBinding, BindingStat
   const missing = new Set<RequiredBinding>(missingBindings(env));
   const states = {} as Record<RequiredBinding, BindingState>;
   for (const name of REQUIRED_BINDINGS) {
-    states[name] = missing.has(name) ? 'missing' : 'bound';
+    states[name] = missing.has(name) ? "missing" : "bound";
   }
   return states;
 }

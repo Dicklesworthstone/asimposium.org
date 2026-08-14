@@ -1,6 +1,6 @@
-import type { D1Database, R2Bucket } from '@cloudflare/workers-types';
-import worker from '../../src/index';
-import type { Env } from '../../src/env';
+import type { D1Database, R2Bucket } from "@cloudflare/workers-types";
+import type { Env } from "../../src/env";
+import worker from "../../src/index";
 
 /**
  * Binding *shapes*, not D1/R2 behaviour.
@@ -26,24 +26,24 @@ const refuse = (method: string) => (): never => {
 /** An object with D1's method shape. It is not a database. */
 export function d1Shaped(): D1Database {
   return {
-    prepare: refuse('prepare'),
-    batch: refuse('batch'),
-    dump: refuse('dump'),
-    exec: refuse('exec'),
-    withSession: refuse('withSession'),
+    prepare: refuse("prepare"),
+    batch: refuse("batch"),
+    dump: refuse("dump"),
+    exec: refuse("exec"),
+    withSession: refuse("withSession"),
   } as unknown as D1Database;
 }
 
 /** An object with R2's method shape. It is not a bucket. */
 export function r2Shaped(): R2Bucket {
   return {
-    get: refuse('get'),
-    put: refuse('put'),
-    head: refuse('head'),
-    delete: refuse('delete'),
-    list: refuse('list'),
-    createMultipartUpload: refuse('createMultipartUpload'),
-    resumeMultipartUpload: refuse('resumeMultipartUpload'),
+    get: refuse("get"),
+    put: refuse("put"),
+    head: refuse("head"),
+    delete: refuse("delete"),
+    list: refuse("list"),
+    createMultipartUpload: refuse("createMultipartUpload"),
+    resumeMultipartUpload: refuse("resumeMultipartUpload"),
   } as unknown as R2Bucket;
 }
 
@@ -53,7 +53,10 @@ export function boundEnv(overrides: Partial<Record<keyof Env, unknown>> = {}): E
 }
 
 /** An `ExecutionContext` stand-in; the scaffold schedules no deferred work. */
-export function executionContext(): { waitUntil: (p: Promise<unknown>) => void; passThroughOnException: () => void } {
+export function executionContext(): {
+  waitUntil: (p: Promise<unknown>) => void;
+  passThroughOnException: () => void;
+} {
   return {
     waitUntil: () => undefined,
     passThroughOnException: () => undefined,
@@ -80,7 +83,7 @@ export async function callWorker(path: string, env: unknown = boundEnv()): Promi
     executionContext() as unknown as Parameters<typeof worker.fetch>[2],
   );
   const bodyText = await response.text();
-  let body: unknown = undefined;
+  let body: unknown;
   try {
     body = JSON.parse(bodyText);
   } catch {
@@ -88,7 +91,7 @@ export async function callWorker(path: string, env: unknown = boundEnv()): Promi
   }
   return {
     status: response.status,
-    contentType: response.headers.get('content-type') ?? '',
+    contentType: response.headers.get("content-type") ?? "",
     bodyText,
     body,
     headers: response.headers,
