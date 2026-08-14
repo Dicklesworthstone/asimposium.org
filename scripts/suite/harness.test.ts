@@ -51,9 +51,9 @@ import {
   MAX_TIMEOUT_MS,
   orderSteps,
   publishFailureBlob,
+  RUN_IDENTITY_NAME,
   reconcileFailureManifest,
   reconcileRunIdentity,
-  RUN_IDENTITY_NAME,
   repositoryRoot,
   reserveArtifactNamespace,
   runHarness,
@@ -1847,27 +1847,43 @@ describe("failure manifest reconciliation", () => {
     const cases: [string, () => Record<string, unknown>[] | string][] = [
       ["not JSON", () => "{not json\n"],
       ["a JSON array", () => "[1,2,3]\n"],
-      ["an unknown schema version", () => [line(FAILURE_RECORD_INTENT, body, { schema_version: "9.9" })]],
-      ["an unknown record kind", () => [line(FAILURE_RECORD_INTENT, body, { record: "something_else" })]],
-      ["another run's record", () => [line(FAILURE_RECORD_INTENT, body, { run_id: "a-different-run" })]],
+      [
+        "an unknown schema version",
+        () => [line(FAILURE_RECORD_INTENT, body, { schema_version: "9.9" })],
+      ],
+      [
+        "an unknown record kind",
+        () => [line(FAILURE_RECORD_INTENT, body, { record: "something_else" })],
+      ],
+      [
+        "another run's record",
+        () => [line(FAILURE_RECORD_INTENT, body, { run_id: "a-different-run" })],
+      ],
       ["an unusable step label", () => [line(FAILURE_RECORD_INTENT, body, { step: "../escape" })]],
       ["an out-of-range attempt", () => [line(FAILURE_RECORD_INTENT, body, { attempt: 0 })]],
       ["a non-integer attempt", () => [line(FAILURE_RECORD_INTENT, body, { attempt: 1.5 })]],
       ["a malformed digest", () => [line(FAILURE_RECORD_INTENT, body, { digest: "nothex" })]],
       ["a negative byte count", () => [line(FAILURE_RECORD_INTENT, body, { bytes: -1 })]],
-      ["a blob path that addresses another digest", () => [
-        line(FAILURE_RECORD_INTENT, body, { blob: "e2e/artifacts/blobs/sha256/deadbeef" }),
-      ]],
+      [
+        "a blob path that addresses another digest",
+        () => [line(FAILURE_RECORD_INTENT, body, { blob: "e2e/artifacts/blobs/sha256/deadbeef" })],
+      ],
       ["a completion with no intent", () => [line(FAILURE_RECORD_STORED, body)]],
-      ["a completion disagreeing with its intent", () => [
-        line(FAILURE_RECORD_INTENT, body),
-        line(FAILURE_RECORD_STORED, "different bytes entirely\n", { bytes: 1 }),
-      ]],
-      ["one attempt completed twice", () => [
-        line(FAILURE_RECORD_INTENT, body),
-        line(FAILURE_RECORD_STORED, body),
-        line(FAILURE_RECORD_STORED, body),
-      ]],
+      [
+        "a completion disagreeing with its intent",
+        () => [
+          line(FAILURE_RECORD_INTENT, body),
+          line(FAILURE_RECORD_STORED, "different bytes entirely\n", { bytes: 1 }),
+        ],
+      ],
+      [
+        "one attempt completed twice",
+        () => [
+          line(FAILURE_RECORD_INTENT, body),
+          line(FAILURE_RECORD_STORED, body),
+          line(FAILURE_RECORD_STORED, body),
+        ],
+      ],
     ];
 
     for (const [name, build] of cases) {

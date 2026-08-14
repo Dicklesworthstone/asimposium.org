@@ -1722,11 +1722,7 @@ export function runIdentityDigest(identity: RunIdentity): string {
  * that misreports both halves. Refusing is the only honest option: nothing here
  * may rewrite or remove the earlier evidence to make it agree.
  */
-export function reconcileRunIdentity(
-  path: string,
-  identity: RunIdentity,
-  resuming: boolean,
-): void {
+export function reconcileRunIdentity(path: string, identity: RunIdentity, resuming: boolean): void {
   const digest = runIdentityDigest(identity);
   const body = `${JSON.stringify({
     schema_version: HARNESS_SCHEMA_VERSION,
