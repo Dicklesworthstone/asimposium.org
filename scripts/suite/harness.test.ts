@@ -4,7 +4,14 @@
  */
 
 import { describe, expect, test } from "bun:test";
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, symlinkSync } from "node:fs";
+import {
+  existsSync,
+  mkdirSync,
+  mkdtempSync,
+  readFileSync,
+  symlinkSync,
+  writeFileSync,
+} from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -16,15 +23,23 @@ import {
   type HarnessError,
   type HarnessEvent,
   type HarnessStep,
+  MAX_CAPTURED_OUTPUT_CHARS,
   MAX_DIFF_CHARS,
   MAX_FAILURE_ARTIFACT_CHARS,
+  MAX_FAILURE_ARTIFACTS_PER_RUN,
+  MAX_RETRIES_PER_STEP,
   MAX_STEPS_PER_RUN,
+  MAX_TIMEOUT_MS,
   orderSteps,
   runHarness,
+  validateHarnessEvent,
   validateRunId,
 } from "../harness/runner.ts";
 
 const SHELL_HARNESS = fileURLToPath(new URL("../e2e-test-harness.sh", import.meta.url));
+const SECRET_EMITTER = fileURLToPath(
+  new URL("../harness/self-test-secret-emitter.ts", import.meta.url),
+);
 
 function fixtureRoot(name: string): string {
   const root = mkdtempSync(join(tmpdir(), `asimposium-harness-${name}-`));
@@ -122,7 +137,14 @@ describe("deterministic, structured diagnostics", () => {
     const failure = failed.events.find((event) => event.record === "step");
     expect(failure?.status).toBe("fail");
     expect(failure?.exit_code).toBe(3);
-    expect(failure?.reproduce).toBe("scripts/e2e-test-harness.sh --run-id failed-1");
+    expect(failure?.reproduce).toBe("unavailable: no registered CLI scenario");
+    expect(failure?.git_revision).toBe("unavailable");
+    expect(failure?.environment.runtime).toBe("bun");
+    expect(failure?.environment.binding_versions).toEqual({});
+    expect(failure?.http_method).toBeNull();
+    expect(failure?.route_template).toBeNull();
+    expect(failure?.cursor).toBeNull();
+    expect(failure?.seq).toBeNull();
   });
 });
 
@@ -200,6 +222,83 @@ describe("execution lifecycle", () => {
     expect(cancelled.exitCode).toBe(1);
     expect(cancelled.events.find((event) => event.record === "step")?.status).toBe("cancelled");
     expect(existsSync(cancellationMarker)).toBe(false);
+
+    const preCancelled = new AbortController();
+    preCancelled.abort();
+    const preCancelledMarker = join(root, "pre-cancelled-marker");
+    const preCancelledResult = await runHarness({
+      root,
+      suite: "e2e",
+      runId: "pre-cancelled-1",
+      signal: preCancelled.signal,
+      steps: [
+        {
+          id: "pre-cancelled",
+          scenario: "e2e",
+          command: command(
+            `const fs = require("node:fs"); setTimeout(() => fs.writeFileSync(${JSON.stringify(preCancelledMarker)}, "late"), 250);`,
+          ),
+          replaySafe: true,
+        },
+      ],
+      onEvent: () => undefined,
+      onOutput: () => undefined,
+    });
+    await Bun.sleep(350);
+    expect(preCancelledResult.exitCode).toBe(1);
+    expect(preCancelledResult.events.find((event) => event.record === "step")?.status).toBe(
+      "cancelled",
+    );
+    expect(existsSync(preCancelledMarker)).toBe(false);
+  });
+
+  test("timeout terminates the detached process group, including a planted grandchild", async () => {
+    const root = fixtureRoot("process-group");
+    const marker = join(root, "grandchild-marker");
+    const grandchild = `const fs = require("node:fs"); setTimeout(() => fs.writeFileSync(${JSON.stringify(marker)}, "late"), 250); setTimeout(() => process.exit(0), 1000);`;
+    const parent = `const cp = require("node:child_process"); cp.spawn(process.execPath, ["-e", ${JSON.stringify(grandchild)}], { stdio: "ignore" }); setTimeout(() => process.exit(0), 1000);`;
+    const result = await runHarness({
+      root,
+      suite: "e2e",
+      runId: "process-group-1",
+      steps: [
+        {
+          id: "grandchild",
+          scenario: "e2e",
+          command: command(parent),
+          replaySafe: true,
+          timeoutMs: 20,
+        },
+      ],
+      onEvent: () => undefined,
+      onOutput: () => undefined,
+    });
+    await Bun.sleep(350);
+    expect(result.exitCode).toBe(1);
+    expect(result.events.find((event) => event.record === "step")?.status).toBe("timeout");
+    expect(existsSync(marker)).toBe(false);
+  });
+
+  test("uses only a fixed child environment instead of ambient values", async () => {
+    const root = fixtureRoot("environment");
+    const result = await runHarness({
+      root,
+      suite: "security",
+      runId: "environment-1",
+      steps: [
+        {
+          id: "scrubbed-env",
+          scenario: "security",
+          command: command(
+            "process.exit(process.env.HOME === undefined && process.env.BUN_INSTALL === undefined ? 0 : 1)",
+          ),
+          replaySafe: true,
+        },
+      ],
+      onEvent: () => undefined,
+      onOutput: () => undefined,
+    });
+    expect(result.exitCode).toBe(0);
   });
 
   test("resumes failed replay-safe work but withholds incomplete unsafe work", async () => {
@@ -254,7 +353,10 @@ describe("execution lifecycle", () => {
 describe("secret-safe, bounded artifacts", () => {
   test("redacts argv, child stdout/stderr, diffs and every retained artifact while keeping failure cause visible", async () => {
     const root = fixtureRoot("redaction");
-    const secret = "asimp_ag_01JXYZ_redaction_canary";
+    const secret = ["asimp", "ag", "01JXYZ", "selftest", "neverlog", "canary"].join("_");
+    const opaqueValue = "A".repeat(32);
+    const opaqueEmitter = join(root, "opaque-output.cjs");
+    writeFileSync(opaqueEmitter, 'process.stderr.write("A".repeat(32)); process.exit(1);');
     let visible = "";
     const result = await runHarness({
       root,
@@ -262,11 +364,15 @@ describe("secret-safe, bounded artifacts", () => {
       runId: "redaction-1",
       steps: [
         {
+          id: "opaque",
+          scenario: "security",
+          command: [process.execPath, opaqueEmitter],
+          replaySafe: true,
+        },
+        {
           id: "secret",
           scenario: "security",
-          command: command(
-            `console.log(${JSON.stringify(`token=${secret}`)}); console.error(${JSON.stringify(`Authorization: Bearer ${secret}`)}); process.exit(1);`,
-          ),
+          command: [process.execPath, SECRET_EMITTER],
           replaySafe: true,
           expected: `authorization_code=${secret}`,
           actual: `directive_body=${secret}`,
@@ -280,6 +386,7 @@ describe("secret-safe, bounded artifacts", () => {
     expect(result.exitCode).toBe(1);
     expect(visible).toContain("<redacted>");
     expect(visible).not.toContain(secret);
+    expect(visible).not.toContain(opaqueValue);
     const retained = [
       result.artifacts.jsonl,
       result.artifacts.junit,
@@ -289,8 +396,9 @@ describe("secret-safe, bounded artifacts", () => {
       .join("\n");
     expect(retained).toContain("<redacted>");
     expect(retained).not.toContain(secret);
-    const failure = result.events.find((event) => event.record === "step");
-    expect(failure?.argv).toEqual(["bun", "<redacted-argument>", "<redacted-argument>"]);
+    expect(retained).not.toContain(opaqueValue);
+    const failure = result.events.find((event) => event.step === "secret");
+    expect(failure?.argv).toEqual(["bun", "<redacted-argument>"]);
     expect(failure?.argv?.join(" ")).not.toContain(secret);
     expect(failure?.diff?.length).toBeLessThanOrEqual(MAX_DIFF_CHARS);
     expect(boundedDiff("x".repeat(10_000), "y".repeat(10_000), root).length).toBeLessThanOrEqual(
@@ -309,7 +417,9 @@ describe("secret-safe, bounded artifacts", () => {
         {
           id: "large-failure",
           scenario: "unit",
-          command: command(`console.error(${JSON.stringify(large)}); process.exit(1)`),
+          command: command(
+            `process.stderr.write("x".repeat(${MAX_FAILURE_ARTIFACT_CHARS * 3})); process.exit(1)`,
+          ),
           replaySafe: true,
         },
       ],
@@ -320,6 +430,9 @@ describe("secret-safe, bounded artifacts", () => {
     expect(
       readFileSync(failure.artifacts.failureLogs[0] as string, "utf8").length,
     ).toBeLessThanOrEqual(MAX_FAILURE_ARTIFACT_CHARS);
+    const failureEvent = failure.events.find((event) => event.step === "large-failure");
+    expect(failureEvent?.output_chars).toBeLessThanOrEqual(MAX_CAPTURED_OUTPUT_CHARS * 2);
+    expect(failureEvent?.output_truncated).toBe(true);
 
     const success = await runHarness({
       root,
@@ -329,7 +442,7 @@ describe("secret-safe, bounded artifacts", () => {
         {
           id: "large-success",
           scenario: "unit",
-          command: command(`console.log(${JSON.stringify(large)})`),
+          command: command(`process.stdout.write("x".repeat(${MAX_FAILURE_ARTIFACT_CHARS * 3}))`),
           replaySafe: true,
         },
       ],
@@ -339,6 +452,132 @@ describe("secret-safe, bounded artifacts", () => {
     expect(success.exitCode).toBe(0);
     expect(success.artifacts.failureLogs).toEqual([]);
     expect(readFileSync(success.artifacts.jsonl, "utf8")).not.toContain(large);
+  });
+
+  test("retains at most the fixed number of failure logs without deleting any prior evidence", async () => {
+    const root = fixtureRoot("failure-retention");
+    const result = await runHarness({
+      root,
+      suite: "unit",
+      runId: "failure-retention-1",
+      steps: Array.from({ length: MAX_FAILURE_ARTIFACTS_PER_RUN + 1 }, (_, index) => ({
+        id: `failure-${index}`,
+        scenario: "unit",
+        command: command("process.stderr.write('bounded failure'); process.exit(1)"),
+        replaySafe: true,
+      })),
+      onEvent: () => undefined,
+      onOutput: () => undefined,
+    });
+    expect(result.exitCode).toBe(1);
+    expect(result.artifacts.failureLogs).toHaveLength(MAX_FAILURE_ARTIFACTS_PER_RUN);
+  });
+});
+
+describe("runtime contract validation", () => {
+  test("rejects secret-bearing argv and unbounded retry, timeout, and command inputs before spawn", async () => {
+    const root = fixtureRoot("validation");
+    const secret = ["asimp", "ag", "01JXYZ", "argv", "canary"].join("_");
+    await expect(
+      runHarness({
+        root,
+        suite: "security",
+        runId: "secret-argv-1",
+        steps: [
+          {
+            id: "secret-argv",
+            scenario: "security",
+            command: [process.execPath, `token=${secret}`],
+            replaySafe: true,
+          },
+        ],
+        onEvent: () => undefined,
+        onOutput: () => undefined,
+      }),
+    ).rejects.toMatchObject({ code: "COMMAND_SECRET_FORBIDDEN" } satisfies Partial<HarnessError>);
+
+    await expect(
+      runHarness({
+        root,
+        suite: "security",
+        runId: "bounds-1",
+        steps: [
+          {
+            id: "bounds",
+            scenario: "security",
+            command: command("process.exit(0)"),
+            replaySafe: true,
+            retries: MAX_RETRIES_PER_STEP + 1,
+            timeoutMs: MAX_TIMEOUT_MS + 1,
+          },
+        ],
+        onEvent: () => undefined,
+        onOutput: () => undefined,
+      }),
+    ).rejects.toMatchObject({ code: "RETRY_LIMIT" } satisfies Partial<HarnessError>);
+  });
+
+  test("records validated revision, environment, HTTP, cursor, and sequence context", async () => {
+    const root = fixtureRoot("event-schema");
+    const result = await runHarness({
+      root,
+      suite: "contract",
+      runId: "event-schema-1",
+      gitRevision: "abcdef0",
+      bindingVersions: { d1: "local", worker: "unbound" },
+      steps: [
+        {
+          id: "context",
+          scenario: "contract",
+          command: command("process.exit(0)"),
+          replaySafe: true,
+          http: { method: "POST", routeTemplate: "/v1/sessions/:id", cursor: 7, seq: 11 },
+        },
+      ],
+      onEvent: () => undefined,
+      onOutput: () => undefined,
+    });
+    const event = result.events.find((item) => item.record === "step");
+    if (event === undefined) throw new Error("missing step event");
+    expect(event.git_revision).toBe("abcdef0");
+    expect(event.environment.binding_versions).toEqual({ d1: "local", worker: "unbound" });
+    expect(event.http_method).toBe("POST");
+    expect(event.route_template).toBe("/v1/sessions/:id");
+    expect(event.cursor).toBe(7);
+    expect(event.seq).toBe(11);
+    let schemaError: unknown;
+    try {
+      validateHarnessEvent({ ...event, route_template: null });
+    } catch (error) {
+      schemaError = error;
+    }
+    expect(schemaError).toMatchObject({
+      code: "EVENT_SCHEMA_INVALID",
+    } satisfies Partial<HarnessError>);
+  });
+
+  test("withholds unimplemented D1, HTTP, and browser adapters instead of fabricating subsystem proof", async () => {
+    const root = fixtureRoot("adapter-unavailable");
+    const result = await runHarness({
+      root,
+      suite: "integration",
+      runId: "adapter-unavailable-1",
+      steps: [
+        { id: "d1", scenario: "integration", adapter: "d1", replaySafe: false },
+        { id: "http", scenario: "integration", adapter: "http", replaySafe: false },
+        { id: "browser", scenario: "e2e", adapter: "browser", replaySafe: false },
+      ],
+      onEvent: () => undefined,
+      onOutput: () => undefined,
+    });
+    expect(result.exitCode).toBe(HARNESS_BLOCKED_EXIT_CODE);
+    expect(
+      result.events
+        .filter((event) => event.record === "step")
+        .every((event) =>
+          ["blocked", "ADAPTER_UNAVAILABLE"].includes(event.status === "blocked" ? event.code : ""),
+        ),
+    ).toBe(true);
   });
 });
 
@@ -417,8 +656,8 @@ test("the real shell entry point proves the seeded harness-only negative aggrega
   ]);
   expect(exitCode).toBe(0);
   expect(stdout).toContain("HARNESS_SELF_TEST_HARNESS_ONLY");
-  expect(stdout).toContain("no product session");
-  expect(stderr).toContain("synthetic D1 rollback");
+  expect(stdout).toContain("D1, HTTP, and browser adapters are blocked");
+  expect(stdout).toContain("ADAPTER_UNAVAILABLE");
   expect(stderr).toContain("<redacted>");
   expect(stderr).not.toContain("selftest_neverlog_canary");
 });

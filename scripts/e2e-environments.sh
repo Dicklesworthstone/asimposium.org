@@ -105,10 +105,21 @@ fi
 # ---------------------------------------------------------------------------
 # Phase 5 — forward migration rehearsal (plan only, no database).
 # ---------------------------------------------------------------------------
-if bun infra/migrate.mjs --env "$ENVIRONMENT" >/dev/null; then
+# One invocation only: each planner run against a local environment performs a
+# real D1 round trip, so running it twice to capture output would double the
+# cost of every rehearsal.
+PLAN_STATUS=0
+PLAN_OUTPUT="$(bun infra/migrate.mjs --env "$ENVIRONMENT" 2>&1)" || PLAN_STATUS=$?
+if [ "$PLAN_STATUS" -eq 0 ]; then
   emit "migration-plan" "pass" "OK" "forward migration plan computed from db/migrations"
 else
-  fail_phase "migration-plan" "MIGRATION_PLAN_FAILED" "infra/migrate.mjs could not produce a plan."
+  PLAN_STDERR="$PLAN_OUTPUT"
+  # Surface the planner's own code rather than a generic wrapper failure: the
+  # difference between MIGRATION_DRIFT and OUT_OF_ORDER_MIGRATION is the whole
+  # diagnosis, and swallowing it would make this script the least useful layer.
+  PLAN_CODE="$(printf '%s' "$PLAN_STDERR" | sed -n 's/.*"code":"\([A-Z_]*\)".*/\1/p' | head -1)"
+  fail_phase "migration-plan" "${PLAN_CODE:-MIGRATION_PLAN_FAILED}" \
+    "infra/migrate.mjs refused to produce a plan; re-run it directly for the full diagnostic."
 fi
 
 # ---------------------------------------------------------------------------
@@ -117,6 +128,14 @@ fi
 # blocking it would be dishonest in the opposite direction.
 # ---------------------------------------------------------------------------
 if [ "$ENVIRONMENT" = "local" ]; then
+  if bun infra/migrate-local.test.mjs >/dev/null; then
+    emit "local-d1-seam" "pass" "OK" \
+      "a failing local D1 command surfaces a bounded, redacted cause rather than swallowing it"
+  else
+    fail_phase "local-d1-seam" "SEAM_CONTRACT_FAILED" \
+      "The local D1 integration contract failed."
+  fi
+
   if ! bun infra/migrate.mjs --env local --apply >/dev/null; then
     fail_phase "migrate-apply-first" "APPLY_FAILED" "The first local application failed."
   fi

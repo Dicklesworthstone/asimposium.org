@@ -15,8 +15,10 @@ import {
   lstatSync,
   mkdirSync,
   openSync,
+  readdirSync,
   readFileSync,
   realpathSync,
+  statSync,
   writeFileSync,
 } from "node:fs";
 import { homedir, tmpdir } from "node:os";
@@ -27,9 +29,21 @@ export const HARNESS_BLOCKED_EXIT_CODE = 78;
 export const MAX_CAPTURED_OUTPUT_CHARS = 4_096;
 export const MAX_DIFF_CHARS = 1_024;
 export const MAX_FAILURE_ARTIFACT_CHARS = 8_192;
+export const MAX_FAILURE_DETAIL_CHARS = 1_024;
 export const MAX_RESUME_HISTORY_BYTES = 64 * 1024;
-/** Fixed per-run bound: successful runs retain metadata/JUnit only, never child output. */
+export const MAX_EVENT_BYTES = 8 * 1024;
+export const MAX_EVENT_LEDGER_BYTES = 2 * 1024 * 1024;
+export const MAX_FAILURE_ARTIFACTS_PER_RUN = 32;
+export const MAX_JUNIT_ARTIFACTS_PER_RUN = 8;
 export const MAX_STEPS_PER_RUN = 64;
+export const MAX_RETRIES_PER_STEP = 3;
+export const MAX_TIMEOUT_MS = 60_000;
+export const MAX_COMMAND_ARGUMENTS = 16;
+export const MAX_COMMAND_ARGUMENT_CHARS = 4_096;
+export const MAX_COMMAND_CHARS = 8_192;
+export const MAX_METADATA_CHARS = 256;
+export const MAX_ROUTE_TEMPLATE_CHARS = 256;
+export const MAX_DIFF_INPUT_CHARS = 16 * 1024;
 
 const RUN_ID_PATTERN = /^[A-Za-z0-9][A-Za-z0-9._-]{0,79}$/;
 const STEP_ID_PATTERN = /^[A-Za-z0-9][A-Za-z0-9._-]{0,79}$/;
@@ -42,12 +56,22 @@ const XML_ESCAPE: Readonly<Record<string, string>> = {
 };
 
 export type StepStatus = "pass" | "fail" | "blocked" | "timeout" | "cancelled" | "skipped";
+export type HarnessAdapter = "process" | "d1" | "http" | "browser";
+
+export interface HttpContext {
+  method: string;
+  routeTemplate: string;
+  cursor?: number;
+  seq?: number;
+}
 
 export interface HarnessStep {
   /** Stable, path-safe identifier. Steps are sorted by scenario then id before execution. */
   id: string;
   scenario: string;
-  command: readonly string[];
+  /** OPS.2a executes only direct process steps. Other adapter kinds are explicitly withheld. */
+  adapter?: HarnessAdapter;
+  command?: readonly string[];
   /** A run can retry or resume this operation only when this is true. */
   replaySafe: boolean;
   retries?: number;
@@ -57,6 +81,7 @@ export interface HarnessStep {
   assertion?: string;
   requestId?: string;
   eventId?: string;
+  http?: HttpContext;
 }
 
 export interface HarnessRunOptions {
@@ -67,6 +92,12 @@ export interface HarnessRunOptions {
   /** Supplying a seed makes fixture selection reproducible; omitted derives from suite + run id. */
   seed?: number;
   resume?: boolean;
+  /** A real revision if supplied by the caller; unavailable is recorded rather than guessed. */
+  gitRevision?: string;
+  /** Binding versions are caller supplied metadata only; they are never inherited into children. */
+  bindingVersions?: Readonly<Record<string, string>>;
+  /** Only a registered CLI scenario may be represented as executable reproduction. */
+  reproduction?: "self-test";
   signal?: AbortSignal;
   /** Called with redacted child output. Defaults to visible stderr. */
   onOutput?: (text: string) => void;
@@ -88,9 +119,21 @@ export interface HarnessEvent {
   attempt: number;
   retry: number;
   replay_safe: boolean;
+  adapter: HarnessAdapter;
   status: StepStatus | "pass" | "fail" | "blocked";
   code: string;
   reproduce: string;
+  git_revision: string;
+  environment: {
+    runtime: "bun";
+    runtime_version: string;
+    platform: string;
+    binding_versions: Record<string, string>;
+  };
+  http_method: string | null;
+  route_template: string | null;
+  cursor: number | null;
+  seq: number | null;
   argv?: string[];
   exit_code?: number;
   request_id?: string;
@@ -132,6 +175,7 @@ class ArtifactStore {
   readonly jsonl: string;
   readonly failureLogs: string[] = [];
   private readonly physicalRoot: string;
+  private failureArtifactCount: number;
 
   constructor(
     root: string,
@@ -156,14 +200,29 @@ class ArtifactStore {
       const descriptor = openSync(this.jsonl, "wx");
       closeSync(descriptor);
     }
+    this.failureArtifactCount = readdirSync(this.directory).filter((name) =>
+      /^failure-[A-Za-z0-9._-]+-attempt-\d+(?:\.\d+)?\.log$/.test(name),
+    ).length;
   }
 
   append(event: HarnessEvent): void {
-    appendFileSync(this.jsonl, `${JSON.stringify(event)}\n`, "utf8");
+    const serialized = `${JSON.stringify(event)}\n`;
+    const eventBytes = Buffer.byteLength(serialized, "utf8");
+    if (eventBytes > MAX_EVENT_BYTES) {
+      throw new HarnessError("EVENT_TOO_LARGE", "a redacted event exceeds the fixed event size.");
+    }
+    if (statSync(this.jsonl).size + eventBytes > MAX_EVENT_LEDGER_BYTES) {
+      throw new HarnessError(
+        "EVENT_LEDGER_LIMIT",
+        "the bounded event ledger is full; retain the existing evidence without deletion.",
+      );
+    }
+    appendFileSync(this.jsonl, serialized, "utf8");
   }
 
   writeFailureLog(step: HarnessStep, attempt: number, output: string): string | undefined {
     if (output.length === 0) return undefined;
+    if (this.failureArtifactCount >= MAX_FAILURE_ARTIFACTS_PER_RUN) return undefined;
     const safeStep = validateStepId(step.id) ? step.id : "invalid-step";
     for (let collision = 0; collision < 100; collision += 1) {
       const suffix = collision === 0 ? "" : `.${collision}`;
@@ -175,6 +234,7 @@ class ArtifactStore {
         flag: "wx",
       });
       this.failureLogs.push(path);
+      this.failureArtifactCount += 1;
       return path;
     }
     throw new HarnessError("FAILURE_ARTIFACT_LIMIT", "no bounded failure artifact slot remains.");
@@ -182,7 +242,7 @@ class ArtifactStore {
 
   writeJUnit(events: readonly HarnessEvent[]): string {
     let attempt = 0;
-    while (attempt < 100) {
+    while (attempt < MAX_JUNIT_ARTIFACTS_PER_RUN) {
       const name = attempt === 0 ? "junit.xml" : `junit.${attempt}.xml`;
       const path = join(this.directory, name);
       assertContained(this.physicalRoot, path, "ARTIFACT_PATH_UNSAFE");
@@ -195,7 +255,7 @@ class ArtifactStore {
     }
     throw new HarnessError(
       "JUNIT_ARTIFACT_LIMIT",
-      "no bounded JUnit artifact slot remains for this run.",
+      "no bounded JUnit artifact slot remains; existing retained artifacts are not deleted.",
     );
   }
 
@@ -211,9 +271,9 @@ class ArtifactStore {
     for (const line of bytes.toString("utf8").split("\n")) {
       if (line.trim().length === 0) continue;
       try {
-        const event = JSON.parse(line) as Partial<HarnessEvent>;
-        if (event.record !== "step" || typeof event.step !== "string") continue;
-        if (isStepStatus(event.status)) states.set(event.step, event.status);
+        const event = JSON.parse(line) as HarnessEvent;
+        validateHarnessEvent(event);
+        if (event.record === "step") states.set(event.step, event.status);
       } catch {
         throw new HarnessError(
           "RUN_HISTORY_INVALID",
@@ -263,6 +323,7 @@ export function redactNeverLog(text: string, root: string): string {
     /\b(?:sk|rk|pk)-[A-Za-z0-9_-]{12,}/g,
     /\bgh[pousr]_[A-Za-z0-9]{16,}/g,
     /\bAIza[0-9A-Za-z_-]{20,}/g,
+    /\b[A-Za-z0-9]{32,}\b/g,
     /-----BEGIN [A-Z ]*PRIVATE KEY-----[\s\S]*?-----END [A-Z ]*PRIVATE KEY-----/g,
   ];
   for (const pattern of patterns) {
@@ -286,18 +347,192 @@ export function boundedDiff(expected: string, actual: string, root: string): str
   );
 }
 
-export function safeReproductionCommand(runId: string, resume: boolean): string {
-  if (!validateRunId(runId)) throw new HarnessError("RUN_ID_INVALID", "run_id must be safe.");
-  return `scripts/e2e-test-harness.sh --run-id ${runId}${resume ? " --resume" : ""}`;
+export function safeReproductionCommand(reproduction?: HarnessRunOptions["reproduction"]): string {
+  if (reproduction === "self-test") return "scripts/e2e-test-harness.sh --self-test";
+  return "unavailable: no registered CLI scenario";
 }
 
-export async function runHarness(options: HarnessRunOptions): Promise<HarnessRunResult> {
-  if (options.steps.length > MAX_STEPS_PER_RUN) {
+/** Validate the public runner input before any artifact directory or child process is created. */
+export function validateHarnessRunOptions(options: HarnessRunOptions): void {
+  if (typeof options !== "object" || options === null) {
+    throw new HarnessError("RUN_OPTIONS_INVALID", "run options must be an object.");
+  }
+  if (!validateRunId(options.runId)) {
+    throw new HarnessError("RUN_ID_INVALID", "run_id must be one safe path component.");
+  }
+  assertSafeMetadata(options.suite, "SUITE_INVALID", "suite");
+  if (!Array.isArray(options.steps) || options.steps.length > MAX_STEPS_PER_RUN) {
     throw new HarnessError(
       "RUN_STEP_LIMIT",
       "harness runs may contain at most the bounded step limit.",
     );
   }
+  if (
+    options.seed !== undefined &&
+    (!Number.isInteger(options.seed) || options.seed < 0 || options.seed > 0xffffffff)
+  ) {
+    throw new HarnessError("SEED_INVALID", "seed must be an unsigned 32-bit integer.");
+  }
+  if (options.gitRevision !== undefined && !isGitRevision(options.gitRevision)) {
+    throw new HarnessError(
+      "GIT_REVISION_INVALID",
+      "git revision must be a commit hash or unavailable.",
+    );
+  }
+  if (options.reproduction !== undefined && options.reproduction !== "self-test") {
+    throw new HarnessError("REPRODUCTION_INVALID", "only registered CLI reproduction is allowed.");
+  }
+  validateBindingVersions(options.bindingVersions);
+  const seenStepIds = new Set<string>();
+  for (const step of options.steps) {
+    validateHarnessStep(step);
+    if (seenStepIds.has(step.id)) {
+      throw new HarnessError(
+        "STEP_ID_DUPLICATE",
+        "step ids must be unique within one harness run.",
+      );
+    }
+    seenStepIds.add(step.id);
+  }
+}
+
+/** Validate the step contract, including bounded command inputs that can reach a process table. */
+export function validateHarnessStep(step: HarnessStep): void {
+  if (typeof step !== "object" || step === null || Array.isArray(step)) {
+    throw new HarnessError("STEP_SCHEMA_INVALID", "step must be an object.");
+  }
+  if (!validateStepId(step.id)) {
+    throw new HarnessError("STEP_ID_INVALID", "step id must be one safe path component.");
+  }
+  assertSafeMetadata(step.scenario, "SCENARIO_INVALID", "scenario");
+  if (typeof step.replaySafe !== "boolean") {
+    throw new HarnessError("REPLAY_SAFETY_INVALID", "replay_safe must be explicit.");
+  }
+  const adapter = step.adapter ?? "process";
+  if (!isHarnessAdapter(adapter)) {
+    throw new HarnessError("ADAPTER_INVALID", "adapter must be process, d1, http, or browser.");
+  }
+  if (adapter === "process") {
+    validateCommand(step.command);
+  } else if (step.command !== undefined) {
+    throw new HarnessError(
+      "ADAPTER_COMMAND_FORBIDDEN",
+      "withheld adapters cannot claim execution through a process command.",
+    );
+  }
+  if (!isBoundedInteger(step.retries ?? 0, 0, MAX_RETRIES_PER_STEP)) {
+    throw new HarnessError("RETRY_LIMIT", "retries must be a bounded non-negative integer.");
+  }
+  if (step.timeoutMs !== undefined && !isBoundedInteger(step.timeoutMs, 1, MAX_TIMEOUT_MS)) {
+    throw new HarnessError("TIMEOUT_LIMIT", "timeout_ms must be within the fixed harness bound.");
+  }
+  for (const [field, value] of Object.entries({
+    assertion: step.assertion,
+    request_id: step.requestId,
+    event_id: step.eventId,
+  })) {
+    if (value !== undefined) assertSafeMetadata(value, "METADATA_INVALID", field);
+  }
+  if ((step.expected === undefined) !== (step.actual === undefined)) {
+    throw new HarnessError("DIFF_INVALID", "expected and actual must be supplied together.");
+  }
+  if (step.expected !== undefined) assertBoundedInputText(step.expected, "expected");
+  if (step.actual !== undefined) assertBoundedInputText(step.actual, "actual");
+  if (step.http !== undefined) validateHttpContext(step.http);
+}
+
+/** Runtime schema guard for every JSONL/JUnit-facing event, not only TypeScript callers. */
+export function validateHarnessEvent(event: HarnessEvent): void {
+  if (typeof event !== "object" || event === null || Array.isArray(event)) {
+    throw new HarnessError("EVENT_SCHEMA_INVALID", "event must be an object.");
+  }
+  if (
+    event.schema_version !== HARNESS_SCHEMA_VERSION ||
+    !["step", "summary", "self_test"].includes(event.record)
+  ) {
+    throw new HarnessError("EVENT_SCHEMA_INVALID", "event record is not recognized.");
+  }
+  if (!validateRunId(event.run_id) || !validateStepId(event.step)) {
+    throw new HarnessError("EVENT_SCHEMA_INVALID", "event identifiers are invalid.");
+  }
+  for (const [field, value] of Object.entries({
+    suite: event.suite,
+    scenario: event.scenario,
+    code: event.code,
+    reproduce: event.reproduce,
+    git_revision: event.git_revision,
+  })) {
+    assertSafeMetadata(value, "EVENT_SCHEMA_INVALID", field);
+  }
+  if (
+    !isBoundedInteger(event.seed, 0, 0xffffffff) ||
+    !isBoundedInteger(event.duration_ms, 0, MAX_TIMEOUT_MS + 250) ||
+    Number.isNaN(Date.parse(event.started_at)) ||
+    Number.isNaN(Date.parse(event.finished_at))
+  ) {
+    throw new HarnessError("EVENT_SCHEMA_INVALID", "event numeric fields are out of bounds.");
+  }
+  if (
+    !isBoundedInteger(event.attempt, 0, MAX_RETRIES_PER_STEP + 1) ||
+    !isBoundedInteger(event.retry, 0, MAX_RETRIES_PER_STEP)
+  ) {
+    throw new HarnessError("EVENT_SCHEMA_INVALID", "event retry fields are out of bounds.");
+  }
+  if (
+    !isStepStatus(event.status) ||
+    !isHarnessAdapter(event.adapter) ||
+    !isGitRevision(event.git_revision)
+  ) {
+    throw new HarnessError(
+      "EVENT_SCHEMA_INVALID",
+      "event status, adapter, or revision is invalid.",
+    );
+  }
+  if (!isValidReproduction(event.reproduce)) {
+    throw new HarnessError("EVENT_SCHEMA_INVALID", "event reproduction is not truthful.");
+  }
+  validateEnvironment(event.environment);
+  validateNullableHttpContext(event.http_method, event.route_template, event.cursor, event.seq);
+  for (const [field, value] of Object.entries({
+    request_id: event.request_id,
+    event_id: event.event_id,
+    assertion: event.assertion,
+  })) {
+    if (value !== undefined) assertSafeMetadata(value, "EVENT_SCHEMA_INVALID", field);
+  }
+  if (event.detail !== undefined)
+    assertSafeEventText(event.detail, MAX_FAILURE_DETAIL_CHARS, "detail");
+  if (event.diff !== undefined && event.diff.length > MAX_DIFF_CHARS) {
+    throw new HarnessError("EVENT_SCHEMA_INVALID", "event diff exceeds its fixed bound.");
+  }
+  if (
+    event.output_chars !== undefined &&
+    !isBoundedInteger(event.output_chars, 0, MAX_CAPTURED_OUTPUT_CHARS * 2)
+  ) {
+    throw new HarnessError(
+      "EVENT_SCHEMA_INVALID",
+      "event output metadata exceeds its fixed bound.",
+    );
+  }
+  if (
+    event.argv !== undefined &&
+    (!Array.isArray(event.argv) ||
+      event.argv.some(
+        (argument) => typeof argument !== "string" || argument.length > MAX_COMMAND_ARGUMENT_CHARS,
+      ))
+  ) {
+    throw new HarnessError("EVENT_SCHEMA_INVALID", "event argv metadata exceeds its fixed bound.");
+  }
+  if (event.output_truncated !== undefined && typeof event.output_truncated !== "boolean") {
+    throw new HarnessError("EVENT_SCHEMA_INVALID", "event output truncation metadata is invalid.");
+  }
+  if (event.exit_code !== undefined && !isBoundedInteger(event.exit_code, -255, 255)) {
+    throw new HarnessError("EVENT_SCHEMA_INVALID", "event exit code is out of bounds.");
+  }
+}
+
+export async function runHarness(options: HarnessRunOptions): Promise<HarnessRunResult> {
+  validateHarnessRunOptions(options);
   const seed = options.seed ?? deterministicSeed(options.suite, options.runId);
   const store = new ArtifactStore(options.root, options.runId, options.resume === true);
   const output = options.onOutput ?? ((text: string) => process.stderr.write(text));
@@ -310,9 +545,7 @@ export async function runHarness(options: HarnessRunOptions): Promise<HarnessRun
 
   const seenStepIds = new Set<string>();
   for (const step of orderSteps(options.steps)) {
-    if (!validateStepId(step.id)) {
-      throw new HarnessError("STEP_ID_INVALID", "step id must be one safe path component.");
-    }
+    validateHarnessStep(step);
     if (seenStepIds.has(step.id)) {
       throw new HarnessError(
         "STEP_ID_DUPLICATE",
@@ -320,6 +553,11 @@ export async function runHarness(options: HarnessRunOptions): Promise<HarnessRun
       );
     }
     seenStepIds.add(step.id);
+    if ((step.adapter ?? "process") !== "process") {
+      const event = unavailableAdapterEvent(options, step, seed);
+      recordEvent(store, events, eventSink, event);
+      continue;
+    }
     const prior = priorStates.get(step.id);
     if (options.resume === true && prior !== undefined) {
       if (prior === "pass") {
@@ -347,7 +585,7 @@ export async function runHarness(options: HarnessRunOptions): Promise<HarnessRun
       }
     }
 
-    const retries = step.replaySafe ? Math.max(0, step.retries ?? 0) : 0;
+    const retries = step.replaySafe ? (step.retries ?? 0) : 0;
     let finalEvent: HarnessEvent | undefined;
     for (let attempt = 0; attempt <= retries; attempt += 1) {
       finalEvent = await runAttempt(options, step, seed, attempt, retries, output);
@@ -398,33 +636,32 @@ async function runAttempt(
   const started = new Date();
   const startedAt = performance.now();
   let termination: "timeout" | "cancelled" | undefined;
+  const commandLine = step.command;
+  if (commandLine === undefined) {
+    throw new HarnessError("COMMAND_MISSING", "a process step requires a validated command.");
+  }
   const child = Bun.spawn({
-    cmd: [...step.command],
+    cmd: [...commandLine],
     cwd: resolve(options.root),
     stdout: "pipe",
     stderr: "pipe",
     stdin: "ignore",
+    detached: true,
+    env: scrubbedChildEnvironment(),
   });
   let forceKill: ReturnType<typeof setTimeout> | undefined;
   const terminate = (reason: "timeout" | "cancelled") => {
     if (termination !== undefined) return;
     termination = reason;
-    try {
-      child.kill("SIGTERM");
-    } catch {
-      // The child already completed between the scheduler tick and the kill attempt.
-    }
+    killChildGroup(child, "SIGTERM");
     forceKill = setTimeout(() => {
-      try {
-        child.kill("SIGKILL");
-      } catch {
-        // A normal SIGTERM exit is the expected cleanup path.
-      }
+      killChildGroup(child, "SIGKILL");
     }, 250);
   };
   const timeout = setTimeout(() => terminate("timeout"), Math.max(1, step.timeoutMs ?? 30_000));
   const abort = () => terminate("cancelled");
   options.signal?.addEventListener("abort", abort, { once: true });
+  if (options.signal?.aborted) abort();
 
   const [stdout, stderr, exitCode] = await Promise.all([
     readBounded(child.stdout, MAX_CAPTURED_OUTPUT_CHARS),
@@ -432,7 +669,11 @@ async function runAttempt(
     child.exited,
   ]);
   clearTimeout(timeout);
-  if (forceKill !== undefined) clearTimeout(forceKill);
+  if (forceKill !== undefined) {
+    clearTimeout(forceKill);
+    // The leader may have exited after SIGTERM while a descendant remains in its process group.
+    killChildGroup(child, "SIGKILL");
+  }
   options.signal?.removeEventListener("abort", abort);
 
   const visibleOutput = redactNeverLog(`${stdout.text}${stderr.text}`, options.root);
@@ -466,7 +707,7 @@ async function runAttempt(
       : redactNeverLog(
           clip(
             `${stdout.text.length > 0 ? `stdout:\n${stdout.text}\n` : ""}${stderr.text.length > 0 ? `stderr:\n${stderr.text}` : ""}`,
-            MAX_FAILURE_ARTIFACT_CHARS,
+            MAX_FAILURE_DETAIL_CHARS,
           ),
           options.root,
         );
@@ -486,8 +727,8 @@ async function runAttempt(
     replay_safe: step.replaySafe,
     status,
     code,
-    reproduce: safeReproductionCommand(options.runId, options.resume === true),
-    argv: safeArgv(step.command, options.root),
+    reproduce: safeReproductionCommand(options.reproduction),
+    argv: safeArgv(commandLine, options.root),
     exit_code: exitCode,
     ...(step.requestId === undefined
       ? {}
@@ -502,6 +743,7 @@ async function runAttempt(
     output_chars: outputChars,
     output_truncated: stdout.truncated || stderr.truncated,
     ...(detail === undefined ? {} : { detail }),
+    ...eventContext(options, step),
   };
 }
 
@@ -530,8 +772,9 @@ function skippedEvent(
     replay_safe: step.replaySafe,
     status,
     code,
-    reproduce: safeReproductionCommand(options.runId, true),
+    reproduce: safeReproductionCommand(options.reproduction),
     detail,
+    ...eventContext(options, step),
   };
 }
 
@@ -564,10 +807,11 @@ function summaryEvent(
     replay_safe: true,
     status: hasFailure ? "fail" : hasBlocked ? "blocked" : "pass",
     code: hasFailure ? "RUN_FAILED" : hasBlocked ? "RUN_BLOCKED" : "RUN_PASSED",
-    reproduce: safeReproductionCommand(options.runId, true),
+    reproduce: safeReproductionCommand(options.reproduction),
     artifact_digest: junitDigest,
     detail:
       "Harness output is redacted and bounded; a passing harness run is not product correctness.",
+    ...eventContext(options),
   };
 }
 
@@ -577,9 +821,91 @@ function recordEvent(
   sink: (event: HarnessEvent) => void,
   event: HarnessEvent,
 ): void {
+  validateHarnessEvent(event);
   store.append(event);
   events.push(event);
   sink(event);
+}
+
+function unavailableAdapterEvent(
+  options: HarnessRunOptions,
+  step: HarnessStep,
+  seed: number,
+): HarnessEvent {
+  const now = new Date().toISOString();
+  const adapter = step.adapter ?? "process";
+  return {
+    schema_version: HARNESS_SCHEMA_VERSION,
+    record: "step",
+    run_id: options.runId,
+    suite: safeMetadata(options.suite, options.root),
+    scenario: safeMetadata(step.scenario, options.root),
+    step: step.id,
+    seed,
+    started_at: now,
+    finished_at: now,
+    duration_ms: 0,
+    attempt: 0,
+    retry: 0,
+    replay_safe: step.replaySafe,
+    status: "blocked",
+    code: "ADAPTER_UNAVAILABLE",
+    reproduce: safeReproductionCommand(options.reproduction),
+    detail: `${adapter} adapter is not registered in OPS.2a; no ${adapter} behavior was exercised.`,
+    ...eventContext(options, step),
+  };
+}
+
+function eventContext(
+  options: HarnessRunOptions,
+  step?: HarnessStep,
+): Pick<
+  HarnessEvent,
+  "adapter" | "git_revision" | "environment" | "http_method" | "route_template" | "cursor" | "seq"
+> {
+  const http = step?.http;
+  return {
+    adapter: step?.adapter ?? "process",
+    git_revision: options.gitRevision ?? "unavailable",
+    environment: {
+      runtime: "bun",
+      runtime_version: Bun.version,
+      platform: process.platform,
+      binding_versions: orderedBindingVersions(options.bindingVersions),
+    },
+    http_method: http?.method ?? null,
+    route_template: http?.routeTemplate ?? null,
+    cursor: http?.cursor ?? null,
+    seq: http?.seq ?? null,
+  };
+}
+
+function scrubbedChildEnvironment(): Record<string, string> {
+  // Do not inherit process.env: any unlabelled value might be sensitive. These fixed values
+  // are sufficient for absolute executables and the standard system command search path.
+  return process.platform === "win32"
+    ? { PATH: "C:\\Windows\\System32", LANG: "C", TZ: "UTC" }
+    : { PATH: "/usr/local/bin:/usr/bin:/bin", LANG: "C", LC_ALL: "C", TZ: "UTC" };
+}
+
+function killChildGroup(
+  child: { pid: number; kill(signal?: string | number): void },
+  signal: string,
+): void {
+  try {
+    if (process.platform === "win32") {
+      child.kill(signal);
+      return;
+    }
+    // Bun detached=true calls setsid() on POSIX, making the leader PID its process-group ID.
+    process.kill(-child.pid, signal);
+  } catch {
+    try {
+      child.kill(signal);
+    } catch {
+      // Exit between a timeout tick and signal delivery is an expected race.
+    }
+  }
 }
 
 function junitXml(events: readonly HarnessEvent[]): string {
@@ -638,7 +964,208 @@ function safeArgv(commandLine: readonly string[], root: string): string[] {
 }
 
 function safeMetadata(value: string, root: string): string {
-  return clip(redactNeverLog(value, root), 256);
+  return clip(redactNeverLog(value, root), MAX_METADATA_CHARS);
+}
+
+function validateCommand(command: readonly string[] | undefined): void {
+  if (!Array.isArray(command) || command.length === 0 || command.length > MAX_COMMAND_ARGUMENTS) {
+    throw new HarnessError("COMMAND_LIMIT", "command must have a bounded non-empty argv.");
+  }
+  const totalLength = command.reduce((total, argument) => total + argument.length, 0);
+  if (totalLength > MAX_COMMAND_CHARS) {
+    throw new HarnessError("COMMAND_LIMIT", "command exceeds the fixed argv character bound.");
+  }
+  for (const argument of command) {
+    if (
+      typeof argument !== "string" ||
+      argument.length === 0 ||
+      argument.length > MAX_COMMAND_ARGUMENT_CHARS
+    ) {
+      throw new HarnessError(
+        "COMMAND_LIMIT",
+        "each command argument must be a bounded non-empty string.",
+      );
+    }
+    if (containsForbiddenCommandSecret(argument)) {
+      throw new HarnessError(
+        "COMMAND_SECRET_FORBIDDEN",
+        "secret-bearing argv is forbidden because process tables are not redactable.",
+      );
+    }
+  }
+}
+
+function containsForbiddenCommandSecret(value: string): boolean {
+  return [
+    /asimp_ag_[A-Za-z0-9_-]{4,}/,
+    /#v1\.[A-Za-z0-9._~-]{4,}/,
+    /\bBearer\s+[A-Za-z0-9._~+/-]{4,}={0,2}/i,
+    /\b(?:authorization|cookie|set-cookie|token|access_token|refresh_token|id_token|password|signature|sig|authorization_code|directive_body|workshop_body)\s*(?:=|:)\s*(?:"[^"]{4,}"|'[^']{4,}'|[^\s,;]{4,})/i,
+    /\b(?:sk|rk|pk)-[A-Za-z0-9_-]{12,}/,
+    /\bgh[pousr]_[A-Za-z0-9]{16,}/,
+    /\bAIza[0-9A-Za-z_-]{20,}/,
+    /\b[A-Za-z0-9]{32,}\b/,
+  ].some((pattern) => pattern.test(value));
+}
+
+function assertSafeMetadata(value: unknown, code: string, field: string): asserts value is string {
+  if (typeof value !== "string" || value.length === 0 || value.length > MAX_METADATA_CHARS) {
+    throw new HarnessError(code, `${field} must be a bounded non-empty string.`);
+  }
+  if (/\p{Cc}/u.test(value) || containsForbiddenCommandSecret(value)) {
+    throw new HarnessError(code, `${field} contains unsafe metadata.`);
+  }
+}
+
+function assertSafeEventText(
+  value: unknown,
+  maximum: number,
+  field: string,
+): asserts value is string {
+  if (
+    typeof value !== "string" ||
+    value.length > maximum ||
+    containsForbiddenCommandSecret(value)
+  ) {
+    throw new HarnessError(
+      "EVENT_SCHEMA_INVALID",
+      `${field} is unsafe or exceeds its fixed bound.`,
+    );
+  }
+}
+
+function assertBoundedInputText(value: unknown, field: string): asserts value is string {
+  if (typeof value !== "string" || value.length > MAX_DIFF_INPUT_CHARS) {
+    throw new HarnessError("DIFF_INPUT_LIMIT", `${field} exceeds the fixed diff-input bound.`);
+  }
+}
+
+function validateBindingVersions(bindingVersions: unknown): void {
+  if (bindingVersions === undefined) return;
+  if (
+    typeof bindingVersions !== "object" ||
+    bindingVersions === null ||
+    Array.isArray(bindingVersions)
+  ) {
+    throw new HarnessError("BINDING_VERSION_INVALID", "binding versions must be an object.");
+  }
+  const entries = Object.entries(bindingVersions);
+  if (entries.length > 16) {
+    throw new HarnessError(
+      "BINDING_VERSION_LIMIT",
+      "binding version metadata has a fixed entry limit.",
+    );
+  }
+  for (const [key, value] of entries) {
+    if (!/^[A-Za-z][A-Za-z0-9_.-]{0,63}$/.test(key)) {
+      throw new HarnessError("BINDING_VERSION_INVALID", "binding version key is invalid.");
+    }
+    assertSafeMetadata(value, "BINDING_VERSION_INVALID", "binding version");
+  }
+}
+
+function orderedBindingVersions(
+  bindingVersions: Readonly<Record<string, string>> | undefined,
+): Record<string, string> {
+  return Object.fromEntries(
+    Object.entries(bindingVersions ?? {}).sort(([left], [right]) => asciiCompare(left, right)),
+  );
+}
+
+function validateHttpContext(http: HttpContext): void {
+  if (typeof http !== "object" || http === null || Array.isArray(http)) {
+    throw new HarnessError("HTTP_CONTEXT_INVALID", "HTTP context must be an object.");
+  }
+  if (!/^[A-Z]{3,10}$/.test(http.method)) {
+    throw new HarnessError("HTTP_CONTEXT_INVALID", "HTTP method must be an uppercase token.");
+  }
+  if (
+    http.routeTemplate.length === 0 ||
+    http.routeTemplate.length > MAX_ROUTE_TEMPLATE_CHARS ||
+    !http.routeTemplate.startsWith("/") ||
+    /[?#\s]/.test(http.routeTemplate)
+  ) {
+    throw new HarnessError(
+      "HTTP_CONTEXT_INVALID",
+      "route template must be a bounded path without query data.",
+    );
+  }
+  if (http.cursor !== undefined && !isBoundedInteger(http.cursor, 0, Number.MAX_SAFE_INTEGER)) {
+    throw new HarnessError("HTTP_CONTEXT_INVALID", "cursor must be a non-negative integer.");
+  }
+  if (http.seq !== undefined && !isBoundedInteger(http.seq, 0, Number.MAX_SAFE_INTEGER)) {
+    throw new HarnessError("HTTP_CONTEXT_INVALID", "seq must be a non-negative integer.");
+  }
+}
+
+function validateNullableHttpContext(
+  method: string | null,
+  routeTemplate: string | null,
+  cursor: number | null,
+  seq: number | null,
+): void {
+  if (
+    (method !== null && typeof method !== "string") ||
+    (routeTemplate !== null && typeof routeTemplate !== "string") ||
+    (cursor !== null && typeof cursor !== "number") ||
+    (seq !== null && typeof seq !== "number")
+  ) {
+    throw new HarnessError("EVENT_SCHEMA_INVALID", "event HTTP context has invalid field types.");
+  }
+  if ((method === null) !== (routeTemplate === null)) {
+    throw new HarnessError(
+      "EVENT_SCHEMA_INVALID",
+      "HTTP method and route template must appear together.",
+    );
+  }
+  if (method !== null && routeTemplate !== null)
+    validateHttpContext({
+      method,
+      routeTemplate,
+      cursor: cursor ?? undefined,
+      seq: seq ?? undefined,
+    });
+  if (cursor !== null && !isBoundedInteger(cursor, 0, Number.MAX_SAFE_INTEGER)) {
+    throw new HarnessError("EVENT_SCHEMA_INVALID", "event cursor is invalid.");
+  }
+  if (seq !== null && !isBoundedInteger(seq, 0, Number.MAX_SAFE_INTEGER)) {
+    throw new HarnessError("EVENT_SCHEMA_INVALID", "event seq is invalid.");
+  }
+}
+
+function validateEnvironment(environment: HarnessEvent["environment"]): void {
+  if (typeof environment !== "object" || environment === null || Array.isArray(environment)) {
+    throw new HarnessError("EVENT_SCHEMA_INVALID", "event environment must be an object.");
+  }
+  if (
+    environment.runtime !== "bun" ||
+    !/^\d+\.\d+\.\d+/.test(environment.runtime_version) ||
+    !/^[A-Za-z0-9_-]{1,64}$/.test(environment.platform)
+  ) {
+    throw new HarnessError("EVENT_SCHEMA_INVALID", "event environment is invalid.");
+  }
+  validateBindingVersions(environment.binding_versions);
+}
+
+function isGitRevision(value: string): boolean {
+  return value === "unavailable" || /^[0-9a-f]{7,64}$/i.test(value);
+}
+
+function isValidReproduction(value: string): boolean {
+  return (
+    value === "scripts/e2e-test-harness.sh --self-test" ||
+    value === "unavailable: no registered CLI scenario"
+  );
+}
+
+function isHarnessAdapter(value: unknown): value is HarnessAdapter {
+  return ["process", "d1", "http", "browser"].includes(String(value));
+}
+
+function isBoundedInteger(value: unknown, minimum: number, maximum: number): value is number {
+  return (
+    typeof value === "number" && Number.isInteger(value) && value >= minimum && value <= maximum
+  );
 }
 
 function asciiCompare(left: string, right: string): number {
@@ -740,18 +1267,23 @@ function command(code: string): readonly string[] {
   return [process.execPath, "-e", code];
 }
 
+function secretEmitterCommand(): readonly string[] {
+  return [process.execPath, resolve(import.meta.dir, "self-test-secret-emitter.ts")];
+}
+
 export async function runHarnessSelfTest(
   root: string,
   onEvent?: (event: HarnessEvent) => void,
 ): Promise<0 | 1> {
   const runId = `ops.2a-selftest-${Date.now()}-${process.pid}`;
-  const secret = "asimp_ag_01JXYZ_selftest_neverlog_canary";
+  const secret = ["asimp", "ag", "01JXYZ", "selftest", "neverlog", "canary"].join("_");
   const sink =
     onEvent ?? ((record: HarnessEvent) => process.stdout.write(`${JSON.stringify(record)}\n`));
   const result = await runHarness({
     root,
     runId,
     suite: "ops.2a-harness-self-test",
+    reproduction: "self-test",
     onEvent: sink,
     steps: [
       {
@@ -766,31 +1298,25 @@ export async function runHarnessSelfTest(
         eventId: "evt-selftest-unit",
       },
       {
-        id: "d1-rollback",
+        id: "d1-adapter-unavailable",
         scenario: "integration",
-        command: command("console.error('synthetic D1 rollback'); process.exit(1)"),
-        replaySafe: true,
-        assertion: "seeded D1 rollback",
-        requestId: "req-selftest-d1",
-        eventId: "evt-selftest-d1",
+        adapter: "d1",
+        replaySafe: false,
+        assertion: "D1 adapter intentionally unavailable",
       },
       {
-        id: "http-fault",
+        id: "http-adapter-unavailable",
         scenario: "integration",
-        command: command("console.error('synthetic HTTP 503'); process.exit(1)"),
-        replaySafe: true,
-        assertion: "seeded HTTP fault",
-        requestId: "req-selftest-http",
-        eventId: "evt-selftest-http",
+        adapter: "http",
+        replaySafe: false,
+        assertion: "HTTP adapter intentionally unavailable",
       },
       {
-        id: "browser-assertion",
+        id: "browser-adapter-unavailable",
         scenario: "e2e",
-        command: command("console.error('synthetic browser assertion'); process.exit(1)"),
-        replaySafe: true,
-        assertion: "seeded browser failure",
-        requestId: "req-selftest-browser",
-        eventId: "evt-selftest-browser",
+        adapter: "browser",
+        replaySafe: false,
+        assertion: "browser adapter intentionally unavailable",
       },
       {
         id: "interrupted-safe",
@@ -805,9 +1331,7 @@ export async function runHarnessSelfTest(
       {
         id: "secret-canary",
         scenario: "security",
-        command: command(
-          `console.error(${JSON.stringify(`Authorization: Bearer ${secret}`)}); process.exit(1)`,
-        ),
+        command: secretEmitterCommand(),
         replaySafe: true,
         assertion: "never-log canary",
         requestId: "req-selftest-secret",
@@ -834,6 +1358,7 @@ export async function runHarnessSelfTest(
     root,
     runId: resumeRunId,
     suite: "ops.2a-harness-self-test",
+    reproduction: "self-test",
     steps: resumeSteps,
     onEvent: sink,
   });
@@ -841,6 +1366,7 @@ export async function runHarnessSelfTest(
     root,
     runId: resumeRunId,
     suite: "ops.2a-harness-self-test",
+    reproduction: "self-test",
     steps: resumeSteps,
     resume: true,
     onEvent: sink,
@@ -860,10 +1386,8 @@ export async function runHarnessSelfTest(
     !artifacts.includes(secret) &&
     artifacts.includes("<redacted>") &&
     identifiers.includes("req-selftest-unit") &&
-    identifiers.includes("evt-selftest-browser") &&
-    result.events.every((event) =>
-      event.reproduce.startsWith("scripts/e2e-test-harness.sh --run-id "),
-    ) &&
+    result.events.every((event) => event.reproduce === "scripts/e2e-test-harness.sh --self-test") &&
+    result.events.filter((item) => item.code === "ADAPTER_UNAVAILABLE").length === 3 &&
     interrupted.exitCode === 1 &&
     resumed.events.some((event) => event.step === "safe-retry" && event.status === "fail") &&
     resumed.events.some(
@@ -884,13 +1408,26 @@ export async function runHarnessSelfTest(
     attempt: 1,
     retry: 0,
     replay_safe: true,
+    adapter: "process",
     status: pass ? "pass" : "fail",
     code: pass ? "HARNESS_SELF_TEST_HARNESS_ONLY" : "HARNESS_SELF_TEST_FAILED",
     reproduce: "scripts/e2e-test-harness.sh --self-test",
+    git_revision: "unavailable",
+    environment: {
+      runtime: "bun",
+      runtime_version: Bun.version,
+      platform: process.platform,
+      binding_versions: {},
+    },
+    http_method: null,
+    route_template: null,
+    cursor: null,
+    seq: null,
     detail: pass
-      ? "Harness-only validation passed; no product session, D1 binding, HTTP origin, browser, or Cloudflare behavior is proven."
+      ? "Harness-only validation passed; D1, HTTP, and browser adapters are blocked and no product behavior is proven."
       : "Harness self-test invariants failed.",
   };
+  validateHarnessEvent(event);
   sink(event);
   return pass ? 0 : 1;
 }
