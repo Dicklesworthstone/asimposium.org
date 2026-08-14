@@ -12,6 +12,8 @@ const PRIMARY_PROBLEM = "P-s2";
 const SECONDARY_PROBLEM = "P-s2-b";
 const LARGE_PROBLEM = "P-s2-large";
 const OUTBOX_PROBLEM = "P-s2-outbox";
+const UPGRADE_EXISTING_PROBLEM = "P-upgrade-existing";
+const UPGRADE_EMPTY_PROBLEM = "P-upgrade-empty";
 
 interface WriteResult {
   event_id: string;
@@ -253,10 +255,10 @@ function stateResult(body: Record<string, unknown>): StateResult {
     counts: typedCounts,
     chain_digest: stringAt(body, "chain_digest"),
     checkpoint_digest: body.checkpoint_digest === null ? null : stringAt(body, "checkpoint_digest"),
-    checkpoint_mode: (() => {
+    checkpoint_mode: ((): "unsigned-v0" => {
       const mode = stringAt(body, "checkpoint_mode");
       if (mode !== "unsigned-v0") fail("S2_CHECKPOINT_MODE_INVALID");
-      return mode;
+      return "unsigned-v0";
     })(),
   };
 }
@@ -361,6 +363,7 @@ async function waitForOutbox(
     row_digest: null,
     build_digest: null,
     checkpoint_digest: null,
+    checkpoint_mode: "unsigned-v0",
     transaction_ms: null,
     sql_ms: null,
     lock_wait_ms: null,
@@ -479,6 +482,150 @@ async function exerciseOutboxDrainer(): Promise<void> {
   assertEqual(heldStatus.last_phase, "held-before-ack", "S2_OUTBOX_KILL_BOUNDARY_NOT_DURABLE");
   assertEqual(heldStatus.alarm_at === null, false, "S2_OUTBOX_KILL_REARM_MISSING");
   assertEqual(held.seq, 4, "S2_OUTBOX_HOLD_SEQUENCE_INVALID");
+}
+
+async function upgradeExisting(): Promise<void> {
+  const preBackfillRead = await request(
+    "GET",
+    `/__s2/events?problem_id=${UPGRADE_EXISTING_PROBLEM}&since=0&limit=200`,
+    "upgrade-existing-backfill-required",
+  );
+  assertEqual(preBackfillRead.status, 409, "S2_UPGRADE_EXISTING_READ_NOT_BLOCKED");
+  assertEqual(
+    preBackfillRead.body.code,
+    "KRATER_INTEGRITY_BACKFILL_REQUIRED",
+    "S2_UPGRADE_EXISTING_BACKFILL_CODE_INVALID",
+  );
+  assertEqual(
+    preBackfillRead.contentType.startsWith("application/problem+json"),
+    true,
+    "S2_UPGRADE_EXISTING_BACKFILL_MEDIA_INVALID",
+  );
+
+  const firstBackfill = await request(
+    "POST",
+    "/__s2/integrity/backfill",
+    "upgrade-existing-bounded-backfill",
+    { problem_id: UPGRADE_EXISTING_PROBLEM, completed_at: CREATED_AT },
+  );
+  assertEqual(firstBackfill.status, 200, "S2_UPGRADE_EXISTING_BACKFILL_FAILED");
+  assertEqual(firstBackfill.body.status, "complete", "S2_UPGRADE_EXISTING_BACKFILL_STATUS_INVALID");
+  assertEqual(
+    firstBackfill.body.checkpoint_mode,
+    "unsigned-v0",
+    "S2_UPGRADE_EXISTING_CHECKPOINT_MODE_INVALID",
+  );
+  const secondBackfill = await request(
+    "POST",
+    "/__s2/integrity/backfill",
+    "upgrade-existing-backfill-idempotence",
+    { problem_id: UPGRADE_EXISTING_PROBLEM, completed_at: CREATED_AT },
+  );
+  assertEqual(secondBackfill.status, 200, "S2_UPGRADE_EXISTING_BACKFILL_RERUN_FAILED");
+
+  const restored = await state(UPGRADE_EXISTING_PROBLEM, "upgrade-existing-restored-state");
+  assertEqual(restored.cursor, 1, "S2_UPGRADE_EXISTING_CURSOR_INVALID");
+  assertEqual(restored.counts.events, 1, "S2_UPGRADE_EXISTING_EVENT_COUNT_INVALID");
+  assertEqual(
+    restored.counts.integrity_checkpoints,
+    1,
+    "S2_UPGRADE_EXISTING_CHECKPOINT_COUNT_INVALID",
+  );
+  assertEqual(restored.checkpoint_mode, "unsigned-v0", "S2_UPGRADE_EXISTING_MODE_INVALID");
+  await assertReplay(UPGRADE_EXISTING_PROBLEM, 1, "upgrade-existing-replay-after-backfill");
+
+  const tamper = await request(
+    "POST",
+    "/__s2/tamper-envelope",
+    "upgrade-existing-post-backfill-tamper",
+    { event_id: "E-upgrade-existing-001", operation: "update" },
+  );
+  assertEqual(tamper.status, 409, "S2_UPGRADE_EXISTING_TAMPER_NOT_REFUSED");
+  assertEqual(
+    tamper.body.code,
+    "EVENT_ENVELOPE_IMMUTABLE",
+    "S2_UPGRADE_EXISTING_TAMPER_CODE_INVALID",
+  );
+  await assertReplay(UPGRADE_EXISTING_PROBLEM, 1, "upgrade-existing-replay-after-tamper");
+
+  const appended = await write(
+    writeBody(2, UPGRADE_EXISTING_PROBLEM, "Post-upgrade integrity claim."),
+    "upgrade-existing-post-backfill-write",
+  );
+  assertEqual(appended.seq, 2, "S2_UPGRADE_EXISTING_APPEND_SEQUENCE_INVALID");
+  await assertReplay(UPGRADE_EXISTING_PROBLEM, 2, "upgrade-existing-post-upgrade-replay");
+
+  emit({
+    tool: "bun",
+    tool_version: Bun.version,
+    package: "apps/wire",
+    suite: "s2-krater-local-d1-upgrade",
+    revision: REVISION,
+    dirty_state: DIRTY_STATE,
+    source_digest: SOURCE_DIGEST,
+    bindings: BINDINGS,
+    scenario: "exact-old-0001-existing-event-forward-0004-backfill-tamper-replay",
+    seed: SEED,
+    scope: SCOPE,
+    request_id: null,
+    event_id: appended.event_id,
+    pre_cursor: 1,
+    post_cursor: 2,
+    payload_sha256: appended.payload_sha256,
+    row_digest: appended.row_digest,
+    build_digest: appended.build_digest,
+    checkpoint_digest: appended.checkpoint_digest,
+    checkpoint_mode: "unsigned-v0",
+    transaction_ms: appended.transaction_ms,
+    sql_ms: appended.d1_sql_ms,
+    lock_wait_ms: appended.lock_wait_ms,
+    retry_count: appended.retry_count,
+    assertion_diff: null,
+    status: "pass",
+    reproduce: "scripts/e2e-s2-krater.sh",
+  });
+}
+
+async function upgradeEmpty(): Promise<void> {
+  await seed(UPGRADE_EMPTY_PROBLEM, "upgrade-empty-old-database-seed");
+  const appended = await write(
+    writeBody(1, UPGRADE_EMPTY_PROBLEM, "Fresh claim after an empty legacy database upgrade."),
+    "upgrade-empty-post-migration-write",
+  );
+  assertEqual(appended.seq, 1, "S2_UPGRADE_EMPTY_SEQUENCE_INVALID");
+  const upgraded = await state(UPGRADE_EMPTY_PROBLEM, "upgrade-empty-post-migration-state");
+  assertEqual(upgraded.cursor, 1, "S2_UPGRADE_EMPTY_CURSOR_INVALID");
+  assertEqual(upgraded.counts.integrity_checkpoints, 1, "S2_UPGRADE_EMPTY_CHECKPOINT_INVALID");
+  await assertReplay(UPGRADE_EMPTY_PROBLEM, 1, "upgrade-empty-post-migration-replay");
+  emit({
+    tool: "bun",
+    tool_version: Bun.version,
+    package: "apps/wire",
+    suite: "s2-krater-local-d1-upgrade",
+    revision: REVISION,
+    dirty_state: DIRTY_STATE,
+    source_digest: SOURCE_DIGEST,
+    bindings: BINDINGS,
+    scenario: "exact-old-0001-empty-database-forward-0004-fresh-write-replay",
+    seed: SEED,
+    scope: SCOPE,
+    request_id: null,
+    event_id: appended.event_id,
+    pre_cursor: 0,
+    post_cursor: 1,
+    payload_sha256: appended.payload_sha256,
+    row_digest: appended.row_digest,
+    build_digest: appended.build_digest,
+    checkpoint_digest: appended.checkpoint_digest,
+    checkpoint_mode: "unsigned-v0",
+    transaction_ms: appended.transaction_ms,
+    sql_ms: appended.d1_sql_ms,
+    lock_wait_ms: appended.lock_wait_ms,
+    retry_count: appended.retry_count,
+    assertion_diff: null,
+    status: "pass",
+    reproduce: "scripts/e2e-s2-krater.sh",
+  });
 }
 
 async function exercise(): Promise<void> {
@@ -684,6 +831,8 @@ async function exercise(): Promise<void> {
     package: "apps/wire",
     suite: "s2-krater-local-d1",
     revision: REVISION,
+    dirty_state: DIRTY_STATE,
+    source_digest: SOURCE_DIGEST,
     bindings: BINDINGS,
     scenario: "canonical-write-cursor-fts-replay-fault-contention",
     seed: SEED,
@@ -696,6 +845,7 @@ async function exercise(): Promise<void> {
     row_digest: null,
     build_digest: null,
     checkpoint_digest: null,
+    checkpoint_mode: "unsigned-v0",
     transaction_ms: percentile95(writes.map((entry) => entry.transaction_ms)),
     sql_ms: null,
     lock_wait_ms: null,
@@ -743,6 +893,8 @@ async function restartVerify(): Promise<void> {
     package: "apps/wire",
     suite: "s2-krater-local-d1",
     revision: REVISION,
+    dirty_state: DIRTY_STATE,
+    source_digest: SOURCE_DIGEST,
     bindings: BINDINGS,
     scenario: "outbox-crash-restart-at-least-once-without-visible-duplicates",
     seed: SEED,
@@ -755,6 +907,7 @@ async function restartVerify(): Promise<void> {
     row_digest: null,
     build_digest: null,
     checkpoint_digest: primary.checkpoint_digest,
+    checkpoint_mode: primary.checkpoint_mode,
     transaction_ms: null,
     sql_ms: null,
     lock_wait_ms: null,
@@ -775,6 +928,8 @@ async function main(): Promise<void> {
   }
   if (phase === "exercise") return exercise();
   if (phase === "restart-verify") return restartVerify();
+  if (phase === "upgrade-existing") return upgradeExisting();
+  if (phase === "upgrade-empty") return upgradeEmpty();
   fail("S2_PHASE_INVALID");
 }
 
@@ -785,6 +940,8 @@ main().catch((error: unknown) => {
     package: "apps/wire",
     suite: "s2-krater-local-d1",
     revision: REVISION,
+    dirty_state: DIRTY_STATE,
+    source_digest: SOURCE_DIGEST,
     bindings: BINDINGS,
     scenario: phase,
     seed: SEED,
@@ -797,6 +954,7 @@ main().catch((error: unknown) => {
     row_digest: null,
     build_digest: null,
     checkpoint_digest: null,
+    checkpoint_mode: null,
     transaction_ms: null,
     sql_ms: null,
     lock_wait_ms: null,
