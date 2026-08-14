@@ -12,7 +12,7 @@ import {
   type ServiceEnvelopeClaims,
 } from "../../src/auth/canonical";
 import { parseEnvelope, verifyServiceEnvelope } from "../../src/auth/envelope";
-import { VerificationKeyring } from "../../src/auth/keyring";
+import { KeyringConfigError, VerificationKeyring } from "../../src/auth/keyring";
 import { MemoryNonceStore } from "../../src/auth/nonce";
 
 /**
@@ -244,6 +244,77 @@ describe("parseEnvelope — untrusted input", () => {
     const h = await harness();
     const envelope = await signedEnvelope(h);
     expect(parseEnvelope({ ...envelope, signature: envelope.signature.slice(0, 126) })).toBeUndefined();
+  });
+});
+
+describe("claim bounds are enforced before canonicalization or crypto", () => {
+  test.each([
+    ["kid", "not a kid!"],
+    ["iss", "AGORA"],
+    ["aud", "sto a"],
+    ["method", "TRACE"],
+    ["route", "v1/no-leading-slash"],
+    ["route", "/v1/x?query=1"],
+    ["action", "Directive.Create"],
+    ["action", "directive..create"],
+    ["principal_type", "Sponsor1"],
+    ["principal_id", "usr:01"],
+  ])("refuses a %s outside its character class: %j", async (field, value) => {
+    const h = await harness();
+    const envelope = await signedEnvelope(h, { [field]: value } as never);
+    expect(parseEnvelope(envelope)).toBeUndefined();
+  });
+
+  test.each([
+    ["kid", 65],
+    ["action", 65],
+    ["principal_id", 65],
+    ["principal_type", 33],
+    ["route", 257],
+  ])("refuses an oversized %s (%i bytes)", async (field, size) => {
+    const h = await harness();
+    const filler = field === "route" ? `/${"a".repeat(size - 1)}` : "a".repeat(size);
+    const envelope = await signedEnvelope(h, { [field]: filler } as never);
+    expect(parseEnvelope(envelope)).toBeUndefined();
+  });
+
+  test.each([
+    ["action", "directive\ncreate"],
+    ["principal_id", "usr_01"],
+    ["kid", "agora a"],
+    ["route", "/v1/x\n"],
+  ])("refuses a control character in %s", async (field, value) => {
+    const h = await harness();
+    const envelope = await signedEnvelope(h, { [field]: value } as never);
+    expect(parseEnvelope(envelope)).toBeUndefined();
+  });
+
+  test("an out-of-bounds claim never reaches the signature check", async () => {
+    // A megabyte of `action` would otherwise cost a megabyte of hashing per
+    // request before any signature was verified.
+    const h = await harness();
+    const envelope = await signedEnvelope(h, { action: "a".repeat(1_000_000) });
+    const result = await h.verify(envelope);
+    expect(result).toMatchObject({ ok: false, reason: "malformed" });
+  });
+
+  test("valid boundary values are accepted", async () => {
+    const h = await harness();
+    const envelope = await signedEnvelope(h, {
+      kid: "a".repeat(64),
+      action: "a".repeat(64),
+      principal_id: "a".repeat(64),
+      route: `/${"a".repeat(255)}`,
+    });
+    expect(parseEnvelope(envelope)).toBeDefined();
+  });
+
+  test("canonicalization stays total even for claims the verifier refuses", async () => {
+    // Framing must be correct for input validation would reject; the two jobs
+    // are separate on purpose (defence in depth).
+    const claims = await baseClaims({ action: "ab\nc:d" });
+    expect(() => canonicalBytes(claims)).not.toThrow();
+    expect(parseEnvelope({ claims, signature: "0".repeat(128) })).toBeUndefined();
   });
 });
 
@@ -491,6 +562,66 @@ describe("verification — key rotation overlap", () => {
           { kid: "dup", publicKeyHex: "11".repeat(32), notBefore: 0 },
         ]),
     ).toThrow(/duplicate kid/);
+  });
+});
+
+describe("keyring configuration fails at construction, never at request time", () => {
+  const good = { kid: "k", publicKeyHex: "ab".repeat(32), notBefore: 0 };
+
+  test.each([
+    ["an empty kid", { ...good, kid: "" }],
+    ["a kid with spaces", { ...good, kid: "agora key" }],
+    ["an over-long kid", { ...good, kid: "k".repeat(65) }],
+    ["a short public key", { ...good, publicKeyHex: "ab".repeat(31) }],
+    ["a long public key", { ...good, publicKeyHex: "ab".repeat(33) }],
+    ["an uppercase public key", { ...good, publicKeyHex: "AB".repeat(32) }],
+    ["a non-hex public key", { ...good, publicKeyHex: "zz".repeat(32) }],
+    ["a negative notBefore", { ...good, notBefore: -1 }],
+    ["a fractional notBefore", { ...good, notBefore: 1.5 }],
+    ["a fractional notAfter", { ...good, notBefore: 0, notAfter: 1.5 }],
+    ["notAfter equal to notBefore", { ...good, notBefore: 10, notAfter: 10 }],
+    ["notAfter before notBefore", { ...good, notBefore: 20, notAfter: 10 }],
+  ])("refuses %s", (_label, record) => {
+    expect(() => new VerificationKeyring([record])).toThrow(KeyringConfigError);
+  });
+
+  test("a well-formed record is accepted", () => {
+    expect(() => new VerificationKeyring([good])).not.toThrow();
+    expect(new VerificationKeyring([good]).kids).toEqual(["k"]);
+  });
+
+  test("a syntactically valid key the runtime rejects fails closed, not by throwing", async () => {
+    // 32 lowercase hex bytes that are not a valid Ed25519 point. Construction
+    // cannot tell; `lookup` must refuse rather than let an exception escape
+    // verifyServiceEnvelope and become a 500 carrying a stack trace.
+    const keyring = new VerificationKeyring([
+      { kid: "bad-point", publicKeyHex: "ff".repeat(32), notBefore: 0 },
+    ]);
+    const claims = await baseClaims({ kid: "bad-point" });
+    let result: Awaited<ReturnType<typeof verifyServiceEnvelope>> | undefined;
+    let threw = false;
+    try {
+      result = await verifyServiceEnvelope(
+        { claims, signature: "0".repeat(128) },
+        {
+          keyring,
+          nonces: new MemoryNonceStore(),
+          now: NOW,
+          issuer: "agora",
+          audience: "stoa",
+          body: BODY,
+          method: "POST",
+          route: ROUTE,
+        },
+      );
+    } catch {
+      threw = true;
+    }
+    expect(threw).toBe(false);
+    expect(result?.ok).toBe(false);
+    if (result !== undefined && !result.ok) {
+      expect(["key_unusable", "bad_signature"]).toContain(result.reason);
+    }
   });
 });
 
