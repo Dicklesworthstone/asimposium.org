@@ -167,7 +167,10 @@ async function runExpectedBlockedPreflight(
   // fast, named no-authority capability result.
   const { S2_RUN_REAL_BINDING_INTEGRATION: _realBindingAuthority, ...environment } = process.env;
   const child = Bun.spawn({
-    cmd: ["bun", "test", preflight.file],
+    // This is a capability probe, not a test-suite member. Executing the file directly keeps
+    // its deliberate exit 78 out of broad `bun test` discovery, where a process-level exit
+    // could otherwise overwrite an earlier real test failure.
+    cmd: ["bun", preflight.file, "--capability-probe"],
     cwd: PACKAGE_ROOT,
     env: environment,
     stdout: "pipe",

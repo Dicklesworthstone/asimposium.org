@@ -40,22 +40,38 @@ function blockRealBindingLane(
   process.exit(BLOCKED_EXIT_CODE);
 }
 
-// This file is an opt-in integration lane, not a skipped lifecycle claim. The registered suite
-// discovers this typed blocker in a separate fast process; only exact explicit authority and a
-// real Wrangler binary permit the two 660-second lifecycle runs below.
-if (process.env.S2_RUN_REAL_BINDING_INTEGRATION !== "1") {
-  blockRealBindingLane(
-    "S2_REAL_BINDING_PROOF_BLOCKED",
-    "explicit authority for the two real local Wrangler lifecycle runs",
-    "a shell-only regression or skipped discovery run presented as real D1/Workerd lifecycle proof",
+// This file has two deliberately separate entry modes:
+//
+// 1. `bun test <this-file>` with explicit authority runs the real lifecycle proof.
+// 2. `bun <this-file> --capability-probe` is the registered suite's fast capability probe and
+//    may exit 78.
+//
+// A discovered test module must never terminate the shared Bun test process. Doing so lets a
+// final blocker overwrite an earlier exit 1, which launders real regressions into "blocked".
+const HAS_REAL_BINDING_AUTHORITY = process.env.S2_RUN_REAL_BINDING_INTEGRATION === "1";
+const HAS_WRANGLER = existsSync(WRANGLER);
+const IS_CAPABILITY_PROBE =
+  import.meta.main && process.argv.length === 3 && process.argv[2] === "--capability-probe";
+
+if (IS_CAPABILITY_PROBE) {
+  if (!HAS_REAL_BINDING_AUTHORITY) {
+    blockRealBindingLane(
+      "S2_REAL_BINDING_PROOF_BLOCKED",
+      "explicit authority for the two real local Wrangler lifecycle runs",
+      "a shell-only regression or skipped discovery run presented as real D1/Workerd lifecycle proof",
+    );
+  }
+  if (!HAS_WRANGLER) {
+    blockRealBindingLane(
+      "S2_WRANGLER_REQUIRED_FOR_LIFECYCLE_PROOF",
+      "apps/wire/node_modules/.bin/wrangler",
+      "a mocked binding or missing binary presented as lifecycle proof",
+    );
+  }
+  process.stderr.write(
+    "usage: run the authorized lifecycle lane with the reproduce command in the blocker record\n",
   );
-}
-if (!existsSync(WRANGLER)) {
-  blockRealBindingLane(
-    "S2_WRANGLER_REQUIRED_FOR_LIFECYCLE_PROOF",
-    "apps/wire/node_modules/.bin/wrangler",
-    "a mocked binding or missing binary presented as lifecycle proof",
-  );
+  process.exit(2);
 }
 
 interface Run {
@@ -93,7 +109,10 @@ async function runHarness(env: Record<string, string>, deadlineMs: number): Prom
   return { exitCode, stdout: await stdout, stderr: await stderr };
 }
 
-describe("S2 real local Wrangler lifecycle proof", () => {
+const describeRealBindingLane =
+  HAS_REAL_BINDING_AUTHORITY && HAS_WRANGLER ? describe : describe.skip;
+
+describeRealBindingLane("S2 real local Wrangler lifecycle proof", () => {
   test("runs only with explicit integration authority and a real Wrangler binary", async () => {
     for (const mode of ["parallel", "sigterm"] as const) {
       const run = await runHarness({ S2_LIFECYCLE_TEST: mode }, 660_000);

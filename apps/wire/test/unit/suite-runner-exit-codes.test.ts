@@ -20,6 +20,7 @@ import { join, resolve } from "node:path";
 const BLOCKED_EXIT_CODE = 78;
 const PACKAGE_ROOT = resolve(import.meta.dir, "../..");
 const RUNNER = "scripts/suites.ts";
+const REAL_BINDING_LANE = resolve(PACKAGE_ROOT, "test/integration/s2-krater-real-bindings.test.ts");
 
 interface Diagnostic {
   tool: string;
@@ -43,7 +44,7 @@ interface Run {
   record: Diagnostic;
 }
 
-async function runRunner(suite: string, cwd = PACKAGE_ROOT): Promise<Run> {
+async function runRunner(suite: string, cwd = runnerFixture()): Promise<Run> {
   const child = Bun.spawn({
     cmd: ["bun", RUNNER, suite],
     cwd,
@@ -72,13 +73,16 @@ async function runRunner(suite: string, cwd = PACKAGE_ROOT): Promise<Run> {
 }
 
 /**
- * A throwaway copy of the real runner beside a single deliberately failing test. Copying the
- * runner verbatim from disk means the planted regression travels through the same code path a
- * real one would, without leaving a failing fixture inside this package's own suites.
+ * A throwaway copy of the real runner with tiny, deterministic suite members. Unit tests must
+ * exercise the runner's classification and diagnostic contract without recursively launching
+ * the real 60-second Workerd/D1 auth preflight. The latter belongs to the integration suite.
  */
-function plantRegression(): string {
+function runnerFixture(): string {
   const dir = mkdtempSync(join(tmpdir(), "wire-suite-regression-"));
   mkdirSync(join(dir, "scripts"), { recursive: true });
+  mkdirSync(join(dir, "test", "auth"), { recursive: true });
+  mkdirSync(join(dir, "test", "integration"), { recursive: true });
+  mkdirSync(join(dir, "test", "security"), { recursive: true });
   mkdirSync(join(dir, "test", "unit"), { recursive: true });
   mkdirSync(join(dir, "test", "split"), { recursive: true });
   writeFileSync(
@@ -86,6 +90,44 @@ function plantRegression(): string {
     `${JSON.stringify({ name: "@asimposium/wire", version: "0.0.0", private: true }, null, 2)}\n`,
   );
   writeFileSync(join(dir, "scripts", "suites.ts"), readFileSync(join(PACKAGE_ROOT, RUNNER)));
+  const passingTest = [
+    'import { expect, test } from "bun:test";',
+    "",
+    'test("the isolated fixture passes", () => {',
+    "  expect(true).toBe(true);",
+    "});",
+    "",
+  ].join("\n");
+  writeFileSync(join(dir, "test", "auth", "preflight.test.ts"), passingTest);
+  writeFileSync(join(dir, "test", "security", "security.test.ts"), passingTest);
+  writeFileSync(
+    join(dir, "test", "integration", "s2-krater-real-bindings.test.ts"),
+    [
+      'if (process.argv[2] !== "--capability-probe") throw new Error("capability probe flag required");',
+      "console.log(JSON.stringify({",
+      '  tool: "bun",',
+      '  package: "apps/wire",',
+      '  suite: "s2-krater-real-bindings",',
+      '  status: "blocked",',
+      "  exit_code: 78,",
+      '  code: "S2_REAL_BINDING_PROOF_BLOCKED",',
+      '  blocked_on: "explicit authority for the two real local Wrangler lifecycle runs",',
+      '  forbidden_substitutes: "a shell-only regression presented as real binding proof",',
+      '  reproduce: "fixture-only",',
+      "}));",
+      "process.exit(78);",
+      "",
+    ].join("\n"),
+  );
+  return dir;
+}
+
+/**
+ * Add one deliberate failure beneath the real runner copy. The regression travels through the
+ * same unit-suite code path without leaving a failing fixture in this package's own tree.
+ */
+function plantRegression(): string {
+  const dir = runnerFixture();
   writeFileSync(
     join(dir, "test", "split", "planted-regression.test.ts"),
     [
@@ -182,6 +224,33 @@ describe("a suite that actually ran keeps the ordinary exit codes", () => {
     // The child's own failure is in the log, not summarised away.
     expect(run.stderr + run.stdout).toContain("planted regression");
   }, 30_000);
+
+  test("a discovered blocked capability cannot overwrite an earlier real failure with exit 78", async () => {
+    const fixture = plantRegression();
+    const { S2_RUN_REAL_BINDING_INTEGRATION: _authority, ...environment } = process.env;
+    const child = Bun.spawn({
+      cmd: [
+        "bun",
+        "test",
+        join(fixture, "test", "split", "planted-regression.test.ts"),
+        REAL_BINDING_LANE,
+      ],
+      cwd: PACKAGE_ROOT,
+      env: environment,
+      stdout: "pipe",
+      stderr: "pipe",
+    });
+    const [stdout, stderr, exitCode] = await Promise.all([
+      new Response(child.stdout).text(),
+      new Response(child.stderr).text(),
+      child.exited,
+    ]);
+
+    expect(exitCode).toBe(1);
+    expect(exitCode).not.toBe(BLOCKED_EXIT_CODE);
+    expect(`${stdout}${stderr}`).toContain("a planted regression");
+    expect(`${stdout}${stderr}`).not.toContain('"status":"blocked"');
+  }, 20_000);
 
   test("an unknown suite is a usage error, distinct from both", async () => {
     const child = Bun.spawn({
