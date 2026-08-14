@@ -38,22 +38,25 @@ export interface KraterWriteResult {
    */
   writePhaseMs: number;
   /**
-   * Rows read by the write batch alone.
+   * Rows read by the final settled `db.batch` only.
    *
-   * A subtotal, not the write's row cost: the head read and the four post-write verification
-   * reads go through `.first()`, which discards `meta`, so their rows are not counted anywhere.
-   * No complete row total is published, because one cannot be computed from what is measured.
+   * This is a subtotal, not the write's row cost: the head read and the four post-write
+   * verification reads use `.first()`, which discards `meta`. Rejected retry attempts are also
+   * excluded: D1 throws without a `D1Result` or `meta` for a failed batch. No complete row total
+   * is published, because it cannot be computed from the available measurements.
    */
-  batchRowsRead: number;
-  d1RowsWritten: number;
-  d1SqlMs: number | null;
+  successfulBatchRowsRead: number;
+  /** Rows written by the final settled `db.batch` only, as D1 reports them. */
+  successfulBatchRowsWritten: number;
+  /** Engine-reported SQL time for the final settled `db.batch` only. */
+  successfulBatchSqlMs: number | null;
   /** What the completeness preflight cost, which `writePhaseMs` excludes entirely. */
   preflight: KraterPreflightCost;
   /**
    * Wall time from function entry to return: validation, preflight, payload and request
    * hashing, every retry, and the verification reads. Complete, unlike the row counts.
    */
-  totalMs: number;
+  writeClaimWallMs: number;
   /** D1 does not expose lock wait separately; do not relabel elapsed time as lock wait. */
   lockWaitMs: null;
   retryCount: number;
@@ -374,6 +377,8 @@ function sqlDuration(results: readonly D1Result<unknown>[]): number | null {
 export interface KraterPreflightCost {
   /** Rows the preflight read, summed across its statements as D1 reports them. */
   readonly rows_read: number;
+  /** Rows the preflight wrote, including a legacy replay's `db.batch` statements. */
+  readonly rows_written: number;
   /** Engine-reported SQL time for those statements; null when the engine reports none. */
   readonly sql_ms: number | null;
   /** How many statements the preflight issued. */
@@ -386,13 +391,29 @@ export interface KraterPreflightCost {
 
 interface CostAccumulator {
   rows_read: number;
+  rows_written: number;
   sql_ms: number;
   sql_reported: boolean;
   statements: number;
 }
 
 function newCostAccumulator(): CostAccumulator {
-  return { rows_read: 0, sql_ms: 0, sql_reported: false, statements: 0 };
+  return { rows_read: 0, rows_written: 0, sql_ms: 0, sql_reported: false, statements: 0 };
+}
+
+function recordD1Result<T>(cost: CostAccumulator, result: D1Result<T>): void {
+  cost.rows_read += result.meta.rows_read;
+  cost.rows_written += result.meta.rows_written;
+  cost.statements += 1;
+  const reported = result.meta.timings?.sql_duration_ms;
+  if (reported !== undefined) {
+    cost.sql_ms += reported;
+    cost.sql_reported = true;
+  }
+}
+
+function recordD1Results<T>(cost: CostAccumulator, results: readonly D1Result<T>[]): void {
+  for (const result of results) recordD1Result(cost, result);
 }
 
 /**
@@ -407,13 +428,7 @@ async function firstRowMeasured<T>(
   prepared: D1PreparedStatement,
 ): Promise<T | null> {
   const result = await prepared.all<T>();
-  cost.rows_read += result.meta.rows_read;
-  cost.statements += 1;
-  const reported = result.meta.timings?.sql_duration_ms;
-  if (reported !== undefined) {
-    cost.sql_ms += reported;
-    cost.sql_reported = true;
-  }
+  recordD1Result(cost, result);
   return result.results[0] ?? null;
 }
 
@@ -424,6 +439,7 @@ function settleCost(
 ): KraterPreflightCost {
   return {
     rows_read: cost.rows_read,
+    rows_written: cost.rows_written,
     sql_ms: cost.sql_reported ? Math.round(cost.sql_ms * 1_000) / 1_000 : null,
     statements: cost.statements,
     wall_ms: Math.round((performance.now() - startedAt) * 1_000) / 1_000,
@@ -704,12 +720,7 @@ export async function backfillKraterIntegrity(
   ).all<EventRow>();
   // The replay path's dominant read. Counting it keeps the two paths comparable in the receipt:
   // a legacy upgrade legitimately reads the whole log, an ordinary write must not.
-  cost.rows_read += events.meta.rows_read;
-  cost.statements += 1;
-  if (events.meta.timings?.sql_duration_ms !== undefined) {
-    cost.sql_ms += events.meta.timings.sql_duration_ms;
-    cost.sql_reported = true;
-  }
+  recordD1Result(cost, events);
 
   if (events.results.length > MAX_INTEGRITY_BACKFILL_EVENTS) {
     backfillRequired(
@@ -809,7 +820,8 @@ export async function backfillKraterIntegrity(
     ),
   );
   try {
-    await db.batch(updates);
+    const batchResults = await db.batch(updates);
+    recordD1Results(cost, batchResults);
   } catch (_error) {
     const rechecked = await readIntegrityBackfill(db, problemId, cost);
     if (rechecked?.state !== "complete") {
@@ -849,6 +861,7 @@ export async function writeClaim(
   db: D1Database,
   input: KraterWriteInput,
 ): Promise<KraterWriteResult> {
+  const writeClaimStartedAt = performance.now();
   validateWriteInput(input);
   const preflight = await backfillKraterIntegrity(db, input.problemId, input.createdAt);
   const payloadJson = payloadFor(input);
@@ -856,7 +869,7 @@ export async function writeClaim(
     sha256Hex(payloadJson),
     sha256Hex(requestFor(input)),
   ]);
-  const startedAt = performance.now();
+  const writePhaseStartedAt = performance.now();
   let retryCount = 0;
 
   while (retryCount <= MAX_CHAIN_RETRIES) {
@@ -1063,8 +1076,7 @@ export async function writeClaim(
       throw new Error("Krater write did not persist integrity digests.");
     }
 
-    const transactionMs = Math.round((performance.now() - startedAt) * 1_000) / 1_000;
-    const transactionRowsRead = metricSum(results, "rows_read");
+    const writePhaseMs = Math.round((performance.now() - writePhaseStartedAt) * 1_000) / 1_000;
     return {
       eventId: settled.event_id,
       seq: settled.event_seq,
@@ -1076,13 +1088,12 @@ export async function writeClaim(
       buildDigest: projection.build_digest,
       chainDigest: event.chain_digest,
       checkpointDigest: checkpoint.checkpoint_digest,
-      transactionMs,
-      d1RowsRead: transactionRowsRead,
-      d1RowsWritten: metricSum(results, "rows_written"),
-      d1SqlMs: sqlDuration(results),
+      writePhaseMs,
+      successfulBatchRowsRead: metricSum(results, "rows_read"),
+      successfulBatchRowsWritten: metricSum(results, "rows_written"),
+      successfulBatchSqlMs: sqlDuration(results),
       preflight,
-      totalRowsRead: preflight.rows_read + transactionRowsRead,
-      totalMs: Math.round((preflight.wall_ms + transactionMs) * 1_000) / 1_000,
+      writeClaimWallMs: Math.round((performance.now() - writeClaimStartedAt) * 1_000) / 1_000,
       lockWaitMs: null,
       retryCount,
     };

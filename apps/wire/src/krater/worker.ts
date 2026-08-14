@@ -44,7 +44,7 @@ interface KraterHarnessEnv extends KraterOutboxEnv {
   S2_LOCAL_HARNESS?: string;
 }
 
-export const S2_LOCAL_HARNESS_CAPABILITY = "enabled";
+const S2_LOCAL_HARNESS_CAPABILITY = "enabled";
 const HARNESS_PATH_PREFIX = "/__s2/";
 
 /**
@@ -168,7 +168,7 @@ async function chainHeadTriggerSql(db: D1Database): Promise<string> {
 
 function assertLoopbackOnly(url: URL): void {
   if (url.hostname !== "127.0.0.1" && url.hostname !== "localhost" && url.hostname !== "[::1]") {
-    throw new KraterValidationError("the legacy fixture route is loopback-only.");
+    throw new KraterValidationError("the local S2 harness is loopback-only.");
   }
 }
 
@@ -409,12 +409,16 @@ async function handleHarnessRequest(
   }
   let surface: "read" | "write" = "read";
   try {
+    // Every capability-enabled harness route remains local-only. This is deliberately before
+    // route dispatch, body parsing, and any D1 call so an attacker-controlled Host cannot turn
+    // one of the ordinary harness mutations into a remotely reachable write surface.
+    if (url.pathname.startsWith(HARNESS_PATH_PREFIX)) assertLoopbackOnly(url);
+
     // Loopback-only. Reports the engine's chosen plan for the completeness probe that runs on
     // every write. The caller supplies a problem id and nothing else — the statement text
     // lives in krater.ts and is the same constant the probe itself executes, so this cannot
     // drift from the query it describes and offers no surface for caller-supplied SQL.
     if (request.method === "GET" && url.pathname === "/__s2/integrity/probe-plan") {
-      assertLoopbackOnly(url);
       const plan = await explainUndigestedEventProbe(env.DB, queryString(url, "problem_id"));
       return response(plan);
     }
@@ -422,7 +426,6 @@ async function handleHarnessRequest(
     // Loopback-only fixture route; see plantLegacyProblemForHarness.
     if (request.method === "POST" && url.pathname === "/__s2/legacy/plant") {
       surface = "write";
-      assertLoopbackOnly(url);
       const body = await readBody(request);
       const planted = await plantLegacyProblemForHarness(
         env.DB,
@@ -487,19 +490,24 @@ async function handleHarnessRequest(
         build_digest: result.buildDigest,
         chain_digest: result.chainDigest,
         checkpoint_digest: result.checkpointDigest,
-        transaction_ms: result.transactionMs,
-        d1_rows_read: result.d1RowsRead,
-        d1_rows_written: result.d1RowsWritten,
-        d1_sql_ms: result.d1SqlMs,
-        // The completeness preflight runs before the transaction and was absent from this
-        // receipt entirely, which is why the index it depends on could not be evidenced here.
+        write_phase_ms: result.writePhaseMs,
+        // D1 exposes metadata only for the settled batch result. Rejected retry attempts have
+        // no result/meta and are deliberately excluded from these successful-batch subtotals.
+        successful_batch_rows_read: result.successfulBatchRowsRead,
+        successful_batch_rows_written: result.successfulBatchRowsWritten,
+        successful_batch_sql_ms: result.successfulBatchSqlMs,
+        successful_batch_metric_scope: "settled-db.batch-only",
+        failed_retry_batch_metrics: "excluded-d1-error-has-no-meta",
+        // The completeness preflight runs before the write phase. Its own measured subtotal
+        // keeps the bounded partial-index probe separate from the batch receipt.
         preflight_rows_read: result.preflight.rows_read,
+        preflight_rows_written: result.preflight.rows_written,
         preflight_sql_ms: result.preflight.sql_ms,
-        preflight_ms: result.preflight.wall_ms,
+        preflight_wall_ms: result.preflight.wall_ms,
         preflight_statements: result.preflight.statements,
         preflight_fast_path: result.preflight.upgraded_fast_path,
-        total_rows_read: result.totalRowsRead,
-        total_ms: result.totalMs,
+        write_claim_wall_ms: result.writeClaimWallMs,
+        write_claim_wall_scope: "writeClaim-entry-to-return",
         lock_wait_ms: result.lockWaitMs,
         retry_count: result.retryCount,
         outbox_handoff: outboxHandoff,
@@ -547,12 +555,21 @@ async function handleHarnessRequest(
     if (request.method === "POST" && url.pathname === "/__s2/integrity/backfill") {
       surface = "write";
       const body = await readBody(request);
-      await backfillKraterIntegrity(
+      const backfill = await backfillKraterIntegrity(
         env.DB,
         requiredString(body, "problem_id"),
         requiredString(body, "completed_at"),
       );
-      return response({ status: "complete", checkpoint_mode: "unsigned-v0" });
+      return response({
+        status: "complete",
+        checkpoint_mode: "unsigned-v0",
+        backfill_rows_read: backfill.rows_read,
+        backfill_rows_written: backfill.rows_written,
+        backfill_sql_ms: backfill.sql_ms,
+        backfill_wall_ms: backfill.wall_ms,
+        backfill_statements: backfill.statements,
+        backfill_fast_path: backfill.upgraded_fast_path,
+      });
     }
 
     if (request.method === "GET" && url.pathname === "/__s2/search") {

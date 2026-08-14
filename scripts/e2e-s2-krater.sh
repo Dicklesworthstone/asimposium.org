@@ -19,6 +19,7 @@ readonly S2_FORWARD_MIGRATION="db/migrations/0004_krater_integrity_v1.sql"
 # and then at exactly 0005. Folding both into one apply would prove neither: the phase run
 # between them is what establishes that the index is absent before 0005 and chosen after it.
 readonly S2_INDEX_MIGRATION="db/migrations/0005_krater_undigested_index.sql"
+readonly S2_BIND_IP="127.0.0.1"
 readonly S2_READY_DEADLINE_SECONDS=15
 readonly S2_PHASE_DEADLINE_SECONDS=75
 readonly S2_TERMINATE_WAIT_TICKS=20
@@ -197,6 +198,7 @@ start_worker() {
     --config "${config}" \
     --local \
     --persist-to "${persist}" \
+    --ip "${S2_BIND_IP}" \
     --port "${port}" \
     --inspector-port 0 \
     --log-level error \
@@ -264,6 +266,17 @@ emit_legacy_failure() {
   emit "{\"tool\":\"wrangler\",\"tool_version\":\"${S2_WRANGLER_VERSION}\",\"package\":\"apps/wire\",\"suite\":\"s2-krater-local-d1-upgrade\",\"scenario\":\"${phase}\",\"status\":\"fail\",\"code\":\"${code}\",\"cause\":${cause},\"reproduce\":\"scripts/e2e-s2-krater.sh\"}"
 }
 
+run_legacy_phase() {
+  local phase="$1" log="$2" phase_status
+  if run_phase "${phase}"; then
+    return 0
+  else
+    phase_status=$?
+  fi
+  emit_legacy_failure "${phase}" "S2_LEGACY_UPGRADE_SCENARIO_FAILED" "${log}"
+  return "${phase_status}"
+}
+
 # ── legacy upgrade stages ────────────────────────────────────────────────────
 # Build a genuinely old database and then upgrade it in place.
 #
@@ -323,11 +336,10 @@ run_legacy_upgrade() {
     return 1
   fi
 
-  if run_phase "${phase}"; then
+  if run_legacy_phase "${phase}" "${log}"; then
     status=0
   else
     status=$?
-    emit_legacy_failure "${phase}" "S2_LEGACY_UPGRADE_SCENARIO_FAILED" "${log}"
   fi
   stop_worker
   S2_ACTIVE_ORIGIN="${S2_ORIGIN}"
@@ -357,15 +369,62 @@ run_legacy_upgrade() {
       return 1
     fi
 
-    if ! run_phase "${index_phase}"; then
+    if run_legacy_phase "${index_phase}" "${log}"; then
+      :
+    else
       status=$?
-      emit_legacy_failure "${index_phase}" "S2_LEGACY_UPGRADE_SCENARIO_FAILED" "${log}"
     fi
     stop_worker
     S2_ACTIVE_ORIGIN="${S2_ORIGIN}"
   fi
   return "${status}"
 }
+
+run_legacy_upgrade_checked() {
+  local upgrade_status
+  if run_legacy_upgrade "$@"; then
+    return 0
+  else
+    upgrade_status=$?
+  fi
+  return "${upgrade_status}"
+}
+
+run_s2_shell_regression_test() {
+  local phase_status upgrade_status emitted_phase=""
+
+  # This deliberately never starts a Wrangler dev server. It plants the exact indexed-phase
+  # failure that used to be inverted by `if ! run_phase`; both helper boundaries must preserve
+  # exit 91.
+  run_phase() { return 91; }
+  emit_legacy_failure() { emitted_phase="$1"; }
+  if run_legacy_phase "upgrade-indexed" "/dev/null"; then
+    phase_status=0
+  else
+    phase_status=$?
+  fi
+  if [[ ${phase_status} -ne 91 || "${emitted_phase}" != "upgrade-indexed" ]]; then
+    emit '{"tool":"bash","package":"apps/wire","suite":"s2-krater-shell","status":"fail","code":"S2_INDEXED_FAILURE_STATUS_MASKED","reproduce":"S2_SHELL_REGRESSION_TEST=indexed-phase-status scripts/e2e-s2-krater.sh"}'
+    return 1
+  fi
+
+  run_legacy_upgrade() { return "${phase_status}"; }
+  if run_legacy_upgrade_checked "upgrade-existing" "" "upgrade-indexed"; then
+    upgrade_status=0
+  else
+    upgrade_status=$?
+  fi
+  if [[ ${upgrade_status} -ne 91 ]]; then
+    emit '{"tool":"bash","package":"apps/wire","suite":"s2-krater-shell","status":"fail","code":"S2_UPGRADE_FAILURE_STATUS_MASKED","reproduce":"S2_SHELL_REGRESSION_TEST=indexed-phase-status scripts/e2e-s2-krater.sh"}'
+    return 1
+  fi
+  emit '{"tool":"bash","package":"apps/wire","suite":"s2-krater-shell","status":"pass","scenario":"planted-indexed-phase-failure-preserves-nonzero-status","reproduce":"S2_SHELL_REGRESSION_TEST=indexed-phase-status scripts/e2e-s2-krater.sh"}'
+}
+
+if [[ "${S2_SHELL_REGRESSION_TEST:-none}" == "indexed-phase-status" ]]; then
+  run_s2_shell_regression_test
+  exit $?
+fi
 
 launch_lifecycle_child() {
   local port="$1" log="$2" interrupt_after_ready="$3"
@@ -528,11 +587,15 @@ stop_worker
 # These run after the primary proof and before the blocked records, because a
 # broken upgrade must fail the run rather than be reported alongside a green
 # local proof. Each owns its own port and persistence directory.
-if ! run_legacy_upgrade "upgrade-existing" "${S2_LEGACY_EXISTING_FIXTURE}" "upgrade-indexed"; then
+if run_legacy_upgrade_checked "upgrade-existing" "${S2_LEGACY_EXISTING_FIXTURE}" "upgrade-indexed"; then
+  :
+else
   S2_CLIENT_EXIT=$?
   exit "${S2_CLIENT_EXIT}"
 fi
-if ! run_legacy_upgrade "upgrade-empty" ""; then
+if run_legacy_upgrade_checked "upgrade-empty" ""; then
+  :
+else
   S2_CLIENT_EXIT=$?
   exit "${S2_CLIENT_EXIT}"
 fi

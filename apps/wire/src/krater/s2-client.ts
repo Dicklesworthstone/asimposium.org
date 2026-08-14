@@ -7,6 +7,9 @@ const SOURCE_DIGEST = process.env.S2_SOURCE_DIGEST;
 const SEED = "s2-local-chain-v1";
 const SCOPE = "local-workerd-d1-do";
 const BINDINGS = { d1: "DB", durable_object: "KRATER_OUTBOX", r2: null };
+const SUCCESSFUL_BATCH_METRIC_SCOPE: "settled-db.batch-only" = "settled-db.batch-only";
+const FAILED_RETRY_BATCH_METRICS: "excluded-d1-error-has-no-meta" = "excluded-d1-error-has-no-meta";
+const WRITE_CLAIM_WALL_SCOPE: "writeClaim-entry-to-return" = "writeClaim-entry-to-return";
 const CREATED_AT = "2026-08-14T00:00:00.000Z";
 const PRIMARY_PROBLEM = "P-s2";
 const SECONDARY_PROBLEM = "P-s2-b";
@@ -60,10 +63,20 @@ interface WriteResult {
   build_digest: string;
   chain_digest: string;
   checkpoint_digest: string;
-  transaction_ms: number;
-  d1_rows_read: number;
-  d1_rows_written: number;
-  d1_sql_ms: number | null;
+  write_phase_ms: number;
+  successful_batch_rows_read: number;
+  successful_batch_rows_written: number;
+  successful_batch_sql_ms: number | null;
+  successful_batch_metric_scope: typeof SUCCESSFUL_BATCH_METRIC_SCOPE;
+  failed_retry_batch_metrics: typeof FAILED_RETRY_BATCH_METRICS;
+  preflight_rows_read: number;
+  preflight_rows_written: number;
+  preflight_sql_ms: number | null;
+  preflight_wall_ms: number;
+  preflight_statements: number;
+  preflight_fast_path: boolean;
+  write_claim_wall_ms: number;
+  write_claim_wall_scope: typeof WRITE_CLAIM_WALL_SCOPE;
   lock_wait_ms: null;
   retry_count: number;
   outbox_handoff: "armed" | "deferred" | "unavailable";
@@ -186,8 +199,41 @@ function requestDiagnostics(
     build_digest: body === undefined ? null : nullableStringAt(body, "build_digest"),
     chain_digest: body === undefined ? null : nullableStringAt(body, "chain_digest"),
     checkpoint_digest: body === undefined ? null : nullableStringAt(body, "checkpoint_digest"),
-    transaction_ms: body === undefined ? null : nullableNumberAt(body, "transaction_ms"),
-    sql_ms: body === undefined ? null : nullableNumberAt(body, "d1_sql_ms"),
+    write_phase_ms: body === undefined ? null : nullableNumberAt(body, "write_phase_ms"),
+    successful_batch_rows_read:
+      body === undefined ? null : nullableNumberAt(body, "successful_batch_rows_read"),
+    successful_batch_rows_written:
+      body === undefined ? null : nullableNumberAt(body, "successful_batch_rows_written"),
+    successful_batch_sql_ms:
+      body === undefined ? null : nullableNumberAt(body, "successful_batch_sql_ms"),
+    successful_batch_metric_scope:
+      body === undefined ? null : nullableStringAt(body, "successful_batch_metric_scope"),
+    failed_retry_batch_metrics:
+      body === undefined ? null : nullableStringAt(body, "failed_retry_batch_metrics"),
+    preflight_rows_read: body === undefined ? null : nullableNumberAt(body, "preflight_rows_read"),
+    preflight_rows_written:
+      body === undefined ? null : nullableNumberAt(body, "preflight_rows_written"),
+    preflight_sql_ms: body === undefined ? null : nullableNumberAt(body, "preflight_sql_ms"),
+    preflight_wall_ms: body === undefined ? null : nullableNumberAt(body, "preflight_wall_ms"),
+    preflight_statements:
+      body === undefined ? null : nullableNumberAt(body, "preflight_statements"),
+    preflight_fast_path:
+      body === undefined || typeof body.preflight_fast_path !== "boolean"
+        ? null
+        : booleanAt(body, "preflight_fast_path"),
+    write_claim_wall_ms: body === undefined ? null : nullableNumberAt(body, "write_claim_wall_ms"),
+    write_claim_wall_scope:
+      body === undefined ? null : nullableStringAt(body, "write_claim_wall_scope"),
+    backfill_rows_read: body === undefined ? null : nullableNumberAt(body, "backfill_rows_read"),
+    backfill_rows_written:
+      body === undefined ? null : nullableNumberAt(body, "backfill_rows_written"),
+    backfill_sql_ms: body === undefined ? null : nullableNumberAt(body, "backfill_sql_ms"),
+    backfill_wall_ms: body === undefined ? null : nullableNumberAt(body, "backfill_wall_ms"),
+    backfill_statements: body === undefined ? null : nullableNumberAt(body, "backfill_statements"),
+    backfill_fast_path:
+      body === undefined || typeof body.backfill_fast_path !== "boolean"
+        ? null
+        : booleanAt(body, "backfill_fast_path"),
     lock_wait_ms: body === undefined ? null : nullableNumberAt(body, "lock_wait_ms"),
     retry_count: body === undefined ? null : nullableNumberAt(body, "retry_count"),
     checkpoint_mode: body === undefined ? null : nullableStringAt(body, "checkpoint_mode"),
@@ -261,10 +307,33 @@ function writeResult(body: Record<string, unknown>): WriteResult {
     build_digest: stringAt(body, "build_digest"),
     chain_digest: stringAt(body, "chain_digest"),
     checkpoint_digest: stringAt(body, "checkpoint_digest"),
-    transaction_ms: numberAt(body, "transaction_ms"),
-    d1_rows_read: numberAt(body, "d1_rows_read"),
-    d1_rows_written: numberAt(body, "d1_rows_written"),
-    d1_sql_ms: body.d1_sql_ms === null ? null : numberAt(body, "d1_sql_ms"),
+    write_phase_ms: numberAt(body, "write_phase_ms"),
+    successful_batch_rows_read: numberAt(body, "successful_batch_rows_read"),
+    successful_batch_rows_written: numberAt(body, "successful_batch_rows_written"),
+    successful_batch_sql_ms:
+      body.successful_batch_sql_ms === null ? null : numberAt(body, "successful_batch_sql_ms"),
+    successful_batch_metric_scope: (() => {
+      const scope = stringAt(body, "successful_batch_metric_scope");
+      if (scope !== SUCCESSFUL_BATCH_METRIC_SCOPE) fail("S2_RESPONSE_INVALID");
+      return SUCCESSFUL_BATCH_METRIC_SCOPE;
+    })(),
+    failed_retry_batch_metrics: (() => {
+      const scope = stringAt(body, "failed_retry_batch_metrics");
+      if (scope !== FAILED_RETRY_BATCH_METRICS) fail("S2_RESPONSE_INVALID");
+      return FAILED_RETRY_BATCH_METRICS;
+    })(),
+    preflight_rows_read: numberAt(body, "preflight_rows_read"),
+    preflight_rows_written: numberAt(body, "preflight_rows_written"),
+    preflight_sql_ms: body.preflight_sql_ms === null ? null : numberAt(body, "preflight_sql_ms"),
+    preflight_wall_ms: numberAt(body, "preflight_wall_ms"),
+    preflight_statements: numberAt(body, "preflight_statements"),
+    preflight_fast_path: booleanAt(body, "preflight_fast_path"),
+    write_claim_wall_ms: numberAt(body, "write_claim_wall_ms"),
+    write_claim_wall_scope: (() => {
+      const scope = stringAt(body, "write_claim_wall_scope");
+      if (scope !== WRITE_CLAIM_WALL_SCOPE) fail("S2_RESPONSE_INVALID");
+      return WRITE_CLAIM_WALL_SCOPE;
+    })(),
     lock_wait_ms: body.lock_wait_ms === null ? null : fail("S2_RESPONSE_INVALID"),
     retry_count: numberAt(body, "retry_count"),
     outbox_handoff: (() => {
@@ -274,6 +343,43 @@ function writeResult(body: Record<string, unknown>): WriteResult {
       }
       return handoff as WriteResult["outbox_handoff"];
     })(),
+  };
+}
+
+function receiptMetrics(result?: WriteResult): Record<string, number | boolean | string | null> {
+  if (result === undefined) {
+    return {
+      write_phase_ms: null,
+      successful_batch_rows_read: null,
+      successful_batch_rows_written: null,
+      successful_batch_sql_ms: null,
+      successful_batch_metric_scope: null,
+      failed_retry_batch_metrics: null,
+      preflight_rows_read: null,
+      preflight_rows_written: null,
+      preflight_sql_ms: null,
+      preflight_wall_ms: null,
+      preflight_statements: null,
+      preflight_fast_path: null,
+      write_claim_wall_ms: null,
+      write_claim_wall_scope: null,
+    };
+  }
+  return {
+    write_phase_ms: result.write_phase_ms,
+    successful_batch_rows_read: result.successful_batch_rows_read,
+    successful_batch_rows_written: result.successful_batch_rows_written,
+    successful_batch_sql_ms: result.successful_batch_sql_ms,
+    successful_batch_metric_scope: result.successful_batch_metric_scope,
+    failed_retry_batch_metrics: result.failed_retry_batch_metrics,
+    preflight_rows_read: result.preflight_rows_read,
+    preflight_rows_written: result.preflight_rows_written,
+    preflight_sql_ms: result.preflight_sql_ms,
+    preflight_wall_ms: result.preflight_wall_ms,
+    preflight_statements: result.preflight_statements,
+    preflight_fast_path: result.preflight_fast_path,
+    write_claim_wall_ms: result.write_claim_wall_ms,
+    write_claim_wall_scope: result.write_claim_wall_scope,
   };
 }
 
@@ -398,8 +504,7 @@ async function waitForOutbox(
     build_digest: null,
     checkpoint_digest: null,
     checkpoint_mode: "unsigned-v0",
-    transaction_ms: null,
-    sql_ms: null,
+    ...receiptMetrics(),
     lock_wait_ms: null,
     retry_count: observed.delivery_attempts,
     assertion_diff: `pending=${observed.pending};delivered=${observed.delivered};quarantined=${observed.quarantined};phase=${observed.last_phase}`,
@@ -596,6 +701,18 @@ async function legacyBoundedBackfill(): Promise<void> {
   );
   assertEqual(completed.status, 200, "S2_LEGACY_AT_LIMIT_BACKFILL_FAILED");
   assertEqual(stringAt(completed.body, "status"), "complete", "S2_LEGACY_AT_LIMIT_STATUS_INVALID");
+  // This is the replay's `db.batch`, not the later ordinary write batch. A positive value
+  // proves the backfill receipt preserves the D1 metadata instead of reporting only reads.
+  assertEqual(
+    numberAt(completed.body, "backfill_rows_written") > 0,
+    true,
+    "S2_LEGACY_AT_LIMIT_BACKFILL_BATCH_WRITES_UNMEASURED",
+  );
+  assertEqual(
+    booleanAt(completed.body, "backfill_fast_path"),
+    false,
+    "S2_LEGACY_AT_LIMIT_BACKFILL_WRONGLY_FAST_PATH",
+  );
 
   const upgraded = await state(LEGACY_AT_LIMIT_PROBLEM, "legacy-at-limit-state");
   assertEqual(upgraded.cursor, LEGACY_AT_LIMIT_EVENTS, "S2_LEGACY_AT_LIMIT_CURSOR_INVALID");
@@ -772,11 +889,7 @@ async function readProbePlan(
   problemId: string,
   scenario: string,
 ): Promise<Record<string, unknown>> {
-  const plan = await request(
-    "GET",
-    `/__s2/integrity/probe-plan?problem_id=${problemId}`,
-    scenario,
-  );
+  const plan = await request("GET", `/__s2/integrity/probe-plan?problem_id=${problemId}`, scenario);
   assertEqual(plan.status, 200, "S2_PROBE_PLAN_READ_FAILED");
   return plan.body;
 }
@@ -823,10 +936,10 @@ async function probePlanUsesPartialIndex(): Promise<void> {
  * What the write preflight actually costs, measured on two upgraded problems whose histories
  * differ 64-fold.
  *
- * The receipt used to start its clock after the preflight, so `transaction_ms` and
- * `d1_rows_read` described only the batch and the completeness check that runs before every
- * write — the thing migration 0005 exists to bound — was absent from the evidence entirely. A
- * plan assertion says the index is chosen; this says what choosing it is worth.
+ * The receipt distinguishes the measured preflight from the measured write batch, and its
+ * end-to-end wall time starts before validation. The completeness check that runs before every
+ * write — the thing migration 0005 exists to bound — is therefore evidence rather than an
+ * omitted cost. A plan assertion says the index is chosen; this says what choosing it is worth.
  *
  * The claim is bounded, not constant: preflight rows stay under a small ceiling while the log
  * behind them grows from 8 envelopes to 512, so the cost does not track ledger size. Nothing
@@ -847,41 +960,36 @@ async function preflightCostDoesNotGrowWithHistory(): Promise<void> {
     [PREFLIGHT_SMALL_PROBLEM, PREFLIGHT_SMALL_EVENTS, "preflight-cost-small-history"],
     [PREFLIGHT_LARGE_PROBLEM, PREFLIGHT_LARGE_EVENTS, "preflight-cost-large-history"],
   ] as const) {
-    const result = await request("POST", "/__s2/write", scenario, {
-      ...writeBody(events + 1, problemId, "Preflight cost measurement claim."),
-      s2_defer_outbox_nudge: true,
-    });
-    assertEqual(result.status, 200, "S2_PREFLIGHT_WRITE_FAILED");
-    assertEqual(numberAt(result.body, "post_cursor"), events + 1, "S2_PREFLIGHT_CURSOR_INVALID");
+    const result = await write(
+      writeBody(events + 1, problemId, "Preflight cost measurement claim."),
+      scenario,
+    );
+    assertEqual(result.post_cursor, events + 1, "S2_PREFLIGHT_CURSOR_INVALID");
 
     // The fast path is the one under test. A false here would mean the write re-ran the bounded
     // replay, and its rows would say nothing about the probe.
-    assertEqual(
-      booleanAt(result.body, "preflight_fast_path"),
-      true,
-      "S2_PREFLIGHT_NOT_FAST_PATH",
-    );
+    assertEqual(result.preflight_fast_path, true, "S2_PREFLIGHT_NOT_FAST_PATH");
     // Head, backfill row, probe. Identical for both, so any cost difference between them can
     // only come from rows read, never from a different number of round trips.
-    assertEqual(
-      numberAt(result.body, "preflight_statements"),
-      3,
-      "S2_PREFLIGHT_STATEMENT_COUNT_INVALID",
-    );
+    assertEqual(result.preflight_statements, 3, "S2_PREFLIGHT_STATEMENT_COUNT_INVALID");
 
-    const preflightRows = numberAt(result.body, "preflight_rows_read");
+    const preflightRows = result.preflight_rows_read;
     assertEqual(preflightRows <= PREFLIGHT_ROWS_CEILING, true, "S2_PREFLIGHT_ROWS_UNBOUNDED");
-    // The receipt has to add up, or the split between preflight and transaction could hide a
-    // cost in the gap between them.
+    // Healthy no-match preflights are read-only. The legacy replay's `db.batch` writes are
+    // separately accounted in `preflight_rows_written`, so this assertion would fail if the
+    // ordinary write path re-ran a backfill.
+    assertEqual(result.preflight_rows_written, 0, "S2_PREFLIGHT_FAST_PATH_WROTE_ROWS");
+    // These are exact subtotals, not an invented overall row count: `.first()` callers do not
+    // expose D1 metadata, so combining them with either subtotal would be misleading.
     assertEqual(
-      numberAt(result.body, "total_rows_read"),
-      preflightRows + numberAt(result.body, "d1_rows_read"),
-      "S2_PREFLIGHT_TOTAL_ROWS_INCONSISTENT",
+      result.write_claim_wall_ms >= result.preflight_wall_ms,
+      true,
+      "S2_PREFLIGHT_WRITE_CLAIM_BEFORE_PREFLIGHT",
     );
     assertEqual(
-      numberAt(result.body, "total_ms") >= numberAt(result.body, "transaction_ms"),
+      result.write_claim_wall_ms >= result.write_phase_ms,
       true,
-      "S2_PREFLIGHT_TOTAL_MS_INCONSISTENT",
+      "S2_PREFLIGHT_WRITE_CLAIM_BEFORE_WRITE_PHASE",
     );
     measured[problemId] = preflightRows;
   }
@@ -991,6 +1099,11 @@ async function upgradeExisting(): Promise<void> {
   assertEqual(firstBackfill.status, 200, "S2_UPGRADE_EXISTING_BACKFILL_FAILED");
   assertEqual(firstBackfill.body.status, "complete", "S2_UPGRADE_EXISTING_BACKFILL_STATUS_INVALID");
   assertEqual(
+    numberAt(firstBackfill.body, "backfill_rows_written") > 0,
+    true,
+    "S2_UPGRADE_EXISTING_BACKFILL_BATCH_WRITES_UNMEASURED",
+  );
+  assertEqual(
     firstBackfill.body.checkpoint_mode,
     "unsigned-v0",
     "S2_UPGRADE_EXISTING_CHECKPOINT_MODE_INVALID",
@@ -1056,8 +1169,66 @@ async function upgradeExisting(): Promise<void> {
     build_digest: appended.build_digest,
     checkpoint_digest: appended.checkpoint_digest,
     checkpoint_mode: "unsigned-v0",
-    transaction_ms: appended.transaction_ms,
-    sql_ms: appended.d1_sql_ms,
+    ...receiptMetrics(appended),
+    lock_wait_ms: appended.lock_wait_ms,
+    retry_count: appended.retry_count,
+    assertion_diff: null,
+    status: "pass",
+    reproduce: "scripts/e2e-s2-krater.sh",
+  });
+}
+
+/**
+ * This phase runs only after `scripts/e2e-s2-krater.sh` applies 0005 to the same persisted
+ * database that `upgradeExisting` exercised at exactly 0004. It proves the upgrade is not a
+ * fresh-schema substitute: an already backfilled legacy subject takes the indexed, healthy
+ * no-match preflight before accepting its next ordinary write.
+ */
+async function upgradeIndexed(): Promise<void> {
+  assertIndexedProbePlan(
+    await readProbePlan(UPGRADE_EXISTING_PROBLEM, "upgrade-indexed-probe-plan"),
+  );
+
+  const appended = await write(
+    writeBody(3, UPGRADE_EXISTING_PROBLEM, "Post-0005 indexed integrity claim."),
+    "upgrade-indexed-post-migration-write",
+  );
+  assertEqual(appended.seq, 3, "S2_UPGRADE_INDEXED_APPEND_SEQUENCE_INVALID");
+  assertEqual(appended.preflight_fast_path, true, "S2_UPGRADE_INDEXED_NOT_FAST_PATH");
+  assertEqual(
+    appended.preflight_statements,
+    3,
+    "S2_UPGRADE_INDEXED_PREFLIGHT_STATEMENT_COUNT_INVALID",
+  );
+  assertEqual(
+    appended.preflight_rows_written,
+    0,
+    "S2_UPGRADE_INDEXED_HEALTHY_PREFLIGHT_WROTE_ROWS",
+  );
+  await assertReplay(UPGRADE_EXISTING_PROBLEM, 3, "upgrade-indexed-post-migration-replay");
+
+  emit({
+    tool: "bun",
+    tool_version: Bun.version,
+    package: "apps/wire",
+    suite: "s2-krater-local-d1-upgrade",
+    revision: REVISION,
+    dirty_state: DIRTY_STATE,
+    source_digest: SOURCE_DIGEST,
+    bindings: BINDINGS,
+    scenario: "exact-0004-existing-event-forward-0005-indexed-healthy-write-replay",
+    seed: SEED,
+    scope: SCOPE,
+    request_id: null,
+    event_id: appended.event_id,
+    pre_cursor: 2,
+    post_cursor: 3,
+    payload_sha256: appended.payload_sha256,
+    row_digest: appended.row_digest,
+    build_digest: appended.build_digest,
+    checkpoint_digest: appended.checkpoint_digest,
+    checkpoint_mode: "unsigned-v0",
+    ...receiptMetrics(appended),
     lock_wait_ms: appended.lock_wait_ms,
     retry_count: appended.retry_count,
     assertion_diff: null,
@@ -1098,8 +1269,7 @@ async function upgradeEmpty(): Promise<void> {
     build_digest: appended.build_digest,
     checkpoint_digest: appended.checkpoint_digest,
     checkpoint_mode: "unsigned-v0",
-    transaction_ms: appended.transaction_ms,
-    sql_ms: appended.d1_sql_ms,
+    ...receiptMetrics(appended),
     lock_wait_ms: appended.lock_wait_ms,
     retry_count: appended.retry_count,
     assertion_diff: null,
@@ -1307,6 +1477,7 @@ async function exercise(): Promise<void> {
   await ordinaryWritesPastTheLimit();
   await mixedDigestLogIsNotComplete();
   await probePlanUsesPartialIndex();
+  await preflightCostDoesNotGrowWithHistory();
   await exerciseOutboxDrainer();
 
   emit({
@@ -1330,14 +1501,35 @@ async function exercise(): Promise<void> {
     build_digest: null,
     checkpoint_digest: null,
     checkpoint_mode: "unsigned-v0",
-    transaction_ms: percentile95(writes.map((entry) => entry.transaction_ms)),
-    sql_ms: null,
+    metric_scope: "selected-settled-write-receipts",
+    write_receipt_count: writes.length,
+    successful_batch_metric_scope: SUCCESSFUL_BATCH_METRIC_SCOPE,
+    failed_retry_batch_metrics: FAILED_RETRY_BATCH_METRICS,
+    write_claim_wall_scope: WRITE_CLAIM_WALL_SCOPE,
+    p95_write_phase_ms: percentile95(writes.map((entry) => entry.write_phase_ms)),
+    sum_successful_batch_rows_read: writes.reduce(
+      (total, entry) => total + entry.successful_batch_rows_read,
+      0,
+    ),
+    sum_successful_batch_rows_written: writes.reduce(
+      (total, entry) => total + entry.successful_batch_rows_written,
+      0,
+    ),
+    sum_preflight_rows_read: writes.reduce((total, entry) => total + entry.preflight_rows_read, 0),
+    sum_preflight_rows_written: writes.reduce(
+      (total, entry) => total + entry.preflight_rows_written,
+      0,
+    ),
+    p95_preflight_wall_ms: percentile95(writes.map((entry) => entry.preflight_wall_ms)),
+    sum_preflight_statements: writes.reduce(
+      (total, entry) => total + entry.preflight_statements,
+      0,
+    ),
+    p95_write_claim_wall_ms: percentile95(writes.map((entry) => entry.write_claim_wall_ms)),
     lock_wait_ms: null,
-    retry_count: writes.reduce((total, entry) => total + entry.retry_count, 0),
+    sum_retry_count: writes.reduce((total, entry) => total + entry.retry_count, 0),
     assertion_diff: null,
-    requests: requestCount,
-    d1_rows_read: writes.reduce((total, entry) => total + entry.d1_rows_read, 0),
-    d1_rows_written: writes.reduce((total, entry) => total + entry.d1_rows_written, 0),
+    total_harness_request_count: requestCount,
     status: "pass",
     reproduce: "scripts/e2e-s2-krater.sh",
   });
@@ -1395,12 +1587,11 @@ async function restartVerify(): Promise<void> {
     build_digest: null,
     checkpoint_digest: primary.checkpoint_digest,
     checkpoint_mode: primary.checkpoint_mode,
-    transaction_ms: null,
-    sql_ms: null,
+    ...receiptMetrics(),
     lock_wait_ms: null,
     retry_count: recoveredOutbox.delivery_attempts,
     assertion_diff: null,
-    requests: requestCount,
+    total_harness_request_count: requestCount,
     status: "pass",
     reproduce: "scripts/e2e-s2-krater.sh",
   });
@@ -1416,6 +1607,7 @@ async function main(): Promise<void> {
   if (phase === "exercise") return exercise();
   if (phase === "restart-verify") return restartVerify();
   if (phase === "upgrade-existing") return upgradeExisting();
+  if (phase === "upgrade-indexed") return upgradeIndexed();
   if (phase === "upgrade-empty") return upgradeEmpty();
   fail("S2_PHASE_INVALID");
 }
@@ -1442,8 +1634,7 @@ main().catch((error: unknown) => {
     build_digest: null,
     checkpoint_digest: null,
     checkpoint_mode: null,
-    transaction_ms: null,
-    sql_ms: null,
+    ...receiptMetrics(),
     lock_wait_ms: null,
     retry_count: null,
     assertion_diff: error instanceof Error ? error.message : "S2_UNEXPECTED_FAILURE",
