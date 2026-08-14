@@ -163,9 +163,10 @@ against a weak reader stays in the threat model, not hidden under it.
   being treated as `"next_actions":`. This package makes no claim that a downstream consumer which
   decodes such body text will preserve the same boundary.
 - **No arbitrary-input sanitizer resource bound.** Unicode-canonical active-markup recovery replays
-  the per-code-point interpretation once only when findings exist. Adversarial label and
-  many-finding tests exercise Fable's planned 20,000-character `body_md` contract, but do not prove
-  a time or RSS bound for unbounded input.
+  an ASCII-finding-equivalent per-code-point interpretation once only when findings exist; the
+  exported structural diagnostic retains its historical whole-string NFKC view. Adversarial label
+  and many-finding tests exercise Fable's planned 20,000-character `body_md` contract, but do not
+  prove a time or RSS bound for unbounded input.
 - **No TOON**, per the section above.
 - The fingerprint is a drift checksum, not authentication, and not an ETag.
 - This package is not the validator. Scientific rules P1–P13 live in the Worker and

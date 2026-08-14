@@ -611,6 +611,14 @@ describe("neutralizeUntrustedBody", () => {
     expect(
       neutralizeUntrustedBody(`${composableHangulJamo}<script>＜ＳＣＲＩＰＴ＞`).findings,
     ).toEqual([{ marker: "active-html", count: 2 }]);
+
+    // The exported diagnostic retains its historical whole-string NFKC view:
+    // eight Jamo pairs compose to eight UTF-16 Hangul syllables, followed by
+    // the eight UTF-16 units in `<script>`.
+    expect(
+      activeHtmlScanDiagnostics(`${composableHangulJamo}<script>`).canonical
+        .transformed_utf16_units,
+    ).toBe(16);
   });
 
   test("maps every canonical finding in one pass at the 20,000-character contract bound", () => {

@@ -283,11 +283,23 @@ function canonicalizeSourceCodePoint(sourceCodePoint: string): string {
 }
 
 function unicodeCanonicalTokenizerScanText(value: string): string {
+  // Keep the historical whole-string interpretation for the exported
+  // structural diagnostic. NFKC can compose adjacent non-ASCII source code
+  // points (notably Hangul Jamo), and that transformed length is observable.
+  return value
+    .normalize("NFKD")
+    .replace(CANONICAL_MARK_OR_FORMAT, "")
+    .normalize("NFKC")
+    .toLowerCase();
+}
+
+function unicodeCanonicalSourceMappedScanText(value: string): string {
   // NFKD already exposes every compatibility spelling the ASCII-shaped
   // tokenizer recognizes. After marks and format controls are removed, a
   // whole-string NFKC pass can only recompose non-ASCII sequences (not create
-  // a tag name, attribute name, or URL scheme), so omitting it lets source
-  // recovery replay this exact interpretation once, code point by code point.
+  // a tag name, attribute name, or URL scheme). Omitting only that recomposition
+  // gives the classifier the same findings while letting source recovery replay
+  // this exact interpretation once, code point by code point.
   const parts: string[] = [];
   for (const sourceCodePoint of value) {
     const canonical = canonicalizeSourceCodePoint(sourceCodePoint);
@@ -1169,7 +1181,7 @@ function countActiveHtml(body: string): number {
     findings.add(sourceFindingKey(finding));
   }
 
-  const canonicalFindings = collectActiveMarkup(unicodeCanonicalTokenizerScanText(body));
+  const canonicalFindings = collectActiveMarkup(unicodeCanonicalSourceMappedScanText(body));
   for (const finding of canonicalFindingsAtSourceOffsets(body, canonicalFindings)) {
     findings.add(sourceFindingKey(finding));
   }
