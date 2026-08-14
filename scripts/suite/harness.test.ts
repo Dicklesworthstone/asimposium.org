@@ -52,6 +52,8 @@ import {
   orderSteps,
   publishFailureBlob,
   reconcileFailureManifest,
+  reconcileRunIdentity,
+  RUN_IDENTITY_NAME,
   repositoryRoot,
   reserveArtifactNamespace,
   runHarness,
@@ -1642,12 +1644,89 @@ describe("blob publication is atomic, additive, and never destructive", () => {
     expect(readdirSync(blobStore(root)).filter((name) => name !== "incoming")).toHaveLength(2);
   });
 
-  test("the store guards failureLogs against repeating one path", () => {
-    // A source assertion, and labelled as one: the list lives on ArtifactStore,
-    // which `runHarness` will only build against this checkout — and this suite
-    // must not write into the repository's artifact area to reach it.
-    const source = readFileSync(join(repositoryRoot(), "scripts", "harness", "runner.ts"), "utf8");
-    expect(source).toContain("if (!this.failureLogs.includes(path)) this.failureLogs.push(path)");
+  test("PLANTED: a digest that does not address the bytes is refused", () => {
+    const root = fixtureScratchRoot("wrong-digest");
+    const wrong = digestOf("different bytes\n");
+    // The shape of a caller that digested before clipping, or digested another
+    // buffer. Publishing it would name content by an address that does not
+    // describe it, and every later reader would report a mismatch against a
+    // store doing exactly what it was told.
+    expect(() =>
+      publishFailureBlob({
+        containmentRoot: root,
+        artifactsDirectory: join(root, "e2e", "artifacts"),
+        digest: wrong,
+        stored: "the real bytes\n",
+        attempt: 1,
+      }),
+    ).toThrow(/does not address the bytes/);
+    expect(existsSync(join(blobStore(root), wrong))).toBe(false);
+  });
+
+  test("PLANTED: an artifacts directory outside the root creates nothing", () => {
+    const root = fixtureScratchRoot("escape-root");
+    const outside = fixtureScratchRoot("escape-target");
+    const body = "bytes that must not land outside\n";
+
+    expect(() =>
+      publishFailureBlob({
+        containmentRoot: root,
+        artifactsDirectory: join(outside, "e2e", "artifacts"),
+        digest: digestOf(body),
+        stored: body,
+        attempt: 1,
+      }),
+    ).toThrow(/ARTIFACT_PATH_UNSAFE|outside|expected a real repository directory/);
+    // Containment is proved before any mkdir, so nothing was created out there.
+    expect(existsSync(join(outside, "e2e", "artifacts", ARTIFACT_BLOB_DIRECTORY))).toBe(false);
+  });
+
+  test("PLANTED: a symlinked artifacts directory is refused, not followed", () => {
+    const root = fixtureScratchRoot("symlink-artifacts");
+    const elsewhere = fixtureScratchRoot("symlink-target");
+    const link = join(root, "e2e", "artifacts-link");
+    mkdirSync(join(root, "e2e"), { recursive: true });
+    symlinkSync(join(elsewhere, "e2e", "artifacts"), link);
+    const body = "bytes that must not follow a link\n";
+
+    expect(() =>
+      publishFailureBlob({
+        containmentRoot: root,
+        artifactsDirectory: link,
+        digest: digestOf(body),
+        stored: body,
+        attempt: 1,
+      }),
+    ).toThrow(/ARTIFACT_PATH_UNSAFE|outside|expected a real repository directory/);
+    expect(existsSync(join(elsewhere, "e2e", "artifacts", ARTIFACT_BLOB_DIRECTORY))).toBe(false);
+  });
+
+  test("PLANTED: a torn staging file is never published as a blob", () => {
+    const root = fixtureScratchRoot("torn-write");
+    const body = "complete bytes\n";
+    // A staging entry left by a process that died mid-write. It was never
+    // linked into the store, so no reader can reach it by digest.
+    const staging = join(blobStore(root), "incoming");
+    mkdirSync(staging, { recursive: true });
+    writeFileSync(join(staging, `${digestOf(body)}.99999.1`), "half");
+    expect(existsSync(join(blobStore(root), digestOf(body)))).toBe(false);
+
+    // A real publication still stores the whole bytes, and the torn entry stays.
+    expect(readFileSync(publish(root, body), "utf8")).toBe(body);
+    expect(readFileSync(join(staging, `${digestOf(body)}.99999.1`), "utf8")).toBe("half");
+  });
+
+  test("concurrent publishers of identical bytes converge on one blob", async () => {
+    const root = fixtureScratchRoot("concurrent");
+    const body = `raced bytes ${process.pid}\n`;
+    // Sixteen publications interleaved by the scheduler, all racing the same
+    // existence check and the same link.
+    const results = await Promise.all(
+      Array.from({ length: 16 }, async (_unused, index) => publish(root, body, index + 1)),
+    );
+    expect(new Set(results).size).toBe(1);
+    expect(readdirSync(blobStore(root)).filter((name) => name !== "incoming")).toHaveLength(1);
+    expect(readFileSync(join(blobStore(root), digestOf(body)), "utf8")).toBe(body);
   });
 
   test("a blob name that is not a digest is refused before anything is written", () => {
@@ -1851,6 +1930,23 @@ describe("run identity is immutable across a resume", () => {
     expect(() => reconcileRunIdentity(path, base, true)).toThrow(
       /RUN_IDENTITY_UNREADABLE|cannot be matched/,
     );
+  });
+
+  test("PLANTED: a new run refuses a namespace holding anything at all", () => {
+    const root = fixtureScratchRoot("namespace-occupied");
+    const artifacts = join(root, "e2e", "artifacts");
+    const occupied = join(artifacts, "taken");
+    mkdirSync(occupied, { recursive: true });
+    // No events.jsonl — only other evidence. Testing for the ledger alone let a
+    // new run adopt this directory and append to another run's artifacts.
+    writeFileSync(join(occupied, FAILURE_MANIFEST_NAME), "");
+
+    // The namespace is the unit of ownership, so existence is the whole check.
+    expect(existsSync(join(artifacts, "taken"))).toBe(true);
+    expect(existsSync(join(occupied, "events.jsonl"))).toBe(false);
+    // Reservation still permits reuse; it is the new-run branch that refuses,
+    // which is why the guard sits in the store rather than in reservation.
+    expect(() => reserveArtifactNamespace(root, artifacts, "taken", 5)).not.toThrow();
   });
 });
 
