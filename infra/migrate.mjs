@@ -184,6 +184,89 @@ export function planMigrations(migrations, applied, options) {
   };
 }
 
+/**
+ * The runner's own bookkeeping table.
+ *
+ * It is created by the runner rather than by a numbered migration, because
+ * `db/migrations/` belongs to W2/S-2 and because the ledger must exist before
+ * the first migration it records. It holds no product data.
+ */
+export const LEDGER_TABLE = "_asimposium_migrations";
+
+const LEDGER_DDL = `CREATE TABLE IF NOT EXISTS ${LEDGER_TABLE} (
+  id TEXT PRIMARY KEY,
+  sequence INTEGER NOT NULL,
+  digest TEXT NOT NULL,
+  applied_at TEXT NOT NULL
+);`;
+
+const sqlLiteral = (value) => `'${String(value).replace(/'/g, "''")}'`;
+
+/**
+ * Run a local D1 command through Wrangler.
+ *
+ * `--local` only. This function never accepts a `--remote` flag and never reads
+ * a credential; a remote application is refused earlier, by the caller.
+ */
+function localD1(root, databaseName, args) {
+  const result = Bun.spawnSync({
+    cmd: [
+      "bunx",
+      "wrangler",
+      "d1",
+      "execute",
+      databaseName,
+      "--local",
+      "--config",
+      "infra/wrangler.toml",
+      "--json",
+      ...args,
+    ],
+    cwd: root,
+    stdout: "pipe",
+    stderr: "pipe",
+  });
+  const stdout = result.stdout.toString();
+  if (result.exitCode !== 0) {
+    // Wrangler's stderr can carry a local filesystem path, so it is summarised
+    // rather than echoed into a diagnostic that may be pasted into an issue.
+    fail(
+      "LOCAL_D1_COMMAND_FAILED",
+      `A local D1 command exited ${result.exitCode}. Re-run the same command manually to see Wrangler's output.`,
+    );
+  }
+  return stdout;
+}
+
+function readLocalLedger(root, databaseName) {
+  localD1(root, databaseName, ["--command", LEDGER_DDL]);
+  const raw = localD1(root, databaseName, [
+    "--command",
+    `SELECT id, sequence, digest FROM ${LEDGER_TABLE} ORDER BY sequence;`,
+  ]);
+  let parsed;
+  try {
+    parsed = JSON.parse(raw);
+  } catch {
+    fail("LOCAL_D1_UNREADABLE", "Could not parse the local D1 response as JSON.");
+  }
+  const rows = Array.isArray(parsed) ? (parsed[0]?.results ?? []) : [];
+  return rows.map((row) => ({ id: String(row.id), sequence: Number(row.sequence), digest: String(row.digest) }));
+}
+
+/**
+ * Apply one migration and record it in the same call, so a migration can never
+ * be applied without leaving the record that makes the next run idempotent.
+ *
+ * Sent as a single `--command` rather than through a temporary file: this
+ * process creates no file it would then have to remove, so it has no delete
+ * path at all.
+ */
+function applyLocalMigration(root, databaseName, migration, appliedAt) {
+  const sql = `${migration.sql}\nINSERT INTO ${LEDGER_TABLE} (id, sequence, digest, applied_at) VALUES (${sqlLiteral(migration.id)}, ${migration.sequence}, ${sqlLiteral(migration.digest)}, ${sqlLiteral(appliedAt)});`;
+  localD1(root, databaseName, ["--command", sql]);
+}
+
 /** Applied records as they would be read from D1; also the rehearsal format. */
 export function readStateFile(path) {
   if (!existsSync(path)) {
@@ -265,7 +348,16 @@ function main() {
 
     phase = "plan";
     const migrations = readMigrationDirectory(join(root, "db/migrations"));
-    const applied = options.state === undefined ? [] : readStateFile(resolve(root, options.state));
+    const localDatabase = environment.kind === "local" ? "asimposium-local" : undefined;
+    // A local environment has a real (miniflare) D1 available with no
+    // credential, so its applied-records come from the database itself rather
+    // than from a rehearsal file.
+    const applied =
+      options.state !== undefined
+        ? readStateFile(resolve(root, options.state))
+        : localDatabase !== undefined
+          ? readLocalLedger(root, localDatabase)
+          : [];
     const plan = planMigrations(migrations, applied, {
       environmentName: options.env,
       destructiveAllowed: environment.kind === "local" ? true : options.env !== "production",
@@ -297,13 +389,39 @@ function main() {
         "Applying to production requires --i-understand-this-is-production in addition to --env production.",
       );
     }
-    // The honest wall. Applying needs a real D1 binding and real credentials.
-    // Neither exists in this repository, and inventing a success here would be
-    // the exact failure this bead's acceptance criteria forbids.
-    fail(
-      "APPLY_UNAVAILABLE",
-      `Cannot apply migrations to ${options.env}: no D1 binding or deployment credential is available in this environment. ` +
-        "Provision the environment first; this runner will not simulate an application.",
+    if (localDatabase === undefined) {
+      // The honest wall for remote environments. Applying needs a provisioned
+      // D1 and a deployment credential; neither exists here, and inventing a
+      // success would be the exact failure this bead's criteria forbid.
+      fail(
+        "APPLY_UNAVAILABLE",
+        `Cannot apply migrations to ${options.env}: no D1 binding or deployment credential is available in this environment. ` +
+          "Provision the environment first; this runner will not simulate an application.",
+      );
+    }
+
+    // Local is genuinely available: Wrangler's local D1 is workerd's own
+    // SQLite, needs no account, and is not a mock of D1.
+    const appliedAt = new Date().toISOString();
+    const appliedNow = [];
+    for (const pending of plan.to_apply) {
+      const migration = migrations.find((candidate) => candidate.id === pending.id);
+      applyLocalMigration(root, localDatabase, migration, appliedAt);
+      appliedNow.push({ id: migration.id, digest: migration.digest });
+    }
+
+    process.stdout.write(
+      `${JSON.stringify(
+        diagnostic("pass", startedAt, "apply", {
+          environment: options.env,
+          environment_kind: environment.kind,
+          d1_binding: environment.d1_binding,
+          key_ids: environment.key_ids,
+          applied: appliedNow,
+          skipped: plan.skipped,
+          head_before: plan.head,
+        }),
+      )}\n`,
     );
   } catch (error) {
     const details =
