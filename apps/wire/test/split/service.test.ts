@@ -8,8 +8,10 @@ import {
   KraterCommitUnknownError,
   type KraterSplitPort,
   type KraterSplitTransaction,
+  nextMonotonicUlid,
   normHash,
   type OpenClaimRef,
+  type PrivateArtifactBinding,
   type PromoteInput,
   PromotionCommitUnknownError,
   type PublicLedgerEvent,
@@ -17,9 +19,11 @@ import {
   SplitLeakError,
   SplitService,
   type StoredPublicLedgerEvent,
+  WorkshopCreationCommitUnknownError,
   type WorkshopKey,
   type WorkshopObject,
   type WorkshopPushInput,
+  type WorkshopReservation,
 } from "../../src/split";
 
 /**
@@ -35,9 +39,23 @@ interface MemoryState {
   readonly publicEvents: Map<string, StoredPublicLedgerEvent[]>;
   readonly openClaims: Map<string, OpenClaimRef>;
   readonly idempotency: Map<string, SplitIdempotencyRecord>;
-  readonly privateArtifacts: Map<string, string>;
+  readonly reservations: Map<string, WorkshopReservation>;
+  readonly privateArtifacts: Map<string, MemoryPrivateArtifact>;
+  readonly privateArtifactRecoveries: Map<string, MemoryPrivateArtifactRecovery>;
+  privateArtifactSequence: number;
   readonly publicArtifacts: Map<string, string>;
   readonly publicArtifactBindings: Map<string, string>;
+}
+
+interface MemoryPrivateArtifact {
+  readonly binding: PrivateArtifactBinding;
+  readonly bodyMd: string;
+  readonly state: "staged" | "bound";
+}
+
+interface MemoryPrivateArtifactRecovery {
+  readonly reservation: WorkshopReservation;
+  readonly binding: PrivateArtifactBinding;
 }
 
 const workshopScope = (key: WorkshopKey): string => `${key.problemId}\u0000${key.fellowId}`;
@@ -45,6 +63,49 @@ const claimScope = (problemId: string, normalizedHash: string): string =>
   `${problemId}\u0000${normalizedHash}`;
 const idempotencyScope = (scope: IdempotencyScope, key: string): string =>
   `${scope.principalId}\u0000${scope.sessionId}\u0000${scope.operation}\u0000${scope.problemId}\u0000${key}`;
+
+function samePrivateBinding(left: PrivateArtifactBinding, right: PrivateArtifactBinding): boolean {
+  return (
+    left.digest === right.digest &&
+    left.problemId === right.problemId &&
+    left.fellowId === right.fellowId &&
+    left.sponsorId === right.sponsorId &&
+    left.sessionId === right.sessionId &&
+    left.workshopId === right.workshopId
+  );
+}
+
+function sameReservation(left: WorkshopReservation, right: WorkshopReservation): boolean {
+  return (
+    left.workshopId === right.workshopId &&
+    left.problemId === right.problemId &&
+    left.fellowId === right.fellowId &&
+    left.sponsorId === right.sponsorId &&
+    left.sessionId === right.sessionId
+  );
+}
+
+function privateBindingMatchesReservationForTest(
+  binding: PrivateArtifactBinding,
+  reservation: WorkshopReservation,
+): boolean {
+  return (
+    binding.workshopId === reservation.workshopId &&
+    binding.problemId === reservation.problemId &&
+    binding.fellowId === reservation.fellowId &&
+    binding.sponsorId === reservation.sponsorId &&
+    binding.sessionId === reservation.sessionId
+  );
+}
+
+function requiredPrivateBinding(
+  binding: PrivateArtifactBinding | undefined,
+  context: string,
+): PrivateArtifactBinding {
+  if (binding === undefined)
+    throw new Error(`expected a server-bound private artifact for ${context}`);
+  return binding;
+}
 
 function emptyState(): MemoryState {
   return {
@@ -54,7 +115,10 @@ function emptyState(): MemoryState {
     publicEvents: new Map(),
     openClaims: new Map(),
     idempotency: new Map(),
+    reservations: new Map(),
     privateArtifacts: new Map(),
+    privateArtifactRecoveries: new Map(),
+    privateArtifactSequence: 0,
     publicArtifacts: new Map(),
     publicArtifactBindings: new Map(),
   };
@@ -70,14 +134,20 @@ function copyState(state: MemoryState): MemoryState {
     ),
     openClaims: new Map(state.openClaims),
     idempotency: new Map(state.idempotency),
+    reservations: new Map(state.reservations),
     privateArtifacts: new Map(state.privateArtifacts),
+    privateArtifactRecoveries: new Map(state.privateArtifactRecoveries),
+    privateArtifactSequence: state.privateArtifactSequence,
     publicArtifacts: new Map(state.publicArtifacts),
     publicArtifactBindings: new Map(state.publicArtifactBindings),
   };
 }
 
 class MemoryTransaction implements KraterSplitTransaction {
-  constructor(private readonly state: MemoryState) {}
+  constructor(
+    private readonly state: MemoryState,
+    private readonly loseReservationDuringFinalize: () => boolean,
+  ) {}
 
   currentPublicSeq(problemId: string): number {
     return this.state.publicSeq.get(problemId) ?? 0;
@@ -89,7 +159,7 @@ class MemoryTransaction implements KraterSplitTransaction {
     return next;
   }
 
-  nextWorkshopSeq(key: WorkshopKey): number {
+  private nextWorkshopSeq(key: WorkshopKey): number {
     const scope = workshopScope(key);
     const next = (this.state.workshopSeq.get(scope) ?? 0) + 1;
     this.state.workshopSeq.set(scope, next);
@@ -100,8 +170,98 @@ class MemoryTransaction implements KraterSplitTransaction {
     return this.state.workshops.get(workshopId);
   }
 
-  insertWorkshop(workshop: WorkshopObject): void {
+  reserveWorkshop(reservation: WorkshopReservation): boolean {
+    if (
+      this.state.workshops.has(reservation.workshopId) ||
+      this.state.reservations.has(reservation.workshopId)
+    ) {
+      return false;
+    }
+    this.state.reservations.set(reservation.workshopId, reservation);
+    return true;
+  }
+
+  finalizeReservedWorkshop(
+    reservation: WorkshopReservation,
+    draft: {
+      readonly type: WorkshopObject["type"];
+      readonly title: string;
+      readonly extract: string;
+      readonly inlineBodyMd?: string;
+      readonly privateArtifact?: PrivateArtifactBinding;
+    },
+  ): WorkshopObject | undefined {
+    const storedReservation = this.state.reservations.get(reservation.workshopId);
+    if (storedReservation === undefined || !sameReservation(storedReservation, reservation)) {
+      return undefined;
+    }
+    if (this.loseReservationDuringFinalize()) {
+      this.state.reservations.delete(reservation.workshopId);
+      return undefined;
+    }
+    if (draft.privateArtifact !== undefined) {
+      const staged = this.state.privateArtifacts.get(draft.privateArtifact.digest);
+      if (
+        staged === undefined ||
+        staged.state !== "staged" ||
+        !samePrivateBinding(staged.binding, draft.privateArtifact)
+      ) {
+        return undefined;
+      }
+    }
+    const workshop: WorkshopObject = {
+      id: reservation.workshopId,
+      problemId: reservation.problemId,
+      fellowId: reservation.fellowId,
+      sponsorId: reservation.sponsorId,
+      workshopSeq: this.nextWorkshopSeq(reservation),
+      ...draft,
+    };
     this.state.workshops.set(workshop.id, workshop);
+    this.state.reservations.delete(reservation.workshopId);
+    if (draft.privateArtifact !== undefined) {
+      const staged = this.state.privateArtifacts.get(draft.privateArtifact.digest);
+      if (staged === undefined) throw new Error("staged private artifact disappeared");
+      this.state.privateArtifacts.set(draft.privateArtifact.digest, { ...staged, state: "bound" });
+    }
+    return workshop;
+  }
+
+  abortWorkshopReservation(reservation: WorkshopReservation): void {
+    const storedReservation = this.state.reservations.get(reservation.workshopId);
+    if (storedReservation !== undefined && sameReservation(storedReservation, reservation)) {
+      this.state.reservations.delete(reservation.workshopId);
+    }
+  }
+
+  stagePrivateWorkshopBody(
+    reservation: WorkshopReservation,
+    bodyMd: string,
+  ): PrivateArtifactBinding | undefined {
+    const storedReservation = this.state.reservations.get(reservation.workshopId);
+    if (storedReservation === undefined || !sameReservation(storedReservation, reservation)) {
+      return undefined;
+    }
+    this.state.privateArtifactSequence += 1;
+    const digest = `sha256:${this.state.privateArtifactSequence.toString(16).padStart(64, "0")}`;
+    const binding: PrivateArtifactBinding = { ...reservation, digest };
+    this.state.privateArtifacts.set(digest, { binding, bodyMd, state: "staged" });
+    return binding;
+  }
+
+  recordUnboundPrivateWorkshopBody(
+    reservation: WorkshopReservation,
+    binding: PrivateArtifactBinding,
+  ): void {
+    const artifact = this.state.privateArtifacts.get(binding.digest);
+    if (
+      artifact !== undefined &&
+      artifact.state === "staged" &&
+      samePrivateBinding(artifact.binding, binding) &&
+      privateBindingMatchesReservationForTest(binding, reservation)
+    ) {
+      this.state.privateArtifactRecoveries.set(binding.digest, { reservation, binding });
+    }
   }
 
   markWorkshopPromoted(workshopId: string, publicEventId: string): void {
@@ -128,17 +288,24 @@ class MemoryTransaction implements KraterSplitTransaction {
     this.state.publicEvents.set(event.problemId, [...events, event]);
   }
 
-  getPrivateArtifact(privateArtifactDigest: string): { readonly bodyMd: string } | undefined {
-    const bodyMd = this.state.privateArtifacts.get(privateArtifactDigest);
-    return bodyMd === undefined ? undefined : { bodyMd };
+  getPrivateArtifact(binding: PrivateArtifactBinding): { readonly bodyMd: string } | undefined {
+    const artifact = this.state.privateArtifacts.get(binding.digest);
+    if (
+      artifact === undefined ||
+      artifact.state !== "bound" ||
+      !samePrivateBinding(artifact.binding, binding)
+    ) {
+      return undefined;
+    }
+    return { bodyMd: artifact.bodyMd };
   }
 
   copyPrivateArtifactToPublic(
-    privateArtifactDigest: string,
+    binding: PrivateArtifactBinding,
     publicArtifactId: string,
   ): { readonly id: string; readonly bodyMd: string } | undefined {
-    const bodyMd = this.state.privateArtifacts.get(privateArtifactDigest);
-    return bodyMd === undefined ? undefined : { id: publicArtifactId, bodyMd };
+    const artifact = this.getPrivateArtifact(binding);
+    return artifact === undefined ? undefined : { id: publicArtifactId, bodyMd: artifact.bodyMd };
   }
 
   bindPublicArtifact(
@@ -177,13 +344,69 @@ class MemoryKrater implements KraterSplitPort {
   private state = emptyState();
   private tail: Promise<void> = Promise.resolve();
   private disconnectAfterNextCommit = false;
+  private privateStorageUnavailable = false;
+  private loseNextFinalizeReservation = false;
 
   armDisconnectAfterCommit(): void {
     this.disconnectAfterNextCommit = true;
   }
 
-  seedPrivateArtifact(digest: string, bodyMd: string): void {
-    this.state.privateArtifacts.set(digest, bodyMd);
+  armPrivateStorageUnavailable(): void {
+    this.privateStorageUnavailable = true;
+  }
+
+  armFinalizeReservationLoss(): void {
+    this.loseNextFinalizeReservation = true;
+  }
+
+  workshopCursorFor(key: WorkshopKey): number {
+    return this.state.workshopSeq.get(workshopScope(key)) ?? 0;
+  }
+
+  privateArtifactCount(): number {
+    return this.state.privateArtifacts.size;
+  }
+
+  boundPrivateArtifactCount(): number {
+    return [...this.state.privateArtifacts.values()].filter(
+      (artifact) => artifact.state === "bound",
+    ).length;
+  }
+
+  recoveryBindingCount(): number {
+    return this.state.privateArtifactRecoveries.size;
+  }
+
+  privateBindingForWorkshop(workshopId: string): PrivateArtifactBinding | undefined {
+    return this.state.workshops.get(workshopId)?.privateArtifact;
+  }
+
+  replaceWorkshopBindingForTest(workshopId: string, binding: PrivateArtifactBinding): void {
+    const workshop = this.state.workshops.get(workshopId);
+    if (workshop === undefined) throw new Error("unknown workshop in test binding replacement");
+    this.state.workshops.set(workshopId, { ...workshop, privateArtifact: binding });
+  }
+
+  async stagePrivateWorkshopBody(
+    reservation: WorkshopReservation,
+    bodyMd: string,
+  ): Promise<PrivateArtifactBinding | undefined> {
+    return this.transaction((transaction) => {
+      if (this.privateStorageUnavailable) {
+        this.privateStorageUnavailable = false;
+        return undefined;
+      }
+      return (transaction as MemoryTransaction).stagePrivateWorkshopBody(reservation, bodyMd);
+    });
+  }
+
+  async recoverUnboundPrivateWorkshopBody(
+    reservation: WorkshopReservation,
+    binding: PrivateArtifactBinding,
+  ): Promise<void> {
+    await this.transaction((transaction) => {
+      (transaction as MemoryTransaction).recordUnboundPrivateWorkshopBody(reservation, binding);
+    });
   }
 
   async transaction<T>(
@@ -199,7 +422,13 @@ class MemoryKrater implements KraterSplitPort {
 
     try {
       const draft = copyState(this.state);
-      const result = await operation(new MemoryTransaction(draft));
+      const result = await operation(
+        new MemoryTransaction(draft, () => {
+          if (!this.loseNextFinalizeReservation) return false;
+          this.loseNextFinalizeReservation = false;
+          return true;
+        }),
+      );
       this.state = draft;
       if (this.disconnectAfterNextCommit) {
         this.disconnectAfterNextCommit = false;
@@ -260,7 +489,7 @@ const SPONSOR_A: AuthenticatedSponsorPrincipal = {
   sessionId: "S-sponsor-a",
 };
 
-class TestIds {
+class DeterministicSplitIds {
   private event = 0;
   private artifact = 0;
 
@@ -276,7 +505,7 @@ class TestIds {
 }
 
 function splitService(krater = new MemoryKrater()): SplitService {
-  return new SplitService(krater, new TestIds());
+  return new SplitService(krater, new DeterministicSplitIds());
 }
 
 function eventIds(events: readonly PublicLedgerEvent[]): string[] {
@@ -460,6 +689,169 @@ describe("S-3 split cursors and existence hiding", () => {
       cacheControl: "no-store",
     });
   });
+
+  test("server-binds private CAS bodies so a known victim digest cannot be rebound or read", async () => {
+    const krater = new MemoryKrater();
+    const service = splitService(krater);
+    const victimBody = "victim private CAS body ".repeat(80);
+    const attackerBody = "attacker private CAS body ".repeat(80);
+    await service.pushWorkshop(
+      FELLOW_B,
+      workshop({ workshopId: "W-victim-spill", bodyMd: victimBody }),
+    );
+    const victimBinding = requiredPrivateBinding(
+      krater.privateBindingForWorkshop("W-victim-spill"),
+      "victim workshop",
+    );
+
+    const forgedInput = {
+      ...workshop({ workshopId: "W-attacker-spill", bodyMd: attackerBody }),
+      privateArtifactDigest: victimBinding.digest,
+    };
+    await service.pushWorkshop(FELLOW_A, forgedInput);
+    const attackerBinding = requiredPrivateBinding(
+      krater.privateBindingForWorkshop("W-attacker-spill"),
+      "attacker workshop",
+    );
+    expect(attackerBinding.digest).not.toBe(victimBinding.digest);
+    expect(
+      await service.sponsorPrivateArtifact(
+        { kind: "sponsor", sponsorId: "sponsor-a" },
+        "W-attacker-spill",
+      ),
+    ).toEqual({ status: 200, cacheControl: "private, no-store", bodyMd: attackerBody });
+
+    krater.replaceWorkshopBindingForTest("W-attacker-spill", {
+      ...attackerBinding,
+      digest: victimBinding.digest,
+    });
+    expect(
+      await service.sponsorPrivateArtifact(
+        { kind: "sponsor", sponsorId: "sponsor-a" },
+        "W-attacker-spill",
+      ),
+    ).toEqual({ status: 404, code: "NOT_FOUND", cacheControl: "no-store" });
+  });
+
+  test("planted PRIVATE_CAS_STORAGE_REQUIRED leaves no cursor, reservation, or binding", async () => {
+    const krater = new MemoryKrater();
+    const service = splitService(krater);
+    const cursorKey = { problemId: "P-split", fellowId: FELLOW_A.fellowId };
+    const privateBody = "storage-unavailable private body ".repeat(80);
+    expect(krater.workshopCursorFor(cursorKey)).toBe(0);
+    krater.armPrivateStorageUnavailable();
+
+    expect(
+      await service.pushWorkshop(
+        FELLOW_A,
+        workshop({ workshopId: "W-storage-unavailable", bodyMd: privateBody }),
+      ),
+    ).toEqual({
+      status: 422,
+      code: "PRIVATE_CAS_STORAGE_REQUIRED",
+      fixHint: "Private workshop storage is unavailable; retry after the server can bind the body.",
+    });
+    expect(krater.workshopCursorFor(cursorKey)).toBe(0);
+    expect(krater.privateArtifactCount()).toBe(0);
+    expect(krater.boundPrivateArtifactCount()).toBe(0);
+    expect(krater.recoveryBindingCount()).toBe(0);
+    expect(await service.sponsorWorkshopCard(SPONSOR_A, "W-storage-unavailable")).toEqual({
+      status: 404,
+      code: "NOT_FOUND",
+      cacheControl: "no-store",
+    });
+
+    expect(
+      await service.pushWorkshop(
+        FELLOW_A,
+        workshop({ workshopId: "W-storage-unavailable", bodyMd: "retry after storage recovers" }),
+      ),
+    ).toEqual({
+      status: 201,
+      workshopId: "W-storage-unavailable",
+      workshopSeq: 1,
+      spilledToPrivateCas: false,
+    });
+  });
+
+  test("create-only workshop IDs survive concurrent retries and cannot reset promotion", async () => {
+    const krater = new MemoryKrater();
+    const service = splitService(krater);
+    const first = workshop({
+      workshopId: "W-create-only",
+      bodyMd: "first private body ".repeat(80),
+    });
+    const second = workshop({
+      workshopId: "W-create-only",
+      bodyMd: "second private body ".repeat(80),
+    });
+    const results = await Promise.all([
+      service.pushWorkshop(FELLOW_A, first),
+      service.pushWorkshop(FELLOW_B, second),
+    ]);
+    expect(results).toEqual([
+      { status: 201, workshopId: "W-create-only", workshopSeq: 1, spilledToPrivateCas: true },
+      {
+        status: 409,
+        code: "WORKSHOP_ALREADY_EXISTS",
+        suggestedAction: "use_new_workshop_id",
+      },
+    ]);
+    expect(krater.workshopCursorFor({ problemId: "P-split", fellowId: FELLOW_A.fellowId })).toBe(1);
+    expect(krater.workshopCursorFor({ problemId: "P-split", fellowId: FELLOW_B.fellowId })).toBe(0);
+    expect(krater.privateArtifactCount()).toBe(1);
+    expect(krater.boundPrivateArtifactCount()).toBe(1);
+    expect(krater.privateBindingForWorkshop("W-create-only")).toMatchObject({
+      fellowId: FELLOW_A.fellowId,
+      sponsorId: FELLOW_A.sponsorId,
+    });
+    expect(
+      await service.sponsorPrivateArtifact(
+        { kind: "sponsor", sponsorId: FELLOW_B.sponsorId },
+        "W-create-only",
+      ),
+    ).toEqual({ status: 404, code: "NOT_FOUND", cacheControl: "no-store" });
+
+    expect(
+      await service.promote(FELLOW_A, promotion({ workshopId: "W-create-only" })),
+    ).toMatchObject({ status: 201, outcome: "created" });
+    expect(await service.pushWorkshop(FELLOW_A, first)).toEqual({
+      status: 409,
+      code: "WORKSHOP_ALREADY_EXISTS",
+      suggestedAction: "use_new_workshop_id",
+    });
+    expect(
+      await service.promote(
+        FELLOW_A,
+        promotion({ workshopId: "W-create-only", idempotencyKey: "retry-with-new-key" }),
+      ),
+    ).toEqual({ status: 409, code: "PROMOTION_ALREADY_EXISTS", publicEventId: "EV-test-1" });
+    expect(eventIds((await service.publicLedger("P-split")).events)).toEqual(["EV-test-1"]);
+  });
+
+  test("an unconfirmed stage/finalize boundary records recovery without exposing private bytes", async () => {
+    const krater = new MemoryKrater();
+    const service = splitService(krater);
+    const cursorKey = { problemId: "P-split", fellowId: FELLOW_A.fellowId };
+    krater.armFinalizeReservationLoss();
+
+    await expect(
+      service.pushWorkshop(
+        FELLOW_A,
+        workshop({ workshopId: "W-recovery-seam", bodyMd: "recovery private body ".repeat(80) }),
+      ),
+    ).rejects.toBeInstanceOf(WorkshopCreationCommitUnknownError);
+    expect(krater.workshopCursorFor(cursorKey)).toBe(0);
+    expect(krater.privateArtifactCount()).toBe(1);
+    expect(krater.boundPrivateArtifactCount()).toBe(0);
+    expect(krater.recoveryBindingCount()).toBe(1);
+    expect(await service.sponsorPrivateArtifact(SPONSOR_A, "W-recovery-seam")).toEqual({
+      status: 404,
+      code: "NOT_FOUND",
+      cacheControl: "no-store",
+    });
+    expect(await service.publicLedger("P-split")).toMatchObject({ publicSeq: 0, events: [] });
+  });
 });
 
 describe("S-3 public-surface and private-CAS exclusion", () => {
@@ -467,14 +859,12 @@ describe("S-3 public-surface and private-CAS exclusion", () => {
     const krater = new MemoryKrater();
     const service = splitService(krater);
     const privateBody = "private-cas-canary ".repeat(80);
-    krater.seedPrivateArtifact("sha256-private-cas-canary", privateBody);
     await service.pushWorkshop(
       FELLOW_A,
       workshop({
         workshopId: "W-spill",
         title: "Private CAS title",
         bodyMd: privateBody,
-        privateArtifactDigest: "sha256-private-cas-canary",
       }),
     );
 
@@ -497,11 +887,15 @@ describe("S-3 public-surface and private-CAS exclusion", () => {
     const cache = await service.publicLedger("P-split");
     const search = await service.searchPublicLedger("P-split", "private-cas-canary");
     const exported = await service.exportPublicLedger("P-split");
-    const publicCas = await service.publicArtifact("sha256-private-cas-canary");
+    const privateBinding = requiredPrivateBinding(
+      krater.privateBindingForWorkshop("W-spill"),
+      "private workshop",
+    );
+    const publicCas = await service.publicArtifact(privateBinding.digest);
     for (const face of [cache, search, exported, publicCas]) {
       const serialized = JSON.stringify(face);
       expect(serialized).not.toContain("private-cas-canary");
-      expect(serialized).not.toContain("sha256-private-cas-canary");
+      expect(serialized).not.toContain(privateBinding.digest);
       expect(serialized).not.toContain("W-spill");
     }
     expect(cache).toMatchObject({ cacheControl: "public, max-age=10", publicSeq: 0, events: [] });
@@ -514,13 +908,11 @@ describe("S-3 public-surface and private-CAS exclusion", () => {
     const krater = new MemoryKrater();
     const service = splitService(krater);
     const privateBody = "private artifact canary ".repeat(80);
-    krater.seedPrivateArtifact("sha256-private-after-promotion", privateBody);
     await service.pushWorkshop(
       FELLOW_A,
       workshop({
         workshopId: "W-promoted-spill",
         bodyMd: privateBody,
-        privateArtifactDigest: "sha256-private-after-promotion",
       }),
     );
     expect(await service.publishWorkshopArtifact(FELLOW_A, "W-promoted-spill")).toEqual({
@@ -533,7 +925,11 @@ describe("S-3 public-surface and private-CAS exclusion", () => {
     const publicFace = await service.publicLedger("P-split");
     expect(eventIds(publicFace.events)).toEqual(["EV-test-1"]);
     expect(JSON.stringify(publicFace)).not.toContain("private-after-promotion");
-    expect(await service.publicArtifact("sha256-private-after-promotion")).toEqual({
+    const privateBinding = requiredPrivateBinding(
+      krater.privateBindingForWorkshop("W-promoted-spill"),
+      "promoted workshop",
+    );
+    expect(await service.publicArtifact(privateBinding.digest)).toEqual({
       status: 404,
       code: "NOT_FOUND",
       cacheControl: "no-store",
@@ -583,10 +979,52 @@ describe("S-3 promotion validator", () => {
       code: "SCHEMA_INVALID",
       rule: "P2/P4",
       fixHint:
-        "Remove author-writable disposition, proof, confidence, or certification fields; the ledger computes disposition after independent review.",
+        "Remove author-writable disposition, proof, confidence, certification, or status-upgrade fields; the ledger computes disposition after independent review.",
       nextAction: "remove_authoritative_fields",
     });
     expect(await service.publicLedger("P-split")).toMatchObject({ publicSeq: 0, events: [] });
+  });
+
+  test("refuses nested semantic-control assertions while ordinary prose remains writable", async () => {
+    const service = splitService();
+    await service.pushWorkshop(FELLOW_A, workshop({ workshopId: "W-nested-p2" }));
+
+    expect(
+      await service.promote(
+        FELLOW_A,
+        promotion({
+          workshopId: "W-nested-p2",
+          publicClaim: {
+            ...promotion().publicClaim,
+            candidate: {
+              evidence: [{ reviewer_notes: { StAtUs: "ＰＲＯＶＥＤ" } }],
+            },
+          },
+        }),
+      ),
+    ).toMatchObject({
+      status: 422,
+      code: "SCHEMA_INVALID",
+      rule: "P2/P4",
+      nextAction: "remove_authoritative_fields",
+    });
+
+    expect(
+      await service.promote(
+        FELLOW_A,
+        promotion({
+          workshopId: "W-nested-p2",
+          publicClaim: {
+            ...promotion().publicClaim,
+            candidate: {
+              prose:
+                "The historical source uses the word PROVED; this Fellow does not assert a disposition.",
+              review_note: "Status remains open pending independent review.",
+            },
+          },
+        }),
+      ),
+    ).toMatchObject({ status: 201, outcome: "created" });
   });
 
   test("refuses an NFKC-equivalent open claim with P11 and the existing ID", async () => {
@@ -768,6 +1206,50 @@ describe("S-3 atomic promotion and recovery", () => {
 });
 
 describe("S-3 planted negative", () => {
+  test("strict public shapes require every event/result field and reject mixed or nested canaries", () => {
+    const event = {
+      id: "EV-01J00000000000000000000000",
+      problemId: "P-split",
+      publicSeq: 1,
+      claimId: "C-1",
+      title: "A public title",
+      extract: "A public extract",
+      statement: "A bounded public statement.",
+    };
+    const snapshot = {
+      status: 200,
+      cacheControl: "public, max-age=10",
+      publicSeq: 1,
+      events: [event],
+    };
+    const search = {
+      status: 200,
+      cacheControl: "public, max-age=10",
+      results: [event],
+    };
+    expect(() => assertPublicLedgerProjectionShape(snapshot)).not.toThrow();
+    expect(() => assertPublicLedgerProjectionShape(search)).not.toThrow();
+
+    for (const requiredField of Object.keys(event)) {
+      const incompleteEvent: Record<string, unknown> = { ...event };
+      delete incompleteEvent[requiredField];
+      expect(() =>
+        assertPublicLedgerProjectionShape({ ...snapshot, events: [incompleteEvent] }),
+      ).toThrow(SplitLeakError);
+      expect(() =>
+        assertPublicLedgerProjectionShape({ ...search, results: [incompleteEvent] }),
+      ).toThrow(SplitLeakError);
+    }
+
+    const mixedResultsLeak = { ...snapshot, results: [event] };
+    const nestedBodyCanary = {
+      ...snapshot,
+      events: [{ ...event, metadata: { bodyMd: "private body canary" } }],
+    };
+    expect(() => assertPublicLedgerProjectionShape(mixedResultsLeak)).toThrow(SplitLeakError);
+    expect(() => assertPublicLedgerProjectionShape(nestedBodyCanary)).toThrow(SplitLeakError);
+  });
+
   test("should-leak: a workshop sequence injected into a public projection is detected", () => {
     // This object is intentionally malformed.  The guard is exercised against
     // the same public-projection invariant used by the service above.
@@ -796,5 +1278,49 @@ describe("S-3 planted negative", () => {
       annotation: "private bytes under an innocent-looking key",
     };
     expect(() => assertPublicLedgerProjectionShape(shouldLeak)).toThrow(SplitLeakError);
+  });
+
+  test("should-leak: a private field nested below an otherwise ordinary object is detected", () => {
+    const shouldLeak = {
+      status: 200,
+      cacheControl: "public, max-age=10",
+      publicSeq: 1,
+      events: [],
+      presentation: { workshop_seq: 7 },
+    };
+    expect(() => assertPublicProjectionSafe(shouldLeak)).toThrow(SplitLeakError);
+  });
+});
+
+describe("S-3 identifiers", () => {
+  test("production ULIDs are canonical, unique, and lexically monotonic", () => {
+    const ulids = Array.from({ length: 64 }, () => nextMonotonicUlid());
+    for (const ulid of ulids) {
+      expect(ulid).toMatch(/^[0-7][0123456789ABCDEFGHJKMNPQRSTVWXYZ]{25}$/u);
+    }
+    expect(new Set(ulids)).toHaveLength(ulids.length);
+    expect([...ulids].sort()).toEqual(ulids);
+  });
+
+  test("the default production ID factory emits prefixed ULIDs while test services stay deterministic", async () => {
+    const productionService = new SplitService(new MemoryKrater());
+    await productionService.pushWorkshop(FELLOW_A, workshop({ workshopId: "W-production-id" }));
+    const promoted = await productionService.promote(
+      FELLOW_A,
+      promotion({ workshopId: "W-production-id" }),
+    );
+    expect(promoted).toMatchObject({
+      status: 201,
+      outcome: "created",
+      receipt: {
+        event: { id: expect.stringMatching(/^EV-[0-7][0123456789ABCDEFGHJKMNPQRSTVWXYZ]{25}$/u) },
+      },
+    });
+
+    const deterministicService = splitService();
+    await deterministicService.pushWorkshop(FELLOW_A, workshop({ workshopId: "W-test-id" }));
+    expect(
+      await deterministicService.promote(FELLOW_A, promotion({ workshopId: "W-test-id" })),
+    ).toMatchObject({ receipt: { event: { id: "EV-test-1" } } });
   });
 });

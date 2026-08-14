@@ -37,6 +37,25 @@ export interface PrivateArtifactBinding extends WorkshopKey {
   readonly workshopId: string;
 }
 
+/**
+ * A create-only D1 reservation. It deliberately has no workshop sequence:
+ * a rejected or unconfirmed body write must not advance the workshop cursor.
+ */
+export interface WorkshopReservation extends WorkshopKey {
+  readonly workshopId: string;
+  readonly sponsorId: string;
+  readonly sessionId: string;
+}
+
+/** The non-sequenced content used to finalize a previously reserved workshop. */
+export interface ReservedWorkshopDraft {
+  readonly type: WorkshopObject["type"];
+  readonly title: string;
+  readonly extract: string;
+  readonly inlineBodyMd?: string;
+  readonly privateArtifact?: PrivateArtifactBinding;
+}
+
 export interface WorkshopObject extends WorkshopKey {
   readonly id: string;
   readonly sponsorId: string;
@@ -122,7 +141,7 @@ export interface SplitIdFactory {
 
 const CROCKFORD_BASE32 = "0123456789ABCDEFGHJKMNPQRSTVWXYZ";
 let lastUlidTimestamp = -1;
-let lastUlidRandomness = new Uint8Array(10);
+const lastUlidRandomness = Uint8Array.of(0, 0, 0, 0, 0, 0, 0, 0, 0, 0);
 
 function encodeBase32(value: bigint, length: number): string {
   let remaining = value;
@@ -180,18 +199,23 @@ export interface OpenClaimRef {
 export interface KraterSplitTransaction {
   currentPublicSeq(problemId: string): number;
   nextPublicSeq(problemId: string): number;
-  nextWorkshopSeq(key: WorkshopKey): number;
   getWorkshop(workshopId: string): WorkshopObject | undefined;
-  /** Create-only. False means the caller's workshop ID already exists. */
-  createWorkshop(workshop: WorkshopObject): boolean;
   /**
-   * Stores bytes and returns a server-created binding. Every binding field is
-   * derived from authenticated context and the server-selected workshop ID.
+   * Claims the globally unique workshop ID without allocating a workshop
+   * sequence. False means a workshop or a pending reservation already owns it.
    */
-  bindPrivateWorkshopBody(
-    binding: Omit<PrivateArtifactBinding, "digest">,
-    bodyMd: string,
-  ): PrivateArtifactBinding | undefined;
+  reserveWorkshop(reservation: WorkshopReservation): boolean;
+  /**
+   * Atomically consumes the reservation, allocates the per-Fellow/problem
+   * sequence, and makes the body binding readable. Undefined means creation
+   * was not confirmed; callers must use the recovery seam below.
+   */
+  finalizeReservedWorkshop(
+    reservation: WorkshopReservation,
+    draft: ReservedWorkshopDraft,
+  ): WorkshopObject | undefined;
+  /** Removes only an unfinalized reservation. It never changes a cursor. */
+  abortWorkshopReservation(reservation: WorkshopReservation): void;
   markWorkshopPromoted(workshopId: string, publicEventId: string): void;
   markWorkshopArtifactPublished(workshopId: string, publicArtifactId: string): void;
   getPublicEvents(problemId: string): readonly StoredPublicLedgerEvent[];
@@ -213,6 +237,26 @@ export interface KraterSplitTransaction {
 
 export interface KraterSplitPort {
   transaction<T>(operation: (transaction: KraterSplitTransaction) => Promise<T> | T): Promise<T>;
+  /**
+   * Writes a private body outside D1 and returns a server-bound digest. A
+   * returned binding is staged, not readable, until `finalizeReservedWorkshop`
+   * commits it with the reservation. `undefined` means no durable body was
+   * staged and lets the caller abort its reservation without a cursor change.
+   */
+  stagePrivateWorkshopBody(
+    reservation: WorkshopReservation,
+    bodyMd: string,
+  ): Promise<PrivateArtifactBinding | undefined>;
+  /**
+   * R2 cannot join the D1 transaction. On a post-stage finalization failure,
+   * the adapter must inspect/record this binding for safe retry or retention;
+   * it must remain unreadable by private and public reads until a D1 binding
+   * is finalized. This is a recovery seam, not a rollback claim.
+   */
+  recoverUnboundPrivateWorkshopBody(
+    reservation: WorkshopReservation,
+    binding: PrivateArtifactBinding,
+  ): Promise<void>;
 }
 
 export interface WorkshopPushInput {
@@ -372,6 +416,20 @@ export class PromotionCommitUnknownError extends Error {
   }
 }
 
+/**
+ * The private body may have reached R2 while its D1 binding was not confirmed.
+ * Do not report this as a rejected creation or expose the body; invoke the
+ * port's recovery seam and require the future route/adapter to reconcile it.
+ */
+export class WorkshopCreationCommitUnknownError extends Error {
+  readonly code = "WORKSHOP_CREATION_COMMIT_UNKNOWN";
+
+  constructor() {
+    super("Workshop creation was not confirmed; private-body recovery is required");
+    this.name = "WorkshopCreationCommitUnknownError";
+  }
+}
+
 function utf8ByteLength(value: string): number {
   return new TextEncoder().encode(value).byteLength;
 }
@@ -457,6 +515,19 @@ function privateBindingMatchesWorkshop(
   );
 }
 
+function privateBindingMatchesReservation(
+  binding: PrivateArtifactBinding,
+  reservation: WorkshopReservation,
+): boolean {
+  return (
+    binding.workshopId === reservation.workshopId &&
+    binding.problemId === reservation.problemId &&
+    binding.fellowId === reservation.fellowId &&
+    binding.sponsorId === reservation.sponsorId &&
+    binding.sessionId === reservation.sessionId
+  );
+}
+
 function assertExactObject(
   value: unknown,
   keys: readonly string[],
@@ -507,6 +578,9 @@ function assertPublicEventShape(value: unknown): void {
  * fails closed until the public face contract explicitly admits it.
  */
 export function assertPublicLedgerProjectionShape(value: unknown): void {
+  if (value === null || typeof value !== "object" || Array.isArray(value)) {
+    throw new SplitLeakError("non-object-public-ledger-projection");
+  }
   const record = value as Readonly<Record<string, unknown>>;
   const isSnapshot = Object.hasOwn(record, "events");
   const isSearch = Object.hasOwn(record, "results");
@@ -563,35 +637,76 @@ export class SplitService {
     input: WorkshopPushInput,
   ): Promise<WorkshopPushResult> {
     const spilledToPrivateCas = utf8ByteLength(input.bodyMd) > PRIVATE_BODY_THRESHOLD_BYTES;
-    if (spilledToPrivateCas && input.privateArtifactDigest === undefined) {
+    const reservation: WorkshopReservation = {
+      workshopId: input.workshopId,
+      problemId: input.problemId,
+      fellowId: actor.fellowId,
+      sponsorId: actor.sponsorId,
+      sessionId: actor.sessionId,
+    };
+    const reserved = await this.krater.transaction((transaction) =>
+      transaction.reserveWorkshop(reservation),
+    );
+    if (!reserved) {
       return {
-        status: 422,
-        code: "PRIVATE_CAS_REQUIRED",
-        fixHint:
-          "Bodies above 1 KiB require a private CAS digest before the workshop row is written.",
+        status: 409,
+        code: "WORKSHOP_ALREADY_EXISTS",
+        suggestedAction: "use_new_workshop_id",
       };
     }
 
-    return this.krater.transaction((transaction) => {
-      const workshopSeq = transaction.nextWorkshopSeq({
-        problemId: input.problemId,
-        fellowId: actor.fellowId,
+    const privateArtifact = spilledToPrivateCas
+      ? await this.krater.stagePrivateWorkshopBody(reservation, input.bodyMd)
+      : undefined;
+    if (spilledToPrivateCas && privateArtifact === undefined) {
+      await this.krater.transaction((transaction) => {
+        transaction.abortWorkshopReservation(reservation);
       });
-      transaction.insertWorkshop({
-        id: input.workshopId,
-        problemId: input.problemId,
-        fellowId: actor.fellowId,
-        sponsorId: actor.sponsorId,
-        workshopSeq,
-        type: input.type,
-        title: input.title,
-        extract: extractFrom(input.bodyMd),
-        ...(spilledToPrivateCas
-          ? { privateArtifactDigest: input.privateArtifactDigest }
-          : { inlineBodyMd: input.bodyMd }),
-      });
-      return { status: 201, workshopId: input.workshopId, workshopSeq, spilledToPrivateCas };
-    });
+      return {
+        status: 422,
+        code: "PRIVATE_CAS_STORAGE_REQUIRED",
+        fixHint:
+          "Private workshop storage is unavailable; retry after the server can bind the body.",
+      };
+    }
+    if (
+      privateArtifact !== undefined &&
+      !privateBindingMatchesReservation(privateArtifact, reservation)
+    ) {
+      await this.krater.recoverUnboundPrivateWorkshopBody(reservation, privateArtifact);
+      throw new WorkshopCreationCommitUnknownError();
+    }
+
+    try {
+      const created = await this.krater.transaction((transaction) =>
+        transaction.finalizeReservedWorkshop(reservation, {
+          type: input.type,
+          title: input.title,
+          extract: extractFrom(input.bodyMd),
+          ...(privateArtifact === undefined ? { inlineBodyMd: input.bodyMd } : { privateArtifact }),
+        }),
+      );
+      if (created === undefined) {
+        if (privateArtifact !== undefined) {
+          await this.krater.recoverUnboundPrivateWorkshopBody(reservation, privateArtifact);
+        }
+        throw new WorkshopCreationCommitUnknownError();
+      }
+      return {
+        status: 201,
+        workshopId: created.id,
+        workshopSeq: created.workshopSeq,
+        spilledToPrivateCas,
+      };
+    } catch (error) {
+      if (error instanceof KraterCommitUnknownError) {
+        if (privateArtifact !== undefined) {
+          await this.krater.recoverUnboundPrivateWorkshopBody(reservation, privateArtifact);
+        }
+        throw new WorkshopCreationCommitUnknownError();
+      }
+      throw error;
+    }
   }
 
   async sponsorWorkshopCard(
@@ -647,7 +762,8 @@ export class SplitService {
       const workshop = transaction.getWorkshop(workshopId);
       if (
         workshop === undefined ||
-        workshop.privateArtifactDigest === undefined ||
+        workshop.privateArtifact === undefined ||
+        !privateBindingMatchesWorkshop(workshop.privateArtifact, workshop) ||
         !principalMayReadWorkshop(principal, {
           fellowId: workshop.fellowId,
           sponsorId: workshop.sponsorId,
@@ -655,7 +771,7 @@ export class SplitService {
       ) {
         return privateNotFound();
       }
-      const artifact = transaction.getPrivateArtifact(workshop.privateArtifactDigest);
+      const artifact = transaction.getPrivateArtifact(workshop.privateArtifact);
       if (artifact === undefined) return privateNotFound();
       return {
         status: 200,
@@ -688,7 +804,12 @@ export class SplitService {
       const workshop = transaction.getWorkshop(workshopId);
       if (workshop === undefined || !actorMayManageWorkshop(actor, workshop))
         return privateNotFound();
-      if (workshop.privateArtifactDigest === undefined) return privateNotFound();
+      if (
+        workshop.privateArtifact === undefined ||
+        !privateBindingMatchesWorkshop(workshop.privateArtifact, workshop)
+      ) {
+        return privateNotFound();
+      }
       if (workshop.promotedPublicEventId === undefined) {
         return { status: 409, code: "PROMOTION_REQUIRED" };
       }
@@ -700,7 +821,7 @@ export class SplitService {
       // The port's contract is copy-and-verify first; no public binding is
       // written if the private bytes cannot be read or copied.
       const artifact = transaction.copyPrivateArtifactToPublic(
-        workshop.privateArtifactDigest,
+        workshop.privateArtifact,
         publicArtifactId,
       );
       if (artifact === undefined) return privateNotFound();

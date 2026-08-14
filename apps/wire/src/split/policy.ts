@@ -79,14 +79,23 @@ const STATUS_UPGRADES = new Set([
 ]);
 
 function normalizedControlKey(key: string): string {
-  return key.normalize("NFKC").toLowerCase().replace(/[^a-z0-9]/gu, "");
+  return key
+    .normalize("NFKC")
+    .toLowerCase()
+    .replace(/[^a-z0-9]/gu, "");
 }
 
 function normalizedStatusValue(value: string): string {
-  return value.normalize("NFKC").toLowerCase().replace(/[^a-z0-9]/gu, "");
+  return value
+    .normalize("NFKC")
+    .toLowerCase()
+    .replace(/[^a-z0-9]/gu, "");
 }
 
-function containsAuthoritativeField(value: unknown, seen: WeakSet<object> = new WeakSet()): boolean {
+function containsAuthoritativeField(
+  value: unknown,
+  seen: WeakSet<object> = new WeakSet(),
+): boolean {
   if (value === null || typeof value !== "object") return false;
   if (seen.has(value)) return false;
   seen.add(value);

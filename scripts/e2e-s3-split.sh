@@ -8,7 +8,10 @@
 #
 # Consumer: the S-3 release gate, once Krater and the Worker routes exist.
 # Observed defect class: a workshop object or private CAS digest reaches a
-# public/cache/search/export surface, or a retry makes a second public event.
+# public/cache/search/export surface; an R2-staged body becomes readable
+# without a finalized D1 binding/recovery record; or a retry makes a second
+# public event. R2 is outside D1, so this gate must exercise the adapter's
+# staged-copy/binding recovery seam rather than claiming cross-service rollback.
 # Deletion condition: replace this refusal with the actual paired-principal
 # script after it runs against isolated local bindings and staging.
 
