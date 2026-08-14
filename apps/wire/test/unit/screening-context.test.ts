@@ -3,14 +3,14 @@ import { expect, test } from "bun:test";
 import {
   assertContextualScreeningInput,
   buildContextualScreeningInput,
-  ContextualScreeningInputError,
-  MAX_CONTEXTUAL_PROMOTIONS,
-  screenContextuallyWithProvider,
-  screenWithProvider,
   type ContextualPromotionCandidate,
+  ContextualScreeningInputError,
   type ContextualScreeningProvider,
+  MAX_CONTEXTUAL_PROMOTIONS,
   type ScreeningProvider,
   type ScreeningProviderRequest,
+  screenContextuallyWithProvider,
+  screenWithProvider,
 } from "../../src/screening";
 
 const CANARY_PROBLEM = "server-owned-problem-statement-canary-do-not-store";
@@ -196,7 +196,9 @@ test("every outward field of a prior promotion can participate in contextual agg
         return { decision: "quarantine", coarse_category: "dual-use-boundary" };
       },
     };
-    await expect(screenContextuallyWithProvider(provider, input, CONTEXT_OPTIONS)).resolves.toMatchObject({
+    await expect(
+      screenContextuallyWithProvider(provider, input, CONTEXT_OPTIONS),
+    ).resolves.toMatchObject({
       decision: "quarantine",
       decision_path: "provider-contextual-hold",
     });
@@ -282,6 +284,27 @@ test("provider reject and provider failure are both coarse contextual holds", as
     status_code: "SCREENING_PROVIDER_TIMEOUT",
   });
   expect(JSON.stringify(timedOut)).not.toContain(CANARY_CURRENT);
+
+  const exceptionMessageCanary = "provider-exception-message-canary-do-not-store";
+  const exceptionStackCanary = "provider-exception-stack-canary-do-not-store";
+  const throwingProvider: ContextualScreeningProvider = {
+    async screenContextually() {
+      const error = new Error(exceptionMessageCanary);
+      error.stack = exceptionStackCanary;
+      throw error;
+    },
+  };
+  const failed = await screenContextuallyWithProvider(throwingProvider, input, CONTEXT_OPTIONS);
+  expect(failed).toMatchObject({
+    decision: "quarantine",
+    coarse_category: "provider-unavailable",
+    provider_status: "error",
+    decision_path: "provider-error-fail-closed",
+    status_code: "SCREENING_PROVIDER_ERROR",
+  });
+  for (const canary of [exceptionMessageCanary, exceptionStackCanary, CANARY_CURRENT]) {
+    expect(JSON.stringify(failed)).not.toContain(canary);
+  }
 });
 
 test("direct and contextual verdicts compose monotonically without softening warnings", async () => {
@@ -515,6 +538,10 @@ test("the corpus provider request stays digest-only and distinct from the live-c
   expect(observed).toEqual(request);
   expect(JSON.stringify(observed)).not.toContain(CANARY_CURRENT);
   await expect(
-    screenContextuallyWithProvider(PASS_PROVIDER, buildContextualScreeningInput(source()), CONTEXT_OPTIONS),
+    screenContextuallyWithProvider(
+      PASS_PROVIDER,
+      buildContextualScreeningInput(source()),
+      CONTEXT_OPTIONS,
+    ),
   ).resolves.toMatchObject({ decision: "pass" });
 });

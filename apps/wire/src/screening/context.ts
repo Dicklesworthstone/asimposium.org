@@ -1,7 +1,4 @@
-import type {
-  ContextualPromotionCandidate,
-  ContextualScreeningInput,
-} from "./types";
+import type { ContextualPromotionCandidate, ContextualScreeningInput } from "./types";
 
 /** The provider gets enough statement context to adjudicate scope, not an archive. */
 export const MAX_CONTEXTUAL_PROBLEM_STATEMENT_BYTES = 4_096;
@@ -42,9 +39,20 @@ function isRecord(value: unknown): value is Record<string, unknown> {
   return value !== null && typeof value === "object" && !Array.isArray(value);
 }
 
-function requireBoundedText(value: unknown, maxBytes: number, label: string, nonEmpty = true): string {
-  if (typeof value !== "string" || (nonEmpty && value.length === 0) || utf8Bytes(value) > maxBytes) {
-    throw new ContextualScreeningInputError(`${label} is absent or exceeds its bounded context limit.`);
+function requireBoundedText(
+  value: unknown,
+  maxBytes: number,
+  label: string,
+  nonEmpty = true,
+): string {
+  if (
+    typeof value !== "string" ||
+    (nonEmpty && value.length === 0) ||
+    utf8Bytes(value) > maxBytes
+  ) {
+    throw new ContextualScreeningInputError(
+      `${label} is absent or exceeds its bounded context limit.`,
+    );
   }
   return value;
 }
@@ -58,17 +66,31 @@ function requireScopeId(value: unknown, label: string): string {
 
 function candidateFrom(value: unknown): ContextualPromotionCandidate {
   if (!isRecord(value) || Object.keys(value).length !== 4) {
-    throw new ContextualScreeningInputError("current promotion must contain exactly its outward fields.");
+    throw new ContextualScreeningInputError(
+      "current promotion must contain exactly its outward fields.",
+    );
   }
   const keys = ["title", "extract", "statement", "public_artifact_md"] as const;
   if (keys.some((key) => !Object.hasOwn(value, key))) {
-    throw new ContextualScreeningInputError("current promotion must contain exactly its outward fields.");
+    throw new ContextualScreeningInputError(
+      "current promotion must contain exactly its outward fields.",
+    );
   }
   return {
     // Empty public fields remain explicit in the provider payload; omission is
     // not an acceptable way to save context budget.
-    title: requireBoundedText(value.title, MAX_CONTEXTUAL_PROMOTION_BYTES, "promotion title", false),
-    extract: requireBoundedText(value.extract, MAX_CONTEXTUAL_PROMOTION_BYTES, "promotion extract", false),
+    title: requireBoundedText(
+      value.title,
+      MAX_CONTEXTUAL_PROMOTION_BYTES,
+      "promotion title",
+      false,
+    ),
+    extract: requireBoundedText(
+      value.extract,
+      MAX_CONTEXTUAL_PROMOTION_BYTES,
+      "promotion extract",
+      false,
+    ),
     statement: requireBoundedText(
       value.statement,
       MAX_CONTEXTUAL_PROMOTION_BYTES,
@@ -105,7 +127,9 @@ function totalInputBytes(input: ContextualScreeningInput): number {
  * `buildContextualScreeningInput`, but this guard prevents an alternate route
  * from bypassing the text and item budgets later.
  */
-export function assertContextualScreeningInput(input: unknown): asserts input is ContextualScreeningInput {
+export function assertContextualScreeningInput(
+  input: unknown,
+): asserts input is ContextualScreeningInput {
   if (!isRecord(input) || !Array.isArray(input.recent_same_fellow_promotions)) {
     throw new ContextualScreeningInputError("contextual screening input has an invalid shape.");
   }
@@ -127,7 +151,9 @@ export function assertContextualScreeningInput(input: unknown): asserts input is
     recent_same_fellow_promotions: input.recent_same_fellow_promotions,
   };
   if (totalInputBytes(normalized) > MAX_CONTEXTUAL_TOTAL_BYTES) {
-    throw new ContextualScreeningInputError("contextual screening input exceeds the aggregate byte budget.");
+    throw new ContextualScreeningInputError(
+      "contextual screening input exceeds the aggregate byte budget.",
+    );
   }
 }
 
@@ -136,9 +162,7 @@ export function assertContextualScreeningInput(input: unknown): asserts input is
  * are scope-checked before ordering, so a caller cannot accidentally turn a
  * same-Fellow history lookup into cross-Fellow or cross-problem context.
  */
-export function buildContextualScreeningInput(
-  source: unknown,
-): ContextualScreeningInput {
+export function buildContextualScreeningInput(source: unknown): ContextualScreeningInput {
   if (!isRecord(source) || !Array.isArray(source.recent_promotions)) {
     throw new ContextualScreeningInputError("contextual screening source has an invalid shape.");
   }

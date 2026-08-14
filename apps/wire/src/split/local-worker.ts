@@ -25,6 +25,17 @@ import {
 import type { D1Database, ExecutionContext, R2Bucket } from "@cloudflare/workers-types";
 
 import {
+  buildContextualScreeningInput,
+  type ContextualPromotionCandidate,
+  ContextualScreeningInputError,
+  type ContextualScreeningProvider,
+  type ContextualScreeningResult,
+  type DirectContentScreeningVerdict,
+  MAX_CONTEXTUAL_PROMOTIONS,
+  type PolicyCategory,
+  screenContextuallyWithProvider,
+} from "../screening/index.ts";
+import {
   assertPublicProjectionSafe,
   duplicateClaimRefusal,
   nextMonotonicUlid,
@@ -68,8 +79,41 @@ interface PublicArtifactRow {
   readonly object_key: string;
 }
 
+interface ContextHistoryRow {
+  readonly id: string;
+  readonly public_seq: number;
+  readonly title: string;
+  readonly extract: string;
+  readonly statement: string;
+  readonly statement_digest: string;
+  readonly artifact_digest: string;
+  readonly event_id: string;
+  readonly object_key: string;
+}
+
+interface LocalProblemStatementRow {
+  readonly statement: string;
+  readonly statement_digest: string;
+}
+
+interface ScreeningHoldRow {
+  readonly request_digest: string;
+  readonly coarse_category: string;
+}
+
 const LOCAL_FELLOW_ID = "local-fellow";
 const LOCAL_SESSION_ID = "local-session";
+const LOCAL_S4_SERVER_OWNED_PROBLEM_STATEMENT =
+  "This local S4 fixture evaluates bounded public promotions against the server-owned scientific problem record.";
+const LOCAL_S4_APPEAL_CODE = "SPONSOR_APPEAL_AVAILABLE";
+const LOCAL_S4_TIMEOUT_MARKER = "S4-TIMEOUT-FIXTURE";
+const LOCAL_S4_DIRECT_REJECT_MARKER = "S4-DIRECT-REJECT-FIXTURE";
+const LOCAL_S4_HISTORY_PIECE_MARKER = "S4-PIECE-A-FIXTURE";
+const LOCAL_S4_CURRENT_PIECE_MARKER = "S4-PIECE-B-FIXTURE";
+const LOCAL_S4_PROVIDER_EXCEPTION_MARKER = "S4-PROVIDER-EXCEPTION-FIXTURE";
+const LOCAL_S4_PROVIDER_EXCEPTION_MESSAGE_CANARY = "S4-PROVIDER-EXCEPTION-MESSAGE-CANARY";
+const LOCAL_S4_PROVIDER_EXCEPTION_STACK_CANARY = "S4-PROVIDER-EXCEPTION-STACK-CANARY";
+const LOCAL_S4_REVALIDATION_ATTEMPTS = 2;
 const ID_PATTERN = /^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$/u;
 const TEST_D1_BIND_FAULT_HEADER = "x-asimp-local-test-fault";
 const TEST_D1_BIND_FAULT = "d1-bind-reject";
@@ -150,6 +194,29 @@ const SCHEMA = [
     event_id TEXT NOT NULL UNIQUE,
     object_key TEXT NOT NULL,
     PRIMARY KEY (digest, event_id)
+  )`,
+  `CREATE TABLE IF NOT EXISTS s4_local_problem_statements (
+    problem_id TEXT PRIMARY KEY,
+    statement TEXT NOT NULL,
+    statement_digest TEXT NOT NULL
+  )`,
+  `CREATE TABLE IF NOT EXISTS s4_local_screening_holds (
+    problem_id TEXT NOT NULL,
+    fellow_id TEXT NOT NULL,
+    idempotency_key_digest TEXT NOT NULL,
+    request_digest TEXT NOT NULL,
+    input_digest TEXT NOT NULL,
+    model_version TEXT NOT NULL,
+    policy_version TEXT NOT NULL,
+    configuration_digest TEXT NOT NULL,
+    decision TEXT NOT NULL,
+    coarse_category TEXT NOT NULL,
+    provider_status TEXT NOT NULL,
+    decision_path TEXT NOT NULL,
+    status_code TEXT NOT NULL,
+    appeal_code TEXT NOT NULL,
+    context_frontier_digest TEXT NOT NULL,
+    PRIMARY KEY (problem_id, fellow_id, idempotency_key_digest)
   )`,
 ];
 
@@ -388,6 +455,318 @@ async function sha256Hex(value: string): Promise<string> {
   const bytes = new TextEncoder().encode(value);
   const digest = await crypto.subtle.digest("SHA-256", bytes);
   return Array.from(new Uint8Array(digest), (byte) => byte.toString(16).padStart(2, "0")).join("");
+}
+
+function candidateIncludes(candidate: ContextualPromotionCandidate, marker: string): boolean {
+  return [
+    candidate.title,
+    candidate.extract,
+    candidate.statement,
+    candidate.public_artifact_md,
+  ].some((field) => field.includes(marker));
+}
+
+function localDirectContentVerdict(
+  candidate: ContextualPromotionCandidate,
+): DirectContentScreeningVerdict {
+  return candidateIncludes(candidate, LOCAL_S4_DIRECT_REJECT_MARKER)
+    ? { decision: "reject", coarse_category: "operational-harm" }
+    : { decision: "pass", coarse_category: "benign-context" };
+}
+
+/**
+ * This deterministic fixture exists only in the local workerd harness. It
+ * proves the narrow contextual-provider wiring and must not be treated as
+ * live screening evidence or a production provider implementation.
+ */
+const LOCAL_S4_CONTEXTUAL_PROVIDER: ContextualScreeningProvider = {
+  async screenContextually(input, signal) {
+    if (candidateIncludes(input.current_promotion, LOCAL_S4_TIMEOUT_MARKER)) {
+      return await new Promise<never>((_resolve, reject) => {
+        signal.addEventListener("abort", () => {
+          const error = new Error("local contextual fixture aborted");
+          error.name = "AbortError";
+          reject(error);
+        });
+      });
+    }
+    if (candidateIncludes(input.current_promotion, LOCAL_S4_PROVIDER_EXCEPTION_MARKER)) {
+      const error = new Error(LOCAL_S4_PROVIDER_EXCEPTION_MESSAGE_CANARY);
+      error.stack = LOCAL_S4_PROVIDER_EXCEPTION_STACK_CANARY;
+      throw error;
+    }
+    const historyContainsPiece = input.recent_same_fellow_promotions.some((promotion) =>
+      candidateIncludes(promotion, LOCAL_S4_HISTORY_PIECE_MARKER),
+    );
+    return historyContainsPiece &&
+      candidateIncludes(input.current_promotion, LOCAL_S4_CURRENT_PIECE_MARKER)
+      ? { decision: "quarantine", coarse_category: "dual-use-boundary" }
+      : { decision: "pass", coarse_category: "benign-context" };
+  },
+};
+
+async function localS4Identity() {
+  return {
+    model_version: "local-s4-fixture-no-live-provider",
+    policy_version: "local-s4-fixture-policy-v1",
+    configuration_digest: `sha256:${await sha256Hex("local-s4-fixture-config-v1")}`,
+  } as const;
+}
+
+function localPolicyCategory(value: string): PolicyCategory {
+  const allowed = new Set<PolicyCategory>([
+    "benign-context",
+    "spam-commercial",
+    "injection",
+    "dual-use-boundary",
+    "operational-harm",
+    "harassment",
+    "sexual-content",
+    "provider-unavailable",
+  ]);
+  return allowed.has(value as PolicyCategory) ? (value as PolicyCategory) : "provider-unavailable";
+}
+
+function screeningHoldResponse(coarseCategory: string): Response {
+  return json(
+    {
+      code: "SCREENING_HOLD",
+      coarse_category: localPolicyCategory(coarseCategory),
+      appeal: LOCAL_S4_APPEAL_CODE,
+    },
+    202,
+  );
+}
+
+function directScreeningRefusal(coarseCategory: PolicyCategory): Response {
+  return json(
+    {
+      code: "POLICY_DENIED",
+      coarse_category: coarseCategory,
+      appeal: LOCAL_S4_APPEAL_CODE,
+    },
+    403,
+  );
+}
+
+function localScreeningInputErrorResult(
+  inputDigest: string,
+  identity: Awaited<ReturnType<typeof localS4Identity>>,
+): ContextualScreeningResult {
+  return {
+    input_digest: inputDigest,
+    model_version: identity.model_version,
+    policy_version: identity.policy_version,
+    configuration_digest: identity.configuration_digest,
+    decision: "quarantine",
+    coarse_category: "provider-unavailable",
+    provider_status: "error",
+    decision_path: "provider-error-fail-closed",
+    status_code: "SCREENING_PROVIDER_ERROR",
+  };
+}
+
+async function ensureLocalProblemStatement(
+  env: LocalSplitEnv,
+  problemId: string,
+): Promise<LocalProblemStatementRow> {
+  const statementDigest = await sha256Hex(LOCAL_S4_SERVER_OWNED_PROBLEM_STATEMENT);
+  await env.DB.prepare(
+    `INSERT INTO s4_local_problem_statements (problem_id, statement, statement_digest)
+     VALUES (?1, ?2, ?3)
+     ON CONFLICT(problem_id) DO NOTHING`,
+  )
+    .bind(problemId, LOCAL_S4_SERVER_OWNED_PROBLEM_STATEMENT, statementDigest)
+    .run();
+  const record = await env.DB.prepare(
+    `SELECT statement, statement_digest
+     FROM s4_local_problem_statements WHERE problem_id = ?1`,
+  )
+    .bind(problemId)
+    .first<LocalProblemStatementRow>();
+  if (
+    record === null ||
+    record.statement !== LOCAL_S4_SERVER_OWNED_PROBLEM_STATEMENT ||
+    record.statement_digest !== statementDigest
+  ) {
+    throw new ContextualScreeningInputError("local server-owned problem statement is unavailable.");
+  }
+  return record;
+}
+
+async function loadSameScopeContext(
+  env: LocalSplitEnv,
+  workshop: WorkshopRow,
+  currentPromotion: ContextualPromotionCandidate,
+): Promise<{
+  readonly input: ReturnType<typeof buildContextualScreeningInput>;
+  readonly frontier_public_seq: number;
+  readonly frontier_digest: string;
+}> {
+  const [problemStatement, history] = await Promise.all([
+    ensureLocalProblemStatement(env, workshop.problem_id),
+    env.DB.prepare(
+      `SELECT event.id, event.public_seq, event.title, event.extract, event.statement,
+              event.statement_digest, artifact.digest AS artifact_digest,
+              artifact.event_id, artifact.object_key
+       FROM s3_local_events AS event
+       JOIN s3_local_workshops AS source ON source.id = event.source_workshop_id
+       JOIN s3_local_public_artifacts AS artifact ON artifact.event_id = event.id
+       WHERE event.problem_id = ?1
+         AND source.problem_id = event.problem_id
+         AND source.fellow_id = ?2
+       ORDER BY event.public_seq DESC
+       LIMIT ?3`,
+    )
+      .bind(workshop.problem_id, workshop.fellow_id, MAX_CONTEXTUAL_PROMOTIONS)
+      .all<ContextHistoryRow>(),
+  ]);
+  const promotions = await Promise.all(
+    history.results.map(async (row) => {
+      if (
+        row.event_id !== row.id ||
+        row.object_key !== publicArtifactKey(row.artifact_digest) ||
+        !Number.isSafeInteger(row.public_seq) ||
+        row.public_seq < 1
+      ) {
+        throw new ContextualScreeningInputError("local public history binding is malformed.");
+      }
+      const artifact = await env.ARTIFACTS.get(row.object_key);
+      if (
+        artifact === null ||
+        artifact.customMetadata?.body_sha256 !== row.artifact_digest ||
+        artifact.customMetadata.storage_scope !== "public-candidate"
+      ) {
+        throw new ContextualScreeningInputError(
+          "local public history artifact binding is unavailable.",
+        );
+      }
+      const publicArtifactMd = await artifact.text();
+      if ((await sha256Hex(publicArtifactMd)) !== row.artifact_digest) {
+        throw new ContextualScreeningInputError("local public history artifact digest is invalid.");
+      }
+      return {
+        problem_id: workshop.problem_id,
+        fellow_id: workshop.fellow_id,
+        public_seq: row.public_seq,
+        promotion: {
+          title: row.title,
+          extract: row.extract,
+          statement: row.statement,
+          public_artifact_md: publicArtifactMd,
+        },
+      };
+    }),
+  );
+  const chronologicalFrontier = [...history.results]
+    .sort((left, right) => left.public_seq - right.public_seq)
+    .map((row) => ({
+      event_id: row.id,
+      public_seq: row.public_seq,
+      statement_digest: row.statement_digest,
+      artifact_digest: row.artifact_digest,
+    }));
+  const frontierDigest = `sha256:${await sha256Hex(
+    JSON.stringify({
+      problem_id: workshop.problem_id,
+      fellow_id: workshop.fellow_id,
+      promotions: chronologicalFrontier,
+    }),
+  )}`;
+  return {
+    input: buildContextualScreeningInput({
+      problem_id: workshop.problem_id,
+      fellow_id: workshop.fellow_id,
+      server_owned_problem_statement: problemStatement.statement,
+      current_promotion: currentPromotion,
+      recent_promotions: promotions,
+    }),
+    frontier_public_seq: history.results[0]?.public_seq ?? 0,
+    frontier_digest: frontierDigest,
+  };
+}
+
+async function localScreeningRequestDigest(
+  workshop: WorkshopRow,
+  currentPromotion: ContextualPromotionCandidate,
+): Promise<string> {
+  return `sha256:${await sha256Hex(
+    JSON.stringify({
+      operation: "local-s4-promote",
+      workshop_id: workshop.id,
+      problem_id: workshop.problem_id,
+      fellow_id: workshop.fellow_id,
+      current_promotion: currentPromotion,
+    }),
+  )}`;
+}
+
+async function localIdempotencyKeyDigest(request: Request, requestDigest: string): Promise<string> {
+  const key = request.headers.get("idempotency-key");
+  if (key !== null && (key.length === 0 || key.length > 256)) {
+    throw new ContextualScreeningInputError("idempotency key is malformed.");
+  }
+  return `sha256:${await sha256Hex(
+    key === null ? `local-s4-derived:${requestDigest}` : `local-s4-header:${key}`,
+  )}`;
+}
+
+async function replayedScreeningHold(
+  env: LocalSplitEnv,
+  workshop: WorkshopRow,
+  idempotencyKeyDigest: string,
+  requestDigest: string,
+): Promise<Response | undefined> {
+  const existing = await env.DB.prepare(
+    `SELECT request_digest, coarse_category
+     FROM s4_local_screening_holds
+     WHERE problem_id = ?1 AND fellow_id = ?2 AND idempotency_key_digest = ?3`,
+  )
+    .bind(workshop.problem_id, workshop.fellow_id, idempotencyKeyDigest)
+    .first<ScreeningHoldRow>();
+  if (existing === null) return undefined;
+  if (existing.request_digest !== requestDigest) {
+    return json({ code: "IDEMPOTENCY_CONFLICT" }, 409);
+  }
+  return screeningHoldResponse(existing.coarse_category);
+}
+
+async function persistScreeningHold(
+  env: LocalSplitEnv,
+  workshop: WorkshopRow,
+  idempotencyKeyDigest: string,
+  requestDigest: string,
+  result: ContextualScreeningResult,
+  frontierDigest: string,
+): Promise<Response> {
+  await env.DB.prepare(
+    `INSERT INTO s4_local_screening_holds
+       (problem_id, fellow_id, idempotency_key_digest, request_digest, input_digest,
+        model_version, policy_version, configuration_digest, decision, coarse_category,
+        provider_status, decision_path, status_code, appeal_code, context_frontier_digest)
+     VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15)
+     ON CONFLICT(problem_id, fellow_id, idempotency_key_digest) DO NOTHING`,
+  )
+    .bind(
+      workshop.problem_id,
+      workshop.fellow_id,
+      idempotencyKeyDigest,
+      requestDigest,
+      result.input_digest,
+      result.model_version,
+      result.policy_version,
+      result.configuration_digest,
+      result.decision,
+      result.coarse_category,
+      result.provider_status,
+      result.decision_path,
+      result.status_code,
+      LOCAL_S4_APPEAL_CODE,
+      frontierDigest,
+    )
+    .run();
+  const replay = await replayedScreeningHold(env, workshop, idempotencyKeyDigest, requestDigest);
+  return replay ?? screeningHoldResponse(result.coarse_category);
 }
 
 function normalizeS3Whitespace(value: string): string {
@@ -727,6 +1106,9 @@ async function promoteWorkshop(request: Request, env: LocalSplitEnv): Promise<Re
   const body = await requestBody(request);
   if (body === undefined) return json({ code: "LOCAL_INPUT_INVALID" }, 400);
   if (body.claim_id !== undefined) return callerOwnedIdRefusal("claim_id");
+  // Problem statements are established by the server-owned D1 record below;
+  // a promote caller never supplies or overrides contextual problem text.
+  if (body.problem_statement !== undefined) return json({ code: "LOCAL_INPUT_INVALID" }, 400);
 
   // The local harness accepts a raw HTTP object, not a pre-shaped TypeScript
   // value. Check the whole submitted object before selecting the public fields:
@@ -751,6 +1133,12 @@ async function promoteWorkshop(request: Request, env: LocalSplitEnv): Promise<Re
   ) {
     return json({ code: "LOCAL_INPUT_INVALID" }, 400);
   }
+  const currentPromotion: ContextualPromotionCandidate = {
+    title,
+    extract,
+    statement,
+    public_artifact_md: publicArtifactMd,
+  };
   const workshop = await env.DB.prepare(
     `SELECT id, problem_id, fellow_id, sponsor_id, session_id, workshop_seq, body_key, body_digest,
             promoted_event_id
@@ -769,96 +1157,195 @@ async function promoteWorkshop(request: Request, env: LocalSplitEnv): Promise<Re
   const duplicate = await duplicateClaim(env, workshop.problem_id, statementDigest);
   if (duplicate !== null) return duplicateClaimResponse(duplicate);
 
-  const publicArtifactDigest = await sha256Hex(publicArtifactMd);
-  const publicObjectKey = publicArtifactKey(publicArtifactDigest);
-  const eventId = `EV-${nextMonotonicUlid()}`;
-  await env.ARTIFACTS.put(publicObjectKey, publicArtifactMd, {
-    httpMetadata: { contentType: "text/markdown; charset=utf-8" },
-    customMetadata: {
-      body_sha256: publicArtifactDigest,
-      storage_scope: "public-candidate",
-    },
-  });
+  const requestDigest = await localScreeningRequestDigest(workshop, currentPromotion);
+  let idempotencyKeyDigest: string;
+  try {
+    idempotencyKeyDigest = await localIdempotencyKeyDigest(request, requestDigest);
+  } catch (error) {
+    if (error instanceof ContextualScreeningInputError) {
+      return json({ code: "LOCAL_INPUT_INVALID" }, 400);
+    }
+    throw error;
+  }
+  const replay = await replayedScreeningHold(env, workshop, idempotencyKeyDigest, requestDigest);
+  if (replay !== undefined) return replay;
 
-  const statements = [
-    env.DB.prepare(
-      `INSERT INTO s3_local_public_cursors (problem_id, public_seq)
-       VALUES (?1, 0)
-       ON CONFLICT(problem_id) DO NOTHING`,
-    ).bind(workshop.problem_id),
-    env.DB.prepare(
-      `UPDATE s3_local_workshops
-       SET promoted_event_id = ?1
-       WHERE id = ?2 AND problem_id = ?3 AND promoted_event_id IS NULL
-       RETURNING id`,
-    ).bind(eventId, workshop.id, workshop.problem_id),
-    env.DB.prepare(
-      `UPDATE s3_local_public_cursors
-       SET public_seq = public_seq + 1
-       WHERE problem_id = ?1
-         AND EXISTS (
-           SELECT 1 FROM s3_local_workshops
-           WHERE id = ?2 AND promoted_event_id = ?3
-         )
-       RETURNING public_seq`,
-    ).bind(workshop.problem_id, workshop.id, eventId),
-    env.DB.prepare(
-      `INSERT INTO s3_local_events
-          (id, problem_id, public_seq, claim_id, title, extract, statement, statement_digest,
-           source_workshop_id)
-       SELECT ?1, cursor.problem_id, cursor.public_seq, 'C-' || cursor.public_seq,
-              ?4, ?5, ?6, ?7, ?2
-       FROM s3_local_public_cursors AS cursor
-       JOIN s3_local_workshops AS workshop ON workshop.id = ?2
-       WHERE cursor.problem_id = ?3 AND workshop.promoted_event_id = ?1`,
-    ).bind(eventId, workshop.id, workshop.problem_id, title, extract, statement, statementDigest),
-    env.DB.prepare(
-      `INSERT INTO s3_local_public_artifacts (digest, event_id, object_key)
-       SELECT ?1, ?2, ?3
-       WHERE EXISTS (SELECT 1 FROM s3_local_events WHERE id = ?2)`,
-    ).bind(publicArtifactDigest, eventId, publicObjectKey),
-  ];
-  if (d1FaultRequested(request, env)) {
-    statements.push(
-      env.DB.prepare(
-        `INSERT INTO s3_local_public_cursors (problem_id, public_seq) VALUES (?1, 0)`,
-      ).bind(workshop.problem_id),
-    );
+  const directContent = localDirectContentVerdict(currentPromotion);
+  if (directContent.decision === "reject") {
+    return directScreeningRefusal(directContent.coarse_category);
   }
 
-  try {
-    const results = await env.DB.batch(statements);
-    const publicSeq = sequenceFrom(results[2], "public_seq");
-    if (publicSeq !== undefined && changesFrom(results[3]) === 1 && changesFrom(results[4]) === 1) {
-      return json(
-        {
-          status: 201,
-          event_id: eventId,
-          claim_id: `C-${publicSeq}`,
-          public_artifact_digest: publicArtifactDigest,
-          public_seq: publicSeq,
-        },
-        201,
+  for (let attempt = 0; attempt < LOCAL_S4_REVALIDATION_ATTEMPTS; attempt += 1) {
+    const identity = await localS4Identity();
+    let context: Awaited<ReturnType<typeof loadSameScopeContext>>;
+    let result: ContextualScreeningResult;
+    try {
+      context = await loadSameScopeContext(env, workshop, currentPromotion);
+      result = await screenContextuallyWithProvider(LOCAL_S4_CONTEXTUAL_PROVIDER, context.input, {
+        timeout_ms: 25,
+        identity,
+        direct_content: directContent,
+      });
+    } catch (error) {
+      if (!(error instanceof ContextualScreeningInputError)) throw error;
+      const safeInputDigest = `sha256:${await sha256Hex(
+        `local-s4-context-assembly:${requestDigest}`,
+      )}`;
+      return await persistScreeningHold(
+        env,
+        workshop,
+        idempotencyKeyDigest,
+        requestDigest,
+        localScreeningInputErrorResult(safeInputDigest, identity),
+        `sha256:${await sha256Hex(`local-s4-context-frontier-unavailable:${requestDigest}`)}`,
       );
     }
-  } catch {
-    const committedDuplicate = await duplicateClaim(env, workshop.problem_id, statementDigest);
-    if (committedDuplicate !== null) return duplicateClaimResponse(committedDuplicate);
-    return json({ code: "PUBLIC_CAS_RECOVERY_REQUIRED" }, 503);
-  }
+    if (result.decision === "reject") return directScreeningRefusal(result.coarse_category);
+    if (result.decision === "quarantine") {
+      return await persistScreeningHold(
+        env,
+        workshop,
+        idempotencyKeyDigest,
+        requestDigest,
+        result,
+        context.frontier_digest,
+      );
+    }
 
-  const settled = await env.DB.prepare(
-    "SELECT promoted_event_id FROM s3_local_workshops WHERE id = ?1",
-  )
-    .bind(workshop.id)
-    .first<{ readonly promoted_event_id: string | null }>();
-  if (settled?.promoted_event_id !== null && settled?.promoted_event_id !== undefined) {
-    return json(
-      { code: "PROMOTION_ALREADY_EXISTS", public_event_id: settled.promoted_event_id },
-      409,
-    );
+    const publicArtifactDigest = await sha256Hex(publicArtifactMd);
+    const publicObjectKey = publicArtifactKey(publicArtifactDigest);
+    const eventId = `EV-${nextMonotonicUlid()}`;
+    await env.ARTIFACTS.put(publicObjectKey, publicArtifactMd, {
+      httpMetadata: { contentType: "text/markdown; charset=utf-8" },
+      customMetadata: {
+        body_sha256: publicArtifactDigest,
+        storage_scope: "public-candidate",
+      },
+    });
+
+    // Every public mutation is conditioned on the same-Fellow/problem
+    // frontier that reached the provider. If another qualifying promotion
+    // appears, this entire D1 batch has no cursor/event/artifact binding and
+    // the loop reloads and re-screens the bounded context before trying again.
+    const statements = [
+      env.DB.prepare(
+        `INSERT INTO s3_local_public_cursors (problem_id, public_seq)
+         SELECT ?3, 0
+         WHERE EXISTS (
+           SELECT 1 FROM s3_local_workshops AS pending
+           WHERE pending.id = ?2 AND pending.problem_id = ?3 AND pending.promoted_event_id IS NULL
+             AND NOT EXISTS (
+               SELECT 1
+               FROM s3_local_events AS event
+               JOIN s3_local_workshops AS source ON source.id = event.source_workshop_id
+               WHERE event.problem_id = ?3
+                 AND source.problem_id = event.problem_id
+                 AND source.fellow_id = ?4
+                 AND event.public_seq > ?5
+             )
+         )
+         ON CONFLICT(problem_id) DO NOTHING`,
+      ).bind(
+        eventId,
+        workshop.id,
+        workshop.problem_id,
+        workshop.fellow_id,
+        context.frontier_public_seq,
+      ),
+      env.DB.prepare(
+        `UPDATE s3_local_workshops
+         SET promoted_event_id = ?1
+         WHERE id = ?2 AND problem_id = ?3 AND promoted_event_id IS NULL
+           AND NOT EXISTS (
+             SELECT 1
+             FROM s3_local_events AS event
+             JOIN s3_local_workshops AS source ON source.id = event.source_workshop_id
+             WHERE event.problem_id = ?3
+               AND source.problem_id = event.problem_id
+               AND source.fellow_id = ?4
+               AND event.public_seq > ?5
+           )
+         RETURNING id`,
+      ).bind(
+        eventId,
+        workshop.id,
+        workshop.problem_id,
+        workshop.fellow_id,
+        context.frontier_public_seq,
+      ),
+      env.DB.prepare(
+        `UPDATE s3_local_public_cursors
+         SET public_seq = public_seq + 1
+         WHERE problem_id = ?1
+           AND EXISTS (
+             SELECT 1 FROM s3_local_workshops
+             WHERE id = ?2 AND promoted_event_id = ?3
+           )
+         RETURNING public_seq`,
+      ).bind(workshop.problem_id, workshop.id, eventId),
+      env.DB.prepare(
+        `INSERT INTO s3_local_events
+            (id, problem_id, public_seq, claim_id, title, extract, statement, statement_digest,
+             source_workshop_id)
+         SELECT ?1, cursor.problem_id, cursor.public_seq, 'C-' || cursor.public_seq,
+                ?4, ?5, ?6, ?7, ?2
+         FROM s3_local_public_cursors AS cursor
+         JOIN s3_local_workshops AS pending ON pending.id = ?2
+         WHERE cursor.problem_id = ?3 AND pending.promoted_event_id = ?1`,
+      ).bind(eventId, workshop.id, workshop.problem_id, title, extract, statement, statementDigest),
+      env.DB.prepare(
+        `INSERT INTO s3_local_public_artifacts (digest, event_id, object_key)
+         SELECT ?1, ?2, ?3
+         WHERE EXISTS (SELECT 1 FROM s3_local_events WHERE id = ?2)`,
+      ).bind(publicArtifactDigest, eventId, publicObjectKey),
+    ];
+    if (d1FaultRequested(request, env)) {
+      statements.push(
+        env.DB.prepare(
+          `INSERT INTO s3_local_public_cursors (problem_id, public_seq) VALUES (?1, 0)`,
+        ).bind(workshop.problem_id),
+      );
+    }
+
+    try {
+      const results = await env.DB.batch(statements);
+      const publicSeq = sequenceFrom(results[2], "public_seq");
+      if (
+        publicSeq !== undefined &&
+        changesFrom(results[1]) === 1 &&
+        changesFrom(results[3]) === 1 &&
+        changesFrom(results[4]) === 1
+      ) {
+        return json(
+          {
+            status: 201,
+            event_id: eventId,
+            claim_id: `C-${publicSeq}`,
+            public_artifact_digest: publicArtifactDigest,
+            public_seq: publicSeq,
+          },
+          201,
+        );
+      }
+    } catch {
+      const committedDuplicate = await duplicateClaim(env, workshop.problem_id, statementDigest);
+      if (committedDuplicate !== null) return duplicateClaimResponse(committedDuplicate);
+      return json({ code: "PUBLIC_CAS_RECOVERY_REQUIRED" }, 503);
+    }
+
+    const settled = await env.DB.prepare(
+      "SELECT promoted_event_id FROM s3_local_workshops WHERE id = ?1",
+    )
+      .bind(workshop.id)
+      .first<{ readonly promoted_event_id: string | null }>();
+    if (settled?.promoted_event_id !== null && settled?.promoted_event_id !== undefined) {
+      return json(
+        { code: "PROMOTION_ALREADY_EXISTS", public_event_id: settled.promoted_event_id },
+        409,
+      );
+    }
   }
-  return json({ code: "PUBLIC_CAS_RECOVERY_REQUIRED" }, 503);
+  return json({ code: "SCREENING_CONTEXT_RETRY_REQUIRED" }, 503);
 }
 
 async function publicProblemExists(env: LocalSplitEnv, problemId: string): Promise<boolean> {

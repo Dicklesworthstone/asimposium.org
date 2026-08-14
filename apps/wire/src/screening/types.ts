@@ -220,10 +220,7 @@ export interface ContextualScreeningResult {
     | "direct-content-warning"
     | "provider-timeout-fail-closed"
     | "provider-error-fail-closed";
-  readonly status_code:
-    | "SCREENED"
-    | "SCREENING_PROVIDER_TIMEOUT"
-    | "SCREENING_PROVIDER_ERROR";
+  readonly status_code: "SCREENED" | "SCREENING_PROVIDER_TIMEOUT" | "SCREENING_PROVIDER_ERROR";
 }
 
 export interface ScreeningThresholds {

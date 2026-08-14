@@ -15,24 +15,26 @@ export {
   wilson95,
 } from "./aggregate";
 export {
+  assertContextualScreeningInput,
+  buildContextualScreeningInput,
+  ContextualScreeningInputError,
+  contextualScreeningInputDigest,
+  MAX_CONTEXTUAL_PROBLEM_STATEMENT_BYTES,
+  MAX_CONTEXTUAL_PROMOTION_BYTES,
+  MAX_CONTEXTUAL_PROMOTIONS,
+  MAX_CONTEXTUAL_TOTAL_BYTES,
+} from "./context";
+export {
   screenContextuallyWithProvider,
   screenWithProvider,
 } from "./provider";
 export { screeningOpsJsonl } from "./report";
-export {
-  assertContextualScreeningInput,
-  buildContextualScreeningInput,
-  contextualScreeningInputDigest,
-  ContextualScreeningInputError,
-  MAX_CONTEXTUAL_TOTAL_BYTES,
-  MAX_CONTEXTUAL_PROMOTION_BYTES,
-  MAX_CONTEXTUAL_PROMOTIONS,
-  MAX_CONTEXTUAL_PROBLEM_STATEMENT_BYTES,
-} from "./context";
 export type {
   ContextualScreeningInput,
+  ContextualPromotionCandidate,
   ContextualScreeningProvider,
   ContextualScreeningResult,
+  DirectContentScreeningVerdict,
   GroundTruth,
   PolicyCategory,
   ProviderStatus,

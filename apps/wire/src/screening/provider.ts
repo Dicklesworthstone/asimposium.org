@@ -1,8 +1,5 @@
 import { isSafeScreeningDiagnosticLabel, isSha256Digest } from "./aggregate";
-import {
-  assertContextualScreeningInput,
-  contextualScreeningInputDigest,
-} from "./context";
+import { assertContextualScreeningInput, contextualScreeningInputDigest } from "./context";
 import type {
   ContextualScreeningIdentity,
   ContextualScreeningInput,
@@ -82,7 +79,10 @@ function providerFailureObservation(
 function boundContextualResult(
   inputDigest: string,
   identity: ContextualScreeningIdentity,
-  result: Omit<ContextualScreeningResult, "input_digest" | "model_version" | "policy_version" | "configuration_digest">,
+  result: Omit<
+    ContextualScreeningResult,
+    "input_digest" | "model_version" | "policy_version" | "configuration_digest"
+  >,
 ): ContextualScreeningResult {
   return {
     input_digest: inputDigest,
@@ -211,7 +211,9 @@ function assertProviderRequest(request: ScreeningProviderRequest): void {
   }
 }
 
-function assertContextualIdentity(identity: unknown): asserts identity is ContextualScreeningIdentity {
+function assertContextualIdentity(
+  identity: unknown,
+): asserts identity is ContextualScreeningIdentity {
   if (!isRecord(identity)) throw new TypeError("Contextual screening identity is malformed.");
   if (
     typeof identity.model_version !== "string" ||
