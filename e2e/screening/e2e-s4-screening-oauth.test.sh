@@ -10,6 +10,91 @@ readonly REPO_ROOT
 readonly SCRIPT_PATH="${REPO_ROOT}/scripts/e2e-s4-screening-oauth.sh"
 BUN_PATH="$(command -v bun)"
 readonly BUN_PATH
+readonly S4_PRIVATE_TEST_AUTHORITY='e2e/screening/e2e-s4-screening-oauth.test.sh'
+readonly S4_PRIVATE_TEST_CAPABILITY='s4-screening-lifecycle-v1'
+
+# Test-only lifecycle controls must never leak in from a caller's environment.
+# Individual cases pass the full private authority/capability explicitly.
+unset S4_WRAPPER_TEST_LIFECYCLE_HOOK S4_WRAPPER_TEST_SIGNAL \
+  S4_WRAPPER_TEST_AUTHORITY S4_WRAPPER_TEST_CAPABILITY S4_WRAPPER_TEST_WRAPPER_PID
+
+# A command substitution waits for every writer of its stdout pipe. A broken
+# wrapper can leave a descendant holding that pipe even after its leader exits,
+# so capture through a private pipe and bound the entire isolated test session.
+# This function prints only after its child session is reaped (or force-stopped),
+# which keeps the caller's command substitution bounded too.
+run_bounded_capture() {
+  local timeout_seconds="$1"
+  shift
+  local capture_status
+
+  set +e
+  S4_CAPTURE_OUTPUT="$(S4_CAPTURE_TIMEOUT_SECONDS="${timeout_seconds}" /usr/bin/perl -e '
+use strict;
+use warnings;
+use IO::Select;
+use POSIX qw(setsid WNOHANG);
+use Time::HiRes qw(time);
+
+my $timeout = $ENV{S4_CAPTURE_TIMEOUT_SECONDS};
+exit 125 unless defined($timeout) && $timeout =~ /\A(?:[1-9][0-9]*)(?:\.[0-9]+)?\z/;
+pipe(my $reader, my $writer) or exit 125;
+my $pid = fork();
+exit 125 unless defined($pid);
+if ($pid == 0) {
+  close($reader);
+  setsid() or exit 125;
+  open(STDOUT, q{>&}, $writer) or exit 125;
+  open(STDERR, q{>&}, $writer) or exit 125;
+  close($writer);
+  exec @ARGV;
+  exit 125;
+}
+close($writer);
+my $selector = IO::Select->new($reader);
+my $deadline = time() + $timeout;
+my $output = q{};
+my $child_status;
+my $closed = 0;
+while (time() < $deadline) {
+  my $waited = waitpid($pid, WNOHANG);
+  $child_status = $? if $waited == $pid;
+  my $remaining = $deadline - time();
+  my @ready = $selector->can_read($remaining > 0.05 ? 0.05 : $remaining);
+  for my $handle (@ready) {
+    my $bytes = sysread($handle, my $chunk, 8192);
+    if (defined($bytes) && $bytes > 0) { $output .= $chunk; next; }
+    $selector->remove($handle);
+    close($handle);
+    $closed = 1;
+  }
+  last if defined($child_status) && $closed;
+}
+if (!defined($child_status) || !$closed) {
+  # The execed command is the session leader. The wrapper may create distinct
+  # process groups, so stop every member of this isolated session, not just the
+  # current group, before returning the bounded capture failure.
+  my $rows = qx{ps -A -o pid=,sid= 2>/dev/null};
+  for my $row (split /\n/, $rows) {
+    my ($member, $sid) = $row =~ /^\s*([0-9]+)\s+([0-9]+)\s*\z/;
+    kill q{KILL}, $member if defined($member) && defined($sid) && $sid == $pid;
+  }
+  waitpid($pid, 0) if !defined($child_status);
+  while (1) {
+    my $bytes = sysread($reader, my $chunk, 8192);
+    last unless defined($bytes) && $bytes > 0;
+    $output .= $chunk;
+  }
+  print $output;
+  exit 124;
+}
+print $output;
+exit (($child_status & 127) ? 128 + ($child_status & 127) : ($child_status >> 8));
+' -- "$@")"
+  capture_status=$?
+  set -e
+  S4_CAPTURE_STATUS="${capture_status}"
+}
 
 assert_terminal_summary() {
   local case_name="$1"
@@ -191,6 +276,211 @@ run_planted_runner_signal_case() (
   esac
 )
 
+run_private_lifecycle_environment_cases() (
+  local output
+  local status
+
+  # A poisoned production environment must not gain test-hook authority. The
+  # ordinary live gate stays an ordinary blocked live gate and never emits the
+  # private fixture's readiness marker.
+  run_bounded_capture 2 \
+    env \
+    S4_WRAPPER_TEST_LIFECYCLE_HOOK=after-spawn-before-ownership \
+    S4_WRAPPER_TEST_SIGNAL=TERM \
+    "S4_WRAPPER_TEST_AUTHORITY=${S4_PRIVATE_TEST_AUTHORITY}" \
+    "S4_WRAPPER_TEST_CAPABILITY=${S4_PRIVATE_TEST_CAPABILITY}" \
+    bash "${SCRIPT_PATH}"
+  output="${S4_CAPTURE_OUTPUT}"
+  status="${S4_CAPTURE_STATUS}"
+  if [[ "${status}" -ne 78 ]]; then
+    printf '%s\n' "production environment poisoning: expected ordinary live blocker 78, got ${status}" >&2
+    exit 1
+  fi
+  assert_terminal_summary \
+    'production environment poisoning is inert' \
+    "${output}" \
+    blocked \
+    S4_LIVE_GATE_BLOCKED \
+    78 \
+    78 \
+    0 \
+    0 \
+    0
+  case "${output}" in
+    *S4_TEST_RUNNER_READY*)
+      printf '%s\n' 'production environment poisoning activated a private lifecycle fixture' >&2
+      exit 1
+      ;;
+    *) ;;
+  esac
+
+  # The self-test accepts test controls only as the exact, complete pair set by
+  # this driver. Partial authority and an invalid hook both fail before Bun or
+  # a fixture can run.
+  run_bounded_capture 2 \
+    env \
+    S4_WRAPPER_TEST_LIFECYCLE_HOOK=after-spawn-before-ownership \
+    S4_WRAPPER_TEST_SIGNAL=TERM \
+    bash "${SCRIPT_PATH}" --self-test
+  output="${S4_CAPTURE_OUTPUT}"
+  status="${S4_CAPTURE_STATUS}"
+  if [[ "${status}" -ne 64 ]]; then
+    printf '%s\n' "partial private authority: expected 64, got ${status}" >&2
+    exit 1
+  fi
+  assert_terminal_summary \
+    'partial private lifecycle authority is rejected' \
+    "${output}" \
+    fail \
+    S4_PRIVATE_SELF_TEST_CONFIGURATION_INVALID \
+    64 \
+    null \
+    null \
+    null \
+    null
+
+  run_bounded_capture 2 \
+    env \
+    S4_WRAPPER_TEST_LIFECYCLE_HOOK=not-a-real-boundary \
+    S4_WRAPPER_TEST_SIGNAL=TERM \
+    "S4_WRAPPER_TEST_AUTHORITY=${S4_PRIVATE_TEST_AUTHORITY}" \
+    "S4_WRAPPER_TEST_CAPABILITY=${S4_PRIVATE_TEST_CAPABILITY}" \
+    bash "${SCRIPT_PATH}" --self-test
+  output="${S4_CAPTURE_OUTPUT}"
+  status="${S4_CAPTURE_STATUS}"
+  if [[ "${status}" -ne 64 ]]; then
+    printf '%s\n' "malformed private lifecycle controls: expected 64, got ${status}" >&2
+    exit 1
+  fi
+  assert_terminal_summary \
+    'malformed private lifecycle controls are rejected' \
+    "${output}" \
+    fail \
+    S4_PRIVATE_SELF_TEST_CONFIGURATION_INVALID \
+    64 \
+    null \
+    null \
+    null \
+    null
+)
+
+run_normal_success_group_case() (
+  local output
+  local status
+  local descendant_pid
+
+  # shellcheck disable=SC2329 # Imported and invoked by the child bash process.
+  bun() {
+    case "${1:-}" in
+      e2e/screening/s4-runner.ts)
+        # The payload leader returns without waiting. Its descendant ignores
+        # TERM, so a green wrapper result proves the normal-return group-reap
+        # path both finds the survivor and escalates it to KILL.
+        bash -c 'trap "" TERM; while :; do :; done' &
+        descendant=$!
+        printf 'S4_TEST_NORMAL_READY descendant=%s\n' "${descendant}"
+        return 0
+        ;;
+      test) return 0 ;;
+      *) return 125 ;;
+    esac
+  }
+  export -f bun
+
+  run_bounded_capture 2 bash "${SCRIPT_PATH}" --self-test
+  output="${S4_CAPTURE_OUTPUT}"
+  status="${S4_CAPTURE_STATUS}"
+  if [[ "${status}" -ne 0 ]]; then
+    printf '%s\n' "normal successful group: expected exit 0, got ${status}" >&2
+    exit 1
+  fi
+  if [[ ! "${output}" =~ S4_TEST_NORMAL_READY[[:space:]]descendant=([0-9]+) ]]; then
+    printf '%s\n' 'normal successful group: fixture never reported its descendant' >&2
+    exit 1
+  fi
+  descendant_pid="${BASH_REMATCH[1]}"
+  if kill -0 "${descendant_pid}" 2>/dev/null; then
+    printf '%s\n' 'normal successful group: descendant survived a green wrapper return' >&2
+    exit 1
+  fi
+  assert_terminal_summary \
+    'normal successful group has zero survivors' \
+    "${output}" \
+    pass \
+    S4_SELF_TEST_GREEN \
+    0 \
+    0 \
+    0 \
+    0 \
+    0
+)
+
+run_stale_identity_case() (
+  local output
+  local status
+  local descendant_pid
+  local started_at=${SECONDS}
+
+  # shellcheck disable=SC2329 # Imported and invoked by the child bash process.
+  bun() {
+    case "${1:-}" in
+      e2e/screening/s4-runner.ts)
+        bash -c 'trap "" TERM; while :; do :; done' &
+        descendant=$!
+        printf 'S4_TEST_STALE_IDENTITY_READY descendant=%s\n' "${descendant}"
+        wait "${descendant}"
+        ;;
+      test) return 125 ;;
+      *) return 125 ;;
+    esac
+  }
+  export -f bun
+
+  # A corrupted recorded identity deliberately prevents a group signal. The
+  # bounded capture owns a private session and proves both that the refusal is
+  # bounded and that its test-only teardown leaves no survivor behind.
+  run_bounded_capture 1 \
+    env \
+    S4_WRAPPER_TEST_LIFECYCLE_HOOK=after-ownership-before-wait \
+    S4_WRAPPER_TEST_SIGNAL=TERM \
+    "S4_WRAPPER_TEST_AUTHORITY=${S4_PRIVATE_TEST_AUTHORITY}" \
+    "S4_WRAPPER_TEST_CAPABILITY=${S4_PRIVATE_TEST_CAPABILITY}" \
+    bash "${SCRIPT_PATH}" --self-test
+  output="${S4_CAPTURE_OUTPUT}"
+  status="${S4_CAPTURE_STATUS}"
+  if [[ "${status}" -ne 124 ]]; then
+    printf '%s\n' "stale identity: expected bounded-capture 124 after refusing the cached PGID, got ${status}" >&2
+    exit 1
+  fi
+  if ((SECONDS - started_at > 2)); then
+    printf '%s\n' 'stale identity: bounded capture exceeded its deadline' >&2
+    exit 1
+  fi
+  if [[ ! "${output}" =~ S4_TEST_STALE_IDENTITY_READY[[:space:]]descendant=([0-9]+) ]]; then
+    printf '%s\n' 'stale identity: fixture never reported its TERM-resistant descendant' >&2
+    exit 1
+  fi
+  descendant_pid="${BASH_REMATCH[1]}"
+  if kill -0 "${descendant_pid}" 2>/dev/null; then
+    printf '%s\n' 'stale identity: bounded session teardown left a descendant alive' >&2
+    exit 1
+  fi
+  assert_terminal_summary \
+    'stale identity refuses a cached numeric PGID' \
+    "${output}" \
+    fail \
+    S4_WRAPPER_INTERRUPTED_TERM \
+    143 \
+    null \
+    null \
+    null \
+    null
+)
+
+run_private_lifecycle_environment_cases
+run_normal_success_group_case
+run_stale_identity_case
+
 set +e
 self_test_output="$(bash "${SCRIPT_PATH}" --self-test 2>&1)"
 readonly self_test_status=$?
@@ -349,7 +639,7 @@ run_parent_signal_case() (
         if [[ "${S4_WRAPPER_TEST_LIFECYCLE_HOOK}" == "after-wait-before-ownership-clear" ]]; then
           bash -c "sleep 0.05" &
         else
-          bash -c "while :; do :; done" &
+          bash -c 'trap "" TERM; while :; do :; done' &
         fi
         descendant=$!
         printf 'S4_TEST_RUNNER_READY descendant=%s\n' "${descendant}"
@@ -370,13 +660,24 @@ run_parent_signal_case() (
   }
   export -f bun
 
-  set +e
   # Command substitutions inherit SIGINT ignored from non-interactive Bash on
   # some launchers. Reset it in the execing process so this remains a real
   # process-level INT delivery test rather than a disposition-dependent fake.
-  output="$(S4_WRAPPER_TEST_LIFECYCLE_HOOK="${lifecycle_hook}" S4_WRAPPER_TEST_SIGNAL="${signal_name}" /usr/bin/perl -e '$SIG{INT} = "DEFAULT"; exec @ARGV' bash "${SCRIPT_PATH}" --self-test 2>&1)"
-  wrapper_status=$?
-  set -e
+  run_bounded_capture 2 \
+    env \
+    "S4_WRAPPER_TEST_LIFECYCLE_HOOK=${lifecycle_hook}" \
+    "S4_WRAPPER_TEST_SIGNAL=${signal_name}" \
+    "S4_WRAPPER_TEST_AUTHORITY=${S4_PRIVATE_TEST_AUTHORITY}" \
+    "S4_WRAPPER_TEST_CAPABILITY=${S4_PRIVATE_TEST_CAPABILITY}" \
+    /usr/bin/perl -e '$SIG{INT} = "DEFAULT"; exec @ARGV' \
+    bash "${SCRIPT_PATH}" --self-test
+  output="${S4_CAPTURE_OUTPUT}"
+  wrapper_status="${S4_CAPTURE_STATUS}"
+
+  if [[ "${wrapper_status}" -eq 124 ]]; then
+    printf '%s\n' "${lifecycle_hook}/${signal_name}: bounded capture exhausted its deadline" >&2
+    exit 1
+  fi
 
   if [[ "${wrapper_status}" -ne "${signal_status}" ]]; then
     printf '%s\n' "${lifecycle_hook}/${signal_name}: expected exit ${signal_status}, got ${wrapper_status}" >&2
