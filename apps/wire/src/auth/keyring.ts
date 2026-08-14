@@ -30,7 +30,54 @@ export interface VerificationKeyRecord {
   notAfter?: number;
 }
 
-export type KeyLookupFailure = "unknown_kid" | "key_not_yet_valid" | "key_retired";
+export type KeyLookupFailure =
+  | "unknown_kid"
+  | "key_not_yet_valid"
+  | "key_retired"
+  | "key_unusable";
+
+/** Key ids are non-secret identifiers, not free text. */
+const KID_PATTERN = /^[A-Za-z0-9._-]{1,64}$/;
+/** Raw Ed25519 public keys are exactly 32 bytes, lowercase hex. */
+const PUBLIC_KEY_PATTERN = /^[0-9a-f]{64}$/;
+
+export class KeyringConfigError extends Error {
+  readonly code = "KEYRING_CONFIG_INVALID";
+  constructor(message: string) {
+    super(message);
+    this.name = "KeyringConfigError";
+  }
+}
+
+/**
+ * Validate one configured key at construction time.
+ *
+ * Configuration errors belong at startup, where a deploy fails loudly, rather
+ * than at request time, where they would surface as an exception escaping the
+ * verifier and becoming a 500 that leaks a stack trace.
+ */
+function validateRecord(record: VerificationKeyRecord): void {
+  if (!KID_PATTERN.test(record.kid)) {
+    throw new KeyringConfigError(`invalid kid: ${JSON.stringify(record.kid).slice(0, 80)}`);
+  }
+  if (!PUBLIC_KEY_PATTERN.test(record.publicKeyHex)) {
+    // The key itself is public, but echoing it into an error adds nothing.
+    throw new KeyringConfigError(`kid ${record.kid}: public key must be 32 bytes of lowercase hex`);
+  }
+  if (!Number.isSafeInteger(record.notBefore) || record.notBefore < 0) {
+    throw new KeyringConfigError(`kid ${record.kid}: notBefore must be a non-negative integer`);
+  }
+  if (record.notAfter !== undefined) {
+    if (!Number.isSafeInteger(record.notAfter)) {
+      throw new KeyringConfigError(`kid ${record.kid}: notAfter must be an integer`);
+    }
+    if (record.notAfter <= record.notBefore) {
+      // An empty validity window silently refuses every envelope it should have
+      // accepted, and looks exactly like a signature bug.
+      throw new KeyringConfigError(`kid ${record.kid}: notAfter must be after notBefore`);
+    }
+  }
+}
 
 export type KeyLookup =
   | { ok: true; key: CryptoKey; record: VerificationKeyRecord }
@@ -49,9 +96,10 @@ export class VerificationKeyring {
   constructor(records: readonly VerificationKeyRecord[]) {
     this.#records = new Map();
     for (const record of records) {
+      validateRecord(record);
       if (this.#records.has(record.kid)) {
         // Two keys under one id makes "which key signed this" undecidable.
-        throw new Error(`duplicate kid in keyring: ${record.kid}`);
+        throw new KeyringConfigError(`duplicate kid in keyring: ${record.kid}`);
       }
       this.#records.set(record.kid, record);
     }
@@ -77,13 +125,21 @@ export class VerificationKeyring {
     const cached = this.#imported.get(kid);
     if (cached !== undefined) return { ok: true, key: cached, record };
 
-    const key = await crypto.subtle.importKey(
-      "raw",
-      fromHex(record.publicKeyHex) as BufferSource,
-      ED25519,
-      false,
-      ["verify"],
-    );
+    let key: CryptoKey;
+    try {
+      key = await crypto.subtle.importKey(
+        "raw",
+        fromHex(record.publicKeyHex) as BufferSource,
+        ED25519,
+        false,
+        ["verify"],
+      );
+    } catch {
+      // Construction validates the shape, so reaching here means the runtime
+      // rejected an otherwise well-formed key (not a valid curve point, or no
+      // Ed25519 support). Fail closed: never throw past the verifier.
+      return { ok: false, reason: "key_unusable" };
+    }
     this.#imported.set(kid, key);
     return { ok: true, key, record };
   }

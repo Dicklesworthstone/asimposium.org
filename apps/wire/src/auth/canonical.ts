@@ -26,9 +26,16 @@
  * field list. This is the classic defence against the `("a","bc") == ("ab","c")`
  * concatenation collision, and it is why a delimiter-only scheme is not enough.
  *
- * Nothing secret is ever part of the canonical form: the payload appears only
- * as a SHA-256 digest, and the signature is computed over these bytes rather
- * than included in them.
+ * The payload appears only as a SHA-256 digest, and the signature is computed
+ * over these bytes rather than included in them. That does not make the
+ * canonical form loggable: it still carries attribution and the nonce.
+ *
+ * Canonicalization is deliberately **total** — it encodes any string, including
+ * control characters and non-BMB code points, without ambiguity. Refusing
+ * strange claims is a separate, stricter job done by the verifier's bounds
+ * check (`envelope.ts`). Keeping the two apart means the framing stays correct
+ * even for input the validator would reject, which is what defence in depth
+ * means here.
  */
 
 /** Envelope format version. A change here is a new signing domain. */
@@ -149,7 +156,15 @@ export function canonicalBytes(claims: ServiceEnvelopeClaims): Uint8Array {
   return concatBytes(chunks);
 }
 
-/** Debug/vector helper: the canonical form as text. Carries no secret. */
+/**
+ * The canonical form as text. **Test and vector generation only.**
+ *
+ * Not safe to log. It excludes the payload bytes, but it carries the full
+ * attribution — principal id, action, route, kid — and the nonce, which is a
+ * single-use credential for the duration of the envelope. The never-log list
+ * (§14.3) covers attribution and nonces as surely as it covers tokens; use
+ * `buildAuthDiagnostic` for anything that reaches an operator.
+ */
 export function canonicalString(claims: ServiceEnvelopeClaims): string {
   return new TextDecoder().decode(canonicalBytes(claims));
 }

@@ -107,6 +107,40 @@ const SIGNATURE_HEX_LENGTH = 128; // 64 bytes
 const NONCE_MIN_LENGTH = 32;
 const NONCE_MAX_LENGTH = 128;
 
+/**
+ * Hard bounds on every untrusted claim string, applied **before** the value
+ * reaches canonicalization or any crypto call.
+ *
+ * Two reasons. First, unbounded attacker-controlled strings are a denial-of-
+ * service surface: a megabyte `action` costs a megabyte of hashing per request,
+ * for free, before any signature has been checked. Second, these values are
+ * carried into event records and operator diagnostics, and a control character
+ * or a newline in an id is how a log line becomes two log lines.
+ *
+ * Every class here is ASCII-only, so the pattern bounds the byte length too;
+ * the byte length is still checked explicitly rather than inferred.
+ */
+const CLAIM_BOUNDS: Record<string, { pattern: RegExp; maxBytes: number }> = {
+  kid: { pattern: /^[A-Za-z0-9._-]+$/, maxBytes: 64 },
+  iss: { pattern: /^[a-z0-9.-]+$/, maxBytes: 64 },
+  aud: { pattern: /^[a-z0-9.-]+$/, maxBytes: 64 },
+  method: { pattern: /^(?:GET|HEAD|POST|PUT|PATCH|DELETE|OPTIONS)$/, maxBytes: 7 },
+  // A route *template*: segments, parameters, no query, no fragment.
+  route: { pattern: /^\/[A-Za-z0-9/:._-]*$/, maxBytes: 256 },
+  action: { pattern: /^[a-z0-9]+(?:[._-][a-z0-9]+)*$/, maxBytes: 64 },
+  principal_type: { pattern: /^[a-z_]+$/, maxBytes: 32 },
+  principal_id: { pattern: /^[A-Za-z0-9_-]+$/, maxBytes: 64 },
+};
+
+const utf8 = new TextEncoder();
+
+function withinBounds(field: string, value: string): boolean {
+  const bounds = CLAIM_BOUNDS[field];
+  if (bounds === undefined) return true;
+  if (utf8.encode(value).length > bounds.maxBytes) return false;
+  return bounds.pattern.test(value);
+}
+
 const refuse = (reason: EnvelopeRefusalReason): EnvelopeVerification => ({
   ok: false,
   code: "UNAUTHORIZED",
@@ -147,6 +181,11 @@ export function parseEnvelope(value: unknown): ServiceEnvelope | undefined {
   if (nonce.length < NONCE_MIN_LENGTH || nonce.length > NONCE_MAX_LENGTH) return undefined;
   if (!/^[A-Za-z0-9_-]+$/.test(nonce)) return undefined;
   if (!/^[0-9a-f]{64}$/.test(claims.payload_sha256 as string)) return undefined;
+
+  // Hard bounds before anything expensive or attacker-influenced happens.
+  for (const field of Object.keys(CLAIM_BOUNDS)) {
+    if (!withinBounds(field, claims[field] as string)) return undefined;
+  }
 
   return { claims: claims as unknown as ServiceEnvelopeClaims, signature };
 }
