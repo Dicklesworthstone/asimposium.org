@@ -4,11 +4,15 @@ import { revalidatePath } from "next/cache";
 
 import type {
   MintEnrollmentRequest,
-  SponsorEnrollmentDecision,
 } from "@asimposium/contracts";
+import { SponsorEnrollmentDecisionSchema } from "@asimposium/contracts";
 
 import { auth } from "@/auth";
-import { stoaDecideProposal, stoaMintEnrollment } from "@/lib/stoa";
+import {
+  isCanonicalSponsorId,
+  stoaDecideProposal,
+  stoaMintEnrollment,
+} from "@/lib/stoa";
 
 export type MintResult =
   | { readonly ok: true; readonly joinUrl: string; readonly enrollmentId: string; readonly expiresAt: number }
@@ -16,9 +20,18 @@ export type MintResult =
 
 export type DecideResult = { readonly ok: true } | { readonly ok: false; readonly message: string };
 
-async function requireSponsorId(): Promise<string | undefined> {
+async function requireSponsorId(): Promise<
+  { readonly ok: true; readonly sponsorId: string } | { readonly ok: false; readonly message: string }
+> {
   const session = await auth();
-  return session?.user?.id;
+  if (session?.user === undefined) return { ok: false, message: "Not signed in." };
+  if (!isCanonicalSponsorId(session.user.id)) {
+    return {
+      ok: false,
+      message: "Your sponsor identity has not been bootstrapped on this deployment.",
+    };
+  }
+  return { ok: true, sponsorId: session.user.id };
 }
 
 /**
@@ -26,14 +39,14 @@ async function requireSponsorId(): Promise<string | undefined> {
  * is shown once in the client and never stored by Agora (the Worker keeps
  * only its SHA-256 hash).
  */
-export async function mintJoinUrl(): Promise<MintResult> {
-  const sponsorId = await requireSponsorId();
-  if (sponsorId === undefined) return { ok: false, message: "Not signed in." };
+export async function mintJoinUrl(idempotencyKey: string): Promise<MintResult> {
+  const sponsor = await requireSponsorId();
+  if (!sponsor.ok) return sponsor;
 
   const request: MintEnrollmentRequest = {
     requested_scopes: ["promote", "review", "propose-problems", "upload-artifacts"],
   };
-  const result = await stoaMintEnrollment(sponsorId, request);
+  const result = await stoaMintEnrollment(sponsor.sponsorId, request, idempotencyKey);
   if (!result.ok) {
     return {
       ok: false,
@@ -57,12 +70,22 @@ export async function mintJoinUrl(): Promise<MintResult> {
 /** Approve, reduce, or deny a pending proposal. */
 export async function decideProposal(
   enrollmentId: string,
-  decision: SponsorEnrollmentDecision,
+  decision: unknown,
+  idempotencyKey: string,
 ): Promise<DecideResult> {
-  const sponsorId = await requireSponsorId();
-  if (sponsorId === undefined) return { ok: false, message: "Not signed in." };
+  const sponsor = await requireSponsorId();
+  if (!sponsor.ok) return sponsor;
+  const parsed = SponsorEnrollmentDecisionSchema.safeParse(decision);
+  if (!parsed.success || parsed.data.enrollment_id !== enrollmentId) {
+    return { ok: false, message: "The decision request is invalid." };
+  }
 
-  const result = await stoaDecideProposal(sponsorId, enrollmentId, decision);
+  const result = await stoaDecideProposal(
+    sponsor.sponsorId,
+    enrollmentId,
+    parsed.data,
+    idempotencyKey,
+  );
   if (!result.ok) {
     return {
       ok: false,

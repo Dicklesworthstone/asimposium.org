@@ -1,3 +1,5 @@
+import "server-only";
+
 import {
   type MintEnrollmentRequest,
   type MintEnrollmentResponse,
@@ -11,8 +13,7 @@ import {
   SponsorProposalListResponseSchema,
 } from "@asimposium/contracts";
 
-import { mintServiceEnvelope, serviceEnvelopeHeaders } from "./service-envelope";
-import { SITE } from "./site";
+import { dispatchSignedSponsorRequest } from "./stoa-sponsor";
 
 /**
  * Agora's typed client for the Stoa sponsor surface. Server-only: it reads the
@@ -25,9 +26,6 @@ import { SITE } from "./site";
  * fails closed as `bad_signature`, never as a silent mismatch.
  */
 
-const ENVELOPE_ISSUER = "agora";
-const ENVELOPE_AUDIENCE = "stoa";
-
 const ROUTE_MINT = "/v1/enrollments";
 const ROUTE_PROPOSALS = "/v1/enrollments/proposals";
 const ROUTE_DECISION = "/v1/enrollments/:enrollmentId/decision";
@@ -37,6 +35,13 @@ const ACTION_MINT = "enrollment.mint";
 const ACTION_PROPOSALS = "enrollment.proposals.list";
 const ACTION_DECIDE = "enrollment.decide";
 const ACTION_FELLOWS = "fellows.list";
+
+/** Worker-owned user ids; OAuth subjects are never accepted as sponsor ids. */
+const CANONICAL_SPONSOR_ID = /^usr_[A-Za-z0-9_-]{1,60}$/;
+
+export function isCanonicalSponsorId(value: unknown): value is string {
+  return typeof value === "string" && CANONICAL_SPONSOR_ID.test(value);
+}
 
 export type StoaCall<T> =
   | { readonly ok: true; readonly data: T }
@@ -99,32 +104,29 @@ async function callStoa<T>(options: {
   readonly principalId: string;
   /** The exact body bytes — signed and sent, never reserialized. */
   readonly body: string;
+  readonly idempotencyKey?: string;
   readonly parse: (value: unknown) => T;
 }): Promise<StoaCall<T>> {
+  if (!isCanonicalSponsorId(options.principalId)) {
+    return { ok: false, reason: "unconfigured" };
+  }
   const config = await signingConfig();
   if (config === undefined) return { ok: false, reason: "unconfigured" };
 
-  const envelope = await mintServiceEnvelope({
-    privateKey: config.privateKey,
-    kid: config.kid,
-    now: Math.floor(Date.now() / 1_000),
-    issuer: ENVELOPE_ISSUER,
-    audience: ENVELOPE_AUDIENCE,
-    method: options.method,
-    route: options.route,
-    action: options.action,
-    principalId: options.principalId,
-    body: options.body,
-  });
-
   let response: Response;
   try {
-    response = await fetch(`${SITE.stoa}${options.path}`, {
+    response = await dispatchSignedSponsorRequest({
       method: options.method,
-      headers: serviceEnvelopeHeaders(envelope),
-      body: options.method === "GET" ? undefined : options.body,
-      cache: "no-store",
-      signal: AbortSignal.timeout(8_000),
+      path: options.path,
+      route: options.route,
+      action: options.action,
+      sponsorId: options.principalId,
+      rawBody: options.body,
+      privateKey: config.privateKey,
+      kid: config.kid,
+      now: Math.floor(Date.now() / 1_000),
+      timeoutMs: 8_000,
+      idempotencyKey: options.idempotencyKey,
     });
   } catch {
     return { ok: false, reason: "unreachable" };
@@ -153,6 +155,7 @@ export async function stoaConfigured(): Promise<boolean> {
 export function stoaMintEnrollment(
   principalId: string,
   request: MintEnrollmentRequest,
+  idempotencyKey: string,
 ): Promise<StoaCall<MintEnrollmentResponse>> {
   const body = JSON.stringify(request);
   return callStoa({
@@ -162,6 +165,7 @@ export function stoaMintEnrollment(
     action: ACTION_MINT,
     principalId,
     body,
+    idempotencyKey,
     parse: (value) => MintEnrollmentResponseSchema.parse(value),
   });
 }
@@ -184,6 +188,7 @@ export function stoaDecideProposal(
   principalId: string,
   enrollmentId: string,
   decision: SponsorEnrollmentDecision,
+  idempotencyKey: string,
 ): Promise<StoaCall<SponsorEnrollmentDecisionResponse>> {
   return callStoa({
     method: "POST",
@@ -192,6 +197,7 @@ export function stoaDecideProposal(
     action: ACTION_DECIDE,
     principalId,
     body: JSON.stringify(decision),
+    idempotencyKey,
     parse: (value) => SponsorEnrollmentDecisionResponseSchema.parse(value),
   });
 }

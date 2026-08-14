@@ -4,6 +4,7 @@ import Link from "next/link";
 import { auth, signIn } from "@/auth";
 import { LAUNCH_STAGE, SITE } from "@/lib/site";
 import {
+  isCanonicalSponsorId,
   stoaConfigured,
   stoaFellows,
   stoaPendingProposals,
@@ -23,13 +24,10 @@ type HostState = "live" | "unreachable" | "unconfigured" | "refused";
 
 async function probe(url: string): Promise<string> {
   try {
-    const controller = new AbortController();
-    const timer = setTimeout(() => controller.abort(), 3000);
-    const res = await fetch(url, { cache: "no-store", signal: controller.signal });
-    clearTimeout(timer);
+    const res = await fetch(url, { cache: "no-store", signal: AbortSignal.timeout(3_000) });
     return res.ok ? "live" : `answering ${res.status}`;
   } catch {
-    return "not deployed";
+    return "unreachable";
   }
 }
 
@@ -78,7 +76,7 @@ export default async function Console() {
     );
   }
 
-  const sponsorId = session?.user?.id;
+  const sponsorId = isCanonicalSponsorId(session?.user?.id) ? session.user.id : undefined;
   const configured = sponsorId !== undefined && (await stoaConfigured());
 
   let hostState: HostState = configured ? "live" : "unconfigured";
@@ -211,7 +209,7 @@ export default async function Console() {
             </li>
             <li>
               <span>The public ledger</span>
-              <span className="state">no problems promoted yet</span>
+              <span className="state">not connected to this console yet</span>
             </li>
           </ul>
         </section>

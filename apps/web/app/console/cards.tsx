@@ -1,8 +1,12 @@
 "use client";
 
-import type { EnrollmentApprovalCard, EnrollmentGrantReduction } from "@asimposium/contracts";
+import type {
+  EnrollmentApprovalCard,
+  EnrollmentGrantReduction,
+  SponsorEnrollmentDecision,
+} from "@asimposium/contracts";
 import { useRouter } from "next/navigation";
-import { useState, useTransition } from "react";
+import { useRef, useState, useTransition } from "react";
 
 import { decideProposal, mintJoinUrl } from "./actions";
 
@@ -19,6 +23,7 @@ export function MintCard({ configured }: { configured: boolean }) {
   const [expiresAt, setExpiresAt] = useState<number | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [copied, setCopied] = useState(false);
+  const mintAttempt = useRef<string | null>(null);
 
   if (!configured) {
     return (
@@ -42,15 +47,28 @@ export function MintCard({ configured }: { configured: boolean }) {
             className="btn-quiet"
             type="button"
             onClick={() => {
-              void navigator.clipboard.writeText(joinUrl).then(() => {
-                setCopied(true);
-                setTimeout(() => setCopied(false), 1_500);
-              });
+              void navigator.clipboard.writeText(joinUrl).then(
+                () => {
+                  setCopied(true);
+                  setTimeout(() => setCopied(false), 1_500);
+                },
+                () => setError("Clipboard access was refused. Select and copy the URL manually."),
+              );
             }}
           >
             {copied ? "Copied" : "Copy"}
           </button>
-          <button className="btn-quiet" type="button" onClick={() => router.refresh()}>
+          <button
+            className="btn-quiet"
+            type="button"
+            onClick={() => {
+              setJoinUrl(null);
+              setExpiresAt(null);
+              setCopied(false);
+              setError(null);
+              router.refresh();
+            }}
+          >
             Done
           </button>
         </div>
@@ -73,8 +91,11 @@ export function MintCard({ configured }: { configured: boolean }) {
         action={() => {
           setError(null);
           startTransition(async () => {
-            const result = await mintJoinUrl();
+            const idempotencyKey = mintAttempt.current ?? `console-${crypto.randomUUID()}`;
+            mintAttempt.current = idempotencyKey;
+            const result = await mintJoinUrl(idempotencyKey);
             if (result.ok) {
+              mintAttempt.current = null;
               setJoinUrl(result.joinUrl);
               setExpiresAt(result.expiresAt);
             } else {
@@ -135,16 +156,29 @@ function ProposalCard({ card }: { readonly card: EnrollmentApprovalCard }) {
   const [eventBudget, setEventBudget] = useState("");
   const [artifactBudget, setArtifactBudget] = useState("");
   const [grantHours, setGrantHours] = useState("");
+  const decisionAttempt = useRef<{ readonly body: string; readonly key: string } | null>(null);
+
+  const submitDecision = (decision: SponsorEnrollmentDecision) => {
+    setError(null);
+    const body = JSON.stringify(decision);
+    const prior = decisionAttempt.current;
+    const attempt =
+      prior?.body === body ? prior : { body, key: `console-${crypto.randomUUID()}` };
+    decisionAttempt.current = attempt;
+    startTransition(async () => {
+      const result = await decideProposal(card.enrollment_id, decision, attempt.key);
+      if (!result.ok) setError(result.message);
+      else {
+        decisionAttempt.current = null;
+        router.refresh();
+      }
+    });
+  };
 
   const decide = (decision: "approve" | "deny") => {
-    setError(null);
-    startTransition(async () => {
-      const result = await decideProposal(card.enrollment_id, {
-        enrollment_id: card.enrollment_id,
-        decision,
-      });
-      if (!result.ok) setError(result.message);
-      else router.refresh();
+    submitDecision({
+      enrollment_id: card.enrollment_id,
+      decision,
     });
   };
 
@@ -170,14 +204,10 @@ function ProposalCard({ card }: { readonly card: EnrollmentApprovalCard }) {
       setError("Choose at least one narrowing, or use Approve.");
       return;
     }
-    startTransition(async () => {
-      const result = await decideProposal(card.enrollment_id, {
-        enrollment_id: card.enrollment_id,
-        decision: "reduce",
-        reduction,
-      });
-      if (!result.ok) setError(result.message);
-      else router.refresh();
+    submitDecision({
+      enrollment_id: card.enrollment_id,
+      decision: "reduce",
+      reduction,
     });
   };
 

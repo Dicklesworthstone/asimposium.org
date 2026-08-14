@@ -1,6 +1,7 @@
 import { describe, expect, test } from "bun:test";
 
 import { dispatchSignedSponsorRequest } from "../../../web/lib/stoa-sponsor.ts";
+import { mintServiceEnvelope } from "../../../web/lib/service-envelope.ts";
 import { toHex } from "../../src/auth/canonical";
 import {
   authenticateServiceEnvelopeRequest,
@@ -78,6 +79,7 @@ describe("S-6 Agora signed dispatch seam", () => {
 
     const response = await dispatchSignedSponsorRequest({
       ...dispatchOptions(h, rawBody),
+      idempotencyKey: "console-01JXYZ4K6Q",
       fetchImpl: async (input, requestInit) => {
         init = requestInit;
         sent = new Request(input, requestInit);
@@ -93,6 +95,7 @@ describe("S-6 Agora signed dispatch seam", () => {
     expect(sent?.headers.get("authorization")).toBeNull();
     expect(sent?.headers.get("cookie")).toBeNull();
     expect(sent?.headers.has("asimp-service-envelope")).toBe(true);
+    expect(sent?.headers.get("idempotency-key")).toBe("console-01JXYZ4K6Q");
     expect(init).toMatchObject({ credentials: "omit", cache: "no-store", redirect: "error" });
   });
 
@@ -128,6 +131,29 @@ describe("S-6 Agora signed dispatch seam", () => {
     await expect(
       dispatchSignedSponsorRequest({ ...options, path: "/v1/enrollments?unbound=query" }),
     ).rejects.toThrow(/query-free path/);
+  });
+
+  test("rejects an unsafe product idempotency key before signing or dispatch", async () => {
+    const h = await harness();
+    let signerCalls = 0;
+    let fetchCalls = 0;
+
+    await expect(
+      dispatchSignedSponsorRequest({
+        ...dispatchOptions(h, '{"requested_scopes":["promote"]}'),
+        idempotencyKey: "contains a space",
+        mintEnvelopeImpl: async (...args) => {
+          signerCalls += 1;
+          return mintServiceEnvelope(...args);
+        },
+        fetchImpl: async () => {
+          fetchCalls += 1;
+          return new Response(null, { status: 204 });
+        },
+      }),
+    ).rejects.toThrow(/Idempotency-Key/);
+    expect(signerCalls).toBe(0);
+    expect(fetchCalls).toBe(0);
   });
 });
 

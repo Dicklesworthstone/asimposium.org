@@ -73,6 +73,8 @@ export interface DispatchSignedSponsorRequestOptions {
   lifetimeSeconds?: number;
   /** Bound on the whole dispatch. Defaults to `DEFAULT_STOA_TIMEOUT_MS`. */
   timeoutMs?: number;
+  /** Product-level retry key. The Worker retains it for 24 hours on writes. */
+  idempotencyKey?: string;
   /** Caller cancellation, composed with the bound above; neither one leaks the other. */
   signal?: AbortSignal;
   /**
@@ -214,6 +216,12 @@ export async function dispatchSignedSponsorRequest(
   if (!/^[A-Z]+$/.test(method)) throw new TypeError("Stoa request method must be an HTTP token");
 
   const timeoutMs = resolveTimeoutMs(options.timeoutMs);
+  if (
+    options.idempotencyKey !== undefined &&
+    !/^[A-Za-z0-9._-]{1,160}$/.test(options.idempotencyKey)
+  ) {
+    throw new TypeError("Idempotency-Key must be 1 to 160 safe opaque characters");
+  }
   const rawBody =
     typeof options.rawBody === "string" ? options.rawBody : copyBodyBytes(options.rawBody);
   if ((method === "GET" || method === "HEAD") && rawBody.length !== 0) {
@@ -279,7 +287,12 @@ export async function dispatchSignedSponsorRequest(
     // is observed rather than surfacing as an unhandled rejection.
     const dispatched = (options.fetchImpl ?? fetch)(destination, {
       method,
-      headers: serviceEnvelopeHeaders(envelope),
+      headers: {
+        ...serviceEnvelopeHeaders(envelope),
+        ...(options.idempotencyKey === undefined
+          ? {}
+          : { "Idempotency-Key": options.idempotencyKey }),
+      },
       body: method === "GET" || method === "HEAD" ? undefined : rawBody,
       // The service envelope is the sole cross-plane credential.  These options
       // make an accidental redirect or ambient credential forwarding fail closed.
