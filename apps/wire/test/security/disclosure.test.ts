@@ -1,4 +1,5 @@
 import { describe, expect, test } from "bun:test";
+import type { D1Database } from "@cloudflare/workers-types";
 import { createApp } from "../../src/app";
 import type { Env } from "../../src/env";
 import { boundEnv, callWorker, executionContext, r2Shaped } from "../support/bindings";
@@ -16,6 +17,8 @@ import { boundEnv, callWorker, executionContext, r2Shaped } from "../support/bin
 
 const CANARY_TOKEN = "asimp_ag_canary000000000000000000";
 const CANARY_SECRET = "canary-google-client-secret";
+const REPLAY_KEY = "CCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCC";
+const ENROLLMENT_ID = "ASIMP-EN-01JXYZ4K6Q";
 
 const leakyEnv = (): unknown => ({
   ...boundEnv(),
@@ -67,14 +70,101 @@ describe("faces disclose no environment or binding values", () => {
     forbidden(res.bodyText);
   });
 
-  test("the mounted /v1 failure does not echo a secret-shaped path segment", async () => {
+  test("an unknown /v1 path is a typed 404 before enrollment configuration", async () => {
     const res = await callWorker(`/v1/${CANARY_TOKEN}`, leakyEnv());
 
-    // Propylon owns the whole /v1 namespace. With enrollment replay
-    // deliberately unconfigured in this fixture, the request reaches that
-    // mounted stack and fails closed before route dispatch.
-    expect(res.status).toBe(503);
+    expect(res.status).toBe(404);
+    expect(res.contentType).toBe("application/problem+json; charset=utf-8");
+    expect(res.body).toMatchObject({ code: "ROUTE_NOT_FOUND", status: 404 });
     expect(res.bodyText).not.toContain(CANARY_TOKEN);
+  });
+
+  test("a wrong method on a real Propylon path gets the canonical 404 face", async () => {
+    const app = createApp();
+    const response = await app.fetch(
+      new Request("https://a.asimposium.org/v1/hello", { method: "POST" }),
+      boundEnv({ ENROLLMENT_REPLAY_KEY: REPLAY_KEY }),
+      executionContext() as unknown as Parameters<typeof app.fetch>[2],
+    );
+
+    expect(response.status).toBe(404);
+    expect(response.headers.get("content-type")).toBe("application/problem+json; charset=utf-8");
+    expect(response.headers.get("x-asimp-internal-router-miss")).toBeNull();
+    expect(await response.json()).toMatchObject({ code: "ROUTE_NOT_FOUND", status: 404 });
+  });
+
+  test("an intentional typed route 404 is not mistaken for a dispatch miss", async () => {
+    const app = createApp();
+    const response = await app.fetch(
+      new Request("https://a.asimposium.org/join/not-an-enrollment-id"),
+      boundEnv({ ENROLLMENT_REPLAY_KEY: REPLAY_KEY }),
+      executionContext() as unknown as Parameters<typeof app.fetch>[2],
+    );
+
+    expect(response.status).toBe(404);
+    expect(response.headers.get("x-asimp-internal-router-miss")).toBeNull();
+    expect(await response.json()).toMatchObject({ code: "CAPSULE_UNAVAILABLE", status: 404 });
+  });
+});
+
+function capsuleDb(secretExpiresAt: number): {
+  readonly db: D1Database;
+  readonly prepareCalls: () => number;
+} {
+  let calls = 0;
+  const row = {
+    enrollment_id: ENROLLMENT_ID,
+    sponsor_id: "usr_cache_regression",
+    secret_hash: "not-returned",
+    secret_expires_at: secretExpiresAt,
+    requested_scopes_json: JSON.stringify(["review"]),
+    requested_resources_json: "{}",
+    invalidated: 0,
+    secret_consumed_at: null,
+  };
+  const db = {
+    prepare() {
+      calls += 1;
+      return {
+        bind() {
+          return { first: async () => row };
+        },
+      };
+    },
+    batch() {
+      throw new Error("capsule cache regression must not execute a batch");
+    },
+  } as unknown as D1Database;
+  return { db, prepareCalls: () => calls };
+}
+
+describe("the isolate cache never crosses D1 binding identity", () => {
+  test("equal credentials with DB-A then DB-B read DB-B on the second request", async () => {
+    const app = createApp();
+    const first = capsuleDb(8_000_000_000_001);
+    const second = capsuleDb(8_000_000_000_002);
+    const request = () =>
+      new Request(`https://a.asimposium.org/join/${ENROLLMENT_ID}`, {
+        headers: { accept: "application/json" },
+      });
+
+    const responseA = await app.fetch(
+      request(),
+      boundEnv({ DB: first.db, ENROLLMENT_REPLAY_KEY: REPLAY_KEY }),
+      executionContext() as unknown as Parameters<typeof app.fetch>[2],
+    );
+    const responseB = await app.fetch(
+      request(),
+      boundEnv({ DB: second.db, ENROLLMENT_REPLAY_KEY: REPLAY_KEY }),
+      executionContext() as unknown as Parameters<typeof app.fetch>[2],
+    );
+
+    expect(responseA.status).toBe(200);
+    expect(responseB.status).toBe(200);
+    expect(await responseA.json()).toMatchObject({ secret_expires_at: 8_000_000_000_001 });
+    expect(await responseB.json()).toMatchObject({ secret_expires_at: 8_000_000_000_002 });
+    expect(first.prepareCalls()).toBe(1);
+    expect(second.prepareCalls()).toBe(1);
   });
 });
 

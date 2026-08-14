@@ -92,6 +92,44 @@ describe("face wire format", () => {
     expect(res.bodyText).toBe(ENROLLMENT_UNAVAILABLE);
   });
 
+  test("every mounted Propylon path shape reaches enrollment configuration", async () => {
+    const paths = [
+      "/join/ASIMP-EN-01JXYZ4K6Q",
+      "/v1/device-token",
+      "/v1/enrollments",
+      "/v1/enrollments/proposals",
+      "/v1/enrollments/ASIMP-EN-01JXYZ4K6Q/decision",
+      "/v1/fellows",
+      "/v1/fellows/flow",
+      "/v1/hello",
+    ];
+
+    for (const path of paths) {
+      const res = await callWorker(path);
+      expect(res.status, path).toBe(503);
+      expect(res.bodyText, path).toBe(ENROLLMENT_UNAVAILABLE);
+    }
+  });
+
+  test("near-miss Propylon paths are canonical 404s before configuration", async () => {
+    const paths = [
+      "/join/",
+      "/join/ASIMP-EN-01JXYZ4K6Q/extra",
+      "/v1/enrollment",
+      "/v1/enrollments/ASIMP-EN-01JXYZ4K6Q",
+      "/v1/enrollments/ASIMP-EN-01JXYZ4K6Q/decision/extra",
+      "/v1/hello/",
+      "/v1/hello%2F",
+    ];
+
+    for (const path of paths) {
+      const res = await callWorker(path);
+      expect(res.status, path).toBe(404);
+      expect(res.contentType, path).toBe("application/problem+json; charset=utf-8");
+      expect(res.body, path).toMatchObject({ code: "ROUTE_NOT_FOUND", status: 404 });
+    }
+  });
+
   test("GET a genuine unknown route", async () => {
     const res = await callWorker("/nope");
 
