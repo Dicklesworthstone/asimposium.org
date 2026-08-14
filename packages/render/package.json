@@ -16,7 +16,9 @@
     "test:contract": "bun test test/contract",
     "test:integration": "bun test test/integration",
     "test:security": "bun test test/security",
-    "report": "bun run scripts/suite-report.ts"
+    "report": "bun run scripts/suite-report.ts",
+    "golden:print": "bun scripts/golden-print.ts",
+    "spike:s5": "bun scripts/s5-spike.ts"
   },
   "devDependencies": {
     "@types/bun": "1.3.8",
