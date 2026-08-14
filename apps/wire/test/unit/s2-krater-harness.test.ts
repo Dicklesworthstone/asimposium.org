@@ -1,5 +1,14 @@
 import { describe, expect, test } from "bun:test";
-import { existsSync, lstatSync, mkdtempSync, readFileSync, symlinkSync } from "node:fs";
+import { spawnSync } from "node:child_process";
+import {
+  closeSync,
+  existsSync,
+  lstatSync,
+  mkdtempSync,
+  openSync,
+  readFileSync,
+  symlinkSync,
+} from "node:fs";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 
@@ -128,58 +137,69 @@ interface Run {
   stderr: string;
 }
 
-async function exitBefore(
-  exited: Promise<number>,
-  milliseconds: number,
-): Promise<number | undefined> {
-  return Promise.race([exited, Bun.sleep(milliseconds).then(() => undefined)]);
+function runCaptured(
+  command: string,
+  args: readonly string[],
+  env: NodeJS.ProcessEnv,
+  deadlineMs: number,
+): Run {
+  const logRoot = mkdtempSync(join(tmpdir(), "asimposium-s2-shell-"));
+  const stdoutPath = join(logRoot, "stdout.log");
+  const stderrPath = join(logRoot, "stderr.log");
+  closeSync(openSync(stdoutPath, "wx", 0o600));
+  closeSync(openSync(stderrPath, "wx", 0o600));
+  const child = spawnSync(
+    "bash",
+    [
+      "-c",
+      'stdout_path="$1"; stderr_path="$2"; shift 2; exec "$@" >>"$stdout_path" 2>>"$stderr_path"',
+      "s2-retained-log-runner",
+      stdoutPath,
+      stderrPath,
+      command,
+      ...args,
+    ],
+    {
+      cwd: REPOSITORY_ROOT,
+      env: { ...process.env, ...env },
+      timeout: deadlineMs,
+    },
+  );
+  const errorCode =
+    child.error === undefined || !("code" in child.error) ? undefined : child.error.code;
+  const errorDetail = child.error === undefined ? "" : ` spawn_error=${child.error.message}`;
+  const signalDetail = child.signal === null ? "" : ` terminated_by=${child.signal}`;
+  return {
+    exitCode: child.status ?? (errorCode === "ETIMEDOUT" ? 124 : 125),
+    stdout: readFileSync(stdoutPath, "utf8"),
+    stderr: `${readFileSync(stderrPath, "utf8")}${signalDetail}${errorDetail} retained_logs=${logRoot}`,
+  };
 }
 
 async function runHarness(env: Record<string, string>, deadlineMs: number): Promise<Run> {
-  const child = Bun.spawn({
-    cmd: ["bash", SCRIPT],
-    cwd: REPOSITORY_ROOT,
-    env: { ...process.env, ...env },
-    stdout: "pipe",
-    stderr: "pipe",
-  });
-  const stdout = new Response(child.stdout).text();
-  const stderr = new Response(child.stderr).text();
-  let exitCode = await exitBefore(child.exited, deadlineMs);
-  if (exitCode === undefined) {
-    child.kill("SIGTERM");
-    exitCode = await exitBefore(child.exited, 10_000);
-  }
-  if (exitCode === undefined) {
-    child.kill("SIGKILL");
-    exitCode = await child.exited;
-  }
-  const result = { exitCode, stdout: await stdout, stderr: await stderr };
-  if (result.exitCode === 137 && deadlineMs > 0) {
-    throw new Error(`S2 harness exceeded its bounded test deadline; stderr:\n${result.stderr}`);
-  }
-  return result;
+  return runCaptured("bash", [SCRIPT], env, deadlineMs);
+}
+
+/**
+ * The fast shell matrix needs byte-complete terminal records from each short
+ * child. Bun's asynchronous pipe wrapper has intermittently returned two empty
+ * strings for a zero-exit child under `bun test`; the synchronous subprocess
+ * API waits for the process as one bounded operation while the shell writes to
+ * private retained logs. This keeps a byte-complete detailed failure record
+ * even when the test runner discards the child's in-memory pipes.
+ */
+function runHarnessSync(env: Record<string, string>, deadlineMs: number): Run {
+  return runCaptured("bash", [SCRIPT], env, deadlineMs);
 }
 
 async function probeRealBindingCapability(): Promise<Run> {
   const { S2_RUN_REAL_BINDING_INTEGRATION: _authority, ...environment } = process.env;
-  const child = Bun.spawn({
-    cmd: [
-      "bun",
-      "apps/wire/test/integration/s2-krater-real-bindings.test.ts",
-      "--capability-probe",
-    ],
-    cwd: REPOSITORY_ROOT,
-    env: environment,
-    stdout: "pipe",
-    stderr: "pipe",
-  });
-  const [stdout, stderr, exitCode] = await Promise.all([
-    new Response(child.stdout).text(),
-    new Response(child.stderr).text(),
-    child.exited,
-  ]);
-  return { exitCode, stdout, stderr };
+  return runCaptured(
+    "bun",
+    ["apps/wire/test/integration/s2-krater-real-bindings.test.ts", "--capability-probe"],
+    environment,
+    30_000,
+  );
 }
 
 describe("S2 to S7 normalized cost receipt", () => {
@@ -361,10 +381,18 @@ describe("S2 to S7 normalized cost receipt", () => {
     expect(shell).toContain("S2_PARENT_TERM_RESIDUAL_UNPROVEN");
     expect(start).toContain("pre_release_group_is_stably_pinned");
     expect(start).not.toContain("blocked_snapshot");
-    expect(start).toContain("FIFO reads are builtins and create no group member");
+    expect(start).toContain("Publish its exact");
+    expect(start).toContain("observer");
     expect(start).toContain("IFS= read -r -t 0.2 value <&8");
+    // biome-ignore lint/suspicious/noTemplateCurlyInString: asserts literal shell source text.
+    expect(start).toContain('kill -0 "${owner_pid}"');
+    // biome-ignore lint/suspicious/noTemplateCurlyInString: asserts literal shell source text.
+    expect(start).toContain('kill -KILL -- "-${supervisor_pid}"');
     expect(shell).toContain("pre_release_helper_is_expected_snapshot");
     expect(shell).toContain("pre_release_snapshot_line_kind");
+    expect(shell).toContain("detached_process_table_read()");
+    expect(shell).toContain("setsid() or exit 125; exec @ARGV");
+    expect(shell).toContain("read_detached_process_snapshot");
     expect(shell).toContain("S2_SHELL_REGRESSION_FAILED");
     const groupMembers = shell.slice(
       shell.indexOf("group_members() {"),
@@ -373,6 +401,17 @@ describe("S2 to S7 normalized cost receipt", () => {
     // biome-ignore lint/suspicious/noTemplateCurlyInString: asserts literal shell source text.
     expect(groupMembers).toContain('-g "${pgid}"');
     expect(groupMembers).not.toContain("ps -axo");
+    const preRelease = shell.slice(
+      shell.indexOf("pre_release_helper_is_expected_snapshot()"),
+      shell.indexOf("signal_owned_group()"),
+    );
+    expect(preRelease).not.toContain("$(LC_ALL=C ps");
+    expect(preRelease).toContain(
+      "detached_process_table_read -o pid=,pgid=,ppid=,stat=,command= -g",
+    );
+    // biome-ignore lint/suspicious/noTemplateCurlyInString: asserts literal shell source text.
+    expect(preRelease).toContain('"${helper}" == "${expected_helper}"');
+    expect(preRelease).toContain("S2_PRE_RELEASE_EXPECTED_HELPER_REJECTED_SAMPLES");
     // biome-ignore lint/suspicious/noTemplateCurlyInString: asserts literal shell source text.
     expect(shell).toContain("${S2_GROUP_MEMBER_COUNT} -ge 1 && ${S2_GROUP_MEMBER_COUNT} -le 2");
     expect(shell).toContain("S2_PLANT_PERSISTENT_PRE_RELEASE_HELPER");
@@ -386,6 +425,8 @@ describe("S2 to S7 normalized cost receipt", () => {
     expect(shell).toContain("S2_PERSISTENT_PRE_RELEASE_HELPER_RESAMPLE_OR_RELEASE_PROOF_FAILED");
     expect(shell).toContain("S2_PERSISTENT_PRE_RELEASE_HELPER_PGID_INVALID");
     expect(shell).toContain("S2_PERSISTENT_PRE_RELEASE_HELPER_SURVIVOR");
+    expect(shell).toContain("S2_PERSISTENT_PRE_RELEASE_HELPER_PLANTED_IDENTITY_INVALID");
+    expect(shell).toContain("S2_PERSISTENT_PRE_RELEASE_HELPER_PLANTED_HELPER_SURVIVOR");
     // biome-ignore lint/suspicious/noTemplateCurlyInString: asserts literal shell source text.
     expect(shell).toContain('[[ -n "${marker}" ]] || return 1');
     expect(shell).toContain("trap '' INT TERM HUP");
@@ -417,6 +458,7 @@ describe("registered S2 shell and lifecycle regressions", () => {
   test("the fast planted shell regressions are bounded and leave no owned group behind", async () => {
     const modes = [
       "pre-release-helper-classification",
+      "pre-arm-owner-loss",
       "release-race",
       "persistent-pre-release-helper",
       "release-interleaving",
@@ -438,7 +480,7 @@ describe("registered S2 shell and lifecycle regressions", () => {
     ] as const;
 
     for (const mode of modes) {
-      const run = await runHarness({ S2_SHELL_REGRESSION_TEST: mode }, 30_000);
+      const run = runHarnessSync({ S2_SHELL_REGRESSION_TEST: mode }, 30_000);
       if (run.exitCode !== 0) {
         const codes = Array.from(
           `${run.stdout}\n${run.stderr}`.matchAll(/"code":"([A-Z][A-Z0-9_]{2,95})"/g),
@@ -447,10 +489,15 @@ describe("registered S2 shell and lifecycle regressions", () => {
           .filter((code, index, values) => values.indexOf(code) === index)
           .slice(0, 4);
         throw new Error(
-          `S2 shell regression failed: ${mode}; codes=${codes.join(",") || "NO_TYPED_CODE"}`,
+          `S2 shell regression failed: ${mode}; codes=${codes.join(",") || "NO_TYPED_CODE"}; stdout=${run.stdout || "<empty>"}; stderr=${run.stderr || "<empty>"}`,
         );
       }
       expect(run.exitCode).toBe(0);
+      if (!run.stdout.includes('"suite":"s2-krater-shell","status":"pass"')) {
+        throw new Error(
+          `S2 shell regression emitted no terminal pass: ${mode}; stdout=${run.stdout || "<empty>"}; stderr=${run.stderr || "<empty>"}`,
+        );
+      }
       expect(run.stdout).toContain('"suite":"s2-krater-shell","status":"pass"');
       expect(run.stdout).toContain('"suite":"s2-krater-evidence","status":"pass"');
       if (mode === "legacy-leader-loss") {
@@ -461,9 +508,12 @@ describe("registered S2 shell and lifecycle regressions", () => {
         expect(run.stdout).toContain('"pre_release_accepted_samples":0');
         expect(run.stdout).toContain('"pre_release_rejected_samples":40');
         expect(run.stdout).toContain('"pre_release_max_group_members":2');
+        expect(run.stdout).toContain('"planted_persistent_helper_pid":');
+        expect(run.stdout).toContain('"planted_persistent_helper_rejected_samples":40');
         expect(run.stdout).toContain('"payload_release_refused":true');
         expect(run.stdout).toContain('"exact_pinned_group_reaped":true');
         expect(run.stdout).toContain('"no_exact_group_survivor":true');
+        expect(run.stdout).toContain('"no_planted_persistent_helper_survivor":true');
       } else if (mode === "term-interrupt-cleanup") {
         expect(run.stdout).toContain(
           "term-interrupted-parent-after-term-resistant-payload-control-status-cleans-most-recent-untracked-exact-supervisor",

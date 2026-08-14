@@ -348,7 +348,7 @@ emit_release_race_failure() {
 
 emit_persistent_pre_release_helper_failure() {
   local code="$1" payload_started="$2" group_survives=false exact_reap_recorded=false
-  local most_recent_supervisor_empty=false
+  local most_recent_supervisor_empty=false planted_helper_survives=false
   if is_decimal "${S2_LAST_SUPERVISOR_PGID}" && \
     kill -0 -- "-${S2_LAST_SUPERVISOR_PGID}" 2>/dev/null; then
     group_survives=true
@@ -358,7 +358,11 @@ emit_persistent_pre_release_helper_failure() {
     exact_reap_recorded=true
   fi
   [[ -z "${S2_MOST_RECENT_SUPERVISOR}" ]] && most_recent_supervisor_empty=true
-  emit "{\"tool\":\"bash\",\"package\":\"apps/wire\",\"suite\":\"s2-krater-shell\",\"status\":\"fail\",\"code\":\"${code}\",\"pre_release_resample_attempts\":$(json_decimal_or_null "${S2_PRE_RELEASE_RESAMPLE_ATTEMPTS}"),\"pre_release_accepted_samples\":$(json_decimal_or_null "${S2_PRE_RELEASE_ACCEPTED_SAMPLES}"),\"pre_release_rejected_samples\":$(json_decimal_or_null "${S2_PRE_RELEASE_REJECTED_SAMPLES}"),\"pre_release_max_group_members\":$(json_decimal_or_null "${S2_PRE_RELEASE_MAX_GROUP_MEMBER_COUNT}"),\"payload_started\":$(json_bool "${payload_started}"),\"exact_pinned_group_reap_recorded\":$(json_bool "${exact_reap_recorded}"),\"most_recent_supervisor_empty\":$(json_bool "${most_recent_supervisor_empty}"),\"exact_group_survives\":$(json_bool "${group_survives}"),\"reproduce\":\"S2_SHELL_REGRESSION_TEST=persistent-pre-release-helper scripts/e2e-s2-krater.sh\"}"
+  if is_decimal "${S2_PRE_RELEASE_EXPECTED_HELPER_PID}" && \
+    kill -0 "${S2_PRE_RELEASE_EXPECTED_HELPER_PID}" 2>/dev/null; then
+    planted_helper_survives=true
+  fi
+  emit "{\"tool\":\"bash\",\"package\":\"apps/wire\",\"suite\":\"s2-krater-shell\",\"status\":\"fail\",\"code\":\"${code}\",\"pre_release_resample_attempts\":$(json_decimal_or_null "${S2_PRE_RELEASE_RESAMPLE_ATTEMPTS}"),\"pre_release_accepted_samples\":$(json_decimal_or_null "${S2_PRE_RELEASE_ACCEPTED_SAMPLES}"),\"pre_release_rejected_samples\":$(json_decimal_or_null "${S2_PRE_RELEASE_REJECTED_SAMPLES}"),\"pre_release_max_group_members\":$(json_decimal_or_null "${S2_PRE_RELEASE_MAX_GROUP_MEMBER_COUNT}"),\"planted_persistent_helper_pid\":$(json_decimal_or_null "${S2_PRE_RELEASE_EXPECTED_HELPER_PID}"),\"planted_persistent_helper_rejected_samples\":$(json_decimal_or_null "${S2_PRE_RELEASE_EXPECTED_HELPER_REJECTED_SAMPLES}"),\"planted_persistent_helper_survives\":$(json_bool "${planted_helper_survives}"),\"payload_started\":$(json_bool "${payload_started}"),\"exact_pinned_group_reap_recorded\":$(json_bool "${exact_reap_recorded}"),\"most_recent_supervisor_empty\":$(json_bool "${most_recent_supervisor_empty}"),\"exact_group_survives\":$(json_bool "${group_survives}"),\"reproduce\":\"S2_SHELL_REGRESSION_TEST=persistent-pre-release-helper scripts/e2e-s2-krater.sh\"}"
 }
 
 redacted_wrangler_cause() {
@@ -424,6 +428,8 @@ S2_PRE_RELEASE_ACCEPTED_SAMPLES=0
 S2_PRE_RELEASE_REJECTED_SAMPLES=0
 S2_PRE_RELEASE_MAX_GROUP_MEMBER_COUNT=0
 S2_PRE_RELEASE_REAPED_PGID=""
+S2_PRE_RELEASE_EXPECTED_HELPER_PID=""
+S2_PRE_RELEASE_EXPECTED_HELPER_REJECTED_SAMPLES=0
 # This packed record is published before any release write. It closes the caller-assignment
 # gap: an EXIT trap can still prove and release the exact newest supervisor while a caller is
 # between start_pinned_supervisor and its Worker/lifecycle bookkeeping. Fields are PID, PGID,
@@ -433,6 +439,29 @@ S2_MOST_RECENT_SUPERVISOR=""
 
 is_decimal() {
   [[ "$1" =~ ^[0-9]+$ ]]
+}
+
+# A process-table scanner must leave the pinned supervisor's session before it samples it.
+# Bash gives a command-substitution/process-substitution child its caller's process group, so
+# this function immediately execs Perl, whose first action is `setsid()`. Only then does it exec
+# `ps`; the scanner is therefore never counted as a member of the group it observes.
+detached_process_table_read() {
+  command -v perl >/dev/null 2>&1 || return 1
+  LC_ALL=C exec perl -MPOSIX=setsid -e 'setsid() or exit 125; exec @ARGV' -- ps "$@"
+}
+
+# Read exactly one detached process-table row. Scanner failure, no row, or multiple rows is
+# unsafe for an ownership proof and fails closed without falling back to a shell substitution.
+read_detached_process_snapshot() {
+  local line rows=0
+  S2_DETACHED_PROCESS_SNAPSHOT=""
+  while IFS= read -r line; do
+    [[ -n "${line}" ]] || continue
+    rows=$((rows + 1))
+    [[ ${rows} -eq 1 ]] || return 1
+    S2_DETACHED_PROCESS_SNAPSHOT="${line}"
+  done < <(detached_process_table_read "$@")
+  [[ ${rows} -eq 1 ]]
 }
 
 # Inspect the direct supervisor without printing its command line: it contains the per-run
@@ -480,12 +509,49 @@ watchdog_is_healthy() {
   watchdog_snapshot "$1" "$2" "$3" "$4" "$5"
 }
 
+# The pre-release proof must not create an observer in the very group it is
+# accepting. These are deliberately separate from the ordinary lifecycle
+# classifiers below: only the release gate needs a session-detached scanner.
+pre_release_supervisor_is_owned() {
+  local pid="$1" pgid="$2" marker="$3" line
+  read_detached_process_snapshot -o pid=,pgid=,ppid=,stat=,command= -p "${pid}" || return 1
+  line="${S2_DETACHED_PROCESS_SNAPSHOT}"
+  read -r seen_pid seen_pgid seen_ppid seen_stat seen_command <<<"${line}"
+  is_decimal "${seen_pid}" && is_decimal "${seen_pgid}" && is_decimal "${seen_ppid}" || return 1
+  [[ "${seen_pid}" == "${pid}" && "${seen_pgid}" == "${pgid}" && \
+    "${seen_ppid}" == "${S2_PARENT_PID}" && "${seen_stat}" != T* && \
+    "${seen_command}" == *"s2-pinned-supervisor-${marker}"* ]] || return 1
+  kill -0 "${pid}" 2>/dev/null && kill -0 -- "-${pgid}" 2>/dev/null
+}
+
+pre_release_watchdog_is_healthy() {
+  local watchdog_pid="$1" supervisor_pid="$2" pgid="$3" marker="$4" health_file="$5"
+  local line health_line health_state health_pid
+  [[ -f "${health_file}" && ! -L "${health_file}" ]] || return 1
+  line=""
+  while IFS= read -r health_line; do
+    line="${health_line}"
+  done <"${health_file}"
+  [[ -n "${line}" ]] || return 1
+  read -r health_state health_pid <<<"${line}"
+  [[ "${health_state}" == "healthy" && "${health_pid}" == "${watchdog_pid}" ]] || return 1
+  read_detached_process_snapshot -o pid=,pgid=,ppid=,stat=,command= -p "${watchdog_pid}" || return 1
+  line="${S2_DETACHED_PROCESS_SNAPSHOT}"
+  read -r seen_pid seen_pgid seen_ppid seen_stat seen_command <<<"${line}"
+  is_decimal "${seen_pid}" && is_decimal "${seen_pgid}" && is_decimal "${seen_ppid}" || return 1
+  [[ "${seen_pid}" == "${watchdog_pid}" && "${seen_pgid}" == "${pgid}" && \
+    "${seen_ppid}" == "${supervisor_pid}" && "${seen_stat}" != T* && \
+    "${seen_stat}" != Z* && "${seen_command}" == *"s2-parent-watchdog-${marker}"* ]] || return 1
+  kill -0 "${watchdog_pid}" 2>/dev/null && kill -0 -- "-${pgid}" 2>/dev/null
+}
+
 # The supervisor is the group leader and remains alive after its child exits. It blocks on a
 # private release FIFO before invoking the real command, so no Wrangler/workerd descendant can
 # exist until identity and kernel group ownership have been proved by the parent.
 start_pinned_supervisor() {
   local status_file="$1" label="$2" persist="$3" port="$4" proof_scope="$5"
-  local marker pid deadline control_fifo release_fifo release_token arm_token
+  local marker pid deadline control_fifo release_fifo release_token arm_token persistent_helper_pid_file
+  local persistent_helper_pid=""
   local watchdog_pid_file watchdog_health watchdog_pid tick release_sent=0
   local plant_watchdog_exit_on_term="${S2_PLANT_WATCHDOG_EXIT_ON_TERM:-0}"
   local plant_supervisor_exit_on_term="${S2_PLANT_SUPERVISOR_EXIT_ON_TERM:-0}"
@@ -502,11 +568,15 @@ start_pinned_supervisor() {
   S2_PRE_RELEASE_REJECTED_SAMPLES=0
   S2_PRE_RELEASE_MAX_GROUP_MEMBER_COUNT=0
   S2_PRE_RELEASE_REAPED_PGID=""
+  S2_PRE_RELEASE_EXPECTED_HELPER_PID=""
+  S2_PRE_RELEASE_EXPECTED_HELPER_REJECTED_SAMPLES=0
   [[ ! -e "${status_file}" && ! -L "${status_file}" ]] || return 1
   control_fifo="${status_file}.control"
   [[ ! -e "${control_fifo}" && ! -L "${control_fifo}" ]] || return 1
   release_fifo="${status_file}.release"
   [[ ! -e "${release_fifo}" && ! -L "${release_fifo}" ]] || return 1
+  persistent_helper_pid_file="${status_file}.persistent-helper.pid"
+  [[ ! -e "${persistent_helper_pid_file}" && ! -L "${persistent_helper_pid_file}" ]] || return 1
   watchdog_pid_file="${status_file}.watchdog.pid"
   [[ ! -e "${watchdog_pid_file}" && ! -L "${watchdog_pid_file}" ]] || return 1
   watchdog_health="${status_file}.watchdog.health"
@@ -529,7 +599,8 @@ start_pinned_supervisor() {
     plant_watchdog_exit_on_term="$8"
     plant_supervisor_exit_on_term="$9"
     plant_persistent_pre_release_helper="${10}"
-    shift 10
+    persistent_helper_pid_file="${11}"
+    shift 11
     supervisor_pid="$$"
     release_fifo="${status_file}.release"
     [[ ! -e "${release_fifo}" && ! -L "${release_fifo}" ]] || exit 125
@@ -537,26 +608,36 @@ start_pinned_supervisor() {
     exec 8<>"${release_fifo}" || exit 125
     wait_for_gate_value() {
       local expected="$1" value
-      # The controller owns all process-table observations before it writes either
-      # gate token. Do not run `$(ps ...)` while this supervisor is blocked: Bash
-      # gives that command-substitution shell this pinned process group, so the
-      # observer becomes a transient second descendant in the very proof it races.
-      # FIFO reads are builtins and create no group member; controller-side
-      # `supervisor_is_owned` remains the fail-closed acceptance check.
+      # Gate reads are builtins and never create a group member. Controller-side
+      # process-table observations run through a detached `setsid` scanner, so
+      # they cannot turn their own sampling process into a second descendant of
+      # this blocked supervisor.
       while :; do
         if IFS= read -r -t 0.2 value <&8; then
           [[ "${value}" == "${expected}" ]] || exit 125
           return 0
+        fi
+        if ! kill -0 "${owner_pid}" 2>/dev/null; then
+          # Before the watchdog exists, this supervisor is the only process
+          # able to retire its private group. Killing the exact group, rather
+          # than merely exiting, also reaps any planted pre-release helper.
+          trap - TERM HUP INT
+          kill -KILL -- "-${supervisor_pid}" 2>/dev/null || exit 125
+          exit 125
         fi
       done
     }
     trap "exit 125" TERM HUP INT
     if [[ "${plant_persistent_pre_release_helper}" == 1 ]]; then
       # Regression-only: this one-process helper has no child of its own, but
-      # its argv deliberately carries the supervisor marker. The classifier
-      # must treat that marker match only as a possible fork/exec ghost, exhaust
-      # its bounded resamples, and refuse release before the payload can start.
+      # its argv deliberately carries the supervisor marker. Publish its exact
+      # PID before the controller samples the group so a process-table observer
+      # cannot impersonate the planted helper in the proof.
+      [[ ! -e "${persistent_helper_pid_file}" && ! -L "${persistent_helper_pid_file}" ]] || exit 125
       bash -c "exec -a s2-persistent-pre-release-helper-s2-pinned-supervisor-${marker} tail -f /dev/null" &
+      persistent_helper_pid="$!"
+      [[ "${persistent_helper_pid}" =~ ^[0-9]+$ ]] || exit 125
+      printf "%s\\n" "${persistent_helper_pid}" >"${persistent_helper_pid_file}" || exit 125
     fi
     # The controller first arms the parent-loss watchdog while this supervisor remains blocked.
     # Only after it proves the watchdog exact healthy identity does it send the separate
@@ -620,21 +701,66 @@ start_pinned_supervisor() {
     "${S2_WATCHDOG_MAX_UNCERTAIN_TICKS}" "${plant_watchdog_exit_on_term}" \
     "${plant_supervisor_exit_on_term}" \
     "${plant_persistent_pre_release_helper}" \
+    "${persistent_helper_pid_file}" \
     "$@" &
   pid=$!
   S2_LAST_SUPERVISOR_PGID="${pid}"
 
   deadline=$((SECONDS + S2_READY_DEADLINE_SECONDS))
   while (( SECONDS < deadline )); do
-    if supervisor_is_owned "${pid}" "${pid}" "${marker}" && [[ -p "${release_fifo}" && ! -L "${release_fifo}" ]]; then
+    if [[ -p "${release_fifo}" && ! -L "${release_fifo}" ]]; then
       # Open the parent side read/write before the final proof. A later write uses this already-open
       # descriptor, so a child exit in the proof-to-release window cannot turn pathname open into
       # an unbounded FIFO wait. The parent-held read end also prevents SIGPIPE on that planted race.
       exec 7<>"${release_fifo}" || return 1
-      if ! supervisor_is_owned "${pid}" "${pid}" "${marker}"; then exec 7>&-; return 1; fi
+      if [[ "${plant_persistent_pre_release_helper}" == 1 ]]; then
+        deadline=$((SECONDS + S2_READY_DEADLINE_SECONDS))
+        while (( SECONDS < deadline )); do
+          if [[ -f "${persistent_helper_pid_file}" && ! -L "${persistent_helper_pid_file}" ]] && \
+            IFS= read -r persistent_helper_pid <"${persistent_helper_pid_file}" && \
+            is_decimal "${persistent_helper_pid}"; then
+            S2_PRE_RELEASE_EXPECTED_HELPER_PID="${persistent_helper_pid}"
+            break
+          fi
+          sleep 0.05
+        done
+        if ! is_decimal "${S2_PRE_RELEASE_EXPECTED_HELPER_PID}"; then
+          exec 7>&-
+          if pre_release_supervisor_is_owned "${pid}" "${pid}" "${marker}"; then
+            kill_owned_group_to_zero "${pid}" "${pid}" "${marker}" "${persist}" "${port}" \
+              "${proof_scope}" || return 1
+            S2_PRE_RELEASE_REAPED_PGID="${pid}"
+          fi
+          return 1
+        fi
+      fi
+      if [[ "${S2_PLANT_OWNER_LOSS_BEFORE_ARM:-0}" == 1 ]]; then
+        local owner_loss_record="${S2_PRE_ARM_OWNER_LOSS_RECORD:-}"
+          [[ "${S2_SHELL_REGRESSION_TEST:-}" == "pre-arm-owner-loss-child" && \
+          -n "${owner_loss_record}" && \
+          "${owner_loss_record}" == "${S2_EVIDENCE_ROOT}/"* && \
+          ! -e "${owner_loss_record}" && ! -L "${owner_loss_record}" && \
+          "${plant_persistent_pre_release_helper}" == 1 ]] && \
+          is_decimal "${S2_PRE_RELEASE_EXPECTED_HELPER_PID}" || {
+          exec 7>&-
+          return 1
+        }
+        printf '%s %s %s %s %s %s\n' \
+          "${pid}" "${pid}" "${marker}" "${S2_PRE_RELEASE_EXPECTED_HELPER_PID}" \
+          "${persist}" "${port}" >"${owner_loss_record}" || {
+          exec 7>&-
+          return 1
+        }
+        # Test-only: die while the supervisor is still waiting for its first
+        # gate. This is a builtin timed read on the already-open FIFO, so the
+        # plant creates no controller child that could become unrelated residue.
+        while :; do
+          IFS= read -r -t 1 _ <&7 || :
+        done
+      fi
       if ! pre_release_group_is_stably_pinned "${pid}" "${marker}"; then
         exec 7>&-
-        if supervisor_is_owned "${pid}" "${pid}" "${marker}"; then
+        if pre_release_supervisor_is_owned "${pid}" "${pid}" "${marker}"; then
           kill_owned_group_to_zero "${pid}" "${pid}" "${marker}" "${persist}" "${port}" \
             "${proof_scope}" || return 1
           S2_PRE_RELEASE_REAPED_PGID="${pid}"
@@ -648,19 +774,19 @@ start_pinned_supervisor() {
       deadline=$((SECONDS + S2_READY_DEADLINE_SECONDS))
       watchdog_pid=""
       while (( SECONDS < deadline )); do
-        supervisor_is_owned "${pid}" "${pid}" "${marker}" || break
+        pre_release_supervisor_is_owned "${pid}" "${pid}" "${marker}" || break
         if [[ -f "${watchdog_pid_file}" && ! -L "${watchdog_pid_file}" ]] && \
           IFS= read -r watchdog_pid <"${watchdog_pid_file}" && is_decimal "${watchdog_pid}" && \
-          watchdog_is_healthy "${watchdog_pid}" "${pid}" "${pid}" "${marker}" "${watchdog_health}"; then
+          pre_release_watchdog_is_healthy "${watchdog_pid}" "${pid}" "${pid}" "${marker}" "${watchdog_health}"; then
           break
         fi
         sleep 0.05
       done
-      if ! supervisor_is_owned "${pid}" "${pid}" "${marker}" || \
+      if ! pre_release_supervisor_is_owned "${pid}" "${pid}" "${marker}" || \
         [[ -z "${watchdog_pid}" ]] || \
-        ! watchdog_is_healthy "${watchdog_pid}" "${pid}" "${pid}" "${marker}" "${watchdog_health}"; then
+        ! pre_release_watchdog_is_healthy "${watchdog_pid}" "${pid}" "${pid}" "${marker}" "${watchdog_health}"; then
         exec 7>&-
-        if supervisor_is_owned "${pid}" "${pid}" "${marker}"; then
+        if pre_release_supervisor_is_owned "${pid}" "${pid}" "${marker}"; then
           signal_owned_group KILL "${pid}" "${pid}" "${marker}" || return 1
           for ((tick = 0; tick < S2_TERMINATE_WAIT_TICKS; tick += 1)); do
             kill -0 -- "-${pid}" 2>/dev/null || break
@@ -806,11 +932,10 @@ pre_release_snapshot_line_kind() {
   is_decimal "${seen_pid}" && is_decimal "${seen_pgid}" && is_decimal "${seen_ppid}" || return 1
   [[ "${seen_pid}" == "${helper_pid}" && "${seen_pgid}" == "${supervisor_pid}" && \
     "${seen_ppid}" == "${supervisor_pid}" && "${seen_stat}" != T* ]] || return 1
-  # macOS can expose a child between fork and exec with the parent's command
-  # line, and may expose it once more as a zombie. Either observation is
-  # ambiguous, not accepted: request a bounded resample. A persistent helper
-  # can forge the same marker in its argv, so repeated ambiguity must exhaust
-  # that bound and refuse release rather than becoming an allow rule.
+  # An argv marker is not an identity proof. macOS can expose a child between
+  # fork and exec with its parent's argv, and a persistent non-ps helper can
+  # deliberately carry the same marker. Either case is ambiguous, never
+  # accepted: bounded resampling must refuse release on persistent ambiguity.
   if [[ "${seen_stat}" == Z* || \
     "${seen_command}" == *"s2-pinned-supervisor-${marker}"* ]]; then
     return 2
@@ -830,48 +955,85 @@ pre_release_snapshot_line_kind() {
 # and fails closed.
 pre_release_helper_is_expected_snapshot() {
   local helper_pid="$1" supervisor_pid="$2" marker="$3" line
-  if ! line="$(LC_ALL=C ps -o pid=,pgid=,ppid=,stat=,command= -p "${helper_pid}" 2>/dev/null)"; then
-    return 2
-  fi
-  [[ -n "${line}" ]] || return 2
+  read_detached_process_snapshot -o pid=,pgid=,ppid=,stat=,command= -p "${helper_pid}" || return 2
+  line="${S2_DETACHED_PROCESS_SNAPSHOT}"
   pre_release_snapshot_line_kind "${line}" "${helper_pid}" "${supervisor_pid}" "${marker}"
 }
 
-# Before release the fresh session contains only the pinned supervisor, except for its exact
-# process-table helper. Two accepted bounded samples prove the leader remains pinned. A helper
-# that exits between the group scan and its own inspection is resampled; a live non-ps helper is
-# refused immediately; and a persistent ambiguous helper exhausts the same finite resample
-# budget before release is refused. This preserves the unexpected-child fail-closed boundary
-# without making a slow or just-exited `ps` process an aggregate-load startup flake.
+# Before release the fresh session contains only the pinned supervisor. One detached process-table
+# scan supplies each complete sample, so an observer never appears as the helper it classifies.
+# Two accepted bounded samples prove the leader remains pinned. A marker-bearing helper is
+# ambiguous and resampled; a live non-ps helper is refused immediately; and persistent ambiguity
+# exhausts the same finite resample budget before release is refused.
 pre_release_group_is_stably_pinned() {
-  local pid="$1" marker="$2" attempts=0 accepted=0 member helper="" helper_status
+  local pid="$1" marker="$2" attempts=0 accepted=0 line member helper="" helper_line=""
+  local supervisor_line="" helper_status expected_helper
+  local seen_pid seen_pgid seen_ppid seen_stat seen_command
   S2_PRE_RELEASE_RESAMPLE_ATTEMPTS=0
   S2_PRE_RELEASE_ACCEPTED_SAMPLES=0
   S2_PRE_RELEASE_REJECTED_SAMPLES=0
   S2_PRE_RELEASE_MAX_GROUP_MEMBER_COUNT=0
+  S2_PRE_RELEASE_EXPECTED_HELPER_REJECTED_SAMPLES=0
+  expected_helper="${S2_PRE_RELEASE_EXPECTED_HELPER_PID}"
+  [[ -z "${expected_helper}" ]] || is_decimal "${expected_helper}" || return 1
   while (( attempts < 40 && accepted < 2 )); do
     attempts=$((attempts + 1))
     S2_PRE_RELEASE_RESAMPLE_ATTEMPTS="${attempts}"
-    supervisor_is_owned "${pid}" "${pid}" "${marker}" || return 1
-    group_members "${pid}" || return 1
+    S2_GROUP_MEMBER_COUNT=0
+    S2_GROUP_MEMBER_PIDS=()
+    supervisor_line=""
+    helper_line=""
+    # One detached scan is the complete sample. It sees the supervisor and any
+    # helper in one process-table instant, after the scanner has left this
+    # group; no command-substitution child can manufacture the second member.
+    while IFS= read -r line; do
+      [[ -n "${line}" ]] || continue
+      read -r seen_pid seen_pgid seen_ppid seen_stat seen_command <<<"${line}"
+      is_decimal "${seen_pid}" && is_decimal "${seen_pgid}" && is_decimal "${seen_ppid}" || return 1
+      [[ "${seen_pgid}" == "${pid}" ]] || continue
+      S2_GROUP_MEMBER_COUNT=$((S2_GROUP_MEMBER_COUNT + 1))
+      S2_GROUP_MEMBER_PIDS+=("${seen_pid}")
+      if [[ "${seen_pid}" == "${pid}" ]]; then
+        supervisor_line="${line}"
+      else
+        helper_line="${line}"
+      fi
+    done < <(detached_process_table_read -o pid=,pgid=,ppid=,stat=,command= -g "${pid}")
     if (( S2_GROUP_MEMBER_COUNT > S2_PRE_RELEASE_MAX_GROUP_MEMBER_COUNT )); then
       S2_PRE_RELEASE_MAX_GROUP_MEMBER_COUNT="${S2_GROUP_MEMBER_COUNT}"
     fi
     [[ ${S2_GROUP_MEMBER_COUNT} -ge 1 && ${S2_GROUP_MEMBER_COUNT} -le 2 ]] || return 1
     group_contains_pid "${pid}" || return 1
+    [[ -n "${supervisor_line}" ]] || return 1
+    read -r seen_pid seen_pgid seen_ppid seen_stat seen_command <<<"${supervisor_line}"
+    [[ "${seen_pid}" == "${pid}" && "${seen_pgid}" == "${pid}" && \
+      "${seen_ppid}" == "${S2_PARENT_PID}" && "${seen_stat}" != T* && \
+      "${seen_command}" == *"s2-pinned-supervisor-${marker}"* ]] || return 1
+    kill -0 "${pid}" 2>/dev/null && kill -0 -- "-${pid}" 2>/dev/null || return 1
     if [[ ${S2_GROUP_MEMBER_COUNT} -eq 2 ]]; then
       helper=""
       for member in "${S2_GROUP_MEMBER_PIDS[@]}"; do
         [[ "${member}" == "${pid}" ]] || helper="${member}"
       done
       [[ -n "${helper}" ]] || return 1
-      if pre_release_helper_is_expected_snapshot "${helper}" "${pid}" "${marker}"; then
+      # The plant records its exact helper PID before the controller samples the
+      # group. If an observer ever entered this group, it would be a third member
+      # or replace the recorded helper here, both fail-closed rather than making
+      # the plant's rejection counters look real.
+      [[ -z "${expected_helper}" || "${helper}" == "${expected_helper}" ]] || return 1
+      [[ -n "${helper_line}" ]] || return 1
+      if pre_release_snapshot_line_kind "${helper_line}" "${helper}" "${pid}" "${marker}"; then
         accepted=$((accepted + 1))
         S2_PRE_RELEASE_ACCEPTED_SAMPLES="${accepted}"
       else
         helper_status=$?
         [[ ${helper_status} -eq 2 ]] || return 1
         S2_PRE_RELEASE_REJECTED_SAMPLES=$((S2_PRE_RELEASE_REJECTED_SAMPLES + 1))
+        if [[ -n "${expected_helper}" ]]; then
+          S2_PRE_RELEASE_EXPECTED_HELPER_REJECTED_SAMPLES=$((
+            S2_PRE_RELEASE_EXPECTED_HELPER_REJECTED_SAMPLES + 1
+          ))
+        fi
       fi
     else
       accepted=$((accepted + 1))
@@ -2333,6 +2495,66 @@ run_s2_shell_regression_test() {
     return 0
   fi
 
+  if [[ "${mode}" == "pre-arm-owner-loss-child" ]]; then
+    parent_loss_record="${S2_PRE_ARM_OWNER_LOSS_RECORD:-}"
+    [[ -n "${parent_loss_record}" && "${parent_loss_record}" == "${S2_EVIDENCE_ROOT}/"* && \
+      ! -e "${parent_loss_record}" && ! -L "${parent_loss_record}" ]] || return 2
+    status_file="${S2_STATE_DIR}/pre-arm-owner-loss-$(random_hex 8).status"
+    S2_PLANT_PERSISTENT_PRE_RELEASE_HELPER=1 \
+      S2_PLANT_OWNER_LOSS_BEFORE_ARM=1 \
+      start_pinned_supervisor "${status_file}" pre-arm-owner-loss \
+        "${S2_STATE_DIR}" "${S2_PORT}" client bash -c 'sleep 30'
+    return 125
+  fi
+
+  if [[ "${mode}" == "pre-arm-owner-loss" ]]; then
+    local planted_helper_pid child_persist child_port
+    parent_loss_record="${S2_STATE_DIR}/pre-arm-owner-loss-record-$(random_hex 8)"
+    env \
+      S2_SHELL_REGRESSION_TEST=pre-arm-owner-loss-child \
+      S2_PRE_ARM_OWNER_LOSS_RECORD="${parent_loss_record}" \
+      bash "${BASH_SOURCE[0]}" >/dev/null 2>&1 &
+    parent_loss_child=$!
+    deadline=$((SECONDS + S2_READY_DEADLINE_SECONDS))
+    while [[ ! -f "${parent_loss_record}" || -L "${parent_loss_record}" ]]; do
+      if (( SECONDS >= deadline )); then
+        kill -KILL "${parent_loss_child}" 2>/dev/null || :
+        wait "${parent_loss_child}" 2>/dev/null || :
+        return 1
+      fi
+      sleep 0.05
+    done
+    read -r supervisor_pid supervisor_pgid supervisor_marker planted_helper_pid \
+      child_persist child_port <"${parent_loss_record}" || return 1
+    is_decimal "${supervisor_pid}" && is_decimal "${supervisor_pgid}" && \
+      is_decimal "${planted_helper_pid}" && is_decimal "${child_port}" || return 1
+    [[ "${supervisor_pid}" == "${supervisor_pgid}" && -n "${supervisor_marker}" && \
+      -d "${child_persist}" && ! -L "${child_persist}" ]] || return 1
+    kill -0 "${planted_helper_pid}" 2>/dev/null || return 1
+    kill -KILL "${parent_loss_child}" 2>/dev/null || return 1
+    if wait "${parent_loss_child}" 2>/dev/null; then
+      parent_loss_status=0
+    else
+      parent_loss_status=$?
+    fi
+    [[ ${parent_loss_status} -eq 137 ]] || return 1
+    deadline=$((SECONDS + 5))
+    while kill -0 -- "-${supervisor_pgid}" 2>/dev/null; do
+      if (( SECONDS >= deadline )); then
+        reap_parent_terminated_supervisor_residual \
+          "${supervisor_pid}" "${supervisor_pgid}" "${supervisor_marker}" \
+          "${child_persist}" "${child_port}" || :
+        return 1
+      fi
+      sleep 0.1
+    done
+    if kill -0 "${planted_helper_pid}" 2>/dev/null; then return 1; fi
+    assert_no_run_survivors \
+      "${child_persist}" "${child_port}" "${supervisor_marker}" || return 1
+    emit '{"tool":"bash","package":"apps/wire","suite":"s2-krater-shell","status":"pass","scenario":"controller-death-before-first-gate-reaps-supervisor-and-planted-helper","reproduce":"S2_SHELL_REGRESSION_TEST=pre-arm-owner-loss scripts/e2e-s2-krater.sh"}'
+    return 0
+  fi
+
   if [[ "${mode}" == "parent-loss-child" ]]; then
     parent_loss_record="${S2_PARENT_LOSS_RECORD:-}"
     [[ -n "${parent_loss_record}" && ! -e "${parent_loss_record}" && ! -L "${parent_loss_record}" ]] || return 2
@@ -2509,10 +2731,16 @@ run_s2_shell_regression_test() {
       emit_persistent_pre_release_helper_failure "S2_PERSISTENT_PRE_RELEASE_HELPER_ACCEPTED" "${payload_started_bool}"
       return 1
     fi
+    if ! is_decimal "${S2_PRE_RELEASE_EXPECTED_HELPER_PID}"; then
+      emit_persistent_pre_release_helper_failure "S2_PERSISTENT_PRE_RELEASE_HELPER_PLANTED_IDENTITY_INVALID" false
+      return 1
+    fi
     [[ ${S2_PRE_RELEASE_RESAMPLE_ATTEMPTS} -eq 40 && \
       ${S2_PRE_RELEASE_ACCEPTED_SAMPLES} -eq 0 && \
       ${S2_PRE_RELEASE_REJECTED_SAMPLES} -eq 40 && \
       ${S2_PRE_RELEASE_MAX_GROUP_MEMBER_COUNT} -eq 2 && \
+      "${S2_PRE_RELEASE_EXPECTED_HELPER_PID}" != "${S2_LAST_SUPERVISOR_PGID}" && \
+      ${S2_PRE_RELEASE_EXPECTED_HELPER_REJECTED_SAMPLES} -eq 40 && \
       "${S2_PRE_RELEASE_REAPED_PGID}" == "${S2_LAST_SUPERVISOR_PGID}" && \
       -z "${S2_MOST_RECENT_SUPERVISOR}" && \
       ! -e "${payload_started}" && ! -L "${payload_started}" ]] || {
@@ -2530,7 +2758,11 @@ run_s2_shell_regression_test() {
       emit_persistent_pre_release_helper_failure "S2_PERSISTENT_PRE_RELEASE_HELPER_SURVIVOR" false
       return 1
     fi
-    emit '{"tool":"bash","package":"apps/wire","suite":"s2-krater-shell","status":"pass","scenario":"persistent-marker-bearing-pre-release-helper-exhausts-resamples-refuses-payload-release-and-reaps-exact-pinned-group","pre_release_resample_attempts":40,"pre_release_accepted_samples":0,"pre_release_rejected_samples":40,"pre_release_max_group_members":2,"payload_release_refused":true,"exact_pinned_group_reaped":true,"no_exact_group_survivor":true,"reproduce":"S2_SHELL_REGRESSION_TEST=persistent-pre-release-helper scripts/e2e-s2-krater.sh"}'
+    if kill -0 "${S2_PRE_RELEASE_EXPECTED_HELPER_PID}" 2>/dev/null; then
+      emit_persistent_pre_release_helper_failure "S2_PERSISTENT_PRE_RELEASE_HELPER_PLANTED_HELPER_SURVIVOR" false
+      return 1
+    fi
+    emit "{\"tool\":\"bash\",\"package\":\"apps/wire\",\"suite\":\"s2-krater-shell\",\"status\":\"pass\",\"scenario\":\"persistent-marker-bearing-pre-release-helper-exhausts-resamples-refuses-payload-release-and-reaps-exact-pinned-group\",\"pre_release_resample_attempts\":40,\"pre_release_accepted_samples\":0,\"pre_release_rejected_samples\":40,\"pre_release_max_group_members\":2,\"planted_persistent_helper_pid\":${S2_PRE_RELEASE_EXPECTED_HELPER_PID},\"planted_persistent_helper_rejected_samples\":40,\"payload_release_refused\":true,\"exact_pinned_group_reaped\":true,\"no_exact_group_survivor\":true,\"no_planted_persistent_helper_survivor\":true,\"reproduce\":\"S2_SHELL_REGRESSION_TEST=persistent-pre-release-helper scripts/e2e-s2-krater.sh\"}"
     return 0
   fi
 
