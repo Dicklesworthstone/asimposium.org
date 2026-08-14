@@ -1,0 +1,137 @@
+# ASImposium environment topology (bead asimposiumorg-p1g, OPS.3).
+#
+# This file is the single declarative source for what each environment is made
+# of: its D1 database, its two R2 buckets and their roles, its Durable Object
+# namespace, and its signing key ids. `validate-environments.mjs` enforces every
+# rule below; nothing here is applied to Cloudflare by reading this file.
+#
+# IT CONTAINS NO SECRETS AND MUST NEVER CONTAIN ANY.
+#   - Signing key *ids* (`kid`) are public identifiers and belong here. The keys
+#     themselves live in `wrangler secret` / Vercel env and nowhere else.
+#   - Resource identifiers for deployable environments are written as
+#     `${VAR_NAME}` references resolved from CI at deploy time. A literal id is
+#     rejected by the validator, so a real one cannot be committed by accident.
+#   - The validator also scans every value for credential shapes and fails on
+#     anything that looks like a key, token, or PEM block.
+#
+# Binding NAMES are identical across environments so the Worker's code path is
+# the same everywhere (Fable §13.3). Resource names and ids are distinct across
+# environments so nothing is ever shared. Parity is checked by ROLE, never by
+# bucket name (bead: "compare roles rather than bucket names").
+
+schema_version = 1
+
+[policy]
+# Every environment must declare exactly these R2 roles — no more, no fewer.
+required_r2_roles = ["private-cas", "public-delivery"]
+# Only this role may carry a public custom domain.
+publishable_role = "public-delivery"
+# The apex artifact hostname. Production alone may claim it.
+production_artifact_hostname = "artifacts.asimposium.org"
+# Migrations roll forward only; there are no down-migrations (see migrate.mjs).
+rollback_policy = "forward-only"
+
+# ---------------------------------------------------------------------------
+# local — miniflare / wrangler local persistence. No account, no network.
+# ---------------------------------------------------------------------------
+[env.local]
+kind = "local"
+is_preview = false
+may_hold_production_keys = false
+destructive_operations_allowed = true
+
+[env.local.d1]
+binding = "DB"
+database_name = "asimposium-local"
+database_id = "00000000-0000-0000-0000-000000000000"
+
+[[env.local.r2]]
+binding = "ARTIFACTS"
+role = "private-cas"
+bucket_name = "asimposium-artifacts-local"
+custom_domain = ""
+
+[[env.local.r2]]
+binding = "PUBLIC_ARTIFACTS"
+role = "public-delivery"
+bucket_name = "asimposium-public-local"
+custom_domain = ""
+
+[env.local.durable_objects]
+binding = "HERALD_ROOMS"
+class_name = "HeraldRoom"
+script_namespace = "asimposium-stoa-local"
+
+[env.local.keys]
+current_kid = "local-dev-1"
+previous_kid = ""
+
+# ---------------------------------------------------------------------------
+# staging — the preview tier. Vercel previews point here. Synthetic data only.
+# ---------------------------------------------------------------------------
+[env.staging]
+kind = "remote"
+is_preview = true
+may_hold_production_keys = false
+destructive_operations_allowed = true
+
+[env.staging.d1]
+binding = "DB"
+database_name = "asimposium-staging"
+database_id = "${ASIMP_D1_DATABASE_ID_STAGING}"
+
+[[env.staging.r2]]
+binding = "ARTIFACTS"
+role = "private-cas"
+bucket_name = "asimposium-artifacts-staging"
+custom_domain = ""
+
+[[env.staging.r2]]
+binding = "PUBLIC_ARTIFACTS"
+role = "public-delivery"
+bucket_name = "asimposium-public-staging"
+custom_domain = "artifacts-staging.asimposium.org"
+
+[env.staging.durable_objects]
+binding = "HERALD_ROOMS"
+class_name = "HeraldRoom"
+script_namespace = "asimposium-stoa-staging"
+
+[env.staging.keys]
+current_kid = "staging-2026-08"
+previous_kid = "staging-2026-07"
+
+# ---------------------------------------------------------------------------
+# production — the only environment that may claim the apex artifact hostname.
+# ---------------------------------------------------------------------------
+[env.production]
+kind = "remote"
+is_preview = false
+may_hold_production_keys = true
+destructive_operations_allowed = false
+
+[env.production.d1]
+binding = "DB"
+database_name = "asimposium-prod"
+database_id = "${ASIMP_D1_DATABASE_ID_PRODUCTION}"
+
+[[env.production.r2]]
+binding = "ARTIFACTS"
+role = "private-cas"
+bucket_name = "asimposium-artifacts-prod"
+custom_domain = ""
+
+[[env.production.r2]]
+binding = "PUBLIC_ARTIFACTS"
+role = "public-delivery"
+bucket_name = "asimposium-public-prod"
+custom_domain = "artifacts.asimposium.org"
+
+[env.production.durable_objects]
+binding = "HERALD_ROOMS"
+class_name = "HeraldRoom"
+script_namespace = "asimposium-stoa-prod"
+
+[env.production.keys]
+current_kid = "prod-2026-08"
+previous_kid = "prod-2026-07"
