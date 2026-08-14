@@ -1,0 +1,11 @@
+name = "asimposium-s2-krater-legacy"
+main = "worker.ts"
+compatibility_date = "2026-08-13"
+compatibility_flags = ["nodejs_compat"]
+workers_dev = false
+
+[[d1_databases]]
+binding = "DB"
+database_name = "asimposium-s2-krater-legacy"
+database_id = "00000000-0000-0000-0000-000000000000"
+migrations_dir = "fixtures/legacy-migrations"
