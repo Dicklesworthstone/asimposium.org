@@ -141,6 +141,10 @@ against a weak reader stays in the threat model, not hidden under it.
   spellings. For example, the literal body text `"next_action\u0073":` remains data, rather than
   being treated as `"next_actions":`. This package makes no claim that a downstream consumer which
   decodes such body text will preserve the same boundary.
+- **No arbitrary-input sanitizer resource bound.** Unicode-canonical active-markup recovery uses the
+  exact whole-string transform only for findings and is assessed against Fable's planned 20,000
+  character `body_md` contract. It does not prove a time or RSS bound for unbounded input or an
+  unbounded number of canonical findings.
 - **No TOON**, per the section above.
 - The fingerprint is a drift checksum, not authentication, and not an ETag.
 - This package is not the validator. Scientific rules P1–P13 live in the Worker and

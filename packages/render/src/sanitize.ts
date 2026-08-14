@@ -127,14 +127,6 @@ function rawBrowserTokenizerScanText(value: string): string {
  * interpretation rather than an input rewrite for the raw pass. Its source map
  * makes any finding deduplicate against the original source occurrence.
  */
-function canonicalSourcePiece(character: string): string {
-  return character
-    .normalize("NFKD")
-    .replace(CANONICAL_MARK_OR_FORMAT, "")
-    .normalize("NFKC")
-    .toLowerCase();
-}
-
 function unicodeCanonicalTokenizerScanText(value: string): string {
   // Keep the interpretation itself as a compact whole string. Mapping every
   // source point before knowing whether there is a finding turns benign NFKD
@@ -158,39 +150,51 @@ function sourceFindingKey(finding: ActiveHtmlFinding): string {
 }
 
 /**
- * Canonical findings are emitted in transformed-text order. Recover their raw
- * source offsets only when they exist, walking the source once with the exact
- * per-code-point transform used to build the interpretation. Benign NFKD
- * expansion therefore retains no source metadata at all.
+ * Canonical findings are emitted in transformed-text order. Their raw source
+ * offsets must be recovered with the exact whole-string transform used above:
+ * NFKC can compose a sequence of source code points (for example, Hangul
+ * Jamo), so replaying that transform code point by code point is not a map.
+ *
+ * Recovery runs only for actual findings and retains no source-offset table.
+ * It binary-searches the first transformed prefix that contains the finding
+ * offset, then attributes that output to the source code point ending the
+ * prefix. The planned `body_md` contract is capped at 20,000 characters
+ * (Fable §4.3); this is not a proof of an arbitrary-input time or RSS bound.
  */
+function sourceCodePointStartBefore(value: string, endOffset: number): number {
+  const before = endOffset - 1;
+  if (before <= 0) return 0;
+  const low = value.charCodeAt(before);
+  const high = value.charCodeAt(before - 1);
+  return low >= 0xdc00 && low <= 0xdfff && high >= 0xd800 && high <= 0xdbff ? before - 1 : before;
+}
+
+function sourceOffsetForCanonicalOffset(value: string, canonicalOffset: number): number {
+  let lowerBound = 0;
+  let upperBound = value.length;
+
+  while (lowerBound < upperBound) {
+    const endOffset = lowerBound + Math.floor((upperBound - lowerBound) / 2);
+    if (unicodeCanonicalTokenizerScanText(value.slice(0, endOffset)).length <= canonicalOffset) {
+      lowerBound = endOffset + 1;
+    } else {
+      upperBound = endOffset;
+    }
+  }
+
+  return sourceCodePointStartBefore(value, lowerBound);
+}
+
 function canonicalFindingsAtSourceOffsets(
   value: string,
   canonicalFindings: readonly ActiveHtmlFinding[],
 ): ActiveHtmlFinding[] {
   if (canonicalFindings.length === 0) return [];
 
-  const sourceFindings: ActiveHtmlFinding[] = [];
-  let sourceOffset = 0;
-  let transformedOffset = 0;
-  let findingIndex = 0;
-
-  while (sourceOffset < value.length && findingIndex < canonicalFindings.length) {
-    const character = codePointAt(value, sourceOffset);
-    const transformedLength = canonicalSourcePiece(character).length;
-    const transformedEndOffset = transformedOffset + transformedLength;
-
-    while (findingIndex < canonicalFindings.length) {
-      const finding = canonicalFindings[findingIndex];
-      if (finding === undefined || finding.offset >= transformedEndOffset) break;
-      sourceFindings.push({ kind: finding.kind, offset: sourceOffset });
-      findingIndex += 1;
-    }
-
-    transformedOffset = transformedEndOffset;
-    sourceOffset += character.length;
-  }
-
-  return sourceFindings;
+  return canonicalFindings.map((finding) => ({
+    kind: finding.kind,
+    offset: sourceOffsetForCanonicalOffset(value, finding.offset),
+  }));
 }
 
 export interface ActiveHtmlScanDiagnostics {

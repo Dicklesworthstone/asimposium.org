@@ -348,6 +348,22 @@ describe("neutralizeUntrustedBody", () => {
     expect(result.findings).toEqual([{ marker: "active-html", count: 2 }]);
   });
 
+  test("deduplicates whole-string Hangul composition offsets without losing fullwidth tags", () => {
+    // These are literal Hangul Jamo, not precomposed syllables. Whole-string
+    // NFKC composes each pair, moving the raw tag from offset 16 to offset 8.
+    const composableHangulJamo = "가".repeat(8);
+
+    expect(neutralizeUntrustedBody(`${composableHangulJamo}<script>`).findings).toEqual([
+      { marker: "active-html", count: 1 },
+    ]);
+
+    // The raw tag must still deduplicate while the fullwidth tag is retained
+    // as a distinct Unicode-canonical finding.
+    expect(
+      neutralizeUntrustedBody(`${composableHangulJamo}<script>＜ＳＣＲＩＰＴ＞`).findings,
+    ).toEqual([{ marker: "active-html", count: 2 }]);
+  });
+
   test("keeps benign Unicode-normalization metadata proportional to findings, not source code points", () => {
     // U+FDFA expands to many UTF-16 units under NFKD. This deliberately
     // checks the allocation shape rather than a timing or RSS threshold that
