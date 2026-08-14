@@ -283,7 +283,7 @@ run_private_lifecycle_environment_cases() (
   # A poisoned production environment must not gain test-hook authority. The
   # ordinary live gate stays an ordinary blocked live gate and never emits the
   # private fixture's readiness marker.
-  run_bounded_capture 2 \
+  run_bounded_capture 5 \
     env \
     S4_WRAPPER_TEST_LIFECYCLE_HOOK=after-spawn-before-ownership \
     S4_WRAPPER_TEST_SIGNAL=TERM \

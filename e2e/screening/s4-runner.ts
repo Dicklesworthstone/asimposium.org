@@ -154,7 +154,10 @@ export async function fetchBoundedLiveJson(
   let reader: BoundedResponseReader | undefined;
   try {
     const response = await Promise.race([
-      fetch(url, { ...init, signal: controller.signal }),
+      // A screening attestation is bound to this exact endpoint. Following a
+      // redirect could silently send its bearer/body to a different origin and
+      // turn an outage page into a different response class, so reject it.
+      fetch(url, { ...init, redirect: "manual", signal: controller.signal }),
       deadline,
     ]);
     if (!response.ok) throw new BoundedLiveJsonError("S4_LIVE_RESPONSE_UNAVAILABLE");

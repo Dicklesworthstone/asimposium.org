@@ -50,7 +50,6 @@ import {
   screenWithProvider,
   truthMetricFor,
   verifyObservationBodyBindings,
-  wilson95,
 } from "../../apps/wire/src/screening/index";
 
 /** No hard-reject half means no complete run, whatever else went right. */
@@ -101,7 +100,7 @@ export interface S4PartialScreeningReport {
   readonly reserved_by_ground_truth: ReservedGroundTruthCounts;
   readonly provider_ok_count: number;
   readonly provider_failure_count: number;
-  /** Actual legitimate bodies observed by the provider, before conservative padding. */
+  /** Actual legitimate bodies observed by the provider. */
   readonly legitimate_observed_count: number;
   readonly legitimate_false_positive_rate: RateMetric;
   readonly quarantine_publish_rate: RateMetric;
@@ -116,7 +115,7 @@ export interface S4PartialScreeningReport {
 export interface PartialAggregateInput {
   /** The rows that produced actual observations in this run. */
   readonly corpus: readonly ScreeningCorpusExample[];
-  /** Manifest rows unavailable to this run. They remain visible in conservative metrics. */
+  /** Manifest rows unavailable to this run; they are availability gaps, never synthetic metrics. */
   readonly reserved: readonly ScreeningCorpusExample[];
   readonly observations: readonly ScreeningObservation[];
   readonly identity: ScreeningRunIdentity;
@@ -209,28 +208,12 @@ function rateFrom(metric: ConfusionMetric, key: keyof ConfusionMetric): RateMetr
   return typeof value === "object" && value !== null ? (value as RateMetric) : EMPTY_RATE;
 }
 
-function rounded(value: number): number {
-  return Math.round(value * 1_000_000) / 1_000_000;
-}
-
 function reservedGroundTruthCounts(
   reserved: readonly ScreeningCorpusExample[],
 ): ReservedGroundTruthCounts {
   const counts: Record<GroundTruth, number> = { legitimate: 0, "hard-reject": 0, quarantine: 0 };
   for (const example of reserved) counts[example.ground_truth] += 1;
   return counts;
-}
-
-function conservativeLegitimateRate(metric: RateMetric, unavailableCount: number): RateMetric {
-  if (unavailableCount === 0) return metric;
-  const numerator = metric.numerator + unavailableCount;
-  const denominator = metric.denominator + unavailableCount;
-  return {
-    numerator,
-    denominator,
-    rate: rounded(numerator / denominator),
-    wilson_95: wilson95(numerator, denominator),
-  };
 }
 
 function availabilityBlockers(counts: ReservedGroundTruthCounts): readonly string[] {
@@ -308,10 +291,10 @@ export function aggregatePartialScreeningRun(
   const providerFailures = pairs.filter(([, observation]) => observation.provider_status !== "ok");
   const providerFailureCount = pairs.length - providerOk.length;
   const reservedByGroundTruth = reservedGroundTruthCounts(input.reserved);
-  // `truthMetricFor` keeps provider-error legitimate observations in its
-  // denominator. Unavailable legitimate reservations cannot become a quiet
-  // denominator reduction either: their fail-closed outcome is conservatively
-  // counted as an over-refusal until a body can actually be screened.
+  // A fail-closed operational quarantine is the correct write-path outcome for
+  // an unavailable provider, but it is not a classifier result. Likewise, a
+  // reserved row was not screened. Neither may be invented as a false positive
+  // or folded into an accuracy denominator; both make the FP metric unmeasured.
   const eligibleHardReject = providerOk.filter(
     ([example]) => example.ground_truth === "hard-reject",
   );
@@ -325,10 +308,12 @@ export function aggregatePartialScreeningRun(
   const legitimateMetric = truthMetricFor("legitimate", pairs);
   const quarantineMetric = truthMetricFor("quarantine", pairs);
   const observedLegitimateRate = rateFrom(legitimateMetric, "false_positive_rate");
-  const falsePositiveRate = conservativeLegitimateRate(
-    observedLegitimateRate,
-    reservedByGroundTruth.legitimate,
-  );
+  const legitimateMetricUnmeasured =
+    reservedByGroundTruth.legitimate > 0 ||
+    providerFailures.some(([example]) => example.ground_truth === "legitimate");
+  const falsePositiveRate = legitimateMetricUnmeasured
+    ? EMPTY_RATE
+    : observedLegitimateRate;
   const quarantinePublishRate = rateFrom(quarantineMetric, "quarantine_publish_rate");
   const quarantineOverRefusalRate = rateFrom(quarantineMetric, "quarantine_over_refusal_rate");
 
@@ -372,24 +357,30 @@ export function aggregatePartialScreeningRun(
     failures.push("LEGITIMATE_FALSE_POSITIVE_THRESHOLD_FAILED");
   }
 
-  versionMismatch(
-    providerOk.map(([, observation]) => observation.model_version),
-    input.identity.model_version,
-    "MODEL_VERSION",
-    failures,
-  );
-  versionMismatch(
-    providerOk.map(([, observation]) => observation.policy_version),
-    input.identity.policy_version,
-    "POLICY_VERSION",
-    failures,
-  );
-  versionMismatch(
-    providerOk.map(([, observation]) => observation.configuration_digest),
-    input.identity.configuration_digest,
-    "CONFIGURATION_DIGEST",
-    failures,
-  );
+  // With no provider-success observation there is no version attestation to
+  // compare. Treat that as the provider outage it is, not as three fabricated
+  // mismatches. If even one result arrived, however, its versions remain
+  // evidence and must agree with the run identity.
+  if (providerOk.length > 0) {
+    versionMismatch(
+      providerOk.map(([, observation]) => observation.model_version),
+      input.identity.model_version,
+      "MODEL_VERSION",
+      failures,
+    );
+    versionMismatch(
+      providerOk.map(([, observation]) => observation.policy_version),
+      input.identity.policy_version,
+      "POLICY_VERSION",
+      failures,
+    );
+    versionMismatch(
+      providerOk.map(([, observation]) => observation.configuration_digest),
+      input.identity.configuration_digest,
+      "CONFIGURATION_DIGEST",
+      failures,
+    );
+  }
 
   if (providerFailureCount > 0) {
     failures.push("PROVIDER_UNAVAILABLE_FAIL_CLOSED", "ACCURACY_METRICS_INCOMPLETE");
@@ -445,7 +436,9 @@ export function aggregatePartialScreeningRun(
  * The reserved half is not fabricated or counted as passing. Reserved
  * legitimate examples conservatively count as fail-closed over-refusals, while
  * the truth-specific blocker and `unmeasured` field keep the evidence boundary
- * explicit; unavailable hard-reject/quarantine examples are never invented.
+ * explicit. Provider outages and reserved examples are not classifier outcomes,
+ * so they are never synthesized as false positives; unavailable
+ * hard-reject/quarantine examples are never invented either.
  */
 export async function runLegitimateOnlyScreening(
   options: PartialRunOptions,
@@ -568,6 +561,6 @@ export function partialRunOpsJsonl(report: S4PartialScreeningReport): string {
     blockers: report.blockers,
     exit_code: report.exit_code,
     detail:
-      "Partial S-4 run: only evaluable bodies were screened. Reserved legitimate rows are counted conservatively; metrics named in `unmeasured` remain incomplete and this run can never report pass.",
+      "Partial S-4 run: only evaluable bodies were screened. Reserved rows and provider outages are not synthesized into accuracy metrics; metrics named in `unmeasured` remain incomplete and this run can never report pass.",
   });
 }

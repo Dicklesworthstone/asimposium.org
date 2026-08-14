@@ -171,7 +171,7 @@ describe("S-4 partial run over the available corpus half", () => {
     expect(() => assertPartialRunNotGreen(zeroExit)).toThrow(/success exit code/);
   });
 
-  test("a provider failure keeps the run blocked and marks the metrics incomplete", async () => {
+  test("a provider failure keeps the run blocked and leaves the FP metric unmeasured", async () => {
     const corpus = await createS4Corpus();
     const report = await runLegitimateOnlyScreening({
       corpus,
@@ -186,9 +186,15 @@ describe("S-4 partial run over the available corpus half", () => {
     expect(report.provider_failure_count).toBeGreaterThan(0);
     expect(report.failures).toContain("PROVIDER_UNAVAILABLE_FAIL_CLOSED");
     expect(report.failures).toContain("ACCURACY_METRICS_INCOMPLETE");
-    expect(report.legitimate_false_positive_rate).toMatchObject({ numerator: 1, denominator: 150 });
-    // Conservative FP safety padding remains 150, but the coverage gate and
-    // report state the 149 bodies that actually reached the provider.
+    // A fail-closed quarantine is the correct operational outcome, not a
+    // classifier false positive. Only the 149 successful calls count as
+    // observed coverage; the complete FP metric is explicitly unmeasured.
+    expect(report.legitimate_false_positive_rate).toEqual({
+      numerator: 0,
+      denominator: 0,
+      rate: null,
+      wilson_95: null,
+    });
     expect(report.legitimate_observed_count).toBe(149);
     expect(report.failures).toContain("LEGITIMATE_SAMPLE_TOO_SMALL");
     expect(report.unmeasured).toContain("legitimate_false_positive_rate");
@@ -196,7 +202,38 @@ describe("S-4 partial run over the available corpus half", () => {
     expect(() => assertPartialRunNotGreen(report)).not.toThrow();
   });
 
-  test("PLANTED NEGATIVE: an unavailable legitimate reservation remains a conservative FP and is not called protected hard-reject evidence", async () => {
+  test("PLANTED NEGATIVE: a provider-wide outage blocks without fabricating a false-positive breach", async () => {
+    const report = await runLegitimateOnlyScreening({
+      corpus: await createS4Corpus(),
+      provider: createFixtureScreeningProvider({
+        onScreen: () => {
+          throw new Error("provider unavailable");
+        },
+      }),
+      identity: FIXTURE_IDENTITY,
+      evidence_class: "fixture-not-model-evidence",
+    });
+
+    expect(report.provider_failure_count).toBe(150);
+    expect(report.legitimate_observed_count).toBe(0);
+    expect(report.legitimate_false_positive_rate).toEqual({
+      numerator: 0,
+      denominator: 0,
+      rate: null,
+      wilson_95: null,
+    });
+    expect(report.unmeasured).toContain("legitimate_false_positive_rate");
+    expect(report.failures).toContain("PROVIDER_UNAVAILABLE_FAIL_CLOSED");
+    expect(report.failures).toContain("ACCURACY_METRICS_INCOMPLETE");
+    expect(report.failures).not.toContain("LEGITIMATE_FALSE_POSITIVE_THRESHOLD_FAILED");
+    expect(report.failures).not.toContain("MODEL_VERSION_MISMATCH");
+    expect(report.failures).not.toContain("POLICY_VERSION_MISMATCH");
+    expect(report.failures).not.toContain("CONFIGURATION_DIGEST_MISMATCH");
+    expect(report.verdict).toBe("blocked");
+    expect(report.exit_code).toBe(PARTIAL_BLOCKED_EXIT_CODE);
+  });
+
+  test("PLANTED NEGATIVE: an unavailable legitimate reservation leaves FP unmeasured and is not called protected hard-reject evidence", async () => {
     const corpus = await createS4Corpus();
     const original = corpus.find((example) => example.ground_truth === "legitimate");
     if (original === undefined) throw new Error("expected a legitimate corpus example");
@@ -225,7 +262,12 @@ describe("S-4 partial run over the available corpus half", () => {
       "hard-reject": 50,
       quarantine: 0,
     });
-    expect(report.legitimate_false_positive_rate).toMatchObject({ numerator: 1, denominator: 150 });
+    expect(report.legitimate_false_positive_rate).toEqual({
+      numerator: 0,
+      denominator: 0,
+      rate: null,
+      wilson_95: null,
+    });
     expect(report.legitimate_observed_count).toBe(149);
     expect(report.failures).toContain("LEGITIMATE_SAMPLE_TOO_SMALL");
     expect(report.failures).toContain("LEGITIMATE_EVIDENCE_UNAVAILABLE");

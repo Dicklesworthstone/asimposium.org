@@ -364,6 +364,30 @@ describe("S-4 live-response bounds", () => {
     }
   });
 
+  test("PLANTED NEGATIVE: redirects are rejected manually before the target can receive the request", async () => {
+    let redirectTargetRequests = 0;
+    const server = Bun.serve({
+      hostname: "127.0.0.1",
+      port: 0,
+      fetch(request) {
+        const requestUrl = new URL(request.url);
+        if (requestUrl.pathname === "/redirect") {
+          return Response.redirect(new URL("/redirect-target", request.url).toString(), 302);
+        }
+        redirectTargetRequests += 1;
+        return Response.json({ unexpected: "redirect target was reached" });
+      },
+    });
+    try {
+      await expect(
+        fetchBoundedLiveJson(new URL(`http://127.0.0.1:${server.port}/redirect`), {}),
+      ).rejects.toMatchObject({ code: "S4_LIVE_RESPONSE_UNAVAILABLE" });
+      expect(redirectTargetRequests).toBe(0);
+    } finally {
+      server.stop(true);
+    }
+  });
+
   test("PLANTED NEGATIVE: reader cleanup errors cannot replace the original bounded failure", () => {
     const reader = {
       cancel() {
