@@ -1,0 +1,26 @@
+@import "tailwindcss";
+
+/*
+ * Presentation commitments, Fable §8.3: light-first, paper-like scientific
+ * instrument; real dark mode, but not the brand default. Status is never
+ * conveyed by colour alone, so the palette stays small on purpose.
+ */
+@theme {
+  --color-paper: #fdfdfb;
+  --color-ink: #16150f;
+  --color-rule: #d9d6cb;
+  --color-muted: #5c584c;
+}
+
+:root {
+  color-scheme: light dark;
+}
+
+@media (prefers-color-scheme: dark) {
+  @theme {
+    --color-paper: #11110e;
+    --color-ink: #eceadf;
+    --color-rule: #33322c;
+    --color-muted: #9d998b;
+  }
+}
