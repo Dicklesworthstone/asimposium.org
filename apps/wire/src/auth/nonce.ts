@@ -62,6 +62,30 @@ function validEpochSecond(value: number): boolean {
 }
 
 /**
+ * The one input contract every `NonceStore` enforces, shared so the two
+ * implementations cannot drift apart.
+ *
+ * The verifier only reaches `claim()` for an envelope it has already accepted
+ * as unexpired, and it retains the digest through the skew window plus one
+ * second, so a real claim always arrives with `expiresAt >= now + 1`. An
+ * `expiresAt <= now` therefore means a caller has computed a retention window
+ * this store cannot honour, which is a caller invariant failure rather than a
+ * replay decision — a store that answered `true` would record a digest that is
+ * already expired, opening the replay window it exists to close.
+ *
+ * This lived only in `D1NonceStore`, which made the in-memory double the more
+ * permissive of the two: it would green-light window arithmetic that production
+ * rejects, and a regression narrowing the verifier's expiry margin would turn a
+ * routine expired credential into a coarse replay-store outage in production
+ * while every unit test using the double stayed green.
+ */
+function assertClaimableWindow(expiresAt: number, now: number): void {
+  if (!validEpochSecond(now) || !validEpochSecond(expiresAt) || expiresAt <= now) {
+    throw new NonceStoreInputError("invalid nonce expiry");
+  }
+}
+
+/**
  * D1-backed replay window for the Worker binding.
  *
  * The raw nonce never reaches D1: `nonce_hash` is SHA-256 of its UTF-8 bytes.
@@ -99,9 +123,7 @@ export class D1NonceStore implements NonceStore {
   }
 
   async claim(nonce: string, expiresAt: number, now: number): Promise<boolean> {
-    if (!validEpochSecond(now) || !validEpochSecond(expiresAt) || expiresAt <= now) {
-      throw new NonceStoreInputError("invalid nonce expiry");
-    }
+    assertClaimableWindow(expiresAt, now);
 
     await this.cleanupExpired(now);
     const nonceHash = await sha256Hex(new TextEncoder().encode(nonce));
@@ -114,6 +136,10 @@ export class D1NonceStore implements NonceStore {
  * Unit-test-only in-memory, single-isolate replay window. It is never a
  * production substitute for `D1NonceStore` — see the module comment before
  * citing it.
+ *
+ * It shares `assertClaimableWindow` with the D1 adapter so the two agree on
+ * which inputs are refusable. Coordination across isolates remains the part
+ * only `D1NonceStore` can provide.
  */
 export class MemoryNonceStore implements NonceStore {
   readonly #seen = new Map<string, number>();
@@ -128,6 +154,10 @@ export class MemoryNonceStore implements NonceStore {
   }
 
   async claim(nonce: string, expiresAt: number, now: number): Promise<boolean> {
+    // Identical to `D1NonceStore`: the double must refuse every window the
+    // production store refuses, or it cannot be trusted to prove the verifier's
+    // expiry arithmetic.
+    assertClaimableWindow(expiresAt, now);
     this.#evictExpired(now);
     const existing = this.#seen.get(nonce);
     if (existing !== undefined && existing > now) return false;

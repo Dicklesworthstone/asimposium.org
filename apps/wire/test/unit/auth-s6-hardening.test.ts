@@ -13,7 +13,12 @@ import {
 } from "../../src/auth/canonical";
 import { parseEnvelope, verifyServiceEnvelope } from "../../src/auth/envelope";
 import { VerificationKeyring } from "../../src/auth/keyring";
-import { D1NonceStore, MemoryNonceStore } from "../../src/auth/nonce";
+import {
+  D1NonceStore,
+  MemoryNonceStore,
+  type NonceStore,
+  NonceStoreInputError,
+} from "../../src/auth/nonce";
 import { envelopeRefusalProblem, wrongPrincipalProblem } from "../../src/auth/refusal";
 
 /**
@@ -232,6 +237,89 @@ describe("D1 nonce replay contract", () => {
       sqlite.close();
     }
   });
+});
+
+/**
+ * Both `NonceStore` implementations must refuse exactly the same windows.
+ *
+ * The guard used to live only in `D1NonceStore`, which made the in-memory
+ * double the more permissive of the two. A regression narrowing the verifier's
+ * expiry margin would then keep every `MemoryNonceStore` test green while
+ * production turned an ordinary expired credential into a coarse
+ * replay-store outage. Running one table against both closes that asymmetry.
+ */
+describe("shared NonceStore input contract", () => {
+  const CONTRACT_NONCE = "n".repeat(43);
+
+  /** Windows no store may accept: unusable `now`, unusable expiry, or no margin. */
+  const INVALID_WINDOWS = [
+    ["expiry equal to now", NOW, NOW],
+    ["expiry before now", NOW - 1, NOW],
+    ["fractional expiry", NOW + 0.5, NOW],
+    ["fractional now", NOW + 60, NOW + 0.5],
+    ["negative now", NOW + 60, -1],
+    ["negative expiry", -1, NOW],
+    ["NaN now", NOW + 60, Number.NaN],
+    ["infinite expiry", Number.POSITIVE_INFINITY, NOW],
+    ["unsafe-integer expiry", Number.MAX_SAFE_INTEGER + 1, NOW],
+  ] as const;
+
+  const STORE_FACTORIES = [
+    [
+      "MemoryNonceStore",
+      (): { store: NonceStore; close: () => void } => ({
+        store: new MemoryNonceStore(),
+        close: () => {},
+      }),
+    ],
+    [
+      "D1NonceStore",
+      (): { store: NonceStore; close: () => void } => {
+        // The existing shim: real SQLite, real migration, real UPSERT.
+        const { sqlite, store } = nonceDatabase();
+        return { store, close: () => sqlite.close() };
+      },
+    ],
+  ] as const;
+
+  for (const [storeName, makeStore] of STORE_FACTORIES) {
+    describe(storeName, () => {
+      test.each(INVALID_WINDOWS)(
+        "PLANTED: refuses %s as a typed input error, never a replay decision",
+        async (_label, expiresAt, now) => {
+          const { store, close } = makeStore();
+          try {
+            // Captured rather than matched so the assertion proves the typed
+            // error, not merely that something threw: a TypeError from a
+            // broken store would otherwise satisfy a bare `rejects.toThrow`.
+            const outcome = await store.claim(CONTRACT_NONCE, expiresAt, now).then(
+              (accepted) => accepted as unknown,
+              (error: unknown) => error,
+            );
+            expect(outcome).toBeInstanceOf(NonceStoreInputError);
+            expect((outcome as NonceStoreInputError).code).toBe("NONCE_STORE_INPUT");
+          } finally {
+            close();
+          }
+        },
+      );
+
+      test("accepts the exact one-second margin and still refuses its replay", async () => {
+        const { store, close } = makeStore();
+        try {
+          // `verifyServiceEnvelope` retains through `exp + skew + 1`, so the
+          // narrowest window a real claim ever presents is exactly one second.
+          // This is the boundary the invalid table sits directly beneath, and
+          // accepting it is what keeps the table a contract rather than a
+          // blanket refusal.
+          expect(await store.claim(CONTRACT_NONCE, NOW + 1, NOW)).toBe(true);
+          expect(await store.claim(CONTRACT_NONCE, NOW + 1, NOW)).toBe(false);
+        } finally {
+          close();
+        }
+      });
+    });
+  }
 });
 
 describe("signed authorization and replay ordering", () => {
