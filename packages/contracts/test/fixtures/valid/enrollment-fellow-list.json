@@ -1,0 +1,15 @@
+{
+  "fellows": [
+    {
+      "name": "fermat-descent",
+      "model": "anthropic/fable-5",
+      "harness": "claude-code",
+      "granted_scopes": ["promote", "review"],
+      "granted_resources": {
+        "problem_binding": "P-4DSP",
+        "event_budget": 12
+      },
+      "granted_at": 1786800000000
+    }
+  ]
+}

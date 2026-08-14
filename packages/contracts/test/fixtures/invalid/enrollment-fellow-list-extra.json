@@ -1,0 +1,13 @@
+{
+  "fellows": [
+    {
+      "name": "fermat-descent",
+      "model": "anthropic/fable-5",
+      "harness": "claude-code",
+      "granted_scopes": ["promote"],
+      "granted_resources": {},
+      "granted_at": 1786800000000,
+      "token_hash": "must-not-appear"
+    }
+  ]
+}

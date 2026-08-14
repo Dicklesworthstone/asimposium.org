@@ -81,6 +81,19 @@ export type EnrollmentPrincipal =
   | { readonly type: "fellow"; readonly fellowId: string }
   | { readonly type: "service"; readonly serviceId: string };
 
+/**
+ * A Fellow as the sponsor console lists it: the approval-time grant facts.
+ * No token, hash, credential id, or proposal handle ever appears here.
+ */
+export interface SponsorFellowRecord {
+  readonly name: string;
+  readonly model: string;
+  readonly harness: string;
+  readonly grantedScopes: readonly RequestedScope[];
+  readonly grantedResources: EnrollmentResourceGrants;
+  readonly grantedAt: number;
+}
+
 export interface EnrollmentClock {
   now(): number;
 }
@@ -183,6 +196,7 @@ export interface ProposalRecord {
   status: "pending" | "approved" | "reduced" | "denied" | "expired";
   grantedScopes?: readonly RequestedScope[];
   grantedResources?: EnrollmentResourceGrants;
+  grantedAt?: number;
   tokenHash?: string;
   tokenIssuedAt?: number;
   pollIntervalSeconds: number;
@@ -304,6 +318,13 @@ export interface EnrollmentStore {
     sponsorId: string,
     now: number,
   ): Promise<EnrollmentApprovalCard>;
+  /**
+   * Every pending card the sponsor must see, oldest first. Due rows are swept
+   * to `expired` first, matching approvalCard's lazy-expiry rule.
+   */
+  pendingApprovalCardsBySponsor(sponsorId: string, now: number): Promise<EnrollmentApprovalCard[]>;
+  /** Approval-time grant facts for the console's Fellows list. */
+  fellowsBySponsor(sponsorId: string): Promise<SponsorFellowRecord[]>;
   capsule(enrollmentId: string, now: number): Promise<EnrollmentCapsule>;
   poll(attempt: PollAttempt): Promise<PollDecision>;
   availabilitySuggestions(name: string): Promise<readonly string[]>;
@@ -819,6 +840,7 @@ export class InMemoryEnrollmentStore implements EnrollmentStore {
       proposal.status = attempt.decision.decision === "approve" ? "approved" : "reduced";
       proposal.grantedScopes = proposedScopes;
       proposal.grantedResources = proposedResources;
+      proposal.grantedAt = attempt.now;
       this.commitIdempotency(idempotency);
     });
   }
@@ -853,6 +875,72 @@ export class InMemoryEnrollmentStore implements EnrollmentStore {
         effectiveGrantedResources: proposal.grantedResources ?? null,
         proposalExpiresAt: proposal.expiresAt,
       };
+    });
+  }
+
+  async pendingApprovalCardsBySponsor(
+    sponsorId: string,
+    now: number,
+  ): Promise<EnrollmentApprovalCard[]> {
+    return this.serialized(() => {
+      const cards: EnrollmentApprovalCard[] = [];
+      for (const record of this.#records.values()) {
+        if (record.sponsorId !== sponsorId || record.proposal === undefined) continue;
+        const proposal = record.proposal;
+        if (proposal.status === "pending" && now >= proposal.expiresAt) {
+          proposal.status = "expired";
+        }
+        if (proposal.status !== "pending") continue;
+        cards.push({
+          enrollmentId: record.enrollmentId,
+          proposalId: proposal.proposalId,
+          name: proposal.name,
+          model: proposal.model,
+          harness: proposal.harness,
+          ...(proposal.reasoningEffort === undefined
+            ? {}
+            : { reasoningEffort: proposal.reasoningEffort }),
+          ...(proposal.toolsNote === undefined ? {} : { toolsNote: proposal.toolsNote }),
+          requestedScopes: record.requestedScopes,
+          requestedResources: record.requestedResources,
+          status: proposal.status,
+          effectiveGrantedScopes: proposal.grantedScopes ?? null,
+          effectiveGrantedResources: proposal.grantedResources ?? null,
+          proposalExpiresAt: proposal.expiresAt,
+        });
+      }
+      cards.sort(
+        (left, right) => left.proposalExpiresAt - right.proposalExpiresAt,
+      );
+      return cards;
+    });
+  }
+
+  async fellowsBySponsor(sponsorId: string): Promise<SponsorFellowRecord[]> {
+    return this.serialized(() => {
+      const fellows: SponsorFellowRecord[] = [];
+      for (const record of this.#records.values()) {
+        if (record.sponsorId !== sponsorId || record.proposal === undefined) continue;
+        const proposal = record.proposal;
+        if (proposal.status !== "approved" && proposal.status !== "reduced") continue;
+        if (
+          proposal.grantedScopes === undefined ||
+          proposal.grantedResources === undefined ||
+          proposal.grantedAt === undefined
+        ) {
+          continue;
+        }
+        fellows.push({
+          name: proposal.name,
+          model: proposal.model,
+          harness: proposal.harness,
+          grantedScopes: proposal.grantedScopes,
+          grantedResources: proposal.grantedResources,
+          grantedAt: proposal.grantedAt,
+        });
+      }
+      fellows.sort((left, right) => right.grantedAt - left.grantedAt);
+      return fellows;
     });
   }
 
@@ -1307,6 +1395,18 @@ export class EnrollmentService {
    */
   async capsule(enrollmentId: string): Promise<EnrollmentCapsule> {
     return this.#store.capsule(enrollmentId, this.#clock.now());
+  }
+
+  /** The sponsor's pending proposals, oldest-expiring first. */
+  async pendingApprovals(sponsor: EnrollmentPrincipal): Promise<EnrollmentApprovalCard[]> {
+    assertSponsor(sponsor);
+    return this.#store.pendingApprovalCardsBySponsor(sponsor.sponsorId, this.#clock.now());
+  }
+
+  /** The sponsor's Fellows as the console lists them: grant facts, never credentials. */
+  async fellows(sponsor: EnrollmentPrincipal): Promise<SponsorFellowRecord[]> {
+    assertSponsor(sponsor);
+    return this.#store.fellowsBySponsor(sponsor.sponsorId);
   }
 
   async decide(

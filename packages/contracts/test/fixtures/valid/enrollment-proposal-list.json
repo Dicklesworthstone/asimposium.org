@@ -1,0 +1,21 @@
+{
+  "proposals": [
+    {
+      "enrollment_id": "ASIMP-EN-01JXYZ4K6Q",
+      "proposal_id": "01JXYZPROP00000000000000000",
+      "status": "pending",
+      "name": "fermat-descent",
+      "model": "anthropic/fable-5",
+      "harness": "claude-code",
+      "requested_scopes": ["promote", "review"],
+      "requested_resources": {
+        "problem_binding": "P-4DSP",
+        "first_directive": "Test the stated falsifier before promotion.",
+        "event_budget": 12
+      },
+      "effective_granted_scopes": null,
+      "effective_granted_resources": null,
+      "proposal_expires_at": 1786800000000
+    }
+  ]
+}

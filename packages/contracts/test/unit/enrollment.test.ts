@@ -7,7 +7,11 @@ import {
   FellowRegistrationCredentialFieldsSchema,
   FellowRegistrationRequestSchema,
   MintEnrollmentRequestSchema,
+  MintEnrollmentResponseSchema,
+  SponsorEnrollmentDecisionResponseSchema,
   SponsorEnrollmentDecisionSchema,
+  SponsorFellowListResponseSchema,
+  SponsorProposalListResponseSchema,
 } from "../../src/enrollment.ts";
 
 const VALID_FIXTURE = new URL("../fixtures/valid/enrollment.json", import.meta.url);
@@ -152,4 +156,73 @@ test("resource-grant fixtures prove strict mint and reduce contract boundaries",
   expect(
     SponsorEnrollmentDecisionSchema.safeParse(await fixture(INVALID_REDUCE_FIXTURE)).success,
   ).toBe(false);
+});
+
+const VALID_MINT_RESPONSE_FIXTURE = new URL(
+  "../fixtures/valid/enrollment-mint-response.json",
+  import.meta.url,
+);
+const VALID_PROPOSAL_LIST_FIXTURE = new URL(
+  "../fixtures/valid/enrollment-proposal-list.json",
+  import.meta.url,
+);
+const VALID_FELLOW_LIST_FIXTURE = new URL(
+  "../fixtures/valid/enrollment-fellow-list.json",
+  import.meta.url,
+);
+const VALID_DECISION_RESPONSE_FIXTURE = new URL(
+  "../fixtures/valid/enrollment-decision-response.json",
+  import.meta.url,
+);
+const INVALID_MINT_RESPONSE_FIXTURE = new URL(
+  "../fixtures/invalid/enrollment-mint-response-plainsecret.json",
+  import.meta.url,
+);
+const INVALID_FELLOW_LIST_FIXTURE = new URL(
+  "../fixtures/invalid/enrollment-fellow-list-extra.json",
+  import.meta.url,
+);
+
+test("the mint response carries the one-time join URL under a versioned secret", async () => {
+  const parsed = MintEnrollmentResponseSchema.safeParse(await fixture(VALID_MINT_RESPONSE_FIXTURE));
+  expect(parsed.success).toBe(true);
+
+  // A plaintext, unversioned secret is never a valid mint response.
+  expect(MintEnrollmentResponseSchema.safeParse(await fixture(INVALID_MINT_RESPONSE_FIXTURE)).success).toBe(
+    false,
+  );
+});
+
+test("the sponsor proposal list reuses the approval card contract exactly", async () => {
+  const parsed = SponsorProposalListResponseSchema.safeParse(
+    await fixture(VALID_PROPOSAL_LIST_FIXTURE),
+  );
+  expect(parsed.success).toBe(true);
+  if (parsed.success) {
+    expect(parsed.data.proposals[0]?.status).toBe("pending");
+    // Sponsor-facing: no grant is mistaken for a live authorization while pending.
+    expect(parsed.data.proposals[0]?.effective_granted_scopes).toBeNull();
+  }
+});
+
+test("the sponsor fellow list exposes no credential material", async () => {
+  const parsed = SponsorFellowListResponseSchema.safeParse(
+    await fixture(VALID_FELLOW_LIST_FIXTURE),
+  );
+  expect(parsed.success).toBe(true);
+
+  // A token hash or any extra field is a strict-shape violation, never a passthrough.
+  expect(SponsorFellowListResponseSchema.safeParse(await fixture(INVALID_FELLOW_LIST_FIXTURE)).success).toBe(
+    false,
+  );
+});
+
+test("the decision acknowledgement is exactly one literal", async () => {
+  expect(
+    SponsorEnrollmentDecisionResponseSchema.safeParse(await fixture(VALID_DECISION_RESPONSE_FIXTURE))
+      .success,
+  ).toBe(true);
+  expect(SponsorEnrollmentDecisionResponseSchema.safeParse({ acknowledged: "true" }).success).toBe(
+    false,
+  );
 });

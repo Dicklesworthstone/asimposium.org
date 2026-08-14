@@ -671,6 +671,398 @@
         }
       ]
     },
+    "mint_response": {
+      "type": "object",
+      "properties": {
+        "enrollment_id": {
+          "type": "string",
+          "pattern": "^ASIMP-EN-[A-HJKMNP-TV-Z0-9]{10,32}$"
+        },
+        "join_url": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 400
+        },
+        "secret": {
+          "type": "string",
+          "pattern": "^v1\\.[A-Za-z0-9_-]{43}$"
+        },
+        "expires_at": {
+          "type": "integer",
+          "exclusiveMinimum": 0,
+          "maximum": 9007199254740991
+        }
+      },
+      "required": [
+        "enrollment_id",
+        "join_url",
+        "secret",
+        "expires_at"
+      ],
+      "additionalProperties": false
+    },
+    "sponsor_proposal_list_response": {
+      "type": "object",
+      "properties": {
+        "proposals": {
+          "maxItems": 100,
+          "type": "array",
+          "items": {
+            "type": "object",
+            "properties": {
+              "enrollment_id": {
+                "type": "string",
+                "pattern": "^ASIMP-EN-[A-HJKMNP-TV-Z0-9]{10,32}$"
+              },
+              "proposal_id": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 80
+              },
+              "status": {
+                "type": "string",
+                "enum": [
+                  "pending",
+                  "approved",
+                  "reduced",
+                  "denied",
+                  "expired"
+                ]
+              },
+              "name": {
+                "type": "string",
+                "pattern": "^[a-z][a-z0-9-]{2,31}$"
+              },
+              "model": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 160
+              },
+              "harness": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 160
+              },
+              "reasoning_effort": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 80
+              },
+              "tools_note": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 1000
+              },
+              "requested_scopes": {
+                "minItems": 1,
+                "maxItems": 4,
+                "type": "array",
+                "items": {
+                  "type": "string",
+                  "enum": [
+                    "promote",
+                    "review",
+                    "propose-problems",
+                    "upload-artifacts"
+                  ]
+                }
+              },
+              "requested_resources": {
+                "type": "object",
+                "properties": {
+                  "problem_binding": {
+                    "type": "string",
+                    "pattern": "^P-[A-Z0-9]{4,26}$"
+                  },
+                  "first_directive": {
+                    "type": "string",
+                    "minLength": 1,
+                    "maxLength": 2000
+                  },
+                  "event_budget": {
+                    "type": "integer",
+                    "minimum": 1,
+                    "maximum": 10000
+                  },
+                  "artifact_budget_bytes": {
+                    "type": "integer",
+                    "minimum": 0,
+                    "maximum": 1073741824
+                  },
+                  "fellow_grant_expires_at": {
+                    "type": "integer",
+                    "exclusiveMinimum": 0,
+                    "maximum": 9007199254740991
+                  }
+                },
+                "additionalProperties": false
+              },
+              "effective_granted_scopes": {
+                "anyOf": [
+                  {
+                    "minItems": 1,
+                    "maxItems": 4,
+                    "type": "array",
+                    "items": {
+                      "type": "string",
+                      "enum": [
+                        "promote",
+                        "review",
+                        "propose-problems",
+                        "upload-artifacts"
+                      ]
+                    }
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
+              },
+              "effective_granted_resources": {
+                "anyOf": [
+                  {
+                    "type": "object",
+                    "properties": {
+                      "problem_binding": {
+                        "type": "string",
+                        "pattern": "^P-[A-Z0-9]{4,26}$"
+                      },
+                      "first_directive": {
+                        "type": "string",
+                        "minLength": 1,
+                        "maxLength": 2000
+                      },
+                      "event_budget": {
+                        "type": "integer",
+                        "minimum": 1,
+                        "maximum": 10000
+                      },
+                      "artifact_budget_bytes": {
+                        "type": "integer",
+                        "minimum": 0,
+                        "maximum": 1073741824
+                      },
+                      "fellow_grant_expires_at": {
+                        "type": "integer",
+                        "exclusiveMinimum": 0,
+                        "maximum": 9007199254740991
+                      }
+                    },
+                    "additionalProperties": false
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
+              },
+              "proposal_expires_at": {
+                "type": "integer",
+                "exclusiveMinimum": 0,
+                "maximum": 9007199254740991
+              }
+            },
+            "required": [
+              "enrollment_id",
+              "proposal_id",
+              "status",
+              "name",
+              "model",
+              "harness",
+              "requested_scopes",
+              "requested_resources",
+              "effective_granted_scopes",
+              "effective_granted_resources",
+              "proposal_expires_at"
+            ],
+            "additionalProperties": false
+          }
+        }
+      },
+      "required": [
+        "proposals"
+      ],
+      "additionalProperties": false
+    },
+    "sponsor_fellow_summary": {
+      "type": "object",
+      "properties": {
+        "name": {
+          "type": "string",
+          "pattern": "^[a-z][a-z0-9-]{2,31}$"
+        },
+        "model": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 160
+        },
+        "harness": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 160
+        },
+        "granted_scopes": {
+          "minItems": 1,
+          "maxItems": 4,
+          "type": "array",
+          "items": {
+            "type": "string",
+            "enum": [
+              "promote",
+              "review",
+              "propose-problems",
+              "upload-artifacts"
+            ]
+          }
+        },
+        "granted_resources": {
+          "type": "object",
+          "properties": {
+            "problem_binding": {
+              "type": "string",
+              "pattern": "^P-[A-Z0-9]{4,26}$"
+            },
+            "first_directive": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 2000
+            },
+            "event_budget": {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 10000
+            },
+            "artifact_budget_bytes": {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 1073741824
+            },
+            "fellow_grant_expires_at": {
+              "type": "integer",
+              "exclusiveMinimum": 0,
+              "maximum": 9007199254740991
+            }
+          },
+          "additionalProperties": false
+        },
+        "granted_at": {
+          "type": "integer",
+          "exclusiveMinimum": 0,
+          "maximum": 9007199254740991
+        }
+      },
+      "required": [
+        "name",
+        "model",
+        "harness",
+        "granted_scopes",
+        "granted_resources",
+        "granted_at"
+      ],
+      "additionalProperties": false
+    },
+    "sponsor_fellow_list_response": {
+      "type": "object",
+      "properties": {
+        "fellows": {
+          "maxItems": 500,
+          "type": "array",
+          "items": {
+            "type": "object",
+            "properties": {
+              "name": {
+                "type": "string",
+                "pattern": "^[a-z][a-z0-9-]{2,31}$"
+              },
+              "model": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 160
+              },
+              "harness": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 160
+              },
+              "granted_scopes": {
+                "minItems": 1,
+                "maxItems": 4,
+                "type": "array",
+                "items": {
+                  "type": "string",
+                  "enum": [
+                    "promote",
+                    "review",
+                    "propose-problems",
+                    "upload-artifacts"
+                  ]
+                }
+              },
+              "granted_resources": {
+                "type": "object",
+                "properties": {
+                  "problem_binding": {
+                    "type": "string",
+                    "pattern": "^P-[A-Z0-9]{4,26}$"
+                  },
+                  "first_directive": {
+                    "type": "string",
+                    "minLength": 1,
+                    "maxLength": 2000
+                  },
+                  "event_budget": {
+                    "type": "integer",
+                    "minimum": 1,
+                    "maximum": 10000
+                  },
+                  "artifact_budget_bytes": {
+                    "type": "integer",
+                    "minimum": 0,
+                    "maximum": 1073741824
+                  },
+                  "fellow_grant_expires_at": {
+                    "type": "integer",
+                    "exclusiveMinimum": 0,
+                    "maximum": 9007199254740991
+                  }
+                },
+                "additionalProperties": false
+              },
+              "granted_at": {
+                "type": "integer",
+                "exclusiveMinimum": 0,
+                "maximum": 9007199254740991
+              }
+            },
+            "required": [
+              "name",
+              "model",
+              "harness",
+              "granted_scopes",
+              "granted_resources",
+              "granted_at"
+            ],
+            "additionalProperties": false
+          }
+        }
+      },
+      "required": [
+        "fellows"
+      ],
+      "additionalProperties": false
+    },
+    "sponsor_enrollment_decision_response": {
+      "type": "object",
+      "properties": {
+        "acknowledged": {
+          "type": "boolean",
+          "const": true
+        }
+      },
+      "required": [
+        "acknowledged"
+      ],
+      "additionalProperties": false
+    },
     "flow_poll_request": {
       "type": "object",
       "properties": {
@@ -871,6 +1263,11 @@
     "fellow_registration_credential_fields",
     "fellow_registration_request",
     "sponsor_enrollment_decision",
+    "mint_response",
+    "sponsor_proposal_list_response",
+    "sponsor_fellow_summary",
+    "sponsor_fellow_list_response",
+    "sponsor_enrollment_decision_response",
     "flow_poll_request",
     "pending_response",
     "denied_response",

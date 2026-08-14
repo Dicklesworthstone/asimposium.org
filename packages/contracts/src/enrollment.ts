@@ -254,6 +254,53 @@ export const SponsorEnrollmentDecisionSchema = z.discriminatedUnion("decision", 
   z.object({ decision: z.literal("deny") }).strict(),
 ]);
 
+/**
+ * Shown exactly once to the sponsor at mint time. `join_url` carries the
+ * fragment secret, so this body is credential material: it travels over TLS to
+ * the authenticated sponsor and is never logged on either plane.
+ */
+export const MintEnrollmentResponseSchema = z
+  .object({
+    enrollment_id: EnrollmentIdSchema,
+    join_url: z.string().min(1).max(400),
+    secret: EnrollmentSecretSchema,
+    expires_at: z.number().int().positive(),
+  })
+  .strict();
+
+/** Pending proposals awaiting the sponsor's decision, oldest first. */
+export const SponsorProposalListResponseSchema = z
+  .object({
+    proposals: z.array(EnrollmentApprovalCardSchema).max(100),
+  })
+  .strict();
+
+/** A Fellow as the sponsor console lists it. No token, no hashes. */
+export const SponsorFellowSummarySchema = z
+  .object({
+    name: FellowNameSchema,
+    model: z.string().min(1).max(160),
+    harness: z.string().min(1).max(160),
+    granted_scopes: z.array(RequestedScopeSchema).min(1).max(4),
+    granted_resources: EnrollmentResourceGrantsSchema,
+    granted_at: z.number().int().positive(),
+  })
+  .strict();
+
+export const SponsorFellowListResponseSchema = z
+  .object({
+    fellows: z.array(SponsorFellowSummarySchema).max(500),
+  })
+  .strict();
+
+/**
+ * Decision acknowledgement. Carries no proposal state: the card changed under
+ * the decision, and a fresh proposal list is how the console sees it.
+ */
+export const SponsorEnrollmentDecisionResponseSchema = z
+  .object({ acknowledged: z.literal(true) })
+  .strict();
+
 /** The only flow-polling input. A proposal id is intentionally absent. */
 export const EnrollmentFlowPollRequestSchema = z
   .object({ flow_handle: EnrollmentFlowHandleSchema })
@@ -300,6 +347,11 @@ export const EnrollmentContractsSchema = z
     fellow_registration_credential_fields: FellowRegistrationCredentialFieldsSchema,
     fellow_registration_request: FellowRegistrationRequestSchema,
     sponsor_enrollment_decision: SponsorEnrollmentDecisionSchema,
+    mint_response: MintEnrollmentResponseSchema,
+    sponsor_proposal_list_response: SponsorProposalListResponseSchema,
+    sponsor_fellow_summary: SponsorFellowSummarySchema,
+    sponsor_fellow_list_response: SponsorFellowListResponseSchema,
+    sponsor_enrollment_decision_response: SponsorEnrollmentDecisionResponseSchema,
     flow_poll_request: EnrollmentFlowPollRequestSchema,
     pending_response: EnrollmentPendingResponseSchema,
     denied_response: EnrollmentDeniedResponseSchema,
@@ -321,6 +373,13 @@ export type EnrollmentClaimResponse = z.infer<typeof EnrollmentClaimResponseSche
 export type EnrollmentHelloResponse = z.infer<typeof EnrollmentHelloResponseSchema>;
 export type MintEnrollmentRequest = z.infer<typeof MintEnrollmentRequestSchema>;
 export type SponsorEnrollmentDecision = z.infer<typeof SponsorEnrollmentDecisionSchema>;
+export type MintEnrollmentResponse = z.infer<typeof MintEnrollmentResponseSchema>;
+export type SponsorProposalListResponse = z.infer<typeof SponsorProposalListResponseSchema>;
+export type SponsorFellowSummary = z.infer<typeof SponsorFellowSummarySchema>;
+export type SponsorFellowListResponse = z.infer<typeof SponsorFellowListResponseSchema>;
+export type SponsorEnrollmentDecisionResponse = z.infer<
+  typeof SponsorEnrollmentDecisionResponseSchema
+>;
 export type EnrollmentFlowPollRequest = z.infer<typeof EnrollmentFlowPollRequestSchema>;
 export type RequestedScope = z.infer<typeof RequestedScopeSchema>;
 export type EnrollmentGrantReduction = z.infer<typeof EnrollmentGrantReductionSchema>;

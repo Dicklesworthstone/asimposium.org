@@ -19,7 +19,6 @@ import {
   type RequestedScope,
   type SponsorEnrollmentDecision,
 } from "./enrollment.ts";
-import { CONTRACT_SCAFFOLD_SCHEMA_ID, ContractScaffoldSchema } from "./schema.ts";
 import {
   type S2CostEvidenceManifest,
   S2CostEvidenceManifestSchema,
@@ -30,6 +29,7 @@ import {
   S2CostReceiptPublicationCommitSchema,
   S2CostReceiptPublicationSchema,
 } from "./s2-cost-receipt.ts";
+import { CONTRACT_SCAFFOLD_SCHEMA_ID, ContractScaffoldSchema } from "./schema.ts";
 
 export interface GeneratedArtifact {
   readonly relativePath: string;
@@ -169,7 +169,10 @@ export function generatedArtifacts(): readonly GeneratedArtifact[] {
     { relativePath: TYPES_ARTIFACT, content: generatedTypes() },
     { relativePath: ENROLLMENT_JSON_SCHEMA_ARTIFACT, content: generatedEnrollmentJsonSchema() },
     { relativePath: ENROLLMENT_TYPES_ARTIFACT, content: generatedEnrollmentTypes() },
-    { relativePath: S2_COST_RECEIPT_JSON_SCHEMA_ARTIFACT, content: generatedS2CostReceiptJsonSchema() },
+    {
+      relativePath: S2_COST_RECEIPT_JSON_SCHEMA_ARTIFACT,
+      content: generatedS2CostReceiptJsonSchema(),
+    },
     { relativePath: S2_COST_RECEIPT_TYPES_ARTIFACT, content: generatedS2CostReceiptTypes() },
   ];
 }
