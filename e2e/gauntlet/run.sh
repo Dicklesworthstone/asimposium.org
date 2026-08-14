@@ -54,17 +54,17 @@ else
     2) code="STAGING_AGENT_BASE_URL_MISSING" ;;
     *) code="STAGING_AGENT_BASE_URL_INVALID" ;;
   esac
-  e2e_emit_and_optionally_record "$write_artifacts" "$run_id" "$suite" "$started_ms" "fail" "$code" "$reproduce" || true
+  e2e_emit_and_optionally_record "$write_artifacts" "$run_id" "$suite" "$started_ms" "fail" "$code" "$reproduce"
   exit 78
 fi
 
 if ! e2e_probe_public_path "$ASIMPOSIUM_STAGING_AGENT_BASE_URL" "/"; then
-  e2e_emit_and_optionally_record "$write_artifacts" "$run_id" "$suite" "$started_ms" "fail" "AGENT_HANDBOOK_UNAVAILABLE" "$reproduce" || true
+  e2e_emit_and_optionally_record "$write_artifacts" "$run_id" "$suite" "$started_ms" "fail" "AGENT_HANDBOOK_UNAVAILABLE" "$reproduce"
   exit 69
 fi
 
 # A gauntlet pass needs fresh harness adapters, sponsor-side approval automation,
 # and a real typed promotion/recovery flow. None exists in OPS.1, so this runner
 # refuses to create a synthetic score or an implied product success.
-e2e_emit_and_optionally_record "$write_artifacts" "$run_id" "$suite" "$started_ms" "fail" "GAUNTLET_ADAPTERS_UNAVAILABLE" "$reproduce" || true
+e2e_emit_and_optionally_record "$write_artifacts" "$run_id" "$suite" "$started_ms" "fail" "GAUNTLET_ADAPTERS_UNAVAILABLE" "$reproduce"
 exit 70

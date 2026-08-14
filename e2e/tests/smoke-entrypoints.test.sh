@@ -35,6 +35,21 @@ if [[ "$invalid_run_id_output" != *'"code":"RUN_ID_INVALID"'* ]]; then
   exit 1
 fi
 
+if credential_origin_output="$(ASIMPOSIUM_STAGING_AGENT_BASE_URL="https://test-user:test-pass@127.0.0.1:1" "$repository_root/scripts/smoke-agent.sh" 2>&1)"; then
+  emit "fail" "CREDENTIAL_ORIGIN_ACCEPTED"
+  exit 1
+fi
+
+if [[ "$credential_origin_output" != *'"code":"STAGING_AGENT_BASE_URL_INVALID"'* ]]; then
+  emit "fail" "CREDENTIAL_ORIGIN_REJECTION_DIAGNOSTIC_MISSING"
+  exit 1
+fi
+
+if [[ "$credential_origin_output" == *"test-user"* ]] || [[ "$credential_origin_output" == *"test-pass"* ]] || [[ "$credential_origin_output" == *"127.0.0.1:1"* ]]; then
+  emit "fail" "CREDENTIAL_ORIGIN_LEAKED"
+  exit 1
+fi
+
 if missing_surface_output="$(ASIMPOSIUM_STAGING_AGENT_BASE_URL="https://127.0.0.1:1" "$repository_root/scripts/smoke-agent.sh" 2>&1)"; then
   emit "fail" "MISSING_STAGING_SURFACE_ACCEPTED"
   exit 1
@@ -42,6 +57,11 @@ fi
 
 if [[ "$missing_surface_output" != *'"code":"AGENT_HANDBOOK_UNAVAILABLE"'* ]]; then
   emit "fail" "MISSING_STAGING_SURFACE_DIAGNOSTIC_MISSING"
+  exit 1
+fi
+
+if [[ "$missing_surface_output" == *"127.0.0.1:1"* ]] || [[ "$missing_surface_output" == *"https://"* ]]; then
+  emit "fail" "MISSING_STAGING_SURFACE_ORIGIN_LEAKED"
   exit 1
 fi
 

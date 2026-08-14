@@ -91,48 +91,117 @@ e2e_format_diagnostic() {
 }
 
 e2e_emit_diagnostic() {
+  if [[ "$3" == "fail" ]]; then
+    e2e_format_diagnostic "$@" >&2
+    return 0
+  fi
+
   e2e_format_diagnostic "$@"
 }
 
-e2e_write_artifact_diagnostic() {
-  local run_id="$1"
-  local suite="$2"
-  local started_ms="$3"
-  local status="$4"
-  local code="$5"
-  local reproduce="$6"
-  local repository_root
-  local artifact_relpath
-  local artifact_directory
+e2e_physical_directory() {
+  local directory="$1"
 
-  repository_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
-  artifact_relpath="$(e2e_artifact_relpath "$run_id")" || return 1
-  artifact_directory="$repository_root/$artifact_relpath"
-
-  case "$artifact_directory" in
-    "$repository_root"/e2e/artifacts/*) ;;
-    *) return 1 ;;
-  esac
-
-  mkdir -p "$artifact_directory"
-  e2e_format_diagnostic "$suite" "$started_ms" "$status" "$code" "$reproduce" >> "$artifact_directory/diagnostics.jsonl"
-  printf '%s/diagnostics.jsonl\n' "$artifact_relpath"
+  [[ -d "$directory" ]] || return 1
+  (cd -P "$directory" 2>/dev/null && pwd -P)
 }
 
-e2e_emit_and_optionally_record() {
-  local write_artifacts="$1"
+e2e_write_artifact_diagnostic_at_root() {
+  local repository_root="$1"
   local run_id="$2"
   local suite="$3"
   local started_ms="$4"
   local status="$5"
   local code="$6"
   local reproduce="$7"
+  local physical_repository_root
+  local e2e_root
+  local physical_e2e_root
+  local artifact_relpath
+  local artifacts_root
+  local physical_artifacts_root
+  local artifact_directory
+  local physical_artifact_directory
+  local diagnostic_path
+
+  physical_repository_root="$(e2e_physical_directory "$repository_root")" || return 1
+  e2e_root="$physical_repository_root/e2e"
+  physical_e2e_root="$(e2e_physical_directory "$e2e_root")" || return 1
+  [[ "$physical_e2e_root" == "$physical_repository_root/e2e" ]] || return 1
+
+  artifact_relpath="$(e2e_artifact_relpath "$run_id")" || return 1
+  artifacts_root="$physical_e2e_root/artifacts"
+
+  if [[ -e "$artifacts_root" || -L "$artifacts_root" ]]; then
+    [[ -d "$artifacts_root" ]] || return 1
+  else
+    mkdir "$artifacts_root" 2>/dev/null || return 1
+  fi
+  physical_artifacts_root="$(e2e_physical_directory "$artifacts_root")" || return 1
+  [[ "$physical_artifacts_root" == "$physical_e2e_root/artifacts" ]] || return 1
+
+  artifact_directory="$physical_artifacts_root/$run_id"
+  if [[ -e "$artifact_directory" || -L "$artifact_directory" ]]; then
+    [[ -d "$artifact_directory" ]] || return 1
+  else
+    mkdir "$artifact_directory" 2>/dev/null || return 1
+  fi
+  physical_artifact_directory="$(e2e_physical_directory "$artifact_directory")" || return 1
+  [[ "$physical_artifact_directory" == "$physical_artifacts_root/$run_id" ]] || return 1
+
+  diagnostic_path="$physical_artifact_directory/diagnostics.jsonl"
+  [[ ! -L "$diagnostic_path" ]] || return 1
+  if [[ -e "$diagnostic_path" && ! -f "$diagnostic_path" ]]; then
+    return 1
+  fi
+
+  e2e_format_diagnostic "$suite" "$started_ms" "$status" "$code" "$reproduce" >> "$diagnostic_path" 2>/dev/null || return 1
+  printf '%s/diagnostics.jsonl\n' "$artifact_relpath"
+}
+
+e2e_write_artifact_diagnostic() {
+  local repository_root
+
+  repository_root="$(e2e_physical_directory "$(dirname "${BASH_SOURCE[0]}")/../..")" || return 1
+  e2e_write_artifact_diagnostic_at_root "$repository_root" "$@"
+}
+
+e2e_emit_and_optionally_record_at_root() {
+  local repository_root="$1"
+  local write_artifacts="$2"
+  local run_id="$3"
+  local suite="$4"
+  local started_ms="$5"
+  local status="$6"
+  local code="$7"
+  local reproduce="$8"
+  local artifact_write_failed=0
 
   if [[ "$write_artifacts" == "1" ]]; then
-    e2e_write_artifact_diagnostic "$run_id" "$suite" "$started_ms" "$status" "$code" "$reproduce" >/dev/null || return 1
+    e2e_write_artifact_diagnostic_at_root "$repository_root" "$run_id" "$suite" "$started_ms" "$status" "$code" "$reproduce" >/dev/null || artifact_write_failed=1
   fi
 
   e2e_emit_diagnostic "$suite" "$started_ms" "$status" "$code" "$reproduce"
+
+  if [[ "$artifact_write_failed" -eq 1 ]]; then
+    e2e_emit_diagnostic "$suite" "$started_ms" "fail" "ARTIFACT_DIAGNOSTIC_WRITE_FAILED" "$reproduce"
+    [[ "$status" == "fail" ]] || return 1
+  fi
+}
+
+e2e_emit_and_optionally_record() {
+  local repository_root
+
+  repository_root="$(e2e_physical_directory "$(dirname "${BASH_SOURCE[0]}")/../..")" || {
+    e2e_emit_diagnostic "$3" "$4" "$5" "$6" "$7"
+    if [[ "$1" == "1" ]]; then
+      e2e_emit_diagnostic "$3" "$4" "fail" "ARTIFACT_DIAGNOSTIC_WRITE_FAILED" "$7"
+      [[ "$5" == "fail" ]] || return 1
+    fi
+    return 0
+  }
+
+  e2e_emit_and_optionally_record_at_root "$repository_root" "$@"
 }
 
 e2e_probe_public_path() {
@@ -141,7 +210,7 @@ e2e_probe_public_path() {
   local http_status
   local curl_status
 
-  http_status="$(curl --silent --show-error --location --max-time 15 --connect-timeout 5 --output /dev/null --write-out '%{http_code}' "$origin$path")"
+  http_status="$(curl --silent --location --max-time 15 --connect-timeout 5 --output /dev/null --write-out '%{http_code}' "$origin$path" 2>/dev/null)"
   curl_status=$?
   [[ "$curl_status" -eq 0 ]] || return 1
   [[ "$http_status" =~ ^2[0-9][0-9]$ ]]

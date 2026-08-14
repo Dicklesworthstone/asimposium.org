@@ -55,13 +55,13 @@ for origin_variable in ASIMPOSIUM_STAGING_AGENT_BASE_URL ASIMPOSIUM_STAGING_AGOR
       2) code="STAGING_SURFACE_BASE_URL_MISSING" ;;
       *) code="STAGING_SURFACE_BASE_URL_INVALID" ;;
     esac
-    e2e_emit_and_optionally_record "$write_artifacts" "$run_id" "$suite" "$started_ms" "fail" "$code" "$reproduce" || true
+    e2e_emit_and_optionally_record "$write_artifacts" "$run_id" "$suite" "$started_ms" "fail" "$code" "$reproduce"
     exit 78
   fi
 done
 
 if ! command -v bunx >/dev/null 2>&1; then
-  e2e_emit_and_optionally_record "$write_artifacts" "$run_id" "$suite" "$started_ms" "fail" "BUNX_UNAVAILABLE" "$reproduce" || true
+  e2e_emit_and_optionally_record "$write_artifacts" "$run_id" "$suite" "$started_ms" "fail" "BUNX_UNAVAILABLE" "$reproduce"
   exit 69
 fi
 
@@ -72,7 +72,7 @@ playwright_status=$?
 set -e
 
 if [[ "$playwright_status" -ne 0 ]]; then
-  e2e_emit_and_optionally_record "$write_artifacts" "$run_id" "$suite" "$started_ms" "fail" "PLAYWRIGHT_TARGET_SURFACE_CHECK_FAILED" "$reproduce" || true
+  e2e_emit_and_optionally_record "$write_artifacts" "$run_id" "$suite" "$started_ms" "fail" "PLAYWRIGHT_TARGET_SURFACE_CHECK_FAILED" "$reproduce"
   exit "$playwright_status"
 fi
 
