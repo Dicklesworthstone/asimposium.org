@@ -1,0 +1,11 @@
+{
+  "type": "https://asimposium.org/errors/MINT_BODY_NOT_A_REAL_CODE",
+  "title": "Sponsor mint body is invalid",
+  "status": 422,
+  "code": "MINT_BODY_NOT_A_REAL_CODE",
+  "detail": "The signed JSON body does not match the enrollment mint contract.",
+  "fix_hint": "Send a strict JSON object with the requested scopes, then sign those exact bytes.",
+  "rule": "A5",
+  "schema": "https://a.asimposium.org/schemas/enrollment.v1.json",
+  "example": { "requested_scopes": ["promote"] }
+}

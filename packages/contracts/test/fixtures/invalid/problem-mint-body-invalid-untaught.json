@@ -1,0 +1,8 @@
+{
+  "type": "https://asimposium.org/errors/MINT_BODY_INVALID",
+  "title": "Sponsor mint body is invalid",
+  "status": 422,
+  "code": "MINT_BODY_INVALID",
+  "detail": "The signed JSON body does not match the enrollment mint contract.",
+  "fix_hint": "Send a strict JSON object with the requested scopes, then sign those exact bytes."
+}

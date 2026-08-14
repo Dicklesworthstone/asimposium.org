@@ -59,6 +59,22 @@ export {
   SponsorProposalListResponseSchema,
 } from "./enrollment.ts";
 export {
+  CONTRACT_PROBLEM_CODES,
+  type ContractProblem,
+  ContractProblemSchema,
+  OPAQUE_PROBLEM_CODES,
+  type OpaqueProblem,
+  OpaqueProblemSchema,
+  PROBLEM_TYPE_PREFIX,
+  type ProblemCode,
+  ProblemCodeSchema,
+  ProblemContractsSchema,
+  type ProblemDocument,
+  ProblemDocumentSchema,
+  type ProblemRule,
+  ProblemRuleSchema,
+} from "./problem.ts";
+export {
   MAX_S2_COST_EVIDENCE_MANIFEST_BYTES,
   MAX_S2_COST_RECEIPT_BYTES,
   parseS2CostEvidenceManifestBytes,

@@ -20,6 +20,14 @@ import {
   type SponsorEnrollmentDecision,
 } from "./enrollment.ts";
 import {
+  type ContractProblem,
+  type OpaqueProblem,
+  type ProblemCode,
+  ProblemContractsSchema,
+  type ProblemDocument,
+  type ProblemRule,
+} from "./problem.ts";
+import {
   type S2CostEvidenceManifest,
   S2CostEvidenceManifestSchema,
   type S2CostMeasurementReceipt,
@@ -46,6 +54,9 @@ const JSON_SCHEMA_ARTIFACT = "generated/contracts-scaffold.schema.json";
 const ENROLLMENT_TYPES_ARTIFACT = "generated/enrollment.types.ts";
 const ENROLLMENT_JSON_SCHEMA_ARTIFACT = "generated/enrollment.schema.json";
 const ENROLLMENT_SCHEMA_ID = "https://a.asimposium.org/schemas/enrollment.v1.json";
+const PROBLEM_TYPES_ARTIFACT = "generated/problem.types.ts";
+const PROBLEM_JSON_SCHEMA_ARTIFACT = "generated/problem.schema.json";
+const PROBLEM_SCHEMA_ID = "https://a.asimposium.org/schemas/problem.v1.json";
 const S2_COST_RECEIPT_TYPES_ARTIFACT = "generated/s2-cost-receipt.types.ts";
 const S2_COST_RECEIPT_JSON_SCHEMA_ARTIFACT = "generated/s2-cost-receipt.schema.json";
 const S2_COST_RECEIPT_SCHEMA_ID = "https://a.asimposium.org/schemas/s2-cost-receipt.v1.json";
@@ -126,6 +137,39 @@ function generatedEnrollmentTypes(): string {
   ].join("\n");
 }
 
+function generatedProblemJsonSchema(): string {
+  const document = {
+    $id: PROBLEM_SCHEMA_ID,
+    title: "ASImposium refusal contracts",
+    description:
+      "Rule A5 refusal faces. Contract problems teach with rule/schema/example; opaque problems deliberately do not.",
+    ...z.toJSONSchema(ProblemContractsSchema),
+  };
+
+  return formatJson(document);
+}
+
+function generatedProblemTypes(): string {
+  const typeNames = [
+    "ContractProblem",
+    "OpaqueProblem",
+    "ProblemCode",
+    "ProblemDocument",
+    "ProblemRule",
+  ] as const satisfies readonly (keyof {
+    ContractProblem: ContractProblem;
+    OpaqueProblem: OpaqueProblem;
+    ProblemCode: ProblemCode;
+    ProblemDocument: ProblemDocument;
+    ProblemRule: ProblemRule;
+  })[];
+  return [
+    "// Generated from src/problem.ts by `bun run generate`. Do not edit.",
+    `export type { ${typeNames.join(", ")} } from "../src/problem.ts";`,
+    "",
+  ].join("\n");
+}
+
 function generatedS2CostReceiptJsonSchema(): string {
   const document = {
     $id: S2_COST_RECEIPT_SCHEMA_ID,
@@ -169,6 +213,8 @@ export function generatedArtifacts(): readonly GeneratedArtifact[] {
     { relativePath: TYPES_ARTIFACT, content: generatedTypes() },
     { relativePath: ENROLLMENT_JSON_SCHEMA_ARTIFACT, content: generatedEnrollmentJsonSchema() },
     { relativePath: ENROLLMENT_TYPES_ARTIFACT, content: generatedEnrollmentTypes() },
+    { relativePath: PROBLEM_JSON_SCHEMA_ARTIFACT, content: generatedProblemJsonSchema() },
+    { relativePath: PROBLEM_TYPES_ARTIFACT, content: generatedProblemTypes() },
     {
       relativePath: S2_COST_RECEIPT_JSON_SCHEMA_ARTIFACT,
       content: generatedS2CostReceiptJsonSchema(),
