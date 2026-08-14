@@ -6,7 +6,11 @@ import { resolve } from "node:path";
 import type { D1Database } from "@cloudflare/workers-types";
 
 import { D1EnrollmentStore } from "../../src/enrollment/d1-store";
-import type { EnrollmentRecord } from "../../src/enrollment/service";
+import {
+  EnrollmentPersistenceError,
+  type EnrollmentRecord,
+  InMemoryEnrollmentStore,
+} from "../../src/enrollment/service";
 
 /**
  * The active-key abort, proven against the real migration.
@@ -58,6 +62,9 @@ function localD1(sqlite: Database): D1Database {
         },
         async first<T>(): Promise<T | null> {
           return (sqlite.prepare<T, LocalBinding[]>(query).get(...values) ?? null) as T | null;
+        },
+        async all<T>(): Promise<{ results: T[] }> {
+          return { results: sqlite.prepare<T, LocalBinding[]>(query).all(...values) as T[] };
         },
       };
     },
@@ -288,5 +295,268 @@ describe("the active-key abort rolls back the product effect with the replay row
       now: NOW,
     });
     expect(replay?.encryptedResponse.ciphertext).toBe("ciphertext-first");
+  });
+});
+
+/**
+ * Bounded exact name suggestions, proven against the real migration.
+ *
+ * The prior implementation issued one indexed point lookup per candidate, so a
+ * stem whose low suffixes were occupied cost one D1 round trip per occupied
+ * suffix — up to 9_998 sequential statements in a single request, repeatable
+ * for free because the name path runs after `verifyClaimCredentials` reads the
+ * join secret but before `claim` consumes it.
+ *
+ * The replacement is a single statement: a recursive CTE generates the suffix
+ * series inside SQLite, left-joins each generated name against the NOCASE
+ * unique index on `enrollment_fellows.name`, and returns the first free
+ * candidates in numeric order. One query and five bound parameters, against
+ * D1's 50-query and 100-parameter budgets, at any density.
+ *
+ * Three of the cases below are now structural rather than behavioural, and are
+ * kept as regression locks: comparing generated text to stored text means
+ * `-02`, `-foo` and `-2-alpha` are names that never equal a candidate, and
+ * ordering on the generated integer cannot degrade to lexicographic order.
+ *
+ * The cases below are the regressions that would otherwise return silently.
+ * The query-count case is the one that catches a correct-but-unbounded rewrite:
+ * it asserts statements, not wall time.
+ */
+const NAME_COLLATION_COLUMN = "name TEXT NOT NULL COLLATE NOCASE UNIQUE";
+
+function insertFellow(sqlite: Database, name: string, ordinal: number): void {
+  sqlite
+    .prepare<unknown, [string, string, string, string, string, number]>(
+      `INSERT INTO enrollment_fellows (fellow_id, sponsor_id, name, model, harness, created_at)
+       VALUES (?, ?, ?, ?, ?, ?)`,
+    )
+    .run(`fellow-${ordinal}`, "usr_fixture_sponsor", name, "test-model", "codex", NOW);
+}
+
+function occupy(sqlite: Database, names: readonly string[]): void {
+  names.forEach((name, index) => {
+    insertFellow(sqlite, name, index);
+  });
+}
+
+/** `localD1`, plus the exact SQL of every statement the store issues. */
+function recordingD1(sqlite: Database): { db: D1Database; issued: readonly string[] } {
+  const base = localD1(sqlite) as unknown as { prepare(query: string): unknown };
+  const issued: string[] = [];
+  const db = {
+    prepare(query: string) {
+      issued.push(query);
+      return base.prepare(query);
+    },
+  } as unknown as D1Database;
+  return { db, issued };
+}
+
+describe("availabilitySuggestions is bounded, exact and deterministic", () => {
+  test("the NOCASE unique index this join depends on is still declared", () => {
+    // The join states `COLLATE NOCASE` explicitly so it matches this index. If
+    // the column's collation ever changes, the join silently stops agreeing
+    // with the equality lookups elsewhere in the store — and, per the plan
+    // assertion below, stops being an index probe at all.
+    expect(readFileSync(MIGRATION, "utf8")).toContain(NAME_COLLATION_COLUMN);
+  });
+
+  test("PLANTED: the gap is numeric, not lexicographic", async () => {
+    const sqlite = database();
+    occupy(sqlite, ["orchid-2"]);
+    // `orchid-10` sorts before `orchid-2` as text. Ordering the candidates as
+    // text, rather than on the generated integer, would offer it first.
+    expect(await new D1EnrollmentStore(localD1(sqlite)).availabilitySuggestions("orchid")).toEqual([
+      "orchid-3",
+      "orchid-4",
+      "orchid-5",
+    ]);
+  });
+
+  test("PLANTED: a non-numeric or deeper name in the namespace occupies nothing", async () => {
+    const sqlite = database();
+    occupy(sqlite, ["orchid-foo", "orchid-2-alpha"]);
+    // Neither is equal to any generated candidate, so neither can occupy one.
+    expect(await new D1EnrollmentStore(localD1(sqlite)).availabilitySuggestions("orchid")).toEqual([
+      "orchid-2",
+      "orchid-3",
+      "orchid-4",
+    ]);
+  });
+
+  test("PLANTED: a leading-zero spelling does not suppress the canonical name", async () => {
+    const sqlite = database();
+    occupy(sqlite, ["orchid-02"]);
+    // `orchid-02` is a different name. Any implementation that recovered the
+    // suffix from stored text instead of comparing against generated text
+    // would read it as 2 and wrongly retire a free candidate.
+    expect(await new D1EnrollmentStore(localD1(sqlite)).availabilitySuggestions("orchid")).toEqual([
+      "orchid-2",
+      "orchid-3",
+      "orchid-4",
+    ]);
+  });
+
+  test("PLANTED: a reserved candidate is skipped even though its stem is clean", async () => {
+    const sqlite = database();
+    occupy(sqlite, ["gpt-5-2", "gpt-5-3", "gpt-5-4", "gpt-5-5"]);
+    // `gpt-5` passes the name policy but `gpt-5-6` is reserved, so the
+    // per-candidate check must survive; hoisting it to the stem returns it.
+    expect(await new D1EnrollmentStore(localD1(sqlite)).availabilitySuggestions("gpt-5")).toEqual([
+      "gpt-5-7",
+      "gpt-5-8",
+      "gpt-5-9",
+    ]);
+  });
+
+  test("PLANTED: a saturated range returns fewer suggestions, never an error", async () => {
+    const sqlite = database();
+    const stem = "zzz";
+    occupy(
+      sqlite,
+      Array.from({ length: 9_997 }, (_, offset) => `${stem}-${offset + 2}`),
+    );
+    // 2..9_998 held; the suffix law stops at 9_999, so exactly one remains.
+    expect(await new D1EnrollmentStore(localD1(sqlite)).availabilitySuggestions(stem)).toEqual([
+      "zzz-9999",
+    ]);
+  });
+
+  test("PLANTED: 500 occupied suffixes still cost exactly one statement", async () => {
+    const sqlite = database();
+    occupy(
+      sqlite,
+      Array.from({ length: 500 }, (_, offset) => `orchid-${offset + 2}`),
+    );
+    const recording = recordingD1(sqlite);
+    const suggestions = await new D1EnrollmentStore(recording.db).availabilitySuggestions("orchid");
+    expect(suggestions).toEqual(["orchid-502", "orchid-503", "orchid-504"]);
+    // The point-lookup implementation issued 503 statements for this shape, and
+    // a batched one would issue 8. D1 allows 50 per invocation.
+    expect(recording.issued.length).toBe(1);
+  });
+
+  test("PLANTED: a namespace of >10k non-numeric siblings costs one statement and keeps early gaps", async () => {
+    const sqlite = database();
+    occupy(sqlite, [
+      ...Array.from({ length: 10_400 }, (_, offset) => `orchid-tag${offset}`),
+      "orchid-2",
+      "orchid-4",
+    ]);
+    const recording = recordingD1(sqlite);
+    const suggestions = await new D1EnrollmentStore(recording.db).availabilitySuggestions("orchid");
+    // Siblings that are not canonical numeric candidates occupy nothing, so the
+    // early gaps at 3, 5 and 6 survive a namespace with more siblings than the
+    // whole suffix series, none of which is ever returned to the Worker.
+    expect(suggestions).toEqual(["orchid-3", "orchid-5", "orchid-6"]);
+    expect(recording.issued.length).toBe(1);
+  });
+
+  test("the generated-suffix join uses the name index rather than scanning fellows", async () => {
+    const sqlite = database();
+    occupy(sqlite, ["orchid-2"]);
+    const recording = recordingD1(sqlite);
+    await new D1EnrollmentStore(recording.db).availabilitySuggestions("orchid");
+    const [issued] = recording.issued;
+    expect(issued).toBeDefined();
+    // Plan the statement the store actually issued, so this cannot drift from it.
+    const plan = sqlite
+      .prepare<{ detail: string }, [number, number, string, string, number]>(
+        `EXPLAIN QUERY PLAN ${issued as string}`,
+      )
+      .all(2, 9_999, "orchid-", "orchid-", 11)
+      .map((step) => step.detail)
+      .join(" | ");
+    expect(plan).toContain("enrollment_fellows");
+    expect(plan).toMatch(/USING (COVERING )?INDEX/);
+    // A bare `SCAN enrollment_fellows` would mean 9_998 full table scans.
+    expect(plan).not.toContain("SCAN enrollment_fellows");
+  });
+
+  test("PLANTED: a failing D1 query becomes the typed refusal, carrying no driver text", async () => {
+    const raw = "D1_ERROR: no such table: enrollment_fellows at /var/secret/path.sql";
+    const failing = {
+      prepare() {
+        return {
+          bind() {
+            return {
+              async all() {
+                throw new Error(raw);
+              },
+            };
+          },
+        };
+      },
+    } as unknown as D1Database;
+
+    let caught: unknown;
+    try {
+      await new D1EnrollmentStore(failing).availabilitySuggestions("orchid");
+    } catch (error) {
+      caught = error;
+    }
+    // Typed, so the router answers 503 ENROLLMENT_UNAVAILABLE instead of
+    // letting a raw driver Error reach the route boundary.
+    expect(caught).toBeInstanceOf(EnrollmentPersistenceError);
+    // And the driver's text — table names, paths — never rides along.
+    const surface = `${(caught as Error).message} ${(caught as Error).stack ?? ""}`;
+    expect(surface).not.toContain("D1_ERROR");
+    expect(surface).not.toContain("no such table");
+    expect(surface).not.toContain("/var/secret/path.sql");
+    expect((caught as Error).message).toBe("enrollment persistence is unavailable");
+  });
+
+  test("PLANTED: the policy invariant's typed refusal survives the query wrap", async () => {
+    // A full page whose every row fails the name policy. The query itself
+    // succeeds, so this refusal can only come from the post-query invariant —
+    // which proves that branch fires and that placing the try/catch around the
+    // query alone did not swallow or re-wrap it.
+    let queried = false;
+    const fullPageOfReservedNames = {
+      prepare() {
+        return {
+          bind() {
+            return {
+              async all() {
+                queried = true;
+                return { results: Array.from({ length: 11 }, () => ({ name: "admin" })) };
+              },
+            };
+          },
+        };
+      },
+    } as unknown as D1Database;
+
+    let caught: unknown;
+    try {
+      await new D1EnrollmentStore(fullPageOfReservedNames).availabilitySuggestions("orchid");
+    } catch (error) {
+      caught = error;
+    }
+    expect(queried).toBe(true);
+    expect(caught).toBeInstanceOf(EnrollmentPersistenceError);
+    // Never two suggestions passed off as a saturated range.
+    expect(caught).toBeDefined();
+  });
+
+  test("PLANTED: the in-memory and D1 stores agree on stem policy and order", async () => {
+    const sqlite = database();
+    const d1 = new D1EnrollmentStore(localD1(sqlite));
+    const memory = new InMemoryEnrollmentStore();
+    for (const input of [
+      "orchid",
+      "gpt-5",
+      "GPT-5",
+      "!!!",
+      "",
+      "  spaced  name  ",
+      "a",
+      "x".repeat(40),
+      "trailing---",
+    ]) {
+      expect(await d1.availabilitySuggestions(input)).toEqual(
+        await memory.availabilitySuggestions(input),
+      );
+    }
   });
 });
