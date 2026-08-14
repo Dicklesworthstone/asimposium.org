@@ -204,6 +204,23 @@ describe("lifecycle: process-group cleanup reaches descendants, not just the lea
     expect(phases).not.toContain("AAAAAAAA");
   }, 60_000);
 
+  test("PLANTED: a descendant that ignores TERM is reported as a survivor and then killed", async () => {
+    const run = await runScript(["--self-test-lifecycle-kill"]);
+    const emitted = record(run);
+    expect(`${run.stderr}\n${JSON.stringify(emitted)}`).toContain("lifecycle-cleaned");
+    expect(run.exitCode).toBe(0);
+    expect(emitted.code).toBe("LIFECYCLE_SELF_TEST_PASSED");
+
+    const descendant = Number(phaseValue(run.stderr, "lifecycle-descendant", "pid"));
+    // TERM delivered, ignored, reported, escalated — in that order, and the
+    // survivor is named rather than silently absorbed by a "terminated" line.
+    expect(phaseValue(run.stderr, "lifecycle-survivors", "pids")).toBe(String(descendant));
+    expect(phaseValue(run.stderr, "lifecycle-survivors", "after_s")).toMatch(/^[0-9]+$/);
+    expect(phaseValue(run.stderr, "lifecycle-killed", "signal")).toBe("KILL");
+    expect(phaseValue(run.stderr, "lifecycle-killed", "scope")).toBe("group");
+    expect(await waitForExit(descendant)).toBe(true);
+  }, 60_000);
+
   test("PLANTED: an unowned child is cleaned as a pid tree, and the runner never signals its own group", async () => {
     const run = await runScript(["--self-test-lifecycle-unowned"]);
     const emitted = record(run);
