@@ -12,7 +12,14 @@ import { existsSync } from "node:fs";
 import { homedir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
-import { failCommand, makeFixtureRepo, markerCommand, PASS_COMMAND } from "./fixtures.ts";
+import {
+  blockedCommand,
+  failCommand,
+  makeFixtureRepo,
+  markerCommand,
+  PASS_COMMAND,
+} from "./fixtures.ts";
+import { BLOCKED_EXIT_CODE } from "./policy.ts";
 import type { SummaryDiagnostic, UnitDiagnostic } from "./report.ts";
 
 const CLI = fileURLToPath(new URL("./cli.ts", import.meta.url));
@@ -301,7 +308,7 @@ describe("secret-safe diagnostics", () => {
       expect(unit.suite).toBe("unit");
       expect(unit.version).toMatch(/^\d+\.\d+\.\d+/);
       expect(typeof unit.duration_ms).toBe("number");
-      expect(["pass", "fail", "missing", "skip"]).toContain(unit.status);
+      expect(["pass", "fail", "blocked", "missing", "skip"]).toContain(unit.status);
       expect(unit.reproduce.length).toBeGreaterThan(0);
     }
   });
@@ -406,5 +413,116 @@ describe("--list plans without running", () => {
     expect(plans.every((plan) => plan.record === "plan")).toBe(true);
     expect(plans.find((plan) => plan.dir === "apps/wire")?.action).toBe("run");
     expect(plans.find((plan) => plan.dir === "packages/protocol")?.action).toBe("skip");
+  });
+});
+
+describe("a deliberate blocker is not a broken gate", () => {
+  test("a package exiting the blocked code is reported blocked, and the run exits nonzero", async () => {
+    const root = makeFixtureRepo({
+      rootScripts: { "toolchain:test": PASS_COMMAND },
+      packages: [
+        { dir: "apps/web", scripts: { "test:unit": PASS_COMMAND }, source: true },
+        { dir: "apps/wire", scripts: { "test:unit": blockedCommand() }, source: true },
+      ],
+    });
+    const result = await runCli(root, ["unit", "--json"]);
+
+    // Never green, and never confusable with a failure.
+    expect(result.exitCode).toBe(BLOCKED_EXIT_CODE);
+    expect(result.exitCode).not.toBe(0);
+    expect(result.exitCode).not.toBe(1);
+
+    const unit = units(result).find((record) => record.dir === "apps/wire");
+    expect(unit?.status).toBe("blocked");
+    expect(unit?.code).toBe("SUITE_BLOCKED");
+    expect(unit?.exit_code).toBe(BLOCKED_EXIT_CODE);
+    expect(unit?.detail).toContain("deliberately");
+    expect(unit?.reproduce).toBe("cd ./apps/wire && bun run test:unit");
+
+    const blockedSummary = summary(result, "unit");
+    expect(blockedSummary?.status).toBe("blocked");
+    expect(blockedSummary?.code).toBe("SUITE_BLOCKED");
+    expect(blockedSummary?.totals.blocked).toBe(1);
+    expect(blockedSummary?.totals.fail).toBe(0);
+    expect(blockedSummary?.totals.pass).toBe(2);
+  });
+
+  test("the blocked child's own stderr reaches the operator, naming its blocker", async () => {
+    const root = makeFixtureRepo({
+      rootScripts: { "toolchain:test": PASS_COMMAND },
+      packages: [{ dir: "apps/wire", scripts: { "test:unit": blockedCommand() }, source: true }],
+    });
+    const result = await runCli(root, ["unit", "--json"]);
+    expect(result.exitCode).toBe(BLOCKED_EXIT_CODE);
+    expect(result.stderr).toContain("blocked on asimposiumorg-fixture");
+  });
+
+  test("a real failure outranks a blocker: exit 1, and each row keeps its own status", async () => {
+    const root = makeFixtureRepo({
+      rootScripts: { "toolchain:test": PASS_COMMAND },
+      packages: [
+        { dir: "apps/web", scripts: { "test:unit": PASS_COMMAND }, source: true },
+        { dir: "apps/wire", scripts: { "test:unit": blockedCommand() }, source: true },
+        { dir: "packages/render", scripts: { "test:unit": failCommand(1) }, source: true },
+        { dir: "packages/contracts", source: true, scripts: {} },
+      ],
+    });
+    const result = await runCli(root, ["unit", "--json"]);
+
+    expect(result.exitCode).toBe(1);
+
+    const byDir = new Map(units(result).map((record) => [record.dir, record]));
+    expect(byDir.get("apps/web")?.status).toBe("pass");
+    expect(byDir.get("apps/wire")?.status).toBe("blocked");
+    expect(byDir.get("packages/render")?.status).toBe("fail");
+    expect(byDir.get("packages/contracts")?.status).toBe("missing");
+
+    const mixed = summary(result, "unit");
+    expect(mixed?.status).toBe("fail");
+    expect(mixed?.code).toBe("SUITE_INCOMPLETE");
+    expect(mixed?.totals).toEqual({
+      total: 5,
+      executed: 4,
+      pass: 2,
+      fail: 1,
+      blocked: 1,
+      missing: 1,
+      skip: 0,
+    });
+  });
+
+  test("any other nonzero exit stays a failure: only the root-owned code means blocked", async () => {
+    const root = makeFixtureRepo({
+      rootScripts: { "toolchain:test": PASS_COMMAND },
+      packages: [
+        { dir: "apps/wire", scripts: { "test:unit": failCommand(2) }, source: true },
+        { dir: "packages/render", scripts: { "test:unit": failCommand(3) }, source: true },
+      ],
+    });
+    const result = await runCli(root, ["unit", "--json"]);
+    expect(result.exitCode).toBe(1);
+    for (const record of units(result).filter((entry) => entry.dir !== ".")) {
+      expect(record.status).toBe("fail");
+      expect(record.code).toBe("SUITE_FAILED");
+    }
+    expect(summary(result, "unit")?.totals.blocked).toBe(0);
+  });
+
+  test("human output labels the blocker and prints its reproduction and detail", async () => {
+    const root = makeFixtureRepo({
+      rootScripts: { "toolchain:test": PASS_COMMAND },
+      packages: [{ dir: "apps/wire", scripts: { "test:unit": blockedCommand() }, source: true }],
+    });
+    const result = await runCli(root, ["unit"]);
+
+    expect(result.exitCode).toBe(BLOCKED_EXIT_CODE);
+    expect(result.stdout).toContain("BLOCKED");
+    expect(result.stdout).toContain("reproduce: cd ./apps/wire && bun run test:unit");
+    expect(result.stdout).toContain("detail:");
+    expect(result.stdout).toContain("1 blocked");
+    expect(result.stdout).toContain("BLOCKED");
+    expect(result.stdout).not.toContain("FAIL");
+    expect(result.stdout).not.toContain(root);
+    expect(result.stdout).not.toContain(homedir());
   });
 });

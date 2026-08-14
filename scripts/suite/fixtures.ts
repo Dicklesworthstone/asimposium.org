@@ -10,6 +10,7 @@
 import { mkdirSync, mkdtempSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
+import { BLOCKED_EXIT_CODE } from "./policy.ts";
 
 export interface FixturePackage {
   dir: string;
@@ -34,6 +35,17 @@ export const PASS_COMMAND = 'bun -e "process.exit(0)"';
 /** A command that writes to stderr and exits nonzero: the planted negative. */
 export function failCommand(exitCode = 1): string {
   return `bun -e "console.error('planted failure'); process.exit(${exitCode})"`;
+}
+
+/**
+ * A command that names its blocker on stderr and exits with the root-owned blocked code,
+ * which is how a package says "this gate is deliberately unsatisfiable today".
+ */
+export function blockedCommand(): string {
+  return (
+    `bun -e "console.error('blocked on asimposiumorg-fixture: no namespace exists yet');` +
+    ` process.exit(${BLOCKED_EXIT_CODE})"`
+  );
 }
 
 /** A command that records that it ran, so `--list` can be proven not to execute anything. */

@@ -45,6 +45,26 @@ export const SUITE_DESCRIPTION: Readonly<Record<Suite, string>> = {
   e2e: "Playwright human plane and the Cold-Agent Gauntlet (Fable §16.1, §16.3).",
 };
 
+/**
+ * The one exit code a package script uses to say "this gate is deliberately blocked on
+ * named future work", as distinct from "this gate ran and something is broken".
+ *
+ * Without it the dispatcher had exactly one non-zero meaning, so a package honestly
+ * refusing to fake a gate it cannot yet satisfy — no D1 namespace, no staging origin, no
+ * measured budget — was reported identically to a package whose tests are red. The
+ * ambiguity runs both ways, and the second direction is the dangerous one: a real
+ * regression landing inside an already-red suite changes nothing a reader can see.
+ *
+ * 78 is `EX_CONFIG` from sysexits(3) — "something was unconfigured or unavailable in the
+ * environment" — which is exactly the claim a blocked gate makes. It lives here, at the
+ * root, for the same reason the required-suite table does (Fable §17.0): a package must
+ * not be able to redefine the meaning of its own gate inside a feature diff.
+ *
+ * A blocked unit is never green. The run still exits non-zero, and the record still
+ * carries the reproduction command and the child's own detail.
+ */
+export const BLOCKED_EXIT_CODE = 78;
+
 /** Owed by every workspace package that contains source code. */
 export const BASELINE_REQUIRED: readonly Suite[] = ["typecheck", "lint", "unit"];
 

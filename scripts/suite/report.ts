@@ -16,7 +16,12 @@
 import { homedir } from "node:os";
 import { relative, sep } from "node:path";
 
-export type UnitStatus = "pass" | "fail" | "missing" | "skip";
+/**
+ * `blocked` means the package deliberately refused a gate it cannot yet satisfy and said
+ * so with the root-owned exit code (`BLOCKED_EXIT_CODE`, policy.ts). It is never green:
+ * it is counted separately, rendered with its own label, and still exits the run non-zero.
+ */
+export type UnitStatus = "pass" | "fail" | "blocked" | "missing" | "skip";
 
 export interface UnitDiagnostic {
   record: "unit";
@@ -44,7 +49,8 @@ export interface SummaryDiagnostic {
   suite: string;
   version: string;
   duration_ms: number;
-  status: "pass" | "fail";
+  /** `blocked` only when nothing genuinely failed: a real fail or missing outranks it. */
+  status: "pass" | "fail" | "blocked";
   reproduce: string;
   code: string;
   totals: {
@@ -52,6 +58,7 @@ export interface SummaryDiagnostic {
     executed: number;
     pass: number;
     fail: number;
+    blocked: number;
     missing: number;
     skip: number;
   };
@@ -143,6 +150,7 @@ export function serialize(diagnostic: Diagnostic, root: string): string {
 const STATUS_LABEL: Readonly<Record<UnitStatus, string>> = {
   pass: "PASS   ",
   fail: "FAIL   ",
+  blocked: "BLOCKED",
   missing: "MISSING",
   skip: "SKIP   ",
 };
@@ -174,7 +182,8 @@ export function formatSummaryLine(diagnostic: SummaryDiagnostic, root: string): 
   const totals = diagnostic.totals;
   const line =
     `summary ${diagnostic.suite}: ${totals.pass} pass · ${totals.fail} fail · ` +
-    `${totals.missing} missing · ${totals.skip} skip · ${totals.executed} executed · ` +
+    `${totals.blocked} blocked · ${totals.missing} missing · ${totals.skip} skip · ` +
+    `${totals.executed} executed · ` +
     `${seconds(diagnostic.duration_ms)} · ${diagnostic.status.toUpperCase()}`;
   return redact(line, root);
 }

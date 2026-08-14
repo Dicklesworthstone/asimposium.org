@@ -168,11 +168,40 @@ describe("human rendering", () => {
       status: "fail",
       reproduce: "bun run suite unit",
       code: "SUITE_INCOMPLETE",
-      totals: { total: 4, executed: 3, pass: 2, fail: 1, missing: 0, skip: 1 },
+      totals: { total: 4, executed: 3, pass: 2, fail: 1, blocked: 0, missing: 0, skip: 1 },
     };
     const line = formatSummaryLine(summary, ROOT);
     expect(line).toBe(
-      "summary unit: 2 pass · 1 fail · 0 missing · 1 skip · 3 executed · 2.00s · FAIL",
+      "summary unit: 2 pass · 1 fail · 0 blocked · 0 missing · 1 skip · 3 executed · 2.00s · FAIL",
     );
+  });
+
+  test("a blocked unit is labelled BLOCKED, never PASS", () => {
+    const line = formatUnitLine(
+      unit({ status: "blocked", code: "SUITE_BLOCKED", command: "bun run test:integration" }),
+      ROOT,
+    );
+    expect(line).toContain("BLOCKED");
+    expect(line).not.toContain("PASS");
+  });
+
+  test("a blocked-only summary counts the blocker and renders BLOCKED, not PASS", () => {
+    const summary: SummaryDiagnostic = {
+      record: "summary",
+      tool: "bun",
+      package: "asimposium",
+      suite: "integration",
+      version: "1.3.8",
+      duration_ms: 2000,
+      status: "blocked",
+      reproduce: "bun run suite integration",
+      code: "SUITE_BLOCKED",
+      totals: { total: 3, executed: 2, pass: 1, fail: 0, blocked: 1, missing: 0, skip: 1 },
+    };
+    const line = formatSummaryLine(summary, ROOT);
+    expect(line).toBe(
+      "summary integration: 1 pass · 0 fail · 1 blocked · 0 missing · 1 skip · 2 executed · 2.00s · BLOCKED",
+    );
+    expect(line).not.toContain("PASS");
   });
 });

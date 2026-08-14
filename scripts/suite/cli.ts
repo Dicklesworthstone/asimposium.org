@@ -11,6 +11,9 @@
  *   - a package that carries source code and owes a suite but has no script FAILS
  *     (status "missing"), so a stub cannot stay silently green once it grows code;
  *   - a stub with no source files is reported "skip" with the reason, never "pass";
+ *   - a package that exits with the root-owned BLOCKED_EXIT_CODE is reported "blocked":
+ *     still non-zero, still printed with its reproduction command, but counted apart from
+ *     "fail" so a deliberate refusal and a broken test are never the same row;
  *   - child stdout/stderr is streamed, never suppressed;
  *   - dispatcher-authored records carry no absolute paths, no environment values and no
  *     credential-shaped strings.
@@ -21,6 +24,7 @@
 import { isAbsolute, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import {
+  BLOCKED_EXIT_CODE,
   isSuite,
   orderSuites,
   ROOT_UNITS,
@@ -41,6 +45,7 @@ import {
   type SummaryDiagnostic,
   serialize,
   type UnitDiagnostic,
+  type UnitStatus,
 } from "./report.ts";
 import {
   DiscoveryError,
@@ -100,8 +105,14 @@ HOW A SUITE RESOLVES FOR ONE PACKAGE
   2. no script, package carries source files, and root policy requires the suite ->
      status "missing" and the run fails. Gates are not optional once code exists.
   3. no script and no source files -> status "skip" with reason "no source files yet".
-  Required suites are declared at the repository root (scripts/suite/policy.ts) and never
-  inside a package, so a feature diff cannot relax its own gate (Fable §17.0).
+  4. the script runs and exits ${BLOCKED_EXIT_CODE} -> status "blocked": the package deliberately refuses
+     a gate it cannot yet satisfy honestly (no D1 namespace, no staging origin, no measured
+     budget). Blocked is never green — it prints its reproduction command and detail, and
+     the run exits ${BLOCKED_EXIT_CODE} — but it is counted apart from "fail" so a real regression inside
+     an already-red suite is still visible. Any other non-zero exit is "fail".
+  Required suites and the blocked exit code are declared at the repository root
+  (scripts/suite/policy.ts) and never inside a package, so a feature diff cannot relax its
+  own gate nor redefine what its own exit codes mean (Fable §17.0).
 
 SCRIPT NAMES EXPECTED IN EACH WORKSPACE PACKAGE
 ${SUITES.map((suite) => `  ${suite.padEnd(12)} -> "${SUITE_SCRIPT[suite]}"`).join("\n")}
@@ -110,6 +121,7 @@ EXIT CODES
   0  every unit passed or was legitimately skipped
   1  at least one unit failed, or a required suite script is missing
   2  usage, policy or preflight error (bad suite name, unreadable root, bun too old)
+  ${BLOCKED_EXIT_CODE} no failures, but at least one unit is deliberately blocked on named future work
 
 DIAGNOSTICS
   One record per unit plus a summary per suite: tool, package, suite, version, duration_ms,
@@ -313,6 +325,16 @@ async function runUnit(
   const durationMs = Math.round(performance.now() - startedAt);
   const signal = child.signalCode ?? undefined;
 
+  // A signalled child is never "blocked": it did not choose its exit code, so a coincident
+  // 78 must not be read as a deliberate refusal.
+  const status: UnitStatus =
+    exitCode === 0
+      ? "pass"
+      : signal === undefined && exitCode === BLOCKED_EXIT_CODE
+        ? "blocked"
+        : "fail";
+  const signalSuffix = signal !== undefined ? ` (${signal})` : "";
+
   return {
     record: "unit",
     tool: TOOL,
@@ -320,18 +342,25 @@ async function runUnit(
     suite,
     version: Bun.version,
     duration_ms: durationMs,
-    status: exitCode === 0 ? "pass" : "fail",
+    status,
     reproduce: reproduceCommand(unit.dir, script),
     dir: unit.dir,
-    code: exitCode === 0 ? "SUITE_PASSED" : "SUITE_FAILED",
+    code:
+      status === "pass" ? "SUITE_PASSED" : status === "blocked" ? "SUITE_BLOCKED" : "SUITE_FAILED",
     package_version: unit.version,
     script,
     command,
     exit_code: exitCode,
     ...(signal !== undefined ? { signal } : {}),
-    ...(exitCode === 0
+    ...(status === "pass"
       ? {}
-      : { detail: `"${command}" exited ${exitCode}${signal !== undefined ? ` (${signal})` : ""}` }),
+      : {
+          detail:
+            status === "blocked"
+              ? `"${command}" exited ${exitCode}: the package reports this gate as deliberately ` +
+                "blocked on future work, not as satisfied. Its own output above names the blocker."
+              : `"${command}" exited ${exitCode}${signalSuffix}`,
+        }),
   };
 }
 
@@ -361,7 +390,11 @@ function emit(diagnostic: Diagnostic, options: Options): void {
   }
   if (diagnostic.record === "unit") {
     process.stdout.write(`${formatUnitLine(diagnostic, options.root)}\n`);
-    if (diagnostic.status === "fail" || diagnostic.status === "missing") {
+    if (
+      diagnostic.status === "fail" ||
+      diagnostic.status === "missing" ||
+      diagnostic.status === "blocked"
+    ) {
       process.stdout.write(
         `         reproduce: ${redact(diagnostic.reproduce, options.root)}\n` +
           (diagnostic.detail !== undefined
@@ -498,6 +531,7 @@ async function main(argv: string[]): Promise<number> {
   }
 
   let failed = false;
+  let blocked = false;
 
   for (const suite of options.suites) {
     const planned = planSuite(suite, options.root, workspaces).filter((unit) =>
@@ -529,7 +563,15 @@ async function main(argv: string[]): Promise<number> {
 
     if (!options.json) process.stdout.write(`suite ${suite}\n`);
 
-    const totals = { total: planned.length, executed: 0, pass: 0, fail: 0, missing: 0, skip: 0 };
+    const totals = {
+      total: planned.length,
+      executed: 0,
+      pass: 0,
+      fail: 0,
+      blocked: 0,
+      missing: 0,
+      skip: 0,
+    };
     const suiteStartedAt = performance.now();
     let bailed = false;
 
@@ -547,11 +589,16 @@ async function main(argv: string[]): Promise<number> {
       if (diagnostic.status === "fail" || diagnostic.status === "missing") {
         failed = true;
         if (options.bail) bailed = true;
+      } else if (diagnostic.status === "blocked") {
+        // Not a failure, so `--bail` does not stop the run: the point of a blocked unit is
+        // that the rest of the suite still has something to say.
+        blocked = true;
       }
     }
 
     const emptyRun = options.requireExecuted && totals.executed === 0;
     if (emptyRun) failed = true;
+    const genuinelyFailed = totals.fail + totals.missing > 0 || emptyRun;
 
     const summary: SummaryDiagnostic = {
       record: "summary",
@@ -560,13 +607,15 @@ async function main(argv: string[]): Promise<number> {
       suite,
       version: Bun.version,
       duration_ms: Math.round(performance.now() - suiteStartedAt),
-      status: totals.fail + totals.missing === 0 && !emptyRun ? "pass" : "fail",
+      status: genuinelyFailed ? "fail" : totals.blocked > 0 ? "blocked" : "pass",
       reproduce: `bun run suite ${suite}`,
       code: emptyRun
         ? "NO_UNITS_EXECUTED"
-        : totals.fail + totals.missing === 0
-          ? "SUITE_COMPLETE"
-          : "SUITE_INCOMPLETE",
+        : genuinelyFailed
+          ? "SUITE_INCOMPLETE"
+          : totals.blocked > 0
+            ? "SUITE_BLOCKED"
+            : "SUITE_COMPLETE",
       totals,
       ...(emptyRun
         ? { detail: `--require-executed was set but suite "${suite}" executed no units` }
@@ -579,7 +628,10 @@ async function main(argv: string[]): Promise<number> {
     if (bailed) break;
   }
 
-  return failed ? 1 : 0;
+  // A genuine failure outranks a blocker: exit 1 still means "something is broken". A run
+  // whose only non-passing units are blocked exits BLOCKED_EXIT_CODE — non-zero, never
+  // green, and distinguishable by a CI consumer without parsing prose.
+  return failed ? 1 : blocked ? BLOCKED_EXIT_CODE : 0;
 }
 
 const exitCode = await main(process.argv.slice(2));
