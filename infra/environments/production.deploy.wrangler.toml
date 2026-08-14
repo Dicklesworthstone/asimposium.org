@@ -1,0 +1,45 @@
+# Deploy-time resolution of the generated production.wrangler.toml:
+#   - the provisioned D1 id is substituted (the generated file carries the
+#     CI-time ${ASIMP_D1_DATABASE_ID_PRODUCTION} placeholder);
+#   - the HERALD_ROOMS Durable Object binding is omitted because the Worker
+#     exports no HeraldRoom class yet (W7) and a bound-but-unexported class is
+#     a deploy-time failure — recorded on asimposiumorg-p1g for the OPS.3
+#     reconciliation;
+#   - SERVICE_ENVELOPE_KEYS carries only PUBLIC Ed25519 verification keys
+#     (non-secret by design; the signing key lives in Vercel env).
+# Regenerate nothing over this file; when OPS.3 closes, fold this back into
+# the generator.
+name = "asimposium-stoa-prod"
+main = "../../apps/wire/src/index.ts"
+compatibility_date = "2026-08-13"
+compatibility_flags = ["nodejs_compat"]
+workers_dev = false
+
+# Custom domain: creates the DNS record on the asimposium.org zone (proxied).
+routes = [
+  { pattern = "a.asimposium.org", custom_domain = true },
+]
+
+[[d1_databases]]
+binding = "DB"
+database_name = "asimposium-prod"
+database_id = "651aa4dd-ae3d-4e31-beb1-4c09d778eb94"
+migrations_dir = "../../db/migrations"
+
+[[r2_buckets]]
+# role: private-cas
+binding = "ARTIFACTS"
+bucket_name = "asimposium-artifacts-prod"
+
+[[r2_buckets]]
+# role: public-delivery
+binding = "PUBLIC_ARTIFACTS"
+bucket_name = "asimposium-public-prod"
+
+[[rules]]
+type = "Text"
+globs = ["**/*.md"]
+fallthrough = true
+
+[vars]
+SERVICE_ENVELOPE_KEYS = '[{"kid":"prod-svc-2026-08","publicKeyHex":"0b137bcd0a75c16e2a4d5f734e1f550018fc6cea15edd5693bb8b597096e5f76","notBefore":1786665600}]'
