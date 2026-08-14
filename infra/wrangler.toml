@@ -17,3 +17,8 @@ migrations_dir = "../db/migrations"
 [[r2_buckets]]
 binding = "ARTIFACTS"
 bucket_name = "asimposium-artifacts-local"
+
+[[rules]]
+type = "Text"
+globs = ["**/*.md"]
+fallthrough = true

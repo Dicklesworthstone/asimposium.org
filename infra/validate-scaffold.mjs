@@ -1,4 +1,4 @@
-import { existsSync, lstatSync, readFileSync } from "node:fs";
+import { existsSync, lstatSync, readFileSync, realpathSync } from "node:fs";
 import { dirname, isAbsolute, relative, resolve, sep } from "node:path";
 import { fileURLToPath } from "node:url";
 import { performance } from "node:perf_hooks";
@@ -22,6 +22,7 @@ const REQUIRED_RESPONSIBILITY_DOCS = [
   "docs/README.md",
 ];
 const FORBIDDEN_BACKEND_MARKERS = ["supabase", "turso", "neon", "prisma"];
+const STRICT_ARRAY_TABLES = new Set(["d1_databases", "r2_buckets", "rules"]);
 
 export class ScaffoldValidationError extends Error {
   constructor(code, message) {
@@ -50,16 +51,55 @@ function readRequiredAssignment(content, key, source) {
   return match[1];
 }
 
+function readRequiredBooleanAssignment(content, key, source) {
+  const escapedKey = key.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+  const match = content.match(
+    new RegExp(`^\\s*${escapedKey}\\s*=\\s*(true|false)\\s*$`, "m"),
+  );
+  if (!match) {
+    fail("MISSING_CONFIG_KEY", `${source} must define ${key}.`);
+  }
+  return match[1] === "true";
+}
+
+function readRequiredSingleStringArrayAssignment(content, key, source) {
+  const escapedKey = key.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+  const match = content.match(
+    new RegExp(`^\\s*${escapedKey}\\s*=\\s*\\[\\s*"([^\"]+)"\\s*\\]\\s*$`, "m"),
+  );
+  if (!match) {
+    fail("MISSING_CONFIG_KEY", `${source} must define ${key} as a single-string array.`);
+  }
+  return match[1];
+}
+
 function readTable(content, table, source) {
   const lines = content.split("\n");
   const headers = [`[[${table}]]`, `[${table}]`];
-  const start = lines.findIndex((line) => headers.includes(line.trim()));
-  if (start < 0) {
+  const matches = lines
+    .map((line, index) => ({ index, header: line.trim() }))
+    .filter(({ header }) => headers.includes(header));
+  if (matches.length === 0) {
     fail("MISSING_CONFIG_TABLE", `${source} must define ${headers[0]} or ${headers[1]}.`);
   }
 
+  if (STRICT_ARRAY_TABLES.has(table)) {
+    if (matches.length !== 1) {
+      fail(
+        "DUPLICATE_CONFIG_TABLE",
+        `${source} must define exactly one ${headers[0]}; duplicate, shadowed, or conflicting ${table} entries are not allowed.`,
+      );
+    }
+    if (matches[0].header !== headers[0]) {
+      fail(
+        "UNSAFE_CONFIG_TABLE",
+        `${source} must define ${headers[0]}, not ${headers[1]}.`,
+      );
+    }
+  }
+
   const rows = [];
-  for (let index = start + 1; index < lines.length; index += 1) {
+  for (let index = matches[0].index + 1; index < lines.length; index += 1) {
     if (/^\s*\[/.test(lines[index])) {
       break;
     }
@@ -81,17 +121,40 @@ function assertExact(value, expected, key, source) {
   }
 }
 
-function assertRepositoryPath(root, configPath, declaredPath, key) {
+function isOutside(root, target) {
+  const relation = relative(root, target);
+  return relation === ".." || relation.startsWith(`..${sep}`) || isAbsolute(relation);
+}
+
+function resolveRepositoryPath(root, configPath, declaredPath, key) {
   if (isAbsolute(declaredPath)) {
     fail("PATH_ESCAPE", `${key} must be repository-relative.`);
   }
 
   const target = resolve(dirname(configPath), declaredPath);
-  const relation = relative(root, target);
-  if (relation === ".." || relation.startsWith(`..${sep}`) || isAbsolute(relation)) {
+  if (isOutside(root, target)) {
     fail("PATH_ESCAPE", `${key} resolves outside the repository.`);
   }
   return target;
+}
+
+function assertPhysicalRepositoryContainment(root, target, key) {
+  if (!existsSync(target)) {
+    fail("MISSING_REQUIRED_TARGET", `${key} must resolve to an existing repository target.`);
+  }
+
+  let physicalRoot;
+  let physicalTarget;
+  try {
+    physicalRoot = realpathSync(root);
+    physicalTarget = realpathSync(target);
+  } catch {
+    fail("MISSING_REQUIRED_TARGET", `${key} must resolve to an existing repository target.`);
+  }
+
+  if (isOutside(physicalRoot, physicalTarget)) {
+    fail("PATH_ESCAPE", `${key} resolves outside the repository after symlink resolution.`);
+  }
 }
 
 function assertDirectory(root, workspacePath) {
@@ -161,8 +224,7 @@ export function validateScaffold(rootDirectory, configWorkspacePath = "infra/wra
     fail("PATH_ESCAPE", "The Wrangler configuration path must be repository-relative.");
   }
   const configPath = resolve(root, configWorkspacePath);
-  const configRelation = relative(root, configPath);
-  if (configRelation === ".." || configRelation.startsWith(`..${sep}`) || isAbsolute(configRelation)) {
+  if (isOutside(root, configPath)) {
     fail("PATH_ESCAPE", "The Wrangler configuration path resolves outside the repository.");
   }
   const configSource = relativeDisplay(root, configPath).replace(/^\.\//, "");
@@ -170,19 +232,21 @@ export function validateScaffold(rootDirectory, configWorkspacePath = "infra/wra
   if (!existsSync(configPath)) {
     fail("MISSING_CONFIG_FILE", `Expected ${configSource}.`);
   }
+  assertPhysicalRepositoryContainment(root, configPath, "The Wrangler configuration path");
 
   const config = readFileSync(configPath, "utf8");
   assertNoForbiddenBackend(config, configSource);
   assertNoRemoteConfiguration(config, configSource);
 
   const declaredMain = readRequiredAssignment(config, "main", configSource);
-  const mainPath = assertRepositoryPath(root, configPath, declaredMain, "main");
+  const mainPath = resolveRepositoryPath(root, configPath, declaredMain, "main");
   assertExact(
     declaredMain,
     "../apps/wire/src/index.ts",
     "main",
     configSource,
   );
+  assertPhysicalRepositoryContainment(root, mainPath, "main");
 
   assertExact(readRequiredAssignment(config, "name", configSource), "asimposium-stoa-local", "name", configSource);
   assertExact(
@@ -233,12 +297,13 @@ export function validateScaffold(rootDirectory, configWorkspacePath = "infra/wra
     "d1_databases.migrations_dir",
     configSource,
   );
-  const migrationsPath = assertRepositoryPath(
+  const migrationsPath = resolveRepositoryPath(
     root,
     configPath,
     migrationsDirectory,
     "d1_databases.migrations_dir",
   );
+  assertPhysicalRepositoryContainment(root, migrationsPath, "d1_databases.migrations_dir");
   const wrangler_version = readPinnedWranglerVersion(root);
 
   for (const workspacePath of REQUIRED_DIRECTORIES) {
@@ -265,6 +330,26 @@ export function validateScaffold(rootDirectory, configWorkspacePath = "infra/wra
     readTableAssignment(config, "r2_buckets", "bucket_name", configSource),
     "asimposium-artifacts-local",
     "r2_buckets.bucket_name",
+    configSource,
+  );
+
+  const rules = readTable(config, "rules", configSource);
+  assertExact(
+    readRequiredAssignment(rules, "type", configSource),
+    "Text",
+    "rules.type",
+    configSource,
+  );
+  assertExact(
+    readRequiredSingleStringArrayAssignment(rules, "globs", configSource),
+    "**/*.md",
+    "rules.globs",
+    configSource,
+  );
+  assertExact(
+    readRequiredBooleanAssignment(rules, "fallthrough", configSource),
+    true,
+    "rules.fallthrough",
     configSource,
   );
 
