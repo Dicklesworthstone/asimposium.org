@@ -101,12 +101,12 @@ describe("GET /internal/health", () => {
 
 describe("routing", () => {
   test("an unknown path is a problem+json 404 that names the route that exists", async () => {
-    const res = await callWorker("/v1/hello");
+    const res = await callWorker("/not-a-route");
 
     expect(res.status).toBe(404);
     expect(res.contentType).toBe("application/problem+json; charset=utf-8");
     expect(res.body).toMatchObject({ code: "ROUTE_NOT_FOUND", status: 404 });
-    expect((res.body as { detail: string }).detail).toContain("/v1/hello");
+    expect((res.body as { detail: string }).detail).toContain("/not-a-route");
     expect((res.body as { fix_hint: string }).fix_hint).toContain("/internal/health");
   });
 });
