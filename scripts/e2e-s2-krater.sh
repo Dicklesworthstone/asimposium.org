@@ -719,7 +719,10 @@ read_child_status() {
 
 group_members() {
   local pgid="$1" rows line pid seen_pgid ppid
-  rows="$(LC_ALL=C ps -axo pid=,pgid=,ppid=,stat=,command=)" || return 2
+  # Query only the owned process group. A host-wide process-table walk here made
+  # the pre-release proof contend with every agent on the machine and widened
+  # the fork/exec observation race this function is meant to classify.
+  rows="$(LC_ALL=C ps -o pid=,pgid=,ppid=,stat=,command= -g "${pgid}" 2>/dev/null)" || return 2
   S2_GROUP_MEMBER_COUNT=0
   S2_GROUP_MEMBER_PIDS=()
   while IFS= read -r line; do
@@ -741,13 +744,20 @@ group_contains_pid() {
   return 1
 }
 
-pre_release_snapshot_line_is_expected() {
-  local line="$1" helper_pid="$2" supervisor_pid="$3"
+pre_release_snapshot_line_kind() {
+  local line="$1" helper_pid="$2" supervisor_pid="$3" marker="$4"
   local seen_pid seen_pgid seen_ppid seen_stat seen_command expected_arguments
   read -r seen_pid seen_pgid seen_ppid seen_stat seen_command <<<"${line}"
   is_decimal "${seen_pid}" && is_decimal "${seen_pgid}" && is_decimal "${seen_ppid}" || return 1
   [[ "${seen_pid}" == "${helper_pid}" && "${seen_pgid}" == "${supervisor_pid}" && \
-    "${seen_ppid}" == "${supervisor_pid}" && "${seen_stat}" != T* && "${seen_stat}" != Z* ]] || return 1
+    "${seen_ppid}" == "${supervisor_pid}" && "${seen_stat}" != T* ]] || return 1
+  # macOS exposes the short interval between fork and exec with the parent's
+  # command line, and may expose the child once more as a zombie. Neither is a
+  # live unexpected descendant; ask the bounded caller to resample it.
+  if [[ "${seen_stat}" == Z* || \
+    "${seen_command}" == *"s2-pinned-supervisor-${marker}"* ]]; then
+    return 2
+  fi
   expected_arguments="-o pid=,pgid=,ppid=,stat=,command= -p ${supervisor_pid}"
   case "${seen_command}" in
     "ps ${expected_arguments}"|"/bin/ps ${expected_arguments}"|"/usr/bin/ps ${expected_arguments}")
@@ -761,12 +771,12 @@ pre_release_snapshot_line_is_expected() {
 # sampled helper disappeared before its follow-up inspection, which is an observation race and
 # must be resampled; exit 1 means a still-observable unexpected descendant and fails closed.
 pre_release_helper_is_expected_snapshot() {
-  local helper_pid="$1" supervisor_pid="$2" line
+  local helper_pid="$1" supervisor_pid="$2" marker="$3" line
   if ! line="$(LC_ALL=C ps -o pid=,pgid=,ppid=,stat=,command= -p "${helper_pid}" 2>/dev/null)"; then
     return 2
   fi
   [[ -n "${line}" ]] || return 2
-  pre_release_snapshot_line_is_expected "${line}" "${helper_pid}" "${supervisor_pid}"
+  pre_release_snapshot_line_kind "${line}" "${helper_pid}" "${supervisor_pid}" "${marker}"
 }
 
 # Before release the fresh session contains only the pinned supervisor, except for its exact
@@ -776,7 +786,7 @@ pre_release_helper_is_expected_snapshot() {
 # a slow or just-exited `ps` process an aggregate-load startup flake.
 pre_release_group_is_stably_pinned() {
   local pid="$1" marker="$2" attempts=0 accepted=0 member helper="" helper_status
-  while (( attempts < 8 && accepted < 2 )); do
+  while (( attempts < 40 && accepted < 2 )); do
     attempts=$((attempts + 1))
     supervisor_is_owned "${pid}" "${pid}" "${marker}" || return 1
     group_members "${pid}" || return 1
@@ -788,7 +798,7 @@ pre_release_group_is_stably_pinned() {
         [[ "${member}" == "${pid}" ]] || helper="${member}"
       done
       [[ -n "${helper}" ]] || return 1
-      if pre_release_helper_is_expected_snapshot "${helper}" "${pid}"; then
+      if pre_release_helper_is_expected_snapshot "${helper}" "${pid}" "${marker}"; then
         accepted=$((accepted + 1))
       else
         helper_status=$?
@@ -2230,16 +2240,22 @@ run_s2_shell_regression_test() {
   fi
 
   if [[ "${mode}" == "pre-release-helper-classification" ]]; then
-    pre_release_snapshot_line_is_expected \
-      '123 456 456 S ps -o pid=,pgid=,ppid=,stat=,command= -p 456' 123 456 || return 1
-    pre_release_snapshot_line_is_expected \
-      '124 456 456 S /bin/ps -o pid=,pgid=,ppid=,stat=,command= -p 456' 124 456 || return 1
-    if pre_release_snapshot_line_is_expected \
-      '125 456 456 S bash s2-persistent-pre-release-helper-marker' 125 456; then return 1; fi
-    if pre_release_snapshot_line_is_expected \
-      '126 456 999 S ps -o pid=,pgid=,ppid=,stat=,command= -p 456' 126 456; then return 1; fi
-    if pre_release_snapshot_line_is_expected \
-      '127 456 456 Z ps -o pid=,pgid=,ppid=,stat=,command= -p 456' 127 456; then return 1; fi
+    pre_release_snapshot_line_kind \
+      '123 456 456 S ps -o pid=,pgid=,ppid=,stat=,command= -p 456' 123 456 marker || return 1
+    pre_release_snapshot_line_kind \
+      '124 456 456 S /bin/ps -o pid=,pgid=,ppid=,stat=,command= -p 456' 124 456 marker || return 1
+    if pre_release_snapshot_line_kind \
+      '125 456 456 S bash s2-pinned-supervisor-marker' 125 456 marker; then return 1; \
+    else [[ $? -eq 2 ]] || return 1; fi
+    if pre_release_snapshot_line_kind \
+      '126 456 456 Z ps -o pid=,pgid=,ppid=,stat=,command= -p 456' 126 456 marker; then \
+      return 1; else [[ $? -eq 2 ]] || return 1; fi
+    if pre_release_snapshot_line_kind \
+      '127 456 456 S bash s2-persistent-pre-release-helper-marker' 127 456 marker; then \
+      return 1; else [[ $? -eq 1 ]] || return 1; fi
+    if pre_release_snapshot_line_kind \
+      '128 456 999 S ps -o pid=,pgid=,ppid=,stat=,command= -p 456' 128 456 marker; then \
+      return 1; else [[ $? -eq 1 ]] || return 1; fi
     emit '{"tool":"bash","package":"apps/wire","suite":"s2-krater-shell","status":"pass","scenario":"pre-release-helper-classifier-accepts-only-the-supervisors-exact-live-ps-child","reproduce":"S2_SHELL_REGRESSION_TEST=pre-release-helper-classification scripts/e2e-s2-krater.sh"}'
     return 0
   fi

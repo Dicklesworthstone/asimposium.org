@@ -361,8 +361,15 @@ describe("S2 to S7 normalized cost receipt", () => {
     expect(shell).toContain("S2_PARENT_TERM_RESIDUAL_UNPROVEN");
     expect(start).toContain("pre_release_group_is_stably_pinned");
     expect(shell).toContain("pre_release_helper_is_expected_snapshot");
-    expect(shell).toContain("pre_release_snapshot_line_is_expected");
+    expect(shell).toContain("pre_release_snapshot_line_kind");
     expect(shell).toContain("S2_SHELL_REGRESSION_FAILED");
+    const groupMembers = shell.slice(
+      shell.indexOf("group_members() {"),
+      shell.indexOf("group_contains_pid()"),
+    );
+    // biome-ignore lint/suspicious/noTemplateCurlyInString: asserts literal shell source text.
+    expect(groupMembers).toContain('-g "${pgid}"');
+    expect(groupMembers).not.toContain("ps -axo");
     // biome-ignore lint/suspicious/noTemplateCurlyInString: asserts literal shell source text.
     expect(shell).toContain("${S2_GROUP_MEMBER_COUNT} -ge 1 && ${S2_GROUP_MEMBER_COUNT} -le 2");
     expect(shell).toContain("S2_PLANT_PERSISTENT_PRE_RELEASE_HELPER");
