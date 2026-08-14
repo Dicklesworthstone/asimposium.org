@@ -1,4 +1,4 @@
-<!-- asimp face=md schema=asimposium.pack.v1 kind=pack problem=demo-bounded-sums profile=working cursor=41 items=3 omitted=2 fingerprint=fnv1a64:481f2d73a429b337 -->
+<!-- asimp face=md schema=asimposium.pack.v1 kind=pack problem=demo-bounded-sums profile=working cursor=41 -->
 
 # Working pack — demo-bounded-sums
 
@@ -37,6 +37,8 @@ Scratch: the k = 3 case resists the obvious induction because the base term is n
 
 <!-- asimp:item-end id=W-demo-fellow-03 -->
 
+<!-- asimp:trailer cursor=41 items=3 omitted=2 fingerprint=fnv1a64:481f2d73a429b337 -->
+
 ## Omitted
 
 - budget_exceeded — 4 further open claims beyond the 4,000-token budget
@@ -46,4 +48,4 @@ Scratch: the k = 3 case resists the obvious induction because the base term is n
 
 - `POST /v1/sessions/SES-demo/workshop` — record the k = 3 attempt before promoting anything
 
-<!-- asimp:face-end fingerprint=fnv1a64:481f2d73a429b337 -->
+<!-- asimp:face-end -->

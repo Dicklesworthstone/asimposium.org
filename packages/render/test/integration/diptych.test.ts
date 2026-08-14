@@ -480,17 +480,17 @@ describe("determinism (Fable §7.1 axiom 7)", () => {
 describe("face shape", () => {
   const faces = renderAllFaces(safeWorkingPack());
 
-  test("the markdown face opens with a parseable control header and closes with the fingerprint", () => {
+  test("the markdown face keeps cursor in its opening header and volatile metadata in its post-item trailer", () => {
     const [header] = faces.md.body.split("\n");
     expect(header).toBe(
       `<!-- asimp face=md schema=asimposium.pack.v1 kind=pack problem=demo-bounded-sums profile=working ` +
-        `cursor=41 items=3 omitted=2 fingerprint=${faces.md.fingerprint} -->`,
+        `cursor=41 -->`,
     );
-    expect(
-      faces.md.body
-        .trimEnd()
-        .endsWith(`<!-- asimp:face-end fingerprint=${faces.md.fingerprint} -->`),
-    ).toBe(true);
+    const trailer = `<!-- asimp:trailer cursor=41 items=3 omitted=2 fingerprint=${faces.md.fingerprint} -->`;
+    expect(faces.md.body.indexOf(trailer)).toBeGreaterThan(
+      faces.md.body.lastIndexOf("<!-- asimp:item-end id=W-demo-fellow-03 -->"),
+    );
+    expect(faces.md.body.trimEnd().endsWith("<!-- asimp:face-end -->")).toBe(true);
   });
 
   test("every markdown item is opened and closed by its own delimiter", () => {

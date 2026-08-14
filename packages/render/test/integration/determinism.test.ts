@@ -11,7 +11,8 @@
  *   - a fresh process must produce the same bytes, or the goldens and any cross-run digest
  *     comparison are measuring one process's hash seed rather than the projection.
  *
- * The second block records an honest limitation of the current face format. See the note.
+ * The markdown face keeps its cacheable prefix in raw bytes, not merely inside
+ * an item substring: budget-varying metadata is a post-item trailer.
  */
 
 import { describe, expect, test } from "bun:test";
@@ -24,34 +25,51 @@ import { safeWorkingPack } from "../_support/fixtures.ts";
  * exactly as a real composer must (Fable §7.3 — an empty pack with an empty `omitted` is a
  * bug, a truncated one that says so is information).
  */
-function budgetBucket(items: number): Projection {
+type ProjectionWithPackMetadata = Projection & {
+  readonly session?: string;
+  readonly budget_tokens?: number;
+  readonly tokens_estimate?: number;
+};
+
+function budgetBucket(items: number): ProjectionWithPackMetadata {
   const pack = safeWorkingPack();
   const dropped = pack.items.length - items;
   return {
     ...pack,
-    items: pack.items.slice(0, items),
+    items: pack.items.slice(0, items).map((item, index) => ({ ...item, tokens: 160 + index * 20 })),
     omitted:
       dropped > 0
         ? [...pack.omitted, { reason: "budget_exceeded", detail: `${dropped} further item(s)` }]
         : pack.omitted,
+    session: "SES-cache-stable",
+    budget_tokens: items === 1 ? 800 : items === 2 ? 1_500 : 2_500,
+    tokens_estimate: 320 + items * 180,
   };
 }
 
-/** The item region of a markdown face: everything the prompt cache would reuse. */
-function itemRegion(markdown: string): string {
-  const start = markdown.indexOf("## Items\n");
-  const end = markdown.indexOf("## Omitted\n");
-  return markdown.slice(start, end);
+/** Every raw byte through the complete ordered item sequence, excluding its trailer. */
+function rawItemPrefix(markdown: string): string {
+  const trailer = markdown.indexOf("<!-- asimp:trailer ");
+  if (trailer === -1) throw new Error("markdown face is missing its post-item trailer");
+  return markdown.slice(0, trailer);
+}
+
+function trailerLine(markdown: string): string {
+  const line = markdown
+    .split("\n")
+    .find((candidate) => candidate.startsWith("<!-- asimp:trailer "));
+  if (line === undefined) throw new Error("markdown face is missing its post-item trailer");
+  return line;
 }
 
 describe("stable-prefix ordering across budget buckets", () => {
   const buckets = [1, 2, 3].map((n) => ({ n, md: renderProjection(budgetBucket(n), "md").body }));
 
-  test("a larger budget extends the item region rather than reshuffling it", () => {
+  test("a larger same-cursor budget shares raw bytes through the complete smaller item list", () => {
     for (let i = 1; i < buckets.length; i += 1) {
-      const smaller = itemRegion(buckets[i - 1]?.md ?? "");
-      const larger = itemRegion(buckets[i]?.md ?? "");
-      expect(larger.startsWith(smaller.trimEnd())).toBe(true);
+      const smaller = rawItemPrefix(buckets[i - 1]?.md ?? "");
+      const larger = buckets[i]?.md ?? "";
+      expect(larger.startsWith(smaller)).toBe(true);
       expect(larger.length).toBeGreaterThan(smaller.length);
     }
   });
@@ -71,36 +89,39 @@ describe("stable-prefix ordering across budget buckets", () => {
     }
   });
 
+  test("the post-item trailer retains cursor and optional pack metadata", () => {
+    for (const bucket of buckets) {
+      const trailer = trailerLine(bucket.md);
+      const itemEnd = bucket.md.lastIndexOf("<!-- asimp:item-end ");
+      expect(bucket.md.indexOf(trailer)).toBeGreaterThan(itemEnd);
+      expect(trailer).toContain("cursor=41");
+      expect(trailer).toContain(`items=${bucket.n}`);
+      expect(trailer).toContain("session=SES-cache-stable");
+      expect(trailer).toContain(
+        `budget_tokens=${bucket.n === 1 ? 800 : bucket.n === 2 ? 1_500 : 2_500}`,
+      );
+      expect(trailer).toContain(`tokens_estimate=${320 + bucket.n * 180}`);
+      expect(trailer).toMatch(/fingerprint=fnv1a64:[0-9a-f]{16}/);
+      expect(bucket.md).toContain("tokens=160");
+    }
+  });
+
   test("re-rendering one bucket is byte-identical, bucket by bucket", () => {
     for (const bucket of buckets) {
       expect(renderProjection(budgetBucket(bucket.n), "md").body).toBe(bucket.md);
     }
   });
 
-  /**
-   * Honest limitation, recorded rather than asserted away. The face *header* carries
-   * `items=`, `omitted=` and the content fingerprint, so two buckets share no byte prefix
-   * from position zero — only the item region is stable. A harness caching on a raw prefix
-   * of the whole face therefore gets no hit across budgets. Moving the volatile counters
-   * behind the stable envelope would fix it, but that is a face-format change with golden
-   * and Worker consequences, so it is reported, not smuggled in here.
-   */
-  test("the whole face is NOT prefix-stable: the shared prefix dies inside the header", () => {
-    const small = buckets[0]?.md ?? "";
-    const large = buckets[2]?.md ?? "";
-
-    let shared = 0;
-    while (shared < Math.min(small.length, large.length) && small[shared] === large[shared]) {
-      shared += 1;
+  test("the opening header retains cursor but none of the budget-varying fields", () => {
+    for (const bucket of buckets) {
+      const header = bucket.md.split("\n")[0] ?? "";
+      expect(header).toContain("cursor=41");
+      expect(header).not.toContain("items=");
+      expect(header).not.toContain("omitted=");
+      expect(header).not.toContain("fingerprint=");
+      expect(header).not.toContain("budget_tokens=");
+      expect(header).not.toContain("tokens_estimate=");
     }
-
-    // The two faces agree until the header's `items=` counter and diverge there, which is
-    // well before the item region — the expensive part a prompt cache would want to reuse.
-    expect(small.slice(shared - 6, shared)).toBe("items=");
-    expect(shared).toBeLessThan(large.indexOf("## Items"));
-    expect(large.startsWith(small.slice(0, shared + 1))).toBe(false);
-    expect((small.split("\n")[0] ?? "").includes("items=1")).toBe(true);
-    expect((large.split("\n")[0] ?? "").includes("items=3")).toBe(true);
   });
 });
 
@@ -114,10 +135,13 @@ describe("determinism across process restarts", () => {
       const dropped = pack.items.length - ${items};
       const projection = {
         ...pack,
-        items: pack.items.slice(0, ${items}),
+        items: pack.items.slice(0, ${items}).map((item, index) => ({ ...item, tokens: 160 + index * 20 })),
         omitted: dropped > 0
           ? [...pack.omitted, { reason: "budget_exceeded", detail: dropped + " further item(s)" }]
           : pack.omitted,
+        session: "SES-cache-stable",
+        budget_tokens: ${items} === 1 ? 800 : ${items} === 2 ? 1500 : 2500,
+        tokens_estimate: 320 + ${items} * 180,
       };
       process.stdout.write(renderProjection(projection, ${JSON.stringify(format)}).body);
     `;

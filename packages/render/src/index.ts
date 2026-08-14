@@ -22,6 +22,7 @@ export {
   bucketizePackBudget,
   type ComposedPack,
   type ComposedPackItem,
+  composedPackToProjection,
   composePack,
   PACK_BUDGET_BUCKETS,
   PACK_PREAMBLE,

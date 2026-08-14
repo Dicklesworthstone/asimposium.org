@@ -9,8 +9,18 @@
  */
 
 import { byteLength, contentFingerprint, stableStringify } from "./canonical.ts";
-import { firstUnpairedUtf16SurrogateOffset, isSafeWorkerPath } from "./sanitize.ts";
-import { ITEM_SCOPES, type ItemScope, type NextAction, type OmittedEntry } from "./types.ts";
+import {
+  firstUnpairedUtf16SurrogateOffset,
+  isSafeHeaderValue,
+  isSafeWorkerPath,
+} from "./sanitize.ts";
+import {
+  ITEM_SCOPES,
+  type ItemScope,
+  type NextAction,
+  type OmittedEntry,
+  type Projection,
+} from "./types.ts";
 
 /** The only cacheable token buckets from Fable §7.3. */
 export const PACK_BUDGET_BUCKETS = [800, 1_500, 2_500, 4_000, 8_000] as const;
@@ -60,6 +70,8 @@ export interface PackCandidate {
 
 /** Server-authored action affordance filtered against the caller's permissions. */
 export interface PackActionCandidate extends NextAction {
+  /** Explicit server assertion that this GET is safe to advertise anonymously. */
+  readonly public_read: boolean;
   /** All listed effective permissions are required to advertise this action. */
   readonly requires?: readonly string[];
 }
@@ -95,10 +107,12 @@ export interface ComposedPackItem {
 }
 
 /**
- * The semantic envelope a Worker later enriches with its transport ETag and
- * cryptographic digest. `canonical_json` is the exact UTF-8 source for
- * `bytes` and `canonical_fingerprint`; FNV is named a fingerprint on purpose,
- * never represented as an integrity control.
+ * The semantic composition result before it crosses into the safe rendering
+ * boundary. A Worker later enriches a rendered face with its transport ETag
+ * and cryptographic digest. `canonical_json` is the exact UTF-8 source for
+ * `bytes` and `canonical_fingerprint`, but it is internal semantic/accounting
+ * material — never a serviceable safe face. FNV is named a fingerprint on
+ * purpose, never represented as an integrity control.
  */
 export interface ComposedPack {
   readonly schema: string;
@@ -115,6 +129,7 @@ export interface ComposedPack {
   readonly degraded: readonly string[];
   readonly bytes: number;
   readonly canonical_fingerprint: string;
+  /** Internal semantic bytes; use `composedPackToProjection` before rendering. */
   readonly canonical_json: string;
 }
 
@@ -144,6 +159,43 @@ interface ValidatedCandidate {
 interface ValidatedAction {
   readonly value: NextAction;
   readonly requires: readonly string[];
+  readonly public_read: boolean;
+}
+
+/**
+ * Typed boundary from pure composition to the one safe rendering pipeline.
+ *
+ * Composer accounting needed to understand the semantic pack crosses as
+ * validated projection metadata. Transport bytes, the internal canonical
+ * fingerprint and `canonical_json` do not cross: none is an escaped or
+ * neutralized face. Every consumer that could serve bytes must pass the
+ * returned Projection through `prepareProjection` / `renderAllFaces`.
+ */
+export function composedPackToProjection(pack: ComposedPack): Projection {
+  return {
+    schema: pack.schema,
+    kind: "pack",
+    session: pack.session,
+    problem: pack.problem,
+    profile: pack.profile,
+    cursor: pack.cursor,
+    budget_tokens: pack.budget_tokens,
+    tokens_estimate: pack.tokens_estimate,
+    title: "ASImposium pack",
+    preamble: pack.preamble,
+    items: pack.items.map((item) => ({
+      kind: item.kind,
+      id: item.id,
+      scope: item.scope,
+      untrusted: item.untrusted,
+      body: item.body,
+      why_included: item.why_included,
+      tokens: item.tokens,
+    })),
+    omitted: pack.omitted,
+    next_actions: pack.next_actions,
+    degraded: pack.degraded,
+  };
 }
 
 /** The server-authored trust boundary required in every Fable §7.3 pack. */
@@ -171,6 +223,17 @@ function assertScalarText(value: unknown, field: string): string {
     return refuse("INVALID_INPUT", `${field} contains an unpaired UTF-16 surrogate at ${offset}`);
   }
   return value;
+}
+
+function assertHeaderToken(value: unknown, field: string): string {
+  const text = assertScalarText(value, field);
+  if (!isSafeHeaderValue(text)) {
+    return refuse(
+      "INVALID_INPUT",
+      `${field} must be a safe control-header token without whitespace, '=', '<', '>', or '--'`,
+    );
+  }
+  return text;
 }
 
 function assertTokenEstimate(value: unknown, field: string): number {
@@ -300,6 +363,9 @@ function assertActions(value: unknown): readonly ValidatedAction[] {
     if (action.method !== "GET" && action.method !== "POST") {
       refuse("INVALID_ACTION", `action_candidates[${index}].method must be GET or POST`);
     }
+    if (typeof action.public_read !== "boolean") {
+      refuse("INVALID_ACTION", `action_candidates[${index}].public_read must be boolean`);
+    }
     const url = assertScalarText(action.url, `action_candidates[${index}].url`);
     if (!isSafeWorkerPath(url)) {
       refuse(
@@ -317,6 +383,7 @@ function assertActions(value: unknown): readonly ValidatedAction[] {
         action.requires,
         `action_candidates[${index}].requires`,
       ),
+      public_read: action.public_read,
     });
   }
   return actions.sort((left, right) => {
@@ -432,10 +499,10 @@ export function composePack(input: PackComposerInput): ComposedPack {
   const viewer = assertViewer(source.viewer);
   const budgetTokens = bucketizePackBudget(source.requested_max_tokens as number);
   const common = {
-    schema: assertScalarText(source.schema, "schema"),
-    session: assertScalarText(source.session, "session"),
-    problem: assertScalarText(source.problem, "problem"),
-    profile: assertScalarText(source.profile, "profile"),
+    schema: assertHeaderToken(source.schema, "schema"),
+    session: assertHeaderToken(source.session, "session"),
+    problem: assertHeaderToken(source.problem, "problem"),
+    profile: assertHeaderToken(source.profile, "profile"),
     cursor: source.cursor,
     budget_tokens: budgetTokens,
     preamble: PACK_PREAMBLE,
@@ -467,12 +534,13 @@ export function composePack(input: PackComposerInput): ComposedPack {
   // filtered using this empty set.
   const permissions = new Set(viewer.audience === "public" ? [] : viewer.permissions);
   const visible: ValidatedCandidate[] = [];
-  let publicWorkshopExcluded = 0;
   let itemPermissionExcluded = 0;
 
   for (const candidate of candidates) {
     if (viewer.audience === "public" && candidate.value.scope === "workshop") {
-      publicWorkshopExcluded += 1;
+      // Private workshop material is outside a public pack's input universe.
+      // Do not count it or emit an omission: even the existence of an omitted
+      // workshop item is private state that anonymous callers must not learn.
       continue;
     }
     if (!isAuthorized(candidate.requires, permissions)) {
@@ -484,13 +552,22 @@ export function composePack(input: PackComposerInput): ComposedPack {
 
   const nextActions: NextAction[] = [];
   let publicWriteActionsExcluded = 0;
+  let publicNonreadActionsExcluded = 0;
   let actionPermissionExcluded = 0;
   for (const action of actions) {
     // Public faces have no principal. Claimed effective permissions must never
     // turn an anonymous GET into a POST affordance; writes are earned in a
     // session and are absent rather than merely expected to 403 later.
-    if (viewer.audience === "public" && action.value.method === "POST") {
-      publicWriteActionsExcluded += 1;
+    if (viewer.audience === "public") {
+      if (action.value.method === "POST") {
+        publicWriteActionsExcluded += 1;
+      } else if (!action.public_read) {
+        publicNonreadActionsExcluded += 1;
+      } else if (action.requires.length > 0) {
+        actionPermissionExcluded += 1;
+      } else {
+        nextActions.push(action.value);
+      }
     } else if (isAuthorized(action.requires, permissions)) {
       nextActions.push(action.value);
     } else {
@@ -499,16 +576,14 @@ export function composePack(input: PackComposerInput): ComposedPack {
   }
 
   const staticOmitted: OmittedEntry[] = [];
-  if (publicWorkshopExcluded > 0) {
-    // Counts, ids and titles are private workshop state too. A public face
-    // learns only the policy reason for the absence, never its magnitude.
-    staticOmitted.push(omission("workshop_scope_excluded"));
-  }
   if (itemPermissionExcluded > 0) {
     staticOmitted.push(omission("item_permission_filtered"));
   }
   if (publicWriteActionsExcluded > 0) {
     staticOmitted.push(omission("public_write_actions_excluded"));
+  }
+  if (publicNonreadActionsExcluded > 0) {
+    staticOmitted.push(omission("public_nonread_actions_excluded"));
   }
   if (actionPermissionExcluded > 0) {
     staticOmitted.push(omission("actions_permission_filtered"));

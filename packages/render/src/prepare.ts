@@ -57,6 +57,7 @@ export interface PreparedItem {
   readonly scope: ItemScope;
   readonly untrusted: boolean;
   readonly why_included: string;
+  readonly tokens?: number;
   /** Neutralized body. Untrusted bodies always differ from input when forged. */
   readonly body: string;
   readonly neutralized: readonly NeutralizationFinding[];
@@ -65,9 +66,12 @@ export interface PreparedItem {
 export interface PreparedProjection {
   readonly schema: string;
   readonly kind: string;
+  readonly session?: string;
   readonly problem: string;
   readonly profile: string;
   readonly cursor: number;
+  readonly budget_tokens?: number;
+  readonly tokens_estimate?: number;
   readonly title: string;
   readonly preamble: string;
   readonly items: readonly PreparedItem[];
@@ -119,6 +123,9 @@ function projectionStrings(projection: Projection): ProjectionString[] {
     { field: "title", value: projection.title, reject_control_comment: true },
     { field: "preamble", value: projection.preamble, reject_control_comment: true },
   ];
+  if (projection.session !== undefined) {
+    fields.push({ field: "session", value: projection.session, reject_control_comment: false });
+  }
 
   for (const [index, item] of projection.items.entries()) {
     fields.push(
@@ -238,12 +245,58 @@ export function prepareProjection(projection: Projection): PreparedProjection {
     );
   }
 
-  for (const [field, value] of [
+  const optionalPackFields = [
+    projection.session,
+    projection.budget_tokens,
+    projection.tokens_estimate,
+  ];
+  const presentPackFieldCount = optionalPackFields.filter((value) => value !== undefined).length;
+  if (presentPackFieldCount !== 0 && presentPackFieldCount !== optionalPackFields.length) {
+    refuse(
+      "INVALID_HEADER_VALUE",
+      "Budgeted pack metadata is an all-or-none contract",
+      "session, budget_tokens, and tokens_estimate must either all be present or all be absent; a partial tuple makes the faces disagree about what was budgeted",
+      "Supply the complete composer tuple, or omit all three fields for a non-budgeted projection.",
+      "A1",
+    );
+  }
+  const hasPackMetadata = presentPackFieldCount === optionalPackFields.length;
+  if (hasPackMetadata) {
+    if (
+      !Number.isSafeInteger(projection.budget_tokens) ||
+      (projection.budget_tokens as number) < 1
+    ) {
+      refuse(
+        "INVALID_HEADER_VALUE",
+        "Pack budget must be a positive safe integer",
+        `budget_tokens ${JSON.stringify(projection.budget_tokens)} cannot be rendered as honest pack metadata`,
+        "Use the positive fixed bucket selected by the pack composer.",
+        "A1",
+      );
+    }
+    if (
+      !Number.isSafeInteger(projection.tokens_estimate) ||
+      (projection.tokens_estimate as number) < 1 ||
+      (projection.tokens_estimate as number) > (projection.budget_tokens as number)
+    ) {
+      refuse(
+        "INVALID_HEADER_VALUE",
+        "Pack token estimate must fit its declared budget",
+        `tokens_estimate ${JSON.stringify(projection.tokens_estimate)} must be a positive safe integer no greater than budget_tokens ${projection.budget_tokens}`,
+        "Recompute the complete semantic-pack estimate and select a large enough fixed budget bucket.",
+        "A1",
+      );
+    }
+  }
+
+  const headerValues: Array<readonly [string, string]> = [
     ["schema", projection.schema],
     ["kind", projection.kind],
     ["problem", projection.problem],
     ["profile", projection.profile],
-  ] as const) {
+  ];
+  if (projection.session !== undefined) headerValues.push(["session", projection.session]);
+  for (const [field, value] of headerValues) {
     if (!isSafeHeaderValue(value)) {
       refuse(
         "INVALID_HEADER_VALUE",
@@ -277,6 +330,7 @@ export function prepareProjection(projection: Projection): PreparedProjection {
   const seen = new Set<string>();
   const items: PreparedItem[] = [];
   const neutralized: NeutralizationReport[] = [];
+  let itemTokenTotal = 0;
 
   for (const item of projection.items) {
     if (!ITEM_ID_PATTERN.test(item.id)) {
@@ -298,6 +352,39 @@ export function prepareProjection(projection: Projection): PreparedProjection {
       );
     }
     seen.add(item.id);
+
+    if (hasPackMetadata !== (item.tokens !== undefined)) {
+      refuse(
+        "INVALID_HEADER_VALUE",
+        "Pack item estimates must match the pack metadata tuple",
+        `item ${item.id} ${item.tokens === undefined ? "omits tokens while the projection declares a pack budget" : "declares tokens without session, budget_tokens, and tokens_estimate"}`,
+        hasPackMetadata
+          ? "Preserve the composer's whole-item tokens estimate on every selected item."
+          : "Either remove the item tokens field or provide the complete budgeted-pack metadata tuple.",
+        "A1",
+      );
+    }
+    if (item.tokens !== undefined) {
+      if (!Number.isSafeInteger(item.tokens) || item.tokens < 1) {
+        refuse(
+          "INVALID_HEADER_VALUE",
+          "Pack item tokens must be a positive safe integer",
+          `item ${item.id} declares tokens ${JSON.stringify(item.tokens)}`,
+          "Preserve the positive whole-item estimate emitted by the pack composer.",
+          "A1",
+        );
+      }
+      itemTokenTotal += item.tokens;
+      if (!Number.isSafeInteger(itemTokenTotal)) {
+        refuse(
+          "INVALID_HEADER_VALUE",
+          "Pack item token totals must remain safe integers",
+          `item token accumulation overflowed at item ${item.id}`,
+          "Use bounded item estimates and a supported fixed pack budget.",
+          "A1",
+        );
+      }
+    }
 
     const bodyCodePoints = codePointCountThroughLimit(item.body, MAX_BODY_CODE_POINTS);
     if (bodyCodePoints > MAX_BODY_CODE_POINTS) {
@@ -382,6 +469,7 @@ export function prepareProjection(projection: Projection): PreparedProjection {
         scope: item.scope,
         untrusted: true,
         why_included: item.why_included,
+        ...(item.tokens === undefined ? {} : { tokens: item.tokens }),
         body: result.text,
         neutralized: findings,
       });
@@ -395,18 +483,36 @@ export function prepareProjection(projection: Projection): PreparedProjection {
         scope: item.scope,
         untrusted: false,
         why_included: item.why_included,
+        ...(item.tokens === undefined ? {} : { tokens: item.tokens }),
         body: item.body,
         neutralized: [],
       });
     }
   }
 
+  if (hasPackMetadata && itemTokenTotal > (projection.tokens_estimate as number)) {
+    refuse(
+      "INVALID_HEADER_VALUE",
+      "Pack item estimates exceed the complete pack estimate",
+      `selected items total ${itemTokenTotal} tokens but tokens_estimate is ${projection.tokens_estimate}`,
+      "Recompute tokens_estimate from the complete semantic envelope and every selected item.",
+      "A1",
+    );
+  }
+
   const fingerprintSource = stableStringify({
     schema: projection.schema,
     kind: projection.kind,
+    ...(projection.session === undefined ? {} : { session: projection.session }),
     problem: projection.problem,
     profile: projection.profile,
     cursor: projection.cursor,
+    ...(projection.budget_tokens === undefined
+      ? {}
+      : {
+          budget_tokens: projection.budget_tokens,
+          tokens_estimate: projection.tokens_estimate,
+        }),
     title: projection.title,
     preamble: projection.preamble,
     items,
@@ -418,9 +524,16 @@ export function prepareProjection(projection: Projection): PreparedProjection {
   return {
     schema: projection.schema,
     kind: projection.kind,
+    ...(projection.session === undefined ? {} : { session: projection.session }),
     problem: projection.problem,
     profile: projection.profile,
     cursor: projection.cursor,
+    ...(projection.budget_tokens === undefined
+      ? {}
+      : {
+          budget_tokens: projection.budget_tokens,
+          tokens_estimate: projection.tokens_estimate as number,
+        }),
     title: projection.title,
     preamble: projection.preamble,
     items,

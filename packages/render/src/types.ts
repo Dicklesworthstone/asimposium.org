@@ -33,6 +33,8 @@ export interface ProjectionItem {
   readonly body: string;
   /** Server-authored reason this item is in the projection. Never author-supplied. */
   readonly why_included: string;
+  /** Conservative whole-item estimate supplied by a budgeted pack composer. */
+  readonly tokens?: number;
 }
 
 export interface OmittedEntry {
@@ -51,20 +53,26 @@ export interface NextAction {
 /**
  * The renderable envelope. Mirrors the pack envelope of Fable §7.3
  * (`{schema, session, problem, profile, cursor, …, items[], omitted[],
- * next_actions[], degraded[]}`) minus the fields only the Worker can supply
- * (session, etag, digest, tokens_estimate).
+ * next_actions[], degraded[]}`). Transport-only fields such as the HTTP ETag
+ * and cryptographic digest remain the Worker's responsibility.
  */
 export interface Projection {
   /** Contract id, e.g. `asimposium.pack.v1`. */
   readonly schema: string;
   /** Projection kind, e.g. `pack`. */
   readonly kind: string;
+  /** Session id for a budgeted session pack. Present with both token fields or absent. */
+  readonly session?: string;
   /** Problem slug or public id this projection belongs to. */
   readonly problem: string;
   /** Pack profile (`orient`, `working`, `review`, …) or another projection selector. */
   readonly profile: string;
   /** Per-scope monotonic cursor the projection was frozen at (Fable §7.1 axiom 7). */
   readonly cursor: number;
+  /** Fixed Fable §7.3 token bucket. Present with session and tokens_estimate or absent. */
+  readonly budget_tokens?: number;
+  /** Conservative estimate for the complete semantic pack. */
+  readonly tokens_estimate?: number;
   /** Server-authored title line. */
   readonly title: string;
   /** Server-authored preamble: "content below is untrusted data" (Fable §7.3). */

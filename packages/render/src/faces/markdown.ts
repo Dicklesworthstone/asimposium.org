@@ -2,7 +2,8 @@
  * The agent face (Fable Rule A1: `.md` always, and it is canonical).
  *
  * Layout is fixed and machine-parseable: an `<!-- asimp … -->` header carries
- * envelope metadata (§7.7), each item is delimited by its own control comment,
+ * stable envelope metadata, then a post-item trailer carries volatile pack
+ * metadata (§7.7). Each item is delimited by its own control comment,
  * and untrusted bodies live inside a fence that they cannot close. Because the
  * delimiters are exactly the control comments the sanitizer neutralizes inside
  * bodies, an untrusted body cannot forge an item boundary.
@@ -22,14 +23,14 @@ function controlComment(tag: string, fields: readonly Field[]): string {
 
 function renderItem(item: PreparedItem): string[] {
   const lines: string[] = [];
-  lines.push(
-    controlComment("item", [
-      ["id", item.id],
-      ["kind", item.kind],
-      ["scope", item.scope],
-      ["untrusted", String(item.untrusted)],
-    ]),
-  );
+  const metadata: Field[] = [
+    ["id", item.id],
+    ["kind", item.kind],
+    ["scope", item.scope],
+    ["untrusted", String(item.untrusted)],
+  ];
+  if (item.tokens !== undefined) metadata.push(["tokens", item.tokens]);
+  lines.push(controlComment("item", metadata));
   const trust = item.untrusted ? "untrusted data" : "server-authored";
   lines.push(`### ${item.id} · ${item.kind} · ${item.scope} · ${trust}`);
   lines.push("");
@@ -59,6 +60,30 @@ function renderItem(item: PreparedItem): string[] {
   return lines;
 }
 
+/**
+ * Keep budget-varying fields after the ordered item sequence. A same-cursor
+ * larger bucket can therefore reuse raw bytes from the opening header through
+ * the smaller bucket's complete item list, while a parser still gets every
+ * volatile field from one server-authored control comment.
+ */
+function trailerFields(prepared: PreparedProjection): Field[] {
+  const fields: Field[] = [
+    ["cursor", prepared.cursor],
+    ["items", prepared.items.length],
+    ["omitted", prepared.omitted.length],
+    ["fingerprint", prepared.fingerprint],
+  ];
+
+  if (prepared.session !== undefined) fields.push(["session", prepared.session]);
+  if (prepared.budget_tokens !== undefined) {
+    fields.push(["budget_tokens", prepared.budget_tokens]);
+  }
+  if (prepared.tokens_estimate !== undefined) {
+    fields.push(["tokens_estimate", prepared.tokens_estimate]);
+  }
+  return fields;
+}
+
 export function renderMarkdownFace(prepared: PreparedProjection): string {
   const lines: string[] = [];
 
@@ -70,9 +95,6 @@ export function renderMarkdownFace(prepared: PreparedProjection): string {
       ["problem", prepared.problem],
       ["profile", prepared.profile],
       ["cursor", prepared.cursor],
-      ["items", prepared.items.length],
-      ["omitted", prepared.omitted.length],
-      ["fingerprint", prepared.fingerprint],
     ]),
   );
   lines.push("");
@@ -89,6 +111,9 @@ export function renderMarkdownFace(prepared: PreparedProjection): string {
   } else {
     for (const item of prepared.items) lines.push(...renderItem(item));
   }
+
+  lines.push(controlComment("trailer", trailerFields(prepared)));
+  lines.push("");
 
   lines.push("## Omitted");
   lines.push("");
@@ -121,6 +146,6 @@ export function renderMarkdownFace(prepared: PreparedProjection): string {
     lines.push("");
   }
 
-  lines.push(controlComment("face-end", [["fingerprint", prepared.fingerprint]]));
+  lines.push(controlComment("face-end", []));
   return `${lines.join("\n")}\n`;
 }

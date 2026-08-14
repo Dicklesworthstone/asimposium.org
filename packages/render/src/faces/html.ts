@@ -21,9 +21,11 @@ function attribute(name: string, value: string | number): string {
 
 function renderItem(item: PreparedItem): string[] {
   const lines: string[] = [];
+  const tokenAttribute =
+    item.tokens === undefined ? "" : ` ${attribute("data-tokens", item.tokens)}`;
   lines.push(
     `    <li class="asimp-item" ${attribute("data-id", item.id)} ${attribute("data-kind", item.kind)} ` +
-      `${attribute("data-scope", item.scope)} ${attribute("data-untrusted", String(item.untrusted))}>`,
+      `${attribute("data-scope", item.scope)} ${attribute("data-untrusted", String(item.untrusted))}${tokenAttribute}>`,
   );
   const trust = item.untrusted ? "untrusted data" : "server-authored";
   lines.push(
@@ -44,10 +46,18 @@ function renderItem(item: PreparedItem): string[] {
 
 export function renderHtmlFragmentFace(prepared: PreparedProjection): string {
   const lines: string[] = [];
+  const packAttributes: string[] = [];
+  if (prepared.session !== undefined)
+    packAttributes.push(attribute("data-session", prepared.session));
+  if (prepared.budget_tokens !== undefined) {
+    packAttributes.push(attribute("data-budget-tokens", prepared.budget_tokens));
+    packAttributes.push(attribute("data-tokens-estimate", prepared.tokens_estimate as number));
+  }
   lines.push(
     `<section class="asimp-face" ${attribute("data-schema", prepared.schema)} ` +
       `${attribute("data-kind", prepared.kind)} ${attribute("data-problem", prepared.problem)} ` +
       `${attribute("data-profile", prepared.profile)} ${attribute("data-cursor", prepared.cursor)} ` +
+      `${packAttributes.join(" ")}${packAttributes.length === 0 ? "" : " "}` +
       `${attribute("data-fingerprint", prepared.fingerprint)}>`,
   );
   lines.push(`  <h2 class="asimp-face__title">${escapeHtml(prepared.title)}</h2>`);

@@ -14,9 +14,16 @@ export function renderJsonFace(prepared: PreparedProjection): string {
     schema: prepared.schema,
     face: "json",
     kind: prepared.kind,
+    ...(prepared.session === undefined ? {} : { session: prepared.session }),
     problem: prepared.problem,
     profile: prepared.profile,
     cursor: prepared.cursor,
+    ...(prepared.budget_tokens === undefined
+      ? {}
+      : {
+          budget_tokens: prepared.budget_tokens,
+          tokens_estimate: prepared.tokens_estimate,
+        }),
     fingerprint: prepared.fingerprint,
     title: prepared.title,
     preamble: prepared.preamble,
@@ -26,6 +33,7 @@ export function renderJsonFace(prepared: PreparedProjection): string {
       scope: item.scope,
       untrusted: item.untrusted,
       why_included: item.why_included,
+      ...(item.tokens === undefined ? {} : { tokens: item.tokens }),
       body: item.body,
       neutralized: item.neutralized.map((finding) => ({
         marker: finding.marker,

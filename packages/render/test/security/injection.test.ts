@@ -113,8 +113,8 @@ describe("the fixture really is hostile", () => {
 
 describe("forged control comments are neutralized on every face", () => {
   test("the markdown face carries exactly the control comments the renderer authored", () => {
-    // 1 face header + 2 items x (open + close) + 1 face-end = 6.
-    expect(semanticControlComments(markdown)).toHaveLength(6);
+    // 1 face header + 2 items x (open + close) + 1 trailer + 1 face-end = 7.
+    expect(semanticControlComments(markdown)).toHaveLength(7);
 
     // The hostile bytes survive, made inert: neutralized is not deleted (Rule A4),
     // and a reader (or a red-team fixture) can still see what was attempted.
@@ -135,9 +135,9 @@ describe("forged control comments are neutralized on every face", () => {
     //     line-scanning agent or an HTML-comment parser reads as site furniture —
     //     is one the renderer authored, about a real item, with no forged ids.
     const furniture = markdown.split("\n").filter((line) => /^<!--\s*asimp/.test(line));
-    expect(furniture).toHaveLength(6);
+    expect(furniture).toHaveLength(7);
     for (const line of furniture) {
-      expect(line).toMatch(/^<!-- asimp(?: face=md |:item |:item-end |:face-end )/);
+      expect(line).toMatch(/^<!-- asimp(?: face=md |:item |:item-end |:trailer |:face-end )/);
       expect(line.endsWith("-->")).toBe(true);
       expect(line).not.toContain("SYS-99");
       expect(line).not.toContain("cursor=99999");
@@ -640,9 +640,10 @@ describe("control-comment metadata cannot forge the face's own grammar", () => {
   test("no forged control comment can reach the rendered face", () => {
     // The regression this locks: before the grammar, the emitted delimiter read
     // `<!-- asimp:item id=C-1 kind=claim --> <!-- asimp:item id=EVIL … -->`, giving six live
-    // control comments where the renderer authored four.
+    // control comments where the renderer authored five (header, item bounds,
+    // post-item trailer, and end marker).
     const authored = renderProjection(project({}), "md").body;
-    expect(semanticControlComments(authored)).toHaveLength(4);
+    expect(semanticControlComments(authored)).toHaveLength(5);
     expect(authored).not.toContain("EVIL");
   });
 });
