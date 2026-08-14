@@ -741,35 +741,65 @@ group_contains_pid() {
   return 1
 }
 
-# Before release the fresh session contains only the pinned supervisor, except for a transient
-# helper fork made by the supervisor's own process-table inspection. Two bounded samples prove
-# the exact leader remains the group leader and permit at most that one helper; this avoids
-# treating an observation race as a start failure while still refusing an unexpected pre-release
-# descendant before any real Worker command can run.
+pre_release_snapshot_line_is_expected() {
+  local line="$1" helper_pid="$2" supervisor_pid="$3"
+  local seen_pid seen_pgid seen_ppid seen_stat seen_command expected_arguments
+  read -r seen_pid seen_pgid seen_ppid seen_stat seen_command <<<"${line}"
+  is_decimal "${seen_pid}" && is_decimal "${seen_pgid}" && is_decimal "${seen_ppid}" || return 1
+  [[ "${seen_pid}" == "${helper_pid}" && "${seen_pgid}" == "${supervisor_pid}" && \
+    "${seen_ppid}" == "${supervisor_pid}" && "${seen_stat}" != T* && "${seen_stat}" != Z* ]] || return 1
+  expected_arguments="-o pid=,pgid=,ppid=,stat=,command= -p ${supervisor_pid}"
+  case "${seen_command}" in
+    "ps ${expected_arguments}"|"/bin/ps ${expected_arguments}"|"/usr/bin/ps ${expected_arguments}")
+      return 0
+      ;;
+    *) return 1 ;;
+  esac
+}
+
+# Classify the only helper that the blocked supervisor is allowed to have. Exit 2 means the
+# sampled helper disappeared before its follow-up inspection, which is an observation race and
+# must be resampled; exit 1 means a still-observable unexpected descendant and fails closed.
+pre_release_helper_is_expected_snapshot() {
+  local helper_pid="$1" supervisor_pid="$2" line
+  if ! line="$(LC_ALL=C ps -o pid=,pgid=,ppid=,stat=,command= -p "${helper_pid}" 2>/dev/null)"; then
+    return 2
+  fi
+  [[ -n "${line}" ]] || return 2
+  pre_release_snapshot_line_is_expected "${line}" "${helper_pid}" "${supervisor_pid}"
+}
+
+# Before release the fresh session contains only the pinned supervisor, except for its exact
+# process-table helper. Two accepted bounded samples prove the leader remains pinned. A helper
+# that exits between the group scan and its own inspection is resampled; a live non-ps helper is
+# refused immediately. This preserves the unexpected-child fail-closed boundary without making
+# a slow or just-exited `ps` process an aggregate-load startup flake.
 pre_release_group_is_stably_pinned() {
-  local pid="$1" marker="$2" sample member helper="" first_helper=""
-  for sample in 1 2; do
+  local pid="$1" marker="$2" attempts=0 accepted=0 member helper="" helper_status
+  while (( attempts < 8 && accepted < 2 )); do
+    attempts=$((attempts + 1))
     supervisor_is_owned "${pid}" "${pid}" "${marker}" || return 1
     group_members "${pid}" || return 1
     [[ ${S2_GROUP_MEMBER_COUNT} -ge 1 && ${S2_GROUP_MEMBER_COUNT} -le 2 ]] || return 1
     group_contains_pid "${pid}" || return 1
-    # ps itself may momentarily fork a helper inside the newly pinned session.
-    # A helper with the same PID in both samples is instead a persistent child
-    # and therefore an unapproved payload before the release gate.
     if [[ ${S2_GROUP_MEMBER_COUNT} -eq 2 ]]; then
       helper=""
       for member in "${S2_GROUP_MEMBER_PIDS[@]}"; do
         [[ "${member}" == "${pid}" ]] || helper="${member}"
       done
       [[ -n "${helper}" ]] || return 1
-      if [[ ${sample} -eq 1 ]]; then
-        first_helper="${helper}"
-      elif [[ -n "${first_helper}" && "${helper}" == "${first_helper}" ]]; then
-        return 1
+      if pre_release_helper_is_expected_snapshot "${helper}" "${pid}"; then
+        accepted=$((accepted + 1))
+      else
+        helper_status=$?
+        [[ ${helper_status} -eq 2 ]] || return 1
       fi
+    else
+      accepted=$((accepted + 1))
     fi
-    (( sample == 2 )) || sleep 0.05
+    (( accepted == 2 )) || sleep 0.05
   done
+  [[ ${accepted} -eq 2 ]]
 }
 
 signal_owned_group() {
@@ -2194,12 +2224,35 @@ run_s2_shell_regression_test() {
   local interrupt_record interrupt_child interrupt_status interrupt_secret child_persist child_port
   local child_run child_status_file child_diagnostic diagnostic_body manifest_body
 
+  if [[ ! "${mode}" =~ ^[a-z0-9][a-z0-9-]{0,63}$ ]]; then
+    emit '{"tool":"bash","package":"apps/wire","suite":"s2-krater-shell","status":"fail","code":"S2_SHELL_REGRESSION_TEST_INVALID","reproduce":"scripts/e2e-s2-krater.sh"}'
+    return 2
+  fi
+
+  if [[ "${mode}" == "pre-release-helper-classification" ]]; then
+    pre_release_snapshot_line_is_expected \
+      '123 456 456 S ps -o pid=,pgid=,ppid=,stat=,command= -p 456' 123 456 || return 1
+    pre_release_snapshot_line_is_expected \
+      '124 456 456 S /bin/ps -o pid=,pgid=,ppid=,stat=,command= -p 456' 124 456 || return 1
+    if pre_release_snapshot_line_is_expected \
+      '125 456 456 S bash s2-persistent-pre-release-helper-marker' 125 456; then return 1; fi
+    if pre_release_snapshot_line_is_expected \
+      '126 456 999 S ps -o pid=,pgid=,ppid=,stat=,command= -p 456' 126 456; then return 1; fi
+    if pre_release_snapshot_line_is_expected \
+      '127 456 456 Z ps -o pid=,pgid=,ppid=,stat=,command= -p 456' 127 456; then return 1; fi
+    emit '{"tool":"bash","package":"apps/wire","suite":"s2-krater-shell","status":"pass","scenario":"pre-release-helper-classifier-accepts-only-the-supervisors-exact-live-ps-child","reproduce":"S2_SHELL_REGRESSION_TEST=pre-release-helper-classification scripts/e2e-s2-krater.sh"}'
+    return 0
+  fi
+
   if [[ "${mode}" == "parent-loss-child" ]]; then
     parent_loss_record="${S2_PARENT_LOSS_RECORD:-}"
     [[ -n "${parent_loss_record}" && ! -e "${parent_loss_record}" && ! -L "${parent_loss_record}" ]] || return 2
     status_file="${S2_STATE_DIR}/parent-loss-$(random_hex 8).status"
     start_pinned_supervisor "${status_file}" parent-loss "${S2_STATE_DIR}" "${S2_PORT}" client \
-      bash -c 'sleep 30' || return 1
+      bash -c 'sleep 30' || {
+        emit '{"tool":"bash","package":"apps/wire","suite":"s2-krater-shell","status":"fail","code":"S2_PARENT_LOSS_START_FAILED","reproduce":"S2_SHELL_REGRESSION_TEST=parent-loss scripts/e2e-s2-krater.sh"}'
+        return 1
+      }
     printf '%s %s %s %s %s %s %s\n' \
       "${S2_STARTED_PID}" "${S2_STARTED_PGID}" "${S2_STARTED_MARKER}" \
       "${S2_STARTED_WATCHDOG_PID}" "${S2_STARTED_WATCHDOG_HEALTH}" \
@@ -2269,7 +2322,10 @@ run_s2_shell_regression_test() {
     # shellcheck disable=SC2016
     S2_PLANT_SUPERVISOR_EXIT_ON_TERM=1 \
       start_pinned_supervisor "${status_file}" owner-loss-uncertain "${S2_STATE_DIR}" "${S2_PORT}" client \
-        bash -c 'trap "" TERM; deadline=$((SECONDS + 4)); while (( SECONDS < deadline )); do read -r -t 1 ignored || :; done' || return 1
+        bash -c 'trap "" TERM; deadline=$((SECONDS + 4)); while (( SECONDS < deadline )); do read -r -t 1 ignored || :; done' || {
+          emit '{"tool":"bash","package":"apps/wire","suite":"s2-krater-shell","status":"fail","code":"S2_OWNER_LOSS_UNCERTAIN_START_FAILED","reproduce":"S2_SHELL_REGRESSION_TEST=owner-loss-uncertain scripts/e2e-s2-krater.sh"}'
+          return 1
+        }
     deadline=$((SECONDS + S2_READY_DEADLINE_SECONDS))
     while :; do
       group_members "${S2_STARTED_PGID}" || return 1
@@ -2821,8 +2877,18 @@ run_s2_shell_regression_test() {
 }
 
 if [[ "${S2_SHELL_REGRESSION_TEST:-none}" != "none" ]]; then
-  run_s2_shell_regression_test "${S2_SHELL_REGRESSION_TEST}"
-  exit $?
+  if run_s2_shell_regression_test "${S2_SHELL_REGRESSION_TEST}"; then
+    exit 0
+  else
+    S2_SHELL_REGRESSION_STATUS=$?
+    if [[ "${S2_SHELL_REGRESSION_TEST}" =~ ^[a-z0-9][a-z0-9-]{0,63}$ ]]; then
+      S2_SHELL_REGRESSION_DIAGNOSTIC="${S2_SHELL_REGRESSION_TEST}"
+    else
+      S2_SHELL_REGRESSION_DIAGNOSTIC="invalid"
+    fi
+    emit "{\"tool\":\"bash\",\"package\":\"apps/wire\",\"suite\":\"s2-krater-shell\",\"status\":\"fail\",\"code\":\"S2_SHELL_REGRESSION_FAILED\",\"scenario\":\"${S2_SHELL_REGRESSION_DIAGNOSTIC}\",\"exit_code\":${S2_SHELL_REGRESSION_STATUS},\"reproduce\":\"scripts/e2e-s2-krater.sh\"}"
+    exit "${S2_SHELL_REGRESSION_STATUS}"
+  fi
 fi
 
 launch_lifecycle_child() {

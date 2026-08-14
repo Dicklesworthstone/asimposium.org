@@ -360,6 +360,9 @@ describe("S2 to S7 normalized cost receipt", () => {
     expect(shell).toContain("S2_PARENT_TERM_OLD_HOOK_RESIDUAL_REAPED");
     expect(shell).toContain("S2_PARENT_TERM_RESIDUAL_UNPROVEN");
     expect(start).toContain("pre_release_group_is_stably_pinned");
+    expect(shell).toContain("pre_release_helper_is_expected_snapshot");
+    expect(shell).toContain("pre_release_snapshot_line_is_expected");
+    expect(shell).toContain("S2_SHELL_REGRESSION_FAILED");
     // biome-ignore lint/suspicious/noTemplateCurlyInString: asserts literal shell source text.
     expect(shell).toContain("${S2_GROUP_MEMBER_COUNT} -ge 1 && ${S2_GROUP_MEMBER_COUNT} -le 2");
     expect(shell).toContain("S2_PLANT_PERSISTENT_PRE_RELEASE_HELPER");
@@ -392,6 +395,7 @@ describe("S2 to S7 normalized cost receipt", () => {
 describe("registered S2 shell and lifecycle regressions", () => {
   test("the fast planted shell regressions are bounded and leave no owned group behind", async () => {
     const modes = [
+      "pre-release-helper-classification",
       "release-race",
       "persistent-pre-release-helper",
       "release-interleaving",
