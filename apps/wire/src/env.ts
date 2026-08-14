@@ -16,6 +16,17 @@ export interface Env {
   DB: D1Database;
   /** Krater's content-addressed body store (Fable §10.4), bound as ARTIFACTS. */
   ARTIFACTS: R2Bucket;
+  /**
+   * Base64url 256-bit enrollment replay binding (wrangler secret). Absent
+   * disables enrollment with a typed 503 rather than a fallback.
+   */
+  ENROLLMENT_REPLAY_KEY?: string;
+  /**
+   * JSON array of service-envelope verification key records
+   * (`[{kid, publicKeyHex, notBefore, notAfter?}]`; public, non-secret).
+   * Absent disables sponsor routes only.
+   */
+  SERVICE_ENVELOPE_KEYS?: string;
 }
 
 export const REQUIRED_BINDINGS = ["DB", "ARTIFACTS"] as const;
