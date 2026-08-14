@@ -281,10 +281,15 @@ export function aggregateScreeningRun(
   versionMismatch(policyVersions, identity.policy_version, "POLICY_VERSION", failures);
   versionMismatch(configurationDigests, identity.configuration_digest, "CONFIGURATION_DIGEST", failures);
 
-  // A failed provider call is not a green result even when its quarantine outcome
-  // happened to satisfy a safety metric. Preserve threshold failures as failures.
-  const verdict = failures.length > 0 ? "fail" : providerFailureCount > 0 ? "blocked" : "pass";
-  if (providerFailureCount > 0 && verdict === "blocked") failures.push("PROVIDER_UNAVAILABLE_FAIL_CLOSED");
+  // A failed provider call is never green. Keep that diagnostic even when a
+  // separate threshold failure is already present, so a fail report cannot
+  // conceal that fail-closed provider behavior was observed.
+  if (providerFailureCount > 0) failures.push("PROVIDER_UNAVAILABLE_FAIL_CLOSED");
+  const verdict = failures.some((failure) => failure !== "PROVIDER_UNAVAILABLE_FAIL_CLOSED")
+    ? "fail"
+    : providerFailureCount > 0
+      ? "blocked"
+      : "pass";
 
   return {
     report_version: "s4-screening-report-v1",

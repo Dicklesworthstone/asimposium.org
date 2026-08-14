@@ -58,13 +58,20 @@ function assertOAuthDryCheck(value: unknown): void {
   const expectedScopes = ["email", "openid", "profile"];
   const scopes = [...(response.scopes ?? [])].sort();
   if (response.environment !== "production" || response.provider !== "google" || JSON.stringify(scopes) !== JSON.stringify(expectedScopes)) {
-    throw new Error("OAUTH_DRY_CHECK_SCOPE_OR_PROVIDER_MISMATCH");
+    throw new RunnerFailure("OAUTH_DRY_CHECK_SCOPE_OR_PROVIDER_MISMATCH", 1);
   }
-  if (!Array.isArray(response.redirect_uris) || response.redirect_uris.length === 0) throw new Error("OAUTH_DRY_CHECK_REDIRECT_MISSING");
+  if (!Array.isArray(response.redirect_uris) || response.redirect_uris.length === 0) {
+    throw new RunnerFailure("OAUTH_DRY_CHECK_REDIRECT_MISSING", 1);
+  }
   for (const redirect of response.redirect_uris) {
-    const parsed = new URL(redirect);
-    if (parsed.protocol !== "https:" || parsed.username || parsed.password || parsed.hash) {
-      throw new Error("OAUTH_DRY_CHECK_REDIRECT_INVALID");
+    try {
+      const parsed = new URL(redirect);
+      if (parsed.protocol !== "https:" || parsed.username || parsed.password || parsed.hash) {
+        throw new RunnerFailure("OAUTH_DRY_CHECK_REDIRECT_INVALID", 1);
+      }
+    } catch (error) {
+      if (error instanceof RunnerFailure) throw error;
+      throw new RunnerFailure("OAUTH_DRY_CHECK_REDIRECT_INVALID", 1);
     }
   }
 }
@@ -97,9 +104,19 @@ async function runLive(): Promise<void> {
     configuration_digest: screening.configuration_digest,
   };
   const report = aggregateScreeningRun(corpus, screening.observations, identity);
-  const oauthResponse = await fetch(oauthUrl, { headers: { authorization: `Bearer ${bearer}` } });
+  let oauthResponse: Response;
+  try {
+    oauthResponse = await fetch(oauthUrl, { headers: { authorization: `Bearer ${bearer}` } });
+  } catch {
+    throw new RunnerFailure("OAUTH_DRY_CHECK_UNAVAILABLE", 78);
+  }
   if (!oauthResponse.ok) throw new RunnerFailure("OAUTH_DRY_CHECK_UNAVAILABLE", 78);
-  assertOAuthDryCheck(await oauthResponse.json());
+  try {
+    assertOAuthDryCheck(await oauthResponse.json());
+  } catch (error) {
+    if (error instanceof RunnerFailure) throw error;
+    throw new RunnerFailure("OAUTH_DRY_CHECK_INVALID_RESPONSE", 1);
+  }
   // Safe NDJSON only; no origin, bearer, protected body, prompt, or raw score.
   process.stdout.write(`${screeningOpsJsonl(corpus, screening.observations, report)}\n`);
   if (report.verdict !== "pass") {
