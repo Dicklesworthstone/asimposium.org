@@ -1,17 +1,11 @@
 import { describe, expect, test } from "bun:test";
-import type { Hono } from "hono";
-
 import {
   MintEnrollmentResponseSchema,
   SponsorEnrollmentDecisionResponseSchema,
   SponsorFellowListResponseSchema,
   SponsorProposalListResponseSchema,
 } from "@asimposium/contracts";
-
-import {
-  mintServiceEnvelope,
-  serviceEnvelopeHeaders,
-} from "../../../web/lib/service-envelope.ts";
+import { mintServiceEnvelope, serviceEnvelopeHeaders } from "../../../web/lib/service-envelope.ts";
 import { toHex } from "../../src/auth/canonical";
 import { authenticateServiceEnvelopeRequest } from "../../src/auth/http";
 import { VerificationKeyring } from "../../src/auth/keyring";
@@ -106,16 +100,18 @@ async function harness(options?: { withSponsorSeam: false }): Promise<Harness> {
   return { app, sign };
 }
 
-function envelopeRequest(
-  path: string,
-  headers: Headers,
-  method: string,
-  body?: string,
-): Request {
-  return new Request(`${origin}${path}`, { method, headers, ...(body === undefined ? {} : { body }) });
+function envelopeRequest(path: string, headers: Headers, method: string, body?: string): Request {
+  return new Request(`${origin}${path}`, {
+    method,
+    headers,
+    ...(body === undefined ? {} : { body }),
+  });
 }
 
-async function mintOne(h: Harness, scopes = '["promote","review"]'): Promise<{
+async function mintOne(
+  h: Harness,
+  scopes = '["promote","review"]',
+): Promise<{
   enrollmentId: string;
   secret: string;
   joinUrl: string;
@@ -167,7 +163,8 @@ describe("sponsor enrollment routes", () => {
         body: '{"requested_scopes":["promote"]}',
       }),
     );
-    expect(unsigned.status).toBe(401);
+    expect(unsigned.status).toBe(403);
+    expect(await unsigned.json()).toMatchObject({ code: "WRONG_PRINCIPAL" });
 
     const minted = await mintOne(h);
     expect(minted.joinUrl.startsWith("https://a.asimposium.org/join/ASIMP-EN-")).toBe(true);
@@ -184,9 +181,7 @@ describe("sponsor enrollment routes", () => {
 
   test("sponsor routes answer 503 when the auth seam is not configured", async () => {
     const h = await harness({ withSponsorSeam: false });
-    const response = await h.app.fetch(
-      new Request(`${origin}/v1/fellows`, { method: "GET" }),
-    );
+    const response = await h.app.fetch(new Request(`${origin}/v1/fellows`, { method: "GET" }));
     expect(response.status).toBe(503);
     expect(await response.json()).toMatchObject({ code: "SPONSOR_AUTH_UNAVAILABLE" });
   });
@@ -197,7 +192,12 @@ describe("sponsor enrollment routes", () => {
     const flowHandle = await claimOne(h, enrollmentId, secret);
 
     // The approval card list shows the pending proposal in contract shape.
-    const listHeaders = await h.sign("", "/v1/enrollments/proposals", "enrollment.proposals.list", "GET");
+    const listHeaders = await h.sign(
+      "",
+      "/v1/enrollments/proposals",
+      "enrollment.proposals.list",
+      "GET",
+    );
     const list = await h.app.fetch(
       envelopeRequest("/v1/enrollments/proposals", listHeaders, "GET"),
     );
@@ -212,7 +212,7 @@ describe("sponsor enrollment routes", () => {
     });
 
     // Approve.
-    const decisionBody = '{"decision":"approve"}';
+    const decisionBody = JSON.stringify({ enrollment_id: enrollmentId, decision: "approve" });
     const decisionHeaders = await h.sign(
       decisionBody,
       "/v1/enrollments/:enrollmentId/decision",
@@ -232,7 +232,12 @@ describe("sponsor enrollment routes", () => {
     });
 
     // The proposal list is empty after the decision.
-    const listHeaders2 = await h.sign("", "/v1/enrollments/proposals", "enrollment.proposals.list", "GET");
+    const listHeaders2 = await h.sign(
+      "",
+      "/v1/enrollments/proposals",
+      "enrollment.proposals.list",
+      "GET",
+    );
     const list2 = await h.app.fetch(
       envelopeRequest("/v1/enrollments/proposals", listHeaders2, "GET"),
     );
@@ -280,8 +285,12 @@ describe("sponsor enrollment routes", () => {
     const { enrollmentId, secret } = await mintOne(h);
     const flowHandle = await claimOne(h, enrollmentId, secret, "delta-ringer");
 
-    const body = '{"decision":"deny"}';
-    const headers = await h.sign(body, "/v1/enrollments/:enrollmentId/decision", "enrollment.decide");
+    const body = JSON.stringify({ enrollment_id: enrollmentId, decision: "deny" });
+    const headers = await h.sign(
+      body,
+      "/v1/enrollments/:enrollmentId/decision",
+      "enrollment.decide",
+    );
     const decided = await h.app.fetch(
       envelopeRequest(`/v1/enrollments/${enrollmentId}/decision`, headers, "POST", body),
     );
@@ -321,7 +330,7 @@ describe("sponsor enrollment routes", () => {
     expect(SponsorProposalListResponseSchema.parse(await list.json()).proposals).toHaveLength(0);
 
     // The outsider's decision attempt is not a pending proposal of theirs.
-    const body = '{"decision":"approve"}';
+    const body = JSON.stringify({ enrollment_id: enrollmentId, decision: "approve" });
     const decisionHeaders = await h.sign(
       body,
       "/v1/enrollments/:enrollmentId/decision",
@@ -333,5 +342,81 @@ describe("sponsor enrollment routes", () => {
       envelopeRequest(`/v1/enrollments/${enrollmentId}/decision`, decisionHeaders, "POST", body),
     );
     expect([403, 404]).toContain(decided.status);
+  });
+
+  test("a signed decision cannot be retargeted through the route template", async () => {
+    const h = await harness();
+    const first = await mintOne(h);
+    const second = await mintOne(h);
+    await claimOne(h, first.enrollmentId, first.secret, "first-orchid");
+    await claimOne(h, second.enrollmentId, second.secret, "second-orchid");
+
+    const body = JSON.stringify({ enrollment_id: first.enrollmentId, decision: "approve" });
+    const retargetHeaders = await h.sign(
+      body,
+      "/v1/enrollments/:enrollmentId/decision",
+      "enrollment.decide",
+    );
+    retargetHeaders.set("idempotency-key", "IK-retarget-proof");
+
+    const retargeted = await h.app.fetch(
+      envelopeRequest(
+        `/v1/enrollments/${second.enrollmentId}/decision`,
+        retargetHeaders,
+        "POST",
+        body,
+      ),
+    );
+    expect(retargeted.status).toBe(422);
+    expect(await retargeted.json()).toMatchObject({
+      code: "DECISION_TARGET_MISMATCH",
+      rule: "ADR-20",
+    });
+
+    // Authentication consumes the envelope nonce even though target binding
+    // later refuses the product write. Replaying those exact credentials to
+    // the correct path therefore fails at authentication.
+    const consumedNonceReplay = await h.app.fetch(
+      envelopeRequest(
+        `/v1/enrollments/${first.enrollmentId}/decision`,
+        retargetHeaders,
+        "POST",
+        body,
+      ),
+    );
+    expect(consumedNonceReplay.status).toBe(401);
+    expect(await consumedNonceReplay.json()).toMatchObject({ code: "UNAUTHORIZED" });
+
+    // The mismatch created neither an enrollment-store effect nor a product
+    // idempotency row: a fresh envelope with the same product key succeeds for
+    // the body-named target, while the path target remains pending.
+    const correctHeaders = await h.sign(
+      body,
+      "/v1/enrollments/:enrollmentId/decision",
+      "enrollment.decide",
+    );
+    correctHeaders.set("idempotency-key", "IK-retarget-proof");
+    const correct = await h.app.fetch(
+      envelopeRequest(
+        `/v1/enrollments/${first.enrollmentId}/decision`,
+        correctHeaders,
+        "POST",
+        body,
+      ),
+    );
+    expect(correct.status).toBe(200);
+
+    const listHeaders = await h.sign(
+      "",
+      "/v1/enrollments/proposals",
+      "enrollment.proposals.list",
+      "GET",
+    );
+    const list = SponsorProposalListResponseSchema.parse(
+      await (
+        await h.app.fetch(envelopeRequest("/v1/enrollments/proposals", listHeaders, "GET"))
+      ).json(),
+    );
+    expect(list.proposals.map((proposal) => proposal.enrollment_id)).toEqual([second.enrollmentId]);
   });
 });

@@ -119,6 +119,7 @@ describe("S-1 enrollment state machine", () => {
       effectiveGrantedResources: null,
     });
     await service.decide(sponsor, enrollmentId, {
+      enrollment_id: enrollmentId,
       decision: "reduce",
       reduction: {
         scopes: ["review"],
@@ -286,6 +287,7 @@ describe("S-1 enrollment state machine", () => {
 
     await expectEnrollmentError(
       service.decide(sponsor, enrollmentId, {
+        enrollment_id: enrollmentId,
         decision: "reduce",
         reduction: { scopes: ["upload-artifacts"] },
       }),
@@ -293,12 +295,14 @@ describe("S-1 enrollment state machine", () => {
     );
     await expectEnrollmentError(
       service.decide(sponsor, enrollmentId, {
+        enrollment_id: enrollmentId,
         decision: "reduce",
         reduction: { event_budget: 12 },
       }),
       "SCOPE_NOT_REDUCED",
     );
     await service.decide(sponsor, enrollmentId, {
+      enrollment_id: enrollmentId,
       decision: "reduce",
       reduction: { problem_binding: null, first_directive: null, event_budget: 11 },
     });
@@ -309,8 +313,14 @@ describe("S-1 enrollment state machine", () => {
     const first = await mintAndClaim(service, "shared-orchid");
     const second = await mintAndClaim(service, "shared-orchid");
     const outcomes = await Promise.allSettled([
-      service.decide(sponsor, first.enrollmentId, { decision: "approve" }),
-      service.decide(sponsor, second.enrollmentId, { decision: "approve" }),
+      service.decide(sponsor, first.enrollmentId, {
+        enrollment_id: first.enrollmentId,
+        decision: "approve",
+      }),
+      service.decide(sponsor, second.enrollmentId, {
+        enrollment_id: second.enrollmentId,
+        decision: "approve",
+      }),
     ]);
     expect(outcomes.filter((outcome) => outcome.status === "fulfilled")).toHaveLength(1);
     expect(
@@ -371,14 +381,14 @@ describe("S-1 enrollment state machine", () => {
       service.decide(
         sponsor,
         minted.enrollmentId,
-        { decision: "approve" },
+        { enrollment_id: minted.enrollmentId, decision: "approve" },
         { idempotencyKey: "decision-idempotency-1" },
       ),
     ).resolves.toBeUndefined();
     await service.decide(
       sponsor,
       minted.enrollmentId,
-      { decision: "approve" },
+      { enrollment_id: minted.enrollmentId, decision: "approve" },
       { idempotencyKey: "decision-idempotency-1" },
     );
     const issued = await service.poll(
@@ -605,7 +615,10 @@ describe("S-1 enrollment state machine", () => {
     const { service } = serviceFixture();
     for (const name of ["fellow-2", "fellow-3", "fellow-4"]) {
       const enrollment = await mintAndClaim(service, name);
-      await service.decide(sponsor, enrollment.enrollmentId, { decision: "approve" });
+      await service.decide(sponsor, enrollment.enrollmentId, {
+        enrollment_id: enrollment.enrollmentId,
+        decision: "approve",
+      });
     }
     const minted = await service.mint(sponsor, { requested_scopes: ["review"] });
     const error = await expectEnrollmentError(

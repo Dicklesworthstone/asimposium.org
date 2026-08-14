@@ -287,7 +287,7 @@ if (typeof origin !== "string" || !/^http:\/\/127\.0\.0\.1:\d+$/.test(origin)) {
       {
         sponsor_id: sponsorId,
         enrollment_id: rollbackMintBody.enrollmentId,
-        decision: { decision: "deny" },
+        decision: { enrollment_id: rollbackMintBody.enrollmentId, decision: "deny" },
       },
       { "idempotency-key": "local-decision-rollback-1" },
     );

@@ -32,7 +32,8 @@ import {
  */
 const STOA_ORIGIN = "https://a.asimposium.org";
 
-export interface EnrollmentRouterOptions {  readonly service: EnrollmentService;
+export interface EnrollmentRouterOptions {
+  readonly service: EnrollmentService;
   /**
    * Parent-supplied verified sponsor seam: authenticates the signed service
    * envelope for one exact route template and action. A returned `Response`
@@ -47,8 +48,7 @@ export interface EnrollmentRouterOptions {  readonly service: EnrollmentService;
     route: string,
     action: string,
   ) => Promise<
-    | { readonly principal: EnrollmentPrincipal; readonly rawBody: Uint8Array }
-    | Response
+    { readonly principal: EnrollmentPrincipal; readonly rawBody: Uint8Array } | Response
   >;
 }
 
@@ -466,7 +466,9 @@ function contractCard(card: {
   toolsNote?: string;
   requestedScopes: readonly ("promote" | "review" | "propose-problems" | "upload-artifacts")[];
   requestedResources: EnrollmentResourceGrants;
-  effectiveGrantedScopes: readonly ("promote" | "review" | "propose-problems" | "upload-artifacts")[] | null;
+  effectiveGrantedScopes:
+    | readonly ("promote" | "review" | "propose-problems" | "upload-artifacts")[]
+    | null;
   effectiveGrantedResources: EnrollmentResourceGrants | null;
   proposalExpiresAt: number;
 }): Record<string, unknown> {
@@ -582,18 +584,18 @@ function mountSponsorRoutes(app: Hono, options: EnrollmentRouterOptions): void {
       );
     }
     try {
-      const parsed = SponsorEnrollmentDecisionSchema.safeParse(
-        verifiedJson(authenticated.rawBody),
-      );
+      const parsed = SponsorEnrollmentDecisionSchema.safeParse(verifiedJson(authenticated.rawBody));
       if (!parsed.success) {
         return enrollmentErrorResponse(new EnrollmentError("PROPOSAL_NOT_PENDING"));
       }
       // The envelope signs the body digest and the route *template*, never the
       // filled path, so this equality is what binds an approve to the proposal
-      // it was authored for. It runs before the idempotency key is read and
-      // before any store call, so a retargeted decision consumes no replay slot
-      // and reaches no proposal. Both sides are caller-supplied, so comparing
-      // them discloses nothing about either enrollment's existence.
+      // it was authored for. Authentication has already consumed the service-
+      // envelope nonce; this later check runs before the product idempotency
+      // key is read and before any enrollment-store call, so a retargeted
+      // decision creates no product replay row and reaches no proposal. Both
+      // sides are caller-supplied, so comparing them discloses nothing about
+      // either enrollment's existence.
       if (parsed.data.enrollment_id !== enrollmentId) {
         return enrollmentErrorResponse(new EnrollmentError("DECISION_TARGET_MISMATCH"));
       }

@@ -206,7 +206,10 @@ describe("the codes the S-1 contract depends on survive the harness", () => {
     const approval = await call(db, KEY_A, "/__s1/approve", {
       sponsor_id: mintBody.sponsor_id,
       enrollment_id: minted.body.enrollmentId as string,
-      decision: { decision: "reduce" },
+      decision: {
+        enrollment_id: minted.body.enrollmentId as string,
+        decision: "reduce",
+      },
     });
     expect(approval.status).toBe(400);
     expect(approval.body).toEqual({ code: "PROPOSAL_NOT_PENDING" });
@@ -221,7 +224,7 @@ describe("the codes the S-1 contract depends on survive the harness", () => {
     // more specific status.
     const approval = await call(freshDatabase(), KEY_A, "/__s1/approve", {
       sponsor_id: mintBody.sponsor_id,
-      enrollment_id: "ASIMP-EN-DOESNOTEXIST",
+      enrollment_id: "ASIMP-EN-0000000000",
     });
     expect(approval.status).toBe(403);
     expect(approval.body).toEqual({ code: "WRONG_PRINCIPAL" });

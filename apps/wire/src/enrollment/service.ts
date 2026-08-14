@@ -910,9 +910,7 @@ export class InMemoryEnrollmentStore implements EnrollmentStore {
           proposalExpiresAt: proposal.expiresAt,
         });
       }
-      cards.sort(
-        (left, right) => left.proposalExpiresAt - right.proposalExpiresAt,
-      );
+      cards.sort((left, right) => left.proposalExpiresAt - right.proposalExpiresAt);
       return cards;
     });
   }
@@ -1421,8 +1419,9 @@ export class EnrollmentService {
     if (!parsed.success) throw new EnrollmentError("PROPOSAL_NOT_PENDING");
     // The Worker is the single validator, so the target binding lives here too
     // and not only on the HTTP edge: a decision authored for one enrollment can
-    // never settle another, whatever the caller. Refused before the idempotency
-    // key is prepared, so a retargeted decision burns no replay slot.
+    // never settle another, whatever the caller. Refused before the product
+    // idempotency key is prepared, so a retargeted decision creates no product
+    // replay record.
     if (parsed.data.enrollment_id !== enrollmentId) {
       throw new EnrollmentError("DECISION_TARGET_MISMATCH");
     }

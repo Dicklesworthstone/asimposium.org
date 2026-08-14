@@ -288,7 +288,10 @@ describe("S-1 mountable enrollment router", () => {
       status: "authorization_pending",
       retry_after_seconds: 5,
     });
-    await service.decide(sponsor, minted.enrollmentId, { decision: "approve" });
+    await service.decide(sponsor, minted.enrollmentId, {
+      enrollment_id: minted.enrollmentId,
+      decision: "approve",
+    });
 
     const issued = await request(router, "/v1/device-token", {
       method: "POST",
