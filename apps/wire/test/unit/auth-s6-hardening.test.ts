@@ -2,6 +2,7 @@ import { Database } from "bun:sqlite";
 import { describe, expect, test } from "bun:test";
 import { readFileSync } from "node:fs";
 import { resolve } from "node:path";
+import { ProblemDocumentSchema } from "@asimposium/contracts";
 import type { D1Database } from "@cloudflare/workers-types";
 
 import {
@@ -384,6 +385,8 @@ describe("safe RFC 7807 auth refusal faces", () => {
       ),
     );
     expect(new Set(signatures.map(({ status, body }) => `${status}:${body}`)).size).toBe(1);
+    const signatureDocument: unknown = await new Response(signatures[0]?.body ?? "").json();
+    expect(ProblemDocumentSchema.safeParse(signatureDocument).success).toBe(true);
     expect(signatures[0]?.body).toContain('"code":"UNAUTHORIZED"');
     expect(signatures[0]?.body).not.toContain("bad_signature");
     expect(signatures[0]?.body).not.toContain("payload_mismatch");
@@ -395,8 +398,12 @@ describe("safe RFC 7807 auth refusal faces", () => {
     const wrongPrincipal = wrongPrincipalProblem();
     expect(unavailable.headers.get("content-type")).toBe("application/problem+json; charset=utf-8");
     expect(unavailable.status).toBe(503);
-    expect(await unavailable.json()).toMatchObject({ code: "AUTH_REPLAY_STORE_UNAVAILABLE" });
+    expect(ProblemDocumentSchema.parse(await unavailable.json())).toMatchObject({
+      code: "AUTH_REPLAY_STORE_UNAVAILABLE",
+    });
     expect(wrongPrincipal.status).toBe(403);
-    expect(await wrongPrincipal.json()).toMatchObject({ code: "WRONG_PRINCIPAL" });
+    expect(ProblemDocumentSchema.parse(await wrongPrincipal.json())).toMatchObject({
+      code: "WRONG_PRINCIPAL",
+    });
   });
 });

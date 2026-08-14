@@ -11,7 +11,7 @@ import {
   enrollmentReplayProtectorFromBase64Url,
 } from "./enrollment/service";
 import type { Env } from "./env";
-import { problem } from "./http/envelope";
+import { validatedProblem as problem } from "./http/envelope";
 import { handleHealth } from "./http/health";
 import { redactPathname } from "./http/redact";
 

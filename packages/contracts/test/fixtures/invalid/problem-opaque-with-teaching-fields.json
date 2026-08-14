@@ -1,0 +1,11 @@
+{
+  "type": "https://asimposium.org/errors/UNAUTHORIZED",
+  "title": "Authorization was not accepted",
+  "status": 401,
+  "code": "UNAUTHORIZED",
+  "detail": "The request did not include an authorization accepted by this route.",
+  "fix_hint": "Obtain a fresh sponsor authorization and retry the request.",
+  "rule": "A5",
+  "schema": "https://a.asimposium.org/schemas/enrollment.v1.json",
+  "example": { "forged": true }
+}

@@ -395,6 +395,21 @@ function decisionBodyInvalidResponse(): Response {
   );
 }
 
+function enrollmentIdInvalidResponse(): Response {
+  return problem(
+    422,
+    "ENROLLMENT_ID_INVALID",
+    "Enrollment id is invalid",
+    "The decision path does not contain a syntactically valid public enrollment id.",
+    "Use the enrollment id from a pending approval card in both the request path and the signed decision body.",
+    enrollmentContractFields({
+      method: "POST",
+      path: "/v1/enrollments/ASIMP-EN-01JXYZ4K6Q/decision",
+      body: { enrollment_id: "ASIMP-EN-01JXYZ4K6Q", decision: "approve" },
+    }),
+  );
+}
+
 function mintBodyInvalidResponse(): Response {
   return problem(
     422,
@@ -857,6 +872,10 @@ function mountSponsorRoutes(app: Hono, options: EnrollmentRouterOptions): void {
     if (hasQuery(c.req.raw)) {
       return sponsorPathOnlyResponse(c.req.raw, "/v1/enrollments/ASIMP-EN-01JXYZ4K6Q/decision");
     }
+    const enrollmentId = c.req.param("enrollmentId");
+    if (!EnrollmentIdSchema.safeParse(enrollmentId).success) {
+      return enrollmentIdInvalidResponse();
+    }
     const authenticated = await requireSponsor(
       options,
       c.req.raw,
@@ -864,16 +883,6 @@ function mountSponsorRoutes(app: Hono, options: EnrollmentRouterOptions): void {
       "enrollment.decide",
     );
     if (authenticated instanceof Response) return authenticated;
-    const enrollmentId = c.req.param("enrollmentId");
-    if (!EnrollmentIdSchema.safeParse(enrollmentId).success) {
-      return problem(
-        404,
-        "PROPOSAL_NOT_PENDING",
-        "No pending proposal here",
-        "This enrollment proposal is not pending a decision.",
-        "Check the enrollment id or list pending proposals for the current set.",
-      );
-    }
     try {
       let decisionBody: unknown;
       try {

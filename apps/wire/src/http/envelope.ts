@@ -8,6 +8,12 @@
  * Bodies carry no timestamps and no randomness, so the same input produces
  * byte-identical output (Fable §7.1 axiom 7: determinism is cache money).
  */
+import {
+  type ProblemCode,
+  type ProblemDocument,
+  ProblemDocumentSchema,
+  type ProblemRule,
+} from "@asimposium/contracts";
 
 export const SCHEMA_BASE = "https://a.asimposium.org/schemas";
 export const ERROR_BASE = "https://asimposium.org/errors";
@@ -58,6 +64,11 @@ export interface ProblemInput {
   headers?: Record<string, string>;
 }
 
+export interface ValidatedProblemInput extends Omit<ProblemInput, "code" | "rule"> {
+  code: ProblemCode;
+  rule?: ProblemRule;
+}
+
 const jsonBody = (value: unknown): string => JSON.stringify(value);
 
 export function successEnvelope<T>(input: SuccessInput<T>): SuccessEnvelope<T> {
@@ -88,6 +99,15 @@ export function problemEnvelope(input: ProblemInput): ProblemEnvelope {
   return envelope;
 }
 
+/**
+ * Construct one refusal owned by the closed contracts catalog. The generic
+ * builder remains available to unfinished surfaces, while shipped enrollment,
+ * auth, and app-boundary faces fail closed if their transparency class drifts.
+ */
+export function validatedProblemEnvelope(input: ValidatedProblemInput): ProblemDocument {
+  return ProblemDocumentSchema.parse(problemEnvelope(input));
+}
+
 export function success<T>(input: SuccessInput<T>): Response {
   return new Response(jsonBody(successEnvelope(input)), {
     status: input.status ?? 200,
@@ -100,6 +120,16 @@ export function success<T>(input: SuccessInput<T>): Response {
 
 export function problem(input: ProblemInput): Response {
   return new Response(jsonBody(problemEnvelope(input)), {
+    status: input.status,
+    headers: {
+      "content-type": "application/problem+json; charset=utf-8",
+      ...input.headers,
+    },
+  });
+}
+
+export function validatedProblem(input: ValidatedProblemInput): Response {
+  return new Response(jsonBody(validatedProblemEnvelope(input)), {
     status: input.status,
     headers: {
       "content-type": "application/problem+json; charset=utf-8",

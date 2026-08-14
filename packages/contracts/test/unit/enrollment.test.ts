@@ -15,6 +15,8 @@ import {
 } from "../../src/enrollment.ts";
 
 const VALID_FIXTURE = new URL("../fixtures/valid/enrollment.json", import.meta.url);
+const SYNTHETIC_ENROLLMENT_SECRET = `v1.${"A".repeat(43)}`;
+const MALFORMED_ENROLLMENT_SECRET = ["v1", "short"].join(".");
 const INVALID_FIXTURE = new URL(
   "../fixtures/invalid/enrollment-invalid-secret.json",
   import.meta.url,
@@ -70,20 +72,23 @@ test("planted malformed enrollment secret is rejected", async () => {
   const parsed = FellowRegistrationRequestSchema.safeParse(await fixture(INVALID_FIXTURE));
 
   expect(parsed.success).toBe(false);
-  expect(EnrollmentSecretSchema.safeParse("v1.short").success).toBe(false);
+  expect(EnrollmentSecretSchema.safeParse(MALFORMED_ENROLLMENT_SECRET).success).toBe(false);
 });
 
 test("credential fields remain inspectable for teachable names while malformed secrets stay invalid", () => {
   const body = {
     enrollment_id: "ASIMP-EN-7F3K9M2Q8R",
-    secret: "v1.AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
+    secret: SYNTHETIC_ENROLLMENT_SECRET,
     name: "codex-lab",
     model: "test-model",
     harness: "test-harness",
   };
   expect(FellowRegistrationCredentialFieldsSchema.safeParse(body).success).toBe(true);
   expect(
-    FellowRegistrationCredentialFieldsSchema.safeParse({ ...body, secret: "v1.short" }).success,
+    FellowRegistrationCredentialFieldsSchema.safeParse({
+      ...body,
+      secret: MALFORMED_ENROLLMENT_SECRET,
+    }).success,
   ).toBe(false);
 });
 
@@ -95,7 +100,7 @@ test("Fellow names match the exact Fable §5.4 naming law", () => {
   expect(
     FellowRegistrationRequestSchema.safeParse({
       enrollment_id: "ASIMP-EN-7F3K9M2Q8R",
-      secret: "v1.AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
+      secret: SYNTHETIC_ENROLLMENT_SECRET,
       name: "orchid-",
       model: "test-model",
       harness: "test-harness",
@@ -242,9 +247,9 @@ test("the mint response carries the one-time join URL under a versioned secret",
   expect(parsed.success).toBe(true);
 
   // A plaintext, unversioned secret is never a valid mint response.
-  expect(MintEnrollmentResponseSchema.safeParse(await fixture(INVALID_MINT_RESPONSE_FIXTURE)).success).toBe(
-    false,
-  );
+  expect(
+    MintEnrollmentResponseSchema.safeParse(await fixture(INVALID_MINT_RESPONSE_FIXTURE)).success,
+  ).toBe(false);
 });
 
 test("the sponsor proposal list reuses the approval card contract exactly", async () => {
@@ -266,15 +271,16 @@ test("the sponsor fellow list exposes no credential material", async () => {
   expect(parsed.success).toBe(true);
 
   // A token hash or any extra field is a strict-shape violation, never a passthrough.
-  expect(SponsorFellowListResponseSchema.safeParse(await fixture(INVALID_FELLOW_LIST_FIXTURE)).success).toBe(
-    false,
-  );
+  expect(
+    SponsorFellowListResponseSchema.safeParse(await fixture(INVALID_FELLOW_LIST_FIXTURE)).success,
+  ).toBe(false);
 });
 
 test("the decision acknowledgement is exactly one literal", async () => {
   expect(
-    SponsorEnrollmentDecisionResponseSchema.safeParse(await fixture(VALID_DECISION_RESPONSE_FIXTURE))
-      .success,
+    SponsorEnrollmentDecisionResponseSchema.safeParse(
+      await fixture(VALID_DECISION_RESPONSE_FIXTURE),
+    ).success,
   ).toBe(true);
   expect(SponsorEnrollmentDecisionResponseSchema.safeParse({ acknowledged: "true" }).success).toBe(
     false,

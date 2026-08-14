@@ -1,0 +1,8 @@
+{
+  "type": "https://asimposium.org/errors/AUTH_REPLAY_STORE_UNAVAILABLE",
+  "title": "Authorization replay defense is unavailable",
+  "status": 503,
+  "code": "AUTH_REPLAY_STORE_UNAVAILABLE",
+  "detail": "The request was not accepted because authorization replay defense is unavailable.",
+  "fix_hint": "Retry the request. If the condition persists, contact the sponsor."
+}

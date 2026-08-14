@@ -31,6 +31,7 @@
                 "BODY_ONLY_REQUIRED",
                 "DECISION_BODY_INVALID",
                 "DECISION_TARGET_MISMATCH",
+                "ENROLLMENT_ID_INVALID",
                 "HARNESS_AS_NAME",
                 "IDEMPOTENCY_CONFLICT",
                 "IDEMPOTENCY_KEY_INVALID",
@@ -118,14 +119,18 @@
             "code": {
               "type": "string",
               "enum": [
+                "AUTH_REPLAY_STORE_UNAVAILABLE",
                 "CAPSULE_UNAVAILABLE",
                 "ENROLLMENT_UNAVAILABLE",
                 "FELLOW_TOKEN_INVALID",
                 "FLOW_INVALID",
+                "INTERNAL_ERROR",
                 "PAIRING_INVALID",
                 "PROPOSAL_EXPIRED",
                 "PROPOSAL_NOT_PENDING",
+                "ROUTE_NOT_FOUND",
                 "SPONSOR_AUTH_UNAVAILABLE",
+                "UNAUTHORIZED",
                 "WRONG_PRINCIPAL"
               ]
             },
@@ -176,6 +181,7 @@
             "BODY_ONLY_REQUIRED",
             "DECISION_BODY_INVALID",
             "DECISION_TARGET_MISMATCH",
+            "ENROLLMENT_ID_INVALID",
             "HARNESS_AS_NAME",
             "IDEMPOTENCY_CONFLICT",
             "IDEMPOTENCY_KEY_INVALID",
@@ -263,14 +269,18 @@
         "code": {
           "type": "string",
           "enum": [
+            "AUTH_REPLAY_STORE_UNAVAILABLE",
             "CAPSULE_UNAVAILABLE",
             "ENROLLMENT_UNAVAILABLE",
             "FELLOW_TOKEN_INVALID",
             "FLOW_INVALID",
+            "INTERNAL_ERROR",
             "PAIRING_INVALID",
             "PROPOSAL_EXPIRED",
             "PROPOSAL_NOT_PENDING",
+            "ROUTE_NOT_FOUND",
             "SPONSOR_AUTH_UNAVAILABLE",
+            "UNAUTHORIZED",
             "WRONG_PRINCIPAL"
           ]
         },
@@ -301,6 +311,7 @@
         "BODY_ONLY_REQUIRED",
         "DECISION_BODY_INVALID",
         "DECISION_TARGET_MISMATCH",
+        "ENROLLMENT_ID_INVALID",
         "HARNESS_AS_NAME",
         "IDEMPOTENCY_CONFLICT",
         "IDEMPOTENCY_KEY_INVALID",
@@ -312,14 +323,18 @@
         "PATH_ONLY_REQUIRED",
         "SCOPE_ESCALATION",
         "SCOPE_NOT_REDUCED",
+        "AUTH_REPLAY_STORE_UNAVAILABLE",
         "CAPSULE_UNAVAILABLE",
         "ENROLLMENT_UNAVAILABLE",
         "FELLOW_TOKEN_INVALID",
         "FLOW_INVALID",
+        "INTERNAL_ERROR",
         "PAIRING_INVALID",
         "PROPOSAL_EXPIRED",
         "PROPOSAL_NOT_PENDING",
+        "ROUTE_NOT_FOUND",
         "SPONSOR_AUTH_UNAVAILABLE",
+        "UNAUTHORIZED",
         "WRONG_PRINCIPAL"
       ]
     }

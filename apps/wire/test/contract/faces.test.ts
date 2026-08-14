@@ -1,4 +1,5 @@
 import { describe, expect, test } from "bun:test";
+import { ProblemDocumentSchema } from "@asimposium/contracts";
 import { createApp } from "../../src/app";
 import type { Env } from "../../src/env";
 import { boundEnv, callWorker, executionContext, r2Shaped } from "../support/bindings";
@@ -136,6 +137,16 @@ describe("face wire format", () => {
     expect(res.status).toBe(404);
     expect(res.contentType).toBe("application/problem+json; charset=utf-8");
     expect(res.bodyText).toBe(ROUTE_NOT_FOUND);
+    expect(ProblemDocumentSchema.safeParse(res.body).success).toBe(true);
+  });
+
+  test("a maximally redacted unknown path remains inside the problem contract", async () => {
+    const segment = "private-path-segment".repeat(12);
+    const res = await callWorker(`/${Array.from({ length: 12 }, () => segment).join("/")}`);
+
+    expect(res.status).toBe(404);
+    expect(ProblemDocumentSchema.safeParse(res.body).success).toBe(true);
+    expect(res.bodyText).not.toContain(segment);
   });
 
   test("an unhandled throw", async () => {
@@ -152,7 +163,9 @@ describe("face wire format", () => {
 
     expect(response.status).toBe(500);
     expect(response.headers.get("content-type")).toBe("application/problem+json; charset=utf-8");
-    expect(await response.text()).toBe(INTERNAL_ERROR);
+    const bodyText = await response.text();
+    expect(bodyText).toBe(INTERNAL_ERROR);
+    expect(ProblemDocumentSchema.safeParse(JSON.parse(bodyText)).success).toBe(true);
   });
 });
 

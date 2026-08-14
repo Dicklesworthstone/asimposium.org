@@ -1,0 +1,8 @@
+{
+  "type": "https://asimposium.org/errors/INTERNAL_ERROR",
+  "title": "The Worker failed to handle this request",
+  "status": 500,
+  "code": "INTERNAL_ERROR",
+  "detail": "An unexpected error occurred. Its details are not disclosed on this face.",
+  "fix_hint": "Retry the request. If it persists, report the route and the time of the attempt."
+}

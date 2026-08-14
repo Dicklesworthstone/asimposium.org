@@ -6,7 +6,7 @@
  * forgery oracle. These faces therefore distinguish only the safe transport
  * classes: unauthorized, wrong credential class, and replay-store outage.
  */
-import { problem } from "../http/envelope";
+import { validatedProblem as problem } from "../http/envelope";
 import type { EnvelopeRefusalReason } from "./envelope";
 
 export function envelopeRefusalProblem(reason: EnvelopeRefusalReason): Response {

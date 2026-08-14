@@ -1,6 +1,7 @@
 import { describe, expect, test } from "bun:test";
 import {
   MintEnrollmentResponseSchema,
+  ProblemDocumentSchema,
   SponsorEnrollmentDecisionResponseSchema,
   SponsorFellowListResponseSchema,
   SponsorProposalListResponseSchema,
@@ -162,6 +163,37 @@ async function claimOne(
 }
 
 describe("sponsor enrollment routes", () => {
+  test("an invalid decision-path id teaches before sponsor auth or state lookup", async () => {
+    let sponsorAuthCalls = 0;
+    const h = await harness({
+      verifiedSponsor: async () => {
+        sponsorAuthCalls += 1;
+        throw new Error("invalid enrollment ids must not reach sponsor authentication");
+      },
+    });
+    const response = await h.app.fetch(
+      new Request(`${origin}/v1/enrollments/not-an-enrollment-id/decision`, {
+        method: "POST",
+        body: '{"private":"must not be parsed or echoed"}',
+      }),
+    );
+
+    expect(response.status).toBe(422);
+    const problem = ProblemDocumentSchema.parse(await response.json());
+    expect(problem).toMatchObject({
+      code: "ENROLLMENT_ID_INVALID",
+      rule: "A5",
+      schema: "https://a.asimposium.org/schemas/enrollment.v1.json",
+      example: {
+        method: "POST",
+        path: "/v1/enrollments/ASIMP-EN-01JXYZ4K6Q/decision",
+      },
+    });
+    expect(JSON.stringify(problem)).not.toContain("not-an-enrollment-id");
+    expect(JSON.stringify(problem)).not.toContain("must not be parsed or echoed");
+    expect(sponsorAuthCalls).toBe(0);
+  });
+
   test("mint requires the envelope and returns the one-time join URL", async () => {
     const h = await harness();
 

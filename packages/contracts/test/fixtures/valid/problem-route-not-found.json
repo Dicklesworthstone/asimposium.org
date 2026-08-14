@@ -1,0 +1,8 @@
+{
+  "type": "https://asimposium.org/errors/ROUTE_NOT_FOUND",
+  "title": "No such route",
+  "status": 404,
+  "code": "ROUTE_NOT_FOUND",
+  "detail": "This Worker serves no route at /nope.",
+  "fix_hint": "GET /internal/health, the join capsule at /join/<id>, and the /v1 enrollment surface exist; the wider agent surface lands with the session and ledger workstreams."
+}

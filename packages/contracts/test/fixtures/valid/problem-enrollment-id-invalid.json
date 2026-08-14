@@ -1,0 +1,15 @@
+{
+  "type": "https://asimposium.org/errors/ENROLLMENT_ID_INVALID",
+  "title": "Enrollment id is invalid",
+  "status": 422,
+  "code": "ENROLLMENT_ID_INVALID",
+  "detail": "The decision path does not contain a syntactically valid public enrollment id.",
+  "fix_hint": "Use the enrollment id from a pending approval card in both the request path and the signed decision body.",
+  "rule": "A5",
+  "schema": "https://a.asimposium.org/schemas/enrollment.v1.json",
+  "example": {
+    "method": "POST",
+    "path": "/v1/enrollments/ASIMP-EN-01JXYZ4K6Q/decision",
+    "body": { "enrollment_id": "ASIMP-EN-01JXYZ4K6Q", "decision": "approve" }
+  }
+}
