@@ -4,6 +4,11 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 
 import {
+  buildS2CostMeasurementReceipt,
+  type S2CostReceiptMetric,
+  type S2CostReceiptProvenance,
+} from "../apps/wire/src/krater/s2-client.ts";
+import {
   buildCostVerifierDiagnostic,
   calculateFableWorkload,
   createReceiptReader,
@@ -27,6 +32,41 @@ import {
 
 const REVISION = "a".repeat(40);
 const SOURCE_DIGEST = "b".repeat(64);
+const PRODUCER_PROVENANCE: S2CostReceiptProvenance = {
+  run_id: "s2-cost-producer",
+  revision: REVISION,
+  dirty_state: "clean",
+  source_digest: SOURCE_DIGEST,
+};
+const PRODUCER_METRICS: readonly S2CostReceiptMetric[] = [
+  {
+    successfulBatchRowsRead: 3,
+    successfulBatchRowsWritten: 2,
+    successfulBatchSqlMs: 1,
+    writePhaseMs: 1,
+    writeClaimWallMs: 100,
+    retryCount: 0,
+    preflight: { rows_read: 4, rows_written: 0, sql_ms: 1, statements: 3, wall_ms: 10 },
+  },
+  {
+    successfulBatchRowsRead: 5,
+    successfulBatchRowsWritten: 4,
+    successfulBatchSqlMs: 2,
+    writePhaseMs: 20,
+    writeClaimWallMs: 110,
+    retryCount: 1,
+    preflight: { rows_read: 6, rows_written: 1, sql_ms: 2, statements: 4, wall_ms: 5 },
+  },
+  {
+    successfulBatchRowsRead: 7,
+    successfulBatchRowsWritten: 6,
+    successfulBatchSqlMs: 3,
+    writePhaseMs: 9,
+    writeClaimWallMs: 90,
+    retryCount: 2,
+    preflight: { rows_read: 8, rows_written: 0, sql_ms: 3, statements: 5, wall_ms: 7 },
+  },
+];
 
 function validReceipt(overrides: Partial<S2CostMeasurementReceipt> = {}): S2CostMeasurementReceipt {
   return {
@@ -244,6 +284,70 @@ describe("S7 cost verifier", () => {
       ),
     );
     expect(invalid).toMatchObject({ status: "blocked", code: "S2_COST_RECEIPT_INVALID" });
+  });
+
+  test("accepts the normalized S2 producer receipt but preserves the terminal exit-78 boundary", () => {
+    const privateBodySentinel = "s2-private-body-must-not-echo";
+    const metricsWithPrivateBody: readonly (
+      | S2CostReceiptMetric
+      | (S2CostReceiptMetric & { readonly privateBody: string })
+    )[] = [
+      { ...PRODUCER_METRICS[0]!, privateBody: privateBodySentinel },
+      ...PRODUCER_METRICS.slice(1),
+    ];
+    const receipt = buildS2CostMeasurementReceipt(
+      metricsWithPrivateBody,
+      PRODUCER_PROVENANCE,
+    );
+    const bytes = new TextEncoder().encode(JSON.stringify(receipt));
+    const result = verifyCostModel(FABLE_WORKED_EXAMPLE, bytes, PRODUCER_PROVENANCE);
+    const receiptPath = writeCliReceipt(bytes);
+    const cli = runStandaloneCli(["--receipt", receiptPath]);
+
+    expect(result).toMatchObject({
+      status: "blocked",
+      code: "COST_MODEL_EXTERNAL_MEASUREMENTS_UNAVAILABLE",
+      s2: {
+        state: "accepted-local",
+        receipt_provenance: PRODUCER_PROVENANCE,
+        write_receipt_count: 3,
+        measured_counters: {
+          sum_successful_batch_rows_read: 15,
+          sum_successful_batch_rows_written: 12,
+          sum_preflight_rows_read: 18,
+          sum_preflight_rows_written: 1,
+          sum_preflight_statements: 12,
+          sum_retry_count: 3,
+        },
+        local_p95_ms: { write_phase: 20, preflight_wall: 10, write_claim_wall: 110 },
+      },
+      source_discrepancies: [
+        { code: "FABLE_CURSOR_RATE_MISMATCH", stated: 100, computed: 1_000 },
+      ],
+    });
+    expect(result.unknowns).toEqual(verifyCostModel().unknowns);
+    expect(result.unknowns).toEqual(
+      expect.arrayContaining([
+        "complete_write_row_totals",
+        "route_to_receipt_mapping",
+        "worker_cpu_ms",
+        "r2_operations_and_storage",
+        "durable_object_alarm_cost",
+        "provider_price",
+        "deployed_performance_budget_verdict",
+      ]),
+    );
+    expect(cli.exitCode).toBe(78);
+    expect(parseJsonOutput(cli.stdout)).toMatchObject({
+      status: "blocked",
+      code: "COST_MODEL_EXTERNAL_MEASUREMENTS_UNAVAILABLE",
+      cost_model: { s2: { state: "accepted-local" } },
+    });
+    // Receipt and CLI diagnostics contain normalized counters only; the S-2
+    // request-body sentinel must not be represented or echoed here.
+    expect(`${JSON.stringify(receipt)}\n${cli.stdout}\n${cli.stderr}`).not.toContain(
+      privateBodySentinel,
+    );
   });
 
   test("carries receipt provenance and measured counters without claiming current Git", () => {

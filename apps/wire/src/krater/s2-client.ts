@@ -1,3 +1,30 @@
+import { createHash, randomUUID } from "node:crypto";
+import {
+  closeSync,
+  constants,
+  fstatSync,
+  fsyncSync,
+  linkSync,
+  lstatSync,
+  openSync,
+  writeSync,
+} from "node:fs";
+import { resolve } from "node:path";
+
+import {
+  MAX_S2_COST_RECEIPT_BYTES,
+  parseS2CostMeasurementReceiptBytes,
+  REQUIRED_ROW_TOTAL_EXCLUSIONS,
+  S2_COST_METRIC_SCOPE,
+  S2_COST_RECEIPT_RECORD,
+  S2_COST_RECEIPT_SCHEMA_VERSION,
+  S2_FAILED_RETRY_SCOPE,
+  S2_LOCAL_SCOPE,
+  S2_SUCCESSFUL_BATCH_SCOPE,
+  S2_WRITE_CLAIM_SCOPE,
+  type S2CostMeasurementReceipt,
+} from "@asimposium/contracts";
+
 const origin = process.env.S2_ORIGIN;
 const phase = process.env.S2_PHASE ?? "exercise";
 const harnessToken = process.env.S2_HARNESS_TOKEN;
@@ -6,12 +33,16 @@ const REVISION = process.env.S2_GIT_HEAD;
 const DIRTY_STATE = process.env.S2_GIT_DIRTY;
 const SOURCE_DIGEST = process.env.S2_SOURCE_DIGEST;
 const SEED = "s2-local-chain-v1";
-const SCOPE = "local-workerd-d1-do";
-const BINDINGS = { d1: "DB", durable_object: "KRATER_OUTBOX", r2: null };
+const SCOPE = S2_LOCAL_SCOPE;
+const BINDINGS: S2CostMeasurementReceipt["bindings"] = {
+  d1: "DB",
+  durable_object: "KRATER_OUTBOX",
+  r2: null,
+};
 const HARNESS_TOKEN_PATTERN = /^[a-f0-9]{64}$/;
-const SUCCESSFUL_BATCH_METRIC_SCOPE: "settled-db.batch-only" = "settled-db.batch-only";
-const FAILED_RETRY_BATCH_METRICS: "excluded-d1-error-has-no-meta" = "excluded-d1-error-has-no-meta";
-const WRITE_CLAIM_WALL_SCOPE: "writeClaim-entry-to-return" = "writeClaim-entry-to-return";
+const SUCCESSFUL_BATCH_METRIC_SCOPE: typeof S2_SUCCESSFUL_BATCH_SCOPE = S2_SUCCESSFUL_BATCH_SCOPE;
+const FAILED_RETRY_BATCH_METRICS: typeof S2_FAILED_RETRY_SCOPE = S2_FAILED_RETRY_SCOPE;
+const WRITE_CLAIM_WALL_SCOPE: typeof S2_WRITE_CLAIM_SCOPE = S2_WRITE_CLAIM_SCOPE;
 const CREATED_AT = "2026-08-14T00:00:00.000Z";
 const PRIMARY_PROBLEM = "P-s2";
 const SECONDARY_PROBLEM = "P-s2-b";
@@ -82,6 +113,301 @@ interface WriteResult {
   lock_wait_ms: null;
   retry_count: number;
   outbox_handoff: "armed" | "deferred" | "unavailable";
+}
+
+export { S2_COST_RECEIPT_RELATIVE_PATH } from "@asimposium/contracts";
+import { S2_COST_RECEIPT_RELATIVE_PATH } from "@asimposium/contracts";
+
+export type S2CostReceiptProvenance = Pick<
+  S2CostMeasurementReceipt,
+  "run_id" | "revision" | "dirty_state" | "source_digest"
+>;
+
+export interface S2CostReceiptOutput {
+  readonly root: string;
+  readonly receiptPath: string;
+}
+
+/** A parsed successful write result, narrowed to one new settled write rather than a replay. */
+export interface S2SettledWriteResult extends Omit<WriteResult, "idempotent"> {
+  readonly idempotent: false;
+}
+
+export interface S2CostReceiptArtifact {
+  readonly relativePath: typeof S2_COST_RECEIPT_RELATIVE_PATH;
+  readonly digest: string;
+  readonly bytes: number;
+}
+
+export interface S2CostReceiptWriteResult {
+  readonly receipt: S2CostMeasurementReceipt;
+  readonly artifact: S2CostReceiptArtifact;
+}
+
+class S2CostReceiptError extends Error {
+  constructor(readonly code: string) {
+    super(code);
+    this.name = "S2CostReceiptError";
+  }
+}
+
+function costReceiptFailure(code: string): never {
+  throw new S2CostReceiptError(code);
+}
+
+function validCount(value: unknown): number {
+  if (typeof value !== "number" || !Number.isSafeInteger(value) || value < 0) {
+    costReceiptFailure("S2_COST_RECEIPT_METRICS_INVALID");
+  }
+  return value;
+}
+
+function validMilliseconds(value: unknown): number {
+  if (typeof value !== "number" || !Number.isFinite(value) || value < 0) {
+    costReceiptFailure("S2_COST_RECEIPT_METRICS_INVALID");
+  }
+  return value;
+}
+
+function validNullableMilliseconds(value: unknown): number | null {
+  return value === null ? null : validMilliseconds(value);
+}
+
+function requireBoundSettledWrite(write: S2SettledWriteResult): void {
+  if (
+    write.idempotent !== false ||
+    typeof write.event_id !== "string" ||
+    typeof write.payload_sha256 !== "string" ||
+    typeof write.row_digest !== "string" ||
+    typeof write.build_digest !== "string" ||
+    typeof write.chain_digest !== "string" ||
+    typeof write.checkpoint_digest !== "string" ||
+    write.successful_batch_metric_scope !== S2_SUCCESSFUL_BATCH_SCOPE ||
+    write.failed_retry_batch_metrics !== S2_FAILED_RETRY_SCOPE ||
+    write.write_claim_wall_scope !== S2_WRITE_CLAIM_SCOPE ||
+    write.lock_wait_ms !== null ||
+    !["armed", "deferred", "unavailable"].includes(write.outbox_handoff)
+  ) {
+    costReceiptFailure("S2_COST_RECEIPT_METRICS_INVALID");
+  }
+  validCount(write.seq);
+  validCount(write.pre_cursor);
+  validCount(write.post_cursor);
+  validNullableMilliseconds(write.successful_batch_sql_ms);
+  validNullableMilliseconds(write.preflight_sql_ms);
+  validCount(write.preflight_rows_read);
+  validCount(write.preflight_rows_written);
+  validCount(write.preflight_statements);
+  validMilliseconds(write.write_phase_ms);
+  validMilliseconds(write.preflight_wall_ms);
+  validMilliseconds(write.write_claim_wall_ms);
+  validCount(write.successful_batch_rows_read);
+  validCount(write.successful_batch_rows_written);
+  validCount(write.retry_count);
+}
+
+function selectedSettledWrite(write: WriteResult): S2SettledWriteResult {
+  // `writes` admits only successful, non-idempotent `write()` results. Replays
+  // are responses to the same settled write and must not inflate its denominator.
+  if (write.idempotent) costReceiptFailure("S2_COST_RECEIPT_IDEMPOTENT_REPLAY_SELECTED");
+  return write as S2SettledWriteResult;
+}
+
+/**
+ * Pure producer for the exact receipt parsed by S-7. The parser is deliberately
+ * reused as the final structural check, so this client cannot grow a second
+ * receipt schema beside the verifier's authoritative one.
+ */
+export function buildS2CostMeasurementReceipt(
+  selectedSettledWrites: readonly S2SettledWriteResult[],
+  provenance: S2CostReceiptProvenance,
+): S2CostMeasurementReceipt {
+  if (selectedSettledWrites.length === 0) costReceiptFailure("S2_COST_RECEIPT_EMPTY");
+
+  const metrics = selectedSettledWrites.map((write) => {
+    requireBoundSettledWrite(write);
+    return {
+    successfulBatchRowsRead: validCount(write.successful_batch_rows_read),
+    successfulBatchRowsWritten: validCount(write.successful_batch_rows_written),
+    writePhaseMs: validMilliseconds(write.write_phase_ms),
+    writeClaimWallMs: validMilliseconds(write.write_claim_wall_ms),
+    retryCount: validCount(write.retry_count),
+    preflight: {
+      rowsRead: validCount(write.preflight_rows_read),
+      rowsWritten: validCount(write.preflight_rows_written),
+      statements: validCount(write.preflight_statements),
+      wallMs: validMilliseconds(write.preflight_wall_ms),
+    },
+    };
+  });
+  // These are deliberately per-selected-claim-write subtotals, never an S-2
+  // run-wide D1 total. Integrity backfill is a separately measured migration
+  // operation with its own response fields, not a successful claim WriteResult,
+  // so it is outside this denominator rather than an unreported exception to it.
+  // The verifier retains complete_write_row_totals and route_to_receipt_mapping
+  // as unknowns; REQUIRED_ROW_TOTAL_EXCLUSIONS only describes missing metadata
+  // within the selected ordinary-write measurement itself.
+  const candidate: S2CostMeasurementReceipt = {
+    schema_version: S2_COST_RECEIPT_SCHEMA_VERSION,
+    record: S2_COST_RECEIPT_RECORD,
+    run_id: provenance.run_id,
+    phase: "exercise",
+    revision: provenance.revision,
+    dirty_state: provenance.dirty_state,
+    source_digest: provenance.source_digest,
+    scope: S2_LOCAL_SCOPE,
+    bindings: BINDINGS,
+    status: "pass",
+    metric_scope: S2_COST_METRIC_SCOPE,
+    write_receipt_count: metrics.length,
+    successful_batch_metric_scope: S2_SUCCESSFUL_BATCH_SCOPE,
+    failed_retry_batch_metrics: S2_FAILED_RETRY_SCOPE,
+    write_claim_wall_scope: S2_WRITE_CLAIM_SCOPE,
+    p95_write_phase_ms: percentile95(metrics.map((write) => write.writePhaseMs)),
+    p95_preflight_wall_ms: percentile95(metrics.map((write) => write.preflight.wallMs)),
+    p95_write_claim_wall_ms: percentile95(metrics.map((write) => write.writeClaimWallMs)),
+    sum_successful_batch_rows_read: metrics.reduce(
+      (total, write) => total + write.successfulBatchRowsRead,
+      0,
+    ),
+    sum_successful_batch_rows_written: metrics.reduce(
+      (total, write) => total + write.successfulBatchRowsWritten,
+      0,
+    ),
+    sum_preflight_rows_read: metrics.reduce((total, write) => total + write.preflight.rowsRead, 0),
+    sum_preflight_rows_written: metrics.reduce(
+      (total, write) => total + write.preflight.rowsWritten,
+      0,
+    ),
+    sum_preflight_statements: metrics.reduce(
+      (total, write) => total + write.preflight.statements,
+      0,
+    ),
+    sum_retry_count: metrics.reduce((total, write) => total + write.retryCount, 0),
+    known_row_total_exclusions: REQUIRED_ROW_TOTAL_EXCLUSIONS,
+  };
+
+  try {
+    return parseS2CostMeasurementReceiptBytes(
+      new TextEncoder().encode(JSON.stringify(candidate)),
+    );
+  } catch {
+    return costReceiptFailure("S2_COST_RECEIPT_INVALID");
+  }
+}
+
+function validatedReceiptPath(output: S2CostReceiptOutput): string {
+  if (output.root === "" || output.receiptPath === "") {
+    return costReceiptFailure("S2_COST_RECEIPT_PATH_INVALID");
+  }
+  const root = resolve(output.root);
+  const receiptPath = resolve(output.receiptPath);
+  if (receiptPath !== resolve(root, S2_COST_RECEIPT_RELATIVE_PATH)) {
+    return costReceiptFailure("S2_COST_RECEIPT_PATH_INVALID");
+  }
+  try {
+    const rootStat = lstatSync(root);
+    if (!rootStat.isDirectory() || rootStat.isSymbolicLink()) {
+      return costReceiptFailure("S2_COST_RECEIPT_ROOT_INVALID");
+    }
+  } catch {
+    return costReceiptFailure("S2_COST_RECEIPT_ROOT_INVALID");
+  }
+  try {
+    const existing = lstatSync(receiptPath);
+    return costReceiptFailure(
+      existing.isSymbolicLink() ? "S2_COST_RECEIPT_SYMLINK_REFUSED" : "S2_COST_RECEIPT_EXISTS",
+    );
+  } catch (error) {
+    if (error instanceof S2CostReceiptError) throw error;
+    if ((error as NodeJS.ErrnoException).code !== "ENOENT") {
+      return costReceiptFailure("S2_COST_RECEIPT_PATH_INVALID");
+    }
+  }
+  return receiptPath;
+}
+
+function writeAll(descriptor: number, bytes: Uint8Array): void {
+  let offset = 0;
+  while (offset < bytes.byteLength) {
+    const written = writeSync(descriptor, bytes, offset, bytes.byteLength - offset);
+    if (!Number.isSafeInteger(written) || written <= 0) {
+      costReceiptFailure("S2_COST_RECEIPT_WRITE_FAILED");
+    }
+    offset += written;
+  }
+}
+
+function receiptDigest(bytes: Uint8Array): string {
+  return createHash("sha256").update(bytes).digest("hex");
+}
+
+/**
+ * Write a receipt only to the fixed direct child of an owned S-2 run root. The final path is
+ * created by hard-linking a fully written, fsynced mode-0600 staging inode: O_EXCL link
+ * publication cannot replace an existing path, and no partial receipt can appear at the final
+ * name. Staging files are retained evidence if publication fails; this harness never deletes.
+ */
+export function writeS2CostMeasurementReceipt(
+  selectedSettledWrites: readonly S2SettledWriteResult[],
+  provenance: S2CostReceiptProvenance,
+  output: S2CostReceiptOutput,
+): S2CostReceiptWriteResult {
+  const receipt = buildS2CostMeasurementReceipt(selectedSettledWrites, provenance);
+  const bytes = new TextEncoder().encode(JSON.stringify(receipt));
+  if (bytes.byteLength > MAX_S2_COST_RECEIPT_BYTES) {
+    return costReceiptFailure("S2_COST_RECEIPT_TOO_LARGE");
+  }
+  const receiptPath = validatedReceiptPath(output);
+  const stagingPath = resolve(output.root, `.${S2_COST_RECEIPT_RELATIVE_PATH}.${randomUUID()}.pending`);
+  let descriptor: number | undefined;
+  let failure: unknown;
+  try {
+    descriptor = openSync(
+      stagingPath,
+      constants.O_WRONLY | constants.O_CREAT | constants.O_EXCL,
+      0o600,
+    );
+    const stat = fstatSync(descriptor);
+    if (!stat.isFile() || (stat.mode & 0o777) !== 0o600) {
+      costReceiptFailure("S2_COST_RECEIPT_MODE_INVALID");
+    }
+    writeAll(descriptor, bytes);
+    fsyncSync(descriptor);
+  } catch (error) {
+    failure = error;
+  } finally {
+    if (descriptor !== undefined) {
+      try {
+        closeSync(descriptor);
+      } catch (error) {
+        if (failure === undefined) failure = error;
+      }
+    }
+  }
+  if (failure !== undefined) {
+    if (failure instanceof S2CostReceiptError) throw failure;
+    if ((failure as NodeJS.ErrnoException).code === "EEXIST") {
+      return costReceiptFailure("S2_COST_RECEIPT_EXISTS");
+    }
+    return costReceiptFailure("S2_COST_RECEIPT_WRITE_FAILED");
+  }
+  try {
+    linkSync(stagingPath, receiptPath);
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === "EEXIST") {
+      return costReceiptFailure("S2_COST_RECEIPT_EXISTS");
+    }
+    return costReceiptFailure("S2_COST_RECEIPT_WRITE_FAILED");
+  }
+  return {
+    receipt,
+    artifact: {
+      relativePath: S2_COST_RECEIPT_RELATIVE_PATH,
+      digest: receiptDigest(bytes),
+      bytes: bytes.byteLength,
+    },
+  };
 }
 
 interface StateResult {
@@ -1308,7 +1634,7 @@ async function upgradeEmpty(lane: UpgradeEvidenceLane = "raw-sql"): Promise<void
 }
 
 async function exercise(): Promise<void> {
-  const writes: WriteResult[] = [];
+  const writes: S2SettledWriteResult[] = [];
   await seed(PRIMARY_PROBLEM, "seed-primary");
 
   const first = await write(writeBody(1), "first-write");
@@ -1316,7 +1642,7 @@ async function exercise(): Promise<void> {
   assertEqual(first.idempotent, false, "S2_FIRST_WRITE_MARKED_IDEMPOTENT");
   assertEqual(first.pre_cursor, 0, "S2_FIRST_PRE_CURSOR_INVALID");
   assertEqual(first.post_cursor, 1, "S2_FIRST_POST_CURSOR_INVALID");
-  writes.push(first);
+  writes.push(selectedSettledWrite(first));
 
   const sameKey = await Promise.all(
     Array.from({ length: 12 }, () => write(writeBody(1), "same-key-concurrency")),
@@ -1333,7 +1659,7 @@ async function exercise(): Promise<void> {
   );
   const sequences = concurrent.map((entry) => entry.seq).sort((left, right) => left - right);
   assertEqual(sequences.join(","), "2,3,4,5,6,7,8,9,10,11,12,13", "S2_SEQUENCE_INVALID");
-  writes.push(...concurrent);
+  writes.push(...concurrent.map(selectedSettledWrite));
 
   await seed(SECONDARY_PROBLEM, "seed-secondary");
   const secondary = await write(
@@ -1341,7 +1667,7 @@ async function exercise(): Promise<void> {
     "per-problem-sequence",
   );
   assertEqual(secondary.seq, 1, "S2_SECONDARY_SEQUENCE_INVALID");
-  writes.push(secondary);
+  writes.push(selectedSettledWrite(secondary));
 
   const primaryState = await state(PRIMARY_PROBLEM, "cursor-and-row-counts");
   assertEqual(primaryState.cursor, 13, "S2_PRIMARY_CURSOR_INVALID");
@@ -1459,7 +1785,7 @@ async function exercise(): Promise<void> {
     false,
     "S2_DISCONNECT_BEFORE_COMMIT_RETRY_INVALID",
   );
-  writes.push(retriedBeforeDisconnect);
+  writes.push(selectedSettledWrite(retriedBeforeDisconnect));
 
   const afterDisconnect = { ...writeBody(15), s2_post_commit_delay_ms: 125 };
   await expectTransportAbort(afterDisconnect, "disconnect-after-commit");
@@ -1476,7 +1802,7 @@ async function exercise(): Promise<void> {
     "16,17,18,19,20,21,22,23,24,25,26,27,28,29,30,31",
     "S2_LOCK_CONTENTION_SEQUENCE_INVALID",
   );
-  writes.push(...contention);
+  writes.push(...contention.map(selectedSettledWrite));
 
   const durableOutboxState = await state(PRIMARY_PROBLEM, "outbox-before-worker-restart");
   assertEqual(durableOutboxState.cursor, 31, "S2_OUTBOX_CURSOR_INVALID");
@@ -1499,7 +1825,7 @@ async function exercise(): Promise<void> {
       writeBody(index, LARGE_PROBLEM, `Large replay corpus claim ${index}.`),
       "large-paginated-replay-corpus",
     );
-    writes.push(large);
+    writes.push(selectedSettledWrite(large));
   }
   await assertReplay(LARGE_PROBLEM, 201, "large-paginated-full-replay");
   await legacyBoundedBackfill();
@@ -1508,6 +1834,19 @@ async function exercise(): Promise<void> {
   await probePlanUsesPartialIndex();
   await preflightCostDoesNotGrowWithHistory();
   await exerciseOutboxDrainer();
+  const costReceipt = writeS2CostMeasurementReceipt(
+    writes,
+    {
+      run_id: requiredEnvironment("S2_RUN_ID"),
+      revision: requiredEnvironment("S2_GIT_HEAD"),
+      dirty_state: requiredDirtyState(),
+      source_digest: requiredEnvironment("S2_SOURCE_DIGEST"),
+    },
+    {
+      root: requiredEnvironment("S2_COST_RECEIPT_ROOT"),
+      receiptPath: requiredEnvironment("S2_COST_RECEIPT_PATH"),
+    },
+  );
 
   emit({
     tool: "bun",
@@ -1530,35 +1869,28 @@ async function exercise(): Promise<void> {
     build_digest: null,
     checkpoint_digest: null,
     checkpoint_mode: "unsigned-v0",
-    metric_scope: "selected-settled-write-receipts",
-    write_receipt_count: writes.length,
-    successful_batch_metric_scope: SUCCESSFUL_BATCH_METRIC_SCOPE,
-    failed_retry_batch_metrics: FAILED_RETRY_BATCH_METRICS,
-    write_claim_wall_scope: WRITE_CLAIM_WALL_SCOPE,
-    p95_write_phase_ms: percentile95(writes.map((entry) => entry.write_phase_ms)),
-    sum_successful_batch_rows_read: writes.reduce(
-      (total, entry) => total + entry.successful_batch_rows_read,
-      0,
-    ),
-    sum_successful_batch_rows_written: writes.reduce(
-      (total, entry) => total + entry.successful_batch_rows_written,
-      0,
-    ),
-    sum_preflight_rows_read: writes.reduce((total, entry) => total + entry.preflight_rows_read, 0),
-    sum_preflight_rows_written: writes.reduce(
-      (total, entry) => total + entry.preflight_rows_written,
-      0,
-    ),
-    p95_preflight_wall_ms: percentile95(writes.map((entry) => entry.preflight_wall_ms)),
-    sum_preflight_statements: writes.reduce(
-      (total, entry) => total + entry.preflight_statements,
-      0,
-    ),
-    p95_write_claim_wall_ms: percentile95(writes.map((entry) => entry.write_claim_wall_ms)),
+    metric_scope: costReceipt.receipt.metric_scope,
+    write_receipt_count: costReceipt.receipt.write_receipt_count,
+    successful_batch_metric_scope: costReceipt.receipt.successful_batch_metric_scope,
+    failed_retry_batch_metrics: costReceipt.receipt.failed_retry_batch_metrics,
+    write_claim_wall_scope: costReceipt.receipt.write_claim_wall_scope,
+    p95_write_phase_ms: costReceipt.receipt.p95_write_phase_ms,
+    sum_successful_batch_rows_read: costReceipt.receipt.sum_successful_batch_rows_read,
+    sum_successful_batch_rows_written: costReceipt.receipt.sum_successful_batch_rows_written,
+    sum_preflight_rows_read: costReceipt.receipt.sum_preflight_rows_read,
+    sum_preflight_rows_written: costReceipt.receipt.sum_preflight_rows_written,
+    p95_preflight_wall_ms: costReceipt.receipt.p95_preflight_wall_ms,
+    sum_preflight_statements: costReceipt.receipt.sum_preflight_statements,
+    p95_write_claim_wall_ms: costReceipt.receipt.p95_write_claim_wall_ms,
     lock_wait_ms: null,
-    sum_retry_count: writes.reduce((total, entry) => total + entry.retry_count, 0),
+    sum_retry_count: costReceipt.receipt.sum_retry_count,
     assertion_diff: null,
     total_harness_request_count: requestCount,
+    cost_receipt: {
+      path: costReceipt.artifact.relativePath,
+      artifact_digest: costReceipt.artifact.digest,
+      bytes: costReceipt.artifact.bytes,
+    },
     status: "pass",
     reproduce: "scripts/e2e-s2-krater.sh",
   });
@@ -1647,34 +1979,47 @@ async function main(): Promise<void> {
   fail("S2_PHASE_INVALID");
 }
 
-main().catch((error: unknown) => {
-  emit({
-    tool: "bun",
-    tool_version: Bun.version,
-    package: "apps/wire",
-    suite: "s2-krater-local-d1",
-    revision: REVISION,
-    dirty_state: DIRTY_STATE,
-    source_digest: SOURCE_DIGEST,
-    bindings: BINDINGS,
-    scenario: phase,
-    seed: SEED,
-    scope: SCOPE,
-    request_id: null,
-    event_id: null,
-    pre_cursor: null,
-    post_cursor: null,
-    payload_sha256: null,
-    row_digest: null,
-    build_digest: null,
-    checkpoint_digest: null,
-    checkpoint_mode: null,
-    ...receiptMetrics(),
-    lock_wait_ms: null,
-    retry_count: null,
-    assertion_diff: error instanceof Error ? error.message : "S2_UNEXPECTED_FAILURE",
-    status: "fail",
-    reproduce: "scripts/e2e-s2-krater.sh",
+function requiredEnvironment(name: string): string {
+  const value = process.env[name];
+  if (typeof value !== "string" || value === "") return fail(`${name}_INVALID`);
+  return value;
+}
+
+function requiredDirtyState(): "clean" | "dirty" {
+  if (DIRTY_STATE === "clean" || DIRTY_STATE === "dirty") return DIRTY_STATE;
+  return fail("S2_GIT_DIRTY_INVALID");
+}
+
+if (import.meta.main) {
+  main().catch((error: unknown) => {
+    emit({
+      tool: "bun",
+      tool_version: Bun.version,
+      package: "apps/wire",
+      suite: "s2-krater-local-d1",
+      revision: REVISION,
+      dirty_state: DIRTY_STATE,
+      source_digest: SOURCE_DIGEST,
+      bindings: BINDINGS,
+      scenario: phase,
+      seed: SEED,
+      scope: SCOPE,
+      request_id: null,
+      event_id: null,
+      pre_cursor: null,
+      post_cursor: null,
+      payload_sha256: null,
+      row_digest: null,
+      build_digest: null,
+      checkpoint_digest: null,
+      checkpoint_mode: null,
+      ...receiptMetrics(),
+      lock_wait_ms: null,
+      retry_count: null,
+      assertion_diff: error instanceof Error ? error.message : "S2_UNEXPECTED_FAILURE",
+      status: "fail",
+      reproduce: "scripts/e2e-s2-krater.sh",
+    });
+    process.exitCode = 1;
   });
-  process.exitCode = 1;
-});
+}

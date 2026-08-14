@@ -29,6 +29,7 @@ readonly S2_WATCHDOG_MAX_UNCERTAIN_TICKS=10
 readonly S2_MAX_RETAINED_BYTES=67108864
 readonly S2_MAX_RETAINED_FILES=1024
 readonly S2_EVIDENCE_ROOT="e2e/artifacts/s2-krater"
+readonly S2_COST_RECEIPT_RELATIVE_PATH="s2-cost-input.json"
 # A parallel child runs the full local D1 suite, including two real migration-journal lanes.
 # Keep the test bounded, but allow its documented work rather than converting a healthy child
 # into a synthetic TERM result before the journal is finished.
@@ -51,6 +52,7 @@ readonly -a S2_SOURCE_PATHS=(
   db/migrations/0003_auth_nonce_replay.sql
   db/migrations/0004_krater_integrity_v1.sql
   db/migrations/0005_krater_undigested_index.sql
+  scripts/verify-cost-model.ts
   scripts/e2e-s2-krater.sh
 )
 readonly -a S2_EXPECTED_MIGRATION_JOURNAL=(
@@ -149,6 +151,7 @@ if ! mkdir "${S2_RUN_DIR}" || ! mkdir "${S2_RUN_DIR}/main"; then
   printf '%s\n' '{"tool":"bash","package":"apps/wire","suite":"s2-krater-evidence","status":"fail","code":"S2_EVIDENCE_RUN_CREATE_FAILED","reproduce":"scripts/e2e-s2-krater.sh"}'
   exit 1
 fi
+readonly S2_COST_RECEIPT_PATH="${S2_RUN_DIR}/${S2_COST_RECEIPT_RELATIVE_PATH}"
 S2_STATE_DIR="${S2_RUN_DIR}/main"
 readonly S2_STATE_DIR
 readonly S2_SERVER_LOG="${S2_STATE_DIR}/wrangler.log"
@@ -345,6 +348,12 @@ S2_PLANTED_RELEASE_PID=""
 S2_PLANTED_RELEASE_PGID=""
 S2_PLANTED_RELEASE_MARKER=""
 S2_LAST_SUPERVISOR_PGID=""
+# This packed record is published before any release write. It closes the caller-assignment
+# gap: an EXIT trap can still prove and release the exact newest supervisor while a caller is
+# between start_pinned_supervisor and its Worker/lifecycle bookkeeping. Fields are PID, PGID,
+# expected PPID, marker, watchdog PID, watchdog health path, persistence directory, port, and
+# proof scope. Every path is generated beneath the safe S2 run directory and contains no space.
+S2_MOST_RECENT_SUPERVISOR=""
 
 is_decimal() {
   [[ "$1" =~ ^[0-9]+$ ]]
@@ -399,11 +408,17 @@ watchdog_is_healthy() {
 # private release FIFO before invoking the real command, so no Wrangler/workerd descendant can
 # exist until identity and kernel group ownership have been proved by the parent.
 start_pinned_supervisor() {
-  local status_file="$1" label="$2" marker pid deadline control_fifo release_fifo release_token arm_token
+  local status_file="$1" label="$2" persist="$3" port="$4" proof_scope="$5"
+  local marker pid deadline control_fifo release_fifo release_token arm_token
   local watchdog_pid_file watchdog_health watchdog_pid tick release_sent=0
   local plant_watchdog_exit_on_term="${S2_PLANT_WATCHDOG_EXIT_ON_TERM:-0}"
   local plant_supervisor_exit_on_term="${S2_PLANT_SUPERVISOR_EXIT_ON_TERM:-0}"
-  shift 2
+  shift 5
+  [[ -d "${persist}" && ! -L "${persist}" && "${port}" =~ ^[0-9]+$ ]] || return 1
+  case "${proof_scope}" in
+    server|client) ;;
+    *) return 1 ;;
+  esac
   marker="${label}-$(random_hex 16)" || return 1
   [[ ! -e "${status_file}" && ! -L "${status_file}" ]] || return 1
   control_fifo="${status_file}.control"
@@ -537,27 +552,6 @@ start_pinned_supervisor() {
       # identity before release.  The child command is still blocked, so no workerd descendant
       # can exist in this interval.
       if ! printf '%s\n' "${arm_token}" >&7; then exec 7>&-; return 1; fi
-      if [[ "${S2_PLANT_RELEASE_INTERLEAVING:-0}" == 1 ]]; then
-        # Exercise the former close/reopen interval: publish the release value as soon as the
-        # watchdog PID exists, before waiting for its health record. FD 8 remains continuously
-        # open in the supervisor, so the release cannot disappear between two FIFO opens.
-        deadline=$((SECONDS + S2_READY_DEADLINE_SECONDS))
-        while (( SECONDS < deadline )); do
-          supervisor_is_owned "${pid}" "${pid}" "${marker}" || break
-          if [[ -f "${watchdog_pid_file}" && ! -L "${watchdog_pid_file}" ]] && \
-            IFS= read -r watchdog_pid <"${watchdog_pid_file}" && is_decimal "${watchdog_pid}"; then
-            break
-          fi
-          sleep 0.05
-        done
-        if ! supervisor_is_owned "${pid}" "${pid}" "${marker}" || \
-          [[ -z "${watchdog_pid}" ]] || ! is_decimal "${watchdog_pid}" || \
-          ! printf '%s\n' "${release_token}" >&7; then
-          exec 7>&-
-          return 1
-        fi
-        release_sent=1
-      fi
       deadline=$((SECONDS + S2_READY_DEADLINE_SECONDS))
       watchdog_pid=""
       while (( SECONDS < deadline )); do
@@ -583,6 +577,19 @@ start_pinned_supervisor() {
         kill -0 -- "-${pid}" 2>/dev/null && return 1
         wait "${pid}" 2>/dev/null || :
         return 1
+      fi
+      # This assignment precedes every release write. An EXIT trap can therefore use the same
+      # exact persistence, port, and proof scope that the eventual owner would use, even if a
+      # signal lands between this line and the caller recording its own ownership fields.
+      S2_MOST_RECENT_SUPERVISOR="${pid} ${pid} ${S2_PARENT_PID} ${marker} ${watchdog_pid} ${watchdog_health} ${persist} ${port} ${proof_scope}"
+      if [[ "${S2_PLANT_RELEASE_INTERLEAVING:-0}" == 1 ]]; then
+        # FD 8 remains continuously open across watchdog publication and this release write;
+        # the exact cleanup record above removes the former release-to-owner gap.
+        if ! printf '%s\n' "${release_token}" >&7; then
+          exec 7>&-
+          return 1
+        fi
+        release_sent=1
       fi
       if [[ "${S2_PLANT_RELEASE_CHILD_EXIT_AFTER_REPROOF:-0}" == 1 ]]; then
         S2_PLANTED_RELEASE_PID="${pid}"
@@ -814,6 +821,48 @@ legacy_reap_leader_lost_group() {
   return 1
 }
 
+# A shell-regression child can deliberately model the retired pre-publication hook: its parent
+# has already exited, so supervisor_is_owned correctly refuses it because PPID is now 1. This
+# bounded reaper is narrower than normal cleanup. It requires the original PID/PGID plus the
+# randomized supervisor marker in the live leader command before one KILL of that exact group;
+# it never authorizes a bare numeric group or prints command text.
+reap_parent_terminated_supervisor_residual() {
+  local pid="$1" pgid="$2" marker="$3" persist="$4" port="$5"
+  local rows line seen_pid seen_pgid seen_ppid seen_stat seen_command tick leader_seen=0
+  is_decimal "${pid}" && is_decimal "${pgid}" && is_decimal "${port}" && \
+    [[ "${pid}" == "${pgid}" && -n "${marker}" && -d "${persist}" && ! -L "${persist}" ]] || return 1
+  rows="$(LC_ALL=C ps -axo pid=,pgid=,ppid=,stat=,command=)" || return 1
+  while IFS= read -r line; do
+    [[ -n "${line}" ]] || continue
+    read -r seen_pid seen_pgid seen_ppid seen_stat seen_command <<<"${line}"
+    is_decimal "${seen_pid}" && is_decimal "${seen_pgid}" && is_decimal "${seen_ppid}" || return 1
+    if [[ "${seen_pid}" == "${pid}" && "${seen_pgid}" == "${pgid}" && \
+      "${seen_ppid}" == "1" && "${seen_stat}" != Z* && \
+      "${seen_command}" == *"s2-pinned-supervisor-${marker}"* ]]; then
+      leader_seen=1
+    fi
+  done <<<"${rows}"
+  [[ ${leader_seen} -eq 1 ]] || return 1
+  kill -KILL -- "-${pgid}" 2>/dev/null || return 1
+  for ((tick = 0; tick < S2_TERMINATE_WAIT_TICKS; tick += 1)); do
+    if ! kill -0 -- "-${pgid}" 2>/dev/null; then
+      wait "${pid}" 2>/dev/null || :
+      assert_no_run_survivors "${persist}" "${port}" "${marker}"
+      return $?
+    fi
+    sleep 0.1
+  done
+  return 1
+}
+
+clear_most_recent_supervisor_if_pid() {
+  local pid="$1" latest_pid
+  [[ -n "${S2_MOST_RECENT_SUPERVISOR}" ]] || return 0
+  latest_pid="${S2_MOST_RECENT_SUPERVISOR%% *}"
+  [[ "${pid}" == "${latest_pid}" ]] || return 0
+  S2_MOST_RECENT_SUPERVISOR=""
+}
+
 stop_pinned_supervisor() {
   local pid="$1" pgid="$2" marker="$3" watchdog_pid="$4" watchdog_health="$5"
   local persist="$6" port="$7" proof_scope="${8:-server}" tick release_tick
@@ -823,8 +872,12 @@ stop_pinned_supervisor() {
     # The watchdog's exact healthy identity is part of the lifecycle contract. Its absence or
     # published inspection uncertainty is a hard failure, but the still-proved group leader is
     # sufficient authority to kill this exact group and establish zero survivors.
-    kill_owned_group_to_zero "${pid}" "${pgid}" "${marker}" "${persist}" "${port}" \
-      "${proof_scope}" || return 1
+    if kill_owned_group_to_zero "${pid}" "${pgid}" "${marker}" "${persist}" "${port}" \
+      "${proof_scope}"; then
+      clear_most_recent_supervisor_if_pid "${pid}"
+    else
+      return 1
+    fi
     return 1
   fi
   signal_owned_group TERM "${pid}" "${pgid}" "${marker}" || return 1
@@ -840,6 +893,7 @@ stop_pinned_supervisor() {
         if [[ "${proof_scope}" == "server" ]]; then
           assert_no_run_survivors "${persist}" "${port}" "${marker}" || return 1
         fi
+        clear_most_recent_supervisor_if_pid "${pid}"
         return 0
       fi
       if [[ "${S2_LEGACY_STOP_CONTEXT:-0}" == 1 && "${proof_scope}" == "server" ]]; then
@@ -849,8 +903,12 @@ stop_pinned_supervisor() {
       return 1
     fi
     if ! group_members "${pgid}"; then
-      kill_owned_group_to_zero "${pid}" "${pgid}" "${marker}" "${persist}" "${port}" \
-        "${proof_scope}" || return 1
+      if kill_owned_group_to_zero "${pid}" "${pgid}" "${marker}" "${persist}" "${port}" \
+        "${proof_scope}"; then
+        clear_most_recent_supervisor_if_pid "${pid}"
+      else
+        return 1
+      fi
       return 1
     fi
     if [[ ${S2_GROUP_MEMBER_COUNT} -le 2 ]]; then
@@ -859,9 +917,12 @@ stop_pinned_supervisor() {
       # unexpected TERM-resistant payload: keep the leader alive and KILL this still-proved exact
       # group. Releasing the leader first would make that survivor uninspectable and losable.
       if [[ ${S2_GROUP_MEMBER_COUNT} -eq 2 ]] && ! group_contains_pid "${watchdog_pid}"; then
-        kill_owned_group_to_zero "${pid}" "${pgid}" "${marker}" "${persist}" "${port}" \
-          "${proof_scope}"
-        return $?
+        if kill_owned_group_to_zero "${pid}" "${pgid}" "${marker}" "${persist}" "${port}" \
+          "${proof_scope}"; then
+          clear_most_recent_supervisor_if_pid "${pid}"
+          return 0
+        fi
+        return 1
       fi
       # At this point the group is only the leader, or the leader plus its exact watchdog. The
       # group is in terminal teardown, so release only that exact leader.
@@ -872,6 +933,7 @@ stop_pinned_supervisor() {
           if [[ "${proof_scope}" == "server" ]]; then
             assert_no_run_survivors "${persist}" "${port}" "${marker}" || return 1
           fi
+          clear_most_recent_supervisor_if_pid "${pid}"
           return 0
         fi
         sleep 0.1
@@ -885,8 +947,12 @@ stop_pinned_supervisor() {
 
   # A TERM-resistant descendant is still inside the exact leader-pinned group. The fresh leader
   # proof in this helper authorizes KILL of that group only; there is no PID fallback.
-  kill_owned_group_to_zero "${pid}" "${pgid}" "${marker}" "${persist}" "${port}" \
-    "${proof_scope}"
+  if kill_owned_group_to_zero "${pid}" "${pgid}" "${marker}" "${persist}" "${port}" \
+    "${proof_scope}"; then
+    clear_most_recent_supervisor_if_pid "${pid}"
+    return 0
+  fi
+  return 1
 }
 
 server_is_owned() {
@@ -896,6 +962,7 @@ server_is_owned() {
 }
 
 stop_worker() {
+  local stopped_pid
   if [[ "${S2_PLANT_STOP_WORKER_FAILURE:-0}" == 1 ]]; then
     # Regression-only in-process mutation. The legacy wrapper must return failure before it
     # restores the origin, so this mutation is intentionally observable by its caller.
@@ -903,6 +970,7 @@ stop_worker() {
     return 91
   fi
   [[ -n "${S2_SERVER_PID}" ]] || return 0
+  stopped_pid="${S2_SERVER_PID}"
   stop_pinned_supervisor \
     "${S2_SERVER_PID}" "${S2_SERVER_PGID}" "${S2_SERVER_MARKER}" \
     "${S2_SERVER_WATCHDOG_PID}" "${S2_SERVER_WATCHDOG_HEALTH}" \
@@ -916,6 +984,7 @@ stop_worker() {
   S2_SERVER_PORT=""
   S2_ACTIVE_HARNESS_TOKEN=""
   S2_ACTIVE_HARNESS_RUN_ID=""
+  clear_most_recent_supervisor_if_pid "${stopped_pid}"
 }
 
 remember_lifecycle_supervisor() {
@@ -943,6 +1012,7 @@ forget_lifecycle_supervisor() {
       S2_LIFECYCLE_OWNED_WATCHDOG_HEALTH_FILES[index]=""
       S2_LIFECYCLE_OWNED_STATE_DIRS[index]=""
       S2_LIFECYCLE_OWNED_PORTS[index]=""
+      clear_most_recent_supervisor_if_pid "${pid}"
       return 0
     fi
   done
@@ -972,8 +1042,84 @@ stop_lifecycle_supervisors() {
 }
 
 # shellcheck disable=SC2329
+most_recent_supervisor_is_tracked() {
+  local pid="$1" index
+  [[ -n "${S2_SERVER_PID}" && "${pid}" == "${S2_SERVER_PID}" ]] && return 0
+  for index in "${!S2_LIFECYCLE_OWNED_PIDS[@]}"; do
+    [[ -n "${S2_LIFECYCLE_OWNED_PIDS[index]}" && \
+      "${pid}" == "${S2_LIFECYCLE_OWNED_PIDS[index]}" ]] && return 0
+  done
+  return 1
+}
+
+# The ordinary Worker and explicit lifecycle arrays own their own release paths. This covers
+# only the short, otherwise-unowned interval after the newest pinned supervisor reports ready
+# and before its caller records that ownership. It never signals a bare numeric group:
+# supervisor_is_owned proves PID, PGID, PPID, and randomized marker immediately before cleanup.
+# shellcheck disable=SC2329
+stop_most_recent_untracked_supervisor() {
+  local pid pgid expected_ppid marker watchdog_pid watchdog_health persist port proof_scope
+  [[ -n "${S2_MOST_RECENT_SUPERVISOR}" ]] || return 0
+  read -r pid pgid expected_ppid marker watchdog_pid watchdog_health persist port proof_scope \
+    <<<"${S2_MOST_RECENT_SUPERVISOR}"
+  is_decimal "${pid}" && is_decimal "${pgid}" && is_decimal "${expected_ppid}" && \
+    is_decimal "${watchdog_pid}" && [[ "${pid}" == "${pgid}" && \
+    "${expected_ppid}" == "${S2_PARENT_PID}" && -n "${marker}" && -n "${watchdog_health}" && \
+    -d "${persist}" && ! -L "${persist}" && "${port}" =~ ^[0-9]+$ ]] || return 1
+  case "${proof_scope}" in
+    server|client) ;;
+    *) return 1 ;;
+  esac
+  if most_recent_supervisor_is_tracked "${pid}"; then
+    clear_most_recent_supervisor_if_pid "${pid}"
+    return 0
+  fi
+
+  if ! supervisor_is_owned "${pid}" "${pgid}" "${marker}"; then
+    # A previously completed/explicitly released exact supervisor is not an error, but prove
+    # that no marker or run-owned survivor remains. This is inspection, not a numeric group
+    # signal; without the fresh identity proof above no signal is attempted.
+    if ! kill -0 -- "-${pgid}" 2>/dev/null; then
+      wait "${pid}" 2>/dev/null || :
+      if [[ "${proof_scope}" != "server" ]] || \
+        assert_no_run_survivors "${persist}" "${port}" "${marker}"; then
+        clear_most_recent_supervisor_if_pid "${pid}"
+        return 0
+      fi
+      return 1
+    fi
+    if [[ "${proof_scope}" == "server" ]] && \
+      assert_no_run_survivors "${persist}" "${port}" "${marker}"; then
+      clear_most_recent_supervisor_if_pid "${pid}"
+      return 0
+    fi
+    return 1
+  fi
+  if stop_pinned_supervisor \
+    "${pid}" "${pgid}" "${marker}" "${watchdog_pid}" "${watchdog_health}" \
+    "${persist}" "${port}" "${proof_scope}"; then
+    clear_most_recent_supervisor_if_pid "${pid}"
+    return 0
+  fi
+  # stop_pinned_supervisor deliberately reports a missing/stale watchdog as failure even after
+  # it has KILLed the freshly proved exact group. For EXIT cleanup that zero-survivor result is
+  # complete: preserve the parent’s original signal status instead of converting it to 125.
+  if [[ "${proof_scope}" == "client" ]] && ! kill -0 -- "-${pgid}" 2>/dev/null; then
+    clear_most_recent_supervisor_if_pid "${pid}"
+    return 0
+  fi
+  if [[ "${proof_scope}" == "server" ]] && \
+    assert_no_run_survivors "${persist}" "${port}" "${marker}"; then
+    clear_most_recent_supervisor_if_pid "${pid}"
+    return 0
+  fi
+  return 1
+}
+
+# shellcheck disable=SC2329
 cleanup_workers() {
   local result=0
+  stop_most_recent_untracked_supervisor || result=1
   stop_lifecycle_supervisors || result=1
   stop_worker || result=1
   if [[ ${result} -ne 0 ]]; then
@@ -997,13 +1143,16 @@ write_evidence_receipt() {
   S2_RECEIPT_EXIT_CODE="${exit_code}" \
   S2_RECEIPT_MAX_BYTES="${S2_MAX_RETAINED_BYTES}" \
   S2_RECEIPT_MAX_FILES="${S2_MAX_RETAINED_FILES}" \
+  S2_RECEIPT_COST_RELATIVE_PATH="${S2_COST_RECEIPT_RELATIVE_PATH}" \
   bun --eval '
-    import { lstatSync, readdirSync, writeFileSync } from "node:fs";
+    import { lstatSync, readFileSync, readdirSync, writeFileSync } from "node:fs";
+    import { createHash } from "node:crypto";
     import { relative, resolve } from "node:path";
 
     const root = process.env.S2_RECEIPT_ROOT ?? "";
     const receiptPath = process.env.S2_RECEIPT_PATH ?? "";
     const relativeReceiptPath = process.env.S2_RECEIPT_RELATIVE_PATH ?? "";
+    const costReceiptRelativePath = process.env.S2_RECEIPT_COST_RELATIVE_PATH ?? "";
     const maxBytes = Number(process.env.S2_RECEIPT_MAX_BYTES);
     const maxFiles = Number(process.env.S2_RECEIPT_MAX_FILES);
     const files = [];
@@ -1030,6 +1179,21 @@ write_evidence_receipt() {
       files.sort((left, right) => left.path.localeCompare(right.path));
       const retainedBytes = files.reduce((sum, file) => sum + file.bytes, 0);
       if (files.length + 1 > maxFiles || retainedBytes > maxBytes) throw new Error("bound");
+      if (costReceiptRelativePath !== "s2-cost-input.json") throw new Error("cost-receipt-path");
+      const costReceipt = files.find((file) => file.path === costReceiptRelativePath);
+      const costReceiptSummary =
+        costReceipt === undefined
+          ? null
+          : (() => {
+              if (costReceipt.kind !== "file") throw new Error("cost-receipt-kind");
+              const bytes = readFileSync(resolve(root, costReceiptRelativePath));
+              if (bytes.byteLength !== costReceipt.bytes) throw new Error("cost-receipt-size");
+              return {
+                path: costReceiptRelativePath,
+                digest: createHash("sha256").update(bytes).digest("hex"),
+                bytes: costReceipt.bytes,
+              };
+            })();
       const manifest = {
         manifest_version: "s2-krater-evidence-v1",
         run_id: process.env.S2_RECEIPT_RUN_ID,
@@ -1045,6 +1209,7 @@ write_evidence_receipt() {
           retained_bytes_before_manifest: retainedBytes,
           retained_files_before_manifest: files.length,
         },
+        s2_cost_receipt: costReceiptSummary,
         files,
       };
       const body = `${JSON.stringify(manifest)}\n`;
@@ -1123,6 +1288,7 @@ start_worker() {
   S2_ACTIVE_ORIGIN="http://127.0.0.1:${port}"
 
   start_pinned_supervisor "${persist}/server-${run_id}.status" "worker-${port}" \
+    "${persist}" "${port}" server \
     env "${S2_WRANGLER}" dev apps/wire/src/krater/worker.ts \
       --config "${config}" \
       --local \
@@ -1144,6 +1310,8 @@ start_worker() {
   S2_SERVER_PORT="${port}"
   S2_ACTIVE_HARNESS_TOKEN="${token}"
   S2_ACTIVE_HARNESS_RUN_ID="${run_id}"
+  # Transfer is complete only after every Worker handle is visible to EXIT cleanup.
+  clear_most_recent_supervisor_if_pid "${S2_SERVER_PID}"
 
   deadline=$((SECONDS + S2_READY_DEADLINE_SECONDS))
   while (( SECONDS < deadline )); do
@@ -1164,7 +1332,23 @@ start_worker() {
 run_phase() {
   local phase="$1" phase_pid phase_pgid phase_marker phase_status deadline
   local phase_watchdog_pid phase_watchdog_health
+  local -a receipt_environment=()
+  if [[ "${phase}" == "exercise" ]]; then
+    if [[ -e "${S2_COST_RECEIPT_PATH}" || -L "${S2_COST_RECEIPT_PATH}" ]]; then
+      emit '{"tool":"bash","package":"apps/wire","suite":"s2-krater-local-d1","status":"fail","code":"S2_COST_RECEIPT_EXISTS","reproduce":"scripts/e2e-s2-krater.sh"}'
+      return 125
+    fi
+    receipt_environment=(
+      "S2_RUN_ID=${S2_RUN_ID}"
+      "S2_COST_RECEIPT_ROOT=${S2_RUN_DIR}"
+      "S2_COST_RECEIPT_PATH=${S2_COST_RECEIPT_PATH}"
+    )
+  fi
+  # A phase client is deliberately not a Worker/lifecycle-array owner. Its local handles can be
+  # untracked by those arrays for up to S2_PHASE_DEADLINE_SECONDS (75s), so the most-recent
+  # record remains live until its exact supervisor has stopped.
   start_pinned_supervisor "${S2_STATE_DIR}/client-${phase}-$(random_hex 8).status" "client-${phase}" \
+    "${S2_SERVER_PERSIST}" "${S2_SERVER_PORT}" client \
     env \
       S2_ORIGIN="${S2_ACTIVE_ORIGIN}" \
       S2_PHASE="${phase}" \
@@ -1172,6 +1356,7 @@ run_phase() {
       S2_GIT_HEAD="${S2_GIT_HEAD}" \
       S2_GIT_DIRTY="${S2_GIT_DIRTY}" \
       S2_SOURCE_DIGEST="${S2_SOURCE_DIGEST}" \
+      "${receipt_environment[@]}" \
       bun apps/wire/src/krater/s2-client.ts || return 125
   phase_pid="${S2_STARTED_PID}"
   phase_pgid="${S2_STARTED_PGID}"
@@ -1184,7 +1369,7 @@ run_phase() {
     if read_child_status "${phase_status}"; then
       if ! stop_pinned_supervisor "${phase_pid}" "${phase_pgid}" "${phase_marker}" \
         "${phase_watchdog_pid}" "${phase_watchdog_health}" \
-        "${S2_STATE_DIR}" "${S2_PORT}" client; then
+        "${S2_SERVER_PERSIST}" "${S2_SERVER_PORT}" client; then
         emit '{"tool":"bash","package":"apps/wire","suite":"s2-krater-lifecycle","status":"fail","code":"S2_CLIENT_CLEANUP_OWNERSHIP_UNPROVEN","reproduce":"scripts/e2e-s2-krater.sh"}'
         return 125
       fi
@@ -1193,13 +1378,13 @@ run_phase() {
     if ! server_is_owned; then
       stop_pinned_supervisor "${phase_pid}" "${phase_pgid}" "${phase_marker}" \
         "${phase_watchdog_pid}" "${phase_watchdog_health}" \
-        "${S2_STATE_DIR}" "${S2_PORT}" client || :
+        "${S2_SERVER_PERSIST}" "${S2_SERVER_PORT}" client || :
       return 125
     fi
     if (( SECONDS >= deadline )); then
       stop_pinned_supervisor "${phase_pid}" "${phase_pgid}" "${phase_marker}" \
         "${phase_watchdog_pid}" "${phase_watchdog_health}" \
-        "${S2_STATE_DIR}" "${S2_PORT}" client || :
+        "${S2_SERVER_PERSIST}" "${S2_SERVER_PORT}" client || :
       return 124
     fi
     sleep 0.2
@@ -1538,12 +1723,15 @@ run_s2_shell_regression_test() {
   local source_path signal_called=0 parent_loss_record parent_loss_child parent_loss_status
   local journal_valid journal_alternate journal_invalid valid_output alternate_output invalid_output
   local valid_digest alternate_digest cleanup_status
+  local interrupt_record interrupt_child interrupt_status interrupt_secret child_persist child_port
+  local child_run child_status_file child_diagnostic diagnostic_body manifest_body
 
   if [[ "${mode}" == "parent-loss-child" ]]; then
     parent_loss_record="${S2_PARENT_LOSS_RECORD:-}"
     [[ -n "${parent_loss_record}" && ! -e "${parent_loss_record}" && ! -L "${parent_loss_record}" ]] || return 2
     status_file="${S2_STATE_DIR}/parent-loss-$(random_hex 8).status"
-    start_pinned_supervisor "${status_file}" parent-loss bash -c 'sleep 30' || return 1
+    start_pinned_supervisor "${status_file}" parent-loss "${S2_STATE_DIR}" "${S2_PORT}" client \
+      bash -c 'sleep 30' || return 1
     printf '%s %s %s %s %s\n' \
       "${S2_STARTED_PID}" "${S2_STARTED_PGID}" "${S2_STARTED_MARKER}" \
       "${S2_STARTED_WATCHDOG_PID}" "${S2_STARTED_WATCHDOG_HEALTH}" >"${parent_loss_record}"
@@ -1575,7 +1763,17 @@ run_s2_shell_regression_test() {
       -f "${supervisor_watchdog_health}" && ! -L "${supervisor_watchdog_health}" ]] || return 1
     deadline=$((SECONDS + S2_TERMINATE_WAIT_TICKS + 5))
     while kill -0 -- "-${supervisor_pgid}" 2>/dev/null; do
-      (( SECONDS < deadline )) || return 1
+      if (( SECONDS >= deadline )); then
+        # The current hook must never reach this branch. If a deliberately failing old-hook
+        # shape does, reap only its still-provable PPID-1 marker leader and then fail the plant
+        # after proving zero residue, so the regression cannot leave an immortal supervisor.
+        if reap_parent_terminated_supervisor_residual \
+          "${supervisor_pid}" "${supervisor_pgid}" "${supervisor_marker}" \
+          "${child_persist}" "${child_port}"; then
+          emit '{"tool":"bash","package":"apps/wire","suite":"s2-krater-shell","status":"fail","code":"S2_PARENT_TERM_OLD_HOOK_RESIDUAL_REAPED","reproduce":"S2_SHELL_REGRESSION_TEST=term-interrupt-cleanup scripts/e2e-s2-krater.sh"}'
+        fi
+        return 1
+      fi
       sleep 0.1
     done
     read -r watchdog_state watchdog_health_pid < <(tail -n 1 "${supervisor_watchdog_health}") || return 1
@@ -1595,7 +1793,7 @@ run_s2_shell_regression_test() {
     # The child Bash, not this harness, must expand its SECONDS-based deadline.
     # shellcheck disable=SC2016
     S2_PLANT_SUPERVISOR_EXIT_ON_TERM=1 \
-      start_pinned_supervisor "${status_file}" owner-loss-uncertain \
+      start_pinned_supervisor "${status_file}" owner-loss-uncertain "${S2_STATE_DIR}" "${S2_PORT}" client \
         bash -c 'trap "" TERM; deadline=$((SECONDS + 4)); while (( SECONDS < deadline )); do read -r -t 1 ignored || :; done' || return 1
     deadline=$((SECONDS + S2_READY_DEADLINE_SECONDS))
     while :; do
@@ -1654,7 +1852,8 @@ run_s2_shell_regression_test() {
   if [[ "${mode}" == "release-race" ]]; then
     status_file="${S2_STATE_DIR}/release-race-$(random_hex 8).status"
     if S2_PLANT_RELEASE_CHILD_EXIT_AFTER_REPROOF=1 \
-      start_pinned_supervisor "${status_file}" release-race bash -c 'sleep 30'; then
+      start_pinned_supervisor "${status_file}" release-race "${S2_STATE_DIR}" "${S2_PORT}" client \
+        bash -c 'sleep 30'; then
       return 1
     fi
     is_decimal "${S2_PLANTED_RELEASE_PID}" && \
@@ -1668,7 +1867,11 @@ run_s2_shell_regression_test() {
   if [[ "${mode}" == "release-interleaving" ]]; then
     status_file="${S2_STATE_DIR}/release-interleaving-$(random_hex 8).status"
     S2_PLANT_RELEASE_INTERLEAVING=1 \
-      start_pinned_supervisor "${status_file}" release-interleaving bash -c 'exit 0' || return 1
+      start_pinned_supervisor "${status_file}" release-interleaving "${S2_STATE_DIR}" "${S2_PORT}" client \
+        bash -c 'exit 0' || {
+        emit '{"tool":"bash","package":"apps/wire","suite":"s2-krater-shell","status":"fail","code":"S2_RELEASE_INTERLEAVING_START_FAILED","reproduce":"S2_SHELL_REGRESSION_TEST=release-interleaving scripts/e2e-s2-krater.sh"}'
+        return 1
+      }
     supervisor_pid="${S2_STARTED_PID}"
     supervisor_pgid="${S2_STARTED_PGID}"
     supervisor_marker="${S2_STARTED_MARKER}"
@@ -1677,16 +1880,120 @@ run_s2_shell_regression_test() {
     supervisor_watchdog_health="${S2_STARTED_WATCHDOG_HEALTH}"
     deadline=$((SECONDS + S2_READY_DEADLINE_SECONDS))
     while ! read_child_status "${supervisor_status}"; do
-      supervisor_is_owned "${supervisor_pid}" "${supervisor_pgid}" "${supervisor_marker}" || return 1
+      supervisor_is_owned "${supervisor_pid}" "${supervisor_pgid}" "${supervisor_marker}" || {
+        emit '{"tool":"bash","package":"apps/wire","suite":"s2-krater-shell","status":"fail","code":"S2_RELEASE_INTERLEAVING_OWNERSHIP_LOST","reproduce":"S2_SHELL_REGRESSION_TEST=release-interleaving scripts/e2e-s2-krater.sh"}'
+        return 1
+      }
+      (( SECONDS < deadline )) || {
+        emit '{"tool":"bash","package":"apps/wire","suite":"s2-krater-shell","status":"fail","code":"S2_RELEASE_INTERLEAVING_STATUS_TIMEOUT","reproduce":"S2_SHELL_REGRESSION_TEST=release-interleaving scripts/e2e-s2-krater.sh"}'
+        return 1
+      }
+      sleep 0.05
+    done
+    [[ "${S2_CHILD_STATUS}" == "0" ]] || {
+      emit '{"tool":"bash","package":"apps/wire","suite":"s2-krater-shell","status":"fail","code":"S2_RELEASE_INTERLEAVING_CHILD_STATUS_INVALID","reproduce":"S2_SHELL_REGRESSION_TEST=release-interleaving scripts/e2e-s2-krater.sh"}'
+      return 1
+    }
+    stop_pinned_supervisor "${supervisor_pid}" "${supervisor_pgid}" "${supervisor_marker}" \
+      "${supervisor_watchdog_pid}" "${supervisor_watchdog_health}" \
+      "${S2_STATE_DIR}" "${S2_PORT}" client || {
+        emit '{"tool":"bash","package":"apps/wire","suite":"s2-krater-shell","status":"fail","code":"S2_RELEASE_INTERLEAVING_STOP_FAILED","reproduce":"S2_SHELL_REGRESSION_TEST=release-interleaving scripts/e2e-s2-krater.sh"}'
+        return 1
+      }
+    if kill -0 -- "-${supervisor_pgid}" 2>/dev/null; then
+      emit '{"tool":"bash","package":"apps/wire","suite":"s2-krater-shell","status":"fail","code":"S2_RELEASE_INTERLEAVING_SURVIVOR","reproduce":"S2_SHELL_REGRESSION_TEST=release-interleaving scripts/e2e-s2-krater.sh"}'
+      return 1
+    fi
+    emit '{"tool":"bash","package":"apps/wire","suite":"s2-krater-shell","status":"pass","scenario":"release-written-at-watchdog-publication-crosses-continuously-open-supervisor-fd8","reproduce":"S2_SHELL_REGRESSION_TEST=release-interleaving scripts/e2e-s2-krater.sh"}'
+    return 0
+  fi
+
+  if [[ "${mode}" == "term-interrupt-cleanup-child" ]]; then
+    interrupt_record="${S2_PARENT_INTERRUPT_RECORD:-}"
+    interrupt_secret="${S2_PARENT_INTERRUPT_SECRET:-}"
+    [[ -n "${interrupt_record}" && -n "${interrupt_secret}" && \
+      ! -e "${interrupt_record}" && ! -L "${interrupt_record}" ]] || return 2
+    status_file="${S2_STATE_DIR}/parent-term-control-$(random_hex 8).status"
+    # This is the exact former orphan shape: the payload resists group TERM, its status/control
+    # phase is observed, then the controlling parent receives TERM before it can assign the
+    # start result to the Worker or lifecycle ownership tables.
+    # shellcheck disable=SC2016
+    S2_PLANT_WATCHDOG_EXIT_ON_TERM=1 \
+      start_pinned_supervisor "${status_file}" parent-term-control "${S2_STATE_DIR}" "${S2_PORT}" client \
+        bash -c 'trap "" TERM; deadline=$((SECONDS + 4)); while (( SECONDS < deadline )); do read -r -t 1 ignored || :; done' || return 1
+    supervisor_pid="${S2_STARTED_PID}"
+    supervisor_pgid="${S2_STARTED_PGID}"
+    supervisor_marker="${S2_STARTED_MARKER}"
+    supervisor_status="${S2_STARTED_STATUS_FILE}"
+    supervisor_watchdog_pid="${S2_STARTED_WATCHDOG_PID}"
+    supervisor_watchdog_health="${S2_STARTED_WATCHDOG_HEALTH}"
+    deadline=$((SECONDS + S2_READY_DEADLINE_SECONDS))
+    while :; do
+      group_members "${supervisor_pgid}" || return 1
+      [[ ${S2_GROUP_MEMBER_COUNT} -ge 3 ]] && break
       (( SECONDS < deadline )) || return 1
       sleep 0.05
     done
-    [[ "${S2_CHILD_STATUS}" == "0" ]] || return 1
-    stop_pinned_supervisor "${supervisor_pid}" "${supervisor_pgid}" "${supervisor_marker}" \
-      "${supervisor_watchdog_pid}" "${supervisor_watchdog_health}" \
-      "${S2_STATE_DIR}" "${S2_PORT}" client || return 1
-    if kill -0 -- "-${supervisor_pgid}" 2>/dev/null; then return 1; fi
-    emit '{"tool":"bash","package":"apps/wire","suite":"s2-krater-shell","status":"pass","scenario":"release-written-at-watchdog-publication-crosses-continuously-open-supervisor-fd8","reproduce":"S2_SHELL_REGRESSION_TEST=release-interleaving scripts/e2e-s2-krater.sh"}'
+    signal_owned_group TERM "${supervisor_pid}" "${supervisor_pgid}" "${supervisor_marker}" || return 1
+    deadline=$((SECONDS + S2_READY_DEADLINE_SECONDS))
+    while :; do
+      if read_child_status "${supervisor_status}" && [[ "${S2_CHILD_STATUS}" == "143" && \
+        -p "${supervisor_status}.control" ]] && \
+        supervisor_is_owned "${supervisor_pid}" "${supervisor_pgid}" "${supervisor_marker}"; then
+        break
+      fi
+      (( SECONDS < deadline )) || return 1
+      sleep 0.05
+    done
+    child_diagnostic="${S2_STATE_DIR}/parent-term-control-diagnostic-$(random_hex 8).json"
+    [[ ! -e "${child_diagnostic}" && ! -L "${child_diagnostic}" ]] || return 1
+    printf '%s\n' '{"tool":"bash","package":"apps/wire","suite":"s2-krater-shell","status":"interrupted","code":"S2_PARENT_TERM_AFTER_CONTROL","child_status":143,"exact_group":true}' >"${child_diagnostic}"
+    printf '%s %s %s %s %s %s %s %s\n' \
+      "${supervisor_pid}" "${supervisor_pgid}" "${supervisor_marker}" "${S2_STATE_DIR}" \
+      "${S2_PORT}" "${S2_RUN_DIR}" "${supervisor_status}" "${child_diagnostic}" >"${interrupt_record}"
+    # Invoke the ordinary TERM -> EXIT cleanup path. It must consume S2_MOST_RECENT_SUPERVISOR
+    # before this caller can ever enroll it in a narrower owner slot.
+    kill -TERM "$$"
+    return 125
+  fi
+
+  if [[ "${mode}" == "term-interrupt-cleanup" ]]; then
+    interrupt_record="${S2_STATE_DIR}/parent-term-control-record-$(random_hex 8)"
+    interrupt_secret="s2-parent-term-secret-must-not-appear"
+    env \
+      S2_SHELL_REGRESSION_TEST=term-interrupt-cleanup-child \
+      S2_PARENT_INTERRUPT_RECORD="${interrupt_record}" \
+      S2_PARENT_INTERRUPT_SECRET="${interrupt_secret}" \
+      bash "${BASH_SOURCE[0]}" >/dev/null 2>&1 &
+    interrupt_child=$!
+    if wait "${interrupt_child}" 2>/dev/null; then
+      interrupt_status=0
+    else
+      interrupt_status=$?
+    fi
+    [[ ${interrupt_status} -eq 143 && -f "${interrupt_record}" && ! -L "${interrupt_record}" ]] || return 1
+    read -r supervisor_pid supervisor_pgid supervisor_marker child_persist child_port child_run \
+      child_status_file child_diagnostic <"${interrupt_record}" || return 1
+    is_decimal "${supervisor_pid}" && is_decimal "${supervisor_pgid}" && is_decimal "${child_port}" && \
+      [[ "${supervisor_pid}" == "${supervisor_pgid}" && -n "${supervisor_marker}" && \
+      "${child_persist}" == "${child_run}/main" && -d "${child_persist}" && ! -L "${child_persist}" && \
+      -f "${child_status_file}" && ! -L "${child_status_file}" && \
+      -p "${child_status_file}.control" && -f "${child_diagnostic}" && ! -L "${child_diagnostic}" ]] || return 1
+    [[ "$(<"${child_status_file}")" == "143" ]] || return 1
+    deadline=$((SECONDS + S2_TERMINATE_WAIT_TICKS + 5))
+    while kill -0 -- "-${supervisor_pgid}" 2>/dev/null; do
+      (( SECONDS < deadline )) || return 1
+      sleep 0.1
+    done
+    assert_no_run_survivors "${child_persist}" "${child_port}" "${supervisor_marker}" || return 1
+    diagnostic_body="$(<"${child_diagnostic}")"
+    manifest_body="$(<"${child_run}/manifest.json")"
+    [[ "${diagnostic_body}" == *'"code":"S2_PARENT_TERM_AFTER_CONTROL"'* && \
+      "${diagnostic_body}" == *'"child_status":143'* && \
+      "${manifest_body}" == *'"exit_code":143'* && \
+      "${diagnostic_body}" != *"${interrupt_secret}"* && \
+      "${manifest_body}" != *"${interrupt_secret}"* ]] || return 1
+    emit '{"tool":"bash","package":"apps/wire","suite":"s2-krater-shell","status":"pass","scenario":"term-interrupted-parent-after-term-resistant-payload-control-status-cleans-most-recent-untracked-exact-supervisor","reproduce":"S2_SHELL_REGRESSION_TEST=term-interrupt-cleanup scripts/e2e-s2-krater.sh"}'
     return 0
   fi
 
@@ -1695,7 +2002,7 @@ run_s2_shell_regression_test() {
     # The child Bash, not this harness, must expand its SECONDS-based deadline.
     # shellcheck disable=SC2016
     S2_PLANT_WATCHDOG_EXIT_ON_TERM=1 \
-      start_pinned_supervisor "${status_file}" term-resistant-release \
+      start_pinned_supervisor "${status_file}" term-resistant-release "${S2_STATE_DIR}" "${S2_PORT}" client \
         bash -c 'trap "" TERM; deadline=$((SECONDS + 4)); while (( SECONDS < deadline )); do read -r -t 1 ignored || :; done' || return 1
     supervisor_pid="${S2_STARTED_PID}"
     supervisor_pgid="${S2_STARTED_PGID}"
@@ -1728,7 +2035,8 @@ run_s2_shell_regression_test() {
   if [[ "${mode}" == "watchdog-self-retire" ]]; then
     status_file="${S2_STATE_DIR}/watchdog-self-retire-$(random_hex 8).status"
     if S2_PLANT_SUPERVISOR_EXIT_AFTER_WATCHDOG=1 \
-      start_pinned_supervisor "${status_file}" watchdog-self-retire bash -c 'sleep 30'; then
+      start_pinned_supervisor "${status_file}" watchdog-self-retire "${S2_STATE_DIR}" "${S2_PORT}" client \
+        bash -c 'sleep 30'; then
       return 1
     fi
     deadline=$((SECONDS + S2_READY_DEADLINE_SECONDS + S2_WATCHDOG_MAX_UNCERTAIN_TICKS))
@@ -1814,7 +2122,7 @@ run_s2_shell_regression_test() {
     # The child Bash, not this harness, must expand its SECONDS-based deadline.
     # shellcheck disable=SC2016
     S2_PLANT_SUPERVISOR_EXIT_ON_TERM=1 \
-      start_pinned_supervisor "${status_file}" legacy-leader-loss \
+      start_pinned_supervisor "${status_file}" legacy-leader-loss "${S2_STATE_DIR}" "${S2_PORT}" server \
         bash -c 'trap "" TERM; deadline=$((SECONDS + 4)); while (( SECONDS < deadline )); do read -r -t 1 ignored || :; done' || return 1
     S2_SERVER_PID="${S2_STARTED_PID}"
     S2_SERVER_PGID="${S2_STARTED_PGID}"
@@ -1847,7 +2155,8 @@ run_s2_shell_regression_test() {
   if [[ "${mode}" == "watchdog-uncertainty" ]]; then
     status_file="${S2_STATE_DIR}/watchdog-uncertainty-$(random_hex 8).status"
     S2_PLANT_WATCHDOG_INSPECTION_UNCERTAIN=1 \
-      start_pinned_supervisor "${status_file}" watchdog-uncertainty bash -c 'sleep 30' || return 1
+      start_pinned_supervisor "${status_file}" watchdog-uncertainty "${S2_STATE_DIR}" "${S2_PORT}" client \
+        bash -c 'sleep 30' || return 1
     supervisor_pid="${S2_STARTED_PID}"
     supervisor_pgid="${S2_STARTED_PGID}"
     supervisor_marker="${S2_STARTED_MARKER}"
@@ -1895,7 +2204,8 @@ run_s2_shell_regression_test() {
 
   if [[ "${mode}" == "pinned-supervisor" ]]; then
     status_file="${S2_STATE_DIR}/shell-pinned-$(random_hex 8).status"
-    start_pinned_supervisor "${status_file}" shell-pinned bash -c 'exit 0' || return 1
+    start_pinned_supervisor "${status_file}" shell-pinned "${S2_STATE_DIR}" "${S2_PORT}" client \
+      bash -c 'exit 0' || return 1
     supervisor_pid="${S2_STARTED_PID}"
     supervisor_pgid="${S2_STARTED_PGID}"
     supervisor_marker="${S2_STARTED_MARKER}"
@@ -2003,6 +2313,7 @@ launch_lifecycle_child() {
   local port="$1" log="$2" interrupt_after_ready="$3" state_dir="$4" ready_file
   ready_file="${state_dir}/ready-${port}-$(random_hex 8)"
   start_pinned_supervisor "${state_dir}/child-${port}-$(random_hex 8).status" "lifecycle-${port}" \
+    "${state_dir}" "${port}" client \
     env \
       S2_PORT="${port}" \
       S2_LIFECYCLE_TEST="none" \
@@ -2025,6 +2336,7 @@ launch_lifecycle_child() {
     "${S2_LIFECYCLE_CHILD_WATCHDOG_HEALTH}" \
     "${state_dir}" \
     "${port}"
+  clear_most_recent_supervisor_if_pid "${S2_LIFECYCLE_CHILD_PID}"
 }
 
 wait_for_lifecycle_port() {

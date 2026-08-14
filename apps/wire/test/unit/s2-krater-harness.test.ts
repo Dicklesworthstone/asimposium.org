@@ -1,6 +1,15 @@
 import { describe, expect, test } from "bun:test";
-import { existsSync, readFileSync } from "node:fs";
-import { resolve } from "node:path";
+import { existsSync, lstatSync, mkdtempSync, readFileSync, symlinkSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join, resolve } from "node:path";
+
+import {
+  buildS2CostMeasurementReceipt,
+  S2_COST_RECEIPT_RELATIVE_PATH,
+  type S2CostReceiptMetric,
+  type S2CostReceiptProvenance,
+  writeS2CostMeasurementReceipt,
+} from "../../src/krater/s2-client.ts";
 
 const REPOSITORY_ROOT = resolve(import.meta.dir, "../../../..");
 const SCRIPT = "scripts/e2e-s2-krater.sh";
@@ -8,6 +17,43 @@ const REAL_BINDING_INTEGRATION = resolve(
   REPOSITORY_ROOT,
   "apps/wire/test/integration/s2-krater-real-bindings.test.ts",
 );
+
+const COST_PROVENANCE: S2CostReceiptProvenance = {
+  run_id: "s2-cost-producer",
+  revision: "a".repeat(40),
+  dirty_state: "clean",
+  source_digest: "b".repeat(64),
+};
+
+const COST_METRICS: readonly S2CostReceiptMetric[] = [
+  {
+    successfulBatchRowsRead: 3,
+    successfulBatchRowsWritten: 2,
+    successfulBatchSqlMs: 1,
+    writePhaseMs: 1,
+    writeClaimWallMs: 100,
+    retryCount: 0,
+    preflight: { rows_read: 4, rows_written: 0, sql_ms: 1, statements: 3, wall_ms: 10 },
+  },
+  {
+    successfulBatchRowsRead: 5,
+    successfulBatchRowsWritten: 4,
+    successfulBatchSqlMs: 2,
+    writePhaseMs: 20,
+    writeClaimWallMs: 110,
+    retryCount: 1,
+    preflight: { rows_read: 6, rows_written: 1, sql_ms: 2, statements: 4, wall_ms: 5 },
+  },
+  {
+    successfulBatchRowsRead: 7,
+    successfulBatchRowsWritten: 6,
+    successfulBatchSqlMs: 3,
+    writePhaseMs: 9,
+    writeClaimWallMs: 90,
+    retryCount: 2,
+    preflight: { rows_read: 8, rows_written: 0, sql_ms: 3, statements: 5, wall_ms: 7 },
+  },
+];
 
 interface Run {
   exitCode: number;
@@ -65,11 +111,191 @@ async function discoverRealBindingLane(): Promise<Run> {
   return { exitCode, stdout, stderr };
 }
 
+describe("S2 to S7 normalized cost receipt", () => {
+  test("builds the verifier's exact receipt schema from successful settled write metrics", () => {
+    const privateBodySentinel = "s2-private-body-must-not-appear";
+    const metricsWithPrivateBody: readonly (
+      | S2CostReceiptMetric
+      | (S2CostReceiptMetric & { readonly privateBody: string })
+    )[] = [
+      { ...COST_METRICS[0]!, privateBody: privateBodySentinel },
+      ...COST_METRICS.slice(1),
+    ];
+    const receipt = buildS2CostMeasurementReceipt(metricsWithPrivateBody, COST_PROVENANCE);
+
+    expect(Object.keys(receipt)).toEqual([
+      "schema_version",
+      "record",
+      "run_id",
+      "phase",
+      "revision",
+      "dirty_state",
+      "source_digest",
+      "scope",
+      "bindings",
+      "status",
+      "metric_scope",
+      "write_receipt_count",
+      "successful_batch_metric_scope",
+      "failed_retry_batch_metrics",
+      "write_claim_wall_scope",
+      "p95_write_phase_ms",
+      "p95_preflight_wall_ms",
+      "p95_write_claim_wall_ms",
+      "sum_successful_batch_rows_read",
+      "sum_successful_batch_rows_written",
+      "sum_preflight_rows_read",
+      "sum_preflight_rows_written",
+      "sum_preflight_statements",
+      "sum_retry_count",
+      "known_row_total_exclusions",
+    ]);
+    expect(Object.keys(receipt.bindings)).toEqual(["d1", "durable_object", "r2"]);
+    expect(receipt).toMatchObject({
+      run_id: COST_PROVENANCE.run_id,
+      revision: COST_PROVENANCE.revision,
+      dirty_state: "clean",
+      source_digest: COST_PROVENANCE.source_digest,
+      phase: "exercise",
+      status: "pass",
+      metric_scope: "selected-settled-write-receipts",
+      write_receipt_count: 3,
+      p95_write_phase_ms: 20,
+      p95_preflight_wall_ms: 10,
+      p95_write_claim_wall_ms: 110,
+      sum_successful_batch_rows_read: 15,
+      sum_successful_batch_rows_written: 12,
+      sum_preflight_rows_read: 18,
+      sum_preflight_rows_written: 1,
+      sum_preflight_statements: 12,
+      sum_retry_count: 3,
+      known_row_total_exclusions: [
+        "head-and-post-write-verification-reads-no-meta",
+        "failed-retry-batches-no-meta",
+      ],
+    });
+    // Integrity backfills have their own measured response fields. They are not
+    // selected successful claim WriteResults and therefore cannot be smuggled
+    // into this per-selected-write denominator or represented as a total D1 cost.
+    expect(JSON.stringify(receipt)).not.toContain("backfill");
+    expect(JSON.stringify(receipt)).not.toContain(privateBodySentinel);
+  });
+
+  test("refuses empty or malformed selected metrics before creating an artifact", () => {
+    const root = mkdtempSync(join(tmpdir(), "asimposium-s2-cost-refusal-"));
+    const receiptPath = join(root, S2_COST_RECEIPT_RELATIVE_PATH);
+
+    expect(() =>
+      writeS2CostMeasurementReceipt([], COST_PROVENANCE, { root, receiptPath }),
+    ).toThrow("S2_COST_RECEIPT_EMPTY");
+    expect(existsSync(receiptPath)).toBe(false);
+
+    const malformed = structuredClone(COST_METRICS) as S2CostReceiptMetric[];
+    malformed[0] = { ...malformed[0]!, writePhaseMs: Number.NaN };
+    expect(() =>
+      writeS2CostMeasurementReceipt(malformed, COST_PROVENANCE, { root, receiptPath }),
+    ).toThrow("S2_COST_RECEIPT_METRICS_INVALID");
+    expect(existsSync(receiptPath)).toBe(false);
+  });
+
+  test("writes one mode-0600 regular receipt, refusing overwrite, symlink, and escaped paths", () => {
+    const root = mkdtempSync(join(tmpdir(), "asimposium-s2-cost-receipt-"));
+    const receiptPath = join(root, S2_COST_RECEIPT_RELATIVE_PATH);
+    const written = writeS2CostMeasurementReceipt(COST_METRICS, COST_PROVENANCE, {
+      root,
+      receiptPath,
+    });
+    const artifact = written.artifact;
+
+    const stat = lstatSync(receiptPath);
+    expect(stat.isFile()).toBe(true);
+    expect(stat.isSymbolicLink()).toBe(false);
+    expect(stat.mode & 0o777).toBe(0o600);
+    expect(artifact).toMatchObject({
+      relativePath: S2_COST_RECEIPT_RELATIVE_PATH,
+      bytes: readFileSync(receiptPath).byteLength,
+    });
+    expect(JSON.parse(readFileSync(receiptPath, "utf8"))).toEqual(
+      written.receipt,
+    );
+
+    const original = readFileSync(receiptPath, "utf8");
+    expect(() =>
+      writeS2CostMeasurementReceipt(COST_METRICS, COST_PROVENANCE, { root, receiptPath }),
+    ).toThrow("S2_COST_RECEIPT_EXISTS");
+    expect(readFileSync(receiptPath, "utf8")).toBe(original);
+
+    const symlinkRoot = mkdtempSync(join(tmpdir(), "asimposium-s2-cost-symlink-"));
+    const symlinkPath = join(symlinkRoot, S2_COST_RECEIPT_RELATIVE_PATH);
+    symlinkSync("untrusted-target", symlinkPath);
+    expect(() =>
+      writeS2CostMeasurementReceipt(COST_METRICS, COST_PROVENANCE, {
+        root: symlinkRoot,
+        receiptPath: symlinkPath,
+      }),
+    ).toThrow("S2_COST_RECEIPT_SYMLINK_REFUSED");
+    expect(lstatSync(symlinkPath).isSymbolicLink()).toBe(true);
+
+    const escapedPath = join(root, "nested", S2_COST_RECEIPT_RELATIVE_PATH);
+    expect(() =>
+      writeS2CostMeasurementReceipt(COST_METRICS, COST_PROVENANCE, {
+        root,
+        receiptPath: escapedPath,
+      }),
+    ).toThrow("S2_COST_RECEIPT_PATH_INVALID");
+    expect(existsSync(escapedPath)).toBe(false);
+  });
+
+  test("keeps receipt creation exercise-only and before its sole pass record", () => {
+    const client = readFileSync(
+      resolve(REPOSITORY_ROOT, "apps/wire/src/krater/s2-client.ts"),
+      "utf8",
+    );
+    const exercise = client.slice(
+      client.indexOf("async function exercise():"),
+      client.indexOf("async function restartVerify"),
+    );
+    const restartAndUpgrade = client.slice(client.indexOf("async function restartVerify"));
+    expect(exercise).toContain("writeS2CostMeasurementReceipt");
+    expect(exercise.indexOf("writeS2CostMeasurementReceipt")).toBeLessThan(
+      exercise.lastIndexOf('status: "pass"'),
+    );
+    expect(exercise).toContain("writes.map(selectedSettledMetric)");
+    expect(client).toContain("if (write.idempotent)");
+    expect(restartAndUpgrade).not.toContain("writeS2CostMeasurementReceipt(");
+    expect(client).toContain("if (import.meta.main)");
+
+    const shell = readFileSync(resolve(REPOSITORY_ROOT, SCRIPT), "utf8");
+    expect(shell).toContain("scripts/verify-cost-model.ts");
+    expect(shell).toContain('S2_COST_RECEIPT_RELATIVE_PATH="s2-cost-input.json"');
+    expect(shell).toContain("s2_cost_receipt: costReceiptSummary");
+    expect(shell).toContain('if [[ "${phase}" == "exercise" ]]');
+  });
+
+  test("publishes exact supervisor cleanup scope before every normal release write", () => {
+    const shell = readFileSync(resolve(REPOSITORY_ROOT, SCRIPT), "utf8");
+    const start = shell.slice(
+      shell.indexOf("start_pinned_supervisor() {"),
+      shell.indexOf("read_child_status()"),
+    );
+    expect(start).toContain('persist="$3" port="$4" proof_scope="$5"');
+    expect(start.indexOf("S2_MOST_RECENT_SUPERVISOR=")).toBeLessThan(
+      start.indexOf('printf \'%s\\n\' "${release_token}" >&7'),
+    );
+    expect(start).toContain('${persist} ${port} ${proof_scope}');
+    expect(shell).toContain('"${persist}" "${port}" "${proof_scope}"; then');
+    expect(shell).toContain('clear_most_recent_supervisor_if_pid "${S2_SERVER_PID}"');
+    expect(shell).toContain("reap_parent_terminated_supervisor_residual");
+    expect(shell).toContain("S2_PARENT_TERM_OLD_HOOK_RESIDUAL_REAPED");
+  });
+});
+
 describe("registered S2 shell and lifecycle regressions", () => {
   test("the fast planted shell regressions are bounded and leave no owned group behind", async () => {
     const modes = [
       "release-race",
       "release-interleaving",
+      "term-interrupt-cleanup",
       "term-resistant-release",
       "watchdog-uncertainty",
       "watchdog-self-retire",
@@ -88,12 +314,31 @@ describe("registered S2 shell and lifecycle regressions", () => {
 
     for (const mode of modes) {
       const run = await runHarness({ S2_SHELL_REGRESSION_TEST: mode }, 30_000);
+      if (run.exitCode !== 0) {
+        const codes = Array.from(
+          `${run.stdout}\n${run.stderr}`.matchAll(/"code":"([A-Z][A-Z0-9_]{2,95})"/g),
+          (match) => match[1],
+        )
+          .filter((code, index, values) => values.indexOf(code) === index)
+          .slice(0, 4);
+        throw new Error(
+          `S2 shell regression failed: ${mode}; codes=${codes.join(",") || "NO_TYPED_CODE"}`,
+        );
+      }
       expect(run.exitCode).toBe(0);
       expect(run.stdout).toContain('"suite":"s2-krater-shell","status":"pass"');
       expect(run.stdout).toContain('"suite":"s2-krater-evidence","status":"pass"');
       if (mode === "legacy-leader-loss") {
         expect(run.stdout).toContain('"code":"S2_LEGACY_SUPERVISOR_INSPECTION_UNCERTAIN"');
         expect(run.stdout).toContain('"action":"kill-exact-residual-group"');
+      } else if (mode === "term-interrupt-cleanup") {
+        expect(run.stdout).toContain(
+          "term-interrupted-parent-after-term-resistant-payload-control-status-cleans-most-recent-untracked-exact-supervisor",
+        );
+        expect(`${run.stdout}\n${run.stderr}`).not.toContain('"status":"fail"');
+        expect(`${run.stdout}\n${run.stderr}`).not.toContain(
+          "s2-parent-term-secret-must-not-appear",
+        );
       } else {
         expect(`${run.stdout}\n${run.stderr}`).not.toContain('"status":"fail"');
       }
