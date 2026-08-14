@@ -16,15 +16,20 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import {
+  assertContainedRoot,
   boundedDiff,
   deterministicSeed,
+  FORCE_KILL_GRACE_MS,
+  HARD_READER_GRACE_MS,
   HARNESS_BLOCKED_EXIT_CODE,
   HARNESS_SCHEMA_VERSION,
   type HarnessError,
   type HarnessEvent,
   type HarnessStep,
+  isContainedPath,
   MAX_CAPTURED_OUTPUT_CHARS,
   MAX_DIFF_CHARS,
+  MAX_EVENT_DURATION_MS,
   MAX_FAILURE_ARTIFACT_CHARS,
   MAX_FAILURE_ARTIFACTS_PER_RUN,
   MAX_RETRIES_PER_STEP,
@@ -33,8 +38,45 @@ import {
   orderSteps,
   runHarness,
   validateHarnessEvent,
+  validateHarnessStep,
   validateRunId,
 } from "../harness/runner.ts";
+
+/** A schema-valid event, so a test can vary exactly one field. */
+function sampleEvent(overrides: Partial<HarnessEvent> = {}): HarnessEvent {
+  const now = new Date().toISOString();
+  return {
+    schema_version: HARNESS_SCHEMA_VERSION,
+    record: "step",
+    run_id: "sample-run",
+    suite: "ops.2a-sample",
+    scenario: "unit",
+    step: "sample-step",
+    seed: 1,
+    started_at: now,
+    finished_at: now,
+    duration_ms: 0,
+    attempt: 1,
+    retry: 0,
+    replay_safe: true,
+    adapter: "process",
+    status: "pass",
+    code: "STEP_PASSED",
+    reproduce: "scripts/e2e-test-harness.sh --self-test",
+    git_revision: "unavailable",
+    environment: {
+      runtime: "bun",
+      runtime_version: Bun.version,
+      platform: process.platform,
+      binding_versions: {},
+    },
+    http_method: null,
+    route_template: null,
+    cursor: null,
+    seq: null,
+    ...overrides,
+  } as HarnessEvent;
+}
 
 const SHELL_HARNESS = fileURLToPath(new URL("../e2e-test-harness.sh", import.meta.url));
 const SECRET_EMITTER = fileURLToPath(
@@ -656,8 +698,211 @@ test("the real shell entry point proves the seeded harness-only negative aggrega
   ]);
   expect(exitCode).toBe(0);
   expect(stdout).toContain("HARNESS_SELF_TEST_HARNESS_ONLY");
-  expect(stdout).toContain("D1, HTTP, and browser adapters are blocked");
-  expect(stdout).toContain("ADAPTER_UNAVAILABLE");
+  // The verdict must keep disclaiming product correctness even now that real
+  // adapters run: a green harness proves the harness, nothing else.
+  expect(stdout).toContain("proves nothing about product behavior");
   expect(stderr).toContain("<redacted>");
   expect(stderr).not.toContain("selftest_neverlog_canary");
+});
+
+describe("OPS.2a real adapters", () => {
+  const ADAPTERS = join(fileURLToPath(new URL("../harness/adapters/", import.meta.url)));
+
+  async function runAdapter(
+    file: string,
+    mode: "ok" | "planted-fail",
+  ): Promise<{ exitCode: number; stdout: string; stderr: string }> {
+    const child = Bun.spawn({
+      cmd: [process.execPath, join(ADAPTERS, file), "--mode", mode],
+      stdout: "pipe",
+      stderr: "pipe",
+      stdin: "ignore",
+      // The same scrubbed environment the runner gives its children, so an
+      // adapter that only works with a developer's PATH fails here.
+      env: { PATH: "/usr/local/bin:/usr/bin:/bin", LANG: "C", LC_ALL: "C", TZ: "UTC" },
+    });
+    const [stdout, stderr, exitCode] = await Promise.all([
+      new Response(child.stdout).text(),
+      new Response(child.stderr).text(),
+      child.exited,
+    ]);
+    return { exitCode, stdout, stderr };
+  }
+
+  /** 0 = the real dependency ran and the assertion held; 78 = named blocker. */
+  function expectPositive(result: { exitCode: number; stdout: string }, blockedCode: string): void {
+    expect([0, HARNESS_BLOCKED_EXIT_CODE]).toContain(result.exitCode);
+    if (result.exitCode === HARNESS_BLOCKED_EXIT_CODE) {
+      expect(result.stdout).toContain(blockedCode);
+      // A blocker must name the missing thing, never merely shrug.
+      expect(result.stdout).toContain("No ");
+    }
+  }
+
+  test("the D1 adapter proves rollback against a real local database", async () => {
+    const ok = await runAdapter("d1-rollback.ts", "ok");
+    expectPositive(ok, "D1_ADAPTER_UNAVAILABLE");
+    if (ok.exitCode !== 0) return;
+    const record = JSON.parse(ok.stdout.trim().split("\n").pop() ?? "{}");
+    expect(record.code).toBe("D1_TRANSACTION_ROLLED_BACK");
+    // Rollback is only demonstrated by re-reading state, never by the error.
+    expect(record.batch_rejected).toBe(true);
+    expect(record.doomed_row_present).toBe(false);
+    expect(record.sentinel_present).toBe(true);
+    // Never an absolute path, even for a disposable directory.
+    expect(ok.stdout).not.toContain("/Users/");
+    expect(ok.stdout).not.toContain("/tmp/");
+    expect(record.state_dir_class).toBe("os-temp");
+  });
+
+  test("PLANTED: the D1 rollback assertion fails when nothing rolled back", async () => {
+    const planted = await runAdapter("d1-rollback.ts", "planted-fail");
+    if (planted.exitCode === HARNESS_BLOCKED_EXIT_CODE) return;
+    expect(planted.exitCode).toBe(1);
+    expect(planted.stdout).toContain("D1_TRANSACTION_LEAKED");
+  });
+
+  test("the HTTP adapter proves a real loopback fault surface", async () => {
+    const ok = await runAdapter("http-fault.ts", "ok");
+    expectPositive(ok, "HTTP_ADAPTER_UNAVAILABLE");
+    if (ok.exitCode !== 0) return;
+    const record = JSON.parse(ok.stdout.trim().split("\n").pop() ?? "{}");
+    expect(record.code).toBe("HTTP_FAULT_SURFACE_VERIFIED");
+    expect(record.observed_status).toBe(500);
+    expect(record.route_template).toBe("/fault");
+    expect(record.request_id_echoed).toBe(true);
+    expect(record.request_id_minted).toBe(true);
+    // A route that never answers must be bounded by the client, not by luck.
+    expect(record.slow_route_timed_out).toBe(true);
+  });
+
+  test("PLANTED: the HTTP assertion fails when the status contract is wrong", async () => {
+    const planted = await runAdapter("http-fault.ts", "planted-fail");
+    expect(planted.exitCode).toBe(1);
+    expect(planted.stdout).toContain("HTTP_FAULT_SURFACE_MISMATCH");
+  });
+
+  test("the browser adapter either asserts real DOM or names its blocker", async () => {
+    const ok = await runAdapter("browser-assert.ts", "ok");
+    expectPositive(ok, "BROWSER_ADAPTER_UNAVAILABLE");
+    const record = JSON.parse(ok.stdout.trim().split("\n").pop() ?? "{}");
+    if (ok.exitCode === HARNESS_BLOCKED_EXIT_CODE) {
+      expect(record.missing).toBe("@playwright/test");
+      return;
+    }
+    expect(record.code).toBe("BROWSER_ASSERTION_VERIFIED");
+    // Artifact policy is disabled, not merely redacted.
+    expect(record.artifacts_captured).toBe("none");
+    expect(record.screenshot_policy).toBe("disabled");
+    expect(record.trace_policy).toBe("disabled");
+  });
+
+  test("PLANTED: the browser assertion fails on text the page never renders", async () => {
+    const planted = await runAdapter("browser-assert.ts", "planted-fail");
+    if (planted.exitCode === HARNESS_BLOCKED_EXIT_CODE) return;
+    expect(planted.exitCode).toBe(1);
+    expect(planted.stdout).toContain("BROWSER_ASSERTION_MISMATCH");
+  });
+
+  test("an adapter step may only execute its own registered probe", () => {
+    // The adapter label is what a reader trusts when deciding whether D1 really
+    // ran, so it must never be attachable to an arbitrary executable.
+    expect(() =>
+      validateHarnessStep({
+        id: "smuggled",
+        scenario: "integration",
+        adapter: "d1",
+        replaySafe: false,
+        command: [process.execPath, join(ADAPTERS, "http-fault.ts"), "--mode", "ok"],
+      }),
+    ).toThrow(/registered probe/);
+  });
+});
+
+describe("harness code may never delete files", () => {
+  /**
+   * AGENTS.md RULE 1 forbids this repository's agents from deleting files, and a
+   * test harness is where "just clean up the temp dir" feels most reasonable and
+   * is most dangerous: the same call with a wrong variable removes a developer's
+   * work. Termination of processes is fine; removal of files is not.
+   */
+  const FORBIDDEN = [
+    "rmSync",
+    "unlinkSync",
+    "rmdirSync",
+    "rimraf",
+    "fs.rm(",
+    "promises.rm(",
+    "rm -rf",
+    "rm -f",
+  ];
+
+  test("no deletion API appears in any harness source file", async () => {
+    const { Glob } = await import("bun");
+    const root = fileURLToPath(new URL("../harness/", import.meta.url));
+    const offenders: string[] = [];
+    for await (const relativeFile of new Glob("**/*.{ts,sh}").scan({ cwd: root, onlyFiles: true })) {
+      const text = readFileSync(join(root, relativeFile), "utf8");
+      for (const [index, line] of text.split("\n").entries()) {
+        const code = line.trim();
+        if (code.startsWith("*") || code.startsWith("//") || code.startsWith("#")) continue;
+        for (const banned of FORBIDDEN) {
+          if (code.includes(banned)) offenders.push(`${relativeFile}:${index + 1} ${banned}`);
+        }
+      }
+    }
+    expect(offenders).toEqual([]);
+  });
+});
+
+describe("repository root containment", () => {
+  test("a relative, missing, or non-directory root is refused", () => {
+    expect(() => assertContainedRoot("relative/path")).toThrow(/absolute/);
+    expect(() => assertContainedRoot("")).toThrow(/non-empty/);
+    expect(() => assertContainedRoot(undefined)).toThrow(/non-empty/);
+    expect(() => assertContainedRoot(join(tmpdir(), `absent-${Date.now()}`))).toThrow(/exist/);
+  });
+
+  test("PLANTED: a symlinked root resolves to its destination rather than escaping", () => {
+    const outside = mkdtempSync(join(tmpdir(), "harness-outside-"));
+    const holder = mkdtempSync(join(tmpdir(), "harness-holder-"));
+    const link = join(holder, "root-link");
+    symlinkSync(outside, link);
+    // Containment resolves the link, so callers act on the real destination
+    // instead of believing artifacts landed under `holder`.
+    const resolved = assertContainedRoot(link);
+    expect(resolved).not.toContain("root-link");
+    expect(isContainedPath(resolved, join(resolved, "artifacts"))).toBe(true);
+    expect(isContainedPath(resolved, join(resolved, "..", "escaped"))).toBe(false);
+  });
+
+  test("a run refuses to start against an escaping root", async () => {
+    await expect(
+      runHarness({
+        root: "not/absolute",
+        runId: "root-escape-probe",
+        suite: "ops.2a-root",
+        steps: [{ id: "noop", scenario: "unit", replaySafe: true, command: [process.execPath, "-e", ""] }],
+        onEvent: () => undefined,
+      }),
+    ).rejects.toThrow(/absolute/);
+  });
+});
+
+describe("timeout grace", () => {
+  test("a legitimate maximum-length timeout stays schema-valid", () => {
+    // A step that times out at MAX_TIMEOUT_MS does not finish there: SIGTERM,
+    // the force-kill wait, and pipe drain all land after the deadline. The
+    // schema must represent that honestly instead of destroying the evidence.
+    expect(MAX_EVENT_DURATION_MS).toBeGreaterThan(MAX_TIMEOUT_MS + FORCE_KILL_GRACE_MS);
+    expect(HARD_READER_GRACE_MS).toBeGreaterThanOrEqual(1_000);
+    const event = sampleEvent({ duration_ms: MAX_EVENT_DURATION_MS });
+    expect(() => validateHarnessEvent(event)).not.toThrow();
+  });
+
+  test("PLANTED: a duration beyond the grace is still rejected", () => {
+    expect(() => validateHarnessEvent(sampleEvent({ duration_ms: MAX_EVENT_DURATION_MS + 1 }))).toThrow(
+      /out of bounds/,
+    );
+  });
 });
