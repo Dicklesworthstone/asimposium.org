@@ -19,6 +19,23 @@ export {
   type RenderProblem,
 } from "./errors.ts";
 export {
+  bucketizePackBudget,
+  type ComposedPack,
+  type ComposedPackItem,
+  composePack,
+  PACK_BUDGET_BUCKETS,
+  PACK_PREAMBLE,
+  type PackActionCandidate,
+  type PackAudience,
+  type PackBudgetBucket,
+  type PackCandidate,
+  PackComposerError,
+  type PackComposerErrorCode,
+  type PackComposerInput,
+  type PackMembership,
+  type PackViewer,
+} from "./pack-composer.ts";
+export {
   ITEM_ID_PATTERN,
   type PreparedItem,
   type PreparedProjection,
