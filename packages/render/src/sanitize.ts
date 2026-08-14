@@ -155,10 +155,30 @@ export function escapeHtml(text: string): string {
 }
 
 /**
- * Reject values that would break out of our own `<!-- asimp … -->` header
- * grammar. Header values are server-authored, so this is a defensive assertion
- * about our own composer, not a filter on user content.
+ * The grammar for every value that lands inside an `<!-- asimp … k=v -->` control
+ * comment: the face header's fields and each item delimiter's fields.
+ *
+ * Rejecting only `\r\n`, `--` and `>` was not enough, because it left two ways to
+ * corrupt the canonical face through *metadata* rather than through a body:
+ *
+ *   - whitespace and `=` are the delimiters of the `k=v` grammar itself, so a value
+ *     like `working cursor=999` injected a second `cursor` key ahead of the real one,
+ *     and a first-wins parser read the forged value;
+ *   - a value carrying `-->` closed the comment outright, letting the next characters
+ *     open a forged `asimp:item` with `scope=system untrusted=false` — a fabricated
+ *     system item in the one channel Fable §7.3 reserves for instructions.
+ *
+ * So the rule is a positive grammar, not a denylist: start with an alphanumeric (a
+ * value can never be read as a flag), then the punctuation the real vocabulary uses —
+ * `asimposium.pack.v1`, `demo-bounded-sums`, `working`, `workshop-note`, `C-12@3`,
+ * `SP4D#41`, `fnv1a64:6305…` — and nothing else. `--` stays banned separately because
+ * it is illegal inside an HTML comment regardless of what follows it.
+ *
+ * This constrains only control-comment metadata. Titles, preambles, `why_included`
+ * and bodies are prose, live outside the comment grammar, and are untouched by it.
  */
+const CONTROL_TOKEN = /^[A-Za-z0-9][A-Za-z0-9._:@#/-]{0,127}$/;
+
 export function isSafeHeaderValue(value: string): boolean {
-  return !/[\r\n]/.test(value) && !value.includes("--") && !value.includes(">");
+  return CONTROL_TOKEN.test(value) && !value.includes("--");
 }

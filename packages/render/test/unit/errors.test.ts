@@ -114,9 +114,22 @@ describe("prepareProjection builds both shapes of init", () => {
     const cited = refusalFrom(
       packWith({ omitted: [] as unknown as Projection["omitted"], items: [] }),
     );
-    const uncited = refusalFrom(packWith({ schema: "asimposium.pack.v1 --> injected" }));
+    // Header-grammar refusals cite A1 now, so the uncited branch uses a purely structural
+    // refusal instead. The property under test is unchanged: `rule` appears only when the
+    // refusal actually cites one.
+    const uncited = refusalFrom(
+      packWith({
+        next_actions: [
+          {
+            method: "DELETE" as Projection["next_actions"][number]["method"],
+            url: "/v1/x",
+            why: "w",
+          },
+        ],
+      }),
+    );
     expect(cited.code).toBe("EMPTY_PROJECTION_WITHOUT_OMISSION");
-    expect(uncited.code).toBe("INVALID_HEADER_VALUE");
+    expect(uncited.code).toBe("INVALID_NEXT_ACTION");
     for (const error of [cited, uncited]) {
       expect(error).toBeInstanceOf(RenderContractError);
       expect(error.toProblem().type.startsWith(ERROR_TYPE_BASE)).toBe(true);

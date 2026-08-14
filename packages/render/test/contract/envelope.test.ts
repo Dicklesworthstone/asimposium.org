@@ -220,9 +220,68 @@ describe("refusals serialize as RFC 7807 problems", () => {
   });
 
   test("omits rule when the refusal cites none", () => {
-    const projection: Projection = { ...safeWorkingPack(), problem: "demo>injected" };
-    const error = expectRefusal(() => prepareProjection(projection), "INVALID_HEADER_VALUE");
+    // A structural refusal with no doctrine rule behind it. (Header-grammar refusals cite
+    // A1 now that the control-token grammar is part of the Diptych contract, so they are no
+    // longer an example of the uncited shape.)
+    const projection: Projection = {
+      ...safeWorkingPack(),
+      next_actions: [
+        {
+          method: "DELETE" as Projection["next_actions"][number]["method"],
+          url: "/v1/x",
+          why: "w",
+        },
+      ],
+    };
+    const error = expectRefusal(() => prepareProjection(projection), "INVALID_NEXT_ACTION");
     expect(Object.hasOwn(error.toProblem(), "rule")).toBe(false);
-    expect(error.toProblem().type).toBe("https://asimposium.org/errors/INVALID_HEADER_VALUE");
+    expect(error.toProblem().type).toBe("https://asimposium.org/errors/INVALID_NEXT_ACTION");
+  });
+});
+
+describe("the cursor is a sequence number, not an arbitrary float", () => {
+  // It is printed as `cursor=<number>` in the face header and copied into the JSON face, so
+  // an unchecked value made the two faces disagree about one projection: NaN and Infinity
+  // printed literally in markdown but serialized to null in JSON.
+  const withCursor = (cursor: number): Projection =>
+    ({ ...safeWorkingPack(), cursor }) as Projection;
+
+  for (const [label, cursor] of [
+    ["NaN", Number.NaN],
+    ["Infinity", Number.POSITIVE_INFINITY],
+    ["-Infinity", Number.NEGATIVE_INFINITY],
+    ["a negative sequence", -1],
+    ["a fraction", 1.5],
+    ["past MAX_SAFE_INTEGER", Number.MAX_SAFE_INTEGER + 2],
+  ] as const) {
+    test(`refuses ${label}`, () => {
+      const error = expectRefusal(() => prepareProjection(withCursor(cursor)), "INVALID_CURSOR");
+      expect(error.rule).toBe("A6");
+      expect(error.status).toBe(422);
+      expect(error.detail).toContain("cursor");
+    });
+  }
+
+  test("accepts 0 and a large safe integer, so the guard is not simply refusing numbers", () => {
+    for (const cursor of [0, 41, Number.MAX_SAFE_INTEGER]) {
+      const prepared = prepareProjection(withCursor(cursor));
+      expect(prepared.cursor).toBe(cursor);
+    }
+  });
+
+  test("a valid cursor reaches both faces with the same value", () => {
+    const projection = withCursor(Number.MAX_SAFE_INTEGER);
+    const markdown = renderProjection(projection, "md").body;
+    const json = JSON.parse(renderProjection(projection, "json").body) as { cursor: number };
+    expect(markdown).toContain(`cursor=${Number.MAX_SAFE_INTEGER}`);
+    expect(json.cursor).toBe(Number.MAX_SAFE_INTEGER);
+  });
+
+  test("no rejected cursor can produce a face at all", () => {
+    for (const cursor of [Number.NaN, Number.POSITIVE_INFINITY, -1, 1.5]) {
+      for (const format of ["md", "json", "html-fragment"] as const) {
+        expect(() => renderProjection(withCursor(cursor), format)).toThrow(RenderContractError);
+      }
+    }
   });
 });

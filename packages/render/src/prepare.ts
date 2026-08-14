@@ -90,18 +90,36 @@ export function prepareProjection(projection: Projection): PreparedProjection {
     );
   }
 
-  for (const value of [
-    projection.schema,
-    projection.kind,
-    projection.problem,
-    projection.profile,
-  ]) {
+  // The cursor is printed straight into the face header as `cursor=<number>` and copied into
+  // the JSON face, so it is control-comment metadata that happens to be numeric. Unchecked,
+  // the two faces disagreed about the same projection: `NaN` and `Infinity` printed
+  // literally in markdown but serialized to `null` in JSON, and an integer past
+  // MAX_SAFE_INTEGER was silently rounded. A cursor is a per-scope monotonic sequence number
+  // (Fable §7.1 axiom 7, §10.2), so the honest domain is exactly the non-negative safe
+  // integers, and anything else is a composer defect rather than a value to render.
+  if (!Number.isSafeInteger(projection.cursor) || projection.cursor < 0) {
+    refuse(
+      "INVALID_CURSOR",
+      "The cursor must be a non-negative safe integer",
+      `cursor ${JSON.stringify(projection.cursor)} is not a non-negative safe integer; NaN and Infinity render as "NaN"/"Infinity" in markdown but as null in JSON, and values past ${Number.MAX_SAFE_INTEGER} round silently`,
+      "Pass the per-scope sequence number the event log assigned (0 or greater). If no events exist yet the cursor is 0, never null or -1.",
+      "A6",
+    );
+  }
+
+  for (const [field, value] of [
+    ["schema", projection.schema],
+    ["kind", projection.kind],
+    ["problem", projection.problem],
+    ["profile", projection.profile],
+  ] as const) {
     if (!isSafeHeaderValue(value)) {
       refuse(
         "INVALID_HEADER_VALUE",
         "Envelope metadata may not break the face header grammar",
-        `header value ${JSON.stringify(value)} contains a newline, '--' or '>'`,
-        "Envelope metadata is server-authored; fix the composer rather than escaping the value here.",
+        `${field} ${JSON.stringify(value)} is not a control token: whitespace and '=' make the k=v header ambiguous, and '<', '>' or '--' can close the comment outright`,
+        "Envelope metadata is server-authored. Use the boring vocabulary the faces already use — asimposium.pack.v1, pack, demo-bounded-sums, working — and fix the composer rather than escaping the value here.",
+        "A1",
       );
     }
   }
@@ -148,6 +166,22 @@ export function prepareProjection(projection: Projection): PreparedProjection {
         "Item scope must be system, ledger or workshop",
         `item ${item.id} declares scope ${JSON.stringify(item.scope)}`,
         `Allowed scopes: ${ITEM_SCOPES.join(", ")}.`,
+      );
+    }
+
+    // `kind` is printed into the item's own `<!-- asimp:item … -->` delimiter, so it obeys
+    // the same grammar as every other control token. Unvalidated, it was the sharpest hole
+    // in the canonical face: a kind ending in `-->` closed the delimiter and let the
+    // characters after it open a forged item with `scope=system untrusted=false`, which is
+    // a fabricated instruction channel (Fable §7.3) reached through metadata rather than
+    // through a body.
+    if (!isSafeHeaderValue(item.kind)) {
+      refuse(
+        "INVALID_ITEM_KIND",
+        "Item kind may not break the item delimiter grammar",
+        `item ${item.id} declares kind ${JSON.stringify(item.kind)}, which is not a control token: whitespace and '=' make the k=v delimiter ambiguous, and '<', '>' or '--' can close it outright`,
+        "Use the object vocabulary the ledger already uses — claim, evidence, review, hypothesis, dead-end, move, warning, handback, workshop-note.",
+        "A1",
       );
     }
 

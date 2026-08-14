@@ -1,16 +1,19 @@
 /**
  * Planted negatives for the S-5 driver script (bead asimposiumorg-6jo).
  *
- * The handler tests cover the face; these cover the shell around it, where three defects
- * were proven by an adversarial pass:
+ * The handler tests cover the face; these cover the shell around it, where four defects were
+ * proven by adversarial passes:
  *
  *  1. `ASIMP_S5_SEED` was interpolated into a JSON template by `printf`, so a caller could
  *     forge record keys — including a second `status` — and land credential-shaped text in
  *     a build log.
  *  2. the server was spawned before its cleanup existed and with no trap, so a SIGTERM
  *     (a CI timeout's usual signal) left workerd listening.
- *  3. the port was fixed, so a leftover listener from an interrupted run could satisfy the
- *     next run's readiness probe and be compared against as if it were fresh.
+ *  3. the main port was fixed, so a leftover listener from an interrupted run could satisfy
+ *     the next run's readiness probe and be compared against as if it were fresh.
+ *  4. even with distinct main ports, both runs bound wrangler's default devtools inspector
+ *     (9231), so one of two concurrent runs died on "Address already in use" while the other
+ *     reported green — a flake whose survivor looks healthy.
  *
  * Each test below fails if the corresponding guard is removed.
  */
@@ -158,13 +161,17 @@ describe("two full runs can share a machine", () => {
     // worst possible shape: the survivor reports green and the suite looks healthy.
     const [first, second] = await Promise.all([runScript({}, 300_000), runScript({}, 300_000)]);
 
+    const served: number[] = [];
     for (const [label, run] of [
       ["first", first],
       ["second", second],
     ] as const) {
       expect(`${label} exit ${run.exitCode}`).toBe(`${label} exit 0`);
-      expect(run.stderr).not.toContain("Address already in use");
-      expect(run.stdout).not.toContain("Address already in use");
+      const streams = `${run.stdout}${run.stderr}`;
+      expect(streams).not.toContain("Address already in use");
+      // The inspector default is the specific address the collision happened on; naming it
+      // keeps this test honest if wrangler ever changes how it reports a bind failure.
+      expect(streams).not.toContain("9231");
 
       const records = run.stdout
         .trim()
@@ -172,19 +179,23 @@ describe("two full runs can share a machine", () => {
         .filter(Boolean)
         .map((line) => JSON.parse(line) as Record<string, unknown>);
       // Green must mean the served phase actually ran, not that it was skipped.
-      expect(records.filter((record) => record.phase === "worker-served").length).toBeGreaterThan(
-        0,
-      );
+      const workerServed = records.filter((record) => record.phase === "worker-served").length;
+      expect(workerServed).toBeGreaterThan(0);
+      served.push(workerServed);
       const summary = records.find((record) => record.assertion === "spike_summary");
       expect(summary?.status).toBe("pass");
     }
+    // Symmetry: a run that quietly degraded would serve fewer assertions than its twin.
+    expect(served[0]).toBe(served[1] as number);
   }, 320_000);
 });
 
 describe("an interrupted run leaves nothing listening", () => {
   async function answering(port: number): Promise<boolean> {
     try {
-      const response = await fetch(`http://127.0.0.1:${port}/__s5/face?format=md`);
+      const response = await fetch(`http://127.0.0.1:${port}/__s5/face?format=md`, {
+        signal: AbortSignal.timeout(2_000),
+      });
       await response.text();
       return response.ok;
     } catch {
