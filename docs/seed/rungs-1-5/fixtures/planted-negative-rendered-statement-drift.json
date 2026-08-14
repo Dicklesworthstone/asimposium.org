@@ -1,0 +1,7 @@
+{
+  "id": "negative-rendered-statement-drift",
+  "heading": "## Exact statement",
+  "body": "# Controlled checker fixture\n\n## Exact statement\n\nFor every natural number n, there exists a natural prime p such that p ≤ n.\n\n## Next section\n",
+  "expected_text": "For every natural number n, there exists a natural prime p such that n ≤ p.",
+  "expected_diagnostic": "E_RENDERED_STATEMENT_DRIFT"
+}
