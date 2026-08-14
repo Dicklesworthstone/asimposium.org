@@ -30,16 +30,26 @@ export interface AuthDiagnostic {
   /** Route template, never a filled path: no ids, no query, no fragment. */
   route: string;
   method: string;
-  /** Non-secret key identifier. */
+  /** Non-secret key identifier, with its authentication state beside it. */
   kid?: string;
+  kid_claim_state?: ClaimState;
   action?: string;
+  action_claim_state?: ClaimState;
   /** Pseudonymous, salted digest prefix of the acting principal. */
   principal_pseudonym?: string;
   /** First bytes of the payload digest, for correlating a write to its body. */
   payload_digest_prefix?: string;
+  payload_digest_claim_state?: ClaimState;
   /** Milliseconds, rounded. */
   duration_ms?: number;
 }
+
+/**
+ * Parsed envelope fields are attacker input until a signature has verified.
+ * A refusal may still record bounded values for correlation, but must label
+ * them rather than silently turning them into trusted operator facts.
+ */
+export type ClaimState = "authenticated_claim" | "unauthenticated_attacker_claim";
 
 /**
  * Stable pseudonym for a principal id.
@@ -62,6 +72,8 @@ export interface DiagnosticInput {
   durationMs?: number;
   /** Present only once an envelope has parsed; still not secret material. */
   claims?: Pick<ServiceEnvelopeClaims, "kid" | "action" | "payload_sha256">;
+  /** Required for a trusted label; omitted claims default conservatively below. */
+  claimsState?: ClaimState;
   /** Precomputed by `principalPseudonym`; the raw id is not accepted here. */
   principalPseudonym?: string;
 }
@@ -76,9 +88,21 @@ export function buildAuthDiagnostic(input: DiagnosticInput): AuthDiagnostic {
     route: input.route,
   };
   if (input.claims !== undefined) {
+    // A caller that forgets to identify a successful signature must not turn
+    // raw envelope fields into trusted telemetry. More importantly, a refusal
+    // can never carry an authenticated-claim label, even if its caller passes
+    // one accidentally: failed verification leaves every parsed field attacker
+    // input for diagnostic purposes.
+    const claimsState =
+      input.outcome === "accepted" && input.claimsState === "authenticated_claim"
+        ? "authenticated_claim"
+        : "unauthenticated_attacker_claim";
     record.kid = input.claims.kid;
+    record.kid_claim_state = claimsState;
     record.action = input.claims.action;
+    record.action_claim_state = claimsState;
     record.payload_digest_prefix = input.claims.payload_sha256.slice(0, DIGEST_PREFIX);
+    record.payload_digest_claim_state = claimsState;
   }
   if (input.principalPseudonym !== undefined) {
     record.principal_pseudonym = input.principalPseudonym;

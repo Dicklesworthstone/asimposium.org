@@ -97,8 +97,8 @@ export interface VerifyOptions {
   clockSkewSeconds?: number;
   /** Hard ceiling on `exp - iat`, seconds. */
   maxLifetimeSeconds?: number;
-  /** When present, the envelope's action must be a member. */
-  permittedActions?: readonly string[];
+  /** Envelope action allowlist for this exact Worker ingress. Never optional. */
+  permittedActions: readonly string[];
 }
 
 const DEFAULT_CLOCK_SKEW_SECONDS = 60;
@@ -217,7 +217,11 @@ export async function verifyServiceEnvelope(
   if (claims.method !== options.method || claims.route !== options.route) {
     return refuse("action_not_permitted");
   }
-  if (options.permittedActions !== undefined && !options.permittedActions.includes(claims.action)) {
+  if (
+    !Array.isArray(options.permittedActions) ||
+    options.permittedActions.length === 0 ||
+    !options.permittedActions.includes(claims.action)
+  ) {
     return refuse("action_not_permitted");
   }
 

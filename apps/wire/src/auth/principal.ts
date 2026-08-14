@@ -11,10 +11,10 @@
  *     **Cookies are never consulted here.** Not "rejected" — not read at all.
  *
  * A bearer on a sponsor route, or a cookie relied upon on the agent host, is
- * `WRONG_PRINCIPAL`. Both directions matter, and they fail differently in
- * practice: the first is a Fellow reaching for its sponsor's authority, the
- * second is a browser session leaking onto the agent plane, which is what
- * host-only cookie scoping exists to prevent in the first place.
+ * `WRONG_PRINCIPAL`. The Worker also has one precise ingress class —
+ * `service-envelope-worker` — for the signed envelope that an Agora server
+ * action sends to `a.`. It is not an agent bearer route and it is not the
+ * apex-side sponsor action itself.
  *
  * `consultedCredentials` is the mechanical form of "never consulted": the
  * decision names which credential sources were read, and the agent host can
@@ -29,10 +29,12 @@ export type RouteClass =
   | "public"
   /** Fellow write on the agent plane: bearer only. */
   | "agent-write"
-  /** Sponsor write, arriving from an Agora server action: envelope only. */
-  | "sponsor-write";
+  /** Apex-side sponsor action policy: envelope only. */
+  | "sponsor-write"
+  /** Worker ingress for an Agora-signed sponsor envelope: envelope only. */
+  | "service-envelope-worker";
 
-export type CredentialSource = "bearer" | "envelope" | "cookie";
+export type CredentialSource = "bearer" | "envelope";
 
 /**
  * Which credentials the request *presented*. Booleans on purpose: this module
@@ -41,15 +43,15 @@ export type CredentialSource = "bearer" | "envelope" | "cookie";
 export interface PresentedCredentials {
   bearer: boolean;
   envelope: boolean;
-  cookie: boolean;
 }
 
 export type PrincipalRefusalReason =
   | "bearer_on_sponsor_route"
-  | "cookie_on_agent_plane"
   | "envelope_on_agent_route"
   | "sponsor_route_off_apex"
   | "agent_route_off_agent_host"
+  | "service_envelope_route_off_agent_host"
+  | "bearer_on_service_envelope_route"
   | "no_credential";
 
 export type PrincipalDecision =
@@ -81,8 +83,11 @@ export interface RouteRequest {
  */
 export function consultedCredentials(host: PlaneHost, routeClass: RouteClass): CredentialSource[] {
   if (host === "agent") {
-    // The agent plane has no notion of a browser session. Cookies are not on
-    // this list, and that absence is the point.
+    // The agent plane has no notion of a browser session. Cookie bytes are not
+    // represented in `PresentedCredentials`, so this decision cannot inspect
+    // them by accident. The one non-bearer ingress is the signed envelope
+    // arriving from an Agora server action.
+    if (routeClass === "service-envelope-worker") return ["envelope"];
     return routeClass === "public" ? [] : ["bearer"];
   }
   // The apex serves humans; sponsor writes arrive as enveloped server actions.
@@ -108,6 +113,14 @@ export function routePrincipal(request: RouteRequest): PrincipalDecision {
       consulted,
     };
   }
+  if (routeClass === "service-envelope-worker" && host !== "agent") {
+    return {
+      ok: false,
+      code: "WRONG_PRINCIPAL",
+      reason: "service_envelope_route_off_agent_host",
+      consulted,
+    };
+  }
 
   if (routeClass === "sponsor-write") {
     // A Fellow bearer reaching for sponsor authority.
@@ -127,14 +140,26 @@ export function routePrincipal(request: RouteRequest): PrincipalDecision {
       return { ok: false, code: "WRONG_PRINCIPAL", reason: "envelope_on_agent_route", consulted };
     }
     if (presented.bearer) {
-      // A cookie may ride along on the request; it is simply not read.
       return { ok: true, authenticateWith: "bearer", consulted };
     }
-    // Only a cookie was offered, on a host that does not consult cookies.
-    if (presented.cookie) {
-      return { ok: false, code: "WRONG_PRINCIPAL", reason: "cookie_on_agent_plane", consulted };
-    }
     return { ok: false, code: "WRONG_PRINCIPAL", reason: "no_credential", consulted };
+  }
+
+  if (routeClass === "service-envelope-worker") {
+    // A Fellow bearer cannot acquire sponsor authority merely by sending it to
+    // the Worker ingress that receives Agora envelopes.
+    if (presented.bearer) {
+      return {
+        ok: false,
+        code: "WRONG_PRINCIPAL",
+        reason: "bearer_on_service_envelope_route",
+        consulted,
+      };
+    }
+    if (!presented.envelope) {
+      return { ok: false, code: "WRONG_PRINCIPAL", reason: "no_credential", consulted };
+    }
+    return { ok: true, authenticateWith: "envelope", consulted };
   }
 
   // Public reads are world-readable: no credential is required or consulted,

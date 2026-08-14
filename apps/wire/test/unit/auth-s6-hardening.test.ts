@@ -130,6 +130,7 @@ async function envelopeHarness() {
         body: BODY,
         method: "POST",
         route: ROUTE,
+        permittedActions: ["directive.create"],
       });
     },
   };

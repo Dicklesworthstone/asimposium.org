@@ -108,6 +108,7 @@ async function harness(keyValidity?: { notBefore: number; notAfter?: number }): 
         body: BODY,
         method: "POST",
         route: ROUTE,
+        permittedActions: ["directive.create"],
         ...overrides,
       }),
   };
@@ -514,6 +515,7 @@ describe("verification — key rotation overlap", () => {
           body: BODY,
           method: "POST",
           route: ROUTE,
+          permittedActions: ["directive.create"],
         },
       );
       expect(result.ok).toBe(true);
@@ -542,6 +544,7 @@ describe("verification — key rotation overlap", () => {
         body: BODY,
         method: "POST",
         route: ROUTE,
+        permittedActions: ["directive.create"],
       },
     );
     expect(result).toMatchObject({ ok: false, reason: "key_retired" });
@@ -567,7 +570,7 @@ describe("verification — key rotation overlap", () => {
           { kid: "dup", publicKeyHex: "00".repeat(32), notBefore: 0 },
           { kid: "dup", publicKeyHex: "11".repeat(32), notBefore: 0 },
         ]),
-    ).toThrow(/duplicate kid/);
+    ).toThrow(/duplicate key identifier/);
   });
 });
 
@@ -596,6 +599,35 @@ describe("keyring configuration fails at construction, never at request time", (
     expect(new VerificationKeyring([good]).kids).toEqual(["k"]);
   });
 
+  test("an invalid configured kid is never echoed by its startup error", () => {
+    const canary = "kid-should-not-appear-in-an-error!";
+    let message = "";
+    try {
+      new VerificationKeyring([{ ...good, kid: canary }]);
+    } catch (error) {
+      message = error instanceof Error ? error.message : String(error);
+    }
+    expect(message).toContain("invalid key identifier");
+    expect(message).not.toContain(canary);
+  });
+
+  test("only the newest current key may be open-ended", () => {
+    expect(
+      () =>
+        new VerificationKeyring([
+          { kid: "previous", publicKeyHex: "ab".repeat(32), notBefore: 0 },
+          { kid: "current", publicKeyHex: "cd".repeat(32), notBefore: 10 },
+        ]),
+    ).toThrow(/only the newest current key/);
+    expect(
+      () =>
+        new VerificationKeyring([
+          { kid: "previous", publicKeyHex: "ab".repeat(32), notBefore: 0, notAfter: 20 },
+          { kid: "current", publicKeyHex: "cd".repeat(32), notBefore: 10 },
+        ]),
+    ).not.toThrow();
+  });
+
   test("a syntactically valid key the runtime rejects fails closed, not by throwing", async () => {
     // 32 lowercase hex bytes that are not a valid Ed25519 point. Construction
     // cannot tell; `lookup` must refuse rather than let an exception escape
@@ -618,6 +650,7 @@ describe("keyring configuration fails at construction, never at request time", (
           body: BODY,
           method: "POST",
           route: ROUTE,
+          permittedActions: ["directive.create"],
         },
       );
     } catch {

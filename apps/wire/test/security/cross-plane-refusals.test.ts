@@ -81,6 +81,7 @@ async function harness() {
         body: BODY_CANARY,
         method: "POST",
         route: ROUTE,
+        permittedActions: ["directive.create"],
         ...overrides,
       }),
   };
@@ -107,24 +108,27 @@ describe("diagnostics carry no credential material", () => {
     expect(result.ok).toBe(true);
     if (!result.ok) return;
 
-    const line = formatAuthDiagnostic(
-      buildAuthDiagnostic({
-        outcome: "accepted",
-        code: "OK",
-        reason: "accepted",
-        method: "POST",
-        route: ROUTE,
-        claims: result.claims,
-        principalPseudonym: await principalPseudonym(result.principal.id, "operator-salt"),
-        durationMs: 12.6,
-      }),
-    );
+    const record = buildAuthDiagnostic({
+      outcome: "accepted",
+      code: "OK",
+      reason: "accepted",
+      method: "POST",
+      route: ROUTE,
+      claims: result.claims,
+      claimsState: "authenticated_claim",
+      principalPseudonym: await principalPseudonym(result.principal.id, "operator-salt"),
+      durationMs: 12.6,
+    });
+    const line = formatAuthDiagnostic(record);
 
     assertNoCanaries(line, h.envelope.signature);
     // What it does carry: enough to correlate, not enough to reconstruct.
     expect(line).toContain("agora-2026-08-a");
     expect(line).toContain("directive.create");
     expect(line).toContain(ROUTE);
+    expect(record.kid_claim_state).toBe("authenticated_claim");
+    expect(record.action_claim_state).toBe("authenticated_claim");
+    expect(record.payload_digest_claim_state).toBe("authenticated_claim");
   });
 
   test("the pseudonym is stable, salted, and not the principal id", async () => {
@@ -153,6 +157,23 @@ describe("diagnostics carry no credential material", () => {
     );
     assertNoCanaries(line, h.envelope.signature);
     expect(line).toContain("payload_mismatch");
+  });
+
+  test("parsed refusal fields are labelled as unauthenticated attacker claims", async () => {
+    const h = await harness();
+    const record = buildAuthDiagnostic({
+      outcome: "refused",
+      code: "UNAUTHORIZED",
+      reason: "bad_signature",
+      method: "POST",
+      route: ROUTE,
+      // These fields may have parsed, but no signature authenticated them.
+      claims: h.envelope.claims,
+      claimsState: "authenticated_claim",
+    });
+    expect(record.kid_claim_state).toBe("unauthenticated_attacker_claim");
+    expect(record.action_claim_state).toBe("unauthenticated_attacker_claim");
+    expect(record.payload_digest_claim_state).toBe("unauthenticated_attacker_claim");
   });
 
   test("only a digest prefix of the payload is ever emitted", async () => {
@@ -250,6 +271,7 @@ describe("the Worker accepts what the Agora actually mints", () => {
       body: BODY_CANARY,
       method: "POST",
       route: ROUTE,
+      permittedActions: ["directive.create"],
     });
 
     expect(result.ok).toBe(true);
@@ -295,6 +317,7 @@ describe("the Worker accepts what the Agora actually mints", () => {
       body: '{"focus":"rewritten by a proxy"}',
       method: "POST",
       route: ROUTE,
+      permittedActions: ["directive.create"],
     });
     expect(result).toMatchObject({ ok: false, reason: "payload_mismatch" });
   });
@@ -305,19 +328,18 @@ describe("principal confusion is refused before any credential is examined", () 
     const decision = routePrincipal({
       host: "apex",
       routeClass: "sponsor-write",
-      presented: { bearer: true, envelope: true, cookie: true },
+      presented: { bearer: true, envelope: true },
     });
     expect(decision).toMatchObject({ ok: false, code: "WRONG_PRINCIPAL" });
     assertNoCanaries(JSON.stringify(decision), "0".repeat(128));
   });
 
-  test("a cookie on the agent plane is refused and never read", () => {
+  test("an agent-plane request with no bearer is refused as no credential", () => {
     const decision = routePrincipal({
       host: "agent",
       routeClass: "agent-write",
-      presented: { bearer: false, envelope: false, cookie: true },
+      presented: { bearer: false, envelope: false },
     });
-    expect(decision).toMatchObject({ ok: false, code: "WRONG_PRINCIPAL" });
-    expect(decision.consulted).not.toContain("cookie");
+    expect(decision).toMatchObject({ ok: false, code: "WRONG_PRINCIPAL", reason: "no_credential" });
   });
 });

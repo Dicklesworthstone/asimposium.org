@@ -26,7 +26,7 @@ export interface VerificationKeyRecord {
   publicKeyHex: string;
   /** Inclusive start of validity, epoch seconds. */
   notBefore: number;
-  /** Exclusive end of validity, epoch seconds. Omit for an open-ended key. */
+  /** Exclusive end of validity, epoch seconds. Omit only for the current key. */
   notAfter?: number;
 }
 
@@ -54,23 +54,23 @@ export class KeyringConfigError extends Error {
  */
 function validateRecord(record: VerificationKeyRecord): void {
   if (!KID_PATTERN.test(record.kid)) {
-    throw new KeyringConfigError(`invalid kid: ${JSON.stringify(record.kid).slice(0, 80)}`);
+    throw new KeyringConfigError("key record has an invalid key identifier");
   }
   if (!PUBLIC_KEY_PATTERN.test(record.publicKeyHex)) {
     // The key itself is public, but echoing it into an error adds nothing.
-    throw new KeyringConfigError(`kid ${record.kid}: public key must be 32 bytes of lowercase hex`);
+    throw new KeyringConfigError("key record public key must be 32 bytes of lowercase hex");
   }
   if (!Number.isSafeInteger(record.notBefore) || record.notBefore < 0) {
-    throw new KeyringConfigError(`kid ${record.kid}: notBefore must be a non-negative integer`);
+    throw new KeyringConfigError("key record notBefore must be a non-negative integer");
   }
   if (record.notAfter !== undefined) {
     if (!Number.isSafeInteger(record.notAfter)) {
-      throw new KeyringConfigError(`kid ${record.kid}: notAfter must be an integer`);
+      throw new KeyringConfigError("key record notAfter must be an integer");
     }
     if (record.notAfter <= record.notBefore) {
       // An empty validity window silently refuses every envelope it should have
       // accepted, and looks exactly like a signature bug.
-      throw new KeyringConfigError(`kid ${record.kid}: notAfter must be after notBefore`);
+      throw new KeyringConfigError("key record notAfter must be after notBefore");
     }
   }
 }
@@ -90,14 +90,25 @@ export class VerificationKeyring {
   readonly #imported = new Map<string, CryptoKey>();
 
   constructor(records: readonly VerificationKeyRecord[]) {
+    if (records.length === 0) {
+      throw new KeyringConfigError("keyring must contain a current verification key");
+    }
     this.#records = new Map();
     for (const record of records) {
       validateRecord(record);
       if (this.#records.has(record.kid)) {
         // Two keys under one id makes "which key signed this" undecidable.
-        throw new KeyringConfigError(`duplicate kid in keyring: ${record.kid}`);
+        throw new KeyringConfigError("keyring contains a duplicate key identifier");
       }
       this.#records.set(record.kid, record);
+    }
+
+    const newestNotBefore = Math.max(...records.map((record) => record.notBefore));
+    const openEnded = records.filter((record) => record.notAfter === undefined);
+    if (openEnded.length > 1 || openEnded.some((record) => record.notBefore !== newestNotBefore)) {
+      throw new KeyringConfigError(
+        "only the newest current key may have an open-ended validity window",
+      );
     }
   }
 

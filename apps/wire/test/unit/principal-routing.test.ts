@@ -17,104 +17,62 @@ import {
  * authority, and a browser session turning up on the agent host.
  */
 
-const none: PresentedCredentials = { bearer: false, envelope: false, cookie: false };
+const none: PresentedCredentials = { bearer: false, envelope: false };
 const with_ = (partial: Partial<PresentedCredentials>): PresentedCredentials => ({
   ...none,
   ...partial,
 });
 
 describe("cookies are never consulted on the agent plane", () => {
-  test.each<RouteClass>(["public", "agent-write", "sponsor-write"])(
-    "the agent host never lists cookie as consulted for %s",
+  test.each<RouteClass>(["public", "agent-write", "sponsor-write", "service-envelope-worker"])(
+    "the agent host lists only the route's real credential source for %s",
     (routeClass) => {
-      expect(consultedCredentials("agent", routeClass)).not.toContain("cookie");
+      const expected: CredentialSource[] =
+        routeClass === "public"
+          ? []
+          : routeClass === "service-envelope-worker"
+            ? ["envelope"]
+            : ["bearer"];
+      expect(consultedCredentials("agent", routeClass)).toEqual(expected);
     },
   );
 
-  test("no decision on the agent host reports having read a cookie", () => {
-    const classes: RouteClass[] = ["public", "agent-write", "sponsor-write"];
+  test("routing has no cookie field to inspect", () => {
+    const classes: RouteClass[] = [
+      "public",
+      "agent-write",
+      "sponsor-write",
+      "service-envelope-worker",
+    ];
     const presentations: PresentedCredentials[] = [
       none,
-      with_({ cookie: true }),
       with_({ bearer: true }),
-      with_({ bearer: true, cookie: true }),
-      with_({ envelope: true, cookie: true }),
+      with_({ envelope: true }),
     ];
     for (const routeClass of classes) {
       for (const presented of presentations) {
         const decision = routePrincipal({ host: "agent", routeClass, presented });
-        expect(decision.consulted).not.toContain("cookie" satisfies CredentialSource);
+        expect(
+          decision.consulted.every((source) => source === "bearer" || source === "envelope"),
+        ).toBe(true);
       }
     }
   });
 
-  test("a bearer still authenticates when a cookie rides along unread", () => {
+  test("a bearer authenticates without any cookie-derived routing input", () => {
     const decision = routePrincipal({
-      host: "agent",
-      routeClass: "agent-write",
-      presented: with_({ bearer: true, cookie: true }),
-    });
-    expect(decision).toMatchObject({ ok: true, authenticateWith: "bearer" });
-  });
-
-  test("bearer + cookie decides identically to bearer alone", () => {
-    // Sole authentication by the bearer: the cookie changes nothing at all,
-    // not the outcome, not the credential chosen, not the consulted list.
-    const withCookie = routePrincipal({
-      host: "agent",
-      routeClass: "agent-write",
-      presented: with_({ bearer: true, cookie: true }),
-    });
-    const withoutCookie = routePrincipal({
       host: "agent",
       routeClass: "agent-write",
       presented: with_({ bearer: true }),
     });
-    expect(withCookie).toEqual(withoutCookie);
-  });
-
-  test("cookie presence changes nothing except the one case the rule names", () => {
-    // Toggling the cookie flag is only allowed to matter for an agent-plane
-    // write with no bearer, where it turns "no credential" into the more
-    // specific "cookie on the agent plane". Everywhere else the decision must
-    // be byte-identical with and without it.
-    const hosts: PlaneHost[] = ["apex", "agent"];
-    const classes: RouteClass[] = ["public", "agent-write", "sponsor-write"];
-    for (const host of hosts) {
-      for (const routeClass of classes) {
-        for (const bearer of [true, false]) {
-          for (const envelope of [true, false]) {
-            const off = routePrincipal({
-              host,
-              routeClass,
-              presented: { bearer, envelope, cookie: false },
-            });
-            const on = routePrincipal({
-              host,
-              routeClass,
-              presented: { bearer, envelope, cookie: true },
-            });
-            const namedCase =
-              host === "agent" && routeClass === "agent-write" && !bearer && !envelope;
-            if (namedCase) {
-              expect(off).toMatchObject({ ok: false, reason: "no_credential" });
-              expect(on).toMatchObject({ ok: false, reason: "cookie_on_agent_plane" });
-            } else {
-              expect(on).toEqual(off);
-            }
-          }
-        }
-      }
-    }
+    expect(decision).toMatchObject({ ok: true, authenticateWith: "bearer" });
   });
 
   test("cookie material cannot be supplied to the router at all", () => {
-    // The presented type carries a boolean. There is no field through which a
-    // cookie's bytes could arrive, so "never parsed" is structural rather than
-    // a discipline someone has to remember.
-    const presented: PresentedCredentials = with_({ cookie: true });
-    expect(typeof presented.cookie).toBe("boolean");
-    expect(Object.keys(presented).sort()).toEqual(["bearer", "cookie", "envelope"]);
+    // There is no field through which Cookie presence or bytes could arrive,
+    // so agent-host Cookie requests are necessarily classified as no credential
+    // by the HTTP adapter without a Cookie read.
+    expect(Object.keys(none).sort()).toEqual(["bearer", "envelope"]);
   });
 });
 
@@ -133,17 +91,16 @@ describe("WRONG_PRINCIPAL, both directions", () => {
     });
   });
 
-  test("a cookie alone on the agent plane is refused", () => {
-    // A browser session turning up where sessions do not exist.
+  test("no credential on the agent plane is refused without a cookie classification", () => {
     const decision = routePrincipal({
       host: "agent",
       routeClass: "agent-write",
-      presented: with_({ cookie: true }),
+      presented: none,
     });
     expect(decision).toMatchObject({
       ok: false,
       code: "WRONG_PRINCIPAL",
-      reason: "cookie_on_agent_plane",
+      reason: "no_credential",
     });
   });
 
@@ -179,6 +136,30 @@ describe("WRONG_PRINCIPAL, both directions", () => {
     expect(decision).toMatchObject({ ok: false, reason: "agent_route_off_agent_host" });
   });
 
+  test("the Worker service-envelope ingress accepts only an envelope on the agent host", () => {
+    expect(
+      routePrincipal({
+        host: "agent",
+        routeClass: "service-envelope-worker",
+        presented: with_({ envelope: true }),
+      }),
+    ).toMatchObject({ ok: true, authenticateWith: "envelope" });
+    expect(
+      routePrincipal({
+        host: "agent",
+        routeClass: "service-envelope-worker",
+        presented: with_({ bearer: true, envelope: true }),
+      }),
+    ).toMatchObject({ ok: false, reason: "bearer_on_service_envelope_route" });
+    expect(
+      routePrincipal({
+        host: "apex",
+        routeClass: "service-envelope-worker",
+        presented: with_({ envelope: true }),
+      }),
+    ).toMatchObject({ ok: false, reason: "service_envelope_route_off_agent_host" });
+  });
+
   test("no credential at all is refused on either write class", () => {
     expect(
       routePrincipal({ host: "apex", routeClass: "sponsor-write", presented: none }),
@@ -195,7 +176,7 @@ describe("the happy paths", () => {
       routePrincipal({
         host: "apex",
         routeClass: "sponsor-write",
-        presented: with_({ envelope: true, cookie: true }),
+        presented: with_({ envelope: true }),
       }),
     ).toMatchObject({ ok: true, authenticateWith: "envelope" });
   });
@@ -205,7 +186,7 @@ describe("the happy paths", () => {
       const decision = routePrincipal({
         host,
         routeClass: "public",
-        presented: with_({ bearer: true, cookie: true }),
+        presented: with_({ bearer: true }),
       });
       expect(decision).toMatchObject({ ok: true, authenticateWith: "none" });
       expect(decision.consulted).toEqual([]);
@@ -229,7 +210,7 @@ describe("the decision surface never carries credential material", () => {
 
   test("the presented type is booleans, so a token cannot be passed in at all", () => {
     // Structural: there is no field on PresentedCredentials that could hold a
-    // bearer token, a cookie value, or a signature.
+    // bearer token, cookie value, or signature.
     const presented: PresentedCredentials = with_({ bearer: true });
     for (const value of Object.values(presented)) {
       expect(typeof value).toBe("boolean");
@@ -240,15 +221,19 @@ describe("the decision surface never carries credential material", () => {
 describe("the full matrix is total", () => {
   test("every host × class × presentation combination decides without throwing", () => {
     const hosts: PlaneHost[] = ["apex", "agent"];
-    const classes: RouteClass[] = ["public", "agent-write", "sponsor-write"];
+    const classes: RouteClass[] = [
+      "public",
+      "agent-write",
+      "sponsor-write",
+      "service-envelope-worker",
+    ];
     let decided = 0;
     for (const host of hosts) {
       for (const routeClass of classes) {
-        for (let bits = 0; bits < 8; bits += 1) {
+        for (let bits = 0; bits < 4; bits += 1) {
           const presented: PresentedCredentials = {
             bearer: (bits & 1) !== 0,
             envelope: (bits & 2) !== 0,
-            cookie: (bits & 4) !== 0,
           };
           const decision = routePrincipal({ host, routeClass, presented });
           expect(typeof decision.ok).toBe("boolean");
@@ -256,21 +241,6 @@ describe("the full matrix is total", () => {
         }
       }
     }
-    expect(decided).toBe(48);
-  });
-
-  test("no write route is ever satisfied by a cookie", () => {
-    const hosts: PlaneHost[] = ["apex", "agent"];
-    const classes: RouteClass[] = ["agent-write", "sponsor-write"];
-    for (const host of hosts) {
-      for (const routeClass of classes) {
-        const decision = routePrincipal({
-          host,
-          routeClass,
-          presented: with_({ cookie: true }),
-        });
-        expect(decision.ok).toBe(false);
-      }
-    }
+    expect(decided).toBe(32);
   });
 });
