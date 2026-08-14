@@ -48,8 +48,10 @@ import {
 interface LocalSplitEnv {
   readonly DB: D1Database;
   readonly ARTIFACTS: R2Bucket;
-  /** Non-secret per-run value proving readiness came from this Wrangler child. */
+  /** Private 256-bit test-harness authority; it is never returned by a route. */
   readonly S3_RUN_TOKEN?: string;
+  /** Public, non-secret per-run readiness value for the local Wrangler probe. */
+  readonly S3_READINESS_NONCE?: string;
 }
 
 interface WorkshopRow {
@@ -172,6 +174,7 @@ const LOCAL_S4_BENIGN_OUTAGE_MARKER = "S4-BENIGN-OUTAGE-FIXTURE";
 const LOCAL_S4_REVALIDATION_ATTEMPTS = 2;
 const LOCAL_S4_REPLAY_WINDOW_SECONDS = 24 * 60 * 60;
 const LOCAL_S4_NEGATIVE_DEDUP_WINDOW_SECONDS = 15 * 60;
+const LOCAL_HARNESS_AUTHORITY_TOKEN = /^[a-f0-9]{64}$/u;
 const ID_PATTERN = /^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$/u;
 const TEST_D1_BIND_FAULT_HEADER = "x-asimp-local-test-fault";
 const TEST_D1_BIND_FAULT = "d1-bind-reject";
@@ -1507,13 +1510,17 @@ function hasLocalHarnessAuthority(
   env: LocalSplitEnv,
   header: (typeof LOCAL_HARNESS_AUTHORITY_HEADERS)[number],
 ): boolean {
-  return env.S3_RUN_TOKEN !== undefined && request.headers.get(header) === env.S3_RUN_TOKEN;
+  return (
+    env.S3_RUN_TOKEN !== undefined &&
+    LOCAL_HARNESS_AUTHORITY_TOKEN.test(env.S3_RUN_TOKEN) &&
+    request.headers.get(header) === env.S3_RUN_TOKEN
+  );
 }
 
 /**
  * This test-only D1 fault is deliberately two-part: a caller must request the
  * named fault and independently prove possession of this Wrangler run's
- * readiness token. A nonempty fault header cannot manufacture an orphan.
+ * private authority token. A nonempty fault header cannot manufacture an orphan.
  */
 function d1FaultRequested(request: Request, env: LocalSplitEnv): boolean {
   return (
@@ -1537,7 +1544,7 @@ function throwIfRouteBindingPoisoned(request: Request, env: LocalSplitEnv): void
  * A per-run local-only fault injector for proving each public route fails
  * closed before it serializes a D1 row with an unexpected private locator.
  * It never writes D1 or R2 and is unavailable without this Wrangler child's
- * readiness token.
+ * private authority token.
  */
 function publicRowsForRequest(
   request: Request,
@@ -2138,6 +2145,20 @@ async function promoteWorkshop(request: Request, env: LocalSplitEnv): Promise<Re
       return json({ code: "PUBLIC_CAS_RECOVERY_REQUIRED" }, 503);
     }
 
+    // A simultaneous request with this same key can reach the first replay
+    // lookup before the winning transaction commits. Its own conditional batch
+    // then makes no public mutation. Re-read the now-settled replay map before
+    // treating the workshop as generically settled, so an exact retry retains
+    // the persisted 201 response rather than becoming a spurious 409.
+    const settledReplay = await replayedScreeningDecision(
+      env,
+      workshop,
+      idempotencyKeyDigest,
+      requestDigest,
+      nowSeconds,
+    );
+    if (settledReplay !== undefined) return settledReplay;
+
     const settled = await env.DB.prepare(
       "SELECT promoted_event_id FROM s3_local_workshops WHERE id = ?1",
     )
@@ -2501,7 +2522,7 @@ export default {
         return json({
           status: "ok",
           bindings: ["DB", "ARTIFACTS"],
-          run_token: env.S3_RUN_TOKEN ?? "missing",
+          readiness_nonce: env.S3_READINESS_NONCE ?? "missing",
         });
       }
       if (request.method === "POST" && url.pathname === "/__s3/workshops") {

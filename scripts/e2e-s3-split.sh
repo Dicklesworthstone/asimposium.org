@@ -38,6 +38,17 @@ is_retained_signal_status() {
   [[ "$1" == "129" || "$1" == "130" || "$1" == "143" ]]
 }
 
+mint_hex_token() {
+  local byte_count="$1"
+  [[ "${byte_count}" =~ ^([1-9]|[1-9][0-9]|1[0-2][0-8])$ ]] || return 1
+  S3_TOKEN_BYTE_COUNT="${byte_count}" bun --eval '
+    const byteCount = Number(process.env.S3_TOKEN_BYTE_COUNT);
+    if (!Number.isSafeInteger(byteCount) || byteCount < 1 || byteCount > 128) process.exit(1);
+    const bytes = crypto.getRandomValues(new Uint8Array(byteCount));
+    console.log(Array.from(bytes, (value) => value.toString(16).padStart(2, "0")).join(""));
+  '
+}
+
 allocate_port() {
   bun --eval 'const server = Bun.serve({ port: 0, fetch() { return new Response("ready"); } }); console.log(server.port); server.stop(true);'
 }
@@ -57,7 +68,19 @@ else
 fi
 readonly S3_PORT
 readonly ORIGIN="http://127.0.0.1:${S3_PORT}"
-readonly S3_RUN_TOKEN="s3-$$-${RANDOM}-${RANDOM}"
+S3_RUN_TOKEN="$(mint_hex_token 32)" || {
+  emit '{"tool":"bash","package":"@asimposium/wire","suite":"s3-local-bindings","status":"fail","code":"S3_AUTHORITY_TOKEN_UNAVAILABLE","reproduce":"bash scripts/e2e-s3-split.sh"}'
+  exit 1
+}
+S3_READINESS_NONCE="s3-ready-$(mint_hex_token 16)" || {
+  emit '{"tool":"bash","package":"@asimposium/wire","suite":"s3-local-bindings","status":"fail","code":"S3_READINESS_NONCE_UNAVAILABLE","reproduce":"bash scripts/e2e-s3-split.sh"}'
+  exit 1
+}
+if ! [[ "${S3_RUN_TOKEN}" =~ ^[a-f0-9]{64}$ && "${S3_READINESS_NONCE}" =~ ^s3-ready-[a-f0-9]{32}$ ]]; then
+  emit '{"tool":"bash","package":"@asimposium/wire","suite":"s3-local-bindings","status":"fail","code":"S3_LOCAL_TOKEN_FORMAT_INVALID","reproduce":"bash scripts/e2e-s3-split.sh"}'
+  exit 1
+fi
+readonly S3_RUN_TOKEN S3_READINESS_NONCE
 
 if port_is_busy "${S3_PORT}"; then
   emit '{"tool":"bash","package":"@asimposium/wire","suite":"s3-local-bindings","status":"fail","code":"S3_PORT_OCCUPIED","reproduce":"bash scripts/e2e-s3-split.sh"}'
@@ -1266,7 +1289,8 @@ start_supervised_payload server "${SERVER_LOG}" "${WRANGLER}" dev "${ENTRYPOINT}
   --inspector-port 0 \
   --log-level error \
   --show-interactive-dev-session=false \
-  --var "S3_RUN_TOKEN:${S3_RUN_TOKEN}"
+  --var "S3_RUN_TOKEN:${S3_RUN_TOKEN}" \
+  --var "S3_READINESS_NONCE:${S3_READINESS_NONCE}"
 server_start_status=$?
 if is_retained_signal_status "${server_start_status}"; then
   exit "${server_start_status}"
@@ -1285,7 +1309,7 @@ for _attempt in {1..60}; do
   if ! supervisor_identity_is_exact "${SERVER_SUPERVISOR_PID}" "${SERVER_PGID}" \
     "${SERVER_SUPERVISOR_STARTED_AT}" "${SERVER_SUPERVISOR_TOKEN}"; then break; fi
   health="$(curl --silent --fail --connect-timeout 1 --max-time 1 "${ORIGIN}/__s3/health" 2>/dev/null || true)"
-  if [[ "${health}" == *"\"run_token\":\"${S3_RUN_TOKEN}\""* ]] && \
+  if [[ "${health}" == *"\"readiness_nonce\":\"${S3_READINESS_NONCE}\""* ]] && \
     supervisor_identity_is_exact "${SERVER_SUPERVISOR_PID}" "${SERVER_PGID}" \
       "${SERVER_SUPERVISOR_STARTED_AT}" "${SERVER_SUPERVISOR_TOKEN}" && \
     listener_pids_are_in_group "${S3_PORT}" "${SERVER_PGID}"; then
@@ -1301,7 +1325,8 @@ if [[ ${ready} -ne 1 ]]; then
 fi
 
 run_owned_checker "${CHECKER_DEADLINE_SECONDS}" env \
-  S3_LOCAL_ORIGIN="${ORIGIN}" S3_LOCAL_RUN_TOKEN="${S3_RUN_TOKEN}" bun "${CHECKER}"
+  S3_LOCAL_ORIGIN="${ORIGIN}" S3_LOCAL_RUN_TOKEN="${S3_RUN_TOKEN}" \
+  S3_LOCAL_READINESS_NONCE="${S3_READINESS_NONCE}" bun "${CHECKER}"
 checker_status=$?
 if is_retained_signal_status "${checker_status}"; then
   exit "${checker_status}"

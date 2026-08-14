@@ -12,12 +12,19 @@ import { FACE_FORMATS, MEDIA_TYPES } from "@asimposium/render";
 
 const rawOrigin = process.env.S3_LOCAL_ORIGIN;
 const parsedOrigin = rawOrigin === undefined ? undefined : new URL(rawOrigin);
-const localRunToken = (() => {
+const localAuthorityToken = (() => {
   const token = process.env.S3_LOCAL_RUN_TOKEN;
-  if (token === undefined || !/^s3-[0-9]+-[0-9]+-[0-9]+$/u.test(token)) {
+  if (token === undefined || !/^[a-f0-9]{64}$/u.test(token)) {
     throw new Error("S3_LOCAL_RUN_TOKEN_REQUIRED");
   }
   return token;
+})();
+const localReadinessNonce = (() => {
+  const nonce = process.env.S3_LOCAL_READINESS_NONCE;
+  if (nonce === undefined || !/^s3-ready-[a-f0-9]{32}$/u.test(nonce)) {
+    throw new Error("S3_LOCAL_READINESS_NONCE_REQUIRED");
+  }
+  return nonce;
 })();
 if (
   parsedOrigin === undefined ||
@@ -53,7 +60,7 @@ const localS4FellowAuthorityHeader = "x-asimp-local-s4-fellow-authority";
 const localS4FellowIdHeader = "x-asimp-local-s4-fellow-id";
 const localS4FixtureAuthorityHeader = "x-asimp-local-s4-fixture-authority";
 const localS4NowSecondsHeader = "x-asimp-local-s4-now-seconds";
-const localSponsorId = `local-sponsor-${localRunToken}`;
+const localSponsorId = `local-sponsor-${localAuthorityToken}`;
 const authoritativeFieldFixHint =
   "Remove author-writable disposition, proof, confidence, certification, or status-upgrade fields; the ledger computes disposition after independent review.";
 const duplicateClaimFixHint =
@@ -223,12 +230,12 @@ function s4FixtureHeaders(
 ): Readonly<Record<string, string>> {
   return {
     "idempotency-key": idempotencyKey,
-    [localS4FixtureAuthorityHeader]: localRunToken,
+    [localS4FixtureAuthorityHeader]: localAuthorityToken,
     ...extra,
   };
 }
 
-async function resetS4Fixtures(authority = localRunToken): Promise<Snapshot> {
+async function resetS4Fixtures(authority = localAuthorityToken): Promise<Snapshot> {
   return snapshot(
     await localFetch(`${origin}/__s3/s4/fixtures/reset`, {
       method: "POST",
@@ -314,8 +321,12 @@ async function main(): Promise<void> {
 
   const health = await requestJson("/__s3/health");
   check(
-    "local_workerd_reports_D1_and_R2_bindings",
-    health.response.status === 200 && Array.isArray(health.body.bindings),
+    "local_workerd_reports_D1_and_R2_bindings_with_a_public_readiness_nonce_but_never_authority",
+    health.response.status === 200 &&
+      Array.isArray(health.body.bindings) &&
+      health.body.readiness_nonce === localReadinessNonce &&
+      !("run_token" in health.body) &&
+      !JSON.stringify(health.body).includes(localAuthorityToken),
     `status ${health.response.status}`,
   );
 
@@ -395,7 +406,7 @@ async function main(): Promise<void> {
   );
   const ownerPrivate = await snapshot(
     await localFetch(`${origin}/__s3/private/${workshopId}`, {
-      headers: { "x-asimp-local-sponsor": localRunToken },
+      headers: { "x-asimp-local-sponsor": localAuthorityToken },
     }),
   );
   check(
@@ -542,13 +553,18 @@ async function main(): Promise<void> {
   const postExport = await snapshot(
     await localFetch(`${origin}/__s3/public/${mainProblemId}/export.jsonl`),
   );
-  const poisonedPublicHeaders = { "x-asimp-local-shape-poison": localRunToken };
-  const wrongTokenPoisonedPublicHeaders = {
-    "x-asimp-local-shape-poison": `${localRunToken}-wrong`,
+  const poisonedPublicHeaders = { "x-asimp-local-shape-poison": localAuthorityToken };
+  const readinessNoncePoisonedPublicHeaders = {
+    "x-asimp-local-shape-poison": localReadinessNonce,
   };
   const nonemptyPoisonedPublicHeaders = { "x-asimp-local-shape-poison": "nonempty" };
-  const poisonedPrivateLocator = `s3-local-shape-poison-${localRunToken}`;
-  const poisonedProbeForbidden = [...forbiddenMain, poisonedPrivateLocator, localRunToken];
+  const poisonedPrivateLocator = `s3-local-shape-poison-${localAuthorityToken}`;
+  const poisonedProbeForbidden = [
+    ...forbiddenMain,
+    poisonedPrivateLocator,
+    localAuthorityToken,
+    localReadinessNonce,
+  ];
   const poisonProbePaths = [
     ...FACE_FORMATS.map((format) => `${origin}/__s3/public/${mainProblemId}?format=${format}`),
     `${origin}/__s3/public/${mainProblemId}/search?q=${encodeURIComponent(publicStatement)}`,
@@ -558,9 +574,11 @@ async function main(): Promise<void> {
     Promise.all(
       poisonProbePaths.map(async (path) => snapshot(await localFetch(path, { headers }))),
     );
-  const routeBindingPoisonHeaders = { "x-asimp-local-route-binding-poison": localRunToken };
-  const wrongTokenRouteBindingPoisonHeaders = {
-    "x-asimp-local-route-binding-poison": `${localRunToken}-wrong`,
+  const routeBindingPoisonHeaders = {
+    "x-asimp-local-route-binding-poison": localAuthorityToken,
+  };
+  const readinessNonceRouteBindingPoisonHeaders = {
+    "x-asimp-local-route-binding-poison": localReadinessNonce,
   };
   const nonemptyRouteBindingPoisonHeaders = {
     "x-asimp-local-route-binding-poison": "nonempty",
@@ -612,11 +630,11 @@ async function main(): Promise<void> {
         }),
       ),
     ]);
-  const [unpoisonedPublic, poisonedPublic, wrongTokenPoisonedPublic, nonemptyPoisonedPublic] =
+  const [unpoisonedPublic, poisonedPublic, readinessNoncePoisonedPublic, nonemptyPoisonedPublic] =
     await Promise.all([
       poisonProbeSnapshots({}),
       poisonProbeSnapshots(poisonedPublicHeaders),
-      poisonProbeSnapshots(wrongTokenPoisonedPublicHeaders),
+      poisonProbeSnapshots(readinessNoncePoisonedPublicHeaders),
       poisonProbeSnapshots(nonemptyPoisonedPublicHeaders),
     ]);
   check(
@@ -633,7 +651,7 @@ async function main(): Promise<void> {
           isExactLocalS3BindingFailure(response) &&
           hasNoPrivateMaterial(response, poisonedProbeForbidden),
       ) &&
-      [wrongTokenPoisonedPublic, nonemptyPoisonedPublic].every(
+      [readinessNoncePoisonedPublic, nonemptyPoisonedPublic].every(
         (responses) =>
           unpoisonedPublic.length === FACE_FORMATS.length + 2 &&
           responses.length === unpoisonedPublic.length &&
@@ -650,12 +668,12 @@ async function main(): Promise<void> {
   const [
     routeBindingBaseline,
     routeBindingPoisoned,
-    wrongTokenRouteBindingPoisoned,
+    readinessNonceRouteBindingPoisoned,
     nonemptyRouteBindingPoisoned,
   ] = await Promise.all([
     routeBindingPoisonSnapshots({}),
     routeBindingPoisonSnapshots(routeBindingPoisonHeaders),
-    routeBindingPoisonSnapshots(wrongTokenRouteBindingPoisonHeaders),
+    routeBindingPoisonSnapshots(readinessNonceRouteBindingPoisonHeaders),
     routeBindingPoisonSnapshots(nonemptyRouteBindingPoisonHeaders),
   ]);
   check(
@@ -669,7 +687,7 @@ async function main(): Promise<void> {
   );
   check(
     "wrong_or_nonempty_route_binding_poison_headers_are_byte_for_byte_inert_on_every_async_route",
-    [wrongTokenRouteBindingPoisoned, nonemptyRouteBindingPoisoned].every(
+    [readinessNonceRouteBindingPoisoned, nonemptyRouteBindingPoisoned].every(
       (responses) =>
         responses.length === 8 &&
         responses.every(
@@ -848,7 +866,7 @@ async function main(): Promise<void> {
   const recoveryPrivateBodyKey = `s3-local/private/staged/sha256/${recoveryDigest}`;
   const failedBind = await pushWorkshop(recoveryProblem, recoveryBody, {
     "x-asimp-local-test-fault": "d1-bind-reject",
-    "x-asimp-local-test-fault-authority": localRunToken,
+    "x-asimp-local-test-fault-authority": localAuthorityToken,
   });
   const staleAuthorityAudit = await snapshot(
     await localFetch(`${origin}/__s3/recovery/sha256/${recoveryDigest}`, {
@@ -856,26 +874,31 @@ async function main(): Promise<void> {
     }),
   );
   const orphanAudit = await requestJson(`/__s3/recovery/sha256/${recoveryDigest}`, {
-    headers: { "x-asimp-local-recovery-audit": localRunToken },
+    headers: { "x-asimp-local-recovery-audit": localAuthorityToken },
   });
+  const readinessNonceAudit = await snapshot(
+    await localFetch(`${origin}/__s3/recovery/sha256/${recoveryDigest}`, {
+      headers: { "x-asimp-local-recovery-audit": localReadinessNonce },
+    }),
+  );
   const failedArtifactProbe = await snapshot(
     await localFetch(`${origin}/sha256/${recoveryDigest}`),
   );
   const recoveredBind = await pushWorkshop(recoveryProblem, recoveryBody);
   const recoveredAudit = await requestJson(`/__s3/recovery/sha256/${recoveryDigest}`, {
-    headers: { "x-asimp-local-recovery-audit": localRunToken },
+    headers: { "x-asimp-local-recovery-audit": localAuthorityToken },
   });
   const missingFaultAuthority = await pushWorkshop(
     "P-s3-recovery-fault-no-authority",
     `${privateCanary}-fault-request-without-authority`,
     { "x-asimp-local-test-fault": "d1-bind-reject" },
   );
-  const wrongFaultAuthority = await pushWorkshop(
-    "P-s3-recovery-fault-wrong-authority",
-    `${privateCanary}-fault-request-with-wrong-authority`,
+  const readinessNonceFaultAuthority = await pushWorkshop(
+    "P-s3-recovery-fault-readiness-nonce",
+    `${privateCanary}-fault-request-with-readiness-nonce`,
     {
       "x-asimp-local-test-fault": "d1-bind-reject",
-      "x-asimp-local-test-fault-authority": `${localRunToken}-wrong`,
+      "x-asimp-local-test-fault-authority": localReadinessNonce,
     },
   );
   check(
@@ -883,6 +906,7 @@ async function main(): Promise<void> {
     failedBind.response.status === 503 &&
       failedBind.body.code === "PRIVATE_CAS_RECOVERY_REQUIRED" &&
       staleAuthorityAudit.response.status === 404 &&
+      readinessNonceAudit.response.status === 404 &&
       hasNoPrivateMaterial(staleAuthorityAudit, [
         recoveryBody,
         recoveryDigest,
@@ -903,9 +927,9 @@ async function main(): Promise<void> {
       recoveredAudit.body.state === "d1_bound" &&
       missingFaultAuthority.response.status === 201 &&
       missingFaultAuthority.body.spilled_to_private_r2 === true &&
-      wrongFaultAuthority.response.status === 201 &&
-      wrongFaultAuthority.body.spilled_to_private_r2 === true,
-    `failure ${failedBind.response.status}/${String(failedBind.body.code)} orphan ${String(orphanAudit.body.state)} retry ${recoveredBind.response.status}/${String(recoveredBind.body.workshop_seq)} recovery ${String(recoveredAudit.body.state)} unauthorized ${missingFaultAuthority.response.status}/${wrongFaultAuthority.response.status}`,
+      readinessNonceFaultAuthority.response.status === 201 &&
+      readinessNonceFaultAuthority.body.spilled_to_private_r2 === true,
+    `failure ${failedBind.response.status}/${String(failedBind.body.code)} orphan ${String(orphanAudit.body.state)} readiness-audit ${readinessNonceAudit.response.status} retry ${recoveredBind.response.status}/${String(recoveredBind.body.workshop_seq)} recovery ${String(recoveredAudit.body.state)} unauthorized ${missingFaultAuthority.response.status}/${readinessNonceFaultAuthority.response.status}`,
   );
 
   const workshopRaceProblem = "P-s3-workshop-race";
@@ -967,6 +991,78 @@ async function main(): Promise<void> {
       thirdPromotion.body.claim_id === "C-3" &&
       thirdPromotion.body.public_seq === 3,
     `statuses ${racedPromotions.map((result) => result.response.status).join(",")} sequences ${publicSequences.join(",")} third ${thirdPromotion.response.status}/${String(thirdPromotion.body.claim_id)}/${String(thirdPromotion.body.public_seq)}`,
+  );
+
+  const sameKeyPublicationProblemId = "P-s4-publishing-idempotency-race";
+  const sameKeyPublicationWorkshop = await pushWorkshop(
+    sameKeyPublicationProblemId,
+    `${privateCanary}-s4-publishing-idempotency-race`,
+  );
+  const sameKeyPublicationRequest = promotionRequest(
+    recordField(sameKeyPublicationWorkshop.body, "workshop_id") ?? "",
+    "S4 simultaneous same-key promotion has one immutable public outcome.",
+    "S4 simultaneous same-key public artifact.",
+    {},
+    s4FixtureHeaders("s4-publishing-idempotency-race"),
+  );
+  // These are independent HTTP requests released together, not a sequential
+  // replay. The loser may pass its first replay lookup before the winner's
+  // D1 batch commits, and must still return the winner's exact persisted 201.
+  const sameKeyPublicationResponses = await Promise.all(
+    Array.from({ length: 2 }, async () =>
+      snapshot(await localFetch(`${origin}/__s3/promote`, sameKeyPublicationRequest)),
+    ),
+  );
+  const sameKeyPublicationBodies = sameKeyPublicationResponses.map((response) => response.body);
+  const sameKeyPublicationEvents = sameKeyPublicationBodies.map((body) => {
+    try {
+      return recordField(JSON.parse(body) as Record<string, unknown>, "event_id");
+    } catch {
+      return undefined;
+    }
+  });
+  const sameKeyPublicationLedger = await snapshot(
+    await localFetch(`${origin}/__s3/public/${sameKeyPublicationProblemId}?format=json`),
+  );
+  const sameKeyPublicationEventsInLedger = (() => {
+    try {
+      const body = JSON.parse(sameKeyPublicationLedger.body) as Record<string, unknown>;
+      return Array.isArray(body.items) ? body.items.filter(isLedgerItem) : [];
+    } catch {
+      return [];
+    }
+  })();
+  const sameKeyPublicationActions = await snapshot(
+    await localFetch(`${origin}/__s3/public/${sameKeyPublicationProblemId}/screening.json`),
+  );
+  const sameKeyPublicationActionRows = (() => {
+    try {
+      const body = JSON.parse(sameKeyPublicationActions.body) as Record<string, unknown>;
+      return Array.isArray(body.actions) ? body.actions : [];
+    } catch {
+      return [];
+    }
+  })();
+  const sameKeyPublicationDiagnostics = await requestJson(
+    `/__s3/s4/diagnostics/${sameKeyPublicationProblemId}`,
+    { headers: { [localS4FixtureAuthorityHeader]: localAuthorityToken } },
+  );
+  const sameKeyPublicationReceipts = Array.isArray(sameKeyPublicationDiagnostics.body.receipts)
+    ? sameKeyPublicationDiagnostics.body.receipts
+    : [];
+  check(
+    "S4_concurrent_same_key_publishing_replays_the_exact_201_and_commits_one_event_action_and_receipt",
+    sameKeyPublicationWorkshop.response.status === 201 &&
+      sameKeyPublicationResponses.every((response) => response.response.status === 201) &&
+      sameKeyPublicationBodies[0] !== undefined &&
+      sameKeyPublicationBodies.every((body) => body === sameKeyPublicationBodies[0]) &&
+      sameKeyPublicationEvents[0] !== undefined &&
+      sameKeyPublicationEvents.every((eventId) => eventId === sameKeyPublicationEvents[0]) &&
+      sameKeyPublicationEventsInLedger.length === 1 &&
+      sameKeyPublicationActionRows.length === 1 &&
+      sameKeyPublicationDiagnostics.response.status === 200 &&
+      sameKeyPublicationReceipts.length === 1,
+    `statuses ${sameKeyPublicationResponses.map((response) => response.response.status).join(",")} events ${sameKeyPublicationEvents.join(",")} ledger ${sameKeyPublicationEventsInLedger.length} actions ${sameKeyPublicationActionRows.length} receipts ${sameKeyPublicationReceipts.length}`,
   );
 
   const s4OutwardFields = ["title", "extract", "statement", "public_artifact_md"] as const;
@@ -1285,7 +1381,7 @@ async function main(): Promise<void> {
     `workshop ${missingKeyWorkshop.response.status} promote ${missingKeyResponse.response.status}/${missingKeyResponse.body}`,
   );
 
-  const untrustedReset = await resetS4Fixtures(`${localRunToken}-wrong`);
+  const readinessNonceReset = await resetS4Fixtures(localReadinessNonce);
   const trustedReset = await resetS4Fixtures();
   const negativeDedupProblemId = "P-s4-negative-dedup";
   const negativeDedupFirstWorkshop = await pushWorkshop(
@@ -1328,9 +1424,14 @@ async function main(): Promise<void> {
   const negativeDedupDiagnosticsDenied = await snapshot(
     await localFetch(`${origin}/__s3/s4/diagnostics/${negativeDedupProblemId}`),
   );
+  const negativeDedupDiagnosticsReadinessNonce = await snapshot(
+    await localFetch(`${origin}/__s3/s4/diagnostics/${negativeDedupProblemId}`, {
+      headers: { [localS4FixtureAuthorityHeader]: localReadinessNonce },
+    }),
+  );
   const negativeDedupDiagnostics = await requestJson(
     `/__s3/s4/diagnostics/${negativeDedupProblemId}`,
-    { headers: { [localS4FixtureAuthorityHeader]: localRunToken } },
+    { headers: { [localS4FixtureAuthorityHeader]: localAuthorityToken } },
   );
   const negativeDedupReceipts = Array.isArray(negativeDedupDiagnostics.body.receipts)
     ? negativeDedupDiagnostics.body.receipts
@@ -1347,7 +1448,7 @@ async function main(): Promise<void> {
       : undefined;
   check(
     "S4_negative_content_context_dedup_is_expiring_receipted_and_never_leaks_into_public_projection",
-    untrustedReset.response.status === 404 &&
+    readinessNonceReset.response.status === 404 &&
       trustedReset.response.status === 204 &&
       negativeDedupFirst.response.status === 202 &&
       negativeDedupSecond.response.status === 202 &&
@@ -1356,6 +1457,7 @@ async function main(): Promise<void> {
       negativeDedupPublic.body ===
         '{"schema":"asimposium.s4-public-actions.v1","actions":[{"category":"dual-use-boundary","action":"quarantined","notice":"none"},{"category":"dual-use-boundary","action":"quarantined","notice":"none"}]}' &&
       negativeDedupDiagnosticsDenied.response.status === 404 &&
+      negativeDedupDiagnosticsReadinessNonce.response.status === 404 &&
       negativeDedupDiagnostics.response.status === 200 &&
       negativeDedupReceipts.length === 2 &&
       typeof recordField(firstDedupRecord ?? {}, "configuration_digest") === "string" &&
@@ -1370,7 +1472,7 @@ async function main(): Promise<void> {
       typeof deduplicatedFrom === "string" &&
       /^DR-[A-Za-z0-9._-]+$/u.test(deduplicatedFrom) &&
       hasNoPrivateMaterial(negativeDedupPublic, [LOCAL_S4_NEGATIVE_DEDUP_MARKER]),
-    `reset ${untrustedReset.response.status}/${trustedReset.response.status} holds ${negativeDedupFirst.response.status}/${negativeDedupSecond.response.status} public ${negativeDedupPublic.response.status} diagnostics ${negativeDedupDiagnosticsDenied.response.status}/${negativeDedupDiagnostics.response.status}`,
+    `reset ${readinessNonceReset.response.status}/${trustedReset.response.status} holds ${negativeDedupFirst.response.status}/${negativeDedupSecond.response.status} public ${negativeDedupPublic.response.status} diagnostics ${negativeDedupDiagnosticsDenied.response.status}/${negativeDedupDiagnosticsReadinessNonce.response.status}/${negativeDedupDiagnostics.response.status}`,
   );
 
   const expiringReplayProblemId = "P-s4-replay-expiry";
@@ -1516,7 +1618,7 @@ async function main(): Promise<void> {
     crossFellowProblemId,
     `${privateCanary}-s4-cross-fellow-seed`,
     {
-      [localS4FellowAuthorityHeader]: localRunToken,
+      [localS4FellowAuthorityHeader]: localAuthorityToken,
       [localS4FellowIdHeader]: "fixture-fellow-a",
     },
   );
@@ -1524,7 +1626,7 @@ async function main(): Promise<void> {
     crossFellowProblemId,
     `${privateCanary}-s4-cross-fellow-current`,
     {
-      [localS4FellowAuthorityHeader]: localRunToken,
+      [localS4FellowAuthorityHeader]: localAuthorityToken,
       [localS4FellowIdHeader]: "fixture-fellow-b",
     },
   );
@@ -1569,12 +1671,13 @@ async function main(): Promise<void> {
   const oversizedHistorySeedDenied = await snapshot(
     await localFetch(`${origin}/__s3/s4/fixtures/oversized-history/${oversizedHistoryProblemId}`, {
       method: "POST",
+      headers: { [localS4FixtureAuthorityHeader]: localReadinessNonce },
     }),
   );
   const oversizedHistorySeed = await snapshot(
     await localFetch(`${origin}/__s3/s4/fixtures/oversized-history/${oversizedHistoryProblemId}`, {
       method: "POST",
-      headers: { [localS4FixtureAuthorityHeader]: localRunToken },
+      headers: { [localS4FixtureAuthorityHeader]: localAuthorityToken },
     }),
   );
   const oversizedHistoryWorkshop = await pushWorkshop(
@@ -1595,7 +1698,7 @@ async function main(): Promise<void> {
   );
   const oversizedHistoryDiagnostics = await requestJson(
     `/__s3/s4/diagnostics/${oversizedHistoryProblemId}`,
-    { headers: { [localS4FixtureAuthorityHeader]: localRunToken } },
+    { headers: { [localS4FixtureAuthorityHeader]: localAuthorityToken } },
   );
   const oversizedHistoryReceipts = Array.isArray(oversizedHistoryDiagnostics.body.receipts)
     ? oversizedHistoryDiagnostics.body.receipts
