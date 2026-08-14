@@ -64,6 +64,23 @@ describe("S-1 mountable enrollment router", () => {
       claim: { method: "POST", path: "/v1/fellows", secret_transport: "JSON request body only" },
     });
 
+    const jsonEtag = json.headers.get("etag");
+    expect(jsonEtag).toMatch(/^"[a-f0-9]{64}"$/);
+    const notModified = await request(router, `/join/${minted.enrollmentId}`, {
+      headers: { accept: "application/json", "if-none-match": jsonEtag ?? "" },
+    });
+    expect(notModified.status).toBe(304);
+    expect(await notModified.text()).toBe("");
+
+    const qZero = await request(router, `/join/${minted.enrollmentId}`, {
+      headers: { accept: "application/json;q=0, */*;q=1" },
+    });
+    expect(qZero.headers.get("content-type")).toBe("text/markdown; charset=utf-8");
+    const wildcard = await request(router, `/join/${minted.enrollmentId}`, {
+      headers: { accept: "*/*" },
+    });
+    expect(wildcard.headers.get("content-type")).toBe("text/markdown; charset=utf-8");
+
     const html = await request(router, `/join/${minted.enrollmentId}`, {
       headers: { accept: "text/html" },
     });
@@ -73,6 +90,23 @@ describe("S-1 mountable enrollment router", () => {
     const escaped = await request(router, `/join/${minted.enrollmentId}?secret=v1.ignored`);
     expect(escaped.status).toBe(400);
     expect(await escaped.json()).toMatchObject({ code: "PATH_ONLY_REQUIRED" });
+
+    const unavailable = ["/join/not-an-enrollment-id", "/join/ASIMP-EN-7F3K9M2Q8R"];
+    for (const path of unavailable) {
+      const response = await request(router, path);
+      expect(response.status).toBe(404);
+      expect(await response.json()).toMatchObject({ code: "CAPSULE_UNAVAILABLE" });
+    }
+    await service.claim({
+      enrollment_id: minted.enrollmentId,
+      secret: minted.secret,
+      name: "consumed-orchid",
+      model: "test-model",
+      harness: "test-harness",
+    });
+    const consumed = await request(router, `/join/${minted.enrollmentId}`);
+    expect(consumed.status).toBe(404);
+    expect(await consumed.json()).toMatchObject({ code: "CAPSULE_UNAVAILABLE" });
   });
 
   test("registration makes name errors teachable only after opaque credential fields validate", async () => {
@@ -160,6 +194,11 @@ describe("S-1 mountable enrollment router", () => {
 
     const denied = await request(router, "/v1/hello");
     expect(denied.status).toBe(401);
+    const oversized = await request(router, "/v1/hello", {
+      headers: { authorization: `Bearer asimp_ag_${"A".repeat(8_192)}` },
+    });
+    expect(oversized.status).toBe(401);
+    expect(await oversized.json()).toMatchObject({ code: "FELLOW_TOKEN_INVALID" });
     const hello = await request(router, "/v1/hello", {
       headers: { authorization: `Bearer ${issuedBody.token}` },
     });

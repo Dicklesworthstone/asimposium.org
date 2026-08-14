@@ -183,7 +183,7 @@ describe("S-1 enrollment state machine", () => {
         model: "test-model",
         harness: "test-harness",
       }),
-      "PAIRING_EXPIRED",
+      "PAIRING_INVALID",
     );
 
     const { enrollmentId, flowHandle } = await mintAndClaim(service, "deny-orchid");
@@ -317,7 +317,7 @@ describe("S-1 enrollment state machine", () => {
         model: "test-model",
         harness: "test-harness",
       }),
-      "PAIRING_EXPIRED",
+      "PAIRING_INVALID",
     );
     const mintKey = "mint-idempotency-1";
     await service.mint(sponsor, { requested_scopes: ["review"] }, { idempotencyKey: mintKey });
@@ -332,7 +332,7 @@ describe("S-1 enrollment state machine", () => {
     expect(replacement.secret).toMatch(/^v1\./);
   });
 
-  test("claim, decision, and poll idempotency records block unsafe retries without duplicate state", async () => {
+  test("current claim replay is rejected after secret consumption until encrypted replay recovery replaces this seam", async () => {
     const { service } = serviceFixture();
     const minted = await service.mint(sponsor, { requested_scopes: ["review"] });
     const claimBody = {
@@ -345,7 +345,7 @@ describe("S-1 enrollment state machine", () => {
     const claim = await service.claim(claimBody, { idempotencyKey: "claim-idempotency-1" });
     await expectEnrollmentError(
       service.claim(claimBody, { idempotencyKey: "claim-idempotency-1" }),
-      "IDEMPOTENCY_REPLAY_UNSAFE",
+      "PAIRING_INVALID",
     );
     await service.decide(
       sponsor,
@@ -436,6 +436,71 @@ describe("S-1 enrollment state machine", () => {
       }),
       "PAIRING_INVALID",
     );
+  });
+
+  test("name policy is unreachable until a current unused enrollment secret verifies", async () => {
+    const { clock, service } = serviceFixture();
+    const valid = await service.mint(sponsor, { requested_scopes: ["review"] });
+    const unknown = await service.mint(sponsor, { requested_scopes: ["review"] });
+    const expired = await service.mint(sponsor, {
+      requested_scopes: ["review"],
+      expires_in_ms: 1,
+    });
+    const consumed = await service.mint(sponsor, { requested_scopes: ["review"] });
+    await service.claim({
+      enrollment_id: consumed.enrollmentId,
+      secret: consumed.secret,
+      name: "consumed-orchid",
+      model: "test-model",
+      harness: "test-harness",
+    });
+    clock.value += 2;
+
+    const opaqueAttempts = [
+      {
+        enrollmentId: valid.enrollmentId,
+        secret: "v1.AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
+      },
+      { enrollmentId: "ASIMP-EN-7F3K9M2Q8R", secret: unknown.secret },
+      { enrollmentId: expired.enrollmentId, secret: expired.secret },
+      { enrollmentId: consumed.enrollmentId, secret: consumed.secret },
+    ];
+    for (const name of ["codex", "claimed-orchid", "orchid-", "legal-orchid"]) {
+      for (const attempt of opaqueAttempts) {
+        const error = await expectEnrollmentError(
+          service.claim({
+            enrollment_id: attempt.enrollmentId,
+            secret: attempt.secret,
+            name,
+            model: "test-model",
+            harness: "test-harness",
+          }),
+          "PAIRING_INVALID",
+        );
+        expect(error.suggestions).toEqual([]);
+      }
+    }
+
+    const teaching = await expectEnrollmentError(
+      service.claim({
+        enrollment_id: valid.enrollmentId,
+        secret: valid.secret,
+        name: "codex",
+        model: "test-model",
+        harness: "test-harness",
+      }),
+      "MODEL_AS_NAME",
+    );
+    expect(teaching.suggestions).toHaveLength(3);
+    await expect(
+      service.claim({
+        enrollment_id: valid.enrollmentId,
+        secret: valid.secret,
+        name: "recovered-orchid",
+        model: "test-model",
+        harness: "test-harness",
+      }),
+    ).resolves.toMatchObject({ flowHandle: expect.stringMatching(/^flow_v1\./) });
   });
 
   test("approval cards report deny status without retaining requested grants as effective authority", async () => {

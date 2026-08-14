@@ -48,6 +48,18 @@ CREATE TABLE enrollment_fellows (
   created_at INTEGER NOT NULL
 );
 
+-- Approval writes this immutable grant binding in the same D1 batch that
+-- reserves the Fellow name. A credential remains absent until the Fellow wins
+-- the one-time device-token poll; approval itself never manufactures a token.
+CREATE TABLE enrollment_grants (
+  proposal_id TEXT PRIMARY KEY REFERENCES enrollment_proposals(proposal_id),
+  fellow_id TEXT NOT NULL UNIQUE REFERENCES enrollment_fellows(fellow_id),
+  sponsor_id TEXT NOT NULL,
+  granted_scopes_json TEXT NOT NULL CHECK (json_valid(granted_scopes_json)),
+  granted_resources_json TEXT NOT NULL CHECK (json_valid(granted_resources_json)),
+  granted_at INTEGER NOT NULL
+);
+
 CREATE TABLE enrollment_credentials (
   credential_id TEXT PRIMARY KEY,
   proposal_id TEXT NOT NULL UNIQUE REFERENCES enrollment_proposals(proposal_id),
@@ -61,12 +73,16 @@ CREATE TABLE enrollment_credentials (
 
 CREATE TABLE enrollment_idempotency (
   scope TEXT NOT NULL CHECK (scope IN ('mint', 'claim', 'decision', 'poll')),
+  principal_scope TEXT NOT NULL,
   idempotency_key TEXT NOT NULL,
   request_digest TEXT NOT NULL,
+  response_ciphertext TEXT NOT NULL,
+  response_initialization_vector TEXT NOT NULL,
   expires_at INTEGER NOT NULL,
-  PRIMARY KEY (scope, idempotency_key)
+  PRIMARY KEY (scope, principal_scope, idempotency_key)
 );
 
 CREATE INDEX enrollment_records_sponsor_idx ON enrollment_records (sponsor_id, secret_expires_at);
 CREATE INDEX enrollment_proposals_status_idx ON enrollment_proposals (status, expires_at);
+CREATE INDEX enrollment_grants_fellow_idx ON enrollment_grants (fellow_id);
 CREATE INDEX enrollment_credentials_token_idx ON enrollment_credentials (token_hash);

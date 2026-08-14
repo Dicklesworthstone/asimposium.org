@@ -88,6 +88,17 @@ if (typeof origin !== "string" || !/^http:\/\/127\.0\.0\.1:\d+$/.test(origin)) {
       throw new Error("claim-shape");
     }
 
+    for (const enrollmentId of ["ASIMP-EN-7F3K9M2Q8R", minted.enrollmentId]) {
+      const card = await post("/__s1/card", {
+        sponsor_id: enrollmentId === minted.enrollmentId ? "wrong-local-sponsor" : sponsorId,
+        enrollment_id: enrollmentId,
+      });
+      const cardBody = (await card.json()) as { code?: unknown };
+      if (card.status !== 403 || cardBody.code !== "WRONG_PRINCIPAL") {
+        throw new Error("approval-card-principal-boundary");
+      }
+    }
+
     const pending = await post("/v1/fellows/flow", { flow_handle: claimBody.flow_handle });
     const pendingBody = (await pending.json()) as {
       status?: unknown;
@@ -106,6 +117,21 @@ if (typeof origin !== "string" || !/^http:\/\/127\.0\.0\.1:\d+$/.test(origin)) {
       enrollment_id: minted.enrollmentId,
     });
     if (approval.status !== 200) throw new Error("approval-status");
+
+    const approvedCard = await post("/__s1/card", {
+      sponsor_id: sponsorId,
+      enrollment_id: minted.enrollmentId,
+    });
+    const approvedCardBody = (await approvedCard.json()) as {
+      card?: { status?: unknown; effectiveGrantedScopes?: unknown };
+    };
+    if (
+      approvedCard.status !== 200 ||
+      approvedCardBody.card?.status !== "approved" ||
+      !Array.isArray(approvedCardBody.card.effectiveGrantedScopes)
+    ) {
+      throw new Error("durable-approval-grant");
+    }
 
     const issued = await post("/v1/device-token", { flow_handle: claimBody.flow_handle });
     const issuedBody = (await issued.json()) as { status?: unknown; token?: unknown };
@@ -136,6 +162,8 @@ if (typeof origin !== "string" || !/^http:\/\/127\.0\.0\.1:\d+$/.test(origin)) {
         cases: [
           "capsule-secret-boundary",
           "name-policy",
+          "approval-card-principal-boundary",
+          "durable-approval-grant",
           "body-only-flow",
           "approve-token-hello-binding",
         ],

@@ -7,6 +7,7 @@ import {
   type EnrollmentApprovalCard,
   type EnrollmentCapsule,
   EnrollmentError,
+  type EnrollmentIdempotencyReplay,
   type EnrollmentRecord,
   type EnrollmentResourceGrants,
   type EnrollmentStore,
@@ -53,6 +54,8 @@ interface ProposalRow extends RecordRow {
   token_issued_at: number | null;
   poll_interval_seconds: number;
   last_poll_at: number | null;
+  durable_granted_scopes_json: string | null;
+  durable_granted_resources_json: string | null;
 }
 
 interface CredentialRow {
@@ -70,6 +73,8 @@ interface CredentialRow {
 
 interface IdempotencyRow {
   request_digest: string;
+  response_ciphertext: string;
+  response_initialization_vector: string;
   expires_at: number;
 }
 
@@ -269,20 +274,30 @@ export class D1EnrollmentStore implements EnrollmentStore {
       // The safe classification below deliberately drops the database detail.
     }
 
+    throw new EnrollmentError("PAIRING_INVALID");
+  }
+
+  async verifyClaimCredentials(
+    enrollmentId: string,
+    secretHash: string,
+    now: number,
+  ): Promise<void> {
     const row = await sql(
       this.#db,
       `SELECT enrollment_id, sponsor_id, secret_hash, secret_expires_at,
               requested_scopes_json, requested_resources_json, invalidated, secret_consumed_at
          FROM enrollment_records WHERE enrollment_id = ?`,
-      attempt.enrollmentId,
+      enrollmentId,
     ).first<RecordRow>();
-    if (row === null || !secretSafeEqual(row.secret_hash, attempt.secretHash)) {
+    if (
+      row === null ||
+      !secretSafeEqual(row.secret_hash, secretHash) ||
+      row.invalidated === 1 ||
+      now >= row.secret_expires_at ||
+      row.secret_consumed_at !== null
+    ) {
       throw new EnrollmentError("PAIRING_INVALID");
     }
-    if (row.invalidated === 1 || attempt.now >= row.secret_expires_at) {
-      throw new EnrollmentError("PAIRING_EXPIRED");
-    }
-    throw new EnrollmentError("PAIRING_INVALID");
   }
 
   async decision(attempt: DecisionAttempt): Promise<void> {
@@ -337,8 +352,26 @@ export class D1EnrollmentStore implements EnrollmentStore {
           row.harness,
           attempt.now,
         ),
+        sql(
+          this.#db,
+          `INSERT INTO enrollment_grants (
+             proposal_id, fellow_id, sponsor_id, granted_scopes_json, granted_resources_json, granted_at
+           ) SELECT ?, ?, ?, ?, ?, ? WHERE changes() = 1`,
+          row.proposal_id,
+          row.fellow_id,
+          attempt.sponsorId,
+          encode(scopes),
+          encode(resources),
+          attempt.now,
+        ),
       ]);
-      if (results[0]?.meta.changes === 1 && results[1]?.meta.changes === 1) return;
+      if (
+        results[0]?.meta.changes === 1 &&
+        results[1]?.meta.changes === 1 &&
+        results[2]?.meta.changes === 1
+      ) {
+        return;
+      }
       throw new EnrollmentError("PROPOSAL_NOT_PENDING");
     } catch (error) {
       if (error instanceof EnrollmentError) throw error;
@@ -353,15 +386,7 @@ export class D1EnrollmentStore implements EnrollmentStore {
     now: number,
   ): Promise<EnrollmentApprovalCard> {
     const row = await this.proposalByEnrollment(enrollmentId, sponsorId);
-    if (row === null) {
-      const exists = await sql(
-        this.#db,
-        "SELECT enrollment_id FROM enrollment_records WHERE enrollment_id = ?",
-        enrollmentId,
-      ).first<{ enrollment_id: string }>();
-      if (exists !== null) throw new EnrollmentError("WRONG_PRINCIPAL");
-      throw new EnrollmentError("WRONG_PRINCIPAL");
-    }
+    if (row === null) throw new EnrollmentError("WRONG_PRINCIPAL");
     if (row.status === "pending" && now >= row.expires_at) {
       await sql(
         this.#db,
@@ -374,11 +399,14 @@ export class D1EnrollmentStore implements EnrollmentStore {
     const granted =
       row.status === "approved" || row.status === "reduced"
         ? {
-            scopes: row.granted_scopes_json === null ? null : parseScopes(row.granted_scopes_json),
-            resources:
-              row.granted_resources_json === null
+            scopes:
+              row.durable_granted_scopes_json === null
                 ? null
-                : parseResources(row.granted_resources_json),
+                : parseScopes(row.durable_granted_scopes_json),
+            resources:
+              row.durable_granted_resources_json === null
+                ? null
+                : parseResources(row.durable_granted_resources_json),
           }
         : { scopes: null, resources: null };
     if (
@@ -481,10 +509,10 @@ export class D1EnrollmentStore implements EnrollmentStore {
             `INSERT INTO enrollment_credentials (
                credential_id, proposal_id, fellow_id, sponsor_id, token_hash,
                granted_scopes_json, granted_resources_json, issued_at
-             ) SELECT ?, p.proposal_id, p.fellow_id, r.sponsor_id, ?,
-                      p.granted_scopes_json, p.granted_resources_json, ?
+             ) SELECT ?, p.proposal_id, g.fellow_id, g.sponsor_id, ?,
+                      g.granted_scopes_json, g.granted_resources_json, ?
                  FROM enrollment_proposals p
-                 JOIN enrollment_records r ON r.enrollment_id = p.enrollment_id
+                 JOIN enrollment_grants g ON g.proposal_id = p.proposal_id
                 WHERE p.proposal_id = ? AND changes() = 1`,
             `cred-${row.proposal_id}`,
             issued.tokenHash,
@@ -556,9 +584,11 @@ export class D1EnrollmentStore implements EnrollmentStore {
   async beginIdempotency(attempt: IdempotencyAttempt): Promise<IdempotencyResult> {
     const existing = await sql(
       this.#db,
-      `SELECT request_digest, expires_at FROM enrollment_idempotency
-        WHERE scope = ? AND idempotency_key = ?`,
+      `SELECT request_digest, response_ciphertext, response_initialization_vector, expires_at
+         FROM enrollment_idempotency
+        WHERE scope = ? AND principal_scope = ? AND idempotency_key = ?`,
       attempt.scope,
+      attempt.principalScope,
       attempt.key,
     ).first<IdempotencyRow>();
     if (existing !== null && attempt.now < existing.expires_at) {
@@ -568,11 +598,14 @@ export class D1EnrollmentStore implements EnrollmentStore {
       const refreshed = await sql(
         this.#db,
         `UPDATE enrollment_idempotency
-            SET request_digest = ?, expires_at = ?
-          WHERE scope = ? AND idempotency_key = ? AND expires_at <= ?`,
+            SET request_digest = ?, response_ciphertext = ?, response_initialization_vector = ?, expires_at = ?
+          WHERE scope = ? AND principal_scope = ? AND idempotency_key = ? AND expires_at <= ?`,
         attempt.digest,
+        "",
+        "",
         attempt.now + 24 * 60 * 60 * 1_000,
         attempt.scope,
+        attempt.principalScope,
         attempt.key,
         attempt.now,
       ).run();
@@ -582,17 +615,48 @@ export class D1EnrollmentStore implements EnrollmentStore {
     try {
       await sql(
         this.#db,
-        `INSERT INTO enrollment_idempotency (scope, idempotency_key, request_digest, expires_at)
-         VALUES (?, ?, ?, ?)`,
+        `INSERT INTO enrollment_idempotency (
+           scope, principal_scope, idempotency_key, request_digest,
+           response_ciphertext, response_initialization_vector, expires_at
+         ) VALUES (?, ?, ?, ?, ?, ?, ?)`,
         attempt.scope,
+        attempt.principalScope,
         attempt.key,
         attempt.digest,
+        "",
+        "",
         attempt.now + 24 * 60 * 60 * 1_000,
       ).run();
       return "new";
     } catch {
       return "conflict";
     }
+  }
+
+  async idempotencyReplay(
+    attempt: IdempotencyAttempt,
+  ): Promise<EnrollmentIdempotencyReplay | undefined> {
+    const row = await sql(
+      this.#db,
+      `SELECT request_digest, response_ciphertext, response_initialization_vector, expires_at
+         FROM enrollment_idempotency
+        WHERE scope = ? AND principal_scope = ? AND idempotency_key = ? AND expires_at > ?`,
+      attempt.scope,
+      attempt.principalScope,
+      attempt.key,
+      attempt.now,
+    ).first<IdempotencyRow>();
+    if (row === null) return undefined;
+    if (!secretSafeEqual(row.request_digest, attempt.digest)) {
+      throw new EnrollmentError("IDEMPOTENCY_CONFLICT");
+    }
+    return {
+      digest: row.request_digest,
+      encryptedResponse: {
+        ciphertext: row.response_ciphertext,
+        initializationVector: row.response_initialization_vector,
+      },
+    };
   }
 
   private async proposalByEnrollment(
@@ -606,9 +670,12 @@ export class D1EnrollmentStore implements EnrollmentStore {
               p.proposal_id, p.fellow_id, p.flow_handle_hash, p.name, p.model, p.harness,
               p.reasoning_effort, p.tools_note, p.created_at, p.expires_at, p.status,
               p.granted_scopes_json, p.granted_resources_json, p.token_hash, p.token_issued_at,
-              p.poll_interval_seconds, p.last_poll_at
+              p.poll_interval_seconds, p.last_poll_at,
+              g.granted_scopes_json AS durable_granted_scopes_json,
+              g.granted_resources_json AS durable_granted_resources_json
          FROM enrollment_records e
          JOIN enrollment_proposals p ON p.enrollment_id = e.enrollment_id
+         LEFT JOIN enrollment_grants g ON g.proposal_id = p.proposal_id
         WHERE e.enrollment_id = ? AND e.sponsor_id = ?`,
       enrollmentId,
       sponsorId,
@@ -623,9 +690,12 @@ export class D1EnrollmentStore implements EnrollmentStore {
               p.proposal_id, p.fellow_id, p.flow_handle_hash, p.name, p.model, p.harness,
               p.reasoning_effort, p.tools_note, p.created_at, p.expires_at, p.status,
               p.granted_scopes_json, p.granted_resources_json, p.token_hash, p.token_issued_at,
-              p.poll_interval_seconds, p.last_poll_at
+              p.poll_interval_seconds, p.last_poll_at,
+              g.granted_scopes_json AS durable_granted_scopes_json,
+              g.granted_resources_json AS durable_granted_resources_json
          FROM enrollment_proposals p
          JOIN enrollment_records e ON e.enrollment_id = p.enrollment_id
+         LEFT JOIN enrollment_grants g ON g.proposal_id = p.proposal_id
         WHERE p.flow_handle_hash = ?`,
       flowHandleHash,
     ).first<ProposalRow>();

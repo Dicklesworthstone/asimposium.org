@@ -76,6 +76,17 @@ export interface EnrollmentWriteOptions {
   readonly idempotencyKey?: string;
 }
 
+export interface EnrollmentReplayProtector {
+  seal(plaintext: string): Promise<EncryptedEnrollmentReplay>;
+  open(encrypted: EncryptedEnrollmentReplay): Promise<string>;
+}
+
+/** Stored in D1; neither field is a plaintext credential or protocol response. */
+export interface EncryptedEnrollmentReplay {
+  readonly ciphertext: string;
+  readonly initializationVector: string;
+}
+
 export interface MintedEnrollment {
   readonly enrollmentId: string;
   /** Returned once to the sponsor’s minting flow; never kept by the store. */
@@ -224,12 +235,30 @@ export interface PollDecision {
 
 export interface IdempotencyAttempt {
   readonly scope: "mint" | "claim" | "decision" | "poll";
+  readonly principalScope: string;
   readonly key: string;
   readonly digest: string;
   readonly now: number;
 }
 
+export interface EnrollmentIdempotencyWrite extends IdempotencyAttempt {
+  readonly encryptedResponse: EncryptedEnrollmentReplay;
+}
+
+export interface EnrollmentIdempotencyReplay {
+  readonly digest: string;
+  readonly encryptedResponse: EncryptedEnrollmentReplay;
+}
+
+/** Transitional discriminator retained while encrypted replay wiring lands. */
 export type IdempotencyResult = "new" | "replay" | "conflict";
+
+export class EnrollmentIdempotencyRaceError extends Error {
+  constructor() {
+    super("idempotency record was committed by a concurrent request");
+    this.name = "EnrollmentIdempotencyRaceError";
+  }
+}
 
 /**
  * The persistence seam intentionally exposes only atomic state transitions.
@@ -237,18 +266,28 @@ export type IdempotencyResult = "new" | "replay" | "conflict";
  * pending-expiry races, or one-token-winner semantics.
  */
 export interface EnrollmentStore {
-  create(record: EnrollmentRecord, replacesEnrollmentId?: string): Promise<boolean>;
-  claim(attempt: ClaimAttempt): Promise<void>;
-  decision(attempt: DecisionAttempt): Promise<void>;
+  create(
+    record: EnrollmentRecord,
+    replacesEnrollmentId?: string,
+    idempotency?: EnrollmentIdempotencyWrite,
+  ): Promise<boolean>;
+  claim(attempt: ClaimAttempt, idempotency?: EnrollmentIdempotencyWrite): Promise<void>;
+  /**
+   * Credential-only preflight for teachable name feedback. The final claim
+   * transition repeats this check and burns the secret atomically.
+   */
+  verifyClaimCredentials(enrollmentId: string, secretHash: string, now: number): Promise<void>;
+  decision(attempt: DecisionAttempt, idempotency?: EnrollmentIdempotencyWrite): Promise<void>;
   approvalCard(
     enrollmentId: string,
     sponsorId: string,
     now: number,
   ): Promise<EnrollmentApprovalCard>;
   capsule(enrollmentId: string, now: number): Promise<EnrollmentCapsule>;
-  poll(attempt: PollAttempt): Promise<PollDecision>;
+  poll(attempt: PollAttempt, idempotency?: EnrollmentIdempotencyWrite): Promise<PollDecision>;
   availabilitySuggestions(name: string): Promise<readonly string[]>;
   credentialByTokenHash(tokenHash: string): Promise<FellowCredentialBinding | undefined>;
+  idempotencyReplay(attempt: IdempotencyAttempt): Promise<EnrollmentIdempotencyReplay | undefined>;
   beginIdempotency(attempt: IdempotencyAttempt): Promise<IdempotencyResult>;
 }
 
@@ -275,6 +314,79 @@ function bytesToBase64Url(bytes: Uint8Array): string {
   }
   if (bits > 0) output += BASE64URL[(buffer << (6 - bits)) & 0x3f];
   return output;
+}
+
+function base64UrlToBytes(value: string): Uint8Array {
+  let buffer = 0;
+  let bits = 0;
+  const output: number[] = [];
+  for (const character of value) {
+    const index = BASE64URL.indexOf(character);
+    if (index < 0) throw new TypeError("invalid base64url replay encoding");
+    buffer = (buffer << 6) | index;
+    bits += 6;
+    if (bits >= 8) {
+      bits -= 8;
+      output.push((buffer >> bits) & 0xff);
+    }
+  }
+  return Uint8Array.from(output);
+}
+
+/**
+ * AES-GCM envelope for idempotent response replay. The caller supplies a
+ * stable 256-bit key for D1-backed services; only ciphertext and a random IV
+ * enter D1. The default in-memory service key is intentionally ephemeral.
+ */
+export class AesGcmEnrollmentReplayProtector implements EnrollmentReplayProtector {
+  readonly #key: Uint8Array;
+  readonly #random: EnrollmentRandom;
+
+  constructor(key: Uint8Array, random: EnrollmentRandom = systemRandom) {
+    if (key.length !== ENROLLMENT_SECRET_BYTES) {
+      throw new TypeError("replay protector requires a 256-bit key");
+    }
+    this.#key = key.slice();
+    this.#random = random;
+  }
+
+  async seal(plaintext: string): Promise<EncryptedEnrollmentReplay> {
+    const initializationVector = randomBytes(this.#random, 12);
+    const key = await crypto.subtle.importKey("raw", this.#key.slice().buffer, "AES-GCM", false, [
+      "encrypt",
+    ]);
+    const encoded = new TextEncoder().encode(plaintext);
+    const ciphertext = await crypto.subtle.encrypt(
+      { name: "AES-GCM", iv: initializationVector.slice().buffer },
+      key,
+      encoded.buffer,
+    );
+    return {
+      ciphertext: bytesToBase64Url(new Uint8Array(ciphertext)),
+      initializationVector: bytesToBase64Url(initializationVector),
+    };
+  }
+
+  async open(encrypted: EncryptedEnrollmentReplay): Promise<string> {
+    try {
+      const initializationVector = base64UrlToBytes(encrypted.initializationVector);
+      const ciphertext = base64UrlToBytes(encrypted.ciphertext);
+      if (initializationVector.length !== 12 || ciphertext.length < 16) {
+        throw new TypeError("invalid encrypted replay envelope");
+      }
+      const key = await crypto.subtle.importKey("raw", this.#key.slice().buffer, "AES-GCM", false, [
+        "decrypt",
+      ]);
+      const plaintext = await crypto.subtle.decrypt(
+        { name: "AES-GCM", iv: initializationVector.slice().buffer },
+        key,
+        ciphertext.slice().buffer,
+      );
+      return new TextDecoder().decode(plaintext);
+    } catch {
+      throw new EnrollmentError("IDEMPOTENCY_CONFLICT");
+    }
+  }
 }
 
 function bytesToCrockford(bytes: Uint8Array, length: number): string {
@@ -553,11 +665,19 @@ export class InMemoryEnrollmentStore implements EnrollmentStore {
   readonly #credentials = new Map<string, FellowCredentialBinding>();
   readonly #idempotency = new Map<
     string,
-    { readonly digest: string; readonly expiresAt: number }
+    {
+      readonly digest: string;
+      readonly encryptedResponse: EncryptedEnrollmentReplay;
+      readonly expiresAt: number;
+    }
   >();
   #tail: Promise<void> = Promise.resolve();
 
-  async create(record: EnrollmentRecord, replacesEnrollmentId?: string): Promise<boolean> {
+  async create(
+    record: EnrollmentRecord,
+    replacesEnrollmentId?: string,
+    idempotency?: EnrollmentIdempotencyWrite,
+  ): Promise<boolean> {
     return this.serialized(() => {
       if (this.#records.has(record.enrollmentId)) return false;
       if (replacesEnrollmentId !== undefined) {
@@ -573,26 +693,36 @@ export class InMemoryEnrollmentStore implements EnrollmentStore {
         predecessor.invalidated = true;
       }
       this.#records.set(record.enrollmentId, record);
+      this.commitIdempotency(idempotency);
       return true;
     });
   }
 
-  async claim(attempt: ClaimAttempt): Promise<void> {
+  async claim(attempt: ClaimAttempt, idempotency?: EnrollmentIdempotencyWrite): Promise<void> {
     await this.serialized(() => {
       const record = this.#records.get(attempt.enrollmentId);
-      if (record === undefined || !constantTimeEqual(record.secretHash, attempt.secretHash)) {
-        throw new EnrollmentError("PAIRING_INVALID");
-      }
-      if (record.invalidated || attempt.now >= record.secretExpiresAt) {
-        throw new EnrollmentError("PAIRING_EXPIRED");
-      }
-      if (record.secretConsumedAt !== undefined) throw new EnrollmentError("PAIRING_INVALID");
-      record.secretConsumedAt = attempt.now;
-      record.proposal = attempt.proposal;
+      this.assertClaimCredentials(record, attempt.secretHash, attempt.now);
+      const confirmed = record as EnrollmentRecord;
+      confirmed.secretConsumedAt = attempt.now;
+      confirmed.proposal = attempt.proposal;
+      this.commitIdempotency(idempotency);
     });
   }
 
-  async decision(attempt: DecisionAttempt): Promise<void> {
+  async verifyClaimCredentials(
+    enrollmentId: string,
+    secretHash: string,
+    now: number,
+  ): Promise<void> {
+    await this.serialized(() => {
+      this.assertClaimCredentials(this.#records.get(enrollmentId), secretHash, now);
+    });
+  }
+
+  async decision(
+    attempt: DecisionAttempt,
+    idempotency?: EnrollmentIdempotencyWrite,
+  ): Promise<void> {
     await this.serialized(() => {
       const record = this.#records.get(attempt.enrollmentId);
       if (record === undefined || record.sponsorId !== attempt.sponsorId) {
@@ -609,6 +739,7 @@ export class InMemoryEnrollmentStore implements EnrollmentStore {
 
       if (attempt.decision.decision === "deny") {
         proposal.status = "denied";
+        this.commitIdempotency(idempotency);
         return;
       }
 
@@ -650,6 +781,7 @@ export class InMemoryEnrollmentStore implements EnrollmentStore {
       proposal.status = attempt.decision.decision === "approve" ? "approved" : "reduced";
       proposal.grantedScopes = proposedScopes;
       proposal.grantedResources = proposedResources;
+      this.commitIdempotency(idempotency);
     });
   }
 
@@ -706,7 +838,10 @@ export class InMemoryEnrollmentStore implements EnrollmentStore {
     });
   }
 
-  async poll(attempt: PollAttempt): Promise<PollDecision> {
+  async poll(
+    attempt: PollAttempt,
+    idempotency?: EnrollmentIdempotencyWrite,
+  ): Promise<PollDecision> {
     return this.serialized(async () => {
       const record = [...this.#records.values()].find(
         (candidate) =>
@@ -725,12 +860,21 @@ export class InMemoryEnrollmentStore implements EnrollmentStore {
         });
         proposal.pollIntervalSeconds = pacing.retryAfterSeconds;
         proposal.lastPollAt = attempt.now;
-        return pacing.kind === "slow-down"
-          ? { kind: "slow-down", retryAfterSeconds: pacing.retryAfterSeconds }
-          : { kind: "pending", retryAfterSeconds: pacing.retryAfterSeconds };
+        const decision: PollDecision =
+          pacing.kind === "slow-down"
+            ? { kind: "slow-down", retryAfterSeconds: pacing.retryAfterSeconds }
+            : { kind: "pending", retryAfterSeconds: pacing.retryAfterSeconds };
+        this.commitIdempotency(idempotency);
+        return decision;
       }
-      if (proposal.status === "denied") return { kind: "denied" };
-      if (proposal.status === "expired") return { kind: "expired" };
+      if (proposal.status === "denied") {
+        this.commitIdempotency(idempotency);
+        return { kind: "denied" };
+      }
+      if (proposal.status === "expired") {
+        this.commitIdempotency(idempotency);
+        return { kind: "expired" };
+      }
       if (proposal.tokenHash !== undefined) return { kind: "already-issued" };
 
       const issued = await attempt.createToken();
@@ -751,6 +895,7 @@ export class InMemoryEnrollmentStore implements EnrollmentStore {
         tokenHash: issued.tokenHash,
         issuedAt: attempt.now,
       });
+      this.commitIdempotency(idempotency);
       return { kind: "issued", token: issued.token };
     });
   }
@@ -786,19 +931,71 @@ export class InMemoryEnrollmentStore implements EnrollmentStore {
     return this.serialized(() => this.#credentials.get(tokenHash));
   }
 
+  async idempotencyReplay(
+    attempt: IdempotencyAttempt,
+  ): Promise<EnrollmentIdempotencyReplay | undefined> {
+    return this.serialized(() => {
+      const recordKey = `${attempt.scope}:${attempt.principalScope}:${attempt.key}`;
+      const existing = this.#idempotency.get(recordKey);
+      if (existing !== undefined && attempt.now < existing.expiresAt) {
+        if (!constantTimeEqual(existing.digest, attempt.digest)) {
+          throw new EnrollmentError("IDEMPOTENCY_CONFLICT");
+        }
+        return {
+          digest: existing.digest,
+          encryptedResponse: existing.encryptedResponse,
+        };
+      }
+      return undefined;
+    });
+  }
+
   async beginIdempotency(attempt: IdempotencyAttempt): Promise<IdempotencyResult> {
     return this.serialized(() => {
-      const recordKey = `${attempt.scope}:${attempt.key}`;
+      const recordKey = `${attempt.scope}:${attempt.principalScope}:${attempt.key}`;
       const existing = this.#idempotency.get(recordKey);
       if (existing !== undefined && attempt.now < existing.expiresAt) {
         return constantTimeEqual(existing.digest, attempt.digest) ? "replay" : "conflict";
       }
       this.#idempotency.set(recordKey, {
         digest: attempt.digest,
+        encryptedResponse: { ciphertext: "", initializationVector: "" },
         expiresAt: attempt.now + IDEMPOTENCY_TTL_MS,
       });
       return "new";
     });
+  }
+
+  private commitIdempotency(idempotency: EnrollmentIdempotencyWrite | undefined): void {
+    if (idempotency === undefined) return;
+    const recordKey = `${idempotency.scope}:${idempotency.principalScope}:${idempotency.key}`;
+    const existing = this.#idempotency.get(recordKey);
+    if (existing !== undefined && idempotency.now < existing.expiresAt) {
+      throw new EnrollmentIdempotencyRaceError();
+    }
+    this.#idempotency.set(recordKey, {
+      digest: idempotency.digest,
+      encryptedResponse: idempotency.encryptedResponse,
+      expiresAt: idempotency.now + IDEMPOTENCY_TTL_MS,
+    });
+  }
+
+  private assertClaimCredentials(
+    record: EnrollmentRecord | undefined,
+    secretHash: string,
+    now: number,
+  ): void {
+    if (
+      record === undefined ||
+      !constantTimeEqual(record.secretHash, secretHash) ||
+      record.invalidated ||
+      now >= record.secretExpiresAt ||
+      record.secretConsumedAt !== undefined
+    ) {
+      // Every unusable credential has one opaque result. In particular, name
+      // policy must not become an oracle for an unknown or stolen join URL.
+      throw new EnrollmentError("PAIRING_INVALID");
+    }
   }
 
   /** Test-only storage inspection; it intentionally exposes hashes but never plaintext credentials. */
@@ -846,21 +1043,30 @@ export interface EnrollmentServiceOptions {
   readonly store?: EnrollmentStore;
   readonly clock?: EnrollmentClock;
   readonly random?: EnrollmentRandom;
+  readonly replayProtector?: EnrollmentReplayProtector;
 }
 
 export class EnrollmentService {
   readonly #store: EnrollmentStore;
   readonly #clock: EnrollmentClock;
   readonly #random: EnrollmentRandom;
+  readonly #replayProtector: EnrollmentReplayProtector;
 
   constructor(options: EnrollmentServiceOptions = {}) {
     this.#store = options.store ?? new InMemoryEnrollmentStore();
     this.#clock = options.clock ?? systemClock;
     this.#random = options.random ?? systemRandom;
+    this.#replayProtector =
+      options.replayProtector ??
+      new AesGcmEnrollmentReplayProtector(
+        randomBytes(this.#random, ENROLLMENT_SECRET_BYTES),
+        this.#random,
+      );
   }
 
   async #beginWrite(
     scope: IdempotencyAttempt["scope"],
+    principalScope: string,
     key: string | undefined,
     material: unknown,
   ): Promise<IdempotencyResult> {
@@ -868,6 +1074,7 @@ export class EnrollmentService {
     if (!/^[A-Za-z0-9._-]{1,160}$/.test(key)) throw new EnrollmentError("IDEMPOTENCY_CONFLICT");
     return this.#store.beginIdempotency({
       scope,
+      principalScope,
       key,
       digest: await sha256Hex(JSON.stringify(material)),
       now: this.#clock.now(),
@@ -882,10 +1089,15 @@ export class EnrollmentService {
     assertSponsor(sponsor);
     const parsed = MintEnrollmentRequestSchema.safeParse(rawRequest);
     if (!parsed.success) throw new EnrollmentError("PAIRING_INVALID");
-    const idempotency = await this.#beginWrite("mint", options.idempotencyKey, {
-      sponsor: sponsor.sponsorId,
-      request: parsed.data,
-    });
+    const idempotency = await this.#beginWrite(
+      "mint",
+      `sponsor:${sponsor.sponsorId}`,
+      options.idempotencyKey,
+      {
+        sponsor: sponsor.sponsorId,
+        request: parsed.data,
+      },
+    );
     if (idempotency === "conflict") throw new EnrollmentError("IDEMPOTENCY_CONFLICT");
     if (idempotency === "replay") throw new EnrollmentError("IDEMPOTENCY_REPLAY_UNSAFE");
     const now = this.#clock.now();
@@ -922,6 +1134,9 @@ export class EnrollmentService {
     // receive a teachable name-policy response.
     const credentialFields = FellowRegistrationCredentialFieldsSchema.safeParse(rawRequest);
     if (!credentialFields.success) throw new EnrollmentError("PAIRING_INVALID");
+    const now = this.#clock.now();
+    const secretHash = await sha256Hex(credentialFields.data.secret);
+    await this.#store.verifyClaimCredentials(credentialFields.data.enrollment_id, secretHash, now);
     const rawName = (rawRequest as Record<string, unknown>).name;
     const name = typeof rawName === "string" ? rawName : undefined;
     if (name === undefined) {
@@ -936,15 +1151,16 @@ export class EnrollmentService {
     }
     const parsed = FellowRegistrationRequestSchema.safeParse(rawRequest);
     if (!parsed.success) throw new EnrollmentError("NAME_INVALID");
-    const idempotency = await this.#beginWrite("claim", options.idempotencyKey, parsed.data);
+    const idempotency = await this.#beginWrite(
+      "claim",
+      `enrollment:${parsed.data.enrollment_id}`,
+      options.idempotencyKey,
+      parsed.data,
+    );
     if (idempotency === "conflict") throw new EnrollmentError("IDEMPOTENCY_CONFLICT");
     if (idempotency === "replay") throw new EnrollmentError("IDEMPOTENCY_REPLAY_UNSAFE");
-    const now = this.#clock.now();
     const flowHandle = generateVersionedSecret("flow_v1", this.#random);
-    const [secretHash, flowHandleHash] = await Promise.all([
-      sha256Hex(parsed.data.secret),
-      sha256Hex(flowHandle),
-    ]);
+    const flowHandleHash = await sha256Hex(flowHandle);
     await this.#store.claim({
       enrollmentId: parsed.data.enrollment_id,
       secretHash,
@@ -994,11 +1210,16 @@ export class EnrollmentService {
     assertSponsor(sponsor);
     const parsed = SponsorEnrollmentDecisionSchema.safeParse(rawDecision);
     if (!parsed.success) throw new EnrollmentError("PROPOSAL_NOT_PENDING");
-    const idempotency = await this.#beginWrite("decision", options.idempotencyKey, {
-      sponsor: sponsor.sponsorId,
-      enrollmentId,
-      decision: parsed.data,
-    });
+    const idempotency = await this.#beginWrite(
+      "decision",
+      `sponsor:${sponsor.sponsorId}`,
+      options.idempotencyKey,
+      {
+        sponsor: sponsor.sponsorId,
+        enrollmentId,
+        decision: parsed.data,
+      },
+    );
     if (idempotency === "conflict") throw new EnrollmentError("IDEMPOTENCY_CONFLICT");
     if (idempotency === "replay") return;
     const card = await this.#store.approvalCard(enrollmentId, sponsor.sponsorId, this.#clock.now());
@@ -1026,7 +1247,12 @@ export class EnrollmentService {
   ): Promise<EnrollmentFlowResult> {
     const parsed = EnrollmentFlowPollRequestSchema.safeParse(rawRequest);
     if (!parsed.success) throw new EnrollmentError("FLOW_INVALID");
-    const idempotency = await this.#beginWrite("poll", options.idempotencyKey, parsed.data);
+    const idempotency = await this.#beginWrite(
+      "poll",
+      `flow:${await sha256Hex(parsed.data.flow_handle)}`,
+      options.idempotencyKey,
+      parsed.data,
+    );
     if (idempotency === "conflict") throw new EnrollmentError("IDEMPOTENCY_CONFLICT");
     if (idempotency === "replay") throw new EnrollmentError("IDEMPOTENCY_REPLAY_UNSAFE");
     const now = this.#clock.now();

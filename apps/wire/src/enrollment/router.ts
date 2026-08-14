@@ -10,10 +10,12 @@ import {
   enrollmentCapsuleMarkdown,
   enrollmentCapsuleProjection,
 } from "./capsule.ts";
-import { EnrollmentError, type EnrollmentService } from "./service.ts";
+import { EnrollmentError, type EnrollmentPrincipal, type EnrollmentService } from "./service.ts";
 
 export interface EnrollmentRouterOptions {
   readonly service: EnrollmentService;
+  /** Parent-supplied verified identity seam; this router never trusts a header as a sponsor. */
+  readonly verifiedSponsor?: (request: Request) => Promise<EnrollmentPrincipal | undefined>;
 }
 
 function problem(
@@ -46,6 +48,28 @@ function problem(
 
 function hasQuery(request: Request): boolean {
   return new URL(request.url).search !== "";
+}
+
+/** Exact media types only; wildcard and q=0 deliberately retain Markdown. */
+function explicitlyAccepts(accept: string, mediaType: "application/json" | "text/html"): boolean {
+  for (const item of accept.toLowerCase().split(",")) {
+    const [type, ...parameters] = item.trim().split(";");
+    if (type !== mediaType) continue;
+    const quality = parameters.find((parameter) => parameter.trim().startsWith("q="));
+    if (quality === undefined) return true;
+    const value = Number(quality.trim().slice(2));
+    return Number.isFinite(value) && value > 0;
+  }
+  return false;
+}
+
+async function strongEtag(face: "json" | "html" | "markdown", body: string): Promise<string> {
+  const material = new TextEncoder().encode(`${face}\n${body}`);
+  const digest = await crypto.subtle.digest("SHA-256", material.buffer);
+  const hex = [...new Uint8Array(digest)]
+    .map((byte) => byte.toString(16).padStart(2, "0"))
+    .join("");
+  return `"${hex}"`;
 }
 
 function enrollmentErrorResponse(error: EnrollmentError): Response {
@@ -109,8 +133,25 @@ async function jsonBody(request: Request): Promise<unknown> {
 function bearerToken(request: Request): string | undefined {
   const authorization = request.headers.get("authorization");
   if (authorization === null) return undefined;
-  const match = /^Bearer ([A-Za-z0-9_-]+)$/.exec(authorization);
+  // Bound before hashing: bearer input is untrusted header data and a large
+  // value must not create avoidable hashing work or a diagnostic surface.
+  const match = /^Bearer (asimp_ag_[0-9A-HJKMNP-TV-Z]{26}_[A-Za-z0-9_-]{43})$/.exec(authorization);
   return match?.[1];
+}
+
+function idempotencyOptions(request: Request): { readonly idempotencyKey?: string } | Response {
+  const key = request.headers.get("idempotency-key");
+  if (key === null) return {};
+  if (!/^[A-Za-z0-9._-]{1,160}$/.test(key)) {
+    return problem(
+      400,
+      "IDEMPOTENCY_KEY_INVALID",
+      "Idempotency-Key is invalid",
+      "The idempotency key must be a bounded opaque header value.",
+      "Use 1 to 160 letters, digits, dots, underscores, or hyphens.",
+    );
+  }
+  return { idempotencyKey: key };
 }
 
 /**
@@ -135,7 +176,7 @@ export function createEnrollmentRouter(options: EnrollmentRouterOptions): Hono {
     if (!EnrollmentIdSchema.safeParse(enrollmentId).success) {
       return problem(
         404,
-        "PAIRING_INVALID",
+        "CAPSULE_UNAVAILABLE",
         "Enrollment capsule is unavailable",
         "This enrollment capsule is unavailable.",
         "Check the public enrollment id and obtain a fresh sponsor-issued join URL if needed.",
@@ -144,19 +185,40 @@ export function createEnrollmentRouter(options: EnrollmentRouterOptions): Hono {
     try {
       const projection = enrollmentCapsuleProjection(await options.service.capsule(enrollmentId));
       const accept = c.req.header("accept") ?? "";
-      if (accept.includes("application/json")) {
-        return c.json(projection, 200, { "cache-control": "no-store" });
-      }
-      if (accept.includes("text/html")) {
-        return c.html(enrollmentCapsuleHtml(projection), 200, { "cache-control": "no-store" });
-      }
-      return c.text(enrollmentCapsuleMarkdown(projection), 200, {
-        "content-type": "text/markdown; charset=utf-8",
+      const face = explicitlyAccepts(accept, "application/json")
+        ? "json"
+        : explicitlyAccepts(accept, "text/html")
+          ? "html"
+          : "markdown";
+      const body =
+        face === "json"
+          ? JSON.stringify(projection)
+          : face === "html"
+            ? enrollmentCapsuleHtml(projection)
+            : enrollmentCapsuleMarkdown(projection);
+      const etag = await strongEtag(face, body);
+      const headers = {
         "cache-control": "no-store",
-      });
-    } catch (error) {
-      return enrollmentErrorResponse(
-        error instanceof EnrollmentError ? error : new EnrollmentError("PAIRING_INVALID"),
+        etag,
+        "content-type":
+          face === "json"
+            ? "application/json; charset=utf-8"
+            : face === "html"
+              ? "text/html; charset=UTF-8"
+              : "text/markdown; charset=utf-8",
+      };
+      if (c.req.header("if-none-match") === etag) return c.body(null, 304, headers);
+      return c.body(body, 200, headers);
+    } catch {
+      // A public join path may be malformed or may refer to an enrollment that
+      // was never minted, expired, superseded, or consumed. Those absences are
+      // intentionally one 404 face; no state distinction is public.
+      return problem(
+        404,
+        "CAPSULE_UNAVAILABLE",
+        "Enrollment capsule is unavailable",
+        "This enrollment capsule is unavailable.",
+        "Check the public enrollment id and obtain a fresh sponsor-issued join URL if needed.",
       );
     }
   });
@@ -172,7 +234,9 @@ export function createEnrollmentRouter(options: EnrollmentRouterOptions): Hono {
       );
     }
     try {
-      const claim = await options.service.claim(await jsonBody(c.req.raw));
+      const idempotency = idempotencyOptions(c.req.raw);
+      if (idempotency instanceof Response) return idempotency;
+      const claim = await options.service.claim(await jsonBody(c.req.raw), idempotency);
       const result = EnrollmentClaimResponseSchema.parse({ flow_handle: claim.flowHandle });
       return c.json(result, 202, { "cache-control": "no-store" });
     } catch (error) {
@@ -193,7 +257,9 @@ export function createEnrollmentRouter(options: EnrollmentRouterOptions): Hono {
       );
     }
     try {
-      const result = await options.service.poll(await jsonBody(request));
+      const idempotency = idempotencyOptions(request);
+      if (idempotency instanceof Response) return idempotency;
+      const result = await options.service.poll(await jsonBody(request), idempotency);
       return new Response(JSON.stringify(result), {
         status: 200,
         headers: { "content-type": "application/json; charset=utf-8", "cache-control": "no-store" },

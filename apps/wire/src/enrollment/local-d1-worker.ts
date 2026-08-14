@@ -2,7 +2,7 @@ import type { D1Database, ExecutionContext } from "@cloudflare/workers-types";
 
 import { D1EnrollmentStore } from "./d1-store.ts";
 import { createEnrollmentRouter } from "./router.ts";
-import { EnrollmentService } from "./service.ts";
+import { EnrollmentError, EnrollmentService } from "./service.ts";
 
 interface LocalEnrollmentEnv {
   DB: D1Database;
@@ -72,6 +72,30 @@ export default {
         return response({ status: "approved" });
       } catch {
         return response({ code: "LOCAL_APPROVAL_FAILED" }, 400);
+      }
+    }
+
+    if (request.method === "POST" && url.pathname === "/__s1/card") {
+      const body = await localBody(request);
+      if (
+        body === undefined ||
+        typeof body.sponsor_id !== "string" ||
+        typeof body.enrollment_id !== "string"
+      ) {
+        return response({ code: "LOCAL_INPUT_INVALID" }, 400);
+      }
+      try {
+        return response({
+          card: await service.approvalCard(
+            { type: "sponsor", sponsorId: body.sponsor_id },
+            body.enrollment_id,
+          ),
+        });
+      } catch (error) {
+        return response(
+          { code: error instanceof EnrollmentError ? error.code : "LOCAL_CARD_FAILED" },
+          error instanceof EnrollmentError && error.code === "WRONG_PRINCIPAL" ? 403 : 400,
+        );
       }
     }
 
