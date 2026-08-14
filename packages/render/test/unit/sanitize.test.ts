@@ -14,7 +14,8 @@ const LIVE_CONTROL_COMMENT = /(?<!\\)<!--\s*asimp/i;
 
 describe("neutralizeUntrustedBody", () => {
   test("leaves ordinary scientific prose byte-identical and reports nothing", () => {
-    const body = "For k >= 2 we have S(k) < 2^k, since $\\sum_{i<k} a_i < 2^{k-1}$. See L-4 for the source.";
+    const body =
+      "For k >= 2 we have S(k) < 2^k, since $\\sum_{i<k} a_i < 2^{k-1}$. See L-4 for the source.";
     const result = neutralizeUntrustedBody(body);
     expect(result.text).toBe(body);
     expect(result.findings).toEqual([]);

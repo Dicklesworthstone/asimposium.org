@@ -74,7 +74,10 @@ const ACTIVE_HTML =
 const BACKTICK_RUN = /`+/g;
 
 function countMatches(text: string, pattern: RegExp): number {
-  const scan = new RegExp(pattern.source, pattern.flags.includes("g") ? pattern.flags : `${pattern.flags}g`);
+  const scan = new RegExp(
+    pattern.source,
+    pattern.flags.includes("g") ? pattern.flags : `${pattern.flags}g`,
+  );
   let count = 0;
   while (scan.exec(text) !== null) count += 1;
   return count;

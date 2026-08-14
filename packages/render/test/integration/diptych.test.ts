@@ -26,7 +26,14 @@ interface JsonFace {
   fingerprint: string;
   title: string;
   preamble: string;
-  items: { id: string; kind: string; scope: string; untrusted: boolean; body: string; why_included: string }[];
+  items: {
+    id: string;
+    kind: string;
+    scope: string;
+    untrusted: boolean;
+    body: string;
+    why_included: string;
+  }[];
   omitted: { reason: string; detail?: string }[];
   next_actions: { method: string; url: string; why: string }[];
   degraded: string[];
@@ -37,7 +44,9 @@ function markdownItemIds(markdown: string): string[] {
 }
 
 function htmlItemIds(html: string): string[] {
-  return [...html.matchAll(/<li class="asimp-item" data-id="([^"]+)"/g)].map((match) => match[1] as string);
+  return [...html.matchAll(/<li class="asimp-item" data-id="([^"]+)"/g)].map(
+    (match) => match[1] as string,
+  );
 }
 
 describe("one projection, three faces", () => {
@@ -86,7 +95,10 @@ describe("one projection, three faces", () => {
     const json = JSON.parse(faces.json.body) as JsonFace;
     expect(json.omitted).toEqual([
       { reason: "budget_exceeded", detail: "4 further open claims beyond the 4,000-token budget" },
-      { reason: "p12_review_isolation", detail: "author workshop excluded from review-shaped items" },
+      {
+        reason: "p12_review_isolation",
+        detail: "author workshop excluded from review-shaped items",
+      },
     ]);
     expect(faces.md.body).toContain("## Omitted");
     expect(faces.md.body).toContain("- budget_exceeded — 4 further open claims");
@@ -119,7 +131,10 @@ describe("one projection, three faces", () => {
   });
 
   test("degraded diagnostics are labelled and never mixed into an item body", () => {
-    const degraded: Projection = { ...safeWorkingPack(), degraded: ["screening: deterministic fallback"] };
+    const degraded: Projection = {
+      ...safeWorkingPack(),
+      degraded: ["screening: deterministic fallback"],
+    };
     const rendered = renderAllFaces(degraded);
     expect(rendered.md.body).toContain("## Degraded\n\n- screening: deterministic fallback");
     expect(rendered["html-fragment"].body).toContain("<li>screening: deterministic fallback</li>");
@@ -190,9 +205,11 @@ describe("face shape", () => {
       `<!-- asimp face=md schema=asimposium.pack.v1 kind=pack problem=demo-bounded-sums profile=working ` +
         `cursor=41 items=3 omitted=2 fingerprint=${faces.md.fingerprint} -->`,
     );
-    expect(faces.md.body.trimEnd().endsWith(`<!-- asimp:face-end fingerprint=${faces.md.fingerprint} -->`)).toBe(
-      true,
-    );
+    expect(
+      faces.md.body
+        .trimEnd()
+        .endsWith(`<!-- asimp:face-end fingerprint=${faces.md.fingerprint} -->`),
+    ).toBe(true);
   });
 
   test("every markdown item is opened and closed by its own delimiter", () => {

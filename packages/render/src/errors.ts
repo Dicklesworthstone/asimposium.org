@@ -50,7 +50,13 @@ export class RenderContractError extends Error {
   readonly title: string;
   readonly detail: string;
   readonly fix_hint: string;
-  readonly rule?: string;
+  /**
+   * `declare` on purpose: a plain field declaration would be *defined* as
+   * `undefined` at construction under ESNext class-field semantics, so
+   * `"rule" in error` would be true for a refusal that cites no rule. Declaring
+   * it keeps the property genuinely absent until the constructor assigns one.
+   */
+  declare readonly rule?: string;
   readonly status: number;
 
   constructor(init: RenderErrorInit) {
@@ -60,7 +66,14 @@ export class RenderContractError extends Error {
     this.title = init.title;
     this.detail = init.detail;
     this.fix_hint = init.fix_hint;
-    this.rule = init.rule;
+    // `rule` is genuinely optional: many refusals are structural and cite no
+    // doctrine rule. Under exactOptionalPropertyTypes the honest encoding of
+    // "absent" is to leave the property unassigned rather than to store
+    // `undefined` in a `string` slot, which is what `toProblem()` already
+    // assumes when it decides whether to emit the key at all.
+    if (init.rule !== undefined) {
+      this.rule = init.rule;
+    }
     this.status = init.status ?? 422;
   }
 

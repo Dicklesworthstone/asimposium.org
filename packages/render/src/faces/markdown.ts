@@ -8,8 +8,8 @@
  * bodies, an untrusted body cannot forge an item boundary.
  */
 
-import { fenceFor } from "../sanitize.ts";
 import type { PreparedItem, PreparedProjection } from "../prepare.ts";
+import { fenceFor } from "../sanitize.ts";
 
 type Field = readonly [string, string | number];
 
@@ -42,7 +42,9 @@ function renderItem(item: PreparedItem): string[] {
     lines.push(item.body);
     lines.push(fence.delimiter);
     if (item.neutralized.length > 0) {
-      const summary = item.neutralized.map((finding) => `${finding.marker}×${finding.count}`).join(", ");
+      const summary = item.neutralized
+        .map((finding) => `${finding.marker}×${finding.count}`)
+        .join(", ");
       lines.push("");
       lines.push(`_neutralized in this body:_ ${summary}`);
     }
@@ -94,7 +96,9 @@ export function renderMarkdownFace(prepared: PreparedProjection): string {
     lines.push("_none_");
   } else {
     for (const entry of prepared.omitted) {
-      lines.push(entry.detail === undefined ? `- ${entry.reason}` : `- ${entry.reason} — ${entry.detail}`);
+      lines.push(
+        entry.detail === undefined ? `- ${entry.reason}` : `- ${entry.reason} — ${entry.detail}`,
+      );
     }
   }
   lines.push("");

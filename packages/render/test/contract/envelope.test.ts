@@ -36,7 +36,10 @@ describe("the honest case still renders", () => {
 
 describe("structural trust rules (Fable §7.3, §14.4 layer 2)", () => {
   test("refuses a ledger item that claims system trust", () => {
-    const error = expectRefusal(() => prepareProjection(trustForgeryPack()), "UNTRUSTED_FLAG_MISMATCH");
+    const error = expectRefusal(
+      () => prepareProjection(trustForgeryPack()),
+      "UNTRUSTED_FLAG_MISMATCH",
+    );
     expect(error.rule).toBe("A2");
     expect(error.status).toBe(422);
   });
@@ -101,9 +104,30 @@ describe("identity rules", () => {
 
   test("accepts version-pinned and workshop ids", () => {
     const projection = withItems([
-      { kind: "claim", id: "C-12@3", scope: "ledger", untrusted: true, body: "t", why_included: "w" },
-      { kind: "note", id: "W-fermat-descent-01", scope: "workshop", untrusted: true, body: "t", why_included: "w" },
-      { kind: "event", id: "SP4D#41", scope: "ledger", untrusted: true, body: "t", why_included: "w" },
+      {
+        kind: "claim",
+        id: "C-12@3",
+        scope: "ledger",
+        untrusted: true,
+        body: "t",
+        why_included: "w",
+      },
+      {
+        kind: "note",
+        id: "W-fermat-descent-01",
+        scope: "workshop",
+        untrusted: true,
+        body: "t",
+        why_included: "w",
+      },
+      {
+        kind: "event",
+        id: "SP4D#41",
+        scope: "ledger",
+        untrusted: true,
+        body: "t",
+        why_included: "w",
+      },
     ]);
     expect(prepareProjection(projection).items).toHaveLength(3);
   });
@@ -141,7 +165,10 @@ describe("omitted[] is mandatory (Fable §7.3)", () => {
 
 describe("envelope metadata and next_actions", () => {
   test("refuses metadata that could forge or close the face header", () => {
-    const projection: Projection = { ...safeWorkingPack(), profile: "working --> <!-- asimp face=md" };
+    const projection: Projection = {
+      ...safeWorkingPack(),
+      profile: "working --> <!-- asimp face=md",
+    };
     expectRefusal(() => prepareProjection(projection), "INVALID_HEADER_VALUE");
   });
 
@@ -149,7 +176,11 @@ describe("envelope metadata and next_actions", () => {
     const projection: Projection = {
       ...safeWorkingPack(),
       next_actions: [
-        { method: "DELETE" as Projection["next_actions"][number]["method"], url: "/v1/x", why: "planted negative" },
+        {
+          method: "DELETE" as Projection["next_actions"][number]["method"],
+          url: "/v1/x",
+          why: "planted negative",
+        },
       ],
     };
     expectRefusal(() => prepareProjection(projection), "INVALID_NEXT_ACTION");
@@ -171,7 +202,10 @@ describe("format negotiation never silent-fails (Fable §7.1 axiom 9)", () => {
 
 describe("refusals serialize as RFC 7807 problems", () => {
   test("toProblem carries type, status, code, detail, fix_hint and the cited rule", () => {
-    const error = expectRefusal(() => prepareProjection(trustForgeryPack()), "UNTRUSTED_FLAG_MISMATCH");
+    const error = expectRefusal(
+      () => prepareProjection(trustForgeryPack()),
+      "UNTRUSTED_FLAG_MISMATCH",
+    );
     const problem = error.toProblem();
     expect(problem).toEqual({
       type: "https://asimposium.org/errors/UNTRUSTED_FLAG_MISMATCH",

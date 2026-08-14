@@ -27,7 +27,10 @@ export function renderJsonFace(prepared: PreparedProjection): string {
       untrusted: item.untrusted,
       why_included: item.why_included,
       body: item.body,
-      neutralized: item.neutralized.map((finding) => ({ marker: finding.marker, count: finding.count })),
+      neutralized: item.neutralized.map((finding) => ({
+        marker: finding.marker,
+        count: finding.count,
+      })),
     })),
     omitted: prepared.omitted,
     next_actions: prepared.next_actions,

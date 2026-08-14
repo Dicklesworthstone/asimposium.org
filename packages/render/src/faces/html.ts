@@ -12,8 +12,8 @@
  * The fragment carries no `<html>`, `<head>` or `<body>`: Agora embeds it.
  */
 
-import { escapeHtml } from "../sanitize.ts";
 import type { PreparedItem, PreparedProjection } from "../prepare.ts";
+import { escapeHtml } from "../sanitize.ts";
 
 function attribute(name: string, value: string | number): string {
   return `${name}="${escapeHtml(String(value))}"`;
@@ -31,11 +31,11 @@ function renderItem(item: PreparedItem): string[] {
       `${escapeHtml(item.scope)} · ${escapeHtml(trust)}</header>`,
   );
   lines.push(`      <p class="asimp-item__why">${escapeHtml(item.why_included)}</p>`);
-  lines.push(
-    `      <pre class="asimp-item__body"><code>${escapeHtml(item.body)}</code></pre>`,
-  );
+  lines.push(`      <pre class="asimp-item__body"><code>${escapeHtml(item.body)}</code></pre>`);
   if (item.neutralized.length > 0) {
-    const summary = item.neutralized.map((finding) => `${finding.marker}×${finding.count}`).join(", ");
+    const summary = item.neutralized
+      .map((finding) => `${finding.marker}×${finding.count}`)
+      .join(", ");
     lines.push(`      <p class="asimp-item__neutralized">neutralized: ${escapeHtml(summary)}</p>`);
   }
   lines.push("    </li>");

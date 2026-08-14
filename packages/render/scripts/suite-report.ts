@@ -54,7 +54,9 @@ let failed = false;
 for (const suite of selected) {
   const target = SUITES[suite];
   if (target === undefined) {
-    console.error(`unknown suite ${JSON.stringify(suite)}; known suites: ${Object.keys(SUITES).join(", ")}`);
+    console.error(
+      `unknown suite ${JSON.stringify(suite)}; known suites: ${Object.keys(SUITES).join(", ")}`,
+    );
     process.exit(2);
   }
   const record = await runSuite(suite, target);

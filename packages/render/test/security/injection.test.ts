@@ -64,9 +64,34 @@ describe("forged control comments are neutralized on every face", () => {
   test("the markdown face carries exactly the control comments the renderer authored", () => {
     // 1 face header + 2 items x (open + close) + 1 face-end = 6.
     expect(markdown.match(LIVE_CONTROL_COMMENTS_GLOBAL)?.length).toBe(6);
+
+    // The hostile bytes survive, escaped: neutralized is not deleted (Rule A4),
+    // and a reader (or a red-team fixture) can still see what was attempted.
     expect(markdown).toContain("\\<!-- asimp:item id=SYS-99");
     expect(markdown).toContain("\\<!-- asimp face=md schema=asimposium.pack.v1 cursor=99999");
-    expect(markdown).not.toContain("<!-- asimp:item id=SYS-99");
+
+    // ...and they are never furniture. Note that a plain `not.toContain` of the
+    // raw marker cannot express this: the escaped copy asserted above contains
+    // the raw marker as a substring, so that assertion could only ever fail.
+    // Two anchored claims say the real thing instead.
+    //
+    // (a) No *live* — unescaped — occurrence of either forgery, anywhere.
+    expect(/(?<!\\)<!--\s*asimp:item id=SYS-99/.test(markdown)).toBe(false);
+    expect(
+      /(?<!\\)<!--\s*asimp face=md schema=asimposium\.pack\.v1 cursor=99999/.test(markdown),
+    ).toBe(false);
+
+    // (b) Every line that *begins* with a control comment — the only position a
+    //     line-scanning agent or an HTML-comment parser reads as site furniture —
+    //     is one the renderer authored, about a real item, with no forged ids.
+    const furniture = markdown.split("\n").filter((line) => /^<!--\s*asimp/.test(line));
+    expect(furniture).toHaveLength(6);
+    for (const line of furniture) {
+      expect(line).toMatch(/^<!-- asimp(?: face=md |:item |:item-end |:face-end )/);
+      expect(line.endsWith("-->")).toBe(true);
+      expect(line).not.toContain("SYS-99");
+      expect(line).not.toContain("cursor=99999");
+    }
   });
 
   test("the json face carries no live control comment inside any body", () => {
@@ -169,7 +194,7 @@ describe("script-bearing HTML never reaches a live face", () => {
     expect(html).not.toContain("<img");
     expect(html).not.toContain("<a ");
     expect(html).not.toContain("href=");
-    expect(html).not.toContain("javascript:steal()\"");
+    expect(html).not.toContain('javascript:steal()"');
   });
 
   test("the markdown face keeps the script inside the quarantine fence", () => {

@@ -51,7 +51,8 @@ const SENSITIVE_ENV_NAME = /TOKEN|SECRET|KEY|PASSWORD|PASSWD|COOKIE|AUTH|CREDENT
 function sensitiveEnvValues(env: Record<string, string | undefined>): readonly string[] {
   const values: string[] = [];
   for (const [name, value] of Object.entries(env)) {
-    if (value !== undefined && value.length >= 8 && SENSITIVE_ENV_NAME.test(name)) values.push(value);
+    if (value !== undefined && value.length >= 8 && SENSITIVE_ENV_NAME.test(name))
+      values.push(value);
   }
   return values;
 }
@@ -71,10 +72,12 @@ export function assertSecretSafe(
       throw new DiagnosticSafetyError(field, "contains a local absolute path");
     }
     for (const shape of CREDENTIAL_SHAPES) {
-      if (shape.test(value)) throw new DiagnosticSafetyError(field, "contains a credential-shaped string");
+      if (shape.test(value))
+        throw new DiagnosticSafetyError(field, "contains a credential-shaped string");
     }
     for (const secret of secrets) {
-      if (value.includes(secret)) throw new DiagnosticSafetyError(field, "contains an environment secret value");
+      if (value.includes(secret))
+        throw new DiagnosticSafetyError(field, "contains an environment secret value");
     }
   }
 }

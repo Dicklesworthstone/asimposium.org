@@ -6,9 +6,40 @@
  */
 
 export {
+  byteLength,
+  contentFingerprint,
+  FINGERPRINT_ALGORITHM,
+  stableStringify,
+} from "./canonical.ts";
+
+export {
+  ERROR_TYPE_BASE,
+  RenderContractError,
+  type RenderErrorCode,
+  type RenderProblem,
+} from "./errors.ts";
+export {
+  ITEM_ID_PATTERN,
+  type PreparedItem,
+  type PreparedProjection,
+  prepareProjection,
+} from "./prepare.ts";
+export { MEDIA_TYPES, renderAllFaces, renderProjection } from "./render.ts";
+export {
+  escapeHtml,
+  type Fence,
+  fenceFor,
+  isSafeHeaderValue,
+  longestBacktickRun,
+  type NeutralizationFinding,
+  type NeutralizedBody,
+  neutralizeUntrustedBody,
+  RESERVED_ENVELOPE_KEYS,
+} from "./sanitize.ts";
+export {
   FACE_FORMATS,
-  ITEM_SCOPES,
   type FaceFormat,
+  ITEM_SCOPES,
   type ItemScope,
   type NeutralizationMarker,
   type NeutralizationReport,
@@ -18,38 +49,3 @@ export {
   type ProjectionItem,
   type RenderedFace,
 } from "./types.ts";
-
-export {
-  ERROR_TYPE_BASE,
-  RenderContractError,
-  type RenderErrorCode,
-  type RenderProblem,
-} from "./errors.ts";
-
-export {
-  RESERVED_ENVELOPE_KEYS,
-  escapeHtml,
-  fenceFor,
-  isSafeHeaderValue,
-  longestBacktickRun,
-  neutralizeUntrustedBody,
-  type Fence,
-  type NeutralizationFinding,
-  type NeutralizedBody,
-} from "./sanitize.ts";
-
-export {
-  FINGERPRINT_ALGORITHM,
-  byteLength,
-  contentFingerprint,
-  stableStringify,
-} from "./canonical.ts";
-
-export {
-  ITEM_ID_PATTERN,
-  prepareProjection,
-  type PreparedItem,
-  type PreparedProjection,
-} from "./prepare.ts";
-
-export { MEDIA_TYPES, renderAllFaces, renderProjection } from "./render.ts";

@@ -1,9 +1,9 @@
 import { describe, expect, test } from "bun:test";
 
 import {
-  DiagnosticSafetyError,
   assertSecretSafe,
   buildDiagnostic,
+  DiagnosticSafetyError,
   formatDiagnostic,
   type SuiteDiagnostic,
 } from "../../scripts/diagnostics.ts";
@@ -56,9 +56,9 @@ describe("assertSecretSafe", () => {
   });
 
   test("refuses a local absolute path in the reproduction command", () => {
-    expect(() => assertSecretSafe(record({ repro: "cd /Users/someone/projects/x && bun test" }), {})).toThrow(
-      DiagnosticSafetyError,
-    );
+    expect(() =>
+      assertSecretSafe(record({ repro: "cd /Users/someone/projects/x && bun test" }), {}),
+    ).toThrow(DiagnosticSafetyError);
   });
 
   test("refuses a Windows absolute path", () => {
@@ -68,11 +68,15 @@ describe("assertSecretSafe", () => {
   });
 
   test("refuses a Fellow token prefix anywhere in the record", () => {
-    expect(() => assertSecretSafe(record({ suite: "unit asimp_ag_abc123" }), {})).toThrow(DiagnosticSafetyError);
+    expect(() => assertSecretSafe(record({ suite: "unit asimp_ag_abc123" }), {})).toThrow(
+      DiagnosticSafetyError,
+    );
   });
 
   test("refuses an enrollment fragment secret", () => {
-    expect(() => assertSecretSafe(record({ suite: "join#v1.s3cr3t" }), {})).toThrow(DiagnosticSafetyError);
+    expect(() => assertSecretSafe(record({ suite: "join#v1.s3cr3t" }), {})).toThrow(
+      DiagnosticSafetyError,
+    );
   });
 
   test("refuses the value of a sensitive environment variable", () => {
@@ -84,7 +88,9 @@ describe("assertSecretSafe", () => {
 
   test("ignores short or non-sensitive environment values", () => {
     const env = { HOME_LABEL: "workstation", ASI_TOKEN: "abc" };
-    expect(() => assertSecretSafe(record({ runtime: "bun-1.3.8 workstation abc" }), env)).not.toThrow();
+    expect(() =>
+      assertSecretSafe(record({ runtime: "bun-1.3.8 workstation abc" }), env),
+    ).not.toThrow();
   });
 });
 

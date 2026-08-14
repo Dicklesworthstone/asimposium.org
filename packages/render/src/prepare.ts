@@ -6,10 +6,19 @@
  * one place where the structural trust rules of Fable §14.4 are enforced.
  */
 
-import { RenderContractError } from "./errors.ts";
 import { contentFingerprint, stableStringify } from "./canonical.ts";
-import { neutralizeUntrustedBody, isSafeHeaderValue, type NeutralizationFinding } from "./sanitize.ts";
-import { ITEM_SCOPES, type ItemScope, type NeutralizationReport, type Projection } from "./types.ts";
+import { RenderContractError } from "./errors.ts";
+import {
+  isSafeHeaderValue,
+  type NeutralizationFinding,
+  neutralizeUntrustedBody,
+} from "./sanitize.ts";
+import {
+  ITEM_SCOPES,
+  type ItemScope,
+  type NeutralizationReport,
+  type Projection,
+} from "./types.ts";
 
 /** Public ids stay problem-scoped and boring (Fable §6.1). */
 export const ITEM_ID_PATTERN = /^[A-Za-z0-9][A-Za-z0-9@#._-]{0,63}$/;
@@ -49,7 +58,16 @@ function refuse(
   fix_hint: string,
   rule?: string,
 ): never {
-  throw new RenderContractError({ code, title, detail, fix_hint, rule });
+  // Omit `rule` when the caller cited none. Spreading `{}` keeps the property
+  // absent instead of passing an explicit `undefined`, which exactOptionalPropertyTypes
+  // (correctly) treats as a different thing from "not supplied".
+  throw new RenderContractError({
+    code,
+    title,
+    detail,
+    fix_hint,
+    ...(rule === undefined ? {} : { rule }),
+  });
 }
 
 export function prepareProjection(projection: Projection): PreparedProjection {
@@ -72,7 +90,12 @@ export function prepareProjection(projection: Projection): PreparedProjection {
     );
   }
 
-  for (const value of [projection.schema, projection.kind, projection.problem, projection.profile]) {
+  for (const value of [
+    projection.schema,
+    projection.kind,
+    projection.problem,
+    projection.profile,
+  ]) {
     if (!isSafeHeaderValue(value)) {
       refuse(
         "INVALID_HEADER_VALUE",
@@ -202,7 +225,9 @@ export function prepareProjection(projection: Projection): PreparedProjection {
     preamble: projection.preamble,
     items,
     omitted: projection.omitted.map((entry) =>
-      entry.detail === undefined ? { reason: entry.reason } : { reason: entry.reason, detail: entry.detail },
+      entry.detail === undefined
+        ? { reason: entry.reason }
+        : { reason: entry.reason, detail: entry.detail },
     ),
     next_actions: projection.next_actions.map((action) => ({
       method: action.method,

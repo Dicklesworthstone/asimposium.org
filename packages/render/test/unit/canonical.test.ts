@@ -1,6 +1,11 @@
 import { describe, expect, test } from "bun:test";
 
-import { FINGERPRINT_ALGORITHM, byteLength, contentFingerprint, stableStringify } from "../../src/canonical.ts";
+import {
+  byteLength,
+  contentFingerprint,
+  FINGERPRINT_ALGORITHM,
+  stableStringify,
+} from "../../src/canonical.ts";
 
 describe("stableStringify", () => {
   test("is insensitive to key insertion order", () => {
