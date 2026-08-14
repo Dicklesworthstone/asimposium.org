@@ -16,25 +16,21 @@ import {
   MAX_S2_COST_RECEIPT_BYTES,
   parseS2CostEvidenceManifestBytes,
   parseS2CostMeasurementReceiptBytes,
-  parseS2CostReceiptPublicationCommitBytes,
   parseS2CostReceiptPublicationBytes,
-  REQUIRED_ROW_TOTAL_EXCLUSIONS,
-  S2_COST_DURABLE_PUBLICATION_RESERVED_BYTES,
-  S2_COST_DURABLE_PUBLICATION_RESERVED_NAMES,
+  parseS2CostReceiptPublicationCommitBytes,
+  type REQUIRED_ROW_TOTAL_EXCLUSIONS,
   S2_COST_EVIDENCE_MANIFEST_VERSION,
-  S2_COST_PUBLICATION_COMMIT_RELATIVE_PATH,
   S2_COST_MANIFEST_RELATIVE_PATH,
-  S2_COST_METRIC_SCOPE,
+  type S2_COST_METRIC_SCOPE,
+  S2_COST_PUBLICATION_COMMIT_RELATIVE_PATH,
   S2_COST_PUBLICATION_RELATIVE_PATH,
-  S2_COST_RECEIPT_RECORD,
   S2_COST_RECEIPT_RELATIVE_PATH,
-  S2_COST_RECEIPT_SCHEMA_VERSION,
-  S2_FAILED_RETRY_SCOPE,
-  S2_LOCAL_SCOPE,
+  type S2_FAILED_RETRY_SCOPE,
+  type S2_LOCAL_SCOPE,
+  type S2_SUCCESSFUL_BATCH_SCOPE,
+  type S2_WRITE_CLAIM_SCOPE,
   type S2CostMeasurementReceipt,
   S2CostReceiptContractError,
-  S2_SUCCESSFUL_BATCH_SCOPE,
-  S2_WRITE_CLAIM_SCOPE,
 } from "@asimposium/contracts";
 import {
   HARNESS_SCHEMA_VERSION,
@@ -47,12 +43,12 @@ export {
   REQUIRED_ROW_TOTAL_EXCLUSIONS,
   S2_COST_DURABLE_PUBLICATION_RESERVED_BYTES,
   S2_COST_DURABLE_PUBLICATION_RESERVED_NAMES,
-  S2_COST_METRIC_SCOPE,
   S2_COST_EVIDENCE_MANIFEST_VERSION,
+  S2_COST_MANIFEST_RELATIVE_PATH,
+  S2_COST_METRIC_SCOPE,
   S2_COST_PUBLICATION_COMMIT_RECORD,
   S2_COST_PUBLICATION_COMMIT_RELATIVE_PATH,
   S2_COST_PUBLICATION_COMMIT_SCHEMA_VERSION,
-  S2_COST_MANIFEST_RELATIVE_PATH,
   S2_COST_PUBLICATION_RECORD,
   S2_COST_PUBLICATION_RELATIVE_PATH,
   S2_COST_PUBLICATION_SCHEMA_VERSION,
@@ -63,10 +59,10 @@ export {
   S2_LOCAL_SCOPE,
   S2_SUCCESSFUL_BATCH_SCOPE,
   S2_WRITE_CLAIM_SCOPE,
-  type S2CostMeasurementReceipt,
   type S2CostEvidenceManifest,
-  type S2CostReceiptPublicationCommit,
+  type S2CostMeasurementReceipt,
   type S2CostReceiptPublication,
+  type S2CostReceiptPublicationCommit,
 } from "@asimposium/contracts";
 
 const SAFE_COMPONENT = /^[A-Za-z0-9][A-Za-z0-9._-]{0,79}$/;
@@ -626,10 +622,7 @@ const NODE_RECEIPT_FILE_SYSTEM: ReceiptFileSystem = {
     if (!pathStat.isFile() || pathStat.isSymbolicLink()) {
       throw new CostVerifierError("S2_COST_RECEIPT_UNREADABLE", "receipt cannot be read.");
     }
-    return openSync(
-      receiptPath,
-      constants.O_RDONLY | constants.O_NONBLOCK | constants.O_NOFOLLOW,
-    );
+    return openSync(receiptPath, constants.O_RDONLY | constants.O_NONBLOCK | constants.O_NOFOLLOW);
   },
   fstat: (descriptor) => fstatSync(descriptor),
   read: (descriptor, buffer, offset, length, position) =>
@@ -700,7 +693,10 @@ function safeEvidenceTotal(values: readonly number[]): number {
   let total = 0;
   for (const value of values) {
     if (!Number.isSafeInteger(value) || value < 0 || value > Number.MAX_SAFE_INTEGER - total) {
-      throw new CostVerifierError("S2_COST_RECEIPT_INVALID", "receipt evidence inventory is invalid.");
+      throw new CostVerifierError(
+        "S2_COST_RECEIPT_INVALID",
+        "receipt evidence inventory is invalid.",
+      );
     }
     total += value;
   }
@@ -759,7 +755,8 @@ function attestedReceiptBytes(
     publication.provenance.source_digest !== manifest.source_digest ||
     publication.local_phase_status.exercise !== manifest.local_phase_status.exercise ||
     publication.local_phase_status.restart_verify !== manifest.local_phase_status.restart_verify ||
-    publication.local_phase_status.upgrade_existing !== manifest.local_phase_status.upgrade_existing ||
+    publication.local_phase_status.upgrade_existing !==
+      manifest.local_phase_status.upgrade_existing ||
     publication.local_phase_status.upgrade_empty !== manifest.local_phase_status.upgrade_empty ||
     publication.local_phase_status.upgrade_journal_existing !==
       manifest.local_phase_status.upgrade_journal_existing ||
@@ -767,7 +764,10 @@ function attestedReceiptBytes(
       manifest.local_phase_status.upgrade_journal_empty ||
     Object.values(manifest.local_phase_status).some((status) => status !== "pass")
   ) {
-    throw new CostVerifierError("S2_COST_RECEIPT_INVALID", "receipt evidence does not attest local phases.");
+    throw new CostVerifierError(
+      "S2_COST_RECEIPT_INVALID",
+      "receipt evidence does not attest local phases.",
+    );
   }
   return {
     receipt,

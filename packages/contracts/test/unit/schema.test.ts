@@ -2,7 +2,6 @@ import { expect, test } from "bun:test";
 
 import { generatedArtifacts } from "../../src/artifacts.ts";
 import { type DiagnosticCode, REPRODUCE, safeDiagnostic } from "../../src/diagnostics.ts";
-import { ContractScaffoldSchema } from "../../src/schema.ts";
 import {
   REQUIRED_ROW_TOTAL_EXCLUSIONS,
   S2_COST_DURABLE_PUBLICATION_RESERVED_BYTES,
@@ -13,14 +12,15 @@ import {
   S2_COST_PUBLICATION_COMMIT_SCHEMA_VERSION,
   S2_COST_PUBLICATION_RELATIVE_PATH,
   S2_COST_RECEIPT_BINDINGS_KEYS,
-  S2_COST_RECEIPT_RELATIVE_PATH,
   S2_COST_RECEIPT_RECORD,
+  S2_COST_RECEIPT_RELATIVE_PATH,
   S2_COST_RECEIPT_ROOT_KEYS,
   S2_COST_RECEIPT_SCHEMA_VERSION,
   S2CostEvidenceManifestSchema,
   S2CostMeasurementReceiptSchema,
   S2CostReceiptPublicationCommitSchema,
 } from "../../src/s2-cost-receipt.ts";
+import { ContractScaffoldSchema } from "../../src/schema.ts";
 
 const VALID_FIXTURE = new URL("../fixtures/valid/contracts-scaffold.json", import.meta.url);
 const INVALID_FIXTURE = new URL(

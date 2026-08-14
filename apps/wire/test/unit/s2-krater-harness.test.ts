@@ -3,10 +3,7 @@ import { existsSync, lstatSync, mkdtempSync, readFileSync, symlinkSync } from "n
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 
-import {
-  S2_COST_RECEIPT_BINDINGS_KEYS,
-  S2_COST_RECEIPT_ROOT_KEYS,
-} from "@asimposium/contracts";
+import { S2_COST_RECEIPT_BINDINGS_KEYS, S2_COST_RECEIPT_ROOT_KEYS } from "@asimposium/contracts";
 
 import {
   buildS2CostMeasurementReceipt,
@@ -120,6 +117,11 @@ const COST_WRITES: readonly S2SettledWriteResult[] = [
   },
 ];
 
+const FIRST_COST_WRITE = COST_WRITES[0];
+if (FIRST_COST_WRITE === undefined) {
+  throw new Error("S2 cost fixture must contain at least one settled write");
+}
+
 interface Run {
   exitCode: number;
   stdout: string;
@@ -159,10 +161,14 @@ async function runHarness(env: Record<string, string>, deadlineMs: number): Prom
   return result;
 }
 
-async function discoverRealBindingLane(): Promise<Run> {
+async function probeRealBindingCapability(): Promise<Run> {
   const { S2_RUN_REAL_BINDING_INTEGRATION: _authority, ...environment } = process.env;
   const child = Bun.spawn({
-    cmd: ["bun", "test", "apps/wire/test/integration/s2-krater-real-bindings.test.ts"],
+    cmd: [
+      "bun",
+      "apps/wire/test/integration/s2-krater-real-bindings.test.ts",
+      "--capability-probe",
+    ],
     cwd: REPOSITORY_ROOT,
     env: environment,
     stdout: "pipe",
@@ -182,10 +188,7 @@ describe("S2 to S7 normalized cost receipt", () => {
     const metricsWithPrivateBody: readonly (
       | S2SettledWriteResult
       | (S2SettledWriteResult & { readonly privateBody: string })
-    )[] = [
-      { ...COST_WRITES[0]!, privateBody: privateBodySentinel },
-      ...COST_WRITES.slice(1),
-    ];
+    )[] = [{ ...FIRST_COST_WRITE, privateBody: privateBodySentinel }, ...COST_WRITES.slice(1)];
     const receipt = buildS2CostMeasurementReceipt(metricsWithPrivateBody, COST_PROVENANCE);
 
     expect(Object.keys(receipt)).toEqual([...S2_COST_RECEIPT_ROOT_KEYS]);
@@ -224,19 +227,22 @@ describe("S2 to S7 normalized cost receipt", () => {
     const root = mkdtempSync(join(tmpdir(), "asimposium-s2-cost-refusal-"));
     const receiptPath = join(root, S2_COST_RECEIPT_RELATIVE_PATH);
 
-    expect(() =>
-      writeS2CostMeasurementReceipt([], COST_PROVENANCE, { root, receiptPath }),
-    ).toThrow("S2_COST_RECEIPT_EMPTY");
+    expect(() => writeS2CostMeasurementReceipt([], COST_PROVENANCE, { root, receiptPath })).toThrow(
+      "S2_COST_RECEIPT_EMPTY",
+    );
     expect(existsSync(receiptPath)).toBe(false);
 
     const malformed = structuredClone(COST_WRITES) as S2SettledWriteResult[];
-    malformed[0] = { ...malformed[0]!, write_phase_ms: Number.NaN };
+    const firstMalformed = malformed[0];
+    if (firstMalformed === undefined)
+      throw new Error("cloned S2 cost fixture lost its first write");
+    malformed[0] = { ...firstMalformed, write_phase_ms: Number.NaN };
     expect(() =>
       writeS2CostMeasurementReceipt(malformed, COST_PROVENANCE, { root, receiptPath }),
     ).toThrow("S2_COST_RECEIPT_METRICS_INVALID");
     expect(existsSync(receiptPath)).toBe(false);
 
-    const idempotent = { ...COST_WRITES[0]!, idempotent: true } as unknown as S2SettledWriteResult;
+    const idempotent = { ...FIRST_COST_WRITE, idempotent: true } as S2SettledWriteResult;
     expect(() =>
       writeS2CostMeasurementReceipt([idempotent], COST_PROVENANCE, { root, receiptPath }),
     ).toThrow("S2_COST_RECEIPT_METRICS_INVALID");
@@ -260,9 +266,7 @@ describe("S2 to S7 normalized cost receipt", () => {
       relativePath: S2_COST_RECEIPT_RELATIVE_PATH,
       bytes: readFileSync(receiptPath).byteLength,
     });
-    expect(JSON.parse(readFileSync(receiptPath, "utf8"))).toEqual(
-      written.receipt,
-    );
+    expect(JSON.parse(readFileSync(receiptPath, "utf8"))).toEqual(written.receipt);
 
     const original = readFileSync(receiptPath, "utf8");
     expect(() =>
@@ -302,7 +306,9 @@ describe("S2 to S7 normalized cost receipt", () => {
     );
     const restartAndUpgrade = client.slice(client.indexOf("async function restartVerify"));
     expect(exercise).toContain("writeS2CostMeasurementReceipt");
-    expect(exercise.indexOf("writeS2CostMeasurementReceipt")).toBeLessThan(exercise.lastIndexOf('status: "pass"'));
+    expect(exercise.indexOf("writeS2CostMeasurementReceipt")).toBeLessThan(
+      exercise.lastIndexOf('status: "pass"'),
+    );
     expect(exercise).toContain("selectedSettledWrite");
     expect(client).toContain("if (write.idempotent)");
     expect(restartAndUpgrade).not.toContain("writeS2CostMeasurementReceipt(");
@@ -312,6 +318,7 @@ describe("S2 to S7 normalized cost receipt", () => {
     expect(shell).toContain("scripts/verify-cost-model.ts");
     expect(shell).toContain('S2_COST_RECEIPT_RELATIVE_PATH="s2-cost-input.json"');
     expect(shell).toContain("s2_cost_receipt: costReceiptSummary");
+    // biome-ignore lint/suspicious/noTemplateCurlyInString: asserts literal shell source text.
     expect(shell).toContain('if [[ "${phase}" == "exercise" ]]');
     expect(shell).toContain("S2_COST_LOCAL_PHASES_COMPLETE=1");
     expect(shell).toContain("write_s2_cost_publication");
@@ -333,16 +340,22 @@ describe("S2 to S7 normalized cost receipt", () => {
     );
     expect(start).toContain('persist="$3" port="$4" proof_scope="$5"');
     expect(start.indexOf("S2_MOST_RECENT_SUPERVISOR=")).toBeLessThan(
-      start.indexOf('printf \'%s\\n\' "${release_token}" >&7'),
+      // biome-ignore lint/suspicious/noTemplateCurlyInString: asserts literal shell source text.
+      start.indexOf("printf '%s\\n' \"${release_token}\" >&7"),
     );
-    expect(start).toContain('${persist} ${port} ${proof_scope}');
+    // biome-ignore lint/suspicious/noTemplateCurlyInString: asserts literal shell source text.
+    expect(start).toContain("${persist} ${port} ${proof_scope}");
+    // biome-ignore lint/suspicious/noTemplateCurlyInString: asserts literal shell source text.
     expect(shell).toContain('"${persist}" "${port}" "${proof_scope}"; then');
+    // biome-ignore lint/suspicious/noTemplateCurlyInString: asserts literal shell source text.
     expect(shell).toContain('clear_most_recent_supervisor_if_marker "${S2_SERVER_MARKER}"');
-    expect(shell).toContain("most_recent_supervisor_is_tracked \"${marker}\"");
+    // biome-ignore lint/suspicious/noTemplateCurlyInString: asserts literal shell source text.
+    expect(shell).toContain('most_recent_supervisor_is_tracked "${marker}"');
     expect(shell).toContain("reap_parent_terminated_supervisor_residual");
     expect(shell).toContain("S2_PARENT_TERM_OLD_HOOK_RESIDUAL_REAPED");
     expect(shell).toContain("S2_PARENT_TERM_RESIDUAL_UNPROVEN");
     expect(start).toContain("pre_release_group_is_stably_pinned");
+    // biome-ignore lint/suspicious/noTemplateCurlyInString: asserts literal shell source text.
     expect(shell).toContain("${S2_GROUP_MEMBER_COUNT} -ge 1 && ${S2_GROUP_MEMBER_COUNT} -le 2");
     expect(shell).toContain("S2_PLANT_PERSISTENT_PRE_RELEASE_HELPER");
     expect(shell).toContain("S2_PERSISTENT_PRE_RELEASE_HELPER_ACCEPTED");
@@ -360,7 +373,9 @@ describe("S2 to S7 normalized cost receipt", () => {
     expect(publicationWriters).not.toContain("rmSync(");
     expect(shell).toContain("S2_TERM_RESISTANT_START_FAILED");
     const termInterrupt = shell.slice(
+      // biome-ignore lint/suspicious/noTemplateCurlyInString: asserts literal shell source text.
       shell.indexOf('if [[ "${mode}" == "term-interrupt-cleanup" ]]'),
+      // biome-ignore lint/suspicious/noTemplateCurlyInString: asserts literal shell source text.
       shell.indexOf('if [[ "${mode}" == "term-resistant-release" ]]'),
     );
     expect(termInterrupt).toContain("reap_parent_terminated_supervisor_residual");
@@ -440,8 +455,8 @@ describe("registered S2 shell and lifecycle regressions", () => {
     expect(source).not.toContain('throw new Error("S2_REAL_BINDING');
   });
 
-  test("the registered real-binding discovery emits a typed blocker before Wrangler lifecycle work", async () => {
-    const run = await discoverRealBindingLane();
+  test("the direct real-binding capability probe emits a typed blocker before Wrangler lifecycle work", async () => {
+    const run = await probeRealBindingCapability();
     expect(run.exitCode).toBe(78);
     const recordLine = run.stdout.split("\n").findLast((line) => line.startsWith("{"));
     expect(recordLine).toBeDefined();

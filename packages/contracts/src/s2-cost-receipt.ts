@@ -122,7 +122,9 @@ const SafeEvidenceRelativePathSchema = z
       !path.startsWith("/") &&
       !path.includes("\\") &&
       !path.includes("\0") &&
-      path.split("/").every((component) => component !== "" && component !== "." && component !== ".."),
+      path
+        .split("/")
+        .every((component) => component !== "" && component !== "." && component !== ".."),
   );
 const RetainedFileSchema = z.strictObject({
   path: SafeEvidenceRelativePathSchema,
@@ -297,9 +299,7 @@ export type S2CostReceiptPublication = z.infer<typeof S2CostReceiptPublicationSc
 export type S2CostReceiptPublicationCommit = z.infer<typeof S2CostReceiptPublicationCommitSchema>;
 
 export class S2CostReceiptContractError extends Error {
-  constructor(
-    readonly code: "S2_COST_RECEIPT_INVALID" | "S2_COST_RECEIPT_TOO_LARGE",
-  ) {
+  constructor(readonly code: "S2_COST_RECEIPT_INVALID" | "S2_COST_RECEIPT_TOO_LARGE") {
     super(code);
     this.name = "S2CostReceiptContractError";
   }
@@ -333,11 +333,17 @@ export function parseS2CostMeasurementReceiptBytes(bytes: Uint8Array): S2CostMea
 }
 
 export function parseS2CostEvidenceManifestBytes(bytes: Uint8Array): S2CostEvidenceManifest {
-  return parseSchema(S2CostEvidenceManifestSchema, parseJsonBytes(bytes, MAX_S2_COST_EVIDENCE_MANIFEST_BYTES));
+  return parseSchema(
+    S2CostEvidenceManifestSchema,
+    parseJsonBytes(bytes, MAX_S2_COST_EVIDENCE_MANIFEST_BYTES),
+  );
 }
 
 export function parseS2CostReceiptPublicationBytes(bytes: Uint8Array): S2CostReceiptPublication {
-  return parseSchema(S2CostReceiptPublicationSchema, parseJsonBytes(bytes, MAX_S2_COST_RECEIPT_BYTES));
+  return parseSchema(
+    S2CostReceiptPublicationSchema,
+    parseJsonBytes(bytes, MAX_S2_COST_RECEIPT_BYTES),
+  );
 }
 
 export function parseS2CostReceiptPublicationCommitBytes(
