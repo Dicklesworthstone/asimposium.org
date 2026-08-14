@@ -1,4 +1,5 @@
 import { describe, expect, test } from "bun:test";
+import { resolve } from "node:path";
 import {
   BASELINE_REQUIRED,
   EXTRA_REQUIRED,
@@ -96,5 +97,24 @@ describe("suite policy", () => {
     expect(ROOT_UNITS.lint).toBe("toolchain:lint");
     expect(ROOT_UNITS.unit).toBe("toolchain:test");
     expect(ROOT_UNITS.integration).toBe("toolchain:integration");
+  });
+
+  test("single-provider release gates refuse vacuous success and E2E entrypoints retain diagnostics", async () => {
+    const repositoryRoot = resolve(import.meta.dir, "../..");
+    const rootPackage = (await Bun.file(resolve(repositoryRoot, "package.json")).json()) as {
+      scripts: Record<string, string>;
+    };
+    const e2ePackage = (await Bun.file(resolve(repositoryRoot, "e2e/package.json")).json()) as {
+      scripts: Record<string, string>;
+    };
+    const gauntletPackage = (await Bun.file(
+      resolve(repositoryRoot, "e2e/gauntlet/package.json"),
+    ).json()) as { scripts: Record<string, string> };
+
+    expect(rootPackage.scripts["test:performance"]).toContain("--require-executed");
+    expect(rootPackage.scripts["test:e2e"]).toContain("--require-executed");
+    expect(e2ePackage.scripts["test:e2e"]).toContain("--write-artifacts");
+    expect(e2ePackage.scripts["test:gauntlet"]).toContain("--write-artifacts");
+    expect(gauntletPackage.scripts["test:e2e"]).toContain("--write-artifacts");
   });
 });

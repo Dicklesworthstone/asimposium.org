@@ -1,0 +1,11 @@
+{
+  "name": "@asimposium/gauntlet",
+  "version": "0.1.0",
+  "private": true,
+  "scripts": {
+    "typecheck": "bash -n run.sh",
+    "lint": "shellcheck -x run.sh",
+    "test:unit": "bash run.sh --self-test",
+    "test:e2e": "bash run.sh --write-artifacts"
+  }
+}

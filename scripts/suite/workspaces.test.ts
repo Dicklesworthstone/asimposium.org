@@ -121,7 +121,7 @@ describe("source detection: the trigger that turns gates on", () => {
   });
 
   test("every source extension the monorepo can contain is recognised", () => {
-    for (const extension of ["ts", "tsx", "mts", "cts", "js", "jsx", "mjs", "cjs"]) {
+    for (const extension of ["sh", "ts", "tsx", "mts", "cts", "js", "jsx", "mjs", "cjs"]) {
       const root = makeFixtureRepo({ packages: [{ dir: "apps/web" }] });
       writeFileSync(join(root, "apps/web", `file.${extension}`), "export {};\n");
       expect(hasSourceFiles(join(root, "apps/web"))).toBe(true);

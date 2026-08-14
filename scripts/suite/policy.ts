@@ -106,6 +106,7 @@ export const ROOT_UNITS: Readonly<Partial<Record<Suite, string>>> = {
 
 /** File extensions that make a workspace package "code-bearing" and therefore gate-owing. */
 export const SOURCE_EXTENSIONS: readonly string[] = [
+  ".sh",
   ".ts",
   ".tsx",
   ".mts",
