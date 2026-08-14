@@ -149,6 +149,83 @@ export interface ScreeningProvider {
   }>;
 }
 
+/**
+ * Ephemeral input for the promotion-time contextual screen.
+ *
+ * This is intentionally separate from `ScreeningObservation`: the latter is
+ * an OPS-safe measurement receipt, while this value contains untrusted
+ * scientific text and exists only for the duration of one provider call.
+ */
+export interface ContextualScreeningInput {
+  /** Bounded statement fetched from the server-owned problem record. */
+  readonly problem_statement: string;
+  /** Every outward field of the proposed public promotion, bounded before provider ingress. */
+  readonly current_promotion: ContextualPromotionCandidate;
+  /** The newest bounded rows, presented oldest-to-newest before the current promotion. */
+  readonly recent_same_fellow_promotions: readonly ContextualPromotionCandidate[];
+}
+
+export interface ContextualPromotionCandidate {
+  readonly title: string;
+  readonly extract: string;
+  readonly statement: string;
+  readonly public_artifact_md: string;
+}
+
+/** Versioned, safe-to-retain identity for a contextual decision. */
+export interface ContextualScreeningIdentity {
+  readonly model_version: string;
+  readonly policy_version: string;
+  readonly configuration_digest: string;
+}
+
+/** The direct-content screen runs first and is never softened by contextual screening. */
+export interface DirectContentScreeningVerdict {
+  readonly decision: ScreeningDecision;
+  readonly coarse_category: PolicyCategory;
+}
+
+/**
+ * The contextual provider is a narrow ingress-only seam. Implementations must
+ * not retain `ContextualScreeningInput`; durable receipts carry only the
+ * result type below.
+ */
+export interface ContextualScreeningProvider {
+  screenContextually(
+    input: ContextualScreeningInput,
+    signal: AbortSignal,
+  ): Promise<{
+    decision: ScreeningDecision;
+    coarse_category: PolicyCategory;
+  }>;
+}
+
+/**
+ * Safe to persist in a private hold or return as a coarse refusal. It contains
+ * neither submitted text nor any reconstruction of the supplied context.
+ */
+export interface ContextualScreeningResult {
+  readonly input_digest: string;
+  readonly model_version: string;
+  readonly policy_version: string;
+  readonly configuration_digest: string;
+  readonly decision: "pass" | "allow-with-warning" | "quarantine" | "reject";
+  readonly coarse_category: PolicyCategory;
+  readonly provider_status: ProviderStatus;
+  readonly decision_path:
+    | "provider"
+    | "provider-contextual-hold"
+    | "direct-content-hold"
+    | "direct-content-reject"
+    | "direct-content-warning"
+    | "provider-timeout-fail-closed"
+    | "provider-error-fail-closed";
+  readonly status_code:
+    | "SCREENED"
+    | "SCREENING_PROVIDER_TIMEOUT"
+    | "SCREENING_PROVIDER_ERROR";
+}
+
 export interface ScreeningThresholds {
   readonly legitimate_false_positive_rate_exclusive_max: number;
   readonly hard_reject_false_negative_max: number;

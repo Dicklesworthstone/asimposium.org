@@ -1,5 +1,14 @@
 import { isSafeScreeningDiagnosticLabel, isSha256Digest } from "./aggregate";
+import {
+  assertContextualScreeningInput,
+  contextualScreeningInputDigest,
+} from "./context";
 import type {
+  ContextualScreeningIdentity,
+  ContextualScreeningInput,
+  ContextualScreeningProvider,
+  ContextualScreeningResult,
+  DirectContentScreeningVerdict,
   PolicyCategory,
   ProviderStatus,
   ScreeningObservation,
@@ -14,8 +23,18 @@ export interface ProviderScreenOptions {
   readonly now_ms?: () => number;
 }
 
+export interface ContextualProviderScreenOptions extends ProviderScreenOptions {
+  readonly identity: ContextualScreeningIdentity;
+  /** Direct-content safety runs first; contextual assembly never overrides it. */
+  readonly direct_content: DirectContentScreeningVerdict;
+}
+
 const MAX_PROVIDER_TIMEOUT_MS = 60_000;
 const SCORE_BANDS = ["low", "elevated", "high"] as const;
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return value !== null && typeof value === "object" && !Array.isArray(value);
+}
 
 class ProviderDeadlineExceeded extends Error {
   constructor() {
@@ -60,6 +79,113 @@ function providerFailureObservation(
   };
 }
 
+function boundContextualResult(
+  inputDigest: string,
+  identity: ContextualScreeningIdentity,
+  result: Omit<ContextualScreeningResult, "input_digest" | "model_version" | "policy_version" | "configuration_digest">,
+): ContextualScreeningResult {
+  return {
+    input_digest: inputDigest,
+    model_version: identity.model_version,
+    policy_version: identity.policy_version,
+    configuration_digest: identity.configuration_digest,
+    ...result,
+  };
+}
+
+function contextualProviderFailure(
+  inputDigest: string,
+  identity: ContextualScreeningIdentity,
+  providerStatus: Exclude<ProviderStatus, "ok">,
+): ContextualScreeningResult {
+  const timedOut = providerStatus === "timeout";
+  return boundContextualResult(inputDigest, identity, {
+    // Contextual risk is deliberately a hold. This slice never turns an
+    // assembly signal into a detailed policy rejection.
+    decision: "quarantine",
+    coarse_category: "provider-unavailable",
+    provider_status: providerStatus,
+    decision_path: timedOut ? "provider-timeout-fail-closed" : "provider-error-fail-closed",
+    status_code: timedOut ? "SCREENING_PROVIDER_TIMEOUT" : "SCREENING_PROVIDER_ERROR",
+  });
+}
+
+function decisionRank(decision: ContextualScreeningResult["decision"]): number {
+  switch (decision) {
+    case "reject":
+      return 3;
+    case "quarantine":
+      return 2;
+    case "allow-with-warning":
+      return 1;
+    case "pass":
+      return 0;
+  }
+}
+
+function directContentResult(
+  inputDigest: string,
+  identity: ContextualScreeningIdentity,
+  verdict: DirectContentScreeningVerdict,
+): ContextualScreeningResult {
+  return boundContextualResult(inputDigest, identity, {
+    decision: verdict.decision,
+    coarse_category: verdict.coarse_category,
+    provider_status: "ok",
+    decision_path:
+      verdict.decision === "reject"
+        ? "direct-content-reject"
+        : verdict.decision === "quarantine"
+          ? "direct-content-hold"
+          : "direct-content-warning",
+    status_code: "SCREENED",
+  });
+}
+
+function contextualProviderResult(
+  inputDigest: string,
+  identity: ContextualScreeningIdentity,
+  response: Awaited<ReturnType<ContextualScreeningProvider["screenContextually"]>>,
+): ContextualScreeningResult {
+  if (response.decision === "pass" || response.decision === "allow-with-warning") {
+    return boundContextualResult(inputDigest, identity, {
+      decision: response.decision,
+      coarse_category: response.coarse_category,
+      provider_status: "ok",
+      decision_path: "provider",
+      status_code: "SCREENED",
+    });
+  }
+  // Contextual aggregation is deliberately a private, appealable hold. It
+  // may never produce a detailed public rejection, even when a provider uses
+  // its internal reject class for the assembled text.
+  return boundContextualResult(inputDigest, identity, {
+    decision: "quarantine",
+    coarse_category: response.coarse_category,
+    provider_status: "ok",
+    decision_path: "provider-contextual-hold",
+    status_code: "SCREENED",
+  });
+}
+
+/**
+ * Compose independent direct and contextual verdicts monotonically. A
+ * contextual pass cannot soften a direct warning; ties retain direct-content
+ * responsibility except for pass/pass, where the provider receipt remains the
+ * useful decision path.
+ */
+function composeContextualResult(
+  direct: ContextualScreeningResult,
+  contextual: ContextualScreeningResult,
+): ContextualScreeningResult {
+  const directRank = decisionRank(direct.decision);
+  const contextualRank = decisionRank(contextual.decision);
+  if (directRank > contextualRank || (directRank === 1 && contextualRank === 1)) {
+    return direct;
+  }
+  return contextual;
+}
+
 function assertProviderOptions(options: ProviderScreenOptions): void {
   if (
     !Number.isInteger(options.timeout_ms) ||
@@ -82,6 +208,34 @@ function assertProviderRequest(request: ScreeningProviderRequest): void {
     !isSafeScreeningDiagnosticLabel(request.identity.policy_version)
   ) {
     throw new TypeError("Screening request metadata is unsafe or malformed.");
+  }
+}
+
+function assertContextualIdentity(identity: unknown): asserts identity is ContextualScreeningIdentity {
+  if (!isRecord(identity)) throw new TypeError("Contextual screening identity is malformed.");
+  if (
+    typeof identity.model_version !== "string" ||
+    typeof identity.policy_version !== "string" ||
+    typeof identity.configuration_digest !== "string" ||
+    !isSafeScreeningDiagnosticLabel(identity.model_version) ||
+    !isSafeScreeningDiagnosticLabel(identity.policy_version) ||
+    !isSha256Digest(identity.configuration_digest)
+  ) {
+    throw new TypeError("Contextual screening identity is unsafe or malformed.");
+  }
+}
+
+function assertDirectContentVerdict(
+  verdict: unknown,
+): asserts verdict is DirectContentScreeningVerdict {
+  if (!isRecord(verdict)) throw new TypeError("Direct-content screening verdict is malformed.");
+  if (
+    typeof verdict.decision !== "string" ||
+    typeof verdict.coarse_category !== "string" ||
+    !(SCREENING_DECISIONS as readonly string[]).includes(verdict.decision as string) ||
+    !isPolicyCategory(verdict.coarse_category)
+  ) {
+    throw new TypeError("Direct-content screening verdict is invalid.");
   }
 }
 
@@ -119,6 +273,20 @@ function assertProviderResponse(
     if (band !== undefined && !(SCORE_BANDS as readonly string[]).includes(band as string)) {
       throw new TypeError("Provider response has an invalid score band.");
     }
+  }
+}
+
+function assertContextualProviderResponse(
+  value: unknown,
+): asserts value is Awaited<ReturnType<ContextualScreeningProvider["screenContextually"]>> {
+  if (!isRecord(value)) throw new TypeError("Contextual provider response must be an object.");
+  if (
+    typeof value.decision !== "string" ||
+    typeof value.coarse_category !== "string" ||
+    !(SCREENING_DECISIONS as readonly string[]).includes(value.decision as string) ||
+    !isPolicyCategory(value.coarse_category)
+  ) {
+    throw new TypeError("Contextual provider response has an invalid decision or category.");
   }
 }
 
@@ -177,6 +345,59 @@ export async function screenWithProvider(
       Math.max(0, now() - started),
       retryCount,
     );
+  } finally {
+    if (timer !== undefined) clearTimeout(timer);
+  }
+}
+
+/**
+ * Invoke the live contextual-provider seam without producing a measurement
+ * observation. The raw input crosses exactly this function boundary and the
+ * provider call; its returned result is safe for a private hold record.
+ */
+export async function screenContextuallyWithProvider(
+  provider: ContextualScreeningProvider,
+  input: ContextualScreeningInput,
+  options: ContextualProviderScreenOptions,
+): Promise<ContextualScreeningResult> {
+  assertProviderOptions(options);
+  assertContextualScreeningInput(input);
+  assertContextualIdentity(options.identity);
+  assertDirectContentVerdict(options.direct_content);
+  const inputDigest = await contextualScreeningInputDigest(input);
+  if (options.direct_content.decision === "reject") {
+    return directContentResult(inputDigest, options.identity, options.direct_content);
+  }
+  if (options.direct_content.decision === "quarantine") {
+    return directContentResult(inputDigest, options.identity, options.direct_content);
+  }
+  const controller = new AbortController();
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  const deadline = new Promise<never>((_resolve, reject) => {
+    timer = setTimeout(() => {
+      controller.abort();
+      reject(new ProviderDeadlineExceeded());
+    }, options.timeout_ms);
+  });
+
+  try {
+    const response = await Promise.race([
+      provider.screenContextually(input, controller.signal),
+      deadline,
+    ]);
+    assertContextualProviderResponse(response);
+    return composeContextualResult(
+      directContentResult(inputDigest, options.identity, options.direct_content),
+      contextualProviderResult(inputDigest, options.identity, response),
+    );
+  } catch (error) {
+    const providerStatus: Exclude<ProviderStatus, "ok"> =
+      error instanceof ProviderDeadlineExceeded ||
+      controller.signal.aborted ||
+      (error instanceof Error && error.name === "AbortError")
+        ? "timeout"
+        : "error";
+    return contextualProviderFailure(inputDigest, options.identity, providerStatus);
   } finally {
     if (timer !== undefined) clearTimeout(timer);
   }
