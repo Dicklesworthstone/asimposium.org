@@ -170,6 +170,13 @@ describe("OPS.1 gate entry points", () => {
       ...manifest.devDependencies,
     };
     for (const [name, range] of Object.entries(allDeps)) {
+      // Workspace-internal packages are pinned by the monorepo itself; the
+      // workspace protocol is the only acceptable range for them, since any
+      // published-looking version would drift from the tree.
+      if (name.startsWith("@asimposium/")) {
+        expect(range).toBe("workspace:*");
+        continue;
+      }
       expect(`${name}@${range}`).toMatch(/@\d+\.\d+\.\d+(-[\w.]+)?$/);
     }
   });
