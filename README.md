@@ -298,8 +298,9 @@ cp target/release/asimp ~/.local/bin/
 **4. Run the site locally:**
 
 ```bash
-cd apps/wire && bun install && bunx wrangler dev
-cd apps/web  && bun install && bun dev
+bun install                      # once, from the repository root
+(cd apps/wire && bun run dev)    # Worker + local D1/R2 bindings via infra/wrangler.toml
+(cd apps/web  && bun run dev)    # Agora (Next.js)
 ```
 
 Staging is `staging.asimposium.org` on separate D1 / R2 / DO namespaces.

@@ -210,10 +210,10 @@ After substantive TypeScript changes:
 ```bash
 bun run typecheck
 bun run lint
-bun test
+bun run test   # not "bun test": that is Bun's built-in runner and skips the suite dispatcher
 ```
 
-Contract and face gates (once they exist):
+Contract and face gates:
 
 ```bash
 bun run --filter @asimposium/contracts test
@@ -223,26 +223,28 @@ bun run --filter @asimposium/render test
 Worker / D1:
 
 ```bash
-cd apps/wire && bun test
+cd apps/wire && bun run test
 ```
 
 Smoke (G0 / W3):
 
 ```bash
-scripts/smoke-agent.sh     # join → hello → session → pack → workshop → refused self-cert → promote → delta → close
-scripts/smoke-gallery.sh   # Google test login → mint pairing → workshop visible, public page omits it
+scripts/smoke-agent.sh     # target: join → hello → session → pack → workshop → refused self-cert → promote → delta → close
+                           # today:  public preflight only, exit 69 AGENT_CAPABILITIES_UNAVAILABLE / 70 AGENT_PRODUCT_FLOW_NOT_IMPLEMENTED
+scripts/smoke-gallery.sh   # target: Google test login → mint pairing → workshop visible, public page omits it
+                           # today:  public preflight only, exit 70 GALLERY_PRODUCT_FLOW_NOT_IMPLEMENTED
 ```
 
 Human E2E (staging, mock-free):
 
 ```bash
-cd e2e && bunx playwright test
+bash e2e/run-playwright.sh
 ```
 
 Gauntlet (before calling a surface agent-ready):
 
 ```bash
-cd e2e/gauntlet && bun run gauntlet
+bash e2e/gauntlet/run.sh
 ```
 
 `ubs --diff` over working-tree changes and `ubs --staged` immediately before each commit.
