@@ -39,6 +39,13 @@ const mainProblemId = "P-s3-local";
 const privateCanary = `S3-R2-PRIVATE-CANARY-${"private-body".repeat(160)}`;
 const publicStatement = "Every bounded local example has the recorded public property.";
 const publicArtifact = "A deliberately public local artifact for the one promoted claim.";
+const LOCAL_S4_TIMEOUT_MARKER = "S4-TIMEOUT-FIXTURE";
+const LOCAL_S4_DIRECT_REJECT_MARKER = "S4-DIRECT-REJECT-FIXTURE";
+const LOCAL_S4_HISTORY_PIECE_MARKER = "S4-PIECE-A-FIXTURE";
+const LOCAL_S4_CURRENT_PIECE_MARKER = "S4-PIECE-B-FIXTURE";
+const LOCAL_S4_PROVIDER_EXCEPTION_MARKER = "S4-PROVIDER-EXCEPTION-FIXTURE";
+const LOCAL_S4_PROVIDER_EXCEPTION_MESSAGE_CANARY = "S4-PROVIDER-EXCEPTION-MESSAGE-CANARY";
+const LOCAL_S4_PROVIDER_EXCEPTION_STACK_CANARY = "S4-PROVIDER-EXCEPTION-STACK-CANARY";
 const localSponsorId = `local-sponsor-${localRunToken}`;
 const authoritativeFieldFixHint =
   "Remove author-writable disposition, proof, confidence, certification, or status-upgrade fields; the ledger computes disposition after independent review.";
@@ -172,25 +179,50 @@ async function pushWorkshop(
   });
 }
 
+function promotionRequest(
+  workshopId: string,
+  statement: string,
+  publicArtifactMd: string,
+  candidate: Record<string, unknown> = {},
+  extraHeaders: Readonly<Record<string, string>> = {},
+  outward: Partial<{
+    readonly title: string;
+    readonly extract: string;
+    readonly statement: string;
+    readonly public_artifact_md: string;
+  }> = {},
+): RequestInit {
+  return {
+    method: "POST",
+    headers: { "content-type": "application/json", ...extraHeaders },
+    body: JSON.stringify({
+      candidate,
+      extract: outward.extract ?? "A public extract for the local binding proof.",
+      public_artifact_md: outward.public_artifact_md ?? publicArtifactMd,
+      statement: outward.statement ?? statement,
+      title: outward.title ?? "One public local promotion",
+      workshop_id: workshopId,
+    }),
+  };
+}
+
 async function promote(
   workshopId: string,
   statement: string,
   publicArtifactMd: string,
   candidate: Record<string, unknown> = {},
   extraHeaders: Readonly<Record<string, string>> = {},
+  outward: Partial<{
+    readonly title: string;
+    readonly extract: string;
+    readonly statement: string;
+    readonly public_artifact_md: string;
+  }> = {},
 ): Promise<JsonResult> {
-  return requestJson("/__s3/promote", {
-    method: "POST",
-    headers: { "content-type": "application/json", ...extraHeaders },
-    body: JSON.stringify({
-      candidate,
-      extract: "A public extract for the local binding proof.",
-      public_artifact_md: publicArtifactMd,
-      statement,
-      title: "One public local promotion",
-      workshop_id: workshopId,
-    }),
-  });
+  return requestJson(
+    "/__s3/promote",
+    promotionRequest(workshopId, statement, publicArtifactMd, candidate, extraHeaders, outward),
+  );
 }
 
 async function assertFaceSet(
@@ -904,6 +936,295 @@ async function main(): Promise<void> {
       thirdPromotion.body.claim_id === "C-3" &&
       thirdPromotion.body.public_seq === 3,
     `statuses ${racedPromotions.map((result) => result.response.status).join(",")} sequences ${publicSequences.join(",")} third ${thirdPromotion.response.status}/${String(thirdPromotion.body.claim_id)}/${String(thirdPromotion.body.public_seq)}`,
+  );
+
+  const s4OutwardFields = ["title", "extract", "statement", "public_artifact_md"] as const;
+  const s4HeldResponses: boolean[] = [];
+  for (const [index, field] of s4OutwardFields.entries()) {
+    const problemId = `P-s4-context-${field}`;
+    const priorMarker = `${LOCAL_S4_HISTORY_PIECE_MARKER}-${field}`;
+    const currentMarker = `${LOCAL_S4_CURRENT_PIECE_MARKER}-${field}`;
+    const priorWorkshop = await pushWorkshop(problemId, `${privateCanary}-s4-prior-${field}`);
+    const priorOutward: Partial<{
+      readonly title: string;
+      readonly extract: string;
+      readonly statement: string;
+      readonly public_artifact_md: string;
+    }> = { [field]: priorMarker };
+    const priorPromotion = await promote(
+      recordField(priorWorkshop.body, "workshop_id") ?? "",
+      `S4 prior public statement for ${field}.`,
+      `S4 prior public artifact for ${field}.`,
+      {},
+      {},
+      priorOutward,
+    );
+    const beforeHold = await snapshot(
+      await localFetch(`${origin}/__s3/public/${problemId}?format=json`),
+    );
+    const heldWorkshop = await pushWorkshop(problemId, `${privateCanary}-s4-held-${field}`);
+    const heldArtifact = `S4 held public artifact for ${field}.`;
+    const currentOutward: Partial<{
+      readonly title: string;
+      readonly extract: string;
+      readonly statement: string;
+      readonly public_artifact_md: string;
+    }> = { [field]: currentMarker };
+    const holdHeaders = { "idempotency-key": `s4-context-hold-${index}` };
+    const holdRequest = promotionRequest(
+      recordField(heldWorkshop.body, "workshop_id") ?? "",
+      `S4 held public statement for ${field}.`,
+      heldArtifact,
+      {},
+      holdHeaders,
+      currentOutward,
+    );
+    const firstHold = await snapshot(await localFetch(`${origin}/__s3/promote`, holdRequest));
+    const replayedHold = await snapshot(await localFetch(`${origin}/__s3/promote`, holdRequest));
+    const mismatchedReplay = await snapshot(
+      await localFetch(
+        `${origin}/__s3/promote`,
+        promotionRequest(
+          recordField(heldWorkshop.body, "workshop_id") ?? "",
+          `S4 mismatched replay statement for ${field}.`,
+          heldArtifact,
+          {},
+          holdHeaders,
+          { ...currentOutward, title: `S4 mismatched replay title for ${field}.` },
+        ),
+      ),
+    );
+    const afterHold = await snapshot(
+      await localFetch(`${origin}/__s3/public/${problemId}?format=json`),
+    );
+    const heldArtifactDigest = await sha256Hex(currentOutward.public_artifact_md ?? heldArtifact);
+    const heldArtifactRead = await snapshot(
+      await localFetch(`${origin}/sha256/${heldArtifactDigest}`),
+    );
+    const fieldHeld =
+      priorWorkshop.response.status === 201 &&
+      priorPromotion.response.status === 201 &&
+      beforeHold.response.status === 200 &&
+      firstHold.response.status === 202 &&
+      firstHold.body ===
+        '{"code":"SCREENING_HOLD","coarse_category":"dual-use-boundary","appeal":"SPONSOR_APPEAL_AVAILABLE"}' &&
+      replayedHold.response.status === 202 &&
+      replayedHold.body === firstHold.body &&
+      mismatchedReplay.response.status === 409 &&
+      mismatchedReplay.body === '{"code":"IDEMPOTENCY_CONFLICT"}' &&
+      afterHold.response.status === 200 &&
+      afterHold.body === beforeHold.body &&
+      heldArtifactRead.response.status === 404 &&
+      hasNoPrivateMaterial(firstHold, [currentMarker, heldArtifact]) &&
+      hasNoPrivateMaterial(replayedHold, [currentMarker, heldArtifact]) &&
+      hasNoPrivateMaterial(mismatchedReplay, [currentMarker, heldArtifact]) &&
+      hasNoPrivateMaterial(afterHold, [currentMarker, heldArtifact]) &&
+      hasNoPrivateMaterial(heldArtifactRead, [currentMarker, heldArtifact]);
+    s4HeldResponses.push(fieldHeld);
+    check(
+      `S4_${field}_history_field_reaches_contextual_provider_without_public_effect`,
+      fieldHeld,
+      `prior ${priorPromotion.response.status} hold ${firstHold.response.status} replay ${replayedHold.response.status} mismatch ${mismatchedReplay.response.status} public ${afterHold.response.status} artifact ${heldArtifactRead.response.status}`,
+    );
+  }
+  check(
+    "S4_contextual_aggregation_reads_all_four_D1_authorized_public_fields_and_holds_without_public_effect",
+    s4HeldResponses.length === s4OutwardFields.length && s4HeldResponses.every(Boolean),
+    "a field-specific contextual hold reflected content, duplicated a hold, or changed a public face",
+  );
+
+  const callerProblemCanary = "S4-CALLER-PROBLEM-STATEMENT-MUST-NOT-REACH-CONTEXT";
+  const callerProblemWorkshop = await pushWorkshop(
+    "P-s4-caller-problem",
+    `${privateCanary}-s4-caller-problem`,
+  );
+  const callerProblemResponse = await snapshot(
+    await localFetch(`${origin}/__s3/promote`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({
+        candidate: {},
+        extract: "S4 caller problem extract.",
+        problem_statement: callerProblemCanary,
+        public_artifact_md: "S4 caller problem artifact.",
+        statement: "S4 caller problem statement.",
+        title: "S4 caller problem title.",
+        workshop_id: recordField(callerProblemWorkshop.body, "workshop_id") ?? "",
+      }),
+    }),
+  );
+  check(
+    "S4_problem_statement_is_server_owned_and_caller_material_never_reflects",
+    callerProblemWorkshop.response.status === 201 &&
+      callerProblemResponse.response.status === 400 &&
+      callerProblemResponse.body === '{"code":"LOCAL_INPUT_INVALID"}' &&
+      hasNoPrivateMaterial(callerProblemResponse, [callerProblemCanary]),
+    `status ${callerProblemResponse.response.status}`,
+  );
+
+  const timeoutProblemId = "P-s4-timeout";
+  const timeoutArtifact = "S4 timeout artifact must not become public.";
+  const timeoutWorkshop = await pushWorkshop(timeoutProblemId, `${privateCanary}-s4-timeout`);
+  const timeoutHold = await snapshot(
+    await localFetch(
+      `${origin}/__s3/promote`,
+      promotionRequest(
+        recordField(timeoutWorkshop.body, "workshop_id") ?? "",
+        LOCAL_S4_TIMEOUT_MARKER,
+        timeoutArtifact,
+        {},
+        { "idempotency-key": "s4-timeout-hold" },
+      ),
+    ),
+  );
+  const timeoutFace = await snapshot(
+    await localFetch(`${origin}/__s3/public/${timeoutProblemId}?format=json`),
+  );
+  const timeoutArtifactRead = await snapshot(
+    await localFetch(`${origin}/sha256/${await sha256Hex(timeoutArtifact)}`),
+  );
+  check(
+    "S4_provider_timeout_fails_closed_to_a_private_appealable_hold_without_public_cursor_or_artifact",
+    timeoutWorkshop.response.status === 201 &&
+      timeoutHold.response.status === 202 &&
+      timeoutHold.body ===
+        '{"code":"SCREENING_HOLD","coarse_category":"provider-unavailable","appeal":"SPONSOR_APPEAL_AVAILABLE"}' &&
+      timeoutFace.response.status === 404 &&
+      timeoutArtifactRead.response.status === 404 &&
+      hasNoPrivateMaterial(timeoutHold, [LOCAL_S4_TIMEOUT_MARKER, timeoutArtifact]) &&
+      hasNoPrivateMaterial(timeoutFace, [LOCAL_S4_TIMEOUT_MARKER, timeoutArtifact]) &&
+      hasNoPrivateMaterial(timeoutArtifactRead, [LOCAL_S4_TIMEOUT_MARKER, timeoutArtifact]),
+    `hold ${timeoutHold.response.status} public ${timeoutFace.response.status} artifact ${timeoutArtifactRead.response.status}`,
+  );
+
+  const directProblemId = "P-s4-direct-reject";
+  const directArtifact = "S4 direct-reject artifact must not become public.";
+  const directWorkshop = await pushWorkshop(directProblemId, `${privateCanary}-s4-direct-reject`);
+  const directRefusal = await snapshot(
+    await localFetch(
+      `${origin}/__s3/promote`,
+      promotionRequest(
+        recordField(directWorkshop.body, "workshop_id") ?? "",
+        "S4 normal statement.",
+        directArtifact,
+        {},
+        {},
+        { title: LOCAL_S4_DIRECT_REJECT_MARKER },
+      ),
+    ),
+  );
+  const directFace = await snapshot(
+    await localFetch(`${origin}/__s3/public/${directProblemId}?format=json`),
+  );
+  const directArtifactRead = await snapshot(
+    await localFetch(`${origin}/sha256/${await sha256Hex(directArtifact)}`),
+  );
+  check(
+    "S4_direct_content_reject_is_not_downgraded_by_contextual_screening",
+    directWorkshop.response.status === 201 &&
+      directRefusal.response.status === 403 &&
+      directRefusal.body ===
+        '{"code":"POLICY_DENIED","coarse_category":"operational-harm","appeal":"SPONSOR_APPEAL_AVAILABLE"}' &&
+      directFace.response.status === 404 &&
+      directArtifactRead.response.status === 404 &&
+      hasNoPrivateMaterial(directRefusal, [LOCAL_S4_DIRECT_REJECT_MARKER, directArtifact]) &&
+      hasNoPrivateMaterial(directFace, [LOCAL_S4_DIRECT_REJECT_MARKER, directArtifact]) &&
+      hasNoPrivateMaterial(directArtifactRead, [LOCAL_S4_DIRECT_REJECT_MARKER, directArtifact]),
+    `refusal ${directRefusal.response.status} public ${directFace.response.status} artifact ${directArtifactRead.response.status}`,
+  );
+
+  const providerExceptionProblemId = "P-s4-provider-exception";
+  const providerExceptionArtifact = "S4 provider exception artifact must not become public.";
+  const providerExceptionWorkshop = await pushWorkshop(
+    providerExceptionProblemId,
+    `${privateCanary}-s4-provider-exception`,
+  );
+  const providerExceptionHold = await snapshot(
+    await localFetch(
+      `${origin}/__s3/promote`,
+      promotionRequest(
+        recordField(providerExceptionWorkshop.body, "workshop_id") ?? "",
+        "S4 provider exception statement.",
+        providerExceptionArtifact,
+        {},
+        { "idempotency-key": "s4-provider-exception-hold" },
+        { title: LOCAL_S4_PROVIDER_EXCEPTION_MARKER },
+      ),
+    ),
+  );
+  const providerExceptionFace = await snapshot(
+    await localFetch(`${origin}/__s3/public/${providerExceptionProblemId}?format=json`),
+  );
+  const providerExceptionExport = await snapshot(
+    await localFetch(`${origin}/__s3/public/${providerExceptionProblemId}/export.jsonl`),
+  );
+  const providerExceptionArtifactRead = await snapshot(
+    await localFetch(`${origin}/sha256/${await sha256Hex(providerExceptionArtifact)}`),
+  );
+  const providerExceptionCanaries = [
+    LOCAL_S4_PROVIDER_EXCEPTION_MARKER,
+    LOCAL_S4_PROVIDER_EXCEPTION_MESSAGE_CANARY,
+    LOCAL_S4_PROVIDER_EXCEPTION_STACK_CANARY,
+    providerExceptionArtifact,
+  ];
+  check(
+    "S4_provider_exception_message_and_stack_are_a_coarse_private_hold_without_response_R2_event_or_export_leakage",
+    providerExceptionWorkshop.response.status === 201 &&
+      providerExceptionHold.response.status === 202 &&
+      providerExceptionHold.body ===
+        '{"code":"SCREENING_HOLD","coarse_category":"provider-unavailable","appeal":"SPONSOR_APPEAL_AVAILABLE"}' &&
+      providerExceptionFace.response.status === 404 &&
+      providerExceptionExport.response.status === 404 &&
+      providerExceptionArtifactRead.response.status === 404 &&
+      hasNoPrivateMaterial(providerExceptionHold, providerExceptionCanaries) &&
+      hasNoPrivateMaterial(providerExceptionFace, providerExceptionCanaries) &&
+      hasNoPrivateMaterial(providerExceptionExport, providerExceptionCanaries) &&
+      hasNoPrivateMaterial(providerExceptionArtifactRead, providerExceptionCanaries),
+    `hold ${providerExceptionHold.response.status} public ${providerExceptionFace.response.status} export ${providerExceptionExport.response.status} artifact ${providerExceptionArtifactRead.response.status}`,
+  );
+
+  const oversizedProblemId = "P-s4-oversized-context";
+  const oversizedCanary = "S4-OVERSIZED-CONTEXT-CANARY-MUST-NOT-LEAK";
+  const oversizedArtifact = `${oversizedCanary}${"x".repeat(4_096)}`;
+  const oversizedWorkshop = await pushWorkshop(
+    oversizedProblemId,
+    `${privateCanary}-s4-oversized-context`,
+  );
+  const oversizedHold = await snapshot(
+    await localFetch(
+      `${origin}/__s3/promote`,
+      promotionRequest(
+        recordField(oversizedWorkshop.body, "workshop_id") ?? "",
+        "S4 oversized statement.",
+        oversizedArtifact,
+        {},
+        { "idempotency-key": "s4-oversized-context-hold" },
+      ),
+    ),
+  );
+  const oversizedFace = await snapshot(
+    await localFetch(`${origin}/__s3/public/${oversizedProblemId}?format=json`),
+  );
+  const oversizedExport = await snapshot(
+    await localFetch(`${origin}/__s3/public/${oversizedProblemId}/export.jsonl`),
+  );
+  const oversizedArtifactRead = await snapshot(
+    await localFetch(`${origin}/sha256/${await sha256Hex(oversizedArtifact)}`),
+  );
+  check(
+    "S4_oversized_context_fails_closed_without_response_R2_event_or_export_canary_leakage",
+    oversizedWorkshop.response.status === 201 &&
+      oversizedHold.response.status === 202 &&
+      oversizedHold.body ===
+        '{"code":"SCREENING_HOLD","coarse_category":"provider-unavailable","appeal":"SPONSOR_APPEAL_AVAILABLE"}' &&
+      oversizedFace.response.status === 404 &&
+      oversizedExport.response.status === 404 &&
+      oversizedArtifactRead.response.status === 404 &&
+      hasNoPrivateMaterial(oversizedHold, [oversizedCanary]) &&
+      hasNoPrivateMaterial(oversizedFace, [oversizedCanary]) &&
+      hasNoPrivateMaterial(oversizedExport, [oversizedCanary]) &&
+      hasNoPrivateMaterial(oversizedArtifactRead, [oversizedCanary]),
+    `hold ${oversizedHold.response.status} public ${oversizedFace.response.status} export ${oversizedExport.response.status} artifact ${oversizedArtifactRead.response.status}`,
   );
 
   emit({

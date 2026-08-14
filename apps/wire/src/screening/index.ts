@@ -30,8 +30,8 @@ export {
 } from "./provider";
 export { screeningOpsJsonl } from "./report";
 export type {
-  ContextualScreeningInput,
   ContextualPromotionCandidate,
+  ContextualScreeningInput,
   ContextualScreeningProvider,
   ContextualScreeningResult,
   DirectContentScreeningVerdict,
