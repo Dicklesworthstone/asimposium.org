@@ -56,6 +56,12 @@ readonly EPHEMERAL_PORT_SPAN=20000
 # can no longer derive the group from the leader.
 SERVER_PID=""
 SERVER_PGID=""
+SERVER_IDENTITY=""
+# The timed client phase runs in its own process group. It is tracked here so an
+# interrupt arriving mid-phase terminates that group too, instead of orphaning it.
+CLIENT_PID=""
+CLIENT_PGID=""
+CLIENT_IDENTITY=""
 STATE_DIR=""
 PHASE_LOG=""
 # Resolved by `resolve_port` / `resolve_run_token`, which refuse in this shell
@@ -119,11 +125,63 @@ process_alive() {
   kill -0 "$1" 2>/dev/null
 }
 
-# The process group id of a pid; non-zero when the process is gone or the pid is
-# not a pid. Silent, because it runs inside a command substitution.
+# Failure-only fault injection, for the tests that prove the fail-closed paths.
+# `S1_FAULT_INJECT=ps-unreadable` makes process inspection unavailable. It is
+# consulted in exactly two places — here and in `process_identity` — and it can
+# only make a run refuse or fail. There is no value of it that can produce a pass.
+inspection_unavailable() {
+  [[ "${S1_FAULT_INJECT:-}" == "ps-unreadable" ]]
+}
+
+# One validated snapshot of the process table.
+#
+# The distinction this exists to preserve is *unknown* versus *empty*. `ps` can
+# fail, be truncated, or be unavailable under a restrictive sandbox, and every
+# liveness question in this file is asked in order to decide whether cleanup may
+# stop. An unreadable table read as "no processes" is therefore a false green with
+# a live child behind it. So: a table must be non-empty and must contain this very
+# runner, or it is not a table and callers are told so.
+ps_table() {
+  local table
+  inspection_unavailable && return 1
+  table="$(ps -A -o pid=,ppid=,pgid=,stat= 2>/dev/null)" || return 1
+  [[ -n "$table" ]] || return 1
+  printf '%s\n' "$table" |
+    awk -v self="$$" '$1 == self { found = 1 } END { exit(found ? 0 : 1) }' || return 1
+  printf '%s\n' "$table"
+}
+
+# A pid is not an identity. Pids are recycled, and every signal in this file is
+# aimed at a pid that was recorded earlier, so between the record and the signal
+# the process behind it can have become a stranger. Start time plus command name
+# is stable for the life of a process and changes when the pid is reissued.
+#
+# Returns 1 when no such process exists, and 2 when inspection is unavailable —
+# callers must not collapse those two, because the first is "nothing to do" and
+# the second is "do not touch anything".
+process_identity() {
+  local identity status=0
+  [[ -n "${1:-}" ]] || return 1
+  inspection_unavailable && return 2
+  identity="$(ps -p "$1" -o lstart=,comm= 2>/dev/null)" || status=$?
+  if ((status != 0)); then
+    # `ps -p` exits non-zero for "no such process" and for a real failure alike.
+    # Asking about a pid that must exist separates the two.
+    if ps -p "$$" -o pid= >/dev/null 2>&1; then return 1; fi
+    return 2
+  fi
+  identity="$(printf '%s' "$identity" | tr -s '[:space:]' ' ')"
+  [[ -n "${identity// /}" ]] || return 2
+  printf '%s' "$identity"
+}
+
+# The process group id of a pid; non-zero when the process is gone, the pid is not
+# a pid, or the table cannot be read. Silent, because it runs inside a command
+# substitution.
 process_group_of() {
-  local pgid
-  pgid="$(ps -o pgid= -p "$1" 2>/dev/null | tr -d '[:space:]')"
+  local table pgid
+  table="$(ps_table)" || return 1
+  pgid="$(printf '%s' "$table" | awk -v want="$1" '$1 == want { print $3; exit }')"
   [[ "$pgid" =~ ^[0-9]+$ ]] || return 1
   printf '%s' "$pgid"
 }
@@ -142,21 +200,26 @@ owns_process_group() {
   [[ "$pgid" != "$mine" ]]
 }
 
-# Live (non-zombie) members of a process group, from one ps snapshot.
+# Live (non-zombie) members of a process group. Non-zero means *unknown*, which is
+# never the same answer as an empty list.
 #
-# Zombies must be excluded, and that is the whole difficulty of this check: an
+# Zombies must be excluded, and that is the other half of this check: an
 # exited-but-unreaped leader still answers `kill -0`, so a liveness test built on
 # signals reports a group as alive because of a corpse, and — worse — reports the
 # leader as alive while saying nothing about the descendants that actually hold
 # the port. `stat` is the only thing that distinguishes the two.
 live_group_members() {
-  ps -A -o pid=,pgid=,stat= 2>/dev/null | awk -v want="$1" '$2 == want && $3 !~ /Z/ { print $1 }'
+  local table
+  table="$(ps_table)" || return 1
+  printf '%s' "$table" | awk -v want="$1" '$3 == want && $4 !~ /Z/ { print $1 }'
 }
 
-# Every descendant of `pid`, from one ps snapshot, computed as a transitive
+# Every descendant of `pid`, from one validated snapshot, computed as a transitive
 # closure over ppid. Only used when no group could be proven.
 descendant_pids() {
-  ps -A -o pid=,ppid= 2>/dev/null | awk -v root="$1" '
+  local table
+  table="$(ps_table)" || return 1
+  printf '%s' "$table" | awk -v root="$1" '
     { row_pid[NR] = $1; row_ppid[NR] = $2; rows = NR }
     END {
       selected[root] = 1
@@ -173,30 +236,101 @@ descendant_pids() {
     }'
 }
 
-# The subset of a pid list that is alive and not a zombie.
+# The subset of a pid list that is alive and not a zombie, from one validated
+# snapshot. Non-zero means unknown, not empty.
 live_pids() {
-  local pid live=""
-  for pid in $1; do
-    if ps -p "$pid" -o stat= 2>/dev/null | awk 'NR == 1 && $1 !~ /Z/ { alive = 1 } END { exit(alive ? 0 : 1) }'; then
-      live="$live $pid"
-    fi
-  done
-  printf '%s' "${live# }"
+  local table
+  table="$(ps_table)" || return 1
+  printf '%s' "$table" | awk -v list="$1" '
+    BEGIN {
+      count = split(list, wanted, /[ \t\n]+/)
+      for (index_ = 1; index_ <= count; index_ += 1) if (wanted[index_] != "") want[wanted[index_]] = 1
+    }
+    ($1 in want) && $4 !~ /Z/ { printf "%s ", $1 }'
+}
+
+# Live and not a zombie. Returns 2 when inspection is unavailable, so callers can
+# refuse rather than guess in either direction.
+pid_is_live() {
+  local live
+  live="$(live_pids "$1")" || return 2
+  [[ -n "${live// /}" ]]
 }
 
 commas() {
   printf '%s' "$1" | tr '\n' ' ' | tr -s ' ' ',' | sed 's/^,//; s/,$//'
 }
 
-# Whether a specific pid is a live member of a group.
+# Whether a specific pid is a live member of a group. 2 means unknown.
 group_contains() {
   local pgid="$1"
   local wanted="$2"
-  local pid
-  for pid in $(live_group_members "$pgid"); do
+  local members pid
+  members="$(live_group_members "$pgid")" || return 2
+  for pid in $members; do
     if [[ "$pid" == "$wanted" ]]; then return 0; fi
   done
   return 1
+}
+
+# Whether a process group can still be attributed to the child we proved at spawn.
+#
+# A group id is the pid of its leader, and the kernel keeps that pid reserved while
+# the group has members, so a *new* group with this id can only exist if a live
+# process holds this pid. Therefore: if a process with pid == pgid exists, it must
+# be our leader, and identity says whether it is; if none exists, the group can
+# only be the remnant of ours. Inspection failure is unknown, and unknown withholds
+# the signal — killing a group we cannot attribute is how a stranger's processes
+# die under a recycled id.
+group_is_ours() {
+  local pgid="$1"
+  local expected="$2"
+  local identity status=0
+  [[ -n "$pgid" ]] || return 1
+  identity="$(process_identity "$pgid")" || status=$?
+  if ((status == 1)); then return 0; fi
+  if ((status != 0)); then return 1; fi
+  [[ -n "$expected" && "$identity" == "$expected" ]]
+}
+
+# pid + identity for the root and every descendant visible right now, one per line.
+pid_roster() {
+  local root="$1"
+  local root_identity="$2"
+  local descendants pid identity roster
+  descendants="$(descendant_pids "$root")" || return 1
+  roster="$(printf '%s\t%s' "$root" "$root_identity")"
+  for pid in $descendants; do
+    identity="$(process_identity "$pid")" || continue
+    roster="$roster$(printf '\n%s\t%s' "$pid" "$identity")"
+  done
+  printf '%s' "$roster"
+}
+
+roster_pids() {
+  printf '%s' "$1" | awk -F'\t' '$1 != "" { printf "%s ", $1 }'
+}
+
+# Signal every roster member whose identity still matches what was recorded. A
+# mismatch means the pid was reissued between the snapshot and now: signalling it
+# would kill a stranger, so it is skipped and reported. An unreadable identity is
+# likewise never signalled.
+signal_roster() {
+  local signal="$1"
+  local roster="$2"
+  local label="$3"
+  local pid recorded current status
+  while IFS=$'\t' read -r pid recorded; do
+    [[ -n "$pid" ]] || continue
+    status=0
+    current="$(process_identity "$pid")" || status=$?
+    if ((status != 0)); then continue; fi
+    if [[ "$current" != "$recorded" ]]; then
+      log_phase "${label}-pid-recycled" "pid=$pid action=not-signalled"
+      continue
+    fi
+    kill "-${signal}" "$pid" 2>/dev/null || true
+  done <<<"$roster"
 }
 
 # Terminate the child's whole process group: TERM, a bounded grace period, then
@@ -213,44 +347,62 @@ group_contains() {
 terminate_group() {
   local leader="$1"
   local pgid="$2"
-  local label="$3"
-  local waited=0
-  local limit=$((TERMINATION_GRACE_SECONDS * 10))
-  local members
+  local identity="$3"
+  local label="$4"
+  local waited limit=$((TERMINATION_GRACE_SECONDS * 10))
+  local members signal unknown=0
 
-  members="$(live_group_members "$pgid")"
+  # Attribution first: a group we cannot still tie to our child is never signalled.
+  if ! group_is_ours "$pgid" "$identity"; then
+    log_phase "${label}-group-unattributable" "pgid=$pgid action=not-signalled"
+    return 1
+  fi
+  if ! members="$(live_group_members "$pgid")"; then
+    log_phase "${label}-inspection-unavailable" "pgid=$pgid phase=pre-signal"
+    return 1
+  fi
   if [[ -z "$members" ]]; then
     wait "$leader" 2>/dev/null || true
     return 0
   fi
 
-  kill -TERM -- -"$pgid" 2>/dev/null || true
-  while ((waited < limit)); do
-    members="$(live_group_members "$pgid")"
-    if [[ -z "$members" ]]; then
-      wait "$leader" 2>/dev/null || true
-      log_phase "${label}-terminated" "signal=TERM pgid=$pgid scope=group"
-      return 0
+  for signal in TERM KILL; do
+    kill "-${signal}" -- -"$pgid" 2>/dev/null || true
+    waited=0
+    while ((waited < limit)); do
+      if members="$(live_group_members "$pgid")"; then
+        # Only a readable, empty table ends this: success is a positive
+        # observation, never the absence of one.
+        if [[ -z "$members" ]]; then
+          wait "$leader" 2>/dev/null || true
+          if [[ "$signal" == "KILL" ]]; then
+            log_phase "${label}-killed" \
+              "signal=KILL pgid=$pgid scope=group grace_s=$TERMINATION_GRACE_SECONDS"
+          else
+            log_phase "${label}-terminated" "signal=TERM pgid=$pgid scope=group"
+          fi
+          return 0
+        fi
+      else
+        unknown=$((unknown + 1))
+      fi
+      sleep 0.1
+      waited=$((waited + 1))
+    done
+    log_phase "${label}-survivors" \
+      "pgid=$pgid pids=$(commas "$members") after_signal=$signal after_s=$TERMINATION_GRACE_SECONDS"
+    # Re-check attribution before escalating: a grace period is long enough for the
+    # group to have emptied and its id to have been reissued.
+    if ! group_is_ours "$pgid" "$identity"; then
+      log_phase "${label}-group-unattributable" "pgid=$pgid action=escalation-withheld"
+      return 1
     fi
-    sleep 0.1
-    waited=$((waited + 1))
   done
 
-  log_phase "${label}-survivors" "pgid=$pgid pids=$(commas "$members") after_s=$TERMINATION_GRACE_SECONDS"
-  kill -KILL -- -"$pgid" 2>/dev/null || true
   wait "$leader" 2>/dev/null || true
-  waited=0
-  while ((waited < limit)); do
-    members="$(live_group_members "$pgid")"
-    [[ -n "$members" ]] || break
-    sleep 0.1
-    waited=$((waited + 1))
-  done
-  if [[ -n "$members" ]]; then
-    log_phase "${label}-uncleaned" "pgid=$pgid pids=$(commas "$members")"
-    return 1
-  fi
-  log_phase "${label}-killed" "signal=KILL pgid=$pgid scope=group grace_s=$TERMINATION_GRACE_SECONDS"
+  log_phase "${label}-uncleaned" \
+    "pgid=$pgid pids=$(commas "$members") inspection_failures=$unknown"
+  return 1
 }
 
 # The fallback for a child whose group could not be proven. It must still not
@@ -259,14 +411,26 @@ terminate_group() {
 # walked, because its children are reparented and the relationship is lost.
 terminate_pid_tree() {
   local root="$1"
-  local label="$2"
-  local waited=0
-  local limit=$((TERMINATION_GRACE_SECONDS * 10))
-  local targets live signal
+  local identity="$2"
+  local label="$3"
+  local waited limit=$((TERMINATION_GRACE_SECONDS * 10))
+  local roster targets live signal unknown=0
 
-  targets="$root $(descendant_pids "$root" | tr '\n' ' ')"
-  live="$(live_pids "$targets")"
-  if [[ -z "$live" ]]; then
+  # The roster carries an identity per pid, and `signal_roster` re-verifies each one
+  # immediately before signalling it. Without that, this path is a TOCTOU: after the
+  # root exits its children are reparented, any of these pids can be reaped and
+  # reissued between the snapshot and the signal, and the signal lands on whoever
+  # holds the number by then.
+  if ! roster="$(pid_roster "$root" "$identity")"; then
+    log_phase "${label}-inspection-unavailable" "root=$root phase=roster"
+    return 1
+  fi
+  targets="$(roster_pids "$roster")"
+  if ! live="$(live_pids "$targets")"; then
+    log_phase "${label}-inspection-unavailable" "root=$root phase=pre-signal"
+    return 1
+  fi
+  if [[ -z "${live// /}" ]]; then
     wait "$root" 2>/dev/null || true
     # "No targets" is not the same claim as "nothing was running": once the root
     # has exited, its children are reparented and are no longer enumerable from
@@ -280,17 +444,17 @@ terminate_pid_tree() {
   log_phase "${label}-cleanup-scope" "scope=pid-tree root=$root targets=$(commas "$live")"
 
   for signal in TERM KILL; do
-    local pid
-    for pid in $targets; do
-      kill "-${signal}" "$pid" 2>/dev/null || true
-    done
+    signal_roster "$signal" "$roster" "$label"
     waited=0
     while ((waited < limit)); do
-      live="$(live_pids "$targets")"
-      if [[ -z "$live" ]]; then
-        wait "$root" 2>/dev/null || true
-        log_phase "${label}-terminated" "signal=$signal scope=pid-tree root=$root"
-        return 0
+      if live="$(live_pids "$targets")"; then
+        if [[ -z "${live// /}" ]]; then
+          wait "$root" 2>/dev/null || true
+          log_phase "${label}-terminated" "signal=$signal scope=pid-tree root=$root"
+          return 0
+        fi
+      else
+        unknown=$((unknown + 1))
       fi
       sleep 0.1
       waited=$((waited + 1))
@@ -298,40 +462,90 @@ terminate_pid_tree() {
     log_phase "${label}-survivors" "scope=pid-tree pids=$(commas "$live") after_signal=$signal"
   done
   wait "$root" 2>/dev/null || true
-  log_phase "${label}-uncleaned" "scope=pid-tree pids=$(commas "$live")"
+  log_phase "${label}-uncleaned" "scope=pid-tree pids=$(commas "$live") inspection_failures=$unknown"
   return 1
 }
 
 # Terminate a child. `pgid` is the group proven at spawn time, or empty when no
-# group could be proven — the two cases are handled above, and neither is allowed
-# to leave a descendant behind.
+# group could be proven; `identity` is what that pid was when it was recorded. The
+# two cases are handled above, and neither is allowed to leave a descendant behind
+# or to signal a pid that is no longer the process it was.
 terminate_child() {
   local pid="${1:-}"
   local pgid="${2:-}"
-  local label="${3:-child}"
+  local identity="${3:-}"
+  local label="${4:-child}"
   [[ -n "$pid" ]] || return 0
   if [[ -n "$pgid" ]]; then
-    terminate_group "$pid" "$pgid" "$label"
+    terminate_group "$pid" "$pgid" "$identity" "$label"
     return
   fi
-  terminate_pid_tree "$pid" "$label"
+  terminate_pid_tree "$pid" "$identity" "$label"
+}
+
+# Every live child this run owns, in dependency order: the timed client first,
+# because it is talking to the server, then the server itself. The client runs in
+# its own process group, so an interrupt that only knew about the server would
+# leave that group behind — holding connections, and in the local-D1 case a D1
+# handle — while the run reported itself finished.
+#
+# Non-zero means something could not be proven gone. No caller may turn that into
+# a pass.
+cleanup_all() {
+  local status=0
+  if [[ -n "$CLIENT_PID" ]]; then
+    terminate_child "$CLIENT_PID" "$CLIENT_PGID" "$CLIENT_IDENTITY" "client" || status=1
+    clear_client_state
+  fi
+  if [[ -n "$SERVER_PID" ]]; then
+    terminate_child "$SERVER_PID" "$SERVER_PGID" "$SERVER_IDENTITY" "child" || status=1
+    SERVER_PID=""
+    SERVER_PGID=""
+    SERVER_IDENTITY=""
+  fi
+  return "$status"
+}
+
+clear_client_state() {
+  CLIENT_PID=""
+  CLIENT_PGID=""
+  CLIENT_IDENTITY=""
 }
 
 on_interrupt() {
   local signal="$1"
+  local code="INTERRUPTED_${signal}"
   trap - INT TERM EXIT
-  log_phase "interrupted" "signal=$signal pid=${SERVER_PID:-none} pgid=${SERVER_PGID:-none}"
-  terminate_child "${SERVER_PID:-}" "${SERVER_PGID:-}" || log_phase "cleanup-incomplete" "signal=$signal"
+  log_phase "interrupted" \
+    "signal=$signal child=${SERVER_PID:-none} client=${CLIENT_PID:-none}"
+  if ! cleanup_all; then
+    log_phase "cleanup-incomplete" "signal=$signal"
+    code="INTERRUPTED_${signal}_CLEANUP_INCOMPLETE"
+  fi
   # State is retained on purpose, including here: an interrupted run is the one
   # whose logs a human most wants afterwards.
   printf 'INTERRUPTED %s: signal=%s state_retained=%s\n' "$SUITE" "$signal" "${STATE_DIR:-none}" >&2
-  emit "fail" "INTERRUPTED_${signal}"
+  emit "fail" "$code"
   exit 1
 }
 
+# The last line of defence, and never a mask. A body that already emitted a pass
+# record does not get to keep it if this trap cannot prove the children are gone:
+# the later record and the non-zero status are what the dispatcher and the tests
+# read. Success paths are expected to have cleaned up *before* claiming anything,
+# which is why reaching here with work left to do is itself reportable.
 on_exit() {
   local status="$?"
-  terminate_child "${SERVER_PID:-}" "${SERVER_PGID:-}" || true
+  trap - EXIT
+  if cleanup_all; then
+    return "$status"
+  fi
+  if ((status == 0)); then
+    printf 'FAILED %s: %s\n' "$SUITE" "CLEANUP_INCOMPLETE" >&2
+    emit "fail" "CLEANUP_INCOMPLETE"
+    exit 1
+  fi
+  log_phase "cleanup-incomplete" "exit_status=$status"
   return "$status"
 }
 
@@ -432,22 +646,43 @@ run_with_deadline() {
   "$@" &
   local pid="$!"
   set +m
-  # Proven now, while the child is certainly alive; after it exits the group can
-  # no longer be derived from it, and a timeout cleanup would lose its children.
-  local pgid=""
-  if owns_process_group "$pid"; then pgid="$pid"; fi
+
+  # Proven and recorded now, while the child is certainly alive: after it exits the
+  # group can no longer be derived from it, and its identity can no longer be read.
+  # These land in globals because an interrupt during this phase is handled by the
+  # traps, which can only clean up what they can see.
+  local identity_status=0
+  CLIENT_PID="$pid"
+  CLIENT_PGID=""
+  CLIENT_IDENTITY="$(process_identity "$pid")" || identity_status=$?
+  if ((identity_status == 2)); then
+    clear_client_state
+    failed "PROCESS_INSPECTION_UNAVAILABLE"
+  fi
+  if owns_process_group "$pid"; then CLIENT_PGID="$pid"; fi
+  log_phase "client-started" "pid=$pid scope=$([[ -n "$CLIENT_PGID" ]] && printf 'group' || printf 'pid-tree')"
+
   local waited=0
   local limit=$((seconds * 10))
+  local liveness status
   while ((waited < limit)); do
-    if ! process_alive "$pid"; then
-      local status=0
+    liveness=0
+    pid_is_live "$pid" || liveness=$?
+    if ((liveness == 2)); then
+      cleanup_all || true
+      failed "PROCESS_INSPECTION_UNAVAILABLE"
+    fi
+    if ((liveness != 0)); then
+      status=0
       wait "$pid" || status=$?
+      clear_client_state
       return "$status"
     fi
     sleep 0.1
     waited=$((waited + 1))
   done
-  terminate_child "$pid" "$pgid" "deadline" || true
+  terminate_child "$pid" "$CLIENT_PGID" "$CLIENT_IDENTITY" "deadline" || true
+  clear_client_state
   return 124
 }
 
@@ -562,6 +797,32 @@ self_test() {
   if owns_process_group "$$"; then failed "SELF_TEST_GROUP_OWNERSHIP_FAILED"; fi
   if owns_process_group ""; then failed "SELF_TEST_GROUP_OWNERSHIP_FAILED"; fi
 
+  # Process inspection must fail closed. Every liveness answer in this runner is
+  # used to decide whether cleanup may stop, so "the table could not be read" must
+  # be an error and never an empty list. The runner must also be able to see itself
+  # in a valid table — that is what makes a truncated table detectable at all.
+  local own_group
+  own_group="$(process_group_of "$$")"
+  if S1_FAULT_INJECT=ps-unreadable ps_table >/dev/null 2>&1; then failed "SELF_TEST_FAIL_CLOSED_FAILED"; fi
+  if S1_FAULT_INJECT=ps-unreadable live_pids "$$" >/dev/null 2>&1; then failed "SELF_TEST_FAIL_CLOSED_FAILED"; fi
+  if S1_FAULT_INJECT=ps-unreadable live_group_members "$own_group" >/dev/null 2>&1; then
+    failed "SELF_TEST_FAIL_CLOSED_FAILED"
+  fi
+  if S1_FAULT_INJECT=ps-unreadable descendant_pids "$$" >/dev/null 2>&1; then
+    failed "SELF_TEST_FAIL_CLOSED_FAILED"
+  fi
+  if S1_FAULT_INJECT=ps-unreadable pid_is_live "$$"; then failed "SELF_TEST_FAIL_CLOSED_FAILED"; fi
+  local injected_liveness=0
+  S1_FAULT_INJECT=ps-unreadable pid_is_live "$$" || injected_liveness=$?
+  ((injected_liveness == 2)) || failed "SELF_TEST_FAIL_CLOSED_FAILED"
+  # And an unattributable group is never signalled: with inspection unavailable,
+  # `group_is_ours` must refuse rather than fall through to "no such pid, go ahead".
+  if S1_FAULT_INJECT=ps-unreadable group_is_ours "$own_group" "any-identity"; then
+    failed "SELF_TEST_FAIL_CLOSED_FAILED"
+  fi
+  [[ -n "$(live_pids "$$")" ]] || failed "SELF_TEST_SELF_INVISIBLE"
+  pid_is_live "$$" || failed "SELF_TEST_SELF_INVISIBLE"
+
   diagnostic="$(emit "pass" "SELF_TEST_PASSED")"
   [[ "$diagnostic" != *"AAAAAAAA"* && "$diagnostic" != *"v1."* ]] || failed "SELF_TEST_REDACTION_FAILED"
   printf '%s\n' "$diagnostic"
@@ -591,6 +852,8 @@ self_test_lifecycle() {
   local mode="${1:-group}"
   local leader descendant survivors waited pid_file
   local limit=100
+  local liveness=0
+  local members_status=0
   local stubborn=""
   if [[ "$mode" == "group-kill" ]]; then stubborn="1"; fi
 
@@ -619,6 +882,7 @@ self_test_lifecycle() {
     owns_process_group "$leader" || failed "LIFECYCLE_GROUP_UNOWNED"
     SERVER_PID="$leader"
     SERVER_PGID="$leader"
+    SERVER_IDENTITY="$(process_identity "$leader")" || failed "LIFECYCLE_IDENTITY_UNAVAILABLE"
   else
     # No job control: the child shares this runner's group, so no group can be
     # proven and the fallback must handle it. The child stays alive, which is the
@@ -634,6 +898,7 @@ self_test_lifecycle() {
     if owns_process_group "$leader"; then failed "LIFECYCLE_GROUP_UNEXPECTEDLY_OWNED"; fi
     SERVER_PID="$leader"
     SERVER_PGID=""
+    SERVER_IDENTITY="$(process_identity "$leader")" || failed "LIFECYCLE_IDENTITY_UNAVAILABLE"
   fi
 
   waited=0
@@ -644,7 +909,7 @@ self_test_lifecycle() {
   done
   descendant="$(tr -d '[:space:]' <"$pid_file" 2>/dev/null || true)"
   [[ "$descendant" =~ ^[0-9]+$ ]] || failed "LIFECYCLE_DESCENDANT_UNKNOWN"
-  [[ -n "$(live_pids "$descendant")" ]] || failed "LIFECYCLE_DESCENDANT_NOT_STARTED"
+  pid_is_live "$descendant" || failed "LIFECYCLE_DESCENDANT_NOT_STARTED"
   log_phase "lifecycle-descendant" "pid=$descendant leader=$leader mode=$mode"
 
   if [[ "$mode" != "pid-tree" ]]; then
@@ -662,18 +927,29 @@ self_test_lifecycle() {
   else
     [[ "$(process_group_of "$descendant")" == "$(process_group_of "$$")" ]] ||
       failed "LIFECYCLE_DESCENDANT_OUTSIDE_GROUP"
-    [[ -n "$(live_pids "$leader")" ]] || failed "LIFECYCLE_LEADER_NOT_LIVE"
+    pid_is_live "$leader" || failed "LIFECYCLE_LEADER_NOT_LIVE"
     log_phase "lifecycle-unowned" "leader=$leader shared_pgid=$(process_group_of "$$")"
   fi
 
-  terminate_child "$SERVER_PID" "$SERVER_PGID" "lifecycle" || failed "LIFECYCLE_CLEANUP_INCOMPLETE"
+  terminate_child "$SERVER_PID" "$SERVER_PGID" "$SERVER_IDENTITY" "lifecycle" ||
+    failed "LIFECYCLE_CLEANUP_INCOMPLETE"
   SERVER_PID=""
   SERVER_PGID=""
+  SERVER_IDENTITY=""
 
-  [[ -z "$(live_pids "$descendant")" ]] || failed "LIFECYCLE_DESCENDANT_SURVIVED"
-  [[ -z "$(live_pids "$leader")" ]] || failed "LIFECYCLE_LEADER_SURVIVED"
+  # "Gone" must be a positive observation. An unreadable process table answers
+  # neither way, so it is a failure here rather than an absence of survivors.
+  liveness=0
+  pid_is_live "$descendant" || liveness=$?
+  ((liveness == 1)) || failed "LIFECYCLE_DESCENDANT_SURVIVED"
+  liveness=0
+  pid_is_live "$leader" || liveness=$?
+  ((liveness == 1)) || failed "LIFECYCLE_LEADER_SURVIVED"
   if [[ "$mode" != "pid-tree" ]]; then
-    [[ -z "$(live_group_members "$leader")" ]] || failed "LIFECYCLE_GROUP_SURVIVED"
+    members_status=0
+    survivors="$(live_group_members "$leader")" || members_status=$?
+    ((members_status == 0)) || failed "LIFECYCLE_INSPECTION_UNAVAILABLE"
+    [[ -z "$survivors" ]] || failed "LIFECYCLE_GROUP_SURVIVED"
     if [[ "$mode" == "group-kill" ]]; then
       # The escalation is the point of this mode: a TERM-proof descendant must be
       # reported as a survivor and then actually killed, not quietly left behind.
@@ -687,6 +963,138 @@ self_test_lifecycle() {
   log_phase "lifecycle-cleaned" "mode=$mode leader=$leader descendant=$descendant"
 
   emit "pass" "LIFECYCLE_SELF_TEST_PASSED"
+}
+
+# A state directory for the self-test modes. Retained like every other one.
+lifecycle_state_dir() {
+  local suffix="$1"
+  STATE_DIR="$(mktemp -d -t "asimposium-s1-${suffix}")"
+  [[ -d "$STATE_DIR" && ! -L "$STATE_DIR" ]] || failed "LIFECYCLE_STATE_DIR_INVALID"
+  PHASE_LOG="$STATE_DIR/phases.log"
+  : >"$PHASE_LOG"
+  log_phase "state-retained" "dir=$STATE_DIR mode=$suffix"
+}
+
+# The EXIT trap as a gate rather than a mask.
+#
+# This mode deliberately does the wrong thing: it emits a pass record while a child
+# of its own is still running, and returns successfully. The trap is then the only
+# thing between that and a false green, which is the point of the mode.
+#
+#   * with inspection working, the trap cleans the group up and the run stays 0 —
+#     the pass is true by the time the process exits;
+#   * with `S1_FAULT_INJECT=ps-unreadable`, cleanup cannot be proven, so the trap
+#     must overwrite the outcome with a `CLEANUP_INCOMPLETE` failure record and a
+#     non-zero status. The earlier pass record is still visible above it, which is
+#     exactly the ordering hazard being tested.
+self_test_exit_gate() {
+  local descendant pid_file waited
+  lifecycle_state_dir "exit-gate"
+  pid_file="$STATE_DIR/descendant.pid"
+
+  set -m
+  S1_LIFECYCLE_PID_FILE="$pid_file" bash -c '
+    bash -c "trap \"\" TERM; sleep 300" &
+    printf "%s\n" "$!" >"$S1_LIFECYCLE_PID_FILE"
+    sleep 300
+  ' &
+  SERVER_PID="$!"
+  set +m
+  owns_process_group "$SERVER_PID" || failed "EXIT_GATE_GROUP_UNOWNED"
+  SERVER_PGID="$SERVER_PID"
+  SERVER_IDENTITY="$(process_identity "$SERVER_PID")" || failed "EXIT_GATE_IDENTITY_UNAVAILABLE"
+
+  waited=0
+  while ((waited < 100)); do
+    if [[ -s "$pid_file" ]]; then break; fi
+    sleep 0.1
+    waited=$((waited + 1))
+  done
+  descendant="$(tr -d '[:space:]' <"$pid_file" 2>/dev/null || true)"
+  [[ "$descendant" =~ ^[0-9]+$ ]] || failed "EXIT_GATE_DESCENDANT_UNKNOWN"
+  log_phase "exit-gate-child" "pid=$SERVER_PID pgid=$SERVER_PGID descendant=$descendant"
+
+  # Deliberately out of order, and deliberately without cleaning up first.
+  emit "pass" "EXIT_GATE_SELF_TEST_PASSED"
+  log_phase "result-emitted" "status=pass code=EXIT_GATE_SELF_TEST_PASSED"
+
+  if [[ "${S1_FAULT_INJECT:-}" == "ps-unreadable-at-exit" ]]; then
+    # Armed only now, so everything up to the pass record happened honestly: the
+    # group was proven, the identity was recorded, the child is real. The EXIT trap
+    # is then the only thing standing between a live child and that pass record,
+    # which is the exact ordering this mode exists to test. The child survives on
+    # purpose here — refusing to signal what it cannot attribute is the fail-closed
+    # behaviour — so the run reports `CLEANUP_INCOMPLETE` instead of pretending.
+    S1_FAULT_INJECT="ps-unreadable"
+    log_phase "inspection-fault-armed" "at=post-pass"
+  fi
+}
+
+# An interrupt arriving during the timed client phase.
+#
+# The client runs in its own process group and has a descendant of its own, which is
+# what the real local-D1 client looks like from the outside. This mode blocks in
+# that phase on purpose and never passes by itself: the test signals it, and the
+# assertion is that the interrupt terminated *the client's* group as well as the
+# server's, rather than leaving it holding connections.
+self_test_client_group() {
+  local pid_file client_exit=0
+  lifecycle_state_dir "client-group"
+  pid_file="$STATE_DIR/descendant.pid"
+
+  log_phase "client-phase-start" "deadline_s=$CLIENT_DEADLINE_SECONDS"
+  # Deliberate: `env` sets S1_LIFECYCLE_PID_FILE in the inner shell's environment,
+  # and the inner shell is the one that must expand it.
+  # shellcheck disable=SC2016
+  run_with_deadline "$CLIENT_DEADLINE_SECONDS" \
+    env S1_LIFECYCLE_PID_FILE="$pid_file" bash -c '
+      sleep 300 &
+      printf "%s\n" "$!" >"$S1_LIFECYCLE_PID_FILE"
+      sleep 300
+    ' || client_exit=$?
+  log_phase "client-phase-end" "exit=$client_exit"
+  if ((client_exit == 124)); then failed "CLIENT_DEADLINE_REACHED"; fi
+  # Reaching here means the phase was never interrupted, so the mode proved
+  # nothing. That is a failure, not a pass.
+  failed "CLIENT_PHASE_NOT_INTERRUPTED"
+}
+
+# Identity binding, in both directions.
+#
+# A recorded pid whose identity no longer matches is a recycled pid, and signalling
+# it kills whatever now holds the number. This mode stands a real process in for
+# that case by recording a deliberately wrong identity for it, and requires that
+# the process survives; then it records the true identity and requires that the
+# same call does terminate it, so the guard cannot be "never signals anything".
+self_test_identity() {
+  local victim victim_identity roster waited
+  lifecycle_state_dir "identity"
+
+  sleep 300 &
+  victim="$!"
+  victim_identity="$(process_identity "$victim")" || failed "IDENTITY_UNAVAILABLE"
+  log_phase "identity-victim" "pid=$victim"
+
+  roster="$(printf '%s\t%s' "$victim" "a-process-that-is-not-there-any-more")"
+  signal_roster TERM "$roster" "identity"
+  sleep 0.3
+  pid_is_live "$victim" || failed "IDENTITY_MISMATCH_SIGNALLED"
+  grep -q "identity-pid-recycled" "$PHASE_LOG" || failed "IDENTITY_MISMATCH_UNREPORTED"
+  log_phase "identity-mismatch-refused" "pid=$victim survived=yes"
+
+  roster="$(printf '%s\t%s' "$victim" "$victim_identity")"
+  signal_roster TERM "$roster" "identity"
+  waited=0
+  while ((waited < 100)); do
+    if ! pid_is_live "$victim"; then break; fi
+    sleep 0.1
+    waited=$((waited + 1))
+  done
+  if pid_is_live "$victim"; then failed "IDENTITY_MATCH_NOT_SIGNALLED"; fi
+  wait "$victim" 2>/dev/null || true
+  log_phase "identity-match-signalled" "pid=$victim terminated=yes"
+
+  emit "pass" "IDENTITY_SELF_TEST_PASSED"
 }
 
 # Prove the server answering our port is the child we started, by round-tripping
@@ -727,6 +1135,7 @@ run_local_d1() {
   [[ -x "$LOCAL_WRANGLER" ]] || blocked "WRANGLER_REQUIRED"
 
   local local_port origin token server_log ready waited limit client_exit scope ownership_wait
+  local identity_status liveness
   # Both resolvers refuse in this shell, so a pinned port that is invalid or busy
   # ends the run here — before mktemp, before migrations, before any child.
   resolve_port
@@ -762,6 +1171,12 @@ run_local_d1() {
   SERVER_PID="$!"
   set +m
 
+  # Identity is recorded here, while the child is certainly alive, for the same
+  # reason as the group: cleanup runs later, and by then a pid alone proves nothing.
+  identity_status=0
+  SERVER_IDENTITY="$(process_identity "$SERVER_PID")" || identity_status=$?
+  if ((identity_status == 2)); then failed "PROCESS_INSPECTION_UNAVAILABLE"; fi
+
   # Prove the group once, here, and keep it for the rest of the run. Cleanup
   # signals that group, so a child that did not become its own group leader is
   # reported rather than discovered later as an orphaned workerd holding the
@@ -790,8 +1205,14 @@ run_local_d1() {
   waited=0
   limit=$((READINESS_DEADLINE_SECONDS * 5))
   while ((waited < limit)); do
-    # Readiness is tied to the child: a dead child is never "not ready yet".
-    if ! kill -0 "$SERVER_PID" 2>/dev/null; then
+    # Readiness is tied to the child: a dead child is never "not ready yet". This
+    # asks the process table rather than `kill -0`, which answers for a corpse —
+    # an unreaped wrangler that crashed on startup would otherwise look alive for
+    # the whole readiness deadline and then be reported as merely unavailable.
+    liveness=0
+    pid_is_live "$SERVER_PID" || liveness=$?
+    if ((liveness == 2)); then failed "PROCESS_INSPECTION_UNAVAILABLE"; fi
+    if ((liveness != 0)); then
       log_phase "child-exited-early" "pid=$SERVER_PID log=$server_log"
       failed "LOCAL_WORKER_EXITED"
     fi
@@ -824,7 +1245,18 @@ run_local_d1() {
   fi
   log_phase "client-passed" "exit=0"
 
+  # Cleanup is a gate in front of success, not a courtesy behind it. A pass record
+  # emitted first and cleaned up afterwards is a record the EXIT trap can only
+  # contradict, and for a run whose whole subject is process lifecycle that is the
+  # wrong order: the claim is that nothing of ours is left, so prove it, then claim
+  # it. The port is the independent half of the proof — if anything still holds it,
+  # something of ours is still running whatever the process table says.
+  cleanup_all || failed "LOCAL_CLEANUP_INCOMPLETE"
+  port_is_free "$local_port" || failed "LOCAL_PORT_STILL_HELD"
+  log_phase "cleanup-verified" "port=$local_port port_free=yes children=none"
+
   emit "pass" "LOCAL_D1_ENROLLMENT_PASSED"
+  log_phase "result-emitted" "status=pass code=LOCAL_D1_ENROLLMENT_PASSED"
 }
 
 main() {
@@ -847,6 +1279,22 @@ main() {
   fi
   if [[ "${1:-}" == "--self-test-lifecycle-unowned" ]]; then
     self_test_lifecycle "pid-tree"
+    return
+  fi
+  if [[ "${1:-}" == "--self-test-exit-gate" ]]; then
+    self_test_exit_gate
+    return
+  fi
+  if [[ "${1:-}" == "--self-test-client-group" ]]; then
+    self_test_client_group
+    # The mode exists to be interrupted from outside and never returns on its own:
+    # every path through it ends in `failed`. This `return` is therefore
+    # unreachable, and kept only so the dispatch reads uniformly.
+    # shellcheck disable=SC2317
+    return
+  fi
+  if [[ "${1:-}" == "--self-test-identity" ]]; then
+    self_test_identity
     return
   fi
   if [[ "${1:-}" == "--local-d1" ]]; then
