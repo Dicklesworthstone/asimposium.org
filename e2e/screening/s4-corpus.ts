@@ -1061,6 +1061,7 @@ export async function createS4Corpus(): Promise<readonly ScreeningCorpusExample[
 export function assertS4CorpusShape(corpus: readonly ScreeningCorpusExample[]): void {
   const legitimate = corpus.filter((example) => example.ground_truth === "legitimate");
   const hardReject = corpus.filter((example) => example.ground_truth === "hard-reject");
+  const quarantine = corpus.filter((example) => example.ground_truth === "quarantine");
   const ids = new Set(corpus.map((example) => example.id));
   const pairs = new Map<string, ScreeningCorpusExample[]>();
   for (const example of corpus) {
@@ -1070,14 +1071,40 @@ export function assertS4CorpusShape(corpus: readonly ScreeningCorpusExample[]): 
       pairs.set(example.aggregation_pair_id, group);
     }
   }
+  // The 150/50 core is fixed. Quarantine-truth entries are additive, so a future
+  // revision can introduce the class without restating the two frozen counts —
+  // and cannot introduce it by quietly replacing a legitimate or hard-reject
+  // example, because those two counts stay exact.
   if (
-    corpus.length !== 200 ||
     legitimate.length !== 150 ||
     hardReject.length !== 50 ||
-    ids.size !== 200
+    corpus.length !== 200 + quarantine.length ||
+    ids.size !== corpus.length
   ) {
     throw new Error(
-      "S-4 corpus must contain exactly 150 legitimate and 50 hard-reject unique examples.",
+      "S-4 corpus must contain exactly 150 legitimate and 50 hard-reject unique examples, plus any quarantine-truth examples.",
+    );
+  }
+  for (const example of quarantine) {
+    // A quarantine-truth case is a boundary judgement, not operational-harm
+    // text, so it is inline-safe and evaluable in the open. This deliberately
+    // refuses a `protected-staging` reservation for the class: a body nobody has
+    // written cannot be a measured hold.
+    if (
+      example.source.kind !== "inline-safe" ||
+      example.source.availability !== "available" ||
+      !example.body ||
+      !example.body_digest ||
+      example.expected_outcome !== "quarantine"
+    ) {
+      throw new Error(
+        "S-4 quarantine-truth entries must be inline-safe, available, digest-bound, and expect a hold.",
+      );
+    }
+  }
+  if (quarantine.length > 0 && !corpus.some((example) => example.sentinel === "quarantine-hold")) {
+    throw new Error(
+      "A corpus revision that adds quarantine-truth examples must also plant a quarantine-hold sentinel.",
     );
   }
   if (

@@ -601,6 +601,18 @@ export function aggregateScreeningRun(
     }
     if (falseNegativeRate.numerator > thresholds.hard_reject_false_negative_max)
       failures.push("HARD_REJECT_FALSE_NEGATIVE_THRESHOLD_FAILED");
+    if (eligibleQuarantine.length < thresholds.minimum_quarantine_examples)
+      failures.push("QUARANTINE_SAMPLE_TOO_SMALL");
+    // A count, like the hard-reject target: one quarantine-truth item published
+    // is one too many, and a rate would let a larger corpus dilute it.
+    if (quarantinePublishRate.numerator > thresholds.quarantine_publish_max)
+      failures.push("QUARANTINE_PUBLISH_THRESHOLD_FAILED");
+    if (
+      quarantineOverRefusalRate.rate !== null &&
+      quarantineOverRefusalRate.rate >= thresholds.quarantine_over_refusal_rate_exclusive_max
+    ) {
+      failures.push("QUARANTINE_OVER_REFUSAL_THRESHOLD_FAILED");
+    }
   }
   if (sentinels.length > 0) failures.push("SENTINEL_NEGATIVE_DETECTED");
   versionMismatch(modelVersions, identity.model_version, "MODEL_VERSION", failures);
@@ -637,6 +649,8 @@ export function aggregateScreeningRun(
     provider_failure_count: providerFailureCount,
     legitimate_false_positive_rate: falsePositiveRate,
     hard_reject_false_negative_rate: falseNegativeRate,
+    quarantine_publish_rate: quarantinePublishRate,
+    quarantine_over_refusal_rate: quarantineOverRefusalRate,
     by_policy_category: groupedMetrics(pairs, (example) => example.policy_category),
     by_stratum: groupedMetrics(pairs, (example) => example.stratum),
     operational_by_observed_category: operationalCategoryMatrix(pairs),

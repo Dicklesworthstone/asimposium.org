@@ -53,6 +53,11 @@ export function screeningOpsJsonl(
     provider_failure_count: report.provider_failure_count,
     legitimate_false_positive_rate: report.legitimate_false_positive_rate,
     hard_reject_false_negative_rate: report.hard_reject_false_negative_rate,
+    // Counts and bounds only, like every other metric here. A null rate with a
+    // zero denominator says "no quarantine-truth example was evaluated", which
+    // is information; omitting the field would read as "nothing went wrong".
+    quarantine_publish_rate: report.quarantine_publish_rate,
+    quarantine_over_refusal_rate: report.quarantine_over_refusal_rate,
     by_policy_category: report.by_policy_category,
     by_stratum: report.by_stratum,
     operational_by_observed_category: report.operational_by_observed_category,
