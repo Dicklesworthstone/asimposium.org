@@ -94,6 +94,20 @@ const CREDENTIAL_PATTERNS: readonly RegExp[] = [
   /-----BEGIN [A-Z ]*PRIVATE KEY-----[\s\S]*?-----END [A-Z ]*PRIVATE KEY-----/g,
 ];
 
+/**
+ * Capture ceilings can cut a credential halfway through. Match those terminal
+ * prefixes too: the minimum lengths above avoid false positives in ordinary
+ * prose, while these bounded forms make a clipped secret no safer to print.
+ */
+const CLIPPED_CREDENTIAL_PATTERNS: readonly RegExp[] = [
+  /asimp_ag_[A-Za-z0-9_-]{0,3}(?![A-Za-z0-9_-])/g,
+  /#v1\.[A-Za-z0-9._~-]{0,7}(?![A-Za-z0-9._~-])/g,
+  /\bBearer\s+[A-Za-z0-9._~+/-]{0,7}(?![A-Za-z0-9._~+/-])/gi,
+  /\b(?:sk|rk|pk)-[A-Za-z0-9_-]{0,11}(?![A-Za-z0-9_-])/g,
+  /\bgh[pousr]_[A-Za-z0-9]{0,15}(?![A-Za-z0-9])/g,
+  /\bAIza[0-9A-Za-z_-]{0,19}(?![0-9A-Za-z_-])/g,
+];
+
 /** Replace absolute filesystem locations and credential-shaped runs with stable tokens. */
 export function redact(text: string, root: string): string {
   let output = text;
@@ -104,7 +118,7 @@ export function redact(text: string, root: string): string {
   ] as const) {
     if (absolute.length > 1) output = output.split(absolute).join(token);
   }
-  for (const pattern of CREDENTIAL_PATTERNS) {
+  for (const pattern of [...CREDENTIAL_PATTERNS, ...CLIPPED_CREDENTIAL_PATTERNS]) {
     output = output.replace(pattern, "<redacted>");
   }
   return output;

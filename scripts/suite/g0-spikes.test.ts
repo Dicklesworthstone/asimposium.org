@@ -8,26 +8,34 @@
  * only, which is the part this module actually owns.
  */
 import { describe, expect, test } from "bun:test";
-import { execFileSync } from "node:child_process";
+import { execFileSync, spawn } from "node:child_process";
 import {
   chmodSync,
   existsSync,
   mkdirSync,
   mkdtempSync,
   readFileSync,
+  realpathSync,
+  symlinkSync,
   writeFileSync,
 } from "node:fs";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { delimiter, join } from "node:path";
+import { PassThrough } from "node:stream";
 import {
   ALL_G0_SPIKE_IDS,
   assertCompleteG0Manifest,
+  captureStream,
+  drainCapturedStreams,
   formatG0Summary,
   G0_SPIKES,
   G0ManifestError,
   type G0RunSummary,
   type G0Spike,
   type G0SpikeResult,
+  outputDrainFailureCode,
+  outputTruncationReasons,
+  pinnedScriptPathIsExpected,
   probeContainment,
   REQUIRED_G0_SPIKE_IDS,
   runG0Cli,
@@ -67,6 +75,30 @@ function codes(summary: G0RunSummary): string[] {
 }
 
 /**
+ * Put one executable, bare-name `ps` replacement first on PATH for one callback.
+ *
+ * `runG0Spikes` deliberately permits only bare commands, so the real test has to
+ * exercise PATH resolution rather than pretending an arbitrary pathname is a
+ * process-table command. The original PATH is restored even when the assertion
+ * fails, keeping this fake local to its planted case.
+ */
+async function withFakePs<T>(root: string, body: string, run: () => Promise<T>): Promise<T> {
+  const bin = join(root, "fake-ps-bin");
+  const fakePs = join(bin, "fakeps");
+  mkdirSync(bin, { recursive: true });
+  writeFileSync(fakePs, `#!/usr/bin/env bash\nset -u -o pipefail\n${body}\n`);
+  chmodSync(fakePs, 0o755);
+
+  const originalPath = process.env.PATH ?? "";
+  process.env.PATH = `${bin}${delimiter}${originalPath}`;
+  try {
+    return await run();
+  } finally {
+    process.env.PATH = originalPath;
+  }
+}
+
+/**
  * What a spike that genuinely did nothing wrong is allowed to report *here*.
  *
  * Only a platform that can enforce containment may call such a run green. Where
@@ -76,10 +108,19 @@ function codes(summary: G0RunSummary): string[] {
  * bake in exactly the false green this module was rewritten to remove.
  */
 const CONTAINED = probeContainment().kind === "pid-namespace";
+const REQUIRE_REAL_CONTAINMENT =
+  process.platform === "linux" || process.env.ASIMP_G0_REQUIRE_LINUX_CONTAINMENT === "1";
 const CLEAN_CODE = CONTAINED ? "G0_SPIKE_PASSED" : "G0_SPIKE_CONTAINMENT_UNAVAILABLE";
 const CLEAN_STATUS = CONTAINED ? "pass" : "blocked";
 const CLEAN_EXIT = CONTAINED ? 0 : BLOCKED_EXIT_CODE;
 const CLEAN_SUMMARY_CODE = CONTAINED ? "G0_SPIKES_PASSED" : "G0_SPIKES_BLOCKED";
+const containmentTest = CONTAINED ? test : test.skip;
+const noContainmentTest = CONTAINED ? test.skip : test;
+
+test("PLANTED: Linux or explicitly required containment cannot pass by skipping dynamic fixtures", () => {
+  if (!REQUIRE_REAL_CONTAINMENT) return;
+  expect(probeContainment(true).kind).toBe("pid-namespace");
+});
 
 /** Whether a bare command resolves on PATH, for fixture prerequisites. */
 function which(command: string): boolean {
@@ -97,6 +138,13 @@ async function waitFor(path: string, timeoutMs = 3_000): Promise<void> {
   expect(existsSync(path)).toBe(true);
 }
 
+function waitForExit(child: ReturnType<typeof spawn>): Promise<number | null> {
+  return new Promise((resolveExit, rejectExit) => {
+    child.once("error", rejectExit);
+    child.once("exit", (code) => resolveExit(code));
+  });
+}
+
 function result(overrides: Partial<G0SpikeResult> & Pick<G0SpikeResult, "status">): G0SpikeResult {
   return {
     id: "s1",
@@ -107,7 +155,7 @@ function result(overrides: Partial<G0SpikeResult> & Pick<G0SpikeResult, "status"
 }
 
 describe("D2 — the entry check requires execute bits, not readability", () => {
-  test("an executable fixture runs and a readable-only sibling is refused", async () => {
+  test("an executable fixture is contained-or-blocked and a readable-only sibling is refused", async () => {
     const root = fixtureRoot();
     const ranSentinel = join(root, "readable-only-executed");
     const summary = await runG0Spikes({
@@ -140,6 +188,67 @@ describe("D2 — the entry check requires execute bits, not readability", () => 
     expect(existsSync(sentinel)).toBe(false);
   });
 
+  test("PLANTED: a symlinked executable outside the checkout is refused before containment", async () => {
+    const root = fixtureRoot();
+    const outside = fixtureRoot();
+    const marker = join(root, "symlink-target-executed");
+    const target = join(outside, "outside.sh");
+    mkdirSync(join(root, "fixtures"), { recursive: true });
+    writeFileSync(target, `#!/usr/bin/env bash\nprintf ran > ${JSON.stringify(marker)}\n`);
+    chmodSync(target, 0o755);
+    symlinkSync(target, join(root, "fixtures", "s1.sh"));
+
+    const summary = await runG0Spikes({
+      root,
+      spikes: [{ id: "s1", script: "fixtures/s1.sh" }],
+      containment: { kind: "none", reason: "portable symlink preflight" },
+      diagnosticSink: () => {},
+    });
+
+    expect(codes(summary)).toEqual(["G0_SPIKE_PATH_INVALID"]);
+    expect(summary.exitCode).toBe(1);
+    await Bun.sleep(50);
+    expect(existsSync(marker)).toBe(false);
+  });
+
+  test("PLANTED: a parent-directory symlink escape is path-invalid before containment", async () => {
+    const root = fixtureRoot();
+    const outside = fixtureRoot();
+    const marker = join(root, "parent-symlink-target-executed");
+    const target = join(outside, "s1.sh");
+    mkdirSync(join(root, "fixtures"), { recursive: true });
+    writeFileSync(target, `#!/usr/bin/env bash\nprintf ran > ${JSON.stringify(marker)}\n`);
+    chmodSync(target, 0o755);
+    symlinkSync(outside, join(root, "fixtures", "escaped"));
+
+    const summary = await runG0Spikes({
+      root,
+      spikes: [{ id: "s1", script: "fixtures/escaped/s1.sh" }],
+      containment: { kind: "none", reason: "portable parent-symlink preflight" },
+      diagnosticSink: () => {},
+    });
+
+    expect(codes(summary)).toEqual(["G0_SPIKE_PATH_INVALID"]);
+    expect(summary.exitCode).toBe(1);
+    await Bun.sleep(50);
+    expect(existsSync(marker)).toBe(false);
+  });
+
+  test("PLANTED: an in-repository alternate is refused by the exact pinned-path check", () => {
+    const root = fixtureRoot();
+    const expected = executable(root, "s1", "exit 0");
+    const alternate = executable(root, "s2", "exit 0");
+    const canonicalRoot = realpathSync(root);
+    const expectedPath = realpathSync(join(root, expected.script));
+    const alternatePath = realpathSync(join(root, alternate.script));
+
+    expect(pinnedScriptPathIsExpected(canonicalRoot, expectedPath, expectedPath)).toBe(true);
+    // This is the deterministic preflight/open race seam: both paths are valid
+    // executables under the same checkout, but the second is not the manifest's
+    // approved file and therefore must lead openPinnedScript to refuse it.
+    expect(pinnedScriptPathIsExpected(canonicalRoot, expectedPath, alternatePath)).toBe(false);
+  });
+
   test("a mode-000 file, a directory, a missing path and an escaping path each refuse distinctly", async () => {
     const root = fixtureRoot();
     mkdirSync(join(root, "fixtures", "a-directory.sh"), { recursive: true });
@@ -162,50 +271,129 @@ describe("D2 — the entry check requires execute bits, not readability", () => 
     ]);
     expect(summary.exitCode).toBe(1);
   });
-});
 
-describe("D3 — the aggregate has its own finite ceiling", () => {
-  test("PLANTED: per-spike timeouts alone do not bound the run; the aggregate deadline does", async () => {
+  noContainmentTest(
+    "PLANTED: unavailable containment refuses before the spike body runs",
+    async () => {
+      const root = fixtureRoot();
+      const marker = join(root, "containment-unavailable-body-ran");
+      const summary = await runG0Spikes({
+        root,
+        spikes: [executable(root, "s1", `printf ran > ${JSON.stringify(marker)}`)],
+        diagnosticSink: () => {},
+      });
+
+      expect(codes(summary)).toEqual(["G0_SPIKE_CONTAINMENT_UNAVAILABLE"]);
+      expect(summary.exitCode).toBe(BLOCKED_EXIT_CODE);
+      await Bun.sleep(150);
+      expect(existsSync(marker)).toBe(false);
+    },
+  );
+
+  test("PLANTED: an explicit containment downgrade preserves static refusals without spawning", async () => {
     const root = fixtureRoot();
-    const startedAt = performance.now();
+    const runnableMarker = join(root, "downgraded-runnable-body-ran");
+    const unreadableMarker = join(root, "downgraded-unreadable-body-ran");
     const summary = await runG0Spikes({
       root,
       spikes: [
-        executable(root, "s1", "while :; do sleep 0.01; done"),
-        executable(root, "s2", "while :; do sleep 0.01; done"),
-        executable(root, "s3", "while :; do sleep 0.01; done"),
+        executable(root, "s1", `printf ran > ${JSON.stringify(runnableMarker)}`),
+        readableOnly(root, "s2", `printf ran > ${JSON.stringify(unreadableMarker)}`),
       ],
-      // Each spike could burn 5s on its own: three of them is 15s with no
-      // aggregate bound. The 600ms ceiling is what actually stops the run.
-      timeoutMs: 5_000,
-      aggregateTimeoutMs: 600,
-      terminationGraceMs: 100,
+      containment: { kind: "none", reason: "planted static-preflight path" },
+      diagnosticSink: () => {},
     });
-    const elapsed = performance.now() - startedAt;
 
-    expect(summary.results[0]?.code).toBe("G0_SPIKE_AGGREGATE_TIMEOUT");
-    expect(summary.results.slice(1).map((entry) => entry.code)).toEqual([
-      "G0_SPIKE_NOT_RUN",
-      "G0_SPIKE_NOT_RUN",
+    expect(codes(summary)).toEqual([
+      "G0_SPIKE_CONTAINMENT_UNAVAILABLE",
+      "G0_SPIKE_SCRIPT_NOT_EXECUTABLE",
     ]);
     expect(summary.exitCode).toBe(1);
-    // Comfortably under the 15s an unbounded aggregate would have allowed.
-    expect(elapsed).toBeLessThan(5_000);
-  }, 20_000);
+    await Bun.sleep(150);
+    expect(existsSync(runnableMarker)).toBe(false);
+    expect(existsSync(unreadableMarker)).toBe(false);
+  });
 
-  test("a spike stopped by its own limit is labelled a spike timeout, not an aggregate one", async () => {
+  test("PLANTED: an already-aborted no-containment run reports abort without spawning", async () => {
     const root = fixtureRoot();
+    const marker = join(root, "aborted-preflight-body-ran");
+    const controller = new AbortController();
+    controller.abort();
     const summary = await runG0Spikes({
       root,
-      spikes: [executable(root, "s1", "while :; do sleep 0.01; done")],
-      timeoutMs: 200,
-      aggregateTimeoutMs: 30_000,
-      terminationGraceMs: 100,
+      spikes: [executable(root, "s1", `printf ran > ${JSON.stringify(marker)}`)],
+      containment: { kind: "none", reason: "planted aborted-preflight path" },
+      signal: controller.signal,
+      diagnosticSink: () => {},
     });
 
-    expect(summary.results[0]?.code).toBe("G0_SPIKE_TIMEOUT");
+    expect(codes(summary)).toEqual(["G0_SPIKE_ABORTED"]);
     expect(summary.exitCode).toBe(1);
-  }, 20_000);
+    await Bun.sleep(150);
+    expect(existsSync(marker)).toBe(false);
+  });
+});
+
+describe("D3 — the aggregate has its own finite ceiling", () => {
+  test("PLANTED: the aggregate deadline also bounds ps, termination grace, and output drain", () => {
+    const source = readFileSync(join(import.meta.dir, "g0-spikes.ts"), "utf8");
+    expect(source).toContain("readonly absoluteDeadline: number");
+    expect(source).toContain("timeout: Math.min(5_000, remaining)");
+    expect(source).toContain('killSignal: "SIGKILL"');
+    expect(source).toContain("Math.min(absoluteDeadline, performance.now() + graceMs)");
+    expect(source).toContain("remainingBefore(context.absoluteDeadline)");
+    expect(source).toContain("const drainBudget = Math.min(context.postExitDrainMs");
+  });
+
+  containmentTest(
+    "PLANTED: per-spike timeouts alone do not bound the run; the aggregate deadline does",
+    async () => {
+      const root = fixtureRoot();
+      const startedAt = performance.now();
+      const summary = await runG0Spikes({
+        root,
+        spikes: [
+          executable(root, "s1", "while :; do sleep 0.01; done"),
+          executable(root, "s2", "while :; do sleep 0.01; done"),
+          executable(root, "s3", "while :; do sleep 0.01; done"),
+        ],
+        // Each spike could burn 5s on its own: three of them is 15s with no
+        // aggregate bound. The 600ms ceiling is what actually stops the run.
+        timeoutMs: 5_000,
+        aggregateTimeoutMs: 600,
+        terminationGraceMs: 100,
+      });
+      const elapsed = performance.now() - startedAt;
+
+      expect(summary.results[0]?.code).toBe("G0_SPIKE_AGGREGATE_TIMEOUT");
+      expect(summary.results.slice(1).map((entry) => entry.code)).toEqual([
+        "G0_SPIKE_NOT_RUN",
+        "G0_SPIKE_NOT_RUN",
+      ]);
+      expect(summary.exitCode).toBe(1);
+      // Comfortably under the 15s an unbounded aggregate would have allowed.
+      expect(elapsed).toBeLessThan(5_000);
+    },
+    20_000,
+  );
+
+  containmentTest(
+    "a spike stopped by its own limit is labelled a spike timeout, not an aggregate one",
+    async () => {
+      const root = fixtureRoot();
+      const summary = await runG0Spikes({
+        root,
+        spikes: [executable(root, "s1", "while :; do sleep 0.01; done")],
+        timeoutMs: 200,
+        aggregateTimeoutMs: 30_000,
+        terminationGraceMs: 100,
+      });
+
+      expect(summary.results[0]?.code).toBe("G0_SPIKE_TIMEOUT");
+      expect(summary.exitCode).toBe(1);
+    },
+    20_000,
+  );
 
   test("every duration option refuses a non-finite or out-of-range value", async () => {
     const root = fixtureRoot();
@@ -219,85 +407,142 @@ describe("D3 — the aggregate has its own finite ceiling", () => {
 });
 
 describe("D4 — the entry point bridges SIGINT and SIGTERM", () => {
-  test("SIGINT terminates the running group, still prints a summary, and exits 130", async () => {
-    const root = fixtureRoot();
-    const started = join(root, "cli-started");
-    const leak = join(root, "cli-grandchild-leaked");
-    const handlers = new Map<string, () => void>();
-    const lines: string[] = [];
-    const errors: string[] = [];
+  containmentTest(
+    "SIGINT terminates the running group, still prints a summary, and exits 130",
+    async () => {
+      const root = fixtureRoot();
+      const started = join(root, "cli-started");
+      const leak = join(root, "cli-grandchild-leaked");
+      const handlers = new Map<string, () => void>();
+      const lines: string[] = [];
+      const errors: string[] = [];
 
-    const codePromise = runG0Cli({
-      root,
-      spikes: [
-        executable(
-          root,
-          "s1",
-          `(trap '' TERM; sleep 0.5; printf leaked > ${JSON.stringify(leak)}) &\n` +
-            `printf started > ${JSON.stringify(started)}\n` +
-            "while :; do sleep 0.01; done",
-        ),
-        executable(root, "s2", "exit 0"),
-      ],
-      timeoutMs: 10_000,
-      terminationGraceMs: 100,
-      log: (line) => lines.push(line),
-      errorLog: (line) => errors.push(line),
-      onSignal: (signal, handler) => handlers.set(signal, handler),
-      hardExit: () => {
-        throw new Error("hardExit must not fire on a single signal");
-      },
-    });
+      const codePromise = runG0Cli({
+        root,
+        spikes: [
+          executable(
+            root,
+            "s1",
+            `(trap '' TERM; sleep 0.5; printf leaked > ${JSON.stringify(leak)}) &\n` +
+              `printf started > ${JSON.stringify(started)}\n` +
+              "while :; do sleep 0.01; done",
+          ),
+          executable(root, "s2", "exit 0"),
+        ],
+        timeoutMs: 10_000,
+        terminationGraceMs: 100,
+        log: (line) => lines.push(line),
+        errorLog: (line) => errors.push(line),
+        onSignal: (signal, handler) => handlers.set(signal, handler),
+        hardExit: () => {
+          throw new Error("hardExit must not fire on a single signal");
+        },
+      });
 
-    await waitFor(started);
-    handlers.get("SIGINT")?.();
-    const exitCode = await codePromise;
-    await Bun.sleep(600);
+      await waitFor(started);
+      handlers.get("SIGINT")?.();
+      const exitCode = await codePromise;
+      await Bun.sleep(600);
 
-    expect(exitCode).toBe(signalExitCode("SIGINT"));
-    expect(exitCode).toBe(130);
-    // The summary is still emitted: an interrupted run that prints nothing is
-    // indistinguishable from a crash.
-    expect(lines).toHaveLength(1);
-    expect(JSON.parse(lines[0] as string).suite).toBe("g0-spikes-integration");
-    expect(errors.join("\n")).toContain("G0_SPIKES_INTERRUPTED");
-    // The group really was terminated rather than orphaned.
-    expect(existsSync(leak)).toBe(false);
-  }, 25_000);
+      expect(exitCode).toBe(signalExitCode("SIGINT"));
+      expect(exitCode).toBe(130);
+      // The summary is still emitted: an interrupted run that prints nothing is
+      // indistinguishable from a crash.
+      expect(lines).toHaveLength(1);
+      expect(JSON.parse(lines[0] as string).suite).toBe("g0-spikes-integration");
+      expect(errors.join("\n")).toContain("G0_SPIKES_INTERRUPTED");
+      // The group really was terminated rather than orphaned.
+      expect(existsSync(leak)).toBe(false);
+    },
+    25_000,
+  );
 
-  test("SIGTERM exits 143 and a repeat signal escalates to a hard exit", async () => {
-    const root = fixtureRoot();
-    const started = join(root, "cli-term-started");
-    const handlers = new Map<string, () => void>();
-    const hardExits: number[] = [];
-    const lines: string[] = [];
+  containmentTest(
+    "SIGTERM exits 143 and a repeat signal schedules a hard exit after cleanup",
+    async () => {
+      const root = fixtureRoot();
+      const started = join(root, "cli-term-started");
+      const handlers = new Map<string, () => void>();
+      const hardExits: number[] = [];
+      const lines: string[] = [];
 
-    const codePromise = runG0Cli({
-      root,
-      spikes: [
-        executable(
-          root,
-          "s1",
-          `printf started > ${JSON.stringify(started)}\nwhile :; do sleep 0.01; done`,
-        ),
-      ],
-      timeoutMs: 10_000,
-      terminationGraceMs: 100,
-      log: (line) => lines.push(line),
-      errorLog: () => {},
-      onSignal: (signal, handler) => handlers.set(signal, handler),
-      hardExit: (code) => hardExits.push(code),
-    });
+      const codePromise = runG0Cli({
+        root,
+        spikes: [
+          executable(
+            root,
+            "s1",
+            `printf started > ${JSON.stringify(started)}\nwhile :; do sleep 0.01; done`,
+          ),
+        ],
+        timeoutMs: 10_000,
+        terminationGraceMs: 100,
+        log: (line) => lines.push(line),
+        errorLog: () => {},
+        onSignal: (signal, handler) => handlers.set(signal, handler),
+        hardExit: (code) => hardExits.push(code),
+      });
 
-    await waitFor(started);
-    handlers.get("SIGTERM")?.();
-    handlers.get("SIGTERM")?.();
-    const exitCode = await codePromise;
+      await waitFor(started);
+      handlers.get("SIGTERM")?.();
+      handlers.get("SIGTERM")?.();
+      const exitCode = await codePromise;
 
-    expect(exitCode).toBe(signalExitCode("SIGTERM"));
-    expect(exitCode).toBe(143);
-    expect(hardExits).toEqual([143]);
-  }, 25_000);
+      expect(exitCode).toBe(signalExitCode("SIGTERM"));
+      expect(exitCode).toBe(143);
+      expect(hardExits).toEqual([143]);
+    },
+    25_000,
+  );
+
+  containmentTest(
+    "PLANTED: a real second SIGTERM waits for namespace cleanup before hard exit",
+    async () => {
+      const root = fixtureRoot();
+      const started = join(root, "double-signal-started");
+      const interrupted = join(root, "double-signal-interrupted");
+      const leak = join(root, "double-signal-leak");
+      const spike = executable(
+        root,
+        "s1",
+        `(trap '' TERM; sleep 0.7; printf leaked > ${JSON.stringify(leak)}) &\n` +
+          `printf started > ${JSON.stringify(started)}\n` +
+          "while :; do sleep 0.01; done",
+      );
+      const runner = join(root, "double-signal-runner.ts");
+      writeFileSync(
+        runner,
+        `import { writeFileSync } from "node:fs";
+import { runG0Cli } from ${JSON.stringify(join(import.meta.dir, "g0-spikes.ts"))};
+const code = await runG0Cli({
+  root: ${JSON.stringify(root)},
+  spikes: [${JSON.stringify(spike)}],
+  timeoutMs: 10000,
+  aggregateTimeoutMs: 10000,
+  terminationGraceMs: 250,
+  diagnosticSink: () => {},
+  log: () => {},
+  errorLog: (line) => writeFileSync(${JSON.stringify(interrupted)}, line),
+});
+process.exitCode = code;
+`,
+      );
+      const child = spawn(process.execPath, [runner], { stdio: "ignore" });
+      const exited = waitForExit(child);
+
+      await waitFor(started);
+      expect(child.kill("SIGTERM")).toBe(true);
+      await waitFor(interrupted);
+      expect(child.kill("SIGTERM")).toBe(true);
+      expect(await exited).toBe(143);
+      // The old immediate hard exit let the TERM-ignoring background process
+      // write this after the runner was gone. It exits on its own shortly after,
+      // so the test demonstrates the defect without leaving an artifact process.
+      await Bun.sleep(850);
+      expect(existsSync(leak)).toBe(false);
+    },
+    25_000,
+  );
 
   test("an uninterrupted CLI run returns the summary's own exit code", async () => {
     const root = fixtureRoot();
@@ -334,21 +579,24 @@ describe("D4 — the entry point bridges SIGINT and SIGTERM", () => {
 });
 
 describe("D5 — a start failure is its own condition", () => {
-  test("PLANTED: an unresolvable interpreter reports a spawn failure, not a signalling failure", async () => {
-    const root = fixtureRoot();
-    const summary = await runG0Spikes({
-      root,
-      spikes: [executable(root, "s1", "exit 0")],
-      interpreter: "definitely-not-an-installed-interpreter",
-      timeoutMs: 2_000,
-    });
+  containmentTest(
+    "PLANTED: an unresolvable interpreter reports a spawn failure, not a signalling failure",
+    async () => {
+      const root = fixtureRoot();
+      const summary = await runG0Spikes({
+        root,
+        spikes: [executable(root, "s1", "exit 0")],
+        interpreter: "definitely-not-an-installed-interpreter",
+        timeoutMs: 2_000,
+      });
 
-    expect(summary.results[0]?.code).toBe("G0_SPIKE_SPAWN_FAILED");
-    // The defect being fixed: this used to surface as a process-group problem,
-    // sending a reader to look for a kill that was never attempted.
-    expect(summary.results[0]?.code).not.toBe("G0_SPIKE_PROCESS_GROUP_SIGNAL_FAILED");
-    expect(summary.exitCode).toBe(1);
-  });
+      expect(summary.results[0]?.code).toBe("G0_SPIKE_SPAWN_FAILED");
+      // The defect being fixed: this used to surface as a process-group problem,
+      // sending a reader to look for a kill that was never attempted.
+      expect(summary.results[0]?.code).not.toBe("G0_SPIKE_PROCESS_GROUP_SIGNAL_FAILED");
+      expect(summary.exitCode).toBe(1);
+    },
+  );
 
   test("an interpreter carrying a path separator is refused outright", async () => {
     const root = fixtureRoot();
@@ -435,184 +683,211 @@ describe("D7 — the manifest is validated exactly", () => {
 });
 
 describe("D8 — group cleanup is bounded and never signals a stale group", () => {
-  test("a timed-out spike kills a TERM-ignoring grandchild before it can leak", async () => {
-    const root = fixtureRoot();
-    const sentinel = join(root, "grandchild-survived-timeout");
-    const started = join(root, "grandchild-started");
-    const summary = await runG0Spikes({
-      root,
-      spikes: [
-        executable(
-          root,
-          "s1",
-          `(trap '' TERM; sleep 0.4; printf leaked > ${JSON.stringify(sentinel)}) &\n` +
-            `printf started > ${JSON.stringify(started)}\n` +
-            "while :; do sleep 0.01; done",
-        ),
-      ],
-      timeoutMs: 150,
-      terminationGraceMs: 100,
-    });
+  containmentTest(
+    "a timed-out spike kills a TERM-ignoring grandchild before it can leak",
+    async () => {
+      const root = fixtureRoot();
+      const sentinel = join(root, "grandchild-survived-timeout");
+      const started = join(root, "grandchild-started");
+      const summary = await runG0Spikes({
+        root,
+        spikes: [
+          executable(
+            root,
+            "s1",
+            `(trap '' TERM; sleep 0.4; printf leaked > ${JSON.stringify(sentinel)}) &\n` +
+              `printf started > ${JSON.stringify(started)}\n` +
+              "while :; do sleep 0.01; done",
+          ),
+        ],
+        timeoutMs: 150,
+        terminationGraceMs: 100,
+      });
 
-    expect(summary.results[0]?.code).toBe("G0_SPIKE_TIMEOUT");
-    await waitFor(started);
-    await Bun.sleep(600);
-    expect(existsSync(sentinel)).toBe(false);
-  }, 25_000);
+      expect(summary.results[0]?.code).toBe("G0_SPIKE_TIMEOUT");
+      await waitFor(started);
+      await Bun.sleep(600);
+      expect(existsSync(sentinel)).toBe(false);
+    },
+    25_000,
+  );
 
-  test("PLANTED: a group that dies immediately does not cost the full grace period", async () => {
-    const root = fixtureRoot();
-    const startedAt = performance.now();
-    const summary = await runG0Spikes({
-      root,
-      // Exits the instant it is signalled and leaves nothing behind.
-      spikes: [executable(root, "s1", "while :; do sleep 0.01; done")],
-      timeoutMs: 150,
-      // A three-second grace that must NOT be slept through.
-      terminationGraceMs: 3_000,
-    });
-    const elapsed = performance.now() - startedAt;
+  containmentTest(
+    "PLANTED: a group that dies immediately does not cost the full grace period",
+    async () => {
+      const root = fixtureRoot();
+      const startedAt = performance.now();
+      const summary = await runG0Spikes({
+        root,
+        // Exits the instant it is signalled and leaves nothing behind.
+        spikes: [executable(root, "s1", "while :; do sleep 0.01; done")],
+        timeoutMs: 150,
+        // A three-second grace that must NOT be slept through.
+        terminationGraceMs: 3_000,
+      });
+      const elapsed = performance.now() - startedAt;
 
-    expect(summary.results[0]?.code).toBe("G0_SPIKE_TIMEOUT");
-    // The old cleanup awaited the whole grace unconditionally, so this was
-    // ~3.15s. Polling for the group to disappear returns as soon as it has.
-    expect(elapsed).toBeLessThan(1_500);
-  }, 25_000);
+      expect(summary.results[0]?.code).toBe("G0_SPIKE_TIMEOUT");
+      // The old cleanup awaited the whole grace unconditionally, so this was
+      // ~3.15s. Polling for the group to disappear returns as soon as it has.
+      expect(elapsed).toBeLessThan(1_500);
+    },
+    25_000,
+  );
 
-  test("PLANTED: exit 0 with a surviving descendant is a leak, not a pass", async () => {
-    const root = fixtureRoot();
-    const sentinel = join(root, "descendant-wrote-after-exit");
-    const summary = await runG0Spikes({
-      root,
-      // The script exits 0 immediately while a background descendant keeps
-      // running and would write a sentinel a moment later.
-      spikes: [
-        executable(root, "s1", `(sleep 2; printf leaked > ${JSON.stringify(sentinel)}) &\nexit 0`),
-      ],
-      timeoutMs: 5_000,
-      terminationGraceMs: 300,
-      diagnosticSink: () => {},
-    });
+  containmentTest(
+    "PLANTED: exit 0 with a surviving descendant is a leak, not a pass",
+    async () => {
+      const root = fixtureRoot();
+      const sentinel = join(root, "descendant-wrote-after-exit");
+      const summary = await runG0Spikes({
+        root,
+        // The script exits 0 immediately while a background descendant keeps
+        // running and would write a sentinel a moment later.
+        spikes: [
+          executable(
+            root,
+            "s1",
+            `(sleep 2; printf leaked > ${JSON.stringify(sentinel)}) &\nexit 0`,
+          ),
+        ],
+        timeoutMs: 5_000,
+        terminationGraceMs: 300,
+        diagnosticSink: () => {},
+      });
 
-    // A previous revision reported this as G0_SPIKE_PASSED with exit 0 while the
-    // descendant went on running: a false green *and* a process leak.
-    expect(summary.results[0]?.code).toBe("G0_SPIKE_DESCENDANT_LEAKED");
-    expect(summary.results[0]?.status).toBe("fail");
-    expect(summary.exitCode).toBe(1);
-    expect(summary.exitCode).not.toBe(0);
-    // The script's own exit code is still reported; it just no longer decides
-    // the verdict on its own.
-    expect(summary.results[0]?.exitCode).toBe(0);
+      // A previous revision reported this as G0_SPIKE_PASSED with exit 0 while the
+      // descendant went on running: a false green *and* a process leak.
+      expect(summary.results[0]?.code).toBe("G0_SPIKE_DESCENDANT_LEAKED");
+      expect(summary.results[0]?.status).toBe("fail");
+      expect(summary.exitCode).toBe(1);
+      expect(summary.exitCode).not.toBe(0);
+      // The script's own exit code is still reported; it just no longer decides
+      // the verdict on its own.
+      expect(summary.results[0]?.exitCode).toBe(0);
 
-    // The sentinel is the proof of death: had the descendant survived the
-    // bounded TERM/KILL it would have written by now.
-    await Bun.sleep(2_400);
-    expect(existsSync(sentinel)).toBe(false);
-  }, 25_000);
+      // The sentinel is the proof of death: had the descendant survived the
+      // bounded TERM/KILL it would have written by now.
+      await Bun.sleep(2_400);
+      expect(existsSync(sentinel)).toBe(false);
+    },
+    25_000,
+  );
 
-  test("a descendant that ignores TERM is still killed and the spike is non-green", async () => {
-    const root = fixtureRoot();
-    const sentinel = join(root, "term-immune-descendant-wrote");
-    const summary = await runG0Spikes({
-      root,
-      spikes: [
-        executable(
-          root,
-          "s1",
-          `(trap '' TERM; sleep 2; printf leaked > ${JSON.stringify(sentinel)}) &\nexit 0`,
-        ),
-      ],
-      timeoutMs: 5_000,
-      terminationGraceMs: 200,
-      diagnosticSink: () => {},
-    });
+  containmentTest(
+    "a descendant that ignores TERM is still killed and the spike is non-green",
+    async () => {
+      const root = fixtureRoot();
+      const sentinel = join(root, "term-immune-descendant-wrote");
+      const summary = await runG0Spikes({
+        root,
+        spikes: [
+          executable(
+            root,
+            "s1",
+            `(trap '' TERM; sleep 2; printf leaked > ${JSON.stringify(sentinel)}) &\nexit 0`,
+          ),
+        ],
+        timeoutMs: 5_000,
+        terminationGraceMs: 200,
+        diagnosticSink: () => {},
+      });
 
-    expect(summary.results[0]?.code).toBe("G0_SPIKE_DESCENDANT_LEAKED");
-    expect(summary.exitCode).toBe(1);
-    await Bun.sleep(2_400);
-    // TERM was ignored, so only the bounded KILL escalation can have stopped it.
-    expect(existsSync(sentinel)).toBe(false);
-  }, 25_000);
+      expect(summary.results[0]?.code).toBe("G0_SPIKE_DESCENDANT_LEAKED");
+      expect(summary.exitCode).toBe(1);
+      await Bun.sleep(2_400);
+      // TERM was ignored, so only the bounded KILL escalation can have stopped it.
+      expect(existsSync(sentinel)).toBe(false);
+    },
+    25_000,
+  );
 
-  test("a clean spike that leaves nothing behind stays fast and passes", async () => {
-    const root = fixtureRoot();
-    const startedAt = performance.now();
-    const summary = await runG0Spikes({
-      root,
-      spikes: [executable(root, "s1", "printf 'done\\n'; exit 0")],
-      timeoutMs: 5_000,
-      // A grace period that must not be paid by a spike with nothing to reap.
-      terminationGraceMs: 3_000,
-      diagnosticSink: () => {},
-    });
-    const elapsed = performance.now() - startedAt;
+  containmentTest(
+    "a clean spike that leaves nothing behind stays fast and passes",
+    async () => {
+      const root = fixtureRoot();
+      const startedAt = performance.now();
+      const summary = await runG0Spikes({
+        root,
+        spikes: [executable(root, "s1", "printf 'done\\n'; exit 0")],
+        timeoutMs: 5_000,
+        // A grace period that must not be paid by a spike with nothing to reap.
+        terminationGraceMs: 3_000,
+        diagnosticSink: () => {},
+      });
+      const elapsed = performance.now() - startedAt;
 
-    expect(summary.results[0]?.code).toBe(CLEAN_CODE);
-    expect(summary.results[0]?.status).toBe(CLEAN_STATUS);
-    expect(summary.exitCode).toBe(CLEAN_EXIT);
-    expect(elapsed).toBeLessThan(1_500);
-  }, 25_000);
+      expect(summary.results[0]?.code).toBe(CLEAN_CODE);
+      expect(summary.results[0]?.status).toBe(CLEAN_STATUS);
+      expect(summary.exitCode).toBe(CLEAN_EXIT);
+      expect(elapsed).toBeLessThan(1_500);
+    },
+    25_000,
+  );
 
-  test("PLANTED: an unreadable process table fails closed rather than reporting clean", async () => {
-    const root = fixtureRoot();
-    const summary = await runG0Spikes({
-      root,
-      spikes: [executable(root, "s1", "exit 0")],
-      timeoutMs: 5_000,
-      // Nothing resolves under this name, so the scan cannot run at all.
-      psCommand: "definitely-not-an-installed-ps",
-      diagnosticSink: () => {},
-    });
+  containmentTest(
+    "PLANTED: an unreadable process table fails closed rather than reporting clean",
+    async () => {
+      const root = fixtureRoot();
+      const summary = await runG0Spikes({
+        root,
+        spikes: [executable(root, "s1", "exit 0")],
+        timeoutMs: 5_000,
+        // Nothing resolves under this name, so the scan cannot run at all.
+        psCommand: "definitely-not-an-installed-ps",
+        diagnosticSink: () => {},
+      });
 
-    // "I could not look" must never render as "there is nothing there". An
-    // earlier revision swallowed the failure and returned an empty survivor
-    // list, turning a broken scan into a clean bill of health.
-    expect(summary.results[0]?.code).toBe("G0_SPIKE_DESCENDANT_SCAN_FAILED");
-    expect(summary.results[0]?.status).toBe("fail");
-    expect(summary.exitCode).toBe(1);
-    expect(summary.results[0]?.code).not.toBe("G0_SPIKE_PASSED");
-  }, 25_000);
+      // "I could not look" must never render as "there is nothing there". An
+      // earlier revision swallowed the failure and returned an empty survivor
+      // list, turning a broken scan into a clean bill of health.
+      expect(summary.results[0]?.code).toBe("G0_SPIKE_DESCENDANT_SCAN_FAILED");
+      expect(summary.results[0]?.status).toBe("fail");
+      expect(summary.exitCode).toBe(1);
+      expect(summary.results[0]?.code).not.toBe("G0_SPIKE_PASSED");
+    },
+    25_000,
+  );
 
-  test("PLANTED: a setsid child that closes every FD cannot yield a green run", async () => {
-    expect(which("perl")).toBe(true);
-    const root = fixtureRoot();
-    const sentinel = join(root, "double-escaped-wrote");
-    const summary = await runG0Spikes({
-      root,
-      // The worst case: leaves the process group *and* closes every inherited
-      // descriptor, so it is invisible to the group scan and to the drain check
-      // alike. No amount of polling can see it — only a kernel containment
-      // boundary can, and where there is none the run must not claim success.
-      spikes: [
-        executable(
-          root,
-          "s1",
-          "perl -e 'use POSIX qw(setsid); setsid(); close(STDIN); close(STDOUT); close(STDERR); " +
-            `sleep 3; open(F, ">", ${JSON.stringify(sentinel)}); print F "escaped"; close(F);' &\n` +
-            "sleep 0.4\nexit 0",
-        ),
-      ],
-      timeoutMs: 8_000,
-      terminationGraceMs: 200,
-      postExitDrainMs: 150,
-      diagnosticSink: () => {},
-    });
+  containmentTest(
+    "PLANTED: a setsid child that closes every FD cannot yield a green run",
+    async () => {
+      expect(which("perl")).toBe(true);
+      const root = fixtureRoot();
+      const sentinel = join(root, "double-escaped-wrote");
+      const summary = await runG0Spikes({
+        root,
+        // The worst case: leaves the process group *and* closes every inherited
+        // descriptor, so it is invisible to the group scan and to the drain check
+        // alike. No amount of polling can see it — only a kernel containment
+        // boundary can, and where there is none the run must not claim success.
+        spikes: [
+          executable(
+            root,
+            "s1",
+            "perl -e 'use POSIX qw(setsid); setsid(); close(STDIN); close(STDOUT); close(STDERR); " +
+              `sleep 3; open(F, ">", ${JSON.stringify(sentinel)}); print F "escaped"; close(F);' &\n` +
+              "sleep 0.4\nexit 0",
+          ),
+        ],
+        timeoutMs: 8_000,
+        terminationGraceMs: 200,
+        postExitDrainMs: 150,
+        diagnosticSink: () => {},
+      });
 
-    // Before the containment boundary this reported G0_SPIKE_PASSED with exit 0
-    // while the escapee went on running.
-    expect(summary.exitCode).not.toBe(0);
-    expect(summary.results[0]?.status).not.toBe("pass");
-    if (CONTAINED) {
-      // A PID namespace really can see and tear this down.
+      // Before the containment boundary this reported G0_SPIKE_PASSED with exit 0
+      // while the escapee went on running.
+      expect(summary.exitCode).not.toBe(0);
+      expect(summary.results[0]?.status).not.toBe("pass");
+      // This is a containment-only test. Keeping a non-containment fallback in
+      // its body made that branch dead while implying it had test authority.
       expect(summary.results[0]?.code).toBe("G0_SPIKE_DESCENDANT_LEAKED");
       await Bun.sleep(3_400);
       expect(existsSync(sentinel)).toBe(false);
-    } else {
-      expect(summary.results[0]?.code).toBe("G0_SPIKE_CONTAINMENT_UNAVAILABLE");
-      expect(summary.results[0]?.status).toBe("blocked");
-      expect(summary.exitCode).toBe(BLOCKED_EXIT_CODE);
-    }
-  }, 30_000);
+    },
+    30_000,
+  );
 
   test("PLANTED: a caller cannot mint containment it does not have", async () => {
     const root = fixtureRoot();
@@ -640,12 +915,32 @@ describe("D8 — group cleanup is bounded and never signals a stale group", () =
     const source = readFileSync(join(import.meta.dir, "g0-spikes.ts"), "utf8");
     // One constant, referenced by both, so a proof of `unshare --pid --fork
     // --mount-proc` can never certify a launch that omits part of it.
-    expect(source).toContain("const PID_NAMESPACE_ARGV");
+    expect(source).toContain("const PID_NAMESPACE_LAUNCH_ARGV");
+    expect(source).toContain("function pidNamespaceShellArgv");
     // The literal appears exactly once — inside the shared constant. A second
     // spelling anywhere is how the probe and the launch drifted apart before,
     // certifying `--mount-proc` while running without it.
     expect([...source.matchAll(/"unshare"/g)]).toHaveLength(1);
-    expect(source).toMatch(/const PID_NAMESPACE_ARGV = \["unshare"/);
+    expect(source).toMatch(/const PID_NAMESPACE_LAUNCH_ARGV = \[\s*"unshare"/);
+    // Killing only the outer `unshare --fork` process otherwise strands PID 1
+    // in the new namespace. The exact launch must request kernel child teardown.
+    expect(source).toContain('"--kill-child=SIGKILL"');
+    expect(source).toContain(
+      'pidNamespaceShellArgv(CONTAINMENT_PROBE_PROGRAM, "g0-containment-probe")',
+    );
+    expect(source).toContain('SUPERVISOR_PROGRAM,\n          "g0-supervisor"');
+    // The probe is a minimal instance of the live shape, not `unshare true`:
+    // inner Bash must be PID 1, see its mounted /proc, and fork a direct child.
+    expect(source).toContain('[ "$$" -eq 1 ]');
+    expect(source).toContain("/proc/1/cmdline");
+    expect(source).toContain("probe_target=$!");
+    expect(source).toContain('[ "$probe_parent" = 1 ]');
+    // Execution is by an already-open descriptor, not a path whose final link
+    // or parent directory can be swapped after the preflight realpath check.
+    expect(source).toContain("fsConstants.O_NOFOLLOW");
+    expect(source).toContain(`/proc/self/fd/\${fd}`);
+    expect(source).toContain('"/proc/self/fd/4"');
+    expect(source).toContain('stdio: ["ignore", "pipe", "pipe", "pipe", scriptFd]');
     // The probe must report the truth about this host.
     const capability = probeContainment(true);
     if (process.platform !== "linux") {
@@ -654,53 +949,53 @@ describe("D8 — group cleanup is bounded and never signals a stale group", () =
     }
   });
 
-  test("PLANTED: empty, partially malformed, and sentinel-less ps output all fail closed", async () => {
-    const root = fixtureRoot();
-    // `true` exits 0 and prints nothing: previously parsed as zero survivors.
-    const empty = await runG0Spikes({
-      root,
-      spikes: [executable(root, "s1", "exit 0")],
-      psCommand: "true",
-      diagnosticSink: () => {},
-    });
-    expect(empty.results[0]?.code).toBe("G0_SPIKE_DESCENDANT_SCAN_FAILED");
-    expect(empty.exitCode).toBe(1);
+  containmentTest(
+    "PLANTED: empty, partially malformed, and owned-group-less ps output all fail closed",
+    async () => {
+      const root = fixtureRoot();
+      // `true` exits 0 and prints nothing: previously parsed as zero survivors.
+      const empty = await runG0Spikes({
+        root,
+        spikes: [executable(root, "s1", "exit 0")],
+        psCommand: "true",
+        diagnosticSink: () => {},
+      });
+      expect(empty.results[0]?.code).toBe("G0_SPIKE_DESCENDANT_SCAN_FAILED");
+      expect(empty.exitCode).toBe(1);
 
-    // A listing that is mostly valid but carries a garbage row. The sentinel is
-    // present, so only the malformed-row rule can reject this — a parser that
-    // skipped unparseable lines would report a confident zero, and the skipped
-    // line is exactly where a survivor would hide.
-    const partial = await withFakePs(
-      root,
-      `printf '%s 1 S\\n' "$$"\nprintf '%s 1 S\\n' "${process.pid}"\nprintf 'not-a-row garbage here\\n'\nprintf '2 1 S\\n'`,
-      () =>
-        runG0Spikes({
-          root,
-          spikes: [executable(root, "s2", "exit 0")],
-          psCommand: "fakeps",
-          diagnosticSink: () => {},
-        }),
-    );
-    expect(partial.results[0]?.code).toBe("G0_SPIKE_DESCENDANT_SCAN_FAILED");
-    expect(partial.exitCode).toBe(1);
+      // A real listing plus a garbage row. The owned rows are present, so only
+      // the malformed-row rule can reject this. A parser that skipped
+      // unparseable lines would report a confident zero, and the skipped line is
+      // exactly where a survivor would hide.
+      const partial = await withFakePs(
+        root,
+        "ps -A -o pid=,ppid=,pgid=,state=\nprintf 'not-a-row garbage here\\n'",
+        () =>
+          runG0Spikes({
+            root,
+            spikes: [executable(root, "s2", "exit 0")],
+            psCommand: "fakeps",
+            diagnosticSink: () => {},
+          }),
+      );
+      expect(partial.results[0]?.code).toBe("G0_SPIKE_DESCENDANT_SCAN_FAILED");
+      expect(partial.exitCode).toBe(1);
 
-    // Perfectly well-formed rows that simply never mention this runner prove
-    // nothing about this machine's process table, so they cannot certify an
-    // empty group either.
-    const sentinelLess = await withFakePs(
-      root,
-      "printf '2 1 S\\n'\nprintf '3 1 S\\n'\nprintf '4 4 S\\n'",
-      () =>
+      // Perfectly well-formed rows that omit the live owned group prove nothing
+      // about that group, so they cannot certify it empty either.
+      const ownedGroupLess = await withFakePs(root, "printf '%s 1 1 S\\n' \"$$\"", () =>
         runG0Spikes({
           root,
           spikes: [executable(root, "s3", "exit 0")],
           psCommand: "fakeps",
           diagnosticSink: () => {},
         }),
-    );
-    expect(sentinelLess.results[0]?.code).toBe("G0_SPIKE_DESCENDANT_SCAN_FAILED");
-    expect(sentinelLess.exitCode).toBe(1);
-  }, 30_000);
+      );
+      expect(ownedGroupLess.results[0]?.code).toBe("G0_SPIKE_DESCENDANT_SCAN_FAILED");
+      expect(ownedGroupLess.exitCode).toBe(1);
+    },
+    30_000,
+  );
 
   test("PLANTED: cleanup signals the owned group and never an individual pid", async () => {
     // Signalling enumerated descendant pids is strictly more dangerous than a
@@ -720,96 +1015,108 @@ describe("D8 — group cleanup is bounded and never signals a stale group", () =
     expect(source).not.toContain("signalPids");
   });
 
-  test("a spike whose descendants exit on their own converges without being signalled", async () => {
-    const root = fixtureRoot();
-    const marker = join(root, "short-lived-descendant-finished");
-    const startedAt = performance.now();
-    const summary = await runG0Spikes({
-      root,
-      // The descendant races the runner's scan and exits by itself. Whether the
-      // scan happens to observe it or not, the run must converge and never wait
-      // on, or signal, a pid that has already gone.
-      spikes: [executable(root, "s1", `(printf done > ${JSON.stringify(marker)}) &\nexit 0`)],
-      timeoutMs: 5_000,
-      terminationGraceMs: 2_000,
-      diagnosticSink: () => {},
-    });
-    const elapsed = performance.now() - startedAt;
+  containmentTest(
+    "a spike whose descendants exit on their own converges without being signalled",
+    async () => {
+      const root = fixtureRoot();
+      const marker = join(root, "short-lived-descendant-finished");
+      const startedAt = performance.now();
+      const summary = await runG0Spikes({
+        root,
+        // The descendant races the runner's scan and exits by itself. Whether the
+        // scan happens to observe it or not, the run must converge and never wait
+        // on, or signal, a pid that has already gone.
+        spikes: [executable(root, "s1", `(printf done > ${JSON.stringify(marker)}) &\nexit 0`)],
+        timeoutMs: 5_000,
+        terminationGraceMs: 2_000,
+        diagnosticSink: () => {},
+      });
+      const elapsed = performance.now() - startedAt;
 
-    // Either outcome is legitimate — it depends on whether the scan happened to
-    // catch the descendant before it exited — but both must converge, and
-    // neither may report an unkillable process or a failed signal.
-    const settled: readonly string[] = [CLEAN_CODE, "G0_SPIKE_DESCENDANT_LEAKED"];
-    expect(settled).toContain(String(summary.results[0]?.code));
-    expect(summary.results[0]?.code).not.toBe("G0_SPIKE_DESCENDANT_UNKILLABLE");
-    expect(summary.results[0]?.code).not.toBe("G0_SPIKE_PROCESS_GROUP_SIGNAL_FAILED");
-    expect(elapsed).toBeLessThan(3_000);
-    expect(existsSync(marker)).toBe(true);
-  }, 25_000);
+      // Either outcome is legitimate — it depends on whether the scan happened to
+      // catch the descendant before it exited — but both must converge, and
+      // neither may report an unkillable process or a failed signal.
+      const settled: readonly string[] = [CLEAN_CODE, "G0_SPIKE_DESCENDANT_LEAKED"];
+      expect(settled).toContain(String(summary.results[0]?.code));
+      expect(summary.results[0]?.code).not.toBe("G0_SPIKE_DESCENDANT_UNKILLABLE");
+      expect(summary.results[0]?.code).not.toBe("G0_SPIKE_PROCESS_GROUP_SIGNAL_FAILED");
+      expect(elapsed).toBeLessThan(3_000);
+      expect(existsSync(marker)).toBe(true);
+    },
+    25_000,
+  );
 
-  test("PLANTED: a post-exit pipe holder is refused as a leak and cannot hang the runner", async () => {
-    const root = fixtureRoot();
-    const startedAt = performance.now();
-    const summary = await runG0Spikes({
-      root,
-      // The shell exits at once, but the background subshell inherits stdout and
-      // holds the pipe open for two seconds. Two properties are under test at
-      // once: waiting for `end` unconditionally would block here with no timer
-      // left to stop it, *and* a process still running after its script finished
-      // is a leak however convenient its exit code was.
-      spikes: [executable(root, "s1", "(sleep 2; printf late) &\nexit 0")],
-      timeoutMs: 5_000,
-      postExitDrainMs: 150,
-      terminationGraceMs: 300,
-      diagnosticSink: () => {},
-    });
-    const elapsed = performance.now() - startedAt;
+  containmentTest(
+    "PLANTED: a post-exit pipe holder is refused as a leak and cannot hang the runner",
+    async () => {
+      const root = fixtureRoot();
+      const startedAt = performance.now();
+      const summary = await runG0Spikes({
+        root,
+        // The shell exits at once, but the background subshell inherits stdout and
+        // holds the pipe open for two seconds. Two properties are under test at
+        // once: waiting for `end` unconditionally would block here with no timer
+        // left to stop it, *and* a process still running after its script finished
+        // is a leak however convenient its exit code was.
+        spikes: [executable(root, "s1", "(sleep 2; printf late) &\nexit 0")],
+        timeoutMs: 5_000,
+        postExitDrainMs: 150,
+        terminationGraceMs: 300,
+        diagnosticSink: () => {},
+      });
+      const elapsed = performance.now() - startedAt;
 
-    expect(summary.results[0]?.code).toBe("G0_SPIKE_DESCENDANT_LEAKED");
-    expect(summary.results[0]?.status).toBe("fail");
-    expect(summary.exitCode).toBe(1);
-    expect(summary.results[0]?.code).not.toBe("G0_SPIKE_PASSED");
-    expect(elapsed).toBeLessThan(2_000);
-  }, 25_000);
+      expect(summary.results[0]?.code).toBe("G0_SPIKE_DESCENDANT_LEAKED");
+      expect(summary.results[0]?.status).toBe("fail");
+      expect(summary.exitCode).toBe(1);
+      expect(summary.results[0]?.code).not.toBe("G0_SPIKE_PASSED");
+      expect(elapsed).toBeLessThan(2_000);
+    },
+    25_000,
+  );
 
-  test("abort terminates the running group and later spikes never start", async () => {
-    const root = fixtureRoot();
-    const started = join(root, "abort-started");
-    const leak = join(root, "abort-grandchild-leaked");
-    const later = join(root, "abort-later-ran");
-    const controller = new AbortController();
-    const summaryPromise = runG0Spikes({
-      root,
-      spikes: [
-        executable(
-          root,
-          "s1",
-          `(trap '' TERM; sleep 0.5; printf leaked > ${JSON.stringify(leak)}) &\n` +
-            `printf started > ${JSON.stringify(started)}\n` +
-            "while :; do sleep 0.01; done",
-        ),
-        executable(root, "s2", `printf ran > ${JSON.stringify(later)}`),
-      ],
-      signal: controller.signal,
-      timeoutMs: 10_000,
-      terminationGraceMs: 100,
-    });
+  containmentTest(
+    "abort terminates the running group and later spikes never start",
+    async () => {
+      const root = fixtureRoot();
+      const started = join(root, "abort-started");
+      const leak = join(root, "abort-grandchild-leaked");
+      const later = join(root, "abort-later-ran");
+      const controller = new AbortController();
+      const summaryPromise = runG0Spikes({
+        root,
+        spikes: [
+          executable(
+            root,
+            "s1",
+            `(trap '' TERM; sleep 0.5; printf leaked > ${JSON.stringify(leak)}) &\n` +
+              `printf started > ${JSON.stringify(started)}\n` +
+              "while :; do sleep 0.01; done",
+          ),
+          executable(root, "s2", `printf ran > ${JSON.stringify(later)}`),
+        ],
+        signal: controller.signal,
+        timeoutMs: 10_000,
+        terminationGraceMs: 100,
+      });
 
-    await waitFor(started);
-    controller.abort();
-    const summary = await summaryPromise;
-    await Bun.sleep(700);
+      await waitFor(started);
+      controller.abort();
+      const summary = await summaryPromise;
+      await Bun.sleep(700);
 
-    expect(codes(summary)).toEqual(["G0_SPIKE_ABORTED", "G0_SPIKE_NOT_RUN"]);
-    expect(summary.exitCode).toBe(1);
-    expect(existsSync(leak)).toBe(false);
-    // Recorded rather than omitted: a short results array would understate what
-    // the gate was meant to cover.
-    expect(existsSync(later)).toBe(false);
-    expect(summary.results).toHaveLength(2);
-  }, 25_000);
+      expect(codes(summary)).toEqual(["G0_SPIKE_ABORTED", "G0_SPIKE_NOT_RUN"]);
+      expect(summary.exitCode).toBe(1);
+      expect(existsSync(leak)).toBe(false);
+      // Recorded rather than omitted: a short results array would understate what
+      // the gate was meant to cover.
+      expect(existsSync(later)).toBe(false);
+      expect(summary.results).toHaveLength(2);
+    },
+    25_000,
+  );
 
-  test("a spike killed by a signal is a failure carrying the signal name", async () => {
+  containmentTest("a spike killed by a signal is a failure carrying the signal name", async () => {
     const root = fixtureRoot();
     const summary = await runG0Spikes({
       root,
@@ -824,28 +1131,31 @@ describe("D8 — group cleanup is bounded and never signals a stale group", () =
 });
 
 describe("D9 — child output stays out of the stdout contract", () => {
-  test("PLANTED: child stdout reaches the diagnostic sink and never the aggregate JSON", async () => {
-    const root = fixtureRoot();
-    const captured: string[] = [];
-    const marker = "SPIKE-STDOUT-WOULD-HAVE-CORRUPTED-THE-RECORD";
-    const summary = await runG0Spikes({
-      root,
-      spikes: [executable(root, "s1", `printf '%s\\n' ${JSON.stringify(marker)}; exit 0`)],
-      timeoutMs: 2_000,
-      diagnosticSink: (text) => captured.push(text),
-    });
-    const serialized = formatG0Summary(summary, root);
+  containmentTest(
+    "PLANTED: child stdout reaches the diagnostic sink and never the aggregate JSON",
+    async () => {
+      const root = fixtureRoot();
+      const captured: string[] = [];
+      const marker = "SPIKE-STDOUT-WOULD-HAVE-CORRUPTED-THE-RECORD";
+      const summary = await runG0Spikes({
+        root,
+        spikes: [executable(root, "s1", `printf '%s\\n' ${JSON.stringify(marker)}; exit 0`)],
+        timeoutMs: 2_000,
+        diagnosticSink: (text) => captured.push(text),
+      });
+      const serialized = formatG0Summary(summary, root);
 
-    // Evidence preserved, labelled by spike...
-    expect(captured.join("")).toContain(marker);
-    expect(captured.join("")).toContain("g0 spike s1 stdout");
-    // ...and absent from the one machine-readable line. Under `stdio: inherit`
-    // this text landed on the same stdout as the record below.
-    expect(serialized).not.toContain(marker);
-    expect(JSON.parse(serialized).code).toBe(CLEAN_SUMMARY_CODE);
-  });
+      // Evidence preserved, labelled by spike...
+      expect(captured.join("")).toContain(marker);
+      expect(captured.join("")).toContain("g0 spike s1 stdout");
+      // ...and absent from the one machine-readable line. Under `stdio: inherit`
+      // this text landed on the same stdout as the record below.
+      expect(serialized).not.toContain(marker);
+      expect(JSON.parse(serialized).code).toBe(CLEAN_SUMMARY_CODE);
+    },
+  );
 
-  test("child stderr is captured, labelled and still counted as evidence", async () => {
+  containmentTest("child stderr is captured, labelled and still counted as evidence", async () => {
     const root = fixtureRoot();
     const captured: string[] = [];
     await runG0Spikes({
@@ -859,142 +1169,81 @@ describe("D9 — child output stays out of the stdout contract", () => {
     expect(captured.join("")).toContain("diagnostic detail");
   });
 
-  test("PLANTED: a credential printed by a spike is redacted before it is replayed", async () => {
-    const root = fixtureRoot();
-    const captured: string[] = [];
-    const token = "asimp_ag_abcdefghijklmnop";
-    await runG0Spikes({
-      root,
-      spikes: [executable(root, "s1", `printf '%s\\n' ${JSON.stringify(token)} >&2; exit 1`)],
-      timeoutMs: 2_000,
-      diagnosticSink: (text) => captured.push(text),
-    });
+  containmentTest(
+    "PLANTED: a credential printed by a spike is redacted before it is replayed",
+    async () => {
+      const root = fixtureRoot();
+      const captured: string[] = [];
+      const token = "asimp_ag_abcdefghijklmnop";
+      await runG0Spikes({
+        root,
+        spikes: [executable(root, "s1", `printf '%s\\n' ${JSON.stringify(token)} >&2; exit 1`)],
+        timeoutMs: 2_000,
+        diagnosticSink: (text) => captured.push(text),
+      });
 
-    const text = captured.join("");
-    expect(text).not.toContain(token);
-    expect(text).not.toContain("asimp_ag_");
-    expect(text).toContain("<redacted>");
+      const text = captured.join("");
+      expect(text).not.toContain(token);
+      expect(text).not.toContain("asimp_ag_");
+      expect(text).toContain("<redacted>");
+    },
+  );
+
+  containmentTest(
+    "captured output is bounded and the truncation is declared, not silent",
+    async () => {
+      const root = fixtureRoot();
+      const captured: string[] = [];
+      const summary = await runG0Spikes({
+        root,
+        spikes: [
+          executable(
+            root,
+            "s1",
+            "for i in $(seq 1 400); do printf 'aaaaaaaaaaaaaaaaaaaa\\n'; done",
+          ),
+        ],
+        timeoutMs: 5_000,
+        maxCapturedBytes: 512,
+        diagnosticSink: (text) => captured.push(text),
+      });
+
+      const body = captured.join("");
+      // Ceiling honoured, with room for the label line.
+      expect(body.length).toBeLessThan(1_024);
+      expect(body).toContain("truncated: capture ceiling");
+      expect(summary.results[0]?.outputTruncated).toBe(true);
+      expect(JSON.parse(formatG0Summary(summary, root)).spikes[0].output_truncated).toBe(true);
+      // Bounding must not turn into a hang: the child still ran to completion.
+      expect(summary.results[0]?.code).toBe(CLEAN_CODE);
+    },
+    25_000,
+  );
+
+  test("PLANTED: a genuinely open output holder expires the drain and maps to a failure", async () => {
+    const holder = new PassThrough();
+    const quiet = new PassThrough();
+    const stdout = captureStream(holder, 512);
+    const stderr = captureStream(quiet, 512);
+    holder.write("asimp_ag_abc");
+
+    try {
+      // Neither stream is ended: this is a real open pipe holder, not a capture
+      // ceiling that happens to set the same boolean.
+      const drained = await drainCapturedStreams([stdout, stderr], 20);
+      expect(drained).toBe(false);
+      expect(outputDrainFailureCode(drained)).toBe("G0_SPIKE_OUTPUT_HOLDER_LEAKED");
+      expect(outputTruncationReasons(stdout, !drained)).toEqual([
+        "post-exit drain expired; later output was discarded",
+      ]);
+    } finally {
+      holder.end();
+      quiet.end();
+      await Promise.all([stdout.done, stderr.done]);
+    }
   });
 
-  test("captured output is bounded and the truncation is declared, not silent", async () => {
-    const root = fixtureRoot();
-    const captured: string[] = [];
-    const summary = await runG0Spikes({
-      root,
-      spikes: [
-        executable(root, "s1", "for i in $(seq 1 400); do printf 'aaaaaaaaaaaaaaaaaaaa\\n'; done"),
-      ],
-      timeoutMs: 5_000,
-      maxCapturedBytes: 512,
-      diagnosticSink: (text) => captured.push(text),
-    });
-
-    const body = captured.join("");
-    // Ceiling honoured, with room for the label line.
-    expect(body.length).toBeLessThan(1_024);
-    expect(body).toContain("truncated: capture ceiling");
-    expect(summary.results[0]?.outputTruncated).toBe(true);
-    expect(JSON.parse(formatG0Summary(summary, root)).spikes[0].output_truncated).toBe(true);
-    // Bounding must not turn into a hang: the child still ran to completion.
-    expect(summary.results[0]?.code).toBe(CLEAN_CODE);
-  }, 25_000);
-
-  test("PLANTED: an expired post-exit drain declares truncation instead of claiming a complete log", async () => {
-    const root = fixtureRoot();
-    const captured: string[] = [];
-    const token = "asimp_ag_latewritercredential";
-    const summary = await runG0Spikes({
-      root,
-      // Enough output that the pipe is still being drained when the deadline
-      // expires, so the tail is genuinely discarded. Losing it is acceptable —
-      // an unbounded wait is not — but losing it *silently* would let the
-      // structured record claim a completeness it does not have.
-      spikes: [
-        executable(
-          root,
-          "s1",
-          `printf '%s\\n' ${JSON.stringify(token)}\n` +
-            "for i in $(seq 1 20000); do printf 'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\\n'; done\n" +
-            "exit 0",
-        ),
-      ],
-      timeoutMs: 10_000,
-      postExitDrainMs: 1,
-      maxCapturedBytes: 512,
-      terminationGraceMs: 200,
-      diagnosticSink: (text) => captured.push(text),
-    });
-
-    const record = JSON.parse(formatG0Summary(summary, root)).spikes[0];
-    expect(summary.results[0]?.outputTruncated).toBe(true);
-    expect(record.output_truncated).toBe(true);
-
-    // What *was* replayed stays redacted and bounded: a truncation notice must
-    // not become a hole through which raw child bytes escape.
-    const body = captured.join("");
-    expect(body).not.toContain(token);
-    expect(body).not.toContain("asimp_ag_");
-    expect(body).not.toContain(root);
-    expect(body).toContain("<redacted>");
-  }, 25_000);
-
-  test("PLANTED: a group-escaping pipe holder expires the drain, and the loss is declared", async () => {
-    // Reaping normally closes the pipes before the drain can expire, so the only
-    // way to reach that path is a holder that leaves the process group while
-    // keeping the inherited descriptor — a spike that daemonises. `perl` is the
-    // one POSIX `setsid` this fixture can reach; if it is missing the test fails
-    // loudly rather than skipping, because a safety check that quietly never
-    // runs is indistinguishable from one that passes.
-    expect(which("perl")).toBe(true);
-
-    const root = fixtureRoot();
-    const captured: string[] = [];
-    const token = "asimp_ag_daemonisedcredential";
-    const summary = await runG0Spikes({
-      root,
-      spikes: [
-        executable(
-          root,
-          "s1",
-          `printf '%s\\n' ${JSON.stringify(token)}\n` +
-            "perl -e 'use POSIX qw(setsid); setsid(); sleep 3; print \"late-output\\n\";' &\n" +
-            // Give the holder time to actually leave the process group before the
-            // script exits. Without this the scan sometimes catches it first and
-            // reports the (equally correct) DESCENDANT_LEAKED, which would make
-            // the code assertion below racy rather than exact.
-            "sleep 0.4\n" +
-            "exit 0",
-        ),
-      ],
-      timeoutMs: 8_000,
-      postExitDrainMs: 120,
-      terminationGraceMs: 200,
-      diagnosticSink: (text) => captured.push(text),
-    });
-    const body = captured.join("");
-
-    // The loss is flagged in the structured record...
-    expect(summary.results[0]?.outputTruncated).toBe(true);
-    expect(JSON.parse(formatG0Summary(summary, root)).spikes[0].output_truncated).toBe(true);
-    // ...and the reason is named, not merely flagged.
-    expect(body).toContain("post-exit drain expired");
-    expect(body).toContain("later output was discarded");
-    // A holder that escaped the process group is invisible to the group scan,
-    // so it is caught by the descriptor it is still holding instead. Exact
-    // status and code: an expired drain is evidence of an outliving process and
-    // must never be green, or `setsid` becomes a one-line way past this gate.
-    expect(summary.results[0]?.code).toBe("G0_SPIKE_OUTPUT_HOLDER_LEAKED");
-    expect(summary.results[0]?.status).toBe("fail");
-    expect(summary.exitCode).toBe(1);
-    expect(summary.exitCode).not.toBe(0);
-    expect(summary.status).not.toBe("pass");
-    // And nothing raw escaped on the way out.
-    expect(body).not.toContain(token);
-    expect(body).not.toContain("asimp_ag_");
-    expect(body).not.toContain(root);
-  }, 25_000);
-
-  test("the aggregate record redacts an absolute root and a credential-shaped label", () => {
+  test("PLANTED: a clipped credential prefix is redacted before an aggregate record is emitted", () => {
     const root = fixtureRoot();
     const serialized = formatG0Summary(
       {
@@ -1005,7 +1254,9 @@ describe("D9 — child output stays out of the stdout contract", () => {
         totals: { pass: 0, fail: 1, blocked: 0 },
         results: [
           {
-            id: `${root}/asimp_ag_abcdefghijklmnop`,
+            // This is the prefix a 3-byte capture ceiling can leave behind: it
+            // is too short for the normal full-token matcher and still secret.
+            id: `${root}/asimp_ag_abc`,
             status: "fail",
             code: "G0_SPIKE_FAILED",
             durationMs: 0,
@@ -1040,7 +1291,7 @@ describe("exit precedence", () => {
     expect(summarize([pass, blocked, fail], 0).totals).toEqual({ pass: 1, fail: 1, blocked: 1 });
   });
 
-  test("end to end, a pass plus a blocked spike is non-green and exits 78", async () => {
+  containmentTest("end to end, a pass plus a blocked spike is non-green and exits 78", async () => {
     const root = fixtureRoot();
     const summary = await runG0Spikes({
       root,
@@ -1053,16 +1304,19 @@ describe("exit precedence", () => {
     expect(codes(summary)).toEqual([CLEAN_CODE, "G0_SPIKE_BLOCKED"]);
   });
 
-  test("an unexpected exit code is distinguished from a plain test failure", async () => {
-    const root = fixtureRoot();
-    const summary = await runG0Spikes({
-      root,
-      spikes: [executable(root, "s1", "exit 1"), executable(root, "s2", "exit 42")],
-      timeoutMs: 2_000,
-    });
+  containmentTest(
+    "an unexpected exit code is distinguished from a plain test failure",
+    async () => {
+      const root = fixtureRoot();
+      const summary = await runG0Spikes({
+        root,
+        spikes: [executable(root, "s1", "exit 1"), executable(root, "s2", "exit 42")],
+        timeoutMs: 2_000,
+      });
 
-    expect(codes(summary)).toEqual(["G0_SPIKE_FAILED", "G0_SPIKE_UNEXPECTED_EXIT"]);
-    expect(summary.results[1]?.exitCode).toBe(42);
-    expect(summary.exitCode).toBe(1);
-  });
+      expect(codes(summary)).toEqual(["G0_SPIKE_FAILED", "G0_SPIKE_UNEXPECTED_EXIT"]);
+      expect(summary.results[1]?.exitCode).toBe(42);
+      expect(summary.exitCode).toBe(1);
+    },
+  );
 });

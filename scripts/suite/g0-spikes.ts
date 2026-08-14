@@ -15,9 +15,10 @@
  * Child output does not share it. An earlier revision used inherited
  * descriptors, so any spike that printed a byte to stdout corrupted the record a
  * CI reader parses — the evidence and the verdict were fighting over one
- * channel. Child stdout and stderr are captured, bounded, redacted, and replayed
- * on *this* process's stderr, labelled by spike. Evidence is still preserved and
- * still visible; it just no longer sits inside the machine-readable line.
+ * channel. Child stdout and stderr are captured, bounded, and redacted before
+ * replay on *this* process's stderr, labelled by spike; they are never replayed
+ * verbatim. Evidence is still preserved and visible without sitting inside the
+ * machine-readable line.
  *
  * ## Process groups
  *
@@ -31,7 +32,15 @@
  */
 
 import { type ChildProcess, execFileSync, spawn } from "node:child_process";
-import { accessSync, constants as fsConstants, statSync } from "node:fs";
+import {
+  accessSync,
+  closeSync,
+  constants as fsConstants,
+  fstatSync,
+  lstatSync,
+  openSync,
+  realpathSync,
+} from "node:fs";
 import { relative, resolve, sep } from "node:path";
 import type { Readable } from "node:stream";
 
@@ -296,13 +305,40 @@ function scriptPath(root: string, script: string): string | undefined {
   return absolute;
 }
 
+function isPathWithin(root: string, candidate: string): boolean {
+  const rel = relative(root, candidate);
+  return rel !== "" && rel !== ".." && !rel.startsWith(`..${sep}`);
+}
+
+/**
+ * A pinned descriptor is acceptable only when it still names the exact file
+ * preflight approved. Staying somewhere below the checkout is insufficient: a
+ * concurrent rename could otherwise replace one allowed spike with another.
+ */
+export function pinnedScriptPathIsExpected(
+  canonicalRoot: string,
+  expectedCanonicalPath: string,
+  pinnedCanonicalPath: string,
+): boolean {
+  return (
+    isPathWithin(canonicalRoot, expectedCanonicalPath) &&
+    isPathWithin(canonicalRoot, pinnedCanonicalPath) &&
+    pinnedCanonicalPath === expectedCanonicalPath
+  );
+}
+
 function immediateResult(id: string, code: G0SpikeCode): G0SpikeResult {
   return { id, status: "fail", code, durationMs: 0 };
 }
 
+/** A capability blocker is recorded per requested spike, without starting one. */
+function containmentUnavailableResult(id: string): G0SpikeResult {
+  return { id, status: "blocked", code: "G0_SPIKE_CONTAINMENT_UNAVAILABLE", durationMs: 0 };
+}
+
 /**
- * The supervisor: a shell whose only job is to be the process-group leader and
- * to stay alive until this runner says otherwise.
+ * The supervisor: PID 1 inside the private namespace, held open until this
+ * runner says otherwise.
  *
  * Running the spike script directly as the group leader was the mistake. When
  * the script exited, the leader exited with it, and every question worth asking
@@ -312,18 +348,18 @@ function immediateResult(id: string, code: G0SpikeCode): G0SpikeResult {
  * 0 while leaving a live background process behind, reported as `pass`.
  *
  * So the script runs one level down. The supervisor waits for it, publishes its
- * real exit status on fd 3, and then *blocks* — pinning the process-group id
- * open — until this runner closes fd 3. Descendant cleanup therefore always
- * happens while the leader is demonstrably alive, which is what makes signalling
- * a recycled group id structurally impossible rather than merely unlikely.
+ * real exit status on fd 3, and then *blocks*. `unshare --fork` is the host
+ * process-group leader; it waits for this supervisor, so the group id remains
+ * pinned until the runner closes fd 3 or tears the namespace down.
  *
  * Two details are load-bearing and easy to get wrong:
  *
  *   - There is deliberately **no `trap`**. `trap '' TERM` looks like the obvious
  *     way to protect the supervisor, but an ignored disposition is inherited
  *     across fork and exec, so it would silently make every descendant immune to
- *     the SIGTERM this module relies on. Nothing signals the supervisor, so it
- *     needs no protection.
+ *     the SIGTERM this module relies on. The cleanup signal intentionally reaches
+ *     the supervisor as well as its descendants, so it must keep the default
+ *     disposition.
  *   - The hold uses the `read` builtin rather than `cat`. `cat` would fork a
  *     process into the very group being audited, and the supervisor would be
  *     reported as its own leak.
@@ -355,7 +391,39 @@ signal=
 if [ "$status" -gt 128 ] && [ "$status" -lt 193 ]; then
   signal=$(kill -l $((status - 128)) 2>/dev/null || printf '')
 fi
-printf 'G0SUP status=%s signal=%s\\n' "$status" "$signal" >&3
+namespace_scan=not-applicable
+namespace_survivors=none
+if [ "$3" = "pid-namespace" ]; then
+  # The probe proved this topology before any spike is allowed to start; retain
+  # the same invariant in the live supervisor so an unexpected launch shape is
+  # a fail-closed record rather than an unobserved run.
+  [ "$$" -eq 1 ] || exit 125
+  namespace_scan=unknown
+  namespace_survivors=$(
+    count=0
+    saw_init=0
+    for process_dir in /proc/[0-9]*; do
+      [ -d "$process_dir" ] || continue
+      process_pid=\${process_dir##*/}
+      process_state=
+      while IFS=$'\\t' read -r key value; do
+        [ "$key" = "State:" ] && process_state=\${value%% *}
+      done < "$process_dir/status" || exit 1
+      [ -n "$process_state" ] || exit 1
+      if [ "$process_pid" = 1 ]; then
+        saw_init=1
+        continue
+      fi
+      case "$process_state" in Z*) continue ;; esac
+      count=$((count + 1))
+    done
+    [ "$saw_init" = 1 ] || exit 1
+    printf '%s' "$count"
+  ) || namespace_survivors=
+  if [ -n "$namespace_survivors" ]; then namespace_scan=ok; fi
+fi
+printf 'G0SUP status=%s signal=%s namespace_scan=%s namespace_survivors=%s\\n' \\
+  "$status" "$signal" "$namespace_scan" "$namespace_survivors" >&3
 read -r _ <&3 2>/dev/null || true
 exit "$status"`;
 
@@ -375,12 +443,31 @@ type SurvivorScan =
   | { readonly kind: "ok"; readonly survivors: number }
   | { readonly kind: "unknown" };
 
-function scanGroup(pgid: number, psCommand: string): SurvivorScan {
+type GroupScanMode = "owned" | "after-signal";
+
+/** Milliseconds still available to the one aggregate deadline, never negative. */
+function remainingBefore(deadline: number): number {
+  return Math.max(0, Math.floor(deadline - performance.now()));
+}
+
+function scanGroup(
+  pgid: number,
+  hasForkedNamespaceSupervisor: boolean,
+  psCommand: string,
+  absoluteDeadline: number,
+  mode: GroupScanMode = "owned",
+): SurvivorScan {
+  if (!Number.isSafeInteger(pgid) || pgid <= 0) return { kind: "unknown" };
+  const remaining = remainingBefore(absoluteDeadline);
+  if (remaining < 1) return { kind: "unknown" };
   let listing: string;
   try {
-    listing = execFileSync(psCommand, ["-A", "-o", "pid=,pgid=,state="], {
+    listing = execFileSync(psCommand, ["-A", "-o", "pid=,ppid=,pgid=,state="], {
       encoding: "utf8",
-      timeout: 5_000,
+      timeout: Math.min(5_000, remaining),
+      // A stalled ps must not outlive the aggregate deadline. TERM is not a
+      // reliable timeout signal for a helper that inherits a hostile handler.
+      killSignal: "SIGKILL",
     });
   } catch {
     return { kind: "unknown" };
@@ -393,35 +480,49 @@ function scanGroup(pgid: number, psCommand: string): SurvivorScan {
    * listing parses to nothing useful. Both previously produced "zero survivors",
    * which is the same failure as swallowing the exception: an absent answer
    * rendered as a clean one. Two conditions now have to hold before any count is
-   * believed — at least one row parsed at all, and, while the supervisor is
-   * known to be alive, *its own row* present. The second is the sharp one: it
-   * proves the listing actually covers this process group rather than merely
-   * being well-formed, so a partial `ps` that happens to omit our group can no
-   * longer read as proof that the group is empty.
+   * believed — every row parses, the live group leader is present, and, on the
+   * Linux `unshare --fork` path, the real namespace supervisor is present as
+   * that leader's direct child. The runner's own row is not evidence about a
+   * detached child group, so it is deliberately not a sentinel here. A partial
+   * table that omits the owned group must never read as proof that it is empty.
+   *
+   * After a group signal, the earlier owned scan is the proof that made the
+   * negative PGID safe. At that point the leader may correctly be gone, so a
+   * follow-up only measures remaining members; it cannot create a clean result
+   * because it is reached only after a leak was already observed.
    */
-  let sawSentinel = false;
-  let survivors = 0;
+  let sawLeader = false;
+  let sawForkedSupervisor = !hasForkedNamespaceSupervisor;
+  let liveNonLeaders = 0;
   for (const raw of listing.split("\n")) {
     const line = raw.trim();
     if (line.length === 0) continue;
-    const match = /^(\d+)\s+(\d+)\s+(\S+)$/.exec(line);
+    const match = /^(\d+)\s+(\d+)\s+(\d+)\s+(\S+)$/.exec(line);
     // Every non-empty row must parse. Skipping the ones that do not would let a
     // listing that is half garbage still produce a confident count, and the
     // garbage half is exactly where a missed survivor would hide.
     if (match === null) return { kind: "unknown" };
     const pid = Number(match[1]);
-    const zombie = match[3]?.startsWith("Z") === true;
-    // The sentinel is *this* process, not the supervisor. The runner is alive by
-    // definition — it is executing this line — so its absence can only mean the
-    // listing does not cover this machine's processes. The supervisor was the
-    // wrong anchor: it is legitimately dead after a timeout, so requiring it
-    // conflated "cancelled spike" with "unreadable process table".
-    if (pid === process.pid) sawSentinel = true;
-    if (Number(match[2]) !== pgid || pid === pgid || zombie) continue;
-    survivors += 1;
+    const parentPid = Number(match[2]);
+    const rowGroup = Number(match[3]);
+    const zombie = match[4]?.startsWith("Z") === true;
+    if (rowGroup !== pgid) continue;
+    if (pid === pgid) {
+      if (!zombie) sawLeader = true;
+      continue;
+    }
+    if (zombie) continue;
+    liveNonLeaders += 1;
+    if (hasForkedNamespaceSupervisor && parentPid === pgid) sawForkedSupervisor = true;
   }
-  if (!sawSentinel) return { kind: "unknown" };
-  return { kind: "ok", survivors };
+  if (mode === "owned" && (!sawLeader || !sawForkedSupervisor)) {
+    return { kind: "unknown" };
+  }
+  return {
+    kind: "ok",
+    survivors:
+      mode === "owned" ? liveNonLeaders - (hasForkedNamespaceSupervisor ? 1 : 0) : liveNonLeaders,
+  };
 }
 
 /**
@@ -446,15 +547,59 @@ export type ContainmentCapability =
   | { readonly kind: "none"; readonly reason: string };
 
 /**
- * The exact argv the containment boundary is built from.
+ * The exact shell-launch prefix the containment boundary is built from.
  *
  * Probe and launch share this constant rather than each spelling it out. They
  * drifted once — the probe verified `--mount-proc` while the launch omitted it —
  * which meant the capability that was proved and the command that actually ran
- * were different commands. A capability check that does not exercise the thing
- * it certifies is not a check.
+ * were different commands. The shared prefix reaches the same `bash -c` process
+ * topology that hosts the supervisor; a `true` probe would prove only that
+ * `unshare` accepted flags, not that the supervised launch is contained.
  */
-const PID_NAMESPACE_ARGV = ["unshare", "--pid", "--fork", "--mount-proc"] as const;
+const PID_NAMESPACE_LAUNCH_ARGV = [
+  "unshare",
+  "--pid",
+  "--fork",
+  "--mount-proc",
+  "--kill-child=SIGKILL",
+  "bash",
+  "-c",
+] as const;
+
+/** Build the one exact namespace-shell topology used by both probe and run. */
+function pidNamespaceShellArgv(program: string, name: string, ...args: string[]): string[] {
+  return [...PID_NAMESPACE_LAUNCH_ARGV, program, name, ...args];
+}
+
+/**
+ * A minimal real supervisor topology, not a feature probe.
+ *
+ * `$$ == 1` proves `--fork` placed this Bash process in the new PID namespace.
+ * The command-line check proves `--mount-proc` mounted that namespace's procfs:
+ * an inherited host `/proc/1` would name the host init instead of this probe.
+ * The background child and its `/proc/<pid>/status` parent check are the same
+ * PID-1-forks-a-target relationship the real supervisor relies on.
+ */
+const CONTAINMENT_PROBE_PROGRAM = `set -eu
+[ "$$" -eq 1 ]
+[ -r /proc/1/status ]
+probe_state=
+while IFS=$'\\t' read -r key value; do
+  [ "$key" = "State:" ] && probe_state=\${value%% *}
+done < /proc/1/status
+[ -n "$probe_state" ]
+probe_cmdline=
+IFS= read -r -d '' probe_cmdline < /proc/1/cmdline || true
+case "$probe_cmdline" in *g0-containment-probe*) ;; *) exit 1 ;; esac
+sleep 5 &
+probe_target=$!
+probe_parent=
+while IFS=$'\\t' read -r key value; do
+  [ "$key" = "PPid:" ] && probe_parent=\${value%% *}
+done < "/proc/$probe_target/status"
+[ "$probe_parent" = 1 ]
+kill -TERM "$probe_target"
+wait "$probe_target" || true`;
 
 let containmentCache: ContainmentCapability | undefined;
 
@@ -478,15 +623,19 @@ export function probeContainment(force = false): ContainmentCapability {
     return containmentCache;
   }
   try {
-    execFileSync(PID_NAMESPACE_ARGV[0], [...PID_NAMESPACE_ARGV.slice(1), "true"], {
+    const probeArgv = pidNamespaceShellArgv(CONTAINMENT_PROBE_PROGRAM, "g0-containment-probe");
+    execFileSync(probeArgv[0] as string, probeArgv.slice(1), {
       stdio: "ignore",
       timeout: 5_000,
+      // `unshare --fork` intentionally ignores TERM while waiting. KILL plus
+      // --kill-child makes a wedged probe fail closed instead of pinning startup.
+      killSignal: "SIGKILL",
     });
     containmentCache = { kind: "pid-namespace" };
   } catch {
     containmentCache = {
       kind: "none",
-      reason: `${PID_NAMESPACE_ARGV.join(" ")} is unavailable or not permitted for this user`,
+      reason: `${PID_NAMESPACE_LAUNCH_ARGV.join(" ")} cannot launch a mounted PID-1 supervisor for this user`,
     };
   }
   return containmentCache;
@@ -509,6 +658,10 @@ export function probeContainment(force = false): ContainmentCapability {
  * has already been read off fd 3 by the time cleanup begins, so nothing is lost.
  */
 function signalOwnedGroup(pgid: number, signal: NodeJS.Signals): "signalled" | "gone" | "failed" {
+  // `-pgid` has a meaning far broader than an individual PID. Refuse an absent,
+  // zero, negative, or non-integer value rather than letting numeric coercion
+  // turn a bookkeeping fault into a signal for an unrelated group.
+  if (!Number.isSafeInteger(pgid) || pgid <= 0) return "failed";
   try {
     process.kill(-pgid, signal);
     return "signalled";
@@ -536,10 +689,12 @@ export interface DescendantReaping {
  */
 async function reapDescendants(
   pgid: number,
+  hasForkedNamespaceSupervisor: boolean,
   graceMs: number,
   psCommand: string,
+  absoluteDeadline: number,
 ): Promise<DescendantReaping> {
-  const initial = scanGroup(pgid, psCommand);
+  const initial = scanGroup(pgid, hasForkedNamespaceSupervisor, psCommand, absoluteDeadline);
   if (initial.kind === "unknown") {
     return { leaked: false, unknown: true, unkillable: false, signalFailed: false };
   }
@@ -550,11 +705,13 @@ async function reapDescendants(
   let signalFailed = false;
   const escalate = async (signal: NodeJS.Signals): Promise<SurvivorScan> => {
     if (signalOwnedGroup(pgid, signal) === "failed") signalFailed = true;
-    const deadline = performance.now() + graceMs;
-    let scan = scanGroup(pgid, psCommand);
+    const deadline = Math.min(absoluteDeadline, performance.now() + graceMs);
+    let scan = scanGroup(pgid, false, psCommand, absoluteDeadline, "after-signal");
     while (scan.kind === "ok" && scan.survivors > 0 && performance.now() < deadline) {
-      await Bun.sleep(GROUP_POLL_INTERVAL_MS);
-      scan = scanGroup(pgid, psCommand);
+      const remaining = remainingBefore(deadline);
+      if (remaining < 1) break;
+      await Bun.sleep(Math.min(GROUP_POLL_INTERVAL_MS, remaining));
+      scan = scanGroup(pgid, false, psCommand, absoluteDeadline, "after-signal");
     }
     return scan;
   };
@@ -576,10 +733,13 @@ async function reapDescendants(
  * paused pipe would block the child on write, turning an output-bounding measure
  * into a hang. Only the retained bytes are capped.
  */
-function captureStream(
-  stream: Readable | null,
-  limit: number,
-): { readonly done: Promise<void>; text(): string; truncated(): boolean } {
+export interface CapturedStream {
+  readonly done: Promise<void>;
+  text(): string;
+  truncated(): boolean;
+}
+
+export function captureStream(stream: Readable | null, limit: number): CapturedStream {
   const chunks: Buffer[] = [];
   let retained = 0;
   let truncated = false;
@@ -617,6 +777,36 @@ function captureStream(
 }
 
 /**
+ * Wait only until the caller's already-established deadline for every captured
+ * pipe to close. This is deliberately separate so the planted test holds a
+ * real pipe open rather than merely asserting a result code.
+ */
+export async function drainCapturedStreams(
+  captures: readonly CapturedStream[],
+  timeoutMs: number,
+): Promise<boolean> {
+  if (timeoutMs < 1) return false;
+  return Promise.race([
+    Promise.all(captures.map((capture) => capture.done)).then(() => true),
+    Bun.sleep(timeoutMs).then(() => false),
+  ]);
+}
+
+export function outputDrainFailureCode(drained: boolean): G0SpikeCode | undefined {
+  return drained ? undefined : "G0_SPIKE_OUTPUT_HOLDER_LEAKED";
+}
+
+export function outputTruncationReasons(
+  capture: Pick<CapturedStream, "truncated">,
+  drainExpired: boolean,
+): readonly string[] {
+  const reasons: string[] = [];
+  if (capture.truncated()) reasons.push("capture ceiling");
+  if (drainExpired) reasons.push("post-exit drain expired; later output was discarded");
+  return reasons;
+}
+
+/**
  * Replay captured child output on this process's stderr, labelled and redacted.
  *
  * Redaction runs once over the whole retained buffer rather than per chunk: a
@@ -627,7 +817,7 @@ function replayCapture(
   sink: (text: string) => void,
   id: string,
   channel: "stdout" | "stderr",
-  capture: { text(): string; truncated(): boolean },
+  capture: CapturedStream,
   root: string,
   drainExpired: boolean,
 ): void {
@@ -636,9 +826,7 @@ function replayCapture(
   // fact that output may have been lost is itself the diagnostic, and staying
   // silent about it would let a partial log pass for a complete one.
   if (text.length === 0 && !drainExpired) return;
-  const reasons: string[] = [];
-  if (capture.truncated()) reasons.push("capture ceiling");
-  if (drainExpired) reasons.push("post-exit drain expired; later output was discarded");
+  const reasons = outputTruncationReasons(capture, drainExpired);
   const suffix = reasons.length > 0 ? ` (truncated: ${reasons.join("; ")})` : "";
   sink(`--- g0 spike ${id} ${channel}${suffix} ---\n`);
   if (text.length > 0) sink(redact(text.endsWith("\n") ? text : `${text}\n`, root));
@@ -646,6 +834,8 @@ function replayCapture(
 
 interface SpikeRunContext {
   readonly root: string;
+  /** One absolute budget for script execution, cleanup scans, grace, and drain. */
+  readonly absoluteDeadline: number;
   readonly timeoutMs: number;
   readonly terminationGraceMs: number;
   readonly maxCapturedBytes: number;
@@ -659,12 +849,40 @@ interface SpikeRunContext {
   readonly boundedByAggregate: boolean;
 }
 
-async function runSpike(spike: G0Spike, context: SpikeRunContext): Promise<G0SpikeResult> {
+type SpikePreflight =
+  | {
+      readonly kind: "ready";
+      readonly path: string;
+      readonly canonicalRoot: string;
+      readonly canonicalPath: string;
+    }
+  | { readonly kind: "refused"; readonly result: G0SpikeResult };
+
+/**
+ * Check every condition that can be decided without starting a process.
+ *
+ * Keeping this separate from `runSpike` is what lets an unavailable
+ * containment platform preserve useful path and execute-bit diagnostics without
+ * ever handing a fixture to an interpreter. The containment blocker is last:
+ * a malformed, missing, non-regular, or non-executable entry is an operator
+ * error regardless of host capability and must not be hidden by it.
+ */
+function preflightSpike(
+  spike: G0Spike,
+  context: Pick<SpikeRunContext, "root" | "signal" | "containment">,
+): SpikePreflight {
   const path = scriptPath(context.root, spike.script);
-  if (path === undefined) return immediateResult(spike.id, "G0_SPIKE_PATH_INVALID");
-  if (context.signal?.aborted) return immediateResult(spike.id, "G0_SPIKE_ABORTED");
+  if (path === undefined) {
+    return { kind: "refused", result: immediateResult(spike.id, "G0_SPIKE_PATH_INVALID") };
+  }
+  if (context.signal?.aborted) {
+    return { kind: "refused", result: immediateResult(spike.id, "G0_SPIKE_ABORTED") };
+  }
   if (process.platform === "win32") {
-    return immediateResult(spike.id, "G0_SPIKE_PROCESS_GROUP_UNSUPPORTED");
+    return {
+      kind: "refused",
+      result: immediateResult(spike.id, "G0_SPIKE_PROCESS_GROUP_UNSUPPORTED"),
+    };
   }
 
   /**
@@ -678,42 +896,136 @@ async function runSpike(spike: G0Spike, context: SpikeRunContext): Promise<G0Spi
    * file is a program; `accessSync(X_OK)` asks the kernel that question for this
    * user, so ownership and ACLs are honoured rather than guessed from mode bits.
    */
-  let stat: ReturnType<typeof statSync>;
+  let stat: ReturnType<typeof lstatSync>;
   try {
-    stat = statSync(path);
+    stat = lstatSync(path);
   } catch {
-    return immediateResult(spike.id, "G0_SPIKE_SCRIPT_MISSING");
+    return { kind: "refused", result: immediateResult(spike.id, "G0_SPIKE_SCRIPT_MISSING") };
   }
-  if (!stat.isFile()) return immediateResult(spike.id, "G0_SPIKE_SCRIPT_NOT_REGULAR_FILE");
+  if (stat.isSymbolicLink()) {
+    return { kind: "refused", result: immediateResult(spike.id, "G0_SPIKE_PATH_INVALID") };
+  }
+  if (!stat.isFile()) {
+    return {
+      kind: "refused",
+      result: immediateResult(spike.id, "G0_SPIKE_SCRIPT_NOT_REGULAR_FILE"),
+    };
+  }
   try {
     accessSync(path, fsConstants.X_OK);
   } catch {
-    return immediateResult(spike.id, "G0_SPIKE_SCRIPT_NOT_EXECUTABLE");
+    return {
+      kind: "refused",
+      result: immediateResult(spike.id, "G0_SPIKE_SCRIPT_NOT_EXECUTABLE"),
+    };
   }
+  try {
+    const canonicalRoot = realpathSync(context.root);
+    const canonicalPath = realpathSync(path);
+    if (!isPathWithin(canonicalRoot, canonicalPath)) {
+      return { kind: "refused", result: immediateResult(spike.id, "G0_SPIKE_PATH_INVALID") };
+    }
+    // This is validation only: an unavailable containment capability must still
+    // retain static path diagnostics, but it never reaches open or spawn.
+    if (context.containment.kind === "none") {
+      return { kind: "refused", result: containmentUnavailableResult(spike.id) };
+    }
+    return { kind: "ready", path, canonicalRoot, canonicalPath };
+  } catch {
+    return { kind: "refused", result: immediateResult(spike.id, "G0_SPIKE_PATH_INVALID") };
+  }
+}
+
+/**
+ * Open the executable once, without following a final symlink, then execute
+ * that pinned descriptor. The post-open realpath check catches a renamed parent
+ * directory or another race between preflight and open; the child receives the
+ * descriptor rather than a mutable pathname.
+ */
+function openPinnedScript(
+  path: string,
+  canonicalRoot: string,
+  expectedCanonicalPath: string,
+): number | undefined {
+  let fd: number | undefined;
+  try {
+    fd = openSync(path, fsConstants.O_RDONLY | fsConstants.O_NOFOLLOW);
+    if (!fstatSync(fd).isFile()) {
+      closeSync(fd);
+      return undefined;
+    }
+    const pinnedPath = realpathSync(`/proc/self/fd/${fd}`);
+    if (!pinnedScriptPathIsExpected(canonicalRoot, expectedCanonicalPath, pinnedPath)) {
+      closeSync(fd);
+      return undefined;
+    }
+    return fd;
+  } catch {
+    if (fd !== undefined) {
+      try {
+        closeSync(fd);
+      } catch {
+        /* the failed open left no usable descriptor */
+      }
+    }
+    return undefined;
+  }
+}
+
+async function runSpike(spike: G0Spike, context: SpikeRunContext): Promise<G0SpikeResult> {
+  const preflight = preflightSpike(spike, context);
+  if (preflight.kind === "refused") return preflight.result;
+  const scriptFd = openPinnedScript(
+    preflight.path,
+    preflight.canonicalRoot,
+    preflight.canonicalPath,
+  );
+  if (scriptFd === undefined) return immediateResult(spike.id, "G0_SPIKE_PATH_INVALID");
 
   const startedAt = performance.now();
   let child: ChildProcess;
   // Under a PID namespace the supervisor is PID 1 of its own namespace, so a
   // `setsid` descendant cannot escape observation and cannot outlive teardown.
   const launch =
-    context.containment.kind === "pid-namespace" ? [...PID_NAMESPACE_ARGV, "bash"] : ["bash"];
+    context.containment.kind === "pid-namespace"
+      ? pidNamespaceShellArgv(
+          SUPERVISOR_PROGRAM,
+          "g0-supervisor",
+          context.interpreter,
+          "/proc/self/fd/4",
+          context.containment.kind,
+        )
+      : [
+          "bash",
+          "-c",
+          SUPERVISOR_PROGRAM,
+          "g0-supervisor",
+          context.interpreter,
+          "/proc/self/fd/4",
+          context.containment.kind,
+        ];
   try {
-    child = spawn(
-      launch[0] as string,
-      [...launch.slice(1), "-c", SUPERVISOR_PROGRAM, "g0-supervisor", context.interpreter, path],
-      {
-        cwd: context.root,
-        // `detached` makes the supervisor a session and process-group leader, so
-        // its pid is the pgid every descendant inherits.
-        detached: true,
-        // Never `inherit`: this process's stdout carries the aggregate JSON, and a
-        // spike must not be able to write into that record. fd 3 is the
-        // supervisor's private control channel and never carries spike output.
-        stdio: ["ignore", "pipe", "pipe", "pipe"],
-      },
-    );
+    child = spawn(launch[0] as string, launch.slice(1), {
+      cwd: context.root,
+      // `detached` makes the supervisor a session and process-group leader, so
+      // its pid is the pgid every descendant inherits.
+      detached: true,
+      // Never `inherit`: this process's stdout carries the aggregate JSON, and a
+      // spike must not be able to write into that record. fd 3 is the
+      // supervisor's private control channel and never carries spike output;
+      // fd 4 is the already-open script, never a pathname a peer can swap.
+      stdio: ["ignore", "pipe", "pipe", "pipe", scriptFd],
+    });
   } catch {
     return immediateResult(spike.id, "G0_SPIKE_SPAWN_FAILED");
+  } finally {
+    // The child inherited its own reference. Closing ours is ordinary resource
+    // hygiene and cannot alter the pinned executable it is about to run.
+    try {
+      closeSync(scriptFd);
+    } catch {
+      /* spawn owns no mutable path; an already-closed parent fd is harmless */
+    }
   }
 
   const pgid = child.pid;
@@ -732,42 +1044,6 @@ async function runSpike(spike: G0Spike, context: SpikeRunContext): Promise<G0Spi
       /* the supervisor is already gone */
     }
   };
-
-  let reason: "timeout" | "abort" | undefined;
-  let terminationRequested = false;
-  let signalFailed = false;
-  let termination: Promise<void> | undefined;
-
-  /**
-   * Stop the spike early, without ever signalling the group.
-   *
-   * Signals are addressed to descendant pids individually. The supervisor is
-   * never among them, so it survives to keep the group id pinned and this runner
-   * never has to reason about whether the id it is about to signal still belongs
-   * to the process tree it started. That is the whole reason the recycling
-   * hazard is gone rather than merely mitigated.
-   */
-  const terminate = (why: "timeout" | "abort"): void => {
-    if (terminationRequested || pgid === undefined) return;
-    terminationRequested = true;
-    reason = why;
-    termination = (async () => {
-      // The script has not finished, so there is no status to preserve: signal
-      // the whole owned group, supervisor included, and let the escalation run.
-      if (signalOwnedGroup(pgid, "SIGTERM") === "failed") signalFailed = true;
-      const outcome = await reapDescendants(pgid, context.terminationGraceMs, context.psCommand);
-      if (outcome.signalFailed) signalFailed = true;
-    })();
-  };
-
-  const timeout = setTimeout(() => {
-    terminate("timeout");
-  }, context.timeoutMs);
-  const onAbort = () => {
-    terminate("abort");
-  };
-  context.signal?.addEventListener("abort", onAbort, { once: true });
-  if (context.signal?.aborted) onAbort();
 
   let spawnFailed = false;
   const exitPromise = new Promise<{ exitCode: number | null; signal: NodeJS.Signals | null }>(
@@ -806,6 +1082,51 @@ async function runSpike(spike: G0Spike, context: SpikeRunContext): Promise<G0Spi
     void exitPromise.then(() => resolveSettled());
     check();
   });
+  let scriptHasSettled = false;
+  void scriptSettled.then(() => {
+    scriptHasSettled = true;
+  });
+
+  let reason: "timeout" | "abort" | undefined;
+  let terminationRequested = false;
+  let signalFailed = false;
+  let termination: Promise<void> | undefined;
+
+  /**
+   * Stop a running script without trusting a process-table snapshot. The outer
+   * `unshare --fork` process is the detached group leader, and `--kill-child`
+   * makes killing it tear down PID 1 and every namespace member. That topology
+   * remains safe even if ps is slow, malformed, or omits the group entirely.
+   */
+  const terminate = (why: "timeout" | "abort"): void => {
+    if (terminationRequested || pgid === undefined) return;
+    terminationRequested = true;
+    reason = why;
+    termination = (async () => {
+      if (signalOwnedGroup(pgid, "SIGTERM") === "failed") signalFailed = true;
+      const grace = Math.min(context.terminationGraceMs, remainingBefore(context.absoluteDeadline));
+      if (!scriptHasSettled && grace > 0) {
+        await Promise.race([scriptSettled, Bun.sleep(grace)]);
+      }
+      // Do not use ps to decide whether to escalate: a partial table can say
+      // "empty" while both the outer launcher and PID 1 still ignore TERM.
+      if (!scriptHasSettled && signalOwnedGroup(pgid, "SIGKILL") === "failed") {
+        signalFailed = true;
+      }
+    })();
+  };
+
+  const timeout = setTimeout(
+    () => {
+      terminate("timeout");
+    },
+    Math.min(context.timeoutMs, remainingBefore(context.absoluteDeadline)),
+  );
+  const onAbort = () => {
+    terminate("abort");
+  };
+  context.signal?.addEventListener("abort", onAbort, { once: true });
+  if (context.signal?.aborted) onAbort();
   await scriptSettled;
   clearTimeout(timeout);
   context.signal?.removeEventListener("abort", onAbort);
@@ -834,11 +1155,32 @@ async function runSpike(spike: G0Spike, context: SpikeRunContext): Promise<G0Spi
   let descendantsUnkillable = false;
   let scanUnknown = false;
   if (pgid !== undefined && !startFailed) {
-    const outcome = await reapDescendants(pgid, context.terminationGraceMs, context.psCommand);
+    const outcome = await reapDescendants(
+      pgid,
+      context.containment.kind === "pid-namespace",
+      context.terminationGraceMs,
+      context.psCommand,
+      context.absoluteDeadline,
+    );
     descendantsLeaked = outcome.leaked;
     descendantsUnkillable = outcome.unkillable;
     scanUnknown = outcome.unknown;
     if (outcome.signalFailed) signalFailed = true;
+  }
+
+  if (context.containment.kind === "pid-namespace" && !startFailed) {
+    const namespaceReport =
+      /G0SUP status=\d+ signal=\S* namespace_scan=(\S+) namespace_survivors=(\S*)/.exec(
+        controlText,
+      );
+    if (namespaceReport?.[1] !== "ok" || !/^\d+$/.test(namespaceReport[2] ?? "")) {
+      scanUnknown = true;
+    } else if (Number(namespaceReport[2]) > 0) {
+      // This is the catch the host process-group scan cannot make: `setsid` can
+      // leave that group and close every inherited descriptor, but it remains
+      // visible to PID 1 through its mounted namespace-local /proc.
+      descendantsLeaked = true;
+    }
   }
 
   // Release the supervisor's hold. If cleanup already signalled the group, the
@@ -862,10 +1204,8 @@ async function runSpike(spike: G0Spike, context: SpikeRunContext): Promise<G0Spi
    * class of dishonesty as reporting a leaked spike as a pass: the record would
    * claim completeness it does not have.
    */
-  const drained = await Promise.race([
-    Promise.all([stdout.done, stderr.done]).then(() => true),
-    Bun.sleep(context.postExitDrainMs).then(() => false),
-  ]);
+  const drainBudget = Math.min(context.postExitDrainMs, remainingBefore(context.absoluteDeadline));
+  const drained = await drainCapturedStreams([stdout, stderr], drainBudget);
   if (!drained) {
     child.stdout?.destroy();
     child.stderr?.destroy();
@@ -919,13 +1259,23 @@ async function runSpike(spike: G0Spike, context: SpikeRunContext): Promise<G0Spi
   /**
    * Ownership outranks the exit code.
    *
-   * These three come before every status check below, including `exitCode === 0`,
-   * because they describe whether the run can be believed at all. A spike that
-   * returned 0 while leaving processes running did not finish — it abandoned
-   * work, and the previous revision recorded that as `pass`. A scan that could
-   * not read the process table proves nothing in either direction and fails
-   * closed rather than defaulting to clean.
+   * These checks come before ordinary exit-status interpretation, including
+   * `exitCode === 0`, because they describe whether the run can be believed at
+   * all. Explicit timeout and abort requests take precedence: both are already
+   * non-green, even if their terminating signal made a subsequent scan
+   * impossible. A spike that returned 0 while leaving processes running did not
+   * finish — it abandoned work, and the previous revision recorded that as
+   * `pass`. A scan that could not read the process table proves nothing in
+   * either direction and fails closed rather than defaulting to clean.
    */
+  if (reason === "timeout") {
+    return {
+      ...base,
+      status: "fail",
+      code: context.boundedByAggregate ? "G0_SPIKE_AGGREGATE_TIMEOUT" : "G0_SPIKE_TIMEOUT",
+    };
+  }
+  if (reason === "abort") return { ...base, status: "fail", code: "G0_SPIKE_ABORTED" };
   if (scanUnknown) {
     return { ...base, status: "fail", code: "G0_SPIKE_DESCENDANT_SCAN_FAILED" };
   }
@@ -949,20 +1299,13 @@ async function runSpike(spike: G0Spike, context: SpikeRunContext): Promise<G0Spi
    * found by different means and a reader chasing one should not be told the
    * other.
    */
-  if (!drained) {
-    return { ...base, status: "fail", code: "G0_SPIKE_OUTPUT_HOLDER_LEAKED" };
+  const outputDrainFailure = outputDrainFailureCode(drained);
+  if (outputDrainFailure !== undefined) {
+    return { ...base, status: "fail", code: outputDrainFailure };
   }
   if (signalFailed) {
     return { ...base, status: "fail", code: "G0_SPIKE_PROCESS_GROUP_SIGNAL_FAILED" };
   }
-  if (reason === "timeout") {
-    return {
-      ...base,
-      status: "fail",
-      code: context.boundedByAggregate ? "G0_SPIKE_AGGREGATE_TIMEOUT" : "G0_SPIKE_TIMEOUT",
-    };
-  }
-  if (reason === "abort") return { ...base, status: "fail", code: "G0_SPIKE_ABORTED" };
   if (exitSignal !== undefined) return { ...base, status: "fail", code: "G0_SPIKE_SIGNALLED" };
   if (exitCode === 0) {
     /**
@@ -977,6 +1320,8 @@ async function runSpike(spike: G0Spike, context: SpikeRunContext): Promise<G0Spi
      * satisfy the check, which is exactly what 78 means here, and it is never
      * green.
      */
+    // `runG0Spikes` rejects this capability before it reaches `runSpike`; retain
+    // the defensive branch so a future internal caller cannot manufacture green.
     if (context.containment.kind === "none") {
       return { ...base, status: "blocked", code: "G0_SPIKE_CONTAINMENT_UNAVAILABLE" };
     }
@@ -1073,6 +1418,20 @@ export async function runG0Spikes(options: G0RunOptions): Promise<G0RunSummary> 
       process.stderr.write(text);
     });
   const startedAt = performance.now();
+  if (containment.kind === "none") {
+    // This is intentionally before `runSpike`: no interpreter, child process,
+    // or fixture body runs when the kernel boundary is absent. Preflight still
+    // runs for every entry because path and execute-bit mistakes are meaningful
+    // static diagnostics, even on a host that cannot contain an otherwise valid
+    // spike.
+    const results = spikes.map((spike) => {
+      const preflight = preflightSpike(spike, { root, signal: options.signal, containment });
+      return preflight.kind === "refused"
+        ? preflight.result
+        : containmentUnavailableResult(spike.id);
+    });
+    return summarize(results, Math.round(performance.now() - startedAt));
+  }
   const aggregateDeadline = startedAt + aggregateTimeoutMs;
   const results: G0SpikeResult[] = [];
 
@@ -1092,6 +1451,7 @@ export async function runG0Spikes(options: G0RunOptions): Promise<G0RunSummary> 
     results.push(
       await runSpike(spike, {
         root,
+        absoluteDeadline: aggregateDeadline,
         timeoutMs: boundedByAggregate ? remaining : timeoutMs,
         terminationGraceMs,
         maxCapturedBytes,
@@ -1198,8 +1558,9 @@ export interface G0CliOptions extends Omit<G0RunOptions, "signal"> {
  * signalled, the summary is still printed, and the exit code carries the
  * conventional 128+N encoding.
  *
- * A second signal is honoured immediately: someone pressing Ctrl-C twice is
- * asking to leave now, and refusing them would be its own kind of hang.
+ * A second signal is recorded immediately but its hard exit is deferred until
+ * the first signal's cleanup path has finished. Exiting before that point would
+ * sever the runner while its detached group was still alive.
  */
 export async function runG0Cli(options: G0CliOptions): Promise<number> {
   const root = resolve(options.root);
@@ -1222,9 +1583,10 @@ export async function runG0Cli(options: G0CliOptions): Promise<number> {
 
   const controller = new AbortController();
   let interrupted: BridgedSignal | undefined;
+  let forcedExit: BridgedSignal | undefined;
   const bridge = (signal: BridgedSignal) => {
     if (interrupted !== undefined) {
-      hardExit(signalExitCode(signal));
+      forcedExit = signal;
       return;
     }
     interrupted = signal;
@@ -1245,10 +1607,12 @@ export async function runG0Cli(options: G0CliOptions): Promise<number> {
   try {
     const summary = await runG0Spikes({ ...options, root, signal: controller.signal });
     log(formatG0Summary(summary, root));
+    if (forcedExit !== undefined) hardExit(signalExitCode(forcedExit));
     return interrupted === undefined ? summary.exitCode : signalExitCode(interrupted);
   } catch (error) {
     if (!(error instanceof G0ManifestError)) throw error;
     log(formatManifestFailure(error, root));
+    if (forcedExit !== undefined) hardExit(signalExitCode(forcedExit));
     return 1;
   }
 }
