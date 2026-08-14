@@ -1,0 +1,17 @@
+# S-6 local ingress harness. Local-only by construction: no account_id, no
+# routes, no workers.dev, and a zero database id that only local D1 accepts.
+#
+# `migrations_dir` points at the real numbered migrations so the replay table
+# arrives via db/migrations/0003_auth_nonce_replay.sql through the actual
+# migration path, not through a CREATE TABLE the harness invents at runtime.
+name = "asimposium-s6-auth-local"
+main = "src/auth/local-worker.ts"
+compatibility_date = "2026-08-14"
+compatibility_flags = ["nodejs_compat"]
+workers_dev = false
+
+[[d1_databases]]
+binding = "DB"
+database_name = "asimposium-s6-auth-local"
+database_id = "00000000-0000-0000-0000-000000000000"
+migrations_dir = "../../db/migrations"
