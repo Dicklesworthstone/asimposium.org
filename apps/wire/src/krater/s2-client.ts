@@ -15,6 +15,18 @@ const OUTBOX_PROBLEM = "P-s2-outbox";
 const UPGRADE_EXISTING_PROBLEM = "P-upgrade-existing";
 const UPGRADE_EMPTY_PROBLEM = "P-upgrade-empty";
 
+/**
+ * The bounded integrity replay of `krater.ts` refuses a legacy problem larger than
+ * MAX_INTEGRITY_BACKFILL_EVENTS (512). Nothing exercised that boundary, so the refusal was
+ * asserted from code rather than observed. These two problems are planted through the
+ * loopback-only legacy fixture route in exactly the shape 0004 describes — 0001 rows with
+ * NULL digests plus the `required` backfill row — and drive both sides of the limit.
+ */
+const LEGACY_OVER_LIMIT_PROBLEM = "P-legacy-over-limit";
+const LEGACY_AT_LIMIT_PROBLEM = "P-legacy-at-limit";
+const LEGACY_OVER_LIMIT_EVENTS = 513;
+const LEGACY_AT_LIMIT_EVENTS = 512;
+
 interface WriteResult {
   event_id: string;
   seq: number;
@@ -484,6 +496,156 @@ async function exerciseOutboxDrainer(): Promise<void> {
   assertEqual(held.seq, 4, "S2_OUTBOX_HOLD_SEQUENCE_INVALID");
 }
 
+async function plantLegacy(problemId: string, eventCount: number, scenario: string): Promise<void> {
+  const planted = await request(
+    "POST",
+    "/__s2/legacy/plant",
+    scenario,
+    { problem_id: problemId, event_count: eventCount, created_at: CREATED_AT },
+    20_000,
+  );
+  assertEqual(planted.status, 201, "S2_LEGACY_PLANT_FAILED");
+  assertEqual(numberAt(planted.body, "planted"), eventCount, "S2_LEGACY_PLANT_COUNT_INVALID");
+}
+
+async function attemptLegacyBackfill(problemId: string, scenario: string): Promise<RequestResult> {
+  return request(
+    "POST",
+    "/__s2/integrity/backfill",
+    scenario,
+    { problem_id: problemId, completed_at: CREATED_AT },
+    20_000,
+  );
+}
+
+/**
+ * Both sides of the bounded-replay limit, against real local D1.
+ *
+ * Over the limit the replay must refuse *and change nothing*: a second attempt refuses
+ * identically and the problem's reads stay blocked, so no digest, checkpoint or backfill
+ * state was written on the way to the refusal. At the limit it must complete in one batch,
+ * producing a checkpoint per event and a chain head.
+ */
+async function legacyBoundedBackfill(): Promise<void> {
+  await plantLegacy(LEGACY_OVER_LIMIT_PROBLEM, LEGACY_OVER_LIMIT_EVENTS, "legacy-over-limit-plant");
+
+  const refused = await attemptLegacyBackfill(
+    LEGACY_OVER_LIMIT_PROBLEM,
+    "legacy-over-limit-backfill-refused",
+  );
+  assertEqual(refused.status, 409, "S2_LEGACY_OVER_LIMIT_NOT_REFUSED");
+  assertEqual(
+    stringAt(refused.body, "code"),
+    "KRATER_INTEGRITY_BACKFILL_REQUIRED",
+    "S2_LEGACY_OVER_LIMIT_CODE_INVALID",
+  );
+
+  // Atomicity: refusing twice must be indistinguishable from refusing once.
+  const refusedAgain = await attemptLegacyBackfill(
+    LEGACY_OVER_LIMIT_PROBLEM,
+    "legacy-over-limit-backfill-still-refused",
+  );
+  assertEqual(refusedAgain.status, 409, "S2_LEGACY_OVER_LIMIT_SECOND_NOT_REFUSED");
+  assertEqual(
+    stringAt(refusedAgain.body, "code"),
+    "KRATER_INTEGRITY_BACKFILL_REQUIRED",
+    "S2_LEGACY_OVER_LIMIT_SECOND_CODE_INVALID",
+  );
+
+  // Nothing became readable: a partial replay would have unblocked the ledger.
+  const blockedRead = await request(
+    "GET",
+    `/__s2/events?problem_id=${LEGACY_OVER_LIMIT_PROBLEM}&since=0&limit=10`,
+    "legacy-over-limit-read-still-blocked",
+  );
+  assertEqual(blockedRead.status, 409, "S2_LEGACY_OVER_LIMIT_READ_NOT_BLOCKED");
+  assertEqual(
+    stringAt(blockedRead.body, "code"),
+    "KRATER_INTEGRITY_BACKFILL_REQUIRED",
+    "S2_LEGACY_OVER_LIMIT_READ_CODE_INVALID",
+  );
+
+  // The positive boundary: one event fewer completes, so the refusal above is a limit and
+  // not a blanket failure of the legacy path.
+  await plantLegacy(LEGACY_AT_LIMIT_PROBLEM, LEGACY_AT_LIMIT_EVENTS, "legacy-at-limit-plant");
+  const completed = await attemptLegacyBackfill(
+    LEGACY_AT_LIMIT_PROBLEM,
+    "legacy-at-limit-backfill-complete",
+  );
+  assertEqual(completed.status, 200, "S2_LEGACY_AT_LIMIT_BACKFILL_FAILED");
+  assertEqual(stringAt(completed.body, "status"), "complete", "S2_LEGACY_AT_LIMIT_STATUS_INVALID");
+
+  const upgraded = await state(LEGACY_AT_LIMIT_PROBLEM, "legacy-at-limit-state");
+  assertEqual(upgraded.cursor, LEGACY_AT_LIMIT_EVENTS, "S2_LEGACY_AT_LIMIT_CURSOR_INVALID");
+  assertEqual(
+    upgraded.counts.integrity_checkpoints,
+    LEGACY_AT_LIMIT_EVENTS,
+    "S2_LEGACY_AT_LIMIT_CHECKPOINTS_INVALID",
+  );
+  assertEqual(
+    upgraded.checkpoint_mode,
+    "unsigned-v0",
+    "S2_LEGACY_AT_LIMIT_CHECKPOINT_MODE_INVALID",
+  );
+  // The ledger is readable again, which is the property the upgrade exists to restore: the
+  // same read returned 409 for the over-limit twin. Projection replay is deliberately not
+  // asserted here — the fixture plants event envelopes, which is what integrity backfill
+  // operates on, and not claim projections, which have their own coverage on the primary
+  // problems above.
+  const pageSize = 200;
+  const firstPage = await request(
+    "GET",
+    `/__s2/events?problem_id=${LEGACY_AT_LIMIT_PROBLEM}&since=0&limit=${pageSize}`,
+    "legacy-at-limit-read-unblocked",
+  );
+  assertEqual(firstPage.status, 200, "S2_LEGACY_AT_LIMIT_READ_BLOCKED");
+  assertEqual(
+    Array.isArray(firstPage.body.events) ? (firstPage.body.events as unknown[]).length : -1,
+    pageSize,
+    "S2_LEGACY_AT_LIMIT_FIRST_PAGE_INVALID",
+  );
+  // The tail is present too, so the upgrade reached the last envelope and not just the head.
+  const tail = await request(
+    "GET",
+    `/__s2/events?problem_id=${LEGACY_AT_LIMIT_PROBLEM}&since=500&limit=${pageSize}`,
+    "legacy-at-limit-read-tail",
+  );
+  assertEqual(tail.status, 200, "S2_LEGACY_AT_LIMIT_TAIL_BLOCKED");
+  assertEqual(
+    Array.isArray(tail.body.events) ? (tail.body.events as unknown[]).length : -1,
+    LEGACY_AT_LIMIT_EVENTS - 500,
+    "S2_LEGACY_AT_LIMIT_TAIL_INVALID",
+  );
+}
+
+/** The refusal must survive a restart: it is a property of the data, not of a warm process. */
+async function legacyBoundedBackfillAfterRestart(): Promise<void> {
+  const refused = await attemptLegacyBackfill(
+    LEGACY_OVER_LIMIT_PROBLEM,
+    "legacy-over-limit-backfill-refused-after-restart",
+  );
+  assertEqual(refused.status, 409, "S2_LEGACY_OVER_LIMIT_RESTART_NOT_REFUSED");
+  assertEqual(
+    stringAt(refused.body, "code"),
+    "KRATER_INTEGRITY_BACKFILL_REQUIRED",
+    "S2_LEGACY_OVER_LIMIT_RESTART_CODE_INVALID",
+  );
+  const blockedRead = await request(
+    "GET",
+    `/__s2/events?problem_id=${LEGACY_OVER_LIMIT_PROBLEM}&since=0&limit=10`,
+    "legacy-over-limit-read-blocked-after-restart",
+  );
+  assertEqual(blockedRead.status, 409, "S2_LEGACY_OVER_LIMIT_RESTART_READ_NOT_BLOCKED");
+
+  // And the completed neighbour is still complete, so the restart did not simply break reads.
+  const upgraded = await state(LEGACY_AT_LIMIT_PROBLEM, "legacy-at-limit-state-after-restart");
+  assertEqual(
+    upgraded.counts.integrity_checkpoints,
+    LEGACY_AT_LIMIT_EVENTS,
+    "S2_LEGACY_AT_LIMIT_RESTART_CHECKPOINTS_INVALID",
+  );
+}
+
 async function upgradeExisting(): Promise<void> {
   const preBackfillRead = await request(
     "GET",
@@ -823,6 +985,7 @@ async function exercise(): Promise<void> {
     writes.push(large);
   }
   await assertReplay(LARGE_PROBLEM, 201, "large-paginated-full-replay");
+  await legacyBoundedBackfill();
   await exerciseOutboxDrainer();
 
   emit({
@@ -866,6 +1029,7 @@ async function restartVerify(): Promise<void> {
   assertEqual(primary.counts.integrity_checkpoints, 31, "S2_RESTART_CHECKPOINT_INVALID");
   await assertReplay(PRIMARY_PROBLEM, 31, "outbox-worker-restart-replay");
   await assertReplay(LARGE_PROBLEM, 201, "large-replay-after-worker-restart");
+  await legacyBoundedBackfillAfterRestart();
   const recoveredOutbox = await waitForOutbox(
     "outbox-kill-restart-recovery",
     (status) =>

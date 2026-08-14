@@ -1,4 +1,4 @@
-import type { D1Database, ExecutionContext } from "@cloudflare/workers-types";
+import type { D1Database, D1PreparedStatement, ExecutionContext } from "@cloudflare/workers-types";
 import type { ClaimProjection, KraterWriteInput } from "./krater";
 import {
   attemptEnvelopeTamper,
@@ -87,6 +87,139 @@ function requiredString(body: Record<string, unknown>, key: string): string {
   const value = body[key];
   if (typeof value !== "string") throw new KraterValidationError(`${key} must be a string.`);
   return value;
+}
+
+function requiredNumber(body: Record<string, unknown>, key: string): number {
+  const value = body[key];
+  if (typeof value !== "number" || !Number.isFinite(value)) {
+    throw new KraterValidationError(`${key} must be a finite number.`);
+  }
+  return value;
+}
+
+/**
+ * LOCAL-ONLY HARNESS SURFACE — never mounted in `src/app.ts`, never reachable from a
+ * deployed route, and refused outright unless the request arrived on loopback.
+ *
+ * S-2's bounded integrity replay refuses a legacy problem larger than
+ * MAX_INTEGRITY_BACKFILL_EVENTS, and nothing could exercise that boundary: a legacy problem
+ * is one whose events carry NULL digests, and after 0004 the `events_chain_head_before_insert`
+ * trigger aborts exactly that insert — correctly, because production must never create one.
+ * The only honest way to test the upgrade path is therefore to reconstruct, in a local
+ * database, the state 0004 itself describes: 0001-shaped rows plus the `required` backfill
+ * row that 0004's own INSERT creates for every pre-existing problem.
+ *
+ * The trigger is dropped and recreated **inside one D1 batch**, so either the whole legacy
+ * fixture lands and the trigger is restored, or nothing changes. The recreated body is
+ * copied verbatim from `db/migrations/0004_krater_integrity_v1.sql`; `s2-client.ts` asserts
+ * afterwards that an ordinary write still succeeds, which fails loudly if the two ever drift.
+ */
+const LEGACY_PLANT_MAX_EVENTS = 2_048;
+const LEGACY_PLANT_CHUNK_ROWS = 10;
+
+const CHAIN_HEAD_TRIGGER = "events_chain_head_before_insert";
+
+/**
+ * The trigger's own definition, read back from the schema rather than copied.
+ *
+ * A hardcoded copy of 0004's trigger body would be a second source of truth: it would drift
+ * the first time the migration changed, and the fixture would quietly restore a *different*
+ * guard than the one production runs. Reading `sqlite_master` means the exact text that was
+ * dropped is the exact text restored, and a missing trigger is a loud failure rather than a
+ * silently weakened schema.
+ */
+async function chainHeadTriggerSql(db: D1Database): Promise<string> {
+  const row = await db
+    .prepare("SELECT sql FROM sqlite_master WHERE type = 'trigger' AND name = ?")
+    .bind(CHAIN_HEAD_TRIGGER)
+    .first<{ sql: string | null }>();
+  const sql = row?.sql;
+  if (typeof sql !== "string" || sql.length === 0) {
+    throw new KraterValidationError(
+      `${CHAIN_HEAD_TRIGGER} is absent; refusing to plant legacy state into an unguarded schema.`,
+    );
+  }
+  return sql;
+}
+
+function assertLoopbackOnly(url: URL): void {
+  if (url.hostname !== "127.0.0.1" && url.hostname !== "localhost" && url.hostname !== "[::1]") {
+    throw new KraterValidationError("the legacy fixture route is loopback-only.");
+  }
+}
+
+/**
+ * Plant an exact legacy-0001 problem: `eventCount` contiguous claim envelopes with NULL
+ * digests, a problem head at that cursor with no chain digest, and the `required` backfill
+ * row. Deterministic: the same problem id and count always produce the same payload digests.
+ */
+async function plantLegacyProblemForHarness(
+  db: D1Database,
+  problemId: string,
+  eventCount: number,
+  createdAt: string,
+): Promise<{ planted: number; statements: number }> {
+  if (!Number.isSafeInteger(eventCount) || eventCount < 1 || eventCount > LEGACY_PLANT_MAX_EVENTS) {
+    throw new KraterValidationError(`event_count must be 1 through ${LEGACY_PLANT_MAX_EVENTS}.`);
+  }
+
+  // Read before dropping: the restore below uses the schema's own text, never a copy.
+  const triggerSql = await chainHeadTriggerSql(db);
+
+  const statements: D1PreparedStatement[] = [
+    db.prepare(`DROP TRIGGER ${CHAIN_HEAD_TRIGGER}`),
+    db
+      .prepare(
+        `INSERT INTO problems (id, public_seq, created_at, updated_at)
+         VALUES (?, ?, ?, ?)`,
+      )
+      .bind(problemId, eventCount, createdAt, createdAt),
+  ];
+
+  for (let start = 1; start <= eventCount; start += LEGACY_PLANT_CHUNK_ROWS) {
+    const end = Math.min(start + LEGACY_PLANT_CHUNK_ROWS - 1, eventCount);
+    const values: unknown[] = [];
+    const tuples: string[] = [];
+    for (let seq = start; seq <= end; seq += 1) {
+      // A legacy row: every 0001 column present, both 0004 digest columns left NULL.
+      tuples.push("(?, ?, ?, 'claim.created', 'claim', ?, 1, ?, ?)");
+      values.push(
+        `E-${problemId}-${String(seq).padStart(5, "0")}`,
+        problemId,
+        seq,
+        `C-${problemId}-${String(seq).padStart(5, "0")}`,
+        // Deterministic 64-hex stand-in for a payload digest the legacy writer stored.
+        `${String(seq).padStart(4, "0")}`.repeat(16),
+        createdAt,
+      );
+    }
+    statements.push(
+      db
+        .prepare(
+          `INSERT INTO events
+             (id, problem_id, seq, type, object_kind, object_id, object_version, payload_sha256, created_at)
+           VALUES ${tuples.join(", ")}`,
+        )
+        .bind(...values),
+    );
+  }
+
+  statements.push(
+    db
+      .prepare(
+        `INSERT INTO krater_integrity_backfill (problem_id, state, legacy_event_count, completed_at)
+         VALUES (?, 'required', ?, NULL)`,
+      )
+      .bind(problemId, eventCount),
+    db.prepare(triggerSql),
+  );
+
+  await db.batch(statements);
+
+  // The guard must be back before this route answers: a fixture that leaves the schema
+  // unprotected would make every later scenario in the run meaningless.
+  await chainHeadTriggerSql(db);
+  return { planted: eventCount, statements: statements.length };
 }
 
 function writeInput(body: Record<string, unknown>): KraterWriteInput {
@@ -214,6 +347,20 @@ async function handleHarnessRequest(
   const url = new URL(request.url);
   let surface: "read" | "write" = "read";
   try {
+    // Loopback-only fixture route; see plantLegacyProblemForHarness.
+    if (request.method === "POST" && url.pathname === "/__s2/legacy/plant") {
+      surface = "write";
+      assertLoopbackOnly(url);
+      const body = await readBody(request);
+      const planted = await plantLegacyProblemForHarness(
+        env.DB,
+        requiredString(body, "problem_id"),
+        requiredNumber(body, "event_count"),
+        requiredString(body, "created_at"),
+      );
+      return response({ status: "planted", ...planted }, 201);
+    }
+
     if (request.method === "POST" && url.pathname === "/__s2/seed") {
       surface = "write";
       const body = await readBody(request);
