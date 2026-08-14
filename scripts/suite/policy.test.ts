@@ -91,9 +91,10 @@ describe("suite policy", () => {
     }
   });
 
-  test("typecheck, lint and unit always have a root-owned unit so they are never vacuous", () => {
+  test("typecheck, lint, unit and integration have root-owned units so they are never vacuous", () => {
     expect(ROOT_UNITS.typecheck).toBe("toolchain:typecheck");
     expect(ROOT_UNITS.lint).toBe("toolchain:lint");
     expect(ROOT_UNITS.unit).toBe("toolchain:test");
+    expect(ROOT_UNITS.integration).toBe("toolchain:integration");
   });
 });

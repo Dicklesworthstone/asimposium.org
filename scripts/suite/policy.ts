@@ -101,6 +101,7 @@ export const ROOT_UNITS: Readonly<Partial<Record<Suite, string>>> = {
   typecheck: "toolchain:typecheck",
   lint: "toolchain:lint",
   unit: "toolchain:test",
+  integration: "toolchain:integration",
 };
 
 /** File extensions that make a workspace package "code-bearing" and therefore gate-owing. */

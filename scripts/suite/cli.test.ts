@@ -100,6 +100,22 @@ describe("routing to real package commands", () => {
     expect(rootUnit?.reproduce).toBe("bun run toolchain:test");
   });
 
+  test("the root-owned G0 integration unit is dispatched only for the integration suite", async () => {
+    const marker = "g0-integration-ran";
+    const root = makeFixtureRepo({
+      rootScripts: { "toolchain:integration": markerCommand(marker) },
+      packages: [{ dir: "apps/web", source: true }],
+    });
+    const result = await runCli(root, ["integration", "--json"]);
+
+    expect(result.exitCode).toBe(0);
+    expect(existsSync(join(root, marker))).toBe(true);
+    const rootUnit = units(result).find((unit) => unit.dir === ".");
+    expect(rootUnit?.status).toBe("pass");
+    expect(rootUnit?.script).toBe("toolchain:integration");
+    expect(rootUnit?.reproduce).toBe("bun run toolchain:integration");
+  });
+
   test("selecting several suites runs them in CI doctrine order", async () => {
     const root = makeFixtureRepo({
       rootScripts: { "toolchain:typecheck": PASS_COMMAND, "toolchain:test": PASS_COMMAND },
