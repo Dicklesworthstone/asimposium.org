@@ -1,5 +1,5 @@
 import { isSafeScreeningDiagnosticLabel, isSha256Digest } from "./aggregate";
-import { assertContextualScreeningInput, contextualScreeningInputDigest } from "./context";
+import { contextualScreeningInputDigest, normalizeContextualScreeningInput } from "./context";
 import type {
   ContextualScreeningIdentity,
   ContextualScreeningInput,
@@ -363,10 +363,10 @@ export async function screenContextuallyWithProvider(
   options: ContextualProviderScreenOptions,
 ): Promise<ContextualScreeningResult> {
   assertProviderOptions(options);
-  assertContextualScreeningInput(input);
+  const normalizedInput = normalizeContextualScreeningInput(input);
   assertContextualIdentity(options.identity);
   assertDirectContentVerdict(options.direct_content);
-  const inputDigest = await contextualScreeningInputDigest(input);
+  const inputDigest = await contextualScreeningInputDigest(normalizedInput);
   if (options.direct_content.decision === "reject") {
     return directContentResult(inputDigest, options.identity, options.direct_content);
   }
@@ -384,7 +384,7 @@ export async function screenContextuallyWithProvider(
 
   try {
     const response = await Promise.race([
-      provider.screenContextually(input, controller.signal),
+      provider.screenContextually(normalizedInput, controller.signal),
       deadline,
     ]);
     assertContextualProviderResponse(response);

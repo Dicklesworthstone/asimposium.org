@@ -4,6 +4,7 @@ import {
   assertContextualScreeningInput,
   buildContextualScreeningInput,
   type ContextualPromotionCandidate,
+  type ContextualScreeningInput,
   ContextualScreeningInputError,
   type ContextualScreeningProvider,
   MAX_CONTEXTUAL_PROMOTIONS,
@@ -243,6 +244,60 @@ test("candidate and context reach only the contextual provider; the result carri
     "provider_status",
     "status_code",
   ]);
+});
+
+test("an exact contextual input reaches the provider as a canonical bounded payload", async () => {
+  const input = buildContextualScreeningInput(source());
+  let observed: unknown;
+  const provider: ContextualScreeningProvider = {
+    async screenContextually(received) {
+      observed = received;
+      return { decision: "pass", coarse_category: "benign-context" };
+    },
+  };
+
+  await expect(
+    screenContextuallyWithProvider(provider, input, CONTEXT_OPTIONS),
+  ).resolves.toMatchObject({
+    decision: "pass",
+    decision_path: "provider",
+  });
+  expect(observed).toEqual(input);
+  expect(observed).not.toBe(input);
+  expect((observed as ContextualScreeningInput).current_promotion).not.toBe(
+    input.current_promotion,
+  );
+  expect((observed as ContextualScreeningInput).recent_same_fellow_promotions).not.toBe(
+    input.recent_same_fellow_promotions,
+  );
+  expect((observed as ContextualScreeningInput).recent_same_fellow_promotions[0]).not.toBe(
+    input.recent_same_fellow_promotions[0],
+  );
+});
+
+test("PLANTED NEGATIVE: undeclared top-level context is refused before provider ingress", async () => {
+  const canary = "undeclared-context-canary-must-not-reach-provider";
+  const input = {
+    ...buildContextualScreeningInput(source()),
+    unbounded_undeclared_context: canary.repeat(1_024),
+  };
+  let calls = 0;
+  const provider: ContextualScreeningProvider = {
+    async screenContextually() {
+      calls += 1;
+      return { decision: "pass", coarse_category: "benign-context" };
+    },
+  };
+
+  let message = "";
+  try {
+    await screenContextuallyWithProvider(provider, input, CONTEXT_OPTIONS);
+  } catch (error) {
+    message = (error as Error).message;
+  }
+  expect(calls).toBe(0);
+  expect(message).toBe("contextual screening input has an invalid shape.");
+  expect(message).not.toContain(canary);
 });
 
 test("provider reject and provider failure are both coarse contextual holds", async () => {

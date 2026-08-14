@@ -9,6 +9,12 @@ export const MAX_CONTEXTUAL_PROMOTIONS = 6;
 /** The complete raw provider payload remains bounded even when every field is individually valid. */
 export const MAX_CONTEXTUAL_TOTAL_BYTES = 12_288;
 
+const CONTEXTUAL_INPUT_KEYS = [
+  "problem_statement",
+  "current_promotion",
+  "recent_same_fellow_promotions",
+] as const;
+
 export interface SameScopePromotionContext {
   readonly problem_id: string;
   readonly fellow_id: string;
@@ -37,6 +43,18 @@ function utf8Bytes(value: string): number {
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return value !== null && typeof value === "object" && !Array.isArray(value);
+}
+
+function hasExactlyOwnEnumerableKeys(
+  value: Record<string, unknown>,
+  expected: readonly string[],
+): boolean {
+  const actual = Object.keys(value).sort();
+  const sortedExpected = [...expected].sort();
+  return (
+    actual.length === sortedExpected.length &&
+    actual.every((key, index) => key === sortedExpected[index])
+  );
 }
 
 function requireBoundedText(
@@ -123,14 +141,17 @@ function totalInputBytes(input: ContextualScreeningInput): number {
 }
 
 /**
- * Recheck the provider payload at its boundary. Most callers use
- * `buildContextualScreeningInput`, but this guard prevents an alternate route
- * from bypassing the text and item budgets later.
+ * Rebuild the only payload that may cross the provider boundary. Most callers
+ * use `buildContextualScreeningInput`, but a future route may not: rejecting
+ * undeclared fields here keeps its raw input within the same text and item
+ * budgets instead of merely validating the fields this module happens to read.
  */
-export function assertContextualScreeningInput(
-  input: unknown,
-): asserts input is ContextualScreeningInput {
-  if (!isRecord(input) || !Array.isArray(input.recent_same_fellow_promotions)) {
+export function normalizeContextualScreeningInput(input: unknown): ContextualScreeningInput {
+  if (
+    !isRecord(input) ||
+    !hasExactlyOwnEnumerableKeys(input, CONTEXTUAL_INPUT_KEYS) ||
+    !Array.isArray(input.recent_same_fellow_promotions)
+  ) {
     throw new ContextualScreeningInputError("contextual screening input has an invalid shape.");
   }
   const problemStatement = requireBoundedText(
@@ -142,19 +163,25 @@ export function assertContextualScreeningInput(
   if (input.recent_same_fellow_promotions.length > MAX_CONTEXTUAL_PROMOTIONS) {
     throw new ContextualScreeningInputError("recent promotions exceed the bounded context limit.");
   }
-  for (const promotion of input.recent_same_fellow_promotions) {
-    candidateFrom(promotion);
-  }
+  const recentPromotions = input.recent_same_fellow_promotions.map(candidateFrom);
   const normalized: ContextualScreeningInput = {
     problem_statement: problemStatement,
     current_promotion: candidate,
-    recent_same_fellow_promotions: input.recent_same_fellow_promotions,
+    recent_same_fellow_promotions: recentPromotions,
   };
   if (totalInputBytes(normalized) > MAX_CONTEXTUAL_TOTAL_BYTES) {
     throw new ContextualScreeningInputError(
       "contextual screening input exceeds the aggregate byte budget.",
     );
   }
+  return normalized;
+}
+
+/** Recheck an alternate route's provider payload without preserving its source object. */
+export function assertContextualScreeningInput(
+  input: unknown,
+): asserts input is ContextualScreeningInput {
+  normalizeContextualScreeningInput(input);
 }
 
 /**
@@ -208,16 +235,15 @@ export function buildContextualScreeningInput(source: unknown): ContextualScreen
     current_promotion: currentPromotion,
     recent_same_fellow_promotions: chronologicalRecent.map((promotion) => promotion.promotion),
   };
-  assertContextualScreeningInput(input);
-  return input;
+  return normalizeContextualScreeningInput(input);
 }
 
 /** Stable safe binding for a decision record; it never returns its raw source. */
 export async function contextualScreeningInputDigest(
   input: ContextualScreeningInput,
 ): Promise<string> {
-  assertContextualScreeningInput(input);
-  const encoded = new TextEncoder().encode(JSON.stringify(input));
+  const normalized = normalizeContextualScreeningInput(input);
+  const encoded = new TextEncoder().encode(JSON.stringify(normalized));
   const bytes = new Uint8Array(await crypto.subtle.digest("SHA-256", encoded));
   return `sha256:${Array.from(bytes, (byte) => byte.toString(16).padStart(2, "0")).join("")}`;
 }
