@@ -67,6 +67,7 @@ const EXPECTED_LOCAL_BINDING_ASSERTIONS: string[] = [
   "rendered_json_contains_only_one_public_ledger_item",
   "reused_idempotency_key_with_a_different_promotion_preserves_the_one_promotion_invariant",
   "self_certified_status_is_refused_citing_P2_P4",
+  "sponsor_can_read_own_fellow_workshop_while_public_routes_disclose_nothing",
   "staged_private_digest_is_not_publicly_readable_before_promotion",
   "top_level_authoritative_fields_and_status_upgrades_are_refused_citing_P2_P4",
 ];

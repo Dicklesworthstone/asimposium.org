@@ -1729,7 +1729,6 @@ async function privateArtifact(
     .first<WorkshopRow>();
   if (
     workshop === null ||
-    workshop.fellow_id !== LOCAL_FELLOW_ID ||
     workshop.sponsor_id !== LOCAL_SPONSOR_ID ||
     workshop.session_id !== LOCAL_SESSION_ID
   ) {

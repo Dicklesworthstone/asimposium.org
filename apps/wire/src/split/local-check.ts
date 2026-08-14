@@ -44,6 +44,9 @@ const FETCH_TIMEOUT_MS = 5_000;
 const REPRODUCE = "bash scripts/e2e-s3-split.sh";
 const mainProblemId = "P-s3-local";
 const privateCanary = `S3-R2-PRIVATE-CANARY-${"private-body".repeat(160)}`;
+const sponsorVisiblePrivateProblemId = "P-s3-sponsor-private";
+const sponsorVisiblePrivateFellowId = "s3-sponsor-visible-fellow";
+const sponsorVisiblePrivateCanary = `S3-SPONSOR-PRIVATE-CANARY-${"sponsor-private-body".repeat(128)}`;
 const publicStatement = "Every bounded local example has the recorded public property.";
 const publicArtifact = "A deliberately public local artifact for the one promoted claim.";
 const LOCAL_S4_TIMEOUT_MARKER = "S4-TIMEOUT-FIXTURE";
@@ -351,6 +354,17 @@ async function main(): Promise<void> {
   const workshopId = recordField(pushed.body, "workshop_id") ?? "";
   const privateDigest = await sha256Hex(privateCanary);
   const privateBodyKey = `s3-local/private/staged/sha256/${privateDigest}`;
+  const sponsorVisiblePushed = await pushWorkshop(
+    sponsorVisiblePrivateProblemId,
+    sponsorVisiblePrivateCanary,
+    {
+      [localS4FellowAuthorityHeader]: localAuthorityToken,
+      [localS4FellowIdHeader]: sponsorVisiblePrivateFellowId,
+    },
+  );
+  const sponsorVisibleWorkshopId = recordField(sponsorVisiblePushed.body, "workshop_id") ?? "";
+  const sponsorVisiblePrivateDigest = await sha256Hex(sponsorVisiblePrivateCanary);
+  const sponsorVisiblePrivateBodyKey = `s3-local/private/staged/sha256/${sponsorVisiblePrivateDigest}`;
   check(
     "large_workshop_body_spills_to_R2_and_gets_a_server_owned_workshop_id",
     pushed.response.status === 201 &&
@@ -409,6 +423,11 @@ async function main(): Promise<void> {
       headers: { "x-asimp-local-sponsor": localAuthorityToken },
     }),
   );
+  const sponsorVisiblePrivate = await snapshot(
+    await localFetch(`${origin}/__s3/private/${sponsorVisibleWorkshopId}`, {
+      headers: { "x-asimp-local-sponsor": localAuthorityToken },
+    }),
+  );
   check(
     "owner_private_read_crosses_R2_and_revalidates_the_D1_binding",
     ownerPrivate.response.status === 200 &&
@@ -433,6 +452,46 @@ async function main(): Promise<void> {
     snapshot(await localFetch(`${origin}/__s3/public/${missingProblemId}/search?q=neutral`)),
     snapshot(await localFetch(`${origin}/__s3/public/${missingProblemId}/export.jsonl`)),
   ]);
+  const sponsorVisiblePrivatePublic = await Promise.all([
+    ...FACE_FORMATS.map(async (format) =>
+      snapshot(
+        await localFetch(
+          `${origin}/__s3/public/${sponsorVisiblePrivateProblemId}?format=${format}`,
+        ),
+      ),
+    ),
+    snapshot(
+      await localFetch(`${origin}/__s3/public/${sponsorVisiblePrivateProblemId}/search?q=neutral`),
+    ),
+    snapshot(
+      await localFetch(`${origin}/__s3/public/${sponsorVisiblePrivateProblemId}/export.jsonl`),
+    ),
+  ]);
+  check(
+    "sponsor_can_read_own_fellow_workshop_while_public_routes_disclose_nothing",
+    sponsorVisiblePushed.response.status === 201 &&
+      sponsorVisibleWorkshopId === `W-${sponsorVisiblePrivateFellowId}-1` &&
+      sponsorVisiblePrivate.response.status === 200 &&
+      sponsorVisiblePrivate.response.headers.get("cache-control") === "private, no-store" &&
+      sponsorVisiblePrivate.body === sponsorVisiblePrivateCanary &&
+      sponsorVisiblePrivatePublic.length === unknownPublic.length &&
+      sponsorVisiblePrivatePublic.every(
+        (observed, index) =>
+          observed.response.status === 404 &&
+          observed.response.status === unknownPublic[index]?.response.status &&
+          observed.body === unknownPublic[index]?.body &&
+          observed.headers === unknownPublic[index]?.headers &&
+          hasNoPrivateMaterial(observed, [
+            sponsorVisiblePrivateCanary,
+            sponsorVisibleWorkshopId,
+            sponsorVisiblePrivateDigest,
+            sponsorVisiblePrivateBodyKey,
+            sponsorVisiblePrivateFellowId,
+            localSponsorId,
+          ]),
+      ),
+    "the owning sponsor could not read a Fellow workshop, or an anonymous public route exposed it",
+  );
   check(
     "private_only_problem_is_byte_indistinguishable_from_unknown_on_every_public_route",
     privateOnlyPublic.length === unknownPublic.length &&
