@@ -8,12 +8,15 @@ pin Wrangler as an exact development dependency; a range is not a reproducible
 toolchain contract.
 
 The configuration pins the Worker entrypoint, Workers compatibility date, D1
-migration directory, and R2 binding names so later work has one fixed place to
-land. `validate-scaffold.mjs` makes those layout assumptions executable:
+migration directory, R2 binding names, and Markdown text-module rule so later
+work has one fixed place to land. `validate-scaffold.mjs` uses the repository's
+pinned Bun runtime and semantic TOML parser to reject malformed TOML, duplicate
+scalar keys, and duplicate/shadowed D1, R2, or rules entries before it checks
+the fixed local-only shape:
 
 ```bash
-node infra/validate-scaffold.mjs
-node infra/validate-scaffold.test.mjs
+bun infra/validate-scaffold.mjs
+bun infra/validate-scaffold.test.mjs
 ```
 
 The first command is a static check, not a Wrangler deployment or a D1

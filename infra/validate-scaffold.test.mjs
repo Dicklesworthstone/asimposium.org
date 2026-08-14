@@ -1,14 +1,14 @@
 import assert from "node:assert/strict";
 import { mkdirSync, mkdtempSync, symlinkSync, writeFileSync } from "node:fs";
-import { dirname, join, resolve } from "node:path";
 import { tmpdir } from "node:os";
-import { fileURLToPath } from "node:url";
+import { dirname, join, resolve } from "node:path";
 import { performance } from "node:perf_hooks";
+import { fileURLToPath } from "node:url";
 import { ScaffoldValidationError, validateScaffold } from "./validate-scaffold.mjs";
 
 const repositoryRoot = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 const startedAt = performance.now();
-const reproduce = "node infra/validate-scaffold.test.mjs";
+const reproduce = "bun infra/validate-scaffold.test.mjs";
 const temporaryFixtureRoot = mkdtempSync(join(tmpdir(), "asimposium-infra-validator-"));
 
 const REQUIRED_DIRECTORIES = [
@@ -62,7 +62,11 @@ function createCompleteFixtureRoot(name, config = validConfig) {
     mkdirSync(join(root, directory), { recursive: true });
   }
   writeFixtureFile(root, "apps/wire/src/index.ts", "export default {};\n");
-  writeFixtureFile(root, "apps/wire/package.json", JSON.stringify({ devDependencies: { wrangler: "4.123.0" } }));
+  writeFixtureFile(
+    root,
+    "apps/wire/package.json",
+    JSON.stringify({ devDependencies: { wrangler: "4.123.0" } }),
+  );
   writeFixtureFile(root, "db/migrations/README.md", "fixture\n");
   writeFixtureFile(root, "infra/README.md", "fixture\n");
   writeFixtureFile(root, "docs/README.md", "fixture\n");
@@ -124,19 +128,25 @@ function expectFailure(root, configWorkspacePath, expectedCode) {
 try {
   const duplicateD1Config = validConfig.replace(
     "[[r2_buckets]]",
-    "[[d1_databases]]\nbinding = \"DB_SHADOW\"\ndatabase_name = \"conflicting-local\"\ndatabase_id = \"00000000-0000-0000-0000-000000000000\"\nmigrations_dir = \"../db/migrations\"\n\n[[r2_buckets]]",
+    '[[d1_databases]]\nbinding = "DB_SHADOW"\ndatabase_name = "conflicting-local"\ndatabase_id = "00000000-0000-0000-0000-000000000000"\nmigrations_dir = "../db/migrations"\n\n[[r2_buckets]]',
   );
   const shadowedR2Config = validConfig.replace(
     "[[r2_buckets]]",
-    "[r2_buckets]\nbinding = \"ARTIFACTS_SHADOW\"\nbucket_name = \"conflicting-local\"\n\n[[r2_buckets]]",
+    '[r2_buckets]\nbinding = "ARTIFACTS_SHADOW"\nbucket_name = "conflicting-local"\n\n[[r2_buckets]]',
   );
   const missingMarkdownRuleConfig = validConfig.replace(
-    "\n[[rules]]\ntype = \"Text\"\nglobs = [\"**/*.md\"]\nfallthrough = true\n",
+    '\n[[rules]]\ntype = "Text"\nglobs = ["**/*.md"]\nfallthrough = true\n',
     "\n",
   );
   const wrongMarkdownRuleTypeConfig = validConfig.replace('type = "Text"', 'type = "Data"');
-  const wrongMarkdownRuleGlobConfig = validConfig.replace('globs = ["**/*.md"]', 'globs = ["**/*.txt"]');
-  const wrongMarkdownRuleFallthroughConfig = validConfig.replace("fallthrough = true", "fallthrough = false");
+  const wrongMarkdownRuleGlobConfig = validConfig.replace(
+    'globs = ["**/*.md"]',
+    'globs = ["**/*.txt"]',
+  );
+  const wrongMarkdownRuleFallthroughConfig = validConfig.replace(
+    "fallthrough = true",
+    "fallthrough = false",
+  );
   const shadowedMarkdownRuleConfig = validConfig.replace("[[rules]]", "[rules]");
   const duplicateMarkdownRuleConfig = `${validConfig}
 [[rules]]
@@ -144,6 +154,22 @@ type = "Text"
 globs = ["**/*.md"]
 fallthrough = true
 `;
+  const commentSuffixedDuplicateD1Config = validConfig.replace(
+    "[[r2_buckets]]",
+    "[[d1_databases]] # shadow\n\n[[r2_buckets]]",
+  );
+  const commentSuffixedDuplicateR2Config = validConfig.replace(
+    "[[rules]]",
+    "[[r2_buckets]] # shadow\n\n[[rules]]",
+  );
+  const commentSuffixedDuplicateRulesConfig = `${validConfig}
+[[rules]] # shadow
+`;
+  const malformedTomlConfig = validConfig.replace("workers_dev = false", "workers_dev = [");
+  const duplicateScalarConfig = validConfig.replace(
+    'name = "asimposium-stoa-local"',
+    'name = "asimposium-stoa-local"\nname = "asimposium-stoa-local"',
+  );
   const cases = [
     {
       name: "positive",
@@ -183,19 +209,31 @@ fallthrough = true
     {
       name: "missing-required-migrations-target",
       execute() {
-        expectFailure(createMissingMigrationsFixture(), "infra/wrangler.toml", "MISSING_REQUIRED_TARGET");
+        expectFailure(
+          createMissingMigrationsFixture(),
+          "infra/wrangler.toml",
+          "MISSING_REQUIRED_TARGET",
+        );
       },
     },
     {
       name: "duplicate-d1-binding",
       execute() {
-        expectFailure(createCompleteFixtureRoot("duplicate-d1", duplicateD1Config), "infra/wrangler.toml", "DUPLICATE_CONFIG_TABLE");
+        expectFailure(
+          createCompleteFixtureRoot("duplicate-d1", duplicateD1Config),
+          "infra/wrangler.toml",
+          "DUPLICATE_CONFIG_TABLE",
+        );
       },
     },
     {
       name: "shadowed-r2-binding",
       execute() {
-        expectFailure(createCompleteFixtureRoot("shadowed-r2", shadowedR2Config), "infra/wrangler.toml", "DUPLICATE_CONFIG_TABLE");
+        expectFailure(
+          createCompleteFixtureRoot("shadowed-r2", shadowedR2Config),
+          "infra/wrangler.toml",
+          "MALFORMED_TOML",
+        );
       },
     },
     {
@@ -213,37 +251,114 @@ fallthrough = true
     {
       name: "missing-markdown-text-rule",
       execute() {
-        expectFailure(createCompleteFixtureRoot("missing-markdown-rule", missingMarkdownRuleConfig), "infra/wrangler.toml", "MISSING_CONFIG_TABLE");
+        expectFailure(
+          createCompleteFixtureRoot("missing-markdown-rule", missingMarkdownRuleConfig),
+          "infra/wrangler.toml",
+          "MISSING_CONFIG_TABLE",
+        );
       },
     },
     {
       name: "wrong-markdown-text-rule-type",
       execute() {
-        expectFailure(createCompleteFixtureRoot("wrong-markdown-rule-type", wrongMarkdownRuleTypeConfig), "infra/wrangler.toml", "UNSAFE_CONFIG_VALUE");
+        expectFailure(
+          createCompleteFixtureRoot("wrong-markdown-rule-type", wrongMarkdownRuleTypeConfig),
+          "infra/wrangler.toml",
+          "UNSAFE_CONFIG_VALUE",
+        );
       },
     },
     {
       name: "wrong-markdown-text-rule-glob",
       execute() {
-        expectFailure(createCompleteFixtureRoot("wrong-markdown-rule-glob", wrongMarkdownRuleGlobConfig), "infra/wrangler.toml", "UNSAFE_CONFIG_VALUE");
+        expectFailure(
+          createCompleteFixtureRoot("wrong-markdown-rule-glob", wrongMarkdownRuleGlobConfig),
+          "infra/wrangler.toml",
+          "UNSAFE_CONFIG_VALUE",
+        );
       },
     },
     {
       name: "wrong-markdown-text-rule-fallthrough",
       execute() {
-        expectFailure(createCompleteFixtureRoot("wrong-markdown-rule-fallthrough", wrongMarkdownRuleFallthroughConfig), "infra/wrangler.toml", "UNSAFE_CONFIG_VALUE");
+        expectFailure(
+          createCompleteFixtureRoot(
+            "wrong-markdown-rule-fallthrough",
+            wrongMarkdownRuleFallthroughConfig,
+          ),
+          "infra/wrangler.toml",
+          "UNSAFE_CONFIG_VALUE",
+        );
       },
     },
     {
       name: "shadowed-markdown-text-rule",
       execute() {
-        expectFailure(createCompleteFixtureRoot("shadowed-markdown-rule", shadowedMarkdownRuleConfig), "infra/wrangler.toml", "UNSAFE_CONFIG_TABLE");
+        expectFailure(
+          createCompleteFixtureRoot("shadowed-markdown-rule", shadowedMarkdownRuleConfig),
+          "infra/wrangler.toml",
+          "UNSAFE_CONFIG_TABLE",
+        );
       },
     },
     {
       name: "duplicate-markdown-text-rule",
       execute() {
-        expectFailure(createCompleteFixtureRoot("duplicate-markdown-rule", duplicateMarkdownRuleConfig), "infra/wrangler.toml", "DUPLICATE_CONFIG_TABLE");
+        expectFailure(
+          createCompleteFixtureRoot("duplicate-markdown-rule", duplicateMarkdownRuleConfig),
+          "infra/wrangler.toml",
+          "DUPLICATE_CONFIG_TABLE",
+        );
+      },
+    },
+    {
+      name: "comment-suffixed-duplicate-d1-binding",
+      execute() {
+        expectFailure(
+          createCompleteFixtureRoot("comment-duplicate-d1", commentSuffixedDuplicateD1Config),
+          "infra/wrangler.toml",
+          "DUPLICATE_CONFIG_TABLE",
+        );
+      },
+    },
+    {
+      name: "comment-suffixed-duplicate-r2-binding",
+      execute() {
+        expectFailure(
+          createCompleteFixtureRoot("comment-duplicate-r2", commentSuffixedDuplicateR2Config),
+          "infra/wrangler.toml",
+          "DUPLICATE_CONFIG_TABLE",
+        );
+      },
+    },
+    {
+      name: "comment-suffixed-duplicate-markdown-rule",
+      execute() {
+        expectFailure(
+          createCompleteFixtureRoot("comment-duplicate-rules", commentSuffixedDuplicateRulesConfig),
+          "infra/wrangler.toml",
+          "DUPLICATE_CONFIG_TABLE",
+        );
+      },
+    },
+    {
+      name: "malformed-toml",
+      execute() {
+        expectFailure(
+          createCompleteFixtureRoot("malformed-toml", malformedTomlConfig),
+          "infra/wrangler.toml",
+          "MALFORMED_TOML",
+        );
+      },
+    },
+    {
+      name: "duplicate-scalar-key",
+      execute() {
+        expectFailure(
+          createCompleteFixtureRoot("duplicate-scalar", duplicateScalarConfig),
+          "infra/wrangler.toml",
+          "MALFORMED_TOML",
+        );
       },
     },
   ];
@@ -255,33 +370,44 @@ fallthrough = true
       failedCases.push(testCase.name);
     }
   }
+  if (failedCases.length > 0) {
+    throw new ScaffoldValidationError(
+      "CONTRACT_CASES_FAILED",
+      `Validator contract cases failed: ${failedCases.join(", ")}.`,
+    );
+  }
   assert.deepEqual(failedCases, []);
-  assert.equal(cases.length, 15);
+  assert.equal(cases.length, 20);
 
-  process.stdout.write(`${JSON.stringify({
-    tool: "node",
-    package: "infra",
-    suite: "wrangler-scaffold-static-contract",
-    version: process.version,
-    duration_ms: Math.round(performance.now() - startedAt),
-    status: "pass",
-    reproduce,
-    cases_executed: cases.map(({ name }) => name),
-    temporary_space_fixtures_retained: true,
-  })}\n`);
+  process.stdout.write(
+    `${JSON.stringify({
+      tool: "bun",
+      package: "infra",
+      suite: "wrangler-scaffold-static-contract",
+      version: Bun.version,
+      duration_ms: Math.round(performance.now() - startedAt),
+      status: "pass",
+      reproduce,
+      cases_executed: cases.map(({ name }) => name),
+      temporary_space_fixtures_retained: true,
+    })}\n`,
+  );
 } catch (error) {
-  const details = error instanceof ScaffoldValidationError
-    ? { code: error.code, detail: error.message }
-    : { code: "ASSERTION_FAILED", detail: "One or more validator contract cases failed." };
-  process.stderr.write(`${JSON.stringify({
-    tool: "node",
-    package: "infra",
-    suite: "wrangler-scaffold-static-contract",
-    version: process.version,
-    duration_ms: Math.round(performance.now() - startedAt),
-    status: "fail",
-    reproduce,
-    ...details,
-  })}\n`);
+  const details =
+    error instanceof ScaffoldValidationError
+      ? { code: error.code, detail: error.message }
+      : { code: "ASSERTION_FAILED", detail: "One or more validator contract cases failed." };
+  process.stderr.write(
+    `${JSON.stringify({
+      tool: "bun",
+      package: "infra",
+      suite: "wrangler-scaffold-static-contract",
+      version: Bun.version,
+      duration_ms: Math.round(performance.now() - startedAt),
+      status: "fail",
+      reproduce,
+      ...details,
+    })}\n`,
+  );
   process.exitCode = 1;
 }

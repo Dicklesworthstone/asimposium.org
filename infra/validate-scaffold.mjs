@@ -1,7 +1,7 @@
 import { existsSync, lstatSync, readFileSync, realpathSync } from "node:fs";
 import { dirname, isAbsolute, relative, resolve, sep } from "node:path";
-import { fileURLToPath } from "node:url";
 import { performance } from "node:perf_hooks";
+import { fileURLToPath } from "node:url";
 
 const ZERO_D1_ID = "00000000-0000-0000-0000-000000000000";
 const REQUIRED_DIRECTORIES = [
@@ -22,7 +22,6 @@ const REQUIRED_RESPONSIBILITY_DOCS = [
   "docs/README.md",
 ];
 const FORBIDDEN_BACKEND_MARKERS = ["supabase", "turso", "neon", "prisma"];
-const STRICT_ARRAY_TABLES = new Set(["d1_databases", "r2_buckets", "rules"]);
 
 export class ScaffoldValidationError extends Error {
   constructor(code, message) {
@@ -40,84 +39,102 @@ function relativeDisplay(root, target) {
   return value === "" ? "." : `./${value}`;
 }
 
-function readRequiredAssignment(content, key, source) {
-  const escapedKey = key.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
-  const match = content.match(
-    new RegExp(`^\\s*${escapedKey}\\s*=\\s*"([^"]+)"\\s*$`, "m"),
-  );
-  if (!match) {
+function isRecord(value) {
+  return value !== null && typeof value === "object" && !Array.isArray(value);
+}
+
+function parseToml(content, source) {
+  try {
+    const parsed = Bun.TOML.parse(content);
+    if (!isRecord(parsed)) {
+      fail("MALFORMED_TOML", `${source} must parse to a TOML object.`);
+    }
+    return parsed;
+  } catch (error) {
+    if (error instanceof ScaffoldValidationError) throw error;
+    fail("MALFORMED_TOML", `${source} must be valid TOML.`);
+  }
+}
+
+function readRequiredString(record, key, source) {
+  const value = record[key];
+  if (value === undefined) {
     fail("MISSING_CONFIG_KEY", `${source} must define ${key}.`);
   }
-  return match[1];
+  if (typeof value !== "string") {
+    fail("UNSAFE_CONFIG_VALUE", `${source} must define ${key} as a string.`);
+  }
+  return value;
 }
 
-function readRequiredBooleanAssignment(content, key, source) {
-  const escapedKey = key.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
-  const match = content.match(
-    new RegExp(`^\\s*${escapedKey}\\s*=\\s*(true|false)\\s*$`, "m"),
-  );
-  if (!match) {
+function readRequiredBoolean(record, key, source) {
+  const value = record[key];
+  if (value === undefined) {
     fail("MISSING_CONFIG_KEY", `${source} must define ${key}.`);
   }
-  return match[1] === "true";
+  if (typeof value !== "boolean") {
+    fail("UNSAFE_CONFIG_VALUE", `${source} must define ${key} as a boolean.`);
+  }
+  return value;
 }
 
-function readRequiredSingleStringArrayAssignment(content, key, source) {
-  const escapedKey = key.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
-  const match = content.match(
-    new RegExp(`^\\s*${escapedKey}\\s*=\\s*\\[\\s*"([^\"]+)"\\s*\\]\\s*$`, "m"),
-  );
-  if (!match) {
-    fail("MISSING_CONFIG_KEY", `${source} must define ${key} as a single-string array.`);
+function readRequiredNumber(record, key, source) {
+  const value = record[key];
+  if (value === undefined) {
+    fail("MISSING_CONFIG_KEY", `${source} must define ${key}.`);
   }
-  return match[1];
+  if (typeof value !== "number") {
+    fail("UNSAFE_CONFIG_VALUE", `${source} must define ${key} as a number.`);
+  }
+  return value;
 }
 
-function readTable(content, table, source) {
-  const lines = content.split("\n");
-  const headers = [`[[${table}]]`, `[${table}]`];
-  const matches = lines
-    .map((line, index) => ({ index, header: line.trim() }))
-    .filter(({ header }) => headers.includes(header));
-  if (matches.length === 0) {
-    fail("MISSING_CONFIG_TABLE", `${source} must define ${headers[0]} or ${headers[1]}.`);
+function readRequiredObject(record, key, source) {
+  const value = record[key];
+  if (value === undefined) {
+    fail("MISSING_CONFIG_TABLE", `${source} must define [${key}].`);
   }
-
-  if (STRICT_ARRAY_TABLES.has(table)) {
-    if (matches.length !== 1) {
-      fail(
-        "DUPLICATE_CONFIG_TABLE",
-        `${source} must define exactly one ${headers[0]}; duplicate, shadowed, or conflicting ${table} entries are not allowed.`,
-      );
-    }
-    if (matches[0].header !== headers[0]) {
-      fail(
-        "UNSAFE_CONFIG_TABLE",
-        `${source} must define ${headers[0]}, not ${headers[1]}.`,
-      );
-    }
+  if (!isRecord(value)) {
+    fail("UNSAFE_CONFIG_TABLE", `${source} must define [${key}] as an object table.`);
   }
-
-  const rows = [];
-  for (let index = matches[0].index + 1; index < lines.length; index += 1) {
-    if (/^\s*\[/.test(lines[index])) {
-      break;
-    }
-    rows.push(lines[index]);
-  }
-  return rows.join("\n");
+  return value;
 }
 
-function readTableAssignment(content, table, key, source) {
-  return readRequiredAssignment(readTable(content, table, source), key, source);
+function readSingleObjectArray(record, table, source) {
+  const value = record[table];
+  if (value === undefined) {
+    fail("MISSING_CONFIG_TABLE", `${source} must define [[${table}]].`);
+  }
+  if (!Array.isArray(value)) {
+    fail("UNSAFE_CONFIG_TABLE", `${source} must define [[${table}]], not [${table}].`);
+  }
+  if (value.length !== 1) {
+    fail(
+      "DUPLICATE_CONFIG_TABLE",
+      `${source} must define exactly one [[${table}]] entry; duplicate, shadowed, or conflicting entries are not allowed.`,
+    );
+  }
+  const entry = value[0];
+  if (!isRecord(entry)) {
+    fail("UNSAFE_CONFIG_TABLE", `${source} must define [[${table}]] entries as objects.`);
+  }
+  return entry;
+}
+
+function readRequiredSingleStringArray(record, key, source) {
+  const value = record[key];
+  if (value === undefined) {
+    fail("MISSING_CONFIG_KEY", `${source} must define ${key}.`);
+  }
+  if (!Array.isArray(value) || value.length !== 1 || typeof value[0] !== "string") {
+    fail("UNSAFE_CONFIG_VALUE", `${source} must define ${key} as a single-string array.`);
+  }
+  return value[0];
 }
 
 function assertExact(value, expected, key, source) {
   if (value !== expected) {
-    fail(
-      "UNSAFE_CONFIG_VALUE",
-      `${source} must set ${key} to ${JSON.stringify(expected)}.`,
-    );
+    fail("UNSAFE_CONFIG_VALUE", `${source} must set ${key} to ${JSON.stringify(expected)}.`);
   }
 }
 
@@ -198,7 +215,10 @@ function assertNoRemoteConfiguration(content, source) {
 function readPinnedWranglerVersion(root) {
   const packagePath = resolve(root, "apps/wire/package.json");
   if (!existsSync(packagePath)) {
-    fail("MISSING_WRANGLER_PIN", "Expected apps/wire/package.json with a pinned wrangler development dependency.");
+    fail(
+      "MISSING_WRANGLER_PIN",
+      "Expected apps/wire/package.json with a pinned wrangler development dependency.",
+    );
   }
 
   let packageJson;
@@ -235,68 +255,68 @@ export function validateScaffold(rootDirectory, configWorkspacePath = "infra/wra
   assertPhysicalRepositoryContainment(root, configPath, "The Wrangler configuration path");
 
   const config = readFileSync(configPath, "utf8");
+  const parsedConfig = parseToml(config, configSource);
   assertNoForbiddenBackend(config, configSource);
   assertNoRemoteConfiguration(config, configSource);
 
-  const declaredMain = readRequiredAssignment(config, "main", configSource);
+  const declaredMain = readRequiredString(parsedConfig, "main", configSource);
   const mainPath = resolveRepositoryPath(root, configPath, declaredMain, "main");
-  assertExact(
-    declaredMain,
-    "../apps/wire/src/index.ts",
-    "main",
-    configSource,
-  );
+  assertExact(declaredMain, "../apps/wire/src/index.ts", "main", configSource);
   assertPhysicalRepositoryContainment(root, mainPath, "main");
 
-  assertExact(readRequiredAssignment(config, "name", configSource), "asimposium-stoa-local", "name", configSource);
   assertExact(
-    readRequiredAssignment(config, "compatibility_date", configSource),
+    readRequiredString(parsedConfig, "name", configSource),
+    "asimposium-stoa-local",
+    "name",
+    configSource,
+  );
+  assertExact(
+    readRequiredString(parsedConfig, "compatibility_date", configSource),
     "2026-08-13",
     "compatibility_date",
     configSource,
   );
 
-  if (!/^\s*compatibility_flags\s*=\s*\[[^\]]*"nodejs_compat"[^\]]*\]\s*$/m.test(config)) {
+  const compatibilityFlags = parsedConfig.compatibility_flags;
+  if (!Array.isArray(compatibilityFlags) || !compatibilityFlags.includes("nodejs_compat")) {
     fail("MISSING_COMPATIBILITY_FLAG", `${configSource} must enable nodejs_compat.`);
   }
-  if (!/^\s*workers_dev\s*=\s*false\s*$/m.test(config)) {
-    fail("UNSAFE_CONFIG_VALUE", `${configSource} must disable workers_dev.`);
-  }
-  if (!/^\s*port\s*=\s*8787\s*$/m.test(config)) {
-    fail("MISSING_CONFIG_KEY", `${configSource} must set local dev port 8787.`);
-  }
   assertExact(
-    readRequiredAssignment(readTable(config, "dev", configSource), "local_protocol", configSource),
+    readRequiredBoolean(parsedConfig, "workers_dev", configSource),
+    false,
+    "workers_dev",
+    configSource,
+  );
+  const dev = readRequiredObject(parsedConfig, "dev", configSource);
+  assertExact(readRequiredNumber(dev, "port", configSource), 8787, "dev.port", configSource);
+  assertExact(
+    readRequiredString(dev, "local_protocol", configSource),
     "http",
     "dev.local_protocol",
     configSource,
   );
 
+  const d1Database = readSingleObjectArray(parsedConfig, "d1_databases", configSource);
   assertExact(
-    readTableAssignment(config, "d1_databases", "binding", configSource),
+    readRequiredString(d1Database, "binding", configSource),
     "DB",
     "d1_databases.binding",
     configSource,
   );
   assertExact(
-    readTableAssignment(config, "d1_databases", "database_name", configSource),
+    readRequiredString(d1Database, "database_name", configSource),
     "asimposium-local",
     "d1_databases.database_name",
     configSource,
   );
   assertExact(
-    readTableAssignment(config, "d1_databases", "database_id", configSource),
+    readRequiredString(d1Database, "database_id", configSource),
     ZERO_D1_ID,
     "d1_databases.database_id",
     configSource,
   );
-  const migrationsDirectory = readTableAssignment(config, "d1_databases", "migrations_dir", configSource);
-  assertExact(
-    migrationsDirectory,
-    "../db/migrations",
-    "d1_databases.migrations_dir",
-    configSource,
-  );
+  const migrationsDirectory = readRequiredString(d1Database, "migrations_dir", configSource);
+  assertExact(migrationsDirectory, "../db/migrations", "d1_databases.migrations_dir", configSource);
   const migrationsPath = resolveRepositoryPath(
     root,
     configPath,
@@ -320,34 +340,30 @@ export function validateScaffold(rootDirectory, configWorkspacePath = "infra/wra
     );
   }
 
+  const r2Bucket = readSingleObjectArray(parsedConfig, "r2_buckets", configSource);
   assertExact(
-    readTableAssignment(config, "r2_buckets", "binding", configSource),
+    readRequiredString(r2Bucket, "binding", configSource),
     "ARTIFACTS",
     "r2_buckets.binding",
     configSource,
   );
   assertExact(
-    readTableAssignment(config, "r2_buckets", "bucket_name", configSource),
+    readRequiredString(r2Bucket, "bucket_name", configSource),
     "asimposium-artifacts-local",
     "r2_buckets.bucket_name",
     configSource,
   );
 
-  const rules = readTable(config, "rules", configSource);
+  const rules = readSingleObjectArray(parsedConfig, "rules", configSource);
+  assertExact(readRequiredString(rules, "type", configSource), "Text", "rules.type", configSource);
   assertExact(
-    readRequiredAssignment(rules, "type", configSource),
-    "Text",
-    "rules.type",
-    configSource,
-  );
-  assertExact(
-    readRequiredSingleStringArrayAssignment(rules, "globs", configSource),
+    readRequiredSingleStringArray(rules, "globs", configSource),
     "**/*.md",
     "rules.globs",
     configSource,
   );
   assertExact(
-    readRequiredBooleanAssignment(rules, "fallthrough", configSource),
+    readRequiredBoolean(rules, "fallthrough", configSource),
     true,
     "rules.fallthrough",
     configSource,
@@ -376,18 +392,21 @@ function parseArguments(argumentsList) {
       config: argumentsList[1],
     };
   }
-  fail("INVALID_ARGUMENT", "Usage: node infra/validate-scaffold.mjs [--config <repository-relative-path>]");
+  fail(
+    "INVALID_ARGUMENT",
+    "Usage: bun infra/validate-scaffold.mjs [--config <repository-relative-path>]",
+  );
 }
 
 function diagnostic(status, startedAt, details = {}) {
   return {
-    tool: "node",
+    tool: "bun",
     package: "infra",
     suite: "wrangler-scaffold-static",
-    version: process.version,
+    version: Bun.version,
     duration_ms: Math.round(performance.now() - startedAt),
     status,
-    reproduce: "node infra/validate-scaffold.mjs",
+    reproduce: "bun infra/validate-scaffold.mjs",
     ...details,
   };
 }
@@ -399,14 +418,15 @@ function main() {
     const report = validateScaffold(argumentsResult.root, argumentsResult.config);
     process.stdout.write(`${JSON.stringify(diagnostic("pass", startedAt, report))}\n`);
   } catch (error) {
-    const details = error instanceof ScaffoldValidationError
-      ? { code: error.code, detail: error.message }
-      : { code: "UNEXPECTED", detail: "Unexpected static validation failure." };
+    const details =
+      error instanceof ScaffoldValidationError
+        ? { code: error.code, detail: error.message }
+        : { code: "UNEXPECTED", detail: "Unexpected static validation failure." };
     process.stderr.write(`${JSON.stringify(diagnostic("fail", startedAt, details))}\n`);
     process.exitCode = 1;
   }
 }
 
-if (process.argv[1] === fileURLToPath(import.meta.url)) {
+if (import.meta.main) {
   main();
 }
