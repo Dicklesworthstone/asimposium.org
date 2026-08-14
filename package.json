@@ -16,7 +16,7 @@
   ],
   "scripts": {
     "suite": "bun scripts/suite/cli.ts",
-    "check": "bun scripts/suite/cli.ts --all",
+    "check": "bun scripts/suite/cli.ts --all --require-executed",
     "typecheck": "bun scripts/suite/cli.ts typecheck",
     "lint": "bun scripts/suite/cli.ts lint",
     "test": "bun scripts/suite/cli.ts unit",

@@ -19,11 +19,40 @@ for self_test in \
   "$repository_root/scripts/smoke-gallery.sh" \
   "$repository_root/e2e/run-playwright.sh" \
   "$repository_root/e2e/gauntlet/run.sh"; do
-  if ! "$self_test" --self-test >/dev/null; then
+  if ! "$self_test" --self-test --write-artifacts >/dev/null; then
     emit "fail" "ENTRYPOINT_SELF_TEST_FAILED"
     exit 1
   fi
 done
+
+set +e
+missing_gauntlet_output="$(
+  env -u ASIMPOSIUM_STAGING_AGENT_BASE_URL \
+    "$repository_root/e2e/gauntlet/run.sh" 2>&1
+)"
+missing_gauntlet_exit=$?
+missing_playwright_output="$(
+  env -u ASIMPOSIUM_STAGING_AGENT_BASE_URL -u ASIMPOSIUM_STAGING_AGORA_BASE_URL \
+    "$repository_root/e2e/run-playwright.sh" 2>&1
+)"
+missing_playwright_exit=$?
+set -e
+
+if [[ "$missing_gauntlet_exit" -ne 78 \
+  || "$missing_gauntlet_output" != *'"status":"blocked"'* \
+  || "$missing_gauntlet_output" != *'"code":"STAGING_AGENT_BASE_URL_MISSING"'* \
+  || "$missing_gauntlet_output" != *'"reproduce":"bash e2e/gauntlet/run.sh"'* ]]; then
+  emit "fail" "GAUNTLET_MISSING_STAGING_NOT_BLOCKED"
+  exit 1
+fi
+
+if [[ "$missing_playwright_exit" -ne 78 \
+  || "$missing_playwright_output" != *'"status":"blocked"'* \
+  || "$missing_playwright_output" != *'"code":"STAGING_SURFACE_BASE_URL_MISSING"'* \
+  || "$missing_playwright_output" != *'"reproduce":"bash e2e/run-playwright.sh"'* ]]; then
+  emit "fail" "PLAYWRIGHT_MISSING_STAGING_NOT_BLOCKED"
+  exit 1
+fi
 
 if invalid_run_id_output="$(ASIMPOSIUM_E2E_RUN_ID="../traversal" "$repository_root/scripts/smoke-agent.sh" 2>&1)"; then
   emit "fail" "TRAVERSAL_RUN_ID_ACCEPTED"

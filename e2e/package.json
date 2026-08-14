@@ -5,13 +5,13 @@
   "scripts": {
     "test": "bun run test:unit && bun run test:contract && bun run test:integration",
     "typecheck": "tsc --noEmit -p tsconfig.json",
-    "lint": "cd .. && shellcheck -x e2e/lib/run-diagnostics.sh scripts/smoke-agent.sh scripts/smoke-gallery.sh scripts/e2e-s4-screening-oauth.sh e2e/run-playwright.sh e2e/gauntlet/run.sh e2e/tests/run-diagnostics.test.sh e2e/tests/smoke-entrypoints.test.sh e2e/screening/e2e-s4-screening-oauth.test.sh",
+    "lint": "command -v shellcheck >/dev/null 2>&1 || { printf 'blocked: shellcheck is unavailable\\n' >&2; exit 78; }; cd .. && shellcheck -x e2e/lib/run-diagnostics.sh scripts/smoke-agent.sh scripts/smoke-gallery.sh scripts/e2e-s4-screening-oauth.sh e2e/run-playwright.sh e2e/gauntlet/run.sh e2e/tests/run-diagnostics.test.sh e2e/tests/smoke-entrypoints.test.sh e2e/screening/e2e-s4-screening-oauth.test.sh",
     "test:unit": "bash tests/run-diagnostics.test.sh && bun test screening/s4-runner.test.ts screening/s4-legitimate-only.test.ts screening/oauth-dry-check.test.ts",
     "test:contract": "bash tests/run-diagnostics.test.sh",
     "test:integration": "bash tests/smoke-entrypoints.test.sh && bash screening/e2e-s4-screening-oauth.test.sh",
     "test:security": "bash tests/smoke-entrypoints.test.sh",
     "test:e2e": "bash run-playwright.sh --write-artifacts",
-    "test:gauntlet": "bash gauntlet/run.sh --write-artifacts"
+    "test:gauntlet": "bun run --cwd gauntlet test:e2e"
   },
   "devDependencies": {
     "@playwright/test": "1.55.0"

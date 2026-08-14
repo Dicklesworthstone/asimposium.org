@@ -294,6 +294,34 @@ describe("a package that grows code owes its gates", () => {
     expect(strict.exitCode).toBe(1);
     expect(summary(strict, "contract")?.code).toBe("NO_UNITS_EXECUTED");
   });
+
+  test("--all with --require-executed fails every zero-unit suite", async () => {
+    const root = makeFixtureRepo({ packages: [{ dir: "packages/protocol", scripts: {} }] });
+    const result = await runCli(root, [
+      "--all",
+      "--json",
+      "--require-executed",
+      "--filter",
+      "no-such-package",
+    ]);
+
+    expect(result.exitCode).toBe(1);
+    for (const suite of [
+      "typecheck",
+      "lint",
+      "unit",
+      "contract",
+      "integration",
+      "security",
+      "performance",
+      "e2e",
+    ]) {
+      const suiteSummary = summary(result, suite);
+      expect(suiteSummary?.status).toBe("fail");
+      expect(suiteSummary?.code).toBe("NO_UNITS_EXECUTED");
+      expect(suiteSummary?.totals.executed).toBe(0);
+    }
+  });
 });
 
 describe("secret-safe diagnostics", () => {

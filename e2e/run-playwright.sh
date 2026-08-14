@@ -6,7 +6,7 @@ repository_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 source "$repository_root/e2e/lib/run-diagnostics.sh"
 
 suite="playwright-target-surfaces"
-reproduce="e2e/run-playwright.sh --self-test"
+reproduce="bash e2e/run-playwright.sh"
 started_ms="$(e2e_now_ms)"
 self_test=0
 write_artifacts=0
@@ -37,7 +37,7 @@ while [[ "$#" -gt 0 ]]; do
 done
 
 if [[ "$self_test" -eq 1 ]]; then
-  e2e_run_harness_self_test "$suite" "$started_ms" "$reproduce"
+  e2e_run_harness_self_test "$suite" "$started_ms" "$reproduce --self-test"
   exit 0
 fi
 
@@ -55,7 +55,7 @@ for origin_variable in ASIMPOSIUM_STAGING_AGENT_BASE_URL ASIMPOSIUM_STAGING_AGOR
       2) code="STAGING_SURFACE_BASE_URL_MISSING" ;;
       *) code="STAGING_SURFACE_BASE_URL_INVALID" ;;
     esac
-    e2e_emit_and_optionally_record "$write_artifacts" "$run_id" "$suite" "$started_ms" "fail" "$code" "$reproduce"
+    e2e_emit_and_optionally_record "$write_artifacts" "$run_id" "$suite" "$started_ms" "blocked" "$code" "$reproduce"
     exit 78
   fi
 done
