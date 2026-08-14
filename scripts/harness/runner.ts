@@ -165,13 +165,19 @@ class ArtifactStore {
   writeFailureLog(step: HarnessStep, attempt: number, output: string): string | undefined {
     if (output.length === 0) return undefined;
     const safeStep = validateStepId(step.id) ? step.id : "invalid-step";
-    const name = `failure-${safeStep}-attempt-${attempt}.log`;
-    const path = join(this.directory, name);
-    assertContained(this.physicalRoot, path, "ARTIFACT_PATH_UNSAFE");
-    assertRegularOrAbsent(path, "ARTIFACT_PATH_UNSAFE");
-    writeFileSync(path, clip(output, MAX_FAILURE_ARTIFACT_CHARS), { encoding: "utf8", flag: "wx" });
-    this.failureLogs.push(path);
-    return path;
+    for (let collision = 0; collision < 100; collision += 1) {
+      const suffix = collision === 0 ? "" : `.${collision}`;
+      const path = join(this.directory, `failure-${safeStep}-attempt-${attempt}${suffix}.log`);
+      assertContained(this.physicalRoot, path, "ARTIFACT_PATH_UNSAFE");
+      if (existsSync(path) || isSymbolicLink(path)) continue;
+      writeFileSync(path, clip(output, MAX_FAILURE_ARTIFACT_CHARS), {
+        encoding: "utf8",
+        flag: "wx",
+      });
+      this.failureLogs.push(path);
+      return path;
+    }
+    throw new HarnessError("FAILURE_ARTIFACT_LIMIT", "no bounded failure artifact slot remains.");
   }
 
   writeJUnit(events: readonly HarnessEvent[]): string {
