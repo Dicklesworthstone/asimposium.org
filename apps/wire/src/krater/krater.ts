@@ -112,7 +112,10 @@ function validateWriteInput(input: KraterWriteInput): void {
   requireIdentifier("claimId", input.claimId);
   requireIdentifier("eventId", input.eventId);
   requireIdentifier("idempotencyKey", input.idempotencyKey);
-  if (input.statement.trim().length === 0 || new TextEncoder().encode(input.statement).byteLength > MAX_STATEMENT_BYTES) {
+  if (
+    input.statement.trim().length === 0 ||
+    new TextEncoder().encode(input.statement).byteLength > MAX_STATEMENT_BYTES
+  ) {
     inputError("statement must be non-empty and within the Krater v0 byte limit.");
   }
   if (Number.isNaN(Date.parse(input.createdAt))) {
@@ -160,7 +163,10 @@ function statement(db: D1Database, sql: string, ...values: unknown[]): D1Prepare
   return db.prepare(sql).bind(...values);
 }
 
-function metricSum(results: readonly D1Result<unknown>[], field: "rows_read" | "rows_written"): number {
+function metricSum(
+  results: readonly D1Result<unknown>[],
+  field: "rows_read" | "rows_written",
+): number {
   return results.reduce((total, result) => total + result.meta[field], 0);
 }
 
@@ -172,7 +178,11 @@ function sqlDuration(results: readonly D1Result<unknown>[]): number | null {
 }
 
 /** Create a synthetic problem root for the local S-2 worker harness. */
-export async function ensureProblem(db: D1Database, problemId: string, createdAt: string): Promise<void> {
+export async function ensureProblem(
+  db: D1Database,
+  problemId: string,
+  createdAt: string,
+): Promise<void> {
   requireIdentifier("problemId", problemId);
   if (Number.isNaN(Date.parse(createdAt))) inputError("createdAt must be an ISO-8601 timestamp.");
   await statement(
@@ -192,7 +202,10 @@ export async function ensureProblem(db: D1Database, problemId: string, createdAt
  * application counter. Every dependent insert reads that allocated value from
  * the problem row inside the same batch.
  */
-export async function writeClaim(db: D1Database, input: KraterWriteInput): Promise<KraterWriteResult> {
+export async function writeClaim(
+  db: D1Database,
+  input: KraterWriteInput,
+): Promise<KraterWriteResult> {
   validateWriteInput(input);
   const payloadJson = payloadFor(input);
   const [payloadSha256, requestDigest] = await Promise.all([
@@ -329,7 +342,9 @@ export async function writeClaim(db: D1Database, input: KraterWriteInput): Promi
     throw new KraterProblemNotFoundError("problem must exist before a Krater claim write.");
   }
   if (settled.request_digest !== requestDigest) {
-    throw new KraterIdempotencyConflictError("an idempotency key cannot represent two request digests.");
+    throw new KraterIdempotencyConflictError(
+      "an idempotency key cannot represent two request digests.",
+    );
   }
   if (settled.event_id === null || settled.event_seq === null) {
     throw new Error("Krater write did not settle an event envelope.");
@@ -355,7 +370,11 @@ export async function writeClaim(db: D1Database, input: KraterWriteInput): Promi
 
 export async function readCursor(db: D1Database, problemId: string): Promise<number> {
   requireIdentifier("problemId", problemId);
-  const row = await statement(db, "SELECT public_seq FROM problems WHERE id = ?", problemId).first<CursorRow>();
+  const row = await statement(
+    db,
+    "SELECT public_seq FROM problems WHERE id = ?",
+    problemId,
+  ).first<CursorRow>();
   if (row === null) throw new KraterProblemNotFoundError("problem cursor does not exist.");
   return row.public_seq;
 }
@@ -367,7 +386,13 @@ export async function readEvents(
   limit: number,
 ): Promise<KraterEvent[]> {
   requireIdentifier("problemId", problemId);
-  if (!Number.isInteger(afterSeq) || afterSeq < 0 || !Number.isInteger(limit) || limit < 1 || limit > 200) {
+  if (
+    !Number.isInteger(afterSeq) ||
+    afterSeq < 0 ||
+    !Number.isInteger(limit) ||
+    limit < 1 ||
+    limit > 200
+  ) {
     inputError("cursor reads require bounded integer pagination.");
   }
   const result = await statement(
@@ -389,7 +414,10 @@ export async function readEvents(
   }));
 }
 
-export async function readClaimProjections(db: D1Database, problemId: string): Promise<ClaimProjection[]> {
+export async function readClaimProjections(
+  db: D1Database,
+  problemId: string,
+): Promise<ClaimProjection[]> {
   requireIdentifier("problemId", problemId);
   const result = await statement(
     db,
@@ -439,7 +467,13 @@ export async function searchPublicClaims(
   query: string,
   limit: number,
 ): Promise<{ claimId: string; problemId: string }[]> {
-  if (query.trim().length === 0 || query.length > 128 || !Number.isInteger(limit) || limit < 1 || limit > 50) {
+  if (
+    query.trim().length === 0 ||
+    query.length > 128 ||
+    !Number.isInteger(limit) ||
+    limit < 1 ||
+    limit > 50
+  ) {
     inputError("FTS search requires a bounded non-empty query and limit.");
   }
   const result = await statement(
@@ -465,11 +499,18 @@ export async function rebuildPublicClaimFts(db: D1Database, problemId: string): 
   ]);
 }
 
-export async function inspectProblem(db: D1Database, problemId: string): Promise<Record<string, number>> {
+export async function inspectProblem(
+  db: D1Database,
+  problemId: string,
+): Promise<Record<string, number>> {
   requireIdentifier("problemId", problemId);
   const results = await db.batch<CountRow>([
     statement(db, "SELECT COUNT(*) AS count FROM claims WHERE problem_id = ?", problemId),
-    statement(db, "SELECT COUNT(*) AS count FROM claim_projections WHERE problem_id = ?", problemId),
+    statement(
+      db,
+      "SELECT COUNT(*) AS count FROM claim_projections WHERE problem_id = ?",
+      problemId,
+    ),
     statement(db, "SELECT COUNT(*) AS count FROM events WHERE problem_id = ?", problemId),
     statement(db, "SELECT COUNT(*) AS count FROM idempotency WHERE problem_id = ?", problemId),
     statement(db, "SELECT COUNT(*) AS count FROM outbox WHERE problem_id = ?", problemId),
@@ -480,9 +521,14 @@ export async function inspectProblem(db: D1Database, problemId: string): Promise
   );
 }
 
-export function deterministicWorkload(seed: string, count: number, createdAt: string): KraterWriteInput[] {
+export function deterministicWorkload(
+  seed: string,
+  count: number,
+  createdAt: string,
+): KraterWriteInput[] {
   requireIdentifier("seed", seed);
-  if (!Number.isInteger(count) || count < 1 || count > 64) inputError("workload count must be 1 through 64.");
+  if (!Number.isInteger(count) || count < 1 || count > 64)
+    inputError("workload count must be 1 through 64.");
   return Array.from({ length: count }, (_, index) => {
     const suffix = `${seed}-${String(index + 1).padStart(3, "0")}`;
     return {

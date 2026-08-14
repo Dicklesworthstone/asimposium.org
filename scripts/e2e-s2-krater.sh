@@ -21,9 +21,10 @@ if [[ ! -x "${S2_WRANGLER}" ]]; then
   emit '{"tool":"wrangler","package":"apps/wire","suite":"s2-krater-local-d1","status":"fail","code":"WRANGLER_UNAVAILABLE","reproduce":"scripts/e2e-s2-krater.sh"}'
   exit 1
 fi
+readonly S2_WRANGLER_VERSION="$("${S2_WRANGLER}" --version)"
 
-if ! "${S2_WRANGLER}" d1 migrations apply DB --config infra/wrangler.toml --local --persist-to "${S2_STATE_DIR}"; then
-  emit '{"tool":"wrangler","package":"apps/wire","suite":"s2-krater-local-d1","status":"fail","code":"LOCAL_D1_MIGRATION_FAILED","reproduce":"scripts/e2e-s2-krater.sh"}'
+if ! "${S2_WRANGLER}" d1 migrations apply DB --config infra/wrangler.toml --local --persist-to "${S2_STATE_DIR}" >"${S2_STATE_DIR}/migration.log" 2>&1; then
+  emit "{\"tool\":\"wrangler\",\"tool_version\":\"${S2_WRANGLER_VERSION}\",\"package\":\"apps/wire\",\"suite\":\"s2-krater-local-d1\",\"status\":\"fail\",\"code\":\"LOCAL_D1_MIGRATION_FAILED\",\"reproduce\":\"scripts/e2e-s2-krater.sh\"}"
   exit 1
 fi
 
@@ -39,7 +40,7 @@ readonly S2_SERVER_PID=$!
 
 ready=0
 for _attempt in {1..30}; do
-  if curl --silent --show-error --output /dev/null "${S2_ORIGIN}/__s2/cursor?problem_id=P-s2"; then
+  if curl --silent --output /dev/null "${S2_ORIGIN}/__s2/cursor?problem_id=P-s2"; then
     ready=1
     break
   fi
@@ -51,11 +52,11 @@ if [[ ${ready} -ne 1 ]]; then
     kill "${S2_SERVER_PID}"
     wait "${S2_SERVER_PID}"
   fi
-  emit '{"tool":"wrangler","package":"apps/wire","suite":"s2-krater-local-d1","status":"fail","code":"LOCAL_WORKER_UNAVAILABLE","reproduce":"scripts/e2e-s2-krater.sh"}'
+  emit "{\"tool\":\"wrangler\",\"tool_version\":\"${S2_WRANGLER_VERSION}\",\"package\":\"apps/wire\",\"suite\":\"s2-krater-local-d1\",\"status\":\"fail\",\"code\":\"LOCAL_WORKER_UNAVAILABLE\",\"reproduce\":\"scripts/e2e-s2-krater.sh\"}"
   exit 1
 fi
 
-S2_ORIGIN="${S2_ORIGIN}" bun apps/wire/src/krater/s2-client.ts
+env S2_ORIGIN="${S2_ORIGIN}" bun apps/wire/src/krater/s2-client.ts
 readonly S2_CLIENT_EXIT=$?
 
 if kill -0 "${S2_SERVER_PID}" 2>/dev/null; then
@@ -64,10 +65,10 @@ if kill -0 "${S2_SERVER_PID}" 2>/dev/null; then
 fi
 
 if [[ ${S2_CLIENT_EXIT} -ne 0 ]]; then
-  emit '{"tool":"wrangler","package":"apps/wire","suite":"s2-krater-local-d1","status":"fail","code":"LOCAL_D1_SCENARIO_FAILED","reproduce":"scripts/e2e-s2-krater.sh"}'
+  emit "{\"tool\":\"wrangler\",\"tool_version\":\"${S2_WRANGLER_VERSION}\",\"package\":\"apps/wire\",\"suite\":\"s2-krater-local-d1\",\"status\":\"fail\",\"code\":\"LOCAL_D1_SCENARIO_FAILED\",\"reproduce\":\"scripts/e2e-s2-krater.sh\"}"
   exit "${S2_CLIENT_EXIT}"
 fi
 
-emit '{"tool":"wrangler","package":"apps/wire","suite":"s2-krater-do-alarm","status":"blocked","exit_code":78,"code":"DO_ALARM_BINDING_ABSENT","blocked_on":"a configured Durable Object namespace and alarm class in the Worker environment","forbidden_substitutes":"a mocked Durable Object, a timer, or a claimed outbox drain without a Durable Object alarm","reproduce":"scripts/e2e-s2-krater.sh"}'
-emit '{"tool":"wrangler","package":"apps/wire","suite":"s2-krater-edge-load","status":"blocked","exit_code":78,"code":"EDGE_CACHE_ENVIRONMENT_ABSENT","blocked_on":"a staging edge-cache environment with D1 row-read and Worker CPU telemetry","forbidden_substitutes":"a local curl loop, an in-process handler benchmark, or local-workerd timing presented as edge-load proof","reproduce":"scripts/e2e-s2-krater.sh"}'
+emit "{\"tool\":\"wrangler\",\"tool_version\":\"${S2_WRANGLER_VERSION}\",\"package\":\"apps/wire\",\"suite\":\"s2-krater-do-alarm\",\"status\":\"blocked\",\"exit_code\":78,\"code\":\"DO_ALARM_BINDING_ABSENT\",\"blocked_on\":\"a configured Durable Object namespace and alarm class in the Worker environment\",\"forbidden_substitutes\":\"a mocked Durable Object, a timer, or a claimed outbox drain without a Durable Object alarm\",\"reproduce\":\"scripts/e2e-s2-krater.sh\"}"
+emit "{\"tool\":\"wrangler\",\"tool_version\":\"${S2_WRANGLER_VERSION}\",\"package\":\"apps/wire\",\"suite\":\"s2-krater-edge-load\",\"status\":\"blocked\",\"exit_code\":78,\"code\":\"EDGE_CACHE_ENVIRONMENT_ABSENT\",\"blocked_on\":\"a staging edge-cache environment with D1 row-read and Worker CPU telemetry\",\"forbidden_substitutes\":\"a local curl loop, an in-process handler benchmark, or local-workerd timing presented as edge-load proof\",\"reproduce\":\"scripts/e2e-s2-krater.sh\"}"
 exit 78
