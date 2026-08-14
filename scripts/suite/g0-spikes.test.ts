@@ -828,8 +828,15 @@ describe("D9 — child output stays out of the stdout contract", () => {
     // ...and the reason is named, not merely flagged.
     expect(body).toContain("post-exit drain expired");
     expect(body).toContain("later output was discarded");
-    // The run is non-green: something outlived the script.
+    // A holder that escaped the process group is invisible to the group scan,
+    // so it is caught by the descriptor it is still holding instead. Exact
+    // status and code: an expired drain is evidence of an outliving process and
+    // must never be green, or `setsid` becomes a one-line way past this gate.
+    expect(summary.results[0]?.code).toBe("G0_SPIKE_OUTPUT_HOLDER_LEAKED");
+    expect(summary.results[0]?.status).toBe("fail");
+    expect(summary.exitCode).toBe(1);
     expect(summary.exitCode).not.toBe(0);
+    expect(summary.status).not.toBe("pass");
     // And nothing raw escaped on the way out.
     expect(body).not.toContain(token);
     expect(body).not.toContain("asimp_ag_");

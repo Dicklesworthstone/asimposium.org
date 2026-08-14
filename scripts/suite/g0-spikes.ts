@@ -83,6 +83,13 @@ export type G0SpikeCode =
   | "G0_SPIKE_DESCENDANT_LEAKED"
   /** Descendants survived a bounded TERM and KILL of the owned group. */
   | "G0_SPIKE_DESCENDANT_UNKILLABLE"
+  /**
+   * Something still held the spike's output stream after the script finished
+   * and the owned group was reaped — a process that left the group (a
+   * daemonising `setsid`) and so cannot be seen by a group scan, but is
+   * provably still alive because it is still holding the descriptor.
+   */
+  | "G0_SPIKE_OUTPUT_HOLDER_LEAKED"
   /** The process table could not be read, so no claim about leaks is possible. */
   | "G0_SPIKE_DESCENDANT_SCAN_FAILED";
 
@@ -323,7 +330,7 @@ if ! command -v "$1" >/dev/null 2>&1; then
   read -r _ <&3 2>/dev/null || true
   exit 127
 fi
-"$1" "$2" &
+"$1" "$2" 3>&- &
 target=$!
 wait "$target"
 status=$?
@@ -805,6 +812,23 @@ async function runSpike(spike: G0Spike, context: SpikeRunContext): Promise<G0Spi
   }
   if (descendantsLeaked) {
     return { ...base, status: "fail", code: "G0_SPIKE_DESCENDANT_LEAKED" };
+  }
+  /**
+   * An expired drain is evidence, not just a logging inconvenience.
+   *
+   * By this point the script has finished and the owned group has been reaped,
+   * so nothing this runner can see should still be writing. If the pipe is
+   * *still* open, some process is holding it — necessarily one that left the
+   * process group, which is exactly how a daemonising spike hides from the scan
+   * above. Treating that as a pass would hand any spike a one-line recipe for
+   * leaking a process past this gate: call `setsid`.
+   *
+   * It is deliberately its own code rather than `DESCENDANT_LEAKED`: the two are
+   * found by different means and a reader chasing one should not be told the
+   * other.
+   */
+  if (!drained) {
+    return { ...base, status: "fail", code: "G0_SPIKE_OUTPUT_HOLDER_LEAKED" };
   }
   if (signalFailed) {
     return { ...base, status: "fail", code: "G0_SPIKE_PROCESS_GROUP_SIGNAL_FAILED" };
