@@ -19,9 +19,12 @@
  */
 
 import { afterAll, describe, expect, test } from "bun:test";
+import { chmodSync, mkdtempSync, writeFileSync } from "node:fs";
 import { createServer as createHttpServer, type Server as HttpServer } from "node:http";
 import { createServer, type Server } from "node:net";
-import { resolve } from "node:path";
+import { tmpdir } from "node:os";
+import { join, resolve } from "node:path";
+import { provenance } from "../../../../packages/render/scripts/provenance.ts";
 
 const ROOT = resolve(import.meta.dir, "..", "..", "..", "..");
 const SCRIPT = "scripts/e2e-s5-diptych.sh";
@@ -67,6 +70,7 @@ async function runChecker(
   timeoutMs = 30_000,
   overrides: Record<string, string> = {},
 ): Promise<Run> {
+  const run = await provenance();
   const child = Bun.spawn({
     cmd: ["bun", "apps/wire/src/render-face/check.ts"],
     cwd: ROOT,
@@ -75,12 +79,44 @@ async function runChecker(
       S5_ORIGIN: origin,
       S5_SEED: "s5-checker-adversarial-v1",
       S5_RUN_ID: "s5-checker-adversarial-run",
+      S5_EXPECTED_SOURCE_DIGEST: run.source_digest,
+      S5_EXPECTED_SOURCE_FILES: String(run.source_files),
+      S5_EXPECTED_BUN_VERSION: run.bun_version,
+      S5_EXPECTED_WRANGLER_VERSION: run.wrangler_version,
       ...overrides,
     },
     stdout: "pipe",
     stderr: "pipe",
   });
   const timer = setTimeout(() => child.kill(), timeoutMs);
+  const [stdout, stderr, exitCode] = await Promise.all([
+    new Response(child.stdout).text(),
+    new Response(child.stderr).text(),
+    child.exited,
+  ]);
+  clearTimeout(timer);
+  return { exitCode, stdout, stderr };
+}
+
+async function runCheckerWithoutContract(origin: string): Promise<Run> {
+  const env = { ...process.env };
+  delete env.S5_EXPECTED_SOURCE_DIGEST;
+  delete env.S5_EXPECTED_SOURCE_FILES;
+  delete env.S5_EXPECTED_BUN_VERSION;
+  delete env.S5_EXPECTED_WRANGLER_VERSION;
+  const child = Bun.spawn({
+    cmd: ["bun", "apps/wire/src/render-face/check.ts"],
+    cwd: ROOT,
+    env: {
+      ...env,
+      S5_ORIGIN: origin,
+      S5_SEED: "s5-checker-adversarial-v1",
+      S5_RUN_ID: "s5-checker-adversarial-run",
+    },
+    stdout: "pipe",
+    stderr: "pipe",
+  });
+  const timer = setTimeout(() => child.kill(), 30_000);
   const [stdout, stderr, exitCode] = await Promise.all([
     new Response(child.stdout).text(),
     new Response(child.stderr).text(),
@@ -126,6 +162,40 @@ async function freePort(): Promise<number> {
       server.close(() => (port > 0 ? done(port) : fail(new Error("no port assigned"))));
     });
   });
+}
+
+interface PsFaultShim {
+  readonly directory: string;
+  readonly activate: () => void;
+}
+
+/**
+ * A deterministic `ps` fault is injected only into the child shell's PATH. The test process
+ * keeps the real process table, so its postcondition is independent of the broken observer.
+ * All generated helper/state files inherit the caller's TMPDIR (USB-backed in this swarm).
+ */
+function psFaultShim(mode: "transient" | "permanent"): PsFaultShim {
+  const directory = mkdtempSync(join(tmpdir(), "asimposium-s5-ps-fault-"));
+  const activateFile = join(directory, "activate");
+  const stateFile = join(directory, "state");
+  const shim = join(directory, "ps");
+  writeFileSync(
+    shim,
+    `#!/usr/bin/env bash
+if [[ -f ${JSON.stringify(activateFile)} ]]; then
+  if [[ ${JSON.stringify(mode)} == transient && ! -f ${JSON.stringify(stateFile)} ]]; then
+    : > ${JSON.stringify(stateFile)}
+    exit 1
+  fi
+  if [[ ${JSON.stringify(mode)} == permanent ]]; then
+    exit 1
+  fi
+fi
+exec /bin/ps "$@"
+`,
+  );
+  chmodSync(shim, 0o700);
+  return { directory, activate: () => writeFileSync(activateFile, "active\n") };
 }
 
 async function answering(port: number): Promise<boolean> {
@@ -274,7 +344,77 @@ async function credentialEtagServer(
   });
 }
 
+async function malformedTeachingResponseServer(): Promise<{ origin: string; close: () => Promise<void> }> {
+  return new Promise((done, fail) => {
+    const server = createHttpServer((request, response) => {
+      const url = new URL(request.url ?? "/", "http://127.0.0.1");
+      const teaching = url.searchParams.get("format") === "toon";
+      response.writeHead(teaching ? 400 : 200, {
+        "content-type": teaching
+          ? "application/problem+json; charset=utf-8"
+          : "text/markdown; charset=utf-8",
+        etag: '"sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"',
+        "x-content-type-options": "nosniff",
+      });
+      response.end(teaching ? "not-json" : "safe controlled response\n");
+    });
+    httpListeners.push(server);
+    server.on("error", fail);
+    server.listen(0, "127.0.0.1", () => {
+      const address = server.address();
+      if (typeof address !== "object" || address === null) {
+        fail(new Error("no port assigned"));
+        return;
+      }
+      done({
+        origin: `http://127.0.0.1:${address.port}`,
+        close: () => new Promise((closed) => server.close(() => closed())),
+      });
+    });
+  });
+}
+
 describe("phase-2 diagnostics are secret-safe", () => {
+  test("a direct checker without the launch contract emits one fixed boundary refusal", async () => {
+    const run = await runCheckerWithoutContract("http://127.0.0.1:1");
+    expect(run.exitCode).not.toBe(0);
+    expect(run.stderr).toBe("");
+    expect(run.stdout.trim().split("\n")).toHaveLength(1);
+    expect(JSON.parse(run.stdout) as Record<string, unknown>).toMatchObject({
+      assertion: "checker_boundary_refused",
+      code: "CHECKER_BOUNDARY_REFUSED",
+      bun_version: "unavailable",
+      wrangler_version: "unavailable",
+    });
+  });
+
+  test("an unexpected malformed Worker response emits a fixed main-boundary refusal", async () => {
+    const server = await malformedTeachingResponseServer();
+    let run: Run;
+    try {
+      run = await runChecker(server.origin);
+    } finally {
+      await server.close();
+    }
+
+    if (run === undefined) throw new Error("checker did not return a result");
+    expect(run.exitCode).not.toBe(0);
+    expect(run.stderr).toBe("");
+    const records = run.stdout
+      .trim()
+      .split("\n")
+      .filter(Boolean)
+      .map((line) => JSON.parse(line) as Record<string, unknown>);
+    expect(records.at(-1)).toMatchObject({
+      assertion: "checker_runtime_refused",
+      code: "CHECKER_RUNTIME_REFUSED",
+      detail: "phase-2 checker stopped after an unexpected local Worker result",
+      status: "fail",
+    });
+    expect(`${run.stdout}${run.stderr}`).not.toContain("SyntaxError");
+    expect(`${run.stdout}${run.stderr}`).not.toContain(" at ");
+  });
+
   test("a credential-shaped response ETag produces only a fixed parseable refusal", async () => {
     const credentialEtag = '"asimp_ag_responsecontrolledetag01"';
     const server = await credentialEtagServer(credentialEtag);
@@ -651,6 +791,97 @@ describe("two full runs can share a machine", () => {
 });
 
 describe("an interrupted run leaves nothing listening", () => {
+  test("a transient process-table failure is retried and never treated as an empty owned group", async () => {
+    const port = await freePort();
+    const fault = psFaultShim("transient");
+    const child = startScript({ S5_PORT: String(port), PATH: `${fault.directory}:${process.env.PATH}` });
+    const completion = collectScript(child, 30_000);
+    const marker = `s5-diptych-owner-s5-s5-fixed-seed-v1-${child.pid}`;
+    let ownedGroup: number | undefined;
+
+    try {
+      const markerProcess = await waitForOwnedMarker(marker, child);
+      expect(markerProcess).toBeDefined();
+      ownedGroup = markerProcess?.pgid;
+      expect(await waitForAnswer(port, child)).toBe(true);
+
+      fault.activate();
+      child.kill("SIGTERM");
+      const run = await completion;
+      expect(run.exitCode).not.toBe(0);
+      expect(await waitForProcessGroupAbsence(ownedGroup as number)).toEqual([]);
+      expect(await answering(port)).toBe(false);
+    } finally {
+      if (child.exitCode === null) child.kill("SIGKILL");
+      await child.exited;
+      if (ownedGroup !== undefined) reapExactOwnedGroupForTest(marker, ownedGroup);
+    }
+  }, 200_000);
+
+  test("permanent process-table uncertainty self-expires only the marked group", async () => {
+    const port = await freePort();
+    const fault = psFaultShim("permanent");
+    const child = startScript({ S5_PORT: String(port), PATH: `${fault.directory}:${process.env.PATH}` });
+    const completion = collectScript(child, 30_000);
+    const marker = `s5-diptych-owner-s5-s5-fixed-seed-v1-${child.pid}`;
+    let ownedGroup: number | undefined;
+
+    try {
+      const markerProcess = await waitForOwnedMarker(marker, child);
+      expect(markerProcess).toBeDefined();
+      ownedGroup = markerProcess?.pgid;
+      expect(await waitForAnswer(port, child)).toBe(true);
+
+      fault.activate();
+      const run = await completion;
+      expect(run.exitCode).not.toBe(0);
+      expect(run.stdout).not.toContain('"assertion":"spike_summary"');
+      expect(await waitForProcessGroupAbsence(ownedGroup as number)).toEqual([]);
+      expect(ownedMarkerMatches(marker)).toEqual([]);
+      expect(await answering(port)).toBe(false);
+    } finally {
+      if (child.exitCode === null) child.kill("SIGKILL");
+      await child.exited;
+      if (ownedGroup !== undefined) reapExactOwnedGroupForTest(marker, ownedGroup);
+    }
+  }, 200_000);
+
+  test("a decoy marker in another process group survives exact owned-group cleanup", async () => {
+    const port = await freePort();
+    const child = startScript({ S5_PORT: String(port) });
+    const completion = collectScript(child, 30_000);
+    const marker = `s5-diptych-owner-s5-s5-fixed-seed-v1-${child.pid}`;
+    let ownedGroup: number | undefined;
+    let decoy: ReturnType<typeof Bun.spawn> | undefined;
+
+    try {
+      const markerProcess = await waitForOwnedMarker(marker, child);
+      expect(markerProcess).toBeDefined();
+      ownedGroup = markerProcess?.pgid;
+      expect(await waitForAnswer(port, child)).toBe(true);
+
+      decoy = Bun.spawn({
+        cmd: ["bash", "-c", "while :; do sleep 1; done", `--s5-owned-marker=${marker}`],
+        cwd: ROOT,
+        stdout: "ignore",
+        stderr: "ignore",
+      });
+      await Bun.sleep(50);
+      expect(processTable().some((entry) => entry.pid === decoy?.pid)).toBe(true);
+
+      child.kill("SIGTERM");
+      await completion;
+      expect(await waitForProcessGroupAbsence(ownedGroup as number)).toEqual([]);
+      expect(processTable().some((entry) => entry.pid === decoy?.pid)).toBe(true);
+    } finally {
+      if (child.exitCode === null) child.kill("SIGKILL");
+      await child.exited;
+      if (decoy !== undefined && decoy.exitCode === null) decoy.kill("SIGKILL");
+      if (decoy !== undefined) await decoy.exited;
+      if (ownedGroup !== undefined) reapExactOwnedGroupForTest(marker, ownedGroup);
+    }
+  }, 200_000);
+
   test("SIGTERM to the script takes its exact owned process group down with it", async () => {
     const port = await freePort();
     // Ownership: nothing may be listening before the script starts, or a survivor from
@@ -676,7 +907,7 @@ describe("an interrupted run leaves nothing listening", () => {
     }
   }, 200_000);
 
-  test("leader loss still reaps the exact marked group", async () => {
+  test("post-readiness Worker-leader death fails closed and reaps the exact marked group", async () => {
     const port = await freePort();
     const seed = "s5-owner-loss-XyZ-3927";
     const child = startScript({ ASIMP_S5_SEED: seed, S5_PORT: String(port) });
@@ -702,9 +933,8 @@ describe("an interrupted run leaves nothing listening", () => {
       expect(processTable().some((entry) => entry.pid === ownedGroup)).toBe(false);
       expect(ownedMarkerMatches(marker)).toHaveLength(1);
 
-      // Old cleanup skipped the group when SERVER_PID had died, leaving the marker sidecar
-      // (and potentially workerd) alive. The current trap must prove and reap this PGID.
-      child.kill("SIGTERM");
+      // Do not signal the controller: the post-readiness Worker death itself must cause its
+      // checker/cleanup path to fail closed and leave no marked sidecar or process group.
       const run = await completion;
       expect(run.exitCode).not.toBe(0);
       expect(await waitForProcessGroupAbsence(ownedGroup)).toEqual([]);
@@ -748,7 +978,7 @@ describe("an interrupted run leaves nothing listening", () => {
     }
   }, 200_000);
 
-  test("an absent leader makes the exact marker self-expire before controller SIGKILL", async () => {
+  test("an absent leader makes the exact marker self-expire without killing the controller", async () => {
     const port = await freePort();
     const seed = "s5-absent-leader-4821";
     const child = startScript({ ASIMP_S5_SEED: seed, S5_PORT: String(port) });
@@ -774,10 +1004,8 @@ describe("an interrupted run leaves nothing listening", () => {
       }
       expect(processTable().some((entry) => entry.pid === ownedGroup)).toBe(false);
 
-      // SIGKILL the controller if it has not already observed the failed Worker. The marker's
-      // absence branch must independently reap its exact group either way; this prevents a
-      // concurrent leader/controller loss from retaining a TERM-immune sidecar or listener.
-      if (child.exitCode === null) child.kill("SIGKILL");
+      // The marker's proven-absence branch is independent of controller loss. Wait for the
+      // run to observe the dead Worker naturally; do not kill its controller in this test.
       const run = await completion;
       expect(run.exitCode).not.toBe(0);
       expect(await waitForProcessGroupAbsence(ownedGroup as number)).toEqual([]);

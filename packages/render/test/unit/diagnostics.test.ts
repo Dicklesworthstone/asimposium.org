@@ -3,6 +3,7 @@ import { describe, expect, test } from "bun:test";
 import {
   assertSafeRunId,
   assertSafeS5Seed,
+  assertSafeToolVersion,
   assertSecretSafe,
   buildDiagnostic,
   DiagnosticSafetyError,
@@ -220,6 +221,24 @@ describe("assertSafeS5Seed", () => {
   ] as const) {
     test(`refuses a ${name} seed at the shared boundary`, () => {
       expect(() => assertSafeS5Seed(seed, {})).toThrow(DiagnosticSafetyError);
+    });
+  }
+});
+
+describe("assertSafeToolVersion", () => {
+  test("accepts exact pinned Bun and Wrangler releases", () => {
+    expect(() => assertSafeToolVersion("bun_version", "1.3.8", {})).not.toThrow();
+    expect(() => assertSafeToolVersion("wrangler_version", "4.123.0", {})).not.toThrow();
+  });
+
+  for (const [field, value] of [
+    ["bun_version", "^1.3.8"],
+    ["wrangler_version", "latest"],
+    ["bun_version", "1.3.8; echo leaked"],
+    ["wrangler_version", "sk_live_Aa1_Bb2-Cc3D"],
+  ] as const) {
+    test(`refuses a non-exact ${field} declaration`, () => {
+      expect(() => assertSafeToolVersion(field, value, {})).toThrow(DiagnosticSafetyError);
     });
   }
 });

@@ -20,7 +20,13 @@
 import { contentFingerprint, renderAllFaces, renderProjection } from "../src/index.ts";
 import { S5_SPIKE_CURSOR, S5_SPIKE_PROBLEM, s5Canary, s5SpikeProjection } from "../src/spike.ts";
 import type { FaceFormat, Projection } from "../src/types.ts";
-import { assertSafeRunId, assertSecretSafe, formatDiagnostic } from "./diagnostics.ts";
+import {
+  assertSafeRunId,
+  assertSafeS5Seed,
+  assertSecretSafe,
+  assertSafeToolVersion,
+  formatDiagnostic,
+} from "./diagnostics.ts";
 import { type Provenance, provenance } from "./provenance.ts";
 
 const SPIKE = "s5-diptych";
@@ -42,6 +48,9 @@ if (process.argv.includes("--provenance")) {
 const seed = argument("--seed", "s5-fixed-seed-v1");
 const runId = argument("--run-id", "s5-local-run");
 assertSafeRunId(runId);
+assertSafeS5Seed(seed);
+assertSafeToolVersion("bun_version", run.bun_version);
+assertSafeToolVersion("wrangler_version", run.wrangler_version);
 const canary = s5Canary(seed);
 const canaryDigest = contentFingerprint(canary);
 
@@ -53,6 +62,8 @@ interface SpikeRecord {
   readonly revision_state: string;
   readonly source_digest: string;
   readonly source_files: number;
+  readonly bun_version: string;
+  readonly wrangler_version: string;
   readonly assertion: string;
   readonly problem: string;
   readonly cursor: number;
@@ -92,6 +103,8 @@ function emit(
     revision_state: run.revision_state,
     source_digest: run.source_digest,
     source_files: run.source_files,
+    bun_version: run.bun_version,
+    wrangler_version: run.wrangler_version,
     assertion: input.assertion,
     problem: S5_SPIKE_PROBLEM,
     cursor: S5_SPIKE_CURSOR,

@@ -26,10 +26,18 @@ import {
   readdirSync,
   readFileSync,
 } from "node:fs";
-import { join, relative } from "node:path";
+import { dirname, join, relative, resolve } from "node:path";
 
 /** Repository-relative roots whose bytes decide a spike result. Order is irrelevant; paths sort. */
 export const PROVENANCE_INPUTS: readonly string[] = [
+  "package.json",
+  "bun.lock",
+  "bunfig.toml",
+  "tsconfig.json",
+  "tsconfig.base.json",
+  "apps/wire/package.json",
+  "apps/wire/tsconfig.json",
+  "packages/render/tsconfig.json",
   "packages/render/src",
   "packages/render/scripts/diagnostics.ts",
   "packages/render/scripts/s5-spike.ts",
@@ -49,6 +57,15 @@ export interface Provenance {
   readonly revision_state: "clean" | "dirty" | "unknown";
   readonly source_digest: string;
   readonly source_files: number;
+  /** Exact Bun release declared by the lockfile-owning repository package manifest. */
+  readonly bun_version: string;
+  /** Exact Wrangler release declared by the unmounted S-5 Worker harness manifest. */
+  readonly wrangler_version: string;
+}
+
+export interface RuntimeToolVersions {
+  readonly bun_version: string;
+  readonly wrangler_version: string;
 }
 
 /** An input that cannot be read without widening or blocking the evidence boundary. */
@@ -75,6 +92,113 @@ function isMissing(error: unknown): boolean {
   );
 }
 
+const EXACT_SEMVER = /^\d+\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?$/;
+
+/**
+ * Read one executable input without following a symlink or opening a FIFO. Runtime version
+ * declarations are part of the evidence boundary, so they receive the same no-follow,
+ * regular-file treatment as the bytes eventually hashed by `sourceDigest`.
+ */
+function readRequiredRegularText(root: string, path: string): string {
+  const absolute = join(root, path);
+  let stats: ReturnType<typeof lstatSync>;
+  try {
+    stats = lstatSync(absolute);
+  } catch (error) {
+    if (isMissing(error)) throw new ProvenanceInputError(path, "declared input is missing");
+    throw new ProvenanceInputError(path, "could not inspect input");
+  }
+  if (stats.isSymbolicLink()) throw new ProvenanceInputError(path, "symbolic links are not inputs");
+  if (!stats.isFile()) throw new ProvenanceInputError(path, "entry is not a regular file");
+
+  let descriptor: number | undefined;
+  try {
+    descriptor = openSync(absolute, constants.O_RDONLY | constants.O_NONBLOCK | constants.O_NOFOLLOW);
+    if (!fstatSync(descriptor).isFile())
+      throw new ProvenanceInputError(path, "opened entry is not a regular file");
+    return new TextDecoder().decode(readFileSync(descriptor));
+  } catch (error) {
+    if (error instanceof ProvenanceInputError) throw error;
+    throw new ProvenanceInputError(path, "could not open regular input");
+  } finally {
+    if (descriptor !== undefined) closeSync(descriptor);
+  }
+}
+
+function requiredJsonObject(root: string, path: string): Record<string, unknown> {
+  let value: unknown;
+  try {
+    value = JSON.parse(readRequiredRegularText(root, path));
+  } catch (error) {
+    if (error instanceof ProvenanceInputError) throw error;
+    throw new ProvenanceInputError(path, "is not valid JSON");
+  }
+  if (value === null || typeof value !== "object" || Array.isArray(value))
+    throw new ProvenanceInputError(path, "is not a JSON object");
+  return value as Record<string, unknown>;
+}
+
+const TSCONFIG_INPUTS = [
+  "tsconfig.json",
+  "packages/render/tsconfig.json",
+  "apps/wire/tsconfig.json",
+] as const;
+
+/**
+ * A TypeScript `extends` file changes the emitted/runtime program just as surely as a source
+ * file. Every discovered relative link must therefore already be an explicit provenance
+ * input; a future config chain cannot silently fall outside the digest.
+ */
+function assertDeclaredTsconfigExtends(root: string): void {
+  const seen = new Set<string>();
+  const visit = (path: string): void => {
+    if (seen.has(path)) return;
+    seen.add(path);
+    const config = requiredJsonObject(root, path);
+    const extendsValue = config.extends;
+    if (extendsValue === undefined) return;
+    if (typeof extendsValue !== "string" || !extendsValue.startsWith("."))
+      throw new ProvenanceInputError(path, "extends must name an explicit relative provenance input");
+    const candidate = extendsValue.endsWith(".json") ? extendsValue : `${extendsValue}.json`;
+    const target = relative(root, resolve(root, dirname(path), candidate));
+    if (
+      target === "" ||
+      target.startsWith("..") ||
+      !PROVENANCE_INPUTS.includes(target)
+    ) {
+      throw new ProvenanceInputError(path, "extends target is not a declared provenance input");
+    }
+    visit(target);
+  };
+  for (const path of TSCONFIG_INPUTS) visit(path);
+}
+
+/**
+ * The runner may invoke only the exact Bun and Wrangler releases declared by the executable
+ * source set. Range declarations would make a green record depend on a mutable installer
+ * decision, so they are refused rather than normalized.
+ */
+export function runtimeToolVersions(root: string = repoRoot()): RuntimeToolVersions {
+  const rootPackage = requiredJsonObject(root, "package.json");
+  const packageManager = rootPackage.packageManager;
+  const bunMatch = typeof packageManager === "string" ? /^bun@(.+)$/.exec(packageManager) : null;
+  if (bunMatch === null || !EXACT_SEMVER.test(bunMatch[1] ?? ""))
+    throw new ProvenanceInputError("package.json", "packageManager must pin bun to an exact version");
+
+  const wirePackage = requiredJsonObject(root, "apps/wire/package.json");
+  const devDependencies = wirePackage.devDependencies;
+  const wrangler =
+    devDependencies !== null && typeof devDependencies === "object" && !Array.isArray(devDependencies)
+      ? (devDependencies as Record<string, unknown>).wrangler
+      : undefined;
+  if (typeof wrangler !== "string" || !EXACT_SEMVER.test(wrangler))
+    throw new ProvenanceInputError(
+      "apps/wire/package.json",
+      "devDependencies.wrangler must be an exact version",
+    );
+  return { bun_version: bunMatch[1] as string, wrangler_version: wrangler };
+}
+
 function git(args: string[]): { ok: boolean; out: string } {
   const child = Bun.spawnSync({
     cmd: ["git", ...args],
@@ -94,6 +218,7 @@ function git(args: string[]): { ok: boolean; out: string } {
  * from a broad directory into the evidence set.
  */
 export function provenanceFiles(root: string = repoRoot()): string[] {
+  assertDeclaredTsconfigExtends(root);
   const found: string[] = [];
   const walk = (absolute: string, explicitFile: boolean, requiredInput: boolean): void => {
     const path = relative(root, absolute);
@@ -201,5 +326,11 @@ export async function provenance(root: string = repoRoot()): Promise<Provenance>
     revision === "unknown" || !status.ok ? "unknown" : status.out === "" ? "clean" : "dirty";
 
   const { digest, files } = await sourceDigest(root);
-  return { revision, revision_state, source_digest: digest, source_files: files };
+  return {
+    revision,
+    revision_state,
+    source_digest: digest,
+    source_files: files,
+    ...runtimeToolVersions(root),
+  };
 }

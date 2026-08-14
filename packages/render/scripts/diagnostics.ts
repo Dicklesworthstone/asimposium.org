@@ -55,6 +55,7 @@ const LONG_HEX_TOKEN = /[0-9a-f]{32,}/i;
 
 const SAFE_RUN_ID = /^[A-Za-z0-9][A-Za-z0-9._-]{0,79}$/;
 const SAFE_S5_SEED = /^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$/;
+const EXACT_TOOL_VERSION = /^\d+\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?$/;
 const GIT_REVISION = /^(?:unknown|[0-9a-f]{7,40})$/;
 const SHA256_DIGEST = /^sha256:[0-9a-f]{64}$/;
 const FNV1A64_DIGEST = /^fnv1a64:[0-9a-f]{16}$/;
@@ -182,6 +183,21 @@ export function assertSafeS5Seed(
     throw new DiagnosticSafetyError("seed", "is not a short safe S-5 seed");
   }
   assertSecretSafe({ seed }, env);
+}
+
+/**
+ * S-5 records may name a runtime only when it is a pinned release identifier. This keeps a
+ * caller from turning a tool-version field into a general-purpose diagnostic channel.
+ */
+export function assertSafeToolVersion(
+  field: "bun_version" | "wrangler_version",
+  version: string,
+  env: Record<string, string | undefined> = process.env,
+): void {
+  if (!EXACT_TOOL_VERSION.test(version)) {
+    throw new DiagnosticSafetyError(field, "is not an exact tool version");
+  }
+  assertSecretSafe({ [field]: version }, env);
 }
 
 /** One NDJSON line, key-sorted so build logs diff cleanly. */

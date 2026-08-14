@@ -12,7 +12,8 @@
  * lengths and both digests — never the differing bytes, because a body may contain workshop
  * content and a build log is not the place for it.
  *
- * Usage: S5_ORIGIN=http://127.0.0.1:8793 bun apps/wire/src/render-face/check.ts
+ * Usage: invoked by scripts/e2e-s5-diptych.sh, which supplies closed origin, provenance and
+ * exact tool-version inputs. Direct invocation without that contract is intentionally refused.
  */
 
 import {
@@ -27,6 +28,7 @@ import {
 import {
   assertSafeRunId,
   assertSafeS5Seed,
+  assertSafeToolVersion,
   assertSecretSafe,
   DiagnosticSafetyError,
   formatDiagnostic,
@@ -41,6 +43,13 @@ let diagnosticBase: Record<string, unknown>;
 
 let failures = 0;
 let diagnosticSafetyRefused = false;
+
+interface ExpectedRuntime {
+  readonly sourceDigest: string;
+  readonly sourceFiles: number;
+  readonly bunVersion: string;
+  readonly wranglerVersion: string;
+}
 
 /**
  * The validator this checker expects: SHA-256 over the exact bytes the response carried.
@@ -80,6 +89,26 @@ function assertLoopbackS5Origin(value: string | undefined): string {
   return `http://127.0.0.1:${port}`;
 }
 
+function expectedRuntime(): ExpectedRuntime {
+  const sourceDigest = process.env.S5_EXPECTED_SOURCE_DIGEST;
+  const sourceFiles = process.env.S5_EXPECTED_SOURCE_FILES;
+  const bunVersion = process.env.S5_EXPECTED_BUN_VERSION;
+  const wranglerVersion = process.env.S5_EXPECTED_WRANGLER_VERSION;
+  if (sourceDigest === undefined || !/^sha256:[0-9a-f]{64}$/.test(sourceDigest))
+    throw new DiagnosticSafetyError("source_digest", "is not an exact expected digest");
+  if (sourceFiles === undefined || !/^[1-9][0-9]*$/.test(sourceFiles))
+    throw new DiagnosticSafetyError("source_files", "is not an exact expected input count");
+  assertSafeToolVersion("bun_version", bunVersion ?? "");
+  assertSafeToolVersion("wrangler_version", wranglerVersion ?? "");
+  assertSecretSafe({ source_digest: sourceDigest, source_files: Number(sourceFiles) });
+  return {
+    sourceDigest,
+    sourceFiles: Number(sourceFiles),
+    bunVersion: bunVersion as string,
+    wranglerVersion: wranglerVersion as string,
+  };
+}
+
 async function initialize(): Promise<void> {
   const candidateSeed = process.env.S5_SEED ?? "s5-fixed-seed-v1";
   const candidateRunId = process.env.S5_RUN_ID ?? "s5-local-run";
@@ -88,7 +117,19 @@ async function initialize(): Promise<void> {
   assertSafeRunId(candidateRunId);
   assertSafeS5Seed(candidateSeed);
   const candidateOrigin = assertLoopbackS5Origin(process.env.S5_ORIGIN);
+  const expected = expectedRuntime();
   const run = await provenance();
+  assertSafeToolVersion("bun_version", run.bun_version);
+  assertSafeToolVersion("wrangler_version", run.wrangler_version);
+  if (
+    run.source_digest !== expected.sourceDigest ||
+    run.source_files !== expected.sourceFiles ||
+    run.bun_version !== expected.bunVersion ||
+    run.wrangler_version !== expected.wranglerVersion ||
+    Bun.version !== expected.bunVersion
+  ) {
+    throw new DiagnosticSafetyError("runtime", "does not match the launcher contract");
+  }
   const base = {
     spike: "s5-diptych",
     phase: "worker-served",
@@ -99,6 +140,8 @@ async function initialize(): Promise<void> {
     revision_state: run.revision_state,
     source_digest: run.source_digest,
     source_files: run.source_files,
+    bun_version: run.bun_version,
+    wrangler_version: run.wrangler_version,
   };
   assertSecretSafe(base);
   seed = candidateSeed;
@@ -123,6 +166,8 @@ function emitBoundaryRefusal(): void {
     revision_state: "unknown",
     source_digest: "unavailable",
     source_files: 0,
+    bun_version: "unavailable",
+    wrangler_version: "unavailable",
     assertion: "checker_boundary_refused",
     status: "fail",
     code: "CHECKER_BOUNDARY_REFUSED",
@@ -143,6 +188,19 @@ function emitDiagnosticSafetyRefusal(): void {
     status: "fail",
     code: "DIAGNOSTIC_SAFETY_REFUSED",
     detail: "a phase-2 diagnostic was refused by the secret-safety policy",
+  };
+  assertSecretSafe(refusal);
+  process.stdout.write(`${formatDiagnostic(refusal as unknown as never)}\n`);
+}
+
+/** Main failures must not turn a local Worker error, parser error or stack into a build log. */
+function emitRuntimeRefusal(): void {
+  const refusal = {
+    ...diagnosticBase,
+    assertion: "checker_runtime_refused",
+    status: "fail",
+    code: "CHECKER_RUNTIME_REFUSED",
+    detail: "phase-2 checker stopped after an unexpected local Worker result",
   };
   assertSecretSafe(refusal);
   process.stdout.write(`${formatDiagnostic(refusal as unknown as never)}\n`);
@@ -190,6 +248,8 @@ function boundedDiff(left: string, right: string): Record<string, unknown> {
 async function main(): Promise<void> {
   const formats: FaceFormat[] = ["md", "json", "html-fragment"];
   const variants: SpikeVariant[] = ["public", "sponsor"];
+
+  check("checker_provenance_matches_launcher", true, "launcher contract matched current inputs");
 
   for (const variant of variants) {
     for (const format of formats) {
@@ -402,14 +462,23 @@ async function main(): Promise<void> {
         : `${failures} assertion(s) failed`,
     scope: "local-workerd, harness entrypoint, no binding touched",
   });
-  if (failures > 0) process.exitCode = 1;
 }
 
-try {
-  await initialize();
-} catch {
-  emitBoundaryRefusal();
-  process.exitCode = 1;
+async function run(): Promise<number> {
+  try {
+    await initialize();
+  } catch {
+    emitBoundaryRefusal();
+    return 1;
+  }
+  try {
+    await main();
+  } catch {
+    failures += 1;
+    emitRuntimeRefusal();
+    return 1;
+  }
+  return failures === 0 ? 0 : 1;
 }
 
-if (process.exitCode !== 1) await main();
+process.exitCode = await run();

@@ -13,10 +13,19 @@ import {
   ProvenanceInputError,
   provenance,
   provenanceFiles,
+  runtimeToolVersions,
   sourceDigest,
 } from "../../scripts/provenance.ts";
 
 const REQUIRED_INPUT_STUBS: Readonly<Record<string, string>> = {
+  "package.json": '{"packageManager":"bun@1.3.8"}\n',
+  "bun.lock": "lockfileVersion: 1\n",
+  "bunfig.toml": "[test]\ntimeout = 120000\n",
+  "tsconfig.json": '{"extends":"./tsconfig.base.json"}\n',
+  "tsconfig.base.json": "{}\n",
+  "apps/wire/package.json": '{"devDependencies":{"wrangler":"4.123.0"}}\n',
+  "apps/wire/tsconfig.json": '{"extends":"../../tsconfig.base.json"}\n',
+  "packages/render/tsconfig.json": "{}\n",
   "packages/render/scripts/diagnostics.ts": "export {};\n",
   "packages/render/scripts/s5-spike.ts": "export {};\n",
   "packages/render/scripts/provenance.ts": "export {};\n",
@@ -73,6 +82,14 @@ describe("source digest", () => {
   });
 
   test("covers the Worker harness as well as the renderer", () => {
+    expect(PROVENANCE_INPUTS).toContain("package.json");
+    expect(PROVENANCE_INPUTS).toContain("bun.lock");
+    expect(PROVENANCE_INPUTS).toContain("bunfig.toml");
+    expect(PROVENANCE_INPUTS).toContain("tsconfig.json");
+    expect(PROVENANCE_INPUTS).toContain("tsconfig.base.json");
+    expect(PROVENANCE_INPUTS).toContain("apps/wire/package.json");
+    expect(PROVENANCE_INPUTS).toContain("apps/wire/tsconfig.json");
+    expect(PROVENANCE_INPUTS).toContain("packages/render/tsconfig.json");
     expect(PROVENANCE_INPUTS).toContain("apps/wire/src/render-face");
     expect(PROVENANCE_INPUTS).toContain("packages/render/src");
     expect(PROVENANCE_INPUTS).toContain("packages/render/scripts/diagnostics.ts");
@@ -93,10 +110,15 @@ describe("source digest", () => {
       "infra/notes.md": "not an input\n",
     });
     const { files } = await sourceDigest(root);
-    expect(files).toBe(12);
+    expect(files).toBe(20);
     expect(provenanceFiles(root)).toEqual([
+      "apps/wire/package.json",
       "apps/wire/src/render-face/worker.ts",
+      "apps/wire/tsconfig.json",
+      "bun.lock",
+      "bunfig.toml",
       "infra/wrangler.toml",
+      "package.json",
       "packages/render/scripts/diagnostics.ts",
       "packages/render/scripts/provenance.ts",
       "packages/render/scripts/s5-spike.ts",
@@ -106,7 +128,10 @@ describe("source digest", () => {
       "packages/render/test/golden/working-pack.html",
       "packages/render/test/golden/working-pack.json",
       "packages/render/test/golden/working-pack.md",
+      "packages/render/tsconfig.json",
       "scripts/e2e-s5-diptych.sh",
+      "tsconfig.base.json",
+      "tsconfig.json",
     ]);
   });
 
@@ -153,15 +178,27 @@ describe("source digest", () => {
 
     await expect(sourceDigest(root)).rejects.toThrow(ProvenanceInputError);
   });
+
+  test("refuses a future TypeScript extends link until it is explicitly declared", async () => {
+    const root = fixtureTree({
+      "packages/render/src/a.ts": "export const a = 1;\n",
+      "packages/render/tsconfig.json": '{"extends":"./future-runtime-config.json"}\n',
+      "packages/render/future-runtime-config.json": "{}\n",
+    });
+
+    await expect(sourceDigest(root)).rejects.toThrow(ProvenanceInputError);
+  });
 });
 
 describe("run provenance", () => {
-  test("reports a revision, an explicit state and a digest", async () => {
+  test("reports a revision, an explicit state, a digest and closed tool versions", async () => {
     const run = await provenance();
     expect(run.revision).toMatch(/^[0-9a-f]{7,40}$|^unknown$/);
     expect(["clean", "dirty", "unknown"]).toContain(run.revision_state);
     expect(run.source_digest).toMatch(/^sha256:[0-9a-f]{64}$/);
     expect(run.source_files).toBeGreaterThan(0);
+    expect(run.bun_version).toMatch(/^\d+\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?$/);
+    expect(run.wrangler_version).toMatch(/^\d+\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?$/);
   });
 
   test("the state is never silently 'clean': it is decided by a real status call", async () => {
@@ -171,5 +208,32 @@ describe("run provenance", () => {
     const second = await provenance();
     expect(second.source_digest).toBe(first.source_digest);
     expect(second.revision_state).toBe(first.revision_state);
+  });
+});
+
+describe("runtime tool inputs", () => {
+  test("reads only exact manifest pins", () => {
+    const root = fixtureTree({ "packages/render/src/a.ts": "export const a = 1;\n" });
+    expect(runtimeToolVersions(root)).toEqual({ bun_version: "1.3.8", wrangler_version: "4.123.0" });
+  });
+
+  test("refuses a ranged Bun declaration", () => {
+    const root = fixtureTree(
+      {
+        "packages/render/src/a.ts": "export const a = 1;\n",
+        "package.json": '{"packageManager":"bun@^1.3.8"}\n',
+      },
+    );
+    expect(() => runtimeToolVersions(root)).toThrow(ProvenanceInputError);
+  });
+
+  test("refuses a ranged Wrangler declaration", () => {
+    const root = fixtureTree(
+      {
+        "packages/render/src/a.ts": "export const a = 1;\n",
+        "apps/wire/package.json": '{"devDependencies":{"wrangler":"^4.123.0"}}\n',
+      },
+    );
+    expect(() => runtimeToolVersions(root)).toThrow(ProvenanceInputError);
   });
 });

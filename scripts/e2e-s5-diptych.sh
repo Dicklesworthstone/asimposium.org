@@ -13,9 +13,9 @@
 # faces. No binding is touched, so nothing is mocked; the harness is not the W4-W6 public
 # surface and answers 404 on product routes, which phase 2 asserts.
 #
-# Evidence discipline: a failing gate prints the tool's own stdout and stderr, redacted for
-# absolute paths and credential shapes. A record that says "a gate failed" without the
-# tool's output is not evidence (this script used to do exactly that).
+# Evidence discipline: captured tool output is never replayed. A local Worker or checker can
+# return arbitrary bytes, so even a redactor is not a safe authority for a build log; fixed
+# records preserve the result and reproduction command without creating a second secret sink.
 #
 # Usage:
 #   bash scripts/e2e-s5-diptych.sh
@@ -28,6 +28,7 @@ set -uo pipefail
 
 readonly BLOCKED_EXIT=78
 readonly REPRO="bash scripts/e2e-s5-diptych.sh"
+readonly GROUP_EMPTY_RETRY_LIMIT=50
 # Not readonly: when the caller does not pin S5_PORT, phase 2 picks a free port so two runs
 # never fight over one listener.
 PORT="${S5_PORT:-8793}"
@@ -36,6 +37,8 @@ readonly WRANGLER="apps/wire/node_modules/.bin/wrangler"
 
 cd "$(dirname "${BASH_SOURCE[0]}")/.." || exit 1
 readonly ROOT="$PWD"
+# Callers may set TMPDIR to an external volume (this swarm does); the repository default stays
+# portable for ordinary developer and CI hosts.
 readonly DEFAULT_SCRATCH_ROOT="/private/tmp"
 if [[ "${TMPDIR+x}" == "x" ]]; then
   SCRATCH_ROOT="${TMPDIR}"
@@ -49,7 +52,7 @@ if [[ -z "${SCRATCH_ROOT}" ||
   "${SCRATCH_ROOT}" != /* ||
   -L "${SCRATCH_ROOT}" ||
   ! -d "${SCRATCH_ROOT}" ]]; then
-  printf '{"spike":"s5-diptych","assertion":"scratch_dir","status":"fail","detail":"scratch root was refused"}\n'
+  printf '{"assertion":"scratch_dir","bun_version":"unavailable","detail":"scratch root was refused","duration_ms":0,"repro":"bash scripts/e2e-s5-diptych.sh","revision":"unknown","revision_state":"unknown","run_id":"s5-shell-refusal-v1","seed":"<refused>","source_digest":"unavailable","source_files":0,"spike":"s5-diptych","status":"fail","wrangler_version":"unavailable"}\n'
   exit 1
 fi
 if [[ "${SCRATCH_ROOT}" == "/" ]]; then
@@ -59,7 +62,7 @@ else
 fi
 RUN_DIR="$(mktemp -d "${SCRATCH_TEMPLATE}" 2>/dev/null)"
 if [[ -z "${RUN_DIR}" || -L "${RUN_DIR}" || ! -d "${RUN_DIR}" ]]; then
-  printf '{"spike":"s5-diptych","assertion":"scratch_dir","status":"fail","detail":"scratch directory could not be created"}\n'
+  printf '{"assertion":"scratch_dir","bun_version":"unavailable","detail":"scratch directory could not be created","duration_ms":0,"repro":"bash scripts/e2e-s5-diptych.sh","revision":"unknown","revision_state":"unknown","run_id":"s5-shell-refusal-v1","seed":"<refused>","source_digest":"unavailable","source_files":0,"spike":"s5-diptych","status":"fail","wrangler_version":"unavailable"}\n'
   exit 1
 fi
 readonly RUN_DIR
@@ -83,7 +86,7 @@ seed_rejection() {
   # Deliberately describes the rule without echoing the value: a rejected seed may be
   # credential-shaped, and the diagnostic that reports a secret is the same leak with extra
   # steps. The value never reaches stdout, stderr, argv or a log.
-  printf '{"assertion":"seed_accepted","detail":"%s","duration_ms":0,"repro":"%s","seed":"<rejected>","spike":"s5-diptych","status":"fail"}\n' \
+  printf '{"assertion":"seed_accepted","bun_version":"unavailable","detail":"%s","duration_ms":0,"repro":"%s","revision":"unknown","revision_state":"unknown","run_id":"s5-shell-refusal-v1","seed":"<rejected>","source_digest":"unavailable","source_files":0,"spike":"s5-diptych","status":"fail","wrangler_version":"unavailable"}\n' \
     "$1" "${REPRO}"
 }
 
@@ -99,7 +102,7 @@ readonly RUN_ID_PATTERN='^[A-Za-z0-9][A-Za-z0-9._-]{0,79}$'
 if ! [[ "${RUN_ID}" =~ ${RUN_ID_PATTERN} ]]; then
   # This should be unreachable after the seed guard, but keeping it explicit makes the
   # one identifier shared by phase 1, shell records and phase 2 a checked boundary.
-  printf '{"assertion":"run_id_accepted","detail":"generated S-5 run identifier was refused","spike":"s5-diptych","status":"fail"}\n'
+  printf '{"assertion":"run_id_accepted","bun_version":"unavailable","detail":"generated S-5 run identifier was refused","duration_ms":0,"repro":"bash scripts/e2e-s5-diptych.sh","revision":"unknown","revision_state":"unknown","run_id":"s5-shell-refusal-v1","seed":"<refused>","source_digest":"unavailable","source_files":0,"spike":"s5-diptych","status":"fail","wrangler_version":"unavailable"}\n'
   exit 64
 fi
 
@@ -145,6 +148,8 @@ PROVENANCE_REVISION="unknown"
 PROVENANCE_REVISION_STATE="unknown"
 PROVENANCE_SOURCE_DIGEST="unavailable"
 PROVENANCE_SOURCE_FILES=0
+PROVENANCE_BUN_VERSION="unavailable"
+PROVENANCE_WRANGLER_VERSION="unavailable"
 
 load_provenance() {
   local checkpoint="${1:-initial}" raw fields
@@ -155,11 +160,13 @@ load_provenance() {
       (value.revision === "unknown" || /^[0-9a-f]{7,40}$/.test(value.revision)) &&
       ["clean", "dirty", "unknown"].includes(value.revision_state) &&
       /^sha256:[0-9a-f]{64}$/.test(value.source_digest) &&
-      Number.isSafeInteger(value.source_files) && value.source_files >= 1;
+      Number.isSafeInteger(value.source_files) && value.source_files >= 1 &&
+      /^\d+\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?$/.test(value.bun_version) &&
+      /^\d+\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?$/.test(value.wrangler_version);
     if (!valid) process.exit(1);
-    process.stdout.write([value.revision, value.revision_state, value.source_digest, value.source_files].join(" "));
+    process.stdout.write([value.revision, value.revision_state, value.source_digest, value.source_files, value.bun_version, value.wrangler_version].join(" "));
   ' "${raw}" 2>/dev/null)" || return 1
-  read -r PROVENANCE_REVISION PROVENANCE_REVISION_STATE PROVENANCE_SOURCE_DIGEST PROVENANCE_SOURCE_FILES <<<"${fields}"
+  read -r PROVENANCE_REVISION PROVENANCE_REVISION_STATE PROVENANCE_SOURCE_DIGEST PROVENANCE_SOURCE_FILES PROVENANCE_BUN_VERSION PROVENANCE_WRANGLER_VERSION <<<"${fields}"
 
   # Test-only and fail-only: after exact authority, capability and enum validation, the seam
   # can substitute one fixed valid digest and only when it differs from the real provenance.
@@ -174,8 +181,8 @@ load_provenance() {
 # string reaches this printf.
 phase_record() {
   local assertion="$1" status="$2" detail="$3" duration="$4"
-  printf '{"assertion":"%s","detail":"%s","duration_ms":%s,"repro":"%s","revision":"%s","revision_state":"%s","run_id":"%s","seed":"%s","source_digest":"%s","source_files":%s,"spike":"s5-diptych","status":"%s"}\n' \
-    "$assertion" "$detail" "$duration" "$REPRO" "$PROVENANCE_REVISION" "$PROVENANCE_REVISION_STATE" "$RUN_ID" "$SEED" "$PROVENANCE_SOURCE_DIGEST" "$PROVENANCE_SOURCE_FILES" "$status"
+  printf '{"assertion":"%s","bun_version":"%s","detail":"%s","duration_ms":%s,"repro":"%s","revision":"%s","revision_state":"%s","run_id":"%s","seed":"%s","source_digest":"%s","source_files":%s,"spike":"s5-diptych","status":"%s","wrangler_version":"%s"}\n' \
+    "$assertion" "$PROVENANCE_BUN_VERSION" "$detail" "$duration" "$REPRO" "$PROVENANCE_REVISION" "$PROVENANCE_REVISION_STATE" "$RUN_ID" "$SEED" "$PROVENANCE_SOURCE_DIGEST" "$PROVENANCE_SOURCE_FILES" "$status" "$PROVENANCE_WRANGLER_VERSION"
 }
 
 if ! load_provenance "initial"; then
@@ -194,17 +201,23 @@ readonly BASELINE_REVISION="${PROVENANCE_REVISION}"
 readonly BASELINE_REVISION_STATE="${PROVENANCE_REVISION_STATE}"
 readonly BASELINE_SOURCE_DIGEST="${PROVENANCE_SOURCE_DIGEST}"
 readonly BASELINE_SOURCE_FILES="${PROVENANCE_SOURCE_FILES}"
+readonly BASELINE_BUN_VERSION="${PROVENANCE_BUN_VERSION}"
+readonly BASELINE_WRANGLER_VERSION="${PROVENANCE_WRANGLER_VERSION}"
 
 # Revision is useful context, but byte provenance is authority: another shared-main commit
 # must not fail a run that used the same executable input set and digest.
 assert_provenance_stable() {
   local checkpoint="$1"
   if ! load_provenance "${checkpoint}" || [[ "${PROVENANCE_SOURCE_DIGEST}" != "${BASELINE_SOURCE_DIGEST}" ]] ||
-    [[ "${PROVENANCE_SOURCE_FILES}" != "${BASELINE_SOURCE_FILES}" ]]; then
+    [[ "${PROVENANCE_SOURCE_FILES}" != "${BASELINE_SOURCE_FILES}" ]] ||
+    [[ "${PROVENANCE_BUN_VERSION}" != "${BASELINE_BUN_VERSION}" ]] ||
+    [[ "${PROVENANCE_WRANGLER_VERSION}" != "${BASELINE_WRANGLER_VERSION}" ]]; then
     PROVENANCE_REVISION="${BASELINE_REVISION}"
     PROVENANCE_REVISION_STATE="${BASELINE_REVISION_STATE}"
     PROVENANCE_SOURCE_DIGEST="${BASELINE_SOURCE_DIGEST}"
     PROVENANCE_SOURCE_FILES="${BASELINE_SOURCE_FILES}"
+    PROVENANCE_BUN_VERSION="${BASELINE_BUN_VERSION}"
+    PROVENANCE_WRANGLER_VERSION="${BASELINE_WRANGLER_VERSION}"
     phase_record "provenance_drift" "fail" "source digest or input count changed at ${checkpoint}; refusing mixed evidence" "$((SECONDS * 1000))"
     phase_record "spike_summary" "fail" "S-5 evidence was refused after source provenance drift" "$((SECONDS * 1000))"
     return 1
@@ -213,24 +226,35 @@ assert_provenance_stable() {
   PROVENANCE_REVISION_STATE="${BASELINE_REVISION_STATE}"
   PROVENANCE_SOURCE_DIGEST="${BASELINE_SOURCE_DIGEST}"
   PROVENANCE_SOURCE_FILES="${BASELINE_SOURCE_FILES}"
+  PROVENANCE_BUN_VERSION="${BASELINE_BUN_VERSION}"
+  PROVENANCE_WRANGLER_VERSION="${BASELINE_WRANGLER_VERSION}"
 }
 
-# Print a captured log so a failure is diagnosable, with absolute paths and credential
-# shapes removed. Bounded: a runaway log must not bury the record that explains it.
-show_redacted() {
-  local label="$1" file="$2" limit="${3:-60}"
-  printf '%s\n' "--- ${label} (redacted, first ${limit} lines) ---" >&2
-  # `|` as the delimiter throughout: an enrollment fragment pattern starts with `#`, and
-  # reusing `#` as the delimiter makes sed fail exactly when a failure needs to be shown.
-  sed -e "s|${ROOT}|<repo>|g" -e "s|${HOME}|<home>|g" \
-      -e 's|asimp_ag_[A-Za-z0-9_-]\{4,\}|<redacted>|g' \
-      -e 's|Bearer [A-Za-z0-9._~+/-]\{8,\}|<redacted>|g' \
-      -e 's|#v1\.[A-Za-z0-9._~-]\{8,\}|<redacted>|g' \
-      "$file" | head -n "$limit" >&2
-  printf '%s\n' "--- end ${label} ---" >&2
+runtime_bun_matches_provenance() {
+  local observed
+  observed="$(bun --version 2>/dev/null)" || return 1
+  [[ "${observed}" == "${PROVENANCE_BUN_VERSION}" ]]
+}
+
+runtime_wrangler_matches_provenance() {
+  local observed
+  observed="$("${WRANGLER}" --version 2>/dev/null)" || return 1
+  [[ "${observed}" == "${PROVENANCE_WRANGLER_VERSION}" ]]
+}
+
+# Captured logs are untrusted (the Worker may emit request-controlled diagnostics). Their
+# contents never cross the S-5 process boundary; the fixed notice is enough to explain why
+# the structured phase record failed and keeps every failure stream safe to archive.
+show_fixed_log_notice() {
+  printf '%s\n' "S-5 captured local tool diagnostics; contents withheld by fixed-log policy." >&2
 }
 
 # ── phase 1: local render ───────────────────────────────────────────────────
+if ! runtime_bun_matches_provenance; then
+  phase_record "phase1_local_render" "fail" "the Bun runtime does not match the exact provenance pin" 0
+  phase_record "spike_summary" "fail" "S-5 evidence is incomplete because the Bun runtime is not pinned" 0
+  exit 1
+fi
 if ! bun packages/render/scripts/s5-spike.ts --seed "$SEED" --run-id "$RUN_ID"; then
   phase_record "phase1_local_render" "fail" "the local spike driver reported a failed assertion" 0
   exit 1
@@ -243,8 +267,8 @@ golden_status=0
 if [[ ${golden_status} -ne 0 ]]; then
   # The suite prints the face, the line number and both sides. Suppressing that and saying
   # "run the suite to see the line" wastes the one output that makes the gate actionable.
-  show_redacted "golden faces" "${GOLDEN_LOG}"
-  phase_record "phase1_golden_faces" "fail" "checked-in golden faces no longer match; the suite output is above" 0
+  show_fixed_log_notice
+  phase_record "phase1_golden_faces" "fail" "checked-in golden faces no longer match; captured diagnostics were withheld" 0
   exit 1
 fi
 phase_record "phase1_golden_faces" "pass" "checked-in md/json/html goldens match byte for byte" 0
@@ -254,6 +278,24 @@ if [[ ! -x "${WRANGLER}" ]]; then
   phase_record "phase2_worker_served" "blocked" "wrangler is not installed under apps/wire; run bun install" 0
   phase_record "spike_summary" "blocked" "phase 1 passed; phase 2 blocked on the local toolchain" 0
   exit "${BLOCKED_EXIT}"
+fi
+if ! runtime_wrangler_matches_provenance; then
+  phase_record "phase2_worker_served" "fail" "the Wrangler runtime does not match the exact provenance pin" 0
+  phase_record "spike_summary" "fail" "S-5 evidence is incomplete because the Wrangler runtime is not pinned" 0
+  exit 1
+fi
+
+valid_s5_port() {
+  [[ "${PORT}" =~ ^[1-9][0-9]{0,4}$ ]] || return 1
+  ((10#${PORT} <= 65535))
+}
+
+# Keep the lexical check and the numeric comparison coupled: a nonnumeric caller value must
+# never reach an arithmetic context (where bash may interpret it as an identifier).
+if ( [[ -n "${S5_PORT:-}" ]] && ! valid_s5_port ); then
+  phase_record "phase2_worker_served" "fail" "S5_PORT was refused by the closed local-origin boundary" 0
+  phase_record "spike_summary" "fail" "S-5 evidence is incomplete because the local origin is invalid" 0
+  exit 64
 fi
 
 readonly SERVER_LOG="${RUN_DIR}/wrangler.log"
@@ -268,6 +310,7 @@ SERVER_PID=""
 SERVER_PGID=""
 SERVER_MARKER_PID=""
 SERVER_GROUP_VERIFIED=0
+CLEANUP_FAILURE="none"
 readonly CONTROLLER_PID="$$"
 readonly SERVER_PROCESS_MARKER="s5-diptych-owner-${RUN_ID}"
 readonly SERVER_OWNER_FILE="${RUN_DIR}/server-owner"
@@ -287,54 +330,88 @@ marker_matches_owned_group() {
 }
 
 owned_group_members() {
-  positive_pid "${SERVER_PGID}" || return 1
-  ps -axo pid=,pgid= 2>/dev/null | awk -v group="${SERVER_PGID}" '$2 == group { print $1 }'
+  local snapshot
+  positive_pid "${SERVER_PGID}" || return 2
+  snapshot="$(ps -axo pid=,pgid=,stat= 2>/dev/null)" || return 2
+  [[ -n "${snapshot}" ]] || return 2
+  # A zombie retains a numeric PGID until its parent reaps it, but cannot listen, execute or
+  # survive a signal. Its explicit `Z` state is proven runtime absence, unlike a failed or
+  # malformed observation of *this group* which returns 2. Unrelated process-table rows are
+  # outside the observed scope and cannot make an exact group appear present or absent.
+  awk -v group="${SERVER_PGID}" '
+    $2 != group { next }
+    NF != 3 || $1 !~ /^[1-9][0-9]*$/ || $3 !~ /^[A-Za-z+<]+$/ { invalid = 1; next }
+    $3 !~ /^Z/ { print $1 }
+    END { exit invalid }
+  ' <<<"${snapshot}" || return 2
 }
 
 owned_group_has_non_marker_member() {
-  local member
+  local members member
+  members="$(owned_group_members)" || return 2
   while IFS= read -r member; do
     [[ -n "${member}" && "${member}" != "${SERVER_MARKER_PID}" ]] && return 0
-  done < <(owned_group_members)
+  done <<<"${members}"
   return 1
 }
 
 wait_for_owned_group_empty() {
-  for _wait in {1..20}; do
-    [[ -z "$(owned_group_members)" ]] && return 0
+  local members
+  for ((_wait = 1; _wait <= GROUP_EMPTY_RETRY_LIMIT; _wait += 1)); do
+    members="$(owned_group_members)" || return 2
+    [[ -z "${members}" ]] && return 0
     sleep 0.1
   done
   return 1
+}
+
+finalize_server_cleanup() {
+  # Reap the direct job leader before asking `ps` for a proven-empty group: a dead but
+  # unreaped leader is still visible as a zombie with the old PGID, which is neither a live
+  # Worker nor evidence that cleanup failed.
+  wait "${SERVER_PID}" 2>/dev/null || true
+  wait_for_owned_group_empty || return 1
+  SERVER_PID=""
+  SERVER_PGID=""
+  SERVER_MARKER_PID=""
+  SERVER_GROUP_VERIFIED=0
 }
 
 stop_server() {
   [[ ${SERVER_GROUP_VERIFIED} -eq 1 ]] || return 0
   # The marker is the authorization to signal this group. Do not fall back to SERVER_PID or
   # SERVER_PGID alone: the former may already be gone, and either number may have been reused.
-  marker_matches_owned_group || return 1
-  kill -TERM -- "-${SERVER_PGID}" 2>/dev/null || return 1
+  if ! marker_matches_owned_group; then
+    # The sidecar may independently notice the dead leader after our TERM and expire the
+    # group first. Missing evidence is acceptable only when a complete, valid observation
+    # proves no *live* group member remains; an uncertain or nonempty observation still fails.
+    local remaining
+    remaining="$(owned_group_members)" || { CLEANUP_FAILURE="sidecar_loss_observation_uncertain"; return 1; }
+    [[ -z "${remaining}" ]] || { CLEANUP_FAILURE="group_still_live"; return 1; }
+    finalize_server_cleanup || { CLEANUP_FAILURE="empty_group_not_proven"; return 1; }
+    return $?
+  fi
+  kill -TERM -- "-${SERVER_PGID}" 2>/dev/null || { CLEANUP_FAILURE="term_signal_refused"; return 1; }
   for _wait in {1..20}; do
-    if ! owned_group_has_non_marker_member; then
-      break
-    fi
-    sleep 0.1
+    owned_group_has_non_marker_member
+    case $? in
+      0) sleep 0.1 ;;
+      1) break ;;
+      *) CLEANUP_FAILURE="term_observation_uncertain"; return 1 ;;
+    esac
   done
 
   # The marker ignores TERM so it remains a fresh ownership proof for the escalation. If a
   # workerd child remains, signal the *verified* group; otherwise kill only the verified
   # marker. There is never a signal based solely on an old numeric PID/PGID.
-  marker_matches_owned_group || return 1
-  if owned_group_has_non_marker_member; then
-    kill -KILL -- "-${SERVER_PGID}" 2>/dev/null || return 1
-  else
-    kill -KILL "${SERVER_MARKER_PID}" 2>/dev/null || return 1
-  fi
-  wait_for_owned_group_empty || return 1
-  wait "${SERVER_PID}" 2>/dev/null || true
-  SERVER_PID=""
-  SERVER_PGID=""
-  SERVER_MARKER_PID=""
-  SERVER_GROUP_VERIFIED=0
+  marker_matches_owned_group || { CLEANUP_FAILURE="marker_changed_before_escalation"; return 1; }
+  owned_group_has_non_marker_member
+  case $? in
+    0) kill -KILL -- "-${SERVER_PGID}" 2>/dev/null || { CLEANUP_FAILURE="kill_signal_refused"; return 1; } ;;
+    1) kill -KILL "${SERVER_MARKER_PID}" 2>/dev/null || { CLEANUP_FAILURE="marker_kill_refused"; return 1; } ;;
+    *) CLEANUP_FAILURE="escalation_observation_uncertain"; return 1 ;;
+  esac
+  finalize_server_cleanup || { CLEANUP_FAILURE="empty_group_not_proven"; return 1; }
 }
 
 # True when something already answers on the port. Uses bash's own /dev/tcp so the check
@@ -401,51 +478,108 @@ set -m
       # This marker is TERM-immune and remains inside the exact Worker group. It watches the
       # *live* group leader (`$$`) rather than a historical controller PID: while the script
       # owns the leader, its PPID is `controller_pid`; SIGKILL re-parents the leader to init.
-      # If the leader has already disappeared, an empty lookup is the same ownership loss:
-      # this TERM-immune marker must self-expire rather than wait forever. In either case it
-      # may reap only its freshly verified PID/PGID/argv group.
+      # A proven missing leader is ownership loss; an unreadable process table is uncertainty,
+      # not absence. Uncertainty retries a bounded number of times and then self-expires only
+      # after proving this marker still belongs to the exact group it will signal.
       trap "" TERM INT HUP
+      local marker_group
+      marker_group="$(ps -o pgid= -p "${BASHPID}" 2>/dev/null | tr -d "[:space:]")" || exit 1
+      [[ "${marker_group}" =~ ^[1-9][0-9]*$ ]] || exit 1
       marker_matches_own_group() {
         current_pgid="$(ps -o pgid= -p "${BASHPID}" 2>/dev/null | tr -d "[:space:]")" || return 1
-        [[ "${current_pgid}" == "$$" ]] || return 1
+        [[ "${current_pgid}" == "${marker_group}" ]] || return 1
         command="$(ps -o command= -p "${BASHPID}" 2>/dev/null)" || return 1
         [[ "${command}" == *"--s5-owned-marker=${marker}"* ]]
       }
       group_members() {
-        while read -r pid pgid; do
-          [[ "${pgid}" == "$$" ]] && printf "%s\\n" "${pid}"
-        done < <(ps -axo pid=,pgid= 2>/dev/null)
+        local snapshot
+        snapshot="$(ps -axo pid=,pgid=,stat= 2>/dev/null)" || return 2
+        [[ -n "${snapshot}" ]] || return 2
+        awk -v group="${marker_group}" "
+          \$2 != group { next }
+          NF != 3 || \$1 !~ /^[1-9][0-9]*\$/ || \$3 !~ /^[A-Za-z+<]+\$/ { invalid = 1; next }
+          \$3 !~ /^Z/ { print \$1 }
+          END { exit invalid }
+        " <<<"${snapshot}" || return 2
       }
       group_has_non_marker_member() {
+        local members member
+        members="$(group_members)" || return 2
         while IFS= read -r member; do
           [[ -n "${member}" && "${member}" != "${BASHPID}" ]] && return 0
-        done < <(group_members)
+        done <<<"${members}"
         return 1
       }
-      wait_for_group_empty() {
+      observe_leader_parent() {
+        local parent
+        parent="$(ps -o ppid= -p "$$" 2>/dev/null)" || return 2
+        parent="${parent//[[:space:]]/}"
+        [[ -n "${parent}" ]] || return 1
+        [[ "${parent}" =~ ^[1-9][0-9]*$ ]] || return 2
+        printf "%s\\n" "${parent}"
+      }
+      expire_unobservable_own_group() {
+        # This path is reached only after twenty failed observations. The marker is a child of
+        # the freshly-created job-control group recorded in `marker_group`, and this marker code never calls
+        # setpgid/setsid or execs another program. That construction invariant is the remaining
+        # ownership proof when `ps` is permanently unavailable; it expires its own group and
+        # cannot select a decoy in another process group by PID or command text.
+        kill -TERM -- "-${marker_group}" 2>/dev/null || return 1
+        sleep 0.1
+        kill -KILL -- "-${marker_group}" 2>/dev/null || return 1
+        return 1
+      }
+      reap_exact_owned_group() {
+        marker_matches_own_group || return 1
+        kill -TERM -- "-${marker_group}" 2>/dev/null || return 1
         for _wait in {1..20}; do
-          [[ -z "$(group_members)" ]] && return 0
-          sleep 0.1
+          group_has_non_marker_member
+          case $? in
+            0) sleep 0.1 ;;
+            1) break ;;
+            *)
+              # We did not prove the group empty. The still-verified marker does prove this
+              # exact PGID is ours, so expire it rather than pretending an observation failure
+              # is absence or leaving a TERM-immune sidecar behind.
+              marker_matches_own_group || return 1
+              kill -KILL -- "-${marker_group}" 2>/dev/null || return 1
+              return 1
+              ;;
+          esac
         done
+        marker_matches_own_group || return 1
+        group_has_non_marker_member
+        case $? in
+          0) kill -KILL -- "-${marker_group}" 2>/dev/null || return 1 ;;
+          1) kill -KILL "${BASHPID}" 2>/dev/null || return 1 ;;
+          *)
+            marker_matches_own_group || return 1
+            kill -KILL -- "-${marker_group}" 2>/dev/null || return 1
+            ;;
+        esac
         return 1
       }
+      observation_failures=0
       while :; do
-        leader_parent="$(ps -o ppid= -p "$$" 2>/dev/null | tr -d "[:space:]")" || leader_parent=""
-        if [[ "${leader_parent}" != "${controller_pid}" ]]; then
-          marker_matches_own_group || exit 1
-          kill -TERM -- "-$$" 2>/dev/null || exit 1
-          for _wait in {1..20}; do
-            group_has_non_marker_member || break
-            sleep 0.1
-          done
-          marker_matches_own_group || exit 1
-          if group_has_non_marker_member; then
-            kill -KILL -- "-$$" 2>/dev/null || exit 1
-          else
-            kill -KILL "${BASHPID}" 2>/dev/null || exit 1
+        if leader_parent="$(observe_leader_parent)"; then
+          observation_failures=0
+          if [[ "${leader_parent}" != "${controller_pid}" ]]; then
+            reap_exact_owned_group
+            exit 1
           fi
-          wait_for_group_empty
-          exit $?
+        else
+          observation_status=$?
+          if [[ ${observation_status} -eq 1 ]]; then
+            # Absence was proven by a successful, syntactically valid process query.
+            reap_exact_owned_group
+            exit 1
+          fi
+          observation_failures=$((observation_failures + 1))
+          if [[ ${observation_failures} -ge 20 ]]; then
+            # Bounded uncertainty: expire the exact marked group, never infer absence.
+            expire_unobservable_own_group
+            exit 1
+          fi
         fi
         sleep 0.1 &
         wait "$!"
@@ -482,14 +616,25 @@ SERVER_PID=$!
 # Installed immediately: from here to the end of the run, every exit path — normal, `set -e`,
 # Ctrl-C, a CI timeout's SIGTERM, a closed terminal — stops the server.
 #
-# A signal handler must *exit*, not merely clean up: a bare `trap stop_server TERM` runs the
-# handler and then resumes the script, so a killed run would tear its own server down and
-# carry on into phase 2 against nothing. Exit codes follow the 128+signal convention, and
-# the EXIT trap re-runs stop_server harmlessly because it is idempotent.
-trap stop_server EXIT
-trap 'stop_server; exit 130' INT
-trap 'stop_server; exit 143' TERM
-trap 'stop_server; exit 129' HUP
+# Cleanup is one-shot. The first trap disables EXIT and ignores further termination signals
+# before it touches the group, so a SIGTERM during cleanup cannot re-enter a numeric-PGID
+# decision or replace the original exit status with a nested handler's status.
+CLEANUP_STARTED=0
+cleanup_and_exit() {
+  local first_status="$1"
+  if [[ ${CLEANUP_STARTED} -ne 0 ]]; then
+    exit "${first_status}"
+  fi
+  CLEANUP_STARTED=1
+  trap - EXIT
+  trap '' INT TERM HUP
+  stop_server || true
+  exit "${first_status}"
+}
+trap 'cleanup_and_exit "$?"' EXIT
+trap 'cleanup_and_exit 130' INT
+trap 'cleanup_and_exit 143' TERM
+trap 'cleanup_and_exit 129' HUP
 set +m
 
 for _attempt in {1..40}; do
@@ -508,7 +653,7 @@ for _attempt in {1..40}; do
 done
 
 if [[ ${SERVER_GROUP_VERIFIED} -ne 1 ]]; then
-  show_redacted "wrangler" "${SERVER_LOG}"
+  show_fixed_log_notice
   phase_record "phase2_worker_served" "fail" "the local Worker ownership marker could not be verified" "$((SECONDS * 1000))"
   exit 1
 fi
@@ -527,8 +672,8 @@ for _attempt in {1..40}; do
 done
 
 if [[ ${ready} -ne 1 ]]; then
-  show_redacted "wrangler" "${SERVER_LOG}"
-  phase_record "phase2_worker_served" "fail" "the local Worker did not answer; its log is above" "$((SECONDS * 1000))"
+  show_fixed_log_notice
+  phase_record "phase2_worker_served" "fail" "the local Worker did not answer; captured diagnostics were withheld" "$((SECONDS * 1000))"
   exit 1
 fi
 
@@ -537,13 +682,21 @@ if ! assert_provenance_stable "after_worker_ready_before_checker"; then
 fi
 
 readonly CHECK_LOG="${RUN_DIR}/check.log"
-S5_ORIGIN="${ORIGIN}" S5_SEED="${SEED}" S5_RUN_ID="${RUN_ID}" bun apps/wire/src/render-face/check.ts 2>"${CHECK_LOG}"
+S5_ORIGIN="${ORIGIN}" S5_SEED="${SEED}" S5_RUN_ID="${RUN_ID}" \
+  S5_EXPECTED_SOURCE_DIGEST="${BASELINE_SOURCE_DIGEST}" \
+  S5_EXPECTED_SOURCE_FILES="${BASELINE_SOURCE_FILES}" \
+  S5_EXPECTED_BUN_VERSION="${BASELINE_BUN_VERSION}" \
+  S5_EXPECTED_WRANGLER_VERSION="${BASELINE_WRANGLER_VERSION}" \
+  bun apps/wire/src/render-face/check.ts 2>"${CHECK_LOG}"
 readonly CHECK_EXIT=$?
+CHECK_DIAGNOSTICS=0
 if [[ -s "${CHECK_LOG}" ]]; then
-  show_redacted "phase 2 stderr" "${CHECK_LOG}" 40
+  show_fixed_log_notice
+  phase_record "checker_stderr" "fail" "the checker wrote unexpected diagnostics; contents were withheld" "$((SECONDS * 1000))"
+  CHECK_DIAGNOSTICS=1
 fi
 if ! stop_server; then
-  phase_record "phase2_worker_served" "fail" "owned local Worker cleanup could not be verified" "$((SECONDS * 1000))"
+  phase_record "phase2_worker_served" "fail" "owned local Worker cleanup could not be verified: ${CLEANUP_FAILURE}" "$((SECONDS * 1000))"
   exit 1
 fi
 
@@ -551,9 +704,9 @@ if ! assert_provenance_stable "after_checker"; then
   exit 1
 fi
 
-if [[ ${CHECK_EXIT} -ne 0 ]]; then
-  show_redacted "wrangler" "${SERVER_LOG}" 40
-  phase_record "phase2_worker_served" "fail" "served faces disagreed with the local render; records and logs are above" "$((SECONDS * 1000))"
+if [[ ${CHECK_EXIT} -ne 0 || ${CHECK_DIAGNOSTICS} -ne 0 ]]; then
+  show_fixed_log_notice
+  phase_record "phase2_worker_served" "fail" "served faces disagreed with the local render; captured diagnostics were withheld" "$((SECONDS * 1000))"
   exit 1
 fi
 
