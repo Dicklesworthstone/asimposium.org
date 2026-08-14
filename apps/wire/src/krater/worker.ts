@@ -6,6 +6,7 @@ import {
   cursorMatchesEvents,
   ensureProblem,
   eventChainMatches,
+  explainUndigestedEventProbe,
   inspectProblem,
   KraterIdempotencyConflictError,
   KraterIntegrityBackfillRequiredError,
@@ -34,6 +35,29 @@ import {
 
 interface KraterHarnessEnv extends KraterOutboxEnv {
   DB: D1Database;
+  /**
+   * The local harness capability. Declared only by wrangler.s2.toml and
+   * wrangler.s2-legacy.toml, which exist to run this file under Wrangler on a developer
+   * machine; no deployed configuration defines it. Optional in the type because its absence
+   * is the production case and must be handled, not assumed away.
+   */
+  S2_LOCAL_HARNESS?: string;
+}
+
+export const S2_LOCAL_HARNESS_CAPABILITY = "enabled";
+const HARNESS_PATH_PREFIX = "/__s2/";
+
+/**
+ * Whether the harness surface exists at all in this environment.
+ *
+ * Hostname alone was the wrong control. `assertLoopbackOnly` inspects `url.hostname`, which is
+ * derived from the request's Host header — a value the client sends. It also guarded only two
+ * of the routes, leaving `/__s2/tamper-envelope` and `/__s2/redact-content`, both mutations,
+ * with no check at all. A binding cannot be forged over the wire: an environment that does not
+ * declare it has no harness routes, whatever Host it is asked for.
+ */
+function harnessEnabled(env: KraterHarnessEnv): boolean {
+  return env.S2_LOCAL_HARNESS === S2_LOCAL_HARNESS_CAPABILITY;
 }
 
 function response(body: unknown, status = 200): Response {
@@ -377,8 +401,24 @@ async function handleHarnessRequest(
   _ctx: ExecutionContext,
 ): Promise<Response> {
   const url = new URL(request.url);
+  // Before parsing, before touching D1: without the capability the harness surface is not
+  // merely refused, it is absent. 404 rather than 403 so an environment that lacks the binding
+  // does not confirm that these paths mean anything.
+  if (url.pathname.startsWith(HARNESS_PATH_PREFIX) && !harnessEnabled(env)) {
+    return response({ code: "KRATER_HARNESS_DISABLED" }, 404);
+  }
   let surface: "read" | "write" = "read";
   try {
+    // Loopback-only. Reports the engine's chosen plan for the completeness probe that runs on
+    // every write. The caller supplies a problem id and nothing else — the statement text
+    // lives in krater.ts and is the same constant the probe itself executes, so this cannot
+    // drift from the query it describes and offers no surface for caller-supplied SQL.
+    if (request.method === "GET" && url.pathname === "/__s2/integrity/probe-plan") {
+      assertLoopbackOnly(url);
+      const plan = await explainUndigestedEventProbe(env.DB, queryString(url, "problem_id"));
+      return response(plan);
+    }
+
     // Loopback-only fixture route; see plantLegacyProblemForHarness.
     if (request.method === "POST" && url.pathname === "/__s2/legacy/plant") {
       surface = "write";
@@ -451,6 +491,15 @@ async function handleHarnessRequest(
         d1_rows_read: result.d1RowsRead,
         d1_rows_written: result.d1RowsWritten,
         d1_sql_ms: result.d1SqlMs,
+        // The completeness preflight runs before the transaction and was absent from this
+        // receipt entirely, which is why the index it depends on could not be evidenced here.
+        preflight_rows_read: result.preflight.rows_read,
+        preflight_sql_ms: result.preflight.sql_ms,
+        preflight_ms: result.preflight.wall_ms,
+        preflight_statements: result.preflight.statements,
+        preflight_fast_path: result.preflight.upgraded_fast_path,
+        total_rows_read: result.totalRowsRead,
+        total_ms: result.totalMs,
         lock_wait_ms: result.lockWaitMs,
         retry_count: result.retryCount,
         outbox_handoff: outboxHandoff,

@@ -15,6 +15,10 @@ readonly S2_WRANGLER_CONFIG="apps/wire/src/krater/wrangler.s2.toml"
 readonly S2_LEGACY_CONFIG="apps/wire/src/krater/wrangler.s2-legacy.toml"
 readonly S2_LEGACY_EXISTING_FIXTURE="apps/wire/src/krater/fixtures/legacy-existing-event.sql"
 readonly S2_FORWARD_MIGRATION="db/migrations/0004_krater_integrity_v1.sql"
+# Applied as a second, separate step so the legacy lane observes the database at exactly 0004
+# and then at exactly 0005. Folding both into one apply would prove neither: the phase run
+# between them is what establishes that the index is absent before 0005 and chosen after it.
+readonly S2_INDEX_MIGRATION="db/migrations/0005_krater_undigested_index.sql"
 readonly S2_READY_DEADLINE_SECONDS=15
 readonly S2_PHASE_DEADLINE_SECONDS=75
 readonly S2_TERMINATE_WAIT_TICKS=20
@@ -27,6 +31,7 @@ readonly -a S2_SOURCE_PATHS=(
   apps/wire/src/krater/wrangler.s2.toml
   db/migrations/0001_krater_v0.sql
   db/migrations/0004_krater_integrity_v1.sql
+  db/migrations/0005_krater_undigested_index.sql
   scripts/e2e-s2-krater.sh
 )
 
@@ -273,7 +278,7 @@ emit_legacy_failure() {
 # Each stage owns its own persistence directory and its own dynamically chosen
 # port, so it can neither read nor collide with the primary run's state.
 run_legacy_upgrade() {
-  local phase="$1" fixture="$2"
+  local phase="$1" fixture="$2" index_phase="${3:-}"
   local dir port log status
 
   dir="$(mktemp -d -t asimposium-s2-krater-legacy)"
@@ -326,6 +331,39 @@ run_legacy_upgrade() {
   fi
   stop_worker
   S2_ACTIVE_ORIGIN="${S2_ORIGIN}"
+
+  # Second stage: 0004 -> 0005 on the database the first stage just used, rows and all.
+  #
+  # This is the only 0004-era database in the run. Without this the forward-migration evidence
+  # stopped at 0004 and the index was only ever seen on a database born with it, so nothing
+  # here executed the upgrade the deployed fleet will perform. The Worker is restarted because
+  # the first stage must observe the schema before the index exists.
+  if [[ "${status}" -eq 0 && -n "${index_phase}" ]]; then
+    if ! "${S2_WRANGLER}" d1 execute DB --config "${S2_LEGACY_CONFIG}" --local \
+      --persist-to "${dir}" --file "${S2_INDEX_MIGRATION}" >"${dir}/index-migration.log" 2>&1; then
+      emit_legacy_failure "${index_phase}" "S2_LEGACY_INDEX_MIGRATION_FAILED" "${dir}/index-migration.log"
+      return 1
+    fi
+
+    if ! port="$(choose_available_port)"; then
+      emit "{\"tool\":\"bash\",\"package\":\"apps/wire\",\"suite\":\"s2-krater-local-d1-upgrade\",\"scenario\":\"${index_phase}\",\"status\":\"fail\",\"code\":\"S2_LEGACY_PORT_UNAVAILABLE\",\"reproduce\":\"scripts/e2e-s2-krater.sh\"}"
+      return 1
+    fi
+
+    log="${dir}/wrangler-indexed.log"
+    if ! start_worker "${S2_LEGACY_CONFIG}" "${dir}" "${port}" "${log}"; then
+      emit_legacy_failure "${index_phase}" "S2_LEGACY_WORKER_UNAVAILABLE" "${log}"
+      S2_ACTIVE_ORIGIN="${S2_ORIGIN}"
+      return 1
+    fi
+
+    if ! run_phase "${index_phase}"; then
+      status=$?
+      emit_legacy_failure "${index_phase}" "S2_LEGACY_UPGRADE_SCENARIO_FAILED" "${log}"
+    fi
+    stop_worker
+    S2_ACTIVE_ORIGIN="${S2_ORIGIN}"
+  fi
   return "${status}"
 }
 
@@ -490,7 +528,7 @@ stop_worker
 # These run after the primary proof and before the blocked records, because a
 # broken upgrade must fail the run rather than be reported alongside a green
 # local proof. Each owns its own port and persistence directory.
-if ! run_legacy_upgrade "upgrade-existing" "${S2_LEGACY_EXISTING_FIXTURE}"; then
+if ! run_legacy_upgrade "upgrade-existing" "${S2_LEGACY_EXISTING_FIXTURE}" "upgrade-indexed"; then
   S2_CLIENT_EXIT=$?
   exit "${S2_CLIENT_EXIT}"
 fi

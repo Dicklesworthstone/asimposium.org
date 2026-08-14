@@ -1,4 +1,7 @@
+import { Database } from "bun:sqlite";
 import { describe, expect, test } from "bun:test";
+import { readFileSync } from "node:fs";
+import { join, resolve } from "node:path";
 import {
   canonicalJson,
   cursorMatchesEvents,
@@ -14,6 +17,8 @@ import {
   replayClaimProjections,
   sha256Hex,
   transactionBoundaryMatches,
+  UNDIGESTED_EVENT_INDEX,
+  UNDIGESTED_EVENT_PROBE_SQL,
   validateFtsReadInput,
 } from "./krater";
 
@@ -126,5 +131,75 @@ describe("Krater deterministic contracts", () => {
     expect(() => deterministicWorkload("seed with spaces", 1, "2026-08-14T00:00:00.000Z")).toThrow(
       KraterValidationError,
     );
+  });
+});
+
+describe("migration 0005 forward-applies onto an exact 0004 database", () => {
+  // The index this proves is the difference between the completeness probe seeking and the
+  // probe searching a problem's whole log on every write. The migration files are read from
+  // disk and applied in order, so the thing under test is the shipped SQL, not a restatement
+  // of it, and the query explained is the constant the probe itself executes.
+  const MIGRATIONS = resolve(import.meta.dir, "..", "..", "..", "..", "db", "migrations");
+  const THROUGH_0004 = [
+    "0001_krater_v0.sql",
+    "0002_enrollment_g0.sql",
+    "0003_auth_nonce_replay.sql",
+    "0004_krater_integrity_v1.sql",
+  ];
+  const INDEX_MIGRATION = "0005_krater_undigested_index.sql";
+
+  function planSteps(db: Database): string[] {
+    const rows = db
+      .query(`EXPLAIN QUERY PLAN ${UNDIGESTED_EVENT_PROBE_SQL}`)
+      .all("P-plan-probe") as { detail: string }[];
+    return rows.map((row) => row.detail);
+  }
+
+  function indexNames(db: Database): string[] {
+    return (
+      db
+        .query("SELECT name FROM sqlite_master WHERE type = 'index' AND tbl_name = 'events'")
+        .all() as { name: string }[]
+    ).map((row) => row.name);
+  }
+
+  function openAt0004(): Database {
+    const db = new Database(":memory:");
+    for (const migration of THROUGH_0004) {
+      db.run(readFileSync(join(MIGRATIONS, migration), "utf8"));
+    }
+    return db;
+  }
+
+  test("an exact 0004 database has no partial index and does not use one", () => {
+    const db = openAt0004();
+    expect(indexNames(db)).not.toContain(UNDIGESTED_EVENT_INDEX);
+    const steps = planSteps(db);
+    expect(steps.length).toBeGreaterThan(0);
+    // The pre-0005 plan is the defect this migration exists to fix: a seek to the problem
+    // followed by a walk of its log. Asserting it keeps the test able to tell the two apart.
+    expect(steps.some((step) => step.includes(UNDIGESTED_EVENT_INDEX))).toBe(false);
+    db.close();
+  });
+
+  test("applying 0005 creates the index and the probe then uses it", () => {
+    const db = openAt0004();
+    db.run(readFileSync(join(MIGRATIONS, INDEX_MIGRATION), "utf8"));
+    expect(indexNames(db)).toContain(UNDIGESTED_EVENT_INDEX);
+    const steps = planSteps(db);
+    expect(steps.length).toBeGreaterThan(0);
+    expect(steps.every((step) => step.includes(UNDIGESTED_EVENT_INDEX))).toBe(true);
+    // A seek, not a scan: SCAN would mean the partial predicate stopped implying the query's.
+    expect(steps.some((step) => step.startsWith("SCAN"))).toBe(false);
+    db.close();
+  });
+
+  test("0005 is idempotent, so a database that already has it re-applies cleanly", () => {
+    const db = openAt0004();
+    const sql = readFileSync(join(MIGRATIONS, INDEX_MIGRATION), "utf8");
+    db.run(sql);
+    expect(() => db.run(sql)).not.toThrow();
+    expect(indexNames(db).filter((name) => name === UNDIGESTED_EVENT_INDEX)).toHaveLength(1);
+    db.close();
   });
 });

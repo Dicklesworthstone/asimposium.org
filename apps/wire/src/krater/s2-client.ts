@@ -31,6 +31,24 @@ const LEGACY_WRITE_BOUNDARY_PROBLEM = "P-legacy-write-boundary";
 /** A completed problem that later grows one undigested envelope. */
 const LEGACY_MIXED_PROBLEM = "P-legacy-mixed-digest";
 
+/**
+ * Two upgraded problems whose only difference is how much history they carry, so the write
+ * preflight's cost can be compared across a 64x difference in log length. They are their own
+ * subjects rather than existing ones because every other problem here has its cursor and
+ * counters pinned by other assertions, and this scenario has to write.
+ */
+const PREFLIGHT_SMALL_PROBLEM = "P-preflight-small";
+const PREFLIGHT_LARGE_PROBLEM = "P-preflight-large";
+const PREFLIGHT_SMALL_EVENTS = 8;
+const PREFLIGHT_LARGE_EVENTS = 512;
+/**
+ * The preflight reads a problem head, a backfill row and the completeness probe. Three seeks
+ * plus the probe's empty result is a handful of rows; the ceiling sits far under
+ * PREFLIGHT_LARGE_EVENTS so a preflight that walked the log could not pass it, and far under
+ * PREFLIGHT_SMALL_EVENTS's own history too. It bounds the measurement, it does not model it.
+ */
+const PREFLIGHT_ROWS_CEILING = 8;
+
 interface WriteResult {
   event_id: string;
   seq: number;
@@ -739,6 +757,144 @@ async function mixedDigestLogIsNotComplete(): Promise<void> {
   assertEqual(read.status, 409, "S2_MIXED_READ_NOT_BLOCKED");
 }
 
+/**
+ * The completeness probe runs on every write, and its cost depends entirely on whether the
+ * engine uses the partial index migration 0005 adds. A comment saying so is not evidence, and
+ * the failure mode is silent: edit either the probe's WHERE clause or the index predicate so
+ * they no longer imply one another and SQLite quietly reverts to searching the problem's whole
+ * log, with every existing test still green.
+ *
+ * So the plan itself is asserted, on the path that matters — a healthy problem with no
+ * undigested envelope, where the engine has to prove a negative. The harness sends a problem
+ * id; the statement being explained is the same constant the probe executes.
+ */
+async function readProbePlan(
+  problemId: string,
+  scenario: string,
+): Promise<Record<string, unknown>> {
+  const plan = await request(
+    "GET",
+    `/__s2/integrity/probe-plan?problem_id=${problemId}`,
+    scenario,
+  );
+  assertEqual(plan.status, 200, "S2_PROBE_PLAN_READ_FAILED");
+  return plan.body;
+}
+
+/** Every assertion that the plan is the indexed one, so the three call sites cannot drift. */
+function assertIndexedProbePlan(plan: Record<string, unknown>): void {
+  assertEqual(booleanAt(plan, "uses_index"), true, "S2_PROBE_PLAN_INDEX_UNUSED");
+  assertEqual(booleanAt(plan, "avoids_table_scan"), true, "S2_PROBE_PLAN_FULL_SCAN");
+  // The exact step, not just "mentions the index": a plan that named the index while adding a
+  // sort or a second loop would still satisfy the weaker checks above.
+  assertEqual(
+    booleanAt(plan, "matches_expected_search"),
+    true,
+    "S2_PROBE_PLAN_SEARCH_DETAIL_UNEXPECTED",
+  );
+  assertEqual(
+    stringAt(plan, "index_name"),
+    "events_undigested_idx",
+    "S2_PROBE_PLAN_INDEX_NAME_INVALID",
+  );
+  assertEqual(
+    Array.isArray(plan.steps) && plan.steps.length === 1,
+    true,
+    "S2_PROBE_PLAN_NOT_SINGLE_STEP",
+  );
+}
+
+async function probePlanUsesPartialIndex(): Promise<void> {
+  assertIndexedProbePlan(
+    await readProbePlan(LEGACY_AT_LIMIT_PROBLEM, "integrity-probe-plan-uses-partial-index"),
+  );
+
+  // And the problem really is the no-match case: it is writable, which the completeness
+  // probe only permits when it finds no undigested envelope.
+  const healthy = await state(LEGACY_AT_LIMIT_PROBLEM, "integrity-probe-plan-healthy-subject");
+  assertEqual(
+    healthy.counts.integrity_checkpoints,
+    LEGACY_AT_LIMIT_EVENTS,
+    "S2_PROBE_PLAN_SUBJECT_NOT_UPGRADED",
+  );
+}
+
+/**
+ * What the write preflight actually costs, measured on two upgraded problems whose histories
+ * differ 64-fold.
+ *
+ * The receipt used to start its clock after the preflight, so `transaction_ms` and
+ * `d1_rows_read` described only the batch and the completeness check that runs before every
+ * write — the thing migration 0005 exists to bound — was absent from the evidence entirely. A
+ * plan assertion says the index is chosen; this says what choosing it is worth.
+ *
+ * The claim is bounded, not constant: preflight rows stay under a small ceiling while the log
+ * behind them grows from 8 envelopes to 512, so the cost does not track ledger size. Nothing
+ * here measures deployed D1, and a seek into a B-tree is not O(1).
+ */
+async function preflightCostDoesNotGrowWithHistory(): Promise<void> {
+  for (const [problemId, events, scenario] of [
+    [PREFLIGHT_SMALL_PROBLEM, PREFLIGHT_SMALL_EVENTS, "preflight-small-plant"],
+    [PREFLIGHT_LARGE_PROBLEM, PREFLIGHT_LARGE_EVENTS, "preflight-large-plant"],
+  ] as const) {
+    await plantLegacy(problemId, events, scenario);
+    const upgraded = await attemptLegacyBackfill(problemId, `${scenario}-backfill`);
+    assertEqual(upgraded.status, 200, "S2_PREFLIGHT_SUBJECT_BACKFILL_FAILED");
+  }
+
+  const measured: Record<string, number> = {};
+  for (const [problemId, events, scenario] of [
+    [PREFLIGHT_SMALL_PROBLEM, PREFLIGHT_SMALL_EVENTS, "preflight-cost-small-history"],
+    [PREFLIGHT_LARGE_PROBLEM, PREFLIGHT_LARGE_EVENTS, "preflight-cost-large-history"],
+  ] as const) {
+    const result = await request("POST", "/__s2/write", scenario, {
+      ...writeBody(events + 1, problemId, "Preflight cost measurement claim."),
+      s2_defer_outbox_nudge: true,
+    });
+    assertEqual(result.status, 200, "S2_PREFLIGHT_WRITE_FAILED");
+    assertEqual(numberAt(result.body, "post_cursor"), events + 1, "S2_PREFLIGHT_CURSOR_INVALID");
+
+    // The fast path is the one under test. A false here would mean the write re-ran the bounded
+    // replay, and its rows would say nothing about the probe.
+    assertEqual(
+      booleanAt(result.body, "preflight_fast_path"),
+      true,
+      "S2_PREFLIGHT_NOT_FAST_PATH",
+    );
+    // Head, backfill row, probe. Identical for both, so any cost difference between them can
+    // only come from rows read, never from a different number of round trips.
+    assertEqual(
+      numberAt(result.body, "preflight_statements"),
+      3,
+      "S2_PREFLIGHT_STATEMENT_COUNT_INVALID",
+    );
+
+    const preflightRows = numberAt(result.body, "preflight_rows_read");
+    assertEqual(preflightRows <= PREFLIGHT_ROWS_CEILING, true, "S2_PREFLIGHT_ROWS_UNBOUNDED");
+    // The receipt has to add up, or the split between preflight and transaction could hide a
+    // cost in the gap between them.
+    assertEqual(
+      numberAt(result.body, "total_rows_read"),
+      preflightRows + numberAt(result.body, "d1_rows_read"),
+      "S2_PREFLIGHT_TOTAL_ROWS_INCONSISTENT",
+    );
+    assertEqual(
+      numberAt(result.body, "total_ms") >= numberAt(result.body, "transaction_ms"),
+      true,
+      "S2_PREFLIGHT_TOTAL_MS_INCONSISTENT",
+    );
+    measured[problemId] = preflightRows;
+  }
+
+  const small = measured[PREFLIGHT_SMALL_PROBLEM] ?? -1;
+  const large = measured[PREFLIGHT_LARGE_PROBLEM] ?? -1;
+  assertEqual(small >= 0 && large >= 0, true, "S2_PREFLIGHT_MEASUREMENT_MISSING");
+  // 64x the history must not cost measurably more. Without the index the large problem's probe
+  // reads its whole log to prove no envelope is undigested, and this is the assertion that
+  // fails.
+  assertEqual(large <= small + 1, true, "S2_PREFLIGHT_ROWS_GREW_WITH_HISTORY");
+}
+
 /** The refusal must survive a restart: it is a property of the data, not of a warm process. */
 async function legacyBoundedBackfillAfterRestart(): Promise<void> {
   const refused = await attemptLegacyBackfill(
@@ -1150,6 +1306,7 @@ async function exercise(): Promise<void> {
   await legacyBoundedBackfill();
   await ordinaryWritesPastTheLimit();
   await mixedDigestLogIsNotComplete();
+  await probePlanUsesPartialIndex();
   await exerciseOutboxDrainer();
 
   emit({

@@ -4,6 +4,12 @@ compatibility_date = "2026-08-13"
 compatibility_flags = ["nodejs_compat"]
 workers_dev = false
 
+# The /__s2/ harness surface exists only where this is declared. No deployed configuration
+# declares it, so the diagnostic and fixture routes are absent in production rather than
+# refused there; krater.test.ts asserts both halves of that.
+[vars]
+S2_LOCAL_HARNESS = "enabled"
+
 [[d1_databases]]
 binding = "DB"
 database_name = "asimposium-s2-krater-local"

@@ -27,10 +27,33 @@ export interface KraterWriteResult {
   buildDigest: string;
   chainDigest: string;
   checkpointDigest: string;
-  transactionMs: number;
-  d1RowsRead: number;
+  /**
+   * Time from the first head read through the post-write verification reads, across every
+   * retry attempt.
+   *
+   * Not the transaction's duration, despite what this field was called: the span includes a
+   * head read before `db.batch` and four verification reads after it, and D1 does not expose
+   * the transaction's own time separately. Naming it for the batch would have been the same
+   * class of error as reporting lock wait, which this deliberately does not do.
+   */
+  writePhaseMs: number;
+  /**
+   * Rows read by the write batch alone.
+   *
+   * A subtotal, not the write's row cost: the head read and the four post-write verification
+   * reads go through `.first()`, which discards `meta`, so their rows are not counted anywhere.
+   * No complete row total is published, because one cannot be computed from what is measured.
+   */
+  batchRowsRead: number;
   d1RowsWritten: number;
   d1SqlMs: number | null;
+  /** What the completeness preflight cost, which `writePhaseMs` excludes entirely. */
+  preflight: KraterPreflightCost;
+  /**
+   * Wall time from function entry to return: validation, preflight, payload and request
+   * hashing, every retry, and the verification reads. Complete, unlike the row counts.
+   */
+  totalMs: number;
   /** D1 does not expose lock wait separately; do not relabel elapsed time as lock wait. */
   lockWaitMs: null;
   retryCount: number;
@@ -340,6 +363,74 @@ function sqlDuration(results: readonly D1Result<unknown>[]): number | null {
   return durations.length === 0 ? null : durations.reduce((total, duration) => total + duration, 0);
 }
 
+/**
+ * What the completeness preflight cost, measured rather than asserted.
+ *
+ * The write receipt used to start its clock *after* this preflight, so the statements that run
+ * before every write were absent from the only evidence the harness collected — including the
+ * probe whose cost migration 0005 exists to bound. Reporting it separately keeps the two
+ * halves distinguishable instead of folding an unmeasured cost into a total.
+ */
+export interface KraterPreflightCost {
+  /** Rows the preflight read, summed across its statements as D1 reports them. */
+  readonly rows_read: number;
+  /** Engine-reported SQL time for those statements; null when the engine reports none. */
+  readonly sql_ms: number | null;
+  /** How many statements the preflight issued. */
+  readonly statements: number;
+  /** Wall time inside the preflight, which on the replay path includes digest work. */
+  readonly wall_ms: number;
+  /** True when the problem was already upgraded and the preflight returned at the probe. */
+  readonly upgraded_fast_path: boolean;
+}
+
+interface CostAccumulator {
+  rows_read: number;
+  sql_ms: number;
+  sql_reported: boolean;
+  statements: number;
+}
+
+function newCostAccumulator(): CostAccumulator {
+  return { rows_read: 0, sql_ms: 0, sql_reported: false, statements: 0 };
+}
+
+/**
+ * Read one row while recording what the engine charged for it.
+ *
+ * `.first()` discards `meta`, so a preflight built from it cannot report rows read at all. This
+ * runs the same statement through `.all()` purely to keep the metrics, and returns the first
+ * row so callers read exactly as they did before.
+ */
+async function firstRowMeasured<T>(
+  cost: CostAccumulator,
+  prepared: D1PreparedStatement,
+): Promise<T | null> {
+  const result = await prepared.all<T>();
+  cost.rows_read += result.meta.rows_read;
+  cost.statements += 1;
+  const reported = result.meta.timings?.sql_duration_ms;
+  if (reported !== undefined) {
+    cost.sql_ms += reported;
+    cost.sql_reported = true;
+  }
+  return result.results[0] ?? null;
+}
+
+function settleCost(
+  cost: CostAccumulator,
+  startedAt: number,
+  upgradedFastPath: boolean,
+): KraterPreflightCost {
+  return {
+    rows_read: cost.rows_read,
+    sql_ms: cost.sql_reported ? Math.round(cost.sql_ms * 1_000) / 1_000 : null,
+    statements: cost.statements,
+    wall_ms: Math.round((performance.now() - startedAt) * 1_000) / 1_000,
+    upgraded_fast_path: upgradedFastPath,
+  };
+}
+
 function isRetryableChainConflict(error: unknown): boolean {
   const message = error instanceof Error ? error.message : String(error);
   return /KRATER_CHAIN_HEAD_MISMATCH|SQLITE_BUSY|database is locked/i.test(message);
@@ -409,12 +500,16 @@ function backfillRequired(message: string): never {
 async function readIntegrityBackfill(
   db: D1Database,
   problemId: string,
+  cost: CostAccumulator,
 ): Promise<IntegrityBackfillRow | null> {
-  return statement(
-    db,
-    "SELECT state, legacy_event_count FROM krater_integrity_backfill WHERE problem_id = ?",
-    problemId,
-  ).first<IntegrityBackfillRow>();
+  return firstRowMeasured<IntegrityBackfillRow>(
+    cost,
+    statement(
+      db,
+      "SELECT state, legacy_event_count FROM krater_integrity_backfill WHERE problem_id = ?",
+      problemId,
+    ),
+  );
 }
 
 /**
@@ -433,22 +528,117 @@ async function readIntegrityBackfill(
  * the cost tracks outstanding legacy work rather than ledger size. The index is ordered
  * `(problem_id, seq)`, so the ORDER BY is satisfied without a sort.
  *
+ * It is a search, not a covering read: the index holds `(problem_id, seq)` and this selects
+ * `id`, so a row that matches still costs a table visit. On the healthy path nothing matches,
+ * so nothing is visited — the bound claimed here is "does not grow with the problem's history",
+ * measured as rows read by `firstUndigestedEvent`, and is not a claim of constant cost.
+ *
  * Exported so the equivalence to the exhaustive predicate it replaced is testable rather than
  * assumed; `s2-client.ts` pins the case that distinguishes them, a partly digested log.
  */
+/**
+ * The probe's SQL, named once so the query that runs and the query whose plan is asserted can
+ * never drift apart. A partial index is only used when the query's restriction implies the
+ * index's own predicate, so a copy edited in one place and not the other would silently
+ * degrade the plan while every test still passed.
+ */
+export const UNDIGESTED_EVENT_PROBE_SQL = `SELECT id FROM events
+     WHERE problem_id = ? AND (row_digest IS NULL OR chain_digest IS NULL)
+     ORDER BY seq ASC LIMIT 1`;
+
+/** The index migration 0005 adds for that predicate. */
+export const UNDIGESTED_EVENT_INDEX = "events_undigested_idx";
+
+/**
+ * The exact plan step the probe must produce once 0005 is applied.
+ *
+ * `USING INDEX`, not `USING COVERING INDEX`: the index carries `(problem_id, seq)` and the
+ * probe selects `id`, so a matching row still costs a table visit. That is deliberate and
+ * harmless — the healthy path has no matching row, so nothing is visited — but it means the
+ * plan must never be described as index-only. `TABLE` is optional because SQLite spells the
+ * same plan `SEARCH TABLE events ...` in older releases; table, index and the constrained
+ * column are pinned exactly.
+ */
+const UNDIGESTED_PROBE_SEARCH_DETAIL =
+  /^SEARCH (?:TABLE )?events USING INDEX events_undigested_idx \(problem_id=\?\)$/;
+
+export interface UndigestedProbeResult {
+  /** The first still-undigested envelope of the problem, or null when the log is complete. */
+  readonly event_id: string | null;
+  readonly rows_read: number;
+  readonly sql_ms: number | null;
+  readonly wall_ms: number;
+}
+
 export async function firstUndigestedEvent(
   db: D1Database,
   problemId: string,
-): Promise<string | null> {
+): Promise<UndigestedProbeResult> {
   requireIdentifier("problemId", problemId);
-  const row = await statement(
+  const startedAt = performance.now();
+  const cost = newCostAccumulator();
+  const row = await firstRowMeasured<{ id: string }>(
+    cost,
+    statement(db, UNDIGESTED_EVENT_PROBE_SQL, problemId),
+  );
+  return {
+    event_id: row?.id ?? null,
+    rows_read: cost.rows_read,
+    sql_ms: cost.sql_reported ? Math.round(cost.sql_ms * 1_000) / 1_000 : null,
+    wall_ms: Math.round((performance.now() - startedAt) * 1_000) / 1_000,
+  };
+}
+
+export interface UndigestedProbePlan {
+  /** True when every step of the plan is served by the partial index. */
+  readonly uses_index: boolean;
+  /**
+   * True when no step is a table scan.
+   *
+   * Named for what the predicate actually proves. It was `index_only`, which claimed covering
+   * behaviour the index does not have: `id` is not in the index, so SQLite may still visit the
+   * table for a row that matches. Only the absence of a scan is established here.
+   */
+  readonly avoids_table_scan: boolean;
+  /** True when the plan is exactly one step and that step is the expected index search. */
+  readonly matches_expected_search: boolean;
+  /** The single plan step when there is exactly one, so the assertion can name what it saw. */
+  readonly search_detail: string | null;
+  readonly index_name: string;
+  /** Plan step descriptions, as the engine reports them. */
+  readonly steps: readonly string[];
+}
+
+/**
+ * The query plan the engine actually chooses for the completeness probe.
+ *
+ * Comments claiming an index is used are not evidence; this makes the claim executable. It
+ * explains `UNDIGESTED_EVENT_PROBE_SQL` itself rather than a restatement of it, so the
+ * assertion tracks the query that runs on every write.
+ *
+ * Callers pass a problem id only — never SQL. The statement text is owned here.
+ */
+export async function explainUndigestedEventProbe(
+  db: D1Database,
+  problemId: string,
+): Promise<UndigestedProbePlan> {
+  requireIdentifier("problemId", problemId);
+  const explained = await statement(
     db,
-    `SELECT id FROM events
-     WHERE problem_id = ? AND (row_digest IS NULL OR chain_digest IS NULL)
-     ORDER BY seq ASC LIMIT 1`,
+    `EXPLAIN QUERY PLAN ${UNDIGESTED_EVENT_PROBE_SQL}`,
     problemId,
-  ).first<{ id: string }>();
-  return row?.id ?? null;
+  ).all<{ detail: string }>();
+  const steps = explained.results.map((row) => row.detail);
+  const searchDetail = steps.length === 1 ? (steps[0] ?? null) : null;
+  return {
+    uses_index: steps.length > 0 && steps.every((step) => step.includes(UNDIGESTED_EVENT_INDEX)),
+    avoids_table_scan: steps.every((step) => !step.startsWith("SCAN")),
+    matches_expected_search:
+      searchDetail !== null && UNDIGESTED_PROBE_SEARCH_DETAIL.test(searchDetail),
+    search_detail: searchDetail,
+    index_name: UNDIGESTED_EVENT_INDEX,
+    steps,
+  };
 }
 
 /**
@@ -461,20 +651,24 @@ export async function backfillKraterIntegrity(
   db: D1Database,
   problemId: string,
   completedAt: string,
-): Promise<void> {
+): Promise<KraterPreflightCost> {
   requireIdentifier("problemId", problemId);
   if (Number.isNaN(Date.parse(completedAt)))
     inputError("completedAt must be an ISO-8601 timestamp.");
 
-  const rawHead = await statement(
-    db,
-    "SELECT public_seq, chain_digest FROM problems WHERE id = ?",
-    problemId,
-  ).first<ProblemHeadRow>();
+  // Measured from the first statement, because this whole function runs before every write and
+  // was previously invisible to the receipt.
+  const preflightStartedAt = performance.now();
+  const cost = newCostAccumulator();
+
+  const rawHead = await firstRowMeasured<ProblemHeadRow>(
+    cost,
+    statement(db, "SELECT public_seq, chain_digest FROM problems WHERE id = ?", problemId),
+  );
   if (rawHead === null) {
     throw new KraterProblemNotFoundError("problem must exist before integrity replay.");
   }
-  const storedBackfill = await readIntegrityBackfill(db, problemId);
+  const storedBackfill = await readIntegrityBackfill(db, problemId, cost);
   // An already-upgraded problem is done, whatever its size. This check must precede the
   // bounded-replay limit below: every write calls this function, so testing the limit first
   // made a healthy, fully-digested problem permanently unwritable once it passed 512 events
@@ -491,8 +685,14 @@ export async function backfillKraterIntegrity(
   // an existence question, answered by the partial index migration 0005 adds (see
   // firstUndigestedEvent for the query plans on either side of it).
   if (storedBackfill?.state === "complete" && rawHead.chain_digest !== null) {
-    const undigested = await firstUndigestedEvent(db, problemId);
-    if (undigested === null) return;
+    const probe = await firstUndigestedEvent(db, problemId);
+    cost.rows_read += probe.rows_read;
+    cost.statements += 1;
+    if (probe.sql_ms !== null) {
+      cost.sql_ms += probe.sql_ms;
+      cost.sql_reported = true;
+    }
+    if (probe.event_id === null) return settleCost(cost, preflightStartedAt, true);
   }
 
   const events = await statement(
@@ -502,6 +702,14 @@ export async function backfillKraterIntegrity(
      FROM events WHERE problem_id = ? ORDER BY seq ASC`,
     problemId,
   ).all<EventRow>();
+  // The replay path's dominant read. Counting it keeps the two paths comparable in the receipt:
+  // a legacy upgrade legitimately reads the whole log, an ordinary write must not.
+  cost.rows_read += events.meta.rows_read;
+  cost.statements += 1;
+  if (events.meta.timings?.sql_duration_ms !== undefined) {
+    cost.sql_ms += events.meta.timings.sql_duration_ms;
+    cost.sql_reported = true;
+  }
 
   if (events.results.length > MAX_INTEGRITY_BACKFILL_EVENTS) {
     backfillRequired(
@@ -603,13 +811,14 @@ export async function backfillKraterIntegrity(
   try {
     await db.batch(updates);
   } catch (_error) {
-    const rechecked = await readIntegrityBackfill(db, problemId);
+    const rechecked = await readIntegrityBackfill(db, problemId, cost);
     if (rechecked?.state !== "complete") {
       backfillRequired(
         "the integrity replay could not atomically complete; no digest was defaulted.",
       );
     }
   }
+  return settleCost(cost, preflightStartedAt, false);
 }
 
 /** Create a synthetic problem root for the local S-2 worker harness. */
@@ -641,7 +850,7 @@ export async function writeClaim(
   input: KraterWriteInput,
 ): Promise<KraterWriteResult> {
   validateWriteInput(input);
-  await backfillKraterIntegrity(db, input.problemId, input.createdAt);
+  const preflight = await backfillKraterIntegrity(db, input.problemId, input.createdAt);
   const payloadJson = payloadFor(input);
   const [payloadSha256, requestDigest] = await Promise.all([
     sha256Hex(payloadJson),
@@ -854,6 +1063,8 @@ export async function writeClaim(
       throw new Error("Krater write did not persist integrity digests.");
     }
 
+    const transactionMs = Math.round((performance.now() - startedAt) * 1_000) / 1_000;
+    const transactionRowsRead = metricSum(results, "rows_read");
     return {
       eventId: settled.event_id,
       seq: settled.event_seq,
@@ -865,10 +1076,13 @@ export async function writeClaim(
       buildDigest: projection.build_digest,
       chainDigest: event.chain_digest,
       checkpointDigest: checkpoint.checkpoint_digest,
-      transactionMs: Math.round((performance.now() - startedAt) * 1_000) / 1_000,
-      d1RowsRead: metricSum(results, "rows_read"),
+      transactionMs,
+      d1RowsRead: transactionRowsRead,
       d1RowsWritten: metricSum(results, "rows_written"),
       d1SqlMs: sqlDuration(results),
+      preflight,
+      totalRowsRead: preflight.rows_read + transactionRowsRead,
+      totalMs: Math.round((preflight.wall_ms + transactionMs) * 1_000) / 1_000,
       lockWaitMs: null,
       retryCount,
     };

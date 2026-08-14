@@ -4,6 +4,10 @@ compatibility_date = "2026-08-13"
 compatibility_flags = ["nodejs_compat"]
 workers_dev = false
 
+# Local harness capability; see wrangler.s2.toml.
+[vars]
+S2_LOCAL_HARNESS = "enabled"
+
 [[d1_databases]]
 binding = "DB"
 database_name = "asimposium-s2-krater-legacy"
