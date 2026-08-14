@@ -32,10 +32,7 @@ interface Run {
   stderr: string;
 }
 
-async function runScript(
-  args: readonly string[],
-  env: Record<string, string> = {},
-): Promise<Run> {
+async function runScript(args: readonly string[], env: Record<string, string> = {}): Promise<Run> {
   const child = Bun.spawn({
     cmd: ["bash", SCRIPT, ...args],
     cwd: REPO_ROOT,
@@ -67,13 +64,15 @@ function phaseValue(stderr: string, phase: string, key: string): string | undefi
   return line?.match(new RegExp(`${key}=([^\\s]+)`))?.[1];
 }
 
-const listenerPorts: number[] = [];
-
 /** A real listener, so "busy" means busy rather than "we think it might be". */
 function occupyPort(): { port: number; stop: () => void } {
   const server = Bun.serve({ port: 0, hostname: "127.0.0.1", fetch: () => new Response("busy") });
-  listenerPorts.push(server.port);
-  return { port: server.port, stop: () => server.stop(true) };
+  const { port } = server;
+  // `Server.port` is optional in Bun's types because a unix-socket server has
+  // none. This one is TCP, and a test that pinned `undefined` as its port would
+  // assert nothing at all, so the absence is an error rather than a fallback.
+  if (typeof port !== "number") throw new Error("expected a TCP port for the squatter");
+  return { port, stop: () => server.stop(true) };
 }
 
 describe("the self-test and the blocked external proof", () => {
@@ -154,6 +153,84 @@ describe("a pinned port is validated before anything is started", () => {
     expect(run.stderr).toContain("port-ownership-proven");
     expect(record(run).code).toBe("LOCAL_D1_ENROLLMENT_PASSED");
   }, 120_000);
+});
+
+/** Independent of the script's own assertions: is this pid really gone? */
+function processGone(pid: number): boolean {
+  try {
+    process.kill(pid, 0);
+    return false;
+  } catch {
+    return true;
+  }
+}
+
+async function waitForExit(pid: number): Promise<boolean> {
+  for (let attempt = 0; attempt < 100; attempt += 1) {
+    if (processGone(pid)) return true;
+    await Bun.sleep(50);
+  }
+  return processGone(pid);
+}
+
+describe("lifecycle: process-group cleanup reaches descendants, not just the leader", () => {
+  test("PLANTED: a group whose leader exits and is reaped still loses its descendant", async () => {
+    const run = await runScript(["--self-test-lifecycle"]);
+    const emitted = record(run);
+    expect(`${run.stderr}\n${JSON.stringify(emitted)}`).toContain("lifecycle-cleaned");
+    expect(run.exitCode).toBe(0);
+    expect(emitted.status).toBe("pass");
+    expect(emitted.code).toBe("LIFECYCLE_SELF_TEST_PASSED");
+
+    // The exercise really was the hard case: leader gone and reaped before
+    // cleanup ran, with a descendant still alive at that moment.
+    expect(phaseValue(run.stderr, "lifecycle-leader-exited", "reaped")).toBe("yes");
+    const descendant = Number(phaseValue(run.stderr, "lifecycle-descendant", "pid"));
+    const leader = Number(phaseValue(run.stderr, "lifecycle-leader-exited", "leader"));
+    expect(Number.isInteger(descendant)).toBe(true);
+    expect(phaseValue(run.stderr, "lifecycle-leader-exited", "survivors")).toBe(String(descendant));
+    // Cleanup signalled the proven group, not the pid.
+    expect(phaseValue(run.stderr, "lifecycle-terminated", "scope")).toBe("group");
+    expect(phaseValue(run.stderr, "lifecycle-terminated", "pgid")).toBe(String(leader));
+
+    // Verified here, not merely reported by the script under test.
+    expect(await waitForExit(descendant)).toBe(true);
+
+    const stateDir = phaseValue(run.stderr, "lifecycle-state-retained", "dir") as string;
+    expect(existsSync(stateDir)).toBe(true);
+    const phases = readFileSync(`${stateDir}/phases.log`, "utf8");
+    expect(phases).toContain("lifecycle-leader-exited");
+    expect(phases).toContain("lifecycle-cleaned");
+    expect(phases).not.toContain("AAAAAAAA");
+  }, 60_000);
+
+  test("PLANTED: an unowned child is cleaned as a pid tree, and the runner never signals its own group", async () => {
+    const run = await runScript(["--self-test-lifecycle-unowned"]);
+    const emitted = record(run);
+    expect(`${run.stderr}\n${JSON.stringify(emitted)}`).toContain("lifecycle-cleaned");
+    // Reaching its own final assertions is the proof that the runner did not
+    // deliver a group signal to the group it shares with the child — a run that
+    // signalled itself could not report anything.
+    expect(run.exitCode).toBe(0);
+    expect(emitted.code).toBe("LIFECYCLE_SELF_TEST_PASSED");
+    expect(run.stderr).not.toContain("LIFECYCLE_SELF_SIGNALLED");
+    expect(run.stderr).not.toContain("LIFECYCLE_CLEANUP_INCOMPLETE");
+    // The child really did share this runner's group, so the fallback was the
+    // branch under test rather than the group path taking a different name.
+    expect(phaseValue(run.stderr, "lifecycle-unowned", "shared_pgid")).toMatch(/^[0-9]+$/);
+
+    expect(phaseValue(run.stderr, "lifecycle-cleanup-scope", "scope")).toBe("pid-tree");
+    expect(phaseValue(run.stderr, "lifecycle-terminated", "scope")).toBe("pid-tree");
+    const targets = (phaseValue(run.stderr, "lifecycle-cleanup-scope", "targets") ?? "").split(",");
+    const descendant = Number(phaseValue(run.stderr, "lifecycle-descendant", "pid"));
+    const leader = Number(phaseValue(run.stderr, "lifecycle-descendant", "leader"));
+    // The grandchild was in scope, which is the whole point of walking the tree.
+    expect(targets).toContain(String(descendant));
+    expect(targets.length).toBeGreaterThanOrEqual(2);
+
+    expect(await waitForExit(descendant)).toBe(true);
+    expect(await waitForExit(leader)).toBe(true);
+  }, 60_000);
 });
 
 describe("lifecycle: parallel runs and signal handling", () => {
