@@ -447,18 +447,26 @@ export async function backfillKraterIntegrity(
      FROM events WHERE problem_id = ? ORDER BY seq ASC`,
     problemId,
   ).all<EventRow>();
+  const storedBackfill = await readIntegrityBackfill(db, problemId);
+  const complete =
+    storedBackfill?.state === "complete" &&
+    rawHead.chain_digest !== null &&
+    events.results.every((event) => event.row_digest !== null && event.chain_digest !== null);
+  // An already-upgraded problem is done, whatever its size. This check must precede the
+  // bounded-replay limit below: every write calls this function, so testing the limit first
+  // made a healthy, fully-digested problem permanently unwritable once it passed 512 events
+  // — the 513th write succeeded and every later one was refused with
+  // KRATER_INTEGRITY_BACKFILL_REQUIRED, naming a replay that had already completed and that
+  // would itself refuse at that size. The limit belongs to the legacy upgrade path, which is
+  // the only caller that can actually perform the replay.
+  if (complete) return;
+
   if (events.results.length > MAX_INTEGRITY_BACKFILL_EVENTS) {
     backfillRequired(
       "the legacy problem exceeds the bounded integrity replay limit; use the future range-aware backfill.",
     );
   }
 
-  const storedBackfill = await readIntegrityBackfill(db, problemId);
-  const complete =
-    storedBackfill?.state === "complete" &&
-    rawHead.chain_digest !== null &&
-    events.results.every((event) => event.row_digest !== null && event.chain_digest !== null);
-  if (complete) return;
   if (
     rawHead.chain_digest !== null ||
     events.results.some((event) => event.row_digest !== null || event.chain_digest !== null)

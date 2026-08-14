@@ -26,6 +26,8 @@ const LEGACY_OVER_LIMIT_PROBLEM = "P-legacy-over-limit";
 const LEGACY_AT_LIMIT_PROBLEM = "P-legacy-at-limit";
 const LEGACY_OVER_LIMIT_EVENTS = 513;
 const LEGACY_AT_LIMIT_EVENTS = 512;
+/** A problem that finished its upgrade and then keeps accepting ordinary writes past 512. */
+const LEGACY_WRITE_BOUNDARY_PROBLEM = "P-legacy-write-boundary";
 
 interface WriteResult {
   event_id: string;
@@ -618,6 +620,68 @@ async function legacyBoundedBackfill(): Promise<void> {
   );
 }
 
+/**
+ * The bounded-replay limit belongs to the legacy upgrade, not to ordinary writing.
+ *
+ * Every write calls the same integrity function, so while the size check ran ahead of the
+ * "already complete" early return, a healthy fully-digested problem became permanently
+ * unwritable the moment it passed 512 events: the 513th write succeeded and every later one
+ * was refused with KRATER_INTEGRITY_BACKFILL_REQUIRED, naming a replay that had already
+ * completed and that would itself refuse at that size. These writes cross that boundary on a
+ * problem whose upgrade is finished, and must all be accepted.
+ */
+async function ordinaryWritesPastTheLimit(): Promise<void> {
+  await plantLegacy(
+    LEGACY_WRITE_BOUNDARY_PROBLEM,
+    LEGACY_AT_LIMIT_EVENTS,
+    "legacy-write-boundary-plant",
+  );
+  const upgraded = await attemptLegacyBackfill(
+    LEGACY_WRITE_BOUNDARY_PROBLEM,
+    "legacy-write-boundary-backfill",
+  );
+  assertEqual(upgraded.status, 200, "S2_WRITE_BOUNDARY_BACKFILL_FAILED");
+
+  // 513th event: allowed even before the fix, because the limit was not yet exceeded.
+  const crossing = await request(
+    "POST",
+    "/__s2/write",
+    "legacy-write-boundary-crossing-write",
+    {
+      problem_id: LEGACY_WRITE_BOUNDARY_PROBLEM,
+      claim_id: "C-write-boundary-513",
+      event_id: "E-write-boundary-513",
+      idempotency_key: "IK-write-boundary-513",
+      statement: "The write that takes an upgraded problem past the replay limit.",
+      created_at: CREATED_AT,
+    },
+    20_000,
+  );
+  assertEqual(crossing.status, 200, "S2_WRITE_BOUNDARY_CROSSING_WRITE_REFUSED");
+
+  // 514th event: this is the one the ordering defect refused, permanently.
+  const beyond = await request(
+    "POST",
+    "/__s2/write",
+    "legacy-write-boundary-write-beyond-limit",
+    {
+      problem_id: LEGACY_WRITE_BOUNDARY_PROBLEM,
+      claim_id: "C-write-boundary-514",
+      event_id: "E-write-boundary-514",
+      idempotency_key: "IK-write-boundary-514",
+      statement: "An upgraded problem keeps accepting writes beyond the replay limit.",
+      created_at: CREATED_AT,
+    },
+    20_000,
+  );
+  assertEqual(beyond.status, 200, "S2_WRITE_BOUNDARY_WRITE_BEYOND_LIMIT_REFUSED");
+  assertEqual(
+    numberAt(beyond.body, "post_cursor"),
+    LEGACY_AT_LIMIT_EVENTS + 2,
+    "S2_WRITE_BOUNDARY_CURSOR_INVALID",
+  );
+}
+
 /** The refusal must survive a restart: it is a property of the data, not of a warm process. */
 async function legacyBoundedBackfillAfterRestart(): Promise<void> {
   const refused = await attemptLegacyBackfill(
@@ -643,6 +707,47 @@ async function legacyBoundedBackfillAfterRestart(): Promise<void> {
     upgraded.counts.integrity_checkpoints,
     LEGACY_AT_LIMIT_EVENTS,
     "S2_LEGACY_AT_LIMIT_RESTART_CHECKPOINTS_INVALID",
+  );
+
+  // The write boundary has to hold across a restart too. Exercising it only in a warm
+  // process would miss a freeze that reappears once the integrity state is re-read from D1
+  // rather than from anything the previous process had already touched: the refusal this
+  // regression guards was a property of stored event count, so a cold worker is exactly
+  // where it would come back.
+  const boundary = await state(
+    LEGACY_WRITE_BOUNDARY_PROBLEM,
+    "legacy-write-boundary-state-after-restart",
+  );
+  assertEqual(
+    boundary.cursor,
+    LEGACY_AT_LIMIT_EVENTS + 2,
+    "S2_WRITE_BOUNDARY_RESTART_CURSOR_INVALID",
+  );
+  assertEqual(
+    boundary.counts.integrity_checkpoints,
+    LEGACY_AT_LIMIT_EVENTS + 2,
+    "S2_WRITE_BOUNDARY_RESTART_CHECKPOINTS_INVALID",
+  );
+
+  const beyond = await request(
+    "POST",
+    "/__s2/write",
+    "legacy-write-boundary-write-after-restart",
+    {
+      problem_id: LEGACY_WRITE_BOUNDARY_PROBLEM,
+      claim_id: "C-write-boundary-515",
+      event_id: "E-write-boundary-515",
+      idempotency_key: "IK-write-boundary-515",
+      statement: "A cold worker still accepts writes beyond the replay limit.",
+      created_at: CREATED_AT,
+    },
+    20_000,
+  );
+  assertEqual(beyond.status, 200, "S2_WRITE_BOUNDARY_RESTART_WRITE_REFUSED");
+  assertEqual(
+    numberAt(beyond.body, "post_cursor"),
+    LEGACY_AT_LIMIT_EVENTS + 3,
+    "S2_WRITE_BOUNDARY_RESTART_CURSOR_ADVANCE_INVALID",
   );
 }
 
@@ -986,6 +1091,7 @@ async function exercise(): Promise<void> {
   }
   await assertReplay(LARGE_PROBLEM, 201, "large-paginated-full-replay");
   await legacyBoundedBackfill();
+  await ordinaryWritesPastTheLimit();
   await exerciseOutboxDrainer();
 
   emit({
@@ -1029,7 +1135,6 @@ async function restartVerify(): Promise<void> {
   assertEqual(primary.counts.integrity_checkpoints, 31, "S2_RESTART_CHECKPOINT_INVALID");
   await assertReplay(PRIMARY_PROBLEM, 31, "outbox-worker-restart-replay");
   await assertReplay(LARGE_PROBLEM, 201, "large-replay-after-worker-restart");
-  await legacyBoundedBackfillAfterRestart();
   const recoveredOutbox = await waitForOutbox(
     "outbox-kill-restart-recovery",
     (status) =>
@@ -1051,6 +1156,9 @@ async function restartVerify(): Promise<void> {
     assertEqual(outboxProblem.counts[table], 5, "S2_OUTBOX_RESTART_DUPLICATED_VISIBLE_ROW");
   }
   await assertReplay(OUTBOX_PROBLEM, 5, "outbox-restart-visible-replay");
+  // Last in the phase on purpose: this writes a claim, and a new outbox row would otherwise
+  // perturb the recovery counters the assertions above pin exactly.
+  await legacyBoundedBackfillAfterRestart();
   emit({
     tool: "bun",
     tool_version: Bun.version,
