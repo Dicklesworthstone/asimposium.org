@@ -22,6 +22,21 @@ const REQUIRED_RESPONSIBILITY_DOCS = [
   "docs/README.md",
 ];
 const FORBIDDEN_BACKEND_MARKERS = ["supabase", "turso", "neon", "prisma"];
+const ROOT_CONFIG_KEYS = [
+  "name",
+  "main",
+  "compatibility_date",
+  "compatibility_flags",
+  "workers_dev",
+  "dev",
+  "d1_databases",
+  "r2_buckets",
+  "rules",
+];
+const DEV_CONFIG_KEYS = ["port", "local_protocol"];
+const D1_DATABASE_CONFIG_KEYS = ["binding", "database_name", "database_id", "migrations_dir"];
+const R2_BUCKET_CONFIG_KEYS = ["binding", "bucket_name"];
+const RULE_CONFIG_KEYS = ["type", "globs", "fallthrough"];
 
 export class ScaffoldValidationError extends Error {
   constructor(code, message) {
@@ -53,6 +68,16 @@ function parseToml(content, source) {
   } catch (error) {
     if (error instanceof ScaffoldValidationError) throw error;
     fail("MALFORMED_TOML", `${source} must be valid TOML.`);
+  }
+}
+
+function assertExactKeys(record, allowedKeys, source) {
+  const unexpectedKeys = Object.keys(record).filter((key) => !allowedKeys.includes(key));
+  if (unexpectedKeys.length > 0) {
+    fail(
+      "UNSAFE_CONFIG_KEY",
+      `${source} contains unsupported configuration key ${JSON.stringify(unexpectedKeys[0])}.`,
+    );
   }
 }
 
@@ -258,6 +283,7 @@ export function validateScaffold(rootDirectory, configWorkspacePath = "infra/wra
   const parsedConfig = parseToml(config, configSource);
   assertNoForbiddenBackend(config, configSource);
   assertNoRemoteConfiguration(config, configSource);
+  assertExactKeys(parsedConfig, ROOT_CONFIG_KEYS, `${configSource} root`);
 
   const declaredMain = readRequiredString(parsedConfig, "main", configSource);
   const mainPath = resolveRepositoryPath(root, configPath, declaredMain, "main");
@@ -281,6 +307,12 @@ export function validateScaffold(rootDirectory, configWorkspacePath = "infra/wra
   if (!Array.isArray(compatibilityFlags) || !compatibilityFlags.includes("nodejs_compat")) {
     fail("MISSING_COMPATIBILITY_FLAG", `${configSource} must enable nodejs_compat.`);
   }
+  if (compatibilityFlags.length !== 1 || compatibilityFlags[0] !== "nodejs_compat") {
+    fail(
+      "UNSAFE_CONFIG_VALUE",
+      `${configSource} must set compatibility_flags to exactly ["nodejs_compat"].`,
+    );
+  }
   assertExact(
     readRequiredBoolean(parsedConfig, "workers_dev", configSource),
     false,
@@ -288,6 +320,7 @@ export function validateScaffold(rootDirectory, configWorkspacePath = "infra/wra
     configSource,
   );
   const dev = readRequiredObject(parsedConfig, "dev", configSource);
+  assertExactKeys(dev, DEV_CONFIG_KEYS, `${configSource} [dev]`);
   assertExact(readRequiredNumber(dev, "port", configSource), 8787, "dev.port", configSource);
   assertExact(
     readRequiredString(dev, "local_protocol", configSource),
@@ -297,6 +330,7 @@ export function validateScaffold(rootDirectory, configWorkspacePath = "infra/wra
   );
 
   const d1Database = readSingleObjectArray(parsedConfig, "d1_databases", configSource);
+  assertExactKeys(d1Database, D1_DATABASE_CONFIG_KEYS, `${configSource} [[d1_databases]]`);
   assertExact(
     readRequiredString(d1Database, "binding", configSource),
     "DB",
@@ -341,6 +375,7 @@ export function validateScaffold(rootDirectory, configWorkspacePath = "infra/wra
   }
 
   const r2Bucket = readSingleObjectArray(parsedConfig, "r2_buckets", configSource);
+  assertExactKeys(r2Bucket, R2_BUCKET_CONFIG_KEYS, `${configSource} [[r2_buckets]]`);
   assertExact(
     readRequiredString(r2Bucket, "binding", configSource),
     "ARTIFACTS",
@@ -355,6 +390,7 @@ export function validateScaffold(rootDirectory, configWorkspacePath = "infra/wra
   );
 
   const rules = readSingleObjectArray(parsedConfig, "rules", configSource);
+  assertExactKeys(rules, RULE_CONFIG_KEYS, `${configSource} [[rules]]`);
   assertExact(readRequiredString(rules, "type", configSource), "Text", "rules.type", configSource);
   assertExact(
     readRequiredSingleStringArray(rules, "globs", configSource),

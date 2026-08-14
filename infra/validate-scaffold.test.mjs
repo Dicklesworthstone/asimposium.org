@@ -170,6 +170,41 @@ fallthrough = true
     'name = "asimposium-stoa-local"',
     'name = "asimposium-stoa-local"\nname = "asimposium-stoa-local"',
   );
+  const unknownRootKeyConfig = `${validConfig}
+unexpected_root_key = "value"
+`;
+  const unknownRootTableConfig = `${validConfig}
+[unexpected_root_table]
+value = "value"
+`;
+  const extraDevKeyConfig = validConfig.replace(
+    'local_protocol = "http"',
+    'local_protocol = "http"\nextra_dev_key = true',
+  );
+  const nestedRulesTableConfig = `${validConfig}
+[rules.shadow]
+value = "value"
+`;
+  const nestedRulesArrayConfig = `${validConfig}
+[[rules.shadow]]
+value = "value"
+`;
+  const extraD1KeyConfig = validConfig.replace(
+    'migrations_dir = "../db/migrations"',
+    'migrations_dir = "../db/migrations"\nextra_d1_key = "value"',
+  );
+  const extraR2KeyConfig = validConfig.replace(
+    'bucket_name = "asimposium-artifacts-local"',
+    'bucket_name = "asimposium-artifacts-local"\nextra_r2_key = "value"',
+  );
+  const extraRulesKeyConfig = validConfig.replace(
+    "fallthrough = true",
+    'fallthrough = true\nextra_rules_key = "value"',
+  );
+  const extraCompatibilityFlagConfig = validConfig.replace(
+    'compatibility_flags = ["nodejs_compat"]',
+    'compatibility_flags = ["nodejs_compat", "additional_flag"]',
+  );
   const cases = [
     {
       name: "positive",
@@ -361,6 +396,96 @@ fallthrough = true
         );
       },
     },
+    {
+      name: "unknown-root-key",
+      execute() {
+        expectFailure(
+          createCompleteFixtureRoot("unknown-root-key", unknownRootKeyConfig),
+          "infra/wrangler.toml",
+          "UNSAFE_CONFIG_KEY",
+        );
+      },
+    },
+    {
+      name: "unknown-root-table",
+      execute() {
+        expectFailure(
+          createCompleteFixtureRoot("unknown-root-table", unknownRootTableConfig),
+          "infra/wrangler.toml",
+          "UNSAFE_CONFIG_KEY",
+        );
+      },
+    },
+    {
+      name: "extra-dev-key",
+      execute() {
+        expectFailure(
+          createCompleteFixtureRoot("extra-dev-key", extraDevKeyConfig),
+          "infra/wrangler.toml",
+          "UNSAFE_CONFIG_KEY",
+        );
+      },
+    },
+    {
+      name: "nested-rules-table",
+      execute() {
+        expectFailure(
+          createCompleteFixtureRoot("nested-rules-table", nestedRulesTableConfig),
+          "infra/wrangler.toml",
+          "UNSAFE_CONFIG_KEY",
+        );
+      },
+    },
+    {
+      name: "nested-rules-array",
+      execute() {
+        expectFailure(
+          createCompleteFixtureRoot("nested-rules-array", nestedRulesArrayConfig),
+          "infra/wrangler.toml",
+          "UNSAFE_CONFIG_KEY",
+        );
+      },
+    },
+    {
+      name: "extra-d1-key",
+      execute() {
+        expectFailure(
+          createCompleteFixtureRoot("extra-d1-key", extraD1KeyConfig),
+          "infra/wrangler.toml",
+          "UNSAFE_CONFIG_KEY",
+        );
+      },
+    },
+    {
+      name: "extra-r2-key",
+      execute() {
+        expectFailure(
+          createCompleteFixtureRoot("extra-r2-key", extraR2KeyConfig),
+          "infra/wrangler.toml",
+          "UNSAFE_CONFIG_KEY",
+        );
+      },
+    },
+    {
+      name: "extra-rules-key",
+      execute() {
+        expectFailure(
+          createCompleteFixtureRoot("extra-rules-key", extraRulesKeyConfig),
+          "infra/wrangler.toml",
+          "UNSAFE_CONFIG_KEY",
+        );
+      },
+    },
+    {
+      name: "extra-compatibility-flag",
+      execute() {
+        expectFailure(
+          createCompleteFixtureRoot("extra-compatibility-flag", extraCompatibilityFlagConfig),
+          "infra/wrangler.toml",
+          "UNSAFE_CONFIG_VALUE",
+        );
+      },
+    },
   ];
   const failedCases = [];
   for (const testCase of cases) {
@@ -377,7 +502,7 @@ fallthrough = true
     );
   }
   assert.deepEqual(failedCases, []);
-  assert.equal(cases.length, 20);
+  assert.equal(cases.length, 29);
 
   process.stdout.write(
     `${JSON.stringify({
