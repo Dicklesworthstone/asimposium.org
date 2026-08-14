@@ -1,0 +1,41 @@
+{
+  "name": "@asimposium/web",
+  "version": "0.0.0",
+  "private": true,
+  "description": "Agora — the human face of ASImposium. Read-only at OPS.1; the Worker owns every write.",
+  "type": "module",
+  "scripts": {
+    "dev": "next dev",
+    "build": "next build",
+    "start": "next start",
+    "typecheck": "bun scripts/gate.ts typecheck",
+    "lint": "bun scripts/gate.ts lint",
+    "test": "bun scripts/gate.ts unit && bun scripts/gate.ts contract",
+    "test:unit": "bun scripts/gate.ts unit",
+    "test:contract": "bun scripts/gate.ts contract",
+    "test:integration": "bun scripts/gate.ts integration",
+    "test:e2e": "bun scripts/gate.ts e2e",
+    "test:security": "bun scripts/gate.ts security",
+    "test:performance": "bun scripts/gate.ts performance"
+  },
+  "dependencies": {
+    "next": "16.3.1",
+    "next-auth": "5.0.0-beta.32",
+    "react": "19.2.8",
+    "react-dom": "19.2.8"
+  },
+  "devDependencies": {
+    "@tailwindcss/postcss": "4.3.3",
+    "@types/bun": "1.3.14",
+    "@types/node": "26.2.0",
+    "@types/react": "19.2.18",
+    "@types/react-dom": "19.2.4",
+    "eslint": "9.39.5",
+    "eslint-config-next": "16.3.1",
+    "tailwindcss": "4.3.3",
+    "typescript": "5.9.3"
+  },
+  "engines": {
+    "node": ">=20.9.0"
+  }
+}

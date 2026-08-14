@@ -1,0 +1,15 @@
+# Next.js build output
+.next/
+out/
+next-env.d.ts
+
+# Dependencies
+node_modules/
+
+# The canonical lockfile is the bun-workspaces lockfile at the repository root.
+# A nested lockfile here would shadow it and desynchronise the workspace.
+bun.lock
+bun.lockb
+
+# Vercel
+.vercel/
