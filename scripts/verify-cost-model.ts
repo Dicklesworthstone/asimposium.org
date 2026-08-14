@@ -753,7 +753,25 @@ export function buildCostVerifierDiagnostic(
 
 export type ReceiptReader = (receiptPath: string) => Uint8Array;
 
-function readReceiptBytes(receiptPath: string): Uint8Array {
+/**
+ * The reader owns its bounded descriptor lifecycle; this small structural
+ * boundary lets its error paths be tested without a scheduler-dependent
+ * regular-file race. The CLI never selects an alternate filesystem.
+ */
+export interface ReceiptFileSystem {
+  readonly open: (receiptPath: string) => number;
+  readonly fstat: (descriptor: number) => { readonly size: number; isFile(): boolean };
+  readonly read: (
+    descriptor: number,
+    buffer: Uint8Array,
+    offset: number,
+    length: number,
+    position: number,
+  ) => number;
+  readonly close: (descriptor: number) => void;
+}
+
+function readReceiptBytes(receiptPath: string, fileSystem: ReceiptFileSystem): Uint8Array {
   let descriptor: number | undefined;
   let bytes: Uint8Array | undefined;
   let failure: unknown;
@@ -761,8 +779,8 @@ function readReceiptBytes(receiptPath: string): Uint8Array {
     // A blocking read-only open on a FIFO waits forever before fstat can reject
     // it as non-regular. O_NONBLOCK makes every operator-supplied path reach
     // the descriptor-type check under the same bounded CLI contract.
-    descriptor = openSync(receiptPath, constants.O_RDONLY | constants.O_NONBLOCK);
-    const before = fstatSync(descriptor);
+    descriptor = fileSystem.open(receiptPath);
+    const before = fileSystem.fstat(descriptor);
     if (!before.isFile() || !Number.isSafeInteger(before.size) || before.size < 0) {
       throw new CostVerifierError("S2_COST_RECEIPT_UNREADABLE", "receipt cannot be read.");
     }
@@ -773,14 +791,14 @@ function readReceiptBytes(receiptPath: string): Uint8Array {
     bytes = new Uint8Array(before.size);
     let offset = 0;
     while (offset < bytes.byteLength) {
-      const read = readSync(descriptor, bytes, offset, bytes.byteLength - offset, offset);
+      const read = fileSystem.read(descriptor, bytes, offset, bytes.byteLength - offset, offset);
       if (read === 0) {
         throw new CostVerifierError("S2_COST_RECEIPT_UNREADABLE", "receipt changed while reading.");
       }
       offset += read;
     }
 
-    const after = fstatSync(descriptor);
+    const after = fileSystem.fstat(descriptor);
     if (!after.isFile() || after.size !== before.size) {
       throw new CostVerifierError("S2_COST_RECEIPT_UNREADABLE", "receipt changed while reading.");
     }
@@ -789,7 +807,7 @@ function readReceiptBytes(receiptPath: string): Uint8Array {
   } finally {
     if (descriptor !== undefined) {
       try {
-        closeSync(descriptor);
+        fileSystem.close(descriptor);
       } catch (error) {
         if (failure === undefined) failure = error;
       }
@@ -805,6 +823,20 @@ function readReceiptBytes(receiptPath: string): Uint8Array {
   }
   return bytes;
 }
+
+const NODE_RECEIPT_FILE_SYSTEM: ReceiptFileSystem = {
+  open: (receiptPath) => openSync(receiptPath, constants.O_RDONLY | constants.O_NONBLOCK),
+  fstat: (descriptor) => fstatSync(descriptor),
+  read: (descriptor, buffer, offset, length, position) =>
+    readSync(descriptor, buffer, offset, length, position),
+  close: (descriptor) => closeSync(descriptor),
+};
+
+export function createReceiptReader(fileSystem: ReceiptFileSystem): ReceiptReader {
+  return (receiptPath) => readReceiptBytes(receiptPath, fileSystem);
+}
+
+const defaultReceiptReader = createReceiptReader(NODE_RECEIPT_FILE_SYSTEM);
 
 function parseCliArguments(argv: readonly string[]): string | undefined {
   if (argv.length === 0) return undefined;
@@ -836,7 +868,7 @@ function cliFailureResult(error: unknown): CostVerificationResult {
 
 export function runCostVerifierCli(
   argv: readonly string[] = process.argv.slice(2),
-  readReceipt: ReceiptReader = readReceiptBytes,
+  readReceipt: ReceiptReader = defaultReceiptReader,
 ): CostVerifierDiagnostic {
   let result: CostVerificationResult;
   try {

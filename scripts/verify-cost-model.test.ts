@@ -6,11 +6,14 @@ import { join } from "node:path";
 import {
   buildCostVerifierDiagnostic,
   calculateFableWorkload,
+  createReceiptReader,
   FABLE_WORKED_EXAMPLE,
   FABLE_WORKED_EXAMPLE_ASSUMPTIONS,
   MAX_S2_COST_RECEIPT_BYTES,
   REQUIRED_ROW_TOTAL_EXCLUSIONS,
+  type ReceiptFileSystem,
   receiptDigest,
+  runCostVerifierCli,
   S2_COST_METRIC_SCOPE,
   S2_COST_RECEIPT_RECORD,
   S2_COST_RECEIPT_SCHEMA_VERSION,
@@ -114,6 +117,70 @@ function runStandaloneCli(args: readonly string[]) {
     stdout: new TextDecoder().decode(completed.stdout),
     stderr: new TextDecoder().decode(completed.stderr),
   };
+}
+
+interface ReceiptFileSystemCalls {
+  open: number;
+  fstat: number;
+  read: number;
+  close: number;
+}
+
+function freshReceiptFileSystemCalls(): ReceiptFileSystemCalls {
+  return { open: 0, fstat: 0, read: 0, close: 0 };
+}
+
+function regularFileStat(size: number): { readonly size: number; isFile(): boolean } {
+  return { size, isFile: () => true };
+}
+
+function finalFstatChangedFileSystem(
+  bytes: Uint8Array,
+  finalSize: number,
+  calls: ReceiptFileSystemCalls,
+): ReceiptFileSystem {
+  return {
+    open: (receiptPath) => {
+      calls.open += 1;
+      expect(receiptPath).toBe("/Users/sensitive/s7-race-receipt.json");
+      return 41;
+    },
+    fstat: (descriptor) => {
+      calls.fstat += 1;
+      expect(descriptor).toBe(41);
+      return regularFileStat(calls.fstat === 1 ? bytes.byteLength : finalSize);
+    },
+    read: (descriptor, buffer, offset, length, position) => {
+      calls.read += 1;
+      expect(descriptor).toBe(41);
+      expect(offset).toBe(0);
+      expect(length).toBe(bytes.byteLength);
+      expect(position).toBe(0);
+      buffer.set(bytes);
+      return bytes.byteLength;
+    },
+    close: (descriptor) => {
+      calls.close += 1;
+      expect(descriptor).toBe(41);
+    },
+  };
+}
+
+function assertUnreadableDiagnostic(
+  diagnostic: ReturnType<typeof runCostVerifierCli>,
+  forbidden: readonly string[],
+): void {
+  expect(diagnostic).toMatchObject({
+    status: "blocked",
+    code: "S2_COST_RECEIPT_UNREADABLE",
+    cost_model: {
+      status: "blocked",
+      code: "S2_COST_RECEIPT_UNREADABLE",
+      s2: { state: "unavailable", artifact_digest: null },
+    },
+  });
+  const serialized = JSON.stringify(diagnostic);
+  for (const value of forbidden) expect(serialized).not.toContain(value);
 }
 
 describe("S7 cost verifier", () => {
@@ -486,7 +553,63 @@ describe("S7 cost verifier", () => {
     });
   });
 
+  test("deterministically refuses growth and truncation observed by final fstat", () => {
+    const bytes = receiptBytes();
+    const cases = [
+      ["growth", bytes.byteLength + 1],
+      ["truncation", bytes.byteLength - 1],
+    ] as const;
+
+    for (const [_name, finalSize] of cases) {
+      const calls = freshReceiptFileSystemCalls();
+      const diagnostic = runCostVerifierCli(
+        ["--receipt", "/Users/sensitive/s7-race-receipt.json"],
+        createReceiptReader(finalFstatChangedFileSystem(bytes, finalSize, calls)),
+      );
+
+      assertUnreadableDiagnostic(diagnostic, ["/Users/sensitive/s7-race-receipt.json"]);
+      expect(calls).toEqual({ open: 1, fstat: 2, read: 1, close: 1 });
+    }
+  });
+
+  test("deterministically maps EACCES to unavailable without touching a descriptor", () => {
+    const calls = freshReceiptFileSystemCalls();
+    const deniedFileSystem: ReceiptFileSystem = {
+      open: () => {
+        calls.open += 1;
+        const error = new Error("s7-eacces-should-not-echo") as NodeJS.ErrnoException;
+        error.code = "EACCES";
+        throw error;
+      },
+      fstat: () => {
+        calls.fstat += 1;
+        throw new Error("fstat must not run after EACCES");
+      },
+      read: () => {
+        calls.read += 1;
+        throw new Error("read must not run after EACCES");
+      },
+      close: () => {
+        calls.close += 1;
+        throw new Error("close must not run after EACCES");
+      },
+    };
+
+    const diagnostic = runCostVerifierCli(
+      ["--receipt", "/Users/sensitive/s7-eacces-receipt.json"],
+      createReceiptReader(deniedFileSystem),
+    );
+
+    assertUnreadableDiagnostic(diagnostic, [
+      "/Users/sensitive/s7-eacces-receipt.json",
+      "EACCES",
+      "s7-eacces-should-not-echo",
+    ]);
+    expect(calls).toEqual({ open: 1, fstat: 0, read: 0, close: 0 });
+  });
+
   test("real CLI bounds files, distinguishes unreadable receipts, rejects malformed and extra keys, and never echoes input", () => {
+    const regularPath = writeCliReceipt(receiptText());
     const oversizedPath = writeCliReceipt(new Uint8Array(MAX_S2_COST_RECEIPT_BYTES + 1));
     const malformedContent = "{s7-raw-content-should-not-appear";
     const malformedPath = writeCliReceipt(malformedContent);
@@ -501,6 +624,7 @@ describe("S7 cost verifier", () => {
     const fifoPath = join(fifoDirectory, "receipt.fifo");
     const mkfifo = Bun.spawnSync({ cmd: ["mkfifo", fifoPath], stdout: "pipe", stderr: "pipe" });
     expect(mkfifo.exitCode).toBe(0);
+    const regular = runStandaloneCli(["--receipt", regularPath]);
     const missing = runStandaloneCli(["--receipt", missingPath]);
     const oversized = runStandaloneCli(["--receipt", oversizedPath]);
     const malformed = runStandaloneCli(["--receipt", malformedPath]);
@@ -508,10 +632,15 @@ describe("S7 cost verifier", () => {
     const nonRegular = runStandaloneCli(["--receipt", nonRegularDirectory]);
     const fifo = runStandaloneCli(["--receipt", fifoPath]);
 
-    for (const completed of [missing, oversized, malformed, extraKey, nonRegular, fifo]) {
+    for (const completed of [regular, missing, oversized, malformed, extraKey, nonRegular, fifo]) {
       expect(completed.exitCode).toBe(78);
       expect(completed.stderr).toBe("");
     }
+    expect(parseJsonOutput(regular.stdout)).toMatchObject({
+      status: "blocked",
+      code: "COST_MODEL_EXTERNAL_MEASUREMENTS_UNAVAILABLE",
+      cost_model: { s2: { state: "accepted-local" } },
+    });
     expect(parseJsonOutput(missing.stdout)).toMatchObject({
       status: "blocked",
       code: "S2_COST_RECEIPT_UNREADABLE",
@@ -537,7 +666,8 @@ describe("S7 cost verifier", () => {
       code: "S2_COST_RECEIPT_UNREADABLE",
     });
 
-    for (const completed of [missing, oversized, malformed, extraKey, nonRegular, fifo]) {
+    for (const completed of [regular, missing, oversized, malformed, extraKey, nonRegular, fifo]) {
+      expect(completed.stdout).not.toContain(regularPath);
       expect(completed.stdout).not.toContain(missingPath);
       expect(completed.stdout).not.toContain(oversizedPath);
       expect(completed.stdout).not.toContain(malformedPath);
