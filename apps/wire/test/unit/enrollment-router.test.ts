@@ -165,11 +165,73 @@ describe("S-1 mountable enrollment router", () => {
 
     const jsonEtag = json.headers.get("etag");
     expect(jsonEtag).toMatch(/^"[a-f0-9]{64}"$/);
+    expect(json.headers.get("vary")).toBe("Accept");
+    expect(json.headers.get("cache-control")).toBe("no-store");
     const notModified = await request(router, `/join/${minted.enrollmentId}`, {
-      headers: { accept: "application/json", "if-none-match": jsonEtag ?? "" },
+      headers: {
+        accept: "application/json",
+        "if-none-match": `"not-this-face", W/${jsonEtag ?? ""}, "also-not-this-face"`,
+      },
     });
     expect(notModified.status).toBe(304);
     expect(await notModified.text()).toBe("");
+    expect(notModified.headers.get("vary")).toBe("Accept");
+    expect(notModified.headers.get("cache-control")).toBe("no-store");
+
+    const malformedWeakTag = await request(router, `/join/${minted.enrollmentId}`, {
+      headers: { accept: "application/json", "if-none-match": `W/ ${jsonEtag ?? ""}` },
+    });
+    expect(malformedWeakTag.status).toBe(200);
+
+    const differentFace = await request(router, `/join/${minted.enrollmentId}`, {
+      headers: { accept: "text/html", "if-none-match": jsonEtag ?? "" },
+    });
+    expect(differentFace.status).toBe(200);
+    expect(differentFace.headers.get("vary")).toBe("Accept");
+
+    const weightedHtml = await request(router, `/join/${minted.enrollmentId}`, {
+      headers: { accept: "application/json;q=0.1, text/html ; q=0.9" },
+    });
+    expect(weightedHtml.headers.get("content-type")).toBe("text/html; charset=UTF-8");
+    const deterministicTie = await request(router, `/join/${minted.enrollmentId}`, {
+      headers: { accept: "text/html;q=0.7, application/json;q=0.7" },
+    });
+    expect(deterministicTie.headers.get("content-type")).toBe("application/json; charset=utf-8");
+    const weightedMarkdown = await request(router, `/join/${minted.enrollmentId}`, {
+      headers: { accept: "application/json;q=0.1, text/markdown;q=0.9" },
+    });
+    expect(weightedMarkdown.headers.get("content-type")).toBe("text/markdown; charset=utf-8");
+
+    const textWildcard = await request(router, `/join/${minted.enrollmentId}`, {
+      headers: { accept: "text/*;q=.8, application/json;q=.7" },
+    });
+    expect(textWildcard.headers.get("content-type")).toBe("text/markdown; charset=utf-8");
+    const exactMarkdownRefusal = await request(router, `/join/${minted.enrollmentId}`, {
+      headers: { accept: "text/markdown;q=0, */*;q=1" },
+    });
+    expect(exactMarkdownRefusal.headers.get("content-type")).toBe(
+      "application/json; charset=utf-8",
+    );
+    const applicationWildcard = await request(router, `/join/${minted.enrollmentId}`, {
+      headers: { accept: "application/*;q=.9, text/*;q=.2" },
+    });
+    expect(applicationWildcard.headers.get("content-type")).toBe("application/json; charset=utf-8");
+    const exactHtmlRefusal = await request(router, `/join/${minted.enrollmentId}`, {
+      headers: { accept: "text/html;q=0, text/*;q=.8" },
+    });
+    expect(exactHtmlRefusal.headers.get("content-type")).toBe("text/markdown; charset=utf-8");
+    const malformedDuplicateQuality = await request(router, `/join/${minted.enrollmentId}`, {
+      headers: { accept: " text / html ; q = .9 ; Q=.1, application / json ;q=.7" },
+    });
+    expect(malformedDuplicateQuality.headers.get("content-type")).toBe(
+      "application/json; charset=utf-8",
+    );
+    const quotedCommaParameter = await request(router, `/join/${minted.enrollmentId}`, {
+      headers: { accept: 'text/html;note="a,b";q=.4, application/json;q=.8' },
+    });
+    expect(quotedCommaParameter.headers.get("content-type")).toBe(
+      "application/json; charset=utf-8",
+    );
 
     const qZero = await request(router, `/join/${minted.enrollmentId}`, {
       headers: { accept: "application/json;q=0, */*;q=1" },
@@ -179,6 +241,12 @@ describe("S-1 mountable enrollment router", () => {
       headers: { accept: "*/*" },
     });
     expect(wildcard.headers.get("content-type")).toBe("text/markdown; charset=utf-8");
+    const wildcardNotModified = await request(router, `/join/${minted.enrollmentId}`, {
+      headers: { "if-none-match": "*" },
+    });
+    expect(wildcardNotModified.status).toBe(304);
+    expect(wildcardNotModified.headers.get("vary")).toBe("Accept");
+    expect(wildcardNotModified.headers.get("cache-control")).toBe("no-store");
 
     const html = await request(router, `/join/${minted.enrollmentId}`, {
       headers: { accept: "text/html" },

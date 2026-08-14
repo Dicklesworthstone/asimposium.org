@@ -110,17 +110,118 @@ function hasQuery(request: Request): boolean {
   return new URL(request.url).search !== "";
 }
 
-/** Exact media types only; wildcard and q=0 deliberately retain Markdown. */
-function explicitlyAccepts(accept: string, mediaType: "application/json" | "text/html"): boolean {
-  for (const item of accept.toLowerCase().split(",")) {
-    const [type, ...parameters] = item.trim().split(";");
-    if (type !== mediaType) continue;
-    const quality = parameters.find((parameter) => parameter.trim().startsWith("q="));
-    if (quality === undefined) return true;
-    const value = Number(quality.trim().slice(2));
-    return Number.isFinite(value) && value > 0;
+type CapsuleFace = "json" | "html" | "markdown";
+
+const CAPSULE_FACE_MEDIA: Readonly<Record<CapsuleFace, string>> = {
+  json: "application/json",
+  html: "text/html",
+  markdown: "text/markdown",
+};
+
+/** Parse one quality value. Invalid or duplicate q parameters refuse the range. */
+function acceptQuality(parameters: readonly string[]): number {
+  let quality: number | undefined;
+  for (const parameter of parameters) {
+    const [name, value, ...rest] = parameter.trim().split("=");
+    if (name?.toLowerCase() !== "q") continue;
+    if (quality !== undefined || value === undefined || rest.length !== 0) return 0;
+    const normalized = value.trim();
+    if (!/^(?:0(?:\.\d{0,3})?|\.\d{1,3}|1(?:\.0{0,3})?)$/.test(normalized)) return 0;
+    quality = Number(normalized);
   }
-  return false;
+  return quality ?? 1;
+}
+
+interface AcceptedMediaRange {
+  readonly type: string;
+  readonly subtype: string;
+  readonly quality: number;
+}
+
+/** Split an HTTP list outside quoted strings, retaining escapes for later validation. */
+function splitHeaderList(header: string, delimiter: "," | ";"): string[] {
+  const values: string[] = [];
+  let current = "";
+  let quoted = false;
+  let escaped = false;
+  for (const character of header) {
+    if (escaped) {
+      current += character;
+      escaped = false;
+      continue;
+    }
+    if (quoted && character === "\\") {
+      current += character;
+      escaped = true;
+      continue;
+    }
+    if (character === '"') quoted = !quoted;
+    if (character === delimiter && !quoted) {
+      values.push(current.trim());
+      current = "";
+      continue;
+    }
+    current += character;
+  }
+  values.push(current.trim());
+  return values;
+}
+
+function acceptedMediaRanges(accept: string): readonly AcceptedMediaRange[] {
+  const ranges: AcceptedMediaRange[] = [];
+  for (const item of splitHeaderList(accept, ",")) {
+    const [mediaRange, ...parameters] = splitHeaderList(item, ";");
+    const parts = mediaRange?.split("/") ?? [];
+    if (parts.length !== 2) continue;
+    const type = parts[0]?.trim().toLowerCase() ?? "";
+    const subtype = parts[1]?.trim().toLowerCase() ?? "";
+    if (type === "" || subtype === "" || (type === "*" && subtype !== "*")) continue;
+    ranges.push({ type, subtype, quality: acceptQuality(parameters) });
+  }
+  return ranges;
+}
+
+/** Most-specific media ranges win; equal-quality faces prefer canonical Markdown. */
+function selectCapsuleFace(accept: string): CapsuleFace {
+  const ranges = acceptedMediaRanges(accept);
+  const quality = new Map<CapsuleFace, number>();
+  for (const face of Object.keys(CAPSULE_FACE_MEDIA) as CapsuleFace[]) {
+    const [faceType, faceSubtype] = CAPSULE_FACE_MEDIA[face].split("/") as [string, string];
+    let specificity = -1;
+    let effectiveQuality = 0;
+    for (const range of ranges) {
+      const matchesType = range.type === "*" || range.type === faceType;
+      const matchesSubtype = range.subtype === "*" || range.subtype === faceSubtype;
+      if (!matchesType || !matchesSubtype) continue;
+      const candidateSpecificity = range.type === "*" ? 0 : range.subtype === "*" ? 1 : 2;
+      if (candidateSpecificity > specificity) {
+        specificity = candidateSpecificity;
+        effectiveQuality = range.quality;
+      } else if (candidateSpecificity === specificity) {
+        effectiveQuality = Math.max(effectiveQuality, range.quality);
+      }
+    }
+    if (specificity >= 0) quality.set(face, effectiveQuality);
+  }
+
+  const highest = Math.max(0, ...quality.values());
+  for (const face of ["markdown", "json", "html"] as const) {
+    if ((quality.get(face) ?? 0) === highest && highest > 0) return face;
+  }
+
+  // Accept negotiation is a courtesy (Fable §7.3). If nothing supported is
+  // acceptable, disregard the field and retain the canonical Markdown face.
+  return "markdown";
+}
+
+/** GET uses weak comparison: W/"tag" and "tag" refer to the same face. */
+function ifNoneMatchMatches(header: string | undefined, etag: string): boolean {
+  if (header === undefined) return false;
+  return splitHeaderList(header, ",").some((candidate) => {
+    if (candidate === "*") return true;
+    const opaque = candidate.startsWith("W/") ? candidate.slice(2) : candidate;
+    return opaque === etag;
+  });
 }
 
 async function strongEtag(face: "json" | "html" | "markdown", body: string): Promise<string> {
@@ -383,12 +484,7 @@ export function createEnrollmentRouter(options: EnrollmentRouterOptions): Hono {
     }
     try {
       const projection = enrollmentCapsuleProjection(await options.service.capsule(enrollmentId));
-      const accept = c.req.header("accept") ?? "";
-      const face = explicitlyAccepts(accept, "application/json")
-        ? "json"
-        : explicitlyAccepts(accept, "text/html")
-          ? "html"
-          : "markdown";
+      const face = selectCapsuleFace(c.req.header("accept") ?? "");
       const body =
         face === "json"
           ? JSON.stringify(projection)
@@ -399,6 +495,7 @@ export function createEnrollmentRouter(options: EnrollmentRouterOptions): Hono {
       const headers = {
         "cache-control": "no-store",
         etag,
+        vary: "Accept",
         "content-type":
           face === "json"
             ? "application/json; charset=utf-8"
@@ -406,7 +503,9 @@ export function createEnrollmentRouter(options: EnrollmentRouterOptions): Hono {
               ? "text/html; charset=UTF-8"
               : "text/markdown; charset=utf-8",
       };
-      if (c.req.header("if-none-match") === etag) return c.body(null, 304, headers);
+      if (ifNoneMatchMatches(c.req.header("if-none-match"), etag)) {
+        return c.body(null, 304, headers);
+      }
       return c.body(body, 200, headers);
     } catch (error) {
       // A public join path may be malformed or may refer to an enrollment that
