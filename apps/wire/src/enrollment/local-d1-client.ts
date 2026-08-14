@@ -24,6 +24,46 @@ if (typeof origin !== "string" || !/^http:\/\/127\.0\.0\.1:\d+$/.test(origin)) {
       body: JSON.stringify(body),
     });
 
+  /**
+   * A capsule may show its explicitly labelled, non-authoritative public
+   * demonstration value. The boundary is the secret minted for this specific
+   * enrollment, including its opaque material when a renderer strips the
+   * `v1.` prefix; a secret-shaped prefix by itself is not a leak.
+   */
+  const assertMintedSecretAbsentFromCapsuleFaces = (
+    faces: readonly (readonly [face: string, body: string])[],
+    mintedSecret: string,
+  ): void => {
+    const mintedSecretMaterial = mintedSecret.slice("v1.".length);
+    const leakingFace = faces.find(
+      ([_face, body]) =>
+        body.includes(mintedSecret) ||
+        (mintedSecretMaterial.length > 0 && body.includes(mintedSecretMaterial)),
+    )?.[0];
+    if (leakingFace !== undefined) {
+      // The face name is a fixed local-harness label, never caller content.
+      throw new Error(`capsule-secret-boundary:${leakingFace}`);
+    }
+  };
+
+  /**
+   * PLANTED NEGATIVE: the detector must reject the actual value minted by this
+   * real local-D1 run. This remains distinct from the normal assertion below,
+   * which checks the Worker-rendered public faces.
+   */
+  const assertPlantedMintedSecretLeakIsRefused = (mintedSecret: string): void => {
+    const plantedFace = "planted-minted-secret-leak";
+    try {
+      assertMintedSecretAbsentFromCapsuleFaces([[plantedFace, mintedSecret]], mintedSecret);
+    } catch (error) {
+      if (error instanceof Error && error.message === `capsule-secret-boundary:${plantedFace}`) {
+        return;
+      }
+      throw error;
+    }
+    throw new Error("capsule-planted-minted-secret-leak-accepted");
+  };
+
   try {
     const mintRequest = {
       sponsor_id: sponsorId,
@@ -56,22 +96,39 @@ if (typeof origin !== "string" || !/^http:\/\/127\.0\.0\.1:\d+$/.test(origin)) {
 
     const markdown = await localFetch(`${origin}/join/${minted.enrollmentId}`);
     const markdownBody = await markdown.text();
-    if (
-      markdown.status !== 200 ||
-      markdownBody.includes(minted.secret) ||
-      markdownBody.includes("v1.")
-    ) {
-      throw new Error("capsule-secret-boundary");
-    }
     const capsule = await localFetch(`${origin}/join/${minted.enrollmentId}`, {
       headers: { accept: "application/json" },
     });
-    const capsuleBody = (await capsule.json()) as {
-      enrollment_id?: unknown;
-      claim?: { path?: unknown };
-    };
+    const capsuleJsonBody = await capsule.text();
+    if (capsule.status !== 200) throw new Error("capsule-json-status");
+    if (!capsule.headers.get("content-type")?.startsWith("application/json")) {
+      throw new Error("capsule-json-content-type");
+    }
+    let capsuleBody: { enrollment_id?: unknown; claim?: { path?: unknown } };
+    try {
+      capsuleBody = JSON.parse(capsuleJsonBody) as typeof capsuleBody;
+    } catch {
+      throw new Error("capsule-json-parse");
+    }
+    const html = await localFetch(`${origin}/join/${minted.enrollmentId}`, {
+      headers: { accept: "text/html" },
+    });
+    const htmlBody = await html.text();
+
+    assertPlantedMintedSecretLeakIsRefused(minted.secret);
+    assertMintedSecretAbsentFromCapsuleFaces(
+      [
+        ["markdown", markdownBody],
+        ["json", capsuleJsonBody],
+        ["html", htmlBody],
+      ],
+      minted.secret,
+    );
+
+    if (markdown.status !== 200 || html.status !== 200) {
+      throw new Error("capsule-face-status");
+    }
     if (
-      capsule.status !== 200 ||
       capsuleBody.enrollment_id !== minted.enrollmentId ||
       capsuleBody.claim?.path !== "/v1/fellows"
     ) {
@@ -302,7 +359,8 @@ if (typeof origin !== "string" || !/^http:\/\/127\.0\.0\.1:\d+$/.test(origin)) {
         duration_ms: Math.round(performance.now() - startedAt),
         status: "pass",
         cases: [
-          "capsule-secret-boundary",
+          "capsule-public-face-secret-boundary",
+          "planted-minted-secret-leak-refusal",
           "name-policy",
           "approval-card-principal-boundary",
           "durable-approval-grant",
