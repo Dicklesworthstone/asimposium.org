@@ -80,6 +80,10 @@ interface PublicArtifactRow {
   readonly object_key: string;
 }
 
+interface PromotionEventRow extends Pick<EventRow, "id" | "claim_id" | "public_seq"> {
+  readonly public_artifact_digest: string;
+}
+
 interface ContextHistoryRow {
   readonly id: string;
   readonly public_seq: number;
@@ -97,10 +101,51 @@ interface LocalProblemStatementRow {
   readonly statement_digest: string;
 }
 
-interface ScreeningHoldRow {
+interface ScreeningReplayRow {
   readonly request_digest: string;
-  readonly coarse_category: string;
+  readonly response_kind: string;
+  readonly response_status: number;
+  readonly response_body: string | null;
+  readonly event_id: string | null;
+  readonly receipt_id: string;
+  readonly expires_at: number;
 }
+
+interface ScreeningDecisionReceiptRow {
+  readonly receipt_id: string;
+  readonly input_digest: string;
+  readonly model_version: string;
+  readonly policy_version: string;
+  readonly configuration_digest: string;
+  readonly decision: string;
+  readonly coarse_category: string;
+  readonly provider_status: string;
+  readonly decision_path: string;
+  readonly status_code: string;
+  readonly context_frontier_digest: string;
+  readonly context_omission_count: number;
+  readonly public_action: string;
+  readonly public_notice: string;
+  readonly deduplicated_from_receipt_id: string | null;
+}
+
+interface NegativeDedupRow extends ScreeningDecisionReceiptRow {
+  readonly source_receipt_id: string;
+}
+
+interface PublicScreeningActionRow {
+  readonly receipt_id: string;
+  readonly coarse_category: string;
+  readonly public_action: string;
+  readonly public_notice: string;
+}
+
+type LocalScreeningDecision =
+  | ContextualScreeningResult
+  | (Omit<ContextualScreeningResult, "decision" | "decision_path"> & {
+      readonly decision: "allow-with-warning";
+      readonly decision_path: "benign-outage-degraded";
+    });
 
 const LOCAL_FELLOW_ID = "local-fellow";
 const LOCAL_SESSION_ID = "local-session";
@@ -121,7 +166,12 @@ const LOCAL_S4_FRONTIER_SEED_MARKER = "S4-FRONTIER-SEED-FIXTURE";
 const LOCAL_S4_FRONTIER_LOSER_MARKER = "S4-FRONTIER-LOSER-FIXTURE";
 const LOCAL_S4_CROSS_FELLOW_SEED_MARKER = "S4-CROSS-FELLOW-SEED-FIXTURE";
 const LOCAL_S4_CROSS_FELLOW_CURRENT_MARKER = "S4-CROSS-FELLOW-CURRENT-FIXTURE";
+const LOCAL_S4_WARNING_MARKER = "S4-WARNING-FIXTURE";
+const LOCAL_S4_NEGATIVE_DEDUP_MARKER = "S4-NEGATIVE-DEDUP-FIXTURE";
+const LOCAL_S4_BENIGN_OUTAGE_MARKER = "S4-BENIGN-OUTAGE-FIXTURE";
 const LOCAL_S4_REVALIDATION_ATTEMPTS = 2;
+const LOCAL_S4_REPLAY_WINDOW_SECONDS = 24 * 60 * 60;
+const LOCAL_S4_NEGATIVE_DEDUP_WINDOW_SECONDS = 15 * 60;
 const ID_PATTERN = /^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$/u;
 const TEST_D1_BIND_FAULT_HEADER = "x-asimp-local-test-fault";
 const TEST_D1_BIND_FAULT = "d1-bind-reject";
@@ -130,6 +180,8 @@ const TEST_PUBLIC_ROW_POISON_HEADER = "x-asimp-local-shape-poison";
 const TEST_ROUTE_BINDING_POISON_HEADER = "x-asimp-local-route-binding-poison";
 const TEST_S4_FELLOW_AUTHORITY_HEADER = "x-asimp-local-s4-fellow-authority";
 const TEST_S4_FELLOW_ID_HEADER = "x-asimp-local-s4-fellow-id";
+const TEST_S4_FIXTURE_AUTHORITY_HEADER = "x-asimp-local-s4-fixture-authority";
+const TEST_S4_NOW_SECONDS_HEADER = "x-asimp-local-s4-now-seconds";
 const LOCAL_HARNESS_AUTHORITY_HEADERS = [
   "x-asimp-local-sponsor",
   "x-asimp-local-recovery-audit",
@@ -137,6 +189,7 @@ const LOCAL_HARNESS_AUTHORITY_HEADERS = [
   TEST_PUBLIC_ROW_POISON_HEADER,
   TEST_ROUTE_BINDING_POISON_HEADER,
   TEST_S4_FELLOW_AUTHORITY_HEADER,
+  TEST_S4_FIXTURE_AUTHORITY_HEADER,
 ] as const;
 // biome-ignore lint/suspicious/noControlCharactersInRegex: C0 must be escaped before internal math tokens exist.
 const LOCAL_C0_CONTROL = /[\u0000-\u001F\u007F]/gu;
@@ -211,7 +264,8 @@ const SCHEMA = [
     statement TEXT NOT NULL,
     statement_digest TEXT NOT NULL
   )`,
-  `CREATE TABLE IF NOT EXISTS s4_local_screening_holds (
+  `CREATE TABLE IF NOT EXISTS s4_local_screening_decision_receipts (
+    receipt_id TEXT PRIMARY KEY,
     problem_id TEXT NOT NULL,
     fellow_id TEXT NOT NULL,
     idempotency_key_digest TEXT NOT NULL,
@@ -227,7 +281,41 @@ const SCHEMA = [
     status_code TEXT NOT NULL,
     appeal_code TEXT NOT NULL,
     context_frontier_digest TEXT NOT NULL,
+    context_omission_count INTEGER NOT NULL CHECK (context_omission_count >= 0),
+    public_action TEXT NOT NULL,
+    public_notice TEXT NOT NULL,
+    deduplicated_from_receipt_id TEXT,
+    created_at INTEGER NOT NULL
+  )`,
+  `CREATE TABLE IF NOT EXISTS s4_local_screening_replays (
+    problem_id TEXT NOT NULL,
+    fellow_id TEXT NOT NULL,
+    idempotency_key_digest TEXT NOT NULL,
+    request_digest TEXT NOT NULL,
+    response_kind TEXT NOT NULL,
+    response_status INTEGER NOT NULL,
+    response_body TEXT,
+    event_id TEXT,
+    receipt_id TEXT NOT NULL,
+    expires_at INTEGER NOT NULL,
     PRIMARY KEY (problem_id, fellow_id, idempotency_key_digest)
+  )`,
+  `CREATE TABLE IF NOT EXISTS s4_local_negative_context_dedup (
+    problem_id TEXT NOT NULL,
+    fellow_id TEXT NOT NULL,
+    input_digest TEXT NOT NULL,
+    configuration_digest TEXT NOT NULL,
+    context_frontier_digest TEXT NOT NULL,
+    source_receipt_id TEXT NOT NULL,
+    expires_at INTEGER NOT NULL,
+    PRIMARY KEY (problem_id, fellow_id, input_digest, configuration_digest, context_frontier_digest)
+  )`,
+  `CREATE TABLE IF NOT EXISTS s4_local_public_screening_actions (
+    receipt_id TEXT PRIMARY KEY,
+    problem_id TEXT NOT NULL,
+    coarse_category TEXT NOT NULL,
+    public_action TEXT NOT NULL,
+    public_notice TEXT NOT NULL
   )`,
 ];
 
@@ -513,8 +601,15 @@ function localS4FrontierGate(): LocalS4FrontierGate {
   };
 }
 
-const LOCAL_S4_SAME_FELLOW_FRONTIER_GATE = localS4FrontierGate();
-const LOCAL_S4_CROSS_FELLOW_FRONTIER_GATE = localS4FrontierGate();
+let localS4SameFellowFrontierGate = localS4FrontierGate();
+let localS4CrossFellowFrontierGate = localS4FrontierGate();
+let localS4NegativeDedupCalls = 0;
+
+function resetLocalS4Fixtures(): void {
+  localS4SameFellowFrontierGate = localS4FrontierGate();
+  localS4CrossFellowFrontierGate = localS4FrontierGate();
+  localS4NegativeDedupCalls = 0;
+}
 
 async function waitForLocalS4Fixture(signal: AbortSignal, pending: Promise<void>): Promise<void> {
   await new Promise<void>((resolve, reject) => {
@@ -541,28 +636,37 @@ async function waitForLocalS4Fixture(signal: AbortSignal, pending: Promise<void>
   });
 }
 
-function localS4FixtureTimeoutMs(candidate: ContextualPromotionCandidate): number {
+function localS4FixtureTimeoutMs(
+  candidate: ContextualPromotionCandidate,
+  fixtureAuthorized: boolean,
+): number {
+  if (!fixtureAuthorized) return 25;
   return candidateIncludes(candidate, LOCAL_S4_FRONTIER_SEED_MARKER) ||
-      candidateIncludes(candidate, LOCAL_S4_FRONTIER_LOSER_MARKER) ||
-      candidateIncludes(candidate, LOCAL_S4_CROSS_FELLOW_SEED_MARKER) ||
-      candidateIncludes(candidate, LOCAL_S4_CROSS_FELLOW_CURRENT_MARKER)
+    candidateIncludes(candidate, LOCAL_S4_FRONTIER_LOSER_MARKER) ||
+    candidateIncludes(candidate, LOCAL_S4_CROSS_FELLOW_SEED_MARKER) ||
+    candidateIncludes(candidate, LOCAL_S4_CROSS_FELLOW_CURRENT_MARKER)
     ? 500
     : 25;
 }
 
-function signalLocalS4FixtureCommit(candidate: ContextualPromotionCandidate): void {
+function signalLocalS4FixtureCommit(
+  candidate: ContextualPromotionCandidate,
+  fixtureAuthorized: boolean,
+): void {
+  if (!fixtureAuthorized) return;
   if (candidateIncludes(candidate, LOCAL_S4_FRONTIER_SEED_MARKER)) {
-    LOCAL_S4_SAME_FELLOW_FRONTIER_GATE.signalSeedCommitted();
+    localS4SameFellowFrontierGate.signalSeedCommitted();
   }
   if (candidateIncludes(candidate, LOCAL_S4_CROSS_FELLOW_SEED_MARKER)) {
-    LOCAL_S4_CROSS_FELLOW_FRONTIER_GATE.signalSeedCommitted();
+    localS4CrossFellowFrontierGate.signalSeedCommitted();
   }
 }
 
 function localDirectContentVerdict(
   candidate: ContextualPromotionCandidate,
+  fixtureAuthorized: boolean,
 ): DirectContentScreeningVerdict {
-  return candidateIncludes(candidate, LOCAL_S4_DIRECT_REJECT_MARKER)
+  return fixtureAuthorized && candidateIncludes(candidate, LOCAL_S4_DIRECT_REJECT_MARKER)
     ? { decision: "reject", coarse_category: "operational-harm" }
     : { decision: "pass", coarse_category: "benign-context" };
 }
@@ -572,61 +676,74 @@ function localDirectContentVerdict(
  * proves the narrow contextual-provider wiring and must not be treated as
  * live screening evidence or a production provider implementation.
  */
-const LOCAL_S4_CONTEXTUAL_PROVIDER: ContextualScreeningProvider = {
-  async screenContextually(input, signal) {
-    if (candidateIncludes(input.current_promotion, LOCAL_S4_TIMEOUT_MARKER)) {
-      return await new Promise<never>((_resolve, reject) => {
-        signal.addEventListener("abort", () => {
-          const error = new Error("local contextual fixture aborted");
-          error.name = "AbortError";
-          reject(error);
+function localS4ContextualProvider(fixtureAuthorized: boolean): ContextualScreeningProvider {
+  return {
+    async screenContextually(input, signal) {
+      if (!fixtureAuthorized) return { decision: "pass", coarse_category: "benign-context" };
+      if (candidateIncludes(input.current_promotion, LOCAL_S4_TIMEOUT_MARKER)) {
+        return await new Promise<never>((_resolve, reject) => {
+          signal.addEventListener("abort", () => {
+            const error = new Error("local contextual fixture aborted");
+            error.name = "AbortError";
+            reject(error);
+          });
         });
-      });
-    }
-    if (candidateIncludes(input.current_promotion, LOCAL_S4_PROVIDER_EXCEPTION_MARKER)) {
-      const error = new Error(LOCAL_S4_PROVIDER_EXCEPTION_MESSAGE_CANARY);
-      error.stack = LOCAL_S4_PROVIDER_EXCEPTION_STACK_CANARY;
-      throw error;
-    }
-    if (candidateIncludes(input.current_promotion, LOCAL_S4_FRONTIER_SEED_MARKER)) {
-      await waitForLocalS4Fixture(signal, LOCAL_S4_SAME_FELLOW_FRONTIER_GATE.loser_read);
-      return { decision: "pass", coarse_category: "benign-context" };
-    }
-    if (candidateIncludes(input.current_promotion, LOCAL_S4_FRONTIER_LOSER_MARKER)) {
-      const call = LOCAL_S4_SAME_FELLOW_FRONTIER_GATE.nextLoserCall();
-      if (call === 1) {
-        LOCAL_S4_SAME_FELLOW_FRONTIER_GATE.signalLoserRead();
-        await waitForLocalS4Fixture(signal, LOCAL_S4_SAME_FELLOW_FRONTIER_GATE.seed_committed);
+      }
+      if (candidateIncludes(input.current_promotion, LOCAL_S4_PROVIDER_EXCEPTION_MARKER)) {
+        const error = new Error(LOCAL_S4_PROVIDER_EXCEPTION_MESSAGE_CANARY);
+        error.stack = LOCAL_S4_PROVIDER_EXCEPTION_STACK_CANARY;
+        throw error;
+      }
+      if (candidateIncludes(input.current_promotion, LOCAL_S4_WARNING_MARKER)) {
+        return { decision: "allow-with-warning", coarse_category: "dual-use-boundary" };
+      }
+      if (candidateIncludes(input.current_promotion, LOCAL_S4_NEGATIVE_DEDUP_MARKER)) {
+        localS4NegativeDedupCalls += 1;
+        return localS4NegativeDedupCalls === 1
+          ? { decision: "quarantine", coarse_category: "dual-use-boundary" }
+          : { decision: "reject", coarse_category: "operational-harm" };
+      }
+      if (candidateIncludes(input.current_promotion, LOCAL_S4_FRONTIER_SEED_MARKER)) {
+        await waitForLocalS4Fixture(signal, localS4SameFellowFrontierGate.loser_read);
         return { decision: "pass", coarse_category: "benign-context" };
       }
-    }
-    if (candidateIncludes(input.current_promotion, LOCAL_S4_CROSS_FELLOW_SEED_MARKER)) {
-      await waitForLocalS4Fixture(signal, LOCAL_S4_CROSS_FELLOW_FRONTIER_GATE.loser_read);
-      return { decision: "pass", coarse_category: "benign-context" };
-    }
-    if (candidateIncludes(input.current_promotion, LOCAL_S4_CROSS_FELLOW_CURRENT_MARKER)) {
-      const call = LOCAL_S4_CROSS_FELLOW_FRONTIER_GATE.nextLoserCall();
-      if (call === 1) {
-        LOCAL_S4_CROSS_FELLOW_FRONTIER_GATE.signalLoserRead();
-        await waitForLocalS4Fixture(signal, LOCAL_S4_CROSS_FELLOW_FRONTIER_GATE.seed_committed);
+      if (candidateIncludes(input.current_promotion, LOCAL_S4_FRONTIER_LOSER_MARKER)) {
+        const call = localS4SameFellowFrontierGate.nextLoserCall();
+        if (call === 1) {
+          localS4SameFellowFrontierGate.signalLoserRead();
+          await waitForLocalS4Fixture(signal, localS4SameFellowFrontierGate.seed_committed);
+          return { decision: "pass", coarse_category: "benign-context" };
+        }
+      }
+      if (candidateIncludes(input.current_promotion, LOCAL_S4_CROSS_FELLOW_SEED_MARKER)) {
+        await waitForLocalS4Fixture(signal, localS4CrossFellowFrontierGate.loser_read);
         return { decision: "pass", coarse_category: "benign-context" };
       }
-      // The cross-Fellow control becomes a hold only if the Worker invoked the
-      // provider a second time. A successful promotion therefore proves that
-      // an unrelated Fellow's append did not spuriously invalidate its scope.
-      return { decision: "quarantine", coarse_category: "dual-use-boundary" };
-    }
-    const historyContainsPiece = input.recent_same_fellow_promotions.some((promotion) =>
-      candidateIncludes(promotion, LOCAL_S4_HISTORY_PIECE_MARKER) ||
-      candidateIncludes(promotion, LOCAL_S4_FRONTIER_SEED_MARKER),
-    );
-    return historyContainsPiece &&
-      (candidateIncludes(input.current_promotion, LOCAL_S4_CURRENT_PIECE_MARKER) ||
-        candidateIncludes(input.current_promotion, LOCAL_S4_FRONTIER_LOSER_MARKER))
-      ? { decision: "quarantine", coarse_category: "dual-use-boundary" }
-      : { decision: "pass", coarse_category: "benign-context" };
-  },
-};
+      if (candidateIncludes(input.current_promotion, LOCAL_S4_CROSS_FELLOW_CURRENT_MARKER)) {
+        const call = localS4CrossFellowFrontierGate.nextLoserCall();
+        if (call === 1) {
+          localS4CrossFellowFrontierGate.signalLoserRead();
+          await waitForLocalS4Fixture(signal, localS4CrossFellowFrontierGate.seed_committed);
+          return { decision: "pass", coarse_category: "benign-context" };
+        }
+        // The cross-Fellow control becomes a hold only if the Worker invoked the
+        // provider a second time. A successful promotion therefore proves that
+        // an unrelated Fellow's append did not spuriously invalidate its scope.
+        return { decision: "quarantine", coarse_category: "dual-use-boundary" };
+      }
+      const historyContainsPiece = input.recent_same_fellow_promotions.some(
+        (promotion) =>
+          candidateIncludes(promotion, LOCAL_S4_HISTORY_PIECE_MARKER) ||
+          candidateIncludes(promotion, LOCAL_S4_FRONTIER_SEED_MARKER),
+      );
+      return historyContainsPiece &&
+        (candidateIncludes(input.current_promotion, LOCAL_S4_CURRENT_PIECE_MARKER) ||
+          candidateIncludes(input.current_promotion, LOCAL_S4_FRONTIER_LOSER_MARKER))
+        ? { decision: "quarantine", coarse_category: "dual-use-boundary" }
+        : { decision: "pass", coarse_category: "benign-context" };
+    },
+  };
+}
 
 async function localS4Identity() {
   return {
@@ -648,6 +765,84 @@ function localPolicyCategory(value: string): PolicyCategory {
     "provider-unavailable",
   ]);
   return allowed.has(value as PolicyCategory) ? (value as PolicyCategory) : "provider-unavailable";
+}
+
+const LOCAL_S4_DECISIONS = new Set<LocalScreeningDecision["decision"]>([
+  "pass",
+  "allow-with-warning",
+  "quarantine",
+  "reject",
+]);
+const LOCAL_S4_PROVIDER_STATUSES = new Set(["ok", "timeout", "error"]);
+const LOCAL_S4_STATUS_CODES = new Set([
+  "SCREENED",
+  "SCREENING_PROVIDER_TIMEOUT",
+  "SCREENING_PROVIDER_ERROR",
+]);
+const LOCAL_S4_DECISION_PATHS = new Set([
+  "provider",
+  "provider-contextual-hold",
+  "direct-content-hold",
+  "direct-content-reject",
+  "direct-content-warning",
+  "provider-timeout-fail-closed",
+  "provider-error-fail-closed",
+  "benign-outage-degraded",
+]);
+const LOCAL_S4_PUBLIC_ACTIONS = new Set([
+  "published",
+  "published-with-warning",
+  "quarantined",
+  "rejected",
+]);
+const LOCAL_S4_PUBLIC_NOTICES = new Set(["none", "screening-warning", "screening-degraded"]);
+const SHA256_DIGEST = /^sha256:[0-9a-f]{64}$/u;
+
+function publicActionForScreening(result: LocalScreeningDecision): string {
+  switch (result.decision) {
+    case "pass":
+      return "published";
+    case "allow-with-warning":
+      return "published-with-warning";
+    case "quarantine":
+      return "quarantined";
+    case "reject":
+      return "rejected";
+  }
+}
+
+function publicNoticeForScreening(result: LocalScreeningDecision): string {
+  if (result.decision !== "allow-with-warning") return "none";
+  return result.decision_path === "benign-outage-degraded"
+    ? "screening-degraded"
+    : "screening-warning";
+}
+
+function safeScreeningResponse(result: LocalScreeningDecision): {
+  readonly status: number;
+  readonly body: string;
+} {
+  if (result.decision === "quarantine") {
+    return {
+      status: 202,
+      body: JSON.stringify({
+        code: "SCREENING_HOLD",
+        coarse_category: localPolicyCategory(result.coarse_category),
+        appeal: LOCAL_S4_APPEAL_CODE,
+      }),
+    };
+  }
+  if (result.decision === "reject") {
+    return {
+      status: 403,
+      body: JSON.stringify({
+        code: "POLICY_DENIED",
+        coarse_category: localPolicyCategory(result.coarse_category),
+        appeal: LOCAL_S4_APPEAL_CODE,
+      }),
+    };
+  }
+  throw new Error("Only non-publishing screening decisions have immediate responses.");
 }
 
 function screeningHoldResponse(coarseCategory: string): Response {
@@ -675,7 +870,7 @@ function directScreeningRefusal(coarseCategory: PolicyCategory): Response {
 function localScreeningInputErrorResult(
   inputDigest: string,
   identity: Awaited<ReturnType<typeof localS4Identity>>,
-): ContextualScreeningResult {
+): LocalScreeningDecision {
   return {
     input_digest: inputDigest,
     model_version: identity.model_version,
@@ -687,6 +882,29 @@ function localScreeningInputErrorResult(
     decision_path: "provider-error-fail-closed",
     status_code: "SCREENING_PROVIDER_ERROR",
   };
+}
+
+function benignOutageDegradation(
+  result: ContextualScreeningResult,
+  directContent: DirectContentScreeningVerdict,
+  currentPromotion: ContextualPromotionCandidate,
+  fixtureAuthorized: boolean,
+): LocalScreeningDecision {
+  if (
+    fixtureAuthorized &&
+    candidateIncludes(currentPromotion, LOCAL_S4_BENIGN_OUTAGE_MARKER) &&
+    directContent.decision === "pass" &&
+    directContent.coarse_category === "benign-context" &&
+    result.coarse_category === "provider-unavailable" &&
+    result.provider_status !== "ok"
+  ) {
+    return {
+      ...result,
+      decision: "allow-with-warning",
+      decision_path: "benign-outage-degraded",
+    };
+  }
+  return result;
 }
 
 async function ensureLocalProblemStatement(
@@ -725,6 +943,7 @@ async function loadSameScopeContext(
   readonly input: ReturnType<typeof buildContextualScreeningInput>;
   readonly frontier_public_seq: number;
   readonly frontier_digest: string;
+  readonly omitted_context_count: number;
 }> {
   // This deterministic local fixture lets the harness prove that a dependency
   // failure is converted into the same coarse private hold as every other
@@ -735,9 +954,39 @@ async function loadSameScopeContext(
     error.stack = LOCAL_S4_CONTEXT_DEPENDENCY_STACK_CANARY;
     throw error;
   }
-  const [problemStatement, history] = await Promise.all([
+  const [problemStatement, historyCount] = await Promise.all([
     ensureLocalProblemStatement(env, workshop.problem_id),
     env.DB.prepare(
+      `SELECT COUNT(*) AS history_count
+       FROM s3_local_events AS event
+       JOIN s3_local_workshops AS source ON source.id = event.source_workshop_id
+       WHERE event.problem_id = ?1 AND source.problem_id = event.problem_id AND source.fellow_id = ?2`,
+    )
+      .bind(workshop.problem_id, workshop.fellow_id)
+      .first<{ readonly history_count: number }>(),
+  ]);
+  if (
+    historyCount === null ||
+    !Number.isSafeInteger(historyCount.history_count) ||
+    historyCount.history_count < 0
+  ) {
+    throw new ContextualScreeningInputError("local public history count is malformed.");
+  }
+  const totalHistoryCount = historyCount.history_count;
+  const promotions: Array<{
+    readonly problem_id: string;
+    readonly fellow_id: string;
+    readonly public_seq: number;
+    readonly promotion: ContextualPromotionCandidate;
+    readonly row: ContextHistoryRow;
+  }> = [];
+  let frontierPublicSeq = 0;
+  let offset = 0;
+  // Read fixed-size D1 pages until we have the newest valid bounded context.
+  // The count below remains exact even when much older rows are never
+  // materialized, so a receipt's omission count is never a truncated guess.
+  while (offset < totalHistoryCount && promotions.length < MAX_CONTEXTUAL_PROMOTIONS) {
+    const history = await env.DB.prepare(
       `SELECT event.id, event.public_seq, event.title, event.extract, event.statement,
               event.statement_digest, artifact.digest AS artifact_digest,
               artifact.event_id, artifact.object_key
@@ -748,13 +997,17 @@ async function loadSameScopeContext(
          AND source.problem_id = event.problem_id
          AND source.fellow_id = ?2
        ORDER BY event.public_seq DESC
-       LIMIT ?3`,
+       LIMIT ?3 OFFSET ?4`,
     )
-      .bind(workshop.problem_id, workshop.fellow_id, MAX_CONTEXTUAL_PROMOTIONS)
-      .all<ContextHistoryRow>(),
-  ]);
-  const promotions = await Promise.all(
-    history.results.map(async (row) => {
+      .bind(workshop.problem_id, workshop.fellow_id, MAX_CONTEXTUAL_PROMOTIONS, offset)
+      .all<ContextHistoryRow>();
+    if (history.results.length === 0) {
+      throw new ContextualScreeningInputError("local public history changed during assembly.");
+    }
+    offset += history.results.length;
+    if (frontierPublicSeq === 0) frontierPublicSeq = history.results[0]?.public_seq ?? 0;
+    for (const row of history.results) {
+      if (promotions.length >= MAX_CONTEXTUAL_PROMOTIONS) break;
       if (
         row.event_id !== row.id ||
         row.object_key !== publicArtifactKey(row.artifact_digest) ||
@@ -773,23 +1026,21 @@ async function loadSameScopeContext(
           "local public history artifact binding is unavailable.",
         );
       }
-      // R2 reports object size as metadata. Refuse an oversized historical
-      // object before materializing bytes so context bounds do not depend on
-      // loading an unbounded public artifact into Worker memory.
-      if (
-        !Number.isSafeInteger(artifact.size) ||
-        artifact.size < 0 ||
-        artifact.size > MAX_CONTEXTUAL_PROMOTION_BYTES
-      ) {
+      // An oversized prior body is not corrupted, but it is not eligible for
+      // this bounded provider context. Omit it before materializing bytes and
+      // continue to older rows. Missing, malformed, or digest-mismatched
+      // bindings remain fail-closed below.
+      if (!Number.isSafeInteger(artifact.size) || artifact.size < 0) {
         throw new ContextualScreeningInputError(
-          "local public history artifact exceeds the contextual byte budget.",
+          "local public history artifact metadata is malformed.",
         );
       }
+      if (artifact.size > MAX_CONTEXTUAL_PROMOTION_BYTES) continue;
       const publicArtifactMd = await artifact.text();
       if ((await sha256Hex(publicArtifactMd)) !== row.artifact_digest) {
         throw new ContextualScreeningInputError("local public history artifact digest is invalid.");
       }
-      return {
+      promotions.push({
         problem_id: workshop.problem_id,
         fellow_id: workshop.fellow_id,
         public_seq: row.public_seq,
@@ -799,12 +1050,36 @@ async function loadSameScopeContext(
           statement: row.statement,
           public_artifact_md: publicArtifactMd,
         },
-      };
-    }),
-  );
-  const chronologicalFrontier = [...history.results]
+        row,
+      });
+    }
+  }
+  let boundedPromotions = promotions;
+  let omittedContextCount = totalHistoryCount - promotions.length;
+  let input: ReturnType<typeof buildContextualScreeningInput> | undefined;
+  while (input === undefined) {
+    try {
+      input = buildContextualScreeningInput({
+        problem_id: workshop.problem_id,
+        fellow_id: workshop.fellow_id,
+        server_owned_problem_statement: problemStatement.statement,
+        current_promotion: currentPromotion,
+        recent_promotions: boundedPromotions.map(({ row: _row, ...promotion }) => promotion),
+      });
+    } catch (error) {
+      if (!(error instanceof ContextualScreeningInputError) || boundedPromotions.length === 0) {
+        throw error;
+      }
+      // Omit only the oldest retained row. The newest prefix remains intact,
+      // preserving the most relevant trajectory while keeping provider input
+      // within its total byte limit. The receipt records only this count.
+      boundedPromotions = boundedPromotions.slice(0, -1);
+      omittedContextCount += 1;
+    }
+  }
+  const chronologicalFrontier = [...boundedPromotions]
     .sort((left, right) => left.public_seq - right.public_seq)
-    .map((row) => ({
+    .map(({ row }) => ({
       event_id: row.id,
       public_seq: row.public_seq,
       statement_digest: row.statement_digest,
@@ -814,19 +1089,15 @@ async function loadSameScopeContext(
     JSON.stringify({
       problem_id: workshop.problem_id,
       fellow_id: workshop.fellow_id,
+      total_history_count: totalHistoryCount,
       promotions: chronologicalFrontier,
     }),
   )}`;
   return {
-    input: buildContextualScreeningInput({
-      problem_id: workshop.problem_id,
-      fellow_id: workshop.fellow_id,
-      server_owned_problem_statement: problemStatement.statement,
-      current_promotion: currentPromotion,
-      recent_promotions: promotions,
-    }),
-    frontier_public_seq: history.results[0]?.public_seq ?? 0,
+    input,
+    frontier_public_seq: frontierPublicSeq,
     frontier_digest: frontierDigest,
+    omitted_context_count: omittedContextCount,
   };
 }
 
@@ -845,53 +1116,257 @@ async function localScreeningRequestDigest(
   )}`;
 }
 
-async function localIdempotencyKeyDigest(request: Request, requestDigest: string): Promise<string> {
-  const key = request.headers.get("idempotency-key");
-  if (key !== null && (key.length === 0 || key.length > 256)) {
-    throw new ContextualScreeningInputError("idempotency key is malformed.");
+class LocalIdempotencyKeyError extends Error {
+  constructor(readonly code: "IDEMPOTENCY_KEY_REQUIRED" | "IDEMPOTENCY_KEY_INVALID") {
+    super(code);
+    this.name = "LocalIdempotencyKeyError";
   }
-  return `sha256:${await sha256Hex(
-    key === null ? `local-s4-derived:${requestDigest}` : `local-s4-header:${key}`,
-  )}`;
 }
 
-async function replayedScreeningHold(
+function localS4FixtureAuthorized(request: Request, env: LocalSplitEnv): boolean {
+  return hasLocalHarnessAuthority(request, env, TEST_S4_FIXTURE_AUTHORITY_HEADER);
+}
+
+function localS4NowSeconds(request: Request, env: LocalSplitEnv): number {
+  if (localS4FixtureAuthorized(request, env)) {
+    const supplied = request.headers.get(TEST_S4_NOW_SECONDS_HEADER);
+    if (supplied !== null && /^\d{1,12}$/u.test(supplied)) {
+      const parsed = Number(supplied);
+      if (Number.isSafeInteger(parsed)) return parsed;
+    }
+  }
+  return Math.floor(Date.now() / 1_000);
+}
+
+function hasHeaderControlCharacter(value: string): boolean {
+  return Array.from(value).some((character) => {
+    const codePoint = character.codePointAt(0);
+    return codePoint !== undefined && (codePoint < 0x20 || codePoint === 0x7f);
+  });
+}
+
+async function localIdempotencyKeyDigest(request: Request): Promise<string> {
+  const key = request.headers.get("idempotency-key");
+  if (key === null) throw new LocalIdempotencyKeyError("IDEMPOTENCY_KEY_REQUIRED");
+  if (key.trim().length === 0 || key.length > 256 || hasHeaderControlCharacter(key)) {
+    throw new LocalIdempotencyKeyError("IDEMPOTENCY_KEY_INVALID");
+  }
+  return `sha256:${await sha256Hex(`local-s4-header:${key}`)}`;
+}
+
+function localS4DecisionResponse(result: LocalScreeningDecision): Response {
+  if (result.decision === "quarantine") return screeningHoldResponse(result.coarse_category);
+  if (result.decision === "reject") return directScreeningRefusal(result.coarse_category);
+  throw new Error("A publishing decision has no immediate screening response.");
+}
+
+function localS4ReplayConflict(): Response {
+  return json({ code: "IDEMPOTENCY_CONFLICT" }, 409);
+}
+
+function localS4SafeLabel(value: string): boolean {
+  return /^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/u.test(value);
+}
+
+function assertLocalS4ReceiptSafe(row: ScreeningDecisionReceiptRow): void {
+  if (
+    !validId(row.receipt_id) ||
+    !SHA256_DIGEST.test(row.input_digest) ||
+    !SHA256_DIGEST.test(row.configuration_digest) ||
+    !SHA256_DIGEST.test(row.context_frontier_digest) ||
+    !Number.isSafeInteger(row.context_omission_count) ||
+    row.context_omission_count < 0 ||
+    !localS4SafeLabel(row.model_version) ||
+    !localS4SafeLabel(row.policy_version) ||
+    !LOCAL_S4_DECISIONS.has(row.decision as LocalScreeningDecision["decision"]) ||
+    localPolicyCategory(row.coarse_category) !== row.coarse_category ||
+    !LOCAL_S4_PROVIDER_STATUSES.has(row.provider_status) ||
+    !LOCAL_S4_DECISION_PATHS.has(row.decision_path) ||
+    !LOCAL_S4_STATUS_CODES.has(row.status_code) ||
+    !LOCAL_S4_PUBLIC_ACTIONS.has(row.public_action) ||
+    !LOCAL_S4_PUBLIC_NOTICES.has(row.public_notice) ||
+    (row.deduplicated_from_receipt_id !== null && !validId(row.deduplicated_from_receipt_id))
+  ) {
+    throw new ContextualScreeningInputError("local screening receipt diagnostics are invalid.");
+  }
+}
+
+function decisionFromReceipt(row: ScreeningDecisionReceiptRow): LocalScreeningDecision {
+  assertLocalS4ReceiptSafe(row);
+  return {
+    input_digest: row.input_digest,
+    model_version: row.model_version,
+    policy_version: row.policy_version,
+    configuration_digest: row.configuration_digest,
+    decision: row.decision as LocalScreeningDecision["decision"],
+    coarse_category: row.coarse_category as PolicyCategory,
+    provider_status: row.provider_status as LocalScreeningDecision["provider_status"],
+    decision_path: row.decision_path as LocalScreeningDecision["decision_path"],
+    status_code: row.status_code as LocalScreeningDecision["status_code"],
+  } as LocalScreeningDecision;
+}
+
+function promotionResponse(event: PromotionEventRow, publicNotice: string): Response {
+  const base = {
+    status: 201,
+    event_id: event.id,
+    claim_id: event.claim_id,
+    public_artifact_digest: event.public_artifact_digest,
+    public_seq: event.public_seq,
+  };
+  return json(publicNotice === "none" ? base : { ...base, screening_notice: publicNotice }, 201);
+}
+
+async function replayedScreeningDecision(
   env: LocalSplitEnv,
   workshop: WorkshopRow,
   idempotencyKeyDigest: string,
   requestDigest: string,
+  nowSeconds: number,
 ): Promise<Response | undefined> {
-  const existing = await env.DB.prepare(
-    `SELECT request_digest, coarse_category
-     FROM s4_local_screening_holds
+  const replay = await env.DB.prepare(
+    `SELECT request_digest, response_kind, response_status, response_body, event_id, receipt_id, expires_at
+     FROM s4_local_screening_replays
      WHERE problem_id = ?1 AND fellow_id = ?2 AND idempotency_key_digest = ?3`,
   )
     .bind(workshop.problem_id, workshop.fellow_id, idempotencyKeyDigest)
-    .first<ScreeningHoldRow>();
-  if (existing === null) return undefined;
-  if (existing.request_digest !== requestDigest) {
-    return json({ code: "IDEMPOTENCY_CONFLICT" }, 409);
+    .first<ScreeningReplayRow>();
+  if (replay === null || replay.expires_at <= nowSeconds) return undefined;
+  if (replay.request_digest !== requestDigest) return localS4ReplayConflict();
+  if (replay.response_kind === "screening" && replay.response_body !== null) {
+    return new Response(replay.response_body, {
+      status: replay.response_status,
+      headers: {
+        "cache-control": "no-store",
+        "content-type": "application/json; charset=utf-8",
+        "x-content-type-options": "nosniff",
+      },
+    });
   }
-  return screeningHoldResponse(existing.coarse_category);
+  if (replay.response_kind !== "promotion" || replay.event_id === null) {
+    throw new ContextualScreeningInputError("local screening replay is malformed.");
+  }
+  const [event, receipt] = await Promise.all([
+    env.DB.prepare(
+      `SELECT event.id, event.claim_id, event.public_seq, artifact.digest AS public_artifact_digest
+       FROM s3_local_events AS event
+       JOIN s3_local_public_artifacts AS artifact ON artifact.event_id = event.id
+       WHERE event.id = ?1 AND event.problem_id = ?2`,
+    )
+      .bind(replay.event_id, workshop.problem_id)
+      .first<PromotionEventRow>(),
+    env.DB.prepare(
+      `SELECT receipt_id, input_digest, model_version, policy_version, configuration_digest,
+              decision, coarse_category, provider_status, decision_path, status_code,
+              context_frontier_digest, context_omission_count, public_action, public_notice,
+              deduplicated_from_receipt_id
+       FROM s4_local_screening_decision_receipts WHERE receipt_id = ?1`,
+    )
+      .bind(replay.receipt_id)
+      .first<ScreeningDecisionReceiptRow>(),
+  ]);
+  if (event === null || receipt === null) {
+    throw new ContextualScreeningInputError("local screening promotion replay is incomplete.");
+  }
+  assertLocalS4ReceiptSafe(receipt);
+  return promotionResponse(event, receipt.public_notice);
 }
 
-async function persistScreeningHold(
+async function negativeContextDeduplication(
+  env: LocalSplitEnv,
+  workshop: WorkshopRow,
+  inputDigest: string,
+  configurationDigest: string,
+  frontierDigest: string,
+  nowSeconds: number,
+): Promise<
+  { readonly result: LocalScreeningDecision; readonly sourceReceiptId: string } | undefined
+> {
+  const row = await env.DB.prepare(
+    `SELECT receipt.receipt_id, receipt.input_digest, receipt.model_version, receipt.policy_version,
+            receipt.configuration_digest, receipt.decision, receipt.coarse_category,
+            receipt.provider_status, receipt.decision_path, receipt.status_code,
+            receipt.context_frontier_digest, receipt.context_omission_count, receipt.public_action,
+            receipt.public_notice,
+            receipt.deduplicated_from_receipt_id, dedup.source_receipt_id
+     FROM s4_local_negative_context_dedup AS dedup
+     JOIN s4_local_screening_decision_receipts AS receipt ON receipt.receipt_id = dedup.source_receipt_id
+     WHERE dedup.problem_id = ?1 AND dedup.fellow_id = ?2 AND dedup.input_digest = ?3
+       AND dedup.configuration_digest = ?4 AND dedup.context_frontier_digest = ?5
+       AND dedup.expires_at > ?6`,
+  )
+    .bind(
+      workshop.problem_id,
+      workshop.fellow_id,
+      inputDigest,
+      configurationDigest,
+      frontierDigest,
+      nowSeconds,
+    )
+    .first<NegativeDedupRow>();
+  if (row === null) return undefined;
+  const { source_receipt_id: sourceReceiptId, ...receipt } = row;
+  return { result: decisionFromReceipt(receipt), sourceReceiptId };
+}
+
+async function persistNonPublishingScreeningDecision(
   env: LocalSplitEnv,
   workshop: WorkshopRow,
   idempotencyKeyDigest: string,
   requestDigest: string,
-  result: ContextualScreeningResult,
+  result: LocalScreeningDecision,
   frontierDigest: string,
+  nowSeconds: number,
+  contextOmissionCount: number,
+  deduplicatedFromReceiptId?: string,
 ): Promise<Response> {
-  await env.DB.prepare(
-    `INSERT INTO s4_local_screening_holds
-       (problem_id, fellow_id, idempotency_key_digest, request_digest, input_digest,
-        model_version, policy_version, configuration_digest, decision, coarse_category,
-        provider_status, decision_path, status_code, appeal_code, context_frontier_digest)
-     VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15)
-     ON CONFLICT(problem_id, fellow_id, idempotency_key_digest) DO NOTHING`,
-  )
-    .bind(
+  const response = safeScreeningResponse(result);
+  const receiptId = `DR-${nextMonotonicUlid()}`;
+  const action = publicActionForScreening(result);
+  const notice = publicNoticeForScreening(result);
+  const expiresAt = nowSeconds + LOCAL_S4_REPLAY_WINDOW_SECONDS;
+  const negativeExpiresAt = nowSeconds + LOCAL_S4_NEGATIVE_DEDUP_WINDOW_SECONDS;
+  const negative = result.decision === "quarantine" || result.decision === "reject";
+  await env.DB.batch([
+    env.DB.prepare(
+      `INSERT INTO s4_local_screening_replays
+         (problem_id, fellow_id, idempotency_key_digest, request_digest, response_kind,
+          response_status, response_body, event_id, receipt_id, expires_at)
+       VALUES (?1, ?2, ?3, ?4, 'screening', ?5, ?6, NULL, ?7, ?8)
+       ON CONFLICT(problem_id, fellow_id, idempotency_key_digest) DO UPDATE SET
+         request_digest = excluded.request_digest,
+         response_kind = excluded.response_kind,
+         response_status = excluded.response_status,
+         response_body = excluded.response_body,
+         event_id = excluded.event_id,
+         receipt_id = excluded.receipt_id,
+         expires_at = excluded.expires_at
+       WHERE s4_local_screening_replays.expires_at <= ?9`,
+    ).bind(
+      workshop.problem_id,
+      workshop.fellow_id,
+      idempotencyKeyDigest,
+      requestDigest,
+      response.status,
+      response.body,
+      receiptId,
+      expiresAt,
+      nowSeconds,
+    ),
+    env.DB.prepare(
+      `INSERT INTO s4_local_screening_decision_receipts
+         (receipt_id, problem_id, fellow_id, idempotency_key_digest, request_digest, input_digest,
+          model_version, policy_version, configuration_digest, decision, coarse_category,
+          provider_status, decision_path, status_code, appeal_code, context_frontier_digest,
+          context_omission_count, public_action, public_notice, deduplicated_from_receipt_id, created_at)
+       SELECT ?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16,
+              ?17, ?18, ?19, ?20, ?21
+       WHERE EXISTS (
+         SELECT 1 FROM s4_local_screening_replays
+         WHERE problem_id = ?2 AND fellow_id = ?3 AND idempotency_key_digest = ?4 AND receipt_id = ?1
+       )`,
+    ).bind(
+      receiptId,
       workshop.problem_id,
       workshop.fellow_id,
       idempotencyKeyDigest,
@@ -907,10 +1382,45 @@ async function persistScreeningHold(
       result.status_code,
       LOCAL_S4_APPEAL_CODE,
       frontierDigest,
-    )
-    .run();
-  const replay = await replayedScreeningHold(env, workshop, idempotencyKeyDigest, requestDigest);
-  return replay ?? screeningHoldResponse(result.coarse_category);
+      contextOmissionCount,
+      action,
+      notice,
+      deduplicatedFromReceiptId ?? null,
+      nowSeconds,
+    ),
+    env.DB.prepare(
+      `INSERT INTO s4_local_public_screening_actions
+         (receipt_id, problem_id, coarse_category, public_action, public_notice)
+       SELECT ?1, ?2, ?3, ?4, ?5
+       WHERE EXISTS (SELECT 1 FROM s4_local_screening_decision_receipts WHERE receipt_id = ?1)`,
+    ).bind(receiptId, workshop.problem_id, result.coarse_category, action, notice),
+    env.DB.prepare(
+      `INSERT INTO s4_local_negative_context_dedup
+         (problem_id, fellow_id, input_digest, configuration_digest, context_frontier_digest,
+          source_receipt_id, expires_at)
+       SELECT ?1, ?2, ?3, ?4, ?5, ?6, ?7
+       WHERE ?8 = 1 AND EXISTS (SELECT 1 FROM s4_local_screening_decision_receipts WHERE receipt_id = ?6)
+       ON CONFLICT(problem_id, fellow_id, input_digest, configuration_digest, context_frontier_digest)
+       DO UPDATE SET source_receipt_id = excluded.source_receipt_id, expires_at = excluded.expires_at`,
+    ).bind(
+      workshop.problem_id,
+      workshop.fellow_id,
+      result.input_digest,
+      result.configuration_digest,
+      frontierDigest,
+      receiptId,
+      negativeExpiresAt,
+      negative ? 1 : 0,
+    ),
+  ]);
+  const replay = await replayedScreeningDecision(
+    env,
+    workshop,
+    idempotencyKeyDigest,
+    requestDigest,
+    nowSeconds,
+  );
+  return replay ?? localS4DecisionResponse(result);
 }
 
 function normalizeS3Whitespace(value: string): string {
@@ -1300,6 +1810,25 @@ async function promoteWorkshop(request: Request, env: LocalSplitEnv): Promise<Re
     .bind(workshopId)
     .first<WorkshopRow>();
   if (workshop === null) return notFound();
+  const requestDigest = await localScreeningRequestDigest(workshop, currentPromotion);
+  let idempotencyKeyDigest: string;
+  try {
+    idempotencyKeyDigest = await localIdempotencyKeyDigest(request);
+  } catch (error) {
+    if (error instanceof LocalIdempotencyKeyError) {
+      return json({ code: error.code }, 400);
+    }
+    throw error;
+  }
+  const nowSeconds = localS4NowSeconds(request, env);
+  const replay = await replayedScreeningDecision(
+    env,
+    workshop,
+    idempotencyKeyDigest,
+    requestDigest,
+    nowSeconds,
+  );
+  if (replay !== undefined) return replay;
   if (workshop.promoted_event_id !== null) {
     return json(
       { code: "PROMOTION_ALREADY_EXISTS", public_event_id: workshop.promoted_event_id },
@@ -1310,35 +1839,79 @@ async function promoteWorkshop(request: Request, env: LocalSplitEnv): Promise<Re
   const duplicate = await duplicateClaim(env, workshop.problem_id, statementDigest);
   if (duplicate !== null) return duplicateClaimResponse(duplicate);
 
-  const requestDigest = await localScreeningRequestDigest(workshop, currentPromotion);
-  let idempotencyKeyDigest: string;
-  try {
-    idempotencyKeyDigest = await localIdempotencyKeyDigest(request, requestDigest);
-  } catch (error) {
-    if (error instanceof ContextualScreeningInputError) {
-      return json({ code: "LOCAL_INPUT_INVALID" }, 400);
-    }
-    throw error;
-  }
-  const replay = await replayedScreeningHold(env, workshop, idempotencyKeyDigest, requestDigest);
-  if (replay !== undefined) return replay;
-
-  const directContent = localDirectContentVerdict(currentPromotion);
+  const fixtureAuthorized = localS4FixtureAuthorized(request, env);
+  const directContent = localDirectContentVerdict(currentPromotion, fixtureAuthorized);
   if (directContent.decision === "reject") {
-    return directScreeningRefusal(directContent.coarse_category);
+    const identity = await localS4Identity();
+    const directInputDigest = `sha256:${await sha256Hex(
+      `local-s4-direct:${requestDigest}:${identity.configuration_digest}`,
+    )}`;
+    const directFrontierDigest = `sha256:${await sha256Hex(
+      `local-s4-direct-no-context:${workshop.problem_id}:${workshop.fellow_id}`,
+    )}`;
+    return await persistNonPublishingScreeningDecision(
+      env,
+      workshop,
+      idempotencyKeyDigest,
+      requestDigest,
+      {
+        input_digest: directInputDigest,
+        model_version: identity.model_version,
+        policy_version: identity.policy_version,
+        configuration_digest: identity.configuration_digest,
+        decision: "reject",
+        coarse_category: directContent.coarse_category,
+        provider_status: "ok",
+        decision_path: "direct-content-reject",
+        status_code: "SCREENED",
+      },
+      directFrontierDigest,
+      nowSeconds,
+      0,
+    );
   }
 
   for (let attempt = 0; attempt < LOCAL_S4_REVALIDATION_ATTEMPTS; attempt += 1) {
     const identity = await localS4Identity();
     let context: Awaited<ReturnType<typeof loadSameScopeContext>>;
-    let result: ContextualScreeningResult;
+    let result: LocalScreeningDecision;
     try {
       context = await loadSameScopeContext(env, workshop, currentPromotion);
-      result = await screenContextuallyWithProvider(LOCAL_S4_CONTEXTUAL_PROVIDER, context.input, {
-        timeout_ms: localS4FixtureTimeoutMs(currentPromotion),
-        identity,
-        direct_content: directContent,
-      });
+      const deduplicated = await negativeContextDeduplication(
+        env,
+        workshop,
+        `sha256:${await sha256Hex(JSON.stringify(context.input))}`,
+        identity.configuration_digest,
+        context.frontier_digest,
+        nowSeconds,
+      );
+      if (deduplicated !== undefined) {
+        return await persistNonPublishingScreeningDecision(
+          env,
+          workshop,
+          idempotencyKeyDigest,
+          requestDigest,
+          deduplicated.result,
+          context.frontier_digest,
+          nowSeconds,
+          context.omitted_context_count,
+          deduplicated.sourceReceiptId,
+        );
+      }
+      result = benignOutageDegradation(
+        await screenContextuallyWithProvider(
+          localS4ContextualProvider(fixtureAuthorized),
+          context.input,
+          {
+            timeout_ms: localS4FixtureTimeoutMs(currentPromotion, fixtureAuthorized),
+            identity,
+            direct_content: directContent,
+          },
+        ),
+        directContent,
+        currentPromotion,
+        fixtureAuthorized,
+      );
     } catch {
       // D1/R2/context-provider dependency failures must never escape to the
       // route boundary (whose generic error would be indistinguishable from a
@@ -1347,30 +1920,36 @@ async function promoteWorkshop(request: Request, env: LocalSplitEnv): Promise<Re
       const safeInputDigest = `sha256:${await sha256Hex(
         `local-s4-context-assembly:${requestDigest}`,
       )}`;
-      return await persistScreeningHold(
+      return await persistNonPublishingScreeningDecision(
         env,
         workshop,
         idempotencyKeyDigest,
         requestDigest,
         localScreeningInputErrorResult(safeInputDigest, identity),
         `sha256:${await sha256Hex(`local-s4-context-frontier-unavailable:${requestDigest}`)}`,
+        nowSeconds,
+        0,
       );
     }
-    if (result.decision === "reject") return directScreeningRefusal(result.coarse_category);
-    if (result.decision === "quarantine") {
-      return await persistScreeningHold(
+    if (result.decision === "reject" || result.decision === "quarantine") {
+      return await persistNonPublishingScreeningDecision(
         env,
         workshop,
         idempotencyKeyDigest,
         requestDigest,
         result,
         context.frontier_digest,
+        nowSeconds,
+        context.omitted_context_count,
       );
     }
 
     const publicArtifactDigest = await sha256Hex(publicArtifactMd);
     const publicObjectKey = publicArtifactKey(publicArtifactDigest);
     const eventId = `EV-${nextMonotonicUlid()}`;
+    const receiptId = `DR-${nextMonotonicUlid()}`;
+    const publicAction = publicActionForScreening(result);
+    const publicNotice = publicNoticeForScreening(result);
     await env.ARTIFACTS.put(publicObjectKey, publicArtifactMd, {
       httpMetadata: { contentType: "text/markdown; charset=utf-8" },
       customMetadata: {
@@ -1454,6 +2033,73 @@ async function promoteWorkshop(request: Request, env: LocalSplitEnv): Promise<Re
          SELECT ?1, ?2, ?3
          WHERE EXISTS (SELECT 1 FROM s3_local_events WHERE id = ?2)`,
       ).bind(publicArtifactDigest, eventId, publicObjectKey),
+      // The receipt, the coarse public log record, and the 24h replay map are
+      // created in the same D1 batch as the public event. A CAS object that
+      // has no committed event consequently has no decision receipt claiming
+      // it was published.
+      env.DB.prepare(
+        `INSERT INTO s4_local_screening_decision_receipts
+           (receipt_id, problem_id, fellow_id, idempotency_key_digest, request_digest, input_digest,
+            model_version, policy_version, configuration_digest, decision, coarse_category,
+            provider_status, decision_path, status_code, appeal_code, context_frontier_digest,
+            context_omission_count, public_action, public_notice, deduplicated_from_receipt_id, created_at)
+         SELECT ?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16,
+                ?17, ?18, ?19, NULL, ?20
+         WHERE EXISTS (SELECT 1 FROM s3_local_events WHERE id = ?21)`,
+      ).bind(
+        receiptId,
+        workshop.problem_id,
+        workshop.fellow_id,
+        idempotencyKeyDigest,
+        requestDigest,
+        result.input_digest,
+        result.model_version,
+        result.policy_version,
+        result.configuration_digest,
+        result.decision,
+        result.coarse_category,
+        result.provider_status,
+        result.decision_path,
+        result.status_code,
+        LOCAL_S4_APPEAL_CODE,
+        context.frontier_digest,
+        context.omitted_context_count,
+        publicAction,
+        publicNotice,
+        nowSeconds,
+        eventId,
+      ),
+      env.DB.prepare(
+        `INSERT INTO s4_local_public_screening_actions
+           (receipt_id, problem_id, coarse_category, public_action, public_notice)
+         SELECT ?1, ?2, ?3, ?4, ?5
+         WHERE EXISTS (SELECT 1 FROM s4_local_screening_decision_receipts WHERE receipt_id = ?1)`,
+      ).bind(receiptId, workshop.problem_id, result.coarse_category, publicAction, publicNotice),
+      env.DB.prepare(
+        `INSERT INTO s4_local_screening_replays
+           (problem_id, fellow_id, idempotency_key_digest, request_digest, response_kind,
+            response_status, response_body, event_id, receipt_id, expires_at)
+         SELECT ?1, ?2, ?3, ?4, 'promotion', 201, NULL, ?5, ?6, ?7
+         WHERE EXISTS (SELECT 1 FROM s4_local_screening_decision_receipts WHERE receipt_id = ?6)
+         ON CONFLICT(problem_id, fellow_id, idempotency_key_digest) DO UPDATE SET
+           request_digest = excluded.request_digest,
+           response_kind = excluded.response_kind,
+           response_status = excluded.response_status,
+           response_body = excluded.response_body,
+           event_id = excluded.event_id,
+           receipt_id = excluded.receipt_id,
+           expires_at = excluded.expires_at
+         WHERE s4_local_screening_replays.expires_at <= ?8`,
+      ).bind(
+        workshop.problem_id,
+        workshop.fellow_id,
+        idempotencyKeyDigest,
+        requestDigest,
+        eventId,
+        receiptId,
+        nowSeconds + LOCAL_S4_REPLAY_WINDOW_SECONDS,
+        nowSeconds,
+      ),
     ];
     if (d1FaultRequested(request, env)) {
       statements.push(
@@ -1470,18 +2116,20 @@ async function promoteWorkshop(request: Request, env: LocalSplitEnv): Promise<Re
         publicSeq !== undefined &&
         changesFrom(results[1]) === 1 &&
         changesFrom(results[3]) === 1 &&
-        changesFrom(results[4]) === 1
+        changesFrom(results[4]) === 1 &&
+        changesFrom(results[5]) === 1 &&
+        changesFrom(results[6]) === 1 &&
+        changesFrom(results[7]) === 1
       ) {
-        signalLocalS4FixtureCommit(currentPromotion);
-        return json(
+        signalLocalS4FixtureCommit(currentPromotion, fixtureAuthorized);
+        return promotionResponse(
           {
-            status: 201,
-            event_id: eventId,
+            id: eventId,
             claim_id: `C-${publicSeq}`,
             public_artifact_digest: publicArtifactDigest,
             public_seq: publicSeq,
           },
-          201,
+          publicNotice,
         );
       }
     } catch {
@@ -1560,6 +2208,158 @@ async function publicProjection(
   };
   assertS3PublicProjectionShape(projection);
   return projection;
+}
+
+function assertLocalS4PublicActionRows(rows: readonly PublicScreeningActionRow[]): void {
+  for (const row of rows) {
+    if (
+      localPolicyCategory(row.coarse_category) !== row.coarse_category ||
+      !LOCAL_S4_PUBLIC_ACTIONS.has(row.public_action) ||
+      !LOCAL_S4_PUBLIC_NOTICES.has(row.public_notice)
+    ) {
+      throw new LocalS3PublicShapeError("screening-action-row");
+    }
+  }
+}
+
+/**
+ * The moderation-facing public projection has exactly the category, action,
+ * and generic notice enum. It never queries a workshop, a CAS object, a
+ * request digest, or any provider diagnostic.
+ */
+async function publicScreeningActions(
+  request: Request,
+  env: LocalSplitEnv,
+  problemId: string,
+): Promise<Response> {
+  throwIfRouteBindingPoisoned(request, env);
+  const actions = await env.DB.prepare(
+    `SELECT receipt_id, coarse_category, public_action, public_notice
+     FROM s4_local_public_screening_actions
+     WHERE problem_id = ?1 ORDER BY receipt_id ASC`,
+  )
+    .bind(problemId)
+    .all<PublicScreeningActionRow>();
+  if (actions.results.length === 0) return notFound();
+  assertLocalS4PublicActionRows(actions.results);
+  const body = JSON.stringify({
+    schema: "asimposium.s4-public-actions.v1",
+    actions: actions.results.map((action) => ({
+      category: action.coarse_category,
+      action: action.public_action,
+      notice: action.public_notice,
+    })),
+  });
+  assertS3PublicValueSafe(JSON.parse(body));
+  return publicBytes(request, body, "application/json; charset=utf-8");
+}
+
+/** Test-only receipt visibility; raw content and idempotency-key material remain unavailable. */
+async function localS4Diagnostics(
+  request: Request,
+  env: LocalSplitEnv,
+  problemId: string,
+): Promise<Response> {
+  if (!localS4FixtureAuthorized(request, env)) return notFound();
+  const rows = await env.DB.prepare(
+    `SELECT receipt_id, input_digest, model_version, policy_version, configuration_digest,
+            decision, coarse_category, provider_status, decision_path, status_code,
+            context_frontier_digest, context_omission_count, public_action, public_notice,
+            deduplicated_from_receipt_id
+     FROM s4_local_screening_decision_receipts
+     WHERE problem_id = ?1 ORDER BY receipt_id ASC`,
+  )
+    .bind(problemId)
+    .all<ScreeningDecisionReceiptRow>();
+  for (const row of rows.results) assertLocalS4ReceiptSafe(row);
+  return json({
+    receipts: rows.results.map((row) => ({
+      receipt_id: row.receipt_id,
+      input_digest: row.input_digest,
+      model_version: row.model_version,
+      policy_version: row.policy_version,
+      configuration_digest: row.configuration_digest,
+      decision: row.decision,
+      category: row.coarse_category,
+      provider_status: row.provider_status,
+      decision_path: row.decision_path,
+      status_code: row.status_code,
+      context_frontier_digest: row.context_frontier_digest,
+      context_omission_count: row.context_omission_count,
+      action: row.public_action,
+      notice: row.public_notice,
+      deduplicated_from_receipt_id: row.deduplicated_from_receipt_id,
+    })),
+  });
+}
+
+function resetLocalS4FixtureRoute(request: Request, env: LocalSplitEnv): Response {
+  if (!localS4FixtureAuthorized(request, env)) return notFound();
+  resetLocalS4Fixtures();
+  return new Response(null, { status: 204, headers: { "cache-control": "no-store" } });
+}
+
+/**
+ * Controlled real-binding seed for the historical-oversize regression. It is
+ * deliberately unavailable without this Wrangler child's authority token and
+ * only creates a public artifact whose own digest is valid but whose bytes are
+ * too large for contextual ingestion.
+ */
+async function seedOversizedS4History(
+  request: Request,
+  env: LocalSplitEnv,
+  problemId: string,
+): Promise<Response> {
+  if (!localS4FixtureAuthorized(request, env)) return notFound();
+  const artifactBody = `S4-OVERSIZED-HISTORY-SEED-${"x".repeat(MAX_CONTEXTUAL_PROMOTION_BYTES)}`;
+  const artifactDigest = await sha256Hex(artifactBody);
+  const objectKey = publicArtifactKey(artifactDigest);
+  const eventId = `EV-S4-oversized-${problemId}`;
+  const workshopId = `W-local-fellow-s4-oversized-${problemId}`;
+  const statement = `S4 oversized historical statement for ${problemId}.`;
+  const statementDigest = await localNormHash(statement);
+  await env.ARTIFACTS.put(objectKey, artifactBody, {
+    httpMetadata: { contentType: "text/markdown; charset=utf-8" },
+    customMetadata: { body_sha256: artifactDigest, storage_scope: "public-candidate" },
+  });
+  try {
+    await env.DB.batch([
+      env.DB.prepare(
+        `INSERT INTO s3_local_workshops
+           (id, problem_id, fellow_id, sponsor_id, session_id, workshop_seq, body_key, body_digest,
+            promoted_event_id)
+         VALUES (?1, ?2, ?3, ?4, ?5, 1, ?6, ?7, ?8)`,
+      ).bind(
+        workshopId,
+        problemId,
+        LOCAL_FELLOW_ID,
+        localSponsorId(env),
+        LOCAL_SESSION_ID,
+        objectKey,
+        artifactDigest,
+        eventId,
+      ),
+      env.DB.prepare(
+        "INSERT INTO s3_local_public_cursors (problem_id, public_seq) VALUES (?1, 1)",
+      ).bind(problemId),
+      env.DB.prepare(
+        `INSERT INTO s3_local_workshop_cursors (problem_id, fellow_id, workshop_seq)
+         VALUES (?1, ?2, 1)`,
+      ).bind(problemId, LOCAL_FELLOW_ID),
+      env.DB.prepare(
+        `INSERT INTO s3_local_events
+           (id, problem_id, public_seq, claim_id, title, extract, statement, statement_digest,
+            source_workshop_id)
+         VALUES (?1, ?2, 1, 'C-1', 'S4 oversized history', 'fixture', ?3, ?4, ?5)`,
+      ).bind(eventId, problemId, statement, statementDigest, workshopId),
+      env.DB.prepare(
+        "INSERT INTO s3_local_public_artifacts (digest, event_id, object_key) VALUES (?1, ?2, ?3)",
+      ).bind(artifactDigest, eventId, objectKey),
+    ]);
+  } catch {
+    return json({ code: "LOCAL_S4_FIXTURE_SEED_FAILED" }, 503);
+  }
+  return json({ status: 201 }, 201);
 }
 
 async function publicFace(
@@ -1710,6 +2510,16 @@ export default {
       if (request.method === "POST" && url.pathname === "/__s3/promote") {
         return await promoteWorkshop(request, env);
       }
+      if (request.method === "POST" && url.pathname === "/__s3/s4/fixtures/reset") {
+        return resetLocalS4FixtureRoute(request, env);
+      }
+      const oversizedHistorySeedMatch =
+        /^\/__s3\/s4\/fixtures\/oversized-history\/([A-Za-z0-9][A-Za-z0-9._-]{0,63})$/u.exec(
+          url.pathname,
+        );
+      if (request.method === "POST" && oversizedHistorySeedMatch?.[1] !== undefined) {
+        return await seedOversizedS4History(request, env, oversizedHistorySeedMatch[1]);
+      }
       const privateMatch = /^\/__s3\/private\/([A-Za-z0-9][A-Za-z0-9._-]{0,63})$/u.exec(
         url.pathname,
       );
@@ -1729,6 +2539,16 @@ export default {
       );
       if (request.method === "GET" && searchMatch?.[1] !== undefined) {
         return await publicSearch(request, env, searchMatch[1]);
+      }
+      const screeningActionsMatch =
+        /^\/__s3\/public\/([A-Za-z0-9][A-Za-z0-9._-]{0,63})\/screening\.json$/u.exec(url.pathname);
+      if (request.method === "GET" && screeningActionsMatch?.[1] !== undefined) {
+        return await publicScreeningActions(request, env, screeningActionsMatch[1]);
+      }
+      const s4DiagnosticsMatch =
+        /^\/__s3\/s4\/diagnostics\/([A-Za-z0-9][A-Za-z0-9._-]{0,63})$/u.exec(url.pathname);
+      if (request.method === "GET" && s4DiagnosticsMatch?.[1] !== undefined) {
+        return await localS4Diagnostics(request, env, s4DiagnosticsMatch[1]);
       }
       const exportMatch =
         /^\/__s3\/public\/([A-Za-z0-9][A-Za-z0-9._-]{0,63})\/export\.jsonl$/u.exec(url.pathname);

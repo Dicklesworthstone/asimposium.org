@@ -46,6 +46,13 @@ const LOCAL_S4_CURRENT_PIECE_MARKER = "S4-PIECE-B-FIXTURE";
 const LOCAL_S4_PROVIDER_EXCEPTION_MARKER = "S4-PROVIDER-EXCEPTION-FIXTURE";
 const LOCAL_S4_PROVIDER_EXCEPTION_MESSAGE_CANARY = "S4-PROVIDER-EXCEPTION-MESSAGE-CANARY";
 const LOCAL_S4_PROVIDER_EXCEPTION_STACK_CANARY = "S4-PROVIDER-EXCEPTION-STACK-CANARY";
+const LOCAL_S4_WARNING_MARKER = "S4-WARNING-FIXTURE";
+const LOCAL_S4_NEGATIVE_DEDUP_MARKER = "S4-NEGATIVE-DEDUP-FIXTURE";
+const LOCAL_S4_BENIGN_OUTAGE_MARKER = "S4-BENIGN-OUTAGE-FIXTURE";
+const localS4FellowAuthorityHeader = "x-asimp-local-s4-fellow-authority";
+const localS4FellowIdHeader = "x-asimp-local-s4-fellow-id";
+const localS4FixtureAuthorityHeader = "x-asimp-local-s4-fixture-authority";
+const localS4NowSecondsHeader = "x-asimp-local-s4-now-seconds";
 const localSponsorId = `local-sponsor-${localRunToken}`;
 const authoritativeFieldFixHint =
   "Remove author-writable disposition, proof, confidence, certification, or status-upgrade fields; the ledger computes disposition after independent review.";
@@ -194,7 +201,11 @@ function promotionRequest(
 ): RequestInit {
   return {
     method: "POST",
-    headers: { "content-type": "application/json", ...extraHeaders },
+    headers: {
+      "content-type": "application/json",
+      "idempotency-key": `local-promote-${workshopId}`,
+      ...extraHeaders,
+    },
     body: JSON.stringify({
       candidate,
       extract: outward.extract ?? "A public extract for the local binding proof.",
@@ -204,6 +215,26 @@ function promotionRequest(
       workshop_id: workshopId,
     }),
   };
+}
+
+function s4FixtureHeaders(
+  idempotencyKey: string,
+  extra: Readonly<Record<string, string>> = {},
+): Readonly<Record<string, string>> {
+  return {
+    "idempotency-key": idempotencyKey,
+    [localS4FixtureAuthorityHeader]: localRunToken,
+    ...extra,
+  };
+}
+
+async function resetS4Fixtures(authority = localRunToken): Promise<Snapshot> {
+  return snapshot(
+    await localFetch(`${origin}/__s3/s4/fixtures/reset`, {
+      method: "POST",
+      headers: { [localS4FixtureAuthorityHeader]: authority },
+    }),
+  );
 }
 
 async function promote(
@@ -481,9 +512,9 @@ async function main(): Promise<void> {
     "A different public artifact that must stay unpublished.",
   );
   check(
-    "repeat_promotion_preserves_the_one_promotion_invariant_without_advancing_public_cursor",
+    "reused_idempotency_key_with_a_different_promotion_preserves_the_one_promotion_invariant",
     repeatedPromotion.response.status === 409 &&
-      repeatedPromotion.body.code === "PROMOTION_ALREADY_EXISTS",
+      repeatedPromotion.body.code === "IDEMPOTENCY_CONFLICT",
     `status ${repeatedPromotion.response.status}`,
   );
 
@@ -956,7 +987,7 @@ async function main(): Promise<void> {
       `S4 prior public statement for ${field}.`,
       `S4 prior public artifact for ${field}.`,
       {},
-      {},
+      s4FixtureHeaders(`s4-context-prior-${index}`),
       priorOutward,
     );
     const beforeHold = await snapshot(
@@ -970,7 +1001,7 @@ async function main(): Promise<void> {
       readonly statement: string;
       readonly public_artifact_md: string;
     }> = { [field]: currentMarker };
-    const holdHeaders = { "idempotency-key": `s4-context-hold-${index}` };
+    const holdHeaders = s4FixtureHeaders(`s4-context-hold-${index}`);
     const holdRequest = promotionRequest(
       recordField(heldWorkshop.body, "workshop_id") ?? "",
       `S4 held public statement for ${field}.`,
@@ -1073,7 +1104,7 @@ async function main(): Promise<void> {
         LOCAL_S4_TIMEOUT_MARKER,
         timeoutArtifact,
         {},
-        { "idempotency-key": "s4-timeout-hold" },
+        s4FixtureHeaders("s4-timeout-hold"),
       ),
     ),
   );
@@ -1108,7 +1139,7 @@ async function main(): Promise<void> {
         "S4 normal statement.",
         directArtifact,
         {},
-        {},
+        s4FixtureHeaders("s4-direct-reject"),
         { title: LOCAL_S4_DIRECT_REJECT_MARKER },
       ),
     ),
@@ -1147,7 +1178,7 @@ async function main(): Promise<void> {
         "S4 provider exception statement.",
         providerExceptionArtifact,
         {},
-        { "idempotency-key": "s4-provider-exception-hold" },
+        s4FixtureHeaders("s4-provider-exception-hold"),
         { title: LOCAL_S4_PROVIDER_EXCEPTION_MARKER },
       ),
     ),
@@ -1198,7 +1229,7 @@ async function main(): Promise<void> {
         "S4 oversized statement.",
         oversizedArtifact,
         {},
-        { "idempotency-key": "s4-oversized-context-hold" },
+        s4FixtureHeaders("s4-oversized-context-hold"),
       ),
     ),
   );
@@ -1225,6 +1256,365 @@ async function main(): Promise<void> {
       hasNoPrivateMaterial(oversizedExport, [oversizedCanary]) &&
       hasNoPrivateMaterial(oversizedArtifactRead, [oversizedCanary]),
     `hold ${oversizedHold.response.status} public ${oversizedFace.response.status} export ${oversizedExport.response.status} artifact ${oversizedArtifactRead.response.status}`,
+  );
+
+  const missingKeyProblemId = "P-s4-idempotency-required";
+  const missingKeyWorkshop = await pushWorkshop(
+    missingKeyProblemId,
+    `${privateCanary}-s4-idempotency-required`,
+  );
+  const missingKeyResponse = await snapshot(
+    await localFetch(`${origin}/__s3/promote`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({
+        candidate: {},
+        extract: "S4 idempotency-required extract.",
+        public_artifact_md: "S4 idempotency-required artifact.",
+        statement: "S4 idempotency-required statement.",
+        title: "S4 idempotency-required title.",
+        workshop_id: recordField(missingKeyWorkshop.body, "workshop_id") ?? "",
+      }),
+    }),
+  );
+  check(
+    "S4_promotion_requires_an_explicit_idempotency_key_before_screening_or_public_effect",
+    missingKeyWorkshop.response.status === 201 &&
+      missingKeyResponse.response.status === 400 &&
+      missingKeyResponse.body === '{"code":"IDEMPOTENCY_KEY_REQUIRED"}',
+    `workshop ${missingKeyWorkshop.response.status} promote ${missingKeyResponse.response.status}/${missingKeyResponse.body}`,
+  );
+
+  const untrustedReset = await resetS4Fixtures(`${localRunToken}-wrong`);
+  const trustedReset = await resetS4Fixtures();
+  const negativeDedupProblemId = "P-s4-negative-dedup";
+  const negativeDedupFirstWorkshop = await pushWorkshop(
+    negativeDedupProblemId,
+    `${privateCanary}-s4-negative-dedup-first`,
+  );
+  const negativeDedupFirst = await snapshot(
+    await localFetch(
+      `${origin}/__s3/promote`,
+      promotionRequest(
+        recordField(negativeDedupFirstWorkshop.body, "workshop_id") ?? "",
+        "S4 negative-dedup statement.",
+        "S4 negative-dedup artifact.",
+        {},
+        s4FixtureHeaders("s4-negative-dedup-first", { [localS4NowSecondsHeader]: "1000" }),
+        { title: LOCAL_S4_NEGATIVE_DEDUP_MARKER },
+      ),
+    ),
+  );
+  const negativeDedupSecondWorkshop = await pushWorkshop(
+    negativeDedupProblemId,
+    `${privateCanary}-s4-negative-dedup-second`,
+  );
+  const negativeDedupSecond = await snapshot(
+    await localFetch(
+      `${origin}/__s3/promote`,
+      promotionRequest(
+        recordField(negativeDedupSecondWorkshop.body, "workshop_id") ?? "",
+        "S4 negative-dedup statement.",
+        "S4 negative-dedup artifact.",
+        {},
+        s4FixtureHeaders("s4-negative-dedup-second", { [localS4NowSecondsHeader]: "1001" }),
+        { title: LOCAL_S4_NEGATIVE_DEDUP_MARKER },
+      ),
+    ),
+  );
+  const negativeDedupPublic = await snapshot(
+    await localFetch(`${origin}/__s3/public/${negativeDedupProblemId}/screening.json`),
+  );
+  const negativeDedupDiagnosticsDenied = await snapshot(
+    await localFetch(`${origin}/__s3/s4/diagnostics/${negativeDedupProblemId}`),
+  );
+  const negativeDedupDiagnostics = await requestJson(
+    `/__s3/s4/diagnostics/${negativeDedupProblemId}`,
+    { headers: { [localS4FixtureAuthorityHeader]: localRunToken } },
+  );
+  const negativeDedupReceipts = Array.isArray(negativeDedupDiagnostics.body.receipts)
+    ? negativeDedupDiagnostics.body.receipts
+    : [];
+  const firstDedupReceipt = negativeDedupReceipts[0];
+  const firstDedupRecord =
+    firstDedupReceipt !== null && typeof firstDedupReceipt === "object"
+      ? (firstDedupReceipt as Record<string, unknown>)
+      : undefined;
+  const deduplicatedReceipt = negativeDedupReceipts[1];
+  const deduplicatedFrom =
+    deduplicatedReceipt !== null && typeof deduplicatedReceipt === "object"
+      ? recordField(deduplicatedReceipt as Record<string, unknown>, "deduplicated_from_receipt_id")
+      : undefined;
+  check(
+    "S4_negative_content_context_dedup_is_expiring_receipted_and_never_leaks_into_public_projection",
+    untrustedReset.response.status === 404 &&
+      trustedReset.response.status === 204 &&
+      negativeDedupFirst.response.status === 202 &&
+      negativeDedupSecond.response.status === 202 &&
+      negativeDedupSecond.body === negativeDedupFirst.body &&
+      negativeDedupPublic.response.status === 200 &&
+      negativeDedupPublic.body ===
+        '{"schema":"asimposium.s4-public-actions.v1","actions":[{"category":"dual-use-boundary","action":"quarantined","notice":"none"},{"category":"dual-use-boundary","action":"quarantined","notice":"none"}]}' &&
+      negativeDedupDiagnosticsDenied.response.status === 404 &&
+      negativeDedupDiagnostics.response.status === 200 &&
+      negativeDedupReceipts.length === 2 &&
+      typeof recordField(firstDedupRecord ?? {}, "configuration_digest") === "string" &&
+      /^sha256:[0-9a-f]{64}$/u.test(
+        recordField(firstDedupRecord ?? {}, "configuration_digest") ?? "",
+      ) &&
+      /^sha256:[0-9a-f]{64}$/u.test(
+        recordField(firstDedupRecord ?? {}, "context_frontier_digest") ?? "",
+      ) &&
+      recordField(firstDedupRecord ?? {}, "decision") === "quarantine" &&
+      recordField(firstDedupRecord ?? {}, "action") === "quarantined" &&
+      typeof deduplicatedFrom === "string" &&
+      /^DR-[A-Za-z0-9._-]+$/u.test(deduplicatedFrom) &&
+      hasNoPrivateMaterial(negativeDedupPublic, [LOCAL_S4_NEGATIVE_DEDUP_MARKER]),
+    `reset ${untrustedReset.response.status}/${trustedReset.response.status} holds ${negativeDedupFirst.response.status}/${negativeDedupSecond.response.status} public ${negativeDedupPublic.response.status} diagnostics ${negativeDedupDiagnosticsDenied.response.status}/${negativeDedupDiagnostics.response.status}`,
+  );
+
+  const expiringReplayProblemId = "P-s4-replay-expiry";
+  const expiringReplayWorkshop = await pushWorkshop(
+    expiringReplayProblemId,
+    `${privateCanary}-s4-replay-expiry`,
+  );
+  const expiringReplayWorkshopId = recordField(expiringReplayWorkshop.body, "workshop_id") ?? "";
+  const expiringReplayFirst = await snapshot(
+    await localFetch(
+      `${origin}/__s3/promote`,
+      promotionRequest(
+        expiringReplayWorkshopId,
+        "S4 replay expiry held statement.",
+        "S4 replay expiry held artifact.",
+        {},
+        s4FixtureHeaders("s4-replay-expiry", { [localS4NowSecondsHeader]: "2000" }),
+        { title: LOCAL_S4_TIMEOUT_MARKER },
+      ),
+    ),
+  );
+  const expiringReplayAfterWindow = await snapshot(
+    await localFetch(
+      `${origin}/__s3/promote`,
+      promotionRequest(
+        expiringReplayWorkshopId,
+        "S4 replay expiry published statement.",
+        "S4 replay expiry published artifact.",
+        {},
+        s4FixtureHeaders("s4-replay-expiry", { [localS4NowSecondsHeader]: "88401" }),
+      ),
+    ),
+  );
+  check(
+    "S4_replay_map_expires_after_24_hours_without_erasing_immutable_decision_history",
+    expiringReplayWorkshop.response.status === 201 &&
+      expiringReplayFirst.response.status === 202 &&
+      expiringReplayAfterWindow.response.status === 201 &&
+      expiringReplayAfterWindow.body.includes('"public_seq":1'),
+    `first ${expiringReplayFirst.response.status} after-window ${expiringReplayAfterWindow.response.status}`,
+  );
+
+  const warningProblemId = "P-s4-warning";
+  const warningWorkshop = await pushWorkshop(warningProblemId, `${privateCanary}-s4-warning`);
+  const warningPromotion = await snapshot(
+    await localFetch(
+      `${origin}/__s3/promote`,
+      promotionRequest(
+        recordField(warningWorkshop.body, "workshop_id") ?? "",
+        "S4 warning statement.",
+        "S4 warning artifact.",
+        {},
+        s4FixtureHeaders("s4-warning"),
+        { title: LOCAL_S4_WARNING_MARKER },
+      ),
+    ),
+  );
+  const warningProjection = await snapshot(
+    await localFetch(`${origin}/__s3/public/${warningProblemId}/screening.json`),
+  );
+  check(
+    "S4_allow_with_warning_publishes_a_safe_category_action_notice_without_provider_detail",
+    warningWorkshop.response.status === 201 &&
+      warningPromotion.response.status === 201 &&
+      warningPromotion.body.includes('"screening_notice":"screening-warning"') &&
+      warningProjection.response.status === 200 &&
+      warningProjection.body ===
+        '{"schema":"asimposium.s4-public-actions.v1","actions":[{"category":"dual-use-boundary","action":"published-with-warning","notice":"screening-warning"}]}' &&
+      hasNoPrivateMaterial(warningProjection, [LOCAL_S4_WARNING_MARKER]),
+    `promotion ${warningPromotion.response.status} projection ${warningProjection.response.status}`,
+  );
+
+  const benignOutageProblemId = "P-s4-benign-outage";
+  const benignOutageWorkshop = await pushWorkshop(
+    benignOutageProblemId,
+    `${privateCanary}-s4-benign-outage`,
+  );
+  const benignOutagePromotion = await snapshot(
+    await localFetch(
+      `${origin}/__s3/promote`,
+      promotionRequest(
+        recordField(benignOutageWorkshop.body, "workshop_id") ?? "",
+        "S4 benign-outage statement.",
+        "S4 benign-outage artifact.",
+        {},
+        s4FixtureHeaders("s4-benign-outage"),
+        { title: `${LOCAL_S4_TIMEOUT_MARKER} ${LOCAL_S4_BENIGN_OUTAGE_MARKER}` },
+      ),
+    ),
+  );
+  const benignOutageProjection = await snapshot(
+    await localFetch(`${origin}/__s3/public/${benignOutageProblemId}/screening.json`),
+  );
+  check(
+    "S4_authorized_benign_outage_fixture_degrades_to_a_public_warning_notice_not_a_silent_pass",
+    benignOutageWorkshop.response.status === 201 &&
+      benignOutagePromotion.response.status === 201 &&
+      benignOutagePromotion.body.includes('"screening_notice":"screening-degraded"') &&
+      benignOutageProjection.response.status === 200 &&
+      benignOutageProjection.body.includes('"notice":"screening-degraded"'),
+    `promotion ${benignOutagePromotion.response.status} projection ${benignOutageProjection.response.status}`,
+  );
+
+  const sameFellowReset = await resetS4Fixtures();
+  const sameFellowProblemId = "P-s4-same-fellow-frontier";
+  const sameFellowSeedWorkshop = await pushWorkshop(
+    sameFellowProblemId,
+    `${privateCanary}-s4-same-fellow-seed`,
+  );
+  const sameFellowSeed = await snapshot(
+    await localFetch(
+      `${origin}/__s3/promote`,
+      promotionRequest(
+        recordField(sameFellowSeedWorkshop.body, "workshop_id") ?? "",
+        "S4 same-fellow frontier seed statement.",
+        "S4 same-fellow frontier seed artifact.",
+        {},
+        s4FixtureHeaders("s4-same-fellow-seed"),
+        { title: LOCAL_S4_HISTORY_PIECE_MARKER },
+      ),
+    ),
+  );
+  const sameFellowCurrentWorkshop = await pushWorkshop(
+    sameFellowProblemId,
+    `${privateCanary}-s4-same-fellow-current`,
+  );
+  const sameFellowCurrent = await snapshot(
+    await localFetch(
+      `${origin}/__s3/promote`,
+      promotionRequest(
+        recordField(sameFellowCurrentWorkshop.body, "workshop_id") ?? "",
+        "S4 same-fellow frontier current statement.",
+        "S4 same-fellow frontier current artifact.",
+        {},
+        s4FixtureHeaders("s4-same-fellow-current"),
+        { title: LOCAL_S4_CURRENT_PIECE_MARKER },
+      ),
+    ),
+  );
+  const crossFellowReset = await resetS4Fixtures();
+  const crossFellowProblemId = "P-s4-cross-fellow-frontier";
+  const crossFellowSeedWorkshop = await pushWorkshop(
+    crossFellowProblemId,
+    `${privateCanary}-s4-cross-fellow-seed`,
+    {
+      [localS4FellowAuthorityHeader]: localRunToken,
+      [localS4FellowIdHeader]: "fixture-fellow-a",
+    },
+  );
+  const crossFellowCurrentWorkshop = await pushWorkshop(
+    crossFellowProblemId,
+    `${privateCanary}-s4-cross-fellow-current`,
+    {
+      [localS4FellowAuthorityHeader]: localRunToken,
+      [localS4FellowIdHeader]: "fixture-fellow-b",
+    },
+  );
+  const crossFellowSeed = await snapshot(
+    await localFetch(
+      `${origin}/__s3/promote`,
+      promotionRequest(
+        recordField(crossFellowSeedWorkshop.body, "workshop_id") ?? "",
+        "S4 cross-fellow frontier seed statement.",
+        "S4 cross-fellow frontier seed artifact.",
+        {},
+        s4FixtureHeaders("s4-cross-fellow-seed"),
+        { title: LOCAL_S4_HISTORY_PIECE_MARKER },
+      ),
+    ),
+  );
+  const crossFellowCurrent = await snapshot(
+    await localFetch(
+      `${origin}/__s3/promote`,
+      promotionRequest(
+        recordField(crossFellowCurrentWorkshop.body, "workshop_id") ?? "",
+        "S4 cross-fellow frontier current statement.",
+        "S4 cross-fellow frontier current artifact.",
+        {},
+        s4FixtureHeaders("s4-cross-fellow-current"),
+        { title: LOCAL_S4_CURRENT_PIECE_MARKER },
+      ),
+    ),
+  );
+  check(
+    "S4_frontier_receipts_revalidate_same_fellow_history_but_do_not_spuriously_invalidate_another_fellow",
+    sameFellowReset.response.status === 204 &&
+      sameFellowSeed.response.status === 201 &&
+      sameFellowCurrent.response.status === 202 &&
+      crossFellowReset.response.status === 204 &&
+      crossFellowSeed.response.status === 201 &&
+      crossFellowCurrent.response.status === 201,
+    `same ${sameFellowSeed.response.status}/${sameFellowCurrent.response.status} cross ${crossFellowSeed.response.status}/${crossFellowCurrent.response.status}`,
+  );
+
+  const oversizedHistoryProblemId = "P-s4-oversized-history";
+  const oversizedHistorySeedDenied = await snapshot(
+    await localFetch(`${origin}/__s3/s4/fixtures/oversized-history/${oversizedHistoryProblemId}`, {
+      method: "POST",
+    }),
+  );
+  const oversizedHistorySeed = await snapshot(
+    await localFetch(`${origin}/__s3/s4/fixtures/oversized-history/${oversizedHistoryProblemId}`, {
+      method: "POST",
+      headers: { [localS4FixtureAuthorityHeader]: localRunToken },
+    }),
+  );
+  const oversizedHistoryWorkshop = await pushWorkshop(
+    oversizedHistoryProblemId,
+    `${privateCanary}-s4-oversized-history-current`,
+  );
+  const oversizedHistoryPromotion = await snapshot(
+    await localFetch(
+      `${origin}/__s3/promote`,
+      promotionRequest(
+        recordField(oversizedHistoryWorkshop.body, "workshop_id") ?? "",
+        "S4 later benign statement after oversized history.",
+        "S4 later benign artifact after oversized history.",
+        {},
+        s4FixtureHeaders("s4-oversized-history-current"),
+      ),
+    ),
+  );
+  const oversizedHistoryDiagnostics = await requestJson(
+    `/__s3/s4/diagnostics/${oversizedHistoryProblemId}`,
+    { headers: { [localS4FixtureAuthorityHeader]: localRunToken } },
+  );
+  const oversizedHistoryReceipts = Array.isArray(oversizedHistoryDiagnostics.body.receipts)
+    ? oversizedHistoryDiagnostics.body.receipts
+    : [];
+  const oversizedHistoryReceipt = oversizedHistoryReceipts[0];
+  const oversizedHistoryOmissions =
+    oversizedHistoryReceipt !== null && typeof oversizedHistoryReceipt === "object"
+      ? numberField(oversizedHistoryReceipt as Record<string, unknown>, "context_omission_count")
+      : undefined;
+  check(
+    "S4_oversized_historical_artifact_is_omitted_before_materialization_and_later_benign_promotion_records_the_exact_omission",
+    oversizedHistorySeedDenied.response.status === 404 &&
+      oversizedHistorySeed.response.status === 201 &&
+      oversizedHistoryWorkshop.response.status === 201 &&
+      oversizedHistoryPromotion.response.status === 201 &&
+      oversizedHistoryDiagnostics.response.status === 200 &&
+      oversizedHistoryReceipts.length === 1 &&
+      oversizedHistoryOmissions === 1,
+    `seed ${oversizedHistorySeedDenied.response.status}/${oversizedHistorySeed.response.status} promotion ${oversizedHistoryPromotion.response.status} omissions ${String(oversizedHistoryOmissions)}`,
   );
 
   emit({
