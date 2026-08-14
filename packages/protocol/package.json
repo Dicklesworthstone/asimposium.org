@@ -1,0 +1,19 @@
+{
+  "name": "@asimposium/protocol",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "Original served texts (protocol, policy, capsule, llms.txt) with digests and the gates that keep them honest.",
+  "exports": {
+    ".": "./src/index.ts"
+  },
+  "files": [
+    "src",
+    "assets"
+  ],
+  "scripts": {
+    "typecheck": "tsc --noEmit -p tsconfig.json",
+    "lint": "biome check src tests package.json tsconfig.json",
+    "test:unit": "bun test"
+  }
+}
