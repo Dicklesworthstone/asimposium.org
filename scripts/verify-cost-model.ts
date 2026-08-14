@@ -8,7 +8,7 @@
  */
 
 import { createHash } from "node:crypto";
-import { readFileSync } from "node:fs";
+import { closeSync, fstatSync, openSync, readSync } from "node:fs";
 
 import type { KraterPreflightCost, KraterWriteResult } from "../apps/wire/src/krater/krater.ts";
 import {
@@ -35,6 +35,34 @@ export const REQUIRED_ROW_TOTAL_EXCLUSIONS = [
 const SAFE_COMPONENT = /^[A-Za-z0-9][A-Za-z0-9._-]{0,79}$/;
 const GIT_REVISION = /^[0-9a-f]{40}$/;
 const SHA256 = /^[0-9a-f]{64}$/;
+const S2_COST_RECEIPT_ROOT_KEYS = [
+  "schema_version",
+  "record",
+  "run_id",
+  "phase",
+  "revision",
+  "dirty_state",
+  "source_digest",
+  "scope",
+  "bindings",
+  "status",
+  "metric_scope",
+  "write_receipt_count",
+  "successful_batch_metric_scope",
+  "failed_retry_batch_metrics",
+  "write_claim_wall_scope",
+  "p95_write_phase_ms",
+  "p95_preflight_wall_ms",
+  "p95_write_claim_wall_ms",
+  "sum_successful_batch_rows_read",
+  "sum_successful_batch_rows_written",
+  "sum_preflight_rows_read",
+  "sum_preflight_rows_written",
+  "sum_preflight_statements",
+  "sum_retry_count",
+  "known_row_total_exclusions",
+] as const;
+const S2_COST_RECEIPT_BINDINGS_KEYS = ["d1", "durable_object", "r2"] as const;
 
 /**
  * This names the existing Krater source of the receipt fields. The cost
@@ -211,6 +239,7 @@ export interface UnavailableMeasurement {
 
 export type CostVerificationCode =
   | "S2_COST_MEASUREMENT_UNAVAILABLE"
+  | "S2_COST_RECEIPT_UNREADABLE"
   | "S2_COST_RECEIPT_INVALID"
   | "S2_COST_RECEIPT_TOO_LARGE"
   | "COST_MODEL_ARGUMENT_INVALID"
@@ -355,6 +384,21 @@ function asRecord(value: unknown): Record<string, unknown> {
   return value as Record<string, unknown>;
 }
 
+function requireExactKeySet(
+  record: Record<string, unknown>,
+  expected: readonly string[],
+  label: string,
+): void {
+  const actual = Object.keys(record);
+  if (
+    actual.length !== expected.length ||
+    expected.some((key) => !Object.hasOwn(record, key)) ||
+    actual.some((key) => !expected.includes(key))
+  ) {
+    throw new CostVerifierError("S2_COST_RECEIPT_INVALID", `${label} has an unexpected key set.`);
+  }
+}
+
 function requireString(record: Record<string, unknown>, field: string): string {
   const value = record[field];
   if (typeof value !== "string") {
@@ -396,6 +440,7 @@ function requireMilliseconds(record: Record<string, unknown>, field: string): nu
 
 function parseBindings(value: unknown): S2CostMeasurementReceipt["bindings"] {
   const bindings = asRecord(value);
+  requireExactKeySet(bindings, S2_COST_RECEIPT_BINDINGS_KEYS, "receipt bindings");
   if (bindings.d1 !== "DB" || bindings.durable_object !== "KRATER_OUTBOX" || bindings.r2 !== null) {
     throw new CostVerifierError(
       "S2_COST_RECEIPT_INVALID",
@@ -423,6 +468,7 @@ function parseExclusions(
 
 function parseS2CostMeasurementReceiptValue(value: unknown): S2CostMeasurementReceipt {
   const receipt = asRecord(value);
+  requireExactKeySet(receipt, S2_COST_RECEIPT_ROOT_KEYS, "receipt");
   requireExactString(receipt, "schema_version", S2_COST_RECEIPT_SCHEMA_VERSION);
   requireExactString(receipt, "record", S2_COST_RECEIPT_RECORD);
   const runId = requireString(receipt, "run_id");
@@ -708,11 +754,53 @@ export function buildCostVerifierDiagnostic(
 export type ReceiptReader = (receiptPath: string) => Uint8Array;
 
 function readReceiptBytes(receiptPath: string): Uint8Array {
+  let descriptor: number | undefined;
+  let bytes: Uint8Array | undefined;
+  let failure: unknown;
   try {
-    return readFileSync(receiptPath);
-  } catch {
-    throw new CostVerifierError("S2_COST_MEASUREMENT_UNAVAILABLE", "receipt cannot be read.");
+    descriptor = openSync(receiptPath, "r");
+    const before = fstatSync(descriptor);
+    if (!before.isFile() || !Number.isSafeInteger(before.size) || before.size < 0) {
+      throw new CostVerifierError("S2_COST_RECEIPT_UNREADABLE", "receipt cannot be read.");
+    }
+    if (before.size > MAX_S2_COST_RECEIPT_BYTES) {
+      throw new CostVerifierError("S2_COST_RECEIPT_TOO_LARGE", "receipt exceeds the byte limit.");
+    }
+
+    bytes = new Uint8Array(before.size);
+    let offset = 0;
+    while (offset < bytes.byteLength) {
+      const read = readSync(descriptor, bytes, offset, bytes.byteLength - offset, offset);
+      if (read === 0) {
+        throw new CostVerifierError("S2_COST_RECEIPT_UNREADABLE", "receipt changed while reading.");
+      }
+      offset += read;
+    }
+
+    const after = fstatSync(descriptor);
+    if (!after.isFile() || after.size !== before.size) {
+      throw new CostVerifierError("S2_COST_RECEIPT_UNREADABLE", "receipt changed while reading.");
+    }
+  } catch (error) {
+    failure = error;
+  } finally {
+    if (descriptor !== undefined) {
+      try {
+        closeSync(descriptor);
+      } catch (error) {
+        if (failure === undefined) failure = error;
+      }
+    }
   }
+
+  if (failure !== undefined) {
+    if (failure instanceof CostVerifierError) throw failure;
+    throw new CostVerifierError("S2_COST_RECEIPT_UNREADABLE", "receipt cannot be read.");
+  }
+  if (bytes === undefined) {
+    throw new CostVerifierError("S2_COST_RECEIPT_UNREADABLE", "receipt cannot be read.");
+  }
+  return bytes;
 }
 
 function parseCliArguments(argv: readonly string[]): string | undefined {
@@ -728,16 +816,19 @@ function cliFailureResult(error: unknown): CostVerificationResult {
   if (!(error instanceof CostVerifierError)) {
     return unavailableResult(workload, "invalid", "S2_COST_RECEIPT_INVALID");
   }
-  switch (error.code) {
-    case "COST_MODEL_ARGUMENT_INVALID":
-      return unavailableResult(workload, "invalid", "COST_MODEL_ARGUMENT_INVALID");
-    case "S2_COST_MEASUREMENT_UNAVAILABLE":
-      return unavailableResult(workload, "unavailable", "S2_COST_MEASUREMENT_UNAVAILABLE");
-    case "S2_COST_RECEIPT_TOO_LARGE":
-      return unavailableResult(workload, "invalid", "S2_COST_RECEIPT_TOO_LARGE");
-    default:
-      return unavailableResult(workload, "invalid", "S2_COST_RECEIPT_INVALID");
+  if (error.code === "COST_MODEL_ARGUMENT_INVALID") {
+    return unavailableResult(workload, "invalid", "COST_MODEL_ARGUMENT_INVALID");
   }
+  if (error.code === "S2_COST_MEASUREMENT_UNAVAILABLE") {
+    return unavailableResult(workload, "unavailable", "S2_COST_MEASUREMENT_UNAVAILABLE");
+  }
+  if (error.code === "S2_COST_RECEIPT_UNREADABLE") {
+    return unavailableResult(workload, "unavailable", "S2_COST_RECEIPT_UNREADABLE");
+  }
+  if (error.code === "S2_COST_RECEIPT_TOO_LARGE") {
+    return unavailableResult(workload, "invalid", "S2_COST_RECEIPT_TOO_LARGE");
+  }
+  return unavailableResult(workload, "invalid", "S2_COST_RECEIPT_INVALID");
 }
 
 export function runCostVerifierCli(

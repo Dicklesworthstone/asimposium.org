@@ -1,4 +1,7 @@
 import { describe, expect, test } from "bun:test";
+import { mkdtempSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 
 import {
   buildCostVerifierDiagnostic,
@@ -8,7 +11,6 @@ import {
   MAX_S2_COST_RECEIPT_BYTES,
   REQUIRED_ROW_TOTAL_EXCLUSIONS,
   receiptDigest,
-  runCostVerifierCli,
   S2_COST_METRIC_SCOPE,
   S2_COST_RECEIPT_RECORD,
   S2_COST_RECEIPT_SCHEMA_VERSION,
@@ -75,14 +77,42 @@ function verifiedFixture(
 }
 
 function mutableReceipt(): Record<string, unknown> {
-  return JSON.parse(new TextDecoder().decode(receiptBytes())) as Record<string, unknown>;
+  return structuredClone(validReceipt()) as unknown as Record<string, unknown>;
 }
 
 function assertInvalidReceipt(receipt: Record<string, unknown>): void {
-  expect(verifyCostModel(FABLE_WORKED_EXAMPLE, JSON.stringify(receipt))).toMatchObject({
-    status: "blocked",
-    code: "S2_COST_RECEIPT_INVALID",
+  expect(
+    verifyCostModel(FABLE_WORKED_EXAMPLE, new TextEncoder().encode(JSON.stringify(receipt))),
+  ).toMatchObject({ status: "blocked", code: "S2_COST_RECEIPT_INVALID" });
+}
+
+function parseJsonOutput(output: string): unknown {
+  try {
+    return JSON.parse(output) as unknown;
+  } catch {
+    throw new Error("CLI did not emit JSON.");
+  }
+}
+
+function writeCliReceipt(contents: string | Uint8Array): string {
+  const directory = mkdtempSync(join(tmpdir(), "asimposium-s7-cost-"));
+  const receiptPath = join(directory, "receipt.json");
+  writeFileSync(receiptPath, contents);
+  return receiptPath;
+}
+
+function runStandaloneCli(args: readonly string[]) {
+  const completed = Bun.spawnSync({
+    cmd: [process.execPath, "scripts/verify-cost-model.ts", ...args],
+    cwd: process.cwd(),
+    stdout: "pipe",
+    stderr: "pipe",
   });
+  return {
+    exitCode: completed.exitCode,
+    stdout: new TextDecoder().decode(completed.stdout),
+    stderr: new TextDecoder().decode(completed.stderr),
+  };
 }
 
 describe("S7 cost verifier", () => {
@@ -210,7 +240,7 @@ describe("S7 cost verifier", () => {
 
   test("keeps the same unknowns for unavailable invalid and accepted-local receipts", () => {
     const unavailable = verifyCostModel();
-    const invalid = verifyCostModel(FABLE_WORKED_EXAMPLE, "{");
+    const invalid = verifyCostModel(FABLE_WORKED_EXAMPLE, new TextEncoder().encode("{"));
     const accepted = verifiedFixture();
     expect(unavailable.unknowns).toEqual(invalid.unknowns);
     expect(accepted.unknowns).toEqual(unavailable.unknowns);
@@ -326,6 +356,18 @@ describe("S7 cost verifier", () => {
         },
       ],
       [
+        "root extra key",
+        (receipt) => {
+          receipt.unexpected = true;
+        },
+      ],
+      [
+        "binding extra key",
+        (receipt) => {
+          (receipt.bindings as Record<string, unknown>).unexpected = true;
+        },
+      ],
+      [
         "run id",
         (receipt) => {
           receipt.run_id = "../bad";
@@ -435,50 +477,73 @@ describe("S7 cost verifier", () => {
     }
   });
 
-  test("caps receipt bytes and keeps malformed missing and argument failures distinct and safe", () => {
+  test("caps receipt bytes before parsing", () => {
     const oversized = new Uint8Array(MAX_S2_COST_RECEIPT_BYTES + 1);
     expect(verifyCostModel(FABLE_WORKED_EXAMPLE, oversized)).toMatchObject({
       status: "blocked",
       code: "S2_COST_RECEIPT_TOO_LARGE",
     });
+  });
 
-    const noReceipt = runCostVerifierCli([]);
-    const argumentError = runCostVerifierCli(["--receipt"]);
+  test("real CLI bounds files, distinguishes unreadable receipts, rejects malformed and extra keys, and never echoes input", () => {
+    const oversizedPath = writeCliReceipt(new Uint8Array(MAX_S2_COST_RECEIPT_BYTES + 1));
     const malformedContent = "{s7-raw-content-should-not-appear";
-    const suppliedPath = "/Users/sensitive/s7-cost-receipt.json";
-    const malformed = runCostVerifierCli(["--receipt", suppliedPath], () =>
-      new TextEncoder().encode(malformedContent),
+    const malformedPath = writeCliReceipt(malformedContent);
+    const extraKeyValue = "s7-extra-key-value-should-not-appear";
+    const extraKeyPath = writeCliReceipt(
+      JSON.stringify({ ...validReceipt(), unexpected: extraKeyValue }),
     );
-    const missing = runCostVerifierCli(["--receipt", "s7-receipt-that-does-not-exist.json"]);
-    const tooLarge = runCostVerifierCli(["--receipt", suppliedPath], () => oversized);
+    const missingDirectory = mkdtempSync(join(tmpdir(), "asimposium-s7-cost-missing-"));
+    const missingPath = join(missingDirectory, "receipt-that-does-not-exist.json");
+    const nonRegularDirectory = mkdtempSync(join(tmpdir(), "asimposium-s7-cost-directory-"));
+    const missing = runStandaloneCli(["--receipt", missingPath]);
+    const oversized = runStandaloneCli(["--receipt", oversizedPath]);
+    const malformed = runStandaloneCli(["--receipt", malformedPath]);
+    const extraKey = runStandaloneCli(["--receipt", extraKeyPath]);
+    const nonRegular = runStandaloneCli(["--receipt", nonRegularDirectory]);
 
-    expect(noReceipt.cost_model).toMatchObject({ code: "S2_COST_MEASUREMENT_UNAVAILABLE" });
-    expect(argumentError.cost_model).toMatchObject({ code: "COST_MODEL_ARGUMENT_INVALID" });
-    expect(malformed.cost_model).toMatchObject({ code: "S2_COST_RECEIPT_INVALID" });
-    expect(missing.cost_model).toMatchObject({ code: "S2_COST_MEASUREMENT_UNAVAILABLE" });
-    expect(tooLarge.cost_model).toMatchObject({ code: "S2_COST_RECEIPT_TOO_LARGE" });
+    for (const completed of [missing, oversized, malformed, extraKey, nonRegular]) {
+      expect(completed.exitCode).toBe(78);
+      expect(completed.stderr).toBe("");
+    }
+    expect(parseJsonOutput(missing.stdout)).toMatchObject({
+      status: "blocked",
+      code: "S2_COST_RECEIPT_UNREADABLE",
+    });
+    expect(parseJsonOutput(oversized.stdout)).toMatchObject({
+      status: "blocked",
+      code: "S2_COST_RECEIPT_TOO_LARGE",
+    });
+    expect(parseJsonOutput(malformed.stdout)).toMatchObject({
+      status: "blocked",
+      code: "S2_COST_RECEIPT_INVALID",
+    });
+    expect(parseJsonOutput(extraKey.stdout)).toMatchObject({
+      status: "blocked",
+      code: "S2_COST_RECEIPT_INVALID",
+    });
+    expect(parseJsonOutput(nonRegular.stdout)).toMatchObject({
+      status: "blocked",
+      code: "S2_COST_RECEIPT_UNREADABLE",
+    });
 
-    for (const diagnostic of [argumentError, malformed, missing, tooLarge]) {
-      const serialized = JSON.stringify(diagnostic);
-      expect(serialized).not.toContain(suppliedPath);
-      expect(serialized).not.toContain(malformedContent);
-      expect(serialized).not.toContain("s7-receipt-that-does-not-exist.json");
+    for (const completed of [missing, oversized, malformed, extraKey, nonRegular]) {
+      expect(completed.stdout).not.toContain(missingPath);
+      expect(completed.stdout).not.toContain(oversizedPath);
+      expect(completed.stdout).not.toContain(malformedPath);
+      expect(completed.stdout).not.toContain(extraKeyPath);
+      expect(completed.stdout).not.toContain(malformedContent);
+      expect(completed.stdout).not.toContain(extraKeyValue);
     }
   });
 
   test("standalone CLI returns an honest blocked diagnostic and exit 78", () => {
-    const completed = Bun.spawnSync({
-      cmd: [process.execPath, "scripts/verify-cost-model.ts", "--receipt"],
-      cwd: process.cwd(),
-      stdout: "pipe",
-      stderr: "pipe",
-    });
-    const output = new TextDecoder().decode(completed.stdout);
+    const completed = runStandaloneCli(["--receipt"]);
     expect(completed.exitCode).toBe(78);
-    expect(JSON.parse(output)).toMatchObject({
+    expect(parseJsonOutput(completed.stdout)).toMatchObject({
       status: "blocked",
       code: "COST_MODEL_ARGUMENT_INVALID",
     });
-    expect(output).not.toContain("/Users/");
+    expect(completed.stdout).not.toContain("/Users/");
   });
 });
