@@ -747,4 +747,46 @@ describe("an interrupted run leaves nothing listening", () => {
       if (ownedGroup !== undefined) reapExactOwnedGroupForTest(marker, ownedGroup);
     }
   }, 200_000);
+
+  test("an absent leader makes the exact marker self-expire before controller SIGKILL", async () => {
+    const port = await freePort();
+    const seed = "s5-absent-leader-4821";
+    const child = startScript({ ASIMP_S5_SEED: seed, S5_PORT: String(port) });
+    const completion = collectScript(child, 30_000);
+    const marker = `s5-diptych-owner-s5-${seed}-${child.pid}`;
+    let ownedGroup: number | undefined;
+
+    try {
+      const markerProcess = await waitForOwnedMarker(marker, child);
+      expect(markerProcess).toBeDefined();
+      ownedGroup = markerProcess?.pgid;
+      expect(
+        processTable().some((entry) => entry.pid === ownedGroup && entry.pgid === ownedGroup),
+      ).toBe(true);
+      expect(await waitForAnswer(port, child)).toBe(true);
+
+      // The exact validated group leader disappears first. That makes the marker's live
+      // parent lookup empty; the old nonempty guard looped forever at this point.
+      process.kill(ownedGroup as number, "SIGTERM");
+      for (let attempt = 0; attempt < 80; attempt += 1) {
+        if (!processTable().some((entry) => entry.pid === ownedGroup)) break;
+        await Bun.sleep(25);
+      }
+      expect(processTable().some((entry) => entry.pid === ownedGroup)).toBe(false);
+
+      // SIGKILL the controller if it has not already observed the failed Worker. The marker's
+      // absence branch must independently reap its exact group either way; this prevents a
+      // concurrent leader/controller loss from retaining a TERM-immune sidecar or listener.
+      if (child.exitCode === null) child.kill("SIGKILL");
+      const run = await completion;
+      expect(run.exitCode).not.toBe(0);
+      expect(await waitForProcessGroupAbsence(ownedGroup as number)).toEqual([]);
+      expect(ownedMarkerMatches(marker)).toEqual([]);
+      expect(await answering(port)).toBe(false);
+    } finally {
+      if (child.exitCode === null) child.kill("SIGKILL");
+      await child.exited;
+      if (ownedGroup !== undefined) reapExactOwnedGroupForTest(marker, ownedGroup);
+    }
+  }, 200_000);
 });

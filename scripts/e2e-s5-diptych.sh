@@ -36,11 +36,33 @@ readonly WRANGLER="apps/wire/node_modules/.bin/wrangler"
 
 cd "$(dirname "${BASH_SOURCE[0]}")/.." || exit 1
 readonly ROOT="$PWD"
-readonly RUN_DIR="$(mktemp -d -t asimposium-s5)"
-if [[ -z "${RUN_DIR}" || ! -d "${RUN_DIR}" ]]; then
-  printf '{"spike":"s5-diptych","assertion":"scratch_dir","status":"fail","detail":"mktemp failed"}\n'
+readonly DEFAULT_SCRATCH_ROOT="/private/tmp"
+if [[ "${TMPDIR+x}" == "x" ]]; then
+  SCRATCH_ROOT="${TMPDIR}"
+else
+  SCRATCH_ROOT="${DEFAULT_SCRATCH_ROOT}"
+fi
+# BSD `mktemp -t` chooses the system temporary directory even when TMPDIR points at the USB
+# scratch volume. Validate the supplied root without following a root symlink, then provide
+# an explicit template beneath it. The refusal never repeats a caller-controlled path.
+if [[ -z "${SCRATCH_ROOT}" ||
+  "${SCRATCH_ROOT}" != /* ||
+  -L "${SCRATCH_ROOT}" ||
+  ! -d "${SCRATCH_ROOT}" ]]; then
+  printf '{"spike":"s5-diptych","assertion":"scratch_dir","status":"fail","detail":"scratch root was refused"}\n'
   exit 1
 fi
+if [[ "${SCRATCH_ROOT}" == "/" ]]; then
+  SCRATCH_TEMPLATE="/asimposium-s5.XXXXXXXX"
+else
+  SCRATCH_TEMPLATE="${SCRATCH_ROOT%/}/asimposium-s5.XXXXXXXX"
+fi
+RUN_DIR="$(mktemp -d "${SCRATCH_TEMPLATE}" 2>/dev/null)"
+if [[ -z "${RUN_DIR}" || -L "${RUN_DIR}" || ! -d "${RUN_DIR}" ]]; then
+  printf '{"spike":"s5-diptych","assertion":"scratch_dir","status":"fail","detail":"scratch directory could not be created"}\n'
+  exit 1
+fi
+readonly RUN_DIR
 
 SECONDS=0
 
@@ -379,8 +401,9 @@ set -m
       # This marker is TERM-immune and remains inside the exact Worker group. It watches the
       # *live* group leader (`$$`) rather than a historical controller PID: while the script
       # owns the leader, its PPID is `controller_pid`; SIGKILL re-parents the leader to init.
-      # On that relationship change, this marker can safely reap only its freshly verified
-      # PID/PGID/argv group. That closes the trapless-controller orphan demonstrated in S-5.
+      # If the leader has already disappeared, an empty lookup is the same ownership loss:
+      # this TERM-immune marker must self-expire rather than wait forever. In either case it
+      # may reap only its freshly verified PID/PGID/argv group.
       trap "" TERM INT HUP
       marker_matches_own_group() {
         current_pgid="$(ps -o pgid= -p "${BASHPID}" 2>/dev/null | tr -d "[:space:]")" || return 1
@@ -408,7 +431,7 @@ set -m
       }
       while :; do
         leader_parent="$(ps -o ppid= -p "$$" 2>/dev/null | tr -d "[:space:]")" || leader_parent=""
-        if [[ -n "${leader_parent}" && "${leader_parent}" != "${controller_pid}" ]]; then
+        if [[ "${leader_parent}" != "${controller_pid}" ]]; then
           marker_matches_own_group || exit 1
           kill -TERM -- "-$$" 2>/dev/null || exit 1
           for _wait in {1..20}; do
