@@ -67,10 +67,13 @@ describe("faces disclose no environment or binding values", () => {
     forbidden(res.bodyText);
   });
 
-  test("the 404 face does not echo a secret-shaped path segment", async () => {
+  test("the mounted /v1 failure does not echo a secret-shaped path segment", async () => {
     const res = await callWorker(`/v1/${CANARY_TOKEN}`, leakyEnv());
 
-    expect(res.status).toBe(404);
+    // Propylon owns the whole /v1 namespace. With enrollment replay
+    // deliberately unconfigured in this fixture, the request reaches that
+    // mounted stack and fails closed before route dispatch.
+    expect(res.status).toBe(503);
     expect(res.bodyText).not.toContain(CANARY_TOKEN);
   });
 });
@@ -101,15 +104,15 @@ describe("the error handler does not leak thrown detail", () => {
 });
 
 describe("the 404 face teaches without inventing surface", () => {
-  test("the only route it offers is the one this Worker actually serves", async () => {
-    const res = await callWorker("/v1/sessions");
+  test("it advertises only the surface classes this Worker actually mounts", async () => {
+    const res = await callWorker("/nope");
     const { detail, fix_hint } = res.body as { detail: string; fix_hint: string };
 
     expect(res.status).toBe(404);
-    // Every path-shaped token anywhere in the refusal must be either the path
-    // the caller asked for or the single route that exists. An endpoint added
-    // to the copy before it is added to the app fails here.
+    // Every path-shaped token is either the caller's path or one of the three
+    // namespaces currently mounted by createApp. A future surface added to the
+    // copy before it is mounted fails here.
     const offered = new Set(`${detail} ${fix_hint}`.match(/\/[a-z0-9/_:-]+/gi) ?? []);
-    expect([...offered].sort()).toEqual(["/internal/health", "/v1/sessions"]);
+    expect([...offered].sort()).toEqual(["/internal/health", "/join/", "/nope", "/v1"]);
   });
 });
