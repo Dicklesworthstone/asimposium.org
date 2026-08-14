@@ -12,6 +12,7 @@ import {
   appendFileSync,
   closeSync,
   existsSync,
+  linkSync,
   lstatSync,
   mkdirSync,
   openSync,
@@ -52,7 +53,33 @@ export const MAX_ARTIFACT_NAMESPACES = 5_000;
 export const ARTIFACT_BLOB_DIRECTORY = "blobs";
 /** Per-run manifest naming the blobs a run produced. */
 export const FAILURE_MANIFEST_NAME = "failures.jsonl";
+/**
+ * Where a blob is assembled before it is published.
+ *
+ * Publication has to be atomic. `writeFileSync(path, …, {flag:"wx"})` is an
+ * open followed by a write, so a concurrent reader can observe the name after
+ * the create and before the bytes — an empty file that compares unequal to its
+ * own digest. The reader then concludes the store contradicts itself and halts
+ * a run over a write that was always going to produce identical bytes.
+ *
+ * So bytes are written here first, under a name no reader looks for, and only a
+ * complete file is linked into the store.
+ */
+const ARTIFACT_BLOB_STAGING_DIRECTORY = "incoming";
 const SHA256_HEX = /^[0-9a-f]{64}$/;
+/**
+ * Manifest record kinds.
+ *
+ * `intent` is appended *before* the blob is published and `stored` after. The
+ * pair is what makes the per-run budget survive a crash: a slot is spent when
+ * the attempt begins, not when it succeeds, so a run that dies mid-publish
+ * cannot resume and spend the same slot again. Counting only completions let a
+ * repeatedly-crashing run publish unbounded distinct blobs across resumes.
+ */
+export const FAILURE_RECORD_INTENT = "failure_artifact_intent";
+export const FAILURE_RECORD_STORED = "failure_artifact";
+/** Immutable identity of a run, written once and checked on every resume. */
+export const RUN_IDENTITY_NAME = "run-identity.json";
 export const MAX_STEPS_PER_RUN = 64;
 export const MAX_RETRIES_PER_STEP = 3;
 export const MAX_TIMEOUT_MS = 60_000;
@@ -235,11 +262,20 @@ class ArtifactStore {
   private readonly artifactsDirectory: string;
   /** `<run>/failures.jsonl`: digests this run produced, in order. */
   readonly manifest: string;
+  /**
+   * Digests this run recorded an intent for whose blob is not in the store.
+   *
+   * Reported rather than repaired: the bytes died with the process that held
+   * them, and nothing here may delete the record that says so. A retry that
+   * produces the same output republishes the same digest and clears it.
+   */
+  readonly danglingFailureDigests: readonly string[];
 
   constructor(
     root: string,
     readonly runId: string,
     resume: boolean,
+    identity: RunIdentity,
   ) {
     if (!validateRunId(runId)) {
       throw new HarnessError("RUN_ID_INVALID", "run_id must be one safe path component.");
@@ -249,29 +285,55 @@ class ArtifactStore {
     this.physicalRoot = realDirectory(resolvedRoot, "REPOSITORY_ROOT_INVALID");
     const e2e = ensureDirectDirectory(this.physicalRoot, "e2e");
     const artifacts = ensureDirectDirectory(e2e, "artifacts");
-    // Checked before the namespace is created, so the backstop refuses rather
-    // than reporting a limit after the directory already exists.
-    assertArtifactNamespaceBudget(this.physicalRoot, runId);
-    this.directory = ensureDirectDirectory(artifacts, runId);
+    /**
+     * A new run refuses a namespace that already exists — at all.
+     *
+     * Testing only for `events.jsonl` meant a directory holding a failure
+     * manifest, a JUnit file, or anything else was silently adopted: the new
+     * run inherited another run's evidence directory and appended to it, and
+     * the resulting artifacts described two runs as one. Existence of the
+     * namespace is the check, because the namespace is the unit of ownership.
+     */
+    const namespaceExisted = existsSync(join(artifacts, runId));
+    if (!resume && namespaceExisted) {
+      throw new HarnessError(
+        "RUN_ID_EXISTS",
+        "run_id already owns an artifact namespace; choose a new run_id or resume that run.",
+      );
+    }
+    // Counted and created together. Two separate calls left a window in which
+    // another run could create the namespace that took the checkout over the
+    // limit after this one had already counted; narrowing it to a single
+    // reservation cannot make the backstop exact under concurrency, but it does
+    // remove the avoidable part of the gap.
+    this.directory = reserveArtifactNamespace(this.physicalRoot, artifacts, runId);
     this.artifactsDirectory = artifacts;
     this.jsonl = join(this.directory, "events.jsonl");
     assertRegularOrAbsent(this.jsonl, "ARTIFACT_PATH_UNSAFE");
-    if (!resume && existsSync(this.jsonl)) {
-      throw new HarnessError("RUN_ID_EXISTS", "run_id already has a harness event ledger.");
-    }
     if (!existsSync(this.jsonl)) {
       const descriptor = openSync(this.jsonl, "wx");
       closeSync(descriptor);
     }
+    this.identityPath = join(this.directory, RUN_IDENTITY_NAME);
+    assertRegularOrAbsent(this.identityPath, "ARTIFACT_PATH_UNSAFE");
+    // Written once, verified on every resume: a resumed run that changed its
+    // suite, seed, or step set is a different run wearing the same id, and its
+    // appended events would describe work the earlier events never did.
+    reconcileRunIdentity(this.identityPath, identity, resume && namespaceExisted);
+
     this.manifest = join(this.directory, FAILURE_MANIFEST_NAME);
     assertRegularOrAbsent(this.manifest, "ARTIFACT_PATH_UNSAFE");
-    // A resumed run continues the same bounded budget it already spent.
-    this.failureArtifactCount = existsSync(this.manifest)
-      ? readFileSync(this.manifest, "utf8")
-          .split("\n")
-          .filter((line) => line.trim() !== "").length
-      : 0;
+    // A resumed run continues the same bounded budget it already spent, counted
+    // per attempt rather than per digest so a crashed attempt stays spent.
+    const reconciled = reconcileFailureManifest(this.manifest, this.artifactsDirectory, runId);
+    this.failureArtifactCount = reconciled.attemptCount;
+    this.danglingFailureDigests = reconciled.dangling;
+    for (const digest of reconciled.stored) {
+      this.failureLogs.push(join(blobStoreDirectory(this.artifactsDirectory), digest));
+    }
   }
+
+  private readonly identityPath: string;
 
   append(event: HarnessEvent): void {
     const serialized = `${JSON.stringify(event)}\n`;
@@ -310,57 +372,73 @@ class ArtifactStore {
     const stored = clip(output, MAX_FAILURE_ARTIFACT_CHARS);
     const digest = createHash("sha256").update(stored, "utf8").digest("hex");
     const path = this.blobPath(digest);
+    const bytes = Buffer.byteLength(stored, "utf8");
 
-    assertRegularOrAbsent(path, "ARTIFACT_PATH_UNSAFE");
-    if (existsSync(path)) {
-      if (readFileSync(path, "utf8") !== stored) {
-        throw new HarnessError(
-          "ARTIFACT_BLOB_MISMATCH",
-          "a stored blob does not match its digest; retained evidence was left untouched.",
-        );
-      }
-    } else {
-      try {
-        writeFileSync(path, stored, { encoding: "utf8", flag: "wx" });
-      } catch (error) {
-        // A concurrent run may have written the identical blob between the
-        // check and the write. Accept only that: identical bytes, same name.
-        if ((error as NodeJS.ErrnoException).code !== "EEXIST") throw error;
-        if (readFileSync(path, "utf8") !== stored) {
-          throw new HarnessError(
-            "ARTIFACT_BLOB_MISMATCH",
-            "a stored blob does not match its digest; retained evidence was left untouched.",
-          );
-        }
-      }
-    }
-
-    const record = {
+    const describe = (record: string) => ({
       schema_version: HARNESS_SCHEMA_VERSION,
-      record: "failure_artifact",
+      record,
       run_id: this.runId,
       step: safeStep,
       attempt,
       digest,
-      bytes: Buffer.byteLength(stored, "utf8"),
+      bytes,
       blob: `e2e/artifacts/${ARTIFACT_BLOB_DIRECTORY}/sha256/${digest}`,
-    };
-    appendFileSync(this.manifest, `${JSON.stringify(record)}\n`, "utf8");
-    this.failureLogs.push(path);
+    });
+
+    // The slot is spent here, before the blob exists. A crash after this line
+    // and before publication leaves a dangling intent, which the next
+    // construction reports and which keeps the budget honest; counting only
+    // completed blobs let a crash loop spend one slot arbitrarily often.
+    appendFileSync(this.manifest, `${JSON.stringify(describe(FAILURE_RECORD_INTENT))}\n`, "utf8");
     this.failureArtifactCount += 1;
+
+    this.publishBlob(digest, stored);
+
+    appendFileSync(this.manifest, `${JSON.stringify(describe(FAILURE_RECORD_STORED))}\n`, "utf8");
+    // One blob is one entry. Identical output from two steps resolves to the
+    // same path, and a list that repeated it would report one file as several
+    // pieces of evidence.
+    if (!this.failureLogs.includes(path)) this.failureLogs.push(path);
     return path;
   }
+
+  /**
+   * Publish one blob atomically, without deleting, overwriting, or moving.
+   *
+   * Bytes are assembled under a staging name and then `link`ed into the store.
+   * `link` is the primitive that makes all three properties hold at once: it is
+   * atomic, so a reader never observes a half-written blob; it refuses when the
+   * target exists, so a divergent blob is never silently replaced the way
+   * `rename` would replace it; and it publishes a *second name for the same
+   * inode* rather than relocating the first, so nothing is moved.
+   *
+   * The staging entry is therefore retained rather than cleaned up — and
+   * retaining it costs no data, because after the link both names refer to one
+   * inode holding one copy of the bytes. Staging is bounded by construction: a
+   * blob that already exists returns before any staging file is created, so at
+   * most one entry appears per *distinct* blob first published here, plus one
+   * per lost publication race. `countBlobStagingArtifacts` makes that number
+   * observable instead of a matter of trust.
+   */
+  private publishBlob(digest: string, stored: string): void {
+    this.stagingCounter += 1;
+    publishFailureBlob({
+      containmentRoot: this.physicalRoot,
+      artifactsDirectory: this.artifactsDirectory,
+      digest,
+      stored,
+      attempt: this.stagingCounter,
+    });
+  }
+
+  private stagingCounter = 0;
 
   /** Resolve and contain the path for one digest. */
   private blobPath(digest: string): string {
     if (!SHA256_HEX.test(digest)) {
       throw new HarnessError("ARTIFACT_PATH_UNSAFE", "a blob name must be a sha256 hex digest.");
     }
-    const store = ensureDirectDirectory(
-      ensureDirectDirectory(this.artifactsDirectory, ARTIFACT_BLOB_DIRECTORY),
-      "sha256",
-    );
-    const path = join(store, digest);
+    const path = join(blobStoreDirectory(this.artifactsDirectory), digest);
     assertContained(this.physicalRoot, path, "ARTIFACT_PATH_UNSAFE");
     return path;
   }
@@ -590,20 +668,28 @@ export function isContainedPath(root: string, target: string): boolean {
  * is silently dropped reads to the caller as "honoured", which is how a run
  * ends up doing the opposite of what it was asked.
  */
-const HARNESS_RUN_OPTION_KEYS: readonly string[] = [
-  "root",
-  "runId",
-  "suite",
-  "steps",
-  "seed",
-  "resume",
-  "gitRevision",
-  "bindingVersions",
-  "reproduction",
-  "signal",
-  "onOutput",
-  "onEvent",
-];
+/**
+ * Keyed by `keyof HarnessRunOptions`, so the compiler — not a reviewer —
+ * enforces that the set stays complete. A `readonly string[]` accepted a list
+ * that had silently fallen behind the interface, which turns adding an option
+ * into a runtime refusal of the option that was just added.
+ */
+const HARNESS_RUN_OPTION_COVERAGE: Readonly<Record<keyof HarnessRunOptions, true>> = {
+  root: true,
+  runId: true,
+  suite: true,
+  steps: true,
+  seed: true,
+  resume: true,
+  gitRevision: true,
+  bindingVersions: true,
+  reproduction: true,
+  signal: true,
+  onOutput: true,
+  onEvent: true,
+};
+
+export const HARNESS_RUN_OPTION_KEYS: readonly string[] = Object.keys(HARNESS_RUN_OPTION_COVERAGE);
 
 export function validateHarnessRunOptions(options: HarnessRunOptions): void {
   if (typeof options !== "object" || options === null || Array.isArray(options)) {
@@ -803,7 +889,14 @@ export function validateHarnessEvent(event: HarnessEvent): void {
 export async function runHarness(options: HarnessRunOptions): Promise<HarnessRunResult> {
   validateHarnessRunOptions(options);
   const seed = options.seed ?? deterministicSeed(options.suite, options.runId);
-  const store = new ArtifactStore(options.root, options.runId, options.resume === true);
+  const store = new ArtifactStore(options.root, options.runId, options.resume === true, {
+    runId: options.runId,
+    suite: options.suite,
+    seed,
+    // Ordered as the run will execute them, because the seed derives from that
+    // order: a resume that reordered its steps is a different run.
+    stepIds: orderSteps(options.steps).map((step) => step.id),
+  });
   const output = options.onOutput ?? ((text: string) => process.stderr.write(text));
   const eventSink =
     options.onEvent ??
@@ -1463,6 +1556,394 @@ function isOutside(root: string, target: string): boolean {
  * The reserved blob store is excluded because it is one directory whose
  * contents are content-addressed and deduplicated, not a per-run namespace.
  */
+export interface PublishFailureBlobInput {
+  /** Path everything must resolve inside. */
+  readonly containmentRoot: string;
+  /** `<root>/e2e/artifacts`. */
+  readonly artifactsDirectory: string;
+  readonly digest: string;
+  readonly stored: string;
+  /** Distinguishes staging names within one process. */
+  readonly attempt: number;
+}
+
+/**
+ * Publish one blob atomically, without deleting, overwriting, or moving.
+ *
+ * Bytes are assembled under a staging name and then `link`ed into the store.
+ * `link` is the primitive that makes all three properties hold at once: it is
+ * atomic, so a reader never observes a half-written blob; it refuses when the
+ * target exists, so a divergent blob is never silently replaced the way
+ * `rename` would replace it; and it publishes a *second name for the same
+ * inode* rather than relocating the first, so nothing is moved.
+ *
+ * The staging entry is therefore retained rather than cleaned up — and
+ * retaining it costs no data, because after the link both names refer to one
+ * inode holding one copy of the bytes. Staging is bounded by construction: a
+ * blob that already exists returns before any staging file is created, so at
+ * most one entry appears per *distinct* blob first published here, plus one per
+ * lost publication race. `countBlobStagingArtifacts` makes that number
+ * observable instead of a matter of trust.
+ *
+ * Exported because `runHarness` refuses any root that is not this checkout, so
+ * a test that could only reach publication through a full run would have to
+ * write into the repository's own artifact area to exercise it.
+ */
+export function publishFailureBlob(input: PublishFailureBlobInput): string {
+  if (!SHA256_HEX.test(input.digest)) {
+    throw new HarnessError("ARTIFACT_PATH_UNSAFE", "a blob name must be a sha256 hex digest.");
+  }
+  /**
+   * The digest must describe the bytes, checked here rather than trusted.
+   *
+   * A caller that computed the digest before clipping — or from a different
+   * buffer entirely — would otherwise publish content under a name that does
+   * not address it, and every later reader would compare the wrong bytes and
+   * report `ARTIFACT_BLOB_MISMATCH` against a store that is behaving exactly as
+   * told. Content-addressing that does not verify its own address is a naming
+   * convention, not an integrity property.
+   */
+  const actual = createHash("sha256").update(input.stored, "utf8").digest("hex");
+  if (actual !== input.digest) {
+    throw new HarnessError(
+      "ARTIFACT_BLOB_DIGEST_MISMATCH",
+      "the supplied digest does not address the bytes being published.",
+    );
+  }
+  /**
+   * Containment is proved before anything is created.
+   *
+   * `blobStoreDirectory` calls `ensureDirectDirectory`, which *makes*
+   * directories. Running it first meant an `artifactsDirectory` outside the
+   * containment root had already had `blobs/sha256` created inside it by the
+   * time the check ran — the check reported the violation after committing it.
+   * AGENTS.md is explicit that artifact roots stay under the repository, so the
+   * canonical path is resolved and tested while it is still only a string.
+   */
+  const artifactsDirectory = realDirectory(
+    resolve(input.artifactsDirectory),
+    "ARTIFACT_PATH_UNSAFE",
+  );
+  const containmentRoot = realDirectory(resolve(input.containmentRoot), "ARTIFACT_PATH_UNSAFE");
+  assertContained(containmentRoot, artifactsDirectory, "ARTIFACT_PATH_UNSAFE");
+
+  const store = blobStoreDirectory(artifactsDirectory);
+  const path = join(store, input.digest);
+  assertContained(containmentRoot, path, "ARTIFACT_PATH_UNSAFE");
+  assertRegularOrAbsent(path, "ARTIFACT_PATH_UNSAFE");
+  if (existsSync(path)) {
+    assertBlobAgrees(path, input.stored);
+    return path;
+  }
+  const staging = join(
+    ensureDirectDirectory(store, ARTIFACT_BLOB_STAGING_DIRECTORY),
+    `${input.digest}.${process.pid}.${input.attempt}`,
+  );
+  assertContained(containmentRoot, staging, "ARTIFACT_PATH_UNSAFE");
+  assertRegularOrAbsent(staging, "ARTIFACT_PATH_UNSAFE");
+  writeFileSync(staging, input.stored, { encoding: "utf8", flag: "wx" });
+  try {
+    linkSync(staging, path);
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code !== "EEXIST") throw error;
+    // A concurrent writer published first. Benign when the bytes agree; the
+    // staging entry stays as the retained record that the race happened.
+    assertBlobAgrees(path, input.stored);
+  }
+  return path;
+}
+
+function assertBlobAgrees(path: string, stored: string): void {
+  if (readFileSync(path, "utf8") !== stored) {
+    throw new HarnessError(
+      "ARTIFACT_BLOB_MISMATCH",
+      "a stored blob does not match its digest; retained evidence was left untouched.",
+    );
+  }
+}
+
+/** `<artifacts>/blobs/sha256`, created on demand. */
+function blobStoreDirectory(artifactsDirectory: string): string {
+  return ensureDirectDirectory(
+    ensureDirectDirectory(artifactsDirectory, ARTIFACT_BLOB_DIRECTORY),
+    "sha256",
+  );
+}
+
+/**
+ * How many staging entries the blob store retains.
+ *
+ * Nothing here removes them, so the number is part of the store's contract
+ * rather than an implementation detail: it should track the count of distinct
+ * blobs first published by this checkout, and grow only on a lost race.
+ */
+export function countBlobStagingArtifacts(root: string): number {
+  const staging = join(
+    resolve(root),
+    "e2e",
+    "artifacts",
+    ARTIFACT_BLOB_DIRECTORY,
+    "sha256",
+    ARTIFACT_BLOB_STAGING_DIRECTORY,
+  );
+  if (!existsSync(staging)) return 0;
+  return readdirSync(staging, { withFileTypes: true }).filter((entry) => entry.isFile()).length;
+}
+
+export interface RunIdentity {
+  readonly runId: string;
+  readonly suite: string;
+  readonly seed: number;
+  /** Ordered step ids. Order is part of the identity: the seed derives from it. */
+  readonly stepIds: readonly string[];
+}
+
+/** The identity digest, so a comparison is one value rather than four. */
+export function runIdentityDigest(identity: RunIdentity): string {
+  return createHash("sha256")
+    .update(
+      JSON.stringify({
+        run_id: identity.runId,
+        suite: identity.suite,
+        seed: identity.seed,
+        step_ids: identity.stepIds,
+      }),
+      "utf8",
+    )
+    .digest("hex");
+}
+
+/**
+ * Write the run's identity on first creation; verify it on resume.
+ *
+ * A resume is a continuation, not a fresh start with a familiar name. If the
+ * suite, seed, or step set changed, the events already on disk describe work
+ * that this invocation is not doing, and appending to them produces one ledger
+ * that misreports both halves. Refusing is the only honest option: nothing here
+ * may rewrite or remove the earlier evidence to make it agree.
+ */
+export function reconcileRunIdentity(
+  path: string,
+  identity: RunIdentity,
+  resuming: boolean,
+): void {
+  const digest = runIdentityDigest(identity);
+  const body = `${JSON.stringify({
+    schema_version: HARNESS_SCHEMA_VERSION,
+    record: "run_identity",
+    run_id: identity.runId,
+    suite: identity.suite,
+    seed: identity.seed,
+    step_ids: identity.stepIds,
+    identity_digest: digest,
+  })}\n`;
+
+  if (!existsSync(path)) {
+    // A resume whose namespace exists but which has no identity record predates
+    // this check. Recording it now is additive; claiming it was verified is not.
+    writeFileSync(path, body, { encoding: "utf8", flag: "wx" });
+    return;
+  }
+  let recorded: { identity_digest?: unknown; suite?: unknown; seed?: unknown };
+  try {
+    recorded = JSON.parse(readFileSync(path, "utf8")) as typeof recorded;
+  } catch {
+    throw new HarnessError(
+      "RUN_IDENTITY_UNREADABLE",
+      "the run identity record is unreadable; refusing to resume against evidence that cannot be matched.",
+    );
+  }
+  if (recorded.identity_digest !== digest) {
+    throw new HarnessError(
+      "RUN_IDENTITY_MISMATCH",
+      resuming
+        ? "this resume changes the run's suite, seed, or steps; the recorded evidence describes a different run."
+        : "an artifact namespace already records a different run identity.",
+    );
+  }
+}
+
+export interface FailureManifestReconciliation {
+  /**
+   * Slots spent: one per publication *attempt*, successful or not.
+   *
+   * Keyed by `(step, attempt)`, not by digest. Counting distinct digests made
+   * two different steps that happened to emit identical bytes cost one slot
+   * between them, so a run could exceed its per-run ceiling simply by failing
+   * repetitively — which is the common case, not an exotic one.
+   */
+  readonly attemptCount: number;
+  /** Digests whose blob is present in the store. */
+  readonly stored: readonly string[];
+  /** Digests an intent claimed whose blob never arrived. */
+  readonly dangling: readonly string[];
+  /**
+   * `step attempt` keys whose intent was never followed by a completion.
+   *
+   * Distinct from `dangling`: the blob may well be present, published by
+   * another run producing identical bytes, while *this* run died before it
+   * could record that it had finished.
+   */
+  readonly unfinishedAttempts: readonly string[];
+}
+
+/** One publication attempt, identified the way the budget counts it. */
+interface FailureManifestRecord {
+  readonly kind: typeof FAILURE_RECORD_INTENT | typeof FAILURE_RECORD_STORED;
+  readonly step: string;
+  readonly attempt: number;
+  readonly digest: string;
+}
+
+const MAX_MANIFEST_ATTEMPT = MAX_RETRIES_PER_STEP + 1;
+
+function manifestInvalid(detail: string): never {
+  throw new HarnessError("FAILURE_MANIFEST_INVALID", `the failure manifest is unusable: ${detail}`);
+}
+
+/**
+ * Parse one manifest line, refusing anything it cannot fully account for.
+ *
+ * Every field is checked, including the ones a reader does not strictly need.
+ * A manifest is the record of what a run spent and what evidence exists; a line
+ * that is malformed, belongs to another run, or carries an out-of-range attempt
+ * is a statement this function cannot evaluate, and skipping it silently would
+ * quietly under-count the budget on exactly the corrupted manifest where the
+ * budget matters most.
+ */
+function parseManifestRecord(line: string, runId: string): FailureManifestRecord {
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(line);
+  } catch {
+    return manifestInvalid("a line is not valid JSON");
+  }
+  if (typeof parsed !== "object" || parsed === null || Array.isArray(parsed)) {
+    return manifestInvalid("a line is not a JSON object");
+  }
+  const record = parsed as Record<string, unknown>;
+  if (record.schema_version !== HARNESS_SCHEMA_VERSION) {
+    return manifestInvalid("a line declares an unknown schema version");
+  }
+  if (record.record !== FAILURE_RECORD_INTENT && record.record !== FAILURE_RECORD_STORED) {
+    return manifestInvalid("a line declares an unknown record kind");
+  }
+  if (record.run_id !== runId) {
+    return manifestInvalid("a line belongs to a different run");
+  }
+  // `invalid-step` is what the writer substitutes for a step id it would not
+  // publish, so it is a legitimate recorded value even though it is not one.
+  if (
+    typeof record.step !== "string" ||
+    (record.step !== "invalid-step" && !validateStepId(record.step))
+  ) {
+    return manifestInvalid("a line carries an unusable step label");
+  }
+  if (
+    typeof record.attempt !== "number" ||
+    !Number.isInteger(record.attempt) ||
+    record.attempt < 1 ||
+    record.attempt > MAX_MANIFEST_ATTEMPT
+  ) {
+    return manifestInvalid("a line carries an attempt outside the bounded range");
+  }
+  if (typeof record.digest !== "string" || !SHA256_HEX.test(record.digest)) {
+    return manifestInvalid("a line carries a malformed digest");
+  }
+  if (
+    typeof record.bytes !== "number" ||
+    !Number.isInteger(record.bytes) ||
+    record.bytes < 0 ||
+    record.bytes > MAX_FAILURE_ARTIFACT_CHARS * 4
+  ) {
+    return manifestInvalid("a line carries a byte count outside the bounded range");
+  }
+  if (record.blob !== `e2e/artifacts/${ARTIFACT_BLOB_DIRECTORY}/sha256/${record.digest}`) {
+    return manifestInvalid("a line's blob path does not address its own digest");
+  }
+  return {
+    kind: record.record,
+    step: record.step,
+    attempt: record.attempt,
+    digest: record.digest,
+  };
+}
+
+/**
+ * Read a run's failure manifest back into a budget and a recovery report.
+ *
+ * A crash between the intent line and the published blob is the case this
+ * exists for. The intent still counts against the per-run budget — otherwise a
+ * repeatedly-crashing run resumes with a full budget every time and can publish
+ * unbounded distinct blobs — while the missing blob is reported as dangling
+ * rather than repaired or removed. A malformed line is counted as neither: it
+ * cannot be trusted to describe a slot, and discarding it silently would be a
+ * quieter failure than saying the manifest is unreadable at that point.
+ */
+export function reconcileFailureManifest(
+  manifest: string,
+  artifactsDirectory: string,
+  runId: string,
+): FailureManifestReconciliation {
+  if (!existsSync(manifest)) {
+    return { attemptCount: 0, stored: [], dangling: [], unfinishedAttempts: [] };
+  }
+  const store = join(artifactsDirectory, ARTIFACT_BLOB_DIRECTORY, "sha256");
+  /** Slot key. Two steps emitting identical bytes are two attempts, not one. */
+  const slot = (record: FailureManifestRecord): string => `${record.step} ${record.attempt}`;
+  const intents = new Map<string, string>();
+  const completions = new Map<string, string>();
+
+  for (const line of readFileSync(manifest, "utf8").split("\n")) {
+    if (line.trim() === "") continue;
+    const record = parseManifestRecord(line, runId);
+    const key = slot(record);
+    if (record.kind === FAILURE_RECORD_INTENT) {
+      const existing = intents.get(key);
+      // A repeated intent for one slot is the resume path rewriting its own
+      // attempt; it must not describe different bytes than the first claim.
+      if (existing !== undefined && existing !== record.digest) {
+        manifestInvalid("two intents for one attempt disagree about the digest");
+      }
+      intents.set(key, record.digest);
+      continue;
+    }
+    const claimed = intents.get(key);
+    if (claimed === undefined) {
+      manifestInvalid("a completion has no matching intent");
+    }
+    if (claimed !== record.digest) {
+      manifestInvalid("a completion does not match the digest its intent claimed");
+    }
+    if (completions.has(key)) {
+      manifestInvalid("an attempt was completed twice");
+    }
+    completions.set(key, record.digest);
+  }
+
+  const stored = new Set<string>();
+  const dangling = new Set<string>();
+  const unfinished: string[] = [];
+  for (const [key, digest] of intents) {
+    // Presence in the store decides, not the completion line: a completion
+    // written before a crash that lost the blob is still missing evidence, and
+    // a blob published by another run satisfies this one's reference.
+    if (existsSync(join(store, digest))) stored.add(digest);
+    else dangling.add(digest);
+    // An intent with no completion is where the process died. Distinct from a
+    // dangling digest: the blob can be present (another run published the same
+    // bytes) while this run never got to record that it finished.
+    if (!completions.has(key)) unfinished.push(key);
+  }
+  return {
+    attemptCount: intents.size,
+    // Sorted so a resumed run's reported state does not depend on line order.
+    stored: [...stored].sort(),
+    dangling: [...dangling].sort(),
+    unfinishedAttempts: unfinished.sort(),
+  };
+}
+
 export function countArtifactNamespaces(root: string): number {
   const artifacts = join(resolve(root), "e2e", "artifacts");
   if (!existsSync(artifacts)) return 0;
@@ -1497,6 +1978,28 @@ export function exceedsArtifactNamespaceBudget(
   return used >= limit;
 }
 
+/**
+ * Check the budget and create the namespace in one step.
+ *
+ * Returns the existing directory untouched when the namespace is already there,
+ * so a resume is never refused by a ceiling on *new* directories. The check
+ * still precedes creation: at the limit, nothing is created at all.
+ *
+ * This narrows but cannot close the concurrent window — two runs can both count
+ * `limit - 1` and both create — so the backstop overshoots by at most the number
+ * of writers racing at the boundary. It is a backstop, not a quota, and that
+ * bound is stated rather than implied.
+ */
+export function reserveArtifactNamespace(
+  root: string,
+  artifactsDirectory: string,
+  namespace: string,
+  limit = MAX_ARTIFACT_NAMESPACES,
+): string {
+  assertArtifactNamespaceBudget(root, namespace, limit);
+  return ensureDirectDirectory(artifactsDirectory, namespace);
+}
+
 export function assertArtifactNamespaceBudget(
   root: string,
   namespace: string,
@@ -1508,9 +2011,12 @@ export function assertArtifactNamespaceBudget(
   if (exceedsArtifactNamespaceBudget(used, limit)) {
     throw new HarnessError(
       "ARTIFACT_RETENTION_EXCEEDED",
-      `e2e/artifacts holds ${used} namespaces, at the ${limit} backstop. ` +
-        "Nothing was deleted. Archive or move the existing run directories elsewhere " +
-        "(they are retained evidence), then re-run.",
+      `e2e/artifacts holds ${used} directories, at the ${limit} backstop. ` +
+        "Every directory there counts, not only harness run directories: fixture " +
+        "scratch and anything else placed under e2e/artifacts counts too, so the " +
+        "number may be dominated by directories no run created. Nothing was " +
+        "deleted. Inspect what is there, then archive or move it elsewhere (any " +
+        "harness run directory among them is retained evidence) and re-run.",
     );
   }
 }

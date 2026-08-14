@@ -20,16 +20,21 @@ import { homedir, tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import {
+  ARTIFACT_BLOB_DIRECTORY,
   assertArtifactNamespaceBudget,
   assertContainedRoot,
   boundedDiff,
   countArtifactNamespaces,
+  countBlobStagingArtifacts,
   deterministicSeed,
   exceedsArtifactNamespaceBudget,
   FAILURE_MANIFEST_NAME,
+  FAILURE_RECORD_INTENT,
+  FAILURE_RECORD_STORED,
   FORCE_KILL_GRACE_MS,
   HARD_READER_GRACE_MS,
   HARNESS_BLOCKED_EXIT_CODE,
+  HARNESS_RUN_OPTION_KEYS,
   HARNESS_SCHEMA_VERSION,
   type HarnessError,
   type HarnessEvent,
@@ -45,7 +50,10 @@ import {
   MAX_STEPS_PER_RUN,
   MAX_TIMEOUT_MS,
   orderSteps,
+  publishFailureBlob,
+  reconcileFailureManifest,
   repositoryRoot,
+  reserveArtifactNamespace,
   runHarness,
   validateHarnessEvent,
   validateHarnessStep,
@@ -1124,18 +1132,25 @@ describe("content-addressed failure artifacts", () => {
   }
 
   /**
-   * The single manifest record a one-failure run must have produced.
+   * The single stored record a one-failure run must have produced.
    *
-   * An explicit throw, not a non-null assertion: if the run wrote no manifest
-   * record the test should say so in those words, because that is the defect,
-   * not a typing inconvenience to be silenced.
+   * A publication writes two lines — the intent that spends the budget slot and
+   * the completion that says the blob arrived — so this asserts the pair and
+   * returns the completion. An explicit throw, not a non-null assertion: if the
+   * run wrote no manifest record the test should say so in those words, because
+   * that is the defect, not a typing inconvenience to be silenced.
    */
   function onlyManifestRecord(runJsonl: string): FailureManifestRecord {
     const records = manifestOf(runJsonl);
-    expect(records).toHaveLength(1);
-    const [record] = records;
+    const intents = records.filter((entry) => entry.record === FAILURE_RECORD_INTENT);
+    const stored = records.filter((entry) => entry.record === FAILURE_RECORD_STORED);
+    expect(intents).toHaveLength(1);
+    expect(stored).toHaveLength(1);
+    // The slot is spent before the blob exists, never after.
+    expect(records[0]?.record).toBe(FAILURE_RECORD_INTENT);
+    const [record] = stored;
     if (record === undefined) {
-      throw new Error("the run produced no failure manifest record");
+      throw new Error("the run produced no stored failure manifest record");
     }
     return record;
   }
@@ -1480,5 +1495,441 @@ describe("repository root purity", () => {
     const artifacts = join(repositoryRoot(), "e2e", "artifacts");
     expect(isContainedPath(artifacts, scratch)).toBe(true);
     expect(scratch.startsWith(artifacts)).toBe(true);
+  });
+});
+
+/**
+ * Forward fixes for the OPS.2a retention audit.
+ *
+ * Every test below runs against its own `mkdtemp` root. None reads or writes the
+ * repository's artifact area, which is over the namespace backstop and would
+ * refuse a new run id anyway — and which must not be grown further by the suite
+ * that measures it.
+ */
+describe("blob publication is atomic, additive, and never destructive", () => {
+  /**
+   * These drive `publishFailureBlob` directly rather than `runHarness`.
+   *
+   * `assertContainedRoot` refuses any root that is not this checkout, so a test
+   * reaching publication through a full run could only do so by writing into
+   * the repository's own artifact area — which is over the namespace backstop,
+   * and which this suite must not grow further.
+   */
+  const digestOf = (value: string): string =>
+    createHash("sha256").update(value, "utf8").digest("hex");
+
+  function publish(root: string, body: string, attempt = 1): string {
+    return publishFailureBlob({
+      containmentRoot: root,
+      artifactsDirectory: join(root, "e2e", "artifacts"),
+      digest: digestOf(body),
+      stored: body,
+      attempt,
+    });
+  }
+
+  /** Every regular file under a directory, as directory-relative paths. */
+  function fileCensus(directory: string): Set<string> {
+    const found = new Set<string>();
+    const walk = (current: string, prefix: string): void => {
+      for (const entry of readdirSync(current, { withFileTypes: true })) {
+        const name = prefix === "" ? entry.name : `${prefix}/${entry.name}`;
+        if (entry.isDirectory()) walk(join(current, entry.name), name);
+        else found.add(name);
+      }
+    };
+    walk(directory, "");
+    return found;
+  }
+
+  const blobStore = (root: string): string =>
+    join(root, "e2e", "artifacts", ARTIFACT_BLOB_DIRECTORY, "sha256");
+
+  test("a published blob is complete, and its staging entry is the same inode", () => {
+    const root = fixtureScratchRoot("atomic-publish");
+    const payload = `atomic publication ${process.pid}\n`;
+    const published = publish(root, payload);
+
+    expect(existsSync(published)).toBe(true);
+    // Complete bytes, never the empty file a create-then-write race exposed.
+    expect(readFileSync(published, "utf8")).toBe(payload);
+
+    // Exactly one staging entry, and it is a second name for the same inode —
+    // so retaining it costs a directory entry, not a second copy of the bytes.
+    expect(countBlobStagingArtifacts(root)).toBe(1);
+    const staging = join(blobStore(root), "incoming");
+    const [entry] = readdirSync(staging);
+    if (entry === undefined) throw new Error("no staging entry was retained");
+    expect(statSync(join(staging, entry)).ino).toBe(statSync(published).ino);
+  });
+
+  test("PLANTED: publication removes no file that existed before it", () => {
+    const root = fixtureScratchRoot("no-removal");
+    publish(root, "first payload\n", 1);
+    const before = fileCensus(root);
+
+    publish(root, "second payload\n", 2);
+    publish(root, "first payload\n", 3);
+    const after = fileCensus(root);
+
+    // Additive only. A staging cleanup, a rename, or a prune would show up here
+    // as a path that used to exist and no longer does.
+    expect([...before].filter((path) => !after.has(path))).toEqual([]);
+    expect(after.size).toBeGreaterThan(before.size);
+  });
+
+  test("a repeat of stored content publishes no new staging entry", () => {
+    const root = fixtureScratchRoot("staging-bounded");
+    const payload = `repeated payload ${process.pid}\n`;
+    publish(root, payload, 1);
+    expect(countBlobStagingArtifacts(root)).toBe(1);
+
+    // The blob already exists, so the second call returns before staging.
+    publish(root, payload, 2);
+    expect(countBlobStagingArtifacts(root)).toBe(1);
+    expect(readdirSync(blobStore(root)).filter((name) => name !== "incoming")).toHaveLength(1);
+  });
+
+  test("PLANTED: a reader never observes a partially written blob", () => {
+    const root = fixtureScratchRoot("no-partial");
+    const payload = `bytes that must appear all at once ${process.pid}\n`;
+    const path = publish(root, payload);
+
+    // Under create-then-write publication a concurrent reader could observe
+    // this path existing while empty. Linking makes that state unreachable:
+    // the name appears only once the bytes are already complete.
+    expect(statSync(path).size).toBe(Buffer.byteLength(payload, "utf8"));
+    expect(readFileSync(path, "utf8")).toBe(payload);
+    // Nothing half-written is left under a staging name either.
+    const staging = join(blobStore(root), "incoming");
+    for (const entry of readdirSync(staging)) {
+      expect(readFileSync(join(staging, entry), "utf8")).toBe(payload);
+    }
+  });
+
+  test("PLANTED: a divergent blob raises and leaves the retained bytes untouched", () => {
+    const root = fixtureScratchRoot("mismatch");
+    const payload = `mismatch payload ${process.pid}\n`;
+    // Occupy the digest with bytes that disagree, as on-disk corruption would.
+    mkdirSync(blobStore(root), { recursive: true });
+    const corrupted = "not the bytes this digest names\n";
+    writeFileSync(join(blobStore(root), digestOf(payload)), corrupted);
+
+    expect(() => publish(root, payload)).toThrow(/does not match its digest/);
+    // Refused, not repaired: the divergent file is still exactly as it was.
+    expect(readFileSync(join(blobStore(root), digestOf(payload)), "utf8")).toBe(corrupted);
+  });
+
+  test("a lost publication race is benign when the bytes agree", () => {
+    const root = fixtureScratchRoot("lost-race");
+    const payload = `contended payload ${process.pid}\n`;
+    // Stand in for a winner publishing between the existence check and the link.
+    mkdirSync(blobStore(root), { recursive: true });
+    writeFileSync(join(blobStore(root), digestOf(payload)), payload);
+
+    expect(() => publish(root, payload)).not.toThrow();
+    expect(readFileSync(join(blobStore(root), digestOf(payload)), "utf8")).toBe(payload);
+  });
+
+  test("identical bytes resolve to one path, distinct bytes to distinct paths", () => {
+    const root = fixtureScratchRoot("dedupe-path");
+    const payload = `shared failure ${process.pid}\n`;
+    // The property `failureLogs` dedupe rests on: two steps emitting the same
+    // output name one file, so a list that repeated it would report a single
+    // piece of evidence as several.
+    expect(publish(root, payload, 1)).toBe(publish(root, payload, 2));
+    expect(publish(root, `other ${process.pid}\n`, 3)).not.toBe(publish(root, payload, 4));
+    expect(readdirSync(blobStore(root)).filter((name) => name !== "incoming")).toHaveLength(2);
+  });
+
+  test("the store guards failureLogs against repeating one path", () => {
+    // A source assertion, and labelled as one: the list lives on ArtifactStore,
+    // which `runHarness` will only build against this checkout — and this suite
+    // must not write into the repository's artifact area to reach it.
+    const source = readFileSync(join(repositoryRoot(), "scripts", "harness", "runner.ts"), "utf8");
+    expect(source).toContain("if (!this.failureLogs.includes(path)) this.failureLogs.push(path)");
+  });
+
+  test("a blob name that is not a digest is refused before anything is written", () => {
+    const root = fixtureScratchRoot("bad-digest");
+    expect(() =>
+      publishFailureBlob({
+        containmentRoot: root,
+        artifactsDirectory: join(root, "e2e", "artifacts"),
+        digest: "../../escape",
+        stored: "x",
+        attempt: 1,
+      }),
+    ).toThrow(/sha256 hex digest/);
+  });
+});
+
+describe("failure manifest reconciliation", () => {
+  const digestOf = (value: string): string =>
+    createHash("sha256").update(value, "utf8").digest("hex");
+
+  const RUN = "reconcile-run";
+
+  /** A fully-formed record, so a test varies exactly the field it is about. */
+  function line(
+    kind: string,
+    body: string,
+    overrides: Record<string, unknown> = {},
+  ): Record<string, unknown> {
+    const digest = digestOf(body);
+    return {
+      schema_version: HARNESS_SCHEMA_VERSION,
+      record: kind,
+      run_id: RUN,
+      step: "step-a",
+      attempt: 1,
+      digest,
+      bytes: Buffer.byteLength(body, "utf8"),
+      blob: `e2e/artifacts/${ARTIFACT_BLOB_DIRECTORY}/sha256/${digest}`,
+      ...overrides,
+    };
+  }
+
+  function writeManifest(root: string, lines: readonly object[], runId = RUN): string {
+    const directory = join(root, "e2e", "artifacts", runId);
+    mkdirSync(directory, { recursive: true });
+    const manifest = join(directory, FAILURE_MANIFEST_NAME);
+    writeFileSync(manifest, `${lines.map((entry) => JSON.stringify(entry)).join("\n")}\n`);
+    return manifest;
+  }
+
+  const artifactsOf = (root: string): string => join(root, "e2e", "artifacts");
+
+  function plantBlob(root: string, body: string): void {
+    const store = join(artifactsOf(root), ARTIFACT_BLOB_DIRECTORY, "sha256");
+    mkdirSync(store, { recursive: true });
+    writeFileSync(join(store, digestOf(body)), body);
+  }
+
+  test("PLANTED: an intent whose blob never arrived still spends its slot", () => {
+    const root = fixtureScratchRoot("orphan-budget");
+    const body = "evidence that died with its process\n";
+    const manifest = writeManifest(root, [line(FAILURE_RECORD_INTENT, body)]);
+
+    const reconciled = reconcileFailureManifest(manifest, artifactsOf(root), RUN);
+    // Counting completions would return 0 here, handing a crash-looping run a
+    // fresh budget on every resume.
+    expect(reconciled.attemptCount).toBe(1);
+    expect(reconciled.dangling).toEqual([digestOf(body)]);
+    expect(reconciled.stored).toEqual([]);
+    expect(reconciled.unfinishedAttempts).toEqual(["step-a 1"]);
+  });
+
+  test("a retry that republishes the digest clears the dangling report", () => {
+    const root = fixtureScratchRoot("orphan-recovery");
+    const body = "evidence that came back\n";
+    const manifest = writeManifest(root, [line(FAILURE_RECORD_INTENT, body)]);
+    expect(reconcileFailureManifest(manifest, artifactsOf(root), RUN).dangling).toEqual([
+      digestOf(body),
+    ]);
+
+    plantBlob(root, body);
+    const recovered = reconcileFailureManifest(manifest, artifactsOf(root), RUN);
+    expect(recovered.dangling).toEqual([]);
+    expect(recovered.stored).toEqual([digestOf(body)]);
+    // The slot stays spent either way: recovery is not a refund.
+    expect(recovered.attemptCount).toBe(1);
+  });
+
+  test("PLANTED: two steps with identical bytes spend two slots, not one", () => {
+    const root = fixtureScratchRoot("attempt-keyed");
+    const body = "identical output from different steps\n";
+    const manifest = writeManifest(root, [
+      line(FAILURE_RECORD_INTENT, body, { step: "step-a" }),
+      line(FAILURE_RECORD_STORED, body, { step: "step-a" }),
+      line(FAILURE_RECORD_INTENT, body, { step: "step-b" }),
+      line(FAILURE_RECORD_STORED, body, { step: "step-b" }),
+    ]);
+    plantBlob(root, body);
+    // Keyed by digest this was 1, so repetitive failure — the common case —
+    // silently bought extra publications beyond the per-run ceiling.
+    expect(reconcileFailureManifest(manifest, artifactsOf(root), RUN).attemptCount).toBe(2);
+  });
+
+  test("a repeated intent for one attempt spends one slot", () => {
+    const root = fixtureScratchRoot("attempt-repeat");
+    const body = "retried identical output\n";
+    const manifest = writeManifest(root, [
+      line(FAILURE_RECORD_INTENT, body),
+      line(FAILURE_RECORD_INTENT, body),
+      line(FAILURE_RECORD_STORED, body),
+    ]);
+    plantBlob(root, body);
+    expect(reconcileFailureManifest(manifest, artifactsOf(root), RUN).attemptCount).toBe(1);
+  });
+
+  describe("PLANTED: a manifest it cannot fully account for is refused", () => {
+    const body = "some failure\n";
+    const cases: [string, () => Record<string, unknown>[] | string][] = [
+      ["not JSON", () => "{not json\n"],
+      ["a JSON array", () => "[1,2,3]\n"],
+      ["an unknown schema version", () => [line(FAILURE_RECORD_INTENT, body, { schema_version: "9.9" })]],
+      ["an unknown record kind", () => [line(FAILURE_RECORD_INTENT, body, { record: "something_else" })]],
+      ["another run's record", () => [line(FAILURE_RECORD_INTENT, body, { run_id: "a-different-run" })]],
+      ["an unusable step label", () => [line(FAILURE_RECORD_INTENT, body, { step: "../escape" })]],
+      ["an out-of-range attempt", () => [line(FAILURE_RECORD_INTENT, body, { attempt: 0 })]],
+      ["a non-integer attempt", () => [line(FAILURE_RECORD_INTENT, body, { attempt: 1.5 })]],
+      ["a malformed digest", () => [line(FAILURE_RECORD_INTENT, body, { digest: "nothex" })]],
+      ["a negative byte count", () => [line(FAILURE_RECORD_INTENT, body, { bytes: -1 })]],
+      ["a blob path that addresses another digest", () => [
+        line(FAILURE_RECORD_INTENT, body, { blob: "e2e/artifacts/blobs/sha256/deadbeef" }),
+      ]],
+      ["a completion with no intent", () => [line(FAILURE_RECORD_STORED, body)]],
+      ["a completion disagreeing with its intent", () => [
+        line(FAILURE_RECORD_INTENT, body),
+        line(FAILURE_RECORD_STORED, "different bytes entirely\n", { bytes: 1 }),
+      ]],
+      ["one attempt completed twice", () => [
+        line(FAILURE_RECORD_INTENT, body),
+        line(FAILURE_RECORD_STORED, body),
+        line(FAILURE_RECORD_STORED, body),
+      ]],
+    ];
+
+    for (const [name, build] of cases) {
+      test(name, () => {
+        const root = fixtureScratchRoot("reject");
+        const built = build();
+        let manifest: string;
+        if (typeof built === "string") {
+          const directory = join(artifactsOf(root), RUN);
+          mkdirSync(directory, { recursive: true });
+          manifest = join(directory, FAILURE_MANIFEST_NAME);
+          writeFileSync(manifest, built);
+        } else {
+          manifest = writeManifest(root, built);
+        }
+        // Fail closed. Skipping the line silently under-counted the budget on
+        // exactly the corrupted manifest where the budget matters most.
+        expect(() => reconcileFailureManifest(manifest, artifactsOf(root), RUN)).toThrow(
+          /FAILURE_MANIFEST_INVALID|manifest is unusable/,
+        );
+      });
+    }
+  });
+});
+
+describe("run identity is immutable across a resume", () => {
+  const base = { runId: "identity-run", suite: "unit", seed: 7, stepIds: ["a", "b"] };
+
+  test("the identity is recorded once and re-verified unchanged", () => {
+    const root = fixtureScratchRoot("identity-stable");
+    const path = join(root, RUN_IDENTITY_NAME);
+    reconcileRunIdentity(path, base, false);
+    expect(existsSync(path)).toBe(true);
+    expect(() => reconcileRunIdentity(path, base, true)).not.toThrow();
+  });
+
+  for (const [what, changed] of [
+    ["suite", { ...base, suite: "integration" }],
+    ["seed", { ...base, seed: 8 }],
+    ["step set", { ...base, stepIds: ["a", "b", "c"] }],
+    ["step order", { ...base, stepIds: ["b", "a"] }],
+  ] as const) {
+    test(`PLANTED: a resume that changes the ${what} is refused`, () => {
+      const root = fixtureScratchRoot("identity-change");
+      const path = join(root, RUN_IDENTITY_NAME);
+      reconcileRunIdentity(path, base, false);
+      // The events already on disk describe work this invocation is not doing.
+      expect(() => reconcileRunIdentity(path, changed, true)).toThrow(
+        /RUN_IDENTITY_MISMATCH|different run/,
+      );
+      // Refused, never rewritten to agree.
+      expect(JSON.parse(readFileSync(path, "utf8")).seed).toBe(7);
+    });
+  }
+
+  test("PLANTED: an unreadable identity record refuses the resume", () => {
+    const root = fixtureScratchRoot("identity-corrupt");
+    const path = join(root, RUN_IDENTITY_NAME);
+    writeFileSync(path, "{ this is not json\n");
+    expect(() => reconcileRunIdentity(path, base, true)).toThrow(
+      /RUN_IDENTITY_UNREADABLE|cannot be matched/,
+    );
+  });
+});
+
+describe("run options are covered at compile time", () => {
+  test("the accepted key set is exactly the documented options", () => {
+    // Derived from `Record<keyof HarnessRunOptions, true>`, so a new option that
+    // is added to the interface and forgotten here fails to compile rather than
+    // being refused at runtime as unknown.
+    expect([...HARNESS_RUN_OPTION_KEYS].sort()).toEqual([
+      "bindingVersions",
+      "gitRevision",
+      "onEvent",
+      "onOutput",
+      "reproduction",
+      "resume",
+      "root",
+      "runId",
+      "seed",
+      "signal",
+      "steps",
+      "suite",
+    ]);
+  });
+
+  test("PLANTED: an unknown option is still refused, on a temp root", async () => {
+    const root = fixtureScratchRoot("options-temp");
+    await expect(
+      runHarness({
+        root,
+        suite: "unit",
+        runId: "options-temp",
+        steps: [passStep("ok")],
+        onEvent: () => undefined,
+        onOutput: () => undefined,
+        retainArtifacts: true,
+      } as unknown as Parameters<typeof runHarness>[0]),
+    ).rejects.toThrow(/unknown run option "retainArtifacts"/);
+  });
+});
+
+describe("namespace reservation", () => {
+  test("reserving at the limit creates nothing and keeps existing evidence", () => {
+    const root = fixtureScratchRoot("reserve-limit");
+    const artifacts = join(root, "e2e", "artifacts");
+    mkdirSync(join(artifacts, "occupied"), { recursive: true });
+    writeFileSync(join(artifacts, "occupied", "evidence.log"), "retained\n");
+
+    expect(() => reserveArtifactNamespace(root, artifacts, "brand-new", 1)).toThrow(
+      /ARTIFACT_RETENTION_EXCEEDED|backstop/,
+    );
+    expect(existsSync(join(artifacts, "brand-new"))).toBe(false);
+    expect(readFileSync(join(artifacts, "occupied", "evidence.log"), "utf8")).toBe("retained\n");
+  });
+
+  test("reserving an existing namespace returns it without spending budget", () => {
+    const root = fixtureScratchRoot("reserve-reuse");
+    const artifacts = join(root, "e2e", "artifacts");
+    mkdirSync(join(artifacts, "already"), { recursive: true });
+    // A resume must not be refused by a ceiling on *new* namespaces.
+    expect(reserveArtifactNamespace(root, artifacts, "already", 1)).toBe(
+      realpathSync(join(artifacts, "already")),
+    );
+    expect(countArtifactNamespaces(root)).toBe(1);
+  });
+
+  test("the concurrent overshoot bound is what the backstop actually promises", () => {
+    const root = fixtureScratchRoot("reserve-race");
+    const artifacts = join(root, "e2e", "artifacts");
+    // Two reservations that both observed `limit - 1` both succeed. This is a
+    // backstop, not a quota; the honest claim is that it overshoots by at most
+    // the number of writers racing at the boundary, and a test that asserted
+    // exactness under concurrency would be asserting something untrue.
+    reserveArtifactNamespace(root, artifacts, "racer-a", 2);
+    reserveArtifactNamespace(root, artifacts, "racer-b", 2);
+    expect(countArtifactNamespaces(root)).toBe(2);
+    // Serially, the very next one is refused: the bound holds once the count is
+    // observed after the race rather than during it.
+    expect(() => reserveArtifactNamespace(root, artifacts, "racer-c", 2)).toThrow(
+      /ARTIFACT_RETENTION_EXCEEDED|backstop/,
+    );
   });
 });
