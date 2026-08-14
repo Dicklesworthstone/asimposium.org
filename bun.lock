@@ -5,6 +5,7 @@
     "": {
       "name": "asimposium",
       "devDependencies": {
+        "@asimposium/contracts": "workspace:*",
         "@biomejs/biome": "2.5.8",
         "@types/bun": "1.3.14",
         "typescript": "5.9.3",
@@ -56,6 +57,10 @@
         "@playwright/test": "1.55.0",
       },
     },
+    "e2e/gauntlet": {
+      "name": "@asimposium/gauntlet",
+      "version": "0.1.0",
+    },
     "packages/contracts": {
       "name": "@asimposium/contracts",
       "version": "0.0.0",
@@ -86,6 +91,8 @@
     "@asimposium/contracts": ["@asimposium/contracts@workspace:packages/contracts"],
 
     "@asimposium/e2e": ["@asimposium/e2e@workspace:e2e"],
+
+    "@asimposium/gauntlet": ["@asimposium/gauntlet@workspace:e2e/gauntlet"],
 
     "@asimposium/protocol": ["@asimposium/protocol@workspace:packages/protocol"],
 

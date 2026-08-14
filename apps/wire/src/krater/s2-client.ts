@@ -284,7 +284,10 @@ export function buildS2CostMeasurementReceipt(
       0,
     ),
     sum_retry_count: metrics.reduce((total, write) => total + write.retryCount, 0),
-    known_row_total_exclusions: REQUIRED_ROW_TOTAL_EXCLUSIONS,
+    known_row_total_exclusions: [
+      REQUIRED_ROW_TOTAL_EXCLUSIONS[0],
+      REQUIRED_ROW_TOTAL_EXCLUSIONS[1],
+    ],
   };
 
   try {

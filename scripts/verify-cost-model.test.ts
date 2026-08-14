@@ -194,6 +194,7 @@ interface CliEvidenceOptions {
   readonly receipt?: "file" | "missing" | "directory" | "fifo";
   readonly missing?: EvidenceArtifact;
   readonly symlink?: EvidenceArtifact;
+  readonly provenance?: S2CostReceiptProvenance;
 }
 
 function sha256(bytes: Uint8Array): string {
@@ -210,6 +211,12 @@ function writeCliEvidence(
   const publicationPath = join(root, S2_COST_PUBLICATION_RELATIVE_PATH);
   const commitPath = join(root, S2_COST_PUBLICATION_COMMIT_RELATIVE_PATH);
   const bytes = typeof contents === "string" ? new TextEncoder().encode(contents) : contents;
+  const provenance = options.provenance ?? {
+    run_id: "s2-cost-fixture",
+    revision: REVISION,
+    dirty_state: "clean" as const,
+    source_digest: SOURCE_DIGEST,
+  };
   const receiptKind = options.receipt ?? "file";
   const retainedFiles = [
     { path: S2_COST_RECEIPT_RELATIVE_PATH, bytes: bytes.byteLength, kind: "file" },
@@ -234,10 +241,7 @@ function writeCliEvidence(
   }
   const manifest = {
     manifest_version: S2_COST_EVIDENCE_MANIFEST_VERSION,
-    run_id: "s2-cost-fixture",
-    revision: REVISION,
-    dirty_state: "clean",
-    source_digest: SOURCE_DIGEST,
+    ...provenance,
     exit_code: 78,
     local_phase_status: ALL_LOCAL_PHASES,
     retention: {
@@ -495,7 +499,7 @@ describe("S7 cost verifier", () => {
     );
     const bytes = new TextEncoder().encode(JSON.stringify(receipt));
     const result = verifyCostModel(FABLE_WORKED_EXAMPLE, bytes, PRODUCER_PROVENANCE);
-    const evidence = writeCliEvidence(bytes);
+    const evidence = writeCliEvidence(bytes, { provenance: PRODUCER_PROVENANCE });
     const cli = runStandaloneCli(evidence.args);
 
     expect(result).toMatchObject({
