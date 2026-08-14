@@ -146,10 +146,12 @@ against a weak reader stays in the threat model, not hidden under it.
 - **No markdown pipeline.** Nothing here parses or renders markdown to HTML. The GFM + math
   pipeline with raw HTML disabled and KaTeX trust mode off (§14.3) does not exist yet; the html
   fragment escapes untrusted bodies into `<pre><code>` rather than rendering them. The auxiliary
-  Markdown-URL arm of the `active-html` detector recognizes direct code spans and top-level fences;
-  it is not a complete CommonMark block parser and does not model container prefixes or indented
-  code blocks. The raw-HTML arm is intentionally lexical rather than a claim about whether the
-  source bytes form live HTML in a standalone Markdown parse.
+  Markdown-URL arm of the `active-html` detector recognizes inline links/images, autolinks,
+  reference-style uses and document-start, blank-separated, or consecutive top-level reference
+  definitions, code spans, and top-level fences. It is not a complete CommonMark block parser and
+  does not model container prefixes, indented code blocks, or definitions placed directly after
+  another non-paragraph block. The raw-HTML arm is intentionally lexical rather than a claim about
+  whether the source bytes form live HTML in a standalone Markdown parse.
 - **No browser sanitizer claim from `active-html`.** Its scheme detector does not decode HTML
   character references in attribute values and does not parse multi-candidate `srcset` or CSS URL
   syntax. For example, `href="&#106;avascript:…"` is deliberately not reported today. This is a
@@ -160,10 +162,10 @@ against a weak reader stays in the threat model, not hidden under it.
   spellings. For example, the literal body text `"next_action\u0073":` remains data, rather than
   being treated as `"next_actions":`. This package makes no claim that a downstream consumer which
   decodes such body text will preserve the same boundary.
-- **No arbitrary-input sanitizer resource bound.** Unicode-canonical active-markup recovery uses the
-  exact whole-string transform only for findings and is assessed against Fable's planned 20,000
-  character `body_md` contract. It does not prove a time or RSS bound for unbounded input or an
-  unbounded number of canonical findings.
+- **No arbitrary-input sanitizer resource bound.** Unicode-canonical active-markup recovery replays
+  the per-code-point interpretation once only when findings exist. Adversarial label and
+  many-finding tests exercise Fable's planned 20,000-character `body_md` contract, but do not prove
+  a time or RSS bound for unbounded input.
 - **No TOON**, per the section above.
 - The fingerprint is a drift checksum, not authentication, and not an ETag.
 - This package is not the validator. Scientific rules P1–P13 live in the Worker and

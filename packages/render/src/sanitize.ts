@@ -112,9 +112,10 @@ const URL_SCHEME_CONTINUATION = /^[a-z0-9+.-]$/;
  * The offset of the destination's scheme when a browser would parse it as one of
  * `DANGEROUS_URL_SCHEMES`, else `undefined`.
  *
- * This is the single matcher behind every destination surface — Markdown inline
- * destinations, Markdown autolinks and URL-bearing HTML attributes — so the three
- * paths cannot drift apart as the list changes.
+ * This is the base matcher behind every destination surface. Markdown inline
+ * and reference destinations pass through the small wrapper below because
+ * CommonMark removes backslash escapes before handing a destination to a URL
+ * parser; autolinks and HTML attributes do not.
  *
  * It is deliberately *anchored*: only the scheme the browser resolves counts. A
  * benign `https://example.test/?note=data:text/html` mentions a scheme in its
@@ -177,6 +178,57 @@ function dangerousSchemeOffsetAt(
   return undefined;
 }
 
+function isMarkdownEscapablePunctuation(character: string | undefined): boolean {
+  if (character === undefined) return false;
+  const code = character.charCodeAt(0);
+  return (
+    (code >= 0x21 && code <= 0x2f) ||
+    (code >= 0x3a && code <= 0x40) ||
+    (code >= 0x5b && code <= 0x60) ||
+    (code >= 0x7b && code <= 0x7e)
+  );
+}
+
+/** Dangerous-scheme matching after CommonMark backslash-unescapes punctuation. */
+function markdownDangerousSchemeOffsetAt(
+  text: string,
+  startOffset: number,
+  endOffset: number,
+): number | undefined {
+  let cursor = startOffset;
+  while (cursor < endOffset && text.charCodeAt(cursor) <= 0x20) cursor += 1;
+
+  const schemeStart = cursor;
+  let scheme = "";
+  while (cursor < endOffset) {
+    const code = text.charCodeAt(cursor);
+    if (code === 0x09 || code === 0x0a || code === 0x0d) {
+      cursor += 1;
+      continue;
+    }
+
+    let character = text[cursor] as string;
+    let sourceWidth = 1;
+    if (character === "\\" && isMarkdownEscapablePunctuation(text[cursor + 1])) {
+      character = text[cursor + 1] as string;
+      sourceWidth = 2;
+    }
+    if (character === ":") {
+      return DANGEROUS_URL_SCHEMES.includes(`${scheme}:`) ? schemeStart : undefined;
+    }
+    if (scheme.length >= LONGEST_DANGEROUS_SCHEME_NAME) return undefined;
+    if (
+      scheme.length === 0 ? !isAsciiLowerAlpha(character) : !URL_SCHEME_CONTINUATION.test(character)
+    ) {
+      return undefined;
+    }
+    scheme += character;
+    cursor += sourceWidth;
+  }
+
+  return undefined;
+}
+
 const HTML_ASCII_WHITESPACE = /^[\t\n\f\r ]$/;
 const COMMONMARK_HTML_START_TAG_NAME = /^[a-z][a-z0-9-]*$/;
 
@@ -226,16 +278,22 @@ function rawBrowserTokenizerScanText(value: string): string {
  * interpretation rather than an input rewrite for the raw pass. Its source map
  * makes any finding deduplicate against the original source occurrence.
  */
+function canonicalizeSourceCodePoint(sourceCodePoint: string): string {
+  return sourceCodePoint.normalize("NFKD").replace(CANONICAL_MARK_OR_FORMAT, "").toLowerCase();
+}
+
 function unicodeCanonicalTokenizerScanText(value: string): string {
-  // Keep the interpretation itself as a compact whole string. Mapping every
-  // source point before knowing whether there is a finding turns benign NFKD
-  // expansion into an attacker-controlled allocation; recovery below runs only
-  // for the few offsets the scanner actually reports.
-  return value
-    .normalize("NFKD")
-    .replace(CANONICAL_MARK_OR_FORMAT, "")
-    .normalize("NFKC")
-    .toLowerCase();
+  // NFKD already exposes every compatibility spelling the ASCII-shaped
+  // tokenizer recognizes. After marks and format controls are removed, a
+  // whole-string NFKC pass can only recompose non-ASCII sequences (not create
+  // a tag name, attribute name, or URL scheme), so omitting it lets source
+  // recovery replay this exact interpretation once, code point by code point.
+  const parts: string[] = [];
+  for (const sourceCodePoint of value) {
+    const canonical = canonicalizeSourceCodePoint(sourceCodePoint);
+    if (canonical !== "") parts.push(canonical);
+  }
+  return parts.join("");
 }
 
 interface ActiveHtmlFinding {
@@ -249,50 +307,53 @@ function sourceFindingKey(finding: ActiveHtmlFinding): string {
 }
 
 /**
- * Canonical findings are emitted in transformed-text order. Their raw source
- * offsets must be recovered with the exact whole-string transform used above:
- * NFKC can compose a sequence of source code points (for example, Hangul
- * Jamo), so replaying that transform code point by code point is not a map.
- *
- * Recovery runs only for actual findings and retains no source-offset table.
- * It binary-searches the first transformed prefix that contains the finding
- * offset, then attributes that output to the source code point ending the
- * prefix. The planned `body_md` contract is capped at 20,000 characters
- * (Fable §4.3); this is not a proof of an arbitrary-input time or RSS bound.
+ * Canonical findings are emitted in transformed-text order. Recover all of
+ * their source offsets in one forward replay of the exact per-code-point
+ * interpretation above. Only the findings and their sorted indexes are
+ * retained: a benign compatibility-expansion corpus still allocates no source
+ * map, while thousands of findings do not re-normalize thousands of prefixes.
  */
-function sourceCodePointStartBefore(value: string, endOffset: number): number {
-  const before = endOffset - 1;
-  if (before <= 0) return 0;
-  const low = value.charCodeAt(before);
-  const high = value.charCodeAt(before - 1);
-  return low >= 0xdc00 && low <= 0xdfff && high >= 0xd800 && high <= 0xdbff ? before - 1 : before;
-}
-
-function sourceOffsetForCanonicalOffset(value: string, canonicalOffset: number): number {
-  let lowerBound = 0;
-  let upperBound = value.length;
-
-  while (lowerBound < upperBound) {
-    const endOffset = lowerBound + Math.floor((upperBound - lowerBound) / 2);
-    if (unicodeCanonicalTokenizerScanText(value.slice(0, endOffset)).length <= canonicalOffset) {
-      lowerBound = endOffset + 1;
-    } else {
-      upperBound = endOffset;
-    }
-  }
-
-  return sourceCodePointStartBefore(value, lowerBound);
-}
-
 function canonicalFindingsAtSourceOffsets(
   value: string,
   canonicalFindings: readonly ActiveHtmlFinding[],
 ): ActiveHtmlFinding[] {
   if (canonicalFindings.length === 0) return [];
 
-  return canonicalFindings.map((finding) => ({
+  const pending = canonicalFindings
+    .map((finding, index) => ({ canonicalOffset: finding.offset, index }))
+    .sort((left, right) => left.canonicalOffset - right.canonicalOffset);
+  const sourceOffsets = new Array<number>(canonicalFindings.length);
+  let canonicalStart = 0;
+  let pendingIndex = 0;
+  let sourceOffset = 0;
+
+  for (const sourceCodePoint of value) {
+    const canonicalLength = canonicalizeSourceCodePoint(sourceCodePoint).length;
+    const canonicalEnd = canonicalStart + canonicalLength;
+    while (
+      pendingIndex < pending.length &&
+      (pending[pendingIndex]?.canonicalOffset ?? canonicalEnd) < canonicalEnd
+    ) {
+      const target = pending[pendingIndex];
+      if (target !== undefined && target.canonicalOffset >= canonicalStart) {
+        sourceOffsets[target.index] = sourceOffset;
+      }
+      pendingIndex += 1;
+    }
+    canonicalStart = canonicalEnd;
+    sourceOffset += sourceCodePoint.length;
+  }
+
+  // A scanner finding is always inside the canonical text. Keep this fallback
+  // fail-safe (an extra, non-deduplicated finding) if that invariant regresses.
+  for (; pendingIndex < pending.length; pendingIndex += 1) {
+    const target = pending[pendingIndex];
+    if (target !== undefined) sourceOffsets[target.index] = value.length;
+  }
+
+  return canonicalFindings.map((finding, index) => ({
     kind: finding.kind,
-    offset: sourceOffsetForCanonicalOffset(value, finding.offset),
+    offset: sourceOffsets[index] ?? value.length,
   }));
 }
 
@@ -623,25 +684,27 @@ function markdownInertEnd(text: string, openOffset: number): number | undefined 
     : undefined;
 }
 
-function markdownLabelEnd(text: string, openOffset: number): number | undefined {
-  let nestedLabels = 0;
+function markdownLabelEnds(text: string): Int32Array {
+  const ends = new Int32Array(text.length);
+  ends.fill(-1);
+  const opens: number[] = [];
 
-  for (let cursor = openOffset + 1; cursor < text.length; cursor += 1) {
+  for (let cursor = 0; cursor < text.length; cursor += 1) {
     if (text[cursor] === "\\") {
       cursor += 1;
       continue;
     }
     if (text[cursor] === "[") {
-      nestedLabels += 1;
+      opens.push(cursor);
       continue;
     }
     if (text[cursor] === "]") {
-      if (nestedLabels === 0) return cursor;
-      nestedLabels -= 1;
+      const open = opens.pop();
+      if (open !== undefined) ends[open] = cursor;
     }
   }
 
-  return undefined;
+  return ends;
 }
 
 function markdownLinkCloseAfterDestination(text: string, cursor: number): boolean {
@@ -693,7 +756,7 @@ function markdownDangerousDestinationOffset(
     const destinationEnd = text.indexOf(">", destinationStart);
     if (destinationEnd === -1) return undefined;
     return markdownLinkCloseAfterDestination(text, destinationEnd + 1) &&
-      dangerousSchemeOffsetAt(text, destinationStart, text.length) !== undefined
+      markdownDangerousSchemeOffsetAt(text, destinationStart, text.length) !== undefined
       ? destinationStart
       : undefined;
   }
@@ -704,7 +767,7 @@ function markdownDangerousDestinationOffset(
     const character = text[cursor];
     if (isHtmlAsciiWhitespace(character) && nestedParens === 0) {
       return markdownLinkCloseAfterDestination(text, cursor) &&
-        dangerousSchemeOffsetAt(text, destinationStart, text.length) !== undefined
+        markdownDangerousSchemeOffsetAt(text, destinationStart, text.length) !== undefined
         ? destinationStart
         : undefined;
     }
@@ -712,7 +775,7 @@ function markdownDangerousDestinationOffset(
       nestedParens += 1;
     } else if (character === ")") {
       if (nestedParens === 0) {
-        return dangerousSchemeOffsetAt(text, destinationStart, text.length) !== undefined
+        return markdownDangerousSchemeOffsetAt(text, destinationStart, text.length) !== undefined
           ? destinationStart
           : undefined;
       }
@@ -722,6 +785,249 @@ function markdownDangerousDestinationOffset(
   }
 
   return undefined;
+}
+
+function normalizedMarkdownReferenceLabel(
+  text: string,
+  openOffset: number,
+  closeOffset: number,
+): string | undefined {
+  const source = text.slice(openOffset + 1, closeOffset);
+  if (source.length === 0) return undefined;
+  let sourceCharacters = 0;
+  for (const _character of source) {
+    sourceCharacters += 1;
+    if (sourceCharacters > 999) return undefined;
+  }
+
+  let unescaped = "";
+  for (let cursor = 0; cursor < source.length; cursor += 1) {
+    const character = source[cursor] as string;
+    if (
+      character === "\\" &&
+      cursor + 1 < source.length &&
+      isMarkdownEscapablePunctuation(source[cursor + 1])
+    ) {
+      cursor += 1;
+      unescaped += source[cursor] as string;
+      continue;
+    }
+    // CommonMark link labels cannot contain an unescaped bracket.
+    if (character === "[" || character === "]") return undefined;
+    unescaped += character;
+  }
+
+  const normalized = unescaped
+    .trim()
+    .replace(/[\t\n\r ]+/g, " ")
+    .toLowerCase()
+    // JavaScript lowercasing does not perform the full folds CommonMark's
+    // normative example requires: capital sharp-S lowers to sharp-S, while
+    // both sharp-S forms must match "ss"; final sigma likewise folds to sigma.
+    .replaceAll("ß", "ss")
+    .replaceAll("ς", "σ");
+  return normalized === "" ? undefined : normalized;
+}
+
+function markdownReferenceTitleTailIsValid(text: string, cursor: number, lineEnd: number): boolean {
+  while (text[cursor] === " " || text[cursor] === "\t") cursor += 1;
+  if (cursor === lineEnd) return true;
+
+  const opening = text[cursor];
+  if (opening !== '"' && opening !== "'" && opening !== "(") return false;
+  const closing = opening === "(" ? ")" : opening;
+  cursor += 1;
+  while (cursor < lineEnd) {
+    if (text[cursor] === "\\") {
+      cursor += 2;
+      continue;
+    }
+    if (text[cursor] === closing) {
+      cursor += 1;
+      while (text[cursor] === " " || text[cursor] === "\t") cursor += 1;
+      return cursor === lineEnd;
+    }
+    cursor += 1;
+  }
+  return false;
+}
+
+function markdownReferenceDefinitionEnd(
+  text: string,
+  destinationEnd: number,
+  destinationLineEnd: number,
+): number | undefined {
+  let cursor = destinationEnd;
+  while (text[cursor] === " " || text[cursor] === "\t") cursor += 1;
+  if (cursor < destinationLineEnd) {
+    return markdownReferenceTitleTailIsValid(text, destinationEnd, destinationLineEnd)
+      ? destinationLineEnd
+      : undefined;
+  }
+  if (destinationLineEnd === text.length) return destinationLineEnd;
+
+  const nextLineStart = markdownNextLineStart(text, destinationLineEnd);
+  const nextLineEnd = markdownLineEnd(text, nextLineStart);
+  cursor = nextLineStart;
+  let indentationLength = 0;
+  while (text[cursor] === " " && indentationLength < 4) {
+    cursor += 1;
+    indentationLength += 1;
+  }
+  if (
+    indentationLength <= 3 &&
+    (text[cursor] === '"' || text[cursor] === "'" || text[cursor] === "(") &&
+    markdownReferenceTitleTailIsValid(text, cursor, nextLineEnd)
+  ) {
+    return nextLineEnd;
+  }
+
+  // A non-title next line is ordinary content; the destination-only
+  // definition still ends on its own line.
+  return destinationLineEnd;
+}
+
+interface MarkdownReferenceDefinition {
+  readonly label: string;
+  readonly dangerousOffset: number | null;
+  readonly endOffset: number;
+}
+
+function markdownReferenceDefinitionAt(
+  text: string,
+  openOffset: number,
+  labelEnd: number,
+): MarkdownReferenceDefinition | undefined {
+  const lineStart = markdownLineStart(text, openOffset);
+  const indentation = text.slice(lineStart, openOffset);
+  if (indentation.length > 3 || ![...indentation].every((character) => character === " ")) {
+    return undefined;
+  }
+  if (text[labelEnd + 1] !== ":") return undefined;
+  const label = normalizedMarkdownReferenceLabel(text, openOffset, labelEnd);
+  if (label === undefined) return undefined;
+
+  let cursor = labelEnd + 2;
+  let lineEnd = markdownLineEnd(text, cursor);
+  while (text[cursor] === " " || text[cursor] === "\t") cursor += 1;
+  if (cursor === lineEnd && lineEnd < text.length) {
+    cursor = markdownNextLineStart(text, lineEnd);
+    lineEnd = markdownLineEnd(text, cursor);
+    let indentationLength = 0;
+    while (text[cursor] === " " && indentationLength < 4) {
+      cursor += 1;
+      indentationLength += 1;
+    }
+    if (indentationLength > 3) return undefined;
+  }
+  if (cursor >= lineEnd) return undefined;
+
+  let destinationStart = cursor;
+  let destinationEnd: number;
+  if (text[cursor] === "<") {
+    destinationStart = cursor + 1;
+    destinationEnd = text.indexOf(">", destinationStart);
+    if (destinationEnd === -1 || destinationEnd > lineEnd) return undefined;
+    for (let offset = destinationStart; offset < destinationEnd; offset += 1) {
+      if (text[offset] === "<" || text[offset] === "\n" || text[offset] === "\r") return undefined;
+    }
+    cursor = destinationEnd + 1;
+  } else {
+    let nestedParens = 0;
+    while (cursor < lineEnd) {
+      const character = text[cursor] as string;
+      if (character === "\\") {
+        cursor += 2;
+        continue;
+      }
+      if ((character === " " || character === "\t") && nestedParens === 0) break;
+      if (character === "<" || character === ">") return undefined;
+      if (character === "(") {
+        nestedParens += 1;
+        if (nestedParens > 32) return undefined;
+      } else if (character === ")") {
+        if (nestedParens === 0) return undefined;
+        nestedParens -= 1;
+      }
+      cursor += 1;
+    }
+    if (cursor === destinationStart || nestedParens !== 0) return undefined;
+    destinationEnd = cursor;
+  }
+
+  const endOffset = markdownReferenceDefinitionEnd(text, cursor, lineEnd);
+  if (endOffset === undefined) return undefined;
+  return {
+    label,
+    dangerousOffset:
+      markdownDangerousSchemeOffsetAt(text, destinationStart, destinationEnd) ?? null,
+    endOffset,
+  };
+}
+
+function markdownPreviousLineIsBlank(text: string, lineStart: number): boolean {
+  if (lineStart === 0) return true;
+  let previousLineEnd = lineStart - 1;
+  if (text[previousLineEnd] === "\n" && text[previousLineEnd - 1] === "\r") previousLineEnd -= 1;
+  const previousLineStart = markdownLineStart(text, previousLineEnd);
+  for (let cursor = previousLineStart; cursor < previousLineEnd; cursor += 1) {
+    if (text[cursor] !== " " && text[cursor] !== "\t") return false;
+  }
+  return true;
+}
+
+interface MarkdownReferenceCatalog {
+  readonly destinations: ReadonlyMap<string, number | null>;
+  readonly definitionEnds: ReadonlyMap<number, number>;
+}
+
+function collectMarkdownReferenceDefinitions(
+  text: string,
+  labelEnds: Int32Array,
+): MarkdownReferenceCatalog {
+  const definitions = new Map<string, number | null>();
+  const definitionEnds = new Map<number, number>();
+  let consecutiveDefinitionLineStart = -1;
+  let cursor = 0;
+  while (cursor < text.length) {
+    const inertEnd = markdownInertEnd(text, cursor);
+    if (inertEnd !== undefined) {
+      cursor = inertEnd;
+      continue;
+    }
+    if (text.startsWith(CONTROL_COMMENT_OPEN, cursor)) {
+      cursor = htmlCommentEndOffset(text, cursor);
+      continue;
+    }
+    if (text[cursor] !== "[" || isMarkdownEscaped(text, cursor)) {
+      cursor += 1;
+      continue;
+    }
+    const labelEnd = labelEnds[cursor] ?? -1;
+    if (labelEnd < 0) {
+      cursor += 1;
+      continue;
+    }
+    const lineStart = markdownLineStart(text, cursor);
+    if (
+      lineStart !== 0 &&
+      lineStart !== consecutiveDefinitionLineStart &&
+      !markdownPreviousLineIsBlank(text, lineStart)
+    ) {
+      cursor = labelEnd + 1;
+      continue;
+    }
+    const definition = markdownReferenceDefinitionAt(text, cursor, labelEnd);
+    if (definition !== undefined) {
+      if (!definitions.has(definition.label)) {
+        definitions.set(definition.label, definition.dangerousOffset);
+      }
+      definitionEnds.set(cursor, definition.endOffset);
+      consecutiveDefinitionLineStart = markdownNextLineStart(text, definition.endOffset);
+    }
+    cursor = labelEnd + 1;
+  }
+  return { destinations: definitions, definitionEnds };
 }
 
 /**
@@ -762,6 +1068,8 @@ function completeMarkdownHtmlStartTagEnd(text: string, openOffset: number): numb
 
 function collectActiveMarkdownUrls(text: string): ActiveHtmlFinding[] {
   const findings: ActiveHtmlFinding[] = [];
+  const labelEnds = markdownLabelEnds(text);
+  const referenceCatalog = collectMarkdownReferenceDefinitions(text, labelEnds);
   let cursor = 0;
 
   while (cursor < text.length) {
@@ -792,16 +1100,50 @@ function collectActiveMarkdownUrls(text: string): ActiveHtmlFinding[] {
       continue;
     }
 
-    const labelEnd = markdownLabelEnd(text, cursor);
-    if (labelEnd === undefined || text[labelEnd + 1] !== "(") {
+    const labelEnd = labelEnds[cursor] ?? -1;
+    if (labelEnd < 0) {
       cursor += 1;
       continue;
     }
-    const destinationOffset = markdownDangerousDestinationOffset(text, labelEnd + 1);
-    if (destinationOffset !== undefined) {
-      findings.push({ kind: "url", offset: destinationOffset });
+
+    const nextCharacter = text[labelEnd + 1];
+    if (nextCharacter === "(") {
+      const destinationOffset = markdownDangerousDestinationOffset(text, labelEnd + 1);
+      if (destinationOffset !== undefined) {
+        findings.push({ kind: "url", offset: destinationOffset });
+      }
+      cursor = labelEnd + 1;
+      continue;
     }
-    cursor = labelEnd + 1;
+    // A definition is metadata, not a rendered URL surface by itself.
+    if (nextCharacter === ":") {
+      cursor = referenceCatalog.definitionEnds.get(cursor) ?? labelEnd + 1;
+      continue;
+    }
+
+    const ownLabel = normalizedMarkdownReferenceLabel(text, cursor, labelEnd);
+    let referenceLabel = ownLabel;
+    let referenceEnd = labelEnd;
+    if (nextCharacter === "[") {
+      const explicitLabelEnd = labelEnds[labelEnd + 1] ?? -1;
+      if (explicitLabelEnd < 0) {
+        cursor = labelEnd + 1;
+        continue;
+      }
+      referenceLabel =
+        explicitLabelEnd === labelEnd + 2
+          ? ownLabel
+          : normalizedMarkdownReferenceLabel(text, labelEnd + 1, explicitLabelEnd);
+      referenceEnd = explicitLabelEnd;
+    }
+    if (
+      referenceLabel !== undefined &&
+      referenceCatalog.destinations.get(referenceLabel) !== undefined &&
+      referenceCatalog.destinations.get(referenceLabel) !== null
+    ) {
+      findings.push({ kind: "url", offset: cursor });
+    }
+    cursor = referenceEnd + 1;
   }
 
   return findings;

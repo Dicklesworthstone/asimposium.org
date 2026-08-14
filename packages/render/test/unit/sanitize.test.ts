@@ -314,6 +314,97 @@ describe("neutralizeUntrustedBody", () => {
     }
   });
 
+  test("resolves dangerous reference-style Markdown URLs at each rendered use", () => {
+    const body = [
+      "[full use][target]",
+      "[target][]",
+      "[TARGET]",
+      "![image][target]",
+      "",
+      "[target]: javascript:steal() 'documentary title'",
+    ].join("\n");
+
+    expect(neutralizeUntrustedBody(body)).toEqual({
+      text: body,
+      findings: [{ marker: "active-html", count: 4 }],
+    });
+  });
+
+  test("covers the CommonMark sharp-S fold, whitespace, escapes, and character bounds", () => {
+    const astralLabel = "🧪".repeat(999);
+    const controls = [
+      "[ẞ]\n\n[SS]: javascript:unicode-fold()",
+      "[spaced label]\n\n[  spaced\t label  ]: javascript:whitespace-fold()",
+      "[a!b]\n\n[a\\!b]: javascript:punctuation-escape()",
+      `[${astralLabel}]\n\n[${astralLabel}]: javascript:astral-label()`,
+    ];
+    for (const body of controls) {
+      expect(neutralizeUntrustedBody(body).findings).toEqual([{ marker: "active-html", count: 1 }]);
+    }
+
+    const nonPunctuationEscape = "[aq]\n\n[a\\q]: javascript:not-the-same-label()";
+    const overlongLabel = "x".repeat(1_000);
+    const overlong = `[${overlongLabel}]\n\n[${overlongLabel}]: javascript:overlong-label()`;
+    expect(neutralizeUntrustedBody(nonPunctuationEscape).findings).toEqual([]);
+    expect(neutralizeUntrustedBody(overlong).findings).toEqual([]);
+  });
+
+  test("decodes Markdown punctuation escapes before classifying destination schemes", () => {
+    const controls = [
+      "[inline](javascript\\:steal())",
+      "![angle](<data\\:text/html,steal()>)",
+      "[reference][target]\n\n[target]: vbscript\\:steal()",
+    ];
+
+    for (const body of controls) {
+      expect(neutralizeUntrustedBody(body)).toEqual({
+        text: body,
+        findings: [{ marker: "active-html", count: 1 }],
+      });
+    }
+  });
+
+  test("supports angle and continued reference destinations without counting definitions", () => {
+    const controls = [
+      "[angle][a]\n\n[a]: <data:text/html,steal()>",
+      "[continued][b]\n\n[b]:\n   vbscript:steal()",
+    ];
+
+    for (const body of controls) {
+      expect(neutralizeUntrustedBody(body)).toEqual({
+        text: body,
+        findings: [{ marker: "active-html", count: 1 }],
+      });
+    }
+  });
+
+  test("does not report unused, shadowed, escaped, or code-only reference definitions", () => {
+    const inert = [
+      "[unused]: javascript:not-rendered()",
+      "[safe use][first]\n\n[first]: https://example.test/\n[first]: javascript:shadowed()",
+      "\\[escaped\\]\\[target\\]\n[target]: javascript:not-a-link()",
+      "`[inline][target]`\n[target]: javascript:not-a-link()",
+      "```md\n[target]: javascript:not-a-definition()\n[inside][target]\n```",
+      '[titled][target]\n\n[target]: https://example.test/\n  "<javascript:title-data()>"',
+    ];
+
+    for (const body of inert) {
+      expect(neutralizeUntrustedBody(body)).toEqual({ text: body, findings: [] });
+    }
+  });
+
+  test("does not let a reference definition interrupt a paragraph", () => {
+    const body = "paragraph\n[target]: <javascript:visible-autolink()>\n\n[target]";
+
+    // The definition-shaped line remains paragraph content. Its angle URI is
+    // therefore the one rendered dangerous URL; the later shortcut has no
+    // valid definition and must not add a second finding.
+    expect(neutralizeUntrustedBody(body)).toEqual({
+      text: body,
+      findings: [{ marker: "active-html", count: 1 }],
+    });
+  });
+
   test("reads an attribute destination scheme the way a URL parser would", () => {
     // The WHATWG basic URL parser strips leading C0-control-or-space and removes
     // ASCII tab, LF and CR from anywhere in the input, so each of these executes.
@@ -410,6 +501,17 @@ describe("neutralizeUntrustedBody", () => {
     });
   });
 
+  test("keeps unmatched Markdown labels linear at the 20,000-character contract bound", () => {
+    const body = "[".repeat(20_000);
+    const started = performance.now();
+
+    expect(neutralizeUntrustedBody(body)).toEqual({ text: body, findings: [] });
+
+    // The former per-opener suffix scan was quadratic and took roughly half a
+    // second on this corpus. A one-pass bracket map leaves ample host variance.
+    expect(performance.now() - started).toBeLessThan(250);
+  });
+
   test("documents the HTML character-reference decoding limit without claiming a finding", () => {
     const body = '<a href="&#106;avascript:shown-as-escaped-text()">source</a>';
 
@@ -494,9 +596,10 @@ describe("neutralizeUntrustedBody", () => {
     expect(result.findings).toEqual([{ marker: "active-html", count: 2 }]);
   });
 
-  test("deduplicates whole-string Hangul composition offsets without losing fullwidth tags", () => {
-    // These are literal Hangul Jamo, not precomposed syllables. Whole-string
-    // NFKC composes each pair, moving the raw tag from offset 16 to offset 8.
+  test("maps decomposed Hangul prefixes without losing or duplicating later tags", () => {
+    // These are literal Hangul Jamo, not precomposed syllables. They prove that
+    // source recovery advances by source code point even when normalization
+    // could otherwise recompose adjacent non-ASCII characters.
     const composableHangulJamo = "가".repeat(8);
 
     expect(neutralizeUntrustedBody(`${composableHangulJamo}<script>`).findings).toEqual([
@@ -508,6 +611,21 @@ describe("neutralizeUntrustedBody", () => {
     expect(
       neutralizeUntrustedBody(`${composableHangulJamo}<script>＜ＳＣＲＩＰＴ＞`).findings,
     ).toEqual([{ marker: "active-html", count: 2 }]);
+  });
+
+  test("maps every canonical finding in one pass at the 20,000-character contract bound", () => {
+    const body = "＜ＳＣＲＩＰＴ＞".repeat(2_500);
+    const started = performance.now();
+
+    expect(neutralizeUntrustedBody(body)).toEqual({
+      text: body,
+      findings: [{ marker: "active-html", count: 2_500 }],
+    });
+
+    // The former per-finding binary search repeatedly normalized prefixes and
+    // took several seconds here. The forward source replay is linear in input
+    // plus findings; one second keeps this an algorithmic, not machine, gate.
+    expect(performance.now() - started).toBeLessThan(1_000);
   });
 
   test("keeps benign Unicode-normalization metadata proportional to findings, not source code points", () => {
