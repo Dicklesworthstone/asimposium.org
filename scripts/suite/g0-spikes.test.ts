@@ -1,12 +1,5 @@
 import { describe, expect, test } from "bun:test";
-import {
-  chmodSync,
-  existsSync,
-  mkdirSync,
-  mkdtempSync,
-  readFileSync,
-  writeFileSync,
-} from "node:fs";
+import { chmodSync, existsSync, mkdirSync, mkdtempSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
@@ -27,6 +20,12 @@ function executable(root: string, name: string, body: string): G0Spike {
 
 function statusById(summary: Awaited<ReturnType<typeof runG0Spikes>>): Map<string, string> {
   return new Map(summary.results.map((result) => [result.id, result.status]));
+}
+
+async function waitFor(path: string, timeoutMs = 2_000): Promise<void> {
+  const deadline = Date.now() + timeoutMs;
+  while (!existsSync(path) && Date.now() < deadline) await Bun.sleep(10);
+  expect(existsSync(path)).toBe(true);
 }
 
 describe("G0 integration spike aggregation", () => {
@@ -73,14 +72,15 @@ describe("G0 integration spike aggregation", () => {
     expect(summary.results[0]?.code).toBe("G0_SPIKE_FAILED");
   });
 
-  test("a signal is a failure and a timed-out child receives termination before the runner returns", async () => {
+  test("a signal is a failure and timeout kills a TERM-ignoring grandchild before it can leak a sentinel", async () => {
     const root = fixtureRoot();
-    const marker = join(root, "terminated-marker");
+    const sentinel = join(root, "grandchild-survived-timeout");
+    const started = join(root, "grandchild-started");
     const signal = executable(root, "s1", "kill -TERM $$");
     const timeout = executable(
       root,
       "s2",
-      `trap 'printf terminated > ${JSON.stringify(marker)}; exit 0' TERM\nwhile :; do sleep 0.01; done`,
+      `(trap '' TERM; sleep 0.3; printf leaked > ${JSON.stringify(sentinel)}) &\nprintf started > ${JSON.stringify(started)}\nwhile :; do sleep 0.01; done`,
     );
     const signalled = await runG0Spikes({
       root,
@@ -90,7 +90,7 @@ describe("G0 integration spike aggregation", () => {
     const timedOut = await runG0Spikes({
       root,
       spikes: [timeout],
-      timeoutMs: 500,
+      timeoutMs: 100,
       terminationGraceMs: 100,
     });
 
@@ -99,8 +99,43 @@ describe("G0 integration spike aggregation", () => {
     expect(signalled.results[0]?.signal).toBe("SIGTERM");
     expect(timedOut.exitCode).toBe(1);
     expect(timedOut.results[0]?.code).toBe("G0_SPIKE_TIMEOUT");
-    expect(existsSync(marker)).toBe(true);
-    expect(readFileSync(marker, "utf8")).toBe("terminated");
+    await waitFor(started);
+    await Bun.sleep(400);
+    // The direct-shell-only runner would return after killing its Bash parent,
+    // then this TERM-ignoring grandchild would write the sentinel.
+    expect(existsSync(sentinel)).toBe(false);
+  }, 10_000);
+
+  test("abort kills the current process group and prevents later spikes from starting", async () => {
+    const root = fixtureRoot();
+    const started = join(root, "grandchild-started-abort");
+    const sentinel = join(root, "grandchild-survived-abort");
+    const later = join(root, "later-spike-ran");
+    const controller = new AbortController();
+    const summaryPromise = runG0Spikes({
+      root,
+      spikes: [
+        executable(
+          root,
+          "s1",
+          `(trap '' TERM; sleep 0.3; printf leaked > ${JSON.stringify(sentinel)}) &\nprintf started > ${JSON.stringify(started)}\nwhile :; do sleep 0.01; done`,
+        ),
+        executable(root, "s2", `printf ran > ${JSON.stringify(later)}`),
+      ],
+      signal: controller.signal,
+      timeoutMs: 2_000,
+      terminationGraceMs: 100,
+    });
+
+    await waitFor(started);
+    controller.abort();
+    const summary = await summaryPromise;
+    await Bun.sleep(400);
+
+    expect(summary.exitCode).toBe(1);
+    expect(summary.results.map((result) => result.code)).toEqual(["G0_SPIKE_ABORTED"]);
+    expect(existsSync(sentinel)).toBe(false);
+    expect(existsSync(later)).toBe(false);
   }, 10_000);
 
   test("missing and non-runnable scripts fail before execution", async () => {

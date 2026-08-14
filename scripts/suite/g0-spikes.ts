@@ -14,6 +14,7 @@
  * fixed labels, outcomes, and a safe reproduction command.
  */
 
+import { type ChildProcess, spawn } from "node:child_process";
 import { existsSync, statSync } from "node:fs";
 import { relative, resolve, sep } from "node:path";
 
@@ -38,9 +39,12 @@ export interface G0SpikeResult {
     | "G0_SPIKE_UNEXPECTED_EXIT"
     | "G0_SPIKE_SIGNALLED"
     | "G0_SPIKE_TIMEOUT"
+    | "G0_SPIKE_ABORTED"
     | "G0_SPIKE_SCRIPT_MISSING"
     | "G0_SPIKE_SCRIPT_NOT_EXECUTABLE"
-    | "G0_SPIKE_PATH_INVALID";
+    | "G0_SPIKE_PATH_INVALID"
+    | "G0_SPIKE_PROCESS_GROUP_UNSUPPORTED"
+    | "G0_SPIKE_PROCESS_GROUP_SIGNAL_FAILED";
   readonly durationMs: number;
   readonly exitCode?: number;
   readonly signal?: string;
@@ -61,6 +65,8 @@ export interface G0RunOptions {
   readonly timeoutMs?: number;
   /** Grace period before a timed-out child is force-killed. */
   readonly terminationGraceMs?: number;
+  /** Cancels the currently running spike and prevents later spikes from starting. */
+  readonly signal?: AbortSignal;
 }
 
 const DEFAULT_TIMEOUT_MS = 5 * 60_000;
@@ -94,10 +100,39 @@ function immediateResult(
   id: string,
   code: Extract<
     G0SpikeResult["code"],
-    "G0_SPIKE_SCRIPT_MISSING" | "G0_SPIKE_SCRIPT_NOT_EXECUTABLE" | "G0_SPIKE_PATH_INVALID"
+    | "G0_SPIKE_SCRIPT_MISSING"
+    | "G0_SPIKE_SCRIPT_NOT_EXECUTABLE"
+    | "G0_SPIKE_PATH_INVALID"
+    | "G0_SPIKE_ABORTED"
+    | "G0_SPIKE_PROCESS_GROUP_UNSUPPORTED"
   >,
 ): G0SpikeResult {
   return { id, status: "fail", code, durationMs: 0 };
+}
+
+function processGroupSignal(child: ChildProcess, signal: NodeJS.Signals): boolean {
+  if (child.pid === undefined || process.platform === "win32") return false;
+  try {
+    // `detached: true` makes this shell the process-group leader on POSIX. A
+    // negative PID targets every descendant in that group, never the runner.
+    process.kill(-child.pid, signal);
+    return true;
+  } catch (error) {
+    // A group that already exited is the desired terminal state. Any other
+    // failure is retained as a typed failed spike rather than silently falling
+    // back to signalling only the direct shell.
+    if ((error as NodeJS.ErrnoException).code === "ESRCH") return true;
+    return false;
+  }
+}
+
+function waitForExit(
+  child: ChildProcess,
+): Promise<{ exitCode: number | null; signal: NodeJS.Signals | null }> {
+  return new Promise((resolve, reject) => {
+    child.once("error", reject);
+    child.once("exit", (exitCode, signal) => resolve({ exitCode, signal }));
+  });
 }
 
 async function runSpike(
@@ -105,10 +140,15 @@ async function runSpike(
   spike: G0Spike,
   timeoutMs: number,
   terminationGraceMs: number,
+  signal: AbortSignal | undefined,
 ): Promise<G0SpikeResult> {
   const path = scriptPath(root, spike.script);
   if (path === undefined) return immediateResult(spike.id, "G0_SPIKE_PATH_INVALID");
   if (!existsSync(path)) return immediateResult(spike.id, "G0_SPIKE_SCRIPT_MISSING");
+  if (signal?.aborted) return immediateResult(spike.id, "G0_SPIKE_ABORTED");
+  if (process.platform === "win32") {
+    return immediateResult(spike.id, "G0_SPIKE_PROCESS_GROUP_UNSUPPORTED");
+  }
 
   let runnable = false;
   try {
@@ -121,38 +161,102 @@ async function runSpike(
   if (!runnable) return immediateResult(spike.id, "G0_SPIKE_SCRIPT_NOT_EXECUTABLE");
 
   const startedAt = performance.now();
-  const child = Bun.spawn({
-    cmd: ["bash", path],
+  const child = spawn("bash", [path], {
     cwd: root,
-    stdin: "inherit",
-    stdout: "inherit",
-    stderr: "inherit",
+    detached: true,
+    stdio: "inherit",
   });
   let timedOut = false;
+  let aborted = false;
+  let processGroupSignalFailed = false;
   let forceKill: ReturnType<typeof setTimeout> | undefined;
-  const timeout = setTimeout(() => {
-    timedOut = true;
-    child.kill("SIGTERM");
-    forceKill = setTimeout(() => child.kill("SIGKILL"), terminationGraceMs);
-  }, timeoutMs);
+  let finishTermination: (() => void) | undefined;
+  let termination: Promise<void> | undefined;
 
-  const exitCode = await child.exited;
+  const terminateProcessGroup = (reason: "timeout" | "abort") => {
+    if (termination !== undefined) return;
+    timedOut = reason === "timeout";
+    aborted = reason === "abort";
+    termination = new Promise((resolve) => {
+      finishTermination = resolve;
+    });
+    if (!processGroupSignal(child, "SIGTERM")) processGroupSignalFailed = true;
+    forceKill = setTimeout(() => {
+      if (!processGroupSignal(child, "SIGKILL")) processGroupSignalFailed = true;
+      finishTermination?.();
+    }, terminationGraceMs);
+  };
+
+  const timeout = setTimeout(() => {
+    terminateProcessGroup("timeout");
+  }, timeoutMs);
+  const abort = () => terminateProcessGroup("abort");
+  signal?.addEventListener("abort", abort, { once: true });
+  if (signal?.aborted) abort();
+
+  let exited: { exitCode: number | null; signal: NodeJS.Signals | null };
+  try {
+    exited = await waitForExit(child);
+  } catch {
+    clearTimeout(timeout);
+    signal?.removeEventListener("abort", abort);
+    return {
+      id: spike.id,
+      status: "fail",
+      code: "G0_SPIKE_PROCESS_GROUP_SIGNAL_FAILED",
+      durationMs: Math.round(performance.now() - startedAt),
+    };
+  }
   clearTimeout(timeout);
-  if (forceKill !== undefined) clearTimeout(forceKill);
+  signal?.removeEventListener("abort", abort);
+  // The shell can exit on TERM before descendants do. Do not clear the KILL
+  // timer in that case: wait through the grace period and kill the whole group.
+  if (termination !== undefined) await termination;
+  else if (!processGroupSignal(child, "SIGKILL")) processGroupSignalFailed = true;
+  if (forceKill !== undefined && termination === undefined) clearTimeout(forceKill);
   const durationMs = Math.round(performance.now() - startedAt);
-  const signal = child.signalCode ?? undefined;
+  const exitCode = exited.exitCode ?? undefined;
+  const exitSignal = exited.signal ?? undefined;
+
+  if (processGroupSignalFailed) {
+    return {
+      id: spike.id,
+      status: "fail",
+      code: "G0_SPIKE_PROCESS_GROUP_SIGNAL_FAILED",
+      durationMs,
+      exitCode,
+      signal: exitSignal,
+    };
+  }
 
   if (timedOut) {
-    return { id: spike.id, status: "fail", code: "G0_SPIKE_TIMEOUT", durationMs, exitCode, signal };
+    return {
+      id: spike.id,
+      status: "fail",
+      code: "G0_SPIKE_TIMEOUT",
+      durationMs,
+      exitCode,
+      signal: exitSignal,
+    };
   }
-  if (signal !== undefined) {
+  if (aborted) {
+    return {
+      id: spike.id,
+      status: "fail",
+      code: "G0_SPIKE_ABORTED",
+      durationMs,
+      exitCode,
+      signal: exitSignal,
+    };
+  }
+  if (exitSignal !== undefined) {
     return {
       id: spike.id,
       status: "fail",
       code: "G0_SPIKE_SIGNALLED",
       durationMs,
       exitCode,
-      signal,
+      signal: exitSignal,
     };
   }
   if (exitCode === 0) {
@@ -195,7 +299,15 @@ export async function runG0Spikes(options: G0RunOptions): Promise<G0RunSummary> 
   const startedAt = performance.now();
   const results: G0SpikeResult[] = [];
   for (const spike of options.spikes ?? G0_SPIKES) {
-    results.push(await runSpike(resolve(options.root), spike, timeoutMs, terminationGraceMs));
+    const result = await runSpike(
+      resolve(options.root),
+      spike,
+      timeoutMs,
+      terminationGraceMs,
+      options.signal,
+    );
+    results.push(result);
+    if (options.signal?.aborted) break;
   }
   return summarize(results, Math.round(performance.now() - startedAt));
 }
