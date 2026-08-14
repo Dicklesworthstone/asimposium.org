@@ -24,6 +24,11 @@
  *
  * Exits 78 with `BROWSER_ADAPTER_UNAVAILABLE` when no Chromium is installed.
  */
+import { existsSync } from "node:fs";
+import { createRequire } from "node:module";
+import { homedir } from "node:os";
+import { join, resolve } from "node:path";
+
 const BLOCKED_EXIT_CODE = 78;
 const NAVIGATION_TIMEOUT_MS = 10_000;
 const ADAPTER_WATCHDOG_MS = 30_000;
@@ -75,21 +80,69 @@ interface ChromiumLauncher {
   launch(options?: { headless?: boolean }): Promise<LaunchedBrowser>;
 }
 
+const REPOSITORY_ROOT = resolve(import.meta.dir, "..", "..", "..");
+/** The workspace that actually declares Playwright (`e2e/package.json`). */
+const E2E_MANIFEST = join(REPOSITORY_ROOT, "e2e", "package.json");
+const PLAYWRIGHT_SPECIFIERS = ["@playwright/test", "playwright"] as const;
+
 /**
- * Load Chromium from the first Playwright package that resolves.
+ * Load Chromium, resolving from the workspace that owns the dependency.
  *
- * `@playwright/test` is preferred because that is what `e2e/package.json`
- * actually declares; plain `playwright` is accepted so the adapter also runs
- * where only the core package is present.
+ * A bare `import("@playwright/test")` resolves relative to *this file*, and
+ * this file lives in `scripts/`, which declares no Playwright. The package is
+ * installed for `e2e/`, so a bare import reports "missing" while the dependency
+ * is sitting right there — a false blocker, and the worst kind, because it
+ * looks exactly like an honest one.
+ *
+ * So resolution is anchored at `e2e/package.json` with `createRequire`, and the
+ * *resolved absolute path* is then imported. Hoisted layouts still work through
+ * the plain specifier attempted first.
  */
+/**
+ * Point Playwright at its installed browsers.
+ *
+ * The harness gives every child a fixed environment with no `HOME`, which is
+ * the right policy — an inherited environment is how an unlabelled secret
+ * reaches a log. But Playwright locates its browser cache relative to the home
+ * directory, so without help it reports "Chromium could not launch" while a
+ * perfectly good Chromium sits in the cache: another false blocker.
+ *
+ * `os.homedir()` reads the passwd database rather than `$HOME`, so this
+ * recovers the well-known cache location without inheriting any ambient value.
+ * An explicit `PLAYWRIGHT_BROWSERS_PATH` always wins.
+ */
+function ensureBrowsersPath(): string | undefined {
+  const explicit = process.env.PLAYWRIGHT_BROWSERS_PATH;
+  if (explicit !== undefined && explicit.length > 0) return explicit;
+  const candidates =
+    process.platform === "darwin"
+      ? [join(homedir(), "Library", "Caches", "ms-playwright")]
+      : [join(homedir(), ".cache", "ms-playwright")];
+  const found = candidates.find((candidate) => existsSync(candidate));
+  if (found !== undefined) process.env.PLAYWRIGHT_BROWSERS_PATH = found;
+  return found;
+}
+
 async function loadChromium(): Promise<ChromiumLauncher | undefined> {
-  for (const specifier of ["@playwright/test", "playwright"]) {
+  ensureBrowsersPath();
+  for (const specifier of PLAYWRIGHT_SPECIFIERS) {
     try {
       // Non-literal specifier: deliberately opaque to the root tsconfig.
       const loaded = (await import(specifier)) as unknown as { chromium?: ChromiumLauncher };
       if (loaded.chromium !== undefined) return loaded.chromium;
     } catch {
-      // Try the next specifier; a missing package is a blocker, not a crash.
+      // Not resolvable from here; try the e2e workspace below.
+    }
+  }
+  if (!existsSync(E2E_MANIFEST)) return undefined;
+  const requireFromE2e = createRequire(E2E_MANIFEST);
+  for (const specifier of PLAYWRIGHT_SPECIFIERS) {
+    try {
+      const resolved = requireFromE2e.resolve(specifier);
+      const loaded = (await import(resolved)) as unknown as { chromium?: ChromiumLauncher };
+      if (loaded.chromium !== undefined) return loaded.chromium;
+    } catch {
+      // Try the next specifier; a genuinely missing package is a blocker.
     }
   }
   return undefined;
@@ -134,8 +187,9 @@ async function main(): Promise<number> {
       status: "blocked",
       code: "BROWSER_ADAPTER_UNAVAILABLE",
       missing: "@playwright/test",
+      package_resolved: false,
       detail:
-        "Neither `@playwright/test` nor `playwright` resolves from this file, so Chromium was never launched. `e2e/package.json` declares @playwright/test; install the workspace so it resolves here. A Chromium build may already be present in the Playwright cache. No browser behavior was exercised.",
+        "Playwright does not resolve from this file or from the e2e workspace, so Chromium was never launched. `e2e/package.json` declares @playwright/test; install the workspace. No browser behavior was exercised.",
     });
     return BLOCKED_EXIT_CODE;
   }
@@ -166,12 +220,23 @@ async function main(): Promise<number> {
     try {
       browser = await chromium.launch({ headless: true });
     } catch (error) {
+      // Two very different blockers wear the same exception, and conflating
+      // them is how a false blocker hides: "the package is missing" means the
+      // workspace is not installed, while "this Playwright wants a browser
+      // build the cache does not have" means the package resolved fine. Only
+      // the build name is reported — the full path names a user's home.
+      const message = error instanceof Error ? error.message : "";
+      const build = /chromium[_a-z]*-\d+/.exec(message)?.[0];
       say({
         status: "blocked",
         code: "BROWSER_ADAPTER_UNAVAILABLE",
+        missing: build === undefined ? "chromium-build" : build,
+        package_resolved: true,
         error_class: error instanceof Error ? error.name : "unknown",
         detail:
-          "Chromium could not launch; run `bunx playwright install chromium`. No browser behavior was exercised.",
+          build === undefined
+            ? "Chromium could not launch; run `bunx playwright install chromium` for the Playwright version this workspace declares. No browser behavior was exercised."
+            : `The resolved Playwright expects browser build ${build}, which is not in the Playwright cache; run \`bunx playwright install chromium\` from the e2e workspace. No browser behavior was exercised.`,
       });
       return BLOCKED_EXIT_CODE;
     }

@@ -150,7 +150,7 @@ describe("deterministic, structured diagnostics", () => {
     const result = await runHarness({
       root,
       suite: "unit",
-      runId: "order-1",
+      runId: fixtureRunId("order-1"),
       steps: unordered,
       onEvent: records.sink,
       onOutput: () => undefined,
@@ -174,7 +174,7 @@ describe("deterministic, structured diagnostics", () => {
     const blocked = await runHarness({
       root: blockedRoot,
       suite: "integration",
-      runId: "blocked-1",
+      runId: fixtureRunId("blocked-1"),
       steps: [
         {
           id: "named-blocker",
@@ -195,7 +195,7 @@ describe("deterministic, structured diagnostics", () => {
     const failed = await runHarness({
       root: failedRoot,
       suite: "integration",
-      runId: "failed-1",
+      runId: fixtureRunId("failed-1"),
       steps: [
         {
           id: "planted-negative",
@@ -230,7 +230,7 @@ describe("execution lifecycle", () => {
     const result = await runHarness({
       root,
       suite: "unit",
-      runId: "retry-1",
+      runId: fixtureRunId("retry-1"),
       steps: [
         { id: "retry", scenario: "unit", command: command(code), replaySafe: true, retries: 1 },
       ],
@@ -251,7 +251,7 @@ describe("execution lifecycle", () => {
     const timeout = await runHarness({
       root,
       suite: "e2e",
-      runId: "timeout-1",
+      runId: fixtureRunId("timeout-1"),
       steps: [
         {
           id: "timeout",
@@ -277,7 +277,7 @@ describe("execution lifecycle", () => {
     const cancelled = await runHarness({
       root,
       suite: "e2e",
-      runId: "cancelled-1",
+      runId: fixtureRunId("cancelled-1"),
       signal: controller.signal,
       steps: [
         {
@@ -304,7 +304,7 @@ describe("execution lifecycle", () => {
     const preCancelledResult = await runHarness({
       root,
       suite: "e2e",
-      runId: "pre-cancelled-1",
+      runId: fixtureRunId("pre-cancelled-1"),
       signal: preCancelled.signal,
       steps: [
         {
@@ -335,7 +335,7 @@ describe("execution lifecycle", () => {
     const result = await runHarness({
       root,
       suite: "e2e",
-      runId: "process-group-1",
+      runId: fixtureRunId("process-group-1"),
       steps: [
         {
           id: "grandchild",
@@ -359,7 +359,7 @@ describe("execution lifecycle", () => {
     const result = await runHarness({
       root,
       suite: "security",
-      runId: "environment-1",
+      runId: fixtureRunId("environment-1"),
       steps: [
         {
           id: "scrubbed-env",
@@ -378,6 +378,7 @@ describe("execution lifecycle", () => {
 
   test("resumes failed replay-safe work but withholds incomplete unsafe work", async () => {
     const root = fixtureRoot("resume");
+    const resumeRunId = fixtureRunId("resume");
     const resumeScratch = fixtureScratch("resume");
     const safeCounter = join(resumeScratch, "safe-counter");
     const unsafeCounter = join(resumeScratch, "unsafe-counter");
@@ -402,7 +403,7 @@ describe("execution lifecycle", () => {
     const first = await runHarness({
       root,
       suite: "e2e",
-      runId: "resume-1",
+      runId: resumeRunId,
       steps,
       onEvent: () => undefined,
       onOutput: () => undefined,
@@ -411,7 +412,7 @@ describe("execution lifecycle", () => {
     const resumed = await runHarness({
       root,
       suite: "e2e",
-      runId: "resume-1",
+      runId: resumeRunId,
       resume: true,
       steps,
       onEvent: () => undefined,
@@ -437,7 +438,7 @@ describe("secret-safe, bounded artifacts", () => {
     const result = await runHarness({
       root,
       suite: "security",
-      runId: "redaction-1",
+      runId: fixtureRunId("redaction-1"),
       steps: [
         {
           id: "opaque",
@@ -488,7 +489,7 @@ describe("secret-safe, bounded artifacts", () => {
     const failure = await runHarness({
       root,
       suite: "unit",
-      runId: "cap-failure-1",
+      runId: fixtureRunId("cap-failure-1"),
       steps: [
         {
           id: "large-failure",
@@ -513,7 +514,7 @@ describe("secret-safe, bounded artifacts", () => {
     const success = await runHarness({
       root,
       suite: "unit",
-      runId: "cap-success-1",
+      runId: fixtureRunId("cap-success-1"),
       steps: [
         {
           id: "large-success",
@@ -535,7 +536,7 @@ describe("secret-safe, bounded artifacts", () => {
     const result = await runHarness({
       root,
       suite: "unit",
-      runId: "failure-retention-1",
+      runId: fixtureRunId("failure-retention-1"),
       steps: Array.from({ length: MAX_FAILURE_ARTIFACTS_PER_RUN + 1 }, (_, index) => ({
         id: `failure-${index}`,
         scenario: "unit",
@@ -558,7 +559,7 @@ describe("runtime contract validation", () => {
       runHarness({
         root,
         suite: "security",
-        runId: "secret-argv-1",
+        runId: fixtureRunId("secret-argv-1"),
         steps: [
           {
             id: "secret-argv",
@@ -576,7 +577,7 @@ describe("runtime contract validation", () => {
       runHarness({
         root,
         suite: "security",
-        runId: "bounds-1",
+        runId: fixtureRunId("bounds-1"),
         steps: [
           {
             id: "bounds",
@@ -598,7 +599,7 @@ describe("runtime contract validation", () => {
     const result = await runHarness({
       root,
       suite: "contract",
-      runId: "event-schema-1",
+      runId: fixtureRunId("event-schema-1"),
       gitRevision: "abcdef0",
       bindingVersions: { d1: "local", worker: "unbound" },
       steps: [
@@ -637,7 +638,7 @@ describe("runtime contract validation", () => {
     const result = await runHarness({
       root,
       suite: "integration",
-      runId: "adapter-unavailable-1",
+      runId: fixtureRunId("adapter-unavailable-1"),
       steps: [
         { id: "d1", scenario: "integration", adapter: "d1", replaySafe: false },
         { id: "http", scenario: "integration", adapter: "http", replaySafe: false },
@@ -687,8 +688,10 @@ describe("artifact containment", () => {
 
   test("parallel runs with distinct valid ids remain isolated", async () => {
     const root = fixtureRoot("parallel");
+    // Distinct ids per process: the root is the shared checkout now, so a fixed
+    // id would collide with the previous local run rather than with its peer.
     const runs = await Promise.all(
-      ["parallel-a", "parallel-b"].map((runId) =>
+      [fixtureRunId("parallel-a"), fixtureRunId("parallel-b")].map((runId) =>
         runHarness({
           root,
           suite: "unit",
@@ -713,7 +716,7 @@ describe("artifact containment", () => {
       runHarness({
         root,
         suite: "unit",
-        runId: "step-cap-1",
+        runId: fixtureRunId("step-cap-1"),
         steps: Array.from({ length: MAX_STEPS_PER_RUN + 1 }, (_, index) =>
           passStep(`step-${index}`),
         ),
@@ -825,12 +828,40 @@ describe("OPS.2a real adapters", () => {
     expect(planted.stdout).toContain("HTTP_FAULT_SURFACE_MISMATCH");
   }, 30000);
 
+  test("PLANTED: an installed Playwright must never be reported as a missing package", async () => {
+    // The false blocker this guards against: `@playwright/test` is installed for
+    // the e2e workspace, but the adapter resolves relative to scripts/ and calls
+    // it missing. That reads exactly like an honest 78 and silently deletes the
+    // browser leg of OPS.2a.
+    const declared = existsSync(
+      join(repositoryRoot(), "e2e", "node_modules", "@playwright", "test"),
+    );
+    if (!declared) return; // genuinely absent: nothing to assert
+    const result = await runAdapter("browser-assert.ts", "ok");
+    const record = JSON.parse(result.stdout.trim().split("\n").pop() ?? "{}");
+    if (result.exitCode === HARNESS_BLOCKED_EXIT_CODE) {
+      // A blocker is still allowed — but only for the browser *build*, never
+      // for the package, and it must say which build it wanted.
+      expect(record.package_resolved).toBe(true);
+      expect(record.missing).not.toBe("@playwright/test");
+      expect(String(record.missing)).toMatch(/^chromium/);
+    } else {
+      expect(result.exitCode).toBe(0);
+    }
+  }, 90_000);
+
   test("the browser adapter either asserts real DOM or names its blocker", async () => {
     const ok = await runAdapter("browser-assert.ts", "ok");
     expectPositive(ok, "BROWSER_ADAPTER_UNAVAILABLE");
     const record = JSON.parse(ok.stdout.trim().split("\n").pop() ?? "{}");
     if (ok.exitCode === HARNESS_BLOCKED_EXIT_CODE) {
-      expect(record.missing).toBe("@playwright/test");
+      // Either the package or the browser build may be missing; the blocker
+      // must name which, so a false "package missing" cannot hide behind a
+      // genuine "browser build missing".
+      expect(["@playwright/test", "chromium-build"]).toContain(
+        String(record.missing).startsWith("chromium") ? "chromium-build" : record.missing,
+      );
+      expect(typeof record.package_resolved).toBe("boolean");
       return;
     }
     expect(record.code).toBe("BROWSER_ASSERTION_VERIFIED");
@@ -971,7 +1002,7 @@ describe("repository root identity", () => {
     await expect(
       runHarness({
         root: unrelated,
-        runId: "root-identity-probe",
+        runId: fixtureRunId("root-identity-probe"),
         suite: "ops.2a-root",
         steps: [
           { id: "noop", scenario: "unit", replaySafe: true, command: [process.execPath, "-e", ""] },
