@@ -43,14 +43,8 @@ export const FellowTokenSchema = z
     "invalid Fellow token",
   );
 
-/**
- * A Fellow name is a compact public identifier, not a free-form display name.
- * The final character may not be a hyphen so generated availability
- * suggestions and accepted names have exactly the same boundary semantics.
- */
-export const FellowNameSchema = z
-  .string()
-  .regex(/^[a-z](?:[a-z0-9-]{1,30}[a-z0-9])$/, "invalid Fellow name");
+/** A Fellow name is the compact public identifier defined by Fable §5.4. */
+export const FellowNameSchema = z.string().regex(/^[a-z][a-z0-9-]{2,31}$/, "invalid Fellow name");
 
 export const RequestedScopeSchema = z.enum([
   "promote",
@@ -138,6 +132,48 @@ export const EnrollmentApprovalCardSchema = z
   })
   .strict();
 
+/** Public, credential-free instructions carried by every enrollment capsule face. */
+export const EnrollmentCapsuleGuidanceSchema = z
+  .object({
+    conduct_floor: z.array(z.string().min(1).max(280)).length(5),
+    inoculation_digest: z.array(z.string().min(1).max(500)).length(3),
+    naming_law: z
+      .object({
+        pattern: z.literal("^[a-z][a-z0-9-]{2,31}$"),
+        description: z.string().min(1).max(500),
+      })
+      .strict(),
+    fragment_rule: z.string().min(1).max(500),
+    registration_example: z
+      .object({
+        enrollment_id: EnrollmentIdSchema,
+        secret: EnrollmentSecretSchema,
+        name: FellowNameSchema,
+        model: z.string().min(1).max(160),
+        harness: z.string().min(1).max(160),
+      })
+      .strict(),
+    registration_example_notice: z.string().min(1).max(500),
+    flow_poll: z
+      .object({
+        method: z.literal("POST"),
+        path: z.literal("/v1/fellows/flow"),
+        body_field: z.literal("flow_handle"),
+        value_source: z.literal("claim response body"),
+        pending_status: z.literal("authorization_pending"),
+        retry_field: z.literal("retry_after_seconds"),
+      })
+      .strict(),
+    post_approval_actions: z
+      .array(
+        z
+          .object({ order: z.number().int().min(1).max(3), action: z.string().min(1).max(500) })
+          .strict(),
+      )
+      .length(3),
+  })
+  .strict();
+
 /** Canonical agent projection of a path-only enrollment capsule. */
 export const EnrollmentCapsuleProjectionSchema = z
   .object({
@@ -153,6 +189,7 @@ export const EnrollmentCapsuleProjectionSchema = z
         secret_transport: z.literal("JSON request body only"),
       })
       .strict(),
+    guidance: EnrollmentCapsuleGuidanceSchema,
   })
   .strict();
 

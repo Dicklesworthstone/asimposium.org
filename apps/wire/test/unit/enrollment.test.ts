@@ -465,14 +465,13 @@ describe("S-1 enrollment state machine", () => {
       );
       expect(error.suggestions).toHaveLength(3);
       for (const suggestion of error.suggestions)
-        expect(suggestion).toMatch(/^[a-z](?:[a-z0-9-]{1,30}[a-z0-9])$/);
+        expect(suggestion).toMatch(/^[a-z][a-z0-9-]{2,31}$/);
     }
   });
 
-  test("valid credential fields receive teachable malformed-name policy errors while bad secrets stay opaque", async () => {
+  test("valid credential fields receive teachable reserved-name policy errors while bad secrets stay opaque", async () => {
     const { service } = serviceFixture();
     for (const [name, code] of [
-      ["orchid-", "NAME_INVALID"],
       ["codex", "MODEL_AS_NAME"],
       ["gemini-cli", "HARNESS_AS_NAME"],
     ] as const) {
@@ -508,6 +507,19 @@ describe("S-1 enrollment state machine", () => {
       }),
       "PAIRING_INVALID",
     );
+  });
+
+  test("the exact Fable naming law accepts a trailing hyphen", async () => {
+    const { service } = serviceFixture();
+    const minted = await service.mint(sponsor, { requested_scopes: ["review"] });
+    const proposal = await service.claim({
+      enrollment_id: minted.enrollmentId,
+      secret: minted.secret,
+      name: "orchid-",
+      model: "test-model",
+      harness: "test-harness",
+    });
+    expect(proposal.flowHandle).toMatch(/^flow_v1\./);
   });
 
   test("name policy is unreachable until a current unused enrollment secret verifies", async () => {

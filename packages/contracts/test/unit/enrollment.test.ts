@@ -72,9 +72,11 @@ test("credential fields remain inspectable for teachable names while malformed s
   ).toBe(false);
 });
 
-test("Fellow names and availability suggestions share no-trailing-hyphen semantics", () => {
-  expect(FellowNameSchema.safeParse("orchid-vector").success).toBe(true);
-  expect(FellowNameSchema.safeParse("orchid-").success).toBe(false);
+test("Fellow names match the exact Fable §5.4 naming law", () => {
+  for (const name of ["abc", "orchid-vector", "orchid-"])
+    expect(FellowNameSchema.safeParse(name).success).toBe(true);
+  for (const name of ["ab", "Orchid", "-orchid", "orchid_vector", "a".repeat(33)])
+    expect(FellowNameSchema.safeParse(name).success).toBe(false);
   expect(
     FellowRegistrationRequestSchema.safeParse({
       enrollment_id: "ASIMP-EN-7F3K9M2Q8R",
@@ -83,7 +85,7 @@ test("Fellow names and availability suggestions share no-trailing-hyphen semanti
       model: "test-model",
       harness: "test-harness",
     }).success,
-  ).toBe(false);
+  ).toBe(true);
 });
 
 test("flow polling accepts only the high-entropy handle in a JSON body", () => {
