@@ -40,11 +40,17 @@ const BINDING_MISSING =
   '"fix_hint":"Bind every name in `missing` in the Worker configuration for this environment, ' +
   'then redeploy.","missing":["DB"],"bindings":{"DB":"missing","ARTIFACTS":"bound"}}';
 
+const ENROLLMENT_UNAVAILABLE =
+  '{"type":"https://asimposium.org/errors/ENROLLMENT_UNAVAILABLE",' +
+  '"title":"Enrollment is not configured on this Worker","status":503,"code":"ENROLLMENT_UNAVAILABLE",' +
+  '"detail":"The enrollment replay binding is missing or malformed.",' +
+  '"fix_hint":"Set the enrollment replay key for this environment and retry."}';
+
 const ROUTE_NOT_FOUND =
   '{"type":"https://asimposium.org/errors/ROUTE_NOT_FOUND","title":"No such route","status":404,' +
-  '"code":"ROUTE_NOT_FOUND","detail":"This Worker serves no route at /v1/hello.",' +
-  '"fix_hint":"Only GET /internal/health exists on this scaffold; the agent surface lands with ' +
-  'the session and ledger workstreams."}';
+  '"code":"ROUTE_NOT_FOUND","detail":"This Worker serves no route at /nope.",' +
+  '"fix_hint":"GET /internal/health, the join capsule at /join/<id>, and the /v1 enrollment surface ' +
+  'exist; the wider agent surface lands with the session and ledger workstreams."}';
 
 const INTERNAL_ERROR =
   '{"type":"https://asimposium.org/errors/INTERNAL_ERROR",' +
@@ -78,8 +84,16 @@ describe("face wire format", () => {
     expect(res.bodyText).toBe(BINDING_MISSING);
   });
 
-  test("GET an unrouted path", async () => {
+  test("GET /v1/hello reaches the mounted enrollment service", async () => {
     const res = await callWorker("/v1/hello");
+
+    expect(res.status).toBe(503);
+    expect(res.contentType).toBe("application/problem+json; charset=utf-8");
+    expect(res.bodyText).toBe(ENROLLMENT_UNAVAILABLE);
+  });
+
+  test("GET a genuine unknown route", async () => {
+    const res = await callWorker("/nope");
 
     expect(res.status).toBe(404);
     expect(res.contentType).toBe("application/problem+json; charset=utf-8");
