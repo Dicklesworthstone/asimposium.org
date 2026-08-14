@@ -29,6 +29,17 @@ const INVALID_REDUCE_FIXTURE = new URL(
   "../fixtures/invalid/enrollment-reduce-empty.json",
   import.meta.url,
 );
+const VALID_DECISION_FIXTURE = new URL(
+  "../fixtures/valid/enrollment-decision-approve.json",
+  import.meta.url,
+);
+const INVALID_DECISION_TARGET_FIXTURE = new URL(
+  "../fixtures/invalid/enrollment-decision-missing-target.json",
+  import.meta.url,
+);
+
+/** The synthetic enrollment every decision fixture in this suite decides. */
+const DECISION_TARGET = "ASIMP-EN-01JXYZ4K6Q";
 
 async function fixture(url: URL): Promise<unknown> {
   try {
@@ -104,17 +115,50 @@ test("flow polling accepts only the high-entropy handle in a JSON body", () => {
 });
 
 test("only a strict sponsor decision can approve, reduce, or deny", () => {
-  expect(SponsorEnrollmentDecisionSchema.safeParse({ decision: "approve" }).success).toBe(true);
+  expect(
+    SponsorEnrollmentDecisionSchema.safeParse({
+      enrollment_id: DECISION_TARGET,
+      decision: "approve",
+    }).success,
+  ).toBe(true);
+  expect(
+    SponsorEnrollmentDecisionSchema.safeParse({
+      enrollment_id: DECISION_TARGET,
+      decision: "reduce",
+      reduction: { scopes: ["review"] },
+    }).success,
+  ).toBe(true);
+  expect(
+    SponsorEnrollmentDecisionSchema.safeParse({ enrollment_id: DECISION_TARGET, decision: "deny" })
+      .success,
+  ).toBe(true);
+  expect(
+    SponsorEnrollmentDecisionSchema.safeParse({
+      enrollment_id: DECISION_TARGET,
+      decision: "reduce",
+      reduction: {},
+    }).success,
+  ).toBe(false);
+});
+
+test("a sponsor decision cannot omit or malform the enrollment it decides", () => {
+  // The signed body is the only place the concrete target is covered by the
+  // envelope signature; an untargeted decision must never parse.
+  for (const decision of ["approve", "deny"] as const) {
+    expect(SponsorEnrollmentDecisionSchema.safeParse({ decision }).success).toBe(false);
+  }
   expect(
     SponsorEnrollmentDecisionSchema.safeParse({
       decision: "reduce",
       reduction: { scopes: ["review"] },
     }).success,
-  ).toBe(true);
-  expect(SponsorEnrollmentDecisionSchema.safeParse({ decision: "deny" }).success).toBe(true);
-  expect(
-    SponsorEnrollmentDecisionSchema.safeParse({ decision: "reduce", reduction: {} }).success,
   ).toBe(false);
+  for (const target of ["", "not-an-enrollment", "ASIMP-EN-", "asimp-en-01JXYZ4K6Q"]) {
+    expect(
+      SponsorEnrollmentDecisionSchema.safeParse({ enrollment_id: target, decision: "approve" })
+        .success,
+    ).toBe(false);
+  }
 });
 
 test("minting includes bounded optional problem, directive, budget, and expiry grants", () => {
@@ -155,6 +199,16 @@ test("resource-grant fixtures prove strict mint and reduce contract boundaries",
   );
   expect(
     SponsorEnrollmentDecisionSchema.safeParse(await fixture(INVALID_REDUCE_FIXTURE)).success,
+  ).toBe(false);
+});
+
+test("decision fixtures prove the enrollment target is mandatory in the signed body", async () => {
+  const valid = SponsorEnrollmentDecisionSchema.safeParse(await fixture(VALID_DECISION_FIXTURE));
+  expect(valid.success).toBe(true);
+  expect(valid.success && valid.data.enrollment_id).toBe(DECISION_TARGET);
+  expect(
+    SponsorEnrollmentDecisionSchema.safeParse(await fixture(INVALID_DECISION_TARGET_FIXTURE))
+      .success,
   ).toBe(false);
 });
 

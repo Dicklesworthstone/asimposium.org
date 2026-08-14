@@ -143,6 +143,21 @@ function enrollmentErrorResponse(error: EnrollmentError): Response {
         "This enrollment proposal is not pending a decision.",
         "List pending proposals and decide one whose status is pending.",
       );
+    case "DECISION_TARGET_MISMATCH":
+      // Both compared values are caller-supplied, so this teaches without
+      // disclosing whether either enrollment exists.
+      return problem(
+        422,
+        error.code,
+        "Decision does not name this enrollment",
+        "The signed decision body names a different enrollment than the request path.",
+        "Send the decision to the path of the enrollment named by `enrollment_id`, and sign that exact body.",
+        {
+          rule: "ADR-20",
+          schema: "https://a.asimposium.org/schemas/enrollment.v1.json",
+          example: { enrollment_id: "ASIMP-EN-01JXYZ4K6Q", decision: "approve" },
+        },
+      );
     case "IDEMPOTENCY_CONFLICT":
       return problem(
         409,
@@ -567,14 +582,23 @@ function mountSponsorRoutes(app: Hono, options: EnrollmentRouterOptions): void {
       );
     }
     try {
-      const idempotency = idempotencyOptions(c.req.raw);
-      if (idempotency instanceof Response) return idempotency;
       const parsed = SponsorEnrollmentDecisionSchema.safeParse(
         verifiedJson(authenticated.rawBody),
       );
       if (!parsed.success) {
         return enrollmentErrorResponse(new EnrollmentError("PROPOSAL_NOT_PENDING"));
       }
+      // The envelope signs the body digest and the route *template*, never the
+      // filled path, so this equality is what binds an approve to the proposal
+      // it was authored for. It runs before the idempotency key is read and
+      // before any store call, so a retargeted decision consumes no replay slot
+      // and reaches no proposal. Both sides are caller-supplied, so comparing
+      // them discloses nothing about either enrollment's existence.
+      if (parsed.data.enrollment_id !== enrollmentId) {
+        return enrollmentErrorResponse(new EnrollmentError("DECISION_TARGET_MISMATCH"));
+      }
+      const idempotency = idempotencyOptions(c.req.raw);
+      if (idempotency instanceof Response) return idempotency;
       await options.service.decide(authenticated.principal, enrollmentId, parsed.data, idempotency);
       return c.json(SponsorEnrollmentDecisionResponseSchema.parse({ acknowledged: true }), 200, {
         "cache-control": "no-store",

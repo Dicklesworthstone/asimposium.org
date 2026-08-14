@@ -243,15 +243,27 @@ export const EnrollmentGrantReductionSchema = z
   .strict()
   .refine((value) => Object.keys(value).length > 0, "a reduction must narrow at least one grant");
 
+/**
+ * A sponsor decision names the enrollment it decides.
+ *
+ * The service envelope signs the request body digest and the route *template*
+ * (`/v1/enrollments/:enrollmentId/decision`), never the filled path, so the
+ * concrete target is not otherwise covered by the signature. Carrying the
+ * target inside the signed body makes an approve for one proposal unusable
+ * against another: the Worker refuses unless this field equals the path
+ * parameter. Sponsor isolation answers *whose* enrollment; this answers
+ * *which* (ADR-20).
+ */
 export const SponsorEnrollmentDecisionSchema = z.discriminatedUnion("decision", [
-  z.object({ decision: z.literal("approve") }).strict(),
+  z.object({ enrollment_id: EnrollmentIdSchema, decision: z.literal("approve") }).strict(),
   z
     .object({
+      enrollment_id: EnrollmentIdSchema,
       decision: z.literal("reduce"),
       reduction: EnrollmentGrantReductionSchema,
     })
     .strict(),
-  z.object({ decision: z.literal("deny") }).strict(),
+  z.object({ enrollment_id: EnrollmentIdSchema, decision: z.literal("deny") }).strict(),
 ]);
 
 /**

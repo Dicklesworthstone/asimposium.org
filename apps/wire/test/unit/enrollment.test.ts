@@ -204,10 +204,10 @@ describe("S-1 enrollment state machine", () => {
     const { enrollmentId, flowHandle } = await mintAndClaim(service, "deny-orchid");
     await expectEnrollmentError(service.approvalCard(fellow, enrollmentId), "WRONG_PRINCIPAL");
     await expectEnrollmentError(
-      service.decide(otherSponsor, enrollmentId, { decision: "deny" }),
+      service.decide(otherSponsor, enrollmentId, { enrollment_id: enrollmentId, decision: "deny" }),
       "WRONG_PRINCIPAL",
     );
-    await service.decide(sponsor, enrollmentId, { decision: "deny" });
+    await service.decide(sponsor, enrollmentId, { enrollment_id: enrollmentId, decision: "deny" });
     expect(await service.poll({ flow_handle: flowHandle })).toEqual({ status: "access_denied" });
   });
 
@@ -222,7 +222,10 @@ describe("S-1 enrollment state machine", () => {
       harness: "test-harness",
     });
     clock.value += 2;
-    await service.decide(sponsor, minted.enrollmentId, { decision: "approve" });
+    await service.decide(sponsor, minted.enrollmentId, {
+      enrollment_id: minted.enrollmentId,
+      decision: "approve",
+    });
     expect((await service.poll({ flow_handle: claim.flowHandle })).status).toBe("approved");
   });
 
@@ -257,8 +260,8 @@ describe("S-1 enrollment state machine", () => {
     const { enrollmentId, flowHandle } = await mintAndClaim(service, "race-orchid");
 
     const approvals = await Promise.allSettled([
-      service.decide(sponsor, enrollmentId, { decision: "approve" }),
-      service.decide(sponsor, enrollmentId, { decision: "approve" }),
+      service.decide(sponsor, enrollmentId, { enrollment_id: enrollmentId, decision: "approve" }),
+      service.decide(sponsor, enrollmentId, { enrollment_id: enrollmentId, decision: "approve" }),
     ]);
     expect(approvals.filter((outcome) => outcome.status === "fulfilled")).toHaveLength(1);
 
@@ -590,7 +593,7 @@ describe("S-1 enrollment state machine", () => {
   test("approval cards report deny status without retaining requested grants as effective authority", async () => {
     const { service } = serviceFixture();
     const { enrollmentId } = await mintAndClaim(service, "denied-orchid");
-    await service.decide(sponsor, enrollmentId, { decision: "deny" });
+    await service.decide(sponsor, enrollmentId, { enrollment_id: enrollmentId, decision: "deny" });
     await expect(service.approvalCard(sponsor, enrollmentId)).resolves.toMatchObject({
       status: "denied",
       effectiveGrantedScopes: null,

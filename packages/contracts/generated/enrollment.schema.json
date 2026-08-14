@@ -591,12 +591,17 @@
         {
           "type": "object",
           "properties": {
+            "enrollment_id": {
+              "type": "string",
+              "pattern": "^ASIMP-EN-[A-HJKMNP-TV-Z0-9]{10,32}$"
+            },
             "decision": {
               "type": "string",
               "const": "approve"
             }
           },
           "required": [
+            "enrollment_id",
             "decision"
           ],
           "additionalProperties": false
@@ -604,6 +609,10 @@
         {
           "type": "object",
           "properties": {
+            "enrollment_id": {
+              "type": "string",
+              "pattern": "^ASIMP-EN-[A-HJKMNP-TV-Z0-9]{10,32}$"
+            },
             "decision": {
               "type": "string",
               "const": "reduce"
@@ -651,6 +660,7 @@
             }
           },
           "required": [
+            "enrollment_id",
             "decision",
             "reduction"
           ],
@@ -659,12 +669,17 @@
         {
           "type": "object",
           "properties": {
+            "enrollment_id": {
+              "type": "string",
+              "pattern": "^ASIMP-EN-[A-HJKMNP-TV-Z0-9]{10,32}$"
+            },
             "decision": {
               "type": "string",
               "const": "deny"
             }
           },
           "required": [
+            "enrollment_id",
             "decision"
           ],
           "additionalProperties": false

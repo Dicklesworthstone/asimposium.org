@@ -1,4 +1,5 @@
 {
+  "enrollment_id": "ASIMP-EN-01JXYZ4K6Q",
   "decision": "reduce",
   "reduction": {
     "scopes": ["review"],

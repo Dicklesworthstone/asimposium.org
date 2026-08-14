@@ -35,6 +35,7 @@ export type EnrollmentErrorCode =
   | "NAME_RESERVED"
   | "NAME_TAKEN"
   | "MODEL_AS_NAME"
+  | "DECISION_TARGET_MISMATCH"
   | "PAIRING_EXPIRED"
   | "PAIRING_INVALID"
   | "PROPOSAL_EXPIRED"
@@ -1418,6 +1419,13 @@ export class EnrollmentService {
     assertSponsor(sponsor);
     const parsed = SponsorEnrollmentDecisionSchema.safeParse(rawDecision);
     if (!parsed.success) throw new EnrollmentError("PROPOSAL_NOT_PENDING");
+    // The Worker is the single validator, so the target binding lives here too
+    // and not only on the HTTP edge: a decision authored for one enrollment can
+    // never settle another, whatever the caller. Refused before the idempotency
+    // key is prepared, so a retargeted decision burns no replay slot.
+    if (parsed.data.enrollment_id !== enrollmentId) {
+      throw new EnrollmentError("DECISION_TARGET_MISMATCH");
+    }
     const now = this.#clock.now();
     const replay = await this.#prepareWrite<{ readonly acknowledged: true }>(
       "decision",

@@ -142,11 +142,15 @@ export default {
       ) {
         return response({ code: "LOCAL_INPUT_INVALID" }, 400);
       }
+      // The harness names the target once, at the top level. Default the signed
+      // body's `enrollment_id` from it, but let an explicitly supplied one win
+      // so a mismatch can still be driven through the service's target check.
+      const suppliedDecision = (body.decision ?? { decision: "approve" }) as Record<string, unknown>;
       try {
         await service.decide(
           { type: "sponsor", sponsorId: body.sponsor_id },
           body.enrollment_id,
-          (body.decision ?? { decision: "approve" }) as never,
+          { enrollment_id: body.enrollment_id, ...suppliedDecision } as never,
           { idempotencyKey: request.headers.get("idempotency-key") ?? undefined },
         );
         return response({ status: "approved" });
