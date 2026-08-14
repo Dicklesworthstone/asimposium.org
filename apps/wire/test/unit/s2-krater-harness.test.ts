@@ -390,8 +390,9 @@ describe("S2 to S7 normalized cost receipt", () => {
     expect(start).toContain('kill -KILL -- "-${supervisor_pid}"');
     expect(shell).toContain("pre_release_helper_is_expected_snapshot");
     expect(shell).toContain("pre_release_snapshot_line_kind");
-    expect(shell).toContain("detached_process_table_read()");
-    expect(shell).toContain("setsid() or exit 125; exec @ARGV");
+    expect(shell).toContain("detached_process_table_snapshot()");
+    expect(shell).toContain("setsid() or exit 125;");
+    expect(shell).toContain("sysopen(STDOUT, $snapshot_path, O_WRONLY | O_CREAT | O_EXCL, 0600)");
     expect(shell).toContain("read_detached_process_snapshot");
     expect(shell).toContain("S2_SHELL_REGRESSION_FAILED");
     const groupMembers = shell.slice(
@@ -406,9 +407,12 @@ describe("S2 to S7 normalized cost receipt", () => {
       shell.indexOf("signal_owned_group()"),
     );
     expect(preRelease).not.toContain("$(LC_ALL=C ps");
+    expect(preRelease).not.toContain("< <(");
+    expect(preRelease).not.toMatch(/\$\((?!\()/);
     expect(preRelease).toContain(
-      "detached_process_table_read -o pid=,pgid=,ppid=,stat=,command= -g",
+      'detached_process_table_snapshot "$' + '{S2_PRE_RELEASE_SNAPSHOT_PATH}"',
     );
+    expect(preRelease).toContain("next_pre_release_snapshot_path");
     // biome-ignore lint/suspicious/noTemplateCurlyInString: asserts literal shell source text.
     expect(preRelease).toContain('"${helper}" == "${expected_helper}"');
     expect(preRelease).toContain("S2_PRE_RELEASE_EXPECTED_HELPER_REJECTED_SAMPLES");
@@ -417,16 +421,48 @@ describe("S2 to S7 normalized cost receipt", () => {
     expect(shell).toContain("S2_PLANT_PERSISTENT_PRE_RELEASE_HELPER");
     expect(shell).toContain("S2_PERSISTENT_PRE_RELEASE_HELPER_ACCEPTED");
     expect(shell).toContain("emit_release_race_failure()");
+    expect(shell).toContain('\\"terminal\\":true,\\"scenario\\":\\"release-race\\"');
     expect(shell).toContain("S2_RELEASE_RACE_UNEXPECTEDLY_RELEASED");
     expect(shell).toContain("S2_RELEASE_RACE_PLANTED_IDENTITY_INVALID");
     expect(shell).toContain("S2_RELEASE_RACE_EXACT_GROUP_SURVIVOR");
     expect(shell).toContain("emit_persistent_pre_release_helper_failure()");
+    expect(shell).toContain(
+      '\\"terminal\\":true,\\"scenario\\":\\"persistent-pre-release-helper\\"',
+    );
     expect(shell).toContain("S2_PERSISTENT_PRE_RELEASE_HELPER_PAYLOAD_PATH_UNSAFE");
     expect(shell).toContain("S2_PERSISTENT_PRE_RELEASE_HELPER_RESAMPLE_OR_RELEASE_PROOF_FAILED");
     expect(shell).toContain("S2_PERSISTENT_PRE_RELEASE_HELPER_PGID_INVALID");
     expect(shell).toContain("S2_PERSISTENT_PRE_RELEASE_HELPER_SURVIVOR");
     expect(shell).toContain("S2_PERSISTENT_PRE_RELEASE_HELPER_PLANTED_IDENTITY_INVALID");
     expect(shell).toContain("S2_PERSISTENT_PRE_RELEASE_HELPER_PLANTED_HELPER_SURVIVOR");
+    // biome-ignore lint/style/useTemplate: preserves literal shell ${mode} without interpolation.
+    const modeBranch = (mode: string): string => 'if [[ "$' + '{mode}" == "' + mode + '" ]]';
+    const releaseRace = shell.slice(
+      shell.indexOf(modeBranch("release-race")),
+      shell.indexOf(modeBranch("persistent-pre-release-helper")),
+    );
+    for (const code of [
+      "S2_RELEASE_RACE_UNEXPECTEDLY_RELEASED",
+      "S2_RELEASE_RACE_PLANTED_IDENTITY_INVALID",
+      "S2_RELEASE_RACE_EXACT_GROUP_SURVIVOR",
+    ]) {
+      expect(releaseRace).toContain(`emit_release_race_failure "${code}"`);
+    }
+    const persistentHelper = shell.slice(
+      shell.indexOf(modeBranch("persistent-pre-release-helper")),
+      shell.indexOf(modeBranch("release-interleaving")),
+    );
+    for (const code of [
+      "S2_PERSISTENT_PRE_RELEASE_HELPER_PAYLOAD_PATH_UNSAFE",
+      "S2_PERSISTENT_PRE_RELEASE_HELPER_ACCEPTED",
+      "S2_PERSISTENT_PRE_RELEASE_HELPER_PLANTED_IDENTITY_INVALID",
+      "S2_PERSISTENT_PRE_RELEASE_HELPER_RESAMPLE_OR_RELEASE_PROOF_FAILED",
+      "S2_PERSISTENT_PRE_RELEASE_HELPER_PGID_INVALID",
+      "S2_PERSISTENT_PRE_RELEASE_HELPER_SURVIVOR",
+      "S2_PERSISTENT_PRE_RELEASE_HELPER_PLANTED_HELPER_SURVIVOR",
+    ]) {
+      expect(persistentHelper).toContain(`emit_persistent_pre_release_helper_failure "${code}"`);
+    }
     // biome-ignore lint/suspicious/noTemplateCurlyInString: asserts literal shell source text.
     expect(shell).toContain('[[ -n "${marker}" ]] || return 1');
     expect(shell).toContain("trap '' INT TERM HUP");

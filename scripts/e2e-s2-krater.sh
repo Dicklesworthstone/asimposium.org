@@ -343,7 +343,7 @@ emit_release_race_failure() {
     leader_is_exact=true
   fi
   [[ -n "${S2_PLANTED_RELEASE_MARKER}" ]] && marker_present=true
-  emit "{\"tool\":\"bash\",\"package\":\"apps/wire\",\"suite\":\"s2-krater-shell\",\"status\":\"fail\",\"code\":\"${code}\",\"planted_release_pid\":$(json_decimal_or_null "${S2_PLANTED_RELEASE_PID}"),\"planted_release_pgid\":$(json_decimal_or_null "${S2_PLANTED_RELEASE_PGID}"),\"planted_release_is_group_leader\":$(json_bool "${leader_is_exact}"),\"planted_release_marker_present\":$(json_bool "${marker_present}"),\"exact_group_survives\":$(json_bool "${group_survives}"),\"reproduce\":\"S2_SHELL_REGRESSION_TEST=release-race scripts/e2e-s2-krater.sh\"}"
+  emit "{\"tool\":\"bash\",\"package\":\"apps/wire\",\"suite\":\"s2-krater-shell\",\"status\":\"fail\",\"terminal\":true,\"scenario\":\"release-race\",\"code\":\"${code}\",\"planted_release_pid\":$(json_decimal_or_null "${S2_PLANTED_RELEASE_PID}"),\"planted_release_pgid\":$(json_decimal_or_null "${S2_PLANTED_RELEASE_PGID}"),\"planted_release_is_group_leader\":$(json_bool "${leader_is_exact}"),\"planted_release_marker_present\":$(json_bool "${marker_present}"),\"exact_group_survives\":$(json_bool "${group_survives}"),\"reproduce\":\"S2_SHELL_REGRESSION_TEST=release-race scripts/e2e-s2-krater.sh\"}"
 }
 
 emit_persistent_pre_release_helper_failure() {
@@ -362,7 +362,7 @@ emit_persistent_pre_release_helper_failure() {
     kill -0 "${S2_PRE_RELEASE_EXPECTED_HELPER_PID}" 2>/dev/null; then
     planted_helper_survives=true
   fi
-  emit "{\"tool\":\"bash\",\"package\":\"apps/wire\",\"suite\":\"s2-krater-shell\",\"status\":\"fail\",\"code\":\"${code}\",\"pre_release_resample_attempts\":$(json_decimal_or_null "${S2_PRE_RELEASE_RESAMPLE_ATTEMPTS}"),\"pre_release_accepted_samples\":$(json_decimal_or_null "${S2_PRE_RELEASE_ACCEPTED_SAMPLES}"),\"pre_release_rejected_samples\":$(json_decimal_or_null "${S2_PRE_RELEASE_REJECTED_SAMPLES}"),\"pre_release_max_group_members\":$(json_decimal_or_null "${S2_PRE_RELEASE_MAX_GROUP_MEMBER_COUNT}"),\"planted_persistent_helper_pid\":$(json_decimal_or_null "${S2_PRE_RELEASE_EXPECTED_HELPER_PID}"),\"planted_persistent_helper_rejected_samples\":$(json_decimal_or_null "${S2_PRE_RELEASE_EXPECTED_HELPER_REJECTED_SAMPLES}"),\"planted_persistent_helper_survives\":$(json_bool "${planted_helper_survives}"),\"payload_started\":$(json_bool "${payload_started}"),\"exact_pinned_group_reap_recorded\":$(json_bool "${exact_reap_recorded}"),\"most_recent_supervisor_empty\":$(json_bool "${most_recent_supervisor_empty}"),\"exact_group_survives\":$(json_bool "${group_survives}"),\"reproduce\":\"S2_SHELL_REGRESSION_TEST=persistent-pre-release-helper scripts/e2e-s2-krater.sh\"}"
+  emit "{\"tool\":\"bash\",\"package\":\"apps/wire\",\"suite\":\"s2-krater-shell\",\"status\":\"fail\",\"terminal\":true,\"scenario\":\"persistent-pre-release-helper\",\"code\":\"${code}\",\"pre_release_resample_attempts\":$(json_decimal_or_null "${S2_PRE_RELEASE_RESAMPLE_ATTEMPTS}"),\"pre_release_accepted_samples\":$(json_decimal_or_null "${S2_PRE_RELEASE_ACCEPTED_SAMPLES}"),\"pre_release_rejected_samples\":$(json_decimal_or_null "${S2_PRE_RELEASE_REJECTED_SAMPLES}"),\"pre_release_max_group_members\":$(json_decimal_or_null "${S2_PRE_RELEASE_MAX_GROUP_MEMBER_COUNT}"),\"planted_persistent_helper_pid\":$(json_decimal_or_null "${S2_PRE_RELEASE_EXPECTED_HELPER_PID}"),\"planted_persistent_helper_rejected_samples\":$(json_decimal_or_null "${S2_PRE_RELEASE_EXPECTED_HELPER_REJECTED_SAMPLES}"),\"planted_persistent_helper_survives\":$(json_bool "${planted_helper_survives}"),\"payload_started\":$(json_bool "${payload_started}"),\"exact_pinned_group_reap_recorded\":$(json_bool "${exact_reap_recorded}"),\"most_recent_supervisor_empty\":$(json_bool "${most_recent_supervisor_empty}"),\"exact_group_survives\":$(json_bool "${group_survives}"),\"reproduce\":\"S2_SHELL_REGRESSION_TEST=persistent-pre-release-helper scripts/e2e-s2-krater.sh\"}"
 }
 
 redacted_wrangler_cause() {
@@ -430,6 +430,9 @@ S2_PRE_RELEASE_MAX_GROUP_MEMBER_COUNT=0
 S2_PRE_RELEASE_REAPED_PGID=""
 S2_PRE_RELEASE_EXPECTED_HELPER_PID=""
 S2_PRE_RELEASE_EXPECTED_HELPER_REJECTED_SAMPLES=0
+S2_PRE_RELEASE_SNAPSHOT_PREFIX=""
+S2_PRE_RELEASE_SNAPSHOT_PATH=""
+S2_PRE_RELEASE_SNAPSHOT_SEQUENCE=0
 # This packed record is published before any release write. It closes the caller-assignment
 # gap: an EXIT trap can still prove and release the exact newest supervisor while a caller is
 # between start_pinned_supervisor and its Worker/lifecycle bookkeeping. Fields are PID, PGID,
@@ -441,26 +444,44 @@ is_decimal() {
   [[ "$1" =~ ^[0-9]+$ ]]
 }
 
-# A process-table scanner must leave the pinned supervisor's session before it samples it.
-# Bash gives a command-substitution/process-substitution child its caller's process group, so
-# this function immediately execs Perl, whose first action is `setsid()`. Only then does it exec
-# `ps`; the scanner is therefore never counted as a member of the group it observes.
-detached_process_table_read() {
+# A pre-release process-table observer must never be part of the group it accepts. Bash process
+# substitutions add an intermediate shell in the caller's process group, so the scanner instead
+# runs synchronously: Perl enters a new session *before* it opens the snapshot or execs `ps`, and
+# Bash later parses the completed regular file with builtins only.
+next_pre_release_snapshot_path() {
+  [[ -n "${S2_PRE_RELEASE_SNAPSHOT_PREFIX}" ]] || return 1
+  S2_PRE_RELEASE_SNAPSHOT_SEQUENCE=$((S2_PRE_RELEASE_SNAPSHOT_SEQUENCE + 1))
+  S2_PRE_RELEASE_SNAPSHOT_PATH="${S2_PRE_RELEASE_SNAPSHOT_PREFIX}.${S2_PRE_RELEASE_SNAPSHOT_SEQUENCE}.ps"
+  [[ ! -e "${S2_PRE_RELEASE_SNAPSHOT_PATH}" && ! -L "${S2_PRE_RELEASE_SNAPSHOT_PATH}" ]]
+}
+
+detached_process_table_snapshot() {
+  local snapshot_path="$1"
+  shift
+  [[ -n "${snapshot_path}" && ! -e "${snapshot_path}" && ! -L "${snapshot_path}" ]] || return 1
   command -v perl >/dev/null 2>&1 || return 1
-  LC_ALL=C exec perl -MPOSIX=setsid -e 'setsid() or exit 125; exec @ARGV' -- ps "$@"
+  LC_ALL=C perl -MPOSIX=setsid -MFcntl=O_WRONLY,O_CREAT,O_EXCL -e '
+    my $snapshot_path = shift @ARGV;
+    setsid() or exit 125;
+    sysopen(STDOUT, $snapshot_path, O_WRONLY | O_CREAT | O_EXCL, 0600) or exit 125;
+    open(STDERR, ">", "/dev/null") or exit 125;
+    exec @ARGV;
+  ' "${snapshot_path}" ps "$@"
 }
 
 # Read exactly one detached process-table row. Scanner failure, no row, or multiple rows is
-# unsafe for an ownership proof and fails closed without falling back to a shell substitution.
+# unsafe for an ownership proof and fails closed without a command or process substitution.
 read_detached_process_snapshot() {
   local line rows=0
   S2_DETACHED_PROCESS_SNAPSHOT=""
+  next_pre_release_snapshot_path || return 1
+  detached_process_table_snapshot "${S2_PRE_RELEASE_SNAPSHOT_PATH}" "$@" || return 1
   while IFS= read -r line; do
     [[ -n "${line}" ]] || continue
     rows=$((rows + 1))
     [[ ${rows} -eq 1 ]] || return 1
     S2_DETACHED_PROCESS_SNAPSHOT="${line}"
-  done < <(detached_process_table_read "$@")
+  done <"${S2_PRE_RELEASE_SNAPSHOT_PATH}"
   [[ ${rows} -eq 1 ]]
 }
 
@@ -545,6 +566,31 @@ pre_release_watchdog_is_healthy() {
   kill -0 "${watchdog_pid}" 2>/dev/null && kill -0 -- "-${pgid}" 2>/dev/null
 }
 
+# These cleanup paths run before any release token is written. They reuse the detached proof
+# rather than the ordinary lifecycle classifier, whose command substitution is intentionally
+# outside the pre-release acceptance boundary.
+signal_pre_release_owned_group() {
+  local signal="$1" pid="$2" pgid="$3" marker="$4"
+  pre_release_supervisor_is_owned "${pid}" "${pgid}" "${marker}" || return 1
+  kill "-${signal}" -- "-${pgid}" 2>/dev/null
+}
+
+kill_pre_release_owned_group_to_zero() {
+  local pid="$1" pgid="$2" marker="$3" persist="$4" port="$5" proof_scope="$6" tick
+  signal_pre_release_owned_group KILL "${pid}" "${pgid}" "${marker}" || return 1
+  for ((tick = 0; tick < S2_TERMINATE_WAIT_TICKS; tick += 1)); do
+    if ! kill -0 -- "-${pgid}" 2>/dev/null; then
+      wait "${pid}" 2>/dev/null || :
+      if [[ "${proof_scope}" == "server" ]]; then
+        assert_no_run_survivors "${persist}" "${port}" "${marker}" || return 1
+      fi
+      return 0
+    fi
+    sleep 0.1
+  done
+  return 1
+}
+
 # The supervisor is the group leader and remains alive after its child exits. It blocks on a
 # private release FIFO before invoking the real command, so no Wrangler/workerd descendant can
 # exist until identity and kernel group ownership have been proved by the parent.
@@ -570,6 +616,9 @@ start_pinned_supervisor() {
   S2_PRE_RELEASE_REAPED_PGID=""
   S2_PRE_RELEASE_EXPECTED_HELPER_PID=""
   S2_PRE_RELEASE_EXPECTED_HELPER_REJECTED_SAMPLES=0
+  S2_PRE_RELEASE_SNAPSHOT_PREFIX="${status_file}.pre-release-snapshot"
+  S2_PRE_RELEASE_SNAPSHOT_PATH=""
+  S2_PRE_RELEASE_SNAPSHOT_SEQUENCE=0
   [[ ! -e "${status_file}" && ! -L "${status_file}" ]] || return 1
   control_fifo="${status_file}.control"
   [[ ! -e "${control_fifo}" && ! -L "${control_fifo}" ]] || return 1
@@ -727,7 +776,7 @@ start_pinned_supervisor() {
         if ! is_decimal "${S2_PRE_RELEASE_EXPECTED_HELPER_PID}"; then
           exec 7>&-
           if pre_release_supervisor_is_owned "${pid}" "${pid}" "${marker}"; then
-            kill_owned_group_to_zero "${pid}" "${pid}" "${marker}" "${persist}" "${port}" \
+            kill_pre_release_owned_group_to_zero "${pid}" "${pid}" "${marker}" "${persist}" "${port}" \
               "${proof_scope}" || return 1
             S2_PRE_RELEASE_REAPED_PGID="${pid}"
           fi
@@ -761,7 +810,7 @@ start_pinned_supervisor() {
       if ! pre_release_group_is_stably_pinned "${pid}" "${marker}"; then
         exec 7>&-
         if pre_release_supervisor_is_owned "${pid}" "${pid}" "${marker}"; then
-          kill_owned_group_to_zero "${pid}" "${pid}" "${marker}" "${persist}" "${port}" \
+          kill_pre_release_owned_group_to_zero "${pid}" "${pid}" "${marker}" "${persist}" "${port}" \
             "${proof_scope}" || return 1
           S2_PRE_RELEASE_REAPED_PGID="${pid}"
         fi
@@ -787,11 +836,8 @@ start_pinned_supervisor() {
         ! pre_release_watchdog_is_healthy "${watchdog_pid}" "${pid}" "${pid}" "${marker}" "${watchdog_health}"; then
         exec 7>&-
         if pre_release_supervisor_is_owned "${pid}" "${pid}" "${marker}"; then
-          signal_owned_group KILL "${pid}" "${pid}" "${marker}" || return 1
-          for ((tick = 0; tick < S2_TERMINATE_WAIT_TICKS; tick += 1)); do
-            kill -0 -- "-${pid}" 2>/dev/null || break
-            sleep 0.1
-          done
+          kill_pre_release_owned_group_to_zero "${pid}" "${pid}" "${marker}" "${persist}" "${port}" \
+            "${proof_scope}" || return 1
         fi
         kill -0 -- "-${pid}" 2>/dev/null && return 1
         wait "${pid}" 2>/dev/null || :
@@ -872,17 +918,17 @@ start_pinned_supervisor() {
   # Before release the direct supervisor has no real child. A fresh exact group proof permits
   # bounded group cleanup; an unclear process table is left for the blocked child to self-retire
   # when it observes the lost parent rather than risking an unrelated PID or PGID.
-  if supervisor_is_owned "${pid}" "${pid}" "${marker}"; then
-    signal_owned_group TERM "${pid}" "${pid}" "${marker}" || return 1
+  if pre_release_supervisor_is_owned "${pid}" "${pid}" "${marker}"; then
+    signal_pre_release_owned_group TERM "${pid}" "${pid}" "${marker}" || return 1
     for ((deadline = 0; deadline < S2_TERMINATE_WAIT_TICKS; deadline += 1)); do
       if ! kill -0 -- "-${pid}" 2>/dev/null; then
         wait "${pid}" 2>/dev/null || :
         return 1
       fi
-      supervisor_is_owned "${pid}" "${pid}" "${marker}" || return 1
+      pre_release_supervisor_is_owned "${pid}" "${pid}" "${marker}" || return 1
       sleep 0.1
     done
-    signal_owned_group KILL "${pid}" "${pid}" "${marker}" || return 1
+    signal_pre_release_owned_group KILL "${pid}" "${pid}" "${marker}" || return 1
   fi
   return 1
 }
@@ -985,7 +1031,10 @@ pre_release_group_is_stably_pinned() {
     helper_line=""
     # One detached scan is the complete sample. It sees the supervisor and any
     # helper in one process-table instant, after the scanner has left this
-    # group; no command-substitution child can manufacture the second member.
+    # group; no shell exists in the target group while the scanner runs.
+    next_pre_release_snapshot_path || return 1
+    detached_process_table_snapshot "${S2_PRE_RELEASE_SNAPSHOT_PATH}" \
+      -o pid=,pgid=,ppid=,stat=,command= -g "${pid}" || return 1
     while IFS= read -r line; do
       [[ -n "${line}" ]] || continue
       read -r seen_pid seen_pgid seen_ppid seen_stat seen_command <<<"${line}"
@@ -998,7 +1047,7 @@ pre_release_group_is_stably_pinned() {
       else
         helper_line="${line}"
       fi
-    done < <(detached_process_table_read -o pid=,pgid=,ppid=,stat=,command= -g "${pid}")
+    done <"${S2_PRE_RELEASE_SNAPSHOT_PATH}"
     if (( S2_GROUP_MEMBER_COUNT > S2_PRE_RELEASE_MAX_GROUP_MEMBER_COUNT )); then
       S2_PRE_RELEASE_MAX_GROUP_MEMBER_COUNT="${S2_GROUP_MEMBER_COUNT}"
     fi
