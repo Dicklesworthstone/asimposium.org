@@ -116,6 +116,7 @@ interface WriteResult {
 }
 
 export { S2_COST_RECEIPT_RELATIVE_PATH } from "@asimposium/contracts";
+
 import { S2_COST_RECEIPT_RELATIVE_PATH } from "@asimposium/contracts";
 
 export type S2CostReceiptProvenance = Pick<
@@ -227,17 +228,17 @@ export function buildS2CostMeasurementReceipt(
   const metrics = selectedSettledWrites.map((write) => {
     requireBoundSettledWrite(write);
     return {
-    successfulBatchRowsRead: validCount(write.successful_batch_rows_read),
-    successfulBatchRowsWritten: validCount(write.successful_batch_rows_written),
-    writePhaseMs: validMilliseconds(write.write_phase_ms),
-    writeClaimWallMs: validMilliseconds(write.write_claim_wall_ms),
-    retryCount: validCount(write.retry_count),
-    preflight: {
-      rowsRead: validCount(write.preflight_rows_read),
-      rowsWritten: validCount(write.preflight_rows_written),
-      statements: validCount(write.preflight_statements),
-      wallMs: validMilliseconds(write.preflight_wall_ms),
-    },
+      successfulBatchRowsRead: validCount(write.successful_batch_rows_read),
+      successfulBatchRowsWritten: validCount(write.successful_batch_rows_written),
+      writePhaseMs: validMilliseconds(write.write_phase_ms),
+      writeClaimWallMs: validMilliseconds(write.write_claim_wall_ms),
+      retryCount: validCount(write.retry_count),
+      preflight: {
+        rowsRead: validCount(write.preflight_rows_read),
+        rowsWritten: validCount(write.preflight_rows_written),
+        statements: validCount(write.preflight_statements),
+        wallMs: validMilliseconds(write.preflight_wall_ms),
+      },
     };
   });
   // These are deliberately per-selected-claim-write subtotals, never an S-2
@@ -291,9 +292,7 @@ export function buildS2CostMeasurementReceipt(
   };
 
   try {
-    return parseS2CostMeasurementReceiptBytes(
-      new TextEncoder().encode(JSON.stringify(candidate)),
-    );
+    return parseS2CostMeasurementReceiptBytes(new TextEncoder().encode(JSON.stringify(candidate)));
   } catch {
     return costReceiptFailure("S2_COST_RECEIPT_INVALID");
   }
@@ -362,7 +361,10 @@ export function writeS2CostMeasurementReceipt(
     return costReceiptFailure("S2_COST_RECEIPT_TOO_LARGE");
   }
   const receiptPath = validatedReceiptPath(output);
-  const stagingPath = resolve(output.root, `.${S2_COST_RECEIPT_RELATIVE_PATH}.${randomUUID()}.pending`);
+  const stagingPath = resolve(
+    output.root,
+    `.${S2_COST_RECEIPT_RELATIVE_PATH}.${randomUUID()}.pending`,
+  );
   let descriptor: number | undefined;
   let failure: unknown;
   try {

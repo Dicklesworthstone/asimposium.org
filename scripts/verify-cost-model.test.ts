@@ -17,13 +17,13 @@ import {
   FABLE_WORKED_EXAMPLE_ASSUMPTIONS,
   MAX_S2_COST_RECEIPT_BYTES,
   REQUIRED_ROW_TOTAL_EXCLUSIONS,
+  type ReceiptFileSystem,
+  receiptDigest,
+  runCostVerifierCli,
   S2_COST_DURABLE_PUBLICATION_RESERVED_BYTES,
   S2_COST_DURABLE_PUBLICATION_RESERVED_NAMES,
   S2_COST_EVIDENCE_MANIFEST_VERSION,
   S2_COST_MANIFEST_RELATIVE_PATH,
-  type ReceiptFileSystem,
-  receiptDigest,
-  runCostVerifierCli,
   S2_COST_METRIC_SCOPE,
   S2_COST_PUBLICATION_COMMIT_RECORD,
   S2_COST_PUBLICATION_COMMIT_RELATIVE_PATH,
@@ -31,8 +31,8 @@ import {
   S2_COST_PUBLICATION_RECORD,
   S2_COST_PUBLICATION_RELATIVE_PATH,
   S2_COST_PUBLICATION_SCHEMA_VERSION,
-  S2_COST_RECEIPT_RELATIVE_PATH,
   S2_COST_RECEIPT_RECORD,
+  S2_COST_RECEIPT_RELATIVE_PATH,
   S2_COST_RECEIPT_SCHEMA_VERSION,
   S2_FAILED_RETRY_SCOPE,
   S2_LOCAL_SCOPE,
@@ -126,7 +126,10 @@ function validReceipt(overrides: Partial<S2CostMeasurementReceipt> = {}): S2Cost
     sum_preflight_rows_written: 0,
     sum_preflight_statements: 9,
     sum_retry_count: 1,
-    known_row_total_exclusions: REQUIRED_ROW_TOTAL_EXCLUSIONS,
+    known_row_total_exclusions: [
+      REQUIRED_ROW_TOTAL_EXCLUSIONS[0],
+      REQUIRED_ROW_TOTAL_EXCLUSIONS[1],
+    ],
     ...overrides,
   };
 }
@@ -322,7 +325,10 @@ function rewriteAttestedManifest(
   evidence: CliEvidence,
   mutate: (manifest: Record<string, unknown>) => void,
 ): void {
-  const manifest = JSON.parse(readFileSync(evidence.manifestPath, "utf8")) as Record<string, unknown>;
+  const manifest = JSON.parse(readFileSync(evidence.manifestPath, "utf8")) as Record<
+    string,
+    unknown
+  >;
   mutate(manifest);
   const manifestBytes = new TextEncoder().encode(JSON.stringify(manifest));
   const publication = JSON.parse(readFileSync(evidence.publicationPath, "utf8")) as {
@@ -486,17 +492,17 @@ describe("S7 cost verifier", () => {
 
   test("accepts the normalized S2 producer receipt but preserves the terminal exit-78 boundary", () => {
     const privateBodySentinel = "s2-private-body-must-not-echo";
+    const firstProducerWrite = PRODUCER_WRITES[0];
+    if (firstProducerWrite === undefined)
+      throw new Error("producer fixture must have a first write");
     const metricsWithPrivateBody: readonly (
       | S2SettledWriteResult
       | (S2SettledWriteResult & { readonly privateBody: string })
     )[] = [
-      { ...PRODUCER_WRITES[0]!, privateBody: privateBodySentinel },
+      { ...firstProducerWrite, privateBody: privateBodySentinel },
       ...PRODUCER_WRITES.slice(1),
     ];
-    const receipt = buildS2CostMeasurementReceipt(
-      metricsWithPrivateBody,
-      PRODUCER_PROVENANCE,
-    );
+    const receipt = buildS2CostMeasurementReceipt(metricsWithPrivateBody, PRODUCER_PROVENANCE);
     const bytes = new TextEncoder().encode(JSON.stringify(receipt));
     const result = verifyCostModel(FABLE_WORKED_EXAMPLE, bytes, PRODUCER_PROVENANCE);
     const evidence = writeCliEvidence(bytes, { provenance: PRODUCER_PROVENANCE });
@@ -519,9 +525,7 @@ describe("S7 cost verifier", () => {
         },
         local_p95_ms: { write_phase: 20, preflight_wall: 10, write_claim_wall: 110 },
       },
-      source_discrepancies: [
-        { code: "FABLE_CURSOR_RATE_MISMATCH", stated: 100, computed: 1_000 },
-      ],
+      source_discrepancies: [{ code: "FABLE_CURSOR_RATE_MISMATCH", stated: 100, computed: 1_000 }],
     });
     expect(result.unknowns).toEqual(verifyCostModel().unknowns);
     expect(result.unknowns).toEqual(
@@ -942,7 +946,12 @@ describe("S7 cost verifier", () => {
     commit.receipt.digest = "0".repeat(64);
     writeFileSync(commitEvidence.commitPath, JSON.stringify(commit), { mode: 0o600 });
 
-    for (const evidence of [byteCountEvidence, phaseEvidence, reservationEvidence, commitEvidence]) {
+    for (const evidence of [
+      byteCountEvidence,
+      phaseEvidence,
+      reservationEvidence,
+      commitEvidence,
+    ]) {
       const completed = runStandaloneCli(evidence.args);
       expect(completed.exitCode).toBe(78);
       expect(completed.stderr).toBe("");
@@ -992,18 +1001,24 @@ describe("S7 cost verifier", () => {
     const duplicate = writeCliEvidence(receiptBytes());
     rewriteAttestedManifest(duplicate, (manifest) => {
       const files = manifest.files as readonly Record<string, unknown>[];
-      manifest.files = [...files, files[0]!];
+      const first = files[0];
+      if (first === undefined) throw new Error("attested fixture must inventory its receipt");
+      manifest.files = [...files, first];
     });
     const unsafe = writeCliEvidence(receiptBytes());
     rewriteAttestedManifest(unsafe, (manifest) => {
       const files = manifest.files as Record<string, unknown>[];
-      files[0] = { ...files[0]!, path: "./manifest.json" };
+      const first = files[0];
+      if (first === undefined) throw new Error("attested fixture must inventory its receipt");
+      files[0] = { ...first, path: "./manifest.json" };
     });
     const overflow = writeCliEvidence(receiptBytes());
     rewriteAttestedManifest(overflow, (manifest) => {
       const files = manifest.files as Record<string, unknown>[];
       const retention = manifest.retention as Record<string, unknown>;
-      files[0] = { ...files[0]!, bytes: Number.MAX_SAFE_INTEGER };
+      const first = files[0];
+      if (first === undefined) throw new Error("attested fixture must inventory its receipt");
+      files[0] = { ...first, bytes: Number.MAX_SAFE_INTEGER };
       retention.retained_bytes_before_manifest = Number.MAX_SAFE_INTEGER;
       retention.max_bytes_per_run = Number.MAX_SAFE_INTEGER;
     });
