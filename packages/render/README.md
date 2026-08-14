@@ -45,13 +45,20 @@ backslashes precede it (ordinary API JSON keys remain prose);
 `fence-extended` is recorded once during preparation whenever the sanitized body makes the markdown
 quarantine fence grow past three backticks; thus markdown, JSON, and HTML report the same CommonMark
 defense against a body closing its own fence; `active-html` records real
-script-bearing markup or event attributes in a tag, not bare prose such as `one = 1`. Its bounded
-start-tag scan follows the HTML tokenizer distinction that whitespace and `/` separate attributes
-after a valid tag name, while `/` inside an unquoted attribute value is data. Quoted values and HTML
-comments are skipped as inert, except that `javascript:` is recorded inside a URL-bearing attribute
-(`href`, `src`, `action`, and peers); quoted descriptive attributes such as `title` and `alt` remain
-data. Markdown `javascript:` links remain recorded. An independent raw-browser-tokenizer pass and a case-folded
-Unicode-canonical-tokenizer pass union findings by original source offset. Thus NFKD →
+script-bearing markup, event attributes, or a dangerous destination in a URL surface, not bare
+prose such as `one = 1`. Its bounded start-tag scan follows the HTML tokenizer distinction that
+whitespace and `/` separate attributes after a valid tag name, while `/` inside an unquoted
+attribute value is data. Quoted descriptive attributes such as `title` and `alt` remain data.
+Anchored `javascript:`, `data:`, and `vbscript:` schemes are recorded in URL-bearing HTML attributes
+(`href`, `src`, `action`, `formaction`, `poster`, and peers), Markdown inline link/image
+destinations, and standalone autolinks. A scheme spelling later in an ordinary HTTPS path or query
+is not a finding. The matcher mirrors URL preprocessing that strips leading C0/space and removes
+ASCII tab, LF, and CR inside a scheme. Markdown link syntax inside direct code spans and top-level
+fenced blocks stays inert, including CR, LF, and CRLF line endings. Raw HTML is deliberately a
+lexical signal even inside a code example: `active-html` records the hazard bytes an attempted
+quarantine breakout carries, while every current face still renders those bytes as data. An
+independent raw-browser-tokenizer pass and a case-folded Unicode-canonical-tokenizer pass union
+findings by original source offset. Thus NFKD →
 mark/format removal → NFKC can reveal a mutation, but a manufactured quote, comment, or `>` can
 never suppress real raw active markup; author bytes remain exact.
 
@@ -138,7 +145,17 @@ against a weak reader stays in the threat model, not hidden under it.
   **asimposiumorg-ceq**.
 - **No markdown pipeline.** Nothing here parses or renders markdown to HTML. The GFM + math
   pipeline with raw HTML disabled and KaTeX trust mode off (§14.3) does not exist yet; the html
-  fragment escapes untrusted bodies into `<pre><code>` rather than rendering them.
+  fragment escapes untrusted bodies into `<pre><code>` rather than rendering them. The auxiliary
+  Markdown-URL arm of the `active-html` detector recognizes direct code spans and top-level fences;
+  it is not a complete CommonMark block parser and does not model container prefixes or indented
+  code blocks. The raw-HTML arm is intentionally lexical rather than a claim about whether the
+  source bytes form live HTML in a standalone Markdown parse.
+- **No browser sanitizer claim from `active-html`.** Its scheme detector does not decode HTML
+  character references in attribute values and does not parse multi-candidate `srcset` or CSS URL
+  syntax. For example, `href="&#106;avascript:…"` is deliberately not reported today. This is a
+  reporting boundary, not a live-markup escape: the Markdown face quarantines the whole body and
+  the HTML fragment escapes `&` and `<`. The future GFM pipeline must close this detector gap with
+  its real HTML parser/sanitizer before any untrusted body is rendered as markup.
 - **Textual JSON-key matching only.** The neutralizer does not parse or decode JSON key escape
   spellings. For example, the literal body text `"next_action\u0073":` remains data, rather than
   being treated as `"next_actions":`. This package makes no claim that a downstream consumer which

@@ -16,7 +16,10 @@
  *  3. Markdown fences are always longer than the longest backtick run in the
  *     body they wrap, so a body cannot break out of its quarantine fence.
  *  4. Script-bearing HTML is recorded and never emitted live: the markdown face
- *     fences it, the HTML face escapes it.
+ *     fences it, the HTML face escapes it. "Script-bearing" covers active tags,
+ *     event-handler attributes, and any destination whose scheme a browser
+ *     executes rather than fetches (`javascript:`, `data:`, `vbscript:`) —
+ *     wherever that destination is a real URL surface.
  *
  * What it deliberately does *not* do: it does not delete author content, and it
  * does not mangle prose that merely *discusses* the protocol. A forged comment
@@ -68,8 +71,8 @@ const ACTIVE_HTML_TAGS = new Set([
 ]);
 const ACTIVE_HTML_EVENT_NAME = /^on[a-z][a-z0-9:_-]*$/;
 // Only these attributes are URL-valued HTML execution surfaces. Scanning a
-// complete tag for `javascript:` also treats quoted descriptive data (title,
-// alt, aria-*) as executable when it is not.
+// complete tag for a dangerous scheme would also treat quoted descriptive data
+// (title, alt, aria-*) as executable when it is not.
 const URL_BEARING_HTML_ATTRIBUTES = new Set([
   "action",
   "cite",
@@ -80,7 +83,100 @@ const URL_BEARING_HTML_ATTRIBUTES = new Set([
   "src",
   "xlink:href",
 ]);
-const JAVASCRIPT_URL = "javascript:";
+/**
+ * URL schemes whose destination a browser executes rather than fetches.
+ *
+ * `javascript:` and `vbscript:` run script directly. `data:` is listed whole
+ * rather than by media type: `data:text/html` and `data:image/svg+xml` execute,
+ * and sorting the inert ones out would mean re-implementing media-type parsing
+ * over attacker-controlled case, whitespace, `;`, base64 and percent escapes —
+ * a second parser to get wrong. Recording an inert `data:image/png` is honest
+ * over-reporting; missing an executable one is not (Rule A4).
+ *
+ * Matching is plain lower-case ASCII on purpose. Both interpretations that feed
+ * the scanners (`rawBrowserTokenizerScanText`, `unicodeCanonicalTokenizerScanText`)
+ * have already folded case and Unicode compatibility spellings, so `JaVaScRiPt:`,
+ * a fullwidth `ｄata:` and format-character-stuffed spellings all arrive here
+ * lower-cased and de-obfuscated.
+ */
+const DANGEROUS_URL_SCHEMES: readonly string[] = ["data:", "javascript:", "vbscript:"];
+
+/** Longest dangerous scheme *name*, so scheme accumulation is bounded. */
+const LONGEST_DANGEROUS_SCHEME_NAME = Math.max(
+  ...DANGEROUS_URL_SCHEMES.map((scheme) => scheme.length - 1),
+);
+/** WHATWG URL scheme grammar after the first character, which must be alphabetic. */
+const URL_SCHEME_CONTINUATION = /^[a-z0-9+.-]$/;
+
+/**
+ * The offset of the destination's scheme when a browser would parse it as one of
+ * `DANGEROUS_URL_SCHEMES`, else `undefined`.
+ *
+ * This is the single matcher behind every destination surface — Markdown inline
+ * destinations, Markdown autolinks and URL-bearing HTML attributes — so the three
+ * paths cannot drift apart as the list changes.
+ *
+ * It is deliberately *anchored*: only the scheme the browser resolves counts. A
+ * benign `https://example.test/?note=data:text/html` mentions a scheme in its
+ * query and is data, not an execution surface; reporting it as neutralized would
+ * be pretending (Rule A4).
+ *
+ * Two WHATWG basic-URL-parser preprocessing steps are mirrored, because both are
+ * reachable inside an HTML attribute value and both change what executes:
+ * leading C0-control-or-space is stripped, and ASCII tab, LF and CR are removed
+ * from anywhere in the input — so `java<TAB>script:` is a `javascript:` URL.
+ *
+ * Case and Unicode compatibility spellings need no handling here: both scan
+ * interpretations (`rawBrowserTokenizerScanText`, `unicodeCanonicalTokenizerScanText`)
+ * have already folded them before this runs.
+ *
+ * Proven boundary: HTML character references inside an attribute value are *not*
+ * decoded. A real HTML parser resolves `&#106;`, `&#x6a;`, `&Tab;` and `&colon;`
+ * before the URL parser ever sees the value, so `href="&#106;avascript:steal()"`
+ * is recorded as nothing here. Decoding them means owning a second parser — the
+ * character-reference table, its unterminated-entity quirks and its context
+ * rules — which is exactly the drift this module refuses elsewhere. This is a
+ * detection limit only while no face emits live markup: the markdown face fences
+ * the body and the HTML face escapes it, so neither renders the reference. It
+ * must be closed together with the GFM pipeline (§14.3), whose HTML sanitizer
+ * decodes references as part of parsing.
+ */
+function dangerousSchemeOffsetAt(
+  text: string,
+  startOffset: number,
+  endOffset: number,
+): number | undefined {
+  let cursor = startOffset;
+  // Leading C0 control or space is stripped before parsing.
+  while (cursor < endOffset && text.charCodeAt(cursor) <= 0x20) cursor += 1;
+
+  const schemeStart = cursor;
+  let scheme = "";
+
+  while (cursor < endOffset) {
+    const code = text.charCodeAt(cursor);
+    // ASCII tab, LF and CR are removed from anywhere in the input.
+    if (code === 0x09 || code === 0x0a || code === 0x0d) {
+      cursor += 1;
+      continue;
+    }
+    const character = text[cursor] as string;
+    if (character === ":") {
+      return DANGEROUS_URL_SCHEMES.includes(`${scheme}:`) ? schemeStart : undefined;
+    }
+    if (scheme.length >= LONGEST_DANGEROUS_SCHEME_NAME) return undefined;
+    if (
+      scheme.length === 0 ? !isAsciiLowerAlpha(character) : !URL_SCHEME_CONTINUATION.test(character)
+    ) {
+      return undefined;
+    }
+    scheme += character;
+    cursor += 1;
+  }
+
+  return undefined;
+}
+
 const HTML_ASCII_WHITESPACE = /^[\t\n\f\r ]$/;
 const COMMONMARK_HTML_START_TAG_NAME = /^[a-z][a-z0-9-]*$/;
 
@@ -143,7 +239,7 @@ function unicodeCanonicalTokenizerScanText(value: string): string {
 }
 
 interface ActiveHtmlFinding {
-  readonly kind: "tag" | "javascript";
+  readonly kind: "tag" | "url";
   /** Offset in the tokenizer interpretation that produced this finding. */
   readonly offset: number;
 }
@@ -260,21 +356,18 @@ interface ActiveStartTagScan {
   readonly complete: boolean;
   readonly tagName: string;
   readonly active: boolean;
-  readonly javascriptUrlOffsets: readonly number[];
+  readonly dangerousUrlOffsets: readonly number[];
 }
 
-function findJavascriptUrlOffsets(value: string, startOffset: number, endOffset: number): number[] {
-  const offsets: number[] = [];
-  let searchFrom = startOffset;
-
-  while (searchFrom < endOffset) {
-    const found = value.indexOf(JAVASCRIPT_URL, searchFrom);
-    if (found === -1 || found + JAVASCRIPT_URL.length > endOffset) break;
-    offsets.push(found);
-    searchFrom = found + JAVASCRIPT_URL.length;
-  }
-
-  return offsets;
+/**
+ * The dangerous destination scheme of one URL-bearing attribute value, if any.
+ *
+ * Returns at most one offset per attribute: the value's own scheme. A scheme
+ * spelled later in the path or query is ordinary data and is not reported.
+ */
+function findDangerousUrlOffsets(value: string, startOffset: number, endOffset: number): number[] {
+  const offset = dangerousSchemeOffsetAt(value, startOffset, endOffset);
+  return offset === undefined ? [] : [offset];
 }
 
 function finishActiveStartTag(
@@ -282,14 +375,14 @@ function finishActiveStartTag(
   complete: boolean,
   tagName: string,
   active: boolean,
-  javascriptUrlOffsets: readonly number[],
+  dangerousUrlOffsets: readonly number[],
 ): ActiveStartTagScan {
   return {
     endOffset,
     complete,
     tagName,
     active,
-    javascriptUrlOffsets,
+    dangerousUrlOffsets,
   };
 }
 
@@ -307,16 +400,16 @@ function scanActiveStartTag(value: string, openOffset: number): ActiveStartTagSc
 
   const tagName = value.slice(openOffset + 1, cursor);
   let active = ACTIVE_HTML_TAGS.has(tagName);
-  const javascriptUrlOffsets: number[] = [];
+  const dangerousUrlOffsets: number[] = [];
 
   while (cursor < value.length) {
     while (isHtmlAsciiWhitespace(value[cursor]) || value[cursor] === "/") cursor += 1;
 
     if (cursor >= value.length) {
-      return finishActiveStartTag(value.length, false, tagName, active, javascriptUrlOffsets);
+      return finishActiveStartTag(value.length, false, tagName, active, dangerousUrlOffsets);
     }
     if (value[cursor] === ">") {
-      return finishActiveStartTag(cursor + 1, true, tagName, active, javascriptUrlOffsets);
+      return finishActiveStartTag(cursor + 1, true, tagName, active, dangerousUrlOffsets);
     }
 
     const attributeNameStart = cursor;
@@ -347,7 +440,7 @@ function scanActiveStartTag(value: string, openOffset: number): ActiveStartTagSc
       const valueStart = cursor;
       while (cursor < value.length && value[cursor] !== quote) cursor += 1;
       if (urlBearingAttribute) {
-        javascriptUrlOffsets.push(...findJavascriptUrlOffsets(value, valueStart, cursor));
+        dangerousUrlOffsets.push(...findDangerousUrlOffsets(value, valueStart, cursor));
       }
       if (value[cursor] === quote) cursor += 1;
       continue;
@@ -364,11 +457,11 @@ function scanActiveStartTag(value: string, openOffset: number): ActiveStartTagSc
       cursor += 1;
     }
     if (urlBearingAttribute) {
-      javascriptUrlOffsets.push(...findJavascriptUrlOffsets(value, valueStart, cursor));
+      dangerousUrlOffsets.push(...findDangerousUrlOffsets(value, valueStart, cursor));
     }
   }
 
-  return finishActiveStartTag(value.length, false, tagName, active, javascriptUrlOffsets);
+  return finishActiveStartTag(value.length, false, tagName, active, dangerousUrlOffsets);
 }
 
 /**
@@ -385,6 +478,10 @@ function collectActiveHtml(text: string): ActiveHtmlFinding[] {
     // transformed UTF-16 unit in a benign large canonical interpretation.
     const characterCode = text.charCodeAt(cursor);
     if (characterCode === 60) {
+      if (isMarkdownEscaped(text, cursor)) {
+        cursor += 1;
+        continue;
+      }
       if (
         text.charCodeAt(cursor + 1) === 33 &&
         text.charCodeAt(cursor + 2) === 45 &&
@@ -396,8 +493,8 @@ function collectActiveHtml(text: string): ActiveHtmlFinding[] {
       const tag = scanActiveStartTag(text, cursor);
       if (tag !== undefined) {
         if (tag.active) findings.push({ kind: "tag", offset: cursor });
-        for (const javascriptOffset of tag.javascriptUrlOffsets) {
-          findings.push({ kind: "javascript", offset: javascriptOffset });
+        for (const dangerousOffset of tag.dangerousUrlOffsets) {
+          findings.push({ kind: "url", offset: dangerousOffset });
         }
         cursor = tag.endOffset;
         continue;
@@ -423,9 +520,107 @@ function isMarkdownEscaped(text: string, offset: number): boolean {
 function markdownCodeSpanEnd(text: string, openOffset: number): number | undefined {
   let runLength = 1;
   while (text[openOffset + runLength] === "`") runLength += 1;
-  const delimiter = "`".repeat(runLength);
-  const closeOffset = text.indexOf(delimiter, openOffset + runLength);
-  return closeOffset === -1 ? undefined : closeOffset + runLength;
+  const openingEnd = openOffset + runLength;
+  let cursor = openingEnd;
+  while (cursor < text.length) {
+    const candidate = text.indexOf("`", cursor);
+    if (candidate === -1) return openingEnd;
+    let closingLength = 1;
+    while (text[candidate + closingLength] === "`") closingLength += 1;
+    // CommonMark matches a code-span opener only with a run of exactly the
+    // same length. A two-backtick slice inside a three-backtick run is not a
+    // closer for a two-backtick opener.
+    if (closingLength === runLength) return candidate + closingLength;
+    cursor = candidate + closingLength;
+  }
+  // The maximal opener run is literal text when no exact closer exists. Skip
+  // only those delimiter bytes; the following body still needs active-markup
+  // scanning. This also prevents quadratic rescans of one long unmatched run.
+  return openingEnd;
+}
+
+function markdownLineStart(text: string, offset: number): number {
+  return Math.max(text.lastIndexOf("\n", offset - 1), text.lastIndexOf("\r", offset - 1)) + 1;
+}
+
+function markdownLineEnd(text: string, offset: number): number {
+  const lineFeed = text.indexOf("\n", offset);
+  const carriageReturn = text.indexOf("\r", offset);
+  if (lineFeed === -1) return carriageReturn === -1 ? text.length : carriageReturn;
+  return carriageReturn === -1 ? lineFeed : Math.min(lineFeed, carriageReturn);
+}
+
+function markdownNextLineStart(text: string, lineEnd: number): number {
+  if (lineEnd >= text.length) return text.length;
+  return text[lineEnd] === "\r" && text[lineEnd + 1] === "\n" ? lineEnd + 2 : lineEnd + 1;
+}
+
+/**
+ * Return the end of a CommonMark fenced code block beginning at `openOffset`.
+ * An unclosed opener keeps the rest of the document inert, as CommonMark does.
+ */
+function markdownFencedCodeBlockEnd(text: string, openOffset: number): number | undefined {
+  const delimiter = text[openOffset];
+  if ((delimiter !== "`" && delimiter !== "~") || isMarkdownEscaped(text, openOffset)) {
+    return undefined;
+  }
+  const preceding = text[openOffset - 1];
+  if (openOffset > 0 && preceding !== " " && preceding !== "\n" && preceding !== "\r") {
+    return undefined;
+  }
+
+  const lineStart = markdownLineStart(text, openOffset);
+  const indentation = text.slice(lineStart, openOffset);
+  if (indentation.length > 3 || ![...indentation].every((character) => character === " ")) {
+    return undefined;
+  }
+
+  let openingLength = 1;
+  while (text[openOffset + openingLength] === delimiter) openingLength += 1;
+  if (openingLength < 3) return undefined;
+
+  const openingLineEnd = markdownLineEnd(text, openOffset + openingLength);
+  // Backtick-fence info strings may not themselves contain a backtick.
+  if (delimiter === "`" && text.slice(openOffset + openingLength, openingLineEnd).includes("`")) {
+    return undefined;
+  }
+
+  let line = markdownNextLineStart(text, openingLineEnd);
+  while (line < text.length) {
+    let cursor = line;
+    let closingIndentation = 0;
+    while (text[cursor] === " " && closingIndentation < 4) {
+      cursor += 1;
+      closingIndentation += 1;
+    }
+    if (closingIndentation <= 3) {
+      let closingLength = 0;
+      while (text[cursor + closingLength] === delimiter) closingLength += 1;
+      if (closingLength >= openingLength) {
+        let tail = cursor + closingLength;
+        while (text[tail] === " " || text[tail] === "\t") {
+          tail += 1;
+        }
+        if (tail === text.length || text[tail] === "\n" || text[tail] === "\r") {
+          return markdownNextLineStart(text, tail);
+        }
+      }
+    }
+    const lineEnd = markdownLineEnd(text, line);
+    if (lineEnd === text.length) break;
+    line = markdownNextLineStart(text, lineEnd);
+  }
+
+  return text.length;
+}
+
+/** Markdown code spans and fenced blocks are text, never live HTML surfaces. */
+function markdownInertEnd(text: string, openOffset: number): number | undefined {
+  const fencedEnd = markdownFencedCodeBlockEnd(text, openOffset);
+  if (fencedEnd !== undefined) return fencedEnd;
+  return text[openOffset] === "`" && !isMarkdownEscaped(text, openOffset)
+    ? markdownCodeSpanEnd(text, openOffset)
+    : undefined;
 }
 
 function markdownLabelEnd(text: string, openOffset: number): number | undefined {
@@ -476,12 +671,16 @@ function markdownLinkCloseAfterDestination(text: string, cursor: number): boolea
 }
 
 /**
- * Return the start of a `javascript:` Markdown destination only when it is
+ * Return the start of a dangerous-scheme Markdown destination only when it is
  * part of a syntactically active inline link or image. A bare scheme spelling,
  * a prose label followed by a parenthesized aside, and code-span examples are
  * data, not execution surfaces.
+ *
+ * The scheme must begin the destination. `[x](https://example.test/?u=data:…)`
+ * is an ordinary link whose *query* mentions a scheme, so it is not a finding;
+ * only the destination the browser would actually resolve is scanned.
  */
-function markdownJavascriptDestinationOffset(
+function markdownDangerousDestinationOffset(
   text: string,
   openParenOffset: number,
 ): number | undefined {
@@ -494,7 +693,7 @@ function markdownJavascriptDestinationOffset(
     const destinationEnd = text.indexOf(">", destinationStart);
     if (destinationEnd === -1) return undefined;
     return markdownLinkCloseAfterDestination(text, destinationEnd + 1) &&
-      text.startsWith(JAVASCRIPT_URL, destinationStart)
+      dangerousSchemeOffsetAt(text, destinationStart, text.length) !== undefined
       ? destinationStart
       : undefined;
   }
@@ -505,7 +704,7 @@ function markdownJavascriptDestinationOffset(
     const character = text[cursor];
     if (isHtmlAsciiWhitespace(character) && nestedParens === 0) {
       return markdownLinkCloseAfterDestination(text, cursor) &&
-        text.startsWith(JAVASCRIPT_URL, destinationStart)
+        dangerousSchemeOffsetAt(text, destinationStart, text.length) !== undefined
         ? destinationStart
         : undefined;
     }
@@ -513,7 +712,9 @@ function markdownJavascriptDestinationOffset(
       nestedParens += 1;
     } else if (character === ")") {
       if (nestedParens === 0) {
-        return text.startsWith(JAVASCRIPT_URL, destinationStart) ? destinationStart : undefined;
+        return dangerousSchemeOffsetAt(text, destinationStart, text.length) !== undefined
+          ? destinationStart
+          : undefined;
       }
       nestedParens -= 1;
     }
@@ -525,18 +726,18 @@ function markdownJavascriptDestinationOffset(
 
 /**
  * CommonMark also makes a URI-shaped `<scheme:…>` an autolink. It is a real
- * Markdown URL surface, unlike a bare `javascript:` spelling in prose. Keep
- * the scan intentionally narrow: the character after `<` must begin the
- * forbidden scheme, the URL cannot contain ASCII whitespace or another angle
- * bracket, and a backslash-escaped opener remains ordinary text.
+ * Markdown URL surface, unlike a bare scheme spelling in prose. Keep the scan
+ * intentionally narrow: the character after `<` must begin one of the dangerous
+ * schemes, the URL cannot contain ASCII whitespace or another angle bracket, and
+ * a backslash-escaped opener remains ordinary text.
  */
-function markdownJavascriptAutolinkOffset(text: string, openOffset: number): number | undefined {
+function markdownDangerousAutolinkOffset(text: string, openOffset: number): number | undefined {
   if (isMarkdownEscaped(text, openOffset)) return undefined;
 
   const destinationStart = openOffset + 1;
-  if (!text.startsWith(JAVASCRIPT_URL, destinationStart)) return undefined;
+  if (dangerousSchemeOffsetAt(text, destinationStart, text.length) === undefined) return undefined;
 
-  for (let cursor = destinationStart + JAVASCRIPT_URL.length; cursor < text.length; cursor += 1) {
+  for (let cursor = destinationStart; cursor < text.length; cursor += 1) {
     const character = text[cursor] as string;
     if (character === ">") return destinationStart;
     if (character === "<" || isHtmlAsciiWhitespace(character)) return undefined;
@@ -564,16 +765,14 @@ function collectActiveMarkdownUrls(text: string): ActiveHtmlFinding[] {
   let cursor = 0;
 
   while (cursor < text.length) {
+    const inertEnd = markdownInertEnd(text, cursor);
+    if (inertEnd !== undefined) {
+      cursor = inertEnd;
+      continue;
+    }
     if (text.startsWith(CONTROL_COMMENT_OPEN, cursor)) {
       cursor = htmlCommentEndOffset(text, cursor);
       continue;
-    }
-    if (text[cursor] === "`") {
-      const codeEnd = markdownCodeSpanEnd(text, cursor);
-      if (codeEnd !== undefined) {
-        cursor = codeEnd;
-        continue;
-      }
     }
     if (text[cursor] === "<") {
       const startTagEnd = completeMarkdownHtmlStartTagEnd(text, cursor);
@@ -581,9 +780,9 @@ function collectActiveMarkdownUrls(text: string): ActiveHtmlFinding[] {
         cursor = startTagEnd;
         continue;
       }
-      const autolinkOffset = markdownJavascriptAutolinkOffset(text, cursor);
+      const autolinkOffset = markdownDangerousAutolinkOffset(text, cursor);
       if (autolinkOffset !== undefined) {
-        findings.push({ kind: "javascript", offset: autolinkOffset });
+        findings.push({ kind: "url", offset: autolinkOffset });
       }
       cursor += 1;
       continue;
@@ -598,9 +797,9 @@ function collectActiveMarkdownUrls(text: string): ActiveHtmlFinding[] {
       cursor += 1;
       continue;
     }
-    const destinationOffset = markdownJavascriptDestinationOffset(text, labelEnd + 1);
+    const destinationOffset = markdownDangerousDestinationOffset(text, labelEnd + 1);
     if (destinationOffset !== undefined) {
-      findings.push({ kind: "javascript", offset: destinationOffset });
+      findings.push({ kind: "url", offset: destinationOffset });
     }
     cursor = labelEnd + 1;
   }

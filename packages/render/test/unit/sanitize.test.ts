@@ -292,6 +292,134 @@ describe("neutralizeUntrustedBody", () => {
     });
   });
 
+  test("records data: and vbscript: destinations on every surface javascript: is recorded", () => {
+    // One shared matcher backs Markdown destinations, Markdown autolinks and
+    // URL-bearing HTML attributes, so the three paths cannot drift apart.
+    const controls = [
+      '<a href="data:text/html,<script>steal()</script>">click</a>',
+      "<img src=data:text/html,steal()>",
+      '<button formaction="vbscript:steal()">submit</button>',
+      "[Markdown link](data:text/html;base64,PHN2Zz4=)",
+      "![Markdown image](<vbscript:steal()>)",
+      "<data:text/html,steal()>",
+      "<VBSCRIPT:case-folded-steal()>",
+      "＜ＤＡＴＡ:canonical-steal()＞",
+    ];
+
+    for (const body of controls) {
+      expect(neutralizeUntrustedBody(body)).toEqual({
+        text: body,
+        findings: [{ marker: "active-html", count: 1 }],
+      });
+    }
+  });
+
+  test("reads an attribute destination scheme the way a URL parser would", () => {
+    // The WHATWG basic URL parser strips leading C0-control-or-space and removes
+    // ASCII tab, LF and CR from anywhere in the input, so each of these executes.
+    const TAB = String.fromCharCode(9);
+    const LINE_FEED = String.fromCharCode(10);
+    const CARRIAGE_RETURN = String.fromCharCode(13);
+    const controls = [
+      '<a href=" javascript:steal()">leading space</a>',
+      `<a href="java${TAB}script:steal()">tab inside the scheme</a>`,
+      `<a href="vb${LINE_FEED}script:steal()">line feed inside the scheme</a>`,
+      `<a href="da${CARRIAGE_RETURN}ta:text/html,steal()">carriage return inside the scheme</a>`,
+      '<a HREF="DaTa:text/html,steal()">mixed case</a>',
+    ];
+
+    for (const body of controls) {
+      expect(neutralizeUntrustedBody(body)).toEqual({
+        text: body,
+        findings: [{ marker: "active-html", count: 1 }],
+      });
+    }
+  });
+
+  test("leaves a dangerous scheme spelled inside an ordinary URL's path or query alone", () => {
+    // Rule A4: reporting a benign link as neutralized would be pretending. Only
+    // the scheme the browser actually resolves counts, never one mentioned later.
+    const inert = [
+      '<a href="https://example.test/?note=data:text/html">source</a>',
+      '<a href="https://example.test/javascript:not-a-scheme">source</a>',
+      '<img src="https://example.test/p?u=vbscript:archival()">',
+      "[Markdown link](https://example.test/?u=data:text/html,x)",
+      '<a href="/p/claim.md">relative</a>',
+      "This prose discusses data: and vbscript: as historical URL schemes.",
+      "`[inline code](data:text/html,shown-as-data())`",
+      "\\<vbscript:shown-as-data()>",
+      '<a title="data:text/html documentary citation">source</a>',
+    ];
+
+    for (const body of inert) {
+      expect(neutralizeUntrustedBody(body)).toEqual({ text: body, findings: [] });
+    }
+  });
+
+  test("keeps Markdown URL surfaces in code and escaped tags inert", () => {
+    const inert = [
+      "\\<script>shown as escaped text</script>",
+      "`[shown as inline code](data:text/html,not-a-link)`",
+      "```md\n[shown in a backtick fence](javascript:not-a-link)\n```",
+      "~~~md\n[shown in a tilde fence](vbscript:not-a-link)\n~~~",
+      "```md\r\n[shown in a CRLF fence](data:text/html,not-a-link)\r\n```\r\n",
+      "~~~md\r[shown in a CR-only fence](javascript:not-a-link)\r~~~\r",
+      // Form feed is HTML whitespace, but CommonMark permits only space/tab
+      // after a closing fence. This line is content, so the unclosed fence
+      // remains inert through the end of the document.
+      "```md\n```\f\n[still fenced](javascript:not-a-link)",
+      // A longer backtick run is not an inline-code closer, but a later exact
+      // run is; everything between the exact pair remains code.
+      "``[still inline code](javascript:not-a-link)```then``",
+    ];
+
+    for (const body of inert) {
+      expect(neutralizeUntrustedBody(body)).toEqual({ text: body, findings: [] });
+    }
+  });
+
+  test("retains the lexical active-HTML signal inside Markdown code examples", () => {
+    const controls = [
+      "`<script>lexically dangerous HTML</script>`",
+      "```html\n<img src=x onerror=steal()>\n```",
+    ];
+
+    for (const body of controls) {
+      expect(neutralizeUntrustedBody(body)).toEqual({
+        text: body,
+        findings: [{ marker: "active-html", count: 1 }],
+      });
+    }
+  });
+
+  test("does not hide active markup behind a nonmatching code-span run", () => {
+    const body = "``<script>not actually inline code</script>```";
+
+    expect(neutralizeUntrustedBody(body)).toEqual({
+      text: body,
+      findings: [{ marker: "active-html", count: 1 }],
+    });
+  });
+
+  test("scans after one body-sized unmatched backtick run without suffix rescans", () => {
+    const body = `prose${"`".repeat(20_000)}<script>still active</script>`;
+
+    expect(neutralizeUntrustedBody(body)).toEqual({
+      text: body,
+      findings: [{ marker: "active-html", count: 1 }],
+    });
+  });
+
+  test("documents the HTML character-reference decoding limit without claiming a finding", () => {
+    const body = '<a href="&#106;avascript:shown-as-escaped-text()">source</a>';
+
+    // The matcher intentionally does not implement the HTML entity parser.
+    // Every current face still renders this body as data: Markdown fences it
+    // and the HTML face escapes the ampersand before it could decode.
+    expect(neutralizeUntrustedBody(body)).toEqual({ text: body, findings: [] });
+    expect(escapeHtml(body)).toContain("&amp;#106;avascript:");
+  });
+
   test("detects slash-separated handlers that the old whitespace-only arm misses", () => {
     const controls = ["<svg/onload=steal(1)>", "<IMG/ONERROR =steal(2)>", "<svg /onload=steal(3)>"];
 
