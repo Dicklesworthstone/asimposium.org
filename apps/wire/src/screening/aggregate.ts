@@ -245,6 +245,28 @@ function isSha256Digest(value: unknown): value is string {
   return typeof value === "string" && /^sha256:[a-f0-9]{64}$/.test(value);
 }
 
+/**
+ * A stratum label, allowlisted by structure rather than screened by denylist.
+ *
+ * `stratum` is free-form manifest text that becomes a `by_stratum` label in the
+ * report and in the OPS.2a stream, so it is a published diagnostic field. The
+ * general `safeDiagnosticLabel` shape is too permissive for that job: it admits
+ * `_`, `.` and digits, so `asimp_ag_01jqzx…`, `sk_live_51h8xyz…` and
+ * `v1.s3cr3tfragment…` all pass it while carrying a credential in the label.
+ *
+ * Lowercase words joined by hyphens is the form every real stratum already takes
+ * (`graph-theory`, `hard-reject-operational-harm`), and it is a poor carrier for
+ * anything secret-shaped, which almost always needs digits or `_`/`.`/`:`.
+ *
+ * Honest boundary: this makes a credential-shaped label structurally hard, not
+ * impossible — a pure-lowercase-letters secret would still fit. The corpus is
+ * operator-authored, so this closes the accidental-paste path; it is not a
+ * defence against a malicious manifest author, who owns the corpus anyway.
+ */
+function safeStratumLabel(value: unknown): value is string {
+  return typeof value === "string" && /^[a-z][a-z-]{2,47}$/.test(value) && !value.includes("--");
+}
+
 function isPolicyCategory(value: unknown): boolean {
   return typeof value === "string" && (POLICY_CATEGORIES as readonly string[]).includes(value);
 }
@@ -447,6 +469,16 @@ function requireCompleteInputs(
         "Corpus identifier or evaluated body digest is missing or malformed.",
       );
     }
+    // `stratum` is free-form manifest text and it becomes a `by_stratum` label in
+    // the report and in the OPS.2a stream, so it is a diagnostic field and has to
+    // clear the same bar as an id. Without this, a corpus entry could carry a
+    // credential-shaped stratum straight into a record that is otherwise digest-only
+    // (Fable §14.3 never-log list). `policy_category` needs no check: it is an enum.
+    if (!safeStratumLabel(example.stratum)) {
+      throw new ScreeningInputError(
+        `Corpus entry ${example.id} declares a label this module will not publish.`,
+      );
+    }
     if (example.expected_outcome !== expectedOutcomeFor(example.ground_truth)) {
       throw new ScreeningInputError(
         "Corpus expected outcome conflicts with its declared ground truth.",
@@ -603,10 +635,7 @@ export function aggregateScreeningRun(
       failures.push("HARD_REJECT_FALSE_NEGATIVE_THRESHOLD_FAILED");
     if (eligibleQuarantine.length < thresholds.minimum_quarantine_examples)
       failures.push("QUARANTINE_SAMPLE_TOO_SMALL");
-    // A count, like the hard-reject target: one quarantine-truth item published
-    // is one too many, and a rate would let a larger corpus dilute it.
-    if (quarantinePublishRate.numerator > thresholds.quarantine_publish_max)
-      failures.push("QUARANTINE_PUBLISH_THRESHOLD_FAILED");
+    // A rate, and therefore a statistic: it needs a complete run to mean anything.
     if (
       quarantineOverRefusalRate.rate !== null &&
       quarantineOverRefusalRate.rate >= thresholds.quarantine_over_refusal_rate_exclusive_max
@@ -614,6 +643,23 @@ export function aggregateScreeningRun(
       failures.push("QUARANTINE_OVER_REFUSAL_THRESHOLD_FAILED");
     }
   }
+
+  /**
+   * Outside the completeness guard, deliberately.
+   *
+   * A publish is not a statistic: it is a directly observed safety event on an
+   * observation the provider *did* answer, and another observation timing out
+   * does not make it less true. The precedent is the sentinel check below, which
+   * has always survived an incomplete run for the same reason — it excludes only
+   * the observations that themselves failed.
+   *
+   * A count, not a rate, so a larger corpus cannot dilute it: the ceiling is
+   * zero. The hard-reject false-negative count stays inside the guard where it
+   * already was; changing that is a separate decision about an existing metric,
+   * not a property of this new class.
+   */
+  if (quarantinePublishRate.numerator > thresholds.quarantine_publish_max)
+    failures.push("QUARANTINE_PUBLISH_THRESHOLD_FAILED");
   if (sentinels.length > 0) failures.push("SENTINEL_NEGATIVE_DETECTED");
   versionMismatch(modelVersions, identity.model_version, "MODEL_VERSION", failures);
   versionMismatch(policyVersions, identity.policy_version, "POLICY_VERSION", failures);

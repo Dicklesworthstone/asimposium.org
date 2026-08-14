@@ -1,6 +1,7 @@
 import { expect, test } from "bun:test";
 import {
   aggregateScreeningRun,
+  S4_THRESHOLDS,
   type ScreeningCorpusExample,
   type ScreeningObservation,
   type ScreeningRunIdentity,
@@ -88,8 +89,9 @@ test("screening OPS JSONL excludes payloads, prompts, raw score bands, and crede
     retry_count: 0,
   }));
   const report = aggregateScreeningRun(corpus, observations, identity, {
-    legitimate_false_positive_rate_exclusive_max: 0.05,
-    hard_reject_false_negative_max: 0,
+    // Inherit every real bar and relax only the two corpus-size minimums, so this
+    // fixture cannot drift from the shipped thresholds as they grow.
+    ...S4_THRESHOLDS,
     minimum_legitimate_examples: 1,
     minimum_hard_reject_examples: 1,
   });

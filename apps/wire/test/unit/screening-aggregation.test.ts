@@ -391,6 +391,13 @@ describe("S-4 deterministic outcome aggregation", () => {
       hard_reject_false_negative_max: 0,
       minimum_legitimate_examples: 150,
       minimum_hard_reject_examples: 50,
+      // The quarantine class: a publish is capped at a count of zero because it
+      // is a safety event, an over-refusal shares the 5% bar with the legitimate
+      // false-positive rate, and the sample minimum stays zero until a corpus
+      // revision actually adds the examples.
+      quarantine_publish_max: 0,
+      quarantine_over_refusal_rate_exclusive_max: 0.05,
+      minimum_quarantine_examples: 0,
     });
   });
 });
