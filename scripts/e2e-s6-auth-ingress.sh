@@ -154,10 +154,19 @@ readonly CONTROLLER_PGID
 # state directory is deliberately retained for diagnosis.
 # Every process still in the group, wrapper and workerd alike. The parent pid
 # exiting proves nothing: the grandchild is what holds the port.
+# Members of a process group, or exit 2 if the process table could not be read.
+#
+# The old form piped `ps` straight into `awk`, so a failing or missing `ps`
+# produced empty output that every caller read as "the group is empty". That is
+# fail-open in the one direction that matters: it reports a clean shutdown
+# precisely when it has no idea.
 group_members() {
   local pgid="$1"
   [[ -n "${pgid}" ]] || return 0
-  ps -eo pid=,pgid= 2>/dev/null | awk -v g="${pgid}" '$2 == g { print $1 }'
+  local table
+  table="$(ps -eo pid=,pgid= 2>/dev/null)" || return 2
+  [[ -n "${table}" ]] || return 2
+  printf '%s\n' "${table}" | awk -v g="${pgid}" '$2 == g { print $1 }'
 }
 
 # Does this group still belong to this run?
@@ -313,6 +322,9 @@ start_worker() {
   # With job control the child leads its own group; verify rather than assume,
   # because a silent fallback to a parent-only kill is how workerd leaks.
   SERVER_PGID="$(ps -o pgid= -p "${SERVER_PID}" 2>/dev/null | tr -d " ")"
+  # `stop_worker` clears SERVER_PGID, so the post-cleanup survivor assertions
+  # would have nothing left to look at. This one survives the clearing.
+  LAST_SERVER_PGID="${SERVER_PGID}"
   if [[ -z "${SERVER_PGID}" || "${SERVER_PGID}" != "${SERVER_PID}" ]]; then
     fail_record "worker_owns_its_process_group" "child pid ${SERVER_PID} is not its own group leader (pgid ${SERVER_PGID:-unknown}); a group kill would leak workerd"
     stop_group "${SERVER_PGID}"
@@ -343,10 +355,98 @@ if ! start_worker; then
   exit 1
 fi
 
+# ── cleanup survivors, asserted on every path ────────────────────────────────
+#
+# These ran only under S6_SELF_TEST, which is the one configuration where a leak
+# is least likely to matter and most likely to be noticed anyway. The ordinary
+# run -- the one CI executes, the one that ends in a blocked 78 -- reported
+# nothing about survivors at all, so a workerd holding a port and a D1 file into
+# the next run would exit 78 looking exactly like a clean run.
+assert_no_survivors() {
+  local pgid="$1"
+  local table rows orphans listeners members status
+
+  # ── the process table ─────────────────────────────────────────────────────
+  # Assigned before it is tested. `local x="$(cmd)"` would discard cmd's exit
+  # status behind `local`'s own, which is always 0.
+  table="$(ps -eo pid=,ppid=,command= 2>/dev/null)"
+  status=$?
+  if (( status != 0 )); then
+    fail_record "process_inspection_available" \
+      "ps exited ${status}; survivor state is unknown, so this run will not report zero"
+    return 1
+  fi
+  if [[ -z "${table}" ]]; then
+    fail_record "process_inspection_available" \
+      "ps produced no rows at all; survivor state is unknown, so this run will not report zero"
+    return 1
+  fi
+  # A format this awk cannot parse yields zero matches, which reads exactly like
+  # a clean machine. Require the shape before trusting the count.
+  rows="$(printf '%s\n' "${table}" | grep -cE '^[[:space:]]*[0-9]+[[:space:]]+[0-9]+[[:space:]]+[^[:space:]]' || true)"
+  if [[ "${rows}" == "0" ]]; then
+    fail_record "process_inspection_parsable" \
+      "no ps row matched the expected 'pid ppid command' shape; the survivor count would be meaningless"
+    return 1
+  fi
+
+  # ── listeners on the owned port ───────────────────────────────────────────
+  if ! command -v lsof >/dev/null 2>&1; then
+    fail_record "listener_inspection_available" \
+      "lsof is not available; whether a process still holds the owned port cannot be established"
+    return 1
+  fi
+  # lsof exits 1 with empty output when nothing matches -- that is "no listener",
+  # not a failure. Any other nonzero status, or a nonzero status with output, is
+  # an inspection failure and must not be read as zero.
+  listeners="$(lsof -ti tcp:"${S6_PORT}" 2>/dev/null)"
+  status=$?
+  if (( status > 1 )) || { (( status == 1 )) && [[ -n "${listeners}" ]]; }; then
+    fail_record "listener_inspection_available" \
+      "lsof exited ${status} while inspecting the owned port; the listener count is unknown"
+    return 1
+  fi
+
+  # ── the worker's process group ────────────────────────────────────────────
+  members="$(group_members "${pgid}")"
+  status=$?
+  if (( status != 0 )); then
+    fail_record "group_inspection_available" \
+      "the process table could not be read while counting group members; survivors are unknown"
+    return 1
+  fi
+  emit "{\"suite\":\"s6-auth-ingress-local\",\"assertion\":\"survivor_inspection_available\",\"status\":\"pass\",\"detail\":\"ps, lsof and the group probe all answered, so a zero count means zero\",\"reproduce\":\"${REPRODUCE}\"}"
+
+  # ── the counts themselves ─────────────────────────────────────────────────
+  # Any parent: a grandchild reparented to init still holds the port, and a
+  # pid-only check would call that clean.
+  orphans="$(printf '%s\n' "${table}" \
+    | awk -v state="${STATE_DIR}" '$0 ~ /workerd|wrangler/ && index($0, state) > 0 { print $1 }' \
+    | wc -l | tr -d ' ')"
+  if [[ "${orphans}" != "0" ]]; then
+    fail_record "no_orphaned_runtime_survives" \
+      "${orphans} workerd/wrangler process(es) referencing this run's state directory outlived the group"
+    return 1
+  fi
+  emit "{\"suite\":\"s6-auth-ingress-local\",\"assertion\":\"no_orphaned_runtime_survives\",\"status\":\"pass\",\"detail\":\"no workerd or wrangler process referencing this run's state directory survives, under any parent\",\"reproduce\":\"${REPRODUCE}\"}"
+
+  local listener_count member_count
+  listener_count="$(printf '%s' "${listeners}" | grep -c . || true)"
+  member_count="$(printf '%s' "${members}" | grep -c . || true)"
+  if [[ "${listener_count}" != "0" || "${member_count}" != "0" ]]; then
+    fail_record "child_process_group_is_reaped" \
+      "${listener_count} listener(s) and ${member_count} group member(s) survived cleanup"
+    return 1
+  fi
+  emit "{\"suite\":\"s6-auth-ingress-local\",\"assertion\":\"child_process_group_is_reaped\",\"status\":\"pass\",\"detail\":\"no process holds the owned port after process-group termination\",\"reproduce\":\"${REPRODUCE}\"}"
+  return 0
+}
+
 # ── the checks ───────────────────────────────────────────────────────────────
 run_checker() {
   env S6_ORIGIN="${ORIGIN}" S6_NOW="${S6_NOW}" S6_KID="${S6_KID}" \
     S6_PRIVATE_KEY_JWK="${S6_PRIVATE_KEY_JWK}" \
+    S6_PHASE="${1:-full}" S6_STATE_DIR="${STATE_DIR}" \
     bun "${CHECKER}" 2>"${CHECK_LOG}" &
   local checker_pid=$!
   local deadline=$((SECONDS + CHECK_DEADLINE_SECONDS))
@@ -388,8 +488,90 @@ if [[ ${CHECK_EXIT} -ne 0 ]]; then
   exit 1
 fi
 
+# ── restart-persistent replay: the nonce must outlive the process ────────────
+#
+# Everything above ran against one live isolate, so all of it is equally
+# satisfied by an in-memory nonce set. This is the only assertion that can tell
+# the difference: spend one envelope, stop workerd, start it again against the
+# SAME --persist-to directory, and present that exact envelope to a process that
+# has never seen it. Only a durable D1 row can refuse it.
+run_checker persist-mint
+PERSIST_MINT_EXIT=$?
+show_redacted "checker stderr" "${CHECK_LOG}"
+if [[ ${PERSIST_MINT_EXIT} -ne 0 ]]; then
+  show_redacted "wrangler" "${SERVER_LOG}"
+  stop_worker
+  fail_record "restart_persistent_replay" "the pre-restart envelope was not accepted (checker exit ${PERSIST_MINT_EXIT})"
+  exit 1
+fi
+
+# A clean stop, so D1 flushes to the persist directory rather than being killed
+# mid-write. A SIGKILL here would make a lost row indistinguishable from a lost
+# defence.
+if ! stop_worker; then
+  fail_record "restart_persistent_replay" "the worker group could not be cleanly stopped before the restart"
+  exit 1
+fi
+
+if ! start_worker; then
+  show_redacted "wrangler" "${SERVER_LOG}"
+  show_redacted "curl" "${CURL_LOG}"
+  stop_worker
+  fail_record "restart_persistent_replay" "the local Worker did not come back up against the persisted state directory"
+  exit 1
+fi
+emit "{\"suite\":\"s6-auth-ingress-local\",\"assertion\":\"the_worker_restarts_against_the_same_persisted_d1\",\"status\":\"pass\",\"detail\":\"workerd stopped and restarted with the same --persist-to state directory\",\"reproduce\":\"${REPRODUCE}\"}"
+
+run_checker persist-replay
+PERSIST_REPLAY_EXIT=$?
+show_redacted "checker stderr" "${CHECK_LOG}"
+if [[ ${PERSIST_REPLAY_EXIT} -ne 0 ]]; then
+  show_redacted "wrangler" "${SERVER_LOG}"
+  stop_worker
+  fail_record "restart_persistent_replay" "the same envelope was not refused after the restart (checker exit ${PERSIST_REPLAY_EXIT})"
+  exit 1
+fi
+emit "{\"suite\":\"s6-auth-ingress-local\",\"assertion\":\"restart_persistent_replay\",\"status\":\"pass\",\"detail\":\"one envelope accepted before the restart and refused after it, by a process that never held it in memory\",\"reproduce\":\"${REPRODUCE}\"}"
+
 # ── lifecycle self-tests, opt-in ─────────────────────────────────────────────
 if [[ "${S6_SELF_TEST:-0}" == "1" ]]; then
+  # ── planted: every survivor inspection must fail CLOSED ───────────────────
+  #
+  # Each stub below breaks one inspection. Before this, all of them produced the
+  # same answer -- "0 survivors" -- because a failing `ps`, a missing `lsof` and
+  # an unparsable process table all yield empty output, and empty output counts
+  # as zero. A run on a machine without lsof would have reported a clean
+  # shutdown it never established. Each case must now name its own failure.
+  #
+  # The stubs are plain function definitions inside a subshell, so nothing here
+  # can leak into the real run, and no `eval` is involved.
+  run_inspection() {
+    if assert_no_survivors "${SERVER_PGID}"; then printf 'returned-success'; else printf 'returned-failure'; fi
+  }
+  judge_inspection() {
+    local expected="$1" observed="$2"
+    if [[ "${observed}" != *"returned-failure"* || "${observed}" != *"${expected}"* ]]; then
+      stop_worker
+      fail_record "survivor_inspection_fails_closed" \
+        "with ${expected} broken, the survivor check did not fail closed naming that assertion"
+      exit 1
+    fi
+  }
+
+  judge_inspection "process_inspection_available" \
+    "$( ( ps() { return 3; }; run_inspection ) 2>&1 )"
+  judge_inspection "process_inspection_available" \
+    "$( ( ps() { printf ''; }; run_inspection ) 2>&1 )"
+  judge_inspection "process_inspection_parsable" \
+    "$( ( ps() { printf 'not a process table\n'; }; run_inspection ) 2>&1 )"
+  judge_inspection "listener_inspection_available" \
+    "$( ( command() { [[ "$2" == "lsof" ]] && return 1; builtin command "$@"; }; run_inspection ) 2>&1 )"
+  judge_inspection "listener_inspection_available" \
+    "$( ( lsof() { printf 'junk\n'; return 4; }; run_inspection ) 2>&1 )"
+  judge_inspection "group_inspection_available" \
+    "$( ( group_members() { return 2; }; run_inspection ) 2>&1 )"
+  emit "{\"suite\":\"s6-auth-ingress-local\",\"assertion\":\"survivor_inspection_fails_closed\",\"status\":\"pass\",\"detail\":\"a failing ps, an empty ps, an unparsable ps, a missing lsof, a failing lsof and an unreadable process group each fail closed with a distinct assertion\",\"reproduce\":\"${REPRODUCE}\"}"
+
   # ── planted: stop_group must FAIL when members outlive SIGKILL ─────────────
   #
   # No real process can ignore SIGKILL, so the survivor branch cannot be reached
@@ -534,35 +716,22 @@ if [[ "${S6_SELF_TEST:-0}" == "1" ]]; then
   fi
   emit "{\"suite\":\"s6-auth-ingress-local\",\"assertion\":\"sigterm_terminates_the_worker_group\",\"status\":\"pass\",\"detail\":\"SIGTERM reaped the whole group within its bound and released the port\",\"reproduce\":\"${REPRODUCE}\"}"
 
-  # Orphan check: no workerd may outlive the group under any ancestor. A
-  # grandchild reparented to init still holds the port, and a pid-only check
-  # would call that clean.
-  orphans="$(ps -eo pid=,ppid=,command= 2>/dev/null \
-    | awk -v state="${STATE_DIR}" '$0 ~ /workerd|wrangler/ && index($0, state) > 0 { print $1 }' \
-    | wc -l | tr -d ' ')"
-  if [[ "${orphans}" != "0" ]]; then
-    stop_worker
-    fail_record "no_orphaned_runtime_survives" "${orphans} workerd/wrangler process(es) referencing this run's state directory outlived the group"
-    exit 1
-  fi
-  emit "{\"suite\":\"s6-auth-ingress-local\",\"assertion\":\"no_orphaned_runtime_survives\",\"status\":\"pass\",\"detail\":\"no workerd or wrangler process referencing this run's state directory survives, under any parent\",\"reproduce\":\"${REPRODUCE}\"}"
-
-  # Child cleanup: after stop_worker, nothing may still hold the owned port.
-  reaped_pgid="${SERVER_PGID}"
-  stop_worker
-  sleep 1
-  listeners="$(lsof -ti tcp:"${S6_PORT}" 2>/dev/null | wc -l | tr -d ' ')"
-  members="$(group_members "${reaped_pgid}" | wc -l | tr -d ' ')"
-  if [[ "${listeners}" != "0" || "${members}" != "0" ]]; then
-    fail_record "child_process_group_is_reaped" "${listeners} listener(s) and ${members} group member(s) survived cleanup"
-    exit 1
-  fi
-  emit "{\"suite\":\"s6-auth-ingress-local\",\"assertion\":\"child_process_group_is_reaped\",\"status\":\"pass\",\"detail\":\"no process holds the owned port after process-group termination\",\"reproduce\":\"${REPRODUCE}\"}"
+  # The orphan and reaped assertions used to live here. They now run on every
+  # path below, so duplicating them under the self-test would only report the
+  # same fact twice.
 fi
 
 if ! stop_worker; then
   fail_record "worker_group_cleanup_proved" \
     "the worker group no longer carried this run's ownership proof, so cleanup refused to signal it"
+  exit 1
+fi
+
+# Survivors are asserted before the blocked verdict, not after it and not only
+# under self-test: exit 78 is a *pass* for this suite, so a leak that is only
+# reported later is a leak that is reported to nobody.
+sleep 1
+if ! assert_no_survivors "${LAST_SERVER_PGID}"; then
   exit 1
 fi
 
