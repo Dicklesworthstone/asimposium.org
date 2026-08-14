@@ -37,6 +37,16 @@ export {
   RESERVED_ENVELOPE_KEYS,
 } from "./sanitize.ts";
 export {
+  isSpikeVariant,
+  S5_SPIKE_CURSOR,
+  S5_SPIKE_PROBLEM,
+  S5_SPIKE_SEED,
+  SPIKE_VARIANTS,
+  type SpikeVariant,
+  s5Canary,
+  s5SpikeProjection,
+} from "./spike.ts";
+export {
   FACE_FORMATS,
   type FaceFormat,
   ITEM_SCOPES,
