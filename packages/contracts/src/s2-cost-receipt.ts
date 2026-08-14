@@ -4,9 +4,16 @@ export const S2_COST_RECEIPT_SCHEMA_VERSION = "s2-cost-input-v1";
 export const S2_COST_RECEIPT_RECORD = "s2_cost_measurement";
 export const S2_COST_RECEIPT_RELATIVE_PATH = "s2-cost-input.json";
 export const S2_COST_MANIFEST_RELATIVE_PATH = "manifest.json";
+export const S2_COST_MANIFEST_PENDING_RELATIVE_PATH = ".manifest.json.pending";
 export const S2_COST_PUBLICATION_RELATIVE_PATH = "s2-cost-publication.json";
+export const S2_COST_PUBLICATION_PENDING_RELATIVE_PATH = ".s2-cost-publication.json.pending";
+export const S2_COST_PUBLICATION_COMMIT_RELATIVE_PATH = "s2-cost-publication-commit.json";
+export const S2_COST_PUBLICATION_COMMIT_PENDING_RELATIVE_PATH =
+  ".s2-cost-publication-commit.json.pending";
 export const S2_COST_PUBLICATION_SCHEMA_VERSION = "s2-cost-publication-v1";
 export const S2_COST_PUBLICATION_RECORD = "s2_cost_receipt_publication";
+export const S2_COST_PUBLICATION_COMMIT_SCHEMA_VERSION = "s2-cost-publication-commit-v1";
+export const S2_COST_PUBLICATION_COMMIT_RECORD = "s2_cost_receipt_publication_commit";
 export const S2_COST_EVIDENCE_MANIFEST_VERSION = "s2-krater-evidence-v2";
 export const S2_COST_METRIC_SCOPE = "selected-settled-write-receipts";
 export const S2_SUCCESSFUL_BATCH_SCOPE = "settled-db.batch-only";
@@ -15,6 +22,16 @@ export const S2_WRITE_CLAIM_SCOPE = "writeClaim-entry-to-return";
 export const S2_LOCAL_SCOPE = "local-workerd-d1-do";
 export const MAX_S2_COST_RECEIPT_BYTES = 64 * 1024;
 export const MAX_S2_COST_EVIDENCE_MANIFEST_BYTES = 1024 * 1024;
+export const S2_COST_DURABLE_PUBLICATION_RESERVED_NAMES = [
+  S2_COST_MANIFEST_PENDING_RELATIVE_PATH,
+  S2_COST_MANIFEST_RELATIVE_PATH,
+  S2_COST_PUBLICATION_PENDING_RELATIVE_PATH,
+  S2_COST_PUBLICATION_RELATIVE_PATH,
+  S2_COST_PUBLICATION_COMMIT_PENDING_RELATIVE_PATH,
+  S2_COST_PUBLICATION_COMMIT_RELATIVE_PATH,
+] as const;
+export const S2_COST_DURABLE_PUBLICATION_RESERVED_BYTES =
+  2 * MAX_S2_COST_EVIDENCE_MANIFEST_BYTES + 4 * MAX_S2_COST_RECEIPT_BYTES;
 
 export const REQUIRED_ROW_TOTAL_EXCLUSIONS = [
   "head-and-post-write-verification-reads-no-meta",
@@ -83,12 +100,50 @@ const RetentionSchema = z.strictObject({
   max_files_per_run: NonNegativeSafeIntegerSchema,
   retained_bytes_before_manifest: NonNegativeSafeIntegerSchema,
   retained_files_before_manifest: NonNegativeSafeIntegerSchema,
+  durable_publication_reservation: z.strictObject({
+    retained_names: z.tuple([
+      z.literal(S2_COST_DURABLE_PUBLICATION_RESERVED_NAMES[0]),
+      z.literal(S2_COST_DURABLE_PUBLICATION_RESERVED_NAMES[1]),
+      z.literal(S2_COST_DURABLE_PUBLICATION_RESERVED_NAMES[2]),
+      z.literal(S2_COST_DURABLE_PUBLICATION_RESERVED_NAMES[3]),
+      z.literal(S2_COST_DURABLE_PUBLICATION_RESERVED_NAMES[4]),
+      z.literal(S2_COST_DURABLE_PUBLICATION_RESERVED_NAMES[5]),
+    ]),
+    reserved_bytes_upper_bound: z.literal(S2_COST_DURABLE_PUBLICATION_RESERVED_BYTES),
+  }),
 });
+const SafeEvidenceRelativePathSchema = z
+  .string()
+  .min(1)
+  .max(512)
+  .regex(/^[A-Za-z0-9._/-]+$/)
+  .refine(
+    (path) =>
+      !path.startsWith("/") &&
+      !path.includes("\\") &&
+      !path.includes("\0") &&
+      path.split("/").every((component) => component !== "" && component !== "." && component !== ".."),
+  );
 const RetainedFileSchema = z.strictObject({
-  path: z.string().min(1),
+  path: SafeEvidenceRelativePathSchema,
   bytes: NonNegativeSafeIntegerSchema,
   kind: z.enum(["file", "fifo", "special"]),
 });
+
+function safeSum(values: readonly number[]): number | undefined {
+  let total = 0;
+  for (const value of values) {
+    if (!Number.isSafeInteger(value) || value < 0 || value > Number.MAX_SAFE_INTEGER - total) {
+      return undefined;
+    }
+    total += value;
+  }
+  return total;
+}
+
+function addManifestIssue(ctx: z.RefinementCtx): void {
+  ctx.addIssue({ code: "custom", message: "S2 evidence manifest inventory is invalid." });
+}
 
 export const S2CostReceiptBindingsSchema = z.strictObject({
   d1: z.literal("DB"),
@@ -127,7 +182,7 @@ export const S2CostMeasurementReceiptSchema = z.strictObject({
   ]),
 });
 
-export const S2CostEvidenceManifestSchema = z.strictObject({
+const S2CostEvidenceManifestBaseSchema = z.strictObject({
   manifest_version: z.literal(S2_COST_EVIDENCE_MANIFEST_VERSION),
   run_id: ProvenanceSchema.shape.run_id,
   revision: ProvenanceSchema.shape.revision,
@@ -146,6 +201,62 @@ export const S2CostEvidenceManifestSchema = z.strictObject({
   s2_cost_receipt: ReceiptArtifactSchema.nullable(),
   files: z.array(RetainedFileSchema),
 });
+
+export const S2CostEvidenceManifestSchema = S2CostEvidenceManifestBaseSchema.superRefine(
+  (manifest, ctx) => {
+    const paths = new Set<string>();
+    for (const file of manifest.files) {
+      if (paths.has(file.path)) {
+        addManifestIssue(ctx);
+        return;
+      }
+      paths.add(file.path);
+    }
+    const retainedBytes = safeSum(manifest.files.map((file) => file.bytes));
+    const retainedFilesWithReservation = safeSum([
+      manifest.files.length,
+      manifest.retention.durable_publication_reservation.retained_names.length,
+    ]);
+    const retainedBytesWithReservation =
+      retainedBytes === undefined
+        ? undefined
+        : safeSum([
+            retainedBytes,
+            manifest.retention.durable_publication_reservation.reserved_bytes_upper_bound,
+          ]);
+    if (
+      retainedBytes === undefined ||
+      retainedFilesWithReservation === undefined ||
+      retainedBytesWithReservation === undefined ||
+      manifest.retention.retained_files_before_manifest !== manifest.files.length ||
+      manifest.retention.retained_bytes_before_manifest !== retainedBytes ||
+      retainedFilesWithReservation > manifest.retention.max_files_per_run ||
+      retainedBytesWithReservation > manifest.retention.max_bytes_per_run ||
+      manifest.files.some((file) =>
+        manifest.retention.durable_publication_reservation.retained_names.includes(
+          file.path as (typeof S2_COST_DURABLE_PUBLICATION_RESERVED_NAMES)[number],
+        ),
+      )
+    ) {
+      addManifestIssue(ctx);
+      return;
+    }
+    const receiptInventory = manifest.files.filter(
+      (file) => file.path === S2_COST_RECEIPT_RELATIVE_PATH,
+    );
+    if (manifest.s2_cost_receipt === null) {
+      if (receiptInventory.length !== 0) addManifestIssue(ctx);
+      return;
+    }
+    if (
+      receiptInventory.length !== 1 ||
+      receiptInventory[0]?.kind !== "file" ||
+      receiptInventory[0].bytes !== manifest.s2_cost_receipt.bytes
+    ) {
+      addManifestIssue(ctx);
+    }
+  },
+);
 
 export const S2CostReceiptPublicationSchema = z.strictObject({
   schema_version: z.literal(S2_COST_PUBLICATION_SCHEMA_VERSION),
@@ -166,9 +277,24 @@ export const S2CostReceiptPublicationSchema = z.strictObject({
   }),
 });
 
+export const S2CostReceiptPublicationCommitSchema = z.strictObject({
+  schema_version: z.literal(S2_COST_PUBLICATION_COMMIT_SCHEMA_VERSION),
+  record: z.literal(S2_COST_PUBLICATION_COMMIT_RECORD),
+  manifest: z.strictObject({
+    path: z.literal(S2_COST_MANIFEST_RELATIVE_PATH),
+    digest: Sha256Schema,
+  }),
+  receipt: ReceiptArtifactSchema,
+  publication: z.strictObject({
+    path: z.literal(S2_COST_PUBLICATION_RELATIVE_PATH),
+    digest: Sha256Schema,
+  }),
+});
+
 export type S2CostMeasurementReceipt = z.infer<typeof S2CostMeasurementReceiptSchema>;
 export type S2CostEvidenceManifest = z.infer<typeof S2CostEvidenceManifestSchema>;
 export type S2CostReceiptPublication = z.infer<typeof S2CostReceiptPublicationSchema>;
+export type S2CostReceiptPublicationCommit = z.infer<typeof S2CostReceiptPublicationCommitSchema>;
 
 export class S2CostReceiptContractError extends Error {
   constructor(
@@ -212,4 +338,13 @@ export function parseS2CostEvidenceManifestBytes(bytes: Uint8Array): S2CostEvide
 
 export function parseS2CostReceiptPublicationBytes(bytes: Uint8Array): S2CostReceiptPublication {
   return parseSchema(S2CostReceiptPublicationSchema, parseJsonBytes(bytes, MAX_S2_COST_RECEIPT_BYTES));
+}
+
+export function parseS2CostReceiptPublicationCommitBytes(
+  bytes: Uint8Array,
+): S2CostReceiptPublicationCommit {
+  return parseSchema(
+    S2CostReceiptPublicationCommitSchema,
+    parseJsonBytes(bytes, MAX_S2_COST_RECEIPT_BYTES),
+  );
 }

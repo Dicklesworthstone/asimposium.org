@@ -1,0 +1,664 @@
+{
+  "$id": "https://a.asimposium.org/schemas/s2-cost-receipt.v1.json",
+  "title": "ASImposium S-2 cost receipt evidence contracts",
+  "description": "Closed normalized receipt plus manifest-bound local publication evidence for S-7 verification.",
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "type": "object",
+  "properties": {
+    "receipt": {
+      "type": "object",
+      "properties": {
+        "schema_version": {
+          "type": "string",
+          "const": "s2-cost-input-v1"
+        },
+        "record": {
+          "type": "string",
+          "const": "s2_cost_measurement"
+        },
+        "run_id": {
+          "type": "string",
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]{0,79}$"
+        },
+        "phase": {
+          "type": "string",
+          "const": "exercise"
+        },
+        "revision": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{40}$"
+        },
+        "dirty_state": {
+          "type": "string",
+          "enum": [
+            "clean",
+            "dirty"
+          ]
+        },
+        "source_digest": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{64}$"
+        },
+        "scope": {
+          "type": "string",
+          "const": "local-workerd-d1-do"
+        },
+        "bindings": {
+          "type": "object",
+          "properties": {
+            "d1": {
+              "type": "string",
+              "const": "DB"
+            },
+            "durable_object": {
+              "type": "string",
+              "const": "KRATER_OUTBOX"
+            },
+            "r2": {
+              "type": "null"
+            }
+          },
+          "required": [
+            "d1",
+            "durable_object",
+            "r2"
+          ],
+          "additionalProperties": false
+        },
+        "status": {
+          "type": "string",
+          "const": "pass"
+        },
+        "metric_scope": {
+          "type": "string",
+          "const": "selected-settled-write-receipts"
+        },
+        "write_receipt_count": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 9007199254740991
+        },
+        "successful_batch_metric_scope": {
+          "type": "string",
+          "const": "settled-db.batch-only"
+        },
+        "failed_retry_batch_metrics": {
+          "type": "string",
+          "const": "excluded-d1-error-has-no-meta"
+        },
+        "write_claim_wall_scope": {
+          "type": "string",
+          "const": "writeClaim-entry-to-return"
+        },
+        "p95_write_phase_ms": {
+          "type": "number",
+          "minimum": 0
+        },
+        "p95_preflight_wall_ms": {
+          "type": "number",
+          "minimum": 0
+        },
+        "p95_write_claim_wall_ms": {
+          "type": "number",
+          "minimum": 0
+        },
+        "sum_successful_batch_rows_read": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 9007199254740991
+        },
+        "sum_successful_batch_rows_written": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 9007199254740991
+        },
+        "sum_preflight_rows_read": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 9007199254740991
+        },
+        "sum_preflight_rows_written": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 9007199254740991
+        },
+        "sum_preflight_statements": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 9007199254740991
+        },
+        "sum_retry_count": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 9007199254740991
+        },
+        "known_row_total_exclusions": {
+          "type": "array",
+          "prefixItems": [
+            {
+              "type": "string",
+              "const": "head-and-post-write-verification-reads-no-meta"
+            },
+            {
+              "type": "string",
+              "const": "failed-retry-batches-no-meta"
+            }
+          ]
+        }
+      },
+      "required": [
+        "schema_version",
+        "record",
+        "run_id",
+        "phase",
+        "revision",
+        "dirty_state",
+        "source_digest",
+        "scope",
+        "bindings",
+        "status",
+        "metric_scope",
+        "write_receipt_count",
+        "successful_batch_metric_scope",
+        "failed_retry_batch_metrics",
+        "write_claim_wall_scope",
+        "p95_write_phase_ms",
+        "p95_preflight_wall_ms",
+        "p95_write_claim_wall_ms",
+        "sum_successful_batch_rows_read",
+        "sum_successful_batch_rows_written",
+        "sum_preflight_rows_read",
+        "sum_preflight_rows_written",
+        "sum_preflight_statements",
+        "sum_retry_count",
+        "known_row_total_exclusions"
+      ],
+      "additionalProperties": false
+    },
+    "manifest": {
+      "type": "object",
+      "properties": {
+        "manifest_version": {
+          "type": "string",
+          "const": "s2-krater-evidence-v2"
+        },
+        "run_id": {
+          "type": "string",
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]{0,79}$"
+        },
+        "revision": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{40}$"
+        },
+        "dirty_state": {
+          "type": "string",
+          "enum": [
+            "clean",
+            "dirty"
+          ]
+        },
+        "source_digest": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{64}$"
+        },
+        "exit_code": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 255
+        },
+        "local_phase_status": {
+          "type": "object",
+          "properties": {
+            "exercise": {
+              "type": "string",
+              "enum": [
+                "not-run",
+                "pass",
+                "fail",
+                "interrupted"
+              ]
+            },
+            "restart_verify": {
+              "type": "string",
+              "enum": [
+                "not-run",
+                "pass",
+                "fail",
+                "interrupted"
+              ]
+            },
+            "upgrade_existing": {
+              "type": "string",
+              "enum": [
+                "not-run",
+                "pass",
+                "fail",
+                "interrupted"
+              ]
+            },
+            "upgrade_empty": {
+              "type": "string",
+              "enum": [
+                "not-run",
+                "pass",
+                "fail",
+                "interrupted"
+              ]
+            },
+            "upgrade_journal_existing": {
+              "type": "string",
+              "enum": [
+                "not-run",
+                "pass",
+                "fail",
+                "interrupted"
+              ]
+            },
+            "upgrade_journal_empty": {
+              "type": "string",
+              "enum": [
+                "not-run",
+                "pass",
+                "fail",
+                "interrupted"
+              ]
+            }
+          },
+          "required": [
+            "exercise",
+            "restart_verify",
+            "upgrade_existing",
+            "upgrade_empty",
+            "upgrade_journal_existing",
+            "upgrade_journal_empty"
+          ],
+          "additionalProperties": false
+        },
+        "retention": {
+          "type": "object",
+          "properties": {
+            "retained": {
+              "type": "boolean",
+              "const": true
+            },
+            "deletion_performed": {
+              "type": "boolean",
+              "const": false
+            },
+            "max_bytes_per_run": {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 9007199254740991
+            },
+            "max_files_per_run": {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 9007199254740991
+            },
+            "retained_bytes_before_manifest": {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 9007199254740991
+            },
+            "retained_files_before_manifest": {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 9007199254740991
+            },
+            "durable_publication_reservation": {
+              "type": "object",
+              "properties": {
+                "retained_names": {
+                  "type": "array",
+                  "prefixItems": [
+                    {
+                      "type": "string",
+                      "const": ".manifest.json.pending"
+                    },
+                    {
+                      "type": "string",
+                      "const": "manifest.json"
+                    },
+                    {
+                      "type": "string",
+                      "const": ".s2-cost-publication.json.pending"
+                    },
+                    {
+                      "type": "string",
+                      "const": "s2-cost-publication.json"
+                    },
+                    {
+                      "type": "string",
+                      "const": ".s2-cost-publication-commit.json.pending"
+                    },
+                    {
+                      "type": "string",
+                      "const": "s2-cost-publication-commit.json"
+                    }
+                  ]
+                },
+                "reserved_bytes_upper_bound": {
+                  "type": "number",
+                  "const": 2359296
+                }
+              },
+              "required": [
+                "retained_names",
+                "reserved_bytes_upper_bound"
+              ],
+              "additionalProperties": false
+            }
+          },
+          "required": [
+            "retained",
+            "deletion_performed",
+            "max_bytes_per_run",
+            "max_files_per_run",
+            "retained_bytes_before_manifest",
+            "retained_files_before_manifest",
+            "durable_publication_reservation"
+          ],
+          "additionalProperties": false
+        },
+        "s2_cost_receipt": {
+          "anyOf": [
+            {
+              "type": "object",
+              "properties": {
+                "path": {
+                  "type": "string",
+                  "const": "s2-cost-input.json"
+                },
+                "digest": {
+                  "type": "string",
+                  "pattern": "^[0-9a-f]{64}$"
+                },
+                "bytes": {
+                  "type": "integer",
+                  "minimum": 0,
+                  "maximum": 9007199254740991
+                }
+              },
+              "required": [
+                "path",
+                "digest",
+                "bytes"
+              ],
+              "additionalProperties": false
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "files": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "properties": {
+              "path": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 512,
+                "pattern": "^[A-Za-z0-9._/-]+$"
+              },
+              "bytes": {
+                "type": "integer",
+                "minimum": 0,
+                "maximum": 9007199254740991
+              },
+              "kind": {
+                "type": "string",
+                "enum": [
+                  "file",
+                  "fifo",
+                  "special"
+                ]
+              }
+            },
+            "required": [
+              "path",
+              "bytes",
+              "kind"
+            ],
+            "additionalProperties": false
+          }
+        }
+      },
+      "required": [
+        "manifest_version",
+        "run_id",
+        "revision",
+        "dirty_state",
+        "source_digest",
+        "exit_code",
+        "local_phase_status",
+        "retention",
+        "s2_cost_receipt",
+        "files"
+      ],
+      "additionalProperties": false
+    },
+    "publication": {
+      "type": "object",
+      "properties": {
+        "schema_version": {
+          "type": "string",
+          "const": "s2-cost-publication-v1"
+        },
+        "record": {
+          "type": "string",
+          "const": "s2_cost_receipt_publication"
+        },
+        "manifest": {
+          "type": "object",
+          "properties": {
+            "path": {
+              "type": "string",
+              "const": "manifest.json"
+            },
+            "digest": {
+              "type": "string",
+              "pattern": "^[0-9a-f]{64}$"
+            }
+          },
+          "required": [
+            "path",
+            "digest"
+          ],
+          "additionalProperties": false
+        },
+        "receipt": {
+          "type": "object",
+          "properties": {
+            "path": {
+              "type": "string",
+              "const": "s2-cost-input.json"
+            },
+            "digest": {
+              "type": "string",
+              "pattern": "^[0-9a-f]{64}$"
+            },
+            "bytes": {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 9007199254740991
+            }
+          },
+          "required": [
+            "path",
+            "digest",
+            "bytes"
+          ],
+          "additionalProperties": false
+        },
+        "provenance": {
+          "type": "object",
+          "properties": {
+            "run_id": {
+              "type": "string",
+              "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]{0,79}$"
+            },
+            "revision": {
+              "type": "string",
+              "pattern": "^[0-9a-f]{40}$"
+            },
+            "dirty_state": {
+              "type": "string",
+              "enum": [
+                "clean",
+                "dirty"
+              ]
+            },
+            "source_digest": {
+              "type": "string",
+              "pattern": "^[0-9a-f]{64}$"
+            }
+          },
+          "required": [
+            "run_id",
+            "revision",
+            "dirty_state",
+            "source_digest"
+          ],
+          "additionalProperties": false
+        },
+        "local_phase_status": {
+          "type": "object",
+          "properties": {
+            "exercise": {
+              "type": "string",
+              "const": "pass"
+            },
+            "restart_verify": {
+              "type": "string",
+              "const": "pass"
+            },
+            "upgrade_existing": {
+              "type": "string",
+              "const": "pass"
+            },
+            "upgrade_empty": {
+              "type": "string",
+              "const": "pass"
+            },
+            "upgrade_journal_existing": {
+              "type": "string",
+              "const": "pass"
+            },
+            "upgrade_journal_empty": {
+              "type": "string",
+              "const": "pass"
+            }
+          },
+          "required": [
+            "exercise",
+            "restart_verify",
+            "upgrade_existing",
+            "upgrade_empty",
+            "upgrade_journal_existing",
+            "upgrade_journal_empty"
+          ],
+          "additionalProperties": false
+        }
+      },
+      "required": [
+        "schema_version",
+        "record",
+        "manifest",
+        "receipt",
+        "provenance",
+        "local_phase_status"
+      ],
+      "additionalProperties": false
+    },
+    "publication_commit": {
+      "type": "object",
+      "properties": {
+        "schema_version": {
+          "type": "string",
+          "const": "s2-cost-publication-commit-v1"
+        },
+        "record": {
+          "type": "string",
+          "const": "s2_cost_receipt_publication_commit"
+        },
+        "manifest": {
+          "type": "object",
+          "properties": {
+            "path": {
+              "type": "string",
+              "const": "manifest.json"
+            },
+            "digest": {
+              "type": "string",
+              "pattern": "^[0-9a-f]{64}$"
+            }
+          },
+          "required": [
+            "path",
+            "digest"
+          ],
+          "additionalProperties": false
+        },
+        "receipt": {
+          "type": "object",
+          "properties": {
+            "path": {
+              "type": "string",
+              "const": "s2-cost-input.json"
+            },
+            "digest": {
+              "type": "string",
+              "pattern": "^[0-9a-f]{64}$"
+            },
+            "bytes": {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 9007199254740991
+            }
+          },
+          "required": [
+            "path",
+            "digest",
+            "bytes"
+          ],
+          "additionalProperties": false
+        },
+        "publication": {
+          "type": "object",
+          "properties": {
+            "path": {
+              "type": "string",
+              "const": "s2-cost-publication.json"
+            },
+            "digest": {
+              "type": "string",
+              "pattern": "^[0-9a-f]{64}$"
+            }
+          },
+          "required": [
+            "path",
+            "digest"
+          ],
+          "additionalProperties": false
+        }
+      },
+      "required": [
+        "schema_version",
+        "record",
+        "manifest",
+        "receipt",
+        "publication"
+      ],
+      "additionalProperties": false
+    }
+  },
+  "required": [
+    "receipt",
+    "manifest",
+    "publication",
+    "publication_commit"
+  ],
+  "additionalProperties": false
+}

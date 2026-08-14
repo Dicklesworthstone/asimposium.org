@@ -1,14 +1,25 @@
 import { expect, test } from "bun:test";
 
+import { generatedArtifacts } from "../../src/artifacts.ts";
 import { type DiagnosticCode, REPRODUCE, safeDiagnostic } from "../../src/diagnostics.ts";
 import { ContractScaffoldSchema } from "../../src/schema.ts";
 import {
   REQUIRED_ROW_TOTAL_EXCLUSIONS,
+  S2_COST_DURABLE_PUBLICATION_RESERVED_BYTES,
+  S2_COST_DURABLE_PUBLICATION_RESERVED_NAMES,
+  S2_COST_EVIDENCE_MANIFEST_VERSION,
+  S2_COST_MANIFEST_RELATIVE_PATH,
+  S2_COST_PUBLICATION_COMMIT_RECORD,
+  S2_COST_PUBLICATION_COMMIT_SCHEMA_VERSION,
+  S2_COST_PUBLICATION_RELATIVE_PATH,
   S2_COST_RECEIPT_BINDINGS_KEYS,
+  S2_COST_RECEIPT_RELATIVE_PATH,
   S2_COST_RECEIPT_RECORD,
   S2_COST_RECEIPT_ROOT_KEYS,
   S2_COST_RECEIPT_SCHEMA_VERSION,
+  S2CostEvidenceManifestSchema,
   S2CostMeasurementReceiptSchema,
+  S2CostReceiptPublicationCommitSchema,
 } from "../../src/s2-cost-receipt.ts";
 
 const VALID_FIXTURE = new URL("../fixtures/valid/contracts-scaffold.json", import.meta.url);
@@ -103,4 +114,119 @@ test("S-2 cost receipt source is closed at root and binding keys", () => {
       bindings: { ...receipt.bindings, unexpected: true },
     }).success,
   ).toBe(false);
+});
+
+test("S-2 retained evidence manifest is a closed, bounded envelope", () => {
+  const manifest = {
+    manifest_version: S2_COST_EVIDENCE_MANIFEST_VERSION,
+    run_id: "s2-contract",
+    revision: "a".repeat(40),
+    dirty_state: "clean",
+    source_digest: "b".repeat(64),
+    exit_code: 78,
+    local_phase_status: {
+      exercise: "pass",
+      restart_verify: "pass",
+      upgrade_existing: "pass",
+      upgrade_empty: "pass",
+      upgrade_journal_existing: "pass",
+      upgrade_journal_empty: "pass",
+    },
+    retention: {
+      retained: true,
+      deletion_performed: false,
+      max_bytes_per_run: 3_000_000,
+      max_files_per_run: 7,
+      retained_bytes_before_manifest: 1,
+      retained_files_before_manifest: 1,
+      durable_publication_reservation: {
+        retained_names: S2_COST_DURABLE_PUBLICATION_RESERVED_NAMES,
+        reserved_bytes_upper_bound: S2_COST_DURABLE_PUBLICATION_RESERVED_BYTES,
+      },
+    },
+    s2_cost_receipt: {
+      path: "s2-cost-input.json",
+      digest: "c".repeat(64),
+      bytes: 1,
+    },
+    files: [{ path: "s2-cost-input.json", bytes: 1, kind: "file" }],
+  };
+  expect(S2CostEvidenceManifestSchema.safeParse(manifest).success).toBe(true);
+  expect(S2CostEvidenceManifestSchema.safeParse({ ...manifest, unexpected: true }).success).toBe(
+    false,
+  );
+  expect(
+    S2CostEvidenceManifestSchema.safeParse({
+      ...manifest,
+      retention: { ...manifest.retention, unexpected: true },
+    }).success,
+  ).toBe(false);
+  expect(
+    S2CostEvidenceManifestSchema.safeParse({
+      ...manifest,
+      files: [{ ...manifest.files[0], unexpected: true }],
+    }).success,
+  ).toBe(false);
+  expect(
+    S2CostEvidenceManifestSchema.safeParse({
+      ...manifest,
+      files: [{ ...manifest.files[0], path: "./s2-cost-input.json" }],
+    }).success,
+  ).toBe(false);
+  expect(
+    S2CostEvidenceManifestSchema.safeParse({
+      ...manifest,
+      files: [...manifest.files, manifest.files[0]],
+    }).success,
+  ).toBe(false);
+  expect(
+    S2CostEvidenceManifestSchema.safeParse({
+      ...manifest,
+      files: [{ ...manifest.files[0], bytes: 2 }],
+    }).success,
+  ).toBe(false);
+  expect(
+    S2CostEvidenceManifestSchema.safeParse({
+      ...manifest,
+      retention: {
+        ...manifest.retention,
+        max_bytes_per_run: Number.MAX_SAFE_INTEGER,
+        retained_bytes_before_manifest: Number.MAX_SAFE_INTEGER,
+      },
+      files: [{ ...manifest.files[0], bytes: Number.MAX_SAFE_INTEGER }],
+    }).success,
+  ).toBe(false);
+});
+
+test("S-2 publication commit strictly binds all three preceding artifacts", () => {
+  const commit = {
+    schema_version: S2_COST_PUBLICATION_COMMIT_SCHEMA_VERSION,
+    record: S2_COST_PUBLICATION_COMMIT_RECORD,
+    manifest: { path: S2_COST_MANIFEST_RELATIVE_PATH, digest: "a".repeat(64) },
+    receipt: {
+      path: S2_COST_RECEIPT_RELATIVE_PATH,
+      digest: "b".repeat(64),
+      bytes: 1,
+    },
+    publication: { path: S2_COST_PUBLICATION_RELATIVE_PATH, digest: "c".repeat(64) },
+  };
+  expect(S2CostReceiptPublicationCommitSchema.safeParse(commit).success).toBe(true);
+  expect(
+    S2CostReceiptPublicationCommitSchema.safeParse({ ...commit, unexpected: true }).success,
+  ).toBe(false);
+  expect(
+    S2CostReceiptPublicationCommitSchema.safeParse({
+      ...commit,
+      receipt: { ...commit.receipt, bytes: -1 },
+    }).success,
+  ).toBe(false);
+});
+
+test("the normal contract generator declares both S-2 receipt artifacts for drift checking", () => {
+  expect(generatedArtifacts().map((artifact) => artifact.relativePath)).toEqual(
+    expect.arrayContaining([
+      "generated/s2-cost-receipt.schema.json",
+      "generated/s2-cost-receipt.types.ts",
+    ]),
+  );
 });

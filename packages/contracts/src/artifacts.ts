@@ -26,6 +26,8 @@ import {
   type S2CostMeasurementReceipt,
   S2CostMeasurementReceiptSchema,
   type S2CostReceiptPublication,
+  type S2CostReceiptPublicationCommit,
+  S2CostReceiptPublicationCommitSchema,
   S2CostReceiptPublicationSchema,
 } from "./s2-cost-receipt.ts";
 
@@ -135,6 +137,7 @@ function generatedS2CostReceiptJsonSchema(): string {
         receipt: S2CostMeasurementReceiptSchema,
         manifest: S2CostEvidenceManifestSchema,
         publication: S2CostReceiptPublicationSchema,
+        publication_commit: S2CostReceiptPublicationCommitSchema,
       }),
     ),
   };
@@ -146,10 +149,12 @@ function generatedS2CostReceiptTypes(): string {
     "S2CostEvidenceManifest",
     "S2CostMeasurementReceipt",
     "S2CostReceiptPublication",
+    "S2CostReceiptPublicationCommit",
   ] as const satisfies readonly (keyof {
     S2CostEvidenceManifest: S2CostEvidenceManifest;
     S2CostMeasurementReceipt: S2CostMeasurementReceipt;
     S2CostReceiptPublication: S2CostReceiptPublication;
+    S2CostReceiptPublicationCommit: S2CostReceiptPublicationCommit;
   })[];
   return [
     "// Generated from src/s2-cost-receipt.ts by `bun run generate`. Do not edit.",

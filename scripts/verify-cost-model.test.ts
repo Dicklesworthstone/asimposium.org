@@ -1,6 +1,6 @@
 import { describe, expect, test } from "bun:test";
 import { createHash } from "node:crypto";
-import { mkdirSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, readFileSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
@@ -17,12 +17,17 @@ import {
   FABLE_WORKED_EXAMPLE_ASSUMPTIONS,
   MAX_S2_COST_RECEIPT_BYTES,
   REQUIRED_ROW_TOTAL_EXCLUSIONS,
+  S2_COST_DURABLE_PUBLICATION_RESERVED_BYTES,
+  S2_COST_DURABLE_PUBLICATION_RESERVED_NAMES,
   S2_COST_EVIDENCE_MANIFEST_VERSION,
   S2_COST_MANIFEST_RELATIVE_PATH,
   type ReceiptFileSystem,
   receiptDigest,
   runCostVerifierCli,
   S2_COST_METRIC_SCOPE,
+  S2_COST_PUBLICATION_COMMIT_RECORD,
+  S2_COST_PUBLICATION_COMMIT_RELATIVE_PATH,
+  S2_COST_PUBLICATION_COMMIT_SCHEMA_VERSION,
   S2_COST_PUBLICATION_RECORD,
   S2_COST_PUBLICATION_RELATIVE_PATH,
   S2_COST_PUBLICATION_SCHEMA_VERSION,
@@ -139,6 +144,7 @@ function verifiedFixture(
   expected = {
     run_id: receipt.run_id,
     revision: receipt.revision,
+    dirty_state: receipt.dirty_state,
     source_digest: receipt.source_digest,
   },
 ) {
@@ -178,7 +184,16 @@ interface CliEvidence {
   readonly receiptPath: string;
   readonly manifestPath: string;
   readonly publicationPath: string;
+  readonly commitPath: string;
   readonly args: readonly string[];
+}
+
+type EvidenceArtifact = "receipt" | "manifest" | "publication" | "commit";
+
+interface CliEvidenceOptions {
+  readonly receipt?: "file" | "missing" | "directory" | "fifo";
+  readonly missing?: EvidenceArtifact;
+  readonly symlink?: EvidenceArtifact;
 }
 
 function sha256(bytes: Uint8Array): string {
@@ -187,16 +202,30 @@ function sha256(bytes: Uint8Array): string {
 
 function writeCliEvidence(
   contents: string | Uint8Array,
-  options: { readonly receipt?: "file" | "missing" | "directory" | "fifo" } = {},
+  options: CliEvidenceOptions = {},
 ): CliEvidence {
   const root = mkdtempSync(join(tmpdir(), "asimposium-s7-cost-"));
   const receiptPath = join(root, S2_COST_RECEIPT_RELATIVE_PATH);
   const manifestPath = join(root, S2_COST_MANIFEST_RELATIVE_PATH);
   const publicationPath = join(root, S2_COST_PUBLICATION_RELATIVE_PATH);
+  const commitPath = join(root, S2_COST_PUBLICATION_COMMIT_RELATIVE_PATH);
   const bytes = typeof contents === "string" ? new TextEncoder().encode(contents) : contents;
   const receiptKind = options.receipt ?? "file";
+  const retainedFiles = [
+    { path: S2_COST_RECEIPT_RELATIVE_PATH, bytes: bytes.byteLength, kind: "file" },
+  ];
+  const writeArtifact = (path: string, artifact: EvidenceArtifact, body: string | Uint8Array) => {
+    if (options.missing === artifact) return;
+    if (options.symlink === artifact) {
+      const target = join(root, `.${artifact}-symlink-target`);
+      writeFileSync(target, body, { mode: 0o600 });
+      symlinkSync(target, path);
+      return;
+    }
+    writeFileSync(path, body, { mode: 0o600 });
+  };
   if (receiptKind === "file") {
-    writeFileSync(receiptPath, bytes, { mode: 0o600 });
+    writeArtifact(receiptPath, "receipt", bytes);
   } else if (receiptKind === "directory") {
     mkdirSync(receiptPath, { mode: 0o700 });
   } else if (receiptKind === "fifo") {
@@ -214,17 +243,21 @@ function writeCliEvidence(
     retention: {
       retained: true,
       deletion_performed: false,
-      max_bytes_per_run: 1_000_000,
+      max_bytes_per_run: 3_000_000,
       max_files_per_run: 16,
-      retained_bytes_before_manifest: bytes.byteLength,
-      retained_files_before_manifest: receiptKind === "file" ? 1 : 0,
+      retained_bytes_before_manifest: retainedFiles.reduce((total, file) => total + file.bytes, 0),
+      retained_files_before_manifest: retainedFiles.length,
+      durable_publication_reservation: {
+        retained_names: S2_COST_DURABLE_PUBLICATION_RESERVED_NAMES,
+        reserved_bytes_upper_bound: S2_COST_DURABLE_PUBLICATION_RESERVED_BYTES,
+      },
     },
     s2_cost_receipt: {
       path: S2_COST_RECEIPT_RELATIVE_PATH,
       digest: sha256(bytes),
       bytes: bytes.byteLength,
     },
-    files: [],
+    files: retainedFiles,
   };
   const manifestBytes = new TextEncoder().encode(JSON.stringify(manifest));
   const publication = {
@@ -244,13 +277,30 @@ function writeCliEvidence(
     },
     local_phase_status: ALL_LOCAL_PHASES,
   };
-  writeFileSync(manifestPath, manifestBytes, { mode: 0o600 });
-  writeFileSync(publicationPath, JSON.stringify(publication), { mode: 0o600 });
+  const publicationBytes = new TextEncoder().encode(JSON.stringify(publication));
+  const commit = {
+    schema_version: S2_COST_PUBLICATION_COMMIT_SCHEMA_VERSION,
+    record: S2_COST_PUBLICATION_COMMIT_RECORD,
+    manifest: { path: S2_COST_MANIFEST_RELATIVE_PATH, digest: sha256(manifestBytes) },
+    receipt: {
+      path: S2_COST_RECEIPT_RELATIVE_PATH,
+      digest: sha256(bytes),
+      bytes: bytes.byteLength,
+    },
+    publication: {
+      path: S2_COST_PUBLICATION_RELATIVE_PATH,
+      digest: sha256(publicationBytes),
+    },
+  };
+  writeArtifact(manifestPath, "manifest", manifestBytes);
+  writeArtifact(publicationPath, "publication", publicationBytes);
+  writeArtifact(commitPath, "commit", JSON.stringify(commit));
   return {
     root,
     receiptPath,
     manifestPath,
     publicationPath,
+    commitPath,
     args: [
       "--receipt",
       receiptPath,
@@ -258,6 +308,8 @@ function writeCliEvidence(
       manifestPath,
       "--publication",
       publicationPath,
+      "--commit",
+      commitPath,
     ],
   };
 }
@@ -273,8 +325,16 @@ function rewriteAttestedManifest(
     manifest: { digest: string };
   };
   publication.manifest.digest = sha256(manifestBytes);
+  const publicationBytes = new TextEncoder().encode(JSON.stringify(publication));
+  const commit = JSON.parse(readFileSync(evidence.commitPath, "utf8")) as {
+    manifest: { digest: string };
+    publication: { digest: string };
+  };
+  commit.manifest.digest = sha256(manifestBytes);
+  commit.publication.digest = sha256(publicationBytes);
   writeFileSync(evidence.manifestPath, manifestBytes, { mode: 0o600 });
-  writeFileSync(evidence.publicationPath, JSON.stringify(publication), { mode: 0o600 });
+  writeFileSync(evidence.publicationPath, publicationBytes, { mode: 0o600 });
+  writeFileSync(evidence.commitPath, JSON.stringify(commit), { mode: 0o600 });
 }
 
 function runStandaloneCli(args: readonly string[]) {
@@ -847,7 +907,7 @@ describe("S7 cost verifier", () => {
     expect(calls).toEqual({ open: 1, fstat: 0, read: 0, close: 0 });
   });
 
-  test("requires a manifest-bound receipt length and matching all-pass publication", () => {
+  test("requires a manifest-bound receipt length, all-pass publication, and final commit", () => {
     const receiptOnlyEvidence = writeCliEvidence(receiptBytes());
     const receiptOnly = runStandaloneCli(["--receipt", receiptOnlyEvidence.receiptPath]);
     expect(receiptOnly.exitCode).toBe(78);
@@ -866,8 +926,85 @@ describe("S7 cost verifier", () => {
       const statuses = manifest.local_phase_status as Record<string, unknown>;
       statuses.exercise = "fail";
     });
+    const reservationEvidence = writeCliEvidence(receiptBytes());
+    rewriteAttestedManifest(reservationEvidence, (manifest) => {
+      const retention = manifest.retention as Record<string, unknown>;
+      retention.max_bytes_per_run = 1;
+    });
+    const commitEvidence = writeCliEvidence(receiptBytes());
+    const commit = JSON.parse(readFileSync(commitEvidence.commitPath, "utf8")) as {
+      receipt: { digest: string };
+    };
+    commit.receipt.digest = "0".repeat(64);
+    writeFileSync(commitEvidence.commitPath, JSON.stringify(commit), { mode: 0o600 });
 
-    for (const evidence of [byteCountEvidence, phaseEvidence]) {
+    for (const evidence of [byteCountEvidence, phaseEvidence, reservationEvidence, commitEvidence]) {
+      const completed = runStandaloneCli(evidence.args);
+      expect(completed.exitCode).toBe(78);
+      expect(completed.stderr).toBe("");
+      expect(parseJsonOutput(completed.stdout)).toMatchObject({
+        status: "blocked",
+        code: "S2_COST_RECEIPT_INVALID",
+      });
+      expect(completed.stdout).not.toContain(evidence.root);
+    }
+  });
+
+  test("refuses a final symlink at every four-artifact evidence boundary", () => {
+    const artifacts = ["receipt", "manifest", "publication", "commit"] as const;
+    for (const symlink of artifacts) {
+      const evidence = writeCliEvidence(receiptBytes(), { symlink });
+      const completed = runStandaloneCli(evidence.args);
+      expect(completed.exitCode).toBe(78);
+      expect(completed.stderr).toBe("");
+      expect(parseJsonOutput(completed.stdout)).toMatchObject({
+        status: "blocked",
+        code: "S2_COST_RECEIPT_UNREADABLE",
+      });
+      expect(completed.stdout).not.toContain(evidence.root);
+    }
+  });
+
+  test("refuses every incomplete receipt-manifest-publication-commit crash stage", () => {
+    const artifacts = ["receipt", "manifest", "publication", "commit"] as const;
+    for (const missing of artifacts) {
+      const evidence = writeCliEvidence(receiptBytes(), { missing });
+      const completed = runStandaloneCli(evidence.args);
+      expect(completed.exitCode).toBe(78);
+      expect(completed.stderr).toBe("");
+      expect(parseJsonOutput(completed.stdout)).toMatchObject({
+        status: "blocked",
+        code: "S2_COST_RECEIPT_UNREADABLE",
+      });
+      expect(completed.stdout).not.toContain(evidence.root);
+    }
+  });
+
+  test("refuses forged empty duplicate unsafe, and overflowed manifest inventories", () => {
+    const empty = writeCliEvidence(receiptBytes());
+    rewriteAttestedManifest(empty, (manifest) => {
+      manifest.files = [];
+    });
+    const duplicate = writeCliEvidence(receiptBytes());
+    rewriteAttestedManifest(duplicate, (manifest) => {
+      const files = manifest.files as readonly Record<string, unknown>[];
+      manifest.files = [...files, files[0]!];
+    });
+    const unsafe = writeCliEvidence(receiptBytes());
+    rewriteAttestedManifest(unsafe, (manifest) => {
+      const files = manifest.files as Record<string, unknown>[];
+      files[0] = { ...files[0]!, path: "./manifest.json" };
+    });
+    const overflow = writeCliEvidence(receiptBytes());
+    rewriteAttestedManifest(overflow, (manifest) => {
+      const files = manifest.files as Record<string, unknown>[];
+      const retention = manifest.retention as Record<string, unknown>;
+      files[0] = { ...files[0]!, bytes: Number.MAX_SAFE_INTEGER };
+      retention.retained_bytes_before_manifest = Number.MAX_SAFE_INTEGER;
+      retention.max_bytes_per_run = Number.MAX_SAFE_INTEGER;
+    });
+
+    for (const evidence of [empty, duplicate, unsafe, overflow]) {
       const completed = runStandaloneCli(evidence.args);
       expect(completed.exitCode).toBe(78);
       expect(completed.stderr).toBe("");

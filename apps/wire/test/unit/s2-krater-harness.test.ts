@@ -315,8 +315,13 @@ describe("S2 to S7 normalized cost receipt", () => {
     expect(shell).toContain('if [[ "${phase}" == "exercise" ]]');
     expect(shell).toContain("S2_COST_LOCAL_PHASES_COMPLETE=1");
     expect(shell).toContain("write_s2_cost_publication");
-    expect(shell.indexOf("S2_COST_LOCAL_PHASES_COMPLETE=1")).toBeLessThan(
-      shell.indexOf("write_s2_cost_publication"),
+    expect(shell).toContain("write_s2_cost_publication_commit");
+    const onExit = shell.slice(shell.indexOf("on_exit() {"), shell.indexOf("trap on_exit EXIT"));
+    expect(onExit).toContain("write_evidence_receipt");
+    expect(onExit).toContain("write_s2_cost_publication");
+    expect(onExit).toContain("write_s2_cost_publication_commit");
+    expect(shell.indexOf("write_s2_cost_publication()")).toBeLessThan(
+      shell.indexOf("write_s2_cost_publication_commit()"),
     );
   });
 
@@ -332,12 +337,27 @@ describe("S2 to S7 normalized cost receipt", () => {
     );
     expect(start).toContain('${persist} ${port} ${proof_scope}');
     expect(shell).toContain('"${persist}" "${port}" "${proof_scope}"; then');
-    expect(shell).toContain('clear_most_recent_supervisor_if_pid "${S2_SERVER_PID}"');
+    expect(shell).toContain('clear_most_recent_supervisor_if_marker "${S2_SERVER_MARKER}"');
+    expect(shell).toContain("most_recent_supervisor_is_tracked \"${marker}\"");
     expect(shell).toContain("reap_parent_terminated_supervisor_residual");
     expect(shell).toContain("S2_PARENT_TERM_OLD_HOOK_RESIDUAL_REAPED");
     expect(shell).toContain("S2_PARENT_TERM_RESIDUAL_UNPROVEN");
     expect(start).toContain("pre_release_group_is_stably_pinned");
-    expect(shell).toContain("S2_GROUP_MEMBER_COUNT -ge 1 && ${S2_GROUP_MEMBER_COUNT} -le 2");
+    expect(shell).toContain("${S2_GROUP_MEMBER_COUNT} -ge 1 && ${S2_GROUP_MEMBER_COUNT} -le 2");
+    expect(shell).toContain("S2_PLANT_PERSISTENT_PRE_RELEASE_HELPER");
+    expect(shell).toContain("S2_PERSISTENT_PRE_RELEASE_HELPER_ACCEPTED");
+    expect(shell).toContain("trap '' INT TERM HUP");
+    expect(shell).toContain("S2_LIFECYCLE_DEADLINE_TYPED_EXIT_FAILED");
+    expect(shell).toContain("return 124");
+    const publicationWriters = shell.slice(
+      shell.indexOf("write_evidence_receipt() {"),
+      shell.indexOf("create_evidence_subdir() {"),
+    );
+    expect(publicationWriters).toContain("linkSync(privateSibling, destination)");
+    expect(publicationWriters).toContain("fsyncSync(directoryDescriptor)");
+    expect(publicationWriters).not.toContain("renameSync(");
+    expect(publicationWriters).not.toContain("unlinkSync(");
+    expect(publicationWriters).not.toContain("rmSync(");
     expect(shell).toContain("S2_TERM_RESISTANT_START_FAILED");
     const termInterrupt = shell.slice(
       shell.indexOf('if [[ "${mode}" == "term-interrupt-cleanup" ]]'),
@@ -353,6 +373,7 @@ describe("registered S2 shell and lifecycle regressions", () => {
   test("the fast planted shell regressions are bounded and leave no owned group behind", async () => {
     const modes = [
       "release-race",
+      "persistent-pre-release-helper",
       "release-interleaving",
       "term-interrupt-cleanup",
       "term-resistant-release",

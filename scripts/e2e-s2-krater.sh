@@ -32,10 +32,18 @@ readonly S2_EVIDENCE_ROOT="e2e/artifacts/s2-krater"
 readonly S2_COST_RECEIPT_RELATIVE_PATH="s2-cost-input.json"
 readonly S2_COST_MANIFEST_RELATIVE_PATH="manifest.json"
 readonly S2_COST_PUBLICATION_RELATIVE_PATH="s2-cost-publication.json"
+readonly S2_COST_PUBLICATION_COMMIT_RELATIVE_PATH="s2-cost-publication-commit.json"
 # A parallel child runs the full local D1 suite, including two real migration-journal lanes.
 # Keep the test bounded, but allow its documented work rather than converting a healthy child
 # into a synthetic TERM result before the journal is finished.
-readonly S2_LIFECYCLE_DEADLINE_SECONDS=300
+# The outer lifecycle test can deliberately lower this only for its bounded
+# timeout regression. Production/default runs retain the documented 300s cap.
+S2_LIFECYCLE_DEADLINE_SECONDS="${S2_LIFECYCLE_DEADLINE_SECONDS:-300}"
+if ! [[ "${S2_LIFECYCLE_DEADLINE_SECONDS}" =~ ^[1-9][0-9]*$ ]]; then
+  printf '%s\n' '{"tool":"bash","package":"apps/wire","suite":"s2-krater-lifecycle","status":"fail","code":"S2_LIFECYCLE_DEADLINE_INVALID","reproduce":"scripts/e2e-s2-krater.sh"}'
+  exit 1
+fi
+readonly S2_LIFECYCLE_DEADLINE_SECONDS
 readonly -a S2_SOURCE_PATHS=(
   apps/wire/src/krater/krater.ts
   apps/wire/src/krater/worker.ts
@@ -55,7 +63,12 @@ readonly -a S2_SOURCE_PATHS=(
   db/migrations/0004_krater_integrity_v1.sql
   db/migrations/0005_krater_undigested_index.sql
   scripts/verify-cost-model.ts
+  scripts/verify-cost-model.test.ts
+  packages/contracts/src/artifacts.ts
   packages/contracts/src/s2-cost-receipt.ts
+  packages/contracts/test/unit/schema.test.ts
+  packages/contracts/generated/s2-cost-receipt.schema.json
+  packages/contracts/generated/s2-cost-receipt.types.ts
   scripts/e2e-s2-krater.sh
 )
 readonly -a S2_EXPECTED_MIGRATION_JOURNAL=(
@@ -157,6 +170,7 @@ fi
 readonly S2_COST_RECEIPT_PATH="${S2_RUN_DIR}/${S2_COST_RECEIPT_RELATIVE_PATH}"
 readonly S2_COST_MANIFEST_PATH="${S2_RUN_DIR}/${S2_COST_MANIFEST_RELATIVE_PATH}"
 readonly S2_COST_PUBLICATION_PATH="${S2_RUN_DIR}/${S2_COST_PUBLICATION_RELATIVE_PATH}"
+readonly S2_COST_PUBLICATION_COMMIT_PATH="${S2_RUN_DIR}/${S2_COST_PUBLICATION_COMMIT_RELATIVE_PATH}"
 S2_STATE_DIR="${S2_RUN_DIR}/main"
 readonly S2_STATE_DIR
 readonly S2_SERVER_LOG="${S2_STATE_DIR}/wrangler.log"
@@ -425,6 +439,7 @@ start_pinned_supervisor() {
   local watchdog_pid_file watchdog_health watchdog_pid tick release_sent=0
   local plant_watchdog_exit_on_term="${S2_PLANT_WATCHDOG_EXIT_ON_TERM:-0}"
   local plant_supervisor_exit_on_term="${S2_PLANT_SUPERVISOR_EXIT_ON_TERM:-0}"
+  local plant_persistent_pre_release_helper="${S2_PLANT_PERSISTENT_PRE_RELEASE_HELPER:-0}"
   shift 5
   [[ -d "${persist}" && ! -L "${persist}" && "${port}" =~ ^[0-9]+$ ]] || return 1
   case "${proof_scope}" in
@@ -458,7 +473,8 @@ start_pinned_supervisor() {
     max_watchdog_uncertain_ticks="$7"
     plant_watchdog_exit_on_term="$8"
     plant_supervisor_exit_on_term="$9"
-    shift 9
+    plant_persistent_pre_release_helper="${10}"
+    shift 10
     supervisor_pid="$$"
     release_fifo="${status_file}.release"
     [[ ! -e "${release_fifo}" && ! -L "${release_fifo}" ]] || exit 125
@@ -485,6 +501,12 @@ start_pinned_supervisor() {
       done
     }
     trap "exit 125" TERM HUP INT
+    if [[ "${plant_persistent_pre_release_helper}" == 1 ]]; then
+      # Regression-only: reject this stable child before any real Worker command
+      # can escape the release gate.
+      bash -c "trap '' TERM HUP INT; while :; do sleep 60; done" \
+        "s2-persistent-pre-release-helper-${marker}" &
+    fi
     # The controller first arms the parent-loss watchdog while this supervisor remains blocked.
     # Only after it proves the watchdog exact healthy identity does it send the separate
     # release value.  Thus parent death cannot fall into the old release-to-watchdog gap.
@@ -546,6 +568,7 @@ start_pinned_supervisor() {
     "${release_token}" "${arm_token}" "${S2_PLANT_WATCHDOG_INSPECTION_UNCERTAIN:-0}" \
     "${S2_WATCHDOG_MAX_UNCERTAIN_TICKS}" "${plant_watchdog_exit_on_term}" \
     "${plant_supervisor_exit_on_term}" \
+    "${plant_persistent_pre_release_helper}" \
     "$@" &
   pid=$!
   S2_LAST_SUPERVISOR_PGID="${pid}"
@@ -560,6 +583,10 @@ start_pinned_supervisor() {
       if ! supervisor_is_owned "${pid}" "${pid}" "${marker}"; then exec 7>&-; return 1; fi
       if ! pre_release_group_is_stably_pinned "${pid}" "${marker}"; then
         exec 7>&-
+        if supervisor_is_owned "${pid}" "${pid}" "${marker}"; then
+          kill_owned_group_to_zero "${pid}" "${pid}" "${marker}" "${persist}" "${port}" \
+            "${proof_scope}" || return 1
+        fi
         return 1
       fi
       # Arm the watchdog over the already-open descriptor, then prove its parent/supervisor
@@ -720,12 +747,27 @@ group_contains_pid() {
 # treating an observation race as a start failure while still refusing an unexpected pre-release
 # descendant before any real Worker command can run.
 pre_release_group_is_stably_pinned() {
-  local pid="$1" marker="$2" sample
+  local pid="$1" marker="$2" sample member helper="" first_helper=""
   for sample in 1 2; do
     supervisor_is_owned "${pid}" "${pid}" "${marker}" || return 1
     group_members "${pid}" || return 1
     [[ ${S2_GROUP_MEMBER_COUNT} -ge 1 && ${S2_GROUP_MEMBER_COUNT} -le 2 ]] || return 1
     group_contains_pid "${pid}" || return 1
+    # ps itself may momentarily fork a helper inside the newly pinned session.
+    # A helper with the same PID in both samples is instead a persistent child
+    # and therefore an unapproved payload before the release gate.
+    if [[ ${S2_GROUP_MEMBER_COUNT} -eq 2 ]]; then
+      helper=""
+      for member in "${S2_GROUP_MEMBER_PIDS[@]}"; do
+        [[ "${member}" == "${pid}" ]] || helper="${member}"
+      done
+      [[ -n "${helper}" ]] || return 1
+      if [[ ${sample} -eq 1 ]]; then
+        first_helper="${helper}"
+      elif [[ -n "${first_helper}" && "${helper}" == "${first_helper}" ]]; then
+        return 1
+      fi
+    fi
     (( sample == 2 )) || sleep 0.05
   done
 }
@@ -885,11 +927,11 @@ reap_parent_terminated_supervisor_residual() {
   return 1
 }
 
-clear_most_recent_supervisor_if_pid() {
-  local pid="$1" latest_pid
+clear_most_recent_supervisor_if_marker() {
+  local marker="$1" latest_marker
   [[ -n "${S2_MOST_RECENT_SUPERVISOR}" ]] || return 0
-  latest_pid="${S2_MOST_RECENT_SUPERVISOR%% *}"
-  [[ "${pid}" == "${latest_pid}" ]] || return 0
+  read -r _ _ _ latest_marker _ <<<"${S2_MOST_RECENT_SUPERVISOR}"
+  [[ -n "${marker}" && "${marker}" == "${latest_marker}" ]] || return 0
   S2_MOST_RECENT_SUPERVISOR=""
 }
 
@@ -904,7 +946,7 @@ stop_pinned_supervisor() {
     # sufficient authority to kill this exact group and establish zero survivors.
     if kill_owned_group_to_zero "${pid}" "${pgid}" "${marker}" "${persist}" "${port}" \
       "${proof_scope}"; then
-      clear_most_recent_supervisor_if_pid "${pid}"
+      clear_most_recent_supervisor_if_marker "${marker}"
     else
       return 1
     fi
@@ -923,7 +965,7 @@ stop_pinned_supervisor() {
         if [[ "${proof_scope}" == "server" ]]; then
           assert_no_run_survivors "${persist}" "${port}" "${marker}" || return 1
         fi
-        clear_most_recent_supervisor_if_pid "${pid}"
+        clear_most_recent_supervisor_if_marker "${marker}"
         return 0
       fi
       if [[ "${S2_LEGACY_STOP_CONTEXT:-0}" == 1 && "${proof_scope}" == "server" ]]; then
@@ -935,7 +977,7 @@ stop_pinned_supervisor() {
     if ! group_members "${pgid}"; then
       if kill_owned_group_to_zero "${pid}" "${pgid}" "${marker}" "${persist}" "${port}" \
         "${proof_scope}"; then
-        clear_most_recent_supervisor_if_pid "${pid}"
+        clear_most_recent_supervisor_if_marker "${marker}"
       else
         return 1
       fi
@@ -949,7 +991,7 @@ stop_pinned_supervisor() {
       if [[ ${S2_GROUP_MEMBER_COUNT} -eq 2 ]] && ! group_contains_pid "${watchdog_pid}"; then
         if kill_owned_group_to_zero "${pid}" "${pgid}" "${marker}" "${persist}" "${port}" \
           "${proof_scope}"; then
-          clear_most_recent_supervisor_if_pid "${pid}"
+          clear_most_recent_supervisor_if_marker "${marker}"
           return 0
         fi
         return 1
@@ -963,7 +1005,7 @@ stop_pinned_supervisor() {
           if [[ "${proof_scope}" == "server" ]]; then
             assert_no_run_survivors "${persist}" "${port}" "${marker}" || return 1
           fi
-          clear_most_recent_supervisor_if_pid "${pid}"
+          clear_most_recent_supervisor_if_marker "${marker}"
           return 0
         fi
         sleep 0.1
@@ -979,7 +1021,7 @@ stop_pinned_supervisor() {
   # proof in this helper authorizes KILL of that group only; there is no PID fallback.
   if kill_owned_group_to_zero "${pid}" "${pgid}" "${marker}" "${persist}" "${port}" \
     "${proof_scope}"; then
-    clear_most_recent_supervisor_if_pid "${pid}"
+    clear_most_recent_supervisor_if_marker "${marker}"
     return 0
   fi
   return 1
@@ -992,7 +1034,7 @@ server_is_owned() {
 }
 
 stop_worker() {
-  local stopped_pid
+  local stopped_marker
   if [[ "${S2_PLANT_STOP_WORKER_FAILURE:-0}" == 1 ]]; then
     # Regression-only in-process mutation. The legacy wrapper must return failure before it
     # restores the origin, so this mutation is intentionally observable by its caller.
@@ -1000,7 +1042,7 @@ stop_worker() {
     return 91
   fi
   [[ -n "${S2_SERVER_PID}" ]] || return 0
-  stopped_pid="${S2_SERVER_PID}"
+  stopped_marker="${S2_SERVER_MARKER}"
   stop_pinned_supervisor \
     "${S2_SERVER_PID}" "${S2_SERVER_PGID}" "${S2_SERVER_MARKER}" \
     "${S2_SERVER_WATCHDOG_PID}" "${S2_SERVER_WATCHDOG_HEALTH}" \
@@ -1014,7 +1056,7 @@ stop_worker() {
   S2_SERVER_PORT=""
   S2_ACTIVE_HARNESS_TOKEN=""
   S2_ACTIVE_HARNESS_RUN_ID=""
-  clear_most_recent_supervisor_if_pid "${stopped_pid}"
+  clear_most_recent_supervisor_if_marker "${stopped_marker}"
 }
 
 remember_lifecycle_supervisor() {
@@ -1029,9 +1071,9 @@ remember_lifecycle_supervisor() {
 }
 
 forget_lifecycle_supervisor() {
-  local pid="$1" index
-  for index in "${!S2_LIFECYCLE_OWNED_PIDS[@]}"; do
-    if [[ "${S2_LIFECYCLE_OWNED_PIDS[index]}" == "${pid}" ]]; then
+  local marker="$1" index
+  for index in "${!S2_LIFECYCLE_OWNED_MARKERS[@]}"; do
+    if [[ -n "${marker}" && "${S2_LIFECYCLE_OWNED_MARKERS[index]}" == "${marker}" ]]; then
       # Preserve the slot so Bash 3's indexed-array behavior stays simple; blank means its
       # supervisor was released and must not be signalled again by EXIT cleanup.
       S2_LIFECYCLE_OWNED_PIDS[index]=""
@@ -1042,7 +1084,7 @@ forget_lifecycle_supervisor() {
       S2_LIFECYCLE_OWNED_WATCHDOG_HEALTH_FILES[index]=""
       S2_LIFECYCLE_OWNED_STATE_DIRS[index]=""
       S2_LIFECYCLE_OWNED_PORTS[index]=""
-      clear_most_recent_supervisor_if_pid "${pid}"
+      clear_most_recent_supervisor_if_marker "${marker}"
       return 0
     fi
   done
@@ -1051,10 +1093,11 @@ forget_lifecycle_supervisor() {
 
 # shellcheck disable=SC2329
 stop_lifecycle_supervisors() {
-  local index pid result=0
+  local index pid marker result=0
   for index in "${!S2_LIFECYCLE_OWNED_PIDS[@]}"; do
     pid="${S2_LIFECYCLE_OWNED_PIDS[index]}"
     [[ -n "${pid}" ]] || continue
+    marker="${S2_LIFECYCLE_OWNED_MARKERS[index]}"
     if stop_pinned_supervisor \
       "${pid}" \
       "${S2_LIFECYCLE_OWNED_PGIDS[index]}" \
@@ -1063,7 +1106,7 @@ stop_lifecycle_supervisors() {
       "${S2_LIFECYCLE_OWNED_WATCHDOG_HEALTH_FILES[index]}" \
       "${S2_LIFECYCLE_OWNED_STATE_DIRS[index]}" \
       "${S2_LIFECYCLE_OWNED_PORTS[index]}" client; then
-      forget_lifecycle_supervisor "${pid}" || return 1
+      forget_lifecycle_supervisor "${marker}" || return 1
     else
       result=1
     fi
@@ -1073,11 +1116,11 @@ stop_lifecycle_supervisors() {
 
 # shellcheck disable=SC2329
 most_recent_supervisor_is_tracked() {
-  local pid="$1" index
-  [[ -n "${S2_SERVER_PID}" && "${pid}" == "${S2_SERVER_PID}" ]] && return 0
-  for index in "${!S2_LIFECYCLE_OWNED_PIDS[@]}"; do
-    [[ -n "${S2_LIFECYCLE_OWNED_PIDS[index]}" && \
-      "${pid}" == "${S2_LIFECYCLE_OWNED_PIDS[index]}" ]] && return 0
+  local marker="$1" index
+  [[ -n "${S2_SERVER_MARKER}" && "${marker}" == "${S2_SERVER_MARKER}" ]] && return 0
+  for index in "${!S2_LIFECYCLE_OWNED_MARKERS[@]}"; do
+    [[ -n "${S2_LIFECYCLE_OWNED_MARKERS[index]}" && \
+      "${marker}" == "${S2_LIFECYCLE_OWNED_MARKERS[index]}" ]] && return 0
   done
   return 1
 }
@@ -1100,8 +1143,8 @@ stop_most_recent_untracked_supervisor() {
     server|client) ;;
     *) return 1 ;;
   esac
-  if most_recent_supervisor_is_tracked "${pid}"; then
-    clear_most_recent_supervisor_if_pid "${pid}"
+  if most_recent_supervisor_is_tracked "${marker}"; then
+    clear_most_recent_supervisor_if_marker "${marker}"
     return 0
   fi
 
@@ -1113,14 +1156,14 @@ stop_most_recent_untracked_supervisor() {
       wait "${pid}" 2>/dev/null || :
       if [[ "${proof_scope}" != "server" ]] || \
         assert_no_run_survivors "${persist}" "${port}" "${marker}"; then
-        clear_most_recent_supervisor_if_pid "${pid}"
+        clear_most_recent_supervisor_if_marker "${marker}"
         return 0
       fi
       return 1
     fi
     if [[ "${proof_scope}" == "server" ]] && \
       assert_no_run_survivors "${persist}" "${port}" "${marker}"; then
-      clear_most_recent_supervisor_if_pid "${pid}"
+      clear_most_recent_supervisor_if_marker "${marker}"
       return 0
     fi
     return 1
@@ -1128,19 +1171,19 @@ stop_most_recent_untracked_supervisor() {
   if stop_pinned_supervisor \
     "${pid}" "${pgid}" "${marker}" "${watchdog_pid}" "${watchdog_health}" \
     "${persist}" "${port}" "${proof_scope}"; then
-    clear_most_recent_supervisor_if_pid "${pid}"
+    clear_most_recent_supervisor_if_marker "${marker}"
     return 0
   fi
   # stop_pinned_supervisor deliberately reports a missing/stale watchdog as failure even after
   # it has KILLed the freshly proved exact group. For EXIT cleanup that zero-survivor result is
   # complete: preserve the parent’s original signal status instead of converting it to 125.
   if [[ "${proof_scope}" == "client" ]] && ! kill -0 -- "-${pgid}" 2>/dev/null; then
-    clear_most_recent_supervisor_if_pid "${pid}"
+    clear_most_recent_supervisor_if_marker "${marker}"
     return 0
   fi
   if [[ "${proof_scope}" == "server" ]] && \
     assert_no_run_survivors "${persist}" "${port}" "${marker}"; then
-    clear_most_recent_supervisor_if_pid "${pid}"
+    clear_most_recent_supervisor_if_marker "${marker}"
     return 0
   fi
   return 1
@@ -1182,10 +1225,13 @@ write_evidence_receipt() {
   S2_RECEIPT_PHASE_UPGRADE_JOURNAL_EXISTING="${S2_COST_PHASE_UPGRADE_JOURNAL_EXISTING}" \
   S2_RECEIPT_PHASE_UPGRADE_JOURNAL_EMPTY="${S2_COST_PHASE_UPGRADE_JOURNAL_EMPTY}" \
   bun --eval '
-    import { createHash, randomUUID } from "node:crypto";
+    import { createHash } from "node:crypto";
     import {
       parseS2CostEvidenceManifestBytes,
+      S2_COST_DURABLE_PUBLICATION_RESERVED_BYTES,
+      S2_COST_DURABLE_PUBLICATION_RESERVED_NAMES,
       S2_COST_EVIDENCE_MANIFEST_VERSION,
+      S2_COST_MANIFEST_PENDING_RELATIVE_PATH,
       S2_COST_MANIFEST_RELATIVE_PATH,
       S2_COST_RECEIPT_RELATIVE_PATH,
     } from "@asimposium/contracts";
@@ -1223,12 +1269,13 @@ write_evidence_receipt() {
     // without replacement, read back, and the owned directory fsynced. The
     // sibling is intentionally retained on every path: evidence is never
     // deleted by this harness.
-    const writeExclusiveDurably = (destination, body) => {
+    const writeExclusiveDurably = (destination, pendingRelativePath, body) => {
       const directory = dirname(destination);
-      const privateSibling = resolve(
-        directory,
-        `.${basename(destination)}.${randomUUID()}.pending`,
-      );
+      const privateSibling = resolve(directory, pendingRelativePath);
+      if (
+        basename(privateSibling) !== pendingRelativePath ||
+        dirname(privateSibling) !== resolve(directory)
+      ) throw new Error("pending-path");
       const bytes = Buffer.from(body, "utf8");
       let descriptor;
       let directoryDescriptor;
@@ -1295,7 +1342,12 @@ write_evidence_receipt() {
       visit(root);
       files.sort((left, right) => left.path.localeCompare(right.path));
       const retainedBytes = files.reduce((sum, file) => sum + file.bytes, 0);
-      if (files.length + 1 > maxFiles || retainedBytes > maxBytes) throw new Error("bound");
+      const reservedNames = [...S2_COST_DURABLE_PUBLICATION_RESERVED_NAMES];
+      if (files.some((file) => reservedNames.includes(file.path))) throw new Error("reservation-name");
+      if (
+        files.length + reservedNames.length > maxFiles ||
+        retainedBytes + S2_COST_DURABLE_PUBLICATION_RESERVED_BYTES > maxBytes
+      ) throw new Error("reservation-bound");
       if (costReceiptRelativePath !== S2_COST_RECEIPT_RELATIVE_PATH) throw new Error("cost-receipt-path");
       const costReceipt = files.find((file) => file.path === costReceiptRelativePath);
       const costReceiptSummary =
@@ -1326,17 +1378,20 @@ write_evidence_receipt() {
           max_files_per_run: maxFiles,
           retained_bytes_before_manifest: retainedBytes,
           retained_files_before_manifest: files.length,
+          durable_publication_reservation: {
+            retained_names: reservedNames,
+            reserved_bytes_upper_bound: S2_COST_DURABLE_PUBLICATION_RESERVED_BYTES,
+          },
         },
         s2_cost_receipt: costReceiptSummary,
         files,
       };
       const body = `${JSON.stringify(manifest)}\n`;
-      if (retainedBytes + Buffer.byteLength(body) > maxBytes) throw new Error("bound");
-      if (relativeReceiptPath !== `${S2_RECEIPT_ROOT ?? ""}/${S2_COST_MANIFEST_RELATIVE_PATH}`) {
+      if (relative(root, receiptPath) !== S2_COST_MANIFEST_RELATIVE_PATH) {
         throw new Error("manifest-path");
       }
       parseS2CostEvidenceManifestBytes(Buffer.from(body, "utf8"));
-      writeExclusiveDurably(receiptPath, body);
+      writeExclusiveDurably(receiptPath, S2_COST_MANIFEST_PENDING_RELATIVE_PATH, body);
       const manifestDigest = new Bun.CryptoHasher("sha256").update(body).digest("hex");
       console.log(JSON.stringify({
         tool: "bash+bun",
@@ -1346,8 +1401,10 @@ write_evidence_receipt() {
         run_id: process.env.S2_RECEIPT_RUN_ID,
         manifest: relativeReceiptPath,
         manifest_digest: manifestDigest,
-        retained_bytes: retainedBytes + Buffer.byteLength(body),
-        retained_files: files.length + 1,
+        retained_bytes_before_manifest: retainedBytes,
+        retained_files_before_manifest: files.length,
+        durable_publication_reserved_bytes: S2_COST_DURABLE_PUBLICATION_RESERVED_BYTES,
+        durable_publication_reserved_names: reservedNames,
         max_retained_bytes: maxBytes,
         max_retained_files: maxFiles,
         deletion_performed: false,
@@ -1379,12 +1436,13 @@ write_s2_cost_publication() {
   S2_PUBLICATION_RECEIPT="${S2_COST_RECEIPT_PATH}" \
   S2_PUBLICATION_PATH="${S2_COST_PUBLICATION_PATH}" \
   bun --eval '
-    import { createHash, randomUUID } from "node:crypto";
+    import { createHash } from "node:crypto";
     import {
       parseS2CostEvidenceManifestBytes,
       parseS2CostReceiptPublicationBytes,
       S2_COST_EVIDENCE_MANIFEST_VERSION,
       S2_COST_MANIFEST_RELATIVE_PATH,
+      S2_COST_PUBLICATION_PENDING_RELATIVE_PATH,
       S2_COST_PUBLICATION_RECORD,
       S2_COST_PUBLICATION_RELATIVE_PATH,
       S2_COST_PUBLICATION_SCHEMA_VERSION,
@@ -1407,12 +1465,13 @@ write_s2_cost_publication() {
     const receiptPath = process.env.S2_PUBLICATION_RECEIPT ?? "";
     const publicationPath = process.env.S2_PUBLICATION_PATH ?? "";
     const digest = (bytes) => createHash("sha256").update(bytes).digest("hex");
-    const writeExclusiveDurably = (destination, body) => {
+    const writeExclusiveDurably = (destination, pendingRelativePath, body) => {
       const directory = dirname(destination);
-      const privateSibling = resolve(
-        directory,
-        `.${basename(destination)}.${randomUUID()}.pending`,
-      );
+      const privateSibling = resolve(directory, pendingRelativePath);
+      if (
+        basename(privateSibling) !== pendingRelativePath ||
+        dirname(privateSibling) !== resolve(directory)
+      ) throw new Error("pending-path");
       const bytes = Buffer.from(body, "utf8");
       let descriptor;
       let directoryDescriptor;
@@ -1492,10 +1551,153 @@ write_s2_cost_publication() {
       };
       const body = `${JSON.stringify(publication)}\n`;
       parseS2CostReceiptPublicationBytes(Buffer.from(body, "utf8"));
-      writeExclusiveDurably(publicationPath, body);
+      writeExclusiveDurably(publicationPath, S2_COST_PUBLICATION_PENDING_RELATIVE_PATH, body);
       console.log(JSON.stringify({ tool: "bash+bun", package: "apps/wire", suite: "s2-cost-publication", status: "pass", reproduce: "scripts/e2e-s2-krater.sh" }));
     } catch {
       console.log(JSON.stringify({ tool: "bash+bun", package: "apps/wire", suite: "s2-cost-publication", status: "fail", code: "S2_COST_PUBLICATION_FAILED", reproduce: "scripts/e2e-s2-krater.sh" }));
+      process.exit(1);
+    }
+  '
+}
+
+# Publication itself is still an incomplete statement: this final immutable record binds the
+# receipt, manifest, and publication together after every local phase has passed. The final
+# name and its retained pending sibling are both reserved by the manifest written beforehand.
+# shellcheck disable=SC2329
+write_s2_cost_publication_commit() {
+  # shellcheck disable=SC2034,SC2016
+  S2_COMMIT_ROOT="${S2_RUN_DIR}" \
+  S2_COMMIT_MANIFEST="${S2_COST_MANIFEST_PATH}" \
+  S2_COMMIT_RECEIPT="${S2_COST_RECEIPT_PATH}" \
+  S2_COMMIT_PUBLICATION="${S2_COST_PUBLICATION_PATH}" \
+  S2_COMMIT_PATH="${S2_COST_PUBLICATION_COMMIT_PATH}" \
+  bun --eval '
+    import { createHash } from "node:crypto";
+    import {
+      parseS2CostEvidenceManifestBytes,
+      parseS2CostReceiptPublicationBytes,
+      parseS2CostReceiptPublicationCommitBytes,
+      S2_COST_EVIDENCE_MANIFEST_VERSION,
+      S2_COST_MANIFEST_RELATIVE_PATH,
+      S2_COST_PUBLICATION_COMMIT_PENDING_RELATIVE_PATH,
+      S2_COST_PUBLICATION_COMMIT_RECORD,
+      S2_COST_PUBLICATION_COMMIT_RELATIVE_PATH,
+      S2_COST_PUBLICATION_COMMIT_SCHEMA_VERSION,
+      S2_COST_PUBLICATION_RELATIVE_PATH,
+      S2_COST_RECEIPT_RELATIVE_PATH,
+    } from "@asimposium/contracts";
+    import {
+      closeSync,
+      constants,
+      fsyncSync,
+      linkSync,
+      lstatSync,
+      openSync,
+      readFileSync,
+      writeSync,
+    } from "node:fs";
+    import { basename, dirname, resolve } from "node:path";
+
+    const root = process.env.S2_COMMIT_ROOT ?? "";
+    const manifestPath = process.env.S2_COMMIT_MANIFEST ?? "";
+    const receiptPath = process.env.S2_COMMIT_RECEIPT ?? "";
+    const publicationPath = process.env.S2_COMMIT_PUBLICATION ?? "";
+    const commitPath = process.env.S2_COMMIT_PATH ?? "";
+    const digest = (bytes) => createHash("sha256").update(bytes).digest("hex");
+    const writeExclusiveDurably = (destination, pendingRelativePath, body) => {
+      const directory = dirname(destination);
+      const privateSibling = resolve(directory, pendingRelativePath);
+      if (
+        basename(privateSibling) !== pendingRelativePath ||
+        dirname(privateSibling) !== resolve(directory)
+      ) throw new Error("pending-path");
+      const bytes = Buffer.from(body, "utf8");
+      let descriptor;
+      let directoryDescriptor;
+      try {
+        const directoryStat = lstatSync(directory);
+        if (!directoryStat.isDirectory() || directoryStat.isSymbolicLink()) throw new Error("directory");
+        descriptor = openSync(
+          privateSibling,
+          constants.O_WRONLY | constants.O_CREAT | constants.O_EXCL,
+          0o600,
+        );
+        let offset = 0;
+        while (offset < bytes.byteLength) {
+          const written = writeSync(descriptor, bytes, offset, bytes.byteLength - offset);
+          if (!Number.isSafeInteger(written) || written <= 0) throw new Error("short-write");
+          offset += written;
+        }
+        fsyncSync(descriptor);
+        closeSync(descriptor);
+        descriptor = undefined;
+        const privateStat = lstatSync(privateSibling);
+        if (!privateStat.isFile() || privateStat.isSymbolicLink() || (privateStat.mode & 0o777) !== 0o600) {
+          throw new Error("private-sibling");
+        }
+        if (Buffer.compare(readFileSync(privateSibling), bytes) !== 0) throw new Error("private-readback");
+        linkSync(privateSibling, destination);
+        directoryDescriptor = openSync(directory, constants.O_RDONLY);
+        fsyncSync(directoryDescriptor);
+        closeSync(directoryDescriptor);
+        directoryDescriptor = undefined;
+        const finalStat = lstatSync(destination);
+        if (!finalStat.isFile() || finalStat.isSymbolicLink() || (finalStat.mode & 0o777) !== 0o600) {
+          throw new Error("final");
+        }
+        if (Buffer.compare(readFileSync(destination), bytes) !== 0) throw new Error("final-readback");
+      } finally {
+        if (descriptor !== undefined) closeSync(descriptor);
+        if (directoryDescriptor !== undefined) closeSync(directoryDescriptor);
+      }
+    };
+    try {
+      if (!root) throw new Error("root");
+      const rootStat = lstatSync(root);
+      if (!rootStat.isDirectory() || rootStat.isSymbolicLink()) throw new Error("root");
+      if (
+        resolve(manifestPath) !== resolve(root, S2_COST_MANIFEST_RELATIVE_PATH) ||
+        resolve(receiptPath) !== resolve(root, S2_COST_RECEIPT_RELATIVE_PATH) ||
+        resolve(publicationPath) !== resolve(root, S2_COST_PUBLICATION_RELATIVE_PATH) ||
+        resolve(commitPath) !== resolve(root, S2_COST_PUBLICATION_COMMIT_RELATIVE_PATH)
+      ) throw new Error("path");
+      for (const pathname of [manifestPath, receiptPath, publicationPath]) {
+        const stat = lstatSync(pathname);
+        if (!stat.isFile() || stat.isSymbolicLink() || (stat.mode & 0o777) !== 0o600) throw new Error("artifact");
+      }
+      const manifestBytes = readFileSync(manifestPath);
+      const receiptBytes = readFileSync(receiptPath);
+      const publicationBytes = readFileSync(publicationPath);
+      const manifest = parseS2CostEvidenceManifestBytes(manifestBytes);
+      const publication = parseS2CostReceiptPublicationBytes(publicationBytes);
+      const phases = manifest.local_phase_status;
+      if (
+        manifest.manifest_version !== S2_COST_EVIDENCE_MANIFEST_VERSION || manifest.exit_code !== 78 ||
+        !manifest.s2_cost_receipt || manifest.s2_cost_receipt.path !== S2_COST_RECEIPT_RELATIVE_PATH ||
+        manifest.s2_cost_receipt.digest !== digest(receiptBytes) ||
+        manifest.s2_cost_receipt.bytes !== receiptBytes.byteLength ||
+        publication.manifest.digest !== digest(manifestBytes) ||
+        publication.receipt.digest !== digest(receiptBytes) ||
+        publication.receipt.bytes !== receiptBytes.byteLength ||
+        publication.provenance.run_id !== manifest.run_id ||
+        publication.provenance.revision !== manifest.revision ||
+        publication.provenance.dirty_state !== manifest.dirty_state ||
+        publication.provenance.source_digest !== manifest.source_digest ||
+        Object.values(phases).some((value) => value !== "pass")
+      ) throw new Error("attestation");
+      const commit = {
+        schema_version: S2_COST_PUBLICATION_COMMIT_SCHEMA_VERSION,
+        record: S2_COST_PUBLICATION_COMMIT_RECORD,
+        manifest: { path: S2_COST_MANIFEST_RELATIVE_PATH, digest: digest(manifestBytes) },
+        receipt: { path: S2_COST_RECEIPT_RELATIVE_PATH, digest: digest(receiptBytes), bytes: receiptBytes.byteLength },
+        publication: { path: S2_COST_PUBLICATION_RELATIVE_PATH, digest: digest(publicationBytes) },
+      };
+      const body = `${JSON.stringify(commit)}\n`;
+      parseS2CostReceiptPublicationCommitBytes(Buffer.from(body, "utf8"));
+      writeExclusiveDurably(commitPath, S2_COST_PUBLICATION_COMMIT_PENDING_RELATIVE_PATH, body);
+      console.log(JSON.stringify({ tool: "bash+bun", package: "apps/wire", suite: "s2-cost-publication-commit", status: "pass", reproduce: "scripts/e2e-s2-krater.sh" }));
+    } catch {
+      console.log(JSON.stringify({ tool: "bash+bun", package: "apps/wire", suite: "s2-cost-publication-commit", status: "fail", code: "S2_COST_PUBLICATION_COMMIT_FAILED", reproduce: "scripts/e2e-s2-krater.sh" }));
       process.exit(1);
     }
   '
@@ -1514,12 +1716,19 @@ create_evidence_subdir() {
 on_exit() {
   local original_status="$?" final_status
   trap - EXIT
+  # A first signal has already selected the preserved status. Ignore follow-up
+  # termination signals while exact cleanup and immutable evidence publication run.
+  trap '' INT TERM HUP
+  if [[ "${S2_PLANT_ON_EXIT_SECOND_SIGNAL:-0}" == "1" ]]; then
+    kill -TERM "$$"
+  fi
   final_status="${original_status}"
   if ! cleanup_workers; then
     final_status=125
   fi
   if [[ ${final_status} -eq 78 && ${S2_COST_LOCAL_PHASES_COMPLETE} -eq 1 ]]; then
-    if ! write_evidence_receipt "${final_status}" 1 || ! write_s2_cost_publication; then
+    if ! write_evidence_receipt "${final_status}" 1 || ! write_s2_cost_publication || \
+      ! write_s2_cost_publication_commit; then
       final_status=125
     fi
   elif ! write_evidence_receipt "${final_status}" 0; then
@@ -1570,7 +1779,7 @@ start_worker() {
   S2_ACTIVE_HARNESS_TOKEN="${token}"
   S2_ACTIVE_HARNESS_RUN_ID="${run_id}"
   # Transfer is complete only after every Worker handle is visible to EXIT cleanup.
-  clear_most_recent_supervisor_if_pid "${S2_SERVER_PID}"
+  clear_most_recent_supervisor_if_marker "${S2_SERVER_MARKER}"
 
   deadline=$((SECONDS + S2_READY_DEADLINE_SECONDS))
   while (( SECONDS < deadline )); do
@@ -2130,6 +2339,23 @@ run_s2_shell_regression_test() {
     return 0
   fi
 
+  if [[ "${mode}" == "persistent-pre-release-helper" ]]; then
+    status_file="${S2_STATE_DIR}/persistent-pre-release-helper-$(random_hex 8).status"
+    if S2_PLANT_PERSISTENT_PRE_RELEASE_HELPER=1 \
+      start_pinned_supervisor "${status_file}" persistent-pre-release-helper \
+        "${S2_STATE_DIR}" "${S2_PORT}" client bash -c 'exit 0'; then
+      emit '{"tool":"bash","package":"apps/wire","suite":"s2-krater-shell","status":"fail","code":"S2_PERSISTENT_PRE_RELEASE_HELPER_ACCEPTED","reproduce":"S2_SHELL_REGRESSION_TEST=persistent-pre-release-helper scripts/e2e-s2-krater.sh"}'
+      return 1
+    fi
+    is_decimal "${S2_LAST_SUPERVISOR_PGID}" || return 1
+    if kill -0 -- "-${S2_LAST_SUPERVISOR_PGID}" 2>/dev/null; then
+      emit '{"tool":"bash","package":"apps/wire","suite":"s2-krater-shell","status":"fail","code":"S2_PERSISTENT_PRE_RELEASE_HELPER_SURVIVOR","reproduce":"S2_SHELL_REGRESSION_TEST=persistent-pre-release-helper scripts/e2e-s2-krater.sh"}'
+      return 1
+    fi
+    emit '{"tool":"bash","package":"apps/wire","suite":"s2-krater-shell","status":"pass","scenario":"persistent-pre-release-helper-is-refused-and-exact-pinned-group-is-reaped-before-worker-release","reproduce":"S2_SHELL_REGRESSION_TEST=persistent-pre-release-helper scripts/e2e-s2-krater.sh"}'
+    return 0
+  fi
+
   if [[ "${mode}" == "release-interleaving" ]]; then
     status_file="${S2_STATE_DIR}/release-interleaving-$(random_hex 8).status"
     S2_PLANT_RELEASE_INTERLEAVING=1 \
@@ -2600,7 +2826,10 @@ if [[ "${S2_SHELL_REGRESSION_TEST:-none}" != "none" ]]; then
 fi
 
 launch_lifecycle_child() {
-  local port="$1" log="$2" interrupt_after_ready="$3" state_dir="$4" ready_file
+  local port="$1" log="$2" interrupt_after_ready="$3" state_dir="$4" block_after_ready="${5:-0}"
+  local on_exit_second_signal="${6:-0}" ready_file
+  [[ "${block_after_ready}" == 0 || "${block_after_ready}" == 1 ]] || return 1
+  [[ "${on_exit_second_signal}" == 0 || "${on_exit_second_signal}" == 1 ]] || return 1
   ready_file="${state_dir}/ready-${port}-$(random_hex 8)"
   start_pinned_supervisor "${state_dir}/child-${port}-$(random_hex 8).status" "lifecycle-${port}" \
     "${state_dir}" "${port}" client \
@@ -2608,6 +2837,8 @@ launch_lifecycle_child() {
       S2_PORT="${port}" \
       S2_LIFECYCLE_TEST="none" \
       S2_INTERRUPT_AFTER_READY="${interrupt_after_ready}" \
+      S2_LIFECYCLE_BLOCK_AFTER_READY="${block_after_ready}" \
+      S2_PLANT_ON_EXIT_SECOND_SIGNAL="${on_exit_second_signal}" \
       S2_LIFECYCLE_READY_FILE="${ready_file}" \
       bash "${BASH_SOURCE[0]}" >"${log}" 2>&1 || return 1
   S2_LIFECYCLE_CHILD_PID="${S2_STARTED_PID}"
@@ -2626,7 +2857,7 @@ launch_lifecycle_child() {
     "${S2_LIFECYCLE_CHILD_WATCHDOG_HEALTH}" \
     "${state_dir}" \
     "${port}"
-  clear_most_recent_supervisor_if_pid "${S2_LIFECYCLE_CHILD_PID}"
+  clear_most_recent_supervisor_if_marker "${S2_LIFECYCLE_CHILD_MARKER}"
 }
 
 wait_for_lifecycle_port() {
@@ -2646,13 +2877,14 @@ wait_for_lifecycle_port() {
 
 wait_for_lifecycle_child() {
   local pid="$1" pgid="$2" marker="$3" status_file="$4" watchdog_pid="$5"
-  local watchdog_health="$6" state_dir="$7" port="$8" tick
-  local deadline=$((SECONDS + S2_LIFECYCLE_DEADLINE_SECONDS))
+  local watchdog_health="$6" state_dir="$7" port="$8" deadline_seconds="${9:-${S2_LIFECYCLE_DEADLINE_SECONDS}}" tick
+  [[ "${deadline_seconds}" =~ ^[1-9][0-9]*$ ]] || return 125
+  local deadline=$((SECONDS + deadline_seconds))
   while :; do
     if read_child_status "${status_file}"; then
       stop_pinned_supervisor "${pid}" "${pgid}" "${marker}" \
         "${watchdog_pid}" "${watchdog_health}" "${state_dir}" "${port}" client || return 125
-      forget_lifecycle_supervisor "${pid}" || return 125
+      forget_lifecycle_supervisor "${marker}" || return 125
       return "${S2_CHILD_STATUS}"
     fi
     supervisor_is_owned "${pid}" "${pgid}" "${marker}" || return 125
@@ -2662,13 +2894,23 @@ wait_for_lifecycle_child() {
         if read_child_status "${status_file}"; then
           stop_pinned_supervisor "${pid}" "${pgid}" "${marker}" \
             "${watchdog_pid}" "${watchdog_health}" "${state_dir}" "${port}" client || return 125
-          return "${S2_CHILD_STATUS}"
+          forget_lifecycle_supervisor "${marker}" || return 125
+          # A deadline is a typed timeout regardless of the inner script's
+          # signal-specific status. The retained child status remains evidence.
+          return 124
         fi
-        supervisor_is_owned "${pid}" "${pgid}" "${marker}" || return 125
+        if ! supervisor_is_owned "${pid}" "${pgid}" "${marker}"; then
+          if read_child_status "${status_file}"; then
+            forget_lifecycle_supervisor "${marker}" || return 125
+            return 124
+          fi
+          return 125
+        fi
         sleep 0.1
       done
       stop_pinned_supervisor "${pid}" "${pgid}" "${marker}" \
         "${watchdog_pid}" "${watchdog_health}" "${state_dir}" "${port}" client || return 125
+      forget_lifecycle_supervisor "${marker}" || return 125
       return 124
     fi
     sleep 0.1
@@ -2751,7 +2993,7 @@ run_lifecycle_self_test() {
   fi
 
   if [[ "${mode}" == "sigterm" ]]; then
-    launch_lifecycle_child "${first_port}" "${state_dir}/sigterm.log" 0 "${state_dir}"
+    launch_lifecycle_child "${first_port}" "${state_dir}/sigterm.log" 0 "${state_dir}" 0 1
     first_pid="${S2_LIFECYCLE_CHILD_PID}"
     first_pgid="${S2_LIFECYCLE_CHILD_PGID}"
     first_marker="${S2_LIFECYCLE_CHILD_MARKER}"
@@ -2781,15 +3023,48 @@ run_lifecycle_self_test() {
       emit '{"tool":"bash","package":"apps/wire","suite":"s2-krater-lifecycle","status":"fail","code":"S2_SIGTERM_SURVIVOR","reproduce":"S2_LIFECYCLE_TEST=sigterm scripts/e2e-s2-krater.sh"}'
       return 1
     fi
-    emit '{"tool":"bash","package":"apps/wire","suite":"s2-krater-lifecycle","status":"pass","scenario":"planted-sigterm-leaves-no-wrangler-or-workerd-listener","reproduce":"S2_LIFECYCLE_TEST=sigterm scripts/e2e-s2-krater.sh"}'
+    emit '{"tool":"bash","package":"apps/wire","suite":"s2-krater-lifecycle","status":"pass","scenario":"planted-sigterm-with-follow-up-term-keeps-on-exit-cleanup-immune-and-leaves-no-listener","reproduce":"S2_LIFECYCLE_TEST=sigterm scripts/e2e-s2-krater.sh"}'
     return 0
   fi
 
-  emit '{"tool":"bash","package":"apps/wire","suite":"s2-krater-lifecycle","status":"fail","code":"S2_LIFECYCLE_TEST_INVALID","reproduce":"S2_LIFECYCLE_TEST=parallel scripts/e2e-s2-krater.sh"}'
+  if [[ "${mode}" == "deadline" ]]; then
+    launch_lifecycle_child "${first_port}" "${state_dir}/deadline.log" 0 "${state_dir}" 1
+    first_pid="${S2_LIFECYCLE_CHILD_PID}"
+    first_pgid="${S2_LIFECYCLE_CHILD_PGID}"
+    first_marker="${S2_LIFECYCLE_CHILD_MARKER}"
+    first_status_file="${S2_LIFECYCLE_CHILD_STATUS_FILE}"
+    first_watchdog_pid="${S2_LIFECYCLE_CHILD_WATCHDOG_PID}"
+    first_watchdog_health="${S2_LIFECYCLE_CHILD_WATCHDOG_HEALTH}"
+    first_ready_file="${S2_LIFECYCLE_READY_FILE}"
+    if ! wait_for_lifecycle_port "${first_port}" "${first_pid}" "${first_pgid}" \
+      "${first_marker}" "${first_ready_file}"; then
+      wait_for_lifecycle_child "${first_pid}" "${first_pgid}" \
+        "${first_marker}" "${first_status_file}" "${first_watchdog_pid}" \
+        "${first_watchdog_health}" "${state_dir}" "${first_port}" 1 || :
+      emit '{"tool":"bash","package":"apps/wire","suite":"s2-krater-lifecycle","status":"fail","code":"S2_DEADLINE_FIXTURE_NOT_READY","reproduce":"S2_LIFECYCLE_TEST=deadline scripts/e2e-s2-krater.sh"}'
+      return 1
+    fi
+    if wait_for_lifecycle_child "${first_pid}" "${first_pgid}" \
+      "${first_marker}" "${first_status_file}" "${first_watchdog_pid}" \
+      "${first_watchdog_health}" "${state_dir}" "${first_port}" 1; then
+      first_status=0
+    else
+      first_status=$?
+    fi
+    if [[ ${first_status} -ne 124 ]] || port_is_busy "${first_port}"; then
+      emit '{"tool":"bash","package":"apps/wire","suite":"s2-krater-lifecycle","status":"fail","code":"S2_LIFECYCLE_DEADLINE_TYPED_EXIT_FAILED","reproduce":"S2_LIFECYCLE_TEST=deadline scripts/e2e-s2-krater.sh"}'
+      return 1
+    fi
+    emit '{"tool":"bash","package":"apps/wire","suite":"s2-krater-lifecycle","status":"pass","scenario":"deadline-reaps-exact-child-and-returns-typed-124-not-inner-signal-status","reproduce":"S2_LIFECYCLE_TEST=deadline scripts/e2e-s2-krater.sh"}'
+    return 0
+  fi
+
+  emit '{"tool":"bash","package":"apps/wire","suite":"s2-krater-lifecycle","status":"fail","code":"S2_LIFECYCLE_TEST_INVALID","reproduce":"S2_LIFECYCLE_TEST=parallel|sigterm|deadline scripts/e2e-s2-krater.sh"}'
   return 1
 }
 
-if [[ "${S2_LIFECYCLE_TEST:-none}" == "parallel" || "${S2_LIFECYCLE_TEST:-none}" == "sigterm" ]]; then
+if [[ "${S2_LIFECYCLE_TEST:-none}" == "parallel" || "${S2_LIFECYCLE_TEST:-none}" == "sigterm" || \
+  "${S2_LIFECYCLE_TEST:-none}" == "deadline" ]]; then
   run_lifecycle_self_test "${S2_LIFECYCLE_TEST}"
   exit $?
 fi
@@ -2814,6 +3089,12 @@ if [[ -n "${S2_LIFECYCLE_READY_FILE:-}" ]]; then
     exit 1
   fi
   printf '%s\n' "${S2_ACTIVE_HARNESS_RUN_ID}" >"${S2_LIFECYCLE_READY_FILE}"
+fi
+
+if [[ "${S2_LIFECYCLE_BLOCK_AFTER_READY:-0}" == "1" ]]; then
+  # Regression-only: keep a fully initialized nested harness alive so the
+  # parent proves its deadline return is typed (124), not a child signal code.
+  while :; do sleep 1; done
 fi
 
 if [[ "${S2_INTERRUPT_AFTER_READY:-0}" == "1" ]]; then

@@ -16,9 +16,13 @@ import {
   MAX_S2_COST_RECEIPT_BYTES,
   parseS2CostEvidenceManifestBytes,
   parseS2CostMeasurementReceiptBytes,
+  parseS2CostReceiptPublicationCommitBytes,
   parseS2CostReceiptPublicationBytes,
   REQUIRED_ROW_TOTAL_EXCLUSIONS,
+  S2_COST_DURABLE_PUBLICATION_RESERVED_BYTES,
+  S2_COST_DURABLE_PUBLICATION_RESERVED_NAMES,
   S2_COST_EVIDENCE_MANIFEST_VERSION,
+  S2_COST_PUBLICATION_COMMIT_RELATIVE_PATH,
   S2_COST_MANIFEST_RELATIVE_PATH,
   S2_COST_METRIC_SCOPE,
   S2_COST_PUBLICATION_RELATIVE_PATH,
@@ -41,8 +45,13 @@ import {
 export {
   MAX_S2_COST_RECEIPT_BYTES,
   REQUIRED_ROW_TOTAL_EXCLUSIONS,
+  S2_COST_DURABLE_PUBLICATION_RESERVED_BYTES,
+  S2_COST_DURABLE_PUBLICATION_RESERVED_NAMES,
   S2_COST_METRIC_SCOPE,
   S2_COST_EVIDENCE_MANIFEST_VERSION,
+  S2_COST_PUBLICATION_COMMIT_RECORD,
+  S2_COST_PUBLICATION_COMMIT_RELATIVE_PATH,
+  S2_COST_PUBLICATION_COMMIT_SCHEMA_VERSION,
   S2_COST_MANIFEST_RELATIVE_PATH,
   S2_COST_PUBLICATION_RECORD,
   S2_COST_PUBLICATION_RELATIVE_PATH,
@@ -56,6 +65,7 @@ export {
   S2_WRITE_CLAIM_SCOPE,
   type S2CostMeasurementReceipt,
   type S2CostEvidenceManifest,
+  type S2CostReceiptPublicationCommit,
   type S2CostReceiptPublication,
 } from "@asimposium/contracts";
 
@@ -120,6 +130,7 @@ export interface FableWorkloadArithmetic {
 export interface ExpectedReceiptProvenance {
   readonly run_id?: string;
   readonly revision?: string;
+  readonly dirty_state?: "clean" | "dirty";
   readonly source_digest?: string;
 }
 
@@ -335,6 +346,7 @@ function assertExpectedProvenance(
     if (
       (expected.run_id !== undefined && receipt.run_id !== expected.run_id) ||
       (expected.revision !== undefined && receipt.revision !== expected.revision) ||
+      (expected.dirty_state !== undefined && receipt.dirty_state !== expected.dirty_state) ||
       (expected.source_digest !== undefined && receipt.source_digest !== expected.source_digest)
     ) {
       throw new CostVerifierError("S2_COST_RECEIPT_INVALID", "receipt provenance does not match.");
@@ -607,7 +619,18 @@ function readReceiptBytes(
 }
 
 const NODE_RECEIPT_FILE_SYSTEM: ReceiptFileSystem = {
-  open: (receiptPath) => openSync(receiptPath, constants.O_RDONLY | constants.O_NONBLOCK),
+  open: (receiptPath) => {
+    // lstat gives a deterministic failure for an already-present link, while
+    // O_NOFOLLOW closes the final-component replacement race before fstat.
+    const pathStat = lstatSync(receiptPath);
+    if (!pathStat.isFile() || pathStat.isSymbolicLink()) {
+      throw new CostVerifierError("S2_COST_RECEIPT_UNREADABLE", "receipt cannot be read.");
+    }
+    return openSync(
+      receiptPath,
+      constants.O_RDONLY | constants.O_NONBLOCK | constants.O_NOFOLLOW,
+    );
+  },
   fstat: (descriptor) => fstatSync(descriptor),
   read: (descriptor, buffer, offset, length, position) =>
     readSync(descriptor, buffer, offset, length, position),
@@ -626,23 +649,27 @@ interface CliEvidencePaths {
   readonly receipt: string;
   readonly manifest: string;
   readonly publication: string;
+  readonly commit: string;
 }
 
 function parseCliArguments(argv: readonly string[]): CliEvidencePaths | undefined {
   if (argv.length === 0) return undefined;
   if (
-    argv.length === 6 &&
+    argv.length === 8 &&
     argv[0] === "--receipt" &&
     argv[2] === "--manifest" &&
     argv[4] === "--publication" &&
+    argv[6] === "--commit" &&
     argv[1] !== undefined &&
     argv[3] !== undefined &&
     argv[5] !== undefined &&
+    argv[7] !== undefined &&
     argv[1] !== "" &&
     argv[3] !== "" &&
-    argv[5] !== ""
+    argv[5] !== "" &&
+    argv[7] !== ""
   ) {
-    return { receipt: argv[1], manifest: argv[3], publication: argv[5] };
+    return { receipt: argv[1], manifest: argv[3], publication: argv[5], commit: argv[7] };
   }
   throw new CostVerifierError("COST_MODEL_ARGUMENT_INVALID", "invalid cost-verifier arguments.");
 }
@@ -653,7 +680,8 @@ function verifyEvidencePaths(paths: CliEvidencePaths): void {
   if (
     basename(receipt) !== S2_COST_RECEIPT_RELATIVE_PATH ||
     resolve(paths.manifest) !== resolve(root, S2_COST_MANIFEST_RELATIVE_PATH) ||
-    resolve(paths.publication) !== resolve(root, S2_COST_PUBLICATION_RELATIVE_PATH)
+    resolve(paths.publication) !== resolve(root, S2_COST_PUBLICATION_RELATIVE_PATH) ||
+    resolve(paths.commit) !== resolve(root, S2_COST_PUBLICATION_COMMIT_RELATIVE_PATH)
   ) {
     throw new CostVerifierError("S2_COST_RECEIPT_INVALID", "receipt evidence paths are invalid.");
   }
@@ -668,6 +696,17 @@ function verifyEvidencePaths(paths: CliEvidencePaths): void {
   }
 }
 
+function safeEvidenceTotal(values: readonly number[]): number {
+  let total = 0;
+  for (const value of values) {
+    if (!Number.isSafeInteger(value) || value < 0 || value > Number.MAX_SAFE_INTEGER - total) {
+      throw new CostVerifierError("S2_COST_RECEIPT_INVALID", "receipt evidence inventory is invalid.");
+    }
+    total += value;
+  }
+  return total;
+}
+
 function attestedReceiptBytes(
   paths: CliEvidencePaths,
   readReceipt: ReceiptReader,
@@ -677,12 +716,32 @@ function attestedReceiptBytes(
   const receipt = readReceipt(paths.receipt);
   const manifestBytes = readEvidence(paths.manifest);
   const publicationBytes = readReceipt(paths.publication);
+  const commitBytes = readReceipt(paths.commit);
   const manifest = parseS2CostEvidenceManifestBytes(manifestBytes);
   const publication = parseS2CostReceiptPublicationBytes(publicationBytes);
+  const commit = parseS2CostReceiptPublicationCommitBytes(commitBytes);
   const digest = receiptDigest(receipt);
+  const retainedBytes = safeEvidenceTotal(manifest.files.map((file) => file.bytes));
+  const retainedFilesWithReservation = safeEvidenceTotal([
+    manifest.files.length,
+    manifest.retention.durable_publication_reservation.retained_names.length,
+  ]);
+  const retainedBytesWithReservation = safeEvidenceTotal([
+    retainedBytes,
+    manifest.retention.durable_publication_reservation.reserved_bytes_upper_bound,
+  ]);
   if (
     manifest.manifest_version !== S2_COST_EVIDENCE_MANIFEST_VERSION ||
     manifest.exit_code !== 78 ||
+    manifest.retention.retained_files_before_manifest !== manifest.files.length ||
+    manifest.retention.retained_bytes_before_manifest !== retainedBytes ||
+    manifest.files.some((file) =>
+      manifest.retention.durable_publication_reservation.retained_names.includes(
+        file.path as (typeof manifest.retention.durable_publication_reservation.retained_names)[number],
+      ),
+    ) ||
+    retainedFilesWithReservation > manifest.retention.max_files_per_run ||
+    retainedBytesWithReservation > manifest.retention.max_bytes_per_run ||
     manifest.s2_cost_receipt === null ||
     manifest.s2_cost_receipt.path !== S2_COST_RECEIPT_RELATIVE_PATH ||
     manifest.s2_cost_receipt.digest !== digest ||
@@ -690,6 +749,10 @@ function attestedReceiptBytes(
     publication.manifest.digest !== receiptDigest(manifestBytes) ||
     publication.receipt.digest !== digest ||
     publication.receipt.bytes !== receipt.byteLength ||
+    commit.manifest.digest !== receiptDigest(manifestBytes) ||
+    commit.receipt.digest !== digest ||
+    commit.receipt.bytes !== receipt.byteLength ||
+    commit.publication.digest !== receiptDigest(publicationBytes) ||
     publication.provenance.run_id !== manifest.run_id ||
     publication.provenance.revision !== manifest.revision ||
     publication.provenance.dirty_state !== manifest.dirty_state ||
@@ -711,6 +774,7 @@ function attestedReceiptBytes(
     provenance: {
       run_id: manifest.run_id,
       revision: manifest.revision,
+      dirty_state: manifest.dirty_state,
       source_digest: manifest.source_digest,
     },
   };
