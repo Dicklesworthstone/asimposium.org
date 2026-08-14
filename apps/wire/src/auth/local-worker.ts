@@ -42,6 +42,20 @@ import { wrongPrincipalProblem } from "./refusal";
  * thing this module may publish.
  */
 const S6_INGRESS_ROUTE = "/__s6/ingress";
+
+/**
+ * A second mount of the same verifier, and the extra method it answers.
+ *
+ * Both exist so a *route* or *method* tamper is refused by envelope
+ * verification rather than by the router. With a single POST-only mount, an
+ * envelope replayed at another path or with another verb gets a 404/`404`-shaped
+ * harness face — which proves the router works and says nothing about whether
+ * the verifier binds the envelope to the request it is actually serving. These
+ * mounts let the checker present one envelope against a request it was not
+ * signed for and observe a real `UNAUTHORIZED`.
+ */
+const S6_INGRESS_ALIAS_ROUTE = "/__s6/ingress-alias";
+const S6_INGRESS_METHODS: ReadonlySet<string> = new Set(["POST", "PUT"]);
 const S6_PERMITTED_ACTIONS: readonly string[] = ["s6.probe"];
 
 interface LocalAuthEnv {
@@ -213,7 +227,10 @@ async function ingress(request: Request, env: LocalAuthEnv): Promise<Response> {
     now,
     issuer: "agora",
     audience: "stoa",
-    route: S6_INGRESS_ROUTE,
+    // The route actually being served, not a constant. Binding to a constant
+    // would let an envelope signed for one mount authenticate at another, which
+    // is precisely the confusion the route claim exists to prevent.
+    route: new URL(request.url).pathname,
     permittedActions: S6_PERMITTED_ACTIONS,
   });
 
@@ -237,7 +254,7 @@ async function ingress(request: Request, env: LocalAuthEnv): Promise<Response> {
     code: "OK",
     reason: "accepted",
     method: request.method,
-    route: S6_INGRESS_ROUTE,
+    route: new URL(request.url).pathname,
     durationMs: Date.now() - startedAt,
     claims: result.verification.claims,
     claimsState: "authenticated_claim",
@@ -284,11 +301,18 @@ function principalProbe(url: URL): Response {
     response.headers.set("x-s6-consulted", decision.consulted.join(","));
     return response;
   }
-  return json({
+  // The accepted path reports `consulted` as a header as well as in the body,
+  // exactly as the refusal path above does. Emitting it only on refusal makes
+  // the *positive* case the one that cannot be cross-checked -- and "the
+  // envelope was consulted and the cookie was not" is a claim that matters most
+  // precisely when the request succeeded.
+  const accepted = json({
     ok: true,
     authenticate_with: decision.authenticateWith,
     consulted: decision.consulted,
   });
+  accepted.headers.set("x-s6-consulted", decision.consulted.join(","));
+  return accepted;
 }
 
 export default {
@@ -329,7 +353,10 @@ export default {
         const status = requested >= 400 && requested <= 599 ? requested : 500;
         return json({ code: "S6_FORCED_STATUS", forced: status }, status);
       }
-      if (request.method === "POST" && url.pathname === S6_INGRESS_ROUTE) {
+      if (
+        S6_INGRESS_METHODS.has(request.method) &&
+        (url.pathname === S6_INGRESS_ROUTE || url.pathname === S6_INGRESS_ALIAS_ROUTE)
+      ) {
         return await ingress(request, env);
       }
       return json({ code: "S6_HARNESS_ROUTE_NOT_FOUND" }, 404);

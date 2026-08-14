@@ -199,6 +199,8 @@ export async function loadSigningKey(raw: string | undefined): Promise<SigningKe
 
 const REPRODUCE = "bash scripts/e2e-s6-auth-ingress.sh";
 const ROUTE = "/__s6/ingress";
+/** The verifier's second mount. Same handler, different path. */
+const ALIAS_ROUTE = "/__s6/ingress-alias";
 const ACTION = "s6.probe";
 /** The acting principal every signed envelope in this run names. */
 const PRINCIPAL_ID = "usr_01JXYZ0000000000000000";
@@ -307,14 +309,33 @@ interface Sent {
   diagnostic: string | null;
 }
 
+/**
+ * Presentation-level overrides.
+ *
+ * A tamper must change how an envelope is *presented*, not produce a different
+ * envelope. Re-signing with an altered claim yields a new nonce, which makes the
+ * refusal unusable as evidence about the original one.
+ */
+interface Presentation {
+  extraHeaders?: Record<string, string>;
+  route?: string;
+  method?: string;
+}
+
 async function send(
   envelope: ServiceEnvelope,
   body: string,
-  extraHeaders: Record<string, string> = {},
+  presentation: Presentation = {},
 ): Promise<Sent> {
   const headers = new Headers(serviceEnvelopeHeaders(envelope));
-  for (const [name, value] of Object.entries(extraHeaders)) headers.set(name, value);
-  const response = await localFetch(`${origin}${ROUTE}`, { method: "POST", headers, body });
+  for (const [name, value] of Object.entries(presentation.extraHeaders ?? {})) {
+    headers.set(name, value);
+  }
+  const response = await localFetch(`${origin}${presentation.route ?? ROUTE}`, {
+    method: presentation.method ?? "POST",
+    headers,
+    body,
+  });
   let parsed: Record<string, unknown> = {};
   try {
     parsed = (await response.json()) as Record<string, unknown>;
@@ -394,7 +415,7 @@ async function main(): Promise<void> {
   {
     const body = '{"claim":"C-2","n":2}';
     const sent = await send(await sign(body), body, {
-      cookie: `__Host-authjs.session-token=${COOKIE_CANARY}`,
+      extraHeaders: { cookie: `__Host-authjs.session-token=${COOKIE_CANARY}` },
     });
     await checkAccepted("a_request_bearing_a_cookie_still_authenticates", sent, ACTION);
     check(
@@ -538,61 +559,136 @@ async function main(): Promise<void> {
     await checkAccepted("the_refused_rewrite_did_not_consume_the_nonce", honest, ACTION);
   }
 
-  // ── 5. altered route / method / action / expiry / tamper / key ────────────
+  // ── 5. every tamper is DERIVED from one envelope, which must still spend ──
   {
-    const body = '{"claim":"C-5","n":5}';
-    const cases: [string, () => Promise<Sent>][] = [
-      [
-        "altered_route_is_refused",
-        async () => send(await sign(body, { route: "/__s6/other" }), body),
-      ],
-      ["altered_method_is_refused", async () => send(await sign(body, { method: "PUT" }), body)],
-      [
-        "unpermitted_action_is_refused",
-        async () => send(await sign(body, { action: "s6.other" }), body),
-      ],
-      [
-        "expired_envelope_is_refused",
-        async () => send(await sign(body, { now: NOW - 86_400 }), body),
-      ],
-      [
-        "tampered_signature_is_refused",
-        async () => {
-          const envelope = (await sign(body)) as unknown as Record<string, unknown>;
-          const signature = String(envelope.signature ?? "");
-          const flipped = `${signature.slice(0, -2)}${signature.slice(-2) === "AA" ? "AB" : "AA"}`;
-          return send({ ...envelope, signature: flipped } as unknown as ServiceEnvelope, body);
-        },
-      ],
-      [
-        "unknown_kid_is_refused",
-        async () => {
-          const envelope = (await sign(body)) as unknown as Record<string, unknown>;
-          return send(
-            { ...envelope, kid: "s6-not-in-keyring" } as unknown as ServiceEnvelope,
-            body,
-          );
-        },
-      ],
-      ["altered_payload_is_refused", async () => send(await sign(body), '{"claim":"C-5","n":999}')],
-    ];
-    for (const [assertion, run] of cases) {
-      // Every one of these is an envelope-verification failure, so each must be
-      // exactly 401/UNAUTHORIZED. A 500 is a broken harness, not a refusal.
-      checkRefusal(assertion, await run());
-      /**
-       * …and the refusal must not have consumed anything.
-       *
-       * A refusal that burns the nonce it rejected is indistinguishable from a
-       * correct one until an honest caller retries and is refused for a reason
-       * that never applied to it. Each tampered case is therefore followed by a
-       * freshly signed honest envelope, which must be accepted and attributed
-       * to the signing principal.
-       */
-      const honestBody = `{"claim":"C-5","n":5,"after":"${assertion}"}`;
-      const honest = await send(await sign(honestBody), honestBody);
-      await checkAccepted(`${assertion}__did_not_burn_a_fresh_envelope`, honest, ACTION);
+    /**
+     * Each case mints exactly one honest envelope, derives the refused
+     * presentation from that same envelope, and then presents the original
+     * untouched.
+     *
+     * The sourcing is the whole proof. Signing a second honest envelope after
+     * the refusal would demonstrate nothing: a fresh envelope carries a fresh
+     * nonce, so it is accepted whether or not the refused one burned its own.
+     * Only re-presenting the *same* envelope — the one whose nonce the rejected
+     * request actually carried — separates a verifier that refuses before
+     * consuming from one that consumes and then refuses. The second kind passes
+     * every refusal assertion while quietly making honest retries impossible.
+     *
+     * So no case below calls `sign` twice, and no derivation re-signs.
+     */
+    const mutate = (
+      envelope: ServiceEnvelope,
+      edit: (claims: Record<string, unknown>) => void,
+    ): ServiceEnvelope => {
+      // A deep copy: the original must reach the second presentation untouched.
+      const copy = JSON.parse(JSON.stringify(envelope)) as {
+        claims: Record<string, unknown>;
+        signature: string;
+      };
+      edit(copy.claims);
+      return copy as unknown as ServiceEnvelope;
+    };
+
+    interface Tamper {
+      assertion: string;
+      body: string;
+      derive: (envelope: ServiceEnvelope, body: string) => Promise<Sent>;
     }
+
+    const tampers: Tamper[] = [
+      {
+        assertion: "the_same_envelope_presented_on_another_route_is_refused",
+        body: '{"claim":"C-5","n":51}',
+        // Presented, not re-signed: the alias mount runs the identical verifier,
+        // so the refusal can only come from the route binding.
+        derive: (envelope, body) => send(envelope, body, { route: ALIAS_ROUTE }),
+      },
+      {
+        assertion: "the_same_envelope_presented_with_another_method_is_refused",
+        body: '{"claim":"C-5","n":52}',
+        derive: (envelope, body) => send(envelope, body, { method: "PUT" }),
+      },
+      {
+        assertion: "the_same_envelope_with_a_rewritten_action_is_refused",
+        body: '{"claim":"C-5","n":53}',
+        derive: (envelope, body) =>
+          send(
+            mutate(envelope, (claims) => {
+              claims.action = "s6.other";
+            }),
+            body,
+          ),
+      },
+      {
+        assertion: "the_same_envelope_with_rewritten_timestamps_is_refused",
+        body: '{"claim":"C-5","n":54}',
+        derive: (envelope, body) =>
+          send(
+            mutate(envelope, (claims) => {
+              claims.iat = NOW - 86_400;
+              claims.exp = NOW - 86_000;
+            }),
+            body,
+          ),
+      },
+      {
+        assertion: "the_same_envelope_with_a_flipped_signature_is_refused",
+        body: '{"claim":"C-5","n":55}',
+        derive: (envelope, body) => {
+          const copy = JSON.parse(JSON.stringify(envelope)) as {
+            claims: Record<string, unknown>;
+            signature: string;
+          };
+          const signature = copy.signature;
+          copy.signature = `${signature.slice(0, -2)}${signature.slice(-2) === "AA" ? "AB" : "AA"}`;
+          return send(copy as unknown as ServiceEnvelope, body);
+        },
+      },
+      {
+        assertion: "the_same_envelope_with_an_unknown_kid_is_refused",
+        body: '{"claim":"C-5","n":56}',
+        // `kid` lives inside the signed claims. Setting a top-level `kid` would
+        // leave `claims.kid` intact and the envelope perfectly valid, so that
+        // spelling would assert nothing at all.
+        derive: (envelope, body) =>
+          send(
+            mutate(envelope, (claims) => {
+              claims.kid = "s6-not-in-keyring";
+            }),
+            body,
+          ),
+      },
+      {
+        assertion: "the_same_envelope_with_an_altered_payload_is_refused",
+        body: '{"claim":"C-5","n":57}',
+        derive: (envelope, _body) => send(envelope, '{"claim":"C-5","n":999}'),
+      },
+    ];
+
+    for (const tamper of tampers) {
+      const envelope = await sign(tamper.body);
+      // Exactly 401/UNAUTHORIZED. A 500 is a broken harness, not a refusal.
+      checkRefusal(tamper.assertion, await tamper.derive(envelope, tamper.body));
+      // …and the very envelope that was just rejected must still be spendable.
+      await checkAccepted(
+        `${tamper.assertion.replace(/_is_refused$/, "")}__left_the_original_envelope_spendable`,
+        await send(envelope, tamper.body),
+        ACTION,
+      );
+    }
+  }
+
+  // ── 5b. a genuinely expired envelope is refused ───────────────────────────
+  {
+    // Signed with an old clock rather than rewritten, so this exercises the
+    // expiry comparison itself. It is deliberately *not* paired with a
+    // re-presentation: an expired envelope is expired on the second showing
+    // too, so it can carry no nonce-order claim.
+    const body = '{"claim":"C-5b","n":58}';
+    checkRefusal(
+      "a_genuinely_expired_envelope_is_refused",
+      await send(await sign(body, { now: NOW - 86_400 }), body),
+    );
   }
 
   // ── 6. diagnostics are redacted ──────────────────────────────────────────

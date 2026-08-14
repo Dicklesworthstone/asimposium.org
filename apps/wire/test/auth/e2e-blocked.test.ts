@@ -766,3 +766,187 @@ describe("a refusal must be an exact refusal", () => {
     expect(block).toContain("WRONG_PRINCIPAL");
   });
 });
+
+describe("the forEach callback's parent argument is the guarded proxy", () => {
+  const withCookie = (): Request =>
+    new Request("https://a.asimposium.org/__s6/ingress", {
+      method: "POST",
+      headers: {
+        cookie: "__Host-authjs.session-token=PARENT_ARG_CANARY",
+        "content-type": "application/json",
+      },
+      body: "{}",
+    });
+
+  /**
+   * `Headers.forEach` hands its callback three arguments: value, name, and the
+   * Headers object being iterated. That third one is a full, independent handle
+   * -- and if the proxy passes the *real* target there, every guard above it is
+   * decorative. A consumer writes the most ordinary line imaginable,
+   * `headers.forEach((_v, _n, parent) => parent.get("cookie"))`, and reads the
+   * session token with the canary still reporting zero.
+   *
+   * These are planted: each one failed against the pre-fix proxy, returning the
+   * cookie value verbatim.
+   */
+  const parentReads: ReadonlyArray<[string, (parent: Headers) => void]> = [
+    ["get", (parent) => void parent.get("cookie")],
+    ["has", (parent) => void parent.has("cookie")],
+    ["a nested forEach", (parent) => parent.forEach(() => {})],
+    [
+      "the iterator",
+      (parent) => {
+        for (const _entry of parent as unknown as Iterable<[string, string]>) {
+          // draining is the read; the trap must fire before the first yield
+        }
+      },
+    ],
+  ];
+
+  for (const [label, read] of parentReads) {
+    test(`PLANTED: reaching the cookie through the callback parent via ${label} trips the canary`, () => {
+      let reads = 0;
+      const guarded = cookieTrappedRequest(withCookie(), () => {
+        reads += 1;
+      });
+      const leaked = "";
+      expect(() => {
+        guarded.headers.forEach((_value, _name, parent) => {
+          // Two realms name `Headers`: this package's ambient Workers types and
+          // undici's, which Bun's `fetch` types resolve to. The two-step cast is
+          // the repository's existing spelling for that mismatch.
+          read(parent as unknown as Headers);
+        });
+      }).toThrow("S6_COOKIE_READ_ON_AGENT_HOST");
+      expect(leaked).toBe("");
+      expect(reads).toBeGreaterThan(0);
+    });
+
+    test(`PLANTED: the same reach through a clone's callback parent trips the canary`, () => {
+      let reads = 0;
+      const guarded = cookieTrappedRequest(withCookie(), () => {
+        reads += 1;
+      });
+      const cloned = guarded.clone();
+      expect(() => {
+        cloned.headers.forEach((_value, _name, parent) => {
+          read(parent as unknown as Headers);
+        });
+      }).toThrow("S6_COOKIE_READ_ON_AGENT_HOST");
+      expect(reads).toBeGreaterThan(0);
+    });
+  }
+
+  test("the callback parent still serves an ordinary header normally", () => {
+    // No cookie on this one: `forEach` over cookie-bearing headers trips the
+    // trap while *reaching* the cookie, which is the point of the cases above.
+    // What must still work is the ordinary path -- the guard is a cookie guard,
+    // not a general obstruction, and a proxy that broke every header read would
+    // pass every leak assertion while making the harness useless.
+    let reads = 0;
+    const guarded = cookieTrappedRequest(
+      new Request("https://a.asimposium.org/__s6/ingress", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: "{}",
+      }),
+      () => {
+        reads += 1;
+      },
+    );
+    const seen: string[] = [];
+    guarded.headers.forEach((_value, name, parent) => {
+      if (name === "content-type") seen.push(String(parent.get("content-type")));
+    });
+    expect(seen).toEqual(["application/json"]);
+    expect(reads).toBe(0);
+  });
+
+  test("the cookie header is not yielded to the callback in the first place", () => {
+    const guarded = cookieTrappedRequest(withCookie(), () => undefined);
+    const names: string[] = [];
+    try {
+      guarded.headers.forEach((_value, name) => {
+        names.push(name);
+      });
+    } catch {
+      // the trap fires on reaching `cookie`; whatever was yielded before it counts
+    }
+    expect(names).not.toContain("cookie");
+    expect(names.join(",")).not.toContain("PARENT_ARG_CANARY");
+  });
+});
+
+describe("localFetch never carries a signed envelope to a second origin", () => {
+  /**
+   * A redirect is the one way a correct-looking checker sends real credentials
+   * somewhere it never validated. `S6_ORIGIN` is checked to be loopback, but
+   * that check happens once, before any request; `fetch` defaults to
+   * `redirect: "follow"`, so a 302 makes the *runtime* re-issue the request --
+   * same headers, same envelope -- against whatever `Location` names. The origin
+   * validation would have passed and the assertion would still report against a
+   * response from a host nobody approved.
+   *
+   * This runs two real listeners. The second one records everything it is ever
+   * asked for, and must record nothing.
+   */
+  test("PLANTED: a 302 is returned as-is and the redirect target is never contacted", async () => {
+    const received: string[] = [];
+    const second = Bun.serve({
+      port: 0,
+      hostname: "127.0.0.1",
+      fetch(request) {
+        const envelope = request.headers.get("x-asimposium-envelope") ?? "(none)";
+        received.push(`${request.method} ${new URL(request.url).pathname} envelope=${envelope}`);
+        return new Response("second origin answered", { status: 200 });
+      },
+    });
+    const first = Bun.serve({
+      port: 0,
+      hostname: "127.0.0.1",
+      fetch() {
+        return new Response(null, {
+          status: 302,
+          headers: { location: `http://127.0.0.1:${second.port}/__s6/ingress` },
+        });
+      },
+    });
+
+    try {
+      const response = await localFetch(`http://127.0.0.1:${first.port}/__s6/ingress`, {
+        method: "POST",
+        headers: {
+          "content-type": "application/json",
+          "x-asimposium-envelope": "SIGNED_ENVELOPE_MUST_NOT_TRAVEL",
+        },
+        body: '{"claim":"redirect"}',
+      });
+
+      // The redirect is data, not an instruction to be followed.
+      expect(response.status).toBe(302);
+      expect(await response.text()).not.toContain("second origin answered");
+    } finally {
+      first.stop(true);
+      second.stop(true);
+    }
+
+    // The whole point: the signed request never reached the second origin.
+    expect(received).toEqual([]);
+  });
+
+  test("localFetch pins redirect handling after the caller's init", () => {
+    // Comment-stripped on purpose. Read raw, this assertion is satisfied by the
+    // prose above the call explaining why `redirect: "manual"` is set -- so
+    // deleting the actual line would leave the test green. It caught exactly
+    // that during mutation testing.
+    const checker = code(CHECKER);
+    const body = checker.slice(checker.indexOf("export async function localFetch"));
+    const spread = body.indexOf("...init");
+    const manual = body.indexOf('redirect: "manual"');
+    const signal = body.indexOf("AbortSignal.timeout");
+    expect(spread).toBeGreaterThan(-1);
+    // Before the spread, a caller passing `redirect: "follow"` silently wins.
+    expect(manual).toBeGreaterThan(spread);
+    expect(signal).toBeGreaterThan(spread);
+  });
+});
