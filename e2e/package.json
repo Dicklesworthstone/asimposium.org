@@ -4,6 +4,8 @@
   "private": true,
   "scripts": {
     "test": "bun run test:unit && bun run test:contract && bun run test:integration",
+    "typecheck": "tsc --noEmit -p tsconfig.json",
+    "lint": "cd .. && shellcheck -x e2e/lib/run-diagnostics.sh scripts/smoke-agent.sh scripts/smoke-gallery.sh e2e/run-playwright.sh e2e/gauntlet/run.sh e2e/tests/run-diagnostics.test.sh e2e/tests/smoke-entrypoints.test.sh",
     "test:unit": "bash tests/run-diagnostics.test.sh",
     "test:contract": "bash tests/run-diagnostics.test.sh",
     "test:integration": "bash tests/smoke-entrypoints.test.sh",
