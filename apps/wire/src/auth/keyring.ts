@@ -30,11 +30,7 @@ export interface VerificationKeyRecord {
   notAfter?: number;
 }
 
-export type KeyLookupFailure =
-  | "unknown_kid"
-  | "key_not_yet_valid"
-  | "key_retired"
-  | "key_unusable";
+export type KeyLookupFailure = "unknown_kid" | "key_not_yet_valid" | "key_retired" | "key_unusable";
 
 /** Key ids are non-secret identifiers, not free text. */
 const KID_PATTERN = /^[A-Za-z0-9._-]{1,64}$/;
@@ -129,7 +125,7 @@ export class VerificationKeyring {
     try {
       key = await crypto.subtle.importKey(
         "raw",
-        fromHex(record.publicKeyHex) as BufferSource,
+        fromHex(record.publicKeyHex).slice().buffer,
         ED25519,
         false,
         ["verify"],

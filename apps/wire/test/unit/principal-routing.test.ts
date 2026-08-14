@@ -1,12 +1,12 @@
 import { describe, expect, test } from "bun:test";
 
 import {
-  consultedCredentials,
-  routePrincipal,
   type CredentialSource,
+  consultedCredentials,
   type PlaneHost,
   type PresentedCredentials,
   type RouteClass,
+  routePrincipal,
 } from "../../src/auth/principal";
 
 /**

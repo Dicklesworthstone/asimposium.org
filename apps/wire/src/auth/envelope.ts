@@ -39,7 +39,7 @@ import {
   type ServiceEnvelopeClaims,
 } from "./canonical";
 import type { KeyLookupFailure, VerificationKeyring } from "./keyring";
-import { NonceStoreFullError, type NonceStore } from "./nonce";
+import { type NonceStore, NonceStoreFullError } from "./nonce";
 
 /** The wire shape: signed claims plus a detached signature. */
 export interface ServiceEnvelope {
@@ -227,8 +227,8 @@ export async function verifyServiceEnvelope(
     signatureValid = await crypto.subtle.verify(
       { name: "Ed25519" },
       lookup.key,
-      fromHex(signature) as BufferSource,
-      canonicalBytes(claims) as BufferSource,
+      fromHex(signature).slice().buffer,
+      canonicalBytes(claims).slice().buffer,
     );
   } catch {
     // A malformed signature must be a refusal, never a 500 that leaks a stack.

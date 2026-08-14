@@ -8,8 +8,8 @@ import {
   constantTimeEqual,
   ENVELOPE_VERSION,
   payloadDigest,
-  toHex,
   type ServiceEnvelopeClaims,
+  toHex,
 } from "../../src/auth/canonical";
 import { parseEnvelope, verifyServiceEnvelope } from "../../src/auth/envelope";
 import { KeyringConfigError, VerificationKeyring } from "../../src/auth/keyring";
@@ -36,7 +36,7 @@ async function makeKeypair(): Promise<CryptoKeyPair> {
   return (await crypto.subtle.generateKey({ name: "Ed25519" }, true, [
     "sign",
     "verify",
-  ])) as CryptoKeyPair;
+  ])) as unknown as CryptoKeyPair;
 }
 
 async function publicKeyHex(key: CryptoKey): Promise<string> {
@@ -47,7 +47,7 @@ async function sign(privateKey: CryptoKey, claims: ServiceEnvelopeClaims): Promi
   const signature = await crypto.subtle.sign(
     { name: "Ed25519" },
     privateKey,
-    canonicalBytes(claims) as BufferSource,
+    canonicalBytes(claims).slice().buffer,
   );
   return toHex(new Uint8Array(signature));
 }
@@ -188,13 +188,13 @@ describe("golden vectors — the two planes must agree byte for byte", () => {
 
   test.each(names)("vector %s canonicalizes to its pinned digest", async (name) => {
     const vector = corpus.vectors[name];
-    expect(vector).toBeDefined();
-    expect(await canonicalDigest(vector!.claims)).toBe(vector!.canonical_sha256);
+    if (vector === undefined) throw new Error(`corpus is missing vector ${name}`);
+    expect(await canonicalDigest(vector.claims)).toBe(vector.canonical_sha256);
   });
 
   test("every vector has a distinct digest", async () => {
     const digests = await Promise.all(
-      names.map(async (name) => canonicalDigest(corpus.vectors[name]!.claims)),
+      Object.values(corpus.vectors).map(async (vector) => canonicalDigest(vector.claims)),
     );
     expect(new Set(digests).size).toBe(digests.length);
   });
@@ -243,7 +243,9 @@ describe("parseEnvelope — untrusted input", () => {
   test("refuses a signature of the wrong length", async () => {
     const h = await harness();
     const envelope = await signedEnvelope(h);
-    expect(parseEnvelope({ ...envelope, signature: envelope.signature.slice(0, 126) })).toBeUndefined();
+    expect(
+      parseEnvelope({ ...envelope, signature: envelope.signature.slice(0, 126) }),
+    ).toBeUndefined();
   });
 });
 
@@ -489,7 +491,11 @@ describe("verification — key rotation overlap", () => {
         notBefore: 0,
         notAfter: NOW + 3600,
       },
-      { kid: "agora-2026-08", publicKeyHex: await publicKeyHex(incoming.publicKey), notBefore: NOW - 3600 },
+      {
+        kid: "agora-2026-08",
+        publicKeyHex: await publicKeyHex(incoming.publicKey),
+        notBefore: NOW - 3600,
+      },
     ]);
 
     for (const [kid, keypair] of [
@@ -647,7 +653,10 @@ describe("verification — plane binding", () => {
       [{ alg: "HS256" }, "unsupported_alg"],
     ] as const) {
       const claims = await baseClaims(overrides);
-      const result = await h.verify({ claims, signature: await sign(h.keypair.privateKey, claims) });
+      const result = await h.verify({
+        claims,
+        signature: await sign(h.keypair.privateKey, claims),
+      });
       expect(result).toMatchObject({ ok: false, reason });
     }
   });

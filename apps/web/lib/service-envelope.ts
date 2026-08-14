@@ -122,7 +122,7 @@ export function toHex(bytes: Uint8Array): string {
 }
 
 export async function sha256Hex(bytes: Uint8Array): Promise<string> {
-  const digest = await crypto.subtle.digest("SHA-256", bytes as BufferSource);
+  const digest = await crypto.subtle.digest("SHA-256", bytes.slice().buffer);
   return toHex(new Uint8Array(digest));
 }
 
@@ -200,7 +200,7 @@ export async function mintServiceEnvelope(options: MintOptions): Promise<Service
   const signature = await crypto.subtle.sign(
     { name: "Ed25519" },
     options.privateKey,
-    canonicalBytes(claims) as BufferSource,
+    canonicalBytes(claims).slice().buffer,
   );
 
   return { claims, signature: toHex(new Uint8Array(signature)) };

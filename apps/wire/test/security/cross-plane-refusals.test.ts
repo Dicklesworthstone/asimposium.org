@@ -6,7 +6,7 @@ import {
   formatAuthDiagnostic,
   principalPseudonym,
 } from "../../src/auth/diagnostics";
-import { verifyServiceEnvelope, type ServiceEnvelope } from "../../src/auth/envelope";
+import { type ServiceEnvelope, verifyServiceEnvelope } from "../../src/auth/envelope";
 import { VerificationKeyring } from "../../src/auth/keyring";
 import { MemoryNonceStore } from "../../src/auth/nonce";
 import { routePrincipal } from "../../src/auth/principal";
@@ -33,7 +33,7 @@ async function harness() {
   const keypair = (await crypto.subtle.generateKey({ name: "Ed25519" }, true, [
     "sign",
     "verify",
-  ])) as CryptoKeyPair;
+  ])) as unknown as CryptoKeyPair;
   const keyring = new VerificationKeyring([
     {
       kid: "agora-2026-08-a",
@@ -63,7 +63,7 @@ async function harness() {
       await crypto.subtle.sign(
         { name: "Ed25519" },
         keypair.privateKey,
-        canonicalBytes(claims) as BufferSource,
+        canonicalBytes(claims).slice().buffer,
       ),
     ),
   );
@@ -220,7 +220,7 @@ describe("the Worker accepts what the Agora actually mints", () => {
     const keypair = (await crypto.subtle.generateKey({ name: "Ed25519" }, true, [
       "sign",
       "verify",
-    ])) as CryptoKeyPair;
+    ])) as unknown as CryptoKeyPair;
 
     const envelope = await mintServiceEnvelope({
       privateKey: keypair.privateKey,
@@ -266,7 +266,7 @@ describe("the Worker accepts what the Agora actually mints", () => {
     const keypair = (await crypto.subtle.generateKey({ name: "Ed25519" }, true, [
       "sign",
       "verify",
-    ])) as CryptoKeyPair;
+    ])) as unknown as CryptoKeyPair;
     const envelope = await mintServiceEnvelope({
       privateKey: keypair.privateKey,
       kid: "k",

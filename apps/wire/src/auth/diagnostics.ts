@@ -13,8 +13,8 @@
  * short digest prefixes that are useful for correlation and useless for
  * reconstruction.
  */
-import { sha256Hex } from "./canonical";
-import type { EnvelopeRefusalReason, ServiceEnvelopeClaims } from "./envelope";
+import { type ServiceEnvelopeClaims, sha256Hex } from "./canonical";
+import type { EnvelopeRefusalReason } from "./envelope";
 import type { PrincipalRefusalReason } from "./principal";
 
 /** Prefix length for correlation digests. 12 hex chars = 48 bits. */
