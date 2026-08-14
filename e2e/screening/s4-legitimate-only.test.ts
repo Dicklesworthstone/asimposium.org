@@ -1,5 +1,10 @@
 import { describe, expect, test } from "bun:test";
-import { S4_THRESHOLDS, type ScreeningRunIdentity } from "../../apps/wire/src/screening/index";
+import {
+  S4_THRESHOLDS,
+  type ScreeningObservation,
+  type ScreeningRunIdentity,
+  screenWithProvider,
+} from "../../apps/wire/src/screening/index";
 import { createS4Corpus } from "./s4-corpus";
 import {
   createFixtureScreeningProvider,
@@ -8,6 +13,7 @@ import {
   FIXTURE_POLICY_VERSION,
 } from "./s4-fixture-provider";
 import {
+  aggregatePartialScreeningRun,
   assertPartialRunNotGreen,
   isPartialRunEligible,
   PARTIAL_BLOCKED_EXIT_CODE,
@@ -63,6 +69,13 @@ describe("S-4 partial run over the available corpus half", () => {
     expect(
       isPartialRunEligible(["CORPUS_BODY_UNAVAILABLE", "PROTECTED_HARD_REJECT_BODIES_UNAVAILABLE"]),
     ).toBe(false);
+    expect(
+      isPartialRunEligible([
+        "EVALUATED_BODY_DIGEST_MISSING",
+        "LEGITIMATE_BODY_UNAVAILABLE",
+        "PROTECTED_HARD_REJECT_BODIES_UNAVAILABLE",
+      ]),
+    ).toBe(true);
     expect(isPartialRunEligible(["EVALUATED_BODY_DIGEST_MISSING"])).toBe(false);
   });
 
@@ -74,7 +87,11 @@ describe("S-4 partial run over the available corpus half", () => {
     // Measured: a real denominator and a real interval.
     expect(report.legitimate_false_positive_rate.denominator).toBe(150);
     expect(report.legitimate_false_positive_rate.rate).toBe(0);
-    expect(report.legitimate_false_positive_rate.wilson_95).not.toBeNull();
+    expect(report.legitimate_false_positive_rate.wilson_95).toEqual({
+      confidence_level: 0.95,
+      lower: 0,
+      upper: 0.02497,
+    });
     // Unmeasured: named, with no denominator invented for it.
     expect(report.unmeasured).toContain("hard_reject_false_negative_rate");
     expect(report.quarantine_over_refusal_rate.denominator).toBe(0);
@@ -169,7 +186,55 @@ describe("S-4 partial run over the available corpus half", () => {
     expect(report.provider_failure_count).toBeGreaterThan(0);
     expect(report.failures).toContain("PROVIDER_UNAVAILABLE_FAIL_CLOSED");
     expect(report.failures).toContain("ACCURACY_METRICS_INCOMPLETE");
+    expect(report.legitimate_false_positive_rate).toMatchObject({ numerator: 1, denominator: 150 });
+    // Conservative FP safety padding remains 150, but the coverage gate and
+    // report state the 149 bodies that actually reached the provider.
+    expect(report.legitimate_observed_count).toBe(149);
+    expect(report.failures).toContain("LEGITIMATE_SAMPLE_TOO_SMALL");
+    expect(report.unmeasured).toContain("legitimate_false_positive_rate");
     expect(report.verdict).toBe("blocked");
+    expect(() => assertPartialRunNotGreen(report)).not.toThrow();
+  });
+
+  test("PLANTED NEGATIVE: an unavailable legitimate reservation remains a conservative FP and is not called protected hard-reject evidence", async () => {
+    const corpus = await createS4Corpus();
+    const original = corpus.find((example) => example.ground_truth === "legitimate");
+    if (original === undefined) throw new Error("expected a legitimate corpus example");
+    const unavailableLegitimate = {
+      ...original,
+      body: undefined,
+      body_digest: undefined,
+      source: {
+        ...original.source,
+        kind: "protected-staging" as const,
+        locator: "protected-staging:s4-legitimate/reserved-001",
+        availability: "blocked" as const,
+      },
+    };
+    const report = await runLegitimateOnlyScreening({
+      corpus: corpus.map((example) =>
+        example.id === original.id ? unavailableLegitimate : example,
+      ),
+      provider: createFixtureScreeningProvider(),
+      identity: FIXTURE_IDENTITY,
+      evidence_class: "fixture-not-model-evidence",
+    });
+
+    expect(report.reserved_by_ground_truth).toEqual({
+      legitimate: 1,
+      "hard-reject": 50,
+      quarantine: 0,
+    });
+    expect(report.legitimate_false_positive_rate).toMatchObject({ numerator: 1, denominator: 150 });
+    expect(report.legitimate_observed_count).toBe(149);
+    expect(report.failures).toContain("LEGITIMATE_SAMPLE_TOO_SMALL");
+    expect(report.failures).toContain("LEGITIMATE_EVIDENCE_UNAVAILABLE");
+    expect(report.blockers).toContain("LEGITIMATE_BODY_UNAVAILABLE");
+    // The actual protected hard-reject reservations are still named; the
+    // dedicated legitimate reservation is not relabelled as one of them.
+    expect(
+      report.blockers.filter((blocker) => blocker === "PROTECTED_HARD_REJECT_BODIES_UNAVAILABLE"),
+    ).toHaveLength(1);
     expect(() => assertPartialRunNotGreen(report)).not.toThrow();
   });
 
@@ -181,6 +246,7 @@ describe("S-4 partial run over the available corpus half", () => {
     expect(record.evidence_class).toBe("fixture-not-model-evidence");
     expect(record.verdict).toBe("blocked");
     expect(record.unmeasured).toContain("hard_reject_false_negative_rate");
+    expect(record.legitimate_observed_count).toBe(150);
 
     const serialized = partialRunOpsJsonl(report);
     // No corpus body or safe excerpt may appear in an operational record.
@@ -190,5 +256,44 @@ describe("S-4 partial run over the available corpus half", () => {
     }
     expect(serialized).not.toContain("category_score_bands");
     expect(serialized).not.toContain("coarse_category");
+  });
+
+  test("PLANTED NEGATIVE: partial aggregation and its ops record reject unsafe identity metadata before publication", async () => {
+    const { evaluable, reserved } = partitionEvaluableCorpus(await createS4Corpus());
+    const provider = createFixtureScreeningProvider();
+    const observations: ScreeningObservation[] = await Promise.all(
+      evaluable.map((example) =>
+        screenWithProvider(
+          provider,
+          {
+            example_id: example.id,
+            body_digest: example.body_digest as string,
+            context_digest: example.body_digest as string,
+            identity: FIXTURE_IDENTITY,
+          },
+          { timeout_ms: 10 },
+        ),
+      ),
+    );
+    const input = {
+      corpus: evaluable,
+      reserved,
+      observations,
+      identity: FIXTURE_IDENTITY,
+      evidence_class: "fixture-not-model-evidence" as const,
+    };
+    const report = aggregatePartialScreeningRun(input);
+
+    for (const model_version of ["asimp_ag_0123456789abcdef", "model version/unsafe"]) {
+      expect(() =>
+        aggregatePartialScreeningRun({
+          ...input,
+          identity: { ...FIXTURE_IDENTITY, model_version },
+        }),
+      ).toThrow("Run identity contains unsafe or malformed metadata");
+      expect(() =>
+        partialRunOpsJsonl({ ...report, identity: { ...report.identity, model_version } }),
+      ).toThrow("Run identity contains unsafe or malformed metadata");
+    }
   });
 });

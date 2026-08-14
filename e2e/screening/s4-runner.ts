@@ -1,5 +1,7 @@
 import {
   aggregateScreeningRun,
+  assertScreeningRunIdentity,
+  type ScreeningCorpusExample,
   type ScreeningObservation,
   type ScreeningRunIdentity,
   screeningOpsJsonl,
@@ -10,6 +12,7 @@ import {
   assertS4CorpusShape,
   assertS4ManifestReadyForLiveRun,
   createS4Corpus,
+  deriveS4EvaluatedCorpusIdentity,
   inspectS4ManifestReadiness,
   S4_CORPUS_REVISION,
 } from "./s4-corpus";
@@ -30,8 +33,8 @@ import {
   runLegitimateOnlyScreening,
 } from "./s4-legitimate-only";
 
-const usage = "bun e2e/screening/s4-runner.ts <self-test|live>";
 const LIVE_REQUEST_TIMEOUT_MS = 15_000;
+const MAX_LIVE_JSON_BYTES = 1_048_576;
 
 class RunnerFailure extends Error {
   constructor(
@@ -50,6 +53,51 @@ interface StagingScreeningResponse {
   readonly policy_version: string;
   readonly configuration_digest: string;
   readonly observations: readonly ScreeningObservation[];
+}
+
+export class BoundedLiveJsonError extends Error {
+  constructor(
+    readonly code:
+      | "S4_LIVE_RESPONSE_TIMEOUT"
+      | "S4_LIVE_RESPONSE_TOO_LARGE"
+      | "S4_LIVE_RESPONSE_INVALID_JSON"
+      | "S4_LIVE_RESPONSE_UNAVAILABLE",
+  ) {
+    super(code);
+    this.name = "BoundedLiveJsonError";
+  }
+}
+
+export interface BoundedLiveJsonOptions {
+  readonly timeout_ms?: number;
+  readonly max_bytes?: number;
+}
+
+interface BoundedResponseReader {
+  read(): Promise<{ readonly done: boolean; readonly value?: Uint8Array }>;
+  cancel(): Promise<void>;
+  releaseLock(): void;
+}
+
+/**
+ * Best-effort cleanup must never replace the bounded request outcome. In
+ * particular, some stream implementations throw from `releaseLock()` after an
+ * abort; that is cleanup telemetry, not a reason to turn a timeout into an
+ * unrelated runner failure.
+ */
+export function cleanupBoundedResponseReader(
+  reader: Pick<BoundedResponseReader, "cancel" | "releaseLock">,
+): void {
+  try {
+    void reader.cancel().catch(() => undefined);
+  } catch {
+    // A synchronous cleanup exception is deliberately contained as well.
+  }
+  try {
+    reader.releaseLock();
+  } catch {
+    // Preserve the original bounded failure.
+  }
 }
 
 function requiredHttpsUrl(name: string): URL {
@@ -72,14 +120,81 @@ function requiredBearer(): string {
   return token;
 }
 
-/** Bounds staging I/O; callers translate timeout/error into a BLOCKED run. */
-async function fetchLive(url: URL, init: RequestInit): Promise<Response> {
+/**
+ * Reads an entire successful JSON response under one deadline and byte ceiling.
+ * `fetch()` resolving only proves headers arrived; it does not prove a body will
+ * ever finish. The screening and OAuth attestation are not evidence until their
+ * complete, bounded JSON documents have arrived and parsed.
+ */
+export async function fetchBoundedLiveJson(
+  url: URL,
+  init: RequestInit,
+  options: BoundedLiveJsonOptions = {},
+): Promise<unknown> {
+  const timeoutMs = options.timeout_ms ?? LIVE_REQUEST_TIMEOUT_MS;
+  const maxBytes = options.max_bytes ?? MAX_LIVE_JSON_BYTES;
+  if (
+    !Number.isInteger(timeoutMs) ||
+    timeoutMs < 1 ||
+    !Number.isInteger(maxBytes) ||
+    maxBytes < 1
+  ) {
+    throw new TypeError("S-4 live-response bounds must be positive integers.");
+  }
   const controller = new AbortController();
-  const timer = setTimeout(() => controller.abort(), LIVE_REQUEST_TIMEOUT_MS);
+  let timedOut = false;
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  const deadline = new Promise<never>((_resolve, reject) => {
+    timer = setTimeout(() => {
+      timedOut = true;
+      controller.abort();
+      reject(new BoundedLiveJsonError("S4_LIVE_RESPONSE_TIMEOUT"));
+    }, timeoutMs);
+  });
+  let reader: BoundedResponseReader | undefined;
   try {
-    return await fetch(url, { ...init, signal: controller.signal });
+    const response = await Promise.race([
+      fetch(url, { ...init, signal: controller.signal }),
+      deadline,
+    ]);
+    if (!response.ok) throw new BoundedLiveJsonError("S4_LIVE_RESPONSE_UNAVAILABLE");
+    if (response.body === null) throw new BoundedLiveJsonError("S4_LIVE_RESPONSE_INVALID_JSON");
+    reader = response.body.getReader() as unknown as BoundedResponseReader;
+    const chunks: Uint8Array[] = [];
+    let byteCount = 0;
+    for (;;) {
+      const part = await Promise.race([reader.read(), deadline]);
+      if (part.done) break;
+      if (part.value === undefined) throw new BoundedLiveJsonError("S4_LIVE_RESPONSE_INVALID_JSON");
+      byteCount += part.value.byteLength;
+      if (byteCount > maxBytes) {
+        controller.abort();
+        throw new BoundedLiveJsonError("S4_LIVE_RESPONSE_TOO_LARGE");
+      }
+      chunks.push(part.value);
+    }
+    const complete = new Uint8Array(byteCount);
+    let offset = 0;
+    for (const chunk of chunks) {
+      complete.set(chunk, offset);
+      offset += chunk.byteLength;
+    }
+    try {
+      return JSON.parse(new TextDecoder().decode(complete));
+    } catch {
+      throw new BoundedLiveJsonError("S4_LIVE_RESPONSE_INVALID_JSON");
+    }
+  } catch (error) {
+    if (error instanceof BoundedLiveJsonError) throw error;
+    if (timedOut || controller.signal.aborted) {
+      throw new BoundedLiveJsonError("S4_LIVE_RESPONSE_TIMEOUT");
+    }
+    throw new BoundedLiveJsonError("S4_LIVE_RESPONSE_UNAVAILABLE");
   } finally {
-    clearTimeout(timer);
+    if (timer !== undefined) clearTimeout(timer);
+    if (reader !== undefined) {
+      cleanupBoundedResponseReader(reader);
+    }
   }
 }
 
@@ -93,30 +208,125 @@ function safeFailureCode(error: unknown): string {
   return /^[A-Z0-9_]+$/.test(value) ? value : "S4_RUNNER_REQUEST_FAILED";
 }
 
+type LivePhase = () => Promise<void>;
+type LiveRecordEmitter = (record: Record<string, unknown>) => void;
+type TerminalExitCode = 1 | 64 | 78;
+
+export interface S4TerminalDiagnostic {
+  readonly record_type: "s4-runner-terminal";
+  readonly suite: "s4-screening-oauth";
+  readonly status: "blocked" | "fail";
+  readonly code: string;
+  readonly exit_code: TerminalExitCode;
+}
+
+function emitLiveRecord(record: Record<string, unknown>): void {
+  process.stdout.write(`${JSON.stringify(record)}\n`);
+}
+
+/** One typed, redacted terminal outcome instead of an Error stack or prose. */
+export function s4TerminalDiagnostic(
+  error: unknown,
+  exitCode: TerminalExitCode,
+): S4TerminalDiagnostic {
+  return {
+    record_type: "s4-runner-terminal",
+    suite: "s4-screening-oauth",
+    status: exitCode === 78 ? "blocked" : "fail",
+    code: safeFailureCode(error),
+    exit_code: exitCode,
+  };
+}
+
+function emitTerminalDiagnostic(error: unknown, exitCode: TerminalExitCode): void {
+  process.stderr.write(`${JSON.stringify(s4TerminalDiagnostic(error, exitCode))}\n`);
+}
+
+function phaseFailure(error: unknown): RunnerFailure {
+  if (error instanceof RunnerFailure) return error;
+  return new RunnerFailure(safeFailureCode(error), 78);
+}
+
+/**
+ * Screening and OAuth are independent attestations. A failed or blocked screen
+ * must not skip the OAuth dry check, and each phase records only a fixed,
+ * secret-safe status/code diagnostic. Successful screening emits its richer
+ * OPS.2a evidence inside the screening phase before this function advances to
+ * OAuth.
+ */
+export async function runIndependentLivePhases(
+  screening: LivePhase,
+  oauth: LivePhase,
+  emit: LiveRecordEmitter = emitLiveRecord,
+): Promise<void> {
+  let screeningFailure: RunnerFailure | undefined;
+  try {
+    await screening();
+  } catch (error) {
+    screeningFailure = phaseFailure(error);
+    emit({
+      record_type: "screening-live-diagnostic",
+      status: screeningFailure.exit_code === 78 ? "blocked" : "fail",
+      code: screeningFailure.code,
+    });
+  }
+
+  let oauthFailure: RunnerFailure | undefined;
+  try {
+    await oauth();
+    emit({ record_type: "oauth-dry-check", status: "pass", code: "OAUTH_DRY_CHECK_GREEN" });
+  } catch (error) {
+    oauthFailure = phaseFailure(error);
+    emit({
+      record_type: "oauth-dry-check",
+      status: oauthFailure.exit_code === 78 ? "blocked" : "fail",
+      code: oauthFailure.code,
+    });
+  }
+
+  // Preserve the screening outcome as the primary terminal reason while still
+  // having executed and recorded OAuth. An OAuth-only failure remains terminal.
+  if (screeningFailure !== undefined) throw screeningFailure;
+  if (oauthFailure !== undefined) throw oauthFailure;
+}
+
 /**
  * The production-configuration dry check, which is independent of screening
  * accuracy: a partial screening run still has to prove OAuth is configured the
  * way the bead requires, and an OAuth defect is a failure in either run shape.
  */
 async function assertOAuthDryCheck(oauthUrl: URL, bearer: string): Promise<void> {
-  let oauthResponse: Response;
   try {
-    oauthResponse = await fetchLive(oauthUrl, { headers: { authorization: `Bearer ${bearer}` } });
-  } catch {
-    throw new RunnerFailure("OAUTH_DRY_CHECK_UNAVAILABLE", 78);
-  }
-  if (!oauthResponse.ok) throw new RunnerFailure("OAUTH_DRY_CHECK_UNAVAILABLE", 78);
-  try {
-    assertProductionOAuthDryCheck(await oauthResponse.json());
+    assertProductionOAuthDryCheck(
+      await fetchBoundedLiveJson(oauthUrl, { headers: { authorization: `Bearer ${bearer}` } }),
+    );
   } catch (error) {
-    if (error instanceof RunnerFailure) throw error;
     if (error instanceof OAuthDryCheckFailure) throw new RunnerFailure(error.code, 1);
-    throw new RunnerFailure("OAUTH_DRY_CHECK_INVALID_RESPONSE", 1);
+    if (
+      error instanceof BoundedLiveJsonError &&
+      (error.code === "S4_LIVE_RESPONSE_INVALID_JSON" ||
+        error.code === "S4_LIVE_RESPONSE_TOO_LARGE")
+    ) {
+      throw new RunnerFailure("OAUTH_DRY_CHECK_INVALID_RESPONSE", 1);
+    }
+    if (error instanceof RunnerFailure) throw error;
+    throw new RunnerFailure("OAUTH_DRY_CHECK_UNAVAILABLE", 78);
   }
 }
 
-async function runLive(): Promise<void> {
-  const corpus = await createS4Corpus();
+export interface LiveScreeningOptions {
+  /** Test-only injection for a future ready protected manifest; production creates the frozen manifest. */
+  readonly corpus?: readonly ScreeningCorpusExample[];
+  /** Test-only transport injection; production uses bounded HTTPS fetch. */
+  readonly fetch_live_json?: typeof fetchBoundedLiveJson;
+  /** Keeps focused tests from writing staged-shaped records to process stdout. */
+  readonly write?: (line: string) => void;
+  readonly screening_url?: URL;
+  readonly bearer?: string;
+}
+
+export async function runLiveScreening(options: LiveScreeningOptions = {}): Promise<void> {
+  const corpus = options.corpus ?? (await createS4Corpus());
   assertS4CorpusShape(corpus);
   const readiness = inspectS4ManifestReadiness(corpus);
   /**
@@ -138,38 +348,41 @@ async function runLive(): Promise<void> {
   const submitted = partial ? evaluable : corpus;
   if (partial) await assertEvaluableBodiesBindTheirDigests(evaluable);
   else await assertS4ManifestReadyForLiveRun(corpus);
-  const screeningUrl = requiredHttpsUrl("S4_STAGING_SCREENING_URL");
-  const oauthUrl = requiredHttpsUrl("S4_STAGING_OAUTH_DRY_CHECK_URL");
-  const bearer = requiredBearer();
-  const digestBytes = new Uint8Array(
-    await crypto.subtle.digest("SHA-256", new TextEncoder().encode(JSON.stringify(submitted))),
-  );
-  const corpusDigest = `sha256:${Array.from(digestBytes, (byte) => byte.toString(16).padStart(2, "0")).join("")}`;
-  let screeningResponse: Response;
+  const screeningUrl = options.screening_url ?? requiredHttpsUrl("S4_STAGING_SCREENING_URL");
+  const bearer = options.bearer ?? requiredBearer();
+  const fetchLiveJson = options.fetch_live_json ?? fetchBoundedLiveJson;
+  const write = options.write ?? ((line: string) => process.stdout.write(line));
+  const corpusIdentity = await deriveS4EvaluatedCorpusIdentity(submitted);
+  let screening: StagingScreeningResponse;
   try {
-    screeningResponse = await fetchLive(screeningUrl, {
+    screening = (await fetchLiveJson(screeningUrl, {
       method: "POST",
       headers: { authorization: `Bearer ${bearer}`, "content-type": "application/json" },
       // Staging owns protected bodies. This request carries safe inline bodies
       // plus protected locators/digests, never a substitute response.
       body: JSON.stringify({
         corpus_revision: S4_CORPUS_REVISION,
-        corpus_digest: corpusDigest,
+        corpus_digest: corpusIdentity.corpus_digest,
         // A partial run submits only what it can bind to a digest. Sending the
         // reserved entries would invite staging to answer for bodies neither
         // side holds.
         partial_run: partial,
         examples: submitted,
       }),
-    });
-  } catch {
+    })) as StagingScreeningResponse;
+  } catch (error) {
+    if (
+      error instanceof BoundedLiveJsonError &&
+      (error.code === "S4_LIVE_RESPONSE_INVALID_JSON" ||
+        error.code === "S4_LIVE_RESPONSE_TOO_LARGE")
+    ) {
+      throw new RunnerFailure("WORKERS_AI_STAGING_INVALID_RESPONSE", 1);
+    }
     throw new RunnerFailure("WORKERS_AI_STAGING_UNAVAILABLE", 78);
   }
-  if (!screeningResponse.ok) throw new RunnerFailure("WORKERS_AI_STAGING_UNAVAILABLE", 78);
-  const screening = (await screeningResponse.json()) as StagingScreeningResponse;
   if (
     screening.corpus_revision !== S4_CORPUS_REVISION ||
-    screening.corpus_digest !== corpusDigest
+    screening.corpus_digest !== corpusIdentity.corpus_digest
   ) {
     throw new RunnerFailure("STAGING_CORPUS_IDENTITY_MISMATCH", 1);
   }
@@ -181,6 +394,11 @@ async function runLive(): Promise<void> {
     configuration_digest: screening.configuration_digest,
   };
   try {
+    assertScreeningRunIdentity(identity);
+  } catch {
+    throw new RunnerFailure("STAGING_RUN_IDENTITY_INVALID", 1);
+  }
+  try {
     verifyObservationBodyBindings(submitted, screening.observations);
   } catch {
     throw new RunnerFailure("STAGING_BODY_DIGEST_BINDING_MISMATCH", 1);
@@ -190,16 +408,17 @@ async function runLive(): Promise<void> {
   if (partial) {
     const partialReport: PartialReport = aggregatePartialScreeningRun({
       corpus: evaluable,
+      reserved,
       observations: screening.observations,
       identity,
       evidence_class: "provider-measured",
-      reserved_count: reserved.length,
     });
+    // Evidence first: an OAuth assertion or partial terminal result must never
+    // discard the screening record that was actually measured.
+    write(`${partialRunOpsJsonl(partialReport)}\n`);
     // Belt and braces: the verdict union has no `pass` member, and this
     // re-checks that the named blockers survived aggregation regardless.
     assertPartialRunNotGreen(partialReport);
-    await assertOAuthDryCheck(oauthUrl, bearer);
-    process.stdout.write(`${partialRunOpsJsonl(partialReport)}\n`);
     // Always non-zero. A measured breach is a failure; an unmeasured half is a
     // blocker; there is no third outcome available from this branch.
     throw new RunnerFailure(
@@ -210,8 +429,8 @@ async function runLive(): Promise<void> {
     );
   }
   const report = aggregateScreeningRun(corpus, screening.observations, identity);
-  await assertOAuthDryCheck(oauthUrl, bearer);
-  process.stdout.write(`${screeningOpsJsonl(corpus, screening.observations, report)}\n`);
+  // Write the full OPS.2a result before any independent OAuth phase can fail.
+  write(`${screeningOpsJsonl(corpus, screening.observations, report)}\n`);
   if (report.verdict !== "pass") {
     throw new RunnerFailure(
       report.verdict === "blocked"
@@ -220,6 +439,15 @@ async function runLive(): Promise<void> {
       report.verdict === "blocked" ? 78 : 1,
     );
   }
+}
+
+async function runLiveOAuth(): Promise<void> {
+  const oauthUrl = requiredHttpsUrl("S4_STAGING_OAUTH_DRY_CHECK_URL");
+  await assertOAuthDryCheck(oauthUrl, requiredBearer());
+}
+
+async function runLive(): Promise<void> {
+  await runIndependentLivePhases(runLiveScreening, runLiveOAuth);
 }
 
 /**
@@ -239,28 +467,37 @@ async function runSelfTest(): Promise<number> {
   const readiness = inspectS4ManifestReadiness(corpus);
   const { evaluable, reserved } = partitionEvaluableCorpus(corpus);
   await assertEvaluableBodiesBindTheirDigests(evaluable);
+  // A fixture run still needs the same binding claim as a staging run: its
+  // report identity names the exact available bodies it actually screened, not
+  // a request-shaped placeholder digest.
+  const corpusIdentity = await deriveS4EvaluatedCorpusIdentity(evaluable);
   const report = await runLegitimateOnlyScreening({
     corpus,
     provider: createFixtureScreeningProvider(),
     identity: {
-      corpus_revision: S4_CORPUS_REVISION,
-      corpus_digest: `sha256:${"0".repeat(64)}`,
+      corpus_revision: corpusIdentity.corpus_revision,
+      corpus_digest: corpusIdentity.corpus_digest,
       model_version: FIXTURE_MODEL_VERSION,
       policy_version: FIXTURE_POLICY_VERSION,
       configuration_digest: FIXTURE_CONFIGURATION_DIGEST,
     },
     evidence_class: "fixture-not-model-evidence",
   });
-  assertPartialRunNotGreen(report);
+  // Preserve the measured, typed evidence even if the never-green contract
+  // itself catches a future report-shape regression.
   process.stdout.write(`${partialRunOpsJsonl(report)}\n`);
+  assertPartialRunNotGreen(report);
   process.stdout.write(
     `${JSON.stringify({
+      record_type: "screening-self-test-summary",
       suite: "s4-screening-oauth",
       status: readiness.status,
       code:
         readiness.status === "blocked"
           ? "PROTECTED_HARD_REJECT_BODIES_UNAVAILABLE"
           : "S4_MANIFEST_READY",
+      corpus_revision: corpusIdentity.corpus_revision,
+      corpus_digest: corpusIdentity.corpus_digest,
       evaluated_count: report.evaluated_count,
       reserved_count: reserved.length,
       evidence_class: report.evidence_class,
@@ -274,24 +511,22 @@ async function runSelfTest(): Promise<number> {
   return readiness.status === "blocked" ? 78 : report.exit_code;
 }
 
-const command = process.argv[2];
-if (command === "self-test") {
-  process.exitCode = await runSelfTest();
-} else if (command === "live") {
+async function runCommand(command: string | undefined): Promise<number> {
   try {
-    await runLive();
+    if (command === "self-test") return await runSelfTest();
+    if (command === "live") {
+      await runLive();
+      return 0;
+    }
+    emitTerminalDiagnostic(new Error("S4_RUNNER_USAGE"), 64);
+    return 64;
   } catch (error) {
     const exitCode = error instanceof RunnerFailure ? error.exit_code : 78;
-    process.stderr.write(
-      `${JSON.stringify({
-        suite: "s4-screening-oauth",
-        status: exitCode === 78 ? "blocked" : "fail",
-        code: safeFailureCode(error),
-      })}\n`,
-    );
-    process.exitCode = exitCode;
+    emitTerminalDiagnostic(error, exitCode);
+    return exitCode;
   }
-} else {
-  process.stderr.write(`${usage}\n`);
-  process.exitCode = 64;
+}
+
+if (import.meta.main) {
+  process.exitCode = await runCommand(process.argv[2]);
 }

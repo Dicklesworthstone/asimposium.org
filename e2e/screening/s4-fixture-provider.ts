@@ -26,7 +26,7 @@ import type {
 /** The identity a fixture-driven run must declare, so logs name their source. */
 export const FIXTURE_MODEL_VERSION = "fixture-deterministic-v1-not-a-model";
 export const FIXTURE_POLICY_VERSION = "s4-policy-fixture-v1";
-export const FIXTURE_CONFIGURATION_DIGEST = "sha256:fixture-configuration-not-a-deployment";
+export const FIXTURE_CONFIGURATION_DIGEST = `sha256:${"f".repeat(64)}`;
 
 /**
  * All eight policy categories, written as an exhaustive record so the compiler

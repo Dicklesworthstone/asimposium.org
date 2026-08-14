@@ -37,6 +37,7 @@ interface OAuthDryCheckResponse {
  * no business travelling, and both are safer refused than parsed around.
  */
 const EXPECTED_FIELDS = ["environment", "provider", "redirect_uris", "scopes"] as const;
+const CANONICAL_GOOGLE_CALLBACK = "https://asimposium.org/api/auth/callback/google";
 
 /**
  * The one label an unexpected field name collapses to. A fixed constant, never
@@ -55,6 +56,18 @@ const EXPECTED_FIELDS = ["environment", "provider", "redirect_uris", "scopes"] a
  * from `EXPECTED_FIELDS` in this file rather than from the payload.
  */
 const REDACTED_FIELD_NAME = "<redacted-field-name>";
+
+function hasExactStringSet(value: unknown, expected: readonly string[]): boolean {
+  if (!Array.isArray(value) || value.length !== expected.length) return false;
+  const seen = new Set<string>();
+  for (const member of value) {
+    // Do not coerce a nested array/object through `join()` or `toString()`.
+    // The server response is untrusted until every scope is a direct primitive.
+    if (typeof member !== "string" || !expected.includes(member)) return false;
+    seen.add(member);
+  }
+  return seen.size === expected.length;
+}
 
 /**
  * The transport is staging, but this response attests production OAuth client
@@ -95,27 +108,18 @@ export function assertProductionOAuthDryCheck(value: unknown): void {
   if (response.provider !== "google") {
     throw new OAuthDryCheckFailure("OAUTH_DRY_CHECK_PROVIDER_MISMATCH");
   }
-  if (
-    !Array.isArray(response.scopes) ||
-    [...response.scopes].sort().join(",") !== "email,openid,profile"
-  ) {
+  if (!hasExactStringSet(response.scopes, ["email", "openid", "profile"])) {
     throw new OAuthDryCheckFailure("OAUTH_DRY_CHECK_SCOPE_MISMATCH");
   }
-  if (!Array.isArray(response.redirect_uris) || response.redirect_uris.length === 0) {
+  if (!Array.isArray(response.redirect_uris) || response.redirect_uris.length !== 1) {
     throw new OAuthDryCheckFailure("OAUTH_DRY_CHECK_REDIRECT_MISSING");
   }
-  for (const redirect of response.redirect_uris) {
-    if (typeof redirect !== "string") {
-      throw new OAuthDryCheckFailure("OAUTH_DRY_CHECK_REDIRECT_INVALID");
-    }
-    try {
-      const parsed = new URL(redirect);
-      if (parsed.protocol !== "https:" || parsed.username || parsed.password || parsed.hash) {
-        throw new OAuthDryCheckFailure("OAUTH_DRY_CHECK_REDIRECT_INVALID");
-      }
-    } catch (error) {
-      if (error instanceof OAuthDryCheckFailure) throw error;
-      throw new OAuthDryCheckFailure("OAUTH_DRY_CHECK_REDIRECT_INVALID");
-    }
+  const [redirect] = response.redirect_uris;
+  // Exact source-text comparison is intentional: URL normalization would erase
+  // an explicitly supplied default port and turn a non-canonical callback into
+  // a passing one. No query, fragment, userinfo, alternate host, port, or path
+  // is part of the production OAuth registration contract.
+  if (typeof redirect !== "string" || redirect !== CANONICAL_GOOGLE_CALLBACK) {
+    throw new OAuthDryCheckFailure("OAUTH_DRY_CHECK_REDIRECT_INVALID");
   }
 }

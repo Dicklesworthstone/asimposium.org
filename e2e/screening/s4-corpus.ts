@@ -975,9 +975,34 @@ const PROTECTED_HARD_REJECT_RESERVATIONS: readonly [PolicyCategory, string, stri
   ["harassment", "hard-050", "hostile-targeting control"],
 ];
 
+const PROTECTED_HARD_REJECT_CATEGORY_COUNTS = {
+  "spam-commercial": 10,
+  injection: 10,
+  "dual-use-boundary": 10,
+  "operational-harm": 10,
+  harassment: 10,
+} as const;
+const PROTECTED_AGGREGATION_PAIR_COUNT = 5;
+const PROTECTED_AGGREGATION_MEMBER_COUNT = 10;
+
 export interface S4ManifestReadiness {
   readonly status: "ready" | "blocked";
   readonly blockers: readonly string[];
+}
+
+/**
+ * The identity of the bodies actually submitted for screening.
+ *
+ * It is deliberately a digest of sorted `(id, body_digest)` pairs rather than
+ * an echo of the JSON request. Inline-safe member digests are recomputed from
+ * their local bodies first. Protected staging members carry only a supplied
+ * body digest: the body remains outside this repository and staging proves its
+ * per-observation binding before aggregation. Both branches therefore name the
+ * same canonical evaluated corpus without copying protected material here.
+ */
+export interface S4EvaluatedCorpusIdentity {
+  readonly corpus_revision: typeof S4_CORPUS_REVISION;
+  readonly corpus_digest: string;
 }
 
 async function sha256(value: string): Promise<string> {
@@ -985,6 +1010,35 @@ async function sha256(value: string): Promise<string> {
     await crypto.subtle.digest("SHA-256", new TextEncoder().encode(value)),
   );
   return `sha256:${Array.from(bytes, (byte) => byte.toString(16).padStart(2, "0")).join("")}`;
+}
+
+export async function deriveS4EvaluatedCorpusIdentity(
+  corpus: readonly ScreeningCorpusExample[],
+): Promise<S4EvaluatedCorpusIdentity> {
+  const members: { readonly id: string; readonly body_digest: string }[] = [];
+  for (const example of corpus) {
+    if (example.source.availability !== "available" || !example.body_digest) {
+      throw new Error("EVALUATED_CORPUS_BODY_DIGEST_MISMATCH");
+    }
+    if (example.source.kind === "inline-safe") {
+      if (!example.body || (await sha256(example.body)) !== example.body_digest) {
+        throw new Error("EVALUATED_CORPUS_BODY_DIGEST_MISMATCH");
+      }
+    } else if (example.source.kind === "protected-staging") {
+      if (example.body !== undefined || !/^sha256:[a-f0-9]{64}$/.test(example.body_digest)) {
+        throw new Error("EVALUATED_CORPUS_BODY_DIGEST_MISMATCH");
+      }
+    } else {
+      throw new Error("EVALUATED_CORPUS_BODY_DIGEST_MISMATCH");
+    }
+    members.push({ id: example.id, body_digest: example.body_digest });
+  }
+  if (members.length === 0) throw new Error("EVALUATED_CORPUS_EMPTY");
+  members.sort((left, right) => (left.id < right.id ? -1 : left.id > right.id ? 1 : 0));
+  return {
+    corpus_revision: S4_CORPUS_REVISION,
+    corpus_digest: await sha256(JSON.stringify(members)),
+  };
 }
 
 async function legitimateExamples(): Promise<ScreeningCorpusExample[]> {
@@ -1085,6 +1139,21 @@ export function assertS4CorpusShape(corpus: readonly ScreeningCorpusExample[]): 
       "S-4 corpus must contain exactly 150 legitimate and 50 hard-reject unique examples, plus any quarantine-truth examples.",
     );
   }
+  const protectedCategoryCounts = new Map<PolicyCategory, number>();
+  for (const example of hardReject) {
+    protectedCategoryCounts.set(
+      example.policy_category,
+      (protectedCategoryCounts.get(example.policy_category) ?? 0) + 1,
+    );
+  }
+  if (
+    Object.entries(PROTECTED_HARD_REJECT_CATEGORY_COUNTS).some(
+      ([category, count]) => protectedCategoryCounts.get(category as PolicyCategory) !== count,
+    ) ||
+    protectedCategoryCounts.size !== Object.keys(PROTECTED_HARD_REJECT_CATEGORY_COUNTS).length
+  ) {
+    throw new Error("S-4 protected hard-reject category counts drifted from the frozen manifest.");
+  }
   for (const example of quarantine) {
     // A quarantine-truth case is a boundary judgement, not operational-harm
     // text, so it is inline-safe and evaluable in the open. This deliberately
@@ -1111,7 +1180,10 @@ export function assertS4CorpusShape(corpus: readonly ScreeningCorpusExample[]): 
     ![...pairs.values()].every(
       (group) =>
         group.length === 2 && new Set(group.map((item) => item.aggregation_member)).size === 2,
-    )
+    ) ||
+    pairs.size !== PROTECTED_AGGREGATION_PAIR_COUNT ||
+    [...pairs.values()].reduce((count, group) => count + group.length, 0) !==
+      PROTECTED_AGGREGATION_MEMBER_COUNT
   ) {
     throw new Error("S-4 aggregation pairs must have exactly one a and one b member.");
   }
@@ -1172,9 +1244,11 @@ export function inspectS4ManifestReadiness(
   for (const example of corpus) {
     if (example.source.availability !== "available") {
       blockers.add(
-        example.source.kind === "protected-staging"
+        example.ground_truth === "hard-reject"
           ? "PROTECTED_HARD_REJECT_BODIES_UNAVAILABLE"
-          : "CORPUS_BODY_UNAVAILABLE",
+          : example.ground_truth === "legitimate"
+            ? "LEGITIMATE_BODY_UNAVAILABLE"
+            : "QUARANTINE_BODY_UNAVAILABLE",
       );
     }
     if (!example.body_digest) blockers.add("EVALUATED_BODY_DIGEST_MISSING");

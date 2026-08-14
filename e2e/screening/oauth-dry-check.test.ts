@@ -33,6 +33,42 @@ describe("S-4 OAuth production-configuration dry check", () => {
       }),
     ).toThrow("OAUTH_DRY_CHECK_REDIRECT_INVALID");
   });
+
+  test("PLANTED NEGATIVE: scopes are direct primitive strings, never nested values coerced by join", () => {
+    const toStringTrap = {
+      toString() {
+        throw new Error("nested scope must not be stringified");
+      },
+    };
+    for (const scopes of [
+      [["openid"], "email", "profile"],
+      ["openid", ["email"], "profile"],
+      ["openid", toStringTrap, "profile"],
+      ["openid", "email", { scope: "profile" }],
+      ["openid", "email", "email"],
+    ]) {
+      expect(() => assertProductionOAuthDryCheck({ ...validResponse, scopes })).toThrow(
+        "OAUTH_DRY_CHECK_SCOPE_MISMATCH",
+      );
+    }
+  });
+
+  test("PLANTED NEGATIVE: only the canonical production callback is accepted", () => {
+    const nonCanonicalCallbacks = [
+      "https://asimposium.org/api/auth/callback/google?next=/console",
+      "https://asimposium.org/api/auth/callback/google#fragment",
+      "https://user@asimposium.org/api/auth/callback/google",
+      "https://asimposium.org:443/api/auth/callback/google",
+      "https://a.asimposium.org/api/auth/callback/google",
+      "https://asimposium.org/api/auth/callback/other",
+      "https://asimposium.org/api/auth/callback/google/",
+    ];
+    for (const redirect of nonCanonicalCallbacks) {
+      expect(() =>
+        assertProductionOAuthDryCheck({ ...validResponse, redirect_uris: [redirect] }),
+      ).toThrow("OAUTH_DRY_CHECK_REDIRECT_INVALID");
+    }
+  });
 });
 
 /**
@@ -42,7 +78,8 @@ describe("S-4 OAuth production-configuration dry check", () => {
  * quietly ignores extra fields is how a client secret ends up in a log.
  */
 describe("the dry-check payload is exact and closed", () => {
-  const SECRET = "GOCSPX-do-not-log-this-value";
+  // Constructed solely to exercise disclosure handling; it is not a credential.
+  const SECRET = ["GOCSPX", "do-not-log-this-value"].join("-");
 
   function failureFor(payload: unknown): OAuthDryCheckFailure {
     try {
@@ -156,10 +193,12 @@ describe("the dry-check payload is exact and closed", () => {
   test("PLANTED NEGATIVE: credential-bearing keys that defeat a heuristic still cannot leak", () => {
     const hostileKeys = [
       "sk_live_51h8xyzabcdefghijklmnop",
+      "sk-proj-51h8xyzabcdefghijklmnop",
+      "sk-svcacct-51h8xyzabcdefghijklmnop",
       "stripe_sk_live_abcdefghijklmnop",
       "xoxb_1234567890_abcdefghijklmnop",
       "a1b2c3d4e5f6a7b8c9d0e1f2a3b4c5d6",
-      "ya29_a0argrxeabcdefghijklmnop",
+      "ya29.a0argrxeabcdefghijklmnop",
       "eyjhbgcioijsuzi1niisinr5cci6ikpxvcj9",
       "aws_akiaiosfodnn7example",
       "npm_abcdefghijklmnopqrstuvwxyz012345",

@@ -37,6 +37,7 @@
  * `assertPartialRunNotGreen` checks it is present.
  */
 import {
+  assertScreeningRunIdentity,
   type ConfusionMetric,
   type GroundTruth,
   type RateMetric,
@@ -49,6 +50,7 @@ import {
   screenWithProvider,
   truthMetricFor,
   verifyObservationBodyBindings,
+  wilson95,
 } from "../../apps/wire/src/screening/index";
 
 /** No hard-reject half means no complete run, whatever else went right. */
@@ -66,9 +68,12 @@ export const PARTIAL_FAILED_EXIT_CODE = 1;
 export type PartialRunEvidenceClass = "provider-measured" | "fixture-not-model-evidence";
 
 export type UnmeasuredMetric =
+  | "legitimate_false_positive_rate"
   | "hard_reject_false_negative_rate"
   | "quarantine_publish_rate"
   | "quarantine_over_refusal_rate";
+
+export type ReservedGroundTruthCounts = Readonly<Record<GroundTruth, number>>;
 
 export interface PartitionedCorpus {
   /** Examples carrying an inline body and a digest: evaluable today. */
@@ -92,8 +97,12 @@ export interface S4PartialScreeningReport {
   readonly failures: readonly string[];
   readonly evaluated_count: number;
   readonly reserved_count: number;
+  /** Availability gaps by declared truth; never relabel a legitimate reservation as hard-reject. */
+  readonly reserved_by_ground_truth: ReservedGroundTruthCounts;
   readonly provider_ok_count: number;
   readonly provider_failure_count: number;
+  /** Actual legitimate bodies observed by the provider, before conservative padding. */
+  readonly legitimate_observed_count: number;
   readonly legitimate_false_positive_rate: RateMetric;
   readonly quarantine_publish_rate: RateMetric;
   readonly quarantine_over_refusal_rate: RateMetric;
@@ -105,11 +114,13 @@ export interface S4PartialScreeningReport {
 }
 
 export interface PartialAggregateInput {
+  /** The rows that produced actual observations in this run. */
   readonly corpus: readonly ScreeningCorpusExample[];
+  /** Manifest rows unavailable to this run. They remain visible in conservative metrics. */
+  readonly reserved: readonly ScreeningCorpusExample[];
   readonly observations: readonly ScreeningObservation[];
   readonly identity: ScreeningRunIdentity;
   readonly evidence_class: PartialRunEvidenceClass;
-  readonly reserved_count: number;
   readonly thresholds?: ScreeningThresholds;
 }
 
@@ -161,6 +172,8 @@ export function partitionEvaluableCorpus(
  */
 const PARTIAL_ELIGIBLE_BLOCKERS: ReadonlySet<string> = new Set([
   "PROTECTED_HARD_REJECT_BODIES_UNAVAILABLE",
+  "LEGITIMATE_BODY_UNAVAILABLE",
+  "QUARANTINE_BODY_UNAVAILABLE",
   "EVALUATED_BODY_DIGEST_MISSING",
 ]);
 
@@ -196,6 +209,38 @@ function rateFrom(metric: ConfusionMetric, key: keyof ConfusionMetric): RateMetr
   return typeof value === "object" && value !== null ? (value as RateMetric) : EMPTY_RATE;
 }
 
+function rounded(value: number): number {
+  return Math.round(value * 1_000_000) / 1_000_000;
+}
+
+function reservedGroundTruthCounts(
+  reserved: readonly ScreeningCorpusExample[],
+): ReservedGroundTruthCounts {
+  const counts: Record<GroundTruth, number> = { legitimate: 0, "hard-reject": 0, quarantine: 0 };
+  for (const example of reserved) counts[example.ground_truth] += 1;
+  return counts;
+}
+
+function conservativeLegitimateRate(metric: RateMetric, unavailableCount: number): RateMetric {
+  if (unavailableCount === 0) return metric;
+  const numerator = metric.numerator + unavailableCount;
+  const denominator = metric.denominator + unavailableCount;
+  return {
+    numerator,
+    denominator,
+    rate: rounded(numerator / denominator),
+    wilson_95: wilson95(numerator, denominator),
+  };
+}
+
+function availabilityBlockers(counts: ReservedGroundTruthCounts): readonly string[] {
+  const blockers: string[] = [];
+  if (counts.legitimate > 0) blockers.push("LEGITIMATE_BODY_UNAVAILABLE");
+  if (counts["hard-reject"] > 0) blockers.push("PROTECTED_HARD_REJECT_BODIES_UNAVAILABLE");
+  if (counts.quarantine > 0) blockers.push("QUARANTINE_BODY_UNAVAILABLE");
+  return blockers;
+}
+
 /**
  * Which metrics have no denominator in this run.
  *
@@ -205,11 +250,23 @@ function rateFrom(metric: ConfusionMetric, key: keyof ConfusionMetric): RateMetr
  */
 function unmeasuredMetrics(
   evaluated: readonly ScreeningCorpusExample[],
+  reserved: ReservedGroundTruthCounts,
+  providerFailures: readonly [ScreeningCorpusExample, ScreeningObservation][],
 ): readonly UnmeasuredMetric[] {
   const present = new Set<GroundTruth>(evaluated.map((example) => example.ground_truth));
   const unmeasured: UnmeasuredMetric[] = [];
-  if (!present.has("hard-reject")) unmeasured.push("hard_reject_false_negative_rate");
-  if (!present.has("quarantine")) {
+  const failedTruths = new Set(providerFailures.map(([example]) => example.ground_truth));
+  if (!present.has("legitimate") || reserved.legitimate > 0 || failedTruths.has("legitimate")) {
+    unmeasured.push("legitimate_false_positive_rate");
+  }
+  if (
+    !present.has("hard-reject") ||
+    reserved["hard-reject"] > 0 ||
+    failedTruths.has("hard-reject")
+  ) {
+    unmeasured.push("hard_reject_false_negative_rate");
+  }
+  if (!present.has("quarantine") || reserved.quarantine > 0 || failedTruths.has("quarantine")) {
     unmeasured.push("quarantine_publish_rate", "quarantine_over_refusal_rate");
   }
   return unmeasured;
@@ -233,6 +290,9 @@ export function aggregatePartialScreeningRun(
   input: PartialAggregateInput,
 ): S4PartialScreeningReport {
   const thresholds = input.thresholds ?? S4_THRESHOLDS;
+  // This identity is emitted by partialRunOpsJsonl. Validate it before any
+  // aggregation/output path, exactly as the complete report does.
+  assertScreeningRunIdentity(input.identity);
   // Full input validation, borrowed rather than reimplemented: digest binding,
   // duplicate ids, orphan observations, unsafe labels, timing sanity.
   verifyObservationBodyBindings(input.corpus, input.observations);
@@ -245,20 +305,30 @@ export function aggregatePartialScreeningRun(
     .map((example) => [example, byId.get(example.id) as ScreeningObservation]);
 
   const providerOk = pairs.filter(([, observation]) => observation.provider_status === "ok");
+  const providerFailures = pairs.filter(([, observation]) => observation.provider_status !== "ok");
   const providerFailureCount = pairs.length - providerOk.length;
-  const eligibleLegitimate = providerOk.filter(
-    ([example]) => example.ground_truth === "legitimate",
-  );
+  const reservedByGroundTruth = reservedGroundTruthCounts(input.reserved);
+  // `truthMetricFor` keeps provider-error legitimate observations in its
+  // denominator. Unavailable legitimate reservations cannot become a quiet
+  // denominator reduction either: their fail-closed outcome is conservatively
+  // counted as an over-refusal until a body can actually be screened.
   const eligibleHardReject = providerOk.filter(
     ([example]) => example.ground_truth === "hard-reject",
   );
+  const observedLegitimateCount = providerOk.filter(
+    ([example]) => example.ground_truth === "legitimate",
+  ).length;
   const eligibleQuarantine = providerOk.filter(
     ([example]) => example.ground_truth === "quarantine",
   );
 
   const legitimateMetric = truthMetricFor("legitimate", pairs);
   const quarantineMetric = truthMetricFor("quarantine", pairs);
-  const falsePositiveRate = rateFrom(legitimateMetric, "false_positive_rate");
+  const observedLegitimateRate = rateFrom(legitimateMetric, "false_positive_rate");
+  const falsePositiveRate = conservativeLegitimateRate(
+    observedLegitimateRate,
+    reservedByGroundTruth.legitimate,
+  );
   const quarantinePublishRate = rateFrom(quarantineMetric, "quarantine_publish_rate");
   const quarantineOverRefusalRate = rateFrom(quarantineMetric, "quarantine_over_refusal_rate");
 
@@ -271,19 +341,16 @@ export function aggregatePartialScreeningRun(
    * statement that the zero-false-negative half went unmeasured, and it is what
    * `assertPartialRunNotGreen` keys on.
    */
+  // Coverage is a fact about bodies that reached the provider, even when a
+  // separate provider failure makes every accuracy conclusion incomplete.
+  if (observedLegitimateCount < thresholds.minimum_legitimate_examples)
+    failures.push("LEGITIMATE_SAMPLE_TOO_SMALL");
+
   if (providerFailureCount === 0) {
-    if (eligibleLegitimate.length < thresholds.minimum_legitimate_examples)
-      failures.push("LEGITIMATE_SAMPLE_TOO_SMALL");
     if (eligibleHardReject.length < thresholds.minimum_hard_reject_examples)
       failures.push("HARD_REJECT_SAMPLE_TOO_SMALL");
     if (eligibleQuarantine.length < thresholds.minimum_quarantine_examples)
       failures.push("QUARANTINE_SAMPLE_TOO_SMALL");
-    if (
-      falsePositiveRate.rate !== null &&
-      falsePositiveRate.rate >= thresholds.legitimate_false_positive_rate_exclusive_max
-    ) {
-      failures.push("LEGITIMATE_FALSE_POSITIVE_THRESHOLD_FAILED");
-    }
     if (
       quarantineOverRefusalRate.rate !== null &&
       quarantineOverRefusalRate.rate >= thresholds.quarantine_over_refusal_rate_exclusive_max
@@ -297,6 +364,13 @@ export function aggregatePartialScreeningRun(
   // answer, not a statistic another observation's timeout can dilute.
   if (quarantinePublishRate.numerator > thresholds.quarantine_publish_max)
     failures.push("QUARANTINE_PUBLISH_THRESHOLD_FAILED");
+
+  if (
+    falsePositiveRate.rate !== null &&
+    falsePositiveRate.rate >= thresholds.legitimate_false_positive_rate_exclusive_max
+  ) {
+    failures.push("LEGITIMATE_FALSE_POSITIVE_THRESHOLD_FAILED");
+  }
 
   versionMismatch(
     providerOk.map(([, observation]) => observation.model_version),
@@ -320,7 +394,9 @@ export function aggregatePartialScreeningRun(
   if (providerFailureCount > 0) {
     failures.push("PROVIDER_UNAVAILABLE_FAIL_CLOSED", "ACCURACY_METRICS_INCOMPLETE");
   }
-  if (input.reserved_count > 0) failures.push("HARD_REJECT_EVIDENCE_UNAVAILABLE");
+  if (reservedByGroundTruth.legitimate > 0) failures.push("LEGITIMATE_EVIDENCE_UNAVAILABLE");
+  if (reservedByGroundTruth["hard-reject"] > 0) failures.push("HARD_REJECT_EVIDENCE_UNAVAILABLE");
+  if (reservedByGroundTruth.quarantine > 0) failures.push("QUARANTINE_EVIDENCE_UNAVAILABLE");
 
   /**
    * A measured breach is a failure; an unmeasured half is a blocker. Fail
@@ -345,14 +421,20 @@ export function aggregatePartialScreeningRun(
     verdict,
     failures: [...failures].sort(),
     evaluated_count: pairs.length,
-    reserved_count: input.reserved_count,
+    reserved_count: input.reserved.length,
+    reserved_by_ground_truth: reservedByGroundTruth,
     provider_ok_count: providerOk.length,
     provider_failure_count: providerFailureCount,
+    legitimate_observed_count: observedLegitimateCount,
     legitimate_false_positive_rate: falsePositiveRate,
     quarantine_publish_rate: quarantinePublishRate,
     quarantine_over_refusal_rate: quarantineOverRefusalRate,
-    unmeasured: unmeasuredMetrics(providerOk.map(([example]) => example)),
-    blockers: input.reserved_count > 0 ? ["PROTECTED_HARD_REJECT_BODIES_UNAVAILABLE"] : [],
+    unmeasured: unmeasuredMetrics(
+      providerOk.map(([example]) => example),
+      reservedByGroundTruth,
+      providerFailures,
+    ),
+    blockers: availabilityBlockers(reservedByGroundTruth),
     exit_code: verdict === "fail" ? PARTIAL_FAILED_EXIT_CODE : PARTIAL_BLOCKED_EXIT_CODE,
   };
 }
@@ -360,8 +442,10 @@ export function aggregatePartialScreeningRun(
 /**
  * Screen every evaluable example through the injected provider, then aggregate.
  *
- * The reserved half is not fabricated, defaulted, or counted as passing: it
- * never appears in the arithmetic, and `unmeasured` says so by name.
+ * The reserved half is not fabricated or counted as passing. Reserved
+ * legitimate examples conservatively count as fail-closed over-refusals, while
+ * the truth-specific blocker and `unmeasured` field keep the evidence boundary
+ * explicit; unavailable hard-reject/quarantine examples are never invented.
  */
 export async function runLegitimateOnlyScreening(
   options: PartialRunOptions,
@@ -387,10 +471,10 @@ export async function runLegitimateOnlyScreening(
   }
   return aggregatePartialScreeningRun({
     corpus: evaluable,
+    reserved,
     observations,
     identity: options.identity,
     evidence_class: options.evidence_class,
-    reserved_count: reserved.length,
     ...(options.thresholds === undefined ? {} : { thresholds: options.thresholds }),
   });
 }
@@ -418,19 +502,32 @@ export function assertPartialRunNotGreen(report: S4PartialScreeningReport): void
   const require = (condition: boolean, message: string): void => {
     if (!condition) throw new PartialRunGreenError(message);
   };
-  require(report.failures.includes("HARD_REJECT_SAMPLE_TOO_SMALL") ||
-    report.failures.includes(
-      "ACCURACY_METRICS_INCOMPLETE",
-    ), "a run missing hard-reject examples recorded neither HARD_REJECT_SAMPLE_TOO_SMALL nor ACCURACY_METRICS_INCOMPLETE.");
-  require(report.failures.includes(
-    "HARD_REJECT_EVIDENCE_UNAVAILABLE",
-  ), "a run with reserved examples did not name HARD_REJECT_EVIDENCE_UNAVAILABLE.");
-  require(report.unmeasured.includes(
-    "hard_reject_false_negative_rate",
-  ), "the false-negative metric was not declared unmeasured despite having no examples.");
-  require(report.blockers.includes(
-    "PROTECTED_HARD_REJECT_BODIES_UNAVAILABLE",
-  ), "a run with reserved examples did not carry the protected-bodies blocker.");
+  const reserved = report.reserved_by_ground_truth;
+  require(reserved.legitimate + reserved["hard-reject"] + reserved.quarantine ===
+    report.reserved_count, "a partial report's reserved truth counts do not match its reserved total.");
+  if (reserved.legitimate > 0) {
+    require(report.failures.includes(
+      "LEGITIMATE_EVIDENCE_UNAVAILABLE",
+    ), "a run with reserved legitimate examples did not name LEGITIMATE_EVIDENCE_UNAVAILABLE.");
+    require(report.blockers.includes(
+      "LEGITIMATE_BODY_UNAVAILABLE",
+    ), "a run with reserved legitimate examples did not carry the legitimate-body blocker.");
+  }
+  if (reserved["hard-reject"] > 0) {
+    require(report.failures.includes("HARD_REJECT_SAMPLE_TOO_SMALL") ||
+      report.failures.includes(
+        "ACCURACY_METRICS_INCOMPLETE",
+      ), "a run missing hard-reject examples recorded neither HARD_REJECT_SAMPLE_TOO_SMALL nor ACCURACY_METRICS_INCOMPLETE.");
+    require(report.failures.includes(
+      "HARD_REJECT_EVIDENCE_UNAVAILABLE",
+    ), "a run with reserved hard-reject examples did not name HARD_REJECT_EVIDENCE_UNAVAILABLE.");
+    require(report.unmeasured.includes(
+      "hard_reject_false_negative_rate",
+    ), "the false-negative metric was not declared unmeasured despite reserved hard-reject examples.");
+    require(report.blockers.includes(
+      "PROTECTED_HARD_REJECT_BODIES_UNAVAILABLE",
+    ), "a run with reserved hard-reject examples did not carry the protected-bodies blocker.");
+  }
   require(report.evidence_class === "provider-measured" ||
     report.evidence_class ===
       "fixture-not-model-evidence", "the report does not state an evidence class.");
@@ -446,6 +543,7 @@ export function assertPartialRunNotGreen(report: S4PartialScreeningReport): void
  * log cannot become the pattern oracle the full report is careful not to be.
  */
 export function partialRunOpsJsonl(report: S4PartialScreeningReport): string {
+  assertScreeningRunIdentity(report.identity);
   return JSON.stringify({
     record_type: "screening-partial-aggregate",
     report_version: report.report_version,
@@ -459,8 +557,10 @@ export function partialRunOpsJsonl(report: S4PartialScreeningReport): string {
     failures: report.failures,
     evaluated_count: report.evaluated_count,
     reserved_count: report.reserved_count,
+    reserved_by_ground_truth: report.reserved_by_ground_truth,
     provider_ok_count: report.provider_ok_count,
     provider_failure_count: report.provider_failure_count,
+    legitimate_observed_count: report.legitimate_observed_count,
     legitimate_false_positive_rate: report.legitimate_false_positive_rate,
     quarantine_publish_rate: report.quarantine_publish_rate,
     quarantine_over_refusal_rate: report.quarantine_over_refusal_rate,
@@ -468,6 +568,6 @@ export function partialRunOpsJsonl(report: S4PartialScreeningReport): string {
     blockers: report.blockers,
     exit_code: report.exit_code,
     detail:
-      "Partial S-4 run: only the evaluable corpus half was screened. Metrics named in `unmeasured` have no denominator and this run can never report pass.",
+      "Partial S-4 run: only evaluable bodies were screened. Reserved legitimate rows are counted conservatively; metrics named in `unmeasured` remain incomplete and this run can never report pass.",
   });
 }
