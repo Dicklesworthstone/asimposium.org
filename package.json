@@ -1,0 +1,39 @@
+{
+  "name": "asimposium",
+  "version": "0.0.0",
+  "private": true,
+  "type": "module",
+  "license": "SEE LICENSE IN LICENSE",
+  "packageManager": "bun@1.3.8",
+  "engines": {
+    "bun": ">=1.3.8"
+  },
+  "workspaces": [
+    "apps/*",
+    "packages/*",
+    "e2e*",
+    "e2e/*"
+  ],
+  "scripts": {
+    "suite": "bun scripts/suite/cli.ts",
+    "check": "bun scripts/suite/cli.ts --all",
+    "typecheck": "bun scripts/suite/cli.ts typecheck",
+    "lint": "bun scripts/suite/cli.ts lint",
+    "test": "bun scripts/suite/cli.ts unit",
+    "test:unit": "bun scripts/suite/cli.ts unit",
+    "test:contract": "bun scripts/suite/cli.ts contract",
+    "test:integration": "bun scripts/suite/cli.ts integration",
+    "test:security": "bun scripts/suite/cli.ts security",
+    "test:performance": "bun scripts/suite/cli.ts performance",
+    "test:e2e": "bun scripts/suite/cli.ts e2e",
+    "toolchain:typecheck": "tsc --noEmit -p tsconfig.json",
+    "toolchain:lint": "biome check scripts package.json tsconfig.json tsconfig.base.json biome.json",
+    "toolchain:format": "biome check --write scripts package.json tsconfig.json tsconfig.base.json biome.json",
+    "toolchain:test": "bun test scripts/suite"
+  },
+  "devDependencies": {
+    "@biomejs/biome": "2.5.8",
+    "@types/bun": "1.3.14",
+    "typescript": "5.9.3"
+  }
+}

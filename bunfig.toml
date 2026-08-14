@@ -1,0 +1,18 @@
+# Root Bun configuration. Toolchain integration only (OPS.1).
+# Package-local bunfig.toml files are allowed and take precedence for their own directory.
+
+[install]
+# Pin what the lockfile records: no floating carets creeping into the toolchain.
+exact = true
+registry = "https://registry.npmjs.org"
+# Dev dependencies are part of the gate, so they are always installed.
+production = false
+# Peer dependencies are installed rather than silently assumed.
+peer = true
+
+[install.lockfile]
+save = true
+
+[test]
+# Deterministic gate behaviour: a hung test fails the suite instead of hanging CI.
+timeout = 120000
