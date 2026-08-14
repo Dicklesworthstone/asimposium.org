@@ -2,7 +2,8 @@ PRAGMA foreign_keys = ON;
 
 -- S-1 / Propylon enrollment state. Every credential-shaped value is a
 -- SHA-256 hash; plaintext join secrets, flow handles, and Fellow tokens have
--- no column in D1.
+-- no column in D1. The idempotency table below stores only authenticated
+-- ciphertext for a 24-hour exact-response replay, never plaintext.
 CREATE TABLE enrollment_records (
   enrollment_id TEXT PRIMARY KEY,
   sponsor_id TEXT NOT NULL,
@@ -71,10 +72,35 @@ CREATE TABLE enrollment_credentials (
   issued_at INTEGER NOT NULL
 );
 
+-- The replay window for enrollment writes.
+--
+-- A row here is only ever written in the SAME D1 batch as the product effect it
+-- describes, so the effect and its encrypted replay result commit or roll back
+-- together. There is no reservation row: a key that has no row has no effect
+-- behind it, and a retry re-executes rather than reading a half-finished write.
+--
+-- `request_digest NOT NULL` IS LOAD-BEARING. It is not merely hygiene.
+--
+-- `idempotencyStatement` in apps/wire/src/enrollment/d1-store.ts resolves, on a
+-- conflict with a still-live key, to `request_digest = NULL`. That assignment
+-- violates this constraint, which aborts the whole batch and therefore rolls
+-- back the product effect as well. It is how a concurrent second writer under
+-- one key is refused *atomically*, rather than by a read-then-write check that
+-- has a window between the read and the write.
+--
+-- If this column is ever made nullable, that abort silently becomes a
+-- destructive UPDATE: the live row's ciphertext, IV and expiry are overwritten
+-- with the second request's values and its digest becomes NULL, so the first
+-- caller's retry reads someone else's result. Do not relax it without replacing
+-- the mechanism with something equally atomic.
+--
+-- Proven by: apps/wire/test/unit/enrollment-idempotency-atomicity.test.ts,
+-- which runs this exact migration and fails if the constraint is relaxed.
 CREATE TABLE enrollment_idempotency (
   scope TEXT NOT NULL CHECK (scope IN ('mint', 'claim', 'decision', 'poll')),
   principal_scope TEXT NOT NULL,
   idempotency_key TEXT NOT NULL,
+  -- Load-bearing NOT NULL. See the note above before changing this line.
   request_digest TEXT NOT NULL,
   response_ciphertext TEXT NOT NULL,
   response_initialization_vector TEXT NOT NULL,

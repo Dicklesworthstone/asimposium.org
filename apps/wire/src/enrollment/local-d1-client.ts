@@ -5,34 +5,56 @@ if (typeof origin !== "string" || !/^http:\/\/127\.0\.0\.1:\d+$/.test(origin)) {
 } else {
   const startedAt = performance.now();
   const sponsorId = "local-sponsor-s1";
+  const fetchTimeoutMs = 5_000;
+
+  const localFetch = (input: string, init: RequestInit = {}): Promise<Response> =>
+    fetch(input, {
+      ...init,
+      signal: init.signal ?? AbortSignal.timeout(fetchTimeoutMs),
+    });
 
   const post = async (
     path: string,
     body: unknown,
     headers: Record<string, string> = {},
   ): Promise<Response> =>
-    fetch(`${origin}${path}`, {
+    localFetch(`${origin}${path}`, {
       method: "POST",
       headers: { "content-type": "application/json", ...headers },
       body: JSON.stringify(body),
     });
 
   try {
-    const mint = await post("/__s1/mint", {
+    const mintRequest = {
       sponsor_id: sponsorId,
       request: {
         requested_scopes: ["review"],
         problem_binding: "P-4DSP",
         event_budget: 12,
       },
-    });
+    };
+    const mint = await post("/__s1/mint", mintRequest, { "idempotency-key": "local-mint-1" });
     if (mint.status !== 201) throw new Error("mint-status");
     const minted = (await mint.json()) as { enrollmentId?: unknown; secret?: unknown };
     if (typeof minted.enrollmentId !== "string" || typeof minted.secret !== "string") {
       throw new Error("mint-shape");
     }
+    const mintReplay = await post("/__s1/mint", mintRequest, {
+      "idempotency-key": "local-mint-1",
+    });
+    const mintReplayBody = (await mintReplay.json()) as {
+      enrollmentId?: unknown;
+      secret?: unknown;
+    };
+    if (
+      mintReplay.status !== 201 ||
+      mintReplayBody.enrollmentId !== minted.enrollmentId ||
+      mintReplayBody.secret !== minted.secret
+    ) {
+      throw new Error("mint-lost-response-replay");
+    }
 
-    const markdown = await fetch(`${origin}/join/${minted.enrollmentId}`);
+    const markdown = await localFetch(`${origin}/join/${minted.enrollmentId}`);
     const markdownBody = await markdown.text();
     if (
       markdown.status !== 200 ||
@@ -41,7 +63,7 @@ if (typeof origin !== "string" || !/^http:\/\/127\.0\.0\.1:\d+$/.test(origin)) {
     ) {
       throw new Error("capsule-secret-boundary");
     }
-    const capsule = await fetch(`${origin}/join/${minted.enrollmentId}`, {
+    const capsule = await localFetch(`${origin}/join/${minted.enrollmentId}`, {
       headers: { accept: "application/json" },
     });
     const capsuleBody = (await capsule.json()) as {
@@ -76,16 +98,33 @@ if (typeof origin !== "string" || !/^http:\/\/127\.0\.0\.1:\d+$/.test(origin)) {
       throw new Error("name-policy");
     }
 
-    const claim = await post("/v1/fellows", {
+    const claimRequest = {
       enrollment_id: minted.enrollmentId,
       secret: minted.secret,
       name: "local-orchid",
       model: "local-model",
       harness: "codex",
-    });
+    };
+    const claim = await post("/v1/fellows", claimRequest, { "idempotency-key": "local-claim-1" });
     const claimBody = (await claim.json()) as { flow_handle?: unknown };
     if (claim.status !== 202 || typeof claimBody.flow_handle !== "string") {
       throw new Error("claim-shape");
+    }
+    const claimReplay = await post("/v1/fellows", claimRequest, {
+      "idempotency-key": "local-claim-1",
+    });
+    const claimReplayBody = (await claimReplay.json()) as { flow_handle?: unknown };
+    if (claimReplay.status !== 202 || claimReplayBody.flow_handle !== claimBody.flow_handle) {
+      throw new Error("claim-lost-response-replay");
+    }
+    const claimConflict = await post(
+      "/v1/fellows",
+      { ...claimRequest, name: "different-local-orchid" },
+      { "idempotency-key": "local-claim-1" },
+    );
+    const claimConflictBody = (await claimConflict.json()) as { code?: unknown };
+    if (claimConflict.status !== 409 || claimConflictBody.code !== "IDEMPOTENCY_CONFLICT") {
+      throw new Error("claim-idempotency-conflict");
     }
 
     for (const enrollmentId of ["ASIMP-EN-7F3K9M2Q8R", minted.enrollmentId]) {
@@ -112,11 +151,21 @@ if (typeof origin !== "string" || !/^http:\/\/127\.0\.0\.1:\d+$/.test(origin)) {
       throw new Error("pending-flow");
     }
 
-    const approval = await post("/__s1/approve", {
-      sponsor_id: sponsorId,
-      enrollment_id: minted.enrollmentId,
-    });
+    const approval = await post(
+      "/__s1/approve",
+      {
+        sponsor_id: sponsorId,
+        enrollment_id: minted.enrollmentId,
+      },
+      { "idempotency-key": "local-decision-1" },
+    );
     if (approval.status !== 200) throw new Error("approval-status");
+    const approvalReplay = await post(
+      "/__s1/approve",
+      { sponsor_id: sponsorId, enrollment_id: minted.enrollmentId },
+      { "idempotency-key": "local-decision-1" },
+    );
+    if (approvalReplay.status !== 200) throw new Error("decision-lost-response-replay");
 
     const approvedCard = await post("/__s1/card", {
       sponsor_id: sponsorId,
@@ -133,7 +182,10 @@ if (typeof origin !== "string" || !/^http:\/\/127\.0\.0\.1:\d+$/.test(origin)) {
       throw new Error("durable-approval-grant");
     }
 
-    const issued = await post("/v1/device-token", { flow_handle: claimBody.flow_handle });
+    const pollRequest = { flow_handle: claimBody.flow_handle };
+    const issued = await post("/v1/device-token", pollRequest, {
+      "idempotency-key": "local-poll-1",
+    });
     const issuedBody = (await issued.json()) as { status?: unknown; token?: unknown };
     if (
       issued.status !== 200 ||
@@ -142,14 +194,104 @@ if (typeof origin !== "string" || !/^http:\/\/127\.0\.0\.1:\d+$/.test(origin)) {
     ) {
       throw new Error("issued-shape");
     }
+    const issuedReplay = await post("/v1/device-token", pollRequest, {
+      "idempotency-key": "local-poll-1",
+    });
+    const issuedReplayBody = (await issuedReplay.json()) as { status?: unknown; token?: unknown };
+    if (
+      issuedReplay.status !== 200 ||
+      issuedReplayBody.status !== "approved" ||
+      issuedReplayBody.token !== issuedBody.token
+    ) {
+      throw new Error("token-lost-response-replay");
+    }
 
-    const hello = await fetch(`${origin}/v1/hello`, {
+    const hello = await localFetch(`${origin}/v1/hello`, {
       headers: { authorization: `Bearer ${issuedBody.token}` },
     });
     const helloBody = (await hello.json()) as { fellow?: { name?: unknown } };
     if (hello.status !== 200 || helloBody.fellow?.name !== "local-orchid") {
       throw new Error("hello-binding");
     }
+
+    const raceMint = await post("/__s1/mint", {
+      sponsor_id: sponsorId,
+      request: { requested_scopes: ["review"] },
+    });
+    const raceMintBody = (await raceMint.json()) as { enrollmentId?: unknown; secret?: unknown };
+    if (
+      raceMint.status !== 201 ||
+      typeof raceMintBody.enrollmentId !== "string" ||
+      typeof raceMintBody.secret !== "string"
+    ) {
+      throw new Error("race-mint-shape");
+    }
+    const raceClaimRequest = {
+      enrollment_id: raceMintBody.enrollmentId,
+      secret: raceMintBody.secret,
+      name: "race-local-orchid",
+      model: "local-model",
+      harness: "codex",
+    };
+    const [raceLeft, raceRight] = await Promise.all([
+      post("/v1/fellows", raceClaimRequest, { "idempotency-key": "local-claim-race-1" }),
+      post("/v1/fellows", raceClaimRequest, { "idempotency-key": "local-claim-race-1" }),
+    ]);
+    const raceBodies = (await Promise.all([raceLeft.json(), raceRight.json()])) as Array<{
+      flow_handle?: unknown;
+    }>;
+    if (
+      raceLeft.status !== 202 ||
+      raceRight.status !== 202 ||
+      typeof raceBodies[0]?.flow_handle !== "string" ||
+      raceBodies[0]?.flow_handle !== raceBodies[1]?.flow_handle
+    ) {
+      throw new Error("concurrent-first-claim-replay");
+    }
+
+    // This approval collides with the immutable Fellow name already bound
+    // above. The following deny deliberately reuses its key with a different
+    // digest: it succeeds only if the failed D1 batch rolled back both the
+    // grant effect and its idempotency insert.
+    const rollbackMint = await post("/__s1/mint", {
+      sponsor_id: sponsorId,
+      request: { requested_scopes: ["review"] },
+    });
+    const rollbackMintBody = (await rollbackMint.json()) as {
+      enrollmentId?: unknown;
+      secret?: unknown;
+    };
+    if (
+      rollbackMint.status !== 201 ||
+      typeof rollbackMintBody.enrollmentId !== "string" ||
+      typeof rollbackMintBody.secret !== "string"
+    ) {
+      throw new Error("rollback-mint-shape");
+    }
+    const rollbackClaim = await post("/v1/fellows", {
+      enrollment_id: rollbackMintBody.enrollmentId,
+      secret: rollbackMintBody.secret,
+      name: "local-orchid",
+      model: "local-model",
+      harness: "codex",
+    });
+    if (rollbackClaim.status !== 202) throw new Error("rollback-claim-shape");
+    const failedApproval = await post(
+      "/__s1/approve",
+      { sponsor_id: sponsorId, enrollment_id: rollbackMintBody.enrollmentId },
+      { "idempotency-key": "local-decision-rollback-1" },
+    );
+    if (failedApproval.status !== 400) throw new Error("rollback-decision-failure");
+    const recoveredDeny = await post(
+      "/__s1/approve",
+      {
+        sponsor_id: sponsorId,
+        enrollment_id: rollbackMintBody.enrollmentId,
+        decision: { decision: "deny" },
+      },
+      { "idempotency-key": "local-decision-rollback-1" },
+    );
+    if (recoveredDeny.status !== 200) throw new Error("rollback-key-poisoned");
 
     process.stdout.write(
       `${JSON.stringify({
@@ -166,6 +308,10 @@ if (typeof origin !== "string" || !/^http:\/\/127\.0\.0\.1:\d+$/.test(origin)) {
           "durable-approval-grant",
           "body-only-flow",
           "approve-token-hello-binding",
+          "encrypted-idempotency-lost-response",
+          "idempotency-digest-conflict",
+          "concurrent-first-claim-replay",
+          "failed-batch-does-not-poison-key",
         ],
         reproduce: "scripts/e2e-s1-cold-enrollment.sh --local-d1",
       })}\n`,

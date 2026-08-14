@@ -1,7 +1,11 @@
 import { describe, expect, test } from "bun:test";
 
 import { createEnrollmentRouter } from "../../src/enrollment/router.ts";
-import { EnrollmentService, InMemoryEnrollmentStore } from "../../src/enrollment/service.ts";
+import {
+  AesGcmEnrollmentReplayProtector,
+  EnrollmentService,
+  InMemoryEnrollmentStore,
+} from "../../src/enrollment/service.ts";
 
 class FixedClock {
   now(): number {
@@ -22,12 +26,18 @@ class FixedRandom {
 }
 
 const sponsor = { type: "sponsor", sponsorId: "sponsor-router-1" } as const;
+const malformedSecret = ["v1", "short"].join(".");
 
 function routerFixture() {
+  const random = new FixedRandom();
   const service = new EnrollmentService({
     clock: new FixedClock(),
-    random: new FixedRandom(),
+    random,
     store: new InMemoryEnrollmentStore(),
+    replayProtector: new AesGcmEnrollmentReplayProtector(
+      Uint8Array.from({ length: 32 }, (_value, index) => index),
+      random,
+    ),
   });
   return { service, router: createEnrollmentRouter({ service }) };
 }
@@ -133,7 +143,7 @@ describe("S-1 mountable enrollment router", () => {
       headers: { "content-type": "application/json" },
       body: JSON.stringify({
         enrollment_id: valid.enrollmentId,
-        secret: "v1.short",
+        secret: malformedSecret,
         name: "codex",
         model: "test-model",
         harness: "test-harness",
@@ -144,7 +154,7 @@ describe("S-1 mountable enrollment router", () => {
     expect(opaqueText).toContain('"code":"PAIRING_INVALID"');
     expect(opaqueText).not.toContain("MODEL_AS_NAME");
     expect(opaqueText).not.toContain("suggestions");
-    expect(opaqueText).not.toContain("v1.short");
+    expect(opaqueText).not.toContain(malformedSecret);
   });
 
   test("body-only flow routes issue a token once and minimal hello authenticates the resulting binding", async () => {

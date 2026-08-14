@@ -10,7 +10,13 @@ import {
   enrollmentCapsuleMarkdown,
   enrollmentCapsuleProjection,
 } from "./capsule.ts";
-import { EnrollmentError, type EnrollmentPrincipal, type EnrollmentService } from "./service.ts";
+import {
+  EnrollmentError,
+  EnrollmentPersistenceError,
+  type EnrollmentPrincipal,
+  EnrollmentReplayConfigurationError,
+  type EnrollmentService,
+} from "./service.ts";
 
 export interface EnrollmentRouterOptions {
   readonly service: EnrollmentService;
@@ -100,6 +106,14 @@ function enrollmentErrorResponse(error: EnrollmentError): Response {
         "This identity is not authorized for the requested enrollment action.",
         "Use the sponsor identity for a sponsor decision or a valid Fellow bearer token for hello.",
       );
+    case "IDEMPOTENCY_CONFLICT":
+      return problem(
+        409,
+        "IDEMPOTENCY_CONFLICT",
+        "Idempotency-Key does not match this request",
+        "This key was already used for a different enrollment request.",
+        "Reuse the original request body with this key or choose a new key for a new operation.",
+      );
     case "FLOW_INVALID":
     case "TOKEN_ALREADY_ISSUED":
       return problem(
@@ -120,6 +134,22 @@ function enrollmentErrorResponse(error: EnrollmentError): Response {
         "Read the fragment secret locally and submit the documented JSON body once.",
       );
   }
+}
+
+function enrollmentOperationalFailure(error: unknown): Response | undefined {
+  if (
+    !(error instanceof EnrollmentPersistenceError) &&
+    !(error instanceof EnrollmentReplayConfigurationError)
+  ) {
+    return undefined;
+  }
+  return problem(
+    503,
+    "ENROLLMENT_UNAVAILABLE",
+    "Enrollment is temporarily unavailable",
+    "The enrollment service could not complete this request safely.",
+    "Retry later with the same Idempotency-Key; do not create a second enrollment request.",
+  );
 }
 
 async function jsonBody(request: Request): Promise<unknown> {
@@ -240,6 +270,8 @@ export function createEnrollmentRouter(options: EnrollmentRouterOptions): Hono {
       const result = EnrollmentClaimResponseSchema.parse({ flow_handle: claim.flowHandle });
       return c.json(result, 202, { "cache-control": "no-store" });
     } catch (error) {
+      const operational = enrollmentOperationalFailure(error);
+      if (operational !== undefined) return operational;
       return enrollmentErrorResponse(
         error instanceof EnrollmentError ? error : new EnrollmentError("PAIRING_INVALID"),
       );
@@ -265,6 +297,8 @@ export function createEnrollmentRouter(options: EnrollmentRouterOptions): Hono {
         headers: { "content-type": "application/json; charset=utf-8", "cache-control": "no-store" },
       });
     } catch (error) {
+      const operational = enrollmentOperationalFailure(error);
+      if (operational !== undefined) return operational;
       return enrollmentErrorResponse(
         error instanceof EnrollmentError ? error : new EnrollmentError("FLOW_INVALID"),
       );

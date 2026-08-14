@@ -1,7 +1,10 @@
 import { describe, expect, test } from "bun:test";
+import type { MintEnrollmentRequest } from "@asimposium/contracts";
 
 import {
+  AesGcmEnrollmentReplayProtector,
   EnrollmentError,
+  EnrollmentReplayConfigurationError,
   EnrollmentService,
   InMemoryEnrollmentStore,
   safeEnrollmentDiagnostic,
@@ -30,14 +33,26 @@ class DeterministicRandom {
 const sponsor = { type: "sponsor", sponsorId: "sponsor-opaque-1" } as const;
 const otherSponsor = { type: "sponsor", sponsorId: "sponsor-opaque-2" } as const;
 const fellow = { type: "fellow", fellowId: "fellow-opaque-1" } as const;
+const malformedSecret = ["v1", "short"].join(".");
+const wrongSecret = `v1.${"A".repeat(43)}`;
+const nonCredentialFlowHandle = `flow_v1.${"A".repeat(43)}`;
 
 function serviceFixture() {
   const clock = new MutableClock();
   const store = new InMemoryEnrollmentStore();
+  const random = new DeterministicRandom();
   return {
     clock,
     store,
-    service: new EnrollmentService({ clock, store, random: new DeterministicRandom() }),
+    service: new EnrollmentService({
+      clock,
+      store,
+      random,
+      replayProtector: new AesGcmEnrollmentReplayProtector(
+        Uint8Array.from({ length: 32 }, (_value, index) => index),
+        random,
+      ),
+    }),
   };
 }
 
@@ -302,7 +317,7 @@ describe("S-1 enrollment state machine", () => {
     });
   });
 
-  test("regenerating invalidates an unused predecessor and idempotency never replays a credential", async () => {
+  test("regenerating invalidates an unused predecessor and mint replay returns the encrypted original", async () => {
     const { service } = serviceFixture();
     const original = await service.mint(sponsor, { requested_scopes: ["review"] });
     const replacement = await service.mint(sponsor, {
@@ -320,11 +335,14 @@ describe("S-1 enrollment state machine", () => {
       "PAIRING_INVALID",
     );
     const mintKey = "mint-idempotency-1";
-    await service.mint(sponsor, { requested_scopes: ["review"] }, { idempotencyKey: mintKey });
-    await expectEnrollmentError(
-      service.mint(sponsor, { requested_scopes: ["review"] }, { idempotencyKey: mintKey }),
-      "IDEMPOTENCY_REPLAY_UNSAFE",
+    const first = await service.mint(
+      sponsor,
+      { requested_scopes: ["review"] },
+      { idempotencyKey: mintKey },
     );
+    await expect(
+      service.mint(sponsor, { requested_scopes: ["review"] }, { idempotencyKey: mintKey }),
+    ).resolves.toEqual(first);
     await expectEnrollmentError(
       service.mint(sponsor, { requested_scopes: ["promote"] }, { idempotencyKey: mintKey }),
       "IDEMPOTENCY_CONFLICT",
@@ -332,7 +350,7 @@ describe("S-1 enrollment state machine", () => {
     expect(replacement.secret).toMatch(/^v1\./);
   });
 
-  test("current claim replay is rejected after secret consumption until encrypted replay recovery replaces this seam", async () => {
+  test("lost-response recovery replays the original claim, decision, and one-time token", async () => {
     const { service } = serviceFixture();
     const minted = await service.mint(sponsor, { requested_scopes: ["review"] });
     const claimBody = {
@@ -343,16 +361,17 @@ describe("S-1 enrollment state machine", () => {
       harness: "test-harness",
     } as const;
     const claim = await service.claim(claimBody, { idempotencyKey: "claim-idempotency-1" });
-    await expectEnrollmentError(
+    await expect(
       service.claim(claimBody, { idempotencyKey: "claim-idempotency-1" }),
-      "PAIRING_INVALID",
-    );
-    await service.decide(
-      sponsor,
-      minted.enrollmentId,
-      { decision: "approve" },
-      { idempotencyKey: "decision-idempotency-1" },
-    );
+    ).resolves.toEqual(claim);
+    await expect(
+      service.decide(
+        sponsor,
+        minted.enrollmentId,
+        { decision: "approve" },
+        { idempotencyKey: "decision-idempotency-1" },
+      ),
+    ).resolves.toBeUndefined();
     await service.decide(
       sponsor,
       minted.enrollmentId,
@@ -364,10 +383,63 @@ describe("S-1 enrollment state machine", () => {
       { idempotencyKey: "poll-idempotency-1" },
     );
     expect(issued.status).toBe("approved");
-    await expectEnrollmentError(
+    await expect(
       service.poll({ flow_handle: claim.flowHandle }, { idempotencyKey: "poll-idempotency-1" }),
-      "IDEMPOTENCY_REPLAY_UNSAFE",
-    );
+    ).resolves.toEqual(issued);
+  });
+
+  test("same-key concurrent first claim writers converge on one encrypted replay", async () => {
+    const { service } = serviceFixture();
+    const minted = await service.mint(sponsor, { requested_scopes: ["review"] });
+    const body = {
+      enrollment_id: minted.enrollmentId,
+      secret: minted.secret,
+      name: "race-replay-orchid",
+      model: "test-model",
+      harness: "test-harness",
+    } as const;
+    const results = await Promise.all([
+      service.claim(body, { idempotencyKey: "claim-race-1" }),
+      service.claim(body, { idempotencyKey: "claim-race-1" }),
+    ]);
+    expect(results[0]).toEqual(results[1]);
+  });
+
+  test("replay protection is required, stable across isolates, and decrypt failure is operational", async () => {
+    expect(() => new EnrollmentService()).toThrow(EnrollmentReplayConfigurationError);
+
+    const clock = new MutableClock();
+    const store = new InMemoryEnrollmentStore();
+    const key = Uint8Array.from({ length: 32 }, (_value, index) => index + 1);
+    const first = new EnrollmentService({
+      clock,
+      store,
+      random: new DeterministicRandom(),
+      replayProtector: new AesGcmEnrollmentReplayProtector(key),
+    });
+    const replayedBySecondIsolate = new EnrollmentService({
+      clock,
+      store,
+      random: new DeterministicRandom(),
+      replayProtector: new AesGcmEnrollmentReplayProtector(key),
+    });
+    const request: MintEnrollmentRequest = { requested_scopes: ["review"] };
+    const minted = await first.mint(sponsor, request, { idempotencyKey: "stable-key-1" });
+    await expect(
+      replayedBySecondIsolate.mint(sponsor, request, { idempotencyKey: "stable-key-1" }),
+    ).resolves.toEqual(minted);
+
+    const wrongKeyIsolate = new EnrollmentService({
+      clock,
+      store,
+      random: new DeterministicRandom(),
+      replayProtector: new AesGcmEnrollmentReplayProtector(
+        Uint8Array.from({ length: 32 }, (_value, index) => index + 2),
+      ),
+    });
+    await expect(
+      wrongKeyIsolate.mint(sponsor, request, { idempotencyKey: "stable-key-1" }),
+    ).rejects.toBeInstanceOf(EnrollmentReplayConfigurationError);
   });
 
   test("naming policy rejects model, harness, reserved, impersonating, and profane names with safe suggestions", async () => {
@@ -423,7 +495,7 @@ describe("S-1 enrollment state machine", () => {
     await expectEnrollmentError(
       service.claim({
         enrollment_id: minted.enrollmentId,
-        secret: "v1.short",
+        secret: malformedSecret,
         name: "codex",
         model: "test-model",
         harness: "test-harness",
@@ -459,7 +531,7 @@ describe("S-1 enrollment state machine", () => {
     const opaqueAttempts = [
       {
         enrollmentId: valid.enrollmentId,
-        secret: "v1.AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
+        secret: wrongSecret,
       },
       { enrollmentId: "ASIMP-EN-7F3K9M2Q8R", secret: unknown.secret },
       { enrollmentId: expired.enrollmentId, secret: expired.secret },
@@ -538,7 +610,7 @@ describe("S-1 enrollment state machine", () => {
     const { service } = serviceFixture();
     await expectEnrollmentError(
       service.poll({
-        flow_handle: "flow_v1.AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
+        flow_handle: nonCredentialFlowHandle,
         proposal_id: "not-a-poll-credential",
       } as unknown as { flow_handle: string }),
       "FLOW_INVALID",

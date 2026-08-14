@@ -7,14 +7,16 @@ import {
   type EnrollmentApprovalCard,
   type EnrollmentCapsule,
   EnrollmentError,
+  EnrollmentIdempotencyRaceError,
   type EnrollmentIdempotencyReplay,
+  type EnrollmentIdempotencyWrite,
+  EnrollmentPersistenceError,
   type EnrollmentRecord,
   type EnrollmentResourceGrants,
   type EnrollmentStore,
   enrollmentNameFailure,
   type FellowCredentialBinding,
   type IdempotencyAttempt,
-  type IdempotencyResult,
   isStrictEnrollmentScopeReduction,
   nextEnrollmentPollPacing,
   type PollAttempt,
@@ -80,6 +82,14 @@ interface IdempotencyRow {
 
 const sql = (db: D1Database, query: string, ...values: unknown[]): D1PreparedStatement =>
   db.prepare(query).bind(...values);
+
+/**
+ * How long a replay row stays claimable. Must match `IDEMPOTENCY_TTL_MS` in
+ * `service.ts`, which is what the service tells the caller: two copies of the
+ * same number in two files is how a retry window starts disagreeing with the
+ * window a client was promised. Named here rather than inlined twice below.
+ */
+const IDEMPOTENCY_RETENTION_MS = 24 * 60 * 60 * 1_000;
 
 function secretSafeEqual(left: string, right: string): boolean {
   const leftBytes = new TextEncoder().encode(left);
@@ -167,7 +177,11 @@ export class D1EnrollmentStore implements EnrollmentStore {
     this.#db = db;
   }
 
-  async create(record: EnrollmentRecord, replacesEnrollmentId?: string): Promise<boolean> {
+  async create(
+    record: EnrollmentRecord,
+    replacesEnrollmentId?: string,
+    idempotency?: EnrollmentIdempotencyWrite,
+  ): Promise<boolean> {
     const current = await sql(
       this.#db,
       "SELECT enrollment_id FROM enrollment_records WHERE enrollment_id = ?",
@@ -192,52 +206,64 @@ export class D1EnrollmentStore implements EnrollmentStore {
       );
 
     try {
-      if (replacesEnrollmentId === undefined) {
+      if (replacesEnrollmentId === undefined && idempotency === undefined) {
         await insert().run();
         return true;
       }
-      const results = await this.#db.batch([
-        sql(
-          this.#db,
-          `UPDATE enrollment_records
-             SET invalidated = 1
-           WHERE enrollment_id = ? AND sponsor_id = ?
-             AND secret_consumed_at IS NULL AND invalidated = 0`,
-          replacesEnrollmentId,
-          record.sponsorId,
-        ),
-        sql(
-          this.#db,
-          `INSERT INTO enrollment_records (
-             enrollment_id, sponsor_id, secret_hash, secret_expires_at,
-             requested_scopes_json, requested_resources_json, invalidated, created_at
-           ) SELECT ?, ?, ?, ?, ?, ?, 0, ? WHERE changes() = 1`,
-          record.enrollmentId,
-          record.sponsorId,
-          record.secretHash,
-          record.secretExpiresAt,
-          encode(record.requestedScopes),
-          encode(record.requestedResources),
-          record.createdAt,
-        ),
-      ]);
-      if (results[0]?.meta.changes === 1 && results[1]?.meta.changes === 1) return true;
+      const statements: D1PreparedStatement[] = [];
+      if (replacesEnrollmentId !== undefined) {
+        statements.push(
+          sql(
+            this.#db,
+            `UPDATE enrollment_records
+               SET invalidated = 1
+             WHERE enrollment_id = ? AND sponsor_id = ?
+               AND secret_consumed_at IS NULL AND invalidated = 0`,
+            replacesEnrollmentId,
+            record.sponsorId,
+          ),
+        );
+        statements.push(
+          sql(
+            this.#db,
+            `INSERT INTO enrollment_records (
+               enrollment_id, sponsor_id, secret_hash, secret_expires_at,
+               requested_scopes_json, requested_resources_json, invalidated, created_at
+             ) SELECT ?, ?, ?, ?, ?, ?, 0, ? WHERE changes() = 1`,
+            record.enrollmentId,
+            record.sponsorId,
+            record.secretHash,
+            record.secretExpiresAt,
+            encode(record.requestedScopes),
+            encode(record.requestedResources),
+            record.createdAt,
+          ),
+        );
+      } else {
+        statements.push(insert());
+      }
+      if (idempotency !== undefined) statements.push(this.idempotencyStatement(idempotency));
+      const results = await this.#db.batch(statements);
+      if (results.every((result) => result.meta.changes === 1)) return true;
+      await this.raceIfPresent(idempotency);
       throw new EnrollmentError("PAIRING_INVALID");
     } catch (error) {
       if (error instanceof EnrollmentError) throw error;
+      if (error instanceof EnrollmentIdempotencyRaceError) throw error;
       const raced = await sql(
         this.#db,
         "SELECT enrollment_id FROM enrollment_records WHERE enrollment_id = ?",
         record.enrollmentId,
       ).first<{ enrollment_id: string }>();
       if (raced !== null) return false;
-      throw new EnrollmentError("PAIRING_INVALID");
+      await this.raceIfPresent(idempotency);
+      throw new EnrollmentPersistenceError();
     }
   }
 
-  async claim(attempt: ClaimAttempt): Promise<void> {
+  async claim(attempt: ClaimAttempt, idempotency?: EnrollmentIdempotencyWrite): Promise<void> {
     try {
-      const results = await this.#db.batch([
+      const statements: D1PreparedStatement[] = [
         sql(
           this.#db,
           `UPDATE enrollment_records
@@ -268,10 +294,17 @@ export class D1EnrollmentStore implements EnrollmentStore {
           attempt.proposal.expiresAt,
           attempt.proposal.pollIntervalSeconds,
         ),
-      ]);
-      if (results[0]?.meta.changes === 1 && results[1]?.meta.changes === 1) return;
-    } catch {
-      // The safe classification below deliberately drops the database detail.
+      ];
+      if (idempotency !== undefined) statements.push(this.idempotencyStatement(idempotency));
+      const results = await this.#db.batch(statements);
+      if (results.every((result) => result.meta.changes === 1)) return;
+      await this.raceIfPresent(idempotency);
+    } catch (error) {
+      if (error instanceof EnrollmentError || error instanceof EnrollmentIdempotencyRaceError) {
+        throw error;
+      }
+      await this.raceIfPresent(idempotency);
+      throw new EnrollmentPersistenceError();
     }
 
     throw new EnrollmentError("PAIRING_INVALID");
@@ -282,13 +315,18 @@ export class D1EnrollmentStore implements EnrollmentStore {
     secretHash: string,
     now: number,
   ): Promise<void> {
-    const row = await sql(
-      this.#db,
-      `SELECT enrollment_id, sponsor_id, secret_hash, secret_expires_at,
-              requested_scopes_json, requested_resources_json, invalidated, secret_consumed_at
-         FROM enrollment_records WHERE enrollment_id = ?`,
-      enrollmentId,
-    ).first<RecordRow>();
+    let row: RecordRow | null;
+    try {
+      row = await sql(
+        this.#db,
+        `SELECT enrollment_id, sponsor_id, secret_hash, secret_expires_at,
+                requested_scopes_json, requested_resources_json, invalidated, secret_consumed_at
+           FROM enrollment_records WHERE enrollment_id = ?`,
+        enrollmentId,
+      ).first<RecordRow>();
+    } catch {
+      throw new EnrollmentPersistenceError();
+    }
     if (
       row === null ||
       !secretSafeEqual(row.secret_hash, secretHash) ||
@@ -300,28 +338,39 @@ export class D1EnrollmentStore implements EnrollmentStore {
     }
   }
 
-  async decision(attempt: DecisionAttempt): Promise<void> {
+  async decision(
+    attempt: DecisionAttempt,
+    idempotency?: EnrollmentIdempotencyWrite,
+  ): Promise<void> {
     const row = await this.proposalByEnrollment(attempt.enrollmentId, attempt.sponsorId);
     if (row === null) throw new EnrollmentError("WRONG_PRINCIPAL");
     if (row.status !== "pending") throw new EnrollmentError("PROPOSAL_NOT_PENDING");
     if (attempt.now >= row.expires_at) {
-      await sql(
-        this.#db,
-        "UPDATE enrollment_proposals SET status = 'expired' WHERE proposal_id = ? AND status = 'pending'",
-        row.proposal_id,
-      ).run();
       throw new EnrollmentError("PROPOSAL_EXPIRED");
     }
 
     if (attempt.decision.decision === "deny") {
-      const result = await sql(
-        this.#db,
-        `UPDATE enrollment_proposals SET status = 'denied'
-           WHERE proposal_id = ? AND status = 'pending' AND expires_at > ?`,
-        row.proposal_id,
-        attempt.now,
-      ).run();
-      if (result.meta.changes === 1) return;
+      try {
+        const statements = [
+          sql(
+            this.#db,
+            `UPDATE enrollment_proposals SET status = 'denied'
+             WHERE proposal_id = ? AND status = 'pending' AND expires_at > ?`,
+            row.proposal_id,
+            attempt.now,
+          ),
+          ...(idempotency === undefined ? [] : [this.idempotencyStatement(idempotency)]),
+        ];
+        const results = await this.#db.batch(statements);
+        if (results.every((result) => result.meta.changes === 1)) return;
+        await this.raceIfPresent(idempotency);
+      } catch (error) {
+        if (error instanceof EnrollmentError || error instanceof EnrollmentIdempotencyRaceError) {
+          throw error;
+        }
+        await this.raceIfPresent(idempotency);
+        throw new EnrollmentPersistenceError();
+      }
       throw new EnrollmentError("PROPOSAL_NOT_PENDING");
     }
 
@@ -329,7 +378,7 @@ export class D1EnrollmentStore implements EnrollmentStore {
     const { scopes, resources } = this.reducedGrant(requested, attempt.decision, attempt.now);
     const nextStatus = attempt.decision.decision === "approve" ? "approved" : "reduced";
     try {
-      const results = await this.#db.batch([
+      const statements: D1PreparedStatement[] = [
         sql(
           this.#db,
           `UPDATE enrollment_proposals
@@ -364,19 +413,18 @@ export class D1EnrollmentStore implements EnrollmentStore {
           encode(resources),
           attempt.now,
         ),
-      ]);
-      if (
-        results[0]?.meta.changes === 1 &&
-        results[1]?.meta.changes === 1 &&
-        results[2]?.meta.changes === 1
-      ) {
-        return;
-      }
+      ];
+      if (idempotency !== undefined) statements.push(this.idempotencyStatement(idempotency));
+      const results = await this.#db.batch(statements);
+      if (results.every((result) => result.meta.changes === 1)) return;
+      await this.raceIfPresent(idempotency);
       throw new EnrollmentError("PROPOSAL_NOT_PENDING");
     } catch (error) {
       if (error instanceof EnrollmentError) throw error;
+      if (error instanceof EnrollmentIdempotencyRaceError) throw error;
       if (isUniqueNameFailure(error)) throw new EnrollmentError("NAME_TAKEN");
-      throw new EnrollmentError("PROPOSAL_NOT_PENDING");
+      await this.raceIfPresent(idempotency);
+      throw new EnrollmentPersistenceError();
     }
   }
 
@@ -458,12 +506,26 @@ export class D1EnrollmentStore implements EnrollmentStore {
       const row = await this.proposalByFlow(attempt.flowHandleHash);
       if (row === null) throw new EnrollmentError("FLOW_INVALID");
       if (row.status === "pending" && attempt.now >= row.expires_at) {
-        await sql(
-          this.#db,
-          "UPDATE enrollment_proposals SET status = 'expired' WHERE proposal_id = ? AND status = 'pending'",
-          row.proposal_id,
-        ).run();
-        return { kind: "expired" };
+        const decision: PollDecision = { kind: "expired" };
+        const idempotency = await attempt.replayFor?.(decision);
+        try {
+          const statements = [
+            sql(
+              this.#db,
+              "UPDATE enrollment_proposals SET status = 'expired' WHERE proposal_id = ? AND status = 'pending'",
+              row.proposal_id,
+            ),
+            ...(idempotency === undefined ? [] : [this.idempotencyStatement(idempotency)]),
+          ];
+          const results = await this.#db.batch(statements);
+          if (results.every((result) => result.meta.changes === 1)) return decision;
+          await this.raceIfPresent(idempotency);
+          continue;
+        } catch (error) {
+          if (error instanceof EnrollmentIdempotencyRaceError) throw error;
+          await this.raceIfPresent(idempotency);
+          throw new EnrollmentPersistenceError();
+        }
       }
       if (row.status === "pending") {
         const pacing = nextEnrollmentPollPacing({
@@ -471,30 +533,59 @@ export class D1EnrollmentStore implements EnrollmentStore {
           pollIntervalSeconds: row.poll_interval_seconds,
           now: attempt.now,
         });
-        const changed = await sql(
-          this.#db,
-          `UPDATE enrollment_proposals
-             SET poll_interval_seconds = ?, last_poll_at = ?
-           WHERE proposal_id = ? AND status = 'pending'
-             AND ((last_poll_at IS NULL AND ? IS NULL) OR last_poll_at = ?)`,
-          pacing.retryAfterSeconds,
-          attempt.now,
-          row.proposal_id,
-          row.last_poll_at,
-          row.last_poll_at,
-        ).run();
-        if (changed.meta.changes !== 1) continue;
-        return pacing.kind === "slow-down"
-          ? { kind: "slow-down", retryAfterSeconds: pacing.retryAfterSeconds }
-          : { kind: "pending", retryAfterSeconds: pacing.retryAfterSeconds };
+        const decision: PollDecision =
+          pacing.kind === "slow-down"
+            ? { kind: "slow-down", retryAfterSeconds: pacing.retryAfterSeconds }
+            : { kind: "pending", retryAfterSeconds: pacing.retryAfterSeconds };
+        const idempotency = await attempt.replayFor?.(decision);
+        try {
+          const statements = [
+            sql(
+              this.#db,
+              `UPDATE enrollment_proposals
+                 SET poll_interval_seconds = ?, last_poll_at = ?
+               WHERE proposal_id = ? AND status = 'pending'
+                 AND ((last_poll_at IS NULL AND ? IS NULL) OR last_poll_at = ?)`,
+              pacing.retryAfterSeconds,
+              attempt.now,
+              row.proposal_id,
+              row.last_poll_at,
+              row.last_poll_at,
+            ),
+            ...(idempotency === undefined ? [] : [this.idempotencyStatement(idempotency)]),
+          ];
+          const results = await this.#db.batch(statements);
+          if (results.every((result) => result.meta.changes === 1)) return decision;
+          await this.raceIfPresent(idempotency);
+          continue;
+        } catch (error) {
+          if (error instanceof EnrollmentIdempotencyRaceError) throw error;
+          await this.raceIfPresent(idempotency);
+          throw new EnrollmentPersistenceError();
+        }
       }
-      if (row.status === "denied") return { kind: "denied" };
-      if (row.status === "expired") return { kind: "expired" };
+      if (row.status === "denied" || row.status === "expired") {
+        const decision: PollDecision = { kind: row.status === "denied" ? "denied" : "expired" };
+        const idempotency = await attempt.replayFor?.(decision);
+        if (idempotency === undefined) return decision;
+        try {
+          const [result] = await this.#db.batch([this.standaloneIdempotencyStatement(idempotency)]);
+          if (result?.meta.changes === 1) return decision;
+          await this.raceIfPresent(idempotency);
+          throw new EnrollmentPersistenceError();
+        } catch (error) {
+          if (error instanceof EnrollmentIdempotencyRaceError) throw error;
+          await this.raceIfPresent(idempotency);
+          throw new EnrollmentPersistenceError();
+        }
+      }
       if (row.token_hash !== null) return { kind: "already-issued" };
 
       const issued = await attempt.createToken();
+      const decision: PollDecision = { kind: "issued", token: issued.token };
+      const idempotency = await attempt.replayFor?.(decision);
       try {
-        const results = await this.#db.batch([
+        const statements: D1PreparedStatement[] = [
           sql(
             this.#db,
             `UPDATE enrollment_proposals
@@ -519,12 +610,15 @@ export class D1EnrollmentStore implements EnrollmentStore {
             attempt.now,
             row.proposal_id,
           ),
-        ]);
-        if (results[0]?.meta.changes === 1 && results[1]?.meta.changes === 1) {
-          return { kind: "issued", token: issued.token };
-        }
-      } catch {
-        // A winner may have committed first; re-read below without disclosing SQL detail.
+        ];
+        if (idempotency !== undefined) statements.push(this.idempotencyStatement(idempotency));
+        const results = await this.#db.batch(statements);
+        if (results.every((result) => result.meta.changes === 1)) return decision;
+        await this.raceIfPresent(idempotency);
+      } catch (error) {
+        if (error instanceof EnrollmentIdempotencyRaceError) throw error;
+        await this.raceIfPresent(idempotency);
+        throw new EnrollmentPersistenceError();
       }
     }
     const final = await this.proposalByFlow(attempt.flowHandleHash);
@@ -581,71 +675,24 @@ export class D1EnrollmentStore implements EnrollmentStore {
     };
   }
 
-  async beginIdempotency(attempt: IdempotencyAttempt): Promise<IdempotencyResult> {
-    const existing = await sql(
-      this.#db,
-      `SELECT request_digest, response_ciphertext, response_initialization_vector, expires_at
-         FROM enrollment_idempotency
-        WHERE scope = ? AND principal_scope = ? AND idempotency_key = ?`,
-      attempt.scope,
-      attempt.principalScope,
-      attempt.key,
-    ).first<IdempotencyRow>();
-    if (existing !== null && attempt.now < existing.expires_at) {
-      return secretSafeEqual(existing.request_digest, attempt.digest) ? "replay" : "conflict";
-    }
-    if (existing !== null) {
-      const refreshed = await sql(
+  async idempotencyReplay(
+    attempt: IdempotencyAttempt,
+  ): Promise<EnrollmentIdempotencyReplay | undefined> {
+    let row: IdempotencyRow | null;
+    try {
+      row = await sql(
         this.#db,
-        `UPDATE enrollment_idempotency
-            SET request_digest = ?, response_ciphertext = ?, response_initialization_vector = ?, expires_at = ?
-          WHERE scope = ? AND principal_scope = ? AND idempotency_key = ? AND expires_at <= ?`,
-        attempt.digest,
-        "",
-        "",
-        attempt.now + 24 * 60 * 60 * 1_000,
+        `SELECT request_digest, response_ciphertext, response_initialization_vector, expires_at
+           FROM enrollment_idempotency
+          WHERE scope = ? AND principal_scope = ? AND idempotency_key = ? AND expires_at > ?`,
         attempt.scope,
         attempt.principalScope,
         attempt.key,
         attempt.now,
-      ).run();
-      if (refreshed.meta.changes === 1) return "new";
-      return "conflict";
-    }
-    try {
-      await sql(
-        this.#db,
-        `INSERT INTO enrollment_idempotency (
-           scope, principal_scope, idempotency_key, request_digest,
-           response_ciphertext, response_initialization_vector, expires_at
-         ) VALUES (?, ?, ?, ?, ?, ?, ?)`,
-        attempt.scope,
-        attempt.principalScope,
-        attempt.key,
-        attempt.digest,
-        "",
-        "",
-        attempt.now + 24 * 60 * 60 * 1_000,
-      ).run();
-      return "new";
+      ).first<IdempotencyRow>();
     } catch {
-      return "conflict";
+      throw new EnrollmentPersistenceError();
     }
-  }
-
-  async idempotencyReplay(
-    attempt: IdempotencyAttempt,
-  ): Promise<EnrollmentIdempotencyReplay | undefined> {
-    const row = await sql(
-      this.#db,
-      `SELECT request_digest, response_ciphertext, response_initialization_vector, expires_at
-         FROM enrollment_idempotency
-        WHERE scope = ? AND principal_scope = ? AND idempotency_key = ? AND expires_at > ?`,
-      attempt.scope,
-      attempt.principalScope,
-      attempt.key,
-      attempt.now,
-    ).first<IdempotencyRow>();
     if (row === null) return undefined;
     if (!secretSafeEqual(row.request_digest, attempt.digest)) {
       throw new EnrollmentError("IDEMPOTENCY_CONFLICT");
@@ -657,6 +704,100 @@ export class D1EnrollmentStore implements EnrollmentStore {
         initializationVector: row.response_initialization_vector,
       },
     };
+  }
+
+  /**
+   * The replay row, appended after the product effect in the same D1 batch.
+   *
+   * Three mechanisms are doing distinct jobs here, and each one is load-bearing:
+   *
+   * 1. `SELECT … WHERE changes() = 1` — the row is written only if the statement
+   *    immediately before it in the batch modified exactly one row. A conditional
+   *    effect that matched nothing therefore writes no replay row, so a no-op
+   *    cannot masquerade as a completed operation. The caller additionally
+   *    refuses to report success unless *every* statement changed one row.
+   *
+   * 2. `request_digest = CASE … ELSE NULL` — **the abort.** On a conflict with a
+   *    still-live key, this assigns NULL to a NOT NULL column
+   *    (`db/migrations/0002_enrollment_g0.sql`), which fails the statement and
+   *    rolls the whole batch back, product effect included. That is deliberate:
+   *    it refuses a concurrent second writer under one key *atomically*, with no
+   *    window between a read and a write for a racing isolate to slip through.
+   *    A read-then-write conflict check would reintroduce exactly that window,
+   *    so this must not be "simplified" into one.
+   *
+   * 3. An expired row is reclaimable: the CASE takes the `excluded` digest and
+   *    the row is overwritten by the new completed operation.
+   *
+   * `DO UPDATE` is deliberately unconditional. An earlier revision carried a
+   * `WHERE expires_at <= ?a OR expires_at > ?b` bound with the same timestamp
+   * twice — a tautology that read like a guard while filtering nothing, and hid
+   * the fact that mechanism 2 is the only gate. The guard now lives in the CASE
+   * alone, where it can be read.
+   */
+  private idempotencyStatement(write: EnrollmentIdempotencyWrite): D1PreparedStatement {
+    return sql(
+      this.#db,
+      `INSERT INTO enrollment_idempotency (
+         scope, principal_scope, idempotency_key, request_digest,
+         response_ciphertext, response_initialization_vector, expires_at
+       ) SELECT ?, ?, ?, ?, ?, ?, ? WHERE changes() = 1
+       ON CONFLICT(scope, principal_scope, idempotency_key) DO UPDATE SET
+         request_digest = CASE
+           WHEN enrollment_idempotency.expires_at <= ? THEN excluded.request_digest
+           ELSE NULL
+         END,
+         response_ciphertext = excluded.response_ciphertext,
+         response_initialization_vector = excluded.response_initialization_vector,
+         expires_at = excluded.expires_at`,
+      write.scope,
+      write.principalScope,
+      write.key,
+      write.digest,
+      write.encryptedResponse.ciphertext,
+      write.encryptedResponse.initializationVector,
+      write.now + IDEMPOTENCY_RETENTION_MS,
+      write.now,
+    );
+  }
+
+  /**
+   * The same row for an observation that has no product effect to bind to — a
+   * poll that finds an already-denied or already-expired proposal. There is no
+   * preceding statement, so there is no `changes()` guard; the live-key abort of
+   * mechanism 2 above is identical and equally load-bearing.
+   */
+  private standaloneIdempotencyStatement(write: EnrollmentIdempotencyWrite): D1PreparedStatement {
+    return sql(
+      this.#db,
+      `INSERT INTO enrollment_idempotency (
+         scope, principal_scope, idempotency_key, request_digest,
+         response_ciphertext, response_initialization_vector, expires_at
+       ) VALUES (?, ?, ?, ?, ?, ?, ?)
+       ON CONFLICT(scope, principal_scope, idempotency_key) DO UPDATE SET
+         request_digest = CASE
+           WHEN enrollment_idempotency.expires_at <= ? THEN excluded.request_digest
+           ELSE NULL
+         END,
+         response_ciphertext = excluded.response_ciphertext,
+         response_initialization_vector = excluded.response_initialization_vector,
+         expires_at = excluded.expires_at`,
+      write.scope,
+      write.principalScope,
+      write.key,
+      write.digest,
+      write.encryptedResponse.ciphertext,
+      write.encryptedResponse.initializationVector,
+      write.now + IDEMPOTENCY_RETENTION_MS,
+      write.now,
+    );
+  }
+
+  /** A completed concurrent write is retried by the service through ciphertext. */
+  private async raceIfPresent(write: EnrollmentIdempotencyWrite | undefined): Promise<void> {
+    if (write === undefined) return;
+    const replay = await this.idempotencyReplay(write);
+    if (replay !== undefined) throw new EnrollmentIdempotencyRaceError();
   }
 
   private async proposalByEnrollment(
