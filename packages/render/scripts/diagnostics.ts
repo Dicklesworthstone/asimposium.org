@@ -62,7 +62,10 @@ function sensitiveEnvValues(env: Record<string, string | undefined>): readonly s
  * Called before every emit; a failure is a defect in the caller, not a warning.
  */
 export function assertSecretSafe(
-  record: SuiteDiagnostic,
+  // `object` rather than `SuiteDiagnostic`: the scan is structural, and the S-5 spike
+  // (asimposiumorg-6jo) emits a wider record. One scanner beats a second copy of these
+  // patterns drifting out of step with this one.
+  record: object,
   env: Record<string, string | undefined> = process.env,
 ): void {
   const secrets = sensitiveEnvValues(env);
