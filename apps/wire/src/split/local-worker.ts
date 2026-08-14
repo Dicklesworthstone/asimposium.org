@@ -31,6 +31,7 @@ import {
   type ContextualScreeningProvider,
   type ContextualScreeningResult,
   type DirectContentScreeningVerdict,
+  MAX_CONTEXTUAL_PROMOTION_BYTES,
   MAX_CONTEXTUAL_PROMOTIONS,
   type PolicyCategory,
   screenContextuallyWithProvider,
@@ -113,6 +114,13 @@ const LOCAL_S4_CURRENT_PIECE_MARKER = "S4-PIECE-B-FIXTURE";
 const LOCAL_S4_PROVIDER_EXCEPTION_MARKER = "S4-PROVIDER-EXCEPTION-FIXTURE";
 const LOCAL_S4_PROVIDER_EXCEPTION_MESSAGE_CANARY = "S4-PROVIDER-EXCEPTION-MESSAGE-CANARY";
 const LOCAL_S4_PROVIDER_EXCEPTION_STACK_CANARY = "S4-PROVIDER-EXCEPTION-STACK-CANARY";
+const LOCAL_S4_CONTEXT_DEPENDENCY_FAILURE_MARKER = "S4-CONTEXT-DEPENDENCY-FAILURE-FIXTURE";
+const LOCAL_S4_CONTEXT_DEPENDENCY_MESSAGE_CANARY = "S4-CONTEXT-DEPENDENCY-MESSAGE-CANARY";
+const LOCAL_S4_CONTEXT_DEPENDENCY_STACK_CANARY = "S4-CONTEXT-DEPENDENCY-STACK-CANARY";
+const LOCAL_S4_FRONTIER_SEED_MARKER = "S4-FRONTIER-SEED-FIXTURE";
+const LOCAL_S4_FRONTIER_LOSER_MARKER = "S4-FRONTIER-LOSER-FIXTURE";
+const LOCAL_S4_CROSS_FELLOW_SEED_MARKER = "S4-CROSS-FELLOW-SEED-FIXTURE";
+const LOCAL_S4_CROSS_FELLOW_CURRENT_MARKER = "S4-CROSS-FELLOW-CURRENT-FIXTURE";
 const LOCAL_S4_REVALIDATION_ATTEMPTS = 2;
 const ID_PATTERN = /^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$/u;
 const TEST_D1_BIND_FAULT_HEADER = "x-asimp-local-test-fault";
@@ -120,12 +128,15 @@ const TEST_D1_BIND_FAULT = "d1-bind-reject";
 const TEST_D1_BIND_FAULT_AUTHORITY_HEADER = "x-asimp-local-test-fault-authority";
 const TEST_PUBLIC_ROW_POISON_HEADER = "x-asimp-local-shape-poison";
 const TEST_ROUTE_BINDING_POISON_HEADER = "x-asimp-local-route-binding-poison";
+const TEST_S4_FELLOW_AUTHORITY_HEADER = "x-asimp-local-s4-fellow-authority";
+const TEST_S4_FELLOW_ID_HEADER = "x-asimp-local-s4-fellow-id";
 const LOCAL_HARNESS_AUTHORITY_HEADERS = [
   "x-asimp-local-sponsor",
   "x-asimp-local-recovery-audit",
   TEST_D1_BIND_FAULT_AUTHORITY_HEADER,
   TEST_PUBLIC_ROW_POISON_HEADER,
   TEST_ROUTE_BINDING_POISON_HEADER,
+  TEST_S4_FELLOW_AUTHORITY_HEADER,
 ] as const;
 // biome-ignore lint/suspicious/noControlCharactersInRegex: C0 must be escaped before internal math tokens exist.
 const LOCAL_C0_CONTROL = /[\u0000-\u001F\u007F]/gu;
@@ -466,6 +477,88 @@ function candidateIncludes(candidate: ContextualPromotionCandidate, marker: stri
   ].some((field) => field.includes(marker));
 }
 
+interface LocalS4FrontierGate {
+  readonly loser_read: Promise<void>;
+  readonly seed_committed: Promise<void>;
+  signalLoserRead(): void;
+  signalSeedCommitted(): void;
+  nextLoserCall(): number;
+}
+
+function localS4FrontierGate(): LocalS4FrontierGate {
+  let resolveLoserRead: (() => void) | undefined;
+  let resolveSeedCommitted: (() => void) | undefined;
+  let loserCalls = 0;
+  const loserRead = new Promise<void>((resolve) => {
+    resolveLoserRead = resolve;
+  });
+  const seedCommitted = new Promise<void>((resolve) => {
+    resolveSeedCommitted = resolve;
+  });
+  return {
+    loser_read: loserRead,
+    seed_committed: seedCommitted,
+    signalLoserRead() {
+      resolveLoserRead?.();
+      resolveLoserRead = undefined;
+    },
+    signalSeedCommitted() {
+      resolveSeedCommitted?.();
+      resolveSeedCommitted = undefined;
+    },
+    nextLoserCall() {
+      loserCalls += 1;
+      return loserCalls;
+    },
+  };
+}
+
+const LOCAL_S4_SAME_FELLOW_FRONTIER_GATE = localS4FrontierGate();
+const LOCAL_S4_CROSS_FELLOW_FRONTIER_GATE = localS4FrontierGate();
+
+async function waitForLocalS4Fixture(signal: AbortSignal, pending: Promise<void>): Promise<void> {
+  await new Promise<void>((resolve, reject) => {
+    const abort = () => {
+      const error = new Error("local S4 fixture aborted");
+      error.name = "AbortError";
+      reject(error);
+    };
+    if (signal.aborted) {
+      abort();
+      return;
+    }
+    signal.addEventListener("abort", abort, { once: true });
+    void pending.then(
+      () => {
+        signal.removeEventListener("abort", abort);
+        resolve();
+      },
+      (error: unknown) => {
+        signal.removeEventListener("abort", abort);
+        reject(error);
+      },
+    );
+  });
+}
+
+function localS4FixtureTimeoutMs(candidate: ContextualPromotionCandidate): number {
+  return candidateIncludes(candidate, LOCAL_S4_FRONTIER_SEED_MARKER) ||
+      candidateIncludes(candidate, LOCAL_S4_FRONTIER_LOSER_MARKER) ||
+      candidateIncludes(candidate, LOCAL_S4_CROSS_FELLOW_SEED_MARKER) ||
+      candidateIncludes(candidate, LOCAL_S4_CROSS_FELLOW_CURRENT_MARKER)
+    ? 500
+    : 25;
+}
+
+function signalLocalS4FixtureCommit(candidate: ContextualPromotionCandidate): void {
+  if (candidateIncludes(candidate, LOCAL_S4_FRONTIER_SEED_MARKER)) {
+    LOCAL_S4_SAME_FELLOW_FRONTIER_GATE.signalSeedCommitted();
+  }
+  if (candidateIncludes(candidate, LOCAL_S4_CROSS_FELLOW_SEED_MARKER)) {
+    LOCAL_S4_CROSS_FELLOW_FRONTIER_GATE.signalSeedCommitted();
+  }
+}
+
 function localDirectContentVerdict(
   candidate: ContextualPromotionCandidate,
 ): DirectContentScreeningVerdict {
@@ -495,11 +588,41 @@ const LOCAL_S4_CONTEXTUAL_PROVIDER: ContextualScreeningProvider = {
       error.stack = LOCAL_S4_PROVIDER_EXCEPTION_STACK_CANARY;
       throw error;
     }
+    if (candidateIncludes(input.current_promotion, LOCAL_S4_FRONTIER_SEED_MARKER)) {
+      await waitForLocalS4Fixture(signal, LOCAL_S4_SAME_FELLOW_FRONTIER_GATE.loser_read);
+      return { decision: "pass", coarse_category: "benign-context" };
+    }
+    if (candidateIncludes(input.current_promotion, LOCAL_S4_FRONTIER_LOSER_MARKER)) {
+      const call = LOCAL_S4_SAME_FELLOW_FRONTIER_GATE.nextLoserCall();
+      if (call === 1) {
+        LOCAL_S4_SAME_FELLOW_FRONTIER_GATE.signalLoserRead();
+        await waitForLocalS4Fixture(signal, LOCAL_S4_SAME_FELLOW_FRONTIER_GATE.seed_committed);
+        return { decision: "pass", coarse_category: "benign-context" };
+      }
+    }
+    if (candidateIncludes(input.current_promotion, LOCAL_S4_CROSS_FELLOW_SEED_MARKER)) {
+      await waitForLocalS4Fixture(signal, LOCAL_S4_CROSS_FELLOW_FRONTIER_GATE.loser_read);
+      return { decision: "pass", coarse_category: "benign-context" };
+    }
+    if (candidateIncludes(input.current_promotion, LOCAL_S4_CROSS_FELLOW_CURRENT_MARKER)) {
+      const call = LOCAL_S4_CROSS_FELLOW_FRONTIER_GATE.nextLoserCall();
+      if (call === 1) {
+        LOCAL_S4_CROSS_FELLOW_FRONTIER_GATE.signalLoserRead();
+        await waitForLocalS4Fixture(signal, LOCAL_S4_CROSS_FELLOW_FRONTIER_GATE.seed_committed);
+        return { decision: "pass", coarse_category: "benign-context" };
+      }
+      // The cross-Fellow control becomes a hold only if the Worker invoked the
+      // provider a second time. A successful promotion therefore proves that
+      // an unrelated Fellow's append did not spuriously invalidate its scope.
+      return { decision: "quarantine", coarse_category: "dual-use-boundary" };
+    }
     const historyContainsPiece = input.recent_same_fellow_promotions.some((promotion) =>
-      candidateIncludes(promotion, LOCAL_S4_HISTORY_PIECE_MARKER),
+      candidateIncludes(promotion, LOCAL_S4_HISTORY_PIECE_MARKER) ||
+      candidateIncludes(promotion, LOCAL_S4_FRONTIER_SEED_MARKER),
     );
     return historyContainsPiece &&
-      candidateIncludes(input.current_promotion, LOCAL_S4_CURRENT_PIECE_MARKER)
+      (candidateIncludes(input.current_promotion, LOCAL_S4_CURRENT_PIECE_MARKER) ||
+        candidateIncludes(input.current_promotion, LOCAL_S4_FRONTIER_LOSER_MARKER))
       ? { decision: "quarantine", coarse_category: "dual-use-boundary" }
       : { decision: "pass", coarse_category: "benign-context" };
   },
@@ -603,6 +726,15 @@ async function loadSameScopeContext(
   readonly frontier_public_seq: number;
   readonly frontier_digest: string;
 }> {
+  // This deterministic local fixture lets the harness prove that a dependency
+  // failure is converted into the same coarse private hold as every other
+  // context-assembly failure. It deliberately carries distinct message and
+  // stack canaries; neither is allowed past the screening boundary.
+  if (candidateIncludes(currentPromotion, LOCAL_S4_CONTEXT_DEPENDENCY_FAILURE_MARKER)) {
+    const error = new Error(LOCAL_S4_CONTEXT_DEPENDENCY_MESSAGE_CANARY);
+    error.stack = LOCAL_S4_CONTEXT_DEPENDENCY_STACK_CANARY;
+    throw error;
+  }
   const [problemStatement, history] = await Promise.all([
     ensureLocalProblemStatement(env, workshop.problem_id),
     env.DB.prepare(
@@ -639,6 +771,18 @@ async function loadSameScopeContext(
       ) {
         throw new ContextualScreeningInputError(
           "local public history artifact binding is unavailable.",
+        );
+      }
+      // R2 reports object size as metadata. Refuse an oversized historical
+      // object before materializing bytes so context bounds do not depend on
+      // loading an unbounded public artifact into Worker memory.
+      if (
+        !Number.isSafeInteger(artifact.size) ||
+        artifact.size < 0 ||
+        artifact.size > MAX_CONTEXTUAL_PROMOTION_BYTES
+      ) {
+        throw new ContextualScreeningInputError(
+          "local public history artifact exceeds the contextual byte budget.",
         );
       }
       const publicArtifactMd = await artifact.text();
@@ -840,6 +984,14 @@ function localSponsorId(env: LocalSplitEnv): string {
   return `local-sponsor-${env.S3_RUN_TOKEN ?? "missing"}`;
 }
 
+function localWorkshopFellowId(request: Request, env: LocalSplitEnv): string {
+  if (!hasLocalHarnessAuthority(request, env, TEST_S4_FELLOW_AUTHORITY_HEADER)) {
+    return LOCAL_FELLOW_ID;
+  }
+  const requested = request.headers.get(TEST_S4_FELLOW_ID_HEADER);
+  return requested !== null && validId(requested) ? requested : LOCAL_FELLOW_ID;
+}
+
 function hasLocalHarnessAuthority(
   request: Request,
   env: LocalSplitEnv,
@@ -949,6 +1101,7 @@ async function pushWorkshop(request: Request, env: LocalSplitEnv): Promise<Respo
   if (new TextEncoder().encode(bodyMd).byteLength <= PRIVATE_BODY_THRESHOLD_BYTES) {
     return json({ code: "LOCAL_PRIVATE_SPILL_REQUIRED" }, 400);
   }
+  const fellowId = localWorkshopFellowId(request, env);
 
   const digest = await sha256Hex(bodyMd);
   const bodyKey = stagedPrivateKey(digest);
@@ -968,24 +1121,24 @@ async function pushWorkshop(request: Request, env: LocalSplitEnv): Promise<Respo
       `INSERT INTO s3_local_fellow_workshop_ids (fellow_id, workshop_id_seq)
        VALUES (?1, 0)
        ON CONFLICT(fellow_id) DO NOTHING`,
-    ).bind(LOCAL_FELLOW_ID),
+    ).bind(fellowId),
     env.DB.prepare(
       `UPDATE s3_local_fellow_workshop_ids
        SET workshop_id_seq = workshop_id_seq + 1
        WHERE fellow_id = ?1
        RETURNING workshop_id_seq`,
-    ).bind(LOCAL_FELLOW_ID),
+    ).bind(fellowId),
     env.DB.prepare(
       `INSERT INTO s3_local_workshop_cursors (problem_id, fellow_id, workshop_seq)
        VALUES (?1, ?2, 0)
        ON CONFLICT(problem_id, fellow_id) DO NOTHING`,
-    ).bind(problemId, LOCAL_FELLOW_ID),
+    ).bind(problemId, fellowId),
     env.DB.prepare(
       `UPDATE s3_local_workshop_cursors
        SET workshop_seq = workshop_seq + 1
        WHERE problem_id = ?1 AND fellow_id = ?2
        RETURNING workshop_seq`,
-    ).bind(problemId, LOCAL_FELLOW_ID),
+    ).bind(problemId, fellowId),
     env.DB.prepare(
       `INSERT INTO s3_local_workshops
           (id, problem_id, fellow_id, sponsor_id, session_id, workshop_seq, body_key, body_digest)
@@ -994,7 +1147,7 @@ async function pushWorkshop(request: Request, env: LocalSplitEnv): Promise<Respo
        FROM s3_local_fellow_workshop_ids AS ids
        JOIN s3_local_workshop_cursors AS cursor ON cursor.fellow_id = ids.fellow_id
        WHERE ids.fellow_id = ?2 AND cursor.problem_id = ?1`,
-    ).bind(problemId, LOCAL_FELLOW_ID, localSponsorId(env), LOCAL_SESSION_ID, bodyKey, digest),
+    ).bind(problemId, fellowId, localSponsorId(env), LOCAL_SESSION_ID, bodyKey, digest),
   ];
   if (d1FaultRequested(request, env)) {
     // Deliberately trip D1's real primary-key constraint after R2 PUT. D1's
@@ -1003,7 +1156,7 @@ async function pushWorkshop(request: Request, env: LocalSplitEnv): Promise<Respo
     statements.push(
       env.DB.prepare(
         `INSERT INTO s3_local_fellow_workshop_ids (fellow_id, workshop_id_seq) VALUES (?1, 0)`,
-      ).bind(LOCAL_FELLOW_ID),
+      ).bind(fellowId),
     );
   }
 
@@ -1017,7 +1170,7 @@ async function pushWorkshop(request: Request, env: LocalSplitEnv): Promise<Respo
     return json(
       {
         status: 201,
-        workshop_id: `W-${LOCAL_FELLOW_ID}-${workshopIdSeq}`,
+        workshop_id: `W-${fellowId}-${workshopIdSeq}`,
         workshop_seq: workshopSeq,
         spilled_to_private_r2: true,
       },
@@ -1182,12 +1335,15 @@ async function promoteWorkshop(request: Request, env: LocalSplitEnv): Promise<Re
     try {
       context = await loadSameScopeContext(env, workshop, currentPromotion);
       result = await screenContextuallyWithProvider(LOCAL_S4_CONTEXTUAL_PROVIDER, context.input, {
-        timeout_ms: 25,
+        timeout_ms: localS4FixtureTimeoutMs(currentPromotion),
         identity,
         direct_content: directContent,
       });
-    } catch (error) {
-      if (!(error instanceof ContextualScreeningInputError)) throw error;
+    } catch {
+      // D1/R2/context-provider dependency failures must never escape to the
+      // route boundary (whose generic error would be indistinguishable from a
+      // product failure) or serialize an exception. The safe hold records only
+      // a digest, bounded versions, and coarse state.
       const safeInputDigest = `sha256:${await sha256Hex(
         `local-s4-context-assembly:${requestDigest}`,
       )}`;
@@ -1316,6 +1472,7 @@ async function promoteWorkshop(request: Request, env: LocalSplitEnv): Promise<Re
         changesFrom(results[3]) === 1 &&
         changesFrom(results[4]) === 1
       ) {
+        signalLocalS4FixtureCommit(currentPromotion);
         return json(
           {
             status: 201,
