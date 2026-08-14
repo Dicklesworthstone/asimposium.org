@@ -277,6 +277,29 @@ describe("S-4 frozen corpus", () => {
       expect(writes).toEqual([]);
     }
   });
+
+  test("PLANTED NEGATIVE: scalar and array staging JSON is invalid, fails 1, and never leaks a response body", async () => {
+    const corpus = await createS4Corpus();
+    const canary = "staging-response-body-canary";
+    for (const response of [null, [canary], canary, 42, false] as const) {
+      const writes: string[] = [];
+      let failure: unknown;
+      try {
+        await runLiveScreening({
+          corpus,
+          screening_url: new URL("https://screening.example.test/v1/s4"),
+          bearer: "test-bearer-token-with-sufficient-length",
+          fetch_live_json: async () => response,
+          write: (line) => writes.push(line),
+        });
+      } catch (error) {
+        failure = error;
+      }
+      expect(failure).toMatchObject({ code: "WORKERS_AI_STAGING_INVALID_RESPONSE", exit_code: 1 });
+      expect(String(failure)).not.toContain(canary);
+      expect(writes).toEqual([]);
+    }
+  });
 });
 
 describe("S-4 live-response bounds", () => {

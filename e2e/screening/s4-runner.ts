@@ -55,6 +55,11 @@ interface StagingScreeningResponse {
   readonly observations: readonly ScreeningObservation[];
 }
 
+/** JSON can parse scalars; staging attestation responses cannot be one. */
+function isStagingScreeningResponseObject(value: unknown): value is StagingScreeningResponse {
+  return value !== null && typeof value === "object" && !Array.isArray(value);
+}
+
 export class BoundedLiveJsonError extends Error {
   constructor(
     readonly code:
@@ -356,9 +361,9 @@ export async function runLiveScreening(options: LiveScreeningOptions = {}): Prom
   const fetchLiveJson = options.fetch_live_json ?? fetchBoundedLiveJson;
   const write = options.write ?? ((line: string) => process.stdout.write(line));
   const corpusIdentity = await deriveS4EvaluatedCorpusIdentity(submitted);
-  let screening: StagingScreeningResponse;
+  let response: unknown;
   try {
-    screening = (await fetchLiveJson(screeningUrl, {
+    response = await fetchLiveJson(screeningUrl, {
       method: "POST",
       headers: { authorization: `Bearer ${bearer}`, "content-type": "application/json" },
       // Staging owns protected bodies. This request carries safe inline bodies
@@ -372,7 +377,7 @@ export async function runLiveScreening(options: LiveScreeningOptions = {}): Prom
         partial_run: partial,
         examples: submitted,
       }),
-    })) as StagingScreeningResponse;
+    });
   } catch (error) {
     if (
       error instanceof BoundedLiveJsonError &&
@@ -383,6 +388,10 @@ export async function runLiveScreening(options: LiveScreeningOptions = {}): Prom
     }
     throw new RunnerFailure("WORKERS_AI_STAGING_UNAVAILABLE", 78);
   }
+  if (!isStagingScreeningResponseObject(response)) {
+    throw new RunnerFailure("WORKERS_AI_STAGING_INVALID_RESPONSE", 1);
+  }
+  const screening = response;
   if (
     screening.corpus_revision !== S4_CORPUS_REVISION ||
     screening.corpus_digest !== corpusIdentity.corpus_digest
