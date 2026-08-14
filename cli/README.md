@@ -13,9 +13,12 @@ validation, token storage, network requests, or release distribution.
 ```bash
 cd cli
 cargo fmt --check
-cargo check
-cargo test
+cargo check --locked
+cargo clippy --locked -- -D warnings
+cargo test --locked
 ```
 
-The test suite exercises the compiled binary's help/version output and its
+The pinned toolchain installs Clippy, and the denied-warning Clippy gate is
+required alongside format, check, and test. The test suite exercises the
+compiled binary's help/version output, empty-invocation help failure, and
 unknown-command failure path.

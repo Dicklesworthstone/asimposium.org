@@ -6,7 +6,7 @@ resolver = "3"
 name = "asimp"
 version = "0.1.0"
 edition = "2024"
-rust-version = "1.85"
+rust-version = "1.93.1"
 description = "Optional ASImposium command-line companion; curl remains sufficient."
 
 [dependencies]

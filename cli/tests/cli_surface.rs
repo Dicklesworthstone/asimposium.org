@@ -67,6 +67,22 @@ fn help_surface_names_asimp_and_curl_boundary() {
 }
 
 #[test]
+fn empty_invocation_exits_two_with_clap_help_on_stderr() {
+    let invocation = invoke(&[]);
+    let context = diagnostic(
+        "cli_surface::empty_invocation_exits_two_with_clap_help_on_stderr",
+        &invocation,
+        "cargo test --test cli_surface empty_invocation_exits_two_with_clap_help_on_stderr",
+    );
+    let stderr = String::from_utf8_lossy(&invocation.output.stderr);
+
+    assert_eq!(invocation.output.status.code(), Some(2), "{context}");
+    assert!(invocation.output.stdout.is_empty(), "{context}");
+    assert!(stderr.contains("Usage: asimp"), "{context}");
+    assert!(stderr.contains("Curl remains sufficient."), "{context}");
+}
+
+#[test]
 fn unknown_command_exits_nonzero_with_a_useful_stderr_hint() {
     let invocation = invoke(&["unknown-command"]);
     let context = diagnostic(

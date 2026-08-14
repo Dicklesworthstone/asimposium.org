@@ -8,6 +8,7 @@ use clap::Parser;
 #[command(
     name = "asimp",
     version,
+    arg_required_else_help = true,
     about = "Optional ASImposium command-line companion. Curl remains sufficient.",
     long_about = "Optional ASImposium command-line companion. Curl remains sufficient. OPS.1 exposes no product commands yet."
 )]
@@ -38,5 +39,17 @@ mod tests {
                 .to_string()
                 .contains("unexpected argument 'session' found")
         );
+    }
+
+    #[test]
+    fn empty_input_requests_help_before_product_commands_exist() {
+        let error = Cli::try_parse_from(["asimp"])
+            .expect_err("OPS.1 must teach the available identity surface on empty input");
+
+        assert_eq!(
+            error.kind(),
+            ErrorKind::DisplayHelpOnMissingArgumentOrSubcommand
+        );
+        assert!(error.to_string().contains("Usage: asimp"));
     }
 }
