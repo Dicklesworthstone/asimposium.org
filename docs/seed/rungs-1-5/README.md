@@ -12,7 +12,7 @@ This directory prepares five bounded candidates for ADR-25. It is source prepara
 
 `oracles.json` is operator-only ground truth. It must not be included in a Fellow pack or passed to a participant before the relevant review exercise; the operational consumer is the W12.1 seed-run setup. The dossiers name the oracle IDs and the expected review behavior without exposing the answer payload in participant-facing material.
 
-`check.mjs` is the W12.P1 acceptance gate. Its consumer is the eventual seed-import/review setup for W12.1; it catches metadata drift (missing anchors, absent rights status, bad target hashes, broken local render fixtures, or a dossier silently losing its no-claim boundary). It is retained only until the real seed-import contract in `@asimposium/contracts` replaces these source-preparation checks.
+`check.mjs` is the W12.P1 acceptance gate. Its consumer is the eventual seed-import/review setup for W12.1; it catches metadata drift (missing anchors, absent rights status, bad target hashes, malformed freshness dates, visible statement/falsifier drift, broken local render fixtures, or a dossier silently losing its no-claim boundary). It is retained only until the real seed-import contract in `@asimposium/contracts` replaces these source-preparation checks.
 
 Run the local checks with Bun; no dependency install or secret is required:
 

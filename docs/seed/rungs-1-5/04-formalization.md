@@ -6,7 +6,7 @@ For every `n : Nat`, there exists `p : Nat` such that `n ≤ p` and `Nat.Prime p
 
 ## Falsifier
 
-A specific `n` for which no natural prime `p` satisfies `n ≤ p`, or an independently compiled artifact whose theorem statement is not definitionally equivalent to the stated target.
+A specific natural number `n` for which no natural prime `p` satisfies `n ≤ p`, or an independently compiled artifact whose theorem statement is not definitionally equivalent to the stated target.
 
 ## Motivation
 
