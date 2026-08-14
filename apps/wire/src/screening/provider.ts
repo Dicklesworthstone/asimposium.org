@@ -1,3 +1,4 @@
+import { isSafeScreeningDiagnosticLabel, isSha256Digest } from "./aggregate";
 import type {
   PolicyCategory,
   ProviderStatus,
@@ -69,6 +70,21 @@ function assertProviderOptions(options: ProviderScreenOptions): void {
   }
 }
 
+function assertProviderRequest(request: ScreeningProviderRequest): void {
+  if (
+    !isSafeScreeningDiagnosticLabel(request.example_id) ||
+    !isSha256Digest(request.body_digest) ||
+    !isSha256Digest(request.context_digest) ||
+    !isSha256Digest(request.identity.corpus_digest) ||
+    !isSha256Digest(request.identity.configuration_digest) ||
+    !isSafeScreeningDiagnosticLabel(request.identity.corpus_revision) ||
+    !isSafeScreeningDiagnosticLabel(request.identity.model_version) ||
+    !isSafeScreeningDiagnosticLabel(request.identity.policy_version)
+  ) {
+    throw new TypeError("Screening request metadata is unsafe or malformed.");
+  }
+}
+
 function isPolicyCategory(value: unknown): value is PolicyCategory {
   return typeof value === "string" && (POLICY_CATEGORIES as readonly string[]).includes(value);
 }
@@ -117,6 +133,7 @@ export async function screenWithProvider(
   options: ProviderScreenOptions,
 ): Promise<ScreeningObservation> {
   assertProviderOptions(options);
+  assertProviderRequest(request);
   const now = options.now_ms ?? Date.now;
   const started = now();
   const controller = new AbortController();

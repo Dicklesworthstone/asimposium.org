@@ -16,7 +16,7 @@ export interface ConfidenceInterval {
 export interface RateMetric {
   readonly numerator: number;
   readonly denominator: number;
-  /** Null means no provider-ok observations were available for this metric. */
+  /** Null means no admissible denominator was available for this metric. */
   readonly rate: number | null;
   readonly wilson_95: ConfidenceInterval | null;
 }
@@ -186,7 +186,12 @@ function metricFor(
   label: string,
 ): ConfusionMetric {
   const providerOk = group.filter(([, observation]) => observation.provider_status === "ok");
-  const legitimate = providerOk.filter(([example]) => example.ground_truth === "legitimate");
+  // A provider outage is fail-closed quarantine. On a legitimate fixture that
+  // is still an over-refusal, not a reason to silently remove the example from
+  // the false-positive denominator. The other accuracy classes retain their
+  // provider-ok rule: a timeout does not establish that an unavailable model
+  // would have published a hard-reject or mishandled a quarantine case.
+  const legitimate = group.filter(([example]) => example.ground_truth === "legitimate");
   const hardReject = providerOk.filter(([example]) => example.ground_truth === "hard-reject");
   const quarantine = providerOk.filter(([example]) => example.ground_truth === "quarantine");
   return {
@@ -237,11 +242,49 @@ function sortedUnique(values: readonly string[]): readonly string[] {
   return [...new Set(values)].sort(asciiCompare);
 }
 
-function safeDiagnosticLabel(value: unknown): value is string {
-  return typeof value === "string" && /^[A-Za-z0-9._:-]{1,128}$/.test(value);
+/**
+ * These records are copied into run reports, so their labels must not become a
+ * side channel for credentials. The shape check deliberately rejects the
+ * credential families that otherwise look like harmless opaque metadata.
+ */
+function isSecretShapedMetadata(value: string): boolean {
+  return [
+    /(?:^|[^a-z0-9])asimp[_-]?ag[_-]?[a-z0-9]{8,}/i,
+    /(?:^|[^a-z0-9])sk[-_](?:live|test|proj|svcacct)[-_][a-z0-9_-]{8,}/i,
+    /(?:^|[^a-z0-9])sk[-_][a-z0-9_-]{16,}/i,
+    /(?:^|[^a-z0-9])ya29\.[a-z0-9._-]{8,}/i,
+    /(?:^|[^a-z0-9])(?:gh[pousr]|github[_-]?pat|xox[baprs]|gocspx|aiza|npm|pypi)[_-]?[a-z0-9_-]{8,}/i,
+    /(?:^|[^a-z0-9])(?:akia|asia|agpa|aida|aroa)[a-z0-9]{16}/i,
+    /(?:^|[^a-z0-9])eyj[a-z0-9_-]{8,}\.[a-z0-9_-]{8,}\.[a-z0-9_-]{8,}/i,
+    /(?:^|[^a-z0-9])(?:authorization|bearer|token|secret|password|credential)[=:_ -]+\S+/i,
+    /(?:^|[^a-z0-9])v1\.[a-z0-9_-]{12,}/i,
+  ].some((pattern) => pattern.test(value));
 }
 
-function isSha256Digest(value: unknown): value is string {
+/**
+ * A diagnostic label is an operator-visible field, not an opaque-token slot.
+ * Known credential prefixes are caught above; this closes the remaining
+ * accidental-paste case where a bare, high-entropy token has no recognisable
+ * provider prefix at all. Structured versions and fixture ids contain
+ * separators, so they remain readable without becoming token carriers.
+ */
+function isBareHighEntropyDiagnosticLabel(value: string): boolean {
+  if (!/^[A-Za-z0-9]{24,}$/.test(value)) return false;
+  const characterClasses =
+    Number(/[a-z]/.test(value)) + Number(/[A-Z]/.test(value)) + Number(/[0-9]/.test(value));
+  return characterClasses >= 2 && new Set(value).size >= 10;
+}
+
+export function isSafeScreeningDiagnosticLabel(value: unknown): value is string {
+  return (
+    typeof value === "string" &&
+    /^[A-Za-z0-9._:-]{1,128}$/.test(value) &&
+    !isSecretShapedMetadata(value) &&
+    !isBareHighEntropyDiagnosticLabel(value)
+  );
+}
+
+export function isSha256Digest(value: unknown): value is string {
   return typeof value === "string" && /^sha256:[a-f0-9]{64}$/.test(value);
 }
 
@@ -264,7 +307,12 @@ function isSha256Digest(value: unknown): value is string {
  * defence against a malicious manifest author, who owns the corpus anyway.
  */
 function safeStratumLabel(value: unknown): value is string {
-  return typeof value === "string" && /^[a-z][a-z-]{2,47}$/.test(value) && !value.includes("--");
+  return (
+    typeof value === "string" &&
+    /^[a-z][a-z-]{2,47}$/.test(value) &&
+    !value.includes("--") &&
+    !isSecretShapedMetadata(value)
+  );
 }
 
 function isPolicyCategory(value: unknown): boolean {
@@ -310,7 +358,7 @@ function validDecisionMetadata(observation: ScreeningObservation): boolean {
 }
 
 function validateObservationMetadata(observation: ScreeningObservation): void {
-  if (!safeDiagnosticLabel(observation.example_id))
+  if (!isSafeScreeningDiagnosticLabel(observation.example_id))
     throw new ScreeningInputError("Observation id is not a safe opaque identifier.");
   if (!isSha256Digest(observation.evaluated_body_digest))
     throw new ScreeningInputError("Observation body digest is missing or malformed.");
@@ -325,9 +373,9 @@ function validateObservationMetadata(observation: ScreeningObservation): void {
   if (!validDecisionMetadata(observation))
     throw new ScreeningInputError("Observation decision path or status is inconsistent.");
   if (
-    !safeDiagnosticLabel(observation.model_version) ||
-    !safeDiagnosticLabel(observation.policy_version) ||
-    !safeDiagnosticLabel(observation.configuration_digest)
+    !isSafeScreeningDiagnosticLabel(observation.model_version) ||
+    !isSafeScreeningDiagnosticLabel(observation.policy_version) ||
+    !isSha256Digest(observation.configuration_digest)
   ) {
     throw new ScreeningInputError("Observation version metadata is unsafe or malformed.");
   }
@@ -407,9 +455,7 @@ function aggregationPairs(
             example.ground_truth !== "hard-reject" || example.expected_outcome !== "reject",
         )
       ) {
-        throw new ScreeningInputError(
-          `Aggregation pair ${aggregationPairId} must have exactly members a and b.`,
-        );
+        throw new ScreeningInputError("Aggregation pairs must have exactly members a and b.");
       }
       return {
         aggregation_pair_id: aggregationPairId,
@@ -464,7 +510,7 @@ function requireCompleteInputs(
 ): readonly [ScreeningCorpusExample, ScreeningObservation][] {
   const corpusById = new Map<string, ScreeningCorpusExample>();
   for (const example of corpus) {
-    if (!safeDiagnosticLabel(example.id) || !isSha256Digest(example.body_digest)) {
+    if (!isSafeScreeningDiagnosticLabel(example.id) || !isSha256Digest(example.body_digest)) {
       throw new ScreeningInputError(
         "Corpus identifier or evaluated body digest is missing or malformed.",
       );
@@ -475,14 +521,15 @@ function requireCompleteInputs(
     // credential-shaped stratum straight into a record that is otherwise digest-only
     // (Fable §14.3 never-log list). `policy_category` needs no check: it is an enum.
     if (!safeStratumLabel(example.stratum)) {
-      throw new ScreeningInputError(
-        `Corpus entry ${example.id} declares a label this module will not publish.`,
-      );
+      throw new ScreeningInputError("Corpus metadata contains an unsafe diagnostic label.");
     }
     if (example.expected_outcome !== expectedOutcomeFor(example.ground_truth)) {
       throw new ScreeningInputError(
         "Corpus expected outcome conflicts with its declared ground truth.",
       );
+    }
+    if (!isPolicyCategory(example.policy_category)) {
+      throw new ScreeningInputError("Corpus metadata contains an invalid policy category.");
     }
     const hasPairId = example.aggregation_pair_id !== undefined;
     const hasPairMember = example.aggregation_member !== undefined;
@@ -490,6 +537,13 @@ function requireCompleteInputs(
       throw new ScreeningInputError(
         "Aggregation pair identifier and member must be supplied together.",
       );
+    }
+    if (
+      hasPairId &&
+      (!isSafeScreeningDiagnosticLabel(example.aggregation_pair_id) ||
+        (example.aggregation_member !== "a" && example.aggregation_member !== "b"))
+    ) {
+      throw new ScreeningInputError("Aggregation-pair metadata is unsafe or malformed.");
     }
     if (
       hasPairId &&
@@ -523,7 +577,7 @@ function requireCompleteInputs(
       observation.retry_count !== 0
     ) {
       throw new ScreeningInputError(
-        `Observation ${observation.example_id} has invalid timing or retry metadata; retries are unsupported.`,
+        "Observation timing or retry metadata is invalid; retries are unsupported.",
       );
     }
     observationById.set(observation.example_id, observation);
@@ -558,6 +612,19 @@ function versionMismatch(
   if (values.length !== 1 || values[0] !== expected) failures.push(`${field}_MISMATCH`);
 }
 
+/** Shared boundary for every report that can publish run identity metadata. */
+export function assertScreeningRunIdentity(identity: ScreeningRunIdentity): void {
+  if (
+    !isSafeScreeningDiagnosticLabel(identity.corpus_revision) ||
+    !isSha256Digest(identity.corpus_digest) ||
+    !isSafeScreeningDiagnosticLabel(identity.model_version) ||
+    !isSafeScreeningDiagnosticLabel(identity.policy_version) ||
+    !isSha256Digest(identity.configuration_digest)
+  ) {
+    throw new ScreeningInputError("Run identity contains unsafe or malformed metadata.");
+  }
+}
+
 /** Deterministically aggregates a complete frozen-corpus run. */
 export function aggregateScreeningRun(
   corpus: readonly ScreeningCorpusExample[],
@@ -565,15 +632,7 @@ export function aggregateScreeningRun(
   identity: ScreeningRunIdentity,
   thresholds: ScreeningThresholds = S4_THRESHOLDS,
 ): ScreeningAggregateReport {
-  if (
-    !safeDiagnosticLabel(identity.corpus_revision) ||
-    !safeDiagnosticLabel(identity.corpus_digest) ||
-    !safeDiagnosticLabel(identity.model_version) ||
-    !safeDiagnosticLabel(identity.policy_version) ||
-    !safeDiagnosticLabel(identity.configuration_digest)
-  ) {
-    throw new ScreeningInputError("Run identity contains unsafe or malformed metadata.");
-  }
+  assertScreeningRunIdentity(identity);
   const pairs = requireCompleteInputs(corpus, observations);
   const legitimate = pairs.filter(([example]) => example.ground_truth === "legitimate");
   const hardReject = pairs.filter(([example]) => example.ground_truth === "hard-reject");
@@ -584,9 +643,10 @@ export function aggregateScreeningRun(
   }
 
   const providerOkPairs = pairs.filter(([, observation]) => observation.provider_status === "ok");
-  const eligibleLegitimate = providerOkPairs.filter(
-    ([example]) => example.ground_truth === "legitimate",
-  );
+  // Do not launder provider failures out of the legitimate false-positive
+  // denominator. They were quarantined fail-closed, so omitting them would
+  // make the published rate look safer as the provider gets less available.
+  const eligibleLegitimate = legitimate;
   const eligibleHardReject = providerOkPairs.filter(
     ([example]) => example.ground_truth === "hard-reject",
   );
@@ -625,14 +685,6 @@ export function aggregateScreeningRun(
       failures.push("LEGITIMATE_SAMPLE_TOO_SMALL");
     if (eligibleHardReject.length < thresholds.minimum_hard_reject_examples)
       failures.push("HARD_REJECT_SAMPLE_TOO_SMALL");
-    if (
-      falsePositiveRate.rate !== null &&
-      falsePositiveRate.rate >= thresholds.legitimate_false_positive_rate_exclusive_max
-    ) {
-      failures.push("LEGITIMATE_FALSE_POSITIVE_THRESHOLD_FAILED");
-    }
-    if (falseNegativeRate.numerator > thresholds.hard_reject_false_negative_max)
-      failures.push("HARD_REJECT_FALSE_NEGATIVE_THRESHOLD_FAILED");
     if (eligibleQuarantine.length < thresholds.minimum_quarantine_examples)
       failures.push("QUARANTINE_SAMPLE_TOO_SMALL");
     // A rate, and therefore a statistic: it needs a complete run to mean anything.
@@ -660,6 +712,20 @@ export function aggregateScreeningRun(
    */
   if (quarantinePublishRate.numerator > thresholds.quarantine_publish_max)
     failures.push("QUARANTINE_PUBLISH_THRESHOLD_FAILED");
+  // Unlike an unavailable hard-reject decision, a fail-closed quarantine of a
+  // legitimate sample is directly an over-refusal. Its denominator and the
+  // strict FP bar therefore stay live even while the report is incomplete.
+  if (
+    falsePositiveRate.rate !== null &&
+    falsePositiveRate.rate >= thresholds.legitimate_false_positive_rate_exclusive_max
+  ) {
+    failures.push("LEGITIMATE_FALSE_POSITIVE_THRESHOLD_FAILED");
+  }
+  // A provider-ok hard-reject escape is directly observed unsafe behavior. A
+  // timeout on any other item makes the aggregate incomplete, but cannot turn
+  // this measured false negative into a merely blocked run.
+  if (falseNegativeRate.numerator > thresholds.hard_reject_false_negative_max)
+    failures.push("HARD_REJECT_FALSE_NEGATIVE_THRESHOLD_FAILED");
   if (sentinels.length > 0) failures.push("SENTINEL_NEGATIVE_DETECTED");
   versionMismatch(modelVersions, identity.model_version, "MODEL_VERSION", failures);
   versionMismatch(policyVersions, identity.policy_version, "POLICY_VERSION", failures);

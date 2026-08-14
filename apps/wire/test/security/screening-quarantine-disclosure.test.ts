@@ -1,6 +1,9 @@
 import { expect, test } from "bun:test";
 
-import { aggregateScreeningRun } from "../../src/screening/aggregate";
+import {
+  aggregateScreeningRun,
+  isSafeScreeningDiagnosticLabel,
+} from "../../src/screening/aggregate";
 import { screeningOpsJsonl } from "../../src/screening/report";
 import {
   POLICY_CATEGORIES,
@@ -26,10 +29,10 @@ const BANDS = Object.fromEntries(
 
 const IDENTITY = {
   corpus_revision: "quarantine-disclosure-fixture",
-  corpus_digest: "fixture-digest",
+  corpus_digest: `sha256:${"e".repeat(64)}`,
   model_version: "fixture-model",
   policy_version: "fixture-policy",
-  configuration_digest: "fixture-config",
+  configuration_digest: `sha256:${"f".repeat(64)}`,
 };
 
 function fixture(
@@ -188,10 +191,98 @@ test("PLANTED NEGATIVE: a credential-shaped stratum label is refused, not labell
       message = (error as Error).message;
     }
     expect(refused).toBe(true);
-    // The refusal names the example id, never the offending label.
-    expect(message).toContain("disclosure-hard-reject-2");
+    // The refusal is fixed text: neither the offending label nor unrelated
+    // caller metadata is reflected into diagnostics.
+    expect(message).not.toContain("disclosure-hard-reject-2");
     expect(message).not.toContain(stratum);
     expect(message).not.toContain(forbidden);
+  }
+});
+
+test("PLANTED NEGATIVE: secret-shaped run metadata is refused without echo", () => {
+  const canary = "sk_live_51h8xyzabcdefghijklmnop";
+  const corpus: readonly ScreeningCorpusExample[] = [
+    fixture(1, "legitimate"),
+    fixture(2, "hard-reject"),
+  ];
+  const observations: readonly ScreeningObservation[] = corpus.map((example) => ({
+    example_id: example.id,
+    evaluated_body_digest: example.body_digest as string,
+    decision: example.ground_truth === "hard-reject" ? "reject" : "pass",
+    coarse_category: example.policy_category,
+    category_score_bands: BANDS,
+    model_version: IDENTITY.model_version,
+    policy_version: IDENTITY.policy_version,
+    configuration_digest: IDENTITY.configuration_digest,
+    provider_status: "ok",
+    decision_path: "provider",
+    status_code: "SCREENED",
+    latency_ms: 4,
+    retry_count: 0,
+  }));
+
+  let message = "";
+  try {
+    aggregateScreeningRun(
+      corpus,
+      observations,
+      { ...IDENTITY, model_version: canary },
+      {
+        ...S4_THRESHOLDS,
+        minimum_legitimate_examples: 1,
+        minimum_hard_reject_examples: 1,
+      },
+    );
+  } catch (error) {
+    message = (error as Error).message;
+  }
+  expect(message).toBe("Run identity contains unsafe or malformed metadata.");
+  expect(message).not.toContain(canary);
+});
+
+test("PLANTED NEGATIVE: modern token families are refused as metadata without logging their values", () => {
+  const tokenFamilies = [
+    "ya29.a0argrxeabcdefghijklmnop",
+    "sk-proj-51h8xyzabcdefghijklmnop",
+    "sk-svcacct-51h8xyzabcdefghijklmnop",
+    "gho_abcdefghijklmnopqrstuvwxyz012345",
+    "xoxp-1234567890-abcdefghijklmnop",
+    "AKIAIOSFODNN7EXAMPLE",
+    "eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiJmaXh0dXJlIn0.signaturefragment",
+  ];
+  const corpus: readonly ScreeningCorpusExample[] = [
+    fixture(1, "legitimate"),
+    fixture(2, "hard-reject"),
+  ];
+  for (const token of tokenFamilies) {
+    expect(isSafeScreeningDiagnosticLabel(token)).toBe(false);
+    const observations: readonly ScreeningObservation[] = corpus.map((example) => ({
+      example_id: example.id,
+      evaluated_body_digest: example.body_digest as string,
+      decision: example.ground_truth === "hard-reject" ? "reject" : "pass",
+      coarse_category: example.policy_category,
+      category_score_bands: BANDS,
+      model_version: token,
+      policy_version: IDENTITY.policy_version,
+      configuration_digest: IDENTITY.configuration_digest,
+      provider_status: "ok",
+      decision_path: "provider",
+      status_code: "SCREENED",
+      latency_ms: 4,
+      retry_count: 0,
+    }));
+    let message = "";
+    try {
+      aggregateScreeningRun(corpus, observations, IDENTITY, {
+        ...S4_THRESHOLDS,
+        minimum_legitimate_examples: 1,
+        minimum_hard_reject_examples: 1,
+      });
+    } catch (error) {
+      message = (error as Error).message;
+    }
+    expect(message).toBe("Observation version metadata is unsafe or malformed.");
+    expect(message).not.toContain(token);
   }
 });
 

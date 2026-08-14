@@ -7,6 +7,7 @@ export type {
 } from "./aggregate";
 export {
   aggregateScreeningRun,
+  assertScreeningRunIdentity,
   ScreeningInputError,
   truthMetricFor,
   verifyObservationBodyBindings,

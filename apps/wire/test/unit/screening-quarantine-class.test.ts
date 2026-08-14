@@ -32,10 +32,10 @@ import {
 
 const IDENTITY: ScreeningRunIdentity = {
   corpus_revision: "quarantine-class-fixture-v1",
-  corpus_digest: "fixture-digest",
+  corpus_digest: `sha256:${"e".repeat(64)}`,
   model_version: "fixture-model",
   policy_version: "fixture-policy",
-  configuration_digest: "fixture-config",
+  configuration_digest: `sha256:${"f".repeat(64)}`,
 };
 
 const BANDS = Object.fromEntries(

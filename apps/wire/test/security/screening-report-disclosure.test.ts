@@ -10,10 +10,10 @@ import {
 
 const identity: ScreeningRunIdentity = {
   corpus_revision: "s4-security-v1",
-  corpus_digest: "sha256:security-corpus",
+  corpus_digest: `sha256:${"c".repeat(64)}`,
   model_version: "model-security-v1",
   policy_version: "policy-security-v1",
-  configuration_digest: "sha256:security-config",
+  configuration_digest: `sha256:${"d".repeat(64)}`,
 };
 
 test("screening OPS JSONL excludes payloads, prompts, raw score bands, and credentials", () => {
