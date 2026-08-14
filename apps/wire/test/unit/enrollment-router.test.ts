@@ -166,7 +166,7 @@ describe("S-1 mountable enrollment router", () => {
     const jsonEtag = json.headers.get("etag");
     expect(jsonEtag).toMatch(/^"[a-f0-9]{64}"$/);
     expect(json.headers.get("vary")).toBe("Accept");
-    expect(json.headers.get("cache-control")).toBe("no-store");
+    expect(json.headers.get("cache-control")).toBe("no-cache");
     const notModified = await request(router, `/join/${minted.enrollmentId}`, {
       headers: {
         accept: "application/json",
@@ -176,7 +176,7 @@ describe("S-1 mountable enrollment router", () => {
     expect(notModified.status).toBe(304);
     expect(await notModified.text()).toBe("");
     expect(notModified.headers.get("vary")).toBe("Accept");
-    expect(notModified.headers.get("cache-control")).toBe("no-store");
+    expect(notModified.headers.get("cache-control")).toBe("no-cache");
 
     const malformedWeakTag = await request(router, `/join/${minted.enrollmentId}`, {
       headers: { accept: "application/json", "if-none-match": `W/ ${jsonEtag ?? ""}` },
@@ -246,7 +246,7 @@ describe("S-1 mountable enrollment router", () => {
     });
     expect(wildcardNotModified.status).toBe(304);
     expect(wildcardNotModified.headers.get("vary")).toBe("Accept");
-    expect(wildcardNotModified.headers.get("cache-control")).toBe("no-store");
+    expect(wildcardNotModified.headers.get("cache-control")).toBe("no-cache");
 
     const html = await request(router, `/join/${minted.enrollmentId}`, {
       headers: { accept: "text/html" },

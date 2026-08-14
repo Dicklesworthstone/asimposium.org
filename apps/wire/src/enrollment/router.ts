@@ -493,7 +493,11 @@ export function createEnrollmentRouter(options: EnrollmentRouterOptions): Hono {
             : enrollmentCapsuleMarkdown(projection);
       const etag = await strongEtag(face, body);
       const headers = {
-        "cache-control": "no-store",
+        // The capsule path is public and contains no fragment secret. Allow a
+        // cache to retain the face, but require revalidation every time so a
+        // consumed, expired, or superseded capsule becomes its opaque 404
+        // immediately and the ETag/304 contract remains usable.
+        "cache-control": "no-cache",
         etag,
         vary: "Accept",
         "content-type":
