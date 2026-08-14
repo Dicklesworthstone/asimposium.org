@@ -185,6 +185,15 @@ export interface HarnessRunOptions {
   onOutput?: (text: string) => void;
   /** Called with every already-redacted JSONL record. Defaults to stdout. */
   onEvent?: (record: HarnessEvent) => void;
+  /**
+   * Where artifacts are written. Defaults to the real filesystem.
+   *
+   * The root is still validated against this checkout either way, so supplying
+   * an in-memory store does not loosen containment — it only diverts the
+   * writes, which is what lets ordinary tests exercise real store behaviour
+   * without growing e2e/artifacts.
+   */
+  storage?: HarnessArtifactStorage;
 }
 
 export interface HarnessEvent {
@@ -271,20 +280,24 @@ class ArtifactStore {
    */
   readonly danglingFailureDigests: readonly string[];
 
+  private readonly storage: HarnessArtifactStorage;
+
   constructor(
     root: string,
     readonly runId: string,
     resume: boolean,
     identity: RunIdentity,
+    storage: HarnessArtifactStorage = nodeArtifactStorage,
   ) {
+    this.storage = storage;
     if (!validateRunId(runId)) {
       throw new HarnessError("RUN_ID_INVALID", "run_id must be one safe path component.");
     }
 
     const resolvedRoot = resolve(root);
-    this.physicalRoot = realDirectory(resolvedRoot, "REPOSITORY_ROOT_INVALID");
-    const e2e = ensureDirectDirectory(this.physicalRoot, "e2e");
-    const artifacts = ensureDirectDirectory(e2e, "artifacts");
+    this.physicalRoot = realDirectory(resolvedRoot, "REPOSITORY_ROOT_INVALID", storage);
+    const e2e = ensureDirectDirectory(this.physicalRoot, "e2e", storage);
+    const artifacts = ensureDirectDirectory(e2e, "artifacts", storage);
     /**
      * A new run refuses a namespace that already exists — at all.
      *
@@ -294,7 +307,16 @@ class ArtifactStore {
      * the resulting artifacts described two runs as one. Existence of the
      * namespace is the check, because the namespace is the unit of ownership.
      */
-    const namespaceExisted = existsSync(join(artifacts, runId));
+    // A symlink where the namespace belongs is a containment failure, not an
+    // ownership one, and it is checked first so it keeps its own sharper error
+    // rather than being reported as "this run_id is taken".
+    if (storage.isSymlink(join(artifacts, runId))) {
+      throw new HarnessError(
+        "ARTIFACT_PATH_UNSAFE",
+        "the run namespace is a symlink; artifacts must not be redirected out of the artifact area.",
+      );
+    }
+    const namespaceExisted = storage.exists(join(artifacts, runId));
     if (!resume && namespaceExisted) {
       throw new HarnessError(
         "RUN_ID_EXISTS",
@@ -306,30 +328,38 @@ class ArtifactStore {
     // limit after this one had already counted; narrowing it to a single
     // reservation cannot make the backstop exact under concurrency, but it does
     // remove the avoidable part of the gap.
-    this.directory = reserveArtifactNamespace(this.physicalRoot, artifacts, runId);
+    this.directory = reserveArtifactNamespace(
+      this.physicalRoot,
+      artifacts,
+      runId,
+      MAX_ARTIFACT_NAMESPACES,
+      storage,
+    );
     this.artifactsDirectory = artifacts;
     this.jsonl = join(this.directory, "events.jsonl");
-    assertRegularOrAbsent(this.jsonl, "ARTIFACT_PATH_UNSAFE");
-    if (!existsSync(this.jsonl)) {
-      const descriptor = openSync(this.jsonl, "wx");
-      closeSync(descriptor);
-    }
+    assertRegularOrAbsent(this.jsonl, "ARTIFACT_PATH_UNSAFE", storage);
+    if (!storage.exists(this.jsonl)) storage.writeExclusive(this.jsonl, "");
     this.identityPath = join(this.directory, RUN_IDENTITY_NAME);
-    assertRegularOrAbsent(this.identityPath, "ARTIFACT_PATH_UNSAFE");
+    assertRegularOrAbsent(this.identityPath, "ARTIFACT_PATH_UNSAFE", storage);
     // Written once, verified on every resume: a resumed run that changed its
     // suite, seed, or step set is a different run wearing the same id, and its
     // appended events would describe work the earlier events never did.
-    reconcileRunIdentity(this.identityPath, identity, resume && namespaceExisted);
+    reconcileRunIdentity(this.identityPath, identity, resume && namespaceExisted, storage);
 
     this.manifest = join(this.directory, FAILURE_MANIFEST_NAME);
-    assertRegularOrAbsent(this.manifest, "ARTIFACT_PATH_UNSAFE");
+    assertRegularOrAbsent(this.manifest, "ARTIFACT_PATH_UNSAFE", storage);
     // A resumed run continues the same bounded budget it already spent, counted
     // per attempt rather than per digest so a crashed attempt stays spent.
-    const reconciled = reconcileFailureManifest(this.manifest, this.artifactsDirectory, runId);
+    const reconciled = reconcileFailureManifest(
+      this.manifest,
+      this.artifactsDirectory,
+      runId,
+      storage,
+    );
     this.failureArtifactCount = reconciled.attemptCount;
     this.danglingFailureDigests = reconciled.dangling;
     for (const digest of reconciled.stored) {
-      this.failureLogs.push(join(blobStoreDirectory(this.artifactsDirectory), digest));
+      this.failureLogs.push(join(blobStoreDirectory(this.artifactsDirectory, storage), digest));
     }
   }
 
@@ -341,13 +371,13 @@ class ArtifactStore {
     if (eventBytes > MAX_EVENT_BYTES) {
       throw new HarnessError("EVENT_TOO_LARGE", "a redacted event exceeds the fixed event size.");
     }
-    if (statSync(this.jsonl).size + eventBytes > MAX_EVENT_LEDGER_BYTES) {
+    if (this.storage.size(this.jsonl) + eventBytes > MAX_EVENT_LEDGER_BYTES) {
       throw new HarnessError(
         "EVENT_LEDGER_LIMIT",
         "the bounded event ledger is full; retain the existing evidence without deletion.",
       );
     }
-    appendFileSync(this.jsonl, serialized, "utf8");
+    this.storage.append(this.jsonl, serialized);
   }
 
   /**
@@ -389,12 +419,12 @@ class ArtifactStore {
     // and before publication leaves a dangling intent, which the next
     // construction reports and which keeps the budget honest; counting only
     // completed blobs let a crash loop spend one slot arbitrarily often.
-    appendFileSync(this.manifest, `${JSON.stringify(describe(FAILURE_RECORD_INTENT))}\n`, "utf8");
+    this.storage.append(this.manifest, `${JSON.stringify(describe(FAILURE_RECORD_INTENT))}\n`);
     this.failureArtifactCount += 1;
 
     this.publishBlob(digest, stored);
 
-    appendFileSync(this.manifest, `${JSON.stringify(describe(FAILURE_RECORD_STORED))}\n`, "utf8");
+    this.storage.append(this.manifest, `${JSON.stringify(describe(FAILURE_RECORD_STORED))}\n`);
     // One blob is one entry. Identical output from two steps resolves to the
     // same path, and a list that repeated it would report one file as several
     // pieces of evidence.
@@ -428,6 +458,7 @@ class ArtifactStore {
       digest,
       stored,
       attempt: this.stagingCounter,
+      storage: this.storage,
     });
   }
 
@@ -438,9 +469,14 @@ class ArtifactStore {
     if (!SHA256_HEX.test(digest)) {
       throw new HarnessError("ARTIFACT_PATH_UNSAFE", "a blob name must be a sha256 hex digest.");
     }
-    const path = join(blobStoreDirectory(this.artifactsDirectory), digest);
+    const path = join(blobStoreDirectory(this.artifactsDirectory, this.storage), digest);
     assertContained(this.physicalRoot, path, "ARTIFACT_PATH_UNSAFE");
     return path;
+  }
+
+  /** Read an artifact this store wrote, through the same storage it wrote with. */
+  readArtifact(path: string): string {
+    return this.storage.readFile(path);
   }
 
   writeJUnit(events: readonly HarnessEvent[]): string {
@@ -449,11 +485,11 @@ class ArtifactStore {
       const name = attempt === 0 ? "junit.xml" : `junit.${attempt}.xml`;
       const path = join(this.directory, name);
       assertContained(this.physicalRoot, path, "ARTIFACT_PATH_UNSAFE");
-      if (existsSync(path) || isSymbolicLink(path)) {
+      if (this.storage.exists(path) || this.storage.isSymlink(path)) {
         attempt += 1;
         continue;
       }
-      writeFileSync(path, junitXml(events), { encoding: "utf8", flag: "wx" });
+      this.storage.writeExclusive(path, junitXml(events));
       return path;
     }
     throw new HarnessError(
@@ -647,37 +683,237 @@ export function assertContainedRoot(root: unknown): string {
     );
   }
 
-  if (real !== repositoryRoot() && !isDeclaredHarnessSandbox(real)) {
+  /**
+   * Checkout-only, with no escape hatch.
+   *
+   * A marker file briefly lived here so tests could isolate. That was a bad
+   * trade: it weakened a *production* guard for a test convenience, and the
+   * unlock was reachable by anything able to write a file. Test ergonomics are
+   * solved below by injecting storage, not by loosening what production
+   * accepts. AGENTS.md keeps artifact roots under the repository, and this is
+   * the assertion that enforces it.
+   */
+  if (real !== repositoryRoot()) {
     throw new HarnessError(
       "ROOT_NOT_REPOSITORY",
-      `root is not this checkout and declares no ${HARNESS_SANDBOX_MARKER}; refusing to write artifacts into an unrelated directory.`,
+      "root is not this checkout; refusing to write artifacts into an unrelated directory.",
     );
   }
   return real;
 }
 
 /**
- * A directory that has declared itself a disposable harness root.
+ * The filesystem operations the artifact tree performs.
  *
- * The checkout-identity rule exists to stop *accidental* misdirection — a
- * caller passing the wrong path and scattering artifacts somewhere unrelated.
- * It also made isolation impossible: every test that exercises a real run had
- * to write into the repository's own `e2e/artifacts`, which is how that
- * directory grew past its own backstop and now refuses the suite that fills it.
+ * Narrow on purpose: this is the storage layer that creates run namespaces and
+ * writes blobs and manifests — the part that made the checkout's `e2e/artifacts`
+ * grow without bound — and nothing else in this module routes through it.
  *
- * A marker file is the narrow way back. It cannot be created by accident, it is
- * in-band (no environment variable or process-wide flag that silently applies
- * to every path at once), and it grants nothing beyond the single directory
- * that carries it. Every other refusal above still applies first, so a marker
- * dropped in `$HOME`, in `tmpdir()` itself, or behind a symlink changes
- * nothing.
+ * Injecting it is what lets ordinary unit tests exercise real store behaviour
+ * without writing anything. The alternative attempts were both worse: a marker
+ * file that loosened production containment, and `mkdtemp` roots that put
+ * artifact data outside the repository and, because nothing here may delete,
+ * simply moved the unbounded growth into the system temp directory.
  */
-export const HARNESS_SANDBOX_MARKER = ".harness-sandbox";
+export interface HarnessArtifactStorage {
+  /**
+   * What this storage can attest to.
+   *
+   * Required rather than optional, so every implementation states it and no
+   * result can be produced without one. A simulation exercises control flow —
+   * which branch ran, which error was raised — and proves nothing about the
+   * kernel behaviour this store depends on: hard-link atomicity, EEXIST under
+   * real contention, inode identity. Only "real-filesystem" evidences those.
+   */
+  readonly authority: "real-filesystem" | "simulation";
+  exists(path: string): boolean;
+  isSymlink(path: string): boolean;
+  isFile(path: string): boolean;
+  isDirectory(path: string): boolean;
+  realpath(path: string): string;
+  mkdir(path: string): void;
+  readdir(path: string): readonly string[];
+  readFile(path: string): string;
+  /** Fails with `EEXIST` when the path is taken; never truncates. */
+  writeExclusive(path: string, data: string): void;
+  append(path: string, data: string): void;
+  /** Atomic publish that refuses an existing target, as POSIX `link` does. */
+  link(existing: string, target: string): void;
+  size(path: string): number;
+  /**
+   * Called between the existence check and the link, if present.
+   *
+   * The window this opens is the one that matters: a publisher has just seen no
+   * blob and is about to claim the name. Every operation here is synchronous, so
+   * `Promise.all` over publications does not interleave them — each callback
+   * runs to completion before the next begins, and a test built that way proves
+   * only that the same code ran sixteen times. This hook lets a test place a
+   * second publisher *inside* that window deterministically, which is the only
+   * way to exercise the contended branch in-process.
+   */
+  beforeLink?(path: string): void;
+}
 
-function isDeclaredHarnessSandbox(real: string): boolean {
-  const marker = join(real, HARNESS_SANDBOX_MARKER);
-  if (!existsSync(marker) || isSymbolicLink(marker)) return false;
-  return lstatSync(marker).isFile();
+/**
+ * Refuse to treat a simulated run as evidence.
+ *
+ * Anything that emits a receipt, a gate result, or a retention claim calls this
+ * first. A simulation can show which branch executed; it cannot witness kernel
+ * hard-link semantics, so a receipt derived from one would assert something
+ * nobody observed.
+ */
+export function assertRealStorageAuthority(storage: HarnessArtifactStorage): void {
+  if (storage.authority !== "real-filesystem") {
+    throw new HarnessError(
+      "STORAGE_AUTHORITY_SIMULATED",
+      "this artifact storage is a simulation; it cannot produce a retention receipt or stand as filesystem evidence.",
+    );
+  }
+}
+
+/** The real filesystem. The default everywhere. */
+export const nodeArtifactStorage: HarnessArtifactStorage = {
+  authority: "real-filesystem",
+  exists: (path) => existsSync(path),
+  isSymlink: (path) => {
+    try {
+      return lstatSync(path).isSymbolicLink();
+    } catch {
+      return false;
+    }
+  },
+  isFile: (path) => {
+    try {
+      return lstatSync(path).isFile();
+    } catch {
+      return false;
+    }
+  },
+  isDirectory: (path) => {
+    try {
+      return lstatSync(path).isDirectory();
+    } catch {
+      return false;
+    }
+  },
+  realpath: (path) => realpathSync(path),
+  mkdir: (path) => mkdirSync(path),
+  readdir: (path) => readdirSync(path),
+  readFile: (path) => readFileSync(path, "utf8"),
+  writeExclusive: (path, data) => writeFileSync(path, data, { encoding: "utf8", flag: "wx" }),
+  append: (path, data) => appendFileSync(path, data, "utf8"),
+  link: (existing, target) => linkSync(existing, target),
+  size: (path) => statSync(path).size,
+};
+
+class MemoryStorageError extends Error {
+  constructor(readonly code: string) {
+    super(code);
+  }
+}
+
+/**
+ * An in-memory artifact tree.
+ *
+ * Models the properties the store depends on rather than a filesystem in
+ * general: exclusive creation, `link` refusing an existing target, and
+ * directories that must exist before their children. Symlinks are representable
+ * so containment tests can plant one, but nothing here follows them — the store
+ * only ever asks whether a path *is* a link, and then refuses.
+ *
+ * `runHarness` still validates its root against the real checkout, so a test
+ * using this seam proves the same containment rules; only the writes are
+ * diverted.
+ */
+export function createMemoryArtifactStorage(): HarnessArtifactStorage & {
+  readonly files: Map<string, string>;
+  readonly directories: Set<string>;
+  symlink(path: string): void;
+  seedDirectory(path: string): void;
+} {
+  const files = new Map<string, string>();
+  const directories = new Set<string>();
+  const symlinks = new Set<string>();
+  /** Inode identity, so `link` shares content rather than copying it. */
+  const inodes = new Map<string, string>();
+
+  const seedDirectory = (path: string): void => {
+    let current = resolve(path);
+    while (current !== sep && current.length > 1) {
+      directories.add(current);
+      current = resolve(current, "..");
+    }
+    directories.add(sep);
+  };
+
+  return {
+    authority: "simulation",
+    files,
+    directories,
+    seedDirectory,
+    symlink: (path) => symlinks.add(resolve(path)),
+    exists: (path) => {
+      const key = resolve(path);
+      return files.has(key) || directories.has(key) || symlinks.has(key);
+    },
+    isSymlink: (path) => symlinks.has(resolve(path)),
+    isFile: (path) => files.has(resolve(path)),
+    isDirectory: (path) => directories.has(resolve(path)),
+    realpath: (path) => {
+      const key = resolve(path);
+      if (!files.has(key) && !directories.has(key)) throw new MemoryStorageError("ENOENT");
+      return key;
+    },
+    mkdir: (path) => {
+      const key = resolve(path);
+      if (files.has(key) || directories.has(key)) throw new MemoryStorageError("EEXIST");
+      directories.add(key);
+    },
+    readdir: (path) => {
+      const key = resolve(path);
+      const prefix = `${key}${sep}`;
+      const names = new Set<string>();
+      for (const candidate of [...files.keys(), ...directories]) {
+        if (!candidate.startsWith(prefix)) continue;
+        const rest = candidate.slice(prefix.length);
+        if (rest.length === 0) continue;
+        names.add(rest.split(sep)[0] as string);
+      }
+      return [...names].sort();
+    },
+    readFile: (path) => {
+      const key = resolve(path);
+      const inode = inodes.get(key);
+      const value = inode === undefined ? files.get(key) : files.get(inode);
+      if (value === undefined) throw new MemoryStorageError("ENOENT");
+      return value;
+    },
+    writeExclusive: (path, data) => {
+      const key = resolve(path);
+      if (files.has(key) || directories.has(key)) throw new MemoryStorageError("EEXIST");
+      files.set(key, data);
+    },
+    append: (path, data) => {
+      const key = resolve(path);
+      files.set(key, `${files.get(key) ?? ""}${data}`);
+    },
+    link: (existing, target) => {
+      const from = resolve(existing);
+      const to = resolve(target);
+      if (files.has(to) || directories.has(to)) {
+        const error = new MemoryStorageError("EEXIST");
+        (error as NodeJS.ErrnoException).code = "EEXIST";
+        throw error;
+      }
+      const source = inodes.get(from) ?? from;
+      const value = files.get(source);
+      if (value === undefined) throw new MemoryStorageError("ENOENT");
+      // A second name for one inode, exactly as the real store relies upon.
+      files.set(to, value);
+      inodes.set(to, source);
+    },
+    size: (path) => Buffer.byteLength(files.get(resolve(path)) ?? "", "utf8"),
+  };
 }
 
 /** True when `target` stays inside `root` once both are fully resolved. */
@@ -711,6 +947,7 @@ const HARNESS_RUN_OPTION_COVERAGE: Readonly<Record<keyof HarnessRunOptions, true
   signal: true,
   onOutput: true,
   onEvent: true,
+  storage: true,
 };
 
 export const HARNESS_RUN_OPTION_KEYS: readonly string[] = Object.keys(HARNESS_RUN_OPTION_COVERAGE);
@@ -913,14 +1150,20 @@ export function validateHarnessEvent(event: HarnessEvent): void {
 export async function runHarness(options: HarnessRunOptions): Promise<HarnessRunResult> {
   validateHarnessRunOptions(options);
   const seed = options.seed ?? deterministicSeed(options.suite, options.runId);
-  const store = new ArtifactStore(options.root, options.runId, options.resume === true, {
-    runId: options.runId,
-    suite: options.suite,
-    seed,
-    // Ordered as the run will execute them, because the seed derives from that
-    // order: a resume that reordered its steps is a different run.
-    stepIds: orderSteps(options.steps).map((step) => step.id),
-  });
+  const store = new ArtifactStore(
+    options.root,
+    options.runId,
+    options.resume === true,
+    {
+      runId: options.runId,
+      suite: options.suite,
+      seed,
+      // Ordered as the run will execute them, because the seed derives from
+      // that order: a resume that reordered its steps is a different run.
+      stepIds: orderSteps(options.steps).map((step) => step.id),
+    },
+    options.storage ?? nodeArtifactStorage,
+  );
   const output = options.onOutput ?? ((text: string) => process.stderr.write(text));
   const eventSink =
     options.onEvent ??
@@ -989,7 +1232,9 @@ export async function runHarness(options: HarnessRunOptions): Promise<HarnessRun
   }
 
   const junit = store.writeJUnit(events);
-  const digest = createHash("sha256").update(readFileSync(junit)).digest("hex");
+  const digest = createHash("sha256")
+    .update(store.readArtifact(junit), "utf8")
+    .digest("hex");
   const finishedAt = new Date().toISOString();
   const summary = summaryEvent(options, seed, events, finishedAt, digest);
   recordEvent(store, events, eventSink, summary);
@@ -1589,6 +1834,8 @@ export interface PublishFailureBlobInput {
   readonly stored: string;
   /** Distinguishes staging names within one process. */
   readonly attempt: number;
+  /** Defaults to the real filesystem. */
+  readonly storage?: HarnessArtifactStorage;
 }
 
 /**
@@ -1614,6 +1861,7 @@ export interface PublishFailureBlobInput {
  * write into the repository's own artifact area to exercise it.
  */
 export function publishFailureBlob(input: PublishFailureBlobInput): string {
+  const storage = input.storage ?? nodeArtifactStorage;
   if (!SHA256_HEX.test(input.digest)) {
     throw new HarnessError("ARTIFACT_PATH_UNSAFE", "a blob name must be a sha256 hex digest.");
   }
@@ -1647,38 +1895,50 @@ export function publishFailureBlob(input: PublishFailureBlobInput): string {
   const artifactsDirectory = realDirectory(
     resolve(input.artifactsDirectory),
     "ARTIFACT_PATH_UNSAFE",
+    storage,
   );
-  const containmentRoot = realDirectory(resolve(input.containmentRoot), "ARTIFACT_PATH_UNSAFE");
+  const containmentRoot = realDirectory(
+    resolve(input.containmentRoot),
+    "ARTIFACT_PATH_UNSAFE",
+    storage,
+  );
   assertContained(containmentRoot, artifactsDirectory, "ARTIFACT_PATH_UNSAFE");
 
-  const store = blobStoreDirectory(artifactsDirectory);
+  const store = blobStoreDirectory(artifactsDirectory, storage);
   const path = join(store, input.digest);
   assertContained(containmentRoot, path, "ARTIFACT_PATH_UNSAFE");
-  assertRegularOrAbsent(path, "ARTIFACT_PATH_UNSAFE");
-  if (existsSync(path)) {
-    assertBlobAgrees(path, input.stored);
+  assertRegularOrAbsent(path, "ARTIFACT_PATH_UNSAFE", storage);
+  if (storage.exists(path)) {
+    assertBlobAgrees(path, input.stored, storage);
     return path;
   }
   const staging = join(
-    ensureDirectDirectory(store, ARTIFACT_BLOB_STAGING_DIRECTORY),
+    ensureDirectDirectory(store, ARTIFACT_BLOB_STAGING_DIRECTORY, storage),
     `${input.digest}.${process.pid}.${input.attempt}`,
   );
   assertContained(containmentRoot, staging, "ARTIFACT_PATH_UNSAFE");
-  assertRegularOrAbsent(staging, "ARTIFACT_PATH_UNSAFE");
-  writeFileSync(staging, input.stored, { encoding: "utf8", flag: "wx" });
+  assertRegularOrAbsent(staging, "ARTIFACT_PATH_UNSAFE", storage);
+  storage.writeExclusive(staging, input.stored);
+  // The contended window: this publisher has seen no blob and is about to claim
+  // the name. A test hooks here to let another publisher win first.
+  storage.beforeLink?.(path);
   try {
-    linkSync(staging, path);
+    storage.link(staging, path);
   } catch (error) {
     if ((error as NodeJS.ErrnoException).code !== "EEXIST") throw error;
     // A concurrent writer published first. Benign when the bytes agree; the
     // staging entry stays as the retained record that the race happened.
-    assertBlobAgrees(path, input.stored);
+    assertBlobAgrees(path, input.stored, storage);
   }
   return path;
 }
 
-function assertBlobAgrees(path: string, stored: string): void {
-  if (readFileSync(path, "utf8") !== stored) {
+function assertBlobAgrees(
+  path: string,
+  stored: string,
+  storage: HarnessArtifactStorage = nodeArtifactStorage,
+): void {
+  if (storage.readFile(path) !== stored) {
     throw new HarnessError(
       "ARTIFACT_BLOB_MISMATCH",
       "a stored blob does not match its digest; retained evidence was left untouched.",
@@ -1687,10 +1947,14 @@ function assertBlobAgrees(path: string, stored: string): void {
 }
 
 /** `<artifacts>/blobs/sha256`, created on demand. */
-function blobStoreDirectory(artifactsDirectory: string): string {
+function blobStoreDirectory(
+  artifactsDirectory: string,
+  storage: HarnessArtifactStorage = nodeArtifactStorage,
+): string {
   return ensureDirectDirectory(
-    ensureDirectDirectory(artifactsDirectory, ARTIFACT_BLOB_DIRECTORY),
+    ensureDirectDirectory(artifactsDirectory, ARTIFACT_BLOB_DIRECTORY, storage),
     "sha256",
+    storage,
   );
 }
 
@@ -1701,7 +1965,10 @@ function blobStoreDirectory(artifactsDirectory: string): string {
  * rather than an implementation detail: it should track the count of distinct
  * blobs first published by this checkout, and grow only on a lost race.
  */
-export function countBlobStagingArtifacts(root: string): number {
+export function countBlobStagingArtifacts(
+  root: string,
+  storage: HarnessArtifactStorage = nodeArtifactStorage,
+): number {
   const staging = join(
     resolve(root),
     "e2e",
@@ -1746,7 +2013,12 @@ export function runIdentityDigest(identity: RunIdentity): string {
  * that misreports both halves. Refusing is the only honest option: nothing here
  * may rewrite or remove the earlier evidence to make it agree.
  */
-export function reconcileRunIdentity(path: string, identity: RunIdentity, resuming: boolean): void {
+export function reconcileRunIdentity(
+  path: string,
+  identity: RunIdentity,
+  resuming: boolean,
+  storage: HarnessArtifactStorage = nodeArtifactStorage,
+): void {
   const digest = runIdentityDigest(identity);
   const body = `${JSON.stringify({
     schema_version: HARNESS_SCHEMA_VERSION,
@@ -1758,15 +2030,15 @@ export function reconcileRunIdentity(path: string, identity: RunIdentity, resumi
     identity_digest: digest,
   })}\n`;
 
-  if (!existsSync(path)) {
+  if (!storage.exists(path)) {
     // A resume whose namespace exists but which has no identity record predates
     // this check. Recording it now is additive; claiming it was verified is not.
-    writeFileSync(path, body, { encoding: "utf8", flag: "wx" });
+    storage.writeExclusive(path, body);
     return;
   }
   let recorded: { identity_digest?: unknown; suite?: unknown; seed?: unknown };
   try {
-    recorded = JSON.parse(readFileSync(path, "utf8")) as typeof recorded;
+    recorded = JSON.parse(storage.readFile(path)) as typeof recorded;
   } catch {
     throw new HarnessError(
       "RUN_IDENTITY_UNREADABLE",
@@ -1904,8 +2176,9 @@ export function reconcileFailureManifest(
   manifest: string,
   artifactsDirectory: string,
   runId: string,
+  storage: HarnessArtifactStorage = nodeArtifactStorage,
 ): FailureManifestReconciliation {
-  if (!existsSync(manifest)) {
+  if (!storage.exists(manifest)) {
     return { attemptCount: 0, stored: [], dangling: [], unfinishedAttempts: [] };
   }
   const store = join(artifactsDirectory, ARTIFACT_BLOB_DIRECTORY, "sha256");
@@ -1914,7 +2187,7 @@ export function reconcileFailureManifest(
   const intents = new Map<string, string>();
   const completions = new Map<string, string>();
 
-  for (const line of readFileSync(manifest, "utf8").split("\n")) {
+  for (const line of storage.readFile(manifest).split("\n")) {
     if (line.trim() === "") continue;
     const record = parseManifestRecord(line, runId);
     const key = slot(record);
@@ -1948,7 +2221,7 @@ export function reconcileFailureManifest(
     // Presence in the store decides, not the completion line: a completion
     // written before a crash that lost the blob is still missing evidence, and
     // a blob published by another run satisfies this one's reference.
-    if (existsSync(join(store, digest))) stored.add(digest);
+    if (storage.exists(join(store, digest))) stored.add(digest);
     else dangling.add(digest);
     // An intent with no completion is where the process died. Distinct from a
     // dangling digest: the blob can be present (another run published the same
@@ -1964,13 +2237,16 @@ export function reconcileFailureManifest(
   };
 }
 
-export function countArtifactNamespaces(root: string): number {
+export function countArtifactNamespaces(
+  root: string,
+  storage: HarnessArtifactStorage = nodeArtifactStorage,
+): number {
   const artifacts = join(resolve(root), "e2e", "artifacts");
-  if (!existsSync(artifacts)) return 0;
+  if (!storage.exists(artifacts)) return 0;
   let count = 0;
-  for (const entry of readdirSync(artifacts, { withFileTypes: true })) {
-    if (!entry.isDirectory()) continue;
-    if (entry.name === ARTIFACT_BLOB_DIRECTORY) continue;
+  for (const name of storage.readdir(artifacts)) {
+    if (!storage.isDirectory(join(artifacts, name))) continue;
+    if (name === ARTIFACT_BLOB_DIRECTORY) continue;
     count += 1;
   }
   return count;
@@ -2010,24 +2286,59 @@ export function exceedsArtifactNamespaceBudget(
  * of writers racing at the boundary. It is a backstop, not a quota, and that
  * bound is stated rather than implied.
  */
+export interface ArtifactCapacityReport {
+  readonly used: number;
+  readonly limit: number;
+  readonly exceeded: boolean;
+  /** The operator action, which is never deletion. */
+  readonly remedy: string;
+}
+
+/**
+ * Structured capacity preflight.
+ *
+ * A value rather than an assertion, so a caller decides what to do with it: a
+ * CLI can refuse, an operator can read it, and a unit test can check its shape
+ * without making a green suite depend on ambient disk state. The hard refusal
+ * still lives in `assertArtifactNamespaceBudget`, which fires when a run
+ * actually tries to create a namespace.
+ */
+export function artifactCapacityReport(
+  root: string,
+  limit = MAX_ARTIFACT_NAMESPACES,
+  storage: HarnessArtifactStorage = nodeArtifactStorage,
+): ArtifactCapacityReport {
+  const used = countArtifactNamespaces(root, storage);
+  return {
+    used,
+    limit,
+    exceeded: exceedsArtifactNamespaceBudget(used, limit),
+    remedy:
+      "Nothing may be deleted. Inspect e2e/artifacts — every directory counts, " +
+      "including fixture scratch no run created — then archive or move them elsewhere.",
+  };
+}
+
 export function reserveArtifactNamespace(
   root: string,
   artifactsDirectory: string,
   namespace: string,
   limit = MAX_ARTIFACT_NAMESPACES,
+  storage: HarnessArtifactStorage = nodeArtifactStorage,
 ): string {
-  assertArtifactNamespaceBudget(root, namespace, limit);
-  return ensureDirectDirectory(artifactsDirectory, namespace);
+  assertArtifactNamespaceBudget(root, namespace, limit, storage);
+  return ensureDirectDirectory(artifactsDirectory, namespace, storage);
 }
 
 export function assertArtifactNamespaceBudget(
   root: string,
   namespace: string,
   limit = MAX_ARTIFACT_NAMESPACES,
+  storage: HarnessArtifactStorage = nodeArtifactStorage,
 ): void {
   const artifacts = join(resolve(root), "e2e", "artifacts");
-  if (existsSync(join(artifacts, namespace))) return;
-  const used = countArtifactNamespaces(root);
+  if (storage.exists(join(artifacts, namespace))) return;
+  const used = countArtifactNamespaces(root, storage);
   if (exceedsArtifactNamespaceBudget(used, limit)) {
     throw new HarnessError(
       "ARTIFACT_RETENTION_EXCEEDED",
@@ -2046,39 +2357,50 @@ function assertContained(root: string, target: string, code: string): void {
     throw new HarnessError(code, "artifact path resolves outside the repository.");
 }
 
-function realDirectory(path: string, code: string): string {
+function realDirectory(
+  path: string,
+  code: string,
+  storage: HarnessArtifactStorage = nodeArtifactStorage,
+): string {
   try {
-    const stat = lstatSync(path);
-    if (stat.isSymbolicLink() || !stat.isDirectory()) throw new Error("unsafe directory");
-    return realpathSync(path);
+    if (storage.isSymlink(path) || !storage.isDirectory(path)) {
+      throw new Error("unsafe directory");
+    }
+    return storage.realpath(path);
   } catch {
     throw new HarnessError(code, "expected a real repository directory.");
   }
 }
 
-function ensureDirectDirectory(parent: string, child: string): string {
+function ensureDirectDirectory(
+  parent: string,
+  child: string,
+  storage: HarnessArtifactStorage = nodeArtifactStorage,
+): string {
   const target = join(parent, child);
   assertContained(parent, target, "ARTIFACT_PATH_UNSAFE");
-  if (existsSync(target) || isSymbolicLink(target)) {
-    const stat = lstatSync(target);
-    if (stat.isSymbolicLink() || !stat.isDirectory()) {
+  if (storage.exists(target) || storage.isSymlink(target)) {
+    if (storage.isSymlink(target) || !storage.isDirectory(target)) {
       throw new HarnessError(
         "ARTIFACT_PATH_UNSAFE",
         "artifact directory is not a direct real directory.",
       );
     }
   } else {
-    mkdirSync(target);
+    storage.mkdir(target);
   }
-  const physical = realDirectory(target, "ARTIFACT_PATH_UNSAFE");
+  const physical = realDirectory(target, "ARTIFACT_PATH_UNSAFE", storage);
   assertContained(parent, physical, "ARTIFACT_PATH_UNSAFE");
   return physical;
 }
 
-function assertRegularOrAbsent(path: string, code: string): void {
-  if (!existsSync(path) && !isSymbolicLink(path)) return;
-  const stat = lstatSync(path);
-  if (stat.isSymbolicLink() || !stat.isFile()) {
+function assertRegularOrAbsent(
+  path: string,
+  code: string,
+  storage: HarnessArtifactStorage = nodeArtifactStorage,
+): void {
+  if (!storage.exists(path) && !storage.isSymlink(path)) return;
+  if (storage.isSymlink(path) || !storage.isFile(path)) {
     throw new HarnessError(code, "artifact file path is not a regular file.");
   }
 }
