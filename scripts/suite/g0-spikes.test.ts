@@ -8,7 +8,15 @@
  * only, which is the part this module actually owns.
  */
 import { describe, expect, test } from "bun:test";
-import { chmodSync, existsSync, mkdirSync, mkdtempSync, writeFileSync } from "node:fs";
+import { execFileSync } from "node:child_process";
+import {
+  chmodSync,
+  existsSync,
+  mkdirSync,
+  mkdtempSync,
+  readFileSync,
+  writeFileSync,
+} from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
@@ -55,6 +63,16 @@ function readableOnly(root: string, id: G0Spike["id"], body: string, mode = 0o64
 
 function codes(summary: G0RunSummary): string[] {
   return summary.results.map((result) => result.code);
+}
+
+/** Whether a bare command resolves on PATH, for fixture prerequisites. */
+function which(command: string): boolean {
+  try {
+    execFileSync("command", ["-v", command], { shell: "/bin/bash", stdio: "ignore" });
+    return true;
+  } catch {
+    return false;
+  }
 }
 
 async function waitFor(path: string, timeoutMs = 3_000): Promise<void> {
@@ -445,51 +463,167 @@ describe("D8 — group cleanup is bounded and never signals a stale group", () =
     expect(elapsed).toBeLessThan(1_500);
   }, 25_000);
 
-  test("PLANTED: a cleanly exiting spike's process group is never signalled afterwards", async () => {
+  test("PLANTED: exit 0 with a surviving descendant is a leak, not a pass", async () => {
     const root = fixtureRoot();
-    const survivor = join(root, "clean-exit-background-survivor");
+    const sentinel = join(root, "descendant-wrote-after-exit");
     const summary = await runG0Spikes({
       root,
-      // The shell exits 0 immediately while a background descendant keeps
-      // running. Nothing asked for termination, so nothing may be signalled.
+      // The script exits 0 immediately while a background descendant keeps
+      // running and would write a sentinel a moment later.
+      spikes: [
+        executable(root, "s1", `(sleep 2; printf leaked > ${JSON.stringify(sentinel)}) &\nexit 0`),
+      ],
+      timeoutMs: 5_000,
+      terminationGraceMs: 300,
+      diagnosticSink: () => {},
+    });
+
+    // A previous revision reported this as G0_SPIKE_PASSED with exit 0 while the
+    // descendant went on running: a false green *and* a process leak.
+    expect(summary.results[0]?.code).toBe("G0_SPIKE_DESCENDANT_LEAKED");
+    expect(summary.results[0]?.status).toBe("fail");
+    expect(summary.exitCode).toBe(1);
+    expect(summary.exitCode).not.toBe(0);
+    // The script's own exit code is still reported; it just no longer decides
+    // the verdict on its own.
+    expect(summary.results[0]?.exitCode).toBe(0);
+
+    // The sentinel is the proof of death: had the descendant survived the
+    // bounded TERM/KILL it would have written by now.
+    await Bun.sleep(2_400);
+    expect(existsSync(sentinel)).toBe(false);
+  }, 25_000);
+
+  test("a descendant that ignores TERM is still killed and the spike is non-green", async () => {
+    const root = fixtureRoot();
+    const sentinel = join(root, "term-immune-descendant-wrote");
+    const summary = await runG0Spikes({
+      root,
       spikes: [
         executable(
           root,
           "s1",
-          `(sleep 0.4; printf survived > ${JSON.stringify(survivor)}) &\nexit 0`,
+          `(trap '' TERM; sleep 2; printf leaked > ${JSON.stringify(sentinel)}) &\nexit 0`,
         ),
       ],
       timeoutMs: 5_000,
-      terminationGraceMs: 100,
+      terminationGraceMs: 200,
+      diagnosticSink: () => {},
     });
 
-    expect(summary.results[0]?.code).toBe("G0_SPIKE_PASSED");
-    expect(summary.exitCode).toBe(0);
-    await Bun.sleep(700);
-    // The old code sent an unconditional SIGKILL to the group after every exit,
-    // including clean ones — signalling a group id whose leader had already been
-    // reaped. The descendant is the script's own choice and survives.
-    expect(existsSync(survivor)).toBe(true);
+    expect(summary.results[0]?.code).toBe("G0_SPIKE_DESCENDANT_LEAKED");
+    expect(summary.exitCode).toBe(1);
+    await Bun.sleep(2_400);
+    // TERM was ignored, so only the bounded KILL escalation can have stopped it.
+    expect(existsSync(sentinel)).toBe(false);
   }, 25_000);
 
-  test("PLANTED: a background process holding the inherited pipe cannot hang the runner", async () => {
+  test("a clean spike that leaves nothing behind stays fast and passes", async () => {
     const root = fixtureRoot();
     const startedAt = performance.now();
     const summary = await runG0Spikes({
       root,
-      // The shell exits at once, but the background subshell inherits stdout and
-      // keeps the pipe open for two seconds. Waiting for `end` unconditionally
-      // would block here with no timer left running to stop it.
-      spikes: [executable(root, "s1", "(sleep 2; printf late) &\nexit 0")],
+      spikes: [executable(root, "s1", "printf 'done\\n'; exit 0")],
       timeoutMs: 5_000,
-      postExitDrainMs: 150,
-      terminationGraceMs: 100,
+      // A grace period that must not be paid by a spike with nothing to reap.
+      terminationGraceMs: 3_000,
       diagnosticSink: () => {},
     });
     const elapsed = performance.now() - startedAt;
 
     expect(summary.results[0]?.code).toBe("G0_SPIKE_PASSED");
-    expect(elapsed).toBeLessThan(1_200);
+    expect(summary.exitCode).toBe(0);
+    expect(elapsed).toBeLessThan(1_500);
+  }, 25_000);
+
+  test("PLANTED: an unreadable process table fails closed rather than reporting clean", async () => {
+    const root = fixtureRoot();
+    const summary = await runG0Spikes({
+      root,
+      spikes: [executable(root, "s1", "exit 0")],
+      timeoutMs: 5_000,
+      // Nothing resolves under this name, so the scan cannot run at all.
+      psCommand: "definitely-not-an-installed-ps",
+      diagnosticSink: () => {},
+    });
+
+    // "I could not look" must never render as "there is nothing there". An
+    // earlier revision swallowed the failure and returned an empty survivor
+    // list, turning a broken scan into a clean bill of health.
+    expect(summary.results[0]?.code).toBe("G0_SPIKE_DESCENDANT_SCAN_FAILED");
+    expect(summary.results[0]?.status).toBe("fail");
+    expect(summary.exitCode).toBe(1);
+    expect(summary.results[0]?.code).not.toBe("G0_SPIKE_PASSED");
+  }, 25_000);
+
+  test("PLANTED: cleanup signals the owned group and never an individual pid", async () => {
+    // Signalling enumerated descendant pids is strictly more dangerous than a
+    // group signal: between the `ps` snapshot and the `kill`, a pid can exit and
+    // be reissued to an unrelated process, and there is no way to close that
+    // window from user space. The live supervisor pins the group id, so
+    // `kill(-pgid)` can only ever reach processes this runner started.
+    const source = readFileSync(join(import.meta.dir, "g0-spikes.ts"), "utf8");
+    const killCalls = [...source.matchAll(/process\.kill\(([^,)]+)/g)].map((m) =>
+      (m[1] as string).trim(),
+    );
+    expect(killCalls.length).toBeGreaterThan(0);
+    for (const target of killCalls) {
+      expect(target.startsWith("-")).toBe(true);
+    }
+    // And no pid-list escalation helper survives.
+    expect(source).not.toContain("signalPids");
+  });
+
+  test("a spike whose descendants exit on their own converges without being signalled", async () => {
+    const root = fixtureRoot();
+    const marker = join(root, "short-lived-descendant-finished");
+    const startedAt = performance.now();
+    const summary = await runG0Spikes({
+      root,
+      // The descendant races the runner's scan and exits by itself. Whether the
+      // scan happens to observe it or not, the run must converge and never wait
+      // on, or signal, a pid that has already gone.
+      spikes: [executable(root, "s1", `(printf done > ${JSON.stringify(marker)}) &\nexit 0`)],
+      timeoutMs: 5_000,
+      terminationGraceMs: 2_000,
+      diagnosticSink: () => {},
+    });
+    const elapsed = performance.now() - startedAt;
+
+    // Either outcome is legitimate — it depends on whether the scan happened to
+    // catch the descendant before it exited — but both must converge, and
+    // neither may report an unkillable process or a failed signal.
+    const settled: readonly string[] = ["G0_SPIKE_PASSED", "G0_SPIKE_DESCENDANT_LEAKED"];
+    expect(settled).toContain(String(summary.results[0]?.code));
+    expect(summary.results[0]?.code).not.toBe("G0_SPIKE_DESCENDANT_UNKILLABLE");
+    expect(summary.results[0]?.code).not.toBe("G0_SPIKE_PROCESS_GROUP_SIGNAL_FAILED");
+    expect(elapsed).toBeLessThan(3_000);
+    expect(existsSync(marker)).toBe(true);
+  }, 25_000);
+
+  test("PLANTED: a post-exit pipe holder is refused as a leak and cannot hang the runner", async () => {
+    const root = fixtureRoot();
+    const startedAt = performance.now();
+    const summary = await runG0Spikes({
+      root,
+      // The shell exits at once, but the background subshell inherits stdout and
+      // holds the pipe open for two seconds. Two properties are under test at
+      // once: waiting for `end` unconditionally would block here with no timer
+      // left to stop it, *and* a process still running after its script finished
+      // is a leak however convenient its exit code was.
+      spikes: [executable(root, "s1", "(sleep 2; printf late) &\nexit 0")],
+      timeoutMs: 5_000,
+      postExitDrainMs: 150,
+      terminationGraceMs: 300,
+      diagnosticSink: () => {},
+    });
+    const elapsed = performance.now() - startedAt;
+
+    expect(summary.results[0]?.code).toBe("G0_SPIKE_DESCENDANT_LEAKED");
+    expect(summary.results[0]?.status).toBe("fail");
+    expect(summary.exitCode).toBe(1);
+    expect(summary.results[0]?.code).not.toBe("G0_SPIKE_PASSED");
+    expect(elapsed).toBeLessThan(2_000);
   }, 25_000);
 
   test("abort terminates the running group and later spikes never start", async () => {
@@ -612,11 +746,94 @@ describe("D9 — child output stays out of the stdout contract", () => {
     const body = captured.join("");
     // Ceiling honoured, with room for the label line.
     expect(body.length).toBeLessThan(1_024);
-    expect(body).toContain("truncated at the capture ceiling");
+    expect(body).toContain("truncated: capture ceiling");
     expect(summary.results[0]?.outputTruncated).toBe(true);
     expect(JSON.parse(formatG0Summary(summary, root)).spikes[0].output_truncated).toBe(true);
     // Bounding must not turn into a hang: the child still ran to completion.
     expect(summary.results[0]?.code).toBe("G0_SPIKE_PASSED");
+  }, 25_000);
+
+  test("PLANTED: an expired post-exit drain declares truncation instead of claiming a complete log", async () => {
+    const root = fixtureRoot();
+    const captured: string[] = [];
+    const token = "asimp_ag_latewritercredential";
+    const summary = await runG0Spikes({
+      root,
+      // Enough output that the pipe is still being drained when the deadline
+      // expires, so the tail is genuinely discarded. Losing it is acceptable —
+      // an unbounded wait is not — but losing it *silently* would let the
+      // structured record claim a completeness it does not have.
+      spikes: [
+        executable(
+          root,
+          "s1",
+          `printf '%s\\n' ${JSON.stringify(token)}\n` +
+            "for i in $(seq 1 20000); do printf 'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\\n'; done\n" +
+            "exit 0",
+        ),
+      ],
+      timeoutMs: 10_000,
+      postExitDrainMs: 1,
+      maxCapturedBytes: 512,
+      terminationGraceMs: 200,
+      diagnosticSink: (text) => captured.push(text),
+    });
+
+    const record = JSON.parse(formatG0Summary(summary, root)).spikes[0];
+    expect(summary.results[0]?.outputTruncated).toBe(true);
+    expect(record.output_truncated).toBe(true);
+
+    // What *was* replayed stays redacted and bounded: a truncation notice must
+    // not become a hole through which raw child bytes escape.
+    const body = captured.join("");
+    expect(body).not.toContain(token);
+    expect(body).not.toContain("asimp_ag_");
+    expect(body).not.toContain(root);
+    expect(body).toContain("<redacted>");
+  }, 25_000);
+
+  test("PLANTED: a group-escaping pipe holder expires the drain, and the loss is declared", async () => {
+    // Reaping normally closes the pipes before the drain can expire, so the only
+    // way to reach that path is a holder that leaves the process group while
+    // keeping the inherited descriptor — a spike that daemonises. `perl` is the
+    // one POSIX `setsid` this fixture can reach; if it is missing the test fails
+    // loudly rather than skipping, because a safety check that quietly never
+    // runs is indistinguishable from one that passes.
+    expect(which("perl")).toBe(true);
+
+    const root = fixtureRoot();
+    const captured: string[] = [];
+    const token = "asimp_ag_daemonisedcredential";
+    const summary = await runG0Spikes({
+      root,
+      spikes: [
+        executable(
+          root,
+          "s1",
+          `printf '%s\\n' ${JSON.stringify(token)}\n` +
+            "perl -e 'use POSIX qw(setsid); setsid(); sleep 3; print \"late-output\\n\";' &\n" +
+            "exit 0",
+        ),
+      ],
+      timeoutMs: 8_000,
+      postExitDrainMs: 120,
+      terminationGraceMs: 200,
+      diagnosticSink: (text) => captured.push(text),
+    });
+    const body = captured.join("");
+
+    // The loss is flagged in the structured record...
+    expect(summary.results[0]?.outputTruncated).toBe(true);
+    expect(JSON.parse(formatG0Summary(summary, root)).spikes[0].output_truncated).toBe(true);
+    // ...and the reason is named, not merely flagged.
+    expect(body).toContain("post-exit drain expired");
+    expect(body).toContain("later output was discarded");
+    // The run is non-green: something outlived the script.
+    expect(summary.exitCode).not.toBe(0);
+    // And nothing raw escaped on the way out.
+    expect(body).not.toContain(token);
+    expect(body).not.toContain("asimp_ag_");
+    expect(body).not.toContain(root);
   }, 25_000);
 
   test("the aggregate record redacts an absolute root and a credential-shaped label", () => {

@@ -30,7 +30,7 @@
  * rather than hopefully — see `signalGroup` and `terminateGroup` below.
  */
 
-import { type ChildProcess, spawn } from "node:child_process";
+import { type ChildProcess, execFileSync, spawn } from "node:child_process";
 import { accessSync, constants as fsConstants, statSync } from "node:fs";
 import { relative, resolve, sep } from "node:path";
 import type { Readable } from "node:stream";
@@ -79,7 +79,12 @@ export type G0SpikeCode =
   | "G0_SPIKE_SPAWN_FAILED"
   | "G0_SPIKE_PROCESS_GROUP_UNSUPPORTED"
   | "G0_SPIKE_PROCESS_GROUP_SIGNAL_FAILED"
-  | "G0_SPIKE_PROCESS_GROUP_RECYCLED";
+  /** The script finished but processes it started were still running. */
+  | "G0_SPIKE_DESCENDANT_LEAKED"
+  /** Descendants survived a bounded TERM and KILL of the owned group. */
+  | "G0_SPIKE_DESCENDANT_UNKILLABLE"
+  /** The process table could not be read, so no claim about leaks is possible. */
+  | "G0_SPIKE_DESCENDANT_SCAN_FAILED";
 
 export interface G0SpikeResult {
   readonly id: string;
@@ -143,6 +148,12 @@ export interface G0RunOptions {
    * can hold the runner open, not a wait every spike pays.
    */
   readonly postExitDrainMs?: number;
+  /**
+   * Command used to read the process table. A bare name resolved through `PATH`,
+   * for the same reason `interpreter` is: present so the scan-failure path can
+   * be exercised honestly rather than assumed unreachable.
+   */
+  readonly psCommand?: string;
 }
 
 const BARE_COMMAND = /^[A-Za-z0-9_-]+$/;
@@ -265,35 +276,177 @@ function immediateResult(id: string, code: G0SpikeCode): G0SpikeResult {
   return { id, status: "fail", code, durationMs: 0 };
 }
 
-type GroupSignalOutcome = "signalled" | "gone" | "failed";
+/**
+ * The supervisor: a shell whose only job is to be the process-group leader and
+ * to stay alive until this runner says otherwise.
+ *
+ * Running the spike script directly as the group leader was the mistake. When
+ * the script exited, the leader exited with it, and every question worth asking
+ * afterwards — are there descendants left? may I still signal this group id? —
+ * became unanswerable, because the group either had no leader or had been
+ * recycled out from under us. The observable consequence was a spike that exited
+ * 0 while leaving a live background process behind, reported as `pass`.
+ *
+ * So the script runs one level down. The supervisor waits for it, publishes its
+ * real exit status on fd 3, and then *blocks* — pinning the process-group id
+ * open — until this runner closes fd 3. Descendant cleanup therefore always
+ * happens while the leader is demonstrably alive, which is what makes signalling
+ * a recycled group id structurally impossible rather than merely unlikely.
+ *
+ * Two details are load-bearing and easy to get wrong:
+ *
+ *   - There is deliberately **no `trap`**. `trap '' TERM` looks like the obvious
+ *     way to protect the supervisor, but an ignored disposition is inherited
+ *     across fork and exec, so it would silently make every descendant immune to
+ *     the SIGTERM this module relies on. Nothing signals the supervisor, so it
+ *     needs no protection.
+ *   - The hold uses the `read` builtin rather than `cat`. `cat` would fork a
+ *     process into the very group being audited, and the supervisor would be
+ *     reported as its own leak.
+ *
+ * The control line also carries the two facts this runner can no longer observe
+ * directly, now that the script is a grandchild rather than a child:
+ *
+ *   - **Start failure.** `command -v` decides it before anything is launched, so
+ *     "the interpreter does not exist" stays distinguishable from "the script
+ *     ran and chose to exit 127". Inferring it from the status would conflate
+ *     the two.
+ *   - **Signal.** `wait` reports a signalled child as 128+N, and this reports
+ *     the decoded name alongside the raw status. The shell cannot distinguish
+ *     that from a script that literally called `exit 143`, and neither can this
+ *     module: that ambiguity is inherent to POSIX `wait` and is the price of the
+ *     group ownership the supervisor buys.
+ */
+const SUPERVISOR_PROGRAM = `set -u
+if ! command -v "$1" >/dev/null 2>&1; then
+  printf 'G0SUP spawn_failed=1 status=127 signal=\\n' >&3
+  read -r _ <&3 2>/dev/null || true
+  exit 127
+fi
+"$1" "$2" &
+target=$!
+wait "$target"
+status=$?
+signal=
+if [ "$status" -gt 128 ] && [ "$status" -lt 193 ]; then
+  signal=$(kill -l $((status - 128)) 2>/dev/null || printf '')
+fi
+printf 'G0SUP status=%s signal=%s\\n' "$status" "$signal" >&3
+read -r _ <&3 2>/dev/null || true
+exit "$status"`;
 
 /**
- * Signal an entire process group, reporting the three outcomes separately.
+ * How many processes other than the leader are still in the group.
  *
- * The negative PID form targets the group, never the runner. `ESRCH` is reported
- * as `gone` rather than as success: a caller that cannot tell "I killed it" from
- * "there was nothing there" cannot make the recycling check below.
+ * `unknown` is a first-class answer. An earlier revision swallowed a `ps`
+ * failure and returned an empty list, which is the most dangerous possible
+ * response: "I could not look" rendered as "there is nothing there", turning a
+ * broken scan into a clean bill of health. A caller that cannot see the process
+ * table has no evidence, and no evidence must never read as no leak.
+ *
+ * Zombies are excluded. A reap-pending entry is an accounting artefact of the
+ * supervisor being blocked, not a process still doing anything.
  */
-function signalGroup(pid: number, signal: NodeJS.Signals | 0): GroupSignalOutcome {
+type SurvivorScan =
+  | { readonly kind: "ok"; readonly survivors: number }
+  | { readonly kind: "unknown" };
+
+function scanGroup(pgid: number, psCommand: string): SurvivorScan {
+  let listing: string;
   try {
-    process.kill(-pid, signal);
+    listing = execFileSync(psCommand, ["-A", "-o", "pid=,pgid=,state="], {
+      encoding: "utf8",
+      timeout: 5_000,
+    });
+  } catch {
+    return { kind: "unknown" };
+  }
+  let survivors = 0;
+  for (const line of listing.split("\n")) {
+    const match = /^\s*(\d+)\s+(\d+)\s+(\S+)/.exec(line);
+    if (match === null) continue;
+    if (Number(match[2]) !== pgid || Number(match[1]) === pgid) continue;
+    if (match[3]?.startsWith("Z") === true) continue;
+    survivors += 1;
+  }
+  return { kind: "ok", survivors };
+}
+
+/**
+ * Signal the whole owned group, never an individual pid.
+ *
+ * Enumerating descendant pids and signalling them one by one looks safer than a
+ * group signal and is in fact strictly more dangerous: between the `ps` snapshot
+ * and the `kill`, any of those pids can exit and be reissued by the kernel to an
+ * unrelated process, and the signal lands on a stranger. There is no way to
+ * close that window from user space.
+ *
+ * A group signal has no such window *provided the group id is owned*, and that
+ * is exactly the invariant the live supervisor exists to supply: while it is
+ * running, the pgid cannot be reissued, so `kill(-pgid)` can only reach
+ * processes this runner started. The supervisor receives the signal too and
+ * dies with its descendants, which is deliberate and harmless — its exit status
+ * has already been read off fd 3 by the time cleanup begins, so nothing is lost.
+ */
+function signalOwnedGroup(pgid: number, signal: NodeJS.Signals): "signalled" | "gone" | "failed" {
+  try {
+    process.kill(-pgid, signal);
     return "signalled";
   } catch (error) {
     return (error as NodeJS.ErrnoException).code === "ESRCH" ? "gone" : "failed";
   }
 }
 
-function groupIsAlive(pid: number): boolean {
-  return signalGroup(pid, 0) === "signalled";
+export interface DescendantReaping {
+  /** True when the spike left processes running after its script finished. */
+  readonly leaked: boolean;
+  /** True when the process table could not be read; the result is not trustworthy. */
+  readonly unknown: boolean;
+  /** True when the group still had members after a bounded TERM then KILL. */
+  readonly unkillable: boolean;
+  readonly signalFailed: boolean;
 }
 
-async function pollUntilGroupExits(pid: number, graceMs: number): Promise<boolean> {
-  const deadline = performance.now() + graceMs;
-  while (performance.now() < deadline) {
-    if (!groupIsAlive(pid)) return true;
-    await Bun.sleep(GROUP_POLL_INTERVAL_MS);
+/**
+ * Bounded TERM-then-KILL over whatever the spike left behind.
+ *
+ * Both signals are addressed to the group while the supervisor still owns it.
+ * The escalation stops the moment the group reports empty, so a spike that
+ * cleans up promptly pays a poll interval rather than the whole grace period.
+ */
+async function reapDescendants(
+  pgid: number,
+  graceMs: number,
+  psCommand: string,
+): Promise<DescendantReaping> {
+  const initial = scanGroup(pgid, psCommand);
+  if (initial.kind === "unknown") {
+    return { leaked: false, unknown: true, unkillable: false, signalFailed: false };
   }
-  return !groupIsAlive(pid);
+  if (initial.survivors === 0) {
+    return { leaked: false, unknown: false, unkillable: false, signalFailed: false };
+  }
+
+  let signalFailed = false;
+  const escalate = async (signal: NodeJS.Signals): Promise<SurvivorScan> => {
+    if (signalOwnedGroup(pgid, signal) === "failed") signalFailed = true;
+    const deadline = performance.now() + graceMs;
+    let scan = scanGroup(pgid, psCommand);
+    while (scan.kind === "ok" && scan.survivors > 0 && performance.now() < deadline) {
+      await Bun.sleep(GROUP_POLL_INTERVAL_MS);
+      scan = scanGroup(pgid, psCommand);
+    }
+    return scan;
+  };
+
+  let scan = await escalate("SIGTERM");
+  if (scan.kind === "ok" && scan.survivors > 0) scan = await escalate("SIGKILL");
+  return {
+    leaked: true,
+    unknown: scan.kind === "unknown",
+    unkillable: scan.kind === "ok" && scan.survivors > 0,
+    signalFailed,
+  };
 }
 
 /**
@@ -356,12 +509,19 @@ function replayCapture(
   channel: "stdout" | "stderr",
   capture: { text(): string; truncated(): boolean },
   root: string,
+  drainExpired: boolean,
 ): void {
   const text = capture.text();
-  if (text.length === 0) return;
-  const suffix = capture.truncated() ? " (truncated at the capture ceiling)" : "";
+  // The header is emitted even for an empty capture when the drain expired: the
+  // fact that output may have been lost is itself the diagnostic, and staying
+  // silent about it would let a partial log pass for a complete one.
+  if (text.length === 0 && !drainExpired) return;
+  const reasons: string[] = [];
+  if (capture.truncated()) reasons.push("capture ceiling");
+  if (drainExpired) reasons.push("post-exit drain expired; later output was discarded");
+  const suffix = reasons.length > 0 ? ` (truncated: ${reasons.join("; ")})` : "";
   sink(`--- g0 spike ${id} ${channel}${suffix} ---\n`);
-  sink(redact(text.endsWith("\n") ? text : `${text}\n`, root));
+  if (text.length > 0) sink(redact(text.endsWith("\n") ? text : `${text}\n`, root));
 }
 
 interface SpikeRunContext {
@@ -373,6 +533,7 @@ interface SpikeRunContext {
   readonly diagnosticSink: (text: string) => void;
   readonly interpreter: string;
   readonly postExitDrainMs: number;
+  readonly psCommand: string;
   /** True when the per-spike timeout was clamped by the aggregate deadline. */
   readonly boundedByAggregate: boolean;
 }
@@ -412,94 +573,75 @@ async function runSpike(spike: G0Spike, context: SpikeRunContext): Promise<G0Spi
   const startedAt = performance.now();
   let child: ChildProcess;
   try {
-    child = spawn(context.interpreter, [path], {
+    child = spawn("bash", ["-c", SUPERVISOR_PROGRAM, "g0-supervisor", context.interpreter, path], {
       cwd: context.root,
+      // `detached` makes the supervisor a session and process-group leader, so
+      // its pid is the pgid every descendant inherits.
       detached: true,
       // Never `inherit`: this process's stdout carries the aggregate JSON, and a
-      // spike must not be able to write into that record.
-      stdio: ["ignore", "pipe", "pipe"],
+      // spike must not be able to write into that record. fd 3 is the
+      // supervisor's private control channel and never carries spike output.
+      stdio: ["ignore", "pipe", "pipe", "pipe"],
     });
   } catch {
     return immediateResult(spike.id, "G0_SPIKE_SPAWN_FAILED");
   }
 
+  const pgid = child.pid;
   const stdout = captureStream(child.stdout, context.maxCapturedBytes);
   const stderr = captureStream(child.stderr, context.maxCapturedBytes);
+  const control = child.stdio[3] as Readable & { end?: () => void };
+  let controlText = "";
+  control?.on("data", (chunk: Buffer) => {
+    controlText += chunk.toString("utf8");
+  });
+  /** Releases the supervisor's hold on the process group. Safe to call twice. */
+  const releaseSupervisor = () => {
+    try {
+      (control as unknown as { end?: () => void })?.end?.();
+    } catch {
+      /* the supervisor is already gone */
+    }
+  };
 
   let reason: "timeout" | "abort" | undefined;
   let terminationRequested = false;
   let signalFailed = false;
-  let groupRecycled = false;
-  let childExited = false;
-  /** Latched once the group is observed empty; a later "alive" means reuse. */
-  let sawGroupGone = false;
+  let termination: Promise<void> | undefined;
 
   /**
-   * Terminate the group, then escalate only if it is still there.
+   * Stop the spike early, without ever signalling the group.
    *
-   * Two defects lived here. The first was waiting the full grace period even
-   * when the group had already gone, which is dead time on every timeout. The
-   * second was worse: an unconditional post-exit `SIGKILL` to the group. Once
-   * the leader has exited and been reaped, its PID is a candidate for reuse, and
-   * a group id that has gone quiet and then reappears is not necessarily the
-   * group we started. So the escalation polls for the group to disappear, and
-   * refuses to signal if it ever observes the group dead and then alive again —
-   * that transition is the recycling signature, and the right response to it is
-   * to signal nothing at all and say so.
+   * Signals are addressed to descendant pids individually. The supervisor is
+   * never among them, so it survives to keep the group id pinned and this runner
+   * never has to reason about whether the id it is about to signal still belongs
+   * to the process tree it started. That is the whole reason the recycling
+   * hazard is gone rather than merely mitigated.
    */
-  let escalation: Promise<void> | undefined;
-  const terminateGroup = (why: "timeout" | "abort"): void => {
-    if (terminationRequested) return;
+  const terminate = (why: "timeout" | "abort"): void => {
+    if (terminationRequested || pgid === undefined) return;
     terminationRequested = true;
     reason = why;
-    const pid = child.pid;
-    if (pid === undefined) return;
-    const term = signalGroup(pid, "SIGTERM");
-    if (term === "failed") {
-      signalFailed = true;
-      return;
-    }
-    if (term === "gone") {
-      sawGroupGone = true;
-      return; // nothing to escalate against
-    }
-    escalation = (async () => {
-      if (await pollUntilGroupExits(pid, context.terminationGraceMs)) {
-        sawGroupGone = true;
-        return;
-      }
-      // Still alive after the grace period. Re-probe immediately before the kill
-      // so the window between decision and signal is as small as it can be, and
-      // so a group that has *just* gone is never signalled at all.
-      if (!groupIsAlive(pid)) {
-        sawGroupGone = true;
-        return;
-      }
-      if (sawGroupGone) {
-        // Observed empty earlier and answering now. A process group does not
-        // come back from the dead, so this id belongs to whatever the kernel
-        // handed the number to next. Signalling it would kill an unrelated
-        // process tree, so nothing is sent and the result says why.
-        groupRecycled = true;
-        return;
-      }
-      const kill = signalGroup(pid, "SIGKILL");
-      if (kill === "failed") signalFailed = true;
-      else if (kill === "gone") sawGroupGone = true;
+    termination = (async () => {
+      // The script has not finished, so there is no status to preserve: signal
+      // the whole owned group, supervisor included, and let the escalation run.
+      if (signalOwnedGroup(pgid, "SIGTERM") === "failed") signalFailed = true;
+      const outcome = await reapDescendants(pgid, context.terminationGraceMs, context.psCommand);
+      if (outcome.signalFailed) signalFailed = true;
     })();
   };
 
   const timeout = setTimeout(() => {
-    void terminateGroup("timeout");
+    terminate("timeout");
   }, context.timeoutMs);
   const onAbort = () => {
-    void terminateGroup("abort");
+    terminate("abort");
   };
   context.signal?.addEventListener("abort", onAbort, { once: true });
   if (context.signal?.aborted) onAbort();
 
   let spawnFailed = false;
-  const exited = await new Promise<{ exitCode: number | null; signal: NodeJS.Signals | null }>(
+  const exitPromise = new Promise<{ exitCode: number | null; signal: NodeJS.Signals | null }>(
     (resolveExit) => {
       // A failure to start is its own condition. Reporting it as a
       // process-group signalling failure named the wrong subsystem entirely and
@@ -509,32 +651,87 @@ async function runSpike(spike: G0Spike, context: SpikeRunContext): Promise<G0Spi
         // Nothing will ever write to these, and nothing will end them either.
         child.stdout?.destroy();
         child.stderr?.destroy();
+        control?.destroy();
         resolveExit({ exitCode: null, signal: null });
       });
       child.once("exit", (exitCode, exitSignal) => {
-        childExited = true;
         resolveExit({ exitCode, signal: exitSignal });
       });
     },
   );
 
+  /**
+   * Wait for the script to finish, which is *not* the same event as the
+   * supervisor finishing: the supervisor deliberately outlives it. Either the
+   * control line arrives, or the supervisor died outright (a hard kill, or a
+   * failure to start), and both have to release this wait.
+   */
+  const scriptSettled = new Promise<void>((resolveSettled) => {
+    const check = () => {
+      if (controlText.includes("\n")) resolveSettled();
+    };
+    control?.on("data", check);
+    control?.once("end", () => resolveSettled());
+    control?.once("close", () => resolveSettled());
+    control?.once("error", () => resolveSettled());
+    void exitPromise.then(() => resolveSettled());
+    check();
+  });
+  await scriptSettled;
   clearTimeout(timeout);
   context.signal?.removeEventListener("abort", onAbort);
+  if (termination !== undefined) await termination;
+
+  /**
+   * The convergence requirement.
+   *
+   * A spike owns everything it starts. If the script has finished and processes
+   * it spawned are still running, the gate has not observed a clean run — it has
+   * observed a leak, whatever exit code the script chose to report. Previously
+   * this went unmeasured and such a spike was recorded as `pass`, which is the
+   * exact false green this check exists to remove.
+   *
+   * This runs while the supervisor still holds the group open, so the scan sees
+   * the real membership and the cleanup signals live pids.
+   */
+  /**
+   * The supervisor's verdict on whether the interpreter existed at all. This is
+   * decided before anything is launched, so it never has to be inferred from an
+   * exit status that a script could equally well have chosen for itself.
+   */
+  const startFailed = spawnFailed;
+
+  let descendantsLeaked = false;
+  let descendantsUnkillable = false;
+  let scanUnknown = false;
+  if (pgid !== undefined && !startFailed) {
+    const outcome = await reapDescendants(pgid, context.terminationGraceMs, context.psCommand);
+    descendantsLeaked = outcome.leaked;
+    descendantsUnkillable = outcome.unkillable;
+    scanUnknown = outcome.unknown;
+    if (outcome.signalFailed) signalFailed = true;
+  }
+
+  // Release the supervisor's hold. If cleanup already signalled the group, the
+  // supervisor is gone and this is a no-op; on the clean path it is what lets it
+  // exit at all.
+  releaseSupervisor();
+  const exited = await exitPromise;
 
   /**
    * Drain the pipes, but on a deadline.
    *
    * A child's descendants inherit its stdout and stderr, so the pipe does not
    * reach `end` when the shell exits — it reaches `end` when the *last* holder
-   * closes it. Waiting unconditionally therefore hands a spike that exits 0
-   * while leaving a background process behind the power to hang this runner
-   * indefinitely: the per-spike timer has already been cleared by then, so
-   * nothing would ever stop it.
+   * closes it. Waiting unconditionally would hand any pipe-holding process the
+   * power to stall this runner after its timer has already been cleared.
    *
    * A well-behaved child's pipes close the instant it exits, so this costs
-   * nothing in the normal case. A pipe-holding descendant costs exactly this
-   * deadline, after which the streams are destroyed and whatever was captured is
-   * reported. That is the honest trade: bounded evidence beats an unbounded wait.
+   * nothing in the normal case. When the deadline does expire, the streams are
+   * destroyed and whatever arrives afterwards is lost — and that loss is
+   * recorded. Reporting a bounded log as if it were the whole log is the same
+   * class of dishonesty as reporting a leaked spike as a pass: the record would
+   * claim completeness it does not have.
    */
   const drained = await Promise.race([
     Promise.all([stdout.done, stderr.done]).then(() => true),
@@ -544,11 +741,11 @@ async function runSpike(spike: G0Spike, context: SpikeRunContext): Promise<G0Spi
     child.stdout?.destroy();
     child.stderr?.destroy();
   }
-  replayCapture(context.diagnosticSink, spike.id, "stdout", stdout, context.root);
-  replayCapture(context.diagnosticSink, spike.id, "stderr", stderr, context.root);
-  const outputTruncated = stdout.truncated() || stderr.truncated();
+  const outputTruncated = stdout.truncated() || stderr.truncated() || !drained;
+  replayCapture(context.diagnosticSink, spike.id, "stdout", stdout, context.root, !drained);
+  replayCapture(context.diagnosticSink, spike.id, "stderr", stderr, context.root, !drained);
 
-  if (spawnFailed && !childExited) {
+  if (startFailed) {
     return {
       id: spike.id,
       status: "fail",
@@ -558,27 +755,30 @@ async function runSpike(spike: G0Spike, context: SpikeRunContext): Promise<G0Spi
     };
   }
 
-  /**
-   * One escalation, awaited here rather than raced.
-   *
-   * The shell can exit on TERM long before its descendants do — a spike that
-   * traps TERM and leaves a background grandchild is the leak this module runs
-   * detached in order to catch — so the escalation deliberately outlives the
-   * exit event. It is a single promise owned by `terminateGroup`, not a second
-   * copy of the same logic running here, because two code paths both deciding to
-   * send SIGKILL to one group is how a signal ends up delivered after the group
-   * is gone.
-   *
-   * A spike that exited cleanly started no escalation at all, so it is signalled
-   * nothing: there is nothing to clean up that the script did not choose, and
-   * signalling a group whose leader has already been reaped is the recycling
-   * hazard taken on for no benefit.
-   */
-  if (escalation !== undefined) await escalation;
-
   const durationMs = Math.round(performance.now() - startedAt);
-  const exitCode = exited.exitCode ?? undefined;
-  const exitSignal = exited.signal ?? undefined;
+  /**
+   * The script's status, not the supervisor's.
+   *
+   * They agree in the ordinary case, but only the control line is authoritative:
+   * if the supervisor were itself killed, its exit code would describe that
+   * killing rather than anything the spike did.
+   */
+  const reported = /G0SUP status=(\d+) signal=(\S*)/.exec(controlText);
+  const supervisorExit = exited.exitCode ?? undefined;
+  const exitCode = reported !== null ? Number(reported[1]) : supervisorExit;
+  /**
+   * The script's signal, decoded by the supervisor from its 128+N wait status.
+   * `exited.signal` describes the *supervisor*, which is a different process and
+   * would report a hard kill of the supervisor as though the spike had been
+   * signalled.
+   */
+  const reportedSignal = reported?.[2] ?? "";
+  const exitSignal =
+    reportedSignal.length > 0
+      ? ((reportedSignal.startsWith("SIG")
+          ? reportedSignal
+          : `SIG${reportedSignal}`) as NodeJS.Signals)
+      : (exited.signal ?? undefined);
   const base = {
     id: spike.id,
     durationMs,
@@ -587,8 +787,24 @@ async function runSpike(spike: G0Spike, context: SpikeRunContext): Promise<G0Spi
     ...(outputTruncated ? { outputTruncated } : {}),
   } as const;
 
-  if (groupRecycled) {
-    return { ...base, status: "fail", code: "G0_SPIKE_PROCESS_GROUP_RECYCLED" };
+  /**
+   * Ownership outranks the exit code.
+   *
+   * These three come before every status check below, including `exitCode === 0`,
+   * because they describe whether the run can be believed at all. A spike that
+   * returned 0 while leaving processes running did not finish — it abandoned
+   * work, and the previous revision recorded that as `pass`. A scan that could
+   * not read the process table proves nothing in either direction and fails
+   * closed rather than defaulting to clean.
+   */
+  if (scanUnknown) {
+    return { ...base, status: "fail", code: "G0_SPIKE_DESCENDANT_SCAN_FAILED" };
+  }
+  if (descendantsUnkillable) {
+    return { ...base, status: "fail", code: "G0_SPIKE_DESCENDANT_UNKILLABLE" };
+  }
+  if (descendantsLeaked) {
+    return { ...base, status: "fail", code: "G0_SPIKE_DESCENDANT_LEAKED" };
   }
   if (signalFailed) {
     return { ...base, status: "fail", code: "G0_SPIKE_PROCESS_GROUP_SIGNAL_FAILED" };
@@ -672,6 +888,7 @@ export async function runG0Spikes(options: G0RunOptions): Promise<G0RunSummary> 
     "postExitDrainMs",
   );
   const interpreter = validInterpreter(options.interpreter ?? "bash");
+  const psCommand = validInterpreter(options.psCommand ?? "ps");
   const spikes = options.spikes ?? G0_SPIKES;
   // An explicit list still has to be coherent; the default list additionally has
   // to be complete.
@@ -710,6 +927,7 @@ export async function runG0Spikes(options: G0RunOptions): Promise<G0RunSummary> 
         signal: options.signal,
         diagnosticSink,
         interpreter,
+        psCommand,
         postExitDrainMs,
         boundedByAggregate,
       }),
