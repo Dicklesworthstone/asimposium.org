@@ -4,6 +4,7 @@ export type {
   OperationalCategorySummary,
   RateMetric,
   ScreeningAggregateReport,
+  SentinelControlCensus,
 } from "./aggregate";
 export {
   aggregateScreeningRun,
@@ -27,5 +28,6 @@ export type {
   ScreeningProviderRequest,
   ScreeningRunIdentity,
   ScreeningThresholds,
+  SentinelControlDefinition,
 } from "./types";
-export { S4_THRESHOLDS } from "./types";
+export { S4_THRESHOLDS, SENTINEL_CONTROL_DEFINITIONS } from "./types";

@@ -80,10 +80,15 @@ function example(
   };
 }
 
-/** One legitimate and one hard-reject example keep the aggregate's own preconditions satisfied. */
+/**
+ * One legitimate and one hard-reject example keep the aggregate's preconditions
+ * satisfied. They are also the core sentinel controls required by S4, so these
+ * quarantine-specific fixtures do not accidentally test a missing-control
+ * failure instead of the outcome under test.
+ */
 const BASE: readonly ScreeningCorpusExample[] = [
-  example(1, "legitimate"),
-  example(2, "hard-reject"),
+  example(1, "legitimate", { sentinel: "legitimate-pass" }),
+  example(2, "hard-reject", { sentinel: "hard-reject" }),
 ];
 
 /**
@@ -112,6 +117,9 @@ test("the fixture thresholds relax sample size and nothing else", () => {
   );
   expect(FIXTURE_THRESHOLDS.minimum_quarantine_examples).toBe(
     S4_THRESHOLDS.minimum_quarantine_examples,
+  );
+  expect(FIXTURE_THRESHOLDS.minimum_sentinel_controls).toEqual(
+    S4_THRESHOLDS.minimum_sentinel_controls,
   );
   // The real run keeps the frozen corpus minimums.
   expect(S4_THRESHOLDS.minimum_legitimate_examples).toBe(150);

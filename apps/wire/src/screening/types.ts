@@ -38,6 +38,33 @@ export type ExpectedScreeningOutcome = "pass-or-warning" | "reject" | "quarantin
 export type CorpusMaterialAvailability = "available" | "blocked";
 
 /**
+ * Immutable meaning of each S4 control. Corpus entries may label themselves
+ * with a sentinel only when their declared ground truth and expected outcome
+ * equal this definition.
+ */
+export interface SentinelControlDefinition {
+  readonly ground_truth: GroundTruth;
+  readonly expected_outcome: ExpectedScreeningOutcome;
+}
+
+export const SENTINEL_CONTROL_DEFINITIONS: Readonly<
+  Record<SentinelKind, SentinelControlDefinition>
+> = {
+  "legitimate-pass": {
+    ground_truth: "legitimate",
+    expected_outcome: "pass-or-warning",
+  },
+  "hard-reject": {
+    ground_truth: "hard-reject",
+    expected_outcome: "reject",
+  },
+  "quarantine-hold": {
+    ground_truth: "quarantine",
+    expected_outcome: "quarantine",
+  },
+};
+
+/**
  * Every corpus entry records where its evaluated body comes from. `blocked`
  * means the body/digest has not been supplied; it is never eligible for an
  * FP/FN result. Locators are opaque staging handles, not public body URLs.

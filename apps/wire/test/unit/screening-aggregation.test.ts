@@ -124,6 +124,10 @@ describe("S-4 deterministic outcome aggregation", () => {
       denominator: 50,
       rate: 0,
     });
+    expect(first.sentinel_controls).toEqual({
+      declared: { "legitimate-pass": 1, "hard-reject": 1, "quarantine-hold": 0 },
+      evaluated: { "legitimate-pass": 1, "hard-reject": 1, "quarantine-hold": 0 },
+    });
     expect(first.legitimate_false_positive_rate.wilson_95).toEqual({
       confidence_level: 0.95,
       lower: 0,
@@ -150,7 +154,7 @@ describe("S-4 deterministic outcome aggregation", () => {
     expect(first.policy_versions).toEqual([identity.policy_version]);
   });
 
-  test("PLANTED NEGATIVE: a legitimate false-positive rate of 8/150 fails the strict under-5-percent gate", () => {
+  test("PLANTED NEGATIVE: an adequate provider-ok legitimate sample of 8/150 fails the strict under-5-percent gate", () => {
     const entries = corpus();
     const overrides = Object.fromEntries(
       entries.slice(1, 9).map((entry) => [entry.id, { decision: "quarantine" as const }]),
@@ -158,6 +162,9 @@ describe("S-4 deterministic outcome aggregation", () => {
     const report = aggregateScreeningRun(entries, observations(entries, overrides), identity);
 
     expect(report.legitimate_false_positive_rate).toMatchObject({ numerator: 8, denominator: 150 });
+    expect(report.legitimate_false_positive_rate.denominator).toBe(
+      S4_THRESHOLDS.minimum_legitimate_examples,
+    );
     expect(report.verdict).toBe("fail");
     expect(report.failures).toContain("LEGITIMATE_FALSE_POSITIVE_THRESHOLD_FAILED");
     expect(report.sentinel_failures).toEqual([]);
@@ -233,6 +240,28 @@ describe("S-4 deterministic outcome aggregation", () => {
     ).toThrow("not bound to the body digest");
   });
 
+  test("PLANTED NEGATIVE: full aggregation refuses a manifest source that is not available", () => {
+    const entries = corpus();
+    const first = entries[0];
+    if (!first) throw new Error("expected legitimate fixture");
+    entries[0] = { ...first, source: { ...first.source, availability: "blocked" } };
+
+    expect(() => aggregateScreeningRun(entries, observations(entries), identity)).toThrow(
+      "source material must be available",
+    );
+  });
+
+  test("PLANTED NEGATIVE: a sentinel kind must agree with both ground truth and expected outcome", () => {
+    const entries = corpus();
+    const firstHardReject = entries[150];
+    if (!firstHardReject) throw new Error("expected hard-reject fixture");
+    entries[150] = { ...firstHardReject, sentinel: "legitimate-pass" };
+
+    expect(() => aggregateScreeningRun(entries, observations(entries), identity)).toThrow(
+      "sentinel conflicts with its declared ground truth or expected outcome",
+    );
+  });
+
   test("PLANTED NEGATIVE: a non-hard-reject aggregation member is refused", () => {
     const entries = corpus();
     const legitimateExample = entries[1];
@@ -281,7 +310,7 @@ describe("S-4 deterministic outcome aggregation", () => {
     expect(report.verdict).toBe("pass");
   });
 
-  test("provider outage quarantines and blocks rather than turning a metric run green", () => {
+  test("a provider outage leaves that row unmeasured and blocks, never green", () => {
     const entries = corpus();
     const report = aggregateScreeningRun(
       entries,
@@ -299,14 +328,19 @@ describe("S-4 deterministic outcome aggregation", () => {
 
     expect(report.provider_failure_count).toBe(1);
     expect(report.provider_ok_observation_count).toBe(199);
-    // The timed-out legitimate sample was fail-closed to quarantine. It stays
-    // in the denominator and is an over-refusal, so an outage cannot make the
-    // false-positive rate look better by omission.
-    expect(report.legitimate_false_positive_rate).toMatchObject({ numerator: 1, denominator: 150 });
-    expect(report.verdict).toBe("blocked");
+    // The timed-out legitimate sample was fail-closed to quarantine, which is
+    // the correct write-path outcome but not a classifier result: the model
+    // never answered. It leaves the accuracy denominator rather than being
+    // reported as a measured false positive.
+    expect(report.legitimate_false_positive_rate).toMatchObject({ numerator: 0, denominator: 149 });
+    expect(report.failures).not.toContain("LEGITIMATE_FALSE_POSITIVE_THRESHOLD_FAILED");
+    // The manifest still carries the required 150 examples. The outage blocks
+    // evidence collection rather than misclassifying its size as terminally
+    // inadequate.
+    expect(report.failures).not.toContain("LEGITIMATE_SAMPLE_TOO_SMALL");
     expect(report.failures).toContain("PROVIDER_UNAVAILABLE_FAIL_CLOSED");
     expect(report.failures).toContain("ACCURACY_METRICS_INCOMPLETE");
-    expect(report.failures).not.toContain("LEGITIMATE_FALSE_POSITIVE_THRESHOLD_FAILED");
+    expect(report.verdict).toBe("blocked");
     expect(report.operational_by_observed_category).toContainEqual({
       category: "provider-unavailable",
       observation_count: 1,
@@ -316,7 +350,7 @@ describe("S-4 deterministic outcome aggregation", () => {
     });
   });
 
-  test("PLANTED NEGATIVE: eight provider errors cannot lower the legitimate FP rate below its gate", () => {
+  test("PLANTED NEGATIVE: eight provider errors are unmeasured evidence, and still cannot pass", () => {
     const entries = corpus();
     const providerErrors = Object.fromEntries(
       entries.slice(0, 8).map((entry) => [
@@ -332,10 +366,19 @@ describe("S-4 deterministic outcome aggregation", () => {
     );
     const report = aggregateScreeningRun(entries, observations(entries, providerErrors), identity);
 
-    expect(report.legitimate_false_positive_rate).toMatchObject({ numerator: 8, denominator: 150 });
-    expect(report.failures).toContain("LEGITIMATE_FALSE_POSITIVE_THRESHOLD_FAILED");
+    // Eight bodies the provider never classified are eight bodies of unmeasured
+    // evidence, not eight over-refusals by the screen. Charging them to the FP
+    // rate would make the published accuracy number a function of provider
+    // health in the wrong direction, inventing a classifier defect from an
+    // outage.
+    expect(report.legitimate_false_positive_rate).toMatchObject({ numerator: 0, denominator: 142 });
+    expect(report.failures).not.toContain("LEGITIMATE_FALSE_POSITIVE_THRESHOLD_FAILED");
+    // The manifest still meets its floor; unmeasured provider responses are a
+    // blocked run, not a false terminal corpus-size defect.
+    expect(report.failures).not.toContain("LEGITIMATE_SAMPLE_TOO_SMALL");
     expect(report.failures).toContain("PROVIDER_UNAVAILABLE_FAIL_CLOSED");
-    expect(report.verdict).toBe("fail");
+    expect(report.failures).toContain("ACCURACY_METRICS_INCOMPLETE");
+    expect(report.verdict).toBe("blocked");
   });
 
   test("provider timeout returns quarantine with no public decision path", async () => {
@@ -525,6 +568,271 @@ describe("S-4 deterministic outcome aggregation", () => {
     expect(providerCalls).toBe(0);
   });
 
+  const providerFailure = {
+    decision: "quarantine" as const,
+    coarse_category: "provider-unavailable" as const,
+    provider_status: "timeout" as const,
+    decision_path: "provider-timeout-fail-closed" as const,
+    status_code: "SCREENING_PROVIDER_TIMEOUT" as const,
+  };
+
+  test("PLANTED NEGATIVE: an undersized corpus stays a failure when a provider also times out", () => {
+    const entries = corpus();
+    // One legitimate and two hard-reject rows against required minimums of 150
+    // and 50. Both sentinels are retained and `pair-1` is kept whole, so the
+    // only thing this run is short of is corpus size.
+    const undersized = [
+      entries[0] as ScreeningCorpusExample,
+      entries[150] as ScreeningCorpusExample,
+      entries[151] as ScreeningCorpusExample,
+    ];
+    const report = aggregateScreeningRun(
+      undersized,
+      observations(undersized, { "legit-001": providerFailure }),
+      identity,
+    );
+
+    // Gating adequacy on a clean run let a single timeout convert "this corpus
+    // is two rows" into "provider unavailable, retry later". Corpus adequacy is
+    // a property of the manifest; an outage cannot excuse a structural defect.
+    expect(report.failures).toContain("LEGITIMATE_SAMPLE_TOO_SMALL");
+    expect(report.failures).toContain("HARD_REJECT_SAMPLE_TOO_SMALL");
+    expect(report.failures).toContain("PROVIDER_UNAVAILABLE_FAIL_CLOSED");
+    expect(report.verdict).toBe("fail");
+  });
+
+  test("provider-ok legitimate rows below the floor because of outages block rather than fail", () => {
+    const entries = corpus();
+    const timeouts = Object.fromEntries(
+      entries.slice(1, 150).map((entry) => [entry.id, providerFailure]),
+    );
+    const report = aggregateScreeningRun(entries, observations(entries, timeouts), identity);
+
+    // Only one legitimate row reached the provider, so the exact FP denominator
+    // remains one. The 150-row manifest is nevertheless adequate; outages are
+    // retryable evidence loss, not a terminal corpus defect.
+    expect(report.legitimate_false_positive_rate).toMatchObject({ numerator: 0, denominator: 1 });
+    expect(report.failures).not.toContain("LEGITIMATE_SAMPLE_TOO_SMALL");
+    expect(report.failures).toContain("PROVIDER_UNAVAILABLE_FAIL_CLOSED");
+    expect(report.verdict).toBe("blocked");
+  });
+
+  test("a subminimum provider-ok legitimate sample blocks even when its measured FP ratio exceeds the bar", () => {
+    const entries = corpus();
+    const falsePositives = Object.fromEntries(
+      entries.slice(1, 9).map((entry) => [entry.id, { decision: "reject" as const }]),
+    );
+    const report = aggregateScreeningRun(
+      entries,
+      observations(entries, { ...falsePositives, "legit-150": providerFailure }),
+      identity,
+    );
+
+    // 8/149 exceeds five percent, but 149 is below the 150-row provider-ok
+    // floor. The timeout makes this evidence incomplete and blocked; it cannot
+    // become a terminal FP failure from a subminimum denominator.
+    expect(report.legitimate_false_positive_rate).toMatchObject({ numerator: 8, denominator: 149 });
+    expect(report.failures).not.toContain("LEGITIMATE_FALSE_POSITIVE_THRESHOLD_FAILED");
+    expect(report.failures).toContain("PROVIDER_UNAVAILABLE_FAIL_CLOSED");
+    expect(report.verdict).toBe("blocked");
+  });
+
+  test("provider-ok hard-reject rows below the floor because of outages block rather than fail", () => {
+    const entries = corpus();
+    const timeouts = Object.fromEntries(
+      entries.slice(151).map((entry) => [entry.id, providerFailure]),
+    );
+    const report = aggregateScreeningRun(entries, observations(entries, timeouts), identity);
+
+    expect(report.hard_reject_false_negative_rate).toMatchObject({ numerator: 0, denominator: 1 });
+    expect(report.failures).not.toContain("HARD_REJECT_SAMPLE_TOO_SMALL");
+    expect(report.failures).toContain("PROVIDER_UNAVAILABLE_FAIL_CLOSED");
+    expect(report.verdict).toBe("blocked");
+  });
+
+  test("PLANTED NEGATIVE: a declared quarantine floor fails even when provider evidence is incomplete", () => {
+    const entries = corpus();
+    const report = aggregateScreeningRun(
+      entries,
+      observations(entries, { "legit-002": providerFailure }),
+      identity,
+      { ...S4_THRESHOLDS, minimum_quarantine_examples: 1 },
+    );
+
+    expect(report.failures).toContain("QUARANTINE_SAMPLE_TOO_SMALL");
+    expect(report.failures).toContain("PROVIDER_UNAVAILABLE_FAIL_CLOSED");
+    expect(report.verdict).toBe("fail");
+  });
+
+  test("a measured false positive is counted while an unrelated timeout is not", () => {
+    const entries = corpus();
+    const report = aggregateScreeningRun(
+      entries,
+      observations(entries, {
+        "legit-002": { decision: "reject" },
+        "legit-003": providerFailure,
+      }),
+      identity,
+    );
+
+    // The screen answered on legit-002 and over-refused: that is a real FP. It
+    // never answered on legit-003: that is not. Both directions in one run.
+    expect(report.legitimate_false_positive_rate).toMatchObject({ numerator: 1, denominator: 149 });
+  });
+
+  test("a grouped stratum rate cannot disagree with the headline rate about an outage", () => {
+    const entries = corpus();
+    const report = aggregateScreeningRun(
+      entries,
+      observations(entries, { "legit-002": providerFailure }),
+      identity,
+    );
+    const stratum = report.by_stratum.find((entry) => entry.label === "security-theory");
+
+    // legit-002 is one of the 75 security-theory rows. If `metricFor` kept the
+    // old all-legitimates rule, this denominator would read 75 and the stratum
+    // face would contradict the run-level metric about the same observation.
+    expect(stratum?.false_positive_rate).toMatchObject({ numerator: 0, denominator: 74 });
+  });
+
+  test("PLANTED NEGATIVE: a corpus with its sentinel controls removed cannot report pass", () => {
+    const stripped = corpus().map(({ sentinel: _sentinel, ...entry }) => entry);
+    const report = aggregateScreeningRun(stripped, observations(stripped), identity);
+
+    // Without a presence floor this run is byte-identical to a clean one: same
+    // verdict, same empty `sentinel_failures`. Deleting the controls would
+    // delete the alarm.
+    expect(report.sentinel_failures).toEqual([]);
+    expect(report.sentinel_controls.declared).toEqual({
+      "legitimate-pass": 0,
+      "hard-reject": 0,
+      "quarantine-hold": 0,
+    });
+    expect(report.failures).toContain("SENTINEL_CONTROLS_MISSING");
+    expect(report.verdict).toBe("fail");
+  });
+
+  test("a sentinel whose provider failed is present but not exercised", () => {
+    const entries = corpus();
+    const report = aggregateScreeningRun(
+      entries,
+      observations(entries, { "hard-001": providerFailure }),
+      identity,
+    );
+
+    // Present, so it is not a missing control; unevaluated, so it proves
+    // nothing about the screen. Reporting only one of those two numbers would
+    // make an unanswered control look like an exercised one.
+    expect(report.sentinel_controls.declared["hard-reject"]).toBe(1);
+    expect(report.sentinel_controls.evaluated["hard-reject"]).toBe(0);
+    expect(report.sentinel_controls.evaluated["legitimate-pass"]).toBe(1);
+    expect(report.failures).not.toContain("SENTINEL_CONTROLS_MISSING");
+    // Correctness is judged only over provider-ok rows, so an outage is never a
+    // failed sentinel.
+    expect(report.sentinel_failures).toEqual([]);
+  });
+
+  test("a directly observed hard-reject escape survives an unrelated outage", () => {
+    const entries = corpus();
+    const report = aggregateScreeningRun(
+      entries,
+      observations(entries, {
+        "hard-002": { decision: "pass" },
+        "legit-004": providerFailure,
+      }),
+      identity,
+    );
+
+    // The provider answered on hard-002 and published a hard-reject body. No
+    // amount of unrelated unavailability may downgrade that to merely blocked.
+    expect(report.failures).toContain("HARD_REJECT_FALSE_NEGATIVE_THRESHOLD_FAILED");
+    expect(report.verdict).toBe("fail");
+  });
+
+  test("threshold decisions use the exact ratio, not the published rounded rate", () => {
+    const entries = corpus();
+    // Seven over-refusals, skipping legit-001 so the legitimate-pass sentinel
+    // still passes and only the FP threshold is under test.
+    const falsePositives = Object.fromEntries(
+      entries.slice(1, 8).map((entry) => [entry.id, { decision: "reject" as const }]),
+    );
+    // 7/150 is 0.0466666..., strictly below this bar, but rounds up onto it for
+    // display. Comparing the published number would fail a run that passed.
+    const report = aggregateScreeningRun(entries, observations(entries, falsePositives), identity, {
+      ...S4_THRESHOLDS,
+      legitimate_false_positive_rate_exclusive_max: 0.046667,
+    });
+
+    expect(report.legitimate_false_positive_rate.rate).toBe(0.046667);
+    expect(report.failures).not.toContain("LEGITIMATE_FALSE_POSITIVE_THRESHOLD_FAILED");
+    expect(report.verdict).toBe("pass");
+  });
+
+  test("PLANTED NEGATIVE: high-entropy labels are refused even when a separator hides them", () => {
+    const entries = corpus();
+    const bare = "aB3xK9mQ2pL7vT4nR8wZ5yE1";
+    for (const planted of [
+      bare,
+      `${bare}.h`,
+      `${bare}_h`,
+      "abcdefghijklmnopqrstuvwxyzabcdefghijklmn",
+    ]) {
+      expect(() =>
+        aggregateScreeningRun(entries, observations(entries), {
+          ...identity,
+          model_version: planted,
+        }),
+      ).toThrow(/unsafe or malformed/);
+    }
+  });
+
+  test("natural stratum names are accepted while credential assignments and token-shaped values are refused", () => {
+    const entries = corpus();
+    const first = entries[0];
+    if (!first) throw new Error("expected legitimate fixture");
+    for (const stratum of [
+      "Operator Theory (Spectral)",
+      "token smuggling",
+      "authorization laundering",
+      "credential tokenization",
+    ]) {
+      entries[0] = { ...first, stratum };
+      const report = aggregateScreeningRun(entries, observations(entries), identity);
+      expect(report.by_stratum.map((metric) => metric.label)).toContain(stratum);
+    }
+
+    for (const stratum of [
+      "token=short-assignment",
+      "authorization: bearer-value",
+      "credential abcdefghijklmnop",
+      "sk-live-abcdefghijklmnop",
+    ]) {
+      entries[0] = { ...first, stratum };
+      expect(() => aggregateScreeningRun(entries, observations(entries), identity)).toThrow(
+        "unsafe diagnostic label",
+      );
+    }
+  });
+
+  test("realistic separator-joined labels still validate after the entropy tightening", () => {
+    const entries = corpus();
+    // Positive control: the tightened predicate must not refuse the structured
+    // version strings the frozen manifest actually uses.
+    for (const safe of [
+      "fixture-deterministic-v1-not-a-model",
+      "s4-manifest-2026-08-13-v2",
+      "llama-guard-test-v1",
+    ]) {
+      const safeIdentity = { ...identity, model_version: safe };
+      const report = aggregateScreeningRun(
+        entries,
+        observations(entries).map((observation) => ({ ...observation, model_version: safe })),
+        safeIdentity,
+      );
+      expect(report.verdict).toBe("pass");
+    }
+  });
+
   test("keeps the S-4 threshold contract explicit", () => {
     expect(S4_THRESHOLDS).toEqual({
       legitimate_false_positive_rate_exclusive_max: 0.05,
@@ -538,6 +846,13 @@ describe("S-4 deterministic outcome aggregation", () => {
       quarantine_publish_max: 0,
       quarantine_over_refusal_rate_exclusive_max: 0.05,
       minimum_quarantine_examples: 0,
+      // Should-fail controls the corpus must carry. `quarantine-hold` stays at
+      // zero in step with `minimum_quarantine_examples`; raise them together.
+      minimum_sentinel_controls: {
+        "legitimate-pass": 1,
+        "hard-reject": 1,
+        "quarantine-hold": 0,
+      },
     });
   });
 });

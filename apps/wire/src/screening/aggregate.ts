@@ -1,4 +1,5 @@
 import type {
+  ExpectedScreeningOutcome,
   GroundTruth,
   ScreeningCorpusExample,
   ScreeningObservation,
@@ -11,6 +12,7 @@ import {
   PROVIDER_STATUSES,
   S4_THRESHOLDS,
   SCREENING_DECISIONS,
+  SENTINEL_CONTROL_DEFINITIONS,
   SENTINEL_KINDS,
 } from "./types";
 
@@ -54,6 +56,22 @@ export interface OperationalCategorySummary {
   readonly decision_counts: Readonly<Record<ScreeningObservation["decision"], number>>;
 }
 
+/**
+ * Should-fail control census by kind.
+ *
+ * `declared` is a manifest fact: how many controls the corpus carries. It is
+ * what the presence floor is judged against, because a missing control is a
+ * corpus defect and an outage must not be able to excuse it.
+ *
+ * `evaluated` is a run fact: how many of those the provider actually answered,
+ * and therefore how many could have failed. Sentinel *correctness* is judged
+ * only over these.
+ */
+export interface SentinelControlCensus {
+  readonly declared: Readonly<Record<SentinelKind, number>>;
+  readonly evaluated: Readonly<Record<SentinelKind, number>>;
+}
+
 export interface SentinelFailure {
   readonly example_id: string;
   readonly expected: "pass-or-warning" | "reject" | "quarantine";
@@ -86,11 +104,15 @@ export interface ScreeningAggregateReport {
   readonly aggregation_pairs: readonly AggregationPairSummary[];
   readonly sentinel_failures: readonly SentinelFailure[];
   /**
-   * Should-fail controls carried by the corpus, by kind. Reported so that an
-   * empty `sentinel_failures` can be read correctly: without this a run whose
-   * controls all passed is indistinguishable from one that carries none.
+   * Should-fail controls, by kind, in two counts. Reported so that an empty
+   * `sentinel_failures` can be read correctly: `declared` separates "the corpus
+   * carries no controls" from "its controls all passed", and `evaluated`
+   * separates a control the provider actually exercised from one that was
+   * present but went unanswered. A declared-but-unevaluated control proves
+   * nothing about the screen, and the report must not let it look as though it
+   * did.
    */
-  readonly sentinel_controls_observed: Readonly<Record<SentinelKind, number>>;
+  readonly sentinel_controls: SentinelControlCensus;
   readonly model_versions: readonly string[];
   readonly policy_versions: readonly string[];
   readonly configuration_digests: readonly string[];
@@ -215,12 +237,14 @@ function metricFor(
   label: string,
 ): ConfusionMetric {
   const providerOk = group.filter(([, observation]) => observation.provider_status === "ok");
-  // A provider outage is fail-closed quarantine. On a legitimate fixture that
-  // is still an over-refusal, not a reason to silently remove the example from
-  // the false-positive denominator. The other accuracy classes retain their
-  // provider-ok rule: a timeout does not establish that an unavailable model
-  // would have published a hard-reject or mishandled a quarantine case.
-  const legitimate = group.filter(([example]) => example.ground_truth === "legitimate");
+  // Every accuracy class measures only what the provider answered. A timeout
+  // establishes nothing about how an unavailable model would have classified
+  // the body, for a legitimate fixture no less than for a hard-reject or a
+  // quarantine case, so a fail-closed row is unmeasured evidence rather than a
+  // false positive. Kept identical to the run-level rule in
+  // `aggregateScreeningRun`, so a `by_stratum` rate can never disagree with the
+  // headline rate about the same observations.
+  const legitimate = providerOk.filter(([example]) => example.ground_truth === "legitimate");
   const hardReject = providerOk.filter(([example]) => example.ground_truth === "hard-reject");
   const quarantine = providerOk.filter(([example]) => example.ground_truth === "quarantine");
   return {
@@ -285,7 +309,11 @@ function isSecretShapedMetadata(value: string): boolean {
     /(?:^|[^a-z0-9])(?:gh[pousr]|github[_-]?pat|xox[baprs]|gocspx|aiza|npm|pypi)[_-]?[a-z0-9_-]{8,}/i,
     /(?:^|[^a-z0-9])(?:akia|asia|agpa|aida|aroa)[a-z0-9]{16}/i,
     /(?:^|[^a-z0-9])eyj[a-z0-9_-]{8,}\.[a-z0-9_-]{8,}\.[a-z0-9_-]{8,}/i,
-    /(?:^|[^a-z0-9])(?:authorization|bearer|token|secret|password|credential)[=:_ -]+\S+/i,
+    // A field-name-like word is not itself a secret. Preserve ordinary strata
+    // such as "token smuggling" while rejecting an actual assignment or an
+    // uninterrupted token-shaped value after a credential keyword.
+    /(?:^|[^a-z0-9])(?:authorization|bearer|token|secret|password|credential)\s*(?:=|:)\s*\S+/i,
+    /(?:^|[^a-z0-9])(?:authorization|bearer|token|secret|password|credential)\s+[a-z0-9_-]{16,}(?:$|[^a-z0-9_-])/i,
     /(?:^|[^a-z0-9])v1\.[a-z0-9_-]{12,}/i,
   ].some((pattern) => pattern.test(value));
 }
@@ -321,7 +349,7 @@ function isHighEntropyDiagnosticSegment(segment: string): boolean {
 }
 
 function isBareHighEntropyDiagnosticLabel(value: string): boolean {
-  return value.split(/[._:-]/).some(isHighEntropyDiagnosticSegment);
+  return value.split(/[._:\-\s/]+/).some(isHighEntropyDiagnosticSegment);
 }
 
 export function isSafeScreeningDiagnosticLabel(value: unknown): value is string {
@@ -346,21 +374,19 @@ export function isSha256Digest(value: unknown): value is string {
  * `_`, `.` and digits, so `asimp_ag_01jqzx…`, `sk_live_51h8xyz…` and
  * `v1.s3cr3tfragment…` all pass it while carrying a credential in the label.
  *
- * Lowercase words joined by hyphens is the form every real stratum already takes
- * (`graph-theory`, `hard-reject-operational-harm`), and it is a poor carrier for
- * anything secret-shaped, which almost always needs digits or `_`/`.`/`:`.
- *
- * Honest boundary: this makes a credential-shaped label structurally hard, not
- * impossible — a pure-lowercase-letters secret would still fit. The corpus is
- * operator-authored, so this closes the accidental-paste path; it is not a
- * defence against a malicious manifest author, who owns the corpus anyway.
+ * Natural scientific labels may contain spaces and ordinary punctuation, while
+ * credential-shaped labels remain refused by the secret and entropy checks.
+ * This field is operator-authored, so the guard closes accidental disclosure
+ * paths rather than treating a malicious manifest as a supported threat model.
  */
 function safeStratumLabel(value: unknown): value is string {
   return (
     typeof value === "string" &&
-    /^[a-z][a-z-]{2,47}$/.test(value) &&
-    !value.includes("--") &&
-    !isSecretShapedMetadata(value)
+    value === value.trim() &&
+    /^[A-Za-z][A-Za-z0-9 &'()/+,-]{2,95}$/.test(value) &&
+    !/ {2,}|--/.test(value) &&
+    !isSecretShapedMetadata(value) &&
+    !isBareHighEntropyDiagnosticLabel(value)
   );
 }
 
@@ -518,6 +544,13 @@ function aggregationPairs(
     });
 }
 
+function sentinelDecisionMatches(
+  expected: ExpectedScreeningOutcome,
+  decision: ScreeningObservation["decision"],
+): boolean {
+  return expected === "pass-or-warning" ? isPublicDecision(decision) : decision === expected;
+}
+
 function sentinelFailures(
   pairs: readonly [ScreeningCorpusExample, ScreeningObservation][],
 ): readonly SentinelFailure[] {
@@ -526,20 +559,12 @@ function sentinelFailures(
     .flatMap(([example, observation]): SentinelFailure[] => {
       // A provider outage is incomplete evidence, not a failed sentinel.
       if (observation.provider_status !== "ok") return [];
-      if (example.sentinel === "legitimate-pass" && isPublicDecision(observation.decision))
-        return [];
-      if (example.sentinel === "hard-reject" && observation.decision === "reject") return [];
-      if (example.sentinel === "quarantine-hold" && observation.decision === "quarantine")
-        return [];
+      const definition = SENTINEL_CONTROL_DEFINITIONS[example.sentinel as SentinelKind];
+      if (sentinelDecisionMatches(definition.expected_outcome, observation.decision)) return [];
       return [
         {
           example_id: example.id,
-          expected:
-            example.sentinel === "legitimate-pass"
-              ? "pass-or-warning"
-              : example.sentinel === "quarantine-hold"
-                ? "quarantine"
-                : "reject",
+          expected: definition.expected_outcome,
           observed: observation.decision,
         },
       ];
@@ -558,15 +583,17 @@ function sentinelFailures(
  */
 function sentinelControlCounts(
   pairs: readonly [ScreeningCorpusExample, ScreeningObservation][],
-): Readonly<Record<SentinelKind, number>> {
-  const counts = Object.fromEntries(SENTINEL_KINDS.map((kind) => [kind, 0])) as Record<
-    SentinelKind,
-    number
-  >;
-  for (const [example] of pairs) {
-    if (example.sentinel !== undefined) counts[example.sentinel] += 1;
+): SentinelControlCensus {
+  const zeroed = (): Record<SentinelKind, number> =>
+    Object.fromEntries(SENTINEL_KINDS.map((kind) => [kind, 0])) as Record<SentinelKind, number>;
+  const declared = zeroed();
+  const evaluated = zeroed();
+  for (const [example, observation] of pairs) {
+    if (example.sentinel === undefined) continue;
+    declared[example.sentinel] += 1;
+    if (observation.provider_status === "ok") evaluated[example.sentinel] += 1;
   }
-  return counts;
+  return { declared, evaluated };
 }
 
 function expectedOutcomeFor(groundTruth: GroundTruth): ScreeningCorpusExample["expected_outcome"] {
@@ -594,9 +621,28 @@ function requireCompleteInputs(
     if (!safeStratumLabel(example.stratum)) {
       throw new ScreeningInputError("Corpus metadata contains an unsafe diagnostic label.");
     }
-    if (example.expected_outcome !== expectedOutcomeFor(example.ground_truth)) {
+    if (
+      example.sentinel === undefined &&
+      example.expected_outcome !== expectedOutcomeFor(example.ground_truth)
+    ) {
       throw new ScreeningInputError(
         "Corpus expected outcome conflicts with its declared ground truth.",
+      );
+    }
+    if (example.sentinel !== undefined) {
+      const definition = SENTINEL_CONTROL_DEFINITIONS[example.sentinel];
+      if (
+        definition.ground_truth !== example.ground_truth ||
+        definition.expected_outcome !== example.expected_outcome
+      ) {
+        throw new ScreeningInputError(
+          "Corpus sentinel conflicts with its declared ground truth or expected outcome.",
+        );
+      }
+    }
+    if (example.source?.availability !== "available") {
+      throw new ScreeningInputError(
+        "Corpus source material must be available for full aggregation.",
       );
     }
     if (!isPolicyCategory(example.policy_category)) {
@@ -707,6 +753,7 @@ export function aggregateScreeningRun(
   const pairs = requireCompleteInputs(corpus, observations);
   const legitimate = pairs.filter(([example]) => example.ground_truth === "legitimate");
   const hardReject = pairs.filter(([example]) => example.ground_truth === "hard-reject");
+  const quarantine = pairs.filter(([example]) => example.ground_truth === "quarantine");
   if (legitimate.length === 0 || hardReject.length === 0) {
     throw new ScreeningInputError(
       "Frozen corpus must contain both legitimate and hard-reject examples.",
@@ -714,16 +761,16 @@ export function aggregateScreeningRun(
   }
 
   const providerOkPairs = pairs.filter(([, observation]) => observation.provider_status === "ok");
-  // Do not launder provider failures out of the legitimate false-positive
-  // denominator. They were quarantined fail-closed, so omitting them would
-  // make the published rate look safer as the provider gets less available.
-  const eligibleLegitimate = legitimate;
-  // Coverage is a distinct question from the false-positive denominator above.
-  // Adequacy asks how many bodies actually reached the provider, so it counts
-  // only provider-ok legitimates: 150 rows of which 149 timed out is not a
-  // 150-example run. `eligibleLegitimate` stays conservative for the rate and
-  // must not be reused here. Mirrors `s4-legitimate-only.ts`'s
-  // `observedLegitimateCount`.
+  // A fail-closed quarantine on an unavailable provider is not a classifier
+  // result. The model never answered, so counting it as a false positive
+  // reports unmeasured evidence as a measured accuracy defect and makes the
+  // published rate a function of provider health. Every accuracy class
+  // therefore shares one rule: measure only what the provider answered.
+  //
+  // This does not soften the operational stance. The outage is still fail
+  // closed and still blocking, via `PROVIDER_UNAVAILABLE_FAIL_CLOSED` and
+  // `ACCURACY_METRICS_INCOMPLETE`. Matches the partial-run aggregator, which
+  // leaves the FP metric unmeasured when a legitimate row went unscreened.
   const observedLegitimate = providerOkPairs.filter(
     ([example]) => example.ground_truth === "legitimate",
   );
@@ -733,7 +780,7 @@ export function aggregateScreeningRun(
   const eligibleQuarantine = providerOkPairs.filter(
     ([example]) => example.ground_truth === "quarantine",
   );
-  const falsePositive = eligibleLegitimate.filter(([example, observation]) =>
+  const falsePositive = observedLegitimate.filter(([example, observation]) =>
     isFalsePositive(example, observation),
   ).length;
   const falseNegative = eligibleHardReject.filter(([example, observation]) =>
@@ -745,7 +792,7 @@ export function aggregateScreeningRun(
   const quarantineOverRefusal = eligibleQuarantine.filter(([example, observation]) =>
     isQuarantineOverRefusal(example, observation),
   ).length;
-  const falsePositiveRate = rate(falsePositive, eligibleLegitimate.length);
+  const falsePositiveRate = rate(falsePositive, observedLegitimate.length);
   const falseNegativeRate = rate(falseNegative, eligibleHardReject.length);
   const quarantinePublishRate = rate(quarantinePublish, eligibleQuarantine.length);
   const quarantineOverRefusalRate = rate(quarantineOverRefusal, eligibleQuarantine.length);
@@ -763,31 +810,28 @@ export function aggregateScreeningRun(
 
   // Outside the completeness guard, deliberately.
   //
-  // Corpus adequacy is a property of the manifest and of what the provider
-  // actually answered, not a statistic that a separate timeout can make
-  // meaningless. Gating it on a clean run let one timeout convert "this corpus
-  // is two rows against a required 150/50" into "provider unavailable, retry
-  // later", hiding a structural defect behind retryable infrastructure. The
-  // partial-run aggregator already evaluates coverage this way.
-  if (observedLegitimate.length < thresholds.minimum_legitimate_examples)
+  // Corpus adequacy is a manifest property, not a provider-health metric. A
+  // timeout blocks the run, but cannot turn an adequate frozen corpus into a
+  // terminal sample-size failure; measured rates below use provider-ok rows.
+  if (legitimate.length < thresholds.minimum_legitimate_examples)
     failures.push("LEGITIMATE_SAMPLE_TOO_SMALL");
-  if (eligibleHardReject.length < thresholds.minimum_hard_reject_examples)
+  if (hardReject.length < thresholds.minimum_hard_reject_examples)
     failures.push("HARD_REJECT_SAMPLE_TOO_SMALL");
+  if (quarantine.length < thresholds.minimum_quarantine_examples)
+    failures.push("QUARANTINE_SAMPLE_TOO_SMALL");
 
   // Likewise a manifest fact: whether the corpus carries the should-fail
   // controls that prove the FP and FN assertions can still fail. Absence is not
   // an outage, and it must not be reported as one.
   if (
     SENTINEL_KINDS.some(
-      (kind) => sentinelControls[kind] < thresholds.minimum_sentinel_controls[kind],
+      (kind) => sentinelControls.declared[kind] < thresholds.minimum_sentinel_controls[kind],
     )
   ) {
     failures.push("SENTINEL_CONTROLS_MISSING");
   }
 
   if (providerFailureCount === 0) {
-    if (eligibleQuarantine.length < thresholds.minimum_quarantine_examples)
-      failures.push("QUARANTINE_SAMPLE_TOO_SMALL");
     // A rate, and therefore a statistic: it needs a complete run to mean anything.
     if (
       exceedsExclusiveMax(
@@ -809,16 +853,18 @@ export function aggregateScreeningRun(
    * the observations that themselves failed.
    *
    * A count, not a rate, so a larger corpus cannot dilute it: the ceiling is
-   * zero. The hard-reject false-negative count stays inside the guard where it
-   * already was; changing that is a separate decision about an existing metric,
-   * not a property of this new class.
+   * zero. The hard-reject false-negative check is likewise outside the
+   * completeness guard: a provider-ok escape remains unsafe despite another
+   * row timing out.
    */
   if (quarantinePublishRate.numerator > thresholds.quarantine_publish_max)
     failures.push("QUARANTINE_PUBLISH_THRESHOLD_FAILED");
-  // Unlike an unavailable hard-reject decision, a fail-closed quarantine of a
-  // legitimate sample is directly an over-refusal. Its denominator and the
-  // strict FP bar therefore stay live even while the report is incomplete.
+  // A fail-closed quarantine on a legitimate row is not a directly measured
+  // false positive because the provider never answered. Apply the FP bar only
+  // once the provider-ok legitimate sample reaches the configured floor;
+  // otherwise provider unavailability leaves the run blocked.
   if (
+    observedLegitimate.length >= thresholds.minimum_legitimate_examples &&
     exceedsExclusiveMax(falsePositiveRate, thresholds.legitimate_false_positive_rate_exclusive_max)
   ) {
     failures.push("LEGITIMATE_FALSE_POSITIVE_THRESHOLD_FAILED");
@@ -870,7 +916,7 @@ export function aggregateScreeningRun(
     operational_by_observed_category: operationalCategoryMatrix(pairs),
     aggregation_pairs: aggregationPairs(pairs),
     sentinel_failures: sentinels,
-    sentinel_controls_observed: sentinelControls,
+    sentinel_controls: sentinelControls,
     model_versions: modelVersions,
     policy_versions: policyVersions,
     configuration_digests: configurationDigests,

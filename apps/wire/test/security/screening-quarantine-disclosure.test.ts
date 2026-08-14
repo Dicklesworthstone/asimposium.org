@@ -70,8 +70,8 @@ function fixture(
 
 test("the quarantine metrics add no disclosure path", () => {
   const corpus: readonly ScreeningCorpusExample[] = [
-    fixture(1, "legitimate"),
-    fixture(2, "hard-reject"),
+    fixture(1, "legitimate", { sentinel: "legitimate-pass" }),
+    fixture(2, "hard-reject", { sentinel: "hard-reject" }),
     // Every free-text field on the held case carries a canary, including the
     // body and the excerpt a careless emitter would reach for first.
     fixture(3, "quarantine", {
