@@ -103,6 +103,9 @@ describe("face wire format", () => {
       "/v1/fellows",
       "/v1/fellows/flow",
       "/v1/hello",
+      "/v1/%68ello",
+      "/join/ASIMP-EN-01JXYZ4K6Q%2Fstill-one-segment",
+      "/v1/enrollments/ASIMP-EN-01JXYZ4K6Q%2Fstill-one-segment/decision",
     ];
 
     for (const path of paths) {
@@ -121,6 +124,8 @@ describe("face wire format", () => {
       "/v1/enrollments/ASIMP-EN-01JXYZ4K6Q/decision/extra",
       "/v1/hello/",
       "/v1/hello%2F",
+      "/v1/%2Fhello",
+      "/v1/%ZZhello",
     ];
 
     for (const path of paths) {

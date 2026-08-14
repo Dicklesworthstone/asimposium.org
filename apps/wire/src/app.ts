@@ -63,22 +63,42 @@ const EXACT_ENROLLMENT_PATHS = new Set([
  * far enough to consult deployment credentials or a D1 binding.
  */
 function isEnrollmentPath(pathname: string): boolean {
+  // Hono decodes path segments before matching. Decode each raw segment once
+  // so this ownership gate agrees with the router without turning an encoded
+  // slash inside a dynamic parameter into a new path separator.
+  let segments: string[];
+  try {
+    const rawSegments = pathname.split("/");
+    if (rawSegments.shift() !== "") return false;
+    segments = rawSegments.map((segment) => decodeURIComponent(segment));
+  } catch {
+    return false;
+  }
+  const decodedPath = `/${segments.join("/")}`;
   return (
-    EXACT_ENROLLMENT_PATHS.has(pathname) ||
-    /^\/join\/[^/]+$/.test(pathname) ||
-    /^\/v1\/enrollments\/[^/]+\/decision$/.test(pathname)
+    EXACT_ENROLLMENT_PATHS.has(decodedPath) ||
+    (segments.length === 2 && segments[0] === "join" && segments[1] !== "") ||
+    (segments.length === 4 &&
+      segments[0] === "v1" &&
+      segments[1] === "enrollments" &&
+      segments[2] !== "" &&
+      segments[3] === "decision")
   );
 }
 
-function routeNotFound(requestUrl: string): Response {
+function routeNotFound(requestUrl: string, ownedPathMethod?: string): Response {
+  const pathname = redactPathname(new URL(requestUrl).pathname);
   return problem({
     status: 404,
     code: "ROUTE_NOT_FOUND",
-    title: "No such route",
+    title: ownedPathMethod === undefined ? "No such route" : "Method is not served on this path",
     // The path is echoed so the caller can see what it actually asked for,
     // but never verbatim: an agent that put a credential in a URL must not
     // get it handed back (Fable §14.2).
-    detail: `This Worker serves no route at ${redactPathname(new URL(requestUrl).pathname)}.`,
+    detail:
+      ownedPathMethod === undefined
+        ? `This Worker serves no route at ${pathname}.`
+        : `This Worker serves ${pathname}, but not with ${ownedPathMethod}.`,
     fixHint:
       "GET /internal/health, the join capsule at /join/<id>, and the /v1 enrollment surface exist; the wider agent surface lands with the session and ledger workstreams.",
   });
@@ -199,7 +219,9 @@ export function createApp(): Hono<{ Bindings: Env }> {
     const stack = enrollmentStack(c.env);
     if (stack instanceof Response) return stack;
     const response = await stack.router.fetch(c.req.raw, c.env);
-    return response.headers.get(ROUTER_MISS_HEADER) === "1" ? routeNotFound(c.req.url) : response;
+    return response.headers.get(ROUTER_MISS_HEADER) === "1"
+      ? routeNotFound(c.req.url, c.req.method)
+      : response;
   });
 
   app.notFound((c) => routeNotFound(c.req.url));

@@ -90,7 +90,12 @@ describe("faces disclose no environment or binding values", () => {
     expect(response.status).toBe(404);
     expect(response.headers.get("content-type")).toBe("application/problem+json; charset=utf-8");
     expect(response.headers.get("x-asimp-internal-router-miss")).toBeNull();
-    expect(await response.json()).toMatchObject({ code: "ROUTE_NOT_FOUND", status: 404 });
+    expect(await response.json()).toMatchObject({
+      code: "ROUTE_NOT_FOUND",
+      status: 404,
+      title: "Method is not served on this path",
+      detail: "This Worker serves /v1/hello, but not with POST.",
+    });
   });
 
   test("an intentional typed route 404 is not mistaken for a dispatch miss", async () => {
