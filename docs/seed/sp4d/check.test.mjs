@@ -4,7 +4,7 @@ import test from "node:test";
 import { readFile } from "node:fs/promises";
 import { fileURLToPath } from "node:url";
 import { dirname, resolve } from "node:path";
-import { renderDossier, runCheck, sourcePaths, validateDossier, validateNewTheoryTemplate } from "./check.mjs";
+import { renderDossier, runCheck, sourcePaths, validateDossier, validateNewTheoryTemplate, validateSp4dMarkdown } from "./check.mjs";
 
 const here = dirname(fileURLToPath(import.meta.url));
 
@@ -31,13 +31,15 @@ test("rendering is deterministic for a contract fixture", () => {
     falsifier: "The expected header is absent.",
     settlement_conditions: "The generated sections match this fixture.",
     no_resolution_language: "This is not a resolution claim.",
+    variant_distinctions: [{ variant: "Fixture variant", distinction: "One bounded distinction for rendering." }],
     bounded_subgoals: [{ id: "F-1", question: "Render one bounded item.", falsifier: "The item is omitted.", boundary: "No live data.", evidence_artifact: "Exact string comparison." }],
-    references: [{ id: "F-REF", url: "https://example.invalid/reference", locator: "§1 fixture anchor", authority: "official" }],
+    references: [{ id: "F-REF", url: "https://example.invalid/reference", locator: "§1 fixture anchor", authority: "official", license_or_rights: "License not asserted for this fixture; citation and link only, with no source text or PDF included." }],
     external_expert_requirements: "No external review is implied by this fixture.",
+    safety: "Fixture safety boundary.",
     status_freshness: { source_audit_date: "2026-08-13" },
   };
   const rendered = renderDossier(fixture);
-  assert.equal(rendered, `# FIXTURE: Renderer contract\n\n**Draft source only.** This is not a resolution claim.\n\n## Exact formulation\n\nA deliberately bounded fixture proposition.\n\n## Scope\n\nFixture scope only.\n\n## Out of scope\n\nNo scientific claim.\n\n## Falsifier and settlement\n\n- Falsifier: The expected header is absent.\n- Settlement condition: The generated sections match this fixture.\n\n## Bounded subgoals\n\n- **F-1:** Render one bounded item.\n  - Falsifier: The item is omitted.\n  - Boundary: No live data.\n  - Evidence artifact: Exact string comparison.\n\n## Anchored primary references\n\n- [F-REF](https://example.invalid/reference) — §1 fixture anchor\n\n## External review gate\n\nNo external review is implied by this fixture.\n\n## Freshness\n\nSource audit date: 2026-08-13. A pre-publication status recheck is mandatory.\n`);
+  assert.equal(rendered, `# FIXTURE: Renderer contract\n\n**Draft source only.** This is not a resolution claim.\n\n## Exact formulation\n\nA deliberately bounded fixture proposition.\n\n## Scope\n\nFixture scope only.\n\n## Out of scope\n\nNo scientific claim.\n\n## Variant distinctions\n\n- **Fixture variant:** One bounded distinction for rendering.\n\n## Falsifier and settlement\n\n- Falsifier: The expected header is absent.\n- Settlement condition: The generated sections match this fixture.\n\n## Bounded subgoals\n\n- **F-1:** Render one bounded item.\n  - Falsifier: The item is omitted.\n  - Boundary: No live data.\n  - Evidence artifact: Exact string comparison.\n\n## Anchored primary references\n\n- [F-REF](https://example.invalid/reference) — §1 fixture anchor\n  - License/rights: License not asserted for this fixture; citation and link only, with no source text or PDF included.\n\n## Safety\n\nFixture safety boundary.\n\n## External review gate\n\nNo external review is implied by this fixture.\n\n## Freshness\n\nSource audit date: 2026-08-13. A pre-publication status recheck is mandatory.\n`);
 });
 
 test("planted negative: a conflated variant is rejected", async () => {
@@ -50,6 +52,21 @@ test("planted negative: a missing primary-source anchor is rejected", async () =
   const dossier = JSON.parse(await readFile(sourcePaths.sp4d, "utf8"));
   dossier.references[0].locator = "";
   assert.ok(validateDossier(dossier).some((error) => error.code === "MISSING_SOURCE_ANCHOR"));
+});
+
+test("planted negative: a missing source rights record is rejected", async () => {
+  const dossier = JSON.parse(await readFile(sourcePaths.sp4d, "utf8"));
+  dossier.references[0].license_or_rights = "";
+  assert.ok(validateDossier(dossier).some((error) => error.code === "MISSING_SOURCE_RIGHTS"));
+});
+
+test("planted negative: an SP4D prose citation drift is rejected", async () => {
+  const [dossier, markdown] = await Promise.all([
+    readFile(sourcePaths.sp4d, "utf8").then(JSON.parse),
+    readFile(sourcePaths.sp4dMarkdown, "utf8"),
+  ]);
+  const drifted = markdown.replace(dossier.references[0].url, "https://example.invalid/wrong-anchor");
+  assert.ok(validateSp4dMarkdown(drifted, dossier).some((error) => error.code === "SP4D_MARKDOWN_SOURCE_DRIFT"));
 });
 
 test("planted negative: a current-status field is rejected", async () => {

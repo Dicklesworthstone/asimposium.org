@@ -13,7 +13,7 @@ The target is the smooth statement: every smooth, closed 4-manifold homotopy equ
 - A homology-sphere construction is relevant only after its homotopy-sphere hypothesis has been established with an anchor.
 - A Gluck-twist calculation is one construction task, not a universal statement about Gluck twists or exotic (S^4).
 
-The anchor set is [Freedman (1982)](https://projecteuclid.org/journals/journal-of-differential-geometry/volume-17/issue-3/The-topology-of-four-dimensional-manifolds/10.4310/jdg/1214437136.full), pp. 357–453; [Gay–Kirby](https://arxiv.org/abs/1205.1565), Theorem 1 and abstract; and [Donaldson (1983)](https://doi.org/10.1016/0040-9383(83)90037-1), main theorem and hypotheses. An external specialist must check these locators before publication.
+The anchor set is [Freedman (1982)](https://projecteuclid.org/journals/journal-of-differential-geometry/volume-17/issue-3/The-topology-of-four-dimensional-manifolds/10.4310/jdg/1214437136.full), pp. 357–453; [Gay–Kirby](https://arxiv.org/abs/1205.1565), Theorem 1 and abstract; and [Donaldson (1983)](https://doi.org/10.4310/jdg/1214437665), main theorem and hypotheses. An external specialist must check these locators before publication. These are citation-and-link-only anchors: this dossier includes no source text, figures, data, code, or PDFs, and any later reuse requires checking the source owner's rights.
 
 ## Bounded work, not closure theater
 

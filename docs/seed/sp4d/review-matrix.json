@@ -2,7 +2,7 @@
   "matrix_version": "1.0.0",
   "consumer": "W12.2 real sharpening and famous-problem guardrail entry",
   "gate": "asimposiumorg-4kz W12.P2 source-preparation contract",
-  "observed_defect_class": "conflated mathematical variants, unanchored primary-source claims, unsupported current-status wording, and unbounded flagship tasks",
+  "observed_defect_class": "conflated mathematical variants, unanchored or source-drifted claims, missing per-source license/right boundaries, unsupported current-status wording, and unbounded flagship tasks",
   "deletion_condition": "Replace only after W12.2 has ingested reviewed source material through the real sharpening machinery and its runtime validator has equivalent coverage; never delete it merely because a prose page exists.",
   "dossiers": [
     { "id": "SP4D", "checks": { "exact_formulation": "required", "variant_distinctions": "required", "primary_anchors": "required", "falsifier": "required", "settlement_and_no_claim": "required", "bounded_subgoals": "required", "safety": "required", "freshness": "required", "external_expert_gate": "required", "rendered_face": "required" } },

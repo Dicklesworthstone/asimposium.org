@@ -23,8 +23,8 @@
         { "id": "KZD-G1", "question": "Reproduce one named finite group-ring multiplication in the coefficient ring specified by the source.", "falsifier": "Normal-form reduction yields a nonzero product or an element is not represented as claimed.", "boundary": "One presentation and one coefficient ring only; no global conjecture claim.", "evidence_artifact": "Versioned presentation, reduction trace, independent CAS rerun, and source locator table." }
       ],
       "references": [
-        { "id": "DOLINKO-2012", "authority": "primary", "url": "https://arxiv.org/abs/1202.6645", "locator": "Abstract and Conjecture 1; distinguish the zero-divisor formulation from adjacent conjectures.", "why_here": "Primary formulation anchor." },
-        { "id": "GARDAM-2021", "authority": "primary", "url": "https://arxiv.org/abs/2102.11818", "locator": "Abstract and stated coefficient field; it concerns the unit conjecture, not a license to conflate it with zero divisors.", "why_here": "Post-Gardam distinction anchor." }
+        { "id": "SCHWEITZER-2012", "authority": "primary", "url": "https://arxiv.org/abs/1202.6645", "locator": "Abstract and Conjecture 1; distinguish the zero-divisor formulation from adjacent conjectures.", "why_here": "Primary formulation anchor.", "license_or_rights": "License not asserted by this dossier; citation and link only, with no source text, figures, data, code, or PDF included. Verify source-owner rights before any reuse." },
+        { "id": "GARDAM-2021", "authority": "primary", "url": "https://arxiv.org/abs/2102.11818", "locator": "Abstract and stated coefficient field; it concerns the unit conjecture, not a license to conflate it with zero divisors.", "why_here": "Post-Gardam distinction anchor.", "license_or_rights": "License not asserted by this dossier; citation and link only, with no source text, figures, data, code, or PDF included. Verify source-owner rights before any reuse." }
       ]
     },
     {
@@ -48,7 +48,7 @@
         { "id": "UC-G1", "question": "Verify union closure and exact element frequencies for one supplied finite family, then compare them with one explicitly stated bound.", "falsifier": "A union is absent, parsing changes the family, or the computed maximum frequency misses the bound.", "boundary": "One finite family and one named bound only; no global proof claim.", "evidence_artifact": "Canonical family encoding, exact rational frequency table, and independently rerun verifier." }
       ],
       "references": [
-        { "id": "GILMER-2022", "authority": "primary", "url": "https://arxiv.org/abs/2211.09055", "locator": "Abstract and main theorem statement giving the 0.01 constant in the stated setting.", "why_here": "Primary anchor for a bounded constant, not a current-status assertion." }
+        { "id": "GILMER-2022", "authority": "primary", "url": "https://arxiv.org/abs/2211.09055", "locator": "Abstract and main theorem statement giving the 0.01 constant in the stated setting.", "why_here": "Primary anchor for a bounded constant, not a current-status assertion.", "license_or_rights": "License not asserted by this dossier; citation and link only, with no source text, figures, data, code, or PDF included. Verify source-owner rights before any reuse." }
       ]
     },
     {
@@ -72,7 +72,7 @@
         { "id": "ES-G1", "question": "Produce a complete certificate for 2 <= n <= N where N is committed in the artifact manifest before execution.", "falsifier": "One uncovered n, a nonpositive denominator, or a failed integer cross-product check.", "boundary": "The fixed manifest range only; no extrapolation beyond N.", "evidence_artifact": "Sorted decomposition table, exact verifier, coverage count, and independent replay log." }
       ],
       "references": [
-        { "id": "BELLO-HERNANDEZ-2010", "authority": "primary", "url": "https://arxiv.org/abs/1010.2035", "locator": "Introduction equation (1) and the reported finite verification statement in the abstract.", "why_here": "Primary formulation and detection-floor anchor." }
+        { "id": "BELLO-HERNANDEZ-2010", "authority": "primary", "url": "https://arxiv.org/abs/1010.2035", "locator": "Introduction equation (1) and the reported finite verification statement in the abstract.", "why_here": "Primary formulation and detection-floor anchor.", "license_or_rights": "License not asserted by this dossier; citation and link only, with no source text, figures, data, code, or PDF included. Verify source-owner rights before any reuse." }
       ]
     },
     {
@@ -96,7 +96,7 @@
         { "id": "CUBES-G1", "question": "Verify one supplied triple for one declared k with arbitrary-precision arithmetic and independent implementation agreement.", "falsifier": "Exact evaluation differs from k or an input integer is altered by parsing.", "boundary": "One k and one witness only; no claim about other k values.", "evidence_artifact": "Canonical decimal inputs, two verifier outputs, and SHA-256 digests of the source artifact." }
       ],
       "references": [
-        { "id": "BOOKER-SUTHERLAND-2021", "authority": "primary", "url": "https://doi.org/10.1093/imrn/rnaa174", "locator": "Published article 'On a question of Mordell'; abstract and stated computational verification methodology.", "why_here": "Primary method and provenance anchor." }
+        { "id": "BOOKER-SUTHERLAND-2021", "authority": "primary", "url": "https://doi.org/10.1093/imrn/rnaa174", "locator": "Published article 'On a question of Mordell'; abstract and stated computational verification methodology.", "why_here": "Primary method and provenance anchor.", "license_or_rights": "License not asserted by this dossier; citation and link only, with no source text, figures, data, code, or PDF included. Verify source-owner rights before any reuse." }
       ]
     },
     {
@@ -120,7 +120,7 @@
         { "id": "SENDOV-G1", "question": "For a finite source-supplied polynomial family of one declared degree, certify the root-to-critical-point distance inequalities.", "falsifier": "An interval enclosure excludes all critical points within distance one for an allowed root.", "boundary": "The named family and degree only; no all-degree conclusion.", "evidence_artifact": "Polynomial list, certified root enclosures, critical-point enclosures, and independent checker output." }
       ],
       "references": [
-        { "id": "DRURY-LIN-2022", "authority": "primary", "url": "https://arxiv.org/abs/2210.08720", "locator": "Abstract and the paper's exact formulation; publication and expert-review status must be rechecked separately.", "why_here": "Primary claimed-proof anchor that the dossier intentionally does not convert into a status claim." }
+        { "id": "DRURY-LIN-2022", "authority": "primary", "url": "https://arxiv.org/abs/2210.08720", "locator": "Withdrawal notice, abstract, and comments field; it is a withdrawn author record and cannot support a proof claim.", "why_here": "Primary author-withdrawal record and original claimed-proof anchor; the dossier uses it only to guard against converting a claim into a theorem.", "license_or_rights": "The current arXiv record reports no license for its withdrawn version; citation and link only, with no source text, figures, data, code, or PDF included. Verify source-owner rights before any reuse." }
       ]
     },
     {
@@ -144,7 +144,7 @@
         { "id": "LR-G1", "question": "Verify a rational-time certificate for one supplied integer velocity tuple at one declared k.", "falsifier": "Exact distance-to-nearest-integer arithmetic violates the threshold for any velocity.", "boundary": "One velocity tuple only; no coverage claim for all tuples.", "evidence_artifact": "Velocity manifest, rational time witness, exact distance table, and independent rerun." }
       ],
       "references": [
-        { "id": "BARAJAS-SERRA-2007", "authority": "primary", "url": "https://arxiv.org/abs/0710.4495", "locator": "Abstract and stated runner-count convention for the seven-runner result.", "why_here": "Primary convention and finite-case anchor." }
+        { "id": "BARAJAS-SERRA-2007", "authority": "primary", "url": "https://arxiv.org/abs/0710.4495", "locator": "Abstract and stated runner-count convention for the seven-runner result.", "why_here": "Primary convention and finite-case anchor.", "license_or_rights": "License not asserted by this dossier; citation and link only, with no source text, figures, data, code, or PDF included. Verify source-owner rights before any reuse." }
       ]
     },
     {
@@ -168,7 +168,7 @@
         { "id": "BB6-G1", "question": "Replay one supplied six-state transition table to a checkpointed lower-bound threshold using a deterministic, independently implemented checker.", "falsifier": "The encodings differ, the replay fails before the threshold, or the checker reports a different state/tape convention.", "boundary": "One machine and stated lower bound only; no exact BB(6) claim.", "evidence_artifact": "Transition-table string, checkpoint hashes, verifier source digest, and independent replay receipt." }
       ],
       "references": [
-        { "id": "BBCHALLENGE-2025", "authority": "primary", "url": "https://arxiv.org/abs/2504.20563", "locator": "Lines 41–55 in the public text: machine conventions and the all-zero-tape start state.", "why_here": "Primary convention anchor for checkable Busy Beaver artifacts." }
+        { "id": "BBCHALLENGE-STORY", "authority": "official", "url": "https://bbchallenge.org/story", "locator": "Definition of BB and machine-convention section: two symbols, state A, and an all-zero initial tape; no six-state record or exact-value claim is taken from this anchor.", "why_here": "Official convention anchor for model-fixed, checkable Busy Beaver artifacts; it replaces an unrelated five-state paper.", "license_or_rights": "License not asserted by this dossier; citation and link only, with no source text, figures, data, code, or PDF included. Verify source-owner rights before any reuse." }
       ]
     },
     {
@@ -192,7 +192,7 @@
         { "id": "QCA-G1", "question": "For one declared low-dimensional channel pair and one named functional, reproduce a source-supplied inequality with certified tolerance.", "falsifier": "The maps fail CPTP checks, the functional convention changes, or the certified interval contains equality.", "boundary": "One channel pair and one functional only; no statement about all channels.", "evidence_artifact": "Kraus or Choi data, CPTP checker, optimization settings, interval certificate, and independent rerun." }
       ],
       "references": [
-        { "id": "HASTINGS-2008", "authority": "primary", "url": "https://arxiv.org/abs/0809.3972", "locator": "Abstract and the named communication-capacity additivity claim; retain the functional exactly as stated.", "why_here": "Primary anchor for the distinction between an additivity question and a counterexample construction." }
+        { "id": "HASTINGS-2008", "authority": "primary", "url": "https://arxiv.org/abs/0809.3972", "locator": "Abstract and the named communication-capacity additivity claim; retain the functional exactly as stated.", "why_here": "Primary anchor for the distinction between an additivity question and a counterexample construction.", "license_or_rights": "License not asserted by this dossier; citation and link only, with no source text, figures, data, code, or PDF included. Verify source-owner rights before any reuse." }
       ]
     },
     {
@@ -216,7 +216,7 @@
         { "id": "NS-G1", "question": "Check a specified energy balance for one periodic Fourier-Galerkin truncation over [0,T] with declared residual tolerance.", "falsifier": "The residual certificate exceeds tolerance, divergence-free constraints fail, or a manifest parameter is missing.", "boundary": "One finite truncation and time interval only; no PDE regularity conclusion.", "evidence_artifact": "Mode manifest, solver version, interval or residual certificate, and independently rerun checker." }
       ],
       "references": [
-        { "id": "FEFFERMAN-CLAY", "authority": "official", "url": "https://www.claymath.org/wp-content/uploads/2022/06/navierstokes.pdf", "locator": "Official problem description, alternatives (A)–(D) on pages 2–3; use it to preserve the global-problem boundary.", "why_here": "Official formulation anchor." }
+        { "id": "FEFFERMAN-CLAY", "authority": "official", "url": "https://www.claymath.org/wp-content/uploads/2022/06/navierstokes.pdf", "locator": "Official problem description, alternatives (A)–(D) on pages 2–3; use it to preserve the global-problem boundary.", "why_here": "Official formulation anchor.", "license_or_rights": "License not asserted by this dossier; citation and link only, with no source text, figures, data, code, or PDF included. Verify source-owner rights before any reuse." }
       ]
     }
   ],

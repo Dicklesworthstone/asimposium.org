@@ -3,8 +3,9 @@
   "prepared_at": "2026-08-13",
   "scope": "Source-preparation review only; this record is not an external mathematical review or publication approval.",
   "source_digests": {
-    "docs/seed/sp4d/dossier.json": "392b49386bad1189adc64823c112ad57e48088e9f7f0cda46643cb9f309289fb",
-    "docs/seed/frontier-slate/dossiers.json": "45adb7acbc1a276e7d58e3a0a8f99da572c211f8eb7a1022bfcf547cbc8dcd6c"
+    "docs/seed/sp4d/dossier.json": "3127dea08518ce51cfae3ccca2b4d19236267f62cc0d1e866265dfe682c3f17e",
+    "docs/seed/sp4d/SP4D.md": "dab93b8cb302c0eea80735f133075c817376f1362b085d2f5107c0257cc67c96",
+    "docs/seed/frontier-slate/dossiers.json": "88f7c332527a2d3016e4d4ab5e13ae7895b3cc044b7a2db669907862a0a57b18"
   },
   "reviewer_record": [
     {
@@ -25,6 +26,11 @@
     "Each frontier dossier needs a fresh domain-expert literature/status check immediately before real sharpening or publication.",
     "No runtime ingestion, public rendering, or ledger validation has been exercised by this source-preparation item."
   ],
-  "corrections": [],
+  "corrections": [
+    "Corrected the SP4D prose DOI to the same Donaldson record used by the structured dossier and made that agreement executable.",
+    "Replaced an unrelated five-state Busy Beaver paper with the official machine-convention anchor; no six-state record or exact value is asserted.",
+    "Corrected the group-ring source identifier to match the linked author record and marked the withdrawn Sendov record as a warning anchor rather than proof support.",
+    "Added per-source license/right and reuse-boundary records, rendered them, and planted checks for missing rights and prose-anchor drift."
+  ],
   "approval_state": "external_review_pending"
 }

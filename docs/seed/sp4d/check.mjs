@@ -28,6 +28,7 @@ const requiredChecks = [
 
 export const sourcePaths = {
   sp4d: resolve(here, "dossier.json"),
+  sp4dMarkdown: resolve(here, "SP4D.md"),
   slate: resolve(here, "../frontier-slate/dossiers.json"),
   matrix: resolve(here, "review-matrix.json"),
   report: resolve(here, "review-report.json"),
@@ -39,6 +40,14 @@ function diagnostic(code, dossier, detail) {
 
 function hasAnchor(reference) {
   return typeof reference.locator === "string" && reference.locator.trim().length >= 8;
+}
+
+function hasRightsRecord(reference) {
+  return typeof reference.license_or_rights === "string"
+    && reference.license_or_rights.trim().length >= 40
+    && /(?:license|rights)/i.test(reference.license_or_rights)
+    && /(?:citation|link)/i.test(reference.license_or_rights)
+    && /(?:no source text|no paper text|no PDF)/i.test(reference.license_or_rights);
 }
 
 function variantIsConflated(dossier) {
@@ -97,6 +106,9 @@ export function validateDossier(dossier) {
       if (!hasAnchor(reference)) {
         errors.push(diagnostic("MISSING_SOURCE_ANCHOR", id, reference.id ?? "<unnamed reference>"));
       }
+      if (!hasRightsRecord(reference)) {
+        errors.push(diagnostic("MISSING_SOURCE_RIGHTS", id, reference.id ?? "<unnamed reference>"));
+      }
     }
   }
   if (!Array.isArray(dossier.bounded_subgoals) || dossier.bounded_subgoals.length === 0) {
@@ -115,9 +127,23 @@ export function validateDossier(dossier) {
 }
 
 export function renderDossier(dossier) {
-  const references = dossier.references.map((reference) => `- [${reference.id}](${reference.url}) — ${reference.locator}`).join("\n");
+  const variants = dossier.variant_distinctions.map(({ variant, distinction }) => `- **${variant}:** ${distinction}`).join("\n");
+  const references = dossier.references.map((reference) => `- [${reference.id}](${reference.url}) — ${reference.locator}\n  - License/rights: ${reference.license_or_rights}`).join("\n");
   const subgoals = dossier.bounded_subgoals.map((subgoal) => `- **${subgoal.id}:** ${subgoal.question}\n  - Falsifier: ${subgoal.falsifier}\n  - Boundary: ${subgoal.boundary}\n  - Evidence artifact: ${subgoal.evidence_artifact}`).join("\n");
-  return `# ${dossier.id}: ${dossier.title}\n\n**Draft source only.** ${dossier.no_resolution_language}\n\n## Exact formulation\n\n${dossier.formulation}\n\n## Scope\n\n${dossier.scope}\n\n## Out of scope\n\n${dossier.out_of_scope}\n\n## Falsifier and settlement\n\n- Falsifier: ${dossier.falsifier}\n- Settlement condition: ${dossier.settlement_conditions}\n\n## Bounded subgoals\n\n${subgoals}\n\n## Anchored primary references\n\n${references}\n\n## External review gate\n\n${dossier.external_expert_requirements}\n\n## Freshness\n\nSource audit date: ${dossier.status_freshness.source_audit_date}. A pre-publication status recheck is mandatory.\n`;
+  return `# ${dossier.id}: ${dossier.title}\n\n**Draft source only.** ${dossier.no_resolution_language}\n\n## Exact formulation\n\n${dossier.formulation}\n\n## Scope\n\n${dossier.scope}\n\n## Out of scope\n\n${dossier.out_of_scope}\n\n## Variant distinctions\n\n${variants}\n\n## Falsifier and settlement\n\n- Falsifier: ${dossier.falsifier}\n- Settlement condition: ${dossier.settlement_conditions}\n\n## Bounded subgoals\n\n${subgoals}\n\n## Anchored primary references\n\n${references}\n\n## Safety\n\n${dossier.safety}\n\n## External review gate\n\n${dossier.external_expert_requirements}\n\n## Freshness\n\nSource audit date: ${dossier.status_freshness.source_audit_date}. A pre-publication status recheck is mandatory.\n`;
+}
+
+export function validateSp4dMarkdown(markdown, dossier) {
+  const errors = [];
+  if (!markdown.startsWith("# SP4D")) {
+    errors.push(diagnostic("SP4D_MARKDOWN_CONTRACT_INVALID", dossier.id, "missing SP4D heading"));
+  }
+  for (const reference of dossier.references) {
+    if (!markdown.includes(reference.url)) {
+      errors.push(diagnostic("SP4D_MARKDOWN_SOURCE_DRIFT", dossier.id, reference.id));
+    }
+  }
+  return errors;
 }
 
 export function validateNewTheoryTemplate(template) {
@@ -211,8 +237,9 @@ async function verifyLinks(dossiers) {
 }
 
 export async function runCheck({ verifyLinks: shouldVerifyLinks = false } = {}) {
-  const [sp4dText, slateText, matrix, report] = await Promise.all([
+  const [sp4dText, sp4dMarkdown, slateText, matrix, report] = await Promise.all([
     readFile(sourcePaths.sp4d, "utf8"),
+    readFile(sourcePaths.sp4dMarkdown, "utf8"),
     readFile(sourcePaths.slate, "utf8"),
     readJson(sourcePaths.matrix),
     readJson(sourcePaths.report),
@@ -221,10 +248,12 @@ export async function runCheck({ verifyLinks: shouldVerifyLinks = false } = {}) 
   const slate = JSON.parse(slateText);
   const dossiers = [sp4d, ...slate.dossiers];
   const errors = dossiers.flatMap(validateDossier);
+  errors.push(...validateSp4dMarkdown(sp4dMarkdown, sp4d));
   errors.push(...validateNewTheoryTemplate(slate.new_theory_template));
   errors.push(...validateMatrix(matrix, dossiers.map((dossier) => dossier.id)));
   errors.push(...validateReport(report, {
     "docs/seed/sp4d/dossier.json": sp4dText,
+    "docs/seed/sp4d/SP4D.md": sp4dMarkdown,
     "docs/seed/frontier-slate/dossiers.json": slateText,
   }));
   for (const dossier of dossiers) {

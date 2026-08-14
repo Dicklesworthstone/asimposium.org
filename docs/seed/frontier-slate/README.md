@@ -14,7 +14,7 @@
 | Quantum channel additivity | Certify one functional-specific finite-channel inequality. | “Additivity” has no meaning without its named functional. |
 | Navier–Stokes | Check one finite Galerkin energy identity. | A finite simulation cannot settle global regularity. |
 
-Primary/official anchors, variant distinctions, falsifiers, evidence artifacts, safety notes, and review gates live in [`dossiers.json`](./dossiers.json). Run the source contract from the repository root:
+Primary/official anchors, per-source license/right and reuse boundaries, variant distinctions, falsifiers, evidence artifacts, safety notes, and review gates live in [`dossiers.json`](./dossiers.json). Run the source contract from the repository root:
 
 ```bash
 node docs/seed/sp4d/check.mjs
