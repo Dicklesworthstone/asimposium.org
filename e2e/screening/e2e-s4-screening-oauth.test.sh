@@ -196,6 +196,9 @@ assert_terminal_summary() {
   fi
 
   summary="${output##*$'\n'}"
+  # The program is intentionally single-quoted: Bash must pass every `${...}`
+  # below to Bun literally so JavaScript, not the shell, owns interpolation.
+  # shellcheck disable=SC2016
   if ! "${BUN_PATH}" -e '
     const [summary, expectedStatus, expectedCode, expectedExitCode,
       expectedRunnerStatus, expectedOauthStatus, expectedRunnerTestStatus,
@@ -1263,6 +1266,8 @@ run_parent_signal_case() (
   # Command substitutions inherit SIGINT ignored from non-interactive Bash on
   # some launchers. Reset it in the execing process so this remains a real
   # process-level INT delivery test rather than a disposition-dependent fake.
+  # Perl owns $SIG here; shell expansion would corrupt the signal reset.
+  # shellcheck disable=SC2016
   run_bounded_capture 6 \
     env \
     "S4_WRAPPER_TEST_LIFECYCLE_HOOK=${lifecycle_hook}" \
