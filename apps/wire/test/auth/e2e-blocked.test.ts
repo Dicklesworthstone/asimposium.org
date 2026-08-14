@@ -17,6 +17,8 @@ import { describe, expect, test } from "bun:test";
 import { readFileSync } from "node:fs";
 import { resolve } from "node:path";
 import {
+  classifyRefusal,
+  EXPECTED_REFUSAL,
   LOCAL_FETCH_TIMEOUT_MS,
   loadSigningKey,
   localFetch,
@@ -621,5 +623,146 @@ describe("harness signing-key configuration fails closed", () => {
       // Bounded: a diagnostic is a sentence, not a dump.
       expect((loaded.detail ?? "").length).toBeLessThan(200);
     }
+  });
+});
+
+describe("the cookie trap survives every Request-returning path", () => {
+  const withCookie = (): Request =>
+    new Request("https://a.asimposium.org/__s6/ingress", {
+      method: "POST",
+      headers: {
+        cookie: "__Host-authjs.session-token=CLONE_LEAK_CANARY",
+        "content-type": "application/json",
+      },
+      body: '{"a":1}',
+    });
+
+  test("PLANTED: clone() does not hand back an unguarded Request", () => {
+    // Reproduced before the fix: every method was bound to the real target, so
+    // `guarded.clone()` returned a raw Request and
+    // `clone.headers.get("cookie")` read the session value while the canary
+    // counted zero. A trap a caller can step around by cloning is not a trap.
+    let reads = 0;
+    const guarded = cookieTrappedRequest(withCookie(), () => {
+      reads += 1;
+    });
+    expect(() => guarded.clone().headers.get("cookie")).toThrow("S6_COOKIE_READ_ON_AGENT_HOST");
+    expect(reads).toBe(1);
+  });
+
+  test("PLANTED: a clone of a clone stays guarded", () => {
+    const guarded = cookieTrappedRequest(withCookie(), () => undefined);
+    expect(() => guarded.clone().clone().headers.get("cookie")).toThrow(
+      "S6_COOKIE_READ_ON_AGENT_HOST",
+    );
+  });
+
+  test("PLANTED: every iteration path is trapped on a clone too", () => {
+    for (const read of [
+      (h: Headers) => void [...h.entries()],
+      (h: Headers) => void [...h],
+      (h: Headers) => void [...h.keys()],
+      (h: Headers) => void [...h.values()],
+      (h: Headers) => {
+        h.forEach(() => {});
+      },
+    ]) {
+      const guarded = cookieTrappedRequest(withCookie(), () => undefined);
+      // `clone()` is typed against the ambient fetch types, so its `headers`
+      // needs the same two-step cast this repository uses for that mismatch.
+      const cloned = guarded.clone().headers as unknown as Headers;
+      expect(() => read(cloned)).toThrow("S6_COOKIE_READ_ON_AGENT_HOST");
+    }
+  });
+
+  test("cloning still works for its actual purpose: reading the body twice", async () => {
+    const guarded = cookieTrappedRequest(withCookie(), () => undefined);
+    const copy = guarded.clone();
+    expect(await copy.text()).toBe('{"a":1}');
+    expect(await guarded.text()).toBe('{"a":1}');
+  });
+
+  test("a clone of a cookie-free request reads normally", () => {
+    const plain = cookieTrappedRequest(
+      new Request("https://a.asimposium.org/__s6/ingress", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: "{}",
+      }),
+      () => undefined,
+    );
+    expect(plain.clone().headers.get("content-type")).toBe("application/json");
+  });
+
+  test("clone is the only Request-returning member on the guarded object", () => {
+    const guarded = cookieTrappedRequest(withCookie(), () => undefined);
+    // Body readers return data, not a Request, so they cannot leak headers.
+    for (const member of ["text", "json", "arrayBuffer", "formData", "blob"]) {
+      expect(typeof (guarded as unknown as Record<string, unknown>)[member]).toBe("function");
+    }
+    expect(typeof guarded.clone).toBe("function");
+  });
+});
+
+describe("a refusal must be an exact refusal", () => {
+  test("PLANTED: a 500 is never accepted as a refusal", () => {
+    // `status !== 200` accepted every server error, so a wholly broken harness
+    // reported a clean sweep of refusals.
+    for (const status of [500, 502, 503, 504]) {
+      const verdict = classifyRefusal(
+        status,
+        { code: "S6_FORCED_STATUS" },
+        EXPECTED_REFUSAL.unauthorized,
+      );
+      expect(verdict.ok).toBe(false);
+      expect(verdict.detail).toContain("server error");
+    }
+  });
+
+  test("PLANTED: the wrong 4xx status or the wrong code is refused", () => {
+    expect(classifyRefusal(404, { code: "UNAUTHORIZED" }, EXPECTED_REFUSAL.unauthorized).ok).toBe(
+      false,
+    );
+    expect(
+      classifyRefusal(401, { code: "WRONG_PRINCIPAL" }, EXPECTED_REFUSAL.unauthorized).ok,
+    ).toBe(false);
+    expect(classifyRefusal(401, {}, EXPECTED_REFUSAL.unauthorized).ok).toBe(false);
+    expect(classifyRefusal(200, { ok: true }, EXPECTED_REFUSAL.unauthorized).ok).toBe(false);
+  });
+
+  test("the exact expected refusal is accepted", () => {
+    expect(classifyRefusal(401, { code: "UNAUTHORIZED" }, EXPECTED_REFUSAL.unauthorized).ok).toBe(
+      true,
+    );
+    expect(
+      classifyRefusal(403, { code: "WRONG_PRINCIPAL" }, EXPECTED_REFUSAL.wrongPrincipal).ok,
+    ).toBe(true);
+  });
+
+  test("every refusal assertion goes through the exact-refusal helper", () => {
+    // Comments stripped: this is about what the checker *does*. The rule is not
+    // "the string `status !== 200` never appears" — one legitimate use remains,
+    // asserting that exactly one of a concurrent pair was accepted, whose
+    // refusal quality is then asserted separately by `checkRefusal`. The rule
+    // is that no assertion *named* for a refusal may use the loose form.
+    const lines = code(CHECKER).split("\n");
+    const loose = lines.filter(
+      (line) => /\bcheck\(/.test(line) && !/checkRefusal\(/.test(line) && /refused/.test(line),
+    );
+    expect(loose).toEqual([]);
+    expect(code(CHECKER)).toContain("checkRefusal(");
+    expect(code(CHECKER)).toContain("EXPECTED_REFUSAL");
+  });
+
+  test("the cookie-on-agent probe actually presents a Cookie", () => {
+    const checker = read(CHECKER);
+    const block = checker.slice(
+      checker.indexOf("a_cookie_on_the_agent_write_route_is_wrong_principal") - 1200,
+      checker.indexOf("the_presented_cookie_is_never_echoed_by_the_principal_route"),
+    );
+    // A probe named for a cookie must carry one, and assert the exact reason.
+    expect(block).toContain("headers: { cookie:");
+    expect(block).toContain('"no_credential"');
+    expect(block).toContain("WRONG_PRINCIPAL");
   });
 });

@@ -1,4 +1,5 @@
 #!/usr/bin/env bun
+
 /**
  * S-6 local ingress checker (bead asimposiumorg-vw3).
  *
@@ -15,6 +16,7 @@ import {
   type ServiceEnvelope,
   serviceEnvelopeHeaders,
 } from "../../../web/lib/service-envelope";
+import { principalPseudonym } from "./diagnostics";
 
 /** Every request in this checker is bounded by this deadline. */
 export const LOCAL_FETCH_TIMEOUT_MS = 10_000;
@@ -73,7 +75,21 @@ const origin = validatedOrigin === undefined ? undefined : validatedOrigin.origi
  * caused it.
  */
 export async function localFetch(url: string, init: RequestInit = {}): Promise<Response> {
-  return await fetch(url, { ...init, signal: AbortSignal.timeout(LOCAL_FETCH_TIMEOUT_MS) });
+  return await fetch(url, {
+    ...init,
+    // Both of these are set *after* the spread so a caller cannot override
+    // them, deliberately or by copying an init object around.
+    //
+    // `redirect: "manual"` is a proof-integrity control, not a nicety. The
+    // default is "follow", so a Worker answering 302 would make this checker
+    // re-send a *signed service envelope* to whatever Location named — a second
+    // origin, off loopback, carrying real credentials — and the run would still
+    // report the assertion as passing against a response it never validated the
+    // provenance of. Manual redirects keep every request on the origin this
+    // harness validated.
+    redirect: "manual",
+    signal: AbortSignal.timeout(LOCAL_FETCH_TIMEOUT_MS),
+  });
 }
 
 /**
@@ -184,6 +200,10 @@ export async function loadSigningKey(raw: string | undefined): Promise<SigningKe
 const REPRODUCE = "bash scripts/e2e-s6-auth-ingress.sh";
 const ROUTE = "/__s6/ingress";
 const ACTION = "s6.probe";
+/** The acting principal every signed envelope in this run names. */
+const PRINCIPAL_ID = "usr_01JXYZ0000000000000000";
+/** Must match the launcher's `--var S6_PSEUDONYM_SALT`. */
+const PSEUDONYM_SALT = "s6-local-salt";
 const NOW = Number.parseInt(process.env.S6_NOW ?? "", 10);
 const KID = process.env.S6_KID ?? "s6-local";
 /** Never sent as a real credential; asserted to appear nowhere in any output. */
@@ -200,6 +220,84 @@ function emit(record: Record<string, unknown>): void {
 function check(assertion: string, ok: boolean, detail: string): void {
   if (!ok) failures += 1;
   emit({ assertion, status: ok ? "pass" : "fail", detail: ok ? "as expected" : detail });
+}
+
+/** The refusal vocabulary the adapter is contracted to return. */
+export const EXPECTED_REFUSAL = {
+  /** Envelope verification failed: tamper, expiry, unknown key, bound-byte mismatch, replay. */
+  unauthorized: { status: 401, code: "UNAUTHORIZED" },
+  /** The wrong credential class for the host/route pair. */
+  wrongPrincipal: { status: 403, code: "WRONG_PRINCIPAL" },
+} as const;
+
+/**
+ * Decide whether one response is the exact refusal a case requires.
+ *
+ * `status !== 200` was not an assertion of anything. A 500 from a broken
+ * binding, a 404 from a mistyped route, and a 502 from a dead Worker all
+ * satisfied it, so the suite reported "refused as expected" for a harness that
+ * had simply failed — the precise shape of a test that cannot fail for the
+ * reason it claims to test. A refusal is now an exact status *and* an exact
+ * code, and a server error is called out as its own condition so it can never
+ * be read as proof.
+ */
+export function classifyRefusal(
+  status: number,
+  body: Record<string, unknown>,
+  expected: { status: number; code: string },
+): { ok: boolean; detail: string } {
+  if (status >= 500) {
+    return {
+      ok: false,
+      detail: `server error ${status} is not a refusal (code ${String(body.code ?? "none")})`,
+    };
+  }
+  if (status === 200) return { ok: false, detail: "accepted; a refusal was required" };
+  if (status !== expected.status) {
+    return { ok: false, detail: `status ${status}, expected ${expected.status}` };
+  }
+  const code = typeof body.code === "string" ? body.code : "";
+  if (code !== expected.code) {
+    return { ok: false, detail: `code ${code || "none"}, expected ${expected.code}` };
+  }
+  return { ok: true, detail: "as expected" };
+}
+
+/** Assert one response is exactly the required refusal. */
+function checkRefusal(
+  assertion: string,
+  sent: Sent,
+  expected: { status: number; code: string } = EXPECTED_REFUSAL.unauthorized,
+): void {
+  const verdict = classifyRefusal(sent.status, sent.body, expected);
+  check(assertion, verdict.ok, verdict.detail);
+}
+
+/**
+ * Assert an accepted ingress response is the *right* acceptance.
+ *
+ * `status === 200` alone would pass for an acceptance attributed to the wrong
+ * action or the wrong principal, which is the failure that matters most here:
+ * the whole point of the envelope is that it binds a specific acting principal
+ * to a specific permitted action. The expected pseudonym is derived with the
+ * same function and salt the Worker uses, so this compares against a computed
+ * value rather than whatever the response happened to contain.
+ */
+async function checkAccepted(assertion: string, sent: Sent, expectedAction: string): Promise<void> {
+  const expectedPseudonym = await principalPseudonym(PRINCIPAL_ID, PSEUDONYM_SALT);
+  const action = String(sent.body.action ?? "");
+  const pseudonym = String(sent.body.principal_pseudonym ?? "");
+  check(
+    assertion,
+    sent.status === 200 && action === expectedAction && pseudonym === expectedPseudonym,
+    `status ${sent.status} action ${action || "none"} pseudonym ${pseudonym ? "mismatch" : "absent"}`,
+  );
+  // The pseudonym must be a pseudonym: the raw principal id may never appear.
+  check(
+    `${assertion}__never_discloses_the_principal_id`,
+    !`${JSON.stringify(sent.body)}${sent.diagnostic ?? ""}`.includes(PRINCIPAL_ID),
+    "the raw principal id appeared in the response or diagnostic",
+  );
 }
 
 interface Sent {
@@ -269,7 +367,7 @@ async function main(): Promise<void> {
       method: overrides.method ?? "POST",
       route: overrides.route ?? ROUTE,
       action: overrides.action ?? ACTION,
-      principalId: "usr_01JXYZ0000000000000000",
+      principalId: PRINCIPAL_ID,
       body,
     });
 
@@ -278,19 +376,18 @@ async function main(): Promise<void> {
     const body = '{"claim":"C-1","n":1}';
     const envelope = await sign(body);
     const [first, second] = await Promise.all([send(envelope, body), send(envelope, body)]);
-    const statuses = [first.status, second.status].sort((a, b) => a - b);
+    const winner = first.status === 200 ? first : second;
+    const loser = first.status === 200 ? second : first;
     check(
       "concurrent_identical_envelopes_yield_one_accepted_effect",
-      statuses[0] === 200 && statuses[1] !== 200,
-      `statuses ${statuses.join(",")}`,
+      winner.status === 200 && loser.status !== 200,
+      `statuses ${first.status},${second.status}`,
     );
-    check(
-      "the_loser_is_refused_not_errored",
-      statuses[1] === 401 || statuses[1] === 403,
-      `loser status ${statuses[1]}`,
-    );
-    const third = await send(envelope, body);
-    check("a_third_presentation_stays_refused", third.status !== 200, `status ${third.status}`);
+    await checkAccepted("the_winner_is_attributed_to_the_signed_principal", winner, ACTION);
+    // The loser must be a *refusal*, not any non-200: a 500 here would mean the
+    // replay store fell over, which proves nothing about the unique index.
+    checkRefusal("the_loser_is_refused_not_errored", loser);
+    checkRefusal("a_third_presentation_stays_refused", await send(envelope, body));
   }
 
   // ── 2. cookie is never consulted, and the canary never appears ────────────
@@ -299,11 +396,7 @@ async function main(): Promise<void> {
     const sent = await send(await sign(body), body, {
       cookie: `__Host-authjs.session-token=${COOKIE_CANARY}`,
     });
-    check(
-      "a_request_bearing_a_cookie_still_authenticates",
-      sent.status === 200,
-      `status ${sent.status}`,
-    );
+    await checkAccepted("a_request_bearing_a_cookie_still_authenticates", sent, ACTION);
     check(
       "the_worker_never_read_the_cookie_header",
       sent.cookieReads === "0",
@@ -324,24 +417,114 @@ async function main(): Promise<void> {
         bearerOnSponsor.headers.get("x-s6-principal-reason") === "bearer_on_sponsor_route",
       `status ${bearerOnSponsor.status} reason ${String(bearerOnSponsor.headers.get("x-s6-principal-reason"))}`,
     );
-    const cookieOnAgent = await localFetch(
+    // This case was misnamed and never presented a cookie: it sent
+    // `envelope=1` and asserted only a 403, so "cookie on the agent host" was
+    // proven by a request that contained no cookie at all.
+    const envelopeOnAgent = await localFetch(
       `${origin}/__s6/principal?host=agent&route_class=agent-write&envelope=1`,
     );
     check(
       "envelope_on_the_agent_write_route_is_wrong_principal",
-      cookieOnAgent.status === 403,
-      `status ${cookieOnAgent.status}`,
+      envelopeOnAgent.status === 403 &&
+        envelopeOnAgent.headers.get("x-s6-principal-reason") === "envelope_on_agent_route",
+      `status ${envelopeOnAgent.status} reason ${String(envelopeOnAgent.headers.get("x-s6-principal-reason"))}`,
+    );
+
+    /**
+     * The real cookie-on-agent probe: an actual `Cookie` header on an agent-host
+     * write route, presenting no other credential.
+     *
+     * Two things must hold, and only a request that truly carries the cookie
+     * can show either. The cookie must buy nothing — the decision is exactly
+     * `no_credential`, identical to sending nothing — and it must never be
+     * read, which the Worker reports through the same canary the ingress uses.
+     */
+    const cookieOnAgent = await localFetch(
+      `${origin}/__s6/principal?host=agent&route_class=agent-write`,
+      { headers: { cookie: `__Host-authjs.session-token=${COOKIE_CANARY}` } },
+    );
+    const cookieOnAgentBody = (await cookieOnAgent.json()) as Record<string, unknown>;
+    check(
+      "a_cookie_on_the_agent_write_route_is_wrong_principal",
+      cookieOnAgent.status === 403 &&
+        cookieOnAgentBody.code === "WRONG_PRINCIPAL" &&
+        cookieOnAgent.headers.get("x-s6-principal-reason") === "no_credential",
+      `status ${cookieOnAgent.status} code ${String(cookieOnAgentBody.code)} reason ${String(cookieOnAgent.headers.get("x-s6-principal-reason"))}`,
+    );
+    check(
+      "the_principal_route_never_read_the_presented_cookie",
+      cookieOnAgent.headers.get("x-s6-cookie-reads") === "0",
+      `reads=${String(cookieOnAgent.headers.get("x-s6-cookie-reads"))}`,
+    );
+    check(
+      "the_presented_cookie_is_never_echoed_by_the_principal_route",
+      !`${JSON.stringify(cookieOnAgentBody)}${cookieOnAgent.headers.get("x-s6-consulted") ?? ""}`.includes(
+        COOKIE_CANARY,
+      ),
+      "canary echoed by the principal route",
     );
     const agentConsults = await localFetch(
       `${origin}/__s6/principal?host=agent&route_class=service-envelope-worker&envelope=1`,
     );
     const consulted = agentConsults.headers.get("x-s6-consulted") ?? "";
-    const consultedBody = (await agentConsults.json()) as { consulted?: string[] };
+    const consultedBody = (await agentConsults.json()) as {
+      ok?: boolean;
+      authenticate_with?: string;
+      consulted?: string[];
+    };
+    const consultedList = consultedBody.consulted ?? [];
+    /**
+     * The positive half of the principal contract.
+     *
+     * Asserting only "cookie is not named" would pass against a 403, a 500, or
+     * an empty body — every one of which names no cookie. The accepted case
+     * must therefore be asserted as an acceptance: the right status, the right
+     * credential class, and a consulted set that positively includes the
+     * envelope as well as excluding the cookie.
+     */
+    check(
+      "the_service_envelope_route_accepts_an_envelope_on_the_agent_host",
+      agentConsults.status === 200 &&
+        consultedBody.ok === true &&
+        consultedBody.authenticate_with === "envelope",
+      `status ${agentConsults.status} authenticate_with ${String(consultedBody.authenticate_with)}`,
+    );
+    check(
+      "the_service_envelope_route_consults_the_envelope",
+      consultedList.includes("envelope") && consulted.includes("envelope"),
+      `consulted body [${consultedList.join(",")}] header [${consulted}]`,
+    );
     check(
       "the_agent_host_never_lists_cookie_as_a_consulted_credential",
-      !`${consulted}${(consultedBody.consulted ?? []).join(",")}`.toLowerCase().includes("cookie"),
+      !`${consulted}${consultedList.join(",")}`.toLowerCase().includes("cookie"),
       "cookie named as consulted",
     );
+  }
+
+  // ── 3b. planted: a server error is not a refusal ──────────────────────────
+  {
+    /**
+     * The gate that makes every refusal assertion above mean something.
+     *
+     * With `status !== 200`, a Worker returning 500 satisfied every refusal
+     * check in this file, so a wholly broken harness reported a clean sweep.
+     * This asks the Worker for a real 500 and asserts the classifier *rejects*
+     * it — the suite proving, against a live response, that it can tell a
+     * refusal from a failure.
+     */
+    const forced = await localFetch(`${origin}/__s6/force-status?code=500`);
+    const forcedBody = (await forced.json()) as Record<string, unknown>;
+    check("the_harness_can_force_a_server_error", forced.status === 500, `status ${forced.status}`);
+    const verdict = classifyRefusal(forced.status, forcedBody, EXPECTED_REFUSAL.unauthorized);
+    check(
+      "a_500_is_rejected_as_proof_of_refusal",
+      !verdict.ok && verdict.detail.includes("server error"),
+      `classifier accepted a 500: ${verdict.detail}`,
+    );
+    // And a genuine 401 with the right code is still accepted, so the guard is
+    // not simply refusing everything.
+    const genuine = classifyRefusal(401, { code: "UNAUTHORIZED" }, EXPECTED_REFUSAL.unauthorized);
+    check("a_genuine_401_is_still_accepted", genuine.ok, genuine.detail);
   }
 
   // ── 4. a reordered body is refused and does NOT consume the valid nonce ───
@@ -350,13 +533,9 @@ async function main(): Promise<void> {
     const reordered = '{"n":4,"claim":"C-4"}';
     const envelope = await sign(signedBytes);
     const rewritten = await send(envelope, reordered);
-    check("reordered_json_body_is_refused", rewritten.status !== 200, `status ${rewritten.status}`);
+    checkRefusal("reordered_json_body_is_refused", rewritten);
     const honest = await send(envelope, signedBytes);
-    check(
-      "the_refused_rewrite_did_not_consume_the_nonce",
-      honest.status === 200,
-      `the honest retry got ${honest.status}; a refused body must not burn its envelope`,
-    );
+    await checkAccepted("the_refused_rewrite_did_not_consume_the_nonce", honest, ACTION);
   }
 
   // ── 5. altered route / method / action / expiry / tamper / key ────────────
@@ -398,8 +577,21 @@ async function main(): Promise<void> {
       ["altered_payload_is_refused", async () => send(await sign(body), '{"claim":"C-5","n":999}')],
     ];
     for (const [assertion, run] of cases) {
-      const sent = await run();
-      check(assertion, sent.status !== 200, `status ${sent.status}`);
+      // Every one of these is an envelope-verification failure, so each must be
+      // exactly 401/UNAUTHORIZED. A 500 is a broken harness, not a refusal.
+      checkRefusal(assertion, await run());
+      /**
+       * …and the refusal must not have consumed anything.
+       *
+       * A refusal that burns the nonce it rejected is indistinguishable from a
+       * correct one until an honest caller retries and is refused for a reason
+       * that never applied to it. Each tampered case is therefore followed by a
+       * freshly signed honest envelope, which must be accepted and attributed
+       * to the signing principal.
+       */
+      const honestBody = `{"claim":"C-5","n":5,"after":"${assertion}"}`;
+      const honest = await send(await sign(honestBody), honestBody);
+      await checkAccepted(`${assertion}__did_not_burn_a_fresh_envelope`, honest, ACTION);
     }
   }
 

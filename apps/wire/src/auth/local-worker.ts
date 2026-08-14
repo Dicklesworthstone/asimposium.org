@@ -137,7 +137,12 @@ export function cookieTrappedRequest(request: Request, onCookieRead: () => void)
           thisArg?: unknown,
         ) => {
           for (const [name, value] of guardedEntries()) {
-            callback.call(thisArg, value, name, target);
+            // The third argument is the GUARDED proxy, never the real target.
+            // Handing over `target` gave every callback an unguarded handle:
+            // `(v, n, parent) => parent.get("cookie")` read the session value
+            // on the first non-cookie entry, before iteration ever reached the
+            // cookie the trap was watching for.
+            callback.call(thisArg, value, name, headers as Headers);
           }
         };
       }
@@ -148,6 +153,24 @@ export function cookieTrappedRequest(request: Request, onCookieRead: () => void)
   return new Proxy(request, {
     get(target, property) {
       if (property === "headers") return headers;
+      /**
+       * `clone()` is the one method that hands back another `Request`, and
+       * binding it to the real target returned an *unguarded* one: an adapter
+       * could call `guarded.clone().headers.get("cookie")` and read the session
+       * value while the canary counted zero reads. A trap that any downstream
+       * caller can step around by cloning is not a trap.
+       *
+       * The clone is therefore re-wrapped with the same observer. Body reads
+       * are unaffected — cloning exists so the body can be consumed twice, and
+       * the underlying clone still owns its own stream.
+       */
+      if (property === "clone") {
+        // `clone()` is typed against the ambient fetch types, which differ from
+        // the global `Request` this module is written against; the two-step
+        // cast is this repository's established form for that mismatch.
+        return (): Request =>
+          cookieTrappedRequest(target.clone() as unknown as Request, onCookieRead);
+      }
       // Request accessors must run against the real instance, not the proxy.
       const value = Reflect.get(target, property, target);
       return typeof value === "function" ? value.bind(target) : value;
@@ -282,7 +305,29 @@ export default {
         });
       }
       if (request.method === "GET" && url.pathname === "/__s6/principal") {
-        return principalProbe(url);
+        // Routed through the cookie trap so a probe that *presents* a Cookie
+        // proves it was never consulted, rather than proving only that the
+        // decision function ignores a query parameter.
+        let principalCookieReads = 0;
+        const guardedProbe = cookieTrappedRequest(request, () => {
+          principalCookieReads += 1;
+        });
+        const response = principalProbe(new URL(guardedProbe.url));
+        response.headers.set("x-s6-cookie-reads", String(principalCookieReads));
+        return response;
+      }
+      /**
+       * Harness-only status forcer.
+       *
+       * The checker's refusal assertions must fail on a server error rather
+       * than count it as a refusal, and proving that needs a response the
+       * harness can produce on demand. It mints no effect and touches no
+       * binding; it exists so the suite can demonstrate it rejects a 500.
+       */
+      if (request.method === "GET" && url.pathname === "/__s6/force-status") {
+        const requested = Number.parseInt(url.searchParams.get("code") ?? "", 10);
+        const status = requested >= 400 && requested <= 599 ? requested : 500;
+        return json({ code: "S6_FORCED_STATUS", forced: status }, status);
       }
       if (request.method === "POST" && url.pathname === S6_INGRESS_ROUTE) {
         return await ingress(request, env);
