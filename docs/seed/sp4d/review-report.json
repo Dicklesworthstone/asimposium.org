@@ -3,8 +3,8 @@
   "prepared_at": "2026-08-13",
   "scope": "Source-preparation review only; this record is not an external mathematical review or publication approval.",
   "source_digests": {
-    "docs/seed/sp4d/dossier.json": "3127dea08518ce51cfae3ccca2b4d19236267f62cc0d1e866265dfe682c3f17e",
-    "docs/seed/sp4d/SP4D.md": "dab93b8cb302c0eea80735f133075c817376f1362b085d2f5107c0257cc67c96",
+    "docs/seed/sp4d/dossier.json": "128579b07e7a95bfbd2d35c47e3ca9ffd096082e1e0272c226d4fddbec77131b",
+    "docs/seed/sp4d/SP4D.md": "e36750c3dfcc55ab6c5e4fc4bc5db6a8ffd22928981e42e53cb787bf25b62fa9",
     "docs/seed/frontier-slate/dossiers.json": "88f7c332527a2d3016e4d4ab5e13ae7895b3cc044b7a2db669907862a0a57b18"
   },
   "reviewer_record": [

@@ -62,7 +62,7 @@
       "id": "FREEDMAN-1982",
       "authority": "primary",
       "url": "https://projecteuclid.org/journals/journal-of-differential-geometry/volume-17/issue-3/The-topology-of-four-dimensional-manifolds/10.4310/jdg/1214437136.full",
-      "locator": "Journal of Differential Geometry 17 (1982), pp. 357–453; use the theorem statement in the published paper, not a secondary synopsis.",
+      "locator": "Theorem 1.6 (The 4-dimensional Poincaré conjecture), p. 371: a topological homotopy 4-sphere is homeomorphic to S^4.",
       "why_here": "Anchor for keeping topological conclusions separate from the smooth formulation.",
       "license_or_rights": "License not asserted by this dossier; citation and link only, with no source text, figures, data, code, or PDF included. Verify source-owner rights before any reuse."
     },
@@ -70,7 +70,7 @@
       "id": "GAY-KIRBY-2016",
       "authority": "primary",
       "url": "https://arxiv.org/abs/1205.1565",
-      "locator": "Theorem 1 and abstract; journal reference Geometry & Topology 20 (2016), pp. 3097–3132.",
+      "locator": "Abstract: existence and uniqueness up to stabilization for smooth, closed, oriented, connected 4-manifolds; journal reference Geometry & Topology 20 (2016), pp. 3097–3132.",
       "why_here": "Anchor for the existence and stabilization context of trisections, not a classification claim.",
       "license_or_rights": "License not asserted by this dossier; citation and link only, with no source text, figures, data, code, or PDF included. Verify source-owner rights before any reuse."
     },
@@ -78,7 +78,7 @@
       "id": "DONALDSON-1983",
       "authority": "primary",
       "url": "https://doi.org/10.4310/jdg/1214437665",
-      "locator": "Journal of Differential Geometry 18 (1983), pp. 279–315; main theorem and hypotheses must be checked against the published text.",
+      "locator": "Theorem A and its smooth, compact, simply connected, definite-intersection-form hypotheses; Journal of Differential Geometry 18 (1983), pp. 279–315.",
       "why_here": "Anchor for the distinctive role of smooth four-manifold constraints.",
       "license_or_rights": "License not asserted by this dossier; citation and link only, with no source text, figures, data, code, or PDF included. Verify source-owner rights before any reuse."
     }

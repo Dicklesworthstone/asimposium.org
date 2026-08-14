@@ -69,6 +69,15 @@ test("planted negative: an SP4D prose citation drift is rejected", async () => {
   assert.ok(validateSp4dMarkdown(drifted, dossier).some((error) => error.code === "SP4D_MARKDOWN_SOURCE_DRIFT"));
 });
 
+test("planted negative: an SP4D prose locator drift is rejected", async () => {
+  const [dossier, markdown] = await Promise.all([
+    readFile(sourcePaths.sp4d, "utf8").then(JSON.parse),
+    readFile(sourcePaths.sp4dMarkdown, "utf8"),
+  ]);
+  const drifted = markdown.replace(dossier.references[0].locator, "Theorem 1.6, p. 999: unsupported locator.");
+  assert.ok(validateSp4dMarkdown(drifted, dossier).some((error) => error.code === "SP4D_MARKDOWN_ANCHOR_DRIFT"));
+});
+
 test("planted negative: a current-status field is rejected", async () => {
   const dossier = JSON.parse(await readFile(sourcePaths.sp4d, "utf8"));
   dossier.current_status = "open";

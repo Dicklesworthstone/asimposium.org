@@ -142,6 +142,9 @@ export function validateSp4dMarkdown(markdown, dossier) {
     if (!markdown.includes(reference.url)) {
       errors.push(diagnostic("SP4D_MARKDOWN_SOURCE_DRIFT", dossier.id, reference.id));
     }
+    if (!markdown.includes(reference.locator)) {
+      errors.push(diagnostic("SP4D_MARKDOWN_ANCHOR_DRIFT", dossier.id, reference.id));
+    }
   }
   return errors;
 }
