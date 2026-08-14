@@ -1,0 +1,320 @@
+#!/usr/bin/env bun
+/**
+ * OPS.2a D1 adapter — real local Cloudflare D1, real transaction, real rollback.
+ *
+ * This replaces an `ADAPTER_UNAVAILABLE` placeholder with an assertion that can
+ * only pass if a genuine D1 transaction rolled back. It runs against workerd's
+ * own SQLite through `wrangler d1 execute --local`. It deliberately does **not**
+ * use `bun:sqlite` or any in-process double: the property under test is D1 batch
+ * atomicity, and only D1 can demonstrate it.
+ *
+ * ## The proof
+ *
+ * 1. Seed a table with a sentinel row.
+ * 2. Submit one batch that first inserts a row and *then* violates a UNIQUE
+ *    constraint. The failure is planted **late**, after a successful write in
+ *    the same batch, because an early failure would prove nothing about
+ *    rollback — nothing would have been written yet.
+ * 3. Read the table back in a separate invocation. The doomed row must be gone
+ *    and the sentinel must remain.
+ *
+ * Reading state afterwards is the whole point: a batch that reports an error is
+ * not evidence of rollback, only evidence of an error.
+ *
+ * ## Modes
+ *
+ * `--mode ok`            the batch contains the planted late failure; rollback
+ *                        must be observed. Exits 0 only if it was.
+ * `--mode planted-fail`  the same assertion runs against a batch with **no**
+ *                        failing statement, so the row commits and the rollback
+ *                        assertion correctly fails. This proves the check is
+ *                        capable of failing rather than vacuously passing.
+ *
+ * Exits 78 with a named blocker when wrangler cannot run at all.
+ *
+ * Output is a single JSON line of bounded, non-secret fields. It never prints an
+ * absolute path, an environment value, or SQL containing caller data.
+ */
+import { existsSync, mkdtempSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join, resolve } from "node:path";
+
+const BLOCKED_EXIT_CODE = 78;
+const DATABASE = "harness-ops2a";
+const TABLE = "harness_rollback_probe";
+/** Bound every wrangler invocation so a hung CLI cannot outlive the step. */
+const WRANGLER_TIMEOUT_MS = 20_000;
+
+type Mode = "ok" | "planted-fail";
+
+interface ExecResult {
+  readonly ok: boolean;
+  readonly errorClass: string | undefined;
+}
+
+function say(record: Record<string, unknown>): void {
+  process.stdout.write(`${JSON.stringify({ adapter: "d1", ...record })}\n`);
+}
+
+const REPOSITORY_ROOT = resolve(import.meta.dir, "..", "..", "..");
+
+/**
+ * A short, non-reversible tag for the disposable state directory.
+ *
+ * The absolute path names a machine and a user, so it never reaches a
+ * diagnostic. A truncated digest of the final path segment is enough to tell
+ * two runs apart without disclosing where either one lived.
+ */
+function stateDirDigest(stateDir: string): string {
+  const leaf = stateDir.split("/").pop() ?? "";
+  return Bun.hash(leaf).toString(16).slice(0, 12);
+}
+
+/**
+ * Absolute path to wrangler's entry script, or undefined.
+ *
+ * The harness runs every child with a scrubbed PATH that contains only system
+ * directories — it must, or a child could inherit an unlabelled secret from the
+ * ambient environment. That means `bunx` is not resolvable, so this adapter
+ * cannot rely on a PATH lookup and instead locates wrangler by absolute path
+ * and runs it with `process.execPath`, which is absolute by construction.
+ *
+ * wrangler is a devDependency of `apps/wire`; the root is checked too in case a
+ * future install hoists it.
+ */
+function resolveWranglerEntry(): string | undefined {
+  const candidates = [
+    join(REPOSITORY_ROOT, "apps", "wire", "node_modules", "wrangler", "bin", "wrangler.js"),
+    join(REPOSITORY_ROOT, "node_modules", "wrangler", "bin", "wrangler.js"),
+  ];
+  return candidates.find((candidate) => existsSync(candidate));
+}
+
+function parseMode(argv: readonly string[]): Mode {
+  const index = argv.indexOf("--mode");
+  const value = index >= 0 ? argv[index + 1] : "ok";
+  if (value !== "ok" && value !== "planted-fail") {
+    say({
+      status: "fail",
+      code: "USAGE",
+      detail: "usage: d1-rollback.ts --mode <ok|planted-fail>",
+    });
+    process.exit(2);
+  }
+  return value;
+}
+
+/**
+ * Classify a wrangler failure without echoing its output.
+ *
+ * The stderr of a CLI can contain an absolute path or an account hint, so only
+ * a fixed vocabulary of classes reaches the diagnostic.
+ */
+function classifyFailure(text: string): string {
+  if (/UNIQUE constraint failed/i.test(text)) return "sqlite_constraint_unique";
+  if (/no such table/i.test(text)) return "sqlite_no_such_table";
+  if (/not found|ENOENT|command not found/i.test(text)) return "wrangler_missing";
+  return "unclassified";
+}
+
+interface WranglerRun {
+  readonly ok: boolean;
+  readonly stdout: string;
+  readonly errorClass: string | undefined;
+}
+
+/**
+ * Run one bounded `wrangler d1 execute --local` and capture its JSON.
+ *
+ * The child gets a fixed, minimal environment. `HOME` points at the disposable
+ * state directory so wrangler's cache is hermetic and this probe can never read
+ * or write the developer's real Wrangler configuration.
+ */
+async function wrangler(
+  entry: string,
+  stateDir: string,
+  configPath: string,
+  sql: string,
+): Promise<WranglerRun> {
+  // Narrowed to the stdio shape actually requested below, so `child.stdout` and
+  // `child.stderr` are ReadableStreams rather than the general union that also
+  // admits a file descriptor number or undefined.
+  let child: Bun.Subprocess<"ignore", "pipe", "pipe">;
+  try {
+    child = Bun.spawn({
+      cmd: [
+        process.execPath,
+        entry,
+        "d1",
+        "execute",
+        DATABASE,
+        "--local",
+        "--persist-to",
+        join(stateDir, ".state"),
+        "--config",
+        configPath,
+        "--command",
+        sql,
+        "--json",
+      ],
+      stdout: "pipe",
+      stderr: "pipe",
+      stdin: "ignore",
+      env: {
+        PATH: "/usr/local/bin:/usr/bin:/bin",
+        HOME: stateDir,
+        LANG: "C",
+        TZ: "UTC",
+        WRANGLER_SEND_METRICS: "false",
+        CI: "1",
+      },
+    });
+  } catch (error) {
+    return {
+      ok: false,
+      stdout: "",
+      errorClass: error instanceof Error ? "spawn_failed" : "unclassified",
+    };
+  }
+  const watchdog = setTimeout(() => {
+    try {
+      child.kill("SIGKILL");
+    } catch {
+      /* already gone */
+    }
+  }, WRANGLER_TIMEOUT_MS);
+  const [stdout, stderr, exitCode] = await Promise.all([
+    new Response(child.stdout).text(),
+    new Response(child.stderr).text(),
+    child.exited,
+  ]);
+  clearTimeout(watchdog);
+  const succeeded = exitCode === 0 && !/"error"/.test(stdout);
+  return {
+    ok: succeeded,
+    stdout,
+    errorClass: succeeded ? undefined : classifyFailure(`${stdout}\n${stderr}`),
+  };
+}
+
+async function execute(
+  entry: string,
+  stateDir: string,
+  configPath: string,
+  sql: string,
+): Promise<ExecResult> {
+  const run = await wrangler(entry, stateDir, configPath, sql);
+  return { ok: run.ok, errorClass: run.errorClass };
+}
+
+async function readRows(entry: string, stateDir: string, configPath: string): Promise<string[]> {
+  const run = await wrangler(
+    entry,
+    stateDir,
+    configPath,
+    `SELECT label FROM ${TABLE} ORDER BY id;`,
+  );
+  try {
+    const parsed = JSON.parse(run.stdout) as { results?: { label?: string }[] }[];
+    return (parsed[0]?.results ?? []).map((row) => String(row.label));
+  } catch {
+    return [];
+  }
+}
+
+async function main(): Promise<number> {
+  const mode = parseMode(process.argv.slice(2));
+
+  const wranglerEntry = resolveWranglerEntry();
+  if (wranglerEntry === undefined) {
+    say({
+      status: "blocked",
+      code: "D1_ADAPTER_UNAVAILABLE",
+      missing: "wrangler",
+      detail:
+        "wrangler does not resolve from this checkout (expected apps/wire/node_modules/wrangler); install the workspace. No D1 behavior was exercised.",
+    });
+    return BLOCKED_EXIT_CODE;
+  }
+
+  const stateDir = mkdtempSync(join(tmpdir(), "asimp-ops2a-d1-"));
+  const configPath = join(stateDir, "wrangler.toml");
+  writeFileSync(
+    configPath,
+    [
+      `name = "harness-ops2a-d1"`,
+      `compatibility_date = "2026-08-13"`,
+      ``,
+      `[[d1_databases]]`,
+      `binding = "DB"`,
+      `database_name = "${DATABASE}"`,
+      `database_id = "00000000-0000-0000-0000-000000000000"`,
+      ``,
+    ].join("\n"),
+  );
+
+  try {
+    const seeded = await execute(
+      wranglerEntry,
+      stateDir,
+      configPath,
+      `CREATE TABLE ${TABLE} (id INTEGER PRIMARY KEY, label TEXT NOT NULL UNIQUE);` +
+        ` INSERT INTO ${TABLE} (id, label) VALUES (1, 'sentinel');`,
+    );
+    if (!seeded.ok) {
+      // No database means the adapter cannot run at all — a blocker, not a failure.
+      say({
+        status: "blocked",
+        code: "D1_ADAPTER_UNAVAILABLE",
+        error_class: seeded.errorClass,
+        detail:
+          "wrangler could not open a local D1 database; install the pinned wrangler and retry. No D1 behavior was exercised.",
+      });
+      return BLOCKED_EXIT_CODE;
+    }
+
+    // The transaction under test. In `ok` mode the second statement violates the
+    // UNIQUE constraint *after* the first has already written — a late failure.
+    const doomedBatch =
+      mode === "ok"
+        ? `INSERT INTO ${TABLE} (id, label) VALUES (2, 'doomed');` +
+          ` INSERT INTO ${TABLE} (id, label) VALUES (3, 'sentinel');`
+        : `INSERT INTO ${TABLE} (id, label) VALUES (2, 'doomed');`;
+    const batch = await execute(wranglerEntry, stateDir, configPath, doomedBatch);
+
+    const labels = await readRows(wranglerEntry, stateDir, configPath);
+    const doomedSurvived = labels.includes("doomed");
+    const sentinelIntact = labels.includes("sentinel");
+    const rolledBack = !doomedSurvived && sentinelIntact;
+
+    say({
+      status: rolledBack ? "pass" : "fail",
+      code: rolledBack ? "D1_TRANSACTION_ROLLED_BACK" : "D1_TRANSACTION_LEAKED",
+      mode,
+      batch_rejected: !batch.ok,
+      batch_error_class: batch.errorClass ?? null,
+      rows_after: labels.length,
+      doomed_row_present: doomedSurvived,
+      sentinel_present: sentinelIntact,
+      // Path *class* and a short digest of the directory name, never the path
+      // itself: enough to correlate two runs, useless for locating a machine.
+      state_dir_class: "os-temp",
+      state_dir_digest: stateDirDigest(stateDir),
+      detail: rolledBack
+        ? "A late failure inside one D1 batch rolled back the earlier write in the same batch; state was re-read to confirm."
+        : "The write from a failed batch survived, or the sentinel vanished; D1 did not roll back as required.",
+    });
+    return rolledBack ? 0 : 1;
+  } finally {
+    // Nothing is deleted here, deliberately.
+    //
+    // AGENTS.md RULE 1 forbids this repository's agents from deleting files at
+    // all — including temporary ones they created themselves. The probe is kept
+    // bounded instead: each run gets its own `mkdtemp` directory holding one
+    // small SQLite database, so nothing is ever overwritten and the footprint
+    // grows by a fixed amount per run rather than without limit. Reclaiming OS
+    // temp space is the operating system's job, or a human's.
+  }
+}
+
+process.exit(await main());

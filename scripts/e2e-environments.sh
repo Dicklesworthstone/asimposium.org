@@ -93,13 +93,28 @@ fi
 # shared across environments. Re-run it here so this script's own report carries
 # the assertion rather than pointing at another tool's output.
 # ---------------------------------------------------------------------------
-if bun infra/validate-environments.mjs \
-  | grep -q '"staging":{"kind":"remote","is_preview":true'; then
-  emit "preview-key-isolation" "pass" "OK" \
-    "staging is declared a preview tier; the topology validator rejects production keys or shared key ids outside production"
+TOPOLOGY_JSON="$(bun infra/validate-environments.mjs)"
+case "$TOPOLOGY_JSON" in
+  *'"preview_environment":"staging"'*)
+    emit "preview-key-isolation" "pass" "OK" \
+      "Vercel previews are wired to staging; the topology validator rejects a preview that targets production, holds production keys, or shares a key id"
+    ;;
+  *)
+    fail_phase "preview-key-isolation" "PREVIEW_WIRING_UNCONFIRMED" \
+      "Could not confirm Vercel previews are wired to a non-production preview tier."
+    ;;
+esac
+
+# ---------------------------------------------------------------------------
+# Generated Wrangler configuration must still match the topology. A hand-edited
+# generated file is the quiet path from "reviewed" to "deployed something else".
+# ---------------------------------------------------------------------------
+if bun infra/generate-wrangler.mjs --check >/dev/null; then
+  emit "generated-config" "pass" "OK" \
+    "per-environment Wrangler configuration reconciles exactly with infra/environments.toml"
 else
-  fail_phase "preview-key-isolation" "PREVIEW_TIER_UNCONFIRMED" \
-    "Could not confirm staging is declared as a preview tier."
+  fail_phase "generated-config" "GENERATED_CONFIG_DRIFT" \
+    "Generated Wrangler configuration does not match the topology; run 'bun infra/generate-wrangler.mjs --write' and review the diff."
 fi
 
 # ---------------------------------------------------------------------------

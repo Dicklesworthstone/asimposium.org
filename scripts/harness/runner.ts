@@ -38,6 +38,25 @@ export const MAX_JUNIT_ARTIFACTS_PER_RUN = 8;
 export const MAX_STEPS_PER_RUN = 64;
 export const MAX_RETRIES_PER_STEP = 3;
 export const MAX_TIMEOUT_MS = 60_000;
+/**
+ * Milliseconds a legitimately-timed-out step may exceed its own deadline before
+ * the event schema calls it impossible.
+ *
+ * A step that times out at exactly `MAX_TIMEOUT_MS` does not finish there. The
+ * runner sends SIGTERM, waits `FORCE_KILL_GRACE_MS` before SIGKILL, then drains
+ * both output pipes; on a loaded machine the timer callback itself can be late.
+ * The old allowance was the force-kill delay alone, which left nothing for
+ * reader drain or scheduling jitter — so a *correct* 60s timeout could throw
+ * `EVENT_SCHEMA_INVALID` and destroy the very evidence of the timeout.
+ *
+ * This grace is deliberately generous. Its only job is to keep an honest
+ * measurement representable; every real bound (the step deadline, the retention
+ * caps, the watchdogs) is enforced elsewhere and unaffected by it.
+ */
+export const FORCE_KILL_GRACE_MS = 250;
+export const HARD_READER_GRACE_MS = 5_000;
+/** Largest duration an event may report and still be schema-valid. */
+export const MAX_EVENT_DURATION_MS = MAX_TIMEOUT_MS + FORCE_KILL_GRACE_MS + HARD_READER_GRACE_MS;
 export const MAX_COMMAND_ARGUMENTS = 16;
 export const MAX_COMMAND_ARGUMENT_CHARS = 4_096;
 export const MAX_COMMAND_CHARS = 8_192;
@@ -57,6 +76,24 @@ const XML_ESCAPE: Readonly<Record<string, string>> = {
 
 export type StepStatus = "pass" | "fail" | "blocked" | "timeout" | "cancelled" | "skipped";
 export type HarnessAdapter = "process" | "d1" | "http" | "browser";
+
+/**
+ * The one probe each non-process adapter is allowed to execute.
+ *
+ * Registering a probe here is what turns an adapter from "withheld" into
+ * "runnable". It is an allowlist rather than a convention so that an adapter
+ * label — which is what a reader trusts when deciding whether D1 really ran —
+ * cannot be attached to some other executable.
+ */
+export const ADAPTER_PROBES: Readonly<Record<Exclude<HarnessAdapter, "process">, string>> = {
+  d1: "d1-rollback.ts",
+  http: "http-fault.ts",
+  browser: "browser-assert.ts",
+};
+
+export function adapterProbePath(adapter: Exclude<HarnessAdapter, "process">): string {
+  return resolve(import.meta.dir, "adapters", ADAPTER_PROBES[adapter]);
+}
 
 export interface HttpContext {
   method: string;
@@ -353,10 +390,60 @@ export function safeReproductionCommand(reproduction?: HarnessRunOptions["reprod
 }
 
 /** Validate the public runner input before any artifact directory or child process is created. */
+/**
+ * Establish the run root as a real, absolute, contained directory.
+ *
+ * Everything the harness writes is placed under this path, and every child runs
+ * with it as the working directory, so a root that is relative, missing, or a
+ * symlink pointing elsewhere silently relocates the entire evidence trail. The
+ * checks are ordered from cheapest to most invasive:
+ *
+ *  - absolute, because a relative root resolves against whatever cwd the caller
+ *    happened to have;
+ *  - existing and a directory after `realpath`, so a symlinked root cannot
+ *    redirect artifacts outside the tree the caller believes it named;
+ *  - not the filesystem root, which is never a legitimate artifact base and is
+ *    the shape a mis-joined path takes.
+ *
+ * This is containment, not identity: a disposable temp directory is a perfectly
+ * valid root, and tests rely on that. What is refused is a root that does not
+ * resolve to the place the caller asked for.
+ */
+export function assertContainedRoot(root: unknown): string {
+  if (typeof root !== "string" || root.length === 0) {
+    throw new HarnessError("ROOT_INVALID", "root must be a non-empty absolute path.");
+  }
+  if (!isAbsolute(root)) {
+    throw new HarnessError("ROOT_INVALID", "root must be absolute, not relative to a caller cwd.");
+  }
+  let real: string;
+  try {
+    real = realpathSync(root);
+  } catch {
+    throw new HarnessError("ROOT_INVALID", "root does not exist.");
+  }
+  if (!statSync(real).isDirectory()) {
+    throw new HarnessError("ROOT_INVALID", "root must be a directory.");
+  }
+  if (real === sep) {
+    throw new HarnessError("ROOT_INVALID", "the filesystem root is never a valid artifact base.");
+  }
+  // The resolved root is what every later path is joined against, so callers
+  // that passed a symlink get the destination they will actually write to.
+  return real;
+}
+
+/** True when `target` stays inside `root` once both are fully resolved. */
+export function isContainedPath(root: string, target: string): boolean {
+  const relation = relative(root, target);
+  return relation !== ".." && !relation.startsWith(`..${sep}`) && !isAbsolute(relation);
+}
+
 export function validateHarnessRunOptions(options: HarnessRunOptions): void {
   if (typeof options !== "object" || options === null) {
     throw new HarnessError("RUN_OPTIONS_INVALID", "run options must be an object.");
   }
+  assertContainedRoot(options.root);
   if (!validateRunId(options.runId)) {
     throw new HarnessError("RUN_ID_INVALID", "run_id must be one safe path component.");
   }
@@ -415,10 +502,18 @@ export function validateHarnessStep(step: HarnessStep): void {
   if (adapter === "process") {
     validateCommand(step.command);
   } else if (step.command !== undefined) {
-    throw new HarnessError(
-      "ADAPTER_COMMAND_FORBIDDEN",
-      "withheld adapters cannot claim execution through a process command.",
-    );
+    // A non-process adapter may execute, but only through its own registered
+    // probe. The original rule forbade any command so a placeholder could not
+    // pretend to run; the same intent now survives as an allowlist, so an
+    // adapter label can never be pinned onto an arbitrary process.
+    validateCommand(step.command);
+    const expected = adapterProbePath(adapter);
+    if (step.command[1] !== expected) {
+      throw new HarnessError(
+        "ADAPTER_COMMAND_FORBIDDEN",
+        "an adapter step may only execute its own registered probe.",
+      );
+    }
   }
   if (!isBoundedInteger(step.retries ?? 0, 0, MAX_RETRIES_PER_STEP)) {
     throw new HarnessError("RETRY_LIMIT", "retries must be a bounded non-negative integer.");
@@ -466,7 +561,7 @@ export function validateHarnessEvent(event: HarnessEvent): void {
   }
   if (
     !isBoundedInteger(event.seed, 0, 0xffffffff) ||
-    !isBoundedInteger(event.duration_ms, 0, MAX_TIMEOUT_MS + 250) ||
+    !isBoundedInteger(event.duration_ms, 0, MAX_EVENT_DURATION_MS) ||
     Number.isNaN(Date.parse(event.started_at)) ||
     Number.isNaN(Date.parse(event.finished_at))
   ) {
@@ -553,7 +648,11 @@ export async function runHarness(options: HarnessRunOptions): Promise<HarnessRun
       );
     }
     seenStepIds.add(step.id);
-    if ((step.adapter ?? "process") !== "process") {
+    // A non-process adapter is only "unavailable" when nothing can drive it.
+    // Once an adapter ships an executable probe, the step runs through the same
+    // bounded process path as everything else and keeps its adapter label, so
+    // one termination, redaction and retention story covers every adapter.
+    if ((step.adapter ?? "process") !== "process" && step.command === undefined) {
       const event = unavailableAdapterEvent(options, step, seed);
       recordEvent(store, events, eventSink, event);
       continue;
@@ -656,7 +755,7 @@ async function runAttempt(
     killChildGroup(child, "SIGTERM");
     forceKill = setTimeout(() => {
       killChildGroup(child, "SIGKILL");
-    }, 250);
+    }, FORCE_KILL_GRACE_MS);
   };
   const timeout = setTimeout(() => terminate("timeout"), Math.max(1, step.timeoutMs ?? 30_000));
   const abort = () => terminate("cancelled");
@@ -1271,6 +1370,31 @@ function secretEmitterCommand(): readonly string[] {
   return [process.execPath, resolve(import.meta.dir, "self-test-secret-emitter.ts")];
 }
 
+/** Absolute path to a real adapter probe, plus its mode. Argv carries no secret. */
+function adapterCommand(file: string, mode: "ok" | "planted-fail"): readonly string[] {
+  return [process.execPath, resolve(import.meta.dir, "adapters", file), "--mode", mode];
+}
+
+/**
+ * Classify one real-adapter step for the self-test verdict.
+ *
+ * The three adapters are not interchangeable: D1 and HTTP have hard local
+ * dependencies that are present, while the browser adapter depends on a package
+ * this workspace may not install. So `blocked` is an accepted outcome *only*
+ * when the adapter reported a named blocker — never as a way to pass without
+ * running anything.
+ */
+function adapterOutcome(
+  events: readonly HarnessEvent[],
+  stepId: string,
+): "pass" | "fail" | "blocked" | "missing" {
+  const event = [...events].reverse().find((item) => item.step === stepId);
+  if (event === undefined) return "missing";
+  if (event.status === "pass") return "pass";
+  if (event.status === "blocked") return "blocked";
+  return "fail";
+}
+
 export async function runHarnessSelfTest(
   root: string,
   onEvent?: (event: HarnessEvent) => void,
@@ -1297,26 +1421,69 @@ export async function runHarnessSelfTest(
         requestId: "req-selftest-unit",
         eventId: "evt-selftest-unit",
       },
+      // Real adapters. Each contributes a positive step that can only pass by
+      // exercising the real dependency, and a planted-fail step that proves the
+      // same assertion is capable of failing. A self-test whose checks cannot
+      // fail proves nothing, so both halves are required.
       {
-        id: "d1-adapter-unavailable",
+        id: "d1-rollback-verified",
         scenario: "integration",
         adapter: "d1",
+        command: adapterCommand("d1-rollback.ts", "ok"),
         replaySafe: false,
-        assertion: "D1 adapter intentionally unavailable",
+        timeoutMs: 55_000,
+        assertion: "a late failure in a real local D1 batch rolls back the earlier write",
       },
       {
-        id: "http-adapter-unavailable",
+        id: "d1-rollback-planted-fail",
+        scenario: "integration",
+        adapter: "d1",
+        command: adapterCommand("d1-rollback.ts", "planted-fail"),
+        replaySafe: false,
+        timeoutMs: 55_000,
+        assertion: "planted: the rollback assertion must fail when nothing rolled back",
+        expected: "D1_TRANSACTION_ROLLED_BACK",
+        actual: "D1_TRANSACTION_LEAKED",
+      },
+      {
+        id: "http-fault-verified",
         scenario: "integration",
         adapter: "http",
+        command: adapterCommand("http-fault.ts", "ok"),
         replaySafe: false,
-        assertion: "HTTP adapter intentionally unavailable",
+        timeoutMs: 30_000,
+        assertion: "a real loopback fault carries status and a correlatable request id",
+        http: { method: "GET", routeTemplate: "/fault" },
       },
       {
-        id: "browser-adapter-unavailable",
+        id: "http-fault-planted-fail",
+        scenario: "integration",
+        adapter: "http",
+        command: adapterCommand("http-fault.ts", "planted-fail"),
+        replaySafe: false,
+        timeoutMs: 30_000,
+        assertion: "planted: asserting 200 on a route that answers 500 must fail",
+        expected: "200",
+        actual: "500",
+        http: { method: "GET", routeTemplate: "/fault" },
+      },
+      {
+        id: "browser-assertion-verified",
         scenario: "e2e",
         adapter: "browser",
+        command: adapterCommand("browser-assert.ts", "ok"),
         replaySafe: false,
-        assertion: "browser adapter intentionally unavailable",
+        timeoutMs: 55_000,
+        assertion: "real Chromium renders a local page and the asserted DOM text matches",
+      },
+      {
+        id: "browser-assertion-planted-fail",
+        scenario: "e2e",
+        adapter: "browser",
+        command: adapterCommand("browser-assert.ts", "planted-fail"),
+        replaySafe: false,
+        timeoutMs: 55_000,
+        assertion: "planted: asserting text the page never renders must fail",
       },
       {
         id: "interrupted-safe",
@@ -1381,13 +1548,41 @@ export async function runHarnessSelfTest(
   const identifiers = result.events
     .map((event) => `${event.request_id ?? ""}${event.event_id ?? ""}`)
     .join(" ");
+  /**
+   * Adapter verdicts.
+   *
+   * A positive step must `pass` (the dependency really ran) or `blocked` (the
+   * adapter named a missing dependency). Its planted twin must `fail` — or be
+   * `blocked` for the same reason, since an adapter that cannot launch cannot
+   * fail an assertion either. The pairing is what makes this honest: `pass`
+   * alone could come from an assertion that never fails, and `fail` alone could
+   * come from an adapter that never works.
+   */
+  const adapterPairs = [
+    ["d1-rollback-verified", "d1-rollback-planted-fail"],
+    ["http-fault-verified", "http-fault-planted-fail"],
+    ["browser-assertion-verified", "browser-assertion-planted-fail"],
+  ] as const;
+  const adaptersClassified = adapterPairs.every(([positiveId, negativeId]) => {
+    const positive = adapterOutcome(result.events, positiveId);
+    const negative = adapterOutcome(result.events, negativeId);
+    if (positive === "blocked" && negative === "blocked") return true;
+    return positive === "pass" && negative === "fail";
+  });
+  // At least one adapter must have genuinely executed. If every adapter were
+  // blocked, this self-test would be reporting on nothing.
+  const someAdapterExecuted = adapterPairs.some(
+    ([positiveId]) => adapterOutcome(result.events, positiveId) === "pass",
+  );
+
   const pass =
     result.exitCode === 1 &&
     !artifacts.includes(secret) &&
     artifacts.includes("<redacted>") &&
     identifiers.includes("req-selftest-unit") &&
     result.events.every((event) => event.reproduce === "scripts/e2e-test-harness.sh --self-test") &&
-    result.events.filter((item) => item.code === "ADAPTER_UNAVAILABLE").length === 3 &&
+    adaptersClassified &&
+    someAdapterExecuted &&
     interrupted.exitCode === 1 &&
     resumed.events.some((event) => event.step === "safe-retry" && event.status === "fail") &&
     resumed.events.some(
@@ -1424,7 +1619,7 @@ export async function runHarnessSelfTest(
     cursor: null,
     seq: null,
     detail: pass
-      ? "Harness-only validation passed; D1, HTTP, and browser adapters are blocked and no product behavior is proven."
+      ? "Harness-only validation passed: every registered adapter exercised its real dependency and its planted negative failed as required, or named a missing dependency. This proves the runner classifies and preserves evidence correctly; it proves nothing about product behavior."
       : "Harness self-test invariants failed.",
   };
   validateHarnessEvent(event);
