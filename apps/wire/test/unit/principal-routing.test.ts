@@ -56,6 +56,66 @@ describe("cookies are never consulted on the agent plane", () => {
     });
     expect(decision).toMatchObject({ ok: true, authenticateWith: "bearer" });
   });
+
+  test("bearer + cookie decides identically to bearer alone", () => {
+    // Sole authentication by the bearer: the cookie changes nothing at all,
+    // not the outcome, not the credential chosen, not the consulted list.
+    const withCookie = routePrincipal({
+      host: "agent",
+      routeClass: "agent-write",
+      presented: with_({ bearer: true, cookie: true }),
+    });
+    const withoutCookie = routePrincipal({
+      host: "agent",
+      routeClass: "agent-write",
+      presented: with_({ bearer: true }),
+    });
+    expect(withCookie).toEqual(withoutCookie);
+  });
+
+  test("cookie presence changes nothing except the one case the rule names", () => {
+    // Toggling the cookie flag is only allowed to matter for an agent-plane
+    // write with no bearer, where it turns "no credential" into the more
+    // specific "cookie on the agent plane". Everywhere else the decision must
+    // be byte-identical with and without it.
+    const hosts: PlaneHost[] = ["apex", "agent"];
+    const classes: RouteClass[] = ["public", "agent-write", "sponsor-write"];
+    for (const host of hosts) {
+      for (const routeClass of classes) {
+        for (const bearer of [true, false]) {
+          for (const envelope of [true, false]) {
+            const off = routePrincipal({
+              host,
+              routeClass,
+              presented: { bearer, envelope, cookie: false },
+            });
+            const on = routePrincipal({
+              host,
+              routeClass,
+              presented: { bearer, envelope, cookie: true },
+            });
+            const namedCase =
+              host === "agent" && routeClass === "agent-write" && !bearer && !envelope;
+            if (namedCase) {
+              expect(off).toMatchObject({ ok: false, reason: "no_credential" });
+              expect(on).toMatchObject({ ok: false, reason: "cookie_on_agent_plane" });
+            } else {
+              expect(on).toEqual(off);
+            }
+          }
+        }
+      }
+    }
+  });
+
+  test("cookie material cannot be supplied to the router at all", () => {
+    // The presented type carries a boolean. There is no field through which a
+    // cookie's bytes could arrive, so "never parsed" is structural rather than
+    // a discipline someone has to remember.
+    const presented: PresentedCredentials = with_({ cookie: true });
+    expect(typeof presented.cookie).toBe("boolean");
+    expect(Object.keys(presented).sort()).toEqual(["bearer", "cookie", "envelope"]);
+  });
 });
 
 describe("WRONG_PRINCIPAL, both directions", () => {

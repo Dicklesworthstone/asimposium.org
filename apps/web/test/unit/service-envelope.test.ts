@@ -211,7 +211,9 @@ describe("the session never crosses the seam", () => {
     });
     const headers = serviceEnvelopeHeaders(envelope);
 
-    expect(Object.keys(headers).sort()).toEqual(["content-type", SERVICE_ENVELOPE_HEADER]);
+    expect(Object.keys(headers).sort()).toEqual(
+      [SERVICE_ENVELOPE_HEADER, "content-type"].sort(),
+    );
     // Structural: there is no parameter through which a cookie or an
     // Authorization header could be forwarded to the agent plane.
     const serialized = JSON.stringify(headers).toLowerCase();

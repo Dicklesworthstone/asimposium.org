@@ -206,6 +206,100 @@ describe("verification results carry no credential material", () => {
   });
 });
 
+describe("the Worker accepts what the Agora actually mints", () => {
+  /**
+   * The two planes have independent implementations of the canonical form. The
+   * golden corpus proves the bytes agree; this proves the whole envelope does —
+   * shape, field names, hex encoding, signature — by minting with the real
+   * Agora signer and verifying with the real Worker verifier, in process.
+   *
+   * Still not a deployment: no Vercel, no Auth.js, no HTTP, no Worker runtime.
+   */
+  test("a minted envelope round-trips and attributes the sponsor", async () => {
+    const { mintServiceEnvelope } = await import("../../../web/lib/service-envelope.ts");
+    const keypair = (await crypto.subtle.generateKey({ name: "Ed25519" }, true, [
+      "sign",
+      "verify",
+    ])) as CryptoKeyPair;
+
+    const envelope = await mintServiceEnvelope({
+      privateKey: keypair.privateKey,
+      kid: "agora-2026-08-a",
+      now: NOW,
+      method: "POST",
+      route: ROUTE,
+      action: "directive.create",
+      principalId: "usr_01JXYZ0000000000000000",
+      body: BODY_CANARY,
+    });
+
+    const result = await verifyServiceEnvelope(envelope, {
+      keyring: new VerificationKeyring([
+        {
+          kid: "agora-2026-08-a",
+          publicKeyHex: toHex(
+            new Uint8Array(await crypto.subtle.exportKey("raw", keypair.publicKey)),
+          ),
+          notBefore: 0,
+        },
+      ]),
+      nonces: new MemoryNonceStore(),
+      now: NOW,
+      issuer: "agora",
+      audience: "stoa",
+      body: BODY_CANARY,
+      method: "POST",
+      route: ROUTE,
+    });
+
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    expect(result.principal).toMatchObject({
+      type: "sponsor",
+      id: "usr_01JXYZ0000000000000000",
+      action: "directive.create",
+    });
+  });
+
+  test("a minted envelope is refused when the body is altered in flight", async () => {
+    const { mintServiceEnvelope } = await import("../../../web/lib/service-envelope.ts");
+    const keypair = (await crypto.subtle.generateKey({ name: "Ed25519" }, true, [
+      "sign",
+      "verify",
+    ])) as CryptoKeyPair;
+    const envelope = await mintServiceEnvelope({
+      privateKey: keypair.privateKey,
+      kid: "k",
+      now: NOW,
+      method: "POST",
+      route: ROUTE,
+      action: "directive.create",
+      principalId: "usr_1",
+      body: BODY_CANARY,
+    });
+
+    const result = await verifyServiceEnvelope(envelope, {
+      keyring: new VerificationKeyring([
+        {
+          kid: "k",
+          publicKeyHex: toHex(
+            new Uint8Array(await crypto.subtle.exportKey("raw", keypair.publicKey)),
+          ),
+          notBefore: 0,
+        },
+      ]),
+      nonces: new MemoryNonceStore(),
+      now: NOW,
+      issuer: "agora",
+      audience: "stoa",
+      body: '{"focus":"rewritten by a proxy"}',
+      method: "POST",
+      route: ROUTE,
+    });
+    expect(result).toMatchObject({ ok: false, reason: "payload_mismatch" });
+  });
+});
+
 describe("principal confusion is refused before any credential is examined", () => {
   test("a bearer on a sponsor route is refused without consulting the envelope", () => {
     const decision = routePrincipal({
