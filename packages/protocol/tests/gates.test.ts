@@ -112,7 +112,11 @@ describe("each gate is capable of failing", () => {
   });
 
   test("a served text carrying a credential is refused without echoing it", () => {
-    const token = "asimp_ag_01JQZX9Y2K4M7P8R";
+    // Assembled rather than written as one literal on purpose. The bytes the scanner sees are
+    // identical, but the repository never carries a line matching the `asimp_ag_…` prefix that
+    // Fable §14.2 reserves for secret scanning — a package that refuses credentials in served
+    // text should not be the file that trips the project's own scanner (`ubs` CRITICAL).
+    const token = ["asimp", "ag", "01JQZX9Y2K4M7P8R"].join("_");
     try {
       assertServedTextSafe(documentWithBody(`# Notice\n\nUse ${token} to authenticate.\n`));
       throw new Error("expected a refusal");
@@ -168,5 +172,84 @@ describe("each gate is capable of failing", () => {
   test("a rules section below the floor is refused rather than measured", () => {
     const tiny = "# The Symposium Protocol\n\n## Rules\n\nBe good.\n\n## Versioning\n";
     expect(() => measureRules(tiny, "a fixture with a stub rules section")).toThrow(ProtocolError);
+  });
+
+  test("planted negative: a fenced fake heading cannot hide words from the cap", () => {
+    const visible = "rule ".repeat(200).trim();
+    const hidden = "hidden ".repeat(900).trim();
+    const evasive = [
+      "# The Symposium Protocol",
+      "",
+      "## Rules",
+      "",
+      visible,
+      "",
+      "```",
+      "## Versioning",
+      "```",
+      "",
+      hidden,
+      "",
+      "## Versioning",
+      "",
+      "Not part of the rules.",
+    ].join("\n");
+
+    // 200 visible + the word "Versioning" inside the fence + 900 hidden. The fence delimiters
+    // themselves carry no letter or digit, so they add nothing.
+    const measured = measureRules(evasive, "a fixture hiding its tail behind a fenced heading");
+    expect(measured.words).toBe(1101);
+    expect(measured.within_cap).toBe(false);
+    expect(measured.text).toContain("hidden");
+
+    // The prefix a fence-blind extractor would have measured instead: 200 words, above the floor
+    // and inside the cap, i.e. silently green on a document that violates Rule A8 by 101 words.
+    const evaded = measureRules(
+      ["# The Symposium Protocol", "", "## Rules", "", visible, "", "## Versioning", ""].join("\n"),
+      "the prefix a fence-blind extractor would have measured",
+    );
+    expect(evaded.words).toBe(200);
+    expect(evaded.within_cap).toBe(true);
+  });
+
+  test("planted negative: a tilde fence and a nested longer fence hide nothing either", () => {
+    const bulk = (word: string, times: number) => `${word} `.repeat(times).trim();
+    for (const fence of [
+      ["~~~", "~~~"],
+      ["````", "````"],
+    ] as const) {
+      const document = [
+        "# The Symposium Protocol",
+        "",
+        "## Rules",
+        "",
+        bulk("rule", 200),
+        "",
+        fence[0],
+        "## Versioning",
+        "```",
+        fence[1],
+        "",
+        bulk("hidden", 900),
+        "",
+        "## Versioning",
+        "",
+      ].join("\n");
+      const measured = measureRules(document, `a fixture fenced with ${fence[0]}`);
+      expect(measured.within_cap).toBe(false);
+      expect(measured.words).toBeGreaterThan(PROTOCOL_RULES_WORD_CAP);
+    }
+  });
+});
+
+describe("the package typechecks its own tests (B2)", () => {
+  test("tsconfig includes the tests directory and Bun types", async () => {
+    const raw = await Bun.file(new URL("../tsconfig.json", import.meta.url)).text();
+    const config = JSON.parse(raw) as {
+      include?: string[];
+      compilerOptions?: { types?: string[] };
+    };
+    expect(config.include ?? []).toContain("tests/**/*.ts");
+    expect(config.compilerOptions?.types ?? []).toContain("bun");
   });
 });
