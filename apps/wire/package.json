@@ -25,6 +25,8 @@
     "dev": "wrangler dev --config ../../infra/wrangler.toml"
   },
   "dependencies": {
+    "@asimposium/contracts": "workspace:*",
+    "@asimposium/render": "workspace:*",
     "drizzle-orm": "0.45.2",
     "hono": "4.13.2",
     "zod": "4.4.3"

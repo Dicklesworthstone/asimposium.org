@@ -80,13 +80,14 @@ function plantRegression(): string {
   const dir = mkdtempSync(join(tmpdir(), "wire-suite-regression-"));
   mkdirSync(join(dir, "scripts"), { recursive: true });
   mkdirSync(join(dir, "test", "unit"), { recursive: true });
+  mkdirSync(join(dir, "test", "split"), { recursive: true });
   writeFileSync(
     join(dir, "package.json"),
     `${JSON.stringify({ name: "@asimposium/wire", version: "0.0.0", private: true }, null, 2)}\n`,
   );
   writeFileSync(join(dir, "scripts", "suites.ts"), readFileSync(join(PACKAGE_ROOT, RUNNER)));
   writeFileSync(
-    join(dir, "test", "unit", "planted-regression.test.ts"),
+    join(dir, "test", "split", "planted-regression.test.ts"),
     [
       'import { expect, test } from "bun:test";',
       "",
@@ -123,15 +124,18 @@ describe("a deliberately blocked suite exits 78, never 0 and never 1", () => {
     }, 20_000);
   }
 
-  test("the integration blocker still names the no-mock and no-live-binding claims", async () => {
+  test("the integration blocker distinguishes local D1 evidence from the missing mounted binding suite", async () => {
     const run = await runRunner("integration");
     const blockedOn = run.record.blocked_on ?? "";
     const forbidden = run.record.forbidden_substitutes ?? "";
-    // The claims this refusal rests on, kept intact: no real namespace exists yet, and the
-    // substitutes that would make it look satisfied are named so nobody reaches for them.
+    // The existing local-D1 runner is useful evidence but is not transmuted into
+    // proof for the unmounted cross-slice surface or the absent R2/DO bindings.
     expect(blockedOn).toContain("asimposiumorg-p1g");
-    expect(blockedOn).toContain("all-zero sentinel");
-    expect(blockedOn).toContain("workerd");
+    expect(blockedOn).toContain("e2e-s2-krater.sh");
+    expect(blockedOn).toContain("local Workerd D1");
+    expect(blockedOn).toContain("mounted Worker surfaces");
+    expect(blockedOn).toContain("R2 namespace");
+    expect(blockedOn).toContain("Durable Object alarm");
     expect(forbidden).toContain("mocked or stubbed D1/R2");
     expect(forbidden).toContain("bun:sqlite");
     expect(forbidden).toContain("test/support/bindings.ts");
@@ -168,7 +172,7 @@ describe("a suite that actually ran keeps the ordinary exit codes", () => {
     expect(run.record.tool).toBe("bun test");
   }, 30_000);
 
-  test("a planted real regression exits 1, not 78", async () => {
+  test("a planted regression under the separately registered S-3 tree exits 1, not 78", async () => {
     const run = await runRunner("unit", plantRegression());
     expect(run.exitCode).toBe(1);
     expect(run.exitCode).not.toBe(BLOCKED_EXIT_CODE);

@@ -48,8 +48,8 @@ const BLOCKED_EXIT_CODE = 78;
 
 interface ImplementedSuite {
   status: "implemented";
-  /** Directory, relative to the package root, that `bun test` is pointed at. */
-  dir: string;
+  /** Directories, relative to the package root, passed to `bun test`. */
+  dirs: readonly string[];
   covers: string;
 }
 
@@ -66,25 +66,25 @@ type Suite = ImplementedSuite | PendingSuite;
 const SUITES: Record<string, Suite> = {
   unit: {
     status: "implemented",
-    dir: "test/unit",
+    dirs: ["test/unit", "test/split"],
     covers:
-      "the Worker fetch handler, binding probes, response envelopes and the Drizzle/D1 client seam",
+      "the Worker fetch handler, binding probes, response envelopes, the Drizzle/D1 client seam, and the pure S-3 split-policy/service contract",
   },
   contract: {
     status: "implemented",
-    dir: "test/contract",
+    dirs: ["test/contract"],
     covers:
       "byte-exact wire format of this scaffold's own faces, plus binding-name agreement with infra/wrangler.toml; NOT the Fable §16.2 golden corpus",
   },
   security: {
     status: "implemented",
-    dir: "test/security",
+    dirs: ["test/security"],
     covers: "disclosure discipline on every face this scaffold serves",
   },
   integration: {
     status: "pending",
     blockedOn:
-      "asimposiumorg-p1g (OPS.3) and W2 Krater. infra/wrangler.toml does exist and pins this Worker's entrypoint, compatibility date and binding names, but it is a local shape-only skeleton: its D1 database_id is the all-zero sentinel, infra/README.md forbids using it for a remote deployment, db/migrations holds a README and no numbered SQL, and nothing here has ever been run under workerd. What is missing is a real D1/R2 namespace and a first migration to apply",
+      "asimposiumorg-p1g (OPS.3) and W2 Krater. `scripts/e2e-s2-krater.sh` already applies the numbered migrations and exercises local Workerd D1, but it is not a registered cross-slice integration suite and deliberately blocks on the missing Durable Object alarm and staging edge-cache evidence. What remains missing is a mock-free D1/R2 integration suite for the mounted Worker surfaces plus a configured R2 namespace and Durable Object alarm binding",
     forbiddenSubstitutes:
       "mocked or stubbed D1/R2 (AGENTS.md: do not mock D1 or R2 in integration tests); bun:sqlite standing in for D1; the shape-only shims in test/support/bindings.ts; an in-process fetch relabelled as integration; a `wrangler dev` process that starts, serves the health face and is reported as binding proof without a read or write crossing D1 or R2",
   },
@@ -164,7 +164,7 @@ async function runSuite(
   // stdio is inherited: child output is never suppressed, so a cited green
   // result always has the run behind it in the same log.
   const child = Bun.spawn({
-    cmd: ["bun", "test", suite.dir],
+    cmd: ["bun", "test", ...suite.dirs],
     cwd: PACKAGE_ROOT,
     stdio: ["inherit", "inherit", "inherit"],
   });
