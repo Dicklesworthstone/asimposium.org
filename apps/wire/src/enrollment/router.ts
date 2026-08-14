@@ -4,6 +4,8 @@ import {
   EnrollmentIdSchema,
   MintEnrollmentRequestSchema,
   MintEnrollmentResponseSchema,
+  type ProblemCode,
+  ProblemDocumentSchema,
   SponsorEnrollmentDecisionResponseSchema,
   SponsorEnrollmentDecisionSchema,
   SponsorFellowListResponseSchema,
@@ -31,6 +33,32 @@ import {
  * the literal `hello_url` in the contracts' approved-response schema.
  */
 const STOA_ORIGIN = "https://a.asimposium.org";
+const ENROLLMENT_SCHEMA_URL = "https://a.asimposium.org/schemas/enrollment.v1.json";
+const FRAGMENT_VALUE_PLACEHOLDER = "<value from the join URL fragment>";
+
+/** Contract failures teach request shape; credential and state refusals stay coarse. */
+function enrollmentContractFields(example: Record<string, unknown>): Record<string, unknown> {
+  return { rule: "A5", schema: ENROLLMENT_SCHEMA_URL, example };
+}
+
+function requestPath(request: Request): string {
+  return new URL(request.url).pathname;
+}
+
+function idempotencyHeaderExample(request: Request): Record<string, unknown> {
+  return {
+    method: request.method,
+    path: requestPath(request),
+    headers: { "Idempotency-Key": "enrollment-01JXYZ4K6Q" },
+  };
+}
+
+function idempotencyConflictExample(request: Request): Record<string, unknown> {
+  return {
+    ...idempotencyHeaderExample(request),
+    body: "<the exact JSON body originally sent with this key>",
+  };
+}
 
 export interface EnrollmentRouterOptions {
   readonly service: EnrollmentService;
@@ -54,30 +82,28 @@ export interface EnrollmentRouterOptions {
 
 function problem(
   status: number,
-  code: string,
+  code: ProblemCode,
   title: string,
   detail: string,
   fixHint: string,
   extensions: Record<string, unknown> = {},
 ): Response {
-  return new Response(
-    JSON.stringify({
-      type: `https://asimposium.org/errors/${code}`,
-      title,
-      status,
-      code,
-      detail,
-      fix_hint: fixHint,
-      ...extensions,
-    }),
-    {
-      status,
-      headers: {
-        "content-type": "application/problem+json; charset=utf-8",
-        "cache-control": "no-store",
-      },
+  const document = ProblemDocumentSchema.parse({
+    type: `https://asimposium.org/errors/${code}`,
+    title,
+    status,
+    code,
+    detail,
+    fix_hint: fixHint,
+    ...extensions,
+  });
+  return new Response(JSON.stringify(document), {
+    status,
+    headers: {
+      "content-type": "application/problem+json; charset=utf-8",
+      "cache-control": "no-store",
     },
-  );
+  });
 }
 
 function hasQuery(request: Request): boolean {
@@ -106,7 +132,7 @@ async function strongEtag(face: "json" | "html" | "markdown", body: string): Pro
   return `"${hex}"`;
 }
 
-function enrollmentErrorResponse(error: EnrollmentError): Response {
+function enrollmentErrorResponse(error: EnrollmentError, request: Request): Response {
   switch (error.code) {
     case "NAME_INVALID":
     case "MODEL_AS_NAME":
@@ -121,7 +147,7 @@ function enrollmentErrorResponse(error: EnrollmentError): Response {
         "Choose one of `suggestions` or supply another lowercase, hyphen-separated Fellow name.",
         {
           rule: "P-EN-NAME",
-          schema: "https://a.asimposium.org/schemas/enrollment.v1.json",
+          schema: ENROLLMENT_SCHEMA_URL,
           example: { name: "orchid-vector" },
           suggestions: error.suggestions,
         },
@@ -154,7 +180,7 @@ function enrollmentErrorResponse(error: EnrollmentError): Response {
         "Send the decision to the path of the enrollment named by `enrollment_id`, and sign that exact body.",
         {
           rule: "ADR-20",
-          schema: "https://a.asimposium.org/schemas/enrollment.v1.json",
+          schema: ENROLLMENT_SCHEMA_URL,
           example: { enrollment_id: "ASIMP-EN-01JXYZ4K6Q", decision: "approve" },
         },
       );
@@ -165,6 +191,41 @@ function enrollmentErrorResponse(error: EnrollmentError): Response {
         "Idempotency-Key does not match this request",
         "This key was already used for a different enrollment request.",
         "Reuse the original request body with this key or choose a new key for a new operation.",
+        enrollmentContractFields(idempotencyConflictExample(request)),
+      );
+    case "SCOPE_ESCALATION":
+      return problem(
+        422,
+        error.code,
+        "Grant reduction cannot increase access",
+        "The requested reduction includes a scope or resource beyond the pending proposal.",
+        "Choose only a strict subset of the scopes and resources shown on the pending approval card.",
+        {
+          rule: "ADR-20",
+          schema: ENROLLMENT_SCHEMA_URL,
+          example: {
+            enrollment_id: "ASIMP-EN-01JXYZ4K6Q",
+            decision: "reduce",
+            reduction: { scopes: ["review"] },
+          },
+        },
+      );
+    case "SCOPE_NOT_REDUCED":
+      return problem(
+        422,
+        error.code,
+        "Grant reduction must be strictly narrower",
+        "The requested reduction leaves the pending grant unchanged.",
+        "Remove at least one scope or resource, or lower a numeric budget or expiry below the pending value.",
+        {
+          rule: "ADR-20",
+          schema: ENROLLMENT_SCHEMA_URL,
+          example: {
+            enrollment_id: "ASIMP-EN-01JXYZ4K6Q",
+            decision: "reduce",
+            reduction: { scopes: ["review"] },
+          },
+        },
       );
     case "FLOW_INVALID":
     case "TOKEN_ALREADY_ISSUED":
@@ -204,7 +265,17 @@ function enrollmentUnavailableResponse(): Response {
     "ENROLLMENT_UNAVAILABLE",
     "Enrollment is temporarily unavailable",
     "The enrollment service could not complete this request safely.",
-    "Retry later with the same Idempotency-Key; do not create a second enrollment request.",
+    "Retry later. If this was a write, reuse the same Idempotency-Key; do not create a duplicate request.",
+  );
+}
+
+function capsuleUnavailableResponse(): Response {
+  return problem(
+    404,
+    "CAPSULE_UNAVAILABLE",
+    "Enrollment capsule is unavailable",
+    "This enrollment capsule is unavailable.",
+    "Check the public enrollment id and obtain a fresh sponsor-issued join URL if needed.",
   );
 }
 
@@ -217,9 +288,36 @@ function decisionBodyInvalidResponse(): Response {
     "Send a strict approve, deny, or reduce object that includes the enrollment id named by the request path, then sign those exact bytes.",
     {
       rule: "ADR-20",
-      schema: "https://a.asimposium.org/schemas/enrollment.v1.json",
+      schema: ENROLLMENT_SCHEMA_URL,
       example: { enrollment_id: "ASIMP-EN-01JXYZ4K6Q", decision: "approve" },
     },
+  );
+}
+
+function mintBodyInvalidResponse(): Response {
+  return problem(
+    422,
+    "MINT_BODY_INVALID",
+    "Sponsor mint body is invalid",
+    "The signed JSON body does not match the enrollment mint contract.",
+    "Send a strict JSON object with the requested scopes, then sign those exact bytes.",
+    enrollmentContractFields({
+      method: "POST",
+      path: "/v1/enrollments",
+      headers: { "content-type": "application/json" },
+      body: { requested_scopes: ["promote"] },
+    }),
+  );
+}
+
+function sponsorPathOnlyResponse(request: Request, path: string): Response {
+  return problem(
+    400,
+    "PATH_ONLY_REQUIRED",
+    "Sponsor request target is path-only",
+    "URL query parameters are outside the signed sponsor-route contract and are not accepted.",
+    "Remove the query string; for writes, put typed fields in the exact JSON body that the service envelope signs.",
+    enrollmentContractFields({ method: request.method, path, query: "none" }),
   );
 }
 
@@ -250,6 +348,7 @@ function idempotencyOptions(request: Request): { readonly idempotencyKey?: strin
       "Idempotency-Key is invalid",
       "The idempotency key must be a bounded opaque header value.",
       "Use 1 to 160 letters, digits, dots, underscores, or hyphens.",
+      enrollmentContractFields(idempotencyHeaderExample(request)),
     );
   }
   return { idempotencyKey: key };
@@ -271,17 +370,16 @@ export function createEnrollmentRouter(options: EnrollmentRouterOptions): Hono {
         "Enrollment capsule is path-only",
         "This public capsule accepts its enrollment id only as a path component.",
         "Remove query parameters and keep the join secret in the URL fragment.",
+        enrollmentContractFields({
+          method: "GET",
+          path: "/join/ASIMP-EN-01JXYZ4K6Q",
+          secret_transport: "URL fragment only; never sent with this request",
+        }),
       );
     }
     const enrollmentId = c.req.param("enrollmentId");
     if (!EnrollmentIdSchema.safeParse(enrollmentId).success) {
-      return problem(
-        404,
-        "CAPSULE_UNAVAILABLE",
-        "Enrollment capsule is unavailable",
-        "This enrollment capsule is unavailable.",
-        "Check the public enrollment id and obtain a fresh sponsor-issued join URL if needed.",
-      );
+      return capsuleUnavailableResponse();
     }
     try {
       const projection = enrollmentCapsuleProjection(await options.service.capsule(enrollmentId));
@@ -310,17 +408,14 @@ export function createEnrollmentRouter(options: EnrollmentRouterOptions): Hono {
       };
       if (c.req.header("if-none-match") === etag) return c.body(null, 304, headers);
       return c.body(body, 200, headers);
-    } catch {
+    } catch (error) {
       // A public join path may be malformed or may refer to an enrollment that
       // was never minted, expired, superseded, or consumed. Those absences are
-      // intentionally one 404 face; no state distinction is public.
-      return problem(
-        404,
-        "CAPSULE_UNAVAILABLE",
-        "Enrollment capsule is unavailable",
-        "This enrollment capsule is unavailable.",
-        "Check the public enrollment id and obtain a fresh sponsor-issued join URL if needed.",
-      );
+      // intentionally one 404 face; no state distinction is public. A plain
+      // service or schema failure is operational instead, never a false 404.
+      return error instanceof EnrollmentError
+        ? capsuleUnavailableResponse()
+        : enrollmentUnavailableResponse();
     }
   });
 
@@ -332,6 +427,18 @@ export function createEnrollmentRouter(options: EnrollmentRouterOptions): Hono {
         "Enrollment credentials are body-only",
         "Enrollment credentials are not accepted in a URL query string.",
         "Send the documented JSON body without query parameters.",
+        enrollmentContractFields({
+          method: "POST",
+          path: "/v1/fellows",
+          headers: { "content-type": "application/json" },
+          body: {
+            enrollment_id: "ASIMP-EN-01JXYZ4K6Q",
+            secret: FRAGMENT_VALUE_PLACEHOLDER,
+            name: "orchid-vector",
+            model: "example-lab/orchid-1",
+            harness: "codex",
+          },
+        }),
       );
     }
     try {
@@ -343,13 +450,16 @@ export function createEnrollmentRouter(options: EnrollmentRouterOptions): Hono {
     } catch (error) {
       const operational = enrollmentOperationalFailure(error);
       if (operational !== undefined) return operational;
-      return enrollmentErrorResponse(
-        error instanceof EnrollmentError ? error : new EnrollmentError("PAIRING_INVALID"),
-      );
+      return error instanceof EnrollmentError
+        ? enrollmentErrorResponse(error, c.req.raw)
+        : enrollmentUnavailableResponse();
     }
   });
 
-  const poll = async (request: Request): Promise<Response> => {
+  const poll = async (
+    request: Request,
+    route: "/v1/fellows/flow" | "/v1/device-token",
+  ): Promise<Response> => {
     if (hasQuery(request)) {
       return problem(
         400,
@@ -357,6 +467,12 @@ export function createEnrollmentRouter(options: EnrollmentRouterOptions): Hono {
         "Flow credentials are body-only",
         "A flow credential is not accepted in a URL query string.",
         'Send `{ "flow_handle": "…" }` as the JSON request body.',
+        enrollmentContractFields({
+          method: "POST",
+          path: route,
+          headers: { "content-type": "application/json" },
+          body: { flow_handle: "<flow handle from the claim response>" },
+        }),
       );
     }
     try {
@@ -370,14 +486,14 @@ export function createEnrollmentRouter(options: EnrollmentRouterOptions): Hono {
     } catch (error) {
       const operational = enrollmentOperationalFailure(error);
       if (operational !== undefined) return operational;
-      return enrollmentErrorResponse(
-        error instanceof EnrollmentError ? error : new EnrollmentError("FLOW_INVALID"),
-      );
+      return error instanceof EnrollmentError
+        ? enrollmentErrorResponse(error, request)
+        : enrollmentUnavailableResponse();
     }
   };
 
-  app.post("/v1/fellows/flow", (c) => poll(c.req.raw));
-  app.post("/v1/device-token", (c) => poll(c.req.raw));
+  app.post("/v1/fellows/flow", (c) => poll(c.req.raw, "/v1/fellows/flow"));
+  app.post("/v1/device-token", (c) => poll(c.req.raw, "/v1/device-token"));
 
   app.get("/v1/hello", async (c) => {
     if (hasQuery(c.req.raw)) {
@@ -387,47 +503,57 @@ export function createEnrollmentRouter(options: EnrollmentRouterOptions): Hono {
         "Bearer token is header-only",
         "A Fellow bearer token is not accepted in a URL query string.",
         "Use an Authorization header with a valid one-time Fellow token.",
+        enrollmentContractFields({
+          method: "GET",
+          path: "/v1/hello",
+          headers: { Authorization: "Bearer <approved Fellow token>" },
+        }),
       );
     }
-    const token = bearerToken(c.req.raw);
-    const binding =
-      token === undefined ? undefined : await options.service.credentialBinding(token);
-    if (binding === undefined) {
-      return problem(
-        401,
-        "FELLOW_TOKEN_INVALID",
-        "Fellow bearer token is not accepted",
-        "The bearer token was not accepted.",
-        "Obtain a token through an explicitly approved enrollment flow and send it in Authorization.",
-      );
+    try {
+      const token = bearerToken(c.req.raw);
+      const binding =
+        token === undefined ? undefined : await options.service.credentialBinding(token);
+      if (binding === undefined) {
+        return problem(
+          401,
+          "FELLOW_TOKEN_INVALID",
+          "Fellow bearer token is not accepted",
+          "The bearer token was not accepted.",
+          "Obtain a token through an explicitly approved enrollment flow and send it in Authorization.",
+        );
+      }
+      const response = EnrollmentHelloResponseSchema.parse({
+        fellow: {
+          fellow_id: binding.fellowId,
+          name: binding.name,
+          model: binding.model,
+          harness: binding.harness,
+        },
+        granted_scopes: binding.grantedScopes,
+        granted_resources: {
+          ...(binding.grantedResources.problemBinding === undefined
+            ? {}
+            : { problem_binding: binding.grantedResources.problemBinding }),
+          ...(binding.grantedResources.firstDirective === undefined
+            ? {}
+            : { first_directive: binding.grantedResources.firstDirective }),
+          ...(binding.grantedResources.eventBudget === undefined
+            ? {}
+            : { event_budget: binding.grantedResources.eventBudget }),
+          ...(binding.grantedResources.artifactBudgetBytes === undefined
+            ? {}
+            : { artifact_budget_bytes: binding.grantedResources.artifactBudgetBytes }),
+          ...(binding.grantedResources.fellowGrantExpiresAt === undefined
+            ? {}
+            : { fellow_grant_expires_at: binding.grantedResources.fellowGrantExpiresAt }),
+        },
+      });
+      return c.json(response, 200, { "cache-control": "no-store" });
+    } catch (error) {
+      const operational = enrollmentOperationalFailure(error);
+      return operational ?? enrollmentUnavailableResponse();
     }
-    const response = EnrollmentHelloResponseSchema.parse({
-      fellow: {
-        fellow_id: binding.fellowId,
-        name: binding.name,
-        model: binding.model,
-        harness: binding.harness,
-      },
-      granted_scopes: binding.grantedScopes,
-      granted_resources: {
-        ...(binding.grantedResources.problemBinding === undefined
-          ? {}
-          : { problem_binding: binding.grantedResources.problemBinding }),
-        ...(binding.grantedResources.firstDirective === undefined
-          ? {}
-          : { first_directive: binding.grantedResources.firstDirective }),
-        ...(binding.grantedResources.eventBudget === undefined
-          ? {}
-          : { event_budget: binding.grantedResources.eventBudget }),
-        ...(binding.grantedResources.artifactBudgetBytes === undefined
-          ? {}
-          : { artifact_budget_bytes: binding.grantedResources.artifactBudgetBytes }),
-        ...(binding.grantedResources.fellowGrantExpiresAt === undefined
-          ? {}
-          : { fellow_grant_expires_at: binding.grantedResources.fellowGrantExpiresAt }),
-      },
-    });
-    return c.json(response, 200, { "cache-control": "no-store" });
   });
 
   mountSponsorRoutes(app, options);
@@ -443,15 +569,43 @@ async function requireSponsor(
   action: string,
 ): Promise<{ readonly principal: EnrollmentPrincipal; readonly rawBody: Uint8Array } | Response> {
   if (options.verifiedSponsor === undefined) {
-    return problem(
-      503,
-      "SPONSOR_AUTH_UNAVAILABLE",
-      "Sponsor writes are not configured on this Worker",
-      "This deployment has no service-envelope verification configured.",
-      "Deploy with the service-envelope verification keyring before calling sponsor routes.",
-    );
+    return sponsorAuthUnavailableResponse();
   }
-  return options.verifiedSponsor(request, route, action);
+  try {
+    const result = await options.verifiedSponsor(request, route, action);
+    if (result instanceof Response) return result;
+    if (!isEnrollmentPrincipal(result?.principal) || !(result?.rawBody instanceof Uint8Array)) {
+      return sponsorAuthUnavailableResponse();
+    }
+    return result;
+  } catch {
+    return sponsorAuthUnavailableResponse();
+  }
+}
+
+function sponsorAuthUnavailableResponse(): Response {
+  return problem(
+    503,
+    "SPONSOR_AUTH_UNAVAILABLE",
+    "Sponsor authentication is temporarily unavailable",
+    "The Worker could not verify this sponsor request safely.",
+    "Retry later. If the failure persists, check the service-envelope keyring and nonce store before re-signing the request.",
+  );
+}
+
+function isEnrollmentPrincipal(value: unknown): value is EnrollmentPrincipal {
+  if (typeof value !== "object" || value === null) return false;
+  const principal = value as Record<string, unknown>;
+  switch (principal.type) {
+    case "sponsor":
+      return typeof principal.sponsorId === "string" && principal.sponsorId.length > 0;
+    case "fellow":
+      return typeof principal.fellowId === "string" && principal.fellowId.length > 0;
+    case "service":
+      return typeof principal.serviceId === "string" && principal.serviceId.length > 0;
+    default:
+      return false;
+  }
 }
 
 /** Parse JSON from signature-verified bytes; the request stream is consumed by the seam. */
@@ -529,6 +683,9 @@ function contractFellow(record: SponsorFellowRecord): Record<string, unknown> {
  */
 function mountSponsorRoutes(app: Hono, options: EnrollmentRouterOptions): void {
   app.post("/v1/enrollments", async (c) => {
+    if (hasQuery(c.req.raw)) {
+      return sponsorPathOnlyResponse(c.req.raw, "/v1/enrollments");
+    }
     const authenticated = await requireSponsor(
       options,
       c.req.raw,
@@ -539,8 +696,14 @@ function mountSponsorRoutes(app: Hono, options: EnrollmentRouterOptions): void {
     try {
       const idempotency = idempotencyOptions(c.req.raw);
       if (idempotency instanceof Response) return idempotency;
-      const parsed = MintEnrollmentRequestSchema.safeParse(verifiedJson(authenticated.rawBody));
-      if (!parsed.success) return enrollmentErrorResponse(new EnrollmentError("PAIRING_INVALID"));
+      let mintBody: unknown;
+      try {
+        mintBody = verifiedJson(authenticated.rawBody);
+      } catch {
+        return mintBodyInvalidResponse();
+      }
+      const parsed = MintEnrollmentRequestSchema.safeParse(mintBody);
+      if (!parsed.success) return mintBodyInvalidResponse();
       const minted = await options.service.mint(authenticated.principal, parsed.data, idempotency);
       const response = MintEnrollmentResponseSchema.parse({
         enrollment_id: minted.enrollmentId,
@@ -554,13 +717,16 @@ function mountSponsorRoutes(app: Hono, options: EnrollmentRouterOptions): void {
     } catch (error) {
       const operational = enrollmentOperationalFailure(error);
       if (operational !== undefined) return operational;
-      return enrollmentErrorResponse(
-        error instanceof EnrollmentError ? error : new EnrollmentError("PAIRING_INVALID"),
-      );
+      return error instanceof EnrollmentError
+        ? enrollmentErrorResponse(error, c.req.raw)
+        : enrollmentUnavailableResponse();
     }
   });
 
   app.get("/v1/enrollments/proposals", async (c) => {
+    if (hasQuery(c.req.raw)) {
+      return sponsorPathOnlyResponse(c.req.raw, "/v1/enrollments/proposals");
+    }
     const authenticated = await requireSponsor(
       options,
       c.req.raw,
@@ -578,13 +744,16 @@ function mountSponsorRoutes(app: Hono, options: EnrollmentRouterOptions): void {
     } catch (error) {
       const operational = enrollmentOperationalFailure(error);
       if (operational !== undefined) return operational;
-      return enrollmentErrorResponse(
-        error instanceof EnrollmentError ? error : new EnrollmentError("PAIRING_INVALID"),
-      );
+      return error instanceof EnrollmentError
+        ? enrollmentErrorResponse(error, c.req.raw)
+        : enrollmentUnavailableResponse();
     }
   });
 
   app.post("/v1/enrollments/:enrollmentId/decision", async (c) => {
+    if (hasQuery(c.req.raw)) {
+      return sponsorPathOnlyResponse(c.req.raw, "/v1/enrollments/ASIMP-EN-01JXYZ4K6Q/decision");
+    }
     const authenticated = await requireSponsor(
       options,
       c.req.raw,
@@ -622,7 +791,7 @@ function mountSponsorRoutes(app: Hono, options: EnrollmentRouterOptions): void {
       // sides are caller-supplied, so comparing them discloses nothing about
       // either enrollment's existence.
       if (parsed.data.enrollment_id !== enrollmentId) {
-        return enrollmentErrorResponse(new EnrollmentError("DECISION_TARGET_MISMATCH"));
+        return enrollmentErrorResponse(new EnrollmentError("DECISION_TARGET_MISMATCH"), c.req.raw);
       }
       const idempotency = idempotencyOptions(c.req.raw);
       if (idempotency instanceof Response) return idempotency;
@@ -634,12 +803,15 @@ function mountSponsorRoutes(app: Hono, options: EnrollmentRouterOptions): void {
       const operational = enrollmentOperationalFailure(error);
       if (operational !== undefined) return operational;
       return error instanceof EnrollmentError
-        ? enrollmentErrorResponse(error)
+        ? enrollmentErrorResponse(error, c.req.raw)
         : enrollmentUnavailableResponse();
     }
   });
 
   app.get("/v1/fellows", async (c) => {
+    if (hasQuery(c.req.raw)) {
+      return sponsorPathOnlyResponse(c.req.raw, "/v1/fellows");
+    }
     const authenticated = await requireSponsor(options, c.req.raw, "/v1/fellows", "fellows.list");
     if (authenticated instanceof Response) return authenticated;
     try {
@@ -652,9 +824,9 @@ function mountSponsorRoutes(app: Hono, options: EnrollmentRouterOptions): void {
     } catch (error) {
       const operational = enrollmentOperationalFailure(error);
       if (operational !== undefined) return operational;
-      return enrollmentErrorResponse(
-        error instanceof EnrollmentError ? error : new EnrollmentError("PAIRING_INVALID"),
-      );
+      return error instanceof EnrollmentError
+        ? enrollmentErrorResponse(error, c.req.raw)
+        : enrollmentUnavailableResponse();
     }
   });
 }

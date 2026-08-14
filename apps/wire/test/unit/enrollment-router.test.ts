@@ -3,9 +3,12 @@ import { describe, expect, test } from "bun:test";
 import { createEnrollmentRouter } from "../../src/enrollment/router.ts";
 import {
   AesGcmEnrollmentReplayProtector,
+  EnrollmentError,
   EnrollmentService,
   InMemoryEnrollmentStore,
 } from "../../src/enrollment/service.ts";
+
+const FRAGMENT_VALUE_PLACEHOLDER = "<value from the join URL fragment>";
 
 class FixedClock {
   now(): number {
@@ -196,7 +199,16 @@ describe("S-1 mountable enrollment router", () => {
 
     const escaped = await request(router, `/join/${minted.enrollmentId}?secret=v1.ignored`);
     expect(escaped.status).toBe(400);
-    expect(await escaped.json()).toMatchObject({ code: "PATH_ONLY_REQUIRED" });
+    expect(await escaped.json()).toMatchObject({
+      code: "PATH_ONLY_REQUIRED",
+      rule: "A5",
+      schema: "https://a.asimposium.org/schemas/enrollment.v1.json",
+      example: {
+        method: "GET",
+        path: "/join/ASIMP-EN-01JXYZ4K6Q",
+        secret_transport: "URL fragment only; never sent with this request",
+      },
+    });
 
     const unavailable = ["/join/not-an-enrollment-id", "/join/ASIMP-EN-7F3K9M2Q8R"];
     for (const path of unavailable) {
@@ -252,6 +264,9 @@ describe("S-1 mountable enrollment router", () => {
     expect(opaqueText).not.toContain("MODEL_AS_NAME");
     expect(opaqueText).not.toContain("suggestions");
     expect(opaqueText).not.toContain(malformedSecret);
+    expect(opaqueText).not.toContain('"rule"');
+    expect(opaqueText).not.toContain('"schema"');
+    expect(opaqueText).not.toContain('"example"');
   });
 
   test("body-only flow routes issue a token once and minimal hello authenticates the resulting binding", async () => {
@@ -277,7 +292,17 @@ describe("S-1 mountable enrollment router", () => {
       body: "{}",
     });
     expect(queryPoll.status).toBe(400);
-    expect(await queryPoll.json()).toMatchObject({ code: "BODY_ONLY_REQUIRED" });
+    expect(await queryPoll.json()).toMatchObject({
+      code: "BODY_ONLY_REQUIRED",
+      rule: "A5",
+      schema: "https://a.asimposium.org/schemas/enrollment.v1.json",
+      example: {
+        method: "POST",
+        path: "/v1/fellows/flow",
+        headers: { "content-type": "application/json" },
+        body: { flow_handle: "<flow handle from the claim response>" },
+      },
+    });
 
     const pending = await request(router, "/v1/fellows/flow", {
       method: "POST",
@@ -304,6 +329,11 @@ describe("S-1 mountable enrollment router", () => {
 
     const denied = await request(router, "/v1/hello");
     expect(denied.status).toBe(401);
+    const deniedBody = (await denied.json()) as Record<string, unknown>;
+    expect(deniedBody).toMatchObject({ code: "FELLOW_TOKEN_INVALID" });
+    expect(deniedBody).not.toHaveProperty("rule");
+    expect(deniedBody).not.toHaveProperty("schema");
+    expect(deniedBody).not.toHaveProperty("example");
     const oversized = await request(router, "/v1/hello", {
       headers: { authorization: `Bearer asimp_ag_${"A".repeat(8_192)}` },
     });
@@ -317,5 +347,249 @@ describe("S-1 mountable enrollment router", () => {
       fellow: { name: "router-orchid", model: "test-model", harness: "test-harness" },
       granted_scopes: ["review"],
     });
+  });
+
+  test("mandatory contract failures include rule, schema, and a safe example", async () => {
+    const cases: readonly {
+      readonly code:
+        | "PATH_ONLY_REQUIRED"
+        | "BODY_ONLY_REQUIRED"
+        | "IDEMPOTENCY_KEY_INVALID"
+        | "IDEMPOTENCY_CONFLICT";
+      readonly send: () => Promise<Response>;
+      readonly example: Record<string, unknown>;
+    }[] = [
+      {
+        code: "PATH_ONLY_REQUIRED",
+        send: async () => {
+          const { router } = routerFixture();
+          return request(router, "/join/ASIMP-EN-01JXYZ4K6Q?secret=ignored");
+        },
+        example: {
+          method: "GET",
+          path: "/join/ASIMP-EN-01JXYZ4K6Q",
+          secret_transport: "URL fragment only; never sent with this request",
+        },
+      },
+      {
+        code: "BODY_ONLY_REQUIRED",
+        send: async () => {
+          const { router } = routerFixture();
+          return request(router, "/v1/fellows?enrollment_id=ignored", { method: "POST" });
+        },
+        example: {
+          method: "POST",
+          path: "/v1/fellows",
+          headers: { "content-type": "application/json" },
+          body: {
+            enrollment_id: "ASIMP-EN-01JXYZ4K6Q",
+            secret: FRAGMENT_VALUE_PLACEHOLDER,
+            name: "orchid-vector",
+            model: "example-lab/orchid-1",
+            harness: "codex",
+          },
+        },
+      },
+      {
+        code: "BODY_ONLY_REQUIRED",
+        send: async () => {
+          const { router } = routerFixture();
+          return request(router, "/v1/device-token?flow_handle=ignored", { method: "POST" });
+        },
+        example: {
+          method: "POST",
+          path: "/v1/device-token",
+          headers: { "content-type": "application/json" },
+          body: { flow_handle: "<flow handle from the claim response>" },
+        },
+      },
+      {
+        code: "BODY_ONLY_REQUIRED",
+        send: async () => {
+          const { router } = routerFixture();
+          return request(router, "/v1/hello?token=ignored");
+        },
+        example: {
+          method: "GET",
+          path: "/v1/hello",
+          headers: { Authorization: "Bearer <approved Fellow token>" },
+        },
+      },
+      {
+        code: "IDEMPOTENCY_KEY_INVALID",
+        send: async () => {
+          const { router } = routerFixture();
+          return request(router, "/v1/fellows", {
+            method: "POST",
+            headers: { "idempotency-key": "not allowed" },
+          });
+        },
+        example: {
+          method: "POST",
+          path: "/v1/fellows",
+          headers: { "Idempotency-Key": "enrollment-01JXYZ4K6Q" },
+        },
+      },
+      {
+        code: "IDEMPOTENCY_CONFLICT",
+        send: async () => {
+          const { router, service } = routerFixture();
+          Object.defineProperty(service, "claim", {
+            value: async () => {
+              throw new EnrollmentError("IDEMPOTENCY_CONFLICT");
+            },
+          });
+          return request(router, "/v1/fellows", {
+            method: "POST",
+            headers: { "content-type": "application/json" },
+            body: "{}",
+          });
+        },
+        example: {
+          method: "POST",
+          path: "/v1/fellows",
+          headers: { "Idempotency-Key": "enrollment-01JXYZ4K6Q" },
+          body: "<the exact JSON body originally sent with this key>",
+        },
+      },
+    ];
+
+    for (const scenario of cases) {
+      const response = await scenario.send();
+      expect(response.status).toBe(scenario.code === "IDEMPOTENCY_CONFLICT" ? 409 : 400);
+      expect(await response.json()).toMatchObject({
+        code: scenario.code,
+        rule: "A5",
+        schema: "https://a.asimposium.org/schemas/enrollment.v1.json",
+        example: scenario.example,
+      });
+    }
+  });
+
+  test("table-driven unexpected service and schema faults stay coarse operational failures", async () => {
+    const privateStateCode = "PROPOSAL_EXPIRED";
+    const privateMessage = `private planted service fault ${privateStateCode}`;
+    const fellowToken = `asimp_ag_${"A".repeat(26)}_${"A".repeat(43)}`;
+    const cases: readonly {
+      readonly name: string;
+      readonly path: string;
+      readonly init: RequestInit;
+      readonly plant: (service: EnrollmentService) => void;
+      readonly forbidden: readonly string[];
+    }[] = [
+      {
+        name: "capsule service Error",
+        path: "/join/ASIMP-EN-01JXYZ4K6Q",
+        init: {},
+        plant: (service) => {
+          Object.defineProperty(service, "capsule", {
+            value: async () => {
+              throw new Error(privateMessage);
+            },
+          });
+        },
+        forbidden: [privateMessage, privateStateCode, "CAPSULE_UNAVAILABLE"],
+      },
+      {
+        name: "capsule projection schema fault",
+        path: "/join/ASIMP-EN-01JXYZ4K6Q",
+        init: {},
+        plant: (service) => {
+          Object.defineProperty(service, "capsule", {
+            value: async () => ({
+              enrollmentId: "private-schema-state-code",
+              secretExpiresAt: 0,
+              requestedScopes: [],
+              requestedResources: {},
+            }),
+          });
+        },
+        forbidden: ["private-schema-state-code", "CAPSULE_UNAVAILABLE"],
+      },
+      {
+        name: "claim service Error",
+        path: "/v1/fellows",
+        init: { method: "POST", headers: { "content-type": "application/json" }, body: "{}" },
+        plant: (service) => {
+          Object.defineProperty(service, "claim", {
+            value: async () => {
+              throw new Error(privateMessage);
+            },
+          });
+        },
+        forbidden: [privateMessage, privateStateCode, "PAIRING_INVALID"],
+      },
+      {
+        name: "poll service Error",
+        path: "/v1/fellows/flow",
+        init: { method: "POST", headers: { "content-type": "application/json" }, body: "{}" },
+        plant: (service) => {
+          Object.defineProperty(service, "poll", {
+            value: async () => {
+              throw new Error(privateMessage);
+            },
+          });
+        },
+        forbidden: [privateMessage, privateStateCode, "FLOW_INVALID"],
+      },
+      {
+        name: "hello service Error",
+        path: "/v1/hello",
+        init: { headers: { authorization: `Bearer ${fellowToken}` } },
+        plant: (service) => {
+          Object.defineProperty(service, "credentialBinding", {
+            value: async () => {
+              throw new Error(privateMessage);
+            },
+          });
+        },
+        forbidden: [privateMessage, privateStateCode, "FELLOW_TOKEN_INVALID"],
+      },
+      {
+        name: "claim response schema fault",
+        path: "/v1/fellows",
+        init: { method: "POST", headers: { "content-type": "application/json" }, body: "{}" },
+        plant: (service) => {
+          Object.defineProperty(service, "claim", {
+            value: async () => ({ flowHandle: "private-schema-state-code" }),
+          });
+        },
+        forbidden: ["private-schema-state-code", "PAIRING_INVALID"],
+      },
+      {
+        name: "hello response schema fault",
+        path: "/v1/hello",
+        init: { headers: { authorization: `Bearer ${fellowToken}` } },
+        plant: (service) => {
+          Object.defineProperty(service, "credentialBinding", {
+            value: async () => ({
+              fellowId: "private-schema-state-code",
+              name: "no",
+              model: "test-model",
+              harness: "test-harness",
+              grantedScopes: [],
+              grantedResources: {},
+            }),
+          });
+        },
+        forbidden: ["private-schema-state-code", "FELLOW_TOKEN_INVALID"],
+      },
+    ];
+
+    for (const scenario of cases) {
+      const { router, service } = routerFixture();
+      scenario.plant(service);
+      const response = await request(router, scenario.path, scenario.init);
+      expect(response.status, scenario.name).toBe(503);
+      const text = await response.text();
+      expect(JSON.parse(text), scenario.name).toMatchObject({
+        code: "ENROLLMENT_UNAVAILABLE",
+        fix_hint:
+          "Retry later. If this was a write, reuse the same Idempotency-Key; do not create a duplicate request.",
+      });
+      for (const forbidden of scenario.forbidden) {
+        expect(text, scenario.name).not.toContain(forbidden);
+      }
+    }
   });
 });

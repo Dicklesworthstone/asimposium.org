@@ -10,7 +10,7 @@ import { toHex } from "../../src/auth/canonical";
 import { authenticateServiceEnvelopeRequest } from "../../src/auth/http";
 import { VerificationKeyring } from "../../src/auth/keyring";
 import { MemoryNonceStore } from "../../src/auth/nonce";
-import { createEnrollmentRouter } from "../../src/enrollment/router";
+import { createEnrollmentRouter, type EnrollmentRouterOptions } from "../../src/enrollment/router";
 import {
   EnrollmentService,
   enrollmentReplayProtectorFromBase64Url,
@@ -40,7 +40,10 @@ interface Harness {
   ): Promise<Headers>;
 }
 
-async function harness(options?: { withSponsorSeam: false }): Promise<Harness> {
+async function harness(options?: {
+  readonly withSponsorSeam?: false;
+  readonly verifiedSponsor?: EnrollmentRouterOptions["verifiedSponsor"];
+}): Promise<Harness> {
   const keypair = (await crypto.subtle.generateKey({ name: "Ed25519" }, true, [
     "sign",
     "verify",
@@ -79,22 +82,27 @@ async function harness(options?: { withSponsorSeam: false }): Promise<Harness> {
     ...(options?.withSponsorSeam === false
       ? {}
       : {
-          verifiedSponsor: async (request, route, action) => {
-            const result = await authenticateServiceEnvelopeRequest(request, {
-              keyring,
-              nonces,
-              now: NOW,
-              issuer: "agora",
-              audience: "stoa",
-              route,
-              permittedActions: [action],
-            });
-            if (!result.ok) return result.response;
-            return {
-              principal: { type: "sponsor", sponsorId: result.verification.principal.id } as const,
-              rawBody: result.rawBody,
-            };
-          },
+          verifiedSponsor:
+            options?.verifiedSponsor ??
+            (async (request, route, action) => {
+              const result = await authenticateServiceEnvelopeRequest(request, {
+                keyring,
+                nonces,
+                now: NOW,
+                issuer: "agora",
+                audience: "stoa",
+                route,
+                permittedActions: [action],
+              });
+              if (!result.ok) return result.response;
+              return {
+                principal: {
+                  type: "sponsor",
+                  sponsorId: result.verification.principal.id,
+                } as const,
+                rawBody: result.rawBody,
+              };
+            }),
         }),
   });
 
@@ -185,6 +193,129 @@ describe("sponsor enrollment routes", () => {
     const response = await h.app.fetch(new Request(`${origin}/v1/fellows`, { method: "GET" }));
     expect(response.status).toBe(503);
     expect(await response.json()).toMatchObject({ code: "SPONSOR_AUTH_UNAVAILABLE" });
+  });
+
+  test("auth-seam throws become one coarse 503 on every sponsor route", async () => {
+    const privateMessage = "private keyring or nonce-store failure";
+    const h = await harness({
+      verifiedSponsor: async () => {
+        throw new Error(privateMessage);
+      },
+    });
+    const cases = [
+      { method: "POST", path: "/v1/enrollments", body: "{}" },
+      { method: "GET", path: "/v1/enrollments/proposals" },
+      {
+        method: "POST",
+        path: "/v1/enrollments/ASIMP-EN-0000000000/decision",
+        body: "{}",
+      },
+      { method: "GET", path: "/v1/fellows" },
+    ] as const;
+
+    for (const scenario of cases) {
+      const response = await h.app.fetch(
+        new Request(`${origin}${scenario.path}`, {
+          method: scenario.method,
+          ...("body" in scenario ? { body: scenario.body } : {}),
+        }),
+      );
+      expect(response.status, scenario.path).toBe(503);
+      const text = await response.text();
+      expect(JSON.parse(text), scenario.path).toMatchObject({
+        code: "SPONSOR_AUTH_UNAVAILABLE",
+        fix_hint:
+          "Retry later. If the failure persists, check the service-envelope keyring and nonce store before re-signing the request.",
+      });
+      expect(text, scenario.path).not.toContain(privateMessage);
+    }
+  });
+
+  test("malformed auth-seam success values fail closed as operational errors", async () => {
+    const malformed = [
+      undefined,
+      { principal: { type: "sponsor", sponsorId: SPONSOR } },
+      { rawBody: new Uint8Array() },
+      {
+        principal: { type: "sponsor", sponsorId: "" },
+        rawBody: new Uint8Array(),
+      },
+    ];
+
+    for (const value of malformed) {
+      const verifiedSponsor = (async () => value) as unknown as NonNullable<
+        EnrollmentRouterOptions["verifiedSponsor"]
+      >;
+      const h = await harness({ verifiedSponsor });
+      const response = await h.app.fetch(
+        new Request(`${origin}/v1/enrollments`, { method: "POST", body: "{}" }),
+      );
+      expect(response.status).toBe(503);
+      expect(await response.json()).toMatchObject({ code: "SPONSOR_AUTH_UNAVAILABLE" });
+    }
+  });
+
+  test("sponsor routes reject unsigned query components before authentication", async () => {
+    const h = await harness({ withSponsorSeam: false });
+    const canary = "query-canary-must-not-echo";
+    const cases = [
+      {
+        method: "POST",
+        path: "/v1/enrollments",
+        examplePath: "/v1/enrollments",
+        body: "{}",
+      },
+      {
+        method: "GET",
+        path: "/v1/enrollments/proposals",
+        examplePath: "/v1/enrollments/proposals",
+      },
+      {
+        method: "POST",
+        path: "/v1/enrollments/ASIMP-EN-0000000000/decision",
+        examplePath: "/v1/enrollments/ASIMP-EN-01JXYZ4K6Q/decision",
+        body: "{}",
+      },
+      { method: "GET", path: "/v1/fellows", examplePath: "/v1/fellows" },
+    ] as const;
+
+    for (const scenario of cases) {
+      const response = await h.app.fetch(
+        new Request(`${origin}${scenario.path}?credential=${canary}`, {
+          method: scenario.method,
+          ...("body" in scenario ? { body: scenario.body } : {}),
+        }),
+      );
+      expect(response.status, scenario.path).toBe(400);
+      const text = await response.text();
+      expect(JSON.parse(text), scenario.path).toMatchObject({
+        code: "PATH_ONLY_REQUIRED",
+        rule: "A5",
+        schema: "https://a.asimposium.org/schemas/enrollment.v1.json",
+        example: { method: scenario.method, path: scenario.examplePath, query: "none" },
+      });
+      expect(text, scenario.path).not.toContain(canary);
+      expect(text, scenario.path).not.toContain("SPONSOR_AUTH_UNAVAILABLE");
+    }
+  });
+
+  test("a malformed signed mint body teaches the mint contract", async () => {
+    const h = await harness();
+    const body = "{not-json";
+    const headers = await h.sign(body, "/v1/enrollments", "enrollment.mint");
+    const response = await h.app.fetch(envelopeRequest("/v1/enrollments", headers, "POST", body));
+    expect(response.status).toBe(422);
+    expect(await response.json()).toMatchObject({
+      code: "MINT_BODY_INVALID",
+      rule: "A5",
+      schema: "https://a.asimposium.org/schemas/enrollment.v1.json",
+      example: {
+        method: "POST",
+        path: "/v1/enrollments",
+        headers: { "content-type": "application/json" },
+        body: { requested_scopes: ["promote"] },
+      },
+    });
   });
 
   test("the full loop: mint, claim, card, approve, token, hello, fellows", async () => {
@@ -451,6 +582,49 @@ describe("sponsor enrollment routes", () => {
     }
   });
 
+  test("authenticated invalid reductions identify the actionable grant error", async () => {
+    const h = await harness();
+    const { enrollmentId, secret } = await mintOne(h);
+    await claimOne(h, enrollmentId, secret);
+    const cases = [
+      {
+        code: "SCOPE_ESCALATION",
+        reduction: { scopes: ["upload-artifacts"] },
+      },
+      {
+        code: "SCOPE_NOT_REDUCED",
+        reduction: { scopes: ["promote", "review"] },
+      },
+    ] as const;
+
+    for (const scenario of cases) {
+      const body = JSON.stringify({
+        enrollment_id: enrollmentId,
+        decision: "reduce",
+        reduction: scenario.reduction,
+      });
+      const headers = await h.sign(
+        body,
+        "/v1/enrollments/:enrollmentId/decision",
+        "enrollment.decide",
+      );
+      const response = await h.app.fetch(
+        envelopeRequest(`/v1/enrollments/${enrollmentId}/decision`, headers, "POST", body),
+      );
+      expect(response.status, scenario.code).toBe(422);
+      expect(await response.json(), scenario.code).toMatchObject({
+        code: scenario.code,
+        rule: "ADR-20",
+        schema: "https://a.asimposium.org/schemas/enrollment.v1.json",
+        example: {
+          enrollment_id: "ASIMP-EN-01JXYZ4K6Q",
+          decision: "reduce",
+          reduction: { scopes: ["review"] },
+        },
+      });
+    }
+  });
+
   test("an unexpected decision-service fault is an operational refusal, never false state", async () => {
     const h = await harness();
     const target = "ASIMP-EN-0000000000";
@@ -473,5 +647,143 @@ describe("sponsor enrollment routes", () => {
     expect(JSON.parse(responseText)).toMatchObject({ code: "ENROLLMENT_UNAVAILABLE" });
     expect(responseText).not.toContain("private planted service fault");
     expect(responseText).not.toContain("PROPOSAL_NOT_PENDING");
+  });
+
+  test("table-driven sponsor service and response-schema faults stay coarse", async () => {
+    const privateMessage = "private sponsor service fault PROPOSAL_NOT_PENDING";
+    const cases: readonly {
+      readonly name: string;
+      readonly path: string;
+      readonly route: string;
+      readonly action: string;
+      readonly method: "GET" | "POST";
+      readonly body: string;
+      readonly plant: (service: EnrollmentService) => void;
+      readonly forbidden: readonly string[];
+    }[] = [
+      {
+        name: "mint service Error",
+        path: "/v1/enrollments",
+        route: "/v1/enrollments",
+        action: "enrollment.mint",
+        method: "POST",
+        body: '{"requested_scopes":["promote"]}',
+        plant: (service) => {
+          Object.defineProperty(service, "mint", {
+            value: async () => {
+              throw new Error(privateMessage);
+            },
+          });
+        },
+        forbidden: [privateMessage, "PROPOSAL_NOT_PENDING", "PAIRING_INVALID"],
+      },
+      {
+        name: "mint response schema fault",
+        path: "/v1/enrollments",
+        route: "/v1/enrollments",
+        action: "enrollment.mint",
+        method: "POST",
+        body: '{"requested_scopes":["promote"]}',
+        plant: (service) => {
+          Object.defineProperty(service, "mint", {
+            value: async () => ({
+              enrollmentId: "private-schema-state-code",
+              expiresAt: 0,
+            }),
+          });
+        },
+        forbidden: ["private-schema-state-code", "PAIRING_INVALID"],
+      },
+      {
+        name: "proposal-list service Error",
+        path: "/v1/enrollments/proposals",
+        route: "/v1/enrollments/proposals",
+        action: "enrollment.proposals.list",
+        method: "GET",
+        body: "",
+        plant: (service) => {
+          Object.defineProperty(service, "pendingApprovals", {
+            value: async () => {
+              throw new Error(privateMessage);
+            },
+          });
+        },
+        forbidden: [privateMessage, "PROPOSAL_NOT_PENDING", "PAIRING_INVALID"],
+      },
+      {
+        name: "decision service Error",
+        path: "/v1/enrollments/ASIMP-EN-0000000000/decision",
+        route: "/v1/enrollments/:enrollmentId/decision",
+        action: "enrollment.decide",
+        method: "POST",
+        body: '{"enrollment_id":"ASIMP-EN-0000000000","decision":"approve"}',
+        plant: (service) => {
+          Object.defineProperty(service, "decide", {
+            value: async () => {
+              throw new Error(privateMessage);
+            },
+          });
+        },
+        forbidden: [privateMessage, "PROPOSAL_NOT_PENDING", "PAIRING_INVALID"],
+      },
+      {
+        name: "fellow-list service Error",
+        path: "/v1/fellows",
+        route: "/v1/fellows",
+        action: "fellows.list",
+        method: "GET",
+        body: "",
+        plant: (service) => {
+          Object.defineProperty(service, "fellows", {
+            value: async () => {
+              throw new Error(privateMessage);
+            },
+          });
+        },
+        forbidden: [privateMessage, "PROPOSAL_NOT_PENDING", "PAIRING_INVALID"],
+      },
+      {
+        name: "fellow-list response schema fault",
+        path: "/v1/fellows",
+        route: "/v1/fellows",
+        action: "fellows.list",
+        method: "GET",
+        body: "",
+        plant: (service) => {
+          Object.defineProperty(service, "fellows", {
+            value: async () => [
+              {
+                name: "private-schema-state-code",
+                model: "",
+                harness: "",
+                grantedScopes: [],
+                grantedResources: {},
+                grantedAt: 0,
+              },
+            ],
+          });
+        },
+        forbidden: ["private-schema-state-code", "PAIRING_INVALID"],
+      },
+    ];
+
+    for (const scenario of cases) {
+      const h = await harness();
+      scenario.plant(h.service);
+      const headers = await h.sign(scenario.body, scenario.route, scenario.action, scenario.method);
+      const response = await h.app.fetch(
+        envelopeRequest(scenario.path, headers, scenario.method, scenario.body),
+      );
+      expect(response.status).toBe(503);
+      const text = await response.text();
+      expect(JSON.parse(text)).toMatchObject({
+        code: "ENROLLMENT_UNAVAILABLE",
+        fix_hint:
+          "Retry later. If this was a write, reuse the same Idempotency-Key; do not create a duplicate request.",
+      });
+      for (const forbidden of scenario.forbidden) {
+        expect(text).not.toContain(forbidden);
+      }
+    }
   });
 });
