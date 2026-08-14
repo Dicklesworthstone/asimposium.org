@@ -33,11 +33,27 @@ doctrine, and absent otherwise):
 | `UNKNOWN_FORMAT` | an unknown format is a 400 with the allowed list, never a silent fallback (§7.1 axiom 9) |
 
 What neutralization does to an untrusted body, reported on every face and never silently
-(`NeutralizationMarker`): `asimp-control-comment` escapes a forged `<!-- asimp … -->` header;
-`envelope-key-forgery` escapes a forged envelope key such as `"next_actions":` appearing in a body;
-`fence-extended` grows the markdown quarantine fence past the body's longest backtick run, so a body
-cannot close the fence that quarantines it (the CommonMark rule); `active-html` records
-script-bearing markup, which the html face escapes character by character.
+(`NeutralizationMarker`): `asimp-control-comment` changes a forged `<!-- asimp … -->` opener to
+the inert text `&lt;!--` regardless of its prefix, backslashes, whitespace, case, or canonical and
+compatibility Unicode form; invisible format characters and combining marks remain in the namespace
+candidate until canonicalization, so they cannot split a forged header; either tokenizer-accepted
+closer, literal `-->` or parse-error `--!>`, also ends a fieldless canonical namespace such as
+`<!--asimp--!>`;
+`envelope-key-forgery` changes each quote in an exact lower-case server-authored
+`"next_actions"\s*:` or `"why_included"\s*:` shape to inert `&quot;` text, even when attacker
+backslashes precede it (ordinary API JSON keys remain prose);
+`fence-extended` is recorded once during preparation whenever the sanitized body makes the markdown
+quarantine fence grow past three backticks; thus markdown, JSON, and HTML report the same CommonMark
+defense against a body closing its own fence; `active-html` records real
+script-bearing markup or event attributes in a tag, not bare prose such as `one = 1`. Its bounded
+start-tag scan follows the HTML tokenizer distinction that whitespace and `/` separate attributes
+after a valid tag name, while `/` inside an unquoted attribute value is data. Quoted values and HTML
+comments are skipped as inert, except that `javascript:` is recorded inside a URL-bearing attribute
+(`href`, `src`, `action`, and peers); quoted descriptive attributes such as `title` and `alt` remain
+data. Markdown `javascript:` links remain recorded. An independent raw-browser-tokenizer pass and a case-folded
+Unicode-canonical-tokenizer pass union findings by original source offset. Thus NFKD →
+mark/format removal → NFKC can reveal a mutation, but a manufactured quote, comment, or `>` can
+never suppress real raw active markup; author bytes remain exact.
 
 Neutralized is not deleted. The hostile bytes stay legible as data — Rule A4 — because a reader,
 a sponsor, and a red-team fixture all need to see what was attempted.
@@ -114,13 +130,17 @@ against a weak reader stays in the threat model, not hidden under it.
 
 ## No-claim boundary
 
-- **Not S-5 complete.** S-5 also requires golden-tested faces and proven pack determinism. This
-  package has assertion-level tests and a shared fingerprint; it has **no committed golden face
-  snapshots**, and pack composition (budgets, `omitted[]` selection, stable-prefix ordering) is the
-  Worker's job and is not implemented anywhere yet.
+- **No W4 pack-composer determinism claim.** This package has checked-in, reviewable golden face
+  snapshots and renderer-level determinism checks. They do not prove Worker pack composition
+  (budgets, `omitted[]` selection, or stable-prefix ordering); that claim remains
+  **asimposiumorg-ceq**.
 - **No markdown pipeline.** Nothing here parses or renders markdown to HTML. The GFM + math
   pipeline with raw HTML disabled and KaTeX trust mode off (§14.3) does not exist yet; the html
   fragment escapes untrusted bodies into `<pre><code>` rather than rendering them.
+- **Textual JSON-key matching only.** The neutralizer does not parse or decode JSON key escape
+  spellings. For example, the literal body text `"next_action\u0073":` remains data, rather than
+  being treated as `"next_actions":`. This package makes no claim that a downstream consumer which
+  decodes such body text will preserve the same boundary.
 - **No TOON**, per the section above.
 - The fingerprint is a drift checksum, not authentication, and not an ETag.
 - This package is not the validator. Scientific rules P1–P13 live in the Worker and

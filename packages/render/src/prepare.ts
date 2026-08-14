@@ -9,6 +9,7 @@
 import { contentFingerprint, stableStringify } from "./canonical.ts";
 import { RenderContractError } from "./errors.ts";
 import {
+  fenceFor,
   isSafeHeaderValue,
   type NeutralizationFinding,
   neutralizeUntrustedBody,
@@ -210,6 +211,12 @@ export function prepareProjection(projection: Projection): PreparedProjection {
 
     if (item.untrusted) {
       const result = neutralizeUntrustedBody(item.body);
+      // Markdown computes its quarantine delimiter from this prepared body.
+      // Record the same fact here, once, so every face exposes the decision
+      // rather than leaving JSON and HTML to claim nothing happened.
+      const findings = fenceFor(result.text).extended
+        ? [...result.findings, { marker: "fence-extended" as const, count: 1 }]
+        : result.findings;
       items.push({
         kind: item.kind,
         id: item.id,
@@ -217,9 +224,9 @@ export function prepareProjection(projection: Projection): PreparedProjection {
         untrusted: true,
         why_included: item.why_included,
         body: result.text,
-        neutralized: result.findings,
+        neutralized: findings,
       });
-      for (const finding of result.findings) {
+      for (const finding of findings) {
         neutralized.push({ item_id: item.id, marker: finding.marker, count: finding.count });
       }
     } else {

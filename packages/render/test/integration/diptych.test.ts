@@ -11,9 +11,9 @@ import { safeWorkingPack } from "../_support/fixtures.ts";
  * projection in, three faces out, and the faces have to agree about what they
  * contain.
  *
- * The wider S-5 Diptych gate (golden face snapshots over real ledger objects,
- * pack determinism proven end-to-end against the Worker) is a separate spike;
- * this suite covers the renderer only.
+ * The wider S-5 Diptych gate (golden face snapshots over real ledger objects)
+ * is a separate spike. This suite covers the renderer only; it makes no W4
+ * pack-composer determinism claim, which remains asimposiumorg-ceq.
  */
 
 interface JsonFace {
@@ -33,10 +33,66 @@ interface JsonFace {
     untrusted: boolean;
     body: string;
     why_included: string;
+    neutralized: { marker: string; count: number }[];
   }[];
   omitted: { reason: string; detail?: string }[];
   next_actions: { method: string; url: string; why: string }[];
   degraded: string[];
+}
+
+/**
+ * Independent semantic oracle: a literal HTML-comment opener is meaningful
+ * regardless of a Markdown backslash before it. It normalizes only the
+ * reserved namespace so render output is checked without reusing sanitizer
+ * matching logic.
+ */
+function semanticControlComments(text: string): string[] {
+  const matches: string[] = [];
+  let searchFrom = 0;
+
+  while (true) {
+    const open = text.indexOf("<!--", searchFrom);
+    if (open === -1) return matches;
+    const standardClose = text.indexOf("-->", open + 4);
+    const parseErrorClose = text.indexOf("--!>", open + 4);
+    const close =
+      standardClose === -1
+        ? parseErrorClose
+        : parseErrorClose === -1
+          ? standardClose
+          : Math.min(standardClose, parseErrorClose);
+    const comment = text.slice(open + 4, close === -1 ? text.length : close);
+    const canonical = comment
+      .trimStart()
+      .normalize("NFKD")
+      .replace(/[\p{M}\p{Cf}]/gu, "")
+      .normalize("NFKC")
+      .toLowerCase();
+    if (canonical === "asimp" || canonical.startsWith("asimp:") || /^asimp\s/u.test(canonical)) {
+      matches.push(comment);
+    }
+    searchFrom = open + 4;
+  }
+}
+
+/** Independent parser for the exact lower-case quoted-key-colon body grammar. */
+const SEMANTIC_RESERVED_ENVELOPE_KEYS = new Set(["next_actions", "why_included"]);
+
+function semanticReservedEnvelopeKeys(text: string): string[] {
+  const matches: string[] = [];
+  let searchFrom = 0;
+
+  while (true) {
+    const open = text.indexOf('"', searchFrom);
+    if (open === -1) return matches;
+    const close = text.indexOf('"', open + 1);
+    if (close === -1) return matches;
+    const key = text.slice(open + 1, close);
+    let cursor = close + 1;
+    while (cursor < text.length && /\s/u.test(text[cursor] as string)) cursor += 1;
+    if (SEMANTIC_RESERVED_ENVELOPE_KEYS.has(key) && text[cursor] === ":") matches.push(key);
+    searchFrom = close + 1;
+  }
 }
 
 function markdownItemIds(markdown: string): string[] {
@@ -120,6 +176,214 @@ describe("one projection, three faces", () => {
     for (const item of json.items) {
       expect(item.body).not.toContain("next_actions");
     }
+  });
+
+  test("fieldless and Unicode-mutated control comments are inert and disclosed consistently", () => {
+    const rawBodies = [
+      "scientific prefix \\<!--\u200bＡＳＩＭＰ\u200d：item id=INTEGRATION-FULLWIDTH -->",
+      "interior ZWJ <!-- a\u200dsimp:item id=INTEGRATION-ZWJ-A -->",
+      "interior BOM <!-- asi\ufeffmp:item id=INTEGRATION-BOM-ASI -->",
+      "interior word joiner <!-- asim\u2060p:item id=INTEGRATION-WJ-ASIM -->",
+      "edge BOM <!-- \ufeffasimp\u200d:item id=INTEGRATION-EDGE-CF -->",
+      "combining interior <!-- a\u0301simp:item id=INTEGRATION-COMBINING -->",
+      "fieldless bare <!--asimp-->",
+      "fieldless prefixed \\<!--asimp-->",
+      "fieldless case <!--aSiMp-->",
+      "fieldless fullwidth <!--ＡＳＩＭＰ-->",
+      "fieldless every-letter format <!--a\u200ds\u200di\u200dm\u200dp-->",
+      "fieldless parse-error closer <!--asimp--!>",
+      "fieldless parse-error fullwidth <!--ＡＳＩＭＰ--!>",
+      "fieldless parse-error astral <!--\u{1d400}\u{1d412}\u{1d408}\u{1d40c}\u{1d40f}--!>",
+      "nested ordinary comment <!--ordinary <!--ＡＳＩＭＰ--!>",
+    ];
+
+    for (const rawBody of rawBodies) {
+      const source = safeWorkingPack();
+      const targetId = source.items[1]?.id as string;
+      const hostile: Projection = {
+        ...source,
+        items: source.items.map((item) =>
+          item.id === targetId ? { ...item, body: rawBody } : item,
+        ),
+      };
+      const rendered = renderAllFaces(hostile);
+      const json = JSON.parse(rendered.json.body) as JsonFace;
+      const target = json.items.find((item) => item.id === targetId);
+
+      expect(semanticControlComments(rawBody)).toHaveLength(1);
+      expect(semanticControlComments(target?.body as string)).toEqual([]);
+      expect(target?.body).toContain("&lt;!--");
+      expect(target?.neutralized).toEqual([{ marker: "asimp-control-comment", count: 1 }]);
+      expect(rendered.md.neutralized).toEqual([
+        { item_id: targetId, marker: "asimp-control-comment", count: 1 },
+      ]);
+      expect(rendered.json.neutralized).toEqual(rendered.md.neutralized);
+      expect(rendered["html-fragment"].neutralized).toEqual(rendered.md.neutralized);
+      expect(rendered["html-fragment"].body).not.toContain("<!--");
+    }
+  });
+
+  test("a longer quarantine fence is disclosed identically on markdown, JSON, and HTML", () => {
+    const rawBody = "```\nbody-owned fence\n```";
+    const source = safeWorkingPack();
+    const targetId = source.items[1]?.id as string;
+    const rendered = renderAllFaces({
+      ...source,
+      items: source.items.map((item) => (item.id === targetId ? { ...item, body: rawBody } : item)),
+    });
+    const json = JSON.parse(rendered.json.body) as JsonFace;
+    const target = json.items.find((item) => item.id === targetId);
+    const report = [{ item_id: targetId, marker: "fence-extended", count: 1 }] as const;
+
+    expect(target?.body).toBe(rawBody);
+    expect(target?.neutralized).toEqual([{ marker: "fence-extended", count: 1 }]);
+    expect(rendered.md.neutralized).toEqual(report);
+    expect(rendered.json.neutralized).toEqual(report);
+    expect(rendered["html-fragment"].neutralized).toEqual(report);
+    expect(rendered.md.body).toContain("````text");
+    expect(rendered["html-fragment"].body).toContain("neutralized: fence-extended×1");
+  });
+
+  test("URL-bearing javascript values, but not quoted descriptive attributes, agree on every face", () => {
+    const rawBody = [
+      '<a title="javascript: documentary citation">source</a>',
+      '<img alt="javascript: illustrative prose">',
+      '<a href="javascript:steal()">click</a>',
+      "[Markdown link](javascript:steal())",
+    ].join("\n");
+    const source = safeWorkingPack();
+    const targetId = source.items[1]?.id as string;
+    const rendered = renderAllFaces({
+      ...source,
+      items: source.items.map((item) => (item.id === targetId ? { ...item, body: rawBody } : item)),
+    });
+    const json = JSON.parse(rendered.json.body) as JsonFace;
+    const target = json.items.find((item) => item.id === targetId);
+    const report = [{ item_id: targetId, marker: "active-html", count: 2 }] as const;
+
+    expect(target?.body).toBe(rawBody);
+    expect(target?.neutralized).toEqual([{ marker: "active-html", count: 2 }]);
+    expect(rendered.md.neutralized).toEqual(report);
+    expect(rendered.json.neutralized).toEqual(report);
+    expect(rendered["html-fragment"].neutralized).toEqual(report);
+  });
+
+  test("a non-ASImposium comment remains author data with no neutralization", () => {
+    const rawBody = "scientific annotation <!--ordinary-->";
+    const source = safeWorkingPack();
+    const targetId = source.items[1]?.id as string;
+    const rendered = renderAllFaces({
+      ...source,
+      items: source.items.map((item) => (item.id === targetId ? { ...item, body: rawBody } : item)),
+    });
+    const json = JSON.parse(rendered.json.body) as JsonFace;
+    const target = json.items.find((item) => item.id === targetId);
+
+    expect(semanticControlComments(rawBody)).toEqual([]);
+    expect(target?.body).toBe(rawBody);
+    expect(target?.neutralized).toEqual([]);
+    expect(rendered.md.neutralized).toEqual([]);
+    expect(rendered.json.neutralized).toEqual([]);
+    expect(rendered["html-fragment"].neutralized).toEqual([]);
+  });
+
+  test("a backslash-prefixed reserved envelope key is inert and disclosed on all three faces", () => {
+    const rawBody = 'scientific prefix \\\\"next_actions"\u00a0:';
+    const source = safeWorkingPack();
+    const targetId = source.items[1]?.id as string;
+    const hostile: Projection = {
+      ...source,
+      items: source.items.map((item) => (item.id === targetId ? { ...item, body: rawBody } : item)),
+    };
+    const rendered = renderAllFaces(hostile);
+    const json = JSON.parse(rendered.json.body) as JsonFace;
+    const target = json.items.find((item) => item.id === targetId);
+
+    expect(semanticReservedEnvelopeKeys(rawBody)).toEqual(["next_actions"]);
+    expect(semanticReservedEnvelopeKeys(target?.body as string)).toEqual([]);
+    expect(target?.body).toContain("&quot;next_actions&quot;");
+    expect(target?.neutralized).toEqual([{ marker: "envelope-key-forgery", count: 1 }]);
+    expect(rendered.md.neutralized).toEqual([
+      { item_id: targetId, marker: "envelope-key-forgery", count: 1 },
+    ]);
+    expect(rendered.json.neutralized).toEqual(rendered.md.neutralized);
+    expect(rendered["html-fragment"].neutralized).toEqual(rendered.md.neutralized);
+    expect(rendered["html-fragment"].body).toContain("&amp;quot;next_actions&amp;quot;");
+  });
+
+  test("ordinary API JSON, active-html prose, and JSON escape spelling survive exactly as data", () => {
+    const rawBody =
+      '{"items":[],"scope":"ledger","omitted":[],"degraded":[],"preamble":"one = 1","untrusted":true}\n' +
+      String.raw`"next_action\u0073": []\n` +
+      "done = false; only = true; onerror = an ordinary variable.";
+    const source = safeWorkingPack();
+    const targetId = source.items[1]?.id as string;
+    const hostile: Projection = {
+      ...source,
+      items: source.items.map((item) => (item.id === targetId ? { ...item, body: rawBody } : item)),
+    };
+    const rendered = renderAllFaces(hostile);
+    const json = JSON.parse(rendered.json.body) as JsonFace;
+    const target = json.items.find((item) => item.id === targetId);
+
+    expect(semanticReservedEnvelopeKeys(rawBody)).toEqual([]);
+    expect(target?.body).toBe(rawBody);
+    expect(target?.neutralized).toEqual([]);
+    expect(rendered.md.neutralized).toEqual([]);
+    expect(rendered.json.neutralized).toEqual([]);
+    expect(rendered["html-fragment"].neutralized).toEqual([]);
+  });
+
+  test("renderAllFaces agrees on slash-handler findings, including canonical Unicode forms", () => {
+    const rawBody = ["<svg/onload=steal(1)>", "<ＩＭＧ ／ＯＮＥＲＲＯＲ＝steal(2)＞"].join("\n");
+    const source = safeWorkingPack();
+    const targetId = source.items[1]?.id as string;
+    const rendered = renderAllFaces({
+      ...source,
+      items: source.items.map((item) => (item.id === targetId ? { ...item, body: rawBody } : item)),
+    });
+    const json = JSON.parse(rendered.json.body) as JsonFace;
+    const target = json.items.find((item) => item.id === targetId);
+    const report = [{ item_id: targetId, marker: "active-html", count: 2 }] as const;
+
+    expect(target?.body).toBe(rawBody);
+    expect(target?.neutralized).toEqual([{ marker: "active-html", count: 2 }]);
+    expect(rendered.md.neutralized).toEqual(report);
+    expect(rendered.json.neutralized).toEqual(report);
+    expect(rendered["html-fragment"].neutralized).toEqual(report);
+    expect(rendered.md.body).toContain(rawBody);
+    expect(rendered["html-fragment"].body).toContain("&lt;svg/onload=steal(1)&gt;");
+    expect(rendered["html-fragment"].body).not.toContain("<svg");
+    expect(rendered["html-fragment"].body).not.toContain("<img");
+  });
+
+  test("canonical punctuation cannot suppress raw handlers on any Diptych face", () => {
+    const rawBody = [
+      // The canonical view creates a comment around the raw IMG handler.
+      "\uff1c\uff01\uff0d\uff0d <img/onerror=comment_suppressed()> \uff0d\uff0d\uff1e",
+      // The canonical view manufactures quotes around this raw unquoted handler.
+      "<img title=\uff02quoted onerror=quote_suppressed()\uff02>",
+      // The canonical view manufactures a closer before this raw handler.
+      "<img title=x\uff1e onerror=closer_suppressed()>",
+    ].join("\n");
+    const source = safeWorkingPack();
+    const targetId = source.items[1]?.id as string;
+    const rendered = renderAllFaces({
+      ...source,
+      items: source.items.map((item) => (item.id === targetId ? { ...item, body: rawBody } : item)),
+    });
+    const json = JSON.parse(rendered.json.body) as JsonFace;
+    const target = json.items.find((item) => item.id === targetId);
+    const report = [{ item_id: targetId, marker: "active-html", count: 3 }] as const;
+
+    expect(target?.body).toBe(rawBody);
+    expect(target?.neutralized).toEqual([{ marker: "active-html", count: 3 }]);
+    expect(rendered.md.neutralized).toEqual(report);
+    expect(rendered.json.neutralized).toEqual(report);
+    expect(rendered["html-fragment"].neutralized).toEqual(report);
+    expect(rendered.md.body).toContain("<img/onerror=comment_suppressed()>");
+    expect(rendered["html-fragment"].body).toContain("&lt;img/onerror=comment_suppressed()&gt;");
+    expect(rendered["html-fragment"].body).not.toContain("<img");
   });
 
   test("an empty omitted[] is still stated rather than dropped", () => {

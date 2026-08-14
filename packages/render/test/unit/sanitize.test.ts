@@ -1,6 +1,7 @@
 import { describe, expect, test } from "bun:test";
 
 import {
+  activeHtmlScanDiagnostics,
   escapeHtml,
   fenceFor,
   isSafeHeaderValue,
@@ -9,8 +10,67 @@ import {
 } from "../../src/sanitize.ts";
 import { FORGED } from "../_support/fixtures.ts";
 
-/** The exact guarantee: no live `<!-- asimp` survives in untrusted text. */
-const LIVE_CONTROL_COMMENT = /(?<!\\)<!--\s*asimp/i;
+/** Historical detector retained only to prove the slash-separator regression. */
+const OLD_WHITESPACE_ONLY_HANDLER =
+  /<\s*[A-Za-z][A-Za-z0-9:-]*\b[^<>]*\s+on[a-z][A-Za-z0-9:_-]*\s*=/i;
+
+/**
+ * Deliberately independent semantic oracle. It parses raw HTML-comment
+ * candidates regardless of their prefix, then canonicalizes the reserved
+ * namespace. In particular, it never borrows the sanitizer's matcher or the
+ * old "not preceded by a backslash" rule.
+ */
+function semanticControlComments(text: string): string[] {
+  const matches: string[] = [];
+  let searchFrom = 0;
+
+  while (true) {
+    const open = text.indexOf("<!--", searchFrom);
+    if (open === -1) return matches;
+    const standardClose = text.indexOf("-->", open + 4);
+    const parseErrorClose = text.indexOf("--!>", open + 4);
+    const close =
+      standardClose === -1
+        ? parseErrorClose
+        : parseErrorClose === -1
+          ? standardClose
+          : Math.min(standardClose, parseErrorClose);
+    const comment = text.slice(open + 4, close === -1 ? text.length : close);
+    const canonical = comment
+      .trimStart()
+      .normalize("NFKD")
+      .replace(/[\p{M}\p{Cf}]/gu, "")
+      .normalize("NFKC")
+      .toLowerCase();
+    if (canonical === "asimp" || canonical.startsWith("asimp:") || /^asimp\s/u.test(canonical)) {
+      matches.push(comment);
+    }
+    searchFrom = open + 4;
+  }
+}
+
+/**
+ * Separate raw-text oracle for the documented reserved quoted-key-colon
+ * grammar. A backslash before either quote is not a semantic exemption.
+ */
+const SEMANTIC_RESERVED_ENVELOPE_KEYS = new Set(["next_actions", "why_included"]);
+
+function semanticReservedEnvelopeKeys(text: string): string[] {
+  const matches: string[] = [];
+  let searchFrom = 0;
+
+  while (true) {
+    const open = text.indexOf('"', searchFrom);
+    if (open === -1) return matches;
+    const close = text.indexOf('"', open + 1);
+    if (close === -1) return matches;
+    const key = text.slice(open + 1, close);
+    let cursor = close + 1;
+    while (cursor < text.length && /\s/u.test(text[cursor] as string)) cursor += 1;
+    if (SEMANTIC_RESERVED_ENVELOPE_KEYS.has(key) && text[cursor] === ":") matches.push(key);
+    searchFrom = close + 1;
+  }
+}
 
 describe("neutralizeUntrustedBody", () => {
   test("leaves ordinary scientific prose byte-identical and reports nothing", () => {
@@ -23,9 +83,48 @@ describe("neutralizeUntrustedBody", () => {
 
   test("escapes a forged asimp control comment and records it", () => {
     const result = neutralizeUntrustedBody(`prefix\n${FORGED.itemHeader}\nsuffix`);
-    expect(LIVE_CONTROL_COMMENT.test(result.text)).toBe(false);
-    expect(result.text).toContain("\\<!-- asimp:item id=SYS-99");
+    expect(semanticControlComments(result.text)).toEqual([]);
+    expect(result.text).toContain("&lt;!-- asimp:item id=SYS-99");
     expect(result.findings).toEqual([{ marker: "asimp-control-comment", count: 1 }]);
+  });
+
+  test("neutralizes prefix, backslash, whitespace, case, and Unicode mutations without a rerender escape", () => {
+    const markers = [
+      ...Array.from(
+        { length: 9 },
+        (_, slashCount) => `${"\\".repeat(slashCount)}<!-- asimp:item id=SYS-${slashCount} -->`,
+      ),
+      "ordinary line prefix <!--\tASIMP:item id=CASE -->",
+      "math prefix \\alpha = 1; <!--\u00a0aSiMp\uff1aitem id=SPACE -->",
+      "unicode prefix \\<!--\u200bＡＳＩＭＰ\u200d：item id=FULLWIDTH -->",
+      "combining prefix <!-- a\u034fs\u0307imp:item id=MARKS -->",
+      "interior ZWJ <!-- a\u200dsimp:item id=ZWJ-A -->",
+      "interior ZWJ <!-- as\u200dimp:item id=ZWJ-AS -->",
+      "interior BOM <!-- asi\ufeffmp:item id=BOM-ASI -->",
+      "interior word joiner <!-- asim\u2060p:item id=WJ-ASIM -->",
+      "edge BOM <!-- \ufeffasimp\u200d:item id=EDGE-CF -->",
+      "combining interior <!-- a\u0301simp:item id=COMBINING-A -->",
+      "fieldless bare <!--asimp-->",
+      "fieldless prefixed \\<!--asimp-->",
+      "fieldless case <!--aSiMp-->",
+      "fieldless fullwidth <!--ＡＳＩＭＰ-->",
+      "fieldless every-letter format <!--a\u200ds\u200di\u200dm\u200dp-->",
+      "fieldless parse-error closer <!--asimp--!>",
+      "fieldless parse-error fullwidth <!--ＡＳＩＭＰ--!>",
+      "fieldless parse-error astral <!--\u{1d400}\u{1d412}\u{1d408}\u{1d40c}\u{1d40f}--!>",
+    ];
+
+    for (const marker of markers) {
+      expect(semanticControlComments(marker)).toHaveLength(1);
+      const once = neutralizeUntrustedBody(marker);
+      expect(semanticControlComments(once.text)).toEqual([]);
+      expect(once.text).toContain("&lt;!--");
+      expect(once.findings).toEqual([{ marker: "asimp-control-comment", count: 1 }]);
+
+      const twice = neutralizeUntrustedBody(once.text);
+      expect(twice.text).toBe(once.text);
+      expect(twice.findings).toEqual([]);
+    }
   });
 
   test("counts every forged control comment in one body", () => {
@@ -33,18 +132,112 @@ describe("neutralizeUntrustedBody", () => {
     expect(result.findings).toEqual([{ marker: "asimp-control-comment", count: 2 }]);
   });
 
+  test("an independent oracle finds a parse-error-closed control opener nested after ordinary data", () => {
+    const body = "outer <!--ordinary nested <!--ＡＳＩＭＰ--!>";
+
+    expect(semanticControlComments(body)).toHaveLength(1);
+    expect(neutralizeUntrustedBody(body)).toEqual({
+      text: "outer <!--ordinary nested &lt;!--ＡＳＩＭＰ--!>",
+      findings: [{ marker: "asimp-control-comment", count: 1 }],
+    });
+  });
+
   test("does not touch an ordinary HTML comment that is not addressed to us", () => {
-    const body = "<!-- a note to future readers -->";
+    const body = "\\alpha + \\beta = 1; \\\\<!-- a note to future readers -->; <!--ordinary-->";
     const result = neutralizeUntrustedBody(body);
     expect(result.text).toBe(body);
     expect(result.findings).toEqual([]);
   });
 
-  test("breaks a forged JSON envelope key so no scanner reads it as one", () => {
+  test("rejects a non-prefix control-comment candidate before later comment data can matter", () => {
+    const bodies = [
+      "<!--x asimp:item id=NOT-A-HEADER -->",
+      "<!--asix asimp:item id=NOT-A-HEADER -->",
+      "<!--asimpersonation: not site control furniture -->",
+    ];
+
+    for (const body of bodies) {
+      expect(neutralizeUntrustedBody(body)).toEqual({ text: body, findings: [] });
+    }
+  });
+
+  test("scales linearly across repeated unterminated non-prefix openers", () => {
+    const smallRejected = "<!--x".repeat(1_024);
+    const largeRejected = "<!--x".repeat(2_048);
+    const terminatedControls = "<!--asimp-->".repeat(1_024);
+
+    // Warm both paths before timing. Taking the fastest of several identical
+    // samples avoids treating a scheduler pause as classifier work.
+    neutralizeUntrustedBody(smallRejected);
+    neutralizeUntrustedBody(terminatedControls);
+    const fastestDurationMs = (body: string): number => {
+      let fastest = Number.POSITIVE_INFINITY;
+      for (let sample = 0; sample < 3; sample += 1) {
+        const started = performance.now();
+        neutralizeUntrustedBody(body);
+        fastest = Math.min(fastest, performance.now() - started);
+      }
+      return fastest;
+    };
+
+    expect(neutralizeUntrustedBody(smallRejected)).toEqual({ text: smallRejected, findings: [] });
+    expect(neutralizeUntrustedBody(largeRejected)).toEqual({ text: largeRejected, findings: [] });
+    expect(neutralizeUntrustedBody(terminatedControls).findings).toEqual([
+      { marker: "asimp-control-comment", count: 1_024 },
+    ]);
+
+    const smallMs = fastestDurationMs(smallRejected);
+    const largeMs = fastestDurationMs(largeRejected);
+    const terminatedMs = fastestDurationMs(terminatedControls);
+
+    // Doubling the rejected corpus must remain near-linear. The terminated
+    // control corpus does the same number of literal-opener searches, so it
+    // guards against a future suffix rescan hidden only on the rejection path.
+    expect(largeMs).toBeLessThan(smallMs * 3);
+    expect(largeMs).toBeLessThan(terminatedMs * 4 + 10);
+  });
+
+  test("makes a forged JSON envelope key inert so no scanner reads it as one", () => {
     const result = neutralizeUntrustedBody(FORGED.nextActions);
-    expect(result.text).not.toContain('"next_actions":');
-    expect(result.text).toContain('\\"next_actions\\":');
+    expect(semanticReservedEnvelopeKeys(result.text)).toEqual([]);
+    expect(result.text).toContain("&quot;next_actions&quot;:");
     expect(result.findings).toEqual([{ marker: "envelope-key-forgery", count: 1 }]);
+  });
+
+  test("neutralizes only server-authored quoted-key-colon mutations across prefix and whitespace", () => {
+    const markers = [
+      ...Array.from(
+        { length: 9 },
+        (_, slashCount) => `${"\\".repeat(slashCount)}"next_actions"${" ".repeat(slashCount)}:`,
+      ),
+      'prefix \\"why_included"\t:',
+      'scientific prefix \\\\"why_included"\u00a0:',
+    ];
+
+    for (const marker of markers) {
+      expect(semanticReservedEnvelopeKeys(marker)).toHaveLength(1);
+      const once = neutralizeUntrustedBody(marker);
+      expect(semanticReservedEnvelopeKeys(once.text)).toEqual([]);
+      expect(once.text).toContain("&quot;");
+      expect(once.findings).toEqual([{ marker: "envelope-key-forgery", count: 1 }]);
+
+      const twice = neutralizeUntrustedBody(once.text);
+      expect(twice.text).toBe(once.text);
+      expect(twice.findings).toEqual([]);
+    }
+
+    const ordinaryProse = "A next_actions discussion is not an envelope key.";
+    const caseVariant = '"NEXT_ACTIONS": is a quoted label, not the reserved lower-case key.';
+    const ordinaryApiJson =
+      '{"items":[],"scope":"ledger","omitted":[],"degraded":[],"preamble":"plain data","untrusted":true}';
+    const escapeSpelling = String.raw`"next_action\u0073": []`;
+    expect(neutralizeUntrustedBody(ordinaryProse)).toEqual({ text: ordinaryProse, findings: [] });
+    expect(neutralizeUntrustedBody(caseVariant)).toEqual({ text: caseVariant, findings: [] });
+    expect(neutralizeUntrustedBody(ordinaryApiJson)).toEqual({
+      text: ordinaryApiJson,
+      findings: [],
+    });
+    expect(neutralizeUntrustedBody(escapeSpelling)).toEqual({ text: escapeSpelling, findings: [] });
   });
 
   test("leaves prose that merely mentions an envelope key alone", () => {
@@ -59,6 +252,159 @@ describe("neutralizeUntrustedBody", () => {
     const result = neutralizeUntrustedBody(body);
     expect(result.text).toBe(body);
     expect(result.findings).toEqual([{ marker: "active-html", count: 3 }]);
+  });
+
+  test("limits javascript URL findings to URL-bearing attributes and Markdown links", () => {
+    const inert = [
+      '<a title="javascript: documentary citation">source</a>',
+      '<img alt="javascript: illustrative prose">',
+      '<p data-note="javascript: archival label">text</p>',
+    ].join("\n");
+    expect(neutralizeUntrustedBody(inert)).toEqual({ text: inert, findings: [] });
+
+    const controls = [
+      '<a href="javascript:steal()">click</a>',
+      "<img src=javascript:steal()>",
+      '<button formaction="javascript:steal()">submit</button>',
+      "[Markdown link](javascript:steal())",
+    ].join("\n");
+    expect(neutralizeUntrustedBody(controls)).toEqual({
+      text: controls,
+      findings: [{ marker: "active-html", count: 4 }],
+    });
+  });
+
+  test("detects slash-separated handlers that the old whitespace-only arm misses", () => {
+    const controls = ["<svg/onload=steal(1)>", "<IMG/ONERROR =steal(2)>", "<svg /onload=steal(3)>"];
+
+    for (const body of controls) {
+      expect(OLD_WHITESPACE_ONLY_HANDLER.test(body)).toBe(false);
+      expect(neutralizeUntrustedBody(body)).toEqual({
+        text: body,
+        findings: [{ marker: "active-html", count: 1 }],
+      });
+    }
+  });
+
+  test("recognizes tokenizer separators, case, and canonical Unicode handler forms", () => {
+    const controls = [
+      "<svg/onload=steal(1)>",
+      "<IMG/ONERROR =steal(2)>",
+      "<svg /onload=steal(3)>",
+      "<svg/ onload=steal(4)>",
+      "<svg / / onload=steal(5)>",
+      "<svg\f/\tonload =steal(6)>",
+      "<ＳＶＧ／ＯＮＬＯＡＤ＝steal(7)＞",
+      "<s\u200dvg/o\u034fnload=steal(8)>",
+      '<img title="x"/onerror=steal(9)>',
+      "<img src=x /onerror=steal(10)>",
+      '<img title=">" onerror=steal(11)>',
+      '<img title="<!--" onerror=steal(12)>',
+      "<x.y/onload=steal(13)>",
+      "<x_y/onload=steal(14)>",
+      "<xé/onload=steal(15)>",
+    ];
+
+    for (const body of controls) {
+      expect(neutralizeUntrustedBody(body)).toEqual({
+        text: body,
+        findings: [{ marker: "active-html", count: 1 }],
+      });
+    }
+  });
+
+  test("canonical punctuation cannot suppress a raw-tokenizer handler", () => {
+    const controls = [
+      "＜！－－ <img/onerror=x> －－＞",
+      "＜!-- <img/onerror=x> --＞",
+      "<！－－ <img/onerror=x> －－>",
+      "<img title=＂foo onerror=x＂>",
+      "<img title=＇foo onerror=x＇>",
+      "<img title=x＞ onerror=y>",
+      "<img foo=bar＞ /onerror=y>",
+    ];
+
+    for (const body of controls) {
+      expect(neutralizeUntrustedBody(body).findings).toEqual([{ marker: "active-html", count: 1 }]);
+    }
+
+    const independentRawAndCanonical = "＜！－－ <img/onerror=a> －－＞ <ＳＶＧ／ＯＮＬＯＡＤ=b>";
+    expect(neutralizeUntrustedBody(independentRawAndCanonical).findings).toEqual([
+      { marker: "active-html", count: 2 },
+    ]);
+  });
+
+  test("deduplicates raw and canonical findings by original occurrence across a large body", () => {
+    const scientificLine =
+      "For m >= 2, \u03a3_i a_i < 2^m; onerror = a coefficient name, not an attribute.";
+    const body =
+      `${Array.from({ length: 4096 }, () => scientificLine).join("\n")}\n` +
+      "<svg/onload=record(raw)>\n<\uff33\uff36\uff27\uff0f\uff2f\uff2e\uff2c\uff2f\uff21\uff24=record(canonical)\uff1e>";
+
+    const result = neutralizeUntrustedBody(body);
+    expect(result.text).toBe(body);
+    // Each tag is seen by both interpretations, but source offsets identify
+    // the two original tags rather than reporting four derived matches.
+    expect(result.findings).toEqual([{ marker: "active-html", count: 2 }]);
+  });
+
+  test("keeps benign Unicode-normalization metadata proportional to findings, not source code points", () => {
+    // U+FDFA expands to many UTF-16 units under NFKD. This deliberately
+    // checks the allocation shape rather than a timing or RSS threshold that
+    // would depend on the host runtime.
+    // U+FDFA is three UTF-8 bytes, so this exercises the reported 300 KB
+    // attack shape without asserting a host-specific RSS ceiling.
+    const sourceCodePoints = 100_000;
+    const body = "\ufdfa".repeat(sourceCodePoints);
+    const diagnostics = activeHtmlScanDiagnostics(body);
+
+    expect(diagnostics.canonical.transformed_utf16_units).toBeGreaterThan(sourceCodePoints * 10);
+    expect(diagnostics.raw.finding_offsets).toBe(0);
+    expect(diagnostics.raw.source_mapping_entries).toBe(0);
+    expect(diagnostics.canonical.finding_offsets).toBe(0);
+    expect(diagnostics.canonical.source_mapping_entries).toBe(0);
+
+    const canonicalFinding = activeHtmlScanDiagnostics("<ＳＶＧ／ＯＮＬＯＡＤ=record()＞");
+    expect(canonicalFinding.canonical.finding_offsets).toBe(1);
+    expect(canonicalFinding.canonical.source_mapping_entries).toBe(1);
+  });
+
+  test("does not mistake prose, math, comments, tag names, or attribute values for handlers", () => {
+    const controls = [
+      "one = 1; done = false; only = true; onerror = a variable, not markup.",
+      "svg/onload = a lemma, not markup",
+      "x < y/onload = z",
+      "<!-- <svg/onload=steal(1)> -->",
+      "<!-- <img/onerror=steal(2)>",
+      "<section>/<caption>/<onload=lemma>/<svgonload=lemma>/<custom-onload>",
+      '<img title="foo onerror=x">',
+      '<img alt="/onerror=prose">',
+      "<img src=https://example.test/onerror=x>",
+      // Chromium keeps the slash in an unquoted value; it does not begin an
+      // `onerror` attribute after `src=x`.
+      "<img src=x/onerror=x>",
+    ];
+
+    for (const body of controls) {
+      expect(neutralizeUntrustedBody(body)).toEqual({ text: body, findings: [] });
+    }
+
+    expect(neutralizeUntrustedBody('<img src=x onerror="record()">').findings).toEqual([
+      { marker: "active-html", count: 1 },
+    ]);
+  });
+
+  test("resumes scanning after every HTML comment closer the tokenizer accepts", () => {
+    const controls = [
+      "<!-- inert --><img/onerror=steal(1)>",
+      "<!-- inert --!><img/onerror=steal(2)>",
+      "<!--><img/onerror=steal(3)>",
+      "<!---><img/onerror=steal(4)>",
+    ];
+
+    for (const body of controls) {
+      expect(neutralizeUntrustedBody(body).findings).toEqual([{ marker: "active-html", count: 1 }]);
+    }
   });
 
   test("is idempotent: neutralizing twice equals neutralizing once", () => {
