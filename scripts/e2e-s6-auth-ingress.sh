@@ -227,6 +227,21 @@ stop_group() {
       [[ -z "$(group_members "${pgid}")" ]] && break
       sleep 0.25
     done
+    # SIGKILL is not refusable, so anything still here after the grace is a
+    # survivor this run failed to reap -- a wrangler or workerd holding a port
+    # and a D1 file into the next run. That has to fail the run on the NORMAL
+    # path, not only under S6_SELF_TEST: a leak that is reported only when the
+    # harness is testing itself is a leak that is never reported in practice,
+    # and "zero surviving processes" would be claimed on the strength of an
+    # assertion that never ran. Reporting survivors is also all this can
+    # honestly do: they have already ignored SIGKILL.
+    local survivors
+    survivors="$(group_members "${pgid}" | tr '\n' ' ')"
+    if [[ -n "${survivors// /}" ]]; then
+      fail_record "leaves_no_surviving_process_group_members" \
+        "pgid ${pgid} still has members after SIGKILL: ${survivors% }"
+      return 1
+    fi
   fi
 }
 
@@ -375,6 +390,39 @@ fi
 
 # ── lifecycle self-tests, opt-in ─────────────────────────────────────────────
 if [[ "${S6_SELF_TEST:-0}" == "1" ]]; then
+  # ── planted: stop_group must FAIL when members outlive SIGKILL ─────────────
+  #
+  # No real process can ignore SIGKILL, so the survivor branch cannot be reached
+  # with a live process tree -- which is exactly why it is the branch most
+  # likely to rot unnoticed. The probe and the signal are therefore stubbed
+  # inside a subshell: `group_members` reports a member forever, `kill` and
+  # `sleep` do nothing. `stop_group` must then return non-zero and name the
+  # survivors, rather than falling off the end reporting success.
+  #
+  # The stubs live in a subshell so nothing here can leak into the real run.
+  survivor_probe="$(
+    (
+      group_members() { printf '%s\n' 4242; }
+      group_is_ours() { return 0; }
+      kill() { return 0; }
+      sleep() { return 0; }
+      if stop_group 999999; then printf 'returned-success'; else printf 'returned-failure'; fi
+    ) 2>&1
+  )"
+  if [[ "${survivor_probe}" != *"returned-failure"* ]]; then
+    stop_worker
+    fail_record "stop_group_fails_when_members_survive_sigkill" \
+      "stop_group reported success with group members still present after SIGKILL"
+    exit 1
+  fi
+  if [[ "${survivor_probe}" != *"leaves_no_surviving_process_group_members"* ]]; then
+    stop_worker
+    fail_record "stop_group_names_the_surviving_members" \
+      "stop_group failed without emitting the survivor assertion"
+    exit 1
+  fi
+  emit "{\"suite\":\"s6-auth-ingress-local\",\"assertion\":\"stop_group_fails_when_members_survive_sigkill\",\"status\":\"pass\",\"detail\":\"survivors after SIGKILL are reported and fail the run on the normal path\",\"reproduce\":\"${REPRODUCE}\"}"
+
   # Planted failure: the same checker against a shifted clock must FAIL, which
   # proves the gate is capable of failing rather than structurally green.
   STALE_NOW=$((S6_NOW - 86400))
