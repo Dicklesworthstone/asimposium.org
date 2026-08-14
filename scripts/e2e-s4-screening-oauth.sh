@@ -15,9 +15,9 @@ if [[ "${1:-}" == "--self-test" ]]; then
   bun e2e/screening/s4-runner.ts self-test
   readonly self_test_status=$?
   set -e
-  bun test e2e/screening/s4-runner.test.ts
+  bun test e2e/screening/s4-runner.test.ts e2e/screening/s4-legitimate-only.test.ts
   if [[ "${self_test_status}" -eq 78 ]]; then
-    printf '%s\n' '{"suite":"s4-screening-oauth","status":"blocked","code":"PROTECTED_HARD_REJECT_BODIES_UNAVAILABLE","detail":"manifest validation passed; no FP/FN accuracy result was produced"}'
+    printf '%s\n' '{"suite":"s4-screening-oauth","status":"blocked","code":"PROTECTED_HARD_REJECT_BODIES_UNAVAILABLE","detail":"the available corpus half was measured and its false-positive rate reported under evidence_class fixture-not-model-evidence; the zero-false-negative half has no protected bodies to measure and no live provider answered, so this remains BLOCKED"}'
   fi
   exit "${self_test_status}"
 fi

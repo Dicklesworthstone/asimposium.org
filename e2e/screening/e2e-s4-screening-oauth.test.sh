@@ -27,6 +27,50 @@ case "${self_test_output}" in
     ;;
 esac
 
+# The measurable half must actually be measured: refusing the whole corpus
+# because half of it is unavailable discards evidence that costs nothing to get.
+case "${self_test_output}" in
+  *'"evaluated_count":150'* ) ;;
+  *)
+    printf '%s\n' 'expected the 150 available bodies to be screened and reported' >&2
+    exit 1
+    ;;
+esac
+
+case "${self_test_output}" in
+  *'"legitimate_false_positive_rate"'* ) ;;
+  *)
+    printf '%s\n' 'expected a measured false-positive rate for the available half' >&2
+    exit 1
+    ;;
+esac
+
+# ...and must never be mistaken for the half that was not measured, nor for a
+# model-derived number when a fixture answered.
+case "${self_test_output}" in
+  *'"hard_reject_false_negative_rate"'* ) ;;
+  *)
+    printf '%s\n' 'expected the false-negative metric to be named unmeasured' >&2
+    exit 1
+    ;;
+esac
+
+case "${self_test_output}" in
+  *'fixture-not-model-evidence'* ) ;;
+  *)
+    printf '%s\n' 'expected the fixture-derived run to declare its evidence class' >&2
+    exit 1
+    ;;
+esac
+
+case "${self_test_output}" in
+  *'"verdict":"pass"'* )
+    printf '%s\n' 'a partial run reported a passing verdict' >&2
+    exit 1
+    ;;
+  *) ;;
+esac
+
 set +e
 unset S4_STAGING_SCREENING_URL S4_STAGING_OAUTH_DRY_CHECK_URL S4_STAGING_BEARER_TOKEN
 blocked_output="$(bash "${SCRIPT_PATH}" 2>&1)"
