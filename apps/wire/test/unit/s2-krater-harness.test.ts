@@ -242,7 +242,12 @@ describe("S2 to S7 normalized cost receipt", () => {
     ).toThrow("S2_COST_RECEIPT_METRICS_INVALID");
     expect(existsSync(receiptPath)).toBe(false);
 
-    const idempotent = { ...FIRST_COST_WRITE, idempotent: true } as S2SettledWriteResult;
+    // This is deliberately outside the production type: the refusal test proves
+    // runtime validation rejects an idempotent result before writing evidence.
+    const idempotent = {
+      ...FIRST_COST_WRITE,
+      idempotent: true,
+    } as unknown as S2SettledWriteResult;
     expect(() =>
       writeS2CostMeasurementReceipt([idempotent], COST_PROVENANCE, { root, receiptPath }),
     ).toThrow("S2_COST_RECEIPT_METRICS_INVALID");
