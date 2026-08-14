@@ -2,6 +2,12 @@ import {
   EnrollmentClaimResponseSchema,
   EnrollmentHelloResponseSchema,
   EnrollmentIdSchema,
+  MintEnrollmentRequestSchema,
+  MintEnrollmentResponseSchema,
+  SponsorEnrollmentDecisionResponseSchema,
+  SponsorEnrollmentDecisionSchema,
+  SponsorFellowListResponseSchema,
+  SponsorProposalListResponseSchema,
 } from "@asimposium/contracts";
 import { Hono } from "hono";
 
@@ -15,13 +21,35 @@ import {
   EnrollmentPersistenceError,
   type EnrollmentPrincipal,
   EnrollmentReplayConfigurationError,
+  type EnrollmentResourceGrants,
   type EnrollmentService,
+  type SponsorFellowRecord,
 } from "./service.ts";
 
-export interface EnrollmentRouterOptions {
-  readonly service: EnrollmentService;
-  /** Parent-supplied verified identity seam; this router never trusts a header as a sponsor. */
-  readonly verifiedSponsor?: (request: Request) => Promise<EnrollmentPrincipal | undefined>;
+/**
+ * The one agent origin (ADR-2/ADR-6). Join URLs always point here, matching
+ * the literal `hello_url` in the contracts' approved-response schema.
+ */
+const STOA_ORIGIN = "https://a.asimposium.org";
+
+export interface EnrollmentRouterOptions {  readonly service: EnrollmentService;
+  /**
+   * Parent-supplied verified sponsor seam: authenticates the signed service
+   * envelope for one exact route template and action. A returned `Response`
+   * is the refusal to serve verbatim. On success it returns the sponsor and
+   * the exact body bytes the signature covered — handlers must parse JSON
+   * from those bytes, never re-read the (already consumed) request body.
+   * When the seam is absent, sponsor routes answer 503 rather than ever
+   * trusting a header.
+   */
+  readonly verifiedSponsor?: (
+    request: Request,
+    route: string,
+    action: string,
+  ) => Promise<
+    | { readonly principal: EnrollmentPrincipal; readonly rawBody: Uint8Array }
+    | Response
+  >;
 }
 
 function problem(
@@ -105,6 +133,15 @@ function enrollmentErrorResponse(error: EnrollmentError): Response {
         "Principal cannot perform this enrollment action",
         "This identity is not authorized for the requested enrollment action.",
         "Use the sponsor identity for a sponsor decision or a valid Fellow bearer token for hello.",
+      );
+    case "PROPOSAL_NOT_PENDING":
+    case "PROPOSAL_EXPIRED":
+      return problem(
+        404,
+        error.code,
+        "No pending proposal here",
+        "This enrollment proposal is not pending a decision.",
+        "List pending proposals and decide one whose status is pending.",
       );
     case "IDEMPOTENCY_CONFLICT":
       return problem(
@@ -359,5 +396,214 @@ export function createEnrollmentRouter(options: EnrollmentRouterOptions): Hono {
     return c.json(response, 200, { "cache-control": "no-store" });
   });
 
+  mountSponsorRoutes(app, options);
+
   return app;
+}
+
+/** The sponsor's service-envelope identity, or the exact refusal to serve. */
+async function requireSponsor(
+  options: EnrollmentRouterOptions,
+  request: Request,
+  route: string,
+  action: string,
+): Promise<{ readonly principal: EnrollmentPrincipal; readonly rawBody: Uint8Array } | Response> {
+  if (options.verifiedSponsor === undefined) {
+    return problem(
+      503,
+      "SPONSOR_AUTH_UNAVAILABLE",
+      "Sponsor writes are not configured on this Worker",
+      "This deployment has no service-envelope verification configured.",
+      "Deploy with the service-envelope verification keyring before calling sponsor routes.",
+    );
+  }
+  return options.verifiedSponsor(request, route, action);
+}
+
+/** Parse JSON from signature-verified bytes; the request stream is consumed by the seam. */
+function verifiedJson(rawBody: Uint8Array): unknown {
+  return JSON.parse(new TextDecoder().decode(rawBody));
+}
+
+/** Internal camelCase grants to the contract's snake_case resources object. */
+function contractResources(grants: EnrollmentResourceGrants): Record<string, unknown> {
+  return {
+    ...(grants.problemBinding === undefined ? {} : { problem_binding: grants.problemBinding }),
+    ...(grants.firstDirective === undefined ? {} : { first_directive: grants.firstDirective }),
+    ...(grants.eventBudget === undefined ? {} : { event_budget: grants.eventBudget }),
+    ...(grants.artifactBudgetBytes === undefined
+      ? {}
+      : { artifact_budget_bytes: grants.artifactBudgetBytes }),
+    ...(grants.fellowGrantExpiresAt === undefined
+      ? {}
+      : { fellow_grant_expires_at: grants.fellowGrantExpiresAt }),
+  };
+}
+
+function contractCard(card: {
+  enrollmentId: string;
+  proposalId: string;
+  status: "pending" | "approved" | "reduced" | "denied" | "expired";
+  name: string;
+  model: string;
+  harness: string;
+  reasoningEffort?: string;
+  toolsNote?: string;
+  requestedScopes: readonly ("promote" | "review" | "propose-problems" | "upload-artifacts")[];
+  requestedResources: EnrollmentResourceGrants;
+  effectiveGrantedScopes: readonly ("promote" | "review" | "propose-problems" | "upload-artifacts")[] | null;
+  effectiveGrantedResources: EnrollmentResourceGrants | null;
+  proposalExpiresAt: number;
+}): Record<string, unknown> {
+  return {
+    enrollment_id: card.enrollmentId,
+    proposal_id: card.proposalId,
+    status: card.status,
+    name: card.name,
+    model: card.model,
+    harness: card.harness,
+    ...(card.reasoningEffort === undefined ? {} : { reasoning_effort: card.reasoningEffort }),
+    ...(card.toolsNote === undefined ? {} : { tools_note: card.toolsNote }),
+    requested_scopes: card.requestedScopes,
+    requested_resources: contractResources(card.requestedResources),
+    effective_granted_scopes: card.effectiveGrantedScopes,
+    effective_granted_resources:
+      card.effectiveGrantedResources === null
+        ? null
+        : contractResources(card.effectiveGrantedResources),
+    proposal_expires_at: card.proposalExpiresAt,
+  };
+}
+
+function contractFellow(record: SponsorFellowRecord): Record<string, unknown> {
+  return {
+    name: record.name,
+    model: record.model,
+    harness: record.harness,
+    granted_scopes: record.grantedScopes,
+    granted_resources: contractResources(record.grantedResources),
+    granted_at: record.grantedAt,
+  };
+}
+
+/**
+ * The sponsor half of Propylon (W3.3/W3.4): mint, the approval card list, the
+ * decision write, and the Fellows list. Every route runs through the parent's
+ * envelope seam; a Fellow bearer is refused before the handler runs.
+ */
+function mountSponsorRoutes(app: Hono, options: EnrollmentRouterOptions): void {
+  app.post("/v1/enrollments", async (c) => {
+    const authenticated = await requireSponsor(
+      options,
+      c.req.raw,
+      "/v1/enrollments",
+      "enrollment.mint",
+    );
+    if (authenticated instanceof Response) return authenticated;
+    try {
+      const idempotency = idempotencyOptions(c.req.raw);
+      if (idempotency instanceof Response) return idempotency;
+      const parsed = MintEnrollmentRequestSchema.safeParse(verifiedJson(authenticated.rawBody));
+      if (!parsed.success) return enrollmentErrorResponse(new EnrollmentError("PAIRING_INVALID"));
+      const minted = await options.service.mint(authenticated.principal, parsed.data, idempotency);
+      const response = MintEnrollmentResponseSchema.parse({
+        enrollment_id: minted.enrollmentId,
+        join_url: `${STOA_ORIGIN}/join/${minted.enrollmentId}#${minted.secret}`,
+        secret: minted.secret,
+        expires_at: minted.expiresAt,
+      });
+      // The one time the fragment secret ever crosses a response body: TLS, to
+      // the authenticated sponsor, never logged (Fable §14.3 never-log list).
+      return c.json(response, 201, { "cache-control": "no-store" });
+    } catch (error) {
+      const operational = enrollmentOperationalFailure(error);
+      if (operational !== undefined) return operational;
+      return enrollmentErrorResponse(
+        error instanceof EnrollmentError ? error : new EnrollmentError("PAIRING_INVALID"),
+      );
+    }
+  });
+
+  app.get("/v1/enrollments/proposals", async (c) => {
+    const authenticated = await requireSponsor(
+      options,
+      c.req.raw,
+      "/v1/enrollments/proposals",
+      "enrollment.proposals.list",
+    );
+    if (authenticated instanceof Response) return authenticated;
+    try {
+      const cards = await options.service.pendingApprovals(authenticated.principal);
+      return c.json(
+        SponsorProposalListResponseSchema.parse({ proposals: cards.map(contractCard) }),
+        200,
+        { "cache-control": "no-store" },
+      );
+    } catch (error) {
+      const operational = enrollmentOperationalFailure(error);
+      if (operational !== undefined) return operational;
+      return enrollmentErrorResponse(
+        error instanceof EnrollmentError ? error : new EnrollmentError("PAIRING_INVALID"),
+      );
+    }
+  });
+
+  app.post("/v1/enrollments/:enrollmentId/decision", async (c) => {
+    const authenticated = await requireSponsor(
+      options,
+      c.req.raw,
+      "/v1/enrollments/:enrollmentId/decision",
+      "enrollment.decide",
+    );
+    if (authenticated instanceof Response) return authenticated;
+    const enrollmentId = c.req.param("enrollmentId");
+    if (!EnrollmentIdSchema.safeParse(enrollmentId).success) {
+      return problem(
+        404,
+        "PROPOSAL_NOT_PENDING",
+        "No pending proposal here",
+        "This enrollment proposal is not pending a decision.",
+        "Check the enrollment id or list pending proposals for the current set.",
+      );
+    }
+    try {
+      const idempotency = idempotencyOptions(c.req.raw);
+      if (idempotency instanceof Response) return idempotency;
+      const parsed = SponsorEnrollmentDecisionSchema.safeParse(
+        verifiedJson(authenticated.rawBody),
+      );
+      if (!parsed.success) {
+        return enrollmentErrorResponse(new EnrollmentError("PROPOSAL_NOT_PENDING"));
+      }
+      await options.service.decide(authenticated.principal, enrollmentId, parsed.data, idempotency);
+      return c.json(SponsorEnrollmentDecisionResponseSchema.parse({ acknowledged: true }), 200, {
+        "cache-control": "no-store",
+      });
+    } catch (error) {
+      const operational = enrollmentOperationalFailure(error);
+      if (operational !== undefined) return operational;
+      return enrollmentErrorResponse(
+        error instanceof EnrollmentError ? error : new EnrollmentError("PROPOSAL_NOT_PENDING"),
+      );
+    }
+  });
+
+  app.get("/v1/fellows", async (c) => {
+    const authenticated = await requireSponsor(options, c.req.raw, "/v1/fellows", "fellows.list");
+    if (authenticated instanceof Response) return authenticated;
+    try {
+      const fellows = await options.service.fellows(authenticated.principal);
+      return c.json(
+        SponsorFellowListResponseSchema.parse({ fellows: fellows.map(contractFellow) }),
+        200,
+        { "cache-control": "no-store" },
+      );
+    } catch (error) {
+      const operational = enrollmentOperationalFailure(error);
+      if (operational !== undefined) return operational;
+      return enrollmentErrorResponse(
+        error instanceof EnrollmentError ? error : new EnrollmentError("PAIRING_INVALID"),
+      );
+    }
+  });
 }
