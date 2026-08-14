@@ -30,7 +30,7 @@ const origin = "https://a.asimposium.invalid";
 const SPONSOR = "usr_01JXYZSPONSOR0000000000";
 
 interface Harness {
-  app: ReturnType<typeof createEnrollmentRouter>;
+  app: Hono;
   service: EnrollmentService;
   sign(
     body: string,
