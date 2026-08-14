@@ -12,7 +12,7 @@ readonly REPO_ROOT
 active_child_pid=''
 active_child_pgid=''
 active_child_identity=''
-active_normal_return_reaper_pid=''
+controlled_command_lifecycle_failed=0
 captured_runner_status=null
 captured_oauth_dry_check_test_status=null
 captured_runner_test_status=null
@@ -24,6 +24,10 @@ private_lifecycle_test_authorized=0
 
 readonly S4_PRIVATE_SELF_TEST_AUTHORITY='e2e/screening/e2e-s4-screening-oauth.test.sh'
 readonly S4_PRIVATE_SELF_TEST_CAPABILITY='s4-screening-lifecycle-v1'
+
+# These are set only after the private self-test contract is accepted. Clear
+# caller-provided lookalikes before any production invocation can launch Perl.
+unset S4_PRIVATE_LIFECYCLE_TEST_ACTIVE S4_PRIVATE_PRE_EXEC_RACE_DELAY
 
 # A non-interactive launcher can inherit SIGINT as ignored. Restore the default
 # disposition before installing the wrapper's explicit HUP/INT/TERM handlers.
@@ -43,11 +47,11 @@ json_quote() {
     case "${char}" in
       '"') escaped+='\"' ;;
       $'\\') escaped+=$'\\\\' ;;
-      $'\b') escaped+='\\b' ;;
-      $'\f') escaped+='\\f' ;;
-      $'\n') escaped+='\\n' ;;
-      $'\r') escaped+='\\r' ;;
-      $'\t') escaped+='\\t' ;;
+      $'\b') escaped+='\b' ;;
+      $'\f') escaped+='\f' ;;
+      $'\n') escaped+='\n' ;;
+      $'\r') escaped+='\r' ;;
+      $'\t') escaped+='\t' ;;
       *)
         if [[ "${char}" == [[:cntrl:]] ]]; then
           printf -v code '%d' "'${char}"
@@ -118,11 +122,29 @@ terminate_for_signal() {
   exit "${exit_code}"
 }
 
+terminate_for_reap_failure() {
+  local signal="$1"
+  local runner_status="$2"
+  local oauth_dry_check_test_status="$3"
+  local runner_test_status="$4"
+  local legitimate_only_test_status="$5"
+
+  emit_terminal_summary \
+    fail \
+    S4_ACTIVE_COMMAND_REAP_FAILED \
+    1 \
+    "received ${signal}, but the active command could not be terminated and reaped safely" \
+    "${runner_status}" \
+    "${oauth_dry_check_test_status}" \
+    "${runner_test_status}" \
+    "${legitimate_only_test_status}"
+  exit 1
+}
+
 clear_active_child_ownership() {
   active_child_pid=''
   active_child_pgid=''
   active_child_identity=''
-  active_normal_return_reaper_pid=''
 }
 
 # The process-group number is a routing address, not an identity. Retain the
@@ -187,40 +209,212 @@ wait_for_group_absence() {
   return 1
 }
 
-reap_group_after_leader_exit() {
-  local leader_pid="$1"
-  local pgid="$2"
+wait_for_child_termination() {
+  local child_pid="$1"
+  local status
+
+  # The supervisor lives in a dedicated setsid-created session, so this is an
+  # ordinary termination wait. A parent signal can interrupt it; returning at
+  # once lets run_controlled_command replay the still-deferred signal.
+  wait "${child_pid}"
+  status=$?
+  return "${status}"
+}
+
+reap_direct_child_after_kill() {
+  local child_pid="$1"
   local attempts state
 
-  # This process is a direct child of the wrapper, so its PID cannot be reused
-  # before the wrapper reaps it. Do nothing while its exact leader still exists.
-  # Once that leader is absent, a positive group-member observation is continuous
-  # ownership: the PGID cannot be reused until that original group is empty.
-  while kill -0 "${leader_pid}" 2>/dev/null; do
+  [[ "${child_pid}" =~ ^[1-9][0-9]*$ ]] || return 1
+  for ((attempts = 0; attempts < 10; attempts += 1)); do
+    # Do not wait on a merely live child: even after KILL, an uninterruptible
+    # process could otherwise make this cleanup path unbounded. A zombie is
+    # already dead, and wait is then only the immediate reaping step.
+    state="$(ps -o stat= -p "${child_pid}" 2>/dev/null)" || state=''
+    state="${state//[[:space:]]/}"
+    if [[ -z "${state}" ]]; then
+      wait_for_child_termination "${child_pid}" 2>/dev/null || true
+      return 0
+    fi
+    if [[ "${state}" == Z* ]]; then
+      wait_for_child_termination "${child_pid}" 2>/dev/null || true
+      return 0
+    fi
     sleep 0.01
   done
+  return 1
+}
+
+# Every post-spawn early return routes through here. Before CONT the stopped
+# direct child cannot have launched payload code; after publication the exact
+# live leader authorizes one group KILL. Once that leader is reaped, no numeric
+# group signal is safe: only a bounded positive-empty observation may finish.
+reap_failed_spawn() {
+  local child_pid="$1"
+  local pgid="${active_child_pgid:-}"
+
+  [[ "${child_pid}" =~ ^[1-9][0-9]*$ ]] || return 1
+  if active_group_identity_is_exact; then
+    if ! kill -KILL -- "-${active_child_pgid}" 2>/dev/null &&
+      kill -0 "${child_pid}" 2>/dev/null; then
+      return 1
+    fi
+  else
+    if ! kill -KILL "${child_pid}" 2>/dev/null && kill -0 "${child_pid}" 2>/dev/null; then
+      return 1
+    fi
+  fi
+  reap_direct_child_after_kill "${child_pid}" || return 1
+  if [[ "${pgid}" =~ ^[1-9][0-9]*$ ]]; then
+    wait_for_group_absence "${pgid}" || return 1
+  fi
+  # Private test seam: model the one remaining failure mode after the direct
+  # child was safely reaped but before ownership can be cleared. The caller
+  # must latch lifecycle failure even though no active PID remains available.
+  run_lifecycle_test_hook after-prepublication-reap || return 1
+  clear_active_child_ownership
+}
+
+# Every early post-spawn failure must be observable by the suite even when the
+# direct child was reaped before ownership was published. Otherwise a later
+# command could start after a cleanup result that was neither successful nor
+# safely attributable. Replay a deferred terminal signal only after latching
+# the state so the signal path also emits the explicit cleanup failure.
+return_after_failed_spawn() {
+  local child_pid="$1"
+
+  if ! reap_failed_spawn "${child_pid}"; then
+    controlled_command_lifecycle_failed=1
+  fi
+  replay_deferred_parent_signal
+  return 125
+}
+
+supervisor_identity_is_stopped() {
+  local identity="$1"
+  local pid state command observed
+
+  pid="${identity%%|*}"
+  [[ "${pid}" =~ ^[1-9][0-9]*$ ]] || return 1
+  observed="$(process_identity "${pid}")" || return 1
+  [[ "${observed}" == "${identity}" ]] || return 1
+  state="$(ps -o stat= -p "${pid}" 2>/dev/null)" || return 1
+  command="$(ps -ww -o command= -p "${pid}" 2>/dev/null)" || return 1
+  state="${state//[[:space:]]/}"
+  [[ "${state}" == T* ]] || return 1
+  [[ "${command}" == *'bash -c s4_controlled_command_supervisor "$@"'* ]]
+}
+
+# shellcheck disable=SC2329 # Exported into the dedicated supervisor Bash.
+group_has_live_member_other_than() {
+  local pgid="$1"
+  local excluded_pid="$2"
+
+  [[ "${pgid}" =~ ^[1-9][0-9]*$ && "${excluded_pid}" =~ ^[1-9][0-9]*$ ]] || return 2
+  # This helper must not inspect from the supervised process group: its own
+  # shell/ps descendants would otherwise look like payload survivors, while a
+  # broad ancestry exclusion can hide the real payload descendant. The helper
+  # first creates a fresh session, then runs portable ps from that session.
+  /usr/bin/perl -MPOSIX=setsid -e '
+    my ($wanted, $excluded) = @ARGV;
+    exit 2 unless defined($wanted) && defined($excluded) &&
+      $wanted =~ /\A[1-9][0-9]*\z/ && $excluded =~ /\A[1-9][0-9]*\z/;
+    setsid() == -1 and exit 2;
+    open(my $ps, q{-|}, q{ps}, q{-A}, q{-o}, q{pid=,pgid=,stat=}) or exit 2;
+    while (my $row = <$ps>) {
+      my ($pid, $member_pgid, $state) =
+        $row =~ /^\s*([0-9]+)\s+([0-9]+)\s+([^\s]+)\s*\z/;
+      exit 2 unless defined($pid) && defined($member_pgid) && defined($state);
+      next if $member_pgid != $wanted || $pid == $excluded || $state =~ /Z/;
+      close($ps);
+      exit 0;
+    }
+    close($ps) or exit 2;
+    exit 1;
+  ' "${pgid}" "${excluded_pid}"
+}
+
+# shellcheck disable=SC2329 # Invoked by the dedicated supervisor Bash.
+s4_controlled_command_supervisor() {
+  local terminal_signal_seen=0
+  local cleanup_group_signal_in_progress=0
+  local child
+  local status
+  local pgid
+  local attempts state
+
+  trap '[[ "${cleanup_group_signal_in_progress}" -eq 1 ]] || terminal_signal_seen=1' HUP INT TERM
+  # The outer wrapper created this supervisor with setsid. Its payload must
+  # remain in that private group, so monitor mode stays disabled before spawn.
+  # A stopped leader gives the outer wrapper a deterministic identity-pinning
+  # boundary; there is no timing grace period.
+  set +m
+  kill -STOP "${BASHPID}"
+  pgid="$(ps -o pgid= -p "${BASHPID}" 2>/dev/null)" || return 125
+  pgid="${pgid//[[:space:]]/}"
+  [[ "${pgid}" == "${BASHPID}" ]] || return 125
+
+  "$@" &
+  child=$!
+  wait "${child}"
+  status=$?
+  if [[ "${terminal_signal_seen}" -eq 1 ]]; then
+    # The outer wrapper normally owns prompt signal cleanup. If it disappears
+    # after forwarding the signal, however, this still-live session leader is
+    # the only continuously exact authority over its group. Give ordinary
+    # cleanup a short bounded grace, then terminate the entire group itself;
+    # KILL includes this supervisor, so an abandoned TERM-resistant payload
+    # cannot retain the test pipe or become an orphaned busy loop.
+    cleanup_group_signal_in_progress=1
+    for ((attempts = 0; attempts < 10; attempts += 1)); do
+      state=0
+      group_has_live_member_other_than "${pgid}" "${BASHPID}" || state=$?
+      [[ "${state}" -eq 1 ]] && return 125
+      sleep 0.01
+    done
+    kill -KILL -- "-${pgid}" 2>/dev/null || return 125
+    return 125
+  fi
+
+  # A leader's normal return does not prove that its background descendants
+  # returned. While this supervisor remains the exact group leader, a positive
+  # member observation keeps the PGID safe to signal. Do not preserve payload
+  # status until no live member other than this supervisor remains.
   state=0
-  group_liveness_state "${pgid}" || state=$?
-  [[ "${state}" -eq 1 ]] && return 0
-  [[ "${state}" -eq 0 ]] || return 1
-  kill -TERM -- "-${pgid}" 2>/dev/null || return 1
+  group_has_live_member_other_than "${pgid}" "${BASHPID}" || state=$?
+  [[ "${state}" -eq 1 ]] && return "${status}"
+  if [[ "${state}" -ne 0 ]]; then
+    # Inspection is inconclusive, so never claim a normal payload return. The
+    # outer pin still authorizes one bounded whole-group KILL.
+    kill -KILL -- "-${pgid}" 2>/dev/null || return 125
+    return 125
+  fi
+
+  cleanup_group_signal_in_progress=1
+  kill -TERM -- "-${pgid}" 2>/dev/null || return 125
 
   for ((attempts = 0; attempts < 10; attempts += 1)); do
     state=0
-    group_liveness_state "${pgid}" || state=$?
+    group_has_live_member_other_than "${pgid}" "${BASHPID}" || state=$?
     [[ "${state}" -eq 1 ]] && break
     sleep 0.01
   done
   if [[ "${state}" -ne 1 ]]; then
-    # The group is still positively live after TERM, so the same ownership
-    # argument authorizes bounded escalation even though its leader is gone.
-    group_liveness_state "${pgid}" || return 1
+    # The still-live leader pins the entire process group, so escalation cannot
+    # target a recycled numeric PGID. KILL also terminates this supervisor; the
+    # outer wrapper then positively verifies zero group members before it emits
+    # the typed runner failure.
+    group_has_live_member_other_than "${pgid}" "${BASHPID}" || {
+      kill -KILL -- "-${pgid}" 2>/dev/null || return 125
+      return 125
+    }
     kill -KILL -- "-${pgid}" 2>/dev/null || return 1
   fi
-  wait_for_group_absence "${pgid}" || return 1
-  # The payload returned, but it left a live member behind. The wrapper has
-  # cleaned it before proceeding, yet that command is still a typed failure.
-  return 76
+  # TERM removed every payload member. This still makes the command fail: its
+  # payload leader returned while a descendant remained. Use the generic
+  # controlled-command failure result because an ordinary payload may itself
+  # exit 76, so that numeric status cannot safely encode lifecycle provenance.
+  return 125
 }
 
 terminate_and_reap_active_child() {
@@ -231,14 +425,33 @@ terminate_and_reap_active_child() {
   [[ -n "${child_pid}" ]] || return 0
 
   # A leader that ignores terminal signals keeps the identity pin live through
-  # the grace period. If it is already gone, do not guess that a numeric PGID
-  # still belongs to us; retain ownership and fail the cleanup claim instead.
+  # the grace period. If its identity is stale, do not guess that a numeric
+  # PGID still belongs to us. Its still-unreaped direct PID is safe to KILL and
+  # reap, but no descendant group signal remains authorized afterward.
   if ! active_group_identity_is_exact; then
+    kill -KILL "${child_pid}" 2>/dev/null || true
+    reap_direct_child_after_kill "${child_pid}" || return 1
+    if [[ "${active_child_pgid}" =~ ^[1-9][0-9]*$ ]]; then
+      # The leader is gone. This is observation-only: a nonempty or unknown
+      # result is a cleanup failure, never authority for a later group signal.
+      wait_for_group_absence "${active_child_pgid}" || return 1
+    fi
+    clear_active_child_ownership
     return 1
   fi
-  kill -s "${signal}" -- "-${active_child_pgid}" 2>/dev/null || return 1
+  if ! kill -s "${signal}" -- "-${active_child_pgid}" 2>/dev/null; then
+    # A concurrently self-cleaning supervisor may have removed the exact
+    # leader between the identity check and this signal. Reap only the direct
+    # child and observe the old group; no leaderless numeric group signal is
+    # permitted on this path.
+    reap_direct_child_after_kill "${child_pid}" || return 1
+    wait_for_group_absence "${active_child_pgid}" || return 1
+    clear_active_child_ownership
+    return 0
+  fi
+  run_lifecycle_test_hook after-parent-signal-forwarded
 
-  for ((attempts = 0; attempts < 10; attempts += 1)); do
+  for ((attempts = 0; attempts < 20; attempts += 1)); do
     state=0
     group_liveness_state "${active_child_pgid}" || state=$?
     [[ "${state}" -eq 1 ]] && break
@@ -246,14 +459,21 @@ terminate_and_reap_active_child() {
   done
   if [[ "${state}" -ne 1 ]]; then
     # Escalation is another group signal, so it repeats the exact-identity gate.
-    active_group_identity_is_exact || return 1
-    kill -KILL -- "-${active_child_pgid}" 2>/dev/null || return 1
+    if active_group_identity_is_exact; then
+      kill -KILL -- "-${active_child_pgid}" 2>/dev/null || return 1
+    else
+      # The supervisor may have performed its bounded self-cleanup. Its leader
+      # is gone, so only a bounded positive-empty observation remains safe.
+      reap_direct_child_after_kill "${child_pid}" || return 1
+      wait_for_group_absence "${active_child_pgid}" || return 1
+      clear_active_child_ownership
+      return 0
+    fi
   fi
-  wait "${child_pid}" 2>/dev/null || true
+  reap_direct_child_after_kill "${child_pid}" || return 1
+  # The leader was just reaped. Do not turn a later live/unknown observation
+  # into another group signal: the numeric PGID could already be recycled.
   wait_for_group_absence "${active_child_pgid}" || return 1
-  if [[ -n "${active_normal_return_reaper_pid}" ]]; then
-    wait "${active_normal_return_reaper_pid}" 2>/dev/null || true
-  fi
   clear_active_child_ownership
 }
 
@@ -275,45 +495,73 @@ replay_deferred_parent_signal() {
 
 run_lifecycle_test_hook() {
   local boundary="$1"
-  local spawned_child_pid="${2:-}"
-  local attempts
 
-  [[ "${private_lifecycle_test_authorized}" -eq 1 ]] || return
+  [[ "${private_lifecycle_test_authorized}" -eq 1 ]] || return 0
 
   case "${S4_WRAPPER_TEST_LIFECYCLE_HOOK:-}" in
     '') return ;;
+    pre-exec-before-supervisor-stop)
+      # The private Perl launch delay is the probe. No signal is injected here:
+      # the ownership loop must refuse the setsid-complete Perl pre-exec state.
+      return
+      ;;
     after-spawn-before-ownership)
-      [[ "${boundary}" == after-spawn-before-ownership ]] || return
-      for ((attempts = 0; attempts < 10; attempts += 1)); do
-        if pgrep -P "${spawned_child_pid}" >/dev/null 2>&1; then
-          break
-        fi
-        sleep 0.01
-      done
-      if ! pgrep -P "${spawned_child_pid}" >/dev/null 2>&1; then
-        # Before ownership is published this is still our unreaped direct
-        # child. Do not manufacture a bare PGID signal in a test-only error
-        # path; the normal group path is available only after identity pinning.
-        kill -TERM "${spawned_child_pid}" 2>/dev/null || true
-        wait "${spawned_child_pid}" 2>/dev/null || true
-        printf '%s\n' 'S4 lifecycle test runner never created its descendant' >&2
-        return 125
-      fi
+      [[ "${boundary}" == after-spawn-before-ownership ]] || return 0
+      # The supervisor is deliberately stopped here, before it launches the
+      # payload. This exercises deferred pre-ownership signal delivery without
+      # relying on a race to observe a descendant.
       ;;
     after-wait-before-ownership-clear)
-      [[ "${boundary}" == after-wait-before-ownership-clear ]] || return
+      [[ "${boundary}" == after-wait-before-ownership-clear ]] || return 0
       ;;
     after-ownership-before-wait)
-      [[ "${boundary}" == after-ownership-before-wait ]] || return
+      [[ "${boundary}" == after-ownership-before-wait ]] || return 0
       # Test only: model a stale recorded leader identity. The signal handler
       # must then refuse the numeric process group instead of treating its
       # number as authority over a possibly recycled group.
       active_child_identity="${active_child_identity}:stale"
       ;;
-    *) return ;;
+    before-private-capture-publish-force-failure)
+      [[ "${boundary}" == before-private-capture-publish ]] || return 0
+      # Exercise the post-spawn control-relay failure without allowing a test
+      # caller to alter production behavior.
+      return 125
+      ;;
+    before-cont-identity-mismatch)
+      [[ "${boundary}" == before-cont ]] || return 0
+      active_child_identity="${active_child_identity}:stale"
+      return 0
+      ;;
+    before-cont-force-failure)
+      [[ "${boundary}" == before-cont ]] || return 0
+      return 125
+      ;;
+    prepublication-reaper-force-failure)
+      case "${boundary}" in
+        after-spawn-before-ownership) ;;
+        before-ownership-loop|after-prepublication-reap) return 125 ;;
+        *) return 0 ;;
+      esac
+      ;;
+    post-leader-group-nonempty-force-failure)
+      # The exact supervisor was already reaped at this boundary. This models
+      # a live/unknown post-leader group observation: it must become a typed
+      # lifecycle failure, never a leaderless numeric-PGID signal.
+      [[ "${boundary}" == after-leader-reap-before-group-absence ]] || return 0
+      return 125
+      ;;
+    after-parent-signal-forwarded-kill-wrapper)
+      case "${boundary}" in
+        during-wait) ;;
+        after-parent-signal-forwarded) kill -KILL "${BASHPID}" ;;
+        *) return 0 ;;
+      esac
+      ;;
+    *) return 0 ;;
   esac
 
   case "${S4_WRAPPER_TEST_SIGNAL:-}" in
+    '') return 0 ;;
     HUP) kill -HUP "${BASHPID}" ;;
     INT) kill -INT "${BASHPID}" ;;
     TERM) kill -TERM "${BASHPID}" ;;
@@ -344,7 +592,22 @@ handle_parent_signal() {
   # group, and the wrapper records the statuses captured before interruption.
   trap '' HUP INT TERM
   set +e
-  terminate_and_reap_active_child "${signal}"
+  if [[ "${controlled_command_lifecycle_failed}" -eq 1 ]]; then
+    terminate_for_reap_failure \
+      "${signal}" \
+      "${captured_runner_status}" \
+      "${captured_oauth_dry_check_test_status}" \
+      "${captured_runner_test_status}" \
+      "${captured_legitimate_only_test_status}"
+  fi
+  if ! terminate_and_reap_active_child "${signal}"; then
+    terminate_for_reap_failure \
+      "${signal}" \
+      "${captured_runner_status}" \
+      "${captured_oauth_dry_check_test_status}" \
+      "${captured_runner_test_status}" \
+      "${captured_legitimate_only_test_status}"
+  fi
   terminate_for_signal \
     "${signal}" \
     "${exit_code}" \
@@ -375,12 +638,25 @@ private_lifecycle_test_configuration() {
     ''|1) ;;
     *) return 2 ;;
   esac
+  if [[ "${S4_WRAPPER_TEST_CAPTURE_GROUPS:-}" == 1 ]]; then
+    [[ "${S4_CAPTURE_CONTROL_FD:-}" =~ ^[3-9][0-9]*$ ]] || return 2
+  fi
   if [[ "${S4_WRAPPER_TEST_CAPTURE_GROUPS:-}" == 1 &&
     -z "${S4_WRAPPER_TEST_LIFECYCLE_HOOK:-}${S4_WRAPPER_TEST_SIGNAL:-}" ]]; then
     return 0
   fi
   case "${S4_WRAPPER_TEST_LIFECYCLE_HOOK:-}" in
-    after-spawn-before-ownership|after-ownership-before-wait|during-wait|after-wait-before-ownership-clear) ;;
+    pre-exec-before-supervisor-stop|before-private-capture-publish-force-failure|before-cont-identity-mismatch|before-cont-force-failure|post-leader-group-nonempty-force-failure|json-quote-terminal-probe)
+      [[ -z "${S4_WRAPPER_TEST_SIGNAL:-}" ]] || return 2
+      return 0
+      ;;
+    prepublication-reaper-force-failure)
+      case "${S4_WRAPPER_TEST_SIGNAL:-}" in
+        ''|HUP|INT|TERM) return 0 ;;
+        *) return 2 ;;
+      esac
+      ;;
+    after-spawn-before-ownership|after-ownership-before-wait|during-wait|after-wait-before-ownership-clear|after-parent-signal-forwarded-kill-wrapper) ;;
     *) return 2 ;;
   esac
   case "${S4_WRAPPER_TEST_SIGNAL:-}" in
@@ -394,6 +670,7 @@ publish_private_capture_group() {
   local control_fd="${S4_CAPTURE_CONTROL_FD:-}"
 
   [[ "${private_lifecycle_test_authorized}" -eq 1 ]] || return 0
+  [[ "${S4_WRAPPER_TEST_CAPTURE_GROUPS:-}" == 1 ]] || return 0
   [[ -n "${control_fd}" ]] || return 0
   [[ "${control_fd}" =~ ^[3-9][0-9]*$ ]] || return 1
   [[ "${active_child_pgid}" =~ ^[1-9][0-9]*$ ]] || return 1
@@ -410,6 +687,22 @@ activate_private_lifecycle_test_if_authorized() {
       # In a command substitution, $$ remains the invoking shell's PID. The
       # lifecycle helper must target this wrapper process, not that caller.
       export S4_WRAPPER_TEST_WRAPPER_PID="${BASHPID}"
+      export S4_PRIVATE_LIFECYCLE_TEST_ACTIVE=1
+      if [[ "${S4_WRAPPER_TEST_LIFECYCLE_HOOK:-}" == json-quote-terminal-probe ]]; then
+        emit_terminal_summary \
+          fail \
+          S4_JSON_QUOTE_PROBE \
+          64 \
+          $'private JSON quote probe: " \\ \t \n \001' \
+          null \
+          null \
+          null \
+          null
+        return 64
+      fi
+      if [[ "${S4_WRAPPER_TEST_LIFECYCLE_HOOK:-}" == pre-exec-before-supervisor-stop ]]; then
+        export S4_PRIVATE_PRE_EXEC_RACE_DELAY=1
+      fi
       return 0
       ;;
     1) return 0 ;;
@@ -428,65 +721,69 @@ activate_private_lifecycle_test_if_authorized() {
   esac
 }
 
-s4_controlled_command_supervisor() {
-  local terminal_signal_seen=0
-  local child
-  local status
-
-  trap 'terminal_signal_seen=1' HUP INT TERM
-  "$@" &
-  child=$!
-  wait "${child}"
-  status=$?
-  if [[ "${terminal_signal_seen}" -eq 1 ]]; then
-    # The wrapper owns this process-group leader. Keep it alive after the
-    # payload leader has taken the signal, so any resistant descendant can be
-    # KILLed only through the identity pin that was proved at spawn.
-    while :; do sleep 1; done
-  fi
-  # Publish a live, identity-pinned group leader long enough for the parent to
-  # observe it even when a payload leader returns immediately after forking a
-  # background descendant. The parent then owns normal-return group cleanup.
-  sleep 0.20
-  return "${status}"
-}
-
 run_controlled_command() {
   local status
   local spawned_child_pid
   local spawned_child_identity
+  local previous_child_identity=''
   local attempts
 
-  # Non-interactive Bash otherwise keeps a background command in the wrapper's
-  # process group. Monitor mode gives each started check an isolated group that
-  # the parent-signal trap can terminate and reap as one unit.
+  # Monitor mode is not portable in a no-controlling-terminal shell: Darwin
+  # leaves a background function in the wrapper's group. Start a non-leader
+  # Perl child with setsid instead; the external Bash that inherits it becomes
+  # the supervisor and owns a private, identity-pinned process group.
   begin_parent_signal_deferral
-  set -m
-  # This small supervisor is the process-group leader. When a terminal signal
-  # reaches the group, it stays alive even if that signal lets its payload
-  # leader exit; the wrapper can then escalate a TERM-resistant descendant
-  # through the still-pinned group rather than a leaderless numeric PGID.
-  s4_controlled_command_supervisor "$@" &
+  set +m
+  export -f s4_controlled_command_supervisor group_has_live_member_other_than
+  # This supervisor stops before launching its payload. The parent can therefore
+  # publish an exact PID/PGID/start-time/command identity before the payload has
+  # any opportunity to return or fork a descendant.
+  /usr/bin/perl -MPOSIX=setsid -e '
+    setsid() == -1 and exit 125;
+    if (($ENV{S4_PRIVATE_LIFECYCLE_TEST_ACTIVE} // q{}) eq q{1} &&
+        ($ENV{S4_PRIVATE_PRE_EXEC_RACE_DELAY} // q{}) eq q{1}) {
+      select undef, undef, undef, 0.10;
+    }
+    exec @ARGV;
+    exit 125;
+  ' bash -c 's4_controlled_command_supervisor "$@"' s4-control-supervisor "$@" &
   spawned_child_pid=$!
-  run_lifecycle_test_hook after-spawn-before-ownership "${spawned_child_pid}"
-  for ((attempts = 0; attempts < 10; attempts += 1)); do
+  run_lifecycle_test_hook after-spawn-before-ownership
+  if ! run_lifecycle_test_hook before-ownership-loop; then
+    return_after_failed_spawn "${spawned_child_pid}"
+    return $?
+  fi
+  for ((attempts = 0; attempts < 30; attempts += 1)); do
     spawned_child_identity="$(process_identity "${spawned_child_pid}")" || spawned_child_identity=''
-    if [[ "${spawned_child_identity}" == "${spawned_child_pid}"'|'"${spawned_child_pid}"'|'* ]]; then
+    if [[ "${spawned_child_identity}" == "${spawned_child_pid}"'|'"${spawned_child_pid}"'|'* &&
+      "${spawned_child_identity}" == "${previous_child_identity}" ]] &&
+      supervisor_identity_is_stopped "${spawned_child_identity}"; then
       active_child_pid="${spawned_child_pid}"
       active_child_pgid="${spawned_child_pid}"
       active_child_identity="${spawned_child_identity}"
-      publish_private_capture_group || return 125
+      if ! run_lifecycle_test_hook before-private-capture-publish || ! publish_private_capture_group; then
+        return_after_failed_spawn "${spawned_child_pid}"
+        return $?
+      fi
       break
     fi
+    previous_child_identity="${spawned_child_identity}"
     sleep 0.01
   done
   if [[ -z "${active_child_identity}" ]]; then
     # The direct child has not been reaped, so this narrow direct signal cannot
     # be redirected to a recycled PID. There is no safe group-level fallback.
-    kill -TERM "${spawned_child_pid}" 2>/dev/null || true
-    wait "${spawned_child_pid}" 2>/dev/null || true
-    replay_deferred_parent_signal
-    return 125
+    # The child is deliberately stopped before payload launch; TERM would stay
+    # pending on that stopped process. Its still-unreaped direct PID is safe to
+    # KILL without a process-group fallback.
+    return_after_failed_spawn "${spawned_child_pid}"
+    return $?
+  fi
+  # The stopped process is still the exact direct child pinned above. Starting
+  # it only after ownership publication removes the former sleep-based race.
+  if ! run_lifecycle_test_hook before-cont || ! active_group_identity_is_exact || ! kill -CONT "${active_child_pid}" 2>/dev/null; then
+    return_after_failed_spawn "${spawned_child_pid}"
+    return $?
   fi
   replay_deferred_parent_signal
   run_lifecycle_test_hook after-ownership-before-wait
@@ -494,7 +791,7 @@ run_controlled_command() {
   # A terminal signal interrupts wait promptly; its trap records the signal,
   # then it is forwarded and reaped while ownership is still published.
   begin_parent_signal_deferral
-  wait "${active_child_pid}"
+  wait_for_child_termination "${active_child_pid}"
   status=$?
   if [[ -n "${pending_parent_signal}" ]]; then
     replay_deferred_parent_signal
@@ -503,15 +800,46 @@ run_controlled_command() {
   if [[ -n "${pending_parent_signal}" ]]; then
     replay_deferred_parent_signal
   fi
-  # A normal return from the leader is insufficient: a background descendant
-  # can retain stdout and keep the group live. Clearing ownership is allowed
-  # only after a bounded positive observation of zero non-zombie members.
-  if ! wait_for_group_absence "${active_child_pgid}"; then
-    terminate_live_group_after_normal_return || return 125
+  # The supervisor does not return a payload status until it found zero live
+  # payload members (or it self-KILLed its pinned group). Clear ownership only
+  # after independently proving that the entire group is now empty.
+  if ! run_lifecycle_test_hook after-leader-reap-before-group-absence ||
+    ! wait_for_group_absence "${active_child_pgid}"; then
+    # The exact leader was reaped by wait above. A later nonempty/unknown
+    # observation cannot authorize a numeric group signal, because that group
+    # may have emptied and had its number recycled. Leave ownership latched
+    # for the typed suite guard and never signal it leaderlessly.
+    controlled_command_lifecycle_failed=1
+    replay_deferred_parent_signal
+    return 125
   fi
   clear_active_child_ownership
   replay_deferred_parent_signal
   return "${status}"
+}
+
+fail_if_active_controlled_command_remains() {
+  local command_name="$1"
+  local detail
+
+  if [[ "${controlled_command_lifecycle_failed}" -ne 1 && -z "${active_child_pid}" ]]; then
+    return 0
+  fi
+  if [[ "${controlled_command_lifecycle_failed}" -eq 1 ]]; then
+    detail="the ${command_name} cleanup could not prove zero survivors; no later S4 checks were started"
+  else
+    detail="the ${command_name} leader returned while its identity-pinned process group remained live; no later S4 checks were started"
+  fi
+  emit_terminal_summary \
+    fail \
+    S4_ACTIVE_COMMAND_REAP_FAILED \
+    1 \
+    "${detail}" \
+    "${captured_runner_status}" \
+    "${captured_oauth_dry_check_test_status}" \
+    "${captured_runner_test_status}" \
+    "${captured_legitimate_only_test_status}"
+  exit 1
 }
 
 run_suite() {
@@ -530,6 +858,7 @@ run_suite() {
   captured_oauth_dry_check_test_status=null
   captured_runner_test_status=null
   captured_legitimate_only_test_status=null
+  controlled_command_lifecycle_failed=0
 
   # Capture every status before deciding the terminal state. This preserves
   # failure diagnostics from all focused checks while guaranteeing one summary.
@@ -537,19 +866,7 @@ run_suite() {
   run_controlled_command bun e2e/screening/s4-runner.ts "${runner_mode}"
   runner_status=$?
   captured_runner_status="${runner_status}"
-  if [[ -n "${active_child_pid}" ]]; then
-    set -e
-    emit_terminal_summary \
-      fail \
-      S4_ACTIVE_COMMAND_REAP_FAILED \
-      1 \
-      "the runner leader returned while its identity-pinned process group remained live; no later S4 checks were started" \
-      "${runner_status}" \
-      null \
-      null \
-      null
-    exit 1
-  fi
+  fail_if_active_controlled_command_remains runner
   if signal="$(signal_name_for_status "${runner_status}")"; then
     set -e
     terminate_for_signal "${signal}" "${runner_status}" "${runner_status}" null null null
@@ -557,6 +874,7 @@ run_suite() {
   run_controlled_command bun test e2e/screening/oauth-dry-check.test.ts
   oauth_dry_check_test_status=$?
   captured_oauth_dry_check_test_status="${oauth_dry_check_test_status}"
+  fail_if_active_controlled_command_remains oauth-dry-check-test
   if signal="$(signal_name_for_status "${oauth_dry_check_test_status}")"; then
     set -e
     terminate_for_signal \
@@ -570,6 +888,7 @@ run_suite() {
   run_controlled_command bun test e2e/screening/s4-runner.test.ts
   runner_test_status=$?
   captured_runner_test_status="${runner_test_status}"
+  fail_if_active_controlled_command_remains runner-focused-test
   if signal="$(signal_name_for_status "${runner_test_status}")"; then
     set -e
     terminate_for_signal \
@@ -583,6 +902,7 @@ run_suite() {
   run_controlled_command bun test e2e/screening/s4-legitimate-only.test.ts
   legitimate_only_test_status=$?
   captured_legitimate_only_test_status="${legitimate_only_test_status}"
+  fail_if_active_controlled_command_remains legitimate-only-test
   if signal="$(signal_name_for_status "${legitimate_only_test_status}")"; then
     set -e
     terminate_for_signal \

@@ -16,13 +16,16 @@ readonly S4_PRIVATE_TEST_CAPABILITY='s4-screening-lifecycle-v1'
 # Test-only lifecycle controls must never leak in from a caller's environment.
 # Individual cases pass the full private authority/capability explicitly.
 unset S4_WRAPPER_TEST_LIFECYCLE_HOOK S4_WRAPPER_TEST_SIGNAL \
-  S4_WRAPPER_TEST_AUTHORITY S4_WRAPPER_TEST_CAPABILITY S4_WRAPPER_TEST_WRAPPER_PID
+  S4_WRAPPER_TEST_AUTHORITY S4_WRAPPER_TEST_CAPABILITY \
+  S4_WRAPPER_TEST_CAPTURE_GROUPS S4_WRAPPER_TEST_WRAPPER_PID \
+  S4_CAPTURE_CONTROL_FD
 
 # A command substitution waits for every writer of its stdout pipe. A broken
 # wrapper can leave a descendant holding that pipe even after its leader exits,
 # so capture through a private pipe and bound the entire isolated test session.
-# This function prints only after its child session is reaped (or force-stopped),
-# which keeps the caller's command substitution bounded too.
+# This function prints only after its direct child is reaped or its bounded
+# direct-child teardown expires, which keeps the caller's command substitution
+# bounded too. It never signals a descendant process group by numeric PGID.
 run_bounded_capture() {
   local timeout_seconds="$1"
   shift
@@ -32,6 +35,7 @@ run_bounded_capture() {
   S4_CAPTURE_OUTPUT="$(S4_CAPTURE_TIMEOUT_SECONDS="${timeout_seconds}" /usr/bin/perl -e '
 use strict;
 use warnings;
+use Fcntl qw(F_SETFD);
 use IO::Select;
 use POSIX qw(setsid WNOHANG);
 use Time::HiRes qw(time);
@@ -39,109 +43,118 @@ use Time::HiRes qw(time);
 my $timeout = $ENV{S4_CAPTURE_TIMEOUT_SECONDS};
 exit 125 unless defined($timeout) && $timeout =~ /\A(?:[1-9][0-9]*)(?:\.[0-9]+)?\z/;
 pipe(my $reader, my $writer) or exit 125;
+pipe(my $control_reader, my $control_writer) or exit 125;
+defined(fcntl($control_writer, F_SETFD, 0)) or exit 125;
 my $pid = fork();
 exit 125 unless defined($pid);
 if ($pid == 0) {
   close($reader);
+  close($control_reader);
   setsid() or exit 125;
   open(STDOUT, q{>&}, $writer) or exit 125;
   open(STDERR, q{>&}, $writer) or exit 125;
   close($writer);
+  $ENV{S4_CAPTURE_CONTROL_FD} = fileno($control_writer);
   exec @ARGV;
   exit 125;
 }
 close($writer);
-my $selector = IO::Select->new($reader);
+close($control_writer);
+my $selector = IO::Select->new($reader, $control_reader);
 my $deadline = time() + $timeout;
 my $output = q{};
 my $child_status;
-my $closed = 0;
-my %owned_groups;
+my $output_closed = 0;
+my $control_closed = 0;
+my $control_buffer = q{};
+my %stream_kind = (
+  fileno($reader) => q{output},
+  fileno($control_reader) => q{control},
+);
+my %published_groups;
 
-# Darwin ps has no useful SID column on this host. Instead, snapshot the
-# portable pid/ppid/pgid/stat table. A group is remembered only while it has a
-# live member continuously rooted beneath this exact capture child; once empty,
-# its numeric PGID is discarded permanently and can never be signalled again.
-sub remember_owned_groups {
-  my $rows = qx{ps -A -o pid=,ppid=,pgid=,stat= 2>/dev/null};
-  return 0 if $? != 0 || $rows eq q{};
-  my (%parent, %group, %live, %group_live);
-  for my $row (split /\n/, $rows) {
-    my ($member, $parent, $pgid, $stat) =
-      $row =~ /^\s*([0-9]+)\s+([0-9]+)\s+([0-9]+)\s+([^\s]+)\s*\z/;
-    return 0 unless defined($member) && defined($parent) && defined($pgid) && defined($stat);
-    $parent{$member} = $parent;
-    $group{$member} = $pgid;
-    next if $stat =~ /Z/;
-    $live{$member} = 1;
-    $group_live{$pgid} = 1;
+sub remember_private_capture_group {
+  while ($control_buffer =~ s/\A([^\n]*)\n//) {
+    my $line = $1;
+    next unless $line =~ /\AS4_CAPTURE_GROUP ([1-9][0-9]*)\z/;
+    $published_groups{$1} = 1;
   }
-  for my $pgid (keys %owned_groups) {
-    delete $owned_groups{$pgid} unless $group_live{$pgid};
-  }
-  for my $member (keys %live) {
-    my $cursor = $member;
-    my %seen;
-    while (defined($cursor) && !$seen{$cursor}++) {
-      if ($cursor == $pid) {
-        $owned_groups{$group{$member}} = 1;
-        last;
-      }
-      last unless exists($parent{$cursor});
-      $cursor = $parent{$cursor};
-    }
-  }
-  return 1;
 }
 
-sub drain_ready_output {
+sub published_group_attestation {
+  return q{} unless keys %published_groups;
+  my $rows = qx{ps -A -o pid=,pgid=,stat= 2>/dev/null};
+  return join q{}, map { "S4_TEST_CAPTURE_GROUP_UNKNOWN $_\n" } sort { $a <=> $b } keys %published_groups
+    if $? != 0 || $rows eq q{};
+  my %live;
+  for my $row (split /\n/, $rows) {
+    my ($member, $pgid, $stat) =
+      $row =~ /^\s*([0-9]+)\s+([0-9]+)\s+([^\s]+)\s*\z/;
+    return join q{}, map { "S4_TEST_CAPTURE_GROUP_UNKNOWN $_\n" } sort { $a <=> $b } keys %published_groups
+      unless defined($member) && defined($pgid) && defined($stat);
+    $live{$pgid} = 1 if $stat !~ /Z/;
+  }
+  return join q{}, map {
+    $live{$_} ? "S4_TEST_CAPTURE_GROUP_LIVE $_\n" : "S4_TEST_CAPTURE_GROUP_ZERO $_\n"
+  } sort { $a <=> $b } keys %published_groups;
+}
+
+sub drain_ready_streams {
   my $until = shift;
-  while (time() < $until && !$closed) {
+  while (time() < $until && (!$output_closed || !$control_closed)) {
     my $remaining = $until - time();
     my @ready = $selector->can_read($remaining > 0.01 ? 0.01 : $remaining);
     for my $handle (@ready) {
+      my $handle_fd = fileno($handle);
+      my $kind = $stream_kind{$handle_fd} // q{};
       my $bytes = sysread($handle, my $chunk, 8192);
-      if (defined($bytes) && $bytes > 0) { $output .= $chunk; next; }
+      if (defined($bytes) && $bytes > 0) {
+        if ($kind eq q{output}) {
+          $output .= $chunk;
+        } elsif ($kind eq q{control}) {
+          $control_buffer .= $chunk;
+          remember_private_capture_group();
+        }
+        next;
+      }
       $selector->remove($handle);
+      delete $stream_kind{$handle_fd};
       close($handle);
-      $closed = 1;
+      $output_closed = 1 if $kind eq q{output};
+      $control_closed = 1 if $kind eq q{control};
     }
   }
 }
 
 while (time() < $deadline) {
-  remember_owned_groups();
   my $waited = waitpid($pid, WNOHANG);
   $child_status = $? if $waited == $pid;
-  drain_ready_output(time() + 0.01);
-  last if defined($child_status) && $closed;
+  drain_ready_streams(time() + 0.01);
+  last if defined($child_status) && $output_closed;
 }
-if (!defined($child_status) || !$closed) {
-  # Every target was observed as a live group rooted below our exact child.
-  # Never fall back to a session ID or a pipe-holder PID. A group that has ever
-  # been observed empty was dropped above, so an old numeric PGID is not reused.
-  remember_owned_groups();
-  for my $pgid (keys %owned_groups) {
-    kill q{KILL}, -$pgid;
+if (!defined($child_status) || !$output_closed) {
+  # The direct capture child remains safe to signal until this parent reaps
+  # it. Once reaped, do not infer ownership of any numeric descendant PGID:
+  # close the pipes, attest the published groups, and fail deterministically.
+  if (!defined($child_status)) {
+    kill q{KILL}, $pid;
   }
   my $teardown_deadline = time() + 0.20;
-  while (time() < $teardown_deadline) {
-    remember_owned_groups();
-    for my $pgid (keys %owned_groups) {
-      kill q{KILL}, -$pgid;
-    }
+  while (!defined($child_status) && time() < $teardown_deadline) {
     my $waited = waitpid($pid, WNOHANG);
     $child_status = $? if $waited == $pid;
-    drain_ready_output(time() + 0.01);
-    last if !keys(%owned_groups) && defined($child_status);
+    drain_ready_streams(time() + 0.01);
   }
   # A surviving pipe holder cannot extend teardown. Preserve only bytes already
   # ready, then close the private reader and return the timeout deterministically.
-  drain_ready_output(time() + 0.02);
-  close($reader) unless $closed;
+  drain_ready_streams(time() + 0.02);
+  close($reader) unless $output_closed;
+  close($control_reader) unless $control_closed;
+  print published_group_attestation();
   print $output;
   exit 124;
 }
+print published_group_attestation();
 print $output;
 exit (($child_status & 127) ? 128 + ($child_status & 127) : ($child_status >> 8));
 ' -- "$@")"
@@ -160,10 +173,17 @@ assert_terminal_summary() {
   local expected_oauth_dry_check_test_status="$7"
   local expected_runner_test_status="$8"
   local expected_legitimate_only_test_status="$9"
+  local expected_detail_provided=0
+  local expected_detail=''
   local marker='"record_type":"s4-terminal-summary"'
   local marker_count=0
   local remaining_output="${output}"
   local summary
+
+  if [[ "$#" -eq 10 ]]; then
+    expected_detail_provided=1
+    expected_detail="${10}"
+  fi
 
   while [[ "${remaining_output}" == *"${marker}"* ]]; do
     marker_count=$((marker_count + 1))
@@ -176,22 +196,80 @@ assert_terminal_summary() {
   fi
 
   summary="${output##*$'\n'}"
-  if ! "${BUN_PATH}" -e 'JSON.parse(process.argv[1]);' "${summary}" >/dev/null; then
-    printf '%s\n' "${case_name}: terminal summary is not valid JSON" >&2
-    exit 1
-  fi
-  if [[ "${summary}" != *'"record_type":"s4-terminal-summary"'* ||
-    "${summary}" != *"\"status\":\"${expected_status}\""* ||
-    "${summary}" != *"\"code\":\"${expected_code}\""* ||
-    "${summary}" != *"\"exit_code\":${expected_exit_code}"* ||
-    "${summary}" != *"\"runner_status\":${expected_runner_status}"* ||
-    "${summary}" != *"\"oauth_dry_check_test_status\":${expected_oauth_dry_check_test_status}"* ||
-    "${summary}" != *"\"runner_test_status\":${expected_runner_test_status}"* ||
-    "${summary}" != *"\"legitimate_only_test_status\":${expected_legitimate_only_test_status}"* ]]; then
-    printf '%s\n' "${case_name}: terminal summary did not preserve the captured statuses" >&2
+  if ! "${BUN_PATH}" -e '
+    const [summary, expectedStatus, expectedCode, expectedExitCode,
+      expectedRunnerStatus, expectedOauthStatus, expectedRunnerTestStatus,
+      expectedLegitimateStatus, expectedDetailProvided, expectedDetail] = process.argv.slice(1);
+    const expectedNumberOrNull = (value) => {
+      if (value === "null") return null;
+      if (!/^(?:0|[1-9][0-9]*)$/.test(value)) {
+        throw new Error(`invalid expected numeric-or-null value: ${value}`);
+      }
+      return Number(value);
+    };
+    const payload = JSON.parse(summary);
+    const expected = {
+      record_type: "s4-terminal-summary",
+      suite: "s4-screening-oauth",
+      status: expectedStatus,
+      code: expectedCode,
+      exit_code: expectedNumberOrNull(expectedExitCode),
+      runner_status: expectedNumberOrNull(expectedRunnerStatus),
+      oauth_dry_check_test_status: expectedNumberOrNull(expectedOauthStatus),
+      runner_test_status: expectedNumberOrNull(expectedRunnerTestStatus),
+      legitimate_only_test_status: expectedNumberOrNull(expectedLegitimateStatus),
+    };
+    if (expectedDetailProvided === "1") expected.detail = expectedDetail;
+    for (const [field, value] of Object.entries(expected)) {
+      if (payload[field] !== value) {
+        throw new Error(`${field}: expected ${JSON.stringify(value)}, got ${JSON.stringify(payload[field])}`);
+      }
+    }
+  ' "${summary}" "${expected_status}" "${expected_code}" "${expected_exit_code}" "${expected_runner_status}" "${expected_oauth_dry_check_test_status}" "${expected_runner_test_status}" "${expected_legitimate_only_test_status}" "${expected_detail_provided}" "${expected_detail}" >/dev/null 2>&1; then
+    printf '%s\n' "${case_name}: terminal summary did not exactly match its typed fields" >&2
     printf '%s\n' "${summary}" >&2
     exit 1
   fi
+}
+
+assert_published_groups_are_empty() {
+  local case_name="$1"
+  local output="$2"
+  local marker='S4_TEST_CAPTURE_GROUP_ZERO '
+  local marker_count=0
+  local remaining_output="${output}"
+
+  case "${output}" in
+    *S4_TEST_CAPTURE_GROUP_LIVE\ *|*S4_TEST_CAPTURE_GROUP_UNKNOWN\ *)
+      printf '%s\n' "${case_name}: capture could not prove every wrapper-published PGID was empty" >&2
+      exit 1
+      ;;
+    *) ;;
+  esac
+  while [[ "${remaining_output}" == *"${marker}"* ]]; do
+    marker_count=$((marker_count + 1))
+    remaining_output="${remaining_output#*"${marker}"}"
+  done
+  if [[ "${marker_count}" -eq 0 ]]; then
+    printf '%s\n' "${case_name}: no wrapper-published PGID was attested empty" >&2
+    exit 1
+  fi
+}
+
+assert_no_s4_fixture_survivors() {
+  local fixture_rows
+
+  fixture_rows="$(ps -A -o pid=,command= 2>/dev/null)" || {
+    printf '%s\n' 'post-suite survivor scan: ps inspection failed' >&2
+    exit 1
+  }
+  case "${fixture_rows}" in
+    *S4_TEST_SELF_EXPIRING_DESCENDANT*|*s4-control-supervisor*)
+      printf '%s\n' 'post-suite survivor scan: an S4 fixture or supervisor remained live' >&2
+      exit 1
+      ;;
+    *) ;;
+  esac
 }
 
 run_planted_status_case() (
@@ -337,10 +415,23 @@ run_private_lifecycle_environment_cases() (
   # A poisoned production environment must not gain test-hook authority. The
   # ordinary live gate stays an ordinary blocked live gate and never emits the
   # private fixture's readiness marker.
-  run_bounded_capture 5 \
+  # Keep the normal/live assertion focused on control inertness rather than
+  # the full runner's variable fixture runtime.
+  # shellcheck disable=SC2329 # Imported only by this normal/live invocation.
+  bun() {
+    case "${1:-}" in
+      e2e/screening/s4-runner.ts) return 78 ;;
+      test) return 0 ;;
+      *) return 125 ;;
+    esac
+  }
+  export -f bun
+  run_bounded_capture 4 \
     env \
     S4_WRAPPER_TEST_LIFECYCLE_HOOK=after-spawn-before-ownership \
     S4_WRAPPER_TEST_SIGNAL=TERM \
+    S4_WRAPPER_TEST_CAPTURE_GROUPS=1 \
+    S4_CAPTURE_CONTROL_FD=poisoned \
     "S4_WRAPPER_TEST_AUTHORITY=${S4_PRIVATE_TEST_AUTHORITY}" \
     "S4_WRAPPER_TEST_CAPABILITY=${S4_PRIVATE_TEST_CAPABILITY}" \
     bash "${SCRIPT_PATH}"
@@ -367,6 +458,27 @@ run_private_lifecycle_environment_cases() (
       ;;
     *) ;;
   esac
+
+  # Capture-group publication is itself a private capability. An authority and
+  # capability pair with a malformed relay descriptor is rejected before Bun.
+  set +e
+  output="$(S4_WRAPPER_TEST_CAPTURE_GROUPS=1 S4_CAPTURE_CONTROL_FD=poisoned S4_WRAPPER_TEST_AUTHORITY="${S4_PRIVATE_TEST_AUTHORITY}" S4_WRAPPER_TEST_CAPABILITY="${S4_PRIVATE_TEST_CAPABILITY}" bash "${SCRIPT_PATH}" --self-test 2>&1)"
+  status=$?
+  set -e
+  if [[ "${status}" -ne 64 ]]; then
+    printf '%s\n' "malformed private capture capability: expected 64, got ${status}" >&2
+    exit 1
+  fi
+  assert_terminal_summary \
+    'malformed private capture capability is rejected' \
+    "${output}" \
+    fail \
+    S4_PRIVATE_SELF_TEST_CONFIGURATION_INVALID \
+    64 \
+    null \
+    null \
+    null \
+    null
 
   # The self-test accepts test controls only as the exact, complete pair set by
   # this driver. Partial authority and an invalid hook both fail before Bun or
@@ -416,9 +528,241 @@ run_private_lifecycle_environment_cases() (
     null \
     null \
     null
+
+  # This private probe is the terminal serializer's only caller-controlled
+  # detail. It proves quotes, a backslash, whitespace controls, and U+0001 are
+  # emitted as valid JSON, while the exact authority remains required.
+  run_bounded_capture 2 \
+    env \
+    S4_WRAPPER_TEST_LIFECYCLE_HOOK=json-quote-terminal-probe \
+    "S4_WRAPPER_TEST_AUTHORITY=${S4_PRIVATE_TEST_AUTHORITY}" \
+    "S4_WRAPPER_TEST_CAPABILITY=${S4_PRIVATE_TEST_CAPABILITY}" \
+    bash "${SCRIPT_PATH}" --self-test
+  output="${S4_CAPTURE_OUTPUT}"
+  status="${S4_CAPTURE_STATUS}"
+  if [[ "${status}" -ne 64 ]]; then
+    printf '%s\n' "private JSON quote probe: expected 64, got ${status}" >&2
+    exit 1
+  fi
+  assert_terminal_summary \
+    'private JSON quote probe is valid and exact' \
+    "${output}" \
+    fail \
+    S4_JSON_QUOTE_PROBE \
+    64 \
+    null \
+    null \
+    null \
+    null \
+    $'private JSON quote probe: " \\ \t \n \001'
 )
 
-run_normal_success_group_case() (
+run_post_spawn_reap_case() (
+  local lifecycle_hook="$1"
+  local output
+  local status
+
+  # Each hook fails after the setsid child is stopped and the parent owns its
+  # exact direct PID. No payload is CONTed, so a timely return proves that the
+  # source KILLed and reaped that direct child on the failure branch.
+  # shellcheck disable=SC2329 # Imported and invoked by the child bash process.
+  bun() {
+    case "${1:-}" in
+      test) return 0 ;;
+      *) return 125 ;;
+    esac
+  }
+  export -f bun
+
+  run_bounded_capture 5 \
+    env \
+    "S4_WRAPPER_TEST_LIFECYCLE_HOOK=${lifecycle_hook}" \
+    S4_WRAPPER_TEST_CAPTURE_GROUPS=1 \
+    "S4_WRAPPER_TEST_AUTHORITY=${S4_PRIVATE_TEST_AUTHORITY}" \
+    "S4_WRAPPER_TEST_CAPABILITY=${S4_PRIVATE_TEST_CAPABILITY}" \
+    bash "${SCRIPT_PATH}" --self-test
+  output="${S4_CAPTURE_OUTPUT}"
+  status="${S4_CAPTURE_STATUS}"
+  if [[ "${status}" -ne 1 ]]; then
+    printf '%s\n' "${lifecycle_hook}: expected post-spawn reaped failure 1, got ${status}" >&2
+    exit 1
+  fi
+  assert_terminal_summary \
+    "${lifecycle_hook} reaps its stopped direct child" \
+    "${output}" \
+    fail \
+    S4_RUNNER_FAILED \
+    1 \
+    125 \
+    125 \
+    125 \
+    125
+  if [[ "${lifecycle_hook}" != before-private-capture-publish-force-failure ]]; then
+    assert_published_groups_are_empty "${lifecycle_hook}" "${output}"
+  fi
+)
+
+run_prepublication_reaper_failure_case() (
+  local signal_name="$1"
+  local output
+  local status
+  local expected_runner_status=125
+
+  # The private seam fails before ownership publication, then makes the
+  # direct-child reaper report failure after it has already reaped that child.
+  # The suite must latch the failure with active_child_pid empty. With a
+  # deferred signal, that signal must become the same cleanup failure instead
+  # of disappearing.
+  # shellcheck disable=SC2329 # Imported and invoked by the child bash process.
+  bun() {
+    printf '%s\n' 'unexpected Bun invocation after pre-publication reaper failure' >&2
+    return 125
+  }
+  export -f bun
+
+  if [[ -n "${signal_name}" ]]; then
+    expected_runner_status=null
+  fi
+  run_bounded_capture 2 \
+    env \
+    S4_WRAPPER_TEST_LIFECYCLE_HOOK=prepublication-reaper-force-failure \
+    "S4_WRAPPER_TEST_SIGNAL=${signal_name}" \
+    S4_WRAPPER_TEST_CAPTURE_GROUPS=1 \
+    "S4_WRAPPER_TEST_AUTHORITY=${S4_PRIVATE_TEST_AUTHORITY}" \
+    "S4_WRAPPER_TEST_CAPABILITY=${S4_PRIVATE_TEST_CAPABILITY}" \
+    bash "${SCRIPT_PATH}" --self-test
+  output="${S4_CAPTURE_OUTPUT}"
+  status="${S4_CAPTURE_STATUS}"
+  if [[ "${status}" -ne 1 ]]; then
+    printf '%s\n' "pre-publication reaper failure/${signal_name:-none}: expected typed failure 1, got ${status}" >&2
+    exit 1
+  fi
+  assert_terminal_summary \
+    "pre-publication reaper failure/${signal_name:-none}" \
+    "${output}" \
+    fail \
+    S4_ACTIVE_COMMAND_REAP_FAILED \
+    1 \
+    "${expected_runner_status}" \
+    null \
+    null \
+    null
+  case "${output}" in
+    *S4_TEST_CAPTURE_GROUP_*)
+      printf '%s\n' "pre-publication reaper failure/${signal_name:-none}: ownership was published unexpectedly" >&2
+      exit 1
+      ;;
+    *) ;;
+  esac
+  case "${output}" in
+    *'unexpected Bun invocation after pre-publication reaper failure'*)
+      printf '%s\n' "pre-publication reaper failure/${signal_name:-none}: later S4 command started" >&2
+      exit 1
+      ;;
+    *) ;;
+  esac
+)
+
+run_post_leader_group_observation_failure_case() (
+  local output
+  local status
+
+  # The private seam runs only after the exact supervisor was reaped. It
+  # simulates a live/unknown group result at that point. A typed lifecycle
+  # failure is required; the wrapper must not send a leaderless numeric-PGID
+  # TERM or KILL, and it must not start any later focused command.
+  # shellcheck disable=SC2329 # Imported and invoked by the child bash process.
+  bun() {
+    case "${1:-}" in
+      e2e/screening/s4-runner.ts) return 0 ;;
+      *)
+        printf '%s\n' 'unexpected Bun invocation after post-leader group observation failure' >&2
+        return 125
+        ;;
+    esac
+  }
+  export -f bun
+
+  run_bounded_capture 2 \
+    env \
+    S4_WRAPPER_TEST_LIFECYCLE_HOOK=post-leader-group-nonempty-force-failure \
+    S4_WRAPPER_TEST_CAPTURE_GROUPS=1 \
+    "S4_WRAPPER_TEST_AUTHORITY=${S4_PRIVATE_TEST_AUTHORITY}" \
+    "S4_WRAPPER_TEST_CAPABILITY=${S4_PRIVATE_TEST_CAPABILITY}" \
+    bash "${SCRIPT_PATH}" --self-test
+  output="${S4_CAPTURE_OUTPUT}"
+  status="${S4_CAPTURE_STATUS}"
+  if [[ "${status}" -ne 1 ]]; then
+    printf '%s\n' "post-leader group observation failure: expected typed failure 1, got ${status}" >&2
+    exit 1
+  fi
+  assert_terminal_summary \
+    'post-leader group observation failure has no leaderless group signal fallback' \
+    "${output}" \
+    fail \
+    S4_ACTIVE_COMMAND_REAP_FAILED \
+    1 \
+    125 \
+    null \
+    null \
+    null
+  assert_published_groups_are_empty 'post-leader group observation failure' "${output}"
+  case "${output}" in
+    *'unexpected Bun invocation after post-leader group observation failure'*)
+      printf '%s\n' 'post-leader group observation failure: later S4 command started' >&2
+      exit 1
+      ;;
+    *) ;;
+  esac
+)
+
+run_pre_exec_identity_race_case() (
+  local output
+  local status
+
+  # The private Perl launcher deliberately pauses after setsid and before exec.
+  # A PID==PGID-only loop would pin that Perl process, CONT it pointlessly, and
+  # leave the later supervisor STOPped forever. The source must wait for two
+  # stable stopped Bash-supervisor identities before publishing/CONTing it.
+  # Keep the payload itself trivial: this is exclusively a lifecycle probe. A
+  # four-second capture is a hard bound on a stopped-supervisor regression
+  # while leaving room for the four controlled-command handshakes.
+  # shellcheck disable=SC2329 # Imported and invoked by the child bash process.
+  bun() {
+    case "${1:-}" in
+      e2e/screening/s4-runner.ts) return 78 ;;
+      test) return 0 ;;
+      *) return 125 ;;
+    esac
+  }
+  export -f bun
+  run_bounded_capture 4 \
+    env \
+    S4_WRAPPER_TEST_LIFECYCLE_HOOK=pre-exec-before-supervisor-stop \
+    S4_WRAPPER_TEST_CAPTURE_GROUPS=1 \
+    "S4_WRAPPER_TEST_AUTHORITY=${S4_PRIVATE_TEST_AUTHORITY}" \
+    "S4_WRAPPER_TEST_CAPABILITY=${S4_PRIVATE_TEST_CAPABILITY}" \
+    bash "${SCRIPT_PATH}" --self-test
+  output="${S4_CAPTURE_OUTPUT}"
+  status="${S4_CAPTURE_STATUS}"
+  if [[ "${status}" -ne 78 ]]; then
+    printf '%s\n' "pre-exec supervisor identity race: expected self-test blocker 78, got ${status}" >&2
+    exit 1
+  fi
+  assert_terminal_summary \
+    'pre-exec race waits for the stopped Bash supervisor' \
+    "${output}" \
+    blocked \
+    PROTECTED_HARD_REJECT_BODIES_UNAVAILABLE \
+    78 \
+    78 \
+    0 \
+    0 \
+    0
+  assert_published_groups_are_empty 'pre-exec race' "${output}"
+)
+
+run_normal_leader_exit_descendant_case() (
   local output
   local status
   local descendant_pid
@@ -428,11 +772,23 @@ run_normal_success_group_case() (
     case "${1:-}" in
       e2e/screening/s4-runner.ts)
         # The payload leader returns without waiting. Its descendant ignores
-        # TERM, so a green wrapper result proves the normal-return group-reap
-        # path both finds the survivor and escalates it to KILL.
-        bash -c 'trap "" TERM; while :; do :; done' &
-        descendant=$!
-        printf 'S4_TEST_NORMAL_READY descendant=%s\n' "${descendant}"
+        # TERM. The payload leader returns immediately; the supervisor must
+        # retain and clean its owned group before any normal payload status can
+        # reach the wrapper.
+        /usr/bin/perl -e '
+          $| = 1;
+          my $child = fork();
+          exit 125 unless defined($child);
+          if ($child) {
+            print "S4_TEST_NORMAL_READY descendant=$child\n";
+            exit 0;
+          }
+          $0 = q{S4_TEST_SELF_EXPIRING_DESCENDANT};
+          $SIG{TERM} = q{IGNORE};
+          $SIG{ALRM} = sub { exit 0 };
+          alarm 3;
+          while (1) { }
+        '
         return 0
         ;;
       test) return 0 ;;
@@ -441,32 +797,107 @@ run_normal_success_group_case() (
   }
   export -f bun
 
-  run_bounded_capture 2 bash "${SCRIPT_PATH}" --self-test
+  run_bounded_capture 6 \
+    env \
+    S4_WRAPPER_TEST_CAPTURE_GROUPS=1 \
+    "S4_WRAPPER_TEST_AUTHORITY=${S4_PRIVATE_TEST_AUTHORITY}" \
+    "S4_WRAPPER_TEST_CAPABILITY=${S4_PRIVATE_TEST_CAPABILITY}" \
+    bash "${SCRIPT_PATH}" --self-test
   output="${S4_CAPTURE_OUTPUT}"
   status="${S4_CAPTURE_STATUS}"
-  if [[ "${status}" -ne 0 ]]; then
-    printf '%s\n' "normal successful group: expected exit 0, got ${status}" >&2
+  if [[ "${status}" -ne 1 ]]; then
+    printf '%s\n' "normal leader-exit group: expected typed failure 1, got ${status}" >&2
     exit 1
   fi
   if [[ ! "${output}" =~ S4_TEST_NORMAL_READY[[:space:]]descendant=([0-9]+) ]]; then
-    printf '%s\n' 'normal successful group: fixture never reported its descendant' >&2
+    printf '%s\n' 'normal leader-exit group: fixture never reported its descendant' >&2
     exit 1
   fi
   descendant_pid="${BASH_REMATCH[1]}"
   if kill -0 "${descendant_pid}" 2>/dev/null; then
-    printf '%s\n' 'normal successful group: descendant survived a green wrapper return' >&2
+    printf '%s\n' 'normal leader-exit group: TERM-resistant descendant survived cleanup' >&2
     exit 1
   fi
+  # The supervisor must KILL its own group in this TERM-resistant case. Its 137
+  # is intentionally a generic runner failure: a payload may also exit 137
+  # independently, so the terminal schema must not misattribute it.
   assert_terminal_summary \
-    'normal successful group has zero survivors' \
+    'normal leader exit with TERM-resistant descendant is typed and reaped' \
     "${output}" \
-    pass \
-    S4_SELF_TEST_GREEN \
-    0 \
-    0 \
+    fail \
+    S4_RUNNER_FAILED \
+    1 \
+    137 \
     0 \
     0 \
     0
+  assert_published_groups_are_empty 'normal leader exit with TERM-resistant descendant' "${output}"
+)
+
+run_normal_term_accepts_descendant_case() (
+  local output
+  local status
+  local descendant_pid
+
+  # A descendant that accepts TERM lets the supervisor remove the whole group
+  # without self-KILL. That remains a generic controlled-command failure (125),
+  # not a magic lifecycle status that could collide with a payload's exit 76.
+  # shellcheck disable=SC2329 # Imported and invoked by the child bash process.
+  bun() {
+    case "${1:-}" in
+      e2e/screening/s4-runner.ts)
+        /usr/bin/perl -e '
+          my $child = fork();
+          exit 125 unless defined($child);
+          if ($child) {
+            print "S4_TEST_TERM_ACCEPTS_READY descendant=$child\n";
+            exit 0;
+          }
+          $0 = q{S4_TEST_SELF_EXPIRING_DESCENDANT};
+          $SIG{ALRM} = sub { exit 0 };
+          alarm 3;
+          while (1) { sleep 1; }
+        '
+        return 0
+        ;;
+      test) return 0 ;;
+      *) return 125 ;;
+    esac
+  }
+  export -f bun
+
+  run_bounded_capture 6 \
+    env \
+    S4_WRAPPER_TEST_CAPTURE_GROUPS=1 \
+    "S4_WRAPPER_TEST_AUTHORITY=${S4_PRIVATE_TEST_AUTHORITY}" \
+    "S4_WRAPPER_TEST_CAPABILITY=${S4_PRIVATE_TEST_CAPABILITY}" \
+    bash "${SCRIPT_PATH}" --self-test
+  output="${S4_CAPTURE_OUTPUT}"
+  status="${S4_CAPTURE_STATUS}"
+  if [[ "${status}" -ne 1 ]]; then
+    printf '%s\n' "normal TERM-accepting descendant: expected typed failure 1, got ${status}" >&2
+    exit 1
+  fi
+  if [[ ! "${output}" =~ S4_TEST_TERM_ACCEPTS_READY[[:space:]]descendant=([0-9]+) ]]; then
+    printf '%s\n' 'normal TERM-accepting descendant: fixture never reported its descendant' >&2
+    exit 1
+  fi
+  descendant_pid="${BASH_REMATCH[1]}"
+  if kill -0 "${descendant_pid}" 2>/dev/null; then
+    printf '%s\n' 'normal TERM-accepting descendant survived cleanup' >&2
+    exit 1
+  fi
+  assert_terminal_summary \
+    'normal leader exit with TERM-accepting descendant is a generic controlled failure' \
+    "${output}" \
+    fail \
+    S4_RUNNER_FAILED \
+    1 \
+    125 \
+    0 \
+    0 \
+    0
+  assert_published_groups_are_empty 'normal leader exit with TERM-accepting descendant' "${output}"
 )
 
 run_stale_identity_case() (
@@ -479,7 +910,13 @@ run_stale_identity_case() (
   bun() {
     case "${1:-}" in
       e2e/screening/s4-runner.ts)
-        bash -c 'trap "" TERM; while :; do :; done' &
+        /usr/bin/perl -e '
+          $0 = q{S4_TEST_SELF_EXPIRING_DESCENDANT};
+          $SIG{TERM} = q{IGNORE};
+          $SIG{ALRM} = sub { exit 0 };
+          alarm 3;
+          while (1) { }
+        ' &
         descendant=$!
         printf 'S4_TEST_STALE_IDENTITY_READY descendant=%s\n' "${descendant}"
         wait "${descendant}"
@@ -491,22 +928,24 @@ run_stale_identity_case() (
   export -f bun
 
   # A corrupted recorded identity deliberately prevents a group signal. The
-  # bounded capture owns a private session and proves both that the refusal is
-  # bounded and that its test-only teardown leaves no survivor behind.
-  run_bounded_capture 1 \
+  # TERM-resistant fixture self-expires after three seconds, comfortably after
+  # wrapper cleanup should have succeeded but before this six-second capture
+  # deadline. Capture never signals its numeric descendant group.
+  run_bounded_capture 6 \
     env \
     S4_WRAPPER_TEST_LIFECYCLE_HOOK=after-ownership-before-wait \
     S4_WRAPPER_TEST_SIGNAL=TERM \
+    S4_WRAPPER_TEST_CAPTURE_GROUPS=1 \
     "S4_WRAPPER_TEST_AUTHORITY=${S4_PRIVATE_TEST_AUTHORITY}" \
     "S4_WRAPPER_TEST_CAPABILITY=${S4_PRIVATE_TEST_CAPABILITY}" \
     bash "${SCRIPT_PATH}" --self-test
   output="${S4_CAPTURE_OUTPUT}"
   status="${S4_CAPTURE_STATUS}"
-  if [[ "${status}" -ne 124 ]]; then
-    printf '%s\n' "stale identity: expected bounded-capture 124 after refusing the cached PGID, got ${status}" >&2
+  if [[ "${status}" -ne 1 ]]; then
+    printf '%s\n' "stale identity: expected typed cleanup failure 1 after refusing the cached PGID, got ${status}" >&2
     exit 1
   fi
-  if ((SECONDS - started_at > 2)); then
+  if ((SECONDS - started_at > 7)); then
     printf '%s\n' 'stale identity: bounded capture exceeded its deadline' >&2
     exit 1
   fi
@@ -516,24 +955,122 @@ run_stale_identity_case() (
   fi
   descendant_pid="${BASH_REMATCH[1]}"
   if kill -0 "${descendant_pid}" 2>/dev/null; then
-    printf '%s\n' 'stale identity: bounded session teardown left a descendant alive' >&2
+    printf '%s\n' 'stale identity: self-expiring fixture still survived the bounded capture' >&2
     exit 1
   fi
   assert_terminal_summary \
-    'stale identity refuses a cached numeric PGID' \
+    'stale identity emits explicit reap failure without a numeric group fallback' \
     "${output}" \
     fail \
-    S4_WRAPPER_INTERRUPTED_TERM \
-    143 \
+    S4_ACTIVE_COMMAND_REAP_FAILED \
+    1 \
     null \
     null \
     null \
     null
+  assert_published_groups_are_empty 'stale identity bounded capture' "${output}"
+)
+
+run_outer_wrapper_loss_case() (
+  local output
+  local status
+  local descendant_pid
+  local started_at
+  local elapsed
+
+  # The outer wrapper is deliberately SIGKILLed only after it has forwarded
+  # TERM into the exact supervisor group. The supervisor must then complete
+  # its own bounded KILL while it remains that group's leader. The resistant
+  # child self-expires at three seconds as a test-only backstop, but successful
+  # supervisor teardown must close the capture well before that deadline.
+  # shellcheck disable=SC2329 # Imported and invoked by the child bash process.
+  bun() {
+    case "${1:-}" in
+      e2e/screening/s4-runner.ts)
+        /usr/bin/perl -e '
+          $| = 1;
+          my $child = fork();
+          exit 125 unless defined($child);
+          if ($child) {
+            my $watcher = fork();
+            exit 125 unless defined($watcher);
+            if (!$watcher) {
+              select undef, undef, undef, 0.05;
+              my $wrapper = $ENV{S4_WRAPPER_TEST_WRAPPER_PID} // q{};
+              kill q{TERM}, $wrapper if $wrapper =~ /\A[1-9][0-9]*\z/;
+              exit 0;
+            }
+            print "S4_TEST_OUTER_LOSS_READY descendant=$child\n";
+            waitpid($child, 0);
+            exit 0;
+          }
+          $0 = q{S4_TEST_SELF_EXPIRING_DESCENDANT};
+          $SIG{TERM} = q{IGNORE};
+          $SIG{ALRM} = sub { exit 0 };
+          alarm 3;
+          while (1) { }
+        '
+        ;;
+      test)
+        printf '%s\n' 'unexpected focused test after outer wrapper loss' >&2
+        return 125
+        ;;
+      *) return 125 ;;
+    esac
+  }
+  export -f bun
+
+  started_at="$(/usr/bin/perl -MTime::HiRes=time -e 'printf "%.6f", time')"
+  run_bounded_capture 6 \
+    env \
+    S4_WRAPPER_TEST_LIFECYCLE_HOOK=after-parent-signal-forwarded-kill-wrapper \
+    S4_WRAPPER_TEST_SIGNAL=TERM \
+    S4_WRAPPER_TEST_CAPTURE_GROUPS=1 \
+    "S4_WRAPPER_TEST_AUTHORITY=${S4_PRIVATE_TEST_AUTHORITY}" \
+    "S4_WRAPPER_TEST_CAPABILITY=${S4_PRIVATE_TEST_CAPABILITY}" \
+    bash "${SCRIPT_PATH}" --self-test
+  output="${S4_CAPTURE_OUTPUT}"
+  status="${S4_CAPTURE_STATUS}"
+  elapsed="$(/usr/bin/perl -MTime::HiRes=time -e 'printf "%.6f", time - $ARGV[0]' "${started_at}")"
+  if [[ "${status}" -ne 137 ]]; then
+    printf '%s\n' "outer wrapper loss: expected killed wrapper status 137, got ${status}" >&2
+    exit 1
+  fi
+  if ! /usr/bin/perl -e 'exit($ARGV[0] < 2.5 ? 0 : 1)' "${elapsed}"; then
+    printf '%s\n' "outer wrapper loss: supervisor teardown exceeded its pre-expiry bound (${elapsed}s)" >&2
+    exit 1
+  fi
+  if [[ ! "${output}" =~ S4_TEST_OUTER_LOSS_READY[[:space:]]descendant=([0-9]+) ]]; then
+    printf '%s\n' 'outer wrapper loss: fixture never reported its descendant' >&2
+    exit 1
+  fi
+  descendant_pid="${BASH_REMATCH[1]}"
+  if kill -0 "${descendant_pid}" 2>/dev/null; then
+    printf '%s\n' 'outer wrapper loss: supervisor left a TERM-resistant descendant alive' >&2
+    exit 1
+  fi
+  assert_published_groups_are_empty 'outer wrapper loss supervisor-owned teardown' "${output}"
+  case "${output}" in
+    *'unexpected focused test after outer wrapper loss'*)
+      printf '%s\n' 'outer wrapper loss: later S4 command started' >&2
+      exit 1
+      ;;
+    *) ;;
+  esac
 )
 
 run_private_lifecycle_environment_cases
-run_normal_success_group_case
+run_post_spawn_reap_case before-private-capture-publish-force-failure
+run_post_spawn_reap_case before-cont-identity-mismatch
+run_post_spawn_reap_case before-cont-force-failure
+run_prepublication_reaper_failure_case ''
+run_prepublication_reaper_failure_case TERM
+run_post_leader_group_observation_failure_case
+run_pre_exec_identity_race_case
+run_normal_leader_exit_descendant_case
+run_normal_term_accepts_descendant_case
 run_stale_identity_case
+run_outer_wrapper_loss_case
 
 set +e
 self_test_output="$(bash "${SCRIPT_PATH}" --self-test 2>&1)"
@@ -680,6 +1217,9 @@ run_parent_signal_case() (
   local signal_status="$3"
   local output
   local wrapper_status
+  local expected_status="${signal_status}"
+  local expected_code="S4_WRAPPER_INTERRUPTED_${signal_name}"
+  local expected_exit_code="${signal_status}"
   local descendant_pid
   local started_at=${SECONDS}
 
@@ -693,7 +1233,13 @@ run_parent_signal_case() (
         if [[ "${S4_WRAPPER_TEST_LIFECYCLE_HOOK}" == "after-wait-before-ownership-clear" ]]; then
           bash -c "sleep 0.05" &
         else
-          bash -c 'trap "" TERM; while :; do :; done' &
+          /usr/bin/perl -e '
+            $0 = q{S4_TEST_SELF_EXPIRING_DESCENDANT};
+            $SIG{TERM} = q{IGNORE};
+            $SIG{ALRM} = sub { exit 0 };
+            alarm 3;
+            while (1) { }
+          ' &
         fi
         descendant=$!
         printf 'S4_TEST_RUNNER_READY descendant=%s\n' "${descendant}"
@@ -717,10 +1263,11 @@ run_parent_signal_case() (
   # Command substitutions inherit SIGINT ignored from non-interactive Bash on
   # some launchers. Reset it in the execing process so this remains a real
   # process-level INT delivery test rather than a disposition-dependent fake.
-  run_bounded_capture 2 \
+  run_bounded_capture 6 \
     env \
     "S4_WRAPPER_TEST_LIFECYCLE_HOOK=${lifecycle_hook}" \
     "S4_WRAPPER_TEST_SIGNAL=${signal_name}" \
+    S4_WRAPPER_TEST_CAPTURE_GROUPS=1 \
     "S4_WRAPPER_TEST_AUTHORITY=${S4_PRIVATE_TEST_AUTHORITY}" \
     "S4_WRAPPER_TEST_CAPABILITY=${S4_PRIVATE_TEST_CAPABILITY}" \
     /usr/bin/perl -e '$SIG{INT} = "DEFAULT"; exec @ARGV' \
@@ -728,17 +1275,26 @@ run_parent_signal_case() (
   output="${S4_CAPTURE_OUTPUT}"
   wrapper_status="${S4_CAPTURE_STATUS}"
 
+  if [[ "${lifecycle_hook}" == after-wait-before-ownership-clear ]]; then
+    # The command leader was already reaped at this boundary. The wrapper has
+    # no exact group identity left, so it must report the cleanup refusal rather
+    # than fabricate a clean interrupted result.
+    expected_status=1
+    expected_code=S4_ACTIVE_COMMAND_REAP_FAILED
+    expected_exit_code=1
+  fi
+
   if [[ "${wrapper_status}" -eq 124 ]]; then
     printf '%s\n' "${lifecycle_hook}/${signal_name}: bounded capture exhausted its deadline" >&2
     exit 1
   fi
 
-  if [[ "${wrapper_status}" -ne "${signal_status}" ]]; then
-    printf '%s\n' "${lifecycle_hook}/${signal_name}: expected exit ${signal_status}, got ${wrapper_status}" >&2
+  if [[ "${wrapper_status}" -ne "${expected_status}" ]]; then
+    printf '%s\n' "${lifecycle_hook}/${signal_name}: expected exit ${expected_status}, got ${wrapper_status}" >&2
     exit 1
   fi
-  if ((SECONDS - started_at > 1)); then
-    printf '%s\n' "${lifecycle_hook}/${signal_name}: wrapper did not terminate promptly" >&2
+  if ((SECONDS - started_at > 7)); then
+    printf '%s\n' "${lifecycle_hook}/${signal_name}: wrapper exceeded the bounded signal-cleanup window" >&2
     exit 1
   fi
   if [[ ! "${output}" =~ S4_TEST_RUNNER_READY[[:space:]]descendant=([0-9]+) ]]; then
@@ -755,12 +1311,13 @@ run_parent_signal_case() (
     "${lifecycle_hook}/${signal_name} parent signal" \
     "${output}" \
     fail \
-    "S4_WRAPPER_INTERRUPTED_${signal_name}" \
-    "${signal_status}" \
+    "${expected_code}" \
+    "${expected_exit_code}" \
     null \
     null \
     null \
     null
+  assert_published_groups_are_empty "${lifecycle_hook}/${signal_name} parent signal" "${output}"
 
   case "${output}" in
     *'unexpected focused test after parent signal'*)
@@ -829,3 +1386,5 @@ assert_terminal_summary \
   null \
   null \
   null
+
+assert_no_s4_fixture_survivors
