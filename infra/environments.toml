@@ -30,12 +30,22 @@ publishable_role = "public-delivery"
 production_artifact_hostname = "artifacts.asimposium.org"
 # Migrations roll forward only; there are no down-migrations (see migrate.mjs).
 rollback_policy = "forward-only"
+# Every environment must bind exactly these names, no more and no fewer. The
+# Worker's code path is then identical everywhere (Fable §13.3).
+required_bindings = ["DB", "ARTIFACTS", "PUBLIC_ARTIFACTS", "HERALD_ROOMS"]
+
+# Which environment each Vercel deployment target calls. Preview deployments
+# must reach staging and must never reach production (Fable §13.3, ADR-2).
+[vercel]
+production_environment = "production"
+preview_environment = "staging"
 
 # ---------------------------------------------------------------------------
 # local — miniflare / wrangler local persistence. No account, no network.
 # ---------------------------------------------------------------------------
 [env.local]
 kind = "local"
+worker_origin = "http://127.0.0.1:8787"
 is_preview = false
 may_hold_production_keys = false
 destructive_operations_allowed = true
@@ -65,12 +75,15 @@ script_namespace = "asimposium-stoa-local"
 [env.local.keys]
 current_kid = "local-dev-1"
 previous_kid = ""
+service_envelope_current_kid = "local-svc-1"
+service_envelope_previous_kid = ""
 
 # ---------------------------------------------------------------------------
 # staging — the preview tier. Vercel previews point here. Synthetic data only.
 # ---------------------------------------------------------------------------
 [env.staging]
 kind = "remote"
+worker_origin = "https://a-staging.asimposium.org"
 is_preview = true
 may_hold_production_keys = false
 destructive_operations_allowed = true
@@ -100,12 +113,15 @@ script_namespace = "asimposium-stoa-staging"
 [env.staging.keys]
 current_kid = "staging-2026-08"
 previous_kid = "staging-2026-07"
+service_envelope_current_kid = "staging-svc-2026-08"
+service_envelope_previous_kid = "staging-svc-2026-07"
 
 # ---------------------------------------------------------------------------
 # production — the only environment that may claim the apex artifact hostname.
 # ---------------------------------------------------------------------------
 [env.production]
 kind = "remote"
+worker_origin = "https://a.asimposium.org"
 is_preview = false
 may_hold_production_keys = true
 destructive_operations_allowed = false
@@ -135,3 +151,5 @@ script_namespace = "asimposium-stoa-prod"
 [env.production.keys]
 current_kid = "prod-2026-08"
 previous_kid = "prod-2026-07"
+service_envelope_current_kid = "prod-svc-2026-08"
+service_envelope_previous_kid = "prod-svc-2026-07"

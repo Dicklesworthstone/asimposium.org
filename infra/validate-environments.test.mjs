@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { mkdirSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, readFileSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -383,6 +383,106 @@ const cases = [
       } catch (error) {
         assert.equal(error.code, "MISSING_CONFIG_FILE");
       }
+    },
+  },
+
+  // --- path containment (parent audit) --------------------------------------
+  {
+    name: "config-path-traversal-is-refused",
+    execute() {
+      const root = withTopology("traversal", baseline);
+      for (const escape of ["../outside.toml", "../../etc/passwd", "infra/../../outside.toml"]) {
+        try {
+          validateEnvironments(root, escape);
+          assert.fail(`expected PATH_ESCAPE for ${escape}`);
+        } catch (error) {
+          assert.equal(error.code, "PATH_ESCAPE", escape);
+        }
+      }
+    },
+  },
+  {
+    name: "absolute-config-path-is-refused",
+    execute() {
+      try {
+        validateEnvironments(withTopology("abs", baseline), "/etc/passwd");
+        assert.fail("expected PATH_ESCAPE");
+      } catch (error) {
+        assert.equal(error.code, "PATH_ESCAPE");
+      }
+    },
+  },
+  {
+    name: "symlinked-config-file-escaping-the-root-is-refused",
+    execute() {
+      const root = withTopology("symlink-file", baseline);
+      const outside = join(space, "outside-topology");
+      mkdirSync(outside, { recursive: true });
+      writeFileSync(join(outside, "environments.toml"), baseline, "utf8");
+      symlinkSync(join(outside, "environments.toml"), join(root, "infra/linked.toml"), "file");
+      try {
+        validateEnvironments(root, "infra/linked.toml");
+        assert.fail("expected PATH_ESCAPE");
+      } catch (error) {
+        assert.equal(error.code, "PATH_ESCAPE");
+      }
+    },
+  },
+  {
+    name: "symlinked-directory-escaping-the-root-is-refused",
+    execute() {
+      const root = withTopology("symlink-dir", baseline);
+      const outside = join(space, "outside-dir");
+      mkdirSync(outside, { recursive: true });
+      writeFileSync(join(outside, "environments.toml"), baseline, "utf8");
+      symlinkSync(outside, join(root, "linkdir"), "dir");
+      try {
+        validateEnvironments(root, "linkdir/environments.toml");
+        assert.fail("expected PATH_ESCAPE");
+      } catch (error) {
+        assert.equal(error.code, "PATH_ESCAPE");
+      }
+    },
+  },
+  {
+    name: "a-symlink-that-stays-inside-the-root-is-not-over-blocked",
+    execute() {
+      const root = withTopology("symlink-inside", baseline);
+      symlinkSync(join(root, "infra/environments.toml"), join(root, "infra/alias.toml"), "file");
+      const report = validateEnvironments(root, "infra/alias.toml");
+      assert.equal(report.environments.production.d1_binding, "DB");
+    },
+  },
+
+  // --- closed tables: a shadow field must not be silently ignored -----------
+  {
+    name: "unknown-keys-are-refused-at-every-level",
+    execute() {
+      const insertions = [
+        ["root", baseline.replace("schema_version = 1", "schema_version = 1\nshadow_root = true")],
+        ["policy", baseline.replace(`rollback_policy = "forward-only"`, `rollback_policy = "forward-only"\nshadow_policy = 1`)],
+        ["env", inSection(baseline, "staging", "kind = \"remote\"", "kind = \"remote\"\nshadow_env = 1")],
+        ["d1", inSection(baseline, "staging", `database_name = "asimposium-staging"`, `database_name = "asimposium-staging"\nshadow_d1 = 1`)],
+        ["r2", inSection(baseline, "staging", `bucket_name = "asimposium-artifacts-staging"`, `bucket_name = "asimposium-artifacts-staging"\ncustom_domian = "typo.example.org"`)],
+        ["durable_objects", inSection(baseline, "staging", `class_name = "HeraldRoom"`, `class_name = "HeraldRoom"\nshadow_do = 1`)],
+        ["keys", inSection(baseline, "staging", `current_kid = "staging-2026-08"`, `current_kid = "staging-2026-08"\nshadow_key = 1`)],
+      ];
+      for (const [level, toml] of insertions) {
+        expectFailure(`shadow-${level}`, toml, "UNKNOWN_CONFIG_KEY");
+      }
+    },
+  },
+
+  // --- the destructive flag must be reported, not merely stored -------------
+  {
+    name: "destructive-flag-is-returned-for-callers-to-consume",
+    execute() {
+      const report = validateEnvironments(repositoryRoot);
+      assert.equal(report.environments.local.destructive_operations_allowed, true);
+      assert.equal(report.environments.staging.destructive_operations_allowed, true);
+      assert.equal(report.environments.production.destructive_operations_allowed, false);
+      assert.equal(report.environments.production.may_hold_production_keys, true);
+      assert.equal(report.environments.staging.may_hold_production_keys, false);
     },
   },
 

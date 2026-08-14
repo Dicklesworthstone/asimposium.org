@@ -67,3 +67,33 @@ production permits neither, and `--apply --env production` additionally requires
 account required). Remote environments refuse to apply until they are
 provisioned; the runner never simulates an application. Local state lives in
 `.wrangler/`, which is gitignored.
+
+`--state-file` describes a *rehearsal* and cannot be combined with `--apply`: a
+caller-supplied file claiming a migration is already applied would otherwise
+skip one that never ran. An application reads the target's own ledger or it does
+not apply. State files and the migrations directory are both contained to the
+repository, lexically and after symlink resolution.
+
+## What OPS.3 does NOT yet do
+
+Stated plainly so this tooling is not mistaken for a working environment. **OPS.3
+cannot close on the strength of what is here.**
+
+- **`environments.toml` is not wired into any Wrangler configuration.** It is a
+  validated contract that nothing reads at deploy time. `wrangler.toml` remains
+  the single local skeleton, and no per-environment Wrangler config is generated
+  from the topology.
+- **The Worker does not implement the topology.** `apps/wire`'s `Env` declares
+  `DB` and `ARTIFACTS` only — there is no `PUBLIC_ARTIFACTS` binding and no
+  `HERALD_ROOMS` Durable Object namespace. The public-delivery role and the DO
+  namespace exist in the topology and nowhere in code.
+- **Remote apply does not exist.** `--apply` works only against local D1.
+  Staging and production refuse, by design, until provisioned.
+- **No remote resource has ever been created, read, or written.** No D1 database,
+  R2 bucket, Durable Object namespace, custom domain, deployment, or console
+  change. The private-canary requirement — that a private-only object is
+  unreachable through every public hostname while its authenticated owner
+  retrieves it — is **unproven** and needs real buckets.
+
+Validating the topology proves the *contract* is coherent. It proves nothing
+about resources that may or may not exist.

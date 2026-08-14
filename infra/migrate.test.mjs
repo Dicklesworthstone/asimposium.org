@@ -1,15 +1,18 @@
 import assert from "node:assert/strict";
-import { mkdirSync, mkdtempSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { performance } from "node:perf_hooks";
 import {
+  assertRehearsalIsNotAnApplication,
+  declaresDestructive,
   MigrationError,
   describeDestructiveStatements,
   digestOf,
   planMigrations,
   readMigrationDirectory,
   readStateFile,
+  redactStderr,
 } from "./migrate.mjs";
 
 /**
@@ -206,6 +209,78 @@ const cases = [
 
   // --- destructive-target guards -------------------------------------------
   {
+    name: "destructive-guard-resists-obfuscation",
+    execute() {
+      // Each of these was a live bypass of the previous whole-file regexes.
+      const bypasses = {
+        "cross-statement WHERE vouching for an unscoped UPDATE":
+          "UPDATE claims SET disposition = 1;\nSELECT * FROM problems WHERE id = 1;",
+        "cross-statement WHERE vouching for an unscoped DELETE":
+          "DELETE FROM events;\nSELECT 1 FROM problems WHERE id = 1;",
+        "comment inside the keyword pair": "DROP/**/TABLE claims;",
+        "comment between the keywords": "DROP /* hi */ TABLE claims;",
+        "comment splitting DELETE FROM": "DELETE/**/FROM events;",
+        "DROP INDEX": "DROP INDEX idx_claims;",
+        "DROP VIEW": "DROP VIEW v_claims;",
+        "DROP TRIGGER": "DROP TRIGGER t_claims;",
+        "ALTER TABLE RENAME TO": "ALTER TABLE claims RENAME TO claims_old;",
+        "ALTER TABLE RENAME COLUMN": "ALTER TABLE claims RENAME COLUMN a TO b;",
+        "REPLACE INTO": "REPLACE INTO claims (id) VALUES (1);",
+        "INSERT OR REPLACE": "INSERT OR REPLACE INTO claims (id) VALUES (1);",
+        "PRAGMA writable_schema": "PRAGMA writable_schema = ON;",
+        VACUUM: "VACUUM;",
+        "ATTACH DATABASE": "ATTACH DATABASE 'other.db' AS other;",
+      };
+      for (const [label, sql] of Object.entries(bypasses)) {
+        assert.ok(
+          describeDestructiveStatements(sql).length > 0,
+          `undetected destructive form: ${label}`,
+        );
+      }
+    },
+  },
+  {
+    name: "destructive-guard-does-not-fire-on-comments-or-strings",
+    execute() {
+      // A keyword a reviewer can see is inert must stay inert, or the guard
+      // becomes noise and gets routed around.
+      assert.deepEqual(describeDestructiveStatements("-- DROP TABLE claims\nCREATE TABLE ok (id TEXT);"), []);
+      assert.deepEqual(describeDestructiveStatements("/* DROP TABLE claims */\nCREATE TABLE ok (id TEXT);"), []);
+      assert.deepEqual(
+        describeDestructiveStatements("INSERT INTO notes (body) VALUES ('DROP TABLE claims');"),
+        [],
+      );
+    },
+  },
+  {
+    name: "the-opt-in-marker-must-be-a-real-comment",
+    execute() {
+      assert.equal(declaresDestructive("-- asimposium:allow-destructive\nDROP TABLE a;"), true);
+      assert.equal(declaresDestructive("/* asimposium:allow-destructive */\nDROP TABLE a;"), true);
+      // Smuggled through a string literal: the marker is data, not a decision.
+      assert.equal(
+        declaresDestructive("INSERT INTO t VALUES ('\n-- asimposium:allow-destructive\n');\nDROP TABLE a;"),
+        false,
+      );
+      assert.equal(declaresDestructive("DROP TABLE a;"), false);
+    },
+  },
+  {
+    name: "obfuscated-destruction-is-refused-end-to-end",
+    execute() {
+      // The whole point: an obfuscated DROP with no marker must be refused by
+      // the planner, on every environment, not merely "detected".
+      const sneaky = "DROP/**/TABLE claims;\n";
+      const migrations = readMigrationDirectory(directory("sneaky", { "0001_sneaky.sql": sneaky }));
+      expectFailure("sneaky-permissive", "UNDECLARED_DESTRUCTIVE_MIGRATION", () =>
+        planMigrations(migrations, [], { environmentName: "local", destructiveAllowed: true }),
+      );
+      expectFailure("sneaky-strict", "UNDECLARED_DESTRUCTIVE_MIGRATION", () =>
+        planMigrations(migrations, [], plainOptions),
+      );
+    },
+  },
+  {
     name: "destructive-statements-are-detected",
     execute() {
       assert.deepEqual(describeDestructiveStatements("DROP TABLE claims;"), ["DROP TABLE"]);
@@ -263,6 +338,145 @@ const cases = [
       expectFailure("object", "MALFORMED_STATE_FILE", () => readStateFile(join(root, "object.json")));
       expectFailure("incomplete", "MALFORMED_STATE_FILE", () => readStateFile(join(root, "incomplete.json")));
       assert.equal(readStateFile(join(root, "good.json")).length, 1);
+    },
+  },
+
+  // --- state records are bounded (parent audit) -----------------------------
+  {
+    name: "state-record-fields-are-bounded",
+    execute() {
+      const good = digestOf(CREATE_A);
+      const bad = {
+        "id-not-a-migration.json": [{ id: "../../etc/passwd", sequence: 1, digest: good }],
+        "id-arbitrary.json": [{ id: "whatever", sequence: 1, digest: good }],
+        "sequence-float.json": [{ id: "0001_first.sql", sequence: 1.5, digest: good }],
+        "sequence-negative.json": [{ id: "0001_first.sql", sequence: -1, digest: good }],
+        "sequence-string.json": [{ id: "0001_first.sql", sequence: "1", digest: good }],
+        "sequence-mismatch.json": [{ id: "0001_first.sql", sequence: 7, digest: good }],
+        "digest-short.json": [{ id: "0001_first.sql", sequence: 1, digest: "abc" }],
+        "digest-uppercase.json": [{ id: "0001_first.sql", sequence: 1, digest: good.toUpperCase() }],
+        "digest-nonhex.json": [{ id: "0001_first.sql", sequence: 1, digest: "z".repeat(64) }],
+        "extra-key.json": [{ id: "0001_first.sql", sequence: 1, digest: good, applied_by: "someone" }],
+        "record-array.json": [[{ id: "0001_first.sql", sequence: 1, digest: good }]],
+      };
+      const files = Object.fromEntries(Object.entries(bad).map(([name, value]) => [name, JSON.stringify(value)]));
+      const root = directory("state-bounds", files);
+      for (const name of Object.keys(bad)) {
+        expectFailure(name, "MALFORMED_STATE_FILE", () => readStateFile(join(root, name)));
+      }
+    },
+  },
+  {
+    name: "state-records-must-be-unique-and-ascending",
+    execute() {
+      const a = digestOf(CREATE_A);
+      const b = digestOf(CREATE_B);
+      const root = directory("state-order", {
+        "dup-id.json": JSON.stringify([
+          { id: "0001_first.sql", sequence: 1, digest: a },
+          { id: "0001_first.sql", sequence: 1, digest: a },
+        ]),
+        "dup-seq.json": JSON.stringify([
+          { id: "0001_first.sql", sequence: 1, digest: a },
+          { id: "0001_other.sql", sequence: 1, digest: b },
+        ]),
+        "descending.json": JSON.stringify([
+          { id: "0002_second.sql", sequence: 2, digest: b },
+          { id: "0001_first.sql", sequence: 1, digest: a },
+        ]),
+      });
+      expectFailure("dup-id", "DUPLICATE_STATE_RECORD", () => readStateFile(join(root, "dup-id.json")));
+      expectFailure("dup-seq", "DUPLICATE_STATE_RECORD", () => readStateFile(join(root, "dup-seq.json")));
+      expectFailure("descending", "UNORDERED_STATE_FILE", () => readStateFile(join(root, "descending.json")));
+    },
+  },
+  {
+    name: "state-file-must-be-a-regular-file",
+    execute() {
+      const root = directory("state-symlink", {
+        "real.json": JSON.stringify([{ id: "0001_first.sql", sequence: 1, digest: digestOf(CREATE_A) }]),
+      });
+      symlinkSync(join(root, "real.json"), join(root, "linked.json"), "file");
+      expectFailure("symlinked-state", "UNSAFE_STATE_FILE", () => readStateFile(join(root, "linked.json")));
+      expectFailure("directory-as-state", "UNSAFE_STATE_FILE", () => readStateFile(root));
+    },
+  },
+
+  // --- migration files must be real files (parent audit) --------------------
+  {
+    name: "symlinked-migration-file-is-refused",
+    execute() {
+      const outside = directory("outside-sql", { "evil.sql": "DROP TABLE claims;\n" });
+      const root = directory("symlink-migration", { "0001_first.sql": CREATE_A });
+      symlinkSync(join(outside, "evil.sql"), join(root, "0002_linked.sql"), "file");
+      expectFailure("symlinked-migration", "SYMLINKED_MIGRATION_FILE", () => readMigrationDirectory(root));
+    },
+  },
+  {
+    name: "symlinked-migrations-directory-is-refused",
+    execute() {
+      const real = directory("real-migrations", { "0001_first.sql": CREATE_A });
+      const linkParent = directory("link-parent", {});
+      const link = join(linkParent, "migrations");
+      symlinkSync(real, link, "dir");
+      expectFailure("symlinked-dir", "SYMLINKED_MIGRATIONS_DIRECTORY", () => readMigrationDirectory(link));
+    },
+  },
+  {
+    name: "special-file-in-the-migrations-directory-is-refused",
+    execute() {
+      const root = directory("special", { "0001_first.sql": CREATE_A });
+      mkdirSync(join(root, "0002_subdir.sql"), { recursive: true });
+      expectFailure("subdirectory", "NON_REGULAR_MIGRATION_FILE", () => readMigrationDirectory(root));
+    },
+  },
+
+  // --- a rehearsal may never stand in for an application (parent audit) -----
+  {
+    name: "state-file-cannot-be-combined-with-apply",
+    execute() {
+      expectFailure("rehearsal-as-apply", "STATE_FILE_WITH_APPLY", () =>
+        assertRehearsalIsNotAnApplication({ apply: true, state: "infra/rehearsal.json" }),
+      );
+      // Each alone is fine: a plan may use a rehearsal, and an apply may run
+      // without one by reading the target's ledger.
+      assertRehearsalIsNotAnApplication({ apply: false, state: "infra/rehearsal.json" });
+      assertRehearsalIsNotAnApplication({ apply: true, state: undefined });
+      assertRehearsalIsNotAnApplication({ apply: false, state: undefined });
+    },
+  },
+
+  // --- stderr is surfaced, bounded and redacted (parent audit) --------------
+  {
+    name: "causal-stderr-is-redacted-and-bounded",
+    execute() {
+      assert.equal(redactStderr(""), "");
+      assert.equal(redactStderr(undefined), "");
+
+      const noisy = [
+        "wrangler failed reading /Users/someone/projects/asimposium.org/infra/wrangler.toml",
+        "CLOUDFLARE_API_TOKEN=abcdef0123456789abcdef",
+        "token asimp_ag_deadbeefdeadbeefdeadbeef",
+        `digest ${"a1b2c3d4".repeat(8)}`,
+        "-----BEGIN PRIVATE KEY-----\nMIIEvQ\n-----END PRIVATE KEY-----",
+      ].join("\n");
+      const safe = redactStderr(noisy);
+
+      // The cause survives...
+      assert.ok(safe.includes("wrangler failed"), safe);
+      // ...but nothing that identifies a machine or carries a secret does.
+      assert.equal(safe.includes("/Users/"), false, safe);
+      assert.equal(safe.includes("abcdef0123456789"), false, safe);
+      assert.equal(safe.includes("asimp_ag_"), false, safe);
+      assert.equal(safe.includes("BEGIN PRIVATE KEY"), false, safe);
+      assert.equal(/[A-Fa-f0-9]{32,}/.test(safe), false, safe);
+      // Newlines collapse so one record stays one line.
+      assert.equal(safe.includes("\n"), false, safe);
+
+      // Bounded: a runaway log cannot flood a diagnostic.
+      const long = redactStderr("x".repeat(50_000));
+      assert.ok(long.length <= 601, String(long.length));
+      assert.ok(long.endsWith("…"));
     },
   },
 ];
