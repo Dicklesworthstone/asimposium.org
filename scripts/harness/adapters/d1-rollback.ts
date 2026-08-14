@@ -35,8 +35,8 @@
  * Output is a single JSON line of bounded, non-secret fields. It never prints an
  * absolute path, an environment value, or SQL containing caller data.
  */
-import { existsSync, lstatSync, mkdirSync, writeFileSync } from "node:fs";
-import { dirname, join, relative, resolve, sep } from "node:path";
+import { existsSync, lstatSync, mkdirSync, readdirSync, statSync, writeFileSync } from "node:fs";
+import { basename, dirname, join, relative, resolve, sep } from "node:path";
 import {
   assertRetainedD1StateDirectory,
   assertRetainedIntegrationCapacity,
@@ -50,11 +50,15 @@ const DATABASE = "harness-ops2a";
 const TABLE = "harness_rollback_probe";
 /** Bound every wrangler invocation so a hung CLI cannot outlive the step. */
 const WRANGLER_TIMEOUT_MS = 20_000;
+/** A hostile D1 state tree must not turn the post-run audit into an unbounded walk. */
+const MAX_D1_ADAPTER_STATE_ENTRIES = 2_048;
 
 type Mode = "ok" | "planted-fail";
 
 interface ExecResult {
   readonly ok: boolean;
+  /** True only after Bun actually created the wrangler subprocess. */
+  readonly executed: boolean;
   readonly errorClass: string | undefined;
 }
 
@@ -72,8 +76,31 @@ const REPOSITORY_ROOT = resolve(import.meta.dir, "..", "..", "..");
  * two runs apart without disclosing where either one lived.
  */
 function stateDirDigest(stateDir: string): string {
-  const leaf = stateDir.split("/").pop() ?? "";
+  const leaf = basename(stateDir);
   return Bun.hash(leaf).toString(16).slice(0, 12);
+}
+
+/**
+ * The adapter's direct JSON output is an audit surface. System errors often
+ * include absolute paths, syscall arguments, and host-specific messages, so
+ * they are classified before any diagnostic is emitted.
+ */
+function safeFilesystemClass(error: unknown): "access_denied" | "missing" | "unavailable" {
+  const code = (error as NodeJS.ErrnoException | undefined)?.code;
+  if (code === "EACCES" || code === "EPERM" || code === "EROFS") return "access_denied";
+  if (code === "ENOENT") return "missing";
+  return "unavailable";
+}
+
+function safeFilesystemDetail(operation: string, error: unknown): string {
+  const failure = safeFilesystemClass(error);
+  if (failure === "access_denied") {
+    return `${operation} was denied by the filesystem. No unsafe diagnostic text was retained.`;
+  }
+  if (failure === "missing") {
+    return `${operation} could not find the already-authorized retained state location.`;
+  }
+  return `${operation} could not complete safely; no raw syscall diagnostic was emitted.`;
 }
 
 /**
@@ -154,13 +181,57 @@ function parseStateDirectory(argv: readonly string[]): {
     say({
       status: "fail",
       code: "D1_STATE_DIRECTORY_INVALID",
-      detail:
-        error instanceof Error
-          ? error.message
-          : "D1 state directory is not a retained integration path.",
+      detail: safeFilesystemDetail("D1 state path validation", error),
     });
     process.exit(2);
   }
+}
+
+/**
+ * Count retained D1 bytes without following a symlink or disclosing a path.
+ *
+ * The audit is deliberately bounded: once the exact at-cap condition is
+ * reached it has enough information to refuse further work, and must not turn
+ * an overgrown retained tree into an unbounded recursive scan.
+ */
+function stateUsage(directory: string): {
+  bytes: number;
+  files: number;
+  entries: number;
+  truncated: boolean;
+} {
+  let bytes = 0;
+  let files = 0;
+  let entries = 0;
+  let truncated = false;
+  const walk = (current: string): void => {
+    for (const entry of readdirSync(current, { withFileTypes: true })) {
+      if (bytes >= MAX_D1_ADAPTER_STATE_BYTES || entries >= MAX_D1_ADAPTER_STATE_ENTRIES) {
+        truncated = true;
+        return;
+      }
+      if (!/^[.A-Za-z0-9][A-Za-z0-9._-]{0,127}$/.test(entry.name)) {
+        throw new Error("unsafe_state_entry_name");
+      }
+      entries += 1;
+      const path = join(current, entry.name);
+      if (entry.isSymbolicLink()) throw new Error("unsafe_state_symlink");
+      if (entry.isDirectory()) {
+        walk(path);
+        if (truncated) return;
+        continue;
+      }
+      if (!entry.isFile()) throw new Error("unsafe_state_entry");
+      bytes += statSync(path).size;
+      files += 1;
+      if (bytes >= MAX_D1_ADAPTER_STATE_BYTES || entries >= MAX_D1_ADAPTER_STATE_ENTRIES) {
+        truncated = true;
+        return;
+      }
+    }
+  };
+  walk(directory);
+  return { bytes, files, entries, truncated };
 }
 
 /** Create exactly the already-authorized state leaf, never an arbitrary parent. */
@@ -209,6 +280,7 @@ function classifyFailure(text: string): string {
 
 interface WranglerRun {
   readonly ok: boolean;
+  readonly executed: boolean;
   readonly stdout: string;
   readonly errorClass: string | undefined;
 }
@@ -262,6 +334,7 @@ async function wrangler(
   } catch (error) {
     return {
       ok: false,
+      executed: false,
       stdout: "",
       errorClass: error instanceof Error ? "spawn_failed" : "unclassified",
     };
@@ -282,6 +355,7 @@ async function wrangler(
   const succeeded = exitCode === 0 && !/"error"/.test(stdout);
   return {
     ok: succeeded,
+    executed: true,
     stdout,
     errorClass: succeeded ? undefined : classifyFailure(`${stdout}\n${stderr}`),
   };
@@ -294,10 +368,14 @@ async function execute(
   sql: string,
 ): Promise<ExecResult> {
   const run = await wrangler(entry, stateDir, configPath, sql);
-  return { ok: run.ok, errorClass: run.errorClass };
+  return { ok: run.ok, executed: run.executed, errorClass: run.errorClass };
 }
 
-async function readRows(entry: string, stateDir: string, configPath: string): Promise<string[]> {
+async function readRows(
+  entry: string,
+  stateDir: string,
+  configPath: string,
+): Promise<{ readonly executed: boolean; readonly rows: string[] }> {
   const run = await wrangler(
     entry,
     stateDir,
@@ -306,20 +384,23 @@ async function readRows(entry: string, stateDir: string, configPath: string): Pr
   );
   try {
     const parsed = JSON.parse(run.stdout) as { results?: { label?: string }[] }[];
-    return (parsed[0]?.results ?? []).map((row) => String(row.label));
+    return {
+      executed: run.executed,
+      rows: (parsed[0]?.results ?? []).map((row) => String(row.label)),
+    };
   } catch {
-    return [];
+    return { executed: run.executed, rows: [] };
   }
 }
 
 async function main(): Promise<number> {
   const mode = parseMode(process.argv.slice(2));
-  const { stateDir } = parseStateDirectory(process.argv.slice(2));
+  const { stateDir, artifactNamespace } = parseStateDirectory(process.argv.slice(2));
 
   // The adapter repeats the write-free real-authority/capacity preflight so a
   // copied command cannot bypass its parent runner and create state at a cap.
   // This runs before the namespace leaf or any state/config file is created.
-  const capacity = realFilesystemRetentionPreflight(repositoryRoot());
+  const capacity = realFilesystemRetentionPreflight(repositoryRoot(), undefined, artifactNamespace);
   if (capacity.exceeded) {
     say({
       status: "blocked",
@@ -352,13 +433,13 @@ async function main(): Promise<number> {
       additionalDirectories: 1,
       additionalBytes: MAX_D1_ADAPTER_STATE_BYTES,
     });
-  } catch (error) {
+  } catch {
     say({
       status: "blocked",
       code: "INTEGRATION_RETENTION_EXCEEDED",
       detail:
         "No D1 state was created because retained integration capacity is insufficient. " +
-        (error instanceof Error ? error.message : "Inspect retained integration evidence."),
+        "Inspect the retained integration evidence before an explicit archive or move.",
     });
     return BLOCKED_EXIT_CODE;
   }
@@ -369,28 +450,35 @@ async function main(): Promise<number> {
     say({
       status: "fail",
       code: "D1_STATE_DIRECTORY_INVALID",
-      detail:
-        error instanceof Error
-          ? error.message
-          : "D1 state directory could not be prepared without overwriting retained evidence.",
+      detail: safeFilesystemDetail("D1 state directory preparation", error),
     });
     return 2;
   }
   const configPath = join(stateDir, "wrangler.toml");
-  writeFileSync(
-    configPath,
-    [
-      `name = "harness-ops2a-d1"`,
-      `compatibility_date = "2026-08-13"`,
-      ``,
-      `[[d1_databases]]`,
-      `binding = "DB"`,
-      `database_name = "${DATABASE}"`,
-      `database_id = "00000000-0000-0000-0000-000000000000"`,
-      ``,
-    ].join("\n"),
-    { encoding: "utf8", flag: "wx" },
-  );
+  try {
+    writeFileSync(
+      configPath,
+      [
+        `name = "harness-ops2a-d1"`,
+        `compatibility_date = "2026-08-13"`,
+        ``,
+        `[[d1_databases]]`,
+        `binding = "DB"`,
+        `database_name = "${DATABASE}"`,
+        `database_id = "00000000-0000-0000-0000-000000000000"`,
+        ``,
+      ].join("\n"),
+      { encoding: "utf8", flag: "wx" },
+    );
+  } catch (error) {
+    say({
+      status: "blocked",
+      code: "D1_STATE_WRITE_DENIED",
+      syscall_class: safeFilesystemClass(error),
+      detail: safeFilesystemDetail("D1 state configuration write", error),
+    });
+    return BLOCKED_EXIT_CODE;
+  }
 
   const seeded = await execute(
     wranglerEntry,
@@ -420,10 +508,66 @@ async function main(): Promise<number> {
       : `INSERT INTO ${TABLE} (id, label) VALUES (2, 'doomed');`;
   const batch = await execute(wranglerEntry, stateDir, configPath, doomedBatch);
 
-  const labels = await readRows(wranglerEntry, stateDir, configPath);
+  const postRead = await readRows(wranglerEntry, stateDir, configPath);
+  const labels = postRead.rows;
   const doomedSurvived = labels.includes("doomed");
   const sentinelIntact = labels.includes("sentinel");
-  const rolledBack = !doomedSurvived && sentinelIntact;
+  const sentinelOnly = labels.length === 1 && labels[0] === "sentinel";
+  const lateFailureObserved =
+    batch.executed && !batch.ok && batch.errorClass === "sqlite_constraint_unique";
+  const rolledBack =
+    mode === "ok" && seeded.executed && lateFailureObserved && postRead.executed && sentinelOnly;
+  let usage: { bytes: number; files: number; entries: number; truncated: boolean } | undefined;
+  try {
+    usage = stateUsage(stateDir);
+  } catch (error) {
+    say({
+      status: "fail",
+      code: "D1_STATE_AUDIT_UNSAFE",
+      syscall_class: safeFilesystemClass(error),
+      detail: safeFilesystemDetail("D1 retained-state audit", error),
+    });
+    return 1;
+  }
+  if (usage.bytes >= MAX_D1_ADAPTER_STATE_BYTES) {
+    say({
+      status: "fail",
+      code: "D1_STATE_CAPACITY_EXCEEDED",
+      state_bytes: usage.bytes,
+      state_byte_limit: MAX_D1_ADAPTER_STATE_BYTES,
+      state_audit_truncated: usage.truncated,
+      detail:
+        "The retained D1 state exceeded its reserved byte ceiling; evidence was retained and no further state was created.",
+    });
+    return 1;
+  }
+  if (usage.entries >= MAX_D1_ADAPTER_STATE_ENTRIES) {
+    say({
+      status: "fail",
+      code: "D1_STATE_AUDIT_ENTRY_LIMIT",
+      state_entries: usage.entries,
+      state_entry_limit: MAX_D1_ADAPTER_STATE_ENTRIES,
+      state_audit_truncated: usage.truncated,
+      detail:
+        "The retained D1 state reached the bounded audit entry limit; no further audit or write was attempted.",
+    });
+    return 1;
+  }
+  try {
+    // Re-audit after workerd has written its state. The reservation prevents
+    // ordinary overgrowth; this catches a concurrent writer or an unexpected
+    // implementation expansion without modifying the retained evidence.
+    assertRetainedIntegrationCapacity(integrationDirectoryForState(stateDir));
+  } catch {
+    say({
+      status: "fail",
+      code: "INTEGRATION_RETENTION_EXCEEDED_AFTER_D1",
+      state_bytes: usage.bytes,
+      detail:
+        "D1 completed, but the retained integration census is now over its cap; no cleanup or further write was attempted.",
+    });
+    return 1;
+  }
 
   say({
     status: rolledBack ? "pass" : "fail",
@@ -431,16 +575,27 @@ async function main(): Promise<number> {
     mode,
     batch_rejected: !batch.ok,
     batch_error_class: batch.errorClass ?? null,
+    seed_command_executed: seeded.executed,
+    batch_command_executed: batch.executed,
+    post_read_command_executed: postRead.executed,
+    late_failure_observed: lateFailureObserved,
     rows_after: labels.length,
     doomed_row_present: doomedSurvived,
     sentinel_present: sentinelIntact,
+    sentinel_only_after: sentinelOnly,
+    state_bytes: usage.bytes,
+    state_files: usage.files,
+    state_entries: usage.entries,
+    state_audit_truncated: usage.truncated,
     // Path *class* and a short digest of the directory name, never the path
     // itself: enough to correlate two runs, useless for locating a machine.
     state_dir_class: "retained-integration",
     state_dir_digest: stateDirDigest(stateDir),
     detail: rolledBack
       ? "A late failure inside one D1 batch rolled back the earlier write in the same batch; state was re-read to confirm."
-      : "The write from a failed batch survived, or the sentinel vanished; D1 did not roll back as required.",
+      : mode === "planted-fail"
+        ? "PLANTED: no late constraint failure was supplied, so the earlier write remained and the rollback assertion failed."
+        : "The late D1 constraint failure, exact post-read sentinel state, or both rollback witnesses were absent.",
   });
   return rolledBack ? 0 : 1;
 }

@@ -7,12 +7,13 @@ import { afterAll, describe, expect, test } from "bun:test";
 import { createHash } from "node:crypto";
 import {
   existsSync,
+  lstatSync,
   mkdirSync,
   readdirSync,
   readFileSync,
+  readlinkSync,
   realpathSync,
   statSync,
-  symlinkSync,
   writeFileSync,
 } from "node:fs";
 import { tmpdir } from "node:os";
@@ -67,9 +68,11 @@ import {
   realFilesystemRetentionPreflight,
   reconcileFailureManifest,
   reconcileRunIdentity,
+  redactNeverLog,
   repositoryRoot,
   reserveArtifactNamespace,
   reserveRetainedIntegrationDirectory,
+  restoreProtectedSha256Marker,
   retainedD1StateDirectory,
   retainedIntegrationCapacityReport,
   runHarness,
@@ -89,6 +92,7 @@ function sampleEvent(overrides: Partial<HarnessEvent> = {}): HarnessEvent {
     schema_version: HARNESS_SCHEMA_VERSION,
     record: "step",
     run_id: "sample-run",
+    run_identity_digest: "0".repeat(64),
     suite: "ops.2a-sample",
     scenario: "unit",
     step: "sample-step",
@@ -120,6 +124,7 @@ function sampleEvent(overrides: Partial<HarnessEvent> = {}): HarnessEvent {
 }
 
 const SHELL_HARNESS = fileURLToPath(new URL("../e2e-test-harness.sh", import.meta.url));
+const RUNNER_SOURCE = fileURLToPath(new URL("../harness/runner.ts", import.meta.url));
 const SECRET_EMITTER = fileURLToPath(
   new URL("../harness/self-test-secret-emitter.ts", import.meta.url),
 );
@@ -238,19 +243,95 @@ const ORDINARY_SUITE_RESIDUE_BEFORE = {
  */
 function ordinaryArtifactResidue(): string[] {
   const artifacts = join(repositoryRoot(), "e2e", "artifacts");
-  if (!existsSync(artifacts)) return [];
+  const owned = join(artifacts, DEFAULT_RETAINED_INTEGRATION_NAMESPACE);
+  if (!existsSync(owned)) return [];
   const found: string[] = [];
   const walk = (directory: string, relative = ""): void => {
     for (const entry of readdirSync(directory, { withFileTypes: true })) {
       const next = relative === "" ? entry.name : `${relative}/${entry.name}`;
-      found.push(next);
+      const path = join(directory, entry.name);
+      const stat = lstatSync(path);
+      const stable =
+        `mode=${stat.mode.toString(8)};size=${stat.size};mtime_ms=${stat.mtimeMs.toFixed(3)};` +
+        `ctime_ms=${stat.ctimeMs.toFixed(3)};uid=${stat.uid};gid=${stat.gid};nlink=${stat.nlink}`;
+      if (entry.isSymbolicLink()) {
+        // Census the link itself, never its target. A retained link pointing
+        // outward must become visible without reading or modifying the target.
+        found.push(`${next}\ttype=symlink;target=${readlinkSync(path)};${stable}`);
+        continue;
+      }
+      if (entry.isFile()) {
+        const digest = createHash("sha256").update(readFileSync(path)).digest("hex");
+        found.push(`${next}\ttype=file;sha256=${digest};${stable}`);
+        continue;
+      }
+      if (entry.isDirectory()) {
+        found.push(`${next}\ttype=directory;${stable}`);
+        walk(path, next);
+        continue;
+      }
+      found.push(`${next}\ttype=other;${stable}`);
       // Do not follow a symlink while inspecting evidence. Its name is part of
       // the census, but a target outside e2e/artifacts is not.
-      if (entry.isDirectory()) walk(join(directory, entry.name), next);
     }
   };
-  walk(artifacts);
+  // This suite owns only the one OPS2a integration namespace. Other
+  // workstreams retain their own evidence concurrently, and treating their
+  // files as a harness mutation makes this test nondeterministic while proving
+  // nothing about OPS2a containment.
+  walk(owned, DEFAULT_RETAINED_INTEGRATION_NAMESPACE);
   return found.sort();
+}
+
+interface SimulatedArtifactCensusEntry {
+  readonly relativePath: string;
+  readonly type: "directory" | "file" | "symlink" | "other";
+  readonly size: number;
+  /** Memory storage has no chmod channel; this is its fixed POSIX model. */
+  readonly mode: string;
+}
+
+/**
+ * A zero-write witness for ordinary tests. This is deliberately richer than a
+ * list of names: a same-path truncate, chmod, or type swap must differ too.
+ */
+function simulatedArtifactCensus(
+  storage: HarnessArtifactStorage,
+  directory: string,
+  relativePath = "",
+): SimulatedArtifactCensusEntry[] {
+  const entries: SimulatedArtifactCensusEntry[] = [];
+  for (const name of storage.readdir(directory)) {
+    const path = join(directory, name);
+    const relative = relativePath === "" ? name : `${relativePath}/${name}`;
+    if (storage.isSymlink(path)) {
+      entries.push({ relativePath: relative, type: "symlink", size: 0, mode: "120777" });
+      continue;
+    }
+    if (storage.isDirectory(path)) {
+      entries.push({ relativePath: relative, type: "directory", size: 0, mode: "040755" });
+      entries.push(...simulatedArtifactCensus(storage, path, relative));
+      continue;
+    }
+    if (storage.isFile(path)) {
+      entries.push({
+        relativePath: relative,
+        type: "file",
+        size: storage.size(path),
+        mode: "100644",
+      });
+      continue;
+    }
+    entries.push({ relativePath: relative, type: "other", size: 0, mode: "000000" });
+  }
+  return entries.sort((left, right) => left.relativePath.localeCompare(right.relativePath));
+}
+
+function assertCensusUnchanged(
+  before: readonly SimulatedArtifactCensusEntry[],
+  after: readonly SimulatedArtifactCensusEntry[],
+): void {
+  expect(after).toEqual(before);
 }
 
 /**
@@ -261,11 +342,17 @@ function ordinaryArtifactResidue(): string[] {
  * authority/capacity preflight exposed by the CLI; a full checkout blocks
  * before an integration namespace or artifact file is created.
  */
-function requireRealFilesystemIntegration(): void {
+function requireRealFilesystemIntegration(
+  artifactNamespace = DEFAULT_RETAINED_INTEGRATION_NAMESPACE,
+): void {
   if (!realFilesystemIntegrationEnabled) {
     throw new Error(`${REAL_FILESYSTEM_INTEGRATION_ENV}=1 is required for real filesystem proof.`);
   }
-  const report = realFilesystemRetentionPreflight(repositoryRoot());
+  const report = realFilesystemRetentionPreflight(
+    repositoryRoot(),
+    nodeArtifactStorage,
+    artifactNamespace,
+  );
   if (report.exceeded) {
     throw new Error(
       `real filesystem integration is blocked before any write: ${report.used}/${report.limit} artifact namespaces are retained. ` +
@@ -723,6 +810,94 @@ describe("execution lifecycle", () => {
       ipc.close();
     }
   });
+
+  test("PLANTED: resume rejects changed step semantics and a missing identity", async () => {
+    const root = fixtureRoot("strict-resume");
+    const storage = fixtureStorage();
+    const runId = fixtureRunId("strict-resume");
+    const original = {
+      id: "bound-step",
+      scenario: "resume",
+      replaySafe: true,
+      retries: 0,
+      timeoutMs: 1_000,
+      command: command("process.exit(0)"),
+    } satisfies HarnessStep;
+    await runHarness({
+      root,
+      storage,
+      suite: "unit",
+      runId,
+      steps: [original],
+      onEvent: () => undefined,
+      onOutput: () => undefined,
+    });
+    const jsonl = join(root, "e2e", "artifacts", runId, "events.jsonl");
+    const before = storage.readFile(jsonl);
+    await expect(
+      runHarness({
+        root,
+        storage,
+        suite: "unit",
+        runId,
+        resume: true,
+        steps: [{ ...original, timeoutMs: 2_000 }],
+        onEvent: () => undefined,
+        onOutput: () => undefined,
+      }),
+    ).rejects.toThrow(/RUN_IDENTITY_MISMATCH|bound plan/);
+    expect(storage.readFile(jsonl)).toBe(before);
+
+    const missingRun = fixtureRunId("missing-identity");
+    const missingDirectory = join(root, "e2e", "artifacts", missingRun);
+    storage.seedDirectory(missingDirectory);
+    await expect(
+      runHarness({
+        root,
+        storage,
+        suite: "unit",
+        runId: missingRun,
+        resume: true,
+        steps: [original],
+        onEvent: () => undefined,
+        onOutput: () => undefined,
+      }),
+    ).rejects.toThrow(/RUN_IDENTITY_MISSING|no identity record/);
+    expect(storage.exists(join(missingDirectory, "events.jsonl"))).toBe(false);
+  });
+
+  test("PLANTED: a forged prior event digest refuses resume attribution", async () => {
+    const root = fixtureRoot("event-binding");
+    const storage = fixtureStorage();
+    const runId = fixtureRunId("event-binding");
+    const step = passStep("bound-event", "resume");
+    await runHarness({
+      root,
+      storage,
+      suite: "unit",
+      runId,
+      steps: [step],
+      onEvent: () => undefined,
+      onOutput: () => undefined,
+    });
+    const jsonl = join(root, "e2e", "artifacts", runId, "events.jsonl");
+    const forged = storage
+      .readFile(jsonl)
+      .replace(/"run_identity_digest":"[0-9a-f]{64}"/, `"run_identity_digest":"${"f".repeat(64)}"`);
+    storage.files.set(jsonl, forged);
+    await expect(
+      runHarness({
+        root,
+        storage,
+        suite: "unit",
+        runId,
+        resume: true,
+        steps: [step],
+        onEvent: () => undefined,
+        onOutput: () => undefined,
+      }),
+    ).rejects.toThrow(/RUN_EVENT_IDENTITY_MISMATCH|different immutable run identity/);
+  });
 });
 
 describe("secret-safe, bounded artifacts", () => {
@@ -779,6 +954,57 @@ describe("secret-safe, bounded artifacts", () => {
     expect(boundedDiff("x".repeat(10_000), "y".repeat(10_000), root).length).toBeLessThanOrEqual(
       MAX_DIFF_CHARS,
     );
+  });
+
+  test("redacts full Darwin and generic tmp paths while preserving labelled SHA-256 JSON evidence", () => {
+    const identityDigest = "a".repeat(64);
+    const artifactDigest = "b".repeat(64);
+    const opaque = "c".repeat(64);
+    const redacted = redactNeverLog(
+      `darwin=/private/tmp/ops2a-proof linux=/tmp/ops2a-proof ` +
+        `{"run_identity_digest":"${identityDigest}","artifact_digest":"${artifactDigest}","token":"${opaque}"}`,
+      repositoryRoot(),
+    );
+    expect(redacted).not.toContain("/private/tmp/");
+    expect(redacted).not.toContain("/tmp/");
+    expect(redacted).not.toContain("/private<path>");
+    expect(redacted).toContain(`"run_identity_digest":"${identityDigest}"`);
+    expect(redacted).toContain(`"artifact_digest":"${artifactDigest}"`);
+    expect(redacted).not.toContain(opaque);
+    expect(redacted).toContain("<redacted>");
+  });
+
+  test("PLANTED: an attacker literal legacy placeholder cannot receive a protected digest", () => {
+    const digest = "d".repeat(64);
+    const attackerLiteral = "__HARNESS_SHA256_0__";
+    const opaque = "e".repeat(64);
+    const redacted = redactNeverLog(
+      `{"artifact_digest":"${digest}","attacker":"${attackerLiteral}","token":"${opaque}"}`,
+      repositoryRoot(),
+    );
+
+    // The only restored digest is the labelled one that redaction protected.
+    expect(redacted).toContain(`"artifact_digest":"${digest}"`);
+    expect(redacted).toContain(`"attacker":"${attackerLiteral}"`);
+    expect(redacted).not.toContain(`"attacker":"${digest}"`);
+    expect(redacted).not.toContain(opaque);
+  });
+
+  test("PLANTED: a duplicated exact internal marker fails closed without digest fabrication", () => {
+    const digest = "f".repeat(64);
+    const marker = "\u0000HARNESS_SHA256_forced-collision_0\u0000";
+    const restored = restoreProtectedSha256Marker(
+      `label=${marker};attacker=${marker}`,
+      marker,
+      digest,
+    );
+
+    expect(restored).toBe("label=<redacted>;attacker=<redacted>");
+    expect(restored).not.toContain(digest);
+  });
+
+  test("static guard: protected digests never use global split/join restoration", () => {
+    expect(readFileSync(RUNNER_SOURCE, "utf8")).not.toContain("split(marker).join(digest)");
   });
 
   test("caps failure artifacts and does not retain child output for successful steps", async () => {
@@ -1015,6 +1241,29 @@ describe("artifact containment", () => {
     ).rejects.toMatchObject({ code: "ARTIFACT_PATH_UNSAFE" } satisfies Partial<HarnessError>);
   });
 
+  test("PLANTED: a symlinked artifact root is refused without mutating its target", () => {
+    const root = fixtureRoot("memory-symlink");
+    const storage = fixtureStorage();
+    const artifacts = join(root, "e2e", "artifacts");
+    const link = join(root, "e2e", "artifacts-link");
+    storage.seedDirectory(artifacts);
+    storage.symlink(link);
+    const body = "bytes must not cross a simulated symlink\n";
+    const digest = createHash("sha256").update(body, "utf8").digest("hex");
+
+    expect(() =>
+      publishFailureBlob({
+        containmentRoot: root,
+        artifactsDirectory: link,
+        digest,
+        stored: body,
+        attempt: 1,
+        storage,
+      }),
+    ).toThrow(/ARTIFACT_PATH_UNSAFE|real repository directory/);
+    expect(storage.exists(join(artifacts, ARTIFACT_BLOB_DIRECTORY))).toBe(false);
+  });
+
   test("parallel runs with distinct valid ids remain isolated", async () => {
     const root = fixtureRoot("parallel");
     const storage = fixtureStorage();
@@ -1208,9 +1457,9 @@ const realFilesystemTest = realFilesystemIntegrationEnabled ? test : test.skip;
 realFilesystemTest(
   "the real shell entry point proves the seeded harness-only negative aggregate",
   async () => {
-    requireRealFilesystemIntegration();
     const root = fixtureRoot("shell");
     const customNamespace = "ops2a-retention-shell-proof";
+    requireRealFilesystemIntegration(customNamespace);
     const child = Bun.spawn({
       cmd: [
         "bash",
@@ -1309,38 +1558,54 @@ describeRealFilesystemIntegration("OPS.2a real adapters", () => {
   test("the D1 adapter proves rollback against a real local database", async () => {
     const ok = await runAdapter("d1-rollback.ts", "ok");
     expectPositive(ok, "D1_ADAPTER_UNAVAILABLE");
-    if (ok.exitCode !== 0) return;
-    const record = JSON.parse(ok.stdout.trim().split("\n").pop() ?? "{}");
-    expect(record.code).toBe("D1_TRANSACTION_ROLLED_BACK");
-    // Rollback is only demonstrated by re-reading state, never by the error.
-    expect(record.batch_rejected).toBe(true);
-    expect(record.doomed_row_present).toBe(false);
-    expect(record.sentinel_present).toBe(true);
-    // Never an absolute path, even for a disposable directory.
-    expect(ok.stdout).not.toContain("/Users/");
-    expect(ok.stdout).not.toContain("/tmp/");
-    expect(record.state_dir_class).toBe("retained-integration");
+    if (ok.exitCode === 0) {
+      const record = JSON.parse(ok.stdout.trim().split("\n").pop() ?? "{}");
+      expect(record.code).toBe("D1_TRANSACTION_ROLLED_BACK");
+      // Rollback is only demonstrated by a late UNIQUE rejection and an exact
+      // post-read table, never by a merely absent doomed row.
+      expect(record.seed_command_executed).toBe(true);
+      expect(record.batch_command_executed).toBe(true);
+      expect(record.post_read_command_executed).toBe(true);
+      expect(record.batch_rejected).toBe(true);
+      expect(record.batch_error_class).toBe("sqlite_constraint_unique");
+      expect(record.late_failure_observed).toBe(true);
+      expect(record.doomed_row_present).toBe(false);
+      expect(record.sentinel_only_after).toBe(true);
+      expect(record.state_bytes).toBeGreaterThan(0);
+      // Never an absolute path, even for retained state.
+      expect(ok.stdout).not.toContain("/Users/");
+      expect(ok.stdout).not.toContain("/tmp/");
+      expect(record.state_dir_class).toBe("retained-integration");
+    } else {
+      expect(ok.exitCode).toBe(HARNESS_BLOCKED_EXIT_CODE);
+    }
   }, 90000);
 
   test("PLANTED: the D1 rollback assertion fails when nothing rolled back", async () => {
     const planted = await runAdapter("d1-rollback.ts", "planted-fail");
-    if (planted.exitCode === HARNESS_BLOCKED_EXIT_CODE) return;
-    expect(planted.exitCode).toBe(1);
-    expect(planted.stdout).toContain("D1_TRANSACTION_LEAKED");
+    if (planted.exitCode === HARNESS_BLOCKED_EXIT_CODE) {
+      expect(planted.stdout).toContain("D1_ADAPTER_UNAVAILABLE");
+    } else {
+      expect(planted.exitCode).toBe(1);
+      expect(planted.stdout).toContain("D1_TRANSACTION_LEAKED");
+    }
   }, 90000);
 
   test("the HTTP adapter proves a real loopback fault surface", async () => {
     const ok = await runAdapter("http-fault.ts", "ok");
     expectPositive(ok, "HTTP_ADAPTER_UNAVAILABLE");
-    if (ok.exitCode !== 0) return;
-    const record = JSON.parse(ok.stdout.trim().split("\n").pop() ?? "{}");
-    expect(record.code).toBe("HTTP_FAULT_SURFACE_VERIFIED");
-    expect(record.observed_status).toBe(500);
-    expect(record.route_template).toBe("/fault");
-    expect(record.request_id_echoed).toBe(true);
-    expect(record.request_id_minted).toBe(true);
-    // A route that never answers must be bounded by the client, not by luck.
-    expect(record.slow_route_timed_out).toBe(true);
+    if (ok.exitCode === 0) {
+      const record = JSON.parse(ok.stdout.trim().split("\n").pop() ?? "{}");
+      expect(record.code).toBe("HTTP_FAULT_SURFACE_VERIFIED");
+      expect(record.observed_status).toBe(500);
+      expect(record.route_template).toBe("/fault");
+      expect(record.request_id_echoed).toBe(true);
+      expect(record.request_id_minted).toBe(true);
+      // A route that never answers must be bounded by the client, not by luck.
+      expect(record.slow_route_timed_out).toBe(true);
+    } else {
+      expect(ok.exitCode).toBe(HARNESS_BLOCKED_EXIT_CODE);
+    }
   }, 30000);
 
   test("PLANTED: the HTTP assertion fails when the status contract is wrong", async () => {
@@ -1357,17 +1622,23 @@ describeRealFilesystemIntegration("OPS.2a real adapters", () => {
     const declared = existsSync(
       join(repositoryRoot(), "e2e", "node_modules", "@playwright", "test"),
     );
-    if (!declared) return; // genuinely absent: nothing to assert
-    const result = await runAdapter("browser-assert.ts", "ok");
-    const record = JSON.parse(result.stdout.trim().split("\n").pop() ?? "{}");
-    if (result.exitCode === HARNESS_BLOCKED_EXIT_CODE) {
-      // A blocker is still allowed — but only for the browser *build*, never
-      // for the package, and it must say which build it wanted.
-      expect(record.package_resolved).toBe(true);
-      expect(record.missing).not.toBe("@playwright/test");
-      expect(String(record.missing)).toMatch(/^chromium/);
+    if (declared) {
+      const result = await runAdapter("browser-assert.ts", "ok");
+      const record = JSON.parse(result.stdout.trim().split("\n").pop() ?? "{}");
+      if (result.exitCode === HARNESS_BLOCKED_EXIT_CODE) {
+        // A blocker is still allowed — but only for the browser *build*, never
+        // for the package, and it must say which build it wanted.
+        expect(record.package_resolved).toBe(true);
+        expect(record.missing).not.toBe("@playwright/test");
+        expect(String(record.missing)).toMatch(/^chromium/);
+      } else {
+        expect(result.exitCode).toBe(0);
+      }
     } else {
-      expect(result.exitCode).toBe(0);
+      // The outer integration suite is explicitly skipped unless opted in;
+      // when it is enabled this branch is an explicit unavailable dependency,
+      // not an early green return.
+      expect(declared).toBe(false);
     }
   }, 90_000);
 
@@ -1383,20 +1654,23 @@ describeRealFilesystemIntegration("OPS.2a real adapters", () => {
         String(record.missing).startsWith("chromium") ? "chromium-build" : record.missing,
       );
       expect(typeof record.package_resolved).toBe("boolean");
-      return;
+    } else {
+      expect(record.code).toBe("BROWSER_ASSERTION_VERIFIED");
+      // Artifact policy is disabled, not merely redacted.
+      expect(record.artifacts_captured).toBe("none");
+      expect(record.screenshot_policy).toBe("disabled");
+      expect(record.trace_policy).toBe("disabled");
     }
-    expect(record.code).toBe("BROWSER_ASSERTION_VERIFIED");
-    // Artifact policy is disabled, not merely redacted.
-    expect(record.artifacts_captured).toBe("none");
-    expect(record.screenshot_policy).toBe("disabled");
-    expect(record.trace_policy).toBe("disabled");
   }, 90000);
 
   test("PLANTED: the browser assertion fails on text the page never renders", async () => {
     const planted = await runAdapter("browser-assert.ts", "planted-fail");
-    if (planted.exitCode === HARNESS_BLOCKED_EXIT_CODE) return;
-    expect(planted.exitCode).toBe(1);
-    expect(planted.stdout).toContain("BROWSER_ASSERTION_MISMATCH");
+    if (planted.exitCode === HARNESS_BLOCKED_EXIT_CODE) {
+      expect(planted.stdout).toContain("BROWSER_ADAPTER_UNAVAILABLE");
+    } else {
+      expect(planted.exitCode).toBe(1);
+      expect(planted.stdout).toContain("BROWSER_ASSERTION_MISMATCH");
+    }
   }, 90000);
 
   test("an adapter step may only execute its own registered probe", () => {
@@ -1763,6 +2037,102 @@ describe("content-addressed failure artifacts", () => {
     }
   });
 
+  test("PLANTED: a mutated existing target receives zero writes on refusal", () => {
+    const root = fixtureRoot("cas-zero-target-write");
+    const storage = fixtureStorage();
+    const body = "bytes the digest is meant to address\n";
+    const digest = createHash("sha256").update(body, "utf8").digest("hex");
+    const store = join(root, "e2e", "artifacts", "blobs", "sha256");
+    const target = join(store, digest);
+    const sibling = join(store, "sibling-retained-evidence");
+    storage.seedDirectory(store);
+    const plantedMutation = "existing retained evidence was mutated elsewhere\n";
+    storage.writeExclusive(target, plantedMutation);
+    storage.writeExclusive(sibling, "unchanged sibling retained evidence\n");
+    const before = simulatedArtifactCensus(storage, store);
+    const mutations: string[] = [];
+    const audited = {
+      ...storage,
+      seedDirectory(path: string) {
+        mutations.push(`seedDirectory:${path}`);
+        storage.seedDirectory(path);
+      },
+      symlink(path: string) {
+        mutations.push(`symlink:${path}`);
+        storage.symlink(path);
+      },
+      mkdir(path) {
+        mutations.push(`mkdir:${path}`);
+        storage.mkdir(path);
+      },
+      writeExclusive(path, data) {
+        mutations.push(`writeExclusive:${path}`);
+        storage.writeExclusive(path, data);
+      },
+      append(path, data) {
+        mutations.push(`append:${path}`);
+        storage.append(path, data);
+      },
+      link(existing, targetPath) {
+        mutations.push(`link:${existing}:${targetPath}`);
+        storage.link(existing, targetPath);
+      },
+    } satisfies HarnessArtifactStorage & {
+      seedDirectory(path: string): void;
+      symlink(path: string): void;
+    };
+
+    expect(() =>
+      publishFailureBlob({
+        containmentRoot: root,
+        artifactsDirectory: join(root, "e2e", "artifacts"),
+        digest,
+        stored: body,
+        attempt: 1,
+        storage: audited,
+      }),
+    ).toThrow(/does not match its digest/);
+    expect(mutations).toEqual([]);
+    expect(storage.readFile(target)).toBe(plantedMutation);
+    assertCensusUnchanged(before, simulatedArtifactCensus(storage, store));
+    expect(before).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          relativePath: digest,
+          type: "file",
+          size: Buffer.byteLength(plantedMutation, "utf8"),
+          mode: "100644",
+        }),
+        expect.objectContaining({
+          relativePath: "sibling-retained-evidence",
+          type: "file",
+          size: Buffer.byteLength("unchanged sibling retained evidence\n", "utf8"),
+          mode: "100644",
+        }),
+      ]),
+    );
+  });
+
+  test("PLANTED: the zero-write census rejects mkdir, truncate, chmod, and rename-style differences", () => {
+    const before = [
+      { relativePath: "target", type: "file", size: 19, mode: "100644" },
+      { relativePath: "sibling", type: "file", size: 11, mode: "100644" },
+    ] as const satisfies readonly SimulatedArtifactCensusEntry[];
+    const expectDetected = (after: readonly SimulatedArtifactCensusEntry[]): void => {
+      expect(() => assertCensusUnchanged(before, after)).toThrow();
+    };
+    // These are pure census negatives: HarnessArtifactStorage intentionally
+    // exposes none of truncate/chmod/rename, so proving detection does not
+    // mutate retained evidence or a filesystem fixture.
+    expectDetected([
+      ...before,
+      { relativePath: "new-directory", type: "directory", size: 0, mode: "040755" },
+    ]);
+    expectDetected([{ ...before[0], size: 0 }, before[1]]);
+    expectDetected([{ ...before[0], mode: "100600" }, before[1]]);
+    expectDetected([{ ...before[0], relativePath: "renamed-target" }, before[1]]);
+  });
+
   test("a repeated simulated blob write preserves the original bytes", async () => {
     const root = fixtureRoot("cas-notouch");
     const storage = fixtureStorage();
@@ -1798,13 +2168,24 @@ describe("content-addressed failure artifacts", () => {
     const root = fixtureRoot("cas-resume-cap");
     const storage = fixtureStorage();
     const runId = fixtureRunId("cas-resume-cap");
+    const changingStep: HarnessStep = {
+      id: "seed-failure",
+      scenario: "unit",
+      replaySafe: true,
+      // The contract stays byte-for-byte identical across resume while the
+      // child emits fresh output. That distinguishes a real cap refusal from
+      // the stricter identity guard that correctly rejects changed commands.
+      command: command(
+        "process.stderr.write('retry-' + String(process.hrtime.bigint()) + '\\n'); process.exit(1);",
+      ),
+    };
     // First run establishes the namespace and its manifest.
     await runHarness({
       root,
       storage,
       suite: "unit",
       runId,
-      steps: [failingStep("seed-failure", "seed bytes\n")],
+      steps: [changingStep],
       onEvent: () => undefined,
       onOutput: () => undefined,
     });
@@ -1850,7 +2231,7 @@ describe("content-addressed failure artifacts", () => {
       suite: "unit",
       runId,
       resume: true,
-      steps: [failingStep("seed-failure", `over cap ${process.pid}\n`)],
+      steps: [changingStep],
       onEvent: () => undefined,
       onOutput: () => undefined,
     });
@@ -2077,6 +2458,16 @@ describe("retained integration recursive cap", () => {
     expect(report.bytes).toBe(Buffer.byteLength("stageconfigsqlite", "utf8"));
     expect(report.directoryLimit).toBe(MAX_RETAINED_INTEGRATION_DIRECTORIES);
     expect(report.byteLimit).toBe(MAX_RETAINED_INTEGRATION_BYTES);
+    expect(report.truncated).toBe(false);
+    // Equality is saturated: a preflight that calls this exceeded must agree
+    // with the mutation guard instead of promising one more retained entry.
+    expect(() =>
+      assertRetainedIntegrationCapacity(
+        integration,
+        { additionalDirectories: MAX_RETAINED_INTEGRATION_DIRECTORIES - report.directories },
+        storage,
+      ),
+    ).toThrow(/retained integration evidence holds/);
     expect(() =>
       assertRetainedIntegrationCapacity(
         integration,
@@ -2085,6 +2476,34 @@ describe("retained integration recursive cap", () => {
       ),
     ).toThrow(/retained integration evidence holds/);
     expect(storage.exists(join(integration, "blocked-before-create"))).toBe(false);
+  });
+
+  test("PLANTED: recursive capacity census stops once a cap is decisive", () => {
+    const root = fixtureRoot("retained-integration-bounded-walk");
+    const storage = fixtureStorage();
+    const integration = join(root, "e2e", "artifacts", DEFAULT_RETAINED_INTEGRATION_NAMESPACE);
+    storage.seedDirectory(integration);
+    for (let index = 0; index < MAX_RETAINED_INTEGRATION_DIRECTORIES; index += 1) {
+      storage.mkdir(join(integration, `full-${String(index).padStart(3, "0")}`));
+    }
+    // An entry after the decisive directory count is deliberately not required
+    // for the refusal. A hostile retained tree cannot force an unbounded walk.
+    const report = retainedIntegrationCapacityReport(integration, storage);
+    expect(report.directories).toBe(MAX_RETAINED_INTEGRATION_DIRECTORIES);
+    expect(report.exceeded).toBe(true);
+    expect(report.truncated).toBe(true);
+    expect(() => assertRetainedIntegrationCapacity(integration, {}, storage)).toThrow(
+      /retained integration evidence holds/,
+    );
+    const preflight = artifactCapacityReport(
+      root,
+      MAX_ARTIFACT_NAMESPACES,
+      storage,
+      DEFAULT_RETAINED_INTEGRATION_NAMESPACE,
+    );
+    expect(preflight.exceeded).toBe(true);
+    expect(preflight.retainedIntegration?.truncated).toBe(true);
+    expect(preflight.remedy).toMatch(/requested retained integration namespace/i);
   });
 
   test("an existing content-addressed blob remains readable at the recursive cap", () => {
@@ -2418,26 +2837,6 @@ describeRealFilesystemIntegration("real filesystem publication semantics", () =>
     expect(existsSync(join(outside, "e2e", "artifacts", ARTIFACT_BLOB_DIRECTORY))).toBe(false);
   });
 
-  test("PLANTED: a symlinked artifacts directory is refused, not followed", () => {
-    const root = fixtureScratchRoot("symlink-artifacts");
-    const elsewhere = fixtureScratchRoot("symlink-target");
-    const link = join(root, "e2e", "artifacts-link");
-    mkdirSync(join(root, "e2e"), { recursive: true });
-    symlinkSync(join(elsewhere, "e2e", "artifacts"), link);
-    const body = "bytes that must not follow a link\n";
-
-    expect(() =>
-      publishFailureBlob({
-        containmentRoot: root,
-        artifactsDirectory: link,
-        digest: digestOf(body),
-        stored: body,
-        attempt: 1,
-      }),
-    ).toThrow(/ARTIFACT_PATH_UNSAFE|outside|expected a real repository directory/);
-    expect(existsSync(join(elsewhere, "e2e", "artifacts", ARTIFACT_BLOB_DIRECTORY))).toBe(false);
-  });
-
   test("PLANTED: a torn staging file is never published as a blob", () => {
     const root = fixtureScratchRoot("torn-write");
     const body = "complete bytes\n";
@@ -2711,7 +3110,18 @@ describeRealFilesystemIntegration("real filesystem manifest fixtures", () => {
 });
 
 describeRealFilesystemIntegration("real filesystem resume fixtures", () => {
-  const base = { runId: "identity-run", suite: "unit", seed: 7, stepIds: ["a", "b"] };
+  const base = {
+    runId: "identity-run",
+    suite: "unit",
+    seed: 7,
+    stepIds: ["a", "b"],
+    stepContractDigests: ["a".repeat(64), "b".repeat(64)],
+    reproduction: "unavailable: no registered CLI scenario",
+    artifactNamespace: null,
+    gitRevision: "unavailable",
+    childEnvironmentDigest: "c".repeat(64),
+    bindingVersions: {},
+  };
 
   test("the identity is recorded once and re-verified unchanged", () => {
     const root = fixtureScratchRoot("identity-stable");
