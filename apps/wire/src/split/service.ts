@@ -13,11 +13,13 @@ import {
   duplicateClaimRefusal,
   normHash,
   type PrivateNotFound,
+  principalMayReadWorkshop,
   privateNotFound,
   rejectAuthoritativeFields,
+  SplitLeakError,
   type SplitPrincipal,
   type SplitProblemRefusal,
-  sponsorMayReadWorkshop,
+  sha256Hex,
 } from "./policy";
 
 export const PRIVATE_BODY_THRESHOLD_BYTES = 1024;
@@ -39,6 +41,7 @@ export interface WorkshopObject extends WorkshopKey {
   /** A private CAS reference.  It is never a public projection field. */
   readonly privateArtifactDigest?: string;
   readonly promotedPublicEventId?: string;
+  readonly publishedPublicArtifactId?: string;
 }
 
 export interface PublicClaimInput {
@@ -65,6 +68,11 @@ export interface StoredPublicLedgerEvent extends PublicLedgerEvent {
   readonly sourceWorkshopId: string;
 }
 
+export interface PublicArtifact {
+  readonly id: string;
+  readonly bodyMd: string;
+}
+
 export interface PromotionReceipt {
   readonly event: PublicLedgerEvent;
 }
@@ -73,6 +81,41 @@ export interface SplitIdempotencyRecord {
   readonly requestDigest: string;
   readonly receipt: PromotionReceipt;
 }
+
+export interface IdempotencyScope {
+  readonly principalId: string;
+  readonly sessionId: string;
+  readonly operation: "ledger.promote";
+  readonly problemId: string;
+}
+
+export interface AuthenticatedFellowPrincipal {
+  readonly kind: "fellow";
+  readonly fellowId: string;
+  readonly sponsorId: string;
+  readonly sessionId: string;
+}
+
+export interface AuthenticatedSponsorPrincipal {
+  readonly kind: "sponsor";
+  readonly sponsorId: string;
+  readonly sessionId: string;
+}
+
+/** Auth-derived context only; it is never accepted in a workshop JSON body. */
+export type AuthenticatedWorkshopActor =
+  | AuthenticatedFellowPrincipal
+  | AuthenticatedSponsorPrincipal;
+
+export interface SplitIdFactory {
+  nextPublicEventId(): string;
+  nextPublicArtifactId(): string;
+}
+
+const cryptoIds: SplitIdFactory = {
+  nextPublicEventId: () => `EV-${crypto.randomUUID()}`,
+  nextPublicArtifactId: () => `PA-${crypto.randomUUID()}`,
+};
 
 export interface OpenClaimRef {
   readonly id: string;
@@ -92,21 +135,31 @@ export interface KraterSplitTransaction {
   getWorkshop(workshopId: string): WorkshopObject | undefined;
   insertWorkshop(workshop: WorkshopObject): void;
   markWorkshopPromoted(workshopId: string, publicEventId: string): void;
+  markWorkshopArtifactPublished(workshopId: string, publicArtifactId: string): void;
   getPublicEvents(problemId: string): readonly StoredPublicLedgerEvent[];
   insertPublicEvent(event: StoredPublicLedgerEvent): void;
+  /** Private CAS retrieval, called only after workshop authorization. */
+  getPrivateArtifact(privateArtifactDigest: string): { readonly bodyMd: string } | undefined;
+  /** Must copy and verify private-CAS bytes before exposing the returned public artifact. */
+  copyPrivateArtifactToPublic(
+    privateArtifactDigest: string,
+    publicArtifactId: string,
+  ): PublicArtifact | undefined;
+  bindPublicArtifact(publicEventId: string, artifact: PublicArtifact): void;
+  getPublicArtifact(publicArtifactId: string): PublicArtifact | undefined;
   findOpenClaim(problemId: string, normalizedHash: string): OpenClaimRef | undefined;
   insertOpenClaim(claim: OpenClaimRef): void;
-  getIdempotency(key: string): SplitIdempotencyRecord | undefined;
-  putIdempotency(key: string, record: SplitIdempotencyRecord): void;
+  getIdempotency(scope: IdempotencyScope, key: string): SplitIdempotencyRecord | undefined;
+  putIdempotency(scope: IdempotencyScope, key: string, record: SplitIdempotencyRecord): void;
 }
 
 export interface KraterSplitPort {
   transaction<T>(operation: (transaction: KraterSplitTransaction) => Promise<T> | T): Promise<T>;
 }
 
-export interface WorkshopPushInput extends WorkshopKey {
+export interface WorkshopPushInput {
   readonly workshopId: string;
-  readonly sponsorId: string;
+  readonly problemId: string;
   readonly type: WorkshopObject["type"];
   readonly title: string;
   readonly bodyMd: string;
@@ -145,8 +198,14 @@ export interface SponsorWorkshopCursor {
 export interface SponsorPrivateArtifact {
   readonly status: 200;
   readonly cacheControl: "private, no-store";
-  /** The authenticated Worker may resolve this handle; it is never public CAS output. */
-  readonly privateArtifactDigest: string;
+  /** Retrieved bytes are private and may only leave through the authenticated Worker. */
+  readonly bodyMd: string;
+}
+
+export interface PublicArtifactDelivery {
+  readonly status: 200;
+  readonly cacheControl: "public, max-age=10";
+  readonly bodyMd: string;
 }
 
 export interface PublicLedgerSnapshot {
@@ -171,10 +230,7 @@ export interface PublicExport {
 
 export interface PromoteInput {
   readonly workshopId: string;
-  readonly actorSponsorId: string;
-  readonly actorFellowId: string;
   readonly idempotencyKey: string;
-  readonly requestDigest: string;
   readonly publicClaim: PublicClaimInput;
 }
 
@@ -202,12 +258,33 @@ export interface IdempotencyConflict {
   readonly suggestedAction: "retry_original_request";
 }
 
+export interface PublicationRequired {
+  readonly status: 409;
+  readonly code: "PROMOTION_REQUIRED";
+}
+
+export interface ArtifactPublicationCreated {
+  readonly status: 201;
+  readonly publicArtifactId: string;
+}
+
+export interface ArtifactAlreadyPublished {
+  readonly status: 200;
+  readonly publicArtifactId: string;
+}
+
 export type PromoteResult =
   | PromotionCreated
   | PromotionReplayed
   | PromotionAlreadyExists
   | IdempotencyConflict
   | SplitProblemRefusal
+  | PrivateNotFound;
+
+export type PublishArtifactResult =
+  | ArtifactPublicationCreated
+  | ArtifactAlreadyPublished
+  | PublicationRequired
   | PrivateNotFound;
 
 /**
@@ -240,9 +317,108 @@ function extractFrom(bodyMd: string): string {
   return bodyMd.replace(/\s+/gu, " ").trim().slice(0, 280);
 }
 
+function actorMayManageWorkshop(
+  actor: AuthenticatedWorkshopActor,
+  workshop: WorkshopObject,
+): boolean {
+  return (
+    (actor.kind === "sponsor" && actor.sponsorId === workshop.sponsorId) ||
+    (actor.kind === "fellow" &&
+      actor.fellowId === workshop.fellowId &&
+      actor.sponsorId === workshop.sponsorId)
+  );
+}
+
+function idempotencyScope(actor: AuthenticatedWorkshopActor, problemId: string): IdempotencyScope {
+  return {
+    principalId:
+      actor.kind === "fellow" ? `fellow:${actor.fellowId}` : `sponsor:${actor.sponsorId}`,
+    sessionId: actor.sessionId,
+    operation: "ledger.promote",
+    problemId,
+  };
+}
+
+/** Canonical JSON prevents semantically identical bodies from acquiring different replay identities. */
+function canonicalJson(value: unknown): string {
+  if (value === null) return "null";
+  if (typeof value === "string") return JSON.stringify(value);
+  if (typeof value === "boolean") return value ? "true" : "false";
+  if (typeof value === "number") {
+    if (!Number.isFinite(value))
+      throw new TypeError("promotion request contains a non-finite number");
+    return JSON.stringify(value);
+  }
+  if (Array.isArray(value)) return `[${value.map(canonicalJson).join(",")}]`;
+  if (typeof value === "object") {
+    const record = value as Readonly<Record<string, unknown>>;
+    return `{${Object.keys(record)
+      .sort()
+      .map((key) => `${JSON.stringify(key)}:${canonicalJson(record[key])}`)
+      .join(",")}}`;
+  }
+  throw new TypeError("promotion request contains a non-JSON value");
+}
+
+async function promotionRequestDigest(
+  actor: AuthenticatedWorkshopActor,
+  workshop: WorkshopObject,
+  input: PromoteInput,
+): Promise<string> {
+  return sha256Hex(
+    canonicalJson({
+      operation: "ledger.promote",
+      principal: idempotencyScope(actor, workshop.problemId).principalId,
+      session: actor.sessionId,
+      problem: workshop.problemId,
+      workshop: workshop.id,
+      publicClaim: input.publicClaim,
+    }),
+  );
+}
+
 function publicEventFrom(stored: StoredPublicLedgerEvent): PublicLedgerEvent {
   const { sourceWorkshopId: _sourceWorkshopId, ...event } = stored;
   return event;
+}
+
+function assertExactKeys(
+  value: Readonly<Record<string, unknown>>,
+  allowed: readonly string[],
+): void {
+  for (const key of Object.keys(value)) {
+    if (!allowed.includes(key)) throw new SplitLeakError(key);
+  }
+}
+
+/**
+ * Public ledger construction is allowlisted, not merely "not obviously
+ * private".  An innocent-looking future key such as `annotation` therefore
+ * fails closed until the public face contract explicitly admits it.
+ */
+export function assertPublicLedgerProjectionShape(value: unknown): void {
+  if (value === null || typeof value !== "object" || Array.isArray(value)) {
+    throw new SplitLeakError("non-object-public-ledger-projection");
+  }
+  const record = value as Readonly<Record<string, unknown>>;
+  const events = record.events ?? record.results;
+  assertExactKeys(record, ["status", "cacheControl", "publicSeq", "events", "results"]);
+  if (!Array.isArray(events)) throw new SplitLeakError("events-or-results");
+  for (const event of events) {
+    if (event === null || typeof event !== "object" || Array.isArray(event)) {
+      throw new SplitLeakError("non-object-public-event");
+    }
+    assertExactKeys(event as Readonly<Record<string, unknown>>, [
+      "id",
+      "problemId",
+      "publicSeq",
+      "claimId",
+      "title",
+      "extract",
+      "statement",
+    ]);
+  }
+  assertPublicProjectionSafe(value);
 }
 
 function publicSnapshot(
@@ -255,14 +431,28 @@ function publicSnapshot(
     publicSeq: transaction.currentPublicSeq(problemId),
     events: transaction.getPublicEvents(problemId).map(publicEventFrom),
   };
-  assertPublicProjectionSafe(snapshot);
+  assertPublicLedgerProjectionShape(snapshot);
   return snapshot;
 }
 
-export class SplitService {
-  constructor(private readonly krater: KraterSplitPort) {}
+function deliverPublicArtifact(artifact: PublicArtifact): PublicArtifactDelivery {
+  return {
+    status: 200,
+    cacheControl: "public, max-age=10",
+    bodyMd: artifact.bodyMd,
+  };
+}
 
-  async pushWorkshop(input: WorkshopPushInput): Promise<WorkshopPushResult> {
+export class SplitService {
+  constructor(
+    private readonly krater: KraterSplitPort,
+    private readonly ids: SplitIdFactory = cryptoIds,
+  ) {}
+
+  async pushWorkshop(
+    actor: AuthenticatedFellowPrincipal,
+    input: WorkshopPushInput,
+  ): Promise<WorkshopPushResult> {
     const spilledToPrivateCas = utf8ByteLength(input.bodyMd) > PRIVATE_BODY_THRESHOLD_BYTES;
     if (spilledToPrivateCas && input.privateArtifactDigest === undefined) {
       return {
@@ -274,12 +464,15 @@ export class SplitService {
     }
 
     return this.krater.transaction((transaction) => {
-      const workshopSeq = transaction.nextWorkshopSeq(input);
+      const workshopSeq = transaction.nextWorkshopSeq({
+        problemId: input.problemId,
+        fellowId: actor.fellowId,
+      });
       transaction.insertWorkshop({
         id: input.workshopId,
         problemId: input.problemId,
-        fellowId: input.fellowId,
-        sponsorId: input.sponsorId,
+        fellowId: actor.fellowId,
+        sponsorId: actor.sponsorId,
         workshopSeq,
         type: input.type,
         title: input.title,
@@ -298,7 +491,13 @@ export class SplitService {
   ): Promise<SponsorWorkshopCard | PrivateNotFound> {
     return this.krater.transaction((transaction) => {
       const workshop = transaction.getWorkshop(workshopId);
-      if (workshop === undefined || !sponsorMayReadWorkshop(principal, workshop.sponsorId)) {
+      if (
+        workshop === undefined ||
+        !principalMayReadWorkshop(principal, {
+          fellowId: workshop.fellowId,
+          sponsorId: workshop.sponsorId,
+        })
+      ) {
         return privateNotFound();
       }
       return {
@@ -318,7 +517,13 @@ export class SplitService {
   ): Promise<SponsorWorkshopCursor | PrivateNotFound> {
     return this.krater.transaction((transaction) => {
       const workshop = transaction.getWorkshop(workshopId);
-      if (workshop === undefined || !sponsorMayReadWorkshop(principal, workshop.sponsorId)) {
+      if (
+        workshop === undefined ||
+        !principalMayReadWorkshop(principal, {
+          fellowId: workshop.fellowId,
+          sponsorId: workshop.sponsorId,
+        })
+      ) {
         return privateNotFound();
       }
       return { status: 200, workshopSeq: workshop.workshopSeq };
@@ -334,21 +539,66 @@ export class SplitService {
       if (
         workshop === undefined ||
         workshop.privateArtifactDigest === undefined ||
-        !sponsorMayReadWorkshop(principal, workshop.sponsorId)
+        !principalMayReadWorkshop(principal, {
+          fellowId: workshop.fellowId,
+          sponsorId: workshop.sponsorId,
+        })
       ) {
         return privateNotFound();
       }
+      const artifact = transaction.getPrivateArtifact(workshop.privateArtifactDigest);
+      if (artifact === undefined) return privateNotFound();
       return {
         status: 200,
         cacheControl: "private, no-store",
-        privateArtifactDigest: workshop.privateArtifactDigest,
+        bodyMd: artifact.bodyMd,
       };
     });
   }
 
-  /** The public CAS surface cannot resolve a private workshop digest, even after promotion. */
-  publicPrivateArtifact(): PrivateNotFound {
-    return privateNotFound();
+  /**
+   * A public handle is resolvable only after `publishWorkshopArtifact` has
+   * copied and bound a verified public CAS object.  A private digest is merely
+   * an unknown public handle, so it cannot act as an existence oracle.
+   */
+  async publicArtifact(
+    publicArtifactId: string,
+  ): Promise<PublicArtifactDelivery | PrivateNotFound> {
+    return this.krater.transaction((transaction) => {
+      const artifact = transaction.getPublicArtifact(publicArtifactId);
+      if (artifact === undefined) return privateNotFound();
+      return deliverPublicArtifact(artifact);
+    });
+  }
+
+  async publishWorkshopArtifact(
+    actor: AuthenticatedWorkshopActor,
+    workshopId: string,
+  ): Promise<PublishArtifactResult> {
+    return this.krater.transaction((transaction) => {
+      const workshop = transaction.getWorkshop(workshopId);
+      if (workshop === undefined || !actorMayManageWorkshop(actor, workshop))
+        return privateNotFound();
+      if (workshop.privateArtifactDigest === undefined) return privateNotFound();
+      if (workshop.promotedPublicEventId === undefined) {
+        return { status: 409, code: "PROMOTION_REQUIRED" };
+      }
+      if (workshop.publishedPublicArtifactId !== undefined) {
+        return { status: 200, publicArtifactId: workshop.publishedPublicArtifactId };
+      }
+
+      const publicArtifactId = this.ids.nextPublicArtifactId();
+      // The port's contract is copy-and-verify first; no public binding is
+      // written if the private bytes cannot be read or copied.
+      const artifact = transaction.copyPrivateArtifactToPublic(
+        workshop.privateArtifactDigest,
+        publicArtifactId,
+      );
+      if (artifact === undefined) return privateNotFound();
+      transaction.bindPublicArtifact(workshop.promotedPublicEventId, artifact);
+      transaction.markWorkshopArtifactPublished(workshop.id, artifact.id);
+      return { status: 201, publicArtifactId: artifact.id };
+    });
   }
 
   async publicLedger(problemId: string): Promise<PublicLedgerSnapshot> {
@@ -369,7 +619,7 @@ export class SplitService {
         cacheControl: "public, max-age=10",
         results,
       };
-      assertPublicProjectionSafe(result);
+      assertPublicLedgerProjectionShape(result);
       return result;
     });
   }
@@ -383,17 +633,23 @@ export class SplitService {
         publicSeq: snapshot.publicSeq,
         events: snapshot.events,
       };
-      assertPublicProjectionSafe(result);
+      assertPublicLedgerProjectionShape(result);
       return result;
     });
   }
 
-  async promote(input: PromoteInput): Promise<PromoteResult> {
+  async promote(actor: AuthenticatedWorkshopActor, input: PromoteInput): Promise<PromoteResult> {
     try {
       return await this.krater.transaction(async (transaction) => {
-        const previous = transaction.getIdempotency(input.idempotencyKey);
+        const workshop = transaction.getWorkshop(input.workshopId);
+        if (workshop === undefined || !actorMayManageWorkshop(actor, workshop))
+          return privateNotFound();
+
+        const scope = idempotencyScope(actor, workshop.problemId);
+        const requestDigest = await promotionRequestDigest(actor, workshop, input);
+        const previous = transaction.getIdempotency(scope, input.idempotencyKey);
         if (previous !== undefined) {
-          if (previous.requestDigest === input.requestDigest) {
+          if (previous.requestDigest === requestDigest) {
             return { status: 200, outcome: "replayed", receipt: previous.receipt };
           }
           return {
@@ -403,14 +659,6 @@ export class SplitService {
           };
         }
 
-        const workshop = transaction.getWorkshop(input.workshopId);
-        if (
-          workshop === undefined ||
-          workshop.sponsorId !== input.actorSponsorId ||
-          workshop.fellowId !== input.actorFellowId
-        ) {
-          return privateNotFound();
-        }
         if (workshop.promotedPublicEventId !== undefined) {
           return {
             status: 409,
@@ -428,7 +676,7 @@ export class SplitService {
 
         const publicSeq = transaction.nextPublicSeq(workshop.problemId);
         const event: StoredPublicLedgerEvent = {
-          id: `E-${publicSeq}`,
+          id: this.ids.nextPublicEventId(),
           problemId: workshop.problemId,
           publicSeq,
           claimId: input.publicClaim.claimId,
@@ -447,8 +695,8 @@ export class SplitService {
           normHash: normalizedHash,
         });
         transaction.markWorkshopPromoted(workshop.id, event.id);
-        transaction.putIdempotency(input.idempotencyKey, {
-          requestDigest: input.requestDigest,
+        transaction.putIdempotency(scope, input.idempotencyKey, {
+          requestDigest,
           receipt,
         });
 

@@ -1,6 +1,10 @@
 import { describe, expect, test } from "bun:test";
 import {
+  type AuthenticatedFellowPrincipal,
+  type AuthenticatedSponsorPrincipal,
+  assertPublicLedgerProjectionShape,
   assertPublicProjectionSafe,
+  type IdempotencyScope,
   KraterCommitUnknownError,
   type KraterSplitPort,
   type KraterSplitTransaction,
@@ -31,11 +35,16 @@ interface MemoryState {
   readonly publicEvents: Map<string, StoredPublicLedgerEvent[]>;
   readonly openClaims: Map<string, OpenClaimRef>;
   readonly idempotency: Map<string, SplitIdempotencyRecord>;
+  readonly privateArtifacts: Map<string, string>;
+  readonly publicArtifacts: Map<string, string>;
+  readonly publicArtifactBindings: Map<string, string>;
 }
 
 const workshopScope = (key: WorkshopKey): string => `${key.problemId}\u0000${key.fellowId}`;
 const claimScope = (problemId: string, normalizedHash: string): string =>
   `${problemId}\u0000${normalizedHash}`;
+const idempotencyScope = (scope: IdempotencyScope, key: string): string =>
+  `${scope.principalId}\u0000${scope.sessionId}\u0000${scope.operation}\u0000${scope.problemId}\u0000${key}`;
 
 function emptyState(): MemoryState {
   return {
@@ -45,6 +54,9 @@ function emptyState(): MemoryState {
     publicEvents: new Map(),
     openClaims: new Map(),
     idempotency: new Map(),
+    privateArtifacts: new Map(),
+    publicArtifacts: new Map(),
+    publicArtifactBindings: new Map(),
   };
 }
 
@@ -58,6 +70,9 @@ function copyState(state: MemoryState): MemoryState {
     ),
     openClaims: new Map(state.openClaims),
     idempotency: new Map(state.idempotency),
+    privateArtifacts: new Map(state.privateArtifacts),
+    publicArtifacts: new Map(state.publicArtifacts),
+    publicArtifactBindings: new Map(state.publicArtifactBindings),
   };
 }
 
@@ -95,6 +110,15 @@ class MemoryTransaction implements KraterSplitTransaction {
     this.state.workshops.set(workshopId, { ...workshop, promotedPublicEventId: publicEventId });
   }
 
+  markWorkshopArtifactPublished(workshopId: string, publicArtifactId: string): void {
+    const workshop = this.state.workshops.get(workshopId);
+    if (workshop === undefined) throw new Error("test Krater received an unknown workshop");
+    this.state.workshops.set(workshopId, {
+      ...workshop,
+      publishedPublicArtifactId: publicArtifactId,
+    });
+  }
+
   getPublicEvents(problemId: string): readonly StoredPublicLedgerEvent[] {
     return this.state.publicEvents.get(problemId) ?? [];
   }
@@ -102,6 +126,34 @@ class MemoryTransaction implements KraterSplitTransaction {
   insertPublicEvent(event: StoredPublicLedgerEvent): void {
     const events = this.state.publicEvents.get(event.problemId) ?? [];
     this.state.publicEvents.set(event.problemId, [...events, event]);
+  }
+
+  getPrivateArtifact(privateArtifactDigest: string): { readonly bodyMd: string } | undefined {
+    const bodyMd = this.state.privateArtifacts.get(privateArtifactDigest);
+    return bodyMd === undefined ? undefined : { bodyMd };
+  }
+
+  copyPrivateArtifactToPublic(
+    privateArtifactDigest: string,
+    publicArtifactId: string,
+  ): { readonly id: string; readonly bodyMd: string } | undefined {
+    const bodyMd = this.state.privateArtifacts.get(privateArtifactDigest);
+    return bodyMd === undefined ? undefined : { id: publicArtifactId, bodyMd };
+  }
+
+  bindPublicArtifact(
+    publicEventId: string,
+    artifact: { readonly id: string; readonly bodyMd: string },
+  ): void {
+    this.state.publicArtifacts.set(artifact.id, artifact.bodyMd);
+    this.state.publicArtifactBindings.set(publicEventId, artifact.id);
+  }
+
+  getPublicArtifact(
+    publicArtifactId: string,
+  ): { readonly id: string; readonly bodyMd: string } | undefined {
+    const bodyMd = this.state.publicArtifacts.get(publicArtifactId);
+    return bodyMd === undefined ? undefined : { id: publicArtifactId, bodyMd };
   }
 
   findOpenClaim(problemId: string, normalizedHash: string): OpenClaimRef | undefined {
@@ -112,12 +164,12 @@ class MemoryTransaction implements KraterSplitTransaction {
     this.state.openClaims.set(claimScope(claim.problemId, claim.normHash), claim);
   }
 
-  getIdempotency(key: string): SplitIdempotencyRecord | undefined {
-    return this.state.idempotency.get(key);
+  getIdempotency(scope: IdempotencyScope, key: string): SplitIdempotencyRecord | undefined {
+    return this.state.idempotency.get(idempotencyScope(scope, key));
   }
 
-  putIdempotency(key: string, record: SplitIdempotencyRecord): void {
-    this.state.idempotency.set(key, record);
+  putIdempotency(scope: IdempotencyScope, key: string, record: SplitIdempotencyRecord): void {
+    this.state.idempotency.set(idempotencyScope(scope, key), record);
   }
 }
 
@@ -128,6 +180,10 @@ class MemoryKrater implements KraterSplitPort {
 
   armDisconnectAfterCommit(): void {
     this.disconnectAfterNextCommit = true;
+  }
+
+  seedPrivateArtifact(digest: string, bodyMd: string): void {
+    this.state.privateArtifacts.set(digest, bodyMd);
   }
 
   async transaction<T>(
@@ -160,8 +216,6 @@ function workshop(overrides: Partial<WorkshopPushInput> = {}): WorkshopPushInput
   return {
     workshopId: "W-fellow-a-1",
     problemId: "P-split",
-    fellowId: "fellow-a",
-    sponsorId: "sponsor-a",
     type: "claim-draft",
     title: "Private workshop title",
     bodyMd: "private workshop body",
@@ -172,10 +226,7 @@ function workshop(overrides: Partial<WorkshopPushInput> = {}): WorkshopPushInput
 function promotion(overrides: Partial<PromoteInput> = {}): PromoteInput {
   return {
     workshopId: "W-fellow-a-1",
-    actorSponsorId: "sponsor-a",
-    actorFellowId: "fellow-a",
     idempotencyKey: "idem-promote-1",
-    requestDigest: "request-sha256-a",
     publicClaim: {
       claimId: "C-1",
       title: "Public claim title",
@@ -187,19 +238,61 @@ function promotion(overrides: Partial<PromoteInput> = {}): PromoteInput {
   };
 }
 
+const FELLOW_A: AuthenticatedFellowPrincipal = {
+  kind: "fellow",
+  fellowId: "fellow-a",
+  sponsorId: "sponsor-a",
+  sessionId: "S-fellow-a",
+};
+const FELLOW_B: AuthenticatedFellowPrincipal = {
+  kind: "fellow",
+  fellowId: "fellow-b",
+  sponsorId: "sponsor-b",
+  sessionId: "S-fellow-b",
+};
+const FELLOW_A_RESUMED: AuthenticatedFellowPrincipal = {
+  ...FELLOW_A,
+  sessionId: "S-fellow-a-resumed",
+};
+const SPONSOR_A: AuthenticatedSponsorPrincipal = {
+  kind: "sponsor",
+  sponsorId: "sponsor-a",
+  sessionId: "S-sponsor-a",
+};
+
+class TestIds {
+  private event = 0;
+  private artifact = 0;
+
+  nextPublicEventId(): string {
+    this.event += 1;
+    return `EV-test-${this.event}`;
+  }
+
+  nextPublicArtifactId(): string {
+    this.artifact += 1;
+    return `PA-test-${this.artifact}`;
+  }
+}
+
+function splitService(krater = new MemoryKrater()): SplitService {
+  return new SplitService(krater, new TestIds());
+}
+
 function eventIds(events: readonly PublicLedgerEvent[]): string[] {
   return events.map((event) => event.id);
 }
 
 describe("S-3 split cursors and existence hiding", () => {
   test("workshop cursors are per Fellow/problem and never advance the public cursor", async () => {
-    const service = new SplitService(new MemoryKrater());
+    const service = splitService();
     const results = await Promise.all([
-      service.pushWorkshop(workshop({ workshopId: "W-a-1" })),
+      service.pushWorkshop(FELLOW_A, workshop({ workshopId: "W-a-1" })),
+      service.pushWorkshop(FELLOW_B, workshop({ workshopId: "W-b-1" })),
       service.pushWorkshop(
-        workshop({ workshopId: "W-b-1", fellowId: "fellow-b", sponsorId: "sponsor-b" }),
+        FELLOW_A,
+        workshop({ workshopId: "W-a-2", title: "Second private draft" }),
       ),
-      service.pushWorkshop(workshop({ workshopId: "W-a-2", title: "Second private draft" })),
     ]);
 
     expect(results).toEqual([
@@ -223,49 +316,63 @@ describe("S-3 split cursors and existence hiding", () => {
   });
 
   test("public sequences are per problem and advance only after a successful promotion", async () => {
-    const service = new SplitService(new MemoryKrater());
-    await service.pushWorkshop(workshop({ workshopId: "W-p1-1", problemId: "P-one" }));
-    await service.pushWorkshop(
-      workshop({ workshopId: "W-p2-1", problemId: "P-two", fellowId: "fellow-b", sponsorId: "sponsor-b" }),
-    );
-    await service.pushWorkshop(workshop({ workshopId: "W-p1-2", problemId: "P-one" }));
+    const service = splitService();
+    await service.pushWorkshop(FELLOW_A, workshop({ workshopId: "W-p1-1", problemId: "P-one" }));
+    await service.pushWorkshop(FELLOW_B, workshop({ workshopId: "W-p2-1", problemId: "P-two" }));
+    await service.pushWorkshop(FELLOW_A, workshop({ workshopId: "W-p1-2", problemId: "P-one" }));
 
     expect((await service.publicLedger("P-one")).publicSeq).toBe(0);
     expect((await service.publicLedger("P-two")).publicSeq).toBe(0);
     expect(
       await service.promote(
-        promotion({ workshopId: "W-p1-1", publicClaim: { ...promotion().publicClaim, claimId: "C-p1-1" } }),
-      ),
-    ).toMatchObject({ status: 201, outcome: "created", receipt: { event: { publicSeq: 1 } } });
-    expect(
-      await service.promote(
+        FELLOW_A,
         promotion({
-          workshopId: "W-p2-1",
-          actorSponsorId: "sponsor-b",
-          actorFellowId: "fellow-b",
-          idempotencyKey: "idem-p2-1",
-          requestDigest: "request-sha256-p2-1",
-          publicClaim: { ...promotion().publicClaim, claimId: "C-p2-1", statement: "P-two has property R." },
+          workshopId: "W-p1-1",
+          publicClaim: { ...promotion().publicClaim, claimId: "C-p1-1" },
         }),
       ),
     ).toMatchObject({ status: 201, outcome: "created", receipt: { event: { publicSeq: 1 } } });
     expect(
       await service.promote(
+        FELLOW_B,
+        promotion({
+          workshopId: "W-p2-1",
+          idempotencyKey: "idem-p2-1",
+          publicClaim: {
+            ...promotion().publicClaim,
+            claimId: "C-p2-1",
+            statement: "P-two has property R.",
+          },
+        }),
+      ),
+    ).toMatchObject({ status: 201, outcome: "created", receipt: { event: { publicSeq: 1 } } });
+    expect(
+      await service.promote(
+        FELLOW_A,
         promotion({
           workshopId: "W-p1-2",
           idempotencyKey: "idem-p1-2",
-          requestDigest: "request-sha256-p1-2",
-          publicClaim: { ...promotion().publicClaim, claimId: "C-p1-2", statement: "P-one has property S." },
+          publicClaim: {
+            ...promotion().publicClaim,
+            claimId: "C-p1-2",
+            statement: "P-one has property S.",
+          },
         }),
       ),
     ).toMatchObject({ status: 201, outcome: "created", receipt: { event: { publicSeq: 2 } } });
-    expect((await service.publicLedger("P-one")).publicSeq).toBe(2);
-    expect((await service.publicLedger("P-two")).publicSeq).toBe(1);
+    const one = await service.publicLedger("P-one");
+    const two = await service.publicLedger("P-two");
+    expect(one.publicSeq).toBe(2);
+    expect(two.publicSeq).toBe(1);
+    expect(eventIds(one.events)).toEqual(["EV-test-1", "EV-test-3"]);
+    expect(eventIds(two.events)).toEqual(["EV-test-2"]);
+    expect(new Set([...eventIds(one.events), ...eventIds(two.events)]).size).toBe(3);
   });
 
   test("owner sponsor sees a card while anonymous, cross-sponsor, and absent reads are identical", async () => {
-    const service = new SplitService(new MemoryKrater());
+    const service = splitService();
     await service.pushWorkshop(
+      FELLOW_A,
       workshop({
         workshopId: "W-private",
         title: "Private canary title",
@@ -286,10 +393,24 @@ describe("S-3 split cursors and existence hiding", () => {
       extract: "private canary body",
     });
     expect(JSON.stringify(owner)).not.toContain("bodyMd");
+    expect(
+      await service.sponsorWorkshopCard(
+        { kind: "fellow", fellowId: "fellow-a", sponsorId: "sponsor-a" },
+        "W-private",
+      ),
+    ).toEqual(owner);
 
     const anonymous = await service.sponsorWorkshopCard({ kind: "anonymous" }, "W-private");
     const crossSponsor = await service.sponsorWorkshopCard(
       { kind: "sponsor", sponsorId: "sponsor-b" },
+      "W-private",
+    );
+    const crossFellow = await service.sponsorWorkshopCard(
+      { kind: "fellow", fellowId: "fellow-b", sponsorId: "sponsor-b" },
+      "W-private",
+    );
+    const mismatchedFellow = await service.sponsorWorkshopCard(
+      { kind: "fellow", fellowId: "fellow-a", sponsorId: "sponsor-b" },
       "W-private",
     );
     const absent = await service.sponsorWorkshopCard(
@@ -299,16 +420,56 @@ describe("S-3 split cursors and existence hiding", () => {
     const indistinguishable = { status: 404, code: "NOT_FOUND", cacheControl: "no-store" } as const;
     expect(anonymous).toEqual(indistinguishable);
     expect(crossSponsor).toEqual(indistinguishable);
+    expect(crossFellow).toEqual(indistinguishable);
+    expect(mismatchedFellow).toEqual(indistinguishable);
     expect(absent).toEqual(indistinguishable);
     expect(JSON.stringify(crossSponsor)).not.toContain("W-private");
+  });
+
+  test("caller-supplied owner or actor fields cannot override authenticated principal context", async () => {
+    const service = splitService();
+    const injectedOwner = {
+      ...workshop({ workshopId: "W-context-owned" }),
+      fellowId: "fellow-b",
+      sponsorId: "sponsor-b",
+    };
+    await service.pushWorkshop(FELLOW_A, injectedOwner);
+
+    expect(
+      await service.sponsorWorkshopCard(
+        { kind: "fellow", fellowId: "fellow-a", sponsorId: "sponsor-a" },
+        "W-context-owned",
+      ),
+    ).toMatchObject({ status: 200, id: "W-context-owned" });
+    expect(
+      await service.sponsorWorkshopCard(
+        { kind: "fellow", fellowId: "fellow-b", sponsorId: "sponsor-b" },
+        "W-context-owned",
+      ),
+    ).toEqual({ status: 404, code: "NOT_FOUND", cacheControl: "no-store" });
+
+    const injectedActor = {
+      ...promotion({ workshopId: "W-context-owned" }),
+      actorSponsorId: "sponsor-a",
+      actorFellowId: "fellow-a",
+      requestDigest: "attacker-supplied-digest-is-ignored",
+    };
+    expect(await service.promote(FELLOW_B, injectedActor)).toEqual({
+      status: 404,
+      code: "NOT_FOUND",
+      cacheControl: "no-store",
+    });
   });
 });
 
 describe("S-3 public-surface and private-CAS exclusion", () => {
   test("cache, search, export, and public CAS exclude workshop bodies and private artifact digests", async () => {
-    const service = new SplitService(new MemoryKrater());
+    const krater = new MemoryKrater();
+    const service = splitService(krater);
     const privateBody = "private-cas-canary ".repeat(80);
+    krater.seedPrivateArtifact("sha256-private-cas-canary", privateBody);
     await service.pushWorkshop(
+      FELLOW_A,
       workshop({
         workshopId: "W-spill",
         title: "Private CAS title",
@@ -324,13 +485,19 @@ describe("S-3 public-surface and private-CAS exclusion", () => {
     expect(sponsorArtifact).toEqual({
       status: 200,
       cacheControl: "private, no-store",
-      privateArtifactDigest: "sha256-private-cas-canary",
+      bodyMd: privateBody,
     });
+    expect(
+      await service.sponsorPrivateArtifact(
+        { kind: "fellow", fellowId: "fellow-a", sponsorId: "sponsor-a" },
+        "W-spill",
+      ),
+    ).toEqual(sponsorArtifact);
 
     const cache = await service.publicLedger("P-split");
     const search = await service.searchPublicLedger("P-split", "private-cas-canary");
     const exported = await service.exportPublicLedger("P-split");
-    const publicCas = service.publicPrivateArtifact();
+    const publicCas = await service.publicArtifact("sha256-private-cas-canary");
     for (const face of [cache, search, exported, publicCas]) {
       const serialized = JSON.stringify(face);
       expect(serialized).not.toContain("private-cas-canary");
@@ -343,35 +510,70 @@ describe("S-3 public-surface and private-CAS exclusion", () => {
     expect(publicCas).toEqual({ status: 404, code: "NOT_FOUND", cacheControl: "no-store" });
   });
 
-  test("promotion creates a public copy but does not publish its private workshop artifact", async () => {
-    const service = new SplitService(new MemoryKrater());
+  test("private bytes become public only after promotion then verified public binding", async () => {
+    const krater = new MemoryKrater();
+    const service = splitService(krater);
+    const privateBody = "private artifact canary ".repeat(80);
+    krater.seedPrivateArtifact("sha256-private-after-promotion", privateBody);
     await service.pushWorkshop(
+      FELLOW_A,
       workshop({
         workshopId: "W-promoted-spill",
-        bodyMd: "private artifact canary ".repeat(80),
+        bodyMd: privateBody,
         privateArtifactDigest: "sha256-private-after-promotion",
       }),
     );
-    const result = await service.promote(promotion({ workshopId: "W-promoted-spill" }));
+    expect(await service.publishWorkshopArtifact(FELLOW_A, "W-promoted-spill")).toEqual({
+      status: 409,
+      code: "PROMOTION_REQUIRED",
+    });
+    const result = await service.promote(FELLOW_A, promotion({ workshopId: "W-promoted-spill" }));
     expect(result).toMatchObject({ status: 201, outcome: "created" });
 
     const publicFace = await service.publicLedger("P-split");
-    expect(eventIds(publicFace.events)).toEqual(["E-1"]);
+    expect(eventIds(publicFace.events)).toEqual(["EV-test-1"]);
     expect(JSON.stringify(publicFace)).not.toContain("private-after-promotion");
-    expect(service.publicPrivateArtifact()).toEqual({
+    expect(await service.publicArtifact("sha256-private-after-promotion")).toEqual({
       status: 404,
       code: "NOT_FOUND",
       cacheControl: "no-store",
+    });
+    const published = await service.publishWorkshopArtifact(SPONSOR_A, "W-promoted-spill");
+    expect(published).toEqual({ status: 201, publicArtifactId: "PA-test-1" });
+    expect(await service.publicArtifact("PA-test-1")).toEqual({
+      status: 200,
+      cacheControl: "public, max-age=10",
+      bodyMd: privateBody,
+    });
+    expect(await service.publishWorkshopArtifact(FELLOW_A, "W-promoted-spill")).toEqual({
+      status: 200,
+      publicArtifactId: "PA-test-1",
     });
   });
 });
 
 describe("S-3 promotion validator", () => {
+  test("normalizes all documented TeX delimiters and confusable whitespace without merging distinct claims", async () => {
+    const canonical = "Every example has $x + y$ property Q.";
+    const equivalentForms = [
+      "Every\u00a0example has $$x\u200B + y$$ property Q.",
+      "Every example has \\(x + y\\) property Q.",
+      "Every example has \\[x + y\\] property Q.",
+    ];
+    const canonicalHash = await normHash(canonical);
+    for (const equivalent of equivalentForms) {
+      expect(await normHash(equivalent)).toBe(canonicalHash);
+    }
+    expect(await normHash("Every example has $x - y$ property Q.")).not.toBe(canonicalHash);
+    expect(await normHash("Some examples have $x + y$ property Q.")).not.toBe(canonicalHash);
+  });
+
   test("refuses self-certification with the S-3 P2/P4 contract error", async () => {
-    const service = new SplitService(new MemoryKrater());
-    await service.pushWorkshop(workshop());
+    const service = splitService();
+    await service.pushWorkshop(FELLOW_A, workshop());
 
     const result = await service.promote(
+      FELLOW_A,
       promotion({
         publicClaim: { ...promotion().publicClaim, candidate: { disposition: "proved" } },
       }),
@@ -388,14 +590,15 @@ describe("S-3 promotion validator", () => {
   });
 
   test("refuses an NFKC-equivalent open claim with P11 and the existing ID", async () => {
-    const service = new SplitService(new MemoryKrater());
+    const service = splitService();
     const firstStatement = "Caf\u00e9 $x  + y$ has property Q.";
     const equivalentStatement = "Cafe\u0301 $x + y$ has property Q.";
     expect(await normHash(firstStatement)).toBe(await normHash(equivalentStatement));
 
-    await service.pushWorkshop(workshop({ workshopId: "W-first" }));
+    await service.pushWorkshop(FELLOW_A, workshop({ workshopId: "W-first" }));
     expect(
       await service.promote(
+        FELLOW_A,
         promotion({
           workshopId: "W-first",
           publicClaim: { ...promotion().publicClaim, claimId: "C-41", statement: firstStatement },
@@ -403,12 +606,12 @@ describe("S-3 promotion validator", () => {
       ),
     ).toMatchObject({ status: 201, outcome: "created" });
 
-    await service.pushWorkshop(workshop({ workshopId: "W-second" }));
+    await service.pushWorkshop(FELLOW_A, workshop({ workshopId: "W-second" }));
     const duplicate = await service.promote(
+      FELLOW_A,
       promotion({
         workshopId: "W-second",
         idempotencyKey: "idem-duplicate",
-        requestDigest: "request-sha256-duplicate",
         publicClaim: {
           ...promotion().publicClaim,
           claimId: "C-42",
@@ -429,19 +632,30 @@ describe("S-3 promotion validator", () => {
 });
 
 describe("S-3 atomic promotion and recovery", () => {
-  test("replays the same idempotency key, rejects a changed digest, and never makes a second public event", async () => {
-    const service = new SplitService(new MemoryKrater());
-    await service.pushWorkshop(workshop());
+  test("server-computes replay identity, rejects a changed body, and never makes a second public event", async () => {
+    const service = splitService();
+    await service.pushWorkshop(FELLOW_A, workshop());
     const input = promotion();
 
-    const created = await service.promote(input);
-    const replayed = await service.promote(input);
-    const conflict = await service.promote({ ...input, requestDigest: "request-sha256-different" });
-    const secondKey = await service.promote({
+    const created = await service.promote(FELLOW_A, input);
+    const replayed = await service.promote(FELLOW_A, input);
+    const conflict = await service.promote(FELLOW_A, {
       ...input,
-      idempotencyKey: "idem-promote-2",
-      requestDigest: "request-sha256-second-key",
+      publicClaim: {
+        ...input.publicClaim,
+        statement: "The same key now carries a changed request body.",
+      },
     });
+    const secondKey = await service.promote(
+      {
+        ...FELLOW_A,
+        sessionId: FELLOW_A.sessionId,
+      },
+      {
+        ...input,
+        idempotencyKey: "idem-promote-2",
+      },
+    );
 
     expect(created).toMatchObject({ status: 201, outcome: "created" });
     expect(replayed).toMatchObject({ status: 200, outcome: "replayed" });
@@ -454,22 +668,102 @@ describe("S-3 atomic promotion and recovery", () => {
     expect(secondKey).toEqual({
       status: 409,
       code: "PROMOTION_ALREADY_EXISTS",
-      publicEventId: "E-1",
+      publicEventId: "EV-test-1",
     });
-    expect(eventIds((await service.publicLedger("P-split")).events)).toEqual(["E-1"]);
+    expect(eventIds((await service.publicLedger("P-split")).events)).toEqual(["EV-test-1"]);
   });
 
   test("a disconnect after the committed transaction is recovered only by the same idempotency key", async () => {
     const krater = new MemoryKrater();
-    const service = new SplitService(krater);
-    await service.pushWorkshop(workshop());
+    const service = splitService(krater);
+    await service.pushWorkshop(FELLOW_A, workshop());
     const input = promotion();
     krater.armDisconnectAfterCommit();
 
-    await expect(service.promote(input)).rejects.toBeInstanceOf(PromotionCommitUnknownError);
-    const recovered = await service.promote(input);
+    await expect(service.promote(FELLOW_A, input)).rejects.toBeInstanceOf(
+      PromotionCommitUnknownError,
+    );
+    const recovered = await service.promote(FELLOW_A, input);
     expect(recovered).toMatchObject({ status: 200, outcome: "replayed" });
-    expect(eventIds((await service.publicLedger("P-split")).events)).toEqual(["E-1"]);
+    expect(eventIds((await service.publicLedger("P-split")).events)).toEqual(["EV-test-1"]);
+  });
+
+  test("the same idempotency key is isolated by principal, session, operation, and problem", async () => {
+    const service = splitService();
+    await service.pushWorkshop(
+      FELLOW_A,
+      workshop({ workshopId: "W-scope-a-p1", problemId: "P-one" }),
+    );
+    await service.pushWorkshop(
+      FELLOW_A,
+      workshop({ workshopId: "W-scope-a-p2", problemId: "P-two" }),
+    );
+    await service.pushWorkshop(
+      FELLOW_A,
+      workshop({ workshopId: "W-scope-a-resumed", problemId: "P-one" }),
+    );
+    await service.pushWorkshop(
+      FELLOW_B,
+      workshop({ workshopId: "W-scope-b-p1", problemId: "P-one" }),
+    );
+
+    const sharedKey = "same-key-different-scope";
+    expect(
+      await service.promote(
+        FELLOW_A,
+        promotion({
+          workshopId: "W-scope-a-p1",
+          idempotencyKey: sharedKey,
+          publicClaim: {
+            ...promotion().publicClaim,
+            claimId: "C-scope-a-p1",
+            statement: "P-one claim A.",
+          },
+        }),
+      ),
+    ).toMatchObject({ status: 201, outcome: "created" });
+    expect(
+      await service.promote(
+        FELLOW_A,
+        promotion({
+          workshopId: "W-scope-a-p2",
+          idempotencyKey: sharedKey,
+          publicClaim: {
+            ...promotion().publicClaim,
+            claimId: "C-scope-a-p2",
+            statement: "P-two claim A.",
+          },
+        }),
+      ),
+    ).toMatchObject({ status: 201, outcome: "created" });
+    expect(
+      await service.promote(
+        FELLOW_A_RESUMED,
+        promotion({
+          workshopId: "W-scope-a-resumed",
+          idempotencyKey: sharedKey,
+          publicClaim: {
+            ...promotion().publicClaim,
+            claimId: "C-scope-a-resumed",
+            statement: "P-one claim B.",
+          },
+        }),
+      ),
+    ).toMatchObject({ status: 201, outcome: "created" });
+    expect(
+      await service.promote(
+        FELLOW_B,
+        promotion({
+          workshopId: "W-scope-b-p1",
+          idempotencyKey: sharedKey,
+          publicClaim: {
+            ...promotion().publicClaim,
+            claimId: "C-scope-b-p1",
+            statement: "P-one claim C.",
+          },
+        }),
+      ),
+    ).toMatchObject({ status: 201, outcome: "created" });
   });
 });
 
@@ -491,5 +785,16 @@ describe("S-3 planted negative", () => {
       expect(error).toBeInstanceOf(SplitLeakError);
       expect((error as SplitLeakError).code).toBe("SPLIT_LEAK_DETECTED");
     }
+  });
+
+  test("should-leak: an innocuous key on a public ledger shape is rejected by the allowlist", () => {
+    const shouldLeak = {
+      status: 200,
+      cacheControl: "public, max-age=10",
+      publicSeq: 1,
+      events: [],
+      annotation: "private bytes under an innocent-looking key",
+    };
+    expect(() => assertPublicLedgerProjectionShape(shouldLeak)).toThrow(SplitLeakError);
   });
 });

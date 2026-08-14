@@ -9,7 +9,13 @@
 
 export type SplitPrincipal =
   | { readonly kind: "anonymous" }
-  | { readonly kind: "sponsor"; readonly sponsorId: string };
+  | { readonly kind: "sponsor"; readonly sponsorId: string }
+  | { readonly kind: "fellow"; readonly fellowId: string; readonly sponsorId: string };
+
+export interface WorkshopOwnership {
+  readonly fellowId: string;
+  readonly sponsorId: string;
+}
 
 export interface PrivateNotFound {
   readonly status: 404;
@@ -27,8 +33,17 @@ export function privateNotFound(): PrivateNotFound {
   return { status: 404, code: "NOT_FOUND", cacheControl: "no-store" };
 }
 
-export function sponsorMayReadWorkshop(principal: SplitPrincipal, sponsorId: string): boolean {
-  return principal.kind === "sponsor" && principal.sponsorId === sponsorId;
+/** A workshop is visible to its owning Fellow and its sponsor, and to nobody else. */
+export function principalMayReadWorkshop(
+  principal: SplitPrincipal,
+  ownership: WorkshopOwnership,
+): boolean {
+  return (
+    (principal.kind === "sponsor" && principal.sponsorId === ownership.sponsorId) ||
+    (principal.kind === "fellow" &&
+      principal.fellowId === ownership.fellowId &&
+      principal.sponsorId === ownership.sponsorId)
+  );
 }
 
 export interface SplitProblemRefusal {
@@ -44,11 +59,53 @@ export interface SplitProblemRefusal {
 const AUTHORITATIVE_FIELDS = new Set([
   "disposition",
   "proved",
+  "isproved",
   "confidence",
   "certificate",
   "certification",
   "verified",
+  "isverified",
+  "claimstatus",
+  "reviewstatus",
 ]);
+const STATUS_FIELD = "status";
+const STATUS_UPGRADES = new Set([
+  "proved",
+  "verified",
+  "certified",
+  "corroborated",
+  "stronglysupported",
+  "resolved",
+]);
+
+function normalizedControlKey(key: string): string {
+  return key.normalize("NFKC").toLowerCase().replace(/[^a-z0-9]/gu, "");
+}
+
+function normalizedStatusValue(value: string): string {
+  return value.normalize("NFKC").toLowerCase().replace(/[^a-z0-9]/gu, "");
+}
+
+function containsAuthoritativeField(value: unknown, seen: WeakSet<object> = new WeakSet()): boolean {
+  if (value === null || typeof value !== "object") return false;
+  if (seen.has(value)) return false;
+  seen.add(value);
+  if (Array.isArray(value)) return value.some((item) => containsAuthoritativeField(item, seen));
+
+  for (const [key, nested] of Object.entries(value)) {
+    const normalizedKey = normalizedControlKey(key);
+    if (AUTHORITATIVE_FIELDS.has(normalizedKey)) return true;
+    if (
+      normalizedKey === STATUS_FIELD &&
+      typeof nested === "string" &&
+      STATUS_UPGRADES.has(normalizedStatusValue(nested))
+    ) {
+      return true;
+    }
+    if (containsAuthoritativeField(nested, seen)) return true;
+  }
+  return false;
+}
 
 /**
  * A Fellow may submit a claim to the ledger but may not submit the ledger's
@@ -58,17 +115,15 @@ const AUTHORITATIVE_FIELDS = new Set([
 export function rejectAuthoritativeFields(
   candidate: Readonly<Record<string, unknown>>,
 ): SplitProblemRefusal | null {
-  for (const key of AUTHORITATIVE_FIELDS) {
-    if (Object.hasOwn(candidate, key)) {
-      return {
-        status: 422,
-        code: "SCHEMA_INVALID",
-        rule: "P2/P4",
-        fixHint:
-          "Remove author-writable disposition, proof, confidence, or certification fields; the ledger computes disposition after independent review.",
-        nextAction: "remove_authoritative_fields",
-      };
-    }
+  if (containsAuthoritativeField(candidate)) {
+    return {
+      status: 422,
+      code: "SCHEMA_INVALID",
+      rule: "P2/P4",
+      fixHint:
+        "Remove author-writable disposition, proof, confidence, certification, or status-upgrade fields; the ledger computes disposition after independent review.",
+      nextAction: "remove_authoritative_fields",
+    };
   }
   return null;
 }
@@ -78,19 +133,38 @@ export function rejectAuthoritativeFields(
  * are delimited before whitespace collapsing, so `$x + y$` remains one token
  * rather than becoming indistinguishable punctuation in surrounding prose.
  */
+const CONFUSABLE_WHITESPACE = /[\p{White_Space}\u200B\u2060\uFEFF]+/gu;
+const MATH_SPAN = /\$\$([\s\S]*?)\$\$|\\\(([\s\S]*?)\\\)|\\\[([\s\S]*?)\\\]|\$([^$]*)\$/gu;
+
+function normalizeWhitespace(value: string): string {
+  return value.normalize("NFKC").toLowerCase().replace(CONFUSABLE_WHITESPACE, " ").trim();
+}
+
+/**
+ * The delimiters are recognized before prose whitespace is collapsed.  Inline
+ * `$…$`, display `$$…$$`, `\\(…\\)`, and `\\[…\\]` all become a protected
+ * mathematical token with normalized interior spacing.
+ */
 export function normalizeClaimStatement(statement: string): string {
-  const normalized = statement.normalize("NFKC").toLowerCase();
-  const tokenizedMath = normalized.replace(/\$([^$]*)\$/gu, (_whole, inner: string) => {
-    return `\u0002${inner.trim().replace(/\s+/gu, " ")}\u0003`;
-  });
-  return tokenizedMath.replace(/\s+/gu, " ").trim();
+  return normalizeWhitespace(
+    statement.replace(MATH_SPAN, (_whole, display, paren, bracket, inline) => {
+      const interior = [display, paren, bracket, inline].find(
+        (value): value is string => typeof value === "string",
+      );
+      return `\u0002${normalizeWhitespace(interior ?? "")}\u0003`;
+    }),
+  );
 }
 
 /** A Web Crypto SHA-256, available in Workers and Bun without a Node-only dependency. */
-export async function normHash(statement: string): Promise<string> {
-  const bytes = new TextEncoder().encode(normalizeClaimStatement(statement));
+export async function sha256Hex(value: string): Promise<string> {
+  const bytes = new TextEncoder().encode(value);
   const digest = await crypto.subtle.digest("SHA-256", bytes);
   return Array.from(new Uint8Array(digest), (byte) => byte.toString(16).padStart(2, "0")).join("");
+}
+
+export async function normHash(statement: string): Promise<string> {
+  return sha256Hex(normalizeClaimStatement(statement));
 }
 
 export function duplicateClaimRefusal(existingId: string): SplitProblemRefusal {
@@ -117,6 +191,8 @@ const FORBIDDEN_PUBLIC_KEYS = new Set([
   "sponsor_id",
   "privateartifactdigest",
   "private_artifact_digest",
+  "privateartifact",
+  "private_artifact",
   "body",
   "bodymd",
   "body_md",
