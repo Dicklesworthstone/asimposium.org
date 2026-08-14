@@ -246,15 +246,10 @@ SERVER_PID=""
 SERVER_PGID=""
 SERVER_MARKER_PID=""
 SERVER_GROUP_VERIFIED=0
-WATCHDOG_PID=""
-WATCHDOG_PGID=""
-WATCHDOG_STARTED=0
 readonly CONTROLLER_PID="$$"
 readonly SERVER_PROCESS_MARKER="s5-diptych-owner-${RUN_ID}"
 readonly SERVER_OWNER_FILE="${RUN_DIR}/server-owner"
 readonly SERVER_OWNER_ACK="${RUN_DIR}/server-owner-ack"
-readonly WATCHDOG_PROCESS_MARKER="s5-diptych-parent-watchdog-${RUN_ID}"
-readonly WATCHDOG_DISARM_FILE="${RUN_DIR}/parent-watchdog-disarmed"
 
 positive_pid() {
   [[ "$1" =~ ^[1-9][0-9]*$ ]]
@@ -290,115 +285,11 @@ wait_for_owned_group_empty() {
   return 1
 }
 
-watchdog_matches_own_identity() {
-  local current_pgid command
-  positive_pid "${WATCHDOG_PID}" && positive_pid "${WATCHDOG_PGID}" || return 1
-  current_pgid="$(ps -o pgid= -p "${WATCHDOG_PID}" 2>/dev/null | tr -d '[:space:]')" || return 1
-  [[ "${current_pgid}" == "${WATCHDOG_PGID}" && "${WATCHDOG_PGID}" == "${WATCHDOG_PID}" ]] || return 1
-  command="$(ps -o command= -p "${WATCHDOG_PID}" 2>/dev/null)" || return 1
-  [[ "${command}" == *"--s5-parent-watchdog=${WATCHDOG_PROCESS_MARKER}"* ]]
-}
-
-stop_parent_loss_watchdog() {
-  [[ ${WATCHDOG_STARTED} -eq 1 ]] || return 0
-  # Disarm before ordinary cleanup so a normal EXIT never races the watchdog. The file lives
-  # in this run's private scratch directory; a SIGKILL cannot create it, so parent loss leaves
-  # the watchdog armed.
-  : >"${WATCHDOG_DISARM_FILE}"
-  if watchdog_matches_own_identity; then
-    for _wait in {1..20}; do
-      kill -0 "${WATCHDOG_PID}" 2>/dev/null || break
-      sleep 0.1
-    done
-    if kill -0 "${WATCHDOG_PID}" 2>/dev/null; then
-      # This is a verified, exact watchdog PID, never a process-group number.
-      watchdog_matches_own_identity || return 1
-      kill -KILL "${WATCHDOG_PID}" 2>/dev/null || return 1
-    fi
-  fi
-  wait "${WATCHDOG_PID}" 2>/dev/null || true
-  WATCHDOG_PID=""
-  WATCHDOG_PGID=""
-  WATCHDOG_STARTED=0
-}
-
-start_parent_loss_watchdog() {
-  # The Worker marker lives in the Worker group, so it cannot clean that group after the
-  # controller itself is SIGKILLed. Start a separate job-control group whose parent is this
-  # script. It continuously verifies its own parent PID and the exact marker PID/PGID/argv;
-  # only after the parent disappears can it reap the verified Worker group.
-  set -m
-  bash -c '
-    watchdog_argument="$1"
-    controller_pid="$2"
-    marker_pid="$3"
-    server_pgid="$4"
-    server_marker="$5"
-    disarm_file="$6"
-    [[ "${watchdog_argument}" == "--s5-parent-watchdog=${watchdog_argument#--s5-parent-watchdog=}" ]] || exit 1
-    [[ "${watchdog_argument#--s5-parent-watchdog=}" != "" ]] || exit 1
-    [[ "${controller_pid}" =~ ^[1-9][0-9]*$ && "${marker_pid}" =~ ^[1-9][0-9]*$ && "${server_pgid}" =~ ^[1-9][0-9]*$ ]] || exit 1
-    marker_matches_group() {
-      current_pgid="$(ps -o pgid= -p "${marker_pid}" 2>/dev/null | tr -d "[:space:]")" || return 1
-      [[ "${current_pgid}" == "${server_pgid}" ]] || return 1
-      command="$(ps -o command= -p "${marker_pid}" 2>/dev/null)" || return 1
-      [[ "${command}" == *"--s5-owned-marker=${server_marker}"* ]]
-    }
-    group_members() {
-      while read -r pid pgid; do
-        [[ "${pgid}" == "${server_pgid}" ]] && printf "%s\\n" "${pid}"
-      done < <(ps -axo pid=,pgid= 2>/dev/null)
-    }
-    group_has_non_marker_member() {
-      while IFS= read -r member; do
-        [[ -n "${member}" && "${member}" != "${marker_pid}" ]] && return 0
-      done < <(group_members)
-      return 1
-    }
-    wait_for_group_empty() {
-      for _wait in {1..20}; do
-        [[ -z "$(group_members)" ]] && return 0
-        sleep 0.1
-      done
-      return 1
-    }
-    while :; do
-      [[ -f "${disarm_file}" ]] && exit 0
-      parent_pid="$(ps -o ppid= -p "$$" 2>/dev/null | tr -d "[:space:]")" || exit 1
-      if [[ "${parent_pid}" != "${controller_pid}" ]]; then
-        marker_matches_group || exit 1
-        kill -TERM -- "-${server_pgid}" 2>/dev/null || exit 1
-        for _wait in {1..20}; do
-          group_has_non_marker_member || break
-          sleep 0.1
-        done
-        marker_matches_group || exit 1
-        if group_has_non_marker_member; then
-          kill -KILL -- "-${server_pgid}" 2>/dev/null || exit 1
-        else
-          kill -KILL "${marker_pid}" 2>/dev/null || exit 1
-        fi
-        wait_for_group_empty
-        exit $?
-      fi
-      sleep 0.1
-    done
-  ' "s5-parent-loss-watchdog" "--s5-parent-watchdog=${WATCHDOG_PROCESS_MARKER}" "${CONTROLLER_PID}" "${SERVER_MARKER_PID}" "${SERVER_PGID}" "${SERVER_PROCESS_MARKER}" "${WATCHDOG_DISARM_FILE}" >/dev/null 2>&1 &
-  WATCHDOG_PID=$!
-  set +m
-  WATCHDOG_PGID="$(ps -o pgid= -p "${WATCHDOG_PID}" 2>/dev/null | tr -d '[:space:]')" || return 1
-  watchdog_matches_own_identity || return 1
-  WATCHDOG_STARTED=1
-}
-
 stop_server() {
   [[ ${SERVER_GROUP_VERIFIED} -eq 1 ]] || return 0
   # The marker is the authorization to signal this group. Do not fall back to SERVER_PID or
   # SERVER_PGID alone: the former may already be gone, and either number may have been reused.
   marker_matches_owned_group || return 1
-  # Only a controller that can still prove this exact Worker group may disarm the independent
-  # parent-loss watchdog. If that proof fails, let parent exit keep the watchdog armed.
-  stop_parent_loss_watchdog || return 1
   kill -TERM -- "-${SERVER_PGID}" 2>/dev/null || return 1
   for _wait in {1..20}; do
     if ! owned_group_has_non_marker_member; then
@@ -481,14 +372,59 @@ set -m
     marker="${marker_argument#--s5-owned-marker=}"
     owner_file="$2"
     owner_ack="$3"
-    shift 3
-    [[ "${marker_argument}" == "--s5-owned-marker=${marker}" && -n "${marker}" ]] || exit 1
+    controller_pid="$4"
+    shift 4
+    [[ "${marker_argument}" == "--s5-owned-marker=${marker}" && -n "${marker}" && "${controller_pid}" =~ ^[1-9][0-9]*$ ]] || exit 1
     marker_loop() {
-      # Cleanup keeps this one process as an ownership witness through TERM. It is only ever
-      # KILLed after the parent has freshly matched its pid, PGID and exact argv marker.
+      # This marker is TERM-immune and remains inside the exact Worker group. It watches the
+      # *live* group leader (`$$`) rather than a historical controller PID: while the script
+      # owns the leader, its PPID is `controller_pid`; SIGKILL re-parents the leader to init.
+      # On that relationship change, this marker can safely reap only its freshly verified
+      # PID/PGID/argv group. That closes the trapless-controller orphan demonstrated in S-5.
       trap "" TERM INT HUP
+      marker_matches_own_group() {
+        current_pgid="$(ps -o pgid= -p "${BASHPID}" 2>/dev/null | tr -d "[:space:]")" || return 1
+        [[ "${current_pgid}" == "$$" ]] || return 1
+        command="$(ps -o command= -p "${BASHPID}" 2>/dev/null)" || return 1
+        [[ "${command}" == *"--s5-owned-marker=${marker}"* ]]
+      }
+      group_members() {
+        while read -r pid pgid; do
+          [[ "${pgid}" == "$$" ]] && printf "%s\\n" "${pid}"
+        done < <(ps -axo pid=,pgid= 2>/dev/null)
+      }
+      group_has_non_marker_member() {
+        while IFS= read -r member; do
+          [[ -n "${member}" && "${member}" != "${BASHPID}" ]] && return 0
+        done < <(group_members)
+        return 1
+      }
+      wait_for_group_empty() {
+        for _wait in {1..20}; do
+          [[ -z "$(group_members)" ]] && return 0
+          sleep 0.1
+        done
+        return 1
+      }
       while :; do
-        sleep 60 &
+        leader_parent="$(ps -o ppid= -p "$$" 2>/dev/null | tr -d "[:space:]")" || leader_parent=""
+        if [[ -n "${leader_parent}" && "${leader_parent}" != "${controller_pid}" ]]; then
+          marker_matches_own_group || exit 1
+          kill -TERM -- "-$$" 2>/dev/null || exit 1
+          for _wait in {1..20}; do
+            group_has_non_marker_member || break
+            sleep 0.1
+          done
+          marker_matches_own_group || exit 1
+          if group_has_non_marker_member; then
+            kill -KILL -- "-$$" 2>/dev/null || exit 1
+          else
+            kill -KILL "${BASHPID}" 2>/dev/null || exit 1
+          fi
+          wait_for_group_empty
+          exit $?
+        fi
+        sleep 0.1 &
         wait "$!"
       done
     }
@@ -508,7 +444,7 @@ set -m
     kill -KILL "${marker_pid}" 2>/dev/null || true
     wait "${marker_pid}" 2>/dev/null || true
     exit 1
-  ' "s5-server-launcher" "--s5-owned-marker=${SERVER_PROCESS_MARKER}" "${SERVER_OWNER_FILE}" "${SERVER_OWNER_ACK}" \
+  ' "s5-server-launcher" "--s5-owned-marker=${SERVER_PROCESS_MARKER}" "${SERVER_OWNER_FILE}" "${SERVER_OWNER_ACK}" "${CONTROLLER_PID}" \
     "${WRANGLER}" dev apps/wire/src/render-face/worker.ts \
     --config infra/wrangler.toml \
     --local \
@@ -553,11 +489,6 @@ if [[ ${SERVER_GROUP_VERIFIED} -ne 1 ]]; then
   phase_record "phase2_worker_served" "fail" "the local Worker ownership marker could not be verified" "$((SECONDS * 1000))"
   exit 1
 fi
-if ! start_parent_loss_watchdog; then
-  phase_record "phase2_worker_served" "fail" "the local Worker parent-loss watchdog could not be verified" "$((SECONDS * 1000))"
-  exit 1
-fi
-
 ready=0
 for _attempt in {1..40}; do
   # A dead child can never become ready, and continuing to poll would only succeed against

@@ -181,12 +181,6 @@ function ownedMarkerMatches(marker: string): readonly ProcessEntry[] {
   return processTable().filter((entry) => entry.command.includes(`--s5-owned-marker=${marker}`));
 }
 
-function ownedWatchdogMatches(marker: string): readonly ProcessEntry[] {
-  return processTable().filter((entry) =>
-    entry.command.includes(`--s5-parent-watchdog=${marker}`),
-  );
-}
-
 async function waitForOwnedMarker(
   marker: string,
   child?: ReturnType<typeof startScript>,
@@ -198,28 +192,6 @@ async function waitForOwnedMarker(
     await Bun.sleep(25);
   }
   return undefined;
-}
-
-async function waitForOwnedWatchdog(
-  marker: string,
-  child?: ReturnType<typeof startScript>,
-): Promise<ProcessEntry | undefined> {
-  for (let attempt = 0; attempt < 240; attempt += 1) {
-    const matches = ownedWatchdogMatches(marker);
-    if (matches.length === 1) return matches[0];
-    if (child?.exitCode !== null) return undefined;
-    await Bun.sleep(25);
-  }
-  return undefined;
-}
-
-async function waitForOwnedWatchdogAbsence(marker: string): Promise<readonly ProcessEntry[]> {
-  for (let attempt = 0; attempt < 120; attempt += 1) {
-    const survivors = ownedWatchdogMatches(marker);
-    if (survivors.length === 0) return survivors;
-    await Bun.sleep(25);
-  }
-  return ownedWatchdogMatches(marker);
 }
 
 async function waitForProcessGroupAbsence(pgid: number): Promise<readonly ProcessEntry[]> {
@@ -741,6 +713,38 @@ describe("an interrupted run leaves nothing listening", () => {
     } finally {
       if (child.exitCode === null) child.kill("SIGTERM");
       await child.exited;
+    }
+  }, 200_000);
+
+  test("SIGKILL controller loss is reaped by the exact marked sidecar", async () => {
+    const port = await freePort();
+    const seed = "s5-parent-loss-4821";
+    const child = startScript({ ASIMP_S5_SEED: seed, S5_PORT: String(port) });
+    const completion = collectScript(child, 30_000);
+    const marker = `s5-diptych-owner-s5-${seed}-${child.pid}`;
+    let ownedGroup: number | undefined;
+
+    try {
+      const markerProcess = await waitForOwnedMarker(marker, child);
+      expect(markerProcess).toBeDefined();
+      ownedGroup = markerProcess?.pgid;
+      expect(await waitForAnswer(port, child)).toBe(true);
+
+      process.kill(child.pid, "SIGKILL");
+      const run = await completion;
+      expect(run.exitCode).not.toBe(0);
+
+      // Old cleanup was trap-only: SIGKILL made the controller vanish and left this exact
+      // marker/group answering. The TERM-immune marker sees the *live* group leader reparent
+      // away from the original controller, revalidates marker PID/PGID/argv, then reaps only
+      // that group. Stream closure plus zero group/marker survivors prove the parent-loss path.
+      expect(await waitForProcessGroupAbsence(ownedGroup as number)).toEqual([]);
+      expect(ownedMarkerMatches(marker)).toEqual([]);
+      expect(await answering(port)).toBe(false);
+    } finally {
+      if (child.exitCode === null) child.kill("SIGKILL");
+      await child.exited;
+      if (ownedGroup !== undefined) reapExactOwnedGroupForTest(marker, ownedGroup);
     }
   }, 200_000);
 });
