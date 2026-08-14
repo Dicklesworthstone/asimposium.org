@@ -647,13 +647,37 @@ export function assertContainedRoot(root: unknown): string {
     );
   }
 
-  if (real !== repositoryRoot()) {
+  if (real !== repositoryRoot() && !isDeclaredHarnessSandbox(real)) {
     throw new HarnessError(
       "ROOT_NOT_REPOSITORY",
-      "root is not this checkout; refusing to write artifacts into an unrelated directory.",
+      `root is not this checkout and declares no ${HARNESS_SANDBOX_MARKER}; refusing to write artifacts into an unrelated directory.`,
     );
   }
   return real;
+}
+
+/**
+ * A directory that has declared itself a disposable harness root.
+ *
+ * The checkout-identity rule exists to stop *accidental* misdirection — a
+ * caller passing the wrong path and scattering artifacts somewhere unrelated.
+ * It also made isolation impossible: every test that exercises a real run had
+ * to write into the repository's own `e2e/artifacts`, which is how that
+ * directory grew past its own backstop and now refuses the suite that fills it.
+ *
+ * A marker file is the narrow way back. It cannot be created by accident, it is
+ * in-band (no environment variable or process-wide flag that silently applies
+ * to every path at once), and it grants nothing beyond the single directory
+ * that carries it. Every other refusal above still applies first, so a marker
+ * dropped in `$HOME`, in `tmpdir()` itself, or behind a symlink changes
+ * nothing.
+ */
+export const HARNESS_SANDBOX_MARKER = ".harness-sandbox";
+
+function isDeclaredHarnessSandbox(real: string): boolean {
+  const marker = join(real, HARNESS_SANDBOX_MARKER);
+  if (!existsSync(marker) || isSymbolicLink(marker)) return false;
+  return lstatSync(marker).isFile();
 }
 
 /** True when `target` stays inside `root` once both are fully resolved. */

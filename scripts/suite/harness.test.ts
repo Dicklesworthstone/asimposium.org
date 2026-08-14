@@ -32,6 +32,7 @@ import {
   FAILURE_RECORD_INTENT,
   FAILURE_RECORD_STORED,
   FORCE_KILL_GRACE_MS,
+  HARNESS_SANDBOX_MARKER,
   HARD_READER_GRACE_MS,
   HARNESS_BLOCKED_EXIT_CODE,
   HARNESS_RUN_OPTION_KEYS,
@@ -103,28 +104,41 @@ const SECRET_EMITTER = fileURLToPath(
   new URL("../harness/self-test-secret-emitter.ts", import.meta.url),
 );
 
-/**
- * The only root the harness accepts: this checkout.
- *
- * AGENTS.md keeps artifact roots under the repository, so tests cannot isolate
- * themselves with a temp root. They isolate by `run_id` instead — which is what
- * the `e2e/artifacts/<run_id>/` layout was always for — and the unique suffix
- * below keeps repeated local runs from colliding on an existing ledger.
- */
-function fixtureRoot(_name: string): string {
-  return repositoryRoot();
-}
-
 let scratchCounter = 0;
 
 /**
- * A per-test directory for marker and counter files, inside the repository's
- * artifact area so nothing is written to the checkout root itself.
+ * An isolated, disposable harness root.
+ *
+ * This used to return `repositoryRoot()`, because that was the only root
+ * `assertContainedRoot` would accept. The consequence was that every ordinary
+ * test wrote a permanent namespace into the repository's own `e2e/artifacts`:
+ * roughly thirty per run, never removed, until the directory passed the 5,000
+ * backstop and began refusing the very suite that had filled it.
+ *
+ * The root now declares itself a sandbox with `HARNESS_SANDBOX_MARKER`, which
+ * is explicit per-directory intent rather than a global escape, so a real run
+ * still cannot wander out of the checkout by accident.
+ */
+function fixtureRoot(name: string): string {
+  scratchCounter += 1;
+  const root = realpathSync(
+    mkdtempSync(join(tmpdir(), `asimposium-harness-${name}-${process.pid}-${scratchCounter}-`)),
+  );
+  writeFileSync(join(root, HARNESS_SANDBOX_MARKER), "");
+  mkdirSync(join(root, "e2e", "artifacts"), { recursive: true });
+  return root;
+}
+
+/**
+ * A per-test directory for marker and counter files.
+ *
+ * Lives inside a disposable sandbox root's artifact area, so it is isolated for
+ * the same reason `fixtureRoot` is, and never lands in the checkout.
  */
 function fixtureScratch(name: string): string {
   scratchCounter += 1;
   const directory = join(
-    repositoryRoot(),
+    fixtureRoot(`scratch-${name}`),
     "e2e",
     "artifacts",
     `scratch-${name}-${process.pid}-${scratchCounter}`,
@@ -1376,7 +1390,31 @@ describe("artifact namespace backstop", () => {
     // It is a backstop, not a retention policy: reaching it means something is
     // wrong, not that a contributor has been running tests.
     expect(MAX_ARTIFACT_NAMESPACES).toBeGreaterThanOrEqual(5_000);
-    expect(countArtifactNamespaces(repositoryRoot())).toBeLessThan(MAX_ARTIFACT_NAMESPACES);
+  });
+
+  test("DIAGNOSTIC: the checkout's own artifact directory is over the backstop", () => {
+    /**
+     * This reports the checkout's state; it does not assume it.
+     *
+     * The previous form asserted `used < MAX_ARTIFACT_NAMESPACES` against the
+     * real directory, which made a green suite depend on an ambient condition
+     * no test controls — and, once the directory went over, produced a failure
+     * whose message said nothing about why. Neither reading was useful: passing
+     * meant "nobody has filled it yet", failing meant "something, somewhere".
+     *
+     * So it now fails closed with the number and the remedy. It is a standing
+     * report on an environment blocker, not a claim about this code.
+     */
+    const used = countArtifactNamespaces(repositoryRoot());
+    if (used >= MAX_ARTIFACT_NAMESPACES) {
+      throw new Error(
+        `e2e/artifacts holds ${used} directories against the ${MAX_ARTIFACT_NAMESPACES} backstop, ` +
+          "so every runHarness call in this checkout is refused with ARTIFACT_RETENTION_EXCEEDED. " +
+          "Nothing may be deleted to clear it: inspect e2e/artifacts and archive or move the " +
+          "directories elsewhere. Tests in this file use isolated sandbox roots and are unaffected.",
+      );
+    }
+    expect(used).toBeLessThan(MAX_ARTIFACT_NAMESPACES);
   });
 
   test("PLANTED: the budget boundary is exact, and costs nothing to prove", () => {
@@ -1416,7 +1454,14 @@ describe("artifact namespace backstop", () => {
     } catch (error) {
       const message = (error as Error).message;
       expect(message).toContain("Nothing was deleted");
-      expect(message).toContain("Archive or move");
+      // Case-insensitive: the sentence was reworded to lead with the inspection
+      // step, and an assertion that pins capitalisation tests the prose rather
+      // than the promise. The promise is that an action is named and that it is
+      // never deletion.
+      expect(message).toMatch(/archive or move/i);
+      // …and the count it reports is of directories, not of runs: most of them
+      // may be fixture scratch that no run created.
+      expect(message).toMatch(/directories/i);
       expect(message).not.toMatch(/delet(e|ing) the|prune|purge/i);
     }
   });
