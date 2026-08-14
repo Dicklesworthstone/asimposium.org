@@ -121,8 +121,23 @@ export function toHex(bytes: Uint8Array): string {
   return out;
 }
 
+/**
+ * A detached copy of exactly this byte view.
+ *
+ * `Buffer.prototype.slice()` is a view, unlike `Uint8Array.prototype.slice()`.
+ * Passing its `.buffer` to WebCrypto can therefore hash a Node pool rather
+ * than the selected bytes.  Copying from the view reads only
+ * `byteOffset..byteOffset + byteLength`, works for both Buffer and ordinary
+ * Uint8Array inputs, and never mutates caller-owned storage.
+ */
+function exactBytesBuffer(bytes: Uint8Array): ArrayBuffer {
+  const exact = new Uint8Array(bytes.byteLength);
+  exact.set(bytes);
+  return exact.buffer;
+}
+
 export async function sha256Hex(bytes: Uint8Array): Promise<string> {
-  const digest = await crypto.subtle.digest("SHA-256", bytes.slice().buffer);
+  const digest = await crypto.subtle.digest("SHA-256", exactBytesBuffer(bytes));
   return toHex(new Uint8Array(digest));
 }
 

@@ -1,19 +1,20 @@
 import { describe, expect, test } from "bun:test";
+import { Buffer } from "node:buffer";
 import { readFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 
 import {
-  canonicalBytes,
   CANONICAL_FIELDS,
+  canonicalBytes,
   ENVELOPE_VERSION,
   mintNonce,
   mintServiceEnvelope,
   payloadDigest,
-  serviceEnvelopeHeaders,
   SERVICE_ENVELOPE_HEADER,
+  type ServiceEnvelopeClaims,
+  serviceEnvelopeHeaders,
   sha256Hex,
   toHex,
-  type ServiceEnvelopeClaims,
 } from "../../lib/service-envelope.ts";
 
 /**
@@ -42,7 +43,10 @@ const CORPUS_PATH = join(
 );
 
 interface Corpus {
-  vectors: Record<string, { note: string; claims: ServiceEnvelopeClaims; canonical_sha256: string }>;
+  vectors: Record<
+    string,
+    { note: string; claims: ServiceEnvelopeClaims; canonical_sha256: string }
+  >;
 }
 
 const corpus = JSON.parse(readFileSync(CORPUS_PATH, "utf8")) as Corpus;
@@ -127,6 +131,38 @@ describe("minting", () => {
     expect(envelope.signature).toMatch(/^[0-9a-f]{128}$/);
   });
 
+  test("PLANTED: a Buffer subview hashes only its body bytes", async () => {
+    const prefix = "outside-before:";
+    const bodyText = '{"focus":"exact Buffer view"}';
+    const suffix = ":outside-after";
+    const backing = Buffer.from(`${prefix}${bodyText}${suffix}`);
+    const body = backing.subarray(prefix.length, prefix.length + bodyText.length);
+    const originalBacking = Buffer.from(backing);
+    const expected = toHex(
+      new Uint8Array(await crypto.subtle.digest("SHA-256", new TextEncoder().encode(bodyText))),
+    );
+
+    // Under the old `bytes.slice().buffer` implementation, both calls hashed
+    // the same Buffer backing allocation and this planted assertion failed.
+    expect(await sha256Hex(body)).toBe(expected);
+    expect(await sha256Hex(body)).not.toBe(await sha256Hex(backing));
+    expect(await payloadDigest(body)).toBe(expected);
+    expect(backing).toEqual(originalBacking);
+
+    const keypair = await makeKeypair();
+    const envelope = await mintServiceEnvelope({
+      privateKey: keypair.privateKey,
+      kid: "buffer-subview",
+      now: NOW,
+      method: "POST",
+      route: "/v1/x",
+      action: "a",
+      principalId: "usr_1",
+      body,
+    });
+    expect(envelope.claims.payload_sha256).toBe(expected);
+  });
+
   test("the signature verifies against the matching public key", async () => {
     const keypair = await makeKeypair();
     const envelope = await mintServiceEnvelope({
@@ -178,9 +214,9 @@ describe("minting", () => {
       body: BODY,
     };
     await expect(mintServiceEnvelope({ ...base, now: 1.5 })).rejects.toThrow(/integer/);
-    await expect(
-      mintServiceEnvelope({ ...base, now: NOW, lifetimeSeconds: 0 }),
-    ).rejects.toThrow(/positive/);
+    await expect(mintServiceEnvelope({ ...base, now: NOW, lifetimeSeconds: 0 })).rejects.toThrow(
+      /positive/,
+    );
   });
 });
 
@@ -211,9 +247,7 @@ describe("the session never crosses the seam", () => {
     });
     const headers = serviceEnvelopeHeaders(envelope);
 
-    expect(Object.keys(headers).sort()).toEqual(
-      [SERVICE_ENVELOPE_HEADER, "content-type"].sort(),
-    );
+    expect(Object.keys(headers).sort()).toEqual([SERVICE_ENVELOPE_HEADER, "content-type"].sort());
     // Structural: there is no parameter through which a cookie or an
     // Authorization header could be forwarded to the agent plane.
     const serialized = JSON.stringify(headers).toLowerCase();
