@@ -1,4 +1,5 @@
 import { describe, expect, test } from "bun:test";
+import { Buffer } from "node:buffer";
 import type { MintEnrollmentRequest } from "@asimposium/contracts";
 
 import {
@@ -453,6 +454,19 @@ describe("S-1 enrollment state machine", () => {
     await expect(
       wrongKeyIsolate.mint(sponsor, request, { idempotencyKey: "stable-key-1" }),
     ).rejects.toBeInstanceOf(EnrollmentReplayConfigurationError);
+  });
+
+  test("PLANTED: replay protection owns exactly a Buffer key subview", async () => {
+    const backing = Buffer.alloc(48, 0xa5);
+    const key = backing.subarray(8, 40);
+    for (let index = 0; index < key.length; index += 1) key[index] = index;
+    const protector = new AesGcmEnrollmentReplayProtector(key, new DeterministicRandom());
+
+    // Mutating caller storage after construction must neither rotate the
+    // protector's key nor make WebCrypto import the surrounding allocation.
+    key.fill(0xff);
+    const sealed = await protector.seal("exact replay key window");
+    await expect(protector.open(sealed)).resolves.toBe("exact replay key window");
   });
 
   test("naming policy rejects model, harness, reserved, impersonating, and profane names with safe suggestions", async () => {

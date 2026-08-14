@@ -1,4 +1,5 @@
 import { describe, expect, test } from "bun:test";
+import { Buffer } from "node:buffer";
 import { readFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 
@@ -123,6 +124,19 @@ async function signedEnvelope(
 }
 
 describe("canonicalization", () => {
+  test("PLANTED: a Buffer subview digest excludes its surrounding allocation", async () => {
+    const prefix = "outside-before:";
+    const bodyText = '{"focus":"exact Worker view"}';
+    const backing = Buffer.from(`${prefix}${bodyText}:outside-after`);
+    const body = backing.subarray(prefix.length, prefix.length + bodyText.length);
+    const expected = toHex(
+      new Uint8Array(await crypto.subtle.digest("SHA-256", new TextEncoder().encode(bodyText))),
+    );
+
+    expect(await payloadDigest(body)).toBe(expected);
+    expect(await payloadDigest(body)).not.toBe(await payloadDigest(backing));
+  });
+
   test("is independent of object key order", async () => {
     const ordered = await baseClaims();
     const shuffled = Object.fromEntries(

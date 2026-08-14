@@ -389,7 +389,12 @@ export class AesGcmEnrollmentReplayProtector implements EnrollmentReplayProtecto
     if (key.length !== ENROLLMENT_SECRET_BYTES) {
       throw new TypeError("replay protector requires a 256-bit key");
     }
-    this.#key = key.slice();
+    // `Buffer.prototype.slice()` aliases its source and exposes the whole
+    // pooled backing allocation through `.buffer`. Own an exact plain typed
+    // array so caller mutation cannot rotate the replay key after construction
+    // and WebCrypto receives exactly 32 bytes.
+    this.#key = new Uint8Array(key.length);
+    this.#key.set(key);
     this.#random = random;
   }
 

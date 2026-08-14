@@ -187,14 +187,17 @@ export function fromHex(hex: string): Uint8Array {
 }
 
 /**
- * Lowercase hex SHA-256 of arbitrary bytes.
+ * Lowercase hex SHA-256 of exactly the supplied byte view.
  *
- * `bytes.buffer` rather than the view: WebCrypto accepts either, and naming the
- * ArrayBuffer keeps this compiling under the Worker's `lib` (no DOM), where the
- * `BufferSource` alias does not exist.
+ * A Node `Buffer` is a `Uint8Array`, but its `.slice()` is another view into
+ * the same (often pooled) allocation. Passing that `.buffer` to WebCrypto can
+ * therefore hash bytes before and after the caller's selected window. Copying
+ * through the explicit view keeps the runtime behavior as narrow as the type.
  */
 export async function sha256Hex(bytes: Uint8Array): Promise<string> {
-  const digest = await crypto.subtle.digest("SHA-256", bytes.slice().buffer);
+  const exact = new Uint8Array(bytes.byteLength);
+  exact.set(bytes);
+  const digest = await crypto.subtle.digest("SHA-256", exact.buffer);
   return toHex(new Uint8Array(digest));
 }
 
