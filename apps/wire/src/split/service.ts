@@ -29,6 +29,14 @@ export interface WorkshopKey {
   readonly fellowId: string;
 }
 
+/** Server-issued ownership record for a private CAS body. Never accept this from JSON. */
+export interface PrivateArtifactBinding extends WorkshopKey {
+  readonly digest: string;
+  readonly sponsorId: string;
+  readonly sessionId: string;
+  readonly workshopId: string;
+}
+
 export interface WorkshopObject extends WorkshopKey {
   readonly id: string;
   readonly sponsorId: string;
@@ -38,8 +46,8 @@ export interface WorkshopObject extends WorkshopKey {
   readonly extract: string;
   /** Present only when the body did not spill to private CAS. */
   readonly inlineBodyMd?: string;
-  /** A private CAS reference.  It is never a public projection field. */
-  readonly privateArtifactDigest?: string;
+  /** Server-bound private CAS reference. It is never a public projection field. */
+  readonly privateArtifact?: PrivateArtifactBinding;
   readonly promotedPublicEventId?: string;
   readonly publishedPublicArtifactId?: string;
 }
@@ -112,9 +120,50 @@ export interface SplitIdFactory {
   nextPublicArtifactId(): string;
 }
 
+const CROCKFORD_BASE32 = "0123456789ABCDEFGHJKMNPQRSTVWXYZ";
+let lastUlidTimestamp = -1;
+let lastUlidRandomness = new Uint8Array(10);
+
+function encodeBase32(value: bigint, length: number): string {
+  let remaining = value;
+  let encoded = "";
+  for (let index = 0; index < length; index += 1) {
+    encoded = `${CROCKFORD_BASE32[Number(remaining & 31n)]}${encoded}`;
+    remaining >>= 5n;
+  }
+  return encoded;
+}
+
+function incrementUlidRandomness(): void {
+  for (let index = lastUlidRandomness.length - 1; index >= 0; index -= 1) {
+    const value = lastUlidRandomness[index];
+    if (value === undefined) throw new Error("ULID randomness index was unavailable");
+    if (value < 255) {
+      lastUlidRandomness[index] = value + 1;
+      return;
+    }
+    lastUlidRandomness[index] = 0;
+  }
+  throw new Error("ULID randomness exhausted within one millisecond");
+}
+
+/** Monotonic, lexically sortable ULID for production identifiers. */
+export function nextMonotonicUlid(): string {
+  const now = Math.max(Date.now(), lastUlidTimestamp);
+  if (now === lastUlidTimestamp) {
+    incrementUlidRandomness();
+  } else {
+    crypto.getRandomValues(lastUlidRandomness);
+    lastUlidTimestamp = now;
+  }
+  let randomValue = 0n;
+  for (const byte of lastUlidRandomness) randomValue = (randomValue << 8n) | BigInt(byte);
+  return `${encodeBase32(BigInt(now), 10)}${encodeBase32(randomValue, 16)}`;
+}
+
 const cryptoIds: SplitIdFactory = {
-  nextPublicEventId: () => `EV-${crypto.randomUUID()}`,
-  nextPublicArtifactId: () => `PA-${crypto.randomUUID()}`,
+  nextPublicEventId: () => `EV-${nextMonotonicUlid()}`,
+  nextPublicArtifactId: () => `PA-${nextMonotonicUlid()}`,
 };
 
 export interface OpenClaimRef {
@@ -133,16 +182,25 @@ export interface KraterSplitTransaction {
   nextPublicSeq(problemId: string): number;
   nextWorkshopSeq(key: WorkshopKey): number;
   getWorkshop(workshopId: string): WorkshopObject | undefined;
-  insertWorkshop(workshop: WorkshopObject): void;
+  /** Create-only. False means the caller's workshop ID already exists. */
+  createWorkshop(workshop: WorkshopObject): boolean;
+  /**
+   * Stores bytes and returns a server-created binding. Every binding field is
+   * derived from authenticated context and the server-selected workshop ID.
+   */
+  bindPrivateWorkshopBody(
+    binding: Omit<PrivateArtifactBinding, "digest">,
+    bodyMd: string,
+  ): PrivateArtifactBinding | undefined;
   markWorkshopPromoted(workshopId: string, publicEventId: string): void;
   markWorkshopArtifactPublished(workshopId: string, publicArtifactId: string): void;
   getPublicEvents(problemId: string): readonly StoredPublicLedgerEvent[];
   insertPublicEvent(event: StoredPublicLedgerEvent): void;
-  /** Private CAS retrieval, called only after workshop authorization. */
-  getPrivateArtifact(privateArtifactDigest: string): { readonly bodyMd: string } | undefined;
+  /** Revalidates the full server binding before returning private CAS bytes. */
+  getPrivateArtifact(binding: PrivateArtifactBinding): { readonly bodyMd: string } | undefined;
   /** Must copy and verify private-CAS bytes before exposing the returned public artifact. */
   copyPrivateArtifactToPublic(
-    privateArtifactDigest: string,
+    binding: PrivateArtifactBinding,
     publicArtifactId: string,
   ): PublicArtifact | undefined;
   bindPublicArtifact(publicEventId: string, artifact: PublicArtifact): void;
@@ -163,7 +221,6 @@ export interface WorkshopPushInput {
   readonly type: WorkshopObject["type"];
   readonly title: string;
   readonly bodyMd: string;
-  readonly privateArtifactDigest?: string;
 }
 
 export interface WorkshopPushAccepted {
@@ -175,11 +232,17 @@ export interface WorkshopPushAccepted {
 
 export interface WorkshopPushRefusal {
   readonly status: 422;
-  readonly code: "PRIVATE_CAS_REQUIRED";
-  readonly fixHint: string;
+  readonly code: "PRIVATE_CAS_STORAGE_REQUIRED";
+  readonly fixHint: "Private workshop storage is unavailable; retry after the server can bind the body.";
 }
 
-export type WorkshopPushResult = WorkshopPushAccepted | WorkshopPushRefusal;
+export interface WorkshopAlreadyExists {
+  readonly status: 409;
+  readonly code: "WORKSHOP_ALREADY_EXISTS";
+  readonly suggestedAction: "use_new_workshop_id";
+}
+
+export type WorkshopPushResult = WorkshopPushAccepted | WorkshopPushRefusal | WorkshopAlreadyExists;
 
 export interface SponsorWorkshopCard {
   readonly status: 200;
@@ -382,13 +445,60 @@ function publicEventFrom(stored: StoredPublicLedgerEvent): PublicLedgerEvent {
   return event;
 }
 
-function assertExactKeys(
-  value: Readonly<Record<string, unknown>>,
-  allowed: readonly string[],
-): void {
-  for (const key of Object.keys(value)) {
-    if (!allowed.includes(key)) throw new SplitLeakError(key);
+function privateBindingMatchesWorkshop(
+  binding: PrivateArtifactBinding,
+  workshop: WorkshopObject,
+): boolean {
+  return (
+    binding.workshopId === workshop.id &&
+    binding.problemId === workshop.problemId &&
+    binding.fellowId === workshop.fellowId &&
+    binding.sponsorId === workshop.sponsorId
+  );
+}
+
+function assertExactObject(
+  value: unknown,
+  keys: readonly string[],
+  kind: string,
+): asserts value is Readonly<Record<string, unknown>> {
+  if (value === null || typeof value !== "object" || Array.isArray(value)) {
+    throw new SplitLeakError(`non-object-${kind}`);
   }
+  const record = value as Readonly<Record<string, unknown>>;
+  const actualKeys = Object.keys(record);
+  if (
+    actualKeys.length !== keys.length ||
+    actualKeys.some((key) => !keys.includes(key)) ||
+    keys.some((key) => !Object.hasOwn(record, key))
+  ) {
+    throw new SplitLeakError(`shape-${kind}`);
+  }
+}
+
+function assertString(value: unknown, field: string): asserts value is string {
+  if (typeof value !== "string") throw new SplitLeakError(`type-${field}`);
+}
+
+function assertNonNegativeInteger(value: unknown, field: string): asserts value is number {
+  if (!Number.isInteger(value) || (value as number) < 0) {
+    throw new SplitLeakError(`type-${field}`);
+  }
+}
+
+function assertPublicEventShape(value: unknown): void {
+  assertExactObject(
+    value,
+    ["id", "problemId", "publicSeq", "claimId", "title", "extract", "statement"],
+    "public-event",
+  );
+  assertString(value.id, "event.id");
+  assertString(value.problemId, "event.problemId");
+  assertNonNegativeInteger(value.publicSeq, "event.publicSeq");
+  assertString(value.claimId, "event.claimId");
+  assertString(value.title, "event.title");
+  assertString(value.extract, "event.extract");
+  assertString(value.statement, "event.statement");
 }
 
 /**
@@ -397,26 +507,25 @@ function assertExactKeys(
  * fails closed until the public face contract explicitly admits it.
  */
 export function assertPublicLedgerProjectionShape(value: unknown): void {
-  if (value === null || typeof value !== "object" || Array.isArray(value)) {
-    throw new SplitLeakError("non-object-public-ledger-projection");
-  }
   const record = value as Readonly<Record<string, unknown>>;
-  const events = record.events ?? record.results;
-  assertExactKeys(record, ["status", "cacheControl", "publicSeq", "events", "results"]);
-  if (!Array.isArray(events)) throw new SplitLeakError("events-or-results");
-  for (const event of events) {
-    if (event === null || typeof event !== "object" || Array.isArray(event)) {
-      throw new SplitLeakError("non-object-public-event");
+  const isSnapshot = Object.hasOwn(record, "events");
+  const isSearch = Object.hasOwn(record, "results");
+  if (isSnapshot === isSearch) throw new SplitLeakError("public-ledger-kind");
+  if (isSnapshot) {
+    assertExactObject(value, ["status", "cacheControl", "publicSeq", "events"], "public-snapshot");
+    if (value.status !== 200 || value.cacheControl !== "public, max-age=10") {
+      throw new SplitLeakError("public-snapshot-headers");
     }
-    assertExactKeys(event as Readonly<Record<string, unknown>>, [
-      "id",
-      "problemId",
-      "publicSeq",
-      "claimId",
-      "title",
-      "extract",
-      "statement",
-    ]);
+    assertNonNegativeInteger(value.publicSeq, "publicSeq");
+    if (!Array.isArray(value.events)) throw new SplitLeakError("events");
+    for (const event of value.events) assertPublicEventShape(event);
+  } else {
+    assertExactObject(value, ["status", "cacheControl", "results"], "public-search");
+    if (value.status !== 200 || value.cacheControl !== "public, max-age=10") {
+      throw new SplitLeakError("public-search-headers");
+    }
+    if (!Array.isArray(value.results)) throw new SplitLeakError("results");
+    for (const result of value.results) assertPublicEventShape(result);
   }
   assertPublicProjectionSafe(value);
 }
