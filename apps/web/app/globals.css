@@ -405,6 +405,86 @@
   white-space: pre;
   color: var(--color-ink2);
 }
+.console .join-url {
+  word-break: break-all;
+  white-space: pre-wrap;
+  user-select: all;
+}
+.console .proposal-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+}
+.console .proposal {
+  border-top: 1px solid var(--color-line);
+  padding: 1rem 0 1.1rem;
+}
+.console .proposal:first-child {
+  border-top: 0;
+  padding-top: 0.2rem;
+}
+.console .proposal-actions {
+  flex-direction: row;
+  align-items: center;
+  gap: 0.6rem;
+  margin-top: 0.9rem;
+}
+.console .proposal-actions .btn-google {
+  font-size: 0.82rem;
+  padding: 0.4rem 1.1rem;
+}
+.console .reduce-panel {
+  margin-top: 0.9rem;
+  padding: 0.9rem 1rem;
+  border: 1px solid var(--color-line);
+  background: var(--color-paper);
+}
+.console .reduce-panel fieldset {
+  border: 0;
+  margin: 0 0 0.6rem;
+  padding: 0;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.35rem 1.1rem;
+}
+.console .reduce-panel legend {
+  padding: 0;
+  margin-bottom: 0.3rem;
+}
+.console .check {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.4rem;
+  font-size: 0.9rem;
+}
+.console .check input {
+  accent-color: var(--color-clay);
+}
+.console .reduce-grid {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.7rem 1.2rem;
+  margin: 0.7rem 0 0.8rem;
+}
+.console .reduce-grid label {
+  display: flex;
+  flex-direction: column;
+  gap: 0.2rem;
+  font-size: 0.85rem;
+}
+.console .reduce-grid input {
+  font: inherit;
+  font-size: 0.85rem;
+  padding: 0.3rem 0.5rem;
+  border: 1px solid var(--color-line);
+  background: var(--color-card);
+  color: var(--color-ink);
+  width: 9rem;
+}
+.console .reduce-grid input:focus-visible {
+  outline: 2px solid var(--color-clay);
+  outline-offset: 1px;
+}
 
 .skip {
   position: absolute;

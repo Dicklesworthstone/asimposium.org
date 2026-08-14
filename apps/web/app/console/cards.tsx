@@ -139,7 +139,10 @@ function ProposalCard({ card }: { readonly card: EnrollmentApprovalCard }) {
   const decide = (decision: "approve" | "deny") => {
     setError(null);
     startTransition(async () => {
-      const result = await decideProposal(card.enrollment_id, { decision });
+      const result = await decideProposal(card.enrollment_id, {
+        enrollment_id: card.enrollment_id,
+        decision,
+      });
       if (!result.ok) setError(result.message);
       else router.refresh();
     });
@@ -169,6 +172,7 @@ function ProposalCard({ card }: { readonly card: EnrollmentApprovalCard }) {
     }
     startTransition(async () => {
       const result = await decideProposal(card.enrollment_id, {
+        enrollment_id: card.enrollment_id,
         decision: "reduce",
         reduction,
       });
