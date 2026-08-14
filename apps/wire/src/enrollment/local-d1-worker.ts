@@ -145,7 +145,10 @@ export default {
       // The harness names the target once, at the top level. Default the signed
       // body's `enrollment_id` from it, but let an explicitly supplied one win
       // so a mismatch can still be driven through the service's target check.
-      const suppliedDecision = (body.decision ?? { decision: "approve" }) as Record<string, unknown>;
+      const suppliedDecision = (body.decision ?? { decision: "approve" }) as Record<
+        string,
+        unknown
+      >;
       try {
         await service.decide(
           { type: "sponsor", sponsorId: body.sponsor_id },
