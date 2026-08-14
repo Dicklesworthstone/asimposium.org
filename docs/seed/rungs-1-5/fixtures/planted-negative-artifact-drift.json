@@ -1,0 +1,18 @@
+{
+  "id": "negative-artifact-oracle-drift",
+  "source": {
+    "id": "artifact-drift-source",
+    "pinned_version": "1.0.0",
+    "sha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+    "oracle_artifact_key": "tool_artifact"
+  },
+  "oracle": {
+    "data": {
+      "tool_artifact": {
+        "version": "1.0.0",
+        "sha256": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+      }
+    }
+  },
+  "expected_diagnostic": "E_ARTIFACT_ORACLE_DRIFT"
+}

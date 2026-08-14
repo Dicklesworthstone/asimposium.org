@@ -1,0 +1,15 @@
+{
+  "id": "negative-calibration-oracle-drift",
+  "dossier": {
+    "id": "rung-1-calibration",
+    "statement": "For every natural number n, there exists a natural prime p such that n ≤ p."
+  },
+  "oracle": {
+    "data": {
+      "planted_candidate": "For every natural number n, there exists a natural prime p such that n ≤ p.",
+      "smallest_counterexample": {"n": 1},
+      "expected_review_verdict": "refuted"
+    }
+  },
+  "expected_diagnostic": "E_PLANTED_ERROR_NOT_REVERSED"
+}

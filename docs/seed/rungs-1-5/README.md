@@ -20,8 +20,9 @@ Run the local checks with Bun; no dependency install or secret is required:
 bun docs/seed/rungs-1-5/check.mjs
 bun docs/seed/rungs-1-5/check.mjs --self-test
 bun docs/seed/rungs-1-5/check.mjs --check-links
+bun docs/seed/rungs-1-5/check.mjs --check-artifacts
 ```
 
-The checker emits tool, suite, version, duration, status, and a safe reproduction command. Link probing is a freshness check only: an HTTP success proves reachability, not the mathematical correctness, licensing sufficiency, or future staging behavior of a candidate.
+The checker emits tool, suite, version, duration, status, and a safe reproduction command. Link probing is a freshness check only: an HTTP success proves reachability, not the mathematical correctness, licensing sufficiency, or future staging behavior of a candidate. `--check-artifacts` re-acquires each deliberately pinned public artifact and fails if its bytes no longer match the declared hash or hidden-oracle binding; its output contains only source identifiers and digests.
 
 All source quotations are avoided. Sources are identified by URL and a short locator; their license or rights status is recorded in the manifest. Any future upload of a source body or code artifact requires its own licensing review and a content hash captured at acquisition time.

@@ -57,12 +57,12 @@
       "kind": "source-map",
       "data": {
         "search_date": "2026-08-13",
-        "search_terms": ["Appel Haken 1977 four color discharging", "Robertson Sanders Seymour Thomas 1997 four colour", "Gonthier 2008 formal proof four color"],
-        "required_sources": ["appel-haken-1977", "robertson-et-al-1997", "gonthier-2008"],
-        "expected_mode_labels": {"appel-haken-1977": "computer-assisted", "robertson-et-al-1997": "computer-assisted", "gonthier-2008": "formal proof account"},
+        "search_terms": ["Appel Haken 1977 four color discharging", "Appel Haken Koch 1977 four color reducibility supplement", "Robertson Sanders Seymour Thomas 1997 four colour", "Gonthier 2008 formal proof four color"],
+        "required_sources": ["appel-haken-1977", "appel-haken-koch-1977-part-ii", "appel-haken-1977-supplement", "robertson-et-al-1997", "gonthier-2008"],
+        "expected_mode_labels": {"appel-haken-1977": "computer-assisted proof component", "appel-haken-koch-1977-part-ii": "computer-assisted proof component", "appel-haken-1977-supplement": "published check material", "robertson-et-al-1997": "computer-assisted", "gonthier-2008": "formal proof account"},
         "novelty_verdict": "not asserted"
       },
-      "sha256": "30271e994abad3bbc67ca9e6786b08ccb89c8be10615f0753bca5d3c61532a97"
+      "sha256": "1cb4ef92f16cec0a2e4d67d95b94ec46a1fc9dd771e66d74fd7b22d81d3ba2f7"
     }
   ]
 }

@@ -5,10 +5,11 @@ import { readFile } from "node:fs/promises";
 import { dirname, relative, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 
-const CHECK_VERSION = "1.1.0";
+const CHECK_VERSION = "1.2.0";
 const root = dirname(fileURLToPath(import.meta.url));
 const args = new Set(process.argv.slice(2));
 const checkLinks = args.has("--check-links");
+const checkArtifacts = args.has("--check-artifacts");
 const selfTest = args.has("--self-test");
 const emitDigests = args.has("--emit-digests");
 const runtimeVersion = typeof Bun === "undefined" ? process.version : Bun.version;
@@ -55,6 +56,10 @@ function isIsoDate(value) {
   return typeof value === "string" && /^\d{4}-\d{2}-\d{2}$/.test(value);
 }
 
+function isSha256(value) {
+  return typeof value === "string" && /^[a-f0-9]{64}$/.test(value);
+}
+
 function validateSource(source, location) {
   const valid = isObject(source);
   if (!valid) {
@@ -83,6 +88,41 @@ function validateSource(source, location) {
   }
   if (typeof source.access_date === "string" && !isIsoDate(source.access_date)) {
     diagnostic("E_SOURCE_DATE", location, "source access_date must use YYYY-MM-DD");
+  }
+  if (source.pinned_version !== undefined) {
+    if (!requireString(source.pinned_version, location, "source.pinned_version")) return;
+    if (typeof source.url === "string" && !source.url.includes(source.pinned_version)) {
+      diagnostic("E_SOURCE_VERSION_PIN", location, "versioned source URL must include source.pinned_version");
+    }
+  }
+  if (source.pinned_commit !== undefined) {
+    if (!requireString(source.pinned_commit, location, "source.pinned_commit")) return;
+    if (!/^[a-f0-9]{40}$/.test(source.pinned_commit)) {
+      diagnostic("E_SOURCE_COMMIT_PIN", location, "source.pinned_commit must be a 40-character lowercase Git commit");
+    } else if (typeof source.url === "string" && !source.url.includes(source.pinned_commit)) {
+      diagnostic("E_SOURCE_COMMIT_PIN", location, "pinned source URL must include source.pinned_commit");
+    }
+  }
+  if (source.sha256 !== undefined && !isSha256(source.sha256)) {
+    diagnostic("E_ARTIFACT_HASH", location, "source.sha256 must be a lowercase SHA-256 digest");
+  }
+  if (source.oracle_artifact_key !== undefined) {
+    requireString(source.oracle_artifact_key, location, "source.oracle_artifact_key");
+    if (!isSha256(source.sha256) || typeof source.pinned_version !== "string") {
+      diagnostic("E_ARTIFACT_BINDING", location, "oracle-bound artifact sources require both sha256 and pinned_version");
+    }
+  }
+}
+
+function validateArtifactBinding(source, oracle, location) {
+  if (source.oracle_artifact_key === undefined) return;
+  const artifact = oracle?.data?.[source.oracle_artifact_key];
+  if (!isObject(artifact)) {
+    diagnostic("E_ARTIFACT_ORACLE_TARGET", location, "oracle artifact target is absent or malformed");
+    return;
+  }
+  if (artifact.version !== source.pinned_version || artifact.sha256 !== source.sha256) {
+    diagnostic("E_ARTIFACT_ORACLE_DRIFT", location, "source artifact version or SHA-256 differs from its hidden oracle target");
   }
 }
 
@@ -123,7 +163,7 @@ function renderDossier(dossier) {
   ].join("\n");
 }
 
-function validateDossier(dossier, oracleIds, renderExpectations) {
+function validateDossier(dossier, oraclesById, renderExpectations) {
   const location = `manifest.json:${dossier?.id ?? "unknown"}`;
   if (!isObject(dossier)) {
     diagnostic("E_DOSSIER_SHAPE", location, "dossier must be an object");
@@ -177,8 +217,14 @@ function validateDossier(dossier, oracleIds, renderExpectations) {
     dossier.sources.forEach((source) => validateSource(source, `${location}:source:${source?.id ?? "unknown"}`));
   }
 
-  if (!oracleIds.has(dossier.oracle_id)) {
+  const oracle = oraclesById.get(dossier.oracle_id);
+  if (!oracle) {
     diagnostic("E_ORACLE_REFERENCE", location, `oracle_id ${JSON.stringify(dossier.oracle_id)} is not defined`);
+  }
+  for (const source of dossier.sources ?? []) {
+    if (isObject(source)) {
+      validateArtifactBinding(source, oracle, `${location}:source:${source.id ?? "unknown"}`);
+    }
   }
   if (!isObject(dossier.external_review_required)) {
     diagnostic("E_EXTERNAL_REVIEW", location, "external_review_required is required");
@@ -254,7 +300,12 @@ async function checkDossierMarkdown(dossier) {
 }
 
 async function readJson(name) {
-  return JSON.parse(await readFile(resolve(root, name), "utf8"));
+  try {
+    return JSON.parse(await readFile(resolve(root, name), "utf8"));
+  } catch {
+    diagnostic("E_JSON_INPUT", name, "file is unreadable or invalid JSON");
+    return {};
+  }
 }
 
 async function probe(url) {
@@ -293,6 +344,35 @@ async function checkExternalLinks(dossiers) {
   }
 }
 
+async function checkPinnedArtifacts(dossiers) {
+  const artifacts = new Map();
+  for (const dossier of dossiers) {
+    for (const source of dossier.sources) {
+      if (isSha256(source.sha256)) artifacts.set(source.url, source);
+    }
+  }
+  for (const source of artifacts.values()) {
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), 30_000);
+    try {
+      const response = await fetch(source.url, { method: "GET", redirect: "follow", signal: controller.signal });
+      if (!response.ok) {
+        diagnostic("E_ARTIFACT_REACHABILITY", `source:${source.id}`, `HTTP ${response.status}`);
+        continue;
+      }
+      const actual = createHash("sha256").update(new Uint8Array(await response.arrayBuffer())).digest("hex");
+      if (actual !== source.sha256) {
+        diagnostic("E_ARTIFACT_HASH", `source:${source.id}`, `expected ${source.sha256}, got ${actual}`);
+      }
+      console.log(`artifact source=${source.id} sha256=${actual}`);
+    } catch (error) {
+      diagnostic("E_ARTIFACT_REACHABILITY", `source:${source.id}`, error.name === "AbortError" ? "timed out" : "request failed");
+    } finally {
+      clearTimeout(timer);
+    }
+  }
+}
+
 function runPlantedNegative(fixture) {
   const before = diagnostics.length;
   validateSource(fixture.source, `fixtures/planted-negative-missing-anchor.json:${fixture.id}`);
@@ -325,22 +405,63 @@ function runPlantedRenderedDrift(fixture) {
   if (detected) console.log(`planted-negative id=${fixture.id} status=detected diagnostic=${fixture.expected_diagnostic}`);
 }
 
+function validateCalibrationPlant(dossier, oracle, location) {
+  if (!isObject(dossier) || typeof dossier.statement !== "string") {
+    diagnostic("E_PLANTED_ERROR_TARGET", location, "calibration target statement is absent or malformed");
+    return;
+  }
+  const expectedCandidate = dossier.statement.replace("n ≤ p", "p ≤ n");
+  if (oracle?.data?.planted_candidate !== expectedCandidate) {
+    diagnostic("E_PLANTED_ERROR_NOT_REVERSED", location, "calibration oracle must contain the exact reversed-inequality candidate");
+  }
+  if (oracle?.data?.smallest_counterexample?.n !== 1) {
+    diagnostic("E_PLANTED_ERROR_COUNTEREXAMPLE", location, "calibration oracle must preserve n = 1 as the smallest counterexample");
+  }
+  if (oracle?.data?.expected_review_verdict !== "refuted") {
+    diagnostic("E_PLANTED_ERROR_VERDICT", location, "calibration oracle must require a refuted verdict");
+  }
+}
+
+function runPlantedArtifactDrift(fixture) {
+  const before = diagnostics.length;
+  validateArtifactBinding(fixture.source, fixture.oracle, `fixtures/planted-negative-artifact-drift.json:${fixture.id}`);
+  const detected = diagnostics.slice(before).some((entry) => entry.code === fixture.expected_diagnostic);
+  if (!detected) {
+    diagnostic("E_NEGATIVE_NOT_DETECTED", "fixtures/planted-negative-artifact-drift.json", `expected ${fixture.expected_diagnostic} was not detected`);
+  }
+  diagnostics.splice(before, diagnostics.length - before);
+  if (detected) console.log(`planted-negative id=${fixture.id} status=detected diagnostic=${fixture.expected_diagnostic}`);
+}
+
+function runPlantedCalibrationDrift(fixture) {
+  const before = diagnostics.length;
+  validateCalibrationPlant(fixture.dossier, fixture.oracle, `fixtures/planted-negative-calibration-drift.json:${fixture.id}`);
+  const detected = diagnostics.slice(before).some((entry) => entry.code === fixture.expected_diagnostic);
+  if (!detected) {
+    diagnostic("E_NEGATIVE_NOT_DETECTED", "fixtures/planted-negative-calibration-drift.json", `expected ${fixture.expected_diagnostic} was not detected`);
+  }
+  diagnostics.splice(before, diagnostics.length - before);
+  if (detected) console.log(`planted-negative id=${fixture.id} status=detected diagnostic=${fixture.expected_diagnostic}`);
+}
+
 function printDigestCandidates(oracles, dossiers) {
   for (const oracle of oracles) console.log(`digest oracle=${oracle.id} sha256=${digest(oracle.data)}`);
   for (const dossier of dossiers) console.log(`digest render=${dossier.id} sha256=${digest(renderDossier(dossier))}`);
 }
 
-const [manifest, oracleDocument, renderDocument, missingAnchorFixture, renderedDriftFixture] = await Promise.all([
+const [manifest, oracleDocument, renderDocument, missingAnchorFixture, renderedDriftFixture, artifactDriftFixture, calibrationDriftFixture] = await Promise.all([
   readJson("manifest.json"),
   readJson("oracles.json"),
   readJson("fixtures/render-expectations.json"),
   readJson("fixtures/planted-negative-missing-anchor.json"),
   readJson("fixtures/planted-negative-rendered-statement-drift.json"),
+  readJson("fixtures/planted-negative-artifact-drift.json"),
+  readJson("fixtures/planted-negative-calibration-drift.json"),
 ]);
 
 const dossiers = Array.isArray(manifest.dossiers) ? manifest.dossiers : [];
 const oracles = Array.isArray(oracleDocument.oracles) ? oracleDocument.oracles : [];
-const oracleIds = new Set(oracles.map((oracle) => oracle.id));
+const oraclesById = new Map(oracles.map((oracle) => [oracle.id, oracle]));
 const renderExpectations = new Map((renderDocument.renders ?? []).map((entry) => [entry.id, entry]));
 
 if (dossiers.length !== 5) diagnostic("E_DOSSIER_COUNT", "manifest.json", "exactly five dossiers are required");
@@ -360,20 +481,35 @@ for (const oracle of oracles) {
   }
 }
 
-for (const dossier of dossiers) validateDossier(dossier, oracleIds, renderExpectations);
+for (const dossier of dossiers) validateDossier(dossier, oraclesById, renderExpectations);
+validateCalibrationPlant(
+  dossiers.find((dossier) => dossier.id === "rung-1-calibration"),
+  oraclesById.get("oracle-calibration-unbounded-primes-v1"),
+  "oracles.json:oracle-calibration-unbounded-primes-v1",
+);
 await Promise.all(dossiers.map(checkDossierMarkdown));
 if (selfTest) runPlantedNegative(missingAnchorFixture);
 if (selfTest) runPlantedRenderedDrift(renderedDriftFixture);
+if (selfTest) runPlantedArtifactDrift(artifactDriftFixture);
+if (selfTest) runPlantedCalibrationDrift(calibrationDriftFixture);
 if (emitDigests) printDigestCandidates(oracles, dossiers);
 if (checkLinks) await checkExternalLinks(dossiers);
+if (checkArtifacts) await checkPinnedArtifacts(dossiers);
 
 const duration = Math.round(performance.now() - started);
-const suite = checkLinks ? "source-contract+links" : selfTest ? "source-contract+planted-negative" : "source-contract";
-const reproduction = checkLinks
-  ? "bun docs/seed/rungs-1-5/check.mjs --check-links"
-  : selfTest
-    ? "bun docs/seed/rungs-1-5/check.mjs --self-test"
-    : "bun docs/seed/rungs-1-5/check.mjs";
+const suite = checkLinks && checkArtifacts
+  ? "source-contract+links+artifacts"
+  : checkLinks
+    ? "source-contract+links"
+    : checkArtifacts
+      ? "source-contract+artifacts"
+      : selfTest
+        ? "source-contract+planted-negative"
+        : "source-contract";
+const reproductionArgs = [checkLinks ? "--check-links" : null, checkArtifacts ? "--check-artifacts" : null, selfTest ? "--self-test" : null]
+  .filter(Boolean)
+  .join(" ");
+const reproduction = `bun docs/seed/rungs-1-5/check.mjs${reproductionArgs ? ` ${reproductionArgs}` : ""}`;
 
 if (diagnostics.length > 0) {
   for (const entry of diagnostics) {

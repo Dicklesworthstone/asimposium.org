@@ -20,6 +20,7 @@ Scope is simple undirected labeled graphs through 10 vertices, exhaustive candid
 
 - `networkx-petersen-docs` — [NetworkX `petersen_graph`](https://networkx.org/documentation/stable/reference/generated/networkx.generators.small.petersen_graph.html), locator: API entry identifies a cubic undirected graph with 10 nodes and 15 edges. NetworkX source is BSD-3-Clause; this dossier stores no source body. Retrieved 2026-08-13.
 - `networkx-petersen-source` — [pinned NetworkX source](https://raw.githubusercontent.com/networkx/networkx/2acf1590f82757c01a57b81b8c5dfb79e60aa416/networkx/generators/small.py), locator: `petersen_graph`, lines 726–766. BSD-3-Clause. Retrieved 2026-08-13.
+- `petersen-nonhamiltonicity` — [Wolfram MathWorld’s Petersen Graph entry](https://mathworld.wolfram.com/PetersenGraph.html), locator: nonhamiltonian paragraph giving an explicit argument that the Petersen graph has no Hamiltonian cycle. Wolfram/publisher copyright; citation and locator only. Retrieved 2026-08-13.
 
 ## Known answer and target hash
 

@@ -18,7 +18,7 @@ Scope is Lean 4.33.0 and Mathlib commit `db584cd6d46c92f209a44c0f1c829460d327499
 
 ## Authoritative anchored sources and rights
 
-- `mathlib-euclid-declaration` — [Mathlib `Nat.exists_infinite_primes`](https://leanprover-community.github.io/mathlib4_docs/Mathlib/Data/Nat/Prime/Infinite.html#Nat.exists_infinite_primes), locator: theorem declaration with `n : Nat` and a witness prime `p ≥ n`. Source is Apache-2.0; only a locator is stored. Retrieved 2026-08-13.
+- `mathlib-euclid-declaration` — [Mathlib `Nat.exists_infinite_primes` at the pinned commit](https://github.com/leanprover-community/mathlib4/blob/db584cd6d46c92f209a44c0f1c829460d327499d/Mathlib/Data/Nat/Prime/Infinite.lean#L31-L42), locator: lines 31–42 declare the theorem with `n : Nat` and a witness prime `p ≥ n`. Source is Apache-2.0; only a locator is stored. Retrieved 2026-08-13.
 - `mathlib-license` — [Mathlib LICENSE at the pinned commit](https://github.com/leanprover-community/mathlib4/blob/db584cd6d46c92f209a44c0f1c829460d327499d/LICENSE), locator: repository license. Apache-2.0. Retrieved 2026-08-13.
 
 ## Known answer and target hash

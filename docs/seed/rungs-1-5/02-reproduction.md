@@ -19,7 +19,7 @@ Scope is one positive zero, a CPU-only local run, and the stated absolute-error 
 ## Authoritative anchored sources and rights
 
 - `dlmf-bessel-zeros` — [NIST DLMF §10.21(i)](https://dlmf.nist.gov/10.21.i), locator: definition of `j_{ν,m}` as positive zeros of `J_ν`. Rights status: copyright © NIST; citation and locator only, no copied prose or table. Retrieved 2026-08-13.
-- `mpmath-besseljzero` — [mpmath `besseljzero`](https://mpmath.org/doc/current/functions/bessel.html#besseljzero), locator: API entry for Bessel-function zeros. mpmath is BSD-3-Clause; no code is vendored. Retrieved 2026-08-13.
+- `mpmath-besseljzero` — [mpmath 1.3.0 `besseljzero`](https://mpmath.org/doc/1.3.0/functions/bessel.html#besseljzero), locator: versioned API entry for Bessel-function zeros. mpmath is BSD-3-Clause; no code is vendored. Retrieved 2026-08-13.
 - `mpmath-1.3.0-sdist` — [mpmath 1.3.0 source distribution](https://files.pythonhosted.org/packages/e0/47/dd32fa426cc72114383ac549964eecb20ecfd886d1e5ccf5340b55b02f57/mpmath-1.3.0.tar.gz), SHA-256 `7a28eb2a9774d00c7bc92411c19a89209d5da7c4c9a9e227be8330a23a25b91f`, BSD-3-Clause. Retrieved 2026-08-13.
 
 ## Known answer and target hash
