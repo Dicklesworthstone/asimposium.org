@@ -1,10 +1,10 @@
 import { describe, expect, test } from "bun:test";
-import { mkdirSync, writeFileSync } from "node:fs";
+import { mkdirSync, symlinkSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { makeFixtureRepo } from "./fixtures.ts";
 import {
-  discoverWorkspaces,
   DiscoveryError,
+  discoverWorkspaces,
   hasSourceFiles,
   readRootPackage,
 } from "./workspaces.ts";
@@ -76,7 +76,11 @@ describe("workspace discovery", () => {
   test("scripts and versions are carried through so the dispatcher can route to them", () => {
     const root = makeFixtureRepo({
       packages: [
-        { dir: "apps/wire", version: "1.2.3", scripts: { "test:unit": "bun test", lint: "oxlint" } },
+        {
+          dir: "apps/wire",
+          version: "1.2.3",
+          scripts: { "test:unit": "bun test", lint: "oxlint" },
+        },
       ],
     });
     const [workspace] = discoverWorkspaces(root);
@@ -126,5 +130,22 @@ describe("source detection: the trigger that turns gates on", () => {
 
   test("a missing directory is reported as sourceless rather than throwing", () => {
     expect(hasSourceFiles(join(makeFixtureRepo(), "does-not-exist"))).toBe(false);
+  });
+
+  test("a symlinked directory is not followed, so code cannot be borrowed from outside", () => {
+    const root = makeFixtureRepo({ packages: [{ dir: "packages/protocol", source: true }] });
+    const consumer = makeFixtureRepo({ packages: [{ dir: "packages/empty" }] });
+    // The link target really does carry source, so the assertion below is not vacuous.
+    expect(hasSourceFiles(join(root, "packages/protocol"))).toBe(true);
+    symlinkSync(join(root, "packages/protocol/src"), join(consumer, "packages/empty/src"), "dir");
+    expect(hasSourceFiles(join(consumer, "packages/empty"))).toBe(false);
+  });
+
+  test("a symlink loop terminates instead of hanging the walk", () => {
+    const root = makeFixtureRepo({ packages: [{ dir: "packages/empty" }] });
+    const dir = join(root, "packages/empty");
+    mkdirSync(join(dir, "inner"), { recursive: true });
+    symlinkSync(dir, join(dir, "inner", "loop"), "dir");
+    expect(hasSourceFiles(dir)).toBe(false);
   });
 });

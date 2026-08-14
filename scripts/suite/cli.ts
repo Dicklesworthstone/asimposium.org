@@ -1,4 +1,5 @@
 #!/usr/bin/env bun
+
 /**
  * The ASImposium root suite dispatcher (bead asimposiumorg-8xn, OPS.1).
  *
@@ -17,31 +18,36 @@
  * Run `bun run suite --help` for the full contract.
  */
 
-import { fileURLToPath } from "node:url";
 import { isAbsolute, join, resolve } from "node:path";
+import { fileURLToPath } from "node:url";
 import {
   isSuite,
   orderSuites,
-  requiredSuitesFor,
   ROOT_UNITS,
+  requiredSuitesFor,
   SUITE_DESCRIPTION,
   SUITE_SCRIPT,
   SUITES,
   type Suite,
 } from "./policy.ts";
 import {
+  type Diagnostic,
   displayPath,
   formatSummaryLine,
   formatUnitLine,
+  type PlanDiagnostic,
   redact,
   reproduceCommand,
-  serialize,
-  type Diagnostic,
-  type PlanDiagnostic,
   type SummaryDiagnostic,
+  serialize,
   type UnitDiagnostic,
 } from "./report.ts";
-import { discoverWorkspaces, DiscoveryError, readRootPackage, type Workspace } from "./workspaces.ts";
+import {
+  DiscoveryError,
+  discoverWorkspaces,
+  readRootPackage,
+  type Workspace,
+} from "./workspaces.ts";
 
 const TOOL = "bun";
 const DEPTH_ENV = "ASIMPOSIUM_SUITE_DEPTH";
@@ -192,7 +198,10 @@ function matchesFilter(workspace: { name: string; dir: string }, filters: string
   if (filters.length === 0) return true;
   return filters.some((pattern) => {
     const expression = new RegExp(
-      `^${pattern.split("*").map((part) => part.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")).join(".*")}$`,
+      `^${pattern
+        .split("*")
+        .map((part) => part.replace(/[.*+?^${}()|[\]\\]/g, "\\$&"))
+        .join(".*")}$`,
     );
     return expression.test(workspace.name) || expression.test(workspace.dir);
   });
@@ -413,8 +422,7 @@ function preflight(options: Options, depth: number): UnitDiagnostic {
   }
 
   const compare = (left: string, right: string): number => {
-    const parse = (value: string) =>
-      value.split(".").map((part) => Number.parseInt(part, 10) || 0);
+    const parse = (value: string) => value.split(".").map((part) => Number.parseInt(part, 10) || 0);
     const [a, b] = [parse(left), parse(right)];
     for (let index = 0; index < 3; index += 1) {
       const delta = (a[index] ?? 0) - (b[index] ?? 0);
@@ -436,9 +444,7 @@ function preflight(options: Options, depth: number): UnitDiagnostic {
     ...base,
     status: "pass",
     code: order === 0 ? "TOOLCHAIN_PINNED" : "BUN_VERSION_NEWER_THAN_PIN",
-    ...(order === 0
-      ? {}
-      : { detail: `bun ${Bun.version} is newer than the pinned bun@${pinned}` }),
+    ...(order === 0 ? {} : { detail: `bun ${Bun.version} is newer than the pinned bun@${pinned}` }),
   };
 }
 
@@ -509,7 +515,10 @@ async function main(argv: string[]): Promise<number> {
           code: unit.code,
           ...(unit.script !== undefined ? { script: unit.script } : {}),
           ...(unit.action === "run" && unit.script !== undefined
-            ? { command: `bun run ${unit.script}`, reproduce: reproduceCommand(unit.dir, unit.script) }
+            ? {
+                command: `bun run ${unit.script}`,
+                reproduce: reproduceCommand(unit.dir, unit.script),
+              }
             : {}),
           ...(unit.detail !== undefined ? { detail: unit.detail } : {}),
         };

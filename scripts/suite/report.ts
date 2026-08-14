@@ -117,9 +117,27 @@ export function reproduceCommand(dir: string, script: string): string {
   return dir === "." ? `bun run ${script}` : `cd ./${dir} && bun run ${script}`;
 }
 
+/** Redact every string reachable from a record, leaving numbers and structure untouched. */
+function redactDeep(value: unknown, root: string): unknown {
+  if (typeof value === "string") return redact(value, root);
+  if (Array.isArray(value)) return value.map((entry) => redactDeep(entry, root));
+  if (typeof value === "object" && value !== null) {
+    const out: Record<string, unknown> = {};
+    for (const [key, entry] of Object.entries(value as Record<string, unknown>)) {
+      out[key] = redactDeep(entry, root);
+    }
+    return out;
+  }
+  return value;
+}
+
+/**
+ * Redaction runs on the field values, never on the serialized JSON text: rewriting the
+ * text would have to reason about JSON escaping, and a redactor that can corrupt its own
+ * output is worse than none.
+ */
 export function serialize(diagnostic: Diagnostic, root: string): string {
-  const cleaned = JSON.parse(redact(JSON.stringify(diagnostic), root)) as Diagnostic;
-  return JSON.stringify(cleaned);
+  return JSON.stringify(redactDeep(diagnostic, root));
 }
 
 const STATUS_LABEL: Readonly<Record<UnitStatus, string>> = {

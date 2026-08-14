@@ -5,7 +5,7 @@
  * dispatcher can never drift from what `bun install` actually links.
  */
 
-import { readdirSync, readFileSync, statSync } from "node:fs";
+import { type Dirent, readdirSync, readFileSync, statSync } from "node:fs";
 import { join, sep } from "node:path";
 import { SCAN_IGNORED_DIRECTORIES, SOURCE_EXTENSIONS } from "./policy.ts";
 
@@ -67,7 +67,8 @@ function stringRecord(value: unknown): Record<string, string> {
 }
 
 function stringArray(value: unknown): string[] {
-  if (Array.isArray(value)) return value.filter((entry): entry is string => typeof entry === "string");
+  if (Array.isArray(value))
+    return value.filter((entry): entry is string => typeof entry === "string");
   // npm also allows { workspaces: { packages: [...] } }; accept it so discovery never lies.
   if (typeof value === "object" && value !== null) {
     const packages = (value as Record<string, unknown>).packages;
@@ -141,15 +142,17 @@ export function hasSourceFiles(absoluteDir: string, maxDepth = 8): boolean {
 
   const walk = (dir: string, depth: number): boolean => {
     if (depth > maxDepth || budget <= 0) return false;
-    let entries: ReturnType<typeof readdirSync>;
+    let entries: Dirent[];
     try {
-      entries = readdirSync(dir, { withFileTypes: true });
+      entries = readdirSync(dir, { withFileTypes: true, encoding: "utf8" });
     } catch {
       return false;
     }
     const subdirectories: string[] = [];
     for (const entry of entries) {
       if (budget-- <= 0) return false;
+      // isDirectory() is false for symlinks, so the walk never follows a link out of the
+      // package (or into node_modules through one) and cannot be sent in a circle.
       if (entry.isDirectory()) {
         if (SCAN_IGNORED_DIRECTORIES.includes(entry.name)) continue;
         subdirectories.push(join(dir, entry.name));

@@ -55,14 +55,20 @@ export const BASELINE_REQUIRED: readonly Suite[] = ["typecheck", "lint", "unit"]
  *  - apps/wire: the only writer; owes contract, real-binding integration, security and the
  *    §15 performance budgets.
  *  - apps/web: the cross-plane auth and cache-privacy surface (§14.1, §14.3).
- *  - e2e, e2e/gauntlet: the flagship gate and the synthetic-Fellow load run (§16.1, §16.3).
+ *  - e2e, e2e/gauntlet: the flagship Cold-Agent Gauntlet and the human plane (§16.1).
+ *
+ * Deliberately NOT required yet: the §16.3 synthetic-Fellow load run under e2e. It cannot
+ * be satisfied honestly until a deployed staging Worker exists (W10), and a required gate
+ * whose only cheap satisfaction is a stub that exits 0 manufactures exactly the false
+ * assurance Fable §17.0 forbids. The entry point still runs it the moment e2e defines
+ * "test:performance".
  */
 export const EXTRA_REQUIRED: Readonly<Record<string, readonly Suite[]>> = {
   "packages/contracts": ["contract"],
   "packages/render": ["contract"],
   "apps/wire": ["contract", "integration", "security", "performance"],
   "apps/web": ["security"],
-  e2e: ["e2e", "performance"],
+  e2e: ["e2e"],
   "e2e/gauntlet": ["e2e"],
 };
 

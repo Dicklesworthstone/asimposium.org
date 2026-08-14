@@ -7,8 +7,8 @@ import {
   formatUnitLine,
   redact,
   reproduceCommand,
-  serialize,
   type SummaryDiagnostic,
+  serialize,
   type UnitDiagnostic,
 } from "./report.ts";
 
@@ -51,13 +51,18 @@ describe("redaction", () => {
   });
 
   test("enrollment fragment secrets are masked (Fable §5.2: never log the fragment)", () => {
-    const redacted = redact("https://a.asimposium.org/join/ASIMP-EN-01JX#v1.abcdef0123456789", ROOT);
+    const redacted = redact(
+      "https://a.asimposium.org/join/ASIMP-EN-01JX#v1.abcdef0123456789",
+      ROOT,
+    );
     expect(redacted).toBe("https://a.asimposium.org/join/ASIMP-EN-01JX<redacted>");
     expect(redacted).not.toContain("abcdef0123456789");
   });
 
   test("bearer headers and common third-party credential shapes are masked", () => {
-    expect(redact("Authorization: Bearer abcdef0123456789", ROOT)).toBe("Authorization: <redacted>");
+    expect(redact("Authorization: Bearer abcdef0123456789", ROOT)).toBe(
+      "Authorization: <redacted>",
+    );
     expect(redact("ghp_0123456789abcdefghij", ROOT)).toBe("<redacted>");
     expect(redact("sk-0123456789abcdefghij", ROOT)).toBe("<redacted>");
     expect(redact("AIzaSyA0123456789abcdefghijklmnopqrs", ROOT)).toBe("<redacted>");
@@ -111,6 +116,18 @@ describe("serialization", () => {
     expect(parsed.detail).toContain("<repo>/apps/wire");
     expect(parsed.detail).toContain("<redacted>");
     expect(serialized).not.toContain(ROOT);
+  });
+
+  test("quotes and backslashes in a detail survive redaction as valid JSON", () => {
+    const serialized = serialize(
+      unit({
+        status: "fail",
+        detail: `child said "no" \\ and stopped at ${ROOT}/apps/wire`,
+      }),
+      ROOT,
+    );
+    const parsed = JSON.parse(serialized) as UnitDiagnostic;
+    expect(parsed.detail).toBe('child said "no" \\ and stopped at <repo>/apps/wire');
   });
 
   test("the record shape matches the diagnostic contract the acceptance criteria names", () => {

@@ -116,8 +116,18 @@ describe("routing to real package commands", () => {
     const root = makeFixtureRepo({
       rootScripts: { "toolchain:test": PASS_COMMAND },
       packages: [
-        { dir: "apps/web", name: "@fixture/web", scripts: { "test:unit": PASS_COMMAND }, source: true },
-        { dir: "apps/wire", name: "@fixture/wire", scripts: { "test:unit": PASS_COMMAND }, source: true },
+        {
+          dir: "apps/web",
+          name: "@fixture/web",
+          scripts: { "test:unit": PASS_COMMAND },
+          source: true,
+        },
+        {
+          dir: "apps/wire",
+          name: "@fixture/wire",
+          scripts: { "test:unit": PASS_COMMAND },
+          source: true,
+        },
       ],
     });
     const result = await runCli(root, ["unit", "--json", "--filter", "apps/wire"]);
@@ -311,7 +321,7 @@ describe("secret-safe diagnostics", () => {
 
   test("--json keeps stdout parseable by forwarding child stdout to stderr", async () => {
     const root = makeFixtureRepo({
-      rootScripts: { "toolchain:test": 'bun -e "console.log(\'child chatter\')"' },
+      rootScripts: { "toolchain:test": "bun -e \"console.log('child chatter')\"" },
       packages: [],
     });
     const result = await runCli(root, ["unit", "--json"]);
