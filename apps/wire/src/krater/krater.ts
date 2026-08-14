@@ -421,11 +421,20 @@ async function readIntegrityBackfill(
  * The first event of a problem still missing either digest, or null when every envelope is
  * digested.
  *
- * This is the cheap form of "is the upgrade finished?". `LIMIT 1` lets the engine stop at the
- * first counter-example rather than proving the negative by reading the whole log, and one
- * column crosses the boundary instead of eleven. Exported for direct unit and property
- * coverage: its equivalence to the exhaustive predicate it replaced is the load-bearing
- * claim, so it is tested rather than assumed.
+ * `LIMIT 1` alone does not make this cheap. For a healthy problem there is no matching row,
+ * so the engine has to prove a negative, and without a matching index that means visiting
+ * every envelope of the problem — `EXPLAIN QUERY PLAN` on a 0004-era schema reports
+ * `SEARCH events USING INDEX sqlite_autoindex_events_2 (problem_id=?)`, i.e. a seek to the
+ * problem followed by a filter across its whole log.
+ *
+ * Migration 0005 adds a partial index over exactly this predicate, so the plan becomes
+ * `SEARCH events USING INDEX events_undigested_idx (problem_id=?)`. Rows live in that index
+ * only while they are undigested, which means the set is empty for every upgraded problem:
+ * the cost tracks outstanding legacy work rather than ledger size. The index is ordered
+ * `(problem_id, seq)`, so the ORDER BY is satisfied without a sort.
+ *
+ * Exported so the equivalence to the exhaustive predicate it replaced is testable rather than
+ * assumed; `s2-client.ts` pins the case that distinguishes them, a partly digested log.
  */
 export async function firstUndigestedEvent(
   db: D1Database,
@@ -479,8 +488,8 @@ export async function backfillKraterIntegrity(
   // write cost grow with problem history: eleven columns per row crossing the D1 boundary and
   // an N-element array walked by `.every()`, on every single write. The predicate is
   // unchanged — the same three conditions in the same order — but the third is now asked as
-  // an existence question, which reads at most one row and short-circuits on the first
-  // counter-example instead of proving the point by exhaustion.
+  // an existence question, answered by the partial index migration 0005 adds (see
+  // firstUndigestedEvent for the query plans on either side of it).
   if (storedBackfill?.state === "complete" && rawHead.chain_digest !== null) {
     const undigested = await firstUndigestedEvent(db, problemId);
     if (undigested === null) return;
