@@ -266,10 +266,17 @@ describe("a package that grows code owes its gates", () => {
       packages: [{ dir: "packages/render", source: true, scripts: {} }],
     });
     const result = await runCli(root, ["performance", "--json"]);
-    expect(result.exitCode).toBe(0);
+
+    // The unit row stays an honest "skip": not owed is not the same as broken, and the
+    // zero-executed rule must not rewrite a package's own classification.
     const skipped = units(result).find((unit) => unit.dir === "packages/render");
     expect(skipped?.status).toBe("skip");
     expect(skipped?.code).toBe("SUITE_NOT_REQUIRED");
+
+    // The suite as a whole still ran nothing, so it is not a pass. This assertion used to
+    // read `toBe(0)`: a performance gate could report green having spawned no process.
+    expect(result.exitCode).toBe(1);
+    expect(summary(result, "performance")?.code).toBe("NO_UNITS_EXECUTED");
   });
 
   test("a missing root toolchain script fails rather than quietly disappearing", async () => {
@@ -284,15 +291,59 @@ describe("a package that grows code owes its gates", () => {
     expect(rootUnit?.code).toBe("MISSING_ROOT_SCRIPT");
   });
 
-  test("--require-executed turns an all-skipped suite into a failure", async () => {
+  test("PLANTED: an all-skipped suite fails with no flag, and the flag is now redundant", async () => {
+    // This check used to be opt-in, so `bun run test:contract` against a tree with no
+    // contract script anywhere exited 0 having spawned nothing. None of the root entry
+    // points pass --require-executed except `check`, so the gates that most needed the
+    // check were exactly the ones that never got it.
     const root = makeFixtureRepo({ packages: [{ dir: "packages/protocol", scripts: {} }] });
-    const passive = await runCli(root, ["contract", "--json"]);
-    expect(passive.exitCode).toBe(0);
-    expect(summary(passive, "contract")?.detail).toContain("executed no units");
 
+    const passive = await runCli(root, ["contract", "--json"]);
+    expect(passive.exitCode).toBe(1);
+    const passiveSummary = summary(passive, "contract");
+    expect(passiveSummary?.status).toBe("fail");
+    expect(passiveSummary?.code).toBe("NO_UNITS_EXECUTED");
+    expect(passiveSummary?.totals.executed).toBe(0);
+    expect(passiveSummary?.detail).toContain("executed no units");
+
+    // The flag is kept so existing CI invocations keep parsing, and it must be exactly
+    // redundant: same exit code, same summary code, same totals.
     const strict = await runCli(root, ["contract", "--json", "--require-executed"]);
-    expect(strict.exitCode).toBe(1);
-    expect(summary(strict, "contract")?.code).toBe("NO_UNITS_EXECUTED");
+    const strictSummary = summary(strict, "contract");
+    expect(strict.exitCode).toBe(passive.exitCode);
+    expect(strictSummary?.code).toBe(passiveSummary?.code);
+    expect(strictSummary?.totals).toEqual(passiveSummary?.totals);
+  });
+
+  test("PLANTED: a zero-executed suite outranks a blocked one — exit 1, not the blocked code", async () => {
+    // The two fail-closed rules have to compose. A run may legitimately contain a blocked
+    // suite; that alone exits BLOCKED_EXIT_CODE. Adding a suite that executed nothing must
+    // pull the whole run to a real failure, and must not launder itself as "blocked".
+    const root = makeFixtureRepo({
+      rootScripts: { "toolchain:test": PASS_COMMAND },
+      packages: [
+        { dir: "packages/protocol", scripts: { "test:unit": blockedCommand() }, source: true },
+      ],
+    });
+    const result = await runCli(root, ["unit", "contract", "--json"]);
+
+    // The blocked unit keeps its own honest row and its suite stays "blocked"...
+    const unitSummary = summary(result, "unit");
+    expect(unitSummary?.status).toBe("blocked");
+    expect(unitSummary?.code).toBe("SUITE_BLOCKED");
+    expect(unitSummary?.totals.blocked).toBe(1);
+    expect(unitSummary?.totals.executed).toBe(2);
+
+    // ...while the suite that spawned nothing is a real failure, not a skip and not a block.
+    const contractSummary = summary(result, "contract");
+    expect(contractSummary?.status).toBe("fail");
+    expect(contractSummary?.code).toBe("NO_UNITS_EXECUTED");
+    expect(contractSummary?.totals.executed).toBe(0);
+    expect(contractSummary?.totals.blocked).toBe(0);
+
+    // Failure outranks blocked: without the contract suite this run would have exited 78.
+    expect(result.exitCode).toBe(1);
+    expect(result.exitCode).not.toBe(BLOCKED_EXIT_CODE);
   });
 
   test("--all with --require-executed fails every zero-unit suite", async () => {

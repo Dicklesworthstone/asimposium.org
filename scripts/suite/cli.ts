@@ -11,6 +11,8 @@
  *   - a package that carries source code and owes a suite but has no script FAILS
  *     (status "missing"), so a stub cannot stay silently green once it grows code;
  *   - a stub with no source files is reported "skip" with the reason, never "pass";
+ *   - a suite in which no unit ever executed FAILS ("NO_UNITS_EXECUTED"), so an entry point
+ *     cannot report a required gate green without having spawned a single unit;
  *   - a package that exits with the root-owned BLOCKED_EXIT_CODE is reported "blocked":
  *     still non-zero, still printed with its reproduction command, but counted apart from
  *     "fail" so a deliberate refusal and a broken test are never the same row;
@@ -94,8 +96,8 @@ OPTIONS
   --list                   Print the resolved plan and exit without running anything.
   --json                   NDJSON diagnostics on stdout. Child stdout is forwarded to
                            stderr so stdout stays parseable; nothing is suppressed.
-  --require-executed       Fail a suite that executed zero units (use in CI once a suite is
-                           expected to exist).
+  --require-executed       Accepted for compatibility; now redundant. A suite that executes
+                           zero units always fails, flag or not.
   --bail                   Stop after the first failing unit.
   --root <dir>             Repository root to operate on (default: this repository).
   -h, --help               This text.
@@ -118,7 +120,7 @@ SCRIPT NAMES EXPECTED IN EACH WORKSPACE PACKAGE
 ${SUITES.map((suite) => `  ${suite.padEnd(12)} -> "${SUITE_SCRIPT[suite]}"`).join("\n")}
 
 EXIT CODES
-  0  every unit passed or was legitimately skipped
+  0  at least one unit executed, and every unit passed or was legitimately skipped
   1  at least one unit failed, or a required suite script is missing
   2  usage, policy or preflight error (bad suite name, unreadable root, bun too old)
   ${BLOCKED_EXIT_CODE} no failures, but at least one unit is deliberately blocked on named future work
@@ -596,7 +598,13 @@ async function main(argv: string[]): Promise<number> {
       }
     }
 
-    const emptyRun = options.requireExecuted && totals.executed === 0;
+    // A suite that executed nothing has proved nothing, so it is never "pass". This is the
+    // one shape of green the dispatcher must never manufacture (Fable §17.0): a required
+    // gate reporting success on a run in which no unit was ever spawned. It fails closed by
+    // default rather than only under an opt-in flag, because the entry points that most
+    // need the check -- `bun run test:security`, `test:contract`, `test:integration` -- are
+    // exactly the ones that never passed --require-executed.
+    const emptyRun = totals.executed === 0;
     if (emptyRun) failed = true;
     const genuinelyFailed = totals.fail + totals.missing > 0 || emptyRun;
 
@@ -609,19 +617,24 @@ async function main(argv: string[]): Promise<number> {
       duration_ms: Math.round(performance.now() - suiteStartedAt),
       status: genuinelyFailed ? "fail" : totals.blocked > 0 ? "blocked" : "pass",
       reproduce: `bun run suite ${suite}`,
-      code: emptyRun
-        ? "NO_UNITS_EXECUTED"
-        : genuinelyFailed
+      // A real fail or a missing required script keeps SUITE_INCOMPLETE: it is the more
+      // specific diagnosis, and an all-missing suite also executes zero units.
+      code:
+        totals.fail + totals.missing > 0
           ? "SUITE_INCOMPLETE"
-          : totals.blocked > 0
-            ? "SUITE_BLOCKED"
-            : "SUITE_COMPLETE",
+          : emptyRun
+            ? "NO_UNITS_EXECUTED"
+            : totals.blocked > 0
+              ? "SUITE_BLOCKED"
+              : "SUITE_COMPLETE",
       totals,
       ...(emptyRun
-        ? { detail: `--require-executed was set but suite "${suite}" executed no units` }
-        : totals.executed === 0
-          ? { detail: `suite "${suite}" executed no units; every unit was skipped` }
-          : {}),
+        ? {
+            detail:
+              `suite "${suite}" executed no units; a suite that ran nothing is never a pass. ` +
+              "Define the suite's script in a package, or narrow the selection to suites that exist.",
+          }
+        : {}),
     };
     emit(summary, options);
 

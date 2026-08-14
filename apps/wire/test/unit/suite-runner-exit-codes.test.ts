@@ -22,16 +22,22 @@ const PACKAGE_ROOT = resolve(import.meta.dir, "../..");
 const RUNNER = "scripts/suites.ts";
 const REAL_BINDING_LANE = resolve(PACKAGE_ROOT, "test/integration/s2-krater-real-bindings.test.ts");
 
+/**
+ * One emitted NDJSON record. The suite's own records carry tool/package versions
+ * and a duration; the re-emitted child blocker deliberately does not, so those
+ * members are optional here rather than asserted into existence by the type.
+ */
 interface Diagnostic {
   tool: string;
-  tool_version: string;
+  tool_version?: string;
   package: string;
-  package_version: string;
+  package_version?: string;
   suite: string;
-  duration_ms: number;
+  duration_ms?: number;
   status: string;
   exit_code: number;
   code?: string;
+  probe_rejection?: string;
   blocked_on?: string;
   forbidden_substitutes?: string;
   reproduce: string;
@@ -41,6 +47,9 @@ interface Run {
   exitCode: number;
   stdout: string;
   stderr: string;
+  /** Every NDJSON record the runner emitted, in emission order. */
+  records: Diagnostic[];
+  /** The suite's own final record. */
   record: Diagnostic;
 }
 
@@ -56,20 +65,65 @@ async function runRunner(suite: string, cwd = runnerFixture()): Promise<Run> {
     new Response(child.stderr).text(),
     child.exited,
   ]);
-  const line = stdout.trim().split("\n").at(-1) ?? "";
-  let record: Diagnostic;
-  try {
-    record = JSON.parse(line) as Diagnostic;
-  } catch (error) {
-    // Never swallowed, and never defaulted to an empty record: a runner that stops emitting a
-    // parseable NDJSON diagnostic has broken the contract this suite exists to check, so the
-    // failure has to name the suite and show what did arrive.
-    const detail = error instanceof Error ? error.message : "unparseable";
+  // Every record, not just the last one: a suite that re-publishes a child
+  // capability record emits two, and the earlier one is exactly where a foreign
+  // string could smuggle a path or a credential into this package's stream.
+  const records: Diagnostic[] = [];
+  for (const line of stdout.split("\n")) {
+    const candidate = line.trim();
+    if (candidate === "" || !candidate.startsWith("{")) continue;
+    try {
+      records.push(JSON.parse(candidate) as Diagnostic);
+    } catch (error) {
+      // Never swallowed, and never defaulted to an empty record: a runner that stops emitting a
+      // parseable NDJSON diagnostic has broken the contract this suite exists to check, so the
+      // failure has to name the suite and show what did arrive.
+      const detail = error instanceof Error ? error.message : "unparseable";
+      throw new Error(
+        `${RUNNER} ${suite} emitted an unparseable NDJSON line (${detail}). stdout was: ${stdout.slice(0, 400)}`,
+      );
+    }
+  }
+  const record = records.at(-1);
+  if (record === undefined) {
     throw new Error(
-      `${RUNNER} ${suite} emitted no parseable diagnostic (${detail}). stdout was: ${stdout.slice(0, 400)}`,
+      `${RUNNER} ${suite} emitted no parseable diagnostic. stdout was: ${stdout.slice(0, 400)}`,
     );
   }
-  return { exitCode, stdout, stderr, record };
+  return { exitCode, stdout, stderr, records, record };
+}
+
+/** The well-behaved capability record the real probe would emit with no authority. */
+const BASE_PROBE_RECORD: Record<string, unknown> = {
+  tool: "bun",
+  package: "apps/wire",
+  suite: "s2-krater-real-bindings",
+  status: "blocked",
+  exit_code: 78,
+  code: "S2_REAL_BINDING_PROOF_BLOCKED",
+  blocked_on: "explicit authority for the two real local Wrangler lifecycle runs",
+  forbidden_substitutes: "a shell-only regression presented as real binding proof",
+  reproduce: "fixture-only",
+};
+
+/** The exact key set the runner may republish on a child probe's behalf. */
+const ALLOWED_BLOCKER_KEYS = [
+  "blocked_on",
+  "code",
+  "exit_code",
+  "forbidden_substitutes",
+  "package",
+  "reproduce",
+  "status",
+  "suite",
+  "tool",
+];
+
+interface FixtureOptions {
+  /** Merged over `BASE_PROBE_RECORD` to model a hostile or malformed probe. */
+  readonly probeFields?: Record<string, unknown>;
+  /** Written verbatim to the probe's stderr before it exits. */
+  readonly probeStderr?: string;
 }
 
 /**
@@ -77,7 +131,7 @@ async function runRunner(suite: string, cwd = runnerFixture()): Promise<Run> {
  * exercise the runner's classification and diagnostic contract without recursively launching
  * the real 60-second Workerd/D1 auth preflight. The latter belongs to the integration suite.
  */
-function runnerFixture(): string {
+function runnerFixture(options: FixtureOptions = {}): string {
   const dir = mkdtempSync(join(tmpdir(), "wire-suite-regression-"));
   mkdirSync(join(dir, "scripts"), { recursive: true });
   mkdirSync(join(dir, "test", "auth"), { recursive: true });
@@ -100,21 +154,15 @@ function runnerFixture(): string {
   ].join("\n");
   writeFileSync(join(dir, "test", "auth", "preflight.test.ts"), passingTest);
   writeFileSync(join(dir, "test", "security", "security.test.ts"), passingTest);
+  const probeRecord = { ...BASE_PROBE_RECORD, ...(options.probeFields ?? {}) };
   writeFileSync(
     join(dir, "test", "integration", "s2-krater-real-bindings.test.ts"),
     [
       'if (process.argv[2] !== "--capability-probe") throw new Error("capability probe flag required");',
-      "console.log(JSON.stringify({",
-      '  tool: "bun",',
-      '  package: "apps/wire",',
-      '  suite: "s2-krater-real-bindings",',
-      '  status: "blocked",',
-      "  exit_code: 78,",
-      '  code: "S2_REAL_BINDING_PROOF_BLOCKED",',
-      '  blocked_on: "explicit authority for the two real local Wrangler lifecycle runs",',
-      '  forbidden_substitutes: "a shell-only regression presented as real binding proof",',
-      '  reproduce: "fixture-only",',
-      "}));",
+      `console.log(${JSON.stringify(JSON.stringify(probeRecord))});`,
+      ...(options.probeStderr === undefined
+        ? []
+        : [`process.stderr.write(${JSON.stringify(`${options.probeStderr}\n`)});`]),
       "process.exit(78);",
       "",
     ].join("\n"),
@@ -190,18 +238,175 @@ describe("a deliberately blocked suite exits 78, never 0 and never 1", () => {
     expect(run.record.forbidden_substitutes ?? "").toContain("micro-benchmark");
   }, 20_000);
 
-  test("the blocked record leaks no absolute path, home directory or credential shape", async () => {
+  test("every emitted record leaks no absolute path, home directory or credential shape", async () => {
     for (const suite of ["integration", "performance"] as const) {
       const run = await runRunner(suite);
-      const serialized = JSON.stringify(run.record);
-      expect(serialized).not.toContain("/Users/");
-      expect(serialized).not.toContain("/home/");
-      expect(serialized).not.toContain(PACKAGE_ROOT);
-      expect(serialized).not.toMatch(/asimp_ag_[A-Za-z0-9_-]{4,}/);
-      expect(serialized).not.toMatch(/#v1\.[A-Za-z0-9._~-]{8,}/);
+      // Not just the suite's own final record: the integration run also
+      // republishes a child capability record, and that is the one place a
+      // foreign string enters this package's diagnostic stream.
+      expect(run.records.length).toBeGreaterThan(0);
+      for (const record of run.records) {
+        const serialized = JSON.stringify(record);
+        expect(serialized).not.toContain("/Users/");
+        expect(serialized).not.toContain("/home/");
+        expect(serialized).not.toContain(PACKAGE_ROOT);
+        expect(serialized).not.toContain(tmpdir());
+        expect(serialized).not.toMatch(/asimp_ag_[A-Za-z0-9_-]{4,}/);
+        expect(serialized).not.toMatch(/#v1\.[A-Za-z0-9._~-]{8,}/);
+        expect(serialized).not.toMatch(/\b[A-Fa-f0-9]{32,}\b/);
+      }
       expect(run.record.reproduce).toBe(`cd apps/wire && bun run test:${suite}`);
     }
   }, 40_000);
+
+  test("the integration run republishes exactly one child blocker with exactly the allowed keys", async () => {
+    const run = await runRunner("integration");
+    expect(run.records.length).toBe(2);
+    const child = run.records[0];
+    expect(child).toBeDefined();
+    expect(Object.keys(child as object).sort()).toEqual(ALLOWED_BLOCKER_KEYS);
+    expect(child?.status).toBe("blocked");
+    expect(child?.code).toBe("S2_REAL_BINDING_PROOF_BLOCKED");
+    expect(child?.exit_code).toBe(BLOCKED_EXIT_CODE);
+    expect(child?.suite).toBe("s2-krater-real-bindings");
+  }, 30_000);
+
+  test("a child probe cannot smuggle extra keys, a path or a credential into the republished blocker", async () => {
+    const run = await runRunner(
+      "integration",
+      runnerFixture({
+        probeFields: {
+          cwd_absolute: "/Users/someone/checkout/apps/wire",
+          env_snapshot: "S2_TOKEN=asimp_ag_deadbeefcafe",
+          nested: { home: "/home/someone/.wrangler" },
+        },
+      }),
+    );
+    expect(run.exitCode).toBe(BLOCKED_EXIT_CODE);
+    const child = run.records[0];
+    expect(Object.keys(child as object).sort()).toEqual(ALLOWED_BLOCKER_KEYS);
+    expect(run.stdout).not.toContain("cwd_absolute");
+    expect(run.stdout).not.toContain("env_snapshot");
+    expect(run.stdout).not.toContain("/Users/someone");
+    expect(run.stdout).not.toContain("/home/someone");
+    expect(run.stdout).not.toContain("asimp_ag_");
+  }, 30_000);
+
+  // Absolute-path forms are enumerated deliberately: a validator that only knows
+  // /Users and /home lets /Volumes, /Library, an arbitrary POSIX root, a Windows
+  // drive and a UNC share republish themselves while the header still promises
+  // repository-relative paths only.
+  for (const [label, probeFields, leak] of [
+    [
+      "a home directory path",
+      { blocked_on: "missing /Users/someone/.wrangler/config.toml" },
+      "/Users/someone",
+    ],
+    [
+      "an arbitrary POSIX absolute path",
+      { blocked_on: "missing /sensitive/path/creds.json" },
+      "/sensitive/path",
+    ],
+    [
+      "a macOS volume path",
+      { blocked_on: "missing /Volumes/secret/wrangler.toml" },
+      "/Volumes/secret",
+    ],
+    [
+      "a macOS Library path",
+      { forbidden_substitutes: "reading /Library/Secret/keychain" },
+      "/Library/Secret",
+    ],
+    ["a Windows drive path", { reproduce: "run C:\\Users\\someone\\creds.bat" }, "C:\\Users"],
+    [
+      "a Windows drive path with forward slashes",
+      { reproduce: "run C:/Users/someone/creds.bat" },
+      "C:/Users",
+    ],
+    ["a UNC share path", { blocked_on: "missing \\\\fileserver\\share\\secret" }, "\\\\fileserver"],
+    ["a file URL", { blocked_on: "missing file:///Volumes/secret/config" }, "file://"],
+    [
+      "a credential shape",
+      { forbidden_substitutes: "token asimp_ag_deadbeefcafe123" },
+      "asimp_ag_",
+    ],
+    ["an unbounded string", { reproduce: `cd apps/wire && ${"x".repeat(500)}` }, "xxxxxxxxxx"],
+    [
+      "a control character",
+      { blocked_on: `explicit authority${String.fromCharCode(7)}injected` },
+      undefined,
+    ],
+    ["a non-string", { reproduce: 42 }, undefined],
+  ] as const) {
+    test(`a blocker carrying ${label} is refused with exit 1, never republished`, async () => {
+      const run = await runRunner("integration", runnerFixture({ probeFields }));
+      expect(run.exitCode).toBe(1);
+      expect(run.exitCode).not.toBe(BLOCKED_EXIT_CODE);
+      expect(run.record.status).toBe("fail");
+      expect(run.record.code).toBe("SUITE_PREFLIGHT_FAILED");
+      expect(run.record.probe_rejection).toBe("PROBE_RECORD_TEXT_UNSAFE");
+      // Only the suite's own failure record was emitted; nothing was republished.
+      expect(run.records.length).toBe(1);
+      expect(run.stdout).not.toContain('"status":"blocked"');
+      if (leak !== undefined) expect(run.stdout).not.toContain(leak);
+    }, 30_000);
+  }
+
+  // The mirror of the loop above: tightening the path rule must not start refusing
+  // the prose and documentation links a real blocker is expected to carry.
+  test("ordinary prose, relative paths and https links are still republished", async () => {
+    const run = await runRunner(
+      "integration",
+      runnerFixture({
+        probeFields: {
+          blocked_on:
+            "explicit authority for the two real local Wrangler lifecycle runs; see https://developers.cloudflare.com/d1/ for the binding contract",
+          forbidden_substitutes:
+            "mocked or stubbed D1/R2 (AGENTS.md: do not mock D1 or R2); the shims in test/support/bindings.ts; a 24/7 wrangler dev process",
+          reproduce: "cd apps/wire && bun test test/integration/s2-krater-real-bindings.test.ts",
+        },
+      }),
+    );
+    expect(run.exitCode).toBe(BLOCKED_EXIT_CODE);
+    expect(run.records.length).toBe(2);
+    const child = run.records[0];
+    expect(child?.status).toBe("blocked");
+    expect(child?.blocked_on).toContain("https://developers.cloudflare.com/d1/");
+    expect(child?.forbidden_substitutes).toContain("D1/R2");
+    expect(child?.forbidden_substitutes).toContain("test/support/bindings.ts");
+    expect(child?.reproduce).toContain("test/integration/s2-krater-real-bindings.test.ts");
+  }, 30_000);
+
+  test("a probe that also names its code on stderr is refused, and the refusal says why", async () => {
+    const run = await runRunner(
+      "integration",
+      runnerFixture({ probeStderr: "S2_REAL_BINDING_PROOF_BLOCKED reported out of band" }),
+    );
+    expect(run.exitCode).toBe(1);
+    expect(run.record.code).toBe("SUITE_PREFLIGHT_FAILED");
+    expect(run.record.probe_rejection).toBe("PROBE_CODE_ON_STDERR");
+    // The refusal names the observed rejection instead of asserting the opposite
+    // of what happened; the probe did emit its code, in the wrong channel.
+    expect(run.stderr).toContain("capability probe refused");
+    expect(run.stderr).toContain("PROBE_CODE_ON_STDERR");
+    expect(run.stderr).not.toContain("did not emit its named code");
+  }, 30_000);
+
+  test("a probe that exits 0 is refused rather than read as blocked", async () => {
+    const dir = runnerFixture();
+    writeFileSync(
+      join(dir, "test", "integration", "s2-krater-real-bindings.test.ts"),
+      [
+        'if (process.argv[2] !== "--capability-probe") throw new Error("capability probe flag required");',
+        `console.log(${JSON.stringify(JSON.stringify(BASE_PROBE_RECORD))});`,
+        "process.exit(0);",
+        "",
+      ].join("\n"),
+    );
+    const run = await runRunner("integration", dir);
+    expect(run.exitCode).toBe(1);
+    expect(run.record.probe_rejection).toBe("PROBE_EXIT_CODE_UNEXPECTED");
+  }, 30_000);
 });
 
 describe("a suite that actually ran keeps the ordinary exit codes", () => {
@@ -263,4 +468,35 @@ describe("a suite that actually ran keeps the ordinary exit codes", () => {
     expect(exitCode).toBe(2);
     expect(stderr).toContain("usage:");
   }, 20_000);
+
+  // A bare `SUITES[command]` lookup walks Object.prototype, so these names return
+  // a truthy non-suite, slip past the usage branch, and crash in the runner with a
+  // stack trace and an absolute path instead of the documented exit 2.
+  for (const hostile of ["constructor", "toString", "valueOf", "__proto__", "hasOwnProperty"]) {
+    test(`the prototype-chain argument ${hostile} is a usage error, not a crash`, async () => {
+      const child = Bun.spawn({
+        cmd: ["bun", RUNNER, hostile],
+        cwd: PACKAGE_ROOT,
+        stdout: "pipe",
+        stderr: "pipe",
+      });
+      const [stdout, stderr, exitCode] = await Promise.all([
+        new Response(child.stdout).text(),
+        new Response(child.stderr).text(),
+        child.exited,
+      ]);
+      expect(exitCode).toBe(2);
+      expect(exitCode).not.toBe(BLOCKED_EXIT_CODE);
+      expect(exitCode).not.toBe(0);
+      expect(stderr).toContain("usage:");
+      // No thrown error, no stack frame and no absolute path reached the operator.
+      expect(stderr).not.toContain("TypeError");
+      expect(stderr).not.toContain("error:");
+      expect(stderr).not.toMatch(/^\s+at\s/m);
+      expect(stderr).not.toContain("/Users/");
+      expect(stderr).not.toContain(PACKAGE_ROOT);
+      // A usage error runs nothing, so it emits no diagnostic record either.
+      expect(stdout.trim()).toBe("");
+    }, 20_000);
+  }
 });

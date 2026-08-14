@@ -157,9 +157,71 @@ async function runBunTests(
   return { exitCode, duration: Math.round(performance.now() - started) };
 }
 
+/** The one suite name this runner will accept a foreign capability record for. */
+const PROBE_SUITE = "s2-krater-real-bindings";
+
+/**
+ * Upper bound for a prose field this runner re-publishes on behalf of a child
+ * probe. Long enough for the real blockers, short enough that a runaway string
+ * is a refusal rather than an unbounded copy into the diagnostic stream.
+ */
+const MAX_BLOCKER_TEXT = 400;
+/**
+ * Any absolute filesystem reference, by shape rather than by a list of known roots.
+ *
+ * Enumerating `/Users`, `/home`, `/tmp` and friends only closes the doors someone
+ * thought of: `/Volumes/secret`, `/Library/keys`, a bare `/sensitive/path` and a
+ * UNC share all walk straight through such a list while the file header still
+ * promises repository-relative paths only. The rule is therefore structural — a
+ * token that *begins* a path — with three deliberate non-matches:
+ *
+ *   - `https://host/path`: every slash follows `:` or `/`, never a token boundary.
+ *   - `apps/wire/node_modules/.bin/wrangler`: relative, no leading slash.
+ *   - `D1/R2`, `and/or`, `24/7`: the slash follows a word character.
+ *
+ * `file://` is matched explicitly because it addresses the local filesystem no
+ * matter how many slashes follow it.
+ */
+const ABSOLUTE_PATH_SHAPE =
+  /(?:(?:^|[\s"'`([<=,;])(?:\/[^\s/]|[A-Za-z]:[\\/]|\\\\[^\s\\]))|(?:\bfile:\/\/)/;
+/** Token shapes this package has committed to keeping out of diagnostics, plus any long hex digest. */
+const CREDENTIAL_SHAPE = /asimp_ag_[A-Za-z0-9_-]{4,}|#v1\.[A-Za-z0-9._~-]{8,}|\b[A-Fa-f0-9]{32,}\b/;
+
+/** A bounded, single-line, absolute-path-free and credential-free prose field. */
+function isBoundedSafeText(value: unknown): value is string {
+  return (
+    typeof value === "string" &&
+    value.length > 0 &&
+    value.length <= MAX_BLOCKER_TEXT &&
+    // biome-ignore lint/suspicious/noControlCharactersInRegex: refusing control characters is the point.
+    !/[\u0000-\u001F\u007F]/.test(value) &&
+    !ABSOLUTE_PATH_SHAPE.test(value) &&
+    !CREDENTIAL_SHAPE.test(value)
+  );
+}
+
+/**
+ * Why a capability probe was not accepted as this suite's blocked result.
+ *
+ * Every value is a refusal, and every refusal costs the suite exit 1. The runner
+ * never downgrades a surprising probe result into "blocked": that direction is
+ * exactly how a regression would hide inside an already-red gate.
+ */
+type ProbeRejection =
+  | "PROBE_EXIT_CODE_UNEXPECTED"
+  | "PROBE_CODE_ON_STDERR"
+  | "PROBE_STDOUT_UNPARSEABLE"
+  | "PROBE_RECORD_COUNT_UNEXPECTED"
+  | "PROBE_RECORD_FIELD_UNEXPECTED"
+  | "PROBE_RECORD_TEXT_UNSAFE";
+
+type PreflightOutcome =
+  | { readonly ok: true; readonly duration: number }
+  | { readonly ok: false; readonly duration: number; readonly rejection: ProbeRejection };
+
 async function runExpectedBlockedPreflight(
   preflight: NonNullable<PendingSuite["preflight"]>["expectedBlocked"],
-): Promise<{ ok: boolean; duration: number }> {
+): Promise<PreflightOutcome> {
   if (preflight === undefined) return { ok: true, duration: 0 };
   const started = performance.now();
   // The real S-2 lifecycle lane is opt-in and can take 2x660 seconds. Remove
@@ -182,6 +244,22 @@ async function runExpectedBlockedPreflight(
     child.exited,
   ]);
   const duration = Math.round(performance.now() - started);
+  const reject = (rejection: ProbeRejection): PreflightOutcome => ({
+    ok: false,
+    duration,
+    rejection,
+  });
+
+  if (exitCode !== preflight.exitCode) return reject("PROBE_EXIT_CODE_UNEXPECTED");
+
+  // Probe stderr policy, stated once so it cannot drift into folklore: the named
+  // blocker code is machine-readable capability state, and it belongs in exactly
+  // one place — the single stdout NDJSON record this runner validates field by
+  // field. A probe that also writes the code to stderr is asserting capability
+  // state through a channel nothing validates, so the result is refused rather
+  // than trusted. stderr stays free for human prose that does not name the code.
+  if (stderr.includes(preflight.code)) return reject("PROBE_CODE_ON_STDERR");
+
   const records: Record<string, unknown>[] = [];
   for (const line of stdout.split("\n")) {
     const candidate = line.trim();
@@ -189,30 +267,49 @@ async function runExpectedBlockedPreflight(
     try {
       records.push(JSON.parse(candidate) as Record<string, unknown>);
     } catch {
-      return { ok: false, duration };
+      return reject("PROBE_STDOUT_UNPARSEABLE");
     }
   }
-  if (exitCode !== preflight.exitCode || stderr.includes(preflight.code) || records.length !== 1) {
-    return { ok: false, duration };
-  }
+  if (records.length !== 1) return reject("PROBE_RECORD_COUNT_UNEXPECTED");
   const record = records[0];
-  if (record === undefined) return { ok: false, duration };
+  if (record === undefined) return reject("PROBE_RECORD_COUNT_UNEXPECTED");
   if (
     record.tool !== "bun" ||
     record.package !== PACKAGE_DIR ||
     record.status !== "blocked" ||
     record.exit_code !== preflight.exitCode ||
     record.code !== preflight.code ||
-    record.suite !== "s2-krater-real-bindings" ||
-    typeof record.blocked_on !== "string" ||
-    typeof record.forbidden_substitutes !== "string" ||
-    typeof record.reproduce !== "string"
+    record.suite !== PROBE_SUITE
   ) {
-    return { ok: false, duration };
+    return reject("PROBE_RECORD_FIELD_UNEXPECTED");
   }
-  // Re-emit the exact validated child record from the real integration entry
-  // point. The long lane was not authorized in this child environment.
-  emit(record);
+  const { blocked_on, forbidden_substitutes, reproduce } = record;
+  if (
+    !isBoundedSafeText(blocked_on) ||
+    !isBoundedSafeText(forbidden_substitutes) ||
+    !isBoundedSafeText(reproduce)
+  ) {
+    return reject("PROBE_RECORD_TEXT_UNSAFE");
+  }
+
+  // Reconstruct from an exact allowlist rather than re-publishing the child
+  // object. Every scalar below is a value this runner just proved for itself,
+  // and the three prose fields passed the bounded-safe-text shape. Any extra key
+  // the probe invented is dropped here instead of entering this package's
+  // diagnostic stream, which is what makes the header's "no absolute paths, no
+  // environment values, no credential-shaped strings" promise enforceable at the
+  // one place a foreign record crosses the boundary.
+  emit({
+    tool: "bun",
+    package: PACKAGE_DIR,
+    suite: PROBE_SUITE,
+    status: "blocked",
+    exit_code: preflight.exitCode,
+    code: preflight.code,
+    blocked_on,
+    forbidden_substitutes,
+    reproduce,
+  });
   note(`BLOCKED ${PACKAGE_DIR} integration preflight: ${preflight.code}`);
   note(`  ${preflight.covers}`);
   return { ok: true, duration };
@@ -267,9 +364,15 @@ async function runSuite(
           status: "fail",
           exit_code: 1,
           code: "SUITE_PREFLIGHT_FAILED",
+          probe_rejection: expectedBlocked.rejection,
         });
+        // Name the exact rejection rather than guessing at its cause. An
+        // unexpected capability probe is a failure of this suite (exit 1); it is
+        // never quietly re-read as the blocked result it failed to produce.
+        note(`FAILED ${PACKAGE_DIR} ${name}: capability probe refused`);
+        note(`  rejection: ${expectedBlocked.rejection}`);
         note(
-          `FAILED ${PACKAGE_DIR} ${name}: expected blocker preflight did not emit its named code`,
+          `  the probe must exit ${suite.preflight.expectedBlocked?.exitCode} with exactly one stdout NDJSON blocker record, and must not name its code on stderr`,
         );
         note(`  reproduce: ${base.reproduce}`);
         return 1;
@@ -327,7 +430,11 @@ if (command === "list") {
   process.exit(0);
 }
 
-const selected = SUITES[command];
+// Own properties only. A bare `SUITES[command]` walks Object.prototype, so a
+// hostile argument such as `constructor`, `toString`, `valueOf` or `__proto__`
+// returns a truthy non-suite, slips past this usage branch and crashes later
+// inside the runner with a stack trace instead of the documented exit 2.
+const selected = Object.hasOwn(SUITES, command) ? SUITES[command] : undefined;
 if (selected === undefined) {
   note(`usage: bun scripts/suites.ts <list|${Object.keys(SUITES).join("|")}>`);
   process.exit(2);
