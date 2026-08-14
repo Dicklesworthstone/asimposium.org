@@ -14,6 +14,7 @@ import {
 } from "@asimposium/contracts";
 
 import { dispatchSignedSponsorRequest } from "./stoa-sponsor";
+import { importEd25519PrivateSeedHex } from "./service-envelope";
 
 /**
  * Agora's typed client for the Stoa sponsor surface. Server-only: it reads the
@@ -63,25 +64,19 @@ async function signingConfig(): Promise<StoaSigningConfig | undefined> {
   const kid = process.env.SERVICE_ENVELOPE_KID;
   if (hex === undefined || kid === undefined) return undefined;
   if (!/^[0-9a-f]{64}$/.test(hex) || !/^[A-Za-z0-9._-]{1,64}$/.test(kid)) return undefined;
-  const bytes = new Uint8Array(32);
-  for (let index = 0; index < 32; index += 1) {
-    bytes[index] = Number.parseInt(hex.slice(index * 2, index * 2 + 2), 16);
-  }
   try {
-    const privateKey = await crypto.subtle.importKey("raw", bytes, { name: "Ed25519" }, false, [
-      "sign",
-    ]);
-    return { privateKey, kid };
+    return { privateKey: await importEd25519PrivateSeedHex(hex), kid };
   } catch {
     return undefined;
   }
 }
 
-/** The refusal detail, bounded: problem JSON `title` only, never the raw body. */
+/** The refusal detail: retain only a short problem JSON `title`, never the raw body. */
 async function refusalDetail(response: Response): Promise<string | undefined> {
   try {
     const text = await response.text();
-    const parsed: unknown = JSON.parse(text.slice(0, 4_096));
+    if (text.length > 65_536) return undefined;
+    const parsed: unknown = JSON.parse(text);
     if (typeof parsed === "object" && parsed !== null && "title" in parsed) {
       // One-field boundary read off a problem body; presence checked by `in`.
       const record: Record<string, unknown> = parsed as Record<string, unknown>;

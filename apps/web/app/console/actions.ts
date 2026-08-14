@@ -90,7 +90,9 @@ export async function decideProposal(
     return {
       ok: false,
       message:
-        result.reason === "unreachable"
+        result.reason === "unconfigured"
+          ? "This deployment is not wired to the agent host. The proposal is unchanged."
+          : result.reason === "unreachable"
           ? "The agent host did not answer. The proposal is unchanged."
           : (result.detail ?? "The decision was not accepted."),
     };

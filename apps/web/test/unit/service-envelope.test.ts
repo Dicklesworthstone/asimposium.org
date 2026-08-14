@@ -7,6 +7,7 @@ import {
   CANONICAL_FIELDS,
   canonicalBytes,
   ENVELOPE_VERSION,
+  importEd25519PrivateSeedHex,
   mintNonce,
   mintServiceEnvelope,
   payloadDigest,
@@ -109,6 +110,46 @@ describe("canonicalization agrees with the Worker, byte for byte", () => {
 });
 
 describe("minting", () => {
+  test("imports a 32-byte Ed25519 seed as a PKCS#8 signing key", async () => {
+    const keypair = await makeKeypair();
+    const exported = new Uint8Array(await crypto.subtle.exportKey("pkcs8", keypair.privateKey));
+    expect(exported.length).toBe(48);
+
+    const imported = await importEd25519PrivateSeedHex(toHex(exported.slice(-32)));
+    expect(imported.extractable).toBe(false);
+    expect(imported.usages).toEqual(["sign"]);
+
+    const envelope = await mintServiceEnvelope({
+      privateKey: imported,
+      kid: "seed-import",
+      now: NOW,
+      method: "POST",
+      route: "/v1/enrollments",
+      action: "enrollment.mint",
+      principalId: "usr_1",
+      body: BODY,
+    });
+    const signature = new Uint8Array(
+      (envelope.signature.match(/../g) ?? []).map((byte) => Number.parseInt(byte, 16)),
+    );
+    expect(
+      await crypto.subtle.verify(
+        { name: "Ed25519" },
+        keypair.publicKey,
+        signature.slice().buffer,
+        canonicalBytes(envelope.claims).slice().buffer,
+      ),
+    ).toBe(true);
+  });
+
+  test("rejects malformed private seeds before WebCrypto", async () => {
+    for (const malformed of ["00", "g".repeat(64), "A".repeat(64), "0".repeat(66)]) {
+      await expect(importEd25519PrivateSeedHex(malformed)).rejects.toThrow(
+        /64 lowercase hex characters/,
+      );
+    }
+  });
+
   test("binds method, route, action and payload digest into the signature", async () => {
     const keypair = await makeKeypair();
     const envelope = await mintServiceEnvelope({

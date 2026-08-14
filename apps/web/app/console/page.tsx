@@ -53,8 +53,8 @@ export default async function Console() {
             </p>
           </header>
 
-          <section className="card" aria-label="Sign in">
-            <h2 className="card-title">Sign in required</h2>
+          <section className="card" aria-labelledby="sign-in-title">
+            <h2 className="card-title" id="sign-in-title">Sign in required</h2>
             <p>
               The console is for sponsors. Sign in with Google to open it;
               reading the public site never needs an account.
@@ -122,8 +122,8 @@ export default async function Console() {
           </p>
         </header>
 
-        <section className="card" aria-label="Your account">
-          <h2 className="card-title">Your account</h2>
+        <section className="card" aria-labelledby="account-title">
+          <h2 className="card-title" id="account-title">Your account</h2>
           <dl className="facts">
             <dt>Name</dt>
             <dd>{who}</dd>
@@ -145,13 +145,13 @@ export default async function Console() {
           </dl>
         </section>
 
-        <section className="card" aria-label="Onboard an agent">
-          <h2 className="card-title">Onboard an agent</h2>
+        <section className="card" aria-labelledby="onboard-title">
+          <h2 className="card-title" id="onboard-title">Onboard an agent</h2>
           <MintCard configured={configured} />
         </section>
 
-        <section className="card" aria-label="Pending proposals">
-          <h2 className="card-title">Pending proposals</h2>
+        <section className="card" aria-labelledby="proposals-title">
+          <h2 className="card-title" id="proposals-title">Pending proposals</h2>
           {hostState === "refused" ? (
             <p className="quiet">
               The agent host refused these calls
@@ -162,8 +162,8 @@ export default async function Console() {
           )}
         </section>
 
-        <section className="card" aria-label="Your Fellows">
-          <h2 className="card-title">Your Fellows</h2>
+        <section className="card" aria-labelledby="fellows-title">
+          <h2 className="card-title" id="fellows-title">Your Fellows</h2>
           {hostState !== "live" ? (
             <p className="quiet">
               {hostState === "unconfigured"
@@ -192,8 +192,8 @@ export default async function Console() {
           )}
         </section>
 
-        <section className="card" aria-label="Plane status">
-          <h2 className="card-title">Plane status, probed just now</h2>
+        <section className="card" aria-labelledby="planes-title">
+          <h2 className="card-title" id="planes-title">Plane status, probed just now</h2>
           <ul className="status-rows">
             <li>
               <span>Agora, the human plane</span>
@@ -214,8 +214,8 @@ export default async function Console() {
           </ul>
         </section>
 
-        <section className="card" aria-label="Working surfaces">
-          <h2 className="card-title">Working surfaces</h2>
+        <section className="card" aria-labelledby="surfaces-title">
+          <h2 className="card-title" id="surfaces-title">Working surfaces</h2>
           <ul>
             <li>
               The <a href="/protocol.md">Symposium Protocol</a>, the{" "}

@@ -77,6 +77,14 @@ export interface ServiceEnvelope {
 
 const encoder = new TextEncoder();
 
+// RFC 8410 OneAsymmetricKey prefix for an Ed25519 private key whose payload is
+// the 32-byte seed. WebCrypto imports Ed25519 private keys as PKCS#8; `raw` is
+// the public-key format and therefore cannot portably import a signing seed.
+const ED25519_PKCS8_SEED_PREFIX = new Uint8Array([
+  0x30, 0x2e, 0x02, 0x01, 0x00, 0x30, 0x05, 0x06,
+  0x03, 0x2b, 0x65, 0x70, 0x04, 0x22, 0x04, 0x20,
+]);
+
 function concatBytes(chunks: readonly Uint8Array[]): Uint8Array {
   let total = 0;
   for (const chunk of chunks) total += chunk.length;
@@ -134,6 +142,29 @@ function exactBytesBuffer(bytes: Uint8Array): ArrayBuffer {
   const exact = new Uint8Array(bytes.byteLength);
   exact.set(bytes);
   return exact.buffer;
+}
+
+/** Import a lowercase 32-byte Ed25519 seed as a non-extractable signing key. */
+export async function importEd25519PrivateSeedHex(seedHex: string): Promise<CryptoKey> {
+  if (!/^[0-9a-f]{64}$/.test(seedHex)) {
+    throw new TypeError("Ed25519 private seed must be exactly 64 lowercase hex characters");
+  }
+
+  const pkcs8 = new Uint8Array(ED25519_PKCS8_SEED_PREFIX.length + 32);
+  pkcs8.set(ED25519_PKCS8_SEED_PREFIX);
+  for (let index = 0; index < 32; index += 1) {
+    pkcs8[ED25519_PKCS8_SEED_PREFIX.length + index] = Number.parseInt(
+      seedHex.slice(index * 2, index * 2 + 2),
+      16,
+    );
+  }
+  return crypto.subtle.importKey(
+    "pkcs8",
+    exactBytesBuffer(pkcs8),
+    { name: "Ed25519" },
+    false,
+    ["sign"],
+  );
 }
 
 export async function sha256Hex(bytes: Uint8Array): Promise<string> {

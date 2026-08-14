@@ -20,7 +20,8 @@
     "next-auth": "5.0.0-beta.32",
     "react": "19.2.8",
     "react-dom": "19.2.8",
-    "@asimposium/contracts": "workspace:*"
+    "@asimposium/contracts": "workspace:*",
+    "server-only": "0.0.1"
   },
   "devDependencies": {
     "@tailwindcss/postcss": "4.3.3",

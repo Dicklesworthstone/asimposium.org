@@ -35,13 +35,13 @@ export function MintCard({ configured }: { configured: boolean }) {
 
   if (joinUrl !== null) {
     return (
-      <div>
+      <div aria-live="polite">
         <p>
           <strong>Your one-time join URL.</strong> Shown once; the secret in
           its fragment is never stored by this site. Paste the whole block into
-          your agent&rsquo;s harness within 30 minutes.
+          your agent&rsquo;s harness before the expiry shown below.
         </p>
-        <pre className="pasteblock join-url">{joinUrl}</pre>
+        <pre className="pasteblock join-url" tabIndex={0}>{joinUrl}</pre>
         <div className="auth-row" style={{ flexDirection: "row", marginTop: "0.6rem" }}>
           <button
             className="btn-quiet"
@@ -72,9 +72,8 @@ export function MintCard({ configured }: { configured: boolean }) {
             Done
           </button>
         </div>
-        {expiresAt !== null && (
-          <p className="quiet">Expires {new Date(expiresAt).toLocaleString()}.</p>
-        )}
+        {expiresAt !== null && <p className="quiet">Expires {new Date(expiresAt).toLocaleString()}.</p>}
+        {error !== null && <p className="quiet" role="alert">{error}</p>}
       </div>
     );
   }
@@ -108,7 +107,7 @@ export function MintCard({ configured }: { configured: boolean }) {
           {pending ? "Minting…" : "Mint a join URL"}
         </button>
       </form>
-      {error !== null && <p className="quiet">{error}</p>}
+      {error !== null && <p className="quiet" role="alert">{error}</p>}
     </div>
   );
 }
@@ -156,6 +155,7 @@ function ProposalCard({ card }: { readonly card: EnrollmentApprovalCard }) {
   const [eventBudget, setEventBudget] = useState("");
   const [artifactBudget, setArtifactBudget] = useState("");
   const [grantHours, setGrantHours] = useState("");
+  const [confirmation, setConfirmation] = useState<"approve" | "deny" | null>(null);
   const decisionAttempt = useRef<{ readonly body: string; readonly key: string } | null>(null);
 
   const submitDecision = (decision: SponsorEnrollmentDecision) => {
@@ -176,10 +176,8 @@ function ProposalCard({ card }: { readonly card: EnrollmentApprovalCard }) {
   };
 
   const decide = (decision: "approve" | "deny") => {
-    submitDecision({
-      enrollment_id: card.enrollment_id,
-      decision,
-    });
+    setReduceOpen(false);
+    setConfirmation(decision);
   };
 
   const reduce = () => {
@@ -256,7 +254,12 @@ function ProposalCard({ card }: { readonly card: EnrollmentApprovalCard }) {
           className="btn-quiet"
           type="button"
           disabled={pending}
-          onClick={() => setReduceOpen(!reduceOpen)}
+          aria-controls={`reduce-${card.proposal_id}`}
+          aria-expanded={reduceOpen}
+          onClick={() => {
+            setConfirmation(null);
+            setReduceOpen(!reduceOpen);
+          }}
         >
           Reduce…
         </button>
@@ -270,8 +273,42 @@ function ProposalCard({ card }: { readonly card: EnrollmentApprovalCard }) {
         </button>
       </div>
 
+      {confirmation !== null && (
+        <div className="reduce-panel" role="group" aria-label={`Confirm ${confirmation}`}>
+          <p>
+            <strong>Confirm {confirmation}.</strong>{" "}
+            {confirmation === "approve"
+              ? "This grants the requested scopes to this Fellow."
+              : "This rejects the proposal and the join flow cannot continue."}
+          </p>
+          <div className="auth-row proposal-actions">
+            <button
+              className={confirmation === "approve" ? "btn-google" : "btn-quiet"}
+              type="button"
+              disabled={pending}
+              onClick={() =>
+                submitDecision({
+                  enrollment_id: card.enrollment_id,
+                  decision: confirmation,
+                })
+              }
+            >
+              {pending ? "Sending…" : `Yes, ${confirmation}`}
+            </button>
+            <button
+              className="btn-quiet"
+              type="button"
+              disabled={pending}
+              onClick={() => setConfirmation(null)}
+            >
+              Cancel
+            </button>
+          </div>
+        </div>
+      )}
+
       {reduceOpen && (
-        <div className="reduce-panel">
+        <div className="reduce-panel" id={`reduce-${card.proposal_id}`}>
           <fieldset>
             <legend className="quiet">Keep scopes</legend>
             {card.requested_scopes.map((scope) => (
@@ -350,7 +387,7 @@ function ProposalCard({ card }: { readonly card: EnrollmentApprovalCard }) {
         </div>
       )}
 
-      {error !== null && <p className="quiet">{error}</p>}
+      {error !== null && <p className="quiet" role="alert">{error}</p>}
     </li>
   );
 }

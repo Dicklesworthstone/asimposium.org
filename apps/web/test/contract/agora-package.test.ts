@@ -98,6 +98,39 @@ describe("Propylon configuration (Fable §5.1, §14.1) — structural guard", ()
   });
 });
 
+describe("sponsor console trust boundary", () => {
+  const stoa = readPackageFile("lib/stoa.ts");
+  const auth = readPackageFile("auth.ts");
+  const actions = readPackageFile("app/console/actions.ts");
+
+  test("the Stoa client is server-only and uses the hardened signed dispatcher", () => {
+    expect(stoa).toContain('import "server-only"');
+    expect(stoa).toContain("dispatchSignedSponsorRequest");
+    expect(stoa).not.toMatch(/\bfetch\s*\(/);
+    expect(stoa).not.toContain("mintServiceEnvelope");
+  });
+
+  test("Google subjects are not promoted to Worker sponsor ids", () => {
+    expect(auth).not.toMatch(/session\.user\.id\s*=\s*token\.sub/);
+    expect(actions).toContain("isCanonicalSponsorId");
+  });
+
+  test("server actions parse decision bodies at runtime before dispatch", () => {
+    expect(actions).toContain("SponsorEnrollmentDecisionSchema.safeParse(decision)");
+    expect(actions).toContain("parsed.data.enrollment_id !== enrollmentId");
+  });
+
+  test("the console exposes state changes and expandable controls to assistive technology", () => {
+    const cards = readPackageFile("app/console/cards.tsx");
+    const page = readPackageFile("app/console/page.tsx");
+    expect(cards).toContain('aria-live="polite"');
+    expect(cards).toContain("aria-expanded={reduceOpen}");
+    expect(cards).toContain('role="alert"');
+    expect(page).toContain('aria-labelledby="account-title"');
+    expect(page).not.toMatch(/<section[^>]+aria-label=/);
+  });
+});
+
 describe("the health face states availability, never implies it", () => {
   test("GET /api/health returns exactly the declared fields", async () => {
     const response = GET();
