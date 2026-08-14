@@ -11,7 +11,13 @@
  *     displays a PROVED banner and never says that it verified anything; the artifacts do.
  *  3. `control-marker` — Fable §14.4 layer 3. Site-authored text must not itself contain the
  *     control markers a renderer neutralizes inside untrusted bodies, or the furniture stops being
- *     distinguishable from the forgery.
+ *     distinguishable from the forgery. `@asimposium/render` is the authority on which markers
+ *     exist; today it emits and neutralizes the `<!-- asimp … -->` header, so that pattern is the
+ *     live one. The `<<<asimp:system` / `asimp:system>>>` pair is *reserved* here rather than
+ *     observed: keeping served text clear of it costs nothing and means a future system-item
+ *     delimiter cannot collide with prose already in production. If the renderer settles on a
+ *     different delimiter, this list follows it — two packages disagreeing about the markers is
+ *     itself the seam an attacker wants.
  *  4. `absolute-local-path` / `secret-shaped` — Fable §14.3's never-log list, applied at the
  *     source: an operator's home directory or a credential must never reach a served document.
  *
