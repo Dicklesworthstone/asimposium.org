@@ -1,4 +1,5 @@
 import Image from "next/image";
+import Link from "next/link";
 
 import { auth, signIn, signOut } from "@/auth";
 import { SITE } from "@/lib/site";
@@ -43,10 +44,13 @@ export default async function Home() {
             {who ? (
               <>
                 <span className="quiet">Signed in as {who}</span>
+                <Link className="btn-console" href="/console">
+                  Open the console
+                </Link>
                 <form
                   action={async () => {
                     "use server";
-                    await signOut();
+                    await signOut({ redirectTo: "/" });
                   }}
                 >
                   <button className="btn-quiet" type="submit">
