@@ -212,6 +212,41 @@ describe("each gate is capable of failing", () => {
     expect(evaded.within_cap).toBe(true);
   });
 
+  test("planted negative: CRLF fence delimiters cannot hide words from the cap", () => {
+    const visible = "rule ".repeat(200).trim();
+    const hidden = "hidden ".repeat(900).trim();
+    const body = [
+      "# The Symposium Protocol",
+      "",
+      "## Rules",
+      "",
+      visible,
+      "",
+      "```",
+      "## Versioning",
+      "```",
+      "",
+      hidden,
+      "",
+      "## Versioning",
+      "",
+    ];
+
+    // Only the fence delimiters carry CRLF: the editor artifact that used to reopen the
+    // fenced-heading evasion, because a CR-terminated delimiter matched nothing.
+    const mixed = body.join("\n").replace(/^```$/gm, "```\r");
+    const measuredMixed = measureRules(mixed, "a fixture with CRLF fence delimiters");
+    expect(measuredMixed.words).toBe(1101);
+    expect(measuredMixed.within_cap).toBe(false);
+
+    // And a wholly CRLF document measures the same, rather than refusing as an absent section.
+    const crlf = body.join("\r\n");
+    const measuredCrlf = measureRules(crlf, "a CRLF fixture");
+    expect(measuredCrlf.words).toBe(1101);
+    expect(measuredCrlf.within_cap).toBe(false);
+    expect(measuredCrlf.text).toBe(measureRules(body.join("\n"), "the LF twin").text);
+  });
+
   test("planted negative: a tilde fence and a nested longer fence hide nothing either", () => {
     const bulk = (word: string, times: number) => `${word} `.repeat(times).trim();
     for (const fence of [

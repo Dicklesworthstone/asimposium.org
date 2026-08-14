@@ -114,7 +114,13 @@ function levelTwoHeading(line: string): string | undefined {
  * silently measuring an empty string (which would make the cap vacuously green).
  */
 export function extractSection(markdown: string, heading: string): string | undefined {
-  const lines = markdown.split("\n");
+  // Line endings are normalized first, with the same rule `normalizeServedText` applies, so this
+  // package has one line-ending story. This is load-bearing, not tidiness: JavaScript's `.` never
+  // matches `\r`, so a CR-terminated line matches neither the heading grammar nor a fence
+  // delimiter. On a CRLF document that means no section at all (a false refusal), and on a
+  // document with mixed endings it means a fence that never opens — which puts the fenced-heading
+  // evasion this scan exists to close straight back on the table.
+  const lines = markdown.replace(/\r\n?/g, "\n").split("\n");
   const wanted = heading.trim().toLowerCase();
   let open: OpenFence | undefined;
   let start = -1;

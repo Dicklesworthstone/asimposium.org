@@ -169,6 +169,31 @@ describe("extractSection: fenced code is content, not a section boundary", () =>
     expect(section).not.toContain("tail");
   });
 
+  test("a tilde fence may carry backticks in its info string, unlike a backtick fence", () => {
+    // CommonMark 4.5 forbids backticks in a *backtick* fence's info string only.
+    const section = sectionOf("~~~ `lang`", "## Fake", "~~~", "", "after");
+    expect(section).toContain("after");
+    expect(section).toContain("## Fake");
+    expect(section).not.toContain("tail");
+  });
+
+  test("a longer tilde opener is not closed by a shorter tilde run", () => {
+    const section = sectionOf("~~~~", "## Fake", "~~~", "", "after");
+    expect(section).toContain("tail");
+  });
+
+  test("a closer may be indented up to three spaces even when the opener is not", () => {
+    const section = sectionOf("```", "## Fake", "   ```", "", "after");
+    expect(section).toContain("after");
+    expect(section).not.toContain("tail");
+  });
+
+  test("a four-space indented marker run is code, not a closer", () => {
+    const section = sectionOf("```", "## Fake", "    ```", "## AlsoFake", "", "after");
+    expect(section).toContain("## AlsoFake");
+    expect(section).toContain("tail");
+  });
+
   test("inline code is not a fence: a backtick info string never opens one", () => {
     // ``` `code` ``` would be a fence with a backtick in its info string, which CommonMark forbids.
     const section = sectionOf("``` `inline` ```", "", "after");
@@ -213,6 +238,71 @@ describe("extractSection: fenced code is content, not a section boundary", () =>
   test("a fenced `## Rules` with no real heading is still absent, not a false measurement", () => {
     const markdown = ["# T", "", "```", "## Rules", "decoy", "```", ""].join("\n");
     expect(extractSection(markdown, "Rules")).toBeUndefined();
+  });
+});
+
+/**
+ * JavaScript's `.` never matches `\r`, so a CR-terminated line matches neither the ATX grammar nor
+ * a fence delimiter. Splitting on "\n" alone therefore left every heading and every fence
+ * delimiter invisible on CRLF input — and, worse, *partly* invisible on mixed input, which is a
+ * silent under-count rather than a loud refusal.
+ */
+describe("extractSection: line endings", () => {
+  const lf = [
+    "# T",
+    "",
+    "## Rules",
+    "",
+    "before",
+    "",
+    "```",
+    "## Fake",
+    "```",
+    "",
+    "after",
+    "",
+    "## Versioning",
+    "",
+    "tail",
+    "",
+  ].join("\n");
+
+  test("planted negative: a CRLF document measures exactly what its LF twin measures", () => {
+    const crlf = lf.replace(/\n/g, "\r\n");
+    expect(extractSection(crlf, "Rules")).toBe(extractSection(lf, "Rules") ?? "");
+    expect(extractSection(crlf, "Rules")).toContain("after");
+    expect(extractSection(crlf, "Rules")).not.toContain("tail");
+  });
+
+  test("planted negative: a lone-CR document behaves the same", () => {
+    expect(extractSection(lf.replace(/\n/g, "\r"), "Rules")).toBe(
+      extractSection(lf, "Rules") ?? "",
+    );
+  });
+
+  test("planted negative: CRLF fence delimiters inside an LF document cannot hide the tail", () => {
+    // The editor artifact that matters: only the fence delimiters carry CRLF. Before the fix the
+    // fence never opened, so the fenced `## Fake` truncated the section and the words after it
+    // went unmeasured.
+    const mixed = lf.replace(/^```$/gm, "```\r");
+    const section = extractSection(mixed, "Rules") ?? "";
+    expect(section).toContain("after");
+    expect(section).toContain("## Fake");
+    expect(section).not.toContain("tail");
+  });
+
+  test("a CRLF heading is found at all, rather than reading as an absent section", () => {
+    expect(extractSection("# T\r\n\r\n## Rules\r\n\r\nbody\r\n", "Rules")).toBe("body");
+  });
+
+  test("the returned section is LF-normalized, so no \\r reaches a caller", () => {
+    expect(extractSection(lf.replace(/\n/g, "\r\n"), "Rules")).not.toContain("\r");
+  });
+
+  test("word counts do not depend on the document's line endings", () => {
+    const words = (text: string) => countWords(extractSection(text, "Rules") ?? "");
+    expect(words(lf.replace(/\n/g, "\r\n"))).toBe(words(lf));
+    expect(words(lf.replace(/\n/g, "\r"))).toBe(words(lf));
   });
 });
 
