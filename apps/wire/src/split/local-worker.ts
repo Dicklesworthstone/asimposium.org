@@ -40,6 +40,7 @@ import {
   assertPublicProjectionSafe,
   duplicateClaimRefusal,
   nextMonotonicUlid,
+  normalizeClaimStatement,
   PRIVATE_BODY_THRESHOLD_BYTES,
   rejectAuthoritativeFields,
   type SplitProblemRefusal,
@@ -196,13 +197,6 @@ const LOCAL_HARNESS_AUTHORITY_HEADERS = [
   TEST_S4_FELLOW_AUTHORITY_HEADER,
   TEST_S4_FIXTURE_AUTHORITY_HEADER,
 ] as const;
-// biome-ignore lint/suspicious/noControlCharactersInRegex: C0 must be escaped before internal math tokens exist.
-const LOCAL_C0_CONTROL = /[\u0000-\u001F\u007F]/gu;
-const LOCAL_CONFUSABLE_WHITESPACE = /[\p{White_Space}\u200B\u2060\uFEFF]+/gu;
-// Single-dollar spans are deliberately unsupported here. Two currency amounts
-// can otherwise be mistaken for a mathematical span and consume a later real
-// delimiter. Display and explicit TeX delimiters remain canonical.
-const LOCAL_MATH_SPAN = /\$\$([\s\S]*?)\$\$|\\\(([\s\S]*?)\\\)|\\\[([\s\S]*?)\\\]/gu;
 const LOCAL_FORBIDDEN_PUBLIC_KEY_FORMS = new Set([
   "workshopseq",
   "sponsorid",
@@ -392,7 +386,6 @@ function localPublicKeyForm(key: string): string {
  * the shared guard and this stripped-key guard before constructing a face.
  */
 export function assertS3PublicValueSafe(value: unknown): void {
-  assertPublicProjectionSafe(value);
   const visit = (candidate: unknown): void => {
     if (Array.isArray(candidate)) {
       for (const item of candidate) visit(item);
@@ -407,6 +400,7 @@ export function assertS3PublicValueSafe(value: unknown): void {
     }
   };
   visit(value);
+  assertPublicProjectionSafe(value);
 }
 
 function assertExactPublicObject(
@@ -1428,37 +1422,13 @@ async function persistNonPublishingScreeningDecision(
   return replay ?? localS4DecisionResponse(result);
 }
 
-function normalizeS3Whitespace(value: string): string {
-  return value
-    .normalize("NFKC")
-    .toLocaleLowerCase("en-US")
-    .replace(LOCAL_CONFUSABLE_WHITESPACE, " ")
-    .trim();
-}
-
-function encodeC0Controls(value: string): string {
-  // The U+0002/U+0003 pair below is an internal sentinel. Raw controls must
-  // become visible, distinct text before math tokenization, never that token.
-  return value.replace(LOCAL_C0_CONTROL, (control) => {
-    const code = control.codePointAt(0);
-    return ` [c0-${code === undefined ? "unknown" : code.toString(16).padStart(2, "0")}] `;
-  });
-}
-
 /**
- * S-3's local P11 representation. Explicit TeX math remains protected;
- * single-dollar notation is intentionally prose so currency cannot capture
- * another delimiter. C0 controls are encoded before protected tokens exist.
+ * S-3 uses the shared Fable P11 representation. Keeping the harness on the
+ * production policy prevents a local proof from silently validating a second
+ * near-duplicate contract.
  */
 export function normalizeS3ClaimStatement(statement: string): string {
-  return normalizeS3Whitespace(
-    encodeC0Controls(statement).replace(LOCAL_MATH_SPAN, (_whole, display, paren, bracket) => {
-      const interior = [display, paren, bracket].find(
-        (value): value is string => typeof value === "string",
-      );
-      return `\u0002${normalizeS3Whitespace(interior ?? "")}\u0003`;
-    }),
-  );
+  return normalizeClaimStatement(statement);
 }
 
 async function localNormHash(statement: string): Promise<string> {

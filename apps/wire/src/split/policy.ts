@@ -144,9 +144,17 @@ export function rejectAuthoritativeFields(
  */
 const CONFUSABLE_WHITESPACE = /[\p{White_Space}\u200B\u2060\uFEFF]+/gu;
 const MATH_SPAN = /\$\$([\s\S]*?)\$\$|\\\(([\s\S]*?)\\\)|\\\[([\s\S]*?)\\\]|\$([^$]*)\$/gu;
+// biome-ignore lint/suspicious/noControlCharactersInRegex: these are the two private math-token delimiters below.
+const RAW_MATH_TOKEN_DELIMITER = /[\u0002\u0003]/gu;
 
 function normalizeWhitespace(value: string): string {
   return value.normalize("NFKC").toLowerCase().replace(CONFUSABLE_WHITESPACE, " ").trim();
+}
+
+function escapeRawMathTokenDelimiters(value: string): string {
+  return value.replace(RAW_MATH_TOKEN_DELIMITER, (delimiter) => {
+    return delimiter === "\u0002" ? "[c0-02]" : "[c0-03]";
+  });
 }
 
 /**
@@ -156,12 +164,15 @@ function normalizeWhitespace(value: string): string {
  */
 export function normalizeClaimStatement(statement: string): string {
   return normalizeWhitespace(
-    statement.replace(MATH_SPAN, (_whole, display, paren, bracket, inline) => {
-      const interior = [display, paren, bracket, inline].find(
-        (value): value is string => typeof value === "string",
-      );
-      return `\u0002${normalizeWhitespace(interior ?? "")}\u0003`;
-    }),
+    escapeRawMathTokenDelimiters(statement).replace(
+      MATH_SPAN,
+      (_whole, display, paren, bracket, inline) => {
+        const interior = [display, paren, bracket, inline].find(
+          (value): value is string => typeof value === "string",
+        );
+        return `\u0002${normalizeWhitespace(interior ?? "")}\u0003`;
+      },
+    ),
   );
 }
 
@@ -226,7 +237,7 @@ export function assertPublicProjectionSafe(value: unknown): void {
     if (candidate === null || typeof candidate !== "object") return;
 
     for (const [key, nested] of Object.entries(candidate)) {
-      if (FORBIDDEN_PUBLIC_KEYS.has(key.toLowerCase())) throw new SplitLeakError(key);
+      if (FORBIDDEN_PUBLIC_KEYS.has(normalizedControlKey(key))) throw new SplitLeakError(key);
       visit(nested);
     }
   };

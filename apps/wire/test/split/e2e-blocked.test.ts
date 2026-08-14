@@ -467,16 +467,18 @@ test("local public guards normalize private locator keys and allow renderer body
   ).toThrow("S3_LOCAL_PUBLIC_SHAPE_INVALID");
 });
 
-test("local P11 normalization keeps raw C0 distinct and never treats currency as inline math", () => {
+test("local P11 normalization matches the shared inline-math contract and preserves whitespace collapse", () => {
   const rawControl = normalizeS3ClaimStatement("The relation \u0002x + y\u0003 is recorded.");
   const explicitMath = normalizeS3ClaimStatement("The relation \\(x + y\\) is recorded.");
-  const currencyThenMath = normalizeS3ClaimStatement("Prices are $5 and $7; relation \\(x + y\\).");
+  const inlineMath = normalizeS3ClaimStatement("The relation $x + y$ is recorded.");
 
   expect(rawControl).not.toBe(explicitMath);
   expect(rawControl).toContain("[c0-02]");
   expect(rawControl).toContain("[c0-03]");
-  expect(currencyThenMath).toContain("$5 and $7");
-  expect(currencyThenMath).toContain("\u0002x + y\u0003");
+  expect(inlineMath).toBe(explicitMath);
+  expect(normalizeS3ClaimStatement("line one\nline two\tline three")).toBe(
+    normalizeS3ClaimStatement("line one line two line three"),
+  );
 });
 
 test(

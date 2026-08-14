@@ -9,6 +9,7 @@ import {
   type KraterSplitPort,
   type KraterSplitTransaction,
   nextMonotonicUlid,
+  normalizeClaimStatement,
   normHash,
   type OpenClaimRef,
   type PrivateArtifactBinding,
@@ -964,6 +965,51 @@ describe("S-3 promotion validator", () => {
     expect(await normHash("Some examples have $x + y$ property Q.")).not.toBe(canonicalHash);
   });
 
+  test("keeps raw token controls distinct from math while still collapsing ordinary C0 whitespace", async () => {
+    const rawTokenControls = "Every example has \u0002x + y\u0003 property Q.";
+    const math = "Every example has $x + y$ property Q.";
+
+    expect(normalizeClaimStatement(rawTokenControls)).toContain("[c0-02]x + y[c0-03]");
+    expect(await normHash(rawTokenControls)).not.toBe(await normHash(math));
+    expect(await normHash("Every\texample\nhas property Q.")).toBe(
+      await normHash("Every example has property Q."),
+    );
+  });
+
+  test("does not let a forged raw-token claim preempt an honest inline-math claim", async () => {
+    const service = splitService();
+    await service.pushWorkshop(FELLOW_A, workshop({ workshopId: "W-raw-token" }));
+    expect(
+      await service.promote(
+        FELLOW_A,
+        promotion({
+          workshopId: "W-raw-token",
+          publicClaim: {
+            ...promotion().publicClaim,
+            claimId: "C-raw-token",
+            statement: "Every example has \u0002x + y\u0003 property Q.",
+          },
+        }),
+      ),
+    ).toMatchObject({ status: 201, outcome: "created" });
+
+    await service.pushWorkshop(FELLOW_A, workshop({ workshopId: "W-honest-math" }));
+    expect(
+      await service.promote(
+        FELLOW_A,
+        promotion({
+          workshopId: "W-honest-math",
+          idempotencyKey: "idem-honest-math",
+          publicClaim: {
+            ...promotion().publicClaim,
+            claimId: "C-honest-math",
+            statement: "Every example has $x + y$ property Q.",
+          },
+        }),
+      ),
+    ).toMatchObject({ status: 201, outcome: "created" });
+  });
+
   test("refuses self-certification with the S-3 P2/P4 contract error", async () => {
     const service = splitService();
     await service.pushWorkshop(FELLOW_A, workshop());
@@ -1266,6 +1312,12 @@ describe("S-3 planted negative", () => {
     } catch (error) {
       expect(error).toBeInstanceOf(SplitLeakError);
       expect((error as SplitLeakError).code).toBe("SPLIT_LEAK_DETECTED");
+    }
+  });
+
+  test("should-leak: separator and compatibility variants of private keys are detected", () => {
+    for (const key of ["sponsor-id", "sponsor id", "workshop.seq", "body-md", "ｓponsor_id"]) {
+      expect(() => assertPublicProjectionSafe({ [key]: "private canary" })).toThrow(SplitLeakError);
     }
   });
 
