@@ -21,7 +21,9 @@ export type RenderErrorCode =
   | "DUPLICATE_ITEM_ID"
   | "INVALID_SCOPE"
   | "INVALID_HEADER_VALUE"
-  | "INVALID_NEXT_ACTION";
+  | "INVALID_NEXT_ACTION"
+  | "BODY_TOO_LARGE"
+  | "TRUSTED_BODY_CONTAINS_CONTROL_MARKER";
 
 export interface RenderProblem {
   readonly type: string;

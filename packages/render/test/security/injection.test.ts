@@ -401,6 +401,7 @@ describe("script-bearing HTML never reaches a live face", () => {
     const body = [
       '<a title="javascript: documentary citation">source</a>',
       '<img alt="javascript: illustrative prose">',
+      "This prose mentions javascript: but does not form a Markdown link.",
       '<a href="javascript:steal()">click</a>',
       "[Markdown link](javascript:steal())",
     ].join("\n");
@@ -459,7 +460,7 @@ describe("neutralization is reported, never silent (Rule A4)", () => {
     expect(faces.md.neutralized).toEqual([
       { item_id: "C-13", marker: "asimp-control-comment", count: 2 },
       { item_id: "C-13", marker: "envelope-key-forgery", count: 2 },
-      { item_id: "C-13", marker: "active-html", count: 3 },
+      { item_id: "C-13", marker: "active-html", count: 2 },
       { item_id: "C-13", marker: "fence-extended", count: 1 },
     ]);
     expect(faces.json.neutralized).toEqual(faces.md.neutralized);
@@ -470,7 +471,7 @@ describe("neutralization is reported, never silent (Rule A4)", () => {
     expect(forgedItem?.neutralized).toEqual([
       { marker: "asimp-control-comment", count: 2 },
       { marker: "envelope-key-forgery", count: 2 },
-      { marker: "active-html", count: 3 },
+      { marker: "active-html", count: 2 },
       { marker: "fence-extended", count: 1 },
     ]);
     expect(markdown).toContain("_neutralized in this body:_ asimp-control-comment×2");

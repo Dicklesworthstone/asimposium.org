@@ -10,6 +10,7 @@ import { contentFingerprint, stableStringify } from "./canonical.ts";
 import { RenderContractError } from "./errors.ts";
 import {
   fenceFor,
+  hasAsimpControlComment,
   isSafeHeaderValue,
   type NeutralizationFinding,
   neutralizeUntrustedBody,
@@ -23,6 +24,30 @@ import {
 
 /** Public ids stay problem-scoped and boring (Fable §6.1). */
 export const ITEM_ID_PATTERN = /^[A-Za-z0-9][A-Za-z0-9@#._-]{0,63}$/;
+/** Fable Appendix B's `body_md.maxLength`: Unicode code points, not bytes or UTF-16 units. */
+export const MAX_BODY_CODE_POINTS = 20_000;
+
+/**
+ * Count only through `maximum + 1`, so an oversized body fails before the
+ * Unicode-normalizing sanitizer sees the rest of attacker-controlled input.
+ * A valid surrogate pair is one Unicode code point; an unpaired surrogate is
+ * one malformed code unit and is conservatively counted as one character.
+ */
+function codePointCountThroughLimit(text: string, maximum: number): number {
+  let count = 0;
+
+  for (let cursor = 0; cursor < text.length; ) {
+    const first = text.charCodeAt(cursor);
+    const second = text.charCodeAt(cursor + 1);
+    const isSurrogatePair =
+      first >= 0xd800 && first <= 0xdbff && second >= 0xdc00 && second <= 0xdfff;
+    cursor += isSurrogatePair ? 2 : 1;
+    count += 1;
+    if (count > maximum) return count;
+  }
+
+  return count;
+}
 
 export interface PreparedItem {
   readonly kind: string;
@@ -161,6 +186,17 @@ export function prepareProjection(projection: Projection): PreparedProjection {
     }
     seen.add(item.id);
 
+    const bodyCodePoints = codePointCountThroughLimit(item.body, MAX_BODY_CODE_POINTS);
+    if (bodyCodePoints > MAX_BODY_CODE_POINTS) {
+      refuse(
+        "BODY_TOO_LARGE",
+        "An item body exceeds the renderer's 20,000-character contract",
+        `item ${item.id} contains at least ${bodyCodePoints} Unicode code points; body_md is limited to ${MAX_BODY_CODE_POINTS}`,
+        "Keep body_md at 20,000 Unicode code points or fewer. An astral character such as 😀 counts as one character, not two UTF-16 units or four UTF-8 bytes.",
+        "A1",
+      );
+    }
+
     if (!ITEM_SCOPES.includes(item.scope)) {
       refuse(
         "INVALID_SCOPE",
@@ -206,6 +242,16 @@ export function prepareProjection(projection: Projection): PreparedProjection {
         `item ${item.id} has scope system and untrusted:true`,
         "Set untrusted:false on system items, or give the item its real scope.",
         "A2",
+      );
+    }
+
+    if (!item.untrusted && hasAsimpControlComment(item.body)) {
+      refuse(
+        "TRUSTED_BODY_CONTAINS_CONTROL_MARKER",
+        "Trusted system Markdown may not contain renderer control comments",
+        `item ${item.id} contains an asimp control comment inside a trusted body; only the renderer may emit face and item delimiters`,
+        "Keep the system instruction as ordinary Markdown and remove the <!-- asimp … --> comment. The renderer adds its own structural delimiters around the item.",
+        "A1",
       );
     }
 

@@ -259,6 +259,10 @@ describe("neutralizeUntrustedBody", () => {
       '<a title="javascript: documentary citation">source</a>',
       '<img alt="javascript: illustrative prose">',
       '<p data-note="javascript: archival label">text</p>',
+      "This prose discusses javascript: as a historical URL scheme.",
+      "[A citation label] (javascript: a parenthesized aside, not a link)",
+      "\\[escaped Markdown](javascript:shown-as-data())",
+      "`[inline code](javascript:shown-as-data())`",
     ].join("\n");
     expect(neutralizeUntrustedBody(inert)).toEqual({ text: inert, findings: [] });
 
@@ -267,10 +271,11 @@ describe("neutralizeUntrustedBody", () => {
       "<img src=javascript:steal()>",
       '<button formaction="javascript:steal()">submit</button>',
       "[Markdown link](javascript:steal())",
+      "![Markdown image](<javascript:steal()>)",
     ].join("\n");
     expect(neutralizeUntrustedBody(controls)).toEqual({
       text: controls,
-      findings: [{ marker: "active-html", count: 4 }],
+      findings: [{ marker: "active-html", count: 5 }],
     });
   });
 

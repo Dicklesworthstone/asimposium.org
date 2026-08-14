@@ -217,9 +217,9 @@ export interface ActiveHtmlScanDiagnostics {
  */
 export function activeHtmlScanDiagnostics(body: string): ActiveHtmlScanDiagnostics {
   const rawText = rawBrowserTokenizerScanText(body);
-  const rawFindings = collectActiveHtml(rawText);
+  const rawFindings = collectActiveMarkup(rawText);
   const canonicalText = unicodeCanonicalTokenizerScanText(body);
-  const canonicalFindings = collectActiveHtml(canonicalText);
+  const canonicalFindings = collectActiveMarkup(canonicalText);
   return {
     raw: {
       transformed_utf16_units: rawText.length,
@@ -394,15 +394,163 @@ function collectActiveHtml(text: string): ActiveHtmlFinding[] {
       }
     }
 
-    if (characterCode === 106 && text.startsWith(JAVASCRIPT_URL, cursor)) {
-      findings.push({ kind: "javascript", offset: cursor });
-      cursor += JAVASCRIPT_URL.length;
-      continue;
-    }
     cursor += 1;
   }
 
   return findings;
+}
+
+function isMarkdownEscaped(text: string, offset: number): boolean {
+  let backslashes = 0;
+  let cursor = offset;
+  while (cursor > 0 && text[cursor - 1] === "\\") {
+    backslashes += 1;
+    cursor -= 1;
+  }
+  return backslashes % 2 === 1;
+}
+
+function markdownCodeSpanEnd(text: string, openOffset: number): number | undefined {
+  let runLength = 1;
+  while (text[openOffset + runLength] === "`") runLength += 1;
+  const delimiter = "`".repeat(runLength);
+  const closeOffset = text.indexOf(delimiter, openOffset + runLength);
+  return closeOffset === -1 ? undefined : closeOffset + runLength;
+}
+
+function markdownLabelEnd(text: string, openOffset: number): number | undefined {
+  let nestedLabels = 0;
+
+  for (let cursor = openOffset + 1; cursor < text.length; cursor += 1) {
+    if (text[cursor] === "\\") {
+      cursor += 1;
+      continue;
+    }
+    if (text[cursor] === "[") {
+      nestedLabels += 1;
+      continue;
+    }
+    if (text[cursor] === "]") {
+      if (nestedLabels === 0) return cursor;
+      nestedLabels -= 1;
+    }
+  }
+
+  return undefined;
+}
+
+function markdownLinkCloseAfterDestination(text: string, cursor: number): boolean {
+  while (isHtmlAsciiWhitespace(text[cursor])) cursor += 1;
+  if (text[cursor] === ")") return true;
+
+  const opening = text[cursor];
+  if (opening !== '"' && opening !== "'" && opening !== "(") return false;
+  const closing = opening === "(" ? ")" : opening;
+  cursor += 1;
+
+  while (cursor < text.length) {
+    if (text[cursor] === "\\") {
+      cursor += 2;
+      continue;
+    }
+    if (text[cursor] === closing) {
+      cursor += 1;
+      break;
+    }
+    cursor += 1;
+  }
+  if (text[cursor - 1] !== closing) return false;
+
+  while (isHtmlAsciiWhitespace(text[cursor])) cursor += 1;
+  return text[cursor] === ")";
+}
+
+/**
+ * Return the start of a `javascript:` Markdown destination only when it is
+ * part of a syntactically active inline link or image. A bare scheme spelling,
+ * a prose label followed by a parenthesized aside, and code-span examples are
+ * data, not execution surfaces.
+ */
+function markdownJavascriptDestinationOffset(
+  text: string,
+  openParenOffset: number,
+): number | undefined {
+  let cursor = openParenOffset + 1;
+  while (isHtmlAsciiWhitespace(text[cursor])) cursor += 1;
+  if (cursor >= text.length) return undefined;
+
+  if (text[cursor] === "<") {
+    const destinationStart = cursor + 1;
+    const destinationEnd = text.indexOf(">", destinationStart);
+    if (destinationEnd === -1) return undefined;
+    return markdownLinkCloseAfterDestination(text, destinationEnd + 1) &&
+      text.startsWith(JAVASCRIPT_URL, destinationStart)
+      ? destinationStart
+      : undefined;
+  }
+
+  const destinationStart = cursor;
+  let nestedParens = 0;
+  while (cursor < text.length) {
+    const character = text[cursor];
+    if (isHtmlAsciiWhitespace(character) && nestedParens === 0) {
+      return markdownLinkCloseAfterDestination(text, cursor) &&
+        text.startsWith(JAVASCRIPT_URL, destinationStart)
+        ? destinationStart
+        : undefined;
+    }
+    if (character === "(") {
+      nestedParens += 1;
+    } else if (character === ")") {
+      if (nestedParens === 0) {
+        return text.startsWith(JAVASCRIPT_URL, destinationStart) ? destinationStart : undefined;
+      }
+      nestedParens -= 1;
+    }
+    cursor += 1;
+  }
+
+  return undefined;
+}
+
+function collectActiveMarkdownUrls(text: string): ActiveHtmlFinding[] {
+  const findings: ActiveHtmlFinding[] = [];
+  let cursor = 0;
+
+  while (cursor < text.length) {
+    if (text.startsWith(CONTROL_COMMENT_OPEN, cursor)) {
+      cursor = htmlCommentEndOffset(text, cursor);
+      continue;
+    }
+    if (text[cursor] === "`") {
+      const codeEnd = markdownCodeSpanEnd(text, cursor);
+      if (codeEnd !== undefined) {
+        cursor = codeEnd;
+        continue;
+      }
+    }
+    if (text[cursor] !== "[" || isMarkdownEscaped(text, cursor)) {
+      cursor += 1;
+      continue;
+    }
+
+    const labelEnd = markdownLabelEnd(text, cursor);
+    if (labelEnd === undefined || text[labelEnd + 1] !== "(") {
+      cursor += 1;
+      continue;
+    }
+    const destinationOffset = markdownJavascriptDestinationOffset(text, labelEnd + 1);
+    if (destinationOffset !== undefined) {
+      findings.push({ kind: "javascript", offset: destinationOffset });
+    }
+    cursor = labelEnd + 1;
+  }
+
+  return findings;
+}
+
+function collectActiveMarkup(text: string): ActiveHtmlFinding[] {
+  return [...collectActiveHtml(text), ...collectActiveMarkdownUrls(text)];
 }
 
 /**
@@ -417,11 +565,11 @@ function countActiveHtml(body: string): number {
   // compatibility character can normalize into `<!--`, a quote, or `>`; that
   // derived syntax is allowed to affect only the canonical interpretation, so
   // it cannot hide a real handler from the raw one.
-  for (const finding of collectActiveHtml(rawBrowserTokenizerScanText(body))) {
+  for (const finding of collectActiveMarkup(rawBrowserTokenizerScanText(body))) {
     findings.add(sourceFindingKey(finding));
   }
 
-  const canonicalFindings = collectActiveHtml(unicodeCanonicalTokenizerScanText(body));
+  const canonicalFindings = collectActiveMarkup(unicodeCanonicalTokenizerScanText(body));
   for (const finding of canonicalFindingsAtSourceOffsets(body, canonicalFindings)) {
     findings.add(sourceFindingKey(finding));
   }
@@ -525,6 +673,23 @@ function neutralizeControlComments(body: string): {
   if (count === 0) return { text: body, count: 0 };
   pieces.push(body.slice(copiedThrough));
   return { text: pieces.join(""), count };
+}
+
+/**
+ * Trusted system-item Markdown may be expressive prose, but the renderer is
+ * the sole author of its structural control comments. Reject a trusted body
+ * that tries to embed one rather than allowing it to close or forge a face
+ * delimiter around otherwise legitimate Markdown.
+ */
+export function hasAsimpControlComment(body: string): boolean {
+  let searchFrom = 0;
+
+  while (true) {
+    const openOffset = body.indexOf(CONTROL_COMMENT_OPEN, searchFrom);
+    if (openOffset === -1) return false;
+    if (isAsimpControlComment(body, openOffset)) return true;
+    searchFrom = openOffset + CONTROL_COMMENT_OPEN.length;
+  }
 }
 
 /**
