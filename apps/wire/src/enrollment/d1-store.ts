@@ -22,6 +22,7 @@ import {
   type PollAttempt,
   type PollDecision,
   reduceEnrollmentResources,
+  type SponsorFellowRecord,
   uniqueEnrollmentScopes,
 } from "./service.ts";
 
@@ -78,6 +79,32 @@ interface IdempotencyRow {
   response_ciphertext: string;
   response_initialization_vector: string;
   expires_at: number;
+}
+
+/** Columns selected by `pendingApprovalCardsBySponsor`: record join pending proposal. */
+interface PendingProposalRow {
+  enrollment_id: string;
+  requested_scopes_json: string;
+  requested_resources_json: string;
+  proposal_id: string;
+  name: string;
+  model: string;
+  harness: string;
+  reasoning_effort: string | null;
+  tools_note: string | null;
+  created_at: number;
+  expires_at: number;
+  status: ProposalStatus;
+}
+
+/** Columns selected by `fellowsBySponsor`: fellow join its approval-time grant. */
+interface FellowGrantRow {
+  name: string;
+  model: string;
+  harness: string;
+  granted_scopes_json: string;
+  granted_resources_json: string;
+  granted_at: number;
 }
 
 const sql = (db: D1Database, query: string, ...values: unknown[]): D1PreparedStatement =>
@@ -478,6 +505,70 @@ export class D1EnrollmentStore implements EnrollmentStore {
       effectiveGrantedResources: granted.resources,
       proposalExpiresAt: row.expires_at,
     };
+  }
+
+  async pendingApprovalCardsBySponsor(
+    sponsorId: string,
+    now: number,
+  ): Promise<EnrollmentApprovalCard[]> {
+    // Lazy-expiry sweep first, the same rule approvalCard applies per row.
+    await sql(
+      this.#db,
+      `UPDATE enrollment_proposals SET status = 'expired'
+        WHERE status = 'pending' AND expires_at <= ?
+          AND enrollment_id IN (SELECT enrollment_id FROM enrollment_records WHERE sponsor_id = ?)`,
+      now,
+      sponsorId,
+    ).run();
+    const rows = await sql(
+      this.#db,
+      `SELECT e.enrollment_id, e.requested_scopes_json, e.requested_resources_json,
+              p.proposal_id, p.name, p.model, p.harness, p.reasoning_effort, p.tools_note,
+              p.created_at, p.expires_at, p.status
+         FROM enrollment_records e
+         JOIN enrollment_proposals p ON p.enrollment_id = e.enrollment_id
+        WHERE e.sponsor_id = ? AND p.status = 'pending'
+        ORDER BY p.created_at ASC
+        LIMIT 100`,
+      sponsorId,
+    ).all<PendingProposalRow>();
+    return rows.results.map((row) => ({
+      enrollmentId: row.enrollment_id,
+      proposalId: row.proposal_id,
+      status: "pending" as const,
+      name: row.name,
+      model: row.model,
+      harness: row.harness,
+      ...(row.reasoning_effort === null ? {} : { reasoningEffort: row.reasoning_effort }),
+      ...(row.tools_note === null ? {} : { toolsNote: row.tools_note }),
+      requestedScopes: parseScopes(row.requested_scopes_json),
+      requestedResources: parseResources(row.requested_resources_json),
+      effectiveGrantedScopes: null,
+      effectiveGrantedResources: null,
+      proposalExpiresAt: row.expires_at,
+    }));
+  }
+
+  async fellowsBySponsor(sponsorId: string): Promise<SponsorFellowRecord[]> {
+    const rows = await sql(
+      this.#db,
+      `SELECT f.name, f.model, f.harness,
+              g.granted_scopes_json, g.granted_resources_json, g.granted_at
+         FROM enrollment_fellows f
+         JOIN enrollment_grants g ON g.fellow_id = f.fellow_id
+        WHERE f.sponsor_id = ?
+        ORDER BY g.granted_at DESC
+        LIMIT 500`,
+      sponsorId,
+    ).all<FellowGrantRow>();
+    return rows.results.map((row) => ({
+      name: row.name,
+      model: row.model,
+      harness: row.harness,
+      grantedScopes: parseScopes(row.granted_scopes_json),
+      grantedResources: parseResources(row.granted_resources_json),
+      grantedAt: row.granted_at,
+    }));
   }
 
   async capsule(enrollmentId: string, now: number): Promise<EnrollmentCapsule> {
