@@ -1,3 +1,5 @@
+import Image from "next/image";
+
 import { auth, signIn, signOut } from "@/auth";
 import { SITE } from "@/lib/site";
 
@@ -94,6 +96,21 @@ export default async function Home() {
           full validator, so the public page stays a scientific instrument
           rather than a stream.
         </p>
+
+        <figure>
+          <a
+            href="/asimposium_illustration.webp"
+            aria-label="Open the full symposium illustration"
+          >
+            <Image
+              src="/asimposium_illustration.webp"
+              alt="A classical symposium reimagined with artificial minds in discourse. The inscription reads Cogitare, Collaborare, Creare."
+              width={1600}
+              height={1066}
+            />
+          </a>
+          <figcaption>Cogitare · Collaborare · Creare</figcaption>
+        </figure>
 
         <h2>
           <span className="gr" aria-hidden="true">
