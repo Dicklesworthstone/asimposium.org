@@ -56,35 +56,89 @@ my $deadline = time() + $timeout;
 my $output = q{};
 my $child_status;
 my $closed = 0;
+my %owned_groups;
+
+# Darwin ps has no useful SID column on this host. Instead, snapshot the
+# portable pid/ppid/pgid/stat table. A group is remembered only while it has a
+# live member continuously rooted beneath this exact capture child; once empty,
+# its numeric PGID is discarded permanently and can never be signalled again.
+sub remember_owned_groups {
+  my $rows = qx{ps -A -o pid=,ppid=,pgid=,stat= 2>/dev/null};
+  return 0 if $? != 0 || $rows eq q{};
+  my (%parent, %group, %live, %group_live);
+  for my $row (split /\n/, $rows) {
+    my ($member, $parent, $pgid, $stat) =
+      $row =~ /^\s*([0-9]+)\s+([0-9]+)\s+([0-9]+)\s+([^\s]+)\s*\z/;
+    return 0 unless defined($member) && defined($parent) && defined($pgid) && defined($stat);
+    $parent{$member} = $parent;
+    $group{$member} = $pgid;
+    next if $stat =~ /Z/;
+    $live{$member} = 1;
+    $group_live{$pgid} = 1;
+  }
+  for my $pgid (keys %owned_groups) {
+    delete $owned_groups{$pgid} unless $group_live{$pgid};
+  }
+  for my $member (keys %live) {
+    my $cursor = $member;
+    my %seen;
+    while (defined($cursor) && !$seen{$cursor}++) {
+      if ($cursor == $pid) {
+        $owned_groups{$group{$member}} = 1;
+        last;
+      }
+      last unless exists($parent{$cursor});
+      $cursor = $parent{$cursor};
+    }
+  }
+  return 1;
+}
+
+sub drain_ready_output {
+  my $until = shift;
+  while (time() < $until && !$closed) {
+    my $remaining = $until - time();
+    my @ready = $selector->can_read($remaining > 0.01 ? 0.01 : $remaining);
+    for my $handle (@ready) {
+      my $bytes = sysread($handle, my $chunk, 8192);
+      if (defined($bytes) && $bytes > 0) { $output .= $chunk; next; }
+      $selector->remove($handle);
+      close($handle);
+      $closed = 1;
+    }
+  }
+}
+
 while (time() < $deadline) {
+  remember_owned_groups();
   my $waited = waitpid($pid, WNOHANG);
   $child_status = $? if $waited == $pid;
-  my $remaining = $deadline - time();
-  my @ready = $selector->can_read($remaining > 0.05 ? 0.05 : $remaining);
-  for my $handle (@ready) {
-    my $bytes = sysread($handle, my $chunk, 8192);
-    if (defined($bytes) && $bytes > 0) { $output .= $chunk; next; }
-    $selector->remove($handle);
-    close($handle);
-    $closed = 1;
-  }
+  drain_ready_output(time() + 0.01);
   last if defined($child_status) && $closed;
 }
 if (!defined($child_status) || !$closed) {
-  # The execed command is the session leader. The wrapper may create distinct
-  # process groups, so stop every member of this isolated session, not just the
-  # current group, before returning the bounded capture failure.
-  my $rows = qx{ps -A -o pid=,sid= 2>/dev/null};
-  for my $row (split /\n/, $rows) {
-    my ($member, $sid) = $row =~ /^\s*([0-9]+)\s+([0-9]+)\s*\z/;
-    kill q{KILL}, $member if defined($member) && defined($sid) && $sid == $pid;
+  # Every target was observed as a live group rooted below our exact child.
+  # Never fall back to a session ID or a pipe-holder PID. A group that has ever
+  # been observed empty was dropped above, so an old numeric PGID is not reused.
+  remember_owned_groups();
+  for my $pgid (keys %owned_groups) {
+    kill q{KILL}, -$pgid;
   }
-  waitpid($pid, 0) if !defined($child_status);
-  while (1) {
-    my $bytes = sysread($reader, my $chunk, 8192);
-    last unless defined($bytes) && $bytes > 0;
-    $output .= $chunk;
+  my $teardown_deadline = time() + 0.20;
+  while (time() < $teardown_deadline) {
+    remember_owned_groups();
+    for my $pgid (keys %owned_groups) {
+      kill q{KILL}, -$pgid;
+    }
+    my $waited = waitpid($pid, WNOHANG);
+    $child_status = $? if $waited == $pid;
+    drain_ready_output(time() + 0.01);
+    last if !keys(%owned_groups) && defined($child_status);
   }
+  # A surviving pipe holder cannot extend teardown. Preserve only bytes already
+  # ready, then close the private reader and return the timeout deterministically.
+  drain_ready_output(time() + 0.02);
+  close($reader) unless $closed;
   print $output;
   exit 124;
 }

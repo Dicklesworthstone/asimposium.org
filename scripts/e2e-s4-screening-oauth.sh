@@ -12,6 +12,7 @@ readonly REPO_ROOT
 active_child_pid=''
 active_child_pgid=''
 active_child_identity=''
+active_normal_return_reaper_pid=''
 captured_runner_status=null
 captured_oauth_dry_check_test_status=null
 captured_runner_test_status=null
@@ -121,6 +122,7 @@ clear_active_child_ownership() {
   active_child_pid=''
   active_child_pgid=''
   active_child_identity=''
+  active_normal_return_reaper_pid=''
 }
 
 # The process-group number is a routing address, not an identity. Retain the
@@ -185,16 +187,21 @@ wait_for_group_absence() {
   return 1
 }
 
-terminate_live_group_after_normal_return() {
-  local pgid="${active_child_pgid}"
+reap_group_after_leader_exit() {
+  local leader_pid="$1"
+  local pgid="$2"
   local attempts state
 
-  # The leader has already been reaped, so its PID can no longer authorize a
-  # signal. A positive live-member observation is nevertheless continuous
-  # ownership of this process group: its numeric id cannot be reused until the
-  # group is empty. Unknown inspection remains a refusal, never an empty group.
+  # This process is a direct child of the wrapper, so its PID cannot be reused
+  # before the wrapper reaps it. Do nothing while its exact leader still exists.
+  # Once that leader is absent, a positive group-member observation is continuous
+  # ownership: the PGID cannot be reused until that original group is empty.
+  while kill -0 "${leader_pid}" 2>/dev/null; do
+    sleep 0.01
+  done
   state=0
   group_liveness_state "${pgid}" || state=$?
+  [[ "${state}" -eq 1 ]] && return 0
   [[ "${state}" -eq 0 ]] || return 1
   kill -TERM -- "-${pgid}" 2>/dev/null || return 1
 
@@ -210,7 +217,10 @@ terminate_live_group_after_normal_return() {
     group_liveness_state "${pgid}" || return 1
     kill -KILL -- "-${pgid}" 2>/dev/null || return 1
   fi
-  wait_for_group_absence "${pgid}"
+  wait_for_group_absence "${pgid}" || return 1
+  # The payload returned, but it left a live member behind. The wrapper has
+  # cleaned it before proceeding, yet that command is still a typed failure.
+  return 76
 }
 
 terminate_and_reap_active_child() {
@@ -241,6 +251,9 @@ terminate_and_reap_active_child() {
   fi
   wait "${child_pid}" 2>/dev/null || true
   wait_for_group_absence "${active_child_pgid}" || return 1
+  if [[ -n "${active_normal_return_reaper_pid}" ]]; then
+    wait "${active_normal_return_reaper_pid}" 2>/dev/null || true
+  fi
   clear_active_child_ownership
 }
 
@@ -351,13 +364,21 @@ fi
 private_lifecycle_test_configuration() {
   local requested=0
 
-  if [[ -n "${S4_WRAPPER_TEST_LIFECYCLE_HOOK:-}${S4_WRAPPER_TEST_SIGNAL:-}${S4_WRAPPER_TEST_AUTHORITY:-}${S4_WRAPPER_TEST_CAPABILITY:-}" ]]; then
+  if [[ -n "${S4_WRAPPER_TEST_LIFECYCLE_HOOK:-}${S4_WRAPPER_TEST_SIGNAL:-}${S4_WRAPPER_TEST_AUTHORITY:-}${S4_WRAPPER_TEST_CAPABILITY:-}${S4_WRAPPER_TEST_CAPTURE_GROUPS:-}" ]]; then
     requested=1
   fi
   [[ "${requested}" -eq 1 ]] || return 1
 
   [[ "${S4_WRAPPER_TEST_AUTHORITY:-}" == "${S4_PRIVATE_SELF_TEST_AUTHORITY}" &&
     "${S4_WRAPPER_TEST_CAPABILITY:-}" == "${S4_PRIVATE_SELF_TEST_CAPABILITY}" ]] || return 2
+  case "${S4_WRAPPER_TEST_CAPTURE_GROUPS:-}" in
+    ''|1) ;;
+    *) return 2 ;;
+  esac
+  if [[ "${S4_WRAPPER_TEST_CAPTURE_GROUPS:-}" == 1 &&
+    -z "${S4_WRAPPER_TEST_LIFECYCLE_HOOK:-}${S4_WRAPPER_TEST_SIGNAL:-}" ]]; then
+    return 0
+  fi
   case "${S4_WRAPPER_TEST_LIFECYCLE_HOOK:-}" in
     after-spawn-before-ownership|after-ownership-before-wait|during-wait|after-wait-before-ownership-clear) ;;
     *) return 2 ;;
@@ -367,6 +388,16 @@ private_lifecycle_test_configuration() {
     *) return 2 ;;
   esac
   return 0
+}
+
+publish_private_capture_group() {
+  local control_fd="${S4_CAPTURE_CONTROL_FD:-}"
+
+  [[ "${private_lifecycle_test_authorized}" -eq 1 ]] || return 0
+  [[ -n "${control_fd}" ]] || return 0
+  [[ "${control_fd}" =~ ^[3-9][0-9]*$ ]] || return 1
+  [[ "${active_child_pgid}" =~ ^[1-9][0-9]*$ ]] || return 1
+  printf 'S4_CAPTURE_GROUP %s\n' "${active_child_pgid}" >&"${control_fd}"
 }
 
 activate_private_lifecycle_test_if_authorized() {
@@ -413,6 +444,10 @@ s4_controlled_command_supervisor() {
     # KILLed only through the identity pin that was proved at spawn.
     while :; do sleep 1; done
   fi
+  # Publish a live, identity-pinned group leader long enough for the parent to
+  # observe it even when a payload leader returns immediately after forking a
+  # background descendant. The parent then owns normal-return group cleanup.
+  sleep 0.20
   return "${status}"
 }
 
@@ -440,6 +475,7 @@ run_controlled_command() {
       active_child_pid="${spawned_child_pid}"
       active_child_pgid="${spawned_child_pid}"
       active_child_identity="${spawned_child_identity}"
+      publish_private_capture_group || return 125
       break
     fi
     sleep 0.01
