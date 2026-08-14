@@ -35,9 +35,15 @@
  * Output is a single JSON line of bounded, non-secret fields. It never prints an
  * absolute path, an environment value, or SQL containing caller data.
  */
-import { existsSync, mkdtempSync, writeFileSync } from "node:fs";
-import { tmpdir } from "node:os";
-import { join, resolve } from "node:path";
+import { existsSync, lstatSync, mkdirSync, writeFileSync } from "node:fs";
+import { dirname, join, relative, resolve, sep } from "node:path";
+import {
+  assertRetainedD1StateDirectory,
+  assertRetainedIntegrationCapacity,
+  MAX_D1_ADAPTER_STATE_BYTES,
+  realFilesystemRetentionPreflight,
+  repositoryRoot,
+} from "../runner.ts";
 
 const BLOCKED_EXIT_CODE = 78;
 const DATABASE = "harness-ops2a";
@@ -97,11 +103,95 @@ function parseMode(argv: readonly string[]): Mode {
     say({
       status: "fail",
       code: "USAGE",
-      detail: "usage: d1-rollback.ts --mode <ok|planted-fail>",
+      detail:
+        "usage: d1-rollback.ts --mode <ok|planted-fail> --state-dir <retained-integration-path> --integration-namespace <safe-component>",
     });
     process.exit(2);
   }
   return value;
+}
+
+/**
+ * A real D1 probe never chooses its own state location. It must receive a
+ * validated, direct child of a retained integration run that its parent has
+ * already reserved. In particular this rejects `/tmp`, relative paths, nested
+ * arbitrary directories, and an old state directory that would be reused.
+ */
+function parseStateDirectory(argv: readonly string[]): {
+  stateDir: string;
+  artifactNamespace: string;
+} {
+  const index = argv.indexOf("--state-dir");
+  const value = index >= 0 ? argv[index + 1] : undefined;
+  const namespaceIndex = argv.indexOf("--integration-namespace");
+  const artifactNamespace = namespaceIndex >= 0 ? argv[namespaceIndex + 1] : undefined;
+  if (
+    argv.length !== 6 ||
+    argv[0] !== "--mode" ||
+    (argv[1] !== "ok" && argv[1] !== "planted-fail") ||
+    index !== 2 ||
+    typeof value !== "string" ||
+    value.length === 0 ||
+    namespaceIndex !== 4 ||
+    typeof artifactNamespace !== "string" ||
+    !/^[A-Za-z0-9][A-Za-z0-9._-]{0,79}$/.test(artifactNamespace)
+  ) {
+    say({
+      status: "fail",
+      code: "USAGE",
+      detail:
+        "usage: d1-rollback.ts --mode <ok|planted-fail> --state-dir <retained-integration-path> --integration-namespace <safe-component>",
+    });
+    process.exit(2);
+  }
+  try {
+    const stateDir = assertRetainedD1StateDirectory(REPOSITORY_ROOT, value);
+    if (integrationNamespaceForState(stateDir) !== artifactNamespace) {
+      throw new Error("D1 state namespace does not match the explicit integration namespace");
+    }
+    return { stateDir, artifactNamespace };
+  } catch (error) {
+    say({
+      status: "fail",
+      code: "D1_STATE_DIRECTORY_INVALID",
+      detail:
+        error instanceof Error
+          ? error.message
+          : "D1 state directory is not a retained integration path.",
+    });
+    process.exit(2);
+  }
+}
+
+/** Create exactly the already-authorized state leaf, never an arbitrary parent. */
+function prepareStateDirectory(stateDir: string): void {
+  const parent = dirname(stateDir);
+  if (
+    !existsSync(parent) ||
+    lstatSync(parent).isSymbolicLink() ||
+    !lstatSync(parent).isDirectory()
+  ) {
+    throw new Error(
+      "the retained integration run directory must already exist as a real directory",
+    );
+  }
+  if (existsSync(stateDir)) {
+    throw new Error(
+      "the retained D1 state directory already exists and will not be reused or overwritten",
+    );
+  }
+  mkdirSync(stateDir);
+}
+
+function integrationNamespaceForState(stateDir: string): string {
+  const artifacts = join(REPOSITORY_ROOT, "e2e", "artifacts");
+  const namespace = relative(artifacts, stateDir).split(sep)[0];
+  if (namespace === undefined) throw new Error("D1 state is missing an integration namespace");
+  return namespace;
+}
+
+function integrationDirectoryForState(stateDir: string): string {
+  return join(REPOSITORY_ROOT, "e2e", "artifacts", integrationNamespaceForState(stateDir));
 }
 
 /**
@@ -224,6 +314,22 @@ async function readRows(entry: string, stateDir: string, configPath: string): Pr
 
 async function main(): Promise<number> {
   const mode = parseMode(process.argv.slice(2));
+  const { stateDir } = parseStateDirectory(process.argv.slice(2));
+
+  // The adapter repeats the write-free real-authority/capacity preflight so a
+  // copied command cannot bypass its parent runner and create state at a cap.
+  // This runs before the namespace leaf or any state/config file is created.
+  const capacity = realFilesystemRetentionPreflight(repositoryRoot());
+  if (capacity.exceeded) {
+    say({
+      status: "blocked",
+      code: "ARTIFACT_RETENTION_EXCEEDED",
+      detail:
+        "No D1 state was created: retained integration preflight is at capacity. " +
+        capacity.remedy,
+    });
+    return BLOCKED_EXIT_CODE;
+  }
 
   const wranglerEntry = resolveWranglerEntry();
   if (wranglerEntry === undefined) {
@@ -237,7 +343,39 @@ async function main(): Promise<number> {
     return BLOCKED_EXIT_CODE;
   }
 
-  const stateDir = mkdtempSync(join(tmpdir(), "asimp-ops2a-d1-"));
+  try {
+    // Reserve the state leaf and a bounded maximum before the adapter creates
+    // either the directory or its first config/database byte. The parent run
+    // id, self-test ids, resume ids, cases, and retained staging all appear in
+    // the same recursive accounting report.
+    assertRetainedIntegrationCapacity(integrationDirectoryForState(stateDir), {
+      additionalDirectories: 1,
+      additionalBytes: MAX_D1_ADAPTER_STATE_BYTES,
+    });
+  } catch (error) {
+    say({
+      status: "blocked",
+      code: "INTEGRATION_RETENTION_EXCEEDED",
+      detail:
+        "No D1 state was created because retained integration capacity is insufficient. " +
+        (error instanceof Error ? error.message : "Inspect retained integration evidence."),
+    });
+    return BLOCKED_EXIT_CODE;
+  }
+
+  try {
+    prepareStateDirectory(stateDir);
+  } catch (error) {
+    say({
+      status: "fail",
+      code: "D1_STATE_DIRECTORY_INVALID",
+      detail:
+        error instanceof Error
+          ? error.message
+          : "D1 state directory could not be prepared without overwriting retained evidence.",
+    });
+    return 2;
+  }
   const configPath = join(stateDir, "wrangler.toml");
   writeFileSync(
     configPath,
@@ -251,70 +389,60 @@ async function main(): Promise<number> {
       `database_id = "00000000-0000-0000-0000-000000000000"`,
       ``,
     ].join("\n"),
+    { encoding: "utf8", flag: "wx" },
   );
 
-  try {
-    const seeded = await execute(
-      wranglerEntry,
-      stateDir,
-      configPath,
-      `CREATE TABLE ${TABLE} (id INTEGER PRIMARY KEY, label TEXT NOT NULL UNIQUE);` +
-        ` INSERT INTO ${TABLE} (id, label) VALUES (1, 'sentinel');`,
-    );
-    if (!seeded.ok) {
-      // No database means the adapter cannot run at all — a blocker, not a failure.
-      say({
-        status: "blocked",
-        code: "D1_ADAPTER_UNAVAILABLE",
-        error_class: seeded.errorClass,
-        detail:
-          "wrangler could not open a local D1 database; install the pinned wrangler and retry. No D1 behavior was exercised.",
-      });
-      return BLOCKED_EXIT_CODE;
-    }
-
-    // The transaction under test. In `ok` mode the second statement violates the
-    // UNIQUE constraint *after* the first has already written — a late failure.
-    const doomedBatch =
-      mode === "ok"
-        ? `INSERT INTO ${TABLE} (id, label) VALUES (2, 'doomed');` +
-          ` INSERT INTO ${TABLE} (id, label) VALUES (3, 'sentinel');`
-        : `INSERT INTO ${TABLE} (id, label) VALUES (2, 'doomed');`;
-    const batch = await execute(wranglerEntry, stateDir, configPath, doomedBatch);
-
-    const labels = await readRows(wranglerEntry, stateDir, configPath);
-    const doomedSurvived = labels.includes("doomed");
-    const sentinelIntact = labels.includes("sentinel");
-    const rolledBack = !doomedSurvived && sentinelIntact;
-
+  const seeded = await execute(
+    wranglerEntry,
+    stateDir,
+    configPath,
+    `CREATE TABLE ${TABLE} (id INTEGER PRIMARY KEY, label TEXT NOT NULL UNIQUE);` +
+      ` INSERT INTO ${TABLE} (id, label) VALUES (1, 'sentinel');`,
+  );
+  if (!seeded.ok) {
+    // No database means the adapter cannot run at all — a blocker, not a failure.
     say({
-      status: rolledBack ? "pass" : "fail",
-      code: rolledBack ? "D1_TRANSACTION_ROLLED_BACK" : "D1_TRANSACTION_LEAKED",
-      mode,
-      batch_rejected: !batch.ok,
-      batch_error_class: batch.errorClass ?? null,
-      rows_after: labels.length,
-      doomed_row_present: doomedSurvived,
-      sentinel_present: sentinelIntact,
-      // Path *class* and a short digest of the directory name, never the path
-      // itself: enough to correlate two runs, useless for locating a machine.
-      state_dir_class: "os-temp",
-      state_dir_digest: stateDirDigest(stateDir),
-      detail: rolledBack
-        ? "A late failure inside one D1 batch rolled back the earlier write in the same batch; state was re-read to confirm."
-        : "The write from a failed batch survived, or the sentinel vanished; D1 did not roll back as required.",
+      status: "blocked",
+      code: "D1_ADAPTER_UNAVAILABLE",
+      error_class: seeded.errorClass,
+      detail:
+        "wrangler could not open a local D1 database; install the pinned wrangler and retry. No D1 behavior was exercised.",
     });
-    return rolledBack ? 0 : 1;
-  } finally {
-    // Nothing is deleted here, deliberately.
-    //
-    // AGENTS.md RULE 1 forbids this repository's agents from deleting files at
-    // all — including temporary ones they created themselves. The probe is kept
-    // bounded instead: each run gets its own `mkdtemp` directory holding one
-    // small SQLite database, so nothing is ever overwritten and the footprint
-    // grows by a fixed amount per run rather than without limit. Reclaiming OS
-    // temp space is the operating system's job, or a human's.
+    return BLOCKED_EXIT_CODE;
   }
+
+  // The transaction under test. In `ok` mode the second statement violates the
+  // UNIQUE constraint *after* the first has already written — a late failure.
+  const doomedBatch =
+    mode === "ok"
+      ? `INSERT INTO ${TABLE} (id, label) VALUES (2, 'doomed');` +
+        ` INSERT INTO ${TABLE} (id, label) VALUES (3, 'sentinel');`
+      : `INSERT INTO ${TABLE} (id, label) VALUES (2, 'doomed');`;
+  const batch = await execute(wranglerEntry, stateDir, configPath, doomedBatch);
+
+  const labels = await readRows(wranglerEntry, stateDir, configPath);
+  const doomedSurvived = labels.includes("doomed");
+  const sentinelIntact = labels.includes("sentinel");
+  const rolledBack = !doomedSurvived && sentinelIntact;
+
+  say({
+    status: rolledBack ? "pass" : "fail",
+    code: rolledBack ? "D1_TRANSACTION_ROLLED_BACK" : "D1_TRANSACTION_LEAKED",
+    mode,
+    batch_rejected: !batch.ok,
+    batch_error_class: batch.errorClass ?? null,
+    rows_after: labels.length,
+    doomed_row_present: doomedSurvived,
+    sentinel_present: sentinelIntact,
+    // Path *class* and a short digest of the directory name, never the path
+    // itself: enough to correlate two runs, useless for locating a machine.
+    state_dir_class: "retained-integration",
+    state_dir_digest: stateDirDigest(stateDir),
+    detail: rolledBack
+      ? "A late failure inside one D1 batch rolled back the earlier write in the same batch; state was re-read to confirm."
+      : "The write from a failed batch survived, or the sentinel vanished; D1 did not roll back as required.",
+  });
+  return rolledBack ? 0 : 1;
 }
 
 process.exit(await main());

@@ -10,12 +10,10 @@
 import { createHash } from "node:crypto";
 import {
   appendFileSync,
-  closeSync,
   existsSync,
   linkSync,
   lstatSync,
   mkdirSync,
-  openSync,
   readdirSync,
   readFileSync,
   realpathSync,
@@ -36,6 +34,22 @@ export const MAX_EVENT_BYTES = 8 * 1024;
 export const MAX_EVENT_LEDGER_BYTES = 2 * 1024 * 1024;
 export const MAX_FAILURE_ARTIFACTS_PER_RUN = 32;
 export const MAX_JUNIT_ARTIFACTS_PER_RUN = 8;
+/** The single retained parent for explicit real-filesystem OPS.2a evidence. */
+export const DEFAULT_RETAINED_INTEGRATION_NAMESPACE = "ops2a-retention-integration";
+export const SELF_TEST_REPRODUCTION = `scripts/e2e-test-harness.sh --self-test --integration-namespace ${DEFAULT_RETAINED_INTEGRATION_NAMESPACE}`;
+/**
+ * The opt-in integration parent has a second, recursive cap.
+ *
+ * The top-level namespace backstop only sees `ops2a-retention-integration` as
+ * one directory. That is deliberately insufficient: a self-test run id, its
+ * resume run id, direct fixture case directories, D1 state, blob staging, and
+ * their bytes all sit below that one parent. These limits account for that
+ * nested evidence before an operation creates another retained path.
+ */
+export const MAX_RETAINED_INTEGRATION_DIRECTORIES = 512;
+export const MAX_RETAINED_INTEGRATION_BYTES = 16 * 1024 * 1024;
+/** Conservative reservation for one real D1 adapter state tree. */
+export const MAX_D1_ADAPTER_STATE_BYTES = 2 * 1024 * 1024;
 /**
  * Ceiling on artifact namespaces (run directories plus fixture scratch) under
  * `e2e/artifacts`.
@@ -121,6 +135,7 @@ const XML_ESCAPE: Readonly<Record<string, string>> = {
 
 export type StepStatus = "pass" | "fail" | "blocked" | "timeout" | "cancelled" | "skipped";
 export type HarnessAdapter = "process" | "d1" | "http" | "browser";
+export type HarnessStorageAuthority = "real-filesystem" | "simulation";
 
 /**
  * The one probe each non-process adapter is allowed to execute.
@@ -138,6 +153,58 @@ export const ADAPTER_PROBES: Readonly<Record<Exclude<HarnessAdapter, "process">,
 
 export function adapterProbePath(adapter: Exclude<HarnessAdapter, "process">): string {
   return resolve(import.meta.dir, "adapters", ADAPTER_PROBES[adapter]);
+}
+
+/** Build the only repository-contained state path the real D1 probe accepts. */
+export function retainedD1StateDirectory(
+  root: string,
+  artifactNamespace: string,
+  runId: string,
+  stateName: string,
+): string {
+  if (
+    !validateRunId(artifactNamespace) ||
+    !validateRunId(runId) ||
+    !/^d1-state-[A-Za-z0-9][A-Za-z0-9._-]{0,70}$/.test(stateName)
+  ) {
+    throw new HarnessError(
+      "D1_STATE_DIRECTORY_INVALID",
+      "D1 state must use safe integration namespace, run id, and d1-state path components.",
+    );
+  }
+  return join(resolve(root), "e2e", "artifacts", artifactNamespace, runId, stateName);
+}
+
+/**
+ * Validate an explicit D1 state path without creating it.
+ *
+ * Its three components are deliberately exact: integration namespace, run id,
+ * and one `d1-state-*` leaf. Thus an adapter cannot escape to OS temp or hide
+ * arbitrary retained state under a run directory.
+ */
+export function assertRetainedD1StateDirectory(root: string, stateDirectory: string): string {
+  if (!isAbsolute(stateDirectory)) {
+    throw new HarnessError(
+      "D1_STATE_DIRECTORY_INVALID",
+      "D1 state directory must be an absolute retained integration path.",
+    );
+  }
+  const base = join(resolve(root), "e2e", "artifacts");
+  const target = resolve(stateDirectory);
+  const relation = relative(base, target);
+  const parts = relation === "" ? [] : relation.split(sep);
+  if (
+    parts.length !== 3 ||
+    !validateRunId(parts[0] ?? "") ||
+    !validateRunId(parts[1] ?? "") ||
+    !/^d1-state-[A-Za-z0-9][A-Za-z0-9._-]{0,70}$/.test(parts[2] ?? "")
+  ) {
+    throw new HarnessError(
+      "D1_STATE_DIRECTORY_INVALID",
+      "D1 state directory must be <repo>/e2e/artifacts/<integration>/<run>/d1-state-<name>.",
+    );
+  }
+  return target;
 }
 
 export interface HttpContext {
@@ -180,6 +247,11 @@ export interface HarnessRunOptions {
   bindingVersions?: Readonly<Record<string, string>>;
   /** Only a registered CLI scenario may be represented as executable reproduction. */
   reproduction?: "self-test";
+  /**
+   * Optional retained parent under `e2e/artifacts` for an explicitly enabled
+   * real-filesystem integration run. Ordinary production and unit runs omit it.
+   */
+  artifactNamespace?: string;
   signal?: AbortSignal;
   /** Called with redacted child output. Defaults to visible stderr. */
   onOutput?: (text: string) => void;
@@ -210,6 +282,8 @@ export interface HarnessEvent {
   attempt: number;
   retry: number;
   replay_safe: boolean;
+  /** The storage authority that produced this record. */
+  storage_authority: HarnessStorageAuthority;
   adapter: HarnessAdapter;
   status: StepStatus | "pass" | "fail" | "blocked";
   code: string;
@@ -249,6 +323,8 @@ export interface HarnessRunResult {
   events: HarnessEvent[];
   artifacts: HarnessArtifacts;
   seed: number;
+  /** Simulation exercises control flow; it is not filesystem evidence. */
+  storageAuthority: HarnessStorageAuthority;
 }
 
 export class HarnessError extends Error {
@@ -269,6 +345,10 @@ class ArtifactStore {
   private failureArtifactCount: number;
   /** `<root>/e2e/artifacts`, parent of both run namespaces and the blob store. */
   private readonly artifactsDirectory: string;
+  /** Present only for the explicit retained integration lane. */
+  private readonly retainedIntegrationDirectory: string | undefined;
+  /** Manifest-relative base for the selected artifact namespace. */
+  private readonly artifactRelativeRoot: string;
   /** `<run>/failures.jsonl`: digests this run produced, in order. */
   readonly manifest: string;
   /**
@@ -288,6 +368,7 @@ class ArtifactStore {
     resume: boolean,
     identity: RunIdentity,
     storage: HarnessArtifactStorage = nodeArtifactStorage,
+    artifactNamespace?: string,
   ) {
     this.storage = storage;
     if (!validateRunId(runId)) {
@@ -297,7 +378,21 @@ class ArtifactStore {
     const resolvedRoot = resolve(root);
     this.physicalRoot = realDirectory(resolvedRoot, "REPOSITORY_ROOT_INVALID", storage);
     const e2e = ensureDirectDirectory(this.physicalRoot, "e2e", storage);
-    const artifacts = ensureDirectDirectory(e2e, "artifacts", storage);
+    const topLevelArtifacts = ensureDirectDirectory(e2e, "artifacts", storage);
+    const artifacts =
+      artifactNamespace === undefined
+        ? topLevelArtifacts
+        : reserveArtifactNamespace(
+            this.physicalRoot,
+            topLevelArtifacts,
+            artifactNamespace,
+            MAX_ARTIFACT_NAMESPACES,
+            storage,
+          );
+    this.artifactsDirectory = artifacts;
+    this.retainedIntegrationDirectory = artifactNamespace === undefined ? undefined : artifacts;
+    this.artifactRelativeRoot =
+      artifactNamespace === undefined ? "e2e/artifacts" : `e2e/artifacts/${artifactNamespace}`;
     /**
      * A new run refuses a namespace that already exists — at all.
      *
@@ -328,14 +423,16 @@ class ArtifactStore {
     // limit after this one had already counted; narrowing it to a single
     // reservation cannot make the backstop exact under concurrency, but it does
     // remove the avoidable part of the gap.
-    this.directory = reserveArtifactNamespace(
-      this.physicalRoot,
-      artifacts,
-      runId,
-      MAX_ARTIFACT_NAMESPACES,
-      storage,
-    );
-    this.artifactsDirectory = artifacts;
+    this.directory =
+      artifactNamespace === undefined
+        ? reserveArtifactNamespace(
+            this.physicalRoot,
+            artifacts,
+            runId,
+            MAX_ARTIFACT_NAMESPACES,
+            storage,
+          )
+        : reserveRetainedIntegrationDirectory(artifacts, runId, storage, 1);
     this.jsonl = join(this.directory, "events.jsonl");
     assertRegularOrAbsent(this.jsonl, "ARTIFACT_PATH_UNSAFE", storage);
     if (!storage.exists(this.jsonl)) storage.writeExclusive(this.jsonl, "");
@@ -344,6 +441,7 @@ class ArtifactStore {
     // Written once, verified on every resume: a resumed run that changed its
     // suite, seed, or step set is a different run wearing the same id, and its
     // appended events would describe work the earlier events never did.
+    if (!storage.exists(this.identityPath)) this.assertRetainedCapacity(MAX_EVENT_BYTES);
     reconcileRunIdentity(this.identityPath, identity, resume && namespaceExisted, storage);
 
     this.manifest = join(this.directory, FAILURE_MANIFEST_NAME);
@@ -355,11 +453,14 @@ class ArtifactStore {
       this.artifactsDirectory,
       runId,
       storage,
+      this.artifactRelativeRoot,
     );
     this.failureArtifactCount = reconciled.attemptCount;
     this.danglingFailureDigests = reconciled.dangling;
     for (const digest of reconciled.stored) {
-      this.failureLogs.push(join(blobStoreDirectory(this.artifactsDirectory, storage), digest));
+      this.failureLogs.push(
+        join(this.artifactsDirectory, ARTIFACT_BLOB_DIRECTORY, "sha256", digest),
+      );
     }
   }
 
@@ -377,6 +478,7 @@ class ArtifactStore {
         "the bounded event ledger is full; retain the existing evidence without deletion.",
       );
     }
+    this.assertRetainedCapacity(eventBytes);
     this.storage.append(this.jsonl, serialized);
   }
 
@@ -401,8 +503,12 @@ class ArtifactStore {
     const safeStep = validateStepId(step.id) ? step.id : "invalid-step";
     const stored = clip(output, MAX_FAILURE_ARTIFACT_CHARS);
     const digest = createHash("sha256").update(stored, "utf8").digest("hex");
-    const path = this.blobPath(digest);
     const bytes = Buffer.byteLength(stored, "utf8");
+    // The recursive cap sees the blob and its retained staging link as two
+    // names. Reserve both, the two manifest records, and the three store
+    // directories before the intent makes an attempt durable.
+    this.assertRetainedCapacity(bytes * 2 + MAX_EVENT_BYTES, 3);
+    const path = this.blobPath(digest);
 
     const describe = (record: string) => ({
       schema_version: HARNESS_SCHEMA_VERSION,
@@ -412,7 +518,7 @@ class ArtifactStore {
       attempt,
       digest,
       bytes,
-      blob: `e2e/artifacts/${ARTIFACT_BLOB_DIRECTORY}/sha256/${digest}`,
+      blob: `${this.artifactRelativeRoot}/${ARTIFACT_BLOB_DIRECTORY}/sha256/${digest}`,
     });
 
     // The slot is spent here, before the blob exists. A crash after this line
@@ -459,10 +565,20 @@ class ArtifactStore {
       stored,
       attempt: this.stagingCounter,
       storage: this.storage,
+      retainedIntegrationDirectory: this.retainedIntegrationDirectory,
     });
   }
 
   private stagingCounter = 0;
+
+  private assertRetainedCapacity(additionalBytes: number, additionalDirectories = 0): void {
+    if (this.retainedIntegrationDirectory === undefined) return;
+    assertRetainedIntegrationCapacity(
+      this.retainedIntegrationDirectory,
+      { additionalBytes, additionalDirectories },
+      this.storage,
+    );
+  }
 
   /** Resolve and contain the path for one digest. */
   private blobPath(digest: string): string {
@@ -489,7 +605,9 @@ class ArtifactStore {
         attempt += 1;
         continue;
       }
-      this.storage.writeExclusive(path, junitXml(events));
+      const body = junitXml(events);
+      this.assertRetainedCapacity(Buffer.byteLength(body, "utf8"));
+      this.storage.writeExclusive(path, body);
       return path;
     }
     throw new HarnessError(
@@ -499,15 +617,15 @@ class ArtifactStore {
   }
 
   loadResumeStates(): Map<string, StepStatus> {
-    const bytes = readFileSync(this.jsonl);
-    if (bytes.byteLength > MAX_RESUME_HISTORY_BYTES) {
+    const text = this.storage.readFile(this.jsonl);
+    if (Buffer.byteLength(text, "utf8") > MAX_RESUME_HISTORY_BYTES) {
       throw new HarnessError(
         "RUN_HISTORY_TOO_LARGE",
         "run history exceeds the bounded resume ledger size.",
       );
     }
     const states = new Map<string, StepStatus>();
-    for (const line of bytes.toString("utf8").split("\n")) {
+    for (const line of text.split("\n")) {
       if (line.trim().length === 0) continue;
       try {
         const event = JSON.parse(line) as HarnessEvent;
@@ -586,8 +704,23 @@ export function boundedDiff(expected: string, actual: string, root: string): str
   );
 }
 
-export function safeReproductionCommand(reproduction?: HarnessRunOptions["reproduction"]): string {
-  if (reproduction === "self-test") return "scripts/e2e-test-harness.sh --self-test";
+export function selfTestReproduction(
+  artifactNamespace = DEFAULT_RETAINED_INTEGRATION_NAMESPACE,
+): string {
+  if (!validateRunId(artifactNamespace)) {
+    throw new HarnessError(
+      "ARTIFACT_NAMESPACE_INVALID",
+      "a self-test reproduction must name one safe retained integration namespace.",
+    );
+  }
+  return `scripts/e2e-test-harness.sh --self-test --integration-namespace ${artifactNamespace}`;
+}
+
+export function safeReproductionCommand(
+  reproduction?: HarnessRunOptions["reproduction"],
+  artifactNamespace?: string,
+): string {
+  if (reproduction === "self-test") return selfTestReproduction(artifactNamespace);
   return "unavailable: no registered CLI scenario";
 }
 
@@ -620,6 +753,34 @@ export function repositoryRoot(): string {
 }
 
 /**
+ * Read-only filesystem facts needed to establish a harness root's identity.
+ *
+ * The runner never accepts this through `HarnessRunOptions`: production always
+ * uses `nodeRootFilesystem`. The seam exists so root-identity negatives can be
+ * exercised without manufacturing temp directories, lookalike sentinels, or
+ * symlinks that this repository is forbidden to clean up.
+ */
+export interface HarnessRootFilesystem {
+  exists(path: string): boolean;
+  isSymlink(path: string): boolean;
+  isDirectory(path: string): boolean;
+  realpath(path: string): string;
+  repositoryRoot(): string;
+  homeDirectory(): string;
+  temporaryDirectory(): string;
+}
+
+export const nodeRootFilesystem: HarnessRootFilesystem = {
+  exists: (path) => existsSync(path),
+  isSymlink: (path) => lstatSync(path).isSymbolicLink(),
+  isDirectory: (path) => statSync(path).isDirectory(),
+  realpath: (path) => realpathSync(path),
+  repositoryRoot,
+  homeDirectory: () => homedir(),
+  temporaryDirectory: () => tmpdir(),
+};
+
+/**
  * Establish the run root, by identity — not merely by shape.
  *
  * Everything the harness writes lands under this path and every child runs with
@@ -633,22 +794,25 @@ export function repositoryRoot(): string {
  * the repository" — so there is no opt-in, no marker file, and no flag that
  * relaxes it. An earlier revision of this function offered a consent marker so
  * disposable temp roots could be used by tests; that was an escape hatch this
- * rule does not permit, and tests now isolate themselves by `run_id` inside the
- * repository instead, which is what the artifact layout was already designed
- * for.
+ * rule does not permit. Ordinary tests isolate artifact writes in memory, and
+ * the explicit real-filesystem proof retains evidence below its one approved
+ * namespace in this checkout.
  *
  * Symlinked roots are refused outright rather than silently resolved. Following
  * one would mean the caller named one directory and the harness wrote to
  * another, which is precisely the confusion this function exists to prevent.
  */
-export function assertContainedRoot(root: unknown): string {
+export function assertContainedRoot(
+  root: unknown,
+  filesystem: HarnessRootFilesystem = nodeRootFilesystem,
+): string {
   if (typeof root !== "string" || root.length === 0) {
     throw new HarnessError("ROOT_INVALID", "root must be a non-empty absolute path.");
   }
   if (!isAbsolute(root)) {
     throw new HarnessError("ROOT_INVALID", "root must be absolute, not relative to a caller cwd.");
   }
-  if (!existsSync(root)) {
+  if (!filesystem.exists(root)) {
     throw new HarnessError("ROOT_INVALID", "root does not exist.");
   }
   // Refuse rather than resolve: a symlinked root means the path the caller
@@ -658,14 +822,14 @@ export function assertContainedRoot(root: unknown): string {
   // — macOS resolves `/var` to `/private/var`, so every `mkdtemp` directory has
   // one — and refusing those would ban temp roots on an entire operating system
   // while catching no actual caller confusion.
-  if (lstatSync(root).isSymbolicLink()) {
+  if (filesystem.isSymlink(root)) {
     throw new HarnessError(
       "ROOT_SYMLINK_REFUSED",
       "root must not be a symlink; name the real directory so artifacts land where the caller believes.",
     );
   }
-  const real = realpathSync(root);
-  if (!statSync(real).isDirectory()) {
+  const real = filesystem.realpath(root);
+  if (!filesystem.isDirectory(real)) {
     throw new HarnessError("ROOT_INVALID", "root must be a directory.");
   }
   if (real === sep) {
@@ -673,10 +837,10 @@ export function assertContainedRoot(root: unknown): string {
   }
   // Named explicitly so these two very common mistakes get their own message
   // instead of the generic identity refusal.
-  if (real === realpathSync(homedir())) {
+  if (real === filesystem.realpath(filesystem.homeDirectory())) {
     throw new HarnessError("ROOT_NOT_REPOSITORY", "a home directory is never a harness root.");
   }
-  if (real === realpathSync(tmpdir())) {
+  if (real === filesystem.realpath(filesystem.temporaryDirectory())) {
     throw new HarnessError(
       "ROOT_NOT_REPOSITORY",
       "the shared temp directory is never a harness root.",
@@ -693,7 +857,7 @@ export function assertContainedRoot(root: unknown): string {
    * accepts. AGENTS.md keeps artifact roots under the repository, and this is
    * the assertion that enforces it.
    */
-  if (real !== repositoryRoot()) {
+  if (real !== filesystem.repositoryRoot()) {
     throw new HarnessError(
       "ROOT_NOT_REPOSITORY",
       "root is not this checkout; refusing to write artifacts into an unrelated directory.",
@@ -725,7 +889,7 @@ export interface HarnessArtifactStorage {
    * kernel behaviour this store depends on: hard-link atomicity, EEXIST under
    * real contention, inode identity. Only "real-filesystem" evidences those.
    */
-  readonly authority: "real-filesystem" | "simulation";
+  readonly authority: HarnessStorageAuthority;
   exists(path: string): boolean;
   isSymlink(path: string): boolean;
   isFile(path: string): boolean;
@@ -740,18 +904,6 @@ export interface HarnessArtifactStorage {
   /** Atomic publish that refuses an existing target, as POSIX `link` does. */
   link(existing: string, target: string): void;
   size(path: string): number;
-  /**
-   * Called between the existence check and the link, if present.
-   *
-   * The window this opens is the one that matters: a publisher has just seen no
-   * blob and is about to claim the name. Every operation here is synchronous, so
-   * `Promise.all` over publications does not interleave them — each callback
-   * runs to completion before the next begins, and a test built that way proves
-   * only that the same code ran sixteen times. This hook lets a test place a
-   * second publisher *inside* that window deterministically, which is the only
-   * way to exercise the contended branch in-process.
-   */
-  beforeLink?(path: string): void;
 }
 
 /**
@@ -763,16 +915,45 @@ export interface HarnessArtifactStorage {
  * nobody observed.
  */
 export function assertRealStorageAuthority(storage: HarnessArtifactStorage): void {
-  if (storage.authority !== "real-filesystem") {
+  if (storage !== nodeArtifactStorageCapability) {
     throw new HarnessError(
-      "STORAGE_AUTHORITY_SIMULATED",
-      "this artifact storage is a simulation; it cannot produce a retention receipt or stand as filesystem evidence.",
+      "STORAGE_AUTHORITY_UNTRUSTED",
+      "only the exact node artifact storage capability can produce a retention receipt or stand as filesystem evidence.",
     );
   }
 }
 
-/** The real filesystem. The default everywhere. */
-export const nodeArtifactStorage: HarnessArtifactStorage = {
+/** Labels are derived from the unforgeable adapter identity, never its string field. */
+function storageAuthority(storage: HarnessArtifactStorage): HarnessStorageAuthority {
+  return storage === nodeArtifactStorageCapability ? "real-filesystem" : "simulation";
+}
+
+/**
+ * Inspect the production artifact root without creating an artifact.
+ *
+ * The preflight intentionally has a narrower claim than a run: it attests
+ * that the caller selected real filesystem authority and reports whether the
+ * retention backstop permits a run. A blocked preflight does not imply that
+ * hard-link publication or any shell step was exercised.
+ */
+export function realFilesystemRetentionPreflight(
+  root: string,
+  storage: HarnessArtifactStorage = nodeArtifactStorage,
+): ArtifactCapacityReport {
+  assertContainedRoot(root);
+  assertRealStorageAuthority(storage);
+  return artifactCapacityReport(root, MAX_ARTIFACT_NAMESPACES, storage);
+}
+
+/**
+ * The real-filesystem authority capability.
+ *
+ * It is intentionally private and frozen. The exported reference is useful as
+ * an adapter, but callers cannot replace a method or its label and keep the
+ * capability identity that receipt/preflight code trusts. All authority checks
+ * compare against this private object, never against `authority` text.
+ */
+const nodeArtifactStorageCapability = Object.freeze<HarnessArtifactStorage>({
   authority: "real-filesystem",
   exists: (path) => existsSync(path),
   isSymlink: (path) => {
@@ -804,7 +985,14 @@ export const nodeArtifactStorage: HarnessArtifactStorage = {
   append: (path, data) => appendFileSync(path, data, "utf8"),
   link: (existing, target) => linkSync(existing, target),
   size: (path) => statSync(path).size,
-};
+});
+
+/**
+ * The immutable real filesystem adapter. Its identity is not the authority
+ * proof; the private capability above is. Exposing the frozen inferred type
+ * also prevents TypeScript callers from treating this as a mutable test seam.
+ */
+export const nodeArtifactStorage = nodeArtifactStorageCapability;
 
 class MemoryStorageError extends Error {
   constructor(readonly code: string) {
@@ -948,6 +1136,7 @@ const HARNESS_RUN_OPTION_COVERAGE: Readonly<Record<keyof HarnessRunOptions, true
   onOutput: true,
   onEvent: true,
   storage: true,
+  artifactNamespace: true,
 };
 
 export const HARNESS_RUN_OPTION_KEYS: readonly string[] = Object.keys(HARNESS_RUN_OPTION_COVERAGE);
@@ -990,10 +1179,61 @@ export function validateHarnessRunOptions(options: HarnessRunOptions): void {
   if (options.reproduction !== undefined && options.reproduction !== "self-test") {
     throw new HarnessError("REPRODUCTION_INVALID", "only registered CLI reproduction is allowed.");
   }
+  if (options.artifactNamespace !== undefined && !validateRunId(options.artifactNamespace)) {
+    throw new HarnessError(
+      "ARTIFACT_NAMESPACE_INVALID",
+      "artifact_namespace must be one safe, bounded path component.",
+    );
+  }
+  if (options.reproduction === "self-test" && options.artifactNamespace === undefined) {
+    throw new HarnessError(
+      "INTEGRATION_NAMESPACE_REQUIRED",
+      "a self-test receipt must name its retained integration artifact namespace.",
+    );
+  }
+  if (options.artifactNamespace !== undefined && options.reproduction !== "self-test") {
+    throw new HarnessError(
+      "ARTIFACT_NAMESPACE_CONTEXT_INVALID",
+      "a retained integration artifact namespace is only valid for the registered self-test.",
+    );
+  }
   validateBindingVersions(options.bindingVersions);
   const seenStepIds = new Set<string>();
   for (const step of options.steps) {
     validateHarnessStep(step);
+    if (step.adapter === "d1" && step.command !== undefined) {
+      if (options.reproduction !== "self-test" || options.artifactNamespace === undefined) {
+        throw new HarnessError(
+          "D1_INTEGRATION_CONTEXT_REQUIRED",
+          "the real D1 adapter is only executable through the retained self-test integration lane.",
+        );
+      }
+      const stateDirectory = d1StateDirectoryArgument(step.command);
+      const declaredNamespace = d1IntegrationNamespaceArgument(step.command);
+      if (declaredNamespace !== options.artifactNamespace) {
+        throw new HarnessError(
+          "D1_INTEGRATION_NAMESPACE_MISMATCH",
+          "the real D1 adapter namespace must match this retained self-test receipt.",
+        );
+      }
+      const expectedRunDirectory = join(
+        resolve(options.root),
+        "e2e",
+        "artifacts",
+        options.artifactNamespace,
+        options.runId,
+      );
+      const state = assertRetainedD1StateDirectory(options.root, stateDirectory);
+      if (
+        !isContainedPath(expectedRunDirectory, state) ||
+        relative(expectedRunDirectory, state).split(sep).length !== 1
+      ) {
+        throw new HarnessError(
+          "D1_STATE_DIRECTORY_INVALID",
+          "the real D1 state directory must belong directly to this retained self-test run id.",
+        );
+      }
+    }
     if (seenStepIds.has(step.id)) {
       throw new HarnessError(
         "STEP_ID_DUPLICATE",
@@ -1035,6 +1275,10 @@ export function validateHarnessStep(step: HarnessStep): void {
         "an adapter step may only execute its own registered probe.",
       );
     }
+    if (adapter === "d1") {
+      d1StateDirectoryArgument(step.command);
+      d1IntegrationNamespaceArgument(step.command);
+    }
   }
   if (!isBoundedInteger(step.retries ?? 0, 0, MAX_RETRIES_PER_STEP)) {
     throw new HarnessError("RETRY_LIMIT", "retries must be a bounded non-negative integer.");
@@ -1055,6 +1299,36 @@ export function validateHarnessStep(step: HarnessStep): void {
   if (step.expected !== undefined) assertBoundedInputText(step.expected, "expected");
   if (step.actual !== undefined) assertBoundedInputText(step.actual, "actual");
   if (step.http !== undefined) validateHttpContext(step.http);
+}
+
+function d1StateDirectoryArgument(command: readonly string[]): string {
+  const modeIndex = command.indexOf("--mode");
+  const stateIndex = command.indexOf("--state-dir");
+  if (
+    modeIndex !== 2 ||
+    (command[modeIndex + 1] !== "ok" && command[modeIndex + 1] !== "planted-fail") ||
+    stateIndex !== 4 ||
+    typeof command[stateIndex + 1] !== "string" ||
+    command.length !== 8
+  ) {
+    throw new HarnessError(
+      "D1_STATE_DIRECTORY_REQUIRED",
+      "the real D1 adapter requires exactly --mode <ok|planted-fail> --state-dir <retained path> --integration-namespace <safe-component>.",
+    );
+  }
+  return command[stateIndex + 1] as string;
+}
+
+function d1IntegrationNamespaceArgument(command: readonly string[]): string {
+  const namespaceIndex = command.indexOf("--integration-namespace");
+  const namespace = namespaceIndex >= 0 ? command[namespaceIndex + 1] : undefined;
+  if (namespaceIndex !== 6 || typeof namespace !== "string" || !validateRunId(namespace)) {
+    throw new HarnessError(
+      "D1_INTEGRATION_NAMESPACE_REQUIRED",
+      "the real D1 adapter requires a safe explicit retained integration namespace.",
+    );
+  }
+  return namespace;
 }
 
 /** Runtime schema guard for every JSONL/JUnit-facing event, not only TypeScript callers. */
@@ -1104,6 +1378,9 @@ export function validateHarnessEvent(event: HarnessEvent): void {
       "event status, adapter, or revision is invalid.",
     );
   }
+  if (event.storage_authority !== "real-filesystem" && event.storage_authority !== "simulation") {
+    throw new HarnessError("EVENT_SCHEMA_INVALID", "event storage authority is invalid.");
+  }
   if (!isValidReproduction(event.reproduce)) {
     throw new HarnessError("EVENT_SCHEMA_INVALID", "event reproduction is not truthful.");
   }
@@ -1149,6 +1426,16 @@ export function validateHarnessEvent(event: HarnessEvent): void {
 
 export async function runHarness(options: HarnessRunOptions): Promise<HarnessRunResult> {
   validateHarnessRunOptions(options);
+  const storage = options.storage ?? nodeArtifactStorage;
+  // `self-test` is a production receipt label. Letting a simulated run emit
+  // it would make a branch-coverage fixture indistinguishable from a real CLI
+  // result to a reader that only saw the event ledger.
+  if (options.reproduction !== undefined) {
+    // This is intentionally before ArtifactStore: an opt-in receipt first
+    // learns whether it may write, and a full checkout creates neither a
+    // retained integration namespace nor an artifact file.
+    realFilesystemRetentionPreflight(options.root, storage);
+  }
   const seed = options.seed ?? deterministicSeed(options.suite, options.runId);
   const store = new ArtifactStore(
     options.root,
@@ -1162,7 +1449,8 @@ export async function runHarness(options: HarnessRunOptions): Promise<HarnessRun
       // that order: a resume that reordered its steps is a different run.
       stepIds: orderSteps(options.steps).map((step) => step.id),
     },
-    options.storage ?? nodeArtifactStorage,
+    storage,
+    options.artifactNamespace,
   );
   const output = options.onOutput ?? ((text: string) => process.stderr.write(text));
   const eventSink =
@@ -1232,9 +1520,7 @@ export async function runHarness(options: HarnessRunOptions): Promise<HarnessRun
   }
 
   const junit = store.writeJUnit(events);
-  const digest = createHash("sha256")
-    .update(store.readArtifact(junit), "utf8")
-    .digest("hex");
+  const digest = createHash("sha256").update(store.readArtifact(junit), "utf8").digest("hex");
   const finishedAt = new Date().toISOString();
   const summary = summaryEvent(options, seed, events, finishedAt, digest);
   recordEvent(store, events, eventSink, summary);
@@ -1257,6 +1543,7 @@ export async function runHarness(options: HarnessRunOptions): Promise<HarnessRun
       failureLogs: store.failureLogs,
     },
     seed,
+    storageAuthority: storageAuthority(storage),
   };
 }
 
@@ -1362,7 +1649,7 @@ async function runAttempt(
     replay_safe: step.replaySafe,
     status,
     code,
-    reproduce: safeReproductionCommand(options.reproduction),
+    reproduce: safeReproductionCommand(options.reproduction, options.artifactNamespace),
     argv: safeArgv(commandLine, options.root),
     exit_code: exitCode,
     ...(step.requestId === undefined
@@ -1407,7 +1694,7 @@ function skippedEvent(
     replay_safe: step.replaySafe,
     status,
     code,
-    reproduce: safeReproductionCommand(options.reproduction),
+    reproduce: safeReproductionCommand(options.reproduction, options.artifactNamespace),
     detail,
     ...eventContext(options, step),
   };
@@ -1442,7 +1729,7 @@ function summaryEvent(
     replay_safe: true,
     status: hasFailure ? "fail" : hasBlocked ? "blocked" : "pass",
     code: hasFailure ? "RUN_FAILED" : hasBlocked ? "RUN_BLOCKED" : "RUN_PASSED",
-    reproduce: safeReproductionCommand(options.reproduction),
+    reproduce: safeReproductionCommand(options.reproduction, options.artifactNamespace),
     artifact_digest: junitDigest,
     detail:
       "Harness output is redacted and bounded; a passing harness run is not product correctness.",
@@ -1485,7 +1772,7 @@ function unavailableAdapterEvent(
     replay_safe: step.replaySafe,
     status: "blocked",
     code: "ADAPTER_UNAVAILABLE",
-    reproduce: safeReproductionCommand(options.reproduction),
+    reproduce: safeReproductionCommand(options.reproduction, options.artifactNamespace),
     detail: `${adapter} adapter is not registered in OPS.2a; no ${adapter} behavior was exercised.`,
     ...eventContext(options, step),
   };
@@ -1496,10 +1783,18 @@ function eventContext(
   step?: HarnessStep,
 ): Pick<
   HarnessEvent,
-  "adapter" | "git_revision" | "environment" | "http_method" | "route_template" | "cursor" | "seq"
+  | "storage_authority"
+  | "adapter"
+  | "git_revision"
+  | "environment"
+  | "http_method"
+  | "route_template"
+  | "cursor"
+  | "seq"
 > {
   const http = step?.http;
   return {
+    storage_authority: storageAuthority(options.storage ?? nodeArtifactStorage),
     adapter: step?.adapter ?? "process",
     git_revision: options.gitRevision ?? "unavailable",
     environment: {
@@ -1787,10 +2082,12 @@ function isGitRevision(value: string): boolean {
 }
 
 function isValidReproduction(value: string): boolean {
-  return (
-    value === "scripts/e2e-test-harness.sh --self-test" ||
-    value === "unavailable: no registered CLI scenario"
-  );
+  if (value === "unavailable: no registered CLI scenario") return true;
+  const match =
+    /^scripts\/e2e-test-harness\.sh --self-test --integration-namespace ([A-Za-z0-9][A-Za-z0-9._-]{0,79})$/.exec(
+      value,
+    );
+  return match !== null && validateRunId(match[1] ?? "");
 }
 
 function isHarnessAdapter(value: unknown): value is HarnessAdapter {
@@ -1836,6 +2133,16 @@ export interface PublishFailureBlobInput {
   readonly attempt: number;
   /** Defaults to the real filesystem. */
   readonly storage?: HarnessArtifactStorage;
+  /**
+   * The bounded retained integration parent when this is real proof.
+   *
+   * Ordinary memory tests intentionally omit it. Opt-in direct filesystem
+   * probes supply it so blob staging and bytes are part of the same recursive
+   * cap as run ids and fixture cases.
+   */
+  readonly retainedIntegrationDirectory?: string;
+  /** Deterministic test seam for the exact EEXIST window; never an authority capability. */
+  readonly beforeLink?: (path: string) => void;
 }
 
 /**
@@ -1904,6 +2211,45 @@ export function publishFailureBlob(input: PublishFailureBlobInput): string {
   );
   assertContained(containmentRoot, artifactsDirectory, "ARTIFACT_PATH_UNSAFE");
 
+  let retainedIntegrationDirectory: string | undefined;
+  if (input.retainedIntegrationDirectory !== undefined) {
+    retainedIntegrationDirectory = realDirectory(
+      resolve(input.retainedIntegrationDirectory),
+      "ARTIFACT_PATH_UNSAFE",
+      storage,
+    );
+    assertContained(containmentRoot, retainedIntegrationDirectory, "ARTIFACT_PATH_UNSAFE");
+    assertContained(retainedIntegrationDirectory, artifactsDirectory, "ARTIFACT_PATH_UNSAFE");
+  }
+
+  // Deduplication is a read-only operation and remains valid at the retention
+  // ceiling. Checking capacity first made a resume fail even when the exact
+  // content-addressed blob was already present and no staging name, directory,
+  // or byte would be added.
+  const existing = existingFailureBlobPath(
+    containmentRoot,
+    artifactsDirectory,
+    input.digest,
+    storage,
+  );
+  if (existing !== undefined) {
+    assertBlobAgrees(existing, input.stored, storage);
+    return existing;
+  }
+
+  if (retainedIntegrationDirectory !== undefined) {
+    // The completed blob and retained staging name both count in a recursive
+    // census, and publication may need blobs/sha256/incoming the first time.
+    assertRetainedIntegrationCapacity(
+      retainedIntegrationDirectory,
+      {
+        additionalBytes: Buffer.byteLength(input.stored, "utf8") * 2,
+        additionalDirectories: 3,
+      },
+      storage,
+    );
+  }
+
   const store = blobStoreDirectory(artifactsDirectory, storage);
   const path = join(store, input.digest);
   assertContained(containmentRoot, path, "ARTIFACT_PATH_UNSAFE");
@@ -1921,7 +2267,7 @@ export function publishFailureBlob(input: PublishFailureBlobInput): string {
   storage.writeExclusive(staging, input.stored);
   // The contended window: this publisher has seen no blob and is about to claim
   // the name. A test hooks here to let another publisher win first.
-  storage.beforeLink?.(path);
+  input.beforeLink?.(path);
   try {
     storage.link(staging, path);
   } catch (error) {
@@ -1931,6 +2277,28 @@ export function publishFailureBlob(input: PublishFailureBlobInput): string {
     assertBlobAgrees(path, input.stored, storage);
   }
   return path;
+}
+
+/** Locate an existing blob without creating any part of its directory tree. */
+function existingFailureBlobPath(
+  containmentRoot: string,
+  artifactsDirectory: string,
+  digest: string,
+  storage: HarnessArtifactStorage,
+): string | undefined {
+  let parent = artifactsDirectory;
+  for (const component of [ARTIFACT_BLOB_DIRECTORY, "sha256"] as const) {
+    const candidate = join(parent, component);
+    assertContained(containmentRoot, candidate, "ARTIFACT_PATH_UNSAFE");
+    if (!storage.exists(candidate) && !storage.isSymlink(candidate)) return undefined;
+    const physical = realDirectory(candidate, "ARTIFACT_PATH_UNSAFE", storage);
+    assertContained(parent, physical, "ARTIFACT_PATH_UNSAFE");
+    parent = physical;
+  }
+  const path = join(parent, digest);
+  assertContained(containmentRoot, path, "ARTIFACT_PATH_UNSAFE");
+  assertRegularOrAbsent(path, "ARTIFACT_PATH_UNSAFE", storage);
+  return storage.exists(path) ? path : undefined;
 }
 
 function assertBlobAgrees(
@@ -1977,8 +2345,8 @@ export function countBlobStagingArtifacts(
     "sha256",
     ARTIFACT_BLOB_STAGING_DIRECTORY,
   );
-  if (!existsSync(staging)) return 0;
-  return readdirSync(staging, { withFileTypes: true }).filter((entry) => entry.isFile()).length;
+  if (!storage.exists(staging)) return 0;
+  return storage.readdir(staging).filter((entry) => storage.isFile(join(staging, entry))).length;
 }
 
 export interface RunIdentity {
@@ -2103,7 +2471,11 @@ function manifestInvalid(detail: string): never {
  * quietly under-count the budget on exactly the corrupted manifest where the
  * budget matters most.
  */
-function parseManifestRecord(line: string, runId: string): FailureManifestRecord {
+function parseManifestRecord(
+  line: string,
+  runId: string,
+  artifactRelativeRoot = "e2e/artifacts",
+): FailureManifestRecord {
   let parsed: unknown;
   try {
     parsed = JSON.parse(line);
@@ -2150,7 +2522,9 @@ function parseManifestRecord(line: string, runId: string): FailureManifestRecord
   ) {
     return manifestInvalid("a line carries a byte count outside the bounded range");
   }
-  if (record.blob !== `e2e/artifacts/${ARTIFACT_BLOB_DIRECTORY}/sha256/${record.digest}`) {
+  if (
+    record.blob !== `${artifactRelativeRoot}/${ARTIFACT_BLOB_DIRECTORY}/sha256/${record.digest}`
+  ) {
     return manifestInvalid("a line's blob path does not address its own digest");
   }
   return {
@@ -2177,6 +2551,7 @@ export function reconcileFailureManifest(
   artifactsDirectory: string,
   runId: string,
   storage: HarnessArtifactStorage = nodeArtifactStorage,
+  artifactRelativeRoot = "e2e/artifacts",
 ): FailureManifestReconciliation {
   if (!storage.exists(manifest)) {
     return { attemptCount: 0, stored: [], dangling: [], unfinishedAttempts: [] };
@@ -2189,7 +2564,7 @@ export function reconcileFailureManifest(
 
   for (const line of storage.readFile(manifest).split("\n")) {
     if (line.trim() === "") continue;
-    const record = parseManifestRecord(line, runId);
+    const record = parseManifestRecord(line, runId, artifactRelativeRoot);
     const key = slot(record);
     if (record.kind === FAILURE_RECORD_INTENT) {
       const existing = intents.get(key);
@@ -2287,6 +2662,8 @@ export function exceedsArtifactNamespaceBudget(
  * bound is stated rather than implied.
  */
 export interface ArtifactCapacityReport {
+  /** A simulated count is control-flow input, not production evidence. */
+  readonly storageAuthority: HarnessStorageAuthority;
   readonly used: number;
   readonly limit: number;
   readonly exceeded: boolean;
@@ -2310,6 +2687,7 @@ export function artifactCapacityReport(
 ): ArtifactCapacityReport {
   const used = countArtifactNamespaces(root, storage);
   return {
+    storageAuthority: storageAuthority(storage),
     used,
     limit,
     exceeded: exceedsArtifactNamespaceBudget(used, limit),
@@ -2350,6 +2728,147 @@ export function assertArtifactNamespaceBudget(
         "harness run directory among them is retained evidence) and re-run.",
     );
   }
+}
+
+/** A recursive accounting of all retained evidence below the one integration parent. */
+export interface RetainedIntegrationCapacityReport {
+  /** Derived from adapter identity; never copied from a public string field. */
+  readonly storageAuthority: HarnessStorageAuthority;
+  /** Every nested directory except the retained parent itself. */
+  readonly directories: number;
+  /** Bytes by pathname, including retained staging links. */
+  readonly bytes: number;
+  /** The retained `incoming` entries, reported rather than cleaned up. */
+  readonly stagingEntries: number;
+  readonly directoryLimit: number;
+  readonly byteLimit: number;
+  readonly exceeded: boolean;
+}
+
+/**
+ * Count the nested evidence the top-level namespace backstop cannot see.
+ *
+ * This intentionally walks through `HarnessArtifactStorage`; the simulation
+ * can prove the accounting contract, while only the exact node adapter can
+ * make a real-filesystem receipt. Symlinks and unknown entries fail closed so
+ * a redirected or unaccounted path cannot escape the cap.
+ */
+export function retainedIntegrationCapacityReport(
+  integrationDirectory: string,
+  storage: HarnessArtifactStorage = nodeArtifactStorage,
+): RetainedIntegrationCapacityReport {
+  const root = realDirectory(resolve(integrationDirectory), "ARTIFACT_PATH_UNSAFE", storage);
+  let directories = 0;
+  let bytes = 0;
+  let stagingEntries = 0;
+  const walk = (directory: string): void => {
+    for (const name of storage.readdir(directory)) {
+      if (!isSafeRetainedEvidenceName(name)) {
+        throw new HarnessError(
+          "ARTIFACT_PATH_UNSAFE",
+          "retained integration evidence has an unsafe path component.",
+        );
+      }
+      const path = join(directory, name);
+      if (storage.isSymlink(path)) {
+        throw new HarnessError(
+          "ARTIFACT_PATH_UNSAFE",
+          "retained integration evidence must not traverse a symlink.",
+        );
+      }
+      if (storage.isDirectory(path)) {
+        directories += 1;
+        walk(path);
+        continue;
+      }
+      if (storage.isFile(path)) {
+        bytes += storage.size(path);
+        if (basename(directory) === ARTIFACT_BLOB_STAGING_DIRECTORY) stagingEntries += 1;
+        continue;
+      }
+      throw new HarnessError(
+        "ARTIFACT_PATH_UNSAFE",
+        "retained integration evidence has an unaccountable path entry.",
+      );
+    }
+  };
+  walk(root);
+  return {
+    storageAuthority: storageAuthority(storage),
+    directories,
+    bytes,
+    stagingEntries,
+    directoryLimit: MAX_RETAINED_INTEGRATION_DIRECTORIES,
+    byteLimit: MAX_RETAINED_INTEGRATION_BYTES,
+    exceeded:
+      directories >= MAX_RETAINED_INTEGRATION_DIRECTORIES ||
+      bytes >= MAX_RETAINED_INTEGRATION_BYTES,
+  };
+}
+
+function isSafeRetainedEvidenceName(name: string): boolean {
+  return name !== "." && name !== ".." && /^[.A-Za-z0-9][A-Za-z0-9._-]{0,79}$/.test(name);
+}
+
+/** Refuse before a nested retained directory or byte-bearing file is created. */
+export function assertRetainedIntegrationCapacity(
+  integrationDirectory: string,
+  projected: { readonly additionalDirectories?: number; readonly additionalBytes?: number } = {},
+  storage: HarnessArtifactStorage = nodeArtifactStorage,
+): void {
+  const additionalDirectories = projected.additionalDirectories ?? 0;
+  const additionalBytes = projected.additionalBytes ?? 0;
+  if (
+    !Number.isSafeInteger(additionalDirectories) ||
+    additionalDirectories < 0 ||
+    !Number.isSafeInteger(additionalBytes) ||
+    additionalBytes < 0
+  ) {
+    throw new HarnessError(
+      "INTEGRATION_RETENTION_INVALID",
+      "retained integration capacity projections must be bounded non-negative integers.",
+    );
+  }
+  const report = retainedIntegrationCapacityReport(integrationDirectory, storage);
+  if (
+    report.directories + additionalDirectories > report.directoryLimit ||
+    report.bytes + additionalBytes > report.byteLimit
+  ) {
+    throw new HarnessError(
+      "INTEGRATION_RETENTION_EXCEEDED",
+      `retained integration evidence holds ${report.directories}/${report.directoryLimit} directories and ${report.bytes}/${report.byteLimit} bytes before this operation. ` +
+        "Nothing was created, deleted, or moved. Retain the existing evidence and archive or move it by an explicit operator action before retrying.",
+    );
+  }
+}
+
+/**
+ * Reserve one direct run/case directory beneath the explicit integration
+ * parent. Unlike the top-level cap, this sees all nested self-test, resume,
+ * case, staging, and D1-state growth.
+ */
+export function reserveRetainedIntegrationDirectory(
+  integrationDirectory: string,
+  name: string,
+  storage: HarnessArtifactStorage = nodeArtifactStorage,
+  projectedDirectories = 1,
+): string {
+  if (!validateRunId(name)) {
+    throw new HarnessError(
+      "ARTIFACT_NAMESPACE_INVALID",
+      "retained integration directory names must be safe bounded path components.",
+    );
+  }
+  const root = realDirectory(resolve(integrationDirectory), "ARTIFACT_PATH_UNSAFE", storage);
+  const target = join(root, name);
+  if (!storage.exists(target)) {
+    assertRetainedIntegrationCapacity(
+      root,
+      { additionalDirectories: projectedDirectories },
+      storage,
+    );
+  }
+  return ensureDirectDirectory(root, name, storage);
 }
 
 function assertContained(root: string, target: string, code: string): void {
@@ -2405,14 +2924,6 @@ function assertRegularOrAbsent(
   }
 }
 
-function isSymbolicLink(path: string): boolean {
-  try {
-    return lstatSync(path).isSymbolicLink();
-  } catch {
-    return false;
-  }
-}
-
 async function readBounded(
   stream: ReadableStream<Uint8Array> | null,
   limit: number,
@@ -2453,9 +2964,22 @@ function secretEmitterCommand(): readonly string[] {
   return [process.execPath, resolve(import.meta.dir, "self-test-secret-emitter.ts")];
 }
 
-/** Absolute path to a real adapter probe, plus its mode. Argv carries no secret. */
-function adapterCommand(file: string, mode: "ok" | "planted-fail"): readonly string[] {
-  return [process.execPath, resolve(import.meta.dir, "adapters", file), "--mode", mode];
+/** Absolute path to a real adapter probe, plus its bounded mode and state contract. */
+function adapterCommand(
+  file: string,
+  mode: "ok" | "planted-fail",
+  stateDirectory?: string,
+  artifactNamespace?: string,
+): readonly string[] {
+  const command = [process.execPath, resolve(import.meta.dir, "adapters", file), "--mode", mode];
+  if (file !== ADAPTER_PROBES.d1) return command;
+  if (stateDirectory === undefined || artifactNamespace === undefined) {
+    throw new HarnessError(
+      "D1_STATE_DIRECTORY_REQUIRED",
+      "the real D1 adapter requires retained integration state and namespace arguments.",
+    );
+  }
+  return [...command, "--state-dir", stateDirectory, "--integration-namespace", artifactNamespace];
 }
 
 /**
@@ -2481,8 +3005,18 @@ function adapterOutcome(
 export async function runHarnessSelfTest(
   root: string,
   onEvent?: (event: HarnessEvent) => void,
+  storage: HarnessArtifactStorage = nodeArtifactStorage,
+  artifactNamespace = DEFAULT_RETAINED_INTEGRATION_NAMESPACE,
 ): Promise<0 | 1> {
+  const capacity = realFilesystemRetentionPreflight(root, storage);
+  if (capacity.exceeded) {
+    throw new HarnessError(
+      "ARTIFACT_RETENTION_EXCEEDED",
+      `real-filesystem preflight is blocked before self-test; ${capacity.used} namespaces reach the ${capacity.limit} backstop. ${capacity.remedy}`,
+    );
+  }
   const runId = `ops.2a-selftest-${Date.now()}-${process.pid}`;
+  const reproduction = selfTestReproduction(artifactNamespace);
   const secret = ["asimp", "ag", "01JXYZ", "selftest", "neverlog", "canary"].join("_");
   const sink =
     onEvent ?? ((record: HarnessEvent) => process.stdout.write(`${JSON.stringify(record)}\n`));
@@ -2492,6 +3026,8 @@ export async function runHarnessSelfTest(
     suite: "ops.2a-harness-self-test",
     reproduction: "self-test",
     onEvent: sink,
+    storage,
+    artifactNamespace,
     steps: [
       {
         id: "unit-assertion",
@@ -2512,7 +3048,12 @@ export async function runHarnessSelfTest(
         id: "d1-rollback-verified",
         scenario: "integration",
         adapter: "d1",
-        command: adapterCommand("d1-rollback.ts", "ok"),
+        command: adapterCommand(
+          "d1-rollback.ts",
+          "ok",
+          retainedD1StateDirectory(root, artifactNamespace, runId, "d1-state-rollback-ok"),
+          artifactNamespace,
+        ),
         replaySafe: false,
         timeoutMs: 55_000,
         assertion: "a late failure in a real local D1 batch rolls back the earlier write",
@@ -2521,7 +3062,17 @@ export async function runHarnessSelfTest(
         id: "d1-rollback-planted-fail",
         scenario: "integration",
         adapter: "d1",
-        command: adapterCommand("d1-rollback.ts", "planted-fail"),
+        command: adapterCommand(
+          "d1-rollback.ts",
+          "planted-fail",
+          retainedD1StateDirectory(
+            root,
+            artifactNamespace,
+            runId,
+            "d1-state-rollback-planted-fail",
+          ),
+          artifactNamespace,
+        ),
         replaySafe: false,
         timeoutMs: 55_000,
         assertion: "planted: the rollback assertion must fail when nothing rolled back",
@@ -2611,6 +3162,8 @@ export async function runHarnessSelfTest(
     reproduction: "self-test",
     steps: resumeSteps,
     onEvent: sink,
+    storage,
+    artifactNamespace,
   });
   const resumed = await runHarness({
     root,
@@ -2620,13 +3173,15 @@ export async function runHarnessSelfTest(
     steps: resumeSteps,
     resume: true,
     onEvent: sink,
+    storage,
+    artifactNamespace,
   });
   const artifacts = [
     result.artifacts.jsonl,
     result.artifacts.junit,
     ...result.artifacts.failureLogs,
   ]
-    .map((path) => readFileSync(path, "utf8"))
+    .map((path) => storage.readFile(path))
     .join("\n");
   const identifiers = result.events
     .map((event) => `${event.request_id ?? ""}${event.event_id ?? ""}`)
@@ -2663,7 +3218,7 @@ export async function runHarnessSelfTest(
     !artifacts.includes(secret) &&
     artifacts.includes("<redacted>") &&
     identifiers.includes("req-selftest-unit") &&
-    result.events.every((event) => event.reproduce === "scripts/e2e-test-harness.sh --self-test") &&
+    result.events.every((event) => event.reproduce === reproduction) &&
     adaptersClassified &&
     someAdapterExecuted &&
     interrupted.exitCode === 1 &&
@@ -2686,10 +3241,11 @@ export async function runHarnessSelfTest(
     attempt: 1,
     retry: 0,
     replay_safe: true,
+    storage_authority: storageAuthority(storage),
     adapter: "process",
     status: pass ? "pass" : "fail",
     code: pass ? "HARNESS_SELF_TEST_HARNESS_ONLY" : "HARNESS_SELF_TEST_FAILED",
-    reproduce: "scripts/e2e-test-harness.sh --self-test",
+    reproduce: reproduction,
     git_revision: "unavailable",
     environment: {
       runtime: "bun",
@@ -2710,13 +3266,91 @@ export async function runHarnessSelfTest(
   return pass ? 0 : 1;
 }
 
-function parseCli(argv: readonly string[]): { selfTest: boolean; root: string } {
+/**
+ * Child cases and run ids stay below the one retained top-level namespace, so
+ * an opt-in proof never resumes manufacturing disposable roots in system temp.
+ */
+export interface HarnessReproductionCommand {
+  readonly command: "bash";
+  readonly arguments: readonly string[];
+  readonly copy_paste: string;
+}
+
+export interface HarnessReproductionContract {
+  /** The write-free authority/capacity check that must run first. */
+  readonly preflight: HarnessReproductionCommand;
+  /** The retained integration invocation that is permitted only after preflight. */
+  readonly execute: HarnessReproductionCommand;
+  readonly storage_authority: "real-filesystem";
+  readonly retained_namespace: string;
+}
+
+export function harnessIntegrationReproduction(
+  root: string,
+  artifactNamespace = DEFAULT_RETAINED_INTEGRATION_NAMESPACE,
+): HarnessReproductionContract {
+  if (!validateRunId(artifactNamespace)) {
+    throw new HarnessError(
+      "ARTIFACT_NAMESPACE_INVALID",
+      "artifact_namespace must be one safe, bounded path component.",
+    );
+  }
+  const preflightArguments = [
+    "scripts/e2e-test-harness.sh",
+    "--preflight",
+    "--root",
+    resolve(root),
+    "--integration-namespace",
+    artifactNamespace,
+  ];
+  const executeArguments = [
+    "scripts/e2e-test-harness.sh",
+    "--self-test",
+    "--root",
+    resolve(root),
+    "--integration-namespace",
+    artifactNamespace,
+  ];
+  return {
+    preflight: {
+      command: "bash",
+      arguments: preflightArguments,
+      copy_paste: ["bash", ...preflightArguments]
+        .map((argument) => JSON.stringify(argument))
+        .join(" "),
+    },
+    execute: {
+      command: "bash",
+      arguments: executeArguments,
+      copy_paste: ["bash", ...executeArguments]
+        .map((argument) => JSON.stringify(argument))
+        .join(" "),
+    },
+    storage_authority: "real-filesystem",
+    retained_namespace: artifactNamespace,
+  };
+}
+
+interface HarnessCliOptions {
+  readonly preflight: boolean;
+  readonly selfTest: boolean;
+  readonly root: string;
+  readonly artifactNamespace: string;
+}
+
+function parseCli(argv: readonly string[]): HarnessCliOptions {
+  let preflight = false;
   let selfTest = false;
   let root = resolve(import.meta.dir, "..", "..");
+  let artifactNamespace = DEFAULT_RETAINED_INTEGRATION_NAMESPACE;
   for (let index = 0; index < argv.length; index += 1) {
     const argument = argv[index];
     if (argument === "--self-test") {
       selfTest = true;
+      continue;
+    }
+    if (argument === "--preflight") {
+      preflight = true;
       continue;
     }
     if (argument === "--root") {
@@ -2726,24 +3360,88 @@ function parseCli(argv: readonly string[]): { selfTest: boolean; root: string } 
       root = resolve(value);
       continue;
     }
+    if (argument === "--integration-namespace") {
+      const value = argv[++index];
+      if (value === undefined) {
+        throw new HarnessError(
+          "ARTIFACT_NAMESPACE_MISSING",
+          "--integration-namespace requires one safe path component.",
+        );
+      }
+      if (!validateRunId(value)) {
+        throw new HarnessError(
+          "ARTIFACT_NAMESPACE_INVALID",
+          "--integration-namespace must be one safe, bounded path component.",
+        );
+      }
+      artifactNamespace = value;
+      continue;
+    }
     throw new HarnessError(
       "UNKNOWN_ARGUMENT",
-      "usage: scripts/e2e-test-harness.sh --self-test [--root <dir>]",
+      "usage: scripts/e2e-test-harness.sh (--preflight | --self-test) [--root <dir>] [--integration-namespace <safe-component>]",
     );
   }
-  if (!selfTest)
-    throw new HarnessError("SELF_TEST_REQUIRED", "only the harness self-test is exposed today.");
-  return { selfTest, root };
+  if (preflight === selfTest) {
+    throw new HarnessError("MODE_REQUIRED", "choose exactly one of --preflight or --self-test.");
+  }
+  return { preflight, selfTest, root, artifactNamespace };
 }
 
 if (import.meta.main) {
+  let failureReproduction = SELF_TEST_REPRODUCTION;
   try {
     const options = parseCli(process.argv.slice(2));
-    process.exitCode = await runHarnessSelfTest(options.root);
+    failureReproduction = selfTestReproduction(options.artifactNamespace);
+    const report = realFilesystemRetentionPreflight(options.root);
+    const reproduce = harnessIntegrationReproduction(options.root, options.artifactNamespace);
+    if (report.exceeded) {
+      process.stdout.write(
+        `${JSON.stringify({
+          tool: "bun",
+          suite: "ops.2a-harness",
+          record: "retention_preflight",
+          storage_authority: report.storageAuthority,
+          status: "blocked",
+          code: "ARTIFACT_RETENTION_EXCEEDED",
+          used: report.used,
+          limit: report.limit,
+          detail:
+            "No shell step or artifact publication was attempted because the real filesystem retention backstop is already reached.",
+          reproduce,
+          remedy: report.remedy,
+        })}\n`,
+      );
+      process.exitCode = HARNESS_BLOCKED_EXIT_CODE;
+    } else if (options.preflight) {
+      process.stdout.write(
+        `${JSON.stringify({
+          tool: "bun",
+          suite: "ops.2a-harness",
+          record: "retention_preflight",
+          storage_authority: report.storageAuthority,
+          status: "pass",
+          code: "ARTIFACT_CAPACITY_AVAILABLE",
+          used: report.used,
+          limit: report.limit,
+          detail:
+            "Real filesystem authority is available and the retention backstop permits a separately requested shell self-test.",
+          reproduce,
+        })}\n`,
+      );
+      process.exitCode = 0;
+    } else {
+      process.exitCode = await runHarnessSelfTest(
+        options.root,
+        undefined,
+        nodeArtifactStorage,
+        options.artifactNamespace,
+      );
+    }
   } catch (error) {
     const code = error instanceof HarnessError ? error.code : "HARNESS_UNEXPECTED";
     process.stderr.write(
-      `${JSON.stringify({ tool: "bun", suite: "ops.2a-harness-self-test", status: "fail", code, reproduce: "scripts/e2e-test-harness.sh --self-test" })}\n`,
+      `${JSON.stringify({ tool: "bun", suite: "ops.2a-harness-self-test", status: "fail", code, reproduce: failureReproduction })}\n`,
     );
     process.exitCode = 1;
   }

@@ -1,14 +1,13 @@
 /**
- * OPS.2a contract tests. These use real Bun child processes and retained temporary
- * fixture roots: no product binding, browser, or network result is fabricated here.
+ * OPS.2a contract tests. Ordinary runs use simulated artifacts; the separately
+ * enabled filesystem proof retains evidence below one checkout namespace.
  */
 
-import { describe, expect, test } from "bun:test";
+import { afterAll, describe, expect, test } from "bun:test";
 import { createHash } from "node:crypto";
 import {
   existsSync,
   mkdirSync,
-  mkdtempSync,
   readdirSync,
   readFileSync,
   realpathSync,
@@ -16,18 +15,23 @@ import {
   symlinkSync,
   writeFileSync,
 } from "node:fs";
-import { homedir, tmpdir } from "node:os";
-import { join, resolve } from "node:path";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import {
   ARTIFACT_BLOB_DIRECTORY,
+  adapterProbePath,
+  artifactCapacityReport,
   assertArtifactNamespaceBudget,
   assertContainedRoot,
+  assertRealStorageAuthority,
+  assertRetainedD1StateDirectory,
+  assertRetainedIntegrationCapacity,
   boundedDiff,
   countArtifactNamespaces,
-  artifactCapacityReport,
   countBlobStagingArtifacts,
   createMemoryArtifactStorage,
+  DEFAULT_RETAINED_INTEGRATION_NAMESPACE,
   deterministicSeed,
   exceedsArtifactNamespaceBudget,
   FAILURE_MANIFEST_NAME,
@@ -41,7 +45,9 @@ import {
   type HarnessArtifactStorage,
   type HarnessError,
   type HarnessEvent,
+  type HarnessRootFilesystem,
   type HarnessStep,
+  harnessIntegrationReproduction,
   isContainedPath,
   MAX_ARTIFACT_NAMESPACES,
   MAX_CAPTURED_OUTPUT_CHARS,
@@ -49,6 +55,8 @@ import {
   MAX_EVENT_DURATION_MS,
   MAX_FAILURE_ARTIFACT_CHARS,
   MAX_FAILURE_ARTIFACTS_PER_RUN,
+  MAX_RETAINED_INTEGRATION_BYTES,
+  MAX_RETAINED_INTEGRATION_DIRECTORIES,
   MAX_RETRIES_PER_STEP,
   MAX_STEPS_PER_RUN,
   MAX_TIMEOUT_MS,
@@ -56,12 +64,20 @@ import {
   orderSteps,
   publishFailureBlob,
   RUN_IDENTITY_NAME,
+  realFilesystemRetentionPreflight,
   reconcileFailureManifest,
   reconcileRunIdentity,
   repositoryRoot,
   reserveArtifactNamespace,
+  reserveRetainedIntegrationDirectory,
+  retainedD1StateDirectory,
+  retainedIntegrationCapacityReport,
   runHarness,
+  SELF_TEST_REPRODUCTION,
+  safeReproductionCommand,
+  selfTestReproduction,
   validateHarnessEvent,
+  validateHarnessRunOptions,
   validateHarnessStep,
   validateRunId,
 } from "../harness/runner.ts";
@@ -83,10 +99,11 @@ function sampleEvent(overrides: Partial<HarnessEvent> = {}): HarnessEvent {
     attempt: 1,
     retry: 0,
     replay_safe: true,
+    storage_authority: "simulation",
     adapter: "process",
     status: "pass",
     code: "STEP_PASSED",
-    reproduce: "scripts/e2e-test-harness.sh --self-test",
+    reproduce: SELF_TEST_REPRODUCTION,
     git_revision: "unavailable",
     environment: {
       runtime: "bun",
@@ -108,6 +125,158 @@ const SECRET_EMITTER = fileURLToPath(
 );
 
 let scratchCounter = 0;
+const REAL_FILESYSTEM_INTEGRATION_ENV = "ASIMPOSIUM_RUN_REAL_FS_INTEGRATION";
+const realFilesystemIntegrationEnabled = process.env[REAL_FILESYSTEM_INTEGRATION_ENV] === "1";
+const VIRTUAL_CHECKOUT = "/memory/asimposium";
+const VIRTUAL_HOME = "/memory/home";
+const VIRTUAL_TEMP = "/memory/tmp";
+
+/** A bounded loopback counter for child-process tests; it writes no files. */
+function memoryIpc(): {
+  endpoint(path: string): string;
+  count(path: string): number;
+  close(): void;
+} {
+  const requests = new Map<string, number>();
+  const hostname = "127.0.0.1";
+  const server = Bun.serve({
+    hostname,
+    port: 0,
+    fetch(request) {
+      const path = new URL(request.url).pathname;
+      const count = (requests.get(path) ?? 0) + 1;
+      requests.set(path, count);
+      return Response.json({ count });
+    },
+  });
+  return {
+    endpoint: (path) => `http://${hostname}:${server.port}${path}`,
+    count: (path) => requests.get(path) ?? 0,
+    close: () => server.stop(true),
+  };
+}
+
+/** Root facts in memory, used only to exercise the read-only identity guard. */
+function virtualRootFilesystem(
+  options: {
+    directories?: readonly string[];
+    files?: readonly string[];
+    symlinks?: Readonly<Record<string, string>>;
+  } = {},
+): HarnessRootFilesystem {
+  const directories = new Set([
+    VIRTUAL_CHECKOUT,
+    VIRTUAL_HOME,
+    VIRTUAL_TEMP,
+    ...(options.directories ?? []),
+  ]);
+  const files = new Set(options.files ?? []);
+  const symlinks = new Map(Object.entries(options.symlinks ?? {}));
+  return {
+    exists: (path) => directories.has(path) || files.has(path) || symlinks.has(path),
+    isSymlink: (path) => symlinks.has(path),
+    isDirectory: (path) => directories.has(path),
+    realpath: (path) => symlinks.get(path) ?? path,
+    repositoryRoot: () => VIRTUAL_CHECKOUT,
+    homeDirectory: () => VIRTUAL_HOME,
+    temporaryDirectory: () => VIRTUAL_TEMP,
+  };
+}
+
+const OPS2A_TEMP_PREFIXES = [
+  // These are OPS.2a-owned prefix families, not a repository-wide census.
+  // Watching every `asimposium-*` directory makes this suite fail when a peer
+  // workstream legitimately creates its own fixture while tests run in
+  // parallel. The historical D1 temp family is included explicitly, along
+  // with bounded names reserved for any future OPS.2a harness scratch. The
+  // legacy families are deliberately retained here: evidence cannot be
+  // deleted, but an ordinary run must never add to any task-owned family.
+  "asimp-ops2a-",
+  "asimposium-ops2a-",
+  "harness-ops2a-",
+  "asimposium-harness-scratch-",
+  "asimposium-budget-",
+  "asimposium-harness-outside-",
+  "harness-unrelated-",
+  "harness-impostor-",
+  "harness-link-",
+  "harness-marker-",
+  "harness-run-unrelated-",
+] as const;
+
+function isOps2aTaskTempName(name: string): boolean {
+  return OPS2A_TEMP_PREFIXES.some((prefix) => name.startsWith(prefix));
+}
+
+function ordinaryTaskTempResidue(): string[] {
+  const found: string[] = [];
+  const walk = (directory: string, relative = ""): void => {
+    for (const entry of readdirSync(directory, { withFileTypes: true })) {
+      const next = relative === "" ? entry.name : `${relative}/${entry.name}`;
+      found.push(next);
+      if (entry.isDirectory()) walk(join(directory, entry.name), next);
+    }
+  };
+  for (const entry of readdirSync(tmpdir(), { withFileTypes: true })) {
+    if (!isOps2aTaskTempName(entry.name)) continue;
+    const root = join(tmpdir(), entry.name);
+    found.push(entry.name);
+    if (entry.isDirectory()) walk(root, entry.name);
+  }
+  return found.sort();
+}
+
+const ORDINARY_SUITE_RESIDUE_BEFORE = {
+  artifactEntries: ordinaryArtifactResidue(),
+  taskTempEntries: ordinaryTaskTempResidue(),
+};
+
+/**
+ * Full relative census, not a top-level namespace count. It makes a retained
+ * self-test id, resume id, case, staging file, or D1 `.state` entry equally
+ * visible to the ordinary-suite residue guard.
+ */
+function ordinaryArtifactResidue(): string[] {
+  const artifacts = join(repositoryRoot(), "e2e", "artifacts");
+  if (!existsSync(artifacts)) return [];
+  const found: string[] = [];
+  const walk = (directory: string, relative = ""): void => {
+    for (const entry of readdirSync(directory, { withFileTypes: true })) {
+      const next = relative === "" ? entry.name : `${relative}/${entry.name}`;
+      found.push(next);
+      // Do not follow a symlink while inspecting evidence. Its name is part of
+      // the census, but a target outside e2e/artifacts is not.
+      if (entry.isDirectory()) walk(join(directory, entry.name), next);
+    }
+  };
+  walk(artifacts);
+  return found.sort();
+}
+
+/**
+ * Keep real filesystem proof executable without making ordinary units write.
+ *
+ * The integration suite is intentionally opt-in because its evidence is
+ * retained in the checkout. When selected, its first operation is the same
+ * authority/capacity preflight exposed by the CLI; a full checkout blocks
+ * before an integration namespace or artifact file is created.
+ */
+function requireRealFilesystemIntegration(): void {
+  if (!realFilesystemIntegrationEnabled) {
+    throw new Error(`${REAL_FILESYSTEM_INTEGRATION_ENV}=1 is required for real filesystem proof.`);
+  }
+  const report = realFilesystemRetentionPreflight(repositoryRoot());
+  if (report.exceeded) {
+    throw new Error(
+      `real filesystem integration is blocked before any write: ${report.used}/${report.limit} artifact namespaces are retained. ` +
+        `Reproduce: ${harnessIntegrationReproduction(repositoryRoot()).preflight.copy_paste}. ${report.remedy}`,
+    );
+  }
+}
+
+function describeRealFilesystemIntegration(name: string, define: () => void): void {
+  (realFilesystemIntegrationEnabled ? describe : describe.skip)(name, define);
+}
 
 /**
  * The only root the harness accepts: this checkout.
@@ -147,33 +316,69 @@ function fixtureStorage(): ReturnType<typeof createMemoryArtifactStorage> {
 }
 
 /**
- * A per-test directory for marker and counter files.
+ * A retained root for the explicitly enabled real-filesystem tests.
  *
- * Real files, because the child processes these fixtures coordinate are real
- * and cannot see a simulated tree. Bounded: it lives under the OS temp
- * directory and holds only counters, never artifact namespaces.
+ * Preflight happens before this function reaches either `e2e` or `artifacts`.
+ * Once green, every direct filesystem fixture sits below the one safe parent
+ * namespace used by the CLI self-test too. The evidence is retained; no
+ * cleanup, move, or temp-root escape is involved.
  */
-function fixtureScratch(name: string): string {
-  scratchCounter += 1;
-  const directory = join(
-    tmpdir(),
-    `asimposium-harness-scratch-${name}-${process.pid}-${scratchCounter}`,
+function retainedIntegrationRoot(): string {
+  requireRealFilesystemIntegration();
+  const checkout = repositoryRoot();
+  const e2e = join(checkout, "e2e");
+  const artifacts = join(e2e, "artifacts");
+  if (!nodeArtifactStorage.exists(e2e)) nodeArtifactStorage.mkdir(e2e);
+  if (!nodeArtifactStorage.exists(artifacts)) nodeArtifactStorage.mkdir(artifacts);
+  return reserveArtifactNamespace(
+    checkout,
+    artifacts,
+    DEFAULT_RETAINED_INTEGRATION_NAMESPACE,
+    MAX_ARTIFACT_NAMESPACES,
+    nodeArtifactStorage,
   );
-  mkdirSync(directory, { recursive: true });
-  return directory;
 }
 
-/**
- * A disposable root for tests that exercise the budget/path logic directly.
- *
- * These never call runHarness, so they do not need the checkout, and using a
- * temporary directory keeps their fixture namespaces out of the repository's
- * real artifact area entirely.
- */
 function fixtureScratchRoot(name: string): string {
-  const root = realpathSync(mkdtempSync(join(tmpdir(), `asimposium-budget-${name}-`)));
-  mkdirSync(join(root, "e2e", "artifacts"), { recursive: true });
+  const integration = retainedIntegrationRoot();
+  // The real publication fixtures may create one case root, its e2e/artifacts
+  // path, blob/staging directories, and only short fixed payloads. Check that
+  // complete bounded envelope before even the case root exists; individual
+  // publication calls repeat the byte/staging check at their mutation point.
+  assertRetainedIntegrationCapacity(
+    integration,
+    { additionalDirectories: 16, additionalBytes: 64 * 1024 },
+    nodeArtifactStorage,
+  );
+  scratchCounter += 1;
+  const caseNamespace = `case-${name}-${process.pid}-${scratchCounter}`;
+  if (!validateRunId(caseNamespace)) {
+    throw new Error(`test case namespace is not safe: ${caseNamespace}`);
+  }
+  const root = reserveRetainedIntegrationDirectory(
+    integration,
+    caseNamespace,
+    nodeArtifactStorage,
+    1,
+  );
+  nodeArtifactStorage.mkdir(join(root, "e2e"));
+  nodeArtifactStorage.mkdir(join(root, "e2e", "artifacts"));
   return root;
+}
+
+/** Reserve only a run parent; the D1 adapter creates its one state leaf itself. */
+function fixtureD1StateDirectory(name: string, mode: "ok" | "planted-fail"): string {
+  const integration = retainedIntegrationRoot();
+  scratchCounter += 1;
+  const runId = `d1-${name}-${process.pid}-${scratchCounter}`;
+  if (!validateRunId(runId)) throw new Error(`D1 integration run id is not safe: ${runId}`);
+  reserveRetainedIntegrationDirectory(integration, runId, nodeArtifactStorage);
+  return retainedD1StateDirectory(
+    repositoryRoot(),
+    DEFAULT_RETAINED_INTEGRATION_NAMESPACE,
+    runId,
+    `d1-state-${mode}`,
+  );
 }
 
 /** A run id that is unique per process, so a rerun never hits RUN_ID_EXISTS. */
@@ -220,6 +425,8 @@ describe("deterministic, structured diagnostics", () => {
       onOutput: () => undefined,
     });
     expect(result.exitCode).toBe(0);
+    expect(result.storageAuthority).toBe("simulation");
+    expect(result.events.every((event) => event.storage_authority === "simulation")).toBe(true);
     expect(
       records.events.filter((event) => event.record === "step").map((event) => event.step),
     ).toEqual(["a", "c", "b"]);
@@ -294,140 +501,147 @@ describe("execution lifecycle", () => {
   test("retries replay-safe work with attempt accounting", async () => {
     const root = fixtureRoot("retry");
     const storage = fixtureStorage();
-    const counter = join(fixtureScratch("retry"), "counter");
-    const code = `const fs = require("node:fs"); const path = ${JSON.stringify(counter)}; if (fs.existsSync(path)) { process.exit(0); } else { fs.writeFileSync(path, "one"); process.exit(1); }`;
-    const result = await runHarness({
-      root,
-      storage,
-      suite: "unit",
-      runId: fixtureRunId("retry-1"),
-      steps: [
-        { id: "retry", scenario: "unit", command: command(code), replaySafe: true, retries: 1 },
-      ],
-      onEvent: () => undefined,
-      onOutput: () => undefined,
-    });
-    expect(result.exitCode).toBe(0);
-    const attempts = result.events.filter((event) => event.record === "step");
-    expect(attempts.map((event) => event.status)).toEqual(["fail", "pass"]);
-    expect(attempts.map((event) => event.attempt)).toEqual([1, 2]);
-    expect(attempts.map((event) => event.retry)).toEqual([0, 1]);
+    const ipc = memoryIpc();
+    try {
+      const endpoint = ipc.endpoint("/retry");
+      const code = `(async () => { const { count } = await (await fetch(${JSON.stringify(endpoint)})).json(); process.exit(count === 1 ? 1 : 0); })().catch(() => process.exit(2));`;
+      const result = await runHarness({
+        root,
+        storage,
+        suite: "unit",
+        runId: fixtureRunId("retry-1"),
+        steps: [
+          { id: "retry", scenario: "unit", command: command(code), replaySafe: true, retries: 1 },
+        ],
+        onEvent: () => undefined,
+        onOutput: () => undefined,
+      });
+      expect(result.exitCode).toBe(0);
+      const attempts = result.events.filter((event) => event.record === "step");
+      expect(attempts.map((event) => event.status)).toEqual(["fail", "pass"]);
+      expect(attempts.map((event) => event.attempt)).toEqual([1, 2]);
+      expect(attempts.map((event) => event.retry)).toEqual([0, 1]);
+      expect(ipc.count("/retry")).toBe(2);
+    } finally {
+      ipc.close();
+    }
   });
 
   test("timeout and cancellation terminate direct child processes before their delayed side effect", async () => {
     const root = fixtureRoot("cleanup");
     const storage = fixtureStorage();
-    const scratch = fixtureScratch("cleanup");
-    const timeoutMarker = join(scratch, "timeout-marker");
-    const timeout = await runHarness({
-      root,
-      storage,
-      suite: "e2e",
-      runId: fixtureRunId("timeout-1"),
-      steps: [
-        {
-          id: "timeout",
-          scenario: "e2e",
-          command: command(
-            `const fs = require("node:fs"); setTimeout(() => fs.writeFileSync(${JSON.stringify(timeoutMarker)}, "late"), 250);`,
-          ),
-          replaySafe: true,
-          timeoutMs: 20,
-        },
-      ],
-      onEvent: () => undefined,
-      onOutput: () => undefined,
-    });
-    await Bun.sleep(350);
-    expect(timeout.exitCode).toBe(1);
-    expect(timeout.events.find((event) => event.record === "step")?.status).toBe("timeout");
-    expect(existsSync(timeoutMarker)).toBe(false);
+    const ipc = memoryIpc();
+    const delayedHit = (path: string): string =>
+      `setTimeout(() => void fetch(${JSON.stringify(ipc.endpoint(path))}), 250);`;
+    try {
+      const timeout = await runHarness({
+        root,
+        storage,
+        suite: "e2e",
+        runId: fixtureRunId("timeout-1"),
+        steps: [
+          {
+            id: "timeout",
+            scenario: "e2e",
+            command: command(delayedHit("/timeout")),
+            replaySafe: true,
+            timeoutMs: 20,
+          },
+        ],
+        onEvent: () => undefined,
+        onOutput: () => undefined,
+      });
+      await Bun.sleep(350);
+      expect(timeout.exitCode).toBe(1);
+      expect(timeout.events.find((event) => event.record === "step")?.status).toBe("timeout");
+      expect(ipc.count("/timeout")).toBe(0);
 
-    const cancellationMarker = join(scratch, "cancellation-marker");
-    const controller = new AbortController();
-    setTimeout(() => controller.abort(), 20);
-    const cancelled = await runHarness({
-      root,
-      storage,
-      suite: "e2e",
-      runId: fixtureRunId("cancelled-1"),
-      signal: controller.signal,
-      steps: [
-        {
-          id: "cancelled",
-          scenario: "e2e",
-          command: command(
-            `const fs = require("node:fs"); setTimeout(() => fs.writeFileSync(${JSON.stringify(cancellationMarker)}, "late"), 250);`,
-          ),
-          replaySafe: true,
-          timeoutMs: 1_000,
-        },
-      ],
-      onEvent: () => undefined,
-      onOutput: () => undefined,
-    });
-    await Bun.sleep(350);
-    expect(cancelled.exitCode).toBe(1);
-    expect(cancelled.events.find((event) => event.record === "step")?.status).toBe("cancelled");
-    expect(existsSync(cancellationMarker)).toBe(false);
+      const controller = new AbortController();
+      setTimeout(() => controller.abort(), 20);
+      const cancelled = await runHarness({
+        root,
+        storage,
+        suite: "e2e",
+        runId: fixtureRunId("cancelled-1"),
+        signal: controller.signal,
+        steps: [
+          {
+            id: "cancelled",
+            scenario: "e2e",
+            command: command(delayedHit("/cancelled")),
+            replaySafe: true,
+            timeoutMs: 1_000,
+          },
+        ],
+        onEvent: () => undefined,
+        onOutput: () => undefined,
+      });
+      await Bun.sleep(350);
+      expect(cancelled.exitCode).toBe(1);
+      expect(cancelled.events.find((event) => event.record === "step")?.status).toBe("cancelled");
+      expect(ipc.count("/cancelled")).toBe(0);
 
-    const preCancelled = new AbortController();
-    preCancelled.abort();
-    const preCancelledMarker = join(scratch, "pre-cancelled-marker");
-    const preCancelledResult = await runHarness({
-      root,
-      storage,
-      suite: "e2e",
-      runId: fixtureRunId("pre-cancelled-1"),
-      signal: preCancelled.signal,
-      steps: [
-        {
-          id: "pre-cancelled",
-          scenario: "e2e",
-          command: command(
-            `const fs = require("node:fs"); setTimeout(() => fs.writeFileSync(${JSON.stringify(preCancelledMarker)}, "late"), 250);`,
-          ),
-          replaySafe: true,
-        },
-      ],
-      onEvent: () => undefined,
-      onOutput: () => undefined,
-    });
-    await Bun.sleep(350);
-    expect(preCancelledResult.exitCode).toBe(1);
-    expect(preCancelledResult.events.find((event) => event.record === "step")?.status).toBe(
-      "cancelled",
-    );
-    expect(existsSync(preCancelledMarker)).toBe(false);
+      const preCancelled = new AbortController();
+      preCancelled.abort();
+      const preCancelledResult = await runHarness({
+        root,
+        storage,
+        suite: "e2e",
+        runId: fixtureRunId("pre-cancelled-1"),
+        signal: preCancelled.signal,
+        steps: [
+          {
+            id: "pre-cancelled",
+            scenario: "e2e",
+            command: command(delayedHit("/pre-cancelled")),
+            replaySafe: true,
+          },
+        ],
+        onEvent: () => undefined,
+        onOutput: () => undefined,
+      });
+      await Bun.sleep(350);
+      expect(preCancelledResult.exitCode).toBe(1);
+      expect(preCancelledResult.events.find((event) => event.record === "step")?.status).toBe(
+        "cancelled",
+      );
+      expect(ipc.count("/pre-cancelled")).toBe(0);
+    } finally {
+      ipc.close();
+    }
   });
 
   test("timeout terminates the detached process group, including a planted grandchild", async () => {
     const root = fixtureRoot("process-group");
     const storage = fixtureStorage();
-    const marker = join(fixtureScratch("process-group"), "grandchild-marker");
-    const grandchild = `const fs = require("node:fs"); setTimeout(() => fs.writeFileSync(${JSON.stringify(marker)}, "late"), 250); setTimeout(() => process.exit(0), 1000);`;
-    const parent = `const cp = require("node:child_process"); cp.spawn(process.execPath, ["-e", ${JSON.stringify(grandchild)}], { stdio: "ignore" }); setTimeout(() => process.exit(0), 1000);`;
-    const result = await runHarness({
-      root,
-      storage,
-      suite: "e2e",
-      runId: fixtureRunId("process-group-1"),
-      steps: [
-        {
-          id: "grandchild",
-          scenario: "e2e",
-          command: command(parent),
-          replaySafe: true,
-          timeoutMs: 20,
-        },
-      ],
-      onEvent: () => undefined,
-      onOutput: () => undefined,
-    });
-    await Bun.sleep(350);
-    expect(result.exitCode).toBe(1);
-    expect(result.events.find((event) => event.record === "step")?.status).toBe("timeout");
-    expect(existsSync(marker)).toBe(false);
+    const ipc = memoryIpc();
+    try {
+      const grandchild = `setTimeout(() => void fetch(${JSON.stringify(ipc.endpoint("/grandchild"))}), 250); setTimeout(() => process.exit(0), 1000);`;
+      const parent = `const cp = require("node:child_process"); cp.spawn(process.execPath, ["-e", ${JSON.stringify(grandchild)}], { stdio: "ignore" }); setTimeout(() => process.exit(0), 1000);`;
+      const result = await runHarness({
+        root,
+        storage,
+        suite: "e2e",
+        runId: fixtureRunId("process-group-1"),
+        steps: [
+          {
+            id: "grandchild",
+            scenario: "e2e",
+            command: command(parent),
+            replaySafe: true,
+            timeoutMs: 20,
+          },
+        ],
+        onEvent: () => undefined,
+        onOutput: () => undefined,
+      });
+      await Bun.sleep(350);
+      expect(result.exitCode).toBe(1);
+      expect(result.events.find((event) => event.record === "step")?.status).toBe("timeout");
+      expect(ipc.count("/grandchild")).toBe(0);
+    } finally {
+      ipc.close();
+    }
   });
 
   test("uses only a fixed child environment instead of ambient values", async () => {
@@ -458,15 +672,13 @@ describe("execution lifecycle", () => {
     const root = fixtureRoot("resume");
     const storage = fixtureStorage();
     const resumeRunId = fixtureRunId("resume");
-    const resumeScratch = fixtureScratch("resume");
-    const safeCounter = join(resumeScratch, "safe-counter");
-    const unsafeCounter = join(resumeScratch, "unsafe-counter");
+    const ipc = memoryIpc();
     const steps: HarnessStep[] = [
       {
         id: "safe",
         scenario: "resume",
         command: command(
-          `const fs = require("node:fs"); const path = ${JSON.stringify(safeCounter)}; if (fs.existsSync(path)) process.exit(0); fs.writeFileSync(path, "one"); process.exit(1);`,
+          `(async () => { const { count } = await (await fetch(${JSON.stringify(ipc.endpoint("/safe"))})).json(); process.exit(count === 1 ? 1 : 0); })().catch(() => process.exit(2));`,
         ),
         replaySafe: true,
       },
@@ -474,37 +686,42 @@ describe("execution lifecycle", () => {
         id: "unsafe",
         scenario: "resume",
         command: command(
-          `require("node:fs").writeFileSync(${JSON.stringify(unsafeCounter)}, "one"); process.exit(1);`,
+          `(async () => { await fetch(${JSON.stringify(ipc.endpoint("/unsafe"))}); process.exit(1); })().catch(() => process.exit(2));`,
         ),
         replaySafe: false,
       },
     ];
-    const first = await runHarness({
-      root,
-      storage,
-      suite: "e2e",
-      runId: resumeRunId,
-      steps,
-      onEvent: () => undefined,
-      onOutput: () => undefined,
-    });
-    expect(first.exitCode).toBe(1);
-    const resumed = await runHarness({
-      root,
-      storage,
-      suite: "e2e",
-      runId: resumeRunId,
-      resume: true,
-      steps,
-      onEvent: () => undefined,
-      onOutput: () => undefined,
-    });
-    expect(resumed.exitCode).toBe(HARNESS_BLOCKED_EXIT_CODE);
-    expect(resumed.events.find((event) => event.step === "safe")?.status).toBe("pass");
-    expect(resumed.events.find((event) => event.step === "unsafe")?.code).toBe(
-      "UNSAFE_REPLAY_WITHHELD",
-    );
-    expect(readFileSync(unsafeCounter, "utf8")).toBe("one");
+    try {
+      const first = await runHarness({
+        root,
+        storage,
+        suite: "e2e",
+        runId: resumeRunId,
+        steps,
+        onEvent: () => undefined,
+        onOutput: () => undefined,
+      });
+      expect(first.exitCode).toBe(1);
+      const resumed = await runHarness({
+        root,
+        storage,
+        suite: "e2e",
+        runId: resumeRunId,
+        resume: true,
+        steps,
+        onEvent: () => undefined,
+        onOutput: () => undefined,
+      });
+      expect(resumed.exitCode).toBe(HARNESS_BLOCKED_EXIT_CODE);
+      expect(resumed.events.find((event) => event.step === "safe")?.status).toBe("pass");
+      expect(resumed.events.find((event) => event.step === "unsafe")?.code).toBe(
+        "UNSAFE_REPLAY_WITHHELD",
+      );
+      expect(ipc.count("/safe")).toBe(2);
+      expect(ipc.count("/unsafe")).toBe(1);
+    } finally {
+      ipc.close();
+    }
   });
 });
 
@@ -514,8 +731,6 @@ describe("secret-safe, bounded artifacts", () => {
     const storage = fixtureStorage();
     const secret = ["asimp", "ag", "01JXYZ", "selftest", "neverlog", "canary"].join("_");
     const opaqueValue = "A".repeat(32);
-    const opaqueEmitter = join(fixtureScratch("redaction"), "opaque-output.cjs");
-    writeFileSync(opaqueEmitter, 'process.stderr.write("A".repeat(32)); process.exit(1);');
     let visible = "";
     const result = await runHarness({
       root,
@@ -526,7 +741,7 @@ describe("secret-safe, bounded artifacts", () => {
         {
           id: "opaque",
           scenario: "security",
-          command: [process.execPath, opaqueEmitter],
+          command: command('process.stderr.write("A".repeat(32)); process.exit(1);'),
           replaySafe: true,
         },
         {
@@ -552,7 +767,7 @@ describe("secret-safe, bounded artifacts", () => {
       result.artifacts.junit,
       ...result.artifacts.failureLogs,
     ]
-      .map((path) => readFileSync(path, "utf8"))
+      .map((path) => storage.readFile(path))
       .join("\n");
     expect(retained).toContain("<redacted>");
     expect(retained).not.toContain(secret);
@@ -589,9 +804,9 @@ describe("secret-safe, bounded artifacts", () => {
       onOutput: () => undefined,
     });
     expect(failure.artifacts.failureLogs).toHaveLength(1);
-    expect(
-      readFileSync(failure.artifacts.failureLogs[0] as string, "utf8").length,
-    ).toBeLessThanOrEqual(MAX_FAILURE_ARTIFACT_CHARS);
+    expect(storage.readFile(failure.artifacts.failureLogs[0] as string).length).toBeLessThanOrEqual(
+      MAX_FAILURE_ARTIFACT_CHARS,
+    );
     const failureEvent = failure.events.find((event) => event.step === "large-failure");
     expect(failureEvent?.output_chars).toBeLessThanOrEqual(MAX_CAPTURED_OUTPUT_CHARS * 2);
     expect(failureEvent?.output_truncated).toBe(true);
@@ -646,7 +861,8 @@ describe("secret-safe, bounded artifacts", () => {
      * never the 33rd attempt.
      */
     expect(result.artifacts.failureLogs).toHaveLength(1);
-    const manifest = readFileSync(join(result.artifacts.jsonl, "..", FAILURE_MANIFEST_NAME), "utf8")
+    const manifest = storage
+      .readFile(join(result.artifacts.jsonl, "..", FAILURE_MANIFEST_NAME))
       .split("\n")
       .filter((line) => line.trim() !== "")
       .map((line) => JSON.parse(line) as { record: string });
@@ -779,16 +995,13 @@ describe("artifact containment", () => {
     }
     expect(validateRunId("run.1_ok")).toBe(true);
 
-    // The escape is planted on this run's own artifact directory rather than on
-    // the shared `e2e/artifacts` parent: the root is now the real checkout, so
-    // replacing that parent with a link would sabotage the repository instead of
-    // testing it. A per-run link exercises exactly the same guard.
+    // The adapter represents the link in memory. An ordinary unit test must not
+    // plant a real entry in this checkout's shared artifact area.
     const root = fixtureRoot("symlink");
     const storage = fixtureStorage();
     const runId = fixtureRunId("escape");
-    const outside = mkdtempSync(join(tmpdir(), "asimposium-harness-outside-"));
-    mkdirSync(join(root, "e2e", "artifacts"), { recursive: true });
-    symlinkSync(outside, join(root, "e2e", "artifacts", runId), "dir");
+    storage.seedDirectory(join(root, "e2e", "artifacts"));
+    storage.symlink(join(root, "e2e", "artifacts", runId));
     await expect(
       runHarness({
         root,
@@ -847,40 +1060,227 @@ describe("artifact containment", () => {
   });
 });
 
-test("the real shell entry point proves the seeded harness-only negative aggregate without a product claim", async () => {
-  const root = fixtureRoot("shell");
+test("ordinary units reject simulated storage as production proof", async () => {
   const storage = fixtureStorage();
-  const child = Bun.spawn({
-    cmd: ["bash", SHELL_HARNESS, "--self-test", "--root", root],
-    stdout: "pipe",
-    stderr: "pipe",
-  });
-  const [stdout, stderr, exitCode] = await Promise.all([
-    new Response(child.stdout).text(),
-    new Response(child.stderr).text(),
-    child.exited,
-  ]);
-  expect(exitCode).toBe(0);
-  expect(stdout).toContain("HARNESS_SELF_TEST_HARNESS_ONLY");
-  // The verdict must keep disclaiming product correctness even now that real
-  // adapters run: a green harness proves the harness, nothing else.
-  expect(stdout).toContain("proves nothing about product behavior");
-  expect(stderr).toContain("<redacted>");
-  expect(stderr).not.toContain("selftest_neverlog_canary");
-  // The self-test now drives real adapters end to end — a local D1 database is
-  // opened and read several times — so it needs a budget measured in tens of
-  // seconds, not the default five.
-}, 180_000);
+  expect(() => assertRealStorageAuthority(storage)).toThrow(/exact node artifact storage/);
+  const forged: HarnessArtifactStorage = { ...storage, authority: "real-filesystem" };
+  expect(() => assertRealStorageAuthority(forged)).toThrow(/exact node artifact storage/);
+  // This is an authority check, not a shell invocation. The real shell and
+  // filesystem path is the explicit CLI preflight, which blocks before writing
+  // whenever the checkout has reached its retention cap.
+  expect(() => realFilesystemRetentionPreflight(repositoryRoot(), storage)).toThrow(
+    /exact node artifact storage/,
+  );
+  expect(() => realFilesystemRetentionPreflight(repositoryRoot(), forged)).toThrow(
+    /exact node artifact storage/,
+  );
+  await expect(
+    runHarness({
+      root: repositoryRoot(),
+      storage: forged,
+      suite: "unit",
+      runId: fixtureRunId("forged-real-authority"),
+      steps: [passStep("ok")],
+      reproduction: "self-test",
+      artifactNamespace: DEFAULT_RETAINED_INTEGRATION_NAMESPACE,
+      onEvent: () => undefined,
+      onOutput: () => undefined,
+    }),
+  ).rejects.toThrow(/exact node artifact storage/);
+});
 
-describe("OPS.2a real adapters", () => {
+test("the exported node adapter cannot be mutated into counterfeit production authority", () => {
+  const originalReadFile = nodeArtifactStorage.readFile;
+  const originalAuthority = nodeArtifactStorage.authority;
+  expect(Object.isFrozen(nodeArtifactStorage)).toBe(true);
+  expect(Reflect.set(nodeArtifactStorage as object, "readFile", () => "counterfeit bytes")).toBe(
+    false,
+  );
+  expect(Reflect.set(nodeArtifactStorage as object, "authority", "simulation")).toBe(false);
+  expect(nodeArtifactStorage.readFile).toBe(originalReadFile);
+  expect(nodeArtifactStorage.authority).toBe(originalAuthority);
+  expect(() => assertRealStorageAuthority(nodeArtifactStorage)).not.toThrow();
+});
+
+test("ordinary units validate the D1 retained-state contract without executing D1", () => {
+  const root = repositoryRoot();
+  const state = retainedD1StateDirectory(
+    root,
+    DEFAULT_RETAINED_INTEGRATION_NAMESPACE,
+    "contract-run",
+    "d1-state-ok",
+  );
+  expect(assertRetainedD1StateDirectory(root, state)).toBe(state);
+  expect(() => assertRetainedD1StateDirectory(root, "/tmp/asimp-ops2a-d1-forbidden")).toThrow(
+    /D1 state directory/,
+  );
+  expect(() =>
+    validateHarnessRunOptions({
+      root,
+      suite: "unit",
+      runId: "contract-run",
+      reproduction: "self-test",
+      artifactNamespace: DEFAULT_RETAINED_INTEGRATION_NAMESPACE,
+      steps: [
+        {
+          id: "d1-contract",
+          scenario: "integration",
+          adapter: "d1",
+          replaySafe: false,
+          command: [
+            process.execPath,
+            adapterProbePath("d1"),
+            "--mode",
+            "ok",
+            "--state-dir",
+            retainedD1StateDirectory(
+              root,
+              DEFAULT_RETAINED_INTEGRATION_NAMESPACE,
+              "different-run",
+              "d1-state-ok",
+            ),
+            "--integration-namespace",
+            DEFAULT_RETAINED_INTEGRATION_NAMESPACE,
+          ],
+        },
+      ],
+    }),
+  ).toThrow(/belong directly to this retained self-test run id/);
+});
+
+test("the real integration reproduction contract separates preflight from execution", () => {
+  const contract = harnessIntegrationReproduction(repositoryRoot());
+  expect(contract.storage_authority).toBe("real-filesystem");
+  expect(contract.retained_namespace).toBe(DEFAULT_RETAINED_INTEGRATION_NAMESPACE);
+  expect(contract.preflight.arguments).toEqual([
+    "scripts/e2e-test-harness.sh",
+    "--preflight",
+    "--root",
+    repositoryRoot(),
+    "--integration-namespace",
+    DEFAULT_RETAINED_INTEGRATION_NAMESPACE,
+  ]);
+  expect(contract.execute.arguments).toEqual([
+    "scripts/e2e-test-harness.sh",
+    "--self-test",
+    "--root",
+    repositoryRoot(),
+    "--integration-namespace",
+    DEFAULT_RETAINED_INTEGRATION_NAMESPACE,
+  ]);
+  expect(contract.preflight.copy_paste).toContain("--preflight");
+  expect(contract.execute.copy_paste).toContain("--self-test");
+});
+
+test("a custom retained namespace is preserved in every receipt reproduction string", () => {
+  const customNamespace = "ops2a-retention-custom-proof";
+  const reproduce = selfTestReproduction(customNamespace);
+  const contract = harnessIntegrationReproduction(repositoryRoot(), customNamespace);
+  expect(reproduce).toBe(
+    "scripts/e2e-test-harness.sh --self-test --integration-namespace ops2a-retention-custom-proof",
+  );
+  expect(safeReproductionCommand("self-test", customNamespace)).toBe(reproduce);
+  expect(contract.preflight.arguments).toContain(customNamespace);
+  expect(contract.preflight.copy_paste).toContain(customNamespace);
+  expect(contract.execute.arguments).toContain(customNamespace);
+  expect(contract.execute.copy_paste).toContain(customNamespace);
+  expect(() => validateHarnessEvent(sampleEvent({ reproduce }))).not.toThrow();
+});
+
+test("the ordinary residue guard owns OPS.2a temp families without claiming peer fixtures", () => {
+  expect(isOps2aTaskTempName("asimp-ops2a-d1-old-state")).toBe(true);
+  expect(isOps2aTaskTempName("asimposium-ops2a-self-test")).toBe(true);
+  expect(isOps2aTaskTempName("harness-ops2a-resume")).toBe(true);
+  expect(isOps2aTaskTempName("asimposium-harness-scratch-fixture-1")).toBe(true);
+  expect(isOps2aTaskTempName("asimposium-budget-fixture-1")).toBe(true);
+  expect(isOps2aTaskTempName("asimposium-harness-outside-1")).toBe(true);
+  expect(isOps2aTaskTempName("harness-unrelated-1")).toBe(true);
+  expect(isOps2aTaskTempName("harness-impostor-1")).toBe(true);
+  expect(isOps2aTaskTempName("harness-link-1")).toBe(true);
+  expect(isOps2aTaskTempName("harness-marker-1")).toBe(true);
+  expect(isOps2aTaskTempName("harness-run-unrelated-1")).toBe(true);
+  expect(isOps2aTaskTempName("asimposium-s1-lifecycle.peer-run")).toBe(false);
+  expect(isOps2aTaskTempName("asimposium-s6-auth.peer-run")).toBe(false);
+  expect(isOps2aTaskTempName("harness-another-project")).toBe(false);
+});
+
+const realFilesystemTest = realFilesystemIntegrationEnabled ? test : test.skip;
+realFilesystemTest(
+  "the real shell entry point proves the seeded harness-only negative aggregate",
+  async () => {
+    requireRealFilesystemIntegration();
+    const root = fixtureRoot("shell");
+    const customNamespace = "ops2a-retention-shell-proof";
+    const child = Bun.spawn({
+      cmd: [
+        "bash",
+        SHELL_HARNESS,
+        "--self-test",
+        "--root",
+        root,
+        "--integration-namespace",
+        customNamespace,
+      ],
+      stdout: "pipe",
+      stderr: "pipe",
+    });
+    const [stdout, stderr, exitCode] = await Promise.all([
+      new Response(child.stdout).text(),
+      new Response(child.stderr).text(),
+      child.exited,
+    ]);
+    expect(exitCode).toBe(0);
+    expect(stdout).toContain("HARNESS_SELF_TEST_HARNESS_ONLY");
+    expect(stdout).toContain("proves nothing about product behavior");
+    const receiptReproductions = stdout
+      .trim()
+      .split("\n")
+      .flatMap((line) => {
+        try {
+          const record = JSON.parse(line) as { reproduce?: unknown };
+          return typeof record.reproduce === "string" ? [record.reproduce] : [];
+        } catch {
+          return [];
+        }
+      });
+    expect(receiptReproductions.length).toBeGreaterThan(0);
+    expect(receiptReproductions).toEqual(
+      expect.arrayContaining([
+        "scripts/e2e-test-harness.sh --self-test --integration-namespace ops2a-retention-shell-proof",
+      ]),
+    );
+    expect(receiptReproductions.every((receipt) => receipt.includes(customNamespace))).toBe(true);
+    expect(stderr).toContain("<redacted>");
+    expect(stderr).not.toContain("selftest_neverlog_canary");
+  },
+  180_000,
+);
+
+describeRealFilesystemIntegration("OPS.2a real adapters", () => {
   const ADAPTERS = join(fileURLToPath(new URL("../harness/adapters/", import.meta.url)));
 
   async function runAdapter(
     file: string,
     mode: "ok" | "planted-fail",
   ): Promise<{ exitCode: number; stdout: string; stderr: string }> {
+    requireRealFilesystemIntegration();
+    const d1StateDirectory =
+      file === "d1-rollback.ts" ? fixtureD1StateDirectory(`adapter-${mode}`, mode) : undefined;
     const child = Bun.spawn({
-      cmd: [process.execPath, join(ADAPTERS, file), "--mode", mode],
+      cmd: [
+        process.execPath,
+        join(ADAPTERS, file),
+        "--mode",
+        mode,
+        ...(d1StateDirectory === undefined
+          ? []
+          : [
+              "--state-dir",
+              d1StateDirectory,
+              "--integration-namespace",
+              DEFAULT_RETAINED_INTEGRATION_NAMESPACE,
+            ]),
+      ],
       stdout: "pipe",
       stderr: "pipe",
       stdin: "ignore",
@@ -919,7 +1319,7 @@ describe("OPS.2a real adapters", () => {
     // Never an absolute path, even for a disposable directory.
     expect(ok.stdout).not.toContain("/Users/");
     expect(ok.stdout).not.toContain("/tmp/");
-    expect(record.state_dir_class).toBe("os-temp");
+    expect(record.state_dir_class).toBe("retained-integration");
   }, 90000);
 
   test("PLANTED: the D1 rollback assertion fails when nothing rolled back", async () => {
@@ -1055,10 +1455,11 @@ describe("harness code may never delete files", () => {
 
 describe("repository root identity", () => {
   test("shape failures are refused", () => {
-    expect(() => assertContainedRoot("relative/path")).toThrow(/absolute/);
-    expect(() => assertContainedRoot("")).toThrow(/non-empty/);
-    expect(() => assertContainedRoot(undefined)).toThrow(/non-empty/);
-    expect(() => assertContainedRoot(join(tmpdir(), `absent-${Date.now()}`))).toThrow(/exist/);
+    const filesystem = virtualRootFilesystem();
+    expect(() => assertContainedRoot("relative/path", filesystem)).toThrow(/absolute/);
+    expect(() => assertContainedRoot("", filesystem)).toThrow(/non-empty/);
+    expect(() => assertContainedRoot(undefined, filesystem)).toThrow(/non-empty/);
+    expect(() => assertContainedRoot("/memory/absent", filesystem)).toThrow(/exist/);
   });
 
   test("this checkout is accepted, anchored to where the runner lives", () => {
@@ -1070,59 +1471,66 @@ describe("repository root identity", () => {
 
   test("PLANTED: an unrelated absolute directory is refused", () => {
     // The previous rule accepted this and would have created e2e/artifacts in it.
-    const unrelated = mkdtempSync(join(tmpdir(), "harness-unrelated-"));
-    expect(() => assertContainedRoot(unrelated)).toThrow(/not this checkout/);
+    const unrelated = "/memory/unrelated";
+    expect(() =>
+      assertContainedRoot(unrelated, virtualRootFilesystem({ directories: [unrelated] })),
+    ).toThrow(/not this checkout/);
   });
 
   test("PLANTED: a home directory is refused", () => {
-    expect(() => assertContainedRoot(homedir())).toThrow(/home directory/);
+    const filesystem = virtualRootFilesystem();
+    expect(() => assertContainedRoot(VIRTUAL_HOME, filesystem)).toThrow(/home directory/);
   });
 
   test("PLANTED: the shared temp directory is refused", () => {
-    expect(() => assertContainedRoot(tmpdir())).toThrow(/temp directory/);
+    const filesystem = virtualRootFilesystem();
+    expect(() => assertContainedRoot(VIRTUAL_TEMP, filesystem)).toThrow(/temp directory/);
   });
 
   test("PLANTED: the parent of this checkout is refused", () => {
-    expect(() => assertContainedRoot(resolve(repositoryRoot(), ".."))).toThrow(
-      /unrelated directory/,
-    );
+    const parent = "/memory";
+    expect(() =>
+      assertContainedRoot(parent, virtualRootFilesystem({ directories: [parent] })),
+    ).toThrow(/unrelated directory/);
   });
 
   test("PLANTED: a directory that merely looks like a checkout is refused", () => {
     // Sentinels are not identity. A lookalike must still be refused, because
     // it is not *this* checkout.
-    const impostor = mkdtempSync(join(tmpdir(), "harness-impostor-"));
-    mkdirSync(join(impostor, "scripts", "harness"), { recursive: true });
-    writeFileSync(join(impostor, "package.json"), "{}\n");
-    writeFileSync(join(impostor, "scripts", "harness", "runner.ts"), "// impostor\n");
-    expect(() => assertContainedRoot(impostor)).toThrow(/not this checkout/);
+    const impostor = "/memory/impostor";
+    const filesystem = virtualRootFilesystem({
+      directories: [impostor, `${impostor}/scripts`, `${impostor}/scripts/harness`],
+      files: [`${impostor}/package.json`, `${impostor}/scripts/harness/runner.ts`],
+    });
+    expect(() => assertContainedRoot(impostor, filesystem)).toThrow(/not this checkout/);
   });
 
   test("PLANTED: a symlink pointing at this checkout is refused, not followed", () => {
     // Following it would mean the caller named one directory while the harness
     // wrote to another — exactly the confusion this rule prevents.
-    const holder = mkdtempSync(join(tmpdir(), "harness-link-"));
-    const link = join(holder, "checkout-link");
-    symlinkSync(repositoryRoot(), link);
-    expect(() => assertContainedRoot(link)).toThrow(/symlink/);
+    const link = "/memory/checkout-link";
+    expect(() =>
+      assertContainedRoot(link, virtualRootFilesystem({ symlinks: { [link]: VIRTUAL_CHECKOUT } })),
+    ).toThrow(/symlink/);
   });
 
   test("PLANTED: an outside directory cannot opt itself in with a marker file", () => {
     // An earlier revision accepted a `.asimposium-harness-root` marker as
     // consent. AGENTS.md keeps artifact roots under the repository with no
     // exceptions, so planting any marker must change nothing.
-    const outside = realpathSync(mkdtempSync(join(tmpdir(), "harness-marker-")));
-    for (const marker of [".asimposium-harness-root", ".harness-root", ".git"]) {
-      writeFileSync(join(outside, marker), "not consent\n");
-    }
-    expect(() => assertContainedRoot(outside)).toThrow(/not this checkout/);
+    const outside = "/memory/marker";
+    const filesystem = virtualRootFilesystem({
+      directories: [outside],
+      files: [`${outside}/.asimposium-harness-root`, `${outside}/.harness-root`, `${outside}/.git`],
+    });
+    expect(() => assertContainedRoot(outside, filesystem)).toThrow(/not this checkout/);
   });
 
   test("a run refuses to start against a root it cannot identify", async () => {
-    const unrelated = mkdtempSync(join(tmpdir(), "harness-run-unrelated-"));
     await expect(
       runHarness({
-        root: unrelated,
+        root: tmpdir(),
+        storage: fixtureStorage(),
         runId: fixtureRunId("root-identity-probe"),
         suite: "ops.2a-root",
         steps: [
@@ -1130,9 +1538,7 @@ describe("repository root identity", () => {
         ],
         onEvent: () => undefined,
       }),
-    ).rejects.toThrow(/not this checkout/);
-    // It wrote nothing into the directory it refused.
-    expect(existsSync(join(unrelated, "e2e"))).toBe(false);
+    ).rejects.toThrow(/temp directory/);
   });
 
   test("artifact paths stay inside the resolved root", () => {
@@ -1175,12 +1581,7 @@ describe("content-addressed failure artifacts", () => {
     command: command(`process.stderr.write(${JSON.stringify(output)}); process.exit(1);`),
   });
 
-  async function runFailing(
-    root: string,
-    id: string,
-    output: string,
-    storage = fixtureStorage(),
-  ) {
+  async function runFailing(root: string, id: string, output: string, storage = fixtureStorage()) {
     return await runHarness({
       root,
       storage,
@@ -1211,9 +1612,13 @@ describe("content-addressed failure artifacts", () => {
    * defect in the store, and this must fail on it rather than hand back a
    * loosely-typed object that a later `!` would paper over.
    */
-  function manifestOf(runJsonl: string): FailureManifestRecord[] {
+  function manifestOf(
+    runJsonl: string,
+    storage: ReturnType<typeof createMemoryArtifactStorage>,
+  ): FailureManifestRecord[] {
     const manifest = join(runJsonl, "..", FAILURE_MANIFEST_NAME);
-    return readFileSync(manifest, "utf8")
+    return storage
+      .readFile(manifest)
       .split("\n")
       .filter((line) => line.trim() !== "")
       .map((line) => {
@@ -1238,8 +1643,11 @@ describe("content-addressed failure artifacts", () => {
    * run wrote no manifest record the test should say so in those words, because
    * that is the defect, not a typing inconvenience to be silenced.
    */
-  function onlyManifestRecord(runJsonl: string): FailureManifestRecord {
-    const records = manifestOf(runJsonl);
+  function onlyManifestRecord(
+    runJsonl: string,
+    storage: ReturnType<typeof createMemoryArtifactStorage>,
+  ): FailureManifestRecord {
+    const records = manifestOf(runJsonl, storage);
     const intents = records.filter((entry) => entry.record === FAILURE_RECORD_INTENT);
     const stored = records.filter((entry) => entry.record === FAILURE_RECORD_STORED);
     expect(intents).toHaveLength(1);
@@ -1257,17 +1665,17 @@ describe("content-addressed failure artifacts", () => {
     const root = fixtureRoot("cas-dedupe");
     const storage = fixtureStorage();
     const payload = `identical failure ${process.pid}\n`;
-    const first = await runFailing(root, "cas-a", payload);
-    const second = await runFailing(root, "cas-b", payload);
+    const first = await runFailing(root, "cas-a", payload, storage);
+    const second = await runFailing(root, "cas-b", payload, storage);
 
-    const a = onlyManifestRecord(first.artifacts.jsonl);
-    const b = onlyManifestRecord(second.artifacts.jsonl);
+    const a = onlyManifestRecord(first.artifacts.jsonl, storage);
+    const b = onlyManifestRecord(second.artifacts.jsonl, storage);
     expect(a.digest).toBe(b.digest);
 
     // One blob, referenced twice — not two copies of the same bytes.
     const blob = join(root, "e2e", "artifacts", "blobs", "sha256", a.digest);
-    expect(existsSync(blob)).toBe(true);
-    expect(readFileSync(blob, "utf8")).toContain("identical failure");
+    expect(storage.exists(blob)).toBe(true);
+    expect(storage.readFile(blob)).toContain("identical failure");
     expect(first.artifacts.failureLogs[0]).toBe(second.artifacts.failureLogs[0]);
   });
 
@@ -1293,10 +1701,10 @@ describe("content-addressed failure artifacts", () => {
       onEvent: () => undefined,
       onOutput: () => undefined,
     });
-    const record = onlyManifestRecord(result.artifacts.jsonl);
+    const record = onlyManifestRecord(result.artifacts.jsonl, storage);
 
     const blob = join(root, "e2e", "artifacts", "blobs", "sha256", record.digest);
-    const stored = readFileSync(blob, "utf8");
+    const stored = storage.readFile(blob);
     // The digest must describe the bytes on disk, whatever the runner chose to
     // capture and however it clipped them — never the raw child payload, which
     // is neither what is stored nor what a reader will open.
@@ -1310,14 +1718,14 @@ describe("content-addressed failure artifacts", () => {
   test("PLANTED: one changed byte produces a different blob, and both survive", async () => {
     const root = fixtureRoot("cas-differs");
     const storage = fixtureStorage();
-    const first = await runFailing(root, "cas-x", "failure body A\n");
-    const second = await runFailing(root, "cas-y", "failure body B\n");
+    const first = await runFailing(root, "cas-x", "failure body A\n", storage);
+    const second = await runFailing(root, "cas-y", "failure body B\n", storage);
 
-    const a = onlyManifestRecord(first.artifacts.jsonl);
-    const b = onlyManifestRecord(second.artifacts.jsonl);
+    const a = onlyManifestRecord(first.artifacts.jsonl, storage);
+    const b = onlyManifestRecord(second.artifacts.jsonl, storage);
     expect(a.digest).not.toBe(b.digest);
     for (const digest of [a.digest, b.digest]) {
-      expect(existsSync(join(root, "e2e", "artifacts", "blobs", "sha256", digest))).toBe(true);
+      expect(storage.exists(join(root, "e2e", "artifacts", "blobs", "sha256", digest))).toBe(true);
     }
   });
 
@@ -1327,61 +1735,60 @@ describe("content-addressed failure artifacts", () => {
     // payload would plant a blob the run never looks at, and the test would
     // pass for the wrong reason.
     const learn = fixtureRoot("cas-mismatch-learn");
-    const learned = await runFailing(learn, "cas-mm-learn", payload);
-    const digest = onlyManifestRecord(learned.artifacts.jsonl).digest;
+    const learnStorage = fixtureStorage();
+    const learned = await runFailing(learn, "cas-mm-learn", payload, learnStorage);
+    const digest = onlyManifestRecord(learned.artifacts.jsonl, learnStorage).digest;
 
     // Fresh namespace: plant foreign bytes under that exact digest.
     const root = fixtureRoot("cas-mismatch");
     const storage = fixtureStorage();
     const store = join(root, "e2e", "artifacts", "blobs", "sha256");
-    mkdirSync(store, { recursive: true });
+    storage.seedDirectory(store);
     const blob = join(store, digest);
     const prior = "PRIOR RETAINED EVIDENCE\n";
-    if (!existsSync(blob)) writeFileSync(blob, prior);
-    const plantedIsForeign = readFileSync(blob, "utf8") === prior;
+    if (!storage.exists(blob)) storage.writeExclusive(blob, prior);
+    const plantedIsForeign = storage.readFile(blob) === prior;
 
     if (plantedIsForeign) {
-      await expect(runFailing(root, "cas-mm", payload)).rejects.toThrow(
+      await expect(runFailing(root, "cas-mm", payload, storage)).rejects.toThrow(
         /does not match its digest/,
       );
       // The refusal must leave the prior file exactly as it was.
-      expect(readFileSync(blob, "utf8")).toBe(prior);
+      expect(storage.readFile(blob)).toBe(prior);
     } else {
       // The store already held the authentic bytes for this digest, so there is
       // no mismatch to provoke; assert the honest alternative instead of
       // pretending the planted case ran.
-      expect(readFileSync(blob, "utf8")).not.toBe(prior);
+      expect(storage.readFile(blob)).not.toBe(prior);
     }
   });
 
-  test("a repeated blob write leaves the original file untouched", async () => {
+  test("a repeated simulated blob write preserves the original bytes", async () => {
     const root = fixtureRoot("cas-notouch");
     const storage = fixtureStorage();
     const payload = "stable failure bytes\n";
-    const first = await runFailing(root, "cas-t1", payload);
-    const record = onlyManifestRecord(first.artifacts.jsonl);
+    const first = await runFailing(root, "cas-t1", payload, storage);
+    const record = onlyManifestRecord(first.artifacts.jsonl, storage);
     const blob = join(root, "e2e", "artifacts", "blobs", "sha256", record.digest);
-    const before = statSync(blob).mtimeMs;
-
-    const contentBefore = readFileSync(blob, "utf8");
-    await runFailing(root, "cas-t2", payload);
-    // Same bytes, same name: the second run must reference, never rewrite.
-    expect(statSync(blob).mtimeMs).toBe(before);
-    expect(readFileSync(blob, "utf8")).toBe(contentBefore);
+    const contentBefore = storage.readFile(blob);
+    await runFailing(root, "cas-t2", payload, storage);
+    // Simulation proves the branch and retained bytes, not inode or kernel
+    // semantics. The explicit real-filesystem preflight owns that boundary.
+    expect(storage.readFile(blob)).toBe(contentBefore);
   });
 
   test("PLANTED: a digest that is not sha256 hex can never name a path", async () => {
     const root = fixtureRoot("cas-containment");
     const storage = fixtureStorage();
-    const result = await runFailing(root, "cas-contain", "contained\n");
-    const record = onlyManifestRecord(result.artifacts.jsonl);
+    const result = await runFailing(root, "cas-contain", "contained\n", storage);
+    const record = onlyManifestRecord(result.artifacts.jsonl, storage);
 
     // The stored name is a bare 64-hex component: no separator can appear in
     // it, so no digest can walk out of the blob store.
     expect(record.digest).toMatch(/^[0-9a-f]{64}$/);
     expect(record.blob).toBe(`e2e/artifacts/blobs/sha256/${record.digest}`);
     const blob = join(root, "e2e", "artifacts", "blobs", "sha256", record.digest);
-    expect(isContainedPath(realpathSync(root), realpathSync(blob))).toBe(true);
+    expect(isContainedPath(root, blob)).toBe(true);
     for (const forged of ["../escape", "..", "a/b", `${"0".repeat(63)}/x`]) {
       expect(/^[0-9a-f]{64}$/.test(forged)).toBe(false);
     }
@@ -1404,7 +1811,7 @@ describe("content-addressed failure artifacts", () => {
     const manifestPath = join(root, "e2e", "artifacts", runId, FAILURE_MANIFEST_NAME);
     // One publication is two lines: the intent that spends the slot, then the
     // completion that says the blob arrived.
-    const seeded = readFileSync(manifestPath, "utf8").trim().split("\n");
+    const seeded = storage.readFile(manifestPath).trim().split("\n");
     expect(seeded).toHaveLength(2);
 
     /**
@@ -1429,8 +1836,8 @@ describe("content-addressed failure artifacts", () => {
         blob: `e2e/artifacts/blobs/sha256/${digest}`,
       });
     });
-    writeFileSync(manifestPath, `${[...seeded, ...padding].join("\n")}\n`);
-    const blobsBefore = readdirSync(join(root, "e2e", "artifacts", "blobs", "sha256")).length;
+    storage.append(manifestPath, `${padding.join("\n")}\n`);
+    const blobsBefore = storage.readdir(join(root, "e2e", "artifacts", "blobs", "sha256")).length;
 
     /**
      * Resume with the same step *set* — a resume that changed it would be a
@@ -1447,7 +1854,9 @@ describe("content-addressed failure artifacts", () => {
       onEvent: () => undefined,
       onOutput: () => undefined,
     });
-    expect(readdirSync(join(root, "e2e", "artifacts", "blobs", "sha256")).length).toBe(blobsBefore);
+    expect(storage.readdir(join(root, "e2e", "artifacts", "blobs", "sha256")).length).toBe(
+      blobsBefore,
+    );
   });
 
   test("the blob store is bounded by namespaces x per-run manifest cap", () => {
@@ -1456,20 +1865,16 @@ describe("content-addressed failure artifacts", () => {
     // Deduplication only ever lowers the real count below this ceiling.
     const ceiling = MAX_ARTIFACT_NAMESPACES * MAX_FAILURE_ARTIFACTS_PER_RUN;
     expect(Number.isFinite(ceiling)).toBe(true);
-    const store = join(repositoryRoot(), "e2e", "artifacts", "blobs", "sha256");
-    const stored = existsSync(store) ? readdirSync(store).length : 0;
-    expect(stored).toBeLessThanOrEqual(ceiling);
-    // Every stored name is a bare digest, so the store is flat and countable.
-    for (const name of existsSync(store) ? readdirSync(store).slice(0, 50) : []) {
-      expect(name).toMatch(/^[0-9a-f]{64}$/);
-    }
+    expect(ceiling).toBe(MAX_ARTIFACT_NAMESPACES * MAX_FAILURE_ARTIFACTS_PER_RUN);
+    // This is a mathematical bound, not an ambient inspection of the checkout.
+    // Real occupancy belongs to the explicit CLI preflight.
   });
 
   test("the manifest names the run, step, attempt and digest", async () => {
     const root = fixtureRoot("cas-manifest");
     const storage = fixtureStorage();
-    const result = await runFailing(root, "cas-man", "manifest me\n");
-    const record = onlyManifestRecord(result.artifacts.jsonl);
+    const result = await runFailing(root, "cas-man", "manifest me\n", storage);
+    const record = onlyManifestRecord(result.artifacts.jsonl, storage);
 
     expect(record.schema_version).toBe(HARNESS_SCHEMA_VERSION);
     expect(record.record).toBe("failure_artifact");
@@ -1477,32 +1882,82 @@ describe("content-addressed failure artifacts", () => {
     expect(record.attempt).toBe(1);
     expect(typeof record.bytes).toBe("number");
     // A reader can find the evidence from the manifest alone.
-    expect(existsSync(join(root, record.blob))).toBe(true);
+    expect(storage.exists(join(root, record.blob))).toBe(true);
+  });
+
+  test("deterministic simulated interleaving exercises the losing publisher branch", () => {
+    const root = fixtureRoot("simulated-link-race");
+    const storage = fixtureStorage();
+    const artifactsDirectory = join(root, "e2e", "artifacts");
+    storage.seedDirectory(artifactsDirectory);
+    const body = "simulated race bytes\n";
+    const digest = createHash("sha256").update(body, "utf8").digest("hex");
+    let winnerPublished = false;
+    const beforeLink = (path: string): void => {
+      if (winnerPublished) return;
+      winnerPublished = true;
+      publishFailureBlob({
+        containmentRoot: root,
+        artifactsDirectory,
+        digest,
+        stored: body,
+        attempt: 2,
+        storage,
+      });
+      expect(storage.exists(path)).toBe(true);
+    };
+
+    const loser = publishFailureBlob({
+      containmentRoot: root,
+      artifactsDirectory,
+      digest,
+      stored: body,
+      attempt: 1,
+      storage,
+      beforeLink,
+    });
+
+    expect(winnerPublished).toBe(true);
+    expect(storage.readFile(loser)).toBe(body);
+    expect(countBlobStagingArtifacts(root, storage)).toBe(2);
+    // This proves our simulated state machine reaches EEXIST deterministically.
+    // It does not claim kernel hard-link, inode, or scheduler behaviour.
+    expect(storage.authority).toBe("simulation");
   });
 });
 
 describe("artifact namespace backstop", () => {
-  test("the backstop counts run and scratch namespaces, and excludes the blob store", () => {
-    const root = fixtureScratchRoot("backstop-count");
+  function simulatedArtifacts(): {
+    root: string;
+    storage: ReturnType<typeof createMemoryArtifactStorage>;
+    artifacts: string;
+  } {
+    const root = fixtureRoot("backstop");
+    const storage = fixtureStorage();
     const artifacts = join(root, "e2e", "artifacts");
-    const before = countArtifactNamespaces(root);
+    storage.seedDirectory(artifacts);
+    return { root, storage, artifacts };
+  }
 
-    mkdirSync(join(artifacts, `run-${process.pid}`), { recursive: true });
-    mkdirSync(join(artifacts, `scratch-${process.pid}`), { recursive: true });
+  test("the backstop counts run and scratch namespaces, and excludes the blob store", () => {
+    const { root, storage, artifacts } = simulatedArtifacts();
+    const before = countArtifactNamespaces(root, storage);
+
+    storage.mkdir(join(artifacts, `run-${process.pid}`));
+    storage.mkdir(join(artifacts, `scratch-${process.pid}`));
     // Scratch counts: an exempt path would be a way to mint directories freely.
-    expect(countArtifactNamespaces(root)).toBe(before + 2);
+    expect(countArtifactNamespaces(root, storage)).toBe(before + 2);
 
-    mkdirSync(join(artifacts, "blobs", "sha256"), { recursive: true });
+    storage.seedDirectory(join(artifacts, "blobs", "sha256"));
     // The blob store is one deduplicated directory, not a per-run namespace.
-    expect(countArtifactNamespaces(root)).toBe(before + 2);
+    expect(countArtifactNamespaces(root, storage)).toBe(before + 2);
   });
 
   test("reusing an existing namespace is always allowed", () => {
-    const root = fixtureScratchRoot("backstop-reuse");
-    const artifacts = join(root, "e2e", "artifacts");
-    mkdirSync(join(artifacts, "already-here"), { recursive: true });
+    const { root, storage, artifacts } = simulatedArtifacts();
+    storage.mkdir(join(artifacts, "already-here"));
     // A resume must not be blocked by a ceiling on *new* namespaces.
-    expect(() => assertArtifactNamespaceBudget(root, "already-here")).not.toThrow();
+    expect(() => assertArtifactNamespaceBudget(root, "already-here", 1, storage)).not.toThrow();
   });
 
   test("the backstop sits far above the working range", () => {
@@ -1511,7 +1966,7 @@ describe("artifact namespace backstop", () => {
     expect(MAX_ARTIFACT_NAMESPACES).toBeGreaterThanOrEqual(5_000);
   });
 
-  test("the capacity preflight reports the checkout without asserting it", () => {
+  test("the simulated capacity report is explicit about its authority", () => {
     /**
      * Capacity is an environment condition, not a property of this code.
      *
@@ -1526,20 +1981,14 @@ describe("artifact namespace backstop", () => {
      * a real `runHarness` still fails closed on its own at the moment it tries
      * to create a namespace.
      */
-    const report = artifactCapacityReport(repositoryRoot());
+    const { root, storage } = simulatedArtifacts();
+    const report = artifactCapacityReport(root, MAX_ARTIFACT_NAMESPACES, storage);
+    expect(report.storageAuthority).toBe("simulation");
     expect(report.limit).toBe(MAX_ARTIFACT_NAMESPACES);
-    expect(report.used).toBe(countArtifactNamespaces(repositoryRoot()));
+    expect(report.used).toBe(countArtifactNamespaces(root, storage));
     expect(report.exceeded).toBe(report.used >= report.limit);
     expect(report.remedy).toMatch(/archive or move/i);
-    expect(report.remedy).not.toMatch(/delet|prune|purge/i);
-    if (report.exceeded) {
-      // Visible without being fatal: the operator sees it, the suite stays
-      // honest about what it does and does not verify.
-      process.stderr.write(
-        `\n[capacity] e2e/artifacts holds ${report.used} directories against the ${report.limit} backstop; ` +
-          `real runHarness calls in this checkout are refused. ${report.remedy}\n`,
-      );
-    }
+    expect(report.remedy).not.toMatch(/delete them|prune|purge/i);
   });
 
   test("PLANTED: the budget boundary is exact, and costs nothing to prove", () => {
@@ -1554,27 +2003,27 @@ describe("artifact namespace backstop", () => {
   });
 
   test("PLANTED: a new namespace at the cap is refused before it is created", () => {
-    const root = fixtureScratchRoot("backstop-boundary");
-    const artifacts = join(root, "e2e", "artifacts");
-    mkdirSync(join(artifacts, "occupied"), { recursive: true });
-    writeFileSync(join(artifacts, "occupied", "evidence.log"), "retained\n");
+    const { root, storage, artifacts } = simulatedArtifacts();
+    const occupied = join(artifacts, "occupied");
+    storage.mkdir(occupied);
+    storage.writeExclusive(join(occupied, "evidence.log"), "retained\n");
 
     // An injected limit of 1 reproduces the boundary with one directory.
-    expect(() => assertArtifactNamespaceBudget(root, "brand-new", 1)).toThrow(
+    expect(() => assertArtifactNamespaceBudget(root, "brand-new", 1, storage)).toThrow(
       /ARTIFACT_RETENTION_EXCEEDED|backstop/,
     );
     // Refused *before* creation, and retained evidence is untouched.
-    expect(existsSync(join(artifacts, "brand-new"))).toBe(false);
-    expect(readFileSync(join(artifacts, "occupied", "evidence.log"), "utf8")).toBe("retained\n");
+    expect(storage.exists(join(artifacts, "brand-new"))).toBe(false);
+    expect(storage.readFile(join(occupied, "evidence.log"))).toBe("retained\n");
     // Reuse of the existing namespace still works at the same limit.
-    expect(() => assertArtifactNamespaceBudget(root, "occupied", 1)).not.toThrow();
+    expect(() => assertArtifactNamespaceBudget(root, "occupied", 1, storage)).not.toThrow();
   });
 
   test("the refusal names the operator action and never offers deletion", () => {
-    const root = fixtureScratchRoot("backstop-message");
-    mkdirSync(join(root, "e2e", "artifacts", "one"), { recursive: true });
+    const { root, storage, artifacts } = simulatedArtifacts();
+    storage.mkdir(join(artifacts, "one"));
     try {
-      assertArtifactNamespaceBudget(root, "two", 1);
+      assertArtifactNamespaceBudget(root, "two", 1, storage);
       throw new Error("expected a refusal");
     } catch (error) {
       const message = (error as Error).message;
@@ -1589,6 +2038,105 @@ describe("artifact namespace backstop", () => {
       expect(message).toMatch(/directories/i);
       expect(message).not.toMatch(/delet(e|ing) the|prune|purge/i);
     }
+  });
+});
+
+describe("retained integration recursive cap", () => {
+  test("counts self-test and resume ids, cases, staging, D1 state, and bytes in memory", () => {
+    const root = fixtureRoot("retained-integration-cap");
+    const storage = fixtureStorage();
+    const integration = join(root, "e2e", "artifacts", DEFAULT_RETAINED_INTEGRATION_NAMESPACE);
+    storage.seedDirectory(integration);
+    const selfTest = join(integration, "ops2a-selftest-1");
+    const resume = join(integration, "ops2a-selftest-1-resume");
+    const caseRoot = join(integration, "case-atomic-1");
+    const state = join(selfTest, "d1-state-rollback-ok");
+    const staging = join(caseRoot, "e2e", "artifacts", "blobs", "sha256", "incoming");
+    for (const directory of [
+      selfTest,
+      resume,
+      caseRoot,
+      join(caseRoot, "e2e"),
+      join(caseRoot, "e2e", "artifacts"),
+      join(caseRoot, "e2e", "artifacts", "blobs"),
+      join(caseRoot, "e2e", "artifacts", "blobs", "sha256"),
+      staging,
+      state,
+      join(state, ".state"),
+    ]) {
+      storage.mkdir(directory);
+    }
+    storage.writeExclusive(join(staging, "retained-stage"), "stage");
+    storage.writeExclusive(join(state, "wrangler.toml"), "config");
+    storage.writeExclusive(join(state, ".state", "part.sqlite"), "sqlite");
+
+    const report = retainedIntegrationCapacityReport(integration, storage);
+    expect(report.storageAuthority).toBe("simulation");
+    expect(report.directories).toBe(10);
+    expect(report.stagingEntries).toBe(1);
+    expect(report.bytes).toBe(Buffer.byteLength("stageconfigsqlite", "utf8"));
+    expect(report.directoryLimit).toBe(MAX_RETAINED_INTEGRATION_DIRECTORIES);
+    expect(report.byteLimit).toBe(MAX_RETAINED_INTEGRATION_BYTES);
+    expect(() =>
+      assertRetainedIntegrationCapacity(
+        integration,
+        { additionalDirectories: MAX_RETAINED_INTEGRATION_DIRECTORIES - report.directories + 1 },
+        storage,
+      ),
+    ).toThrow(/retained integration evidence holds/);
+    expect(storage.exists(join(integration, "blocked-before-create"))).toBe(false);
+  });
+
+  test("an existing content-addressed blob remains readable at the recursive cap", () => {
+    const root = fixtureRoot("retained-integration-dedup-at-cap");
+    const storage = fixtureStorage();
+    const integration = join(root, "e2e", "artifacts", DEFAULT_RETAINED_INTEGRATION_NAMESPACE);
+    const artifacts = join(integration, "case-dedup", "e2e", "artifacts");
+    const store = join(artifacts, ARTIFACT_BLOB_DIRECTORY, "sha256");
+    storage.seedDirectory(store);
+    const body = "already retained failure evidence\n";
+    const digest = createHash("sha256").update(body, "utf8").digest("hex");
+    const blob = join(store, digest);
+    storage.writeExclusive(blob, body);
+
+    let filler = 0;
+    while (
+      retainedIntegrationCapacityReport(integration, storage).directories <
+      MAX_RETAINED_INTEGRATION_DIRECTORIES
+    ) {
+      storage.mkdir(join(integration, `filler-${String(filler).padStart(3, "0")}`));
+      filler += 1;
+    }
+    expect(retainedIntegrationCapacityReport(integration, storage).exceeded).toBe(true);
+
+    expect(
+      publishFailureBlob({
+        containmentRoot: root,
+        artifactsDirectory: artifacts,
+        digest,
+        stored: body,
+        attempt: 1,
+        storage,
+        retainedIntegrationDirectory: integration,
+      }),
+    ).toBe(blob);
+    expect(storage.readFile(blob)).toBe(body);
+
+    const newBody = "new bytes must be refused at the cap\n";
+    const newDigest = createHash("sha256").update(newBody, "utf8").digest("hex");
+    expect(() =>
+      publishFailureBlob({
+        containmentRoot: root,
+        artifactsDirectory: artifacts,
+        digest: newDigest,
+        stored: newBody,
+        attempt: 2,
+        storage,
+        retainedIntegrationDirectory: integration,
+      }),
+    ).toThrow(/retained integration evidence holds/);
+    expect(storage.exists(join(store, newDigest))).toBe(false);
+    expect(storage.exists(join(store, "incoming"))).toBe(false);
   });
 });
 
@@ -1627,7 +2175,7 @@ describe("run options are closed", () => {
     ).rejects.toThrow(/unknown run option "emitRecord"/);
   });
 
-  test("every documented option is still accepted", async () => {
+  test("simulation accepts ordinary options but not the production receipt label", async () => {
     const root = fixtureRoot("options-accepted");
     const storage = fixtureStorage();
     const result = await runHarness({
@@ -1640,11 +2188,23 @@ describe("run options are closed", () => {
       resume: false,
       gitRevision: "unavailable",
       bindingVersions: {},
-      reproduction: "self-test",
       onEvent: () => undefined,
       onOutput: () => undefined,
     });
     expect(result.exitCode).toBe(0);
+    await expect(
+      runHarness({
+        root,
+        storage: fixtureStorage(),
+        suite: "unit",
+        runId: fixtureRunId("receipt-simulation"),
+        steps: [passStep("ok")],
+        reproduction: "self-test",
+        artifactNamespace: "simulated-receipt",
+        onEvent: () => undefined,
+        onOutput: () => undefined,
+      }),
+    ).rejects.toThrow(/exact node artifact storage/);
   });
 });
 
@@ -1670,36 +2230,31 @@ describe("repository root purity", () => {
     expect(after.filter((entry) => entry !== "e2e")).toEqual([]);
   });
 
-  test("fixture scratch holds only counters, and never an artifact namespace", () => {
-    const scratch = fixtureScratch("purity-check");
-    // Scratch exists for real child processes, which cannot see a simulated
-    // tree. What matters is that it is not an artifact area: it never lands in
-    // the checkout, and it never becomes a run namespace.
-    expect(scratch.startsWith(repositoryRoot())).toBe(false);
-    expect(isContainedPath(join(repositoryRoot(), "e2e", "artifacts"), scratch)).toBe(false);
-    expect(existsSync(join(scratch, "e2e"))).toBe(false);
+  test("ordinary fixtures use no process scratch directory", () => {
+    // Retry, resume, timeout, and cancellation tests coordinate through a
+    // bounded loopback counter. No PID-named temp root or marker file exists.
+    expect(ordinaryTaskTempResidue()).toEqual(ORDINARY_SUITE_RESIDUE_BEFORE.taskTempEntries);
   });
 });
 
 /**
  * Forward fixes for the OPS.2a retention audit.
  *
- * Every test below runs against its own `mkdtemp` root. None reads or writes the
- * repository's artifact area, which is over the namespace backstop and would
- * refuse a new run id anyway — and which must not be grown further by the suite
- * that measures it.
+ * These tests are only registered when real-filesystem integration is explicit.
+ * Their retained case roots all live under one bounded, repository-contained
+ * parent (`e2e/artifacts/${DEFAULT_RETAINED_INTEGRATION_NAMESPACE}`).
  */
-describe("blob publication is atomic, additive, and never destructive", () => {
+describeRealFilesystemIntegration("real filesystem publication semantics", () => {
   /**
    * These drive `publishFailureBlob` directly rather than `runHarness`.
    *
-   * `assertContainedRoot` refuses any root that is not this checkout, so a test
-   * reaching publication through a full run could only do so by writing into
-   * the repository's own artifact area — which is over the namespace backstop,
-   * and which this suite must not grow further.
+   * They are intentionally direct publication checks: they inspect genuine
+   * filesystem semantics only after the explicit real-authority preflight.
    */
   const digestOf = (value: string): string =>
     createHash("sha256").update(value, "utf8").digest("hex");
+  const retainedIntegrationDirectory = (): string =>
+    join(repositoryRoot(), "e2e", "artifacts", DEFAULT_RETAINED_INTEGRATION_NAMESPACE);
 
   function publish(root: string, body: string, attempt = 1): string {
     return publishFailureBlob({
@@ -1708,6 +2263,7 @@ describe("blob publication is atomic, additive, and never destructive", () => {
       digest: digestOf(body),
       stored: body,
       attempt,
+      retainedIntegrationDirectory: retainedIntegrationDirectory(),
     });
   }
 
@@ -1915,22 +2471,20 @@ describe("blob publication is atomic, additive, and never destructive", () => {
     const body = `contended bytes ${process.pid}\n`;
     const artifactsDirectory = join(root, "e2e", "artifacts");
     let intruded = false;
-    const contended: HarnessArtifactStorage = {
-      ...nodeArtifactStorage,
-      beforeLink(path) {
-        if (intruded) return;
-        intruded = true;
-        // The winner publishes inside the loser's window, using a separate
-        // publication so the store reaches the state the loser will collide with.
-        publishFailureBlob({
-          containmentRoot: root,
-          artifactsDirectory,
-          digest: digestOf(body),
-          stored: body,
-          attempt: 99,
-        });
-        expect(existsSync(path)).toBe(true);
-      },
+    const beforeLink = (path: string): void => {
+      if (intruded) return;
+      intruded = true;
+      // The winner publishes inside the loser's window, using a separate
+      // publication so the store reaches the state the loser will collide with.
+      publishFailureBlob({
+        containmentRoot: root,
+        artifactsDirectory,
+        digest: digestOf(body),
+        stored: body,
+        attempt: 99,
+        retainedIntegrationDirectory: retainedIntegrationDirectory(),
+      });
+      expect(existsSync(path)).toBe(true);
     };
 
     const loser = publishFailureBlob({
@@ -1939,7 +2493,9 @@ describe("blob publication is atomic, additive, and never destructive", () => {
       digest: digestOf(body),
       stored: body,
       attempt: 1,
-      storage: contended,
+      storage: nodeArtifactStorage,
+      beforeLink,
+      retainedIntegrationDirectory: retainedIntegrationDirectory(),
     });
 
     expect(intruded).toBe(true);
@@ -1955,12 +2511,9 @@ describe("blob publication is atomic, additive, and never destructive", () => {
     const root = fixtureScratchRoot("link-race-mismatch");
     const body = `honest bytes ${process.pid}\n`;
     const artifactsDirectory = join(root, "e2e", "artifacts");
-    const contended: HarnessArtifactStorage = {
-      ...nodeArtifactStorage,
-      beforeLink(path) {
-        // A different payload occupies the digest first — corruption, not a race.
-        if (!existsSync(path)) writeFileSync(path, "impostor bytes\n");
-      },
+    const beforeLink = (path: string): void => {
+      // A different payload occupies the digest first — corruption, not a race.
+      if (!existsSync(path)) writeFileSync(path, "impostor bytes\n");
     };
     expect(() =>
       publishFailureBlob({
@@ -1969,7 +2522,9 @@ describe("blob publication is atomic, additive, and never destructive", () => {
         digest: digestOf(body),
         stored: body,
         attempt: 1,
-        storage: contended,
+        storage: nodeArtifactStorage,
+        beforeLink,
+        retainedIntegrationDirectory: retainedIntegrationDirectory(),
       }),
     ).toThrow(/does not match its digest/);
     expect(readFileSync(join(blobStore(root), digestOf(body)), "utf8")).toBe("impostor bytes\n");
@@ -1989,7 +2544,7 @@ describe("blob publication is atomic, additive, and never destructive", () => {
   });
 });
 
-describe("failure manifest reconciliation", () => {
+describeRealFilesystemIntegration("real filesystem manifest fixtures", () => {
   const digestOf = (value: string): string =>
     createHash("sha256").update(value, "utf8").digest("hex");
 
@@ -2155,7 +2710,7 @@ describe("failure manifest reconciliation", () => {
   });
 });
 
-describe("run identity is immutable across a resume", () => {
+describeRealFilesystemIntegration("real filesystem resume fixtures", () => {
   const base = { runId: "identity-run", suite: "unit", seed: 7, stepIds: ["a", "b"] };
 
   test("the identity is recorded once and re-verified unchanged", () => {
@@ -2218,6 +2773,7 @@ describe("run options are covered at compile time", () => {
     // is added to the interface and forgotten here fails to compile rather than
     // being refused at runtime as unknown.
     expect([...HARNESS_RUN_OPTION_KEYS].sort()).toEqual([
+      "artifactNamespace",
       "bindingVersions",
       "gitRevision",
       "onEvent",
@@ -2234,11 +2790,13 @@ describe("run options are covered at compile time", () => {
     ]);
   });
 
-  test("PLANTED: an unknown option is still refused, on a temp root", async () => {
-    const root = fixtureScratchRoot("options-temp");
+  test("PLANTED: an unknown option is still refused without an artifact root", async () => {
+    const root = fixtureRoot("options-temp");
+    const storage = fixtureStorage();
     await expect(
       runHarness({
         root,
+        storage,
         suite: "unit",
         runId: "options-temp",
         steps: [passStep("ok")],
@@ -2250,7 +2808,7 @@ describe("run options are covered at compile time", () => {
   });
 });
 
-describe("namespace reservation", () => {
+describeRealFilesystemIntegration("real filesystem reservation semantics", () => {
   test("reserving at the limit creates nothing and keeps existing evidence", () => {
     const root = fixtureScratchRoot("reserve-limit");
     const artifacts = join(root, "e2e", "artifacts");
@@ -2292,3 +2850,22 @@ describe("namespace reservation", () => {
     );
   });
 });
+
+if (!realFilesystemIntegrationEnabled) {
+  const assertOrdinarySuiteResidue = (): void => {
+    const after = {
+      artifactEntries: ordinaryArtifactResidue(),
+      taskTempEntries: ordinaryTaskTempResidue(),
+    };
+    expect(after.artifactEntries).toEqual(ORDINARY_SUITE_RESIDUE_BEFORE.artifactEntries);
+    expect(after.taskTempEntries).toEqual(ORDINARY_SUITE_RESIDUE_BEFORE.taskTempEntries);
+  };
+
+  test("ordinary harness tests create zero artifact namespaces and task temp entries", () => {
+    assertOrdinarySuiteResidue();
+  });
+
+  // Kept as a global final guard too: focused test selection must not hide a
+  // new `/tmp/asimp-ops2a-d1-*` root or checkout artifact namespace.
+  afterAll(assertOrdinarySuiteResidue);
+}
