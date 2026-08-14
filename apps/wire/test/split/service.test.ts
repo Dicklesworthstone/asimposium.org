@@ -222,6 +222,47 @@ describe("S-3 split cursors and existence hiding", () => {
     });
   });
 
+  test("public sequences are per problem and advance only after a successful promotion", async () => {
+    const service = new SplitService(new MemoryKrater());
+    await service.pushWorkshop(workshop({ workshopId: "W-p1-1", problemId: "P-one" }));
+    await service.pushWorkshop(
+      workshop({ workshopId: "W-p2-1", problemId: "P-two", fellowId: "fellow-b", sponsorId: "sponsor-b" }),
+    );
+    await service.pushWorkshop(workshop({ workshopId: "W-p1-2", problemId: "P-one" }));
+
+    expect((await service.publicLedger("P-one")).publicSeq).toBe(0);
+    expect((await service.publicLedger("P-two")).publicSeq).toBe(0);
+    expect(
+      await service.promote(
+        promotion({ workshopId: "W-p1-1", publicClaim: { ...promotion().publicClaim, claimId: "C-p1-1" } }),
+      ),
+    ).toMatchObject({ status: 201, outcome: "created", receipt: { event: { publicSeq: 1 } } });
+    expect(
+      await service.promote(
+        promotion({
+          workshopId: "W-p2-1",
+          actorSponsorId: "sponsor-b",
+          actorFellowId: "fellow-b",
+          idempotencyKey: "idem-p2-1",
+          requestDigest: "request-sha256-p2-1",
+          publicClaim: { ...promotion().publicClaim, claimId: "C-p2-1", statement: "P-two has property R." },
+        }),
+      ),
+    ).toMatchObject({ status: 201, outcome: "created", receipt: { event: { publicSeq: 1 } } });
+    expect(
+      await service.promote(
+        promotion({
+          workshopId: "W-p1-2",
+          idempotencyKey: "idem-p1-2",
+          requestDigest: "request-sha256-p1-2",
+          publicClaim: { ...promotion().publicClaim, claimId: "C-p1-2", statement: "P-one has property S." },
+        }),
+      ),
+    ).toMatchObject({ status: 201, outcome: "created", receipt: { event: { publicSeq: 2 } } });
+    expect((await service.publicLedger("P-one")).publicSeq).toBe(2);
+    expect((await service.publicLedger("P-two")).publicSeq).toBe(1);
+  });
+
   test("owner sponsor sees a card while anonymous, cross-sponsor, and absent reads are identical", async () => {
     const service = new SplitService(new MemoryKrater());
     await service.pushWorkshop(
