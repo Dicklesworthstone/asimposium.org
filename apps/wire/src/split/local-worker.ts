@@ -2296,6 +2296,7 @@ async function localS4Diagnostics(
   env: LocalSplitEnv,
   problemId: string,
 ): Promise<Response> {
+  throwIfRouteBindingPoisoned(request, env);
   if (!localS4FixtureAuthorized(request, env)) return notFound();
   const rows = await env.DB.prepare(
     `SELECT receipt_id, input_digest, model_version, policy_version, configuration_digest,
@@ -2346,6 +2347,7 @@ async function seedOversizedS4History(
   env: LocalSplitEnv,
   problemId: string,
 ): Promise<Response> {
+  throwIfRouteBindingPoisoned(request, env);
   if (!localS4FixtureAuthorized(request, env)) return notFound();
   const artifactBody = `S4-OVERSIZED-HISTORY-SEED-${"x".repeat(MAX_CONTEXTUAL_PROMOTION_BYTES)}`;
   const artifactDigest = await sha256Hex(artifactBody);

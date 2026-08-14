@@ -11,6 +11,66 @@ import {
 
 const root = resolve(import.meta.dir, "../../../..");
 
+/**
+ * Exact semantic manifest for the local Workerd proof. A count alone can stay
+ * green when one assertion disappears and an unrelated assertion is added.
+ * Keeping the names sorted makes a failure identify the missing or unexpected
+ * product guarantee directly in Bun's bounded diff.
+ */
+const EXPECTED_LOCAL_BINDING_ASSERTIONS: string[] = [
+  "R2_put_then_D1_failure_leaves_an_unreachable_orphan_and_retry_binds_without_a_cursor_burn",
+  "S4_allow_with_warning_publishes_a_safe_category_action_notice_without_provider_detail",
+  "S4_authorized_benign_outage_fixture_degrades_to_a_public_warning_notice_not_a_silent_pass",
+  "S4_concurrent_same_key_publishing_replays_the_exact_201_and_commits_one_event_action_and_receipt",
+  "S4_contextual_aggregation_reads_all_four_D1_authorized_public_fields_and_holds_without_public_effect",
+  "S4_direct_content_reject_is_not_downgraded_by_contextual_screening",
+  "S4_extract_history_field_reaches_contextual_provider_without_public_effect",
+  "S4_frontier_receipts_revalidate_same_fellow_history_but_do_not_spuriously_invalidate_another_fellow",
+  "S4_negative_content_context_dedup_is_expiring_receipted_and_never_leaks_into_public_projection",
+  "S4_oversized_context_fails_closed_without_response_R2_event_or_export_canary_leakage",
+  "S4_oversized_historical_artifact_is_omitted_before_materialization_and_later_benign_promotion_records_the_exact_omission",
+  "S4_problem_statement_is_server_owned_and_caller_material_never_reflects",
+  "S4_promotion_requires_an_explicit_idempotency_key_before_screening_or_public_effect",
+  "S4_provider_exception_message_and_stack_are_a_coarse_private_hold_without_response_R2_event_or_export_leakage",
+  "S4_provider_timeout_fails_closed_to_a_private_appealable_hold_without_public_cursor_or_artifact",
+  "S4_public_artifact_md_history_field_reaches_contextual_provider_without_public_effect",
+  "S4_replay_map_expires_after_24_hours_without_erasing_immutable_decision_history",
+  "S4_statement_history_field_reaches_contextual_provider_without_public_effect",
+  "S4_title_history_field_reaches_contextual_provider_without_public_effect",
+  "all_eleven_async_route_entry_faults_return_one_exact_nonreflective_binding_failure",
+  "anonymous_or_stale_private_authority_is_not_found_without_a_private_cache_entry",
+  "caller_cannot_choose_a_claim_identifier",
+  "caller_cannot_choose_a_workshop_identifier",
+  "concurrent_promotions_allocate_server_claim_ids_and_D1_RETURNING_public_sequences_without_burns",
+  "concurrent_workshop_pushes_use_D1_RETURNING_sequences_without_duplicates_or_burns",
+  "duplicate_and_P2_P4_refusals_leave_the_public_projection_at_its_original_cursor",
+  "large_workshop_body_spills_to_R2_and_gets_a_server_owned_workshop_id",
+  "local_workerd_reports_D1_and_R2_bindings_with_a_public_readiness_nonce_but_never_authority",
+  "missing_problem_never_fabricates_an_empty_public_projection",
+  "near_duplicate_promotion_is_refused_citing_P11_without_a_cursor_burn",
+  "one_promotion_atomically_allocates_the_first_public_claim_and_binds_its_public_artifact",
+  "only_the_explicitly_published_public_artifact_is_readable_after_complete_D1_binding",
+  "owner_private_read_crosses_R2_and_revalidates_the_D1_binding",
+  "post_promotion_face_validators_are_representation_specific",
+  "post_promotion_html-fragment_is_a_private-free_rendered_face_with_a_representation_etag",
+  "post_promotion_html-fragment_matching_validator_returns_a_private-free_304",
+  "post_promotion_json_is_a_private-free_rendered_face_with_a_representation_etag",
+  "post_promotion_json_matching_validator_returns_a_private-free_304",
+  "post_promotion_md_is_a_private-free_rendered_face_with_a_representation_etag",
+  "post_promotion_md_matching_validator_returns_a_private-free_304",
+  "post_promotion_public_projection_search_and_export_apply_shape_guards",
+  "private_only_problem_is_byte_indistinguishable_from_unknown_on_every_public_route",
+  "public_errors_search_and_export_never_reflect_private_probe_material",
+  "public_faces_begin_only_after_a_committed_ledger_event",
+  "raw_C0_controls_cannot_collide_with_protected_math_tokens",
+  "readiness_nonce_or_nonempty_route_binding_poison_headers_are_byte_for_byte_inert_on_every_async_route",
+  "rendered_json_contains_only_one_public_ledger_item",
+  "reused_idempotency_key_with_a_different_promotion_preserves_the_one_promotion_invariant",
+  "self_certified_status_is_refused_citing_P2_P4",
+  "staged_private_digest_is_not_publicly_readable_before_promotion",
+  "top_level_authoritative_fields_and_status_upgrades_are_refused_citing_P2_P4",
+];
+
 const LOCAL_WORKER_BUNDLE_SENTINELS = [
   "s3_local_workshops",
   "/__s3/workshops",
@@ -56,6 +116,11 @@ async function counterfactualProductionBundle(
     entrypoints: [entrypoint],
     format: "esm",
     target: "browser",
+    // Bun.build inside Bun's test runner cannot currently resolve the Zod
+    // dependency through packages/contracts' workspace-local node_modules.
+    // Zod cannot import the local S-3 worker; keeping only that third-party
+    // package external preserves the production/local entry-graph assertion.
+    external: ["zod"],
     plugins: [
       {
         name: namespace,
@@ -106,6 +171,7 @@ test("the S-3 harness binds readiness to its child and excludes the deployed ent
     entrypoints: [productionEntrypoint],
     format: "esm",
     target: "browser",
+    external: ["zod"],
   });
   const counterfactualBundle = await counterfactualProductionBundle(
     productionEntrypoint,
@@ -158,12 +224,23 @@ test("the S-3 harness binds readiness to its child and excludes the deployed ent
   const publicShapePoisonAssertionSource = sourceRegion(
     checker,
     '"post_promotion_public_projection_search_and_export_apply_shape_guards",',
-    '  check(\n    "all_eight_async_route_handlers_return_one_exact_nonreflective_binding_failure",',
+    '  check(\n    "all_eleven_async_route_entry_faults_return_one_exact_nonreflective_binding_failure",',
+  );
+  const readinessLoopSource = sourceRegion(script, "ready=0\n", `if [[ \${ready} -ne 1 ]]`);
+  const healthHandlerSource = sourceRegion(
+    worker,
+    'if (request.method === "GET" && url.pathname === "/__s3/health") {',
+    'if (request.method === "POST" && url.pathname === "/__s3/workshops") {',
   );
 
   expect(script).toContain("S3_PORT_OCCUPIED");
   expect(script).toMatch(/--var "S3_RUN_TOKEN:\$\{S3_RUN_TOKEN\}"/);
-  expect(script).toMatch(/health.*run_token.*S3_RUN_TOKEN/s);
+  expect(script).toMatch(/--var "S3_READINESS_NONCE:\$\{S3_READINESS_NONCE\}"/);
+  expect(readinessLoopSource).toContain("readiness_nonce");
+  expect(readinessLoopSource).toContain("S3_READINESS_NONCE");
+  expect(readinessLoopSource).not.toContain("S3_RUN_TOKEN");
+  expect(healthHandlerSource).toContain("readiness_nonce: readinessNonce");
+  expect(healthHandlerSource).not.toContain("run_token");
   expect(script).toContain("CHECKER_DEADLINE_SECONDS");
   expect(script).toMatch(/S3_LOCAL_RUN_TOKEN="\$\{S3_RUN_TOKEN\}"/);
   expect(script).toContain("S3_SELF_TEST_TERM_RESISTANT_CHILD");
@@ -194,7 +271,8 @@ test("the S-3 harness binds readiness to its child and excludes the deployed ent
   expect(script).toContain("emit_checked_checker_jsonl");
   expect(script).not.toMatch(/cat "\$\{CHECK_LOG\}"/);
   expect(script).not.toMatch(/kill -TERM .*CHECKER_PID/);
-  expect(worker).toContain("run_token: env.S3_RUN_TOKEN");
+  expect(worker).toContain("const authority = env.S3_RUN_TOKEN");
+  expect(worker).toContain("request.headers.get(header) === env.S3_RUN_TOKEN");
   expect(worker).toContain("only `__s3` test routes plus the artifact host shape are mounted");
   expect(occurrences(worker, publicRowGuard)).toBe(3);
   for (const routeSource of [projectionSource, searchSource, exportSource]) {
@@ -207,7 +285,8 @@ test("the S-3 harness binds readiness to its child and excludes the deployed ent
   expect(occurrences(projectionSource, "assertS3PublicProjectionShape(projection);")).toBe(1);
   expect(occurrences(faceSource, "assertS3RenderedFaceShape(face, format);")).toBe(1);
   expect(worker).toContain("FROM s3_local_public_cursors");
-  expect(worker).toContain("function localSponsorId(env: LocalSplitEnv)");
+  expect(worker).toContain('const LOCAL_SPONSOR_ID = "local-sponsor-fixture";');
+  expect(worker).not.toContain("function localSponsorId(");
   expect(faultGateSource).toContain(
     "request.headers.get(TEST_D1_BIND_FAULT_HEADER) === TEST_D1_BIND_FAULT",
   );
@@ -251,7 +330,7 @@ test("the S-3 harness binds readiness to its child and excludes the deployed ent
   );
   expect(checker).toContain("poisonProbeSnapshots({})");
   expect(checker).toContain("const poisonedProbeForbidden = [");
-  expect(checker).toContain("poisonedPrivateLocator, localRunToken");
+  expect(checker).toContain("poisonedPrivateLocator,\n    localAuthorityToken");
   expect(publicShapePoisonAssertionSource).toContain(
     "response.response.status === unpoisonedPublic[index]?.response.status",
   );
@@ -264,10 +343,10 @@ test("the S-3 harness binds readiness to its child and excludes the deployed ent
   expect(publicShapePoisonAssertionSource).toContain(
     "hasNoPrivateMaterial(response, poisonedProbeForbidden)",
   );
-  expect(checker).toContain("wrongTokenRouteBindingPoisonHeaders");
+  expect(checker).toContain("readinessNonceRouteBindingPoisonHeaders");
   expect(checker).toContain("nonemptyRouteBindingPoisonHeaders");
   expect(checker).toContain(
-    "wrong_or_nonempty_route_binding_poison_headers_are_byte_for_byte_inert_on_every_async_route",
+    "readiness_nonce_or_nonempty_route_binding_poison_headers_are_byte_for_byte_inert_on_every_async_route",
   );
   expect(checker).toContain("routeBindingPoisonSnapshots({})");
   expect(checker).toContain("response.body === routeBindingBaseline[index]?.body");
@@ -279,12 +358,15 @@ test("the S-3 harness binds readiness to its child and excludes the deployed ent
     "return await recoveryAudit(request, env, recoveryMatch[1]);",
     "return await publicArtifact(request, env, artifactMatch[1]);",
     "return await publicSearch(request, env, searchMatch[1]);",
+    "return await publicScreeningActions(request, env, screeningActionsMatch[1]);",
+    "return await localS4Diagnostics(request, env, s4DiagnosticsMatch[1]);",
+    "return await seedOversizedS4History(request, env, oversizedHistorySeedMatch[1]);",
     "return await publicExport(request, env, exportMatch[1]);",
     "return await publicFace(request, env, publicMatch[1]);",
   ]) {
     expect(occurrences(fetchSource, dispatch)).toBe(1);
   }
-  expect(occurrences(fetchSource, "return await ")).toBe(8);
+  expect(occurrences(fetchSource, "return await ")).toBe(11);
   expect(worker).toContain("token-gated\n      // NOT_FOUND existence behavior");
   expect(worker).not.toContain('LOCAL_SPONSOR_ID = "local-sponsor"');
   expect(worker).not.toContain('RECOVERY_AUDIT_HEADER = "local-recovery-audit"');
@@ -792,31 +874,10 @@ test(
     });
     expect(String(staging?.blocked_on)).toContain("paired sponsor plus anonymous browser proof");
     expect(String(staging?.forbidden_substitutes)).toContain("local-workerd behavior");
-    expect(assertions).toHaveLength(33);
+    const assertionNames = assertions.map((record) => record.assertion as string).toSorted();
+    expect(new Set(assertionNames).size).toBe(assertionNames.length);
+    expect(assertionNames).toEqual(EXPECTED_LOCAL_BINDING_ASSERTIONS);
     expect(assertions.every((record) => record.status === "pass")).toBe(true);
-    for (const assertion of [
-      "caller_cannot_choose_a_workshop_identifier",
-      "caller_cannot_choose_a_claim_identifier",
-      "staged_private_digest_is_not_publicly_readable_before_promotion",
-      "only_the_explicitly_published_public_artifact_is_readable_after_complete_D1_binding",
-      "R2_put_then_D1_failure_leaves_an_unreachable_orphan_and_retry_binds_without_a_cursor_burn",
-      "concurrent_workshop_pushes_use_D1_RETURNING_sequences_without_duplicates_or_burns",
-      "concurrent_promotions_allocate_server_claim_ids_and_D1_RETURNING_public_sequences_without_burns",
-      "private_only_problem_is_byte_indistinguishable_from_unknown_on_every_public_route",
-      "public_faces_begin_only_after_a_committed_ledger_event",
-      "public_errors_search_and_export_never_reflect_private_probe_material",
-      "post_promotion_public_projection_search_and_export_apply_shape_guards",
-      "wrong_or_nonempty_route_binding_poison_headers_are_byte_for_byte_inert_on_every_async_route",
-      "near_duplicate_promotion_is_refused_citing_P11_without_a_cursor_burn",
-      "raw_C0_controls_cannot_collide_with_protected_math_tokens",
-      "top_level_authoritative_fields_and_status_upgrades_are_refused_citing_P2_P4",
-      "duplicate_and_P2_P4_refusals_leave_the_public_projection_at_its_original_cursor",
-      "missing_problem_never_fabricates_an_empty_public_projection",
-    ]) {
-      expect(
-        assertions.some((record) => record.assertion === assertion && record.status === "pass"),
-      ).toBe(true);
-    }
     expect(stderr).toContain("BLOCKED s3-staging-paired-principal");
     expect(`${stdout}\n${stderr}`).not.toContain(root);
     expect(`${stdout}\n${stderr}`).not.toContain("/Users/");

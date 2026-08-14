@@ -620,6 +620,22 @@ async function main(): Promise<void> {
         }),
       ),
       snapshot(
+        await localFetch(`${origin}/__s3/public/${mainProblemId}/screening.json`, {
+          headers,
+        }),
+      ),
+      snapshot(
+        await localFetch(`${origin}/__s3/s4/diagnostics/${mainProblemId}`, {
+          headers,
+        }),
+      ),
+      snapshot(
+        await localFetch(`${origin}/__s3/s4/fixtures/oversized-history/${mainProblemId}`, {
+          method: "POST",
+          headers,
+        }),
+      ),
+      snapshot(
         await localFetch(`${origin}/__s3/public/${mainProblemId}/export.jsonl`, {
           headers,
         }),
@@ -677,8 +693,8 @@ async function main(): Promise<void> {
     routeBindingPoisonSnapshots(nonemptyRouteBindingPoisonHeaders),
   ]);
   check(
-    "all_eight_async_route_handlers_return_one_exact_nonreflective_binding_failure",
-    routeBindingPoisoned.length === 8 &&
+    "all_eleven_async_route_entry_faults_return_one_exact_nonreflective_binding_failure",
+    routeBindingPoisoned.length === 11 &&
       routeBindingPoisoned.every(isExactLocalS3BindingFailure) &&
       routeBindingPoisoned.every((response) =>
         hasNoPrivateMaterial(response, [...forbiddenMain, poisonedPrivateLocator]),
@@ -686,10 +702,10 @@ async function main(): Promise<void> {
     "an async route bypassed the binding failure boundary or disclosed poisoned internals",
   );
   check(
-    "wrong_or_nonempty_route_binding_poison_headers_are_byte_for_byte_inert_on_every_async_route",
+    "readiness_nonce_or_nonempty_route_binding_poison_headers_are_byte_for_byte_inert_on_every_async_route",
     [readinessNonceRouteBindingPoisoned, nonemptyRouteBindingPoisoned].every(
       (responses) =>
-        responses.length === 8 &&
+        responses.length === 11 &&
         responses.every(
           (response, index) =>
             response.response.status === routeBindingBaseline[index]?.response.status &&
