@@ -1,0 +1,90 @@
+/**
+ * Verification keyring for the service envelope.
+ *
+ * The Worker holds **public** keys only. Signing lives on the Agora side, so a
+ * Worker compromise cannot forge a sponsor write — which matters because the
+ * Worker is the single writer and therefore the most attractive target in the
+ * system (Fable §14.1). This is why the envelope is Ed25519 rather than an
+ * HMAC: a shared secret would put a signing capability on both planes.
+ *
+ * ## Rotation overlap
+ *
+ * A key has a validity window. During a rotation both the outgoing and incoming
+ * keys are valid, so envelopes signed moments before the cutover still verify
+ * while envelopes signed after it verify too. The window is checked against the
+ * envelope's `iat` rather than against "now": an envelope signed while a key
+ * was live stays verifiable for its short lifetime even if the key retires in
+ * between, and — the direction that actually matters — a key that was *not yet*
+ * live at `iat` cannot be used to backdate an envelope.
+ */
+import { fromHex } from "./canonical";
+
+export interface VerificationKeyRecord {
+  /** Non-secret key identifier carried in the envelope. */
+  kid: string;
+  /** Raw 32-byte Ed25519 public key, lowercase hex. */
+  publicKeyHex: string;
+  /** Inclusive start of validity, epoch seconds. */
+  notBefore: number;
+  /** Exclusive end of validity, epoch seconds. Omit for an open-ended key. */
+  notAfter?: number;
+}
+
+export type KeyLookupFailure = "unknown_kid" | "key_not_yet_valid" | "key_retired";
+
+export type KeyLookup =
+  | { ok: true; key: CryptoKey; record: VerificationKeyRecord }
+  | { ok: false; reason: KeyLookupFailure };
+
+const ED25519: EdKeyAlgorithm = { name: "Ed25519" };
+
+interface EdKeyAlgorithm {
+  name: "Ed25519";
+}
+
+export class VerificationKeyring {
+  readonly #records: Map<string, VerificationKeyRecord>;
+  readonly #imported = new Map<string, CryptoKey>();
+
+  constructor(records: readonly VerificationKeyRecord[]) {
+    this.#records = new Map();
+    for (const record of records) {
+      if (this.#records.has(record.kid)) {
+        // Two keys under one id makes "which key signed this" undecidable.
+        throw new Error(`duplicate kid in keyring: ${record.kid}`);
+      }
+      this.#records.set(record.kid, record);
+    }
+  }
+
+  /** Key ids known to this keyring. Non-secret; safe to log. */
+  get kids(): string[] {
+    return [...this.#records.keys()].sort();
+  }
+
+  /**
+   * Resolve a key id to an imported public key, if the key was valid when the
+   * envelope claims to have been issued.
+   */
+  async lookup(kid: string, issuedAt: number): Promise<KeyLookup> {
+    const record = this.#records.get(kid);
+    if (record === undefined) return { ok: false, reason: "unknown_kid" };
+    if (issuedAt < record.notBefore) return { ok: false, reason: "key_not_yet_valid" };
+    if (record.notAfter !== undefined && issuedAt >= record.notAfter) {
+      return { ok: false, reason: "key_retired" };
+    }
+
+    const cached = this.#imported.get(kid);
+    if (cached !== undefined) return { ok: true, key: cached, record };
+
+    const key = await crypto.subtle.importKey(
+      "raw",
+      fromHex(record.publicKeyHex) as BufferSource,
+      ED25519,
+      false,
+      ["verify"],
+    );
+    this.#imported.set(kid, key);
+    return { ok: true, key, record };
+  }
+}

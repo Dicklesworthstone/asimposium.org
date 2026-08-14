@@ -1,0 +1,177 @@
+{
+  "$comment": [
+    "Golden canonicalization vectors for the signed service envelope.",
+    "Both planes pin these: apps/wire verifies, apps/web signs, and each has its own",
+    "implementation of the canonical form. If the two ever disagree by a single byte,",
+    "every sponsor write breaks in production and the failure looks like a bad key --",
+    "so the agreement is asserted here instead of assumed.",
+    "canonical_sha256 is SHA-256 of canonicalBytes(claims), lowercase hex.",
+    "These values are hand-checked and MUST NOT be regenerated to make a red test green:",
+    "a changed digest means the signing domain changed, which is a version bump.",
+    "This corpus belongs in packages/contracts once W1.1 exists (asimposiumorg-phg);",
+    "it lives here because the Worker is the authoritative verifier and contracts is",
+    "out of scope for the S-6 spike."
+  ],
+  "vectors": {
+    "minimal": {
+      "note": "A typical sponsor directive write.",
+      "claims": {
+        "v": "asimp-env-1",
+        "kid": "agora-2026-08-a",
+        "alg": "Ed25519",
+        "iss": "agora",
+        "aud": "stoa",
+        "iat": 1786000000,
+        "exp": 1786000060,
+        "nonce": "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
+        "method": "POST",
+        "route": "/v1/p/:id/directives",
+        "action": "directive.create",
+        "principal_type": "sponsor",
+        "principal_id": "usr_01JXYZ0000000000000000",
+        "payload_sha256": "c752ec509015332ddff46c49113b318657a915f5dc43fb92e418c323d61ea48b"
+      },
+      "canonical_sha256": "f8ae22b637fa98fa6c963aace0c0817a8e65c4654be186eb71fc6b672e7aa37a"
+    },
+    "unicode-nonbmp": {
+      "note": "Non-BMP characters: lengths must be UTF-8 bytes, not UTF-16 code units. An implementation using String.length here produces a different digest and every write fails.",
+      "claims": {
+        "v": "asimp-env-1",
+        "kid": "agora-2026-08-a",
+        "alg": "Ed25519",
+        "iss": "agora",
+        "aud": "stoa",
+        "iat": 1786000000,
+        "exp": 1786000060,
+        "nonce": "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
+        "method": "POST",
+        "route": "/v1/p/:id/directives",
+        "action": "directive.créate.𝔘",
+        "principal_type": "sponsor",
+        "principal_id": "usr_𝔘nicode_01",
+        "payload_sha256": "c752ec509015332ddff46c49113b318657a915f5dc43fb92e418c323d61ea48b"
+      },
+      "canonical_sha256": "896cca4ec36a98ef9a401e0d5bf751d0c1a9aec7bfb43b4aa165d375de56f865"
+    },
+    "delimiter-collision-a": {
+      "note": "Paired with -b. Fields ('a:1','b') and ('a','1:b') must not canonicalize alike; a delimiter-only scheme collides here and lets one signature authorise a different principal.",
+      "claims": {
+        "v": "asimp-env-1",
+        "kid": "agora-2026-08-a",
+        "alg": "Ed25519",
+        "iss": "agora",
+        "aud": "stoa",
+        "iat": 1786000000,
+        "exp": 1786000060,
+        "nonce": "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
+        "method": "POST",
+        "route": "/v1/p/:id/directives",
+        "action": "a:1",
+        "principal_type": "sponsor",
+        "principal_id": "b",
+        "payload_sha256": "c752ec509015332ddff46c49113b318657a915f5dc43fb92e418c323d61ea48b"
+      },
+      "canonical_sha256": "3f29545613e1512c0904aa0e87ca6c463ba6544b468e65fc0f350d6808ca02ac"
+    },
+    "delimiter-collision-b": {
+      "note": "Paired with -a.",
+      "claims": {
+        "v": "asimp-env-1",
+        "kid": "agora-2026-08-a",
+        "alg": "Ed25519",
+        "iss": "agora",
+        "aud": "stoa",
+        "iat": 1786000000,
+        "exp": 1786000060,
+        "nonce": "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
+        "method": "POST",
+        "route": "/v1/p/:id/directives",
+        "action": "a",
+        "principal_type": "sponsor",
+        "principal_id": "1:b",
+        "payload_sha256": "c752ec509015332ddff46c49113b318657a915f5dc43fb92e418c323d61ea48b"
+      },
+      "canonical_sha256": "b21b61a9d013b74f0624aedee218431450afca248c0c91c586a22bca8428726b"
+    },
+    "record-separator-in-value": {
+      "note": "A short action value, distinct from the collision pair, holding the rest of the frame steady.",
+      "claims": {
+        "v": "asimp-env-1",
+        "kid": "agora-2026-08-a",
+        "alg": "Ed25519",
+        "iss": "agora",
+        "aud": "stoa",
+        "iat": 1786000000,
+        "exp": 1786000060,
+        "nonce": "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
+        "method": "POST",
+        "route": "/v1/p/:id/directives",
+        "action": "ab",
+        "principal_type": "sponsor",
+        "principal_id": "usr_01JXYZ0000000000000000",
+        "payload_sha256": "c752ec509015332ddff46c49113b318657a915f5dc43fb92e418c323d61ea48b"
+      },
+      "canonical_sha256": "feb660dbd0a1cca75dd4bb7fa3467428d1fb1b7ebb71535d4424755621076df3"
+    },
+    "newline-in-value": {
+      "note": "A newline inside a signed value must not reframe the record list.",
+      "claims": {
+        "v": "asimp-env-1",
+        "kid": "agora-2026-08-a",
+        "alg": "Ed25519",
+        "iss": "agora",
+        "aud": "stoa",
+        "iat": 1786000000,
+        "exp": 1786000060,
+        "nonce": "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
+        "method": "POST",
+        "route": "/v1/p/:id/directives",
+        "action": "a\nb",
+        "principal_type": "sponsor",
+        "principal_id": "usr_01JXYZ0000000000000000",
+        "payload_sha256": "c752ec509015332ddff46c49113b318657a915f5dc43fb92e418c323d61ea48b"
+      },
+      "canonical_sha256": "5f64b8ef81f65dda155a1884b3403670119c898e8026504586143edebfb9c42d"
+    },
+    "boundary-numbers": {
+      "note": "Small integer timestamps, rendered base-10 without padding or exponent.",
+      "claims": {
+        "v": "asimp-env-1",
+        "kid": "agora-2026-08-a",
+        "alg": "Ed25519",
+        "iss": "agora",
+        "aud": "stoa",
+        "iat": 1,
+        "exp": 121,
+        "nonce": "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
+        "method": "POST",
+        "route": "/v1/p/:id/directives",
+        "action": "directive.create",
+        "principal_type": "sponsor",
+        "principal_id": "usr_01JXYZ0000000000000000",
+        "payload_sha256": "c752ec509015332ddff46c49113b318657a915f5dc43fb92e418c323d61ea48b"
+      },
+      "canonical_sha256": "4dc5d42f202ea5de43563da09a1ad92537f28f4f9b96e72307a5a8e2b73e5152"
+    },
+    "empty-payload": {
+      "note": "Digest of a zero-byte body. A write with no payload is still a signed write.",
+      "claims": {
+        "v": "asimp-env-1",
+        "kid": "agora-2026-08-a",
+        "alg": "Ed25519",
+        "iss": "agora",
+        "aud": "stoa",
+        "iat": 1786000000,
+        "exp": 1786000060,
+        "nonce": "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
+        "method": "POST",
+        "route": "/v1/p/:id/directives",
+        "action": "directive.create",
+        "principal_type": "sponsor",
+        "principal_id": "usr_01JXYZ0000000000000000",
+        "payload_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+      },
+      "canonical_sha256": "b44435bfb3db22ef08490c15096a511400b4a24eaf1b9a883dc3a423dd1fc0dc"
+    }
+  }
+}
