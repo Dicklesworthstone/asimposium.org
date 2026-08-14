@@ -36,28 +36,50 @@ import {
 interface KraterHarnessEnv extends KraterOutboxEnv {
   DB: D1Database;
   /**
-   * The local harness capability. Declared only by wrangler.s2.toml and
-   * wrangler.s2-legacy.toml, which exist to run this file under Wrangler on a developer
-   * machine; no deployed configuration defines it. Optional in the type because its absence
-   * is the production case and must be handled, not assumed away.
+   * The local harness capability. Declared only by wrangler.s2.toml,
+   * wrangler.s2-legacy.toml, and wrangler.s2-upgrade.toml, which exist to run this file under
+   * Wrangler on a developer machine; no deployed configuration defines it. Optional in the type
+   * because its absence is the production case and must be handled, not assumed away.
    */
   S2_LOCAL_HARNESS?: string;
+  /**
+   * Per-local-worker correlation token injected by `scripts/e2e-s2-krater.sh` with Wrangler's
+   * `--var`. It prevents this run from borrowing a stale listener and makes the static capability
+   * insufficient by itself. It is not a same-UID secrecy boundary: local peers can inspect argv
+   * and process environments. The loopback bind is the network boundary.
+   */
+  S2_HARNESS_TOKEN?: string;
+  /** A non-secret, per-worker identifier returned only after token authentication. */
+  S2_HARNESS_RUN_ID?: string;
 }
 
 const S2_LOCAL_HARNESS_CAPABILITY = "enabled";
 const HARNESS_PATH_PREFIX = "/__s2/";
+const HARNESS_TOKEN_HEADER = "x-s2-harness-token";
+const HARNESS_TOKEN_PATTERN = /^[a-f0-9]{64}$/;
+const HARNESS_RUN_ID_PATTERN = /^[a-f0-9]{32}$/;
 
 /**
  * Whether the harness surface exists at all in this environment.
  *
- * Hostname alone was the wrong control. `assertLoopbackOnly` inspects `url.hostname`, which is
- * derived from the request's Host header — a value the client sends. It also guarded only two
- * of the routes, leaving `/__s2/tamper-envelope` and `/__s2/redact-content`, both mutations,
- * with no check at all. A binding cannot be forged over the wire: an environment that does not
- * declare it has no harness routes, whatever Host it is asked for.
+ * Hostname is not a security boundary: it is derived from the client-supplied Host header. The
+ * dev server is bound to loopback by the shell harness, which excludes network peers. Every
+ * `/__s2/` request also presents a per-run token so readiness and mutations cannot be borrowed
+ * from a stale local listener. Same-UID local peers are explicitly outside that token boundary.
+ * Deployed configurations omit the static capability entirely.
  */
 function harnessEnabled(env: KraterHarnessEnv): boolean {
-  return env.S2_LOCAL_HARNESS === S2_LOCAL_HARNESS_CAPABILITY;
+  return (
+    env.S2_LOCAL_HARNESS === S2_LOCAL_HARNESS_CAPABILITY &&
+    typeof env.S2_HARNESS_TOKEN === "string" &&
+    HARNESS_TOKEN_PATTERN.test(env.S2_HARNESS_TOKEN) &&
+    typeof env.S2_HARNESS_RUN_ID === "string" &&
+    HARNESS_RUN_ID_PATTERN.test(env.S2_HARNESS_RUN_ID)
+  );
+}
+
+function harnessRequestAuthorized(request: Request, env: KraterHarnessEnv): boolean {
+  return harnessEnabled(env) && request.headers.get(HARNESS_TOKEN_HEADER) === env.S2_HARNESS_TOKEN;
 }
 
 function response(body: unknown, status = 200): Response {
@@ -164,12 +186,6 @@ async function chainHeadTriggerSql(db: D1Database): Promise<string> {
     );
   }
   return sql;
-}
-
-function assertLoopbackOnly(url: URL): void {
-  if (url.hostname !== "127.0.0.1" && url.hostname !== "localhost" && url.hostname !== "[::1]") {
-    throw new KraterValidationError("the local S2 harness is loopback-only.");
-  }
 }
 
 /**
@@ -394,6 +410,11 @@ function redactionReason(body: Record<string, unknown>): string {
  * A local-only S-2 harness entrypoint. It is not wired into Stoa's production
  * router; scripts/e2e-s2-krater.sh starts this file directly under Wrangler so
  * the same `D1Database` implementation that backs Workers executes Krater.
+ *
+ * The static local capability is necessary but insufficient. Every route also requires the
+ * correlation token supplied when this specific Worker starts. This check occurs before body
+ * parsing and before D1 access; an absent or wrong token is intentionally indistinguishable
+ * from an absent capability. This is a run-attribution guard, not authority over same-UID peers.
  */
 async function handleHarnessRequest(
   request: Request,
@@ -401,20 +422,22 @@ async function handleHarnessRequest(
   _ctx: ExecutionContext,
 ): Promise<Response> {
   const url = new URL(request.url);
-  // Before parsing, before touching D1: without the capability the harness surface is not
-  // merely refused, it is absent. 404 rather than 403 so an environment that lacks the binding
-  // does not confirm that these paths mean anything.
-  if (url.pathname.startsWith(HARNESS_PATH_PREFIX) && !harnessEnabled(env)) {
+  // Before parsing, before touching D1: without both the local capability and this worker's
+  // per-run token the harness surface is not merely refused, it is absent. 404 rather than 403
+  // so a deployed environment does not confirm that these paths mean anything.
+  if (url.pathname.startsWith(HARNESS_PATH_PREFIX) && !harnessRequestAuthorized(request, env)) {
     return response({ code: "KRATER_HARNESS_DISABLED" }, 404);
   }
   let surface: "read" | "write" = "read";
   try {
-    // Every capability-enabled harness route remains local-only. This is deliberately before
-    // route dispatch, body parsing, and any D1 call so an attacker-controlled Host cannot turn
-    // one of the ordinary harness mutations into a remotely reachable write surface.
-    if (url.pathname.startsWith(HARNESS_PATH_PREFIX)) assertLoopbackOnly(url);
+    if (request.method === "GET" && url.pathname === "/__s2/ready") {
+      // `harnessRequestAuthorized` above also established the validated run id. It is public
+      // correlation data, not the bearer token: the shell compares it to its freshly generated
+      // expected value to prove readiness belongs to this process rather than a stale listener.
+      return response({ status: "ready", run_id: env.S2_HARNESS_RUN_ID });
+    }
 
-    // Loopback-only. Reports the engine's chosen plan for the completeness probe that runs on
+    // Token-gated. Reports the engine's chosen plan for the completeness probe that runs on
     // every write. The caller supplies a problem id and nothing else — the statement text
     // lives in krater.ts and is the same constant the probe itself executes, so this cannot
     // drift from the query it describes and offers no surface for caller-supplied SQL.
@@ -423,7 +446,7 @@ async function handleHarnessRequest(
       return response(plan);
     }
 
-    // Loopback-only fixture route; see plantLegacyProblemForHarness.
+    // Token-gated fixture route; see plantLegacyProblemForHarness.
     if (request.method === "POST" && url.pathname === "/__s2/legacy/plant") {
       surface = "write";
       const body = await readBody(request);

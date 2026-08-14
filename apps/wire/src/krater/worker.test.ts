@@ -5,6 +5,9 @@ import type { D1Database, ExecutionContext } from "@cloudflare/workers-types";
 import worker from "./worker";
 
 const REPOSITORY_ROOT = resolve(import.meta.dir, "..", "..", "..", "..");
+const HARNESS_CAPABILITY = "a".repeat(64);
+const HARNESS_RUN_ID = "b".repeat(32);
+const NON_MATCHING_VALUE = "malformed";
 
 function context(): ExecutionContext {
   return {
@@ -24,11 +27,28 @@ function databaseThatMustNotBeTouched(): D1Database {
   ) as D1Database;
 }
 
-function harnessEnv(capability?: string): Parameters<typeof worker.fetch>[1] {
-  return {
-    DB: databaseThatMustNotBeTouched(),
-    S2_LOCAL_HARNESS: capability,
-  };
+interface HarnessEnvOptions {
+  capability?: string;
+  token?: string;
+  runId?: string;
+}
+
+function harnessEnv(options: HarnessEnvOptions = {}): Parameters<typeof worker.fetch>[1] {
+  const env: Parameters<typeof worker.fetch>[1] = { DB: databaseThatMustNotBeTouched() };
+  if (options.capability !== undefined) env.S2_LOCAL_HARNESS = options.capability;
+  if (options.token !== undefined) env.S2_HARNESS_TOKEN = options.token;
+  if (options.runId !== undefined) env.S2_HARNESS_RUN_ID = options.runId;
+  return env;
+}
+
+function harnessRequest(
+  pathname: string,
+  token: string | null = HARNESS_CAPABILITY,
+  init: RequestInit = {},
+): Request {
+  const headers = new Headers(init.headers);
+  if (token !== null) headers.set("x-s2-harness-token", token);
+  return new Request(`https://public.example${pathname}`, { ...init, headers });
 }
 
 function wranglerConfigs(directory: string): string[] {
@@ -48,13 +68,14 @@ function wranglerConfigs(directory: string): string[] {
 
 describe("S2 local harness boundary", () => {
   test("capability-absent requests are rejected before body parsing or D1", async () => {
+    const env = harnessEnv({ token: HARNESS_CAPABILITY, runId: HARNESS_RUN_ID });
+    expect("S2_LOCAL_HARNESS" in env).toBe(false);
     const response = await worker.fetch(
-      new Request("https://public.example/__s2/write", {
+      harnessRequest("/__s2/write", HARNESS_CAPABILITY, {
         method: "POST",
-        headers: { "content-type": "application/json" },
         body: "not-json",
       }),
-      harnessEnv(),
+      env,
       context(),
     );
 
@@ -62,17 +83,106 @@ describe("S2 local harness boundary", () => {
     expect(await response.json()).toEqual({ code: "KRATER_HARNESS_DISABLED" });
   });
 
-  test("enabled harness rejects a non-loopback write before body parsing or D1", async () => {
+  test("enabled harness rejects a wrong token before body parsing or D1", async () => {
     const response = await worker.fetch(
-      new Request("https://public.example/__s2/write", {
+      harnessRequest("/__s2/write", "c".repeat(64), {
         method: "POST",
-        headers: { "content-type": "application/json" },
         body: "not-json",
       }),
-      harnessEnv("enabled"),
+      harnessEnv({ capability: "enabled", token: HARNESS_CAPABILITY, runId: HARNESS_RUN_ID }),
       context(),
     );
 
+    expect(response.status).toBe(404);
+    expect(await response.json()).toEqual({ code: "KRATER_HARNESS_DISABLED" });
+  });
+
+  test("enabled harness rejects a missing per-worker token before body parsing or D1", async () => {
+    const response = await worker.fetch(
+      harnessRequest("/__s2/write", null, { method: "POST", body: "not-json" }),
+      harnessEnv({ capability: "enabled", token: HARNESS_CAPABILITY, runId: HARNESS_RUN_ID }),
+      context(),
+    );
+
+    expect(response.status).toBe(404);
+    expect(await response.json()).toEqual({ code: "KRATER_HARNESS_DISABLED" });
+  });
+
+  test("a static capability with a truly absent token binding is still absent before D1", async () => {
+    const env = harnessEnv({ capability: "enabled", runId: HARNESS_RUN_ID });
+    expect("S2_HARNESS_TOKEN" in env).toBe(false);
+    const response = await worker.fetch(
+      harnessRequest("/__s2/write", HARNESS_CAPABILITY, { method: "POST", body: "not-json" }),
+      env,
+      context(),
+    );
+
+    expect(response.status).toBe(404);
+    expect(await response.json()).toEqual({ code: "KRATER_HARNESS_DISABLED" });
+  });
+
+  test("a malformed token binding keeps the harness absent before D1", async () => {
+    const response = await worker.fetch(
+      harnessRequest("/__s2/write", NON_MATCHING_VALUE, { method: "POST", body: "not-json" }),
+      harnessEnv({ capability: "enabled", token: NON_MATCHING_VALUE, runId: HARNESS_RUN_ID }),
+      context(),
+    );
+
+    expect(response.status).toBe(404);
+    expect(await response.json()).toEqual({ code: "KRATER_HARNESS_DISABLED" });
+  });
+
+  test("a missing run-id binding keeps the harness absent before D1", async () => {
+    const env = harnessEnv({ capability: "enabled", token: HARNESS_CAPABILITY });
+    expect("S2_HARNESS_RUN_ID" in env).toBe(false);
+    const response = await worker.fetch(harnessRequest("/__s2/ready"), env, context());
+
+    expect(response.status).toBe(404);
+    expect(await response.json()).toEqual({ code: "KRATER_HARNESS_DISABLED" });
+  });
+
+  test("a malformed run-id binding keeps the harness absent before D1", async () => {
+    const response = await worker.fetch(
+      harnessRequest("/__s2/ready"),
+      harnessEnv({ capability: "enabled", token: HARNESS_CAPABILITY, runId: "not-a-run-id" }),
+      context(),
+    );
+
+    expect(response.status).toBe(404);
+    expect(await response.json()).toEqual({ code: "KRATER_HARNESS_DISABLED" });
+  });
+
+  test("an empty run-id binding keeps the harness absent before D1", async () => {
+    const response = await worker.fetch(
+      harnessRequest("/__s2/ready"),
+      harnessEnv({ capability: "enabled", token: HARNESS_CAPABILITY, runId: "" }),
+      context(),
+    );
+
+    expect(response.status).toBe(404);
+    expect(await response.json()).toEqual({ code: "KRATER_HARNESS_DISABLED" });
+  });
+
+  test("a matching token returns this worker's readiness identifier without D1", async () => {
+    const response = await worker.fetch(
+      harnessRequest("/__s2/ready"),
+      harnessEnv({ capability: "enabled", token: HARNESS_CAPABILITY, runId: HARNESS_RUN_ID }),
+      context(),
+    );
+
+    expect(response.status).toBe(200);
+    expect(await response.json()).toEqual({ status: "ready", run_id: HARNESS_RUN_ID });
+  });
+
+  test("a matching token reaches the route even when Host is not loopback", async () => {
+    const response = await worker.fetch(
+      harnessRequest("/__s2/cursor?problem_id=P-example"),
+      harnessEnv({ capability: "enabled", token: HARNESS_CAPABILITY, runId: HARNESS_RUN_ID }),
+      context(),
+    );
+
+    // The proxy throws on D1 access. A 400 proves the request passed the token gate rather than
+    // treating a client-controlled Host value as the access-control decision.
     expect(response.status).toBe(400);
     expect(await response.json()).toMatchObject({ code: "KRATER_READ_INVALID" });
   });
@@ -88,7 +198,11 @@ describe("S2 local harness boundary", () => {
 
     expect(capabilityConfigs).toEqual([
       "apps/wire/src/krater/wrangler.s2-legacy.toml",
+      "apps/wire/src/krater/wrangler.s2-upgrade.toml",
       "apps/wire/src/krater/wrangler.s2.toml",
     ]);
+    for (const config of configs) {
+      expect(readFileSync(join(REPOSITORY_ROOT, config), "utf8")).not.toContain("S2_HARNESS_TOKEN");
+    }
   });
 });

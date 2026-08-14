@@ -4,7 +4,8 @@ compatibility_date = "2026-08-13"
 compatibility_flags = ["nodejs_compat"]
 workers_dev = false
 
-# Local harness capability; see wrangler.s2.toml.
+# Local-only harness capability; see the wrangler.s2.toml, wrangler.s2-legacy.toml, and
+# wrangler.s2-upgrade.toml trio. No deployed config declares this variable.
 [vars]
 S2_LOCAL_HARNESS = "enabled"
 

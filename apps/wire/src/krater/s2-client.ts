@@ -1,5 +1,6 @@
 const origin = process.env.S2_ORIGIN;
 const phase = process.env.S2_PHASE ?? "exercise";
+const harnessToken = process.env.S2_HARNESS_TOKEN;
 
 const REVISION = process.env.S2_GIT_HEAD;
 const DIRTY_STATE = process.env.S2_GIT_DIRTY;
@@ -7,6 +8,7 @@ const SOURCE_DIGEST = process.env.S2_SOURCE_DIGEST;
 const SEED = "s2-local-chain-v1";
 const SCOPE = "local-workerd-d1-do";
 const BINDINGS = { d1: "DB", durable_object: "KRATER_OUTBOX", r2: null };
+const HARNESS_TOKEN_PATTERN = /^[a-f0-9]{64}$/;
 const SUCCESSFUL_BATCH_METRIC_SCOPE: "settled-db.batch-only" = "settled-db.batch-only";
 const FAILED_RETRY_BATCH_METRICS: "excluded-d1-error-has-no-meta" = "excluded-d1-error-has-no-meta";
 const WRITE_CLAIM_WALL_SCOPE: "writeClaim-entry-to-return" = "writeClaim-entry-to-return";
@@ -123,6 +125,12 @@ const emit = (record: Record<string, unknown>): void => {
 const fail = (code: string): never => {
   throw new Error(code);
 };
+
+function requireHarnessToken(): string {
+  const token = harnessToken;
+  if (typeof token === "string" && HARNESS_TOKEN_PATTERN.test(token)) return token;
+  return fail("S2_HARNESS_TOKEN_INVALID");
+}
 
 function asRecord(value: unknown): Record<string, unknown> {
   if (typeof value !== "object" || value === null || Array.isArray(value)) {
@@ -255,9 +263,13 @@ async function request(
   const eventId = requestEventId(body);
   const started = performance.now();
   try {
+    const token = requireHarnessToken();
     const fetchResponse = await fetch(`${origin}${pathname}`, {
       method,
-      headers: body === undefined ? undefined : { "content-type": "application/json" },
+      headers: {
+        ...(body === undefined ? {} : { "content-type": "application/json" }),
+        "x-s2-harness-token": token,
+      },
       body: body === undefined ? undefined : JSON.stringify(body),
       signal: AbortSignal.timeout(timeoutMs),
     });
@@ -1072,7 +1084,23 @@ async function legacyBoundedBackfillAfterRestart(): Promise<void> {
   );
 }
 
-async function upgradeExisting(): Promise<void> {
+type UpgradeEvidenceLane = "raw-sql" | "migration-journal";
+
+function upgradeScenario(
+  lane: UpgradeEvidenceLane,
+  stage: "existing" | "indexed" | "empty",
+): string {
+  if (lane === "migration-journal") {
+    if (stage === "existing") return "legacy-0001-current-migration-journal-backfill-tamper-replay";
+    if (stage === "indexed") return "current-migration-journal-indexed-healthy-write-replay";
+    return "legacy-0001-current-migration-journal-empty-write-replay";
+  }
+  if (stage === "existing") return "raw-sql-0004-existing-event-backfill-tamper-replay";
+  if (stage === "indexed") return "raw-sql-0005-indexed-healthy-write-replay";
+  return "raw-sql-0004-empty-database-fresh-write-replay";
+}
+
+async function upgradeExisting(lane: UpgradeEvidenceLane = "raw-sql"): Promise<void> {
   const preBackfillRead = await request(
     "GET",
     `/__s2/events?problem_id=${UPGRADE_EXISTING_PROBLEM}&since=0&limit=200`,
@@ -1157,7 +1185,7 @@ async function upgradeExisting(): Promise<void> {
     dirty_state: DIRTY_STATE,
     source_digest: SOURCE_DIGEST,
     bindings: BINDINGS,
-    scenario: "exact-old-0001-existing-event-forward-0004-backfill-tamper-replay",
+    scenario: upgradeScenario(lane, "existing"),
     seed: SEED,
     scope: SCOPE,
     request_id: null,
@@ -1179,12 +1207,13 @@ async function upgradeExisting(): Promise<void> {
 }
 
 /**
- * This phase runs only after `scripts/e2e-s2-krater.sh` applies 0005 to the same persisted
- * database that `upgradeExisting` exercised at exactly 0004. It proves the upgrade is not a
- * fresh-schema substitute: an already backfilled legacy subject takes the indexed, healthy
- * no-match preflight before accepting its next ordinary write.
+ * In the raw-SQL lane, this follows the observed 0004 -> 0005 transition on the same persisted
+ * database, so it proves that an already backfilled legacy subject takes the indexed healthy
+ * no-match preflight before its next ordinary write. The migration-journal caller starts only
+ * after the complete journal is applied; there it proves final indexed behavior, not the raw
+ * one-migration transition.
  */
-async function upgradeIndexed(): Promise<void> {
+async function upgradeIndexed(lane: UpgradeEvidenceLane = "raw-sql"): Promise<void> {
   assertIndexedProbePlan(
     await readProbePlan(UPGRADE_EXISTING_PROBLEM, "upgrade-indexed-probe-plan"),
   );
@@ -1216,7 +1245,7 @@ async function upgradeIndexed(): Promise<void> {
     dirty_state: DIRTY_STATE,
     source_digest: SOURCE_DIGEST,
     bindings: BINDINGS,
-    scenario: "exact-0004-existing-event-forward-0005-indexed-healthy-write-replay",
+    scenario: upgradeScenario(lane, "indexed"),
     seed: SEED,
     scope: SCOPE,
     request_id: null,
@@ -1237,7 +1266,7 @@ async function upgradeIndexed(): Promise<void> {
   });
 }
 
-async function upgradeEmpty(): Promise<void> {
+async function upgradeEmpty(lane: UpgradeEvidenceLane = "raw-sql"): Promise<void> {
   await seed(UPGRADE_EMPTY_PROBLEM, "upgrade-empty-old-database-seed");
   const appended = await write(
     writeBody(1, UPGRADE_EMPTY_PROBLEM, "Fresh claim after an empty legacy database upgrade."),
@@ -1257,7 +1286,7 @@ async function upgradeEmpty(): Promise<void> {
     dirty_state: DIRTY_STATE,
     source_digest: SOURCE_DIGEST,
     bindings: BINDINGS,
-    scenario: "exact-old-0001-empty-database-forward-0004-fresh-write-replay",
+    scenario: upgradeScenario(lane, "empty"),
     seed: SEED,
     scope: SCOPE,
     request_id: null,
@@ -1604,11 +1633,17 @@ async function main(): Promise<void> {
   if (SOURCE_DIGEST === undefined || !/^[0-9a-f]{64}$/.test(SOURCE_DIGEST)) {
     fail("S2_SOURCE_DIGEST_INVALID");
   }
+  requireHarnessToken();
   if (phase === "exercise") return exercise();
   if (phase === "restart-verify") return restartVerify();
   if (phase === "upgrade-existing") return upgradeExisting();
   if (phase === "upgrade-indexed") return upgradeIndexed();
   if (phase === "upgrade-empty") return upgradeEmpty();
+  if (phase === "upgrade-journal-existing") {
+    await upgradeExisting("migration-journal");
+    return upgradeIndexed("migration-journal");
+  }
+  if (phase === "upgrade-journal-empty") return upgradeEmpty("migration-journal");
   fail("S2_PHASE_INVALID");
 }
 

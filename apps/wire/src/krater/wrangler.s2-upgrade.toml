@@ -1,18 +1,18 @@
-name = "asimposium-s2-krater-local"
+name = "asimposium-s2-krater-upgrade"
 main = "worker.ts"
 compatibility_date = "2026-08-13"
 compatibility_flags = ["nodejs_compat"]
 workers_dev = false
 
-# The /__s2/ harness surface exists only in this local-only trio: wrangler.s2.toml,
-# wrangler.s2-legacy.toml, and wrangler.s2-upgrade.toml. No deployed configuration declares it,
-# so the diagnostic and fixture routes are absent in production rather than refused there.
+# This is the third local-only harness config alongside wrangler.s2.toml and
+# wrangler.s2-legacy.toml. It is used after the legacy config created the exact 0001 database,
+# retaining that database identity while switching to the repository migration journal.
 [vars]
 S2_LOCAL_HARNESS = "enabled"
 
 [[d1_databases]]
 binding = "DB"
-database_name = "asimposium-s2-krater-local"
+database_name = "asimposium-s2-krater-legacy"
 database_id = "00000000-0000-0000-0000-000000000000"
 migrations_dir = "../../../../db/migrations"
 

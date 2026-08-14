@@ -1,7 +1,7 @@
 PRAGMA foreign_keys = ON;
 
--- Exact pre-integrity Krater migration fixture. The upgrade harness applies
--- this alone before applying the repository's forward migrations.
+-- S-2's deliberately small Krater nucleus. Later migrations extend this schema
+-- to the full Fable §10.3 census; they do not replace its event/projection law.
 CREATE TABLE problems (
   id TEXT PRIMARY KEY,
   public_seq INTEGER NOT NULL DEFAULT 0 CHECK (public_seq >= 0),
