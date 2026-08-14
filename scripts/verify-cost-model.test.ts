@@ -107,6 +107,7 @@ function runStandaloneCli(args: readonly string[]) {
     cwd: process.cwd(),
     stdout: "pipe",
     stderr: "pipe",
+    timeout: 2_000,
   });
   return {
     exitCode: completed.exitCode,
@@ -496,13 +497,18 @@ describe("S7 cost verifier", () => {
     const missingDirectory = mkdtempSync(join(tmpdir(), "asimposium-s7-cost-missing-"));
     const missingPath = join(missingDirectory, "receipt-that-does-not-exist.json");
     const nonRegularDirectory = mkdtempSync(join(tmpdir(), "asimposium-s7-cost-directory-"));
+    const fifoDirectory = mkdtempSync(join(tmpdir(), "asimposium-s7-cost-fifo-"));
+    const fifoPath = join(fifoDirectory, "receipt.fifo");
+    const mkfifo = Bun.spawnSync({ cmd: ["mkfifo", fifoPath], stdout: "pipe", stderr: "pipe" });
+    expect(mkfifo.exitCode).toBe(0);
     const missing = runStandaloneCli(["--receipt", missingPath]);
     const oversized = runStandaloneCli(["--receipt", oversizedPath]);
     const malformed = runStandaloneCli(["--receipt", malformedPath]);
     const extraKey = runStandaloneCli(["--receipt", extraKeyPath]);
     const nonRegular = runStandaloneCli(["--receipt", nonRegularDirectory]);
+    const fifo = runStandaloneCli(["--receipt", fifoPath]);
 
-    for (const completed of [missing, oversized, malformed, extraKey, nonRegular]) {
+    for (const completed of [missing, oversized, malformed, extraKey, nonRegular, fifo]) {
       expect(completed.exitCode).toBe(78);
       expect(completed.stderr).toBe("");
     }
@@ -526,14 +532,19 @@ describe("S7 cost verifier", () => {
       status: "blocked",
       code: "S2_COST_RECEIPT_UNREADABLE",
     });
+    expect(parseJsonOutput(fifo.stdout)).toMatchObject({
+      status: "blocked",
+      code: "S2_COST_RECEIPT_UNREADABLE",
+    });
 
-    for (const completed of [missing, oversized, malformed, extraKey, nonRegular]) {
+    for (const completed of [missing, oversized, malformed, extraKey, nonRegular, fifo]) {
       expect(completed.stdout).not.toContain(missingPath);
       expect(completed.stdout).not.toContain(oversizedPath);
       expect(completed.stdout).not.toContain(malformedPath);
       expect(completed.stdout).not.toContain(extraKeyPath);
       expect(completed.stdout).not.toContain(malformedContent);
       expect(completed.stdout).not.toContain(extraKeyValue);
+      expect(completed.stdout).not.toContain(fifoPath);
     }
   });
 

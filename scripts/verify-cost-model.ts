@@ -8,7 +8,7 @@
  */
 
 import { createHash } from "node:crypto";
-import { closeSync, fstatSync, openSync, readSync } from "node:fs";
+import { closeSync, constants, fstatSync, openSync, readSync } from "node:fs";
 
 import type { KraterPreflightCost, KraterWriteResult } from "../apps/wire/src/krater/krater.ts";
 import {
@@ -758,7 +758,10 @@ function readReceiptBytes(receiptPath: string): Uint8Array {
   let bytes: Uint8Array | undefined;
   let failure: unknown;
   try {
-    descriptor = openSync(receiptPath, "r");
+    // A blocking read-only open on a FIFO waits forever before fstat can reject
+    // it as non-regular. O_NONBLOCK makes every operator-supplied path reach
+    // the descriptor-type check under the same bounded CLI contract.
+    descriptor = openSync(receiptPath, constants.O_RDONLY | constants.O_NONBLOCK);
     const before = fstatSync(descriptor);
     if (!before.isFile() || !Number.isSafeInteger(before.size) || before.size < 0) {
       throw new CostVerifierError("S2_COST_RECEIPT_UNREADABLE", "receipt cannot be read.");
