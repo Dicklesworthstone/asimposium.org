@@ -4,8 +4,11 @@ import {
   buildCostVerifierDiagnostic,
   calculateFableWorkload,
   FABLE_WORKED_EXAMPLE,
+  FABLE_WORKED_EXAMPLE_ASSUMPTIONS,
+  MAX_S2_COST_RECEIPT_BYTES,
   REQUIRED_ROW_TOTAL_EXCLUSIONS,
   receiptDigest,
+  runCostVerifierCli,
   S2_COST_METRIC_SCOPE,
   S2_COST_RECEIPT_RECORD,
   S2_COST_RECEIPT_SCHEMA_VERSION,
@@ -51,12 +54,34 @@ function validReceipt(overrides: Partial<S2CostMeasurementReceipt> = {}): S2Cost
   };
 }
 
-function verifiedFixture(receipt = validReceipt()) {
-  const bytes = JSON.stringify(receipt);
-  return verifyCostModel(FABLE_WORKED_EXAMPLE, receipt, bytes, {
+function receiptText(receipt = validReceipt()): string {
+  return JSON.stringify(receipt);
+}
+
+function receiptBytes(receipt = validReceipt()): Uint8Array {
+  return new TextEncoder().encode(receiptText(receipt));
+}
+
+function verifiedFixture(
+  receipt = validReceipt(),
+  expected = {
     run_id: receipt.run_id,
     revision: receipt.revision,
     source_digest: receipt.source_digest,
+  },
+) {
+  const bytes = receiptBytes(receipt);
+  return verifyCostModel(FABLE_WORKED_EXAMPLE, bytes, expected);
+}
+
+function mutableReceipt(): Record<string, unknown> {
+  return JSON.parse(new TextDecoder().decode(receiptBytes())) as Record<string, unknown>;
+}
+
+function assertInvalidReceipt(receipt: Record<string, unknown>): void {
+  expect(verifyCostModel(FABLE_WORKED_EXAMPLE, JSON.stringify(receipt))).toMatchObject({
+    status: "blocked",
+    code: "S2_COST_RECEIPT_INVALID",
   });
 }
 
@@ -78,6 +103,7 @@ describe("S7 cost verifier", () => {
         unit: "requests / second",
       },
     ]);
+    expect(verifyCostModel().assumptions).toEqual(FABLE_WORKED_EXAMPLE_ASSUMPTIONS);
   });
 
   test("rejects non-integral cadence rather than rounding", () => {
@@ -90,7 +116,7 @@ describe("S7 cost verifier", () => {
     expect(error).toMatchObject({ code: "WORKLOAD_CADENCE_NOT_INTEGRAL" });
   });
 
-  test("accepts only a complete scoped S2 cost receipt", () => {
+  test("parses and reports the exact receipt bytes as the sole authority", () => {
     const accepted = verifiedFixture();
     expect(accepted.code).toBe("COST_MODEL_EXTERNAL_MEASUREMENTS_UNAVAILABLE");
     expect(accepted.s2).toMatchObject({
@@ -100,12 +126,61 @@ describe("S7 cost verifier", () => {
       write_receipt_count: 3,
     });
 
+    const originalBytes = receiptBytes();
+    const changedBytes = receiptBytes(validReceipt({ sum_retry_count: 2 }));
+    const original = verifyCostModel(FABLE_WORKED_EXAMPLE, originalBytes);
+    const changed = verifyCostModel(FABLE_WORKED_EXAMPLE, changedBytes);
+    if (original.s2.state !== "accepted-local" || changed.s2.state !== "accepted-local") {
+      throw new Error("valid byte fixtures were not accepted");
+    }
+    expect(changed.s2.artifact_digest).not.toBe(original.s2.artifact_digest);
+    expect(original.s2.measured_counters.sum_retry_count).toBe(1);
+    expect(changed.s2.measured_counters.sum_retry_count).toBe(2);
+
     const invalid = verifyCostModel(
       FABLE_WORKED_EXAMPLE,
-      { ...validReceipt(), write_receipt_count: 0 },
-      JSON.stringify(validReceipt()),
+      receiptBytes(
+        validReceipt({
+          write_receipt_count: 0,
+        }),
+      ),
     );
     expect(invalid).toMatchObject({ status: "blocked", code: "S2_COST_RECEIPT_INVALID" });
+  });
+
+  test("carries receipt provenance and measured counters without claiming current Git", () => {
+    const result = verifiedFixture(validReceipt({ dirty_state: "dirty" }));
+    if (result.s2.state !== "accepted-local") throw new Error("fixture receipt was not accepted");
+
+    expect(result.s2).toMatchObject({
+      receipt_provenance: {
+        run_id: "s2-cost-fixture",
+        revision: REVISION,
+        source_digest: SOURCE_DIGEST,
+        dirty_state: "dirty",
+      },
+      measured_counters: {
+        write_receipt_count: 3,
+        sum_successful_batch_rows_read: 30,
+        sum_successful_batch_rows_written: 12,
+        sum_preflight_rows_read: 9,
+        sum_preflight_rows_written: 0,
+        sum_preflight_statements: 9,
+        sum_retry_count: 1,
+      },
+      local_p95_ms: { write_phase: 111.5, preflight_wall: 12.5, write_claim_wall: 156.5 },
+    });
+
+    const diagnostic = buildCostVerifierDiagnostic(result, "cost-model-test");
+    expect(diagnostic).toMatchObject({
+      git_revision: "unavailable",
+      cost_model: {
+        s2: {
+          receipt_provenance: { revision: REVISION, dirty_state: "dirty" },
+          measured_counters: { sum_preflight_statements: 9, sum_retry_count: 1 },
+        },
+      },
+    });
   });
 
   test("labels S2 row metrics as known lower-bound subtotals", () => {
@@ -133,19 +208,23 @@ describe("S7 cost verifier", () => {
     expect(JSON.stringify(result)).not.toContain("promotion_d1_rows");
   });
 
-  test("blocks instead of zero-filling absent CPU R2 DO pack delta cursor or price inputs", () => {
-    const result = verifyCostModel();
-    expect(result).toMatchObject({ status: "blocked", code: "S2_COST_MEASUREMENT_UNAVAILABLE" });
-    expect(result.unknowns).toEqual(
+  test("keeps the same unknowns for unavailable invalid and accepted-local receipts", () => {
+    const unavailable = verifyCostModel();
+    const invalid = verifyCostModel(FABLE_WORKED_EXAMPLE, "{");
+    const accepted = verifiedFixture();
+    expect(unavailable.unknowns).toEqual(invalid.unknowns);
+    expect(accepted.unknowns).toEqual(unavailable.unknowns);
+    expect(unavailable.unknowns).toEqual(
       expect.arrayContaining([
         "worker_cpu_ms",
         "r2_operations_and_storage",
         "durable_object_alarm_cost",
         "pack_delta_and_cursor_rows",
         "provider_price",
+        "deployed_performance_budget_verdict",
       ]),
     );
-    expect(JSON.stringify(result)).not.toContain('"worker_cpu_ms":0');
+    expect(JSON.stringify(accepted)).not.toContain('"worker_cpu_ms":0');
   });
 
   test("does not treat local p95 as a Fable performance pass", () => {
@@ -164,7 +243,7 @@ describe("S7 cost verifier", () => {
       schema_version: "1.0",
       record: "summary",
       status: "blocked",
-      artifact_digest: receiptDigest(JSON.stringify(validReceipt())),
+      artifact_digest: receiptDigest(receiptBytes()),
     });
     expect(serialized).not.toContain("/Users/");
     expect(serialized).not.toContain("asimp_ag_");
@@ -172,32 +251,234 @@ describe("S7 cost verifier", () => {
     expect(serialized).not.toMatch(/authorization|cookie|workshop text/i);
   });
 
-  test("mutating metric scope exclusion or provenance makes the result blocked", () => {
-    const mutations: Array<[string, unknown, Parameters<typeof verifyCostModel>[3]]> = [
-      ["metric scope", { ...validReceipt(), metric_scope: "all-d1-rows" }, undefined],
+  test("rejects mutations in every receipt scope binding provenance count and p95 guard", () => {
+    const mutations: Array<readonly [string, (receipt: Record<string, unknown>) => void]> = [
       [
-        "exclusion",
-        { ...validReceipt(), known_row_total_exclusions: ["failed-retry-batches-no-meta"] },
-        undefined,
+        "schema",
+        (receipt) => {
+          receipt.schema_version = "other";
+        },
       ],
-      ["provenance", validReceipt(), { source_digest: "c".repeat(64) }],
+      [
+        "record",
+        (receipt) => {
+          receipt.record = "other";
+        },
+      ],
+      [
+        "phase",
+        (receipt) => {
+          receipt.phase = "other";
+        },
+      ],
+      [
+        "scope",
+        (receipt) => {
+          receipt.scope = "remote";
+        },
+      ],
+      [
+        "status",
+        (receipt) => {
+          receipt.status = "fail";
+        },
+      ],
+      [
+        "metric scope",
+        (receipt) => {
+          receipt.metric_scope = "all-d1-rows";
+        },
+      ],
+      [
+        "successful batch scope",
+        (receipt) => {
+          receipt.successful_batch_metric_scope = "all";
+        },
+      ],
+      [
+        "failed retry scope",
+        (receipt) => {
+          receipt.failed_retry_batch_metrics = "included";
+        },
+      ],
+      [
+        "write claim scope",
+        (receipt) => {
+          receipt.write_claim_wall_scope = "partial";
+        },
+      ],
+      [
+        "binding d1",
+        (receipt) => {
+          (receipt.bindings as Record<string, unknown>).d1 = "OTHER";
+        },
+      ],
+      [
+        "binding durable object",
+        (receipt) => {
+          (receipt.bindings as Record<string, unknown>).durable_object = "OTHER";
+        },
+      ],
+      [
+        "binding r2",
+        (receipt) => {
+          (receipt.bindings as Record<string, unknown>).r2 = "R2";
+        },
+      ],
+      [
+        "run id",
+        (receipt) => {
+          receipt.run_id = "../bad";
+        },
+      ],
+      [
+        "revision",
+        (receipt) => {
+          receipt.revision = "not-a-revision";
+        },
+      ],
+      [
+        "source digest",
+        (receipt) => {
+          receipt.source_digest = "not-a-digest";
+        },
+      ],
+      [
+        "dirty state",
+        (receipt) => {
+          receipt.dirty_state = "unknown";
+        },
+      ],
+      [
+        "write receipt count",
+        (receipt) => {
+          receipt.write_receipt_count = 0;
+        },
+      ],
+      [
+        "successful rows read",
+        (receipt) => {
+          receipt.sum_successful_batch_rows_read = -1;
+        },
+      ],
+      [
+        "successful rows written",
+        (receipt) => {
+          receipt.sum_successful_batch_rows_written = -1;
+        },
+      ],
+      [
+        "preflight rows read",
+        (receipt) => {
+          receipt.sum_preflight_rows_read = -1;
+        },
+      ],
+      [
+        "preflight rows written",
+        (receipt) => {
+          receipt.sum_preflight_rows_written = -1;
+        },
+      ],
+      [
+        "preflight statements",
+        (receipt) => {
+          receipt.sum_preflight_statements = -1;
+        },
+      ],
+      [
+        "retry count",
+        (receipt) => {
+          receipt.sum_retry_count = -1;
+        },
+      ],
+      [
+        "write p95",
+        (receipt) => {
+          receipt.p95_write_phase_ms = -1;
+        },
+      ],
+      [
+        "preflight p95",
+        (receipt) => {
+          receipt.p95_preflight_wall_ms = -1;
+        },
+      ],
+      [
+        "write claim p95",
+        (receipt) => {
+          receipt.p95_write_claim_wall_ms = -1;
+        },
+      ],
+      [
+        "row exclusion",
+        (receipt) => {
+          receipt.known_row_total_exclusions = ["wrong"];
+        },
+      ],
     ];
 
-    for (const [_name, receipt, provenance] of mutations) {
-      const result = verifyCostModel(
-        FABLE_WORKED_EXAMPLE,
-        receipt,
-        JSON.stringify(receipt),
-        provenance,
-      );
-      expect(result).toMatchObject({ status: "blocked", code: "S2_COST_RECEIPT_INVALID" });
+    for (const [_name, mutate] of mutations) {
+      const receipt = mutableReceipt();
+      mutate(receipt);
+      assertInvalidReceipt(receipt);
+    }
+
+    for (const expected of [
+      { run_id: "other-run" },
+      { revision: "c".repeat(40) },
+      { source_digest: "d".repeat(64) },
+    ]) {
+      expect(verifyCostModel(FABLE_WORKED_EXAMPLE, receiptBytes(), expected)).toMatchObject({
+        status: "blocked",
+        code: "S2_COST_RECEIPT_INVALID",
+      });
     }
   });
 
-  test("receipt digest binds the exact bytes", () => {
-    const original = JSON.stringify(validReceipt());
-    const mutated = JSON.stringify({ ...validReceipt(), sum_retry_count: 2 });
-    expect(receiptDigest(original)).toHaveLength(64);
-    expect(receiptDigest(mutated)).not.toBe(receiptDigest(original));
+  test("caps receipt bytes and keeps malformed missing and argument failures distinct and safe", () => {
+    const oversized = new Uint8Array(MAX_S2_COST_RECEIPT_BYTES + 1);
+    expect(verifyCostModel(FABLE_WORKED_EXAMPLE, oversized)).toMatchObject({
+      status: "blocked",
+      code: "S2_COST_RECEIPT_TOO_LARGE",
+    });
+
+    const noReceipt = runCostVerifierCli([]);
+    const argumentError = runCostVerifierCli(["--receipt"]);
+    const malformedContent = "{s7-raw-content-should-not-appear";
+    const suppliedPath = "/Users/sensitive/s7-cost-receipt.json";
+    const malformed = runCostVerifierCli(["--receipt", suppliedPath], () =>
+      new TextEncoder().encode(malformedContent),
+    );
+    const missing = runCostVerifierCli(["--receipt", "s7-receipt-that-does-not-exist.json"]);
+    const tooLarge = runCostVerifierCli(["--receipt", suppliedPath], () => oversized);
+
+    expect(noReceipt.cost_model).toMatchObject({ code: "S2_COST_MEASUREMENT_UNAVAILABLE" });
+    expect(argumentError.cost_model).toMatchObject({ code: "COST_MODEL_ARGUMENT_INVALID" });
+    expect(malformed.cost_model).toMatchObject({ code: "S2_COST_RECEIPT_INVALID" });
+    expect(missing.cost_model).toMatchObject({ code: "S2_COST_MEASUREMENT_UNAVAILABLE" });
+    expect(tooLarge.cost_model).toMatchObject({ code: "S2_COST_RECEIPT_TOO_LARGE" });
+
+    for (const diagnostic of [argumentError, malformed, missing, tooLarge]) {
+      const serialized = JSON.stringify(diagnostic);
+      expect(serialized).not.toContain(suppliedPath);
+      expect(serialized).not.toContain(malformedContent);
+      expect(serialized).not.toContain("s7-receipt-that-does-not-exist.json");
+    }
+  });
+
+  test("standalone CLI returns an honest blocked diagnostic and exit 78", () => {
+    const completed = Bun.spawnSync({
+      cmd: [process.execPath, "scripts/verify-cost-model.ts", "--receipt"],
+      cwd: process.cwd(),
+      stdout: "pipe",
+      stderr: "pipe",
+    });
+    const output = new TextDecoder().decode(completed.stdout);
+    expect(completed.exitCode).toBe(78);
+    expect(JSON.parse(output)).toMatchObject({
+      status: "blocked",
+      code: "COST_MODEL_ARGUMENT_INVALID",
+    });
+    expect(output).not.toContain("/Users/");
   });
 });

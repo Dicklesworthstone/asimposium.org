@@ -24,6 +24,8 @@ export const S2_SUCCESSFUL_BATCH_SCOPE = "settled-db.batch-only";
 export const S2_FAILED_RETRY_SCOPE = "excluded-d1-error-has-no-meta";
 export const S2_WRITE_CLAIM_SCOPE = "writeClaim-entry-to-return";
 export const S2_LOCAL_SCOPE = "local-workerd-d1-do";
+/** A receipt is metadata, not an artifact body: fail closed before parsing large input. */
+export const MAX_S2_COST_RECEIPT_BYTES = 64 * 1024;
 
 export const REQUIRED_ROW_TOTAL_EXCLUSIONS = [
   "head-and-post-write-verification-reads-no-meta",
@@ -75,6 +77,29 @@ export const FABLE_WORKED_EXAMPLE: FableWorkedExampleInput = {
   lurkers: 10_000,
   cursor_poll_seconds: 10,
 };
+
+export interface CostModelAssumption {
+  readonly code: "FABLE_ACTIVE_TIME_INFERRED";
+  readonly status: "inferred";
+  readonly active_seconds_per_fellow_day: 14_400;
+  readonly active_hours_per_fellow_day: 4;
+  readonly basis: string;
+}
+
+/**
+ * §15 gives the daily read total and cadences but does not state an active-day
+ * duration. Four hours is inferred from 19,200 reads / (80 fellows × 60 s).
+ */
+export const FABLE_WORKED_EXAMPLE_ASSUMPTIONS: readonly CostModelAssumption[] = [
+  {
+    code: "FABLE_ACTIVE_TIME_INFERRED",
+    status: "inferred",
+    active_seconds_per_fellow_day: 14_400,
+    active_hours_per_fellow_day: 4,
+    basis:
+      "Derived from Fable §15's 19,200 pack reads/day, 80 working Fellows, and 60-second pack cadence; not stated as a plan input.",
+  },
+];
 
 export interface FableWorkloadArithmetic {
   readonly problems: number;
@@ -133,6 +158,13 @@ export interface ExactObservedRatio {
 export interface AcceptedLocalMeasurement {
   readonly state: "accepted-local";
   readonly artifact_digest: string;
+  /** Provenance asserted by the receipt, not the verifier process's current Git state. */
+  readonly receipt_provenance: {
+    readonly run_id: string;
+    readonly revision: string;
+    readonly source_digest: string;
+    readonly dirty_state: "clean" | "dirty";
+  };
   readonly scope: typeof S2_LOCAL_SCOPE;
   readonly bindings: {
     readonly d1: "DB";
@@ -144,6 +176,16 @@ export interface AcceptedLocalMeasurement {
   readonly failed_retry_batch_metrics: typeof S2_FAILED_RETRY_SCOPE;
   readonly write_claim_wall_scope: typeof S2_WRITE_CLAIM_SCOPE;
   readonly write_receipt_count: number;
+  /** Counters observed in the receipt; none is promoted to a complete D1-row total. */
+  readonly measured_counters: {
+    readonly write_receipt_count: number;
+    readonly sum_successful_batch_rows_read: number;
+    readonly sum_successful_batch_rows_written: number;
+    readonly sum_preflight_rows_read: number;
+    readonly sum_preflight_rows_written: number;
+    readonly sum_preflight_statements: number;
+    readonly sum_retry_count: number;
+  };
   readonly known_settled_batch_rows_read: number;
   readonly known_settled_batch_rows_written: number;
   readonly known_preflight_rows_read: number;
@@ -170,6 +212,8 @@ export interface UnavailableMeasurement {
 export type CostVerificationCode =
   | "S2_COST_MEASUREMENT_UNAVAILABLE"
   | "S2_COST_RECEIPT_INVALID"
+  | "S2_COST_RECEIPT_TOO_LARGE"
+  | "COST_MODEL_ARGUMENT_INVALID"
   | "COST_MODEL_EXTERNAL_MEASUREMENTS_UNAVAILABLE";
 
 export interface CostVerificationResult {
@@ -178,6 +222,7 @@ export interface CostVerificationResult {
   readonly workload: FableWorkloadArithmetic;
   readonly s2: AcceptedLocalMeasurement | UnavailableMeasurement;
   readonly source_discrepancies: readonly SourceDiscrepancy[];
+  readonly assumptions: readonly CostModelAssumption[];
   readonly unknowns: readonly string[];
 }
 
@@ -376,7 +421,7 @@ function parseExclusions(
   return REQUIRED_ROW_TOTAL_EXCLUSIONS;
 }
 
-export function parseS2CostMeasurementReceipt(value: unknown): S2CostMeasurementReceipt {
+function parseS2CostMeasurementReceiptValue(value: unknown): S2CostMeasurementReceipt {
   const receipt = asRecord(value);
   requireExactString(receipt, "schema_version", S2_COST_RECEIPT_SCHEMA_VERSION);
   requireExactString(receipt, "record", S2_COST_RECEIPT_RECORD);
@@ -430,21 +475,46 @@ export function parseS2CostMeasurementReceipt(value: unknown): S2CostMeasurement
   };
 }
 
-export function receiptDigest(receiptBytes: string): string {
+export function receiptDigest(receiptBytes: Uint8Array): string {
   return createHash("sha256").update(receiptBytes).digest("hex");
+}
+
+/**
+ * Receipt bytes are the sole verifier input. The parser deliberately lives at
+ * this boundary, so a pre-parsed object can never disagree with the bytes that
+ * are digested and reported as the local artifact.
+ */
+export function parseS2CostMeasurementReceiptBytes(
+  receiptBytes: Uint8Array,
+): S2CostMeasurementReceipt {
+  if (!(receiptBytes instanceof Uint8Array)) {
+    throw new CostVerifierError("S2_COST_RECEIPT_INVALID", "receipt must be UTF-8 JSON bytes.");
+  }
+  if (receiptBytes.byteLength > MAX_S2_COST_RECEIPT_BYTES) {
+    throw new CostVerifierError("S2_COST_RECEIPT_TOO_LARGE", "receipt exceeds the byte limit.");
+  }
+
+  let value: unknown;
+  try {
+    value = JSON.parse(new TextDecoder("utf-8", { fatal: true }).decode(receiptBytes)) as unknown;
+  } catch {
+    throw new CostVerifierError("S2_COST_RECEIPT_INVALID", "receipt is not valid JSON.");
+  }
+  return parseS2CostMeasurementReceiptValue(value);
 }
 
 function assertExpectedProvenance(
   receipt: S2CostMeasurementReceipt,
   expected: ExpectedReceiptProvenance | undefined,
 ): void {
-  if (expected === undefined) return;
-  if (
-    (expected.run_id !== undefined && receipt.run_id !== expected.run_id) ||
-    (expected.revision !== undefined && receipt.revision !== expected.revision) ||
-    (expected.source_digest !== undefined && receipt.source_digest !== expected.source_digest)
-  ) {
-    throw new CostVerifierError("S2_COST_RECEIPT_INVALID", "receipt provenance does not match.");
+  if (expected !== undefined) {
+    if (
+      (expected.run_id !== undefined && receipt.run_id !== expected.run_id) ||
+      (expected.revision !== undefined && receipt.revision !== expected.revision) ||
+      (expected.source_digest !== undefined && receipt.source_digest !== expected.source_digest)
+    ) {
+      throw new CostVerifierError("S2_COST_RECEIPT_INVALID", "receipt provenance does not match.");
+    }
   }
 }
 
@@ -455,6 +525,19 @@ function ratio(numerator: number, denominator: number): ExactObservedRatio {
     unit: "observed rows / selected settled write receipt",
   };
 }
+
+const COST_MODEL_UNKNOWNS = [
+  "complete_write_row_totals",
+  "pack_delta_and_cursor_rows",
+  "worker_cpu_ms",
+  "r2_operations_and_storage",
+  "durable_object_alarm_cost",
+  "edge_cache_hit_rate",
+  "deployed_traffic",
+  "provider_price",
+  "route_to_receipt_mapping",
+  "deployed_performance_budget_verdict",
+] as const;
 
 function unavailableResult(
   workload: FableWorkloadArithmetic,
@@ -467,38 +550,32 @@ function unavailableResult(
     workload,
     s2: { state, artifact_digest: null },
     source_discrepancies: sourceDiscrepancies(workload),
-    unknowns: [
-      "complete_write_row_totals",
-      "pack_delta_and_cursor_rows",
-      "worker_cpu_ms",
-      "r2_operations_and_storage",
-      "durable_object_alarm_cost",
-      "edge_cache_hit_rate",
-      "deployed_traffic",
-      "provider_price",
-      "route_to_receipt_mapping",
-    ],
+    assumptions: FABLE_WORKED_EXAMPLE_ASSUMPTIONS,
+    unknowns: COST_MODEL_UNKNOWNS,
   };
 }
 
 export function verifyCostModel(
   workloadInput: FableWorkedExampleInput = FABLE_WORKED_EXAMPLE,
-  rawReceipt?: unknown,
-  receiptBytes?: string,
+  receiptBytes?: Uint8Array,
   expectedProvenance?: ExpectedReceiptProvenance,
 ): CostVerificationResult {
   const workload = calculateFableWorkload(workloadInput);
-  if (rawReceipt === undefined || receiptBytes === undefined) {
+  if (receiptBytes === undefined) {
     return unavailableResult(workload, "unavailable", "S2_COST_MEASUREMENT_UNAVAILABLE");
   }
 
   let receipt: S2CostMeasurementReceipt;
   try {
-    receipt = parseS2CostMeasurementReceipt(rawReceipt);
+    receipt = parseS2CostMeasurementReceiptBytes(receiptBytes);
     assertExpectedProvenance(receipt, expectedProvenance);
   } catch (error) {
     if (error instanceof CostVerifierError) {
-      return unavailableResult(workload, "invalid", "S2_COST_RECEIPT_INVALID");
+      const code =
+        error.code === "S2_COST_RECEIPT_TOO_LARGE"
+          ? "S2_COST_RECEIPT_TOO_LARGE"
+          : "S2_COST_RECEIPT_INVALID";
+      return unavailableResult(workload, "invalid", code);
     }
     throw error;
   }
@@ -513,6 +590,12 @@ export function verifyCostModel(
     s2: {
       state: "accepted-local",
       artifact_digest: receiptDigest(receiptBytes),
+      receipt_provenance: {
+        run_id: receipt.run_id,
+        revision: receipt.revision,
+        source_digest: receipt.source_digest,
+        dirty_state: receipt.dirty_state,
+      },
       scope: receipt.scope,
       bindings: receipt.bindings,
       metric_scope: receipt.metric_scope,
@@ -520,6 +603,15 @@ export function verifyCostModel(
       failed_retry_batch_metrics: receipt.failed_retry_batch_metrics,
       write_claim_wall_scope: receipt.write_claim_wall_scope,
       write_receipt_count: count,
+      measured_counters: {
+        write_receipt_count: count,
+        sum_successful_batch_rows_read: receipt.sum_successful_batch_rows_read,
+        sum_successful_batch_rows_written: receipt.sum_successful_batch_rows_written,
+        sum_preflight_rows_read: receipt.sum_preflight_rows_read,
+        sum_preflight_rows_written: receipt.sum_preflight_rows_written,
+        sum_preflight_statements: receipt.sum_preflight_statements,
+        sum_retry_count: receipt.sum_retry_count,
+      },
       known_settled_batch_rows_read: receipt.sum_successful_batch_rows_read,
       known_settled_batch_rows_written: receipt.sum_successful_batch_rows_written,
       known_preflight_rows_read: receipt.sum_preflight_rows_read,
@@ -538,18 +630,8 @@ export function verifyCostModel(
       known_row_total_exclusions: receipt.known_row_total_exclusions,
     },
     source_discrepancies: sourceDiscrepancies(workload),
-    unknowns: [
-      "complete_write_row_totals",
-      "pack_delta_and_cursor_rows",
-      "worker_cpu_ms",
-      "r2_operations_and_storage",
-      "durable_object_alarm_cost",
-      "edge_cache_hit_rate",
-      "deployed_traffic",
-      "provider_price",
-      "route_to_receipt_mapping",
-      "deployed_performance_budget_verdict",
-    ],
+    assumptions: FABLE_WORKED_EXAMPLE_ASSUMPTIONS,
+    unknowns: COST_MODEL_UNKNOWNS,
   };
 }
 
@@ -567,11 +649,13 @@ export function buildCostVerifierDiagnostic(
   const now = new Date().toISOString();
   const accepted = result.s2.state === "accepted-local" ? result.s2 : undefined;
   const runIdentity = receiptDigest(
-    JSON.stringify({
-      runId,
-      workload: result.workload,
-      receipt: accepted?.artifact_digest ?? "unavailable",
-    }),
+    new TextEncoder().encode(
+      JSON.stringify({
+        runId,
+        workload: result.workload,
+        receipt: accepted?.artifact_digest ?? "unavailable",
+      }),
+    ),
   );
   const event: CostVerifierDiagnostic = {
     schema_version: HARNESS_SCHEMA_VERSION,
@@ -621,31 +705,44 @@ export function buildCostVerifierDiagnostic(
   return event;
 }
 
-function readJsonReceipt(receiptPath: string): { readonly value: unknown; readonly bytes: string } {
-  let bytes: string;
+export type ReceiptReader = (receiptPath: string) => Uint8Array;
+
+function readReceiptBytes(receiptPath: string): Uint8Array {
   try {
-    bytes = readFileSync(receiptPath, "utf8");
+    return readFileSync(receiptPath);
   } catch {
     throw new CostVerifierError("S2_COST_MEASUREMENT_UNAVAILABLE", "receipt cannot be read.");
-  }
-  try {
-    return { value: JSON.parse(bytes) as unknown, bytes };
-  } catch {
-    throw new CostVerifierError("S2_COST_RECEIPT_INVALID", "receipt is not valid JSON.");
   }
 }
 
 function parseCliArguments(argv: readonly string[]): string | undefined {
   if (argv.length === 0) return undefined;
-  if (argv.length === 2 && argv[0] === "--receipt" && argv[1] !== undefined) return argv[1];
-  throw new CostVerifierError(
-    "COST_MODEL_ARGUMENT_INVALID",
-    "usage: bun scripts/verify-cost-model.ts [--receipt <s2-cost-input.json>]",
-  );
+  if (argv.length === 2 && argv[0] === "--receipt" && argv[1] !== undefined && argv[1] !== "") {
+    return argv[1];
+  }
+  throw new CostVerifierError("COST_MODEL_ARGUMENT_INVALID", "invalid cost-verifier arguments.");
+}
+
+function cliFailureResult(error: unknown): CostVerificationResult {
+  const workload = calculateFableWorkload(FABLE_WORKED_EXAMPLE);
+  if (!(error instanceof CostVerifierError)) {
+    return unavailableResult(workload, "invalid", "S2_COST_RECEIPT_INVALID");
+  }
+  switch (error.code) {
+    case "COST_MODEL_ARGUMENT_INVALID":
+      return unavailableResult(workload, "invalid", "COST_MODEL_ARGUMENT_INVALID");
+    case "S2_COST_MEASUREMENT_UNAVAILABLE":
+      return unavailableResult(workload, "unavailable", "S2_COST_MEASUREMENT_UNAVAILABLE");
+    case "S2_COST_RECEIPT_TOO_LARGE":
+      return unavailableResult(workload, "invalid", "S2_COST_RECEIPT_TOO_LARGE");
+    default:
+      return unavailableResult(workload, "invalid", "S2_COST_RECEIPT_INVALID");
+  }
 }
 
 export function runCostVerifierCli(
   argv: readonly string[] = process.argv.slice(2),
+  readReceipt: ReceiptReader = readReceiptBytes,
 ): CostVerifierDiagnostic {
   let result: CostVerificationResult;
   try {
@@ -653,15 +750,10 @@ export function runCostVerifierCli(
     if (receiptPath === undefined) {
       result = verifyCostModel();
     } else {
-      const receipt = readJsonReceipt(receiptPath);
-      result = verifyCostModel(FABLE_WORKED_EXAMPLE, receipt.value, receipt.bytes);
+      result = verifyCostModel(FABLE_WORKED_EXAMPLE, readReceipt(receiptPath));
     }
   } catch (error) {
-    const code =
-      error instanceof CostVerifierError && error.code === "S2_COST_MEASUREMENT_UNAVAILABLE"
-        ? "S2_COST_MEASUREMENT_UNAVAILABLE"
-        : "S2_COST_RECEIPT_INVALID";
-    result = unavailableResult(calculateFableWorkload(FABLE_WORKED_EXAMPLE), "invalid", code);
+    result = cliFailureResult(error);
   }
   return buildCostVerifierDiagnostic(result);
 }
