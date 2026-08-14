@@ -1184,6 +1184,12 @@ write_evidence_receipt() {
   bun --eval '
     import { createHash, randomUUID } from "node:crypto";
     import {
+      parseS2CostEvidenceManifestBytes,
+      S2_COST_EVIDENCE_MANIFEST_VERSION,
+      S2_COST_MANIFEST_RELATIVE_PATH,
+      S2_COST_RECEIPT_RELATIVE_PATH,
+    } from "@asimposium/contracts";
+    import {
       closeSync,
       constants,
       fstatSync,
@@ -1283,12 +1289,14 @@ write_evidence_receipt() {
     };
 
     try {
-      if (!root || !receiptPath || lstatSync(root).isSymbolicLink()) throw new Error("root");
+      if (!root || !receiptPath) throw new Error("root");
+      const rootStat = lstatSync(root);
+      if (!rootStat.isDirectory() || rootStat.isSymbolicLink()) throw new Error("root");
       visit(root);
       files.sort((left, right) => left.path.localeCompare(right.path));
       const retainedBytes = files.reduce((sum, file) => sum + file.bytes, 0);
       if (files.length + 1 > maxFiles || retainedBytes > maxBytes) throw new Error("bound");
-      if (costReceiptRelativePath !== "s2-cost-input.json") throw new Error("cost-receipt-path");
+      if (costReceiptRelativePath !== S2_COST_RECEIPT_RELATIVE_PATH) throw new Error("cost-receipt-path");
       const costReceipt = files.find((file) => file.path === costReceiptRelativePath);
       const costReceiptSummary =
         !publishCostReceipt || costReceipt === undefined
@@ -1304,7 +1312,7 @@ write_evidence_receipt() {
               };
             })();
       const manifest = {
-        manifest_version: "s2-krater-evidence-v2",
+        manifest_version: S2_COST_EVIDENCE_MANIFEST_VERSION,
         run_id: process.env.S2_RECEIPT_RUN_ID,
         revision: process.env.S2_RECEIPT_REVISION,
         dirty_state: process.env.S2_RECEIPT_DIRTY_STATE,
@@ -1324,6 +1332,10 @@ write_evidence_receipt() {
       };
       const body = `${JSON.stringify(manifest)}\n`;
       if (retainedBytes + Buffer.byteLength(body) > maxBytes) throw new Error("bound");
+      if (relativeReceiptPath !== `${S2_RECEIPT_ROOT ?? ""}/${S2_COST_MANIFEST_RELATIVE_PATH}`) {
+        throw new Error("manifest-path");
+      }
+      parseS2CostEvidenceManifestBytes(Buffer.from(body, "utf8"));
       writeExclusiveDurably(receiptPath, body);
       const manifestDigest = new Bun.CryptoHasher("sha256").update(body).digest("hex");
       console.log(JSON.stringify({
@@ -1368,6 +1380,16 @@ write_s2_cost_publication() {
   S2_PUBLICATION_PATH="${S2_COST_PUBLICATION_PATH}" \
   bun --eval '
     import { createHash, randomUUID } from "node:crypto";
+    import {
+      parseS2CostEvidenceManifestBytes,
+      parseS2CostReceiptPublicationBytes,
+      S2_COST_EVIDENCE_MANIFEST_VERSION,
+      S2_COST_MANIFEST_RELATIVE_PATH,
+      S2_COST_PUBLICATION_RECORD,
+      S2_COST_PUBLICATION_RELATIVE_PATH,
+      S2_COST_PUBLICATION_SCHEMA_VERSION,
+      S2_COST_RECEIPT_RELATIVE_PATH,
+    } from "@asimposium/contracts";
     import {
       closeSync,
       constants,
@@ -1432,11 +1454,13 @@ write_s2_cost_publication() {
       }
     };
     try {
-      if (!root || lstatSync(root).isSymbolicLink()) throw new Error("root");
+      if (!root) throw new Error("root");
+      const rootStat = lstatSync(root);
+      if (!rootStat.isDirectory() || rootStat.isSymbolicLink()) throw new Error("root");
       if (
-        resolve(manifestPath) !== resolve(root, "manifest.json") ||
-        resolve(receiptPath) !== resolve(root, "s2-cost-input.json") ||
-        resolve(publicationPath) !== resolve(root, "s2-cost-publication.json")
+        resolve(manifestPath) !== resolve(root, S2_COST_MANIFEST_RELATIVE_PATH) ||
+        resolve(receiptPath) !== resolve(root, S2_COST_RECEIPT_RELATIVE_PATH) ||
+        resolve(publicationPath) !== resolve(root, S2_COST_PUBLICATION_RELATIVE_PATH)
       ) throw new Error("path");
       for (const pathname of [manifestPath, receiptPath]) {
         const stat = lstatSync(pathname);
@@ -1444,19 +1468,20 @@ write_s2_cost_publication() {
       }
       const manifestBytes = readFileSync(manifestPath);
       const receiptBytes = readFileSync(receiptPath);
-      const manifest = JSON.parse(manifestBytes.toString("utf8"));
+      const manifest = parseS2CostEvidenceManifestBytes(manifestBytes);
       const phases = manifest.local_phase_status;
       if (
-        manifest.manifest_version !== "s2-krater-evidence-v2" || manifest.exit_code !== 78 ||
-        !manifest.s2_cost_receipt || manifest.s2_cost_receipt.path !== "s2-cost-input.json" ||
+        manifest.manifest_version !== S2_COST_EVIDENCE_MANIFEST_VERSION || manifest.exit_code !== 78 ||
+        !manifest.s2_cost_receipt || manifest.s2_cost_receipt.path !== S2_COST_RECEIPT_RELATIVE_PATH ||
         manifest.s2_cost_receipt.digest !== digest(receiptBytes) ||
+        manifest.s2_cost_receipt.bytes !== receiptBytes.byteLength ||
         !phases || Object.values(phases).some((value) => value !== "pass")
       ) throw new Error("attestation");
       const publication = {
-        schema_version: "s2-cost-publication-v1",
-        record: "s2_cost_receipt_publication",
-        manifest: { path: "manifest.json", digest: digest(manifestBytes) },
-        receipt: { path: "s2-cost-input.json", digest: digest(receiptBytes), bytes: receiptBytes.byteLength },
+        schema_version: S2_COST_PUBLICATION_SCHEMA_VERSION,
+        record: S2_COST_PUBLICATION_RECORD,
+        manifest: { path: S2_COST_MANIFEST_RELATIVE_PATH, digest: digest(manifestBytes) },
+        receipt: { path: S2_COST_RECEIPT_RELATIVE_PATH, digest: digest(receiptBytes), bytes: receiptBytes.byteLength },
         provenance: {
           run_id: manifest.run_id,
           revision: manifest.revision,
@@ -1465,7 +1490,9 @@ write_s2_cost_publication() {
         },
         local_phase_status: phases,
       };
-      writeExclusiveDurably(publicationPath, `${JSON.stringify(publication)}\n`);
+      const body = `${JSON.stringify(publication)}\n`;
+      parseS2CostReceiptPublicationBytes(Buffer.from(body, "utf8"));
+      writeExclusiveDurably(publicationPath, body);
       console.log(JSON.stringify({ tool: "bash+bun", package: "apps/wire", suite: "s2-cost-publication", status: "pass", reproduce: "scripts/e2e-s2-krater.sh" }));
     } catch {
       console.log(JSON.stringify({ tool: "bash+bun", package: "apps/wire", suite: "s2-cost-publication", status: "fail", code: "S2_COST_PUBLICATION_FAILED", reproduce: "scripts/e2e-s2-krater.sh" }));

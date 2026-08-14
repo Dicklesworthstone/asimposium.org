@@ -28,8 +28,6 @@ import {
   S2_FAILED_RETRY_SCOPE,
   S2_LOCAL_SCOPE,
   type S2CostMeasurementReceipt,
-  type S2CostEvidenceManifest,
-  type S2CostReceiptPublication,
   S2CostReceiptContractError,
   S2_SUCCESSFUL_BATCH_SCOPE,
   S2_WRITE_CLAIM_SCOPE,

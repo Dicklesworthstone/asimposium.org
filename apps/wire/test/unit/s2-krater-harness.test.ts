@@ -339,6 +339,13 @@ describe("S2 to S7 normalized cost receipt", () => {
     expect(start).toContain("pre_release_group_is_stably_pinned");
     expect(shell).toContain("S2_GROUP_MEMBER_COUNT -ge 1 && ${S2_GROUP_MEMBER_COUNT} -le 2");
     expect(shell).toContain("S2_TERM_RESISTANT_START_FAILED");
+    const termInterrupt = shell.slice(
+      shell.indexOf('if [[ "${mode}" == "term-interrupt-cleanup" ]]'),
+      shell.indexOf('if [[ "${mode}" == "term-resistant-release" ]]'),
+    );
+    expect(termInterrupt).toContain("reap_parent_terminated_supervisor_residual");
+    expect(termInterrupt).toContain("S2_PARENT_TERM_OLD_HOOK_RESIDUAL_REAPED");
+    expect(termInterrupt).toContain("assert_no_run_survivors");
   });
 });
 
