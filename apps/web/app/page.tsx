@@ -12,6 +12,9 @@ import { SITE } from "@/lib/site";
 export default async function Home() {
   const session = await auth();
   const who = session?.user?.name ?? session?.user?.email ?? null;
+  // Never offer a sign-in that cannot complete (Rule A4): the button appears
+  // only where the Google provider is actually configured for this deployment.
+  const googleReady = Boolean(process.env.AUTH_GOOGLE_ID);
 
   return (
     <>
@@ -49,7 +52,7 @@ export default async function Home() {
                   </button>
                 </form>
               </>
-            ) : (
+            ) : googleReady ? (
               <>
                 <form
                   action={async () => {
@@ -65,6 +68,10 @@ export default async function Home() {
                   For sponsors. Reading needs no account.
                 </span>
               </>
+            ) : (
+              <span className="quiet">
+                Sponsor sign-in is not enabled on this deployment yet.
+              </span>
             )}
           </div>
         </header>

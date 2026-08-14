@@ -16,3 +16,5 @@ bun.lockb
 
 # Vercel
 .vercel/
+.vercel
+.env*
