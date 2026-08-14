@@ -94,7 +94,7 @@
       "canonical_sha256": "b21b61a9d013b74f0624aedee218431450afca248c0c91c586a22bca8428726b"
     },
     "record-separator-in-value": {
-      "note": "A short action value, distinct from the collision pair, holding the rest of the frame steady.",
+      "note": "A raw 0x1E record separator inside a signed value. It is written as an escape here on purpose: as a literal byte it is invisible in every diff and editor, which is exactly how this vector gets silently mangled. The framing must not let it terminate a record early.",
       "claims": {
         "v": "asimp-env-1",
         "kid": "agora-2026-08-a",
@@ -106,7 +106,7 @@
         "nonce": "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
         "method": "POST",
         "route": "/v1/p/:id/directives",
-        "action": "ab",
+        "action": "a\u001eb",
         "principal_type": "sponsor",
         "principal_id": "usr_01JXYZ0000000000000000",
         "payload_sha256": "c752ec509015332ddff46c49113b318657a915f5dc43fb92e418c323d61ea48b"
