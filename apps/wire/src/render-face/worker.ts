@@ -36,6 +36,11 @@ const FORMAT_ALIASES: Readonly<Record<string, FaceFormat>> = {
 
 const ERROR_TYPE_BASE = "https://asimposium.org/errors/";
 
+/** Local-only Wrangler variables consumed by the S-5 harness. */
+export interface S5HarnessEnv {
+  readonly S5_SEED?: string;
+}
+
 /**
  * A contract refusal that teaches (Fable §7.7): the code, what was wrong, how to fix it,
  * and the allowed set. Policy refusals are the terse ones; this is not a policy refusal.
@@ -129,7 +134,7 @@ function ifNoneMatchMatches(header: string | null, etag: string): boolean {
 }
 
 export default {
-  async fetch(request: Request): Promise<Response> {
+  async fetch(request: Request, env: S5HarnessEnv = {}): Promise<Response> {
     const url = new URL(request.url);
 
     if (url.pathname !== "/__s5/face") return notFound();
@@ -166,7 +171,7 @@ export default {
       );
     }
 
-    const face = renderProjection(s5SpikeProjection(requestedVariant), format);
+    const face = renderProjection(s5SpikeProjection(requestedVariant, env.S5_SEED), format);
     // Computed over the bytes this response actually carries, so HEAD and GET agree and no
     // other representation can satisfy this validator.
     const etag = await representationEtag(face.body);

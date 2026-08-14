@@ -206,4 +206,21 @@ describe("the harness is a harness, not a product surface", () => {
     const body = await (await call("/__s5/face?variant=sponsor&format=json")).text();
     expect(body).toContain(s5Canary());
   });
+
+  test("a local S5_SEED is rendered through the typed Worker environment", async () => {
+    const seed = "s5-worker-nondefault-v1";
+    const sponsor = await harness.fetch(
+      new Request("http://127.0.0.1/__s5/face?variant=sponsor&format=json"),
+      { S5_SEED: seed },
+    );
+    const publicFace = await harness.fetch(
+      new Request("http://127.0.0.1/__s5/face?variant=public&format=json"),
+      { S5_SEED: seed },
+    );
+    const expected = renderProjection(s5SpikeProjection("sponsor", seed), "json");
+
+    expect(await sponsor.text()).toBe(expected.body);
+    expect(sponsor.headers.get("x-asimp-fingerprint")).toBe(expected.fingerprint);
+    expect(await publicFace.text()).not.toContain(s5Canary(seed));
+  });
 });

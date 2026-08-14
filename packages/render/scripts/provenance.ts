@@ -16,15 +16,32 @@
  * `source_digest` is the load-bearing field. `revision` is context.
  */
 
-import { readdirSync, readFileSync, statSync } from "node:fs";
+import {
+  closeSync,
+  constants,
+  type Dirent,
+  fstatSync,
+  lstatSync,
+  openSync,
+  readdirSync,
+  readFileSync,
+} from "node:fs";
 import { join, relative } from "node:path";
 
 /** Repository-relative roots whose bytes decide a spike result. Order is irrelevant; paths sort. */
 export const PROVENANCE_INPUTS: readonly string[] = [
   "packages/render/src",
+  "packages/render/scripts/diagnostics.ts",
   "packages/render/scripts/s5-spike.ts",
   "packages/render/scripts/provenance.ts",
+  "packages/render/test/_support/fixtures.ts",
+  "packages/render/test/contract/golden.test.ts",
+  "packages/render/test/golden/working-pack.html",
+  "packages/render/test/golden/working-pack.json",
+  "packages/render/test/golden/working-pack.md",
   "apps/wire/src/render-face",
+  "infra/wrangler.toml",
+  "scripts/e2e-s5-diptych.sh",
 ];
 
 export interface Provenance {
@@ -34,8 +51,28 @@ export interface Provenance {
   readonly source_files: number;
 }
 
+/** An input that cannot be read without widening or blocking the evidence boundary. */
+export class ProvenanceInputError extends Error {
+  constructor(
+    readonly path: string,
+    reason: string,
+  ) {
+    super(`refusing unsafe provenance input ${path}: ${reason}`);
+    this.name = "ProvenanceInputError";
+  }
+}
+
 function repoRoot(): string {
   return new URL("../../..", import.meta.url).pathname.replace(/\/$/, "");
+}
+
+function isMissing(error: unknown): boolean {
+  return (
+    typeof error === "object" &&
+    error !== null &&
+    "code" in error &&
+    (error as { readonly code?: unknown }).code === "ENOENT"
+  );
 }
 
 function git(args: string[]): { ok: boolean; out: string } {
@@ -48,27 +85,53 @@ function git(args: string[]): { ok: boolean; out: string } {
   return { ok: child.exitCode === 0, out: new TextDecoder().decode(child.stdout).trim() };
 }
 
-/** Every `.ts` file under the provenance inputs, repository-relative and sorted. */
+/**
+ * Executable provenance inputs, repository-relative and sorted.
+ *
+ * Directory inputs contribute TypeScript sources. Exact input files may use another
+ * extension when they are invoked configuration or checked golden bytes. That admits the
+ * named shell harness without accidentally pulling arbitrary documentation or shell files
+ * from a broad directory into the evidence set.
+ */
 export function provenanceFiles(root: string = repoRoot()): string[] {
   const found: string[] = [];
-  const walk = (absolute: string): void => {
-    let stats: ReturnType<typeof statSync>;
+  const walk = (absolute: string, explicitFile: boolean, requiredInput: boolean): void => {
+    const path = relative(root, absolute);
+    let stats: ReturnType<typeof lstatSync>;
     try {
-      stats = statSync(absolute);
-    } catch {
-      return;
+      // `stat` follows a symlink, which lets a directory input silently widen the evidence
+      // set. `lstat` is the no-follow boundary: every path is classified before traversal.
+      stats = lstatSync(absolute);
+    } catch (error) {
+      // Only descendants of an existing declared directory may be absent. A declared root is
+      // a required executable evidence input: silently skipping it would mint a digest for an
+      // incomplete source set.
+      if (isMissing(error) && !requiredInput) return;
+      if (isMissing(error)) throw new ProvenanceInputError(path, "declared input is missing");
+      throw new ProvenanceInputError(path, "could not inspect input");
     }
+    if (stats.isSymbolicLink())
+      throw new ProvenanceInputError(path, "symbolic links are not inputs");
     if (stats.isFile()) {
-      if (absolute.endsWith(".ts")) found.push(relative(root, absolute));
+      if (absolute.endsWith(".ts") || explicitFile) {
+        found.push(path);
+      }
       return;
     }
-    if (!stats.isDirectory()) return;
-    for (const entry of readdirSync(absolute, { withFileTypes: true, encoding: "utf8" })) {
+    if (!stats.isDirectory())
+      throw new ProvenanceInputError(path, "entry is not a regular file or directory");
+    let entries: Dirent<string>[];
+    try {
+      entries = readdirSync(absolute, { withFileTypes: true, encoding: "utf8" });
+    } catch {
+      throw new ProvenanceInputError(path, "could not read directory");
+    }
+    for (const entry of entries) {
       if (entry.name === "node_modules" || entry.name.startsWith(".")) continue;
-      walk(join(absolute, entry.name));
+      walk(join(absolute, entry.name), false, false);
     }
   };
-  for (const input of PROVENANCE_INPUTS) walk(join(root, input));
+  for (const input of PROVENANCE_INPUTS) walk(join(root, input), true, true);
   return found.sort();
 }
 
@@ -83,8 +146,33 @@ export async function sourceDigest(
   const parts: Uint8Array[] = [];
   const encoder = new TextEncoder();
   for (const file of files) {
+    const absolute = join(root, file);
+    // Recheck immediately before read. This rejects a FIFO or a later symlink replacement
+    // before `readFileSync` can block or follow it.
+    const stats = lstatSync(absolute);
+    if (stats.isSymbolicLink())
+      throw new ProvenanceInputError(file, "symbolic links are not inputs");
+    if (!stats.isFile()) throw new ProvenanceInputError(file, "entry is not a regular file");
+    let descriptor: number | undefined;
+    let bytes: Uint8Array;
+    try {
+      // O_NONBLOCK means a just-replaced FIFO cannot stall this process; O_NOFOLLOW keeps a
+      // symlink replacement from escaping the lstat boundary between classification and read.
+      descriptor = openSync(
+        absolute,
+        constants.O_RDONLY | constants.O_NONBLOCK | constants.O_NOFOLLOW,
+      );
+      if (!fstatSync(descriptor).isFile())
+        throw new ProvenanceInputError(file, "opened entry is not a regular file");
+      bytes = new Uint8Array(readFileSync(descriptor));
+    } catch (error) {
+      if (error instanceof ProvenanceInputError) throw error;
+      throw new ProvenanceInputError(file, "could not open regular input");
+    } finally {
+      if (descriptor !== undefined) closeSync(descriptor);
+    }
     parts.push(encoder.encode(`${file}\0`));
-    parts.push(new Uint8Array(readFileSync(join(root, file))));
+    parts.push(bytes);
     parts.push(encoder.encode("\0"));
   }
   const total = parts.reduce((sum, part) => sum + part.byteLength, 0);

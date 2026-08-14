@@ -14,13 +14,13 @@
  * convention here; `assertSecretSafe` refuses to emit a record that breaks it, and the
  * canary is reported only as a digest.
  *
- * Usage: bun packages/render/scripts/s5-spike.ts [--seed <string>]
+ * Usage: bun packages/render/scripts/s5-spike.ts [--seed <string>] [--run-id <safe-id>]
  */
 
 import { contentFingerprint, renderAllFaces, renderProjection } from "../src/index.ts";
 import { S5_SPIKE_CURSOR, S5_SPIKE_PROBLEM, s5Canary, s5SpikeProjection } from "../src/spike.ts";
 import type { FaceFormat, Projection } from "../src/types.ts";
-import { assertSecretSafe, formatDiagnostic } from "./diagnostics.ts";
+import { assertSafeRunId, assertSecretSafe, formatDiagnostic } from "./diagnostics.ts";
 import { type Provenance, provenance } from "./provenance.ts";
 
 const SPIKE = "s5-diptych";
@@ -31,14 +31,24 @@ function argument(name: string, fallback: string): string {
   return value ?? fallback;
 }
 
+const run: Provenance = await provenance();
+
+if (process.argv.includes("--provenance")) {
+  assertSecretSafe(run);
+  process.stdout.write(`${formatDiagnostic(run as unknown as never)}\n`);
+  process.exit(0);
+}
+
 const seed = argument("--seed", "s5-fixed-seed-v1");
+const runId = argument("--run-id", "s5-local-run");
+assertSafeRunId(runId);
 const canary = s5Canary(seed);
 const canaryDigest = contentFingerprint(canary);
-const run: Provenance = await provenance();
 
 interface SpikeRecord {
   readonly spike: string;
   readonly seed: string;
+  readonly run_id: string;
   readonly revision: string;
   readonly revision_state: string;
   readonly source_digest: string;
@@ -77,6 +87,7 @@ function emit(
   const record: SpikeRecord = {
     spike: SPIKE,
     seed,
+    run_id: runId,
     revision: run.revision,
     revision_state: run.revision_state,
     source_digest: run.source_digest,

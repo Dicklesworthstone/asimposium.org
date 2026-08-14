@@ -24,12 +24,23 @@ import {
   s5Canary,
   s5SpikeProjection,
 } from "@asimposium/render";
+import {
+  assertSafeRunId,
+  assertSafeS5Seed,
+  assertSecretSafe,
+  DiagnosticSafetyError,
+  formatDiagnostic,
+} from "../../../../packages/render/scripts/diagnostics.ts";
+import { provenance } from "../../../../packages/render/scripts/provenance.ts";
 
-const origin = process.env.S5_ORIGIN;
 const REPRO = "bash scripts/e2e-s5-diptych.sh";
-const canary = s5Canary();
+let origin: string;
+let seed: string;
+let canary: string;
+let diagnosticBase: Record<string, unknown>;
 
 let failures = 0;
+let diagnosticSafetyRefused = false;
 
 /**
  * The validator this checker expects: SHA-256 over the exact bytes the response carried.
@@ -43,10 +54,114 @@ async function representationEtag(body: string): Promise<string> {
   return `"sha256:${hex}"`;
 }
 
-function emit(record: Record<string, unknown>): void {
-  process.stdout.write(
-    `${JSON.stringify({ spike: "s5-diptych", phase: "worker-served", repro: REPRO, ...record })}\n`,
-  );
+function assertLoopbackS5Origin(value: string | undefined): string {
+  if (value === undefined) throw new DiagnosticSafetyError("origin", "is not supplied");
+  let parsed: URL;
+  try {
+    parsed = new URL(value);
+  } catch {
+    throw new DiagnosticSafetyError("origin", "is not a URL");
+  }
+  const port = Number(parsed.port);
+  if (
+    parsed.protocol !== "http:" ||
+    parsed.hostname !== "127.0.0.1" ||
+    parsed.username !== "" ||
+    parsed.password !== "" ||
+    !Number.isSafeInteger(port) ||
+    port < 1 ||
+    port > 65_535 ||
+    parsed.pathname !== "/" ||
+    parsed.search !== "" ||
+    parsed.hash !== ""
+  ) {
+    throw new DiagnosticSafetyError("origin", "is not an exact loopback HTTP origin");
+  }
+  return `http://127.0.0.1:${port}`;
+}
+
+async function initialize(): Promise<void> {
+  const candidateSeed = process.env.S5_SEED ?? "s5-fixed-seed-v1";
+  const candidateRunId = process.env.S5_RUN_ID ?? "s5-local-run";
+  // Validate before provenance or any request. Neither supplied value can reach a record
+  // until it has crossed the same renderer-owned secret-safety boundary as every emit.
+  assertSafeRunId(candidateRunId);
+  assertSafeS5Seed(candidateSeed);
+  const candidateOrigin = assertLoopbackS5Origin(process.env.S5_ORIGIN);
+  const run = await provenance();
+  const base = {
+    spike: "s5-diptych",
+    phase: "worker-served",
+    repro: REPRO,
+    run_id: candidateRunId,
+    seed: candidateSeed,
+    revision: run.revision,
+    revision_state: run.revision_state,
+    source_digest: run.source_digest,
+    source_files: run.source_files,
+  };
+  assertSecretSafe(base);
+  seed = candidateSeed;
+  origin = candidateOrigin;
+  canary = s5Canary(seed);
+  diagnosticBase = base;
+}
+
+/**
+ * Startup has no validated caller values or trustworthy source digest yet. The refusal is
+ * therefore fully static: it remains parseable and has every provenance key, but does not
+ * fabricate provenance or repeat the rejected environment value, path, error, or stack.
+ */
+function emitBoundaryRefusal(): void {
+  const refusal = {
+    spike: "s5-diptych",
+    phase: "worker-served",
+    repro: REPRO,
+    run_id: "s5-checker-refusal-v1",
+    seed: "<refused>",
+    revision: "unknown",
+    revision_state: "unknown",
+    source_digest: "unavailable",
+    source_files: 0,
+    assertion: "checker_boundary_refused",
+    status: "fail",
+    code: "CHECKER_BOUNDARY_REFUSED",
+    detail: "phase-2 checker startup was refused by the safety boundary",
+  };
+  assertSecretSafe(refusal);
+  process.stdout.write(`${formatDiagnostic(refusal as unknown as never)}\n`);
+}
+
+/**
+ * The rejected value must not shape the refusal: an unsafe diagnostic is exactly the case
+ * where echoing the value, error message, or stack would repeat the leak we are preventing.
+ */
+function emitDiagnosticSafetyRefusal(): void {
+  const refusal = {
+    ...diagnosticBase,
+    assertion: "diagnostic_safety_refused",
+    status: "fail",
+    code: "DIAGNOSTIC_SAFETY_REFUSED",
+    detail: "a phase-2 diagnostic was refused by the secret-safety policy",
+  };
+  assertSecretSafe(refusal);
+  process.stdout.write(`${formatDiagnostic(refusal as unknown as never)}\n`);
+}
+
+function emit(record: Record<string, unknown>): boolean {
+  if (diagnosticSafetyRefused) return false;
+  const complete = { ...diagnosticBase, ...record };
+  try {
+    assertSecretSafe(complete);
+  } catch (error) {
+    if (!(error instanceof DiagnosticSafetyError)) throw error;
+    diagnosticSafetyRefused = true;
+    if (record.status === "pass") failures += 1;
+    emitDiagnosticSafetyRefusal();
+    return false;
+  }
+  process.stdout.write(`${formatDiagnostic(complete as unknown as never)}\n`);
+  return true;
 }
 
 function check(
@@ -73,18 +188,12 @@ function boundedDiff(left: string, right: string): Record<string, unknown> {
 }
 
 async function main(): Promise<void> {
-  if (origin === undefined) {
-    emit({ assertion: "origin_supplied", status: "fail", detail: "S5_ORIGIN is not set" });
-    process.exitCode = 1;
-    return;
-  }
-
   const formats: FaceFormat[] = ["md", "json", "html-fragment"];
   const variants: SpikeVariant[] = ["public", "sponsor"];
 
   for (const variant of variants) {
     for (const format of formats) {
-      const local = renderProjection(s5SpikeProjection(variant), format);
+      const local = renderProjection(s5SpikeProjection(variant, seed), format);
       const started = performance.now();
       const response = await fetch(`${origin}/__s5/face?variant=${variant}&format=${format}`);
       const served = await response.text();
@@ -113,8 +222,8 @@ async function main(): Promise<void> {
       check(
         `served_${format}_etag_is_a_sha256_of_the_representation`,
         servedEtag === (await representationEtag(served)),
-        `etag ${servedEtag}`,
-        context,
+        "served ETag did not match the local representation",
+        { ...context, etag: servedEtag },
       );
       check(
         `served_${format}_etag_is_not_the_projection_fingerprint`,
@@ -145,8 +254,8 @@ async function main(): Promise<void> {
           head.headers.get("etag") === servedEtag &&
           head.headers.get("content-type") === MEDIA_TYPES[format] &&
           (await head.text()).length === 0,
-        `HEAD status ${head.status} etag ${String(head.headers.get("etag"))}`,
-        context,
+        "HEAD headers or body disagreed with GET",
+        { ...context, etag: servedEtag, head_etag: head.headers.get("etag") ?? "" },
       );
 
       // Conditional replay: same validator, no body, same headers.
@@ -169,8 +278,8 @@ async function main(): Promise<void> {
       check(
         `served_${format}_304_keeps_the_validator`,
         conditional.headers.get("etag") === servedEtag,
-        `etag ${String(conditional.headers.get("etag"))}`,
-        context,
+        "304 did not keep the GET validator",
+        { ...context, etag: servedEtag, conditional_etag: conditional.headers.get("etag") ?? "" },
       );
 
       // `*` matches whenever a representation exists (RFC 9110 §13.1.2), and a weak
@@ -296,4 +405,11 @@ async function main(): Promise<void> {
   if (failures > 0) process.exitCode = 1;
 }
 
-await main();
+try {
+  await initialize();
+} catch {
+  emitBoundaryRefusal();
+  process.exitCode = 1;
+}
+
+if (process.exitCode !== 1) await main();

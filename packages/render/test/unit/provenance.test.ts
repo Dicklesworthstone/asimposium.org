@@ -5,23 +5,44 @@
  */
 
 import { describe, expect, test } from "bun:test";
-import { mkdirSync, mkdtempSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
 import {
   PROVENANCE_INPUTS,
+  ProvenanceInputError,
   provenance,
   provenanceFiles,
   sourceDigest,
 } from "../../scripts/provenance.ts";
 
-/** A throwaway tree shaped like the inputs, so the digest can be exercised in isolation. */
-function fixtureTree(bodies: Record<string, string>): string {
+const REQUIRED_INPUT_STUBS: Readonly<Record<string, string>> = {
+  "packages/render/scripts/diagnostics.ts": "export {};\n",
+  "packages/render/scripts/s5-spike.ts": "export {};\n",
+  "packages/render/scripts/provenance.ts": "export {};\n",
+  "packages/render/test/_support/fixtures.ts": "export {};\n",
+  "packages/render/test/contract/golden.test.ts": "export {};\n",
+  "packages/render/test/golden/working-pack.html": "<article></article>\n",
+  "packages/render/test/golden/working-pack.json": "{}\n",
+  "packages/render/test/golden/working-pack.md": "# golden\n",
+  "apps/wire/src/render-face/worker.ts": "export default {};\n",
+  "infra/wrangler.toml": 'name = "s5"\n',
+  "scripts/e2e-s5-diptych.sh": "#!/usr/bin/env bash\nexit 0\n",
+};
+
+/** A throwaway tree containing every declared input, with opt-out for missing-input refusals. */
+function fixtureTree(
+  bodies: Record<string, string>,
+  options: { readonly omit?: readonly string[] } = {},
+): string {
   const root = mkdtempSync(join(tmpdir(), "asimposium-prov-"));
-  mkdirSync(join(root, "packages/render/src"), { recursive: true });
-  mkdirSync(join(root, "packages/render/scripts"), { recursive: true });
-  mkdirSync(join(root, "apps/wire/src/render-face"), { recursive: true });
-  for (const [path, body] of Object.entries(bodies)) writeFileSync(join(root, path), body);
+  const omitted = new Set(options.omit ?? []);
+  for (const [path, body] of Object.entries({ ...REQUIRED_INPUT_STUBS, ...bodies })) {
+    if (omitted.has(path)) continue;
+    const absolute = join(root, path);
+    mkdirSync(dirname(absolute), { recursive: true });
+    writeFileSync(absolute, body);
+  }
   return root;
 }
 
@@ -54,19 +75,38 @@ describe("source digest", () => {
   test("covers the Worker harness as well as the renderer", () => {
     expect(PROVENANCE_INPUTS).toContain("apps/wire/src/render-face");
     expect(PROVENANCE_INPUTS).toContain("packages/render/src");
+    expect(PROVENANCE_INPUTS).toContain("packages/render/scripts/diagnostics.ts");
+    expect(PROVENANCE_INPUTS).toContain("packages/render/test/contract/golden.test.ts");
+    expect(PROVENANCE_INPUTS).toContain("packages/render/test/golden/working-pack.md");
+    expect(PROVENANCE_INPUTS).toContain("infra/wrangler.toml");
+    expect(PROVENANCE_INPUTS).toContain("scripts/e2e-s5-diptych.sh");
   });
 
-  test("counts only TypeScript inputs, and reports how many it hashed", async () => {
+  test("includes exact non-TypeScript evidence inputs without sweeping unrelated documentation", async () => {
     const root = fixtureTree({
       "packages/render/src/a.ts": "export const a = 1;\n",
       "packages/render/src/notes.md": "not an input\n",
       "apps/wire/src/render-face/worker.ts": "export default {};\n",
+      "scripts/e2e-s5-diptych.sh": "#!/usr/bin/env bash\nexit 0\n",
+      "scripts/unrelated.sh": "#!/usr/bin/env bash\necho unrelated\n",
+      "infra/wrangler.toml": 'name = "s5"\n',
+      "infra/notes.md": "not an input\n",
     });
     const { files } = await sourceDigest(root);
-    expect(files).toBe(2);
+    expect(files).toBe(12);
     expect(provenanceFiles(root)).toEqual([
       "apps/wire/src/render-face/worker.ts",
+      "infra/wrangler.toml",
+      "packages/render/scripts/diagnostics.ts",
+      "packages/render/scripts/provenance.ts",
+      "packages/render/scripts/s5-spike.ts",
       "packages/render/src/a.ts",
+      "packages/render/test/_support/fixtures.ts",
+      "packages/render/test/contract/golden.test.ts",
+      "packages/render/test/golden/working-pack.html",
+      "packages/render/test/golden/working-pack.json",
+      "packages/render/test/golden/working-pack.md",
+      "scripts/e2e-s5-diptych.sh",
     ]);
   });
 
@@ -76,6 +116,42 @@ describe("source digest", () => {
       expect(file.startsWith("/")).toBe(false);
       expect(file).not.toContain(root);
     }
+  });
+
+  test("refuses a symlinked provenance directory instead of widening the source set", () => {
+    const root = fixtureTree({ "packages/render/src/a.ts": "export const a = 1;\n" });
+    const outside = join(root, "outside");
+    mkdirSync(outside);
+    writeFileSync(join(outside, "widened.ts"), "export const widened = true;\n");
+    symlinkSync(outside, join(root, "packages/render/src/unexpected-link"));
+
+    expect(() => provenanceFiles(root)).toThrow(ProvenanceInputError);
+  });
+
+  test("refuses a FIFO explicit input before readFileSync can block", async () => {
+    const root = fixtureTree(
+      { "packages/render/src/a.ts": "export const a = 1;\n" },
+      { omit: ["packages/render/scripts/diagnostics.ts"] },
+    );
+    const fifo = join(root, "packages/render/scripts/diagnostics.ts");
+    const created = Bun.spawnSync({
+      cmd: ["mkfifo", fifo],
+      cwd: root,
+      stdout: "pipe",
+      stderr: "pipe",
+    });
+    expect(created.exitCode).toBe(0);
+
+    await expect(sourceDigest(root)).rejects.toThrow(ProvenanceInputError);
+  });
+
+  test("refuses a missing declared provenance input instead of hashing a partial source set", async () => {
+    const root = fixtureTree(
+      { "packages/render/src/a.ts": "export const a = 1;\n" },
+      { omit: ["scripts/e2e-s5-diptych.sh"] },
+    );
+
+    await expect(sourceDigest(root)).rejects.toThrow(ProvenanceInputError);
   });
 });
 
