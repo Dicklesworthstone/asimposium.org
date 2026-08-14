@@ -1,14 +1,17 @@
 const origin = process.env.S2_ORIGIN;
 const phase = process.env.S2_PHASE ?? "exercise";
 
-const REVISION = "s2-krater-v0.2";
+const REVISION = process.env.S2_GIT_HEAD;
+const DIRTY_STATE = process.env.S2_GIT_DIRTY;
+const SOURCE_DIGEST = process.env.S2_SOURCE_DIGEST;
 const SEED = "s2-local-chain-v1";
-const SCOPE = "local-workerd-d1";
-const BINDINGS = { d1: "DB", durable_object: null, r2: null };
+const SCOPE = "local-workerd-d1-do";
+const BINDINGS = { d1: "DB", durable_object: "KRATER_OUTBOX", r2: null };
 const CREATED_AT = "2026-08-14T00:00:00.000Z";
 const PRIMARY_PROBLEM = "P-s2";
 const SECONDARY_PROBLEM = "P-s2-b";
 const LARGE_PROBLEM = "P-s2-large";
+const OUTBOX_PROBLEM = "P-s2-outbox";
 
 interface WriteResult {
   event_id: string;
@@ -27,6 +30,7 @@ interface WriteResult {
   d1_sql_ms: number | null;
   lock_wait_ms: null;
   retry_count: number;
+  outbox_handoff: "armed" | "deferred" | "unavailable";
 }
 
 interface StateResult {
@@ -34,6 +38,7 @@ interface StateResult {
   counts: Record<string, number>;
   chain_digest: string;
   checkpoint_digest: string | null;
+  checkpoint_mode: "unsigned-v0";
 }
 
 interface RequestResult {
@@ -42,6 +47,22 @@ interface RequestResult {
   elapsedMs: number;
   contentType: string;
   requestId: string;
+}
+
+interface OutboxStatus {
+  active: number;
+  pending: number;
+  alarm_at: number | null;
+  owner_acquisitions: number;
+  max_active: number;
+  recovered_ownerships: number;
+  delivery_attempts: number;
+  delivered: number;
+  quarantined: number;
+  failures: number;
+  last_backoff_ms: number | null;
+  last_quarantine_code: string | null;
+  last_phase: string;
 }
 
 let requestCount = 0;
@@ -113,6 +134,8 @@ function requestDiagnostics(
     package: "apps/wire",
     suite: "s2-krater-local-d1",
     revision: REVISION,
+    dirty_state: DIRTY_STATE,
+    source_digest: SOURCE_DIGEST,
     bindings: BINDINGS,
     scenario,
     seed: SEED,
@@ -131,6 +154,7 @@ function requestDiagnostics(
     sql_ms: body === undefined ? null : nullableNumberAt(body, "d1_sql_ms"),
     lock_wait_ms: body === undefined ? null : nullableNumberAt(body, "lock_wait_ms"),
     retry_count: body === undefined ? null : nullableNumberAt(body, "retry_count"),
+    checkpoint_mode: body === undefined ? null : nullableStringAt(body, "checkpoint_mode"),
     assertion_diff: assertionDiff,
     status: response?.status ?? "transport-aborted",
     duration_ms: response?.elapsedMs ?? null,
@@ -207,6 +231,13 @@ function writeResult(body: Record<string, unknown>): WriteResult {
     d1_sql_ms: body.d1_sql_ms === null ? null : numberAt(body, "d1_sql_ms"),
     lock_wait_ms: body.lock_wait_ms === null ? null : fail("S2_RESPONSE_INVALID"),
     retry_count: numberAt(body, "retry_count"),
+    outbox_handoff: (() => {
+      const handoff = stringAt(body, "outbox_handoff");
+      if (handoff !== "armed" && handoff !== "deferred" && handoff !== "unavailable") {
+        fail("S2_RESPONSE_INVALID");
+      }
+      return handoff as WriteResult["outbox_handoff"];
+    })(),
   };
 }
 
@@ -222,6 +253,11 @@ function stateResult(body: Record<string, unknown>): StateResult {
     counts: typedCounts,
     chain_digest: stringAt(body, "chain_digest"),
     checkpoint_digest: body.checkpoint_digest === null ? null : stringAt(body, "checkpoint_digest"),
+    checkpoint_mode: (() => {
+      const mode = stringAt(body, "checkpoint_mode");
+      if (mode !== "unsigned-v0") fail("S2_CHECKPOINT_MODE_INVALID");
+      return mode;
+    })(),
   };
 }
 
@@ -238,6 +274,7 @@ function canonicalState(state: StateResult): string {
   return JSON.stringify({
     chain_digest: state.chain_digest,
     checkpoint_digest: state.checkpoint_digest,
+    checkpoint_mode: state.checkpoint_mode,
     counts: state.counts,
     cursor: state.cursor,
   });
@@ -261,10 +298,78 @@ async function write(
   body: Record<string, unknown>,
   scenario: string,
   timeoutMs?: number,
+  deferOutboxNudge = true,
 ): Promise<WriteResult> {
-  const result = await request("POST", "/__s2/write", scenario, body, timeoutMs);
+  const requestBody = deferOutboxNudge ? { ...body, s2_defer_outbox_nudge: true } : body;
+  const result = await request("POST", "/__s2/write", scenario, requestBody, timeoutMs);
   assertEqual(result.status, 200, "S2_WRITE_FAILED");
   return writeResult(result.body);
+}
+
+function outboxStatusResult(body: Record<string, unknown>): OutboxStatus {
+  return {
+    active: numberAt(body, "active"),
+    pending: numberAt(body, "pending"),
+    alarm_at: nullableNumberAt(body, "alarm_at"),
+    owner_acquisitions: numberAt(body, "owner_acquisitions"),
+    max_active: numberAt(body, "max_active"),
+    recovered_ownerships: numberAt(body, "recovered_ownerships"),
+    delivery_attempts: numberAt(body, "delivery_attempts"),
+    delivered: numberAt(body, "delivered"),
+    quarantined: numberAt(body, "quarantined"),
+    failures: numberAt(body, "failures"),
+    last_backoff_ms: nullableNumberAt(body, "last_backoff_ms"),
+    last_quarantine_code: nullableStringAt(body, "last_quarantine_code"),
+    last_phase: stringAt(body, "last_phase"),
+  };
+}
+
+async function outboxStatus(scenario: string): Promise<OutboxStatus> {
+  const result = await request("GET", "/__s2/outbox/status", scenario);
+  assertEqual(result.status, 200, "S2_OUTBOX_STATUS_FAILED");
+  return outboxStatusResult(result.body);
+}
+
+async function waitForOutbox(
+  scenario: string,
+  predicate: (status: OutboxStatus) => boolean,
+): Promise<OutboxStatus> {
+  const deadline = performance.now() + 8_000;
+  while (performance.now() < deadline) {
+    const current = await outboxStatus(scenario);
+    if (predicate(current)) return current;
+    await Bun.sleep(50);
+  }
+  const observed = await outboxStatus(`${scenario}-deadline-observation`);
+  emit({
+    tool: "bun",
+    tool_version: Bun.version,
+    package: "apps/wire",
+    suite: "s2-krater-local-d1",
+    revision: REVISION,
+    dirty_state: DIRTY_STATE,
+    source_digest: SOURCE_DIGEST,
+    bindings: BINDINGS,
+    scenario: `${scenario}-deadline-observation`,
+    seed: SEED,
+    scope: SCOPE,
+    request_id: null,
+    event_id: null,
+    pre_cursor: null,
+    post_cursor: null,
+    payload_sha256: null,
+    row_digest: null,
+    build_digest: null,
+    checkpoint_digest: null,
+    transaction_ms: null,
+    sql_ms: null,
+    lock_wait_ms: null,
+    retry_count: observed.delivery_attempts,
+    assertion_diff: `pending=${observed.pending};delivered=${observed.delivered};quarantined=${observed.quarantined};phase=${observed.last_phase}`,
+    status: "fail",
+    duration_ms: 8_000,
+  });
+  return fail("S2_OUTBOX_DEADLINE_EXCEEDED");
 }
 
 async function expectTransportAbort(
@@ -289,6 +394,91 @@ async function assertReplay(
   assertEqual(replay.status, 200, "S2_PROJECTION_REPLAY_FAILED");
   assertEqual(booleanAt(replay.body, "matches"), true, "S2_PROJECTION_REPLAY_MISMATCH");
   assertEqual(numberAt(replay.body, "event_count"), expectedEvents, "S2_REPLAY_PAGE_COUNT_INVALID");
+}
+
+async function exerciseOutboxDrainer(): Promise<void> {
+  await seed(OUTBOX_PROBLEM, "outbox-seed");
+  const before = await outboxStatus("outbox-before-auto-handoff");
+  const auto = await write(
+    writeBody(1, OUTBOX_PROBLEM, "Outbox automatic handoff claim."),
+    "outbox-automatic-handoff",
+    undefined,
+    false,
+  );
+  assertEqual(auto.outbox_handoff, "armed", "S2_OUTBOX_HANDOFF_NOT_ARMED");
+  const afterAuto = await waitForOutbox(
+    "outbox-auto-alarm-delivery",
+    (status) => status.delivered >= before.delivered + 1 && status.pending === 0,
+  );
+  assertEqual(afterAuto.max_active, 1, "S2_OUTBOX_AUTO_SINGLE_OWNER_INVALID");
+  const autoState = await state(OUTBOX_PROBLEM, "outbox-auto-visible-state");
+  for (const table of ["claims", "claim_projections", "events", "outbox"] as const) {
+    assertEqual(autoState.counts[table], 1, "S2_OUTBOX_AUTO_DUPLICATED_VISIBLE_ROW");
+  }
+
+  const concurrent = await write(
+    writeBody(2, OUTBOX_PROBLEM, "Outbox concurrent alarm claim."),
+    "outbox-concurrent-write",
+  );
+  assertEqual(concurrent.outbox_handoff, "deferred", "S2_OUTBOX_DEFERRED_WRITE_INVALID");
+  const nudges = await Promise.all(
+    Array.from({ length: 12 }, () =>
+      request("POST", "/__s2/outbox/nudge", "outbox-concurrent-alarm", { fault_mode: "none" }),
+    ),
+  );
+  for (const nudge of nudges) assertEqual(nudge.status, 202, "S2_OUTBOX_NUDGE_FAILED");
+  const afterConcurrent = await waitForOutbox(
+    "outbox-concurrent-alarm-delivery",
+    (status) => status.delivered >= afterAuto.delivered + 1 && status.pending === 0,
+  );
+  assertEqual(afterConcurrent.max_active, 1, "S2_OUTBOX_CONCURRENT_OWNERSHIP_VIOLATION");
+  assertEqual(afterConcurrent.active, 0, "S2_OUTBOX_ACTIVE_OWNER_LEAKED");
+
+  const transient = await write(
+    writeBody(3, OUTBOX_PROBLEM, "Outbox retry claim."),
+    "outbox-retry-write",
+  );
+  const failOnce = await request("POST", "/__s2/outbox/drain", "outbox-rearm-backoff", {
+    fault_mode: "fail-once",
+  });
+  assertEqual(failOnce.status, 200, "S2_OUTBOX_FAIL_ONCE_ROUTE_FAILED");
+  const retryScheduled = numberAt(failOnce.body, "retry_scheduled_ms");
+  assertEqual(retryScheduled >= 25 && retryScheduled <= 2_000, true, "S2_OUTBOX_BACKOFF_UNBOUNDED");
+  const afterRetry = await waitForOutbox(
+    "outbox-rearm-delivery",
+    (status) => status.delivered >= afterConcurrent.delivered + 1 && status.pending === 0,
+  );
+  assertEqual(
+    afterRetry.delivery_attempts >= before.delivery_attempts + 2,
+    true,
+    "S2_OUTBOX_NOT_AT_LEAST_ONCE",
+  );
+  assertEqual(transient.seq, 3, "S2_OUTBOX_RETRY_SEQUENCE_INVALID");
+
+  const held = await write(
+    writeBody(4, OUTBOX_PROBLEM, "Outbox kill-boundary claim."),
+    "outbox-hold-before-ack-write",
+  );
+  const malformed = await write(
+    writeBody(5, OUTBOX_PROBLEM, "Outbox malformed fixture claim."),
+    "outbox-malformed-write",
+  );
+  const planted = await request(
+    "POST",
+    "/__s2/outbox/plant-malformed",
+    "outbox-malformed-payload-negative",
+    { event_id: malformed.event_id },
+  );
+  assertEqual(planted.status, 201, "S2_OUTBOX_MALFORMED_FIXTURE_FAILED");
+  const hold = await request("POST", "/__s2/outbox/drain", "outbox-hold-before-ack", {
+    fault_mode: "hold-before-ack",
+  });
+  assertEqual(hold.status, 200, "S2_OUTBOX_HOLD_ROUTE_FAILED");
+  assertEqual(booleanAt(hold.body, "held_before_ack"), true, "S2_OUTBOX_HOLD_NOT_REACHED");
+  const heldStatus = await outboxStatus("outbox-kill-boundary-status");
+  assertEqual(heldStatus.last_phase, "held-before-ack", "S2_OUTBOX_KILL_BOUNDARY_NOT_DURABLE");
+  assertEqual(heldStatus.alarm_at === null, false, "S2_OUTBOX_KILL_REARM_MISSING");
+  assertEqual(held.seq, 4, "S2_OUTBOX_HOLD_SEQUENCE_INVALID");
 }
 
 async function exercise(): Promise<void> {
@@ -340,6 +530,7 @@ async function exercise(): Promise<void> {
     assertEqual(primaryState.counts[table], 13, "S2_PRIMARY_ROW_COUNT_INVALID");
   }
   if (primaryState.checkpoint_digest === null) fail("S2_CHECKPOINT_MISSING");
+  assertEqual(primaryState.checkpoint_mode, "unsigned-v0", "S2_CHECKPOINT_MODE_INVALID");
   const secondaryState = await state(SECONDARY_PROBLEM, "per-problem-cursor");
   assertEqual(secondaryState.cursor, 1, "S2_SECONDARY_CURSOR_INVALID");
 
@@ -485,6 +676,7 @@ async function exercise(): Promise<void> {
     writes.push(large);
   }
   await assertReplay(LARGE_PROBLEM, 201, "large-paginated-full-replay");
+  await exerciseOutboxDrainer();
 
   emit({
     tool: "bun",
@@ -524,6 +716,27 @@ async function restartVerify(): Promise<void> {
   assertEqual(primary.counts.integrity_checkpoints, 31, "S2_RESTART_CHECKPOINT_INVALID");
   await assertReplay(PRIMARY_PROBLEM, 31, "outbox-worker-restart-replay");
   await assertReplay(LARGE_PROBLEM, 201, "large-replay-after-worker-restart");
+  const recoveredOutbox = await waitForOutbox(
+    "outbox-kill-restart-recovery",
+    (status) =>
+      status.quarantined === 1 &&
+      status.pending === 1 &&
+      status.last_phase === "quarantined" &&
+      status.last_quarantine_code === "OUTBOX_PAYLOAD_INVALID",
+  );
+  assertEqual(recoveredOutbox.max_active, 1, "S2_OUTBOX_RESTART_OWNERSHIP_VIOLATION");
+  assertEqual(recoveredOutbox.active, 0, "S2_OUTBOX_RESTART_ACTIVE_OWNER_LEAKED");
+  assertEqual(recoveredOutbox.delivery_attempts >= 2, true, "S2_OUTBOX_RESTART_NOT_AT_LEAST_ONCE");
+  assertEqual(
+    recoveredOutbox.last_quarantine_code,
+    "OUTBOX_PAYLOAD_INVALID",
+    "S2_OUTBOX_QUARANTINE_DIAGNOSTIC_INVALID",
+  );
+  const outboxProblem = await state(OUTBOX_PROBLEM, "outbox-restart-visible-state");
+  for (const table of ["claims", "claim_projections", "events", "outbox"] as const) {
+    assertEqual(outboxProblem.counts[table], 5, "S2_OUTBOX_RESTART_DUPLICATED_VISIBLE_ROW");
+  }
+  await assertReplay(OUTBOX_PROBLEM, 5, "outbox-restart-visible-replay");
   emit({
     tool: "bun",
     tool_version: Bun.version,
@@ -531,13 +744,13 @@ async function restartVerify(): Promise<void> {
     suite: "s2-krater-local-d1",
     revision: REVISION,
     bindings: BINDINGS,
-    scenario: "outbox-pending-survives-worker-restart",
+    scenario: "outbox-crash-restart-at-least-once-without-visible-duplicates",
     seed: SEED,
     scope: SCOPE,
     request_id: null,
     event_id: null,
-    pre_cursor: 31,
-    post_cursor: 31,
+    pre_cursor: 4,
+    post_cursor: 4,
     payload_sha256: null,
     row_digest: null,
     build_digest: null,
@@ -545,7 +758,7 @@ async function restartVerify(): Promise<void> {
     transaction_ms: null,
     sql_ms: null,
     lock_wait_ms: null,
-    retry_count: 0,
+    retry_count: recoveredOutbox.delivery_attempts,
     assertion_diff: null,
     requests: requestCount,
     status: "pass",
@@ -555,6 +768,11 @@ async function restartVerify(): Promise<void> {
 
 async function main(): Promise<void> {
   if (origin === undefined) fail("S2_ORIGIN_MISSING");
+  if (REVISION === undefined || !/^[0-9a-f]{40}$/.test(REVISION)) fail("S2_GIT_HEAD_INVALID");
+  if (DIRTY_STATE !== "clean" && DIRTY_STATE !== "dirty") fail("S2_GIT_DIRTY_INVALID");
+  if (SOURCE_DIGEST === undefined || !/^[0-9a-f]{64}$/.test(SOURCE_DIGEST)) {
+    fail("S2_SOURCE_DIGEST_INVALID");
+  }
   if (phase === "exercise") return exercise();
   if (phase === "restart-verify") return restartVerify();
   fail("S2_PHASE_INVALID");

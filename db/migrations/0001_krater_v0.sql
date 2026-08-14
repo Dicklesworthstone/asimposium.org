@@ -5,7 +5,6 @@ PRAGMA foreign_keys = ON;
 CREATE TABLE problems (
   id TEXT PRIMARY KEY,
   public_seq INTEGER NOT NULL DEFAULT 0 CHECK (public_seq >= 0),
-  chain_digest TEXT NOT NULL,
   created_at TEXT NOT NULL,
   updated_at TEXT NOT NULL
 );
@@ -40,8 +39,6 @@ CREATE TABLE events (
   object_id TEXT NOT NULL,
   object_version INTEGER NOT NULL,
   payload_sha256 TEXT NOT NULL,
-  row_digest TEXT NOT NULL,
-  chain_digest TEXT NOT NULL,
   created_at TEXT NOT NULL,
   UNIQUE (problem_id, seq)
 );
@@ -49,66 +46,7 @@ CREATE TABLE events (
 CREATE TABLE event_content (
   event_id TEXT PRIMARY KEY REFERENCES events(id),
   payload_sha256 TEXT NOT NULL,
-  payload_json TEXT NOT NULL,
-  redacted_at TEXT,
-  redaction_reason TEXT
-);
-
--- Event envelopes are permanent facts. Content may later be replaced with a
--- public-safe tombstone, but the original digest and envelope stay available
--- for audit and chain verification.
-CREATE TRIGGER events_immutable_before_update
-BEFORE UPDATE ON events
-BEGIN
-  SELECT RAISE(ABORT, 'KRATER_EVENT_ENVELOPE_IMMUTABLE');
-END;
-
-CREATE TRIGGER events_immutable_before_delete
-BEFORE DELETE ON events
-BEGIN
-  SELECT RAISE(ABORT, 'KRATER_EVENT_ENVELOPE_IMMUTABLE');
-END;
-
-CREATE TRIGGER event_content_lawful_redaction_only
-BEFORE UPDATE ON event_content
-WHEN NEW.event_id != OLD.event_id
-  OR NEW.payload_sha256 != OLD.payload_sha256
-  OR NEW.redacted_at IS NULL
-  OR NEW.redaction_reason IS NULL
-BEGIN
-  SELECT RAISE(ABORT, 'KRATER_CONTENT_REDACTION_INVALID');
-END;
-
--- A write may insert an event only after it has moved the corresponding
--- problem head to the event's sequence and chain digest. This turns a stale
--- application-computed predecessor digest into a transaction abort, not a
--- partial write, so the caller can retry from the durable head.
-CREATE TRIGGER events_chain_head_before_insert
-BEFORE INSERT ON events
-WHEN NOT EXISTS (
-  SELECT 1 FROM problems
-  WHERE id = NEW.problem_id
-    AND public_seq = NEW.seq
-    AND chain_digest = NEW.chain_digest
-)
-BEGIN
-  SELECT RAISE(ABORT, 'KRATER_CHAIN_HEAD_MISMATCH');
-END;
-
-CREATE TABLE integrity_checkpoints (
-  problem_id TEXT NOT NULL REFERENCES problems(id),
-  checkpoint_seq INTEGER NOT NULL CHECK (checkpoint_seq > 0),
-  root_chain_digest TEXT NOT NULL,
-  checkpoint_digest TEXT NOT NULL,
-  checkpoint_version INTEGER NOT NULL CHECK (checkpoint_version = 1),
-  created_at TEXT NOT NULL,
-  signer_key_id TEXT,
-  signature TEXT,
-  PRIMARY KEY (problem_id, checkpoint_seq),
-  CHECK (
-    (signer_key_id IS NULL AND signature IS NULL)
-    OR (signer_key_id IS NOT NULL AND signature IS NOT NULL)
-  )
+  payload_json TEXT NOT NULL
 );
 
 CREATE TABLE idempotency (

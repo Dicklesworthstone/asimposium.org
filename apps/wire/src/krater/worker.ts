@@ -2,15 +2,18 @@ import type { D1Database, ExecutionContext } from "@cloudflare/workers-types";
 import type { ClaimProjection, KraterWriteInput } from "./krater";
 import {
   attemptEnvelopeTamper,
+  backfillKraterIntegrity,
   cursorMatchesEvents,
   ensureProblem,
   eventChainMatches,
   inspectProblem,
   KraterIdempotencyConflictError,
+  KraterIntegrityBackfillRequiredError,
   KraterProblemNotFoundError,
   KraterReadError,
   KraterReplayError,
   KraterValidationError,
+  plantMalformedOutboxForHarness,
   projectionReplayMatches,
   readAllEvents,
   readClaimProjections,
@@ -22,8 +25,14 @@ import {
   searchPublicClaims,
   writeClaim,
 } from "./krater";
+import {
+  KraterOutboxBindingError,
+  type KraterOutboxEnv,
+  type OutboxFaultMode,
+  requestKraterOutbox,
+} from "./outbox-do";
 
-interface KraterHarnessEnv {
+interface KraterHarnessEnv extends KraterOutboxEnv {
   DB: D1Database;
 }
 
@@ -95,6 +104,26 @@ function errorResponse(error: unknown, surface: "read" | "write"): Response {
   if (error instanceof KraterProblemNotFoundError) return response({ code: error.code }, 404);
   if (error instanceof KraterIdempotencyConflictError) return response({ code: error.code }, 409);
   if (error instanceof KraterReplayError) return response({ code: error.code }, 409);
+  if (error instanceof KraterIntegrityBackfillRequiredError) {
+    return contractProblem(
+      409,
+      error.code,
+      "K-S2-INTEGRITY",
+      "Legacy event envelopes require bounded cryptographic replay before integrity-protected reads or writes.",
+      "Run the bounded integrity backfill for this problem, or use the future range-aware operator path.",
+      { route: "/__s2/integrity/backfill", problem_id: "P-example" },
+    );
+  }
+  if (error instanceof KraterOutboxBindingError) {
+    return contractProblem(
+      503,
+      error.code,
+      "K-S2-OUTBOX",
+      "The Worker has no mounted Krater outbox binding.",
+      "Mount the exported class and bind KRATER_OUTBOX before enabling outbox draining.",
+      { binding: "KRATER_OUTBOX", class_name: "KraterOutboxDrainer" },
+    );
+  }
   if (error instanceof KraterReadError || surface === "read") {
     return contractProblem(
       400,
@@ -148,6 +177,22 @@ function harnessBoolean(body: Record<string, unknown>, key: string): boolean {
   return value;
 }
 
+function outboxFaultMode(body: Record<string, unknown>): OutboxFaultMode {
+  const value = body.fault_mode;
+  if (value === undefined || value === "none") return "none";
+  if (value === "fail-once" || value === "hold-before-ack") return value;
+  throw new KraterValidationError("fault_mode must be none, fail-once, or hold-before-ack.");
+}
+
+async function forwardedOutboxResponse(
+  env: KraterHarnessEnv,
+  pathname: "/nudge" | "/drain-now" | "/status",
+  faultMode: OutboxFaultMode = "none",
+): Promise<Response> {
+  const upstream = await requestKraterOutbox(env, pathname, { faultMode });
+  return response(await upstream.json(), upstream.status);
+}
+
 function waitForHarnessDelay(milliseconds: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, milliseconds));
 }
@@ -186,6 +231,7 @@ async function handleHarnessRequest(
       const preCommitDelayMs = harnessDelay(body, "s2_pre_commit_delay_ms");
       const postCommitDelayMs = harnessDelay(body, "s2_post_commit_delay_ms");
       const abortBeforeCommit = harnessBoolean(body, "s2_abort_before_commit");
+      const deferOutboxNudge = harnessBoolean(body, "s2_defer_outbox_nudge");
       if (preCommitDelayMs > 0) await waitForHarnessDelay(preCommitDelayMs);
       if (abortBeforeCommit || request.signal.aborted) {
         return contractProblem(
@@ -198,6 +244,17 @@ async function handleHarnessRequest(
         );
       }
       const result = await writeClaim(env.DB, writeInput(body));
+      let outboxHandoff: "armed" | "deferred" | "unavailable" = "deferred";
+      if (!deferOutboxNudge) {
+        try {
+          const handoff = await requestKraterOutbox(env, "/nudge");
+          outboxHandoff = handoff.ok ? "armed" : "unavailable";
+        } catch (_error) {
+          // The D1 outbox row is durable; a later scheduler nudge can recover
+          // this post-commit handoff without rerunning the canonical write.
+          outboxHandoff = "unavailable";
+        }
+      }
       if (postCommitDelayMs > 0) await waitForHarnessDelay(postCommitDelayMs);
       return response({
         event_id: result.eventId,
@@ -216,6 +273,8 @@ async function handleHarnessRequest(
         d1_sql_ms: result.d1SqlMs,
         lock_wait_ms: result.lockWaitMs,
         retry_count: result.retryCount,
+        outbox_handoff: outboxHandoff,
+        checkpoint_mode: "unsigned-v0",
       });
     }
 
@@ -254,6 +313,17 @@ async function handleHarnessRequest(
         cursor,
         event_count: events.length,
       });
+    }
+
+    if (request.method === "POST" && url.pathname === "/__s2/integrity/backfill") {
+      surface = "write";
+      const body = await readBody(request);
+      await backfillKraterIntegrity(
+        env.DB,
+        requiredString(body, "problem_id"),
+        requiredString(body, "completed_at"),
+      );
+      return response({ status: "complete", checkpoint_mode: "unsigned-v0" });
     }
 
     if (request.method === "GET" && url.pathname === "/__s2/search") {
@@ -305,6 +375,27 @@ async function handleHarnessRequest(
       return response({ code: "KRATER_TAMPER_UNEXPECTEDLY_SUCCEEDED" }, 500);
     }
 
+    if (request.method === "POST" && url.pathname === "/__s2/outbox/nudge") {
+      surface = "write";
+      return forwardedOutboxResponse(env, "/nudge", outboxFaultMode(await readBody(request)));
+    }
+
+    if (request.method === "POST" && url.pathname === "/__s2/outbox/drain") {
+      surface = "write";
+      return forwardedOutboxResponse(env, "/drain-now", outboxFaultMode(await readBody(request)));
+    }
+
+    if (request.method === "GET" && url.pathname === "/__s2/outbox/status") {
+      return forwardedOutboxResponse(env, "/status");
+    }
+
+    if (request.method === "POST" && url.pathname === "/__s2/outbox/plant-malformed") {
+      surface = "write";
+      const body = await readBody(request);
+      await plantMalformedOutboxForHarness(env.DB, requiredString(body, "event_id"));
+      return response({ status: "planted" }, 201);
+    }
+
     if (request.method === "GET" && url.pathname === "/__s2/state") {
       const problemId = queryString(url, "problem_id");
       const [cursor, counts, integrity] = await Promise.all([
@@ -317,6 +408,7 @@ async function handleHarnessRequest(
         counts,
         chain_digest: integrity.chainDigest,
         checkpoint_digest: integrity.checkpointDigest,
+        checkpoint_mode: "unsigned-v0",
       });
     }
 
@@ -326,4 +418,5 @@ async function handleHarnessRequest(
   }
 }
 
+export { KraterOutboxDrainer } from "./outbox-do";
 export default { fetch: handleHarnessRequest };

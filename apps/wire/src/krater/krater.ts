@@ -4,6 +4,7 @@ const IDENTIFIER = /^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/;
 const MAX_STATEMENT_BYTES = 8_192;
 const MAX_EVENT_PAGE_SIZE = 200;
 const MAX_CHAIN_RETRIES = 16;
+const MAX_INTEGRITY_BACKFILL_EVENTS = 512;
 const REDACTION_REASONS = new Set(["legal", "privacy", "severe-safety"]);
 
 export interface KraterWriteInput {
@@ -62,8 +63,8 @@ export interface KraterCheckpoint {
   rootChainDigest: string;
   checkpointDigest: string;
   checkpointVersion: 1;
-  signerKeyId: string | null;
-  signature: string | null;
+  /** ADR-23 signatures are not implemented; this foundation is explicitly unsigned. */
+  checkpointMode: "unsigned-v0";
 }
 
 export interface KraterIntegrityState {
@@ -97,6 +98,10 @@ export class KraterReplayError extends Error {
   readonly code = "KRATER_REPLAY_INVALID";
 }
 
+export class KraterIntegrityBackfillRequiredError extends Error {
+  readonly code = "KRATER_INTEGRITY_BACKFILL_REQUIRED";
+}
+
 interface IdempotencyRow {
   request_digest: string;
   event_id: string | null;
@@ -109,6 +114,11 @@ interface SequenceRow {
 
 interface ProblemHeadRow {
   public_seq: number;
+  chain_digest: string | null;
+}
+
+interface IntegrityProblemHeadRow {
+  public_seq: number;
   chain_digest: string;
 }
 
@@ -117,10 +127,12 @@ interface EventRow {
   problem_id: string;
   seq: number;
   type: "claim.created";
+  object_kind: "claim";
   object_id: string;
+  object_version: number;
   payload_sha256: string;
-  row_digest: string;
-  chain_digest: string;
+  row_digest: string | null;
+  chain_digest: string | null;
   created_at: string;
 }
 
@@ -139,8 +151,12 @@ interface CheckpointRow {
   root_chain_digest: string;
   checkpoint_digest: string;
   checkpoint_version: 1;
-  signer_key_id: string | null;
-  signature: string | null;
+  checkpoint_mode: "unsigned-v0";
+}
+
+interface IntegrityBackfillRow {
+  state: "required" | "complete";
+  legacy_event_count: number;
 }
 
 interface CursorRow {
@@ -241,17 +257,43 @@ export async function eventRowDigest(
   seq: number,
   payloadSha256: string,
 ): Promise<string> {
+  return eventEnvelopeRowDigest({
+    eventId: input.eventId,
+    problemId: input.problemId,
+    seq,
+    type: "claim.created",
+    objectKind: "claim",
+    objectId: input.claimId,
+    objectVersion: 1,
+    payloadSha256,
+    createdAt: input.createdAt,
+  });
+}
+
+interface EventEnvelopeForDigest {
+  eventId: string;
+  problemId: string;
+  seq: number;
+  type: string;
+  objectKind: string;
+  objectId: string;
+  objectVersion: number;
+  payloadSha256: string;
+  createdAt: string;
+}
+
+async function eventEnvelopeRowDigest(envelope: EventEnvelopeForDigest): Promise<string> {
   return sha256Hex(
     canonicalJson({
-      created_at: input.createdAt,
-      event_id: input.eventId,
-      object_id: input.claimId,
-      object_kind: "claim",
-      object_version: 1,
-      payload_sha256: payloadSha256,
-      problem_id: input.problemId,
-      seq,
-      type: "claim.created",
+      created_at: envelope.createdAt,
+      event_id: envelope.eventId,
+      object_id: envelope.objectId,
+      object_kind: envelope.objectKind,
+      object_version: envelope.objectVersion,
+      payload_sha256: envelope.payloadSha256,
+      problem_id: envelope.problemId,
+      seq: envelope.seq,
+      type: envelope.type,
     }),
   );
 }
@@ -303,7 +345,10 @@ function isRetryableChainConflict(error: unknown): boolean {
   return /KRATER_CHAIN_HEAD_MISMATCH|SQLITE_BUSY|database is locked/i.test(message);
 }
 
-async function readProblemHead(db: D1Database, problemId: string): Promise<ProblemHeadRow> {
+async function readProblemHead(
+  db: D1Database,
+  problemId: string,
+): Promise<IntegrityProblemHeadRow> {
   const row = await statement(
     db,
     "SELECT public_seq, chain_digest FROM problems WHERE id = ?",
@@ -311,13 +356,19 @@ async function readProblemHead(db: D1Database, problemId: string): Promise<Probl
   ).first<ProblemHeadRow>();
   if (row === null)
     throw new KraterProblemNotFoundError("problem must exist before a Krater claim write.");
-  return row;
+  if (row.chain_digest === null) {
+    throw new KraterIntegrityBackfillRequiredError(
+      "Krater integrity digests must be replayed from the immutable legacy envelopes first.",
+    );
+  }
+  return { public_seq: row.public_seq, chain_digest: row.chain_digest };
 }
 
 async function readEventById(db: D1Database, eventId: string): Promise<EventRow> {
   const row = await statement(
     db,
-    `SELECT id, problem_id, seq, type, object_id, payload_sha256, row_digest, chain_digest, created_at
+    `SELECT id, problem_id, seq, type, object_kind, object_id, object_version, payload_sha256,
+            row_digest, chain_digest, created_at
      FROM events WHERE id = ?`,
     eventId,
   ).first<EventRow>();
@@ -342,13 +393,173 @@ async function readCheckpointByEvent(db: D1Database, event: EventRow): Promise<C
   const row = await statement(
     db,
     `SELECT problem_id, checkpoint_seq, root_chain_digest, checkpoint_digest, checkpoint_version,
-            signer_key_id, signature
+            checkpoint_mode
      FROM integrity_checkpoints WHERE problem_id = ? AND checkpoint_seq = ?`,
     event.problem_id,
     event.seq,
   ).first<CheckpointRow>();
   if (row === null) throw new Error("Krater write did not persist an integrity checkpoint.");
   return row;
+}
+
+function backfillRequired(message: string): never {
+  throw new KraterIntegrityBackfillRequiredError(message);
+}
+
+async function readIntegrityBackfill(
+  db: D1Database,
+  problemId: string,
+): Promise<IntegrityBackfillRow | null> {
+  return statement(
+    db,
+    "SELECT state, legacy_event_count FROM krater_integrity_backfill WHERE problem_id = ?",
+    problemId,
+  ).first<IntegrityBackfillRow>();
+}
+
+/**
+ * Bounded, deterministic replay for an old 0001 database. It derives every
+ * value using WebCrypto from stored immutable envelopes; it never substitutes
+ * a SQL default or a synthetic digest. Larger or inconsistent histories remain
+ * explicitly blocked for an operator-run, range-aware backfill.
+ */
+export async function backfillKraterIntegrity(
+  db: D1Database,
+  problemId: string,
+  completedAt: string,
+): Promise<void> {
+  requireIdentifier("problemId", problemId);
+  if (Number.isNaN(Date.parse(completedAt)))
+    inputError("completedAt must be an ISO-8601 timestamp.");
+
+  const rawHead = await statement(
+    db,
+    "SELECT public_seq, chain_digest FROM problems WHERE id = ?",
+    problemId,
+  ).first<ProblemHeadRow>();
+  if (rawHead === null) {
+    throw new KraterProblemNotFoundError("problem must exist before integrity replay.");
+  }
+  const events = await statement(
+    db,
+    `SELECT id, problem_id, seq, type, object_kind, object_id, object_version, payload_sha256,
+            row_digest, chain_digest, created_at
+     FROM events WHERE problem_id = ? ORDER BY seq ASC`,
+    problemId,
+  ).all<EventRow>();
+  if (events.results.length > MAX_INTEGRITY_BACKFILL_EVENTS) {
+    backfillRequired(
+      "the legacy problem exceeds the bounded integrity replay limit; use the future range-aware backfill.",
+    );
+  }
+
+  const storedBackfill = await readIntegrityBackfill(db, problemId);
+  const complete =
+    storedBackfill?.state === "complete" &&
+    rawHead.chain_digest !== null &&
+    events.results.every((event) => event.row_digest !== null && event.chain_digest !== null);
+  if (complete) return;
+  if (
+    rawHead.chain_digest !== null ||
+    events.results.some((event) => event.row_digest !== null || event.chain_digest !== null)
+  ) {
+    backfillRequired("the legacy integrity state is partial; refusing to overwrite a digest.");
+  }
+  if (rawHead.public_seq !== events.results.length) {
+    backfillRequired("the legacy cursor does not match a complete contiguous envelope history.");
+  }
+
+  let priorChainDigest = await genesisChainDigest(problemId);
+  const updates: D1PreparedStatement[] = [
+    statement(
+      db,
+      `INSERT INTO krater_integrity_backfill (problem_id, state, legacy_event_count, completed_at)
+       VALUES (?, 'required', ?, NULL) ON CONFLICT(problem_id) DO NOTHING`,
+      problemId,
+      events.results.length,
+    ),
+  ];
+  for (const [index, event] of events.results.entries()) {
+    if (
+      event.seq !== index + 1 ||
+      event.type !== "claim.created" ||
+      event.object_kind !== "claim" ||
+      event.object_version !== 1
+    ) {
+      backfillRequired(
+        "the legacy event stream is not a contiguous Krater claim envelope history.",
+      );
+    }
+    const rowDigest = await eventEnvelopeRowDigest({
+      eventId: event.id,
+      problemId: event.problem_id,
+      seq: event.seq,
+      type: event.type,
+      objectKind: event.object_kind,
+      objectId: event.object_id,
+      objectVersion: event.object_version,
+      payloadSha256: event.payload_sha256,
+      createdAt: event.created_at,
+    });
+    const chainDigest = await eventChainDigest(
+      event.problem_id,
+      event.seq,
+      event.payload_sha256,
+      priorChainDigest,
+    );
+    const digestCheckpoint = await checkpointDigest(event.problem_id, event.seq, chainDigest);
+    updates.push(
+      statement(
+        db,
+        `UPDATE events SET row_digest = ?, chain_digest = ?
+         WHERE id = ? AND row_digest IS NULL AND chain_digest IS NULL`,
+        rowDigest,
+        chainDigest,
+        event.id,
+      ),
+      statement(
+        db,
+        `INSERT INTO integrity_checkpoints
+           (problem_id, checkpoint_seq, root_chain_digest, checkpoint_digest, checkpoint_version,
+            checkpoint_mode, created_at)
+         VALUES (?, ?, ?, ?, 1, 'unsigned-v0', ?)
+         ON CONFLICT(problem_id, checkpoint_seq) DO NOTHING`,
+        event.problem_id,
+        event.seq,
+        chainDigest,
+        digestCheckpoint,
+        event.created_at,
+      ),
+    );
+    priorChainDigest = chainDigest;
+  }
+  updates.push(
+    statement(
+      db,
+      "UPDATE problems SET chain_digest = ? WHERE id = ? AND chain_digest IS NULL",
+      priorChainDigest,
+      problemId,
+    ),
+    statement(
+      db,
+      `UPDATE krater_integrity_backfill
+       SET state = 'complete', legacy_event_count = ?, completed_at = ?
+       WHERE problem_id = ? AND state = 'required'`,
+      events.results.length,
+      completedAt,
+      problemId,
+    ),
+  );
+  try {
+    await db.batch(updates);
+  } catch (_error) {
+    const rechecked = await readIntegrityBackfill(db, problemId);
+    if (rechecked?.state !== "complete") {
+      backfillRequired(
+        "the integrity replay could not atomically complete; no digest was defaulted.",
+      );
+    }
+  }
 }
 
 /** Create a synthetic problem root for the local S-2 worker harness. */
@@ -359,16 +570,15 @@ export async function ensureProblem(
 ): Promise<void> {
   requireIdentifier("problemId", problemId);
   if (Number.isNaN(Date.parse(createdAt))) inputError("createdAt must be an ISO-8601 timestamp.");
-  const chainDigest = await genesisChainDigest(problemId);
   await statement(
     db,
-    `INSERT INTO problems (id, public_seq, chain_digest, created_at, updated_at)
-     VALUES (?, 0, ?, ?, ?) ON CONFLICT(id) DO NOTHING`,
+    `INSERT INTO problems (id, public_seq, created_at, updated_at)
+     VALUES (?, 0, ?, ?) ON CONFLICT(id) DO NOTHING`,
     problemId,
-    chainDigest,
     createdAt,
     createdAt,
   ).run();
+  await backfillKraterIntegrity(db, problemId, createdAt);
 }
 
 /**
@@ -381,6 +591,7 @@ export async function writeClaim(
   input: KraterWriteInput,
 ): Promise<KraterWriteResult> {
   validateWriteInput(input);
+  await backfillKraterIntegrity(db, input.problemId, input.createdAt);
   const payloadJson = payloadFor(input);
   const [payloadSha256, requestDigest] = await Promise.all([
     sha256Hex(payloadJson),
@@ -519,8 +730,8 @@ export async function writeClaim(
           db,
           `INSERT INTO integrity_checkpoints
              (problem_id, checkpoint_seq, root_chain_digest, checkpoint_digest, checkpoint_version,
-              created_at, signer_key_id, signature)
-           SELECT ?, ?, ?, ?, 1, ?, NULL, NULL
+              checkpoint_mode, created_at)
+           SELECT ?, ?, ?, ?, 1, 'unsigned-v0', ?
            FROM idempotency i
            WHERE i.problem_id = ? AND i.idempotency_key = ? AND i.event_id IS NULL`,
           input.problemId,
@@ -589,6 +800,9 @@ export async function writeClaim(
     if (event.seq !== settled.event_seq || checkpoint.root_chain_digest !== event.chain_digest) {
       throw new Error("Krater persisted integrity records disagree.");
     }
+    if (event.row_digest === null || event.chain_digest === null) {
+      throw new Error("Krater write did not persist integrity digests.");
+    }
 
     return {
       eventId: settled.event_id,
@@ -654,19 +868,29 @@ export async function readEvents(
       afterSeq,
       limit,
     ).all<EventRow>();
-    return result.results.map((row) => ({
-      eventId: row.id,
-      problemId: row.problem_id,
-      seq: row.seq,
-      type: row.type,
-      objectId: row.object_id,
-      payloadSha256: row.payload_sha256,
-      rowDigest: row.row_digest,
-      chainDigest: row.chain_digest,
-      createdAt: row.created_at,
-    }));
+    return result.results.map((row) => {
+      if (row.row_digest === null || row.chain_digest === null) {
+        backfillRequired("event reads require completed Krater integrity replay.");
+      }
+      return {
+        eventId: row.id,
+        problemId: row.problem_id,
+        seq: row.seq,
+        type: row.type,
+        objectId: row.object_id,
+        payloadSha256: row.payload_sha256,
+        rowDigest: row.row_digest,
+        chainDigest: row.chain_digest,
+        createdAt: row.created_at,
+      };
+    });
   } catch (error) {
-    if (error instanceof KraterValidationError) throw error;
+    if (
+      error instanceof KraterValidationError ||
+      error instanceof KraterIntegrityBackfillRequiredError
+    ) {
+      throw error;
+    }
     readError("event cursor read could not be completed.");
   }
 }
@@ -739,7 +963,12 @@ export async function readIntegrityState(
       checkpointDigest: checkpoint?.checkpoint_digest ?? null,
     };
   } catch (error) {
-    if (error instanceof KraterProblemNotFoundError) throw error;
+    if (
+      error instanceof KraterProblemNotFoundError ||
+      error instanceof KraterIntegrityBackfillRequiredError
+    ) {
+      throw error;
+    }
     readError("integrity state could not be read.");
   }
 }
@@ -928,6 +1157,28 @@ export async function attemptEnvelopeTamper(
     return;
   }
   await statement(db, "DELETE FROM events WHERE id = ?", eventId).run();
+}
+
+/**
+ * Local S-2 fault injection only. It deliberately corrupts asynchronous
+ * metadata after the canonical write so the real DO quarantine path can prove
+ * that it neither delivers nor mutates public projections or event envelopes.
+ */
+export async function plantMalformedOutboxForHarness(
+  db: D1Database,
+  eventId: string,
+): Promise<void> {
+  requireIdentifier("eventId", eventId);
+  const result = await statement(
+    db,
+    "UPDATE outbox SET payload_sha256 = 'malformed' WHERE event_id = ? AND state = 'pending'",
+    eventId,
+  ).run();
+  if (result.meta.changes !== 1) {
+    throw new KraterProblemNotFoundError(
+      "a pending outbox row must exist for the local fault fixture.",
+    );
+  }
 }
 
 export async function inspectProblem(
