@@ -1,0 +1,46 @@
+# GENERATED FROM infra/environments.toml — DO NOT EDIT BY HAND.
+# Environment: production. Regenerate with: bun infra/generate-wrangler.mjs --write
+# Verify with:  bun infra/generate-wrangler.mjs --check
+
+name = "asimposium-stoa-prod"
+main = "../../apps/wire/src/index.ts"
+compatibility_date = "2026-08-13"
+compatibility_flags = ["nodejs_compat"]
+workers_dev = false
+
+[[d1_databases]]
+binding = "DB"
+database_name = "asimposium-prod"
+database_id = "${ASIMP_D1_DATABASE_ID_PRODUCTION}"
+migrations_dir = "../../db/migrations"
+
+[[r2_buckets]]
+# role: private-cas
+binding = "ARTIFACTS"
+bucket_name = "asimposium-artifacts-prod"
+
+[[r2_buckets]]
+# role: public-delivery
+binding = "PUBLIC_ARTIFACTS"
+bucket_name = "asimposium-public-prod"
+
+[[durable_objects.bindings]]
+name = "HERALD_ROOMS"
+class_name = "HeraldRoom"
+
+[[rules]]
+type = "Text"
+globs = ["**/*.md"]
+fallthrough = true
+
+# The public-delivery bucket is served on its own R2 custom domain, which is
+# configured on the bucket and never as a Worker route:
+#   artifacts.asimposium.org
+# The private-cas bucket carries no custom domain by construction.
+
+# Vercel calls this environment at:
+#   https://a.asimposium.org
+
+# Signing key ids (public identifiers; the keys live in wrangler secret):
+#   signing:          prod-2026-08, prod-2026-07
+#   service envelope: prod-svc-2026-08, prod-svc-2026-07

@@ -74,26 +74,59 @@ skip one that never ran. An application reads the target's own ledger or it does
 not apply. State files and the migrations directory are both contained to the
 repository, lexically and after symlink resolution.
 
+## Generated per-environment Wrangler configuration
+
+`infra/environments/<env>.wrangler.toml` is generated from the topology and is
+not hand-edited:
+
+```bash
+bun infra/generate-wrangler.mjs --check    # reconcile (CI gate)
+bun infra/generate-wrangler.mjs --write    # regenerate, then review the diff
+bun infra/generate-wrangler.test.mjs       # generated-config contract
+```
+
+Generation is a pure function of the validated topology — same input, same
+bytes, no timestamps — so drift is detectable rather than silent. The contract
+suite parses the generated TOML back and reconciles it field by field: D1
+binding/name/id, both R2 roles and bindings, the Durable Object binding and
+class, the Markdown Text rule, and the exact required binding set. It also holds
+the safety properties in the generated artifact: no Worker `route` (a bucket is
+published by an R2 custom domain, never by putting the Worker on the blob path),
+no `custom_domain` on any bucket entry, no `account_id`, no `vars`, no literal
+resource id, no credential shape, and the apex artifact hostname mentioned in
+production's file alone.
+
+**These files are not directly deployable as written.** Resource ids remain
+`${VAR}` references and Wrangler does not interpolate environment variables in
+its configuration, so CI must substitute them at deploy time. That is recorded
+rather than hidden.
+
 ## What OPS.3 does NOT yet do
 
 Stated plainly so this tooling is not mistaken for a working environment. **OPS.3
 cannot close on the strength of what is here.**
 
-- **`environments.toml` is not wired into any Wrangler configuration.** It is a
-  validated contract that nothing reads at deploy time. `wrangler.toml` remains
-  the single local skeleton, and no per-environment Wrangler config is generated
-  from the topology.
 - **The Worker does not implement the topology.** `apps/wire`'s `Env` declares
-  `DB` and `ARTIFACTS` only — there is no `PUBLIC_ARTIFACTS` binding and no
-  `HERALD_ROOMS` Durable Object namespace. The public-delivery role and the DO
-  namespace exist in the topology and nowhere in code.
+  `DB` and `ARTIFACTS` only — no `PUBLIC_ARTIFACTS`, no `HERALD_ROOMS`, and no
+  exported Durable Object class. The topology and the generated configs declare
+  all four bindings; the Worker binds two. Closing this needs coordinated edits
+  in `apps/wire` **and** in `infra/wrangler.toml` (whose validator asserts
+  exactly one R2 bucket), which is why it is reported here rather than done
+  unilaterally.
+- **A Durable Object binding without an exported class fails `wrangler deploy`.**
+  The generated configs declare `HERALD_ROOMS`; the class arrives with W7.
 - **Remote apply does not exist.** `--apply` works only against local D1.
   Staging and production refuse, by design, until provisioned.
+- **Vercel wiring is declared, not applied.** `[vercel]` records which
+  environment each deployment target must call, and the validator enforces that
+  previews never reach production — but no Vercel project setting has been read
+  or written.
 - **No remote resource has ever been created, read, or written.** No D1 database,
   R2 bucket, Durable Object namespace, custom domain, deployment, or console
   change. The private-canary requirement — that a private-only object is
   unreachable through every public hostname while its authenticated owner
   retrieves it — is **unproven** and needs real buckets.
 
-Validating the topology proves the *contract* is coherent. It proves nothing
-about resources that may or may not exist.
+Validating the topology proves the *contract* is coherent, and generation proves
+the deployable artifact matches it. Neither proves that any named resource
+exists.

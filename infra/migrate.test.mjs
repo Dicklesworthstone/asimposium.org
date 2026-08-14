@@ -6,9 +6,9 @@ import { performance } from "node:perf_hooks";
 import {
   assertRehearsalIsNotAnApplication,
   declaresDestructive,
-  MigrationError,
   describeDestructiveStatements,
   digestOf,
+  MigrationError,
   planMigrations,
   readMigrationDirectory,
   readStateFile,
@@ -55,16 +55,27 @@ function expectFailure(label, expectedCode, fn) {
 const CREATE_A = "CREATE TABLE a (id TEXT PRIMARY KEY);\n";
 const CREATE_B = "CREATE TABLE b (id TEXT PRIMARY KEY);\n";
 const plainOptions = { environmentName: "staging", destructiveAllowed: false };
-const record = (migration) => ({ id: migration.id, sequence: migration.sequence, digest: migration.digest });
+const record = (migration) => ({
+  id: migration.id,
+  sequence: migration.sequence,
+  digest: migration.digest,
+});
 
 const cases = [
   {
     name: "reads-and-orders-a-well-formed-directory",
     execute() {
       const migrations = readMigrationDirectory(
-        directory("ok", { "0002_second.sql": CREATE_B, "0001_first.sql": CREATE_A, "README.md": "docs\n" }),
+        directory("ok", {
+          "0002_second.sql": CREATE_B,
+          "0001_first.sql": CREATE_A,
+          "README.md": "docs\n",
+        }),
       );
-      assert.deepEqual(migrations.map((m) => m.id), ["0001_first.sql", "0002_second.sql"]);
+      assert.deepEqual(
+        migrations.map((m) => m.id),
+        ["0001_first.sql", "0002_second.sql"],
+      );
       assert.equal(migrations[0].digest, digestOf(CREATE_A));
       assert.equal(migrations[0].digest.length, 64);
     },
@@ -74,7 +85,9 @@ const cases = [
     execute() {
       // The repository is in exactly this state today: the boundary README and
       // no SQL. It must be a clean no-op, not an error.
-      const migrations = readMigrationDirectory(directory("only-readme", { "README.md": "docs\n" }));
+      const migrations = readMigrationDirectory(
+        directory("only-readme", { "README.md": "docs\n" }),
+      );
       assert.deepEqual(migrations, []);
       const plan = planMigrations(migrations, [], plainOptions);
       assert.deepEqual(plan.to_apply, []);
@@ -84,27 +97,43 @@ const cases = [
   {
     name: "applying-twice-is-a-no-op",
     execute() {
-      const migrations = readMigrationDirectory(directory("twice", { "0001_first.sql": CREATE_A, "0002_second.sql": CREATE_B }));
+      const migrations = readMigrationDirectory(
+        directory("twice", { "0001_first.sql": CREATE_A, "0002_second.sql": CREATE_B }),
+      );
       const first = planMigrations(migrations, [], plainOptions);
-      assert.deepEqual(first.to_apply.map((m) => m.id), ["0001_first.sql", "0002_second.sql"]);
+      assert.deepEqual(
+        first.to_apply.map((m) => m.id),
+        ["0001_first.sql", "0002_second.sql"],
+      );
       assert.equal(first.idempotent, false);
 
       // Second plan, given the records the first run would have written.
       const second = planMigrations(migrations, migrations.map(record), plainOptions);
       assert.deepEqual(second.to_apply, []);
       assert.equal(second.idempotent, true);
-      assert.deepEqual(second.skipped.map((s) => s.reason), ["already_applied", "already_applied"]);
+      assert.deepEqual(
+        second.skipped.map((s) => s.reason),
+        ["already_applied", "already_applied"],
+      );
 
       // And a third is still a no-op: idempotency is stable, not a one-shot.
-      assert.deepEqual(planMigrations(migrations, migrations.map(record), plainOptions).to_apply, []);
+      assert.deepEqual(
+        planMigrations(migrations, migrations.map(record), plainOptions).to_apply,
+        [],
+      );
     },
   },
   {
     name: "a-partially-applied-directory-applies-only-the-remainder",
     execute() {
-      const migrations = readMigrationDirectory(directory("partial", { "0001_first.sql": CREATE_A, "0002_second.sql": CREATE_B }));
+      const migrations = readMigrationDirectory(
+        directory("partial", { "0001_first.sql": CREATE_A, "0002_second.sql": CREATE_B }),
+      );
       const plan = planMigrations(migrations, [record(migrations[0])], plainOptions);
-      assert.deepEqual(plan.to_apply.map((m) => m.id), ["0002_second.sql"]);
+      assert.deepEqual(
+        plan.to_apply.map((m) => m.id),
+        ["0002_second.sql"],
+      );
       assert.equal(plan.head, 1);
     },
   },
@@ -114,18 +143,26 @@ const cases = [
     name: "out-of-order-migration-is-refused",
     execute() {
       const migrations = readMigrationDirectory(
-        directory("ooo", { "0001_first.sql": CREATE_A, "0003_third.sql": CREATE_B, "0002_late.sql": "CREATE TABLE c (id TEXT);\n" }),
+        directory("ooo", {
+          "0001_first.sql": CREATE_A,
+          "0003_third.sql": CREATE_B,
+          "0002_late.sql": "CREATE TABLE c (id TEXT);\n",
+        }),
       );
       // 0001 and 0003 applied; 0002 then appears unapplied beneath the head.
       const applied = [record(migrations[0]), record(migrations[2])];
-      expectFailure("out-of-order", "OUT_OF_ORDER_MIGRATION", () => planMigrations(migrations, applied, plainOptions));
+      expectFailure("out-of-order", "OUT_OF_ORDER_MIGRATION", () =>
+        planMigrations(migrations, applied, plainOptions),
+      );
     },
   },
   {
     name: "duplicate-sequence-number-is-refused",
     execute() {
       expectFailure("dup-seq", "DUPLICATE_MIGRATION_SEQUENCE", () =>
-        readMigrationDirectory(directory("dup", { "0001_first.sql": CREATE_A, "0001_other.sql": CREATE_B })),
+        readMigrationDirectory(
+          directory("dup", { "0001_first.sql": CREATE_A, "0001_other.sql": CREATE_B }),
+        ),
       );
     },
   },
@@ -149,14 +186,18 @@ const cases = [
     name: "non-sql-file-is-refused",
     execute() {
       expectFailure("stray", "UNEXPECTED_MIGRATION_FILE", () =>
-        readMigrationDirectory(directory("stray", { "0001_first.sql": CREATE_A, "notes.txt": "x" })),
+        readMigrationDirectory(
+          directory("stray", { "0001_first.sql": CREATE_A, "notes.txt": "x" }),
+        ),
       );
     },
   },
   {
     name: "empty-migration-is-refused",
     execute() {
-      expectFailure("empty", "EMPTY_MIGRATION", () => readMigrationDirectory(directory("empty", { "0001_first.sql": "  \n" })));
+      expectFailure("empty", "EMPTY_MIGRATION", () =>
+        readMigrationDirectory(directory("empty", { "0001_first.sql": "  \n" })),
+      );
     },
   },
   {
@@ -172,9 +213,19 @@ const cases = [
   {
     name: "down-migrations-are-refused-by-name",
     execute() {
-      for (const filename of ["0002_second.down.sql", "0002_second.rollback.sql", "0002_second.undo.sql", "0002_down_second.sql"]) {
+      for (const filename of [
+        "0002_second.down.sql",
+        "0002_second.rollback.sql",
+        "0002_second.undo.sql",
+        "0002_down_second.sql",
+      ]) {
         expectFailure(filename, "DOWN_MIGRATION_REJECTED", () =>
-          readMigrationDirectory(directory(`down-${filename}`, { "0001_first.sql": CREATE_A, [filename]: "DROP TABLE a;\n" })),
+          readMigrationDirectory(
+            directory(`down-${filename}`, {
+              "0001_first.sql": CREATE_A,
+              [filename]: "DROP TABLE a;\n",
+            }),
+          ),
         );
       }
     },
@@ -185,16 +236,28 @@ const cases = [
     name: "editing-an-applied-migration-is-drift",
     execute() {
       const migrations = readMigrationDirectory(directory("drift", { "0001_first.sql": CREATE_A }));
-      const applied = [{ id: "0001_first.sql", sequence: 1, digest: digestOf("CREATE TABLE something_else (id TEXT);\n") }];
-      expectFailure("drift", "MIGRATION_DRIFT", () => planMigrations(migrations, applied, plainOptions));
+      const applied = [
+        {
+          id: "0001_first.sql",
+          sequence: 1,
+          digest: digestOf("CREATE TABLE something_else (id TEXT);\n"),
+        },
+      ];
+      expectFailure("drift", "MIGRATION_DRIFT", () =>
+        planMigrations(migrations, applied, plainOptions),
+      );
     },
   },
   {
     name: "deleting-an-applied-migration-is-a-rewritten-history",
     execute() {
-      const migrations = readMigrationDirectory(directory("vanished", { "0002_second.sql": CREATE_B }));
+      const migrations = readMigrationDirectory(
+        directory("vanished", { "0002_second.sql": CREATE_B }),
+      );
       const applied = [{ id: "0001_first.sql", sequence: 1, digest: digestOf(CREATE_A) }];
-      expectFailure("vanished", "APPLIED_MIGRATION_MISSING", () => planMigrations(migrations, applied, plainOptions));
+      expectFailure("vanished", "APPLIED_MIGRATION_MISSING", () =>
+        planMigrations(migrations, applied, plainOptions),
+      );
     },
   },
   {
@@ -244,8 +307,14 @@ const cases = [
     execute() {
       // A keyword a reviewer can see is inert must stay inert, or the guard
       // becomes noise and gets routed around.
-      assert.deepEqual(describeDestructiveStatements("-- DROP TABLE claims\nCREATE TABLE ok (id TEXT);"), []);
-      assert.deepEqual(describeDestructiveStatements("/* DROP TABLE claims */\nCREATE TABLE ok (id TEXT);"), []);
+      assert.deepEqual(
+        describeDestructiveStatements("-- DROP TABLE claims\nCREATE TABLE ok (id TEXT);"),
+        [],
+      );
+      assert.deepEqual(
+        describeDestructiveStatements("/* DROP TABLE claims */\nCREATE TABLE ok (id TEXT);"),
+        [],
+      );
       assert.deepEqual(
         describeDestructiveStatements("INSERT INTO notes (body) VALUES ('DROP TABLE claims');"),
         [],
@@ -259,7 +328,9 @@ const cases = [
       assert.equal(declaresDestructive("/* asimposium:allow-destructive */\nDROP TABLE a;"), true);
       // Smuggled through a string literal: the marker is data, not a decision.
       assert.equal(
-        declaresDestructive("INSERT INTO t VALUES ('\n-- asimposium:allow-destructive\n');\nDROP TABLE a;"),
+        declaresDestructive(
+          "INSERT INTO t VALUES ('\n-- asimposium:allow-destructive\n');\nDROP TABLE a;",
+        ),
         false,
       );
       assert.equal(declaresDestructive("DROP TABLE a;"), false);
@@ -285,20 +356,31 @@ const cases = [
     execute() {
       assert.deepEqual(describeDestructiveStatements("DROP TABLE claims;"), ["DROP TABLE"]);
       assert.deepEqual(describeDestructiveStatements("drop table claims;"), ["DROP TABLE"]);
-      assert.deepEqual(describeDestructiveStatements("DELETE FROM events;"), ["DELETE without WHERE"]);
+      assert.deepEqual(describeDestructiveStatements("DELETE FROM events;"), [
+        "DELETE without WHERE",
+      ]);
       assert.deepEqual(describeDestructiveStatements("TRUNCATE events;"), ["TRUNCATE"]);
-      assert.deepEqual(describeDestructiveStatements("ALTER TABLE a DROP COLUMN b;"), ["DROP COLUMN"]);
-      assert.deepEqual(describeDestructiveStatements("UPDATE claims SET disposition = 'x';"), ["UPDATE without WHERE"]);
+      assert.deepEqual(describeDestructiveStatements("ALTER TABLE a DROP COLUMN b;"), [
+        "DROP COLUMN",
+      ]);
+      assert.deepEqual(describeDestructiveStatements("UPDATE claims SET disposition = 'x';"), [
+        "UPDATE without WHERE",
+      ]);
       // Scoped statements are ordinary migrations, not destruction.
       assert.deepEqual(describeDestructiveStatements("DELETE FROM events WHERE seq < 10;"), []);
-      assert.deepEqual(describeDestructiveStatements("UPDATE claims SET x = 1 WHERE id = 'C-1';"), []);
+      assert.deepEqual(
+        describeDestructiveStatements("UPDATE claims SET x = 1 WHERE id = 'C-1';"),
+        [],
+      );
       assert.deepEqual(describeDestructiveStatements(CREATE_A), []);
     },
   },
   {
     name: "undeclared-destructive-migration-is-refused-everywhere",
     execute() {
-      const migrations = readMigrationDirectory(directory("undeclared", { "0001_drop.sql": "DROP TABLE claims;\n" }));
+      const migrations = readMigrationDirectory(
+        directory("undeclared", { "0001_drop.sql": "DROP TABLE claims;\n" }),
+      );
       // Refused even where destruction is permitted: the marker is what makes
       // it reviewable, and an unmarked DROP is indistinguishable from a slip.
       expectFailure("undeclared-permissive", "UNDECLARED_DESTRUCTIVE_MIGRATION", () =>
@@ -313,12 +395,20 @@ const cases = [
     name: "declared-destructive-migration-is-refused-on-a-protected-target",
     execute() {
       const declared = "-- asimposium:allow-destructive\nDROP TABLE claims;\n";
-      const migrations = readMigrationDirectory(directory("declared", { "0001_drop.sql": declared }));
+      const migrations = readMigrationDirectory(
+        directory("declared", { "0001_drop.sql": declared }),
+      );
       expectFailure("protected", "DESTRUCTIVE_TARGET_REFUSED", () =>
-        planMigrations(migrations, [], { environmentName: "production", destructiveAllowed: false }),
+        planMigrations(migrations, [], {
+          environmentName: "production",
+          destructiveAllowed: false,
+        }),
       );
       // …and permitted where the environment allows it.
-      const plan = planMigrations(migrations, [], { environmentName: "local", destructiveAllowed: true });
+      const plan = planMigrations(migrations, [], {
+        environmentName: "local",
+        destructiveAllowed: true,
+      });
       assert.equal(plan.to_apply[0].destructive, true);
     },
   },
@@ -331,12 +421,20 @@ const cases = [
         "bad.json": "{not json",
         "object.json": JSON.stringify({ id: "x" }),
         "incomplete.json": JSON.stringify([{ id: "0001_first.sql" }]),
-        "good.json": JSON.stringify([{ id: "0001_first.sql", sequence: 1, digest: digestOf(CREATE_A) }]),
+        "good.json": JSON.stringify([
+          { id: "0001_first.sql", sequence: 1, digest: digestOf(CREATE_A) },
+        ]),
       });
-      expectFailure("missing", "MISSING_STATE_FILE", () => readStateFile(join(root, "absent.json")));
+      expectFailure("missing", "MISSING_STATE_FILE", () =>
+        readStateFile(join(root, "absent.json")),
+      );
       expectFailure("bad", "MALFORMED_STATE_FILE", () => readStateFile(join(root, "bad.json")));
-      expectFailure("object", "MALFORMED_STATE_FILE", () => readStateFile(join(root, "object.json")));
-      expectFailure("incomplete", "MALFORMED_STATE_FILE", () => readStateFile(join(root, "incomplete.json")));
+      expectFailure("object", "MALFORMED_STATE_FILE", () =>
+        readStateFile(join(root, "object.json")),
+      );
+      expectFailure("incomplete", "MALFORMED_STATE_FILE", () =>
+        readStateFile(join(root, "incomplete.json")),
+      );
       assert.equal(readStateFile(join(root, "good.json")).length, 1);
     },
   },
@@ -354,12 +452,18 @@ const cases = [
         "sequence-string.json": [{ id: "0001_first.sql", sequence: "1", digest: good }],
         "sequence-mismatch.json": [{ id: "0001_first.sql", sequence: 7, digest: good }],
         "digest-short.json": [{ id: "0001_first.sql", sequence: 1, digest: "abc" }],
-        "digest-uppercase.json": [{ id: "0001_first.sql", sequence: 1, digest: good.toUpperCase() }],
+        "digest-uppercase.json": [
+          { id: "0001_first.sql", sequence: 1, digest: good.toUpperCase() },
+        ],
         "digest-nonhex.json": [{ id: "0001_first.sql", sequence: 1, digest: "z".repeat(64) }],
-        "extra-key.json": [{ id: "0001_first.sql", sequence: 1, digest: good, applied_by: "someone" }],
+        "extra-key.json": [
+          { id: "0001_first.sql", sequence: 1, digest: good, applied_by: "someone" },
+        ],
         "record-array.json": [[{ id: "0001_first.sql", sequence: 1, digest: good }]],
       };
-      const files = Object.fromEntries(Object.entries(bad).map(([name, value]) => [name, JSON.stringify(value)]));
+      const files = Object.fromEntries(
+        Object.entries(bad).map(([name, value]) => [name, JSON.stringify(value)]),
+      );
       const root = directory("state-bounds", files);
       for (const name of Object.keys(bad)) {
         expectFailure(name, "MALFORMED_STATE_FILE", () => readStateFile(join(root, name)));
@@ -385,19 +489,29 @@ const cases = [
           { id: "0001_first.sql", sequence: 1, digest: a },
         ]),
       });
-      expectFailure("dup-id", "DUPLICATE_STATE_RECORD", () => readStateFile(join(root, "dup-id.json")));
-      expectFailure("dup-seq", "DUPLICATE_STATE_RECORD", () => readStateFile(join(root, "dup-seq.json")));
-      expectFailure("descending", "UNORDERED_STATE_FILE", () => readStateFile(join(root, "descending.json")));
+      expectFailure("dup-id", "DUPLICATE_STATE_RECORD", () =>
+        readStateFile(join(root, "dup-id.json")),
+      );
+      expectFailure("dup-seq", "DUPLICATE_STATE_RECORD", () =>
+        readStateFile(join(root, "dup-seq.json")),
+      );
+      expectFailure("descending", "UNORDERED_STATE_FILE", () =>
+        readStateFile(join(root, "descending.json")),
+      );
     },
   },
   {
     name: "state-file-must-be-a-regular-file",
     execute() {
       const root = directory("state-symlink", {
-        "real.json": JSON.stringify([{ id: "0001_first.sql", sequence: 1, digest: digestOf(CREATE_A) }]),
+        "real.json": JSON.stringify([
+          { id: "0001_first.sql", sequence: 1, digest: digestOf(CREATE_A) },
+        ]),
       });
       symlinkSync(join(root, "real.json"), join(root, "linked.json"), "file");
-      expectFailure("symlinked-state", "UNSAFE_STATE_FILE", () => readStateFile(join(root, "linked.json")));
+      expectFailure("symlinked-state", "UNSAFE_STATE_FILE", () =>
+        readStateFile(join(root, "linked.json")),
+      );
       expectFailure("directory-as-state", "UNSAFE_STATE_FILE", () => readStateFile(root));
     },
   },
@@ -409,7 +523,9 @@ const cases = [
       const outside = directory("outside-sql", { "evil.sql": "DROP TABLE claims;\n" });
       const root = directory("symlink-migration", { "0001_first.sql": CREATE_A });
       symlinkSync(join(outside, "evil.sql"), join(root, "0002_linked.sql"), "file");
-      expectFailure("symlinked-migration", "SYMLINKED_MIGRATION_FILE", () => readMigrationDirectory(root));
+      expectFailure("symlinked-migration", "SYMLINKED_MIGRATION_FILE", () =>
+        readMigrationDirectory(root),
+      );
     },
   },
   {
@@ -419,7 +535,9 @@ const cases = [
       const linkParent = directory("link-parent", {});
       const link = join(linkParent, "migrations");
       symlinkSync(real, link, "dir");
-      expectFailure("symlinked-dir", "SYMLINKED_MIGRATIONS_DIRECTORY", () => readMigrationDirectory(link));
+      expectFailure("symlinked-dir", "SYMLINKED_MIGRATIONS_DIRECTORY", () =>
+        readMigrationDirectory(link),
+      );
     },
   },
   {
@@ -427,7 +545,9 @@ const cases = [
     execute() {
       const root = directory("special", { "0001_first.sql": CREATE_A });
       mkdirSync(join(root, "0002_subdir.sql"), { recursive: true });
-      expectFailure("subdirectory", "NON_REGULAR_MIGRATION_FILE", () => readMigrationDirectory(root));
+      expectFailure("subdirectory", "NON_REGULAR_MIGRATION_FILE", () =>
+        readMigrationDirectory(root),
+      );
     },
   },
 
@@ -486,7 +606,10 @@ for (const testCase of cases) {
   try {
     testCase.execute();
   } catch (error) {
-    failed.push({ name: testCase.name, detail: error instanceof Error ? error.message : "unknown" });
+    failed.push({
+      name: testCase.name,
+      detail: error instanceof Error ? error.message : "unknown",
+    });
   }
 }
 

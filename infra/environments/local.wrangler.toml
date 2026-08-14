@@ -1,0 +1,50 @@
+# GENERATED FROM infra/environments.toml — DO NOT EDIT BY HAND.
+# Environment: local. Regenerate with: bun infra/generate-wrangler.mjs --write
+# Verify with:  bun infra/generate-wrangler.mjs --check
+
+name = "asimposium-stoa-local"
+main = "../../apps/wire/src/index.ts"
+compatibility_date = "2026-08-13"
+compatibility_flags = ["nodejs_compat"]
+workers_dev = false
+
+[dev]
+port = 8787
+local_protocol = "http"
+
+[[d1_databases]]
+binding = "DB"
+database_name = "asimposium-local"
+database_id = "00000000-0000-0000-0000-000000000000"
+migrations_dir = "../../db/migrations"
+
+[[r2_buckets]]
+# role: private-cas
+binding = "ARTIFACTS"
+bucket_name = "asimposium-artifacts-local"
+
+[[r2_buckets]]
+# role: public-delivery
+binding = "PUBLIC_ARTIFACTS"
+bucket_name = "asimposium-public-local"
+
+[[durable_objects.bindings]]
+name = "HERALD_ROOMS"
+class_name = "HeraldRoom"
+
+[[rules]]
+type = "Text"
+globs = ["**/*.md"]
+fallthrough = true
+
+# The public-delivery bucket is served on its own R2 custom domain, which is
+# configured on the bucket and never as a Worker route:
+#   (none for this environment)
+# The private-cas bucket carries no custom domain by construction.
+
+# Vercel calls this environment at:
+#   http://127.0.0.1:8787
+
+# Signing key ids (public identifiers; the keys live in wrangler secret):
+#   signing:          local-dev-1
+#   service envelope: local-svc-1

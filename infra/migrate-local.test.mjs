@@ -1,8 +1,8 @@
 import assert from "node:assert/strict";
 import { dirname, resolve } from "node:path";
-import { fileURLToPath } from "node:url";
 import { performance } from "node:perf_hooks";
-import { MigrationError, localD1 } from "./migrate.mjs";
+import { fileURLToPath } from "node:url";
+import { localD1, MigrationError } from "./migrate.mjs";
 
 /**
  * Integration suite: this one DOES touch a database.
@@ -69,7 +69,13 @@ const cases = [
       // Bounded and safe to paste into an issue.
       assert.ok(cause.length <= 601, `causal output must be bounded, got ${cause.length}`);
       assert.equal(cause.includes("\n"), false, "must collapse to one line");
-      for (const forbidden of ["/Users/", "/private/", "/var/folders", "asimp_ag_", "BEGIN PRIVATE KEY"]) {
+      for (const forbidden of [
+        "/Users/",
+        "/private/",
+        "/var/folders",
+        "asimp_ag_",
+        "BEGIN PRIVATE KEY",
+      ]) {
         assert.equal(cause.includes(forbidden), false, `leaked ${forbidden}: ${cause}`);
       }
       assert.equal(/[A-Fa-f0-9]{32,}/.test(cause), false, `leaked a long hex run: ${cause}`);
@@ -84,7 +90,10 @@ for (const testCase of cases) {
   try {
     testCase.execute();
   } catch (error) {
-    failed.push({ name: testCase.name, detail: error instanceof Error ? error.message : "unknown" });
+    failed.push({
+      name: testCase.name,
+      detail: error instanceof Error ? error.message : "unknown",
+    });
   }
 }
 

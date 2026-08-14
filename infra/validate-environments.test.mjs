@@ -1,11 +1,19 @@
 import assert from "node:assert/strict";
-import { mkdirSync, mkdtempSync, readFileSync, symlinkSync, writeFileSync } from "node:fs";
+import {
+  mkdirSync,
+  mkdtempSync,
+  readdirSync,
+  readFileSync,
+  symlinkSync,
+  writeFileSync,
+} from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
-import { fileURLToPath } from "node:url";
 import { performance } from "node:perf_hooks";
+import { fileURLToPath } from "node:url";
 import {
   EnvironmentValidationError,
+  findControlBytes,
   selectEnvironment,
   validateEnvironments,
 } from "./validate-environments.mjs";
@@ -54,6 +62,16 @@ function expectFailure(name, toml, expectedCode) {
  * sibling. Matching on `[env.` alone would stop at the first sub-table.
  */
 const TOP_LEVEL_ENV_HEADER = /^\[env\.[a-z][a-z0-9_-]*\]$/gm;
+
+/**
+ * Deploy-time variable references as they appear in the TOML. These are TOML
+ * content, not JavaScript template placeholders — the `${…}` is exactly the
+ * text the topology must carry so a literal resource id can never be committed.
+ */
+// biome-ignore lint/suspicious/noTemplateCurlyInString: TOML deploy-time reference, not a JS template.
+const STAGING_ID_REFERENCE = "${ASIMP_D1_DATABASE_ID_STAGING}";
+// biome-ignore lint/suspicious/noTemplateCurlyInString: TOML deploy-time reference, not a JS template.
+const PRODUCTION_ID_REFERENCE = "${ASIMP_D1_DATABASE_ID_PRODUCTION}";
 
 function inSection(toml, section, from, to) {
   const headers = [...toml.matchAll(TOP_LEVEL_ENV_HEADER)];
@@ -125,7 +143,11 @@ const cases = [
   {
     name: "unknown-r2-role",
     execute() {
-      expectFailure("unknown-role", inSection(baseline, "staging", `role = "private-cas"`, `role = "cache"`), "UNKNOWN_R2_ROLE");
+      expectFailure(
+        "unknown-role",
+        inSection(baseline, "staging", `role = "private-cas"`, `role = "cache"`),
+        "UNKNOWN_R2_ROLE",
+      );
     },
   },
   {
@@ -133,7 +155,12 @@ const cases = [
     execute() {
       expectFailure(
         "shared-public-bucket",
-        inSection(baseline, "staging", `bucket_name = "asimposium-public-staging"`, `bucket_name = "asimposium-public-prod"`),
+        inSection(
+          baseline,
+          "staging",
+          `bucket_name = "asimposium-public-staging"`,
+          `bucket_name = "asimposium-public-prod"`,
+        ),
         "SHARED_RESOURCE",
       );
     },
@@ -143,7 +170,12 @@ const cases = [
     execute() {
       expectFailure(
         "shared-private-bucket",
-        inSection(baseline, "staging", `bucket_name = "asimposium-artifacts-staging"`, `bucket_name = "asimposium-artifacts-prod"`),
+        inSection(
+          baseline,
+          "staging",
+          `bucket_name = "asimposium-artifacts-staging"`,
+          `bucket_name = "asimposium-artifacts-prod"`,
+        ),
         "SHARED_RESOURCE",
       );
     },
@@ -157,7 +189,12 @@ const cases = [
       // the better one to surface, so this pins that ordering deliberately.
       expectFailure(
         "staging-claims-apex",
-        inSection(baseline, "staging", `custom_domain = "artifacts-staging.asimposium.org"`, `custom_domain = "artifacts.asimposium.org"`),
+        inSection(
+          baseline,
+          "staging",
+          `custom_domain = "artifacts-staging.asimposium.org"`,
+          `custom_domain = "artifacts.asimposium.org"`,
+        ),
         "ARTIFACT_HOSTNAME_MISMATCH",
       );
     },
@@ -169,7 +206,12 @@ const cases = [
       // hostname can only ever route to one bucket.
       expectFailure(
         "shared-hostname",
-        inSection(baseline, "local", `custom_domain = ""\n\n[env.local.durable_objects]`, `custom_domain = "artifacts-staging.asimposium.org"\n\n[env.local.durable_objects]`),
+        inSection(
+          baseline,
+          "local",
+          `custom_domain = ""\n\n[env.local.durable_objects]`,
+          `custom_domain = "artifacts-staging.asimposium.org"\n\n[env.local.durable_objects]`,
+        ),
         "SHARED_RESOURCE",
       );
     },
@@ -179,7 +221,12 @@ const cases = [
     execute() {
       expectFailure(
         "prod-wrong-hostname",
-        inSection(baseline, "production", `custom_domain = "artifacts.asimposium.org"`, `custom_domain = "cdn.example.org"`),
+        inSection(
+          baseline,
+          "production",
+          `custom_domain = "artifacts.asimposium.org"`,
+          `custom_domain = "cdn.example.org"`,
+        ),
         "ARTIFACT_HOSTNAME_MISMATCH",
       );
     },
@@ -191,7 +238,12 @@ const cases = [
     execute() {
       expectFailure(
         "shared-d1-name",
-        inSection(baseline, "staging", `database_name = "asimposium-staging"`, `database_name = "asimposium-prod"`),
+        inSection(
+          baseline,
+          "staging",
+          `database_name = "asimposium-staging"`,
+          `database_name = "asimposium-prod"`,
+        ),
         "SHARED_RESOURCE",
       );
     },
@@ -201,7 +253,7 @@ const cases = [
     execute() {
       expectFailure(
         "shared-d1-id",
-        inSection(baseline, "staging", "${ASIMP_D1_DATABASE_ID_STAGING}", "${ASIMP_D1_DATABASE_ID_PRODUCTION}"),
+        inSection(baseline, "staging", STAGING_ID_REFERENCE, PRODUCTION_ID_REFERENCE),
         "SHARED_RESOURCE",
       );
     },
@@ -211,7 +263,12 @@ const cases = [
     execute() {
       expectFailure(
         "shared-do",
-        inSection(baseline, "staging", `script_namespace = "asimposium-stoa-staging"`, `script_namespace = "asimposium-stoa-prod"`),
+        inSection(
+          baseline,
+          "staging",
+          `script_namespace = "asimposium-stoa-staging"`,
+          `script_namespace = "asimposium-stoa-prod"`,
+        ),
         "SHARED_RESOURCE",
       );
     },
@@ -221,17 +278,37 @@ const cases = [
   {
     name: "r2-binding-name-differs-for-the-same-role",
     execute() {
+      // Caught by the per-environment binding roster before cross-environment
+      // parity is reached. That is the sharper error: the Worker's contract is
+      // an exact binding set, and a renamed binding breaks it on its own,
+      // independently of what any other environment declares.
       expectFailure(
         "parity-r2",
         inSection(baseline, "staging", `binding = "PUBLIC_ARTIFACTS"`, `binding = "PUBLIC_BUCKET"`),
-        "BINDING_PARITY_MISMATCH",
+        "BINDING_SET_MISMATCH",
       );
     },
   },
   {
     name: "d1-binding-name-differs",
     execute() {
-      expectFailure("parity-d1", inSection(baseline, "local", `binding = "DB"`, `binding = "DATABASE"`), "BINDING_PARITY_MISMATCH");
+      expectFailure(
+        "parity-d1",
+        inSection(baseline, "local", `binding = "DB"`, `binding = "DATABASE"`),
+        "BINDING_SET_MISMATCH",
+      );
+    },
+  },
+  {
+    name: "a-missing-required-binding-is-refused",
+    execute() {
+      // Dropping the public-delivery bucket entirely: the roster notices the
+      // absent PUBLIC_ARTIFACTS even though the remaining shape is coherent.
+      const withoutPublic = baseline.replace(
+        `[[env.production.r2]]\nbinding = "PUBLIC_ARTIFACTS"\nrole = "public-delivery"\nbucket_name = "asimposium-public-prod"\ncustom_domain = "artifacts.asimposium.org"\n\n`,
+        "",
+      );
+      expectFailure("missing-binding", withoutPublic, "MISSING_R2_ROLE");
     },
   },
   {
@@ -251,7 +328,12 @@ const cases = [
     execute() {
       expectFailure(
         "preview-prod-keys",
-        inSection(baseline, "staging", "may_hold_production_keys = false", "may_hold_production_keys = true"),
+        inSection(
+          baseline,
+          "staging",
+          "may_hold_production_keys = false",
+          "may_hold_production_keys = true",
+        ),
         "PRODUCTION_KEYS_OUTSIDE_PRODUCTION",
       );
     },
@@ -261,7 +343,12 @@ const cases = [
     execute() {
       expectFailure(
         "local-prod-keys",
-        inSection(baseline, "local", "may_hold_production_keys = false", "may_hold_production_keys = true"),
+        inSection(
+          baseline,
+          "local",
+          "may_hold_production_keys = false",
+          "may_hold_production_keys = true",
+        ),
         "PRODUCTION_KEYS_OUTSIDE_PRODUCTION",
       );
     },
@@ -271,7 +358,12 @@ const cases = [
     execute() {
       expectFailure(
         "shared-kid",
-        inSection(baseline, "staging", `current_kid = "staging-2026-08"`, `current_kid = "prod-2026-08"`),
+        inSection(
+          baseline,
+          "staging",
+          `current_kid = "staging-2026-08"`,
+          `current_kid = "prod-2026-08"`,
+        ),
         "SHARED_RESOURCE",
       );
     },
@@ -281,7 +373,12 @@ const cases = [
     execute() {
       expectFailure(
         "kid-same",
-        inSection(baseline, "production", `previous_kid = "prod-2026-07"`, `previous_kid = "prod-2026-08"`),
+        inSection(
+          baseline,
+          "production",
+          `previous_kid = "prod-2026-07"`,
+          `previous_kid = "prod-2026-08"`,
+        ),
         "KID_OVERLAP_INVALID",
       );
     },
@@ -291,7 +388,12 @@ const cases = [
     execute() {
       expectFailure(
         "prod-destructive",
-        inSection(baseline, "production", "destructive_operations_allowed = false", "destructive_operations_allowed = true"),
+        inSection(
+          baseline,
+          "production",
+          "destructive_operations_allowed = false",
+          "destructive_operations_allowed = true",
+        ),
         "PRODUCTION_DESTRUCTIVE_ALLOWED",
       );
     },
@@ -303,7 +405,12 @@ const cases = [
     execute() {
       expectFailure(
         "literal-id",
-        inSection(baseline, "staging", "${ASIMP_D1_DATABASE_ID_STAGING}", "3f2a91c4-77bd-4c0e-9a11-5be2c0d41f88"),
+        inSection(
+          baseline,
+          "staging",
+          STAGING_ID_REFERENCE,
+          "3f2a91c4-77bd-4c0e-9a11-5be2c0d41f88",
+        ),
         "LITERAL_RESOURCE_ID",
       );
     },
@@ -313,7 +420,12 @@ const cases = [
     execute() {
       expectFailure(
         "local-nonzero",
-        inSection(baseline, "local", `database_id = "00000000-0000-0000-0000-000000000000"`, `database_id = "${"$"}{ASIMP_LOCAL}"`),
+        inSection(
+          baseline,
+          "local",
+          `database_id = "00000000-0000-0000-0000-000000000000"`,
+          `database_id = "${"$"}{ASIMP_LOCAL}"`,
+        ),
         "UNSAFE_CONFIG_VALUE",
       );
     },
@@ -331,7 +443,11 @@ const cases = [
   {
     name: "bearer-token-in-topology",
     execute() {
-      expectFailure("token", `${baseline}\n# asimp_ag_abcdef0123456789\n`, "CREDENTIAL_IN_REPOSITORY");
+      expectFailure(
+        "token",
+        `${baseline}\n# asimp_ag_abcdef0123456789\n`,
+        "CREDENTIAL_IN_REPOSITORY",
+      );
     },
   },
   {
@@ -347,13 +463,21 @@ const cases = [
     execute() {
       const start = baseline.indexOf("[env.staging]");
       const end = baseline.indexOf("[env.production]");
-      expectFailure("no-staging", baseline.slice(0, start) + baseline.slice(end), "MISSING_ENVIRONMENT");
+      expectFailure(
+        "no-staging",
+        baseline.slice(0, start) + baseline.slice(end),
+        "MISSING_ENVIRONMENT",
+      );
     },
   },
   {
     name: "unsupported-schema-version",
     execute() {
-      expectFailure("schema", baseline.replace("schema_version = 1", "schema_version = 2"), "UNSUPPORTED_SCHEMA");
+      expectFailure(
+        "schema",
+        baseline.replace("schema_version = 1", "schema_version = 2"),
+        "UNSUPPORTED_SCHEMA",
+      );
     },
   },
   {
@@ -391,12 +515,12 @@ const cases = [
     name: "config-path-traversal-is-refused",
     execute() {
       const root = withTopology("traversal", baseline);
-      for (const escape of ["../outside.toml", "../../etc/passwd", "infra/../../outside.toml"]) {
+      for (const candidate of ["../outside.toml", "../../etc/passwd", "infra/../../outside.toml"]) {
         try {
-          validateEnvironments(root, escape);
-          assert.fail(`expected PATH_ESCAPE for ${escape}`);
+          validateEnvironments(root, candidate);
+          assert.fail(`expected PATH_ESCAPE for ${candidate}`);
         } catch (error) {
-          assert.equal(error.code, "PATH_ESCAPE", escape);
+          assert.equal(error.code, "PATH_ESCAPE", candidate);
         }
       }
     },
@@ -460,12 +584,53 @@ const cases = [
     execute() {
       const insertions = [
         ["root", baseline.replace("schema_version = 1", "schema_version = 1\nshadow_root = true")],
-        ["policy", baseline.replace(`rollback_policy = "forward-only"`, `rollback_policy = "forward-only"\nshadow_policy = 1`)],
-        ["env", inSection(baseline, "staging", "kind = \"remote\"", "kind = \"remote\"\nshadow_env = 1")],
-        ["d1", inSection(baseline, "staging", `database_name = "asimposium-staging"`, `database_name = "asimposium-staging"\nshadow_d1 = 1`)],
-        ["r2", inSection(baseline, "staging", `bucket_name = "asimposium-artifacts-staging"`, `bucket_name = "asimposium-artifacts-staging"\ncustom_domian = "typo.example.org"`)],
-        ["durable_objects", inSection(baseline, "staging", `class_name = "HeraldRoom"`, `class_name = "HeraldRoom"\nshadow_do = 1`)],
-        ["keys", inSection(baseline, "staging", `current_kid = "staging-2026-08"`, `current_kid = "staging-2026-08"\nshadow_key = 1`)],
+        [
+          "policy",
+          baseline.replace(
+            `rollback_policy = "forward-only"`,
+            `rollback_policy = "forward-only"\nshadow_policy = 1`,
+          ),
+        ],
+        [
+          "env",
+          inSection(baseline, "staging", 'kind = "remote"', 'kind = "remote"\nshadow_env = 1'),
+        ],
+        [
+          "d1",
+          inSection(
+            baseline,
+            "staging",
+            `database_name = "asimposium-staging"`,
+            `database_name = "asimposium-staging"\nshadow_d1 = 1`,
+          ),
+        ],
+        [
+          "r2",
+          inSection(
+            baseline,
+            "staging",
+            `bucket_name = "asimposium-artifacts-staging"`,
+            `bucket_name = "asimposium-artifacts-staging"\ncustom_domian = "typo.example.org"`,
+          ),
+        ],
+        [
+          "durable_objects",
+          inSection(
+            baseline,
+            "staging",
+            `class_name = "HeraldRoom"`,
+            `class_name = "HeraldRoom"\nshadow_do = 1`,
+          ),
+        ],
+        [
+          "keys",
+          inSection(
+            baseline,
+            "staging",
+            `current_kid = "staging-2026-08"`,
+            `current_kid = "staging-2026-08"\nshadow_key = 1`,
+          ),
+        ],
       ];
       for (const [level, toml] of insertions) {
         expectFailure(`shadow-${level}`, toml, "UNKNOWN_CONFIG_KEY");
@@ -483,6 +648,259 @@ const cases = [
       assert.equal(report.environments.production.destructive_operations_allowed, false);
       assert.equal(report.environments.production.may_hold_production_keys, true);
       assert.equal(report.environments.staging.may_hold_production_keys, false);
+    },
+  },
+
+  // --- service-envelope keys (Fable §14.1) ---------------------------------
+  {
+    name: "service-envelope-key-must-not-double-as-a-signing-key",
+    execute() {
+      expectFailure(
+        "key-role-collision",
+        inSection(
+          baseline,
+          "staging",
+          `service_envelope_current_kid = "staging-svc-2026-08"`,
+          `service_envelope_current_kid = "staging-2026-08"`,
+        ),
+        "KEY_ROLE_COLLISION",
+      );
+    },
+  },
+  {
+    name: "service-envelope-kid-overlap-must-be-a-real-overlap",
+    execute() {
+      expectFailure(
+        "svc-kid-same",
+        inSection(
+          baseline,
+          "production",
+          `service_envelope_previous_kid = "prod-svc-2026-07"`,
+          `service_envelope_previous_kid = "prod-svc-2026-08"`,
+        ),
+        "KID_OVERLAP_INVALID",
+      );
+    },
+  },
+  {
+    name: "service-envelope-kid-must-not-be-shared-across-environments",
+    execute() {
+      expectFailure(
+        "svc-kid-shared",
+        inSection(
+          baseline,
+          "staging",
+          `service_envelope_current_kid = "staging-svc-2026-08"`,
+          `service_envelope_current_kid = "prod-svc-2026-08"`,
+        ),
+        "SHARED_RESOURCE",
+      );
+    },
+  },
+  {
+    name: "service-envelope-key-ids-are-reported",
+    execute() {
+      const report = validateEnvironments(repositoryRoot);
+      assert.deepEqual(report.environments.production.service_envelope_key_ids, [
+        "prod-svc-2026-08",
+        "prod-svc-2026-07",
+      ]);
+      assert.deepEqual(report.environments.local.service_envelope_key_ids, ["local-svc-1"]);
+    },
+  },
+
+  // --- worker origins -------------------------------------------------------
+  {
+    name: "remote-worker-origin-must-be-https",
+    execute() {
+      expectFailure(
+        "http-remote",
+        inSection(
+          baseline,
+          "staging",
+          `worker_origin = "https://a-staging.asimposium.org"`,
+          `worker_origin = "http://a-staging.asimposium.org"`,
+        ),
+        "UNSAFE_CONFIG_VALUE",
+      );
+    },
+  },
+  {
+    name: "two-environments-must-not-share-a-worker-origin",
+    execute() {
+      expectFailure(
+        "shared-origin",
+        inSection(
+          baseline,
+          "staging",
+          `worker_origin = "https://a-staging.asimposium.org"`,
+          `worker_origin = "https://a.asimposium.org"`,
+        ),
+        "SHARED_RESOURCE",
+      );
+    },
+  },
+
+  // --- Vercel preview wiring (ADR-2) ---------------------------------------
+  {
+    name: "vercel-preview-must-not-target-production",
+    execute() {
+      expectFailure(
+        "preview-to-prod",
+        baseline.replace(`preview_environment = "staging"`, `preview_environment = "production"`),
+        "PREVIEW_TARGETS_PRODUCTION",
+      );
+    },
+  },
+  {
+    name: "vercel-preview-must-name-a-preview-tier",
+    execute() {
+      expectFailure(
+        "preview-not-preview",
+        baseline.replace(`preview_environment = "staging"`, `preview_environment = "local"`),
+        "VERCEL_WIRING_INVALID",
+      );
+    },
+  },
+  {
+    name: "vercel-production-must-be-production",
+    execute() {
+      expectFailure(
+        "prod-target",
+        baseline.replace(
+          `production_environment = "production"`,
+          `production_environment = "staging"`,
+        ),
+        "VERCEL_WIRING_INVALID",
+      );
+    },
+  },
+  {
+    name: "vercel-must-name-known-environments",
+    execute() {
+      expectFailure(
+        "unknown-target",
+        baseline.replace(`preview_environment = "staging"`, `preview_environment = "nowhere"`),
+        "UNKNOWN_ENVIRONMENT",
+      );
+    },
+  },
+  {
+    name: "vercel-wiring-is-reported",
+    execute() {
+      const report = validateEnvironments(repositoryRoot);
+      assert.deepEqual(report.vercel, {
+        production_environment: "production",
+        preview_environment: "staging",
+      });
+      // The value a Vercel preview deployment would actually be given.
+      assert.equal(
+        report.environments[report.vercel.preview_environment].worker_origin,
+        "https://a-staging.asimposium.org",
+      );
+    },
+  },
+
+  // --- control bytes (parent finding) --------------------------------------
+  {
+    name: "a-nul-byte-anywhere-in-the-config-is-refused",
+    execute() {
+      // A NUL truncates strings in a lot of downstream tooling, so a value can
+      // read as one thing to a validator and another to its consumer.
+      expectFailure(
+        "nul-in-comment",
+        `${baseline}\n# trailing\u0000byte\n`,
+        "CONTROL_BYTE_IN_CONFIG",
+      );
+      expectFailure(
+        "nul-in-bucket-name",
+        inSection(
+          baseline,
+          "staging",
+          `bucket_name = "asimposium-artifacts-staging"`,
+          `bucket_name = "asimposium-artifacts-staging\u0000-decoy"`,
+        ),
+        "CONTROL_BYTE_IN_CONFIG",
+      );
+      expectFailure(
+        "nul-in-kid",
+        inSection(
+          baseline,
+          "production",
+          `current_kid = "prod-2026-08"`,
+          `current_kid = "prod-2026-08\u0000"`,
+        ),
+        "CONTROL_BYTE_IN_CONFIG",
+      );
+      expectFailure(
+        "nul-in-database-id",
+        inSection(baseline, "staging", STAGING_ID_REFERENCE, `${STAGING_ID_REFERENCE}\u0000`),
+        "CONTROL_BYTE_IN_CONFIG",
+      );
+    },
+  },
+  {
+    name: "other-control-bytes-are-refused-but-tab-newline-and-cr-are-not",
+    execute() {
+      for (const [label, byte] of [
+        ["BEL", "\u0007"],
+        ["backspace", "\u0008"],
+        ["vertical tab", "\u000b"],
+        ["form feed", "\u000c"],
+        ["ESC", "\u001b"],
+        ["DEL", "\u007f"],
+      ]) {
+        expectFailure(`control-${label}`, `${baseline}\n# ${byte}\n`, "CONTROL_BYTE_IN_CONFIG");
+      }
+      // The three a TOML file legitimately needs must still parse.
+      const withWhitespace = `${baseline}\n#\ttabbed comment\r\n`;
+      const root = withTopology("legal-whitespace", withWhitespace);
+      assert.equal(validateEnvironments(root).config, "infra/environments.toml");
+    },
+  },
+  {
+    name: "the-control-byte-refusal-does-not-echo-the-surrounding-bytes",
+    execute() {
+      const poisoned = inSection(
+        baseline,
+        "staging",
+        `bucket_name = "asimposium-artifacts-staging"`,
+        `bucket_name = "asimposium-artifacts-staging\u0000smuggled-value"`,
+      );
+      const root = withTopology("no-echo", poisoned);
+      try {
+        validateEnvironments(root);
+        assert.fail("expected CONTROL_BYTE_IN_CONFIG");
+      } catch (error) {
+        assert.equal(error.code, "CONTROL_BYTE_IN_CONFIG");
+        // The neighbourhood of a control byte is where a smuggled value sits.
+        assert.equal(error.message.includes("smuggled-value"), false, error.message);
+        assert.equal(error.message.includes("\u0000"), false);
+        assert.match(error.message, /U\+0000/);
+      }
+    },
+  },
+  {
+    name: "no-infra-source-or-config-file-contains-a-control-byte",
+    execute() {
+      // The check that would have caught the NUL that reached
+      // validate-environments.mjs and turned it into `data` for file(1) and git.
+      const infraDirectory = join(repositoryRoot, "infra");
+      const offenders = [];
+      for (const entry of readdirSync(infraDirectory)) {
+        if (!/\.(mjs|toml)$/.test(entry)) continue;
+        const found = findControlBytes(readFileSync(join(infraDirectory, entry), "utf8"));
+        if (found.length > 0) {
+          offenders.push(`${entry}@${found[0].offset}`);
+        }
+      }
+      for (const entry of readdirSync(join(infraDirectory, "environments"))) {
+        const found = findControlBytes(
+          readFileSync(join(infraDirectory, "environments", entry), "utf8"),
+        );
+        if (found.length > 0) offenders.push(`environments/${entry}@${found[0].offset}`);
+      }
+      assert.deepEqual(offenders, []);
     },
   },
 
@@ -515,7 +933,10 @@ for (const testCase of cases) {
   try {
     testCase.execute();
   } catch (error) {
-    failed.push({ name: testCase.name, detail: error instanceof Error ? error.message : "unknown" });
+    failed.push({
+      name: testCase.name,
+      detail: error instanceof Error ? error.message : "unknown",
+    });
   }
 }
 

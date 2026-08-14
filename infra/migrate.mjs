@@ -1,8 +1,8 @@
 import { createHash } from "node:crypto";
-import { existsSync, lstatSync, readFileSync, readdirSync } from "node:fs";
+import { existsSync, lstatSync, readdirSync, readFileSync } from "node:fs";
 import { dirname, join, resolve } from "node:path";
-import { fileURLToPath } from "node:url";
 import { performance } from "node:perf_hooks";
+import { fileURLToPath } from "node:url";
 import {
   assertRepositoryContained,
   EnvironmentValidationError,
@@ -206,14 +206,20 @@ export function readMigrationDirectory(directory) {
     // A symlinked migration is a file whose contents the digest cannot pin: the
     // link can be repointed after review without changing anything in the repo.
     if (entryStat.isSymbolicLink()) {
-      fail("SYMLINKED_MIGRATION_FILE", `"${entry}" is a symlink; migrations must be regular files.`);
+      fail(
+        "SYMLINKED_MIGRATION_FILE",
+        `"${entry}" is a symlink; migrations must be regular files.`,
+      );
     }
     if (!entryStat.isFile()) {
       fail("NON_REGULAR_MIGRATION_FILE", `"${entry}" is not a regular file.`);
     }
     if (entry.endsWith(".md")) continue;
     if (!entry.endsWith(".sql")) {
-      fail("UNEXPECTED_MIGRATION_FILE", `"${entry}" is neither a .sql migration nor documentation.`);
+      fail(
+        "UNEXPECTED_MIGRATION_FILE",
+        `"${entry}" is neither a .sql migration nor documentation.`,
+      );
     }
     // Forward-only is enforced at the filename, before anyone can run one.
     if (/\.(down|rollback|undo)\.sql$/.test(entry) || /^\d+_down_/.test(entry)) {
@@ -229,7 +235,10 @@ export function readMigrationDirectory(directory) {
     const sequence = Number(match[1]);
     const held = seen.get(sequence);
     if (held !== undefined) {
-      fail("DUPLICATE_MIGRATION_SEQUENCE", `Migrations "${held}" and "${entry}" share sequence ${match[1]}.`);
+      fail(
+        "DUPLICATE_MIGRATION_SEQUENCE",
+        `Migrations "${held}" and "${entry}" share sequence ${match[1]}.`,
+      );
     }
     seen.set(sequence, entry);
 
@@ -415,7 +424,11 @@ function readLocalLedger(root, databaseName) {
     fail("LOCAL_D1_UNREADABLE", "Could not parse the local D1 response as JSON.");
   }
   const rows = Array.isArray(parsed) ? (parsed[0]?.results ?? []) : [];
-  return rows.map((row) => ({ id: String(row.id), sequence: Number(row.sequence), digest: String(row.digest) }));
+  return rows.map((row) => ({
+    id: String(row.id),
+    sequence: Number(row.sequence),
+    digest: String(row.digest),
+  }));
 }
 
 /**
@@ -502,7 +515,10 @@ export function readStateFile(path) {
       fail("DUPLICATE_STATE_RECORD", `State file records sequence ${sequence} more than once.`);
     }
     if (sequence <= previousSequence) {
-      fail("UNORDERED_STATE_FILE", `State file record ${index} (sequence ${sequence}) is not in ascending order.`);
+      fail(
+        "UNORDERED_STATE_FILE",
+        `State file record ${index} (sequence ${sequence}) is not in ascending order.`,
+      );
     }
     seenIds.add(id);
     seenSequences.add(sequence);
