@@ -391,23 +391,59 @@ export function safeReproductionCommand(reproduction?: HarnessRunOptions["reprod
 
 /** Validate the public runner input before any artifact directory or child process is created. */
 /**
- * Establish the run root as a real, absolute, contained directory.
+ * A directory that has explicitly consented to being used as a disposable
+ * harness root. Tests create it; nothing else should.
+ */
+export const HARNESS_ROOT_MARKER = ".asimposium-harness-root";
+
+/** Files that must exist for a directory to be this checkout. */
+const REPOSITORY_SENTINELS = ["package.json", join("scripts", "harness", "runner.ts")] as const;
+
+/**
+ * The checkout this runner physically belongs to.
  *
- * Everything the harness writes is placed under this path, and every child runs
- * with it as the working directory, so a root that is relative, missing, or a
- * symlink pointing elsewhere silently relocates the entire evidence trail. The
- * checks are ordered from cheapest to most invasive:
+ * Anchoring identity to `import.meta.dir` rather than to `git rev-parse
+ * --show-toplevel` is deliberate and, for this purpose, stronger: it is the
+ * directory the executing code actually came from, it needs no subprocess, it
+ * still works in a worktree or an exported tarball with no `.git`, and it
+ * cannot be redirected by a nested or planted `.git`. The sentinels below then
+ * confirm the directory really is an ASImposium checkout rather than a
+ * coincidence of layout.
+ */
+export function repositoryRoot(): string {
+  const candidate = realpathSync(resolve(import.meta.dir, "..", ".."));
+  for (const sentinel of REPOSITORY_SENTINELS) {
+    if (!existsSync(join(candidate, sentinel))) {
+      throw new HarnessError(
+        "ROOT_IDENTITY_UNVERIFIABLE",
+        "the harness cannot identify its own checkout; a project sentinel is missing.",
+      );
+    }
+  }
+  return candidate;
+}
+
+/**
+ * Establish the run root, by identity — not merely by shape.
  *
- *  - absolute, because a relative root resolves against whatever cwd the caller
- *    happened to have;
- *  - existing and a directory after `realpath`, so a symlinked root cannot
- *    redirect artifacts outside the tree the caller believes it named;
- *  - not the filesystem root, which is never a legitimate artifact base and is
- *    the shape a mis-joined path takes.
+ * Everything the harness writes lands under this path and every child runs with
+ * it as the working directory, so "any absolute directory" is far too generous:
+ * it would let a stray `--root` scatter an `e2e/artifacts` tree into a home
+ * directory, an unrelated repository, or the parent of this one, and the
+ * mistake would look like a successful run.
  *
- * This is containment, not identity: a disposable temp directory is a perfectly
- * valid root, and tests rely on that. What is refused is a root that does not
- * resolve to the place the caller asked for.
+ * Exactly two roots are therefore accepted:
+ *
+ *  1. **This checkout**, verified against `repositoryRoot()`.
+ *  2. **A directory that has consented**, by containing `HARNESS_ROOT_MARKER`.
+ *     Consent lives in the filesystem rather than in a boolean parameter
+ *     because a flag can be passed by accident and a file cannot: a caller has
+ *     to have deliberately created that marker in that directory. This is what
+ *     lets tests use disposable `mkdtemp` roots without weakening real runs.
+ *
+ * Symlinked roots are refused outright rather than silently resolved. Following
+ * one would mean the caller named one directory and the harness wrote to
+ * another, which is precisely the confusion this function exists to prevent.
  */
 export function assertContainedRoot(root: unknown): string {
   if (typeof root !== "string" || root.length === 0) {
@@ -416,11 +452,17 @@ export function assertContainedRoot(root: unknown): string {
   if (!isAbsolute(root)) {
     throw new HarnessError("ROOT_INVALID", "root must be absolute, not relative to a caller cwd.");
   }
-  let real: string;
-  try {
-    real = realpathSync(root);
-  } catch {
+  if (!existsSync(root)) {
     throw new HarnessError("ROOT_INVALID", "root does not exist.");
+  }
+  // Refuse rather than resolve: a symlinked root means the path the caller
+  // named and the path the harness writes to are two different places.
+  const real = realpathSync(root);
+  if (real !== resolve(root)) {
+    throw new HarnessError(
+      "ROOT_SYMLINK_REFUSED",
+      "root must not be a symlink; name the real directory so artifacts land where the caller believes.",
+    );
   }
   if (!statSync(real).isDirectory()) {
     throw new HarnessError("ROOT_INVALID", "root must be a directory.");
@@ -428,9 +470,25 @@ export function assertContainedRoot(root: unknown): string {
   if (real === sep) {
     throw new HarnessError("ROOT_INVALID", "the filesystem root is never a valid artifact base.");
   }
-  // The resolved root is what every later path is joined against, so callers
-  // that passed a symlink get the destination they will actually write to.
-  return real;
+  // Named explicitly so these two very common mistakes get their own message
+  // instead of the generic identity refusal.
+  if (real === realpathSync(homedir())) {
+    throw new HarnessError("ROOT_NOT_REPOSITORY", "a home directory is never a harness root.");
+  }
+  if (real === realpathSync(tmpdir())) {
+    throw new HarnessError(
+      "ROOT_NOT_REPOSITORY",
+      "the shared temp directory is never a harness root; use a mkdtemp directory carrying the marker.",
+    );
+  }
+
+  if (real === repositoryRoot()) return real;
+  if (existsSync(join(real, HARNESS_ROOT_MARKER))) return real;
+
+  throw new HarnessError(
+    "ROOT_NOT_REPOSITORY",
+    `root is neither this checkout nor a directory carrying ${HARNESS_ROOT_MARKER}; refusing to write artifacts into an unrelated directory.`,
+  );
 }
 
 /** True when `target` stays inside `root` once both are fully resolved. */

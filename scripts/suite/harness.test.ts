@@ -12,8 +12,8 @@ import {
   symlinkSync,
   writeFileSync,
 } from "node:fs";
-import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { homedir, tmpdir } from "node:os";
+import { join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import {
   assertContainedRoot,
@@ -22,6 +22,7 @@ import {
   FORCE_KILL_GRACE_MS,
   HARD_READER_GRACE_MS,
   HARNESS_BLOCKED_EXIT_CODE,
+  HARNESS_ROOT_MARKER,
   HARNESS_SCHEMA_VERSION,
   type HarnessError,
   type HarnessEvent,
@@ -36,6 +37,7 @@ import {
   MAX_STEPS_PER_RUN,
   MAX_TIMEOUT_MS,
   orderSteps,
+  repositoryRoot,
   runHarness,
   validateHarnessEvent,
   validateHarnessStep,
@@ -83,9 +85,18 @@ const SECRET_EMITTER = fileURLToPath(
   new URL("../harness/self-test-secret-emitter.ts", import.meta.url),
 );
 
+/**
+ * A disposable root that has explicitly consented to being written to.
+ *
+ * The marker is the whole point: the runner refuses any directory that is
+ * neither this checkout nor carrying it, so a test root has to opt in on the
+ * filesystem. Writing it here — rather than passing a flag — is what keeps a
+ * stray `--root /Users/someone` refused in a real run.
+ */
 function fixtureRoot(name: string): string {
   const root = mkdtempSync(join(tmpdir(), `asimposium-harness-${name}-`));
   mkdirSync(join(root, "e2e"));
+  writeFileSync(join(root, HARNESS_ROOT_MARKER), "disposable harness root\n");
   return root;
 }
 
@@ -703,7 +714,10 @@ test("the real shell entry point proves the seeded harness-only negative aggrega
   expect(stdout).toContain("proves nothing about product behavior");
   expect(stderr).toContain("<redacted>");
   expect(stderr).not.toContain("selftest_neverlog_canary");
-});
+  // The self-test now drives real adapters end to end — a local D1 database is
+  // opened and read several times — so it needs a budget measured in tens of
+  // seconds, not the default five.
+}, 180_000);
 
 describe("OPS.2a real adapters", () => {
   const ADAPTERS = join(fileURLToPath(new URL("../harness/adapters/", import.meta.url)));
@@ -753,14 +767,14 @@ describe("OPS.2a real adapters", () => {
     expect(ok.stdout).not.toContain("/Users/");
     expect(ok.stdout).not.toContain("/tmp/");
     expect(record.state_dir_class).toBe("os-temp");
-  });
+  }, 90000);
 
   test("PLANTED: the D1 rollback assertion fails when nothing rolled back", async () => {
     const planted = await runAdapter("d1-rollback.ts", "planted-fail");
     if (planted.exitCode === HARNESS_BLOCKED_EXIT_CODE) return;
     expect(planted.exitCode).toBe(1);
     expect(planted.stdout).toContain("D1_TRANSACTION_LEAKED");
-  });
+  }, 90000);
 
   test("the HTTP adapter proves a real loopback fault surface", async () => {
     const ok = await runAdapter("http-fault.ts", "ok");
@@ -774,13 +788,13 @@ describe("OPS.2a real adapters", () => {
     expect(record.request_id_minted).toBe(true);
     // A route that never answers must be bounded by the client, not by luck.
     expect(record.slow_route_timed_out).toBe(true);
-  });
+  }, 30000);
 
   test("PLANTED: the HTTP assertion fails when the status contract is wrong", async () => {
     const planted = await runAdapter("http-fault.ts", "planted-fail");
     expect(planted.exitCode).toBe(1);
     expect(planted.stdout).toContain("HTTP_FAULT_SURFACE_MISMATCH");
-  });
+  }, 30000);
 
   test("the browser adapter either asserts real DOM or names its blocker", async () => {
     const ok = await runAdapter("browser-assert.ts", "ok");
@@ -795,14 +809,14 @@ describe("OPS.2a real adapters", () => {
     expect(record.artifacts_captured).toBe("none");
     expect(record.screenshot_policy).toBe("disabled");
     expect(record.trace_policy).toBe("disabled");
-  });
+  }, 90000);
 
   test("PLANTED: the browser assertion fails on text the page never renders", async () => {
     const planted = await runAdapter("browser-assert.ts", "planted-fail");
     if (planted.exitCode === HARNESS_BLOCKED_EXIT_CODE) return;
     expect(planted.exitCode).toBe(1);
     expect(planted.stdout).toContain("BROWSER_ASSERTION_MISMATCH");
-  });
+  }, 90000);
 
   test("an adapter step may only execute its own registered probe", () => {
     // The adapter label is what a reader trusts when deciding whether D1 really
@@ -841,7 +855,10 @@ describe("harness code may never delete files", () => {
     const { Glob } = await import("bun");
     const root = fileURLToPath(new URL("../harness/", import.meta.url));
     const offenders: string[] = [];
-    for await (const relativeFile of new Glob("**/*.{ts,sh}").scan({ cwd: root, onlyFiles: true })) {
+    for await (const relativeFile of new Glob("**/*.{ts,sh}").scan({
+      cwd: root,
+      onlyFiles: true,
+    })) {
       const text = readFileSync(join(root, relativeFile), "utf8");
       for (const [index, line] of text.split("\n").entries()) {
         const code = line.trim();
@@ -855,37 +872,88 @@ describe("harness code may never delete files", () => {
   });
 });
 
-describe("repository root containment", () => {
-  test("a relative, missing, or non-directory root is refused", () => {
+describe("repository root identity", () => {
+  test("shape failures are refused", () => {
     expect(() => assertContainedRoot("relative/path")).toThrow(/absolute/);
     expect(() => assertContainedRoot("")).toThrow(/non-empty/);
     expect(() => assertContainedRoot(undefined)).toThrow(/non-empty/);
     expect(() => assertContainedRoot(join(tmpdir(), `absent-${Date.now()}`))).toThrow(/exist/);
   });
 
-  test("PLANTED: a symlinked root resolves to its destination rather than escaping", () => {
-    const outside = mkdtempSync(join(tmpdir(), "harness-outside-"));
-    const holder = mkdtempSync(join(tmpdir(), "harness-holder-"));
-    const link = join(holder, "root-link");
-    symlinkSync(outside, link);
-    // Containment resolves the link, so callers act on the real destination
-    // instead of believing artifacts landed under `holder`.
-    const resolved = assertContainedRoot(link);
-    expect(resolved).not.toContain("root-link");
-    expect(isContainedPath(resolved, join(resolved, "artifacts"))).toBe(true);
-    expect(isContainedPath(resolved, join(resolved, "..", "escaped"))).toBe(false);
+  test("this checkout is accepted, anchored to where the runner lives", () => {
+    const checkout = repositoryRoot();
+    expect(assertContainedRoot(checkout)).toBe(checkout);
+    expect(existsSync(join(checkout, "scripts", "harness", "runner.ts"))).toBe(true);
+    expect(existsSync(join(checkout, "package.json"))).toBe(true);
   });
 
-  test("a run refuses to start against an escaping root", async () => {
+  test("PLANTED: an unrelated absolute directory is refused", () => {
+    // The previous rule accepted this and would have created e2e/artifacts in it.
+    const unrelated = mkdtempSync(join(tmpdir(), "harness-unrelated-"));
+    expect(() => assertContainedRoot(unrelated)).toThrow(/unrelated directory/);
+  });
+
+  test("PLANTED: a home directory is refused", () => {
+    expect(() => assertContainedRoot(homedir())).toThrow(/home directory/);
+  });
+
+  test("PLANTED: the shared temp directory is refused", () => {
+    expect(() => assertContainedRoot(tmpdir())).toThrow(/temp directory/);
+  });
+
+  test("PLANTED: the parent of this checkout is refused", () => {
+    expect(() => assertContainedRoot(resolve(repositoryRoot(), ".."))).toThrow(
+      /unrelated directory/,
+    );
+  });
+
+  test("PLANTED: a directory that merely looks like a checkout is refused", () => {
+    // Sentinels are not identity. A lookalike must still be refused, because
+    // it is not *this* checkout.
+    const impostor = mkdtempSync(join(tmpdir(), "harness-impostor-"));
+    mkdirSync(join(impostor, "scripts", "harness"), { recursive: true });
+    writeFileSync(join(impostor, "package.json"), "{}\n");
+    writeFileSync(join(impostor, "scripts", "harness", "runner.ts"), "// impostor\n");
+    expect(() => assertContainedRoot(impostor)).toThrow(/unrelated directory/);
+  });
+
+  test("PLANTED: a symlink pointing at this checkout is refused, not followed", () => {
+    // Following it would mean the caller named one directory while the harness
+    // wrote to another — exactly the confusion this rule prevents.
+    const holder = mkdtempSync(join(tmpdir(), "harness-link-"));
+    const link = join(holder, "checkout-link");
+    symlinkSync(repositoryRoot(), link);
+    expect(() => assertContainedRoot(link)).toThrow(/symlink/);
+  });
+
+  test("a disposable root is accepted only once it carries the marker", () => {
+    const disposable = mkdtempSync(join(tmpdir(), "harness-consent-"));
+    expect(() => assertContainedRoot(disposable)).toThrow(/unrelated directory/);
+    writeFileSync(join(disposable, HARNESS_ROOT_MARKER), "disposable harness root\n");
+    expect(assertContainedRoot(disposable)).toBe(disposable);
+  });
+
+  test("a run refuses to start against a root it cannot identify", async () => {
+    const unrelated = mkdtempSync(join(tmpdir(), "harness-run-unrelated-"));
     await expect(
       runHarness({
-        root: "not/absolute",
-        runId: "root-escape-probe",
+        root: unrelated,
+        runId: "root-identity-probe",
         suite: "ops.2a-root",
-        steps: [{ id: "noop", scenario: "unit", replaySafe: true, command: [process.execPath, "-e", ""] }],
+        steps: [
+          { id: "noop", scenario: "unit", replaySafe: true, command: [process.execPath, "-e", ""] },
+        ],
         onEvent: () => undefined,
       }),
-    ).rejects.toThrow(/absolute/);
+    ).rejects.toThrow(/unrelated directory/);
+    // It wrote nothing into the directory it refused.
+    expect(existsSync(join(unrelated, "e2e"))).toBe(false);
+  });
+
+  test("artifact paths stay inside the resolved root", () => {
+    const root = repositoryRoot();
+    expect(isContainedPath(root, join(root, "e2e", "artifacts"))).toBe(true);
+    expect(isContainedPath(root, join(root, "..", "escaped"))).toBe(false);
   });
 });
 
@@ -901,8 +969,8 @@ describe("timeout grace", () => {
   });
 
   test("PLANTED: a duration beyond the grace is still rejected", () => {
-    expect(() => validateHarnessEvent(sampleEvent({ duration_ms: MAX_EVENT_DURATION_MS + 1 }))).toThrow(
-      /out of bounds/,
-    );
+    expect(() =>
+      validateHarnessEvent(sampleEvent({ duration_ms: MAX_EVENT_DURATION_MS + 1 })),
+    ).toThrow(/out of bounds/);
   });
 });
