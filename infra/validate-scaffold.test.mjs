@@ -77,6 +77,15 @@ function createMissingMainFixture() {
   return root;
 }
 
+function createMissingMigrationsFixture() {
+  const root = join(temporaryFixtureRoot, "missing-migrations");
+  mkdirSync(join(root, "infra"), { recursive: true });
+  mkdirSync(join(root, "apps", "wire", "src"), { recursive: true });
+  writeFileSync(join(root, "apps", "wire", "src", "index.ts"), "export default {};\n", "utf8");
+  writeFixtureFile(root, "infra/wrangler.toml", validConfig);
+  return root;
+}
+
 function createMainSymlinkEscapeFixture() {
   const root = join(temporaryFixtureRoot, "main-symlink-escape");
   const externalApps = join(temporaryFixtureRoot, "external-main-apps");
@@ -128,6 +137,7 @@ try {
   const wrongMarkdownRuleTypeConfig = validConfig.replace('type = "Text"', 'type = "Data"');
   const wrongMarkdownRuleGlobConfig = validConfig.replace('globs = ["**/*.md"]', 'globs = ["**/*.txt"]');
   const wrongMarkdownRuleFallthroughConfig = validConfig.replace("fallthrough = true", "fallthrough = false");
+  const shadowedMarkdownRuleConfig = validConfig.replace("[[rules]]", "[rules]");
   const duplicateMarkdownRuleConfig = `${validConfig}
 [[rules]]
 type = "Text"
@@ -168,6 +178,12 @@ fallthrough = true
       name: "missing-required-main-target",
       execute() {
         expectFailure(createMissingMainFixture(), "infra/wrangler.toml", "MISSING_REQUIRED_TARGET");
+      },
+    },
+    {
+      name: "missing-required-migrations-target",
+      execute() {
+        expectFailure(createMissingMigrationsFixture(), "infra/wrangler.toml", "MISSING_REQUIRED_TARGET");
       },
     },
     {
@@ -219,6 +235,12 @@ fallthrough = true
       },
     },
     {
+      name: "shadowed-markdown-text-rule",
+      execute() {
+        expectFailure(createCompleteFixtureRoot("shadowed-markdown-rule", shadowedMarkdownRuleConfig), "infra/wrangler.toml", "UNSAFE_CONFIG_TABLE");
+      },
+    },
+    {
       name: "duplicate-markdown-text-rule",
       execute() {
         expectFailure(createCompleteFixtureRoot("duplicate-markdown-rule", duplicateMarkdownRuleConfig), "infra/wrangler.toml", "DUPLICATE_CONFIG_TABLE");
@@ -234,7 +256,7 @@ fallthrough = true
     }
   }
   assert.deepEqual(failedCases, []);
-  assert.equal(cases.length, 13);
+  assert.equal(cases.length, 15);
 
   process.stdout.write(`${JSON.stringify({
     tool: "node",
