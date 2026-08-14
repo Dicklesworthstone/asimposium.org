@@ -601,11 +601,16 @@ self_test_lifecycle() {
   pid_file="$STATE_DIR/descendant.pid"
   log_phase "lifecycle-state-retained" "dir=$STATE_DIR mode=$mode"
 
-  if [[ "$mode" == "group" ]]; then
-    # Job control: the child leads its own group, and exits immediately.
+  if [[ "$mode" != "pid-tree" ]]; then
+    # Job control: the child leads its own group, and exits immediately. In
+    # `group-kill` the descendant ignores TERM, so only the escalation removes it.
     set -m
-    S1_LIFECYCLE_PID_FILE="$pid_file" bash -c '
-      sleep 300 &
+    S1_LIFECYCLE_PID_FILE="$pid_file" S1_LIFECYCLE_STUBBORN="$stubborn" bash -c '
+      if [[ -n "$S1_LIFECYCLE_STUBBORN" ]]; then
+        bash -c "trap \"\" TERM; sleep 300" &
+      else
+        sleep 300 &
+      fi
       printf "%s\n" "$!" >"$S1_LIFECYCLE_PID_FILE"
       exit 0
     ' &
@@ -642,7 +647,7 @@ self_test_lifecycle() {
   [[ -n "$(live_pids "$descendant")" ]] || failed "LIFECYCLE_DESCENDANT_NOT_STARTED"
   log_phase "lifecycle-descendant" "pid=$descendant leader=$leader mode=$mode"
 
-  if [[ "$mode" == "group" ]]; then
+  if [[ "$mode" != "pid-tree" ]]; then
     [[ "$(process_group_of "$descendant")" == "$leader" ]] || failed "LIFECYCLE_DESCENDANT_OUTSIDE_GROUP"
     # Let the leader exit and reap it. The reap is not tidiness — it is the exact
     # state that defeats a cleanup which re-derives the group or polls the leader:
@@ -667,8 +672,14 @@ self_test_lifecycle() {
 
   [[ -z "$(live_pids "$descendant")" ]] || failed "LIFECYCLE_DESCENDANT_SURVIVED"
   [[ -z "$(live_pids "$leader")" ]] || failed "LIFECYCLE_LEADER_SURVIVED"
-  if [[ "$mode" == "group" ]]; then
+  if [[ "$mode" != "pid-tree" ]]; then
     [[ -z "$(live_group_members "$leader")" ]] || failed "LIFECYCLE_GROUP_SURVIVED"
+    if [[ "$mode" == "group-kill" ]]; then
+      # The escalation is the point of this mode: a TERM-proof descendant must be
+      # reported as a survivor and then actually killed, not quietly left behind.
+      grep -q "lifecycle-survivors" "$PHASE_LOG" || failed "LIFECYCLE_ESCALATION_UNREPORTED"
+      grep -q "lifecycle-killed" "$PHASE_LOG" || failed "LIFECYCLE_ESCALATION_MISSING"
+    fi
   else
     # Still here, and still a live member of the group the child shared with us.
     group_contains "$(process_group_of "$$")" "$$" || failed "LIFECYCLE_SELF_SIGNALLED"
@@ -828,6 +839,10 @@ main() {
   fi
   if [[ "${1:-}" == "--self-test-lifecycle" ]]; then
     self_test_lifecycle "group"
+    return
+  fi
+  if [[ "${1:-}" == "--self-test-lifecycle-kill" ]]; then
+    self_test_lifecycle "group-kill"
     return
   fi
   if [[ "${1:-}" == "--self-test-lifecycle-unowned" ]]; then
