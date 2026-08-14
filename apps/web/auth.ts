@@ -20,6 +20,15 @@ import Google from "next-auth/providers/google";
 export const { handlers, auth, signIn, signOut } = NextAuth({
   providers: [Google],
   session: { strategy: "jwt" },
+  callbacks: {
+    // The sponsor principal id for the service envelope is the Google `sub`:
+    // opaque, stable, never an email. v5's jwt session does not surface it on
+    // `session.user` without this mapping.
+    session({ session, token }) {
+      if (token.sub) session.user.id = token.sub;
+      return session;
+    },
+  },
   cookies: {
     sessionToken: {
       name: "asimp.session",
