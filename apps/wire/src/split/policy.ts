@@ -143,18 +143,104 @@ export function rejectAuthoritativeFields(
  * rather than becoming indistinguishable punctuation in surrounding prose.
  */
 const CONFUSABLE_WHITESPACE = /[\p{White_Space}\u200B\u2060\uFEFF]+/gu;
-const MATH_SPAN = /\$\$([\s\S]*?)\$\$|\\\(([\s\S]*?)\\\)|\\\[([\s\S]*?)\\\]|\$([^$]*)\$/gu;
-// biome-ignore lint/suspicious/noControlCharactersInRegex: these are the two private math-token delimiters below.
-const RAW_MATH_TOKEN_DELIMITER = /[\u0002\u0003]/gu;
+const CONFUSABLE_WHITESPACE_CHARACTER = /[\p{White_Space}\u200B\u2060\uFEFF]/u;
+const EXPLICIT_MATH_SPAN = /\$\$([\s\S]*?)\$\$|\\\(([\s\S]*?)\\\)|\\\[([\s\S]*?)\\\]/gu;
+// biome-ignore lint/suspicious/noControlCharactersInRegex: C0/C1 controls must not survive into a public claim or impersonate private math-token delimiters.
+const RAW_CONTROL = /[\u0000-\u001F\u007F-\u009F]/gu;
+const CANONICAL_ESCAPE = "~";
+const MATH_TOKEN_START = "\u0002";
+const MATH_TOKEN_END = "\u0003";
 
-function normalizeWhitespace(value: string): string {
-  return value.normalize("NFKC").toLowerCase().replace(CONFUSABLE_WHITESPACE, " ").trim();
+function collapseWhitespace(value: string): string {
+  return value.replace(CONFUSABLE_WHITESPACE, " ").trim();
 }
 
-function escapeRawMathTokenDelimiters(value: string): string {
-  return value.replace(RAW_MATH_TOKEN_DELIMITER, (delimiter) => {
-    return delimiter === "\u0002" ? "[c0-02]" : "[c0-03]";
+function prepareCanonicalInput(value: string): string {
+  const normalized = value
+    .normalize("NFKC")
+    .toLowerCase()
+    .replaceAll(CANONICAL_ESCAPE, `${CANONICAL_ESCAPE}${CANONICAL_ESCAPE}`);
+  return normalized.replace(RAW_CONTROL, (control) => {
+    if (CONFUSABLE_WHITESPACE_CHARACTER.test(control)) return control;
+    const codePoint = control.codePointAt(0);
+    return `${CANONICAL_ESCAPE}c${(codePoint ?? 0).toString(16).padStart(2, "0")};`;
   });
+}
+
+function isEscapedDollar(value: string, index: number): boolean {
+  let slashes = 0;
+  for (let cursor = index - 1; cursor >= 0 && value[cursor] === "\\"; cursor -= 1) {
+    slashes += 1;
+  }
+  return slashes % 2 === 1;
+}
+
+function canOpenInlineMath(value: string, index: number): boolean {
+  const next = value[index + 1];
+  return (
+    next !== undefined &&
+    next !== "$" &&
+    !CONFUSABLE_WHITESPACE_CHARACTER.test(next) &&
+    !isEscapedDollar(value, index)
+  );
+}
+
+function canCloseInlineMath(value: string, index: number): boolean {
+  const previous = value[index - 1];
+  return (
+    previous !== undefined &&
+    previous !== "$" &&
+    !CONFUSABLE_WHITESPACE_CHARACTER.test(previous) &&
+    !isEscapedDollar(value, index)
+  );
+}
+
+/**
+ * Tokenize single-dollar math without letting a currency dollar consume a
+ * later real opener. If a dollar cannot close because whitespace precedes it
+ * but can open, it supersedes the earlier unmatched opener. Each code unit is
+ * visited a bounded number of times; emitted slices cover the input once.
+ */
+function tokenizeInlineMath(value: string): string {
+  const output: string[] = [];
+  let emittedThrough = 0;
+  let opener = -1;
+  let index = 0;
+
+  while (index < value.length) {
+    if (value[index] === MATH_TOKEN_START) {
+      const end = value.indexOf(MATH_TOKEN_END, index + 1);
+      index = end === -1 ? index + 1 : end + 1;
+      continue;
+    }
+    if (value[index] !== "$" || value[index - 1] === "$" || value[index + 1] === "$") {
+      index += 1;
+      continue;
+    }
+
+    if (opener === -1) {
+      if (canOpenInlineMath(value, index)) opener = index;
+      index += 1;
+      continue;
+    }
+
+    if (canCloseInlineMath(value, index)) {
+      output.push(
+        value.slice(emittedThrough, opener),
+        MATH_TOKEN_START,
+        collapseWhitespace(value.slice(opener + 1, index)),
+        MATH_TOKEN_END,
+      );
+      emittedThrough = index + 1;
+      opener = -1;
+    } else if (canOpenInlineMath(value, index)) {
+      opener = index;
+    }
+    index += 1;
+  }
+
+  output.push(value.slice(emittedThrough));
+  return output.join("");
 }
 
 /**
@@ -163,17 +249,16 @@ function escapeRawMathTokenDelimiters(value: string): string {
  * mathematical token with normalized interior spacing.
  */
 export function normalizeClaimStatement(statement: string): string {
-  return normalizeWhitespace(
-    escapeRawMathTokenDelimiters(statement).replace(
-      MATH_SPAN,
-      (_whole, display, paren, bracket, inline) => {
-        const interior = [display, paren, bracket, inline].find(
-          (value): value is string => typeof value === "string",
-        );
-        return `\u0002${normalizeWhitespace(interior ?? "")}\u0003`;
-      },
-    ),
+  const explicitMath = prepareCanonicalInput(statement).replace(
+    EXPLICIT_MATH_SPAN,
+    (_whole, display, paren, bracket) => {
+      const interior = [display, paren, bracket].find(
+        (value): value is string => typeof value === "string",
+      );
+      return `${MATH_TOKEN_START}${collapseWhitespace(interior ?? "")}${MATH_TOKEN_END}`;
+    },
   );
+  return collapseWhitespace(tokenizeInlineMath(explicitMath));
 }
 
 /** A Web Crypto SHA-256, available in Workers and Bun without a Node-only dependency. */

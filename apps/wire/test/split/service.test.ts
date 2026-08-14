@@ -965,14 +965,30 @@ describe("S-3 promotion validator", () => {
     expect(await normHash("Some examples have $x + y$ property Q.")).not.toBe(canonicalHash);
   });
 
-  test("keeps raw token controls distinct from math while still collapsing ordinary C0 whitespace", async () => {
+  test("escapes raw controls injectively while collapsing control whitespace", async () => {
     const rawTokenControls = "Every example has \u0002x + y\u0003 property Q.";
+    const literalEscapeText = "Every example has ~c02;x + y~c03; property Q.";
     const math = "Every example has $x + y$ property Q.";
 
-    expect(normalizeClaimStatement(rawTokenControls)).toContain("[c0-02]x + y[c0-03]");
+    expect(normalizeClaimStatement(rawTokenControls)).toContain("~c02;x + y~c03;");
+    expect(normalizeClaimStatement(literalEscapeText)).toContain("~~c02;x + y~~c03;");
     expect(await normHash(rawTokenControls)).not.toBe(await normHash(math));
+    expect(await normHash(rawTokenControls)).not.toBe(await normHash(literalEscapeText));
     expect(await normHash("Every\texample\nhas property Q.")).toBe(
       await normHash("Every example has property Q."),
+    );
+    for (const control of ["\u0001", "\u0007", "\u001b", "\u007f", "\u009b"]) {
+      expect(normalizeClaimStatement(`before${control}after`)).not.toContain(control);
+    }
+  });
+
+  test("currency and escaped dollars cannot consume a later inline-math opener", async () => {
+    const inline = "Costs $5. The bound $x + y$ holds; escaped \\$9 stays prose.";
+    const explicit = "Costs $5. The bound \\(x + y\\) holds; escaped \\$9 stays prose.";
+
+    expect(await normHash(inline)).toBe(await normHash(explicit));
+    expect(await normHash("The constant is $5$. ")).toBe(
+      await normHash("The constant is \\(5\\)."),
     );
   });
 

@@ -473,9 +473,12 @@ test("local P11 normalization matches the shared inline-math contract and preser
   const inlineMath = normalizeS3ClaimStatement("The relation $x + y$ is recorded.");
 
   expect(rawControl).not.toBe(explicitMath);
-  expect(rawControl).toContain("[c0-02]");
-  expect(rawControl).toContain("[c0-03]");
+  expect(rawControl).toContain("~c02;");
+  expect(rawControl).toContain("~c03;");
   expect(inlineMath).toBe(explicitMath);
+  expect(normalizeS3ClaimStatement("Costs $5. The bound $x + y$ holds.")).toBe(
+    normalizeS3ClaimStatement("Costs $5. The bound \\(x + y\\) holds."),
+  );
   expect(normalizeS3ClaimStatement("line one\nline two\tline three")).toBe(
     normalizeS3ClaimStatement("line one line two line three"),
   );
