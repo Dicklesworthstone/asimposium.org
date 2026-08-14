@@ -699,7 +699,7 @@ async function runSpike(spike: G0Spike, context: SpikeRunContext): Promise<G0Spi
    * decided before anything is launched, so it never has to be inferred from an
    * exit status that a script could equally well have chosen for itself.
    */
-  const startFailed = spawnFailed;
+  const startFailed = spawnFailed || /G0SUP spawn_failed=1/.test(controlText);
 
   let descendantsLeaked = false;
   let descendantsUnkillable = false;
