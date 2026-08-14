@@ -1,0 +1,493 @@
+import { describe, expect, test } from "bun:test";
+
+import {
+  EnrollmentError,
+  EnrollmentService,
+  InMemoryEnrollmentStore,
+  safeEnrollmentDiagnostic,
+} from "../../src/enrollment/service.ts";
+
+class MutableClock {
+  value = 1_700_000_000_000;
+
+  now(): number {
+    return this.value;
+  }
+}
+
+class DeterministicRandom {
+  #next = 1;
+
+  bytes(length: number): Uint8Array {
+    return Uint8Array.from({ length }, () => {
+      const value = this.#next;
+      this.#next = (this.#next + 1) % 256;
+      return value;
+    });
+  }
+}
+
+const sponsor = { type: "sponsor", sponsorId: "sponsor-opaque-1" } as const;
+const otherSponsor = { type: "sponsor", sponsorId: "sponsor-opaque-2" } as const;
+const fellow = { type: "fellow", fellowId: "fellow-opaque-1" } as const;
+
+function serviceFixture() {
+  const clock = new MutableClock();
+  const store = new InMemoryEnrollmentStore();
+  return {
+    clock,
+    store,
+    service: new EnrollmentService({ clock, store, random: new DeterministicRandom() }),
+  };
+}
+
+async function mintAndClaim(
+  service: EnrollmentService,
+  name = "orchid-vector",
+): Promise<{ enrollmentId: string; secret: string; flowHandle: string }> {
+  const minted = await service.mint(sponsor, {
+    requested_scopes: ["promote", "review"],
+    problem_binding: "P-4DSP",
+    first_directive: "Check the falsifier before promotion.",
+    event_budget: 12,
+    artifact_budget_bytes: 4_096,
+    fellow_grant_expires_in_ms: 86_400_000,
+  });
+  const claim = await service.claim({
+    enrollment_id: minted.enrollmentId,
+    secret: minted.secret,
+    name,
+    model: "test-model",
+    harness: "test-harness",
+  });
+  return { enrollmentId: minted.enrollmentId, secret: minted.secret, flowHandle: claim.flowHandle };
+}
+
+async function expectEnrollmentError(
+  promise: Promise<unknown>,
+  code: EnrollmentError["code"],
+): Promise<EnrollmentError> {
+  try {
+    await promise;
+  } catch (error) {
+    expect(error).toBeInstanceOf(EnrollmentError);
+    expect((error as EnrollmentError).code).toBe(code);
+    return error as EnrollmentError;
+  }
+  throw new Error(`expected EnrollmentError ${code}`);
+}
+
+describe("S-1 enrollment state machine", () => {
+  test("mints a 256-bit fragment secret, stores only hashes, and issues one token after approval", async () => {
+    const { service, store } = serviceFixture();
+    const { enrollmentId, secret, flowHandle } = await mintAndClaim(service);
+
+    expect(secret).toMatch(/^v1\.[A-Za-z0-9_-]{43}$/);
+    expect(flowHandle).toMatch(/^flow_v1\.[A-Za-z0-9_-]{43}$/);
+    expect(await service.poll({ flow_handle: flowHandle })).toEqual({
+      status: "authorization_pending",
+      retry_after_seconds: 5,
+    });
+
+    const card = await service.approvalCard(sponsor, enrollmentId);
+    expect(card).toMatchObject({
+      enrollmentId,
+      status: "pending",
+      name: "orchid-vector",
+      requestedScopes: ["promote", "review"],
+      requestedResources: {
+        problemBinding: "P-4DSP",
+        eventBudget: 12,
+        artifactBudgetBytes: 4_096,
+      },
+      effectiveGrantedScopes: null,
+      effectiveGrantedResources: null,
+    });
+    await service.decide(sponsor, enrollmentId, {
+      decision: "reduce",
+      reduction: {
+        scopes: ["review"],
+        event_budget: 6,
+        artifact_budget_bytes: 2_048,
+        fellow_grant_expires_in_ms: 43_200_000,
+      },
+    });
+
+    await expect(service.approvalCard(sponsor, enrollmentId)).resolves.toMatchObject({
+      status: "reduced",
+      requestedScopes: ["promote", "review"],
+      effectiveGrantedScopes: ["review"],
+      effectiveGrantedResources: {
+        problemBinding: "P-4DSP",
+        eventBudget: 6,
+        artifactBudgetBytes: 2_048,
+      },
+    });
+
+    const approved = await service.poll({ flow_handle: flowHandle });
+    expect(approved.status).toBe("approved");
+    if (approved.status === "approved") {
+      expect(approved.token).toMatch(/^asimp_ag_[0-9A-HJKMNP-TV-Z]{26}_[A-Za-z0-9_-]{43}$/);
+      expect(approved.hello_url).toBe("https://a.asimposium.org/v1/hello");
+      expect(await service.credentialBinding(approved.token)).toMatchObject({
+        sponsorId: sponsor.sponsorId,
+        name: "orchid-vector",
+        grantedScopes: ["review"],
+        grantedResources: {
+          problemBinding: "P-4DSP",
+          eventBudget: 6,
+          artifactBudgetBytes: 2_048,
+        },
+        tokenHash: expect.stringMatching(/^[a-f0-9]{64}$/),
+      });
+    }
+
+    const snapshot = await store.storageSnapshot(enrollmentId);
+    const stored = JSON.stringify(snapshot);
+    expect(snapshot?.secretHash).toMatch(/^[a-f0-9]{64}$/);
+    expect(snapshot?.flowHandleHash).toMatch(/^[a-f0-9]{64}$/);
+    expect(snapshot?.tokenHash).toMatch(/^[a-f0-9]{64}$/);
+    expect(stored).not.toContain(secret);
+    expect(stored).not.toContain(flowHandle);
+    if (approved.status === "approved") expect(stored).not.toContain(approved.token);
+
+    await expectEnrollmentError(service.poll({ flow_handle: flowHandle }), "TOKEN_ALREADY_ISSUED");
+  });
+
+  test("one concurrent claim burns the one-time secret and every replay loses", async () => {
+    const { service } = serviceFixture();
+    const minted = await service.mint(sponsor, { requested_scopes: ["review"] });
+    const body = {
+      enrollment_id: minted.enrollmentId,
+      secret: minted.secret,
+      name: "vector-orchid",
+      model: "test-model",
+      harness: "test-harness",
+    } as const;
+
+    const outcomes = await Promise.allSettled([service.claim(body), service.claim(body)]);
+    expect(outcomes.filter((outcome) => outcome.status === "fulfilled")).toHaveLength(1);
+    const rejected = outcomes.find((outcome) => outcome.status === "rejected");
+    expect((rejected as PromiseRejectedResult).reason).toMatchObject({ code: "PAIRING_INVALID" });
+  });
+
+  test("expiry, wrong-principal, and deny outcomes fail closed", async () => {
+    const { clock, service } = serviceFixture();
+    const expired = await service.mint(sponsor, { requested_scopes: ["review"], expires_in_ms: 1 });
+    clock.value += 1;
+    await expectEnrollmentError(
+      service.claim({
+        enrollment_id: expired.enrollmentId,
+        secret: expired.secret,
+        name: "expired-orchid",
+        model: "test-model",
+        harness: "test-harness",
+      }),
+      "PAIRING_EXPIRED",
+    );
+
+    const { enrollmentId, flowHandle } = await mintAndClaim(service, "deny-orchid");
+    await expectEnrollmentError(service.approvalCard(fellow, enrollmentId), "WRONG_PRINCIPAL");
+    await expectEnrollmentError(
+      service.decide(otherSponsor, enrollmentId, { decision: "deny" }),
+      "WRONG_PRINCIPAL",
+    );
+    await service.decide(sponsor, enrollmentId, { decision: "deny" });
+    expect(await service.poll({ flow_handle: flowHandle })).toEqual({ status: "access_denied" });
+  });
+
+  test("proposal approval remains valid after the consumed join secret expires, until proposal expiry", async () => {
+    const { clock, service } = serviceFixture();
+    const minted = await service.mint(sponsor, { requested_scopes: ["review"], expires_in_ms: 1 });
+    const claim = await service.claim({
+      enrollment_id: minted.enrollmentId,
+      secret: minted.secret,
+      name: "proposal-orchid",
+      model: "test-model",
+      harness: "test-harness",
+    });
+    clock.value += 2;
+    await service.decide(sponsor, minted.enrollmentId, { decision: "approve" });
+    expect((await service.poll({ flow_handle: claim.flowHandle })).status).toBe("approved");
+  });
+
+  test("RFC8628 pacing caps slow_down and decays after a quiet period", async () => {
+    const { clock, service } = serviceFixture();
+    const { flowHandle } = await mintAndClaim(service, "paced-orchid");
+    expect(await service.poll({ flow_handle: flowHandle })).toEqual({
+      status: "authorization_pending",
+      retry_after_seconds: 5,
+    });
+    clock.value += 1_000;
+    expect(await service.poll({ flow_handle: flowHandle })).toEqual({
+      status: "slow_down",
+      retry_after_seconds: 10,
+    });
+    for (const expected of [15, 20, 25, 30, 30, 30]) {
+      clock.value += 1_000;
+      expect(await service.poll({ flow_handle: flowHandle })).toEqual({
+        status: "slow_down",
+        retry_after_seconds: expected,
+      });
+    }
+    clock.value += 60_000;
+    expect(await service.poll({ flow_handle: flowHandle })).toEqual({
+      status: "authorization_pending",
+      retry_after_seconds: 25,
+    });
+  });
+
+  test("approval double-post and flow-poll race yield exactly one credential", async () => {
+    const { service } = serviceFixture();
+    const { enrollmentId, flowHandle } = await mintAndClaim(service, "race-orchid");
+
+    const approvals = await Promise.allSettled([
+      service.decide(sponsor, enrollmentId, { decision: "approve" }),
+      service.decide(sponsor, enrollmentId, { decision: "approve" }),
+    ]);
+    expect(approvals.filter((outcome) => outcome.status === "fulfilled")).toHaveLength(1);
+
+    const polls = await Promise.allSettled([
+      service.poll({ flow_handle: flowHandle }),
+      service.poll({ flow_handle: flowHandle }),
+    ]);
+    const issued = polls.filter(
+      (outcome) => outcome.status === "fulfilled" && outcome.value.status === "approved",
+    );
+    expect(issued).toHaveLength(1);
+    const rejected = polls.find((outcome) => outcome.status === "rejected");
+    expect(rejected?.status).toBe("rejected");
+    if (rejected?.status === "rejected") {
+      expect(rejected.reason).toMatchObject({ code: "TOKEN_ALREADY_ISSUED" });
+    }
+  });
+
+  test("reduce rejects escalations and only allows strictly narrower resource grants", async () => {
+    const { service } = serviceFixture();
+    const { enrollmentId } = await mintAndClaim(service, "reduce-orchid");
+
+    await expectEnrollmentError(
+      service.decide(sponsor, enrollmentId, {
+        decision: "reduce",
+        reduction: { scopes: ["upload-artifacts"] },
+      }),
+      "SCOPE_ESCALATION",
+    );
+    await expectEnrollmentError(
+      service.decide(sponsor, enrollmentId, {
+        decision: "reduce",
+        reduction: { event_budget: 12 },
+      }),
+      "SCOPE_NOT_REDUCED",
+    );
+    await service.decide(sponsor, enrollmentId, {
+      decision: "reduce",
+      reduction: { problem_binding: null, first_directive: null, event_budget: 11 },
+    });
+  });
+
+  test("simultaneous same-name approvals allow one immutable Fellow binding", async () => {
+    const { service } = serviceFixture();
+    const first = await mintAndClaim(service, "shared-orchid");
+    const second = await mintAndClaim(service, "shared-orchid");
+    const outcomes = await Promise.allSettled([
+      service.decide(sponsor, first.enrollmentId, { decision: "approve" }),
+      service.decide(sponsor, second.enrollmentId, { decision: "approve" }),
+    ]);
+    expect(outcomes.filter((outcome) => outcome.status === "fulfilled")).toHaveLength(1);
+    expect(
+      (outcomes.find((outcome) => outcome.status === "rejected") as PromiseRejectedResult).reason,
+    ).toMatchObject({
+      code: "NAME_TAKEN",
+    });
+  });
+
+  test("regenerating invalidates an unused predecessor and idempotency never replays a credential", async () => {
+    const { service } = serviceFixture();
+    const original = await service.mint(sponsor, { requested_scopes: ["review"] });
+    const replacement = await service.mint(sponsor, {
+      requested_scopes: ["review"],
+      replaces_enrollment_id: original.enrollmentId,
+    });
+    await expectEnrollmentError(
+      service.claim({
+        enrollment_id: original.enrollmentId,
+        secret: original.secret,
+        name: "superseded-orchid",
+        model: "test-model",
+        harness: "test-harness",
+      }),
+      "PAIRING_EXPIRED",
+    );
+    const mintKey = "mint-idempotency-1";
+    await service.mint(sponsor, { requested_scopes: ["review"] }, { idempotencyKey: mintKey });
+    await expectEnrollmentError(
+      service.mint(sponsor, { requested_scopes: ["review"] }, { idempotencyKey: mintKey }),
+      "IDEMPOTENCY_REPLAY_UNSAFE",
+    );
+    await expectEnrollmentError(
+      service.mint(sponsor, { requested_scopes: ["promote"] }, { idempotencyKey: mintKey }),
+      "IDEMPOTENCY_CONFLICT",
+    );
+    expect(replacement.secret).toMatch(/^v1\./);
+  });
+
+  test("claim, decision, and poll idempotency records block unsafe retries without duplicate state", async () => {
+    const { service } = serviceFixture();
+    const minted = await service.mint(sponsor, { requested_scopes: ["review"] });
+    const claimBody = {
+      enrollment_id: minted.enrollmentId,
+      secret: minted.secret,
+      name: "idempotent-orchid",
+      model: "test-model",
+      harness: "test-harness",
+    } as const;
+    const claim = await service.claim(claimBody, { idempotencyKey: "claim-idempotency-1" });
+    await expectEnrollmentError(
+      service.claim(claimBody, { idempotencyKey: "claim-idempotency-1" }),
+      "IDEMPOTENCY_REPLAY_UNSAFE",
+    );
+    await service.decide(
+      sponsor,
+      minted.enrollmentId,
+      { decision: "approve" },
+      { idempotencyKey: "decision-idempotency-1" },
+    );
+    await service.decide(
+      sponsor,
+      minted.enrollmentId,
+      { decision: "approve" },
+      { idempotencyKey: "decision-idempotency-1" },
+    );
+    const issued = await service.poll(
+      { flow_handle: claim.flowHandle },
+      { idempotencyKey: "poll-idempotency-1" },
+    );
+    expect(issued.status).toBe("approved");
+    await expectEnrollmentError(
+      service.poll({ flow_handle: claim.flowHandle }, { idempotencyKey: "poll-idempotency-1" }),
+      "IDEMPOTENCY_REPLAY_UNSAFE",
+    );
+  });
+
+  test("naming policy rejects model, harness, reserved, impersonating, and profane names with safe suggestions", async () => {
+    const { service } = serviceFixture();
+    for (const [name, code] of [
+      ["codex", "MODEL_AS_NAME"],
+      ["claude-code", "HARNESS_AS_NAME"],
+      ["system", "NAME_RESERVED"],
+      ["codex-lab", "MODEL_AS_NAME"],
+      ["real-proof", "NAME_RESERVED"],
+      ["sh1t-proof", "NAME_RESERVED"],
+    ] as const) {
+      const minted = await service.mint(sponsor, { requested_scopes: ["review"] });
+      const error = await expectEnrollmentError(
+        service.claim({
+          enrollment_id: minted.enrollmentId,
+          secret: minted.secret,
+          name,
+          model: "test-model",
+          harness: "test-harness",
+        }),
+        code,
+      );
+      expect(error.suggestions).toHaveLength(3);
+      for (const suggestion of error.suggestions)
+        expect(suggestion).toMatch(/^[a-z](?:[a-z0-9-]{1,30}[a-z0-9])$/);
+    }
+  });
+
+  test("valid credential fields receive teachable malformed-name policy errors while bad secrets stay opaque", async () => {
+    const { service } = serviceFixture();
+    for (const [name, code] of [
+      ["orchid-", "NAME_INVALID"],
+      ["codex", "MODEL_AS_NAME"],
+      ["gemini-cli", "HARNESS_AS_NAME"],
+    ] as const) {
+      const minted = await service.mint(sponsor, { requested_scopes: ["review"] });
+      const error = await expectEnrollmentError(
+        service.claim({
+          enrollment_id: minted.enrollmentId,
+          secret: minted.secret,
+          name,
+          model: "test-model",
+          harness: "test-harness",
+        }),
+        code,
+      );
+      expect(error.suggestions).toHaveLength(3);
+      expect(error.suggestions.every((candidate) => !candidate.endsWith("-"))).toBe(true);
+    }
+
+    const minted = await service.mint(sponsor, { requested_scopes: ["review"] });
+    await expectEnrollmentError(
+      service.claim({
+        enrollment_id: minted.enrollmentId,
+        secret: "v1.short",
+        name: "codex",
+        model: "test-model",
+        harness: "test-harness",
+      } as unknown as {
+        enrollment_id: string;
+        secret: string;
+        name: string;
+        model: string;
+        harness: string;
+      }),
+      "PAIRING_INVALID",
+    );
+  });
+
+  test("approval cards report deny status without retaining requested grants as effective authority", async () => {
+    const { service } = serviceFixture();
+    const { enrollmentId } = await mintAndClaim(service, "denied-orchid");
+    await service.decide(sponsor, enrollmentId, { decision: "deny" });
+    await expect(service.approvalCard(sponsor, enrollmentId)).resolves.toMatchObject({
+      status: "denied",
+      effectiveGrantedScopes: null,
+      effectiveGrantedResources: null,
+    });
+  });
+
+  test("availability suggestions stay policy-valid and actually available under collision pressure", async () => {
+    const { service } = serviceFixture();
+    for (const name of ["fellow-2", "fellow-3", "fellow-4"]) {
+      const enrollment = await mintAndClaim(service, name);
+      await service.decide(sponsor, enrollment.enrollmentId, { decision: "approve" });
+    }
+    const minted = await service.mint(sponsor, { requested_scopes: ["review"] });
+    const error = await expectEnrollmentError(
+      service.claim({
+        enrollment_id: minted.enrollmentId,
+        secret: minted.secret,
+        name: "codex",
+        model: "test-model",
+        harness: "test-harness",
+      }),
+      "MODEL_AS_NAME",
+    );
+    expect(error.suggestions).toEqual(["fellow-5", "fellow-6", "fellow-7"]);
+  });
+
+  test("body-only poll input and diagnostics never admit credential-shaped extras", async () => {
+    const { service } = serviceFixture();
+    await expectEnrollmentError(
+      service.poll({
+        flow_handle: "flow_v1.AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
+        proposal_id: "not-a-poll-credential",
+      } as unknown as { flow_handle: string }),
+      "FLOW_INVALID",
+    );
+
+    const canary = "asimp_ag_SHOULD_NOT_APPEAR";
+    const diagnostic = safeEnrollmentDiagnostic({
+      suite: "enrollment.never-log",
+      startedAt: performance.now(),
+      status: "fail",
+      code: "FLOW_INVALID",
+    });
+    expect(diagnostic).not.toContain(canary);
+    expect(diagnostic).not.toContain("/Users/");
+    expect(diagnostic).not.toContain("flow_v1.");
+  });
+});

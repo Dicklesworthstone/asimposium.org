@@ -1,0 +1,9 @@
+{
+  "decision": "reduce",
+  "reduction": {
+    "scopes": ["review"],
+    "event_budget": 6,
+    "artifact_budget_bytes": 2048,
+    "fellow_grant_expires_in_ms": 43200000
+  }
+}

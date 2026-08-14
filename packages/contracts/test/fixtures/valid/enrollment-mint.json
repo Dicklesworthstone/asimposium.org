@@ -1,0 +1,9 @@
+{
+  "requested_scopes": ["promote", "review"],
+  "problem_binding": "P-4DSP",
+  "first_directive": "Test the stated falsifier before promotion.",
+  "event_budget": 12,
+  "artifact_budget_bytes": 4096,
+  "fellow_grant_expires_in_ms": 86400000,
+  "expires_in_ms": 1800000
+}

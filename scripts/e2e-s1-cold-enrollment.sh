@@ -10,6 +10,9 @@ readonly SUITE="s1-cold-enrollment"
 readonly VERSION="1"
 readonly REPRODUCE="scripts/e2e-s1-cold-enrollment.sh"
 readonly BLOCKED_EXIT_CODE=78
+readonly HARNESS_IDENTITIES=("claude-code" "codex" "gemini-cli")
+readonly LOCAL_WRANGLER="apps/wire/node_modules/.bin/wrangler"
+readonly LOCAL_PORT="${S1_LOCAL_PORT:-8792}"
 
 started_ms() {
   local seconds
@@ -66,6 +69,15 @@ valid_token() {
   [[ "$1" =~ ^asimp_ag_[0-9A-HJKMNP-TV-Z]{26}_[A-Za-z0-9_-]{43}$ ]]
 }
 
+supported_harness() {
+  local harness="$1"
+  local candidate
+  for candidate in "${HARNESS_IDENTITIES[@]}"; do
+    [[ "$candidate" == "$harness" ]] && return 0
+  done
+  return 1
+}
+
 json_field() {
   local body="$1"
   local field="$2"
@@ -91,16 +103,16 @@ curl_body() {
   local body="${3:-}"
   local result
 
-  # curl's stderr may include network implementation details. Capture it so
-  # failures are represented by the fixed, secret-safe codes emitted above.
+  # Curl diagnostics can echo a caller-supplied origin or credentials. The
+  # runner deliberately retains neither: failures become fixed typed records.
   if [[ "$method" == "GET" ]]; then
-    if ! result="$(curl --silent --show-error --fail-with-body --request GET \
-      --header 'Accept: application/json' "$endpoint" 2>&1)"; then
+    if ! result="$(curl --silent --fail-with-body --request GET \
+      --header 'Accept: application/json' "$endpoint" 2>/dev/null)"; then
       failed "CAPSULE_REQUEST_FAILED"
     fi
-  elif ! result="$(printf '%s' "$body" | curl --silent --show-error --fail-with-body \
+  elif ! result="$(printf '%s' "$body" | curl --silent --fail-with-body \
     --request POST --header 'Accept: application/json' --header 'Content-Type: application/json' \
-    --data-binary @- "$endpoint" 2>&1)"; then
+    --data-binary @- "$endpoint" 2>/dev/null)"; then
     failed "ENROLLMENT_REQUEST_FAILED"
   fi
 
@@ -146,9 +158,61 @@ self_test() {
   [[ "$without_fragment" == "https://a.example.test/join/ASIMP-EN-7F3K9M2Q8R" ]] || failed "SELF_TEST_PATH_CONTAINMENT_FAILED"
   valid_secret "$fragment" || failed "SELF_TEST_FRAGMENT_VALIDATION_FAILED"
 
+  local harness
+  for harness in "${HARNESS_IDENTITIES[@]}"; do
+    supported_harness "$harness" || failed "SELF_TEST_HARNESS_IDENTITIES_FAILED"
+  done
+  supported_harness "unrecognized-harness" && failed "SELF_TEST_HARNESS_IDENTITIES_FAILED"
+
   diagnostic="$(emit "pass" "SELF_TEST_PASSED")"
   [[ "$diagnostic" != *"AAAAAAAA"* && "$diagnostic" != *"v1."* ]] || failed "SELF_TEST_REDACTION_FAILED"
   printf '%s\n' "$diagnostic"
+}
+
+run_local_d1() {
+  [[ -x "$LOCAL_WRANGLER" ]] || blocked "WRANGLER_REQUIRED"
+  local state_dir server_log server_pid origin ready client_exit
+  state_dir="$(mktemp -d -t asimposium-s1-enrollment)"
+  server_log="$state_dir/wrangler.log"
+  server_pid=""
+  origin="http://127.0.0.1:${LOCAL_PORT}"
+
+  # The state directory is intentionally retained. It contains only local
+  # workerd state and diagnostics; AGENTS.md forbids cleanup-by-deletion.
+  [[ -d "$state_dir" && ! -L "$state_dir" ]] || failed "LOCAL_PERSIST_DIR_INVALID"
+  if ! "$LOCAL_WRANGLER" d1 migrations apply DB --config infra/wrangler.toml --local \
+    --persist-to "$state_dir" >"$state_dir/migrations.log" 2>&1; then
+    failed "LOCAL_D1_MIGRATION_FAILED"
+  fi
+
+  "$LOCAL_WRANGLER" dev apps/wire/src/enrollment/local-d1-worker.ts \
+    --config infra/wrangler.toml --local --persist-to "$state_dir" --port "$LOCAL_PORT" \
+    --log-level error --show-interactive-dev-session=false >>"$server_log" 2>&1 &
+  server_pid="$!"
+  ready=0
+  for _attempt in {1..30}; do
+    if curl --silent --output /dev/null "$origin/join/ASIMP-EN-INVALID"; then
+      ready=1
+      break
+    fi
+    sleep 0.2
+  done
+  if [[ "$ready" -ne 1 ]]; then
+    if kill -0 "$server_pid" 2>/dev/null; then kill "$server_pid"; fi
+    failed "LOCAL_WORKER_UNAVAILABLE"
+  fi
+
+  if env S1_LOCAL_ORIGIN="$origin" bun apps/wire/src/enrollment/local-d1-client.ts; then
+    :
+  else
+    client_exit=$?
+    if kill -0 "$server_pid" 2>/dev/null; then kill "$server_pid"; fi
+    if ! wait "$server_pid"; then :; fi
+    exit "$client_exit"
+  fi
+  if kill -0 "$server_pid" 2>/dev/null; then kill "$server_pid"; fi
+  if ! wait "$server_pid"; then :; fi
+  emit "pass" "LOCAL_D1_ENROLLMENT_PASSED"
 }
 
 main() {
@@ -157,11 +221,16 @@ main() {
     self_test
     return
   fi
+  if [[ "${1:-}" == "--local-d1" ]]; then
+    run_local_d1
+    return
+  fi
 
   [[ -n "${ASIMP_S1_JOIN_URL:-}" ]] || blocked "STAGING_JOIN_URL_REQUIRED"
   [[ -n "${ASIMP_S1_FELLOW_NAME:-}" ]] || blocked "FELLOW_NAME_REQUIRED"
   [[ -n "${ASIMP_S1_MODEL:-}" ]] || blocked "MODEL_REQUIRED"
   [[ -n "${ASIMP_S1_HARNESS:-}" ]] || blocked "HARNESS_REQUIRED"
+  supported_harness "$ASIMP_S1_HARNESS" || blocked "HARNESS_IDENTITY_UNSUPPORTED"
 
   local join_path="${ASIMP_S1_JOIN_URL%%#*}"
   local secret="${ASIMP_S1_JOIN_URL#*#}"
@@ -193,7 +262,7 @@ main() {
   status="$(json_status "$poll_response")"
   case "$status" in
     authorization_pending)
-      emit "pending" "SPONSOR_APPROVAL_REQUIRED"
+      blocked "SPONSOR_APPROVAL_REQUIRED"
       ;;
     approved)
       token="$(json_field "$poll_response" "token")"

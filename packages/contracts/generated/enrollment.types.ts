@@ -1,0 +1,2 @@
+// Generated from src/enrollment.ts by `bun run generate`. Do not edit.
+export type { EnrollmentFlowPollRequest, EnrollmentApprovalCard, EnrollmentCapsuleProjection, EnrollmentClaimResponse, EnrollmentGrantReduction, EnrollmentId, EnrollmentHelloResponse, EnrollmentSecret, FellowRegistrationRequest, FellowToken, MintEnrollmentRequest, RequestedScope, SponsorEnrollmentDecision } from "../src/enrollment.ts";

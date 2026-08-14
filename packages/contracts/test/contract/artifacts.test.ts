@@ -52,3 +52,33 @@ test("planted stale generated content fails the drift comparison", () => {
     artifact: artifact.relativePath,
   });
 });
+
+test("planted stale enrollment schema is rejected by the artifact manifest", () => {
+  const startedAt = performance.now();
+  const artifact = generatedArtifacts().find(
+    (candidate) => candidate.relativePath === "generated/enrollment.schema.json",
+  );
+
+  if (artifact === undefined) {
+    throw new Error(failureDiagnostic("artifacts.enrollment-missing", startedAt, "NO_ARTIFACT"));
+  }
+
+  const drift = compareGeneratedArtifact(
+    artifact,
+    `${artifact.content}// stale enrollment schema\n`,
+  );
+  if (drift === undefined) {
+    throw new Error(
+      failureDiagnostic(
+        "artifacts.enrollment-stale-negative",
+        startedAt,
+        "STALE_ARTIFACT_ACCEPTED",
+      ),
+    );
+  }
+
+  expect(drift).toEqual({
+    code: "GENERATED_ARTIFACT_STALE",
+    artifact: "generated/enrollment.schema.json",
+  });
+});

@@ -5,29 +5,37 @@ import {
   EnrollmentDeniedResponseSchema,
   EnrollmentExpiredResponseSchema,
   EnrollmentFlowPollRequestSchema,
+  type EnrollmentGrantReduction,
   EnrollmentPendingResponseSchema,
-  EnrollmentSecretSchema,
+  EnrollmentSlowDownResponseSchema,
   FellowNameSchema,
+  FellowRegistrationCredentialFieldsSchema,
   FellowRegistrationRequestSchema,
+  type MintEnrollmentRequest,
   MintEnrollmentRequestSchema,
   PENDING_PROPOSAL_TTL_MS,
-  SponsorEnrollmentDecisionSchema,
-  type EnrollmentFlowPollRequest,
-  type FellowRegistrationRequest,
-  type MintEnrollmentRequest,
   type RequestedScope,
   type SponsorEnrollmentDecision,
-} from "../../../../packages/contracts/src/enrollment.ts";
+  SponsorEnrollmentDecisionSchema,
+} from "@asimposium/contracts";
 
 const BASE64URL = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_";
 const CROCKFORD32 = "0123456789ABCDEFGHJKMNPQRSTVWXYZ";
 const MAX_ID_ATTEMPTS = 4;
+const IDEMPOTENCY_TTL_MS = 24 * 60 * 60 * 1_000;
+export const INITIAL_POLL_INTERVAL_SECONDS = 5;
+export const MAX_POLL_INTERVAL_SECONDS = 30;
+const POLL_SLOW_DOWN_INCREMENT_SECONDS = 5;
 
 export type EnrollmentErrorCode =
   | "FLOW_INVALID"
+  | "HARNESS_AS_NAME"
+  | "IDEMPOTENCY_CONFLICT"
+  | "IDEMPOTENCY_REPLAY_UNSAFE"
   | "NAME_INVALID"
   | "NAME_RESERVED"
   | "NAME_TAKEN"
+  | "MODEL_AS_NAME"
   | "PAIRING_EXPIRED"
   | "PAIRING_INVALID"
   | "PROPOSAL_EXPIRED"
@@ -40,11 +48,13 @@ export type EnrollmentErrorCode =
 /** An intentionally opaque failure: no credential or request value is retained in the message. */
 export class EnrollmentError extends Error {
   readonly code: EnrollmentErrorCode;
+  readonly suggestions: readonly string[];
 
-  constructor(code: EnrollmentErrorCode) {
+  constructor(code: EnrollmentErrorCode, suggestions: readonly string[] = []) {
     super(code);
     this.name = "EnrollmentError";
     this.code = code;
+    this.suggestions = suggestions;
   }
 }
 
@@ -59,6 +69,11 @@ export interface EnrollmentClock {
 
 export interface EnrollmentRandom {
   bytes(length: number): Uint8Array;
+}
+
+export interface EnrollmentWriteOptions {
+  /** Request header value; never placed in a URL, diagnostic, or event body. */
+  readonly idempotencyKey?: string;
 }
 
 export interface MintedEnrollment {
@@ -77,7 +92,22 @@ export interface EnrollmentApprovalCard {
   readonly reasoningEffort?: string;
   readonly toolsNote?: string;
   readonly requestedScopes: readonly RequestedScope[];
+  readonly requestedResources: EnrollmentResourceGrants;
+  /** The actual proposal state, never inferred from requested grant fields. */
+  readonly status: "pending" | "approved" | "reduced" | "denied" | "expired";
+  /** `null` means the proposal has not granted any live authority. */
+  readonly effectiveGrantedScopes: readonly RequestedScope[] | null;
+  /** `null` means the proposal has not granted any live resource authority. */
+  readonly effectiveGrantedResources: EnrollmentResourceGrants | null;
   readonly proposalExpiresAt: number;
+}
+
+/** Public-only join capsule material. It contains no credential, handle, or token. */
+export interface EnrollmentCapsule {
+  readonly enrollmentId: string;
+  readonly secretExpiresAt: number;
+  readonly requestedScopes: readonly RequestedScope[];
+  readonly requestedResources: EnrollmentResourceGrants;
 }
 
 export interface EnrollmentClaimResult {
@@ -89,6 +119,7 @@ export type EnrollmentFlowResult =
   | { readonly status: "authorization_pending"; readonly retry_after_seconds: number }
   | { readonly status: "access_denied" }
   | { readonly status: "expired_token" }
+  | { readonly status: "slow_down"; readonly retry_after_seconds: number }
   | {
       readonly status: "approved";
       readonly token: string;
@@ -96,18 +127,22 @@ export type EnrollmentFlowResult =
       readonly suggested_next: "GET /v1/hello with the bearer token";
     };
 
-interface EnrollmentRecord {
+export interface EnrollmentRecord {
   readonly enrollmentId: string;
   readonly sponsorId: string;
   readonly secretHash: string;
+  readonly createdAt: number;
   readonly secretExpiresAt: number;
   readonly requestedScopes: readonly RequestedScope[];
+  readonly requestedResources: EnrollmentResourceGrants;
+  invalidated: boolean;
   secretConsumedAt?: number;
   proposal?: ProposalRecord;
 }
 
-interface ProposalRecord {
+export interface ProposalRecord {
   readonly proposalId: string;
+  readonly fellowId: string;
   readonly flowHandleHash: string;
   readonly name: string;
   readonly model: string;
@@ -118,8 +153,33 @@ interface ProposalRecord {
   readonly expiresAt: number;
   status: "pending" | "approved" | "reduced" | "denied" | "expired";
   grantedScopes?: readonly RequestedScope[];
+  grantedResources?: EnrollmentResourceGrants;
   tokenHash?: string;
   tokenIssuedAt?: number;
+  pollIntervalSeconds: number;
+  lastPollAt?: number;
+}
+
+export interface EnrollmentResourceGrants {
+  readonly problemBinding?: string;
+  readonly firstDirective?: string;
+  readonly eventBudget?: number;
+  readonly artifactBudgetBytes?: number;
+  readonly fellowGrantExpiresAt?: number;
+}
+
+/** Immutable Fellow + credential binding committed at the one token winner. */
+export interface FellowCredentialBinding {
+  readonly fellowId: string;
+  readonly credentialId: string;
+  readonly sponsorId: string;
+  readonly name: string;
+  readonly model: string;
+  readonly harness: string;
+  readonly grantedScopes: readonly RequestedScope[];
+  readonly grantedResources: EnrollmentResourceGrants;
+  readonly tokenHash: string;
+  readonly issuedAt: number;
 }
 
 export interface EnrollmentStorageSnapshot {
@@ -128,37 +188,48 @@ export interface EnrollmentStorageSnapshot {
   readonly secretConsumedAt?: number;
   readonly flowHandleHash?: string;
   readonly tokenHash?: string;
+  readonly fellowId?: string;
 }
 
-interface ClaimAttempt {
+export interface ClaimAttempt {
   readonly enrollmentId: string;
   readonly secretHash: string;
   readonly proposal: ProposalRecord;
   readonly now: number;
 }
 
-interface DecisionAttempt {
+export interface DecisionAttempt {
   readonly enrollmentId: string;
   readonly sponsorId: string;
   readonly decision: SponsorEnrollmentDecision;
   readonly now: number;
 }
 
-interface TokenFactoryResult {
+export interface TokenFactoryResult {
   readonly token: string;
   readonly tokenHash: string;
 }
 
-interface PollAttempt {
+export interface PollAttempt {
   readonly flowHandleHash: string;
   readonly now: number;
   readonly createToken: () => Promise<TokenFactoryResult>;
 }
 
-interface PollDecision {
-  readonly kind: "pending" | "denied" | "expired" | "issued" | "already-issued";
+export interface PollDecision {
+  readonly kind: "pending" | "slow-down" | "denied" | "expired" | "issued" | "already-issued";
+  readonly retryAfterSeconds?: number;
   readonly token?: string;
 }
+
+export interface IdempotencyAttempt {
+  readonly scope: "mint" | "claim" | "decision" | "poll";
+  readonly key: string;
+  readonly digest: string;
+  readonly now: number;
+}
+
+export type IdempotencyResult = "new" | "replay" | "conflict";
 
 /**
  * The persistence seam intentionally exposes only atomic state transitions.
@@ -166,11 +237,19 @@ interface PollDecision {
  * pending-expiry races, or one-token-winner semantics.
  */
 export interface EnrollmentStore {
-  create(record: EnrollmentRecord): Promise<boolean>;
+  create(record: EnrollmentRecord, replacesEnrollmentId?: string): Promise<boolean>;
   claim(attempt: ClaimAttempt): Promise<void>;
   decision(attempt: DecisionAttempt): Promise<void>;
-  approvalCard(enrollmentId: string, sponsorId: string, now: number): Promise<EnrollmentApprovalCard>;
+  approvalCard(
+    enrollmentId: string,
+    sponsorId: string,
+    now: number,
+  ): Promise<EnrollmentApprovalCard>;
+  capsule(enrollmentId: string, now: number): Promise<EnrollmentCapsule>;
   poll(attempt: PollAttempt): Promise<PollDecision>;
+  availabilitySuggestions(name: string): Promise<readonly string[]>;
+  credentialByTokenHash(tokenHash: string): Promise<FellowCredentialBinding | undefined>;
+  beginIdempotency(attempt: IdempotencyAttempt): Promise<IdempotencyResult>;
 }
 
 const systemClock: EnrollmentClock = { now: () => Date.now() };
@@ -216,7 +295,8 @@ function bytesToCrockford(bytes: Uint8Array, length: number): string {
 
 function randomBytes(random: EnrollmentRandom, length: number): Uint8Array {
   const bytes = random.bytes(length);
-  if (bytes.length !== length) throw new TypeError("secure random source returned incorrect length");
+  if (bytes.length !== length)
+    throw new TypeError("secure random source returned incorrect length");
   return bytes;
 }
 
@@ -247,7 +327,7 @@ function generateFellowToken(now: number, random: EnrollmentRandom): string {
 
 async function sha256Hex(value: string): Promise<string> {
   const bytes = new TextEncoder().encode(value);
-  const digest = await crypto.subtle.digest("SHA-256", bytes as BufferSource);
+  const digest = await crypto.subtle.digest("SHA-256", bytes.slice().buffer);
   return [...new Uint8Array(digest)].map((byte) => byte.toString(16).padStart(2, "0")).join("");
 }
 
@@ -276,41 +356,188 @@ const RESERVED_FELLOW_NAMES = new Set([
 ]);
 const MODEL_NAMES = new Set(["claude", "codex", "gemini", "gpt-5-6", "grok"]);
 const HARNESS_NAMES = new Set(["claude-code", "codex", "gemini-cli", "grok-build"]);
+const UNAMBIGUOUS_HARNESS_NAMES = ["claude-code", "gemini-cli", "grok-build"] as const;
+const PROFANITY_DENYLIST = new Set(["asshole", "bitch", "cunt", "fuck", "shit"]);
+const PRODUCT_IDENTITIES = [
+  "anthropic",
+  "claude",
+  "codex",
+  "gemini",
+  "gpt-5-6",
+  "grok",
+  "openai",
+] as const;
 
-function validateName(name: string): void {
-  if (!FellowNameSchema.safeParse(name).success) throw new EnrollmentError("NAME_INVALID");
-  if (MODEL_NAMES.has(name)) throw new EnrollmentError("NAME_RESERVED");
-  if (HARNESS_NAMES.has(name)) throw new EnrollmentError("NAME_RESERVED");
-  if (RESERVED_FELLOW_NAMES.has(name) || /(^|-)official($|-)|(^|-)real($|-)|-mod$/.test(name)) {
-    throw new EnrollmentError("NAME_RESERVED");
-  }
+function leetNormalized(value: string): string {
+  return value
+    .toLowerCase()
+    .replaceAll("@", "a")
+    .replaceAll("4", "a")
+    .replaceAll("3", "e")
+    .replaceAll("1", "i")
+    .replaceAll("!", "i")
+    .replaceAll("0", "o")
+    .replaceAll("5", "s")
+    .replaceAll("7", "t")
+    .replaceAll("$", "s");
 }
 
-function assertSponsor(principal: EnrollmentPrincipal): asserts principal is Extract<EnrollmentPrincipal, { type: "sponsor" }> {
+export function enrollmentNameFailure(name: string): EnrollmentErrorCode | undefined {
+  if (!FellowNameSchema.safeParse(name).success) return "NAME_INVALID";
+  if (
+    UNAMBIGUOUS_HARNESS_NAMES.some((harness) => name === harness || name.startsWith(`${harness}-`))
+  ) {
+    return "HARNESS_AS_NAME";
+  }
+  if (
+    MODEL_NAMES.has(name) ||
+    (MODEL_NAMES.size > 0 && [...MODEL_NAMES].some((model) => name.startsWith(`${model}-`)))
+  ) {
+    return "MODEL_AS_NAME";
+  }
+  if (
+    HARNESS_NAMES.has(name) ||
+    [...HARNESS_NAMES].some((harness) => name.startsWith(`${harness}-`))
+  ) {
+    return "HARNESS_AS_NAME";
+  }
+  if (PRODUCT_IDENTITIES.some((identity) => name === identity || name.startsWith(`${identity}-`))) {
+    return "NAME_RESERVED";
+  }
+  if (name.split("-").some((part) => PROFANITY_DENYLIST.has(leetNormalized(part)))) {
+    return "NAME_RESERVED";
+  }
+  if (RESERVED_FELLOW_NAMES.has(name) || /(^|-)official($|-)|(^|-)real($|-)|-mod$/.test(name)) {
+    return "NAME_RESERVED";
+  }
+  return undefined;
+}
+
+function assertSponsor(
+  principal: EnrollmentPrincipal,
+): asserts principal is Extract<EnrollmentPrincipal, { type: "sponsor" }> {
   if (principal.type !== "sponsor" || principal.sponsorId.length === 0) {
     throw new EnrollmentError("WRONG_PRINCIPAL");
   }
 }
 
-function uniqueScopes(scopes: readonly RequestedScope[]): readonly RequestedScope[] {
+export function uniqueEnrollmentScopes(
+  scopes: readonly RequestedScope[],
+): readonly RequestedScope[] {
   return [...new Set(scopes)].sort();
 }
 
 function sameScopes(left: readonly RequestedScope[], right: readonly RequestedScope[]): boolean {
-  const normalizedLeft = uniqueScopes(left);
-  const normalizedRight = uniqueScopes(right);
+  const normalizedLeft = uniqueEnrollmentScopes(left);
+  const normalizedRight = uniqueEnrollmentScopes(right);
   return (
     normalizedLeft.length === normalizedRight.length &&
     normalizedLeft.every((scope, index) => scope === normalizedRight[index])
   );
 }
 
-function isStrictScopeReduction(
+export function isStrictEnrollmentScopeReduction(
   requested: readonly RequestedScope[],
   reduced: readonly RequestedScope[],
 ): boolean {
   const requestedSet = new Set(requested);
   return reduced.every((scope) => requestedSet.has(scope)) && !sameScopes(requested, reduced);
+}
+
+/**
+ * RFC 8628 pacing with a finite ceiling and a recovery path after a quiet
+ * period. Every too-fast poll raises the interval by at most five seconds;
+ * after two compliant intervals of silence, it decays by five seconds. This
+ * is deliberately deterministic so a D1 adapter can enforce identical rules.
+ */
+export function nextEnrollmentPollPacing(input: {
+  readonly lastPollAt?: number;
+  readonly pollIntervalSeconds: number;
+  readonly now: number;
+}): { readonly kind: "pending" | "slow-down"; readonly retryAfterSeconds: number } {
+  const interval = Math.min(
+    MAX_POLL_INTERVAL_SECONDS,
+    Math.max(INITIAL_POLL_INTERVAL_SECONDS, input.pollIntervalSeconds),
+  );
+  if (input.lastPollAt === undefined) {
+    return { kind: "pending", retryAfterSeconds: interval };
+  }
+  const elapsed = Math.max(0, input.now - input.lastPollAt);
+  const decayed =
+    elapsed >= interval * 2_000
+      ? Math.max(INITIAL_POLL_INTERVAL_SECONDS, interval - POLL_SLOW_DOWN_INCREMENT_SECONDS)
+      : interval;
+  if (elapsed < decayed * 1_000) {
+    return {
+      kind: "slow-down",
+      retryAfterSeconds: Math.min(
+        MAX_POLL_INTERVAL_SECONDS,
+        decayed + POLL_SLOW_DOWN_INCREMENT_SECONDS,
+      ),
+    };
+  }
+  return { kind: "pending", retryAfterSeconds: decayed };
+}
+
+function requestedResources(request: MintEnrollmentRequest, now: number): EnrollmentResourceGrants {
+  return {
+    ...(request.problem_binding === undefined ? {} : { problemBinding: request.problem_binding }),
+    ...(request.first_directive === undefined ? {} : { firstDirective: request.first_directive }),
+    ...(request.event_budget === undefined ? {} : { eventBudget: request.event_budget }),
+    ...(request.artifact_budget_bytes === undefined
+      ? {}
+      : { artifactBudgetBytes: request.artifact_budget_bytes }),
+    ...(request.fellow_grant_expires_in_ms === undefined
+      ? {}
+      : { fellowGrantExpiresAt: now + request.fellow_grant_expires_in_ms }),
+  };
+}
+
+export function reduceEnrollmentResources(
+  requested: EnrollmentResourceGrants,
+  reduction: EnrollmentGrantReduction,
+  now: number,
+): EnrollmentResourceGrants {
+  const next: EnrollmentResourceGrants = { ...requested };
+  let changed = false;
+  if (reduction.problem_binding === null) {
+    if (next.problemBinding === undefined) throw new EnrollmentError("SCOPE_NOT_REDUCED");
+    delete (next as { problemBinding?: string }).problemBinding;
+    changed = true;
+  }
+  if (reduction.first_directive === null) {
+    if (next.firstDirective === undefined) throw new EnrollmentError("SCOPE_NOT_REDUCED");
+    delete (next as { firstDirective?: string }).firstDirective;
+    changed = true;
+  }
+  if (reduction.event_budget !== undefined) {
+    if (next.eventBudget === undefined || reduction.event_budget >= next.eventBudget) {
+      throw new EnrollmentError("SCOPE_NOT_REDUCED");
+    }
+    (next as { eventBudget?: number }).eventBudget = reduction.event_budget;
+    changed = true;
+  }
+  if (reduction.artifact_budget_bytes !== undefined) {
+    if (
+      next.artifactBudgetBytes === undefined ||
+      reduction.artifact_budget_bytes >= next.artifactBudgetBytes
+    ) {
+      throw new EnrollmentError("SCOPE_NOT_REDUCED");
+    }
+    (next as { artifactBudgetBytes?: number }).artifactBudgetBytes =
+      reduction.artifact_budget_bytes;
+    changed = true;
+  }
+  if (reduction.fellow_grant_expires_in_ms !== undefined) {
+    const reducedExpiry = now + reduction.fellow_grant_expires_in_ms;
+    if (next.fellowGrantExpiresAt === undefined || reducedExpiry >= next.fellowGrantExpiresAt) {
+      throw new EnrollmentError("SCOPE_NOT_REDUCED");
+    }
+    (next as { fellowGrantExpiresAt?: number }).fellowGrantExpiresAt = reducedExpiry;
+    changed = true;
+  }
+  if (!changed) throw new EnrollmentError("SCOPE_NOT_REDUCED");
+  return next;
 }
 
 /**
@@ -323,11 +550,28 @@ function isStrictScopeReduction(
 export class InMemoryEnrollmentStore implements EnrollmentStore {
   readonly #records = new Map<string, EnrollmentRecord>();
   readonly #activeNames = new Map<string, string>();
+  readonly #credentials = new Map<string, FellowCredentialBinding>();
+  readonly #idempotency = new Map<
+    string,
+    { readonly digest: string; readonly expiresAt: number }
+  >();
   #tail: Promise<void> = Promise.resolve();
 
-  async create(record: EnrollmentRecord): Promise<boolean> {
+  async create(record: EnrollmentRecord, replacesEnrollmentId?: string): Promise<boolean> {
     return this.serialized(() => {
       if (this.#records.has(record.enrollmentId)) return false;
+      if (replacesEnrollmentId !== undefined) {
+        const predecessor = this.#records.get(replacesEnrollmentId);
+        if (
+          predecessor === undefined ||
+          predecessor.sponsorId !== record.sponsorId ||
+          predecessor.secretConsumedAt !== undefined ||
+          predecessor.invalidated
+        ) {
+          throw new EnrollmentError("PAIRING_INVALID");
+        }
+        predecessor.invalidated = true;
+      }
       this.#records.set(record.enrollmentId, record);
       return true;
     });
@@ -339,7 +583,9 @@ export class InMemoryEnrollmentStore implements EnrollmentStore {
       if (record === undefined || !constantTimeEqual(record.secretHash, attempt.secretHash)) {
         throw new EnrollmentError("PAIRING_INVALID");
       }
-      if (attempt.now >= record.secretExpiresAt) throw new EnrollmentError("PAIRING_EXPIRED");
+      if (record.invalidated || attempt.now >= record.secretExpiresAt) {
+        throw new EnrollmentError("PAIRING_EXPIRED");
+      }
       if (record.secretConsumedAt !== undefined) throw new EnrollmentError("PAIRING_INVALID");
       record.secretConsumedAt = attempt.now;
       record.proposal = attempt.proposal;
@@ -366,15 +612,32 @@ export class InMemoryEnrollmentStore implements EnrollmentStore {
         return;
       }
 
-      const proposedScopes =
-        attempt.decision.decision === "approve"
-          ? record.requestedScopes
-          : uniqueScopes(attempt.decision.scopes);
+      let proposedScopes = record.requestedScopes;
+      let proposedResources = record.requestedResources;
       if (attempt.decision.decision === "reduce") {
-        if (!proposedScopes.every((scope) => record.requestedScopes.includes(scope))) {
-          throw new EnrollmentError("SCOPE_ESCALATION");
+        if (attempt.decision.reduction.scopes !== undefined) {
+          proposedScopes = uniqueEnrollmentScopes(attempt.decision.reduction.scopes);
+          if (!proposedScopes.every((scope) => record.requestedScopes.includes(scope))) {
+            throw new EnrollmentError("SCOPE_ESCALATION");
+          }
+          if (!isStrictEnrollmentScopeReduction(record.requestedScopes, proposedScopes)) {
+            throw new EnrollmentError("SCOPE_NOT_REDUCED");
+          }
         }
-        if (!isStrictScopeReduction(record.requestedScopes, proposedScopes)) {
+        const resourceReduction = { ...attempt.decision.reduction } as Record<string, unknown>;
+        delete resourceReduction.scopes;
+        proposedResources =
+          Object.keys(resourceReduction).length === 0
+            ? record.requestedResources
+            : reduceEnrollmentResources(
+                record.requestedResources,
+                attempt.decision.reduction,
+                attempt.now,
+              );
+        if (
+          attempt.decision.reduction.scopes === undefined &&
+          proposedResources === record.requestedResources
+        ) {
           throw new EnrollmentError("SCOPE_NOT_REDUCED");
         }
       }
@@ -386,6 +649,7 @@ export class InMemoryEnrollmentStore implements EnrollmentStore {
       this.#activeNames.set(proposal.name, proposal.proposalId);
       proposal.status = attempt.decision.decision === "approve" ? "approved" : "reduced";
       proposal.grantedScopes = proposedScopes;
+      proposal.grantedResources = proposedResources;
     });
   }
 
@@ -402,7 +666,6 @@ export class InMemoryEnrollmentStore implements EnrollmentStore {
       const proposal = record.proposal;
       if (proposal === undefined) throw new EnrollmentError("PROPOSAL_NOT_PENDING");
       if (proposal.status === "pending" && now >= proposal.expiresAt) proposal.status = "expired";
-      if (proposal.status === "expired") throw new EnrollmentError("PROPOSAL_EXPIRED");
       return {
         enrollmentId: record.enrollmentId,
         proposalId: proposal.proposalId,
@@ -414,7 +677,31 @@ export class InMemoryEnrollmentStore implements EnrollmentStore {
           : { reasoningEffort: proposal.reasoningEffort }),
         ...(proposal.toolsNote === undefined ? {} : { toolsNote: proposal.toolsNote }),
         requestedScopes: record.requestedScopes,
+        requestedResources: record.requestedResources,
+        status: proposal.status,
+        effectiveGrantedScopes: proposal.grantedScopes ?? null,
+        effectiveGrantedResources: proposal.grantedResources ?? null,
         proposalExpiresAt: proposal.expiresAt,
+      };
+    });
+  }
+
+  async capsule(enrollmentId: string, now: number): Promise<EnrollmentCapsule> {
+    return this.serialized(() => {
+      const record = this.#records.get(enrollmentId);
+      if (
+        record === undefined ||
+        record.invalidated ||
+        record.secretConsumedAt !== undefined ||
+        now >= record.secretExpiresAt
+      ) {
+        throw new EnrollmentError("PAIRING_INVALID");
+      }
+      return {
+        enrollmentId: record.enrollmentId,
+        secretExpiresAt: record.secretExpiresAt,
+        requestedScopes: record.requestedScopes,
+        requestedResources: record.requestedResources,
       };
     });
   }
@@ -428,16 +715,89 @@ export class InMemoryEnrollmentStore implements EnrollmentStore {
       );
       const proposal = record?.proposal;
       if (record === undefined || proposal === undefined) throw new EnrollmentError("FLOW_INVALID");
-      if (proposal.status === "pending" && attempt.now >= proposal.expiresAt) proposal.status = "expired";
-      if (proposal.status === "pending") return { kind: "pending" };
+      if (proposal.status === "pending" && attempt.now >= proposal.expiresAt)
+        proposal.status = "expired";
+      if (proposal.status === "pending") {
+        const pacing = nextEnrollmentPollPacing({
+          lastPollAt: proposal.lastPollAt,
+          pollIntervalSeconds: proposal.pollIntervalSeconds,
+          now: attempt.now,
+        });
+        proposal.pollIntervalSeconds = pacing.retryAfterSeconds;
+        proposal.lastPollAt = attempt.now;
+        return pacing.kind === "slow-down"
+          ? { kind: "slow-down", retryAfterSeconds: pacing.retryAfterSeconds }
+          : { kind: "pending", retryAfterSeconds: pacing.retryAfterSeconds };
+      }
       if (proposal.status === "denied") return { kind: "denied" };
       if (proposal.status === "expired") return { kind: "expired" };
       if (proposal.tokenHash !== undefined) return { kind: "already-issued" };
 
       const issued = await attempt.createToken();
+      if (proposal.grantedScopes === undefined || proposal.grantedResources === undefined) {
+        throw new EnrollmentError("PROPOSAL_NOT_PENDING");
+      }
       proposal.tokenHash = issued.tokenHash;
       proposal.tokenIssuedAt = attempt.now;
+      this.#credentials.set(issued.tokenHash, {
+        fellowId: proposal.fellowId,
+        credentialId: `cred-${proposal.proposalId}`,
+        sponsorId: record.sponsorId,
+        name: proposal.name,
+        model: proposal.model,
+        harness: proposal.harness,
+        grantedScopes: proposal.grantedScopes,
+        grantedResources: proposal.grantedResources,
+        tokenHash: issued.tokenHash,
+        issuedAt: attempt.now,
+      });
       return { kind: "issued", token: issued.token };
+    });
+  }
+
+  async availabilitySuggestions(name: string): Promise<readonly string[]> {
+    return this.serialized(() => {
+      const stem = name
+        .toLowerCase()
+        .replace(/[^a-z0-9-]+/g, "-")
+        .replace(/^-+|-+$/g, "")
+        .replace(/-+/g, "-");
+      const safeStem =
+        stem.length >= 1 && /^[a-z]/.test(stem) && enrollmentNameFailure(stem) === undefined
+          ? stem.slice(0, 24).replace(/-+$/g, "")
+          : "fellow";
+      const suggestions: string[] = [];
+      for (let index = 2; suggestions.length < 3 && index < 10_000; index += 1) {
+        const candidate = `${safeStem}-${index}`.slice(0, 32).replace(/-+$/g, "");
+        const failure = enrollmentNameFailure(candidate);
+        if (
+          FellowNameSchema.safeParse(candidate).success &&
+          failure === undefined &&
+          !this.#activeNames.has(candidate)
+        ) {
+          suggestions.push(candidate);
+        }
+      }
+      return suggestions;
+    });
+  }
+
+  async credentialByTokenHash(tokenHash: string): Promise<FellowCredentialBinding | undefined> {
+    return this.serialized(() => this.#credentials.get(tokenHash));
+  }
+
+  async beginIdempotency(attempt: IdempotencyAttempt): Promise<IdempotencyResult> {
+    return this.serialized(() => {
+      const recordKey = `${attempt.scope}:${attempt.key}`;
+      const existing = this.#idempotency.get(recordKey);
+      if (existing !== undefined && attempt.now < existing.expiresAt) {
+        return constantTimeEqual(existing.digest, attempt.digest) ? "replay" : "conflict";
+      }
+      this.#idempotency.set(recordKey, {
+        digest: attempt.digest,
+        expiresAt: attempt.now + IDEMPOTENCY_TTL_MS,
+      });
+      return "new";
     });
   }
 
@@ -449,9 +809,16 @@ export class InMemoryEnrollmentStore implements EnrollmentStore {
       return {
         enrollmentId: record.enrollmentId,
         secretHash: record.secretHash,
-        ...(record.secretConsumedAt === undefined ? {} : { secretConsumedAt: record.secretConsumedAt }),
-        ...(record.proposal === undefined ? {} : { flowHandleHash: record.proposal.flowHandleHash }),
-        ...(record.proposal?.tokenHash === undefined ? {} : { tokenHash: record.proposal.tokenHash }),
+        ...(record.secretConsumedAt === undefined
+          ? {}
+          : { secretConsumedAt: record.secretConsumedAt }),
+        ...(record.proposal === undefined
+          ? {}
+          : { flowHandleHash: record.proposal.flowHandleHash }),
+        ...(record.proposal?.tokenHash === undefined
+          ? {}
+          : { tokenHash: record.proposal.tokenHash }),
+        ...(record.proposal === undefined ? {} : { fellowId: record.proposal.fellowId }),
       };
     });
   }
@@ -492,13 +859,35 @@ export class EnrollmentService {
     this.#random = options.random ?? systemRandom;
   }
 
+  async #beginWrite(
+    scope: IdempotencyAttempt["scope"],
+    key: string | undefined,
+    material: unknown,
+  ): Promise<IdempotencyResult> {
+    if (key === undefined) return "new";
+    if (!/^[A-Za-z0-9._-]{1,160}$/.test(key)) throw new EnrollmentError("IDEMPOTENCY_CONFLICT");
+    return this.#store.beginIdempotency({
+      scope,
+      key,
+      digest: await sha256Hex(JSON.stringify(material)),
+      now: this.#clock.now(),
+    });
+  }
+
   async mint(
     sponsor: EnrollmentPrincipal,
     rawRequest: MintEnrollmentRequest,
+    options: EnrollmentWriteOptions = {},
   ): Promise<MintedEnrollment> {
     assertSponsor(sponsor);
     const parsed = MintEnrollmentRequestSchema.safeParse(rawRequest);
     if (!parsed.success) throw new EnrollmentError("PAIRING_INVALID");
+    const idempotency = await this.#beginWrite("mint", options.idempotencyKey, {
+      sponsor: sponsor.sponsorId,
+      request: parsed.data,
+    });
+    if (idempotency === "conflict") throw new EnrollmentError("IDEMPOTENCY_CONFLICT");
+    if (idempotency === "replay") throw new EnrollmentError("IDEMPOTENCY_REPLAY_UNSAFE");
     const now = this.#clock.now();
     const secret = generateVersionedSecret("v1", this.#random);
     const secretHash = await sha256Hex(secret);
@@ -506,22 +895,50 @@ export class EnrollmentService {
 
     for (let attempt = 0; attempt < MAX_ID_ATTEMPTS; attempt += 1) {
       const enrollmentId = generateEnrollmentId(this.#random);
-      const created = await this.#store.create({
-        enrollmentId,
-        sponsorId: sponsor.sponsorId,
-        secretHash,
-        secretExpiresAt: expiresAt,
-        requestedScopes: uniqueScopes(parsed.data.requested_scopes),
-      });
+      const created = await this.#store.create(
+        {
+          enrollmentId,
+          sponsorId: sponsor.sponsorId,
+          secretHash,
+          createdAt: now,
+          secretExpiresAt: expiresAt,
+          requestedScopes: uniqueEnrollmentScopes(parsed.data.requested_scopes),
+          requestedResources: requestedResources(parsed.data, now),
+          invalidated: false,
+        },
+        parsed.data.replaces_enrollment_id,
+      );
       if (created) return { enrollmentId, secret, expiresAt };
     }
     throw new EnrollmentError("PAIRING_INVALID");
   }
 
-  async claim(rawRequest: FellowRegistrationRequest): Promise<EnrollmentClaimResult> {
+  async claim(
+    rawRequest: unknown,
+    options: EnrollmentWriteOptions = {},
+  ): Promise<EnrollmentClaimResult> {
+    // Validate credential-bearing fields first. A malformed or wrong secret is
+    // always opaque; only a request whose non-name fields are well-formed may
+    // receive a teachable name-policy response.
+    const credentialFields = FellowRegistrationCredentialFieldsSchema.safeParse(rawRequest);
+    if (!credentialFields.success) throw new EnrollmentError("PAIRING_INVALID");
+    const rawName = (rawRequest as Record<string, unknown>).name;
+    const name = typeof rawName === "string" ? rawName : undefined;
+    if (name === undefined) {
+      throw new EnrollmentError(
+        "NAME_INVALID",
+        await this.#store.availabilitySuggestions("fellow"),
+      );
+    }
+    const rejectedName = enrollmentNameFailure(name);
+    if (rejectedName !== undefined) {
+      throw new EnrollmentError(rejectedName, await this.#store.availabilitySuggestions(name));
+    }
     const parsed = FellowRegistrationRequestSchema.safeParse(rawRequest);
-    if (!parsed.success) throw new EnrollmentError("PAIRING_INVALID");
-    validateName(parsed.data.name);
+    if (!parsed.success) throw new EnrollmentError("NAME_INVALID");
+    const idempotency = await this.#beginWrite("claim", options.idempotencyKey, parsed.data);
+    if (idempotency === "conflict") throw new EnrollmentError("IDEMPOTENCY_CONFLICT");
+    if (idempotency === "replay") throw new EnrollmentError("IDEMPOTENCY_REPLAY_UNSAFE");
     const now = this.#clock.now();
     const flowHandle = generateVersionedSecret("flow_v1", this.#random);
     const [secretHash, flowHandleHash] = await Promise.all([
@@ -534,6 +951,7 @@ export class EnrollmentService {
       now,
       proposal: {
         proposalId: generateUlid(now, this.#random),
+        fellowId: `F-${generateUlid(now, this.#random)}`,
         flowHandleHash,
         name: parsed.data.name,
         model: parsed.data.model,
@@ -545,6 +963,7 @@ export class EnrollmentService {
         createdAt: now,
         expiresAt: now + PENDING_PROPOSAL_TTL_MS,
         status: "pending",
+        pollIntervalSeconds: INITIAL_POLL_INTERVAL_SECONDS,
       },
     });
     return { flowHandle };
@@ -558,25 +977,58 @@ export class EnrollmentService {
     return this.#store.approvalCard(enrollmentId, sponsor.sponsorId, this.#clock.now());
   }
 
+  /**
+   * Resolve the path-only public capsule. The route owner chooses the face;
+   * this seam returns no secret, flow handle, proposal id, token, or sponsor.
+   */
+  async capsule(enrollmentId: string): Promise<EnrollmentCapsule> {
+    return this.#store.capsule(enrollmentId, this.#clock.now());
+  }
+
   async decide(
     sponsor: EnrollmentPrincipal,
     enrollmentId: string,
     rawDecision: SponsorEnrollmentDecision,
+    options: EnrollmentWriteOptions = {},
   ): Promise<void> {
     assertSponsor(sponsor);
     const parsed = SponsorEnrollmentDecisionSchema.safeParse(rawDecision);
     if (!parsed.success) throw new EnrollmentError("PROPOSAL_NOT_PENDING");
-    await this.#store.decision({
+    const idempotency = await this.#beginWrite("decision", options.idempotencyKey, {
+      sponsor: sponsor.sponsorId,
       enrollmentId,
-      sponsorId: sponsor.sponsorId,
       decision: parsed.data,
-      now: this.#clock.now(),
     });
+    if (idempotency === "conflict") throw new EnrollmentError("IDEMPOTENCY_CONFLICT");
+    if (idempotency === "replay") return;
+    const card = await this.#store.approvalCard(enrollmentId, sponsor.sponsorId, this.#clock.now());
+    try {
+      await this.#store.decision({
+        enrollmentId,
+        sponsorId: sponsor.sponsorId,
+        decision: parsed.data,
+        now: this.#clock.now(),
+      });
+    } catch (error) {
+      if (error instanceof EnrollmentError && error.code === "NAME_TAKEN") {
+        throw new EnrollmentError(
+          "NAME_TAKEN",
+          await this.#store.availabilitySuggestions(card.name),
+        );
+      }
+      throw error;
+    }
   }
 
-  async poll(rawRequest: EnrollmentFlowPollRequest): Promise<EnrollmentFlowResult> {
+  async poll(
+    rawRequest: unknown,
+    options: EnrollmentWriteOptions = {},
+  ): Promise<EnrollmentFlowResult> {
     const parsed = EnrollmentFlowPollRequestSchema.safeParse(rawRequest);
     if (!parsed.success) throw new EnrollmentError("FLOW_INVALID");
+    const idempotency = await this.#beginWrite("poll", options.idempotencyKey, parsed.data);
+    if (idempotency === "conflict") throw new EnrollmentError("IDEMPOTENCY_CONFLICT");
+    if (idempotency === "replay") throw new EnrollmentError("IDEMPOTENCY_REPLAY_UNSAFE");
     const now = this.#clock.now();
     const flowHandleHash = await sha256Hex(parsed.data.flow_handle);
     const outcome = await this.#store.poll({
@@ -591,7 +1043,12 @@ export class EnrollmentService {
       case "pending":
         return EnrollmentPendingResponseSchema.parse({
           status: "authorization_pending",
-          retry_after_seconds: 5,
+          retry_after_seconds: outcome.retryAfterSeconds ?? 5,
+        });
+      case "slow-down":
+        return EnrollmentSlowDownResponseSchema.parse({
+          status: "slow_down",
+          retry_after_seconds: outcome.retryAfterSeconds ?? 5,
         });
       case "denied":
         return EnrollmentDeniedResponseSchema.parse({ status: "access_denied" });
@@ -607,6 +1064,17 @@ export class EnrollmentService {
           suggested_next: "GET /v1/hello with the bearer token",
         });
     }
+  }
+
+  /**
+   * Token-to-identity lookup for the future `/v1/hello` owner. It creates no
+   * route and proves no deployed authentication; it prevents an approved flow
+   * from returning an orphan credential in the persistence contract.
+   */
+  async credentialBinding(rawToken: string): Promise<FellowCredentialBinding | undefined> {
+    if (!/^asimp_ag_[0-9A-HJKMNP-TV-Z]{26}_[A-Za-z0-9_-]{43}$/.test(rawToken)) return undefined;
+    const tokenHash = await sha256Hex(rawToken);
+    return this.#store.credentialByTokenHash(tokenHash);
   }
 }
 
