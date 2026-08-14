@@ -390,12 +390,6 @@ export function safeReproductionCommand(reproduction?: HarnessRunOptions["reprod
 }
 
 /** Validate the public runner input before any artifact directory or child process is created. */
-/**
- * A directory that has explicitly consented to being used as a disposable
- * harness root. Tests create it; nothing else should.
- */
-export const HARNESS_ROOT_MARKER = ".asimposium-harness-root";
-
 /** Files that must exist for a directory to be this checkout. */
 const REPOSITORY_SENTINELS = ["package.json", join("scripts", "harness", "runner.ts")] as const;
 
@@ -432,14 +426,14 @@ export function repositoryRoot(): string {
  * directory, an unrelated repository, or the parent of this one, and the
  * mistake would look like a successful run.
  *
- * Exactly two roots are therefore accepted:
- *
- *  1. **This checkout**, verified against `repositoryRoot()`.
- *  2. **A directory that has consented**, by containing `HARNESS_ROOT_MARKER`.
- *     Consent lives in the filesystem rather than in a boolean parameter
- *     because a flag can be passed by accident and a file cannot: a caller has
- *     to have deliberately created that marker in that directory. This is what
- *     lets tests use disposable `mkdtemp` roots without weakening real runs.
+ * Exactly one root is accepted: **this checkout**, compared by realpath against
+ * `repositoryRoot()`. AGENTS.md is unconditional — "artifact roots stay under
+ * the repository" — so there is no opt-in, no marker file, and no flag that
+ * relaxes it. An earlier revision of this function offered a consent marker so
+ * disposable temp roots could be used by tests; that was an escape hatch this
+ * rule does not permit, and tests now isolate themselves by `run_id` inside the
+ * repository instead, which is what the artifact layout was already designed
+ * for.
  *
  * Symlinked roots are refused outright rather than silently resolved. Following
  * one would mean the caller named one directory and the harness wrote to
@@ -483,17 +477,17 @@ export function assertContainedRoot(root: unknown): string {
   if (real === realpathSync(tmpdir())) {
     throw new HarnessError(
       "ROOT_NOT_REPOSITORY",
-      "the shared temp directory is never a harness root; use a mkdtemp directory carrying the marker.",
+      "the shared temp directory is never a harness root.",
     );
   }
 
-  if (real === repositoryRoot()) return real;
-  if (existsSync(join(real, HARNESS_ROOT_MARKER))) return real;
-
-  throw new HarnessError(
-    "ROOT_NOT_REPOSITORY",
-    `root is neither this checkout nor a directory carrying ${HARNESS_ROOT_MARKER}; refusing to write artifacts into an unrelated directory.`,
-  );
+  if (real !== repositoryRoot()) {
+    throw new HarnessError(
+      "ROOT_NOT_REPOSITORY",
+      "root is not this checkout; refusing to write artifacts into an unrelated directory.",
+    );
+  }
+  return real;
 }
 
 /** True when `target` stays inside `root` once both are fully resolved. */

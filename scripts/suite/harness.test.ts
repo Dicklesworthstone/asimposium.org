@@ -23,7 +23,6 @@ import {
   FORCE_KILL_GRACE_MS,
   HARD_READER_GRACE_MS,
   HARNESS_BLOCKED_EXIT_CODE,
-  HARNESS_ROOT_MARKER,
   HARNESS_SCHEMA_VERSION,
   type HarnessError,
   type HarnessEvent,
@@ -87,18 +86,39 @@ const SECRET_EMITTER = fileURLToPath(
 );
 
 /**
- * A disposable root that has explicitly consented to being written to.
+ * The only root the harness accepts: this checkout.
  *
- * The marker is the whole point: the runner refuses any directory that is
- * neither this checkout nor carrying it, so a test root has to opt in on the
- * filesystem. Writing it here — rather than passing a flag — is what keeps a
- * stray `--root /Users/someone` refused in a real run.
+ * AGENTS.md keeps artifact roots under the repository, so tests cannot isolate
+ * themselves with a temp root. They isolate by `run_id` instead — which is what
+ * the `e2e/artifacts/<run_id>/` layout was always for — and the unique suffix
+ * below keeps repeated local runs from colliding on an existing ledger.
  */
-function fixtureRoot(name: string): string {
-  const root = realpathSync(mkdtempSync(join(tmpdir(), `asimposium-harness-${name}-`)));
-  mkdirSync(join(root, "e2e"));
-  writeFileSync(join(root, HARNESS_ROOT_MARKER), "disposable harness root\n");
-  return root;
+function fixtureRoot(_name: string): string {
+  return repositoryRoot();
+}
+
+let scratchCounter = 0;
+
+/**
+ * A per-test directory for marker and counter files, inside the repository's
+ * artifact area so nothing is written to the checkout root itself.
+ */
+function fixtureScratch(name: string): string {
+  scratchCounter += 1;
+  const directory = join(
+    repositoryRoot(),
+    "e2e",
+    "artifacts",
+    `scratch-${name}-${process.pid}-${scratchCounter}`,
+  );
+  mkdirSync(directory, { recursive: true });
+  return directory;
+}
+
+/** A run id that is unique per process, so a rerun never hits RUN_ID_EXISTS. */
+function fixtureRunId(name: string): string {
+  scratchCounter += 1;
+  return `t-${name}-${process.pid}-${scratchCounter}`;
 }
 
 function command(code: string): readonly string[] {
@@ -205,7 +225,7 @@ describe("deterministic, structured diagnostics", () => {
 describe("execution lifecycle", () => {
   test("retries replay-safe work with attempt accounting", async () => {
     const root = fixtureRoot("retry");
-    const counter = join(root, "counter");
+    const counter = join(fixtureScratch("retry"), "counter");
     const code = `const fs = require("node:fs"); const path = ${JSON.stringify(counter)}; if (fs.existsSync(path)) { process.exit(0); } else { fs.writeFileSync(path, "one"); process.exit(1); }`;
     const result = await runHarness({
       root,
@@ -226,7 +246,8 @@ describe("execution lifecycle", () => {
 
   test("timeout and cancellation terminate direct child processes before their delayed side effect", async () => {
     const root = fixtureRoot("cleanup");
-    const timeoutMarker = join(root, "timeout-marker");
+    const scratch = fixtureScratch("cleanup");
+    const timeoutMarker = join(scratch, "timeout-marker");
     const timeout = await runHarness({
       root,
       suite: "e2e",
@@ -250,7 +271,7 @@ describe("execution lifecycle", () => {
     expect(timeout.events.find((event) => event.record === "step")?.status).toBe("timeout");
     expect(existsSync(timeoutMarker)).toBe(false);
 
-    const cancellationMarker = join(root, "cancellation-marker");
+    const cancellationMarker = join(scratch, "cancellation-marker");
     const controller = new AbortController();
     setTimeout(() => controller.abort(), 20);
     const cancelled = await runHarness({
@@ -279,7 +300,7 @@ describe("execution lifecycle", () => {
 
     const preCancelled = new AbortController();
     preCancelled.abort();
-    const preCancelledMarker = join(root, "pre-cancelled-marker");
+    const preCancelledMarker = join(scratch, "pre-cancelled-marker");
     const preCancelledResult = await runHarness({
       root,
       suite: "e2e",
@@ -308,7 +329,7 @@ describe("execution lifecycle", () => {
 
   test("timeout terminates the detached process group, including a planted grandchild", async () => {
     const root = fixtureRoot("process-group");
-    const marker = join(root, "grandchild-marker");
+    const marker = join(fixtureScratch("process-group"), "grandchild-marker");
     const grandchild = `const fs = require("node:fs"); setTimeout(() => fs.writeFileSync(${JSON.stringify(marker)}, "late"), 250); setTimeout(() => process.exit(0), 1000);`;
     const parent = `const cp = require("node:child_process"); cp.spawn(process.execPath, ["-e", ${JSON.stringify(grandchild)}], { stdio: "ignore" }); setTimeout(() => process.exit(0), 1000);`;
     const result = await runHarness({
@@ -357,8 +378,9 @@ describe("execution lifecycle", () => {
 
   test("resumes failed replay-safe work but withholds incomplete unsafe work", async () => {
     const root = fixtureRoot("resume");
-    const safeCounter = join(root, "safe-counter");
-    const unsafeCounter = join(root, "unsafe-counter");
+    const resumeScratch = fixtureScratch("resume");
+    const safeCounter = join(resumeScratch, "safe-counter");
+    const unsafeCounter = join(resumeScratch, "unsafe-counter");
     const steps: HarnessStep[] = [
       {
         id: "safe",
@@ -409,7 +431,7 @@ describe("secret-safe, bounded artifacts", () => {
     const root = fixtureRoot("redaction");
     const secret = ["asimp", "ag", "01JXYZ", "selftest", "neverlog", "canary"].join("_");
     const opaqueValue = "A".repeat(32);
-    const opaqueEmitter = join(root, "opaque-output.cjs");
+    const opaqueEmitter = join(fixtureScratch("redaction"), "opaque-output.cjs");
     writeFileSync(opaqueEmitter, 'process.stderr.write("A".repeat(32)); process.exit(1);');
     let visible = "";
     const result = await runHarness({
@@ -642,14 +664,20 @@ describe("artifact containment", () => {
     }
     expect(validateRunId("run.1_ok")).toBe(true);
 
+    // The escape is planted on this run's own artifact directory rather than on
+    // the shared `e2e/artifacts` parent: the root is now the real checkout, so
+    // replacing that parent with a link would sabotage the repository instead of
+    // testing it. A per-run link exercises exactly the same guard.
     const root = fixtureRoot("symlink");
+    const runId = fixtureRunId("escape");
     const outside = mkdtempSync(join(tmpdir(), "asimposium-harness-outside-"));
-    symlinkSync(outside, join(root, "e2e", "artifacts"), "dir");
+    mkdirSync(join(root, "e2e", "artifacts"), { recursive: true });
+    symlinkSync(outside, join(root, "e2e", "artifacts", runId), "dir");
     await expect(
       runHarness({
         root,
         suite: "unit",
-        runId: "escape-1",
+        runId,
         steps: [passStep("pass")],
         onEvent: () => undefined,
         onOutput: () => undefined,
@@ -891,7 +919,7 @@ describe("repository root identity", () => {
   test("PLANTED: an unrelated absolute directory is refused", () => {
     // The previous rule accepted this and would have created e2e/artifacts in it.
     const unrelated = mkdtempSync(join(tmpdir(), "harness-unrelated-"));
-    expect(() => assertContainedRoot(unrelated)).toThrow(/unrelated directory/);
+    expect(() => assertContainedRoot(unrelated)).toThrow(/not this checkout/);
   });
 
   test("PLANTED: a home directory is refused", () => {
@@ -915,7 +943,7 @@ describe("repository root identity", () => {
     mkdirSync(join(impostor, "scripts", "harness"), { recursive: true });
     writeFileSync(join(impostor, "package.json"), "{}\n");
     writeFileSync(join(impostor, "scripts", "harness", "runner.ts"), "// impostor\n");
-    expect(() => assertContainedRoot(impostor)).toThrow(/unrelated directory/);
+    expect(() => assertContainedRoot(impostor)).toThrow(/not this checkout/);
   });
 
   test("PLANTED: a symlink pointing at this checkout is refused, not followed", () => {
@@ -927,11 +955,15 @@ describe("repository root identity", () => {
     expect(() => assertContainedRoot(link)).toThrow(/symlink/);
   });
 
-  test("a disposable root is accepted only once it carries the marker", () => {
-    const disposable = realpathSync(mkdtempSync(join(tmpdir(), "harness-consent-")));
-    expect(() => assertContainedRoot(disposable)).toThrow(/unrelated directory/);
-    writeFileSync(join(disposable, HARNESS_ROOT_MARKER), "disposable harness root\n");
-    expect(assertContainedRoot(disposable)).toBe(disposable);
+  test("PLANTED: an outside directory cannot opt itself in with a marker file", () => {
+    // An earlier revision accepted a `.asimposium-harness-root` marker as
+    // consent. AGENTS.md keeps artifact roots under the repository with no
+    // exceptions, so planting any marker must change nothing.
+    const outside = realpathSync(mkdtempSync(join(tmpdir(), "harness-marker-")));
+    for (const marker of [".asimposium-harness-root", ".harness-root", ".git"]) {
+      writeFileSync(join(outside, marker), "not consent\n");
+    }
+    expect(() => assertContainedRoot(outside)).toThrow(/not this checkout/);
   });
 
   test("a run refuses to start against a root it cannot identify", async () => {
@@ -946,7 +978,7 @@ describe("repository root identity", () => {
         ],
         onEvent: () => undefined,
       }),
-    ).rejects.toThrow(/unrelated directory/);
+    ).rejects.toThrow(/not this checkout/);
     // It wrote nothing into the directory it refused.
     expect(existsSync(join(unrelated, "e2e"))).toBe(false);
   });
