@@ -457,13 +457,18 @@ export function assertContainedRoot(root: unknown): string {
   }
   // Refuse rather than resolve: a symlinked root means the path the caller
   // named and the path the harness writes to are two different places.
-  const real = realpathSync(root);
-  if (real !== resolve(root)) {
+  //
+  // Only the final component is tested. An ancestor symlink is a platform fact
+  // — macOS resolves `/var` to `/private/var`, so every `mkdtemp` directory has
+  // one — and refusing those would ban temp roots on an entire operating system
+  // while catching no actual caller confusion.
+  if (lstatSync(root).isSymbolicLink()) {
     throw new HarnessError(
       "ROOT_SYMLINK_REFUSED",
       "root must not be a symlink; name the real directory so artifacts land where the caller believes.",
     );
   }
+  const real = realpathSync(root);
   if (!statSync(real).isDirectory()) {
     throw new HarnessError("ROOT_INVALID", "root must be a directory.");
   }
