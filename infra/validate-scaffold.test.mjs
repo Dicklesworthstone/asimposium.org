@@ -113,13 +113,16 @@ function createMigrationsSymlinkEscapeFixture() {
   return root;
 }
 
-function expectFailure(root, configWorkspacePath, expectedCode) {
+function expectFailure(root, configWorkspacePath, expectedCode, expectedDetail) {
   try {
     validateScaffold(root, configWorkspacePath);
     assert.fail(`expected ${expectedCode}`);
   } catch (error) {
     assert.ok(error instanceof ScaffoldValidationError);
     assert.equal(error.code, expectedCode);
+    if (expectedDetail !== undefined) {
+      assert.equal(error.message.includes(expectedDetail), true);
+    }
     assert.equal(error.message.includes("/Users/"), false);
     assert.equal(/(?:^|\s)\/(?:private|tmp|var)\//.test(error.message), false);
   }
@@ -170,9 +173,10 @@ fallthrough = true
     'name = "asimposium-stoa-local"',
     'name = "asimposium-stoa-local"\nname = "asimposium-stoa-local"',
   );
-  const unknownRootKeyConfig = `${validConfig}
-unexpected_root_key = "value"
-`;
+  const unknownRootKeyConfig = validConfig.replace(
+    "[dev]",
+    'unexpected_root_key = "value"\n\n[dev]',
+  );
   const unknownRootTableConfig = `${validConfig}
 [unexpected_root_table]
 value = "value"
@@ -403,6 +407,7 @@ value = "value"
           createCompleteFixtureRoot("unknown-root-key", unknownRootKeyConfig),
           "infra/wrangler.toml",
           "UNSAFE_CONFIG_KEY",
+          "root contains unsupported configuration key",
         );
       },
     },
