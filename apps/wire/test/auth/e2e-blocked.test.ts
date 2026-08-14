@@ -9,33 +9,21 @@
  * These guard the *shape* of the local proof: that the harness stays unmounted,
  * that it names no product route, that its blockers are stated rather than
  * implied, and that local proof is never described as deployed proof. The
- * behavioural proof lives in `scripts/e2e-s6-auth-ingress.sh`, which needs a
- * real local D1 binding and therefore cannot run inside `bun test`.
+ * behavioural proof lives in `scripts/e2e-s6-auth-ingress.sh`. Its self-test
+ * needs real local Workerd and D1, so the wire integration suite executes it
+ * as a bounded preflight rather than relabelling it as an in-process unit test.
  */
 
 import { describe, expect, test } from "bun:test";
-import {
-  existsSync,
-  lstatSync,
-  mkdirSync,
-  mkdtempSync,
-  readFileSync,
-  symlinkSync,
-  writeFileSync,
-} from "node:fs";
-import { tmpdir } from "node:os";
-import { join, resolve } from "node:path";
+import { readFileSync } from "node:fs";
+import { resolve } from "node:path";
 import {
   classifyRefusal,
   EXPECTED_REFUSAL,
-  HANDOFF_FILENAME,
   LOCAL_FETCH_TIMEOUT_MS,
   loadSigningKey,
   localFetch,
-  parseHandoff,
-  resolveHandoffPath,
   validateLoopbackOrigin,
-  writeHandoffExclusively,
 } from "../../src/auth/local-check";
 import { cookieTrappedRequest } from "../../src/auth/local-worker";
 
@@ -59,6 +47,120 @@ const WORKER = "apps/wire/src/auth/local-worker.ts";
 const CHECKER = "apps/wire/src/auth/local-check.ts";
 const SCRIPT = "scripts/e2e-s6-auth-ingress.sh";
 const CONFIG = "apps/wire/wrangler.s6.toml";
+const SUITES = "apps/wire/scripts/suites.ts";
+
+// The shell runs a real workerd/D1 lifecycle and can be slow on a loaded host.
+// Leave enough room for its direct-child TERM/KILL cleanup before Bun's outer
+// test timeout, so the test runner never strands the bash process it spawned.
+const SHELL_SELF_TEST_INNER_BUDGET_MS = 230_000;
+const SHELL_SELF_TEST_TERM_GRACE_MS = 40_000;
+const SHELL_SELF_TEST_KILL_GRACE_MS = 20_000;
+const SHELL_SELF_TEST_STREAM_DRAIN_MS = 5_000;
+const SHELL_SELF_TEST_TIMEOUT_MS = 300_000;
+const FAIL_STATUS_RECORD = /"status"\s*:\s*"fail"/;
+
+interface ShellSelfTest {
+  result(): Promise<{ exitCode: number; stdout: string; stderr: string }>;
+  cleanup(): Promise<void>;
+}
+
+function startShellSelfTest(): ShellSelfTest {
+  const {
+    S6_PORT: _port,
+    S6_SELF_TEST: _selfTest,
+    S6_TEST_CHECK_DEADLINE_SECONDS: _deadline,
+    S6_TEST_SIGNAL_WINDOW: _signalWindow,
+    S6_TEST_REPEAT_SIGNAL_DURING_CLEANUP: _repeatSignal,
+    S6_TEST_GROUP_INSPECTION_FAILURES_REMAINING: _inspectionFailures,
+    S6_TEST_WEDGE_AFTER_RESTART: _wedge,
+    ...environment
+  } = process.env;
+  const child = Bun.spawn({
+    cmd: ["bash", SCRIPT],
+    cwd: root,
+    env: { ...environment, S6_SELF_TEST: "1" },
+    stdout: "pipe",
+    stderr: "pipe",
+  });
+  const stdout = new Response(child.stdout).text();
+  const stderr = new Response(child.stderr).text();
+  let childHasExited = false;
+  const childExit = child.exited.then((exitCode) => {
+    childHasExited = true;
+    return exitCode;
+  });
+  let cleanupPromise: Promise<void> | undefined;
+
+  const waitForExit = async (timeoutMs: number): Promise<number | undefined> =>
+    await new Promise<number | undefined>((complete) => {
+      const timer = setTimeout(() => complete(undefined), timeoutMs);
+      void childExit.then((exitCode) => {
+        clearTimeout(timer);
+        complete(exitCode);
+      });
+    });
+
+  const completeWithin = async <Value>(
+    promise: Promise<Value>,
+    timeoutMs: number,
+    operation: string,
+  ): Promise<Value> => {
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    const timeout = new Promise<never>((_resolve, reject) => {
+      timer = setTimeout(
+        () => reject(new Error(`S-6 shell self-test timed out while ${operation}`)),
+        timeoutMs,
+      );
+    });
+    try {
+      return await Promise.race([promise, timeout]);
+    } finally {
+      if (timer !== undefined) clearTimeout(timer);
+    }
+  };
+
+  const cleanup = async (): Promise<void> => {
+    if (cleanupPromise !== undefined) return cleanupPromise;
+    cleanupPromise = (async () => {
+      if (!childHasExited) {
+        // This is the exact direct bash child only. The script itself owns and
+        // proves cleanup of its workerd process groups.
+        child.kill("SIGTERM");
+        if ((await waitForExit(SHELL_SELF_TEST_TERM_GRACE_MS)) === undefined) {
+          child.kill("SIGKILL");
+          if ((await waitForExit(SHELL_SELF_TEST_KILL_GRACE_MS)) === undefined) {
+            throw new Error("S-6 shell self-test direct child survived SIGKILL");
+          }
+        }
+      }
+      await completeWithin(
+        Promise.allSettled([stdout, stderr]),
+        SHELL_SELF_TEST_STREAM_DRAIN_MS,
+        "draining direct-child output during cleanup",
+      );
+    })();
+    return cleanupPromise;
+  };
+
+  return {
+    async result(): Promise<{ exitCode: number; stdout: string; stderr: string }> {
+      const deadline = performance.now() + SHELL_SELF_TEST_INNER_BUDGET_MS;
+      const remaining = (): number => Math.max(1, Math.floor(deadline - performance.now()));
+      const exitCode = await completeWithin(
+        childExit,
+        remaining(),
+        `waiting for the direct child within ${SHELL_SELF_TEST_INNER_BUDGET_MS}ms`,
+      );
+      const [capturedStdout, capturedStderr] = await completeWithin(
+        Promise.all([stdout, stderr]),
+        remaining(),
+        "draining direct-child output within the inner budget",
+      );
+      return { exitCode, stdout: capturedStdout, stderr: capturedStderr };
+    },
+    cleanup,
+  };
+}
 
 describe("the S-6 harness stays a harness", () => {
   test("the production router never imports it", () => {
@@ -166,9 +268,10 @@ describe("lifecycle discipline", () => {
     expect(script).toContain("--inspector-port 0");
   });
 
-  test("readiness is tied to child liveness", () => {
-    expect(script).toContain('kill -0 "${SERVER_PID}"');
-    expect(script).toMatch(/if ! kill -0 "\$\{SERVER_PID\}" 2>\/dev\/null; then return 1; fi/);
+  test("readiness is tied to the exact pinned supervisor", () => {
+    expect(script).toContain("supervisor_identity_is_exact()");
+    expect(script).toContain("SERVER_SUPERVISOR_PID");
+    expect(script).toContain('"${SERVER_SUPERVISOR_STARTED_AT}" "${SERVER_SUPERVISOR_TOKEN}"');
   });
 
   test("cleanup terminates the process group, then escalates within a bound", () => {
@@ -222,10 +325,12 @@ describe("lifecycle defects that must not return", () => {
     // Without job control `$!` is a pid inside the script's own group, so
     // `kill -TERM -$!` fails and the fallback reaps only the wrapper.
     expect(script).toMatch(/^set -m$/m);
-    // And the assumption is verified, not trusted.
-    expect(script).toContain('SERVER_PGID="$(ps -o pgid= -p "${SERVER_PID}"');
-    expect(script).toContain("worker_owns_its_process_group");
-    expect(script).toMatch(/"\$\{SERVER_PGID\}" != "\$\{SERVER_PID\}"/);
+    // And the assumption is verified, not trusted, while the leader is stopped
+    // before it can execute Wrangler.
+    expect(script).toContain('SUPERVISOR_PGID="$(ps -o pgid= -p "${SUPERVISOR_PID}"');
+    expect(script).toContain("pinned_supervisor_identity");
+    expect(script).toMatch(/"\$\{SUPERVISOR_PID\}" != "\$\{SUPERVISOR_PGID\}"/);
+    expect(script).toContain('kill -STOP "$$"');
   });
 
   test("no cleanup path silently degrades to killing the parent only", () => {
@@ -274,6 +379,9 @@ describe("lifecycle defects that must not return", () => {
   });
 
   test("redaction survives an unset HOME under set -u", () => {
+    expect(script).toContain('readonly REDACTION_REPOSITORY="<repo>"');
+    expect(script).toContain('readonly REDACTION_HOME="<home>"');
+    expect(script).toContain('readonly REDACTION_SECRET="<redacted>"');
     expect(script).toContain('local home="${HOME:-}"');
     // A bare ${HOME} expansion would abort exactly when a failure needs showing.
     expect(script).not.toMatch(/s\|\$\{HOME\}\|/);
@@ -383,11 +491,11 @@ describe("lifecycle defects the takeover had to fix", () => {
   test("PLANTED: trap variables are initialised before the trap is armed", () => {
     // The EXIT trap reads SERVER_PGID and is armed before start_worker runs, so
     // an early exit under `set -u` would abort cleanup with "unbound variable".
-    const armed = script.indexOf("trap stop_worker EXIT");
+    const armed = script.indexOf("trap on_exit EXIT");
     expect(armed).toBeGreaterThan(0);
     expect(script.indexOf('SERVER_PGID=""')).toBeGreaterThan(0);
     expect(script.indexOf('SERVER_PGID=""')).toBeLessThan(armed);
-    expect(script.indexOf('SERVER_PID=""')).toBeLessThan(armed);
+    expect(script.indexOf('SERVER_SUPERVISOR_PID=""')).toBeLessThan(armed);
   });
 
   test("PLANTED: the controller's own process group can never be signalled", () => {
@@ -402,11 +510,13 @@ describe("lifecycle defects the takeover had to fix", () => {
     expect(stopGroup.indexOf("CONTROLLER_PGID")).toBeLessThan(stopGroup.indexOf("kill -TERM"));
   });
 
-  test("PLANTED: an ownership-refused cleanup makes the full run fail", () => {
+  test("PLANTED: an identity-refused cleanup makes the full run fail", () => {
     expect(script).toContain("local cleanup_status=0");
-    expect(script).toContain('stop_group "${SERVER_PGID}" || cleanup_status=$?');
+    expect(script).toContain('stop_group "${SERVER_PGID}" "${SERVER_SUPERVISOR_PID}"');
     expect(script).toContain('fail_record "worker_group_cleanup_proved"');
-    expect(script).toMatch(/if ! stop_worker; then\n\s+fail_record "worker_group_cleanup_proved"/);
+    const terminalCleanup = script.slice(script.lastIndexOf("if cleanup_and_verify; then"));
+    expect(terminalCleanup).toContain('fail_record "worker_group_cleanup_proved"');
+    expect(terminalCleanup).toContain("exit 1");
   });
 
   test("PLANTED: an occupied pinned port is refused before the Worker starts", () => {
@@ -418,10 +528,14 @@ describe("lifecycle defects the takeover had to fix", () => {
 
   test("PLANTED: the checker deadline escalates TERM then KILL", () => {
     const block = script.slice(script.indexOf("run_checker()"), script.indexOf("run_checker\n"));
-    expect(block).toContain('kill -TERM "${checker_pid}"');
-    expect(block).toContain('kill -KILL "${checker_pid}"');
-    // Both waits are counted loops, so a checker ignoring TERM cannot hang it.
-    expect(block).toMatch(/for _grace in \{1\.\.\d+\}; do/);
+    const cleanup = script.slice(
+      script.indexOf("stop_exact_direct_child()"),
+      script.indexOf("clear_restart_checker_identity()"),
+    );
+    expect(block).toContain("if ! stop_checker; then");
+    expect(cleanup).toContain('kill -TERM "${pid}"');
+    expect(cleanup).toContain('kill -KILL "${pid}"');
+    expect(cleanup).toContain("TEST_DIRECT_CHILD_CLEANUP_SECONDS");
   });
 
   test("PLANTED: curl failure evidence is retained, not discarded", () => {
@@ -499,22 +613,24 @@ describe("the checker sends only to a validated loopback origin", () => {
   });
 });
 
-describe("the group killer proves ownership before it signals", () => {
-  const script = read(SCRIPT);
+describe("the group killer pins an exact supervisor before it signals", () => {
+  // Lifecycle ownership is an executable property. Keep these checks on
+  // comment-stripped source so a narrative mention of an owner or stop path
+  // cannot satisfy one of the five signal-window guarantees.
+  const script = code(SCRIPT);
 
   test("PLANTED: a stale or recycled group is refused, not blindly killed", () => {
-    expect(script).toContain("group_is_ours()");
+    expect(script).toContain("supervisor_identity_is_exact()");
     expect(script).toContain("never_signals_a_recycled_group");
-    // Ownership is proven by finding a member that references THIS run's
-    // private state directory, not by the pgid number alone.
-    expect(script).toMatch(/grep -qF -- "\$\{STATE_DIR\}"/);
+    expect(script).toContain("s6-pinned-supervisor:");
+    expect(script).toContain("SUPERVISOR_STARTED_AT");
   });
 
-  test("PLANTED: ownership is proven before TERM and again before KILL", () => {
+  test("PLANTED: the exact leader is proven before TERM and again before KILL", () => {
     const block = script.slice(script.indexOf("stop_group() {"), script.indexOf("stop_worker() {"));
-    const firstProof = block.indexOf("group_is_ours");
+    const firstProof = block.indexOf("supervisor_identity_is_exact");
     const term = block.indexOf('kill -TERM "-${pgid}"');
-    const secondProof = block.indexOf("group_is_ours", term);
+    const secondProof = block.indexOf("supervisor_identity_is_exact", term);
     const kill = block.indexOf('kill -KILL "-${pgid}"');
     expect(firstProof).toBeGreaterThan(-1);
     expect(firstProof).toBeLessThan(term);
@@ -523,11 +639,171 @@ describe("the group killer proves ownership before it signals", () => {
     expect(secondProof).toBeLessThan(kill);
   });
 
-  test("an already-empty group is a no-op, never a signal", () => {
+  test("PLANTED: an already-empty group is a no-op only after the group probe succeeds", () => {
     const block = script.slice(script.indexOf("stop_group() {"), script.indexOf("stop_worker() {"));
-    const emptyCheck = block.indexOf('if [[ -z "$(group_members "${pgid}")" ]]; then');
-    expect(emptyCheck).toBeGreaterThan(-1);
-    expect(emptyCheck).toBeLessThan(block.indexOf('kill -TERM "-${pgid}"'));
+    expect(block).toContain('members="$(group_members "${pgid}")"');
+    expect(block).toContain("group_members_status=$?");
+    expect(block).toContain('fail_record "group_inspection_available"');
+    expect(block).not.toContain('[[ -z "$(group_members "${pgid}")" ]]');
+    expect(block.indexOf("group_members_status=$?")).toBeLessThan(
+      block.indexOf('kill -TERM "-${pgid}"'),
+    );
+  });
+
+  test("PLANTED: a failed cleanup preserves worker identity for the EXIT retry", () => {
+    const block = script.slice(script.indexOf("stop_worker() {"), script.indexOf("on_exit() {"));
+    expect(block).toContain('stop_group "${SERVER_PGID}" "${SERVER_SUPERVISOR_PID}"');
+    expect(block).toMatch(/if \(\( cleanup_status != 0 \)\); then\n\s+return/);
+    const failedReturn = block.indexOf("if (( cleanup_status != 0 )); then");
+    expect(failedReturn).toBeGreaterThan(-1);
+    expect(block.indexOf('SERVER_PGID=""')).toBeGreaterThan(failedReturn);
+  });
+
+  test("PLANTED: every nonempty process row parses and the runner is present", () => {
+    const block = script.slice(
+      script.indexOf("assert_no_survivors() {"),
+      script.indexOf("# ── the checks"),
+    );
+    expect(block).toContain("process_inspection_parsable");
+    expect(block).toContain("runner pid $$");
+    expect(block).toContain('awk -v runner="$$"');
+    expect(block).not.toContain('if [[ "${rows}" == "0" ]]');
+  });
+
+  test("PLANTED: a live kernel group cannot disappear from a partial ps table", () => {
+    const block = script.slice(
+      script.indexOf("group_members() {"),
+      script.indexOf("stop_group() {"),
+    );
+    expect(block).toContain('kill -0 "-${pgid}"');
+    expect(block).toContain("group_liveness_status=$?");
+    expect(block).toContain("return 2");
+  });
+
+  test("PLANTED: a successful but blank direct ps lookup fails closed", () => {
+    const members = script.slice(
+      script.indexOf("group_members() {"),
+      script.indexOf("stop_group() {"),
+    );
+    expect(members).toContain("if (( leader_status == 0 )); then");
+    expect(members).toContain('[[ -n "${leader}" ]] || return 2');
+    expect(script).toContain("blank_direct_group_probe");
+    expect(script).toContain("group_members_rejects_blank_direct_ps");
+  });
+
+  test("PLANTED: a start failure reaches a defined survivor helper through EXIT", () => {
+    const helper = script.indexOf("assert_no_survivors() {");
+    const armed = script.indexOf("trap on_exit EXIT");
+    const start = script.indexOf("if ! start_worker; then");
+    expect(helper).toBeGreaterThan(-1);
+    expect(armed).toBeGreaterThan(helper);
+    expect(start).toBeGreaterThan(armed);
+  });
+
+  test("PLANTED: a pre-exec launch failure reaps its exact direct child before start returns", () => {
+    const launcher = script.slice(
+      script.indexOf("reap_provisional_supervisor() {"),
+      script.indexOf("resume_pinned_supervisor()"),
+    );
+    const start = script.slice(
+      script.indexOf("start_worker() {"),
+      script.indexOf("assert_no_survivors() {"),
+    );
+    expect(launcher).toContain('kill -KILL "${pid}"');
+    expect(launcher).toContain('wait_for_killed_direct_child_reap "${pid}"');
+    expect(script).toContain('wait -f "${pid}"');
+    expect(launcher).toContain("supervisor_direct_child_is_exact");
+    expect(start.indexOf("if (( launch_status != 0 )); then")).toBeLessThan(
+      start.indexOf("adopt_provisional_as_worker"),
+    );
+    expect(script).toContain('run_preexec_fault "not-group-leader"');
+    expect(script).toContain('run_preexec_fault "identity-unavailable"');
+  });
+
+  test("PLANTED: self-test cleanup uses the production stop path and blocks unavailable lsof", () => {
+    const busy = script.slice(
+      script.indexOf("busy_run_id="),
+      script.indexOf("foreign_readiness_is_rejected"),
+    );
+    expect(busy).toContain("busy_group_status=$?");
+    expect(busy).not.toContain('group_members "${busy_pgid}" | wc -l');
+
+    const sigterm = script.slice(
+      script.indexOf('sigterm_pgid="${SERVER_PGID}"'),
+      script.indexOf(
+        "if ! cleanup_and_verify; then",
+        script.indexOf('sigterm_pgid="${SERVER_PGID}"'),
+      ),
+    );
+    expect(sigterm).toContain("if ! stop_worker; then");
+    expect(sigterm).toContain('assert_no_survivors "${sigterm_pgid}"');
+    expect(script).toContain("listener_bind_proves_port_released");
+    expect(script).toContain("LIFECYCLE_LSOF_UNAVAILABLE");
+    expect(script).toContain('"status":"blocked"');
+    expect(sigterm).not.toContain('lsof -ti tcp:"${S6_PORT}" 2>/dev/null | wc -l');
+  });
+
+  test("PLANTED: wait -f capability detection is localized to the C synopsis", () => {
+    const helper = script.slice(
+      script.indexOf("wait_supports_full_completion()"),
+      script.indexOf("wait_for_killed_direct_child_reap()"),
+    );
+    expect(helper).toContain("LC_ALL=C help wait");
+    expect(helper).toContain("LC_ALL=C grep");
+    expect(helper).not.toContain("BASH_VERSINFO");
+  });
+
+  test("PLANTED: the EXIT finalizer masks repeated signals and covers every ownership window", () => {
+    const finalizer = script.slice(
+      script.indexOf("cleanup_with_retry() {"),
+      script.indexOf("KEY_MATERIAL="),
+    );
+    const onExit = script.slice(script.indexOf("on_exit() {"), script.indexOf("KEY_MATERIAL="));
+    expect(finalizer).toContain("for attempt in 1 2");
+    expect(finalizer).toContain("finalizer_retried_transient_inspection");
+    expect(onExit).toContain("trap '' INT TERM HUP");
+    expect(onExit).toContain("cleanup_with_retry");
+    expect(script).toContain(
+      "for signal_window in provisional-supervisor ordinary-checker restart-checker worker busy-contender",
+    );
+    expect(script).toContain("S6_TEST_REPEAT_SIGNAL_DURING_CLEANUP");
+    expect(script).toContain('kill -HUP "$$"');
+    expect(script).toContain("repeated_signal_finalizer");
+    expect(script).toContain("run_nested_harness");
+    expect(script).not.toMatch(/\$\([^\n]*bash "\$\{BASH_SOURCE\[0\]\}"/);
+  });
+
+  test("PLANTED: nested self-test settings are validated before dynamic export", () => {
+    const nestedHarness = script.slice(
+      script.indexOf("run_nested_harness()"),
+      script.indexOf("NESTED_HARNESS_PID=$!", script.indexOf("run_nested_harness()")),
+    );
+    expect(nestedHarness).toContain('[[ "${assignment}" =~ ^S6_TEST_[A-Z0-9_]+= ]]');
+    expect(nestedHarness).toContain('name="${assignment%%=*}"');
+    expect(nestedHarness).toContain('value="${assignment#*=}"');
+    expect(nestedHarness).toContain('export "${name}=${value}"');
+    expect(nestedHarness).not.toContain('export "${assignment}"');
+  });
+
+  test("PLANTED: every S6_TEST seam is refused unless the self-test is explicit", async () => {
+    const child = Bun.spawn({
+      cmd: ["bash", SCRIPT],
+      cwd: root,
+      env: {
+        PATH: process.env.PATH ?? "/usr/bin:/bin",
+        S6_TEST_WEDGE_AFTER_RESTART: "1",
+      },
+      stdout: "pipe",
+      stderr: "pipe",
+    });
+    const [stdout, stderr, exitCode] = await Promise.all([
+      new Response(child.stdout).text(),
+      new Response(child.stderr).text(),
+      child.exited,
+    ]);
+    expect(exitCode).toBe(1);
+    expect(`${stdout}\n${stderr}`).toContain("test_seams_require_explicit_self_test");
+    expect(`${stdout}\n${stderr}`).toContain('"status":"fail"');
   });
 });
 
@@ -543,9 +819,13 @@ describe("harness signing-key configuration fails closed", () => {
    */
   const SECRET_D = "S3CRET_PRIVATE_SCALAR_DO_NOT_ECHO_0f1e2d";
 
-  const runChecker = async (jwk: string): Promise<{ code: number; output: string }> => {
+  const runChecker = async (
+    jwk: string,
+    extraEnv: Record<string, string | undefined> = {},
+    args: string[] = [],
+  ): Promise<{ code: number; output: string }> => {
     const child = Bun.spawn({
-      cmd: ["bun", "src/auth/local-check.ts"],
+      cmd: ["bun", "src/auth/local-check.ts", ...args],
       cwd: resolve(root, "apps/wire"),
       env: {
         PATH: process.env.PATH ?? "/usr/bin:/bin",
@@ -555,6 +835,7 @@ describe("harness signing-key configuration fails closed", () => {
         S6_NOW: "1786000000",
         S6_KID: "s6-local",
         S6_PRIVATE_KEY_JWK: jwk,
+        ...extraEnv,
       },
       stdout: "pipe",
       stderr: "pipe",
@@ -604,6 +885,30 @@ describe("harness signing-key configuration fails closed", () => {
     const { code, output } = await runChecker("");
     expect(code).not.toBe(0);
     expect(output).toContain("S6_HARNESS_KEY_MISSING");
+  }, 30_000);
+
+  test("PLANTED: checker test seams are refused before any harness work without self-test", async () => {
+    const supplied = `{"kty":"OKP","d":"${SECRET_D}"}`;
+    const { code, output } = await runChecker(supplied, { S6_TEST_WEDGE_AFTER_RESTART: "1" });
+    expect(code).not.toBe(0);
+    expect(output).toContain("test_seams_require_explicit_self_test");
+    expect(output).not.toContain(SECRET_D);
+  }, 30_000);
+
+  test("PLANTED: restart mode refuses a missing or mismatched argv identity marker", async () => {
+    const token = crypto.randomUUID().replaceAll("-", "");
+    const missing = await runChecker("", { S6_PHASE: "restart", S6_RESTART_CHECKER_TOKEN: token });
+    expect(missing.code).not.toBe(0);
+    expect(missing.output).toContain("restart_checker_identity_configured");
+
+    const validMarker = await runChecker(
+      "",
+      { S6_PHASE: "restart", S6_RESTART_CHECKER_TOKEN: token },
+      [`s6-restart-checker:${token}`],
+    );
+    expect(validMarker.code).not.toBe(0);
+    expect(validMarker.output).not.toContain("restart_checker_identity_configured");
+    expect(validMarker.output).toContain("S6_HARNESS_KEY_MISSING");
   }, 30_000);
 
   test("the loader accepts a real Ed25519 JWK", async () => {
@@ -807,16 +1112,23 @@ describe("the forEach callback's parent argument is the guarded proxy", () => {
    * These are planted: each one failed against the pre-fix proxy, returning the
    * cookie value verbatim.
    */
-  const parentReads: ReadonlyArray<[string, (parent: Headers) => void]> = [
-    ["get", (parent) => void parent.get("cookie")],
-    ["has", (parent) => void parent.has("cookie")],
-    ["a nested forEach", (parent) => parent.forEach(() => {})],
+  const parentReads: ReadonlyArray<[string, (parent: Headers) => unknown]> = [
+    ["get", (parent) => parent.get("cookie")],
+    ["has", (parent) => parent.has("cookie")],
+    [
+      "a nested forEach",
+      (parent) => {
+        const yielded: string[] = [];
+        parent.forEach((value, name) => {
+          yielded.push(`${name}=${value}`);
+        });
+        return yielded;
+      },
+    ],
     [
       "the iterator",
       (parent) => {
-        for (const _entry of parent as unknown as Iterable<[string, string]>) {
-          // draining is the read; the trap must fire before the first yield
-        }
+        return [...(parent as unknown as Iterable<[string, string]>)];
       },
     ],
   ];
@@ -827,16 +1139,19 @@ describe("the forEach callback's parent argument is the guarded proxy", () => {
       const guarded = cookieTrappedRequest(withCookie(), () => {
         reads += 1;
       });
-      const leaked = "";
+      let leaked: unknown;
       expect(() => {
         guarded.headers.forEach((_value, _name, parent) => {
           // Two realms name `Headers`: this package's ambient Workers types and
           // undici's, which Bun's `fetch` types resolve to. The two-step cast is
           // the repository's existing spelling for that mismatch.
-          read(parent as unknown as Headers);
+          leaked = read(parent as unknown as Headers);
         });
       }).toThrow("S6_COOKIE_READ_ON_AGENT_HOST");
-      expect(leaked).toBe("");
+      // The old false-green test assigned a constant and never captured the
+      // callback result. A raw callback parent returns the canary here before
+      // the outer iterator reaches Cookie and throws.
+      expect(leaked).toBeUndefined();
       expect(reads).toBeGreaterThan(0);
     });
 
@@ -846,11 +1161,13 @@ describe("the forEach callback's parent argument is the guarded proxy", () => {
         reads += 1;
       });
       const cloned = guarded.clone();
+      let leaked: unknown;
       expect(() => {
         cloned.headers.forEach((_value, _name, parent) => {
-          read(parent as unknown as Headers);
+          leaked = read(parent as unknown as Headers);
         });
       }).toThrow("S6_COOKIE_READ_ON_AGENT_HOST");
+      expect(leaked).toBeUndefined();
       expect(reads).toBeGreaterThan(0);
     });
   }
@@ -969,157 +1286,364 @@ describe("localFetch never carries a signed envelope to a second origin", () => 
   });
 });
 
-describe("the restart handoff cannot be turned into an arbitrary write", () => {
-  const scratch = (): string => mkdtempSync(join(tmpdir(), "s6-handoff-"));
+describe("restart persistence retains credentials in one stopped checker", () => {
+  const checker = code(CHECKER);
+  const script = code(SCRIPT);
 
-  /**
-   * The first spelling of this took a full path from the environment and handed
-   * it to `Bun.write`, which truncates whatever is already there. That made the
-   * checker an arbitrary-file overwrite driven by an env var: point
-   * `S6_PERSIST_ENVELOPE_PATH` at anything the harness user can write and the
-   * run destroys it, silently, on the way to reporting a pass.
-   *
-   * The interface is now a *directory* and one filename fixed in source, and
-   * every rejection below is a fixed string carrying no candidate path.
-   */
-  test("a missing, relative or non-absolute state dir is refused", () => {
-    for (const value of [undefined, "", "relative/dir", "./x", "~/tmp"]) {
-      const resolved = resolveHandoffPath(value);
-      expect(resolved.ok).toBe(false);
+  test("PLANTED: no credential handoff path or filesystem primitive remains", () => {
+    for (const forbidden of [
+      "S6_STATE_DIR",
+      "HANDOFF_",
+      "persist-mint",
+      "persist-replay",
+      "readFileSync",
+      "writeFileSync",
+      "openSync",
+    ]) {
+      expect(checker).not.toContain(forbidden);
+    }
+    expect(script).toContain("export S6_PUBLIC_KEY_HEX S6_PRIVATE_KEY_JWK S6_KID S6_NOW");
+    expect(script).not.toContain("env S6_PRIVATE_KEY_JWK=");
+  });
+
+  test("PLANTED: one checker stops with the spent envelope then proves both replay and fresh acceptance", () => {
+    const accepted = checker.indexOf("an_in_memory_envelope_is_accepted_before_restart");
+    const stopped = checker.indexOf("restart_checker_stopped_with_spent_envelope");
+    const stop = checker.indexOf('process.kill(process.pid, "SIGSTOP")');
+    const replay = checker.indexOf("the_same_in_memory_envelope_is_refused_after_a_worker_restart");
+    const fresh = checker.indexOf("a_new_valid_envelope_is_accepted_after_a_worker_restart");
+    expect(accepted).toBeGreaterThan(-1);
+    expect(stopped).toBeGreaterThan(accepted);
+    expect(stop).toBeGreaterThan(stopped);
+    expect(replay).toBeGreaterThan(stop);
+    expect(fresh).toBeGreaterThan(replay);
+    expect(checker).toContain("the_post_restart_envelope_is_distinct_from_the_replayed_envelope");
+  });
+
+  test("PLANTED: restart proof does not clone a second verifier", () => {
+    expect(checker).not.toContain("VerificationKeyring");
+    expect(checker).not.toContain("parseEnvelope");
+    expect(checker).not.toContain("verifyRestartHandoff");
+  });
+
+  test("PLANTED: the phase record is emitted before the uncatchable stop", () => {
+    expect(checker.indexOf("restart_checker_stopped_with_spent_envelope")).toBeLessThan(
+      checker.indexOf('process.kill(process.pid, "SIGSTOP")'),
+    );
+  });
+
+  test("PLANTED: the phase record carries no dynamic credential field", () => {
+    const block = checker.slice(
+      checker.indexOf("restart_checker_stopped_with_spent_envelope"),
+      checker.indexOf('process.kill(process.pid, "SIGSTOP")'),
+    );
+    for (const forbidden of ["signature", "nonce", "privateKey", "oldBody"]) {
+      expect(block).not.toContain(forbidden);
     }
   });
 
-  test("a state dir that does not exist is refused", () => {
-    const missing = join(tmpdir(), "s6-handoff-definitely-not-here-9f3a2b");
-    expect(existsSync(missing)).toBe(false);
-    expect(resolveHandoffPath(missing).ok).toBe(false);
+  test("PLANTED: the shell accepts a phase only with the exact safe shape", () => {
+    expect(script).toContain("const expectedKeys");
+    expect(script).toContain('record.assertion === "restart_checker_stopped_with_spent_envelope"');
+    expect(script).toContain(
+      'record.detail === "one accepted envelope remains only in this checker process memory"',
+    );
   });
 
-  test("a file, and a symlink standing in for the state dir, are both refused", () => {
-    const dir = scratch();
-    const asFile = join(dir, "not-a-dir");
-    writeFileSync(asFile, "");
-    expect(resolveHandoffPath(asFile).ok).toBe(false);
-
-    const target = join(dir, "real-target");
-    mkdirSync(target);
-    const link = join(dir, "linked");
-    symlinkSync(target, link);
-    // lstat sees the link itself, so this never reaches the directory it names.
-    expect(resolveHandoffPath(link).ok).toBe(false);
+  test("PLANTED: stopped-checker coordination observes a stopped process state", () => {
+    const block = script.slice(
+      script.indexOf("start_restart_checker()"),
+      script.indexOf("resume_restart_checker()"),
+    );
+    expect(block).toContain('ps -o stat= -p "${RESTART_CHECKER_PID}"');
+    expect(block).toContain('"${state}" == *T*');
+    expect(block).toContain("CHECK_DEADLINE_SECONDS");
   });
 
-  test("a state dir inside the checkout is refused", () => {
-    // The handoff is per-run scratch. Writing it into the repository is the
-    // artifact-root violation this rule exists to prevent.
-    const inside = resolveHandoffPath(resolve(root, "apps"));
-    expect(inside.ok).toBe(false);
-    if (!inside.ok) expect(inside.detail).toContain("outside the checkout");
-    expect(resolveHandoffPath(root).ok).toBe(false);
+  test("PLANTED: the restart checker is pinned by birth time and argv before direct signals", () => {
+    const checkerStart = script.slice(
+      script.indexOf("start_restart_checker()"),
+      script.indexOf("resume_restart_checker()"),
+    );
+    const checkerStop = script.slice(
+      script.indexOf("direct_child_identity_is_exact()"),
+      script.indexOf("cleanup_and_verify()"),
+    );
+    expect(checkerStart).toContain('S6_RESTART_CHECKER_TOKEN="${RESTART_CHECKER_TOKEN}"');
+    expect(checkerStart).toContain('"s6-restart-checker:${RESTART_CHECKER_TOKEN}"');
+    expect(checkerStop).toContain("ps -o lstart=");
+    expect(checkerStop).toContain("s6-restart-checker:");
+    expect(checkerStop).toContain(
+      'direct_child_identity_is_exact "${pid}" "${started_at}" "${marker}"',
+    );
+    expect(checkerStop).toContain("sent no signal");
   });
 
-  test("a real private state dir yields exactly one fixed filename", () => {
-    const dir = scratch();
-    const resolved = resolveHandoffPath(dir);
-    expect(resolved.ok).toBe(true);
-    if (resolved.ok) {
-      expect(resolved.path.endsWith(`/${HANDOFF_FILENAME}`)).toBe(true);
-      // The filename is fixed in source; no environment value contributes to it.
-      expect(HANDOFF_FILENAME).not.toContain("/");
-      expect(HANDOFF_FILENAME).not.toContain("..");
+  test("PLANTED: aborted coordination resumes then bounds checker cleanup", () => {
+    const block = script.slice(
+      script.indexOf("stop_exact_direct_child()"),
+      script.indexOf("clear_restart_checker_identity()"),
+    );
+    expect(block).toContain('kill -CONT "${pid}"');
+    expect(block).toContain('kill -TERM "${pid}"');
+    expect(block).toContain('kill -KILL "${pid}"');
+  });
+
+  test("PLANTED: the pinned supervisor stops before it executes Wrangler", () => {
+    const block = script.slice(
+      script.indexOf("launch_pinned_supervisor()"),
+      script.indexOf("resume_pinned_supervisor()"),
+    );
+    expect(block.indexOf('kill -STOP "$$"')).toBeLessThan(block.indexOf('"$@" &'));
+    expect(block.indexOf("set +m")).toBeLessThan(block.indexOf('"$@" &'));
+  });
+
+  test("PLANTED: the supervisor survives group TERM and has an explicit release", () => {
+    const block = script.slice(
+      script.indexOf("launch_pinned_supervisor()"),
+      script.indexOf("resume_pinned_supervisor()"),
+    );
+    expect(block).toContain('trap ":" TERM INT HUP');
+    expect(block).toContain('trap "exit 0" USR1');
+  });
+
+  test("PLANTED: supervisor identity binds pid, pgid, birth time, and marker", () => {
+    const block = script.slice(
+      script.indexOf("supervisor_identity_is_exact()"),
+      script.indexOf("launch_pinned_supervisor()"),
+    );
+    expect(block).toContain("ps -o lstart=");
+    expect(block).toContain("ps -ww -o command=");
+    expect(block).toContain("s6-pinned-supervisor:");
+  });
+
+  test("PLANTED: the exact pinned supervisor is required before every group signal", () => {
+    const block = script.slice(script.indexOf("stop_group() {"), script.indexOf("stop_worker() {"));
+    const term = block.indexOf('kill -TERM "-${pgid}"');
+    const kill = block.indexOf('kill -KILL "-${pgid}"');
+    expect(block.lastIndexOf("supervisor_identity_is_exact", term)).toBeLessThan(term);
+    expect(block.lastIndexOf("supervisor_identity_is_exact", kill)).toBeLessThan(kill);
+  });
+
+  test("PLANTED: empty lsof cannot green an occupied port", () => {
+    expect(script).toContain("lsof() { return 1; }; run_inspection");
+    expect(script).toContain("port_accepts_bind()");
+    expect(script).toContain("listener_bind_proves_port_released");
+  });
+
+  test("PLANTED: state-directory FD inspection fails closed and narrows its claim", () => {
+    expect(script).toContain('lsof -t +D "${STATE_DIR}"');
+    expect(script).toContain("LIFECYCLE_LSOF_UNAVAILABLE");
+    expect(script).toContain("arbitrary daemon containment is not claimed");
+  });
+
+  test("PLANTED: the SIGTERM self-test uses production stop_group through stop_worker", () => {
+    const block = script.slice(
+      script.indexOf('sigterm_pgid="${SERVER_PGID}"'),
+      script.indexOf(
+        "if ! cleanup_and_verify; then",
+        script.indexOf('sigterm_pgid="${SERVER_PGID}"'),
+      ),
+    );
+    expect(block).toContain("if ! stop_worker; then");
+    expect(block).not.toContain('kill -TERM "-${sigterm_pgid}"');
+  });
+
+  test("PLANTED: the shell observes the safe stop, restarts workerd, resumes, and bounds cleanup", () => {
+    expect(script).toContain("start_restart_checker()");
+    expect(script).toContain("restart_checker_phase_is_safe_and_recorded()");
+    expect(script).toContain('kill -CONT "${RESTART_CHECKER_PID}"');
+    expect(script).toContain("stop_restart_checker()");
+    expect(script).toContain("restart_checker_cleanup");
+    expect(script.indexOf("if ! start_restart_checker; then")).toBeLessThan(
+      script.indexOf("if ! stop_worker; then", script.indexOf("if ! start_restart_checker; then")),
+    );
+  });
+
+  test("PLANTED: exact marker and lstart are mandatory before every direct-PID signal", () => {
+    const cleanup = script.slice(
+      script.indexOf("stop_exact_direct_child()"),
+      script.indexOf("clear_restart_checker_identity()"),
+    );
+    for (const signal of ["CONT", "TERM", "KILL"]) {
+      const send = cleanup.indexOf(`kill -${signal} "\${pid}"`);
+      expect(send).toBeGreaterThan(-1);
+      expect(cleanup.lastIndexOf("direct_child_identity_is_exact", send)).toBeLessThan(send);
     }
+    expect(cleanup).not.toContain("unreaped direct-child PID");
+    expect(script).toContain("reused_direct_pid_is_never_signalled");
+    expect(script).toContain("persistent_identity_inspection_fails_closed");
   });
 
-  test("no rejection detail ever echoes the path it was given", () => {
-    const dir = scratch();
-    const secretish = join(dir, "S3CRET_PATH_DO_NOT_ECHO_4b2c");
-    writeFileSync(secretish, "");
-    const resolved = resolveHandoffPath(secretish);
-    expect(resolved.ok).toBe(false);
-    if (!resolved.ok) expect(resolved.detail).not.toContain("S3CRET_PATH_DO_NOT_ECHO_4b2c");
-  });
-
-  test("PLANTED: the real write refuses an existing file and never truncates it", () => {
-    const dir = scratch();
-    const target = join(dir, HANDOFF_FILENAME);
-    writeFileSync(target, "PRE_EXISTING_CONTENT_MUST_SURVIVE");
-
-    const result = writeHandoffExclusively(target, "REPLACEMENT");
-    expect(result.ok).toBe(false);
-    // Nothing was truncated: the original bytes are still there.
-    expect(readFileSync(target, "utf8")).toBe("PRE_EXISTING_CONTENT_MUST_SURVIVE");
-  });
-
-  test("PLANTED: the real write refuses a planted symlink and spares its target", () => {
-    const dir = scratch();
-    const victim = join(dir, "victim");
-    writeFileSync(victim, "VICTIM_MUST_SURVIVE");
-    symlinkSync(victim, join(dir, HANDOFF_FILENAME));
-
-    const result = writeHandoffExclusively(join(dir, HANDOFF_FILENAME), "REPLACEMENT");
-    expect(result.ok).toBe(false);
-    // O_EXCL does not follow the link, so the link's target is untouched.
-    expect(readFileSync(victim, "utf8")).toBe("VICTIM_MUST_SURVIVE");
-  });
-
-  test("the real write creates an owner-only regular file when the name is free", () => {
-    const dir = scratch();
-    const target = join(dir, HANDOFF_FILENAME);
-    expect(writeHandoffExclusively(target, '{"ok":true}').ok).toBe(true);
-    expect(readFileSync(target, "utf8")).toBe('{"ok":true}');
-    const entry = lstatSync(target);
-    expect(entry.isFile()).toBe(true);
-    // No group or other bits: this file holds a signed envelope.
-    expect(entry.mode & 0o077).toBe(0);
-    // …and a second attempt on the same name is refused, not silently redone.
-    expect(writeHandoffExclusively(target, "SECOND").ok).toBe(false);
-    expect(readFileSync(target, "utf8")).toBe('{"ok":true}');
-  });
-
-  test("a refused write never echoes the payload it was given", () => {
-    const dir = scratch();
-    const target = join(dir, HANDOFF_FILENAME);
-    writeFileSync(target, "x");
-    const result = writeHandoffExclusively(target, "SIGNED_PAYLOAD_MUST_NOT_ECHO_5d8b");
-    expect(result.ok).toBe(false);
-    if (!result.ok) expect(result.detail).not.toContain("SIGNED_PAYLOAD_MUST_NOT_ECHO_5d8b");
-  });
-
-  test("the handoff schema rejects anything but one envelope and its bytes", () => {
-    const good = JSON.stringify({
-      envelope: { claims: { nonce: "n" }, signature: "sig" },
-      body: "{}",
-    });
-    expect(parseHandoff(good).ok).toBe(true);
-
-    const bad = [
-      "not json at all",
-      JSON.stringify(null),
-      JSON.stringify([1, 2]),
-      JSON.stringify({ envelope: { claims: {}, signature: "s" } }),
-      // an extra member is how key material would arrive
-      JSON.stringify({ envelope: { claims: {}, signature: "s" }, body: "{}", d: "PRIVATE" }),
-      JSON.stringify({ envelope: { claims: {}, signature: "s", d: "PRIVATE" }, body: "{}" }),
-      JSON.stringify({ envelope: { claims: {}, signature: 7 }, body: "{}" }),
-      JSON.stringify({ envelope: { claims: "nope", signature: "s" }, body: "{}" }),
-      JSON.stringify({ envelope: { claims: {}, signature: "s" }, body: 5 }),
-    ];
-    for (const value of bad) {
-      expect(parseHandoff(value).ok).toBe(false);
+  test("PLANTED: the finalizer owns every child class before survivor inspection", () => {
+    const initialized = script.slice(0, script.indexOf("trap on_exit EXIT"));
+    for (const owner of [
+      "PROVISIONAL_SUPERVISOR_OWNED",
+      "CHECKER_OWNED",
+      "BUSY_SUPERVISOR_OWNED",
+      "RESTART_CHECKER_PID",
+      "SERVER_SUPERVISOR_PID",
+      "NESTED_HARNESS_PID",
+    ]) {
+      expect(initialized).toContain(`${owner}=`);
     }
+    const cleanup = script.slice(
+      script.indexOf("cleanup_and_verify()"),
+      script.indexOf("cleanup_with_retry()"),
+    );
+    for (const stop of [
+      "stop_nested_harness",
+      "stop_checker",
+      "stop_restart_checker",
+      "stop_busy_contender",
+      "stop_worker",
+      "reap_provisional_supervisor",
+    ]) {
+      expect(cleanup).toContain(`if ! ${stop}`);
+    }
+    expect(script).not.toMatch(
+      /stop_(?:nested_harness|worker|checker|restart_checker|busy_contender)[^\n]*\|\| true/,
+    );
   });
 
-  test("a schema rejection never quotes the handoff it read", () => {
-    const withSecret = JSON.stringify({
-      envelope: { claims: {}, signature: "SIGNATURE_MUST_NOT_BE_ECHOED_7a1f" },
-      body: "{}",
-      extra: 1,
-    });
-    const parsed = parseHandoff(withSecret);
-    expect(parsed.ok).toBe(false);
-    if (!parsed.ok) expect(parsed.detail).not.toContain("SIGNATURE_MUST_NOT_BE_ECHOED_7a1f");
-    const broken = parseHandoff('{"signature":"SIG_IN_BROKEN_JSON_9c2e"');
-    expect(broken.ok).toBe(false);
-    if (!broken.ok) expect(broken.detail).not.toContain("SIG_IN_BROKEN_JSON_9c2e");
+  test("PLANTED: post-resume inspection failure consumes one immutable deadline", () => {
+    const resume = script.slice(
+      script.indexOf("resume_restart_checker()"),
+      script.indexOf("run_checker\n"),
+    );
+    const deadline = resume.indexOf(
+      'deadline="$(deadline_after_work "${CHECK_DEADLINE_SECONDS}")"',
+    );
+    const continued = resume.indexOf('kill -CONT "${RESTART_CHECKER_PID}"');
+    expect(deadline).toBeGreaterThan(-1);
+    expect(deadline).toBeLessThan(continued);
+    expect(
+      resume.match(/deadline="\$\(deadline_after_work "\$\{CHECK_DEADLINE_SECONDS\}"\)"/g)?.length,
+    ).toBe(1);
+    expect(resume).toContain("TEST_RESTART_INSPECTION_FAILURES_REMAINING");
+    expect(resume).toContain("post_resume_inspection_failure_is_bounded");
+    expect(resume).toContain("if direct_child_is_gone");
+    expect(script).toContain("wedged_restart_checker_is_bounded");
   });
+
+  test("the self-test has a conventional machine-readable success contract", () => {
+    expect(script).toContain("self_test_complete");
+    expect(script).toContain("mode");
+    expect(script).toContain("self-test");
+    expect(script).toContain("exit_code");
+    const selfTestEnd = script.slice(script.indexOf("self_test_complete"));
+    expect(selfTestEnd).toMatch(/exit 0\nfi/);
+    expect(script).toContain("expected_negative");
+    // Normal mode still terminates at the explicit deployed blocker.
+    expect(script).toContain('exit "${BLOCKED_EXIT}"');
+  });
+
+  test("the local workerd/D1 self-test is an integration preflight, not a security-suite cost", () => {
+    const suites = read(SUITES);
+    const security = suites.slice(suites.indexOf("security:"), suites.indexOf("integration:"));
+    const integration = suites.slice(
+      suites.indexOf("integration:"),
+      suites.indexOf("performance:"),
+    );
+    expect(security).toContain('dirs: ["test/security"]');
+    expect(security).not.toContain("test/auth");
+    expect(integration).toContain('status: "pending"');
+    expect(integration).toContain("preflight:");
+    expect(integration).toContain('dirs: ["test/auth"]');
+    expect(integration).toContain('file: "test/integration/s2-krater-real-bindings.test.ts"');
+    expect(integration).toContain('code: "S2_REAL_BINDING_PROOF_BLOCKED"');
+    expect(integration).toContain("2x660-second lifecycle lane is not run");
+    // The downstream verdict is blocked, but the diagnostic must not erase
+    // the Bun preflight that really ran before it.
+    expect(suites).toContain('tool: suite.preflight === undefined ? "none" : "bun test"');
+    expect(suites).toContain("preflight_covers: preflightCovers");
+    expect(suites).toContain("preflight_blocked_code: suite.preflight?.expectedBlocked?.code");
+    expect(suites).toContain("records.length !== 1");
+    expect(suites).toContain("JSON.parse(candidate) as Record<string, unknown>");
+    expect(suites).toContain('record.status !== "blocked"');
+    expect(suites).toContain('record.suite !== "s2-krater-real-bindings"');
+  });
+
+  test(
+    "the local shell self-test is executed as a bounded automatic gate",
+    async () => {
+      expect(
+        SHELL_SELF_TEST_INNER_BUDGET_MS +
+          SHELL_SELF_TEST_TERM_GRACE_MS +
+          SHELL_SELF_TEST_KILL_GRACE_MS +
+          SHELL_SELF_TEST_STREAM_DRAIN_MS,
+      ).toBeLessThan(SHELL_SELF_TEST_TIMEOUT_MS);
+      const shellSource = code(SCRIPT);
+      expect(shellSource).toContain("readonly SCRIPT_TOTAL_DEADLINE_SECONDS=210");
+      expect(shellSource).toContain("readonly SCRIPT_CLEANUP_RESERVE_SECONDS=30");
+      expect(210_000).toBeLessThan(SHELL_SELF_TEST_INNER_BUDGET_MS);
+      const selfTest = startShellSelfTest();
+      try {
+        const { exitCode, stdout, stderr } = await selfTest.result();
+        expect(exitCode).toBe(0);
+        // A fail record is invalid on either stream. The self-test normally
+        // emits records on stdout, but error paths may emit diagnostics on stderr.
+        expect(stdout).not.toMatch(FAIL_STATUS_RECORD);
+        expect(stderr).not.toMatch(FAIL_STATUS_RECORD);
+        const records = stdout
+          .split("\n")
+          .filter((line) => line.length > 0)
+          .map((line) => JSON.parse(line) as Record<string, unknown>);
+        expect(
+          records.some(
+            (record) =>
+              record.assertion ===
+                "group_members_parser_rejects_malformed_truncated_and_unreadable_tables" &&
+              record.status === "expected_negative",
+          ),
+        ).toBe(true);
+        for (const assertion of [
+          "process_table_parser_rejects_malformed_row",
+          "process_table_parser_rejects_truncated_row",
+          "group_members_parser_rejects_malformed_table",
+          "group_members_parser_rejects_truncated_table",
+        ]) {
+          expect(
+            records.some(
+              (record) => record.assertion === assertion && record.status === "expected_negative",
+            ),
+          ).toBe(true);
+        }
+        for (const window of [
+          "provisional_supervisor",
+          "ordinary_checker",
+          "restart_checker",
+          "worker",
+          "busy_contender",
+        ]) {
+          expect(
+            records.some(
+              (record) =>
+                record.assertion === `finalizer_owns_${window}` &&
+                record.status === "expected_negative",
+            ),
+          ).toBe(true);
+        }
+        expect(
+          records.some(
+            (record) =>
+              record.assertion === "lifecycle_lsof_unavailable_is_blocked" &&
+              record.status === "pass",
+          ),
+        ).toBe(true);
+        expect(
+          records.some(
+            (record) =>
+              record.assertion === "self_test_complete" &&
+              record.status === "pass" &&
+              record.mode === "self-test" &&
+              record.exit_code === 0,
+          ),
+        ).toBe(true);
+      } finally {
+        await selfTest.cleanup();
+      }
+    },
+    SHELL_SELF_TEST_TIMEOUT_MS,
+  );
 });
