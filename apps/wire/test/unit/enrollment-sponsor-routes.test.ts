@@ -833,7 +833,7 @@ describe("sponsor enrollment routes", () => {
       expect(JSON.parse(text)).toMatchObject({
         code: "ENROLLMENT_UNAVAILABLE",
         fix_hint:
-          "Retry later. If this was a write, reuse the same Idempotency-Key; do not create a duplicate request.",
+          "Retry later. For a keyed write, reuse the original Idempotency-Key. If the write had no key, do not retry it automatically because its outcome is unknown.",
       });
       for (const forbidden of scenario.forbidden) {
         expect(text).not.toContain(forbidden);
@@ -917,7 +917,10 @@ describe("sponsor enrollment routes", () => {
     const start = await h.app.fetch(
       new Request(`${origin}/v1/device-code`, {
         method: "POST",
-        headers: { "content-type": "application/json" },
+        headers: {
+          "content-type": "application/json",
+          "cf-connecting-ip": "198.51.100.40",
+        },
         body: JSON.stringify({
           name: "device-drifter",
           model: "kimi-code/k3",

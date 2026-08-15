@@ -1,9 +1,10 @@
 import { describe, expect, test } from "bun:test";
-import { ContractProblemSchema } from "@asimposium/contracts";
+import { ContractProblemSchema, OpaqueProblemSchema } from "@asimposium/contracts";
 
 import { createEnrollmentRouter } from "../../src/enrollment/router.ts";
 import {
   AesGcmEnrollmentReplayProtector,
+  DEVICE_START_RATE_LIMIT_ATTEMPTS,
   EnrollmentError,
   EnrollmentService,
   FELLOW_TOKEN_TTL_MS,
@@ -64,7 +65,10 @@ describe("S-1 mountable enrollment router", () => {
     for (const body of ['{"name":', JSON.stringify({ name: "missing-runtime" })]) {
       const response = await request(router, "/v1/device-code", {
         method: "POST",
-        headers: { "content-type": "application/json" },
+        headers: {
+          "content-type": "application/json",
+          "cf-connecting-ip": "198.51.100.30",
+        },
         body,
       });
       expect(response.status).toBe(422);
@@ -92,6 +96,115 @@ describe("S-1 mountable enrollment router", () => {
       example: { method: "POST", path: "/v1/device-code" },
     });
     expect(ContractProblemSchema.safeParse(queryProblem).success).toBe(true);
+  });
+
+  test("device start trusts only a canonical Cloudflare source address", async () => {
+    const { router } = routerFixture();
+    const body = JSON.stringify({
+      name: "source-bound-device",
+      model: "example-lab/orchid-1",
+      harness: "codex",
+      requested_scopes: ["review"],
+    });
+    const headerCases: Array<Record<string, string>> = [
+      { "content-type": "application/json" },
+      {
+        "content-type": "application/json",
+        "x-forwarded-for": "198.51.100.31",
+      },
+      {
+        "content-type": "application/json",
+        "cf-connecting-ip": "198.51.100.31, 203.0.113.1",
+      },
+    ];
+    for (const headers of headerCases) {
+      const response = await request(router, "/v1/device-code", {
+        method: "POST",
+        headers,
+        body,
+      });
+      expect(response.status).toBe(503);
+      expect(await response.json()).toMatchObject({ code: "ENROLLMENT_UNAVAILABLE" });
+    }
+
+    const accepted = await request(router, "/v1/device-code", {
+      method: "POST",
+      headers: {
+        "content-type": "application/json",
+        "cf-connecting-ip": "2001:0DB8:0:0:0:0:0:31",
+      },
+      body,
+    });
+    expect(accepted.status).toBe(201);
+  });
+
+  test("device start replay is exact and the source throttle stays opaque", async () => {
+    const { router } = routerFixture();
+    const source = "198.51.100.32";
+    const body = JSON.stringify({
+      name: "idempotent-device",
+      model: "example-lab/orchid-1",
+      harness: "codex",
+      requested_scopes: ["review"],
+    });
+    const start = (requestBody: string, key?: string) =>
+      request(router, "/v1/device-code", {
+        method: "POST",
+        headers: {
+          "content-type": "application/json",
+          "cf-connecting-ip": source,
+          ...(key === undefined ? {} : { "idempotency-key": key }),
+        },
+        body: requestBody,
+      });
+    const key = "device-router-replay-0001";
+    const first = await start(body, key);
+    expect(first.status).toBe(201);
+    const original = await first.json();
+    const replay = await start(body, key);
+    expect(replay.status).toBe(201);
+    expect(await replay.json()).toEqual(original);
+
+    const changed = await start(
+      JSON.stringify({
+        name: "changed-idempotent-device",
+        model: "example-lab/orchid-1",
+        harness: "codex",
+        requested_scopes: ["review"],
+      }),
+      key,
+    );
+    expect(changed.status).toBe(409);
+    expect(await changed.json()).toMatchObject({ code: "IDEMPOTENCY_CONFLICT", rule: "A5" });
+
+    for (let index = 1; index < DEVICE_START_RATE_LIMIT_ATTEMPTS; index += 1) {
+      const response = await start(
+        JSON.stringify({
+          name: `device-source-${index}`,
+          model: "example-lab/orchid-1",
+          harness: "codex",
+          requested_scopes: ["review"],
+        }),
+      );
+      expect(response.status).toBe(201);
+    }
+    const limited = await start(
+      JSON.stringify({
+        name: "device-source-refused",
+        model: "example-lab/orchid-1",
+        harness: "codex",
+        requested_scopes: ["review"],
+      }),
+    );
+    expect(limited.status).toBe(429);
+    expect(limited.headers.get("retry-after")).toBe("60");
+    const refusal = await limited.json();
+    expect(refusal).toMatchObject({ code: "DEVICE_START_RATE_LIMITED" });
+    expect(refusal).not.toHaveProperty("rule");
+    expect(refusal).not.toHaveProperty("schema");
+    expect(refusal).not.toHaveProperty("example");
+    expect(JSON.stringify(refusal)).not.toContain(source);
+    expect(OpaqueProblemSchema.safeParse(refusal).success).toBe(true);
   });
 
   test("GET join is path-only and carries the complete capsule without echoing its secret", async () => {
@@ -702,7 +815,7 @@ describe("S-1 mountable enrollment router", () => {
       expect(JSON.parse(text), scenario.name).toMatchObject({
         code: "ENROLLMENT_UNAVAILABLE",
         fix_hint:
-          "Retry later. If this was a write, reuse the same Idempotency-Key; do not create a duplicate request.",
+          "Retry later. For a keyed write, reuse the original Idempotency-Key. If the write had no key, do not retry it automatically because its outcome is unknown.",
       });
       for (const forbidden of scenario.forbidden) {
         expect(text, scenario.name).not.toContain(forbidden);

@@ -1,3 +1,5 @@
+import { DeviceCodeStartResponseSchema } from "@asimposium/contracts";
+
 const origin = process.env.S1_LOCAL_ORIGIN;
 if (typeof origin !== "string" || !/^http:\/\/127\.0\.0\.1:\d+$/.test(origin)) {
   process.stderr.write('{"status":"fail","code":"LOCAL_ORIGIN_INVALID"}\n');
@@ -23,6 +25,62 @@ if (typeof origin !== "string" || !/^http:\/\/127\.0\.0\.1:\d+$/.test(origin)) {
       headers: { "content-type": "application/json", ...headers },
       body: JSON.stringify(body),
     });
+
+  interface DeviceCounts {
+    readonly device_records: number;
+    readonly start_attempts: number;
+    readonly start_replays: number;
+  }
+
+  const readDeviceCounts = async (): Promise<DeviceCounts> => {
+    const result = await localFetch(`${origin}/__s1/device-counts`);
+    if (result.status !== 200) throw new Error("device-counts-status");
+    const body = (await result.json()) as Partial<DeviceCounts>;
+    if (
+      !Number.isSafeInteger(body.device_records) ||
+      !Number.isSafeInteger(body.start_attempts) ||
+      !Number.isSafeInteger(body.start_replays) ||
+      (body.device_records ?? -1) < 0 ||
+      (body.start_attempts ?? -1) < 0 ||
+      (body.start_replays ?? -1) < 0
+    ) {
+      throw new Error("device-counts-shape");
+    }
+    return body as DeviceCounts;
+  };
+
+  const deviceStartBody = (name: string): Record<string, unknown> => ({
+    name,
+    model: "local-model",
+    harness: "codex",
+    requested_scopes: ["review"],
+  });
+
+  const startDevice = (
+    clientAddress: string,
+    body: Record<string, unknown>,
+    idempotencyKey: string,
+  ): Promise<Response> =>
+    post(
+      "/__s1/device-start",
+      { client_address: clientAddress, request: body },
+      { "idempotency-key": idempotencyKey },
+    );
+
+  const assertCountDelta = (
+    before: DeviceCounts,
+    after: DeviceCounts,
+    expected: number,
+    code: string,
+  ): void => {
+    if (
+      after.device_records - before.device_records !== expected ||
+      after.start_attempts - before.start_attempts !== expected ||
+      after.start_replays - before.start_replays !== expected
+    ) {
+      throw new Error(code);
+    }
+  };
 
   /**
    * A capsule may show its explicitly labelled, non-authoritative public
@@ -222,7 +280,11 @@ if (typeof origin !== "string" || !/^http:\/\/127\.0\.0\.1:\d+$/.test(origin)) {
       }
     }
 
-    const pending = await post("/v1/fellows/flow", { flow_handle: claimBody.flow_handle });
+    const pending = await post(
+      "/v1/fellows/flow",
+      { flow_handle: claimBody.flow_handle },
+      { "idempotency-key": "local-poll-1" },
+    );
     const pendingBody = (await pending.json()) as {
       status?: unknown;
       retry_after_seconds?: unknown;
@@ -267,10 +329,14 @@ if (typeof origin !== "string" || !/^http:\/\/127\.0\.0\.1:\d+$/.test(origin)) {
     }
 
     const pollRequest = { flow_handle: claimBody.flow_handle };
-    const issued = await post("/v1/device-token", pollRequest, {
-      "idempotency-key": "local-poll-1",
-    });
-    const issuedBody = (await issued.json()) as { status?: unknown; token?: unknown };
+    const [issued, issuedReplay] = await Promise.all([
+      post("/v1/device-token", pollRequest, { "idempotency-key": "local-poll-1" }),
+      post("/v1/device-token", pollRequest, { "idempotency-key": "local-poll-1" }),
+    ]);
+    const [issuedBody, issuedReplayBody] = (await Promise.all([
+      issued.json(),
+      issuedReplay.json(),
+    ])) as [{ status?: unknown; token?: unknown }, { status?: unknown; token?: unknown }];
     if (
       issued.status !== 200 ||
       issuedBody.status !== "approved" ||
@@ -278,10 +344,6 @@ if (typeof origin !== "string" || !/^http:\/\/127\.0\.0\.1:\d+$/.test(origin)) {
     ) {
       throw new Error("issued-shape");
     }
-    const issuedReplay = await post("/v1/device-token", pollRequest, {
-      "idempotency-key": "local-poll-1",
-    });
-    const issuedReplayBody = (await issuedReplay.json()) as { status?: unknown; token?: unknown };
     if (
       issuedReplay.status !== 200 ||
       issuedReplayBody.status !== "approved" ||
@@ -360,6 +422,19 @@ if (typeof origin !== "string" || !/^http:\/\/127\.0\.0\.1:\d+$/.test(origin)) {
       harness: "codex",
     });
     if (rollbackClaim.status !== 202) throw new Error("rollback-claim-shape");
+    const rollbackClaimBody = (await rollbackClaim.json()) as { flow_handle?: unknown };
+    if (typeof rollbackClaimBody.flow_handle !== "string") {
+      throw new Error("rollback-claim-flow-shape");
+    }
+    const rollbackPending = await post(
+      "/v1/fellows/flow",
+      { flow_handle: rollbackClaimBody.flow_handle },
+      { "idempotency-key": "local-rollback-poll-1" },
+    );
+    const rollbackPendingBody = (await rollbackPending.json()) as { status?: unknown };
+    if (rollbackPending.status !== 200 || rollbackPendingBody.status !== "authorization_pending") {
+      throw new Error("rollback-pending-poll");
+    }
     const failedApproval = await post(
       "/__s1/approve",
       { sponsor_id: sponsorId, enrollment_id: rollbackMintBody.enrollmentId },
@@ -376,6 +451,129 @@ if (typeof origin !== "string" || !/^http:\/\/127\.0\.0\.1:\d+$/.test(origin)) {
       { "idempotency-key": "local-decision-rollback-1" },
     );
     if (recoveredDeny.status !== 200) throw new Error("rollback-key-poisoned");
+    const rollbackDenied = await post(
+      "/v1/fellows/flow",
+      { flow_handle: rollbackClaimBody.flow_handle },
+      { "idempotency-key": "local-rollback-poll-1" },
+    );
+    const rollbackDeniedBody = (await rollbackDenied.json()) as { status?: unknown };
+    if (rollbackDenied.status !== 200 || rollbackDeniedBody.status !== "access_denied") {
+      throw new Error("stable-poll-key-denial-transition");
+    }
+
+    // Real Workerd/D1 concurrency proof: eleven independently keyed requests
+    // arrive together at a fresh source. Exactly ten may commit, and the
+    // refused request must not consume a product row, rate slot, or replay row.
+    const beforeDistinctStarts = await readDeviceCounts();
+    const distinctStartResponses = await Promise.all(
+      Array.from({ length: 11 }, (_unused, index) =>
+        startDevice(
+          "198.51.100.40",
+          deviceStartBody(`local-device-distinct-${String(index).padStart(2, "0")}`),
+          `local-device-distinct-${String(index).padStart(2, "0")}`,
+        ),
+      ),
+    );
+    const distinctStartBodies = await Promise.all(
+      distinctStartResponses.map((result) => result.json() as Promise<unknown>),
+    );
+    const distinctSuccesses = distinctStartResponses
+      .map((result, index) => ({ result, body: distinctStartBodies[index] }))
+      .filter(({ result }) => result.status === 201);
+    const distinctRefusals = distinctStartResponses
+      .map((result, index) => ({ result, body: distinctStartBodies[index] }))
+      .filter(
+        ({ result, body }) =>
+          result.status === 429 &&
+          typeof body === "object" &&
+          body !== null &&
+          "code" in body &&
+          body.code === "DEVICE_START_RATE_LIMITED",
+      );
+    if (
+      distinctSuccesses.length !== 10 ||
+      distinctRefusals.length !== 1 ||
+      distinctSuccesses.some(({ body }) => !DeviceCodeStartResponseSchema.safeParse(body).success)
+    ) {
+      throw new Error("concurrent-device-start-source-limit");
+    }
+    assertCountDelta(
+      beforeDistinctStarts,
+      await readDeviceCounts(),
+      10,
+      "concurrent-device-start-source-limit-counts",
+    );
+
+    // At the ninth occupied slot, two simultaneous identical requests share
+    // one key and body. Both callers must receive the exact same successful
+    // representation while only one tenth product/rate/replay triple commits.
+    const beforeReplayBoundary = await readDeviceCounts();
+    const boundaryAddress = "198.51.100.41";
+    const boundaryFillResponses = await Promise.all(
+      Array.from({ length: 9 }, (_unused, index) =>
+        startDevice(
+          boundaryAddress,
+          deviceStartBody(`local-device-boundary-${String(index).padStart(2, "0")}`),
+          `local-device-boundary-${String(index).padStart(2, "0")}`,
+        ),
+      ),
+    );
+    if (boundaryFillResponses.some((result) => result.status !== 201)) {
+      throw new Error("concurrent-device-start-boundary-fill");
+    }
+    const boundaryBody = deviceStartBody("local-device-boundary-final");
+    const [boundaryLeft, boundaryRight] = await Promise.all([
+      startDevice(boundaryAddress, boundaryBody, "local-device-boundary-final"),
+      startDevice(boundaryAddress, boundaryBody, "local-device-boundary-final"),
+    ]);
+    const [boundaryLeftBody, boundaryRightBody] = await Promise.all([
+      boundaryLeft.json(),
+      boundaryRight.json(),
+    ]);
+    const boundaryLeftParsed = DeviceCodeStartResponseSchema.safeParse(boundaryLeftBody);
+    const boundaryRightParsed = DeviceCodeStartResponseSchema.safeParse(boundaryRightBody);
+    if (
+      boundaryLeft.status !== 201 ||
+      boundaryRight.status !== 201 ||
+      !boundaryLeftParsed.success ||
+      !boundaryRightParsed.success ||
+      JSON.stringify(boundaryLeftParsed.data) !== JSON.stringify(boundaryRightParsed.data)
+    ) {
+      throw new Error("concurrent-device-start-final-slot-replay");
+    }
+    assertCountDelta(
+      beforeReplayBoundary,
+      await readDeviceCounts(),
+      10,
+      "concurrent-device-start-final-slot-replay-counts",
+    );
+
+    const expiryStart = await startDevice(
+      "198.51.100.42",
+      deviceStartBody("local-device-stable-poll-expire"),
+      "local-device-stable-poll-expire",
+    );
+    const expiryStartBody = DeviceCodeStartResponseSchema.safeParse(await expiryStart.json());
+    if (expiryStart.status !== 201 || !expiryStartBody.success) {
+      throw new Error("stable-poll-key-expiry-start");
+    }
+    const expiryPollRequest = { flow_handle: expiryStartBody.data.device_code };
+    const expiryPending = await post("/v1/device-token", expiryPollRequest, {
+      "idempotency-key": "local-device-expiry-poll-1",
+    });
+    const expiryPendingBody = (await expiryPending.json()) as { status?: unknown };
+    if (expiryPending.status !== 200 || expiryPendingBody.status !== "authorization_pending") {
+      throw new Error("stable-poll-key-expiry-pending");
+    }
+    const advanced = await post("/__s1/advance-device-ttl", {});
+    if (advanced.status !== 200) throw new Error("stable-poll-key-clock-advance");
+    const expiryTerminal = await post("/v1/device-token", expiryPollRequest, {
+      "idempotency-key": "local-device-expiry-poll-1",
+    });
+    const expiryTerminalBody = (await expiryTerminal.json()) as { status?: unknown };
+    if (expiryTerminal.status !== 200 || expiryTerminalBody.status !== "expired_token") {
+      throw new Error("stable-poll-key-expiry-transition");
+    }
 
     process.stdout.write(
       `${JSON.stringify({
@@ -398,12 +596,20 @@ if (typeof origin !== "string" || !/^http:\/\/127\.0\.0\.1:\d+$/.test(origin)) {
           "idempotency-digest-conflict",
           "concurrent-first-claim-replay",
           "failed-batch-does-not-poison-key",
+          "stable-poll-key-approval-transition",
+          "stable-poll-key-denial-transition",
+          "stable-poll-key-expiry-transition",
+          "concurrent-device-start-source-limit",
+          "concurrent-device-start-final-slot-replay",
         ],
         reproduce: "scripts/e2e-s1-cold-enrollment.sh --local-d1",
       })}\n`,
     );
   } catch (error) {
-    const code = error instanceof Error ? error.message : "local-d1-scenario";
+    // Only fixed harness-owned codes may cross the diagnostic boundary. Parser,
+    // fetch, D1, and schema errors can contain response fragments or URLs.
+    const candidate = error instanceof Error ? error.message : "";
+    const code = /^[a-z][a-z0-9-]{0,79}$/.test(candidate) ? candidate : "local-d1-scenario";
     process.stderr.write(
       `${JSON.stringify({
         tool: "bun+wrangler",

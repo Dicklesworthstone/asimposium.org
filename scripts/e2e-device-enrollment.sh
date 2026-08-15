@@ -13,6 +13,7 @@ suite="device-enrollment-e2e"
 reproduce="bash scripts/e2e-device-enrollment.sh"
 readonly runner="$repository_root/e2e/playwright/device-enrollment-runner.ts"
 readonly max_response_bytes=131072
+readonly browser_deadline_seconds=90
 proposal_ttl_seconds=0
 started_ms="$(e2e_now_ms)"
 self_test=0
@@ -21,6 +22,9 @@ explicit_run_id=""
 scenario="approve"
 run_id=""
 run_digest=""
+browser_capture_test_ps_mode="none"
+browser_capture_test_release_reader_exit=0
+browser_capture_test_setup_interrupt=0
 
 HTTP_BODY=""
 HTTP_STATUS=""
@@ -32,6 +36,7 @@ START_EXPIRES_SECONDS=0
 POLL_STATUS=""
 POLL_RETRY_SECONDS=""
 POLL_TOKEN=""
+POLL_IDEMPOTENCY_KEY=""
 
 usage_failure() {
   e2e_emit_diagnostic "$suite" "$started_ms" "fail" "$1" "$reproduce"
@@ -143,7 +148,337 @@ storage_state_safe() {
   '
 }
 
+# Capture one browser command inside a freshly proved process group. Playwright
+# action timeouts do not cover a wedged browser launch/transport/close, so this
+# supervisor owns one outer deadline and reaps the exact group TERM -> KILL.
+# stdout is bounded; stderr is discarded because only the runner's one safe
+# diagnostic record is part of this harness contract.
+bounded_browser_capture() {
+  local timeout_seconds="$1"
+  shift
+  DEVICE_BROWSER_CAPTURE_TIMEOUT_SECONDS="$timeout_seconds" \
+    DEVICE_BROWSER_CAPTURE_TEST_PS_MODE="$browser_capture_test_ps_mode" \
+    DEVICE_BROWSER_CAPTURE_TEST_RELEASE_READER_EXIT="$browser_capture_test_release_reader_exit" \
+    DEVICE_BROWSER_CAPTURE_TEST_SETUP_INTERRUPT="$browser_capture_test_setup_interrupt" \
+    /usr/bin/perl -e '
+use strict;
+use warnings;
+use IO::Select;
+use POSIX qw(setsid WNOHANG);
+use Time::HiRes qw(time);
+
+my $timeout = $ENV{DEVICE_BROWSER_CAPTURE_TIMEOUT_SECONDS};
+exit 125 unless defined($timeout) && $timeout =~ /\A[1-9][0-9]*\z/;
+my $test_ps_mode = $ENV{DEVICE_BROWSER_CAPTURE_TEST_PS_MODE};
+my $test_release_reader_exit = $ENV{DEVICE_BROWSER_CAPTURE_TEST_RELEASE_READER_EXIT};
+my $test_setup_interrupt = $ENV{DEVICE_BROWSER_CAPTURE_TEST_SETUP_INTERRUPT};
+exit 125 unless defined($test_ps_mode) && $test_ps_mode =~ /\A(?:none|once|persistent|hang)\z/;
+exit 125 unless defined($test_release_reader_exit) && $test_release_reader_exit =~ /\A[01]\z/;
+exit 125 unless defined($test_setup_interrupt) && $test_setup_interrupt =~ /\A[01]\z/;
+pipe(my $output_reader, my $output_writer) or exit 125;
+pipe(my $ready_reader, my $ready_writer) or exit 125;
+pipe(my $release_reader, my $release_writer) or exit 125;
+my $pid = fork();
+exit 125 unless defined($pid);
+if ($pid == 0) {
+  close($output_reader);
+  close($ready_reader);
+  close($release_writer);
+  setsid() or exit 125;
+  open(STDOUT, q{>&}, $output_writer) or exit 125;
+  open(STDERR, q{>}, q{/dev/null}) or exit 125;
+  close($output_writer);
+  syswrite($ready_writer, qq{READY\n}) == 6 or exit 125;
+  if ($test_release_reader_exit == 1) {
+    # Close the release reader before readiness EOF. Once the parent observes
+    # the complete readiness record, its next gate write is deterministically
+    # EPIPE rather than a scheduler-dependent successful write to a dying child.
+    close($release_reader);
+    close($ready_writer);
+    exit 125;
+  }
+  close($ready_writer);
+  my $gate = q{};
+  sysread($release_reader, $gate, 1) == 1 && $gate eq q{G} or exit 125;
+  close($release_reader);
+  exec @ARGV;
+  exit 125;
+}
+close($output_writer);
+close($ready_writer);
+close($release_reader);
+
+my $selector = IO::Select->new($output_reader, $ready_reader);
+my %kind = (fileno($output_reader) => q{output}, fileno($ready_reader) => q{ready});
+my $output = q{};
+my $ready = q{};
+my $output_closed = 0;
+my $ready_closed = 0;
+my $overflow = 0;
+my $child_changed = 0;
+my $child_status;
+$SIG{CHLD} = sub { $child_changed = 1; };
+my $interrupted = 0;
+$SIG{HUP} = $SIG{INT} = $SIG{TERM} = sub { $interrupted = 1; };
+# Installed only in the already-forked parent: an EPIPE at the release gate
+# must reach checked cleanup instead of terminating Perl with SIGPIPE. The
+# child retains the default disposition across its later exec.
+$SIG{PIPE} = q{IGNORE};
+
+sub drain_once {
+  my ($wait) = @_;
+  for my $handle ($selector->can_read($wait)) {
+    my $fd = fileno($handle);
+    my $stream = $kind{$fd} // q{};
+    my $bytes = sysread($handle, my $chunk, 8192);
+    if (defined($bytes) && $bytes > 0) {
+      if ($stream eq q{output}) {
+        $output .= $chunk unless $overflow;
+        $overflow = 1 if length($output) > 262_144;
+      } elsif ($stream eq q{ready}) {
+        $ready .= $chunk;
+      }
+      next;
+    }
+    $selector->remove($handle);
+    delete $kind{$fd};
+    close($handle);
+    $output_closed = 1 if $stream eq q{output};
+    $ready_closed = 1 if $stream eq q{ready};
+  }
+}
+
+sub scan_process_rows {
+  pipe(my $scan_reader, my $scan_writer) or return (0, q{});
+  my $scan_pid = fork();
+  if (!defined($scan_pid)) {
+    close($scan_reader);
+    close($scan_writer);
+    return (0, q{});
+  }
+  if ($scan_pid == 0) {
+    close($scan_reader);
+    open(STDOUT, q{>&}, $scan_writer) or exit 125;
+    open(STDERR, q{>}, q{/dev/null}) or exit 125;
+    close($scan_writer);
+    exit 125 if $test_ps_mode eq q{persistent};
+    if ($test_ps_mode eq q{hang}) {
+      select(undef, undef, undef, 30.0);
+      exit 125;
+    }
+    exec q{/bin/ps}, q{-A}, q{-o}, q{pid=,pgid=,stat=};
+    exit 125;
+  }
+  close($scan_writer);
+  my $scan_selector = IO::Select->new($scan_reader);
+  my $scan_deadline = time() + 0.5;
+  my $rows = q{};
+  my $closed = 0;
+  while (time() < $scan_deadline && !$closed && length($rows) <= 2_097_152) {
+    my $remaining = $scan_deadline - time();
+    my $wait = $remaining < 0.02 ? $remaining : 0.02;
+    for my $handle ($scan_selector->can_read($wait)) {
+      my $bytes = sysread($handle, my $chunk, 8192);
+      if (defined($bytes) && $bytes > 0) {
+        $rows .= $chunk;
+      } else {
+        $scan_selector->remove($handle);
+        close($handle);
+        $closed = 1;
+      }
+    }
+  }
+  if (!$closed) {
+    $scan_selector->remove($scan_reader);
+    close($scan_reader);
+  }
+  my $scan_status;
+  my $reap_deadline = time() + 0.5;
+  while (time() < $reap_deadline) {
+    my $reaped = waitpid($scan_pid, WNOHANG);
+    if ($reaped == $scan_pid) {
+      $scan_status = $?;
+      last;
+    }
+    last if $reaped == -1;
+    select(undef, undef, undef, 0.01);
+  }
+  if (!defined($scan_status)) {
+    my $kill_reap_deadline = time() + 0.5;
+    while (time() < $kill_reap_deadline) {
+      my $reaped = waitpid($scan_pid, WNOHANG);
+      if ($reaped == $scan_pid) {
+        $scan_status = $?;
+        last;
+      }
+      last if $reaped == -1;
+      # The unreaped direct child still owns this exact PID. Retry SIGKILL
+      # until it is reaped or the fixed deadline makes the scan uncertain.
+      kill q{KILL}, $scan_pid;
+      select(undef, undef, undef, 0.01);
+    }
+  }
+  return (0, q{}) unless $closed && defined($scan_status) && $scan_status == 0;
+  return (0, q{}) if $rows eq q{} || length($rows) > 2_097_152;
+  return (1, $rows);
+}
+
+sub group_state {
+  my ($pgid) = @_;
+  if ($test_ps_mode eq q{once}) {
+    $test_ps_mode = q{none};
+    return 2;
+  }
+  my ($scan_ok, $rows) = scan_process_rows();
+  return 2 unless $scan_ok;
+  for my $row (split /\n/, $rows) {
+    next if $row =~ /\A\s*\z/;
+    my ($member, $group, $stat) = $row =~ /\A\s*([0-9]+)\s+([0-9]+)\s+(\S+)\s*\z/;
+    return 2 unless defined($member) && defined($group) && defined($stat);
+    return 1 if $group == $pgid && $stat !~ /\AZ/;
+  }
+  return 0;
+}
+
+sub settle_group {
+  my ($pgid) = @_;
+  kill q{TERM}, -$pgid;
+  my $term_deadline = time() + 0.75;
+  while (time() < $term_deadline) {
+    drain_once(0.02);
+    my $state = group_state($pgid);
+    return 1 if $state == 0;
+  }
+  my $kill_sent = kill q{KILL}, -$pgid;
+  if (!$kill_sent) {
+    return group_state($pgid) == 0 ? 1 : 0;
+  }
+  my $kill_deadline = time() + 1.0;
+  while (time() < $kill_deadline) {
+    drain_once(0.02);
+    my $state = group_state($pgid);
+    return 1 if $state == 0;
+  }
+  return 0;
+}
+
+sub reap_until {
+  my ($deadline) = @_;
+  while (time() < $deadline) {
+    my $reaped = waitpid($pid, WNOHANG);
+    if ($reaped == $pid) {
+      $child_status = $?;
+      return 1;
+    }
+    return 0 if $reaped == -1;
+    drain_once(0.02);
+  }
+  return 0;
+}
+
+sub terminate_exact_child {
+  my ($deadline) = @_;
+  while (time() < $deadline) {
+    my $reaped = waitpid($pid, WNOHANG);
+    if ($reaped == $pid) {
+      $child_status = $?;
+      return 1;
+    }
+    return 0 if $reaped == -1;
+    # The unreaped direct child still owns its PID, so retrying this exact
+    # signal cannot hit a reused process. Success is declared only after reap.
+    kill q{KILL}, $pid;
+    drain_once(0.02);
+  }
+  return 0;
+}
+
+# The child cannot exec or create descendants until readiness is observed.
+my $setup_deadline = time() + 2.0;
+$interrupted = 1 if $test_setup_interrupt == 1;
+while (!$ready_closed && time() < $setup_deadline && !$interrupted) {
+  drain_once(0.02);
+}
+if ($ready ne qq{READY\n} || !$ready_closed || $interrupted) {
+  my $cleaned = terminate_exact_child(time() + 1.0);
+  exit 125 unless $cleaned;
+  exit($interrupted ? 130 : 125);
+}
+my $release_bytes = syswrite($release_writer, q{G});
+if (!defined($release_bytes) || $release_bytes != 1) {
+  my $settled = settle_group($pid);
+  my $reaped = reap_until(time() + 1.0);
+  exit 125 unless $settled && $reaped;
+  exit 125;
+}
+close($release_writer);
+
+my $deadline = time() + $timeout;
+my $timed_out = 0;
+while (time() < $deadline && !$interrupted && !$overflow) {
+  drain_once(0.02);
+  if ($child_changed && $output_closed) {
+    my $state = group_state($pid);
+    if ($state == 0) {
+      reap_until(time() + 1.0) or exit 125;
+      my $status = $child_status;
+      exit 125 unless defined($status);
+      print $output;
+      exit (($status & 127) ? 128 + ($status & 127) : ($status >> 8));
+    }
+    last if $state == 2 || $state == 1;
+  }
+}
+$timed_out = 1 if time() >= $deadline;
+my $settled = settle_group($pid);
+my $reaped = reap_until(time() + 1.0);
+exit 125 unless $settled && $reaped;
+exit 124 if $timed_out;
+exit 130 if $interrupted;
+exit 126 if $overflow;
+exit 125;
+' -- "$@"
+}
+
+# Prove a planted browser marker has no surviving argv holder without trusting
+# an unbounded shell-level `ps`. The scanner itself runs inside the same bounded
+# supervisor, so a hung or failing process table is a typed non-green result.
+assert_no_browser_marker() {
+  local marker="$1"
+  local survived_code="$2"
+  local scan_output
+  local scan_status
+
+  set +e
+  # shellcheck disable=SC2016 # The embedded Perl process owns its $ENV expansion.
+  scan_output="$(
+    DEVICE_E2E_PLANTED_MARKER="$marker" \
+      bounded_browser_capture 2 /usr/bin/perl -e '
+        use strict;
+        use warnings;
+        my $marker = $ENV{DEVICE_E2E_PLANTED_MARKER};
+        exit 125 unless defined($marker) && $marker =~ /\A[A-Za-z0-9._-]{1,160}\z/;
+        open(my $rows, q{-|}, q{/bin/ps}, q{-A}, q{-o}, q{command=}) or exit 125;
+        my $found = 0;
+        while (my $row = <$rows>) {
+          $found = 1 if index($row, $marker) >= 0;
+        }
+        close($rows) or exit 125;
+        exit($found ? 1 : 0);
+      '
+  )"
+  scan_status=$?
+  set -e
+  [[ -z "$scan_output" ]] || fail "BROWSER_SURVIVOR_SCAN_FAILED"
+  case "$scan_status" in
+    0) return 0 ;;
+    1) fail "$survived_code" ;;
+    *) fail "BROWSER_SURVIVOR_SCAN_FAILED" ;;
+  esac
+}
+
 command -v bun >/dev/null 2>&1 || blocked "E2E_DEPENDENCY_UNAVAILABLE"
+[[ -x /usr/bin/perl ]] || blocked "E2E_DEPENDENCY_UNAVAILABLE"
 proposal_ttl_seconds="$(
   bun -e 'import { PENDING_PROPOSAL_TTL_MS } from "@asimposium/contracts"; process.stdout.write(String(PENDING_PROPOSAL_TTL_MS / 1_000));'
 )" || blocked "E2E_CONTRACT_UNAVAILABLE"
@@ -339,6 +674,7 @@ start_device() {
     fail "DEVICE_START_CONTRACT_FAILED"
   fi
   flow_digest="$(printf '%s' "$START_DEVICE_CODE" | sha256_prefix)" || fail "DIGEST_FAILED"
+  POLL_IDEMPOTENCY_KEY="idem-poll-${run_digest}-${step_scenario}"
   emit_step "$step_scenario" "device-start" "pass" "DEVICE_CODE_ISSUED" "$HTTP_STATUS" "$HTTP_DURATION_MS" "$request_id" "null" "$flow_digest"
 }
 
@@ -352,7 +688,8 @@ poll_device() {
 
   request_id="$(safe_request_id "$step_scenario" "$step")"
   request_body="$(printf '{"flow_handle":"%s"}' "$START_DEVICE_CODE")"
-  http_post_json "$ASIMPOSIUM_STAGING_AGENT_BASE_URL" "/v1/device-token" "$request_body" "$request_id" "idem-$request_id" \
+  [[ -n "$POLL_IDEMPOTENCY_KEY" ]] || fail "DEVICE_POLL_KEY_MISSING"
+  http_post_json "$ASIMPOSIUM_STAGING_AGENT_BASE_URL" "/v1/device-token" "$request_body" "$request_id" "$POLL_IDEMPOTENCY_KEY" \
     || fail "DEVICE_POLL_UNREACHABLE"
   flow_digest="$(printf '%s' "$START_DEVICE_CODE" | sha256_prefix)" || fail "DIGEST_FAILED"
   if [[ "$HTTP_STATUS" != "200" ]] || ! parse_poll_response || [[ "$POLL_STATUS" != "$expected_status" ]]; then
@@ -381,10 +718,16 @@ run_browser() {
   browser_output="$(
     printf '%s\n%s\n%s\n%s\n%s\n' "$START_USER_CODE" "$name" "e2e/device-contract" "curl-playwright" "$scopes_csv" \
       | ASIMPOSIUM_DEVICE_E2E_STORAGE_STATE="$storage_path" \
-        bun "$runner" "$mode" 2>/dev/null
+        bounded_browser_capture "$browser_deadline_seconds" bun "$runner" "$mode"
   )"
   browser_status=$?
   set -e
+  case "$browser_status" in
+    124) fail "BROWSER_DEVICE_FLOW_TIMEOUT" ;;
+    125) fail "BROWSER_CAPTURE_SETUP_FAILED" ;;
+    126) fail "BROWSER_DIAGNOSTIC_OVERSIZE" ;;
+    130) fail "BROWSER_CAPTURE_INTERRUPTED" ;;
+  esac
   if [[ "$browser_output" == *"$START_USER_CODE"* \
     || "$browser_output" == *"$START_DEVICE_CODE"* \
     || "$browser_output" == *"$name"* \
@@ -418,10 +761,16 @@ assert_distinct_sponsors() {
   browser_output="$(
     ASIMPOSIUM_DEVICE_E2E_STORAGE_STATE="$ASIMPOSIUM_DEVICE_E2E_STORAGE_STATE" \
       ASIMPOSIUM_DEVICE_E2E_SECOND_STORAGE_STATE="$ASIMPOSIUM_DEVICE_E2E_SECOND_STORAGE_STATE" \
-      bun "$runner" assert-distinct-sponsors 2>/dev/null
+      bounded_browser_capture "$browser_deadline_seconds" bun "$runner" assert-distinct-sponsors
   )"
   browser_status=$?
   set -e
+  case "$browser_status" in
+    124) fail "SPONSOR_PREFLIGHT_TIMEOUT" ;;
+    125) fail "BROWSER_CAPTURE_SETUP_FAILED" ;;
+    126) fail "BROWSER_DIAGNOSTIC_OVERSIZE" ;;
+    130) fail "BROWSER_CAPTURE_INTERRUPTED" ;;
+  esac
   if [[ "$browser_output" == *"asimp_ag_"* \
     || "$browser_output" == *"https://"* \
     || "$browser_output" == *"@"* \
@@ -560,9 +909,26 @@ run_proposal_expired() {
 
 run_self_test() {
   local output
+  local runner_status
   local canary_flow
   local canary_token
   local planted_device_digest
+  local planted_timeout_marker
+  local planted_timeout_output
+  local planted_timeout_status
+  local planted_uncertain_output
+  local planted_uncertain_status
+  local planted_persistent_output
+  local planted_persistent_status
+  local planted_hung_output
+  local planted_hung_status
+  local planted_hung_started_ms
+  local planted_hung_duration_ms
+  local planted_release_output
+  local planted_release_status
+  local planted_setup_output
+  local planted_setup_status
+  local planted_suffix
   local planted_wrong_code
   local planted_wrong_status
   canary_flow="flow_v1.$(printf 'A%.0s' {1..43})"
@@ -570,7 +936,11 @@ run_self_test() {
 
   e2e_run_harness_self_test "$suite" "$started_ms" "$reproduce --self-test" >/dev/null \
     || fail "HARNESS_SELF_TEST_FAILED"
-  output="$(bun "$runner" --self-test 2>/dev/null)" || fail "BROWSER_RUNNER_SELF_TEST_FAILED"
+  set +e
+  output="$(bounded_browser_capture 15 bun "$runner" --self-test)"
+  runner_status=$?
+  set -e
+  [[ "$runner_status" -eq 0 ]] || fail "BROWSER_RUNNER_SELF_TEST_FAILED"
   if [[ "$output" != *'"code":"BROWSER_RUNNER_SELF_TEST_OK"'* \
     || "$output" == *"$canary_flow"* \
     || "$output" == *"$canary_token"* \
@@ -588,6 +958,90 @@ run_self_test() {
     || validate_browser_record "$planted_device_digest" "self-test" "BROWSER_RUNNER_SELF_TEST_OK" "0"; then
     fail "BROWSER_RUNNER_PLANTED_NEGATIVE_ACCEPTED"
   fi
+
+  planted_timeout_marker="device-e2e-timeout-${run_digest}-$$"
+  set +e
+  planted_timeout_output="$(
+    bounded_browser_capture 1 bash -c \
+      'trap "" TERM; while :; do sleep 1; done' "$planted_timeout_marker"
+  )"
+  planted_timeout_status=$?
+  set -e
+  [[ "$planted_timeout_status" -eq 124 && -z "$planted_timeout_output" ]] \
+    || fail "BROWSER_TIMEOUT_PLANT_NOT_CAUGHT"
+  assert_no_browser_marker "$planted_timeout_marker" "BROWSER_TIMEOUT_PLANT_SURVIVED"
+
+  browser_capture_test_ps_mode="once"
+  set +e
+  planted_uncertain_output="$(
+    bounded_browser_capture 1 bash -c \
+      'trap "" TERM; while :; do sleep 1; done' "$planted_timeout_marker-uncertain"
+  )"
+  planted_uncertain_status=$?
+  set -e
+  browser_capture_test_ps_mode="none"
+  [[ "$planted_uncertain_status" -eq 124 && -z "$planted_uncertain_output" ]] \
+    || fail "BROWSER_PS_UNCERTAINTY_PLANT_NOT_CAUGHT"
+  assert_no_browser_marker \
+    "$planted_timeout_marker-uncertain" \
+    "BROWSER_PS_UNCERTAINTY_PLANT_SURVIVED"
+
+  browser_capture_test_ps_mode="persistent"
+  set +e
+  planted_persistent_output="$(
+    bounded_browser_capture 1 bash -c \
+      'trap "" TERM; while :; do sleep 1; done' "$planted_timeout_marker-persistent"
+  )"
+  planted_persistent_status=$?
+  set -e
+  browser_capture_test_ps_mode="none"
+  [[ "$planted_persistent_status" -eq 125 && -z "$planted_persistent_output" ]] \
+    || fail "BROWSER_PERSISTENT_PS_FAILURE_PLANT_NOT_CAUGHT"
+
+  browser_capture_test_ps_mode="hang"
+  planted_hung_started_ms="$(e2e_now_ms)"
+  set +e
+  planted_hung_output="$(
+    bounded_browser_capture 1 bash -c \
+      'trap "" TERM; while :; do sleep 1; done' "$planted_timeout_marker-hung"
+  )"
+  planted_hung_status=$?
+  set -e
+  planted_hung_duration_ms="$(( $(e2e_now_ms) - planted_hung_started_ms ))"
+  browser_capture_test_ps_mode="none"
+  [[ "$planted_hung_status" -eq 125 && -z "$planted_hung_output" \
+    && "$planted_hung_duration_ms" -le 8000 ]] \
+    || fail "BROWSER_HUNG_PS_PLANT_NOT_BOUNDED"
+
+  browser_capture_test_release_reader_exit=1
+  set +e
+  planted_release_output="$(
+    bounded_browser_capture 5 bash -c 'while :; do sleep 1; done' \
+      "$planted_timeout_marker-release"
+  )"
+  planted_release_status=$?
+  set -e
+  browser_capture_test_release_reader_exit=0
+  [[ "$planted_release_status" -eq 125 && -z "$planted_release_output" ]] \
+    || fail "BROWSER_RELEASE_PIPE_PLANT_NOT_CAUGHT"
+
+  browser_capture_test_setup_interrupt=1
+  set +e
+  planted_setup_output="$(
+    bounded_browser_capture 5 bash -c 'while :; do sleep 1; done' \
+      "$planted_timeout_marker-setup"
+  )"
+  planted_setup_status=$?
+  set -e
+  browser_capture_test_setup_interrupt=0
+  [[ "$planted_setup_status" -eq 130 && -z "$planted_setup_output" ]] \
+    || fail "BROWSER_SETUP_INTERRUPT_PLANT_NOT_CAUGHT"
+
+  for planted_suffix in persistent hung release setup; do
+    assert_no_browser_marker \
+      "$planted_timeout_marker-$planted_suffix" \
+      "BROWSER_SUPERVISOR_PLANT_SURVIVED"
+  done
   printf '%s\n' "$output"
   final_record "pass" "DEVICE_ENROLLMENT_HARNESS_SELF_TEST_OK"
 }

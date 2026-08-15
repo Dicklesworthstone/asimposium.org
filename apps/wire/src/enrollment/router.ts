@@ -328,6 +328,19 @@ function enrollmentErrorResponse(error: EnrollmentError, request: Request): Resp
         "Several recent user-code lookups failed, so code entry is locked for a while.",
         "Wait fifteen minutes before trying another code.",
       );
+    case "DEVICE_START_RATE_LIMITED": {
+      const response = problem(
+        429,
+        "DEVICE_START_RATE_LIMITED",
+        "Device enrollment is temporarily limited",
+        "This source cannot start another device enrollment right now.",
+        "Wait before starting another device enrollment. An existing flow may still be polled.",
+      );
+      // A fixed coarse retry hint helps a well-behaved client without exposing
+      // the bucket threshold or the precise age of another attempt.
+      response.headers.set("retry-after", "60");
+      return response;
+    }
     case "IDEMPOTENCY_CONFLICT":
       return problem(
         409,
@@ -409,7 +422,7 @@ function enrollmentUnavailableResponse(): Response {
     "ENROLLMENT_UNAVAILABLE",
     "Enrollment is temporarily unavailable",
     "The enrollment service could not complete this request safely.",
-    "Retry later. If this was a write, reuse the same Idempotency-Key; do not create a duplicate request.",
+    "Retry later. For a keyed write, reuse the original Idempotency-Key. If the write had no key, do not retry it automatically because its outcome is unknown.",
   );
 }
 
@@ -517,6 +530,39 @@ function idempotencyOptions(request: Request): { readonly idempotencyKey?: strin
 }
 
 /**
+ * Cloudflare overwrites CF-Connecting-IP on the proxied Worker boundary. No
+ * caller-supplied forwarding chain is consulted. Strict shape validation keeps
+ * direct/local requests from inventing arbitrary bucket strings; absence is an
+ * operational refusal rather than an unbounded shared fallback.
+ */
+function trustedDeviceClientAddress(request: Request): string | undefined {
+  const value = request.headers.get("cf-connecting-ip");
+  if (value === null || value !== value.trim() || value.length < 2 || value.length > 45) {
+    return undefined;
+  }
+  if (value.includes(":")) {
+    if (!/^[0-9A-Fa-f:.]+$/.test(value)) return undefined;
+    try {
+      const hostname = new URL(`http://[${value}]/`).hostname;
+      if (!hostname.startsWith("[") || !hostname.endsWith("]")) return undefined;
+      return hostname.slice(1, -1).toLowerCase();
+    } catch {
+      return undefined;
+    }
+  }
+  const segments = value.split(".");
+  if (
+    segments.length !== 4 ||
+    segments.some(
+      (segment) => !/^(?:0|[1-9][0-9]{0,2})$/.test(segment) || Number.parseInt(segment, 10) > 255,
+    )
+  ) {
+    return undefined;
+  }
+  return segments.join(".");
+}
+
+/**
  * Mountable Propylon S-1 sub-app. The shared Worker app owns authentication
  * middleware and chooses where to mount it; this module owns only typed
  * enrollment routes and never modifies the shared router.
@@ -585,9 +631,8 @@ export function createEnrollmentRouter(options: EnrollmentRouterOptions): Hono {
 
   // W3.5: the one open write on the surface. An unaffiliated agent starts the
   // proposal-carrying device flow here; it has no credential yet by
-  // construction. Abuse is bounded by the 30-minute user-code TTL, the 24-hour
-  // proposal expiry, and the fact that unbound proposals are visible to no
-  // sponsor until a human types the code.
+  // construction. The Cloudflare-authenticated source bucket is reserved in
+  // the same D1 transaction as the proposal; the raw address is never stored.
   app.post("/v1/device-code", async (c) => {
     if (hasQuery(c.req.raw)) {
       return problem(
@@ -609,9 +654,14 @@ export function createEnrollmentRouter(options: EnrollmentRouterOptions): Hono {
         }),
       );
     }
+    const trustedClientAddress = trustedDeviceClientAddress(c.req.raw);
+    if (trustedClientAddress === undefined) return enrollmentUnavailableResponse();
+    const idempotency = idempotencyOptions(c.req.raw);
+    if (idempotency instanceof Response) return idempotency;
     try {
       const started = await options.service.deviceStart(
         await jsonBody(c.req.raw, "DEVICE_CODE_BODY_INVALID"),
+        { ...idempotency, trustedClientAddress },
       );
       return c.json(DeviceCodeStartResponseSchema.parse(started), 201, {
         "cache-control": "no-store",

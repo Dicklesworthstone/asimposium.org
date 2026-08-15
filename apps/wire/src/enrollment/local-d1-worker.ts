@@ -3,6 +3,7 @@ import type { D1Database, ExecutionContext } from "@cloudflare/workers-types";
 import { D1EnrollmentStore } from "./d1-store.ts";
 import { createEnrollmentRouter } from "./router.ts";
 import {
+  DEVICE_CODE_TTL_MS,
   EnrollmentError,
   EnrollmentPersistenceError,
   EnrollmentReplayConfigurationError,
@@ -29,6 +30,7 @@ function response(body: unknown, status = 200): Response {
  * first-request-lazy rather than module-load.
  */
 let cached: { readonly key: string; readonly service: EnrollmentService } | undefined;
+let localClockOffsetMs = 0;
 
 /**
  * A missing or malformed `ENROLLMENT_REPLAY_KEY` must be a typed, safe refusal —
@@ -43,6 +45,7 @@ function resolveService(env: LocalEnrollmentEnv): EnrollmentService | Response {
     const service = new EnrollmentService({
       store: new D1EnrollmentStore(env.DB),
       replayProtector: enrollmentReplayProtectorFromBase64Url(env.ENROLLMENT_REPLAY_KEY),
+      clock: { now: () => Date.now() + localClockOffsetMs },
     });
     cached = { key: env.ENROLLMENT_REPLAY_KEY, service };
     return service;
@@ -65,6 +68,7 @@ function unavailable(): Response {
  *  - a decrypt/JSON/config failure is operational — 503, never a 4xx that blames
  *    the client for a key the operator misconfigured;
  *  - a same-key/different-digest collision keeps its 409 and its exact code;
+ *  - a device-start source limit keeps its production 429;
  *  - `WRONG_PRINCIPAL` keeps 403;
  *  - every other typed enrollment failure keeps its exact code at 400, which is
  *    what the local-D1 client asserts for a name collision;
@@ -81,6 +85,7 @@ function localFailure(error: unknown): Response {
   }
   if (error instanceof EnrollmentError) {
     if (error.code === "IDEMPOTENCY_CONFLICT") return response({ code: error.code }, 409);
+    if (error.code === "DEVICE_START_RATE_LIMITED") return response({ code: error.code }, 429);
     if (error.code === "WRONG_PRINCIPAL") return response({ code: error.code }, 403);
     return response({ code: error.code }, 400);
   }
@@ -100,7 +105,7 @@ async function localBody(request: Request): Promise<Record<string, unknown> | un
 
 /**
  * Local-D1-only S-1 harness entrypoint. It is intentionally not imported by
- * `src/index.ts` or the production app. Its two setup routes exist solely to
+ * `src/index.ts` or the production app. Its local setup and proof routes exist solely to
  * drive a real workerd D1 binding through the mountable enrollment router.
  */
 export default {
@@ -129,6 +134,63 @@ export default {
       } catch (error) {
         return localFailure(error);
       }
+    }
+
+    if (request.method === "POST" && url.pathname === "/__s1/device-start") {
+      const body = await localBody(request);
+      if (
+        body === undefined ||
+        typeof body.client_address !== "string" ||
+        body.request === undefined
+      ) {
+        return response({ code: "LOCAL_INPUT_INVALID" }, 400);
+      }
+      try {
+        const started = await service.deviceStart(body.request, {
+          trustedClientAddress: body.client_address,
+          idempotencyKey: request.headers.get("idempotency-key") ?? undefined,
+        });
+        return response(started, 201);
+      } catch (error) {
+        return localFailure(error);
+      }
+    }
+
+    if (request.method === "GET" && url.pathname === "/__s1/device-counts") {
+      try {
+        const counts = await env.DB.prepare(
+          `SELECT
+             (SELECT COUNT(*) FROM enrollment_records WHERE kind = 'device') AS device_records,
+             (SELECT COUNT(*) FROM device_start_attempts) AS start_attempts,
+             (SELECT COUNT(*) FROM enrollment_idempotency WHERE scope = 'device-start') AS start_replays`,
+        ).first<{
+          readonly device_records: number;
+          readonly start_attempts: number;
+          readonly start_replays: number;
+        }>();
+        if (
+          counts === null ||
+          !Number.isSafeInteger(counts.device_records) ||
+          !Number.isSafeInteger(counts.start_attempts) ||
+          !Number.isSafeInteger(counts.start_replays)
+        ) {
+          return unavailable();
+        }
+        return response(counts);
+      } catch {
+        return unavailable();
+      }
+    }
+
+    if (request.method === "POST" && url.pathname === "/__s1/advance-device-ttl") {
+      const body = await localBody(request);
+      if (body === undefined || Object.keys(body).length !== 0 || localClockOffsetMs !== 0) {
+        return response({ code: "LOCAL_INPUT_INVALID" }, 400);
+      }
+      // Test-only deterministic expiry: move exactly one device-code TTL and
+      // disclose neither the wall clock nor any enrollment identifier.
+      localClockOffsetMs = DEVICE_CODE_TTL_MS;
+      return response({ advanced: true });
     }
 
     if (request.method === "POST" && url.pathname === "/__s1/approve") {

@@ -1,5 +1,6 @@
 import { Database } from "bun:sqlite";
 import { describe, expect, test } from "bun:test";
+import { createHash } from "node:crypto";
 import { readFileSync } from "node:fs";
 import { resolve } from "node:path";
 
@@ -7,10 +8,20 @@ import type { D1Database } from "@cloudflare/workers-types";
 
 import { D1EnrollmentStore } from "../../src/enrollment/d1-store";
 import {
+  AesGcmEnrollmentReplayProtector,
+  DEVICE_CODE_TTL_MS,
+  DEVICE_LOOKUP_LOCKOUT_FAILURES,
+  DEVICE_LOOKUP_LOCKOUT_WINDOW_MS,
+  DEVICE_START_RATE_LIMIT_ATTEMPTS,
+  DEVICE_START_RATE_LIMIT_WINDOW_MS,
   type DeviceCreateInput,
+  type DeviceLookupAttempt,
   type EnrollmentError,
+  EnrollmentIdempotencyRaceError,
+  EnrollmentIdentifierCollisionError,
   EnrollmentPersistenceError,
   type EnrollmentRecord,
+  EnrollmentService,
   InMemoryEnrollmentStore,
 } from "../../src/enrollment/service";
 
@@ -49,6 +60,10 @@ const LIFECYCLE_MIGRATION = resolve(
   "../../../../db/migrations/0006_fellow_credential_lifecycle.sql",
 );
 const DEVICE_MIGRATION = resolve(import.meta.dir, "../../../../db/migrations/0009_device_flow.sql");
+const DEVICE_HARDENING_MIGRATION = resolve(
+  import.meta.dir,
+  "../../../../db/migrations/0010_device_flow_hardening.sql",
+);
 
 /** The exact column definition the abort depends on. */
 const LOAD_BEARING_COLUMN = "request_digest TEXT NOT NULL";
@@ -70,8 +85,12 @@ function localD1(
     bind(...values: LocalBinding[]) {
       return {
         async run() {
-          const result = sqlite.prepare<unknown, LocalBinding[]>(query).run(...values);
-          return { meta: { changes: result.changes } };
+          const statement = sqlite.prepare<unknown, LocalBinding[]>(query);
+          if (/^\s*SELECT\b/i.test(query)) {
+            return { results: statement.all(...values), meta: { changes: 0 } };
+          }
+          const result = statement.run(...values);
+          return { results: [], meta: { changes: result.changes } };
         },
         async first<T>(): Promise<T | null> {
           const row = (sqlite.prepare<T, LocalBinding[]>(query).get(...values) ?? null) as T | null;
@@ -85,11 +104,16 @@ function localD1(
     },
   });
   const runBatch = async (
-    statements: readonly { run(): Promise<{ meta: { changes: number } }> }[],
+    statements: readonly {
+      run(): Promise<{ readonly results?: readonly unknown[]; readonly meta: { changes: number } }>;
+    }[],
   ) => {
     sqlite.run("BEGIN");
     try {
-      const results: { meta: { changes: number } }[] = [];
+      const results: {
+        readonly results?: readonly unknown[];
+        readonly meta: { changes: number };
+      }[] = [];
       for (const statement of statements) results.push(await statement.run());
       sqlite.run("COMMIT");
       return results;
@@ -101,7 +125,14 @@ function localD1(
   let batchTail: Promise<void> = Promise.resolve();
   return {
     prepare,
-    batch(statements: readonly { run(): Promise<{ meta: { changes: number } }> }[]) {
+    batch(
+      statements: readonly {
+        run(): Promise<{
+          readonly results?: readonly unknown[];
+          readonly meta: { changes: number };
+        }>;
+      }[],
+    ) {
       if (options.serializeBatches !== true) return runBatch(statements);
       const result = batchTail.then(
         () => runBatch(statements),
@@ -132,10 +163,37 @@ function database(options: { readonly nullableDigest?: boolean } = {}): Database
 function deviceDatabase(): Database {
   const sqlite = database();
   sqlite.exec(readFileSync(DEVICE_MIGRATION, "utf8"));
+  sqlite.exec(readFileSync(DEVICE_HARDENING_MIGRATION, "utf8"));
   return sqlite;
 }
 
 const NOW = 1_786_000_000_000;
+
+class DeviceTestClock {
+  value = NOW;
+
+  now(): number {
+    return this.value;
+  }
+}
+
+function d1DeviceServiceFixture(): {
+  readonly clock: DeviceTestClock;
+  readonly service: EnrollmentService;
+  readonly sqlite: Database;
+} {
+  const clock = new DeviceTestClock();
+  const sqlite = deviceDatabase();
+  return {
+    clock,
+    sqlite,
+    service: new EnrollmentService({
+      clock,
+      store: new D1EnrollmentStore(localD1(sqlite)),
+      replayProtector: new AesGcmEnrollmentReplayProtector(new Uint8Array(32)),
+    }),
+  };
+}
 
 function record(id: string): EnrollmentRecord {
   return {
@@ -156,17 +214,24 @@ const KEY = "local-mint-collision-1";
 const DIGEST_A = "a".repeat(64);
 const DIGEST_B = "b".repeat(64);
 
-function deviceInput(suffix: string): DeviceCreateInput {
+function deviceInput(suffix: string, at = NOW): DeviceCreateInput {
+  let digestState = 2_166_136_261;
+  for (const byte of new TextEncoder().encode(suffix)) {
+    digestState ^= byte;
+    digestState = Math.imul(digestState, 16_777_619) >>> 0;
+  }
+  const userCodeHash = digestState.toString(16).padStart(8, "0").repeat(8);
   return {
     record: {
       enrollmentId: `ASIMP-EN-DEVICE-${suffix}`,
       sponsorId: "",
       secretHash: `device-secret-${suffix}`,
-      createdAt: NOW,
-      secretExpiresAt: NOW,
+      createdAt: at,
+      secretExpiresAt: at,
       requestedScopes: ["review"],
       requestedResources: {},
       kind: "device",
+      deviceExpiresAt: at + DEVICE_CODE_TTL_MS,
       invalidated: false,
     },
     proposal: {
@@ -176,13 +241,32 @@ function deviceInput(suffix: string): DeviceCreateInput {
       name: `device-${suffix.toLowerCase()}`,
       model: "test-model",
       harness: "codex",
-      createdAt: NOW,
-      expiresAt: NOW + 24 * 60 * 60_000,
+      createdAt: at,
+      expiresAt: at + 24 * 60 * 60_000,
       status: "pending",
       pollIntervalSeconds: 5,
     },
-    userCodeHash: `user-code-${suffix}`,
-    deviceExpiresAt: NOW + 30 * 60_000,
+    userCodeHash,
+    deviceExpiresAt: at + DEVICE_CODE_TTL_MS,
+    clientBucket: "b".repeat(64),
+    startWindowBeginning: at - DEVICE_START_RATE_LIMIT_WINDOW_MS,
+    startLimit: DEVICE_START_RATE_LIMIT_ATTEMPTS,
+    reclaimBatchSize: 100,
+  };
+}
+
+function deviceLookupAttempt(
+  sponsorId: string,
+  userCodeHash: string,
+  now = NOW,
+): DeviceLookupAttempt {
+  return {
+    sponsorId,
+    userCodeHash,
+    now,
+    windowBeginning: now - DEVICE_LOOKUP_LOCKOUT_WINDOW_MS,
+    failureLimit: DEVICE_LOOKUP_LOCKOUT_FAILURES,
+    reclaimBatchSize: 100,
   };
 }
 
@@ -194,7 +278,184 @@ function isUnboundDeviceProposalQuery(query: string): boolean {
   );
 }
 
+function expectHardeningMigrationGuardRollback(sqlite: Database): void {
+  const migration = readFileSync(DEVICE_HARDENING_MIGRATION, "utf8");
+  const guardCreateStart = migration.indexOf("CREATE TABLE device_flow_migration_guard");
+  const guardInsertStart = migration.indexOf("INSERT INTO device_flow_migration_guard");
+  const guardDropStart = migration.indexOf("DROP TABLE device_flow_migration_guard");
+  expect(guardCreateStart).toBeGreaterThan(0);
+  expect(guardInsertStart).toBeGreaterThan(guardCreateStart);
+  expect(guardDropStart).toBeGreaterThan(guardInsertStart);
+
+  let guardFailed = false;
+  sqlite.run("BEGIN");
+  try {
+    sqlite.exec(migration.slice(0, guardCreateStart));
+    sqlite.run(migration.slice(guardCreateStart, guardInsertStart));
+    try {
+      sqlite.prepare(migration.slice(guardInsertStart, guardDropStart)).run();
+    } catch {
+      guardFailed = true;
+    }
+  } finally {
+    sqlite.run("ROLLBACK");
+  }
+
+  expect(guardFailed).toBe(true);
+  const columns = sqlite
+    .prepare<{ name: string }, []>("PRAGMA table_info(enrollment_records)")
+    .all()
+    .map((column) => column.name);
+  expect(columns).not.toContain("device_expires_at");
+  expect(
+    sqlite
+      .prepare<{ n: number }, []>(
+        "SELECT COUNT(*) AS n FROM sqlite_master WHERE type = 'table' AND name = 'device_start_attempts'",
+      )
+      .get()?.n,
+  ).toBe(0);
+}
+
 describe("device enrollment first-decider SQL", () => {
+  test("0010 backfills a populated valid 0009 triple and installs its invariants", () => {
+    const sqlite = database();
+    sqlite.exec(readFileSync(DEVICE_MIGRATION, "utf8"));
+    const enrollmentId = "ASIMP-EN-DEVICE-legacy-valid";
+    const proposalId = "proposal-device-legacy-valid";
+    const deviceExpiresAt = NOW + DEVICE_CODE_TTL_MS;
+    sqlite
+      .prepare(
+        `INSERT INTO enrollment_records (
+           enrollment_id, sponsor_id, secret_hash, secret_expires_at,
+           requested_scopes_json, requested_resources_json, invalidated, created_at, kind
+         ) VALUES (?, '', ?, ?, '["review"]', '{}', 0, ?, 'device')`,
+      )
+      .run(enrollmentId, "legacy-valid-secret", NOW, NOW);
+    sqlite
+      .prepare(
+        `INSERT INTO enrollment_proposals (
+           proposal_id, enrollment_id, fellow_id, flow_handle_hash, name, model, harness,
+           created_at, expires_at, status, poll_interval_seconds
+         ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'pending', 5)`,
+      )
+      .run(
+        proposalId,
+        enrollmentId,
+        "fellow-device-legacy-valid",
+        "flow-device-legacy-valid",
+        "legacy-valid",
+        "test-model",
+        "codex",
+        NOW,
+        NOW + 24 * 60 * 60_000,
+      );
+    sqlite
+      .prepare(
+        "INSERT INTO device_codes (enrollment_id, user_code_hash, created_at, expires_at) VALUES (?, ?, ?, ?)",
+      )
+      .run(enrollmentId, "a".repeat(64), NOW, deviceExpiresAt);
+    sqlite
+      .prepare(
+        `INSERT INTO enrollment_idempotency (
+           scope, principal_scope, idempotency_key, request_digest,
+           response_ciphertext, response_initialization_vector, expires_at
+         ) VALUES ('mint', 'usr_legacy', 'legacy-replay', ?, 'ciphertext', 'iv', ?)`,
+      )
+      .run("c".repeat(64), NOW + 1);
+
+    sqlite.run("BEGIN");
+    sqlite.exec(readFileSync(DEVICE_HARDENING_MIGRATION, "utf8"));
+    sqlite.run("COMMIT");
+
+    expect(
+      sqlite
+        .prepare<
+          { device_expires_at: number | null; device_mapping_reclaimed_at: number | null },
+          [string]
+        >(
+          "SELECT device_expires_at, device_mapping_reclaimed_at FROM enrollment_records WHERE enrollment_id = ?",
+        )
+        .get(enrollmentId),
+    ).toEqual({ device_expires_at: deviceExpiresAt, device_mapping_reclaimed_at: null });
+    expect(() =>
+      sqlite
+        .prepare("UPDATE enrollment_records SET device_expires_at = ? WHERE enrollment_id = ?")
+        .run(deviceExpiresAt + 1, enrollmentId),
+    ).toThrow();
+    expect(() =>
+      sqlite
+        .prepare("UPDATE enrollment_records SET created_at = ? WHERE enrollment_id = ?")
+        .run(NOW + 1, enrollmentId),
+    ).toThrow("DEVICE_RECORD_CREATED_AT_IMMUTABLE");
+    expect(() =>
+      sqlite
+        .prepare("UPDATE enrollment_proposals SET expires_at = ? WHERE proposal_id = ?")
+        .run(NOW + 24 * 60 * 60_000 + 1, proposalId),
+    ).toThrow("DEVICE_PROPOSAL_EXPIRY_IMMUTABLE");
+    expect(() =>
+      sqlite
+        .prepare(
+          "UPDATE enrollment_records SET kind = 'join-url', device_expires_at = NULL WHERE enrollment_id = ?",
+        )
+        .run(enrollmentId),
+    ).toThrow();
+    expect(
+      sqlite
+        .prepare<{ n: number }, [string]>(
+          "SELECT COUNT(*) AS n FROM enrollment_proposals WHERE proposal_id = ? AND status = 'pending'",
+        )
+        .get(proposalId)?.n,
+    ).toBe(1);
+    expect(
+      sqlite
+        .prepare<{ request_digest: string }, []>(
+          "SELECT request_digest FROM enrollment_idempotency WHERE idempotency_key = 'legacy-replay'",
+        )
+        .get()?.request_digest,
+    ).toBe("c".repeat(64));
+    expect(() =>
+      sqlite
+        .prepare(
+          `INSERT INTO enrollment_idempotency (
+             scope, principal_scope, idempotency_key, request_digest,
+             response_ciphertext, response_initialization_vector, expires_at
+           ) VALUES ('device-start', 'source:test', 'device-replay', ?, 'ciphertext', 'iv', ?)`,
+        )
+        .run("d".repeat(64), NOW + 1),
+    ).not.toThrow();
+  });
+
+  test("0010 migration refuses a pre-existing device record without its proposal/code triple", () => {
+    const sqlite = database();
+    sqlite.exec(readFileSync(DEVICE_MIGRATION, "utf8"));
+    sqlite
+      .prepare(
+        `INSERT INTO enrollment_records (
+           enrollment_id, sponsor_id, secret_hash, secret_expires_at,
+           requested_scopes_json, requested_resources_json, invalidated, created_at, kind
+         ) VALUES (?, '', ?, ?, '[]', '{}', 0, ?, 'device')`,
+      )
+      .run("ASIMP-EN-DEVICE-legacy-impossible", "legacy-impossible-secret", NOW, NOW);
+
+    expectHardeningMigrationGuardRollback(sqlite);
+  });
+
+  test("0010 migration refuses a pre-existing enrollment kind outside its closed vocabulary", () => {
+    const sqlite = database();
+    sqlite.exec(readFileSync(DEVICE_MIGRATION, "utf8"));
+    sqlite.prepare("UPDATE enrollment_records SET kind = 'legacy-unknown'").run();
+    sqlite
+      .prepare(
+        `INSERT INTO enrollment_records (
+           enrollment_id, sponsor_id, secret_hash, secret_expires_at,
+           requested_scopes_json, requested_resources_json, invalidated, created_at, kind
+         ) VALUES (?, ?, ?, ?, '[]', '{}', 0, ?, 'legacy-unknown')`,
+      )
+      .run("ASIMP-EN-legacy-kind", "usr_legacy_kind", "legacy-kind-secret", NOW, NOW);
+
+    expectHardeningMigrationGuardRollback(sqlite);
+  });
+
   test("device polling expires at thirty minutes without rewriting the 24-hour proposal", async () => {
     const sqlite = deviceDatabase();
     const store = new D1EnrollmentStore(localD1(sqlite));
@@ -231,6 +492,241 @@ describe("device enrollment first-decider SQL", () => {
     ).toEqual({ expires_at: input.proposal.expiresAt, status: "pending" });
   });
 
+  test("D1 leaves one stable poll key free until approve, deny, or expiry is terminal", async () => {
+    const { clock, service, sqlite } = d1DeviceServiceFixture();
+    const sponsor = { type: "sponsor", sponsorId: "usr_stable_poll_d1" } as const;
+    const terminalCount = (): number =>
+      sqlite
+        .prepare<{ n: number }, []>(
+          "SELECT COUNT(*) AS n FROM enrollment_idempotency WHERE scope = 'poll'",
+        )
+        .get()?.n ?? -1;
+
+    const approveStart = await service.deviceStart(
+      {
+        name: "d1-stable-poll-approve",
+        model: "test-model",
+        harness: "codex",
+        requested_scopes: ["review"],
+      },
+      { trustedClientAddress: "198.51.100.61" },
+    );
+    const approveOptions = { idempotencyKey: "d1-stable-poll-approve-1" } as const;
+    expect(
+      (await service.poll({ flow_handle: approveStart.device_code }, approveOptions)).status,
+    ).toBe("authorization_pending");
+    expect(terminalCount()).toBe(0);
+    const approveCard = await service.deviceLookup(sponsor, {
+      user_code: approveStart.user_code,
+    });
+    await service.decide(sponsor, approveCard.enrollmentId, {
+      enrollment_id: approveCard.enrollmentId,
+      decision: "approve",
+    });
+    const approved = await service.poll({ flow_handle: approveStart.device_code }, approveOptions);
+    expect(approved.status).toBe("approved");
+    expect(await service.poll({ flow_handle: approveStart.device_code }, approveOptions)).toEqual(
+      approved,
+    );
+    expect(terminalCount()).toBe(1);
+
+    const denyStart = await service.deviceStart(
+      {
+        name: "d1-stable-poll-deny",
+        model: "test-model",
+        harness: "codex",
+        requested_scopes: ["review"],
+      },
+      { trustedClientAddress: "198.51.100.62" },
+    );
+    const denyOptions = { idempotencyKey: "d1-stable-poll-deny-1" } as const;
+    expect((await service.poll({ flow_handle: denyStart.device_code }, denyOptions)).status).toBe(
+      "authorization_pending",
+    );
+    expect(terminalCount()).toBe(1);
+    const denyCard = await service.deviceLookup(sponsor, { user_code: denyStart.user_code });
+    await service.decide(sponsor, denyCard.enrollmentId, {
+      enrollment_id: denyCard.enrollmentId,
+      decision: "deny",
+    });
+    expect(await service.poll({ flow_handle: denyStart.device_code }, denyOptions)).toEqual({
+      status: "access_denied",
+    });
+    expect(terminalCount()).toBe(2);
+
+    const expireStart = await service.deviceStart(
+      {
+        name: "d1-stable-poll-expire",
+        model: "test-model",
+        harness: "codex",
+        requested_scopes: ["review"],
+      },
+      { trustedClientAddress: "198.51.100.63" },
+    );
+    const expireOptions = { idempotencyKey: "d1-stable-poll-expire-1" } as const;
+    expect(
+      (await service.poll({ flow_handle: expireStart.device_code }, expireOptions)).status,
+    ).toBe("authorization_pending");
+    expect(terminalCount()).toBe(2);
+    clock.value += DEVICE_CODE_TTL_MS;
+    expect(await service.poll({ flow_handle: expireStart.device_code }, expireOptions)).toEqual({
+      status: "expired_token",
+    });
+    expect(terminalCount()).toBe(3);
+  });
+
+  test("D1 same-key terminal polls recover after both replay preflights miss", async () => {
+    const clock = new DeviceTestClock();
+    const sqlite = deviceDatabase();
+    let preflightReaders = 0;
+    let releasePreflights: (() => void) | undefined;
+    const bothPreflightsRead = new Promise<void>((resolve) => {
+      releasePreflights = resolve;
+    });
+    const db = localD1(sqlite, {
+      serializeBatches: true,
+      afterFirstRead: async (query) => {
+        if (!query.includes("FROM enrollment_idempotency")) return;
+        preflightReaders += 1;
+        if (preflightReaders === 2) releasePreflights?.();
+        await bothPreflightsRead;
+      },
+    });
+    const service = new EnrollmentService({
+      clock,
+      store: new D1EnrollmentStore(db),
+      replayProtector: new AesGcmEnrollmentReplayProtector(new Uint8Array(32)),
+    });
+    const sponsor = { type: "sponsor", sponsorId: "usr_poll_race_d1" } as const;
+    const started = await service.deviceStart(
+      {
+        name: "d1-poll-race-replay",
+        model: "test-model",
+        harness: "codex",
+        requested_scopes: ["review"],
+      },
+      { trustedClientAddress: "198.51.100.64" },
+    );
+    const card = await service.deviceLookup(sponsor, { user_code: started.user_code });
+    await service.decide(sponsor, card.enrollmentId, {
+      enrollment_id: card.enrollmentId,
+      decision: "approve",
+    });
+    const options = { idempotencyKey: "d1-poll-race-replay-1" } as const;
+    const results = await Promise.all([
+      service.poll({ flow_handle: started.device_code }, options),
+      service.poll({ flow_handle: started.device_code }, options),
+    ]);
+    expect(results[0]).toEqual(results[1]);
+    expect(results[0]?.status).toBe("approved");
+    expect(preflightReaders).toBeGreaterThanOrEqual(3);
+    expect(
+      sqlite
+        .prepare<{ n: number }, []>(
+          "SELECT COUNT(*) AS n FROM enrollment_idempotency WHERE scope = 'poll'",
+        )
+        .get()?.n,
+    ).toBe(1);
+  });
+
+  test("versioned poll replay ignores legacy transients but recovers a legacy issued token", async () => {
+    const clock = new DeviceTestClock();
+    const sqlite = deviceDatabase();
+    const protector = new AesGcmEnrollmentReplayProtector(new Uint8Array(32));
+    const service = new EnrollmentService({
+      clock,
+      store: new D1EnrollmentStore(localD1(sqlite)),
+      replayProtector: protector,
+    });
+    const sponsor = { type: "sponsor", sponsorId: "usr_legacy_poll_replay_d1" } as const;
+    const insertLegacyReplay = async (
+      flowHandle: string,
+      key: string,
+      replayResponse: unknown,
+    ): Promise<void> => {
+      const flowHash = createHash("sha256").update(flowHandle).digest("hex");
+      const digest = createHash("sha256")
+        .update(JSON.stringify({ flow_handle: flowHandle }))
+        .digest("hex");
+      const encrypted = await protector.seal(JSON.stringify(replayResponse));
+      sqlite
+        .prepare(
+          `INSERT INTO enrollment_idempotency (
+             scope, principal_scope, idempotency_key, request_digest,
+             response_ciphertext, response_initialization_vector, expires_at
+           ) VALUES ('poll', ?, ?, ?, ?, ?, ?)`,
+        )
+        .run(
+          `flow:${flowHash}`,
+          key,
+          digest,
+          encrypted.ciphertext,
+          encrypted.initializationVector,
+          clock.value + 24 * 60 * 60_000,
+        );
+    };
+
+    const pendingStart = await service.deviceStart(
+      {
+        name: "legacy-pending-replay",
+        model: "test-model",
+        harness: "codex",
+        requested_scopes: ["review"],
+      },
+      { trustedClientAddress: "198.51.100.65" },
+    );
+    const pendingKey = "legacy-pending-replay-1";
+    const pending = await service.poll(
+      { flow_handle: pendingStart.device_code },
+      { idempotencyKey: pendingKey },
+    );
+    expect(pending.status).toBe("authorization_pending");
+    await insertLegacyReplay(pendingStart.device_code, pendingKey, pending);
+    const pendingCard = await service.deviceLookup(sponsor, {
+      user_code: pendingStart.user_code,
+    });
+    await service.decide(sponsor, pendingCard.enrollmentId, {
+      enrollment_id: pendingCard.enrollmentId,
+      decision: "deny",
+    });
+    expect(
+      await service.poll({ flow_handle: pendingStart.device_code }, { idempotencyKey: pendingKey }),
+    ).toEqual({ status: "access_denied" });
+
+    const issuedStart = await service.deviceStart(
+      {
+        name: "legacy-issued-replay",
+        model: "test-model",
+        harness: "codex",
+        requested_scopes: ["review"],
+      },
+      { trustedClientAddress: "198.51.100.66" },
+    );
+    const issuedCard = await service.deviceLookup(sponsor, { user_code: issuedStart.user_code });
+    await service.decide(sponsor, issuedCard.enrollmentId, {
+      enrollment_id: issuedCard.enrollmentId,
+      decision: "approve",
+    });
+    const issued = await service.poll({ flow_handle: issuedStart.device_code });
+    expect(issued.status).toBe("approved");
+    const issuedKey = "legacy-issued-replay-1";
+    await insertLegacyReplay(issuedStart.device_code, issuedKey, issued);
+    expect(
+      await service.poll({ flow_handle: issuedStart.device_code }, { idempotencyKey: issuedKey }),
+    ).toEqual(issued);
+
+    const principalScopes = sqlite
+      .prepare<{ principal_scope: string }, []>(
+        "SELECT principal_scope FROM enrollment_idempotency WHERE scope = 'poll' ORDER BY principal_scope",
+      )
+      .all()
+      .map((row) => row.principal_scope);
+    expect(principalScopes.filter((scope) => scope.startsWith("flow:"))).toHaveLength(2);
+    expect(principalScopes.filter((scope) => scope.startsWith("flow-terminal-v1:"))).toHaveLength(
+      1,
+    );
+  });
+
   test("a device proposal whose code mapping disappeared fails closed", async () => {
     const sqlite = deviceDatabase();
     const store = new D1EnrollmentStore(localD1(sqlite));
@@ -251,6 +747,294 @@ describe("device enrollment first-decider SQL", () => {
     ).rejects.toMatchObject({ code: "FLOW_INVALID" } satisfies Partial<EnrollmentError>);
   });
 
+  test("concurrent D1 lookup failures admit exactly five rows and atomically lock the sixth", async () => {
+    const sqlite = deviceDatabase();
+    const store = new D1EnrollmentStore(localD1(sqlite, { serializeBatches: true }));
+    const input = deviceInput("atomic-lookup");
+    await store.deviceCreate(input);
+    const sponsorId = "usr_atomic_lookup";
+    const unknownHash = "f".repeat(64);
+    const outcomes = await Promise.allSettled(
+      Array.from({ length: DEVICE_LOOKUP_LOCKOUT_FAILURES + 1 }, () =>
+        store.deviceLookup(deviceLookupAttempt(sponsorId, unknownHash)),
+      ),
+    );
+    const codes = outcomes
+      .map((outcome) =>
+        outcome.status === "rejected" &&
+        typeof outcome.reason === "object" &&
+        outcome.reason !== null &&
+        "code" in outcome.reason
+          ? String(outcome.reason.code)
+          : "UNEXPECTED_SUCCESS",
+      )
+      .sort();
+    expect(codes).toEqual([
+      "DEVICE_CODE_UNKNOWN",
+      "DEVICE_CODE_UNKNOWN",
+      "DEVICE_CODE_UNKNOWN",
+      "DEVICE_CODE_UNKNOWN",
+      "DEVICE_CODE_UNKNOWN",
+      "DEVICE_LOOKUP_LOCKED",
+    ]);
+    expect(
+      sqlite
+        .prepare<{ n: number }, [string]>(
+          "SELECT COUNT(*) AS n FROM device_lookup_attempts WHERE sponsor_id = ? AND success = 0",
+        )
+        .get(sponsorId)?.n,
+    ).toBe(DEVICE_LOOKUP_LOCKOUT_FAILURES);
+    await expect(
+      store.deviceLookup(deviceLookupAttempt(sponsorId, input.userCodeHash)),
+    ).rejects.toMatchObject({ code: "DEVICE_LOOKUP_LOCKED" });
+
+    const reopenedAt = NOW + DEVICE_LOOKUP_LOCKOUT_WINDOW_MS + 1;
+    await expect(
+      store.deviceLookup(deviceLookupAttempt(sponsorId, input.userCodeHash, reopenedAt)),
+    ).resolves.toMatchObject({ name: input.proposal.name });
+    expect(
+      sqlite
+        .prepare<{ n: number }, [string]>(
+          "SELECT COUNT(*) AS n FROM device_lookup_attempts WHERE sponsor_id = ? AND success = 0",
+        )
+        .get(sponsorId)?.n,
+    ).toBe(0);
+  });
+
+  test("repeated successful D1 lookups create no rate-table rows", async () => {
+    const sqlite = deviceDatabase();
+    const store = new D1EnrollmentStore(localD1(sqlite));
+    const input = deviceInput("successful-lookup-no-write");
+    await store.deviceCreate(input);
+
+    for (let attempt = 0; attempt < 100; attempt += 1) {
+      await expect(
+        store.deviceLookup(deviceLookupAttempt("usr_success_lookup", input.userCodeHash)),
+      ).resolves.toMatchObject({ proposalId: input.proposal.proposalId });
+    }
+
+    expect(
+      sqlite.prepare<{ n: number }, []>("SELECT COUNT(*) AS n FROM device_lookup_attempts").get()
+        ?.n,
+    ).toBe(0);
+  });
+
+  test("D1 source throttling is transactional, isolated, and reopens after its window", async () => {
+    const sqlite = deviceDatabase();
+    const store = new D1EnrollmentStore(localD1(sqlite));
+    const bucket = "b".repeat(64);
+    for (let index = 0; index < DEVICE_START_RATE_LIMIT_ATTEMPTS; index += 1) {
+      await store.deviceCreate({ ...deviceInput(`rate-${index}`), clientBucket: bucket });
+    }
+    await expect(
+      store.deviceCreate({ ...deviceInput("rate-refused"), clientBucket: bucket }),
+    ).rejects.toMatchObject({ code: "DEVICE_START_RATE_LIMITED" });
+    expect(
+      sqlite
+        .prepare<{ n: number }, [string]>(
+          "SELECT COUNT(*) AS n FROM device_start_attempts WHERE client_bucket = ?",
+        )
+        .get(bucket)?.n,
+    ).toBe(DEVICE_START_RATE_LIMIT_ATTEMPTS);
+    expect(recordExists(sqlite, deviceInput("rate-refused").record.enrollmentId)).toBe(false);
+
+    await expect(
+      store.deviceCreate({ ...deviceInput("other-source"), clientBucket: "c".repeat(64) }),
+    ).resolves.toBeUndefined();
+    const reopenedAt = NOW + DEVICE_START_RATE_LIMIT_WINDOW_MS + 1;
+    await expect(
+      store.deviceCreate({
+        ...deviceInput("rate-reopened", reopenedAt),
+        clientBucket: bucket,
+      }),
+    ).resolves.toBeUndefined();
+  });
+
+  test("D1 identifier collisions are typed and consume no source slot", async () => {
+    const sqlite = deviceDatabase();
+    const store = new D1EnrollmentStore(localD1(sqlite));
+    const first = deviceInput("typed-identifier-collision-first");
+    const collision = {
+      ...deviceInput("typed-identifier-collision-second"),
+      userCodeHash: first.userCodeHash,
+    };
+    await store.deviceCreate(first);
+
+    await expect(store.deviceCreate(collision)).rejects.toBeInstanceOf(
+      EnrollmentIdentifierCollisionError,
+    );
+
+    expect(recordExists(sqlite, collision.record.enrollmentId)).toBe(false);
+    expect(
+      sqlite.prepare<{ n: number }, []>("SELECT COUNT(*) AS n FROM device_start_attempts").get()?.n,
+    ).toBe(1);
+  });
+
+  test("device-start idempotency conflicts roll back both the product and rate reservation", async () => {
+    const sqlite = deviceDatabase();
+    const store = new D1EnrollmentStore(localD1(sqlite));
+    const first = deviceInput("device-idempotency-first");
+    const conflicting = deviceInput("device-idempotency-conflict");
+    await store.deviceCreate(first, deviceWrite(DIGEST_A, "device-first"));
+    const before = replayRow(sqlite);
+
+    await expect(
+      store.deviceCreate(conflicting, deviceWrite(DIGEST_B, "device-conflict")),
+    ).rejects.toMatchObject({ code: "IDEMPOTENCY_CONFLICT" } satisfies Partial<EnrollmentError>);
+
+    expect(recordExists(sqlite, first.record.enrollmentId)).toBe(true);
+    expect(recordExists(sqlite, conflicting.record.enrollmentId)).toBe(false);
+    expect(replayRow(sqlite)).toEqual(before);
+    expect(
+      sqlite.prepare<{ n: number }, []>("SELECT COUNT(*) AS n FROM device_start_attempts").get()?.n,
+    ).toBe(1);
+  });
+
+  test("same-key replay wins over the source limit when another caller fills slot ten", async () => {
+    const sqlite = deviceDatabase();
+    const store = new D1EnrollmentStore(localD1(sqlite));
+    for (let index = 0; index < DEVICE_START_RATE_LIMIT_ATTEMPTS - 1; index += 1) {
+      await store.deviceCreate(deviceInput(`replay-edge-fill-${index}`));
+    }
+    const winner = deviceInput("replay-edge-winner");
+    const loser = deviceInput("replay-edge-loser");
+    await store.deviceCreate(winner, deviceWrite(DIGEST_A, "edge-winner"));
+
+    await expect(
+      store.deviceCreate(loser, deviceWrite(DIGEST_A, "edge-loser")),
+    ).rejects.toBeInstanceOf(EnrollmentIdempotencyRaceError);
+
+    expect(recordExists(sqlite, winner.record.enrollmentId)).toBe(true);
+    expect(recordExists(sqlite, loser.record.enrollmentId)).toBe(false);
+    expect(
+      sqlite.prepare<{ n: number }, []>("SELECT COUNT(*) AS n FROM device_start_attempts").get()?.n,
+    ).toBe(DEVICE_START_RATE_LIMIT_ATTEMPTS);
+  });
+
+  test("stale start-attempt reclamation is capped per transaction", async () => {
+    const sqlite = deviceDatabase();
+    const store = new D1EnrollmentStore(localD1(sqlite));
+    const staleAt = NOW - DEVICE_START_RATE_LIMIT_WINDOW_MS - 1;
+    const insert = sqlite.prepare(
+      "INSERT INTO device_start_attempts (client_bucket, attempted_at) VALUES (?, ?)",
+    );
+    for (let index = 0; index < 125; index += 1) {
+      insert.run(index.toString(16).padStart(64, "0"), staleAt);
+    }
+
+    await store.deviceCreate(deviceInput("bounded-start-reclaim"));
+
+    expect(
+      sqlite
+        .prepare<{ n: number }, [number]>(
+          "SELECT COUNT(*) AS n FROM device_start_attempts WHERE attempted_at = ?",
+        )
+        .get(staleAt)?.n,
+    ).toBe(25);
+    expect(
+      sqlite.prepare<{ n: number }, []>("SELECT COUNT(*) AS n FROM device_start_attempts").get()?.n,
+    ).toBe(26);
+  });
+
+  test("authorized mapping cleanup retains the live proposal and a durable expired poll verdict", async () => {
+    const sqlite = deviceDatabase();
+    const store = new D1EnrollmentStore(localD1(sqlite));
+    const input = deviceInput("reclaimed-mapping");
+    await store.deviceCreate(input);
+    const cleanupAt = input.deviceExpiresAt;
+    await store.deviceCreate({
+      ...deviceInput("cleanup-trigger", cleanupAt),
+      clientBucket: "d".repeat(64),
+    });
+
+    expect(
+      sqlite
+        .prepare<{ n: number }, [string]>(
+          "SELECT COUNT(*) AS n FROM device_codes WHERE enrollment_id = ?",
+        )
+        .get(input.record.enrollmentId)?.n,
+    ).toBe(0);
+    expect(
+      sqlite
+        .prepare<
+          { device_mapping_reclaimed_at: number | null; device_expires_at: number | null },
+          [string]
+        >(
+          `SELECT device_mapping_reclaimed_at, device_expires_at
+             FROM enrollment_records WHERE enrollment_id = ?`,
+        )
+        .get(input.record.enrollmentId),
+    ).toEqual({
+      device_mapping_reclaimed_at: cleanupAt,
+      device_expires_at: input.deviceExpiresAt,
+    });
+    expect(() =>
+      sqlite
+        .prepare(
+          "UPDATE enrollment_records SET device_mapping_reclaimed_at = NULL WHERE enrollment_id = ?",
+        )
+        .run(input.record.enrollmentId),
+    ).toThrow("DEVICE_MAPPING_RECLAMATION_IMMUTABLE");
+    expect(() =>
+      sqlite
+        .prepare(
+          "UPDATE enrollment_records SET device_mapping_reclaimed_at = ? WHERE enrollment_id = ?",
+        )
+        .run(cleanupAt + 1, input.record.enrollmentId),
+    ).toThrow("DEVICE_MAPPING_RECLAMATION_IMMUTABLE");
+    expect(
+      sqlite
+        .prepare<{ status: string; expires_at: number }, [string]>(
+          "SELECT status, expires_at FROM enrollment_proposals WHERE proposal_id = ?",
+        )
+        .get(input.proposal.proposalId),
+    ).toEqual({ status: "pending", expires_at: input.proposal.expiresAt });
+    await expect(
+      store.poll({
+        flowHandleHash: input.proposal.flowHandleHash,
+        now: cleanupAt,
+        createToken: async () => {
+          throw new Error("reclaimed expired mapping reached the token factory");
+        },
+      }),
+    ).resolves.toEqual({ kind: "expired" });
+  });
+
+  test("0010 rejects impossible device triples and rolls back the source reservation", async () => {
+    const sqlite = deviceDatabase();
+    const store = new D1EnrollmentStore(localD1(sqlite));
+    const input = deviceInput("impossible-expiry");
+    await expect(
+      store.deviceCreate({
+        ...input,
+        proposal: { ...input.proposal, expiresAt: input.deviceExpiresAt - 1 },
+      }),
+    ).rejects.toBeInstanceOf(EnrollmentPersistenceError);
+    expect(recordExists(sqlite, input.record.enrollmentId)).toBe(false);
+    expect(
+      sqlite.prepare<{ n: number }, []>("SELECT COUNT(*) AS n FROM device_start_attempts").get()?.n,
+    ).toBe(0);
+    expect(() =>
+      sqlite
+        .prepare("INSERT INTO device_start_attempts (client_bucket, attempted_at) VALUES (?, ?)")
+        .run("198.51.100.8", NOW),
+    ).toThrow();
+  });
+
+  test("persisted device-card corruption is operational, not a policy refusal", async () => {
+    const sqlite = deviceDatabase();
+    const store = new D1EnrollmentStore(localD1(sqlite));
+    const input = deviceInput("corrupt-card");
+    await store.deviceCreate(input);
+    sqlite
+      .prepare("UPDATE enrollment_records SET requested_scopes_json = '[]' WHERE enrollment_id = ?")
+      .run(input.record.enrollmentId);
+
+    await expect(
+      store.deviceApprovalCardForDecision(input.record.enrollmentId, NOW),
+    ).rejects.toBeInstanceOf(EnrollmentPersistenceError);
+  });
+
   test("a stale loaded card cannot bind a sponsor after its device code expires", async () => {
     const sqlite = deviceDatabase();
     const store = new D1EnrollmentStore(localD1(sqlite));
@@ -264,7 +1048,7 @@ describe("device enrollment first-decider SQL", () => {
         decision: { enrollment_id: input.record.enrollmentId, decision: "approve" },
         now: input.deviceExpiresAt,
       }),
-    ).rejects.toMatchObject({ code: "PROPOSAL_NOT_PENDING" } satisfies Partial<EnrollmentError>);
+    ).rejects.toMatchObject({ code: "PAIRING_INVALID" } satisfies Partial<EnrollmentError>);
 
     expect(
       sqlite
@@ -409,6 +1193,14 @@ function write(digest: string, marker: string, now = NOW) {
       ciphertext: `ciphertext-${marker}`,
       initializationVector: `iv-${marker}`,
     },
+  };
+}
+
+function deviceWrite(digest: string, marker: string, now = NOW) {
+  return {
+    ...write(digest, marker, now),
+    scope: "device-start" as const,
+    principalScope: `source:${"b".repeat(64)}`,
   };
 }
 

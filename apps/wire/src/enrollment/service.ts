@@ -41,6 +41,15 @@ const MAX_USER_CODE_RANDOM_BATCHES = 8;
 export const DEVICE_CODE_TTL_MS = 30 * 60 * 1_000;
 export const DEVICE_LOOKUP_LOCKOUT_FAILURES = 5;
 export const DEVICE_LOOKUP_LOCKOUT_WINDOW_MS = 15 * 60 * 1_000;
+export const DEVICE_START_RATE_LIMIT_ATTEMPTS = 10;
+export const DEVICE_START_RATE_LIMIT_WINDOW_MS = 15 * 60 * 1_000;
+const DEVICE_RECLAIM_BATCH_SIZE = 100;
+const ENROLLMENT_KEY_DERIVATION_SALT = new TextEncoder().encode(
+  "asimposium-enrollment-key-derivation-v1",
+);
+const ENROLLMENT_REPLAY_KEY_INFO = new TextEncoder().encode("encrypted-replay-aes-gcm-v1");
+const DEVICE_SOURCE_BUCKET_KEY_INFO = new TextEncoder().encode("device-source-bucket-hmac-v1");
+const POLL_TERMINAL_REPLAY_PRINCIPAL_VERSION = "flow-terminal-v1";
 
 function generateUserCode(random: EnrollmentRandom): string {
   const chars: string[] = [];
@@ -81,6 +90,7 @@ export type EnrollmentErrorCode =
   | "DEVICE_CODE_UNKNOWN"
   | "DEVICE_LOOKUP_BODY_INVALID"
   | "DEVICE_LOOKUP_LOCKED"
+  | "DEVICE_START_RATE_LIMITED"
   | "PAIRING_EXPIRED"
   | "PAIRING_INVALID"
   | "PROPOSAL_EXPIRED"
@@ -119,6 +129,14 @@ export class EnrollmentPersistenceError extends Error {
   constructor() {
     super("enrollment persistence is unavailable");
     this.name = "EnrollmentPersistenceError";
+  }
+}
+
+/** A proven opaque-identifier collision whose transaction did not commit. */
+export class EnrollmentIdentifierCollisionError extends Error {
+  constructor() {
+    super("enrollment identifier collision");
+    this.name = "EnrollmentIdentifierCollisionError";
   }
 }
 
@@ -165,9 +183,20 @@ export interface EnrollmentWriteOptions {
   readonly idempotencyKey?: string;
 }
 
+export interface DeviceStartOptions extends EnrollmentWriteOptions {
+  /**
+   * Cloudflare's canonical client address. The service HMAC-buckets it before it
+   * reaches storage; callers must never pass X-Forwarded-For or a raw
+   * user-controlled bucket name here.
+   */
+  readonly trustedClientAddress: string;
+}
+
 export interface EnrollmentReplayProtector {
   seal(plaintext: string): Promise<EncryptedEnrollmentReplay>;
   open(encrypted: EncryptedEnrollmentReplay): Promise<string>;
+  /** Stable keyed bucket; a D1 read alone must not reveal an enumerable IPv4 source. */
+  sourceBucket(trustedClientAddress: string): Promise<string>;
 }
 
 /** Stored in D1; neither field is a plaintext credential or protocol response. */
@@ -238,6 +267,10 @@ export interface EnrollmentRecord {
   readonly requestedResources: EnrollmentResourceGrants;
   /** W3.5: join-URL enrollments are minted by a sponsor; device enrollments bind at decision. */
   readonly kind?: "join-url" | "device";
+  /** Durable poll expiry; retained after the short human-code mapping is reclaimed. */
+  readonly deviceExpiresAt?: number;
+  /** Present only after bounded authorized cleanup removes the expired mapping. */
+  readonly deviceMappingReclaimedAt?: number;
   invalidated: boolean;
   secretConsumedAt?: number;
   proposal?: ProposalRecord;
@@ -249,6 +282,20 @@ export interface DeviceCreateInput {
   readonly proposal: ProposalRecord;
   readonly userCodeHash: string;
   readonly deviceExpiresAt: number;
+  /** Keyed HMAC-SHA-256 source bucket; never a raw client address. */
+  readonly clientBucket: string;
+  readonly startWindowBeginning: number;
+  readonly startLimit: number;
+  readonly reclaimBatchSize: number;
+}
+
+export interface DeviceLookupAttempt {
+  readonly sponsorId: string;
+  readonly userCodeHash: string;
+  readonly now: number;
+  readonly windowBeginning: number;
+  readonly failureLimit: number;
+  readonly reclaimBatchSize: number;
 }
 
 export interface ProposalRecord {
@@ -332,9 +379,10 @@ export interface PollAttempt {
   readonly now: number;
   readonly createToken: () => Promise<TokenFactoryResult>;
   /**
-   * The store invokes this after it knows the protocol result and immediately
-   * before its D1 batch commits that result.  The callback seals the exact
-   * response; only its ciphertext reaches D1.
+   * The store invokes this only after it knows a terminal protocol result and
+   * immediately before its D1 batch commits that result. Pending and slow-down
+   * observations deliberately leave the stable key free. The callback seals
+   * the exact terminal response; only its ciphertext reaches D1.
    */
   readonly replayFor?: (decision: PollDecision) => Promise<EnrollmentIdempotencyWrite | undefined>;
 }
@@ -346,7 +394,7 @@ export interface PollDecision {
 }
 
 export interface IdempotencyAttempt {
-  readonly scope: "mint" | "claim" | "decision" | "poll";
+  readonly scope: "mint" | "claim" | "decision" | "poll" | "device-start";
   readonly principalScope: string;
   readonly key: string;
   readonly digest: string;
@@ -405,18 +453,15 @@ export interface EnrollmentStore {
    */
   bootstrapSponsor(sponsorId: string, now: number): Promise<boolean>;
   /** W3.5: create a device enrollment, its pending proposal, and the user-code mapping, atomically. */
-  deviceCreate(input: DeviceCreateInput): Promise<void>;
-  /** W3.5: the pending card behind a human-typed user code; undefined when unknown, used, or expired. */
-  deviceCardByUserCode(
-    userCodeHash: string,
-    now: number,
-  ): Promise<EnrollmentApprovalCard | undefined>;
+  deviceCreate(input: DeviceCreateInput, idempotency?: EnrollmentIdempotencyWrite): Promise<void>;
+  /**
+   * W3.5: atomically enforce the sponsor lockout, resolve the pending card,
+   * and persist exactly one failed lookup. Successful lookups do not grow the
+   * failure ledger. Unknown codes and lockout remain opaque EnrollmentErrors.
+   */
+  deviceLookup(attempt: DeviceLookupAttempt): Promise<EnrollmentApprovalCard>;
   /** W3.5: the decision-path card for an unbound device enrollment (kind=device, no sponsor yet). */
   deviceApprovalCardForDecision(enrollmentId: string, now: number): Promise<EnrollmentApprovalCard>;
-  /** W3.5: failed user-code lookups inside the lockout window. */
-  recentDeviceLookupFailures(sponsorId: string, sinceMs: number, now: number): Promise<number>;
-  /** W3.5: record one lookup outcome for the lockout window. */
-  recordDeviceLookup(sponsorId: string, success: boolean, now: number): Promise<void>;
   capsule(enrollmentId: string, now: number): Promise<EnrollmentCapsule>;
   poll(attempt: PollAttempt): Promise<PollDecision>;
   availabilitySuggestions(name: string): Promise<readonly string[]>;
@@ -471,13 +516,15 @@ function base64UrlToBytes(value: string): Uint8Array {
 }
 
 /**
- * AES-GCM envelope for idempotent response replay. The caller supplies a
- * stable 256-bit key from deployment configuration; only ciphertext and a
- * random IV enter D1.  There is deliberately no random default: an isolate
- * restart must be able to decrypt a committed response.
+ * AES-GCM envelope for idempotent response replay. The caller supplies one
+ * stable 256-bit deployment root. HKDF derives separate AES replay and HMAC
+ * source-bucket keys; only ciphertext, a random IV, and keyed source buckets
+ * enter D1. There is deliberately no random default: an isolate restart must
+ * reproduce both derived keys.
  */
 export class AesGcmEnrollmentReplayProtector implements EnrollmentReplayProtector {
-  readonly #key: Uint8Array;
+  readonly #replayKey: Promise<CryptoKey>;
+  readonly #sourceBucketKey: Promise<CryptoKey>;
   readonly #random: EnrollmentRandom;
 
   constructor(key: Uint8Array, random: EnrollmentRandom = systemRandom) {
@@ -488,16 +535,45 @@ export class AesGcmEnrollmentReplayProtector implements EnrollmentReplayProtecto
     // pooled backing allocation through `.buffer`. Own an exact plain typed
     // array so caller mutation cannot rotate the replay key after construction
     // and WebCrypto receives exactly 32 bytes.
-    this.#key = new Uint8Array(key.length);
-    this.#key.set(key);
+    const rootBytes = new Uint8Array(key.length);
+    rootBytes.set(key);
+    const rootKey = crypto.subtle.importKey("raw", rootBytes.slice().buffer, "HKDF", false, [
+      "deriveKey",
+    ]);
+    this.#replayKey = rootKey.then((material) =>
+      crypto.subtle.deriveKey(
+        {
+          name: "HKDF",
+          hash: "SHA-256",
+          salt: ENROLLMENT_KEY_DERIVATION_SALT,
+          info: ENROLLMENT_REPLAY_KEY_INFO,
+        },
+        material,
+        { name: "AES-GCM", length: 256 },
+        false,
+        ["encrypt", "decrypt"],
+      ),
+    );
+    this.#sourceBucketKey = rootKey.then((material) =>
+      crypto.subtle.deriveKey(
+        {
+          name: "HKDF",
+          hash: "SHA-256",
+          salt: ENROLLMENT_KEY_DERIVATION_SALT,
+          info: DEVICE_SOURCE_BUCKET_KEY_INFO,
+        },
+        material,
+        { name: "HMAC", hash: "SHA-256", length: 256 },
+        false,
+        ["sign"],
+      ),
+    );
     this.#random = random;
   }
 
   async seal(plaintext: string): Promise<EncryptedEnrollmentReplay> {
     const initializationVector = randomBytes(this.#random, 12);
-    const key = await crypto.subtle.importKey("raw", this.#key.slice().buffer, "AES-GCM", false, [
-      "encrypt",
-    ]);
+    const key = await this.#replayKey;
     const encoded = new TextEncoder().encode(plaintext);
     const ciphertext = await crypto.subtle.encrypt(
       { name: "AES-GCM", iv: initializationVector.slice().buffer },
@@ -517,9 +593,7 @@ export class AesGcmEnrollmentReplayProtector implements EnrollmentReplayProtecto
       if (initializationVector.length !== 12 || ciphertext.length < 16) {
         throw new TypeError("invalid encrypted replay envelope");
       }
-      const key = await crypto.subtle.importKey("raw", this.#key.slice().buffer, "AES-GCM", false, [
-        "decrypt",
-      ]);
+      const key = await this.#replayKey;
       const plaintext = await crypto.subtle.decrypt(
         { name: "AES-GCM", iv: initializationVector.slice().buffer },
         key,
@@ -529,6 +603,15 @@ export class AesGcmEnrollmentReplayProtector implements EnrollmentReplayProtecto
     } catch {
       throw new EnrollmentReplayConfigurationError();
     }
+  }
+
+  async sourceBucket(trustedClientAddress: string): Promise<string> {
+    const key = await this.#sourceBucketKey;
+    const material = new TextEncoder().encode(`device-start-source-v1\0${trustedClientAddress}`);
+    const signature = await crypto.subtle.sign("HMAC", key, material.slice().buffer);
+    return [...new Uint8Array(signature)]
+      .map((byte) => byte.toString(16).padStart(2, "0"))
+      .join("");
   }
 }
 
@@ -850,7 +933,10 @@ export class InMemoryEnrollmentStore implements EnrollmentStore {
   readonly #sponsors = new Map<string, { createdAt: number; lastSeenAt: number }>();
   readonly #deviceCodes = new Map<string, { enrollmentId: string; expiresAt: number }>();
   readonly #deviceCodeExpiresAtByEnrollment = new Map<string, number>();
-  readonly #deviceLookups: { sponsorId: string; at: number; success: boolean }[] = [];
+  readonly #activeDeviceMappingEnrollments = new Set<string>();
+  readonly #reclaimedDeviceMappingEnrollments = new Set<string>();
+  readonly #deviceStarts: { clientBucket: string; at: number }[] = [];
+  readonly #deviceLookupFailures: { sponsorId: string; at: number }[] = [];
   readonly #idempotency = new Map<
     string,
     {
@@ -927,7 +1013,11 @@ export class InMemoryEnrollmentStore implements EnrollmentStore {
       }
       if (isUnboundDevice) {
         const deviceCodeExpiresAt = this.#deviceCodeExpiresAtByEnrollment.get(record.enrollmentId);
-        if (deviceCodeExpiresAt === undefined || attempt.now >= deviceCodeExpiresAt) {
+        if (
+          deviceCodeExpiresAt === undefined ||
+          !this.#activeDeviceMappingEnrollments.has(record.enrollmentId) ||
+          attempt.now >= deviceCodeExpiresAt
+        ) {
           throw new EnrollmentError("PAIRING_INVALID");
         }
       }
@@ -1101,16 +1191,65 @@ export class InMemoryEnrollmentStore implements EnrollmentStore {
     });
   }
 
-  async deviceCreate(input: DeviceCreateInput): Promise<void> {
+  async deviceCreate(
+    input: DeviceCreateInput,
+    idempotency?: EnrollmentIdempotencyWrite,
+  ): Promise<void> {
     return this.serialized(() => {
+      if (idempotency !== undefined) {
+        const recordKey = `${idempotency.scope}:${idempotency.principalScope}:${idempotency.key}`;
+        const existing = this.#idempotency.get(recordKey);
+        if (existing !== undefined && idempotency.now < existing.expiresAt) {
+          throw new EnrollmentIdempotencyRaceError();
+        }
+      }
+      let reclaimed = 0;
+      for (
+        let index = 0;
+        index < this.#deviceStarts.length && reclaimed < input.reclaimBatchSize;
+      ) {
+        const entry = this.#deviceStarts[index];
+        if (entry !== undefined && entry.at < input.startWindowBeginning) {
+          this.#deviceStarts.splice(index, 1);
+          reclaimed += 1;
+        } else {
+          index += 1;
+        }
+      }
+      reclaimed = 0;
+      for (const [hash, mapping] of this.#deviceCodes) {
+        if (reclaimed >= input.reclaimBatchSize) break;
+        if (mapping.expiresAt <= input.record.createdAt) {
+          this.#deviceCodes.delete(hash);
+          this.#activeDeviceMappingEnrollments.delete(mapping.enrollmentId);
+          this.#reclaimedDeviceMappingEnrollments.add(mapping.enrollmentId);
+          reclaimed += 1;
+        }
+      }
+      const startsInWindow = this.#deviceStarts.filter(
+        (entry) =>
+          entry.clientBucket === input.clientBucket &&
+          entry.at >= input.startWindowBeginning &&
+          entry.at <= input.record.createdAt,
+      ).length;
+      if (startsInWindow >= input.startLimit) {
+        throw new EnrollmentError("DEVICE_START_RATE_LIMITED");
+      }
       if (
         this.#records.has(input.record.enrollmentId) ||
-        this.#deviceCodes.has(input.userCodeHash)
+        this.#deviceCodes.has(input.userCodeHash) ||
+        [...this.#records.values()].some(
+          (record) =>
+            record.proposal?.proposalId === input.proposal.proposalId ||
+            record.proposal?.fellowId === input.proposal.fellowId ||
+            record.proposal?.flowHandleHash === input.proposal.flowHandleHash,
+        )
       ) {
-        throw new EnrollmentPersistenceError();
+        throw new EnrollmentIdentifierCollisionError();
       }
       this.#records.set(input.record.enrollmentId, {
         ...input.record,
+        deviceExpiresAt: input.deviceExpiresAt,
         proposal: input.proposal,
       });
       this.#deviceCodes.set(input.userCodeHash, {
@@ -1118,23 +1257,64 @@ export class InMemoryEnrollmentStore implements EnrollmentStore {
         expiresAt: input.deviceExpiresAt,
       });
       this.#deviceCodeExpiresAtByEnrollment.set(input.record.enrollmentId, input.deviceExpiresAt);
+      this.#activeDeviceMappingEnrollments.add(input.record.enrollmentId);
+      this.#deviceStarts.push({ clientBucket: input.clientBucket, at: input.record.createdAt });
+      this.commitIdempotency(idempotency);
     });
   }
 
-  async deviceCardByUserCode(
-    userCodeHash: string,
-    now: number,
-  ): Promise<EnrollmentApprovalCard | undefined> {
+  async deviceLookup(attempt: DeviceLookupAttempt): Promise<EnrollmentApprovalCard> {
     return this.serialized(() => {
-      const code = this.#deviceCodes.get(userCodeHash);
-      if (code === undefined || now >= code.expiresAt) return undefined;
+      let reclaimed = 0;
+      for (
+        let index = 0;
+        index < this.#deviceLookupFailures.length && reclaimed < attempt.reclaimBatchSize;
+      ) {
+        const entry = this.#deviceLookupFailures[index];
+        if (entry !== undefined && entry.at < attempt.windowBeginning) {
+          this.#deviceLookupFailures.splice(index, 1);
+          reclaimed += 1;
+        } else {
+          index += 1;
+        }
+      }
+      reclaimed = 0;
+      for (const [hash, mapping] of this.#deviceCodes) {
+        if (reclaimed >= attempt.reclaimBatchSize) break;
+        if (mapping.expiresAt <= attempt.now) {
+          this.#deviceCodes.delete(hash);
+          this.#activeDeviceMappingEnrollments.delete(mapping.enrollmentId);
+          this.#reclaimedDeviceMappingEnrollments.add(mapping.enrollmentId);
+          reclaimed += 1;
+        }
+      }
+      const failures = this.#deviceLookupFailures.filter(
+        (entry) =>
+          entry.sponsorId === attempt.sponsorId &&
+          entry.at >= attempt.windowBeginning &&
+          entry.at <= attempt.now,
+      ).length;
+      if (failures >= attempt.failureLimit) {
+        throw new EnrollmentError("DEVICE_LOOKUP_LOCKED");
+      }
+      const code = this.#deviceCodes.get(attempt.userCodeHash);
+      if (code === undefined || attempt.now >= code.expiresAt) {
+        this.#deviceLookupFailures.push({ sponsorId: attempt.sponsorId, at: attempt.now });
+        throw new EnrollmentError("DEVICE_CODE_UNKNOWN");
+      }
       const record = this.#records.get(code.enrollmentId);
-      if (record === undefined || record.proposal === undefined) return undefined;
+      if (record === undefined || record.proposal === undefined) {
+        this.#deviceLookupFailures.push({ sponsorId: attempt.sponsorId, at: attempt.now });
+        throw new EnrollmentError("DEVICE_CODE_UNKNOWN");
+      }
       const proposal = record.proposal;
-      if (proposal.status === "pending" && now >= proposal.expiresAt) {
+      if (proposal.status === "pending" && attempt.now >= proposal.expiresAt) {
         proposal.status = "expired";
       }
-      if (proposal.status !== "pending") return undefined;
+      if (proposal.status !== "pending") {
+        this.#deviceLookupFailures.push({ sponsorId: attempt.sponsorId, at: attempt.now });
+        throw new EnrollmentError("DEVICE_CODE_UNKNOWN");
+      }
       return cardFromRecord(record);
     });
   }
@@ -1154,7 +1334,11 @@ export class InMemoryEnrollmentStore implements EnrollmentStore {
         throw new EnrollmentError("PAIRING_INVALID");
       }
       const deviceCodeExpiresAt = this.#deviceCodeExpiresAtByEnrollment.get(enrollmentId);
-      if (deviceCodeExpiresAt === undefined || now >= deviceCodeExpiresAt) {
+      if (
+        deviceCodeExpiresAt === undefined ||
+        !this.#activeDeviceMappingEnrollments.has(enrollmentId) ||
+        now >= deviceCodeExpiresAt
+      ) {
         throw new EnrollmentError("PAIRING_INVALID");
       }
       const proposal = record.proposal;
@@ -1162,29 +1346,6 @@ export class InMemoryEnrollmentStore implements EnrollmentStore {
         proposal.status = "expired";
       }
       return cardFromRecord(record);
-    });
-  }
-
-  async recentDeviceLookupFailures(
-    sponsorId: string,
-    sinceMs: number,
-    now: number,
-  ): Promise<number> {
-    return this.serialized(
-      () =>
-        this.#deviceLookups.filter(
-          (entry) =>
-            entry.sponsorId === sponsorId &&
-            !entry.success &&
-            entry.at >= sinceMs &&
-            entry.at <= now,
-        ).length,
-    );
-  }
-
-  async recordDeviceLookup(sponsorId: string, success: boolean, now: number): Promise<void> {
-    return this.serialized(() => {
-      this.#deviceLookups.push({ sponsorId, at: now, success });
     });
   }
 
@@ -1221,6 +1382,16 @@ export class InMemoryEnrollmentStore implements EnrollmentStore {
       if (record.kind === "device") {
         const deviceCodeExpiresAt = this.#deviceCodeExpiresAtByEnrollment.get(record.enrollmentId);
         if (deviceCodeExpiresAt === undefined) throw new EnrollmentError("FLOW_INVALID");
+        const mappingIsActive = this.#activeDeviceMappingEnrollments.has(record.enrollmentId);
+        const mappingWasReclaimed = this.#reclaimedDeviceMappingEnrollments.has(
+          record.enrollmentId,
+        );
+        if (!mappingIsActive && !mappingWasReclaimed) {
+          throw new EnrollmentError("FLOW_INVALID");
+        }
+        if (!mappingIsActive && attempt.now < deviceCodeExpiresAt) {
+          throw new EnrollmentError("FLOW_INVALID");
+        }
         if (attempt.now >= deviceCodeExpiresAt) {
           const decision: PollDecision = { kind: "expired" };
           const idempotency = await attempt.replayFor?.(decision);
@@ -1245,10 +1416,8 @@ export class InMemoryEnrollmentStore implements EnrollmentStore {
           pacing.kind === "slow-down"
             ? { kind: "slow-down", retryAfterSeconds: pacing.retryAfterSeconds }
             : { kind: "pending", retryAfterSeconds: pacing.retryAfterSeconds };
-        const idempotency = await attempt.replayFor?.(decision);
         proposal.pollIntervalSeconds = pacing.retryAfterSeconds;
         proposal.lastPollAt = attempt.now;
-        this.commitIdempotency(idempotency);
         return decision;
       }
       if (proposal.status === "denied") {
@@ -1699,7 +1868,10 @@ export class EnrollmentService {
    * law is screened here; a name already taken survives to the decision,
    * which answers NAME_TAKEN with available suggestions.
    */
-  async deviceStart(rawRequest: unknown): Promise<DeviceCodeStartResponse> {
+  async deviceStart(
+    rawRequest: unknown,
+    options: DeviceStartOptions,
+  ): Promise<DeviceCodeStartResponse> {
     const parsed = DeviceCodeStartRequestSchema.safeParse(rawRequest);
     if (!parsed.success) throw new EnrollmentError("DEVICE_CODE_BODY_INVALID");
     const nameFailure = enrollmentNameFailure(parsed.data.name);
@@ -1710,6 +1882,24 @@ export class EnrollmentService {
       );
     }
     const now = this.#clock.now();
+    const trustedClientAddress = options.trustedClientAddress.toLowerCase();
+    if (
+      trustedClientAddress.length < 2 ||
+      trustedClientAddress.length > 45 ||
+      !/^[0-9a-f:.]+$/.test(trustedClientAddress) ||
+      (!trustedClientAddress.includes(".") && !trustedClientAddress.includes(":"))
+    ) {
+      throw new EnrollmentPersistenceError();
+    }
+    const clientBucket = await this.#replayProtector.sourceBucket(trustedClientAddress);
+    const replay = await this.#prepareWrite<DeviceCodeStartResponse>(
+      "device-start",
+      `source:${clientBucket}`,
+      options.idempotencyKey,
+      parsed.data,
+      now,
+    );
+    if (replay.replay !== undefined) return await replay.replay;
     for (let attempt = 0; attempt < MAX_ID_ATTEMPTS; attempt += 1) {
       const enrollmentId = generateEnrollmentId(this.#random);
       const flowHandle = generateVersionedSecret("flow_v1", this.#random);
@@ -1744,27 +1934,45 @@ export class EnrollmentService {
         status: "pending",
         pollIntervalSeconds: INITIAL_POLL_INTERVAL_SECONDS,
       };
+      const result: DeviceCodeStartResponse = {
+        device_code: flowHandle,
+        user_code: userCode,
+        verification_url: "https://asimposium.org/approve",
+        interval_seconds: INITIAL_POLL_INTERVAL_SECONDS,
+        expires_in_seconds: DEVICE_CODE_TTL_MS / 1_000,
+      };
+      const idempotency = await this.#writeReplay(replay.attempt, result);
       try {
-        await this.#store.deviceCreate({
-          record,
-          proposal,
-          userCodeHash: await sha256Hex(userCode),
-          deviceExpiresAt: now + DEVICE_CODE_TTL_MS,
-        });
-        return {
-          device_code: flowHandle,
-          user_code: userCode,
-          verification_url: "https://asimposium.org/approve",
-          interval_seconds: INITIAL_POLL_INTERVAL_SECONDS,
-          expires_in_seconds: DEVICE_CODE_TTL_MS / 1_000,
-        };
+        await this.#store.deviceCreate(
+          {
+            record,
+            proposal,
+            userCodeHash: await sha256Hex(userCode),
+            deviceExpiresAt: now + DEVICE_CODE_TTL_MS,
+            clientBucket,
+            startWindowBeginning: now - DEVICE_START_RATE_LIMIT_WINDOW_MS,
+            startLimit: DEVICE_START_RATE_LIMIT_ATTEMPTS,
+            reclaimBatchSize: DEVICE_RECLAIM_BATCH_SIZE,
+          },
+          idempotency,
+        );
+        return result;
       } catch (error) {
-        // A user-code collision is the only retryable persistence failure.
-        if (error instanceof EnrollmentPersistenceError && attempt + 1 < MAX_ID_ATTEMPTS) continue;
+        if (error instanceof EnrollmentIdempotencyRaceError && replay.attempt !== undefined) {
+          return this.#readRaceReplay<DeviceCodeStartResponse>(replay.attempt);
+        }
+        if (error instanceof EnrollmentIdentifierCollisionError) {
+          if (attempt + 1 < MAX_ID_ATTEMPTS) continue;
+          throw new EnrollmentPersistenceError();
+        }
+        // A persistence failure may mean the transaction committed but its
+        // response was lost. Never retry it with fresh IDs: keyed calls recover
+        // through raceIfPresent above; unkeyed calls receive the operational
+        // refusal and can retry deliberately after observing it.
         throw error;
       }
     }
-    throw new EnrollmentError("PAIRING_INVALID");
+    throw new EnrollmentPersistenceError();
   }
 
   /**
@@ -1779,24 +1987,14 @@ export class EnrollmentService {
     const parsed = DeviceLookupRequestSchema.safeParse(rawRequest);
     if (!parsed.success) throw new EnrollmentError("DEVICE_LOOKUP_BODY_INVALID");
     const now = this.#clock.now();
-    const failures = await this.#store.recentDeviceLookupFailures(
-      sponsor.sponsorId,
-      now - DEVICE_LOOKUP_LOCKOUT_WINDOW_MS,
+    return this.#store.deviceLookup({
+      sponsorId: sponsor.sponsorId,
+      userCodeHash: await sha256Hex(parsed.data.user_code),
       now,
-    );
-    if (failures >= DEVICE_LOOKUP_LOCKOUT_FAILURES) {
-      throw new EnrollmentError("DEVICE_LOOKUP_LOCKED");
-    }
-    const card = await this.#store.deviceCardByUserCode(
-      await sha256Hex(parsed.data.user_code),
-      now,
-    );
-    if (card === undefined) {
-      await this.#store.recordDeviceLookup(sponsor.sponsorId, false, now);
-      throw new EnrollmentError("DEVICE_CODE_UNKNOWN");
-    }
-    await this.#store.recordDeviceLookup(sponsor.sponsorId, true, now);
-    return card;
+      windowBeginning: now - DEVICE_LOOKUP_LOCKOUT_WINDOW_MS,
+      failureLimit: DEVICE_LOOKUP_LOCKOUT_FAILURES,
+      reclaimBatchSize: DEVICE_RECLAIM_BATCH_SIZE,
+    });
   }
 
   async decide(
@@ -1829,6 +2027,13 @@ export class EnrollmentService {
       now,
     );
     if (replay.replay !== undefined) return;
+    const recoverCommittedDecision = async (): Promise<boolean> => {
+      if (replay.attempt === undefined) return false;
+      const completed = await this.#store.idempotencyReplay(replay.attempt);
+      if (completed === undefined) return false;
+      await this.#decodeReplay<{ readonly acknowledged: true }>(completed);
+      return true;
+    };
     let card: EnrollmentApprovalCard;
     try {
       card = await this.#store.approvalCard(enrollmentId, sponsor.sponsorId, now);
@@ -1838,9 +2043,15 @@ export class EnrollmentService {
         // Unbound device enrollment: the decision binds it, so the card fetch
         // runs off the sponsor gate (kind=device with no sponsor yet).
         card = await this.#store.deviceApprovalCardForDecision(enrollmentId, now);
-      } catch {
+      } catch (deviceError) {
         // Not an unbound device enrollment either: the original ownership
-        // refusal is the honest answer, not the device path's.
+        // refusal is the honest answer, not the device path's. Operational
+        // storage/decoding failures remain operational and must propagate.
+        if (!(deviceError instanceof EnrollmentError)) throw deviceError;
+        // A same-key winner can bind and commit between the ownership read and
+        // this unbound-device read. Its encrypted replay is the only evidence
+        // that turns the apparent state refusal into a successful retry.
+        if (await recoverCommittedDecision()) return;
         throw error;
       }
     }
@@ -1866,6 +2077,14 @@ export class EnrollmentService {
         await this.#readRaceReplay<{ readonly acknowledged: true }>(replay.attempt);
         return;
       }
+      if (
+        error instanceof EnrollmentError &&
+        (error.code === "PROPOSAL_NOT_PENDING" ||
+          error.code === "PROPOSAL_EXPIRED" ||
+          error.code === "WRONG_PRINCIPAL")
+      ) {
+        if (await recoverCommittedDecision()) return;
+      }
       throw error;
     }
   }
@@ -1880,31 +2099,64 @@ export class EnrollmentService {
     const flowHandleHash = await sha256Hex(parsed.data.flow_handle);
     const replay = await this.#prepareWrite<EnrollmentFlowResult>(
       "poll",
-      `flow:${flowHandleHash}`,
+      // Pre-fix Workers persisted pending/slow_down under `flow:<hash>`. A
+      // versioned terminal namespace makes those indistinguishable legacy rows
+      // unable to mask approval, denial, or expiry during a rolling upgrade.
+      `${POLL_TERMINAL_REPLAY_PRINCIPAL_VERSION}:${flowHandleHash}`,
       options.idempotencyKey,
       parsed.data,
       now,
     );
     if (replay.replay !== undefined) return await replay.replay;
-    let outcome: PollDecision;
     try {
-      outcome = await this.#store.poll({
+      const outcome = await this.#store.poll({
         flowHandleHash,
         now,
         createToken: async () => {
           const token = generateFellowToken(now, this.#random);
           return { token, tokenHash: await sha256Hex(token) };
         },
+        // Pending and slow_down are observations, not durable outcomes. The
+        // documented stable poll key must remain free until approval, denial,
+        // or expiry, otherwise its first pending response would mask the
+        // terminal state for the full 24-hour replay window.
         replayFor: async (decision) =>
-          this.#writeReplay(replay.attempt, this.#flowResultFromDecision(decision)),
+          decision.kind === "pending" || decision.kind === "slow-down"
+            ? undefined
+            : this.#writeReplay(replay.attempt, this.#flowResultFromDecision(decision)),
       });
+      return this.#flowResultFromDecision(outcome);
     } catch (error) {
       if (error instanceof EnrollmentIdempotencyRaceError && replay.attempt !== undefined) {
         return this.#readRaceReplay<EnrollmentFlowResult>(replay.attempt);
       }
+      if (
+        error instanceof EnrollmentError &&
+        error.code === "TOKEN_ALREADY_ISSUED" &&
+        replay.attempt !== undefined
+      ) {
+        // A same-key poll can pass replay preflight immediately before another
+        // isolate commits the one-time token and its encrypted response.
+        const completed = await this.#store.idempotencyReplay(replay.attempt);
+        if (completed !== undefined) {
+          return this.#decodeReplay<EnrollmentFlowResult>(completed);
+        }
+        // Preserve a genuine pre-fix lost-response token when possible. Legacy
+        // transient rows are deliberately not replayed: only a schema-valid
+        // approved body can explain an already-issued token.
+        const legacy = await this.#store.idempotencyReplay({
+          ...replay.attempt,
+          principalScope: `flow:${flowHandleHash}`,
+        });
+        if (legacy !== undefined) {
+          const approved = EnrollmentApprovedResponseSchema.safeParse(
+            await this.#decodeReplay<unknown>(legacy),
+          );
+          if (approved.success) return approved.data;
+        }
+      }
       throw error;
     }
-    return this.#flowResultFromDecision(outcome);
   }
 
   #flowResultFromDecision(outcome: PollDecision): EnrollmentFlowResult {

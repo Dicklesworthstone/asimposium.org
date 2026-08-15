@@ -30,6 +30,11 @@ const LIFECYCLE_MIGRATION = resolve(
   import.meta.dir,
   "../../../../db/migrations/0006_fellow_credential_lifecycle.sql",
 );
+const DEVICE_MIGRATION = resolve(import.meta.dir, "../../../../db/migrations/0009_device_flow.sql");
+const DEVICE_HARDENING_MIGRATION = resolve(
+  import.meta.dir,
+  "../../../../db/migrations/0010_device_flow_hardening.sql",
+);
 
 type LocalBinding = string | number | null;
 
@@ -68,6 +73,8 @@ function freshDatabase(): D1Database {
   const sqlite = new Database(":memory:", { strict: true });
   sqlite.run(readFileSync(MIGRATION, "utf8"));
   sqlite.run(readFileSync(LIFECYCLE_MIGRATION, "utf8"));
+  sqlite.run(readFileSync(DEVICE_MIGRATION, "utf8"));
+  sqlite.run(readFileSync(DEVICE_HARDENING_MIGRATION, "utf8"));
   return localD1(sqlite);
 }
 

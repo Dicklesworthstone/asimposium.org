@@ -8,18 +8,20 @@ import {
 } from "@asimposium/contracts";
 // D1 proves JSON syntax; these schemas prove that stored authority still obeys
 // the public scope vocabulary and resource bounds when it is read back.
-import type { D1Database, D1PreparedStatement } from "@cloudflare/workers-types";
+import type { D1Database, D1PreparedStatement, D1Result } from "@cloudflare/workers-types";
 
 import {
   type ClaimAttempt,
   type DecisionAttempt,
   type DeviceCreateInput,
+  type DeviceLookupAttempt,
   type EnrollmentApprovalCard,
   type EnrollmentCapsule,
   EnrollmentError,
   EnrollmentIdempotencyRaceError,
   type EnrollmentIdempotencyReplay,
   type EnrollmentIdempotencyWrite,
+  EnrollmentIdentifierCollisionError,
   EnrollmentPersistenceError,
   type EnrollmentRecord,
   type EnrollmentResourceGrants,
@@ -74,7 +76,13 @@ interface ProposalRow extends RecordRow {
 
 interface PollingProposalRow extends ProposalRow {
   enrollment_kind: "join-url" | "device";
-  device_code_expires_at: number | null;
+  device_record_expires_at: number | null;
+  device_mapping_expires_at: number | null;
+  device_mapping_reclaimed_at: number | null;
+}
+
+interface UnboundDeviceProposalRow extends ProposalRow {
+  device_mapping_expires_at: number | null;
 }
 
 interface CredentialRow {
@@ -165,7 +173,7 @@ function parseScopes(encoded: string): readonly RequestedScope[] {
     }
     return uniqueEnrollmentScopes(value.map((scope) => RequestedScopeSchema.parse(scope)));
   } catch {
-    throw new EnrollmentError("PAIRING_INVALID");
+    throw new EnrollmentPersistenceError();
   }
 }
 
@@ -209,7 +217,7 @@ function parseResources(encoded: string): EnrollmentResourceGrants {
         : { fellowGrantExpiresAt: parsed.fellow_grant_expires_at }),
     };
   } catch {
-    throw new EnrollmentError("PAIRING_INVALID");
+    throw new EnrollmentPersistenceError();
   }
 }
 
@@ -230,7 +238,7 @@ function proposalStatus(value: string): ProposalStatus {
   if (["pending", "approved", "reduced", "denied", "expired"].includes(value)) {
     return value as ProposalStatus;
   }
-  throw new EnrollmentError("PAIRING_INVALID");
+  throw new EnrollmentPersistenceError();
 }
 
 function isUniqueNameFailure(error: unknown): boolean {
@@ -455,8 +463,16 @@ export class D1EnrollmentStore implements EnrollmentStore {
     if (row === null) {
       // An unbound device enrollment belongs to nobody until a decision; the
       // first decider binds it inside the same batch.
-      row = await this.unboundDeviceProposalByEnrollment(attempt.enrollmentId);
-      bindsDeviceSponsor = row !== null;
+      const deviceRow = await this.unboundDeviceProposalByEnrollment(attempt.enrollmentId);
+      row = deviceRow;
+      bindsDeviceSponsor = deviceRow !== null;
+      if (
+        deviceRow !== null &&
+        (deviceRow.device_mapping_expires_at === null ||
+          attempt.now >= deviceRow.device_mapping_expires_at)
+      ) {
+        throw new EnrollmentError("PAIRING_INVALID");
+      }
     }
     if (row === null) throw new EnrollmentError("WRONG_PRINCIPAL");
     if (row.status !== "pending") throw new EnrollmentError("PROPOSAL_NOT_PENDING");
@@ -635,7 +651,7 @@ export class D1EnrollmentStore implements EnrollmentStore {
       (row.status === "approved" || row.status === "reduced") &&
       (granted.scopes === null || granted.resources === null)
     ) {
-      throw new EnrollmentError("PAIRING_INVALID");
+      throw new EnrollmentPersistenceError();
     }
     return {
       enrollmentId: row.enrollment_id,
@@ -774,28 +790,117 @@ export class D1EnrollmentStore implements EnrollmentStore {
     return [...fellows.values()];
   }
 
-  async deviceCreate(input: DeviceCreateInput): Promise<void> {
+  async deviceCreate(
+    input: DeviceCreateInput,
+    idempotency?: EnrollmentIdempotencyWrite,
+  ): Promise<void> {
+    const identifierCollisionPredicate = `
+      EXISTS (SELECT 1 FROM enrollment_records WHERE enrollment_id = ?)
+      OR EXISTS (
+        SELECT 1 FROM enrollment_proposals
+         WHERE proposal_id = ? OR enrollment_id = ? OR fellow_id = ? OR flow_handle_hash = ?
+      )
+      OR EXISTS (
+        SELECT 1 FROM device_codes WHERE enrollment_id = ? OR user_code_hash = ?
+      )`;
+    const identifierBindings = [
+      input.record.enrollmentId,
+      input.proposal.proposalId,
+      input.record.enrollmentId,
+      input.proposal.fellowId,
+      input.proposal.flowHandleHash,
+      input.record.enrollmentId,
+      input.userCodeHash,
+    ] as const;
     try {
-      const results = await this.#db.batch([
+      const statements = [
+        sql(
+          this.#db,
+          `UPDATE enrollment_records
+              SET device_mapping_reclaimed_at = ?
+            WHERE enrollment_id IN (
+              SELECT d.enrollment_id
+                FROM device_codes d
+                JOIN enrollment_records e ON e.enrollment_id = d.enrollment_id
+               WHERE d.expires_at <= ? AND e.device_mapping_reclaimed_at IS NULL
+               ORDER BY d.expires_at, d.enrollment_id
+               LIMIT ?
+            )`,
+          input.record.createdAt,
+          input.record.createdAt,
+          input.reclaimBatchSize,
+        ),
+        sql(
+          this.#db,
+          `DELETE FROM device_codes
+            WHERE enrollment_id IN (
+              SELECT d.enrollment_id
+                FROM device_codes d
+                JOIN enrollment_records e ON e.enrollment_id = d.enrollment_id
+               WHERE d.expires_at <= ? AND e.device_mapping_reclaimed_at IS NOT NULL
+               ORDER BY d.expires_at, d.enrollment_id
+               LIMIT ?
+            )`,
+          input.record.createdAt,
+          input.reclaimBatchSize,
+        ),
+        sql(
+          this.#db,
+          `DELETE FROM device_start_attempts
+            WHERE id IN (
+              SELECT id FROM device_start_attempts
+               WHERE attempted_at < ?
+               ORDER BY attempted_at, id
+               LIMIT ?
+            )`,
+          input.startWindowBeginning,
+          input.reclaimBatchSize,
+        ),
+        sql(
+          this.#db,
+          `SELECT CASE WHEN ${identifierCollisionPredicate} THEN 1 ELSE 0 END AS collided`,
+          ...identifierBindings,
+        ),
+        sql(
+          this.#db,
+          `INSERT INTO device_start_attempts (client_bucket, attempted_at)
+           SELECT ?, ?
+            WHERE NOT (${identifierCollisionPredicate})
+              AND (
+              SELECT COUNT(*) FROM device_start_attempts
+               WHERE client_bucket = ?
+                 AND attempted_at >= ?
+                 AND attempted_at <= ?
+            ) < ?`,
+          input.clientBucket,
+          input.record.createdAt,
+          ...identifierBindings,
+          input.clientBucket,
+          input.startWindowBeginning,
+          input.record.createdAt,
+          input.startLimit,
+        ),
         sql(
           this.#db,
           `INSERT INTO enrollment_records (
              enrollment_id, sponsor_id, secret_hash, secret_expires_at,
-             requested_scopes_json, requested_resources_json, invalidated, created_at, kind
-           ) VALUES (?, '', ?, ?, ?, ?, 0, ?, 'device')`,
+             requested_scopes_json, requested_resources_json, invalidated, created_at,
+             kind, device_expires_at
+           ) SELECT ?, '', ?, ?, ?, ?, 0, ?, 'device', ? WHERE changes() = 1`,
           input.record.enrollmentId,
           input.record.secretHash,
           input.record.secretExpiresAt,
           encode(input.record.requestedScopes),
           encode(input.record.requestedResources),
           input.record.createdAt,
+          input.deviceExpiresAt,
         ),
         sql(
           this.#db,
           `INSERT INTO enrollment_proposals (
              proposal_id, enrollment_id, fellow_id, flow_handle_hash, name, model, harness,
              reasoning_effort, tools_note, created_at, expires_at, status, poll_interval_seconds
-           ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'pending', ?)`,
+           ) SELECT ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'pending', ? WHERE changes() = 1`,
           input.proposal.proposalId,
           input.record.enrollmentId,
           input.proposal.fellowId,
@@ -812,51 +917,171 @@ export class D1EnrollmentStore implements EnrollmentStore {
         sql(
           this.#db,
           `INSERT INTO device_codes (enrollment_id, user_code_hash, created_at, expires_at)
-           VALUES (?, ?, ?, ?)`,
+           SELECT ?, ?, ?, ? WHERE changes() = 1`,
           input.record.enrollmentId,
           input.userCodeHash,
           input.record.createdAt,
           input.deviceExpiresAt,
         ),
-      ]);
-      if (results.every((result) => result.meta.changes === 1)) return;
+        ...(idempotency === undefined ? [] : [this.idempotencyStatement(idempotency)]),
+      ];
+      const results = await this.#db.batch(statements);
+      const collisionRow = (results[3]?.results?.[0] ?? undefined) as
+        | { readonly collided?: number }
+        | undefined;
+      if (collisionRow?.collided !== 0 && collisionRow?.collided !== 1) {
+        throw new EnrollmentPersistenceError();
+      }
+      if (collisionRow.collided === 1) {
+        await this.raceIfPresent(idempotency);
+        throw new EnrollmentIdentifierCollisionError();
+      }
+      const rateReservation = results[4];
+      if ((rateReservation?.meta.changes ?? 0) === 0) {
+        // A same-key winner may have filled the final source slot after this
+        // request's replay preflight. Exact replay/conflict takes precedence
+        // over the coarse rate refusal whenever that winner committed.
+        await this.raceIfPresent(idempotency);
+        throw new EnrollmentError("DEVICE_START_RATE_LIMITED");
+      }
+      const productResults = results.slice(5);
+      if (productResults.every((result) => result.meta.changes === 1)) return;
       throw new EnrollmentPersistenceError();
     } catch (error) {
+      if (error instanceof EnrollmentError) throw error;
+      if (error instanceof EnrollmentIdentifierCollisionError) throw error;
+      if (error instanceof EnrollmentIdempotencyRaceError) throw error;
+      await this.raceIfPresent(idempotency);
       if (error instanceof EnrollmentPersistenceError) throw error;
       throw new EnrollmentPersistenceError();
     }
   }
 
-  async deviceCardByUserCode(
-    userCodeHash: string,
-    now: number,
-  ): Promise<EnrollmentApprovalCard | undefined> {
-    const codeRow = await sql(
-      this.#db,
-      "SELECT enrollment_id, expires_at FROM device_codes WHERE user_code_hash = ?",
-      userCodeHash,
-    ).first<{ enrollment_id: string; expires_at: number }>();
-    if (codeRow === null || now >= codeRow.expires_at) return undefined;
-    const row = await sql(
-      this.#db,
-      `SELECT e.enrollment_id, e.requested_scopes_json, e.requested_resources_json,
-              p.proposal_id, p.name, p.model, p.harness, p.reasoning_effort, p.tools_note,
-              p.expires_at, p.status
-         FROM enrollment_records e
-         JOIN enrollment_proposals p ON p.enrollment_id = e.enrollment_id
-        WHERE e.enrollment_id = ? AND e.kind = 'device' AND e.sponsor_id = ''`,
-      codeRow.enrollment_id,
-    ).first<PendingProposalRow>();
-    if (row === null) return undefined;
-    if (row.status === "pending" && now >= row.expires_at) {
-      await sql(
-        this.#db,
-        "UPDATE enrollment_proposals SET status = 'expired' WHERE proposal_id = ? AND status = 'pending'",
-        row.proposal_id,
-      ).run();
-      return undefined;
+  async deviceLookup(attempt: DeviceLookupAttempt): Promise<EnrollmentApprovalCard> {
+    const liveCodePredicate = `
+      FROM device_codes d
+      JOIN enrollment_records e ON e.enrollment_id = d.enrollment_id
+      JOIN enrollment_proposals p ON p.enrollment_id = e.enrollment_id
+     WHERE d.user_code_hash = ?
+       AND d.expires_at > ?
+       AND e.kind = 'device'
+       AND e.sponsor_id = ''
+       AND p.status = 'pending'
+       AND p.expires_at > ?`;
+    let results: D1Result<unknown>[];
+    try {
+      results = await this.#db.batch([
+        sql(
+          this.#db,
+          `DELETE FROM device_lookup_attempts
+            WHERE id IN (
+              SELECT id FROM device_lookup_attempts
+               WHERE attempted_at < ?
+               ORDER BY attempted_at, id
+               LIMIT ?
+            )`,
+          attempt.windowBeginning,
+          attempt.reclaimBatchSize,
+        ),
+        sql(
+          this.#db,
+          `UPDATE enrollment_records
+              SET device_mapping_reclaimed_at = ?
+            WHERE enrollment_id IN (
+              SELECT d.enrollment_id
+                FROM device_codes d
+                JOIN enrollment_records e ON e.enrollment_id = d.enrollment_id
+               WHERE d.expires_at <= ? AND e.device_mapping_reclaimed_at IS NULL
+               ORDER BY d.expires_at, d.enrollment_id
+               LIMIT ?
+            )`,
+          attempt.now,
+          attempt.now,
+          attempt.reclaimBatchSize,
+        ),
+        sql(
+          this.#db,
+          `DELETE FROM device_codes
+            WHERE enrollment_id IN (
+              SELECT d.enrollment_id
+                FROM device_codes d
+                JOIN enrollment_records e ON e.enrollment_id = d.enrollment_id
+               WHERE d.expires_at <= ? AND e.device_mapping_reclaimed_at IS NOT NULL
+               ORDER BY d.expires_at, d.enrollment_id
+               LIMIT ?
+            )`,
+          attempt.now,
+          attempt.reclaimBatchSize,
+        ),
+        sql(
+          this.#db,
+          `SELECT COUNT(*) AS failures FROM device_lookup_attempts
+            WHERE sponsor_id = ? AND success = 0
+              AND attempted_at >= ? AND attempted_at <= ?`,
+          attempt.sponsorId,
+          attempt.windowBeginning,
+          attempt.now,
+        ),
+        sql(
+          this.#db,
+          `SELECT e.enrollment_id, e.requested_scopes_json, e.requested_resources_json,
+                  p.proposal_id, p.name, p.model, p.harness, p.reasoning_effort, p.tools_note,
+                  p.created_at, p.expires_at, p.status
+             ${liveCodePredicate}
+              AND (
+                SELECT COUNT(*) FROM device_lookup_attempts
+                 WHERE sponsor_id = ? AND success = 0
+                   AND attempted_at >= ? AND attempted_at <= ?
+              ) < ?`,
+          attempt.userCodeHash,
+          attempt.now,
+          attempt.now,
+          attempt.sponsorId,
+          attempt.windowBeginning,
+          attempt.now,
+          attempt.failureLimit,
+        ),
+        sql(
+          this.#db,
+          `INSERT INTO device_lookup_attempts (sponsor_id, attempted_at, success)
+           SELECT ?, ?, 0
+            WHERE NOT EXISTS (SELECT 1 ${liveCodePredicate})
+              AND (
+              SELECT COUNT(*) FROM device_lookup_attempts
+               WHERE sponsor_id = ? AND success = 0
+                 AND attempted_at >= ? AND attempted_at <= ?
+            ) < ?`,
+          attempt.sponsorId,
+          attempt.now,
+          attempt.userCodeHash,
+          attempt.now,
+          attempt.now,
+          attempt.sponsorId,
+          attempt.windowBeginning,
+          attempt.now,
+          attempt.failureLimit,
+        ),
+      ]);
+    } catch {
+      throw new EnrollmentPersistenceError();
     }
-    if (row.status !== "pending") return undefined;
+    const countRow = (results[3]?.results?.[0] ?? undefined) as
+      | { readonly failures?: number }
+      | undefined;
+    if (countRow === undefined || !Number.isSafeInteger(countRow.failures)) {
+      throw new EnrollmentPersistenceError();
+    }
+    if ((countRow.failures ?? 0) >= attempt.failureLimit) {
+      throw new EnrollmentError("DEVICE_LOOKUP_LOCKED");
+    }
+    const row = (results[4]?.results?.[0] ?? undefined) as PendingProposalRow | undefined;
+    const outcome = results[5];
+    const outcomeChanges = outcome?.meta.changes ?? -1;
+    if (row === undefined) {
+      if (outcomeChanges !== 1) throw new EnrollmentPersistenceError();
+      throw new EnrollmentError("DEVICE_CODE_UNKNOWN");
+    }
+    if (outcomeChanges !== 0) throw new EnrollmentPersistenceError();
     return {
       enrollmentId: row.enrollment_id,
       proposalId: row.proposal_id,
@@ -926,32 +1151,6 @@ export class D1EnrollmentStore implements EnrollmentStore {
     };
   }
 
-  async recentDeviceLookupFailures(
-    sponsorId: string,
-    sinceMs: number,
-    now: number,
-  ): Promise<number> {
-    const row = await sql(
-      this.#db,
-      `SELECT COUNT(*) AS failures FROM device_lookup_attempts
-        WHERE sponsor_id = ? AND success = 0 AND attempted_at >= ? AND attempted_at <= ?`,
-      sponsorId,
-      sinceMs,
-      now,
-    ).first<{ failures: number }>();
-    return row?.failures ?? 0;
-  }
-
-  async recordDeviceLookup(sponsorId: string, success: boolean, now: number): Promise<void> {
-    await sql(
-      this.#db,
-      "INSERT INTO device_lookup_attempts (sponsor_id, attempted_at, success) VALUES (?, ?, ?)",
-      sponsorId,
-      now,
-      success ? 1 : 0,
-    ).run();
-  }
-
   async bootstrapSponsor(sponsorId: string, now: number): Promise<boolean> {
     // INSERT OR IGNORE first so `created` is exact; the follow-up UPDATE moves
     // only last_seen_at. Two statements in one batch keep the pair atomic.
@@ -996,8 +1195,21 @@ export class D1EnrollmentStore implements EnrollmentStore {
       if (row === null) throw new EnrollmentError("FLOW_INVALID");
       if (row.token_hash !== null) return { kind: "already-issued" };
       if (row.enrollment_kind === "device") {
-        if (row.device_code_expires_at === null) throw new EnrollmentError("FLOW_INVALID");
-        if (attempt.now >= row.device_code_expires_at) {
+        if (row.device_record_expires_at === null) throw new EnrollmentError("FLOW_INVALID");
+        if (row.device_mapping_expires_at === null) {
+          if (
+            row.device_mapping_reclaimed_at === null ||
+            attempt.now < row.device_record_expires_at
+          ) {
+            throw new EnrollmentError("FLOW_INVALID");
+          }
+        } else if (
+          row.device_mapping_reclaimed_at !== null ||
+          row.device_mapping_expires_at !== row.device_record_expires_at
+        ) {
+          throw new EnrollmentError("FLOW_INVALID");
+        }
+        if (attempt.now >= row.device_record_expires_at) {
           const decision: PollDecision = { kind: "expired" };
           const idempotency = await attempt.replayFor?.(decision);
           if (idempotency === undefined) return decision;
@@ -1047,9 +1259,8 @@ export class D1EnrollmentStore implements EnrollmentStore {
           pacing.kind === "slow-down"
             ? { kind: "slow-down", retryAfterSeconds: pacing.retryAfterSeconds }
             : { kind: "pending", retryAfterSeconds: pacing.retryAfterSeconds };
-        const idempotency = await attempt.replayFor?.(decision);
         try {
-          const statements = [
+          const [result] = await this.#db.batch([
             sql(
               this.#db,
               `UPDATE enrollment_proposals
@@ -1062,15 +1273,10 @@ export class D1EnrollmentStore implements EnrollmentStore {
               row.last_poll_at,
               row.last_poll_at,
             ),
-            ...(idempotency === undefined ? [] : [this.idempotencyStatement(idempotency)]),
-          ];
-          const results = await this.#db.batch(statements);
-          if (results.every((result) => result.meta.changes === 1)) return decision;
-          await this.raceIfPresent(idempotency);
+          ]);
+          if (result?.meta.changes === 1) return decision;
           continue;
-        } catch (error) {
-          if (error instanceof EnrollmentIdempotencyRaceError) throw error;
-          await this.raceIfPresent(idempotency);
+        } catch {
           throw new EnrollmentPersistenceError();
         }
       }
@@ -1438,7 +1644,7 @@ export class D1EnrollmentStore implements EnrollmentStore {
   /** The proposal row for an unbound device enrollment, or null. */
   private async unboundDeviceProposalByEnrollment(
     enrollmentId: string,
-  ): Promise<ProposalRow | null> {
+  ): Promise<UnboundDeviceProposalRow | null> {
     return sql(
       this.#db,
       `SELECT e.enrollment_id, e.sponsor_id, e.secret_hash, e.secret_expires_at,
@@ -1447,14 +1653,16 @@ export class D1EnrollmentStore implements EnrollmentStore {
               p.reasoning_effort, p.tools_note, p.created_at, p.expires_at, p.status,
               p.granted_scopes_json, p.granted_resources_json, p.token_hash, p.token_issued_at,
               p.poll_interval_seconds, p.last_poll_at,
+              d.expires_at AS device_mapping_expires_at,
               g.granted_scopes_json AS durable_granted_scopes_json,
               g.granted_resources_json AS durable_granted_resources_json
          FROM enrollment_records e
          JOIN enrollment_proposals p ON p.enrollment_id = e.enrollment_id
+         LEFT JOIN device_codes d ON d.enrollment_id = e.enrollment_id
          LEFT JOIN enrollment_grants g ON g.proposal_id = p.proposal_id
         WHERE e.enrollment_id = ? AND e.sponsor_id = '' AND e.kind = 'device'`,
       enrollmentId,
-    ).first<ProposalRow>();
+    ).first<UnboundDeviceProposalRow>();
   }
 
   private async proposalByFlow(flowHandleHash: string): Promise<PollingProposalRow | null> {
@@ -1462,7 +1670,10 @@ export class D1EnrollmentStore implements EnrollmentStore {
       this.#db,
       `SELECT e.enrollment_id, e.sponsor_id, e.secret_hash, e.secret_expires_at,
               e.requested_scopes_json, e.requested_resources_json, e.invalidated, e.secret_consumed_at,
-              e.kind AS enrollment_kind, d.expires_at AS device_code_expires_at,
+              e.kind AS enrollment_kind,
+              e.device_expires_at AS device_record_expires_at,
+              e.device_mapping_reclaimed_at,
+              d.expires_at AS device_mapping_expires_at,
               p.proposal_id, p.fellow_id, p.flow_handle_hash, p.name, p.model, p.harness,
               p.reasoning_effort, p.tools_note, p.created_at, p.expires_at, p.status,
               p.granted_scopes_json, p.granted_resources_json, p.token_hash, p.token_issued_at,
