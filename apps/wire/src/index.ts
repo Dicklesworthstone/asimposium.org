@@ -1,6 +1,7 @@
-import type { ExecutionContext } from "@cloudflare/workers-types";
+import type { ExecutionContext, ScheduledController } from "@cloudflare/workers-types";
 import { createApp } from "./app";
 import type { Env } from "./env";
+import { KraterOutboxDrainer, requestKraterOutbox } from "./krater/outbox-do";
 
 /**
  * The Worker entrypoint: `a.asimposium.org`.
@@ -14,7 +15,15 @@ export default {
   fetch(request: Request, env: Env, ctx: ExecutionContext): Response | Promise<Response> {
     return app.fetch(request, env, ctx);
   },
+  async scheduled(
+    _controller: ScheduledController,
+    env: Env,
+    _ctx: ExecutionContext,
+  ): Promise<void> {
+    const result = await requestKraterOutbox(env, "/nudge");
+    if (!result.ok) throw new Error("KRATER_OUTBOX_SCHEDULED_RECONCILE_FAILED");
+  },
 };
 
 export type { Env };
-export { createApp };
+export { createApp, KraterOutboxDrainer };

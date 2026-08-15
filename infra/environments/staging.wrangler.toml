@@ -8,6 +8,9 @@ compatibility_date = "2026-08-13"
 compatibility_flags = ["nodejs_compat"]
 workers_dev = false
 
+[triggers]
+crons = ["*/5 * * * *"]
+
 [[d1_databases]]
 binding = "DB"
 database_name = "asimposium-staging"
@@ -27,6 +30,14 @@ bucket_name = "asimposium-public-staging"
 [[durable_objects.bindings]]
 name = "HERALD_ROOMS"
 class_name = "HeraldRoom"
+
+[[durable_objects.bindings]]
+name = "KRATER_OUTBOX"
+class_name = "KraterOutboxDrainer"
+
+[exports.KraterOutboxDrainer]
+type = "durable-object"
+storage = "sqlite"
 
 [[rules]]
 type = "Text"

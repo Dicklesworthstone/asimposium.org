@@ -18,6 +18,17 @@ migrations_dir = "../db/migrations"
 binding = "ARTIFACTS"
 bucket_name = "asimposium-artifacts-local"
 
+[[durable_objects.bindings]]
+name = "KRATER_OUTBOX"
+class_name = "KraterOutboxDrainer"
+
+[exports.KraterOutboxDrainer]
+type = "durable-object"
+storage = "sqlite"
+
+[triggers]
+crons = ["*/5 * * * *"]
+
 [[rules]]
 type = "Text"
 globs = ["**/*.md", "**/*.txt", "**/*.schema.json"]

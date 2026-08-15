@@ -57,6 +57,8 @@ export function renderEnvironment(name, environment, policy) {
     lines.push("[dev]", "port = 8787", `local_protocol = ${tomlString("http")}`, "");
   }
 
+  lines.push("[triggers]", `crons = [${tomlString(policy.outbox_cron)}]`, "");
+
   lines.push(
     "[[d1_databases]]",
     `binding = ${tomlString(environment.d1.binding)}`,
@@ -82,6 +84,14 @@ export function renderEnvironment(name, environment, policy) {
     "[[durable_objects.bindings]]",
     `name = ${tomlString(environment.durable_objects.binding)}`,
     `class_name = ${tomlString(environment.durable_objects.class_name)}`,
+    "",
+    "[[durable_objects.bindings]]",
+    `name = ${tomlString(environment.outbox.binding)}`,
+    `class_name = ${tomlString(environment.outbox.class_name)}`,
+    "",
+    `[exports.${environment.outbox.class_name}]`,
+    `type = ${tomlString("durable-object")}`,
+    `storage = ${tomlString("sqlite")}`,
     "",
     "[[rules]]",
     `type = ${tomlString("Text")}`,

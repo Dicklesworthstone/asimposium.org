@@ -1,10 +1,9 @@
 # Deploy-time resolution of the generated production.wrangler.toml:
 #   - the provisioned D1 id is substituted (the generated file carries the
 #     CI-time ${ASIMP_D1_DATABASE_ID_PRODUCTION} placeholder);
-#   - the HERALD_ROOMS Durable Object binding is omitted because the Worker
-#     exports no HeraldRoom class yet (W7) and a bound-but-unexported class is
-#     a deploy-time failure — recorded on asimposiumorg-p1g for the OPS.3
-#     reconciliation;
+#   - HERALD_ROOMS remains omitted until W7 exports HeraldRoom; the production
+#     Krater outbox binding and recovery cron are present because the current
+#     Worker already exports and uses KraterOutboxDrainer;
 #   - SERVICE_ENVELOPE_KEYS carries only PUBLIC Ed25519 verification keys
 #     (non-secret by design; the signing key lives in Vercel env).
 # Regenerate nothing over this file; when OPS.3 closes, fold this back into
@@ -19,6 +18,9 @@ workers_dev = false
 routes = [
   { pattern = "a.asimposium.org", custom_domain = true },
 ]
+
+[triggers]
+crons = ["*/5 * * * *"]
 
 [[d1_databases]]
 binding = "DB"
@@ -35,6 +37,14 @@ bucket_name = "asimposium-artifacts-prod"
 # role: public-delivery
 binding = "PUBLIC_ARTIFACTS"
 bucket_name = "asimposium-public-prod"
+
+[[durable_objects.bindings]]
+name = "KRATER_OUTBOX"
+class_name = "KraterOutboxDrainer"
+
+[exports.KraterOutboxDrainer]
+type = "durable-object"
+storage = "sqlite"
 
 [[rules]]
 type = "Text"

@@ -30,9 +30,10 @@ publishable_role = "public-delivery"
 production_artifact_hostname = "artifacts.asimposium.org"
 # Migrations roll forward only; there are no down-migrations (see migrate.mjs).
 rollback_policy = "forward-only"
+outbox_cron = "*/5 * * * *"
 # Every environment must bind exactly these names, no more and no fewer. The
 # Worker's code path is then identical everywhere (Fable §13.3).
-required_bindings = ["DB", "ARTIFACTS", "PUBLIC_ARTIFACTS", "HERALD_ROOMS"]
+required_bindings = ["DB", "ARTIFACTS", "PUBLIC_ARTIFACTS", "HERALD_ROOMS", "KRATER_OUTBOX"]
 
 # Which environment each Vercel deployment target calls. Preview deployments
 # must reach staging and must never reach production (Fable §13.3, ADR-2).
@@ -72,6 +73,10 @@ binding = "HERALD_ROOMS"
 class_name = "HeraldRoom"
 script_namespace = "asimposium-stoa-local"
 
+[env.local.outbox]
+binding = "KRATER_OUTBOX"
+class_name = "KraterOutboxDrainer"
+
 [env.local.keys]
 current_kid = "local-dev-1"
 previous_kid = ""
@@ -110,6 +115,10 @@ binding = "HERALD_ROOMS"
 class_name = "HeraldRoom"
 script_namespace = "asimposium-stoa-staging"
 
+[env.staging.outbox]
+binding = "KRATER_OUTBOX"
+class_name = "KraterOutboxDrainer"
+
 [env.staging.keys]
 current_kid = "staging-2026-08"
 previous_kid = "staging-2026-07"
@@ -147,6 +156,10 @@ custom_domain = "artifacts.asimposium.org"
 binding = "HERALD_ROOMS"
 class_name = "HeraldRoom"
 script_namespace = "asimposium-stoa-prod"
+
+[env.production.outbox]
+binding = "KRATER_OUTBOX"
+class_name = "KraterOutboxDrainer"
 
 [env.production.keys]
 current_kid = "prod-2026-08"

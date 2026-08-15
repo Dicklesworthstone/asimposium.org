@@ -1,6 +1,8 @@
 import { describe, expect, test } from "bun:test";
 import { resolve } from "node:path";
 import { REQUIRED_BINDINGS } from "../../src/env";
+import worker from "../../src/index";
+import { boundEnv, executionContext } from "../support/bindings";
 
 /**
  * The binding names this Worker requires must be the binding names the Worker
@@ -32,7 +34,20 @@ async function configuredBindings(): Promise<string[]> {
     );
   }
   const toml = await file.text();
-  return [...toml.matchAll(/^\s*binding\s*=\s*"([^"]+)"/gm)].map((match) => match[1] as string);
+  const config = Bun.TOML.parse(toml) as {
+    d1_databases?: Array<{ binding?: unknown }>;
+    r2_buckets?: Array<{ binding?: unknown }>;
+    durable_objects?: { bindings?: Array<{ name?: unknown }> };
+  };
+  const values = [
+    ...(config.d1_databases ?? []).map((entry) => entry.binding),
+    ...(config.r2_buckets ?? []).map((entry) => entry.binding),
+    ...(config.durable_objects?.bindings ?? []).map((entry) => entry.name),
+  ];
+  if (values.some((value) => typeof value !== "string")) {
+    throw new Error("infra/wrangler.toml contains a binding without a string name");
+  }
+  return values as string[];
 }
 
 describe("binding names agree with the Worker configuration", () => {
@@ -43,6 +58,31 @@ describe("binding names agree with the Worker configuration", () => {
     for (const required of REQUIRED_BINDINGS) {
       expect(provided).toContain(required);
     }
+  });
+
+  test("the production entrypoint cron always nudges the outbox binding", async () => {
+    const requests: Request[] = [];
+    const env = boundEnv({
+      KRATER_OUTBOX: {
+        idFromName: (name: string) => name,
+        get: () => ({
+          fetch: async (request: Request) => {
+            requests.push(request);
+            return new Response(JSON.stringify({ accepted: true }), { status: 202 });
+          },
+        }),
+      },
+    });
+
+    await worker.scheduled(
+      {} as Parameters<typeof worker.scheduled>[0],
+      env,
+      executionContext() as Parameters<typeof worker.scheduled>[2],
+    );
+
+    expect(requests).toHaveLength(1);
+    expect(new URL(requests[0]?.url ?? "https://invalid.example").pathname).toBe("/nudge");
+    expect(requests[0]?.method).toBe("POST");
   });
 
   test("the configuration provides no binding this Worker silently ignores", async () => {

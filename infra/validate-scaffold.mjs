@@ -31,11 +31,19 @@ const ROOT_CONFIG_KEYS = [
   "dev",
   "d1_databases",
   "r2_buckets",
+  "durable_objects",
+  "exports",
+  "triggers",
   "rules",
 ];
 const DEV_CONFIG_KEYS = ["port", "local_protocol"];
 const D1_DATABASE_CONFIG_KEYS = ["binding", "database_name", "database_id", "migrations_dir"];
 const R2_BUCKET_CONFIG_KEYS = ["binding", "bucket_name"];
+const DURABLE_OBJECTS_CONFIG_KEYS = ["bindings"];
+const DURABLE_OBJECT_BINDING_CONFIG_KEYS = ["name", "class_name"];
+const EXPORTS_CONFIG_KEYS = ["KraterOutboxDrainer"];
+const OUTBOX_EXPORT_CONFIG_KEYS = ["type", "storage"];
+const TRIGGERS_CONFIG_KEYS = ["crons"];
 const RULE_CONFIG_KEYS = ["type", "globs", "fallthrough"];
 
 export class ScaffoldValidationError extends Error {
@@ -168,10 +176,7 @@ function assertExact(value, expected, key, source) {
 }
 
 function assertExactStringArray(value, expected, key, source) {
-  if (
-    value.length !== expected.length ||
-    value.some((item, index) => item !== expected[index])
-  ) {
+  if (value.length !== expected.length || value.some((item, index) => item !== expected[index])) {
     fail("UNSAFE_CONFIG_VALUE", `${source} must set ${key} to ${JSON.stringify(expected)}.`);
   }
 }
@@ -399,6 +404,65 @@ export function validateScaffold(rootDirectory, configWorkspacePath = "infra/wra
     readRequiredString(r2Bucket, "bucket_name", configSource),
     "asimposium-artifacts-local",
     "r2_buckets.bucket_name",
+    configSource,
+  );
+
+  const durableObjects = readRequiredObject(parsedConfig, "durable_objects", configSource);
+  assertExactKeys(durableObjects, DURABLE_OBJECTS_CONFIG_KEYS, `${configSource} [durable_objects]`);
+  const outboxBinding = readSingleObjectArray(
+    durableObjects,
+    "bindings",
+    `${configSource} [durable_objects]`,
+  );
+  assertExactKeys(
+    outboxBinding,
+    DURABLE_OBJECT_BINDING_CONFIG_KEYS,
+    `${configSource} [[durable_objects.bindings]]`,
+  );
+  assertExact(
+    readRequiredString(outboxBinding, "name", configSource),
+    "KRATER_OUTBOX",
+    "durable_objects.bindings.name",
+    configSource,
+  );
+  assertExact(
+    readRequiredString(outboxBinding, "class_name", configSource),
+    "KraterOutboxDrainer",
+    "durable_objects.bindings.class_name",
+    configSource,
+  );
+
+  const exportsConfig = readRequiredObject(parsedConfig, "exports", configSource);
+  assertExactKeys(exportsConfig, EXPORTS_CONFIG_KEYS, `${configSource} [exports]`);
+  const outboxExport = readRequiredObject(
+    exportsConfig,
+    "KraterOutboxDrainer",
+    `${configSource} [exports]`,
+  );
+  assertExactKeys(
+    outboxExport,
+    OUTBOX_EXPORT_CONFIG_KEYS,
+    `${configSource} [exports.KraterOutboxDrainer]`,
+  );
+  assertExact(
+    readRequiredString(outboxExport, "type", configSource),
+    "durable-object",
+    "exports.KraterOutboxDrainer.type",
+    configSource,
+  );
+  assertExact(
+    readRequiredString(outboxExport, "storage", configSource),
+    "sqlite",
+    "exports.KraterOutboxDrainer.storage",
+    configSource,
+  );
+
+  const triggers = readRequiredObject(parsedConfig, "triggers", configSource);
+  assertExactKeys(triggers, TRIGGERS_CONFIG_KEYS, `${configSource} [triggers]`);
+  assertExactStringArray(
+    readRequiredStringArray(triggers, "crons", configSource),
+    ["*/5 * * * *"],
+    "triggers.crons",
     configSource,
   );
 

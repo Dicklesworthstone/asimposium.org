@@ -1,6 +1,7 @@
 import type { D1Database, R2Bucket } from "@cloudflare/workers-types";
 import type { Env } from "../../src/env";
 import worker from "../../src/index";
+import type { KraterOutboxNamespace } from "../../src/krater/outbox-do";
 
 /**
  * Binding *shapes*, not D1/R2 behaviour.
@@ -47,9 +48,22 @@ export function r2Shaped(): R2Bucket {
   } as unknown as R2Bucket;
 }
 
+/** A method-shaped Durable Object namespace. It owns no object or storage. */
+export function outboxShaped(): KraterOutboxNamespace {
+  return {
+    idFromName: refuse("idFromName"),
+    get: refuse("get"),
+  };
+}
+
 /** A fully-bound `Env` whose handles are shape-only. */
 export function boundEnv(overrides: Partial<Record<keyof Env, unknown>> = {}): Env {
-  return { DB: d1Shaped(), ARTIFACTS: r2Shaped(), ...overrides } as Env;
+  return {
+    DB: d1Shaped(),
+    ARTIFACTS: r2Shaped(),
+    KRATER_OUTBOX: outboxShaped(),
+    ...overrides,
+  } as Env;
 }
 
 /** An `ExecutionContext` stand-in; the scaffold schedules no deferred work. */

@@ -44,6 +44,17 @@ migrations_dir = "../db/migrations"
 binding = "ARTIFACTS"
 bucket_name = "asimposium-artifacts-local"
 
+[[durable_objects.bindings]]
+name = "KRATER_OUTBOX"
+class_name = "KraterOutboxDrainer"
+
+[exports.KraterOutboxDrainer]
+type = "durable-object"
+storage = "sqlite"
+
+[triggers]
+crons = ["*/5 * * * *"]
+
 [[rules]]
 type = "Text"
 globs = ["**/*.md", "**/*.txt", "**/*.schema.json"]
@@ -208,6 +219,15 @@ value = "value"
   const extraCompatibilityFlagConfig = validConfig.replace(
     'compatibility_flags = ["nodejs_compat"]',
     'compatibility_flags = ["nodejs_compat", "additional_flag"]',
+  );
+  const wrongOutboxBindingConfig = validConfig.replace(
+    'name = "KRATER_OUTBOX"',
+    'name = "OUTBOX_SHADOW"',
+  );
+  const wrongOutboxStorageConfig = validConfig.replace('storage = "sqlite"', 'storage = "memory"');
+  const missingOutboxCronConfig = validConfig.replace(
+    '\n[triggers]\ncrons = ["*/5 * * * *"]\n',
+    "\n",
   );
   const cases = [
     {
@@ -491,6 +511,36 @@ value = "value"
         );
       },
     },
+    {
+      name: "wrong-outbox-binding",
+      execute() {
+        expectFailure(
+          createCompleteFixtureRoot("wrong-outbox-binding", wrongOutboxBindingConfig),
+          "infra/wrangler.toml",
+          "UNSAFE_CONFIG_VALUE",
+        );
+      },
+    },
+    {
+      name: "wrong-outbox-storage",
+      execute() {
+        expectFailure(
+          createCompleteFixtureRoot("wrong-outbox-storage", wrongOutboxStorageConfig),
+          "infra/wrangler.toml",
+          "UNSAFE_CONFIG_VALUE",
+        );
+      },
+    },
+    {
+      name: "missing-outbox-cron",
+      execute() {
+        expectFailure(
+          createCompleteFixtureRoot("missing-outbox-cron", missingOutboxCronConfig),
+          "infra/wrangler.toml",
+          "MISSING_CONFIG_TABLE",
+        );
+      },
+    },
   ];
   const failedCases = [];
   for (const testCase of cases) {
@@ -507,7 +557,7 @@ value = "value"
     );
   }
   assert.deepEqual(failedCases, []);
-  assert.equal(cases.length, 29);
+  assert.equal(cases.length, 32);
 
   process.stdout.write(
     `${JSON.stringify({

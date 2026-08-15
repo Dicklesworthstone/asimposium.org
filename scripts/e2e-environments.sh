@@ -117,6 +117,14 @@ else
     "Generated Wrangler configuration does not match the topology; run 'bun infra/generate-wrangler.mjs --write' and review the diff."
 fi
 
+if bun infra/generate-wrangler.test.mjs >/dev/null; then
+  emit "generated-config-contract" "pass" "OK" \
+    "generator contract rejects missing cron, outbox binding, and Durable Object export configuration"
+else
+  fail_phase "generated-config-contract" "GENERATOR_CONTRACT_FAILED" \
+    "infra/generate-wrangler.test.mjs failed a planted topology-drift case."
+fi
+
 # ---------------------------------------------------------------------------
 # Phase 5 — forward migration rehearsal (plan only, no database).
 # ---------------------------------------------------------------------------

@@ -24,11 +24,11 @@ const OUTBOX_PHASES = new Set<DurableCounters["last_phase"]>([
 
 export type OutboxFaultMode = "none" | "fail-once" | "hold-before-ack";
 
-interface KraterOutboxStub {
+export interface KraterOutboxStub {
   fetch(request: Request): Promise<Response>;
 }
 
-interface KraterOutboxNamespace {
+export interface KraterOutboxNamespace {
   idFromName(name: string): unknown;
   get(id: unknown): KraterOutboxStub;
 }
@@ -168,8 +168,8 @@ export function validateOutboxRow(
 }
 
 /**
- * Explicit post-transaction handoff seam. Production wiring owns the binding;
- * Krater does not define a namespace or mount a class in the shared Worker.
+ * Explicit post-transaction handoff seam. The production entrypoint owns the
+ * binding; this helper centralizes selection of the one named retry owner.
  */
 export function kraterOutboxStub(env: KraterOutboxEnv): KraterOutboxStub {
   if (env.KRATER_OUTBOX === undefined) throw new KraterOutboxBindingError();
@@ -190,8 +190,8 @@ export async function requestKraterOutbox(
 }
 
 /**
- * Unmounted production-shaped Durable Object. The shared app entrypoint must
- * explicitly export/mount this class and bind KRATER_OUTBOX before deployment.
+ * Durable retry owner exported by the shared Worker and mounted through the
+ * environment-specific Wrangler configuration.
  */
 export class KraterOutboxDrainer {
   constructor(
@@ -254,7 +254,9 @@ export class KraterOutboxDrainer {
       ? statement(
           this.env.DB,
           `SELECT id, event_id, problem_id, kind, dedupe_key, payload_sha256
-           FROM outbox WHERE state = 'pending' AND id > ? ORDER BY id ASC LIMIT ?`,
+           FROM outbox
+           WHERE state = 'pending' AND quarantined_at IS NULL AND id > ?
+           ORDER BY id ASC LIMIT ?`,
           afterId,
           OUTBOX_DRAIN_BATCH_SIZE,
         )
@@ -262,7 +264,7 @@ export class KraterOutboxDrainer {
           this.env.DB,
           `SELECT id, event_id, problem_id, kind, dedupe_key, payload_sha256
            FROM outbox
-           WHERE state = 'pending' AND id > ? AND id <= ?
+           WHERE state = 'pending' AND quarantined_at IS NULL AND id > ? AND id <= ?
            ORDER BY id ASC LIMIT ?`,
           afterId,
           wrapThroughId,
@@ -302,7 +304,7 @@ export class KraterOutboxDrainer {
   private async pendingCount(): Promise<number> {
     const row = await statement(
       this.env.DB,
-      "SELECT COUNT(*) AS count FROM outbox WHERE state = 'pending'",
+      "SELECT COUNT(*) AS count FROM outbox WHERE state = 'pending' AND quarantined_at IS NULL",
     ).first<CountRow>();
     return row?.count ?? 0;
   }
@@ -317,8 +319,8 @@ export class KraterOutboxDrainer {
     const result = await statement(
       this.env.DB,
       `UPDATE outbox
-          SET state = 'quarantined', quarantined_at = ?, quarantine_code = ?
-        WHERE id = ? AND state = 'pending'`,
+          SET quarantined_at = ?, quarantine_code = ?
+        WHERE id = ? AND state = 'pending' AND quarantined_at IS NULL`,
       new Date().toISOString(),
       code,
       row.id,
@@ -341,7 +343,7 @@ export class KraterOutboxDrainer {
     const result = await statement(
       this.env.DB,
       `UPDATE outbox SET state = 'delivered', delivered_at = ?
-       WHERE id = ? AND state = 'pending'`,
+       WHERE id = ? AND state = 'pending' AND quarantined_at IS NULL`,
       new Date().toISOString(),
       row.id,
     ).run();

@@ -1,6 +1,6 @@
 import { describe, expect, test } from "bun:test";
 import { bindingStates, isBindingHealthy, missingBindings, REQUIRED_BINDINGS } from "../../src/env";
-import { boundEnv, d1Shaped, r2Shaped } from "../support/bindings";
+import { boundEnv, d1Shaped, outboxShaped, r2Shaped } from "../support/bindings";
 
 describe("binding probes", () => {
   test("a D1-shaped handle passes the DB probe", () => {
@@ -9,6 +9,10 @@ describe("binding probes", () => {
 
   test("an R2-shaped handle passes the ARTIFACTS probe", () => {
     expect(isBindingHealthy("ARTIFACTS", r2Shaped())).toBe(true);
+  });
+
+  test("a Durable Object namespace-shaped handle passes the KRATER_OUTBOX probe", () => {
+    expect(isBindingHealthy("KRATER_OUTBOX", outboxShaped())).toBe(true);
   });
 
   test.each([
@@ -49,6 +53,7 @@ describe("bindingStates", () => {
     expect(bindingStates(boundEnv({ ARTIFACTS: undefined }))).toEqual({
       DB: "bound",
       ARTIFACTS: "missing",
+      KRATER_OUTBOX: "bound",
     });
   });
 

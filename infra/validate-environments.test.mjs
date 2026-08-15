@@ -321,6 +321,26 @@ const cases = [
       );
     },
   },
+  {
+    name: "outbox-binding-name-differs",
+    execute() {
+      expectFailure(
+        "parity-outbox-binding",
+        inSection(baseline, "staging", `binding = "KRATER_OUTBOX"`, `binding = "OUTBOX_RENAMED"`),
+        "BINDING_SET_MISMATCH",
+      );
+    },
+  },
+  {
+    name: "outbox-recovery-cron-cannot-drift",
+    execute() {
+      expectFailure(
+        "outbox-cron-drift",
+        baseline.replace(`outbox_cron = "*/5 * * * *"`, `outbox_cron = "0 * * * *"`),
+        "UNSAFE_OUTBOX_CRON",
+      );
+    },
+  },
 
   // --- keys, preview restrictions, production guards ------------------------
   {
@@ -894,11 +914,14 @@ const cases = [
           offenders.push(`${entry}@${found[0].offset}`);
         }
       }
-      for (const entry of readdirSync(join(infraDirectory, "environments"))) {
+      for (const entry of readdirSync(join(infraDirectory, "environments"), {
+        withFileTypes: true,
+      })) {
+        if (!entry.isFile() || !entry.name.endsWith(".toml")) continue;
         const found = findControlBytes(
-          readFileSync(join(infraDirectory, "environments", entry), "utf8"),
+          readFileSync(join(infraDirectory, "environments", entry.name), "utf8"),
         );
-        if (found.length > 0) offenders.push(`environments/${entry}@${found[0].offset}`);
+        if (found.length > 0) offenders.push(`environments/${entry.name}@${found[0].offset}`);
       }
       assert.deepEqual(offenders, []);
     },

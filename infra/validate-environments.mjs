@@ -92,6 +92,7 @@ const POLICY_KEYS = [
   "publishable_role",
   "production_artifact_hostname",
   "rollback_policy",
+  "outbox_cron",
   "required_bindings",
 ];
 const VERCEL_KEYS = ["production_environment", "preview_environment"];
@@ -104,11 +105,13 @@ const ENVIRONMENT_KEYS = [
   "d1",
   "r2",
   "durable_objects",
+  "outbox",
   "keys",
 ];
 const D1_KEYS = ["binding", "database_name", "database_id"];
 const R2_KEYS = ["binding", "role", "bucket_name", "custom_domain"];
 const DURABLE_OBJECT_KEYS = ["binding", "class_name", "script_namespace"];
+const OUTBOX_KEYS = ["binding", "class_name"];
 const KEY_KEYS = [
   "current_kid",
   "previous_kid",
@@ -367,6 +370,14 @@ function validateDurableObjects(durableObjects, name, source, registry) {
   return { binding, class_name: className, script_namespace: namespace };
 }
 
+function validateOutbox(outbox, source) {
+  assertExactKeys(outbox, OUTBOX_KEYS, source);
+  return {
+    binding: requireString(outbox, "binding", source, BINDING_NAME, "an uppercase binding name"),
+    class_name: requireString(outbox, "class_name", source, CLASS_NAME, "a class name"),
+  };
+}
+
 function validateKeys(keys, name, source, registry, isPreview, mayHoldProductionKeys) {
   assertExactKeys(keys, KEY_KEYS, source);
   const currentKid = requireString(keys, "current_kid", source, KID, "a lowercase key id");
@@ -493,6 +504,7 @@ export function validateEnvironments(
       "a hostname",
     ),
     rollback_policy: requireString(policyTable, "rollback_policy", `${configWorkspacePath} policy`),
+    outbox_cron: requireString(policyTable, "outbox_cron", `${configWorkspacePath} policy`),
     required_bindings: policyTable.required_bindings,
   };
   if (
@@ -515,6 +527,12 @@ export function validateEnvironments(
     fail(
       "UNSAFE_ROLLBACK_POLICY",
       `${configWorkspacePath} policy.rollback_policy must be "forward-only"; down-migrations are not supported.`,
+    );
+  }
+  if (policy.outbox_cron !== "*/5 * * * *") {
+    fail(
+      "UNSAFE_OUTBOX_CRON",
+      `${configWorkspacePath} policy.outbox_cron must be "*/5 * * * *" so recovery is bounded to five minutes.`,
     );
   }
 
@@ -584,6 +602,7 @@ export function validateEnvironments(
       `${source}.durable_objects`,
       registry,
     );
+    const outbox = validateOutbox(requireRecord(entry, "outbox", source), `${source}.outbox`);
     const keys = validateKeys(
       requireRecord(entry, "keys", source),
       name,
@@ -615,6 +634,7 @@ export function validateEnvironments(
       d1.binding,
       ...r2.map((b) => b.binding),
       durableObjects.binding,
+      outbox.binding,
     ].sort();
     const requiredBindings = [...policy.required_bindings].sort();
     if (declaredBindings.join(",") !== requiredBindings.join(",")) {
@@ -633,6 +653,7 @@ export function validateEnvironments(
       d1,
       r2,
       durable_objects: durableObjects,
+      outbox,
       keys,
     };
   }
@@ -672,6 +693,12 @@ export function validateEnvironments(
       environment.durable_objects.class_name !== environments[reference].durable_objects.class_name
     ) {
       fail("BINDING_PARITY_MISMATCH", `${source} Durable Object class must match ${reference}'s.`);
+    }
+    if (environment.outbox.binding !== environments[reference].outbox.binding) {
+      fail("BINDING_PARITY_MISMATCH", `${source} outbox binding must match ${reference}'s.`);
+    }
+    if (environment.outbox.class_name !== environments[reference].outbox.class_name) {
+      fail("BINDING_PARITY_MISMATCH", `${source} outbox class must match ${reference}'s.`);
     }
   }
 
@@ -745,6 +772,7 @@ export function validateEnvironments(
             .custom_domain,
           durable_objects: environment.durable_objects,
           durable_object_binding: environment.durable_objects.binding,
+          outbox: environment.outbox,
           key_ids: [environment.keys.current_kid, environment.keys.previous_kid].filter(Boolean),
           service_envelope_key_ids: [
             environment.keys.service_envelope_current_kid,

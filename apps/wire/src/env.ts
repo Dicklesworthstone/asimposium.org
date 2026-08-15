@@ -1,4 +1,5 @@
 import type { D1Database, R2Bucket } from "@cloudflare/workers-types";
+import type { KraterOutboxNamespace } from "./krater/outbox-do";
 
 /**
  * Typed Worker bindings for `apps/wire` (Stoa / Propylon / Symposiarch / Herald).
@@ -16,6 +17,8 @@ export interface Env {
   DB: D1Database;
   /** Krater's content-addressed body store (Fable §10.4), bound as ARTIFACTS. */
   ARTIFACTS: R2Bucket;
+  /** Durable retry owner for Krater's transactional outbox. */
+  KRATER_OUTBOX: KraterOutboxNamespace;
   /**
    * Base64url 256-bit enrollment replay binding (wrangler secret). Absent
    * disables enrollment with a typed 503 rather than a fallback.
@@ -29,7 +32,7 @@ export interface Env {
   SERVICE_ENVELOPE_KEYS?: string;
 }
 
-export const REQUIRED_BINDINGS = ["DB", "ARTIFACTS"] as const;
+export const REQUIRED_BINDINGS = ["DB", "ARTIFACTS", "KRATER_OUTBOX"] as const;
 
 export type RequiredBinding = (typeof REQUIRED_BINDINGS)[number];
 
@@ -55,6 +58,8 @@ const BINDING_PROBES: Record<RequiredBinding, (value: unknown) => boolean> = {
     isFunction(readProperty(value, "prepare")) && isFunction(readProperty(value, "batch")),
   ARTIFACTS: (value) =>
     isFunction(readProperty(value, "get")) && isFunction(readProperty(value, "put")),
+  KRATER_OUTBOX: (value) =>
+    isFunction(readProperty(value, "idFromName")) && isFunction(readProperty(value, "get")),
 };
 
 /** True when `value` looks like a live handle for the named binding. */

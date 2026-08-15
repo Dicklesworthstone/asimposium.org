@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { mkdirSync, mkdtempSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { performance } from "node:perf_hooks";
@@ -92,9 +92,18 @@ const cases = [
     execute() {
       for (const [name, environment] of Object.entries(report.environments)) {
         const bindings = parsed[name].durable_objects.bindings;
-        assert.equal(bindings.length, 1, name);
-        assert.equal(bindings[0].name, environment.durable_objects.binding, name);
-        assert.equal(bindings[0].class_name, environment.durable_objects.class_name, name);
+        assert.equal(bindings.length, 2, name);
+        const herald = bindings.find(
+          (binding) => binding.name === environment.durable_objects.binding,
+        );
+        const outbox = bindings.find((binding) => binding.name === environment.outbox.binding);
+        assert.equal(herald.class_name, environment.durable_objects.class_name, name);
+        assert.equal(outbox.class_name, environment.outbox.class_name, name);
+        assert.deepEqual(parsed[name].exports[environment.outbox.class_name], {
+          type: "durable-object",
+          storage: "sqlite",
+        });
+        assert.deepEqual(parsed[name].triggers.crons, [report.policy.outbox_cron], name);
         // A Durable Object namespace is scoped to the Worker script that owns
         // it, so the script name IS the namespace. Asserting the equality makes
         // the topology's `script_namespace` load-bearing instead of decorative:
@@ -117,16 +126,38 @@ const cases = [
     },
   },
   {
+    name: "the-production-deploy-overlay-retains-outbox-recovery",
+    execute() {
+      const deploy = Bun.TOML.parse(
+        readFileSync(
+          join(repositoryRoot, "infra/environments/production.deploy.wrangler.toml"),
+          "utf8",
+        ),
+      );
+      const binding = deploy.durable_objects.bindings.find(
+        (candidate) => candidate.name === report.environments.production.outbox.binding,
+      );
+      assert.equal(binding.class_name, report.environments.production.outbox.class_name);
+      assert.deepEqual(deploy.triggers.crons, [report.policy.outbox_cron]);
+      assert.deepEqual(Object.keys(deploy.triggers), ["crons"]);
+      assert.deepEqual(deploy.routes, [
+        { pattern: "a.asimposium.org", custom_domain: true },
+      ]);
+      assert.deepEqual(deploy.exports[report.environments.production.outbox.class_name], {
+        type: "durable-object",
+        storage: "sqlite",
+      });
+      assert.equal(deploy.main, parsed.production.main);
+      assert.equal(deploy.vars.S2_LOCAL_HARNESS, undefined);
+    },
+  },
+  {
     name: "the-served-text-rules-survive-generation",
     execute() {
       for (const [name, config] of Object.entries(parsed)) {
         assert.equal(config.rules.length, 1, name);
         assert.equal(config.rules[0].type, "Text", name);
-        assert.deepEqual(
-          config.rules[0].globs,
-          ["**/*.md", "**/*.txt", "**/*.schema.json"],
-          name,
-        );
+        assert.deepEqual(config.rules[0].globs, ["**/*.md", "**/*.txt", "**/*.schema.json"], name);
         assert.equal(config.rules[0].fallthrough, true, name);
       }
     },
