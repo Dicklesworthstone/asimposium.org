@@ -89,6 +89,8 @@ export function enrollmentCapsuleProjection(
         value_source: "claim response body",
         pending_status: "authorization_pending",
         retry_field: "retry_after_seconds",
+        idempotency:
+          "send one stable Idempotency-Key per enrollment; the same key replays the approval body within 24 hours",
       },
       post_approval_actions: POST_APPROVAL_ACTIONS.map((action, index) => ({
         order: index + 1,

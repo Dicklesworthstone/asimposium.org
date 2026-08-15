@@ -426,6 +426,10 @@
                 "retry_field": {
                   "type": "string",
                   "const": "retry_after_seconds"
+                },
+                "idempotency": {
+                  "type": "string",
+                  "const": "send one stable Idempotency-Key per enrollment; the same key replays the approval body within 24 hours"
                 }
               },
               "required": [
@@ -434,7 +438,8 @@
                 "body_field",
                 "value_source",
                 "pending_status",
-                "retry_field"
+                "retry_field",
+                "idempotency"
               ],
               "additionalProperties": false
             },

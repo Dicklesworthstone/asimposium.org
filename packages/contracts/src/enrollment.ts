@@ -174,6 +174,9 @@ export const EnrollmentCapsuleGuidanceSchema = z
         value_source: z.literal("claim response body"),
         pending_status: z.literal("authorization_pending"),
         retry_field: z.literal("retry_after_seconds"),
+        idempotency: z.literal(
+          "send one stable Idempotency-Key per enrollment; the same key replays the approval body within 24 hours",
+        ),
       })
       .strict(),
     post_approval_actions: z
