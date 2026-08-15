@@ -11,7 +11,8 @@ import Google from "next-auth/providers/google";
  *    sent to `a.asimposium.org`; a sponsor cookie on an agent route is a
  *    `WRONG_PRINCIPAL` error, and the reverse is too.
  *  - Agora holds no Krater credentials. A signed service envelope to the Worker
- *    is how sponsor writes happen (W8). That path does not exist yet.
+ *    is how sponsor writes happen (W8). That path runs in production: the
+ *    console's mint, decision, and list calls cross it per request.
  *
  * Credentials come from the environment at runtime — `AUTH_SECRET`,
  * `AUTH_GOOGLE_ID`, `AUTH_GOOGLE_SECRET`. They are never read at module scope
