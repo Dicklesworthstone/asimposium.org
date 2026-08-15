@@ -20,6 +20,11 @@ import {
   type SponsorEnrollmentDecision,
 } from "./enrollment.ts";
 import {
+  LedgerContractsSchema,
+  type ProblemIndexEntry,
+  type ProblemsIndexResponse,
+} from "./ledger.ts";
+import {
   type ContractProblem,
   type OpaqueProblem,
   type ProblemCode,
@@ -60,6 +65,9 @@ const PROBLEM_SCHEMA_ID = "https://a.asimposium.org/schemas/problem.v1.json";
 const S2_COST_RECEIPT_TYPES_ARTIFACT = "generated/s2-cost-receipt.types.ts";
 const S2_COST_RECEIPT_JSON_SCHEMA_ARTIFACT = "generated/s2-cost-receipt.schema.json";
 const S2_COST_RECEIPT_SCHEMA_ID = "https://a.asimposium.org/schemas/s2-cost-receipt.v1.json";
+const LEDGER_TYPES_ARTIFACT = "generated/ledger.types.ts";
+const LEDGER_JSON_SCHEMA_ARTIFACT = "generated/ledger.schema.json";
+const LEDGER_SCHEMA_ID = "https://a.asimposium.org/schemas/ledger.v1.json";
 
 export function packageDirectory(): string {
   return fileURLToPath(new URL("../", import.meta.url));
@@ -207,6 +215,29 @@ function generatedS2CostReceiptTypes(): string {
   ].join("\n");
 }
 
+function generatedLedgerJsonSchema(): string {
+  const document = {
+    $id: LEDGER_SCHEMA_ID,
+    title: "ASImposium public ledger read faces",
+    description:
+      "W6.1 public faces. The problems index mirrors the Krater projection; omitted[] is mandatory so readers see what the face left out.",
+    ...z.toJSONSchema(LedgerContractsSchema),
+  };
+  return formatJson(document);
+}
+
+function generatedLedgerTypes(): string {
+  const typeNames = ["ProblemIndexEntry", "ProblemsIndexResponse"] as const satisfies readonly (keyof {
+    ProblemIndexEntry: ProblemIndexEntry;
+    ProblemsIndexResponse: ProblemsIndexResponse;
+  })[];
+  return [
+    "// Generated from src/ledger.ts by `bun run generate`. Do not edit.",
+    `export type { ${typeNames.join(", ")} } from "../src/ledger.ts";`,
+    "",
+  ].join("\n");
+}
+
 export function generatedArtifacts(): readonly GeneratedArtifact[] {
   return [
     { relativePath: JSON_SCHEMA_ARTIFACT, content: generatedJsonSchema() },
@@ -215,6 +246,8 @@ export function generatedArtifacts(): readonly GeneratedArtifact[] {
     { relativePath: ENROLLMENT_TYPES_ARTIFACT, content: generatedEnrollmentTypes() },
     { relativePath: PROBLEM_JSON_SCHEMA_ARTIFACT, content: generatedProblemJsonSchema() },
     { relativePath: PROBLEM_TYPES_ARTIFACT, content: generatedProblemTypes() },
+    { relativePath: LEDGER_JSON_SCHEMA_ARTIFACT, content: generatedLedgerJsonSchema() },
+    { relativePath: LEDGER_TYPES_ARTIFACT, content: generatedLedgerTypes() },
     {
       relativePath: S2_COST_RECEIPT_JSON_SCHEMA_ARTIFACT,
       content: generatedS2CostReceiptJsonSchema(),

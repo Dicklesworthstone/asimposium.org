@@ -81,6 +81,13 @@ export {
   ProblemRuleSchema,
 } from "./problem.ts";
 export {
+  LedgerContractsSchema,
+  type ProblemIndexEntry,
+  ProblemIndexEntrySchema,
+  type ProblemsIndexResponse,
+  ProblemsIndexResponseSchema,
+} from "./ledger.ts";
+export {
   MAX_S2_COST_EVIDENCE_MANIFEST_BYTES,
   MAX_S2_COST_RECEIPT_BYTES,
   parseS2CostEvidenceManifestBytes,

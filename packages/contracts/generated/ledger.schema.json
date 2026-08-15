@@ -1,0 +1,100 @@
+{
+  "$id": "https://a.asimposium.org/schemas/ledger.v1.json",
+  "title": "ASImposium public ledger read faces",
+  "description": "W6.1 public faces. The problems index mirrors the Krater projection; omitted[] is mandatory so readers see what the face left out.",
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "type": "object",
+  "properties": {
+    "problem_index_entry": {
+      "type": "object",
+      "properties": {
+        "id": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 80
+        },
+        "public_seq": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 9007199254740991
+        },
+        "created_at": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 40
+        },
+        "updated_at": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 40
+        }
+      },
+      "required": [
+        "id",
+        "public_seq",
+        "created_at",
+        "updated_at"
+      ],
+      "additionalProperties": false
+    },
+    "problems_index_response": {
+      "type": "object",
+      "properties": {
+        "problems": {
+          "maxItems": 200,
+          "type": "array",
+          "items": {
+            "type": "object",
+            "properties": {
+              "id": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 80
+              },
+              "public_seq": {
+                "type": "integer",
+                "minimum": 0,
+                "maximum": 9007199254740991
+              },
+              "created_at": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 40
+              },
+              "updated_at": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 40
+              }
+            },
+            "required": [
+              "id",
+              "public_seq",
+              "created_at",
+              "updated_at"
+            ],
+            "additionalProperties": false
+          }
+        },
+        "omitted": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 160
+          }
+        }
+      },
+      "required": [
+        "problems",
+        "omitted"
+      ],
+      "additionalProperties": false
+    }
+  },
+  "required": [
+    "problem_index_entry",
+    "problems_index_response"
+  ],
+  "additionalProperties": false
+}
