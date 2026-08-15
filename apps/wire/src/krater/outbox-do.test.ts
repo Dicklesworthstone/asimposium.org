@@ -20,7 +20,7 @@ interface FakeOutboxRow {
   readonly kind: string;
   readonly dedupe_key: string;
   readonly payload_sha256: string;
-  state: "pending" | "delivered" | "quarantined";
+  state: "pending" | "delivered";
   delivered_at: string | null;
   quarantined_at: string | null;
   quarantine_code: string | null;
@@ -88,7 +88,10 @@ function outboxHarness(rows: FakeOutboxRow[], options: OutboxHarnessOptions = {}
           return prepared as unknown as D1PreparedStatement;
         },
         all: async <T>() => {
-          if (!sql.includes("FROM outbox") || !sql.includes("state = 'pending' AND id > ?")) {
+          if (
+            !sql.includes("FROM outbox") ||
+            !sql.includes("state = 'pending' AND quarantined_at IS NULL AND id > ?")
+          ) {
             throw new Error(`unexpected all query: ${sql}`);
           }
           const [afterId, middle, final] = bindings;
@@ -105,6 +108,7 @@ function outboxHarness(rows: FakeOutboxRow[], options: OutboxHarnessOptions = {}
             .filter(
               (row) =>
                 row.state === "pending" &&
+                row.quarantined_at === null &&
                 row.id > afterId &&
                 (throughId === undefined || row.id <= throughId),
             )
@@ -113,23 +117,32 @@ function outboxHarness(rows: FakeOutboxRow[], options: OutboxHarnessOptions = {}
           return { results: results as T[], success: true, meta: {} };
         },
         first: async <T>() => {
-          if (!sql.includes("SELECT COUNT(*) AS count FROM outbox WHERE state = 'pending'")) {
+          if (
+            !sql.includes(
+              "SELECT COUNT(*) AS count FROM outbox WHERE state = 'pending' AND quarantined_at IS NULL",
+            )
+          ) {
             throw new Error(`unexpected first query: ${sql}`);
           }
-          return { count: rows.filter((row) => row.state === "pending").length } as T;
+          return {
+            count: rows.filter((row) => row.state === "pending" && row.quarantined_at === null)
+              .length,
+          } as T;
         },
         run: async () => {
-          if (sql.includes("SET state = 'quarantined'")) {
+          if (sql.includes("SET quarantined_at = ?")) {
             const [quarantinedAt, quarantineCode, id] = bindings;
             const row = rows.find(
-              (candidate) => candidate.id === id && candidate.state === "pending",
+              (candidate) =>
+                candidate.id === id &&
+                candidate.state === "pending" &&
+                candidate.quarantined_at === null,
             );
             if (
               row !== undefined &&
               typeof quarantinedAt === "string" &&
               typeof quarantineCode === "string"
             ) {
-              row.state = "quarantined";
               row.quarantined_at = quarantinedAt;
               row.quarantine_code = quarantineCode;
             }
@@ -148,7 +161,10 @@ function outboxHarness(rows: FakeOutboxRow[], options: OutboxHarnessOptions = {}
           }
           const [deliveredAt, id] = bindings;
           const row = rows.find(
-            (candidate) => candidate.id === id && candidate.state === "pending",
+            (candidate) =>
+              candidate.id === id &&
+              candidate.state === "pending" &&
+              candidate.quarantined_at === null,
           );
           if (row !== undefined && typeof deliveredAt === "string") {
             row.state = "delivered";
@@ -221,9 +237,11 @@ describe("Krater outbox Durable Object contracts", () => {
       held_before_ack: false,
     });
     expect(harness.alarmAt()).not.toBeNull();
-    expect(rows.slice(0, OUTBOX_DRAIN_BATCH_SIZE).every((row) => row.state === "quarantined")).toBe(
-      true,
-    );
+    expect(
+      rows
+        .slice(0, OUTBOX_DRAIN_BATCH_SIZE)
+        .every((row) => row.state === "pending" && row.quarantined_at !== null),
+    ).toBe(true);
     expect(rows.at(-1)?.state).toBe("pending");
 
     const second = await harness.drainer.fetch(drainRequest());
