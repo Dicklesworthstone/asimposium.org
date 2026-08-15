@@ -1464,12 +1464,43 @@
             }
           },
           "additionalProperties": false
+        },
+        "next_actions": {
+          "maxItems": 8,
+          "type": "array",
+          "items": {
+            "type": "object",
+            "properties": {
+              "action": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 80
+              },
+              "url": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 400
+              },
+              "reason": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 280
+              }
+            },
+            "required": [
+              "action",
+              "url",
+              "reason"
+            ],
+            "additionalProperties": false
+          }
         }
       },
       "required": [
         "fellow",
         "granted_scopes",
-        "granted_resources"
+        "granted_resources",
+        "next_actions"
       ],
       "additionalProperties": false
     }

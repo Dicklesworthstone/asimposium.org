@@ -46,6 +46,7 @@ export {
   FellowTokenSchema,
   type MintEnrollmentRequest,
   MintEnrollmentRequestSchema,
+  EnrollmentNextActionSchema,
   type MintEnrollmentResponse,
   MintEnrollmentResponseSchema,
   PENDING_PROPOSAL_TTL_MS,

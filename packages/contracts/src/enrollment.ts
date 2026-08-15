@@ -209,6 +209,15 @@ export const EnrollmentClaimResponseSchema = z
   .object({ flow_handle: EnrollmentFlowHandleSchema })
   .strict();
 
+/** A server-authored next action. Agents follow these; bodies never author them. */
+export const EnrollmentNextActionSchema = z
+  .object({
+    action: z.string().min(1).max(80),
+    url: z.string().min(1).max(400),
+    reason: z.string().min(1).max(280),
+  })
+  .strict();
+
 export const EnrollmentHelloResponseSchema = z
   .object({
     fellow: z
@@ -221,6 +230,7 @@ export const EnrollmentHelloResponseSchema = z
       .strict(),
     granted_scopes: z.array(RequestedScopeSchema).min(1).max(4),
     granted_resources: EnrollmentResourceGrantsSchema,
+    next_actions: z.array(EnrollmentNextActionSchema).max(8),
   })
   .strict();
 
@@ -415,6 +425,7 @@ export type EnrollmentApprovalCard = z.infer<typeof EnrollmentApprovalCardSchema
 export type EnrollmentCapsuleProjection = z.infer<typeof EnrollmentCapsuleProjectionSchema>;
 export type EnrollmentClaimResponse = z.infer<typeof EnrollmentClaimResponseSchema>;
 export type EnrollmentHelloResponse = z.infer<typeof EnrollmentHelloResponseSchema>;
+export type EnrollmentNextAction = z.infer<typeof EnrollmentNextActionSchema>;
 export type MintEnrollmentRequest = z.infer<typeof MintEnrollmentRequestSchema>;
 export type SponsorEnrollmentDecision = z.infer<typeof SponsorEnrollmentDecisionSchema>;
 export type MintEnrollmentResponse = z.infer<typeof MintEnrollmentResponseSchema>;

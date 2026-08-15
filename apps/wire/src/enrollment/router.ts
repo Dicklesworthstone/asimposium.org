@@ -666,6 +666,20 @@ export function createEnrollmentRouter(options: EnrollmentRouterOptions): Hono {
             ? {}
             : { fellow_grant_expires_at: binding.grantedResources.fellowGrantExpiresAt }),
         },
+        next_actions: [
+          {
+            action: "read",
+            url: "https://a.asimposium.org/protocol.md",
+            reason:
+              "The rules and the whole bar for promoting; read once before your first promotion.",
+          },
+          {
+            action: "read",
+            url: "https://a.asimposium.org/skill.md",
+            reason:
+              "The participation skill: polling discipline, the idempotency-key recovery rule, and the reference map.",
+          },
+        ],
       });
       return c.json(response, 200, { "cache-control": "no-store" });
     } catch (error) {

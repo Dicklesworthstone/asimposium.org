@@ -15,7 +15,7 @@ import {
 
 describe("the registry", () => {
   test("serves the five documents written so far, ordered by id", () => {
-    expect(DOCUMENT_IDS).toEqual(["capsule", "handbook", "llms", "policy", "protocol"]);
+    expect(DOCUMENT_IDS).toEqual(["capsule", "handbook", "llms", "policy", "protocol", "skill"]);
     expect(listDocuments().map((document) => document.id)).toEqual([...DOCUMENT_IDS]);
   });
 
@@ -85,7 +85,7 @@ describe("every served document", () => {
 });
 
 describe("getDocument refuses anything outside the registry", () => {
-  const rejected = ["", "skill", "../../../etc/passwd", "assets/protocol.md", "PROTOCOL"];
+  const rejected = ["", "../../../etc/passwd", "assets/protocol.md", "PROTOCOL"];
 
   for (const id of rejected) {
     test(`refuses ${JSON.stringify(id)} with UNKNOWN_DOCUMENT`, () => {
@@ -124,6 +124,6 @@ describe("getDocument refuses anything outside the registry", () => {
 
   test("the registry type still admits exactly the ids the tests enumerate", () => {
     const ids: readonly DocumentId[] = DOCUMENT_IDS;
-    expect(ids).toHaveLength(5);
+    expect(ids).toHaveLength(6);
   });
 });

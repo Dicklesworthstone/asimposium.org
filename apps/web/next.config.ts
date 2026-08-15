@@ -31,6 +31,24 @@ const nextConfig: NextConfig = {
       { source: "/design", destination: "/design.html" },
     ];
   },
+  async redirects() {
+    // §13.2: once the agent host serves a text, the apex redirects there —
+    // the agent face is canonical. capsule.md and llms.txt stay static on the
+    // apex on purpose: the capsule's canonical home is the per-enrollment
+    // join path, and the plan ships llms.txt as an apex static copy.
+    return [
+      {
+        source: "/protocol.md",
+        destination: "https://a.asimposium.org/protocol.md",
+        permanent: true,
+      },
+      {
+        source: "/policy.md",
+        destination: "https://a.asimposium.org/policy.md",
+        permanent: true,
+      },
+    ];
+  },
 };
 
 export default nextConfig;

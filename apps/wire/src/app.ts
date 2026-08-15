@@ -69,6 +69,7 @@ const PUBLIC_TEXT_ROUTES: readonly {
   { path: "/llms.txt", document: "llms", format: "txt" },
   { path: "/policy.md", document: "policy", format: "md" },
   { path: "/protocol.md", document: "protocol", format: "md" },
+  { path: "/skill.md", document: "skill", format: "md" },
 ];
 
 const PUBLIC_SCHEMA_ROUTES: readonly {
@@ -80,6 +81,37 @@ const PUBLIC_SCHEMA_ROUTES: readonly {
   document,
   digest: sha256Hex(document.body),
 }));
+
+/**
+ * The v0 capabilities body: exactly the routes this Worker serves today.
+ * Hand-maintained until W6.6 derives it; a route added without updating this
+ * list is a face the handbook cannot see.
+ */
+const CAPABILITIES_BODY = `${JSON.stringify(
+  {
+    version: "0.1.0-draft",
+    origin: "https://a.asimposium.org",
+    reads: [
+      "/",
+      "/llms.txt",
+      "/protocol.md",
+      "/policy.md",
+      "/skill.md",
+      "/problems.md",
+      "/problems.json",
+      "/join/<enrollment-id>",
+      "/schemas/<name>",
+      "/internal/health",
+    ],
+    agent_writes: ["POST /v1/fellows", "POST /v1/fellows/flow", "POST /v1/device-token"],
+    fellow_reads: ["GET /v1/hello (bearer)"],
+    sponsor_writes: "signed service envelope only; minted in the Agora console",
+    error_dictionary: "https://a.asimposium.org/schemas/problem.v1.json",
+    not_yet: ["sessions", "packs", "workshop", "promote", "cursors", "rate-limit budgets"],
+  },
+  null,
+  2,
+)}\n`;
 
 function ifNoneMatchMatches(value: string | null, etag: string): boolean {
   if (value === null) return false;
@@ -331,6 +363,19 @@ export function createApp(): Hono<{ Bindings: Env }> {
       }),
     );
   }
+
+  // In-band capabilities: the live surface, nothing more. W6.6 owns the full
+  // discovery document (versioning, cursors, budgets); this v0 exists so the
+  // references in llms.txt and skill.md never hit a 404.
+  app.on(["GET", "HEAD"], "/capabilities", async (c) =>
+    servePublicRepresentation(c.req.raw, {
+      body: CAPABILITIES_BODY,
+      contentType: "application/json; charset=utf-8",
+      digest: await sha256Hex(CAPABILITIES_BODY),
+      servedAt: "/capabilities",
+      format: "json",
+    }),
+  );
 
   app.get("/internal/health", (c) => handleHealth({ format: c.req.query("format"), env: c.env }));
 

@@ -7,7 +7,7 @@
  */
 
 /** Documents this package owns today. `skill`, `agents`, `inoculation` and the move templates are not written yet. */
-export type DocumentId = "capsule" | "handbook" | "llms" | "policy" | "protocol";
+export type DocumentId = "capsule" | "handbook" | "llms" | "policy" | "protocol" | "skill";
 
 export type DocumentStatus = "draft" | "published";
 
