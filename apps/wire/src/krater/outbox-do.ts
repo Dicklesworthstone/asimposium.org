@@ -74,6 +74,11 @@ interface OutboxCommand {
   faultMode: OutboxFaultMode;
 }
 
+interface StaleWrapFixtureCommand {
+  scanAfterId: number;
+  scanWrapThroughId: number;
+}
+
 export class KraterOutboxBindingError extends Error {
   readonly code = "KRATER_OUTBOX_BINDING_UNAVAILABLE";
 }
@@ -106,6 +111,21 @@ async function requestCommand(request: Request): Promise<OutboxCommand> {
   const body = asRecord(await request.json());
   if (body === null) throw new Error("KRATER_OUTBOX_COMMAND_INVALID");
   return { faultMode: parseFaultMode(body.fault_mode) };
+}
+
+function parseStaleWrapFixtureCommand(value: unknown): StaleWrapFixtureCommand {
+  const body = asRecord(value);
+  const scanAfterId = body?.scan_after_id;
+  const scanWrapThroughId = body?.scan_wrap_through_id;
+  if (
+    !isNonNegativeInteger(scanAfterId) ||
+    !isNonNegativeInteger(scanWrapThroughId) ||
+    scanWrapThroughId === 0 ||
+    scanAfterId >= scanWrapThroughId
+  ) {
+    throw new Error("KRATER_OUTBOX_STALE_WRAP_FIXTURE_INVALID");
+  }
+  return { scanAfterId, scanWrapThroughId };
 }
 
 function emptyCounters(): DurableCounters {
@@ -189,6 +209,24 @@ export async function requestKraterOutbox(
   return kraterOutboxStub(env).fetch(request);
 }
 
+/** Local S-2 harness seam: production routing never exposes this request. */
+export async function plantKraterOutboxStaleWrapForHarness(
+  env: KraterOutboxEnv,
+  scanAfterId: number,
+  scanWrapThroughId: number,
+): Promise<Response> {
+  return kraterOutboxStub(env).fetch(
+    new Request("https://krater-outbox.internal/__s2/plant-stale-wrap", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({
+        scan_after_id: scanAfterId,
+        scan_wrap_through_id: scanWrapThroughId,
+      }),
+    }),
+  );
+}
+
 /**
  * Durable retry owner exported by the shared Worker and mounted through the
  * environment-specific Wrangler configuration.
@@ -212,6 +250,18 @@ export class KraterOutboxDrainer {
       if (pathname === "/drain-now") {
         const command = await requestCommand(request);
         return response(await this.drain("fetch", command.faultMode));
+      }
+      if (pathname === "/__s2/plant-stale-wrap" && request.method === "POST") {
+        const fixture = parseStaleWrapFixtureCommand(await request.json());
+        await this.state.storage.put({
+          [OUTBOX_SCAN_AFTER_ID_KEY]: fixture.scanAfterId,
+          [OUTBOX_SCAN_WRAP_THROUGH_ID_KEY]: fixture.scanWrapThroughId,
+          // If the first recovery alarm wins the race with the harness's
+          // observation, hold the restored row before ACK and keep it armed.
+          fault_mode: "hold-before-ack",
+        });
+        await this.state.storage.deleteAlarm();
+        return response({ planted: true }, 201);
       }
       return response({ code: "KRATER_OUTBOX_ROUTE_NOT_FOUND" }, 404);
     } catch (error) {
@@ -460,6 +510,14 @@ export class KraterOutboxDrainer {
           await this.state.storage.put(OUTBOX_SCAN_AFTER_ID_KEY, wrapThroughId);
           if ((await this.pendingRows(wrapThroughId)).length > 0) {
             await this.setAlarm(OUTBOX_ALARM_BASE_MS);
+          } else if ((await this.pendingCount()) > 0) {
+            // The wrap cursor is derived Durable Object state, while D1 is
+            // authoritative. A D1 restore (or other stale cursor state) can
+            // reintroduce a pending row below the interval this wrap just
+            // finished. Never clear the only alarm while authoritative work
+            // remains: discard the optimization and rescan from the start.
+            await this.state.storage.put(OUTBOX_SCAN_AFTER_ID_KEY, 0);
+            await this.setAlarm(OUTBOX_ALARM_BASE_MS);
           } else {
             await this.state.storage.deleteAlarm();
           }
@@ -474,15 +532,20 @@ export class KraterOutboxDrainer {
         }
         return { source, delivered, quarantined, held_before_ack: false };
       } catch (error) {
-        // Cloudflare retries failed alarms, but fetch-driven drains need the
-        // same durable liveness guarantee. Re-arm explicitly when storage is
-        // healthy enough to do so, then preserve the original failure.
+        // Re-arm explicitly so fetch- and alarm-driven drains use the same
+        // bounded retry policy. Once an alarm is durably re-armed, returning
+        // successfully keeps that code-owned schedule authoritative instead
+        // of also asking the runtime to create an independent failed-alarm
+        // retry. If re-arming itself fails, throw and leave the runtime as the
+        // final retry authority.
         try {
           await this.retryAfterFailure();
         } catch (_retryError) {
-          // If DO storage itself is unavailable, the alarm runtime remains the
-          // final retry authority. Never replace the causal drain failure.
+          throw error;
         }
+        if (source === "alarm") return { source, retry_armed: true };
+        // Fetch callers still receive the causal D1 failure after the retry is
+        // safe; a 2xx response would falsely report a successful direct drain.
         throw error;
       } finally {
         await this.state.storage.put("active", 0);

@@ -299,6 +299,37 @@ describe("Krater outbox Durable Object contracts", () => {
     expect(validateOutboxRow({ ...valid, dedupe_key: "wrong" })).toBe("OUTBOX_DEDUPE_INVALID");
   });
 
+  test("the local stale-wrap fixture accepts only a forward bounded cursor interval", async () => {
+    const harness = outboxHarness([]);
+    const fixtureRequest = (scanAfterId: number, scanWrapThroughId: number) =>
+      new Request("https://krater-outbox.internal/__s2/plant-stale-wrap", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({
+          scan_after_id: scanAfterId,
+          scan_wrap_through_id: scanWrapThroughId,
+        }),
+      });
+
+    for (const [scanAfterId, scanWrapThroughId] of [
+      [2, 2],
+      [2, 1],
+      [-1, 2],
+    ] as const) {
+      const refused = await harness.drainer.fetch(fixtureRequest(scanAfterId, scanWrapThroughId));
+      expect(refused.status).toBe(400);
+      expect(await refused.json()).toEqual({ code: "KRATER_OUTBOX_STALE_WRAP_FIXTURE_INVALID" });
+    }
+
+    const planted = await harness.drainer.fetch(fixtureRequest(8, 20));
+    expect(planted.status).toBe(201);
+    expect(await planted.json()).toEqual({ planted: true });
+    expect(harness.storageValue("scan_after_id")).toBe(8);
+    expect(harness.storageValue("scan_wrap_through_id")).toBe(20);
+    expect(harness.storageValue("fault_mode")).toBe("hold-before-ack");
+    expect(harness.alarmAt()).toBeNull();
+  });
+
   test("PLANTED: a full quarantined page cannot starve the next valid pending row", async () => {
     const rows = [
       ...Array.from({ length: OUTBOX_DRAIN_BATCH_SIZE }, (_, index) => outboxRow(index + 1, false)),
@@ -406,6 +437,26 @@ describe("Krater outbox Durable Object contracts", () => {
     await drainScheduledAlarms(harness);
   });
 
+  test("PLANTED: an alarm ACK failure uses only the durably re-armed bounded retry", async () => {
+    const rows = [outboxRow(1)];
+    const harness = outboxHarness(rows, { acknowledgeFailures: 1 });
+
+    await expect(harness.drainer.alarm()).resolves.toBeUndefined();
+
+    expect(rows[0]?.state).toBe("pending");
+    expect(harness.alarmAt()).not.toBeNull();
+    expect(harness.storageValue("counters")).toMatchObject({
+      failures: 1,
+      last_backoff_ms: OUTBOX_ALARM_BASE_MS,
+      last_phase: "retry",
+    });
+
+    await harness.drainer.alarm();
+
+    expect(rows[0]?.state).toBe("delivered");
+    await drainScheduledAlarms(harness);
+  });
+
   test("PLANTED: a zero-change acknowledgement retains the pending row for alarm retry", async () => {
     const rows = [outboxRow(1)];
     const harness = outboxHarness(rows, { acknowledgeZeroChanges: 1 });
@@ -500,5 +551,29 @@ describe("Krater outbox Durable Object contracts", () => {
     await drainScheduledAlarms(harness);
     expect(harness.storageValue("scan_after_id")).toBe(1);
     expect(harness.storageValue("scan_wrap_through_id")).toBeUndefined();
+  });
+
+  test("PLANTED: a completed stale wrap cannot clear the only alarm above restored D1 work", async () => {
+    const rows = [outboxRow(1)];
+    const harness = outboxHarness(rows, {
+      initialStorage: {
+        scan_after_id: 8,
+        scan_wrap_through_id: 20,
+      },
+    });
+
+    const first = await harness.drainer.fetch(drainRequest());
+
+    expect(first.status).toBe(200);
+    expect(await first.json()).toMatchObject({ delivered: 0, quarantined: 0 });
+    expect(rows[0]?.state).toBe("pending");
+    expect(harness.storageValue("scan_after_id")).toBe(0);
+    expect(harness.storageValue("scan_wrap_through_id")).toBeUndefined();
+    expect(harness.alarmAt()).not.toBeNull();
+
+    await harness.drainer.alarm();
+
+    expect(rows[0]?.state).toBe("delivered");
+    await drainScheduledAlarms(harness);
   });
 });

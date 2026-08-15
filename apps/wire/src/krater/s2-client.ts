@@ -1005,12 +1005,50 @@ async function exerciseOutboxDrainer(): Promise<void> {
   );
   assertEqual(transient.seq, 4, "S2_OUTBOX_RETRY_SEQUENCE_INVALID");
 
+  const restored = await write(
+    writeBody(5, OUTBOX_PROBLEM, "Outbox stale-wrap recovery claim."),
+    "outbox-stale-wrap-write",
+  );
+  assertEqual(restored.outbox_handoff, "deferred", "S2_OUTBOX_STALE_WRAP_WRITE_NOT_DEFERRED");
+  const staleWrap = await request(
+    "POST",
+    "/__s2/outbox/plant-stale-wrap",
+    "outbox-stale-wrap-fixture",
+    { scan_after_id: 1_000, scan_wrap_through_id: 2_000 },
+  );
+  assertEqual(staleWrap.status, 201, "S2_OUTBOX_STALE_WRAP_FIXTURE_FAILED");
+  const staleFirst = await request("POST", "/__s2/outbox/drain", "outbox-stale-wrap-first-drain", {
+    fault_mode: "none",
+  });
+  assertEqual(staleFirst.status, 200, "S2_OUTBOX_STALE_WRAP_FIRST_DRAIN_FAILED");
+  assertEqual(numberAt(staleFirst.body, "delivered"), 0, "S2_OUTBOX_STALE_WRAP_SKIPPED_RANGE");
+  const staleArmed = await outboxStatus("outbox-stale-wrap-rearmed");
+  assertEqual(staleArmed.pending, 1, "S2_OUTBOX_STALE_WRAP_PENDING_LOST");
+  assertEqual(staleArmed.alarm_at === null, false, "S2_OUTBOX_STALE_WRAP_ALARM_LOST");
+  const staleSecond = await request(
+    "POST",
+    "/__s2/outbox/drain",
+    "outbox-stale-wrap-second-drain",
+    { fault_mode: "none" },
+  );
+  assertEqual(staleSecond.status, 200, "S2_OUTBOX_STALE_WRAP_SECOND_DRAIN_FAILED");
+  assertEqual(numberAt(staleSecond.body, "delivered"), 1, "S2_OUTBOX_STALE_WRAP_NOT_DELIVERED");
+  const staleReset = await request("POST", "/__s2/outbox/nudge", "outbox-stale-wrap-fault-reset", {
+    fault_mode: "none",
+  });
+  assertEqual(staleReset.status, 202, "S2_OUTBOX_STALE_WRAP_FAULT_RESET_FAILED");
+  await waitForOutbox(
+    "outbox-stale-wrap-settled",
+    (status) => status.pending === 0 && status.alarm_at === null,
+  );
+  assertEqual(restored.seq, 5, "S2_OUTBOX_STALE_WRAP_SEQUENCE_INVALID");
+
   const held = await write(
-    writeBody(5, OUTBOX_PROBLEM, "Outbox kill-boundary claim."),
+    writeBody(6, OUTBOX_PROBLEM, "Outbox kill-boundary claim."),
     "outbox-hold-before-ack-write",
   );
   const malformed = await write(
-    writeBody(6, OUTBOX_PROBLEM, "Outbox malformed fixture claim."),
+    writeBody(7, OUTBOX_PROBLEM, "Outbox malformed fixture claim."),
     "outbox-malformed-write",
   );
   const planted = await request(
@@ -1028,7 +1066,7 @@ async function exerciseOutboxDrainer(): Promise<void> {
   const heldStatus = await outboxStatus("outbox-kill-boundary-status");
   assertEqual(heldStatus.last_phase, "held-before-ack", "S2_OUTBOX_KILL_BOUNDARY_NOT_DURABLE");
   assertEqual(heldStatus.alarm_at === null, false, "S2_OUTBOX_KILL_REARM_MISSING");
-  assertEqual(held.seq, 5, "S2_OUTBOX_HOLD_SEQUENCE_INVALID");
+  assertEqual(held.seq, 6, "S2_OUTBOX_HOLD_SEQUENCE_INVALID");
 }
 
 async function plantLegacy(problemId: string, eventCount: number, scenario: string): Promise<void> {
@@ -1991,9 +2029,9 @@ async function restartVerify(): Promise<void> {
   );
   const outboxProblem = await state(OUTBOX_PROBLEM, "outbox-restart-visible-state");
   for (const table of ["claims", "claim_projections", "events", "outbox"] as const) {
-    assertEqual(outboxProblem.counts[table], 6, "S2_OUTBOX_RESTART_DUPLICATED_VISIBLE_ROW");
+    assertEqual(outboxProblem.counts[table], 7, "S2_OUTBOX_RESTART_DUPLICATED_VISIBLE_ROW");
   }
-  await assertReplay(OUTBOX_PROBLEM, 6, "outbox-restart-visible-replay");
+  await assertReplay(OUTBOX_PROBLEM, 7, "outbox-restart-visible-replay");
   // Last in the phase on purpose: this writes a claim, and a new outbox row would otherwise
   // perturb the recovery counters the assertions above pin exactly.
   await legacyBoundedBackfillAfterRestart();

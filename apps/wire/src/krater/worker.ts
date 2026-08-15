@@ -30,6 +30,7 @@ import {
   KraterOutboxBindingError,
   type KraterOutboxEnv,
   type OutboxFaultMode,
+  plantKraterOutboxStaleWrapForHarness,
   requestKraterOutbox,
 } from "./outbox-do";
 
@@ -668,6 +669,17 @@ async function handleHarnessRequest(
       const body = await readBody(request);
       await plantMalformedOutboxForHarness(env.DB, requiredString(body, "event_id"));
       return response({ status: "planted" }, 201);
+    }
+
+    if (request.method === "POST" && url.pathname === "/__s2/outbox/plant-stale-wrap") {
+      surface = "write";
+      const body = await readBody(request);
+      const upstream = await plantKraterOutboxStaleWrapForHarness(
+        env,
+        requiredNumber(body, "scan_after_id"),
+        requiredNumber(body, "scan_wrap_through_id"),
+      );
+      return response(await upstream.json(), upstream.status);
     }
 
     if (request.method === "GET" && url.pathname === "/__s2/state") {
