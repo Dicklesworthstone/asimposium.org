@@ -33,6 +33,7 @@ interface OutboxHarness {
 interface OutboxHarnessOptions {
   readonly initialStorage?: Readonly<Record<string, unknown>>;
   readonly acknowledgeFailures?: number;
+  readonly acknowledgeZeroChanges?: number;
 }
 
 function outboxRow(id: number, valid = true): FakeOutboxRow {
@@ -52,6 +53,7 @@ function outboxRow(id: number, valid = true): FakeOutboxRow {
 function outboxHarness(rows: FakeOutboxRow[], options: OutboxHarnessOptions = {}): OutboxHarness {
   const storage = new Map<string, unknown>(Object.entries(options.initialStorage ?? {}));
   let acknowledgeFailures = options.acknowledgeFailures ?? 0;
+  let acknowledgeZeroChanges = options.acknowledgeZeroChanges ?? 0;
   let alarmAt: number | null = null;
 
   const durableState = {
@@ -101,6 +103,10 @@ function outboxHarness(rows: FakeOutboxRow[], options: OutboxHarnessOptions = {}
           if (acknowledgeFailures > 0) {
             acknowledgeFailures -= 1;
             throw new Error("PLANTED_D1_ACKNOWLEDGEMENT_FAILURE");
+          }
+          if (acknowledgeZeroChanges > 0) {
+            acknowledgeZeroChanges -= 1;
+            return { success: true, meta: { changes: 0 } };
           }
           const [deliveredAt, id] = bindings;
           const row = rows.find(
@@ -249,5 +255,62 @@ describe("Krater outbox Durable Object contracts", () => {
       last_phase: "delivered",
     });
     expect(harness.alarmAt()).toBeNull();
+  });
+
+  test("PLANTED: a zero-change acknowledgement retains the pending row for alarm retry", async () => {
+    const rows = [outboxRow(1)];
+    const harness = outboxHarness(rows, { acknowledgeZeroChanges: 1 });
+
+    const first = await harness.drainer.fetch(drainRequest());
+
+    expect(first.status).toBe(200);
+    expect(await first.json()).toMatchObject({ delivered: 0, retry_scheduled_ms: 25 });
+    expect(rows[0]?.state).toBe("pending");
+    expect(harness.storageValue("scan_after_id") ?? 0).toBe(0);
+    expect(harness.alarmAt()).not.toBeNull();
+
+    await harness.drainer.alarm();
+
+    expect(rows[0]?.state).toBe("delivered");
+    expect(harness.alarmAt()).toBeNull();
+  });
+
+  test("PLANTED: stale quarantine state cannot suppress a different restored row", async () => {
+    const rows = [outboxRow(1)];
+    const harness = outboxHarness(rows, {
+      initialStorage: {
+        "quarantine:1": JSON.stringify([
+          rows[0]?.event_id,
+          "malformed",
+          rows[0]?.dedupe_key,
+          rows[0]?.payload_sha256,
+        ]),
+      },
+    });
+
+    const response = await harness.drainer.fetch(drainRequest());
+
+    expect(response.status).toBe(200);
+    expect(await response.json()).toMatchObject({ delivered: 1, quarantined: 0 });
+    expect(rows[0]?.state).toBe("delivered");
+  });
+
+  test("PLANTED: corrupt diagnostic counters cannot disable failure re-arming", async () => {
+    const rows = [outboxRow(1)];
+    const harness = outboxHarness(rows, {
+      acknowledgeFailures: 1,
+      initialStorage: { counters: { failures: "not-a-number" } },
+    });
+
+    const failed = await harness.drainer.fetch(drainRequest());
+
+    expect(failed.status).toBe(400);
+    expect(rows[0]?.state).toBe("pending");
+    expect(harness.storageValue("counters")).toMatchObject({
+      failures: 1,
+      last_backoff_ms: OUTBOX_ALARM_BASE_MS,
+      last_phase: "retry",
+    });
+    expect(harness.alarmAt()).not.toBeNull();
   });
 });

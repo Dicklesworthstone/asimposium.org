@@ -12,6 +12,14 @@ export const OUTBOX_ALARM_MAX_MS = 2_000;
 const SHA256_HEX = /^[a-f0-9]{64}$/;
 const OUTBOX_EVENT_ID = /^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/;
 const OUTBOX_SCAN_AFTER_ID_KEY = "scan_after_id";
+const OUTBOX_PHASES = new Set<DurableCounters["last_phase"]>([
+  "idle",
+  "dequeued",
+  "held-before-ack",
+  "delivered",
+  "quarantined",
+  "retry",
+]);
 
 export type OutboxFaultMode = "none" | "fail-once" | "hold-before-ack";
 
@@ -114,6 +122,28 @@ function emptyCounters(): DurableCounters {
   };
 }
 
+function isNonNegativeInteger(value: unknown): value is number {
+  return typeof value === "number" && Number.isSafeInteger(value) && value >= 0;
+}
+
+function isDurableCounters(value: unknown): value is DurableCounters {
+  const record = asRecord(value);
+  if (record === null) return false;
+  return (
+    isNonNegativeInteger(record.owner_acquisitions) &&
+    isNonNegativeInteger(record.max_active) &&
+    isNonNegativeInteger(record.recovered_ownerships) &&
+    isNonNegativeInteger(record.delivery_attempts) &&
+    isNonNegativeInteger(record.delivered) &&
+    isNonNegativeInteger(record.quarantined) &&
+    isNonNegativeInteger(record.failures) &&
+    (record.last_backoff_ms === null || isNonNegativeInteger(record.last_backoff_ms)) &&
+    (record.last_quarantine_code === null || typeof record.last_quarantine_code === "string") &&
+    typeof record.last_phase === "string" &&
+    OUTBOX_PHASES.has(record.last_phase as DurableCounters["last_phase"])
+  );
+}
+
 export function boundedOutboxBackoff(failures: number): number {
   if (!Number.isInteger(failures) || failures < 1) {
     throw new Error("KRATER_OUTBOX_BACKOFF_INVALID");
@@ -197,7 +227,12 @@ export class KraterOutboxDrainer {
   }
 
   private async counters(): Promise<DurableCounters> {
-    return (await this.state.storage.get<DurableCounters>("counters")) ?? emptyCounters();
+    const stored = await this.state.storage.get<unknown>("counters");
+    if (stored === undefined) return emptyCounters();
+    if (isDurableCounters(stored)) return stored;
+    const recovered = emptyCounters();
+    await this.state.storage.put("counters", recovered);
+    return recovered;
   }
 
   private async updateCounters(
@@ -244,8 +279,15 @@ export class KraterOutboxDrainer {
     return row?.count ?? 0;
   }
 
-  private async isQuarantined(outboxId: number): Promise<boolean> {
-    return (await this.state.storage.get<boolean>(`quarantine:${outboxId}`)) === true;
+  private quarantineFingerprint(row: PendingOutboxRow): string {
+    return JSON.stringify([row.event_id, row.kind, row.dedupe_key, row.payload_sha256]);
+  }
+
+  private async isQuarantined(row: PendingOutboxRow): Promise<boolean> {
+    return (
+      (await this.state.storage.get<unknown>(`quarantine:${row.id}`)) ===
+      this.quarantineFingerprint(row)
+    );
   }
 
   private async quarantine(
@@ -253,8 +295,8 @@ export class KraterOutboxDrainer {
     code: NonNullable<ReturnType<typeof validateOutboxRow>>,
   ): Promise<void> {
     const key = `quarantine:${row.id}`;
-    if (!(await this.isQuarantined(row.id))) {
-      await this.state.storage.put(key, true);
+    if (!(await this.isQuarantined(row))) {
+      await this.state.storage.put(key, this.quarantineFingerprint(row));
       await this.updateCounters((current) => ({
         ...current,
         quarantined: current.quarantined + 1,
@@ -333,7 +375,7 @@ export class KraterOutboxDrainer {
         let quarantined = 0;
         let faultMode = requestedFault;
         for (const row of rows) {
-          if (await this.isQuarantined(row.id)) {
+          if (await this.isQuarantined(row)) {
             scanAfterId = row.id;
             continue;
           }
@@ -369,6 +411,10 @@ export class KraterOutboxDrainer {
               last_backoff_ms: null,
               last_phase: "delivered",
             }));
+          } else {
+            await this.state.storage.put(OUTBOX_SCAN_AFTER_ID_KEY, scanAfterId);
+            const backoff = await this.retryAfterFailure();
+            return { source, delivered, quarantined, retry_scheduled_ms: backoff };
           }
           scanAfterId = row.id;
           faultMode = "none";
