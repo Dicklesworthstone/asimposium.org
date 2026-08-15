@@ -983,13 +983,71 @@ describe("S-3 promotion validator", () => {
   });
 
   test("currency and escaped dollars cannot consume a later inline-math opener", async () => {
-    const inline = "Costs $5. The bound $x + y$ holds; escaped \\$9 stays prose.";
-    const explicit = "Costs $5. The bound \\(x + y\\) holds; escaped \\$9 stays prose.";
+    const equivalentCurrencyForms = [
+      [
+        "Costs $5. The bound $x + y$ holds; escaped \\$9 stays prose.",
+        "Costs $5. The bound \\(x + y\\) holds; escaped \\$9 stays prose.",
+      ],
+      ["Cost $5;bound$x+y$ holds.", "Cost $5;bound\\(x+y\\) holds."],
+      ["Cost $5,then$x+y$ holds.", "Cost $5,then\\(x+y\\) holds."],
+      ["Cost $5—then$x+y$ holds.", "Cost $5—then\\(x+y\\) holds."],
+      ["Value $1,234.50 USD;bound$x+y$ holds.", "Value $1,234.50 USD;bound\\(x+y\\) holds."],
+    ] as const;
 
-    expect(await normHash(inline)).toBe(await normHash(explicit));
+    for (const [inline, explicit] of equivalentCurrencyForms) {
+      expect(await normHash(inline)).toBe(await normHash(explicit));
+    }
     expect(await normHash("The constant is $5$. ")).toBe(
       await normHash("The constant is \\(5\\)."),
     );
+    const legitimateNumericMath = ["$5+x$", "$5 x$", "$5;x$", "$5;xy$"];
+    for (const inlineMath of legitimateNumericMath) {
+      const interior = inlineMath.slice(1, -1);
+      expect(await normHash(`The formula ${inlineMath} and $y$ hold.`)).toBe(
+        await normHash(`The formula \\(${interior}\\) and \\(y\\) hold.`),
+      );
+    }
+  });
+
+  test("refuses a punctuation-adjacent currency/math duplicate under P11", async () => {
+    const service = splitService();
+    await service.pushWorkshop(FELLOW_A, workshop({ workshopId: "W-currency-inline" }));
+    expect(
+      await service.promote(
+        FELLOW_A,
+        promotion({
+          workshopId: "W-currency-inline",
+          publicClaim: {
+            ...promotion().publicClaim,
+            claimId: "C-currency-inline",
+            statement: "Cost $5;bound$x+y$ holds.",
+          },
+        }),
+      ),
+    ).toMatchObject({ status: 201, outcome: "created" });
+
+    await service.pushWorkshop(FELLOW_A, workshop({ workshopId: "W-currency-explicit" }));
+    expect(
+      await service.promote(
+        FELLOW_A,
+        promotion({
+          workshopId: "W-currency-explicit",
+          idempotencyKey: "idem-currency-explicit",
+          publicClaim: {
+            ...promotion().publicClaim,
+            claimId: "C-currency-explicit",
+            statement: "Cost $5;bound\\(x+y\\) holds.",
+          },
+        }),
+      ),
+    ).toMatchObject({
+      status: 409,
+      code: "DUPLICATE_CLAIM",
+      rule: "P11",
+      existingId: "C-currency-inline",
+      nextAction: "review_or_refine",
+    });
+    expect((await service.publicLedger("P-split")).publicSeq).toBe(1);
   });
 
   test("does not let a forged raw-token claim preempt an honest inline-math claim", async () => {

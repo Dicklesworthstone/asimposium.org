@@ -150,6 +150,12 @@ const RAW_CONTROL = /[\u0000-\u001F\u007F-\u009F]/gu;
 const CANONICAL_ESCAPE = "~";
 const MATH_TOKEN_START = "\u0002";
 const MATH_TOKEN_END = "\u0003";
+const CURRENCY_LED_PROSE =
+  /^[+-]?(?:(?:\d{1,3}(?:,\d{3})+)|\d+)(?:\.\d+)?(?:\s?[a-z]{3})?(?:[),.;:!?…]|[-–—])\s*\p{L}{2}/u;
+const EXPLICIT_CURRENCY_CONTEXT =
+  /(?:^|[^\p{L}\p{N}_])(?:amounts?|budgets?|costs?|fees?|paid|pay|payments?|prices?|worth)(?:\s+(?:are|at|is|of|was|were))?\s*[:=]?\s*$/u;
+const CURRENCY_CODE_LED_PROSE =
+  /^[+-]?(?:(?:\d{1,3}(?:,\d{3})+)|\d+)(?:\.\d+)?\s?[a-z]{3}(?:[),.;:!?…]|[-–—])\s*\p{L}{2}/u;
 
 function collapseWhitespace(value: string): string {
   return value.replace(CONFUSABLE_WHITESPACE, " ").trim();
@@ -195,16 +201,8 @@ function canCloseInlineMath(value: string, index: number): boolean {
   );
 }
 
-/**
- * Tokenize single-dollar math without letting a currency dollar consume a
- * later real opener. If a dollar cannot close because whitespace precedes it
- * but can open, it supersedes the earlier unmatched opener. Each code unit is
- * visited a bounded number of times; emitted slices cover the input once.
- */
-function tokenizeInlineMath(value: string): string {
-  const output: string[] = [];
-  let emittedThrough = 0;
-  let opener = -1;
+function inlineDollarPositions(value: string): readonly number[] {
+  const positions: number[] = [];
   let index = 0;
 
   while (index < value.length) {
@@ -213,18 +211,64 @@ function tokenizeInlineMath(value: string): string {
       index = end === -1 ? index + 1 : end + 1;
       continue;
     }
-    if (value[index] !== "$" || value[index - 1] === "$" || value[index + 1] === "$") {
-      index += 1;
-      continue;
+    if (
+      value[index] === "$" &&
+      value[index - 1] !== "$" &&
+      value[index + 1] !== "$" &&
+      !isEscapedDollar(value, index)
+    ) {
+      positions.push(index);
     }
+    index += 1;
+  }
 
+  return positions;
+}
+
+function currencyOpenerShouldYield(
+  value: string,
+  opener: number,
+  nextOpener: number,
+  hasLaterDollar: boolean,
+): boolean {
+  return (
+    hasLaterDollar &&
+    canOpenInlineMath(value, nextOpener) &&
+    CURRENCY_LED_PROSE.test(value.slice(opener + 1, nextOpener)) &&
+    (EXPLICIT_CURRENCY_CONTEXT.test(value.slice(Math.max(0, opener - 64), opener)) ||
+      CURRENCY_CODE_LED_PROSE.test(value.slice(opener + 1, nextOpener)))
+  );
+}
+
+/**
+ * Tokenize single-dollar math without letting a currency dollar consume a
+ * later real opener. If a dollar cannot close because whitespace precedes it
+ * but can open, it supersedes the earlier unmatched opener. An ambidextrous
+ * dollar also supersedes a numeric opener when the intervening text has an
+ * unmistakable currency-then-prose boundary and another delimiter remains;
+ * this keeps `$5$`, `$5+x$`, and numeric math outside currency context intact.
+ * Each code unit is visited a bounded number of times; emitted slices cover
+ * the input once.
+ */
+function tokenizeInlineMath(value: string): string {
+  const output: string[] = [];
+  let emittedThrough = 0;
+  let opener = -1;
+  const dollarPositions = inlineDollarPositions(value);
+
+  for (const [positionIndex, index] of dollarPositions.entries()) {
     if (opener === -1) {
       if (canOpenInlineMath(value, index)) opener = index;
-      index += 1;
       continue;
     }
 
     if (canCloseInlineMath(value, index)) {
+      if (
+        currencyOpenerShouldYield(value, opener, index, positionIndex + 1 < dollarPositions.length)
+      ) {
+        opener = index;
+        continue;
+      }
       output.push(
         value.slice(emittedThrough, opener),
         MATH_TOKEN_START,
@@ -236,7 +280,6 @@ function tokenizeInlineMath(value: string): string {
     } else if (canOpenInlineMath(value, index)) {
       opener = index;
     }
-    index += 1;
   }
 
   output.push(value.slice(emittedThrough));
