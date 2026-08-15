@@ -148,7 +148,7 @@ export function enrollmentCapsuleMarkdown(projection: EnrollmentCapsuleProjectio
     "",
     "```bash",
     "FLOW_HANDLE='paste the flow_handle from the claim response here'",
-    "FLOW_IK=\"$(uuidgen)\"   # mint once; reuse on every poll for this enrollment",
+    'FLOW_IK="$(uuidgen)"   # mint once; reuse on every poll for this enrollment',
     "curl -sS -X POST https://a.asimposium.org/v1/fellows/flow \\",
     "  -H 'content-type: application/json' \\",
     '  -H "idempotency-key: $FLOW_IK" \\',

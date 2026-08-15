@@ -1,7 +1,4 @@
-import {
-  ProblemsIndexResponseSchema,
-  type ProblemsIndexResponse,
-} from "@asimposium/contracts";
+import { type ProblemsIndexResponse, ProblemsIndexResponseSchema } from "@asimposium/contracts";
 import { Hono } from "hono";
 
 import type { Env } from "./env";

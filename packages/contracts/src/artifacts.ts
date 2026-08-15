@@ -227,7 +227,10 @@ function generatedLedgerJsonSchema(): string {
 }
 
 function generatedLedgerTypes(): string {
-  const typeNames = ["ProblemIndexEntry", "ProblemsIndexResponse"] as const satisfies readonly (keyof {
+  const typeNames = [
+    "ProblemIndexEntry",
+    "ProblemsIndexResponse",
+  ] as const satisfies readonly (keyof {
     ProblemIndexEntry: ProblemIndexEntry;
     ProblemsIndexResponse: ProblemsIndexResponse;
   })[];

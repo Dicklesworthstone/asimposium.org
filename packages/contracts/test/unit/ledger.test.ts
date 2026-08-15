@@ -1,9 +1,6 @@
 import { expect, test } from "bun:test";
 
-import {
-  LedgerContractsSchema,
-  ProblemsIndexResponseSchema,
-} from "../../src/ledger.ts";
+import { LedgerContractsSchema, ProblemsIndexResponseSchema } from "../../src/ledger.ts";
 
 const VALID_INDEX = new URL("../fixtures/valid/ledger-problems-index.json", import.meta.url);
 const INVALID_INDEX = new URL(
