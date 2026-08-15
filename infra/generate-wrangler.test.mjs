@@ -140,14 +140,13 @@ const cases = [
       assert.equal(binding.class_name, report.environments.production.outbox.class_name);
       assert.deepEqual(deploy.triggers.crons, [report.policy.outbox_cron]);
       assert.deepEqual(Object.keys(deploy.triggers), ["crons"]);
-      assert.deepEqual(deploy.routes, [
-        { pattern: "a.asimposium.org", custom_domain: true },
-      ]);
+      assert.deepEqual(deploy.routes, [{ pattern: "a.asimposium.org", custom_domain: true }]);
       assert.deepEqual(deploy.exports[report.environments.production.outbox.class_name], {
         type: "durable-object",
         storage: "sqlite",
       });
       assert.equal(deploy.main, parsed.production.main);
+      assert.deepEqual(deploy.rules, parsed.production.rules);
       assert.equal(deploy.vars.S2_LOCAL_HARNESS, undefined);
     },
   },

@@ -1,6 +1,6 @@
 import { describe, expect, test } from "bun:test";
 import { HEALTH_SCHEMA } from "../../src/http/health";
-import { boundEnv, callWorker, d1Shaped, r2Shaped } from "../support/bindings";
+import { boundEnv, callWorker, d1Shaped, outboxShaped, r2Shaped } from "../support/bindings";
 
 describe("GET /internal/health", () => {
   test("serves the success envelope when every binding is present", async () => {
@@ -15,7 +15,7 @@ describe("GET /internal/health", () => {
         service: "wire",
         role: "stoa",
         format: "json",
-        bindings: { DB: "bound", ARTIFACTS: "bound" },
+        bindings: { DB: "bound", ARTIFACTS: "bound", KRATER_OUTBOX: "bound" },
       },
       degraded: [],
       next_actions: [],
@@ -60,14 +60,17 @@ describe("GET /internal/health", () => {
 
   // PLANTED NEGATIVE 2 — an absent binding must fail closed, not report healthy.
   test("reports 503 BINDING_MISSING when D1 is not bound", async () => {
-    const res = await callWorker("/internal/health", { ARTIFACTS: r2Shaped() });
+    const res = await callWorker("/internal/health", {
+      ARTIFACTS: r2Shaped(),
+      KRATER_OUTBOX: outboxShaped(),
+    });
 
     expect(res.status).toBe(503);
     expect(res.contentType).toBe("application/problem+json; charset=utf-8");
     expect(res.body).toMatchObject({
       code: "BINDING_MISSING",
       missing: ["DB"],
-      bindings: { DB: "missing", ARTIFACTS: "bound" },
+      bindings: { DB: "missing", ARTIFACTS: "bound", KRATER_OUTBOX: "bound" },
     });
   });
 
@@ -77,13 +80,14 @@ describe("GET /internal/health", () => {
     const res = await callWorker("/internal/health", {
       DB: d1Shaped(),
       ARTIFACTS: { name: "asimp-cas" },
+      KRATER_OUTBOX: outboxShaped(),
     });
 
     expect(res.status).toBe(503);
     expect(res.body).toMatchObject({
       code: "BINDING_MISSING",
       missing: ["ARTIFACTS"],
-      bindings: { DB: "bound", ARTIFACTS: "missing" },
+      bindings: { DB: "bound", ARTIFACTS: "missing", KRATER_OUTBOX: "bound" },
     });
   });
 
@@ -91,7 +95,11 @@ describe("GET /internal/health", () => {
     const res = await callWorker("/internal/health", {});
 
     expect(res.status).toBe(503);
-    expect((res.body as { missing: string[] }).missing).toEqual(["DB", "ARTIFACTS"]);
+    expect((res.body as { missing: string[] }).missing).toEqual([
+      "DB",
+      "ARTIFACTS",
+      "KRATER_OUTBOX",
+    ]);
   });
 
   test("validates format before bindings, so a bad request is a 400 not a 503", async () => {

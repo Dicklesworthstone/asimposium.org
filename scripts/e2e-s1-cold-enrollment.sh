@@ -31,6 +31,12 @@
 set -euo pipefail
 umask 077
 
+# A bare shell status is not actionable evidence. Log only the failing line and
+# status: never BASH_COMMAND, because later commands carry enrollment secrets in
+# environment variables and request bodies. Bash suppresses ERR for failures
+# that are explicitly handled by if/while/&&/||, so planted refusals stay quiet.
+trap 'status=$?; printf "[%s] shell-error status=%s line=%s\n" "s1-cold-enrollment" "$status" "$LINENO" >&2; exit "$status"' ERR
+
 readonly SUITE="s1-cold-enrollment"
 readonly VERSION="1"
 readonly REPRODUCE="scripts/e2e-s1-cold-enrollment.sh"
@@ -1554,8 +1560,12 @@ self_test() {
     log_phase "self-test-parser-refused" "fault=$parser_fault action=not-accepted"
   done
   FAULT_ACTIVE=0
-  [[ -n "$(live_pids "$$")" ]] || failed "SELF_TEST_SELF_INVISIBLE"
-  pid_is_live "$$" || failed "SELF_TEST_SELF_INVISIBLE"
+  # A busy host can lose an unrelated process between ps selecting and
+  # formatting its row, making one otherwise-valid global snapshot unknown.
+  # Reuse the production tri-state retry: only a positive live observation
+  # passes, while confirmed absence or persistent inspection failure remains a
+  # hard refusal.
+  wait_for_pid_live "$$" || failed "SELF_TEST_SELF_INVISIBLE"
 
   diagnostic="$(emit "pass" "SELF_TEST_PASSED")"
   [[ "$diagnostic" != *"$fragment_sentinel"* && "$diagnostic" != *"v1."* ]] || failed "SELF_TEST_REDACTION_FAILED"

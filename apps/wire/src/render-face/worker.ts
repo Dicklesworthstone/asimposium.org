@@ -194,3 +194,8 @@ export default {
     return new Response(request.method === "HEAD" ? null : face.body, { status: 200, headers });
   },
 };
+
+// The S-5 harness overrides `main` while retaining infra/wrangler.toml. Keep
+// its module export set compatible with that configuration; the render fixture
+// itself still touches no Durable Object or storage binding.
+export { KraterOutboxDrainer } from "../krater/outbox-do";

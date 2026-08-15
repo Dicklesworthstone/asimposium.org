@@ -1,5 +1,8 @@
 import { describe, expect, test } from "bun:test";
+import { spawn } from "node:child_process";
+import { once } from "node:events";
 import { existsSync, readdirSync, readFileSync } from "node:fs";
+import { createConnection, createServer, type Socket } from "node:net";
 import { resolve } from "node:path";
 
 /**
@@ -32,25 +35,230 @@ interface Run {
   stderr: string;
 }
 
-async function runScript(args: readonly string[], env: Record<string, string> = {}): Promise<Run> {
-  const child = Bun.spawn({
-    cmd: ["bash", SCRIPT, ...args],
-    cwd: REPO_ROOT,
-    env: { ...process.env, ...env },
-    stdout: "pipe",
-    stderr: "pipe",
+interface SocketCapture {
+  port: number;
+  connected: Promise<void>;
+  finished: Promise<void>;
+  reader: PipeReader;
+  byteCount(): number;
+  overflowed(): boolean;
+  text(): string;
+  close(): void;
+}
+
+const CAPTURE_LIMIT_BYTES = 256 * 1024;
+
+async function socketCapture(): Promise<SocketCapture> {
+  const server = createServer();
+  server.listen(0, "127.0.0.1");
+  await once(server, "listening");
+  const address = server.address();
+  if (address === null || typeof address === "string") {
+    server.close();
+    throw new Error("expected a loopback TCP capture listener");
+  }
+
+  const decoder = new TextDecoder();
+  const queued: Uint8Array[] = [];
+  let captured = "";
+  let capturedBytes = 0;
+  let didOverflow = false;
+  let ended = false;
+  let pendingRead: ((result: { done: boolean; value?: Uint8Array }) => void) | undefined;
+  let parentSide: Socket | undefined;
+  let resolveFinished: (() => void) | undefined;
+  const finished = new Promise<void>((resolve) => {
+    resolveFinished = resolve;
   });
-  const stdout = new Response(child.stdout).text();
-  const stderr = new Response(child.stderr).text();
+  const finishReader = () => {
+    if (ended) return;
+    ended = true;
+    captured += decoder.decode();
+    pendingRead?.({ done: true });
+    pendingRead = undefined;
+    resolveFinished?.();
+    resolveFinished = undefined;
+  };
+  const reader: PipeReader = {
+    read() {
+      const next = queued.shift();
+      if (next) return Promise.resolve({ done: false, value: next });
+      if (ended) return Promise.resolve({ done: true });
+      return new Promise((resolveRead) => {
+        pendingRead = resolveRead;
+      });
+    },
+    async cancel() {
+      parentSide?.destroy();
+      finishReader();
+    },
+  };
+  const connected = new Promise<void>((resolveConnection) => {
+    server.once("connection", (socket) => {
+      parentSide = socket;
+      socket.on("data", (chunk: Buffer) => {
+        capturedBytes += chunk.byteLength;
+        if (didOverflow || capturedBytes > CAPTURE_LIMIT_BYTES) {
+          didOverflow = true;
+          return;
+        }
+        const bytes = new Uint8Array(chunk);
+        captured += decoder.decode(bytes, { stream: true });
+        if (pendingRead) {
+          const resolveRead = pendingRead;
+          pendingRead = undefined;
+          resolveRead({ done: false, value: bytes });
+        } else {
+          queued.push(bytes);
+        }
+      });
+      socket.once("end", finishReader);
+      socket.once("close", finishReader);
+      socket.once("error", finishReader);
+      server.close();
+      resolveConnection();
+    });
+  });
+  return {
+    port: address.port,
+    connected,
+    finished,
+    reader,
+    byteCount: () => capturedBytes,
+    overflowed: () => didOverflow,
+    text: () => captured,
+    close() {
+      server.close();
+      parentSide?.destroy();
+      finishReader();
+    },
+  };
+}
+
+async function settleSocketCapture(capture: SocketCapture): Promise<string> {
+  const connected = await Promise.race([
+    capture.connected.then(() => true),
+    Bun.sleep(1_000).then(() => false),
+  ]);
+  if (!connected) throw new Error("S1_CAPTURE_CONNECTION_TIMEOUT");
+  const finished = await Promise.race([
+    capture.finished.then(() => true),
+    Bun.sleep(1_000).then(() => false),
+  ]);
+  if (!finished) throw new Error("S1_CAPTURE_EOF_TIMEOUT");
+  assertCaptureComplete(capture);
+  return capture.text();
+}
+
+function assertCaptureComplete(capture: SocketCapture): void {
+  if (capture.overflowed()) {
+    throw new Error(`S1_CAPTURE_LIMIT_EXCEEDED bytes=${capture.byteCount()}`);
+  }
+}
+
+interface CapturedHarness {
+  child: SpawnedHarness;
+  stdoutCapture: SocketCapture;
+  stderrCapture: SocketCapture;
+  closeCaptures(): void;
+}
+
+async function spawnCapturedHarness(
+  args: readonly string[],
+  env: Record<string, string> = {},
+): Promise<CapturedHarness> {
+  const [stdoutCapture, stderrCapture] = await Promise.all([socketCapture(), socketCapture()]);
+  const subprocess = spawn(
+    "bash",
+    [
+      "-c",
+      'set -e; exec 3<>"/dev/tcp/127.0.0.1/$1"; exec 4<>"/dev/tcp/127.0.0.1/$2"; exec 1>&3 2>&4; shift 2; exec bash "$@"',
+      "s1-test-capture",
+      String(stdoutCapture.port),
+      String(stderrCapture.port),
+      SCRIPT,
+      ...args,
+    ],
+    {
+      cwd: REPO_ROOT,
+      env: { ...process.env, ...env },
+      // Bun 1.3's test runner can close anonymous stdout/stderr pipes before
+      // the child begins executing. Start on inherited descriptors, then have
+      // bash connect its output to these in-memory loopback listeners.
+      stdio: ["ignore", "inherit", "inherit"],
+    },
+  );
+  const exited = new Promise<number>((resolveExit, rejectExit) => {
+    subprocess.once("error", rejectExit);
+    subprocess.once("exit", (code, signal) => {
+      resolveExit(code ?? (signal === null ? 1 : 128));
+    });
+  });
+  const child: SpawnedHarness = {
+    exited,
+    get exitCode() {
+      return subprocess.exitCode;
+    },
+    kill(signal) {
+      return subprocess.kill(signal);
+    },
+  };
+  return {
+    child,
+    stdoutCapture,
+    stderrCapture,
+    closeCaptures() {
+      stdoutCapture.close();
+      stderrCapture.close();
+    },
+  };
+}
+
+function safeCaptureSummary(value: string): string {
+  const lines = value.split("\n").filter(Boolean);
+  const codes = lines.flatMap((line) => {
+    if (!line.startsWith("{")) return [];
+    try {
+      const parsed = JSON.parse(line) as { code?: unknown };
+      return typeof parsed.code === "string" && /^[A-Z][A-Z0-9_]{0,63}$/.test(parsed.code)
+        ? [parsed.code]
+        : [];
+    } catch {
+      return [];
+    }
+  });
+  const phases = lines.flatMap((line) => {
+    const match = line.match(/^\[s1-cold-enrollment\] ([a-z][a-z0-9-]{0,63})(?:\s|$)/);
+    return match?.[1] ? [match[1]] : [];
+  });
+  return `bytes=${Buffer.byteLength(value)} lines=${lines.length} codes=${[...new Set(codes)].join(",") || "none"} phases=${[...new Set(phases)].join(",") || "none"}`;
+}
+
+function failureEvidence(run: Run): string {
+  const relevantEnvironment = Object.keys(process.env)
+    .filter((key) => /^(?:ASIMP_S1_|BASH|BUN|CI$|NODE|S1_|SHELLOPTS)/.test(key))
+    .sort()
+    .join(" ");
+  return `exit=${run.exitCode}\nenv_keys=${relevantEnvironment || "none"}\nstdout=${safeCaptureSummary(run.stdout)}\nstderr=${safeCaptureSummary(run.stderr)}`;
+}
+
+async function runScript(args: readonly string[], env: Record<string, string> = {}): Promise<Run> {
+  const harness = await spawnCapturedHarness(args, env);
+  const { child, stdoutCapture, stderrCapture } = harness;
   try {
     const exitCode = await waitForExitBefore(child.exited, RUN_SCRIPT_TIMEOUT_MS);
     if (exitCode === undefined) {
       const forcedExit = await terminateExactChild(child);
       throw new Error(`script exceeded its test deadline; forced_exit=${String(forcedExit)}`);
     }
-    return { exitCode, stdout: await stdout, stderr: await stderr };
+    const [stdout, stderr] = await Promise.all([
+      settleSocketCapture(stdoutCapture),
+      settleSocketCapture(stderrCapture),
+    ]);
+    return { exitCode, stdout, stderr };
   } finally {
     await terminateExactChild(child);
+    harness.closeCaptures();
   }
 }
 
@@ -66,7 +274,13 @@ function records(run: Run): Array<Record<string, unknown>> {
     .trim()
     .split("\n")
     .filter((entry) => entry.startsWith("{"))
-    .map((line) => JSON.parse(line) as Record<string, unknown>);
+    .map((line) => {
+      try {
+        return JSON.parse(line) as Record<string, unknown>;
+      } catch {
+        throw new Error("S1_OUTPUT_RECORD_INVALID");
+      }
+    });
 }
 
 function enrollmentEnv(origin: string): Record<string, string> {
@@ -91,6 +305,72 @@ function phaseValue(stderr: string, phase: string, key: string): string | undefi
   return line?.match(new RegExp(`${key}=([^\\s]+)`))?.[1];
 }
 
+describe("the in-memory child-output transport", () => {
+  test("reports malformed NDJSON without echoing its bytes", () => {
+    expect(() => records({ exitCode: 1, stdout: '{"code":"BROKEN"', stderr: "" })).toThrow(
+      "S1_OUTPUT_RECORD_INVALID",
+    );
+  });
+
+  test("reassembles a terminal record split across delayed TCP packets", async () => {
+    const capture = await socketCapture();
+    const client = createConnection({ host: "127.0.0.1", port: capture.port });
+    try {
+      await once(client, "connect");
+      client.write('{"code":"SPLIT_');
+      await Bun.sleep(20);
+      const closed = once(client, "close");
+      client.end('RECORD"}\n');
+      await closed;
+      expect(await settleSocketCapture(capture)).toBe('{"code":"SPLIT_RECORD"}\n');
+    } finally {
+      client.destroy();
+      capture.close();
+    }
+  });
+
+  test("fails with a fixed code when a connected writer never closes", async () => {
+    const capture = await socketCapture();
+    const client = createConnection({ host: "127.0.0.1", port: capture.port });
+    try {
+      await once(client, "connect");
+      client.write("partial");
+      let failure = "";
+      try {
+        await settleSocketCapture(capture);
+      } catch (error) {
+        failure = error instanceof Error ? error.message : String(error);
+      }
+      expect(failure).toBe("S1_CAPTURE_EOF_TIMEOUT");
+    } finally {
+      client.destroy();
+      capture.close();
+    }
+  });
+
+  test("caps output and reports only a byte count on overflow", async () => {
+    const capture = await socketCapture();
+    const client = createConnection({ host: "127.0.0.1", port: capture.port });
+    try {
+      await once(client, "connect");
+      const closed = once(client, "close");
+      client.end(Buffer.alloc(CAPTURE_LIMIT_BYTES + 1, 0x78));
+      await closed;
+      let failure = "";
+      try {
+        await settleSocketCapture(capture);
+      } catch (error) {
+        failure = error instanceof Error ? error.message : String(error);
+      }
+      expect(failure).toBe(`S1_CAPTURE_LIMIT_EXCEEDED bytes=${CAPTURE_LIMIT_BYTES + 1}`);
+      expect(failure.includes("xxxx")).toBe(false);
+    } finally {
+      client.destroy();
+      capture.close();
+    }
+  });
+});
+
 /** A real listener, so "busy" means busy rather than "we think it might be". */
 function occupyPort(): { port: number; stop: () => void } {
   const server = Bun.serve({ port: 0, hostname: "127.0.0.1", fetch: () => new Response("busy") });
@@ -106,10 +386,12 @@ describe("the self-test and the blocked external proof", () => {
   test("--self-test passes and leaks no fragment secret", async () => {
     const fragmentSentinel = "v1.S1FRAGMENT_SENTINEL_0123456789abcdefghijklm";
     const run = await runScript(["--self-test"]);
-    expect(run.exitCode).toBe(0);
+    if (run.exitCode !== 0) {
+      throw new Error(`S1 self-test failed\n${failureEvidence(run)}`);
+    }
     expect(record(run).code).toBe("SELF_TEST_PASSED");
-    expect(run.stdout).not.toContain(fragmentSentinel);
-    expect(run.stderr).not.toContain(fragmentSentinel);
+    expect(run.stdout.includes(fragmentSentinel)).toBe(false);
+    expect(run.stderr.includes(fragmentSentinel)).toBe(false);
     for (const fault of [
       "ps-malformed-after-self",
       "ps-truncated-tail",
@@ -350,7 +632,9 @@ describe("a pinned port is validated before anything is started", () => {
       return;
     }
     const run = await runScript(["--local-d1"]);
-    expect(run.exitCode).toBe(0);
+    if (run.exitCode !== 0) {
+      throw new Error(`unscoped local-D1 run failed\n${failureEvidence(run)}`);
+    }
     const port = Number(phaseValue(run.stderr, "port-allocated", "port"));
     expect(Number.isInteger(port)).toBe(true);
     expect(port).toBeGreaterThanOrEqual(1024);
@@ -587,7 +871,7 @@ async function waitForStderrMarker(
       const exitCode = await terminateExactChild(child);
       abandonReader(reader);
       throw new Error(
-        `timed out waiting for ${marker}; child_exit=${String(exitCode)}; stderr:\n${stderr}`,
+        `timed out waiting for ${marker}; child_exit=${String(exitCode)}; stderr=${safeCaptureSummary(stderr)}`,
       );
     }
     const chunk = await readBefore(reader, remaining);
@@ -595,7 +879,7 @@ async function waitForStderrMarker(
       const exitCode = await terminateExactChild(child);
       abandonReader(reader);
       throw new Error(
-        `stream timed out waiting for ${marker}; child_exit=${String(exitCode)}; stderr:\n${stderr}`,
+        `stream timed out waiting for ${marker}; child_exit=${String(exitCode)}; stderr=${safeCaptureSummary(stderr)}`,
       );
     }
     if (chunk.done) break;
@@ -605,7 +889,7 @@ async function waitForStderrMarker(
     const exitCode = await terminateExactChild(child);
     abandonReader(reader);
     throw new Error(
-      `child exited before ${marker}; child_exit=${String(exitCode)}; stderr:\n${stderr}`,
+      `child exited before ${marker}; child_exit=${String(exitCode)}; stderr=${safeCaptureSummary(stderr)}`,
     );
   }
   return stderr;
@@ -622,12 +906,16 @@ async function drainStderrBefore(
     const remaining = deadline - performance.now();
     if (remaining <= 0) {
       abandonReader(reader);
-      throw new Error(`timed out draining stderr after signal; retained stderr:\n${stderr}`);
+      throw new Error(
+        `timed out draining stderr after signal; stderr=${safeCaptureSummary(stderr)}`,
+      );
     }
     const chunk = await readBefore(reader, remaining);
     if (chunk === undefined) {
       abandonReader(reader);
-      throw new Error(`timed out draining stderr after signal; retained stderr:\n${stderr}`);
+      throw new Error(
+        `timed out draining stderr after signal; stderr=${safeCaptureSummary(stderr)}`,
+      );
     }
     if (chunk.done) return `${stderr}${decoder.decode()}`;
     stderr += decoder.decode(chunk.value, { stream: true });
@@ -670,7 +958,7 @@ describe("lifecycle: process-group cleanup reaches descendants, not just the lea
     const phases = readFileSync(`${stateDir}/phases.log`, "utf8");
     expect(phases).toContain("lifecycle-pinned-supervisor");
     expect(phases).toContain("lifecycle-group-retired");
-    expect(phases).not.toContain("AAAAAAAA");
+    expect(phases.includes("AAAAAAAA")).toBe(false);
   }, 60_000);
 
   test("PLANTED: launch-proof faults reap exact stopped direct children before payload execution", async () => {
@@ -912,18 +1200,14 @@ describe("lifecycle: containment failures stay fail-closed", () => {
   }, 60_000);
 
   test("terminal interrupt record is corrected after EXIT recovers its first cleanup attempt", async () => {
-    const child = Bun.spawn({
-      cmd: ["bash", SCRIPT, "--self-test-interrupt-cleanup-retry"],
-      cwd: REPO_ROOT,
-      env: { ...process.env, S1_FAULT_INJECT: "ps-once" },
-      stdout: "pipe",
-      stderr: "pipe",
+    const harness = await spawnCapturedHarness(["--self-test-interrupt-cleanup-retry"], {
+      S1_FAULT_INJECT: "ps-once",
     });
+    const { child } = harness;
     const decoder = new TextDecoder();
     let reader: PipeReader | undefined;
     try {
-      const stdout = new Response(child.stdout).text();
-      reader = child.stderr.getReader();
+      reader = harness.stderrCapture.reader;
       let stderr = await waitForStderrMarker(
         child,
         reader,
@@ -939,11 +1223,16 @@ describe("lifecycle: containment failures stay fail-closed", () => {
       if (exitCode === undefined) {
         const forcedExit = await terminateExactChild(child);
         throw new Error(
-          `interrupt cleanup retry did not exit; forced_exit=${String(forcedExit)}; stderr:\n${stderr}`,
+          `interrupt cleanup retry did not exit; forced_exit=${String(forcedExit)}; stderr=${safeCaptureSummary(stderr)}`,
         );
       }
       stderr = await drainStderrBefore(reader, decoder, stderr, HARNESS_CLEANUP_TIMEOUT_MS);
-      const run = { exitCode, stdout: await stdout, stderr };
+      assertCaptureComplete(harness.stderrCapture);
+      const run = {
+        exitCode,
+        stdout: await settleSocketCapture(harness.stdoutCapture),
+        stderr,
+      };
       expect(records(run)).toHaveLength(1);
       expect(record(run)).toMatchObject({ status: "fail", code: "INTERRUPTED_TERM" });
       expect(stderr).toContain("interrupted-cleanup-pending");
@@ -953,6 +1242,7 @@ describe("lifecycle: containment failures stay fail-closed", () => {
     } finally {
       await terminateExactChild(child);
       if (reader) abandonReader(reader);
+      harness.closeCaptures();
     }
   }, 60_000);
 
@@ -1078,19 +1368,14 @@ describe("lifecycle: parallel runs and signal handling", () => {
       await assertWranglerBlocked();
       return;
     }
-    const child = Bun.spawn({
-      cmd: ["bash", SCRIPT, "--local-d1"],
-      cwd: REPO_ROOT,
-      env: { ...process.env },
-      stdout: "pipe",
-      stderr: "pipe",
-    });
+    const harness = await spawnCapturedHarness(["--local-d1"]);
+    const { child } = harness;
 
     // Read stderr incrementally so the TERM lands while the child is really up.
     const decoder = new TextDecoder();
     let reader: PipeReader | undefined;
     try {
-      reader = child.stderr.getReader();
+      reader = harness.stderrCapture.reader;
       let stderr = await waitForStderrMarker(child, reader, decoder, "child-started", 90_000);
       expect(stderr).toContain("child-started");
 
@@ -1106,10 +1391,11 @@ describe("lifecycle: parallel runs and signal handling", () => {
       if (exitCode === undefined) {
         const forcedExit = await terminateExactChild(child);
         throw new Error(
-          `TERM did not stop the local-D1 harness; forced_exit=${String(forcedExit)}; stderr:\n${stderr}`,
+          `TERM did not stop the local-D1 harness; forced_exit=${String(forcedExit)}; stderr=${safeCaptureSummary(stderr)}`,
         );
       }
       stderr = await drainStderrBefore(reader, decoder, stderr, HARNESS_CLEANUP_TIMEOUT_MS);
+      assertCaptureComplete(harness.stderrCapture);
 
       // A signalled run is a failure with a typed code, not a silent zero.
       expect(exitCode).not.toBe(0);
@@ -1129,10 +1415,11 @@ describe("lifecycle: parallel runs and signal handling", () => {
       expect(phases).toContain("child-started");
       expect(phases).toContain("interrupted");
       // Logs carry lifecycle facts only, never the local replay key.
-      expect(phases).not.toContain("AAAAAAAA");
+      expect(phases.includes("AAAAAAAA")).toBe(false);
     } finally {
       await terminateExactChild(child);
       if (reader) abandonReader(reader);
+      harness.closeCaptures();
     }
   }, 180_000);
 
@@ -1141,18 +1428,12 @@ describe("lifecycle: parallel runs and signal handling", () => {
       await assertWranglerBlocked();
       return;
     }
-    const child = Bun.spawn({
-      cmd: ["bash", SCRIPT, "--local-d1"],
-      cwd: REPO_ROOT,
-      env: { ...process.env },
-      stdout: "pipe",
-      stderr: "pipe",
-    });
+    const harness = await spawnCapturedHarness(["--local-d1"]);
+    const { child } = harness;
     const decoder = new TextDecoder();
     let reader: PipeReader | undefined;
     try {
-      const stdout = new Response(child.stdout).text();
-      reader = child.stderr.getReader();
+      reader = harness.stderrCapture.reader;
       let stderr = await waitForStderrMarker(child, reader, decoder, "child-started", 90_000);
       const supervisor = Number(phaseValue(stderr, "child-started", "pid"));
       const localPort = Number(phaseValue(stderr, "child-started", "port"));
@@ -1164,13 +1445,20 @@ describe("lifecycle: parallel runs and signal handling", () => {
       if (exitCode === undefined) {
         const forcedExit = await terminateExactChild(child);
         throw new Error(
-          `HUP did not stop the local-D1 harness; forced_exit=${String(forcedExit)}; stderr:\n${stderr}`,
+          `HUP did not stop the local-D1 harness; forced_exit=${String(forcedExit)}; stderr=${safeCaptureSummary(stderr)}`,
         );
       }
       stderr = await drainStderrBefore(reader, decoder, stderr, HARNESS_CLEANUP_TIMEOUT_MS);
+      assertCaptureComplete(harness.stderrCapture);
 
       expect(exitCode).toBe(1);
-      expect(record({ exitCode, stdout: await stdout, stderr }).code).toBe("INTERRUPTED_HUP");
+      expect(
+        record({
+          exitCode,
+          stdout: await settleSocketCapture(harness.stdoutCapture),
+          stderr,
+        }).code,
+      ).toBe("INTERRUPTED_HUP");
       expect(stderr).toContain("cleanup-begin signal=HUP");
       expect(await waitForGroupExit(supervisor)).toBe(true);
       // A successful rebind proves no workerd listener FD survived the HUP path.
@@ -1178,22 +1466,17 @@ describe("lifecycle: parallel runs and signal handling", () => {
     } finally {
       await terminateExactChild(child);
       if (reader) abandonReader(reader);
+      harness.closeCaptures();
     }
   }, 180_000);
 
   test("PLANTED: TERM during the client phase terminates the client supervisor group", async () => {
-    const child = Bun.spawn({
-      cmd: ["bash", SCRIPT, "--self-test-client-group"],
-      cwd: REPO_ROOT,
-      env: { ...process.env },
-      stdout: "pipe",
-      stderr: "pipe",
-    });
+    const harness = await spawnCapturedHarness(["--self-test-client-group"]);
+    const { child } = harness;
     const decoder = new TextDecoder();
     let reader: PipeReader | undefined;
     try {
-      const stdout = new Response(child.stdout).text();
-      reader = child.stderr.getReader();
+      reader = harness.stderrCapture.reader;
       let stderr = await waitForStderrMarker(child, reader, decoder, "client-started", 30_000);
       expect(stderr).toContain("client-started");
       const stateDir = phaseValue(stderr, "state-retained", "dir") as string;
@@ -1206,13 +1489,20 @@ describe("lifecycle: parallel runs and signal handling", () => {
       if (exitCode === undefined) {
         const forcedExit = await terminateExactChild(child);
         throw new Error(
-          `TERM did not stop the client-phase harness; forced_exit=${String(forcedExit)}; stderr:\n${stderr}`,
+          `TERM did not stop the client-phase harness; forced_exit=${String(forcedExit)}; stderr=${safeCaptureSummary(stderr)}`,
         );
       }
       stderr = await drainStderrBefore(reader, decoder, stderr, HARNESS_CLEANUP_TIMEOUT_MS);
+      assertCaptureComplete(harness.stderrCapture);
 
       expect(exitCode).toBe(1);
-      expect(record({ exitCode, stdout: await stdout, stderr }).code).toBe("INTERRUPTED_TERM");
+      expect(
+        record({
+          exitCode,
+          stdout: await settleSocketCapture(harness.stdoutCapture),
+          stderr,
+        }).code,
+      ).toBe("INTERRUPTED_TERM");
       expect(stderr).toContain("INTERRUPTED s1-cold-enrollment");
       expect(stderr).toContain("client-killed");
       expect(await waitForExit(descendant)).toBe(true);
@@ -1220,22 +1510,17 @@ describe("lifecycle: parallel runs and signal handling", () => {
     } finally {
       await terminateExactChild(child);
       if (reader) abandonReader(reader);
+      harness.closeCaptures();
     }
   }, 60_000);
 
   test("PLANTED: a second signal after cleanup begins is masked until the zero-survivor gate finishes", async () => {
-    const child = Bun.spawn({
-      cmd: ["bash", SCRIPT, "--self-test-client-group"],
-      cwd: REPO_ROOT,
-      env: { ...process.env },
-      stdout: "pipe",
-      stderr: "pipe",
-    });
+    const harness = await spawnCapturedHarness(["--self-test-client-group"]);
+    const { child } = harness;
     const decoder = new TextDecoder();
     let reader: PipeReader | undefined;
     try {
-      const stdout = new Response(child.stdout).text();
-      reader = child.stderr.getReader();
+      reader = harness.stderrCapture.reader;
       let stderr = await waitForStderrMarker(child, reader, decoder, "client-started", 30_000);
       const stateDir = phaseValue(stderr, "state-retained", "dir") as string;
       const supervisor = Number(phaseValue(stderr, "client-started", "pid"));
@@ -1251,19 +1536,27 @@ describe("lifecycle: parallel runs and signal handling", () => {
       if (exitCode === undefined) {
         const forcedExit = await terminateExactChild(child);
         throw new Error(
-          `second signal bypassed cleanup; forced_exit=${String(forcedExit)}; stderr:\n${stderr}`,
+          `second signal bypassed cleanup; forced_exit=${String(forcedExit)}; stderr=${safeCaptureSummary(stderr)}`,
         );
       }
       stderr = await drainStderrBefore(reader, decoder, stderr, HARNESS_CLEANUP_TIMEOUT_MS);
+      assertCaptureComplete(harness.stderrCapture);
 
       expect(exitCode).toBe(1);
-      expect(record({ exitCode, stdout: await stdout, stderr }).code).toBe("INTERRUPTED_TERM");
+      expect(
+        record({
+          exitCode,
+          stdout: await settleSocketCapture(harness.stdoutCapture),
+          stderr,
+        }).code,
+      ).toBe("INTERRUPTED_TERM");
       expect(stderr).toContain("client-killed");
       expect(await waitForExit(descendant)).toBe(true);
       expect(await waitForGroupExit(supervisor)).toBe(true);
     } finally {
       await terminateExactChild(child);
       if (reader) abandonReader(reader);
+      harness.closeCaptures();
     }
   }, 60_000);
 });

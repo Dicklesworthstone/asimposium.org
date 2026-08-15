@@ -1,7 +1,9 @@
 import { describe, expect, test } from "bun:test";
 import { resolve } from "node:path";
+import { KraterOutboxDrainer as enrollmentHarnessDrainer } from "../../src/enrollment/local-d1-worker";
 import { REQUIRED_BINDINGS } from "../../src/env";
-import worker from "../../src/index";
+import worker, { KraterOutboxDrainer as productionDrainer } from "../../src/index";
+import { KraterOutboxDrainer as renderHarnessDrainer } from "../../src/render-face/worker";
 import { boundEnv, executionContext } from "../support/bindings";
 
 /**
@@ -83,6 +85,15 @@ describe("binding names agree with the Worker configuration", () => {
     expect(requests).toHaveLength(1);
     expect(new URL(requests[0]?.url ?? "https://invalid.example").pathname).toBe("/nudge");
     expect(requests[0]?.method).toBe("POST");
+  });
+
+  test("alternate Wrangler entrypoints export every configured Durable Object class", () => {
+    // The S-1 and S-5 harnesses override `main` while retaining
+    // infra/wrangler.toml. Wrangler validates the configured class export on
+    // the selected entrypoint before workerd starts, even though these
+    // harnesses never call KRATER_OUTBOX.
+    expect(enrollmentHarnessDrainer).toBe(productionDrainer);
+    expect(renderHarnessDrainer).toBe(productionDrainer);
   });
 
   test("the configuration provides no binding this Worker silently ignores", async () => {

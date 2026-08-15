@@ -186,3 +186,8 @@ export default {
     return createEnrollmentRouter({ service }).fetch(request);
   },
 };
+
+// This alternate Wrangler entrypoint shares infra/wrangler.toml with the
+// production Worker. Wrangler validates every configured Durable Object export
+// even though the S-1 harness never calls the outbox binding.
+export { KraterOutboxDrainer } from "../krater/outbox-do";
