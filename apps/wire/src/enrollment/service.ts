@@ -524,6 +524,12 @@ function base64UrlToBytes(value: string): Uint8Array {
  */
 export class AesGcmEnrollmentReplayProtector implements EnrollmentReplayProtector {
   readonly #replayKey: Promise<CryptoKey>;
+  /**
+   * Decrypt-only compatibility for rows sealed before replay/source key
+   * separation. Those D1 rows expire after the fixed idempotency-retention
+   * window; new rows are never sealed with this key.
+   */
+  readonly #legacyReplayKey: Promise<CryptoKey>;
   readonly #sourceBucketKey: Promise<CryptoKey>;
   readonly #random: EnrollmentRandom;
 
@@ -537,6 +543,13 @@ export class AesGcmEnrollmentReplayProtector implements EnrollmentReplayProtecto
     // and WebCrypto receives exactly 32 bytes.
     const rootBytes = new Uint8Array(key.length);
     rootBytes.set(key);
+    this.#legacyReplayKey = crypto.subtle.importKey(
+      "raw",
+      rootBytes.slice().buffer,
+      { name: "AES-GCM" },
+      false,
+      ["decrypt"],
+    );
     const rootKey = crypto.subtle.importKey("raw", rootBytes.slice().buffer, "HKDF", false, [
       "deriveKey",
     ]);
@@ -587,22 +600,33 @@ export class AesGcmEnrollmentReplayProtector implements EnrollmentReplayProtecto
   }
 
   async open(encrypted: EncryptedEnrollmentReplay): Promise<string> {
+    let initializationVector: Uint8Array;
+    let ciphertext: Uint8Array;
     try {
-      const initializationVector = base64UrlToBytes(encrypted.initializationVector);
-      const ciphertext = base64UrlToBytes(encrypted.ciphertext);
+      initializationVector = base64UrlToBytes(encrypted.initializationVector);
+      ciphertext = base64UrlToBytes(encrypted.ciphertext);
       if (initializationVector.length !== 12 || ciphertext.length < 16) {
         throw new TypeError("invalid encrypted replay envelope");
       }
-      const key = await this.#replayKey;
-      const plaintext = await crypto.subtle.decrypt(
-        { name: "AES-GCM", iv: initializationVector.slice().buffer },
-        key,
-        ciphertext.slice().buffer,
-      );
-      return new TextDecoder().decode(plaintext);
     } catch {
       throw new EnrollmentReplayConfigurationError();
     }
+
+    for (const keyPromise of [this.#replayKey, this.#legacyReplayKey]) {
+      try {
+        const plaintext = await crypto.subtle.decrypt(
+          { name: "AES-GCM", iv: initializationVector.slice().buffer },
+          await keyPromise,
+          ciphertext.slice().buffer,
+        );
+        return new TextDecoder().decode(plaintext);
+      } catch {
+        // AES-GCM authentication selects the current or predecessor key. The
+        // caller receives one coarse configuration failure only after both
+        // authenticated decryptions fail.
+      }
+    }
+    throw new EnrollmentReplayConfigurationError();
   }
 
   async sourceBucket(trustedClientAddress: string): Promise<string> {
@@ -2101,7 +2125,9 @@ export class EnrollmentService {
       "poll",
       // Pre-fix Workers persisted pending/slow_down under `flow:<hash>`. A
       // versioned terminal namespace makes those indistinguishable legacy rows
-      // unable to mask approval, denial, or expiry during a rolling upgrade.
+      // unable to mask approval, denial, or expiry after the current Worker is
+      // cut over. This namespace change is forward-only: deployment must not
+      // mix or roll back to a Worker that knows only the legacy namespace.
       `${POLL_TERMINAL_REPLAY_PRINCIPAL_VERSION}:${flowHandleHash}`,
       options.idempotencyKey,
       parsed.data,

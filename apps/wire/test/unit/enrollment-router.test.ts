@@ -116,6 +116,14 @@ describe("S-1 mountable enrollment router", () => {
         "content-type": "application/json",
         "cf-connecting-ip": "198.51.100.31, 203.0.113.1",
       },
+      {
+        "content-type": "application/json",
+        "cf-connecting-ip": "0198.51.100.31",
+      },
+      {
+        "content-type": "application/json",
+        "cf-connecting-ip": "198.51.100.031",
+      },
     ];
     for (const headers of headerCases) {
       const response = await request(router, "/v1/device-code", {
@@ -136,6 +144,40 @@ describe("S-1 mountable enrollment router", () => {
       body,
     });
     expect(accepted.status).toBe(201);
+
+    for (let index = 1; index < DEVICE_START_RATE_LIMIT_ATTEMPTS; index += 1) {
+      const equivalent = await request(router, "/v1/device-code", {
+        method: "POST",
+        headers: {
+          "content-type": "application/json",
+          "cf-connecting-ip": "2001:db8::31",
+        },
+        body: JSON.stringify({
+          name: `canonical-ipv6-${index}`,
+          model: "example-lab/orchid-1",
+          harness: "codex",
+          requested_scopes: ["review"],
+        }),
+      });
+      expect(equivalent.status).toBe(201);
+    }
+    const sharedBucketLimited = await request(router, "/v1/device-code", {
+      method: "POST",
+      headers: {
+        "content-type": "application/json",
+        "cf-connecting-ip": "2001:db8::31",
+      },
+      body: JSON.stringify({
+        name: "canonical-ipv6-refused",
+        model: "example-lab/orchid-1",
+        harness: "codex",
+        requested_scopes: ["review"],
+      }),
+    });
+    expect(sharedBucketLimited.status).toBe(429);
+    expect(await sharedBucketLimited.json()).toMatchObject({
+      code: "DEVICE_START_RATE_LIMITED",
+    });
   });
 
   test("device start replay is exact and the source throttle stays opaque", async () => {
@@ -205,6 +247,10 @@ describe("S-1 mountable enrollment router", () => {
     expect(refusal).not.toHaveProperty("example");
     expect(JSON.stringify(refusal)).not.toContain(source);
     expect(OpaqueProblemSchema.safeParse(refusal).success).toBe(true);
+
+    const replayAfterLimit = await start(body, key);
+    expect(replayAfterLimit.status).toBe(201);
+    expect(await replayAfterLimit.json()).toEqual(original);
   });
 
   test("GET join is path-only and carries the complete capsule without echoing its secret", async () => {

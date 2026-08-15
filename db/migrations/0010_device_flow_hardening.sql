@@ -45,6 +45,18 @@ ALTER TABLE enrollment_idempotency_with_device_start RENAME TO enrollment_idempo
 -- once, then the Worker persists failures only.
 DELETE FROM device_lookup_attempts WHERE success = 1;
 
+-- The sponsor/time index from 0009 serves lockout counts, but its leading
+-- sponsor column cannot serve the bounded global retention sweep. Keep cleanup
+-- work proportional to the reclaimed batch instead of the lifetime table.
+CREATE INDEX device_lookup_attempts_time
+  ON device_lookup_attempts (attempted_at, id);
+
+-- Mapping reclamation is ordered by expiry on every sponsor lookup. Without
+-- this index, the bounded DELETE/UPDATE result still requires an unbounded scan
+-- of all live mappings before LIMIT can apply.
+CREATE INDEX device_codes_expiry
+  ON device_codes (expires_at, enrollment_id);
+
 -- Unauthenticated starts are bounded before a sponsor is associated. The
 -- bucket is a keyed HMAC-SHA-256 of the Cloudflare-authenticated client address;
 -- raw addresses never enter D1 through this path.

@@ -1,5 +1,6 @@
 import { Database } from "bun:sqlite";
 import { describe, expect, test } from "bun:test";
+import { Buffer } from "node:buffer";
 import { createHash } from "node:crypto";
 import { readFileSync } from "node:fs";
 import { resolve } from "node:path";
@@ -423,6 +424,52 @@ describe("device enrollment first-decider SQL", () => {
         )
         .run("d".repeat(64), NOW + 1),
     ).not.toThrow();
+    const indexColumns = (indexName: string): string[] =>
+      sqlite
+        .prepare<{ name: string }, [string]>("SELECT name FROM pragma_index_info(?) ORDER BY seqno")
+        .all(indexName)
+        .map((column) => column.name);
+    expect(indexColumns("device_lookup_attempts_sponsor_time")).toEqual([
+      "sponsor_id",
+      "attempted_at",
+    ]);
+    expect(indexColumns("device_lookup_attempts_time")).toEqual(["attempted_at", "id"]);
+    expect(indexColumns("device_codes_expiry")).toEqual(["expires_at", "enrollment_id"]);
+    const queryPlan = (statement: string, ...parameters: (string | number)[]): string =>
+      sqlite
+        .prepare<{ detail: string }, (string | number)[]>(`EXPLAIN QUERY PLAN ${statement}`)
+        .all(...parameters)
+        .map((step) => step.detail)
+        .join("\n");
+    expect(
+      queryPlan(
+        `SELECT id FROM device_lookup_attempts
+          WHERE attempted_at < ? ORDER BY attempted_at, id LIMIT ?`,
+        NOW,
+        100,
+      ),
+    ).toContain("device_lookup_attempts_time");
+    expect(
+      queryPlan(
+        `SELECT COUNT(*) FROM device_lookup_attempts
+          WHERE sponsor_id = ? AND success = 0
+            AND attempted_at >= ? AND attempted_at <= ?`,
+        "usr_index_proof",
+        NOW - DEVICE_LOOKUP_LOCKOUT_WINDOW_MS,
+        NOW,
+      ),
+    ).toContain("device_lookup_attempts_sponsor_time");
+    expect(
+      queryPlan(
+        `SELECT d.enrollment_id
+           FROM device_codes d
+           JOIN enrollment_records e ON e.enrollment_id = d.enrollment_id
+          WHERE d.expires_at <= ? AND e.device_mapping_reclaimed_at IS NULL
+          ORDER BY d.expires_at, d.enrollment_id LIMIT ?`,
+        NOW,
+        100,
+      ),
+    ).toContain("device_codes_expiry");
   });
 
   test("0010 migration refuses a pre-existing device record without its proposal/code triple", () => {
@@ -629,10 +676,19 @@ describe("device enrollment first-decider SQL", () => {
     ).toBe(1);
   });
 
-  test("versioned poll replay ignores legacy transients but recovers a legacy issued token", async () => {
+  test("versioned poll replay ignores raw-key legacy transients and recovers a raw-key issued token", async () => {
     const clock = new DeviceTestClock();
     const sqlite = deviceDatabase();
-    const protector = new AesGcmEnrollmentReplayProtector(new Uint8Array(32));
+    const replayRoot = new Uint8Array(32);
+    const protector = new AesGcmEnrollmentReplayProtector(replayRoot);
+    const predecessorReplayKey = await crypto.subtle.importKey(
+      "raw",
+      replayRoot.slice().buffer,
+      { name: "AES-GCM" },
+      false,
+      ["encrypt"],
+    );
+    let predecessorIv = 0;
     const service = new EnrollmentService({
       clock,
       store: new D1EnrollmentStore(localD1(sqlite)),
@@ -648,7 +704,18 @@ describe("device enrollment first-decider SQL", () => {
       const digest = createHash("sha256")
         .update(JSON.stringify({ flow_handle: flowHandle }))
         .digest("hex");
-      const encrypted = await protector.seal(JSON.stringify(replayResponse));
+      const initializationVector = new Uint8Array(12);
+      predecessorIv += 1;
+      initializationVector[initializationVector.length - 1] = predecessorIv;
+      const ciphertext = await crypto.subtle.encrypt(
+        { name: "AES-GCM", iv: initializationVector.slice().buffer },
+        predecessorReplayKey,
+        new TextEncoder().encode(JSON.stringify(replayResponse)).buffer,
+      );
+      const encrypted = {
+        ciphertext: Buffer.from(ciphertext).toString("base64url"),
+        initializationVector: Buffer.from(initializationVector).toString("base64url"),
+      };
       sqlite
         .prepare(
           `INSERT INTO enrollment_idempotency (

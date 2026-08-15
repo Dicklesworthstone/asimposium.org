@@ -13,3 +13,10 @@ When W2 begins, each migration must use the fixed name
 agent-reviewable deployment script. The Worker remains the only process that
 mutates D1. Local development may use Wrangler's local persistence, but that
 does not prove a migration, transaction, backup, or remote resource.
+
+The Worker release that introduces `flow-terminal-v1` poll replay principals
+must be an atomic, forward-only cutover. Do not use a gradual old/new Worker
+split or roll back to a Worker that understands only `flow:<hash>` after the
+first terminal poll. The current Worker can authenticate and recover encrypted
+responses written by the predecessor for the 24-hour replay-retention window;
+the predecessor cannot read the new terminal namespace.
