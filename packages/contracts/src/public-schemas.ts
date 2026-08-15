@@ -9,9 +9,10 @@
 /// <reference path="./assets.d.ts" />
 
 import enrollmentSchemaModule from "../generated/enrollment.schema.json" with { type: "text" };
+import ledgerSchemaModule from "../generated/ledger.schema.json" with { type: "text" };
 import problemSchemaModule from "../generated/problem.schema.json" with { type: "text" };
 
-export const PUBLIC_SCHEMA_IDS = ["enrollment", "problem"] as const;
+export const PUBLIC_SCHEMA_IDS = ["enrollment", "ledger", "problem"] as const;
 
 export type PublicSchemaId = (typeof PUBLIC_SCHEMA_IDS)[number];
 
@@ -35,6 +36,12 @@ const PUBLIC_SCHEMAS: readonly PublicSchemaDocument[] = Object.freeze([
     served_at: "/schemas/enrollment.v1.json",
     media_type: "application/schema+json; charset=utf-8",
     body: exactTextModule(enrollmentSchemaModule, "generated/enrollment.schema.json"),
+  }),
+  Object.freeze({
+    id: "ledger",
+    served_at: "/schemas/ledger.v1.json",
+    media_type: "application/schema+json; charset=utf-8",
+    body: exactTextModule(ledgerSchemaModule, "generated/ledger.schema.json"),
   }),
   Object.freeze({
     id: "problem",

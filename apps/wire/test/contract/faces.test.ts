@@ -4,7 +4,13 @@ import { listPublicSchemas } from "@asimposium/contracts/public-schemas";
 import { getDocument, sha256Hex } from "@asimposium/protocol";
 import { createApp } from "../../src/app";
 import type { Env } from "../../src/env";
-import { boundEnv, callWorker, executionContext, r2Shaped } from "../support/bindings";
+import {
+  boundEnv,
+  callWorker,
+  executionContext,
+  outboxShaped,
+  r2Shaped,
+} from "../support/bindings";
 
 /**
  * SCOPE OF THIS SUITE (read before citing it).
@@ -28,7 +34,8 @@ import { boundEnv, callWorker, executionContext, r2Shaped } from "../support/bin
 const HEALTH_OK =
   '{"schema":"https://a.asimposium.org/schemas/internal.health.v1.json","ok":true,' +
   '"data":{"service":"wire","role":"stoa","format":"json",' +
-  '"bindings":{"DB":"bound","ARTIFACTS":"bound"}},"degraded":[],"next_actions":[]}';
+  '"bindings":{"DB":"bound","ARTIFACTS":"bound","KRATER_OUTBOX":"bound"}},' +
+  '"degraded":[],"next_actions":[]}';
 
 const UNKNOWN_FORMAT =
   '{"type":"https://asimposium.org/errors/UNKNOWN_FORMAT",' +
@@ -43,7 +50,8 @@ const BINDING_MISSING =
   '"title":"Required Worker bindings are not configured","status":503,"code":"BINDING_MISSING",' +
   '"detail":"Missing or wrong-shaped bindings: DB.",' +
   '"fix_hint":"Bind every name in `missing` in the Worker configuration for this environment, ' +
-  'then redeploy.","missing":["DB"],"bindings":{"DB":"missing","ARTIFACTS":"bound"}}';
+  'then redeploy.","missing":["DB"],"bindings":{"DB":"missing","ARTIFACTS":"bound",' +
+  '"KRATER_OUTBOX":"bound"}}';
 
 const ENROLLMENT_UNAVAILABLE =
   '{"type":"https://asimposium.org/errors/ENROLLMENT_UNAVAILABLE",' +
@@ -125,33 +133,45 @@ describe("face wire format", () => {
     expect(await response.text()).toBe("");
   });
 
-  test("schema faces honor HEAD and conditional reads without body bytes", async () => {
-    const document = listPublicSchemas().find((candidate) => candidate.id === "problem");
-    expect(document).toBeDefined();
-    if (document === undefined) return;
-    const etag = `"${sha256Hex(document.body)}"`;
+  test.each([...listPublicSchemas()])(
+    "$served_at honors HEAD and conditional reads without body bytes",
+    async (document) => {
+      const etag = `"${sha256Hex(document.body)}"`;
+      const app = createApp();
+
+      const head = await app.fetch(
+        new Request(`https://a.asimposium.org${document.served_at}`, { method: "HEAD" }),
+        {} as Env,
+        executionContext() as unknown as Parameters<typeof app.fetch>[2],
+      );
+      expect(head.status).toBe(200);
+      expect(head.headers.get("content-type")).toBe(document.media_type);
+      expect(head.headers.get("etag")).toBe(etag);
+      expect(await head.text()).toBe("");
+
+      const conditional = await app.fetch(
+        new Request(`https://a.asimposium.org${document.served_at}`, {
+          headers: { "if-none-match": etag },
+        }),
+        {} as Env,
+        executionContext() as unknown as Parameters<typeof app.fetch>[2],
+      );
+      expect(conditional.status).toBe(304);
+      expect(conditional.headers.get("etag")).toBe(etag);
+      expect(await conditional.text()).toBe("");
+    },
+  );
+
+  test("an undeclared schema URL stays a typed route miss", async () => {
     const app = createApp();
-
-    const head = await app.fetch(
-      new Request(`https://a.asimposium.org${document.served_at}`, { method: "HEAD" }),
+    const response = await app.fetch(
+      new Request("https://a.asimposium.org/schemas/not-declared.v1.json"),
       {} as Env,
       executionContext() as unknown as Parameters<typeof app.fetch>[2],
     );
-    expect(head.status).toBe(200);
-    expect(head.headers.get("content-type")).toBe(document.media_type);
-    expect(head.headers.get("etag")).toBe(etag);
-    expect(await head.text()).toBe("");
-
-    const conditional = await app.fetch(
-      new Request(`https://a.asimposium.org${document.served_at}`, {
-        headers: { "if-none-match": etag },
-      }),
-      {} as Env,
-      executionContext() as unknown as Parameters<typeof app.fetch>[2],
-    );
-    expect(conditional.status).toBe(304);
-    expect(conditional.headers.get("etag")).toBe(etag);
-    expect(await conditional.text()).toBe("");
+    expect(response.status).toBe(404);
+    expect(response.headers.get("content-type")).toBe("application/problem+json; charset=utf-8");
+    expect(await response.json()).toMatchObject({ code: "ROUTE_NOT_FOUND" });
   });
 
   test("a served-text format typo teaches the only allowed value", async () => {
@@ -197,7 +217,10 @@ describe("face wire format", () => {
   });
 
   test("GET /internal/health with D1 unbound", async () => {
-    const res = await callWorker("/internal/health", { ARTIFACTS: r2Shaped() });
+    const res = await callWorker("/internal/health", {
+      ARTIFACTS: r2Shaped(),
+      KRATER_OUTBOX: outboxShaped(),
+    });
 
     expect(res.status).toBe(503);
     expect(res.contentType).toBe("application/problem+json; charset=utf-8");
