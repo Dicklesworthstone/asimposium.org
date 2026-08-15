@@ -39,18 +39,27 @@ async function strongEtag(face: "json" | "markdown", body: string): Promise<stri
 }
 
 async function loadIndex(db: Env["DB"]): Promise<ProblemsIndexResponse> {
+  // One row over the face limit decides whether the index is complete; when
+  // it is not, omitted[] says so rather than silently truncating.
   const rows = await db
     .prepare(
-      "SELECT id, public_seq, created_at, updated_at FROM problems ORDER BY public_seq DESC LIMIT 200",
+      "SELECT id, public_seq, created_at, updated_at FROM problems ORDER BY public_seq DESC LIMIT 201",
     )
     .all<ProblemRow>();
-  return ProblemsIndexResponseSchema.parse({ problems: rows.results, omitted: OMITTED });
+  const truncated = rows.results.length > 200;
+  const omitted = truncated
+    ? [...OMITTED, "results beyond the 200 most recent by public_seq"]
+    : OMITTED;
+  return ProblemsIndexResponseSchema.parse({
+    problems: rows.results.slice(0, 200),
+    omitted,
+  });
 }
 
 export function createLedgerFaceRoutes(): Hono<{ Bindings: Env }> {
   const app = new Hono<{ Bindings: Env }>();
 
-  app.get("/problems.json", async (c) => {
+  app.on(["GET", "HEAD"], "/problems.json", async (c) => {
     const body = JSON.stringify(await loadIndex(c.env.DB));
     const etag = await strongEtag("json", body);
     const headers = {
@@ -59,10 +68,10 @@ export function createLedgerFaceRoutes(): Hono<{ Bindings: Env }> {
       etag,
     };
     if (ifNoneMatchMatches(c.req.header("if-none-match"), etag)) return c.body(null, 304, headers);
-    return c.body(body, 200, headers);
+    return new Response(c.req.method === "HEAD" ? null : body, { status: 200, headers });
   });
 
-  app.get("/problems.md", async (c) => {
+  app.on(["GET", "HEAD"], "/problems.md", async (c) => {
     const data = await loadIndex(c.env.DB);
     const listing =
       data.problems.length === 0
@@ -78,7 +87,7 @@ export function createLedgerFaceRoutes(): Hono<{ Bindings: Env }> {
       etag,
     };
     if (ifNoneMatchMatches(c.req.header("if-none-match"), etag)) return c.body(null, 304, headers);
-    return c.body(body, 200, headers);
+    return new Response(c.req.method === "HEAD" ? null : body, { status: 200, headers });
   });
 
   return app;
