@@ -18,7 +18,8 @@ export type MintResult =
 export type DecideResult = { readonly ok: true } | { readonly ok: false; readonly message: string };
 
 async function requireSponsorId(): Promise<
-  { readonly ok: true; readonly sponsorId: string } | { readonly ok: false; readonly message: string }
+  | { readonly ok: true; readonly sponsorId: string; readonly authIssuedAt?: number }
+  | { readonly ok: false; readonly message: string }
 > {
   const session = await auth();
   if (session?.user === undefined) return { ok: false, message: "Not signed in." };
@@ -28,7 +29,21 @@ async function requireSponsorId(): Promise<
       message: "Your sponsor identity has not been bootstrapped on this deployment.",
     };
   }
-  return { ok: true, sponsorId: session.user.id };
+  return { ok: true, sponsorId: session.user.id, authIssuedAt: session.authIssuedAt };
+}
+
+/**
+ * W3.4: approve/reduce/deny are recent-auth actions. A decision is a
+ * permanent public binding, so the session must be fresh — the JWT `iat`,
+ * never a client-supplied time. Fifteen minutes is the window.
+ */
+const RECENT_DECISION_WINDOW_SECONDS = 15 * 60;
+
+function recentAuthOk(authIssuedAt: number | undefined): boolean {
+  return (
+    authIssuedAt !== undefined &&
+    Math.floor(Date.now() / 1_000) - authIssuedAt <= RECENT_DECISION_WINDOW_SECONDS
+  );
 }
 
 /**
@@ -72,6 +87,13 @@ export async function decideProposal(
 ): Promise<DecideResult> {
   const sponsor = await requireSponsorId();
   if (!sponsor.ok) return sponsor;
+  if (!recentAuthOk(sponsor.authIssuedAt)) {
+    return {
+      ok: false,
+      message:
+        "Decisions need a recent sign-in (15 minutes). Sign out and back in, then decide. The proposal is unchanged.",
+    };
+  }
   const parsed = SponsorEnrollmentDecisionSchema.safeParse(decision);
   if (!parsed.success || parsed.data.enrollment_id !== enrollmentId) {
     return { ok: false, message: "The decision request is invalid." };

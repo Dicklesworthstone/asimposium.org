@@ -27,6 +27,7 @@ export const { handlers, auth, signIn, signOut } = NextAuth({
     // Stoa call gate on this canonical shape (isCanonicalSponsorId).
     session({ session, token }) {
       if (token.sub) session.user.id = `usr_${token.sub}`;
+      if (typeof token.iat === "number") session.authIssuedAt = token.iat;
       return session;
     },
   },
