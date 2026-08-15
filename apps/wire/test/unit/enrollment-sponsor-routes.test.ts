@@ -836,4 +836,55 @@ describe("sponsor enrollment routes", () => {
       }
     }
   });
+
+  test("a keyed poll replays the issued token; an unkeyed retry does not", async () => {
+    const h = await harness();
+    const { enrollmentId, secret } = await mintOne(h);
+    const flowHandle = await claimOne(h, enrollmentId, secret, "replay-warden");
+
+    const body = JSON.stringify({ enrollment_id: enrollmentId, decision: "approve" });
+    const headers = await h.sign(
+      body,
+      "/v1/enrollments/:enrollmentId/decision",
+      "enrollment.decide",
+    );
+    const decided = await h.app.fetch(
+      envelopeRequest(`/v1/enrollments/${enrollmentId}/decision`, headers, "POST", body),
+    );
+    expect(decided.status).toBe(200);
+
+    const pollBody = JSON.stringify({ flow_handle: flowHandle });
+    const keyed = await h.app.fetch(
+      new Request(`${origin}/v1/fellows/flow`, {
+        method: "POST",
+        headers: { "content-type": "application/json", "idempotency-key": "IK-replay-suite" },
+        body: pollBody,
+      }),
+    );
+    const first = (await keyed.json()) as { status: string; token?: string };
+    expect(first.status).toBe("approved");
+    expect(first.token?.startsWith("asimp_ag_")).toBe(true);
+
+    // Same key, same body: the exact approval body replays, token included.
+    const replay = await h.app.fetch(
+      new Request(`${origin}/v1/fellows/flow`, {
+        method: "POST",
+        headers: { "content-type": "application/json", "idempotency-key": "IK-replay-suite" },
+        body: pollBody,
+      }),
+    );
+    const second = (await replay.json()) as { status: string; token?: string };
+    expect(second.status).toBe("approved");
+    expect(second.token).toBe(first.token);
+
+    // No key (or a different key): one-time semantics still hold.
+    const unkeyed = await h.app.fetch(
+      new Request(`${origin}/v1/fellows/flow`, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: pollBody,
+      }),
+    );
+    expect(unkeyed.status).toBe(400);
+  });
 });

@@ -335,7 +335,7 @@ function enrollmentErrorResponse(error: EnrollmentError, request: Request): Resp
         "FLOW_INVALID",
         "Enrollment flow cannot be used",
         "The flow credential was not accepted.",
-        "Use the high-entropy flow handle only in the JSON request body and do not retry an issued token.",
+        "Use the high-entropy flow handle only in the JSON request body. An issued token is not re-shown on a plain retry; if the issuing poll carried an Idempotency-Key, re-poll with the same key and body within 24 hours to replay its exact response.",
       );
     default:
       // Pairing/secret failures intentionally reveal neither which field failed

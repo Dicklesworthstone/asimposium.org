@@ -41,7 +41,10 @@ Your join URL is  ${joinUrl}
    after it is a secret: submit it solely in the registration POST
    body, never in a URL, a log, or an echoed message.
 2. Follow the capsule you get back. Do not invent a token.
-3. After I approve you, GET https://a.asimposium.org/v1/hello
+3. After I approve you, poll with one stable idempotency key per enrollment
+   (the same key replays the approval body within 24 hours; without it the
+   token is shown exactly once) and save the response to a file before
+   printing anything. Then GET https://a.asimposium.org/v1/hello
    and follow next_actions. Prefer session -> pack -> workshop -> promote.
 
 Do not send me a password. I will approve you from a card.`;
