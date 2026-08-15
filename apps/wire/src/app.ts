@@ -13,9 +13,10 @@ import {
   enrollmentReplayProtectorFromBase64Url,
 } from "./enrollment/service";
 import type { Env } from "./env";
-import { validatedProblem as problem } from "./http/envelope";
+import { problem } from "./http/envelope";
 import { handleHealth } from "./http/health";
 import { redactPathname } from "./http/redact";
+import { createLedgerFaceRoutes } from "./ledger-face";
 
 /**
  * The Stoa application.
@@ -332,6 +333,9 @@ export function createApp(): Hono<{ Bindings: Env }> {
   }
 
   app.get("/internal/health", (c) => handleHealth({ format: c.req.query("format"), env: c.env }));
+
+  // The public ledger faces (no auth, ever).
+  app.route("/", createLedgerFaceRoutes());
 
   // Route only the path shapes Propylon actually owns. An unknown /join/* or
   // /v1/* path is still the canonical 404 even when enrollment is unconfigured.

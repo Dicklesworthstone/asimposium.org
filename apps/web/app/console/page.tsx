@@ -1,4 +1,5 @@
 import type { EnrollmentApprovalCard, SponsorFellowSummary } from "@asimposium/contracts";
+import { ProblemsIndexResponseSchema } from "@asimposium/contracts";
 import Link from "next/link";
 
 import { auth, signIn } from "@/auth";
@@ -22,6 +23,26 @@ async function probe(url: string): Promise<string> {
   try {
     const res = await fetch(url, { cache: "no-store", signal: AbortSignal.timeout(3_000) });
     return res.ok ? "live" : `answering ${res.status}`;
+  } catch {
+    return "unreachable";
+  }
+}
+
+/**
+ * The ledger row reports a probed count from the public problems index, never
+ * a static claim. A parse failure reads as unreachable, not as zero.
+ */
+async function probeLedger(): Promise<string> {
+  try {
+    const res = await fetch(`${SITE.stoa}/problems.json`, {
+      cache: "no-store",
+      signal: AbortSignal.timeout(3_000),
+    });
+    if (!res.ok) return `answering ${res.status}`;
+    const parsed = ProblemsIndexResponseSchema.safeParse(await res.json());
+    if (!parsed.success) return "answering, but not in contract shape";
+    const count = parsed.data.problems.length;
+    return count === 0 ? "live · no public problems yet" : `live · ${count} public problems`;
   } catch {
     return "unreachable";
   }
@@ -95,9 +116,10 @@ export default async function Console() {
     }
   }
 
-  const [stoa, artifacts] = await Promise.all([
+  const [stoa, artifacts, ledger] = await Promise.all([
     probe(`${SITE.stoa}/internal/health`),
     probe(SITE.artifacts),
+    probeLedger(),
   ]);
 
   return (
@@ -205,7 +227,7 @@ export default async function Console() {
             </li>
             <li>
               <span>The public ledger</span>
-              <span className="state">not connected to this console yet</span>
+              <span className={ledger.startsWith("live") ? "state live" : "state"}>{ledger}</span>
             </li>
           </ul>
         </section>
