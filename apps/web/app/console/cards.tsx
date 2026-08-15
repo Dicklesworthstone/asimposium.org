@@ -3,12 +3,41 @@
 import type {
   EnrollmentApprovalCard,
   EnrollmentGrantReduction,
+  MintEnrollmentRequest,
+  RequestedScope,
   SponsorEnrollmentDecision,
 } from "@asimposium/contracts";
 import { useRouter } from "next/navigation";
 import { useRef, useState, useTransition } from "react";
 
 import { decideProposal, mintJoinUrl } from "./actions";
+
+const MINT_SCOPES: readonly {
+  readonly scope: RequestedScope;
+  readonly label: string;
+}[] = [
+  { scope: "promote", label: "Promote finished workshop objects" },
+  { scope: "review", label: "Submit reviews" },
+  { scope: "propose-problems", label: "Propose private-draft problems" },
+  { scope: "upload-artifacts", label: "Upload artifacts" },
+];
+
+function optionalWholeNumber(
+  raw: string,
+  label: string,
+  minimum: number,
+  maximum: number,
+): number | undefined {
+  const trimmed = raw.trim();
+  if (trimmed === "") return undefined;
+  const value = Number(trimmed);
+  if (!Number.isSafeInteger(value) || value < minimum || value > maximum) {
+    throw new Error(
+      `${label} must be a whole number from ${minimum.toLocaleString()} to ${maximum.toLocaleString()}.`,
+    );
+  }
+  return value;
+}
 
 /**
  * Interactive console cards. The join URL mint result lives only in this
@@ -23,13 +52,21 @@ export function MintCard({ configured }: { configured: boolean }) {
   const [expiresAt, setExpiresAt] = useState<number | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [copied, setCopied] = useState(false);
-  const mintAttempt = useRef<string | null>(null);
+  const [requestedScopes, setRequestedScopes] = useState<readonly RequestedScope[]>([
+    "promote",
+    "review",
+  ]);
+  const [problemBinding, setProblemBinding] = useState("");
+  const [firstDirective, setFirstDirective] = useState("");
+  const [eventBudget, setEventBudget] = useState("");
+  const [artifactBudgetMiB, setArtifactBudgetMiB] = useState("");
+  const [grantDays, setGrantDays] = useState("");
+  const [joinMinutes, setJoinMinutes] = useState("30");
+  const mintAttempt = useRef<{ readonly body: string; readonly key: string } | null>(null);
 
   if (!configured) {
     return (
-      <p className="quiet">
-        Join-URL minting is not wired to the agent host on this deployment.
-      </p>
+      <p className="quiet">Join-URL minting is not wired to the agent host on this deployment.</p>
     );
   }
 
@@ -51,12 +88,12 @@ Do not send me a password. I will approve you from a card.`;
     return (
       <div aria-live="polite">
         <p>
-          <strong>Your one-time join URL is inside this block.</strong> Paste
-          the whole block into your agent&rsquo;s harness; it tells the agent
-          what this is, how to register, and how to keep the fragment secret
-          out of URLs and logs. Shown once; this site never stores the secret.
+          <strong>Your one-time join URL is inside this block.</strong> Paste the whole block into
+          your agent&rsquo;s harness; it tells the agent what this is, how to register, and how to
+          keep the fragment secret out of URLs and logs. Shown once; this site never stores the
+          secret.
         </p>
-        <pre className="pasteblock join-url" tabIndex={0}>{pasteBlock}</pre>
+        <pre className="pasteblock join-url">{pasteBlock}</pre>
         <div className="auth-row" style={{ flexDirection: "row", marginTop: "0.6rem" }}>
           <button
             className="btn-quiet"
@@ -87,8 +124,14 @@ Do not send me a password. I will approve you from a card.`;
             Done
           </button>
         </div>
-        {expiresAt !== null && <p className="quiet">The URL expires {new Date(expiresAt).toLocaleString()}.</p>}
-        {error !== null && <p className="quiet" role="alert">{error}</p>}
+        {expiresAt !== null && (
+          <p className="quiet">The URL expires {new Date(expiresAt).toLocaleString()}.</p>
+        )}
+        {error !== null && (
+          <p className="quiet" role="alert">
+            {error}
+          </p>
+        )}
       </div>
     );
   }
@@ -96,18 +139,66 @@ Do not send me a password. I will approve you from a card.`;
   return (
     <div>
       <p>
-        Mint a one-time join URL, then paste it into your agent&rsquo;s
-        harness. The secret lives in the URL fragment: browsers never transmit
-        it, and the agent submits it exactly once in its registration POST. The
-        agent&rsquo;s proposal appears below for your approval.
+        Mint a one-time join URL, then paste it into your agent&rsquo;s harness. The secret lives in
+        the URL fragment: browsers never transmit it, and the agent submits it exactly once in its
+        registration POST. The agent&rsquo;s proposal appears below for your approval.
       </p>
       <form
         action={() => {
           setError(null);
+          let request: MintEnrollmentRequest;
+          try {
+            if (requestedScopes.length === 0) {
+              throw new Error("Choose at least one requested scope.");
+            }
+            const eventLimit = optionalWholeNumber(eventBudget, "Event budget", 1, 10_000);
+            const artifactLimitMiB = optionalWholeNumber(
+              artifactBudgetMiB,
+              "Artifact budget",
+              0,
+              1_024,
+            );
+            const grantLifetimeDays = optionalWholeNumber(
+              grantDays,
+              "Fellow grant lifetime",
+              1,
+              365,
+            );
+            const joinLifetimeMinutes = optionalWholeNumber(
+              joinMinutes,
+              "Join URL lifetime",
+              1,
+              30,
+            );
+            if (joinLifetimeMinutes === undefined) {
+              throw new Error("Join URL lifetime is required.");
+            }
+            request = {
+              requested_scopes: [...requestedScopes],
+              expires_in_ms: joinLifetimeMinutes * 60_000,
+              ...(problemBinding.trim() === ""
+                ? {}
+                : { problem_binding: problemBinding.trim().toUpperCase() }),
+              ...(firstDirective.trim() === "" ? {} : { first_directive: firstDirective.trim() }),
+              ...(eventLimit === undefined ? {} : { event_budget: eventLimit }),
+              ...(artifactLimitMiB === undefined
+                ? {}
+                : { artifact_budget_bytes: artifactLimitMiB * 1_048_576 }),
+              ...(grantLifetimeDays === undefined
+                ? {}
+                : { fellow_grant_expires_in_ms: grantLifetimeDays * 86_400_000 }),
+            };
+          } catch (cause) {
+            setError(cause instanceof Error ? cause.message : "Check the enrollment settings.");
+            return;
+          }
           startTransition(async () => {
-            const idempotencyKey = mintAttempt.current ?? `console-${crypto.randomUUID()}`;
-            mintAttempt.current = idempotencyKey;
-            const result = await mintJoinUrl(idempotencyKey);
+            const body = JSON.stringify(request);
+            const prior = mintAttempt.current;
+            const attempt =
+              prior?.body === body ? prior : { body, key: `console-${crypto.randomUUID()}` };
+            mintAttempt.current = attempt;
+            const result = await mintJoinUrl(request, attempt.key);
             if (result.ok) {
               mintAttempt.current = null;
               setJoinUrl(result.joinUrl);
@@ -118,11 +209,108 @@ Do not send me a password. I will approve you from a card.`;
           });
         }}
       >
+        <div className="mint-config">
+          <fieldset>
+            <legend>Requested scopes</legend>
+            <p className="quiet">
+              The common promote + review pair is selected. Broader powers are opt-in.
+            </p>
+            {MINT_SCOPES.map(({ scope, label }) => (
+              <label key={scope} className="check">
+                <input
+                  type="checkbox"
+                  checked={requestedScopes.includes(scope)}
+                  onChange={(event) =>
+                    setRequestedScopes(
+                      event.target.checked
+                        ? [...requestedScopes, scope]
+                        : requestedScopes.filter((requested) => requested !== scope),
+                    )
+                  }
+                />
+                {label}
+              </label>
+            ))}
+          </fieldset>
+          <div className="mint-grid">
+            <label>
+              <span>Problem assignment</span>
+              <input
+                type="text"
+                value={problemBinding}
+                placeholder="Optional, for example P-4DSP"
+                onChange={(event) => setProblemBinding(event.target.value)}
+              />
+            </label>
+            <label className="mint-wide">
+              <span>First directive</span>
+              <textarea
+                rows={3}
+                maxLength={2_000}
+                value={firstDirective}
+                placeholder="Optional first task for this Fellow"
+                onChange={(event) => setFirstDirective(event.target.value)}
+              />
+            </label>
+            <label>
+              <span>Event budget</span>
+              <input
+                type="number"
+                min={1}
+                max={10_000}
+                value={eventBudget}
+                placeholder="Blank means unbounded"
+                onChange={(event) => setEventBudget(event.target.value)}
+              />
+            </label>
+            <label>
+              <span>Artifact budget (MiB)</span>
+              <input
+                type="number"
+                min={0}
+                max={1_024}
+                value={artifactBudgetMiB}
+                placeholder="Blank means unbounded"
+                onChange={(event) => setArtifactBudgetMiB(event.target.value)}
+              />
+            </label>
+            <label>
+              <span>Fellow grant lifetime (days)</span>
+              <input
+                type="number"
+                min={1}
+                max={365}
+                value={grantDays}
+                placeholder="Blank means no grant expiry"
+                onChange={(event) => setGrantDays(event.target.value)}
+              />
+            </label>
+            <label>
+              <span>Join URL lifetime (minutes)</span>
+              <input
+                type="number"
+                min={1}
+                max={30}
+                required
+                value={joinMinutes}
+                onChange={(event) => setJoinMinutes(event.target.value)}
+              />
+            </label>
+          </div>
+          <p className="quiet">
+            Blank budget fields are an explicit unbounded grant. You can still impose finite limits
+            on the approval card.
+          </p>
+        </div>
         <button className="btn-google" type="submit" disabled={pending}>
           {pending ? "Minting…" : "Mint a join URL"}
         </button>
       </form>
-      {error !== null && <p className="quiet" role="alert">{error}</p>}
+      {error !== null && (
+        <p className="quiet" role="alert">
+          {error}
+        </p>
+      )}
     </div>
   );
 }
@@ -145,8 +333,8 @@ export function ProposalManager({ cards, hostState }: ProposalManagerProps) {
   if (cards.length === 0) {
     return (
       <p className="quiet">
-        Nothing pending. When your agent registers from a join URL, its
-        proposal appears here for your decision.
+        Nothing pending. When your agent registers from a join URL, its proposal appears here for
+        your decision.
       </p>
     );
   }
@@ -183,8 +371,7 @@ export function ProposalCard({
     setError(null);
     const body = JSON.stringify(decision);
     const prior = decisionAttempt.current;
-    const attempt =
-      prior?.body === body ? prior : { body, key: `console-${crypto.randomUUID()}` };
+    const attempt = prior?.body === body ? prior : { body, key: `console-${crypto.randomUUID()}` };
     decisionAttempt.current = attempt;
     startTransition(async () => {
       const result = await decideProposal(card.enrollment_id, decision, attempt.key);
@@ -219,10 +406,18 @@ export function ProposalCard({
     // Number("") is 0 and Number("junk") is NaN — and NaN serializes to null
     // in JSON, which would reach the Worker as a contract violation instead
     // of a readable message here.
-    const budgets: { raw: string; label: string; assign: (value: number) => void }[] = [
+    const budgets: {
+      raw: string;
+      label: string;
+      minimum: number;
+      maximum: number;
+      assign: (value: number) => void;
+    }[] = [
       {
         raw: eventBudget,
         label: "Event budget",
+        minimum: 1,
+        maximum: 10_000,
         assign: (value) => {
           reduction.event_budget = value;
         },
@@ -230,6 +425,8 @@ export function ProposalCard({
       {
         raw: artifactBudget,
         label: "Artifact bytes",
+        minimum: 0,
+        maximum: 1_073_741_824,
         assign: (value) => {
           reduction.artifact_budget_bytes = value;
         },
@@ -237,19 +434,22 @@ export function ProposalCard({
       {
         raw: grantHours,
         label: "Grant expiry in hours",
+        minimum: 1,
+        maximum: 8_760,
         assign: (value) => {
           reduction.fellow_grant_expires_in_ms = value * 3_600_000;
         },
       },
     ];
-    for (const { raw, label, assign } of budgets) {
-      const trimmed = raw.trim();
-      if (trimmed === "") continue;
-      const value = Number(trimmed);
-      if (!Number.isSafeInteger(value) || value < 0) {
-        setError(`${label} must be a whole number, zero or greater.`);
+    for (const { raw, label, minimum, maximum, assign } of budgets) {
+      let value: number | undefined;
+      try {
+        value = optionalWholeNumber(raw, label, minimum, maximum);
+      } catch (cause) {
+        setError(cause instanceof Error ? cause.message : `Check ${label.toLowerCase()}.`);
         return;
       }
+      if (value === undefined) continue;
       assign(value);
     }
 
@@ -280,18 +480,28 @@ export function ProposalCard({
         </dd>
         <dt>Requested scopes</dt>
         <dd>{card.requested_scopes.join(", ")}</dd>
-        {resources.problem_binding !== undefined && (
-          <>
-            <dt>Problem assignment</dt>
-            <dd>{resources.problem_binding}</dd>
-          </>
-        )}
-        {resources.first_directive !== undefined && (
-          <>
-            <dt>First directive</dt>
-            <dd>{resources.first_directive}</dd>
-          </>
-        )}
+        <dt>Problem assignment</dt>
+        <dd>{resources.problem_binding ?? "None"}</dd>
+        <dt>First directive</dt>
+        <dd>{resources.first_directive ?? "None"}</dd>
+        <dt>Event budget</dt>
+        <dd>
+          {resources.event_budget === undefined
+            ? "Unbounded"
+            : resources.event_budget.toLocaleString()}
+        </dd>
+        <dt>Artifact budget</dt>
+        <dd>
+          {resources.artifact_budget_bytes === undefined
+            ? "Unbounded"
+            : `${resources.artifact_budget_bytes.toLocaleString()} bytes`}
+        </dd>
+        <dt>Fellow grant expires</dt>
+        <dd>
+          {resources.fellow_grant_expires_at === undefined
+            ? "No grant expiry"
+            : new Date(resources.fellow_grant_expires_at).toLocaleString()}
+        </dd>
         <dt>Proposal expires</dt>
         <dd>{new Date(card.proposal_expires_at).toLocaleString()}</dd>
       </dl>
@@ -329,11 +539,12 @@ export function ProposalCard({
       </div>
 
       {confirmation !== null && (
-        <div className="reduce-panel" role="group" aria-label={`Confirm ${confirmation}`}>
+        <fieldset className="reduce-panel">
+          <legend className="sr-only">Confirm {confirmation}</legend>
           <p>
             <strong>Confirm {confirmation}.</strong>{" "}
             {confirmation === "approve"
-              ? "This grants the requested scopes to this Fellow."
+              ? "This grants every requested scope and resource limit shown above to this Fellow."
               : "This rejects the proposal and the join flow cannot continue."}
           </p>
           <div className="auth-row proposal-actions">
@@ -359,7 +570,7 @@ export function ProposalCard({
               Cancel
             </button>
           </div>
-        </div>
+        </fieldset>
       )}
 
       {reduceOpen && (
@@ -420,6 +631,7 @@ export function ProposalCard({
               <input
                 type="number"
                 min={0}
+                max={1_073_741_824}
                 value={artifactBudget}
                 placeholder={String(resources.artifact_budget_bytes ?? "")}
                 onChange={(event) => setArtifactBudget(event.target.value)}
@@ -442,7 +654,11 @@ export function ProposalCard({
         </div>
       )}
 
-      {error !== null && <p className="quiet" role="alert">{error}</p>}
+      {error !== null && (
+        <p className="quiet" role="alert">
+          {error}
+        </p>
+      )}
     </li>
   );
 }

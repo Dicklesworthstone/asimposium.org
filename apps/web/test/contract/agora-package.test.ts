@@ -132,6 +132,42 @@ describe("sponsor console trust boundary", () => {
     expect(actions).toContain("parsed.data.enrollment_id !== enrollmentId");
   });
 
+  test("sponsor minting sends validated, configurable least-authority enrollment settings", () => {
+    const cards = readPackageFile("app/console/cards.tsx");
+    expect(actions).toContain("MintEnrollmentRequestSchema.safeParse(request)");
+    expect(actions).toContain("stoaMintEnrollment(sponsor.sponsorId, parsed.data, idempotencyKey)");
+    expect(actions).not.toContain(
+      'requested_scopes: ["promote", "review", "propose-problems", "upload-artifacts"]',
+    );
+    expect(cards).toContain('"promote",\n    "review"');
+    expect(cards).toContain("Broader powers are opt-in.");
+    expect(cards).toContain("problem_binding: problemBinding.trim().toUpperCase()");
+    expect(cards).toContain("first_directive: firstDirective.trim()");
+    expect(cards).toContain("event_budget: eventLimit");
+    expect(cards).toContain("artifact_budget_bytes: artifactLimitMiB * 1_048_576");
+    expect(cards).toContain("fellow_grant_expires_in_ms: grantLifetimeDays * 86_400_000");
+    expect(cards).toContain("expires_in_ms: joinLifetimeMinutes * 60_000");
+  });
+
+  test("approval consent shows every requested resource, including explicit unbounded states", () => {
+    const cards = readPackageFile("app/console/cards.tsx");
+    for (const label of [
+      "Problem assignment",
+      "First directive",
+      "Event budget",
+      "Artifact budget",
+      "Fellow grant expires",
+      "Proposal expires",
+    ]) {
+      expect(cards).toContain(`<dt>${label}</dt>`);
+    }
+    expect(cards).toContain('? "Unbounded"');
+    expect(cards).toContain('? "No grant expiry"');
+    expect(cards).toContain(
+      "This grants every requested scope and resource limit shown above to this Fellow.",
+    );
+  });
+
   test("the explicit step-up buttons force a Google challenge", () => {
     const consolePage = readPackageFile("app/console/page.tsx");
     const approvePage = readPackageFile("app/approve/page.tsx");
@@ -158,7 +194,7 @@ describe("sponsor console trust boundary", () => {
     expect(deviceForm).not.toContain('aria-label="Device code"');
     expect(deviceForm).toContain("Check another code");
     expect(deviceForm).toContain("no Fellow or");
-    expect(deviceForm).toContain("decision === \"deny\"");
+    expect(deviceForm).toContain('decision === "deny"');
     expect(deviceForm).toContain("Enter a different code");
     expect(deviceForm).toContain('aria-label="Device proposal"');
   });

@@ -1,7 +1,10 @@
 "use server";
 
-import type { EnrollmentApprovalCard, MintEnrollmentRequest } from "@asimposium/contracts";
-import { SponsorEnrollmentDecisionSchema } from "@asimposium/contracts";
+import type { EnrollmentApprovalCard } from "@asimposium/contracts";
+import {
+  MintEnrollmentRequestSchema,
+  SponsorEnrollmentDecisionSchema,
+} from "@asimposium/contracts";
 import { revalidatePath } from "next/cache";
 
 import { auth } from "@/auth";
@@ -61,14 +64,14 @@ async function requireSponsorId(): Promise<
  * is shown once in the client and never stored by Agora (the Worker keeps
  * only its SHA-256 hash).
  */
-export async function mintJoinUrl(idempotencyKey: string): Promise<MintResult> {
+export async function mintJoinUrl(request: unknown, idempotencyKey: string): Promise<MintResult> {
   const sponsor = await requireSponsorId();
   if (!sponsor.ok) return sponsor;
-
-  const request: MintEnrollmentRequest = {
-    requested_scopes: ["promote", "review", "propose-problems", "upload-artifacts"],
-  };
-  const result = await stoaMintEnrollment(sponsor.sponsorId, request, idempotencyKey);
+  const parsed = MintEnrollmentRequestSchema.safeParse(request);
+  if (!parsed.success) {
+    return { ok: false, message: "Check the enrollment settings and try again." };
+  }
+  const result = await stoaMintEnrollment(sponsor.sponsorId, parsed.data, idempotencyKey);
   if (!result.ok) {
     return {
       ok: false,
