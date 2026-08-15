@@ -56,6 +56,7 @@ const EXACT_ENROLLMENT_PATHS = new Set([
   "/v1/fellows",
   "/v1/fellows/flow",
   "/v1/hello",
+  "/v1/sponsors/bootstrap",
 ]);
 
 const PUBLIC_TEXT_CACHE_CONTROL = "public, max-age=60, stale-while-revalidate=300";
