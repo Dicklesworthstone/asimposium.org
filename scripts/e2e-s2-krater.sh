@@ -1151,18 +1151,60 @@ lsof_scan_has_no_matches() {
   esac
 }
 
+# Recursive lsof scans can briefly observe their own directory-traversal process under load.
+# Never exempt a PID class: instead, retry only well-formed machine-mode PID matches and require
+# a later actual zero-holder observation. Malformed rows, diagnostics, and scanner errors remain
+# immediate failures; a real persistent holder remains visible through the whole bounded sample.
+lsof_scan_reaches_no_matches() {
+  local attempt line machine_pids
+  for attempt in 1 2 3; do
+    if lsof_scan_has_no_matches "$@"; then return 0; fi
+    [[ "${S2_LSOF_LAST_STATUS}" == 0 || "${S2_LSOF_LAST_STATUS}" == 1 ]] || return 1
+    [[ -n "${S2_LSOF_LAST_OUTPUT}" ]] || return 1
+    machine_pids=1
+    while IFS= read -r line; do
+      [[ "${line}" =~ ^[0-9]+$ ]] || { machine_pids=0; break; }
+    done <<<"${S2_LSOF_LAST_OUTPUT}"
+    [[ ${machine_pids} -eq 1 ]] || return 1
+    [[ ${attempt} -lt 3 ]] || return 1
+    sleep 0.05
+  done
+  return 1
+}
+
 assert_no_run_survivors() {
   local persist="$1" port="$2" marker="$3" rows line
-  lsof_scanner_is_healthy || return 1
-  [[ -d "${persist}" && ! -L "${persist}" ]] || return 1
-  port_is_busy "${port}" && return 1
-  rows="$(LC_ALL=C ps -axo pid=,pgid=,ppid=,stat=,command=)" || return 1
+  S2_SURVIVOR_ASSERTION_FAILURE=""
+  lsof_scanner_is_healthy || { S2_SURVIVOR_ASSERTION_FAILURE="lsof-health"; return 1; }
+  [[ -d "${persist}" && ! -L "${persist}" ]] || {
+    S2_SURVIVOR_ASSERTION_FAILURE="persist-path"
+    return 1
+  }
+  if port_is_busy "${port}"; then
+    S2_SURVIVOR_ASSERTION_FAILURE="port-busy"
+    return 1
+  fi
+  rows="$(LC_ALL=C ps -axo pid=,pgid=,ppid=,stat=,command=)" || {
+    S2_SURVIVOR_ASSERTION_FAILURE="process-scan"
+    return 1
+  }
   while IFS= read -r line; do
     [[ "${line}" == *"${persist}"* || "${line}" == *"s2-pinned-supervisor-${marker}"* || \
-      "${line}" == *"s2-parent-watchdog-${marker}"* ]] && return 1
+      "${line}" == *"s2-parent-watchdog-${marker}"* ]] && {
+      S2_SURVIVOR_ASSERTION_FAILURE="process-match"
+      return 1
+    }
   done <<<"${rows}"
-  lsof_scan_has_no_matches -nP +D "${persist}" || return 1
-  lsof_scan_has_no_matches -nP -iTCP:"${port}" -sTCP:LISTEN || return 1
+  # lsof -t implicitly selects -w (suppress warnings). Re-enable warnings after -t so an
+  # inaccessible recursive path cannot collapse to the same exit-1/empty result as no matches.
+  lsof_scan_reaches_no_matches -nP -t +w +D "${persist}" || {
+    S2_SURVIVOR_ASSERTION_FAILURE="state-fd-scan"
+    return 1
+  }
+  lsof_scan_reaches_no_matches -nP -t +w -iTCP:"${port}" -sTCP:LISTEN || {
+    S2_SURVIVOR_ASSERTION_FAILURE="listener-scan"
+    return 1
+  }
   return 0
 }
 
@@ -1189,6 +1231,8 @@ kill_owned_group_to_zero() {
 # and never falls back to a PID or a bare/recycled process group.
 legacy_residual_group_is_exact() {
   local pgid="$1" marker="$2" persist="$3" rows line pid seen_pgid ppid stat command
+  local held_file="${S2_LEGACY_REQUIRED_HELD_FILE:-}" holder_output holder_status holder_pid
+  local holder_pgid holder_count=0 watchdog_seen=0
   rows="$(LC_ALL=C ps -axo pid=,pgid=,ppid=,stat=,command=)" || return 1
   while IFS= read -r line; do
     [[ -n "${line}" ]] || continue
@@ -1196,13 +1240,31 @@ legacy_residual_group_is_exact() {
     is_decimal "${pid}" && is_decimal "${seen_pgid}" && is_decimal "${ppid}" || return 1
     [[ "${seen_pgid}" == "${pgid}" && "${stat}" != Z* && \
       "${command}" == *"s2-parent-watchdog-${marker}"* && \
-      "${command}" == *"${persist}"* ]] && return 0
+      "${command}" == *"${persist}"* ]] && watchdog_seen=1
   done <<<"${rows}"
-  return 1
+  [[ ${watchdog_seen} -eq 1 ]] || return 1
+  [[ -n "${held_file}" ]] || return 0
+  [[ -f "${held_file}" && ! -L "${held_file}" ]] || return 1
+  if holder_output="$(lsof -nP -t +w -- "${held_file}" 2>&1)"; then
+    holder_status=0
+  else
+    holder_status=$?
+  fi
+  [[ ${holder_status} -eq 0 || ${holder_status} -eq 1 ]] || return 1
+  [[ -n "${holder_output}" ]] || return 1
+  while IFS= read -r holder_pid; do
+    is_decimal "${holder_pid}" || return 1
+    holder_pgid="$(LC_ALL=C ps -o pgid= -p "${holder_pid}" 2>/dev/null | tr -d '[:space:]')" || return 1
+    [[ "${holder_pgid}" == "${pgid}" ]] || return 1
+    holder_count=$((holder_count + 1))
+  done <<<"${holder_output}"
+  [[ ${holder_count} -eq 1 ]]
 }
 
 legacy_reap_leader_lost_group() {
   local pid="$1" pgid="$2" marker="$3" persist="$4" port="$5" tick kill_tick
+  local holder_line holder_pid observed_holder_pgid holder_count=0
+  local controller_holds_state=false exact_group_holds_state=false
   for ((tick = 0; tick < S2_LEGACY_STOP_INSPECTION_TICKS; tick += 1)); do
     if ! kill -0 -- "-${pgid}" 2>/dev/null; then
       wait "${pid}" 2>/dev/null || :
@@ -1215,16 +1277,37 @@ legacy_reap_leader_lost_group() {
       # We reached this branch only after TERM was sent with a fresh exact-leader proof, and the
       # bounded scan above still sees the same run's watchdog marker in the same group. This is
       # the sole post-leader-loss KILL authority; anything less exact remains a hard refusal.
-      kill -KILL -- "-${pgid}" 2>/dev/null || return 1
+      if ! kill -KILL -- "-${pgid}" 2>/dev/null; then
+        emit '{"tool":"bash","package":"apps/wire","suite":"s2-krater-local-d1-upgrade","status":"fail","code":"S2_LEGACY_EXACT_RESIDUAL_KILL_FAILED","reproduce":"scripts/e2e-s2-krater.sh"}'
+        return 1
+      fi
       for ((kill_tick = 0; kill_tick < S2_TERMINATE_WAIT_TICKS; kill_tick += 1)); do
         if ! kill -0 -- "-${pgid}" 2>/dev/null; then
           wait "${pid}" 2>/dev/null || :
-          assert_no_run_survivors "${persist}" "${port}" "${marker}" || return 1
+          if ! assert_no_run_survivors "${persist}" "${port}" "${marker}"; then
+            if [[ "${S2_SURVIVOR_ASSERTION_FAILURE:-}" == "state-fd-scan" ]]; then
+              while IFS= read -r holder_line; do
+                [[ -n "${holder_line}" ]] || continue
+                if [[ ! "${holder_line}" =~ ^([0-9]+)$ ]]; then
+                  holder_count=-1
+                  break
+                fi
+                holder_pid="${BASH_REMATCH[1]}"
+                holder_count=$((holder_count + 1))
+                [[ "${holder_pid}" == "$$" ]] && controller_holds_state=true
+                observed_holder_pgid="$(LC_ALL=C ps -o pgid= -p "${holder_pid}" 2>/dev/null | tr -d '[:space:]')" || observed_holder_pgid=""
+                [[ "${observed_holder_pgid}" == "${pgid}" ]] && exact_group_holds_state=true
+              done <<<"${S2_LSOF_LAST_OUTPUT}"
+            fi
+            emit "{\"tool\":\"bash+lsof+ps\",\"package\":\"apps/wire\",\"suite\":\"s2-krater-local-d1-upgrade\",\"status\":\"fail\",\"code\":\"S2_LEGACY_EXACT_RESIDUAL_POSTCONDITION_UNPROVEN\",\"check\":\"${S2_SURVIVOR_ASSERTION_FAILURE:-unknown}\",\"state_holder_count\":$(json_decimal_or_null "${holder_count}"),\"controller_holds_state\":$(json_bool "${controller_holds_state}"),\"exact_group_holds_state\":$(json_bool "${exact_group_holds_state}"),\"reproduce\":\"scripts/e2e-s2-krater.sh\"}"
+            return 1
+          fi
           S2_LEGACY_STOP_REAPED_UNCERTAIN=1
           return 1
         fi
         sleep 0.1
       done
+      emit '{"tool":"bash","package":"apps/wire","suite":"s2-krater-local-d1-upgrade","status":"fail","code":"S2_LEGACY_EXACT_RESIDUAL_GROUP_SURVIVED","reproduce":"scripts/e2e-s2-krater.sh"}'
       return 1
     fi
     sleep 0.1
@@ -2543,6 +2626,10 @@ run_s2_shell_regression_test() {
   local valid_digest alternate_digest cleanup_status
   local interrupt_record interrupt_child interrupt_status interrupt_secret child_persist child_port
   local child_run child_status_file child_diagnostic diagnostic_body manifest_body
+  local plant_clean_stop_bypass payload_behavior payload_ready_file payload_state_file
+  local payload_pid state_holders holder_status lsof_held_file lsof_transient_marker
+  local payload_ready_seen payload_state_regular payload_pid_valid state_holder_exact
+  local group_sufficient payload_in_group lsof_observation
 
   if [[ ! "${mode}" =~ ^[a-z0-9][a-z0-9-]{0,63}$ ]]; then
     emit '{"tool":"bash","package":"apps/wire","suite":"s2-krater-shell","status":"fail","code":"S2_SHELL_REGRESSION_TEST_INVALID","reproduce":"scripts/e2e-s2-krater.sh"}'
@@ -3136,6 +3223,38 @@ run_s2_shell_regression_test() {
     lsof_scan_has_no_matches -nP +D "${S2_STATE_DIR}" || return 1
     [[ "${S2_LSOF_LAST_STATUS}" == "1" && -z "${S2_LSOF_LAST_OUTPUT}" ]] || return 1
     lsof() {
+      local arg warnings_enabled=0
+      for arg in "$@"; do
+        [[ "${arg}" == "-p" ]] && { printf 'p%s\n' "$$"; return 0; }
+        [[ "${arg}" == "+w" ]] && warnings_enabled=1
+      done
+      if [[ ${warnings_enabled} -eq 1 ]]; then
+        printf '%s\n' 'planted lsof traversal warning' >&2
+      fi
+      return 1
+    }
+    if assert_no_run_survivors "${S2_STATE_DIR}" "${S2_PORT}" planted-lsof-warning; then
+      return 1
+    fi
+    [[ "${S2_SURVIVOR_ASSERTION_FAILURE}" == "state-fd-scan" && \
+      "${S2_LSOF_LAST_STATUS}" == "1" && \
+      "${S2_LSOF_LAST_OUTPUT}" == *'planted lsof traversal warning'* ]] || return 1
+    lsof_transient_marker="${S2_STATE_DIR}/planted-lsof-transient-match-$(random_hex 8)"
+    lsof() {
+      local arg
+      for arg in "$@"; do
+        [[ "${arg}" == "-p" ]] && { printf 'p%s\n' "$$"; return 0; }
+      done
+      if [[ ! -e "${lsof_transient_marker}" && ! -L "${lsof_transient_marker}" ]]; then
+        printf '%s\n' transient >"${lsof_transient_marker}" || return 2
+        printf '%s\n' "$$"
+        return 1
+      fi
+      return 1
+    }
+    assert_no_run_survivors "${S2_STATE_DIR}" "${S2_PORT}" planted-lsof-transient-match || return 1
+    [[ -f "${lsof_transient_marker}" && ! -L "${lsof_transient_marker}" ]] || return 1
+    lsof() {
       local arg
       for arg in "$@"; do
         [[ "${arg}" == "-p" ]] && { printf 'p%s\n' "$$"; return 0; }
@@ -3146,11 +3265,37 @@ run_s2_shell_regression_test() {
     if assert_no_run_survivors "${S2_STATE_DIR}" "${S2_PORT}" planted-lsof-scan; then return 1; fi
     [[ "${S2_LSOF_LAST_STATUS}" == "2" && \
       "${S2_LSOF_LAST_OUTPUT}" == *'planted lsof scanner failure'* ]] || return 1
+    unset -f lsof
+    lsof_held_file="${S2_STATE_DIR}/planted-lsof-held-open-$(random_hex 8)"
+    [[ ! -e "${lsof_held_file}" && ! -L "${lsof_held_file}" ]] || return 1
+    exec 6>"${lsof_held_file}" || return 1
+    if assert_no_run_survivors "${S2_STATE_DIR}" "${S2_PORT}" planted-lsof-real-holder; then
+      exec 6>&-
+      emit '{"tool":"bash+lsof","package":"apps/wire","suite":"s2-krater-shell","status":"fail","code":"S2_LSOF_REAL_HOLDER_NOT_DETECTED","reproduce":"S2_SHELL_REGRESSION_TEST=lsof-scan-failure scripts/e2e-s2-krater.sh"}'
+      return 1
+    fi
+    holder_status=1
+    while IFS= read -r state_holders; do
+      [[ "${state_holders}" == "$$" ]] && holder_status=0
+    done <<<"${S2_LSOF_LAST_OUTPUT}"
+    if [[ "${S2_SURVIVOR_ASSERTION_FAILURE}" != "state-fd-scan" || ${holder_status} -ne 0 ]]; then
+      exec 6>&-
+      emit "{\"tool\":\"bash+lsof\",\"package\":\"apps/wire\",\"suite\":\"s2-krater-shell\",\"status\":\"fail\",\"code\":\"S2_LSOF_REAL_HOLDER_PROOF_MISMATCH\",\"check\":\"${S2_SURVIVOR_ASSERTION_FAILURE:-unknown}\",\"holder_includes_controller\":$(json_bool "$([[ ${holder_status} -eq 0 ]] && printf true || printf false)"),\"reproduce\":\"S2_SHELL_REGRESSION_TEST=lsof-scan-failure scripts/e2e-s2-krater.sh\"}"
+      return 1
+    fi
+    exec 6>&-
+    # With the real controller-held FD closed, a transient numeric observer match must converge
+    # to an actual zero-holder sample rather than becoming a circular false positive.
+    if ! assert_no_run_survivors "${S2_STATE_DIR}" "${S2_PORT}" planted-lsof-self-scan; then
+      emit "{\"tool\":\"bash+lsof\",\"package\":\"apps/wire\",\"suite\":\"s2-krater-shell\",\"status\":\"fail\",\"code\":\"S2_LSOF_SELF_SCAN_NOT_EXCLUDED\",\"check\":\"${S2_SURVIVOR_ASSERTION_FAILURE:-unknown}\",\"reproduce\":\"S2_SHELL_REGRESSION_TEST=lsof-scan-failure scripts/e2e-s2-krater.sh\"}"
+      return 1
+    fi
+    # shellcheck disable=SC2329 # invoked indirectly by lsof_scanner_is_healthy below
     lsof() { printf '%s\n' 'planted lsof health failure' >&2; return 2; }
     if lsof_scanner_is_healthy; then return 1; fi
     [[ "${S2_LSOF_LAST_STATUS}" == "2" && \
       "${S2_LSOF_LAST_OUTPUT}" == *'planted lsof health failure'* ]] || return 1
-    emit '{"tool":"bash","package":"apps/wire","suite":"s2-krater-shell","status":"pass","scenario":"lsof-empty-no-match-is-distinct-from-captured-scan-and-health-failure","reproduce":"S2_SHELL_REGRESSION_TEST=lsof-scan-failure scripts/e2e-s2-krater.sh"}'
+    emit '{"tool":"bash","package":"apps/wire","suite":"s2-krater-shell","status":"pass","scenario":"lsof-empty-warning-transient-numeric-real-holder-captured-scan-and-health-failure-remain-distinct","reproduce":"S2_SHELL_REGRESSION_TEST=lsof-scan-failure scripts/e2e-s2-krater.sh"}'
     return 0
   fi
 
@@ -3171,11 +3316,41 @@ run_s2_shell_regression_test() {
 
   if [[ "${mode}" == "legacy-leader-loss" ]]; then
     status_file="${S2_STATE_DIR}/legacy-leader-loss-$(random_hex 8).status"
-    # The child Bash, not this harness, must expand its SECONDS-based deadline.
+    payload_ready_file="${S2_STATE_DIR}/legacy-leader-loss-$(random_hex 8).ready"
+    payload_state_file="${S2_STATE_DIR}/legacy-leader-loss-$(random_hex 8).held-open"
+    plant_clean_stop_bypass="${S2_PLANT_LEGACY_CLEAN_STOP_BYPASS:-0}"
+    if [[ "${plant_clean_stop_bypass}" != 0 && "${plant_clean_stop_bypass}" != 1 ]]; then
+      emit '{"tool":"bash","package":"apps/wire","suite":"s2-krater-shell","status":"fail","code":"S2_LEGACY_LEADER_LOSS_PLANT_INVALID","reproduce":"S2_SHELL_REGRESSION_TEST=legacy-leader-loss scripts/e2e-s2-krater.sh"}'
+      return 2
+    fi
+    [[ ! -e "${payload_ready_file}" && ! -L "${payload_ready_file}" && \
+      ! -e "${payload_state_file}" && ! -L "${payload_state_file}" ]] || return 1
+    payload_behavior="resist-term"
+    if [[ "${plant_clean_stop_bypass}" == 1 ]]; then payload_behavior="clean-stop"; fi
+    # The plant first installs its signal behavior, then opens one retained state file and
+    # publishes its exact PID. The controller does not send TERM until it has observed that PID
+    # in the exact pinned group and through lsof on the open file. Unlike the former four-second
+    # payload, this process has no independent expiry that can race an aggregate test scheduler.
     # shellcheck disable=SC2016
-    S2_PLANT_SUPERVISOR_EXIT_ON_TERM=1 \
+    S2_PLANT_WATCHDOG_EXIT_ON_TERM="${plant_clean_stop_bypass}" \
+      S2_PLANT_SUPERVISOR_EXIT_ON_TERM=1 \
       start_pinned_supervisor "${status_file}" legacy-leader-loss "${S2_STATE_DIR}" "${S2_PORT}" server \
-        bash -c 'trap "" TERM; deadline=$((SECONDS + 4)); while (( SECONDS < deadline )); do read -r -t 1 ignored || :; done' || return 1
+        bash -c '
+          ready_file="$1"
+          state_file="$2"
+          behavior="$3"
+          if [[ "${behavior}" == "resist-term" ]]; then
+            trap "" TERM HUP INT
+          elif [[ "${behavior}" == "clean-stop" ]]; then
+            trap "exit 0" TERM HUP INT
+          else
+            exit 125
+          fi
+          exec 9>"${state_file}" || exit 125
+          printf "%s\n" "$$" >"${ready_file}" || exit 125
+          while :; do read -r -t 1 ignored || :; done
+        ' s2-legacy-leader-loss-payload \
+          "${payload_ready_file}" "${payload_state_file}" "${payload_behavior}" || return 1
     S2_SERVER_PID="${S2_STARTED_PID}"
     S2_SERVER_PGID="${S2_STARTED_PGID}"
     S2_SERVER_MARKER="${S2_STARTED_MARKER}"
@@ -3186,20 +3361,75 @@ run_s2_shell_regression_test() {
     S2_ACTIVE_ORIGIN="http://127.0.0.1:1"
     deadline=$((SECONDS + S2_READY_DEADLINE_SECONDS))
     while :; do
-      group_members "${S2_SERVER_PGID}" || return 1
-      [[ ${S2_GROUP_MEMBER_COUNT} -ge 3 ]] && break
-      (( SECONDS < deadline )) || return 1
+      payload_ready_seen=false
+      payload_state_regular=false
+      payload_pid_valid=false
+      state_holder_exact=false
+      group_sufficient=false
+      payload_in_group=false
+      lsof_observation="not-run"
+      if [[ -f "${payload_ready_file}" && ! -L "${payload_ready_file}" ]] && \
+        IFS= read -r payload_pid <"${payload_ready_file}"; then
+        payload_ready_seen=true
+        if is_decimal "${payload_pid}"; then payload_pid_valid=true; fi
+        if [[ -f "${payload_state_file}" && ! -L "${payload_state_file}" ]]; then
+          payload_state_regular=true
+          if state_holders="$(lsof -t +w -- "${payload_state_file}" 2>&1)"; then
+            holder_status=0
+          else
+            holder_status=$?
+          fi
+          if [[ ${holder_status} -eq 0 ]]; then
+            lsof_observation="match"
+          elif [[ ${holder_status} -eq 1 && -z "${state_holders}" ]]; then
+            lsof_observation="no-match"
+          else
+            lsof_observation="scan-failure"
+          fi
+          if [[ ${holder_status} -eq 0 && "${state_holders}" == "${payload_pid}" ]]; then
+            state_holder_exact=true
+          fi
+        fi
+      else
+        payload_pid=""
+        state_holders=""
+        holder_status=1
+      fi
+      if ! group_members "${S2_SERVER_PGID}"; then
+        emit '{"tool":"bash+ps","package":"apps/wire","suite":"s2-krater-shell","status":"fail","code":"S2_LEGACY_LEADER_LOSS_PAYLOAD_NOT_READY","reason":"process-group-scan","reproduce":"S2_SHELL_REGRESSION_TEST=legacy-leader-loss scripts/e2e-s2-krater.sh"}'
+        return 1
+      fi
+      if [[ ${S2_GROUP_MEMBER_COUNT} -ge 3 ]]; then group_sufficient=true; fi
+      if [[ "${payload_pid_valid}" == true ]] && group_contains_pid "${payload_pid}"; then
+        payload_in_group=true
+      fi
+      if [[ "${group_sufficient}" == true && "${state_holder_exact}" == true && \
+        "${payload_in_group}" == true ]]; then
+        break
+      fi
+      if (( SECONDS >= deadline )); then
+        emit "{\"tool\":\"bash+lsof+ps\",\"package\":\"apps/wire\",\"suite\":\"s2-krater-shell\",\"status\":\"fail\",\"code\":\"S2_LEGACY_LEADER_LOSS_PAYLOAD_NOT_READY\",\"reason\":\"deadline\",\"ready_record\":${payload_ready_seen},\"state_file_regular\":${payload_state_regular},\"payload_pid_valid\":${payload_pid_valid},\"state_holder_exact\":${state_holder_exact},\"group_sufficient\":${group_sufficient},\"payload_in_exact_group\":${payload_in_group},\"lsof_observation\":\"${lsof_observation}\",\"reproduce\":\"S2_SHELL_REGRESSION_TEST=legacy-leader-loss scripts/e2e-s2-krater.sh\"}"
+        return 1
+      fi
       sleep 0.05
     done
+    emit '{"tool":"bash+lsof+ps","package":"apps/wire","suite":"s2-krater-shell","status":"pass","scenario":"legacy-leader-loss","assertion":"payload-ready-in-exact-group-with-retained-state-fd","payload_in_exact_group":true,"state_fd_held":true,"reproduce":"S2_SHELL_REGRESSION_TEST=legacy-leader-loss scripts/e2e-s2-krater.sh"}'
+    S2_LEGACY_REQUIRED_HELD_FILE="${payload_state_file}"
     if stop_legacy_worker_or_fail; then
       stop_status=0
     else
       stop_status=$?
     fi
+    unset S2_LEGACY_REQUIRED_HELD_FILE
+    if [[ ${stop_status} -eq 0 ]]; then
+      assert_no_run_survivors "${S2_STATE_DIR}" "${S2_PORT}" "${S2_STARTED_MARKER}" || return 1
+      emit '{"tool":"bash","package":"apps/wire","suite":"s2-krater-shell","status":"fail","code":"S2_LEGACY_LEADER_LOSS_BRANCH_NOT_REACHED","observed":"ordinary-clean-stop","expected":"inspection-uncertain-exact-residual-group","reproduce":"S2_SHELL_REGRESSION_TEST=legacy-leader-loss scripts/e2e-s2-krater.sh"}'
+      return 1
+    fi
     [[ ${stop_status} -eq 1 && "${S2_ACTIVE_ORIGIN}" == "http://127.0.0.1:1" && \
       -z "${S2_SERVER_PID}" ]] || return 1
     if kill -0 -- "-${S2_STARTED_PGID}" 2>/dev/null; then return 1; fi
-    assert_no_run_survivors "${S2_STATE_DIR}" "${S2_PORT}" legacy-leader-loss || return 1
+    assert_no_run_survivors "${S2_STATE_DIR}" "${S2_PORT}" "${S2_STARTED_MARKER}" || return 1
     emit '{"tool":"bash","package":"apps/wire","suite":"s2-krater-shell","status":"pass","scenario":"legacy-term-leader-loss-bounds-inspection-publishes-uncertainty-and-kills-only-exact-residual-group","reproduce":"S2_SHELL_REGRESSION_TEST=legacy-leader-loss scripts/e2e-s2-krater.sh"}'
     return 0
   fi

@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test";
-import { spawnSync } from "node:child_process";
+import { spawn, spawnSync } from "node:child_process";
 import { randomUUID } from "node:crypto";
 import {
   closeSync,
@@ -31,6 +31,119 @@ const REAL_BINDING_INTEGRATION = resolve(
 );
 const S2_SHELL_REGRESSION_WATCHDOG_MS = 90_000;
 const S2_SHELL_REGRESSION_TEST_TIMEOUT_MS = 120_000;
+const CONCURRENT_CONTROLLER_SETUP_MS = 5_000;
+const CONCURRENT_PROCESS_GROUP_GRACE_MS = 2_000;
+const CONCURRENT_CAPTURE_TEST_TIMEOUT_MS = 25_000;
+const CONCURRENT_LEGACY_TEST_TIMEOUT_MS =
+  CONCURRENT_CONTROLLER_SETUP_MS +
+  S2_SHELL_REGRESSION_WATCHDOG_MS +
+  CONCURRENT_PROCESS_GROUP_GRACE_MS +
+  1_000 + // controller's bounded post-KILL group-settle check
+  5_000 + // one shared retained process-table capture
+  10_000; // assertion and scheduler margin
+const CONCURRENT_PROCESS_GROUP_RUNNER = String.raw`
+  use strict;
+  use warnings;
+  use Fcntl qw(F_GETFL F_SETFL O_CREAT O_EXCL O_NONBLOCK O_WRONLY);
+  use POSIX qw(setsid WNOHANG);
+  my $grace_ms = shift @ARGV;
+  my $pre_setsid_delay_ms = shift @ARGV;
+  my $controller_ready_path = shift @ARGV;
+  my $stdout_path = shift @ARGV;
+  my $stderr_path = shift @ARGV;
+  open STDOUT, ">>", $stdout_path or exit 125;
+  open STDERR, ">>", $stderr_path or exit 125;
+  select STDERR; $| = 1;
+  select STDOUT; $| = 1;
+  pipe(my $ready_reader, my $ready_writer) or exit 125;
+  pipe(my $go_reader, my $go_writer) or exit 125;
+  my $ready_flags = fcntl($ready_reader, F_GETFL, 0);
+  defined $ready_flags or exit 125;
+  fcntl($ready_reader, F_SETFL, $ready_flags | O_NONBLOCK) or exit 125;
+  my $deadline = 0;
+  $SIG{TERM} = sub { $deadline = 1; };
+  sysopen(my $controller_ready, $controller_ready_path, O_WRONLY | O_CREAT | O_EXCL, 0600)
+    or exit 125;
+  syswrite($controller_ready, "R", 1) == 1 or exit 125;
+  close $controller_ready or exit 125;
+  my $child = fork();
+  defined $child or exit 125;
+  if ($child == 0) {
+    close $ready_reader;
+    close $go_writer;
+    $SIG{TERM} = "DEFAULT";
+    $SIG{HUP} = "DEFAULT";
+    $SIG{INT} = "DEFAULT";
+    select undef, undef, undef, $pre_setsid_delay_ms / 1000 if $pre_setsid_delay_ms > 0;
+    setsid() or exit 125;
+    getpgrp(0) == $$ or exit 125;
+    syswrite($ready_writer, "R", 1) == 1 or exit 125;
+    close $ready_writer or exit 125;
+    my $go = "";
+    sysread($go_reader, $go, 1) == 1 && $go eq "G" or exit 125;
+    close $go_reader or exit 125;
+    exec @ARGV;
+    exit 125;
+  }
+  close $ready_writer;
+  close $go_reader;
+  my $group_ready = 0;
+  my $go_sent = 0;
+  while (1) {
+    if (!$group_ready) {
+      my $ready = "";
+      my $ready_bytes = sysread($ready_reader, $ready, 1);
+      if (defined $ready_bytes && $ready_bytes == 1) {
+        $ready eq "R" or exit 125;
+        $group_ready = 1;
+        close $ready_reader or exit 125;
+      }
+    }
+    if ($group_ready && !$go_sent && !$deadline) {
+      syswrite($go_writer, "G", 1) == 1 or exit 125;
+      close $go_writer or exit 125;
+      $go_sent = 1;
+    }
+    if ($deadline) {
+      close $go_writer unless $go_sent;
+      my $action;
+      if ($group_ready) {
+        kill "TERM", -$child;
+        $action = "term-then-kill-exact-child-group";
+      } else {
+        kill "TERM", $child;
+        $action = "term-then-kill-exact-child-before-group";
+      }
+      my $step = ($grace_ms / 1000) / 20;
+      for (1 .. 20) { select undef, undef, undef, $step; }
+      if ($group_ready) {
+        kill "KILL", -$child if kill 0, -$child;
+      } else {
+        kill "KILL", $child if kill 0, $child;
+      }
+      waitpid($child, 0);
+      if ($group_ready) {
+        for (1 .. 20) {
+          last unless kill 0, -$child;
+          select undef, undef, undef, 0.05;
+        }
+        if (kill 0, -$child) {
+          print STDERR qq({"suite":"s2-concurrent-supervisor","status":"fail","code":"S2_CAPTURE_CLEANUP_INCOMPLETE"}\n);
+          exit 125;
+        }
+      }
+      print STDERR qq({"suite":"s2-concurrent-supervisor","status":"fail","code":"S2_CAPTURE_DEADLINE_EXCEEDED","action":"$action"}\n);
+      exit 124;
+    }
+    my $reaped = waitpid($child, WNOHANG);
+    if ($reaped == $child) {
+      my $status = $?;
+      exit(128 + ($status & 127)) if ($status & 127);
+      exit($status >> 8);
+    }
+    select undef, undef, undef, 0.01;
+  }
+`;
 
 const COST_PROVENANCE: S2CostReceiptProvenance = {
   run_id: "s2-cost-producer",
@@ -138,6 +251,7 @@ interface Run {
   exitCode: number;
   stdout: string;
   stderr: string;
+  retainedLogs: string;
 }
 
 function ndjsonRecords(run: Run): Array<Record<string, unknown>> {
@@ -145,6 +259,15 @@ function ndjsonRecords(run: Run): Array<Record<string, unknown>> {
     .split("\n")
     .filter((line) => line.startsWith("{"))
     .map((line) => JSON.parse(line) as Record<string, unknown>);
+}
+
+function typedDiagnosticCodes(run: Run): string[] {
+  return Array.from(
+    `${run.stdout}\n${run.stderr}`.matchAll(/"code":"([A-Z][A-Z0-9_]{2,95})"/g),
+    (match) => match[1] ?? "",
+  )
+    .filter((code, index, values) => code !== "" && values.indexOf(code) === index)
+    .slice(0, 4);
 }
 
 function runCaptured(
@@ -192,7 +315,120 @@ function runCaptured(
     exitCode: child.status ?? (errorCode === "ETIMEDOUT" ? 124 : 125),
     stdout: readFileSync(stdoutPath, "utf8"),
     stderr: `${readFileSync(stderrPath, "utf8")}${signalDetail}${errorDetail} retained_logs=${logRoot}`,
+    retainedLogs: logRoot,
   };
+}
+
+function runCapturedConcurrently(
+  command: string,
+  args: readonly string[],
+  env: NodeJS.ProcessEnv,
+  deadlineMs: number,
+  preSetsidDelayMs = 0,
+): Promise<Run> {
+  if (!Number.isInteger(preSetsidDelayMs) || preSetsidDelayMs < 0) {
+    throw new Error("concurrent capture pre-setsid delay must be a non-negative integer");
+  }
+  const logRoot = mkdtempSync(join(tmpdir(), "asimposium-s2-shell-concurrent-"));
+  const stdoutPath = join(logRoot, "stdout.log");
+  const stderrPath = join(logRoot, "stderr.log");
+  const controllerReadyPath = join(logRoot, "controller.ready");
+  let stdoutFd: number | undefined;
+  let stderrFd: number | undefined;
+  let child: ReturnType<typeof spawn>;
+  try {
+    stdoutFd = openSync(stdoutPath, "wx", 0o600);
+    stderrFd = openSync(stderrPath, "wx", 0o600);
+    closeSync(stdoutFd);
+    stdoutFd = undefined;
+    closeSync(stderrFd);
+    stderrFd = undefined;
+    child = spawn(
+      "perl",
+      [
+        "-e",
+        CONCURRENT_PROCESS_GROUP_RUNNER,
+        "--",
+        String(CONCURRENT_PROCESS_GROUP_GRACE_MS),
+        String(preSetsidDelayMs),
+        controllerReadyPath,
+        stdoutPath,
+        stderrPath,
+        command,
+        ...args,
+      ],
+      {
+        cwd: REPOSITORY_ROOT,
+        env: { ...process.env, ...env },
+        stdio: "ignore",
+      },
+    );
+  } catch (error) {
+    if (stdoutFd !== undefined) closeSync(stdoutFd);
+    if (stderrFd !== undefined) closeSync(stderrFd);
+    const detail = error instanceof Error ? error.message : String(error);
+    return Promise.resolve({
+      exitCode: 125,
+      stdout: existsSync(stdoutPath) ? readFileSync(stdoutPath, "utf8") : "",
+      stderr: `${existsSync(stderrPath) ? readFileSync(stderrPath, "utf8") : ""} spawn_error=${detail} retained_logs=${logRoot}`,
+      retainedLogs: logRoot,
+    });
+  }
+  return new Promise((resolveRun) => {
+    let childError: Error | undefined;
+    let deadlineTriggered = false;
+    let deadline: ReturnType<typeof setTimeout> | undefined;
+    let readinessPoll: ReturnType<typeof setInterval> | undefined;
+    let setupDeadline: ReturnType<typeof setTimeout> | undefined;
+    const controllerIsReady = () => {
+      try {
+        return readFileSync(controllerReadyPath, "utf8") === "R";
+      } catch {
+        return false;
+      }
+    };
+    const armDeadline = () => {
+      if (deadline !== undefined) return;
+      if (readinessPoll !== undefined) clearInterval(readinessPoll);
+      if (setupDeadline !== undefined) clearTimeout(setupDeadline);
+      deadline = setTimeout(() => {
+        if (child.exitCode !== null || child.signalCode !== null) return;
+        deadlineTriggered = true;
+        child.kill("SIGTERM");
+      }, deadlineMs);
+    };
+    readinessPoll = setInterval(() => {
+      if (controllerIsReady()) armDeadline();
+    }, 10);
+    setupDeadline = setTimeout(() => {
+      if (controllerIsReady()) {
+        armDeadline();
+        return;
+      }
+      if (child.exitCode === null && child.signalCode === null) child.kill("SIGKILL");
+    }, CONCURRENT_CONTROLLER_SETUP_MS);
+    child.once("error", (error) => {
+      childError = error;
+    });
+    child.once("close", (status, signal) => {
+      if (deadline !== undefined) clearTimeout(deadline);
+      if (readinessPoll !== undefined) clearInterval(readinessPoll);
+      if (setupDeadline !== undefined) clearTimeout(setupDeadline);
+      const errorCode =
+        childError === undefined || !("code" in childError) ? undefined : childError.code;
+      const errorDetail = childError === undefined ? "" : ` spawn_error=${childError.message}`;
+      const signalDetail = signal === null ? "" : ` terminated_by=${signal}`;
+      resolveRun({
+        exitCode:
+          deadlineTriggered && status === 124
+            ? 124
+            : (status ?? (errorCode === "ETIMEDOUT" ? 124 : 125)),
+        stdout: readFileSync(stdoutPath, "utf8"),
+        stderr: `${readFileSync(stderrPath, "utf8")}${signalDetail}${errorDetail} retained_logs=${logRoot}`,
+        retainedLogs: logRoot,
+      });
+    });
+  });
 }
 
 async function runHarness(env: Record<string, string>, deadlineMs: number): Promise<Run> {
@@ -241,16 +477,34 @@ function parseS2LifecycleProcessTable(runId: string, snapshot: ProcessTableCaptu
     .map((line) => line.trim().split(/\s+/u).slice(0, 4).join(" "));
 }
 
-function liveS2LifecycleProcesses(runId: string): string[] {
+function captureS2LifecycleProcessTable(): ProcessTableCapture {
   // Bun can report a zero-exit synchronous child with empty in-memory pipes.
   // The same retained-log wrapper used for the lifecycle run makes the scan's
   // output byte-complete before it is interpreted as zero survivors.
   const scan = runCaptured("/bin/ps", ["-axo", "pid=,pgid=,ppid=,stat=,command="], {}, 5_000);
-  return parseS2LifecycleProcessTable(runId, {
+  return {
+    status: scan.exitCode,
+    signal: null,
+    stdout: scan.stdout,
+  };
+}
+
+function liveS2LifecycleProcesses(runId: string): string[] {
+  return parseS2LifecycleProcessTable(runId, captureS2LifecycleProcessTable());
+}
+
+function liveProcessesContainingMarker(marker: string): string[] {
+  const scan = runCaptured("/bin/ps", ["-axo", "pid=,pgid=,ppid=,stat=,command="], {}, 5_000);
+  const rows = parseS2LifecycleProcessTable("marker-scan-never-matches-a-path", {
     status: scan.exitCode,
     signal: null,
     stdout: scan.stdout,
   });
+  if (rows.length !== 0) throw new Error("generic marker scan sentinel unexpectedly matched");
+  return scan.stdout
+    .split("\n")
+    .filter((line) => line.includes(marker))
+    .map((line) => line.trim().split(/\s+/u).slice(0, 4).join(" "));
 }
 
 async function probeRealBindingCapability(): Promise<Run> {
@@ -624,6 +878,21 @@ function assertS2RunThenScanForSurvivors(
   if (assertionFailure !== undefined) throw assertionFailure;
 }
 
+function collectAllFixtureVerificationFailures<T>(
+  fixtures: readonly T[],
+  verify: (fixture: T, index: number) => void,
+): Array<{ readonly index: number; readonly error: Error }> {
+  const failures: Array<{ readonly index: number; readonly error: Error }> = [];
+  fixtures.forEach((fixture, index) => {
+    try {
+      verify(fixture, index);
+    } catch (error) {
+      failures.push({ index, error: error instanceof Error ? error : new Error(String(error)) });
+    }
+  });
+  return failures;
+}
+
 describe("registered S2 shell and lifecycle regressions", () => {
   test("PLANTED: a run assertion failure cannot bypass the survivor scan", () => {
     let scans = 0;
@@ -670,6 +939,20 @@ describe("registered S2 shell and lifecycle regressions", () => {
     ]);
   });
 
+  test("PLANTED: one concurrent fixture failure cannot skip later survivor scans", () => {
+    const visited: number[] = [];
+    const failures = collectAllFixtureVerificationFailures([0, 1, 2, 3], (_fixture, index) => {
+      visited.push(index);
+      if (index === 0 || index === 2) throw new Error(`PLANTED_FIXTURE_${index}`);
+    });
+    expect(visited).toEqual([0, 1, 2, 3]);
+    expect(failures.map((failure) => failure.index)).toEqual([0, 2]);
+    expect(failures.map((failure) => failure.error.message)).toEqual([
+      "PLANTED_FIXTURE_0",
+      "PLANTED_FIXTURE_2",
+    ]);
+  });
+
   test("PLANTED: process scans are bounded, non-empty, and never expose scanner error text", () => {
     const runId = "s2u-process-scan-fixture";
     const scanner = " 4242 4242 1 R /bin/ps -axo pid=,pgid=,ppid=,stat=,command=";
@@ -709,6 +992,140 @@ describe("registered S2 shell and lifecycle regressions", () => {
       }),
     ).toEqual([]);
   });
+
+  test(
+    "PLANTED: a deadline before setsid kills only the exact gated fork child",
+    async () => {
+      const marker = `s2-pre-setsid-${randomUUID().replaceAll("-", "").slice(0, 24)}`;
+      console.log(
+        JSON.stringify({
+          suite: "s2-concurrent-supervisor",
+          fixture: "pre-setsid-timeout",
+          phase: "start",
+        }),
+      );
+      const run = await runCapturedConcurrently(
+        "bash",
+        ["-c", "exit 0", `${marker}-payload`],
+        {},
+        200,
+        3_000,
+      );
+      assertS2RunThenScanForSurvivors(
+        "concurrent-pre-setsid-timeout",
+        () => {
+          const missing = [
+            run.exitCode === 124 ? undefined : "exit-124",
+            run.stderr.includes('"code":"S2_CAPTURE_DEADLINE_EXCEEDED"')
+              ? undefined
+              : "typed-deadline",
+            run.stderr.includes('"action":"term-then-kill-exact-child-before-group"')
+              ? undefined
+              : "exact-pre-group-action",
+            run.stdout === "" ? undefined : "payload-executed-before-gate",
+          ].filter((entry): entry is string => entry !== undefined);
+          if (missing.length !== 0) {
+            throw new Error(
+              `pre-setsid timeout proof incomplete: missing=${missing.join(",")}; ` +
+                `codes=${typedDiagnosticCodes(run).join(",") || "NO_TYPED_CODE"}; ` +
+                `stdout_bytes=${Buffer.byteLength(run.stdout)}; ` +
+                `stderr_bytes=${Buffer.byteLength(run.stderr)}; ` +
+                `retained_logs=${run.retainedLogs}`,
+            );
+          }
+        },
+        () => liveProcessesContainingMarker(marker),
+      );
+      console.log(
+        JSON.stringify({
+          suite: "s2-concurrent-supervisor",
+          fixture: "pre-setsid-timeout",
+          phase: "pass",
+        }),
+      );
+    },
+    CONCURRENT_CAPTURE_TEST_TIMEOUT_MS,
+  );
+
+  test(
+    "PLANTED: the concurrent capture deadline kills one exact TERM-resistant process group",
+    async () => {
+      const marker = `s2-timeout-${randomUUID().replaceAll("-", "").slice(0, 24)}`;
+      const stateRoot = mkdtempSync(join(tmpdir(), "asimposium-s2-timeout-state-"));
+      const heldFile = join(stateRoot, "held-open");
+      console.log(
+        JSON.stringify({ suite: "s2-concurrent-supervisor", fixture: "timeout", phase: "start" }),
+      );
+      const run = await runCapturedConcurrently(
+        "bash",
+        [
+          "-c",
+          String.raw`
+            trap "" TERM HUP INT
+            held_file="$1"
+            marker="$2"
+            exec 9>"$held_file" || exit 125
+            printf '%s\n' '{"suite":"s2-concurrent-supervisor","status":"pass","assertion":"timeout-payload-ready-with-held-fd"}'
+            bash -c 'trap "" TERM HUP INT; while :; do read -r -t 1 ignored || :; done' "$marker-descendant" &
+            while :; do read -r -t 1 ignored || :; done
+          `,
+          `${marker}-parent`,
+          heldFile,
+          marker,
+        ],
+        {},
+        2_000,
+      );
+
+      assertS2RunThenScanForSurvivors(
+        "concurrent-timeout-exact-group",
+        () => {
+          const stateFileRegular =
+            existsSync(heldFile) &&
+            lstatSync(heldFile).isFile() &&
+            !lstatSync(heldFile).isSymbolicLink();
+          const missing = [
+            run.exitCode === 124 ? undefined : "exit-124",
+            run.stdout.includes('"assertion":"timeout-payload-ready-with-held-fd"')
+              ? undefined
+              : "payload-ready",
+            run.stderr.includes('"code":"S2_CAPTURE_DEADLINE_EXCEEDED"')
+              ? undefined
+              : "typed-deadline",
+            run.stderr.includes('"action":"term-then-kill-exact-child-group"')
+              ? undefined
+              : "exact-group-action",
+            stateFileRegular ? undefined : "retained-state-file",
+          ].filter((entry): entry is string => entry !== undefined);
+          if (missing.length !== 0) {
+            throw new Error(
+              `concurrent timeout proof incomplete: missing=${missing.join(",")}; ` +
+                `codes=${typedDiagnosticCodes(run).join(",") || "NO_TYPED_CODE"}; ` +
+                `stdout_bytes=${Buffer.byteLength(run.stdout)}; stderr_bytes=${Buffer.byteLength(run.stderr)}; ` +
+                `retained_logs=${run.retainedLogs}`,
+            );
+          }
+        },
+        () => {
+          const survivors = liveProcessesContainingMarker(marker);
+          const holders = runCaptured("lsof", ["-nP", "-t", "+w", "--", heldFile], {}, 5_000);
+          const rawScannerStderr = holders.stderr.split(" retained_logs=", 1)[0] ?? "";
+          if (holders.exitCode !== 1 || holders.stdout !== "" || rawScannerStderr !== "") {
+            throw new Error(
+              `concurrent timeout retained-state scan failed: status=${holders.exitCode}; ` +
+                `stdout_bytes=${Buffer.byteLength(holders.stdout)}; ` +
+                `stderr_bytes=${Buffer.byteLength(rawScannerStderr)}`,
+            );
+          }
+          return survivors;
+        },
+      );
+      console.log(
+        JSON.stringify({ suite: "s2-concurrent-supervisor", fixture: "timeout", phase: "pass" }),
+      );
+    },
+    CONCURRENT_CAPTURE_TEST_TIMEOUT_MS,
+  );
 
   test.each([...selectedS2ShellRegressionModes()])(
     "shell regression %s is bounded and leaves no owned group behind",
@@ -785,6 +1202,172 @@ describe("registered S2 shell and lifecycle regressions", () => {
       console.log(JSON.stringify({ suite: "s2-shell-regression-matrix", mode, phase: "pass" }));
     },
     S2_SHELL_REGRESSION_TEST_TIMEOUT_MS,
+  );
+
+  test(
+    "PLANTED: the ordinary clean-stop bypass cannot satisfy legacy leader-loss coverage",
+    () => {
+      const runId = `s2u-${randomUUID().replaceAll("-", "").slice(0, 24)}`;
+      const run = runHarnessSync(
+        {
+          S2_RUN_ID: runId,
+          S2_SHELL_REGRESSION_TEST: "legacy-leader-loss",
+          S2_PLANT_LEGACY_CLEAN_STOP_BYPASS: "1",
+        },
+        S2_SHELL_REGRESSION_WATCHDOG_MS,
+      );
+      assertS2RunThenScanForSurvivors(
+        "legacy-leader-loss-clean-stop-bypass",
+        () => {
+          expect(run.exitCode).toBe(1);
+          expect(run.stdout).toContain(
+            '"assertion":"payload-ready-in-exact-group-with-retained-state-fd"',
+          );
+          expect(ndjsonRecords(run)).toContainEqual(
+            expect.objectContaining({
+              suite: "s2-krater-shell",
+              status: "fail",
+              code: "S2_LEGACY_LEADER_LOSS_BRANCH_NOT_REACHED",
+              observed: "ordinary-clean-stop",
+              expected: "inspection-uncertain-exact-residual-group",
+            }),
+          );
+          expect(run.stdout).toContain('"code":"S2_SHELL_REGRESSION_FAILED"');
+          expect(run.stdout).not.toContain('"code":"S2_LEGACY_SUPERVISOR_INSPECTION_UNCERTAIN"');
+          expect(run.stdout).not.toContain('"action":"kill-exact-residual-group"');
+          expect(run.stdout).not.toContain(
+            "legacy-term-leader-loss-bounds-inspection-publishes-uncertainty-and-kills-only-exact-residual-group",
+          );
+        },
+        () => liveS2LifecycleProcesses(runId),
+      );
+    },
+    S2_SHELL_REGRESSION_TEST_TIMEOUT_MS,
+  );
+
+  test(
+    "legacy leader-loss deterministically reaches exact residual cleanup under concurrent load",
+    async () => {
+      const fixtures = Array.from({ length: 6 }, (_, index) => ({
+        index,
+        runId: `s2u-${randomUUID().replaceAll("-", "").slice(0, 24)}`,
+      }));
+      for (const fixture of fixtures) {
+        console.log(
+          JSON.stringify({
+            suite: "s2-legacy-leader-loss-concurrent",
+            fixture: fixture.index,
+            phase: "start",
+          }),
+        );
+      }
+      const runs = await Promise.all(
+        fixtures.map((fixture) =>
+          runCapturedConcurrently(
+            "bash",
+            [SCRIPT],
+            {
+              S2_RUN_ID: fixture.runId,
+              S2_SHELL_REGRESSION_TEST: "legacy-leader-loss",
+            },
+            S2_SHELL_REGRESSION_WATCHDOG_MS,
+          ),
+        ),
+      );
+      const survivorSnapshot = captureS2LifecycleProcessTable();
+
+      const fixtureFailures = collectAllFixtureVerificationFailures(fixtures, (fixture, index) => {
+        const run = runs[index];
+        assertS2RunThenScanForSurvivors(
+          `legacy-leader-loss-concurrent-${fixture.index}`,
+          () => {
+            if (run === undefined) {
+              throw new Error(`concurrent fixture result missing: fixture=${fixture.index}`);
+            }
+            const evidencePass = run.stdout
+              .split("\n")
+              .some(
+                (line) =>
+                  line.includes('"suite":"s2-krater-evidence"') &&
+                  line.includes('"status":"pass"') &&
+                  line.includes('"evidence_retention_status":"pass"') &&
+                  line.includes('"captured_exit_code":0') &&
+                  line.includes('"captured_run_status":"pass"'),
+              );
+            const missing = [
+              run.exitCode === 0 ? undefined : "exit-zero",
+              run.stdout.includes(
+                '"assertion":"payload-ready-in-exact-group-with-retained-state-fd"',
+              )
+                ? undefined
+                : "causal-ready",
+              run.stdout.includes('"code":"S2_LEGACY_SUPERVISOR_INSPECTION_UNCERTAIN"')
+                ? undefined
+                : "uncertainty-code",
+              run.stdout.includes('"action":"kill-exact-residual-group"')
+                ? undefined
+                : "exact-kill-action",
+              !run.stdout.includes('"code":"S2_LEGACY_LEADER_LOSS_BRANCH_NOT_REACHED"')
+                ? undefined
+                : "ordinary-clean-stop-refusal",
+              run.stdout.includes(
+                "legacy-term-leader-loss-bounds-inspection-publishes-uncertainty-and-kills-only-exact-residual-group",
+              )
+                ? undefined
+                : "terminal-scenario",
+              evidencePass ? undefined : "evidence-pass",
+            ].filter((entry): entry is string => entry !== undefined);
+            if (missing.length !== 0) {
+              throw new Error(
+                `concurrent fixture proof incomplete: fixture=${fixture.index}; ` +
+                  `missing=${missing.join(",")}; ` +
+                  `codes=${typedDiagnosticCodes(run).join(",") || "NO_TYPED_CODE"}; ` +
+                  `stdout_bytes=${Buffer.byteLength(run.stdout)}; ` +
+                  `stderr_bytes=${Buffer.byteLength(run.stderr)}; ` +
+                  `retained_logs=${run.retainedLogs}`,
+              );
+            }
+          },
+          () => parseS2LifecycleProcessTable(fixture.runId, survivorSnapshot),
+        );
+        console.log(
+          JSON.stringify({
+            suite: "s2-legacy-leader-loss-concurrent",
+            fixture: fixture.index,
+            phase: "pass",
+          }),
+        );
+      });
+      const failures = fixtureFailures.map(({ index, error }) => {
+        const fixture = fixtures[index];
+        const run = runs[index];
+        console.log(
+          JSON.stringify({
+            suite: "s2-legacy-leader-loss-concurrent",
+            fixture: fixture?.index ?? index,
+            phase: "fail",
+            code: "S2_CONCURRENT_FIXTURE_FAILED",
+            exit_code: run?.exitCode ?? 125,
+            typed_codes: run === undefined ? [] : typedDiagnosticCodes(run),
+            stdout_bytes: run === undefined ? 0 : Buffer.byteLength(run.stdout),
+            stderr_bytes: run === undefined ? 0 : Buffer.byteLength(run.stderr),
+            retained_logs: run?.retainedLogs ?? "unavailable",
+          }),
+        );
+        return new Error(
+          `concurrent fixture failed: fixture=${fixture?.index ?? index}; ` +
+            `retained_logs=${run?.retainedLogs ?? "unavailable"}`,
+          { cause: error },
+        );
+      });
+      if (failures.length !== 0) {
+        throw new AggregateError(
+          failures,
+          `concurrent S2 legacy leader-loss verification failed: fixtures=${fixtureFailures.map(({ index }) => fixtures[index]?.index ?? index).join(",")}`,
+        );
+      }
+    },
+    CONCURRENT_LEGACY_TEST_TIMEOUT_MS,
   );
 
   test(
