@@ -63,6 +63,7 @@ function outboxHarness(rows: FakeOutboxRow[], options: OutboxHarnessOptions = {}
         if (typeof keyOrEntries === "string") storage.set(keyOrEntries, value);
         else for (const [key, entry] of Object.entries(keyOrEntries)) storage.set(key, entry);
       },
+      delete: async (key: string) => storage.delete(key),
       setAlarm: async (scheduledTime: number) => {
         alarmAt = scheduledTime;
       },
@@ -83,15 +84,26 @@ function outboxHarness(rows: FakeOutboxRow[], options: OutboxHarnessOptions = {}
           return prepared as unknown as D1PreparedStatement;
         },
         all: async <T>() => {
-          if (!sql.includes("FROM outbox WHERE state = 'pending' AND id > ?")) {
+          if (!sql.includes("FROM outbox") || !sql.includes("state = 'pending' AND id > ?")) {
             throw new Error(`unexpected all query: ${sql}`);
           }
-          const [afterId, limit] = bindings;
-          if (typeof afterId !== "number" || typeof limit !== "number") {
+          const [afterId, middle, final] = bindings;
+          const throughId = sql.includes("AND id <= ?") ? middle : undefined;
+          const limit = throughId === undefined ? middle : final;
+          if (
+            typeof afterId !== "number" ||
+            (throughId !== undefined && typeof throughId !== "number") ||
+            typeof limit !== "number"
+          ) {
             throw new Error("outbox page bindings missing");
           }
           const results = rows
-            .filter((row) => row.state === "pending" && row.id > afterId)
+            .filter(
+              (row) =>
+                row.state === "pending" &&
+                row.id > afterId &&
+                (throughId === undefined || row.id <= throughId),
+            )
             .sort((left, right) => left.id - right.id)
             .slice(0, limit);
           return { results: results as T[], success: true, meta: {} };
@@ -138,6 +150,13 @@ function drainRequest(faultMode: "none" | "fail-once" = "none"): Request {
   });
 }
 
+async function drainScheduledAlarms(harness: OutboxHarness): Promise<void> {
+  for (let attempts = 0; attempts < 16 && harness.alarmAt() !== null; attempts += 1) {
+    await harness.drainer.alarm();
+  }
+  expect(harness.alarmAt()).toBeNull();
+}
+
 describe("Krater outbox Durable Object contracts", () => {
   test("keeps exponential alarm backoff inside the explicit local safety bound", () => {
     expect(boundedOutboxBackoff(1)).toBe(OUTBOX_ALARM_BASE_MS);
@@ -182,8 +201,8 @@ describe("Krater outbox Durable Object contracts", () => {
     expect(second.status).toBe(200);
     expect(await second.json()).toMatchObject({ delivered: 1, quarantined: 0 });
     expect(rows.at(-1)?.state).toBe("delivered");
-    expect(harness.storageValue("scan_after_id")).toBe(0);
-    expect(harness.alarmAt()).toBeNull();
+    await drainScheduledAlarms(harness);
+    expect(harness.storageValue("scan_after_id")).toBe(OUTBOX_DRAIN_BATCH_SIZE + 1);
   });
 
   test("a retry fault never advances the durable scan cursor past the unacknowledged row", async () => {
@@ -199,7 +218,7 @@ describe("Krater outbox Durable Object contracts", () => {
     const retried = await harness.drainer.fetch(drainRequest());
     expect(await retried.json()).toMatchObject({ delivered: 1 });
     expect(rows[1]?.state).toBe("delivered");
-    expect(harness.alarmAt()).toBeNull();
+    await drainScheduledAlarms(harness);
   });
 
   test("a stale cursor beyond the restored D1 range wraps before declaring the outbox empty", async () => {
@@ -211,7 +230,8 @@ describe("Krater outbox Durable Object contracts", () => {
     expect(response.status).toBe(200);
     expect(await response.json()).toMatchObject({ delivered: 1 });
     expect(rows[0]?.state).toBe("delivered");
-    expect(harness.storageValue("scan_after_id")).toBe(0);
+    await drainScheduledAlarms(harness);
+    expect(harness.storageValue("scan_after_id")).toBe(1);
   });
 
   test("PLANTED: corrupt derived cursor state cannot wedge authoritative D1 work", async () => {
@@ -225,7 +245,8 @@ describe("Krater outbox Durable Object contracts", () => {
     expect(response.status).toBe(200);
     expect(await response.json()).toMatchObject({ delivered: 1 });
     expect(rows[0]?.state).toBe("delivered");
-    expect(harness.storageValue("scan_after_id")).toBe(0);
+    await drainScheduledAlarms(harness);
+    expect(harness.storageValue("scan_after_id")).toBe(1);
   });
 
   test("PLANTED: an actual D1 acknowledgement failure re-arms and retries through alarm()", async () => {
@@ -254,7 +275,7 @@ describe("Krater outbox Durable Object contracts", () => {
       last_backoff_ms: null,
       last_phase: "delivered",
     });
-    expect(harness.alarmAt()).toBeNull();
+    await drainScheduledAlarms(harness);
   });
 
   test("PLANTED: a zero-change acknowledgement retains the pending row for alarm retry", async () => {
@@ -272,7 +293,7 @@ describe("Krater outbox Durable Object contracts", () => {
     await harness.drainer.alarm();
 
     expect(rows[0]?.state).toBe("delivered");
-    expect(harness.alarmAt()).toBeNull();
+    await drainScheduledAlarms(harness);
   });
 
   test("PLANTED: stale quarantine state cannot suppress a different restored row", async () => {
@@ -293,6 +314,7 @@ describe("Krater outbox Durable Object contracts", () => {
     expect(response.status).toBe(200);
     expect(await response.json()).toMatchObject({ delivered: 1, quarantined: 0 });
     expect(rows[0]?.state).toBe("delivered");
+    await drainScheduledAlarms(harness);
   });
 
   test("PLANTED: corrupt diagnostic counters cannot disable failure re-arming", async () => {
@@ -312,5 +334,24 @@ describe("Krater outbox Durable Object contracts", () => {
       last_phase: "retry",
     });
     expect(harness.alarmAt()).not.toBeNull();
+  });
+
+  test("PLANTED: a mixed restore range wraps before clearing the only alarm", async () => {
+    const rows = [outboxRow(1), outboxRow(101)];
+    const harness = outboxHarness(rows, {
+      initialStorage: { scan_after_id: 100 },
+    });
+
+    const first = await harness.drainer.fetch(drainRequest());
+
+    expect(first.status).toBe(200);
+    expect(rows[0]?.state).toBe("pending");
+    expect(rows[1]?.state).toBe("delivered");
+    expect(harness.alarmAt()).not.toBeNull();
+
+    await drainScheduledAlarms(harness);
+
+    expect(rows[0]?.state).toBe("delivered");
+    expect(harness.storageValue("scan_after_id")).toBe(101);
   });
 });

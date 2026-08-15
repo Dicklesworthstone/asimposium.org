@@ -12,6 +12,7 @@ export const OUTBOX_ALARM_MAX_MS = 2_000;
 const SHA256_HEX = /^[a-f0-9]{64}$/;
 const OUTBOX_EVENT_ID = /^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/;
 const OUTBOX_SCAN_AFTER_ID_KEY = "scan_after_id";
+const OUTBOX_SCAN_WRAP_THROUGH_ID_KEY = "scan_wrap_through_id";
 const OUTBOX_PHASES = new Set<DurableCounters["last_phase"]>([
   "idle",
   "dequeued",
@@ -248,13 +249,25 @@ export class KraterOutboxDrainer {
     await this.state.storage.setAlarm(Date.now() + bounded);
   }
 
-  private async pendingRows(afterId: number): Promise<PendingOutboxRow[]> {
-    const rows = await statement(
-      this.env.DB,
-      `SELECT id, event_id, problem_id, kind, dedupe_key, payload_sha256
-       FROM outbox WHERE state = 'pending' AND id > ? ORDER BY id ASC LIMIT ?`,
-      afterId,
-      OUTBOX_DRAIN_BATCH_SIZE,
+  private async pendingRows(afterId: number, wrapThroughId?: number): Promise<PendingOutboxRow[]> {
+    const rows = await (wrapThroughId === undefined
+      ? statement(
+          this.env.DB,
+          `SELECT id, event_id, problem_id, kind, dedupe_key, payload_sha256
+           FROM outbox WHERE state = 'pending' AND id > ? ORDER BY id ASC LIMIT ?`,
+          afterId,
+          OUTBOX_DRAIN_BATCH_SIZE,
+        )
+      : statement(
+          this.env.DB,
+          `SELECT id, event_id, problem_id, kind, dedupe_key, payload_sha256
+           FROM outbox
+           WHERE state = 'pending' AND id > ? AND id <= ?
+           ORDER BY id ASC LIMIT ?`,
+          afterId,
+          wrapThroughId,
+          OUTBOX_DRAIN_BATCH_SIZE,
+        )
     ).all<PendingOutboxRow>();
     return rows.results;
   }
@@ -267,6 +280,17 @@ export class KraterOutboxDrainer {
       // of truth, so corrupt derived state is recovered by a safe full rescan.
       await this.state.storage.put(OUTBOX_SCAN_AFTER_ID_KEY, 0);
       return 0;
+    }
+    return value;
+  }
+
+  private async scanWrapThroughId(scanAfterId: number): Promise<number | undefined> {
+    const value = await this.state.storage.get<unknown>(OUTBOX_SCAN_WRAP_THROUGH_ID_KEY);
+    if (value === undefined) return undefined;
+    if (!isNonNegativeInteger(value) || value === 0 || scanAfterId > value) {
+      await this.state.storage.delete(OUTBOX_SCAN_WRAP_THROUGH_ID_KEY);
+      await this.state.storage.put(OUTBOX_SCAN_AFTER_ID_KEY, 0);
+      return undefined;
     }
     return value;
   }
@@ -363,8 +387,12 @@ export class KraterOutboxDrainer {
 
       try {
         let scanAfterId = await this.scanAfterId();
-        let rows = await this.pendingRows(scanAfterId);
-        if (rows.length === 0 && scanAfterId !== 0) {
+        const wrapThroughId = await this.scanWrapThroughId(scanAfterId);
+        if (wrapThroughId === undefined) {
+          scanAfterId = await this.scanAfterId();
+        }
+        let rows = await this.pendingRows(scanAfterId, wrapThroughId);
+        if (rows.length === 0 && scanAfterId !== 0 && wrapThroughId === undefined) {
           // A cursor beyond D1's current maximum can survive a restore. Wrap
           // once so that stale derived state cannot hide the first page.
           scanAfterId = 0;
@@ -421,10 +449,23 @@ export class KraterOutboxDrainer {
         }
 
         await this.state.storage.put(OUTBOX_SCAN_AFTER_ID_KEY, scanAfterId);
-        if ((await this.pendingRows(scanAfterId)).length > 0) {
+        if ((await this.pendingRows(scanAfterId, wrapThroughId)).length > 0) {
+          await this.setAlarm(OUTBOX_ALARM_BASE_MS);
+        } else if (wrapThroughId !== undefined) {
+          await this.state.storage.delete(OUTBOX_SCAN_WRAP_THROUGH_ID_KEY);
+          await this.state.storage.put(OUTBOX_SCAN_AFTER_ID_KEY, wrapThroughId);
+          if ((await this.pendingRows(wrapThroughId)).length > 0) {
+            await this.setAlarm(OUTBOX_ALARM_BASE_MS);
+          } else {
+            await this.state.storage.deleteAlarm();
+          }
+        } else if (scanAfterId !== 0) {
+          await this.state.storage.put({
+            [OUTBOX_SCAN_AFTER_ID_KEY]: 0,
+            [OUTBOX_SCAN_WRAP_THROUGH_ID_KEY]: scanAfterId,
+          });
           await this.setAlarm(OUTBOX_ALARM_BASE_MS);
         } else {
-          await this.state.storage.put(OUTBOX_SCAN_AFTER_ID_KEY, 0);
           await this.state.storage.deleteAlarm();
         }
         return { source, delivered, quarantined, held_before_ack: false };
