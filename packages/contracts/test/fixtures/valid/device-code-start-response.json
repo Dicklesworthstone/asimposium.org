@@ -1,0 +1,7 @@
+{
+  "device_code": "flow_v1.ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopq",
+  "user_code": "ABCD-2345",
+  "verification_url": "https://asimposium.org/approve",
+  "interval_seconds": 5,
+  "expires_in_seconds": 900
+}

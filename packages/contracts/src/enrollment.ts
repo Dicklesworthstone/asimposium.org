@@ -221,6 +221,54 @@ export const EnrollmentNextActionSchema = z
   })
   .strict();
 
+/**
+ * W3.5 device flow: a human-typed code. Eight characters from an alphabet
+ * without 0/1/I/O confusion, grouped 4-4. Brute force is bounded by the
+ * lookup lockout, not by entropy alone.
+ */
+export const DEVICE_USER_CODE_PATTERN =
+  /^[ABCDEFGHJKMNPQRSTVWXYZ23456789]{4}-[ABCDEFGHJKMNPQRSTVWXYZ23456789]{4}$/;
+
+/**
+ * The device-code request carries the FULL proposal (name, declared runtime,
+ * scopes) because the sponsor's approval card must show exactly what a
+ * path-1 mint shows; a metadata-free code would gut ADR-20's card guarantee.
+ */
+export const DeviceCodeStartRequestSchema = z
+  .object({
+    name: FellowNameSchema,
+    model: z.string().trim().min(1).max(160),
+    harness: z.string().trim().min(1).max(160),
+    reasoning_effort: z.string().trim().min(1).max(80).optional(),
+    tools_note: z.string().trim().min(1).max(1_000).optional(),
+    requested_scopes: z.array(RequestedScopeSchema).min(1).max(4),
+  })
+  .strict();
+
+export const DeviceCodeStartResponseSchema = z
+  .object({
+    device_code: EnrollmentFlowHandleSchema,
+    user_code: z.string().regex(DEVICE_USER_CODE_PATTERN),
+    verification_url: z.literal("https://asimposium.org/approve"),
+    interval_seconds: z.number().int().positive().max(60),
+    expires_in_seconds: z.number().int().positive().max(3_600),
+  })
+  .strict();
+
+/** Sponsor-side: find the pending device proposal by its human code. */
+export const DeviceLookupRequestSchema = z
+  .object({
+    user_code: z.string().regex(DEVICE_USER_CODE_PATTERN),
+  })
+  .strict();
+
+/** The lookup answer is the same approval card the console already renders. */
+export const DeviceLookupResponseSchema = z
+  .object({
+    card: EnrollmentApprovalCardSchema,
+  })
+  .strict();
+
 export const EnrollmentHelloResponseSchema = z
   .object({
     fellow: z
@@ -421,6 +469,10 @@ export const EnrollmentContractsSchema = z
     sponsor_fellow_list_response: SponsorFellowListResponseSchema,
     sponsor_enrollment_decision_response: SponsorEnrollmentDecisionResponseSchema,
     sponsor_bootstrap_response: SponsorBootstrapResponseSchema,
+    device_code_start_request: DeviceCodeStartRequestSchema,
+    device_code_start_response: DeviceCodeStartResponseSchema,
+    device_lookup_request: DeviceLookupRequestSchema,
+    device_lookup_response: DeviceLookupResponseSchema,
     flow_poll_request: EnrollmentFlowPollRequestSchema,
     pending_response: EnrollmentPendingResponseSchema,
     denied_response: EnrollmentDeniedResponseSchema,
@@ -454,6 +506,10 @@ export type SponsorEnrollmentDecisionResponse = z.infer<
   typeof SponsorEnrollmentDecisionResponseSchema
 >;
 export type SponsorBootstrapResponse = z.infer<typeof SponsorBootstrapResponseSchema>;
+export type DeviceCodeStartRequest = z.infer<typeof DeviceCodeStartRequestSchema>;
+export type DeviceCodeStartResponse = z.infer<typeof DeviceCodeStartResponseSchema>;
+export type DeviceLookupRequest = z.infer<typeof DeviceLookupRequestSchema>;
+export type DeviceLookupResponse = z.infer<typeof DeviceLookupResponseSchema>;
 export type EnrollmentFlowPollRequest = z.infer<typeof EnrollmentFlowPollRequestSchema>;
 export type RequestedScope = z.infer<typeof RequestedScopeSchema>;
 export type EnrollmentGrantReduction = z.infer<typeof EnrollmentGrantReductionSchema>;

@@ -1,4 +1,7 @@
 import {
+  type DeviceCodeStartResponse,
+  DeviceCodeStartRequestSchema,
+  DeviceLookupRequestSchema,
   ENROLLMENT_SECRET_BYTES,
   ENROLLMENT_SECRET_TTL_MS,
   EnrollmentApprovedResponseSchema,
@@ -30,6 +33,20 @@ export const MAX_POLL_INTERVAL_SECONDS = 30;
 export const FELLOW_TOKEN_TTL_MS = 365 * 24 * 60 * 60 * 1_000;
 const POLL_SLOW_DOWN_INCREMENT_SECONDS = 5;
 
+/** W3.5: human-typed codes; the alphabet excludes 0/1/I/O confusion. */
+const USER_CODE_ALPHABET = "ABCDEFGHJKMNPQRSTVWXYZ23456789";
+export const DEVICE_CODE_TTL_MS = 15 * 60 * 1_000;
+export const DEVICE_LOOKUP_LOCKOUT_FAILURES = 5;
+export const DEVICE_LOOKUP_LOCKOUT_WINDOW_MS = 15 * 60 * 1_000;
+
+function generateUserCode(random: EnrollmentRandom): string {
+  const bytes = randomBytes(random, 8);
+  const chars = [...bytes].map(
+    (byte) => USER_CODE_ALPHABET[byte % USER_CODE_ALPHABET.length],
+  );
+  return `${chars.slice(0, 4).join("")}-${chars.slice(4).join("")}`;
+}
+
 function fellowStatusCanAuthenticate(status: FellowLifecycleStatus): boolean {
   // Suspicious-review Fellows retain read access for sponsor diagnosis. Write
   // authorization must additionally quarantine that status in centralized policy.
@@ -45,6 +62,8 @@ export type EnrollmentErrorCode =
   | "NAME_TAKEN"
   | "MODEL_AS_NAME"
   | "DECISION_TARGET_MISMATCH"
+  | "DEVICE_CODE_UNKNOWN"
+  | "DEVICE_LOOKUP_LOCKED"
   | "PAIRING_EXPIRED"
   | "PAIRING_INVALID"
   | "PROPOSAL_EXPIRED"
@@ -193,15 +212,26 @@ export type EnrollmentFlowResult =
 
 export interface EnrollmentRecord {
   readonly enrollmentId: string;
-  readonly sponsorId: string;
+  /** Mutable: an unbound device enrollment ("") binds to its first decider. */
+  sponsorId: string;
   readonly secretHash: string;
   readonly createdAt: number;
   readonly secretExpiresAt: number;
   readonly requestedScopes: readonly RequestedScope[];
   readonly requestedResources: EnrollmentResourceGrants;
+  /** W3.5: join-URL enrollments are minted by a sponsor; device enrollments bind at decision. */
+  readonly kind?: "join-url" | "device";
   invalidated: boolean;
   secretConsumedAt?: number;
   proposal?: ProposalRecord;
+}
+
+/** W3.5: the atomic device-flow write — record, pending proposal, and the user-code mapping. */
+export interface DeviceCreateInput {
+  readonly record: EnrollmentRecord;
+  readonly proposal: ProposalRecord;
+  readonly userCodeHash: string;
+  readonly deviceExpiresAt: number;
 }
 
 export interface ProposalRecord {
@@ -357,6 +387,22 @@ export interface EnrollmentStore {
    * false means it only moved last_seen_at.
    */
   bootstrapSponsor(sponsorId: string, now: number): Promise<boolean>;
+  /** W3.5: create a device enrollment, its pending proposal, and the user-code mapping, atomically. */
+  deviceCreate(input: DeviceCreateInput): Promise<void>;
+  /** W3.5: the pending card behind a human-typed user code; undefined when unknown, used, or expired. */
+  deviceCardByUserCode(
+    userCodeHash: string,
+    now: number,
+  ): Promise<EnrollmentApprovalCard | undefined>;
+  /** W3.5: the decision-path card for an unbound device enrollment (kind=device, no sponsor yet). */
+  deviceApprovalCardForDecision(
+    enrollmentId: string,
+    now: number,
+  ): Promise<EnrollmentApprovalCard>;
+  /** W3.5: failed user-code lookups inside the lockout window. */
+  recentDeviceLookupFailures(sponsorId: string, sinceMs: number, now: number): Promise<number>;
+  /** W3.5: record one lookup outcome for the lockout window. */
+  recordDeviceLookup(sponsorId: string, success: boolean, now: number): Promise<void>;
   capsule(enrollmentId: string, now: number): Promise<EnrollmentCapsule>;
   poll(attempt: PollAttempt): Promise<PollDecision>;
   availabilitySuggestions(name: string): Promise<readonly string[]>;
@@ -760,11 +806,36 @@ export function reduceEnrollmentResources(
  * the exact race semantics executable: one secret claim and one token issue
  * may win, even when callers race through Promise.all.
  */
+/** The sponsor-facing card for a record with a proposal, whatever its lifecycle state. */
+function cardFromRecord(record: EnrollmentRecord): EnrollmentApprovalCard {
+  const proposal = record.proposal;
+  if (proposal === undefined) throw new EnrollmentError("PROPOSAL_NOT_PENDING");
+  return {
+    enrollmentId: record.enrollmentId,
+    proposalId: proposal.proposalId,
+    name: proposal.name,
+    model: proposal.model,
+    harness: proposal.harness,
+    ...(proposal.reasoningEffort === undefined
+      ? {}
+      : { reasoningEffort: proposal.reasoningEffort }),
+    ...(proposal.toolsNote === undefined ? {} : { toolsNote: proposal.toolsNote }),
+    requestedScopes: record.requestedScopes,
+    requestedResources: record.requestedResources,
+    status: proposal.status,
+    effectiveGrantedScopes: proposal.grantedScopes ?? null,
+    effectiveGrantedResources: proposal.grantedResources ?? null,
+    proposalExpiresAt: proposal.expiresAt,
+  };
+}
+
 export class InMemoryEnrollmentStore implements EnrollmentStore {
   readonly #records = new Map<string, EnrollmentRecord>();
   readonly #activeNames = new Map<string, string>();
   readonly #credentials = new Map<string, FellowCredentialBinding>();
   readonly #sponsors = new Map<string, { createdAt: number; lastSeenAt: number }>();
+  readonly #deviceCodes = new Map<string, { enrollmentId: string; expiresAt: number }>();
+  readonly #deviceLookups: { sponsorId: string; at: number; success: boolean }[] = [];
   readonly #idempotency = new Map<
     string,
     {
@@ -827,7 +898,12 @@ export class InMemoryEnrollmentStore implements EnrollmentStore {
   ): Promise<void> {
     await this.serialized(() => {
       const record = this.#records.get(attempt.enrollmentId);
-      if (record === undefined || record.sponsorId !== attempt.sponsorId) {
+      const isUnboundDevice =
+        record !== undefined && record.kind === "device" && record.sponsorId === "";
+      if (
+        record === undefined ||
+        (record.sponsorId !== attempt.sponsorId && !isUnboundDevice)
+      ) {
         throw new EnrollmentError("WRONG_PRINCIPAL");
       }
       const proposal = record.proposal;
@@ -839,6 +915,8 @@ export class InMemoryEnrollmentStore implements EnrollmentStore {
       }
 
       if (attempt.decision.decision === "deny") {
+        // The first decider binds an unbound device enrollment, even to deny it.
+        if (isUnboundDevice) record.sponsorId = attempt.sponsorId;
         proposal.status = "denied";
         this.commitIdempotency(idempotency);
         return;
@@ -879,6 +957,7 @@ export class InMemoryEnrollmentStore implements EnrollmentStore {
         throw new EnrollmentError("NAME_TAKEN");
       }
       this.#activeNames.set(proposal.name, proposal.proposalId);
+      if (isUnboundDevice) record.sponsorId = attempt.sponsorId;
       proposal.status = attempt.decision.decision === "approve" ? "approved" : "reduced";
       proposal.grantedScopes = proposedScopes;
       proposal.grantedResources = proposedResources;
@@ -897,26 +976,10 @@ export class InMemoryEnrollmentStore implements EnrollmentStore {
       if (record === undefined || record.sponsorId !== sponsorId) {
         throw new EnrollmentError("WRONG_PRINCIPAL");
       }
+      if (record.proposal === undefined) throw new EnrollmentError("PROPOSAL_NOT_PENDING");
       const proposal = record.proposal;
-      if (proposal === undefined) throw new EnrollmentError("PROPOSAL_NOT_PENDING");
       if (proposal.status === "pending" && now >= proposal.expiresAt) proposal.status = "expired";
-      return {
-        enrollmentId: record.enrollmentId,
-        proposalId: proposal.proposalId,
-        name: proposal.name,
-        model: proposal.model,
-        harness: proposal.harness,
-        ...(proposal.reasoningEffort === undefined
-          ? {}
-          : { reasoningEffort: proposal.reasoningEffort }),
-        ...(proposal.toolsNote === undefined ? {} : { toolsNote: proposal.toolsNote }),
-        requestedScopes: record.requestedScopes,
-        requestedResources: record.requestedResources,
-        status: proposal.status,
-        effectiveGrantedScopes: proposal.grantedScopes ?? null,
-        effectiveGrantedResources: proposal.grantedResources ?? null,
-        proposalExpiresAt: proposal.expiresAt,
-      };
+      return cardFromRecord(record);
     });
   }
 
@@ -1016,6 +1079,82 @@ export class InMemoryEnrollmentStore implements EnrollmentStore {
       }
       this.#sponsors.set(sponsorId, { createdAt: now, lastSeenAt: now });
       return true;
+    });
+  }
+
+  async deviceCreate(input: DeviceCreateInput): Promise<void> {
+    return this.serialized(() => {
+      if (this.#records.has(input.record.enrollmentId)) {
+        throw new EnrollmentPersistenceError();
+      }
+      this.#records.set(input.record.enrollmentId, {
+        ...input.record,
+        proposal: input.proposal,
+      });
+      this.#deviceCodes.set(input.userCodeHash, {
+        enrollmentId: input.record.enrollmentId,
+        expiresAt: input.deviceExpiresAt,
+      });
+    });
+  }
+
+  async deviceCardByUserCode(
+    userCodeHash: string,
+    now: number,
+  ): Promise<EnrollmentApprovalCard | undefined> {
+    return this.serialized(() => {
+      const code = this.#deviceCodes.get(userCodeHash);
+      if (code === undefined || now >= code.expiresAt) return undefined;
+      const record = this.#records.get(code.enrollmentId);
+      if (record === undefined || record.proposal === undefined) return undefined;
+      const proposal = record.proposal;
+      if (proposal.status === "pending" && now >= proposal.expiresAt) {
+        proposal.status = "expired";
+      }
+      if (proposal.status !== "pending") return undefined;
+      return cardFromRecord(record);
+    });
+  }
+
+  async deviceApprovalCardForDecision(
+    enrollmentId: string,
+    now: number,
+  ): Promise<EnrollmentApprovalCard> {
+    return this.serialized(() => {
+      const record = this.#records.get(enrollmentId);
+      if (
+        record === undefined ||
+        record.kind !== "device" ||
+        record.sponsorId !== "" ||
+        record.proposal === undefined
+      ) {
+        throw new EnrollmentError("PAIRING_INVALID");
+      }
+      const proposal = record.proposal;
+      if (proposal.status === "pending" && now >= proposal.expiresAt) {
+        proposal.status = "expired";
+      }
+      return cardFromRecord(record);
+    });
+  }
+
+  async recentDeviceLookupFailures(
+    sponsorId: string,
+    sinceMs: number,
+    now: number,
+  ): Promise<number> {
+    return this.serialized(
+      () =>
+        this.#deviceLookups.filter(
+          (entry) =>
+            entry.sponsorId === sponsorId && !entry.success && entry.at >= sinceMs && entry.at <= now,
+        ).length,
+    );
+  }
+
+  async recordDeviceLookup(sponsorId: string, success: boolean, now: number): Promise<void> {
+    return this.serialized(() => {
+      this.#deviceLookups.push({ sponsorId, at: now, success });
     });
   }
 
@@ -1515,6 +1654,112 @@ export class EnrollmentService {
     return { created, at: now };
   }
 
+  /**
+   * W3.5: the proposal-carrying device flow. No principal: the agent is
+   * unaffiliated until a sponsor's decision binds the enrollment. The naming
+   * law is screened here; a name already taken survives to the decision,
+   * which answers NAME_TAKEN with available suggestions.
+   */
+  async deviceStart(rawRequest: unknown): Promise<DeviceCodeStartResponse> {
+    const parsed = DeviceCodeStartRequestSchema.safeParse(rawRequest);
+    if (!parsed.success) throw new EnrollmentError("PAIRING_INVALID");
+    const nameFailure = enrollmentNameFailure(parsed.data.name);
+    if (nameFailure !== undefined) {
+      throw new EnrollmentError(
+        nameFailure,
+        await this.#store.availabilitySuggestions(parsed.data.name),
+      );
+    }
+    const now = this.#clock.now();
+    for (let attempt = 0; attempt < MAX_ID_ATTEMPTS; attempt += 1) {
+      const enrollmentId = generateEnrollmentId(this.#random);
+      const flowHandle = generateVersionedSecret("flow_v1", this.#random);
+      const userCode = generateUserCode(this.#random);
+      // The record's secret hash guards a plaintext that is never issued: the
+      // join-capsule and claim paths stay unreachable for device enrollments.
+      const neverIssuedSecret = generateVersionedSecret("v1", this.#random);
+      const record: EnrollmentRecord = {
+        enrollmentId,
+        sponsorId: "",
+        secretHash: await sha256Hex(neverIssuedSecret),
+        createdAt: now,
+        secretExpiresAt: now,
+        requestedScopes: uniqueEnrollmentScopes(parsed.data.requested_scopes),
+        requestedResources: {},
+        kind: "device",
+        invalidated: false,
+      };
+      const proposal: ProposalRecord = {
+        proposalId: generateUlid(now, this.#random),
+        fellowId: `F-${generateUlid(now, this.#random)}`,
+        flowHandleHash: await sha256Hex(flowHandle),
+        name: parsed.data.name,
+        model: parsed.data.model,
+        harness: parsed.data.harness,
+        ...(parsed.data.reasoning_effort === undefined
+          ? {}
+          : { reasoningEffort: parsed.data.reasoning_effort }),
+        ...(parsed.data.tools_note === undefined ? {} : { toolsNote: parsed.data.tools_note }),
+        createdAt: now,
+        expiresAt: now + PENDING_PROPOSAL_TTL_MS,
+        status: "pending",
+        pollIntervalSeconds: INITIAL_POLL_INTERVAL_SECONDS,
+      };
+      try {
+        await this.#store.deviceCreate({
+          record,
+          proposal,
+          userCodeHash: await sha256Hex(userCode),
+          deviceExpiresAt: now + DEVICE_CODE_TTL_MS,
+        });
+        return {
+          device_code: flowHandle,
+          user_code: userCode,
+          verification_url: "https://asimposium.org/approve",
+          interval_seconds: INITIAL_POLL_INTERVAL_SECONDS,
+          expires_in_seconds: DEVICE_CODE_TTL_MS / 1_000,
+        };
+      } catch (error) {
+        // A user-code collision is the only retryable persistence failure.
+        if (error instanceof EnrollmentPersistenceError && attempt + 1 < MAX_ID_ATTEMPTS) continue;
+        throw error;
+      }
+    }
+    throw new EnrollmentError("PAIRING_INVALID");
+  }
+
+  /**
+   * W3.5: sponsor looks up a pending device proposal by its human code. Five
+   * failures inside fifteen minutes lock the sponsor out of the window.
+   */
+  async deviceLookup(
+    sponsor: EnrollmentPrincipal,
+    rawRequest: unknown,
+  ): Promise<EnrollmentApprovalCard> {
+    assertSponsor(sponsor);
+    const parsed = DeviceLookupRequestSchema.safeParse(rawRequest);
+    if (!parsed.success) throw new EnrollmentError("DEVICE_CODE_UNKNOWN");
+    const now = this.#clock.now();
+    const failures = await this.#store.recentDeviceLookupFailures(
+      sponsor.sponsorId,
+      now - DEVICE_LOOKUP_LOCKOUT_WINDOW_MS,
+      now,
+    );
+    if (failures >= DEVICE_LOOKUP_LOCKOUT_FAILURES) {
+      throw new EnrollmentError("DEVICE_LOOKUP_LOCKED");
+    }
+    const card = await this.#store.deviceCardByUserCode(
+      await sha256Hex(parsed.data.user_code),
+      now,
+    );
+    if (card === undefined) {
+      await this.#store.recordDeviceLookup(sponsor.sponsorId, false, now);
+      throw new EnrollmentError("DEVICE_CODE_UNKNOWN");
+    }
+    await this.#store.recordDeviceLookup(sponsor.sponsorId, true, now);
+    return card;
+  }
+
   async decide(
     sponsor: EnrollmentPrincipal,
     enrollmentId: string,
@@ -1545,7 +1790,21 @@ export class EnrollmentService {
       now,
     );
     if (replay.replay !== undefined) return;
-    const card = await this.#store.approvalCard(enrollmentId, sponsor.sponsorId, now);
+    let card: EnrollmentApprovalCard;
+    try {
+      card = await this.#store.approvalCard(enrollmentId, sponsor.sponsorId, now);
+    } catch (error) {
+      if (!(error instanceof EnrollmentError && error.code === "WRONG_PRINCIPAL")) throw error;
+      try {
+        // Unbound device enrollment: the decision binds it, so the card fetch
+        // runs off the sponsor gate (kind=device with no sponsor yet).
+        card = await this.#store.deviceApprovalCardForDecision(enrollmentId, now);
+      } catch {
+        // Not an unbound device enrollment either: the original ownership
+        // refusal is the honest answer, not the device path's.
+        throw error;
+      }
+    }
     const idempotency = await this.#writeReplay(replay.attempt, { acknowledged: true });
     try {
       await this.#store.decision(

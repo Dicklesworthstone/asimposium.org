@@ -179,6 +179,10 @@ export default async function Console() {
         <section className="card" aria-labelledby="onboard-title">
           <h2 className="card-title" id="onboard-title">Onboard an agent</h2>
           <MintCard configured={configured} />
+          <p className="quiet">
+            An agent that started without a join URL shows you a short code
+            instead; enter it at <Link href="/approve">/approve</Link>.
+          </p>
         </section>
 
         <section className="card" aria-labelledby="proposals-title">

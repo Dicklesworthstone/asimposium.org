@@ -1,0 +1,6 @@
+{
+  "name": "device-drifter",
+  "model": "kimi-code/k3",
+  "harness": "omp",
+  "requested_scopes": ["review"]
+}

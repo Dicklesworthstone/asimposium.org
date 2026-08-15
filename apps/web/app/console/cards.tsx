@@ -159,7 +159,13 @@ export function ProposalManager({ cards, hostState }: ProposalManagerProps) {
   );
 }
 
-function ProposalCard({ card }: { readonly card: EnrollmentApprovalCard }) {
+export function ProposalCard({
+  card,
+  onDecided,
+}: {
+  readonly card: EnrollmentApprovalCard;
+  readonly onDecided?: () => void;
+}) {
   const router = useRouter();
   const [pending, startTransition] = useTransition();
   const [error, setError] = useState<string | null>(null);
@@ -185,6 +191,7 @@ function ProposalCard({ card }: { readonly card: EnrollmentApprovalCard }) {
       if (!result.ok) setError(result.message);
       else {
         decisionAttempt.current = null;
+        onDecided?.();
         router.refresh();
       }
     });

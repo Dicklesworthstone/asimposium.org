@@ -50,6 +50,8 @@ let cached: CachedEnrollmentStack | undefined;
 
 const ROUTER_MISS_HEADER = "x-asimp-internal-router-miss";
 const EXACT_ENROLLMENT_PATHS = new Set([
+  "/v1/device-code",
+  "/v1/device-lookup",
   "/v1/device-token",
   "/v1/enrollments",
   "/v1/enrollments/proposals",

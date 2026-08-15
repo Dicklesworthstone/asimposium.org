@@ -3,6 +3,8 @@ import {
   EnrollmentHelloResponseSchema,
   EnrollmentIdSchema,
   MintEnrollmentRequestSchema,
+  DeviceCodeStartResponseSchema,
+  DeviceLookupResponseSchema,
   MintEnrollmentResponseSchema,
   type ProblemCode,
   ProblemDocumentSchema,
@@ -286,6 +288,22 @@ function enrollmentErrorResponse(error: EnrollmentError, request: Request): Resp
           example: { enrollment_id: "ASIMP-EN-01JXYZ4K6Q", decision: "approve" },
         },
       );
+    case "DEVICE_CODE_UNKNOWN":
+      return problem(
+        404,
+        "DEVICE_CODE_UNKNOWN",
+        "No pending proposal for that code",
+        "No pending device proposal matches that user code.",
+        "Check the code with the agent's operator. Codes expire fifteen minutes after they are shown.",
+      );
+    case "DEVICE_LOOKUP_LOCKED":
+      return problem(
+        429,
+        "DEVICE_LOOKUP_LOCKED",
+        "Too many failed code attempts",
+        "Several recent user-code lookups failed, so code entry is locked for a while.",
+        "Wait fifteen minutes before trying another code.",
+      );
     case "IDEMPOTENCY_CONFLICT":
       return problem(
         409,
@@ -534,6 +552,35 @@ export function createEnrollmentRouter(options: EnrollmentRouterOptions): Hono {
       // service or schema failure is operational instead, never a false 404.
       return error instanceof EnrollmentError
         ? capsuleUnavailableResponse()
+        : enrollmentUnavailableResponse();
+    }
+  });
+
+  // W3.5: the one open write on the surface. An unaffiliated agent starts the
+  // proposal-carrying device flow here; it has no credential yet by
+  // construction. Abuse is bounded by the 15-minute user-code TTL, the 24-hour
+  // proposal expiry, and the fact that unbound proposals are visible to no
+  // sponsor until a human types the code.
+  app.post("/v1/device-code", async (c) => {
+    if (hasQuery(c.req.raw)) {
+      return problem(
+        400,
+        "BODY_ONLY_REQUIRED",
+        "Device flow fields are body-only",
+        "Device flow fields are not accepted in a URL query string.",
+        "Send the documented JSON body without query parameters.",
+      );
+    }
+    try {
+      const started = await options.service.deviceStart(await jsonBody(c.req.raw));
+      return c.json(DeviceCodeStartResponseSchema.parse(started), 201, {
+        "cache-control": "no-store",
+      });
+    } catch (error) {
+      const operational = enrollmentOperationalFailure(error);
+      if (operational !== undefined) return operational;
+      return error instanceof EnrollmentError
+        ? enrollmentErrorResponse(error, c.req.raw)
         : enrollmentUnavailableResponse();
     }
   });
@@ -995,6 +1042,33 @@ function mountSponsorRoutes(app: Hono, options: EnrollmentRouterOptions): void {
         result.created ? 201 : 200,
         { "cache-control": "no-store" },
       );
+    } catch (error) {
+      const operational = enrollmentOperationalFailure(error);
+      if (operational !== undefined) return operational;
+      return error instanceof EnrollmentError
+        ? enrollmentErrorResponse(error, c.req.raw)
+        : enrollmentUnavailableResponse();
+    }
+  });
+
+  // W3.5: the sponsor's entry into the device flow. The user code is the
+  // lookup key; the answer is the same approval card the console renders.
+  app.post("/v1/device-lookup", async (c) => {
+    const authenticated = await requireSponsor(
+      options,
+      c.req.raw,
+      "/v1/device-lookup",
+      "enrollment.device.lookup",
+    );
+    if (authenticated instanceof Response) return authenticated;
+    try {
+      const card = await options.service.deviceLookup(
+        authenticated.principal,
+        verifiedJson(authenticated.rawBody),
+      );
+      return c.json(DeviceLookupResponseSchema.parse({ card: contractCard(card) }), 200, {
+        "cache-control": "no-store",
+      });
     } catch (error) {
       const operational = enrollmentOperationalFailure(error);
       if (operational !== undefined) return operational;

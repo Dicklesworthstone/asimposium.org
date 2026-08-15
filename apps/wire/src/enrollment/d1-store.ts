@@ -13,6 +13,7 @@ import type { D1Database, D1PreparedStatement } from "@cloudflare/workers-types"
 import {
   type ClaimAttempt,
   type DecisionAttempt,
+  type DeviceCreateInput,
   type EnrollmentApprovalCard,
   type EnrollmentCapsule,
   EnrollmentError,
@@ -444,16 +445,35 @@ export class D1EnrollmentStore implements EnrollmentStore {
     attempt: DecisionAttempt,
     idempotency?: EnrollmentIdempotencyWrite,
   ): Promise<void> {
-    const row = await this.proposalByEnrollment(attempt.enrollmentId, attempt.sponsorId);
+    let row = await this.proposalByEnrollment(attempt.enrollmentId, attempt.sponsorId);
+    let bindsDeviceSponsor = false;
+    if (row === null) {
+      // An unbound device enrollment belongs to nobody until a decision; the
+      // first decider binds it inside the same batch.
+      row = await this.unboundDeviceProposalByEnrollment(attempt.enrollmentId);
+      bindsDeviceSponsor = row !== null;
+    }
     if (row === null) throw new EnrollmentError("WRONG_PRINCIPAL");
     if (row.status !== "pending") throw new EnrollmentError("PROPOSAL_NOT_PENDING");
     if (attempt.now >= row.expires_at) {
       throw new EnrollmentError("PROPOSAL_EXPIRED");
     }
+    const bindingStatements: D1PreparedStatement[] = bindsDeviceSponsor
+      ? [
+          sql(
+            this.#db,
+            `UPDATE enrollment_records SET sponsor_id = ?
+             WHERE enrollment_id = ? AND sponsor_id = '' AND kind = 'device'`,
+            attempt.sponsorId,
+            attempt.enrollmentId,
+          ),
+        ]
+      : [];
 
     if (attempt.decision.decision === "deny") {
       try {
         const statements = [
+          ...bindingStatements,
           sql(
             this.#db,
             `UPDATE enrollment_proposals SET status = 'denied'
@@ -481,6 +501,7 @@ export class D1EnrollmentStore implements EnrollmentStore {
     const nextStatus = attempt.decision.decision === "approve" ? "approved" : "reduced";
     try {
       const statements: D1PreparedStatement[] = [
+        ...bindingStatements,
         sql(
           this.#db,
           `UPDATE enrollment_proposals
@@ -700,6 +721,181 @@ export class D1EnrollmentStore implements EnrollmentStore {
       });
     }
     return [...fellows.values()];
+  }
+
+  async deviceCreate(input: DeviceCreateInput): Promise<void> {
+    try {
+      const results = await this.#db.batch([
+        sql(
+          this.#db,
+          `INSERT INTO enrollment_records (
+             enrollment_id, sponsor_id, secret_hash, secret_expires_at,
+             requested_scopes_json, requested_resources_json, invalidated, created_at, kind
+           ) VALUES (?, '', ?, ?, ?, ?, 0, ?, 'device')`,
+          input.record.enrollmentId,
+          input.record.secretHash,
+          input.record.secretExpiresAt,
+          encode(input.record.requestedScopes),
+          encode(input.record.requestedResources),
+          input.record.createdAt,
+        ),
+        sql(
+          this.#db,
+          `INSERT INTO enrollment_proposals (
+             proposal_id, enrollment_id, fellow_id, flow_handle_hash, name, model, harness,
+             reasoning_effort, tools_note, created_at, expires_at, status, poll_interval_seconds
+           ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'pending', ?)`,
+          input.proposal.proposalId,
+          input.record.enrollmentId,
+          input.proposal.fellowId,
+          input.proposal.flowHandleHash,
+          input.proposal.name,
+          input.proposal.model,
+          input.proposal.harness,
+          input.proposal.reasoningEffort ?? null,
+          input.proposal.toolsNote ?? null,
+          input.proposal.createdAt,
+          input.proposal.expiresAt,
+          input.proposal.pollIntervalSeconds,
+        ),
+        sql(
+          this.#db,
+          `INSERT INTO device_codes (enrollment_id, user_code_hash, created_at, expires_at)
+           VALUES (?, ?, ?, ?)`,
+          input.record.enrollmentId,
+          input.userCodeHash,
+          input.record.createdAt,
+          input.deviceExpiresAt,
+        ),
+      ]);
+      if (results.every((result) => result.meta.changes === 1)) return;
+      throw new EnrollmentPersistenceError();
+    } catch (error) {
+      if (error instanceof EnrollmentPersistenceError) throw error;
+      throw new EnrollmentPersistenceError();
+    }
+  }
+
+  async deviceCardByUserCode(
+    userCodeHash: string,
+    now: number,
+  ): Promise<EnrollmentApprovalCard | undefined> {
+    const codeRow = await sql(
+      this.#db,
+      "SELECT enrollment_id, expires_at FROM device_codes WHERE user_code_hash = ?",
+      userCodeHash,
+    ).first<{ enrollment_id: string; expires_at: number }>();
+    if (codeRow === null || now >= codeRow.expires_at) return undefined;
+    const row = await sql(
+      this.#db,
+      `SELECT e.enrollment_id, e.requested_scopes_json, e.requested_resources_json,
+              p.proposal_id, p.name, p.model, p.harness, p.reasoning_effort, p.tools_note,
+              p.expires_at, p.status
+         FROM enrollment_records e
+         JOIN enrollment_proposals p ON p.enrollment_id = e.enrollment_id
+        WHERE e.enrollment_id = ? AND e.kind = 'device' AND e.sponsor_id = ''`,
+      codeRow.enrollment_id,
+    ).first<PendingProposalRow>();
+    if (row === null) return undefined;
+    if (row.status === "pending" && now >= row.expires_at) {
+      await sql(
+        this.#db,
+        "UPDATE enrollment_proposals SET status = 'expired' WHERE proposal_id = ? AND status = 'pending'",
+        row.proposal_id,
+      ).run();
+      return undefined;
+    }
+    if (row.status !== "pending") return undefined;
+    return {
+      enrollmentId: row.enrollment_id,
+      proposalId: row.proposal_id,
+      status: "pending" as const,
+      name: row.name,
+      model: row.model,
+      harness: row.harness,
+      ...(row.reasoning_effort === null ? {} : { reasoningEffort: row.reasoning_effort }),
+      ...(row.tools_note === null ? {} : { toolsNote: row.tools_note }),
+      requestedScopes: parseScopes(row.requested_scopes_json),
+      requestedResources: parseResources(row.requested_resources_json),
+      effectiveGrantedScopes: null,
+      effectiveGrantedResources: null,
+      proposalExpiresAt: row.expires_at,
+    };
+  }
+
+  async deviceApprovalCardForDecision(
+    enrollmentId: string,
+    now: number,
+  ): Promise<EnrollmentApprovalCard> {
+    const card = await this.deviceCardByEnrollmentForDecision(enrollmentId, now);
+    if (card === undefined) throw new EnrollmentError("PAIRING_INVALID");
+    return card;
+  }
+
+  private async deviceCardByEnrollmentForDecision(
+    enrollmentId: string,
+    now: number,
+  ): Promise<EnrollmentApprovalCard | undefined> {
+    const row = await sql(
+      this.#db,
+      `SELECT e.enrollment_id, e.requested_scopes_json, e.requested_resources_json,
+              p.proposal_id, p.name, p.model, p.harness, p.reasoning_effort, p.tools_note,
+              p.expires_at, p.status
+         FROM enrollment_records e
+         JOIN enrollment_proposals p ON p.enrollment_id = e.enrollment_id
+        WHERE e.enrollment_id = ? AND e.kind = 'device' AND e.sponsor_id = ''`,
+      enrollmentId,
+    ).first<PendingProposalRow>();
+    if (row === null) return undefined;
+    if (row.status === "pending" && now >= row.expires_at) {
+      await sql(
+        this.#db,
+        "UPDATE enrollment_proposals SET status = 'expired' WHERE proposal_id = ? AND status = 'pending'",
+        row.proposal_id,
+      ).run();
+      row.status = "expired";
+    }
+    return {
+      enrollmentId: row.enrollment_id,
+      proposalId: row.proposal_id,
+      status: row.status,
+      name: row.name,
+      model: row.model,
+      harness: row.harness,
+      ...(row.reasoning_effort === null ? {} : { reasoningEffort: row.reasoning_effort }),
+      ...(row.tools_note === null ? {} : { toolsNote: row.tools_note }),
+      requestedScopes: parseScopes(row.requested_scopes_json),
+      requestedResources: parseResources(row.requested_resources_json),
+      effectiveGrantedScopes: null,
+      effectiveGrantedResources: null,
+      proposalExpiresAt: row.expires_at,
+    };
+  }
+
+  async recentDeviceLookupFailures(
+    sponsorId: string,
+    sinceMs: number,
+    now: number,
+  ): Promise<number> {
+    const row = await sql(
+      this.#db,
+      `SELECT COUNT(*) AS failures FROM device_lookup_attempts
+        WHERE sponsor_id = ? AND success = 0 AND attempted_at >= ? AND attempted_at <= ?`,
+      sponsorId,
+      sinceMs,
+      now,
+    ).first<{ failures: number }>();
+    return row?.failures ?? 0;
+  }
+
+  async recordDeviceLookup(sponsorId: string, success: boolean, now: number): Promise<void> {
+    await sql(
+      this.#db,
+      "INSERT INTO device_lookup_attempts (sponsor_id, attempted_at, success) VALUES (?, ?, ?)",
+      sponsorId,
+      now,
+      success ? 1 : 0,
+    ).run();
   }
 
   async bootstrapSponsor(sponsorId: string, now: number): Promise<boolean> {
@@ -1163,6 +1359,28 @@ export class D1EnrollmentStore implements EnrollmentStore {
         WHERE e.enrollment_id = ? AND e.sponsor_id = ?`,
       enrollmentId,
       sponsorId,
+    ).first<ProposalRow>();
+  }
+
+  /** The proposal row for an unbound device enrollment, or null. */
+  private async unboundDeviceProposalByEnrollment(
+    enrollmentId: string,
+  ): Promise<ProposalRow | null> {
+    return sql(
+      this.#db,
+      `SELECT e.enrollment_id, e.sponsor_id, e.secret_hash, e.secret_expires_at,
+              e.requested_scopes_json, e.requested_resources_json, e.invalidated, e.secret_consumed_at,
+              p.proposal_id, p.fellow_id, p.flow_handle_hash, p.name, p.model, p.harness,
+              p.reasoning_effort, p.tools_note, p.created_at, p.expires_at, p.status,
+              p.granted_scopes_json, p.granted_resources_json, p.token_hash, p.token_issued_at,
+              p.poll_interval_seconds, p.last_poll_at,
+              g.granted_scopes_json AS durable_granted_scopes_json,
+              g.granted_resources_json AS durable_granted_resources_json
+         FROM enrollment_records e
+         JOIN enrollment_proposals p ON p.enrollment_id = e.enrollment_id
+         LEFT JOIN enrollment_grants g ON g.proposal_id = p.proposal_id
+        WHERE e.enrollment_id = ? AND e.sponsor_id = '' AND e.kind = 'device'`,
+      enrollmentId,
     ).first<ProposalRow>();
   }
 

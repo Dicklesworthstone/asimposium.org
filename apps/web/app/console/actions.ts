@@ -3,17 +3,39 @@
 import { revalidatePath } from "next/cache";
 
 import type {
+  EnrollmentApprovalCard,
   MintEnrollmentRequest,
 } from "@asimposium/contracts";
 import { SponsorEnrollmentDecisionSchema } from "@asimposium/contracts";
 
 import { auth } from "@/auth";
 import { isCanonicalSponsorId } from "@/lib/sponsor-id";
-import { stoaDecideProposal, stoaMintEnrollment } from "@/lib/stoa";
+import { stoaDecideProposal, stoaDeviceLookup, stoaMintEnrollment } from "@/lib/stoa";
 
 export type MintResult =
   | { readonly ok: true; readonly joinUrl: string; readonly enrollmentId: string; readonly expiresAt: number }
   | { readonly ok: false; readonly message: string };
+
+export type DeviceLookupResult =
+  | { readonly ok: true; readonly card: EnrollmentApprovalCard }
+  | { readonly ok: false; readonly message: string };
+
+/** W3.5: find a pending device proposal by its human code. Read-only; decisions go through decideProposal with the recent-auth gate. */
+export async function lookupDeviceCode(userCode: string): Promise<DeviceLookupResult> {
+  const sponsor = await requireSponsorId();
+  if (!sponsor.ok) return sponsor;
+  const result = await stoaDeviceLookup(sponsor.sponsorId, userCode.trim().toUpperCase());
+  if (!result.ok) {
+    return {
+      ok: false,
+      message:
+        result.reason === "unreachable"
+          ? "The agent host did not answer. Try again in a moment."
+          : (result.detail ?? "That code was not accepted."),
+    };
+  }
+  return { ok: true, card: result.data.card };
+}
 
 export type DecideResult = { readonly ok: true } | { readonly ok: false; readonly message: string };
 

@@ -202,6 +202,8 @@
               "enum": [
                 "AUTH_REPLAY_STORE_UNAVAILABLE",
                 "CAPSULE_UNAVAILABLE",
+                "DEVICE_CODE_UNKNOWN",
+                "DEVICE_LOOKUP_LOCKED",
                 "ENROLLMENT_UNAVAILABLE",
                 "FELLOW_TOKEN_INVALID",
                 "FLOW_INVALID",
@@ -433,6 +435,8 @@
           "enum": [
             "AUTH_REPLAY_STORE_UNAVAILABLE",
             "CAPSULE_UNAVAILABLE",
+            "DEVICE_CODE_UNKNOWN",
+            "DEVICE_LOOKUP_LOCKED",
             "ENROLLMENT_UNAVAILABLE",
             "FELLOW_TOKEN_INVALID",
             "FLOW_INVALID",
@@ -488,6 +492,8 @@
         "UNKNOWN_FORMAT",
         "AUTH_REPLAY_STORE_UNAVAILABLE",
         "CAPSULE_UNAVAILABLE",
+        "DEVICE_CODE_UNKNOWN",
+        "DEVICE_LOOKUP_LOCKED",
         "ENROLLMENT_UNAVAILABLE",
         "FELLOW_TOKEN_INVALID",
         "FLOW_INVALID",

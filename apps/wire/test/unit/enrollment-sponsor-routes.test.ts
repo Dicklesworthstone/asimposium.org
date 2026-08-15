@@ -1,5 +1,7 @@
 import { describe, expect, test } from "bun:test";
 import {
+  DeviceCodeStartResponseSchema,
+  DeviceLookupResponseSchema,
   MintEnrollmentResponseSchema,
   ProblemDocumentSchema,
   SponsorEnrollmentDecisionResponseSchema,
@@ -904,5 +906,96 @@ describe("sponsor enrollment routes", () => {
     const second = await call();
     expect(second.status).toBe(200);
     expect(((await second.json()) as { created: boolean }).created).toBe(false);
+  });
+
+  test("the device loop: start, lookup, approve, keyed poll, hello", async () => {
+    const h = await harness();
+
+    // An unaffiliated agent starts the flow with its full proposal.
+    const start = await h.app.fetch(
+      new Request(`${origin}/v1/device-code`, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({
+          name: "device-drifter",
+          model: "kimi-code/k3",
+          harness: "omp",
+          requested_scopes: ["review"],
+        }),
+      }),
+    );
+    expect(start.status).toBe(201);
+    const started = DeviceCodeStartResponseSchema.parse(await start.json());
+    expect(started.user_code).toMatch(/^[A-Z2-9]{4}-[A-Z2-9]{4}$/);
+
+    // The unbound proposal appears in NO sponsor's pending list.
+    const listHeaders = await h.sign("", "/v1/enrollments/proposals", "enrollment.proposals.list", "GET");
+    const list = await h.app.fetch(envelopeRequest("/v1/enrollments/proposals", listHeaders, "GET"));
+    expect(SponsorProposalListResponseSchema.parse(await list.json()).proposals).toHaveLength(0);
+
+    // The sponsor looks it up by the human code and gets the full card.
+    const lookupBody = JSON.stringify({ user_code: started.user_code });
+    const lookupHeaders = await h.sign(lookupBody, "/v1/device-lookup", "enrollment.device.lookup");
+    const lookup = await h.app.fetch(envelopeRequest("/v1/device-lookup", lookupHeaders, "POST", lookupBody));
+    expect(lookup.status).toBe(200);
+    const card = DeviceLookupResponseSchema.parse(await lookup.json()).card;
+    expect(card).toMatchObject({ name: "device-drifter", status: "pending" });
+
+    // The decision binds the sponsor and the agent's keyed poll wins the token.
+    const decisionBody = JSON.stringify({ enrollment_id: card.enrollment_id, decision: "approve" });
+    const decisionHeaders = await h.sign(
+      decisionBody,
+      "/v1/enrollments/:enrollmentId/decision",
+      "enrollment.decide",
+    );
+    const decided = await h.app.fetch(
+      envelopeRequest(`/v1/enrollments/${card.enrollment_id}/decision`, decisionHeaders, "POST", decisionBody),
+    );
+    expect(decided.status).toBe(200);
+
+    const pollBody = JSON.stringify({ flow_handle: started.device_code });
+    const poll = await h.app.fetch(
+      new Request(`${origin}/v1/device-token`, {
+        method: "POST",
+        headers: { "content-type": "application/json", "idempotency-key": "IK-device-loop" },
+        body: pollBody,
+      }),
+    );
+    const outcome = (await poll.json()) as { status: string; token?: string };
+    expect(outcome.status).toBe("approved");
+
+    const hello = await h.app.fetch(
+      new Request(`${origin}/v1/hello`, { headers: { authorization: `Bearer ${outcome.token}` } }),
+    );
+    expect(hello.status).toBe(200);
+
+    // The fellow now appears in the sponsor's list.
+    const fellowsHeaders = await h.sign("", "/v1/fellows", "fellows.list", "GET");
+    const fellows = SponsorFellowListResponseSchema.parse(
+      await (await h.app.fetch(envelopeRequest("/v1/fellows", fellowsHeaders, "GET"))).json(),
+    );
+    expect(fellows.fellows.map((f) => f.name)).toContain("device-drifter");
+  });
+
+  test("device lookup lockout: five failures refuse the sixth", async () => {
+    const h = await harness();
+    const badBody = JSON.stringify({ user_code: "ABCD-2345" });
+    for (let attempt = 0; attempt < 5; attempt += 1) {
+      const headers = await h.sign(badBody, "/v1/device-lookup", "enrollment.device.lookup");
+      const res = await h.app.fetch(envelopeRequest("/v1/device-lookup", headers, "POST", badBody));
+      expect(res.status).toBe(404);
+    }
+    const headers = await h.sign(badBody, "/v1/device-lookup", "enrollment.device.lookup");
+    const locked = await h.app.fetch(envelopeRequest("/v1/device-lookup", headers, "POST", badBody));
+    expect(locked.status).toBe(429);
+    expect(await locked.json()).toMatchObject({ code: "DEVICE_LOOKUP_LOCKED" });
+  });
+
+  test("a malformed user code teaches the format, not the state", async () => {
+    const h = await harness();
+    const badBody = JSON.stringify({ user_code: "not-a-code" });
+    const headers = await h.sign(badBody, "/v1/device-lookup", "enrollment.device.lookup");
+    const res = await h.app.fetch(envelopeRequest("/v1/device-lookup", headers, "POST", badBody));
+    expect(res.status).toBe(404);
   });
 });

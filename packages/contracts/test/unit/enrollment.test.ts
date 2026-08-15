@@ -1,6 +1,9 @@
 import { expect, test } from "bun:test";
 
 import {
+  DeviceCodeStartRequestSchema,
+  DeviceCodeStartResponseSchema,
+  DeviceLookupRequestSchema,
   EnrollmentFlowPollRequestSchema,
   EnrollmentSecretSchema,
   FellowNameSchema,
@@ -310,4 +313,54 @@ test("the decision acknowledgement is exactly one literal", async () => {
   expect(SponsorEnrollmentDecisionResponseSchema.safeParse({ acknowledged: "true" }).success).toBe(
     false,
   );
+});
+
+const VALID_DEVICE_START_FIXTURE = new URL(
+  "../fixtures/valid/device-code-start.json",
+  import.meta.url,
+);
+const VALID_DEVICE_RESPONSE_FIXTURE = new URL(
+  "../fixtures/valid/device-code-start-response.json",
+  import.meta.url,
+);
+const INVALID_DEVICE_LOOKUP_FIXTURE = new URL(
+  "../fixtures/invalid/device-lookup-lowercase-code.json",
+  import.meta.url,
+);
+
+test("device flow contracts pin the start, response, and lookup shapes", async () => {
+  expect(
+    DeviceCodeStartRequestSchema.safeParse(await fixture(VALID_DEVICE_START_FIXTURE)).success,
+  ).toBe(true);
+
+  const response = DeviceCodeStartResponseSchema.safeParse(
+    await fixture(VALID_DEVICE_RESPONSE_FIXTURE),
+  );
+  expect(response.success).toBe(true);
+
+  // Human codes are uppercase by contract; a lowercase code never reaches the lookup.
+  expect(
+    DeviceLookupRequestSchema.safeParse(await fixture(INVALID_DEVICE_LOOKUP_FIXTURE)).success,
+  ).toBe(false);
+});
+
+test("the device start schema admits a lowercase name the naming law will screen", () => {
+  // The schema admits this shape; the service's naming law refuses "claude"
+  // as MODEL_AS_NAME. The contract test pins only the shape boundary.
+  expect(
+    DeviceCodeStartRequestSchema.safeParse({
+      name: "claude",
+      model: "anthropic/fable-5",
+      harness: "claude-code",
+      requested_scopes: ["review"],
+    }).success,
+  ).toBe(true);
+  expect(
+    DeviceCodeStartRequestSchema.safeParse({
+      name: "x",
+      model: "anthropic/fable-5",
+      harness: "claude-code",
+      requested_scopes: [],
+    }).success,
+  ).toBe(false);
 });

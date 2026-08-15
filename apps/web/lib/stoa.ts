@@ -7,6 +7,8 @@ import {
   type SponsorEnrollmentDecision,
   type SponsorEnrollmentDecisionResponse,
   SponsorEnrollmentDecisionResponseSchema,
+  type DeviceLookupResponse,
+  DeviceLookupResponseSchema,
   type SponsorBootstrapResponse,
   SponsorBootstrapResponseSchema,
   type SponsorFellowListResponse,
@@ -35,12 +37,14 @@ const ROUTE_PROPOSALS = "/v1/enrollments/proposals";
 const ROUTE_DECISION = "/v1/enrollments/:enrollmentId/decision";
 const ROUTE_FELLOWS = "/v1/fellows";
 const ROUTE_BOOTSTRAP = "/v1/sponsors/bootstrap";
+const ROUTE_DEVICE_LOOKUP = "/v1/device-lookup";
 
 const ACTION_MINT = "enrollment.mint";
 const ACTION_PROPOSALS = "enrollment.proposals.list";
 const ACTION_DECIDE = "enrollment.decide";
 const ACTION_FELLOWS = "fellows.list";
 const ACTION_BOOTSTRAP = "sponsor.bootstrap";
+const ACTION_DEVICE_LOOKUP = "enrollment.device.lookup";
 
 export type StoaCall<T> =
   | { readonly ok: true; readonly data: T }
@@ -204,6 +208,22 @@ export function stoaFellows(principalId: string): Promise<StoaCall<SponsorFellow
     principalId,
     body: "",
     parse: (value) => SponsorFellowListResponseSchema.parse(value),
+  });
+}
+
+/** W3.5: sponsor lookup of a pending device proposal by its human code. */
+export function stoaDeviceLookup(
+  principalId: string,
+  userCode: string,
+): Promise<StoaCall<DeviceLookupResponse>> {
+  return callStoa({
+    method: "POST",
+    route: ROUTE_DEVICE_LOOKUP,
+    path: ROUTE_DEVICE_LOOKUP,
+    action: ACTION_DEVICE_LOOKUP,
+    principalId,
+    body: JSON.stringify({ user_code: userCode }),
+    parse: (value) => DeviceLookupResponseSchema.parse(value),
   });
 }
 
