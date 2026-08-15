@@ -49,10 +49,7 @@ function outboxRow(id: number, valid = true): FakeOutboxRow {
   };
 }
 
-function outboxHarness(
-  rows: FakeOutboxRow[],
-  options: OutboxHarnessOptions = {},
-): OutboxHarness {
+function outboxHarness(rows: FakeOutboxRow[], options: OutboxHarnessOptions = {}): OutboxHarness {
   const storage = new Map<string, unknown>(Object.entries(options.initialStorage ?? {}));
   let acknowledgeFailures = options.acknowledgeFailures ?? 0;
   let alarmAt: number | null = null;
