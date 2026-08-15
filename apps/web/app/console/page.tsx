@@ -3,12 +3,8 @@ import Link from "next/link";
 
 import { auth, signIn } from "@/auth";
 import { LAUNCH_STAGE, SITE } from "@/lib/site";
-import {
-  isCanonicalSponsorId,
-  stoaConfigured,
-  stoaFellows,
-  stoaPendingProposals,
-} from "@/lib/stoa";
+import { isCanonicalSponsorId } from "@/lib/sponsor-id";
+import { stoaConfigured, stoaFellows, stoaPendingProposals } from "@/lib/stoa";
 
 import { MintCard, ProposalManager } from "./cards";
 

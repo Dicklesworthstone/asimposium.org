@@ -8,11 +8,8 @@ import type {
 import { SponsorEnrollmentDecisionSchema } from "@asimposium/contracts";
 
 import { auth } from "@/auth";
-import {
-  isCanonicalSponsorId,
-  stoaDecideProposal,
-  stoaMintEnrollment,
-} from "@/lib/stoa";
+import { isCanonicalSponsorId } from "@/lib/sponsor-id";
+import { stoaDecideProposal, stoaMintEnrollment } from "@/lib/stoa";
 
 export type MintResult =
   | { readonly ok: true; readonly joinUrl: string; readonly enrollmentId: string; readonly expiresAt: number }

@@ -20,6 +20,15 @@ import Google from "next-auth/providers/google";
 export const { handlers, auth, signIn, signOut } = NextAuth({
   providers: [Google],
   session: { strategy: "jwt" },
+  callbacks: {
+    // The sponsor principal id Agora signs envelopes with: `usr_` plus the
+    // Google `sub` — opaque, stable, never an email. The console and every
+    // Stoa call gate on this canonical shape (isCanonicalSponsorId).
+    session({ session, token }) {
+      if (token.sub) session.user.id = `usr_${token.sub}`;
+      return session;
+    },
+  },
   cookies: {
     sessionToken: {
       name: "asimp.session",

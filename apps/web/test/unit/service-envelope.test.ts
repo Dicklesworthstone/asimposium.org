@@ -336,3 +336,17 @@ describe("hex helpers", () => {
     expect(toHex(new Uint8Array([0, 15, 16, 255]))).toBe("000f10ff");
   });
 });
+
+describe("canonical sponsor ids", () => {
+  test("usr_ plus a Google sub is the only accepted shape", async () => {
+    const { isCanonicalSponsorId } = await import("../../lib/sponsor-id.ts");
+    // A real Google sub is 1-60 chars of digits; usr_-prefixed is canonical.
+    expect(isCanonicalSponsorId("usr_105234567890123456789")).toBe(true);
+    // The bare sub, an email, and an empty suffix are all non-canonical and
+    // must never reach an envelope's principal_id.
+    expect(isCanonicalSponsorId("105234567890123456789")).toBe(false);
+    expect(isCanonicalSponsorId("usr_")).toBe(false);
+    expect(isCanonicalSponsorId("sponsor@example.com")).toBe(false);
+    expect(isCanonicalSponsorId(undefined)).toBe(false);
+  });
+});

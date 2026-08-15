@@ -15,6 +15,7 @@ import {
 
 import { dispatchSignedSponsorRequest } from "./stoa-sponsor";
 import { importEd25519PrivateSeedHex } from "./service-envelope";
+import { isCanonicalSponsorId } from "./sponsor-id";
 
 /**
  * Agora's typed client for the Stoa sponsor surface. Server-only: it reads the
@@ -36,13 +37,6 @@ const ACTION_MINT = "enrollment.mint";
 const ACTION_PROPOSALS = "enrollment.proposals.list";
 const ACTION_DECIDE = "enrollment.decide";
 const ACTION_FELLOWS = "fellows.list";
-
-/** Worker-owned user ids; OAuth subjects are never accepted as sponsor ids. */
-const CANONICAL_SPONSOR_ID = /^usr_[A-Za-z0-9_-]{1,60}$/;
-
-export function isCanonicalSponsorId(value: unknown): value is string {
-  return typeof value === "string" && CANONICAL_SPONSOR_ID.test(value);
-}
 
 export type StoaCall<T> =
   | { readonly ok: true; readonly data: T }
