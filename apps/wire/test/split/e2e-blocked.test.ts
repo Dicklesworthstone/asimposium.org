@@ -103,52 +103,88 @@ function occurrences(source: string, needle: string): number {
   return source.split(needle).length - 1;
 }
 
-async function bundleText(outputs: readonly Blob[]): Promise<string> {
-  return (await Promise.all(outputs.map((output) => output.text()))).join("\n");
+const ISOLATED_BUILD_SCRIPT = String.raw`
+const mode = process.argv[1];
+const productionEntrypoint = process.argv[2];
+const localWorkerEntrypoint = process.argv[3];
+const entrypoint = "s3-production-counterfactual-entry";
+const namespace = "s3-production-counterfactual";
+const options = {
+  entrypoints: mode === "production" ? [productionEntrypoint] : [entrypoint],
+  format: "esm",
+  target: "browser",
+  external: ["zod"],
+};
+
+if (mode === "counterfactual") {
+  options.plugins = [{
+    name: namespace,
+    setup(build) {
+      build.onResolve({ filter: /^s3-production-counterfactual-entry$/u }, () => ({
+        path: entrypoint,
+        namespace,
+      }));
+      build.onLoad({ filter: /^s3-production-counterfactual-entry$/u, namespace }, () => ({
+        loader: "ts",
+        contents: [
+          "import productionWorker from " + JSON.stringify(productionEntrypoint) + ";",
+          "import localWorker from " + JSON.stringify(localWorkerEntrypoint) + ";",
+          "export default {",
+          "  fetch(request: Request, env: unknown, ctx: unknown) {",
+          "    if (request.headers.get(\"x-s3-counterfactual\") === \"1\") {",
+          "      return localWorker.fetch(request, env as never, ctx as never);",
+          "    }",
+          "    return productionWorker.fetch(request, env as never, ctx as never);",
+          "  },",
+          "};",
+        ].join("\n"),
+      }));
+    },
+  }];
+} else if (mode !== "production") {
+  console.error("S3_ISOLATED_BUILD_MODE_INVALID:" + mode);
+  process.exit(2);
 }
 
-async function counterfactualProductionBundle(
+const result = await Bun.build(options);
+if (!result.success) {
+  for (const log of result.logs) console.error(String(log));
+  process.exit(1);
+}
+for (const output of result.outputs) process.stdout.write(await output.text());
+`;
+
+async function isolatedProductionBundle(
+  mode: "production" | "counterfactual",
   productionEntrypoint: string,
   localWorkerEntrypoint: string,
-) {
-  const entrypoint = "s3-production-counterfactual-entry";
-  const namespace = "s3-production-counterfactual";
-  return Bun.build({
-    entrypoints: [entrypoint],
-    format: "esm",
-    target: "browser",
-    // Bun.build inside Bun's test runner cannot currently resolve the Zod
-    // dependency through packages/contracts' workspace-local node_modules.
-    // Zod cannot import the local S-3 worker; keeping only that third-party
-    // package external preserves the production/local entry-graph assertion.
-    external: ["zod"],
-    plugins: [
-      {
-        name: namespace,
-        setup(build) {
-          build.onResolve({ filter: /^s3-production-counterfactual-entry$/u }, () => ({
-            path: entrypoint,
-            namespace,
-          }));
-          build.onLoad({ filter: /^s3-production-counterfactual-entry$/u, namespace }, () => ({
-            loader: "ts",
-            contents: [
-              `import productionWorker from ${JSON.stringify(productionEntrypoint)};`,
-              `import localWorker from ${JSON.stringify(localWorkerEntrypoint)};`,
-              "export default {",
-              "  fetch(request: Request, env: unknown, ctx: unknown) {",
-              '    if (request.headers.get("x-s3-counterfactual") === "1") {',
-              "      return localWorker.fetch(request, env as never, ctx as never);",
-              "    }",
-              "    return productionWorker.fetch(request, env as never, ctx as never);",
-              "  },",
-              "};",
-            ].join("\n"),
-          }));
-        },
-      },
+): Promise<string> {
+  // Keep the graph proof outside Bun's long-lived test process. Other suites
+  // legitimately install build plugins, and Bun 1.3.x can retain their loader
+  // registrations across later Bun.build calls. A fresh child preserves the
+  // actual bundler assertion without making aggregate order part of the test.
+  const child = Bun.spawn({
+    cmd: [
+      process.execPath,
+      "-e",
+      ISOLATED_BUILD_SCRIPT,
+      mode,
+      productionEntrypoint,
+      localWorkerEntrypoint,
     ],
+    cwd: root,
+    stdout: "pipe",
+    stderr: "pipe",
   });
+  const [stdout, stderr, exitCode] = await Promise.all([
+    new Response(child.stdout).text(),
+    new Response(child.stderr).text(),
+    child.exited,
+  ]);
+  if (exitCode !== 0) {
+    throw new Error(`S3_ISOLATED_BUILD_FAILED:${mode}:${exitCode}\n${stderr}`);
+  }
+  return stdout;
 }
 
 test("the S-3 harness binds readiness to its child and excludes the deployed entry graph", async () => {
@@ -168,13 +204,13 @@ test("the S-3 harness binds readiness to its child and excludes the deployed ent
   ].map((path) => readFileSync(resolve(root, path), "utf8"));
   const productionEntrypoint = resolve(root, "apps/wire/src/index.ts");
   const localWorkerEntrypoint = resolve(root, "apps/wire/src/split/local-worker.ts");
-  const productionBundle = await Bun.build({
-    entrypoints: [productionEntrypoint],
-    format: "esm",
-    target: "browser",
-    external: ["zod"],
-  });
-  const counterfactualBundle = await counterfactualProductionBundle(
+  const productionBundleText = await isolatedProductionBundle(
+    "production",
+    productionEntrypoint,
+    localWorkerEntrypoint,
+  );
+  const counterfactualBundleText = await isolatedProductionBundle(
+    "counterfactual",
     productionEntrypoint,
     localWorkerEntrypoint,
   );
@@ -376,12 +412,8 @@ test("the S-3 harness binds readiness to its child and excludes the deployed ent
   expect(productionIndex).not.toContain("split/local-worker");
   expect(wirePackage.exports?.["."]).toBe("./src/index.ts");
   expect(productionConfigs.every((config) => config.includes("apps/wire/src/index.ts"))).toBe(true);
-  expect(productionBundle.success).toBe(true);
-  const productionBundleText = await bundleText(productionBundle.outputs);
   expect(localWorkerBundleSentinels(productionBundleText)).toEqual([]);
   expect(() => assertProductionBundleExcludesLocalWorker(productionBundleText)).not.toThrow();
-  expect(counterfactualBundle.success).toBe(true);
-  const counterfactualBundleText = await bundleText(counterfactualBundle.outputs);
   expect(localWorkerBundleSentinels(counterfactualBundleText)).toEqual(
     LOCAL_WORKER_BUNDLE_SENTINELS,
   );

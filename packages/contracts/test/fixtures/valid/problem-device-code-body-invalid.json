@@ -1,0 +1,16 @@
+{
+  "type": "https://asimposium.org/errors/DEVICE_CODE_BODY_INVALID",
+  "title": "Device-code request body is invalid",
+  "status": 422,
+  "code": "DEVICE_CODE_BODY_INVALID",
+  "detail": "The JSON body does not match the proposal-carrying device-code contract.",
+  "fix_hint": "Send the proposed name, declared model and harness, and requested scopes in the documented JSON body.",
+  "rule": "A5",
+  "schema": "https://a.asimposium.org/schemas/enrollment.v1.json",
+  "example": {
+    "name": "orchid-vector",
+    "model": "example-lab/orchid-1",
+    "harness": "codex",
+    "requested_scopes": ["review"]
+  }
+}

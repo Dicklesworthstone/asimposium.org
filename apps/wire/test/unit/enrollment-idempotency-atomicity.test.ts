@@ -7,6 +7,8 @@ import type { D1Database } from "@cloudflare/workers-types";
 
 import { D1EnrollmentStore } from "../../src/enrollment/d1-store";
 import {
+  type DeviceCreateInput,
+  type EnrollmentError,
   EnrollmentPersistenceError,
   type EnrollmentRecord,
   InMemoryEnrollmentStore,
@@ -46,6 +48,7 @@ const LIFECYCLE_MIGRATION = resolve(
   import.meta.dir,
   "../../../../db/migrations/0006_fellow_credential_lifecycle.sql",
 );
+const DEVICE_MIGRATION = resolve(import.meta.dir, "../../../../db/migrations/0009_device_flow.sql");
 
 /** The exact column definition the abort depends on. */
 const LOAD_BEARING_COLUMN = "request_digest TEXT NOT NULL";
@@ -56,7 +59,13 @@ type LocalBinding = string | number | null;
  * A D1 shim over `bun:sqlite`. `batch` is the part that matters: one
  * transaction, sequential statements, rollback on any error, error rethrown.
  */
-function localD1(sqlite: Database): D1Database {
+function localD1(
+  sqlite: Database,
+  options: {
+    readonly afterFirstRead?: (query: string) => Promise<void>;
+    readonly serializeBatches?: boolean;
+  } = {},
+): D1Database {
   const prepare = (query: string) => ({
     bind(...values: LocalBinding[]) {
       return {
@@ -65,7 +74,9 @@ function localD1(sqlite: Database): D1Database {
           return { meta: { changes: result.changes } };
         },
         async first<T>(): Promise<T | null> {
-          return (sqlite.prepare<T, LocalBinding[]>(query).get(...values) ?? null) as T | null;
+          const row = (sqlite.prepare<T, LocalBinding[]>(query).get(...values) ?? null) as T | null;
+          await options.afterFirstRead?.(query);
+          return row;
         },
         async all<T>(): Promise<{ results: T[] }> {
           return { results: sqlite.prepare<T, LocalBinding[]>(query).all(...values) as T[] };
@@ -73,19 +84,34 @@ function localD1(sqlite: Database): D1Database {
       };
     },
   });
+  const runBatch = async (
+    statements: readonly { run(): Promise<{ meta: { changes: number } }> }[],
+  ) => {
+    sqlite.run("BEGIN");
+    try {
+      const results: { meta: { changes: number } }[] = [];
+      for (const statement of statements) results.push(await statement.run());
+      sqlite.run("COMMIT");
+      return results;
+    } catch (error) {
+      sqlite.run("ROLLBACK");
+      throw error;
+    }
+  };
+  let batchTail: Promise<void> = Promise.resolve();
   return {
     prepare,
-    async batch(statements: readonly { run(): Promise<{ meta: { changes: number } }> }[]) {
-      sqlite.run("BEGIN");
-      try {
-        const results: { meta: { changes: number } }[] = [];
-        for (const statement of statements) results.push(await statement.run());
-        sqlite.run("COMMIT");
-        return results;
-      } catch (error) {
-        sqlite.run("ROLLBACK");
-        throw error;
-      }
+    batch(statements: readonly { run(): Promise<{ meta: { changes: number } }> }[]) {
+      if (options.serializeBatches !== true) return runBatch(statements);
+      const result = batchTail.then(
+        () => runBatch(statements),
+        () => runBatch(statements),
+      );
+      batchTail = result.then(
+        () => undefined,
+        () => undefined,
+      );
+      return result;
     },
   } as unknown as D1Database;
 }
@@ -100,6 +126,12 @@ function database(options: { readonly nullableDigest?: boolean } = {}): Database
       : schema,
   );
   sqlite.exec(readFileSync(LIFECYCLE_MIGRATION, "utf8"));
+  return sqlite;
+}
+
+function deviceDatabase(): Database {
+  const sqlite = database();
+  sqlite.exec(readFileSync(DEVICE_MIGRATION, "utf8"));
   return sqlite;
 }
 
@@ -123,6 +155,162 @@ const KEY = "local-mint-collision-1";
 /** Distinct 64-hex digests, the shape `sha256Hex` produces for a request body. */
 const DIGEST_A = "a".repeat(64);
 const DIGEST_B = "b".repeat(64);
+
+function deviceInput(suffix: string): DeviceCreateInput {
+  return {
+    record: {
+      enrollmentId: `ASIMP-EN-DEVICE-${suffix}`,
+      sponsorId: "",
+      secretHash: `device-secret-${suffix}`,
+      createdAt: NOW,
+      secretExpiresAt: NOW,
+      requestedScopes: ["review"],
+      requestedResources: {},
+      kind: "device",
+      invalidated: false,
+    },
+    proposal: {
+      proposalId: `proposal-device-${suffix}`,
+      fellowId: `fellow-device-${suffix}`,
+      flowHandleHash: `flow-device-${suffix}`,
+      name: `device-${suffix.toLowerCase()}`,
+      model: "test-model",
+      harness: "codex",
+      createdAt: NOW,
+      expiresAt: NOW + 24 * 60 * 60_000,
+      status: "pending",
+      pollIntervalSeconds: 5,
+    },
+    userCodeHash: `user-code-${suffix}`,
+    deviceExpiresAt: NOW + 30 * 60_000,
+  };
+}
+
+function isUnboundDeviceProposalQuery(query: string): boolean {
+  return (
+    query.includes("JOIN enrollment_proposals p") &&
+    query.includes("e.sponsor_id = ''") &&
+    query.includes("e.kind = 'device'")
+  );
+}
+
+describe("device enrollment first-decider SQL", () => {
+  test.each(["approve", "deny"] as const)(
+    "a stale pending pre-read cannot partially bind a sponsor before %s",
+    async (decision) => {
+      const sqlite = deviceDatabase();
+      let invalidatedPreRead = false;
+      const store = new D1EnrollmentStore(
+        localD1(sqlite, {
+          afterFirstRead: async (query) => {
+            if (invalidatedPreRead || !isUnboundDeviceProposalQuery(query)) {
+              return;
+            }
+            invalidatedPreRead = true;
+            sqlite
+              .prepare(
+                "UPDATE enrollment_proposals SET status = 'expired' WHERE status = 'pending'",
+              )
+              .run();
+          },
+        }),
+      );
+      const input = deviceInput(`stale-${decision}`);
+      await store.deviceCreate(input);
+
+      await expect(
+        store.decision({
+          enrollmentId: input.record.enrollmentId,
+          sponsorId: "usr_stale_pre_read",
+          decision: { enrollment_id: input.record.enrollmentId, decision },
+          now: NOW,
+        }),
+      ).rejects.toMatchObject({ code: "PROPOSAL_NOT_PENDING" } satisfies Partial<EnrollmentError>);
+
+      const state = sqlite
+        .prepare<{ sponsor_id: string; status: string }, [string]>(`SELECT e.sponsor_id, p.status
+             FROM enrollment_records e
+             JOIN enrollment_proposals p ON p.enrollment_id = e.enrollment_id
+            WHERE e.enrollment_id = ?`)
+        .get(input.record.enrollmentId);
+      expect(invalidatedPreRead).toBe(true);
+      expect(state).toEqual({ sponsor_id: "", status: "expired" });
+      expect(
+        sqlite.prepare<{ n: number }, []>("SELECT COUNT(*) AS n FROM enrollment_fellows").get()?.n,
+      ).toBe(0);
+      expect(
+        sqlite.prepare<{ n: number }, []>("SELECT COUNT(*) AS n FROM enrollment_grants").get()?.n,
+      ).toBe(0);
+    },
+  );
+
+  test.each([
+    ["approve", "approve"],
+    ["deny", "approve"],
+  ] as const)(
+    "two pre-read sponsors racing %s/%s commit exactly one verdict",
+    async (left, right) => {
+      const sqlite = deviceDatabase();
+      let arrivals = 0;
+      let releaseBarrier: (() => void) | undefined;
+      const barrier = new Promise<void>((resolve) => {
+        releaseBarrier = resolve;
+      });
+      const store = new D1EnrollmentStore(
+        localD1(sqlite, {
+          serializeBatches: true,
+          afterFirstRead: async (query) => {
+            if (!isUnboundDeviceProposalQuery(query)) return;
+            arrivals += 1;
+            if (arrivals === 2) releaseBarrier?.();
+            await barrier;
+          },
+        }),
+      );
+      const input = deviceInput(`${left}-${right}`);
+      await store.deviceCreate(input);
+
+      const decisions = [left, right] as const;
+      const sponsors = ["usr_device_left", "usr_device_right"] as const;
+      const outcomes = await Promise.allSettled(
+        decisions.map((decision, index) =>
+          store.decision({
+            enrollmentId: input.record.enrollmentId,
+            sponsorId: sponsors[index] as string,
+            decision: { enrollment_id: input.record.enrollmentId, decision },
+            now: NOW,
+          }),
+        ),
+      );
+
+      const winner = outcomes.findIndex((outcome) => outcome.status === "fulfilled");
+      const loser = outcomes.findIndex((outcome) => outcome.status === "rejected");
+      expect(winner).toBeGreaterThanOrEqual(0);
+      expect(loser).toBeGreaterThanOrEqual(0);
+      expect((outcomes[loser] as PromiseRejectedResult).reason).toMatchObject({
+        code: "PROPOSAL_NOT_PENDING",
+      } satisfies Partial<EnrollmentError>);
+
+      const recordRow = sqlite
+        .prepare<{ sponsor_id: string }, [string]>(
+          "SELECT sponsor_id FROM enrollment_records WHERE enrollment_id = ?",
+        )
+        .get(input.record.enrollmentId);
+      expect(recordRow?.sponsor_id).toBe(sponsors[winner]);
+      const expectedBindings = decisions[winner] === "deny" ? 0 : 1;
+      expect(
+        sqlite.prepare<{ n: number }, []>("SELECT COUNT(*) AS n FROM enrollment_fellows").get()?.n,
+      ).toBe(expectedBindings);
+      expect(
+        sqlite.prepare<{ n: number }, []>("SELECT COUNT(*) AS n FROM enrollment_grants").get()?.n,
+      ).toBe(expectedBindings);
+      expect(
+        sqlite.prepare<{ n: number }, []>("SELECT COUNT(*) AS n FROM enrollment_idempotency").get()
+          ?.n,
+      ).toBe(0);
+    },
+  );
+});
 
 function write(digest: string, marker: string, now = NOW) {
   return {

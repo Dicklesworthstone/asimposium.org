@@ -4,7 +4,10 @@ import type { MintEnrollmentRequest } from "@asimposium/contracts";
 
 import {
   AesGcmEnrollmentReplayProtector,
+  DEVICE_CODE_TTL_MS,
   EnrollmentError,
+  EnrollmentPersistenceError,
+  type EnrollmentRandom,
   EnrollmentReplayConfigurationError,
   EnrollmentService,
   InMemoryEnrollmentStore,
@@ -37,6 +40,12 @@ const fellow = { type: "fellow", fellowId: "fellow-opaque-1" } as const;
 const malformedSecret = ["v1", "short"].join(".");
 const wrongSecret = `v1.${"A".repeat(43)}`;
 const nonCredentialFlowHandle = `flow_v1.${"A".repeat(43)}`;
+const deviceProposal = {
+  name: "device-orchid",
+  model: "test-model",
+  harness: "test-harness",
+  requested_scopes: ["review"],
+} as const;
 
 function serviceFixture() {
   const clock = new MutableClock();
@@ -94,6 +103,78 @@ async function expectEnrollmentError(
 }
 
 describe("S-1 enrollment state machine", () => {
+  test("device codes use unbiased rejection sampling and bound a broken random source", async () => {
+    class TailThenLowRandom implements EnrollmentRandom {
+      #userBatches = 0;
+
+      bytes(length: number): Uint8Array {
+        if (length !== 8) return new Uint8Array(length);
+        this.#userBatches += 1;
+        return this.#userBatches === 1
+          ? Uint8Array.from({ length }, (_value, index) => 240 + index)
+          : Uint8Array.from({ length }, (_value, index) => index);
+      }
+    }
+    const tailThenLow = new TailThenLowRandom();
+    const sampled = new EnrollmentService({
+      store: new InMemoryEnrollmentStore(),
+      random: tailThenLow,
+      replayProtector: new AesGcmEnrollmentReplayProtector(new Uint8Array(32)),
+    });
+    expect((await sampled.deviceStart(deviceProposal)).user_code).toBe("ABCD-EFGH");
+
+    const broken: EnrollmentRandom = { bytes: (length) => new Uint8Array(length).fill(255) };
+    const unavailable = new EnrollmentService({
+      store: new InMemoryEnrollmentStore(),
+      random: broken,
+      replayProtector: new AesGcmEnrollmentReplayProtector(new Uint8Array(32)),
+    });
+    await expect(unavailable.deviceStart(deviceProposal)).rejects.toEqual(
+      new TypeError("secure random source could not produce a device user code"),
+    );
+  });
+
+  test("a memory-store user-code collision neither overwrites nor retargets the first proposal", async () => {
+    class SameUserCodeRandom implements EnrollmentRandom {
+      #call = 1;
+
+      bytes(length: number): Uint8Array {
+        if (length === 8) return new Uint8Array(length);
+        const value = this.#call;
+        this.#call = (this.#call + 1) % 240;
+        return new Uint8Array(length).fill(value);
+      }
+    }
+    const random = new SameUserCodeRandom();
+    const service = new EnrollmentService({
+      store: new InMemoryEnrollmentStore(),
+      random,
+      replayProtector: new AesGcmEnrollmentReplayProtector(new Uint8Array(32)),
+    });
+    const first = await service.deviceStart(deviceProposal);
+    await expect(
+      service.deviceStart({ ...deviceProposal, name: "second-device-orchid" }),
+    ).rejects.toBeInstanceOf(EnrollmentPersistenceError);
+    await expect(
+      service.deviceLookup(sponsor, { user_code: first.user_code }),
+    ).resolves.toMatchObject({ name: deviceProposal.name });
+  });
+
+  test("device user codes remain usable for exactly the Fable thirty-minute window", async () => {
+    const { clock, service } = serviceFixture();
+    const started = await service.deviceStart(deviceProposal);
+    expect(started.expires_in_seconds).toBe(30 * 60);
+    clock.value += DEVICE_CODE_TTL_MS - 1;
+    await expect(
+      service.deviceLookup(sponsor, { user_code: started.user_code }),
+    ).resolves.toMatchObject({ name: deviceProposal.name });
+    clock.value += 1;
+    await expectEnrollmentError(
+      service.deviceLookup(sponsor, { user_code: started.user_code }),
+      "DEVICE_CODE_UNKNOWN",
+    );
+  });
+
   test("mints a 256-bit fragment secret, stores only hashes, and issues one token after approval", async () => {
     const { service, store } = serviceFixture();
     const { enrollmentId, secret, flowHandle } = await mintAndClaim(service);

@@ -4,6 +4,10 @@ import { fileURLToPath } from "node:url";
 import { z } from "zod";
 
 import {
+  type DeviceCodeStartRequest,
+  type DeviceCodeStartResponse,
+  type DeviceLookupRequest,
+  type DeviceLookupResponse,
   type EnrollmentApprovalCard,
   type EnrollmentCapsuleProjection,
   type EnrollmentClaimResponse,
@@ -110,6 +114,10 @@ function generatedEnrollmentJsonSchema(): string {
 
 function generatedEnrollmentTypes(): string {
   const typeNames = [
+    "DeviceCodeStartRequest",
+    "DeviceCodeStartResponse",
+    "DeviceLookupRequest",
+    "DeviceLookupResponse",
     "EnrollmentFlowPollRequest",
     "EnrollmentApprovalCard",
     "EnrollmentCapsuleProjection",
@@ -124,6 +132,10 @@ function generatedEnrollmentTypes(): string {
     "RequestedScope",
     "SponsorEnrollmentDecision",
   ] as const satisfies readonly (keyof {
+    DeviceCodeStartRequest: DeviceCodeStartRequest;
+    DeviceCodeStartResponse: DeviceCodeStartResponse;
+    DeviceLookupRequest: DeviceLookupRequest;
+    DeviceLookupResponse: DeviceLookupResponse;
     EnrollmentFlowPollRequest: EnrollmentFlowPollRequest;
     EnrollmentApprovalCard: EnrollmentApprovalCard;
     EnrollmentCapsuleProjection: EnrollmentCapsuleProjection;

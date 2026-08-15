@@ -82,3 +82,18 @@ test("planted stale enrollment schema is rejected by the artifact manifest", () 
     artifact: "generated/enrollment.schema.json",
   });
 });
+
+test("the generated TypeScript face exports the complete device-flow contract", () => {
+  const artifact = generatedArtifacts().find(
+    (candidate) => candidate.relativePath === "generated/enrollment.types.ts",
+  );
+  expect(artifact).toBeDefined();
+  for (const typeName of [
+    "DeviceCodeStartRequest",
+    "DeviceCodeStartResponse",
+    "DeviceLookupRequest",
+    "DeviceLookupResponse",
+  ]) {
+    expect(artifact?.content, typeName).toContain(typeName);
+  }
+});

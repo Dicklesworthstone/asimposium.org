@@ -22,12 +22,20 @@ export const { handlers, auth, signIn, signOut } = NextAuth({
   providers: [Google],
   session: { strategy: "jwt" },
   callbacks: {
+    // Auth.js refreshes the JWT's standard `iat` whenever it serves a session,
+    // so `iat` cannot prove a recent Google sign-in. Preserve our own stable
+    // authentication time and advance it only when an OAuth account is
+    // present — the interactive sign-in/sign-up callback, never a session read.
+    jwt({ token, account }) {
+      if (account) token.authTime = Math.floor(Date.now() / 1_000);
+      return token;
+    },
     // The sponsor principal id Agora signs envelopes with: `usr_` plus the
     // Google `sub` — opaque, stable, never an email. The console and every
     // Stoa call gate on this canonical shape (isCanonicalSponsorId).
     session({ session, token }) {
       if (token.sub) session.user.id = `usr_${token.sub}`;
-      if (typeof token.iat === "number") session.authIssuedAt = token.iat;
+      if (typeof token.authTime === "number") session.authIssuedAt = token.authTime;
       return session;
     },
   },

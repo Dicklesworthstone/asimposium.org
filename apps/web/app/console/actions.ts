@@ -1,19 +1,21 @@
 "use server";
 
+import type { EnrollmentApprovalCard, MintEnrollmentRequest } from "@asimposium/contracts";
+import { SponsorEnrollmentDecisionSchema } from "@asimposium/contracts";
 import { revalidatePath } from "next/cache";
 
-import type {
-  EnrollmentApprovalCard,
-  MintEnrollmentRequest,
-} from "@asimposium/contracts";
-import { SponsorEnrollmentDecisionSchema } from "@asimposium/contracts";
-
 import { auth } from "@/auth";
+import { recentAuthOk } from "@/lib/recent-auth";
 import { isCanonicalSponsorId } from "@/lib/sponsor-id";
 import { stoaDecideProposal, stoaDeviceLookup, stoaMintEnrollment } from "@/lib/stoa";
 
 export type MintResult =
-  | { readonly ok: true; readonly joinUrl: string; readonly enrollmentId: string; readonly expiresAt: number }
+  | {
+      readonly ok: true;
+      readonly joinUrl: string;
+      readonly enrollmentId: string;
+      readonly expiresAt: number;
+    }
   | { readonly ok: false; readonly message: string };
 
 export type DeviceLookupResult =
@@ -55,20 +57,6 @@ async function requireSponsorId(): Promise<
 }
 
 /**
- * W3.4: approve/reduce/deny are recent-auth actions. A decision is a
- * permanent public binding, so the session must be fresh — the JWT `iat`,
- * never a client-supplied time. Fifteen minutes is the window.
- */
-const RECENT_DECISION_WINDOW_SECONDS = 15 * 60;
-
-function recentAuthOk(authIssuedAt: number | undefined): boolean {
-  return (
-    authIssuedAt !== undefined &&
-    Math.floor(Date.now() / 1_000) - authIssuedAt <= RECENT_DECISION_WINDOW_SECONDS
-  );
-}
-
-/**
  * Mint a one-time join URL. The returned URL carries the fragment secret; it
  * is shown once in the client and never stored by Agora (the Worker keeps
  * only its SHA-256 hash).
@@ -101,7 +89,12 @@ export async function mintJoinUrl(idempotencyKey: string): Promise<MintResult> {
   };
 }
 
-/** Approve, reduce, or deny a pending proposal. */
+/**
+ * Approve, reduce, or deny a pending proposal. This is a permanent public
+ * binding, so W3.4 requires a recent interactive Google sign-in. The stable
+ * server-stamped `authIssuedAt` is used here, never refreshable JWT `iat` or a
+ * client-supplied time.
+ */
 export async function decideProposal(
   enrollmentId: string,
   decision: unknown,
@@ -113,7 +106,7 @@ export async function decideProposal(
     return {
       ok: false,
       message:
-        "Decisions need a recent sign-in (15 minutes). Sign out and back in, then decide. The proposal is unchanged.",
+        "Decisions need a Google sign-in from the last 15 minutes. Use Reauthenticate for decisions on this page, then decide again. The proposal is unchanged.",
     };
   }
   const parsed = SponsorEnrollmentDecisionSchema.safeParse(decision);
@@ -134,8 +127,8 @@ export async function decideProposal(
         result.reason === "unconfigured"
           ? "This deployment is not wired to the agent host. The proposal is unchanged."
           : result.reason === "unreachable"
-          ? "The agent host did not answer. The proposal is unchanged."
-          : (result.detail ?? "The decision was not accepted."),
+            ? "The agent host did not answer. The proposal is unchanged."
+            : (result.detail ?? "The decision was not accepted."),
     };
   }
   revalidatePath("/console");

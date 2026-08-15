@@ -88,6 +88,18 @@ describe("Propylon configuration (Fable §5.1, §14.1) — structural guard", ()
     expect(surface.cookies.keys).toContain("httpOnly");
   });
 
+  test("ordinary session reads cannot refresh the recent-auth claim", () => {
+    expect(surface.recentAuth).toMatchObject({
+      callbacksPresent: true,
+      unresolvable: false,
+      jwtStampCount: 1,
+      safeJwtStampCount: 1,
+      sessionProjectionCount: 1,
+      safeSessionProjectionCount: 1,
+      iatReads: [],
+    });
+  });
+
   test("the file contains exactly one environment expression: process.env.NODE_ENV", () => {
     // Auth.js resolves AUTH_* itself at request time, so auth.ts never needs a
     // secret at any scope. The rule is an allowlist over the whole file rather
@@ -120,14 +132,32 @@ describe("sponsor console trust boundary", () => {
     expect(actions).toContain("parsed.data.enrollment_id !== enrollmentId");
   });
 
+  test("the explicit step-up buttons force a Google challenge", () => {
+    const consolePage = readPackageFile("app/console/page.tsx");
+    const approvePage = readPackageFile("app/approve/page.tsx");
+    for (const page of [consolePage, approvePage]) {
+      expect(page).toContain('prompt: "login"');
+      expect(page).toContain('max_age: "0"');
+      expect(page).toContain("Reauthenticate for decisions");
+    }
+  });
+
   test("the console exposes state changes and expandable controls to assistive technology", () => {
     const cards = readPackageFile("app/console/cards.tsx");
     const page = readPackageFile("app/console/page.tsx");
+    const deviceForm = readPackageFile("app/approve/form.tsx");
     expect(cards).toContain('aria-live="polite"');
     expect(cards).toContain("aria-expanded={reduceOpen}");
     expect(cards).toContain('role="alert"');
     expect(page).toContain('aria-labelledby="account-title"');
     expect(page).not.toMatch(/<section[^>]+aria-label=/);
+    expect(deviceForm.match(/aria-live="polite"/gu)).toHaveLength(1);
+    expect(deviceForm).toContain('className="sr-only"');
+    expect(deviceForm).toContain("Proposal found");
+    expect(deviceForm).toContain("That character is not used in device codes.");
+    expect(deviceForm).not.toContain('aria-label="Device code"');
+    expect(deviceForm).toContain("Approve another agent");
+    expect(deviceForm).toContain("Enter a different code");
   });
 });
 
@@ -218,11 +248,7 @@ describe("OPS.1 gate entry points", () => {
     expect(manifest.dependencies["next"]).toMatch(/^16\./);
     expect(manifest.dependencies["next-auth"]).toMatch(/^5\./);
     expect(manifest.devDependencies["tailwindcss"]).toMatch(/^4\./);
-    expect(readPackageFile("postcss.config.mjs")).toContain(
-      "@tailwindcss/postcss",
-    );
-    expect(readPackageFile("app/globals.css")).toContain(
-      '@import "tailwindcss"',
-    );
+    expect(readPackageFile("postcss.config.mjs")).toContain("@tailwindcss/postcss");
+    expect(readPackageFile("app/globals.css")).toContain('@import "tailwindcss"');
   });
 });

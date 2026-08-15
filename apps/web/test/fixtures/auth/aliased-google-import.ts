@@ -6,6 +6,16 @@ import Idp from "next-auth/providers/google";
 
 export const { handlers, auth, signIn, signOut } = NextAuth({
   providers: [Idp({ allowDangerousEmailAccountLinking: false })],
+  callbacks: {
+    jwt({ token, account }) {
+      if (account) token.authTime = Math.floor(Date.now() / 1_000);
+      return token;
+    },
+    session({ session, token }) {
+      if (typeof token.authTime === "number") session.authIssuedAt = token.authTime;
+      return session;
+    },
+  },
   cookies: {
     sessionToken: {
       name: "asimp.session",

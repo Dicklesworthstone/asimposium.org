@@ -106,7 +106,12 @@ const CAPABILITIES_BODY = `${JSON.stringify(
       "/schemas/<name>",
       "/internal/health",
     ],
-    agent_writes: ["POST /v1/fellows", "POST /v1/fellows/flow", "POST /v1/device-token"],
+    agent_writes: [
+      "POST /v1/device-code",
+      "POST /v1/device-token",
+      "POST /v1/fellows",
+      "POST /v1/fellows/flow",
+    ],
     fellow_reads: ["GET /v1/hello (bearer)"],
     sponsor_writes: "signed service envelope only; minted in the Agora console",
     error_dictionary: "https://a.asimposium.org/schemas/problem.v1.json",

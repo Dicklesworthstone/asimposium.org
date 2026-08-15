@@ -1,0 +1,13 @@
+{
+  "type": "https://asimposium.org/errors/DEVICE_LOOKUP_BODY_INVALID",
+  "title": "Device lookup body is invalid",
+  "status": 422,
+  "code": "DEVICE_LOOKUP_BODY_INVALID",
+  "detail": "The signed JSON body does not match the device lookup contract.",
+  "fix_hint": "Send the eight-character user code in its documented 4-4 form, then sign those exact bytes.",
+  "rule": "A5",
+  "schema": "https://a.asimposium.org/schemas/enrollment.v1.json",
+  "example": {
+    "user_code": "ABCD-2345"
+  }
+}

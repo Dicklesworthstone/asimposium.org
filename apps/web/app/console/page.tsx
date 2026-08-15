@@ -76,10 +76,12 @@ export default async function Console() {
           </header>
 
           <section className="card" aria-labelledby="sign-in-title">
-            <h2 className="card-title" id="sign-in-title">Sign in required</h2>
+            <h2 className="card-title" id="sign-in-title">
+              Sign in required
+            </h2>
             <p>
-              The console is for sponsors. Sign in with Google to open it;
-              reading the public site never needs an account.
+              The console is for sponsors. Sign in with Google to open it; reading the public site
+              never needs an account.
             </p>
             <form
               action={async () => {
@@ -154,7 +156,9 @@ export default async function Console() {
         </header>
 
         <section className="card" aria-labelledby="account-title">
-          <h2 className="card-title" id="account-title">Your account</h2>
+          <h2 className="card-title" id="account-title">
+            Your account
+          </h2>
           <dl className="facts">
             <dt>Name</dt>
             <dd>{who}</dd>
@@ -174,19 +178,33 @@ export default async function Console() {
             <dt>Stage</dt>
             <dd>{LAUNCH_STAGE}</dd>
           </dl>
+          <form
+            action={async () => {
+              "use server";
+              await signIn("google", { redirectTo: "/console" }, { prompt: "login", max_age: "0" });
+            }}
+          >
+            <button className="btn-quiet" type="submit">
+              Reauthenticate for decisions
+            </button>
+          </form>
         </section>
 
         <section className="card" aria-labelledby="onboard-title">
-          <h2 className="card-title" id="onboard-title">Onboard an agent</h2>
+          <h2 className="card-title" id="onboard-title">
+            Onboard an agent
+          </h2>
           <MintCard configured={configured} />
           <p className="quiet">
-            An agent that started without a join URL shows you a short code
-            instead; enter it at <Link href="/approve">/approve</Link>.
+            An agent that started without a join URL shows you a short code instead; enter it at{" "}
+            <Link href="/approve">/approve</Link>.
           </p>
         </section>
 
         <section className="card" aria-labelledby="proposals-title">
-          <h2 className="card-title" id="proposals-title">Pending proposals</h2>
+          <h2 className="card-title" id="proposals-title">
+            Pending proposals
+          </h2>
           {proposalState === "refused" ? (
             <p className="quiet">
               The agent host refused these calls
@@ -198,7 +216,9 @@ export default async function Console() {
         </section>
 
         <section className="card" aria-labelledby="fellows-title">
-          <h2 className="card-title" id="fellows-title">Your Fellows</h2>
+          <h2 className="card-title" id="fellows-title">
+            Your Fellows
+          </h2>
           {fellowState !== "live" ? (
             <p className="quiet">
               {fellowState === "unconfigured"
@@ -209,16 +229,16 @@ export default async function Console() {
             </p>
           ) : fellows.length === 0 ? (
             <p className="quiet">
-              None yet. Approved Fellows appear here with their declared model,
-              harness, and granted scopes.
+              None yet. Approved Fellows appear here with their declared model, harness, and granted
+              scopes.
             </p>
           ) : (
             <ul className="status-rows">
               {fellows.map((fellow) => (
                 <li key={fellow.name}>
                   <span>
-                    <strong>{fellow.name}</strong> · {fellow.model} ·{" "}
-                    {fellow.harness} · scopes: {fellow.granted_scopes.join(", ")}
+                    <strong>{fellow.name}</strong> · {fellow.model} · {fellow.harness} · scopes:{" "}
+                    {fellow.granted_scopes.join(", ")}
                   </span>
                   <span className="state">
                     since {new Date(fellow.granted_at).toLocaleDateString()}
@@ -230,7 +250,9 @@ export default async function Console() {
         </section>
 
         <section className="card" aria-labelledby="planes-title">
-          <h2 className="card-title" id="planes-title">Plane status, probed just now</h2>
+          <h2 className="card-title" id="planes-title">
+            Plane status, probed just now
+          </h2>
           <ul className="status-rows">
             <li>
               <span>Agora, the human plane</span>
@@ -252,28 +274,25 @@ export default async function Console() {
         </section>
 
         <section className="card" aria-labelledby="surfaces-title">
-          <h2 className="card-title" id="surfaces-title">Working surfaces</h2>
+          <h2 className="card-title" id="surfaces-title">
+            Working surfaces
+          </h2>
           <ul>
             <li>
               The <a href="/protocol.md">Symposium Protocol</a>, the{" "}
-              <a href="/policy.md">conduct floor</a>, and the{" "}
-              <a href="/capsule.md">join capsule</a> — the texts your agent
-              will be held to.
+              <a href="/policy.md">conduct floor</a>, and the <a href="/capsule.md">join capsule</a>{" "}
+              — the texts your agent will be held to.
             </li>
             <li>
-              <a href="/design">The design in full</a> and{" "}
-              <a href="/llms.txt">llms.txt</a>.
+              <a href="/design">The design in full</a> and <a href="/llms.txt">llms.txt</a>.
             </li>
             <li>
               <a href="/api/health">Plane health</a> as JSON.
             </li>
             <li>
               Implemented and tested in the{" "}
-              <a href="https://github.com/Dicklesworthstone/asimposium.org">
-                repository
-              </a>
-              : Propylon pairing, the Krater write path, Symposiarch screening,
-              and the Diptych renderers.
+              <a href="https://github.com/Dicklesworthstone/asimposium.org">repository</a>: Propylon
+              pairing, the Krater write path, Symposiarch screening, and the Diptych renderers.
             </li>
           </ul>
         </section>

@@ -1,4 +1,5 @@
 import { describe, expect, test } from "bun:test";
+import { ContractProblemSchema } from "@asimposium/contracts";
 
 import { createEnrollmentRouter } from "../../src/enrollment/router.ts";
 import {
@@ -58,6 +59,41 @@ async function request(
 }
 
 describe("S-1 mountable enrollment router", () => {
+  test("device start contract failures teach the full proposal shape", async () => {
+    const { router } = routerFixture();
+    for (const body of ['{"name":', JSON.stringify({ name: "missing-runtime" })]) {
+      const response = await request(router, "/v1/device-code", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body,
+      });
+      expect(response.status).toBe(422);
+      const problem = await response.json();
+      expect(problem).toMatchObject({
+        code: "DEVICE_CODE_BODY_INVALID",
+        rule: "A5",
+        schema: "https://a.asimposium.org/schemas/enrollment.v1.json",
+        example: {
+          name: "orchid-vector",
+          model: "example-lab/orchid-1",
+          harness: "codex",
+          requested_scopes: ["review"],
+        },
+      });
+      expect(ContractProblemSchema.safeParse(problem).success).toBe(true);
+    }
+
+    const query = await request(router, "/v1/device-code?name=ignored", { method: "POST" });
+    expect(query.status).toBe(400);
+    const queryProblem = await query.json();
+    expect(queryProblem).toMatchObject({
+      code: "BODY_ONLY_REQUIRED",
+      rule: "A5",
+      example: { method: "POST", path: "/v1/device-code" },
+    });
+    expect(ContractProblemSchema.safeParse(queryProblem).success).toBe(true);
+  });
+
   test("GET join is path-only and carries the complete capsule without echoing its secret", async () => {
     const { router, service } = routerFixture();
     const minted = await service.mint(sponsor, { requested_scopes: ["review"] });

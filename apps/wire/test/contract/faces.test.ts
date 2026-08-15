@@ -72,6 +72,19 @@ const INTERNAL_ERROR =
   '"fix_hint":"Retry the request. If it persists, report the route and the time of the attempt."}';
 
 describe("face wire format", () => {
+  test("GET /capabilities names every live agent enrollment write", async () => {
+    const res = await callWorker("/capabilities", {});
+    expect(res.status).toBe(200);
+    expect(res.headers.get("cache-control")).toContain("max-age=60");
+    const body = JSON.parse(res.bodyText) as { agent_writes: string[] };
+    expect(body.agent_writes).toEqual([
+      "POST /v1/device-code",
+      "POST /v1/device-token",
+      "POST /v1/fellows",
+      "POST /v1/fellows/flow",
+    ]);
+  });
+
   test("GET / is the exact handbook, independent of D1", async () => {
     const document = getDocument("handbook");
     const res = await callWorker("/", {});

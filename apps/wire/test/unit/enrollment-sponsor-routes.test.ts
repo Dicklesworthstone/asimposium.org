@@ -1,8 +1,10 @@
 import { describe, expect, test } from "bun:test";
 import {
+  ContractProblemSchema,
   DeviceCodeStartResponseSchema,
   DeviceLookupResponseSchema,
   MintEnrollmentResponseSchema,
+  OpaqueProblemSchema,
   ProblemDocumentSchema,
   SponsorEnrollmentDecisionResponseSchema,
   SponsorFellowListResponseSchema,
@@ -929,14 +931,23 @@ describe("sponsor enrollment routes", () => {
     expect(started.user_code).toMatch(/^[A-Z2-9]{4}-[A-Z2-9]{4}$/);
 
     // The unbound proposal appears in NO sponsor's pending list.
-    const listHeaders = await h.sign("", "/v1/enrollments/proposals", "enrollment.proposals.list", "GET");
-    const list = await h.app.fetch(envelopeRequest("/v1/enrollments/proposals", listHeaders, "GET"));
+    const listHeaders = await h.sign(
+      "",
+      "/v1/enrollments/proposals",
+      "enrollment.proposals.list",
+      "GET",
+    );
+    const list = await h.app.fetch(
+      envelopeRequest("/v1/enrollments/proposals", listHeaders, "GET"),
+    );
     expect(SponsorProposalListResponseSchema.parse(await list.json()).proposals).toHaveLength(0);
 
     // The sponsor looks it up by the human code and gets the full card.
     const lookupBody = JSON.stringify({ user_code: started.user_code });
     const lookupHeaders = await h.sign(lookupBody, "/v1/device-lookup", "enrollment.device.lookup");
-    const lookup = await h.app.fetch(envelopeRequest("/v1/device-lookup", lookupHeaders, "POST", lookupBody));
+    const lookup = await h.app.fetch(
+      envelopeRequest("/v1/device-lookup", lookupHeaders, "POST", lookupBody),
+    );
     expect(lookup.status).toBe(200);
     const card = DeviceLookupResponseSchema.parse(await lookup.json()).card;
     expect(card).toMatchObject({ name: "device-drifter", status: "pending" });
@@ -949,7 +960,12 @@ describe("sponsor enrollment routes", () => {
       "enrollment.decide",
     );
     const decided = await h.app.fetch(
-      envelopeRequest(`/v1/enrollments/${card.enrollment_id}/decision`, decisionHeaders, "POST", decisionBody),
+      envelopeRequest(
+        `/v1/enrollments/${card.enrollment_id}/decision`,
+        decisionHeaders,
+        "POST",
+        decisionBody,
+      ),
     );
     expect(decided.status).toBe(200);
 
@@ -986,7 +1002,9 @@ describe("sponsor enrollment routes", () => {
       expect(res.status).toBe(404);
     }
     const headers = await h.sign(badBody, "/v1/device-lookup", "enrollment.device.lookup");
-    const locked = await h.app.fetch(envelopeRequest("/v1/device-lookup", headers, "POST", badBody));
+    const locked = await h.app.fetch(
+      envelopeRequest("/v1/device-lookup", headers, "POST", badBody),
+    );
     expect(locked.status).toBe(429);
     expect(await locked.json()).toMatchObject({ code: "DEVICE_LOOKUP_LOCKED" });
   });
@@ -996,6 +1014,39 @@ describe("sponsor enrollment routes", () => {
     const badBody = JSON.stringify({ user_code: "not-a-code" });
     const headers = await h.sign(badBody, "/v1/device-lookup", "enrollment.device.lookup");
     const res = await h.app.fetch(envelopeRequest("/v1/device-lookup", headers, "POST", badBody));
+    expect(res.status).toBe(422);
+    const problem = await res.json();
+    expect(problem).toMatchObject({
+      code: "DEVICE_LOOKUP_BODY_INVALID",
+      rule: "A5",
+      schema: "https://a.asimposium.org/schemas/enrollment.v1.json",
+      example: { user_code: "ABCD-2345" },
+    });
+    expect(ContractProblemSchema.safeParse(problem).success).toBe(true);
+    expect(OpaqueProblemSchema.safeParse(problem).success).toBe(false);
+  });
+
+  test("valid-but-unknown user codes remain one opaque non-oracle face", async () => {
+    const h = await harness();
+    const body = JSON.stringify({ user_code: "ABCD-2345" });
+    const headers = await h.sign(body, "/v1/device-lookup", "enrollment.device.lookup");
+    const res = await h.app.fetch(envelopeRequest("/v1/device-lookup", headers, "POST", body));
     expect(res.status).toBe(404);
+    const problem = await res.json();
+    expect(problem).toMatchObject({ code: "DEVICE_CODE_UNKNOWN" });
+    expect(problem).not.toHaveProperty("rule");
+    expect(problem).not.toHaveProperty("schema");
+    expect(problem).not.toHaveProperty("example");
+    expect(OpaqueProblemSchema.safeParse(problem).success).toBe(true);
+    expect(ContractProblemSchema.safeParse(problem).success).toBe(false);
+  });
+
+  test("malformed signed JSON is a teaching lookup error, never a false outage", async () => {
+    const h = await harness();
+    const body = '{"user_code":';
+    const headers = await h.sign(body, "/v1/device-lookup", "enrollment.device.lookup");
+    const res = await h.app.fetch(envelopeRequest("/v1/device-lookup", headers, "POST", body));
+    expect(res.status).toBe(422);
+    expect(await res.json()).toMatchObject({ code: "DEVICE_LOOKUP_BODY_INVALID", rule: "A5" });
   });
 });

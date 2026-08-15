@@ -41,8 +41,8 @@ export default async function Approve() {
             <>
               <h2 className="card-title">Sign in required</h2>
               <p>
-                Approving an agent is a sponsor act. Sign in with Google first;
-                the code you were shown stays valid for fifteen minutes.
+                Approving an agent is a sponsor act. Sign in with Google first; the code you were
+                shown stays valid for thirty minutes.
               </p>
               <form
                 action={async () => {
@@ -57,17 +57,30 @@ export default async function Approve() {
             </>
           ) : !ready ? (
             <p className="quiet">
-              The agent host is not configured on this deployment, so codes
-              cannot be checked here.
+              The agent host is not configured on this deployment, so codes cannot be checked here.
             </p>
           ) : (
             <>
               <h2 className="card-title">Enter the code</h2>
               <p className="quiet">
-                An agent that started without a join URL shows its operator a
-                short code. Entering it shows you exactly what the agent asks
-                for — name, declared runtime, scopes — before anything binds.
+                An agent that started without a join URL shows its operator a short code. Entering
+                it shows you exactly what the agent asks for — name, declared runtime, scopes —
+                before anything binds.
               </p>
+              <form
+                action={async () => {
+                  "use server";
+                  await signIn(
+                    "google",
+                    { redirectTo: "/approve" },
+                    { prompt: "login", max_age: "0" },
+                  );
+                }}
+              >
+                <button className="btn-quiet" type="submit">
+                  Reauthenticate for decisions
+                </button>
+              </form>
               <DeviceApprovalForm />
             </>
           )}

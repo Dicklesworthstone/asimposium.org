@@ -14,6 +14,14 @@ const VALID_MINT_BODY_INVALID = new URL(
   "../fixtures/valid/problem-mint-body-invalid.json",
   import.meta.url,
 );
+const VALID_DEVICE_LOOKUP_BODY_INVALID = new URL(
+  "../fixtures/valid/problem-device-lookup-body-invalid.json",
+  import.meta.url,
+);
+const INVALID_DEVICE_LOOKUP_BODY_INVALID_UNTAUGHT = new URL(
+  "../fixtures/invalid/problem-device-lookup-body-invalid-untaught.json",
+  import.meta.url,
+);
 const INVALID_UNTAUGHT = new URL(
   "../fixtures/invalid/problem-mint-body-invalid-untaught.json",
   import.meta.url,
@@ -37,6 +45,7 @@ const VALID_ADDITIONAL_PROBLEMS = [
   ["problem-route-not-found.json", "ROUTE_NOT_FOUND", 404, "opaque"],
   ["problem-internal-error.json", "INTERNAL_ERROR", 500, "opaque"],
   ["problem-enrollment-id-invalid.json", "ENROLLMENT_ID_INVALID", 422, "contract"],
+  ["problem-device-code-body-invalid.json", "DEVICE_CODE_BODY_INVALID", 422, "contract"],
   ["problem-unknown-format.json", "UNKNOWN_FORMAT", 400, "contract"],
 ] as const;
 
@@ -55,6 +64,26 @@ test("the MINT_BODY_INVALID refusal the Worker emits validates as a contract pro
   expect(parsed.data.code).toBe("MINT_BODY_INVALID");
   expect(parsed.data.type).toBe(`${PROBLEM_TYPE_PREFIX}MINT_BODY_INVALID`);
   expect(parsed.data.status).toBe(422);
+});
+
+test("malformed device lookup input teaches only the public body shape", async () => {
+  const document = await fixture(VALID_DEVICE_LOOKUP_BODY_INVALID);
+  const parsed = ProblemDocumentSchema.safeParse(document);
+  expect(parsed.success).toBe(true);
+  expect(ContractProblemSchema.safeParse(document).success).toBe(true);
+  expect(OpaqueProblemSchema.safeParse(document).success).toBe(false);
+  expect(
+    ProblemDocumentSchema.safeParse(await fixture(INVALID_DEVICE_LOOKUP_BODY_INVALID_UNTAUGHT))
+      .success,
+  ).toBe(false);
+  if (!parsed.success) return;
+  expect(parsed.data).toMatchObject({
+    code: "DEVICE_LOOKUP_BODY_INVALID",
+    status: 422,
+    rule: "A5",
+    schema: "https://a.asimposium.org/schemas/enrollment.v1.json",
+    example: { user_code: "ABCD-2345" },
+  });
 });
 
 test("mounted boundary, auth, and enrollment-id problems are in the closed contract", async () => {

@@ -37,6 +37,10 @@
  *     `globalThis` anywhere in the file — aliased, bracketed, computed, inside
  *     a callback, inside an IIFE, inside a static initialiser — is refused.
  *     Auth.js resolves `AUTH_*` itself; this file never needs a secret.
+ *  6. **Recent authentication uses a stable custom claim.** The JWT callback
+ *     stamps `authTime` only while an OAuth account is present, and the session
+ *     callback projects only that claim. Auth.js refreshes standard `iat` on
+ *     session reads, so consulting it would turn page refresh into step-up.
  *
  * Anything unresolvable is a refusal. A checker that treats "I could not see
  * it" as "it is not there" reports a property it never established.
@@ -68,7 +72,9 @@ export type AuthViolationCode =
   | "AUTH_COOKIE_CONFIG_MISSING"
   | "AUTH_COOKIE_DOMAIN_SET"
   | "AUTH_COOKIE_UNRESOLVABLE"
-  | "AUTH_ENV_ACCESS_FORBIDDEN";
+  | "AUTH_ENV_ACCESS_FORBIDDEN"
+  | "AUTH_RECENT_AUTH_CONFIG_MISSING"
+  | "AUTH_RECENT_AUTH_REFRESHABLE";
 
 export interface AuthViolation {
   code: AuthViolationCode;
@@ -155,6 +161,16 @@ const RULES: Record<AuthViolationCode, { rule: string; fix_hint: string }> = {
     fix_hint:
       "`process.env.NODE_ENV` is the only environment expression allowed in auth.ts. Auth.js resolves AUTH_* itself; read anything else in a module of its own.",
   },
+  AUTH_RECENT_AUTH_CONFIG_MISSING: {
+    rule: "ASI-RECENT-AUTH",
+    fix_hint:
+      "Configure literal jwt and session callbacks. Stamp token.authTime only when an OAuth account is present, then project that stable claim to session.authIssuedAt.",
+  },
+  AUTH_RECENT_AUTH_REFRESHABLE: {
+    rule: "ASI-RECENT-AUTH",
+    fix_hint:
+      "Never derive recent authentication from token.iat or an unconditional JWT callback. Auth.js refreshes iat on session reads; use the account-guarded token.authTime claim.",
+  },
 };
 
 const NEXT_AUTH_MODULE = "next-auth";
@@ -165,10 +181,7 @@ const GOOGLE_PROVIDER = `${PROVIDER_PREFIX}google`;
  * Modules `auth.ts` may import. Adding an entry is a deliberate decision about
  * what can influence identity, and belongs in a commit a reviewer reads.
  */
-export const ALLOWED_IMPORTS: ReadonlySet<string> = new Set([
-  NEXT_AUTH_MODULE,
-  GOOGLE_PROVIDER,
-]);
+export const ALLOWED_IMPORTS: ReadonlySet<string> = new Set([NEXT_AUTH_MODULE, GOOGLE_PROVIDER]);
 
 /**
  * Global objects that can reach the process environment. Every syntactic route
@@ -245,6 +258,19 @@ export interface AuthSurface {
   wiring: ExportWiring;
   /** Source text of each dynamic-code escape hatch found in the file. */
   dynamicCode: string[];
+  recentAuth: RecentAuthSurface;
+}
+
+export interface RecentAuthSurface {
+  callbacksPresent: boolean;
+  unresolvable: boolean;
+  jwtPresent: boolean;
+  sessionPresent: boolean;
+  jwtStampCount: number;
+  safeJwtStampCount: number;
+  sessionProjectionCount: number;
+  safeSessionProjectionCount: number;
+  iatReads: string[];
 }
 
 function parse(source: string, fileName: string): ts.SourceFile {
@@ -432,6 +458,221 @@ export function sessionCookieOptions(sourceFile: ts.SourceFile): SessionCookieOp
   return { present: true, keys, unresolvable };
 }
 
+type CallbackFunction = ts.MethodDeclaration | ts.ArrowFunction | ts.FunctionExpression;
+
+function callbackFunction(
+  callbacks: ts.ObjectLiteralExpression,
+  key: string,
+): { fn: CallbackFunction | undefined; unresolvable: boolean } {
+  let fn: CallbackFunction | undefined;
+  let unresolvable = false;
+  for (const element of callbacks.properties) {
+    if (ts.isSpreadAssignment(element)) {
+      unresolvable = true;
+      continue;
+    }
+    if (literalPropertyName(element) !== key) continue;
+    if (ts.isMethodDeclaration(element)) fn = element;
+    else if (
+      ts.isPropertyAssignment(element) &&
+      (ts.isArrowFunction(element.initializer) || ts.isFunctionExpression(element.initializer))
+    ) {
+      fn = element.initializer;
+    } else {
+      unresolvable = true;
+    }
+  }
+  return { fn, unresolvable };
+}
+
+function callbackBinding(fn: CallbackFunction, publicName: string): string | undefined {
+  const parameter = fn.parameters[0];
+  if (parameter === undefined || !ts.isObjectBindingPattern(parameter.name)) return undefined;
+  for (const element of parameter.name.elements) {
+    if (!ts.isIdentifier(element.name)) continue;
+    const sourceName = element.propertyName;
+    const name =
+      sourceName !== undefined && (ts.isIdentifier(sourceName) || ts.isStringLiteral(sourceName))
+        ? sourceName.text
+        : element.name.text;
+    if (name === publicName) return element.name.text;
+  }
+  return undefined;
+}
+
+function propertyAccess(
+  node: ts.Node | undefined,
+  objectName: string | undefined,
+  propertyName: string,
+): node is ts.PropertyAccessExpression {
+  return (
+    node !== undefined &&
+    objectName !== undefined &&
+    ts.isPropertyAccessExpression(node) &&
+    ts.isIdentifier(node.expression) &&
+    node.expression.text === objectName &&
+    node.name.text === propertyName
+  );
+}
+
+function staticPropertyName(node: ts.Node | undefined): string | undefined {
+  if (node === undefined) return undefined;
+  if (ts.isPropertyAccessExpression(node)) return node.name.text;
+  if (ts.isElementAccessExpression(node)) {
+    const argument = node.argumentExpression;
+    if (argument !== undefined && ts.isStringLiteralLike(argument)) return argument.text;
+  }
+  return undefined;
+}
+
+function isWithin(node: ts.Node, ancestor: ts.Node): boolean {
+  for (let parent: ts.Node | undefined = node; parent !== undefined; parent = parent.parent) {
+    if (parent === ancestor) return true;
+  }
+  return false;
+}
+
+function isEpochSecondsNow(node: ts.Expression): boolean {
+  if (!ts.isCallExpression(node) || node.arguments.length !== 1) return false;
+  if (!propertyAccess(node.expression, "Math", "floor")) return false;
+  const quotient = node.arguments[0];
+  if (
+    quotient === undefined ||
+    !ts.isBinaryExpression(quotient) ||
+    quotient.operatorToken.kind !== ts.SyntaxKind.SlashToken
+  ) {
+    return false;
+  }
+  return (
+    ts.isCallExpression(quotient.left) &&
+    quotient.left.arguments.length === 0 &&
+    propertyAccess(quotient.left.expression, "Date", "now") &&
+    ts.isNumericLiteral(quotient.right) &&
+    quotient.right.text === "1000"
+  );
+}
+
+function isInsideTruthyIf(node: ts.Node, binding: string | undefined, stop: ts.Node): boolean {
+  let child = node;
+  for (let parent = node.parent; parent !== undefined && parent !== stop; parent = parent.parent) {
+    if (
+      ts.isIfStatement(parent) &&
+      child === parent.thenStatement &&
+      binding !== undefined &&
+      ts.isIdentifier(parent.expression) &&
+      parent.expression.text === binding
+    ) {
+      return true;
+    }
+    child = parent;
+  }
+  return false;
+}
+
+function isInsideNumberGuard(
+  node: ts.Node,
+  tokenBinding: string | undefined,
+  stop: ts.Node,
+): boolean {
+  let child = node;
+  for (let parent = node.parent; parent !== undefined && parent !== stop; parent = parent.parent) {
+    if (ts.isIfStatement(parent) && child === parent.thenStatement) {
+      const condition = parent.expression;
+      if (
+        ts.isBinaryExpression(condition) &&
+        [ts.SyntaxKind.EqualsEqualsToken, ts.SyntaxKind.EqualsEqualsEqualsToken].includes(
+          condition.operatorToken.kind,
+        ) &&
+        ts.isTypeOfExpression(condition.left) &&
+        propertyAccess(condition.left.expression, tokenBinding, "authTime") &&
+        ts.isStringLiteral(condition.right) &&
+        condition.right.text === "number"
+      ) {
+        return true;
+      }
+    }
+    child = parent;
+  }
+  return false;
+}
+
+/** Prove that ordinary session reads cannot refresh the decision step-up time. */
+export function recentAuthSurface(sourceFile: ts.SourceFile): RecentAuthSurface {
+  const empty: RecentAuthSurface = {
+    callbacksPresent: false,
+    unresolvable: false,
+    jwtPresent: false,
+    sessionPresent: false,
+    jwtStampCount: 0,
+    safeJwtStampCount: 0,
+    sessionProjectionCount: 0,
+    safeSessionProjectionCount: 0,
+    iatReads: [],
+  };
+  const config = nextAuthConfig(sourceFile);
+  if (config === undefined) return empty;
+  const lookup = propertyOf(config, "callbacks");
+  const callbacks = asObjectLiteral(lookup.value);
+  if (callbacks === undefined) return { ...empty, unresolvable: lookup.unresolvable };
+
+  const jwt = callbackFunction(callbacks, "jwt");
+  const session = callbackFunction(callbacks, "session");
+  const surface = {
+    ...empty,
+    callbacksPresent: true,
+    unresolvable: lookup.unresolvable || jwt.unresolvable || session.unresolvable,
+    jwtPresent: jwt.fn !== undefined,
+    sessionPresent: session.fn !== undefined,
+  };
+
+  // Bindings are resolved while walking the complete source. That matters: a
+  // helper or alias outside the callback must not be able to add a second
+  // refreshable write that a callback-local walk never sees.
+  const jwtToken = jwt.fn === undefined ? undefined : callbackBinding(jwt.fn, "token");
+  const account = jwt.fn === undefined ? undefined : callbackBinding(jwt.fn, "account");
+  const sessionToken = session.fn === undefined ? undefined : callbackBinding(session.fn, "token");
+  const sessionBinding =
+    session.fn === undefined ? undefined : callbackBinding(session.fn, "session");
+  const visit = (node: ts.Node): void => {
+    // `iat` is forbidden anywhere in executable auth configuration, including
+    // through aliases or helpers. It is refreshable by Auth.js and therefore
+    // cannot be authentication-age evidence in any spelling.
+    if (ts.isIdentifier(node) && node.text === "iat") {
+      surface.iatReads.push(node.getText(sourceFile));
+    }
+    if (ts.isBinaryExpression(node) && node.operatorToken.kind === ts.SyntaxKind.EqualsToken) {
+      const assignedProperty = staticPropertyName(node.left);
+      if (assignedProperty === "authTime") {
+        surface.jwtStampCount += 1;
+        if (
+          jwt.fn !== undefined &&
+          isWithin(node, jwt.fn) &&
+          propertyAccess(node.left, jwtToken, "authTime") &&
+          isEpochSecondsNow(node.right) &&
+          isInsideTruthyIf(node, account, jwt.fn)
+        ) {
+          surface.safeJwtStampCount += 1;
+        }
+      }
+      if (assignedProperty === "authIssuedAt") {
+        surface.sessionProjectionCount += 1;
+        if (
+          session.fn !== undefined &&
+          isWithin(node, session.fn) &&
+          propertyAccess(node.left, sessionBinding, "authIssuedAt") &&
+          propertyAccess(node.right, sessionToken, "authTime") &&
+          isInsideNumberGuard(node, sessionToken, session.fn)
+        ) {
+          surface.safeSessionProjectionCount += 1;
+        }
+      }
+    }
+    ts.forEachChild(node, visit);
+  };
+  visit(sourceFile);
+  return surface;
+}
+
 /** True when this identifier is a real value reference, not a name position. */
 function isValueReference(node: ts.Identifier): boolean {
   const parent = node.parent;
@@ -521,8 +762,7 @@ export function propylonExportWiring(sourceFile: ts.SourceFile): ExportWiring {
       for (const declaration of statement.declarationList.declarations) {
         const names: string[] = [];
         objectBindingNames(declaration.name, names);
-        const wired =
-          declaration.initializer !== undefined && calls.has(declaration.initializer);
+        const wired = declaration.initializer !== undefined && calls.has(declaration.initializer);
         for (const name of names) {
           if (isExported) exported.add(name);
           // Bindings destructured from the factory call, exported here or via
@@ -592,6 +832,7 @@ export function readAuthSurface(source: string, fileName = "auth.ts"): AuthSurfa
     envAccesses: envAccesses(sourceFile),
     wiring: propylonExportWiring(sourceFile),
     dynamicCode: dynamicCode(sourceFile),
+    recentAuth: recentAuthSurface(sourceFile),
   };
 }
 
@@ -623,6 +864,7 @@ function importViolations(surface: AuthSurface, file: string): AuthViolation[] {
 export function validateAuthConfig(source: string, file = "auth.ts"): AuthViolation[] {
   const surface = readAuthSurface(source, file);
   const providers = surface.providers;
+  const recentAuth = surface.recentAuth;
   const out: AuthViolation[] = [
     ...importViolations(surface, file),
     ...envViolations(surface, file),
@@ -654,6 +896,35 @@ export function validateAuthConfig(source: string, file = "auth.ts"): AuthViolat
       ),
     );
     return out;
+  }
+
+  if (
+    !recentAuth.callbacksPresent ||
+    !recentAuth.jwtPresent ||
+    !recentAuth.sessionPresent ||
+    recentAuth.unresolvable
+  ) {
+    out.push(
+      violation(
+        "AUTH_RECENT_AUTH_CONFIG_MISSING",
+        file,
+        "The jwt/session callback pair is absent or not a literal, statically resolvable configuration.",
+      ),
+    );
+  } else if (
+    recentAuth.jwtStampCount !== 1 ||
+    recentAuth.safeJwtStampCount !== 1 ||
+    recentAuth.sessionProjectionCount !== 1 ||
+    recentAuth.safeSessionProjectionCount !== 1 ||
+    recentAuth.iatReads.length > 0
+  ) {
+    out.push(
+      violation(
+        "AUTH_RECENT_AUTH_REFRESHABLE",
+        file,
+        `Recent-auth wiring is unsafe: ${recentAuth.jwtStampCount} authTime stamp(s), ${recentAuth.safeJwtStampCount} account-guarded epoch stamp(s), ${recentAuth.sessionProjectionCount} session projection(s), ${recentAuth.safeSessionProjectionCount} guarded stable projection(s), ${recentAuth.iatReads.length} iat read(s).`,
+      ),
+    );
   }
 
   if (surface.wiring.missing.length > 0) {

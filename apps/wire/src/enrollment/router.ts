@@ -1,10 +1,10 @@
 import {
+  DeviceCodeStartResponseSchema,
+  DeviceLookupResponseSchema,
   EnrollmentClaimResponseSchema,
   EnrollmentHelloResponseSchema,
   EnrollmentIdSchema,
   MintEnrollmentRequestSchema,
-  DeviceCodeStartResponseSchema,
-  DeviceLookupResponseSchema,
   MintEnrollmentResponseSchema,
   type ProblemCode,
   ProblemDocumentSchema,
@@ -23,6 +23,7 @@ import {
 } from "./capsule.ts";
 import {
   EnrollmentError,
+  type EnrollmentErrorCode,
   EnrollmentPersistenceError,
   type EnrollmentPrincipal,
   EnrollmentReplayConfigurationError,
@@ -288,13 +289,36 @@ function enrollmentErrorResponse(error: EnrollmentError, request: Request): Resp
           example: { enrollment_id: "ASIMP-EN-01JXYZ4K6Q", decision: "approve" },
         },
       );
+    case "DEVICE_CODE_BODY_INVALID":
+      return problem(
+        422,
+        error.code,
+        "Device-code request body is invalid",
+        "The JSON body does not match the proposal-carrying device-code contract.",
+        "Send the proposed name, declared model and harness, and requested scopes in the documented JSON body.",
+        enrollmentContractFields({
+          name: "orchid-vector",
+          model: "example-lab/orchid-1",
+          harness: "codex",
+          requested_scopes: ["review"],
+        }),
+      );
+    case "DEVICE_LOOKUP_BODY_INVALID":
+      return problem(
+        422,
+        error.code,
+        "Device lookup body is invalid",
+        "The signed JSON body does not match the device lookup contract.",
+        "Send the eight-character user code in its documented 4-4 form, then sign those exact bytes.",
+        enrollmentContractFields({ user_code: "ABCD-2345" }),
+      );
     case "DEVICE_CODE_UNKNOWN":
       return problem(
         404,
         "DEVICE_CODE_UNKNOWN",
         "No pending proposal for that code",
         "No pending device proposal matches that user code.",
-        "Check the code with the agent's operator. Codes expire fifteen minutes after they are shown.",
+        "Check the code with the agent's operator. Codes expire thirty minutes after they are shown.",
       );
     case "DEVICE_LOOKUP_LOCKED":
       return problem(
@@ -456,11 +480,14 @@ function sponsorPathOnlyResponse(request: Request, path: string): Response {
   );
 }
 
-async function jsonBody(request: Request): Promise<unknown> {
+async function jsonBody(
+  request: Request,
+  invalidCode: EnrollmentErrorCode = "PAIRING_INVALID",
+): Promise<unknown> {
   try {
     return await request.json();
   } catch {
-    throw new EnrollmentError("PAIRING_INVALID");
+    throw new EnrollmentError(invalidCode);
   }
 }
 
@@ -558,7 +585,7 @@ export function createEnrollmentRouter(options: EnrollmentRouterOptions): Hono {
 
   // W3.5: the one open write on the surface. An unaffiliated agent starts the
   // proposal-carrying device flow here; it has no credential yet by
-  // construction. Abuse is bounded by the 15-minute user-code TTL, the 24-hour
+  // construction. Abuse is bounded by the 30-minute user-code TTL, the 24-hour
   // proposal expiry, and the fact that unbound proposals are visible to no
   // sponsor until a human types the code.
   app.post("/v1/device-code", async (c) => {
@@ -569,10 +596,23 @@ export function createEnrollmentRouter(options: EnrollmentRouterOptions): Hono {
         "Device flow fields are body-only",
         "Device flow fields are not accepted in a URL query string.",
         "Send the documented JSON body without query parameters.",
+        enrollmentContractFields({
+          method: "POST",
+          path: "/v1/device-code",
+          headers: { "content-type": "application/json" },
+          body: {
+            name: "orchid-vector",
+            model: "example-lab/orchid-1",
+            harness: "codex",
+            requested_scopes: ["review"],
+          },
+        }),
       );
     }
     try {
-      const started = await options.service.deviceStart(await jsonBody(c.req.raw));
+      const started = await options.service.deviceStart(
+        await jsonBody(c.req.raw, "DEVICE_CODE_BODY_INVALID"),
+      );
       return c.json(DeviceCodeStartResponseSchema.parse(started), 201, {
         "cache-control": "no-store",
       });
@@ -1062,10 +1102,16 @@ function mountSponsorRoutes(app: Hono, options: EnrollmentRouterOptions): void {
     );
     if (authenticated instanceof Response) return authenticated;
     try {
-      const card = await options.service.deviceLookup(
-        authenticated.principal,
-        verifiedJson(authenticated.rawBody),
-      );
+      let lookupBody: unknown;
+      try {
+        lookupBody = verifiedJson(authenticated.rawBody);
+      } catch {
+        return enrollmentErrorResponse(
+          new EnrollmentError("DEVICE_LOOKUP_BODY_INVALID"),
+          c.req.raw,
+        );
+      }
+      const card = await options.service.deviceLookup(authenticated.principal, lookupBody);
       return c.json(DeviceLookupResponseSchema.parse({ card: contractCard(card) }), 200, {
         "cache-control": "no-store",
       });

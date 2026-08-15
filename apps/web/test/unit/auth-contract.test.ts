@@ -5,11 +5,11 @@ import { dirname, join } from "node:path";
 import {
   ALLOWED_ENV_EXPRESSION,
   ALLOWED_IMPORTS,
+  type AuthViolation,
+  type AuthViolationCode,
   formatAuthViolations,
   readAuthSurface,
   validateAuthConfig,
-  type AuthViolation,
-  type AuthViolationCode,
 } from "../../scripts/auth-contract.ts";
 
 /**
@@ -37,6 +37,16 @@ function config(overrides: { providers?: string; options?: string; extra?: strin
     ${overrides.extra ?? ""}
     export const { handlers, auth, signIn, signOut } = NextAuth({
       providers: ${overrides.providers ?? "[Google]"},
+      callbacks: {
+        jwt({ token, account }) {
+          if (account) token.authTime = Math.floor(Date.now() / 1_000);
+          return token;
+        },
+        session({ session, token }) {
+          if (typeof token.authTime === "number") session.authIssuedAt = token.authTime;
+          return session;
+        },
+      },
       cookies: {
         sessionToken: {
           name: "asimp.session",
@@ -57,11 +67,81 @@ describe("the baseline configuration is clean", () => {
   });
 
   test("the allowlists stay minimal and are stated, not inferred", () => {
-    expect([...ALLOWED_IMPORTS].sort()).toEqual([
-      "next-auth",
-      "next-auth/providers/google",
-    ]);
+    expect([...ALLOWED_IMPORTS].sort()).toEqual(["next-auth", "next-auth/providers/google"]);
     expect(ALLOWED_ENV_EXPRESSION).toBe("process.env.NODE_ENV");
+  });
+});
+
+describe("recent-auth is stable across ordinary session reads", () => {
+  test("the account-guarded custom claim is the only accepted wiring", () => {
+    const surface = readAuthSurface(readFileSync(join(FIXTURES, "valid.ts"), "utf8")).recentAuth;
+    expect(surface).toMatchObject({
+      callbacksPresent: true,
+      unresolvable: false,
+      jwtPresent: true,
+      sessionPresent: true,
+      jwtStampCount: 1,
+      safeJwtStampCount: 1,
+      sessionProjectionCount: 1,
+      safeSessionProjectionCount: 1,
+      iatReads: [],
+    });
+  });
+
+  test("PLANTED: projecting refreshable JWT iat is refused", () => {
+    const source = readFileSync(join(FIXTURES, "valid.ts"), "utf8").replaceAll(
+      "token.authTime",
+      "token.iat",
+    );
+    expect(codesOf(validateAuthConfig(source))).toContain("AUTH_RECENT_AUTH_REFRESHABLE");
+  });
+
+  test("PLANTED: stamping on every JWT callback is refused", () => {
+    const source = readFileSync(join(FIXTURES, "valid.ts"), "utf8").replace(
+      "if (account) token.authTime = Math.floor(Date.now() / 1_000);",
+      "token.authTime = Math.floor(Date.now() / 1_000);",
+    );
+    expect(codesOf(validateAuthConfig(source))).toContain("AUTH_RECENT_AUTH_REFRESHABLE");
+  });
+
+  test("PLANTED: an unguarded session projection is refused", () => {
+    const source = readFileSync(join(FIXTURES, "valid.ts"), "utf8").replace(
+      'if (typeof token.authTime === "number") session.authIssuedAt = token.authTime;',
+      "session.authIssuedAt = token.authTime;",
+    );
+    expect(codesOf(validateAuthConfig(source))).toContain("AUTH_RECENT_AUTH_REFRESHABLE");
+  });
+
+  test("PLANTED: aliases cannot hide an extra auth-time stamp or session overwrite", () => {
+    const baseline = readFileSync(join(FIXTURES, "valid.ts"), "utf8");
+    const aliasedStamp = baseline.replace(
+      "return token;",
+      "const tokenAlias = token; tokenAlias.authTime = Math.floor(Date.now() / 1_000); return token;",
+    );
+    const aliasedProjection = baseline.replace(
+      "return session;",
+      "const sessionAlias = session; sessionAlias.authIssuedAt = Math.floor(Date.now() / 1_000); return session;",
+    );
+    expect(codesOf(validateAuthConfig(aliasedStamp))).toContain("AUTH_RECENT_AUTH_REFRESHABLE");
+    expect(codesOf(validateAuthConfig(aliasedProjection))).toContain(
+      "AUTH_RECENT_AUTH_REFRESHABLE",
+    );
+  });
+
+  test("PLANTED: a helper and computed properties cannot smuggle refreshable iat", () => {
+    const baseline = readFileSync(join(FIXTURES, "valid.ts"), "utf8");
+    const helper = baseline
+      .replace(
+        "export const { handlers",
+        "function refreshAge(target: { authIssuedAt?: number }, source: { iat?: number }) { target.authIssuedAt = source.iat; }\nexport const { handlers",
+      )
+      .replace("return session;", "refreshAge(session, token); return session;");
+    const computed = baseline.replace(
+      "return session;",
+      'session["authIssuedAt"] = token["authTime"]; return session;',
+    );
+    expect(codesOf(validateAuthConfig(helper))).toContain("AUTH_RECENT_AUTH_REFRESHABLE");
+    expect(codesOf(validateAuthConfig(computed))).toContain("AUTH_RECENT_AUTH_REFRESHABLE");
   });
 });
 
@@ -81,9 +161,7 @@ describe("round 1 — the mutations that defeated the regexes", () => {
   });
 
   test("a credential read via destructuring is caught", () => {
-    const hits = scan("destructured-secret").filter(
-      (v) => v.code === "AUTH_ENV_ACCESS_FORBIDDEN",
-    );
+    const hits = scan("destructured-secret").filter((v) => v.code === "AUTH_ENV_ACCESS_FORBIDDEN");
     expect(hits.length).toBeGreaterThan(0);
     expect(hits[0]?.rule).toBe("ASI-NO-BUILD-SECRETS");
   });
@@ -227,9 +305,7 @@ describe("round 4 — the contract must prove the shipped wiring", () => {
   });
 
   test("require, eval and Function are all refused", () => {
-    const hits = scan("require-and-eval").filter(
-      (v) => v.code === "AUTH_DYNAMIC_CODE_FORBIDDEN",
-    );
+    const hits = scan("require-and-eval").filter((v) => v.code === "AUTH_DYNAMIC_CODE_FORBIDDEN");
     const text = hits.map((v) => v.detail).join(" ");
     expect(text).toContain("require(");
     expect(text).toContain("eval(");
@@ -288,7 +364,10 @@ describe("the environment rule is an allowlist over the whole file", () => {
     ["inside a callback", "const f = { cb: () => process.env.AUTH_SECRET };"],
     ["inside a nested function", "function outer() { function inner() { return Bun.env.X; } }"],
     ["passed as an argument", "register(process.env);"],
-    ["NODE_ENV by bracket, which is not the allowed spelling", 'const s = process.env["NODE_ENV"];'],
+    [
+      "NODE_ENV by bracket, which is not the allowed spelling",
+      'const s = process.env["NODE_ENV"];',
+    ],
   ])("%s is refused", (_label, extra) => {
     expect(codesOf(validateAuthConfig(config({ extra })))).toContain("AUTH_ENV_ACCESS_FORBIDDEN");
   });
@@ -306,7 +385,7 @@ describe("the environment rule is an allowlist over the whole file", () => {
   });
 
   test("a property merely named `process` is not an environment access", () => {
-    expect(readAuthSurface('const o = { process: 1 }; const x = o.process;').envAccesses).toEqual(
+    expect(readAuthSurface("const o = { process: 1 }; const x = o.process;").envAccesses).toEqual(
       [],
     );
   });

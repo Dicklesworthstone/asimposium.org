@@ -1,6 +1,6 @@
 import {
-  type DeviceCodeStartResponse,
   DeviceCodeStartRequestSchema,
+  type DeviceCodeStartResponse,
   DeviceLookupRequestSchema,
   ENROLLMENT_SECRET_BYTES,
   ENROLLMENT_SECRET_TTL_MS,
@@ -35,15 +35,30 @@ const POLL_SLOW_DOWN_INCREMENT_SECONDS = 5;
 
 /** W3.5: human-typed codes; the alphabet excludes 0/1/I/O confusion. */
 const USER_CODE_ALPHABET = "ABCDEFGHJKMNPQRSTVWXYZ23456789";
-export const DEVICE_CODE_TTL_MS = 15 * 60 * 1_000;
+const USER_CODE_RANDOM_CEILING =
+  Math.floor(256 / USER_CODE_ALPHABET.length) * USER_CODE_ALPHABET.length;
+const MAX_USER_CODE_RANDOM_BATCHES = 8;
+export const DEVICE_CODE_TTL_MS = 30 * 60 * 1_000;
 export const DEVICE_LOOKUP_LOCKOUT_FAILURES = 5;
 export const DEVICE_LOOKUP_LOCKOUT_WINDOW_MS = 15 * 60 * 1_000;
 
 function generateUserCode(random: EnrollmentRandom): string {
-  const bytes = randomBytes(random, 8);
-  const chars = [...bytes].map(
-    (byte) => USER_CODE_ALPHABET[byte % USER_CODE_ALPHABET.length],
-  );
+  const chars: string[] = [];
+  for (let batch = 0; batch < MAX_USER_CODE_RANDOM_BATCHES && chars.length < 8; batch += 1) {
+    for (const byte of randomBytes(random, 8)) {
+      // 256 is not divisible by the 30-character alphabet. Reject the high
+      // tail instead of mapping it with `%`, which would make sixteen characters
+      // more likely and reduce the brute-force cost below the advertised one.
+      if (byte >= USER_CODE_RANDOM_CEILING) continue;
+      const character = USER_CODE_ALPHABET[byte % USER_CODE_ALPHABET.length];
+      if (character === undefined) throw new TypeError("device user-code alphabet is unavailable");
+      chars.push(character);
+      if (chars.length === 8) break;
+    }
+  }
+  if (chars.length !== 8) {
+    throw new TypeError("secure random source could not produce a device user code");
+  }
   return `${chars.slice(0, 4).join("")}-${chars.slice(4).join("")}`;
 }
 
@@ -62,7 +77,9 @@ export type EnrollmentErrorCode =
   | "NAME_TAKEN"
   | "MODEL_AS_NAME"
   | "DECISION_TARGET_MISMATCH"
+  | "DEVICE_CODE_BODY_INVALID"
   | "DEVICE_CODE_UNKNOWN"
+  | "DEVICE_LOOKUP_BODY_INVALID"
   | "DEVICE_LOOKUP_LOCKED"
   | "PAIRING_EXPIRED"
   | "PAIRING_INVALID"
@@ -395,10 +412,7 @@ export interface EnrollmentStore {
     now: number,
   ): Promise<EnrollmentApprovalCard | undefined>;
   /** W3.5: the decision-path card for an unbound device enrollment (kind=device, no sponsor yet). */
-  deviceApprovalCardForDecision(
-    enrollmentId: string,
-    now: number,
-  ): Promise<EnrollmentApprovalCard>;
+  deviceApprovalCardForDecision(enrollmentId: string, now: number): Promise<EnrollmentApprovalCard>;
   /** W3.5: failed user-code lookups inside the lockout window. */
   recentDeviceLookupFailures(sponsorId: string, sinceMs: number, now: number): Promise<number>;
   /** W3.5: record one lookup outcome for the lockout window. */
@@ -900,10 +914,7 @@ export class InMemoryEnrollmentStore implements EnrollmentStore {
       const record = this.#records.get(attempt.enrollmentId);
       const isUnboundDevice =
         record !== undefined && record.kind === "device" && record.sponsorId === "";
-      if (
-        record === undefined ||
-        (record.sponsorId !== attempt.sponsorId && !isUnboundDevice)
-      ) {
+      if (record === undefined || (record.sponsorId !== attempt.sponsorId && !isUnboundDevice)) {
         throw new EnrollmentError("WRONG_PRINCIPAL");
       }
       const proposal = record.proposal;
@@ -1021,7 +1032,8 @@ export class InMemoryEnrollmentStore implements EnrollmentStore {
 
   async fellowsBySponsor(sponsorId: string, now: number): Promise<SponsorFellowRecord[]> {
     return this.serialized(() => {
-      const fellows: SponsorFellowRecord[] = [];      for (const record of this.#records.values()) {
+      const fellows: SponsorFellowRecord[] = [];
+      for (const record of this.#records.values()) {
         if (record.sponsorId !== sponsorId || record.proposal === undefined) continue;
         const proposal = record.proposal;
         if (proposal.status !== "approved" && proposal.status !== "reduced") continue;
@@ -1084,7 +1096,10 @@ export class InMemoryEnrollmentStore implements EnrollmentStore {
 
   async deviceCreate(input: DeviceCreateInput): Promise<void> {
     return this.serialized(() => {
-      if (this.#records.has(input.record.enrollmentId)) {
+      if (
+        this.#records.has(input.record.enrollmentId) ||
+        this.#deviceCodes.has(input.userCodeHash)
+      ) {
         throw new EnrollmentPersistenceError();
       }
       this.#records.set(input.record.enrollmentId, {
@@ -1147,7 +1162,10 @@ export class InMemoryEnrollmentStore implements EnrollmentStore {
       () =>
         this.#deviceLookups.filter(
           (entry) =>
-            entry.sponsorId === sponsorId && !entry.success && entry.at >= sinceMs && entry.at <= now,
+            entry.sponsorId === sponsorId &&
+            !entry.success &&
+            entry.at >= sinceMs &&
+            entry.at <= now,
         ).length,
     );
   }
@@ -1662,7 +1680,7 @@ export class EnrollmentService {
    */
   async deviceStart(rawRequest: unknown): Promise<DeviceCodeStartResponse> {
     const parsed = DeviceCodeStartRequestSchema.safeParse(rawRequest);
-    if (!parsed.success) throw new EnrollmentError("PAIRING_INVALID");
+    if (!parsed.success) throw new EnrollmentError("DEVICE_CODE_BODY_INVALID");
     const nameFailure = enrollmentNameFailure(parsed.data.name);
     if (nameFailure !== undefined) {
       throw new EnrollmentError(
@@ -1738,7 +1756,7 @@ export class EnrollmentService {
   ): Promise<EnrollmentApprovalCard> {
     assertSponsor(sponsor);
     const parsed = DeviceLookupRequestSchema.safeParse(rawRequest);
-    if (!parsed.success) throw new EnrollmentError("DEVICE_CODE_UNKNOWN");
+    if (!parsed.success) throw new EnrollmentError("DEVICE_LOOKUP_BODY_INVALID");
     const now = this.#clock.now();
     const failures = await this.#store.recentDeviceLookupFailures(
       sponsor.sponsorId,

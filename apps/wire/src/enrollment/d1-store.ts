@@ -463,24 +463,47 @@ export class D1EnrollmentStore implements EnrollmentStore {
           sql(
             this.#db,
             `UPDATE enrollment_records SET sponsor_id = ?
-             WHERE enrollment_id = ? AND sponsor_id = '' AND kind = 'device'`,
+             WHERE enrollment_id = ? AND sponsor_id = '' AND kind = 'device'
+               AND EXISTS (
+                 SELECT 1 FROM enrollment_proposals p
+                  WHERE p.enrollment_id = enrollment_records.enrollment_id
+                    AND p.proposal_id = ? AND p.status = 'pending' AND p.expires_at > ?
+               )`,
             attempt.sponsorId,
             attempt.enrollmentId,
+            row.proposal_id,
+            attempt.now,
           ),
         ]
       : [];
 
     if (attempt.decision.decision === "deny") {
       try {
+        const proposalDecision = bindsDeviceSponsor
+          ? sql(
+              this.#db,
+              `UPDATE enrollment_proposals SET status = 'denied'
+               WHERE proposal_id = ? AND status = 'pending' AND expires_at > ?
+                 AND changes() = 1
+                 AND EXISTS (
+                   SELECT 1 FROM enrollment_records e
+                    WHERE e.enrollment_id = enrollment_proposals.enrollment_id
+                      AND e.kind = 'device' AND e.sponsor_id = ?
+                 )`,
+              row.proposal_id,
+              attempt.now,
+              attempt.sponsorId,
+            )
+          : sql(
+              this.#db,
+              `UPDATE enrollment_proposals SET status = 'denied'
+               WHERE proposal_id = ? AND status = 'pending' AND expires_at > ?`,
+              row.proposal_id,
+              attempt.now,
+            );
         const statements = [
           ...bindingStatements,
-          sql(
-            this.#db,
-            `UPDATE enrollment_proposals SET status = 'denied'
-             WHERE proposal_id = ? AND status = 'pending' AND expires_at > ?`,
-            row.proposal_id,
-            attempt.now,
-          ),
+          proposalDecision,
           ...(idempotency === undefined ? [] : [this.idempotencyStatement(idempotency)]),
         ];
         const results = await this.#db.batch(statements);
@@ -500,19 +523,39 @@ export class D1EnrollmentStore implements EnrollmentStore {
     const { scopes, resources } = this.reducedGrant(requested, attempt.decision, attempt.now);
     const nextStatus = attempt.decision.decision === "approve" ? "approved" : "reduced";
     try {
+      const proposalDecision = bindsDeviceSponsor
+        ? sql(
+            this.#db,
+            `UPDATE enrollment_proposals
+               SET status = ?, granted_scopes_json = ?, granted_resources_json = ?
+             WHERE proposal_id = ? AND status = 'pending' AND expires_at > ?
+               AND changes() = 1
+               AND EXISTS (
+                 SELECT 1 FROM enrollment_records e
+                  WHERE e.enrollment_id = enrollment_proposals.enrollment_id
+                    AND e.kind = 'device' AND e.sponsor_id = ?
+               )`,
+            nextStatus,
+            encode(scopes),
+            encode(resources),
+            row.proposal_id,
+            attempt.now,
+            attempt.sponsorId,
+          )
+        : sql(
+            this.#db,
+            `UPDATE enrollment_proposals
+               SET status = ?, granted_scopes_json = ?, granted_resources_json = ?
+             WHERE proposal_id = ? AND status = 'pending' AND expires_at > ?`,
+            nextStatus,
+            encode(scopes),
+            encode(resources),
+            row.proposal_id,
+            attempt.now,
+          );
       const statements: D1PreparedStatement[] = [
         ...bindingStatements,
-        sql(
-          this.#db,
-          `UPDATE enrollment_proposals
-             SET status = ?, granted_scopes_json = ?, granted_resources_json = ?
-           WHERE proposal_id = ? AND status = 'pending' AND expires_at > ?`,
-          nextStatus,
-          encode(scopes),
-          encode(resources),
-          row.proposal_id,
-          attempt.now,
-        ),
+        proposalDecision,
         sql(
           this.#db,
           `INSERT INTO enrollment_fellows (fellow_id, sponsor_id, name, model, harness, created_at)
