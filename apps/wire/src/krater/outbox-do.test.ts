@@ -1,4 +1,7 @@
+import { Database } from "bun:sqlite";
 import { describe, expect, test } from "bun:test";
+import { readFileSync } from "node:fs";
+import { resolve } from "node:path";
 import type {
   D1Database,
   D1PreparedStatement,
@@ -12,6 +15,12 @@ import {
   OUTBOX_DRAIN_BATCH_SIZE,
   validateOutboxRow,
 } from "./outbox-do";
+
+const KRATER_MIGRATION = resolve(import.meta.dir, "../../../../db/migrations/0001_krater_v0.sql");
+const QUARANTINE_MIGRATION = resolve(
+  import.meta.dir,
+  "../../../../db/migrations/0007_outbox_quarantine_state.sql",
+);
 
 interface FakeOutboxRow {
   readonly id: number;
@@ -200,6 +209,74 @@ async function drainScheduledAlarms(harness: OutboxHarness): Promise<void> {
 }
 
 describe("Krater outbox Durable Object contracts", () => {
+  test("0007 preserves existing rows and makes quarantine terminal without rebuilding outbox", () => {
+    const sqlite = new Database(":memory:", { strict: true });
+    sqlite.exec(readFileSync(KRATER_MIGRATION, "utf8"));
+    sqlite
+      .prepare("INSERT INTO problems (id, created_at, updated_at) VALUES (?, ?, ?)")
+      .run("P-outbox", "2026-08-14T00:00:00Z", "2026-08-14T00:00:00Z");
+    for (const id of [1, 2]) {
+      sqlite
+        .prepare(
+          `INSERT INTO events (
+             id, problem_id, seq, type, object_kind, object_id,
+             object_version, payload_sha256, created_at
+           ) VALUES (?, 'P-outbox', ?, 'claim.promoted', 'claim', ?, 1, ?, ?)`,
+        )
+        .run(`E-outbox-${id}`, id, `C-outbox-${id}`, "a".repeat(64), "2026-08-14T00:00:00Z");
+    }
+    sqlite
+      .prepare(
+        `INSERT INTO outbox (
+           id, event_id, problem_id, kind, dedupe_key, payload_sha256,
+           state, created_at, delivered_at
+         ) VALUES
+           (1, 'E-outbox-1', 'P-outbox', 'search.index', 'search.index:E-outbox-1', ?,
+            'pending', '2026-08-14T00:00:00Z', NULL),
+           (2, 'E-outbox-2', 'P-outbox', 'search.index', 'search.index:E-outbox-2', ?,
+            'delivered', '2026-08-14T00:00:00Z', '2026-08-14T00:01:00Z')`,
+      )
+      .run("a".repeat(64), "b".repeat(64));
+
+    sqlite.exec(readFileSync(QUARANTINE_MIGRATION, "utf8"));
+
+    expect(
+      sqlite
+        .prepare<
+          {
+            id: number;
+            state: string;
+            quarantined_at: string | null;
+            quarantine_code: string | null;
+          },
+          []
+        >("SELECT id, state, quarantined_at, quarantine_code FROM outbox ORDER BY id")
+        .all(),
+    ).toEqual([
+      { id: 1, state: "pending", quarantined_at: null, quarantine_code: null },
+      { id: 2, state: "delivered", quarantined_at: null, quarantine_code: null },
+    ]);
+    sqlite
+      .prepare("UPDATE outbox SET quarantined_at = ?, quarantine_code = ? WHERE id = 1")
+      .run("2026-08-14T00:02:00Z", "OUTBOX_PAYLOAD_INVALID");
+    expect(() =>
+      sqlite
+        .prepare("UPDATE outbox SET state = 'delivered', delivered_at = ? WHERE id = 1")
+        .run("2026-08-14T00:03:00Z"),
+    ).toThrow();
+    expect(() =>
+      sqlite
+        .prepare("UPDATE outbox SET quarantined_at = ?, quarantine_code = ? WHERE id = 2")
+        .run("2026-08-14T00:02:00Z", "OUTBOX_PAYLOAD_INVALID"),
+    ).toThrow();
+    expect(
+      sqlite
+        .prepare<{ name: string }, []>("SELECT name FROM sqlite_master WHERE type = 'index'")
+        .all()
+        .some((row) => row.name === "outbox_drainable_idx"),
+    ).toBe(true);
+  });
+
   test("keeps exponential alarm backoff inside the explicit local safety bound", () => {
     expect(boundedOutboxBackoff(1)).toBe(OUTBOX_ALARM_BASE_MS);
     expect(boundedOutboxBackoff(2)).toBe(OUTBOX_ALARM_BASE_MS * 2);
