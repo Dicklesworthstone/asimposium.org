@@ -631,6 +631,37 @@ async function request(
   }
 }
 
+async function triggerScheduledOutboxReconcile(scenario: string): Promise<void> {
+  if (origin === undefined) fail("S2_ORIGIN_MISSING");
+  const currentRequestId = requestId();
+  const pathname = `/__scheduled?cron=${encodeURIComponent("*/5 * * * *")}`;
+  const started = performance.now();
+  try {
+    const fetchResponse = await fetch(`${origin}${pathname}`, {
+      method: "GET",
+      headers: { "x-s2-harness-token": requireHarnessToken() },
+      signal: AbortSignal.timeout(5_000),
+    });
+    const elapsedMs = Math.round((performance.now() - started) * 1_000) / 1_000;
+    await fetchResponse.text();
+    const result: RequestResult = {
+      status: fetchResponse.status,
+      body: {},
+      elapsedMs,
+      contentType: fetchResponse.headers.get("content-type") ?? "",
+      requestId: currentRequestId,
+    };
+    requestDiagnostics(currentRequestId, scenario, pathname, null, result, null);
+    assertEqual(result.status, 200, "S2_OUTBOX_SCHEDULED_RECONCILE_FAILED");
+  } catch (error) {
+    if (error instanceof Error && error.message === "S2_OUTBOX_SCHEDULED_RECONCILE_FAILED") {
+      throw error;
+    }
+    requestDiagnostics(currentRequestId, scenario, pathname, null, null, "transport-aborted");
+    throw new Error("S2_TRANSPORT_ABORTED");
+  }
+}
+
 function writeBody(
   index: number,
   problemId = PRIMARY_PROBLEM,
@@ -904,7 +935,8 @@ async function exerciseOutboxDrainer(): Promise<void> {
   assertEqual(auto.outbox_handoff, "armed", "S2_OUTBOX_HANDOFF_NOT_ARMED");
   const afterAuto = await waitForOutbox(
     "outbox-auto-alarm-delivery",
-    (status) => status.delivered >= before.delivered + 1 && status.pending === 0,
+    (status) =>
+      status.delivered >= before.delivered + 1 && status.pending === 0 && status.alarm_at === null,
   );
   assertEqual(afterAuto.max_active, 1, "S2_OUTBOX_AUTO_SINGLE_OWNER_INVALID");
   const autoState = await state(OUTBOX_PROBLEM, "outbox-auto-visible-state");
@@ -912,8 +944,30 @@ async function exerciseOutboxDrainer(): Promise<void> {
     assertEqual(autoState.counts[table], 1, "S2_OUTBOX_AUTO_DUPLICATED_VISIBLE_ROW");
   }
 
+  const scheduled = await write(
+    {
+      ...writeBody(2, OUTBOX_PROBLEM, "Outbox scheduled recovery claim."),
+      s2_fail_outbox_nudge: true,
+    },
+    "outbox-failed-initial-handoff",
+    undefined,
+    false,
+  );
+  assertEqual(scheduled.outbox_handoff, "unavailable", "S2_OUTBOX_HANDOFF_FAILURE_NOT_PLANTED");
+  const stranded = await outboxStatus("outbox-failed-handoff-visible");
+  assertEqual(stranded.pending, 1, "S2_OUTBOX_FAILED_HANDOFF_NOT_PENDING");
+  assertEqual(stranded.alarm_at, null, "S2_OUTBOX_FAILED_HANDOFF_BORROWED_ALARM");
+  await triggerScheduledOutboxReconcile("outbox-scheduled-reconcile-trigger");
+  const afterScheduled = await waitForOutbox(
+    "outbox-scheduled-reconcile-delivery",
+    (status) =>
+      status.delivered >= afterAuto.delivered + 1 &&
+      status.pending === 0 &&
+      status.alarm_at === null,
+  );
+
   const concurrent = await write(
-    writeBody(2, OUTBOX_PROBLEM, "Outbox concurrent alarm claim."),
+    writeBody(3, OUTBOX_PROBLEM, "Outbox concurrent alarm claim."),
     "outbox-concurrent-write",
   );
   assertEqual(concurrent.outbox_handoff, "deferred", "S2_OUTBOX_DEFERRED_WRITE_INVALID");
@@ -925,13 +979,13 @@ async function exerciseOutboxDrainer(): Promise<void> {
   for (const nudge of nudges) assertEqual(nudge.status, 202, "S2_OUTBOX_NUDGE_FAILED");
   const afterConcurrent = await waitForOutbox(
     "outbox-concurrent-alarm-delivery",
-    (status) => status.delivered >= afterAuto.delivered + 1 && status.pending === 0,
+    (status) => status.delivered >= afterScheduled.delivered + 1 && status.pending === 0,
   );
   assertEqual(afterConcurrent.max_active, 1, "S2_OUTBOX_CONCURRENT_OWNERSHIP_VIOLATION");
   assertEqual(afterConcurrent.active, 0, "S2_OUTBOX_ACTIVE_OWNER_LEAKED");
 
   const transient = await write(
-    writeBody(3, OUTBOX_PROBLEM, "Outbox retry claim."),
+    writeBody(4, OUTBOX_PROBLEM, "Outbox retry claim."),
     "outbox-retry-write",
   );
   const failOnce = await request("POST", "/__s2/outbox/drain", "outbox-rearm-backoff", {
@@ -949,14 +1003,14 @@ async function exerciseOutboxDrainer(): Promise<void> {
     true,
     "S2_OUTBOX_NOT_AT_LEAST_ONCE",
   );
-  assertEqual(transient.seq, 3, "S2_OUTBOX_RETRY_SEQUENCE_INVALID");
+  assertEqual(transient.seq, 4, "S2_OUTBOX_RETRY_SEQUENCE_INVALID");
 
   const held = await write(
-    writeBody(4, OUTBOX_PROBLEM, "Outbox kill-boundary claim."),
+    writeBody(5, OUTBOX_PROBLEM, "Outbox kill-boundary claim."),
     "outbox-hold-before-ack-write",
   );
   const malformed = await write(
-    writeBody(5, OUTBOX_PROBLEM, "Outbox malformed fixture claim."),
+    writeBody(6, OUTBOX_PROBLEM, "Outbox malformed fixture claim."),
     "outbox-malformed-write",
   );
   const planted = await request(
@@ -974,7 +1028,7 @@ async function exerciseOutboxDrainer(): Promise<void> {
   const heldStatus = await outboxStatus("outbox-kill-boundary-status");
   assertEqual(heldStatus.last_phase, "held-before-ack", "S2_OUTBOX_KILL_BOUNDARY_NOT_DURABLE");
   assertEqual(heldStatus.alarm_at === null, false, "S2_OUTBOX_KILL_REARM_MISSING");
-  assertEqual(held.seq, 4, "S2_OUTBOX_HOLD_SEQUENCE_INVALID");
+  assertEqual(held.seq, 5, "S2_OUTBOX_HOLD_SEQUENCE_INVALID");
 }
 
 async function plantLegacy(problemId: string, eventCount: number, scenario: string): Promise<void> {
@@ -1937,9 +1991,9 @@ async function restartVerify(): Promise<void> {
   );
   const outboxProblem = await state(OUTBOX_PROBLEM, "outbox-restart-visible-state");
   for (const table of ["claims", "claim_projections", "events", "outbox"] as const) {
-    assertEqual(outboxProblem.counts[table], 5, "S2_OUTBOX_RESTART_DUPLICATED_VISIBLE_ROW");
+    assertEqual(outboxProblem.counts[table], 6, "S2_OUTBOX_RESTART_DUPLICATED_VISIBLE_ROW");
   }
-  await assertReplay(OUTBOX_PROBLEM, 5, "outbox-restart-visible-replay");
+  await assertReplay(OUTBOX_PROBLEM, 6, "outbox-restart-visible-replay");
   // Last in the phase on purpose: this writes a claim, and a new outbox row would otherwise
   // perturb the recovery counters the assertions above pin exactly.
   await legacyBoundedBackfillAfterRestart();
@@ -1957,8 +2011,8 @@ async function restartVerify(): Promise<void> {
     scope: SCOPE,
     request_id: null,
     event_id: null,
-    pre_cursor: 4,
-    post_cursor: 4,
+    pre_cursor: 5,
+    post_cursor: 5,
     payload_sha256: null,
     row_digest: null,
     build_digest: null,

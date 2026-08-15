@@ -478,6 +478,7 @@ async function handleHarnessRequest(
       const postCommitDelayMs = harnessDelay(body, "s2_post_commit_delay_ms");
       const abortBeforeCommit = harnessBoolean(body, "s2_abort_before_commit");
       const deferOutboxNudge = harnessBoolean(body, "s2_defer_outbox_nudge");
+      const failOutboxNudge = harnessBoolean(body, "s2_fail_outbox_nudge");
       if (preCommitDelayMs > 0) await waitForHarnessDelay(preCommitDelayMs);
       if (abortBeforeCommit || request.signal.aborted) {
         return contractProblem(
@@ -492,13 +493,17 @@ async function handleHarnessRequest(
       const result = await writeClaim(env.DB, writeInput(body));
       let outboxHandoff: "armed" | "deferred" | "unavailable" = "deferred";
       if (!deferOutboxNudge) {
-        try {
-          const handoff = await requestKraterOutbox(env, "/nudge");
-          outboxHandoff = handoff.ok ? "armed" : "unavailable";
-        } catch (_error) {
-          // The D1 outbox row is durable; a later scheduler nudge can recover
-          // this post-commit handoff without rerunning the canonical write.
+        if (failOutboxNudge) {
           outboxHandoff = "unavailable";
+        } else {
+          try {
+            const handoff = await requestKraterOutbox(env, "/nudge");
+            outboxHandoff = handoff.ok ? "armed" : "unavailable";
+          } catch (_error) {
+            // The D1 outbox row is durable; the scheduled reconcile can recover
+            // this post-commit handoff without rerunning the canonical write.
+            outboxHandoff = "unavailable";
+          }
         }
       }
       if (postCommitDelayMs > 0) await waitForHarnessDelay(postCommitDelayMs);

@@ -354,4 +354,23 @@ describe("Krater outbox Durable Object contracts", () => {
     expect(rows[0]?.state).toBe("delivered");
     expect(harness.storageValue("scan_after_id")).toBe(101);
   });
+
+  test("PLANTED: an equal wrap checkpoint left by a crash cannot strand lower rows", async () => {
+    const rows = [outboxRow(1)];
+    const harness = outboxHarness(rows, {
+      initialStorage: {
+        scan_after_id: 101,
+        scan_wrap_through_id: 101,
+      },
+    });
+
+    const response = await harness.drainer.fetch(drainRequest());
+
+    expect(response.status).toBe(200);
+    expect(await response.json()).toMatchObject({ delivered: 1 });
+    expect(rows[0]?.state).toBe("delivered");
+    await drainScheduledAlarms(harness);
+    expect(harness.storageValue("scan_after_id")).toBe(1);
+    expect(harness.storageValue("scan_wrap_through_id")).toBeUndefined();
+  });
 });

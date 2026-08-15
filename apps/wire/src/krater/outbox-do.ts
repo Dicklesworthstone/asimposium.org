@@ -287,7 +287,11 @@ export class KraterOutboxDrainer {
   private async scanWrapThroughId(scanAfterId: number): Promise<number | undefined> {
     const value = await this.state.storage.get<unknown>(OUTBOX_SCAN_WRAP_THROUGH_ID_KEY);
     if (value === undefined) return undefined;
-    if (!isNonNegativeInteger(value) || value === 0 || scanAfterId > value) {
+    if (!isNonNegativeInteger(value) || value === 0 || scanAfterId >= value) {
+      // Equality is also inconsistent: it can be left by a crash after the
+      // bounded wrap cursor is persisted but before the wrap marker is
+      // cleared. Rescan authoritative D1 rather than querying an empty
+      // (id > value AND id <= value) interval and clearing the only alarm.
       await this.state.storage.delete(OUTBOX_SCAN_WRAP_THROUGH_ID_KEY);
       await this.state.storage.put(OUTBOX_SCAN_AFTER_ID_KEY, 0);
       return undefined;
