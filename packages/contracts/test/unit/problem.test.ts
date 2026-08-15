@@ -26,6 +26,10 @@ const INVALID_OPAQUE_WITH_TEACHING_FIELDS = new URL(
   "../fixtures/invalid/problem-opaque-with-teaching-fields.json",
   import.meta.url,
 );
+const INVALID_UNKNOWN_FORMAT_WITHOUT_ALLOWED = new URL(
+  "../fixtures/invalid/problem-unknown-format-no-allowed.json",
+  import.meta.url,
+);
 
 const VALID_ADDITIONAL_PROBLEMS = [
   ["problem-unauthorized.json", "UNAUTHORIZED", 401, "opaque"],
@@ -98,6 +102,9 @@ test("UNKNOWN_FORMAT is a teaching code with a bounded allowed list", async () =
   expect(ProblemDocumentSchema.safeParse(document).success).toBe(true);
   expect(CONTRACT_PROBLEM_CODES).toContain("UNKNOWN_FORMAT");
   expect(OPAQUE_PROBLEM_CODES).not.toContain("UNKNOWN_FORMAT" as never);
+  expect(
+    ProblemDocumentSchema.safeParse(await fixture(INVALID_UNKNOWN_FORMAT_WITHOUT_ALLOWED)).success,
+  ).toBe(false);
 
   expect(
     ProblemDocumentSchema.safeParse({

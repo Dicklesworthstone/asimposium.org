@@ -1,6 +1,7 @@
 import { describe, expect, test } from "bun:test";
 import { ProblemDocumentSchema } from "@asimposium/contracts";
-import { getDocument } from "@asimposium/protocol";
+import { listPublicSchemas } from "@asimposium/contracts/public-schemas";
+import { getDocument, sha256Hex } from "@asimposium/protocol";
 import { createApp } from "../../src/app";
 import type { Env } from "../../src/env";
 import { boundEnv, callWorker, executionContext, r2Shaped } from "../support/bindings";
@@ -86,6 +87,17 @@ describe("face wire format", () => {
     expect(res.bodyText).toBe(document.body);
   });
 
+  test.each([...listPublicSchemas()])(
+    "GET $served_at serves the exact drift-checked $id schema without D1",
+    async (document) => {
+      const res = await callWorker(`${document.served_at}?format=json`, {});
+      expect(res.status).toBe(200);
+      expect(res.contentType).toBe(document.media_type);
+      expect(res.headers.get("etag")).toBe(`"${sha256Hex(document.body)}"`);
+      expect(res.bodyText).toBe(document.body);
+    },
+  );
+
   test("public texts honor strong, weak, and wildcard conditional reads", async () => {
     const document = getDocument("handbook");
     for (const value of [`"${document.digest}"`, `W/"${document.digest}"`, "*"]) {
@@ -113,12 +125,58 @@ describe("face wire format", () => {
     expect(await response.text()).toBe("");
   });
 
+  test("schema faces honor HEAD and conditional reads without body bytes", async () => {
+    const document = listPublicSchemas().find((candidate) => candidate.id === "problem");
+    expect(document).toBeDefined();
+    if (document === undefined) return;
+    const etag = `"${sha256Hex(document.body)}"`;
+    const app = createApp();
+
+    const head = await app.fetch(
+      new Request(`https://a.asimposium.org${document.served_at}`, { method: "HEAD" }),
+      {} as Env,
+      executionContext() as unknown as Parameters<typeof app.fetch>[2],
+    );
+    expect(head.status).toBe(200);
+    expect(head.headers.get("content-type")).toBe(document.media_type);
+    expect(head.headers.get("etag")).toBe(etag);
+    expect(await head.text()).toBe("");
+
+    const conditional = await app.fetch(
+      new Request(`https://a.asimposium.org${document.served_at}`, {
+        headers: { "if-none-match": etag },
+      }),
+      {} as Env,
+      executionContext() as unknown as Parameters<typeof app.fetch>[2],
+    );
+    expect(conditional.status).toBe(304);
+    expect(conditional.headers.get("etag")).toBe(etag);
+    expect(await conditional.text()).toBe("");
+  });
+
   test("a served-text format typo teaches the only allowed value", async () => {
     const res = await callWorker("/protocol.md?format=json", {});
     expect(res.status).toBe(400);
     expect(res.contentType).toBe("application/problem+json; charset=utf-8");
     expect(res.body).toMatchObject({ code: "UNKNOWN_FORMAT", allowed: ["md"] });
     expect(ProblemDocumentSchema.safeParse(res.body).success).toBe(true);
+  });
+
+  test("a schema format typo links to the reachable repair schema", async () => {
+    const res = await callWorker("/schemas/enrollment.v1.json?format=markdown", {});
+    expect(res.status).toBe(400);
+    expect(res.contentType).toBe("application/problem+json; charset=utf-8");
+    expect(res.body).toMatchObject({
+      code: "UNKNOWN_FORMAT",
+      schema: "https://a.asimposium.org/schemas/problem.v1.json",
+      example: { method: "GET", path: "/schemas/enrollment.v1.json?format=json" },
+      allowed: ["json"],
+    });
+    expect(ProblemDocumentSchema.safeParse(res.body).success).toBe(true);
+
+    const repair = await callWorker("/schemas/problem.v1.json", {});
+    expect(repair.status).toBe(200);
+    expect(repair.contentType).toBe("application/schema+json; charset=utf-8");
   });
 
   test("GET /internal/health, fully bound", async () => {

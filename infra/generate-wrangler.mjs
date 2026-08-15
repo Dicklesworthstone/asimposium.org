@@ -85,7 +85,7 @@ export function renderEnvironment(name, environment, policy) {
     "",
     "[[rules]]",
     `type = ${tomlString("Text")}`,
-    `globs = ["**/*.md", "**/*.txt"]`,
+    `globs = ["**/*.md", "**/*.txt", "**/*.schema.json"]`,
     "fallthrough = true",
     "",
     "# The public-delivery bucket is served on its own R2 custom domain, which is",

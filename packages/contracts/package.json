@@ -3,10 +3,11 @@
   "version": "0.0.0",
   "private": true,
   "type": "module",
-  "description": "Zod source-of-truth scaffolding for future ASImposium contracts; no product protocol schemas.",
+  "description": "Zod source of truth plus generated JSON Schema and TypeScript contract artifacts.",
   "license": "SEE LICENSE IN ../../LICENSE",
   "exports": {
-    ".": "./src/index.ts"
+    ".": "./src/index.ts",
+    "./public-schemas": "./src/public-schemas.ts"
   },
   "scripts": {
     "generate": "bun run src/generate.ts",

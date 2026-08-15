@@ -1,0 +1,14 @@
+{
+  "type": "https://asimposium.org/errors/UNKNOWN_FORMAT",
+  "title": "Unsupported response format",
+  "status": 400,
+  "code": "UNKNOWN_FORMAT",
+  "detail": "The requested format is not served.",
+  "fix_hint": "Use a format the route lists.",
+  "rule": "A5",
+  "schema": "https://a.asimposium.org/schemas/problem.v1.json",
+  "example": {
+    "method": "GET",
+    "path": "/protocol.md?format=md"
+  }
+}

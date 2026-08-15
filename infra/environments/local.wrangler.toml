@@ -34,7 +34,7 @@ class_name = "HeraldRoom"
 
 [[rules]]
 type = "Text"
-globs = ["**/*.md", "**/*.txt"]
+globs = ["**/*.md", "**/*.txt", "**/*.schema.json"]
 fallthrough = true
 
 # The public-delivery bucket is served on its own R2 custom domain, which is

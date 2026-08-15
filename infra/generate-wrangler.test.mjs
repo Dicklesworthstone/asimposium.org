@@ -122,7 +122,11 @@ const cases = [
       for (const [name, config] of Object.entries(parsed)) {
         assert.equal(config.rules.length, 1, name);
         assert.equal(config.rules[0].type, "Text", name);
-        assert.deepEqual(config.rules[0].globs, ["**/*.md", "**/*.txt"], name);
+        assert.deepEqual(
+          config.rules[0].globs,
+          ["**/*.md", "**/*.txt", "**/*.schema.json"],
+          name,
+        );
         assert.equal(config.rules[0].fallthrough, true, name);
       }
     },

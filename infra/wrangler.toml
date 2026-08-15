@@ -20,5 +20,5 @@ bucket_name = "asimposium-artifacts-local"
 
 [[rules]]
 type = "Text"
-globs = ["**/*.md", "**/*.txt"]
+globs = ["**/*.md", "**/*.txt", "**/*.schema.json"]
 fallthrough = true

@@ -1,4 +1,5 @@
-import { type DocumentId, getDocument } from "@asimposium/protocol";
+import { listPublicSchemas, type PublicSchemaDocument } from "@asimposium/contracts/public-schemas";
+import { type DocumentId, getDocument, sha256Hex } from "@asimposium/protocol";
 import { Hono } from "hono";
 
 import { authenticateServiceEnvelopeRequest } from "./auth/http";
@@ -69,6 +70,16 @@ const PUBLIC_TEXT_ROUTES: readonly {
   { path: "/protocol.md", document: "protocol", format: "md" },
 ];
 
+const PUBLIC_SCHEMA_ROUTES: readonly {
+  readonly path: string;
+  readonly document: PublicSchemaDocument;
+  readonly digest: string;
+}[] = listPublicSchemas().map((document) => ({
+  path: document.served_at,
+  document,
+  digest: sha256Hex(document.body),
+}));
+
 function ifNoneMatchMatches(value: string | null, etag: string): boolean {
   if (value === null) return false;
   return value.split(",").some((candidate) => {
@@ -83,13 +94,23 @@ function responseForHead(request: Request, response: Response): Response {
     : response;
 }
 
-/** Site-authored discovery texts; independent of D1 and safe on the very first GET. */
-function servePublicText(request: Request, id: DocumentId, format: "md" | "txt"): Response {
-  const document = getDocument(id);
+interface PublicRepresentation {
+  readonly body: string;
+  readonly contentType: string;
+  readonly digest: string;
+  readonly servedAt: string;
+  readonly format: "json" | "md" | "txt";
+}
+
+/** Immutable public bytes; independent of D1 and safe on the very first GET. */
+function servePublicRepresentation(
+  request: Request,
+  representation: PublicRepresentation,
+): Response {
   const requestedFormats = new URL(request.url).searchParams.getAll("format");
   if (
     requestedFormats.length > 1 ||
-    (requestedFormats[0] !== undefined && requestedFormats[0] !== format)
+    (requestedFormats[0] !== undefined && requestedFormats[0] !== representation.format)
   ) {
     return responseForHead(
       request,
@@ -102,23 +123,41 @@ function servePublicText(request: Request, id: DocumentId, format: "md" | "txt")
         rule: "A5",
         extensions: {
           schema: "https://a.asimposium.org/schemas/problem.v1.json",
-          example: { method: "GET", path: `${document.served_at}?format=${format}` },
-          allowed: [format],
+          example: {
+            method: "GET",
+            path: `${representation.servedAt}?format=${representation.format}`,
+          },
+          allowed: [representation.format],
         },
       }),
     );
   }
 
-  const etag = `"${document.digest}"`;
+  const etag = `"${representation.digest}"`;
   const headers = {
     "cache-control": PUBLIC_TEXT_CACHE_CONTROL,
-    "content-type": document.media_type,
+    "content-type": representation.contentType,
     etag,
   };
   if (ifNoneMatchMatches(request.headers.get("if-none-match"), etag)) {
     return new Response(null, { status: 304, headers });
   }
-  return new Response(request.method === "HEAD" ? null : document.body, { status: 200, headers });
+  return new Response(request.method === "HEAD" ? null : representation.body, {
+    status: 200,
+    headers,
+  });
+}
+
+/** Site-authored discovery texts, bundled from the protocol registry. */
+function servePublicText(request: Request, id: DocumentId, format: "md" | "txt"): Response {
+  const document = getDocument(id);
+  return servePublicRepresentation(request, {
+    body: document.body,
+    contentType: document.media_type,
+    digest: document.digest,
+    servedAt: document.served_at,
+    format,
+  });
 }
 
 /**
@@ -277,6 +316,18 @@ export function createApp(): Hono<{ Bindings: Env }> {
   for (const route of PUBLIC_TEXT_ROUTES) {
     app.on(["GET", "HEAD"], route.path, (c) =>
       servePublicText(c.req.raw, route.document, route.format),
+    );
+  }
+
+  for (const route of PUBLIC_SCHEMA_ROUTES) {
+    app.on(["GET", "HEAD"], route.path, (c) =>
+      servePublicRepresentation(c.req.raw, {
+        body: route.document.body,
+        contentType: route.document.media_type,
+        digest: route.digest,
+        servedAt: route.document.served_at,
+        format: "json",
+      }),
     );
   }
 
