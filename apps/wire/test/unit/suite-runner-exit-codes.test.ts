@@ -363,8 +363,7 @@ describe("a deliberately blocked suite exits 78, never 0 and never 1", () => {
             "explicit authority for the two real local Wrangler lifecycle runs; see https://developers.cloudflare.com/d1/ for the binding contract",
           forbidden_substitutes:
             "mocked or stubbed D1/R2 (AGENTS.md: do not mock D1 or R2); the shims in test/support/bindings.ts; a 24/7 wrangler dev process",
-          reproduce:
-            "cd apps/wire && bun run test:integration:s2-real",
+          reproduce: "cd apps/wire && bun run test:integration:s2-real",
         },
       }),
     );
@@ -376,9 +375,9 @@ describe("a deliberately blocked suite exits 78, never 0 and never 1", () => {
     expect(child?.forbidden_substitutes).toContain("D1/R2");
     expect(child?.forbidden_substitutes).toContain("test/support/bindings.ts");
     expect(child?.reproduce).toBe("cd apps/wire && bun run test:integration:s2-real");
-    const packageJson = JSON.parse(
-      readFileSync(resolve(PACKAGE_ROOT, "package.json"), "utf8"),
-    ) as { readonly scripts?: Readonly<Record<string, string>> };
+    const packageJson = JSON.parse(readFileSync(resolve(PACKAGE_ROOT, "package.json"), "utf8")) as {
+      readonly scripts?: Readonly<Record<string, string>>;
+    };
     expect(packageJson.scripts?.["test:integration:s2-real"]).toBe(
       "S2_RUN_REAL_BINDING_INTEGRATION=1 bun test /dev/null --timeout=120000 test/integration/s2-krater-real-bindings.test.ts",
     );

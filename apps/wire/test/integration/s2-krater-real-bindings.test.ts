@@ -33,8 +33,7 @@ function blockRealBindingLane(
     code,
     blocked_on: blockedOn,
     forbidden_substitutes: forbiddenSubstitutes,
-    reproduce:
-      "cd apps/wire && bun run test:integration:s2-real",
+    reproduce: "cd apps/wire && bun run test:integration:s2-real",
   };
   console.log(JSON.stringify(record));
   process.exit(BLOCKED_EXIT_CODE);
