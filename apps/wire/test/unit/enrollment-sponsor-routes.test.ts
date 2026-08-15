@@ -49,6 +49,7 @@ interface Harness {
 async function harness(options?: {
   readonly withSponsorSeam?: false;
   readonly verifiedSponsor?: EnrollmentRouterOptions["verifiedSponsor"];
+  readonly clock?: { now(): number };
 }): Promise<Harness> {
   const keypair = (await crypto.subtle.generateKey({ name: "Ed25519" }, true, [
     "sign",
@@ -67,6 +68,7 @@ async function harness(options?: {
     replayProtector: enrollmentReplayProtectorFromBase64Url(
       "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
     ),
+    ...(options?.clock === undefined ? {} : { clock: options.clock }),
   });
 
   const sign: Harness["sign"] = async (body, route, action, method = "POST", principalId) => {
@@ -464,6 +466,65 @@ describe("sponsor enrollment routes", () => {
     const serializedFellows = JSON.stringify(fellowPayload);
     expect(serializedFellows).not.toContain(outcome.token as string);
     expect(serializedFellows).not.toContain("token_hash");
+  });
+
+  test("an elapsed pre-approval grant leaves no impossible card or misleading retry loop", async () => {
+    const clock = {
+      value: NOW,
+      now() {
+        return this.value;
+      },
+    };
+    const h = await harness({ clock });
+    const mintBody = JSON.stringify({
+      requested_scopes: ["review"],
+      fellow_grant_expires_in_ms: 1,
+    });
+    const mintHeaders = await h.sign(mintBody, "/v1/enrollments", "enrollment.mint");
+    const mintResponse = await h.app.fetch(
+      envelopeRequest("/v1/enrollments", mintHeaders, "POST", mintBody),
+    );
+    expect(mintResponse.status).toBe(201);
+    const minted = MintEnrollmentResponseSchema.parse(await mintResponse.json());
+    await claimOne(h, minted.enrollment_id, minted.secret, "elapsed-grant");
+    clock.value += 1;
+
+    const decide = async (): Promise<Response> => {
+      const body = JSON.stringify({
+        enrollment_id: minted.enrollment_id,
+        decision: "approve",
+      });
+      const headers = await h.sign(
+        body,
+        "/v1/enrollments/:enrollmentId/decision",
+        "enrollment.decide",
+      );
+      return h.app.fetch(
+        envelopeRequest(`/v1/enrollments/${minted.enrollment_id}/decision`, headers, "POST", body),
+      );
+    };
+
+    for (let attempt = 0; attempt < 2; attempt += 1) {
+      const response = await decide();
+      expect(response.status).toBe(404);
+      expect(await response.json()).toMatchObject({
+        code: "PROPOSAL_EXPIRED",
+        title: "No pending proposal here",
+      });
+    }
+
+    const listHeaders = await h.sign(
+      "",
+      "/v1/enrollments/proposals",
+      "enrollment.proposals.list",
+      "GET",
+    );
+    const list = await h.app.fetch(
+      envelopeRequest("/v1/enrollments/proposals", listHeaders, "GET"),
+    );
+    expect(list.status).toBe(200);
+    expect(SponsorProposalListResponseSchema.parse(await list.json()).proposals).toEqual([]);
+    expect(await h.service.fellows({ type: "sponsor", sponsorId: SPONSOR })).toEqual([]);
   });
 
   test("deny ends the flow and lists no fellow", async () => {

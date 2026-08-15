@@ -60,6 +60,10 @@ const LIFECYCLE_MIGRATION = resolve(
   import.meta.dir,
   "../../../../db/migrations/0006_fellow_credential_lifecycle.sql",
 );
+const CREDENTIAL_HARDENING_MIGRATION = resolve(
+  import.meta.dir,
+  "../../../../db/migrations/0011_fellow_credential_hardening.sql",
+);
 const DEVICE_MIGRATION = resolve(import.meta.dir, "../../../../db/migrations/0009_device_flow.sql");
 const DEVICE_HARDENING_MIGRATION = resolve(
   import.meta.dir,
@@ -158,6 +162,7 @@ function database(options: { readonly nullableDigest?: boolean } = {}): Database
       : schema,
   );
   sqlite.exec(readFileSync(LIFECYCLE_MIGRATION, "utf8"));
+  sqlite.exec(readFileSync(CREDENTIAL_HARDENING_MIGRATION, "utf8"));
   return sqlite;
 }
 
@@ -1102,6 +1107,36 @@ describe("device enrollment first-decider SQL", () => {
     ).rejects.toBeInstanceOf(EnrollmentPersistenceError);
   });
 
+  test("D1 device lookup hides and expires a card at its requested grant boundary", async () => {
+    const sqlite = deviceDatabase();
+    const store = new D1EnrollmentStore(localD1(sqlite));
+    const base = deviceInput("expired-requested-grant");
+    const input = {
+      ...base,
+      record: {
+        ...base.record,
+        requestedResources: { fellowGrantExpiresAt: NOW + 1 },
+      },
+    };
+    await store.deviceCreate(input);
+
+    await expect(
+      store.deviceLookup(
+        deviceLookupAttempt("usr_expired_requested_grant", input.userCodeHash, NOW + 1),
+      ),
+    ).rejects.toMatchObject({ code: "DEVICE_CODE_UNKNOWN" } satisfies Partial<EnrollmentError>);
+    expect(
+      sqlite
+        .prepare<{ status: string }, [string]>(
+          "SELECT status FROM enrollment_proposals WHERE proposal_id = ?",
+        )
+        .get(input.proposal.proposalId),
+    ).toEqual({ status: "expired" });
+    await expect(
+      store.deviceApprovalCardForDecision(input.record.enrollmentId, NOW + 1),
+    ).resolves.toMatchObject({ status: "expired" });
+  });
+
   test("a stale loaded card cannot bind a sponsor after its device code expires", async () => {
     const sqlite = deviceDatabase();
     const store = new D1EnrollmentStore(localD1(sqlite));
@@ -1131,6 +1166,63 @@ describe("device enrollment first-decider SQL", () => {
       sqlite.prepare<{ n: number }, []>("SELECT COUNT(*) AS n FROM enrollment_fellows").get()?.n,
     ).toBe(0);
   });
+
+  test.each([1, 2])(
+    "D1 refuses approval at or after the Fellow grant boundary at offset %i",
+    async (elapsedMs) => {
+      const sqlite = deviceDatabase();
+      const store = new D1EnrollmentStore(localD1(sqlite));
+      const base = deviceInput(`dead-grant-${elapsedMs}`);
+      const input = {
+        record: {
+          ...record(base.record.enrollmentId),
+          requestedResources: { fellowGrantExpiresAt: NOW + 1 },
+        },
+        proposal: base.proposal,
+      };
+      expect(await store.create(input.record)).toBe(true);
+      await store.claim({
+        enrollmentId: input.record.enrollmentId,
+        secretHash: input.record.secretHash,
+        proposal: input.proposal,
+        now: NOW,
+      });
+      expect(await store.pendingApprovalCardsBySponsor("usr_fixture_sponsor", NOW)).toHaveLength(1);
+
+      await expect(
+        store.decision({
+          enrollmentId: input.record.enrollmentId,
+          sponsorId: "usr_fixture_sponsor",
+          decision: { enrollment_id: input.record.enrollmentId, decision: "approve" },
+          now: NOW + elapsedMs,
+        }),
+      ).rejects.toMatchObject({ code: "PROPOSAL_EXPIRED" } satisfies Partial<EnrollmentError>);
+      expect(
+        sqlite
+          .prepare<{ sponsor_id: string; status: string }, [string]>(
+            `SELECT e.sponsor_id, p.status
+               FROM enrollment_records e
+               JOIN enrollment_proposals p ON p.enrollment_id = e.enrollment_id
+              WHERE e.enrollment_id = ?`,
+          )
+          .get(input.record.enrollmentId),
+      ).toEqual({ sponsor_id: "usr_fixture_sponsor", status: "expired" });
+      expect(
+        sqlite.prepare<{ n: number }, []>("SELECT COUNT(*) AS n FROM enrollment_grants").get()?.n,
+      ).toBe(0);
+      expect(
+        await store.pendingApprovalCardsBySponsor("usr_fixture_sponsor", NOW + elapsedMs),
+      ).toEqual([]);
+      await expect(
+        store.decision({
+          enrollmentId: input.record.enrollmentId,
+          sponsorId: "usr_fixture_sponsor",
+          decision: { enrollment_id: input.record.enrollmentId, decision: "approve" },
+          now: NOW + elapsedMs,
+        }),
+      ).rejects.toMatchObject({ code: "PROPOSAL_EXPIRED" } satisfies Partial<EnrollmentError>);
+    },
+  );
 
   test.each(["approve", "deny"] as const)(
     "a stale pending pre-read cannot partially bind a sponsor before %s",
@@ -1441,7 +1533,12 @@ const LIFECYCLE_SPONSOR = "usr_lifecycle_sponsor";
 const LIFECYCLE_FELLOW = "fellow-lifecycle";
 const LIFECYCLE_PROPOSAL = "proposal-lifecycle";
 
-function seedLifecycleIdentity(sqlite: Database): void {
+function seedLifecycleIdentity(
+  sqlite: Database,
+  resourcesJson = "{}",
+  scopesJson = '["review"]',
+  grantedAt = NOW,
+): void {
   sqlite
     .prepare(
       `INSERT INTO enrollment_records (
@@ -1454,8 +1551,8 @@ function seedLifecycleIdentity(sqlite: Database): void {
       LIFECYCLE_SPONSOR,
       "lifecycle-secret-hash",
       NOW + 30 * 60_000,
-      '["review"]',
-      "{}",
+      scopesJson,
+      resourcesJson,
       NOW,
     );
   sqlite
@@ -1476,10 +1573,10 @@ function seedLifecycleIdentity(sqlite: Database): void {
       "codex",
       NOW,
       NOW + 30 * 60_000,
-      '["review"]',
-      "{}",
-      "token-hash-1",
-      NOW,
+      scopesJson,
+      resourcesJson,
+      null,
+      null,
     );
   sqlite
     .prepare(
@@ -1494,18 +1591,37 @@ function seedLifecycleIdentity(sqlite: Database): void {
          granted_resources_json, granted_at
        ) VALUES (?, ?, ?, ?, ?, ?)`,
     )
-    .run(LIFECYCLE_PROPOSAL, LIFECYCLE_FELLOW, LIFECYCLE_SPONSOR, '["review"]', "{}", NOW);
+    .run(
+      LIFECYCLE_PROPOSAL,
+      LIFECYCLE_FELLOW,
+      LIFECYCLE_SPONSOR,
+      scopesJson,
+      resourcesJson,
+      grantedAt,
+    );
+  sqlite
+    .prepare(
+      `UPDATE enrollment_proposals
+          SET token_hash = ?, token_issued_at = ?
+        WHERE proposal_id = ?`,
+    )
+    .run("token-hash-1", NOW, LIFECYCLE_PROPOSAL);
 }
 
 function insertLifecycleCredential(
   sqlite: Database,
   input: {
-    readonly id: string;
+    readonly id: string | null;
     readonly hash: string;
     readonly issuedAt: number;
     readonly proposalId?: string;
     readonly sponsorId?: string;
     readonly scopesJson?: string;
+    readonly resourcesJson?: string;
+    readonly profile?: "bearer" | "dpop" | "http-message-signature";
+    readonly expiresAt?: number;
+    readonly lastUsedAt?: number | null;
+    readonly revokedAt?: number | null;
   },
 ): void {
   sqlite
@@ -1513,8 +1629,8 @@ function insertLifecycleCredential(
       `INSERT INTO fellow_tokens (
          credential_id, proposal_id, fellow_id, sponsor_id, token_hash,
          granted_scopes_json, granted_resources_json, issued_at, expires_at,
-         credential_profile, credential_origin
-       ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'bearer', ?)`,
+         revoked_at, last_used_at, credential_profile, credential_origin
+       ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
     )
     .run(
       input.id,
@@ -1523,11 +1639,60 @@ function insertLifecycleCredential(
       input.sponsorId ?? LIFECYCLE_SPONSOR,
       input.hash,
       input.scopesJson ?? '["review"]',
-      "{}",
+      input.resourcesJson ?? "{}",
       input.issuedAt,
-      input.issuedAt + TOKEN_TTL_MS,
+      input.expiresAt ?? input.issuedAt + TOKEN_TTL_MS,
+      input.revokedAt ?? null,
+      input.lastUsedAt ?? null,
+      input.profile ?? "bearer",
       input.proposalId === undefined ? "harness-migration" : "enrollment",
     );
+}
+
+function expectCredentialHardeningGuardRollback(sqlite: Database): void {
+  const migration = readFileSync(CREDENTIAL_HARDENING_MIGRATION, "utf8");
+  const guardInsert = "INSERT INTO fellow_credential_migration_guard (valid)";
+  const guardInsertStart = migration.indexOf(guardInsert);
+  const guardDropStart = migration.indexOf("DROP TABLE fellow_credential_migration_guard");
+  expect(guardInsertStart).toBeGreaterThan(0);
+  expect(guardDropStart).toBeGreaterThan(guardInsertStart);
+  let guardFailed = false;
+  let guardMessage = "";
+  sqlite.run("BEGIN");
+  try {
+    sqlite.exec(migration.slice(0, guardInsertStart));
+    const guardStatements = migration
+      .slice(guardInsertStart, guardDropStart)
+      .split(guardInsert)
+      .slice(1)
+      .map((suffix) => `${guardInsert}${suffix}`);
+    expect(guardStatements.length).toBeGreaterThan(1);
+    // Bun's multi-statement exec stops after the first zero-row INSERT for
+    // this shape. Prepare each migration statement so every independent guard
+    // is causally executed by the planted rollback proof.
+    for (const statement of guardStatements) sqlite.prepare(statement).run();
+  } catch (error) {
+    guardFailed = true;
+    guardMessage = error instanceof Error ? error.message : String(error);
+  } finally {
+    sqlite.run("ROLLBACK");
+  }
+
+  expect(guardFailed).toBe(true);
+  expect(guardMessage).toContain("fellow_credential_hardening_guard");
+  expect(
+    sqlite
+      .prepare<{ n: number }, []>(
+        `SELECT COUNT(*) AS n FROM sqlite_master
+          WHERE name IN (
+            'fellow_credential_migration_guard',
+            'enrollment_credentials_issuance_monotonic',
+            'enrollment_fellows_status_transition',
+            'enrollment_credentials_sponsor_fellow_lifecycle_idx'
+          )`,
+      )
+      .get()?.n,
+  ).toBe(0);
 }
 
 describe("Fellow credential lifecycle constraints and authentication", () => {
@@ -1615,6 +1780,599 @@ describe("Fellow credential lifecycle constraints and authentication", () => {
     ).toBe(3);
   });
 
+  test("0011 accepts valid 0006 state without rewriting credential evidence", async () => {
+    const sqlite = new Database(":memory:", { strict: true });
+    sqlite.run(readFileSync(MIGRATION, "utf8"));
+    sqlite.exec(readFileSync(LIFECYCLE_MIGRATION, "utf8"));
+    seedLifecycleIdentity(sqlite);
+    insertLifecycleCredential(sqlite, {
+      id: "credential-valid-upgrade",
+      hash: "token-hash-1",
+      issuedAt: NOW,
+      proposalId: LIFECYCLE_PROPOSAL,
+    });
+    const before = sqlite
+      .prepare<Record<string, string | number | null>, []>(
+        "SELECT * FROM fellow_tokens WHERE credential_id = 'credential-valid-upgrade'",
+      )
+      .get();
+
+    sqlite.run("BEGIN");
+    sqlite.exec(readFileSync(CREDENTIAL_HARDENING_MIGRATION, "utf8"));
+    sqlite.run("COMMIT");
+
+    expect(
+      sqlite
+        .prepare<Record<string, string | number | null>, []>(
+          "SELECT * FROM fellow_tokens WHERE credential_id = 'credential-valid-upgrade'",
+        )
+        .get(),
+    ).toEqual(before);
+    const monotonicPlan = sqlite
+      .prepare<{ detail: string }, [string, number]>(
+        "EXPLAIN QUERY PLAN SELECT 1 FROM fellow_tokens WHERE fellow_id = ? AND issued_at > ?",
+      )
+      .all(LIFECYCLE_FELLOW, NOW)
+      .map((row) => row.detail)
+      .join("\n");
+    expect(monotonicPlan).toContain("enrollment_credentials_fellow_issued_idx");
+    const recording = recordingD1(sqlite);
+    await new D1EnrollmentStore(recording.db).fellowsBySponsor(LIFECYCLE_SPONSOR, NOW);
+    const [inventoryQuery] = recording.issued;
+    expect(inventoryQuery).toBeDefined();
+    const sponsorPlan = sqlite
+      .prepare<{ detail: string }, LocalBinding[]>(`EXPLAIN QUERY PLAN ${inventoryQuery as string}`)
+      .all(LIFECYCLE_SPONSOR, NOW, NOW, NOW)
+      .map((row) => row.detail)
+      .join("\n");
+    expect(sponsorPlan).toContain("MATERIALIZE sponsor_fellow_page");
+    expect(sponsorPlan).toContain("enrollment_grants_sponsor_page_idx");
+    expect(sponsorPlan).toContain("enrollment_credentials_sponsor_fellow_lifecycle_idx");
+    expect(sponsorPlan).not.toContain("SCAN grant_row");
+  });
+
+  test("0011 preserves an expired durable grant that never issued a credential", async () => {
+    const sqlite = new Database(":memory:", { strict: true });
+    sqlite.run(readFileSync(MIGRATION, "utf8"));
+    sqlite.exec(readFileSync(LIFECYCLE_MIGRATION, "utf8"));
+    seedLifecycleIdentity(sqlite, `{"fellowGrantExpiresAt":${NOW + 1}}`);
+    sqlite.exec(readFileSync(DEVICE_MIGRATION, "utf8"));
+    sqlite.exec(readFileSync(DEVICE_HARDENING_MIGRATION, "utf8"));
+    sqlite
+      .prepare(
+        `UPDATE enrollment_proposals
+            SET token_hash = NULL, token_issued_at = NULL
+          WHERE proposal_id = ?`,
+      )
+      .run(LIFECYCLE_PROPOSAL);
+    expect(
+      await new D1EnrollmentStore(localD1(sqlite)).poll({
+        flowHandleHash: "lifecycle-flow-hash",
+        now: NOW + 1,
+        createToken: async () => {
+          throw new Error("expired grant must not mint");
+        },
+      }),
+    ).toEqual({ kind: "expired" });
+    const grantBefore = sqlite
+      .prepare<Record<string, string | number>, []>("SELECT * FROM enrollment_grants")
+      .get();
+
+    sqlite.run("BEGIN");
+    sqlite.exec(readFileSync(CREDENTIAL_HARDENING_MIGRATION, "utf8"));
+    sqlite.run("COMMIT");
+
+    expect(
+      sqlite.prepare<Record<string, string | number>, []>("SELECT * FROM enrollment_grants").get(),
+    ).toEqual(grantBefore);
+    expect(
+      sqlite.prepare<{ n: number }, []>("SELECT COUNT(*) AS n FROM fellow_tokens").get()?.n,
+    ).toBe(0);
+  });
+
+  test("0011 refuses an expired proposal that has no real grant-expiry cause", () => {
+    const sqlite = new Database(":memory:", { strict: true });
+    sqlite.run(readFileSync(MIGRATION, "utf8"));
+    seedLifecycleIdentity(sqlite);
+    sqlite
+      .prepare(
+        `UPDATE enrollment_proposals
+            SET status = 'expired', token_hash = NULL, token_issued_at = NULL
+          WHERE proposal_id = ?`,
+      )
+      .run(LIFECYCLE_PROPOSAL);
+    sqlite.exec(readFileSync(LIFECYCLE_MIGRATION, "utf8"));
+
+    expectCredentialHardeningGuardRollback(sqlite);
+  });
+
+  test("0011 refuses retained authority outside the complete persisted schema", () => {
+    const corruptCases = [
+      { label: "unknown scope", scopes: '["admin"]', resources: "{}" },
+      { label: "unknown resource", scopes: '["review"]', resources: '{"mystery":1}' },
+      {
+        label: "wrong budget type",
+        scopes: '["review"]',
+        resources: '{"eventBudget":"10"}',
+      },
+      {
+        label: "budget beyond contract",
+        scopes: '["review"]',
+        resources: '{"artifactBudgetBytes":1073741825}',
+      },
+      {
+        label: "invalid problem binding",
+        scopes: '["review"]',
+        resources: '{"problemBinding":"P-abcd"}',
+      },
+      {
+        label: "duplicate resource key",
+        scopes: '["review"]',
+        resources: '{"eventBudget":1,"eventBudget":2}',
+      },
+      {
+        label: "unicode-trimmed empty directive",
+        scopes: '["review"]',
+        resources: JSON.stringify({ firstDirective: "\t\u00a0\ufeff" }),
+      },
+      {
+        label: "directive beyond UTF-16 contract",
+        scopes: '["review"]',
+        resources: JSON.stringify({ firstDirective: "😀".repeat(2_000) }),
+      },
+    ] as const;
+
+    for (const fixture of corruptCases) {
+      const sqlite = new Database(":memory:", { strict: true });
+      sqlite.run(readFileSync(MIGRATION, "utf8"));
+      seedLifecycleIdentity(sqlite, fixture.resources, fixture.scopes);
+      sqlite
+        .prepare(
+          `UPDATE enrollment_proposals
+              SET token_hash = NULL, token_issued_at = NULL
+            WHERE proposal_id = ?`,
+        )
+        .run(LIFECYCLE_PROPOSAL);
+      sqlite.exec(readFileSync(LIFECYCLE_MIGRATION, "utf8"));
+
+      expectCredentialHardeningGuardRollback(sqlite);
+    }
+  });
+
+  test("0011 keeps malformed authority out of every future durable grant", () => {
+    const corruptCases = [
+      { scopes: '["admin"]', resources: "{}" },
+      { scopes: '["review"]', resources: '{"unknown":true}' },
+      { scopes: '["review"]', resources: '{"eventBudget":0}' },
+      {
+        scopes: '["review"]',
+        resources: JSON.stringify({ firstDirective: "\t\u00a0\ufeff" }),
+      },
+      {
+        scopes: '["review"]',
+        resources: JSON.stringify({ firstDirective: "😀".repeat(2_000) }),
+      },
+    ] as const;
+
+    for (const fixture of corruptCases) {
+      const sqlite = database();
+      expect(() => seedLifecycleIdentity(sqlite, fixture.resources, fixture.scopes)).toThrow(
+        "enrollment grant authority schema invalid",
+      );
+      expect(
+        sqlite.prepare<{ n: number }, []>("SELECT COUNT(*) AS n FROM enrollment_grants").get()?.n,
+      ).toBe(0);
+    }
+  });
+
+  test("0011 rejects retained and future Fellow identities outside the hello contract", () => {
+    const identityCases = [
+      { field: "model", value: "" },
+      { field: "model", value: "😀".repeat(100) },
+      { field: "harness", value: "\t\u00a0\ufeff" },
+      { field: "harness", value: "😀".repeat(100) },
+    ] as const;
+
+    for (const fixture of identityCases) {
+      const retained = new Database(":memory:", { strict: true });
+      retained.run(readFileSync(MIGRATION, "utf8"));
+      seedLifecycleIdentity(retained);
+      retained
+        .prepare(`UPDATE enrollment_fellows SET ${fixture.field} = ? WHERE fellow_id = ?`)
+        .run(fixture.value, LIFECYCLE_FELLOW);
+      retained
+        .prepare(`UPDATE enrollment_proposals SET ${fixture.field} = ? WHERE proposal_id = ?`)
+        .run(fixture.value, LIFECYCLE_PROPOSAL);
+      retained
+        .prepare(
+          `UPDATE enrollment_proposals
+              SET token_hash = NULL, token_issued_at = NULL
+            WHERE proposal_id = ?`,
+        )
+        .run(LIFECYCLE_PROPOSAL);
+      retained.exec(readFileSync(LIFECYCLE_MIGRATION, "utf8"));
+      expectCredentialHardeningGuardRollback(retained);
+
+      const current = database();
+      expect(() =>
+        current
+          .prepare(
+            `INSERT INTO enrollment_fellows (
+               fellow_id, sponsor_id, name, model, harness, created_at
+             ) VALUES (?, ?, ?, ?, ?, ?)`,
+          )
+          .run(
+            `invalid-fellow-${fixture.field}`,
+            LIFECYCLE_SPONSOR,
+            "invalid-fellow",
+            fixture.field === "model" ? fixture.value : "model",
+            fixture.field === "harness" ? fixture.value : "harness",
+            NOW,
+          ),
+      ).toThrow("Fellow identity schema invalid");
+    }
+
+    const invalidName = database();
+    expect(() =>
+      invalidName
+        .prepare(
+          `INSERT INTO enrollment_fellows (
+             fellow_id, sponsor_id, name, model, harness, created_at
+           ) VALUES (?, ?, ?, ?, ?, ?)`,
+        )
+        .run("invalid-fellow-name", LIFECYCLE_SPONSOR, "Invalid", "model", "harness", NOW),
+    ).toThrow("Fellow identity schema invalid");
+
+    const retainedNullId = new Database(":memory:", { strict: true });
+    retainedNullId.run(readFileSync(MIGRATION, "utf8"));
+    retainedNullId
+      .prepare(
+        `INSERT INTO enrollment_fellows (
+           fellow_id, sponsor_id, name, model, harness, created_at
+         ) VALUES (NULL, ?, ?, ?, ?, ?)`,
+      )
+      .run(LIFECYCLE_SPONSOR, "orphan-fellow", "model", "harness", NOW);
+    retainedNullId.exec(readFileSync(LIFECYCLE_MIGRATION, "utf8"));
+    expectCredentialHardeningGuardRollback(retainedNullId);
+
+    const currentNullId = database();
+    expect(() =>
+      currentNullId
+        .prepare(
+          `INSERT INTO enrollment_fellows (
+             fellow_id, sponsor_id, name, model, harness, created_at
+           ) VALUES (NULL, ?, ?, ?, ?, ?)`,
+        )
+        .run(LIFECYCLE_SPONSOR, "orphan-fellow", "model", "harness", NOW),
+    ).toThrow("Fellow identity schema invalid");
+
+    const identityIdCases = [
+      {
+        label: "fellow-id",
+        fellowId: "😀".repeat(50),
+        sponsorId: LIFECYCLE_SPONSOR,
+      },
+      {
+        label: "sponsor-id",
+        fellowId: "orphan-sponsor-id-fellow",
+        sponsorId: "😀".repeat(100),
+      },
+    ] as const;
+    for (const fixture of identityIdCases) {
+      const retained = new Database(":memory:", { strict: true });
+      retained.run(readFileSync(MIGRATION, "utf8"));
+      retained
+        .prepare(
+          `INSERT INTO enrollment_fellows (
+             fellow_id, sponsor_id, name, model, harness, created_at
+           ) VALUES (?, ?, ?, ?, ?, ?)`,
+        )
+        .run(
+          fixture.fellowId,
+          fixture.sponsorId,
+          `orphan-${fixture.label}`,
+          "model",
+          "harness",
+          NOW,
+        );
+      retained.exec(readFileSync(LIFECYCLE_MIGRATION, "utf8"));
+      expectCredentialHardeningGuardRollback(retained);
+
+      const current = database();
+      expect(() =>
+        current
+          .prepare(
+            `INSERT INTO enrollment_fellows (
+               fellow_id, sponsor_id, name, model, harness, created_at
+             ) VALUES (?, ?, ?, ?, ?, ?)`,
+          )
+          .run(
+            fixture.fellowId,
+            fixture.sponsorId,
+            `orphan-${fixture.label}`,
+            "model",
+            "harness",
+            NOW,
+          ),
+      ).toThrow("Fellow identity schema invalid");
+    }
+  });
+
+  test("0011 rejects retained and future sponsor-visible evidence outside safe schemas", () => {
+    for (const grantedAt of [-1, 9_007_199_254_740_992]) {
+      const retainedGrant = new Database(":memory:", { strict: true });
+      retainedGrant.run(readFileSync(MIGRATION, "utf8"));
+      seedLifecycleIdentity(retainedGrant, "{}", '["review"]', grantedAt);
+      retainedGrant
+        .prepare(
+          `UPDATE enrollment_proposals
+              SET token_hash = NULL, token_issued_at = NULL
+            WHERE proposal_id = ?`,
+        )
+        .run(LIFECYCLE_PROPOSAL);
+      retainedGrant.exec(readFileSync(LIFECYCLE_MIGRATION, "utf8"));
+      expectCredentialHardeningGuardRollback(retainedGrant);
+
+      const currentGrant = database();
+      expect(() => seedLifecycleIdentity(currentGrant, "{}", '["review"]', grantedAt)).toThrow(
+        "enrollment grant evidence schema invalid",
+      );
+    }
+
+    const credentialCases = [
+      { id: null, expiresAt: NOW + TOKEN_TTL_MS },
+      { id: "😀".repeat(100), expiresAt: NOW + TOKEN_TTL_MS },
+      { id: "credential-unsafe-expiry", expiresAt: 9_007_199_254_740_992 },
+    ] as const;
+    for (const fixture of credentialCases) {
+      const retained = new Database(":memory:", { strict: true });
+      retained.run(readFileSync(MIGRATION, "utf8"));
+      retained.exec(readFileSync(LIFECYCLE_MIGRATION, "utf8"));
+      seedLifecycleIdentity(retained);
+      insertLifecycleCredential(retained, {
+        id: fixture.id,
+        hash: "token-hash-1",
+        issuedAt: NOW,
+        proposalId: LIFECYCLE_PROPOSAL,
+        expiresAt: fixture.expiresAt,
+      });
+      expectCredentialHardeningGuardRollback(retained);
+
+      const current = database();
+      seedLifecycleIdentity(current);
+      expect(() =>
+        insertLifecycleCredential(current, {
+          id: fixture.id,
+          hash: "token-hash-1",
+          issuedAt: NOW,
+          proposalId: LIFECYCLE_PROPOSAL,
+          expiresAt: fixture.expiresAt,
+        }),
+      ).toThrow("credential output schema invalid");
+    }
+  });
+
+  test("0011 refuses issued proposal facts without their exact credential row", () => {
+    const tokenFacts = [
+      { label: "both", hash: "orphan-token", issuedAt: NOW },
+      { label: "hash only", hash: "orphan-token", issuedAt: null },
+      { label: "time only", hash: null, issuedAt: NOW },
+    ] as const;
+
+    for (const fixture of tokenFacts) {
+      const sqlite = new Database(":memory:", { strict: true });
+      sqlite.run(readFileSync(MIGRATION, "utf8"));
+      seedLifecycleIdentity(sqlite);
+      sqlite
+        .prepare(
+          `UPDATE enrollment_proposals
+              SET token_hash = ?, token_issued_at = ?
+            WHERE proposal_id = ?`,
+        )
+        .run(fixture.hash, fixture.issuedAt, LIFECYCLE_PROPOSAL);
+      sqlite.exec(readFileSync(LIFECYCLE_MIGRATION, "utf8"));
+
+      expectCredentialHardeningGuardRollback(sqlite);
+    }
+  });
+
+  test("0011 refuses an approved proposal whose atomic Fellow and grant rows are missing", () => {
+    const sqlite = new Database(":memory:", { strict: true });
+    sqlite.run(readFileSync(MIGRATION, "utf8"));
+    seedLifecycleIdentity(sqlite);
+    sqlite.prepare("DELETE FROM enrollment_grants WHERE proposal_id = ?").run(LIFECYCLE_PROPOSAL);
+    sqlite
+      .prepare(
+        `UPDATE enrollment_proposals
+            SET token_hash = NULL, token_issued_at = NULL
+          WHERE proposal_id = ?`,
+      )
+      .run(LIFECYCLE_PROPOSAL);
+    sqlite.exec(readFileSync(LIFECYCLE_MIGRATION, "utf8"));
+
+    expectCredentialHardeningGuardRollback(sqlite);
+  });
+
+  test("0011 refuses an over-authorized 0006 legacy copy and rolls back its own schema", () => {
+    const sqlite = new Database(":memory:", { strict: true });
+    sqlite.run(readFileSync(MIGRATION, "utf8"));
+    seedLifecycleIdentity(sqlite);
+    sqlite
+      .prepare(
+        `INSERT INTO enrollment_credentials (
+           credential_id, proposal_id, fellow_id, sponsor_id, token_hash,
+           granted_scopes_json, granted_resources_json, issued_at
+         ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+      )
+      .run(
+        "credential-legacy-escalated",
+        LIFECYCLE_PROPOSAL,
+        LIFECYCLE_FELLOW,
+        LIFECYCLE_SPONSOR,
+        "token-hash-legacy-escalated",
+        '["promote"]',
+        "{}",
+        NOW,
+      );
+    sqlite.exec(readFileSync(LIFECYCLE_MIGRATION, "utf8"));
+
+    expectCredentialHardeningGuardRollback(sqlite);
+    expect(
+      sqlite.prepare<{ n: number }, []>("SELECT COUNT(*) AS n FROM fellow_tokens").get()?.n,
+    ).toBe(1);
+  });
+
+  test("0011 refuses a durable grant that exceeds its recorded approval", () => {
+    const sqlite = new Database(":memory:", { strict: true });
+    sqlite.run(readFileSync(MIGRATION, "utf8"));
+    seedLifecycleIdentity(sqlite);
+    sqlite.prepare("UPDATE enrollment_grants SET granted_scopes_json = '[\"promote\"]'").run();
+    sqlite
+      .prepare(
+        `INSERT INTO enrollment_credentials (
+           credential_id, proposal_id, fellow_id, sponsor_id, token_hash,
+           granted_scopes_json, granted_resources_json, issued_at
+         ) VALUES (?, ?, ?, ?, ?, '["promote"]', '{}', ?)`,
+      )
+      .run(
+        "credential-escalated-grant",
+        LIFECYCLE_PROPOSAL,
+        LIFECYCLE_FELLOW,
+        LIFECYCLE_SPONSOR,
+        "token-hash-1",
+        NOW,
+      );
+    sqlite.exec(readFileSync(LIFECYCLE_MIGRATION, "utf8"));
+
+    expectCredentialHardeningGuardRollback(sqlite);
+  });
+
+  test("0011 refuses enrollment credential token and issuance facts that disagree with the proposal", () => {
+    for (const mismatch of ["token", "issuance"] as const) {
+      const sqlite = new Database(":memory:", { strict: true });
+      sqlite.run(readFileSync(MIGRATION, "utf8"));
+      seedLifecycleIdentity(sqlite);
+      sqlite
+        .prepare(
+          `INSERT INTO enrollment_credentials (
+             credential_id, proposal_id, fellow_id, sponsor_id, token_hash,
+             granted_scopes_json, granted_resources_json, issued_at
+           ) VALUES (?, ?, ?, ?, ?, '["review"]', '{}', ?)`,
+        )
+        .run(
+          `credential-${mismatch}-mismatch`,
+          LIFECYCLE_PROPOSAL,
+          LIFECYCLE_FELLOW,
+          LIFECYCLE_SPONSOR,
+          mismatch === "token" ? "token-hash-mismatch" : "token-hash-1",
+          mismatch === "issuance" ? NOW + 1 : NOW,
+        );
+      sqlite.exec(readFileSync(LIFECYCLE_MIGRATION, "utf8"));
+
+      expectCredentialHardeningGuardRollback(sqlite);
+    }
+  });
+
+  test("0011 refuses a pre-existing four-token overlap created by backdated issuance", () => {
+    const sqlite = new Database(":memory:", { strict: true });
+    sqlite.run(readFileSync(MIGRATION, "utf8"));
+    sqlite.exec(readFileSync(LIFECYCLE_MIGRATION, "utf8"));
+    seedLifecycleIdentity(sqlite);
+    insertLifecycleCredential(sqlite, {
+      id: "credential-future-1",
+      hash: "token-hash-future-1",
+      issuedAt: NOW + 200,
+      proposalId: LIFECYCLE_PROPOSAL,
+    });
+    insertLifecycleCredential(sqlite, {
+      id: "credential-future-2",
+      hash: "token-hash-future-2",
+      issuedAt: NOW + 201,
+    });
+    insertLifecycleCredential(sqlite, {
+      id: "credential-future-3",
+      hash: "token-hash-future-3",
+      issuedAt: NOW + 202,
+    });
+    insertLifecycleCredential(sqlite, {
+      id: "credential-backdated",
+      hash: "token-hash-backdated",
+      issuedAt: NOW + 100,
+    });
+    expect(
+      sqlite.prepare<{ n: number }, []>("SELECT COUNT(*) AS n FROM fellow_tokens").get()?.n,
+    ).toBe(4);
+
+    expectCredentialHardeningGuardRollback(sqlite);
+  });
+
+  test("0011 rejects a backdated insert before it can bypass the active-token cap", () => {
+    const sqlite = database();
+    seedLifecycleIdentity(sqlite);
+    insertLifecycleCredential(sqlite, {
+      id: "credential-current-1",
+      hash: "token-hash-current-1",
+      issuedAt: NOW + 200,
+    });
+    insertLifecycleCredential(sqlite, {
+      id: "credential-current-2",
+      hash: "token-hash-current-2",
+      issuedAt: NOW + 201,
+    });
+    insertLifecycleCredential(sqlite, {
+      id: "credential-current-3",
+      hash: "token-hash-current-3",
+      issuedAt: NOW + 202,
+    });
+
+    expect(() =>
+      insertLifecycleCredential(sqlite, {
+        id: "credential-current-backdated",
+        hash: "token-hash-current-backdated",
+        issuedAt: NOW + 100,
+      }),
+    ).toThrow("credential issuance cannot move backward");
+    expect(
+      sqlite.prepare<{ n: number }, []>("SELECT COUNT(*) AS n FROM fellow_tokens").get()?.n,
+    ).toBe(3);
+  });
+
+  test("authentication refuses a legacy credential whose copied authority exceeds its durable grant", async () => {
+    const sqlite = new Database(":memory:", { strict: true });
+    sqlite.run(readFileSync(MIGRATION, "utf8"));
+    seedLifecycleIdentity(sqlite);
+    sqlite
+      .prepare(
+        `INSERT INTO enrollment_credentials (
+           credential_id, proposal_id, fellow_id, sponsor_id, token_hash,
+           granted_scopes_json, granted_resources_json, issued_at
+         ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+      )
+      .run(
+        "credential-legacy-escalated",
+        LIFECYCLE_PROPOSAL,
+        LIFECYCLE_FELLOW,
+        LIFECYCLE_SPONSOR,
+        "token-hash-legacy-escalated",
+        '["promote"]',
+        "{}",
+        NOW,
+      );
+    sqlite.exec(readFileSync(LIFECYCLE_MIGRATION, "utf8"));
+    const store = new D1EnrollmentStore(localD1(sqlite));
+
+    expect(
+      await store.authenticateCredential("token-hash-legacy-escalated", NOW + 1, "bearer"),
+    ).toBeUndefined();
+    expect(
+      sqlite
+        .prepare<{ last_used_at: number | null }, []>(
+          "SELECT last_used_at FROM fellow_tokens WHERE credential_id = 'credential-legacy-escalated'",
+        )
+        .get()?.last_used_at,
+    ).toBeNull();
+  });
+
   test("identity splices and a backwards sponsor panic are refused by the database", () => {
     const sqlite = database();
     seedLifecycleIdentity(sqlite);
@@ -1626,7 +2384,7 @@ describe("Fellow credential lifecycle constraints and authentication", () => {
         proposalId: LIFECYCLE_PROPOSAL,
         sponsorId: "usr_attacker",
       }),
-    ).toThrow("credential authority binding mismatch");
+    ).toThrow("credential durable authority mismatch");
     expect(() =>
       insertLifecycleCredential(sqlite, {
         id: "credential-null-origin-cross-sponsor",
@@ -1634,7 +2392,7 @@ describe("Fellow credential lifecycle constraints and authentication", () => {
         issuedAt: NOW,
         sponsorId: "usr_attacker",
       }),
-    ).toThrow("credential authority binding mismatch");
+    ).toThrow("credential durable authority mismatch");
     expect(() =>
       insertLifecycleCredential(sqlite, {
         id: "credential-escalated-grant",
@@ -1643,7 +2401,7 @@ describe("Fellow credential lifecycle constraints and authentication", () => {
         proposalId: LIFECYCLE_PROPOSAL,
         scopesJson: '["promote"]',
       }),
-    ).toThrow("credential authority binding mismatch");
+    ).toThrow("credential durable authority mismatch");
 
     sqlite
       .prepare(
@@ -1683,6 +2441,26 @@ describe("Fellow credential lifecycle constraints and authentication", () => {
       issuedAt: NOW,
       proposalId: LIFECYCLE_PROPOSAL,
     });
+
+    for (const [column, value] of [
+      ["sponsor_id", "usr_rewritten_sponsor"],
+      ["name", "rewritten-fellow"],
+      ["model", "rewritten-model"],
+      ["harness", "rewritten-harness"],
+      ["created_at", NOW + 1],
+    ] as const) {
+      expect(() =>
+        sqlite
+          .prepare(`UPDATE enrollment_fellows SET ${column} = ? WHERE fellow_id = ?`)
+          .run(value, LIFECYCLE_FELLOW),
+      ).toThrow("Fellow identity is immutable");
+    }
+    sqlite
+      .prepare("UPDATE enrollment_fellows SET status = 'paused' WHERE fellow_id = ?")
+      .run(LIFECYCLE_FELLOW);
+    sqlite
+      .prepare("UPDATE enrollment_fellows SET status = 'active' WHERE fellow_id = ?")
+      .run(LIFECYCLE_FELLOW);
 
     expect(() =>
       sqlite
@@ -1767,7 +2545,7 @@ describe("Fellow credential lifecycle constraints and authentication", () => {
     });
     const store = new D1EnrollmentStore(localD1(sqlite));
 
-    const authenticated = await store.authenticateCredential("token-hash-1", NOW + 1);
+    const authenticated = await store.authenticateCredential("token-hash-1", NOW + 1, "bearer");
     expect(authenticated?.lastUsedAt).toBe(NOW + 1);
     expect(authenticated?.fellowStatus).toBe("active");
     expect(
@@ -1785,7 +2563,9 @@ describe("Fellow credential lifecycle constraints and authentication", () => {
       },
     ]);
 
-    expect(await store.authenticateCredential("token-hash-1", NOW + TOKEN_TTL_MS)).toBeUndefined();
+    expect(
+      await store.authenticateCredential("token-hash-1", NOW + TOKEN_TTL_MS, "bearer"),
+    ).toBeUndefined();
     expect(
       (await store.fellowsBySponsor(LIFECYCLE_SPONSOR, NOW + TOKEN_TTL_MS))[0]?.credentials,
     ).toEqual([]);
@@ -1797,27 +2577,19 @@ describe("Fellow credential lifecycle constraints and authentication", () => {
         .get()?.last_used_at,
     ).toBe(NOW + 1);
 
-    for (const status of ["paused", "revoked", "archived", "compromised"] as const) {
-      sqlite
-        .prepare("UPDATE enrollment_fellows SET status = ? WHERE fellow_id = ?")
-        .run(status, LIFECYCLE_FELLOW);
-      expect(await store.authenticateCredential("token-hash-1", NOW + 2)).toBeUndefined();
-      expect((await store.fellowsBySponsor(LIFECYCLE_SPONSOR, NOW + 2))[0]).toMatchObject({
-        status,
-        credentials: [{ credentialId: "credential-1", active: false }],
-      });
-    }
     sqlite
       .prepare("UPDATE enrollment_fellows SET status = 'suspicious_review' WHERE fellow_id = ?")
       .run(LIFECYCLE_FELLOW);
-    expect((await store.authenticateCredential("token-hash-1", NOW + 3))?.fellowStatus).toBe(
-      "suspicious_review",
-    );
+    expect(
+      (await store.authenticateCredential("token-hash-1", NOW + 3, "bearer"))?.fellowStatus,
+    ).toBe("suspicious_review");
     expect((await store.fellowsBySponsor(LIFECYCLE_SPONSOR, NOW + 3))[0]).toMatchObject({
       status: "suspicious_review",
       credentials: [{ credentialId: "credential-1", active: true }],
     });
-    expect((await store.authenticateCredential("token-hash-1", NOW + 2))?.lastUsedAt).toBe(NOW + 3);
+    expect(
+      (await store.authenticateCredential("token-hash-1", NOW + 2, "bearer"))?.lastUsedAt,
+    ).toBe(NOW + 3);
 
     sqlite
       .prepare("UPDATE enrollment_fellows SET status = 'active' WHERE fellow_id = ?")
@@ -1828,7 +2600,7 @@ describe("Fellow credential lifecycle constraints and authentication", () => {
          VALUES (?, ?, ?)`,
       )
       .run(LIFECYCLE_SPONSOR, NOW, NOW);
-    expect(await store.authenticateCredential("token-hash-1", NOW + 4)).toBeUndefined();
+    expect(await store.authenticateCredential("token-hash-1", NOW + 4, "bearer")).toBeUndefined();
     expect((await store.fellowsBySponsor(LIFECYCLE_SPONSOR, NOW + 4))[0]?.credentials).toEqual([]);
 
     expect(
@@ -1840,6 +2612,129 @@ describe("Fellow credential lifecycle constraints and authentication", () => {
     ).toBe(NOW + 3);
   });
 
+  test("an auth-state change between candidate parsing and last-used update wins the race", async () => {
+    const races = [
+      {
+        label: "revocation",
+        mutate: (sqlite: Database) =>
+          sqlite
+            .prepare(
+              "UPDATE fellow_tokens SET revoked_at = ? WHERE credential_id = 'credential-race'",
+            )
+            .run(NOW + 1),
+      },
+      {
+        label: "pause",
+        mutate: (sqlite: Database) =>
+          sqlite
+            .prepare("UPDATE enrollment_fellows SET status = 'paused' WHERE fellow_id = ?")
+            .run(LIFECYCLE_FELLOW),
+      },
+      {
+        label: "panic",
+        mutate: (sqlite: Database) =>
+          sqlite
+            .prepare(
+              `INSERT INTO enrollment_sponsor_security (sponsor_id, panic_at, updated_at)
+               VALUES (?, ?, ?)`,
+            )
+            .run(LIFECYCLE_SPONSOR, NOW + 1, NOW + 1),
+      },
+    ] as const;
+
+    for (const race of races) {
+      const sqlite = database();
+      seedLifecycleIdentity(sqlite);
+      insertLifecycleCredential(sqlite, {
+        id: "credential-race",
+        hash: "token-hash-1",
+        issuedAt: NOW,
+        proposalId: LIFECYCLE_PROPOSAL,
+      });
+      let mutated = false;
+      const store = new D1EnrollmentStore(
+        localD1(sqlite, {
+          afterFirstRead: async (query) => {
+            if (mutated || !query.includes("FROM fellow_tokens WHERE token_hash")) return;
+            mutated = true;
+            race.mutate(sqlite);
+          },
+        }),
+      );
+
+      expect(
+        await store.authenticateCredential("token-hash-1", NOW + 2, "bearer"),
+        race.label,
+      ).toBeUndefined();
+      expect(mutated, race.label).toBe(true);
+      expect(
+        sqlite
+          .prepare<{ last_used_at: number | null }, []>(
+            "SELECT last_used_at FROM fellow_tokens WHERE credential_id = 'credential-race'",
+          )
+          .get()?.last_used_at,
+        race.label,
+      ).toBeNull();
+    }
+  });
+
+  test("terminal Fellow states cannot resurrect and compromise requires prior family revocation", async () => {
+    for (const terminal of ["revoked", "compromised"] as const) {
+      const sqlite = database();
+      seedLifecycleIdentity(sqlite);
+      insertLifecycleCredential(sqlite, {
+        id: `credential-${terminal}`,
+        hash: `token-hash-${terminal}`,
+        issuedAt: NOW,
+      });
+      const store = new D1EnrollmentStore(localD1(sqlite));
+
+      if (terminal === "compromised") {
+        expect(() =>
+          sqlite
+            .prepare("UPDATE enrollment_fellows SET status = 'compromised' WHERE fellow_id = ?")
+            .run(LIFECYCLE_FELLOW),
+        ).toThrow("compromise requires credential family revocation");
+        sqlite
+          .prepare("UPDATE fellow_tokens SET revoked_at = ? WHERE fellow_id = ?")
+          .run(NOW + 1, LIFECYCLE_FELLOW);
+      }
+      sqlite
+        .prepare("UPDATE enrollment_fellows SET status = ? WHERE fellow_id = ?")
+        .run(terminal, LIFECYCLE_FELLOW);
+      expect(
+        await store.authenticateCredential(`token-hash-${terminal}`, NOW + 2, "bearer"),
+      ).toBeUndefined();
+      expect(() =>
+        insertLifecycleCredential(sqlite, {
+          id: `credential-${terminal}-late`,
+          hash: `token-hash-${terminal}-late`,
+          issuedAt: NOW + 2,
+        }),
+      ).toThrow("terminal Fellow cannot receive live credential");
+      expect(() =>
+        sqlite
+          .prepare("UPDATE enrollment_fellows SET status = 'active' WHERE fellow_id = ?")
+          .run(LIFECYCLE_FELLOW),
+      ).toThrow("fellow lifecycle transition invalid");
+      sqlite
+        .prepare("UPDATE enrollment_fellows SET status = 'archived' WHERE fellow_id = ?")
+        .run(LIFECYCLE_FELLOW);
+      expect(() =>
+        insertLifecycleCredential(sqlite, {
+          id: `credential-${terminal}-archived-late`,
+          hash: `token-hash-${terminal}-archived-late`,
+          issuedAt: NOW + 3,
+        }),
+      ).toThrow("terminal Fellow cannot receive live credential");
+      expect(() =>
+        sqlite
+          .prepare("UPDATE enrollment_fellows SET status = 'active' WHERE fellow_id = ?")
+          .run(LIFECYCLE_FELLOW),
+      ).toThrow("fellow lifecycle transition invalid");
+    }
+  });
+
   test("a future-issued credential is inactive until its issuance boundary", async () => {
     const sqlite = database();
     seedLifecycleIdentity(sqlite);
@@ -1847,14 +2742,256 @@ describe("Fellow credential lifecycle constraints and authentication", () => {
       id: "credential-future",
       hash: "token-hash-future",
       issuedAt: NOW + 1_000,
-      proposalId: LIFECYCLE_PROPOSAL,
     });
     const store = new D1EnrollmentStore(localD1(sqlite));
 
-    expect(await store.authenticateCredential("token-hash-future", NOW + 999)).toBeUndefined();
-    expect((await store.authenticateCredential("token-hash-future", NOW + 1_000))?.lastUsedAt).toBe(
-      NOW + 1_000,
-    );
+    expect(
+      await store.authenticateCredential("token-hash-future", NOW + 999, "bearer"),
+    ).toBeUndefined();
+    expect(
+      (await store.authenticateCredential("token-hash-future", NOW + 1_000, "bearer"))?.lastUsedAt,
+    ).toBe(NOW + 1_000);
+  });
+
+  test("the approval-time Fellow grant expiry is an exclusive authentication boundary", async () => {
+    const sqlite = database();
+    const grantExpiresAt = NOW + 1_000;
+    const resourcesJson = JSON.stringify({ fellowGrantExpiresAt: grantExpiresAt });
+    seedLifecycleIdentity(sqlite, resourcesJson);
+    insertLifecycleCredential(sqlite, {
+      id: "credential-grant-expiry",
+      hash: "token-hash-grant-expiry",
+      issuedAt: NOW,
+      resourcesJson,
+    });
+    const store = new D1EnrollmentStore(localD1(sqlite));
+
+    expect(
+      (await store.authenticateCredential("token-hash-grant-expiry", grantExpiresAt - 1, "bearer"))
+        ?.lastUsedAt,
+    ).toBe(grantExpiresAt - 1);
+    expect(
+      await store.authenticateCredential("token-hash-grant-expiry", grantExpiresAt, "bearer"),
+    ).toBeUndefined();
+    expect(
+      (await store.fellowsBySponsor(LIFECYCLE_SPONSOR, grantExpiresAt))[0]?.credentials,
+    ).toEqual([]);
+    expect(
+      sqlite
+        .prepare<{ last_used_at: number | null }, []>(
+          "SELECT last_used_at FROM fellow_tokens WHERE credential_id = 'credential-grant-expiry'",
+        )
+        .get()?.last_used_at,
+    ).toBe(grantExpiresAt - 1);
+  });
+
+  test("polling at the grant boundary expires without manufacturing a dead credential", async () => {
+    const sqlite = deviceDatabase();
+    const grantExpiresAt = NOW + 1_000;
+    const resourcesJson = JSON.stringify({ fellowGrantExpiresAt: grantExpiresAt });
+    seedLifecycleIdentity(sqlite, resourcesJson);
+    sqlite
+      .prepare(
+        "UPDATE enrollment_proposals SET token_hash = NULL, token_issued_at = NULL WHERE proposal_id = ?",
+      )
+      .run(LIFECYCLE_PROPOSAL);
+    const store = new D1EnrollmentStore(localD1(sqlite));
+    let tokenFactoryCalls = 0;
+
+    expect(
+      await store.poll({
+        flowHandleHash: "lifecycle-flow-hash",
+        now: grantExpiresAt,
+        createToken: async () => {
+          tokenFactoryCalls += 1;
+          return { token: "must-not-escape", tokenHash: "must-not-persist" };
+        },
+      }),
+    ).toEqual({ kind: "expired" });
+    expect(tokenFactoryCalls).toBe(0);
+    expect(
+      sqlite
+        .prepare<{ status: string; token_hash: string | null }, []>(
+          "SELECT status, token_hash FROM enrollment_proposals WHERE proposal_id = 'proposal-lifecycle'",
+        )
+        .get(),
+    ).toEqual({ status: "expired", token_hash: null });
+    expect(
+      sqlite.prepare<{ n: number }, []>("SELECT COUNT(*) AS n FROM fellow_tokens").get()?.n,
+    ).toBe(0);
+    expect(await store.fellowsBySponsor(LIFECYCLE_SPONSOR, grantExpiresAt)).toMatchObject([
+      {
+        fellowId: LIFECYCLE_FELLOW,
+        status: "active",
+        grantedResources: { fellowGrantExpiresAt: grantExpiresAt },
+        credentials: [],
+      },
+    ]);
+  });
+
+  test("polling refuses corrupt durable scopes before the one-time token factory runs", async () => {
+    const sqlite = new Database(":memory:", { strict: true });
+    sqlite.run(readFileSync(MIGRATION, "utf8"));
+    sqlite.exec(readFileSync(LIFECYCLE_MIGRATION, "utf8"));
+    seedLifecycleIdentity(sqlite, "{}", '["admin"]');
+    sqlite.exec(readFileSync(DEVICE_MIGRATION, "utf8"));
+    sqlite.exec(readFileSync(DEVICE_HARDENING_MIGRATION, "utf8"));
+    sqlite
+      .prepare(
+        `UPDATE enrollment_proposals
+            SET token_hash = NULL, token_issued_at = NULL
+          WHERE proposal_id = ?`,
+      )
+      .run(LIFECYCLE_PROPOSAL);
+    const store = new D1EnrollmentStore(localD1(sqlite));
+    let tokenFactoryCalls = 0;
+    let caught: unknown;
+
+    try {
+      await store.poll({
+        flowHandleHash: "lifecycle-flow-hash",
+        now: NOW + 1,
+        createToken: async () => {
+          tokenFactoryCalls += 1;
+          return { token: "must-not-escape", tokenHash: "must-not-persist" };
+        },
+      });
+    } catch (error) {
+      caught = error;
+    }
+
+    expect(caught).toBeInstanceOf(EnrollmentPersistenceError);
+    expect(tokenFactoryCalls).toBe(0);
+    expect(
+      sqlite
+        .prepare<{ status: string; token_hash: string | null }, []>(
+          "SELECT status, token_hash FROM enrollment_proposals WHERE proposal_id = 'proposal-lifecycle'",
+        )
+        .get(),
+    ).toEqual({ status: "approved", token_hash: null });
+    expect(
+      sqlite.prepare<{ n: number }, []>("SELECT COUNT(*) AS n FROM fellow_tokens").get()?.n,
+    ).toBe(0);
+  });
+
+  test("schema-corrupt retained authority cannot stamp last-used evidence", async () => {
+    const corruptCases = [
+      {
+        label: "string expiry",
+        scopes: '["review"]',
+        resources: '{"fellowGrantExpiresAt":"soon"}',
+      },
+      { label: "real expiry", scopes: '["review"]', resources: '{"fellowGrantExpiresAt":1.5}' },
+      { label: "zero expiry", scopes: '["review"]', resources: '{"fellowGrantExpiresAt":0}' },
+      {
+        label: "overflow expiry",
+        scopes: '["review"]',
+        resources: '{"fellowGrantExpiresAt":1e100}',
+      },
+      { label: "unknown scope", scopes: '["admin"]', resources: "{}" },
+    ] as const;
+    for (const fixture of corruptCases) {
+      const sqlite = new Database(":memory:", { strict: true });
+      sqlite.run(readFileSync(MIGRATION, "utf8"));
+      sqlite.exec(readFileSync(LIFECYCLE_MIGRATION, "utf8"));
+      seedLifecycleIdentity(sqlite, fixture.resources, fixture.scopes);
+      insertLifecycleCredential(sqlite, {
+        id: `credential-corrupt-${fixture.label.replaceAll(" ", "-")}`,
+        hash: `token-hash-corrupt-${fixture.label.replaceAll(" ", "-")}`,
+        issuedAt: NOW,
+        scopesJson: fixture.scopes,
+        resourcesJson: fixture.resources,
+      });
+      const store = new D1EnrollmentStore(localD1(sqlite));
+      let caught: unknown;
+      try {
+        await store.authenticateCredential(
+          `token-hash-corrupt-${fixture.label.replaceAll(" ", "-")}`,
+          NOW + 1,
+          "bearer",
+        );
+      } catch (error) {
+        caught = error;
+      }
+      expect(caught, fixture.label).toBeInstanceOf(EnrollmentPersistenceError);
+      expect(
+        sqlite
+          .prepare<{ last_used_at: number | null }, [string]>(
+            "SELECT last_used_at FROM fellow_tokens WHERE credential_id = ?",
+          )
+          .get(`credential-corrupt-${fixture.label.replaceAll(" ", "-")}`)?.last_used_at,
+        fixture.label,
+      ).toBeNull();
+    }
+  });
+
+  test("schema-corrupt retained Fellow identity cannot stamp last-used evidence", async () => {
+    const sqlite = new Database(":memory:", { strict: true });
+    sqlite.run(readFileSync(MIGRATION, "utf8"));
+    sqlite.exec(readFileSync(LIFECYCLE_MIGRATION, "utf8"));
+    seedLifecycleIdentity(sqlite);
+    insertLifecycleCredential(sqlite, {
+      id: "credential-corrupt-identity",
+      hash: "token-hash-1",
+      issuedAt: NOW,
+      proposalId: LIFECYCLE_PROPOSAL,
+    });
+    sqlite
+      .prepare("UPDATE enrollment_fellows SET model = '' WHERE fellow_id = ?")
+      .run(LIFECYCLE_FELLOW);
+    sqlite
+      .prepare("UPDATE enrollment_proposals SET model = '' WHERE proposal_id = ?")
+      .run(LIFECYCLE_PROPOSAL);
+    const store = new D1EnrollmentStore(localD1(sqlite));
+    let caught: unknown;
+
+    try {
+      await store.authenticateCredential("token-hash-1", NOW + 1, "bearer");
+    } catch (error) {
+      caught = error;
+    }
+
+    expect(caught).toBeInstanceOf(EnrollmentPersistenceError);
+    expect(
+      sqlite
+        .prepare<{ last_used_at: number | null }, []>(
+          "SELECT last_used_at FROM fellow_tokens WHERE credential_id = 'credential-corrupt-identity'",
+        )
+        .get()?.last_used_at,
+    ).toBeNull();
+  });
+
+  test("bearer authentication cannot downgrade a stronger credential profile", async () => {
+    const sqlite = database();
+    seedLifecycleIdentity(sqlite);
+    const rawToken = `asimp_ag_${"A".repeat(26)}_${"A".repeat(43)}`;
+    const tokenHash = createHash("sha256").update(rawToken).digest("hex");
+    insertLifecycleCredential(sqlite, {
+      id: "credential-dpop",
+      hash: tokenHash,
+      issuedAt: NOW,
+      profile: "dpop",
+    });
+    const store = new D1EnrollmentStore(localD1(sqlite));
+    const random = { bytes: (length: number) => new Uint8Array(length) };
+    const service = new EnrollmentService({
+      clock: { now: () => NOW + 1 },
+      random,
+      store,
+      replayProtector: new AesGcmEnrollmentReplayProtector(new Uint8Array(32), random),
+    });
+
+    expect(await service.credentialBinding(rawToken)).toBeUndefined();
+    expect(
+      sqlite
+        .prepare<{ last_used_at: number | null }, []>(
+          "SELECT last_used_at FROM fellow_tokens WHERE credential_id = 'credential-dpop'",
+        )
+        .get()?.last_used_at,
+    ).toBeNull();
+    expect(
+      (await store.authenticateCredential(tokenHash, NOW + 1, "dpop"))?.credentialProfile,
+    ).toBe("dpop");
   });
 });
 

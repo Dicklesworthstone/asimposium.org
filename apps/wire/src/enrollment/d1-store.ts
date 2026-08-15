@@ -3,6 +3,7 @@ import {
   EnrollmentResourceGrantsSchema,
   type FellowCredentialProfile,
   type FellowLifecycleStatus,
+  FellowNameSchema,
   type RequestedScope,
   RequestedScopeSchema,
 } from "@asimposium/contracts";
@@ -103,6 +104,22 @@ interface CredentialRow {
   status: FellowLifecycleStatus;
 }
 
+function credentialBindingIdentityIsValid(row: CredentialRow): boolean {
+  return (
+    row.fellow_id.length >= 1 &&
+    row.fellow_id.length <= 80 &&
+    row.credential_id.length >= 1 &&
+    row.credential_id.length <= 160 &&
+    row.sponsor_id.length >= 1 &&
+    row.sponsor_id.length <= 160 &&
+    FellowNameSchema.safeParse(row.name).success &&
+    row.model.length >= 1 &&
+    row.model.length <= 160 &&
+    row.harness.length >= 1 &&
+    row.harness.length <= 160
+  );
+}
+
 interface IdempotencyRow {
   request_digest: string;
   response_ciphertext: string;
@@ -141,6 +158,7 @@ interface FellowGrantRow {
   issued_at: number | null;
   expires_at: number | null;
   last_used_at: number | null;
+  sponsor_fellow_count: number;
 }
 
 const sql = (db: D1Database, query: string, ...values: unknown[]): D1PreparedStatement =>
@@ -475,9 +493,28 @@ export class D1EnrollmentStore implements EnrollmentStore {
       }
     }
     if (row === null) throw new EnrollmentError("WRONG_PRINCIPAL");
+    if (row.status === "expired") throw new EnrollmentError("PROPOSAL_EXPIRED");
     if (row.status !== "pending") throw new EnrollmentError("PROPOSAL_NOT_PENDING");
-    if (attempt.now >= row.expires_at) {
+    const expirePendingProposal = async (): Promise<never> => {
+      let result: D1Result<unknown>;
+      try {
+        result = await sql(
+          this.#db,
+          "UPDATE enrollment_proposals SET status = 'expired' WHERE proposal_id = ? AND status = 'pending'",
+          row.proposal_id,
+        ).run();
+      } catch {
+        await this.raceIfPresent(idempotency);
+        throw new EnrollmentPersistenceError();
+      }
+      if (result.meta.changes !== 1) {
+        await this.raceIfPresent(idempotency);
+        throw new EnrollmentError("PROPOSAL_NOT_PENDING");
+      }
       throw new EnrollmentError("PROPOSAL_EXPIRED");
+    };
+    if (attempt.now >= row.expires_at) {
+      return expirePendingProposal();
     }
     const bindingStatements: D1PreparedStatement[] = bindsDeviceSponsor
       ? [
@@ -545,6 +582,12 @@ export class D1EnrollmentStore implements EnrollmentStore {
 
     const requested = requestedRecord(row);
     const { scopes, resources } = this.reducedGrant(requested, attempt.decision, attempt.now);
+    if (
+      resources.fellowGrantExpiresAt !== undefined &&
+      attempt.now >= resources.fellowGrantExpiresAt
+    ) {
+      return expirePendingProposal();
+    }
     const nextStatus = attempt.decision.decision === "approve" ? "approved" : "reduced";
     try {
       const proposalDecision = bindsDeviceSponsor
@@ -625,7 +668,12 @@ export class D1EnrollmentStore implements EnrollmentStore {
   ): Promise<EnrollmentApprovalCard> {
     const row = await this.proposalByEnrollment(enrollmentId, sponsorId);
     if (row === null) throw new EnrollmentError("WRONG_PRINCIPAL");
-    if (row.status === "pending" && now >= row.expires_at) {
+    const requested = requestedRecord(row);
+    const grantExpiresAt = requested.requestedResources.fellowGrantExpiresAt;
+    if (
+      row.status === "pending" &&
+      (now >= row.expires_at || (grantExpiresAt !== undefined && now >= grantExpiresAt))
+    ) {
       await sql(
         this.#db,
         "UPDATE enrollment_proposals SET status = 'expired' WHERE proposal_id = ? AND status = 'pending'",
@@ -633,7 +681,6 @@ export class D1EnrollmentStore implements EnrollmentStore {
       ).run();
       row.status = "expired";
     }
-    const requested = requestedRecord(row);
     const granted =
       row.status === "approved" || row.status === "reduced"
         ? {
@@ -674,14 +721,35 @@ export class D1EnrollmentStore implements EnrollmentStore {
     sponsorId: string,
     now: number,
   ): Promise<EnrollmentApprovalCard[]> {
-    // Lazy-expiry sweep first, the same rule approvalCard applies per row.
+    // Lazy-expiry sweep first, including a grant lifetime that elapsed before
+    // approval. A sponsor must never be sent back to an impossible card.
     await sql(
       this.#db,
       `UPDATE enrollment_proposals SET status = 'expired'
-        WHERE status = 'pending' AND expires_at <= ?
-          AND enrollment_id IN (SELECT enrollment_id FROM enrollment_records WHERE sponsor_id = ?)`,
-      now,
+        WHERE proposal_id IN (
+          SELECT proposal.proposal_id
+            FROM enrollment_proposals proposal
+            JOIN enrollment_records enrollment
+              ON enrollment.enrollment_id = proposal.enrollment_id
+           WHERE enrollment.sponsor_id = ?
+             AND proposal.status = 'pending'
+             AND (
+               proposal.expires_at <= ?
+               OR (
+                 json_type(
+                   enrollment.requested_resources_json,
+                   '$.fellowGrantExpiresAt'
+                 ) = 'integer'
+                 AND json_extract(
+                   enrollment.requested_resources_json,
+                   '$.fellowGrantExpiresAt'
+                 ) <= ?
+               )
+             )
+        )`,
       sponsorId,
+      now,
+      now,
     ).run();
     const rows = await sql(
       this.#db,
@@ -717,28 +785,101 @@ export class D1EnrollmentStore implements EnrollmentStore {
     try {
       const result = await sql(
         this.#db,
-        `SELECT f.fellow_id, f.name, f.model, f.harness, f.status,
-			          g.granted_scopes_json, g.granted_resources_json, g.granted_at,
+        `WITH sponsor_fellow_page AS MATERIALIZED (
+			       SELECT fellow.fellow_id, fellow.name, fellow.model, fellow.harness, fellow.status,
+			              fellow.sponsor_id, grant_row.proposal_id AS grant_proposal_id,
+			              grant_row.granted_scopes_json, grant_row.granted_resources_json,
+			              grant_row.granted_at
+			         FROM enrollment_grants grant_row
+			         JOIN enrollment_fellows fellow
+			           ON fellow.fellow_id = grant_row.fellow_id
+			          AND fellow.sponsor_id = grant_row.sponsor_id
+			         JOIN enrollment_proposals grant_proposal
+			           ON grant_proposal.proposal_id = grant_row.proposal_id
+			          AND grant_proposal.fellow_id = grant_row.fellow_id
+			         JOIN enrollment_records grant_enrollment
+			           ON grant_enrollment.enrollment_id = grant_proposal.enrollment_id
+			          AND grant_enrollment.sponsor_id = grant_row.sponsor_id
+			        WHERE grant_row.sponsor_id = ?
+			          AND fellow.name COLLATE BINARY = grant_proposal.name COLLATE BINARY
+			          AND fellow.model = grant_proposal.model
+			          AND fellow.harness = grant_proposal.harness
+			          AND grant_proposal.granted_scopes_json = grant_row.granted_scopes_json
+			          AND grant_proposal.granted_resources_json = grant_row.granted_resources_json
+			          AND (
+			            grant_proposal.status IN ('approved', 'reduced')
+			            OR (
+			              grant_proposal.status = 'expired'
+			              AND grant_proposal.token_hash IS NULL
+			              AND grant_proposal.token_issued_at IS NULL
+			              AND json_type(
+			                grant_row.granted_resources_json,
+			                '$.fellowGrantExpiresAt'
+			              ) = 'integer'
+			            )
+			          )
+			        ORDER BY grant_row.granted_at DESC, grant_row.fellow_id
+			        LIMIT 501
+			     ), sponsor_fellows AS (
+			       SELECT sponsor_fellow_page.*, COUNT(*) OVER () AS sponsor_fellow_count
+			         FROM sponsor_fellow_page
+			     )
+			   SELECT f.fellow_id, f.name, f.model, f.harness, f.status,
+			          f.granted_scopes_json, f.granted_resources_json, f.granted_at,
 			          c.credential_id, c.credential_profile, c.issued_at, c.expires_at,
-			          c.last_used_at
-			     FROM enrollment_fellows f
-			     JOIN enrollment_grants g ON g.fellow_id = f.fellow_id
+			          c.last_used_at, f.sponsor_fellow_count
+			     FROM sponsor_fellows f
 			     LEFT JOIN enrollment_sponsor_security security ON security.sponsor_id = f.sponsor_id
-			     LEFT JOIN fellow_tokens c
+			     LEFT JOIN fellow_tokens c INDEXED BY enrollment_credentials_sponsor_fellow_lifecycle_idx
 			       ON c.fellow_id = f.fellow_id
 			      AND c.sponsor_id = f.sponsor_id
 			      AND c.revoked_at IS NULL
 			      AND c.expires_at > ?
 			      AND c.issued_at <= ?
+			      AND (
+			        json_type(c.granted_resources_json, '$.fellowGrantExpiresAt') IS NULL
+			        OR (
+			          json_type(c.granted_resources_json, '$.fellowGrantExpiresAt') = 'integer'
+			          AND json_extract(c.granted_resources_json, '$.fellowGrantExpiresAt') > ?
+			        )
+			      )
 			      AND c.issued_at > COALESCE(security.panic_at, -1)
-			    WHERE f.sponsor_id = ?
-			    ORDER BY g.granted_at DESC, c.issued_at DESC
+			      AND c.granted_scopes_json = f.granted_scopes_json
+			      AND c.granted_resources_json = f.granted_resources_json
+			      AND EXISTS (
+			        SELECT 1
+			          FROM enrollment_proposals grant_proposal
+			          JOIN enrollment_records grant_enrollment
+			            ON grant_enrollment.enrollment_id = grant_proposal.enrollment_id
+			         WHERE grant_proposal.proposal_id = f.grant_proposal_id
+			           AND grant_proposal.fellow_id = f.fellow_id
+			           AND grant_enrollment.sponsor_id = f.sponsor_id
+			           AND f.name COLLATE BINARY = grant_proposal.name COLLATE BINARY
+			           AND f.model = grant_proposal.model
+			           AND f.harness = grant_proposal.harness
+			           AND grant_proposal.status IN ('approved', 'reduced')
+			           AND grant_proposal.granted_scopes_json = f.granted_scopes_json
+			           AND grant_proposal.granted_resources_json = f.granted_resources_json
+			           AND (
+			             (c.proposal_id IS NULL AND c.credential_origin = 'harness-migration')
+			             OR (
+			               c.proposal_id = grant_proposal.proposal_id
+			               AND c.credential_origin = 'enrollment'
+			               AND grant_proposal.token_hash = c.token_hash
+			               AND grant_proposal.token_issued_at = c.issued_at
+			             )
+			           )
+			      )
+			    ORDER BY f.granted_at DESC, c.issued_at DESC
 			    LIMIT 1501`,
-        now,
-        now,
         sponsorId,
+        now,
+        now,
+        now,
       ).all<FellowGrantRow>();
-      if (result.results.length > 1500) throw new EnrollmentPersistenceError();
+      if (result.results.length > 1500 || (result.results[0]?.sponsor_fellow_count ?? 0) > 500) {
+        throw new EnrollmentPersistenceError();
+      }
       rows = result.results;
     } catch (error) {
       if (error instanceof EnrollmentPersistenceError) throw error;
@@ -967,7 +1108,13 @@ export class D1EnrollmentStore implements EnrollmentStore {
        AND e.kind = 'device'
        AND e.sponsor_id = ''
        AND p.status = 'pending'
-       AND p.expires_at > ?`;
+       AND p.expires_at > ?
+       AND (
+         json_type(e.requested_resources_json, '$.fellowGrantExpiresAt') IS NULL
+         OR json_type(e.requested_resources_json, '$.fellowGrantExpiresAt') <> 'integer'
+         OR json_extract(e.requested_resources_json, '$.fellowGrantExpiresAt') <= 0
+         OR json_extract(e.requested_resources_json, '$.fellowGrantExpiresAt') > ?
+       )`;
     let results: D1Result<unknown>[];
     try {
       results = await this.#db.batch([
@@ -1015,6 +1162,36 @@ export class D1EnrollmentStore implements EnrollmentStore {
         ),
         sql(
           this.#db,
+          `UPDATE enrollment_proposals
+              SET status = 'expired'
+            WHERE status = 'pending'
+              AND enrollment_id IN (
+                SELECT d.enrollment_id
+                  FROM device_codes d
+                  JOIN enrollment_records e ON e.enrollment_id = d.enrollment_id
+                 WHERE d.user_code_hash = ?
+                   AND d.expires_at > ?
+                   AND e.kind = 'device'
+                   AND e.sponsor_id = ''
+                   AND json_type(
+                     e.requested_resources_json,
+                     '$.fellowGrantExpiresAt'
+                   ) = 'integer'
+                   AND json_extract(
+                     e.requested_resources_json,
+                     '$.fellowGrantExpiresAt'
+                   ) > 0
+                   AND json_extract(
+                     e.requested_resources_json,
+                     '$.fellowGrantExpiresAt'
+                   ) <= ?
+              )`,
+          attempt.userCodeHash,
+          attempt.now,
+          attempt.now,
+        ),
+        sql(
+          this.#db,
           `SELECT COUNT(*) AS failures FROM device_lookup_attempts
             WHERE sponsor_id = ? AND success = 0
               AND attempted_at >= ? AND attempted_at <= ?`,
@@ -1034,6 +1211,7 @@ export class D1EnrollmentStore implements EnrollmentStore {
                    AND attempted_at >= ? AND attempted_at <= ?
               ) < ?`,
           attempt.userCodeHash,
+          attempt.now,
           attempt.now,
           attempt.now,
           attempt.sponsorId,
@@ -1056,6 +1234,7 @@ export class D1EnrollmentStore implements EnrollmentStore {
           attempt.userCodeHash,
           attempt.now,
           attempt.now,
+          attempt.now,
           attempt.sponsorId,
           attempt.windowBeginning,
           attempt.now,
@@ -1065,7 +1244,7 @@ export class D1EnrollmentStore implements EnrollmentStore {
     } catch {
       throw new EnrollmentPersistenceError();
     }
-    const countRow = (results[3]?.results?.[0] ?? undefined) as
+    const countRow = (results[4]?.results?.[0] ?? undefined) as
       | { readonly failures?: number }
       | undefined;
     if (countRow === undefined || !Number.isSafeInteger(countRow.failures)) {
@@ -1074,8 +1253,8 @@ export class D1EnrollmentStore implements EnrollmentStore {
     if ((countRow.failures ?? 0) >= attempt.failureLimit) {
       throw new EnrollmentError("DEVICE_LOOKUP_LOCKED");
     }
-    const row = (results[4]?.results?.[0] ?? undefined) as PendingProposalRow | undefined;
-    const outcome = results[5];
+    const row = (results[5]?.results?.[0] ?? undefined) as PendingProposalRow | undefined;
+    const outcome = results[6];
     const outcomeChanges = outcome?.meta.changes ?? -1;
     if (row === undefined) {
       if (outcomeChanges !== 1) throw new EnrollmentPersistenceError();
@@ -1126,7 +1305,13 @@ export class D1EnrollmentStore implements EnrollmentStore {
       now,
     ).first<PendingProposalRow>();
     if (row === null) return undefined;
-    if (row.status === "pending" && now >= row.expires_at) {
+    const requestedResources = parseResources(row.requested_resources_json);
+    if (
+      row.status === "pending" &&
+      (now >= row.expires_at ||
+        (requestedResources.fellowGrantExpiresAt !== undefined &&
+          now >= requestedResources.fellowGrantExpiresAt))
+    ) {
       await sql(
         this.#db,
         "UPDATE enrollment_proposals SET status = 'expired' WHERE proposal_id = ? AND status = 'pending'",
@@ -1144,7 +1329,7 @@ export class D1EnrollmentStore implements EnrollmentStore {
       ...(row.reasoning_effort === null ? {} : { reasoningEffort: row.reasoning_effort }),
       ...(row.tools_note === null ? {} : { toolsNote: row.tools_note }),
       requestedScopes: parseScopes(row.requested_scopes_json),
-      requestedResources: parseResources(row.requested_resources_json),
+      requestedResources,
       effectiveGrantedScopes: null,
       effectiveGrantedResources: null,
       proposalExpiresAt: row.expires_at,
@@ -1295,6 +1480,42 @@ export class D1EnrollmentStore implements EnrollmentStore {
           throw new EnrollmentPersistenceError();
         }
       }
+      if (row.durable_granted_resources_json === null) {
+        throw new EnrollmentPersistenceError();
+      }
+      if (row.durable_granted_scopes_json === null) {
+        throw new EnrollmentPersistenceError();
+      }
+      parseScopes(row.durable_granted_scopes_json);
+      const durableResources = parseResources(row.durable_granted_resources_json);
+      if (
+        durableResources.fellowGrantExpiresAt !== undefined &&
+        attempt.now >= durableResources.fellowGrantExpiresAt
+      ) {
+        const decision: PollDecision = { kind: "expired" };
+        const idempotency = await attempt.replayFor?.(decision);
+        try {
+          const statements = [
+            sql(
+              this.#db,
+              `UPDATE enrollment_proposals
+                  SET status = 'expired'
+                WHERE proposal_id = ? AND status IN ('approved', 'reduced')
+                  AND token_hash IS NULL`,
+              row.proposal_id,
+            ),
+            ...(idempotency === undefined ? [] : [this.idempotencyStatement(idempotency)]),
+          ];
+          const results = await this.#db.batch(statements);
+          if (results.every((result) => result.meta.changes === 1)) return decision;
+          await this.raceIfPresent(idempotency);
+          continue;
+        } catch (error) {
+          if (error instanceof EnrollmentIdempotencyRaceError) throw error;
+          await this.raceIfPresent(idempotency);
+          throw new EnrollmentPersistenceError();
+        }
+      }
       const issued = await attempt.createToken();
       const decision: PollDecision = { kind: "issued", token: issued.token };
       const idempotency = await attempt.replayFor?.(decision);
@@ -1429,28 +1650,9 @@ export class D1EnrollmentStore implements EnrollmentStore {
   async authenticateCredential(
     tokenHash: string,
     now: number,
+    expectedProfile: FellowCredentialProfile,
   ): Promise<FellowCredentialBinding | undefined> {
-    let row: CredentialRow | null;
-    try {
-      row = await sql(
-        this.#db,
-        `UPDATE fellow_tokens
-				        SET last_used_at = MAX(COALESCE(last_used_at, issued_at), ?)
-				      WHERE token_hash = ?
-				        AND revoked_at IS NULL
-				        AND issued_at <= ?
-				        AND expires_at > ?
-			        AND issued_at > COALESCE((
-			          SELECT panic_at FROM enrollment_sponsor_security
-			           WHERE sponsor_id = fellow_tokens.sponsor_id
-			        ), -1)
-			        AND EXISTS (
-				          SELECT 1 FROM enrollment_fellows
-			           WHERE fellow_id = fellow_tokens.fellow_id
-			             AND sponsor_id = fellow_tokens.sponsor_id
-				             AND status IN ('active', 'suspicious_review')
-			        )
-			      RETURNING fellow_id, credential_id, sponsor_id,
+    const bindingColumns = `fellow_id, credential_id, sponsor_id,
 			        (SELECT name FROM enrollment_fellows
 			          WHERE fellow_id = fellow_tokens.fellow_id) AS name,
 			        (SELECT model FROM enrollment_fellows
@@ -1460,37 +1662,109 @@ export class D1EnrollmentStore implements EnrollmentStore {
 			        (SELECT status FROM enrollment_fellows
 			          WHERE fellow_id = fellow_tokens.fellow_id) AS status,
 			        granted_scopes_json, granted_resources_json, token_hash, issued_at,
-			        expires_at, last_used_at, revoked_at, credential_profile`,
+			        expires_at, last_used_at, revoked_at, credential_profile`;
+    const bindingPredicate = `token_hash = ?
+			        AND credential_profile = ?
+			        AND revoked_at IS NULL
+			        AND issued_at <= ?
+			        AND expires_at > ?
+			        AND (
+			          json_type(granted_resources_json, '$.fellowGrantExpiresAt') IS NULL
+			          OR json_type(granted_resources_json, '$.fellowGrantExpiresAt') <> 'integer'
+			          OR json_extract(granted_resources_json, '$.fellowGrantExpiresAt') <= 0
+			          OR json_extract(granted_resources_json, '$.fellowGrantExpiresAt') > ?
+			        )
+		        AND issued_at > COALESCE((
+			          SELECT panic_at FROM enrollment_sponsor_security
+			           WHERE sponsor_id = fellow_tokens.sponsor_id
+			        ), -1)
+		        AND EXISTS (
+			          SELECT 1
+			            FROM enrollment_fellows fellow
+			            JOIN enrollment_grants grant_row
+			              ON grant_row.fellow_id = fellow.fellow_id
+			             AND grant_row.sponsor_id = fellow.sponsor_id
+			            JOIN enrollment_proposals grant_proposal
+			              ON grant_proposal.proposal_id = grant_row.proposal_id
+			            JOIN enrollment_records grant_enrollment
+			              ON grant_enrollment.enrollment_id = grant_proposal.enrollment_id
+		           WHERE fellow.fellow_id = fellow_tokens.fellow_id
+		             AND fellow.sponsor_id = fellow_tokens.sponsor_id
+			             AND grant_proposal.fellow_id = fellow.fellow_id
+			             AND grant_enrollment.sponsor_id = fellow.sponsor_id
+			             AND fellow.name COLLATE BINARY = grant_proposal.name COLLATE BINARY
+			             AND fellow.model = grant_proposal.model
+			             AND fellow.harness = grant_proposal.harness
+			             AND fellow.status IN ('active', 'suspicious_review')
+			             AND grant_proposal.status IN ('approved', 'reduced')
+			             AND grant_proposal.granted_scopes_json = grant_row.granted_scopes_json
+			             AND grant_proposal.granted_resources_json = grant_row.granted_resources_json
+			             AND grant_row.granted_scopes_json = fellow_tokens.granted_scopes_json
+			             AND grant_row.granted_resources_json = fellow_tokens.granted_resources_json
+			             AND (
+			               (fellow_tokens.proposal_id IS NULL
+			                 AND fellow_tokens.credential_origin = 'harness-migration')
+			               OR (
+			                 fellow_tokens.proposal_id = grant_proposal.proposal_id
+			                 AND fellow_tokens.credential_origin = 'enrollment'
+			                 AND grant_proposal.token_hash = fellow_tokens.token_hash
+			                 AND grant_proposal.token_issued_at = fellow_tokens.issued_at
+			               )
+			             )
+		        )`;
+    const authorizationValues = [tokenHash, expectedProfile, now, now, now] as const;
+    let candidate: CredentialRow | null;
+    try {
+      candidate = await sql(
+        this.#db,
+        `SELECT ${bindingColumns} FROM fellow_tokens WHERE ${bindingPredicate}`,
+        ...authorizationValues,
+      ).first<CredentialRow>();
+    } catch {
+      throw new EnrollmentPersistenceError();
+    }
+    if (candidate === null) return undefined;
+    if (!credentialBindingIdentityIsValid(candidate)) throw new EnrollmentPersistenceError();
+    let grantedScopes: readonly RequestedScope[];
+    let grantedResources: EnrollmentResourceGrants;
+    try {
+      grantedScopes = parseScopes(candidate.granted_scopes_json);
+      grantedResources = parseResources(candidate.granted_resources_json);
+    } catch {
+      throw new EnrollmentPersistenceError();
+    }
+    let row: CredentialRow | null;
+    try {
+      row = await sql(
+        this.#db,
+        `UPDATE fellow_tokens
+			        SET last_used_at = MAX(COALESCE(last_used_at, issued_at), ?)
+			      WHERE ${bindingPredicate}
+			      RETURNING ${bindingColumns}`,
         now,
-        tokenHash,
-        now,
-        now,
+        ...authorizationValues,
       ).first<CredentialRow>();
     } catch {
       throw new EnrollmentPersistenceError();
     }
     if (row === null) return undefined;
-    try {
-      return {
-        fellowId: row.fellow_id,
-        credentialId: row.credential_id,
-        sponsorId: row.sponsor_id,
-        name: row.name,
-        model: row.model,
-        harness: row.harness,
-        grantedScopes: parseScopes(row.granted_scopes_json),
-        grantedResources: parseResources(row.granted_resources_json),
-        tokenHash: row.token_hash,
-        issuedAt: row.issued_at,
-        expiresAt: row.expires_at,
-        lastUsedAt: row.last_used_at ?? undefined,
-        revokedAt: row.revoked_at ?? undefined,
-        credentialProfile: row.credential_profile,
-        fellowStatus: row.status,
-      };
-    } catch {
-      throw new EnrollmentPersistenceError();
-    }
+    return {
+      fellowId: row.fellow_id,
+      credentialId: row.credential_id,
+      sponsorId: row.sponsor_id,
+      name: row.name,
+      model: row.model,
+      harness: row.harness,
+      grantedScopes,
+      grantedResources,
+      tokenHash: row.token_hash,
+      issuedAt: row.issued_at,
+      expiresAt: row.expires_at,
+      lastUsedAt: row.last_used_at ?? undefined,
+      revokedAt: row.revoked_at ?? undefined,
+      credentialProfile: row.credential_profile,
+      fellowStatus: row.status,
+    };
   }
 
   async idempotencyReplay(

@@ -469,6 +469,7 @@ export interface EnrollmentStore {
   authenticateCredential(
     tokenHash: string,
     now: number,
+    expectedProfile: FellowCredentialProfile,
   ): Promise<FellowCredentialBinding | undefined>;
   idempotencyReplay(attempt: IdempotencyAttempt): Promise<EnrollmentIdempotencyReplay | undefined>;
 }
@@ -891,7 +892,7 @@ export function reduceEnrollmentResources(
     changed = true;
   }
   if (reduction.event_budget !== undefined) {
-    if (next.eventBudget === undefined || reduction.event_budget >= next.eventBudget) {
+    if (next.eventBudget !== undefined && reduction.event_budget >= next.eventBudget) {
       throw new EnrollmentError("SCOPE_NOT_REDUCED");
     }
     (next as { eventBudget?: number }).eventBudget = reduction.event_budget;
@@ -899,7 +900,7 @@ export function reduceEnrollmentResources(
   }
   if (reduction.artifact_budget_bytes !== undefined) {
     if (
-      next.artifactBudgetBytes === undefined ||
+      next.artifactBudgetBytes !== undefined &&
       reduction.artifact_budget_bytes >= next.artifactBudgetBytes
     ) {
       throw new EnrollmentError("SCOPE_NOT_REDUCED");
@@ -910,7 +911,7 @@ export function reduceEnrollmentResources(
   }
   if (reduction.fellow_grant_expires_in_ms !== undefined) {
     const reducedExpiry = now + reduction.fellow_grant_expires_in_ms;
-    if (next.fellowGrantExpiresAt === undefined || reducedExpiry >= next.fellowGrantExpiresAt) {
+    if (next.fellowGrantExpiresAt !== undefined && reducedExpiry >= next.fellowGrantExpiresAt) {
       throw new EnrollmentError("SCOPE_NOT_REDUCED");
     }
     (next as { fellowGrantExpiresAt?: number }).fellowGrantExpiresAt = reducedExpiry;
@@ -1029,10 +1030,13 @@ export class InMemoryEnrollmentStore implements EnrollmentStore {
         throw new EnrollmentError("WRONG_PRINCIPAL");
       }
       const proposal = record.proposal;
-      if (proposal === undefined || proposal.status !== "pending") {
+      if (proposal === undefined) {
         throw new EnrollmentError("PROPOSAL_NOT_PENDING");
       }
+      if (proposal.status === "expired") throw new EnrollmentError("PROPOSAL_EXPIRED");
+      if (proposal.status !== "pending") throw new EnrollmentError("PROPOSAL_NOT_PENDING");
       if (attempt.now >= proposal.expiresAt) {
+        proposal.status = "expired";
         throw new EnrollmentError("PROPOSAL_EXPIRED");
       }
       if (isUnboundDevice) {
@@ -1084,6 +1088,14 @@ export class InMemoryEnrollmentStore implements EnrollmentStore {
         }
       }
 
+      if (
+        proposedResources.fellowGrantExpiresAt !== undefined &&
+        attempt.now >= proposedResources.fellowGrantExpiresAt
+      ) {
+        proposal.status = "expired";
+        throw new EnrollmentError("PROPOSAL_EXPIRED");
+      }
+
       const nameOwner = this.#activeNames.get(proposal.name);
       if (nameOwner !== undefined && nameOwner !== proposal.proposalId) {
         throw new EnrollmentError("NAME_TAKEN");
@@ -1110,7 +1122,13 @@ export class InMemoryEnrollmentStore implements EnrollmentStore {
       }
       if (record.proposal === undefined) throw new EnrollmentError("PROPOSAL_NOT_PENDING");
       const proposal = record.proposal;
-      if (proposal.status === "pending" && now >= proposal.expiresAt) proposal.status = "expired";
+      const grantExpiresAt = record.requestedResources.fellowGrantExpiresAt;
+      if (
+        proposal.status === "pending" &&
+        (now >= proposal.expiresAt || (grantExpiresAt !== undefined && now >= grantExpiresAt))
+      ) {
+        proposal.status = "expired";
+      }
       return cardFromRecord(record);
     });
   }
@@ -1124,7 +1142,11 @@ export class InMemoryEnrollmentStore implements EnrollmentStore {
       for (const record of this.#records.values()) {
         if (record.sponsorId !== sponsorId || record.proposal === undefined) continue;
         const proposal = record.proposal;
-        if (proposal.status === "pending" && now >= proposal.expiresAt) {
+        const grantExpiresAt = record.requestedResources.fellowGrantExpiresAt;
+        if (
+          proposal.status === "pending" &&
+          (now >= proposal.expiresAt || (grantExpiresAt !== undefined && now >= grantExpiresAt))
+        ) {
           proposal.status = "expired";
         }
         if (proposal.status !== "pending") continue;
@@ -1157,7 +1179,6 @@ export class InMemoryEnrollmentStore implements EnrollmentStore {
       for (const record of this.#records.values()) {
         if (record.sponsorId !== sponsorId || record.proposal === undefined) continue;
         const proposal = record.proposal;
-        if (proposal.status !== "approved" && proposal.status !== "reduced") continue;
         if (
           proposal.grantedScopes === undefined ||
           proposal.grantedResources === undefined ||
@@ -1172,7 +1193,9 @@ export class InMemoryEnrollmentStore implements EnrollmentStore {
               credential.fellowId === proposal.fellowId &&
               credential.revokedAt === undefined &&
               credential.issuedAt <= now &&
-              now < credential.expiresAt,
+              now < credential.expiresAt &&
+              (credential.grantedResources.fellowGrantExpiresAt === undefined ||
+                now < credential.grantedResources.fellowGrantExpiresAt),
           )
           .map((credential) => ({
             credentialId: credential.credentialId,
@@ -1332,7 +1355,12 @@ export class InMemoryEnrollmentStore implements EnrollmentStore {
         throw new EnrollmentError("DEVICE_CODE_UNKNOWN");
       }
       const proposal = record.proposal;
-      if (proposal.status === "pending" && attempt.now >= proposal.expiresAt) {
+      const grantExpiresAt = record.requestedResources.fellowGrantExpiresAt;
+      if (
+        proposal.status === "pending" &&
+        (attempt.now >= proposal.expiresAt ||
+          (grantExpiresAt !== undefined && attempt.now >= grantExpiresAt))
+      ) {
         proposal.status = "expired";
       }
       if (proposal.status !== "pending") {
@@ -1366,7 +1394,11 @@ export class InMemoryEnrollmentStore implements EnrollmentStore {
         throw new EnrollmentError("PAIRING_INVALID");
       }
       const proposal = record.proposal;
-      if (proposal.status === "pending" && now >= proposal.expiresAt) {
+      const grantExpiresAt = record.requestedResources.fellowGrantExpiresAt;
+      if (
+        proposal.status === "pending" &&
+        (now >= proposal.expiresAt || (grantExpiresAt !== undefined && now >= grantExpiresAt))
+      ) {
         proposal.status = "expired";
       }
       return cardFromRecord(record);
@@ -1454,10 +1486,20 @@ export class InMemoryEnrollmentStore implements EnrollmentStore {
         this.commitIdempotency(idempotency);
         return { kind: "expired" };
       }
-      const issued = await attempt.createToken();
       if (proposal.grantedScopes === undefined || proposal.grantedResources === undefined) {
         throw new EnrollmentError("PROPOSAL_NOT_PENDING");
       }
+      if (
+        proposal.grantedResources.fellowGrantExpiresAt !== undefined &&
+        attempt.now >= proposal.grantedResources.fellowGrantExpiresAt
+      ) {
+        const decision: PollDecision = { kind: "expired" };
+        const idempotency = await attempt.replayFor?.(decision);
+        proposal.status = "expired";
+        this.commitIdempotency(idempotency);
+        return decision;
+      }
+      const issued = await attempt.createToken();
       const decision: PollDecision = { kind: "issued", token: issued.token };
       const idempotency = await attempt.replayFor?.(decision);
       proposal.tokenHash = issued.tokenHash;
@@ -1512,15 +1554,19 @@ export class InMemoryEnrollmentStore implements EnrollmentStore {
   async authenticateCredential(
     tokenHash: string,
     now: number,
+    expectedProfile: FellowCredentialProfile,
   ): Promise<FellowCredentialBinding | undefined> {
     return this.serialized(() => {
       const existing = this.#credentials.get(tokenHash);
       if (
         existing === undefined ||
+        existing.credentialProfile !== expectedProfile ||
         !fellowStatusCanAuthenticate(existing.fellowStatus) ||
         existing.revokedAt !== undefined ||
         now < existing.issuedAt ||
-        now >= existing.expiresAt
+        now >= existing.expiresAt ||
+        (existing.grantedResources.fellowGrantExpiresAt !== undefined &&
+          now >= existing.grantedResources.fellowGrantExpiresAt)
       ) {
         return undefined;
       }
@@ -2220,7 +2266,7 @@ export class EnrollmentService {
   async credentialBinding(rawToken: string): Promise<FellowCredentialBinding | undefined> {
     if (!/^asimp_ag_[0-9A-HJKMNP-TV-Z]{26}_[A-Za-z0-9_-]{43}$/.test(rawToken)) return undefined;
     const tokenHash = await sha256Hex(rawToken);
-    return this.#store.authenticateCredential(tokenHash, this.#clock.now());
+    return this.#store.authenticateCredential(tokenHash, this.#clock.now(), "bearer");
   }
 }
 

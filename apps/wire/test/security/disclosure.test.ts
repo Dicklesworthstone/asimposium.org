@@ -2,7 +2,13 @@ import { describe, expect, test } from "bun:test";
 import type { D1Database } from "@cloudflare/workers-types";
 import { createApp } from "../../src/app";
 import type { Env } from "../../src/env";
-import { boundEnv, callWorker, executionContext, r2Shaped } from "../support/bindings";
+import {
+  boundEnv,
+  callWorker,
+  executionContext,
+  outboxShaped,
+  r2Shaped,
+} from "../support/bindings";
 
 /**
  * Disclosure discipline for the scaffold's faces.
@@ -51,6 +57,7 @@ describe("faces disclose no environment or binding values", () => {
   test("the BINDING_MISSING refusal names bindings, never their values", async () => {
     const res = await callWorker("/internal/health", {
       ARTIFACTS: r2Shaped(),
+      KRATER_OUTBOX: outboxShaped(),
       GOOGLE_CLIENT_SECRET: CANARY_SECRET,
       ASIMP_SERVICE_TOKEN: CANARY_TOKEN,
     });

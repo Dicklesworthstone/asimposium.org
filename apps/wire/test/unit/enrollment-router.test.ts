@@ -625,6 +625,113 @@ describe("S-1 mountable enrollment router", () => {
     expect(await exactlyExpired.json()).toMatchObject({ code: "FELLOW_TOKEN_INVALID" });
   });
 
+  test("hello and sponsor inventory stop accepting a token at the Fellow grant boundary", async () => {
+    const { clock, router, service } = routerFixture();
+    const grantLifetimeMs = 1_000;
+    const minted = await service.mint(sponsor, {
+      requested_scopes: ["review"],
+      fellow_grant_expires_in_ms: grantLifetimeMs,
+    });
+    const claim = await service.claim({
+      enrollment_id: minted.enrollmentId,
+      secret: minted.secret,
+      name: "short-grant-orchid",
+      model: "test-model",
+      harness: "test-harness",
+    });
+    await service.decide(sponsor, minted.enrollmentId, {
+      enrollment_id: minted.enrollmentId,
+      decision: "approve",
+    });
+    const issued = await service.poll({ flow_handle: claim.flowHandle });
+    expect(issued.status).toBe("approved");
+    if (issued.status !== "approved") return;
+
+    expect(
+      await request(router, "/v1/hello", {
+        headers: { authorization: `Bearer ${issued.token}` },
+      }),
+    ).toMatchObject({ status: 200 });
+    expect((await service.fellows(sponsor))[0]?.credentials).toHaveLength(1);
+
+    clock.value += grantLifetimeMs;
+    const expiredGrant = await request(router, "/v1/hello", {
+      headers: { authorization: `Bearer ${issued.token}` },
+    });
+    expect(expiredGrant.status).toBe(401);
+    expect(await expiredGrant.json()).toMatchObject({ code: "FELLOW_TOKEN_INVALID" });
+    expect((await service.fellows(sponsor))[0]?.credentials).toEqual([]);
+  });
+
+  test("polling an approved but expired grant returns expiry without issuing a dead token", async () => {
+    const { clock, router, service } = routerFixture();
+    const minted = await service.mint(sponsor, {
+      requested_scopes: ["review"],
+      fellow_grant_expires_in_ms: 1,
+    });
+    const claim = await service.claim({
+      enrollment_id: minted.enrollmentId,
+      secret: minted.secret,
+      name: "expired-grant-orchid",
+      model: "test-model",
+      harness: "test-harness",
+    });
+    await service.decide(sponsor, minted.enrollmentId, {
+      enrollment_id: minted.enrollmentId,
+      decision: "approve",
+    });
+    clock.value += 1;
+
+    const expired = await request(router, "/v1/device-token", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ flow_handle: claim.flowHandle }),
+    });
+    expect(expired.status).toBe(200);
+    expect(await expired.json()).toEqual({ status: "expired_token" });
+    expect(await service.fellows(sponsor)).toMatchObject([
+      {
+        name: "expired-grant-orchid",
+        status: "active",
+        credentials: [],
+      },
+    ]);
+  });
+
+  test.each([1, 2])(
+    "approval at or after the Fellow grant boundary is refused at offset %i",
+    async (elapsedMs) => {
+      const { clock, service } = routerFixture();
+      const minted = await service.mint(sponsor, {
+        requested_scopes: ["review"],
+        fellow_grant_expires_in_ms: 1,
+      });
+      await service.claim({
+        enrollment_id: minted.enrollmentId,
+        secret: minted.secret,
+        name: `dead-grant-${elapsedMs}`,
+        model: "test-model",
+        harness: "test-harness",
+      });
+      clock.value += elapsedMs;
+
+      await expect(
+        service.decide(sponsor, minted.enrollmentId, {
+          enrollment_id: minted.enrollmentId,
+          decision: "approve",
+        }),
+      ).rejects.toMatchObject({ code: "PROPOSAL_EXPIRED" });
+      await expect(
+        service.decide(sponsor, minted.enrollmentId, {
+          enrollment_id: minted.enrollmentId,
+          decision: "approve",
+        }),
+      ).rejects.toMatchObject({ code: "PROPOSAL_EXPIRED" });
+      expect(await service.pendingApprovals(sponsor)).toEqual([]);
+      expect(await service.fellows(sponsor)).toEqual([]);
+    },
+  );
+
   test("mandatory contract failures include rule, schema, and a safe example", async () => {
     const cases: readonly {
       readonly code:

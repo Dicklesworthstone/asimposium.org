@@ -294,6 +294,45 @@ describe("S-1 enrollment state machine", () => {
     );
   });
 
+  test("device lookup never exposes a card after its requested Fellow grant expires", async () => {
+    const clock = new MutableClock();
+    const base = new InMemoryEnrollmentStore();
+    let enrollmentId = "";
+    const store = storeProxy(base, {
+      deviceCreate: async (input, idempotency) => {
+        enrollmentId = input.record.enrollmentId;
+        await base.deviceCreate(
+          {
+            ...input,
+            record: {
+              ...input.record,
+              requestedResources: { fellowGrantExpiresAt: clock.value + 1 },
+            },
+          },
+          idempotency,
+        );
+      },
+    });
+    const service = new EnrollmentService({
+      clock,
+      store,
+      random: new DeterministicRandom(),
+      replayProtector: new AesGcmEnrollmentReplayProtector(new Uint8Array(32)),
+    });
+    const started = await service.deviceStart(deviceProposal, deviceStartOptions);
+
+    clock.value += 1;
+    await expectEnrollmentError(
+      service.deviceLookup(sponsor, { user_code: started.user_code }),
+      "DEVICE_CODE_UNKNOWN",
+    );
+    await expect(
+      base.deviceApprovalCardForDecision(enrollmentId, clock.value),
+    ).resolves.toMatchObject({
+      status: "expired",
+    });
+  });
+
   test("the high-entropy device poll handle expires at the same exclusive boundary", async () => {
     const { clock, service } = serviceFixture();
     const started = await service.deviceStart(deviceProposal, deviceStartOptions);
@@ -666,6 +705,43 @@ describe("S-1 enrollment state machine", () => {
       decision: "reduce",
       reduction: { problem_binding: null, first_directive: null, event_budget: 11 },
     });
+  });
+
+  test("finite sponsor limits strictly reduce a previously unbounded grant", async () => {
+    const { clock, service } = serviceFixture();
+    const minted = await service.mint(sponsor, { requested_scopes: ["review"] });
+    const claim = await service.claim({
+      enrollment_id: minted.enrollmentId,
+      secret: minted.secret,
+      name: "bounded-orchid",
+      model: "test-model",
+      harness: "test-harness",
+    });
+
+    await expect(
+      service.decide(sponsor, minted.enrollmentId, {
+        enrollment_id: minted.enrollmentId,
+        decision: "reduce",
+        reduction: {
+          event_budget: 20,
+          artifact_budget_bytes: 1_048_576,
+          fellow_grant_expires_in_ms: 86_400_000,
+        },
+      }),
+    ).resolves.toBeUndefined();
+    const result = await service.poll({ flow_handle: claim.flowHandle });
+    expect(result).toMatchObject({ status: "approved" });
+    expect(await service.fellows(sponsor)).toMatchObject([
+      {
+        name: "bounded-orchid",
+        grantedResources: {
+          eventBudget: 20,
+          artifactBudgetBytes: 1_048_576,
+          fellowGrantExpiresAt: clock.value + 86_400_000,
+        },
+        credentials: [{ active: true }],
+      },
+    ]);
   });
 
   test("simultaneous same-name approvals allow one immutable Fellow binding", async () => {
