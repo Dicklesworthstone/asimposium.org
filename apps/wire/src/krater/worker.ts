@@ -687,5 +687,15 @@ async function handleHarnessRequest(
   }
 }
 
+async function handleScheduledOutboxReconcile(
+  _controller: unknown,
+  env: KraterHarnessEnv,
+  _context: ExecutionContext,
+): Promise<void> {
+  if (!harnessEnabled(env)) return;
+  const result = await requestKraterOutbox(env, "/nudge");
+  if (!result.ok) throw new Error("KRATER_OUTBOX_SCHEDULED_RECONCILE_FAILED");
+}
+
 export { KraterOutboxDrainer } from "./outbox-do";
-export default { fetch: handleHarnessRequest };
+export default { fetch: handleHarnessRequest, scheduled: handleScheduledOutboxReconcile };

@@ -2065,6 +2065,7 @@ start_worker() {
     env "${S2_WRANGLER}" dev apps/wire/src/krater/worker.ts \
       --config "${config}" \
       --local \
+      --test-scheduled \
       --persist-to "${persist}" \
       --ip "${S2_BIND_IP}" \
       --port "${port}" \

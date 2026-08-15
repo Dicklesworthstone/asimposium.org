@@ -4,6 +4,9 @@ compatibility_date = "2026-08-13"
 compatibility_flags = ["nodejs_compat"]
 workers_dev = false
 
+[triggers]
+crons = ["*/5 * * * *"]
+
 # The /__s2/ harness surface exists only in this local-only trio: wrangler.s2.toml,
 # wrangler.s2-legacy.toml, and wrangler.s2-upgrade.toml. No deployed configuration declares it,
 # so the diagnostic and fixture routes are absent in production rather than refused there.

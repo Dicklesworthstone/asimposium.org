@@ -205,4 +205,46 @@ describe("S2 local harness boundary", () => {
       expect(readFileSync(join(REPOSITORY_ROOT, config), "utf8")).not.toContain("S2_HARNESS_TOKEN");
     }
   });
+
+  test("the local scheduled event independently re-arms the durable outbox", async () => {
+    const requests: Request[] = [];
+    const env = harnessEnv({
+      capability: "enabled",
+      token: HARNESS_CAPABILITY,
+      runId: HARNESS_RUN_ID,
+    });
+    Object.assign(env, {
+      KRATER_OUTBOX: {
+        idFromName: (name: string) => name,
+        get: () => ({
+          fetch: async (request: Request) => {
+            requests.push(request);
+            return new Response(JSON.stringify({ accepted: true }), { status: 202 });
+          },
+        }),
+      },
+    });
+
+    await worker.scheduled({}, env, context());
+
+    expect(requests).toHaveLength(1);
+    expect(new URL(requests[0]?.url ?? "https://invalid.example").pathname).toBe("/nudge");
+    expect(requests[0]?.method).toBe("POST");
+  });
+
+  test("the scheduled recovery authority is absent when the local capability is absent", async () => {
+    const env = harnessEnv({ token: HARNESS_CAPABILITY, runId: HARNESS_RUN_ID });
+    Object.assign(env, {
+      KRATER_OUTBOX: new Proxy(
+        {},
+        {
+          get() {
+            throw new Error("S2_TEST_OUTBOX_TOUCHED");
+          },
+        },
+      ),
+    });
+
+    await expect(worker.scheduled({}, env, context())).resolves.toBeUndefined();
+  });
 });

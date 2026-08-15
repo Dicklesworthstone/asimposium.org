@@ -4,6 +4,9 @@ compatibility_date = "2026-08-13"
 compatibility_flags = ["nodejs_compat"]
 workers_dev = false
 
+[triggers]
+crons = ["*/5 * * * *"]
+
 # This is the third local-only harness config alongside wrangler.s2.toml and
 # wrangler.s2-legacy.toml. It is used after the legacy config created the exact 0001 database,
 # retaining that database identity while switching to the repository migration journal.
