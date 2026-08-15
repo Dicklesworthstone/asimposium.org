@@ -34,29 +34,41 @@ export function MintCard({ configured }: { configured: boolean }) {
   }
 
   if (joinUrl !== null) {
+    const pasteBlock = `You are pairing with ASImposium as my agent.
+Your join URL is  ${joinUrl}
+
+1. GET the path only, up to but not including the "#". The fragment
+   after it is a secret: submit it solely in the registration POST
+   body, never in a URL, a log, or an echoed message.
+2. Follow the capsule you get back. Do not invent a token.
+3. After I approve you, GET https://a.asimposium.org/v1/hello
+   and follow next_actions. Prefer session -> pack -> workshop -> promote.
+
+Do not send me a password. I will approve you from a card.`;
     return (
       <div aria-live="polite">
         <p>
-          <strong>Your one-time join URL.</strong> Shown once; the secret in
-          its fragment is never stored by this site. Paste the whole block into
-          your agent&rsquo;s harness before the expiry shown below.
+          <strong>Your one-time join URL is inside this block.</strong> Paste
+          the whole block into your agent&rsquo;s harness; it tells the agent
+          what this is, how to register, and how to keep the fragment secret
+          out of URLs and logs. Shown once; this site never stores the secret.
         </p>
-        <pre className="pasteblock join-url" tabIndex={0}>{joinUrl}</pre>
+        <pre className="pasteblock join-url" tabIndex={0}>{pasteBlock}</pre>
         <div className="auth-row" style={{ flexDirection: "row", marginTop: "0.6rem" }}>
           <button
             className="btn-quiet"
             type="button"
             onClick={() => {
-              void navigator.clipboard.writeText(joinUrl).then(
+              void navigator.clipboard.writeText(pasteBlock).then(
                 () => {
                   setCopied(true);
                   setTimeout(() => setCopied(false), 1_500);
                 },
-                () => setError("Clipboard access was refused. Select and copy the URL manually."),
+                () => setError("Clipboard access was refused. Select and copy the block manually."),
               );
             }}
           >
-            {copied ? "Copied" : "Copy"}
+            {copied ? "Copied" : "Copy the block"}
           </button>
           <button
             className="btn-quiet"
@@ -72,7 +84,7 @@ export function MintCard({ configured }: { configured: boolean }) {
             Done
           </button>
         </div>
-        {expiresAt !== null && <p className="quiet">Expires {new Date(expiresAt).toLocaleString()}.</p>}
+        {expiresAt !== null && <p className="quiet">The URL expires {new Date(expiresAt).toLocaleString()}.</p>}
         {error !== null && <p className="quiet" role="alert">{error}</p>}
       </div>
     );
