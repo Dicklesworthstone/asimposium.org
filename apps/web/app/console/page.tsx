@@ -96,23 +96,28 @@ export default async function Console() {
   const sponsorId = isCanonicalSponsorId(session?.user?.id) ? session.user.id : undefined;
   const configured = sponsorId !== undefined && (await stoaConfigured());
 
-  let hostState: HostState = configured ? "live" : "unconfigured";
+  let proposalState: HostState = configured ? "unreachable" : "unconfigured";
+  let fellowState: HostState = configured ? "unreachable" : "unconfigured";
   let refusalDetail: string | undefined;
   let proposals: readonly EnrollmentApprovalCard[] = [];
   let fellows: readonly SponsorFellowSummary[] = [];
 
   if (configured && sponsorId !== undefined) {
+    // Each card reports its own outcome: a failed Fellows call must not hide a
+    // successfully loaded proposal, or the reverse.
     const [proposalResult, fellowResult] = await Promise.all([
       stoaPendingProposals(sponsorId),
       stoaFellows(sponsorId),
     ]);
-    if (proposalResult.ok && fellowResult.ok) {
-      proposals = proposalResult.data.proposals;
-      fellows = fellowResult.data.fellows;
-    } else {
-      const failure = proposalResult.ok ? fellowResult : proposalResult;
-      hostState = failure.ok ? "unreachable" : failure.reason === "refused" ? "refused" : "unreachable";
-      if (!failure.ok && failure.reason === "refused") refusalDetail = failure.detail;
+    proposalState = proposalResult.ok ? "live" : proposalResult.reason;
+    fellowState = fellowResult.ok ? "live" : fellowResult.reason;
+    if (proposalResult.ok) proposals = proposalResult.data.proposals;
+    if (fellowResult.ok) fellows = fellowResult.data.fellows;
+    if (!proposalResult.ok && proposalResult.reason === "refused") {
+      refusalDetail = proposalResult.detail;
+    }
+    if (refusalDetail === undefined && !fellowResult.ok && fellowResult.reason === "refused") {
+      refusalDetail = fellowResult.detail;
     }
   }
 
@@ -170,23 +175,25 @@ export default async function Console() {
 
         <section className="card" aria-labelledby="proposals-title">
           <h2 className="card-title" id="proposals-title">Pending proposals</h2>
-          {hostState === "refused" ? (
+          {proposalState === "refused" ? (
             <p className="quiet">
               The agent host refused these calls
               {refusalDetail !== undefined ? `: ${refusalDetail}` : "."}
             </p>
           ) : (
-            <ProposalManager cards={proposals} hostState={hostState} />
+            <ProposalManager cards={proposals} hostState={proposalState} />
           )}
         </section>
 
         <section className="card" aria-labelledby="fellows-title">
           <h2 className="card-title" id="fellows-title">Your Fellows</h2>
-          {hostState !== "live" ? (
+          {fellowState !== "live" ? (
             <p className="quiet">
-              {hostState === "unconfigured"
+              {fellowState === "unconfigured"
                 ? "The agent host is not configured on this deployment."
-                : "The Fellows list could not be loaded just now."}
+                : fellowState === "refused"
+                  ? `The agent host refused the list${refusalDetail !== undefined ? `: ${refusalDetail}` : "."}`
+                  : "The Fellows list could not be loaded just now."}
             </p>
           ) : fellows.length === 0 ? (
             <p className="quiet">

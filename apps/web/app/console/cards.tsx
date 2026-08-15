@@ -208,11 +208,44 @@ function ProposalCard({ card }: { readonly card: EnrollmentApprovalCard }) {
     }
     if (dropProblem) reduction.problem_binding = null;
     if (dropDirective) reduction.first_directive = null;
-    if (eventBudget.trim() !== "") reduction.event_budget = Number(eventBudget);
-    if (artifactBudget.trim() !== "") reduction.artifact_budget_bytes = Number(artifactBudget);
-    if (grantHours.trim() !== "") {
-      reduction.fellow_grant_expires_in_ms = Number(grantHours) * 3_600_000;
+
+    // Number("") is 0 and Number("junk") is NaN — and NaN serializes to null
+    // in JSON, which would reach the Worker as a contract violation instead
+    // of a readable message here.
+    const budgets: { raw: string; label: string; assign: (value: number) => void }[] = [
+      {
+        raw: eventBudget,
+        label: "Event budget",
+        assign: (value) => {
+          reduction.event_budget = value;
+        },
+      },
+      {
+        raw: artifactBudget,
+        label: "Artifact bytes",
+        assign: (value) => {
+          reduction.artifact_budget_bytes = value;
+        },
+      },
+      {
+        raw: grantHours,
+        label: "Grant expiry in hours",
+        assign: (value) => {
+          reduction.fellow_grant_expires_in_ms = value * 3_600_000;
+        },
+      },
+    ];
+    for (const { raw, label, assign } of budgets) {
+      const trimmed = raw.trim();
+      if (trimmed === "") continue;
+      const value = Number(trimmed);
+      if (!Number.isSafeInteger(value) || value < 0) {
+        setError(`${label} must be a whole number, zero or greater.`);
+        return;
+      }
+      assign(value);
     }
+
     if (Object.keys(reduction).length === 0) {
       setError("Choose at least one narrowing, or use Approve.");
       return;
