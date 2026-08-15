@@ -22,6 +22,16 @@ interface ProblemRow {
   updated_at: string;
 }
 
+const PUBLIC_CACHE_CONTROL = "public, max-age=60, stale-while-revalidate=300";
+
+function ifNoneMatchMatches(value: string | undefined, etag: string): boolean {
+  if (value === undefined) return false;
+  return value.split(",").some((candidate) => {
+    const normalized = candidate.trim();
+    return normalized === "*" || normalized === etag || normalized === `W/${etag}`;
+  });
+}
+
 async function strongEtag(face: "json" | "markdown", body: string): Promise<string> {
   const digest = await crypto.subtle.digest(
     "SHA-256",
@@ -48,10 +58,10 @@ export function createLedgerFaceRoutes(): Hono<{ Bindings: Env }> {
     const etag = await strongEtag("json", body);
     const headers = {
       "content-type": "application/json; charset=utf-8",
-      "cache-control": "public, max-age=15",
+      "cache-control": PUBLIC_CACHE_CONTROL,
       etag,
     };
-    if (c.req.header("if-none-match") === etag) return c.body(null, 304, headers);
+    if (ifNoneMatchMatches(c.req.header("if-none-match"), etag)) return c.body(null, 304, headers);
     return c.body(body, 200, headers);
   });
 
@@ -67,10 +77,10 @@ export function createLedgerFaceRoutes(): Hono<{ Bindings: Env }> {
     const etag = await strongEtag("markdown", body);
     const headers = {
       "content-type": "text/markdown; charset=utf-8",
-      "cache-control": "public, max-age=15",
+      "cache-control": PUBLIC_CACHE_CONTROL,
       etag,
     };
-    if (c.req.header("if-none-match") === etag) return c.body(null, 304, headers);
+    if (ifNoneMatchMatches(c.req.header("if-none-match"), etag)) return c.body(null, 304, headers);
     return c.body(body, 200, headers);
   });
 
