@@ -99,7 +99,7 @@ function database(options: { readonly nullableDigest?: boolean } = {}): Database
       ? schema.replace(LOAD_BEARING_COLUMN, "request_digest TEXT")
       : schema,
   );
-  sqlite.run(readFileSync(LIFECYCLE_MIGRATION, "utf8"));
+  sqlite.exec(readFileSync(LIFECYCLE_MIGRATION, "utf8"));
   return sqlite;
 }
 
@@ -420,7 +420,7 @@ describe("Fellow credential lifecycle constraints and authentication", () => {
         NOW,
       );
 
-    sqlite.run(readFileSync(LIFECYCLE_MIGRATION, "utf8"));
+    sqlite.exec(readFileSync(LIFECYCLE_MIGRATION, "utf8"));
     const migrated = sqlite
       .prepare<{ expires_at: number; credential_profile: string; proposal_id: string | null }, []>(
         `SELECT expires_at, credential_profile, proposal_id
@@ -432,6 +432,25 @@ describe("Fellow credential lifecycle constraints and authentication", () => {
       credential_profile: "bearer",
       proposal_id: LIFECYCLE_PROPOSAL,
     });
+    expect(() =>
+      sqlite.prepare("UPDATE enrollment_credentials SET issued_at = issued_at + 1").run(),
+    ).toThrow("legacy enrollment credential table is frozen");
+    expect(() => sqlite.prepare("DELETE FROM enrollment_credentials").run()).toThrow(
+      "legacy enrollment credential table is frozen",
+    );
+    expect(() =>
+      sqlite
+        .prepare(
+          `INSERT INTO enrollment_credentials (
+             credential_id, proposal_id, fellow_id, sponsor_id, token_hash,
+             granted_scopes_json, granted_resources_json, issued_at
+           ) SELECT 'legacy-write', proposal_id, fellow_id, sponsor_id,
+                    'legacy-write-hash', granted_scopes_json,
+                    granted_resources_json, issued_at
+               FROM enrollment_credentials LIMIT 1`,
+        )
+        .run(),
+    ).toThrow("legacy enrollment credential table is frozen");
 
     expect(() =>
       insertLifecycleCredential(sqlite, {

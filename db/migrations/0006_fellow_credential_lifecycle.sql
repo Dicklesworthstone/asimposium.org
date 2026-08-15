@@ -75,6 +75,42 @@ BEGIN
   SELECT RAISE(ABORT, 'legacy enrollment credential table is frozen');
 END;
 
+-- SQLite foreign keys prove that each referenced row exists, but the original
+-- schema did not prove that the three identity columns describe the same
+-- enrollment. Authentication independently rechecks the binding on every use;
+-- this trigger prevents any new cross-identity splice after the lossless legacy
+-- copy. NULL proposal origins remain reserved for harness-migration tokens.
+CREATE TRIGGER enrollment_credentials_identity_insert
+BEFORE INSERT ON fellow_tokens
+WHEN NOT EXISTS (
+  SELECT 1
+    FROM enrollment_fellows AS fellow
+    JOIN enrollment_grants AS grant_row
+      ON grant_row.fellow_id = fellow.fellow_id
+     AND grant_row.sponsor_id = fellow.sponsor_id
+    LEFT JOIN enrollment_proposals AS proposal
+      ON proposal.proposal_id = NEW.proposal_id
+    LEFT JOIN enrollment_records AS enrollment
+      ON enrollment.enrollment_id = proposal.enrollment_id
+   WHERE fellow.fellow_id = NEW.fellow_id
+     AND fellow.sponsor_id = NEW.sponsor_id
+     AND grant_row.granted_scopes_json = NEW.granted_scopes_json
+     AND grant_row.granted_resources_json = NEW.granted_resources_json
+     AND (
+       (NEW.proposal_id IS NULL AND NEW.credential_origin = 'harness-migration')
+       OR (
+         NEW.proposal_id IS NOT NULL
+         AND NEW.credential_origin = 'enrollment'
+         AND grant_row.proposal_id = NEW.proposal_id
+         AND proposal.fellow_id = NEW.fellow_id
+         AND enrollment.sponsor_id = NEW.sponsor_id
+       )
+     )
+)
+BEGIN
+  SELECT RAISE(ABORT, 'credential authority binding mismatch');
+END;
+
 -- The approval-time grant is the authority copied into every credential. The
 -- G0 schema described it as immutable but did not enforce that claim. Without
 -- these guards, a later direct UPDATE or REPLACE can expand a Fellow's scopes
@@ -142,42 +178,6 @@ BEGIN
   SELECT RAISE(ABORT, 'sponsor panic boundary cannot be deleted');
 END;
 
--- SQLite foreign keys prove that each referenced row exists, but the original
--- schema did not prove that the three identity columns describe the same
--- enrollment. Refuse a credential that splices a Fellow onto another sponsor
--- or another Fellow's proposal. NULL proposal origins are reserved for later
--- harness-migration credentials and still remain sponsor-bound to the Fellow.
-CREATE TRIGGER enrollment_credentials_identity_insert
-BEFORE INSERT ON fellow_tokens
-WHEN NOT EXISTS (
-  SELECT 1
-    FROM enrollment_fellows AS fellow
-    JOIN enrollment_grants AS grant_row
-      ON grant_row.fellow_id = fellow.fellow_id
-     AND grant_row.sponsor_id = fellow.sponsor_id
-    LEFT JOIN enrollment_proposals AS proposal
-      ON proposal.proposal_id = NEW.proposal_id
-    LEFT JOIN enrollment_records AS enrollment
-      ON enrollment.enrollment_id = proposal.enrollment_id
-   WHERE fellow.fellow_id = NEW.fellow_id
-     AND fellow.sponsor_id = NEW.sponsor_id
-     AND grant_row.granted_scopes_json = NEW.granted_scopes_json
-     AND grant_row.granted_resources_json = NEW.granted_resources_json
-     AND (
-       (NEW.proposal_id IS NULL AND NEW.credential_origin = 'harness-migration')
-       OR (
-         NEW.proposal_id IS NOT NULL
-         AND NEW.credential_origin = 'enrollment'
-         AND grant_row.proposal_id = NEW.proposal_id
-         AND proposal.fellow_id = NEW.fellow_id
-         AND enrollment.sponsor_id = NEW.sponsor_id
-       )
-     )
-)
-BEGIN
-  SELECT RAISE(ABORT, 'credential authority binding mismatch');
-END;
-
 -- A SQLite REPLACE can otherwise sidestep UPDATE immutability by resolving a
 -- unique conflict as delete-plus-insert. Detect every credential uniqueness
 -- key before conflict resolution and require rotations to use a fresh row.
@@ -228,35 +228,6 @@ BEFORE DELETE ON fellow_tokens
 BEGIN
   SELECT RAISE(ABORT, 'credential history cannot be deleted');
 END;
-
--- The trigger governs new writes. This one-row guard also makes the migration
--- itself abort if a pre-migration row already contains a cross-identity splice.
-CREATE TABLE enrollment_credential_binding_validation (
-  valid INTEGER NOT NULL CHECK (valid = 1)
-);
-INSERT INTO enrollment_credential_binding_validation (valid)
-SELECT CASE WHEN EXISTS (
-  SELECT 1
-    FROM fellow_tokens AS credential
-    LEFT JOIN enrollment_fellows AS fellow
-      ON fellow.fellow_id = credential.fellow_id
-     AND fellow.sponsor_id = credential.sponsor_id
-    LEFT JOIN enrollment_proposals AS proposal
-      ON proposal.proposal_id = credential.proposal_id
-     AND proposal.fellow_id = credential.fellow_id
-    LEFT JOIN enrollment_records AS enrollment
-      ON enrollment.enrollment_id = proposal.enrollment_id
-     AND enrollment.sponsor_id = credential.sponsor_id
-    LEFT JOIN enrollment_grants AS grant_row
-      ON grant_row.proposal_id = credential.proposal_id
-     AND grant_row.fellow_id = credential.fellow_id
-     AND grant_row.sponsor_id = credential.sponsor_id
-     AND grant_row.granted_scopes_json = credential.granted_scopes_json
-     AND grant_row.granted_resources_json = credential.granted_resources_json
-   WHERE fellow.fellow_id IS NULL
-      OR (credential.proposal_id IS NOT NULL AND enrollment.enrollment_id IS NULL)
-      OR (credential.proposal_id IS NOT NULL AND grant_row.proposal_id IS NULL)
-) THEN 0 ELSE 1 END;
 
 -- Future harness migration may mint more than one credential for a Fellow,
 -- but no path can cross the three-active-token boundary even under concurrent
