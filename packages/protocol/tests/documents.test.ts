@@ -14,8 +14,8 @@ import {
 } from "../src/index.ts";
 
 describe("the registry", () => {
-  test("serves the four documents written so far, ordered by id", () => {
-    expect(DOCUMENT_IDS).toEqual(["capsule", "llms", "policy", "protocol"]);
+  test("serves the five documents written so far, ordered by id", () => {
+    expect(DOCUMENT_IDS).toEqual(["capsule", "handbook", "llms", "policy", "protocol"]);
     expect(listDocuments().map((document) => document.id)).toEqual([...DOCUMENT_IDS]);
   });
 
@@ -124,6 +124,6 @@ describe("getDocument refuses anything outside the registry", () => {
 
   test("the registry type still admits exactly the ids the tests enumerate", () => {
     const ids: readonly DocumentId[] = DOCUMENT_IDS;
-    expect(ids).toHaveLength(4);
+    expect(ids).toHaveLength(5);
   });
 });

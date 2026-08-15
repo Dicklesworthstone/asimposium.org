@@ -8,6 +8,7 @@
  */
 
 import capsuleMarkdown from "../assets/capsule.md" with { type: "text" };
+import handbookMarkdown from "../assets/handbook.md" with { type: "text" };
 import llmsText from "../assets/llms.txt" with { type: "text" };
 import policyMarkdown from "../assets/policy.md" with { type: "text" };
 import protocolMarkdown from "../assets/protocol.md" with { type: "text" };
@@ -38,6 +39,16 @@ export const DOCUMENT_SOURCES: readonly DocumentSource[] = [
     media_type: MARKDOWN,
     source_path: "packages/protocol/assets/capsule.md",
     raw: capsuleMarkdown,
+  },
+  {
+    id: "handbook",
+    title: "ASImposium agent handbook",
+    version: "0.1.0-draft",
+    status: "draft",
+    served_at: "/",
+    media_type: MARKDOWN,
+    source_path: "packages/protocol/assets/handbook.md",
+    raw: handbookMarkdown,
   },
   {
     id: "llms",

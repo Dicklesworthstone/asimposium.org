@@ -1,5 +1,6 @@
 import { describe, expect, test } from "bun:test";
 import { ProblemDocumentSchema } from "@asimposium/contracts";
+import { getDocument } from "@asimposium/protocol";
 import { createApp } from "../../src/app";
 import type { Env } from "../../src/env";
 import { boundEnv, callWorker, executionContext, r2Shaped } from "../support/bindings";
@@ -50,8 +51,8 @@ const ENROLLMENT_UNAVAILABLE =
 const ROUTE_NOT_FOUND =
   '{"type":"https://asimposium.org/errors/ROUTE_NOT_FOUND","title":"No such route","status":404,' +
   '"code":"ROUTE_NOT_FOUND","detail":"This Worker serves no route at /nope.",' +
-  '"fix_hint":"GET /internal/health, the join capsule at /join/<id>, and the /v1 enrollment surface ' +
-  'exist; the wider agent surface lands with the session and ledger workstreams."}';
+  '"fix_hint":"GET / for the handbook, /protocol.md for the rules, /internal/health for operations, ' +
+  'the join capsule at /join/<id>, or the /v1 enrollment surface."}';
 
 const INTERNAL_ERROR =
   '{"type":"https://asimposium.org/errors/INTERNAL_ERROR",' +
@@ -60,6 +61,64 @@ const INTERNAL_ERROR =
   '"fix_hint":"Retry the request. If it persists, report the route and the time of the attempt."}';
 
 describe("face wire format", () => {
+  test("GET / is the exact handbook, independent of D1", async () => {
+    const document = getDocument("handbook");
+    const res = await callWorker("/", {});
+
+    expect(res.status).toBe(200);
+    expect(res.contentType).toBe(document.media_type);
+    expect(res.headers.get("etag")).toBe(`"${document.digest}"`);
+    expect(res.headers.get("cache-control")).toContain("max-age=60");
+    expect(res.bodyText).toBe(document.body);
+  });
+
+  test.each([
+    ["/llms.txt", "llms", "txt"],
+    ["/policy.md", "policy", "md"],
+    ["/protocol.md", "protocol", "md"],
+  ] as const)("GET %s serves its registered bytes", async (path, id, format) => {
+    const document = getDocument(id);
+    const res = await callWorker(`${path}?format=${format}`, {});
+    expect(res.status).toBe(200);
+    expect(res.contentType).toBe(document.media_type);
+    expect(res.bodyText).toBe(document.body);
+  });
+
+  test("public texts honor strong, weak, and wildcard conditional reads", async () => {
+    const document = getDocument("handbook");
+    for (const value of [`"${document.digest}"`, `W/"${document.digest}"`, "*"]) {
+      const app = createApp();
+      const response = await app.fetch(
+        new Request("https://a.asimposium.org/", { headers: { "if-none-match": value } }),
+        {} as Env,
+        executionContext() as unknown as Parameters<typeof app.fetch>[2],
+      );
+      expect(response.status, value).toBe(304);
+      expect(response.headers.get("etag"), value).toBe(`"${document.digest}"`);
+      expect(await response.text(), value).toBe("");
+    }
+  });
+
+  test("HEAD returns handbook metadata without body bytes", async () => {
+    const app = createApp();
+    const response = await app.fetch(
+      new Request("https://a.asimposium.org/", { method: "HEAD" }),
+      {} as Env,
+      executionContext() as unknown as Parameters<typeof app.fetch>[2],
+    );
+    expect(response.status).toBe(200);
+    expect(response.headers.get("content-type")).toBe(getDocument("handbook").media_type);
+    expect(await response.text()).toBe("");
+  });
+
+  test("a served-text format typo teaches the only allowed value", async () => {
+    const res = await callWorker("/protocol.md?format=json", {});
+    expect(res.status).toBe(400);
+    expect(res.contentType).toBe("application/problem+json; charset=utf-8");
+    expect(res.body).toMatchObject({ code: "UNKNOWN_FORMAT", allowed: ["md"] });
+    expect(ProblemDocumentSchema.safeParse(res.body).success).toBe(true);
+  });
+
   test("GET /internal/health, fully bound", async () => {
     const res = await callWorker("/internal/health");
 

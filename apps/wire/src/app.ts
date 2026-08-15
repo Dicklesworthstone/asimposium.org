@@ -1,4 +1,5 @@
 import { Hono } from "hono";
+import { type DocumentId, getDocument } from "@asimposium/protocol";
 
 import { authenticateServiceEnvelopeRequest } from "./auth/http";
 import { type VerificationKeyRecord, VerificationKeyring } from "./auth/keyring";
@@ -55,6 +56,63 @@ const EXACT_ENROLLMENT_PATHS = new Set([
   "/v1/hello",
 ]);
 
+const PUBLIC_TEXT_CACHE_CONTROL = "public, max-age=60, stale-while-revalidate=300";
+
+const PUBLIC_TEXT_ROUTES: readonly {
+  readonly path: string;
+  readonly document: DocumentId;
+  readonly format: "md" | "txt";
+}[] = [
+  { path: "/", document: "handbook", format: "md" },
+  { path: "/llms.txt", document: "llms", format: "txt" },
+  { path: "/policy.md", document: "policy", format: "md" },
+  { path: "/protocol.md", document: "protocol", format: "md" },
+];
+
+function ifNoneMatchMatches(value: string | null, etag: string): boolean {
+  if (value === null) return false;
+  return value.split(",").some((candidate) => {
+    const normalized = candidate.trim();
+    return normalized === "*" || normalized === etag || normalized === `W/${etag}`;
+  });
+}
+
+function responseForHead(request: Request, response: Response): Response {
+  return request.method === "HEAD"
+    ? new Response(null, { status: response.status, headers: response.headers })
+    : response;
+}
+
+/** Site-authored discovery texts; independent of D1 and safe on the very first GET. */
+function servePublicText(request: Request, id: DocumentId, format: "md" | "txt"): Response {
+  const requestedFormats = new URL(request.url).searchParams.getAll("format");
+  if (requestedFormats.length > 1 || (requestedFormats[0] !== undefined && requestedFormats[0] !== format)) {
+    return responseForHead(
+      request,
+      problem({
+        status: 400,
+        code: "UNKNOWN_FORMAT",
+        title: "Unsupported response format",
+        detail: "The ?format= value is not one this route serves.",
+        fixHint: "Drop ?format= or use the value in `allowed`.",
+        extensions: { allowed: [format] },
+      }),
+    );
+  }
+
+  const document = getDocument(id);
+  const etag = `"${document.digest}"`;
+  const headers = {
+    "cache-control": PUBLIC_TEXT_CACHE_CONTROL,
+    "content-type": document.media_type,
+    etag,
+  };
+  if (ifNoneMatchMatches(request.headers.get("if-none-match"), etag)) {
+    return new Response(null, { status: 304, headers });
+  }
+  return new Response(request.method === "HEAD" ? null : document.body, { status: 200, headers });
+}
+
 /**
  * True only for a path shape Propylon actually mounts today.
  *
@@ -102,7 +160,7 @@ function routeNotFound(requestUrl: string, ownedPathMethod?: string): Response {
         ? `This Worker serves no route at ${pathname}.`
         : `This Worker serves ${pathname}, but not with ${ownedPathMethod}.`,
     fixHint:
-      "GET /internal/health, the join capsule at /join/<id>, and the /v1 enrollment surface exist; the wider agent surface lands with the session and ledger workstreams.",
+      "GET / for the handbook, /protocol.md for the rules, /internal/health for operations, the join capsule at /join/<id>, or the /v1 enrollment surface.",
   });
 }
 
@@ -207,6 +265,12 @@ function enrollmentStack(env: Env): EnrollmentStack | Response {
 
 export function createApp(): Hono<{ Bindings: Env }> {
   const app = new Hono<{ Bindings: Env }>();
+
+  for (const route of PUBLIC_TEXT_ROUTES) {
+    app.on(["GET", "HEAD"], route.path, (c) =>
+      servePublicText(c.req.raw, route.document, route.format),
+    );
+  }
 
   app.get("/internal/health", (c) => handleHealth({ format: c.req.query("format"), env: c.env }));
 

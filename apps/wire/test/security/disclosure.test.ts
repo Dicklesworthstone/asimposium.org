@@ -239,7 +239,14 @@ describe("the 404 face teaches without inventing surface", () => {
     // Every path-shaped token is either the caller's path or one of the three
     // namespaces currently mounted by createApp. A future surface added to the
     // copy before it is mounted fails here.
-    const offered = new Set(`${detail} ${fix_hint}`.match(/\/[a-z0-9/_:-]+/gi) ?? []);
-    expect([...offered].sort()).toEqual(["/internal/health", "/join/", "/nope", "/v1"]);
+    const offered = new Set(`${detail} ${fix_hint}`.match(/\/(?:[a-z0-9/_.:-]+)?/gi) ?? []);
+    expect([...offered].sort()).toEqual([
+      "/",
+      "/internal/health",
+      "/join/",
+      "/nope",
+      "/protocol.md",
+      "/v1",
+    ]);
   });
 });

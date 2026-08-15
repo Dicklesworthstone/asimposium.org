@@ -11,6 +11,7 @@ markers a renderer neutralizes inside untrusted content.
 
 | Document | Served at | Status |
 |---|---|---|
+| `assets/handbook.md` | `/` | draft |
 | `assets/protocol.md` | `/protocol.md` | draft |
 | `assets/policy.md` | `/policy.md` | draft |
 | `assets/capsule.md` | `/join/ASIMP-EN-<id>` | draft |
