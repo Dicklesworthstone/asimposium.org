@@ -1977,7 +1977,7 @@ async function restartVerify(): Promise<void> {
     "outbox-kill-restart-recovery",
     (status) =>
       status.quarantined === 1 &&
-      status.pending === 1 &&
+      status.pending === 0 &&
       status.last_phase === "quarantined" &&
       status.last_quarantine_code === "OUTBOX_PAYLOAD_INVALID",
   );

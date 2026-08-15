@@ -62,6 +62,8 @@ readonly -a S2_SOURCE_PATHS=(
   db/migrations/0003_auth_nonce_replay.sql
   db/migrations/0004_krater_integrity_v1.sql
   db/migrations/0005_krater_undigested_index.sql
+  db/migrations/0006_fellow_credential_lifecycle.sql
+  db/migrations/0007_outbox_quarantine_state.sql
   scripts/verify-cost-model.ts
   scripts/verify-cost-model.test.ts
   packages/contracts/src/artifacts.ts
@@ -77,6 +79,8 @@ readonly -a S2_EXPECTED_MIGRATION_JOURNAL=(
   0003_auth_nonce_replay.sql
   0004_krater_integrity_v1.sql
   0005_krater_undigested_index.sql
+  0006_fellow_credential_lifecycle.sql
+  0007_outbox_quarantine_state.sql
 )
 
 random_hex() {
@@ -3027,9 +3031,9 @@ run_s2_shell_regression_test() {
     journal_valid="${S2_STATE_DIR}/journal-valid-$(random_hex 8).json"
     journal_alternate="${S2_STATE_DIR}/journal-alternate-$(random_hex 8).json"
     journal_invalid="${S2_STATE_DIR}/journal-invalid-$(random_hex 8).json"
-    printf '%s\n' '[{"success":true,"results":[{"id":1,"name":"0001_krater_v0.sql","applied_at":"2026-08-14 09:25:35.123456"},{"id":2,"name":"0002_enrollment_g0.sql","applied_at":"2026-08-14 09:25:37"},{"id":3,"name":"0003_auth_nonce_replay.sql","applied_at":"2026-08-14 09:25:37"},{"id":4,"name":"0004_krater_integrity_v1.sql","applied_at":"2026-08-14 09:25:37"},{"id":5,"name":"0005_krater_undigested_index.sql","applied_at":"2026-08-14 09:25:37"}]}]' >"${journal_valid}"
-    printf '%s\n' '[{"success":true,"results":[{"id":1,"name":"0001_krater_v0.sql","applied_at":"2026-08-14 10:25:35"},{"id":2,"name":"0002_enrollment_g0.sql","applied_at":"2026-08-14 10:25:37"},{"id":3,"name":"0003_auth_nonce_replay.sql","applied_at":"2026-08-14 10:25:37"},{"id":4,"name":"0004_krater_integrity_v1.sql","applied_at":"2026-08-14 10:25:37"},{"id":5,"name":"0005_krater_undigested_index.sql","applied_at":"2026-08-14 10:25:37"}]}]' >"${journal_alternate}"
-    printf '%s\n' '[{"success":true,"results":[{"id":1,"name":"0001_krater_v0.sql","applied_at":"2026/08/14 09:25:35"},{"id":2,"name":"0002_enrollment_g0.sql","applied_at":"2026-08-14 09:25:37"},{"id":3,"name":"0003_auth_nonce_replay.sql","applied_at":"2026-08-14 09:25:37"},{"id":4,"name":"0004_krater_integrity_v1.sql","applied_at":"2026-08-14 09:25:37"},{"id":5,"name":"0005_krater_undigested_index.sql","applied_at":"2026-08-14 09:25:37"}]}]' >"${journal_invalid}"
+    printf '%s\n' '[{"success":true,"results":[{"id":1,"name":"0001_krater_v0.sql","applied_at":"2026-08-14 09:25:35.123456"},{"id":2,"name":"0002_enrollment_g0.sql","applied_at":"2026-08-14 09:25:37"},{"id":3,"name":"0003_auth_nonce_replay.sql","applied_at":"2026-08-14 09:25:37"},{"id":4,"name":"0004_krater_integrity_v1.sql","applied_at":"2026-08-14 09:25:37"},{"id":5,"name":"0005_krater_undigested_index.sql","applied_at":"2026-08-14 09:25:37"},{"id":6,"name":"0006_fellow_credential_lifecycle.sql","applied_at":"2026-08-14 09:25:37"},{"id":7,"name":"0007_outbox_quarantine_state.sql","applied_at":"2026-08-14 09:25:37"}]}]' >"${journal_valid}"
+    printf '%s\n' '[{"success":true,"results":[{"id":1,"name":"0001_krater_v0.sql","applied_at":"2026-08-14 10:25:35"},{"id":2,"name":"0002_enrollment_g0.sql","applied_at":"2026-08-14 10:25:37"},{"id":3,"name":"0003_auth_nonce_replay.sql","applied_at":"2026-08-14 10:25:37"},{"id":4,"name":"0004_krater_integrity_v1.sql","applied_at":"2026-08-14 10:25:37"},{"id":5,"name":"0005_krater_undigested_index.sql","applied_at":"2026-08-14 10:25:37"},{"id":6,"name":"0006_fellow_credential_lifecycle.sql","applied_at":"2026-08-14 10:25:37"},{"id":7,"name":"0007_outbox_quarantine_state.sql","applied_at":"2026-08-14 10:25:37"}]}]' >"${journal_alternate}"
+    printf '%s\n' '[{"success":true,"results":[{"id":1,"name":"0001_krater_v0.sql","applied_at":"2026/08/14 09:25:35"},{"id":2,"name":"0002_enrollment_g0.sql","applied_at":"2026-08-14 09:25:37"},{"id":3,"name":"0003_auth_nonce_replay.sql","applied_at":"2026-08-14 09:25:37"},{"id":4,"name":"0004_krater_integrity_v1.sql","applied_at":"2026-08-14 09:25:37"},{"id":5,"name":"0005_krater_undigested_index.sql","applied_at":"2026-08-14 09:25:37"},{"id":6,"name":"0006_fellow_credential_lifecycle.sql","applied_at":"2026-08-14 09:25:37"},{"id":7,"name":"0007_outbox_quarantine_state.sql","applied_at":"2026-08-14 09:25:37"}]}]' >"${journal_invalid}"
     if valid_output="$(validate_current_migration_journal "${journal_valid}" journal-timestamp-valid)"; then :; else return 1; fi
     if alternate_output="$(validate_current_migration_journal "${journal_alternate}" journal-timestamp-alternate)"; then :; else return 1; fi
     if invalid_output="$(validate_current_migration_journal "${journal_invalid}" journal-timestamp-invalid)"; then return 1; fi

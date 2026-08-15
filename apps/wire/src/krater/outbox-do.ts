@@ -307,31 +307,34 @@ export class KraterOutboxDrainer {
     return row?.count ?? 0;
   }
 
-  private quarantineFingerprint(row: PendingOutboxRow): string {
-    return JSON.stringify([row.event_id, row.kind, row.dedupe_key, row.payload_sha256]);
-  }
-
-  private async isQuarantined(row: PendingOutboxRow): Promise<boolean> {
-    return (
-      (await this.state.storage.get<unknown>(`quarantine:${row.id}`)) ===
-      this.quarantineFingerprint(row)
-    );
-  }
-
   private async quarantine(
     row: PendingOutboxRow,
     code: NonNullable<ReturnType<typeof validateOutboxRow>>,
-  ): Promise<void> {
-    const key = `quarantine:${row.id}`;
-    if (!(await this.isQuarantined(row))) {
-      await this.state.storage.put(key, this.quarantineFingerprint(row));
-      await this.updateCounters((current) => ({
-        ...current,
-        quarantined: current.quarantined + 1,
-        last_quarantine_code: code,
-        last_phase: "quarantined",
-      }));
-    }
+  ): Promise<boolean> {
+    // D1 is the authoritative queue. Moving poison out of `pending` prevents a
+    // bounded wrap from paying for the same malformed prefix forever. The CAS
+    // also makes concurrent/retried drains increment diagnostics at most once.
+    const result = await statement(
+      this.env.DB,
+      `UPDATE outbox
+          SET state = 'quarantined', quarantined_at = ?, quarantine_code = ?
+        WHERE id = ? AND state = 'pending'`,
+      new Date().toISOString(),
+      code,
+      row.id,
+    ).run();
+    if (result.meta.changes !== 1) return false;
+    await this.state.storage.put(
+      `quarantine:${row.id}`,
+      JSON.stringify([row.event_id, row.kind, row.dedupe_key, row.payload_sha256, code]),
+    );
+    await this.updateCounters((current) => ({
+      ...current,
+      quarantined: current.quarantined + 1,
+      last_quarantine_code: code,
+      last_phase: "quarantined",
+    }));
+    return true;
   }
 
   private async acknowledge(row: PendingOutboxRow): Promise<boolean> {
@@ -407,14 +410,9 @@ export class KraterOutboxDrainer {
         let quarantined = 0;
         let faultMode = requestedFault;
         for (const row of rows) {
-          if (await this.isQuarantined(row)) {
-            scanAfterId = row.id;
-            continue;
-          }
           const malformed = validateOutboxRow(row);
           if (malformed !== null) {
-            await this.quarantine(row, malformed);
-            quarantined += 1;
+            if (await this.quarantine(row, malformed)) quarantined += 1;
             scanAfterId = row.id;
             continue;
           }

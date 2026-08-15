@@ -20,8 +20,10 @@ interface FakeOutboxRow {
   readonly kind: string;
   readonly dedupe_key: string;
   readonly payload_sha256: string;
-  state: "pending" | "delivered";
+  state: "pending" | "delivered" | "quarantined";
   delivered_at: string | null;
+  quarantined_at: string | null;
+  quarantine_code: string | null;
 }
 
 interface OutboxHarness {
@@ -47,6 +49,8 @@ function outboxRow(id: number, valid = true): FakeOutboxRow {
     payload_sha256: "a".repeat(64),
     state: "pending",
     delivered_at: null,
+    quarantined_at: null,
+    quarantine_code: null,
   };
 }
 
@@ -108,7 +112,29 @@ function outboxHarness(rows: FakeOutboxRow[], options: OutboxHarnessOptions = {}
             .slice(0, limit);
           return { results: results as T[], success: true, meta: {} };
         },
+        first: async <T>() => {
+          if (!sql.includes("SELECT COUNT(*) AS count FROM outbox WHERE state = 'pending'")) {
+            throw new Error(`unexpected first query: ${sql}`);
+          }
+          return { count: rows.filter((row) => row.state === "pending").length } as T;
+        },
         run: async () => {
+          if (sql.includes("SET state = 'quarantined'")) {
+            const [quarantinedAt, quarantineCode, id] = bindings;
+            const row = rows.find(
+              (candidate) => candidate.id === id && candidate.state === "pending",
+            );
+            if (
+              row !== undefined &&
+              typeof quarantinedAt === "string" &&
+              typeof quarantineCode === "string"
+            ) {
+              row.state = "quarantined";
+              row.quarantined_at = quarantinedAt;
+              row.quarantine_code = quarantineCode;
+            }
+            return { success: true, meta: { changes: row === undefined ? 0 : 1 } };
+          }
           if (!sql.includes("UPDATE outbox SET state = 'delivered'")) {
             throw new Error(`unexpected run query: ${sql}`);
           }
@@ -195,6 +221,9 @@ describe("Krater outbox Durable Object contracts", () => {
       held_before_ack: false,
     });
     expect(harness.alarmAt()).not.toBeNull();
+    expect(rows.slice(0, OUTBOX_DRAIN_BATCH_SIZE).every((row) => row.state === "quarantined")).toBe(
+      true,
+    );
     expect(rows.at(-1)?.state).toBe("pending");
 
     const second = await harness.drainer.fetch(drainRequest());
@@ -202,6 +231,10 @@ describe("Krater outbox Durable Object contracts", () => {
     expect(await second.json()).toMatchObject({ delivered: 1, quarantined: 0 });
     expect(rows.at(-1)?.state).toBe("delivered");
     await drainScheduledAlarms(harness);
+    const status = await harness.drainer.fetch(
+      new Request("https://krater-outbox.internal/status", { method: "GET" }),
+    );
+    expect(await status.json()).toMatchObject({ pending: 0, quarantined: OUTBOX_DRAIN_BATCH_SIZE });
     expect(harness.storageValue("scan_after_id")).toBe(OUTBOX_DRAIN_BATCH_SIZE + 1);
   });
 
