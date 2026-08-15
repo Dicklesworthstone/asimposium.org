@@ -161,6 +161,12 @@ if [[ ! "${S2_RUN_ID}" =~ ^[A-Za-z0-9][A-Za-z0-9._-]{0,79}$ ]]; then
   printf '%s\n' '{"tool":"bash","package":"apps/wire","suite":"s2-krater-evidence","status":"fail","code":"S2_EVIDENCE_RUN_ID_INVALID","reproduce":"scripts/e2e-s2-krater.sh"}'
   exit 1
 fi
+# A caller-supplied handle arrives exported, unlike the generated branch above.
+# Recursive lifecycle children need their own evidence roots; sharing this one
+# makes them collide with the parent's already-created main directory. Remove
+# only the export attribute. Deliberate shared-handle handoffs pass S2_RUN_ID
+# explicitly at the exact child invocation that consumes it.
+export -n S2_RUN_ID
 readonly S2_RUN_ID
 readonly S2_RUN_DIR="${S2_EVIDENCE_ROOT}/${S2_RUN_ID}"
 if ! mkdir "${S2_RUN_DIR}" || ! mkdir "${S2_RUN_DIR}/main"; then

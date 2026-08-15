@@ -1,5 +1,6 @@
 import { describe, expect, test } from "bun:test";
 import { spawnSync } from "node:child_process";
+import { randomUUID } from "node:crypto";
 import {
   closeSync,
   existsSync,
@@ -201,20 +202,46 @@ function runHarnessSync(env: Record<string, string>, deadlineMs: number): Run {
   return runCaptured("bash", [SCRIPT], env, deadlineMs);
 }
 
-function liveS2LifecycleProcesses(runId: string): string[] {
-  const snapshot = spawnSync("ps", ["-axo", "pid=,pgid=,ppid=,stat=,command="], {
-    encoding: "utf8",
-  });
-  if (snapshot.status !== 0) {
-    throw new Error(`S2 lifecycle process scan failed: ${snapshot.stderr || "no diagnostic"}`);
-  }
-  return snapshot.stdout
-    .split("\n")
-    .filter(
-      (line) =>
-        line.includes(`e2e/artifacts/s2-krater/${runId}/`) &&
-        (line.includes("s2-pinned-supervisor-") || line.includes("s2-parent-watchdog-")),
+interface ProcessTableCapture {
+  readonly status: number | null;
+  readonly signal: NodeJS.Signals | null;
+  readonly error?: Error;
+  readonly stdout: string;
+}
+
+function parseS2LifecycleProcessTable(runId: string, snapshot: ProcessTableCapture): string[] {
+  const errorCode =
+    snapshot.error !== undefined &&
+    "code" in snapshot.error &&
+    typeof snapshot.error.code === "string"
+      ? snapshot.error.code
+      : "none";
+  if (snapshot.error !== undefined || snapshot.signal !== null || snapshot.status !== 0) {
+    throw new Error(
+      `S2 lifecycle process scan failed: status=${snapshot.status ?? "null"} signal=${snapshot.signal ?? "none"} code=${errorCode}`,
     );
+  }
+  const lines = snapshot.stdout.split("\n").filter((line) => line.trim() !== "");
+  if (lines.length === 0) {
+    throw new Error("S2 lifecycle process scan failed: process-table output empty");
+  }
+  // Command text proves ownership but can also contain caller-supplied arguments.
+  // Return only the non-sensitive process identity fields used in diagnostics.
+  return lines
+    .filter((line) => line.includes(`e2e/artifacts/s2-krater/${runId}/`))
+    .map((line) => line.trim().split(/\s+/u).slice(0, 4).join(" "));
+}
+
+function liveS2LifecycleProcesses(runId: string): string[] {
+  // Bun can report a zero-exit synchronous child with empty in-memory pipes.
+  // The same retained-log wrapper used for the lifecycle run makes the scan's
+  // output byte-complete before it is interpreted as zero survivors.
+  const scan = runCaptured("/bin/ps", ["-axo", "pid=,pgid=,ppid=,stat=,command="], {}, 5_000);
+  return parseS2LifecycleProcessTable(runId, {
+    status: scan.exitCode,
+    signal: null,
+    stdout: scan.stdout,
+  });
 }
 
 async function probeRealBindingCapability(): Promise<Run> {
@@ -367,6 +394,13 @@ describe("S2 to S7 normalized cost receipt", () => {
     const shell = readFileSync(resolve(REPOSITORY_ROOT, SCRIPT), "utf8");
     expect(shell).toContain("scripts/verify-cost-model.ts");
     expect(shell).toContain('S2_COST_RECEIPT_RELATIVE_PATH="s2-cost-input.json"');
+    // biome-ignore lint/suspicious/noTemplateCurlyInString: asserts literal shell source text.
+    const runIdValidation = shell.indexOf('if [[ ! "${S2_RUN_ID}" =~');
+    const runIdUnexport = shell.indexOf("export -n S2_RUN_ID");
+    const runIdReadonly = shell.indexOf("readonly S2_RUN_ID");
+    expect(runIdValidation).toBeGreaterThan(-1);
+    expect(runIdValidation).toBeLessThan(runIdUnexport);
+    expect(runIdUnexport).toBeLessThan(runIdReadonly);
     expect(shell).toContain("s2_cost_receipt: costReceiptSummary");
     // biome-ignore lint/suspicious/noTemplateCurlyInString: asserts literal shell source text.
     expect(shell).toContain('if [[ "${phase}" == "exercise" ]]');
@@ -544,66 +578,190 @@ function selectedS2ShellRegressionModes(): readonly (typeof S2_SHELL_REGRESSION_
   return selected;
 }
 
+function assertS2RunThenScanForSurvivors(
+  label: string,
+  assertRun: () => void,
+  scanForSurvivors: () => string[],
+): void {
+  let assertionFailure: Error | undefined;
+  try {
+    assertRun();
+  } catch (error) {
+    assertionFailure = error instanceof Error ? error : new Error(String(error));
+  }
+
+  let survivorScanFailure: Error | undefined;
+  let survivors: string[] = [];
+  try {
+    survivors = scanForSurvivors();
+  } catch (error) {
+    survivorScanFailure = error instanceof Error ? error : new Error(String(error));
+  }
+  if (survivorScanFailure !== undefined || survivors.length !== 0) {
+    const survivorFailure =
+      survivors.length === 0
+        ? undefined
+        : new Error(`S2 shell regression left survivors: ${survivors.join(" | ")}`);
+    throw new AggregateError(
+      [assertionFailure, survivorScanFailure, survivorFailure].filter(
+        (error): error is Error => error !== undefined,
+      ),
+      `S2 shell regression cleanup verification failed after ${label}; ` +
+        `run_failure=${assertionFailure?.message ?? "none"}; ` +
+        `scan_failure=${survivorScanFailure?.message ?? "none"}; ` +
+        `survivors=${survivors.join(" | ") || "none"}`,
+    );
+  }
+  if (assertionFailure !== undefined) throw assertionFailure;
+}
+
 describe("registered S2 shell and lifecycle regressions", () => {
+  test("PLANTED: a run assertion failure cannot bypass the survivor scan", () => {
+    let scans = 0;
+    expect(() =>
+      assertS2RunThenScanForSurvivors(
+        "planted-run-failure",
+        () => {
+          throw new Error("PLANTED_RUN_FAILURE");
+        },
+        () => {
+          scans += 1;
+          return [];
+        },
+      ),
+    ).toThrow("PLANTED_RUN_FAILURE");
+    expect(scans).toBe(1);
+  });
+
+  test("PLANTED: simultaneous run and cleanup failures retain both diagnostics", () => {
+    const combinedFailure = () =>
+      assertS2RunThenScanForSurvivors(
+        "planted-combined-failure",
+        () => {
+          throw new Error("PLANTED_RUN_FAILURE");
+        },
+        () => ["123 123 planted-run-survivor"],
+      );
+    let failure: unknown;
+    try {
+      combinedFailure();
+    } catch (error) {
+      failure = error;
+    }
+    expect(failure).toBeInstanceOf(AggregateError);
+    expect((failure as AggregateError).message).toContain("run_failure=PLANTED_RUN_FAILURE");
+    expect((failure as AggregateError).message).toContain("survivors=123 123 planted-run-survivor");
+    expect(
+      (failure as AggregateError).errors.map((error) =>
+        error instanceof Error ? error.message : String(error),
+      ),
+    ).toEqual([
+      "PLANTED_RUN_FAILURE",
+      "S2 shell regression left survivors: 123 123 planted-run-survivor",
+    ]);
+  });
+
+  test("PLANTED: process scans are bounded, non-empty, and never expose scanner error text", () => {
+    const runId = "s2u-process-scan-fixture";
+    const scanner = " 4242 4242 1 R /bin/ps -axo pid=,pgid=,ppid=,stat=,command=";
+    const survivor = ` 4343 4343 1 S bash e2e/artifacts/s2-krater/${runId}/main/supervisor.status`;
+    expect(
+      parseS2LifecycleProcessTable(runId, {
+        status: 0,
+        signal: null,
+        stdout: `${scanner}\n${survivor}\n`,
+      }),
+    ).toEqual(["4343 4343 1 S"]);
+
+    const scannerError = Object.assign(new Error("mutable scanner diagnostic"), {
+      code: "ETIMEDOUT",
+    });
+    const failedScan = () =>
+      parseS2LifecycleProcessTable(runId, {
+        status: null,
+        signal: "SIGTERM",
+        error: scannerError,
+        stdout: "",
+      });
+    expect(failedScan).toThrow("status=null signal=SIGTERM code=ETIMEDOUT");
+    expect(failedScan).not.toThrow("mutable scanner diagnostic");
+    expect(() =>
+      parseS2LifecycleProcessTable(runId, {
+        status: 0,
+        signal: null,
+        stdout: "",
+      }),
+    ).toThrow("process-table output empty");
+    expect(
+      parseS2LifecycleProcessTable(runId, {
+        status: 0,
+        signal: null,
+        stdout: " 9999 9999 1 S unrelated\n",
+      }),
+    ).toEqual([]);
+  });
+
   test.each([...selectedS2ShellRegressionModes()])(
     "shell regression %s is bounded and leaves no owned group behind",
     (mode) => {
       console.log(JSON.stringify({ suite: "s2-shell-regression-matrix", mode, phase: "start" }));
-      const run = runHarnessSync({ S2_SHELL_REGRESSION_TEST: mode }, 30_000);
-      if (run.exitCode !== 0) {
-        const codes = Array.from(
-          `${run.stdout}\n${run.stderr}`.matchAll(/"code":"([A-Z][A-Z0-9_]{2,95})"/g),
-          (match) => match[1],
-        )
-          .filter((code, index, values) => values.indexOf(code) === index)
-          .slice(0, 4);
-        throw new Error(
-          `S2 shell regression failed: ${mode}; codes=${codes.join(",") || "NO_TYPED_CODE"}; stdout=${run.stdout || "<empty>"}; stderr=${run.stderr || "<empty>"}`,
-        );
-      }
-      expect(run.exitCode).toBe(0);
-      if (!run.stdout.includes('"suite":"s2-krater-shell","status":"pass"')) {
-        throw new Error(
-          `S2 shell regression emitted no terminal pass: ${mode}; stdout=${run.stdout || "<empty>"}; stderr=${run.stderr || "<empty>"}`,
-        );
-      }
-      expect(run.stdout).toContain('"suite":"s2-krater-shell","status":"pass"');
-      expect(run.stdout).toContain('"suite":"s2-krater-evidence","status":"pass"');
-      if (mode === "legacy-leader-loss") {
-        expect(run.stdout).toContain('"code":"S2_LEGACY_SUPERVISOR_INSPECTION_UNCERTAIN"');
-        expect(run.stdout).toContain('"action":"kill-exact-residual-group"');
-      } else if (mode === "persistent-pre-release-helper") {
-        expect(run.stdout).toContain('"pre_release_resample_attempts":40');
-        expect(run.stdout).toContain('"pre_release_accepted_samples":0');
-        expect(run.stdout).toContain('"pre_release_rejected_samples":40');
-        expect(run.stdout).toContain('"pre_release_max_group_members":2');
-        expect(run.stdout).toContain('"planted_persistent_helper_pid":');
-        expect(run.stdout).toContain('"planted_persistent_helper_rejected_samples":40');
-        expect(run.stdout).toContain('"payload_release_refused":true');
-        expect(run.stdout).toContain('"exact_pinned_group_reaped":true');
-        expect(run.stdout).toContain('"no_exact_group_survivor":true');
-        expect(run.stdout).toContain('"no_planted_persistent_helper_survivor":true');
-      } else if (mode === "term-interrupt-cleanup") {
-        expect(run.stdout).toContain(
-          "term-interrupted-parent-after-term-resistant-payload-control-status-cleans-most-recent-untracked-exact-supervisor",
-        );
-        expect(`${run.stdout}\n${run.stderr}`).not.toContain('"status":"fail"');
-        expect(`${run.stdout}\n${run.stderr}`).not.toContain(
-          "s2-parent-term-secret-must-not-appear",
-        );
-      } else {
-        expect(`${run.stdout}\n${run.stderr}`).not.toContain('"status":"fail"');
-      }
-      const runId = run.stdout.match(/"run_id":"([A-Za-z0-9][A-Za-z0-9._-]{0,79})"/)?.[1];
-      if (runId === undefined) {
-        throw new Error(`S2 shell regression emitted no safe evidence run id: ${mode}`);
-      }
-      const survivors = liveS2LifecycleProcesses(runId);
-      if (survivors.length !== 0) {
-        throw new Error(
-          `S2 shell regression left lifecycle processes after ${mode}: ${survivors.join(" | ")}`,
-        );
-      }
+      // The run ID appears in artifact paths and therefore in process command
+      // lines. Keep it opaque: a mode name embedded here could impersonate the
+      // exact lifecycle markers that the shell is trying to classify.
+      const runId = `s2u-${randomUUID().replaceAll("-", "").slice(0, 24)}`;
+      expect(runId).not.toContain(mode);
+      const run = runHarnessSync({ S2_RUN_ID: runId, S2_SHELL_REGRESSION_TEST: mode }, 30_000);
+      assertS2RunThenScanForSurvivors(
+        mode,
+        () => {
+          if (run.exitCode !== 0) {
+            const codes = Array.from(
+              `${run.stdout}\n${run.stderr}`.matchAll(/"code":"([A-Z][A-Z0-9_]{2,95})"/g),
+              (match) => match[1],
+            )
+              .filter((code, index, values) => values.indexOf(code) === index)
+              .slice(0, 4);
+            throw new Error(
+              `S2 shell regression failed: ${mode}; codes=${codes.join(",") || "NO_TYPED_CODE"}; stdout=${run.stdout || "<empty>"}; stderr=${run.stderr || "<empty>"}`,
+            );
+          }
+          expect(run.exitCode).toBe(0);
+          expect(run.stdout).toContain(`"run_id":"${runId}"`);
+          if (!run.stdout.includes('"suite":"s2-krater-shell","status":"pass"')) {
+            throw new Error(
+              `S2 shell regression emitted no terminal pass: ${mode}; stdout=${run.stdout || "<empty>"}; stderr=${run.stderr || "<empty>"}`,
+            );
+          }
+          expect(run.stdout).toContain('"suite":"s2-krater-shell","status":"pass"');
+          expect(run.stdout).toContain('"suite":"s2-krater-evidence","status":"pass"');
+          if (mode === "legacy-leader-loss") {
+            expect(run.stdout).toContain('"code":"S2_LEGACY_SUPERVISOR_INSPECTION_UNCERTAIN"');
+            expect(run.stdout).toContain('"action":"kill-exact-residual-group"');
+          } else if (mode === "persistent-pre-release-helper") {
+            expect(run.stdout).toContain('"pre_release_resample_attempts":40');
+            expect(run.stdout).toContain('"pre_release_accepted_samples":0');
+            expect(run.stdout).toContain('"pre_release_rejected_samples":40');
+            expect(run.stdout).toContain('"pre_release_max_group_members":2');
+            expect(run.stdout).toContain('"planted_persistent_helper_pid":');
+            expect(run.stdout).toContain('"planted_persistent_helper_rejected_samples":40');
+            expect(run.stdout).toContain('"payload_release_refused":true');
+            expect(run.stdout).toContain('"exact_pinned_group_reaped":true');
+            expect(run.stdout).toContain('"no_exact_group_survivor":true');
+            expect(run.stdout).toContain('"no_planted_persistent_helper_survivor":true');
+          } else if (mode === "term-interrupt-cleanup") {
+            expect(run.stdout).toContain(
+              "term-interrupted-parent-after-term-resistant-payload-control-status-cleans-most-recent-untracked-exact-supervisor",
+            );
+            expect(`${run.stdout}\n${run.stderr}`).not.toContain('"status":"fail"');
+            expect(`${run.stdout}\n${run.stderr}`).not.toContain(
+              "s2-parent-term-secret-must-not-appear",
+            );
+          } else {
+            expect(`${run.stdout}\n${run.stderr}`).not.toContain('"status":"fail"');
+          }
+        },
+        () => liveS2LifecycleProcesses(runId),
+      );
       console.log(JSON.stringify({ suite: "s2-shell-regression-matrix", mode, phase: "pass" }));
     },
     30_000,
