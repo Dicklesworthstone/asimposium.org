@@ -5,12 +5,14 @@
   "scripts": {
     "test": "bun run test:unit && bun run test:contract && bun run test:integration",
     "typecheck": "tsc --noEmit -p tsconfig.json",
-    "lint": "command -v shellcheck >/dev/null 2>&1 || { printf 'blocked: shellcheck is unavailable\\n' >&2; exit 78; }; cd .. && shellcheck -x e2e/lib/run-diagnostics.sh scripts/smoke-agent.sh scripts/smoke-gallery.sh scripts/e2e-s4-screening-oauth.sh scripts/e2e-s6-auth-ingress.sh e2e/run-playwright.sh e2e/gauntlet/run.sh e2e/tests/run-diagnostics.test.sh e2e/tests/smoke-entrypoints.test.sh e2e/screening/e2e-s4-screening-oauth.test.sh",
-    "test:unit": "bash tests/run-diagnostics.test.sh && bun test /dev/null --timeout=120000 screening/s4-runner.test.ts screening/s4-legitimate-only.test.ts screening/oauth-dry-check.test.ts",
-    "test:contract": "bash tests/run-diagnostics.test.sh",
+    "lint": "command -v shellcheck >/dev/null 2>&1 || { printf 'blocked: shellcheck is unavailable\\n' >&2; exit 78; }; cd .. && biome check e2e/playwright/device-enrollment-runner.ts e2e/playwright/target-surfaces.spec.ts && shellcheck -x e2e/lib/run-diagnostics.sh scripts/smoke-agent.sh scripts/smoke-gallery.sh scripts/e2e-device-enrollment.sh scripts/e2e-s4-screening-oauth.sh scripts/e2e-s6-auth-ingress.sh e2e/run-playwright.sh e2e/gauntlet/run.sh e2e/tests/device-enrollment-entrypoint.test.sh e2e/tests/run-diagnostics.test.sh e2e/tests/smoke-entrypoints.test.sh e2e/screening/e2e-s4-screening-oauth.test.sh",
+    "test:unit": "bun test /dev/null --timeout=120000 screening/s4-runner.test.ts screening/s4-legitimate-only.test.ts screening/oauth-dry-check.test.ts",
+    "test:contract": "bash tests/run-diagnostics.test.sh && bash tests/device-enrollment-entrypoint.test.sh",
     "test:integration": "bash tests/smoke-entrypoints.test.sh && bash screening/e2e-s4-screening-oauth.test.sh",
-    "test:security": "bash tests/smoke-entrypoints.test.sh",
+    "test:security": "bash tests/smoke-entrypoints.test.sh && bash tests/device-enrollment-entrypoint.test.sh",
     "test:e2e": "bash run-playwright.sh --write-artifacts",
+    "test:e2e:device": "bash ../scripts/e2e-device-enrollment.sh --scenario all --write-artifacts",
+    "test:e2e:device:proposal-expiry": "bash ../scripts/e2e-device-enrollment.sh --scenario proposal-expired --write-artifacts",
     "test:gauntlet": "bun run --cwd gauntlet test:e2e"
   },
   "devDependencies": {

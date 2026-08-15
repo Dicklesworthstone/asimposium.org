@@ -195,6 +195,92 @@ function isUnboundDeviceProposalQuery(query: string): boolean {
 }
 
 describe("device enrollment first-decider SQL", () => {
+  test("device polling expires at thirty minutes without rewriting the 24-hour proposal", async () => {
+    const sqlite = deviceDatabase();
+    const store = new D1EnrollmentStore(localD1(sqlite));
+    const input = deviceInput("poll-expiry");
+    let tokenFactoryCalls = 0;
+    const createToken = async () => {
+      tokenFactoryCalls += 1;
+      throw new Error("expired device polling reached the token factory");
+    };
+    await store.deviceCreate(input);
+
+    await expect(
+      store.poll({
+        flowHandleHash: input.proposal.flowHandleHash,
+        now: input.deviceExpiresAt - 1,
+        createToken,
+      }),
+    ).resolves.toEqual({ kind: "pending", retryAfterSeconds: 5 });
+    await expect(
+      store.poll({
+        flowHandleHash: input.proposal.flowHandleHash,
+        now: input.deviceExpiresAt,
+        createToken,
+      }),
+    ).resolves.toEqual({ kind: "expired" });
+
+    expect(tokenFactoryCalls).toBe(0);
+    expect(
+      sqlite
+        .prepare<{ expires_at: number; status: string }, [string]>(
+          "SELECT expires_at, status FROM enrollment_proposals WHERE proposal_id = ?",
+        )
+        .get(input.proposal.proposalId),
+    ).toEqual({ expires_at: input.proposal.expiresAt, status: "pending" });
+  });
+
+  test("a device proposal whose code mapping disappeared fails closed", async () => {
+    const sqlite = deviceDatabase();
+    const store = new D1EnrollmentStore(localD1(sqlite));
+    const input = deviceInput("missing-code-row");
+    await store.deviceCreate(input);
+    sqlite
+      .prepare("DELETE FROM device_codes WHERE enrollment_id = ?")
+      .run(input.record.enrollmentId);
+
+    await expect(
+      store.poll({
+        flowHandleHash: input.proposal.flowHandleHash,
+        now: NOW,
+        createToken: async () => {
+          throw new Error("a missing device mapping reached the token factory");
+        },
+      }),
+    ).rejects.toMatchObject({ code: "FLOW_INVALID" } satisfies Partial<EnrollmentError>);
+  });
+
+  test("a stale loaded card cannot bind a sponsor after its device code expires", async () => {
+    const sqlite = deviceDatabase();
+    const store = new D1EnrollmentStore(localD1(sqlite));
+    const input = deviceInput("stale-card");
+    await store.deviceCreate(input);
+
+    await expect(
+      store.decision({
+        enrollmentId: input.record.enrollmentId,
+        sponsorId: "usr_stale_card",
+        decision: { enrollment_id: input.record.enrollmentId, decision: "approve" },
+        now: input.deviceExpiresAt,
+      }),
+    ).rejects.toMatchObject({ code: "PROPOSAL_NOT_PENDING" } satisfies Partial<EnrollmentError>);
+
+    expect(
+      sqlite
+        .prepare<{ sponsor_id: string; status: string }, [string]>(
+          `SELECT e.sponsor_id, p.status
+             FROM enrollment_records e
+             JOIN enrollment_proposals p ON p.enrollment_id = e.enrollment_id
+            WHERE e.enrollment_id = ?`,
+        )
+        .get(input.record.enrollmentId),
+    ).toEqual({ sponsor_id: "", status: "pending" });
+    expect(
+      sqlite.prepare<{ n: number }, []>("SELECT COUNT(*) AS n FROM enrollment_fellows").get()?.n,
+    ).toBe(0);
+  });
+
   test.each(["approve", "deny"] as const)(
     "a stale pending pre-read cannot partially bind a sponsor before %s",
     async (decision) => {

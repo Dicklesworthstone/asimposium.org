@@ -164,7 +164,7 @@ export function ProposalCard({
   onDecided,
 }: {
   readonly card: EnrollmentApprovalCard;
-  readonly onDecided?: () => void;
+  readonly onDecided?: (decision: SponsorEnrollmentDecision["decision"]) => void;
 }) {
   const router = useRouter();
   const [pending, startTransition] = useTransition();
@@ -191,7 +191,7 @@ export function ProposalCard({
       if (!result.ok) setError(result.message);
       else {
         decisionAttempt.current = null;
-        onDecided?.();
+        onDecided?.(decision.decision);
         router.refresh();
       }
     });

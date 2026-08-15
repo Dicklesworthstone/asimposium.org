@@ -175,6 +175,40 @@ describe("S-1 enrollment state machine", () => {
     );
   });
 
+  test("the high-entropy device poll handle expires at the same exclusive boundary", async () => {
+    const { clock, service } = serviceFixture();
+    const started = await service.deviceStart(deviceProposal);
+
+    clock.value += DEVICE_CODE_TTL_MS - 1;
+    expect(await service.poll({ flow_handle: started.device_code })).toEqual({
+      status: "authorization_pending",
+      retry_after_seconds: 5,
+    });
+
+    clock.value += 1;
+    expect(await service.poll({ flow_handle: started.device_code })).toEqual({
+      status: "expired_token",
+    });
+  });
+
+  test("a sponsor cannot approve a card retained past the device-code boundary", async () => {
+    const { clock, service } = serviceFixture();
+    const started = await service.deviceStart(deviceProposal);
+    const card = await service.deviceLookup(sponsor, { user_code: started.user_code });
+
+    clock.value += DEVICE_CODE_TTL_MS;
+    await expectEnrollmentError(
+      service.decide(sponsor, card.enrollmentId, {
+        enrollment_id: card.enrollmentId,
+        decision: "approve",
+      }),
+      "WRONG_PRINCIPAL",
+    );
+    expect(await service.poll({ flow_handle: started.device_code })).toEqual({
+      status: "expired_token",
+    });
+  });
+
   test("mints a 256-bit fragment secret, stores only hashes, and issues one token after approval", async () => {
     const { service, store } = serviceFixture();
     const { enrollmentId, secret, flowHandle } = await mintAndClaim(service);

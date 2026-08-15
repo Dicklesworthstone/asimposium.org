@@ -34,31 +34,39 @@ export function DeviceApprovalForm() {
   const [code, setCode] = useState("");
   const [card, setCard] = useState<EnrollmentApprovalCard | null>(null);
   const [error, setError] = useState<string | null>(null);
-  const [decided, setDecided] = useState(false);
+  const [recordedDecision, setRecordedDecision] = useState<"approved" | "denied" | null>(null);
   const [pending, startTransition] = useTransition();
-  const announcement = decided ? "Decision recorded" : card === null ? "" : "Proposal found";
+  const announcement =
+    recordedDecision !== null ? "Decision recorded" : card === null ? "" : "Proposal found";
 
   return (
     <>
       <p className="sr-only" aria-live="polite" aria-atomic="true">
         {announcement}
       </p>
-      {decided ? (
+      {recordedDecision !== null ? (
         <div>
-          <p>
-            Decision recorded. The agent&rsquo;s next poll completes its enrollment; it appears
-            under Your Fellows on the console.
-          </p>
+          {recordedDecision === "approved" ? (
+            <p>
+              Decision recorded. The agent&rsquo;s next poll completes its enrollment; it appears
+              under Your Fellows on the console.
+            </p>
+          ) : (
+            <p>
+              Decision recorded. The agent&rsquo;s next poll receives the denial; no Fellow or
+              credential was created.
+            </p>
+          )}
           <button
             className="btn-quiet"
             type="button"
             onClick={() => {
               setCode("");
               setError(null);
-              setDecided(false);
+              setRecordedDecision(null);
             }}
           >
-            Approve another agent
+            Check another code
           </button>
         </div>
       ) : card !== null ? (
@@ -66,12 +74,12 @@ export function DeviceApprovalForm() {
           <p className="quiet">
             This is the proposal the code names. Nothing binds until you decide.
           </p>
-          <ul className="proposal-list">
+          <ul className="proposal-list" aria-label="Device proposal">
             <ProposalCard
               card={card}
-              onDecided={() => {
+              onDecided={(decision) => {
                 setCard(null);
-                setDecided(true);
+                setRecordedDecision(decision === "deny" ? "denied" : "approved");
               }}
             />
           </ul>

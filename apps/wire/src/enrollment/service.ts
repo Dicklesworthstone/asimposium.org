@@ -849,6 +849,7 @@ export class InMemoryEnrollmentStore implements EnrollmentStore {
   readonly #credentials = new Map<string, FellowCredentialBinding>();
   readonly #sponsors = new Map<string, { createdAt: number; lastSeenAt: number }>();
   readonly #deviceCodes = new Map<string, { enrollmentId: string; expiresAt: number }>();
+  readonly #deviceCodeExpiresAtByEnrollment = new Map<string, number>();
   readonly #deviceLookups: { sponsorId: string; at: number; success: boolean }[] = [];
   readonly #idempotency = new Map<
     string,
@@ -923,6 +924,12 @@ export class InMemoryEnrollmentStore implements EnrollmentStore {
       }
       if (attempt.now >= proposal.expiresAt) {
         throw new EnrollmentError("PROPOSAL_EXPIRED");
+      }
+      if (isUnboundDevice) {
+        const deviceCodeExpiresAt = this.#deviceCodeExpiresAtByEnrollment.get(record.enrollmentId);
+        if (deviceCodeExpiresAt === undefined || attempt.now >= deviceCodeExpiresAt) {
+          throw new EnrollmentError("PAIRING_INVALID");
+        }
       }
 
       if (attempt.decision.decision === "deny") {
@@ -1110,6 +1117,7 @@ export class InMemoryEnrollmentStore implements EnrollmentStore {
         enrollmentId: input.record.enrollmentId,
         expiresAt: input.deviceExpiresAt,
       });
+      this.#deviceCodeExpiresAtByEnrollment.set(input.record.enrollmentId, input.deviceExpiresAt);
     });
   }
 
@@ -1143,6 +1151,10 @@ export class InMemoryEnrollmentStore implements EnrollmentStore {
         record.sponsorId !== "" ||
         record.proposal === undefined
       ) {
+        throw new EnrollmentError("PAIRING_INVALID");
+      }
+      const deviceCodeExpiresAt = this.#deviceCodeExpiresAtByEnrollment.get(enrollmentId);
+      if (deviceCodeExpiresAt === undefined || now >= deviceCodeExpiresAt) {
         throw new EnrollmentError("PAIRING_INVALID");
       }
       const proposal = record.proposal;
@@ -1205,6 +1217,17 @@ export class InMemoryEnrollmentStore implements EnrollmentStore {
       );
       const proposal = record?.proposal;
       if (record === undefined || proposal === undefined) throw new EnrollmentError("FLOW_INVALID");
+      if (proposal.tokenHash !== undefined) return { kind: "already-issued" };
+      if (record.kind === "device") {
+        const deviceCodeExpiresAt = this.#deviceCodeExpiresAtByEnrollment.get(record.enrollmentId);
+        if (deviceCodeExpiresAt === undefined) throw new EnrollmentError("FLOW_INVALID");
+        if (attempt.now >= deviceCodeExpiresAt) {
+          const decision: PollDecision = { kind: "expired" };
+          const idempotency = await attempt.replayFor?.(decision);
+          this.commitIdempotency(idempotency);
+          return decision;
+        }
+      }
       if (proposal.status === "pending" && attempt.now >= proposal.expiresAt) {
         const decision: PollDecision = { kind: "expired" };
         const idempotency = await attempt.replayFor?.(decision);
@@ -1238,8 +1261,6 @@ export class InMemoryEnrollmentStore implements EnrollmentStore {
         this.commitIdempotency(idempotency);
         return { kind: "expired" };
       }
-      if (proposal.tokenHash !== undefined) return { kind: "already-issued" };
-
       const issued = await attempt.createToken();
       if (proposal.grantedScopes === undefined || proposal.grantedResources === undefined) {
         throw new EnrollmentError("PROPOSAL_NOT_PENDING");

@@ -72,6 +72,11 @@ interface ProposalRow extends RecordRow {
   durable_granted_resources_json: string | null;
 }
 
+interface PollingProposalRow extends ProposalRow {
+  enrollment_kind: "join-url" | "device";
+  device_code_expires_at: number | null;
+}
+
 interface CredentialRow {
   fellow_id: string;
   credential_id: string;
@@ -466,12 +471,15 @@ export class D1EnrollmentStore implements EnrollmentStore {
              WHERE enrollment_id = ? AND sponsor_id = '' AND kind = 'device'
                AND EXISTS (
                  SELECT 1 FROM enrollment_proposals p
+                 JOIN device_codes d ON d.enrollment_id = p.enrollment_id
                   WHERE p.enrollment_id = enrollment_records.enrollment_id
                     AND p.proposal_id = ? AND p.status = 'pending' AND p.expires_at > ?
+                    AND d.expires_at > ?
                )`,
             attempt.sponsorId,
             attempt.enrollmentId,
             row.proposal_id,
+            attempt.now,
             attempt.now,
           ),
         ]
@@ -886,8 +894,11 @@ export class D1EnrollmentStore implements EnrollmentStore {
               p.expires_at, p.status
          FROM enrollment_records e
          JOIN enrollment_proposals p ON p.enrollment_id = e.enrollment_id
-        WHERE e.enrollment_id = ? AND e.kind = 'device' AND e.sponsor_id = ''`,
+         JOIN device_codes d ON d.enrollment_id = e.enrollment_id
+        WHERE e.enrollment_id = ? AND e.kind = 'device' AND e.sponsor_id = ''
+          AND d.expires_at > ?`,
       enrollmentId,
+      now,
     ).first<PendingProposalRow>();
     if (row === null) return undefined;
     if (row.status === "pending" && now >= row.expires_at) {
@@ -983,6 +994,27 @@ export class D1EnrollmentStore implements EnrollmentStore {
     for (let retry = 0; retry < 2; retry += 1) {
       const row = await this.proposalByFlow(attempt.flowHandleHash);
       if (row === null) throw new EnrollmentError("FLOW_INVALID");
+      if (row.token_hash !== null) return { kind: "already-issued" };
+      if (row.enrollment_kind === "device") {
+        if (row.device_code_expires_at === null) throw new EnrollmentError("FLOW_INVALID");
+        if (attempt.now >= row.device_code_expires_at) {
+          const decision: PollDecision = { kind: "expired" };
+          const idempotency = await attempt.replayFor?.(decision);
+          if (idempotency === undefined) return decision;
+          try {
+            const [result] = await this.#db.batch([
+              this.standaloneIdempotencyStatement(idempotency),
+            ]);
+            if (result?.meta.changes === 1) return decision;
+            await this.raceIfPresent(idempotency);
+            throw new EnrollmentPersistenceError();
+          } catch (error) {
+            if (error instanceof EnrollmentIdempotencyRaceError) throw error;
+            await this.raceIfPresent(idempotency);
+            throw new EnrollmentPersistenceError();
+          }
+        }
+      }
       if (row.status === "pending" && attempt.now >= row.expires_at) {
         const decision: PollDecision = { kind: "expired" };
         const idempotency = await attempt.replayFor?.(decision);
@@ -1057,8 +1089,6 @@ export class D1EnrollmentStore implements EnrollmentStore {
           throw new EnrollmentPersistenceError();
         }
       }
-      if (row.token_hash !== null) return { kind: "already-issued" };
-
       const issued = await attempt.createToken();
       const decision: PollDecision = { kind: "issued", token: issued.token };
       const idempotency = await attempt.replayFor?.(decision);
@@ -1427,11 +1457,12 @@ export class D1EnrollmentStore implements EnrollmentStore {
     ).first<ProposalRow>();
   }
 
-  private async proposalByFlow(flowHandleHash: string): Promise<ProposalRow | null> {
+  private async proposalByFlow(flowHandleHash: string): Promise<PollingProposalRow | null> {
     return sql(
       this.#db,
       `SELECT e.enrollment_id, e.sponsor_id, e.secret_hash, e.secret_expires_at,
               e.requested_scopes_json, e.requested_resources_json, e.invalidated, e.secret_consumed_at,
+              e.kind AS enrollment_kind, d.expires_at AS device_code_expires_at,
               p.proposal_id, p.fellow_id, p.flow_handle_hash, p.name, p.model, p.harness,
               p.reasoning_effort, p.tools_note, p.created_at, p.expires_at, p.status,
               p.granted_scopes_json, p.granted_resources_json, p.token_hash, p.token_issued_at,
@@ -1440,10 +1471,11 @@ export class D1EnrollmentStore implements EnrollmentStore {
               g.granted_resources_json AS durable_granted_resources_json
          FROM enrollment_proposals p
          JOIN enrollment_records e ON e.enrollment_id = p.enrollment_id
+         LEFT JOIN device_codes d ON d.enrollment_id = e.enrollment_id
          LEFT JOIN enrollment_grants g ON g.proposal_id = p.proposal_id
         WHERE p.flow_handle_hash = ?`,
       flowHandleHash,
-    ).first<ProposalRow>();
+    ).first<PollingProposalRow>();
   }
 
   private reducedGrant(

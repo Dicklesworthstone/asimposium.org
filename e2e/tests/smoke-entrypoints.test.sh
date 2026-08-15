@@ -25,6 +25,55 @@ for self_test in \
   fi
 done
 
+assert_production_refused() {
+  local entrypoint="$1"
+  local expected_code="$2"
+  local output
+  local status
+
+  set +e
+  output="$(
+    ASIMPOSIUM_STAGING_AGENT_BASE_URL="https://a.asimposium.org:443" \
+      ASIMPOSIUM_STAGING_AGORA_BASE_URL="https://ASIMPOSIUM.ORG." \
+      "$entrypoint" 2>&1
+  )"
+  status=$?
+  set -e
+  if [[ "$status" -ne 78 || "$output" != *"\"code\":\"$expected_code\""* ]]; then
+    emit "fail" "PRODUCTION_ORIGIN_NOT_BLOCKED"
+    exit 1
+  fi
+  if [[ "$output" == *"https://"* || "$output" == *"asimposium.org"* ]]; then
+    emit "fail" "PRODUCTION_ORIGIN_LEAKED"
+    exit 1
+  fi
+}
+
+assert_production_refused "$repository_root/scripts/smoke-agent.sh" "STAGING_AGENT_BASE_URL_INVALID"
+assert_production_refused "$repository_root/scripts/smoke-gallery.sh" "STAGING_AGORA_BASE_URL_INVALID"
+assert_production_refused "$repository_root/e2e/run-playwright.sh" "STAGING_SURFACE_BASE_URL_INVALID"
+assert_production_refused "$repository_root/e2e/gauntlet/run.sh" "STAGING_AGENT_BASE_URL_INVALID"
+
+set +e
+direct_playwright_output="$(
+  cd "$repository_root/e2e" \
+    && ASIMPOSIUM_PLAYWRIGHT_ENTRY=1 \
+      ASIMPOSIUM_STAGING_AGENT_BASE_URL="https://a.asimposium.org" \
+      ASIMPOSIUM_STAGING_AGORA_BASE_URL="https://asimposium.org" \
+      bunx --no-install playwright test --config playwright.config.ts --list 2>&1
+)"
+direct_playwright_status=$?
+set -e
+if [[ "$direct_playwright_status" -eq 0 \
+  || "$direct_playwright_output" != *"must be an HTTPS origin"* ]]; then
+  emit "fail" "DIRECT_PLAYWRIGHT_PRODUCTION_ORIGIN_ACCEPTED"
+  exit 1
+fi
+if [[ "$direct_playwright_output" == *"https://"* ]]; then
+  emit "fail" "DIRECT_PLAYWRIGHT_PRODUCTION_ORIGIN_LEAKED"
+  exit 1
+fi
+
 set +e
 missing_gauntlet_output="$(
   env -u ASIMPOSIUM_STAGING_AGENT_BASE_URL \

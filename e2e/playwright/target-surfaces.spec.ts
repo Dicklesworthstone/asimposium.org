@@ -1,4 +1,4 @@
-import { expect, test, type APIRequestContext } from "@playwright/test";
+import { type APIRequestContext, expect, test } from "@playwright/test";
 
 function requiredStagingOrigin(variableName: string): string {
   const supplied = process.env[variableName];
@@ -10,7 +10,9 @@ function requiredStagingOrigin(variableName: string): string {
   try {
     parsed = new URL(supplied);
   } catch {
-    throw new Error(`${variableName} must be an HTTPS origin without credentials, a path, query, or fragment.`);
+    throw new Error(
+      `${variableName} must be an HTTPS origin without credentials, a path, query, or fragment.`,
+    );
   }
 
   if (
@@ -19,13 +21,29 @@ function requiredStagingOrigin(variableName: string): string {
     parsed.password ||
     parsed.pathname !== "/" ||
     parsed.search ||
-    parsed.hash
+    parsed.hash ||
+    new Set([
+      "a.asimposium.org",
+      "artifacts.asimposium.org",
+      "asimposium.org",
+      "www.asimposium.org",
+    ]).has(parsed.hostname.toLowerCase().replace(/\.$/u, ""))
   ) {
-    throw new Error(`${variableName} must be an HTTPS origin without credentials, a path, query, or fragment.`);
+    throw new Error(
+      `${variableName} must be an HTTPS origin without credentials, a path, query, or fragment.`,
+    );
   }
 
   return parsed.origin;
 }
+
+const stagingOrigins =
+  process.env.ASIMPOSIUM_PLAYWRIGHT_ENTRY === "1"
+    ? {
+        agent: requiredStagingOrigin("ASIMPOSIUM_STAGING_AGENT_BASE_URL"),
+        agora: requiredStagingOrigin("ASIMPOSIUM_STAGING_AGORA_BASE_URL"),
+      }
+    : undefined;
 
 async function expectPublicSurface(
   request: APIRequestContext,
@@ -39,21 +57,38 @@ async function expectPublicSurface(
     timeout: 15_000,
   });
 
-  expect(response.status(), `${surfaceName} must return a 2xx response.`).toBeGreaterThanOrEqual(200);
+  expect(response.status(), `${surfaceName} must return a 2xx response.`).toBeGreaterThanOrEqual(
+    200,
+  );
   expect(response.status(), `${surfaceName} must return a 2xx response.`).toBeLessThan(300);
-  expect(await response.text(), `${surfaceName} must identify ASImposium rather than an unrelated fallback.`).toMatch(expectedText);
+  expect(
+    await response.text(),
+    `${surfaceName} must identify ASImposium rather than an unrelated fallback.`,
+  ).toMatch(expectedText);
 }
 
 if (process.env.ASIMPOSIUM_PLAYWRIGHT_ENTRY === "1") {
-  test("agent handbook and capabilities are served from the configured staging agent origin", async ({ request }) => {
-    const origin = requiredStagingOrigin("ASIMPOSIUM_STAGING_AGENT_BASE_URL");
+  test("agent handbook and capabilities are served from the configured staging agent origin", async ({
+    request,
+  }) => {
+    const origin = stagingOrigins?.agent;
+    if (origin === undefined) throw new Error("Playwright staging preflight was not completed.");
 
     await expectPublicSurface(request, origin, "/", /asimp|asimposium/i, "agent handbook");
-    await expectPublicSurface(request, origin, "/capabilities", /asimp|asimposium/i, "agent capabilities");
+    await expectPublicSurface(
+      request,
+      origin,
+      "/capabilities",
+      /asimp|asimposium/i,
+      "agent capabilities",
+    );
   });
 
-  test("Agora public root is served from the configured staging human origin", async ({ request }) => {
-    const origin = requiredStagingOrigin("ASIMPOSIUM_STAGING_AGORA_BASE_URL");
+  test("Agora public root is served from the configured staging human origin", async ({
+    request,
+  }) => {
+    const origin = stagingOrigins?.agora;
+    if (origin === undefined) throw new Error("Playwright staging preflight was not completed.");
 
     await expectPublicSurface(request, origin, "/", /asimp|asimposium/i, "Agora public root");
   });

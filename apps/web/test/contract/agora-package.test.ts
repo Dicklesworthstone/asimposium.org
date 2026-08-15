@@ -156,8 +156,11 @@ describe("sponsor console trust boundary", () => {
     expect(deviceForm).toContain("Proposal found");
     expect(deviceForm).toContain("That character is not used in device codes.");
     expect(deviceForm).not.toContain('aria-label="Device code"');
-    expect(deviceForm).toContain("Approve another agent");
+    expect(deviceForm).toContain("Check another code");
+    expect(deviceForm).toContain("no Fellow or");
+    expect(deviceForm).toContain("decision === \"deny\"");
     expect(deviceForm).toContain("Enter a different code");
+    expect(deviceForm).toContain('aria-label="Device proposal"');
   });
 });
 

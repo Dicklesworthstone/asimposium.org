@@ -58,6 +58,7 @@ e2e_validate_staging_origin() {
   local variable_name="$1"
   local origin="${!variable_name:-}"
   local authority
+  local hostname
 
   [[ -n "$origin" ]] || return 2
   [[ "$origin" == https://* ]] || return 1
@@ -69,6 +70,18 @@ e2e_validate_staging_origin() {
   [[ "$authority" != *"#"* ]] || return 1
   [[ "$authority" != *"@"* ]] || return 1
   [[ "$authority" != *[[:space:]]* ]] || return 1
+
+  # Staging evidence must never be borrowed from the canonical deployment. Do
+  # this before any caller launches curl or a browser, including explicit ports
+  # and a DNS-equivalent trailing dot.
+  hostname="${authority%%:*}"
+  hostname="${hostname%.}"
+  hostname="${hostname,,}"
+  case "$hostname" in
+    a.asimposium.org | artifacts.asimposium.org | asimposium.org | www.asimposium.org)
+      return 1
+      ;;
+  esac
 }
 
 e2e_format_diagnostic() {
@@ -106,6 +119,67 @@ e2e_physical_directory() {
   (cd -P "$directory" 2>/dev/null && pwd -P)
 }
 
+e2e_artifacts_root_at_root() {
+  local repository_root="$1"
+  local physical_repository_root
+  local e2e_root
+  local physical_e2e_root
+  local artifacts_root
+  local physical_artifacts_root
+
+  physical_repository_root="$(e2e_physical_directory "$repository_root")" || return 1
+  e2e_root="$physical_repository_root/e2e"
+  physical_e2e_root="$(e2e_physical_directory "$e2e_root")" || return 1
+  [[ "$physical_e2e_root" == "$physical_repository_root/e2e" ]] || return 1
+
+  artifacts_root="$physical_e2e_root/artifacts"
+  if [[ -e "$artifacts_root" || -L "$artifacts_root" ]]; then
+    [[ -d "$artifacts_root" && ! -L "$artifacts_root" ]] || return 1
+  else
+    mkdir "$artifacts_root" 2>/dev/null || return 1
+  fi
+  physical_artifacts_root="$(e2e_physical_directory "$artifacts_root")" || return 1
+  [[ "$physical_artifacts_root" == "$physical_e2e_root/artifacts" ]] || return 1
+  printf '%s\n' "$physical_artifacts_root"
+}
+
+e2e_artifact_directory_at_root() {
+  local repository_root="$1"
+  local run_id="$2"
+  local physical_artifacts_root
+  local artifact_directory
+  local physical_artifact_directory
+
+  e2e_validate_run_id "$run_id" || return 1
+  physical_artifacts_root="$(e2e_artifacts_root_at_root "$repository_root")" || return 1
+
+  artifact_directory="$physical_artifacts_root/$run_id"
+  if [[ -e "$artifact_directory" || -L "$artifact_directory" ]]; then
+    [[ -d "$artifact_directory" && ! -L "$artifact_directory" ]] || return 1
+  else
+    mkdir "$artifact_directory" 2>/dev/null || return 1
+  fi
+  physical_artifact_directory="$(e2e_physical_directory "$artifact_directory")" || return 1
+  [[ "$physical_artifact_directory" == "$physical_artifacts_root/$run_id" ]] || return 1
+  printf '%s\n' "$physical_artifact_directory"
+}
+
+e2e_claim_artifact_run_at_root() {
+  local repository_root="$1"
+  local run_id="$2"
+  local physical_artifacts_root
+  local artifact_directory
+  local physical_artifact_directory
+
+  e2e_validate_run_id "$run_id" || return 1
+  physical_artifacts_root="$(e2e_artifacts_root_at_root "$repository_root")" || return 1
+  artifact_directory="$physical_artifacts_root/$run_id"
+  [[ ! -e "$artifact_directory" && ! -L "$artifact_directory" ]] || return 1
+  mkdir "$artifact_directory" 2>/dev/null || return 1
+  physical_artifact_directory="$(e2e_physical_directory "$artifact_directory")" || return 1
+  [[ "$physical_artifact_directory" == "$physical_artifacts_root/$run_id" ]] || return 1
+}
+
 e2e_write_artifact_diagnostic_at_root() {
   local repository_root="$1"
   local run_id="$2"
@@ -114,40 +188,10 @@ e2e_write_artifact_diagnostic_at_root() {
   local status="$5"
   local code="$6"
   local reproduce="$7"
-  local physical_repository_root
-  local e2e_root
-  local physical_e2e_root
-  local artifact_relpath
-  local artifacts_root
-  local physical_artifacts_root
-  local artifact_directory
   local physical_artifact_directory
   local diagnostic_path
 
-  physical_repository_root="$(e2e_physical_directory "$repository_root")" || return 1
-  e2e_root="$physical_repository_root/e2e"
-  physical_e2e_root="$(e2e_physical_directory "$e2e_root")" || return 1
-  [[ "$physical_e2e_root" == "$physical_repository_root/e2e" ]] || return 1
-
-  artifact_relpath="$(e2e_artifact_relpath "$run_id")" || return 1
-  artifacts_root="$physical_e2e_root/artifacts"
-
-  if [[ -e "$artifacts_root" || -L "$artifacts_root" ]]; then
-    [[ -d "$artifacts_root" ]] || return 1
-  else
-    mkdir "$artifacts_root" 2>/dev/null || return 1
-  fi
-  physical_artifacts_root="$(e2e_physical_directory "$artifacts_root")" || return 1
-  [[ "$physical_artifacts_root" == "$physical_e2e_root/artifacts" ]] || return 1
-
-  artifact_directory="$physical_artifacts_root/$run_id"
-  if [[ -e "$artifact_directory" || -L "$artifact_directory" ]]; then
-    [[ -d "$artifact_directory" ]] || return 1
-  else
-    mkdir "$artifact_directory" 2>/dev/null || return 1
-  fi
-  physical_artifact_directory="$(e2e_physical_directory "$artifact_directory")" || return 1
-  [[ "$physical_artifact_directory" == "$physical_artifacts_root/$run_id" ]] || return 1
+  physical_artifact_directory="$(e2e_artifact_directory_at_root "$repository_root" "$run_id")" || return 1
 
   diagnostic_path="$physical_artifact_directory/diagnostics.jsonl"
   [[ ! -L "$diagnostic_path" ]] || return 1
@@ -156,7 +200,32 @@ e2e_write_artifact_diagnostic_at_root() {
   fi
 
   e2e_format_diagnostic "$suite" "$started_ms" "$status" "$code" "$reproduce" >> "$diagnostic_path" 2>/dev/null || return 1
-  printf '%s/diagnostics.jsonl\n' "$artifact_relpath"
+  printf 'e2e/artifacts/%s/diagnostics.jsonl\n' "$run_id"
+}
+
+e2e_append_artifact_jsonl_at_root() {
+  local repository_root="$1"
+  local run_id="$2"
+  local file_name="$3"
+  local record="$4"
+  local physical_artifact_directory
+  local artifact_path
+
+  [[ "$file_name" =~ ^[a-z0-9][a-z0-9._-]{0,79}\.jsonl$ ]] || return 1
+  [[ -n "$record" && "${#record}" -le 16384 ]] || return 1
+  [[ "$record" != *$'\n'* && "$record" != *$'\r'* ]] || return 1
+  for forbidden in "flow_v1." "asimp_ag_" "#v1." "https://" "/Users/" '"device_code"' '"user_code"' '"flow_handle"' '"token"' '"cookie"' '"email"'; do
+    [[ "$record" != *"$forbidden"* ]] || return 1
+  done
+
+  physical_artifact_directory="$(e2e_artifact_directory_at_root "$repository_root" "$run_id")" || return 1
+  artifact_path="$physical_artifact_directory/$file_name"
+  [[ ! -L "$artifact_path" ]] || return 1
+  if [[ -e "$artifact_path" && ! -f "$artifact_path" ]]; then
+    return 1
+  fi
+  printf '%s\n' "$record" >> "$artifact_path" 2>/dev/null || return 1
+  printf 'e2e/artifacts/%s/%s\n' "$run_id" "$file_name"
 }
 
 e2e_write_artifact_diagnostic() {
