@@ -1287,6 +1287,30 @@
       ],
       "additionalProperties": false
     },
+    "sponsor_bootstrap_response": {
+      "type": "object",
+      "properties": {
+        "sponsor_id": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 80
+        },
+        "created": {
+          "type": "boolean"
+        },
+        "bootstrapped_at": {
+          "type": "integer",
+          "exclusiveMinimum": 0,
+          "maximum": 9007199254740991
+        }
+      },
+      "required": [
+        "sponsor_id",
+        "created",
+        "bootstrapped_at"
+      ],
+      "additionalProperties": false
+    },
     "flow_poll_request": {
       "type": "object",
       "properties": {
@@ -1524,6 +1548,7 @@
     "sponsor_fellow_summary",
     "sponsor_fellow_list_response",
     "sponsor_enrollment_decision_response",
+    "sponsor_bootstrap_response",
     "flow_poll_request",
     "pending_response",
     "denied_response",

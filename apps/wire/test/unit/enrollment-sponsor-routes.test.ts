@@ -887,4 +887,22 @@ describe("sponsor enrollment routes", () => {
     );
     expect(unkeyed.status).toBe(400);
   });
+
+  test("sponsor bootstrap creates the row once and is idempotent after", async () => {
+    const h = await harness();
+    const call = async () => {
+      const headers = await h.sign("", "/v1/sponsors/bootstrap", "sponsor.bootstrap", "POST");
+      return h.app.fetch(envelopeRequest("/v1/sponsors/bootstrap", headers, "POST"));
+    };
+
+    const first = await call();
+    expect(first.status).toBe(201);
+    const created = (await first.json()) as { created: boolean; sponsor_id: string };
+    expect(created.created).toBe(true);
+    expect(created.sponsor_id).toBe(SPONSOR);
+
+    const second = await call();
+    expect(second.status).toBe(200);
+    expect(((await second.json()) as { created: boolean }).created).toBe(false);
+  });
 });

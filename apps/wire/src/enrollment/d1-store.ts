@@ -702,6 +702,23 @@ export class D1EnrollmentStore implements EnrollmentStore {
     return [...fellows.values()];
   }
 
+  async bootstrapSponsor(sponsorId: string, now: number): Promise<boolean> {
+    // INSERT OR IGNORE first so `created` is exact; the follow-up UPDATE moves
+    // only last_seen_at. Two statements in one batch keep the pair atomic.
+    const results = await this.#db.batch([
+      sql(
+        this.#db,
+        "INSERT OR IGNORE INTO sponsors (sponsor_id, created_at, last_seen_at) VALUES (?, ?, ?)",
+        sponsorId,
+        now,
+        now,
+      ),
+      sql(this.#db, "UPDATE sponsors SET last_seen_at = ? WHERE sponsor_id = ?", now, sponsorId),
+    ]);
+    const insert = results[0];
+    return (insert?.meta.changes ?? 0) === 1;
+  }
+
   async capsule(enrollmentId: string, now: number): Promise<EnrollmentCapsule> {
     const row = await sql(
       this.#db,

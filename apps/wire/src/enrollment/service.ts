@@ -352,6 +352,11 @@ export interface EnrollmentStore {
   pendingApprovalCardsBySponsor(sponsorId: string, now: number): Promise<EnrollmentApprovalCard[]>;
   /** Approval grants and non-secret credential hygiene for the sponsor console. */
   fellowsBySponsor(sponsorId: string, now: number): Promise<SponsorFellowRecord[]>;
+  /**
+   * W3.1: upsert the sponsor row. Returns true when this call created it;
+   * false means it only moved last_seen_at.
+   */
+  bootstrapSponsor(sponsorId: string, now: number): Promise<boolean>;
   capsule(enrollmentId: string, now: number): Promise<EnrollmentCapsule>;
   poll(attempt: PollAttempt): Promise<PollDecision>;
   availabilitySuggestions(name: string): Promise<readonly string[]>;
@@ -759,6 +764,7 @@ export class InMemoryEnrollmentStore implements EnrollmentStore {
   readonly #records = new Map<string, EnrollmentRecord>();
   readonly #activeNames = new Map<string, string>();
   readonly #credentials = new Map<string, FellowCredentialBinding>();
+  readonly #sponsors = new Map<string, { createdAt: number; lastSeenAt: number }>();
   readonly #idempotency = new Map<
     string,
     {
@@ -952,8 +958,7 @@ export class InMemoryEnrollmentStore implements EnrollmentStore {
 
   async fellowsBySponsor(sponsorId: string, now: number): Promise<SponsorFellowRecord[]> {
     return this.serialized(() => {
-      const fellows: SponsorFellowRecord[] = [];
-      for (const record of this.#records.values()) {
+      const fellows: SponsorFellowRecord[] = [];      for (const record of this.#records.values()) {
         if (record.sponsorId !== sponsorId || record.proposal === undefined) continue;
         const proposal = record.proposal;
         if (proposal.status !== "approved" && proposal.status !== "reduced") continue;
@@ -999,6 +1004,18 @@ export class InMemoryEnrollmentStore implements EnrollmentStore {
       }
       fellows.sort((left, right) => right.grantedAt - left.grantedAt);
       return fellows;
+    });
+  }
+
+  async bootstrapSponsor(sponsorId: string, now: number): Promise<boolean> {
+    return this.serialized(() => {
+      const existing = this.#sponsors.get(sponsorId);
+      if (existing !== undefined) {
+        existing.lastSeenAt = now;
+        return false;
+      }
+      this.#sponsors.set(sponsorId, { createdAt: now, lastSeenAt: now });
+      return true;
     });
   }
 
@@ -1488,6 +1505,14 @@ export class EnrollmentService {
   async fellows(sponsor: EnrollmentPrincipal): Promise<SponsorFellowRecord[]> {
     assertSponsor(sponsor);
     return this.#store.fellowsBySponsor(sponsor.sponsorId, this.#clock.now());
+  }
+
+  /** W3.1: bootstrap the sponsor row; reports whether this call created it. */
+  async bootstrapSponsor(sponsor: EnrollmentPrincipal): Promise<{ created: boolean; at: number }> {
+    assertSponsor(sponsor);
+    const now = this.#clock.now();
+    const created = await this.#store.bootstrapSponsor(sponsor.sponsorId, now);
+    return { created, at: now };
   }
 
   async decide(

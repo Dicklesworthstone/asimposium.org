@@ -7,6 +7,8 @@ import {
   type SponsorEnrollmentDecision,
   type SponsorEnrollmentDecisionResponse,
   SponsorEnrollmentDecisionResponseSchema,
+  type SponsorBootstrapResponse,
+  SponsorBootstrapResponseSchema,
   type SponsorFellowListResponse,
   SponsorFellowListResponseSchema,
   type SponsorProposalListResponse,
@@ -32,11 +34,13 @@ const ROUTE_MINT = "/v1/enrollments";
 const ROUTE_PROPOSALS = "/v1/enrollments/proposals";
 const ROUTE_DECISION = "/v1/enrollments/:enrollmentId/decision";
 const ROUTE_FELLOWS = "/v1/fellows";
+const ROUTE_BOOTSTRAP = "/v1/sponsors/bootstrap";
 
 const ACTION_MINT = "enrollment.mint";
 const ACTION_PROPOSALS = "enrollment.proposals.list";
 const ACTION_DECIDE = "enrollment.decide";
 const ACTION_FELLOWS = "fellows.list";
+const ACTION_BOOTSTRAP = "sponsor.bootstrap";
 
 export type StoaCall<T> =
   | { readonly ok: true; readonly data: T }
@@ -200,5 +204,20 @@ export function stoaFellows(principalId: string): Promise<StoaCall<SponsorFellow
     principalId,
     body: "",
     parse: (value) => SponsorFellowListResponseSchema.parse(value),
+  });
+}
+
+/** W3.1: idempotent sponsor bootstrap through the single writer. */
+export function stoaBootstrapSponsor(
+  principalId: string,
+): Promise<StoaCall<SponsorBootstrapResponse>> {
+  return callStoa({
+    method: "POST",
+    route: ROUTE_BOOTSTRAP,
+    path: ROUTE_BOOTSTRAP,
+    action: ACTION_BOOTSTRAP,
+    principalId,
+    body: "",
+    parse: (value) => SponsorBootstrapResponseSchema.parse(value),
   });
 }

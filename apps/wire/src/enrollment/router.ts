@@ -6,6 +6,7 @@ import {
   MintEnrollmentResponseSchema,
   type ProblemCode,
   ProblemDocumentSchema,
+  SponsorBootstrapResponseSchema,
   SponsorEnrollmentDecisionResponseSchema,
   SponsorEnrollmentDecisionSchema,
   SponsorFellowListResponseSchema,
@@ -955,6 +956,43 @@ function mountSponsorRoutes(app: Hono, options: EnrollmentRouterOptions): void {
       return c.json(
         SponsorFellowListResponseSchema.parse({ fellows: fellows.map(contractFellow) }),
         200,
+        { "cache-control": "no-store" },
+      );
+    } catch (error) {
+      const operational = enrollmentOperationalFailure(error);
+      if (operational !== undefined) return operational;
+      return error instanceof EnrollmentError
+        ? enrollmentErrorResponse(error, c.req.raw)
+        : enrollmentUnavailableResponse();
+    }
+  });
+
+  // W3.1: the sponsor's first contact bootstraps their row through the single
+  // writer. Idempotent by construction; no idempotency key needed.
+  app.post("/v1/sponsors/bootstrap", async (c) => {
+    if (hasQuery(c.req.raw)) {
+      return sponsorPathOnlyResponse(c.req.raw, "/v1/sponsors/bootstrap");
+    }
+    const authenticated = await requireSponsor(
+      options,
+      c.req.raw,
+      "/v1/sponsors/bootstrap",
+      "sponsor.bootstrap",
+    );
+    if (authenticated instanceof Response) return authenticated;
+    const principal = authenticated.principal;
+    if (principal.type !== "sponsor") {
+      return enrollmentErrorResponse(new EnrollmentError("WRONG_PRINCIPAL"), c.req.raw);
+    }
+    try {
+      const result = await options.service.bootstrapSponsor(principal);
+      return c.json(
+        SponsorBootstrapResponseSchema.parse({
+          sponsor_id: principal.sponsorId,
+          created: result.created,
+          bootstrapped_at: result.at,
+        }),
+        result.created ? 201 : 200,
         { "cache-control": "no-store" },
       );
     } catch (error) {

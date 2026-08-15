@@ -355,6 +355,19 @@ export const SponsorEnrollmentDecisionResponseSchema = z
   .object({ acknowledged: z.literal(true) })
   .strict();
 
+/**
+ * Sponsor bootstrap (W3.1): first contact through the Worker creates the
+ * sponsor row; later calls only move last_seen_at. `created` reports which
+ * happened so the console and the audit log can tell them apart.
+ */
+export const SponsorBootstrapResponseSchema = z
+  .object({
+    sponsor_id: z.string().min(1).max(80),
+    created: z.boolean(),
+    bootstrapped_at: z.number().int().positive(),
+  })
+  .strict();
+
 /** The only flow-polling input. A proposal id is intentionally absent. */
 export const EnrollmentFlowPollRequestSchema = z
   .object({ flow_handle: EnrollmentFlowHandleSchema })
@@ -407,6 +420,7 @@ export const EnrollmentContractsSchema = z
     sponsor_fellow_summary: SponsorFellowSummarySchema,
     sponsor_fellow_list_response: SponsorFellowListResponseSchema,
     sponsor_enrollment_decision_response: SponsorEnrollmentDecisionResponseSchema,
+    sponsor_bootstrap_response: SponsorBootstrapResponseSchema,
     flow_poll_request: EnrollmentFlowPollRequestSchema,
     pending_response: EnrollmentPendingResponseSchema,
     denied_response: EnrollmentDeniedResponseSchema,
@@ -439,6 +453,7 @@ export type SponsorFellowListResponse = z.infer<typeof SponsorFellowListResponse
 export type SponsorEnrollmentDecisionResponse = z.infer<
   typeof SponsorEnrollmentDecisionResponseSchema
 >;
+export type SponsorBootstrapResponse = z.infer<typeof SponsorBootstrapResponseSchema>;
 export type EnrollmentFlowPollRequest = z.infer<typeof EnrollmentFlowPollRequestSchema>;
 export type RequestedScope = z.infer<typeof RequestedScopeSchema>;
 export type EnrollmentGrantReduction = z.infer<typeof EnrollmentGrantReductionSchema>;

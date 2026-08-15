@@ -5,7 +5,12 @@ import Link from "next/link";
 import { auth, signIn } from "@/auth";
 import { LAUNCH_STAGE, SITE } from "@/lib/site";
 import { isCanonicalSponsorId } from "@/lib/sponsor-id";
-import { stoaConfigured, stoaFellows, stoaPendingProposals } from "@/lib/stoa";
+import {
+  stoaBootstrapSponsor,
+  stoaConfigured,
+  stoaFellows,
+  stoaPendingProposals,
+} from "@/lib/stoa";
 
 import { MintCard, ProposalManager } from "./cards";
 
@@ -104,10 +109,13 @@ export default async function Console() {
 
   if (configured && sponsorId !== undefined) {
     // Each card reports its own outcome: a failed Fellows call must not hide a
-    // successfully loaded proposal, or the reverse.
+    // successfully loaded proposal, or the reverse. The third call is the
+    // W3.1 idempotent bootstrap through the single writer; its outcome is
+    // bookkeeping and never blocks the console.
     const [proposalResult, fellowResult] = await Promise.all([
       stoaPendingProposals(sponsorId),
       stoaFellows(sponsorId),
+      stoaBootstrapSponsor(sponsorId),
     ]);
     proposalState = proposalResult.ok ? "live" : proposalResult.reason;
     fellowState = fellowResult.ok ? "live" : fellowResult.reason;
