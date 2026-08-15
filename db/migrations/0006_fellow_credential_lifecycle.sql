@@ -8,14 +8,12 @@ ALTER TABLE enrollment_fellows ADD COLUMN status TEXT NOT NULL DEFAULT 'active'
     'suspicious_review'
   ));
 
--- Rebuild instead of ALTERing in place: the G0 table made proposal_id UNIQUE,
--- which correctly limited the one-time enrollment poll but accidentally made
--- the Fable max-three credential policy impossible. The initial credential
--- retains a unique proposal origin; later harness-migration credentials have a
--- NULL proposal origin and are bounded by the active-cap trigger below.
-ALTER TABLE enrollment_credentials RENAME TO enrollment_credentials_v0;
-
-CREATE TABLE enrollment_credentials (
+-- The G0 enrollment_credentials table made proposal_id NOT NULL UNIQUE, which
+-- correctly limited the one-time enrollment poll but accidentally made the
+-- Fable max-three token policy impossible. Expand non-destructively into the
+-- canonical Fable `fellow_tokens` table; freeze the legacy rows after copying
+-- so production's forward-only policy never requires a rename or drop.
+CREATE TABLE fellow_tokens (
   credential_id TEXT PRIMARY KEY,
   proposal_id TEXT REFERENCES enrollment_proposals(proposal_id),
   fellow_id TEXT NOT NULL REFERENCES enrollment_fellows(fellow_id),
@@ -45,7 +43,7 @@ CREATE TABLE enrollment_credentials (
   )
 );
 
-INSERT INTO enrollment_credentials (
+INSERT INTO fellow_tokens (
   credential_id, proposal_id, fellow_id, sponsor_id, token_hash,
   granted_scopes_json, granted_resources_json, issued_at, expires_at,
   revoked_at, last_used_at, credential_profile, credential_origin
@@ -53,13 +51,29 @@ INSERT INTO enrollment_credentials (
 SELECT credential_id, proposal_id, fellow_id, sponsor_id, token_hash,
        granted_scopes_json, granted_resources_json, issued_at,
        issued_at + 31536000000, NULL, NULL, 'bearer', 'enrollment'
-  FROM enrollment_credentials_v0;
-
-DROP TABLE enrollment_credentials_v0;
+  FROM enrollment_credentials;
 
 CREATE UNIQUE INDEX enrollment_credentials_initial_proposal_idx
-  ON enrollment_credentials (proposal_id)
+  ON fellow_tokens (proposal_id)
   WHERE proposal_id IS NOT NULL;
+
+CREATE TRIGGER enrollment_credentials_legacy_frozen_insert
+BEFORE INSERT ON enrollment_credentials
+BEGIN
+  SELECT RAISE(ABORT, 'legacy enrollment credential table is frozen');
+END;
+
+CREATE TRIGGER enrollment_credentials_legacy_frozen_update
+BEFORE UPDATE ON enrollment_credentials
+BEGIN
+  SELECT RAISE(ABORT, 'legacy enrollment credential table is frozen');
+END;
+
+CREATE TRIGGER enrollment_credentials_legacy_frozen_delete
+BEFORE DELETE ON enrollment_credentials
+BEGIN
+  SELECT RAISE(ABORT, 'legacy enrollment credential table is frozen');
+END;
 
 -- The approval-time grant is the authority copied into every credential. The
 -- G0 schema described it as immutable but did not enforce that claim. Without
@@ -134,7 +148,7 @@ END;
 -- or another Fellow's proposal. NULL proposal origins are reserved for later
 -- harness-migration credentials and still remain sponsor-bound to the Fellow.
 CREATE TRIGGER enrollment_credentials_identity_insert
-BEFORE INSERT ON enrollment_credentials
+BEFORE INSERT ON fellow_tokens
 WHEN NOT EXISTS (
   SELECT 1
     FROM enrollment_fellows AS fellow
@@ -168,10 +182,10 @@ END;
 -- unique conflict as delete-plus-insert. Detect every credential uniqueness
 -- key before conflict resolution and require rotations to use a fresh row.
 CREATE TRIGGER enrollment_credentials_no_duplicate_insert
-BEFORE INSERT ON enrollment_credentials
+BEFORE INSERT ON fellow_tokens
 WHEN EXISTS (
   SELECT 1
-    FROM enrollment_credentials AS existing
+    FROM fellow_tokens AS existing
    WHERE existing.credential_id = NEW.credential_id
       OR existing.token_hash = NEW.token_hash
       OR (NEW.proposal_id IS NOT NULL AND existing.proposal_id = NEW.proposal_id)
@@ -189,20 +203,20 @@ BEFORE UPDATE OF
   credential_id, proposal_id, fellow_id, sponsor_id, token_hash,
   granted_scopes_json, granted_resources_json, issued_at, expires_at,
   credential_profile, credential_origin
-ON enrollment_credentials
+ON fellow_tokens
 BEGIN
   SELECT RAISE(ABORT, 'credential authority is immutable');
 END;
 
 CREATE TRIGGER enrollment_credentials_revocation_monotonic
-BEFORE UPDATE OF revoked_at ON enrollment_credentials
+BEFORE UPDATE OF revoked_at ON fellow_tokens
 WHEN OLD.revoked_at IS NOT NULL OR NEW.revoked_at IS NULL
 BEGIN
   SELECT RAISE(ABORT, 'credential revocation is monotonic');
 END;
 
 CREATE TRIGGER enrollment_credentials_last_used_monotonic
-BEFORE UPDATE OF last_used_at ON enrollment_credentials
+BEFORE UPDATE OF last_used_at ON fellow_tokens
 WHEN OLD.last_used_at IS NOT NULL
  AND (NEW.last_used_at IS NULL OR NEW.last_used_at < OLD.last_used_at)
 BEGIN
@@ -210,7 +224,7 @@ BEGIN
 END;
 
 CREATE TRIGGER enrollment_credentials_no_delete
-BEFORE DELETE ON enrollment_credentials
+BEFORE DELETE ON fellow_tokens
 BEGIN
   SELECT RAISE(ABORT, 'credential history cannot be deleted');
 END;
@@ -223,7 +237,7 @@ CREATE TABLE enrollment_credential_binding_validation (
 INSERT INTO enrollment_credential_binding_validation (valid)
 SELECT CASE WHEN EXISTS (
   SELECT 1
-    FROM enrollment_credentials AS credential
+    FROM fellow_tokens AS credential
     LEFT JOIN enrollment_fellows AS fellow
       ON fellow.fellow_id = credential.fellow_id
      AND fellow.sponsor_id = credential.sponsor_id
@@ -243,14 +257,13 @@ SELECT CASE WHEN EXISTS (
       OR (credential.proposal_id IS NOT NULL AND enrollment.enrollment_id IS NULL)
       OR (credential.proposal_id IS NOT NULL AND grant_row.proposal_id IS NULL)
 ) THEN 0 ELSE 1 END;
-DROP TABLE enrollment_credential_binding_validation;
 
 -- Future harness migration may mint more than one credential for a Fellow,
 -- but no path can cross the three-active-token boundary even under concurrent
 -- inserts. Expired, individually revoked, and pre-panic rows do not consume a
 -- slot. A credential cannot be minted on the panic boundary itself.
 CREATE TRIGGER enrollment_credentials_active_cap
-BEFORE INSERT ON enrollment_credentials
+BEFORE INSERT ON fellow_tokens
 WHEN NEW.revoked_at IS NULL
   AND NEW.expires_at > NEW.issued_at
   AND NEW.issued_at > COALESCE((
@@ -258,7 +271,7 @@ WHEN NEW.revoked_at IS NULL
   ), -1)
   AND (
     SELECT COUNT(*)
-      FROM enrollment_credentials AS existing
+      FROM fellow_tokens AS existing
       LEFT JOIN enrollment_sponsor_security AS security
         ON security.sponsor_id = existing.sponsor_id
      WHERE existing.fellow_id = NEW.fellow_id
@@ -272,7 +285,7 @@ BEGIN
 END;
 
 CREATE TRIGGER enrollment_credentials_post_panic_insert
-BEFORE INSERT ON enrollment_credentials
+BEFORE INSERT ON fellow_tokens
 WHEN NEW.issued_at <= COALESCE((
   SELECT panic_at FROM enrollment_sponsor_security WHERE sponsor_id = NEW.sponsor_id
 ), -1)
@@ -283,6 +296,6 @@ END;
 CREATE INDEX enrollment_fellows_sponsor_status_idx
   ON enrollment_fellows (sponsor_id, status, created_at);
 CREATE INDEX enrollment_credentials_fellow_lifecycle_idx
-  ON enrollment_credentials (fellow_id, revoked_at, expires_at, issued_at);
+  ON fellow_tokens (fellow_id, revoked_at, expires_at, issued_at);
 CREATE INDEX enrollment_credentials_sponsor_lifecycle_idx
-  ON enrollment_credentials (sponsor_id, revoked_at, expires_at, issued_at);
+  ON fellow_tokens (sponsor_id, revoked_at, expires_at, issued_at);

@@ -1,10 +1,10 @@
 import {
-  EnrollmentResourceGrantsSchema,
-  RequestedScopeSchema,
   type EnrollmentGrantReduction,
+  EnrollmentResourceGrantsSchema,
   type FellowCredentialProfile,
   type FellowLifecycleStatus,
   type RequestedScope,
+  RequestedScopeSchema,
 } from "@asimposium/contracts";
 // D1 proves JSON syntax; these schemas prove that stored authority still obeys
 // the public scope vocabulary and resource bounds when it is read back.
@@ -636,7 +636,7 @@ export class D1EnrollmentStore implements EnrollmentStore {
 			     FROM enrollment_fellows f
 			     JOIN enrollment_grants g ON g.fellow_id = f.fellow_id
 			     LEFT JOIN enrollment_sponsor_security security ON security.sponsor_id = f.sponsor_id
-			     LEFT JOIN enrollment_credentials c
+			     LEFT JOIN fellow_tokens c
 			       ON c.fellow_id = f.fellow_id
 			      AND c.sponsor_id = f.sponsor_id
 			      AND c.revoked_at IS NULL
@@ -819,7 +819,7 @@ export class D1EnrollmentStore implements EnrollmentStore {
           ),
           sql(
             this.#db,
-            `INSERT INTO enrollment_credentials (
+            `INSERT INTO fellow_tokens (
 				   credential_id, proposal_id, fellow_id, sponsor_id, token_hash,
 				   granted_scopes_json, granted_resources_json, issued_at, expires_at,
 				   credential_profile
@@ -942,7 +942,7 @@ export class D1EnrollmentStore implements EnrollmentStore {
     try {
       row = await sql(
         this.#db,
-        `UPDATE enrollment_credentials
+        `UPDATE fellow_tokens
 				        SET last_used_at = MAX(COALESCE(last_used_at, issued_at), ?)
 				      WHERE token_hash = ?
 				        AND revoked_at IS NULL
@@ -950,23 +950,23 @@ export class D1EnrollmentStore implements EnrollmentStore {
 				        AND expires_at > ?
 			        AND issued_at > COALESCE((
 			          SELECT panic_at FROM enrollment_sponsor_security
-			           WHERE sponsor_id = enrollment_credentials.sponsor_id
+			           WHERE sponsor_id = fellow_tokens.sponsor_id
 			        ), -1)
 			        AND EXISTS (
 				          SELECT 1 FROM enrollment_fellows
-				           WHERE fellow_id = enrollment_credentials.fellow_id
-				             AND sponsor_id = enrollment_credentials.sponsor_id
+			           WHERE fellow_id = fellow_tokens.fellow_id
+			             AND sponsor_id = fellow_tokens.sponsor_id
 				             AND status IN ('active', 'suspicious_review')
 			        )
 			      RETURNING fellow_id, credential_id, sponsor_id,
 			        (SELECT name FROM enrollment_fellows
-			          WHERE fellow_id = enrollment_credentials.fellow_id) AS name,
+			          WHERE fellow_id = fellow_tokens.fellow_id) AS name,
 			        (SELECT model FROM enrollment_fellows
-			          WHERE fellow_id = enrollment_credentials.fellow_id) AS model,
+			          WHERE fellow_id = fellow_tokens.fellow_id) AS model,
 			        (SELECT harness FROM enrollment_fellows
-			          WHERE fellow_id = enrollment_credentials.fellow_id) AS harness,
+			          WHERE fellow_id = fellow_tokens.fellow_id) AS harness,
 			        (SELECT status FROM enrollment_fellows
-			          WHERE fellow_id = enrollment_credentials.fellow_id) AS status,
+			          WHERE fellow_id = fellow_tokens.fellow_id) AS status,
 			        granted_scopes_json, granted_resources_json, token_hash, issued_at,
 			        expires_at, last_used_at, revoked_at, credential_profile`,
         now,

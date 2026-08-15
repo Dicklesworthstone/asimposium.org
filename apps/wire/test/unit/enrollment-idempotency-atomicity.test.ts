@@ -377,7 +377,7 @@ function insertLifecycleCredential(
 ): void {
   sqlite
     .prepare(
-      `INSERT INTO enrollment_credentials (
+      `INSERT INTO fellow_tokens (
          credential_id, proposal_id, fellow_id, sponsor_id, token_hash,
          granted_scopes_json, granted_resources_json, issued_at, expires_at,
          credential_profile, credential_origin
@@ -424,7 +424,7 @@ describe("Fellow credential lifecycle constraints and authentication", () => {
     const migrated = sqlite
       .prepare<{ expires_at: number; credential_profile: string; proposal_id: string | null }, []>(
         `SELECT expires_at, credential_profile, proposal_id
-           FROM enrollment_credentials WHERE credential_id = 'credential-1'`,
+           FROM fellow_tokens WHERE credential_id = 'credential-1'`,
       )
       .get();
     expect(migrated).toEqual({
@@ -459,8 +459,7 @@ describe("Fellow credential lifecycle constraints and authentication", () => {
       }),
     ).toThrow("active credential cap reached");
     expect(
-      sqlite.prepare<{ n: number }, []>("SELECT COUNT(*) AS n FROM enrollment_credentials").get()
-        ?.n,
+      sqlite.prepare<{ n: number }, []>("SELECT COUNT(*) AS n FROM fellow_tokens").get()?.n,
     ).toBe(3);
   });
 
@@ -535,14 +534,12 @@ describe("Fellow credential lifecycle constraints and authentication", () => {
 
     expect(() =>
       sqlite
-        .prepare("UPDATE enrollment_credentials SET issued_at = ? WHERE credential_id = ?")
+        .prepare("UPDATE fellow_tokens SET issued_at = ? WHERE credential_id = ?")
         .run(NOW + 1, "credential-1"),
     ).toThrow("credential authority is immutable");
     expect(() =>
       sqlite
-        .prepare(
-          "UPDATE enrollment_credentials SET granted_scopes_json = ? WHERE credential_id = ?",
-        )
+        .prepare("UPDATE fellow_tokens SET granted_scopes_json = ? WHERE credential_id = ?")
         .run('["promote"]', "credential-1"),
     ).toThrow("credential authority is immutable");
     expect(() =>
@@ -566,7 +563,7 @@ describe("Fellow credential lifecycle constraints and authentication", () => {
     expect(() =>
       sqlite
         .prepare(
-          `INSERT OR REPLACE INTO enrollment_credentials (
+          `INSERT OR REPLACE INTO fellow_tokens (
              credential_id, proposal_id, fellow_id, sponsor_id, token_hash,
              granted_scopes_json, granted_resources_json, issued_at, expires_at,
              credential_profile, credential_origin
@@ -586,26 +583,24 @@ describe("Fellow credential lifecycle constraints and authentication", () => {
     ).toThrow("credential identity already exists");
 
     sqlite
-      .prepare("UPDATE enrollment_credentials SET last_used_at = ? WHERE credential_id = ?")
+      .prepare("UPDATE fellow_tokens SET last_used_at = ? WHERE credential_id = ?")
       .run(NOW + 5, "credential-1");
     expect(() =>
       sqlite
-        .prepare("UPDATE enrollment_credentials SET last_used_at = ? WHERE credential_id = ?")
+        .prepare("UPDATE fellow_tokens SET last_used_at = ? WHERE credential_id = ?")
         .run(NOW + 4, "credential-1"),
     ).toThrow("credential last-used time is monotonic");
 
     sqlite
-      .prepare("UPDATE enrollment_credentials SET revoked_at = ? WHERE credential_id = ?")
+      .prepare("UPDATE fellow_tokens SET revoked_at = ? WHERE credential_id = ?")
       .run(NOW + 6, "credential-1");
     expect(() =>
       sqlite
-        .prepare("UPDATE enrollment_credentials SET revoked_at = NULL WHERE credential_id = ?")
+        .prepare("UPDATE fellow_tokens SET revoked_at = NULL WHERE credential_id = ?")
         .run("credential-1"),
     ).toThrow("credential revocation is monotonic");
     expect(() =>
-      sqlite
-        .prepare("DELETE FROM enrollment_credentials WHERE credential_id = ?")
-        .run("credential-1"),
+      sqlite.prepare("DELETE FROM fellow_tokens WHERE credential_id = ?").run("credential-1"),
     ).toThrow("credential history cannot be deleted");
   });
 
@@ -626,7 +621,7 @@ describe("Fellow credential lifecycle constraints and authentication", () => {
     expect(
       sqlite
         .prepare<{ last_used_at: number | null }, []>(
-          "SELECT last_used_at FROM enrollment_credentials WHERE credential_id = 'credential-1'",
+          "SELECT last_used_at FROM fellow_tokens WHERE credential_id = 'credential-1'",
         )
         .get()?.last_used_at,
     ).toBe(NOW + 1);
@@ -645,7 +640,7 @@ describe("Fellow credential lifecycle constraints and authentication", () => {
     expect(
       sqlite
         .prepare<{ last_used_at: number | null }, []>(
-          "SELECT last_used_at FROM enrollment_credentials WHERE credential_id = 'credential-1'",
+          "SELECT last_used_at FROM fellow_tokens WHERE credential_id = 'credential-1'",
         )
         .get()?.last_used_at,
     ).toBe(NOW + 1);
@@ -687,7 +682,7 @@ describe("Fellow credential lifecycle constraints and authentication", () => {
     expect(
       sqlite
         .prepare<{ last_used_at: number | null }, []>(
-          "SELECT last_used_at FROM enrollment_credentials WHERE credential_id = 'credential-1'",
+          "SELECT last_used_at FROM fellow_tokens WHERE credential_id = 'credential-1'",
         )
         .get()?.last_used_at,
     ).toBe(NOW + 3);
