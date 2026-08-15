@@ -149,8 +149,13 @@ function runCaptured(
   closeSync(openSync(stdoutPath, "wx", 0o600));
   closeSync(openSync(stderrPath, "wx", 0o600));
   const child = spawnSync(
-    "bash",
+    "perl",
     [
+      "-MPOSIX=setsid",
+      "-e",
+      "setsid() or exit 125; exec @ARGV",
+      "--",
+      "bash",
       "-c",
       'stdout_path="$1"; stderr_path="$2"; shift 2; exec "$@" >>"$stdout_path" 2>>"$stderr_path"',
       "s2-retained-log-runner",
@@ -163,6 +168,10 @@ function runCaptured(
       cwd: REPOSITORY_ROOT,
       env: { ...process.env, ...env },
       timeout: deadlineMs,
+      // The planted lifecycle modes deliberately signal owned process groups.
+      // The Perl wrapper performs the observable setsid(2) before Bash runs,
+      // so a regression cannot signal Bun's test runner (or the invoking
+      // shell) before it can report the exact terminal record.
     },
   );
   const errorCode =
@@ -190,6 +199,22 @@ async function runHarness(env: Record<string, string>, deadlineMs: number): Prom
  */
 function runHarnessSync(env: Record<string, string>, deadlineMs: number): Run {
   return runCaptured("bash", [SCRIPT], env, deadlineMs);
+}
+
+function liveS2LifecycleProcesses(runId: string): string[] {
+  const snapshot = spawnSync("ps", ["-axo", "pid=,pgid=,ppid=,stat=,command="], {
+    encoding: "utf8",
+  });
+  if (snapshot.status !== 0) {
+    throw new Error(`S2 lifecycle process scan failed: ${snapshot.stderr || "no diagnostic"}`);
+  }
+  return snapshot.stdout
+    .split("\n")
+    .filter(
+      (line) =>
+        line.includes(`e2e/artifacts/s2-krater/${runId}/`) &&
+        (line.includes("s2-pinned-supervisor-") || line.includes("s2-parent-watchdog-")),
+    );
 }
 
 async function probeRealBindingCapability(): Promise<Run> {
@@ -388,11 +413,10 @@ describe("S2 to S7 normalized cost receipt", () => {
     expect(start).toContain('kill -0 "${owner_pid}"');
     // biome-ignore lint/suspicious/noTemplateCurlyInString: asserts literal shell source text.
     expect(start).toContain('kill -KILL -- "-${supervisor_pid}"');
-    expect(shell).toContain("pre_release_helper_is_expected_snapshot");
     expect(shell).toContain("pre_release_snapshot_line_kind");
-    expect(shell).toContain("detached_process_table_snapshot()");
-    expect(shell).toContain("setsid() or exit 125;");
-    expect(shell).toContain("sysopen(STDOUT, $snapshot_path, O_WRONLY | O_CREAT | O_EXCL, 0600)");
+    expect(shell).toContain("detached_process_table_read()");
+    expect(shell).toContain("capture_detached_process_table()");
+    expect(shell).toContain("setsid() or exit 125; exec @ARGV");
     expect(shell).toContain("read_detached_process_snapshot");
     expect(shell).toContain("S2_SHELL_REGRESSION_FAILED");
     const groupMembers = shell.slice(
@@ -403,16 +427,12 @@ describe("S2 to S7 normalized cost receipt", () => {
     expect(groupMembers).toContain('-g "${pgid}"');
     expect(groupMembers).not.toContain("ps -axo");
     const preRelease = shell.slice(
-      shell.indexOf("pre_release_helper_is_expected_snapshot()"),
+      shell.indexOf("pre_release_snapshot_line_kind()"),
       shell.indexOf("signal_owned_group()"),
     );
     expect(preRelease).not.toContain("$(LC_ALL=C ps");
-    expect(preRelease).not.toContain("< <(");
-    expect(preRelease).not.toMatch(/\$\((?!\()/);
-    expect(preRelease).toContain(
-      'detached_process_table_snapshot "$' + '{S2_PRE_RELEASE_SNAPSHOT_PATH}"',
-    );
-    expect(preRelease).toContain("next_pre_release_snapshot_path");
+    expect(preRelease).toContain("capture_detached_process_table");
+    expect(preRelease).toContain("-o pid=,pgid=,ppid=,stat=,command= -g");
     // biome-ignore lint/suspicious/noTemplateCurlyInString: asserts literal shell source text.
     expect(preRelease).toContain('"${helper}" == "${expected_helper}"');
     expect(preRelease).toContain("S2_PRE_RELEASE_EXPECTED_HELPER_REJECTED_SAMPLES");
@@ -490,32 +510,45 @@ describe("S2 to S7 normalized cost receipt", () => {
   });
 });
 
-describe("registered S2 shell and lifecycle regressions", () => {
-  test("the fast planted shell regressions are bounded and leave no owned group behind", async () => {
-    const modes = [
-      "pre-release-helper-classification",
-      "pre-arm-owner-loss",
-      "release-race",
-      "persistent-pre-release-helper",
-      "release-interleaving",
-      "term-interrupt-cleanup",
-      "term-resistant-release",
-      "watchdog-uncertainty",
-      "watchdog-self-retire",
-      "parent-loss",
-      "owner-loss-uncertain",
-      "unowned-refusal",
-      "pinned-supervisor",
-      "journal-timestamps",
-      "lsof-scan-failure",
-      "legacy-cleanup-failure",
-      "legacy-leader-loss",
-      "redaction",
-      "provenance",
-      "indexed-phase-status",
-    ] as const;
+const S2_SHELL_REGRESSION_MODES = [
+  "pre-release-helper-classification",
+  "detached-ps-failure",
+  "pre-arm-owner-loss",
+  "release-race",
+  "persistent-pre-release-helper",
+  "release-interleaving",
+  "term-interrupt-cleanup",
+  "term-resistant-release",
+  "watchdog-uncertainty",
+  "watchdog-self-retire",
+  "parent-loss",
+  "owner-loss-uncertain",
+  "unowned-refusal",
+  "pinned-supervisor",
+  "journal-timestamps",
+  "lsof-scan-failure",
+  "legacy-cleanup-failure",
+  "legacy-leader-loss",
+  "redaction",
+  "provenance",
+  "indexed-phase-status",
+] as const;
 
-    for (const mode of modes) {
+function selectedS2ShellRegressionModes(): readonly (typeof S2_SHELL_REGRESSION_MODES)[number][] {
+  const requested = process.env.S2_SHELL_REGRESSION_UNIT_MODE?.split(",");
+  if (requested === undefined) return S2_SHELL_REGRESSION_MODES;
+  const selected = S2_SHELL_REGRESSION_MODES.filter((mode) => requested.includes(mode));
+  if (selected.length === 0 || selected.length !== new Set(requested).size) {
+    throw new Error(`Unknown S2_SHELL_REGRESSION_UNIT_MODE: ${requested.join(",")}`);
+  }
+  return selected;
+}
+
+describe("registered S2 shell and lifecycle regressions", () => {
+  test.each([...selectedS2ShellRegressionModes()])(
+    "shell regression %s is bounded and leaves no owned group behind",
+    (mode) => {
+      console.log(JSON.stringify({ suite: "s2-shell-regression-matrix", mode, phase: "start" }));
       const run = runHarnessSync({ S2_SHELL_REGRESSION_TEST: mode }, 30_000);
       if (run.exitCode !== 0) {
         const codes = Array.from(
@@ -561,8 +594,20 @@ describe("registered S2 shell and lifecycle regressions", () => {
       } else {
         expect(`${run.stdout}\n${run.stderr}`).not.toContain('"status":"fail"');
       }
-    }
-  }, 360_000);
+      const runId = run.stdout.match(/"run_id":"([A-Za-z0-9][A-Za-z0-9._-]{0,79})"/)?.[1];
+      if (runId === undefined) {
+        throw new Error(`S2 shell regression emitted no safe evidence run id: ${mode}`);
+      }
+      const survivors = liveS2LifecycleProcesses(runId);
+      if (survivors.length !== 0) {
+        throw new Error(
+          `S2 shell regression left lifecycle processes after ${mode}: ${survivors.join(" | ")}`,
+        );
+      }
+      console.log(JSON.stringify({ suite: "s2-shell-regression-matrix", mode, phase: "pass" }));
+    },
+    30_000,
+  );
 
   test("an explicit evidence run id is constrained to one safe path component", async () => {
     const run = await runHarness({ S2_RUN_ID: "../not-a-run" }, 30_000);

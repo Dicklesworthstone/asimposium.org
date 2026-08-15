@@ -430,9 +430,7 @@ S2_PRE_RELEASE_MAX_GROUP_MEMBER_COUNT=0
 S2_PRE_RELEASE_REAPED_PGID=""
 S2_PRE_RELEASE_EXPECTED_HELPER_PID=""
 S2_PRE_RELEASE_EXPECTED_HELPER_REJECTED_SAMPLES=0
-S2_PRE_RELEASE_SNAPSHOT_PREFIX=""
-S2_PRE_RELEASE_SNAPSHOT_PATH=""
-S2_PRE_RELEASE_SNAPSHOT_SEQUENCE=0
+S2_DETACHED_PROCESS_TABLE=""
 # This packed record is published before any release write. It closes the caller-assignment
 # gap: an EXIT trap can still prove and release the exact newest supervisor while a caller is
 # between start_pinned_supervisor and its Worker/lifecycle bookkeeping. Fields are PID, PGID,
@@ -444,44 +442,39 @@ is_decimal() {
   [[ "$1" =~ ^[0-9]+$ ]]
 }
 
-# A pre-release process-table observer must never be part of the group it accepts. Bash process
-# substitutions add an intermediate shell in the caller's process group, so the scanner instead
-# runs synchronously: Perl enters a new session *before* it opens the snapshot or execs `ps`, and
-# Bash later parses the completed regular file with builtins only.
-next_pre_release_snapshot_path() {
-  [[ -n "${S2_PRE_RELEASE_SNAPSHOT_PREFIX}" ]] || return 1
-  S2_PRE_RELEASE_SNAPSHOT_SEQUENCE=$((S2_PRE_RELEASE_SNAPSHOT_SEQUENCE + 1))
-  S2_PRE_RELEASE_SNAPSHOT_PATH="${S2_PRE_RELEASE_SNAPSHOT_PREFIX}.${S2_PRE_RELEASE_SNAPSHOT_SEQUENCE}.ps"
-  [[ ! -e "${S2_PRE_RELEASE_SNAPSHOT_PATH}" && ! -L "${S2_PRE_RELEASE_SNAPSHOT_PATH}" ]]
+# A process-table scanner must leave the pinned supervisor's session before it samples it.
+# Bash gives a command-substitution/process-substitution child its caller's process group, so
+# this function immediately execs Perl, whose first action is `setsid()`. Only then does it exec
+# `ps`; the scanner is therefore never counted as a member of the group it observes.
+detached_process_table_read() {
+  [[ "${S2_PLANT_DETACHED_PS_FAILURE:-0}" == "1" ]] && return 97
+  command -v perl >/dev/null 2>&1 || return 1
+  LC_ALL=C exec perl -MPOSIX=setsid -e 'setsid() or exit 125; exec @ARGV' -- ps "$@"
 }
 
-detached_process_table_snapshot() {
-  local snapshot_path="$1"
-  shift
-  [[ -n "${snapshot_path}" && ! -e "${snapshot_path}" && ! -L "${snapshot_path}" ]] || return 1
-  command -v perl >/dev/null 2>&1 || return 1
-  LC_ALL=C perl -MPOSIX=setsid -MFcntl=O_WRONLY,O_CREAT,O_EXCL -e '
-    my $snapshot_path = shift @ARGV;
-    setsid() or exit 125;
-    sysopen(STDOUT, $snapshot_path, O_WRONLY | O_CREAT | O_EXCL, 0600) or exit 125;
-    open(STDERR, ">", "/dev/null") or exit 125;
-    exec @ARGV;
-  ' "${snapshot_path}" ps "$@"
+# Capture both bytes and exit status. A bare process substitution hides its producer's status,
+# which could accept a partial `ps` result after the scanner itself failed. Command substitution
+# is safe here because the child immediately execs the same detached scanner; it never joins the
+# separately-created supervisor session.
+capture_detached_process_table() {
+  local output
+  S2_DETACHED_PROCESS_TABLE=""
+  output="$(detached_process_table_read "$@")" || return 1
+  S2_DETACHED_PROCESS_TABLE="${output}"
 }
 
 # Read exactly one detached process-table row. Scanner failure, no row, or multiple rows is
-# unsafe for an ownership proof and fails closed without a command or process substitution.
+# unsafe for an ownership proof and fails closed.
 read_detached_process_snapshot() {
   local line rows=0
   S2_DETACHED_PROCESS_SNAPSHOT=""
-  next_pre_release_snapshot_path || return 1
-  detached_process_table_snapshot "${S2_PRE_RELEASE_SNAPSHOT_PATH}" "$@" || return 1
+  capture_detached_process_table "$@" || return 1
   while IFS= read -r line; do
     [[ -n "${line}" ]] || continue
     rows=$((rows + 1))
     [[ ${rows} -eq 1 ]] || return 1
     S2_DETACHED_PROCESS_SNAPSHOT="${line}"
-  done <"${S2_PRE_RELEASE_SNAPSHOT_PATH}"
+  done <<<"${S2_DETACHED_PROCESS_TABLE}"
   [[ ${rows} -eq 1 ]]
 }
 
@@ -616,9 +609,6 @@ start_pinned_supervisor() {
   S2_PRE_RELEASE_REAPED_PGID=""
   S2_PRE_RELEASE_EXPECTED_HELPER_PID=""
   S2_PRE_RELEASE_EXPECTED_HELPER_REJECTED_SAMPLES=0
-  S2_PRE_RELEASE_SNAPSHOT_PREFIX="${status_file}.pre-release-snapshot"
-  S2_PRE_RELEASE_SNAPSHOT_PATH=""
-  S2_PRE_RELEASE_SNAPSHOT_SEQUENCE=0
   [[ ! -e "${status_file}" && ! -L "${status_file}" ]] || return 1
   control_fifo="${status_file}.control"
   [[ ! -e "${control_fifo}" && ! -L "${control_fifo}" ]] || return 1
@@ -785,15 +775,15 @@ start_pinned_supervisor() {
       fi
       if [[ "${S2_PLANT_OWNER_LOSS_BEFORE_ARM:-0}" == 1 ]]; then
         local owner_loss_record="${S2_PRE_ARM_OWNER_LOSS_RECORD:-}"
-          [[ "${S2_SHELL_REGRESSION_TEST:-}" == "pre-arm-owner-loss-child" && \
+        if ! [[ "${S2_SHELL_REGRESSION_TEST:-}" == "pre-arm-owner-loss-child" && \
           -n "${owner_loss_record}" && \
           "${owner_loss_record}" == "${S2_EVIDENCE_ROOT}/"* && \
           ! -e "${owner_loss_record}" && ! -L "${owner_loss_record}" && \
           "${plant_persistent_pre_release_helper}" == 1 ]] && \
-          is_decimal "${S2_PRE_RELEASE_EXPECTED_HELPER_PID}" || {
+          is_decimal "${S2_PRE_RELEASE_EXPECTED_HELPER_PID}"; then
           exec 7>&-
           return 1
-        }
+        fi
         printf '%s %s %s %s %s %s\n' \
           "${pid}" "${pid}" "${marker}" "${S2_PRE_RELEASE_EXPECTED_HELPER_PID}" \
           "${persist}" "${port}" >"${owner_loss_record}" || {
@@ -995,17 +985,6 @@ pre_release_snapshot_line_kind() {
   esac
 }
 
-# Classify the only helper that the blocked supervisor is allowed to have. Exit 2 means the
-# sample is ambiguous (gone, zombie, or carrying the inherited supervisor argv) and must be
-# resampled; it never authorizes release. Exit 1 means a still-observable unexpected descendant
-# and fails closed.
-pre_release_helper_is_expected_snapshot() {
-  local helper_pid="$1" supervisor_pid="$2" marker="$3" line
-  read_detached_process_snapshot -o pid=,pgid=,ppid=,stat=,command= -p "${helper_pid}" || return 2
-  line="${S2_DETACHED_PROCESS_SNAPSHOT}"
-  pre_release_snapshot_line_kind "${line}" "${helper_pid}" "${supervisor_pid}" "${marker}"
-}
-
 # Before release the fresh session contains only the pinned supervisor. One detached process-table
 # scan supplies each complete sample, so an observer never appears as the helper it classifies.
 # Two accepted bounded samples prove the leader remains pinned. A marker-bearing helper is
@@ -1031,9 +1010,8 @@ pre_release_group_is_stably_pinned() {
     helper_line=""
     # One detached scan is the complete sample. It sees the supervisor and any
     # helper in one process-table instant, after the scanner has left this
-    # group; no shell exists in the target group while the scanner runs.
-    next_pre_release_snapshot_path || return 1
-    detached_process_table_snapshot "${S2_PRE_RELEASE_SNAPSHOT_PATH}" \
+    # group; no command-substitution child can manufacture the second member.
+    capture_detached_process_table \
       -o pid=,pgid=,ppid=,stat=,command= -g "${pid}" || return 1
     while IFS= read -r line; do
       [[ -n "${line}" ]] || continue
@@ -1047,7 +1025,7 @@ pre_release_group_is_stably_pinned() {
       else
         helper_line="${line}"
       fi
-    done <"${S2_PRE_RELEASE_SNAPSHOT_PATH}"
+    done <<<"${S2_DETACHED_PROCESS_TABLE}"
     if (( S2_GROUP_MEMBER_COUNT > S2_PRE_RELEASE_MAX_GROUP_MEMBER_COUNT )); then
       S2_PRE_RELEASE_MAX_GROUP_MEMBER_COUNT="${S2_GROUP_MEMBER_COUNT}"
     fi
@@ -2541,6 +2519,17 @@ run_s2_shell_regression_test() {
       '129 456 456 S ps -o pid=,pgid=,ppid=,stat=,command= -p 456' 129 456 ''; then \
       return 1; else [[ $? -eq 1 ]] || return 1; fi
     emit '{"tool":"bash","package":"apps/wire","suite":"s2-krater-shell","status":"pass","scenario":"pre-release-helper-classifier-accepts-only-the-supervisors-exact-live-ps-child","reproduce":"S2_SHELL_REGRESSION_TEST=pre-release-helper-classification scripts/e2e-s2-krater.sh"}'
+    return 0
+  fi
+
+  if [[ "${mode}" == "detached-ps-failure" ]]; then
+    S2_DETACHED_PROCESS_TABLE="stale-result-must-not-survive"
+    if S2_PLANT_DETACHED_PS_FAILURE=1 \
+      capture_detached_process_table -o pid=,pgid=,ppid=,stat=,command= -p "$$"; then
+      return 1
+    fi
+    [[ -z "${S2_DETACHED_PROCESS_TABLE}" ]] || return 1
+    emit '{"tool":"bash","package":"apps/wire","suite":"s2-krater-shell","status":"pass","scenario":"detached-ps-failure-propagates-and-clears-partial-process-table","reproduce":"S2_SHELL_REGRESSION_TEST=detached-ps-failure scripts/e2e-s2-krater.sh"}'
     return 0
   fi
 
