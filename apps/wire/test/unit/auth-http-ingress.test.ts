@@ -136,34 +136,36 @@ describe("service-envelope Worker ingress", () => {
   });
 
   test("rejects bearer and envelope confusion before consuming the signed nonce", async () => {
-    const h = await harness();
-    const body = '{"directive":"same nonce survives confusion"}';
-    const signedRequest = await h.makeRequest(body);
-    const bearerHeaders = new Headers(signedRequest.headers);
-    bearerHeaders.set("authorization", "Bearer asimp_ag_canary_never_accepted");
-    const bearerRequest = new Request(`${origin}/internal/auth-spike`, {
-      method: "POST",
-      headers: bearerHeaders,
-      body,
-    });
-    const confused = await authenticateServiceEnvelopeRequest(bearerRequest, h.options);
-    expect(confused.ok).toBe(false);
-    if (!confused.ok) {
-      expect(confused.response.status).toBe(403);
-      expect(await confused.response.json()).toMatchObject({ code: "WRONG_PRINCIPAL" });
-    }
-
-    // The same signed envelope remains usable: the confused request stopped
-    // before verification and therefore could not burn its nonce.
-    const accepted = await authenticateServiceEnvelopeRequest(
-      new Request(`${origin}/internal/auth-spike`, {
+    for (const scheme of ["Bearer", "bearer", "bEaReR"]) {
+      const h = await harness();
+      const body = JSON.stringify({ directive: `same nonce survives ${scheme} confusion` });
+      const signedRequest = await h.makeRequest(body);
+      const bearerHeaders = new Headers(signedRequest.headers);
+      bearerHeaders.set("authorization", `${scheme} asimp_ag_canary_never_accepted`);
+      const bearerRequest = new Request(`${origin}/internal/auth-spike`, {
         method: "POST",
-        headers: signedRequest.headers,
+        headers: bearerHeaders,
         body,
-      }),
-      h.options,
-    );
-    expect(accepted.ok).toBe(true);
+      });
+      const confused = await authenticateServiceEnvelopeRequest(bearerRequest, h.options);
+      expect(confused.ok).toBe(false);
+      if (!confused.ok) {
+        expect(confused.response.status).toBe(403);
+        expect(await confused.response.json()).toMatchObject({ code: "WRONG_PRINCIPAL" });
+      }
+
+      // The same signed envelope remains usable: each confused request stopped
+      // before verification and therefore could not burn its nonce.
+      const accepted = await authenticateServiceEnvelopeRequest(
+        new Request(`${origin}/internal/auth-spike`, {
+          method: "POST",
+          headers: signedRequest.headers,
+          body,
+        }),
+        h.options,
+      );
+      expect(accepted.ok).toBe(true);
+    }
   });
 });
 

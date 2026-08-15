@@ -47,7 +47,7 @@ export type ServiceEnvelopeIngressResult =
 
 function hasBearerAuthorization(headers: Headers): boolean {
   const authorization = headers.get("authorization");
-  return authorization !== null && /^Bearer\s+\S/.test(authorization);
+  return authorization !== null && /^Bearer\s+\S/i.test(authorization);
 }
 
 function parseEnvelopeHeader(value: string): unknown | undefined {
