@@ -153,7 +153,6 @@ TEST_PROVISIONAL_REAL_STARTED_AT=""
 TEST_PROVISIONAL_REAL_TOKEN=""
 TEST_PROVISIONAL_RECOVERY=0
 TEST_EXACT_CHECK_FAILURES_REMAINING=0
-TEST_CHECKER_CONTAINMENT_FAILURE=0
 CLEANUP_ATTEMPTS_USED=0
 SERVER_SUPERVISOR_LIFECYCLE_STATUS="not_started"
 SERVER_PAYLOAD_LIFECYCLE_STATUS="not_started"
@@ -852,20 +851,6 @@ run_owned_checker() {
   fi
   CHECKER_SUPERVISOR_LIFECYCLE_STATUS="running"
   CHECKER_PAYLOAD_LIFECYCLE_STATUS="running"
-  if (( TEST_CHECKER_CONTAINMENT_FAILURE == 1 )); then
-    # Exercise the hard containment path after a real checker group has been
-    # created. Both failed inspections retain ownership; EXIT then retries and
-    # proves the group, port, and state directory are eventually reclaimed.
-    TEST_GROUP_INSPECTION_FAILURES_REMAINING="${CLEANUP_RETRY_ATTEMPTS}"
-    CHECKER_SUPERVISOR_LIFECYCLE_STATUS="injected_inspection_failure"
-    CHECKER_PAYLOAD_LIFECYCLE_STATUS="not_observed"
-    cleanup_checker_and_verify || {
-      CHECKER_SUPERVISOR_LIFECYCLE_STATUS="cleanup_unproven"
-      return 125
-    }
-    CHECKER_SUPERVISOR_LIFECYCLE_STATUS="reaped"
-    return 1
-  fi
   wait_for_checker_completion "$((SECONDS + deadline_seconds))"
 }
 
@@ -1062,41 +1047,49 @@ run_startup_signal_window_self_test() {
   exit "${start_status}"
 }
 
-run_checker_timeout_self_test() {
-  local checker_pgid checker_status members listeners holders status
+start_checker_resource_fixture() {
+  local resist_signals="$1" members listeners holders status
+  [[ "${resist_signals}" =~ ^[01]$ ]] || return 1
   CHECKER_RESOURCE_PORT="$(allocate_port)" || return 1
   [[ "${CHECKER_RESOURCE_PORT}" =~ ^[0-9]+$ && "${CHECKER_RESOURCE_PORT}" != "${S3_PORT}" ]] || return 1
   port_is_busy "${CHECKER_RESOURCE_PORT}" && return 1
-  # shellcheck disable=SC2016 # This program expands only in the checker fixture shell.
-  start_supervised_payload checker "${CHECK_LOG}" bash -c '
-    state_file="$1"
-    port="$2"
-    trap "exit 0" TERM
-    (
-      trap "" TERM INT HUP
-      exec 9>"${state_file}"
-      S3_CHECKER_FIXTURE_PORT="${port}" exec bun --eval '\''
-        const port = Number(process.env.S3_CHECKER_FIXTURE_PORT);
-        Bun.serve({ hostname: "127.0.0.1", port, fetch: () => new Response("checker-fixture") });
-      '\''
-    ) &
-    child="$!"
-    while kill -0 "${child}" 2>/dev/null; do
-      if ! wait "${child}"; then :; fi
-    done
-  ' s3-checker-timeout-payload "${CHECKER_RESISTANT_STATE_FILE}" "${CHECKER_RESOURCE_PORT}" || return 1
-  checker_pgid="${CHECKER_PGID}"
+  S3_CHECKER_FIXTURE_STATE="${CHECKER_RESISTANT_STATE_FILE}" \
+    S3_CHECKER_FIXTURE_PORT="${CHECKER_RESOURCE_PORT}" \
+    S3_CHECKER_FIXTURE_RESIST="${resist_signals}" \
+    start_supervised_payload checker "${CHECK_LOG}" bun --eval '
+      import { openSync } from "node:fs";
+      const stateFile = process.env.S3_CHECKER_FIXTURE_STATE;
+      const port = Number(process.env.S3_CHECKER_FIXTURE_PORT);
+      const resist = process.env.S3_CHECKER_FIXTURE_RESIST;
+      if (!stateFile || !Number.isSafeInteger(port) || !["0", "1"].includes(resist ?? "")) {
+        process.exit(2);
+      }
+      openSync(stateFile, "w");
+      if (resist === "1") {
+        for (const signal of ["SIGTERM", "SIGINT", "SIGHUP"]) process.on(signal, () => {});
+      }
+      Bun.serve({ hostname: "127.0.0.1", port, fetch: () => new Response("checker-fixture") });
+    ' || return 1
   for _wait in {1..60}; do
-    members="$(group_members "${checker_pgid}")"; status=$?
+    members="$(group_members "${CHECKER_PGID}")"; status=$?
     (( status == 0 )) || return 1
     listeners="$(listener_pids "${CHECKER_RESOURCE_PORT}")"; status=$?
     (( status == 0 )) || return 1
     holders="$(checker_state_holder_pids)"; status=$?
     (( status == 0 )) || return 1
-    if [[ "${members}" == *$'\n'* && -n "${listeners}" && -n "${holders}" ]]; then break; fi
+    if [[ "${members}" == *$'\n'* && -n "${listeners}" && -n "${holders}" ]] && \
+      listener_pids_are_in_group "${CHECKER_RESOURCE_PORT}" "${CHECKER_PGID}"; then
+      return 0
+    fi
     sleep 0.05
   done
-  [[ "${members}" == *$'\n'* && -n "${listeners}" && -n "${holders}" ]] || return 1
+  return 1
+}
+
+run_checker_timeout_self_test() {
+  local checker_pgid checker_status
+  start_checker_resource_fixture 1 || return 1
+  checker_pgid="${CHECKER_PGID}"
   wait_for_checker_completion "$((SECONDS + 1))"; checker_status=$?
   (( checker_status == 124 )) || return 1
   emit '{"tool":"bash","package":"@asimposium/wire","suite":"s3-local-bindings","assertion":"checker_timeout_uses_exact_bounded_term_kill_and_wait","status":"pass","reproduce":"bash scripts/e2e-s3-split.sh"}'
@@ -1106,6 +1099,35 @@ run_checker_timeout_self_test() {
   emit '{"tool":"bash","package":"@asimposium/wire","suite":"s3-local-bindings","assertion":"checker_timeout_releases_its_test_port","status":"pass","reproduce":"bash scripts/e2e-s3-split.sh"}'
   assert_checker_state_holders_empty || return 1
   emit '{"tool":"bash","package":"@asimposium/wire","suite":"s3-local-bindings","assertion":"checker_timeout_has_zero_state_fd_survivors","status":"pass","reproduce":"bash scripts/e2e-s3-split.sh"}'
+}
+
+run_checker_containment_self_test() {
+  local checker_pgid cleanup_status members listeners holders status
+  start_checker_resource_fixture 0 || return 1
+  checker_pgid="${CHECKER_PGID}"
+  emit '{"tool":"bash","package":"@asimposium/wire","suite":"s3-local-bindings","assertion":"checker_containment_fixture_has_owned_group_listener_and_state_fd","status":"pass","reproduce":"bash scripts/e2e-s3-split.sh"}'
+
+  # This first refusal sends no signal. The first EXIT cleanup attempt consumes
+  # the second planted inspection failure; its bounded retry must then use the
+  # same retained pid + pgid + lstart + marker before signaling the group.
+  TEST_GROUP_INSPECTION_FAILURES_REMAINING="${CLEANUP_RETRY_ATTEMPTS}"
+  CHECKER_SUPERVISOR_LIFECYCLE_STATUS="injected_inspection_failure"
+  CHECKER_PAYLOAD_LIFECYCLE_STATUS="not_observed"
+  cleanup_checker_and_verify; cleanup_status=$?
+  (( cleanup_status != 0 && TEST_GROUP_INSPECTION_FAILURES_REMAINING == 1 )) || return 1
+  [[ "${CHECKER_PGID}" == "${checker_pgid}" ]] || return 1
+  supervisor_identity_is_exact "${CHECKER_SUPERVISOR_PID}" "${CHECKER_PGID}" \
+    "${CHECKER_SUPERVISOR_STARTED_AT}" "${CHECKER_SUPERVISOR_TOKEN}" || return 1
+  members="$(group_members "${checker_pgid}")"; status=$?
+  (( status == 0 )) && [[ "${members}" == *$'\n'* ]] || return 1
+  listeners="$(listener_pids "${CHECKER_RESOURCE_PORT}")"; status=$?
+  (( status == 0 )) && [[ -n "${listeners}" ]] || return 1
+  listener_pids_are_in_group "${CHECKER_RESOURCE_PORT}" "${checker_pgid}" || return 1
+  holders="$(checker_state_holder_pids)"; status=$?
+  (( status == 0 )) && [[ -n "${holders}" ]] || return 1
+  emit '{"tool":"bash","package":"@asimposium/wire","suite":"s3-local-bindings","assertion":"checker_containment_refusal_sends_no_signal_and_retains_exact_ownership","status":"pass","reproduce":"bash scripts/e2e-s3-split.sh"}'
+  CHECKER_SUPERVISOR_LIFECYCLE_STATUS="cleanup_unproven"
+  return 125
 }
 
 run_checker_exit_one_self_test() {
@@ -1161,6 +1183,16 @@ on_exit() {
       fi
     fi
     exit 1
+  fi
+
+  if (( checker_containment_mode == 1 )); then
+    if (( CLEANUP_ATTEMPTS_USED != CLEANUP_RETRY_ATTEMPTS )); then
+      emit "{\"tool\":\"bash\",\"package\":\"@asimposium/wire\",\"suite\":\"s3-local-bindings\",\"status\":\"fail\",\"code\":\"CHECKER_CONTAINMENT_EXIT_RETRY_NOT_EXERCISED\",\"original_status\":${original_status},\"reproduce\":\"${REPRODUCE}\"}"
+      exit 1
+    fi
+    emit '{"tool":"bash","package":"@asimposium/wire","suite":"s3-local-bindings","assertion":"checker_containment_exit_retry_reclaims_exact_group","status":"pass","reproduce":"bash scripts/e2e-s3-split.sh"}'
+    emit '{"tool":"bash","package":"@asimposium/wire","suite":"s3-local-bindings","assertion":"checker_containment_exit_retry_releases_listener","status":"pass","reproduce":"bash scripts/e2e-s3-split.sh"}'
+    emit '{"tool":"bash","package":"@asimposium/wire","suite":"s3-local-bindings","assertion":"checker_containment_exit_retry_releases_state_fd","status":"pass","reproduce":"bash scripts/e2e-s3-split.sh"}'
   fi
 
   if (( TEST_REPEAT_SIGNAL_DURING_CLEANUP == 1 )); then
@@ -1274,11 +1306,17 @@ fi
 if (( checker_exit_one_mode == 1 )); then
   run_checker_exit_one_self_test || exit 1
 fi
+if (( checker_containment_mode == 1 )); then
+  run_checker_containment_self_test; checker_status=$?
+  if (( checker_status != 125 )); then
+    emit '{"tool":"bash","package":"@asimposium/wire","suite":"s3-local-bindings","status":"fail","code":"CHECKER_CONTAINMENT_FIXTURE_INVALID","reproduce":"bash scripts/e2e-s3-split.sh"}'
+    exit 1
+  fi
+  emit "{\"tool\":\"wrangler+bun\",\"tool_version\":${WRANGLER_VERSION_JSON},\"package\":\"@asimposium/wire\",\"suite\":\"s3-local-bindings\",\"duration_ms\":$(duration_ms),\"status\":\"fail\",\"code\":\"LOCAL_SPLIT_CHECKER_CONTAINMENT_FAILED\",\"reproduce\":\"${REPRODUCE}\"}"
+  exit 1
+fi
 if [[ -n "${TEST_STARTUP_SIGNAL_WINDOW}" ]]; then
   run_startup_signal_window_self_test || exit 1
-fi
-if (( checker_containment_mode == 1 )); then
-  TEST_CHECKER_CONTAINMENT_FAILURE=1
 fi
 
 start_supervised_payload server "${SERVER_LOG}" "${WRANGLER}" dev "${ENTRYPOINT}" \

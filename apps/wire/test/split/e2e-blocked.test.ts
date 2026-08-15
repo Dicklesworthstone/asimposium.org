@@ -300,6 +300,14 @@ test("the S-3 harness binds readiness to its child and excludes the deployed ent
   expect(script).toContain("signal_exact_group_supervisor");
   expect(script).toContain("start_supervised_payload checker");
   expect(script).toContain("LOCAL_SPLIT_CHECKER_CONTAINMENT_FAILED");
+  const containmentDispatch =
+    "if (( checker_containment_mode == 1 )); then\n  run_checker_containment_self_test;";
+  const dollar = "$";
+  const productionWorkerDispatch = `start_supervised_payload server "${dollar}{SERVER_LOG}" "${dollar}{WRANGLER}" dev "${dollar}{ENTRYPOINT}"`;
+  expect(script.indexOf(containmentDispatch)).toBeGreaterThanOrEqual(0);
+  expect(script.indexOf(containmentDispatch)).toBeLessThan(
+    script.indexOf(productionWorkerDispatch),
+  );
   expect(script).toContain("checker_exit_diagnostics");
   expect(script).toContain("checker_exit_status");
   expect(script).toContain("S3_SELF_TEST_CHECKER_EXIT_1");
@@ -685,30 +693,70 @@ test(
   { timeout: 120_000 },
 );
 
+async function runCheckerContainmentPlant(): Promise<{
+  readonly stdout: string;
+  readonly stderr: string;
+  readonly exitCode: number;
+}> {
+  const child = Bun.spawn({
+    cmd: ["bash", "scripts/e2e-s3-split.sh"],
+    cwd: root,
+    env: {
+      PATH: process.env.PATH ?? "",
+      HOME: process.env.HOME ?? "",
+      S3_SELF_TEST_CHECKER_CONTAINMENT_FAILURE: "1",
+    },
+    stdout: "pipe",
+    stderr: "pipe",
+  });
+  const [stdout, stderr, exitCode] = await Promise.all([
+    new Response(child.stdout).text(),
+    new Response(child.stderr).text(),
+    child.exited,
+  ]);
+  return { stdout, stderr, exitCode };
+}
+
+function expectCheckerContainmentPlant(result: {
+  readonly stdout: string;
+  readonly stderr: string;
+  readonly exitCode: number;
+}): void {
+  expect(result.exitCode).toBe(1);
+  expect(result.stdout).toContain('"code":"LOCAL_SPLIT_CHECKER_CONTAINMENT_FAILED"');
+  for (const assertion of [
+    "checker_containment_fixture_has_owned_group_listener_and_state_fd",
+    "checker_containment_refusal_sends_no_signal_and_retains_exact_ownership",
+    "checker_containment_exit_retry_reclaims_exact_group",
+    "checker_containment_exit_retry_releases_listener",
+    "checker_containment_exit_retry_releases_state_fd",
+  ]) {
+    expect(result.stdout).toContain(`"assertion":"${assertion}"`);
+  }
+  const combined = `${result.stdout}\n${result.stderr}`;
+  expect(combined).not.toContain('"code":"LOCAL_WORKER_UNAVAILABLE"');
+  expect(combined).not.toContain('"code":"LOCAL_WORKER_CLEANUP_FAILED"');
+  expect(combined).not.toContain('"code":"CHECKER_CONTAINMENT_FIXTURE_INVALID"');
+  expect(combined).not.toContain('"code":"CHECKER_CONTAINMENT_EXIT_RETRY_NOT_EXERCISED"');
+}
+
 test(
   "PLANTED: an uninspectable checker group reports containment failure and EXIT reclaims it",
   async () => {
-    const child = Bun.spawn({
-      cmd: ["bash", "scripts/e2e-s3-split.sh"],
-      cwd: root,
-      env: {
-        PATH: process.env.PATH ?? "",
-        HOME: process.env.HOME ?? "",
-        S3_SELF_TEST_CHECKER_CONTAINMENT_FAILURE: "1",
-      },
-      stdout: "pipe",
-      stderr: "pipe",
-    });
-    const [stdout, stderr, exitCode] = await Promise.all([
-      new Response(child.stdout).text(),
-      new Response(child.stderr).text(),
-      child.exited,
-    ]);
-    expect(exitCode).toBe(1);
-    expect(stdout).toContain('"code":"LOCAL_SPLIT_CHECKER_CONTAINMENT_FAILED"');
-    expect(`${stdout}\n${stderr}`).not.toContain('"code":"LOCAL_WORKER_CLEANUP_FAILED"');
+    expectCheckerContainmentPlant(await runCheckerContainmentPlant());
   },
-  { timeout: 120_000 },
+  { timeout: 30_000 },
+);
+
+test(
+  "PLANTED: concurrent checker-containment plants cannot divert through Worker startup",
+  async () => {
+    const results = await Promise.all(
+      Array.from({ length: 6 }, () => runCheckerContainmentPlant()),
+    );
+    for (const result of results) expectCheckerContainmentPlant(result);
+  },
+  { timeout: 60_000 },
 );
 
 test(
