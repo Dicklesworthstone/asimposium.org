@@ -11,6 +11,7 @@ export const OUTBOX_ALARM_MAX_MS = 2_000;
 
 const SHA256_HEX = /^[a-f0-9]{64}$/;
 const OUTBOX_EVENT_ID = /^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/;
+const OUTBOX_SCAN_AFTER_ID_KEY = "scan_after_id";
 
 export type OutboxFaultMode = "none" | "fail-once" | "hold-before-ack";
 
@@ -212,14 +213,27 @@ export class KraterOutboxDrainer {
     await this.state.storage.setAlarm(Date.now() + bounded);
   }
 
-  private async pendingRows(): Promise<PendingOutboxRow[]> {
+  private async pendingRows(afterId: number): Promise<PendingOutboxRow[]> {
     const rows = await statement(
       this.env.DB,
       `SELECT id, event_id, problem_id, kind, dedupe_key, payload_sha256
-       FROM outbox WHERE state = 'pending' ORDER BY id ASC LIMIT ?`,
+       FROM outbox WHERE state = 'pending' AND id > ? ORDER BY id ASC LIMIT ?`,
+      afterId,
       OUTBOX_DRAIN_BATCH_SIZE,
     ).all<PendingOutboxRow>();
     return rows.results;
+  }
+
+  private async scanAfterId(): Promise<number> {
+    const value = await this.state.storage.get<unknown>(OUTBOX_SCAN_AFTER_ID_KEY);
+    if (value === undefined) return 0;
+    if (typeof value !== "number" || !Number.isSafeInteger(value) || value < 0) {
+      // The cursor is only a bounded-scan optimization. D1 remains the source
+      // of truth, so corrupt derived state is recovered by a safe full rescan.
+      await this.state.storage.put(OUTBOX_SCAN_AFTER_ID_KEY, 0);
+      return 0;
+    }
+    return value;
   }
 
   private async pendingCount(): Promise<number> {
@@ -306,27 +320,41 @@ export class KraterOutboxDrainer {
       }));
 
       try {
-        const rows = await this.pendingRows();
+        let scanAfterId = await this.scanAfterId();
+        let rows = await this.pendingRows(scanAfterId);
+        if (rows.length === 0 && scanAfterId !== 0) {
+          // A cursor beyond D1's current maximum can survive a restore. Wrap
+          // once so that stale derived state cannot hide the first page.
+          scanAfterId = 0;
+          await this.state.storage.put(OUTBOX_SCAN_AFTER_ID_KEY, scanAfterId);
+          rows = await this.pendingRows(scanAfterId);
+        }
         let delivered = 0;
         let quarantined = 0;
         let faultMode = requestedFault;
         for (const row of rows) {
-          if (await this.isQuarantined(row.id)) continue;
+          if (await this.isQuarantined(row.id)) {
+            scanAfterId = row.id;
+            continue;
+          }
           const malformed = validateOutboxRow(row);
           if (malformed !== null) {
             await this.quarantine(row, malformed);
             quarantined += 1;
+            scanAfterId = row.id;
             continue;
           }
 
           await this.recordAttempt(row);
           if (faultMode === "hold-before-ack") {
+            await this.state.storage.put(OUTBOX_SCAN_AFTER_ID_KEY, scanAfterId);
             await this.state.storage.put("fault_mode", "none");
             await this.updateCounters((current) => ({ ...current, last_phase: "held-before-ack" }));
             await this.setAlarm(OUTBOX_ALARM_MAX_MS);
             return { source, delivered, quarantined, held_before_ack: true };
           }
           if (faultMode === "fail-once") {
+            await this.state.storage.put(OUTBOX_SCAN_AFTER_ID_KEY, scanAfterId);
             await this.state.storage.put("fault_mode", "none");
             const backoff = await this.retryAfterFailure();
             return { source, delivered, quarantined, retry_scheduled_ms: backoff };
@@ -342,19 +370,29 @@ export class KraterOutboxDrainer {
               last_phase: "delivered",
             }));
           }
+          scanAfterId = row.id;
           faultMode = "none";
         }
 
-        const pending = await this.pendingRows();
-        const hasDeliverablePending = await Promise.all(
-          pending.map(async (row) => !(await this.isQuarantined(row.id))),
-        ).then((values) => values.some(Boolean));
-        if (hasDeliverablePending) {
+        await this.state.storage.put(OUTBOX_SCAN_AFTER_ID_KEY, scanAfterId);
+        if ((await this.pendingRows(scanAfterId)).length > 0) {
           await this.setAlarm(OUTBOX_ALARM_BASE_MS);
         } else {
+          await this.state.storage.put(OUTBOX_SCAN_AFTER_ID_KEY, 0);
           await this.state.storage.deleteAlarm();
         }
         return { source, delivered, quarantined, held_before_ack: false };
+      } catch (error) {
+        // Cloudflare retries failed alarms, but fetch-driven drains need the
+        // same durable liveness guarantee. Re-arm explicitly when storage is
+        // healthy enough to do so, then preserve the original failure.
+        try {
+          await this.retryAfterFailure();
+        } catch (_retryError) {
+          // If DO storage itself is unavailable, the alarm runtime remains the
+          // final retry authority. Never replace the causal drain failure.
+        }
+        throw error;
       } finally {
         await this.state.storage.put("active", 0);
       }
