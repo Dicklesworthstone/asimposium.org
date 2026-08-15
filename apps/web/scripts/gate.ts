@@ -78,13 +78,13 @@ const GATES: Record<string, GateSpec> = {
     kind: "run",
     tool: "bun test",
     versionFrom: "bun",
-    argv: ["bun", "test", "--config", "/dev/null", "--timeout=120000", "test/unit"],
+    argv: ["bun", "test", "/dev/null", "--timeout=120000", "test/unit"],
   },
   contract: {
     kind: "run",
     tool: "bun test",
     versionFrom: "bun",
-    argv: ["bun", "test", "--config", "/dev/null", "--timeout=120000", "test/contract"],
+    argv: ["bun", "test", "/dev/null", "--timeout=120000", "test/contract"],
   },
   // `security` is the only extra suite root policy assigns to apps/web
   // (scripts/suite/policy.ts). It is declared and unimplemented, and says so.

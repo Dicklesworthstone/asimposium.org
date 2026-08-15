@@ -11,11 +11,11 @@
   "scripts": {
     "typecheck": "tsc --noEmit",
     "lint": "biome check src test scripts package.json tsconfig.json",
-    "test": "bun test --config /dev/null --timeout=120000",
-    "test:unit": "bun test --config /dev/null --timeout=120000 test/unit",
-    "test:contract": "bun test --config /dev/null --timeout=120000 test/contract",
-    "test:integration": "bun test --config /dev/null --timeout=120000 test/integration",
-    "test:security": "bun test --config /dev/null --timeout=120000 test/security",
+    "test": "bun test /dev/null --timeout=120000 test",
+    "test:unit": "bun test /dev/null --timeout=120000 test/unit",
+    "test:contract": "bun test /dev/null --timeout=120000 test/contract",
+    "test:integration": "bun test /dev/null --timeout=120000 test/integration",
+    "test:security": "bun test /dev/null --timeout=120000 test/security",
     "report": "bun run scripts/suite-report.ts",
     "golden:print": "bun scripts/golden-print.ts",
     "spike:s5": "bun scripts/s5-spike.ts"

@@ -871,7 +871,7 @@ run_suite() {
     set -e
     terminate_for_signal "${signal}" "${runner_status}" "${runner_status}" null null null
   fi
-  run_controlled_command bun test --config /dev/null --timeout=120000 e2e/screening/oauth-dry-check.test.ts
+  run_controlled_command bun test /dev/null --timeout=120000 e2e/screening/oauth-dry-check.test.ts
   oauth_dry_check_test_status=$?
   captured_oauth_dry_check_test_status="${oauth_dry_check_test_status}"
   fail_if_active_controlled_command_remains oauth-dry-check-test
@@ -885,7 +885,7 @@ run_suite() {
       null \
       null
   fi
-  run_controlled_command bun test --config /dev/null --timeout=120000 e2e/screening/s4-runner.test.ts
+  run_controlled_command bun test /dev/null --timeout=120000 e2e/screening/s4-runner.test.ts
   runner_test_status=$?
   captured_runner_test_status="${runner_test_status}"
   fail_if_active_controlled_command_remains runner-focused-test
@@ -899,7 +899,7 @@ run_suite() {
       "${runner_test_status}" \
       null
   fi
-  run_controlled_command bun test --config /dev/null --timeout=120000 e2e/screening/s4-legitimate-only.test.ts
+  run_controlled_command bun test /dev/null --timeout=120000 e2e/screening/s4-legitimate-only.test.ts
   legitimate_only_test_status=$?
   captured_legitimate_only_test_status="${legitimate_only_test_status}"
   fail_if_active_controlled_command_remains legitimate-only-test

@@ -30,7 +30,7 @@
     "toolchain:lint": "biome check scripts package.json tsconfig.json tsconfig.base.json biome.json",
     "toolchain:integration": "bun scripts/suite/g0-spikes.ts",
     "toolchain:format": "biome check --write scripts package.json tsconfig.json tsconfig.base.json biome.json",
-    "toolchain:test": "bun test --config /dev/null --timeout=120000 scripts/suite scripts/verify-cost-model.test.ts"
+    "toolchain:test": "bun test /dev/null --timeout=120000 scripts/suite scripts/verify-cost-model.test.ts"
   },
   "devDependencies": {
     "@asimposium/contracts": "workspace:*",

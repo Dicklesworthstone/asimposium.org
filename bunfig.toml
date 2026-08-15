@@ -15,8 +15,8 @@ save = true
 
 [test]
 # Deterministic gate behaviour: a hung test fails the suite instead of hanging CI.
-# Bun 1.3.8 drops piped child stdout/stderr when a regular config file is loaded,
-# so every supported test entrypoint bypasses this file and repeats this deadline
-# on the command line. Keep the value here as the policy for unsupported direct
-# invocations; `bun run test`, not bare `bun test`, is the repository gate.
+# Bun 1.3.8 can drop piped child stdout/stderr in this workspace unless the test
+# invocation also carries the harmless `/dev/null` filter. Supported test
+# entrypoints include that filter and repeat this deadline on the command line.
+# Keep the value here for direct invocations; `bun run test` is the repo gate.
 timeout = 120000

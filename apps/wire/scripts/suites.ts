@@ -15,7 +15,7 @@
  * not exist.
  *
  * Deletion condition: when every suite below is `implemented`, this file has no
- * remaining job and the scripts should call `bun test test/<suite>` directly.
+ * remaining job and the scripts should call the supported package test scripts.
  *
  * Diagnostics are one NDJSON record per suite on stdout (tool, tool version,
  * package, package version, suite, duration_ms, status, reproduction command)
@@ -149,9 +149,9 @@ async function runBunTests(
   // stdio is inherited: child output is never suppressed, so a cited green
   // result always has the run behind it in the same log.
   const child = Bun.spawn({
-    // Loading a regular Bun config under Bun 1.3.8 empties subprocess pipes
-    // inside the test runner. The CLI deadline preserves the bunfig policy.
-    cmd: ["bun", "test", "--config", "/dev/null", "--timeout=120000", ...dirs],
+    // Bun 1.3.8 can empty subprocess pipes in this workspace unless this
+    // harmless device filter is present. The real suite roots follow it.
+    cmd: ["bun", "test", "/dev/null", "--timeout=120000", ...dirs],
     cwd: PACKAGE_ROOT,
     stdio: ["inherit", "inherit", "inherit"],
   });

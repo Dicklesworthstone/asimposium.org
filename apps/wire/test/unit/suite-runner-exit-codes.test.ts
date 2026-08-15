@@ -364,7 +364,7 @@ describe("a deliberately blocked suite exits 78, never 0 and never 1", () => {
           forbidden_substitutes:
             "mocked or stubbed D1/R2 (AGENTS.md: do not mock D1 or R2); the shims in test/support/bindings.ts; a 24/7 wrangler dev process",
           reproduce:
-            "cd apps/wire && bun test --config /dev/null --timeout=120000 test/integration/s2-krater-real-bindings.test.ts",
+            "cd apps/wire && bun test /dev/null --timeout=120000 test/integration/s2-krater-real-bindings.test.ts",
         },
       }),
     );
