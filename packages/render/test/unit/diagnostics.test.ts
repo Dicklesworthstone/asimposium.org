@@ -35,7 +35,7 @@ describe("buildDiagnostic", () => {
     expect(built.tool_version).toBe("1.3.8");
     expect(built.duration_ms).toBe(12);
     expect(built.status).toBe("pass");
-    expect(built.repro).toBe("cd packages/render && bun test test/unit");
+    expect(built.repro).toBe("cd packages/render && bun run test:unit");
   });
 
   test("derives status from the real exit code rather than assuming success", () => {
@@ -248,7 +248,7 @@ describe("formatDiagnostic", () => {
     const line = formatDiagnostic(record());
     expect(line.includes("\n")).toBe(false);
     const parsed = JSON.parse(line) as SuiteDiagnostic;
-    expect(parsed.repro).toBe("cd packages/render && bun test test/unit");
+    expect(parsed.repro).toBe("cd packages/render && bun run test:unit");
     expect(Object.keys(parsed)).toEqual([...Object.keys(parsed)].sort());
   });
 });

@@ -65,7 +65,7 @@ English prose slightly, which is the safe direction for a budget.
 
 ```bash
 cd packages/protocol
-bun test          # unit suite
+bun run test:unit # unit suite
 bun run typecheck # tsc --noEmit
 bun run lint      # Biome; needs the root `bun install` to have run
 ```

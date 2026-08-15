@@ -34,7 +34,7 @@ function blockRealBindingLane(
     blocked_on: blockedOn,
     forbidden_substitutes: forbiddenSubstitutes,
     reproduce:
-      "cd apps/wire && S2_RUN_REAL_BINDING_INTEGRATION=1 bun test test/integration/s2-krater-real-bindings.test.ts",
+      "cd apps/wire && S2_RUN_REAL_BINDING_INTEGRATION=1 bun test --config /dev/null --timeout=120000 test/integration/s2-krater-real-bindings.test.ts",
   };
   console.log(JSON.stringify(record));
   process.exit(BLOCKED_EXIT_CODE);
@@ -42,7 +42,7 @@ function blockRealBindingLane(
 
 // This file has two deliberately separate entry modes:
 //
-// 1. `bun test <this-file>` with explicit authority runs the real lifecycle proof.
+// 1. `bun test --config /dev/null --timeout=120000 <this-file>` with explicit authority runs the real lifecycle proof.
 // 2. `bun <this-file> --capability-probe` is the registered suite's fast capability probe and
 //    may exit 78.
 //

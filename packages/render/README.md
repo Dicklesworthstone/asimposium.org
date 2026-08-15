@@ -116,7 +116,7 @@ bun run test:unit        # canonical, sanitize, errors, diagnostics
 bun run test:contract    # envelope refusals and the face contract
 bun run test:integration # the Diptych: one projection, three agreeing faces
 bun run test:security    # the planted negative of §14.4 layer 3
-bun test                 # all of the above
+bun run test             # all of the above
 ```
 
 Or through the root dispatcher, which owns the diagnostic envelope

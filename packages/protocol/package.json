@@ -14,6 +14,6 @@
   "scripts": {
     "typecheck": "tsc --noEmit -p tsconfig.json",
     "lint": "biome check src tests package.json tsconfig.json",
-    "test:unit": "bun test"
+    "test:unit": "bun test --config /dev/null --timeout=120000"
   }
 }

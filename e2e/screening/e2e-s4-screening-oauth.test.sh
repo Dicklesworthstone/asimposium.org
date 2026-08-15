@@ -298,7 +298,11 @@ run_planted_status_case() (
         return "${S4_PLANTED_RUNNER_STATUS}"
         ;;
       test)
-        case "${2:-}" in
+        if [[ "${2:-}" != "--config" || "${3:-}" != "/dev/null" || "${4:-}" != "--timeout=120000" ]]; then
+          printf '%s\n' 'planted bun test config/deadline missing' >&2
+          return 125
+        fi
+        case "${5:-}" in
           e2e/screening/oauth-dry-check.test.ts)
             printf '%s\n' 'planted OAuth dry-check focused test'
             return "${S4_PLANTED_OAUTH_DRY_CHECK_TEST_STATUS}"
@@ -312,7 +316,7 @@ run_planted_status_case() (
             return "${S4_PLANTED_LEGITIMATE_ONLY_TEST_STATUS}"
             ;;
           *)
-            printf '%s\n' "unexpected planted bun test target: ${2:-missing}" >&2
+            printf '%s\n' "unexpected planted bun test target: ${5:-missing}" >&2
             return 125
             ;;
         esac

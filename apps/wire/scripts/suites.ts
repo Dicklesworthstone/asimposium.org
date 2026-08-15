@@ -149,7 +149,9 @@ async function runBunTests(
   // stdio is inherited: child output is never suppressed, so a cited green
   // result always has the run behind it in the same log.
   const child = Bun.spawn({
-    cmd: ["bun", "test", ...dirs],
+    // Loading a regular Bun config under Bun 1.3.8 empties subprocess pipes
+    // inside the test runner. The CLI deadline preserves the bunfig policy.
+    cmd: ["bun", "test", "--config", "/dev/null", "--timeout=120000", ...dirs],
     cwd: PACKAGE_ROOT,
     stdio: ["inherit", "inherit", "inherit"],
   });

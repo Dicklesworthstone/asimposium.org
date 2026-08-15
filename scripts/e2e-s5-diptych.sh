@@ -265,7 +265,7 @@ fi
 # ── phase 1b: golden faces ──────────────────────────────────────────────────
 readonly GOLDEN_LOG="${RUN_DIR}/golden.log"
 golden_status=0
-( cd packages/render && bun test test/contract/golden.test.ts ) >"${GOLDEN_LOG}" 2>&1 || golden_status=$?
+( cd packages/render && bun test --config /dev/null --timeout=120000 test/contract/golden.test.ts ) >"${GOLDEN_LOG}" 2>&1 || golden_status=$?
 if [[ ${golden_status} -ne 0 ]]; then
   # The suite prints the face, the line number and both sides. Suppressing that and saying
   # "run the suite to see the line" wastes the one output that makes the gate actionable.

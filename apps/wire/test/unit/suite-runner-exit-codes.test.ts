@@ -363,7 +363,8 @@ describe("a deliberately blocked suite exits 78, never 0 and never 1", () => {
             "explicit authority for the two real local Wrangler lifecycle runs; see https://developers.cloudflare.com/d1/ for the binding contract",
           forbidden_substitutes:
             "mocked or stubbed D1/R2 (AGENTS.md: do not mock D1 or R2); the shims in test/support/bindings.ts; a 24/7 wrangler dev process",
-          reproduce: "cd apps/wire && bun test test/integration/s2-krater-real-bindings.test.ts",
+          reproduce:
+            "cd apps/wire && bun test --config /dev/null --timeout=120000 test/integration/s2-krater-real-bindings.test.ts",
         },
       }),
     );

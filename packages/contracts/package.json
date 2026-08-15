@@ -14,9 +14,9 @@
     "check:drift": "bun run src/check-drift.ts",
     "typecheck": "tsc --noEmit -p tsconfig.json",
     "lint": "biome check src test package.json tsconfig.json",
-    "test": "bun test",
-    "test:unit": "bun test test/unit",
-    "test:contract": "bun test test/contract"
+    "test": "bun test --config /dev/null --timeout=120000",
+    "test:unit": "bun test --config /dev/null --timeout=120000 test/unit",
+    "test:contract": "bun test --config /dev/null --timeout=120000 test/contract"
   },
   "dependencies": {
     "zod": "4.4.3"

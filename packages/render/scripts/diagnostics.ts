@@ -227,6 +227,6 @@ export function buildDiagnostic(input: DiagnosticInput): SuiteDiagnostic {
     duration_ms: input.duration_ms,
     status: input.exit_code === 0 ? "pass" : "fail",
     exit_code: input.exit_code,
-    repro: `cd packages/${input.package} && bun test ${input.target}`,
+    repro: `cd packages/${input.package} && bun run test:${input.suite}`,
   };
 }
