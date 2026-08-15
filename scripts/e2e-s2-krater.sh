@@ -25,7 +25,12 @@ readonly S2_READY_DEADLINE_SECONDS=15
 readonly S2_PHASE_DEADLINE_SECONDS=75
 readonly S2_TERMINATE_WAIT_TICKS=20
 readonly S2_LEGACY_STOP_INSPECTION_TICKS=10
-readonly S2_WATCHDOG_MAX_UNCERTAIN_TICKS=10
+# The legacy controller gets a one-second bounded window to observe the exact
+# watchdog after TERM removes the leader. The watchdog must remain available
+# materially longer than that observer window or scheduler delay can retire the
+# only residual-group authority just before the controller inspects it. Fifty
+# 100ms uncertainty ticks still self-retire the orphan in about five seconds.
+readonly S2_WATCHDOG_MAX_UNCERTAIN_TICKS=50
 readonly S2_MAX_RETAINED_BYTES=67108864
 readonly S2_MAX_RETAINED_FILES=1024
 readonly S2_EVIDENCE_ROOT="e2e/artifacts/s2-krater"
@@ -64,6 +69,8 @@ readonly -a S2_SOURCE_PATHS=(
   db/migrations/0005_krater_undigested_index.sql
   db/migrations/0006_fellow_credential_lifecycle.sql
   db/migrations/0007_outbox_quarantine_state.sql
+  db/migrations/0008_sponsors_bootstrap.sql
+  db/migrations/0009_device_flow.sql
   scripts/verify-cost-model.ts
   scripts/verify-cost-model.test.ts
   packages/contracts/src/artifacts.ts
@@ -81,6 +88,8 @@ readonly -a S2_EXPECTED_MIGRATION_JOURNAL=(
   0005_krater_undigested_index.sql
   0006_fellow_credential_lifecycle.sql
   0007_outbox_quarantine_state.sql
+  0008_sponsors_bootstrap.sql
+  0009_device_flow.sql
 )
 
 random_hex() {
@@ -242,6 +251,12 @@ force_uncertainty=0
 [[ "${max_uncertain_ticks}" =~ ^[1-9][0-9]*$ ]] || exit 125
 [[ "${exit_on_term}" =~ ^[01]$ ]] || exit 125
 trap "exit 0" USR1
+if [[ "${plant_uncertainty}" == 1 ]]; then
+  # Regression-only handshake. The controller first proves this exact
+  # watchdog healthy, then sends USR2 to enter the uncertainty path. A timed
+  # transition here would make the pre-release proof race the scheduler.
+  trap "force_uncertainty=1" USR2
+fi
 if [[ "${exit_on_term}" == 1 ]]; then
   # Regression-only: expose the leader-plus-TERM-resistant-payload interleaving.
   # Normal watchdogs ignore group TERM until the leader dismisses them with USR1.
@@ -304,12 +319,6 @@ while :; do
   elif snapshot_supervisor; then
     uncertain_ticks=0
     publish_health healthy
-    if [[ "${plant_uncertainty}" == 1 ]]; then
-      plant_uncertainty=0
-      sleep 1
-      force_uncertainty=1
-      continue
-    fi
     if [[ "${owner_ppid}" != "${owner_pid}" ]]; then
       terminate_after_owner_loss && exit 0
     fi
@@ -354,6 +363,28 @@ emit_release_race_failure() {
   fi
   [[ -n "${S2_PLANTED_RELEASE_MARKER}" ]] && marker_present=true
   emit "{\"tool\":\"bash\",\"package\":\"apps/wire\",\"suite\":\"s2-krater-shell\",\"status\":\"fail\",\"terminal\":true,\"scenario\":\"release-race\",\"code\":\"${code}\",\"planted_release_pid\":$(json_decimal_or_null "${S2_PLANTED_RELEASE_PID}"),\"planted_release_pgid\":$(json_decimal_or_null "${S2_PLANTED_RELEASE_PGID}"),\"planted_release_is_group_leader\":$(json_bool "${leader_is_exact}"),\"planted_release_marker_present\":$(json_bool "${marker_present}"),\"exact_group_survives\":$(json_bool "${group_survives}"),\"reproduce\":\"S2_SHELL_REGRESSION_TEST=release-race scripts/e2e-s2-krater.sh\"}"
+}
+
+emit_owner_loss_uncertain_failure() {
+  local code="$1" group_survives=false watchdog_survives=false
+  local record_available=false health_file_available=false
+  if is_decimal "${supervisor_pgid:-}" && \
+    kill -0 -- "-${supervisor_pgid}" 2>/dev/null; then
+    group_survives=true
+  fi
+  if is_decimal "${supervisor_watchdog_pid:-}" && \
+    kill -0 "${supervisor_watchdog_pid}" 2>/dev/null; then
+    watchdog_survives=true
+  fi
+  if [[ -n "${parent_loss_record:-}" && -f "${parent_loss_record}" && \
+    ! -L "${parent_loss_record}" ]]; then
+    record_available=true
+  fi
+  if [[ -n "${supervisor_watchdog_health:-}" && -f "${supervisor_watchdog_health}" && \
+    ! -L "${supervisor_watchdog_health}" ]]; then
+    health_file_available=true
+  fi
+  emit "{\"tool\":\"bash\",\"package\":\"apps/wire\",\"suite\":\"s2-krater-shell\",\"status\":\"fail\",\"terminal\":true,\"scenario\":\"owner-loss-uncertain\",\"code\":\"${code}\",\"child_exit_code\":$(json_decimal_or_null "${parent_loss_status:-}"),\"record_available\":$(json_bool "${record_available}"),\"health_file_available\":$(json_bool "${health_file_available}"),\"exact_group_survives\":$(json_bool "${group_survives}"),\"watchdog_survives\":$(json_bool "${watchdog_survives}"),\"reproduce\":\"S2_SHELL_REGRESSION_TEST=owner-loss-uncertain scripts/e2e-s2-krater.sh\"}"
 }
 
 emit_persistent_pre_release_helper_failure() {
@@ -1564,6 +1595,9 @@ write_evidence_receipt() {
     const costReceiptRelativePath = process.env.S2_RECEIPT_COST_RELATIVE_PATH ?? "";
     const maxBytes = Number(process.env.S2_RECEIPT_MAX_BYTES);
     const maxFiles = Number(process.env.S2_RECEIPT_MAX_FILES);
+    const capturedExitCode = Number(process.env.S2_RECEIPT_EXIT_CODE);
+    const capturedRunStatus =
+      capturedExitCode === 0 ? "pass" : capturedExitCode === 78 ? "blocked" : "fail";
     const publishCostReceipt = process.env.S2_RECEIPT_PUBLISH_COST_RECEIPT === "1";
     const localPhaseStatus = {
       exercise: process.env.S2_RECEIPT_PHASE_EXERCISE,
@@ -1678,7 +1712,7 @@ write_evidence_receipt() {
         revision: process.env.S2_RECEIPT_REVISION,
         dirty_state: process.env.S2_RECEIPT_DIRTY_STATE,
         source_digest: process.env.S2_RECEIPT_SOURCE_DIGEST,
-        exit_code: Number(process.env.S2_RECEIPT_EXIT_CODE),
+        exit_code: capturedExitCode,
         local_phase_status: localPhaseStatus,
         retention: {
           retained: true,
@@ -1706,7 +1740,13 @@ write_evidence_receipt() {
         tool: "bash+bun",
         package: "apps/wire",
         suite: "s2-krater-evidence",
-        status: "pass",
+        // This is a terminal record for the run whose bytes were retained, so
+        // its top-level status must never turn a failed or blocked run green.
+        // Retention has its own explicit status below.
+        status: capturedRunStatus,
+        evidence_retention_status: "pass",
+        captured_exit_code: capturedExitCode,
+        captured_run_status: capturedRunStatus,
         run_id: process.env.S2_RECEIPT_RUN_ID,
         manifest: relativeReceiptPath,
         manifest_digest: manifestDigest,
@@ -2716,26 +2756,63 @@ run_s2_shell_regression_test() {
     else
       parent_loss_status=$?
     fi
-    [[ ${parent_loss_status} -eq 137 ]] || return 1
-    [[ -f "${parent_loss_record}" && ! -L "${parent_loss_record}" ]] || return 1
+    [[ ${parent_loss_status} -eq 137 ]] || {
+      emit_owner_loss_uncertain_failure "S2_OWNER_LOSS_UNCERTAIN_CHILD_EXIT_INVALID"
+      return 1
+    }
+    [[ -f "${parent_loss_record}" && ! -L "${parent_loss_record}" ]] || {
+      emit_owner_loss_uncertain_failure "S2_OWNER_LOSS_UNCERTAIN_RECORD_UNAVAILABLE"
+      return 1
+    }
     read -r supervisor_pid supervisor_pgid supervisor_marker supervisor_watchdog_pid \
-      supervisor_watchdog_health child_persist child_port <"${parent_loss_record}" || return 1
-    is_decimal "${supervisor_pid}" && is_decimal "${supervisor_pgid}" && \
-      is_decimal "${supervisor_watchdog_pid}" && is_decimal "${child_port}" || return 1
+      supervisor_watchdog_health child_persist child_port <"${parent_loss_record}" || {
+        emit_owner_loss_uncertain_failure "S2_OWNER_LOSS_UNCERTAIN_RECORD_UNREADABLE"
+        return 1
+      }
+    if ! { is_decimal "${supervisor_pid}" && is_decimal "${supervisor_pgid}" && \
+      is_decimal "${supervisor_watchdog_pid}" && is_decimal "${child_port}"; }; then
+        emit_owner_loss_uncertain_failure "S2_OWNER_LOSS_UNCERTAIN_IDENTITY_INVALID"
+        return 1
+    fi
     [[ "${supervisor_pid}" == "${supervisor_pgid}" && -n "${supervisor_marker}" && \
       -d "${child_persist}" && ! -L "${child_persist}" && \
       "${supervisor_watchdog_health}" == "${child_persist}/"* && \
-      -f "${supervisor_watchdog_health}" && ! -L "${supervisor_watchdog_health}" ]] || return 1
+      -f "${supervisor_watchdog_health}" && ! -L "${supervisor_watchdog_health}" ]] || {
+        emit_owner_loss_uncertain_failure "S2_OWNER_LOSS_UNCERTAIN_RECORD_INVALID"
+        return 1
+      }
     deadline=$((SECONDS + S2_WATCHDOG_MAX_UNCERTAIN_TICKS + 8))
     while kill -0 -- "-${supervisor_pgid}" 2>/dev/null; do
-      (( SECONDS < deadline )) || return 1
+      (( SECONDS < deadline )) || {
+        emit_owner_loss_uncertain_failure "S2_OWNER_LOSS_UNCERTAIN_GROUP_TIMEOUT"
+        return 1
+      }
       sleep 0.1
     done
-    grep -Fqx "owner-lost ${supervisor_watchdog_pid}" "${supervisor_watchdog_health}" || return 1
-    grep -Fqx "inspection-uncertain ${supervisor_watchdog_pid}" "${supervisor_watchdog_health}" || return 1
-    grep -Fqx "inspection-timeout ${supervisor_watchdog_pid}" "${supervisor_watchdog_health}" || return 1
-    if kill -0 "${supervisor_watchdog_pid}" 2>/dev/null; then return 1; fi
-    assert_no_run_survivors "${child_persist}" "${child_port}" "${supervisor_marker}" || return 1
+    grep -Fqx "owner-lost ${supervisor_watchdog_pid}" "${supervisor_watchdog_health}" || {
+      emit_owner_loss_uncertain_failure "S2_OWNER_LOSS_UNCERTAIN_OWNER_LOSS_UNOBSERVED"
+      return 1
+    }
+    grep -Fqx "inspection-uncertain ${supervisor_watchdog_pid}" "${supervisor_watchdog_health}" || {
+      emit_owner_loss_uncertain_failure "S2_OWNER_LOSS_UNCERTAIN_INSPECTION_UNOBSERVED"
+      return 1
+    }
+    grep -Fqx "inspection-timeout ${supervisor_watchdog_pid}" "${supervisor_watchdog_health}" || {
+      emit_owner_loss_uncertain_failure "S2_OWNER_LOSS_UNCERTAIN_TIMEOUT_UNOBSERVED"
+      return 1
+    }
+    if kill -0 "${supervisor_watchdog_pid}" 2>/dev/null; then
+      emit_owner_loss_uncertain_failure "S2_OWNER_LOSS_UNCERTAIN_WATCHDOG_SURVIVOR"
+      return 1
+    fi
+    assert_no_run_survivors "${child_persist}" "${child_port}" "${supervisor_marker}" || {
+      emit_owner_loss_uncertain_failure "S2_OWNER_LOSS_UNCERTAIN_SURVIVOR_SCAN_FAILED"
+      return 1
+    }
+    if [[ "${S2_PLANT_OWNER_LOSS_POST_PROOF_FAILURE:-0}" == 1 ]]; then
+      emit_owner_loss_uncertain_failure "S2_OWNER_LOSS_UNCERTAIN_PLANTED_CHECKPOINT"
+      return 91
+    fi
     emit '{"tool":"bash","package":"apps/wire","suite":"s2-krater-shell","status":"pass","scenario":"controller-loss-plus-leader-loss-plus-term-resistant-member-bounds-owner-loss-inspection-and-watchdog-self-retires","reproduce":"S2_SHELL_REGRESSION_TEST=owner-loss-uncertain scripts/e2e-s2-krater.sh"}'
     return 0
   fi
@@ -3031,9 +3108,9 @@ run_s2_shell_regression_test() {
     journal_valid="${S2_STATE_DIR}/journal-valid-$(random_hex 8).json"
     journal_alternate="${S2_STATE_DIR}/journal-alternate-$(random_hex 8).json"
     journal_invalid="${S2_STATE_DIR}/journal-invalid-$(random_hex 8).json"
-    printf '%s\n' '[{"success":true,"results":[{"id":1,"name":"0001_krater_v0.sql","applied_at":"2026-08-14 09:25:35.123456"},{"id":2,"name":"0002_enrollment_g0.sql","applied_at":"2026-08-14 09:25:37"},{"id":3,"name":"0003_auth_nonce_replay.sql","applied_at":"2026-08-14 09:25:37"},{"id":4,"name":"0004_krater_integrity_v1.sql","applied_at":"2026-08-14 09:25:37"},{"id":5,"name":"0005_krater_undigested_index.sql","applied_at":"2026-08-14 09:25:37"},{"id":6,"name":"0006_fellow_credential_lifecycle.sql","applied_at":"2026-08-14 09:25:37"},{"id":7,"name":"0007_outbox_quarantine_state.sql","applied_at":"2026-08-14 09:25:37"}]}]' >"${journal_valid}"
-    printf '%s\n' '[{"success":true,"results":[{"id":1,"name":"0001_krater_v0.sql","applied_at":"2026-08-14 10:25:35"},{"id":2,"name":"0002_enrollment_g0.sql","applied_at":"2026-08-14 10:25:37"},{"id":3,"name":"0003_auth_nonce_replay.sql","applied_at":"2026-08-14 10:25:37"},{"id":4,"name":"0004_krater_integrity_v1.sql","applied_at":"2026-08-14 10:25:37"},{"id":5,"name":"0005_krater_undigested_index.sql","applied_at":"2026-08-14 10:25:37"},{"id":6,"name":"0006_fellow_credential_lifecycle.sql","applied_at":"2026-08-14 10:25:37"},{"id":7,"name":"0007_outbox_quarantine_state.sql","applied_at":"2026-08-14 10:25:37"}]}]' >"${journal_alternate}"
-    printf '%s\n' '[{"success":true,"results":[{"id":1,"name":"0001_krater_v0.sql","applied_at":"2026/08/14 09:25:35"},{"id":2,"name":"0002_enrollment_g0.sql","applied_at":"2026-08-14 09:25:37"},{"id":3,"name":"0003_auth_nonce_replay.sql","applied_at":"2026-08-14 09:25:37"},{"id":4,"name":"0004_krater_integrity_v1.sql","applied_at":"2026-08-14 09:25:37"},{"id":5,"name":"0005_krater_undigested_index.sql","applied_at":"2026-08-14 09:25:37"},{"id":6,"name":"0006_fellow_credential_lifecycle.sql","applied_at":"2026-08-14 09:25:37"},{"id":7,"name":"0007_outbox_quarantine_state.sql","applied_at":"2026-08-14 09:25:37"}]}]' >"${journal_invalid}"
+    printf '%s\n' '[{"success":true,"results":[{"id":1,"name":"0001_krater_v0.sql","applied_at":"2026-08-14 09:25:35.123456"},{"id":2,"name":"0002_enrollment_g0.sql","applied_at":"2026-08-14 09:25:37"},{"id":3,"name":"0003_auth_nonce_replay.sql","applied_at":"2026-08-14 09:25:37"},{"id":4,"name":"0004_krater_integrity_v1.sql","applied_at":"2026-08-14 09:25:37"},{"id":5,"name":"0005_krater_undigested_index.sql","applied_at":"2026-08-14 09:25:37"},{"id":6,"name":"0006_fellow_credential_lifecycle.sql","applied_at":"2026-08-14 09:25:37"},{"id":7,"name":"0007_outbox_quarantine_state.sql","applied_at":"2026-08-14 09:25:37"},{"id":8,"name":"0008_sponsors_bootstrap.sql","applied_at":"2026-08-14 09:25:37"},{"id":9,"name":"0009_device_flow.sql","applied_at":"2026-08-14 09:25:37"}]}]' >"${journal_valid}"
+    printf '%s\n' '[{"success":true,"results":[{"id":1,"name":"0001_krater_v0.sql","applied_at":"2026-08-14 10:25:35"},{"id":2,"name":"0002_enrollment_g0.sql","applied_at":"2026-08-14 10:25:37"},{"id":3,"name":"0003_auth_nonce_replay.sql","applied_at":"2026-08-14 10:25:37"},{"id":4,"name":"0004_krater_integrity_v1.sql","applied_at":"2026-08-14 10:25:37"},{"id":5,"name":"0005_krater_undigested_index.sql","applied_at":"2026-08-14 10:25:37"},{"id":6,"name":"0006_fellow_credential_lifecycle.sql","applied_at":"2026-08-14 10:25:37"},{"id":7,"name":"0007_outbox_quarantine_state.sql","applied_at":"2026-08-14 10:25:37"},{"id":8,"name":"0008_sponsors_bootstrap.sql","applied_at":"2026-08-14 10:25:37"},{"id":9,"name":"0009_device_flow.sql","applied_at":"2026-08-14 10:25:37"}]}]' >"${journal_alternate}"
+    printf '%s\n' '[{"success":true,"results":[{"id":1,"name":"0001_krater_v0.sql","applied_at":"2026/08/14 09:25:35"},{"id":2,"name":"0002_enrollment_g0.sql","applied_at":"2026-08-14 09:25:37"},{"id":3,"name":"0003_auth_nonce_replay.sql","applied_at":"2026-08-14 09:25:37"},{"id":4,"name":"0004_krater_integrity_v1.sql","applied_at":"2026-08-14 09:25:37"},{"id":5,"name":"0005_krater_undigested_index.sql","applied_at":"2026-08-14 09:25:37"},{"id":6,"name":"0006_fellow_credential_lifecycle.sql","applied_at":"2026-08-14 09:25:37"},{"id":7,"name":"0007_outbox_quarantine_state.sql","applied_at":"2026-08-14 09:25:37"},{"id":8,"name":"0008_sponsors_bootstrap.sql","applied_at":"2026-08-14 09:25:37"},{"id":9,"name":"0009_device_flow.sql","applied_at":"2026-08-14 09:25:37"}]}]' >"${journal_invalid}"
     if valid_output="$(validate_current_migration_journal "${journal_valid}" journal-timestamp-valid)"; then :; else return 1; fi
     if alternate_output="$(validate_current_migration_journal "${journal_alternate}" journal-timestamp-alternate)"; then :; else return 1; fi
     if invalid_output="$(validate_current_migration_journal "${journal_invalid}" journal-timestamp-invalid)"; then return 1; fi
@@ -3137,6 +3214,11 @@ run_s2_shell_regression_test() {
     supervisor_marker="${S2_STARTED_MARKER}"
     supervisor_watchdog_pid="${S2_STARTED_WATCHDOG_PID}"
     supervisor_watchdog_health="${S2_STARTED_WATCHDOG_HEALTH}"
+    # Trigger only after start_pinned_supervisor has completed both healthy
+    # identity proofs. This makes the uncertainty plant causal, not timed.
+    watchdog_is_healthy "${supervisor_watchdog_pid}" "${supervisor_pid}" \
+      "${supervisor_pgid}" "${supervisor_marker}" "${supervisor_watchdog_health}" || return 1
+    kill -USR2 "${supervisor_watchdog_pid}" 2>/dev/null || return 1
     deadline=$((SECONDS + S2_READY_DEADLINE_SECONDS))
     while (( SECONDS < deadline )); do
       read -r watchdog_state watchdog_health_pid < <(tail -n 1 "${supervisor_watchdog_health}") || return 1

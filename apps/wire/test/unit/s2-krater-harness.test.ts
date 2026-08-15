@@ -29,6 +29,8 @@ const REAL_BINDING_INTEGRATION = resolve(
   REPOSITORY_ROOT,
   "apps/wire/test/integration/s2-krater-real-bindings.test.ts",
 );
+const S2_SHELL_REGRESSION_WATCHDOG_MS = 90_000;
+const S2_SHELL_REGRESSION_TEST_TIMEOUT_MS = 120_000;
 
 const COST_PROVENANCE: S2CostReceiptProvenance = {
   run_id: "s2-cost-producer",
@@ -136,6 +138,13 @@ interface Run {
   exitCode: number;
   stdout: string;
   stderr: string;
+}
+
+function ndjsonRecords(run: Run): Array<Record<string, unknown>> {
+  return run.stdout
+    .split("\n")
+    .filter((line) => line.startsWith("{"))
+    .map((line) => JSON.parse(line) as Record<string, unknown>);
 }
 
 function runCaptured(
@@ -710,7 +719,10 @@ describe("registered S2 shell and lifecycle regressions", () => {
       // exact lifecycle markers that the shell is trying to classify.
       const runId = `s2u-${randomUUID().replaceAll("-", "").slice(0, 24)}`;
       expect(runId).not.toContain(mode);
-      const run = runHarnessSync({ S2_RUN_ID: runId, S2_SHELL_REGRESSION_TEST: mode }, 30_000);
+      const run = runHarnessSync(
+        { S2_RUN_ID: runId, S2_SHELL_REGRESSION_TEST: mode },
+        S2_SHELL_REGRESSION_WATCHDOG_MS,
+      );
       assertS2RunThenScanForSurvivors(
         mode,
         () => {
@@ -733,7 +745,15 @@ describe("registered S2 shell and lifecycle regressions", () => {
             );
           }
           expect(run.stdout).toContain('"suite":"s2-krater-shell","status":"pass"');
-          expect(run.stdout).toContain('"suite":"s2-krater-evidence","status":"pass"');
+          const evidenceRecord = ndjsonRecords(run).find(
+            (entry) => entry.suite === "s2-krater-evidence",
+          );
+          expect(evidenceRecord).toMatchObject({
+            status: "pass",
+            evidence_retention_status: "pass",
+            captured_exit_code: 0,
+            captured_run_status: "pass",
+          });
           if (mode === "legacy-leader-loss") {
             expect(run.stdout).toContain('"code":"S2_LEGACY_SUPERVISOR_INSPECTION_UNCERTAIN"');
             expect(run.stdout).toContain('"action":"kill-exact-residual-group"');
@@ -764,7 +784,86 @@ describe("registered S2 shell and lifecycle regressions", () => {
       );
       console.log(JSON.stringify({ suite: "s2-shell-regression-matrix", mode, phase: "pass" }));
     },
-    30_000,
+    S2_SHELL_REGRESSION_TEST_TIMEOUT_MS,
+  );
+
+  test(
+    "PLANTED: a retained evidence receipt labels the failed run it captured",
+    () => {
+      const runId = `s2u-${randomUUID().replaceAll("-", "").slice(0, 24)}`;
+      const run = runHarnessSync(
+        { S2_RUN_ID: runId, S2_SHELL_REGRESSION_TEST: "not-a-registered-mode" },
+        S2_SHELL_REGRESSION_WATCHDOG_MS,
+      );
+      expect(run.exitCode).toBe(2);
+      expect(ndjsonRecords(run)).toContainEqual(
+        expect.objectContaining({
+          suite: "s2-krater-shell",
+          status: "fail",
+          code: "S2_SHELL_REGRESSION_FAILED",
+          exit_code: 2,
+        }),
+      );
+      expect(ndjsonRecords(run)).toContainEqual(
+        expect.objectContaining({
+          suite: "s2-krater-evidence",
+          status: "fail",
+          evidence_retention_status: "pass",
+          captured_exit_code: 2,
+          captured_run_status: "fail",
+        }),
+      );
+    },
+    S2_SHELL_REGRESSION_TEST_TIMEOUT_MS,
+  );
+
+  test(
+    "PLANTED: owner-loss post-proof failure retains a typed checkpoint and zero survivors",
+    () => {
+      const runId = `s2u-${randomUUID().replaceAll("-", "").slice(0, 24)}`;
+      const run = runHarnessSync(
+        {
+          S2_RUN_ID: runId,
+          S2_SHELL_REGRESSION_TEST: "owner-loss-uncertain",
+          S2_PLANT_OWNER_LOSS_POST_PROOF_FAILURE: "1",
+        },
+        S2_SHELL_REGRESSION_WATCHDOG_MS,
+      );
+      assertS2RunThenScanForSurvivors(
+        "owner-loss-uncertain-planted-checkpoint",
+        () => {
+          expect(run.exitCode).toBe(91);
+          expect(ndjsonRecords(run)).toContainEqual(
+            expect.objectContaining({
+              suite: "s2-krater-shell",
+              status: "fail",
+              terminal: true,
+              scenario: "owner-loss-uncertain",
+              code: "S2_OWNER_LOSS_UNCERTAIN_PLANTED_CHECKPOINT",
+              child_exit_code: 137,
+              record_available: true,
+              health_file_available: true,
+              exact_group_survives: false,
+              watchdog_survives: false,
+            }),
+          );
+          expect(ndjsonRecords(run)).toContainEqual(
+            expect.objectContaining({
+              suite: "s2-krater-evidence",
+              status: "fail",
+              evidence_retention_status: "pass",
+              captured_exit_code: 91,
+              captured_run_status: "fail",
+            }),
+          );
+          expect(run.stdout).not.toContain(
+            '"scenario":"controller-loss-plus-leader-loss-plus-term-resistant-member-bounds-owner-loss-inspection-and-watchdog-self-retires"',
+          );
+        },
+        () => liveS2LifecycleProcesses(runId),
+      );
+    },
+    S2_SHELL_REGRESSION_TEST_TIMEOUT_MS,
   );
 
   test("an explicit evidence run id is constrained to one safe path component", async () => {
