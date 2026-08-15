@@ -961,6 +961,28 @@ describe("lifecycle: process-group cleanup reaches descendants, not just the lea
     expect(phases.includes("AAAAAAAA")).toBe(false);
   }, 60_000);
 
+  test("PLANTED: a valid snapshot missing the required descendant is retried before survivor proof", async () => {
+    const run = await runScript(["--self-test-lifecycle-observation-partial"], {
+      S1_FAULT_INJECT: "ps-partial",
+    });
+    const emitted = record(run);
+    expect(run.exitCode).toBe(0);
+    expect(emitted.status).toBe("pass");
+    expect(emitted.code).toBe("LIFECYCLE_SELF_TEST_PASSED");
+    expect(phaseValue(run.stderr, "lifecycle-observation-retried", "reason")).toBe(
+      "validated-snapshot-omitted-required-pid",
+    );
+
+    const descendant = Number(phaseValue(run.stderr, "lifecycle-descendant", "pid"));
+    const survivors = phaseValue(run.stderr, "lifecycle-pinned-supervisor", "survivors");
+    expect(Number.isInteger(descendant)).toBe(true);
+    expect(survivors?.split(",")).toContain(String(descendant));
+    expect(phaseValue(run.stderr, "lifecycle-group-retired", "cleanup")).toBe(
+      "post-kill-absence-proven",
+    );
+    expect(await waitForExit(descendant)).toBe(true);
+  }, 60_000);
+
   test("PLANTED: launch-proof faults reap exact stopped direct children before payload execution", async () => {
     for (const [argument, fault, code, phase] of [
       [

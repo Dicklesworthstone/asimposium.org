@@ -1578,8 +1578,8 @@ self_test() {
 # paths below; they are never treated as owned cleanup targets.
 self_test_lifecycle() {
   local mode="${1:-group}"
-  local leader descendant survivors pid_file child_status="" status_read=0
-  local descendant_deadline status_deadline
+  local leader descendant members="" survivors pid_file child_status="" status_read=0
+  local descendant_deadline status_deadline observation_deadline
   local liveness=0
 
   STATE_DIR="$(mktemp -d -t asimposium-s1-lifecycle)"
@@ -1618,8 +1618,46 @@ self_test_lifecycle() {
   [[ "$child_status" == "0" ]] || failed "LIFECYCLE_STATUS_MISSING"
   group_is_ours "$SERVER_PGID" "$SERVER_IDENTITY" "$SERVER_MARKER" || failed "LIFECYCLE_SUPERVISOR_UNAVAILABLE"
   [[ "$SERVER_MARKER" =~ ^s1-supervisor-[a-f0-9]{32}$ ]] || failed "LIFECYCLE_MARKER_INVALID"
-  group_contains "$leader" "$descendant" || failed "LIFECYCLE_DESCENDANT_ALREADY_GONE"
-  survivors="$(commas "$(live_group_members "$leader")")"
+
+  # Scope the planted omission to the observation under test. Earlier process-
+  # group and ownership checks need genuine snapshots or this fixture would be
+  # testing a different fail-closed boundary.
+  if [[ "$mode" == "group-observation-partial" ]]; then
+    [[ "${S1_FAULT_INJECT:-}" == "ps-partial" ]] || failed "LIFECYCLE_OBSERVATION_FAULT_REQUIRED"
+    PS_PARTIAL_OMIT_PID="$descendant"
+    PS_PARTIAL_OMISSION_MARKER="$STATE_DIR/lifecycle-observation-partial"
+    FAULT_ACTIVE=1
+  fi
+
+  # Membership proof and the survivor record must come from the same validated
+  # process-table snapshot. A second independent read can be syntactically
+  # valid yet omit the descendant, producing a false empty-success diagnostic
+  # immediately after `group_contains` observed it. Retry any snapshot that
+  # does not contain the required live descendant, but keep the retry bounded.
+  observation_deadline=$((SECONDS + FIXTURE_START_DEADLINE_SECONDS))
+  while ((SECONDS < observation_deadline)); do
+    members=""
+    if members="$(live_group_members "$leader")" &&
+      printf '%s\n' "$members" | awk -v wanted="$descendant" '$1 == wanted { found = 1 } END { exit(found ? 0 : 1) }'; then
+      break
+    fi
+    if [[ "$mode" == "group-observation-partial" && "$FAULT_ACTIVE" == "1" &&
+      -f "$PS_PARTIAL_OMISSION_MARKER" ]]; then
+      FAULT_ACTIVE=0
+      log_phase "lifecycle-observation-retried" \
+        "leader=$leader required=$descendant reason=validated-snapshot-omitted-required-pid"
+    fi
+    members=""
+    sleep 0.1
+  done
+  [[ -n "$members" ]] || failed "LIFECYCLE_DESCENDANT_ALREADY_GONE"
+  if [[ "$mode" == "group-observation-partial" ]]; then
+    [[ -f "$PS_PARTIAL_OMISSION_MARKER" ]] || failed "LIFECYCLE_OBSERVATION_OMISSION_NOT_DETECTED"
+    FAULT_ACTIVE=0
+    PS_PARTIAL_OMIT_PID=""
+    PS_PARTIAL_OMISSION_MARKER=""
+  fi
+  survivors="$(commas "$members")"
   log_phase "lifecycle-pinned-supervisor" "leader=$leader status=$child_status survivors=$survivors"
 
   terminate_child "$SERVER_PID" "$SERVER_PGID" "$SERVER_IDENTITY" "$SERVER_MARKER" "lifecycle" ||
@@ -2404,6 +2442,11 @@ main() {
   if [[ "${1:-}" == "--self-test-lifecycle-kill" ]]; then
     begin_self_test "lifecycle-kill"
     self_test_lifecycle "group-kill"
+    return
+  fi
+  if [[ "${1:-}" == "--self-test-lifecycle-observation-partial" ]]; then
+    begin_self_test "lifecycle-observation-partial"
+    self_test_lifecycle "group-observation-partial"
     return
   fi
   if [[ "${1:-}" == "--self-test-preexec-not-stopped" ]]; then
