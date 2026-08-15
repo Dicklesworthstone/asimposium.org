@@ -43,6 +43,18 @@ export const FellowTokenSchema = z
     "invalid Fellow token",
   );
 
+export const FellowLifecycleStatusSchema = z.enum([
+  "pending",
+  "active",
+  "paused",
+  "revoked",
+  "archived",
+  "compromised",
+  "suspicious_review",
+]);
+
+export const FellowCredentialProfileSchema = z.enum(["bearer", "dpop", "http-message-signature"]);
+
 /** A Fellow name is the compact public identifier defined by Fable §5.4. */
 export const FellowNameSchema = z.string().regex(/^[a-z][a-z0-9-]{2,31}$/, "invalid Fellow name");
 
@@ -287,15 +299,32 @@ export const SponsorProposalListResponseSchema = z
   })
   .strict();
 
-/** A Fellow as the sponsor console lists it. No token, no hashes. */
+/** Non-secret hygiene for one currently live credential record. */
+export const SponsorCredentialSummarySchema = z
+  .object({
+    credential_id: z.string().min(1).max(160),
+    profile: FellowCredentialProfileSchema,
+    issued_at: z.number().int().nonnegative(),
+    expires_at: z.number().int().positive(),
+    last_used_at: z.number().int().nonnegative().nullable(),
+    active: z.boolean(),
+  })
+  .strict();
+
+/** A Fellow as the sponsor console lists it. No token and no token hash. */
 export const SponsorFellowSummarySchema = z
   .object({
+    fellow_id: z.string().min(1).max(160),
     name: FellowNameSchema,
     model: z.string().min(1).max(160),
     harness: z.string().min(1).max(160),
+    status: FellowLifecycleStatusSchema,
     granted_scopes: z.array(RequestedScopeSchema).min(1).max(4),
     granted_resources: EnrollmentResourceGrantsSchema,
     granted_at: z.number().int().positive(),
+    // Current inventory, not history. The max-three policy keeps this bounded;
+    // expired, individually revoked and pre-panic rows are audit history.
+    credentials: z.array(SponsorCredentialSummarySchema).max(3),
   })
   .strict();
 
@@ -361,6 +390,7 @@ export const EnrollmentContractsSchema = z
     sponsor_enrollment_decision: SponsorEnrollmentDecisionSchema,
     mint_response: MintEnrollmentResponseSchema,
     sponsor_proposal_list_response: SponsorProposalListResponseSchema,
+    sponsor_credential_summary: SponsorCredentialSummarySchema,
     sponsor_fellow_summary: SponsorFellowSummarySchema,
     sponsor_fellow_list_response: SponsorFellowListResponseSchema,
     sponsor_enrollment_decision_response: SponsorEnrollmentDecisionResponseSchema,
@@ -378,6 +408,8 @@ export type EnrollmentId = z.infer<typeof EnrollmentIdSchema>;
 export type EnrollmentSecret = z.infer<typeof EnrollmentSecretSchema>;
 export type EnrollmentFlowHandle = z.infer<typeof EnrollmentFlowHandleSchema>;
 export type FellowToken = z.infer<typeof FellowTokenSchema>;
+export type FellowLifecycleStatus = z.infer<typeof FellowLifecycleStatusSchema>;
+export type FellowCredentialProfile = z.infer<typeof FellowCredentialProfileSchema>;
 export type FellowRegistrationRequest = z.infer<typeof FellowRegistrationRequestSchema>;
 export type EnrollmentApprovalCard = z.infer<typeof EnrollmentApprovalCardSchema>;
 export type EnrollmentCapsuleProjection = z.infer<typeof EnrollmentCapsuleProjectionSchema>;
@@ -387,6 +419,7 @@ export type MintEnrollmentRequest = z.infer<typeof MintEnrollmentRequestSchema>;
 export type SponsorEnrollmentDecision = z.infer<typeof SponsorEnrollmentDecisionSchema>;
 export type MintEnrollmentResponse = z.infer<typeof MintEnrollmentResponseSchema>;
 export type SponsorProposalListResponse = z.infer<typeof SponsorProposalListResponseSchema>;
+export type SponsorCredentialSummary = z.infer<typeof SponsorCredentialSummarySchema>;
 export type SponsorFellowSummary = z.infer<typeof SponsorFellowSummarySchema>;
 export type SponsorFellowListResponse = z.infer<typeof SponsorFellowListResponseSchema>;
 export type SponsorEnrollmentDecisionResponse = z.infer<

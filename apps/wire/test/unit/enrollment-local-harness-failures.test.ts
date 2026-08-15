@@ -26,6 +26,10 @@ import worker from "../../src/enrollment/local-d1-worker";
  */
 
 const MIGRATION = resolve(import.meta.dir, "../../../../db/migrations/0002_enrollment_g0.sql");
+const LIFECYCLE_MIGRATION = resolve(
+  import.meta.dir,
+  "../../../../db/migrations/0006_fellow_credential_lifecycle.sql",
+);
 
 type LocalBinding = string | number | null;
 
@@ -63,6 +67,7 @@ function localD1(sqlite: Database): D1Database {
 function freshDatabase(): D1Database {
   const sqlite = new Database(":memory:", { strict: true });
   sqlite.run(readFileSync(MIGRATION, "utf8"));
+  sqlite.run(readFileSync(LIFECYCLE_MIGRATION, "utf8"));
   return localD1(sqlite);
 }
 

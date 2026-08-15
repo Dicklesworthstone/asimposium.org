@@ -5,14 +5,17 @@ import {
   AesGcmEnrollmentReplayProtector,
   EnrollmentError,
   EnrollmentService,
+  FELLOW_TOKEN_TTL_MS,
   InMemoryEnrollmentStore,
 } from "../../src/enrollment/service.ts";
 
 const FRAGMENT_VALUE_PLACEHOLDER = "<value from the join URL fragment>";
 
 class FixedClock {
+  value = 1_700_000_000_000;
+
   now(): number {
-    return 1_700_000_000_000;
+    return this.value;
   }
 }
 
@@ -33,8 +36,9 @@ const malformedSecret = ["v1", "short"].join(".");
 
 function routerFixture() {
   const random = new FixedRandom();
+  const clock = new FixedClock();
   const service = new EnrollmentService({
-    clock: new FixedClock(),
+    clock,
     random,
     store: new InMemoryEnrollmentStore(),
     replayProtector: new AesGcmEnrollmentReplayProtector(
@@ -42,7 +46,7 @@ function routerFixture() {
       random,
     ),
   });
-  return { service, router: createEnrollmentRouter({ service }) };
+  return { clock, service, router: createEnrollmentRouter({ service }) };
 }
 
 async function request(
@@ -338,7 +342,7 @@ describe("S-1 mountable enrollment router", () => {
   });
 
   test("body-only flow routes issue a token once and minimal hello authenticates the resulting binding", async () => {
-    const { router, service } = routerFixture();
+    const { clock, router, service } = routerFixture();
     const minted = await service.mint(sponsor, { requested_scopes: ["review"] });
     const registration = await request(router, "/v1/fellows", {
       method: "POST",
@@ -415,6 +419,15 @@ describe("S-1 mountable enrollment router", () => {
       fellow: { name: "router-orchid", model: "test-model", harness: "test-harness" },
       granted_scopes: ["review"],
     });
+
+    // The expiry boundary is exclusive: exactly 365 days after issuance is one
+    // opaque authentication miss, not one final accepted use.
+    clock.value += FELLOW_TOKEN_TTL_MS;
+    const exactlyExpired = await request(router, "/v1/hello", {
+      headers: { authorization: `Bearer ${issuedBody.token}` },
+    });
+    expect(exactlyExpired.status).toBe(401);
+    expect(await exactlyExpired.json()).toMatchObject({ code: "FELLOW_TOKEN_INVALID" });
   });
 
   test("mandatory contract failures include rule, schema, and a safe example", async () => {

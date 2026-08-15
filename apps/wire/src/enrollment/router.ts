@@ -785,12 +785,22 @@ function contractCard(card: {
 
 function contractFellow(record: SponsorFellowRecord): Record<string, unknown> {
   return {
+    fellow_id: record.fellowId,
     name: record.name,
     model: record.model,
     harness: record.harness,
+    status: record.status,
     granted_scopes: record.grantedScopes,
     granted_resources: contractResources(record.grantedResources),
     granted_at: record.grantedAt,
+    credentials: record.credentials.map((credential) => ({
+      credential_id: credential.credentialId,
+      profile: credential.profile,
+      issued_at: credential.issuedAt,
+      expires_at: credential.expiresAt,
+      last_used_at: credential.lastUsedAt ?? null,
+      active: credential.active,
+    })),
   };
 }
 

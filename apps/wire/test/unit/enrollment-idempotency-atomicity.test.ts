@@ -42,6 +42,10 @@ import {
  */
 
 const MIGRATION = resolve(import.meta.dir, "../../../../db/migrations/0002_enrollment_g0.sql");
+const LIFECYCLE_MIGRATION = resolve(
+  import.meta.dir,
+  "../../../../db/migrations/0006_fellow_credential_lifecycle.sql",
+);
 
 /** The exact column definition the abort depends on. */
 const LOAD_BEARING_COLUMN = "request_digest TEXT NOT NULL";
@@ -95,6 +99,7 @@ function database(options: { readonly nullableDigest?: boolean } = {}): Database
       ? schema.replace(LOAD_BEARING_COLUMN, "request_digest TEXT")
       : schema,
   );
+  sqlite.run(readFileSync(LIFECYCLE_MIGRATION, "utf8"));
   return sqlite;
 }
 
@@ -295,6 +300,414 @@ describe("the active-key abort rolls back the product effect with the replay row
       now: NOW,
     });
     expect(replay?.encryptedResponse.ciphertext).toBe("ciphertext-first");
+  });
+});
+
+const TOKEN_TTL_MS = 365 * 24 * 60 * 60 * 1_000;
+const LIFECYCLE_SPONSOR = "usr_lifecycle_sponsor";
+const LIFECYCLE_FELLOW = "fellow-lifecycle";
+const LIFECYCLE_PROPOSAL = "proposal-lifecycle";
+
+function seedLifecycleIdentity(sqlite: Database): void {
+  sqlite
+    .prepare(
+      `INSERT INTO enrollment_records (
+         enrollment_id, sponsor_id, secret_hash, secret_expires_at,
+         requested_scopes_json, requested_resources_json, created_at
+       ) VALUES (?, ?, ?, ?, ?, ?, ?)`,
+    )
+    .run(
+      "ASIMP-EN-LIFECYCLE",
+      LIFECYCLE_SPONSOR,
+      "lifecycle-secret-hash",
+      NOW + 30 * 60_000,
+      '["review"]',
+      "{}",
+      NOW,
+    );
+  sqlite
+    .prepare(
+      `INSERT INTO enrollment_proposals (
+         proposal_id, enrollment_id, fellow_id, flow_handle_hash, name, model, harness,
+         created_at, expires_at, status, granted_scopes_json, granted_resources_json,
+         token_hash, token_issued_at, poll_interval_seconds
+       ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'approved', ?, ?, ?, ?, 5)`,
+    )
+    .run(
+      LIFECYCLE_PROPOSAL,
+      "ASIMP-EN-LIFECYCLE",
+      LIFECYCLE_FELLOW,
+      "lifecycle-flow-hash",
+      "lifecycle-fellow",
+      "test-model",
+      "codex",
+      NOW,
+      NOW + 30 * 60_000,
+      '["review"]',
+      "{}",
+      "token-hash-1",
+      NOW,
+    );
+  sqlite
+    .prepare(
+      `INSERT INTO enrollment_fellows (fellow_id, sponsor_id, name, model, harness, created_at)
+       VALUES (?, ?, ?, ?, ?, ?)`,
+    )
+    .run(LIFECYCLE_FELLOW, LIFECYCLE_SPONSOR, "lifecycle-fellow", "test-model", "codex", NOW);
+  sqlite
+    .prepare(
+      `INSERT INTO enrollment_grants (
+         proposal_id, fellow_id, sponsor_id, granted_scopes_json,
+         granted_resources_json, granted_at
+       ) VALUES (?, ?, ?, ?, ?, ?)`,
+    )
+    .run(LIFECYCLE_PROPOSAL, LIFECYCLE_FELLOW, LIFECYCLE_SPONSOR, '["review"]', "{}", NOW);
+}
+
+function insertLifecycleCredential(
+  sqlite: Database,
+  input: {
+    readonly id: string;
+    readonly hash: string;
+    readonly issuedAt: number;
+    readonly proposalId?: string;
+    readonly sponsorId?: string;
+    readonly scopesJson?: string;
+  },
+): void {
+  sqlite
+    .prepare(
+      `INSERT INTO enrollment_credentials (
+         credential_id, proposal_id, fellow_id, sponsor_id, token_hash,
+         granted_scopes_json, granted_resources_json, issued_at, expires_at,
+         credential_profile, credential_origin
+       ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'bearer', ?)`,
+    )
+    .run(
+      input.id,
+      input.proposalId ?? null,
+      LIFECYCLE_FELLOW,
+      input.sponsorId ?? LIFECYCLE_SPONSOR,
+      input.hash,
+      input.scopesJson ?? '["review"]',
+      "{}",
+      input.issuedAt,
+      input.issuedAt + TOKEN_TTL_MS,
+      input.proposalId === undefined ? "harness-migration" : "enrollment",
+    );
+}
+
+describe("Fellow credential lifecycle constraints and authentication", () => {
+  test("0006 preserves the original credential, permits migration tokens, and enforces the active cap", () => {
+    const sqlite = new Database(":memory:", { strict: true });
+    sqlite.run(readFileSync(MIGRATION, "utf8"));
+    seedLifecycleIdentity(sqlite);
+    sqlite
+      .prepare(
+        `INSERT INTO enrollment_credentials (
+           credential_id, proposal_id, fellow_id, sponsor_id, token_hash,
+           granted_scopes_json, granted_resources_json, issued_at
+         ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+      )
+      .run(
+        "credential-1",
+        LIFECYCLE_PROPOSAL,
+        LIFECYCLE_FELLOW,
+        LIFECYCLE_SPONSOR,
+        "token-hash-1",
+        '["review"]',
+        "{}",
+        NOW,
+      );
+
+    sqlite.run(readFileSync(LIFECYCLE_MIGRATION, "utf8"));
+    const migrated = sqlite
+      .prepare<{ expires_at: number; credential_profile: string; proposal_id: string | null }, []>(
+        `SELECT expires_at, credential_profile, proposal_id
+           FROM enrollment_credentials WHERE credential_id = 'credential-1'`,
+      )
+      .get();
+    expect(migrated).toEqual({
+      expires_at: NOW + TOKEN_TTL_MS,
+      credential_profile: "bearer",
+      proposal_id: LIFECYCLE_PROPOSAL,
+    });
+
+    expect(() =>
+      insertLifecycleCredential(sqlite, {
+        id: "credential-duplicate-origin",
+        hash: "token-hash-duplicate-origin",
+        issuedAt: NOW + 1,
+        proposalId: LIFECYCLE_PROPOSAL,
+      }),
+    ).toThrow();
+    insertLifecycleCredential(sqlite, {
+      id: "credential-2",
+      hash: "token-hash-2",
+      issuedAt: NOW + 1,
+    });
+    insertLifecycleCredential(sqlite, {
+      id: "credential-3",
+      hash: "token-hash-3",
+      issuedAt: NOW + 2,
+    });
+    expect(() =>
+      insertLifecycleCredential(sqlite, {
+        id: "credential-4",
+        hash: "token-hash-4",
+        issuedAt: NOW + 3,
+      }),
+    ).toThrow("active credential cap reached");
+    expect(
+      sqlite.prepare<{ n: number }, []>("SELECT COUNT(*) AS n FROM enrollment_credentials").get()
+        ?.n,
+    ).toBe(3);
+  });
+
+  test("identity splices and a backwards sponsor panic are refused by the database", () => {
+    const sqlite = database();
+    seedLifecycleIdentity(sqlite);
+    expect(() =>
+      insertLifecycleCredential(sqlite, {
+        id: "credential-cross-sponsor",
+        hash: "token-hash-cross-sponsor",
+        issuedAt: NOW,
+        proposalId: LIFECYCLE_PROPOSAL,
+        sponsorId: "usr_attacker",
+      }),
+    ).toThrow("credential authority binding mismatch");
+    expect(() =>
+      insertLifecycleCredential(sqlite, {
+        id: "credential-null-origin-cross-sponsor",
+        hash: "token-hash-null-origin-cross-sponsor",
+        issuedAt: NOW,
+        sponsorId: "usr_attacker",
+      }),
+    ).toThrow("credential authority binding mismatch");
+    expect(() =>
+      insertLifecycleCredential(sqlite, {
+        id: "credential-escalated-grant",
+        hash: "token-hash-escalated-grant",
+        issuedAt: NOW,
+        proposalId: LIFECYCLE_PROPOSAL,
+        scopesJson: '["promote"]',
+      }),
+    ).toThrow("credential authority binding mismatch");
+
+    sqlite
+      .prepare(
+        `INSERT INTO enrollment_sponsor_security (sponsor_id, panic_at, updated_at)
+         VALUES (?, ?, ?)`,
+      )
+      .run(LIFECYCLE_SPONSOR, NOW + 10, NOW + 10);
+    expect(() =>
+      sqlite
+        .prepare(
+          `UPDATE enrollment_sponsor_security SET panic_at = ?, updated_at = ?
+            WHERE sponsor_id = ?`,
+        )
+        .run(NOW + 9, NOW + 11, LIFECYCLE_SPONSOR),
+    ).toThrow("sponsor panic boundary is monotonic");
+    expect(() =>
+      sqlite
+        .prepare("DELETE FROM enrollment_sponsor_security WHERE sponsor_id = ?")
+        .run(LIFECYCLE_SPONSOR),
+    ).toThrow("sponsor panic boundary cannot be deleted");
+    expect(() =>
+      sqlite
+        .prepare(
+          `INSERT OR REPLACE INTO enrollment_sponsor_security (sponsor_id, panic_at, updated_at)
+           VALUES (?, ?, ?)`,
+        )
+        .run(LIFECYCLE_SPONSOR, NOW + 9, NOW + 12),
+    ).toThrow("sponsor panic boundary already exists");
+  });
+
+  test("credential authority and revocation are immutable while last-used evidence is monotonic", () => {
+    const sqlite = database();
+    seedLifecycleIdentity(sqlite);
+    insertLifecycleCredential(sqlite, {
+      id: "credential-1",
+      hash: "token-hash-1",
+      issuedAt: NOW,
+      proposalId: LIFECYCLE_PROPOSAL,
+    });
+
+    expect(() =>
+      sqlite
+        .prepare("UPDATE enrollment_credentials SET issued_at = ? WHERE credential_id = ?")
+        .run(NOW + 1, "credential-1"),
+    ).toThrow("credential authority is immutable");
+    expect(() =>
+      sqlite
+        .prepare(
+          "UPDATE enrollment_credentials SET granted_scopes_json = ? WHERE credential_id = ?",
+        )
+        .run('["promote"]', "credential-1"),
+    ).toThrow("credential authority is immutable");
+    expect(() =>
+      sqlite
+        .prepare("UPDATE enrollment_grants SET granted_scopes_json = ? WHERE fellow_id = ?")
+        .run('["promote"]', LIFECYCLE_FELLOW),
+    ).toThrow("enrollment grant is immutable");
+    expect(() =>
+      sqlite.prepare("DELETE FROM enrollment_grants WHERE fellow_id = ?").run(LIFECYCLE_FELLOW),
+    ).toThrow("enrollment grant cannot be deleted");
+    expect(() =>
+      sqlite
+        .prepare(
+          `INSERT OR REPLACE INTO enrollment_grants (
+             proposal_id, fellow_id, sponsor_id, granted_scopes_json,
+             granted_resources_json, granted_at
+           ) VALUES (?, ?, ?, ?, ?, ?)`,
+        )
+        .run(LIFECYCLE_PROPOSAL, LIFECYCLE_FELLOW, LIFECYCLE_SPONSOR, '["promote"]', "{}", NOW),
+    ).toThrow("enrollment grant already exists");
+    expect(() =>
+      sqlite
+        .prepare(
+          `INSERT OR REPLACE INTO enrollment_credentials (
+             credential_id, proposal_id, fellow_id, sponsor_id, token_hash,
+             granted_scopes_json, granted_resources_json, issued_at, expires_at,
+             credential_profile, credential_origin
+           ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'bearer', 'enrollment')`,
+        )
+        .run(
+          "credential-1",
+          LIFECYCLE_PROPOSAL,
+          LIFECYCLE_FELLOW,
+          LIFECYCLE_SPONSOR,
+          "token-hash-replaced",
+          '["review"]',
+          "{}",
+          NOW + 1,
+          NOW + TOKEN_TTL_MS,
+        ),
+    ).toThrow("credential identity already exists");
+
+    sqlite
+      .prepare("UPDATE enrollment_credentials SET last_used_at = ? WHERE credential_id = ?")
+      .run(NOW + 5, "credential-1");
+    expect(() =>
+      sqlite
+        .prepare("UPDATE enrollment_credentials SET last_used_at = ? WHERE credential_id = ?")
+        .run(NOW + 4, "credential-1"),
+    ).toThrow("credential last-used time is monotonic");
+
+    sqlite
+      .prepare("UPDATE enrollment_credentials SET revoked_at = ? WHERE credential_id = ?")
+      .run(NOW + 6, "credential-1");
+    expect(() =>
+      sqlite
+        .prepare("UPDATE enrollment_credentials SET revoked_at = NULL WHERE credential_id = ?")
+        .run("credential-1"),
+    ).toThrow("credential revocation is monotonic");
+    expect(() =>
+      sqlite
+        .prepare("DELETE FROM enrollment_credentials WHERE credential_id = ?")
+        .run("credential-1"),
+    ).toThrow("credential history cannot be deleted");
+  });
+
+  test("successful authentication alone stamps last_used and every lifecycle refusal is opaque", async () => {
+    const sqlite = database();
+    seedLifecycleIdentity(sqlite);
+    insertLifecycleCredential(sqlite, {
+      id: "credential-1",
+      hash: "token-hash-1",
+      issuedAt: NOW,
+      proposalId: LIFECYCLE_PROPOSAL,
+    });
+    const store = new D1EnrollmentStore(localD1(sqlite));
+
+    const authenticated = await store.authenticateCredential("token-hash-1", NOW + 1);
+    expect(authenticated?.lastUsedAt).toBe(NOW + 1);
+    expect(authenticated?.fellowStatus).toBe("active");
+    expect(
+      sqlite
+        .prepare<{ last_used_at: number | null }, []>(
+          "SELECT last_used_at FROM enrollment_credentials WHERE credential_id = 'credential-1'",
+        )
+        .get()?.last_used_at,
+    ).toBe(NOW + 1);
+    expect(await store.fellowsBySponsor(LIFECYCLE_SPONSOR, NOW + 1)).toMatchObject([
+      {
+        fellowId: LIFECYCLE_FELLOW,
+        status: "active",
+        credentials: [{ credentialId: "credential-1", lastUsedAt: NOW + 1, active: true }],
+      },
+    ]);
+
+    expect(await store.authenticateCredential("token-hash-1", NOW + TOKEN_TTL_MS)).toBeUndefined();
+    expect(
+      (await store.fellowsBySponsor(LIFECYCLE_SPONSOR, NOW + TOKEN_TTL_MS))[0]?.credentials,
+    ).toEqual([]);
+    expect(
+      sqlite
+        .prepare<{ last_used_at: number | null }, []>(
+          "SELECT last_used_at FROM enrollment_credentials WHERE credential_id = 'credential-1'",
+        )
+        .get()?.last_used_at,
+    ).toBe(NOW + 1);
+
+    for (const status of ["paused", "revoked", "archived", "compromised"] as const) {
+      sqlite
+        .prepare("UPDATE enrollment_fellows SET status = ? WHERE fellow_id = ?")
+        .run(status, LIFECYCLE_FELLOW);
+      expect(await store.authenticateCredential("token-hash-1", NOW + 2)).toBeUndefined();
+      expect((await store.fellowsBySponsor(LIFECYCLE_SPONSOR, NOW + 2))[0]).toMatchObject({
+        status,
+        credentials: [{ credentialId: "credential-1", active: false }],
+      });
+    }
+    sqlite
+      .prepare("UPDATE enrollment_fellows SET status = 'suspicious_review' WHERE fellow_id = ?")
+      .run(LIFECYCLE_FELLOW);
+    expect((await store.authenticateCredential("token-hash-1", NOW + 3))?.fellowStatus).toBe(
+      "suspicious_review",
+    );
+    expect((await store.fellowsBySponsor(LIFECYCLE_SPONSOR, NOW + 3))[0]).toMatchObject({
+      status: "suspicious_review",
+      credentials: [{ credentialId: "credential-1", active: true }],
+    });
+    expect((await store.authenticateCredential("token-hash-1", NOW + 2))?.lastUsedAt).toBe(NOW + 3);
+
+    sqlite
+      .prepare("UPDATE enrollment_fellows SET status = 'active' WHERE fellow_id = ?")
+      .run(LIFECYCLE_FELLOW);
+    sqlite
+      .prepare(
+        `INSERT INTO enrollment_sponsor_security (sponsor_id, panic_at, updated_at)
+         VALUES (?, ?, ?)`,
+      )
+      .run(LIFECYCLE_SPONSOR, NOW, NOW);
+    expect(await store.authenticateCredential("token-hash-1", NOW + 4)).toBeUndefined();
+    expect((await store.fellowsBySponsor(LIFECYCLE_SPONSOR, NOW + 4))[0]?.credentials).toEqual([]);
+
+    expect(
+      sqlite
+        .prepare<{ last_used_at: number | null }, []>(
+          "SELECT last_used_at FROM enrollment_credentials WHERE credential_id = 'credential-1'",
+        )
+        .get()?.last_used_at,
+    ).toBe(NOW + 3);
+  });
+
+  test("a future-issued credential is inactive until its issuance boundary", async () => {
+    const sqlite = database();
+    seedLifecycleIdentity(sqlite);
+    insertLifecycleCredential(sqlite, {
+      id: "credential-future",
+      hash: "token-hash-future",
+      issuedAt: NOW + 1_000,
+      proposalId: LIFECYCLE_PROPOSAL,
+    });
+    const store = new D1EnrollmentStore(localD1(sqlite));
+
+    expect(await store.authenticateCredential("token-hash-future", NOW + 999)).toBeUndefined();
+    expect((await store.authenticateCredential("token-hash-future", NOW + 1_000))?.lastUsedAt).toBe(
+      NOW + 1_000,
+    );
   });
 });
 

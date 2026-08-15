@@ -1,4 +1,13 @@
-import type { EnrollmentGrantReduction, RequestedScope } from "@asimposium/contracts";
+import {
+  EnrollmentResourceGrantsSchema,
+  RequestedScopeSchema,
+  type EnrollmentGrantReduction,
+  type FellowCredentialProfile,
+  type FellowLifecycleStatus,
+  type RequestedScope,
+} from "@asimposium/contracts";
+// D1 proves JSON syntax; these schemas prove that stored authority still obeys
+// the public scope vocabulary and resource bounds when it is read back.
 import type { D1Database, D1PreparedStatement } from "@cloudflare/workers-types";
 
 import {
@@ -15,6 +24,7 @@ import {
   type EnrollmentResourceGrants,
   type EnrollmentStore,
   enrollmentNameFailure,
+  FELLOW_TOKEN_TTL_MS,
   type FellowCredentialBinding,
   type IdempotencyAttempt,
   isStrictEnrollmentScopeReduction,
@@ -72,6 +82,11 @@ interface CredentialRow {
   granted_resources_json: string;
   token_hash: string;
   issued_at: number;
+  expires_at: number;
+  last_used_at: number | null;
+  revoked_at: number | null;
+  credential_profile: FellowCredentialProfile;
+  status: FellowLifecycleStatus;
 }
 
 interface IdempotencyRow {
@@ -99,12 +114,19 @@ interface PendingProposalRow {
 
 /** Columns selected by `fellowsBySponsor`: fellow join its approval-time grant. */
 interface FellowGrantRow {
+  fellow_id: string;
   name: string;
   model: string;
   harness: string;
+  status: FellowLifecycleStatus;
   granted_scopes_json: string;
   granted_resources_json: string;
   granted_at: number;
+  credential_id: string | null;
+  credential_profile: FellowCredentialProfile | null;
+  issued_at: number | null;
+  expires_at: number | null;
+  last_used_at: number | null;
 }
 
 const sql = (db: D1Database, query: string, ...values: unknown[]): D1PreparedStatement =>
@@ -132,10 +154,10 @@ function secretSafeEqual(left: string, right: string): boolean {
 function parseScopes(encoded: string): readonly RequestedScope[] {
   try {
     const value: unknown = JSON.parse(encoded);
-    if (!Array.isArray(value) || value.some((scope) => typeof scope !== "string")) {
+    if (!Array.isArray(value) || value.length < 1 || value.length > 4) {
       throw new TypeError("invalid scope payload");
     }
-    return uniqueEnrollmentScopes(value as RequestedScope[]);
+    return uniqueEnrollmentScopes(value.map((scope) => RequestedScopeSchema.parse(scope)));
   } catch {
     throw new EnrollmentError("PAIRING_INVALID");
   }
@@ -148,18 +170,38 @@ function parseResources(encoded: string): EnrollmentResourceGrants {
       throw new TypeError("invalid resource payload");
     }
     const input = value as Record<string, unknown>;
-    const output: EnrollmentResourceGrants = {
-      ...(typeof input.problemBinding === "string" ? { problemBinding: input.problemBinding } : {}),
-      ...(typeof input.firstDirective === "string" ? { firstDirective: input.firstDirective } : {}),
-      ...(typeof input.eventBudget === "number" ? { eventBudget: input.eventBudget } : {}),
-      ...(typeof input.artifactBudgetBytes === "number"
-        ? { artifactBudgetBytes: input.artifactBudgetBytes }
-        : {}),
-      ...(typeof input.fellowGrantExpiresAt === "number"
-        ? { fellowGrantExpiresAt: input.fellowGrantExpiresAt }
-        : {}),
+    const allowed = new Set([
+      "problemBinding",
+      "firstDirective",
+      "eventBudget",
+      "artifactBudgetBytes",
+      "fellowGrantExpiresAt",
+    ]);
+    if (Object.keys(input).some((key) => !allowed.has(key))) {
+      throw new TypeError("unknown resource grant");
+    }
+    const parsed = EnrollmentResourceGrantsSchema.parse({
+      ...(input.problemBinding === undefined ? {} : { problem_binding: input.problemBinding }),
+      ...(input.firstDirective === undefined ? {} : { first_directive: input.firstDirective }),
+      ...(input.eventBudget === undefined ? {} : { event_budget: input.eventBudget }),
+      ...(input.artifactBudgetBytes === undefined
+        ? {}
+        : { artifact_budget_bytes: input.artifactBudgetBytes }),
+      ...(input.fellowGrantExpiresAt === undefined
+        ? {}
+        : { fellow_grant_expires_at: input.fellowGrantExpiresAt }),
+    });
+    return {
+      ...(parsed.problem_binding === undefined ? {} : { problemBinding: parsed.problem_binding }),
+      ...(parsed.first_directive === undefined ? {} : { firstDirective: parsed.first_directive }),
+      ...(parsed.event_budget === undefined ? {} : { eventBudget: parsed.event_budget }),
+      ...(parsed.artifact_budget_bytes === undefined
+        ? {}
+        : { artifactBudgetBytes: parsed.artifact_budget_bytes }),
+      ...(parsed.fellow_grant_expires_at === undefined
+        ? {}
+        : { fellowGrantExpiresAt: parsed.fellow_grant_expires_at }),
     };
-    return output;
   } catch {
     throw new EnrollmentError("PAIRING_INVALID");
   }
@@ -582,26 +624,82 @@ export class D1EnrollmentStore implements EnrollmentStore {
     }));
   }
 
-  async fellowsBySponsor(sponsorId: string): Promise<SponsorFellowRecord[]> {
-    const rows = await sql(
-      this.#db,
-      `SELECT f.name, f.model, f.harness,
-              g.granted_scopes_json, g.granted_resources_json, g.granted_at
-         FROM enrollment_fellows f
-         JOIN enrollment_grants g ON g.fellow_id = f.fellow_id
-        WHERE f.sponsor_id = ?
-        ORDER BY g.granted_at DESC
-        LIMIT 500`,
-      sponsorId,
-    ).all<FellowGrantRow>();
-    return rows.results.map((row) => ({
-      name: row.name,
-      model: row.model,
-      harness: row.harness,
-      grantedScopes: parseScopes(row.granted_scopes_json),
-      grantedResources: parseResources(row.granted_resources_json),
-      grantedAt: row.granted_at,
-    }));
+  async fellowsBySponsor(sponsorId: string, now: number): Promise<SponsorFellowRecord[]> {
+    let rows: readonly FellowGrantRow[];
+    try {
+      const result = await sql(
+        this.#db,
+        `SELECT f.fellow_id, f.name, f.model, f.harness, f.status,
+			          g.granted_scopes_json, g.granted_resources_json, g.granted_at,
+			          c.credential_id, c.credential_profile, c.issued_at, c.expires_at,
+			          c.last_used_at
+			     FROM enrollment_fellows f
+			     JOIN enrollment_grants g ON g.fellow_id = f.fellow_id
+			     LEFT JOIN enrollment_sponsor_security security ON security.sponsor_id = f.sponsor_id
+			     LEFT JOIN enrollment_credentials c
+			       ON c.fellow_id = f.fellow_id
+			      AND c.sponsor_id = f.sponsor_id
+			      AND c.revoked_at IS NULL
+			      AND c.expires_at > ?
+			      AND c.issued_at <= ?
+			      AND c.issued_at > COALESCE(security.panic_at, -1)
+			    WHERE f.sponsor_id = ?
+			    ORDER BY g.granted_at DESC, c.issued_at DESC
+			    LIMIT 1501`,
+        now,
+        now,
+        sponsorId,
+      ).all<FellowGrantRow>();
+      if (result.results.length > 1500) throw new EnrollmentPersistenceError();
+      rows = result.results;
+    } catch (error) {
+      if (error instanceof EnrollmentPersistenceError) throw error;
+      throw new EnrollmentPersistenceError();
+    }
+
+    const fellows = new Map<string, SponsorFellowRecord>();
+    for (const row of rows) {
+      let fellow = fellows.get(row.fellow_id);
+      if (fellow === undefined) {
+        let grantedScopes: readonly RequestedScope[];
+        let grantedResources: EnrollmentResourceGrants;
+        try {
+          grantedScopes = parseScopes(row.granted_scopes_json);
+          grantedResources = parseResources(row.granted_resources_json);
+        } catch {
+          throw new EnrollmentPersistenceError();
+        }
+        fellow = {
+          fellowId: row.fellow_id,
+          name: row.name,
+          model: row.model,
+          harness: row.harness,
+          status: row.status,
+          grantedScopes,
+          grantedResources,
+          grantedAt: row.granted_at,
+          credentials: [],
+        };
+        fellows.set(row.fellow_id, fellow);
+      }
+      if (
+        row.credential_id === null ||
+        row.credential_profile === null ||
+        row.issued_at === null ||
+        row.expires_at === null
+      ) {
+        continue;
+      }
+      (fellow.credentials as SponsorFellowRecord["credentials"][number][]).push({
+        credentialId: row.credential_id,
+        profile: row.credential_profile,
+        issuedAt: row.issued_at,
+        expiresAt: row.expires_at,
+        ...(row.last_used_at === null ? {} : { lastUsedAt: row.last_used_at }),
+        active: row.status === "active" || row.status === "suspicious_review",
+      });
+    }
+    return [...fellows.values()];
   }
 
   async capsule(enrollmentId: string, now: number): Promise<EnrollmentCapsule> {
@@ -722,16 +820,18 @@ export class D1EnrollmentStore implements EnrollmentStore {
           sql(
             this.#db,
             `INSERT INTO enrollment_credentials (
-               credential_id, proposal_id, fellow_id, sponsor_id, token_hash,
-               granted_scopes_json, granted_resources_json, issued_at
-             ) SELECT ?, p.proposal_id, g.fellow_id, g.sponsor_id, ?,
-                      g.granted_scopes_json, g.granted_resources_json, ?
+				   credential_id, proposal_id, fellow_id, sponsor_id, token_hash,
+				   granted_scopes_json, granted_resources_json, issued_at, expires_at,
+				   credential_profile
+				 ) SELECT ?, p.proposal_id, g.fellow_id, g.sponsor_id, ?,
+				          g.granted_scopes_json, g.granted_resources_json, ?, ?, 'bearer'
                  FROM enrollment_proposals p
                  JOIN enrollment_grants g ON g.proposal_id = p.proposal_id
                 WHERE p.proposal_id = ? AND changes() = 1`,
             `cred-${row.proposal_id}`,
             issued.tokenHash,
             attempt.now,
+            attempt.now + FELLOW_TOKEN_TTL_MS,
             row.proposal_id,
           ),
         ];
@@ -768,14 +868,13 @@ export class D1EnrollmentStore implements EnrollmentStore {
     // breaches the first at saturation, which is exactly when it must not.
     //
     // What is bounded here is what crosses the Worker boundary: at most
-    // `limit` rows are ever returned and held in Worker memory. The work
-    // *inside* SQLite is not flat — the engine walks the series and performs
-    // one index probe per candidate up to the gaps it returns, and the
-    // `ORDER BY` makes it walk the whole series rather than stopping at the
-    // limit. That is deliberate: the ordering is public behaviour, and the
-    // cost is in-engine rather than a round trip per candidate. Measured on
-    // SQLite with 5_000 occupied suffixes it is ~3.8 ms per call, against
-    // ~2.0 ms for the same statement without `ORDER BY`.
+    // `limit` rows are ever returned and held in Worker memory. The work inside
+    // SQLite is not flat: the engine walks the series and performs one indexed
+    // probe per candidate. Keeping this as one join is substantially faster at
+    // saturation than a correlated lookup inside each recursive step. The seed
+    // is explicitly cast because real D1 binds JavaScript numbers as SQL REAL;
+    // without it, concatenation emits `fellow-2.0` while bun:sqlite emits
+    // `fellow-2`, and the production name law correctly rejects that drift.
     //
     // Comparing generated text to stored text is also what retires a whole
     // class of parsing bugs: `<stem>-02`, `<stem>-foo` and `<stem>-2-alpha` are
@@ -794,9 +893,11 @@ export class D1EnrollmentStore implements EnrollmentStore {
       const rows = await sql(
         this.#db,
         `WITH RECURSIVE suggestion(suffix) AS (
-           SELECT ?
+           SELECT CAST(? AS INTEGER)
            UNION ALL
-           SELECT suffix + 1 FROM suggestion WHERE suffix < ?
+           SELECT suggestion.suffix + 1
+             FROM suggestion
+            WHERE suggestion.suffix < CAST(? AS INTEGER)
          )
          SELECT ? || suggestion.suffix AS name
            FROM suggestion
@@ -833,29 +934,71 @@ export class D1EnrollmentStore implements EnrollmentStore {
     return suggestions;
   }
 
-  async credentialByTokenHash(tokenHash: string): Promise<FellowCredentialBinding | undefined> {
-    const row = await sql(
-      this.#db,
-      `SELECT c.fellow_id, c.credential_id, c.sponsor_id, f.name, f.model, f.harness,
-              c.granted_scopes_json, c.granted_resources_json, c.token_hash, c.issued_at
-         FROM enrollment_credentials c
-         JOIN enrollment_fellows f ON f.fellow_id = c.fellow_id
-        WHERE c.token_hash = ?`,
-      tokenHash,
-    ).first<CredentialRow>();
+  async authenticateCredential(
+    tokenHash: string,
+    now: number,
+  ): Promise<FellowCredentialBinding | undefined> {
+    let row: CredentialRow | null;
+    try {
+      row = await sql(
+        this.#db,
+        `UPDATE enrollment_credentials
+				        SET last_used_at = MAX(COALESCE(last_used_at, issued_at), ?)
+				      WHERE token_hash = ?
+				        AND revoked_at IS NULL
+				        AND issued_at <= ?
+				        AND expires_at > ?
+			        AND issued_at > COALESCE((
+			          SELECT panic_at FROM enrollment_sponsor_security
+			           WHERE sponsor_id = enrollment_credentials.sponsor_id
+			        ), -1)
+			        AND EXISTS (
+				          SELECT 1 FROM enrollment_fellows
+				           WHERE fellow_id = enrollment_credentials.fellow_id
+				             AND sponsor_id = enrollment_credentials.sponsor_id
+				             AND status IN ('active', 'suspicious_review')
+			        )
+			      RETURNING fellow_id, credential_id, sponsor_id,
+			        (SELECT name FROM enrollment_fellows
+			          WHERE fellow_id = enrollment_credentials.fellow_id) AS name,
+			        (SELECT model FROM enrollment_fellows
+			          WHERE fellow_id = enrollment_credentials.fellow_id) AS model,
+			        (SELECT harness FROM enrollment_fellows
+			          WHERE fellow_id = enrollment_credentials.fellow_id) AS harness,
+			        (SELECT status FROM enrollment_fellows
+			          WHERE fellow_id = enrollment_credentials.fellow_id) AS status,
+			        granted_scopes_json, granted_resources_json, token_hash, issued_at,
+			        expires_at, last_used_at, revoked_at, credential_profile`,
+        now,
+        tokenHash,
+        now,
+        now,
+      ).first<CredentialRow>();
+    } catch {
+      throw new EnrollmentPersistenceError();
+    }
     if (row === null) return undefined;
-    return {
-      fellowId: row.fellow_id,
-      credentialId: row.credential_id,
-      sponsorId: row.sponsor_id,
-      name: row.name,
-      model: row.model,
-      harness: row.harness,
-      grantedScopes: parseScopes(row.granted_scopes_json),
-      grantedResources: parseResources(row.granted_resources_json),
-      tokenHash: row.token_hash,
-      issuedAt: row.issued_at,
-    };
+    try {
+      return {
+        fellowId: row.fellow_id,
+        credentialId: row.credential_id,
+        sponsorId: row.sponsor_id,
+        name: row.name,
+        model: row.model,
+        harness: row.harness,
+        grantedScopes: parseScopes(row.granted_scopes_json),
+        grantedResources: parseResources(row.granted_resources_json),
+        tokenHash: row.token_hash,
+        issuedAt: row.issued_at,
+        expiresAt: row.expires_at,
+        lastUsedAt: row.last_used_at ?? undefined,
+        revokedAt: row.revoked_at ?? undefined,
+        credentialProfile: row.credential_profile,
+        fellowStatus: row.status,
+      };
+    } catch {
+      throw new EnrollmentPersistenceError();
+    }
   }
 
   async idempotencyReplay(

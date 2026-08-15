@@ -435,14 +435,31 @@ describe("sponsor enrollment routes", () => {
       envelopeRequest("/v1/fellows", fellowsHeaders, "GET"),
     );
     expect(fellowsResponse.status).toBe(200);
-    const fellows = SponsorFellowListResponseSchema.parse(await fellowsResponse.json());
+    const fellowPayload = await fellowsResponse.json();
+    const fellows = SponsorFellowListResponseSchema.parse(fellowPayload);
     expect(fellows.fellows).toHaveLength(1);
     expect(fellows.fellows[0]).toMatchObject({
+      status: "active",
       name: "orchid-vector",
       model: "anthropic/fable-5",
       harness: "claude-code",
       granted_scopes: ["promote", "review"],
+      credentials: [
+        {
+          profile: "bearer",
+          active: true,
+        },
+      ],
     });
+    expect(fellows.fellows[0]?.fellow_id.startsWith("F-")).toBe(true);
+    expect(fellows.fellows[0]?.credentials[0]?.last_used_at).toBeInteger();
+    expect(
+      (fellows.fellows[0]?.credentials[0]?.expires_at ?? 0) -
+        (fellows.fellows[0]?.credentials[0]?.issued_at ?? 0),
+    ).toBe(365 * 24 * 60 * 60 * 1_000);
+    const serializedFellows = JSON.stringify(fellowPayload);
+    expect(serializedFellows).not.toContain(outcome.token as string);
+    expect(serializedFellows).not.toContain("token_hash");
   });
 
   test("deny ends the flow and lists no fellow", async () => {

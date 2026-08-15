@@ -135,6 +135,23 @@ if (typeof origin !== "string" || !/^http:\/\/127\.0\.0\.1:\d+$/.test(origin)) {
       throw new Error("capsule-json");
     }
 
+    const plantedWrongSecret = await post("/v1/fellows", {
+      enrollment_id: minted.enrollmentId,
+      secret: `v1.${"z".repeat(43)}`,
+      name: "local-orchid",
+      model: "local-model",
+      harness: "codex",
+    });
+    const plantedWrongSecretBody = (await plantedWrongSecret.json()) as { code?: unknown };
+    if (plantedWrongSecret.status !== 400 || plantedWrongSecretBody.code !== "PAIRING_INVALID") {
+      const safeCode =
+        typeof plantedWrongSecretBody.code === "string" &&
+        /^[A-Z][A-Z0-9_]{0,39}$/.test(plantedWrongSecretBody.code)
+          ? plantedWrongSecretBody.code
+          : "INVALID_CODE";
+      throw new Error(`wrong-secret-status-${plantedWrongSecret.status}-code-${safeCode}`);
+    }
+
     const malformedName = await post("/v1/fellows", {
       enrollment_id: minted.enrollmentId,
       secret: minted.secret,
@@ -152,7 +169,17 @@ if (typeof origin !== "string" || !/^http:\/\/127\.0\.0\.1:\d+$/.test(origin)) {
       !Array.isArray(malformedNameBody.suggestions) ||
       malformedNameBody.suggestions.length !== 3
     ) {
-      throw new Error("name-policy");
+      const safeCode =
+        typeof malformedNameBody.code === "string" &&
+        /^[A-Z][A-Z0-9_]{0,39}$/.test(malformedNameBody.code)
+          ? malformedNameBody.code
+          : "INVALID_CODE";
+      const suggestionCount = Array.isArray(malformedNameBody.suggestions)
+        ? malformedNameBody.suggestions.length
+        : -1;
+      throw new Error(
+        `name-policy-status-${malformedName.status}-code-${safeCode}-suggestions-${suggestionCount}`,
+      );
     }
 
     const claimRequest = {
@@ -361,6 +388,7 @@ if (typeof origin !== "string" || !/^http:\/\/127\.0\.0\.1:\d+$/.test(origin)) {
         cases: [
           "capsule-public-face-secret-boundary",
           "planted-minted-secret-leak-refusal",
+          "planted-wrong-secret-opaque-refusal",
           "name-policy",
           "approval-card-principal-boundary",
           "durable-approval-grant",

@@ -264,12 +264,37 @@ test("the sponsor proposal list reuses the approval card contract exactly", asyn
   }
 });
 
-test("the sponsor fellow list exposes no credential material", async () => {
+test("the sponsor fellow list exposes hygiene metadata but no bearer or token hash", async () => {
   const parsed = SponsorFellowListResponseSchema.safeParse(
     await fixture(VALID_FELLOW_LIST_FIXTURE),
   );
   expect(parsed.success).toBe(true);
 
+  if (parsed.success) {
+    expect(parsed.data.fellows[0]?.credentials[0]).toMatchObject({
+      profile: "bearer",
+      active: true,
+    });
+    const fellow = parsed.data.fellows[0];
+    const credential = fellow?.credentials[0];
+    expect(fellow).toBeDefined();
+    expect(credential).toBeDefined();
+    if (fellow !== undefined && credential !== undefined) {
+      expect(
+        SponsorFellowListResponseSchema.safeParse({
+          fellows: [
+            {
+              ...fellow,
+              credentials: Array.from({ length: 4 }, (_, index) => ({
+                ...credential,
+                credential_id: `credential-over-cap-${index}`,
+              })),
+            },
+          ],
+        }).success,
+      ).toBe(false);
+    }
+  }
   // A token hash or any extra field is a strict-shape violation, never a passthrough.
   expect(
     SponsorFellowListResponseSchema.safeParse(await fixture(INVALID_FELLOW_LIST_FIXTURE)).success,

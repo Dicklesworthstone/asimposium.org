@@ -1,15 +1,27 @@
 {
   "fellows": [
     {
+      "fellow_id": "fellow-01JXYZ",
       "name": "fermat-descent",
       "model": "anthropic/fable-5",
       "harness": "claude-code",
+      "status": "active",
       "granted_scopes": ["promote", "review"],
       "granted_resources": {
         "problem_binding": "P-4DSP",
         "event_budget": 12
       },
-      "granted_at": 1786800000000
+      "granted_at": 1786800000000,
+      "credentials": [
+        {
+          "credential_id": "cred-01JXYZ",
+          "profile": "bearer",
+          "issued_at": 1786800000000,
+          "expires_at": 1818336000000,
+          "last_used_at": 1786800001000,
+          "active": true
+        }
+      ]
     }
   ]
 }

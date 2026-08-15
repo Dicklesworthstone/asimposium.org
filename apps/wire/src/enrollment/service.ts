@@ -5,6 +5,8 @@ import {
   EnrollmentDeniedResponseSchema,
   EnrollmentExpiredResponseSchema,
   EnrollmentFlowPollRequestSchema,
+  type FellowCredentialProfile,
+  type FellowLifecycleStatus,
   type EnrollmentGrantReduction,
   EnrollmentPendingResponseSchema,
   EnrollmentSlowDownResponseSchema,
@@ -25,7 +27,14 @@ const MAX_ID_ATTEMPTS = 4;
 const IDEMPOTENCY_TTL_MS = 24 * 60 * 60 * 1_000;
 export const INITIAL_POLL_INTERVAL_SECONDS = 5;
 export const MAX_POLL_INTERVAL_SECONDS = 30;
+export const FELLOW_TOKEN_TTL_MS = 365 * 24 * 60 * 60 * 1_000;
 const POLL_SLOW_DOWN_INCREMENT_SECONDS = 5;
+
+function fellowStatusCanAuthenticate(status: FellowLifecycleStatus): boolean {
+  // Suspicious-review Fellows retain read access for sponsor diagnosis. Write
+  // authorization must additionally quarantine that status in centralized policy.
+  return status === "active" || status === "suspicious_review";
+}
 
 export type EnrollmentErrorCode =
   | "FLOW_INVALID"
@@ -83,16 +92,28 @@ export type EnrollmentPrincipal =
   | { readonly type: "service"; readonly serviceId: string };
 
 /**
- * A Fellow as the sponsor console lists it: the approval-time grant facts.
- * No token, hash, credential id, or proposal handle ever appears here.
+ * Non-secret hygiene for one credential in the owning sponsor's console.
  */
+export interface SponsorCredentialRecord {
+  readonly credentialId: string;
+  readonly profile: FellowCredentialProfile;
+  readonly issuedAt: number;
+  readonly expiresAt: number;
+  readonly lastUsedAt?: number;
+  readonly active: boolean;
+}
+
+/** A Fellow as the sponsor console lists it: grants plus credential hygiene. */
 export interface SponsorFellowRecord {
+  readonly fellowId: string;
   readonly name: string;
   readonly model: string;
   readonly harness: string;
+  readonly status: FellowLifecycleStatus;
   readonly grantedScopes: readonly RequestedScope[];
   readonly grantedResources: EnrollmentResourceGrants;
   readonly grantedAt: number;
+  readonly credentials: readonly SponsorCredentialRecord[];
 }
 
 export interface EnrollmentClock {
@@ -212,7 +233,7 @@ export interface EnrollmentResourceGrants {
   readonly fellowGrantExpiresAt?: number;
 }
 
-/** Immutable Fellow + credential binding committed at the one token winner. */
+/** Fellow + credential binding after an atomic lifecycle-aware authentication. */
 export interface FellowCredentialBinding {
   readonly fellowId: string;
   readonly credentialId: string;
@@ -224,6 +245,11 @@ export interface FellowCredentialBinding {
   readonly grantedResources: EnrollmentResourceGrants;
   readonly tokenHash: string;
   readonly issuedAt: number;
+  readonly expiresAt: number;
+  readonly lastUsedAt?: number;
+  readonly revokedAt?: number;
+  readonly credentialProfile: FellowCredentialProfile;
+  readonly fellowStatus: FellowLifecycleStatus;
 }
 
 export interface EnrollmentStorageSnapshot {
@@ -324,12 +350,16 @@ export interface EnrollmentStore {
    * to `expired` first, matching approvalCard's lazy-expiry rule.
    */
   pendingApprovalCardsBySponsor(sponsorId: string, now: number): Promise<EnrollmentApprovalCard[]>;
-  /** Approval-time grant facts for the console's Fellows list. */
-  fellowsBySponsor(sponsorId: string): Promise<SponsorFellowRecord[]>;
+  /** Approval grants and non-secret credential hygiene for the sponsor console. */
+  fellowsBySponsor(sponsorId: string, now: number): Promise<SponsorFellowRecord[]>;
   capsule(enrollmentId: string, now: number): Promise<EnrollmentCapsule>;
   poll(attempt: PollAttempt): Promise<PollDecision>;
   availabilitySuggestions(name: string): Promise<readonly string[]>;
-  credentialByTokenHash(tokenHash: string): Promise<FellowCredentialBinding | undefined>;
+  /** Atomically validates lifecycle state and records a successful use. */
+  authenticateCredential(
+    tokenHash: string,
+    now: number,
+  ): Promise<FellowCredentialBinding | undefined>;
   idempotencyReplay(attempt: IdempotencyAttempt): Promise<EnrollmentIdempotencyReplay | undefined>;
 }
 
@@ -920,7 +950,7 @@ export class InMemoryEnrollmentStore implements EnrollmentStore {
     });
   }
 
-  async fellowsBySponsor(sponsorId: string): Promise<SponsorFellowRecord[]> {
+  async fellowsBySponsor(sponsorId: string, now: number): Promise<SponsorFellowRecord[]> {
     return this.serialized(() => {
       const fellows: SponsorFellowRecord[] = [];
       for (const record of this.#records.values()) {
@@ -934,13 +964,37 @@ export class InMemoryEnrollmentStore implements EnrollmentStore {
         ) {
           continue;
         }
+        const status: FellowLifecycleStatus = "active";
+        const credentials = [...this.#credentials.values()]
+          .filter(
+            (credential) =>
+              credential.fellowId === proposal.fellowId &&
+              credential.revokedAt === undefined &&
+              credential.issuedAt <= now &&
+              now < credential.expiresAt,
+          )
+          .map((credential) => ({
+            credentialId: credential.credentialId,
+            profile: credential.credentialProfile,
+            issuedAt: credential.issuedAt,
+            expiresAt: credential.expiresAt,
+            ...(credential.lastUsedAt === undefined ? {} : { lastUsedAt: credential.lastUsedAt }),
+            active:
+              fellowStatusCanAuthenticate(status) &&
+              credential.issuedAt <= now &&
+              now < credential.expiresAt,
+          }))
+          .sort((left, right) => right.issuedAt - left.issuedAt);
         fellows.push({
+          fellowId: proposal.fellowId,
           name: proposal.name,
           model: proposal.model,
           harness: proposal.harness,
+          status,
           grantedScopes: proposal.grantedScopes,
           grantedResources: proposal.grantedResources,
           grantedAt: proposal.grantedAt,
+          credentials,
         });
       }
       fellows.sort((left, right) => right.grantedAt - left.grantedAt);
@@ -1031,6 +1085,9 @@ export class InMemoryEnrollmentStore implements EnrollmentStore {
         grantedResources: proposal.grantedResources,
         tokenHash: issued.tokenHash,
         issuedAt: attempt.now,
+        expiresAt: attempt.now + FELLOW_TOKEN_TTL_MS,
+        credentialProfile: "bearer",
+        fellowStatus: "active",
       });
       this.commitIdempotency(idempotency);
       return decision;
@@ -1064,8 +1121,28 @@ export class InMemoryEnrollmentStore implements EnrollmentStore {
     });
   }
 
-  async credentialByTokenHash(tokenHash: string): Promise<FellowCredentialBinding | undefined> {
-    return this.serialized(() => this.#credentials.get(tokenHash));
+  async authenticateCredential(
+    tokenHash: string,
+    now: number,
+  ): Promise<FellowCredentialBinding | undefined> {
+    return this.serialized(() => {
+      const existing = this.#credentials.get(tokenHash);
+      if (
+        existing === undefined ||
+        !fellowStatusCanAuthenticate(existing.fellowStatus) ||
+        existing.revokedAt !== undefined ||
+        now < existing.issuedAt ||
+        now >= existing.expiresAt
+      ) {
+        return undefined;
+      }
+      const authenticated = {
+        ...existing,
+        lastUsedAt: Math.max(existing.lastUsedAt ?? existing.issuedAt, now),
+      };
+      this.#credentials.set(tokenHash, authenticated);
+      return authenticated;
+    });
   }
 
   async idempotencyReplay(
@@ -1407,10 +1484,10 @@ export class EnrollmentService {
     return this.#store.pendingApprovalCardsBySponsor(sponsor.sponsorId, this.#clock.now());
   }
 
-  /** The sponsor's Fellows as the console lists them: grant facts, never credentials. */
+  /** The sponsor's Fellows: grant facts and non-secret credential hygiene. */
   async fellows(sponsor: EnrollmentPrincipal): Promise<SponsorFellowRecord[]> {
     assertSponsor(sponsor);
-    return this.#store.fellowsBySponsor(sponsor.sponsorId);
+    return this.#store.fellowsBySponsor(sponsor.sponsorId, this.#clock.now());
   }
 
   async decide(
@@ -1536,14 +1613,13 @@ export class EnrollmentService {
   }
 
   /**
-   * Token-to-identity lookup for the future `/v1/hello` owner. It creates no
-   * route and proves no deployed authentication; it prevents an approved flow
-   * from returning an orphan credential in the persistence contract.
+   * Authenticate a header-only bearer and record its successful use. Expired,
+   * revoked, paused, archived and compromised authority returns one opaque miss.
    */
   async credentialBinding(rawToken: string): Promise<FellowCredentialBinding | undefined> {
     if (!/^asimp_ag_[0-9A-HJKMNP-TV-Z]{26}_[A-Za-z0-9_-]{43}$/.test(rawToken)) return undefined;
     const tokenHash = await sha256Hex(rawToken);
-    return this.#store.credentialByTokenHash(tokenHash);
+    return this.#store.authenticateCredential(tokenHash, this.#clock.now());
   }
 }
 

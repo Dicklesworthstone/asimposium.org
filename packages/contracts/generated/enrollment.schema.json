@@ -898,9 +898,66 @@
       ],
       "additionalProperties": false
     },
+    "sponsor_credential_summary": {
+      "type": "object",
+      "properties": {
+        "credential_id": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 160
+        },
+        "profile": {
+          "type": "string",
+          "enum": [
+            "bearer",
+            "dpop",
+            "http-message-signature"
+          ]
+        },
+        "issued_at": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 9007199254740991
+        },
+        "expires_at": {
+          "type": "integer",
+          "exclusiveMinimum": 0,
+          "maximum": 9007199254740991
+        },
+        "last_used_at": {
+          "anyOf": [
+            {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 9007199254740991
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "active": {
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "credential_id",
+        "profile",
+        "issued_at",
+        "expires_at",
+        "last_used_at",
+        "active"
+      ],
+      "additionalProperties": false
+    },
     "sponsor_fellow_summary": {
       "type": "object",
       "properties": {
+        "fellow_id": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 160
+        },
         "name": {
           "type": "string",
           "pattern": "^[a-z][a-z0-9-]{2,31}$"
@@ -914,6 +971,18 @@
           "type": "string",
           "minLength": 1,
           "maxLength": 160
+        },
+        "status": {
+          "type": "string",
+          "enum": [
+            "pending",
+            "active",
+            "paused",
+            "revoked",
+            "archived",
+            "compromised",
+            "suspicious_review"
+          ]
         },
         "granted_scopes": {
           "minItems": 1,
@@ -963,15 +1032,74 @@
           "type": "integer",
           "exclusiveMinimum": 0,
           "maximum": 9007199254740991
+        },
+        "credentials": {
+          "maxItems": 3,
+          "type": "array",
+          "items": {
+            "type": "object",
+            "properties": {
+              "credential_id": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 160
+              },
+              "profile": {
+                "type": "string",
+                "enum": [
+                  "bearer",
+                  "dpop",
+                  "http-message-signature"
+                ]
+              },
+              "issued_at": {
+                "type": "integer",
+                "minimum": 0,
+                "maximum": 9007199254740991
+              },
+              "expires_at": {
+                "type": "integer",
+                "exclusiveMinimum": 0,
+                "maximum": 9007199254740991
+              },
+              "last_used_at": {
+                "anyOf": [
+                  {
+                    "type": "integer",
+                    "minimum": 0,
+                    "maximum": 9007199254740991
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
+              },
+              "active": {
+                "type": "boolean"
+              }
+            },
+            "required": [
+              "credential_id",
+              "profile",
+              "issued_at",
+              "expires_at",
+              "last_used_at",
+              "active"
+            ],
+            "additionalProperties": false
+          }
         }
       },
       "required": [
+        "fellow_id",
         "name",
         "model",
         "harness",
+        "status",
         "granted_scopes",
         "granted_resources",
-        "granted_at"
+        "granted_at",
+        "credentials"
       ],
       "additionalProperties": false
     },
@@ -984,6 +1112,11 @@
           "items": {
             "type": "object",
             "properties": {
+              "fellow_id": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 160
+              },
               "name": {
                 "type": "string",
                 "pattern": "^[a-z][a-z0-9-]{2,31}$"
@@ -997,6 +1130,18 @@
                 "type": "string",
                 "minLength": 1,
                 "maxLength": 160
+              },
+              "status": {
+                "type": "string",
+                "enum": [
+                  "pending",
+                  "active",
+                  "paused",
+                  "revoked",
+                  "archived",
+                  "compromised",
+                  "suspicious_review"
+                ]
               },
               "granted_scopes": {
                 "minItems": 1,
@@ -1046,15 +1191,74 @@
                 "type": "integer",
                 "exclusiveMinimum": 0,
                 "maximum": 9007199254740991
+              },
+              "credentials": {
+                "maxItems": 3,
+                "type": "array",
+                "items": {
+                  "type": "object",
+                  "properties": {
+                    "credential_id": {
+                      "type": "string",
+                      "minLength": 1,
+                      "maxLength": 160
+                    },
+                    "profile": {
+                      "type": "string",
+                      "enum": [
+                        "bearer",
+                        "dpop",
+                        "http-message-signature"
+                      ]
+                    },
+                    "issued_at": {
+                      "type": "integer",
+                      "minimum": 0,
+                      "maximum": 9007199254740991
+                    },
+                    "expires_at": {
+                      "type": "integer",
+                      "exclusiveMinimum": 0,
+                      "maximum": 9007199254740991
+                    },
+                    "last_used_at": {
+                      "anyOf": [
+                        {
+                          "type": "integer",
+                          "minimum": 0,
+                          "maximum": 9007199254740991
+                        },
+                        {
+                          "type": "null"
+                        }
+                      ]
+                    },
+                    "active": {
+                      "type": "boolean"
+                    }
+                  },
+                  "required": [
+                    "credential_id",
+                    "profile",
+                    "issued_at",
+                    "expires_at",
+                    "last_used_at",
+                    "active"
+                  ],
+                  "additionalProperties": false
+                }
               }
             },
             "required": [
+              "fellow_id",
               "name",
               "model",
               "harness",
+              "status",
               "granted_scopes",
               "granted_resources",
-              "granted_at"
+              "granted_at",
+              "credentials"
             ],
             "additionalProperties": false
           }
@@ -1280,6 +1484,7 @@
     "sponsor_enrollment_decision",
     "mint_response",
     "sponsor_proposal_list_response",
+    "sponsor_credential_summary",
     "sponsor_fellow_summary",
     "sponsor_fellow_list_response",
     "sponsor_enrollment_decision_response",
