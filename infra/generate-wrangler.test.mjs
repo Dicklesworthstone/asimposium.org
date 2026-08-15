@@ -117,12 +117,12 @@ const cases = [
     },
   },
   {
-    name: "the-markdown-text-rule-survives-generation",
+    name: "the-served-text-rules-survive-generation",
     execute() {
       for (const [name, config] of Object.entries(parsed)) {
         assert.equal(config.rules.length, 1, name);
         assert.equal(config.rules[0].type, "Text", name);
-        assert.deepEqual(config.rules[0].globs, ["**/*.md"], name);
+        assert.deepEqual(config.rules[0].globs, ["**/*.md", "**/*.txt"], name);
         assert.equal(config.rules[0].fallthrough, true, name);
       }
     },

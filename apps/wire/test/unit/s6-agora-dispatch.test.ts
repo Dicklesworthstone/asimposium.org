@@ -1,7 +1,7 @@
 import { describe, expect, test } from "bun:test";
 
-import { dispatchSignedSponsorRequest } from "../../../web/lib/stoa-sponsor.ts";
 import { mintServiceEnvelope } from "../../../web/lib/service-envelope.ts";
+import { dispatchSignedSponsorRequest } from "../../../web/lib/stoa-sponsor.ts";
 import { toHex } from "../../src/auth/canonical";
 import {
   authenticateServiceEnvelopeRequest,

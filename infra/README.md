@@ -8,8 +8,9 @@ pin Wrangler as an exact development dependency; a range is not a reproducible
 toolchain contract.
 
 The configuration pins the Worker entrypoint, Workers compatibility date, D1
-migration directory, R2 binding names, and Markdown text-module rule so later
-work has one fixed place to land. `validate-scaffold.mjs` uses the repository's
+migration directory, R2 binding names, and served-text module rule for both
+Markdown and `llms.txt` so later work has one fixed place to land.
+`validate-scaffold.mjs` uses the repository's
 pinned Bun runtime and semantic TOML parser to reject malformed TOML, duplicate
 scalar keys, and duplicate/shadowed D1, R2, or rules entries before it checks
 the fixed local-only shape:
@@ -89,7 +90,7 @@ Generation is a pure function of the validated topology — same input, same
 bytes, no timestamps — so drift is detectable rather than silent. The contract
 suite parses the generated TOML back and reconciles it field by field: D1
 binding/name/id, both R2 roles and bindings, the Durable Object binding and
-class, the Markdown Text rule, and the exact required binding set. It also holds
+class, the Markdown-and-text Text rule, and the exact required binding set. It also holds
 the safety properties in the generated artifact: no Worker `route` (a bucket is
 published by an R2 custom domain, never by putting the Worker on the blob path),
 no `custom_domain` on any bucket entry, no `account_id`, no `vars`, no literal

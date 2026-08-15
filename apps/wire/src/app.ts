@@ -1,5 +1,5 @@
-import { Hono } from "hono";
 import { type DocumentId, getDocument } from "@asimposium/protocol";
+import { Hono } from "hono";
 
 import { authenticateServiceEnvelopeRequest } from "./auth/http";
 import { type VerificationKeyRecord, VerificationKeyring } from "./auth/keyring";
@@ -85,8 +85,12 @@ function responseForHead(request: Request, response: Response): Response {
 
 /** Site-authored discovery texts; independent of D1 and safe on the very first GET. */
 function servePublicText(request: Request, id: DocumentId, format: "md" | "txt"): Response {
+  const document = getDocument(id);
   const requestedFormats = new URL(request.url).searchParams.getAll("format");
-  if (requestedFormats.length > 1 || (requestedFormats[0] !== undefined && requestedFormats[0] !== format)) {
+  if (
+    requestedFormats.length > 1 ||
+    (requestedFormats[0] !== undefined && requestedFormats[0] !== format)
+  ) {
     return responseForHead(
       request,
       problem({
@@ -95,12 +99,16 @@ function servePublicText(request: Request, id: DocumentId, format: "md" | "txt")
         title: "Unsupported response format",
         detail: "The ?format= value is not one this route serves.",
         fixHint: "Drop ?format= or use the value in `allowed`.",
-        extensions: { allowed: [format] },
+        rule: "A5",
+        extensions: {
+          schema: "https://a.asimposium.org/schemas/problem.v1.json",
+          example: { method: "GET", path: `${document.served_at}?format=${format}` },
+          allowed: [format],
+        },
       }),
     );
   }
 
-  const document = getDocument(id);
   const etag = `"${document.digest}"`;
   const headers = {
     "cache-control": PUBLIC_TEXT_CACHE_CONTROL,

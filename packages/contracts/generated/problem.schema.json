@@ -8,6 +8,239 @@
     "problem_document": {
       "anyOf": [
         {
+          "oneOf": [
+            {
+              "type": "object",
+              "properties": {
+                "type": {
+                  "type": "string",
+                  "maxLength": 200,
+                  "pattern": "^https:\\/\\/asimposium\\.org\\/errors\\/.*"
+                },
+                "title": {
+                  "type": "string",
+                  "minLength": 1,
+                  "maxLength": 160
+                },
+                "status": {
+                  "type": "integer",
+                  "minimum": 400,
+                  "maximum": 599
+                },
+                "code": {
+                  "type": "string",
+                  "enum": [
+                    "BODY_ONLY_REQUIRED",
+                    "DECISION_BODY_INVALID",
+                    "DECISION_TARGET_MISMATCH",
+                    "ENROLLMENT_ID_INVALID",
+                    "HARNESS_AS_NAME",
+                    "IDEMPOTENCY_CONFLICT",
+                    "IDEMPOTENCY_KEY_INVALID",
+                    "MINT_BODY_INVALID",
+                    "MODEL_AS_NAME",
+                    "NAME_INVALID",
+                    "NAME_RESERVED",
+                    "NAME_TAKEN",
+                    "PATH_ONLY_REQUIRED",
+                    "SCOPE_ESCALATION",
+                    "SCOPE_NOT_REDUCED"
+                  ]
+                },
+                "detail": {
+                  "type": "string",
+                  "minLength": 1,
+                  "maxLength": 400
+                },
+                "fix_hint": {
+                  "type": "string",
+                  "minLength": 1,
+                  "maxLength": 400
+                },
+                "rule": {
+                  "type": "string",
+                  "enum": [
+                    "A5",
+                    "ADR-20",
+                    "P-EN-NAME"
+                  ]
+                },
+                "schema": {
+                  "type": "string",
+                  "maxLength": 200,
+                  "format": "uri"
+                },
+                "example": {
+                  "type": "object",
+                  "propertyNames": {
+                    "type": "string"
+                  },
+                  "additionalProperties": {}
+                },
+                "suggestions": {
+                  "maxItems": 3,
+                  "type": "array",
+                  "items": {
+                    "type": "string",
+                    "minLength": 1,
+                    "maxLength": 32
+                  }
+                }
+              },
+              "required": [
+                "type",
+                "title",
+                "status",
+                "code",
+                "detail",
+                "fix_hint",
+                "rule",
+                "schema",
+                "example"
+              ],
+              "additionalProperties": false
+            },
+            {
+              "type": "object",
+              "properties": {
+                "type": {
+                  "type": "string",
+                  "maxLength": 200,
+                  "pattern": "^https:\\/\\/asimposium\\.org\\/errors\\/.*"
+                },
+                "title": {
+                  "type": "string",
+                  "minLength": 1,
+                  "maxLength": 160
+                },
+                "status": {
+                  "type": "integer",
+                  "minimum": 400,
+                  "maximum": 599
+                },
+                "code": {
+                  "type": "string",
+                  "const": "UNKNOWN_FORMAT"
+                },
+                "detail": {
+                  "type": "string",
+                  "minLength": 1,
+                  "maxLength": 400
+                },
+                "fix_hint": {
+                  "type": "string",
+                  "minLength": 1,
+                  "maxLength": 400
+                },
+                "rule": {
+                  "type": "string",
+                  "enum": [
+                    "A5",
+                    "ADR-20",
+                    "P-EN-NAME"
+                  ]
+                },
+                "schema": {
+                  "type": "string",
+                  "maxLength": 200,
+                  "format": "uri"
+                },
+                "example": {
+                  "type": "object",
+                  "propertyNames": {
+                    "type": "string"
+                  },
+                  "additionalProperties": {}
+                },
+                "allowed": {
+                  "minItems": 1,
+                  "maxItems": 12,
+                  "type": "array",
+                  "items": {
+                    "type": "string",
+                    "minLength": 1,
+                    "maxLength": 32
+                  }
+                }
+              },
+              "required": [
+                "type",
+                "title",
+                "status",
+                "code",
+                "detail",
+                "fix_hint",
+                "rule",
+                "schema",
+                "example",
+                "allowed"
+              ],
+              "additionalProperties": false
+            }
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "type": {
+              "type": "string",
+              "maxLength": 200,
+              "pattern": "^https:\\/\\/asimposium\\.org\\/errors\\/.*"
+            },
+            "title": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 160
+            },
+            "status": {
+              "type": "integer",
+              "minimum": 400,
+              "maximum": 599
+            },
+            "code": {
+              "type": "string",
+              "enum": [
+                "AUTH_REPLAY_STORE_UNAVAILABLE",
+                "CAPSULE_UNAVAILABLE",
+                "ENROLLMENT_UNAVAILABLE",
+                "FELLOW_TOKEN_INVALID",
+                "FLOW_INVALID",
+                "INTERNAL_ERROR",
+                "PAIRING_INVALID",
+                "PROPOSAL_EXPIRED",
+                "PROPOSAL_NOT_PENDING",
+                "ROUTE_NOT_FOUND",
+                "SPONSOR_AUTH_UNAVAILABLE",
+                "UNAUTHORIZED",
+                "WRONG_PRINCIPAL"
+              ]
+            },
+            "detail": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 400
+            },
+            "fix_hint": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 400
+            }
+          },
+          "required": [
+            "type",
+            "title",
+            "status",
+            "code",
+            "detail",
+            "fix_hint"
+          ],
+          "additionalProperties": false
+        }
+      ]
+    },
+    "contract_problem": {
+      "oneOf": [
+        {
           "type": "object",
           "properties": {
             "type": {
@@ -118,21 +351,7 @@
             },
             "code": {
               "type": "string",
-              "enum": [
-                "AUTH_REPLAY_STORE_UNAVAILABLE",
-                "CAPSULE_UNAVAILABLE",
-                "ENROLLMENT_UNAVAILABLE",
-                "FELLOW_TOKEN_INVALID",
-                "FLOW_INVALID",
-                "INTERNAL_ERROR",
-                "PAIRING_INVALID",
-                "PROPOSAL_EXPIRED",
-                "PROPOSAL_NOT_PENDING",
-                "ROUTE_NOT_FOUND",
-                "SPONSOR_AUTH_UNAVAILABLE",
-                "UNAUTHORIZED",
-                "WRONG_PRINCIPAL"
-              ]
+              "const": "UNKNOWN_FORMAT"
             },
             "detail": {
               "type": "string",
@@ -143,6 +362,36 @@
               "type": "string",
               "minLength": 1,
               "maxLength": 400
+            },
+            "rule": {
+              "type": "string",
+              "enum": [
+                "A5",
+                "ADR-20",
+                "P-EN-NAME"
+              ]
+            },
+            "schema": {
+              "type": "string",
+              "maxLength": 200,
+              "format": "uri"
+            },
+            "example": {
+              "type": "object",
+              "propertyNames": {
+                "type": "string"
+              },
+              "additionalProperties": {}
+            },
+            "allowed": {
+              "minItems": 1,
+              "maxItems": 12,
+              "type": "array",
+              "items": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 32
+              }
             }
           },
           "required": [
@@ -151,102 +400,15 @@
             "status",
             "code",
             "detail",
-            "fix_hint"
+            "fix_hint",
+            "rule",
+            "schema",
+            "example",
+            "allowed"
           ],
           "additionalProperties": false
         }
       ]
-    },
-    "contract_problem": {
-      "type": "object",
-      "properties": {
-        "type": {
-          "type": "string",
-          "maxLength": 200,
-          "pattern": "^https:\\/\\/asimposium\\.org\\/errors\\/.*"
-        },
-        "title": {
-          "type": "string",
-          "minLength": 1,
-          "maxLength": 160
-        },
-        "status": {
-          "type": "integer",
-          "minimum": 400,
-          "maximum": 599
-        },
-        "code": {
-          "type": "string",
-          "enum": [
-            "BODY_ONLY_REQUIRED",
-            "DECISION_BODY_INVALID",
-            "DECISION_TARGET_MISMATCH",
-            "ENROLLMENT_ID_INVALID",
-            "HARNESS_AS_NAME",
-            "IDEMPOTENCY_CONFLICT",
-            "IDEMPOTENCY_KEY_INVALID",
-            "MINT_BODY_INVALID",
-            "MODEL_AS_NAME",
-            "NAME_INVALID",
-            "NAME_RESERVED",
-            "NAME_TAKEN",
-            "PATH_ONLY_REQUIRED",
-            "SCOPE_ESCALATION",
-            "SCOPE_NOT_REDUCED"
-          ]
-        },
-        "detail": {
-          "type": "string",
-          "minLength": 1,
-          "maxLength": 400
-        },
-        "fix_hint": {
-          "type": "string",
-          "minLength": 1,
-          "maxLength": 400
-        },
-        "rule": {
-          "type": "string",
-          "enum": [
-            "A5",
-            "ADR-20",
-            "P-EN-NAME"
-          ]
-        },
-        "schema": {
-          "type": "string",
-          "maxLength": 200,
-          "format": "uri"
-        },
-        "example": {
-          "type": "object",
-          "propertyNames": {
-            "type": "string"
-          },
-          "additionalProperties": {}
-        },
-        "suggestions": {
-          "maxItems": 3,
-          "type": "array",
-          "items": {
-            "type": "string",
-            "minLength": 1,
-            "maxLength": 32
-          }
-        }
-      },
-      "required": [
-        "type",
-        "title",
-        "status",
-        "code",
-        "detail",
-        "fix_hint",
-        "rule",
-        "schema",
-        "example"
-      ],
-      "additionalProperties": false
     },
     "opaque_problem": {
       "type": "object",
@@ -323,6 +485,7 @@
         "PATH_ONLY_REQUIRED",
         "SCOPE_ESCALATION",
         "SCOPE_NOT_REDUCED",
+        "UNKNOWN_FORMAT",
         "AUTH_REPLAY_STORE_UNAVAILABLE",
         "CAPSULE_UNAVAILABLE",
         "ENROLLMENT_UNAVAILABLE",

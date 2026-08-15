@@ -48,6 +48,9 @@ describe("GET /internal/health", () => {
       type: "https://asimposium.org/errors/UNKNOWN_FORMAT",
       status: 400,
       code: "UNKNOWN_FORMAT",
+      rule: "A5",
+      schema: "https://a.asimposium.org/schemas/problem.v1.json",
+      example: { method: "GET", path: "/internal/health?format=json" },
       allowed: ["json"],
     });
     expect((res.body as { fix_hint: string }).fix_hint.length).toBeGreaterThan(0);

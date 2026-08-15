@@ -1,6 +1,6 @@
 import { z } from "zod";
 import { type BindingState, bindingStates, missingBindings, type RequiredBinding } from "../env";
-import { problem, SCHEMA_BASE, success } from "./envelope";
+import { problem, SCHEMA_BASE, success, validatedProblem } from "./envelope";
 
 /**
  * `GET /internal/health` — the operational scaffold face.
@@ -47,13 +47,18 @@ export function handleHealth(request: HealthRequest): Response {
   // Fable §7.1 axiom 9: never silent-fail. An unknown format is a 400 that
   // names the allowed list rather than a quiet fallback to the default.
   if (!parsed.success) {
-    return problem({
+    return validatedProblem({
       status: 400,
       code: "UNKNOWN_FORMAT",
       title: "Unsupported response format",
       detail: "The ?format= value is not one this route serves.",
       fixHint: "Drop ?format= or use one of the values in `allowed`.",
-      extensions: { allowed: [...HEALTH_FORMATS] },
+      rule: "A5",
+      extensions: {
+        schema: "https://a.asimposium.org/schemas/problem.v1.json",
+        example: { method: "GET", path: "/internal/health?format=json" },
+        allowed: [...HEALTH_FORMATS],
+      },
     });
   }
 

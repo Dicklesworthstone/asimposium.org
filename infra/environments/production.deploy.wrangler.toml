@@ -38,7 +38,7 @@ bucket_name = "asimposium-public-prod"
 
 [[rules]]
 type = "Text"
-globs = ["**/*.md"]
+globs = ["**/*.md", "**/*.txt"]
 fallthrough = true
 
 [vars]

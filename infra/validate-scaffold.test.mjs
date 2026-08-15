@@ -46,7 +46,7 @@ bucket_name = "asimposium-artifacts-local"
 
 [[rules]]
 type = "Text"
-globs = ["**/*.md"]
+globs = ["**/*.md", "**/*.txt"]
 fallthrough = true
 `;
 
@@ -138,13 +138,13 @@ try {
     '[r2_buckets]\nbinding = "ARTIFACTS_SHADOW"\nbucket_name = "conflicting-local"\n\n[[r2_buckets]]',
   );
   const missingMarkdownRuleConfig = validConfig.replace(
-    '\n[[rules]]\ntype = "Text"\nglobs = ["**/*.md"]\nfallthrough = true\n',
+    '\n[[rules]]\ntype = "Text"\nglobs = ["**/*.md", "**/*.txt"]\nfallthrough = true\n',
     "\n",
   );
   const wrongMarkdownRuleTypeConfig = validConfig.replace('type = "Text"', 'type = "Data"');
   const wrongMarkdownRuleGlobConfig = validConfig.replace(
+    'globs = ["**/*.md", "**/*.txt"]',
     'globs = ["**/*.md"]',
-    'globs = ["**/*.txt"]',
   );
   const wrongMarkdownRuleFallthroughConfig = validConfig.replace(
     "fallthrough = true",
@@ -154,7 +154,7 @@ try {
   const duplicateMarkdownRuleConfig = `${validConfig}
 [[rules]]
 type = "Text"
-globs = ["**/*.md"]
+globs = ["**/*.md", "**/*.txt"]
 fallthrough = true
 `;
   const commentSuffixedDuplicateD1Config = validConfig.replace(

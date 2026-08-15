@@ -33,6 +33,7 @@ const VALID_ADDITIONAL_PROBLEMS = [
   ["problem-route-not-found.json", "ROUTE_NOT_FOUND", 404, "opaque"],
   ["problem-internal-error.json", "INTERNAL_ERROR", 500, "opaque"],
   ["problem-enrollment-id-invalid.json", "ENROLLMENT_ID_INVALID", 422, "contract"],
+  ["problem-unknown-format.json", "UNKNOWN_FORMAT", 400, "contract"],
 ] as const;
 
 async function fixture(url: URL): Promise<unknown> {
@@ -88,6 +89,36 @@ test("MINT_BODY_INVALID is a teaching code, not an opaque one", () => {
   // The two classes must stay disjoint, or a code's transparency is ambiguous.
   const opaque = new Set<string>(OPAQUE_PROBLEM_CODES);
   expect(CONTRACT_PROBLEM_CODES.filter((code) => opaque.has(code))).toEqual([]);
+});
+
+test("UNKNOWN_FORMAT is a teaching code with a bounded allowed list", async () => {
+  const document = await fixture(
+    new URL("../fixtures/valid/problem-unknown-format.json", import.meta.url),
+  );
+  expect(ProblemDocumentSchema.safeParse(document).success).toBe(true);
+  expect(CONTRACT_PROBLEM_CODES).toContain("UNKNOWN_FORMAT");
+  expect(OPAQUE_PROBLEM_CODES).not.toContain("UNKNOWN_FORMAT" as never);
+
+  expect(
+    ProblemDocumentSchema.safeParse({
+      ...(document as Record<string, unknown>),
+      allowed: [],
+    }).success,
+  ).toBe(false);
+  expect(
+    ProblemDocumentSchema.safeParse({
+      ...(document as Record<string, unknown>),
+      allowed: undefined,
+    }).success,
+  ).toBe(false);
+
+  const mintProblem = await fixture(VALID_MINT_BODY_INVALID);
+  expect(
+    ProblemDocumentSchema.safeParse({
+      ...(mintProblem as Record<string, unknown>),
+      allowed: ["json"],
+    }).success,
+  ).toBe(false);
 });
 
 test("an opaque refusal may not acquire the teaching fields", async () => {

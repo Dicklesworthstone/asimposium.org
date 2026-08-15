@@ -33,7 +33,9 @@ const UNKNOWN_FORMAT =
   '{"type":"https://asimposium.org/errors/UNKNOWN_FORMAT",' +
   '"title":"Unsupported response format","status":400,"code":"UNKNOWN_FORMAT",' +
   '"detail":"The ?format= value is not one this route serves.",' +
-  '"fix_hint":"Drop ?format= or use one of the values in `allowed`.","allowed":["json"]}';
+  '"fix_hint":"Drop ?format= or use one of the values in `allowed`.","rule":"A5",' +
+  '"schema":"https://a.asimposium.org/schemas/problem.v1.json",' +
+  '"example":{"method":"GET","path":"/internal/health?format=json"},"allowed":["json"]}';
 
 const BINDING_MISSING =
   '{"type":"https://asimposium.org/errors/BINDING_MISSING",' +

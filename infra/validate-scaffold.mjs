@@ -146,19 +146,32 @@ function readSingleObjectArray(record, table, source) {
   return entry;
 }
 
-function readRequiredSingleStringArray(record, key, source) {
+function readRequiredStringArray(record, key, source) {
   const value = record[key];
   if (value === undefined) {
     fail("MISSING_CONFIG_KEY", `${source} must define ${key}.`);
   }
-  if (!Array.isArray(value) || value.length !== 1 || typeof value[0] !== "string") {
-    fail("UNSAFE_CONFIG_VALUE", `${source} must define ${key} as a single-string array.`);
+  if (
+    !Array.isArray(value) ||
+    value.length === 0 ||
+    value.some((item) => typeof item !== "string")
+  ) {
+    fail("UNSAFE_CONFIG_VALUE", `${source} must define ${key} as a non-empty string array.`);
   }
-  return value[0];
+  return value;
 }
 
 function assertExact(value, expected, key, source) {
   if (value !== expected) {
+    fail("UNSAFE_CONFIG_VALUE", `${source} must set ${key} to ${JSON.stringify(expected)}.`);
+  }
+}
+
+function assertExactStringArray(value, expected, key, source) {
+  if (
+    value.length !== expected.length ||
+    value.some((item, index) => item !== expected[index])
+  ) {
     fail("UNSAFE_CONFIG_VALUE", `${source} must set ${key} to ${JSON.stringify(expected)}.`);
   }
 }
@@ -392,9 +405,9 @@ export function validateScaffold(rootDirectory, configWorkspacePath = "infra/wra
   const rules = readSingleObjectArray(parsedConfig, "rules", configSource);
   assertExactKeys(rules, RULE_CONFIG_KEYS, `${configSource} [[rules]]`);
   assertExact(readRequiredString(rules, "type", configSource), "Text", "rules.type", configSource);
-  assertExact(
-    readRequiredSingleStringArray(rules, "globs", configSource),
-    "**/*.md",
+  assertExactStringArray(
+    readRequiredStringArray(rules, "globs", configSource),
+    ["**/*.md", "**/*.txt"],
     "rules.globs",
     configSource,
   );

@@ -236,10 +236,12 @@ describe("the 404 face teaches without inventing surface", () => {
     const { detail, fix_hint } = res.body as { detail: string; fix_hint: string };
 
     expect(res.status).toBe(404);
-    // Every path-shaped token is either the caller's path or one of the three
-    // namespaces currently mounted by createApp. A future surface added to the
+    // Every path-shaped token is either the caller's path or a surface currently
+    // mounted by createApp. A future surface added to the
     // copy before it is mounted fails here.
-    const offered = new Set(`${detail} ${fix_hint}`.match(/\/(?:[a-z0-9/_.:-]+)?/gi) ?? []);
+    const offered = new Set(
+      `${detail} ${fix_hint}`.match(/\/(?:[a-z0-9/_:-]+(?:\.[a-z0-9_-]+)?)?/gi) ?? [],
+    );
     expect([...offered].sort()).toEqual([
       "/",
       "/internal/health",

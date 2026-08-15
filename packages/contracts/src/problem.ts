@@ -34,7 +34,7 @@ export const PROBLEM_TYPE_PREFIX = "https://asimposium.org/errors/";
  * Refusals whose cause is fully described by the request, so naming it lets
  * the caller fix the request. These carry the teaching fields.
  */
-export const CONTRACT_PROBLEM_CODES = [
+const GENERAL_CONTRACT_PROBLEM_CODES = [
   "BODY_ONLY_REQUIRED",
   "DECISION_BODY_INVALID",
   "DECISION_TARGET_MISMATCH",
@@ -50,6 +50,11 @@ export const CONTRACT_PROBLEM_CODES = [
   "PATH_ONLY_REQUIRED",
   "SCOPE_ESCALATION",
   "SCOPE_NOT_REDUCED",
+] as const;
+
+export const CONTRACT_PROBLEM_CODES = [
+  ...GENERAL_CONTRACT_PROBLEM_CODES,
+  "UNKNOWN_FORMAT",
 ] as const;
 
 /**
@@ -102,15 +107,30 @@ const problemBase = {
  * A teaching refusal: a contract code plus the three fields that let the
  * caller repair the request without a second round trip.
  */
-export const ContractProblemSchema = z
+const generalContractProblem = z
   .object({
     ...problemBase,
-    code: z.enum(CONTRACT_PROBLEM_CODES),
+    code: z.enum(GENERAL_CONTRACT_PROBLEM_CODES),
     ...teachingFields,
     /** Available Fellow names, present only on name-policy refusals. */
     suggestions: z.array(z.string().min(1).max(32)).max(3).optional(),
   })
   .strict();
+
+const unknownFormatProblem = z
+  .object({
+    ...problemBase,
+    code: z.literal("UNKNOWN_FORMAT"),
+    ...teachingFields,
+    /** Formats accepted by the route. Required only for UNKNOWN_FORMAT. */
+    allowed: z.array(z.string().min(1).max(32)).min(1).max(12),
+  })
+  .strict();
+
+export const ContractProblemSchema = z.discriminatedUnion("code", [
+  generalContractProblem,
+  unknownFormatProblem,
+]);
 
 /**
  * An opaque refusal. The teaching fields are forbidden rather than optional:

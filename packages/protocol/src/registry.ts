@@ -7,6 +7,8 @@
  * drift-checked (see `assertProtocolInvariants`), so metadata cannot quietly disagree with prose.
  */
 
+/// <reference path="./assets.d.ts" />
+
 import capsuleMarkdown from "../assets/capsule.md" with { type: "text" };
 import handbookMarkdown from "../assets/handbook.md" with { type: "text" };
 import llmsText from "../assets/llms.txt" with { type: "text" };
