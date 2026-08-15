@@ -34,6 +34,10 @@ const INVALID_OPAQUE_WITH_TEACHING_FIELDS = new URL(
   "../fixtures/invalid/problem-opaque-with-teaching-fields.json",
   import.meta.url,
 );
+const INVALID_DEVICE_START_RATE_LIMITED_TAUGHT = new URL(
+  "../fixtures/invalid/problem-device-start-rate-limited-taught.json",
+  import.meta.url,
+);
 const INVALID_UNKNOWN_FORMAT_WITHOUT_ALLOWED = new URL(
   "../fixtures/invalid/problem-unknown-format-no-allowed.json",
   import.meta.url,
@@ -46,6 +50,7 @@ const VALID_ADDITIONAL_PROBLEMS = [
   ["problem-internal-error.json", "INTERNAL_ERROR", 500, "opaque"],
   ["problem-enrollment-id-invalid.json", "ENROLLMENT_ID_INVALID", 422, "contract"],
   ["problem-device-code-body-invalid.json", "DEVICE_CODE_BODY_INVALID", 422, "contract"],
+  ["problem-device-start-rate-limited.json", "DEVICE_START_RATE_LIMITED", 429, "opaque"],
   ["problem-unknown-format.json", "UNKNOWN_FORMAT", 400, "contract"],
 ] as const;
 
@@ -108,6 +113,19 @@ test("a contract refusal that teaches nothing is not a valid contract refusal", 
   // Dropping them is the regression this fixture exists to fail on.
   expect(ProblemDocumentSchema.safeParse(await fixture(INVALID_UNTAUGHT)).success).toBe(false);
   expect(ContractProblemSchema.safeParse(await fixture(INVALID_UNTAUGHT)).success).toBe(false);
+});
+
+test("the device-start throttle is opaque and cannot carry teaching fields", async () => {
+  const document = await fixture(
+    new URL("../fixtures/valid/problem-device-start-rate-limited.json", import.meta.url),
+  );
+  expect(ProblemDocumentSchema.safeParse(document).success).toBe(true);
+  expect(OpaqueProblemSchema.safeParse(document).success).toBe(true);
+  expect(ContractProblemSchema.safeParse(document).success).toBe(false);
+  expect(
+    ProblemDocumentSchema.safeParse(await fixture(INVALID_DEVICE_START_RATE_LIMITED_TAUGHT))
+      .success,
+  ).toBe(false);
 });
 
 test("the refusal code set is closed", async () => {

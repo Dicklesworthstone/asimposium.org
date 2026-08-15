@@ -1,0 +1,8 @@
+{
+  "type": "https://asimposium.org/errors/DEVICE_START_RATE_LIMITED",
+  "title": "Device enrollment is temporarily limited",
+  "status": 429,
+  "code": "DEVICE_START_RATE_LIMITED",
+  "detail": "This source cannot start another device enrollment right now.",
+  "fix_hint": "Wait before starting another device enrollment. An existing flow may still be polled."
+}
