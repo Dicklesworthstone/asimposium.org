@@ -1,8 +1,18 @@
 import assert from "node:assert/strict";
-import { mkdirSync, mkdtempSync, symlinkSync, writeFileSync } from "node:fs";
+import {
+  existsSync,
+  lstatSync,
+  mkdirSync,
+  mkdtempSync,
+  readFileSync,
+  symlinkSync,
+  writeFileSync,
+} from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { performance } from "node:perf_hooks";
+import { fileURLToPath } from "node:url";
+import { REDACTED_TOKEN } from "@asimposium/contracts/diagnostic-safety";
 import {
   assertRehearsalIsNotAnApplication,
   declaresDestructive,
@@ -13,7 +23,9 @@ import {
   readMigrationDirectory,
   readStateFile,
   redactStderr,
+  resolvePinnedWranglerCommand,
 } from "./migrate.mjs";
+import { maskAbsolutePaths } from "./validate-environments.mjs";
 
 /**
  * Negative corpus for the migration planner.
@@ -31,6 +43,52 @@ import {
 const startedAt = performance.now();
 const reproduce = "bun infra/migrate.test.mjs";
 const space = mkdtempSync(join(tmpdir(), "asimposium-migrations-"));
+const repositoryRoot = fileURLToPath(new URL("..", import.meta.url));
+const INSTALLED_WRANGLER_ENTRY = join(
+  repositoryRoot,
+  "apps/wire/node_modules/wrangler/bin/wrangler.js",
+);
+const INSTALLED_WRANGLER_MANIFEST = join(
+  repositoryRoot,
+  "apps/wire/node_modules/wrangler/package.json",
+);
+
+function pinnedWranglerFileSystem(overrides = {}) {
+  return {
+    existsSync: overrides.existsSync ?? existsSync,
+    lstatSync: overrides.lstatSync ?? lstatSync,
+    readFileSync: overrides.readFileSync ?? readFileSync,
+  };
+}
+
+function exactDeclaredWranglerVersion() {
+  const manifest = JSON.parse(readFileSync(join(repositoryRoot, "apps/wire/package.json"), "utf8"));
+  return manifest.devDependencies.wrangler;
+}
+
+/**
+ * Run the real CLI and return what a caller would actually see.
+ *
+ * The redaction rule is about what reaches stdout and stderr, so asserting on a
+ * thrown error object would test one layer above the one that matters. This
+ * refuses before it reaches a database: an unknown environment cannot be
+ * resolved to a target, so no D1 is opened.
+ */
+function runCli(args) {
+  const result = Bun.spawnSync(["bun", "infra/migrate.mjs", ...args], {
+    cwd: repositoryRoot,
+    stdout: "pipe",
+    stderr: "pipe",
+  });
+  const stdout = result.stdout.toString();
+  const stderr = result.stderr.toString();
+  return { exitCode: result.exitCode, stdout, stderr, combined: `${stdout}${stderr}` };
+}
+
+/** The last JSON line a run emitted on stderr. */
+function refusalOf(run) {
+  return JSON.parse(run.stderr.trim().split("\n").at(-1));
+}
 
 function directory(name, files) {
   const root = join(space, name);
@@ -62,6 +120,82 @@ const record = (migration) => ({
 });
 
 const cases = [
+  {
+    name: "the pinned Wrangler command ignores PATH and executes the exact workspace entry",
+    execute() {
+      const declaredVersion = exactDeclaredWranglerVersion();
+      const command = resolvePinnedWranglerCommand(repositoryRoot);
+      assert.deepEqual(command, [process.execPath, INSTALLED_WRANGLER_ENTRY]);
+
+      // `process.execPath` and the entry are both absolute. This PATH excludes
+      // the ambient Bun-global Wrangler, so the version result cannot come from
+      // the shell command that previously made the local migration lane drift.
+      const result = Bun.spawnSync({
+        cmd: [...command, "--version"],
+        cwd: repositoryRoot,
+        env: { ...process.env, PATH: "/usr/bin:/bin" },
+        stdout: "pipe",
+        stderr: "pipe",
+      });
+      assert.equal(result.exitCode, 0, result.stderr.toString());
+      assert.equal(result.stdout.toString().trim(), declaredVersion);
+    },
+  },
+  {
+    name: "a-missing-pinned-Wrangler-refuses-before-any-fallback-can-run",
+    execute() {
+      let thrown;
+      try {
+        resolvePinnedWranglerCommand(
+          repositoryRoot,
+          pinnedWranglerFileSystem({
+            existsSync(path) {
+              return path === INSTALLED_WRANGLER_ENTRY ? false : existsSync(path);
+            },
+          }),
+        );
+        assert.fail("a missing installed Wrangler must refuse");
+      } catch (error) {
+        thrown = error;
+      }
+      assert.ok(thrown instanceof MigrationError, `unexpected error: ${thrown}`);
+      assert.equal(thrown.code, "PINNED_WRANGLER_UNAVAILABLE");
+      assert.equal(
+        thrown.message,
+        "The repository-pinned Wrangler is not installed. Run bun install --frozen-lockfile.",
+      );
+      assert.equal(thrown.message.includes("bunx"), false);
+      assert.equal(/(?:^|\s)\/(?:Users|home|private|tmp|var)\//.test(thrown.message), false);
+    },
+  },
+  {
+    name: "a-stale-pinned-Wrangler-version-refuses-without-echoing-either-version",
+    execute() {
+      let thrown;
+      try {
+        resolvePinnedWranglerCommand(
+          repositoryRoot,
+          pinnedWranglerFileSystem({
+            readFileSync(path, options) {
+              if (path === INSTALLED_WRANGLER_MANIFEST) return '{"version":"4.120.0"}';
+              return readFileSync(path, options);
+            },
+          }),
+        );
+        assert.fail("a stale installed Wrangler must refuse");
+      } catch (error) {
+        thrown = error;
+      }
+      assert.ok(thrown instanceof MigrationError, `unexpected error: ${thrown}`);
+      assert.equal(thrown.code, "PINNED_WRANGLER_VERSION_MISMATCH");
+      assert.equal(
+        thrown.message,
+        "The installed repository-pinned Wrangler does not match apps/wire/package.json. Run bun install --frozen-lockfile.",
+      );
+      assert.equal(thrown.message.includes("4.120.0"), false);
+      assert.equal(thrown.message.includes(exactDeclaredWranglerVersion()), false);
+    },
+  },
   {
     name: "reads-and-orders-a-well-formed-directory",
     execute() {
@@ -412,6 +546,42 @@ const cases = [
       assert.equal(plan.to_apply[0].destructive, true);
     },
   },
+  {
+    name: "production records through 0014 and admits pending non-destructive 0015",
+    execute() {
+      const migrations = readMigrationDirectory(join(repositoryRoot, "db", "migrations"));
+      const applied = migrations.filter((migration) => migration.sequence <= 14).map(record);
+      const plan = planMigrations(migrations, applied, {
+        environmentName: "production",
+        destructiveAllowed: false,
+      });
+      assert.equal(plan.head, 14);
+      assert.deepEqual(plan.to_apply, [
+        {
+          id: "0015_sponsor_enrollment_bootstrap_invariant.sql",
+          sequence: 15,
+          digest: migrations.find((migration) => migration.sequence === 15)?.digest,
+          destructive: false,
+        },
+      ]);
+    },
+  },
+  {
+    name: "the actual pending 0012 rebuild remains refused on production",
+    execute() {
+      const migrations = readMigrationDirectory(join(repositoryRoot, "db", "migrations"));
+      const lifecycle = migrations.find((migration) => migration.sequence === 12);
+      assert.ok(lifecycle, "0012 lifecycle migration is missing");
+      assert.ok(describeDestructiveStatements(lifecycle.sql).length > 0);
+      expectFailure("actual-0012-production", "UNDECLARED_DESTRUCTIVE_MIGRATION", () =>
+        planMigrations(
+          migrations,
+          migrations.filter((migration) => migration.sequence <= 11).map(record),
+          { environmentName: "production", destructiveAllowed: false },
+        ),
+      );
+    },
+  },
 
   // --- applied-state parsing ------------------------------------------------
   {
@@ -597,6 +767,249 @@ const cases = [
       const long = redactStderr("x".repeat(50_000));
       assert.ok(long.length <= 601, String(long.length));
       assert.ok(long.endsWith("…"));
+    },
+  },
+  {
+    // Families this file never declared. They can only be redacted by the
+    // shared module, so each one failing here means the delegation is gone.
+    name: "credential-families-only-the-shared-module-knows-are-redacted",
+    execute() {
+      for (const [label, noisy, leaked] of [
+        ["bearer", "Authorization: Bearer abcdefgh12345678", "abcdefgh12345678"],
+        ["basic", "Authorization: Basic YWxhZGRpbjpvcGVuc2U=", "YWxhZGRpbjpvcGVuc2U"],
+        ["github pat", "remote said github_pat_1234567890123456789012ab", "github_pat_1234"],
+        ["stripe-shaped", "child printed sk_live_abcdefghijkl", "sk_live_abcdefghijkl"],
+        ["google api key", "key AIzaSyA1234567890123456789012", "AIzaSyA1234567890"],
+        ["join fragment", "url #v1.abcdefghijkl", "#v1.abcdefghijkl"],
+        ["labelled password", "password: hunter2", "hunter2"],
+      ]) {
+        const safe = redactStderr(noisy);
+        assert.equal(safe.includes(leaked), false, `${label}: ${safe}`);
+        assert.ok(safe.includes(REDACTED_TOKEN), `${label}: ${safe}`);
+      }
+    },
+  },
+  {
+    // Line-valued fields consume to end of line: a cookie attribute list or a
+    // private body must not survive past the first `;` or `,`.
+    name: "labelled-cookie-and-body-values-are-redacted-to-the-line-tail",
+    execute() {
+      for (const [noisy, leaked] of [
+        ["cookie: sid=abc; other=secret", "other=secret"],
+        ["set-cookie: a=1; Secure; HttpOnly", "HttpOnly"],
+        ["directive_body: prove the lemma, then reveal the witness", "witness"],
+        ["workshop_body: draft one, draft two", "draft two"],
+      ]) {
+        const safe = redactStderr(noisy);
+        assert.equal(safe.includes(leaked), false, safe);
+      }
+    },
+  },
+  {
+    // Every occurrence, not just the first: a child that echoes its environment
+    // twice must not have the second copy printed.
+    name: "every-occurrence-of-a-credential-family-is-replaced",
+    execute() {
+      const safe = redactStderr(
+        "first asimp_ag_AAAABBBBCCCC then asimp_ag_DDDDEEEEFFFF and PGPASSWORD=one API_TOKEN=two",
+      );
+      assert.equal(safe.includes("asimp_ag_AAAA"), false, safe);
+      assert.equal(safe.includes("asimp_ag_DDDD"), false, safe);
+      assert.equal(safe.includes("one"), false, safe);
+      assert.equal(safe.includes("two"), false, safe);
+      // The labels survive so an operator knows which variables were withheld.
+      assert.ok(safe.includes("PGPASSWORD="), safe);
+      assert.ok(safe.includes("API_TOKEN="), safe);
+    },
+  },
+  {
+    // The scanner must not eat the diagnostic. A migration id, a short digest
+    // prefix, and ordinary prose are what make a failure legible.
+    name: "safe-migration-prose-and-identifiers-survive-redaction",
+    execute() {
+      const safe = redactStderr(
+        "0004_krater_integrity_v1.sql applied in 12 ms; sequence 4; sha256 prefix a1b2c3d4",
+      );
+      assert.equal(
+        safe,
+        "0004_krater_integrity_v1.sql applied in 12 ms; sequence 4; sha256 prefix a1b2c3d4",
+      );
+      assert.equal(safe.includes(REDACTED_TOKEN), false, safe);
+    },
+  },
+  {
+    // Structural: the credential families live in one place. A copy reappearing
+    // here is the drift this consolidation removed, and it would pass every
+    // behavioural case above while silently falling behind the shared list.
+    name: "migrate-does-not-restate-a-shared-credential-family",
+    execute() {
+      const source = readFileSync(new URL("./migrate.mjs", import.meta.url), "utf8");
+      const code = source.replace(/\/\*[\s\S]*?\*\//g, "").replace(/^\s*\/\/.*$/gm, "");
+      for (const duplicated of [
+        "asimp_ag_",
+        "BEGIN ",
+        "Bearer",
+        "Basic",
+        "github_pat_",
+        "AIza",
+        "password",
+        "cookie",
+      ]) {
+        assert.equal(code.includes(duplicated), false, `restated credential family: ${duplicated}`);
+      }
+      // ...while the migration-specific guards stay local to this file.
+      assert.ok(code.includes("A-Z0-9_]{2,})="), "env-assignment guard missing");
+      assert.ok(code.includes("A-Fa-f0-9]{32,}"), "long-hex guard missing");
+      assert.ok(code.includes("MAX_CAUSAL_STDERR"), "size bound missing");
+      // Absolute-path masking is still applied here, but it is defined once
+      // beside the topology validator so the two runners cannot drift to
+      // different notions of a masked path. Reached, not restated.
+      assert.ok(code.includes("maskAbsolutePaths"), "absolute-path masking is not applied");
+      assert.equal(code.includes("Volumes"), false, "absolute-path rule was restated locally");
+    },
+  },
+  {
+    // A caller who fat-fingers a token into `--env` must not have the tool that
+    // refuses the value print it back into the log. The contrast run is the
+    // causal half: the two invocations differ in exactly one dimension —
+    // whether the argument is credential-shaped — and reach the same refusal by
+    // the same path, so the redaction is shown to fire on the credential and
+    // only on the credential.
+    name: "a-credential-passed-as-an-environment-name-is-not-echoed",
+    execute() {
+      // Synthetic, shaped like a Fellow bearer token. Never a live value.
+      const planted = "asimp_ag_LIVEabc123XYZdefg456";
+      const refused = runCli(["--env", planted]);
+      assert.equal(refused.exitCode, 1);
+
+      const diagnostic = refusalOf(refused);
+      assert.equal(diagnostic.status, "fail");
+      assert.equal(diagnostic.code, "UNKNOWN_ENVIRONMENT");
+
+      // Neither the whole token nor the distinctive tail survives anywhere a
+      // caller can see, on either stream.
+      assert.equal(refused.combined.includes(planted), false, "token reached the output");
+      assert.equal(
+        refused.combined.includes("abc123XYZdefg456"),
+        false,
+        "token tail reached the output",
+      );
+      assert.ok(diagnostic.detail.includes(REDACTED_TOKEN), "detail was not redacted");
+
+      // The refusal is still useful: the safe prose that tells a caller what to
+      // do instead is not collateral damage of the redaction.
+      assert.ok(
+        diagnostic.detail.includes("expected one of local, staging, production"),
+        "safe prose did not survive redaction",
+      );
+
+      // Causal contrast: a non-credential name takes the same path to the same
+      // code and is echoed verbatim, so the assertions above are load-bearing
+      // rather than passing because nothing is ever echoed.
+      const benign = runCli(["--env", "prod"]);
+      const echoed = refusalOf(benign);
+      assert.equal(echoed.code, "UNKNOWN_ENVIRONMENT");
+      assert.ok(echoed.detail.includes('"prod"'), "a safe environment name should be echoed");
+      assert.equal(echoed.detail.includes(REDACTED_TOKEN), false);
+    },
+  },
+  {
+    // A path is not a credential family, so the canonical scanner declines it.
+    // Caller-controlled path diagnostics keep the absolute-path masking they
+    // have always had, rather than losing it to the credential delegation.
+    //
+    // `--env` is the emission path under test because it is a *supported* flag
+    // whose value is genuinely interpolated into the refusal. An earlier
+    // revision of this case passed `--config`, which this CLI does not accept:
+    // it took the INVALID_ARGUMENT branch, never interpolated the plant, and
+    // "passed" only because the usage string literally contains
+    // `[--state-file <path>]`. Pinning the code and refusing the usage text is
+    // what keeps that false green from coming back.
+    name: "an-absolute-caller-path-is-masked-in-the-diagnostic",
+    execute() {
+      const planted = "/Users/planted-operator/private-keys";
+      const refused = runCli(["--env", planted]);
+      assert.equal(refused.exitCode, 1);
+
+      const diagnostic = refusalOf(refused);
+      assert.equal(diagnostic.status, "fail");
+      assert.equal(diagnostic.code, "UNKNOWN_ENVIRONMENT", "a non-interpolating branch ran");
+      assert.equal(
+        diagnostic.detail.includes("Usage:"),
+        false,
+        "took the usage branch, whose static text contains <path> and proves nothing",
+      );
+
+      // Exact, so a partial mask that left a fragment behind cannot pass.
+      assert.equal(
+        diagnostic.detail,
+        'Unknown environment "<path>"; expected one of local, staging, production.',
+      );
+      assert.equal(refused.combined.includes("planted-operator"), false, "home directory leaked");
+      assert.equal(refused.combined.includes(planted), false, "absolute path leaked");
+
+      // Causal contrast: a value with no absolute path reaches the same code by
+      // the same route and is echoed verbatim.
+      const benign = refusalOf(runCli(["--env", "prod"]));
+      assert.equal(benign.code, "UNKNOWN_ENVIRONMENT");
+      assert.ok(benign.detail.includes('"prod"'), "a safe environment name should be echoed");
+      assert.equal(benign.detail.includes("<path>"), false, "nothing to mask, yet masked");
+
+      // This CLI's own path-bearing flag never interpolates the caller's path
+      // at all: `--state-file` refusals are fixed strings. That is the stronger
+      // property, so it is asserted as non-disclosure only and is deliberately
+      // NOT offered as evidence of masking.
+      const escaped = runCli(["--env", "local", "--state-file", `${planted}/state.json`]);
+      assert.equal(refusalOf(escaped).code, "PATH_ESCAPE");
+      assert.equal(escaped.combined.includes("planted-operator"), false, "home directory leaked");
+      assert.equal(
+        refusalOf(escaped).detail.includes("<path>"),
+        false,
+        "this refusal is a fixed string; a <path> here would mean it echoes after all",
+      );
+
+      // The masking primitive itself, which every diagnostic this file prints
+      // is routed through.
+      assert.equal(
+        maskAbsolutePaths("read /Users/planted-operator/k.pem failed"),
+        "read <path> failed",
+      );
+      assert.equal(
+        redactStderr("wrangler: cannot open /Users/planted-operator/k.pem"),
+        "wrangler: cannot open <path>",
+      );
+    },
+  },
+  {
+    // A bare `\S+` value class stopped at the first space, so a quoted
+    // assignment printed the tail of the value it claimed to withhold. Each
+    // plant differs from the working case in exactly one dimension: where the
+    // value ends.
+    name: "a-quoted-environment-assignment-is-withheld-to-its-closing-quote",
+    execute() {
+      // Spaces inside the value: the old rule emitted ` def ghi"`.
+      const spaced = redactStderr('child failed: TOKEN="abc def ghi" NEXT=keepme');
+      assert.equal(spaced.includes("def"), false, "quoted value tail leaked");
+      assert.equal(spaced.includes("ghi"), false, "quoted value tail leaked");
+      assert.ok(spaced.includes(`TOKEN=${REDACTED_TOKEN}`), "label was not preserved");
+
+      // An escaped quote inside the value: `"[^"]*"` would close early here and
+      // leak the remainder, which is why the class consumes `\\.` as a unit.
+      const escaped = redactStderr('child failed: TOKEN="abc \\" def" tail');
+      assert.equal(escaped.includes("def"), false, "value past an escaped quote leaked");
+      assert.ok(escaped.includes(`TOKEN=${REDACTED_TOKEN}`), "label was not preserved");
+
+      // Single quotes are the same value class.
+      const single = redactStderr("child failed: SECRET='a b c' after");
+      assert.equal(single.includes(" b "), false, "single-quoted value tail leaked");
+
+      // The bound is the closing quote and not the rest of the line: an
+      // adjacent assignment is still redacted on its own terms, and ordinary
+      // trailing prose survives, so the widened class did not become a
+      // line-eating rule.
+      assert.ok(spaced.includes(`NEXT=${REDACTED_TOKEN}`), "adjacent assignment was not redacted");
+      assert.ok(escaped.endsWith("tail"), "prose after a quoted value did not survive");
+      assert.ok(single.endsWith("after"), "prose after a quoted value did not survive");
     },
   },
 ];

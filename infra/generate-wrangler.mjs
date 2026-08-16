@@ -1,4 +1,4 @@
-import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, readdirSync, readFileSync, writeFileSync } from "node:fs";
 import { dirname, join, resolve } from "node:path";
 import { performance } from "node:perf_hooks";
 import { fileURLToPath } from "node:url";
@@ -25,6 +25,12 @@ import { EnvironmentValidationError, validateEnvironments } from "./validate-env
  */
 
 export const GENERATED_DIRECTORY = "infra/environments";
+/**
+ * The one checked-in configuration in the generated directory that this tool
+ * does not render. It is hand-maintained deploy-time configuration, so it is
+ * expected on disk but never reconciled against the topology here.
+ */
+export const DEPLOY_OVERLAY_NAME = "production.deploy.wrangler.toml";
 const BANNER = "# GENERATED FROM infra/environments.toml — DO NOT EDIT BY HAND.";
 
 function tomlString(value) {
@@ -35,6 +41,31 @@ function tomlString(value) {
  * Render one environment. Key order is fixed by this function, not by object
  * iteration order, so the output is stable across runtimes.
  */
+/**
+ * The bound-vs-exported Durable Object classes of one parsed Wrangler config.
+ *
+ * The positive gate and its planted negative both call this, so weakening it
+ * cannot leave the negative passing for an unrelated reason.
+ */
+export function durableObjectParity(parsedConfig) {
+  return {
+    bound: (parsedConfig.durable_objects?.bindings ?? [])
+      .map((binding) => binding.class_name)
+      .sort(),
+    exported: Object.keys(parsedConfig.exports ?? {}).sort(),
+  };
+}
+
+/**
+ * The origin one parsed Wrangler config publishes to its Worker.
+ *
+ * The positive gate and its planted negative both read through this, so a
+ * projection that stopped being emitted cannot leave either passing.
+ */
+export function stoaOriginProjection(parsedConfig) {
+  return parsedConfig.vars?.STOA_ORIGIN;
+}
+
 export function renderEnvironment(name, environment, policy) {
   const lines = [
     BANNER,
@@ -54,7 +85,17 @@ export function renderEnvironment(name, environment, policy) {
   ];
 
   if (environment.kind === "local") {
-    lines.push("[dev]", "port = 8787", `local_protocol = ${tomlString("http")}`, "");
+    // Derived from the validated loopback origin, never restated: the topology
+    // already pins `worker_origin` to `http://127.0.0.1:<port>`, so one
+    // declaration governs both the port `wrangler dev` binds and the origin the
+    // Worker publishes as STOA_ORIGIN. A second literal here could disagree
+    // with it silently.
+    lines.push(
+      "[dev]",
+      `port = ${new URL(environment.worker_origin).port}`,
+      `local_protocol = ${tomlString("http")}`,
+      "",
+    );
   }
 
   lines.push("[triggers]", `crons = [${tomlString(policy.outbox_cron)}]`, "");
@@ -80,18 +121,54 @@ export function renderEnvironment(name, environment, policy) {
     );
   }
 
+  // Cloudflare refuses a Durable Object binding whose class the entrypoint does
+  // not export, so a binding and its `[exports.<class>]` block are emitted as a
+  // pair or not at all. A deferred binding is withheld from BOTH lists rather
+  // than paired with an export for a class that does not exist; the deferral is
+  // rendered as a comment so the omission is legible in the deployed artifact.
+  // `policy.deferred_bindings` is required, not optional: a missing list must
+  // fail loudly here rather than silently emit an unexportable binding.
+  const deferred = new Set(policy.deferred_bindings);
+  const durableObjects = [environment.durable_objects, environment.outbox];
+  for (const durableObject of durableObjects) {
+    if (deferred.has(durableObject.binding)) continue;
+    lines.push(
+      "[[durable_objects.bindings]]",
+      `name = ${tomlString(durableObject.binding)}`,
+      `class_name = ${tomlString(durableObject.class_name)}`,
+      "",
+    );
+  }
+  for (const durableObject of durableObjects) {
+    if (deferred.has(durableObject.binding)) continue;
+    lines.push(
+      `[exports.${durableObject.class_name}]`,
+      `type = ${tomlString("durable-object")}`,
+      // Declared per binding in the topology, never invented here: the storage
+      // backend decides whether the class gets SQL storage, and a renderer
+      // default would make the deployed shape depend on an unreviewed value.
+      `storage = ${tomlString(durableObject.storage)}`,
+      "",
+    );
+  }
+  for (const durableObject of durableObjects) {
+    if (!deferred.has(durableObject.binding)) continue;
+    lines.push(
+      `# Deferred: ${durableObject.binding} (${durableObject.class_name}) is declared in`,
+      "# infra/environments.toml but is not bound here, because the Worker entrypoint",
+      "# does not export its class yet. Binding it would make this config undeployable.",
+      "",
+    );
+  }
+
   lines.push(
-    "[[durable_objects.bindings]]",
-    `name = ${tomlString(environment.durable_objects.binding)}`,
-    `class_name = ${tomlString(environment.durable_objects.class_name)}`,
-    "",
-    "[[durable_objects.bindings]]",
-    `name = ${tomlString(environment.outbox.binding)}`,
-    `class_name = ${tomlString(environment.outbox.class_name)}`,
-    "",
-    `[exports.${environment.outbox.class_name}]`,
-    `type = ${tomlString("durable-object")}`,
-    `storage = ${tomlString("sqlite")}`,
+    // Non-secret, and the only origin the Worker may claim for itself. It is
+    // projected from this environment's declared `worker_origin`, never derived
+    // from request metadata: a Host or X-Forwarded-Host header is supplied by
+    // the caller, so trusting it would let a request relocate the origin the
+    // Worker believes it serves.
+    "[vars]",
+    `STOA_ORIGIN = ${tomlString(environment.worker_origin)}`,
     "",
     "[[rules]]",
     `type = ${tomlString("Text")}`,
@@ -103,7 +180,7 @@ export function renderEnvironment(name, environment, policy) {
     `#   ${environment.published_hostname === "" ? "(none for this environment)" : environment.published_hostname}`,
     "# The private-cas bucket carries no custom domain by construction.",
     "",
-    "# Vercel calls this environment at:",
+    "# Vercel calls this environment at the STOA_ORIGIN projected above:",
     `#   ${environment.worker_origin}`,
     "",
     "# Signing key ids (public identifiers; the keys live in wrangler secret):",
@@ -149,7 +226,28 @@ export function reconcile(root, files) {
       drifted.push(workspacePath);
     }
   }
-  return { missing, drifted, checked: Object.keys(files).length };
+  // Checking only the expected names leaves a stale fourth config invisible:
+  // an environment that was renamed or removed from the topology keeps its old
+  // generated file on disk, and a deploy pointed at that path would read a
+  // configuration the topology no longer describes. Enumerate the directory and
+  // refuse anything outside the generated set plus the one checked-in overlay.
+  // Surplus is reported, never removed — this tool does not delete files.
+  const expectedNames = new Set([
+    ...Object.keys(files).map((workspacePath) =>
+      workspacePath.slice(`${GENERATED_DIRECTORY}/`.length),
+    ),
+    DEPLOY_OVERLAY_NAME,
+  ]);
+  const surplus = [];
+  const directory = join(root, GENERATED_DIRECTORY);
+  if (existsSync(directory)) {
+    for (const entry of readdirSync(directory)) {
+      if (!entry.endsWith(".toml") || expectedNames.has(entry)) continue;
+      surplus.push(`${GENERATED_DIRECTORY}/${entry}`);
+    }
+    surplus.sort();
+  }
+  return { missing, drifted, surplus, checked: Object.keys(files).length };
 }
 
 function diagnostic(status, startedAt, details = {}) {
@@ -194,6 +292,15 @@ function main() {
     }
 
     const result = reconcile(root, files);
+    // A surplus config is reported but never removed: deleting a file the
+    // operator may still need is not this tool's call, and `--write` would not
+    // have cleaned it either.
+    if (result.surplus.length > 0) {
+      throw new GenerationError(
+        "GENERATED_CONFIG_SURPLUS",
+        `${GENERATED_DIRECTORY} holds configuration the topology does not describe: ${result.surplus.join(", ")}. Remove it deliberately, or add its environment to infra/environments.toml.`,
+      );
+    }
     if (result.missing.length > 0 || result.drifted.length > 0) {
       throw new GenerationError(
         result.missing.length > 0 ? "GENERATED_CONFIG_MISSING" : "GENERATED_CONFIG_DRIFT",

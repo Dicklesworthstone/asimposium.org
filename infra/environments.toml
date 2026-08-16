@@ -34,6 +34,31 @@ outbox_cron = "*/5 * * * *"
 # Every environment must bind exactly these names, no more and no fewer. The
 # Worker's code path is then identical everywhere (Fable §13.3).
 required_bindings = ["DB", "ARTIFACTS", "PUBLIC_ARTIFACTS", "HERALD_ROOMS", "KRATER_OUTBOX"]
+# Bindings that belong to the topology above but are NOT yet emitted into any
+# generated wrangler config, because `apps/wire/src/index.ts` does not export
+# their Durable Object class yet. Cloudflare refuses a Durable Object binding
+# whose class the entrypoint does not export, so emitting one would render a
+# config that cannot deploy at all. Declaring an `[exports.<class>]` block for a
+# class that does not exist would be the same lie in the other direction.
+#
+# Deferral is declared once and applies to every environment identically:
+# parity is preserved by the binding being absent EVERYWHERE, never by one
+# environment diverging from another. Retire an entry by deleting it here on
+# the same change that adds the class to the Worker's exports.
+deferred_bindings = ["HERALD_ROOMS"] # HeraldRoom lands with W7.
+
+# The exact origin each remote environment's Worker answers on. `STOA_ORIGIN`
+# is projected into every generated config from the environment's own
+# `worker_origin` and is checked against this table, so a swapped pair (staging
+# declaring the production origin, or the reverse) is refused even though both
+# values would still be distinct. The Worker must never derive its own origin
+# from request metadata — a Host or X-Forwarded-Host header is attacker-supplied
+# and would let a caller relocate the origin the Worker believes it serves.
+# `local` is deliberately absent: it is validated as plaintext loopback instead
+# of being pinned to one port.
+[policy.canonical_worker_origins]
+production = "https://a.asimposium.org"
+staging = "https://a-staging.asimposium.org"
 
 # Which environment each Vercel deployment target calls. Preview deployments
 # must reach staging and must never reach production (Fable §13.3, ADR-2).
@@ -72,10 +97,12 @@ custom_domain = ""
 binding = "HERALD_ROOMS"
 class_name = "HeraldRoom"
 script_namespace = "asimposium-stoa-local"
+storage = "sqlite"
 
 [env.local.outbox]
 binding = "KRATER_OUTBOX"
 class_name = "KraterOutboxDrainer"
+storage = "sqlite"
 
 [env.local.keys]
 current_kid = "local-dev-1"
@@ -114,10 +141,12 @@ custom_domain = "artifacts-staging.asimposium.org"
 binding = "HERALD_ROOMS"
 class_name = "HeraldRoom"
 script_namespace = "asimposium-stoa-staging"
+storage = "sqlite"
 
 [env.staging.outbox]
 binding = "KRATER_OUTBOX"
 class_name = "KraterOutboxDrainer"
+storage = "sqlite"
 
 [env.staging.keys]
 current_kid = "staging-2026-08"
@@ -156,10 +185,12 @@ custom_domain = "artifacts.asimposium.org"
 binding = "HERALD_ROOMS"
 class_name = "HeraldRoom"
 script_namespace = "asimposium-stoa-prod"
+storage = "sqlite"
 
 [env.production.outbox]
 binding = "KRATER_OUTBOX"
 class_name = "KraterOutboxDrainer"
+storage = "sqlite"
 
 [env.production.keys]
 current_kid = "prod-2026-08"

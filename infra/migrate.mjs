@@ -3,9 +3,12 @@ import { existsSync, lstatSync, readdirSync, readFileSync } from "node:fs";
 import { dirname, join, resolve } from "node:path";
 import { performance } from "node:perf_hooks";
 import { fileURLToPath } from "node:url";
+import { REDACTED_TOKEN, redactCredentials } from "@asimposium/contracts/diagnostic-safety";
 import {
   assertRepositoryContained,
   EnvironmentValidationError,
+  maskAbsolutePaths,
+  redactDiagnostic,
   selectEnvironment,
   validateEnvironments,
 } from "./validate-environments.mjs";
@@ -43,12 +46,26 @@ export class MigrationError extends Error {
   }
 }
 
+/**
+ * Every refusal this module raises goes through here, so redacting once at the
+ * throw site covers every structured diagnostic. `--env <value>` and
+ * `--config <path>` are caller-controlled and reach a message, so a caller who
+ * passes a credential — or an absolute path — as either would otherwise have it
+ * printed back by the tool that refuses it. Both passes apply, so a `--config
+ * /Users/<name>/…` refusal keeps its home directory out of the log even though
+ * a path is not a credential family.
+ */
 function fail(code, message, cause) {
-  throw new MigrationError(code, message, cause);
+  throw new MigrationError(code, redactDiagnostic(message), cause);
 }
 
 /** Digest recorded in the ledger: sha256 hex, nothing else. */
 export const DIGEST = /^[0-9a-f]{64}$/;
+
+const EXACT_SEMVER = /^(?:0|[1-9]\d*)\.(?:0|[1-9]\d*)\.(?:0|[1-9]\d*)$/;
+const WIRE_PACKAGE_MANIFEST = "apps/wire/package.json";
+const INSTALLED_WRANGLER_MANIFEST = "apps/wire/node_modules/wrangler/package.json";
+const INSTALLED_WRANGLER_ENTRY = "apps/wire/node_modules/wrangler/bin/wrangler.js";
 
 const MAX_CAUSAL_STDERR = 600;
 
@@ -56,17 +73,46 @@ const MAX_CAUSAL_STDERR = 600;
  * Turn a tool's stderr into something safe to put in a diagnostic.
  *
  * Suppressing it entirely loses the cause; forwarding it raw can carry absolute
- * paths and, if a tool ever echoes its environment, secret bytes. So: drop
- * anything that looks assigned (`NAME=value`) or credential-shaped, replace
- * absolute paths with a placeholder, collapse whitespace, and bound the length.
+ * paths and, if a tool ever echoes its environment, secret bytes.
+ *
+ * The known credential families — agent tokens, join-URL fragments, Bearer and
+ * Basic headers, third-party key shapes, PEM private keys, labelled fields such
+ * as `password:` and `cookie:`, and their clipped tails — are **not** restated
+ * here. They come from `@asimposium/contracts/diagnostic-safety`, which is the
+ * one place that list is maintained; a second copy in this file would drift
+ * behind it silently and every consumer would believe it was covered.
+ *
+ * What stays is what is specific to running a migration tool, and none of it is
+ * a credential family:
+ *
+ *  - `NAME=value`, because a child that echoes its environment prints
+ *    assignments this scanner has no shape rule for;
+ *  - absolute paths, which disclose the operator's filesystem rather than a
+ *    secret — applied here but *defined* alongside the topology validator, so
+ *    the two runners cannot drift to different notions of a masked path;
+ *  - long hex runs, which are how a digest, an id, or a raw key appears here;
+ *  - whitespace collapse and a length bound, so one diagnostic stays paste-able.
  */
 export function redactStderr(text) {
   if (typeof text !== "string" || text.trim() === "") return "";
-  let safe = text
-    .replace(/\b[A-Z][A-Z0-9_]{2,}=\S+/g, "$<name>=<redacted>")
-    .replace(/[A-Za-z]*\/(?:Users|home|private|tmp|var|opt|etc|Volumes)\/[^\s"']*/g, "<path>")
-    .replace(/-----BEGIN [A-Z ]*-----[\s\S]*?-----END [A-Z ]*-----/g, "<redacted-key>")
-    .replace(/\basimp_ag_[A-Za-z0-9]+/g, "<redacted-token>")
+  let safe = maskAbsolutePaths(
+    redactCredentials(text)
+      // The name is captured and echoed so an operator knows *which* variable
+      // was withheld. Without the named group `$<name>` is emitted literally,
+      // which is what this line used to do — the value was safe but the label
+      // was lost.
+      //
+      // The value class is escape-aware and tries the quoted forms first. A
+      // bare `\S+` stops at the first space, so `TOKEN="abc def"` printed
+      // ` def"` — the tail of the very value it claimed to withhold — and
+      // `"…(?:\\.|[^"\\])*"` is needed rather than `"[^"]*"` because a value
+      // containing `\"` would otherwise close the match early and leak the
+      // remainder the same way.
+      .replace(
+        /\b(?<name>[A-Z][A-Z0-9_]{2,})=(?:"(?:\\.|[^"\\])*"|'(?:\\.|[^'\\])*'|\S+)/g,
+        `$<name>=${REDACTED_TOKEN}`,
+      ),
+  )
     .replace(/\b[A-Fa-f0-9]{32,}\b/g, "<redacted-hex>")
     .replace(/\s+/g, " ")
     .trim();
@@ -370,6 +416,86 @@ const LEDGER_DDL = `CREATE TABLE IF NOT EXISTS ${LEDGER_TABLE} (
 const sqlLiteral = (value) => `'${String(value).replace(/'/g, "''")}'`;
 
 /**
+ * Resolve the exact Wrangler installed by this workspace's lockfile.
+ *
+ * The migration runner must never treat `bunx`, its shared cache, or the
+ * operator's PATH as an authority on the Wrangler version. `apps/wire` owns
+ * the exact devDependency; its installed manifest is compared with that
+ * declaration before the direct entrypoint is returned. A missing or stale
+ * workspace install refuses before a D1 command can be spawned.
+ */
+export function resolvePinnedWranglerCommand(root, fileSystem = {}) {
+  const fs = {
+    existsSync: fileSystem.existsSync ?? existsSync,
+    lstatSync: fileSystem.lstatSync ?? lstatSync,
+    readFileSync: fileSystem.readFileSync ?? readFileSync,
+  };
+
+  const requireRegularFile = (workspacePath) => {
+    const target = assertRepositoryContained(root, workspacePath, "Pinned Wrangler path");
+    if (!fs.existsSync(target)) {
+      fail(
+        "PINNED_WRANGLER_UNAVAILABLE",
+        "The repository-pinned Wrangler is not installed. Run bun install --frozen-lockfile.",
+      );
+    }
+    try {
+      if (!fs.lstatSync(target).isFile()) {
+        fail(
+          "PINNED_WRANGLER_UNAVAILABLE",
+          "The repository-pinned Wrangler installation is not usable. Run bun install --frozen-lockfile.",
+        );
+      }
+    } catch (error) {
+      if (error instanceof MigrationError) throw error;
+      fail(
+        "PINNED_WRANGLER_UNAVAILABLE",
+        "The repository-pinned Wrangler installation is not usable. Run bun install --frozen-lockfile.",
+      );
+    }
+    return target;
+  };
+
+  const readJsonObject = (workspacePath) => {
+    const target = requireRegularFile(workspacePath);
+    try {
+      const parsed = JSON.parse(fs.readFileSync(target, "utf8"));
+      if (parsed === null || typeof parsed !== "object" || Array.isArray(parsed)) {
+        throw new TypeError("manifest is not an object");
+      }
+      return parsed;
+    } catch (error) {
+      if (error instanceof MigrationError) throw error;
+      fail(
+        "PINNED_WRANGLER_UNAVAILABLE",
+        "The repository-pinned Wrangler installation is not usable. Run bun install --frozen-lockfile.",
+      );
+    }
+  };
+
+  const declaredPackage = readJsonObject(WIRE_PACKAGE_MANIFEST);
+  const declaredVersion = declaredPackage.devDependencies?.wrangler;
+  if (typeof declaredVersion !== "string" || !EXACT_SEMVER.test(declaredVersion)) {
+    fail(
+      "PINNED_WRANGLER_CONFIGURATION_INVALID",
+      "The declared apps/wire Wrangler version must be an exact semver.",
+    );
+  }
+
+  const installedPackage = readJsonObject(INSTALLED_WRANGLER_MANIFEST);
+  const installedVersion = installedPackage.version;
+  if (typeof installedVersion !== "string" || installedVersion !== declaredVersion) {
+    fail(
+      "PINNED_WRANGLER_VERSION_MISMATCH",
+      "The installed repository-pinned Wrangler does not match apps/wire/package.json. Run bun install --frozen-lockfile.",
+    );
+  }
+
+  const entry = requireRegularFile(INSTALLED_WRANGLER_ENTRY);
+  return [process.execPath, entry];
+}
+
+/**
  * Run a local D1 command through Wrangler.
  *
  * `--local` only. This function never accepts a `--remote` flag and never reads
@@ -378,8 +504,7 @@ const sqlLiteral = (value) => `'${String(value).replace(/'/g, "''")}'`;
 export function localD1(root, databaseName, args) {
   const result = Bun.spawnSync({
     cmd: [
-      "bunx",
-      "wrangler",
+      ...resolvePinnedWranglerCommand(root),
       "d1",
       "execute",
       databaseName,
@@ -683,7 +808,12 @@ function main() {
       error instanceof MigrationError || error instanceof EnvironmentValidationError
         ? {
             code: error.code,
-            detail: error.message,
+            // Redacted again at the emission boundary, not only at the throw
+            // site. `fail()` covers what this module raises, but this branch
+            // also serialises errors constructed elsewhere, and the boundary
+            // that writes to stderr is the one that must be safe. Redaction is
+            // idempotent, so covering both costs nothing.
+            detail: redactStderr(error.message),
             ...(error.causalOutput
               ? { causal_output: error.causalOutput, causal_stream: error.causalStream }
               : {}),

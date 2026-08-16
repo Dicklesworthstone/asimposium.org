@@ -11,6 +11,7 @@ import { tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { performance } from "node:perf_hooks";
 import { fileURLToPath } from "node:url";
+import { containsCredentialShape, REDACTED_TOKEN } from "@asimposium/contracts/diagnostic-safety";
 import {
   EnvironmentValidationError,
   findControlBytes,
@@ -32,16 +33,56 @@ const reproduce = "bun infra/validate-environments.test.mjs";
 const space = mkdtempSync(join(tmpdir(), "asimposium-environments-"));
 const baseline = readFileSync(join(repositoryRoot, "infra/environments.toml"), "utf8");
 
+/**
+ * The Worker entrypoint a fixture root exposes. The default mirrors the real
+ * `apps/wire/src/index.ts`: the outbox class is exported, `HeraldRoom` is not.
+ * Cases that exercise export parity override it.
+ */
+const DEFAULT_WORKER_EXPORTS = "export { createApp, KraterOutboxDrainer };\n";
+
 /** Write a mutated topology into its own root and validate it there. */
-function withTopology(name, toml) {
+function withTopology(name, toml, workerExports = DEFAULT_WORKER_EXPORTS) {
   const root = join(space, name);
   mkdirSync(join(root, "infra"), { recursive: true });
   writeFileSync(join(root, "infra/environments.toml"), toml, "utf8");
+  // The topology is reconciled against what the Worker exports, so a fixture
+  // root needs an entrypoint or every case would fail for a missing file
+  // instead of the rule it was written to prove.
+  mkdirSync(join(root, "apps/wire/src"), { recursive: true });
+  writeFileSync(join(root, "apps/wire/src/index.ts"), workerExports, "utf8");
   return root;
 }
 
-function expectFailure(name, toml, expectedCode) {
-  const root = withTopology(name, toml);
+/**
+ * Run the real CLI and return what a caller would actually see.
+ *
+ * The redaction rule is about what reaches stdout and stderr, so asserting on a
+ * thrown error object alone would test one layer above the one that matters.
+ */
+function runCli(args) {
+  const result = Bun.spawnSync(["bun", "infra/validate-environments.mjs", ...args], {
+    cwd: repositoryRoot,
+    stdout: "pipe",
+    stderr: "pipe",
+  });
+  const stdout = result.stdout.toString();
+  const stderr = result.stderr.toString();
+  return { exitCode: result.exitCode, stdout, stderr, combined: `${stdout}${stderr}` };
+}
+
+/** The last JSON line a run emitted on stderr. */
+function refusalOf(run) {
+  return JSON.parse(run.stderr.trim().split("\n").at(-1));
+}
+
+/** The topology is accepted as written against this entrypoint. */
+function expectAccepted(name, toml, workerExports = DEFAULT_WORKER_EXPORTS) {
+  const root = withTopology(name, toml, workerExports);
+  validateEnvironments(root);
+}
+
+function expectFailure(name, toml, expectedCode, workerExports = DEFAULT_WORKER_EXPORTS) {
+  const root = withTopology(name, toml, workerExports);
   try {
     validateEnvironments(root);
     assert.fail(`${name}: expected ${expectedCode}, but the topology was accepted`);
@@ -138,6 +179,281 @@ const cases = [
         `[[env.staging.r2]]\nbinding = "EXTRA"\nrole = "private-cas"\nbucket_name = "asimposium-extra-staging"\ncustom_domain = ""\n\n[env.staging.durable_objects]`,
       );
       expectFailure("dup-role", duplicated, "DUPLICATE_R2_ROLE");
+    },
+  },
+  {
+    // Deferral withholds a binding from the generated configs; it must not
+    // become a second place to declare a binding no environment actually owes.
+    name: "deferred-binding-outside-the-required-roster",
+    execute() {
+      expectFailure(
+        "deferred-unknown",
+        baseline.replace(/^deferred_bindings = .*$/m, 'deferred_bindings = ["NOT_A_BINDING"]'),
+        "UNKNOWN_DEFERRED_BINDING",
+      );
+    },
+  },
+  {
+    // The root-cause negative: deferral must never reach the outbox. Dropping
+    // KRATER_OUTBOX would silently remove the binding the recovery cron drives,
+    // which is strictly worse than the undeployable config deferral prevents.
+    name: "deferring-the-krater-outbox-is-refused",
+    execute() {
+      expectFailure(
+        "deferred-outbox",
+        baseline.replace(/^deferred_bindings = .*$/m, 'deferred_bindings = ["KRATER_OUTBOX"]'),
+        "BINDING_NOT_DEFERRABLE",
+      );
+    },
+  },
+  {
+    name: "deferring-a-d1-or-r2-binding-is-refused",
+    execute() {
+      for (const binding of ["DB", "ARTIFACTS", "PUBLIC_ARTIFACTS"]) {
+        expectFailure(
+          `deferred-${binding.toLowerCase()}`,
+          baseline.replace(/^deferred_bindings = .*$/m, `deferred_bindings = ["${binding}"]`),
+          "BINDING_NOT_DEFERRABLE",
+        );
+      }
+    },
+  },
+  {
+    // An emitted binding whose class the entrypoint does not export is exactly
+    // the undeployable configuration this whole mechanism exists to prevent.
+    name: "an-emitted-class-must-be-exported-by-the-worker",
+    execute() {
+      expectFailure(
+        "emitted-not-exported",
+        baseline,
+        "EMITTED_CLASS_NOT_EXPORTED",
+        "export { createApp };\n",
+      );
+    },
+  },
+  {
+    // The other direction: once the class ships, the deferral is stale and must
+    // be retired rather than silently withholding a binding that is ready.
+    name: "a-deferred-class-must-not-already-be-exported",
+    execute() {
+      expectFailure(
+        "deferred-already-exported",
+        baseline,
+        "DEFERRED_CLASS_ALREADY_EXPORTED",
+        "export { createApp, KraterOutboxDrainer, HeraldRoom };\n",
+      );
+    },
+  },
+  {
+    // A swapped pair leaves both origins distinct, so the uniqueness claim
+    // cannot catch it; only the canonical pin can.
+    name: "a-swapped-worker-origin-pair-is-refused",
+    execute() {
+      const swapped = baseline
+        .replace(
+          'worker_origin = "https://a-staging.asimposium.org"',
+          'worker_origin = "__STAGING__"',
+        )
+        .replace(
+          'worker_origin = "https://a.asimposium.org"',
+          'worker_origin = "https://a-staging.asimposium.org"',
+        )
+        .replace('worker_origin = "__STAGING__"', 'worker_origin = "https://a.asimposium.org"');
+      expectFailure("origin-swapped", swapped, "WORKER_ORIGIN_NOT_CANONICAL");
+    },
+  },
+  {
+    name: "a-foreign-worker-origin-is-refused",
+    execute() {
+      expectFailure(
+        "origin-foreign",
+        baseline.replace(
+          'worker_origin = "https://a.asimposium.org"',
+          'worker_origin = "https://a.asimposium.example"',
+        ),
+        "WORKER_ORIGIN_NOT_CANONICAL",
+      );
+    },
+  },
+  {
+    // A canonical entry carrying a port, path, query, or credentials would be
+    // projected verbatim into STOA_ORIGIN.
+    name: "a-malformed-canonical-origin-is-refused",
+    execute() {
+      for (const planted of [
+        'production = "https://a.asimposium.org/v1"',
+        'production = "https://a.asimposium.org:8787"',
+        'production = "http://a.asimposium.org"',
+        'production = "https://user:pw@a.asimposium.org"',
+      ]) {
+        expectFailure(
+          `canonical-${planted.replace(/\W+/g, "-").slice(0, 40)}`,
+          baseline.replace('production = "https://a.asimposium.org"', planted),
+          "UNSAFE_CONFIG_VALUE",
+        );
+      }
+    },
+  },
+  {
+    // A non-loopback local origin is refused for being non-loopback, not for
+    // colliding with production: the planted value is a distinct host so no
+    // other rule can account for the failure.
+    name: "a-local-worker-origin-must-be-plaintext-loopback",
+    execute() {
+      expectFailure(
+        "local-not-loopback",
+        baseline.replace(
+          'worker_origin = "http://127.0.0.1:8787"',
+          'worker_origin = "https://local.asimposium.example"',
+        ),
+        "UNSAFE_CONFIG_VALUE",
+      );
+    },
+  },
+  {
+    // One defect each, so every plant fails for its own reason and none can be
+    // accounted for by a second problem in the same value:
+    //   :0      in range shape, no leading zero — below the minimum only
+    //   :80     canonical digits — privileged port only
+    //   :08787  numerically 8787, in range — leading zero only
+    //   :65536  no leading zero — above the maximum only
+    name: "a-local-loopback-port-must-be-canonical-and-unprivileged",
+    execute() {
+      for (const port of ["0", "80", "08787", "65536"]) {
+        expectFailure(
+          `local-port-${port}`,
+          baseline.replace(
+            'worker_origin = "http://127.0.0.1:8787"',
+            `worker_origin = "http://127.0.0.1:${port}"`,
+          ),
+          "UNSAFE_CONFIG_VALUE",
+        );
+      }
+    },
+  },
+  {
+    // The boundaries the law admits, so it is a range and not a single value.
+    name: "the-canonical-loopback-port-boundaries-are-accepted",
+    execute() {
+      for (const port of ["1024", "8787", "65535"]) {
+        expectAccepted(
+          `local-port-ok-${port}`,
+          baseline.replace(
+            'worker_origin = "http://127.0.0.1:8787"',
+            `worker_origin = "http://127.0.0.1:${port}"`,
+          ),
+        );
+      }
+    },
+  },
+  {
+    // Export detection is syntax-aware, not textual. A regex scanner matches
+    // these and forces a stale-deferral refusal for an export that does not
+    // exist at runtime, so each case fails if the AST parse is reverted.
+    name: "a-fake-export-in-a-comment-does-not-retire-a-deferral",
+    execute() {
+      expectAccepted(
+        "comment-export",
+        baseline,
+        "// export { HeraldRoom };\n/* export { HeraldRoom }; */\nexport { createApp, KraterOutboxDrainer };\n",
+      );
+    },
+  },
+  {
+    name: "a-fake-export-in-a-string-does-not-retire-a-deferral",
+    execute() {
+      expectAccepted(
+        "string-export",
+        baseline,
+        'const doc = "export { HeraldRoom };";\nexport { createApp, KraterOutboxDrainer };\n',
+      );
+    },
+  },
+  {
+    name: "a-type-only-export-does-not-retire-a-deferral",
+    execute() {
+      expectAccepted(
+        "type-export",
+        baseline,
+        "export type { HeraldRoom };\nexport { createApp, KraterOutboxDrainer };\n",
+      );
+      expectAccepted(
+        "type-specifier-export",
+        baseline,
+        "export { createApp, KraterOutboxDrainer, type HeraldRoom };\n",
+      );
+    },
+  },
+  {
+    // The positive counterpart: a real value export must be seen, in each form
+    // the entrypoint could plausibly use.
+    name: "a-real-value-export-retires-the-deferral",
+    execute() {
+      for (const entrypoint of [
+        "export { createApp, KraterOutboxDrainer, HeraldRoom };\n",
+        "export { createApp, KraterOutboxDrainer };\nexport class HeraldRoom {}\n",
+        "export { createApp, KraterOutboxDrainer };\nexport const HeraldRoom = class {};\n",
+        "export { createApp, KraterOutboxDrainer };\nexport { Room as HeraldRoom };\n",
+      ]) {
+        expectFailure(
+          `real-export-${entrypoint.length}`,
+          baseline,
+          "DEFERRED_CLASS_ALREADY_EXPORTED",
+          entrypoint,
+        );
+      }
+    },
+  },
+  {
+    // Storage is declared per binding, so an unknown backend must be refused
+    // rather than silently rendered into an `[exports.<class>]` block.
+    name: "durable-object-storage-must-be-a-known-backend",
+    execute() {
+      for (const planted of ['storage = "postgres"', 'storage = ""', "storage = 1"]) {
+        expectFailure(
+          `storage-${planted.replace(/\W+/g, "-")}`,
+          baseline.replace('storage = "sqlite"', planted),
+          "DURABLE_OBJECT_STORAGE_INVALID",
+        );
+      }
+    },
+  },
+  {
+    // An absent declaration is refused by the same rule as a bad one, so the
+    // generator can never fall back to a default nobody reviewed.
+    name: "durable-object-storage-must-be-declared",
+    execute() {
+      expectFailure(
+        "storage-absent",
+        baseline.replace(
+          'script_namespace = "asimposium-stoa-local"\nstorage = "sqlite"',
+          'script_namespace = "asimposium-stoa-local"',
+        ),
+        "DURABLE_OBJECT_STORAGE_INVALID",
+      );
+    },
+  },
+  {
+    name: "duplicate-deferred-binding",
+    execute() {
+      expectFailure(
+        "deferred-duplicate",
+        baseline.replace(
+          /^deferred_bindings = .*$/m,
+          'deferred_bindings = ["HERALD_ROOMS", "HERALD_ROOMS"]',
+        ),
+        "DUPLICATE_DEFERRED_BINDING",
+      );
+    },
+  },
+  {
+    name: "deferred-bindings-must-be-an-array-of-binding-names",
+    execute() {
+      expectFailure(
+        "deferred-not-an-array",
+        baseline.replace(/^deferred_bindings = .*$/m, 'deferred_bindings = "HERALD_ROOMS"'),
+        "MISSING_CONFIG_KEY",
+      );
     },
   },
   {
@@ -746,6 +1062,9 @@ const cases = [
     },
   },
   {
+    // Pointing staging at the production origin is now caught earlier, by the
+    // canonical pin, so this case asserts the refusal it actually produces.
+    // Uniqueness is still reachable and is proven by the case below.
     name: "two-environments-must-not-share-a-worker-origin",
     execute() {
       expectFailure(
@@ -756,8 +1075,26 @@ const cases = [
           `worker_origin = "https://a-staging.asimposium.org"`,
           `worker_origin = "https://a.asimposium.org"`,
         ),
-        "SHARED_RESOURCE",
+        "WORKER_ORIGIN_NOT_CANONICAL",
       );
+    },
+  },
+  {
+    // Uniqueness in isolation: both environments satisfy their canonical pin,
+    // because the canonical table itself declares the collision. Only the
+    // shared-resource claim can refuse this.
+    name: "two-canonical-origins-must-not-collide",
+    execute() {
+      const collided = baseline
+        .replace(
+          'staging = "https://a-staging.asimposium.org"',
+          'staging = "https://a.asimposium.org"',
+        )
+        .replace(
+          'worker_origin = "https://a-staging.asimposium.org"',
+          'worker_origin = "https://a.asimposium.org"',
+        );
+      expectFailure("canonical-collision", collided, "SHARED_RESOURCE");
     },
   },
 
@@ -947,6 +1284,178 @@ const cases = [
         assert.equal(error.code, "UNKNOWN_ENVIRONMENT");
       }
       assert.equal(selectEnvironment(report, "staging").is_preview, true);
+    },
+  },
+
+  // --- caller-controlled text never survives into a diagnostic --------------
+  {
+    // `--config` is caller-controlled and reaches the refusal message, so a
+    // credential passed as a path would otherwise be printed on stdout by the
+    // very tool that refused to read it. The benign contrast run is the causal
+    // half: same path, same code, one dimension different.
+    name: "a-credential-passed-as-a-config-path-is-not-echoed",
+    execute() {
+      // Synthetic, shaped like a Fellow bearer token. Never a live value.
+      const planted = "asimp_ag_LIVEabc123XYZdefg456";
+      const refused = runCli(["--config", `infra/${planted}.toml`]);
+      assert.equal(refused.exitCode, 1);
+
+      const diagnostic = refusalOf(refused);
+      assert.equal(diagnostic.status, "fail");
+      assert.equal(diagnostic.code, "MISSING_CONFIG_FILE");
+
+      assert.equal(refused.combined.includes(planted), false, "token reached the output");
+      assert.equal(
+        refused.combined.includes("abc123XYZdefg456"),
+        false,
+        "token tail reached the output",
+      );
+      assert.ok(diagnostic.detail.includes(REDACTED_TOKEN), "detail was not redacted");
+
+      // The surrounding prose still names what was expected and where.
+      assert.ok(diagnostic.detail.startsWith("Expected infra/"), "safe prose did not survive");
+      assert.ok(diagnostic.detail.endsWith(".toml."), "safe path suffix did not survive");
+
+      // Causal contrast: an ordinary missing path is echoed verbatim.
+      const benign = runCli(["--config", "infra/absent.toml"]);
+      const echoed = refusalOf(benign);
+      assert.equal(echoed.code, "MISSING_CONFIG_FILE");
+      assert.ok(echoed.detail.includes("absent"), "a safe path should be echoed");
+      assert.equal(echoed.detail.includes(REDACTED_TOKEN), false);
+    },
+  },
+  {
+    // The same guarantee at the library boundary the migration runner calls,
+    // rather than only through this module's own CLI.
+    name: "a-credential-passed-as-an-environment-name-is-not-echoed",
+    execute() {
+      const planted = "asimp_ag_LIVEabc123XYZdefg456";
+      const report = validateEnvironments(repositoryRoot);
+      try {
+        selectEnvironment(report, planted);
+        assert.fail("expected UNKNOWN_ENVIRONMENT");
+      } catch (error) {
+        assert.equal(error.code, "UNKNOWN_ENVIRONMENT");
+        assert.equal(error.message.includes(planted), false, "token reached the message");
+        assert.ok(error.message.includes(REDACTED_TOKEN), "message was not redacted");
+        assert.ok(
+          error.message.includes("expected one of local, staging, production"),
+          "safe prose did not survive redaction",
+        );
+      }
+      // Causal contrast: a safe name reaches the same message verbatim.
+      try {
+        selectEnvironment(report, "prod");
+        assert.fail("expected UNKNOWN_ENVIRONMENT");
+      } catch (error) {
+        assert.ok(error.message.includes('"prod"'), "a safe environment name should be echoed");
+        assert.equal(error.message.includes(REDACTED_TOKEN), false);
+      }
+    },
+  },
+  {
+    // A path is not a credential family, so the canonical scanner deliberately
+    // declines it and delegation alone would have printed the operator's home
+    // directory. The infra-local mask is what covers this.
+    name: "an-absolute-caller-path-never-reaches-a-diagnostic",
+    execute() {
+      const planted = "/Users/planted-operator/private-keys/environments.toml";
+
+      // `--config` is refused for being absolute *before* the path is ever
+      // interpolated, so the strongest true statement here is that it does not
+      // appear at all — not that it appears masked.
+      const refused = runCli(["--config", planted]);
+      assert.equal(refused.exitCode, 1);
+      assert.equal(refusalOf(refused).code, "PATH_ESCAPE");
+      assert.equal(refused.combined.includes("planted-operator"), false, "home directory leaked");
+      assert.equal(refused.combined.includes(planted), false, "absolute path leaked");
+
+      // The masking itself is proven where caller text really is echoed: an
+      // environment *name* reaches its refusal message verbatim.
+      try {
+        selectEnvironment(validateEnvironments(repositoryRoot), planted);
+        assert.fail("expected UNKNOWN_ENVIRONMENT");
+      } catch (error) {
+        assert.equal(error.code, "UNKNOWN_ENVIRONMENT");
+        assert.equal(error.message.includes("planted-operator"), false, "home directory leaked");
+        assert.ok(error.message.includes("<path>"), "path was not masked");
+      }
+
+      // Causal: the canonical credential scanner would not have masked this, so
+      // the assertion above proves the infra-local rule rather than passing on
+      // someone else's coverage.
+      assert.equal(
+        containsCredentialShape(planted),
+        false,
+        "the plant must not be caught by the credential scanner, or it proves nothing",
+      );
+    },
+  },
+
+  // --- context-only partial shapes, stricter than the canonical scanner ------
+  {
+    // The canonical pattern needs four characters after `asimp_ag_`; this file
+    // refuses one. Each plant is chosen to sit *below* the canonical threshold,
+    // so a regression that deleted the context rule in favour of pure
+    // delegation would let it through.
+    name: "a-short-fellow-token-prefix-in-the-topology-is-refused",
+    execute() {
+      const planted = "asimp_ag_ab";
+      assert.equal(
+        containsCredentialShape(`current_kid = "${planted}"`),
+        false,
+        "plant is above the canonical threshold, so it would not prove the context rule",
+      );
+      const mutated = baseline.replace('current_kid = "local-dev-1"', `current_kid = "${planted}"`);
+      assert.notEqual(mutated, baseline, "the plant did not change the topology");
+      expectFailure("short-fellow-prefix", mutated, "CREDENTIAL_IN_REPOSITORY");
+    },
+  },
+  {
+    // Same shape of proof for the provider-key family: canonical needs eight
+    // characters after `sk_live_`, this file refuses one.
+    name: "a-short-provider-key-prefix-in-the-topology-is-refused",
+    execute() {
+      const planted = "sk_live_abcd";
+      assert.equal(
+        containsCredentialShape(`current_kid = "${planted}"`),
+        false,
+        "plant is above the canonical threshold, so it would not prove the context rule",
+      );
+      const mutated = baseline.replace('current_kid = "local-dev-1"', `current_kid = "${planted}"`);
+      assert.notEqual(mutated, baseline, "the plant did not change the topology");
+      expectFailure("short-provider-prefix", mutated, "CREDENTIAL_IN_REPOSITORY");
+    },
+  },
+  {
+    // The de-duplication is a structural property, not a behavioural one: a
+    // future edit could reintroduce a local copy of a shared family and every
+    // behavioural test would still pass while the two lists drifted apart.
+    name: "the-validator-does-not-restate-a-shared-credential-family",
+    execute() {
+      const source = readFileSync(new URL("./validate-environments.mjs", import.meta.url), "utf8");
+      const code = source.replace(/\/\*[\s\S]*?\*\//g, "").replace(/^\s*\/\/.*$/gm, "");
+      for (const duplicated of [
+        "Bearer",
+        "Basic",
+        "github_pat_",
+        "AIza",
+        "PRIVATE KEY",
+        "password",
+        "cookie",
+        "#v1.",
+      ]) {
+        assert.equal(code.includes(duplicated), false, `restated credential family: ${duplicated}`);
+      }
+      // The shared list is reached rather than reimplemented...
+      assert.ok(code.includes("containsCredentialShape"), "canonical scanner is not consulted");
+      // ...while the guards that are genuinely specific to a topology file stay
+      // local, including the two deliberately-stricter partial prefixes.
+      assert.ok(code.includes("CERTIFICATE"), "certificate guard missing");
+      assert.ok(code.includes("eyJ"), "JWT guard missing");
+      assert.ok(code.includes("A-Fa-f0-9]{64,}"), "long-hex guard missing");
+      assert.ok(code.includes("asimp_ag_[A-Za-z0-9]"), "short Fellow-prefix guard missing");
+      assert.ok(code.includes("live|test)_[A-Za-z0-9]"), "short provider-prefix guard missing");
     },
   },
 ];

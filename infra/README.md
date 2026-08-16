@@ -35,9 +35,10 @@ literal id or anything key-shaped.
 
 ```bash
 bun infra/validate-environments.mjs        # topology
-bun infra/validate-environments.test.mjs   # 33-case negative corpus
+bun infra/validate-environments.test.mjs   # 84-case negative corpus
+bun infra/generate-wrangler.test.mjs       # 28-case generated-config contract
 bun infra/migrate.mjs --env local          # forward migration plan
-bun infra/migrate.test.mjs                 # 18-case planner corpus
+bun infra/migrate.test.mjs                 # 38-case planner corpus
 scripts/e2e-environments.sh staging        # rehearsal; blocks where it must
 ```
 
@@ -49,6 +50,15 @@ disjoint; a `private-cas` bucket may never carry a public custom domain, and
 only production may claim `artifacts.asimposium.org`; only production may hold
 production keys, and `previous_kid` must differ from `current_kid` so a rotation
 is a real overlap window; production may not permit destructive operations.
+
+Both tools redact at the throw site, so every structured diagnostic they print
+is scanned before it reaches stdout or stderr — including the caller-controlled
+`--env` and `--config` text, which a mistyped token would otherwise have echoed
+back by the tool that refused it. Credential families come from
+`@asimposium/contracts/diagnostic-safety` rather than being restated here; what
+stays local is what that scanner deliberately declines — absolute paths, and the
+short credential *prefixes* that have no benign reading in a file whose every
+legitimate value is a name, an id, or a `${VAR}` reference.
 
 ## Migrations
 
@@ -94,9 +104,20 @@ binding/name/id, both R2 roles and bindings, the Durable Object binding and
 class, the Markdown, text, and generated-schema Text rule, and the exact required binding set. It also holds
 the safety properties in the generated artifact: no Worker `route` (a bucket is
 published by an R2 custom domain, never by putting the Worker on the blob path),
-no `custom_domain` on any bucket entry, no `account_id`, no `vars`, no literal
+no `custom_domain` on any bucket entry, no `account_id`, no literal
 resource id, no credential shape, and the apex artifact hostname mentioned in
 production's file alone.
+
+A generated config carries exactly one `[vars]` entry — `STOA_ORIGIN`, the
+non-secret origin projected from that environment's `worker_origin`, so the
+Worker never has to ask a request which origin it is serving. The contract
+suite enumerates the key set exhaustively, so a second variable appearing there
+is a new disclosure that fails rather than passing unnoticed. The checked-in
+`production.deploy.wrangler.toml` overlay carries that same `STOA_ORIGIN` plus
+`SERVICE_ENVELOPE_KEYS`, which holds public Ed25519 verification keys only; its
+key set is pinned by the same suite. Reconciliation also enumerates the
+directory, so a stale config left behind by a renamed environment is reported
+as surplus rather than sitting unnoticed beside the generated set.
 
 **These files are not directly deployable as written.** Resource ids remain
 `${VAR}` references and Wrangler does not interpolate environment variables in
@@ -108,15 +129,24 @@ rather than hidden.
 Stated plainly so this tooling is not mistaken for a working environment. **OPS.3
 cannot close on the strength of what is here.**
 
-- **The Worker does not implement the topology.** `apps/wire`'s `Env` declares
-  `DB` and `ARTIFACTS` only — no `PUBLIC_ARTIFACTS`, no `HERALD_ROOMS`, and no
-  exported Durable Object class. The topology and the generated configs declare
-  all four bindings; the Worker binds two. Closing this needs coordinated edits
-  in `apps/wire` **and** in `infra/wrangler.toml` (whose validator asserts
-  exactly one R2 bucket), which is why it is reported here rather than done
+- **The Worker does not yet implement the whole topology.** The topology's
+  `required_bindings` roster is five — `DB`, `ARTIFACTS`, `PUBLIC_ARTIFACTS`,
+  `HERALD_ROOMS`, `KRATER_OUTBOX`. `apps/wire`'s `Env` declares three of them:
+  `DB`, `ARTIFACTS`, and `KRATER_OUTBOX`. `PUBLIC_ARTIFACTS` has no counterpart
+  in the Worker, and `HERALD_ROOMS` is deferred (below). One Durable Object
+  class **is** exported — `KraterOutboxDrainer`, which is why its binding is
+  emitted rather than deferred. Closing the gap needs coordinated edits in
+  `apps/wire` **and** in `infra/wrangler.toml` (whose validator asserts exactly
+  one R2 bucket), which is why it is reported here rather than done
   unilaterally.
 - **A Durable Object binding without an exported class fails `wrangler deploy`.**
-  The generated configs declare `HERALD_ROOMS`; the class arrives with W7.
+  `HERALD_ROOMS` is therefore declared in `environments.toml` but listed in
+  `policy.deferred_bindings`, so it is withheld from every generated config
+  until `apps/wire/src/index.ts` exports `HeraldRoom` with W7. The validator
+  reconciles both directions against that entrypoint: an emitted class must
+  already be exported, and a deferred class must not be. Deferral applies to
+  every environment identically, so parity holds by uniform absence. Retire the
+  entry on the same change that adds the export.
 - **Remote apply does not exist.** `--apply` works only against local D1.
   Staging and production refuse, by design, until provisioned.
 - **Vercel wiring is declared, not applied.** `[vercel]` records which

@@ -1,10 +1,18 @@
 import assert from "node:assert/strict";
-import { mkdirSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { performance } from "node:perf_hooks";
 import { fileURLToPath } from "node:url";
-import { GENERATED_DIRECTORY, reconcile, renderAll } from "./generate-wrangler.mjs";
+import {
+  DEPLOY_OVERLAY_NAME,
+  durableObjectParity,
+  GENERATED_DIRECTORY,
+  reconcile,
+  renderAll,
+  renderEnvironment,
+  stoaOriginProjection,
+} from "./generate-wrangler.mjs";
 import { validateEnvironments } from "./validate-environments.mjs";
 
 /**
@@ -90,19 +98,22 @@ const cases = [
   {
     name: "durable-object-reconciles-exactly",
     execute() {
+      const deferred = new Set(report.policy.deferred_bindings);
       for (const [name, environment] of Object.entries(report.environments)) {
+        const declared = [environment.durable_objects, environment.outbox];
+        const emitted = declared.filter((durableObject) => !deferred.has(durableObject.binding));
         const bindings = parsed[name].durable_objects.bindings;
-        assert.equal(bindings.length, 2, name);
-        const herald = bindings.find(
-          (binding) => binding.name === environment.durable_objects.binding,
-        );
-        const outbox = bindings.find((binding) => binding.name === environment.outbox.binding);
-        assert.equal(herald.class_name, environment.durable_objects.class_name, name);
-        assert.equal(outbox.class_name, environment.outbox.class_name, name);
-        assert.deepEqual(parsed[name].exports[environment.outbox.class_name], {
-          type: "durable-object",
-          storage: "sqlite",
-        });
+        assert.equal(bindings.length, emitted.length, name);
+        for (const durableObject of emitted) {
+          const bound = bindings.find((binding) => binding.name === durableObject.binding);
+          assert.equal(bound.class_name, durableObject.class_name, name);
+          // Storage comes from the topology, so a renderer that reverted to a
+          // hardcoded backend would disagree with the declaration here.
+          assert.deepEqual(parsed[name].exports[durableObject.class_name], {
+            type: "durable-object",
+            storage: durableObject.storage,
+          });
+        }
         assert.deepEqual(parsed[name].triggers.crons, [report.policy.outbox_cron], name);
         // A Durable Object namespace is scoped to the Worker script that owns
         // it, so the script name IS the namespace. Asserting the equality makes
@@ -121,7 +132,101 @@ const cases = [
           ...config.r2_buckets.map((b) => b.binding),
           ...config.durable_objects.bindings.map((d) => d.name),
         ].sort();
-        assert.deepEqual(bound, [...report.policy.required_bindings].sort(), name);
+        // A deferred binding stays in the topology roster but must not reach a
+        // generated config, so the emitted roster is the required set minus it.
+        const expected = report.policy.required_bindings
+          .filter((binding) => !report.policy.deferred_bindings.includes(binding))
+          .sort();
+        assert.deepEqual(bound, expected, name);
+      }
+    },
+  },
+  {
+    // Cloudflare refuses a Durable Object binding whose class the entrypoint
+    // does not export. Set equality (not a count) is what makes this causal: an
+    // added binding and a dropped export each fail, and in opposite directions.
+    // STOA_ORIGIN is real configuration the Worker reads, not a comment. It is
+    // projected from the topology so the Worker never has to ask a request what
+    // origin it is serving.
+    name: "stoa-origin-is-projected-from-the-declared-worker-origin",
+    execute() {
+      for (const [name, environment] of Object.entries(report.environments)) {
+        const projected = stoaOriginProjection(parsed[name]);
+        assert.equal(typeof projected, "string", name);
+        assert.equal(projected, environment.worker_origin, name);
+      }
+    },
+  },
+  {
+    // The planted negative, through the same reader: a projection carrying
+    // another environment's origin must not survive. A swapped pair keeps both
+    // values distinct, so uniqueness alone would not catch it.
+    name: "PLANTED-a-foreign-origin-projection-fails-the-comparison",
+    execute() {
+      const origins = Object.values(report.environments).map((e) => e.worker_origin);
+      for (const [name, environment] of Object.entries(report.environments)) {
+        for (const foreign of origins.filter((o) => o !== environment.worker_origin)) {
+          const mutated = structuredClone(parsed[name]);
+          mutated.vars.STOA_ORIGIN = foreign;
+          assert.notEqual(stoaOriginProjection(mutated), environment.worker_origin, name);
+        }
+      }
+    },
+  },
+  {
+    name: "every-emitted-durable-object-binding-has-its-export",
+    execute() {
+      for (const [name, config] of Object.entries(parsed)) {
+        const { bound, exported } = durableObjectParity(config);
+        assert.deepEqual(bound, exported, name);
+      }
+    },
+  },
+  {
+    // The planted negative for the case above, through the SAME helper: strip
+    // one export from a rendered config and `durableObjectParity` must stop
+    // agreeing. Reimplementing the comparison here would let the positive gate
+    // be weakened while this case kept passing.
+    name: "PLANTED-a-binding-without-its-export-fails-the-set-equality",
+    execute() {
+      for (const [name, config] of Object.entries(parsed)) {
+        const { bound } = durableObjectParity(config);
+        assert.ok(bound.length > 0, `${name} emits no durable object to strip`);
+        const stripped = structuredClone(config);
+        delete stripped.exports[bound[0]];
+        const mutated = durableObjectParity(stripped);
+        assert.notDeepEqual(mutated.bound, mutated.exported, name);
+      }
+    },
+  },
+  {
+    name: "deferred-bindings-reach-neither-the-bindings-nor-the-exports",
+    execute() {
+      const deferred = report.policy.deferred_bindings;
+      assert.ok(deferred.length > 0, "topology declares no deferred binding to prove");
+      for (const [name, environment] of Object.entries(report.environments)) {
+        const declared = [environment.durable_objects, environment.outbox];
+        for (const binding of deferred) {
+          const durableObject = declared.find((candidate) => candidate.binding === binding);
+          assert.ok(durableObject, `${name} does not declare deferred binding ${binding}`);
+          assert.equal(
+            parsed[name].durable_objects.bindings.some((bound) => bound.name === binding),
+            false,
+            name,
+          );
+          assert.equal(
+            Object.hasOwn(parsed[name].exports ?? {}, durableObject.class_name),
+            false,
+            name,
+          );
+          // The omission is legible in the artifact, not silent.
+          assert.ok(
+            files[`${GENERATED_DIRECTORY}/${name}.wrangler.toml`].includes(
+              `# Deferred: ${binding}`,
+            ),
+            name,
+          );
+        }
       }
     },
   },
@@ -148,6 +253,23 @@ const cases = [
       assert.equal(deploy.main, parsed.production.main);
       assert.deepEqual(deploy.rules, parsed.production.rules);
       assert.equal(deploy.vars.S2_LOCAL_HARNESS, undefined);
+      // The overlay is the file a production deploy actually reads, so the
+      // origin projection must agree with the generated config exactly. The
+      // Worker fails closed without it, and a drifted value would publish the
+      // wrong origin from the one config `--check` does not reconcile.
+      assert.equal(deploy.vars.STOA_ORIGIN, report.environments.production.worker_origin);
+      assert.equal(deploy.vars.STOA_ORIGIN, stoaOriginProjection(parsed.production));
+      // Exhaustive: the overlay may publish exactly these two non-secret values
+      // and nothing else. A third key here is a new disclosure on the deploy
+      // path, which no generated-config assertion would catch.
+      assert.deepEqual(Object.keys(deploy.vars).sort(), ["SERVICE_ENVELOPE_KEYS", "STOA_ORIGIN"]);
+      // Public verification keys only: the signing key lives in Vercel env.
+      const keyring = JSON.parse(deploy.vars.SERVICE_ENVELOPE_KEYS);
+      assert.ok(Array.isArray(keyring) && keyring.length > 0);
+      for (const record of keyring) {
+        assert.deepEqual(Object.keys(record).sort(), ["kid", "notBefore", "publicKeyHex"]);
+        assert.match(record.publicKeyHex, /^[0-9a-f]{64}$/);
+      }
     },
   },
   {
@@ -196,7 +318,10 @@ const cases = [
     execute() {
       for (const [name, config] of Object.entries(parsed)) {
         assert.equal(config.account_id, undefined, name);
-        assert.equal(config.vars, undefined, name);
+        // `vars` is not forbidden, but it is exhaustively enumerated: the only
+        // value a generated config may publish is the non-secret origin
+        // projection. Anything else appearing here is a new disclosure.
+        assert.deepEqual(Object.keys(config.vars ?? {}), ["STOA_ORIGIN"], name);
         assert.equal(config.workers_dev, false, name);
         const id = config.d1_databases[0].database_id;
         const isSentinel = id === "00000000-0000-0000-0000-000000000000";
@@ -332,6 +457,49 @@ const cases = [
 
   // --- reconciliation must actually detect divergence ----------------------
   {
+    // A renamed or retired environment leaves its old generated file behind.
+    // Checking only expected names cannot see it, and a deploy pointed at that
+    // path would read a configuration the topology no longer describes.
+    name: "reconcile-reports-a-surplus-generated-config-and-retains-it",
+    execute() {
+      const root = join(space, "surplus");
+      mkdirSync(join(root, GENERATED_DIRECTORY), { recursive: true });
+      for (const [path, contents] of Object.entries(files)) {
+        writeFileSync(join(root, path), contents, "utf8");
+      }
+      // The checked-in overlay is expected on disk and must never be reported.
+      const overlay = `${GENERATED_DIRECTORY}/${DEPLOY_OVERLAY_NAME}`;
+      writeFileSync(join(root, overlay), "# hand-maintained deploy overlay\n", "utf8");
+      assert.deepEqual(reconcile(root, files).surplus, []);
+
+      const stale = `${GENERATED_DIRECTORY}/retired.wrangler.toml`;
+      writeFileSync(
+        join(root, stale),
+        files[`${GENERATED_DIRECTORY}/staging.wrangler.toml`],
+        "utf8",
+      );
+      const result = reconcile(root, files);
+      assert.deepEqual(result.surplus, [stale]);
+      assert.deepEqual(result.drifted, []);
+      assert.deepEqual(result.missing, []);
+      // Reported, never removed: the fixture is still on disk afterwards.
+      assert.equal(existsSync(join(root, stale)), true);
+    },
+  },
+  {
+    // One declaration governs both the port `wrangler dev` binds and the origin
+    // the Worker publishes, so a changed port must move both together.
+    name: "the-local-dev-port-follows-the-declared-worker-origin",
+    execute() {
+      const local = report.environments.local;
+      assert.equal(parsed.local.dev.port, Number(new URL(local.worker_origin).port));
+      const moved = { ...local, worker_origin: "http://127.0.0.1:8811" };
+      const rendered = Bun.TOML.parse(renderEnvironment("local", moved, report.policy));
+      assert.equal(rendered.dev.port, 8811);
+      assert.equal(stoaOriginProjection(rendered), "http://127.0.0.1:8811");
+    },
+  },
+  {
     name: "reconcile-detects-a-hand-edited-generated-file",
     execute() {
       const root = join(space, "drifted");
@@ -339,7 +507,12 @@ const cases = [
       for (const [path, contents] of Object.entries(files)) {
         writeFileSync(join(root, path), contents, "utf8");
       }
-      assert.deepEqual(reconcile(root, files), { missing: [], drifted: [], checked: 3 });
+      assert.deepEqual(reconcile(root, files), {
+        missing: [],
+        drifted: [],
+        surplus: [],
+        checked: 3,
+      });
 
       // One byte of hand-editing: a bucket quietly repointed at production.
       const target = `${GENERATED_DIRECTORY}/staging.wrangler.toml`;
@@ -369,8 +542,14 @@ const cases = [
   {
     name: "the-checked-in-generated-configs-match-the-topology",
     execute() {
-      // The gate the CI stage runs: what is on disk is what the topology says.
-      assert.deepEqual(reconcile(repositoryRoot, files), { missing: [], drifted: [], checked: 3 });
+      // The gate the CI stage runs: what is on disk is what the topology says,
+      // and nothing else is on disk beside the one checked-in deploy overlay.
+      assert.deepEqual(reconcile(repositoryRoot, files), {
+        missing: [],
+        drifted: [],
+        surplus: [],
+        checked: 3,
+      });
     },
   },
 ];

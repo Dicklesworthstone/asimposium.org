@@ -52,4 +52,10 @@ globs = ["**/*.md", "**/*.txt", "**/*.schema.json"]
 fallthrough = true
 
 [vars]
+# The only origin this Worker may claim for itself, matching the generated
+# production projection. Non-secret, and never derived from request metadata: a
+# Host or X-Forwarded-Host header is caller-supplied, so trusting it would let a
+# request relocate the origin the Worker believes it serves. The Worker fails
+# closed without it.
+STOA_ORIGIN = "https://a.asimposium.org"
 SERVICE_ENVELOPE_KEYS = '[{"kid":"prod-svc-2026-08","publicKeyHex":"0b137bcd0a75c16e2a4d5f734e1f550018fc6cea15edd5693bb8b597096e5f76","notBefore":1786665600}]'

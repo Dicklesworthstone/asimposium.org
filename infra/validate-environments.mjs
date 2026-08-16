@@ -2,6 +2,11 @@ import { existsSync, lstatSync, readFileSync, realpathSync } from "node:fs";
 import { dirname, isAbsolute, relative, resolve, sep } from "node:path";
 import { performance } from "node:perf_hooks";
 import { fileURLToPath } from "node:url";
+import {
+  containsCredentialShape,
+  redactCredentials,
+} from "@asimposium/contracts/diagnostic-safety";
+import ts from "typescript";
 
 /**
  * Environment topology validator (bead asimposiumorg-p1g, OPS.3).
@@ -23,8 +28,44 @@ export class EnvironmentValidationError extends Error {
   }
 }
 
+/**
+ * Absolute filesystem paths, masked to `<path>`.
+ *
+ * The canonical scanner deliberately declines this: it knows credential shapes
+ * only, and teaching it about home directories would drag `node:os` into a
+ * package that is bundled into a Worker. An absolute path is still disclosure —
+ * `/Users/<name>/…` names an operator and their machine layout — so the masking
+ * is an infra-local concern, defined once here because the migration runner
+ * shares it rather than keeping a second copy.
+ */
+const ABSOLUTE_PATH = /[A-Za-z]*\/(?:Users|home|private|tmp|var|opt|etc|Volumes)\/[^\s"']*/g;
+
+export function maskAbsolutePaths(text) {
+  return text.replace(ABSOLUTE_PATH, "<path>");
+}
+
+/**
+ * Everything a structured diagnostic must survive before it is printed:
+ * canonical credential families first, then absolute paths.
+ */
+export function redactDiagnostic(text) {
+  return maskAbsolutePaths(redactCredentials(text));
+}
+
+/**
+ * Every refusal this module raises goes through here, so redacting once at the
+ * throw site covers every structured diagnostic without each interpolation
+ * having to remember. That matters most for the messages that echo
+ * caller-controlled text: `--env <value>` and a `--config <path>` both reach a
+ * message, and a caller who passes a credential — or a home-directory path — as
+ * either would otherwise have it printed back on stdout by the very tool that
+ * refuses it.
+ *
+ * Workspace-relative source labels such as `infra/environments.toml [env.local]`
+ * survive: neither pass touches a repository-relative path.
+ */
 function fail(code, message) {
-  throw new EnvironmentValidationError(code, message);
+  throw new EnvironmentValidationError(code, redactDiagnostic(message));
 }
 
 const isRecord = (v) => v !== null && typeof v === "object" && !Array.isArray(v);
@@ -43,6 +84,114 @@ function isOutside(root, target) {
  * directory anywhere in the path resolves to an in-repo string while the real
  * file sits outside. Both checks are needed; neither is sufficient alone.
  */
+/** The Worker entrypoint whose named exports decide what may be bound. */
+export const WORKER_ENTRYPOINT = "apps/wire/src/index.ts";
+
+/**
+ * Named *value* exports of the Worker entrypoint, read (never written).
+ *
+ * Cloudflare resolves a Durable Object binding to a class the entrypoint
+ * exports, so this set is the ground truth that decides which bindings may be
+ * emitted. It is collected from the TypeScript AST rather than by scanning
+ * text: a regex cannot tell an export from the same words inside a comment or
+ * a string literal, and a commented-out `export { HeraldRoom }` would then
+ * force a stale-deferral refusal for an export that does not exist at runtime.
+ *
+ * Excluded, because none of them binds a class at runtime: `export type { … }`
+ * and type-only specifiers, `export default`, interfaces, and type aliases.
+ */
+export function workerNamedExports(root) {
+  const path = assertRepositoryContained(root, WORKER_ENTRYPOINT, "worker entrypoint");
+  let source;
+  try {
+    source = readFileSync(path, "utf8");
+  } catch {
+    fail("MISSING_WORKER_ENTRYPOINT", `Expected ${WORKER_ENTRYPOINT}.`);
+  }
+  const parsed = ts.createSourceFile(
+    WORKER_ENTRYPOINT,
+    source,
+    ts.ScriptTarget.ESNext,
+    true,
+    ts.ScriptKind.TS,
+  );
+  const names = new Set();
+  for (const statement of parsed.statements) {
+    if (ts.isExportDeclaration(statement)) {
+      if (statement.isTypeOnly) continue;
+      const clause = statement.exportClause;
+      if (clause !== undefined && ts.isNamedExports(clause)) {
+        for (const element of clause.elements) {
+          if (!element.isTypeOnly) names.add(element.name.text);
+        }
+      }
+      continue;
+    }
+    const modifiers = ts.canHaveModifiers(statement) ? ts.getModifiers(statement) : undefined;
+    if (modifiers === undefined) continue;
+    const exported = modifiers.some((m) => m.kind === ts.SyntaxKind.ExportKeyword);
+    const isDefault = modifiers.some((m) => m.kind === ts.SyntaxKind.DefaultKeyword);
+    if (!exported || isDefault) continue;
+    if (ts.isClassDeclaration(statement) || ts.isFunctionDeclaration(statement)) {
+      if (statement.name !== undefined) names.add(statement.name.text);
+    } else if (ts.isVariableStatement(statement)) {
+      for (const declaration of statement.declarationList.declarations) {
+        if (ts.isIdentifier(declaration.name)) names.add(declaration.name.text);
+      }
+    }
+  }
+  return names;
+}
+
+/**
+ * Reconcile the declared topology against what the Worker actually exports.
+ *
+ * This is the single gate both the validator and its planted negatives call, so
+ * weakening it cannot leave a negative case passing for an unrelated reason.
+ * Three rules, each with a distinct failure:
+ *
+ *  - only a Durable Object *namespace* binding may be deferred. Deferring D1,
+ *    an R2 bucket, or the Krater outbox would silently drop a binding the
+ *    Worker's code path requires, which is a strictly worse outcome than the
+ *    undeployable config deferral exists to prevent;
+ *  - an emitted class must already be exported, or the generated config cannot
+ *    deploy;
+ *  - a deferred class must NOT be exported, or the deferral is stale and is
+ *    withholding a binding that is ready.
+ */
+export function assertDurableObjectExportParity(policy, environments, exportedClasses, source) {
+  const deferrable = new Set(
+    Object.values(environments).map((environment) => environment.durable_objects.binding),
+  );
+  for (const deferred of policy.deferred_bindings) {
+    if (!deferrable.has(deferred)) {
+      fail(
+        "BINDING_NOT_DEFERRABLE",
+        `${source} defers "${deferred}"; only a Durable Object namespace binding may be deferred, never D1, an R2 bucket, or the Krater outbox.`,
+      );
+    }
+  }
+  const deferredNames = new Set(policy.deferred_bindings);
+  for (const [name, environment] of Object.entries(environments)) {
+    for (const durableObject of [environment.durable_objects, environment.outbox]) {
+      const isDeferred = deferredNames.has(durableObject.binding);
+      const isExported = exportedClasses.has(durableObject.class_name);
+      if (!isDeferred && !isExported) {
+        fail(
+          "EMITTED_CLASS_NOT_EXPORTED",
+          `${source} binds "${durableObject.binding}" to class "${durableObject.class_name}", which ${WORKER_ENTRYPOINT} does not export; the generated configuration could not deploy.`,
+        );
+      }
+      if (isDeferred && isExported) {
+        fail(
+          "DEFERRED_CLASS_ALREADY_EXPORTED",
+          `${source} defers "${durableObject.binding}", but ${WORKER_ENTRYPOINT} now exports "${durableObject.class_name}"; retire the deferral in env.${name}.`,
+        );
+      }
+    }
+  }
+}
+
 export function assertRepositoryContained(root, workspacePath, label) {
   if (isAbsolute(workspacePath)) {
     fail("PATH_ESCAPE", `${label} must be repository-relative.`);
@@ -94,6 +243,8 @@ const POLICY_KEYS = [
   "rollback_policy",
   "outbox_cron",
   "required_bindings",
+  "deferred_bindings",
+  "canonical_worker_origins",
 ];
 const VERCEL_KEYS = ["production_environment", "preview_environment"];
 const ENVIRONMENT_KEYS = [
@@ -110,8 +261,15 @@ const ENVIRONMENT_KEYS = [
 ];
 const D1_KEYS = ["binding", "database_name", "database_id"];
 const R2_KEYS = ["binding", "role", "bucket_name", "custom_domain"];
-const DURABLE_OBJECT_KEYS = ["binding", "class_name", "script_namespace"];
-const OUTBOX_KEYS = ["binding", "class_name"];
+const DURABLE_OBJECT_KEYS = ["binding", "class_name", "script_namespace", "storage"];
+const OUTBOX_KEYS = ["binding", "class_name", "storage"];
+/**
+ * Durable Object storage backends Cloudflare accepts in an `[exports.<class>]`
+ * block. Declared per binding rather than assumed by the generator: the backend
+ * decides whether a class gets SQL storage, and inventing it in the renderer
+ * would make the deployed shape depend on a value nothing reviewed.
+ */
+const DURABLE_OBJECT_STORAGE_KINDS = ["sqlite", "kv"];
 const KEY_KEYS = [
   "current_kid",
   "previous_kid",
@@ -120,7 +278,47 @@ const KEY_KEYS = [
 ];
 
 /** Local dev may use loopback http; anything remote must be https. */
-const WORKER_ORIGIN = /^https:\/\/[a-z0-9-]+(\.[a-z0-9-]+)+$|^http:\/\/127\.0\.0\.1:\d{2,5}$/;
+// The loopback branch admits any 1-to-5-digit port so that the canonical port
+// law below is the single authority that refuses one. A narrower shape here
+// would reject some bad ports with a shape error instead, which makes a
+// planted port indistinguishable from a planted typo.
+const WORKER_ORIGIN = /^https:\/\/[a-z0-9-]+(\.[a-z0-9-]+)+$|^http:\/\/127\.0\.0\.1:\d{1,5}$/;
+/** Local development only: plaintext, loopback literal, explicit port. */
+const LOOPBACK_WORKER_ORIGIN = /^http:\/\/127\.0\.0\.1:(\d{1,5})$/;
+/**
+ * Lowest port a local dev Worker may bind. The shared origin contract admits
+ * the whole 1-65535 range because it also describes deployed origins; a local
+ * `wrangler dev` bind is deliberately narrower, since every port below 1024 is
+ * privileged and none of them is a plausible dev port. The canonicality
+ * mechanics are identical to the shared contract's on purpose.
+ */
+const MIN_LOOPBACK_PORT = 1024;
+const MAX_LOOPBACK_PORT = 65_535;
+
+/**
+ * Exact canonical loopback origin: plaintext, the loopback literal, and a port
+ * that survives a round trip through `Number`.
+ *
+ * `String(port) === digits` is what rejects a leading zero. `Number` would
+ * accept `08787` and silently normalise it to `8787`, so the topology and the
+ * origin the Worker publishes would disagree by one character while both
+ * parsed to the same integer.
+ */
+function isCanonicalLoopbackOrigin(value) {
+  const match = LOOPBACK_WORKER_ORIGIN.exec(value);
+  if (match === null) return false;
+  const digits = match[1];
+  if (digits === undefined) return false;
+  const port = Number(digits);
+  return (
+    Number.isInteger(port) &&
+    String(port) === digits &&
+    port >= MIN_LOOPBACK_PORT &&
+    port <= MAX_LOOPBACK_PORT
+  );
+}
+/** A canonical remote origin: https, host only, no port, path, query, or credentials. */
+const CANONICAL_WORKER_ORIGIN = /^https:\/\/[a-z0-9-]+(\.[a-z0-9-]+)+$/;
 
 /** `${VAR}` deploy-time reference — the only legal id form for a remote env. */
 const VAR_REFERENCE = /^\$\{[A-Z][A-Z0-9_]*\}$/;
@@ -137,12 +335,44 @@ const CLASS_NAME = /^[A-Z][A-Za-z0-9]{1,63}$/;
  * Credential shapes. This is the "no secrets in the repo" gate: the topology
  * file is committed, so anything key-shaped in it is a leak by construction.
  */
-const CREDENTIAL_SHAPES = [
-  [/-----BEGIN [A-Z ]*(PRIVATE KEY|CERTIFICATE)/, "a PEM block"],
-  [/\basimp_ag_[A-Za-z0-9]/, "a Fellow bearer token"],
-  [/\b(sk|rk|pk)_(live|test)_[A-Za-z0-9]{8,}/, "a provider secret key"],
-  [/\bghp_[A-Za-z0-9]{20,}/, "a GitHub token"],
+/**
+ * Shapes this validator recognises *in addition to* the canonical scanner.
+ *
+ * The known credential families — Fellow bearer tokens, provider secret keys,
+ * GitHub tokens, PEM private keys, Bearer/Basic headers, labelled fields — are
+ * not restated here. They come from `@asimposium/contracts/diagnostic-safety`,
+ * which is the one place that list is maintained; a second copy would drift
+ * behind it while every reader believed the file was covered.
+ *
+ * What remains is specific to *this* context: a declarative topology file that
+ * should contain nothing but names, ids, and public key identifiers. None of
+ * these is a credential family the canonical scanner claims.
+ */
+const VALIDATOR_CONTEXT_SHAPES = [
+  // Partial prefixes, deliberately stricter here than the canonical scanner.
+  //
+  // The canonical patterns require four characters after `asimp_ag_` and twelve
+  // after `sk_live_`, and their clipped variants are terminal-only — correctly,
+  // because a general scanner runs over prose and must not rewrite `pk-3`. A
+  // *mid-file* `asimp_ag_ab` therefore passes it.
+  //
+  // This file is not prose. Every legitimate value in it is a name, a resource
+  // id, or a `${VAR}` reference, so a credential prefix has no benign reading
+  // at any length, and the shorter trigger costs nothing. Delegating these to
+  // the canonical thresholds would have silently relaxed a rule this file
+  // already enforced, so they are kept and labelled as context-only rather
+  // than dropped in the name of de-duplication.
+  [/\basimp_ag_[A-Za-z0-9]/, "a Fellow bearer token prefix"],
+  [/\b(?:sk|rk|pk)_(?:live|test)_[A-Za-z0-9]/, "a provider secret key prefix"],
+  // A certificate is public material, but it still has no business in a
+  // topology file, and its presence means something was pasted here wholesale.
+  [/-----BEGIN [A-Z ]*CERTIFICATE/, "a PEM certificate block"],
+  // Not covered by the canonical scanner today. Retained rather than dropped:
+  // losing coverage to avoid a duplicate would be the wrong trade.
   [/\beyJ[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}\./, "a JWT"],
+  // Raw material, not a named family: a 64-hex run or a long base64 blob in a
+  // file whose every legitimate value is a name or a `${VAR}` reference is a
+  // pasted key regardless of which product issued it.
   [/\b[A-Fa-f0-9]{64,}\b/, "a long hex secret"],
   [/\b[A-Za-z0-9+/]{60,}={0,2}\b/, "a long base64 blob"],
 ];
@@ -187,10 +417,15 @@ function assertNoControlBytes(text, source) {
 }
 
 function assertNoCredentialShapes(text, source) {
-  for (const [pattern, description] of CREDENTIAL_SHAPES) {
+  // Known families first, from the one canonical list.
+  if (containsCredentialShape(text)) {
+    // The matched text is never echoed: reporting it would put the secret in
+    // the log this check exists to keep clean. The family is not named either,
+    // so the refusal does not confirm which shape was recognised.
+    fail("CREDENTIAL_IN_REPOSITORY", `${source} contains a known credential shape.`);
+  }
+  for (const [pattern, description] of VALIDATOR_CONTEXT_SHAPES) {
     if (pattern.test(text)) {
-      // The matched text is never echoed: reporting it would put the secret in
-      // the log this check exists to keep clean.
       fail("CREDENTIAL_IN_REPOSITORY", `${source} contains what looks like ${description}.`);
     }
   }
@@ -367,7 +602,24 @@ function validateDurableObjects(durableObjects, name, source, registry) {
     "a lowercase resource name",
   );
   claim(registry, "durable object script_namespace", namespace, name);
-  return { binding, class_name: className, script_namespace: namespace };
+  return {
+    binding,
+    class_name: className,
+    script_namespace: namespace,
+    storage: durableObjectStorage(durableObjects, source),
+  };
+}
+
+/** The declared storage backend for one Durable Object, never an assumed one. */
+function durableObjectStorage(table, source) {
+  const storage = table.storage;
+  if (typeof storage !== "string" || !DURABLE_OBJECT_STORAGE_KINDS.includes(storage)) {
+    fail(
+      "DURABLE_OBJECT_STORAGE_INVALID",
+      `${source} storage must be one of ${DURABLE_OBJECT_STORAGE_KINDS.join(", ")}.`,
+    );
+  }
+  return storage;
 }
 
 function validateOutbox(outbox, source) {
@@ -375,6 +627,7 @@ function validateOutbox(outbox, source) {
   return {
     binding: requireString(outbox, "binding", source, BINDING_NAME, "an uppercase binding name"),
     class_name: requireString(outbox, "class_name", source, CLASS_NAME, "a class name"),
+    storage: durableObjectStorage(outbox, source),
   };
 }
 
@@ -506,7 +759,27 @@ export function validateEnvironments(
     rollback_policy: requireString(policyTable, "rollback_policy", `${configWorkspacePath} policy`),
     outbox_cron: requireString(policyTable, "outbox_cron", `${configWorkspacePath} policy`),
     required_bindings: policyTable.required_bindings,
+    deferred_bindings: policyTable.deferred_bindings,
+    canonical_worker_origins: policyTable.canonical_worker_origins,
   };
+  // Each declared canonical origin must itself be a bare https origin: a value
+  // carrying a port, path, query, or credentials would be projected verbatim
+  // into STOA_ORIGIN and become the origin the Worker publishes about itself.
+  const canonicalOrigins = policy.canonical_worker_origins;
+  if (typeof canonicalOrigins !== "object" || canonicalOrigins === null) {
+    fail(
+      "MISSING_CONFIG_KEY",
+      `${configWorkspacePath} policy.canonical_worker_origins must be a table of environment name to origin.`,
+    );
+  }
+  for (const [environmentName, origin] of Object.entries(canonicalOrigins)) {
+    if (typeof origin !== "string" || !CANONICAL_WORKER_ORIGIN.test(origin)) {
+      fail(
+        "UNSAFE_CONFIG_VALUE",
+        `${configWorkspacePath} policy.canonical_worker_origins.${environmentName} must be a bare https origin.`,
+      );
+    }
+  }
   if (
     !Array.isArray(policy.required_bindings) ||
     policy.required_bindings.length === 0 ||
@@ -516,6 +789,33 @@ export function validateEnvironments(
       "MISSING_CONFIG_KEY",
       `${configWorkspacePath} policy.required_bindings must be a non-empty array of binding names.`,
     );
+  }
+  // A deferred binding stays part of the declared topology; it is only withheld
+  // from the generated configs until the Worker exports its class. Requiring it
+  // to be a subset of `required_bindings` keeps deferral from becoming a second,
+  // silent place to declare a binding that no environment actually owes.
+  if (
+    !Array.isArray(policy.deferred_bindings) ||
+    !policy.deferred_bindings.every((b) => typeof b === "string" && BINDING_NAME.test(b))
+  ) {
+    fail(
+      "MISSING_CONFIG_KEY",
+      `${configWorkspacePath} policy.deferred_bindings must be an array of binding names (empty is allowed).`,
+    );
+  }
+  if (new Set(policy.deferred_bindings).size !== policy.deferred_bindings.length) {
+    fail(
+      "DUPLICATE_DEFERRED_BINDING",
+      `${configWorkspacePath} policy.deferred_bindings lists the same binding more than once.`,
+    );
+  }
+  for (const deferred of policy.deferred_bindings) {
+    if (!policy.required_bindings.includes(deferred)) {
+      fail(
+        "UNKNOWN_DEFERRED_BINDING",
+        `${configWorkspacePath} policy.deferred_bindings names "${deferred}", which is not in policy.required_bindings.`,
+      );
+    }
   }
   if (!requiredRoles.includes(policy.publishable_role)) {
     fail(
@@ -568,6 +868,29 @@ export function validateEnvironments(
       fail(
         "UNSAFE_CONFIG_VALUE",
         `${source} worker_origin must be https for a remote environment.`,
+      );
+    }
+    // Pin the origin to its declared canonical value. Uniqueness alone does not
+    // catch a swapped pair: staging carrying the production origin and
+    // production carrying staging's are still two distinct values, and the
+    // projection below would then publish the wrong STOA_ORIGIN to both.
+    const canonical = policy.canonical_worker_origins[name];
+    if (canonical !== undefined && workerOrigin !== canonical) {
+      fail(
+        "WORKER_ORIGIN_NOT_CANONICAL",
+        `${source} worker_origin is "${workerOrigin}"; policy.canonical_worker_origins.${name} is "${canonical}".`,
+      );
+    }
+    if (canonical === undefined && kind !== "local") {
+      fail(
+        "WORKER_ORIGIN_NOT_CANONICAL",
+        `${source} is remote but policy.canonical_worker_origins declares no origin for "${name}".`,
+      );
+    }
+    if (kind === "local" && !isCanonicalLoopbackOrigin(workerOrigin)) {
+      fail(
+        "UNSAFE_CONFIG_VALUE",
+        `${source} worker_origin must be a plaintext loopback origin whose port is ${MIN_LOOPBACK_PORT}-${MAX_LOOPBACK_PORT} with no leading zero.`,
       );
     }
     // Two environments answering on one origin is the same class of mistake as
@@ -657,6 +980,16 @@ export function validateEnvironments(
       keys,
     };
   }
+
+  // Deferral is only honest if it agrees with what the Worker exports today.
+  // Checked after every environment is built, because the set of deferrable
+  // bindings is derived from the declared topology rather than hardcoded.
+  assertDurableObjectExportParity(
+    policy,
+    environments,
+    workerNamedExports(root),
+    `${configWorkspacePath} [policy]`,
+  );
 
   // Parity is by ROLE, never by resource name: the Worker's code path must be
   // identical everywhere, while the resources behind it must be disjoint.

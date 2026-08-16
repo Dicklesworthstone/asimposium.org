@@ -28,16 +28,19 @@ binding = "PUBLIC_ARTIFACTS"
 bucket_name = "asimposium-public-staging"
 
 [[durable_objects.bindings]]
-name = "HERALD_ROOMS"
-class_name = "HeraldRoom"
-
-[[durable_objects.bindings]]
 name = "KRATER_OUTBOX"
 class_name = "KraterOutboxDrainer"
 
 [exports.KraterOutboxDrainer]
 type = "durable-object"
 storage = "sqlite"
+
+# Deferred: HERALD_ROOMS (HeraldRoom) is declared in
+# infra/environments.toml but is not bound here, because the Worker entrypoint
+# does not export its class yet. Binding it would make this config undeployable.
+
+[vars]
+STOA_ORIGIN = "https://a-staging.asimposium.org"
 
 [[rules]]
 type = "Text"
@@ -49,7 +52,7 @@ fallthrough = true
 #   artifacts-staging.asimposium.org
 # The private-cas bucket carries no custom domain by construction.
 
-# Vercel calls this environment at:
+# Vercel calls this environment at the STOA_ORIGIN projected above:
 #   https://a-staging.asimposium.org
 
 # Signing key ids (public identifiers; the keys live in wrangler secret):
