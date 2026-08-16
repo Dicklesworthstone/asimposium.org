@@ -179,7 +179,11 @@ function aggregateOutputCommand(totalCapturedBytes: number, includeExitedControl
 describe("owned session launcher", () => {
   test("the production 65536-byte per-stream limit completes with exact output", async () => {
     const result = await runOwnedCommand({
-      command: ["perl", "-e", `syswrite(STDOUT, "x" x ${PRODUCTION_STREAM_RETAINED_BYTES}); exit 0;`],
+      command: [
+        "perl",
+        "-e",
+        `syswrite(STDOUT, "x" x ${PRODUCTION_STREAM_RETAINED_BYTES}); exit 0;`,
+      ],
       cwd: process.cwd(),
       env: childEnvironment(),
       timeoutMs: 2_000,
@@ -193,6 +197,7 @@ describe("owned session launcher", () => {
 
   test("the production 65537-byte per-stream overrun retains no excess and leaves no owned survivor", async () => {
     const marker = `suite-output-overrun-owned-${crypto.randomUUID()}`;
+    const cancelled: ("stdout" | "stderr")[] = [];
     const result = await runOwnedCommand({
       command: [
         "perl",
@@ -202,6 +207,7 @@ describe("owned session launcher", () => {
       cwd: process.cwd(),
       env: childEnvironment(),
       timeoutMs: 2_000,
+      onPipeCancelRequested: (pipe) => cancelled.push(pipe),
     });
 
     expect(result.outcome).toBe("output-overrun");
@@ -209,6 +215,7 @@ describe("owned session launcher", () => {
     expect(result.stdout).toHaveLength(PRODUCTION_STREAM_RETAINED_BYTES);
     expect(result.retainedStdoutBytes).toBe(PRODUCTION_STREAM_RETAINED_BYTES);
     expect(result.retainedOutputBytes).toBeLessThanOrEqual(PRODUCTION_AGGREGATE_RETAINED_BYTES);
+    expect(cancelled.sort()).toEqual(["stderr", "stdout"]);
     expect(processTable()).not.toContain(marker);
   });
 
@@ -301,6 +308,34 @@ describe("owned session launcher", () => {
     expect(result.exitCode).toBe(0);
   });
 
+  test("the normal production pgrep census accepts its owned leader", async () => {
+    const result = await runOwnedCommand({
+      command: ["perl", "-e", "exit 0;"],
+      cwd: process.cwd(),
+      env: childEnvironment(),
+      timeoutMs: 2_000,
+    });
+
+    expect(result.outcome).toBe("exited");
+    expect(result.exitCode).toBe(0);
+  });
+
+  test.each([
+    ["exit 1 with stdout", 'print "999\\n"; exit 1;'],
+    ["exit 0 with no PID", "exit 0;"],
+    ["a malformed PID line", 'print "not-a-pid\\n"; exit 0;'],
+  ])("PLANTED: contradictory pgrep census %s is inspection-unproven", async (_label, source) => {
+    const result = await runOwnedCommand({
+      command: ["perl", "-e", "exit 0;"],
+      cwd: process.cwd(),
+      env: childEnvironment(),
+      timeoutMs: 2_000,
+      inspectionCommand: ["perl", "-e", source],
+    });
+
+    expect(result.outcome).toBe("inspection-unproven");
+  });
+
   test("a stalled inspector is bounded, reaped, and reported inspection-unproven", async () => {
     const marker = `suite-stalled-inspector-${crypto.randomUUID()}`;
     const startedAt = performance.now();
@@ -383,6 +418,7 @@ describe("owned session launcher", () => {
 
   test("a detached inherited pipe holder is cancelled locally, not credited as dispatcher cleanup", async () => {
     const marker = `suite-detached-pipe-boundary-${crypto.randomUUID()}`;
+    const cancelled: ("stdout" | "stderr")[] = [];
     try {
       const startedAt = performance.now();
       const result = await runOwnedCommand({
@@ -398,9 +434,11 @@ describe("owned session launcher", () => {
         termGraceMs: 40,
         killReapMs: 200,
         pipeDrainMs: 10,
+        onPipeCancelRequested: (pipe) => cancelled.push(pipe),
       });
 
       expect(result.outcome).toBe("pipe-drain-unproven");
+      expect(cancelled.sort()).toEqual(["stderr", "stdout"]);
       expect(performance.now() - startedAt).toBeLessThan(750);
       // The process is intentionally outside our group and still live here. The
       // dispatcher cancelled and released its readers; it did not clean this PID.

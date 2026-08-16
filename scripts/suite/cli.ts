@@ -195,6 +195,8 @@ export interface OwnedCommandOptions {
   inspectionOutputBytes?: number;
   /** Test seam only: production always launches the nonce-bound supervisor below. */
   supervisorScript?: string;
+  /** Test seam only: observes the first bounded cancel-and-release request per captured pipe. */
+  onPipeCancelRequested?: (pipe: "stdout" | "stderr") => void;
 }
 
 export interface OwnedCommandResult {
@@ -499,7 +501,7 @@ async function inspectOwnedProcessGroup(
     snapshot = Bun.spawn({
       cmd:
         options.command === undefined
-          ? ["/usr/bin/pgrep", "-g", String(leaderPid)]
+          ? ["/usr/bin/pgrep", "-g", String(leaderPid), ".*"]
           : [...options.command],
       env: environmentForSuite(),
       stdin: "ignore",
@@ -536,6 +538,7 @@ async function inspectOwnedProcessGroup(
     observation?.kind !== "exited" ||
     (observation.exitCode !== 0 && observation.exitCode !== 1)
   ) {
+    cancelCapturedPipes([stdout, stderr]);
     killDirectChild(snapshot, "SIGKILL");
     await reapDirectChild(snapshot, millisecondsBefore(deadlineAt));
     await drainWithin([stdout, stderr], millisecondsBefore(deadlineAt));
@@ -546,15 +549,32 @@ async function inspectOwnedProcessGroup(
     stdout.overflowed() ||
     stderr.overflowed()
   ) {
+    cancelCapturedPipes([stdout, stderr]);
     killDirectChild(snapshot, "SIGKILL");
     await reapDirectChild(snapshot, millisecondsBefore(deadlineAt));
     return { state: "inspection-unproven" };
   }
 
+  const stdoutText = stdout.text();
+  if (stderr.text() !== "") return { state: "inspection-unproven" };
+  if (observation.exitCode === 1) {
+    // `pgrep` reserves exit 1 for an empty match. Output with that status is a
+    // contradiction, never an empty census that may prove a post-KILL group is gone.
+    return stdoutText === "" ? { state: "census", members: [] } : { state: "inspection-unproven" };
+  }
+
+  const lines = stdoutText.endsWith("\n")
+    ? stdoutText.slice(0, -1).split("\n")
+    : stdoutText.split("\n");
+  if (lines.length === 0 || lines.some((line) => !/^[1-9][0-9]*$/.test(line))) {
+    return { state: "inspection-unproven" };
+  }
+  const seen = new Set<number>();
   const members: OwnedSessionMember[] = [];
-  for (const line of stdout.text().split("\n")) {
-    const pid = Number(line.trim());
-    if (!Number.isSafeInteger(pid) || pid < 1) continue;
+  for (const line of lines) {
+    const pid = Number(line);
+    if (!Number.isSafeInteger(pid) || seen.has(pid)) return { state: "inspection-unproven" };
+    seen.add(pid);
     members.push({ pid, pgid: leaderPid, state: "" });
   }
 
@@ -631,7 +651,7 @@ interface CapturedStream {
   ready: Promise<number | undefined>;
   completion: Promise<ControlEvent | undefined>;
   overrun: Promise<void>;
-  cancel(): Promise<void>;
+  cancel(): void;
   failed(): boolean;
   overflowed(): boolean;
   retainedBytes(): number;
@@ -653,6 +673,7 @@ function captureStream(
   streamLimitBytes: number,
   budget: RetainedOutputBudget,
   controlPrefix?: string,
+  onCancelRequested?: () => void,
 ): CapturedStream {
   let captured = "";
   let buffered = "";
@@ -668,6 +689,7 @@ function captureStream(
   let overrunResolved = false;
   let reader: ReturnType<(typeof stream)["getReader"]> | undefined;
   let cancellationRequested = false;
+  let cancellationDelivered = false;
   const ready = new Promise<number | undefined>((resolve) => {
     resolveReady = resolve;
   });
@@ -726,6 +748,31 @@ function captureStream(
       memberCount,
     });
   };
+  const releaseReader = (): void => {
+    try {
+      reader?.releaseLock();
+    } catch {
+      // A pending read may be completing cancellation; its finally block retries release.
+    }
+  };
+  // Do not await reader.cancel(): a detached inheritor can retain an OS pipe
+  // forever. Cancellation starts synchronously, releases the local reader, and
+  // is idempotent across every bounded failure path.
+  const cancel = (): void => {
+    const firstRequest = !cancellationRequested;
+    cancellationRequested = true;
+    if (firstRequest) onCancelRequested?.();
+    if (reader === undefined || cancellationDelivered) return;
+    cancellationDelivered = true;
+    try {
+      void reader.cancel().catch(() => {
+        // Cancellation is best-effort; the caller still reports a typed failure.
+      });
+    } catch {
+      // A concurrent terminal read can reject cancellation synchronously.
+    }
+    releaseReader();
+  };
   const retain = (chunk: Uint8Array, decoder: TextDecoder): void => {
     if (streamOverflowed) return;
     const available = Math.max(
@@ -758,11 +805,19 @@ function captureStream(
     try {
       const activeReader = stream.getReader();
       reader = activeReader;
+      if (cancellationRequested) {
+        cancel();
+        return;
+      }
       const decoder = new TextDecoder();
       while (true) {
         const next = await activeReader.read();
         if (next.done) break;
         retain(next.value, decoder);
+        if (streamOverflowed) {
+          cancel();
+          break;
+        }
       }
       if (!streamOverflowed) {
         const decodedTail = decoder.decode();
@@ -773,11 +828,7 @@ function captureStream(
     } catch {
       if (!cancellationRequested) streamFailed = true;
     } finally {
-      try {
-        reader?.releaseLock();
-      } catch {
-        // The cancellation path already owns the reader's terminal state.
-      }
+      releaseReader();
       resolveReadyOnce(undefined);
       resolveCompletionOnce(undefined);
     }
@@ -787,19 +838,7 @@ function captureStream(
     ready,
     completion,
     overrun,
-    cancel: async (): Promise<void> => {
-      cancellationRequested = true;
-      try {
-        await reader?.cancel();
-      } catch {
-        // Cancellation is best-effort: callers still classify the drain as unproven.
-      }
-      try {
-        reader?.releaseLock();
-      } catch {
-        // The read loop may already have released the lock.
-      }
-    },
+    cancel,
     failed: () => streamFailed,
     overflowed: () => streamOverflowed,
     retainedBytes: () => retainedBytes,
@@ -825,8 +864,12 @@ async function drainWithin(
     milliseconds,
   );
   if (drained !== undefined && !streams.some((stream) => stream.failed())) return true;
-  await Promise.all(streams.map((stream) => stream.cancel()));
+  cancelCapturedPipes(streams);
   return false;
+}
+
+function cancelCapturedPipes(streams: readonly CapturedStream[]): void {
+  for (const stream of streams) stream.cancel();
 }
 
 async function reapDirectChild(
@@ -1036,12 +1079,15 @@ export async function runOwnedCommand(options: OwnedCommandOptions): Promise<Own
     child.stdout as ReadableStream<Uint8Array>,
     streamLimitBytes,
     budget,
+    undefined,
+    () => options.onPipeCancelRequested?.("stdout"),
   );
   const stderr = captureStream(
     child.stderr as ReadableStream<Uint8Array>,
     streamLimitBytes,
     budget,
     controlPrefix,
+    () => options.onPipeCancelRequested?.("stderr"),
   );
   const termGraceMs = options.termGraceMs ?? OWNED_PROCESS_TERM_GRACE_MS;
   const killReapMs = options.killReapMs ?? OWNED_PROCESS_KILL_REAP_MS;
@@ -1165,6 +1211,13 @@ export async function runOwnedCommand(options: OwnedCommandOptions): Promise<Own
     }
   }
 
+  if (
+    outcome === "output-overrun" ||
+    outcome === "inspection-unproven" ||
+    outcome === "ownership-unproven"
+  ) {
+    cancelCapturedPipes([stdout, stderr]);
+  }
   const drained = await drainWithin([stdout, stderr], pipeDrainMs);
   if (outcome === "exited" && (stdout.overflowed() || stderr.overflowed())) {
     outcome = "output-overrun";
