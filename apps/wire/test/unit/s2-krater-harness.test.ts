@@ -1005,6 +1005,7 @@ const S2_SHELL_REGRESSION_MODES = [
   "watchdog-uncertainty",
   "watchdog-self-retire",
   "watchdog-publication-delay",
+  "post-release-controller-term-identity-exit-race",
   "post-release-controller-kill-refusal",
   "post-release-safe-checkpoint",
   "watchdog-startup-diagnostics",
@@ -1340,7 +1341,9 @@ describe("registered S2 shell and lifecycle regressions", () => {
                 S2_PLANT_POST_RELEASE_CONTROLLER_IGNORE_FIRST_TERM: "1",
                 S2_PLANT_POST_RELEASE_CONTROLLER_KILL_ACK_LIVE: "1",
               }
-            : {}),
+            : mode === "post-release-controller-term-identity-exit-race"
+              ? { S2_PLANT_POST_RELEASE_CONTROLLER_EXIT_BEFORE_TERM_IDENTITY: "1" }
+              : {}),
         },
         S2_SHELL_REGRESSION_WATCHDOG_MS,
       );
@@ -1380,6 +1383,25 @@ describe("registered S2 shell and lifecycle regressions", () => {
             expect(run.stdout).toContain('"action":"kill-exact-residual-group"');
             expect(run.stdout).not.toContain('"code":"S2_LEGACY_REAPED_HANDOFF_STALE"');
             expect(run.stdout).not.toContain('"code":"S2_CLEANUP_OWNERSHIP_UNPROVEN"');
+          } else if (mode === "post-release-controller-term-identity-exit-race") {
+            expect(ndjsonRecords(run)).toContainEqual({
+              tool: "bash+ps+lsof",
+              package: "apps/wire",
+              suite: "s2-krater-shell",
+              status: "pass",
+              terminal: true,
+              scenario: "controller-exit-between-liveness-and-term-identity-is-boundedly-reaped",
+              initial_live_non_zombie: true,
+              term_identity_failed_after_exit: true,
+              signal_sent_to_unproved_identity: false,
+              controller_reaped: true,
+              no_controller_survivor: true,
+              reproduce:
+                "S2_SHELL_REGRESSION_TEST=post-release-controller-term-identity-exit-race S2_PLANT_POST_RELEASE_CONTROLLER_EXIT_BEFORE_TERM_IDENTITY=1 scripts/e2e-s2-krater.sh",
+            });
+            expect(run.stdout).not.toContain(
+              '"code":"S2_POST_RELEASE_CONTROLLER_CLEANUP_UNPROVEN"',
+            );
           } else if (mode === "post-release-controller-kill-refusal") {
             expect(ndjsonRecords(run)).toContainEqual(
               expect.objectContaining({
@@ -1667,6 +1689,65 @@ describe("registered S2 shell and lifecycle regressions", () => {
         },
         () => liveS2LifecycleProcesses(runId),
       );
+    },
+    S2_SHELL_REGRESSION_TEST_TIMEOUT_MS,
+  );
+
+  test(
+    "PLANTED: term-identity exit races remain bounded under concurrent controller load",
+    async () => {
+      const fixtures = Array.from({ length: 4 }, (_, index) => ({
+        index,
+        runId: `s2u-${randomUUID().replaceAll("-", "").slice(0, 24)}`,
+      }));
+      const runs = await Promise.all(
+        fixtures.map((fixture) =>
+          runHarness(
+            {
+              S2_RUN_ID: fixture.runId,
+              S2_SHELL_REGRESSION_TEST: "post-release-controller-term-identity-exit-race",
+              S2_PLANT_POST_RELEASE_CONTROLLER_EXIT_BEFORE_TERM_IDENTITY: "1",
+            },
+            S2_SHELL_REGRESSION_WATCHDOG_MS,
+          ),
+        ),
+      );
+      const survivorSnapshot = captureS2LifecycleProcessTable();
+      const failures = collectAllFixtureVerificationFailures(fixtures, (fixture, index) => {
+        const run = runs[index];
+        if (run === undefined) throw new Error(`missing concurrent exit-race run ${index}`);
+        assertS2RunThenScanForSurvivors(
+          `term-identity-exit-race-${fixture.index}`,
+          () => {
+            expect(run.exitCode).toBe(0);
+            expect(ndjsonRecords(run)).toContainEqual(
+              expect.objectContaining({
+                suite: "s2-krater-shell",
+                status: "pass",
+                terminal: true,
+                scenario: "controller-exit-between-liveness-and-term-identity-is-boundedly-reaped",
+                initial_live_non_zombie: true,
+                term_identity_failed_after_exit: true,
+                signal_sent_to_unproved_identity: false,
+                controller_reaped: true,
+                no_controller_survivor: true,
+              }),
+            );
+            expect(run.stdout).not.toContain(
+              '"code":"S2_POST_RELEASE_CONTROLLER_CLEANUP_UNPROVEN"',
+            );
+          },
+          () => parseS2LifecycleProcessTable(fixture.runId, survivorSnapshot),
+        );
+      });
+      if (failures.length !== 0) {
+        throw new AggregateError(
+          failures.map((failure) => failure.error),
+          `concurrent term-identity exit-race failures: ${failures
+            .map((failure) => failure.index)
+            .join(",")}`,
+        );
+      }
     },
     S2_SHELL_REGRESSION_TEST_TIMEOUT_MS,
   );

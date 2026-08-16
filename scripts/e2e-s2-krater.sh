@@ -978,6 +978,7 @@ S2_SOURCE_PROVENANCE_REVALIDATE_ON_EXIT=0
 # assigned only by the in-process causal plant after those partial bytes have actually been
 # published; caller input cannot suppress evidence publication on an ordinary run.
 S2_EVIDENCE_SEALING_REFUSED_FOR_PARTIAL_OBSERVATION=0
+S2_EVIDENCE_SEALING_REFUSED_FOR_CONTROLLER_EXIT_RACE=0
 S2_ON_EXIT_CLEANUP_ACTIVE=0
 S2_PARTIAL_PENDING_TERM_PATH=""
 S2_PARTIAL_PENDING_TERM_PID=""
@@ -1346,6 +1347,10 @@ S2_POST_RELEASE_CONTROLLER_CLEANUP_DETAIL=none
 # acknowledged without delivery so the bounded post-KILL liveness refusal is reachable. A
 # second cleanup attempt always uses the real signal and reaps the retained direct child.
 S2_POST_RELEASE_CONTROLLER_KILL_ACK_PLANT_CONSUMED=0
+S2_POST_RELEASE_CONTROLLER_EXIT_RACE_READY=""
+S2_POST_RELEASE_CONTROLLER_EXIT_RACE_REQUEST=""
+S2_POST_RELEASE_CONTROLLER_EXIT_RACE_PLANT_CONSUMED=0
+S2_POST_RELEASE_CONTROLLER_TERM_IDENTITY_EXIT_RACE_OBSERVED=0
 S2_PRE_RELEASE_RESAMPLE_ATTEMPTS=0
 S2_PRE_RELEASE_ACCEPTED_SAMPLES=0
 S2_PRE_RELEASE_REJECTED_SAMPLES=0
@@ -3193,6 +3198,8 @@ clear_post_release_controller() {
   S2_POST_RELEASE_CONTROLLER_PREDICATE=""
   S2_POST_RELEASE_CONTROLLER_RETURNED=""
   S2_POST_RELEASE_CONTROLLER_IDENTITY=""
+  S2_POST_RELEASE_CONTROLLER_EXIT_RACE_READY=""
+  S2_POST_RELEASE_CONTROLLER_EXIT_RACE_REQUEST=""
 }
 
 post_release_controller_record_is_safe() {
@@ -3205,7 +3212,11 @@ post_release_controller_record_is_safe() {
       "${S2_EVIDENCE_ROOT}/${S2_POST_RELEASE_CONTROLLER_MARKER#s2-post-release-controller-}/main" && \
     "${S2_POST_RELEASE_CONTROLLER_PORT}" == "${S2_PORT}" && \
     "${S2_POST_RELEASE_CONTROLLER_IDENTITY}" == \
-      "${S2_POST_RELEASE_CONTROLLER_STATUS}.controller-owner" ]]
+      "${S2_POST_RELEASE_CONTROLLER_STATUS}.controller-owner" && \
+    "${S2_POST_RELEASE_CONTROLLER_EXIT_RACE_READY}" == \
+      "${S2_POST_RELEASE_CONTROLLER_STATUS}.exit-race-ready" && \
+    "${S2_POST_RELEASE_CONTROLLER_EXIT_RACE_REQUEST}" == \
+      "${S2_POST_RELEASE_CONTROLLER_STATUS}.exit-race-request" ]]
 }
 
 post_release_controller_identity_matches() {
@@ -3236,6 +3247,12 @@ post_release_controller_is_zombie() {
   [[ "${state}" == Z* ]]
 }
 
+post_release_controller_is_live_non_zombie() {
+  local pid="$1"
+  kill -0 "${pid}" 2>/dev/null || return 1
+  ! post_release_controller_is_zombie "${pid}"
+}
+
 post_release_controller_cleanup_refusal() {
   emit "{\"tool\":\"bash+ps+lsof\",\"package\":\"apps/wire\",\"suite\":\"s2-krater-shell\",\"status\":\"refused\",\"code\":\"S2_POST_RELEASE_CONTROLLER_CLEANUP_UNPROVEN\",\"reason\":\"${S2_POST_RELEASE_CONTROLLER_CLEANUP_STAGE}\",\"detail\":\"${S2_POST_RELEASE_CONTROLLER_CLEANUP_DETAIL}\",\"reproduce\":\"scripts/e2e-s2-krater.sh\"}"
   return 1
@@ -3248,7 +3265,7 @@ post_release_controller_cleanup_refusal() {
 # be cleared or an EXIT handler may publish evidence.
 # shellcheck disable=SC2329
 cleanup_post_release_controller() {
-  local pid="${S2_POST_RELEASE_CONTROLLER_PID}" tick
+  local pid="${S2_POST_RELEASE_CONTROLLER_PID}" tick deadline
   [[ -n "${pid}" ]] || return 0
   S2_POST_RELEASE_CONTROLLER_CLEANUP_DETAIL=none
   S2_POST_RELEASE_CONTROLLER_CLEANUP_STAGE=record
@@ -3256,45 +3273,84 @@ cleanup_post_release_controller() {
     post_release_controller_cleanup_refusal
     return 1
   }
-  if kill -0 "${pid}" 2>/dev/null && ! post_release_controller_is_zombie "${pid}"; then
-    S2_POST_RELEASE_CONTROLLER_CLEANUP_STAGE=term-identity
-    post_release_controller_command_is_exact "${pid}" "${S2_PARENT_PID}" || {
-      post_release_controller_cleanup_refusal
-      return 1
-    }
-    S2_POST_RELEASE_CONTROLLER_CLEANUP_STAGE=term-signal
-    kill -TERM "${pid}" 2>/dev/null || {
-      post_release_controller_cleanup_refusal
-      return 1
-    }
-    for ((tick = 0; tick < S2_TERMINATE_WAIT_TICKS; tick += 1)); do
-      kill -0 "${pid}" 2>/dev/null || break
-      sleep 0.05
-    done
-    if kill -0 "${pid}" 2>/dev/null && ! post_release_controller_is_zombie "${pid}"; then
-      S2_POST_RELEASE_CONTROLLER_CLEANUP_STAGE=kill-identity
-      post_release_controller_command_is_exact "${pid}" "${S2_PARENT_PID}" || {
+  if post_release_controller_is_live_non_zombie "${pid}"; then
+    if [[ "${S2_PLANT_POST_RELEASE_CONTROLLER_EXIT_BEFORE_TERM_IDENTITY:-0}" == 1 && \
+      ${S2_POST_RELEASE_CONTROLLER_EXIT_RACE_PLANT_CONSUMED} -eq 0 ]]; then
+      checkpoint_file_matches \
+        "${S2_POST_RELEASE_CONTROLLER_EXIT_RACE_READY}" exit-race-ready "${pid}" || {
+          S2_POST_RELEASE_CONTROLLER_CLEANUP_STAGE=term-identity-exit-race-ready
+          post_release_controller_cleanup_refusal
+          return 1
+        }
+      (umask 077; set -o noclobber; \
+        printf 'exit-before-term-identity %s\n' "${pid}" \
+          >"${S2_POST_RELEASE_CONTROLLER_EXIT_RACE_REQUEST}") 2>/dev/null || {
+            S2_POST_RELEASE_CONTROLLER_CLEANUP_STAGE=term-identity-exit-race-request
+            post_release_controller_cleanup_refusal
+            return 1
+          }
+      S2_POST_RELEASE_CONTROLLER_EXIT_RACE_PLANT_CONSUMED=1
+      deadline="$(s2_deadline_at "${S2_READY_DEADLINE_SECONDS}")"
+      while (( SECONDS < deadline )); do
+        post_release_controller_is_live_non_zombie "${pid}" || break
+        sleep 0.01
+      done
+      if post_release_controller_is_live_non_zombie "${pid}"; then
+        S2_POST_RELEASE_CONTROLLER_CLEANUP_STAGE=term-identity-exit-race-timeout
         post_release_controller_cleanup_refusal
         return 1
-      }
-      S2_POST_RELEASE_CONTROLLER_CLEANUP_STAGE=kill-signal
-      if [[ "${S2_PLANT_POST_RELEASE_CONTROLLER_KILL_ACK_LIVE:-0}" == 1 && \
+      fi
+    fi
+    S2_POST_RELEASE_CONTROLLER_CLEANUP_STAGE=term-identity
+    if post_release_controller_command_is_exact "${pid}" "${S2_PARENT_PID}"; then
+      S2_POST_RELEASE_CONTROLLER_CLEANUP_STAGE=term-signal
+      if kill -TERM "${pid}" 2>/dev/null; then
+        for ((tick = 0; tick < S2_TERMINATE_WAIT_TICKS; tick += 1)); do
+          kill -0 "${pid}" 2>/dev/null || break
+          sleep 0.05
+        done
+      elif post_release_controller_is_live_non_zombie "${pid}"; then
+        post_release_controller_cleanup_refusal
+        return 1
+      fi
+    elif post_release_controller_is_live_non_zombie "${pid}"; then
+      # A still-live process whose exact marker/parent identity cannot be re-proved remains a hard
+      # refusal. A child that exited or became a zombie between the entry liveness sample and this
+      # identity sample is safe to reap below without sending any signal to a recycled PID.
+      post_release_controller_cleanup_refusal
+      return 1
+    elif [[ ${S2_POST_RELEASE_CONTROLLER_EXIT_RACE_PLANT_CONSUMED} -eq 1 ]]; then
+      S2_POST_RELEASE_CONTROLLER_TERM_IDENTITY_EXIT_RACE_OBSERVED=1
+    fi
+    if post_release_controller_is_live_non_zombie "${pid}"; then
+      S2_POST_RELEASE_CONTROLLER_CLEANUP_STAGE=kill-identity
+      if ! post_release_controller_command_is_exact "${pid}" "${S2_PARENT_PID}"; then
+        if ! post_release_controller_is_live_non_zombie "${pid}"; then
+          : # Exited between the KILL-identity samples; bounded reap below is now sufficient.
+        else
+          post_release_controller_cleanup_refusal
+          return 1
+        fi
+      elif [[ "${S2_PLANT_POST_RELEASE_CONTROLLER_KILL_ACK_LIVE:-0}" == 1 && \
         ${S2_POST_RELEASE_CONTROLLER_KILL_ACK_PLANT_CONSUMED} -eq 0 ]]; then
         # One-shot fault injection: model an acknowledged KILL dispatch whose exact target is
         # still observable as the same live, non-zombie direct child. The second cleanup attempt
         # cannot take this branch and therefore performs the real KILL/reap.
+        S2_POST_RELEASE_CONTROLLER_CLEANUP_STAGE=kill-signal
         S2_POST_RELEASE_CONTROLLER_KILL_ACK_PLANT_CONSUMED=1
       else
-        kill -KILL "${pid}" 2>/dev/null || {
+        S2_POST_RELEASE_CONTROLLER_CLEANUP_STAGE=kill-signal
+        if ! kill -KILL "${pid}" 2>/dev/null && \
+          post_release_controller_is_live_non_zombie "${pid}"; then
           post_release_controller_cleanup_refusal
           return 1
-        }
+        fi
       fi
       for ((tick = 0; tick < S2_TERMINATE_WAIT_TICKS; tick += 1)); do
         kill -0 "${pid}" 2>/dev/null || break
         sleep 0.05
       done
-      if kill -0 "${pid}" 2>/dev/null && ! post_release_controller_is_zombie "${pid}"; then
+      if post_release_controller_is_live_non_zombie "${pid}"; then
         S2_POST_RELEASE_CONTROLLER_CLEANUP_STAGE=post-kill-live
         S2_POST_RELEASE_CONTROLLER_CLEANUP_DETAIL=exact-live-non-zombie
         post_release_controller_cleanup_refusal
@@ -3367,7 +3423,7 @@ post_release_controller_refuse() {
 start_post_release_controller() {
   local predicate_mode="$1" controller_base controller_run_id controller_stdout controller_stderr controller_path
   [[ "${predicate_mode}" == none || "${predicate_mode}" == malformed || \
-    "${predicate_mode}" == partial ]] || return 1
+    "${predicate_mode}" == partial || "${predicate_mode}" == exit-race ]] || return 1
   [[ -z "${S2_POST_RELEASE_CONTROLLER_PID}" ]] || return 1
   controller_base="${S2_STATE_DIR}/post-release-safe-controller-$(random_hex 8)" || return 1
   controller_run_id="s2u-$(random_hex 24)" || return 1
@@ -3381,6 +3437,8 @@ start_post_release_controller() {
   S2_POST_RELEASE_CONTROLLER_PREDICATE="${S2_POST_RELEASE_CONTROLLER_STATUS}.post-release-ready-predicate"
   S2_POST_RELEASE_CONTROLLER_RETURNED="${controller_base}.start-returned"
   S2_POST_RELEASE_CONTROLLER_IDENTITY="${S2_POST_RELEASE_CONTROLLER_STATUS}.controller-owner"
+  S2_POST_RELEASE_CONTROLLER_EXIT_RACE_READY="${S2_POST_RELEASE_CONTROLLER_STATUS}.exit-race-ready"
+  S2_POST_RELEASE_CONTROLLER_EXIT_RACE_REQUEST="${S2_POST_RELEASE_CONTROLLER_STATUS}.exit-race-request"
   controller_stdout="${controller_base}.child.stdout"
   controller_stderr="${controller_base}.child.stderr"
   for controller_path in \
@@ -3391,6 +3449,8 @@ start_post_release_controller() {
     "${S2_POST_RELEASE_CONTROLLER_PREDICATE}.2.pending" \
     "${S2_POST_RELEASE_CONTROLLER_PREDICATE}.pre-pending-barrier" \
     "${S2_POST_RELEASE_CONTROLLER_RETURNED}" "${S2_POST_RELEASE_CONTROLLER_IDENTITY}" \
+    "${S2_POST_RELEASE_CONTROLLER_EXIT_RACE_READY}" \
+    "${S2_POST_RELEASE_CONTROLLER_EXIT_RACE_REQUEST}" \
     "${controller_stdout}" "${controller_stderr}"; do
     [[ ! -e "${controller_path}" && ! -L "${controller_path}" ]] || {
       clear_post_release_controller
@@ -4305,6 +4365,8 @@ on_exit() {
     # The pending predicate is useful retained diagnosis, but it never acquired the immutable
     # final name consumed by the observer. Do not turn incomplete bytes into a sealed manifest.
     emit '{"tool":"bash","package":"apps/wire","suite":"s2-krater-evidence","status":"refused","code":"S2_EVIDENCE_PUBLICATION_SKIPPED_PARTIAL_OBSERVATION","reproduce":"scripts/e2e-s2-krater.sh"}'
+  elif [[ ${S2_EVIDENCE_SEALING_REFUSED_FOR_CONTROLLER_EXIT_RACE} -eq 1 ]]; then
+    emit '{"tool":"bash","package":"apps/wire","suite":"s2-krater-evidence","status":"refused","code":"S2_EVIDENCE_PUBLICATION_SKIPPED_CONTROLLER_EXIT_RACE","reproduce":"S2_SHELL_REGRESSION_TEST=post-release-controller-term-identity-exit-race scripts/e2e-s2-krater.sh"}'
   elif ! write_evidence_receipt "${final_status}" 0; then
     final_status=125
   fi
@@ -5639,6 +5701,27 @@ run_s2_shell_regression_test() {
     (umask 077; set -o noclobber; \
       printf 'controller-owner %s %s %s\n' "$$" "${PPID}" "${controller_marker}" \
         >"${controller_identity}") 2>/dev/null || return 1
+    if [[ "${S2_PLANT_POST_RELEASE_READY_PREDICATE:-none}" == exit-race ]]; then
+      local exit_race_ready exit_race_request exit_race_line
+      S2_EVIDENCE_SEALING_REFUSED_FOR_CONTROLLER_EXIT_RACE=1
+      exit_race_ready="${controller_status}.exit-race-ready"
+      exit_race_request="${controller_status}.exit-race-request"
+      (umask 077; set -o noclobber; \
+        printf 'exit-race-ready %s\n' "$$" >"${exit_race_ready}") 2>/dev/null || return 1
+      deadline="$(s2_deadline_at "${S2_READY_DEADLINE_SECONDS}")"
+      while (( SECONDS < deadline )); do
+        if [[ -f "${exit_race_request}" && ! -L "${exit_race_request}" ]]; then
+          {
+            IFS= read -r exit_race_line || exit_race_line=""
+            if IFS= read -r _; then exit_race_line=""; fi
+          } <"${exit_race_request}"
+          [[ "${exit_race_line}" == "exit-before-term-identity $$" ]] && return 1
+        fi
+        kill -0 "${PPID}" 2>/dev/null || return 1
+        sleep 0.01
+      done
+      return 1
+    fi
     S2_PLANT_POST_RELEASE_SAFE_BARRIER=1 \
       S2_PLANT_POST_RELEASE_SAFE_BARRIER_EXTERNAL=1 \
       start_pinned_supervisor "${controller_status}" post-release-safe-checkpoint-child \
@@ -5652,6 +5735,40 @@ run_s2_shell_regression_test() {
       "${S2_STARTED_WATCHDOG_PID}" "${S2_STARTED_WATCHDOG_HEALTH}" \
       "${S2_STATE_DIR}" "${S2_PORT}" client || return 1
     kill -0 -- "-${S2_STARTED_PGID}" 2>/dev/null && return 1
+    return 0
+  fi
+
+  if [[ "${mode}" == "post-release-controller-term-identity-exit-race" ]]; then
+    local exit_race_controller_pid exit_race_reaped=false
+    [[ "${S2_PLANT_POST_RELEASE_CONTROLLER_EXIT_BEFORE_TERM_IDENTITY:-0}" == 1 ]] || return 1
+    start_post_release_controller exit-race || return 1
+    exit_race_controller_pid="${S2_POST_RELEASE_CONTROLLER_PID}"
+    deadline="$(s2_deadline_at "${S2_READY_DEADLINE_SECONDS}")"
+    while (( SECONDS < deadline )); do
+      if checkpoint_file_matches \
+        "${S2_POST_RELEASE_CONTROLLER_EXIT_RACE_READY}" exit-race-ready \
+        "${exit_race_controller_pid}" && \
+        post_release_controller_command_is_exact \
+          "${exit_race_controller_pid}" "${S2_PARENT_PID}"; then
+        break
+      fi
+      sleep 0.01
+    done
+    if ! checkpoint_file_matches \
+      "${S2_POST_RELEASE_CONTROLLER_EXIT_RACE_READY}" exit-race-ready \
+      "${exit_race_controller_pid}" || \
+      ! post_release_controller_command_is_exact \
+        "${exit_race_controller_pid}" "${S2_PARENT_PID}"; then
+      post_release_controller_refuse
+      return $?
+    fi
+    cleanup_post_release_controller || return 1
+    [[ ${S2_POST_RELEASE_CONTROLLER_EXIT_RACE_PLANT_CONSUMED} -eq 1 && \
+      ${S2_POST_RELEASE_CONTROLLER_TERM_IDENTITY_EXIT_RACE_OBSERVED} -eq 1 && \
+      "${S2_POST_RELEASE_CONTROLLER_CLEANUP_STAGE}" == complete && \
+      -z "${S2_POST_RELEASE_CONTROLLER_PID}" ]] || return 1
+    exit_race_reaped=true
+    emit "{\"tool\":\"bash+ps+lsof\",\"package\":\"apps/wire\",\"suite\":\"s2-krater-shell\",\"status\":\"pass\",\"terminal\":true,\"scenario\":\"controller-exit-between-liveness-and-term-identity-is-boundedly-reaped\",\"initial_live_non_zombie\":true,\"term_identity_failed_after_exit\":true,\"signal_sent_to_unproved_identity\":false,\"controller_reaped\":$(json_bool "${exit_race_reaped}"),\"no_controller_survivor\":true,\"reproduce\":\"S2_SHELL_REGRESSION_TEST=post-release-controller-term-identity-exit-race S2_PLANT_POST_RELEASE_CONTROLLER_EXIT_BEFORE_TERM_IDENTITY=1 scripts/e2e-s2-krater.sh\"}"
     return 0
   fi
 
