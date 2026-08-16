@@ -64,10 +64,8 @@ const JSON_SCHEMA_ARTIFACT = "generated/contracts-scaffold.schema.json";
 const ENROLLMENT_TYPES_ARTIFACT = "generated/enrollment.types.ts";
 const ENROLLMENT_JSON_SCHEMA_ARTIFACT = "generated/enrollment.schema.json";
 const ENROLLMENT_SCHEMA_ID = "https://a.asimposium.org/schemas/enrollment.v1.json";
-const ENROLLMENT_CAPSULE_JSON_SCHEMA_ARTIFACT =
-  "generated/enrollment-capsule.schema.json";
-const ENROLLMENT_CAPSULE_SCHEMA_ID =
-  "https://a.asimposium.org/schemas/enrollment-capsule.v1.json";
+const ENROLLMENT_CAPSULE_JSON_SCHEMA_ARTIFACT = "generated/enrollment-capsule.schema.json";
+const ENROLLMENT_CAPSULE_SCHEMA_ID = "https://a.asimposium.org/schemas/enrollment-capsule.v1.json";
 const PROBLEM_TYPES_ARTIFACT = "generated/problem.types.ts";
 const PROBLEM_JSON_SCHEMA_ARTIFACT = "generated/problem.schema.json";
 const PROBLEM_SCHEMA_ID = "https://a.asimposium.org/schemas/problem.v1.json";
