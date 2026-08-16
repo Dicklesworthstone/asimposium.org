@@ -4,10 +4,12 @@ import { readFileSync } from "node:fs";
 import { join, resolve } from "node:path";
 import {
   canonicalJson,
+  checkpointDigest,
   cursorMatchesEvents,
   deterministicWorkload,
   eventChainDigest,
   eventChainMatches,
+  eventRowDigest,
   genesisChainDigest,
   type KraterEvent,
   KraterReplayError,
@@ -125,6 +127,35 @@ describe("Krater deterministic contracts", () => {
     expect(await eventChainMatches([first, { ...second, payloadSha256: "c".repeat(64) }])).toBe(
       false,
     );
+  });
+
+  test("accepts exact sequence maxima but rejects unsafe or fractional digest ingress", async () => {
+    const input = {
+      problemId: "P-safe-sequence",
+      claimId: "C-safe-sequence",
+      eventId: "E-safe-sequence",
+      idempotencyKey: "IK-safe-sequence",
+      statement: "A sequence boundary must stay exact.",
+      createdAt: "2026-08-16T00:00:00.000Z",
+    };
+    const max = Number.MAX_SAFE_INTEGER;
+    const payload = "a".repeat(64);
+    const prior = "b".repeat(64);
+
+    await expect(eventChainDigest(input.problemId, max, payload, prior)).resolves.toMatch(
+      /^[a-f0-9]{64}$/,
+    );
+    await expect(eventRowDigest(input, max, payload)).resolves.toMatch(/^[a-f0-9]{64}$/);
+    await expect(checkpointDigest(input.problemId, max, prior)).resolves.toMatch(/^[a-f0-9]{64}$/);
+    for (const invalid of [max + 1, 1.5]) {
+      await expect(eventChainDigest(input.problemId, invalid, payload, prior)).rejects.toThrow(
+        KraterValidationError,
+      );
+      await expect(eventRowDigest(input, invalid, payload)).rejects.toThrow(KraterValidationError);
+      await expect(checkpointDigest(input.problemId, invalid, prior)).rejects.toThrow(
+        KraterValidationError,
+      );
+    }
   });
 
   test("rejects an invalid deterministic-workload seed", () => {

@@ -46,6 +46,10 @@ const WRITE_CLAIM_WALL_SCOPE: typeof S2_WRITE_CLAIM_SCOPE = S2_WRITE_CLAIM_SCOPE
 const CREATED_AT = "2026-08-14T00:00:00.000Z";
 const PRIMARY_PROBLEM = "P-s2";
 const SECONDARY_PROBLEM = "P-s2-b";
+const ALLOCATION_PROBLEM = "P-s2-allocation";
+const ROLLBACK_PROBLEM = "P-s2-rollback";
+const SEQUENCE_BOUNDARY_PROBLEM = "P-s2-sequence-boundary";
+const UNSAFE_PERSISTED_SEQUENCE_PROBLEM = "P-s2-unsafe-persisted-sequence";
 const LARGE_PROBLEM = "P-s2-large";
 const OUTBOX_PROBLEM = "P-s2-outbox";
 const UPGRADE_EXISTING_PROBLEM = "P-upgrade-existing";
@@ -85,7 +89,7 @@ const PREFLIGHT_LARGE_EVENTS = 512;
  */
 const PREFLIGHT_ROWS_CEILING = 8;
 
-interface WriteResult {
+export interface WriteResult {
   event_id: string;
   seq: number;
   idempotent: boolean;
@@ -426,12 +430,18 @@ export function writeS2CostMeasurementReceipt(
   };
 }
 
-interface StateResult {
+export interface S2StateResult {
   cursor: number;
   counts: Record<string, number>;
   chain_digest: string;
   checkpoint_digest: string | null;
   checkpoint_mode: "unsigned-v0";
+}
+
+export interface S2EventPageResult {
+  readonly sequences: readonly number[];
+  readonly nextCursor: number;
+  readonly hasMore: boolean;
 }
 
 interface RequestResult {
@@ -487,9 +497,31 @@ function numberAt(record: Record<string, unknown>, key: string): number {
   return value as number;
 }
 
+function safeNonnegativeIntegerAt(record: Record<string, unknown>, key: string): number {
+  const value = record[key];
+  if (typeof value !== "number" || !Number.isSafeInteger(value) || value < 0) {
+    fail("S2_RESPONSE_INVALID");
+  }
+  return value as number;
+}
+
+function safePositiveIntegerAt(record: Record<string, unknown>, key: string): number {
+  const value = safeNonnegativeIntegerAt(record, key);
+  if (value === 0) fail("S2_RESPONSE_INVALID");
+  return value;
+}
+
 function nullableNumberAt(record: Record<string, unknown>, key: string): number | null {
   const value = record[key];
   return value === null || value === undefined ? null : numberAt(record, key);
+}
+
+function nullableSafeNonnegativeIntegerAt(
+  record: Record<string, unknown>,
+  key: string,
+): number | null {
+  const value = record[key];
+  return value === null || value === undefined ? null : safeNonnegativeIntegerAt(record, key);
 }
 
 function stringAt(record: Record<string, unknown>, key: string): string {
@@ -542,8 +574,8 @@ function requestDiagnostics(
     request_id: requestIdValue,
     event_id: eventId,
     route: pathname.split("?")[0],
-    pre_cursor: body === undefined ? null : nullableNumberAt(body, "pre_cursor"),
-    post_cursor: body === undefined ? null : nullableNumberAt(body, "post_cursor"),
+    pre_cursor: body === undefined ? null : nullableSafeNonnegativeIntegerAt(body, "pre_cursor"),
+    post_cursor: body === undefined ? null : nullableSafeNonnegativeIntegerAt(body, "post_cursor"),
     payload_sha256: body === undefined ? null : nullableStringAt(body, "payload_sha256"),
     row_digest: body === undefined ? null : nullableStringAt(body, "row_digest"),
     build_digest: body === undefined ? null : nullableStringAt(body, "build_digest"),
@@ -680,13 +712,13 @@ function writeBody(
   };
 }
 
-function writeResult(body: Record<string, unknown>): WriteResult {
+export function parseS2WriteResult(body: Record<string, unknown>): WriteResult {
   return {
     event_id: stringAt(body, "event_id"),
-    seq: numberAt(body, "seq"),
+    seq: safePositiveIntegerAt(body, "seq"),
     idempotent: booleanAt(body, "idempotent"),
-    pre_cursor: numberAt(body, "pre_cursor"),
-    post_cursor: numberAt(body, "post_cursor"),
+    pre_cursor: safeNonnegativeIntegerAt(body, "pre_cursor"),
+    post_cursor: safeNonnegativeIntegerAt(body, "post_cursor"),
     payload_sha256: stringAt(body, "payload_sha256"),
     row_digest: stringAt(body, "row_digest"),
     build_digest: stringAt(body, "build_digest"),
@@ -768,7 +800,7 @@ function receiptMetrics(result?: WriteResult): Record<string, number | boolean |
   };
 }
 
-function stateResult(body: Record<string, unknown>): StateResult {
+export function parseS2StateResult(body: Record<string, unknown>): S2StateResult {
   const counts = asRecord(body.counts);
   const typedCounts: Record<string, number> = {};
   for (const [key, value] of Object.entries(counts)) {
@@ -776,7 +808,7 @@ function stateResult(body: Record<string, unknown>): StateResult {
     typedCounts[key] = value as number;
   }
   return {
-    cursor: numberAt(body, "cursor"),
+    cursor: safeNonnegativeIntegerAt(body, "cursor"),
     counts: typedCounts,
     chain_digest: stringAt(body, "chain_digest"),
     checkpoint_digest: body.checkpoint_digest === null ? null : stringAt(body, "checkpoint_digest"),
@@ -785,6 +817,18 @@ function stateResult(body: Record<string, unknown>): StateResult {
       if (mode !== "unsigned-v0") fail("S2_CHECKPOINT_MODE_INVALID");
       return "unsigned-v0";
     })(),
+  };
+}
+
+export function parseS2EventPageResult(body: Record<string, unknown>): S2EventPageResult {
+  const rows = body.events;
+  if (!Array.isArray(rows)) fail("S2_RESPONSE_INVALID");
+  return {
+    sequences: (rows as unknown[]).map((row: unknown) =>
+      safePositiveIntegerAt(asRecord(row), "seq"),
+    ),
+    nextCursor: safeNonnegativeIntegerAt(body, "next_cursor"),
+    hasMore: booleanAt(body, "has_more"),
   };
 }
 
@@ -797,7 +841,7 @@ function percentile95(values: readonly number[]): number {
   return ordered[Math.max(0, Math.ceil(ordered.length * 0.95) - 1)] ?? 0;
 }
 
-function canonicalState(state: StateResult): string {
+function canonicalState(state: S2StateResult): string {
   return JSON.stringify({
     chain_digest: state.chain_digest,
     checkpoint_digest: state.checkpoint_digest,
@@ -815,10 +859,10 @@ async function seed(problemId: string, scenario: string): Promise<void> {
   assertEqual(seeded.status, 201, "S2_SEED_FAILED");
 }
 
-async function state(problemId: string, scenario: string): Promise<StateResult> {
+async function state(problemId: string, scenario: string): Promise<S2StateResult> {
   const response = await request("GET", `/__s2/state?problem_id=${problemId}`, scenario);
   assertEqual(response.status, 200, "S2_STATE_READ_FAILED");
-  return stateResult(response.body);
+  return parseS2StateResult(response.body);
 }
 
 async function write(
@@ -830,7 +874,211 @@ async function write(
   const requestBody = deferOutboxNudge ? { ...body, s2_defer_outbox_nudge: true } : body;
   const result = await request("POST", "/__s2/write", scenario, requestBody, timeoutMs);
   assertEqual(result.status, 200, "S2_WRITE_FAILED");
-  return writeResult(result.body);
+  return parseS2WriteResult(result.body);
+}
+
+async function deterministicAllocationAndRollback(): Promise<void> {
+  await seed(ALLOCATION_PROBLEM, "allocation-two-writer-seed");
+  const allocationFirst = writeBody(1, ALLOCATION_PROBLEM, "Deterministic allocation writer one.");
+  const allocationSecond = writeBody(2, ALLOCATION_PROBLEM, "Deterministic allocation writer two.");
+  // The harness invokes writer two after writer one has read its durable head and before writer
+  // one enters `db.batch`. This is deterministic actual D1 writer interleaving, without holding
+  // an idle D1 request open and turning the local binding's connection budget into the race.
+  const allocationResponse = await request("POST", "/__s2/write", "allocation-two-writer", {
+    ...allocationFirst,
+    s2_defer_outbox_nudge: true,
+    s2_after_head_competing_write: allocationSecond,
+  });
+  assertEqual(allocationResponse.status, 200, "S2_ALLOCATION_WRITER_FAILED");
+  const allocationResult = parseS2WriteResult(allocationResponse.body);
+  const allocatedSequences = [1, allocationResult.seq].sort((left, right) => left - right);
+  assertEqual(allocatedSequences.join(","), "1,2", "S2_DATABASE_ALLOCATION_SEQUENCE_INVALID");
+  assertEqual(
+    allocationResult.retry_count >= 1,
+    true,
+    "S2_DATABASE_ALLOCATION_STALE_HEAD_RETRY_NOT_OBSERVED",
+  );
+  const allocationState = await state(ALLOCATION_PROBLEM, "allocation-two-writer-state");
+  assertEqual(allocationState.cursor, 2, "S2_DATABASE_ALLOCATION_CURSOR_INVALID");
+  for (const table of [
+    "claims",
+    "claim_projections",
+    "events",
+    "idempotency",
+    "outbox",
+    "integrity_checkpoints",
+  ]) {
+    assertEqual(allocationState.counts[table], 2, "S2_DATABASE_ALLOCATION_ROW_COUNT_INVALID");
+  }
+  await assertReplay(ALLOCATION_PROBLEM, 2, "allocation-two-writer-replay");
+
+  await seed(ROLLBACK_PROBLEM, "rollback-two-writer-seed");
+  const firstRollbackWrite = writeBody(1, ROLLBACK_PROBLEM, "Deterministic rollback winner.");
+  const rollbackNeedle = "Deterministic late outbox rollback needle.";
+  const secondRollbackWrite = writeBody(2, ROLLBACK_PROBLEM, rollbackNeedle);
+  const failedRollbackEventId = stringAt(secondRollbackWrite, "event_id");
+  const rollbackResponse = await request("POST", "/__s2/write", "rollback-two-writer", {
+    ...secondRollbackWrite,
+    s2_defer_outbox_nudge: true,
+    s2_after_head_competing_write: firstRollbackWrite,
+    s2_force_late_outbox_rollback: true,
+  });
+  assertEqual(rollbackResponse.status, 409, "S2_ROLLBACK_REJECTION_STATUS_INVALID");
+  assertEqual(
+    rollbackResponse.body.code,
+    "KRATER_WRITE_FAILED",
+    "S2_ROLLBACK_REJECTION_CODE_INVALID",
+  );
+  const rollbackStateResponse = await request(
+    "GET",
+    `/__s2/state?problem_id=${ROLLBACK_PROBLEM}&event_id=${encodeURIComponent(failedRollbackEventId)}`,
+    "rollback-two-writer-state",
+  );
+  assertEqual(rollbackStateResponse.status, 200, "S2_ROLLBACK_STATE_READ_FAILED");
+  const rollbackState = parseS2StateResult(rollbackStateResponse.body);
+  assertEqual(rollbackState.cursor, 1, "S2_ROLLBACK_CURSOR_INVALID");
+  for (const table of [
+    "claims",
+    "claim_projections",
+    "events",
+    "event_content",
+    "public_claim_fts",
+    "idempotency",
+    "outbox",
+    "integrity_checkpoints",
+  ]) {
+    assertEqual(rollbackState.counts[table], 1, "S2_ROLLBACK_PARTIAL_BATCH_COMMIT");
+  }
+  assertEqual(
+    safeNonnegativeIntegerAt(rollbackStateResponse.body, "event_content_for_event"),
+    0,
+    "S2_ROLLBACK_ORPHAN_EVENT_CONTENT",
+  );
+  const rollbackSearch = await request(
+    "GET",
+    `/__s2/search?q=${encodeURIComponent(rollbackNeedle)}`,
+    "rollback-two-writer-fts-state",
+  );
+  assertEqual(rollbackSearch.status, 200, "S2_ROLLBACK_FTS_READ_FAILED");
+  const rollbackMatches = rollbackSearch.body.matches;
+  assertEqual(
+    Array.isArray(rollbackMatches) ? rollbackMatches.length : -1,
+    0,
+    "S2_ROLLBACK_FTS_PARTIAL_BATCH_COMMIT",
+  );
+  await assertReplay(ROLLBACK_PROBLEM, 1, "rollback-two-writer-replay");
+
+  for (const since of [Number.MAX_SAFE_INTEGER - 1, Number.MAX_SAFE_INTEGER]) {
+    const safeCursor = await request(
+      "GET",
+      `/__s2/events?problem_id=${ROLLBACK_PROBLEM}&since=${since}&limit=1`,
+      "sequence-safe-integer-positive",
+    );
+    assertEqual(safeCursor.status, 200, "S2_SEQUENCE_SAFE_INTEGER_READ_REJECTED");
+    const page = parseS2EventPageResult(safeCursor.body);
+    assertEqual(page.sequences.length, 0, "S2_SEQUENCE_SAFE_INTEGER_READ_ROWS_INVALID");
+    assertEqual(page.nextCursor, since, "S2_SEQUENCE_SAFE_INTEGER_NEXT_CURSOR_INVALID");
+    assertEqual(page.hasMore, false, "S2_SEQUENCE_SAFE_INTEGER_HAS_MORE_INVALID");
+  }
+  for (const since of ["9007199254740993", "1.5"]) {
+    const unsafeCursor = await request(
+      "GET",
+      `/__s2/events?problem_id=${ROLLBACK_PROBLEM}&since=${since}&limit=1`,
+      "sequence-safe-integer-query-negative",
+    );
+    assertEqual(unsafeCursor.status, 400, "S2_SEQUENCE_UNSAFE_QUERY_ACCEPTED");
+    assertEqual(
+      unsafeCursor.body.code,
+      "KRATER_READ_INVALID",
+      "S2_SEQUENCE_UNSAFE_QUERY_CODE_INVALID",
+    );
+  }
+
+  const unsafePersistedSeed = await request(
+    "POST",
+    "/__s2/seed",
+    "sequence-unsafe-persisted-seed",
+    {
+      problem_id: UNSAFE_PERSISTED_SEQUENCE_PROBLEM,
+      created_at: CREATED_AT,
+      s2_seed_unsafe_persisted_sequence: true,
+    },
+  );
+  assertEqual(unsafePersistedSeed.status, 201, "S2_SEQUENCE_UNSAFE_PERSISTED_SEED_FAILED");
+  for (const pathname of [
+    `/__s2/cursor?problem_id=${UNSAFE_PERSISTED_SEQUENCE_PROBLEM}`,
+    `/__s2/events?problem_id=${UNSAFE_PERSISTED_SEQUENCE_PROBLEM}&since=0&limit=1`,
+  ]) {
+    const unsafePersistedRead = await request(
+      "GET",
+      pathname,
+      "sequence-unsafe-persisted-read-negative",
+    );
+    assertEqual(unsafePersistedRead.status, 400, "S2_SEQUENCE_UNSAFE_PERSISTED_READ_ACCEPTED");
+    assertEqual(
+      unsafePersistedRead.body.code,
+      "KRATER_READ_INVALID",
+      "S2_SEQUENCE_UNSAFE_PERSISTED_READ_CODE_INVALID",
+    );
+  }
+
+  const sequenceBoundarySeed = await request("POST", "/__s2/seed", "sequence-safe-integer-seed", {
+    problem_id: SEQUENCE_BOUNDARY_PROBLEM,
+    created_at: CREATED_AT,
+    s2_seed_public_seq: Number.MAX_SAFE_INTEGER,
+  });
+  assertEqual(sequenceBoundarySeed.status, 201, "S2_SEQUENCE_BOUNDARY_SEED_FAILED");
+  const sequenceBoundaryWrite = await request(
+    "POST",
+    "/__s2/write",
+    "sequence-safe-integer-negative",
+    { ...writeBody(1, SEQUENCE_BOUNDARY_PROBLEM), s2_defer_outbox_nudge: true },
+  );
+  assertEqual(sequenceBoundaryWrite.status, 409, "S2_SEQUENCE_BOUNDARY_STATUS_INVALID");
+  assertEqual(
+    sequenceBoundaryWrite.body.code,
+    "KRATER_SEQUENCE_EXHAUSTED",
+    "S2_SEQUENCE_BOUNDARY_CODE_INVALID",
+  );
+  const sequenceBoundaryState = await state(
+    SEQUENCE_BOUNDARY_PROBLEM,
+    "sequence-safe-integer-state",
+  );
+  assertEqual(
+    sequenceBoundaryState.cursor,
+    Number.MAX_SAFE_INTEGER,
+    "S2_SEQUENCE_BOUNDARY_CURSOR_MUTATED",
+  );
+  for (const table of [
+    "claims",
+    "claim_projections",
+    "events",
+    "event_content",
+    "public_claim_fts",
+    "idempotency",
+    "outbox",
+    "integrity_checkpoints",
+  ]) {
+    assertEqual(sequenceBoundaryState.counts[table], 0, "S2_SEQUENCE_BOUNDARY_PARTIAL_BATCH");
+  }
+  emit({
+    tool: "bun",
+    tool_version: Bun.version,
+    package: "apps/wire",
+    suite: "s2-krater-local-d1",
+    revision: REVISION,
+    dirty_state: DIRTY_STATE,
+    source_digest: SOURCE_DIGEST,
+    bindings: BINDINGS,
+    scenario: "deterministic-two-writer-database-allocation-and-rollback",
+    allocation_sequences: allocatedSequences,
+    stale_head_retry_observed: true,
+    rollback_cursor: rollbackState.cursor,
+    rollback_idempotency_rows: rollbackState.counts.idempotency,
+    sequence_boundary_refused: true,
+    status: "pass",
+    reproduce: "scripts/e2e-s2-krater.sh",
+  });
 }
 
 function outboxStatusResult(body: Record<string, unknown>): OutboxStatus {
@@ -902,14 +1150,20 @@ async function waitForOutbox(
 async function expectTransportAbort(
   body: Record<string, unknown>,
   scenario: string,
-): Promise<void> {
+): Promise<string> {
+  const observationId = body.s2_harness_request_id;
+  if (body.s2_abort_before_commit === true && typeof observationId !== "string") {
+    fail("S2_ABORT_OBSERVATION_ID_MISSING");
+  }
   try {
     await request("POST", "/__s2/write", scenario, body, 20);
   } catch (error) {
-    if (error instanceof Error && error.message === "S2_TRANSPORT_ABORTED") return;
+    if (error instanceof Error && error.message === "S2_TRANSPORT_ABORTED") {
+      return typeof observationId === "string" ? observationId : "";
+    }
     throw error;
   }
-  fail("S2_TRANSPORT_ABORT_EXPECTED");
+  return fail("S2_TRANSPORT_ABORT_EXPECTED");
 }
 
 async function assertReplay(
@@ -1769,6 +2023,8 @@ async function exercise(): Promise<void> {
   assertEqual(sequences.join(","), "2,3,4,5,6,7,8,9,10,11,12,13", "S2_SEQUENCE_INVALID");
   writes.push(...concurrent.map(selectedSettledWrite));
 
+  await deterministicAllocationAndRollback();
+
   await seed(SECONDARY_PROBLEM, "seed-secondary");
   const secondary = await write(
     writeBody(1, SECONDARY_PROBLEM, "Secondary problem claim."),
@@ -1800,8 +2056,10 @@ async function exercise(): Promise<void> {
     "cursor-read",
   );
   assertEqual(events.status, 200, "S2_CURSOR_READ_FAILED");
-  const eventRows = events.body.events;
-  if (!Array.isArray(eventRows) || eventRows.length !== 13) fail("S2_EVENT_PAGE_INVALID");
+  const eventPage = parseS2EventPageResult(events.body);
+  if (eventPage.sequences.length !== 13 || eventPage.nextCursor !== 13 || eventPage.hasMore) {
+    fail("S2_EVENT_PAGE_INVALID");
+  }
 
   const fts = await request("GET", "/__s2/search?q=Synthetic&limit=20", "fts-read");
   assertEqual(fts.status, 200, "S2_FTS_QUERY_FAILED");
@@ -1881,10 +2139,39 @@ async function exercise(): Promise<void> {
   const beforeDisconnect = {
     ...writeBody(14),
     s2_abort_before_commit: true,
+    s2_harness_request_id: "AB-s2-before-commit-001",
     s2_pre_commit_delay_ms: 125,
   };
-  await expectTransportAbort(beforeDisconnect, "disconnect-before-commit");
+  const beforeDisconnectObservationId = await expectTransportAbort(
+    beforeDisconnect,
+    "disconnect-before-commit",
+  );
   await Bun.sleep(160);
+  const beforeDisconnectObservation = await request(
+    "GET",
+    `/__s2/abort-observation?request_id=${encodeURIComponent(beforeDisconnectObservationId)}`,
+    "disconnect-before-commit-observation",
+  );
+  assertEqual(
+    beforeDisconnectObservation.status,
+    200,
+    "S2_DISCONNECT_BEFORE_COMMIT_NOT_ACCEPTED_BY_WORKER",
+  );
+  assertEqual(
+    stringAt(beforeDisconnectObservation.body, "request_id"),
+    beforeDisconnectObservationId,
+    "S2_DISCONNECT_BEFORE_COMMIT_OBSERVATION_MISMATCH",
+  );
+  assertEqual(
+    booleanAt(beforeDisconnectObservation.body, "accepted_before_commit"),
+    true,
+    "S2_DISCONNECT_BEFORE_COMMIT_ACCEPTANCE_INVALID",
+  );
+  assertEqual(
+    booleanAt(beforeDisconnectObservation.body, "transaction_entered"),
+    false,
+    "S2_DISCONNECT_BEFORE_COMMIT_ENTERED_TRANSACTION",
+  );
   const stateAfterBeforeDisconnect = await state(PRIMARY_PROBLEM, "disconnect-before-commit-state");
   assertEqual(stateAfterBeforeDisconnect.cursor, 13, "S2_DISCONNECT_BEFORE_COMMIT_ADVANCED_CURSOR");
   const retriedBeforeDisconnect = await write(writeBody(14), "disconnect-before-commit-retry");
@@ -1924,7 +2211,7 @@ async function exercise(): Promise<void> {
   );
   for (const read of readStorm) {
     assertEqual(read.status, 200, "S2_READ_STORM_STATUS_INVALID");
-    assertEqual(numberAt(read.body, "cursor"), 31, "S2_READ_STORM_CURSOR_INVALID");
+    assertEqual(safeNonnegativeIntegerAt(read.body, "cursor"), 31, "S2_READ_STORM_CURSOR_INVALID");
   }
 
   await seed(LARGE_PROBLEM, "seed-large-replay-corpus");

@@ -27,6 +27,50 @@ function databaseThatMustNotBeTouched(): D1Database {
   ) as D1Database;
 }
 
+function databaseWithCursor(cursor: number): D1Database {
+  return {
+    prepare() {
+      return {
+        bind() {
+          return {
+            first: async () => ({ public_seq: cursor }),
+          };
+        },
+      };
+    },
+  } as unknown as D1Database;
+}
+
+function databaseWithEvents(events: readonly Record<string, unknown>[]): D1Database {
+  return {
+    prepare() {
+      return {
+        bind() {
+          return {
+            all: async () => ({ results: events }),
+          };
+        },
+      };
+    },
+  } as unknown as D1Database;
+}
+
+function databaseTouchCounter(): { readonly db: D1Database; readonly touches: () => number } {
+  let count = 0;
+  return {
+    db: new Proxy(
+      {},
+      {
+        get() {
+          count += 1;
+          throw new Error("S2_TEST_DATABASE_TOUCHED");
+        },
+      },
+    ) as D1Database,
+    touches: () => count,
+  };
+}
+
 interface HarnessEnvOptions {
   capability?: string;
   token?: string;
@@ -174,6 +218,45 @@ describe("S2 local harness boundary", () => {
     expect(await response.json()).toEqual({ status: "ready", run_id: HARNESS_RUN_ID });
   });
 
+  test("a timed-out pre-commit plant needs a correlated Worker acceptance observation", async () => {
+    const env = harnessEnv({
+      capability: "enabled",
+      token: HARNESS_CAPABILITY,
+      runId: HARNESS_RUN_ID,
+    });
+    const observationId = "AB-s2-worker-observation-001";
+    const aborted = await worker.fetch(
+      harnessRequest("/__s2/write", HARNESS_CAPABILITY, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({
+          problem_id: "P-s2-observation",
+          claim_id: "C-s2-observation",
+          event_id: "E-s2-observation",
+          idempotency_key: "IK-s2-observation",
+          statement: "A local abort observation must precede the transaction.",
+          created_at: "2026-08-16T00:00:00.000Z",
+          s2_abort_before_commit: true,
+          s2_harness_request_id: observationId,
+        }),
+      }),
+      env,
+      context(),
+    );
+    expect(aborted.status).toBe(499);
+    const observation = await worker.fetch(
+      harnessRequest(`/__s2/abort-observation?request_id=${encodeURIComponent(observationId)}`),
+      env,
+      context(),
+    );
+    expect(observation.status).toBe(200);
+    expect(await observation.json()).toEqual({
+      request_id: observationId,
+      accepted_before_commit: true,
+      transaction_entered: false,
+    });
+  });
+
   test("a matching token reaches the route even when Host is not loopback", async () => {
     const response = await worker.fetch(
       harnessRequest("/__s2/cursor?problem_id=P-example"),
@@ -185,6 +268,78 @@ describe("S2 local harness boundary", () => {
     // treating a client-controlled Host value as the access-control decision.
     expect(response.status).toBe(400);
     expect(await response.json()).toMatchObject({ code: "KRATER_READ_INVALID" });
+  });
+
+  test("cursor ingress rejects lossy decimals and unsafe integers before D1", async () => {
+    const observed = databaseTouchCounter();
+    const env = harnessEnv({
+      capability: "enabled",
+      token: HARNESS_CAPABILITY,
+      runId: HARNESS_RUN_ID,
+    });
+    env.DB = observed.db;
+
+    for (const since of ["9007199254740993", "1.5"]) {
+      const response = await worker.fetch(
+        harnessRequest(`/__s2/events?problem_id=P-example&since=${since}&limit=1`),
+        env,
+        context(),
+      );
+      expect(response.status).toBe(400);
+      expect(await response.json()).toMatchObject({ code: "KRATER_READ_INVALID" });
+    }
+    expect(observed.touches()).toBe(0);
+  });
+
+  test("cursor ingress retains exact safe maxima and rejects unsafe D1 cursor and event rows", async () => {
+    const environment = {
+      capability: "enabled",
+      token: HARNESS_CAPABILITY,
+      runId: HARNESS_RUN_ID,
+    } as const;
+    for (const since of [Number.MAX_SAFE_INTEGER - 1, Number.MAX_SAFE_INTEGER]) {
+      const env = harnessEnv(environment);
+      env.DB = databaseWithEvents([]);
+      const response = await worker.fetch(
+        harnessRequest(`/__s2/events?problem_id=P-example&since=${since}&limit=1`),
+        env,
+        context(),
+      );
+      expect(response.status).toBe(200);
+      expect(await response.json()).toEqual({ events: [], next_cursor: since, has_more: false });
+    }
+
+    const unsafeCursorEnv = harnessEnv(environment);
+    unsafeCursorEnv.DB = databaseWithCursor(Number.MAX_SAFE_INTEGER + 1);
+    const unsafeCursor = await worker.fetch(
+      harnessRequest("/__s2/cursor?problem_id=P-example"),
+      unsafeCursorEnv,
+      context(),
+    );
+    expect(unsafeCursor.status).toBe(400);
+    expect(await unsafeCursor.json()).toMatchObject({ code: "KRATER_READ_INVALID" });
+
+    const unsafeEventEnv = harnessEnv(environment);
+    unsafeEventEnv.DB = databaseWithEvents([
+      {
+        id: "E-unsafe-sequence",
+        problem_id: "P-example",
+        seq: Number.MAX_SAFE_INTEGER + 1,
+        type: "claim.created",
+        object_id: "C-unsafe-sequence",
+        payload_sha256: "a".repeat(64),
+        row_digest: "b".repeat(64),
+        chain_digest: "c".repeat(64),
+        created_at: "2026-08-16T00:00:00.000Z",
+      },
+    ]);
+    const unsafeEvent = await worker.fetch(
+      harnessRequest("/__s2/events?problem_id=P-example&since=0&limit=1"),
+      unsafeEventEnv,
+      context(),
+    );
+    expect(unsafeEvent.status).toBe(400);
+    expect(await unsafeEvent.json()).toMatchObject({ code: "KRATER_READ_INVALID" });
   });
 
   test("the harness capability is declared only by local S2 Wrangler configurations", () => {

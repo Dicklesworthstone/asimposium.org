@@ -7,12 +7,14 @@ import {
   ensureProblem,
   eventChainMatches,
   explainUndigestedEventProbe,
+  inspectEventContentByEventId,
   inspectProblem,
   KraterIdempotencyConflictError,
   KraterIntegrityBackfillRequiredError,
   KraterProblemNotFoundError,
   KraterReadError,
   KraterReplayError,
+  KraterSequenceExhaustedError,
   KraterValidationError,
   plantMalformedOutboxForHarness,
   projectionReplayMatches,
@@ -59,6 +61,33 @@ const HARNESS_PATH_PREFIX = "/__s2/";
 const HARNESS_TOKEN_HEADER = "x-s2-harness-token";
 const HARNESS_TOKEN_PATTERN = /^[a-f0-9]{64}$/;
 const HARNESS_RUN_ID_PATTERN = /^[a-f0-9]{32}$/;
+const HARNESS_REQUEST_ID_PATTERN = /^[A-Za-z0-9][A-Za-z0-9._-]{0,79}$/;
+const MAX_ABORT_OBSERVATIONS = 64;
+const UNSAFE_D1_SEQUENCE_LITERAL = "9007199254740993";
+
+interface AbortBeforeCommitObservation {
+  requestId: string;
+  acceptedBeforeCommit: true;
+  transactionEntered: false;
+}
+
+// This is deliberately process-local and bounded: it is a loopback-only harness witness, not
+// a production audit log or a second write path. A test that times out before Worker acceptance
+// cannot read an observation and therefore cannot pass the pre-commit abort negative.
+const abortBeforeCommitObservations = new Map<string, AbortBeforeCommitObservation>();
+
+function recordAbortBeforeCommitObservation(requestId: string): void {
+  abortBeforeCommitObservations.set(requestId, {
+    requestId,
+    acceptedBeforeCommit: true,
+    transactionEntered: false,
+  });
+  while (abortBeforeCommitObservations.size > MAX_ABORT_OBSERVATIONS) {
+    const oldest = abortBeforeCommitObservations.keys().next().value;
+    if (oldest === undefined) return;
+    abortBeforeCommitObservations.delete(oldest);
+  }
+}
 
 /**
  * Whether the harness surface exists at all in this environment.
@@ -136,12 +165,29 @@ function requiredString(body: Record<string, unknown>, key: string): string {
   return value;
 }
 
+function harnessRequestId(body: Record<string, unknown>): string {
+  const value = requiredString(body, "s2_harness_request_id");
+  if (!HARNESS_REQUEST_ID_PATTERN.test(value)) {
+    throw new KraterValidationError("s2_harness_request_id must be a bounded harness identifier.");
+  }
+  return value;
+}
+
 function requiredNumber(body: Record<string, unknown>, key: string): number {
   const value = body[key];
   if (typeof value !== "number" || !Number.isFinite(value)) {
     throw new KraterValidationError(`${key} must be a finite number.`);
   }
   return value;
+}
+
+function competingWriteInput(body: Record<string, unknown>): KraterWriteInput | null {
+  const candidate = body.s2_after_head_competing_write;
+  if (candidate === undefined) return null;
+  if (!isRecord(candidate)) {
+    throw new KraterValidationError("s2_after_head_competing_write must be a Krater write object.");
+  }
+  return writeInput(candidate);
 }
 
 /**
@@ -228,6 +274,15 @@ async function plantLegacyProblemForHarness(
         "cannot append legacy envelopes to a problem that is absent.",
       );
     }
+    if (
+      !Number.isSafeInteger(head.public_seq) ||
+      head.public_seq < 0 ||
+      head.public_seq > Number.MAX_SAFE_INTEGER - eventCount
+    ) {
+      throw new KraterValidationError(
+        "legacy append refuses an inexact or exhausted persisted cursor.",
+      );
+    }
     base = head.public_seq;
   }
 
@@ -310,6 +365,7 @@ function errorResponse(error: unknown, surface: "read" | "write"): Response {
   if (error instanceof KraterProblemNotFoundError) return response({ code: error.code }, 404);
   if (error instanceof KraterIdempotencyConflictError) return response({ code: error.code }, 409);
   if (error instanceof KraterReplayError) return response({ code: error.code }, 409);
+  if (error instanceof KraterSequenceExhaustedError) return response({ code: error.code }, 409);
   if (error instanceof KraterIntegrityBackfillRequiredError) {
     return contractProblem(
       409,
@@ -347,8 +403,13 @@ function errorResponse(error: unknown, surface: "read" | "write"): Response {
 function queryInteger(url: URL, key: string, fallback: number): number {
   const value = url.searchParams.get(key);
   if (value === null) return fallback;
+  if (!/^(?:0|[1-9][0-9]*)$/.test(value)) {
+    throw new KraterValidationError(`${key} must be a canonical nonnegative integer.`);
+  }
   const parsed = Number(value);
-  if (!Number.isInteger(parsed)) throw new KraterValidationError(`${key} must be an integer.`);
+  if (!Number.isSafeInteger(parsed)) {
+    throw new KraterValidationError(`${key} must be a safe integer.`);
+  }
   return parsed;
 }
 
@@ -356,6 +417,10 @@ function queryString(url: URL, key: string): string {
   const value = url.searchParams.get(key);
   if (value === null) throw new KraterValidationError(`${key} is required.`);
   return value;
+}
+
+function queryOptionalString(url: URL, key: string): string | undefined {
+  return url.searchParams.get(key) ?? undefined;
 }
 
 function replayProjection(projection: ClaimProjection): Record<string, unknown> {
@@ -381,6 +446,49 @@ function harnessBoolean(body: Record<string, unknown>, key: string): boolean {
   if (value === undefined) return false;
   if (typeof value !== "boolean") throw new KraterValidationError(`${key} must be a boolean.`);
   return value;
+}
+
+function harnessSeedSequence(body: Record<string, unknown>): number | "unsafe-persisted" | null {
+  const value = body.s2_seed_public_seq;
+  const unsafePersisted = body.s2_seed_unsafe_persisted_sequence;
+  if (unsafePersisted !== undefined && unsafePersisted !== true) {
+    throw new KraterValidationError("s2_seed_unsafe_persisted_sequence must be true when present.");
+  }
+  if (value === undefined) return unsafePersisted === true ? "unsafe-persisted" : null;
+  if (unsafePersisted === true || value !== Number.MAX_SAFE_INTEGER) {
+    throw new KraterValidationError("s2_seed_public_seq may only plant Number.MAX_SAFE_INTEGER.");
+  }
+  return value;
+}
+
+/** Local-only malformed-row fixture: SQL, not a rounded JavaScript binding, persists 2^53 + 1. */
+async function seedUnsafePersistedSequenceForHarness(
+  db: D1Database,
+  problemId: string,
+  createdAt: string,
+): Promise<void> {
+  const eventId = `E-${problemId}-unsafe-sequence`;
+  const claimId = `C-${problemId}-unsafe-sequence`;
+  const chainDigest = "f".repeat(64);
+  const results = await db.batch([
+    db
+      .prepare(
+        `UPDATE problems SET public_seq = ${UNSAFE_D1_SEQUENCE_LITERAL}, chain_digest = ? WHERE id = ?`,
+      )
+      .bind(chainDigest, problemId),
+    db
+      .prepare(
+        `INSERT INTO events
+           (id, problem_id, seq, type, object_kind, object_id, object_version, payload_sha256,
+            row_digest, chain_digest, created_at)
+         SELECT ?, p.id, p.public_seq, 'claim.created', 'claim', ?, 1, ?, ?, ?, ?
+         FROM problems p WHERE p.id = ?`,
+      )
+      .bind(eventId, claimId, "e".repeat(64), "d".repeat(64), chainDigest, createdAt, problemId),
+  ]);
+  if (results[0]?.meta.changes !== 1 || results[1]?.meta.changes !== 1) {
+    throw new KraterValidationError("unsafe sequence fixture could not persist its exact D1 rows.");
+  }
 }
 
 function outboxFaultMode(body: Record<string, unknown>): OutboxFaultMode {
@@ -438,6 +546,21 @@ async function handleHarnessRequest(
       return response({ status: "ready", run_id: env.S2_HARNESS_RUN_ID });
     }
 
+    if (request.method === "GET" && url.pathname === "/__s2/abort-observation") {
+      const requestId = queryString(url, "request_id");
+      if (!HARNESS_REQUEST_ID_PATTERN.test(requestId)) {
+        throw new KraterValidationError("request_id must be a bounded harness identifier.");
+      }
+      const observation = abortBeforeCommitObservations.get(requestId);
+      if (observation === undefined)
+        return response({ code: "S2_ABORT_OBSERVATION_NOT_FOUND" }, 404);
+      return response({
+        request_id: observation.requestId,
+        accepted_before_commit: observation.acceptedBeforeCommit,
+        transaction_entered: observation.transactionEntered,
+      });
+    }
+
     // Token-gated. Reports the engine's chosen plan for the completeness probe that runs on
     // every write. The caller supplies a problem id and nothing else — the statement text
     // lives in krater.ts and is the same constant the probe itself executes, so this cannot
@@ -464,11 +587,17 @@ async function handleHarnessRequest(
     if (request.method === "POST" && url.pathname === "/__s2/seed") {
       surface = "write";
       const body = await readBody(request);
-      await ensureProblem(
-        env.DB,
-        requiredString(body, "problem_id"),
-        requiredString(body, "created_at"),
-      );
+      const seededSequence = harnessSeedSequence(body);
+      const problemId = requiredString(body, "problem_id");
+      const createdAt = requiredString(body, "created_at");
+      await ensureProblem(env.DB, problemId, createdAt);
+      if (seededSequence === "unsafe-persisted") {
+        await seedUnsafePersistedSequenceForHarness(env.DB, problemId, createdAt);
+      } else if (seededSequence !== null) {
+        await env.DB.prepare("UPDATE problems SET public_seq = ? WHERE id = ?")
+          .bind(seededSequence, problemId)
+          .run();
+      }
       return response({ status: "seeded" }, 201);
     }
 
@@ -480,6 +609,9 @@ async function handleHarnessRequest(
       const abortBeforeCommit = harnessBoolean(body, "s2_abort_before_commit");
       const deferOutboxNudge = harnessBoolean(body, "s2_defer_outbox_nudge");
       const failOutboxNudge = harnessBoolean(body, "s2_fail_outbox_nudge");
+      const forceLateOutboxRollback = harnessBoolean(body, "s2_force_late_outbox_rollback");
+      const competingInput = competingWriteInput(body);
+      if (abortBeforeCommit) recordAbortBeforeCommitObservation(harnessRequestId(body));
       if (preCommitDelayMs > 0) await waitForHarnessDelay(preCommitDelayMs);
       if (abortBeforeCommit || request.signal.aborted) {
         return contractProblem(
@@ -491,7 +623,47 @@ async function handleHarnessRequest(
           { idempotency_key: "IK-example" },
         );
       }
-      const result = await writeClaim(env.DB, writeInput(body));
+      const input = writeInput(body);
+      if (competingInput !== null && competingInput.problemId !== input.problemId) {
+        throw new KraterValidationError(
+          "s2_after_head_competing_write must target the same problem as the outer write.",
+        );
+      }
+      let competingWriteCompleted = false;
+      let lateOutboxRollbackArmed = false;
+      // This D1 trigger is a local-only fault injection. It aborts at the outbox
+      // statement, after event_content and FTS have been attempted in the same
+      // canonical batch. The finally block removes only the trigger this request
+      // created, so a failed transaction cannot contaminate later harness cases.
+      let result: Awaited<ReturnType<typeof writeClaim>>;
+      try {
+        result = await writeClaim(
+          env.DB,
+          input,
+          !forceLateOutboxRollback && competingInput === null
+            ? undefined
+            : {
+                afterReadHead: async () => {
+                  if (!competingWriteCompleted && competingInput !== null) {
+                    competingWriteCompleted = true;
+                    await writeClaim(env.DB, competingInput);
+                  }
+                  if (forceLateOutboxRollback && !lateOutboxRollbackArmed) {
+                    await env.DB.prepare(
+                      `CREATE TRIGGER s2_late_outbox_rollback
+                         BEFORE INSERT ON outbox
+                         BEGIN SELECT RAISE(ABORT, 'S2_LATE_OUTBOX_ROLLBACK'); END`,
+                    ).run();
+                    lateOutboxRollbackArmed = true;
+                  }
+                },
+              },
+        );
+      } finally {
+        if (lateOutboxRollbackArmed) {
+          await env.DB.prepare("DROP TRIGGER s2_late_outbox_rollback").run();
+        }
+      }
       let outboxHandoff: "armed" | "deferred" | "unavailable" = "deferred";
       if (!deferOutboxNudge) {
         if (failOutboxNudge) {
@@ -684,10 +856,14 @@ async function handleHarnessRequest(
 
     if (request.method === "GET" && url.pathname === "/__s2/state") {
       const problemId = queryString(url, "problem_id");
-      const [cursor, counts, integrity] = await Promise.all([
+      const eventId = queryOptionalString(url, "event_id");
+      const [cursor, counts, integrity, eventContentForEvent] = await Promise.all([
         readCursor(env.DB, problemId),
         inspectProblem(env.DB, problemId),
         readIntegrityState(env.DB, problemId),
+        eventId === undefined
+          ? Promise.resolve(undefined)
+          : inspectEventContentByEventId(env.DB, eventId),
       ]);
       return response({
         cursor,
@@ -695,6 +871,9 @@ async function handleHarnessRequest(
         chain_digest: integrity.chainDigest,
         checkpoint_digest: integrity.checkpointDigest,
         checkpoint_mode: "unsigned-v0",
+        ...(eventContentForEvent === undefined
+          ? {}
+          : { event_content_for_event: eventContentForEvent }),
       });
     }
 

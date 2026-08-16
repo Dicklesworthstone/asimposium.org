@@ -62,6 +62,15 @@ export interface KraterWriteResult {
   retryCount: number;
 }
 
+/**
+ * Test scheduling hooks for the local S-2 harness. They can delay a write at
+ * a named causal boundary, but cannot supply a sequence or alter any database
+ * value. Production callers omit this argument.
+ */
+export interface KraterWriteHooks {
+  afterReadHead?: (head: Readonly<{ publicSeq: number; chainDigest: string }>) => Promise<void>;
+}
+
 export interface KraterEvent {
   eventId: string;
   problemId: string;
@@ -126,6 +135,15 @@ export class KraterReplayError extends Error {
 
 export class KraterIntegrityBackfillRequiredError extends Error {
   readonly code = "KRATER_INTEGRITY_BACKFILL_REQUIRED";
+}
+
+/**
+ * D1 INTEGER values are wider than JavaScript's exact integer range. Krater's
+ * sequence participates in event and chain digests, so accepting an inexact
+ * predecessor would let two distinct durable values share one JS candidate.
+ */
+export class KraterSequenceExhaustedError extends Error {
+  readonly code = "KRATER_SEQUENCE_EXHAUSTED";
 }
 
 interface IdempotencyRow {
@@ -201,6 +219,28 @@ function readError(message: string): never {
   throw new KraterReadError(message);
 }
 
+function isSafeNonnegativeInteger(value: unknown): value is number {
+  return typeof value === "number" && Number.isSafeInteger(value) && value >= 0;
+}
+
+function requireInputSequence(value: unknown, label: string, allowZero: boolean): number {
+  if (!isSafeNonnegativeInteger(value) || (!allowZero && value === 0)) {
+    inputError(`${label} must be a ${allowZero ? "nonnegative" : "positive"} safe integer.`);
+  }
+  return value;
+}
+
+function requireStoredSequence(value: unknown, label: string, allowZero: boolean): number {
+  if (!isSafeNonnegativeInteger(value) || (!allowZero && value === 0)) {
+    readError(`${label} stored an inexact or invalid sequence.`);
+  }
+  return value;
+}
+
+function eventRowWithSafeSequence(row: EventRow): EventRow {
+  return { ...row, seq: requireStoredSequence(row.seq, "event", false) };
+}
+
 function requireIdentifier(label: string, value: string): void {
   if (!IDENTIFIER.test(value)) inputError(`${label} must be a bounded identifier.`);
 }
@@ -267,7 +307,7 @@ export async function eventChainDigest(
   previousChainDigest: string,
 ): Promise<string> {
   requireIdentifier("problemId", problemId);
-  if (!Number.isInteger(seq) || seq < 1) inputError("chain sequence must be a positive integer.");
+  requireInputSequence(seq, "chain sequence", false);
   return sha256Hex(
     canonicalJson({
       payload_sha256: payloadSha256,
@@ -283,6 +323,7 @@ export async function eventRowDigest(
   seq: number,
   payloadSha256: string,
 ): Promise<string> {
+  requireInputSequence(seq, "event row sequence", false);
   return eventEnvelopeRowDigest({
     eventId: input.eventId,
     problemId: input.problemId,
@@ -309,6 +350,7 @@ interface EventEnvelopeForDigest {
 }
 
 async function eventEnvelopeRowDigest(envelope: EventEnvelopeForDigest): Promise<string> {
+  requireInputSequence(envelope.seq, "event envelope sequence", false);
   return sha256Hex(
     canonicalJson({
       created_at: envelope.createdAt,
@@ -338,6 +380,7 @@ export async function checkpointDigest(
   seq: number,
   rootChainDigest: string,
 ): Promise<string> {
+  requireInputSequence(seq, "checkpoint sequence", false);
   return sha256Hex(
     canonicalJson({
       checkpoint_version: 1,
@@ -468,7 +511,10 @@ async function readProblemHead(
       "Krater integrity digests must be replayed from the immutable legacy envelopes first.",
     );
   }
-  return { public_seq: row.public_seq, chain_digest: row.chain_digest };
+  return {
+    public_seq: requireStoredSequence(row.public_seq, "problem cursor", true),
+    chain_digest: row.chain_digest,
+  };
 }
 
 async function readEventById(db: D1Database, eventId: string): Promise<EventRow> {
@@ -480,7 +526,7 @@ async function readEventById(db: D1Database, eventId: string): Promise<EventRow>
     eventId,
   ).first<EventRow>();
   if (row === null) throw new Error("Krater write did not persist an event envelope.");
-  return row;
+  return eventRowWithSafeSequence(row);
 }
 
 async function readProjectionByEvent(db: D1Database, event: EventRow): Promise<ProjectionRow> {
@@ -493,7 +539,10 @@ async function readProjectionByEvent(db: D1Database, event: EventRow): Promise<P
     event.seq,
   ).first<ProjectionRow>();
   if (row === null) throw new Error("Krater write did not persist a projection.");
-  return row;
+  return {
+    ...row,
+    source_seq: requireStoredSequence(row.source_seq, "projection source sequence", false),
+  };
 }
 
 async function readCheckpointByEvent(db: D1Database, event: EventRow): Promise<CheckpointRow> {
@@ -506,7 +555,10 @@ async function readCheckpointByEvent(db: D1Database, event: EventRow): Promise<C
     event.seq,
   ).first<CheckpointRow>();
   if (row === null) throw new Error("Krater write did not persist an integrity checkpoint.");
-  return row;
+  return {
+    ...row,
+    checkpoint_seq: requireStoredSequence(row.checkpoint_seq, "checkpoint sequence", false),
+  };
 }
 
 function backfillRequired(message: string): never {
@@ -684,6 +736,7 @@ export async function backfillKraterIntegrity(
   if (rawHead === null) {
     throw new KraterProblemNotFoundError("problem must exist before integrity replay.");
   }
+  const publicSeq = requireStoredSequence(rawHead.public_seq, "problem cursor", true);
   const storedBackfill = await readIntegrityBackfill(db, problemId, cost);
   // An already-upgraded problem is done, whatever its size. This check must precede the
   // bounded-replay limit below: every write calls this function, so testing the limit first
@@ -721,8 +774,9 @@ export async function backfillKraterIntegrity(
   // The replay path's dominant read. Counting it keeps the two paths comparable in the receipt:
   // a legacy upgrade legitimately reads the whole log, an ordinary write must not.
   recordD1Result(cost, events);
+  const legacyEvents = events.results.map(eventRowWithSafeSequence);
 
-  if (events.results.length > MAX_INTEGRITY_BACKFILL_EVENTS) {
+  if (legacyEvents.length > MAX_INTEGRITY_BACKFILL_EVENTS) {
     backfillRequired(
       "the legacy problem exceeds the bounded integrity replay limit; use the future range-aware backfill.",
     );
@@ -730,11 +784,11 @@ export async function backfillKraterIntegrity(
 
   if (
     rawHead.chain_digest !== null ||
-    events.results.some((event) => event.row_digest !== null || event.chain_digest !== null)
+    legacyEvents.some((event) => event.row_digest !== null || event.chain_digest !== null)
   ) {
     backfillRequired("the legacy integrity state is partial; refusing to overwrite a digest.");
   }
-  if (rawHead.public_seq !== events.results.length) {
+  if (publicSeq !== legacyEvents.length) {
     backfillRequired("the legacy cursor does not match a complete contiguous envelope history.");
   }
 
@@ -745,10 +799,10 @@ export async function backfillKraterIntegrity(
       `INSERT INTO krater_integrity_backfill (problem_id, state, legacy_event_count, completed_at)
        VALUES (?, 'required', ?, NULL) ON CONFLICT(problem_id) DO NOTHING`,
       problemId,
-      events.results.length,
+      legacyEvents.length,
     ),
   ];
-  for (const [index, event] of events.results.entries()) {
+  for (const [index, event] of legacyEvents.entries()) {
     if (
       event.seq !== index + 1 ||
       event.type !== "claim.created" ||
@@ -814,7 +868,7 @@ export async function backfillKraterIntegrity(
       `UPDATE krater_integrity_backfill
        SET state = 'complete', legacy_event_count = ?, completed_at = ?
        WHERE problem_id = ? AND state = 'required'`,
-      events.results.length,
+      legacyEvents.length,
       completedAt,
       problemId,
     ),
@@ -860,6 +914,7 @@ export async function ensureProblem(
 export async function writeClaim(
   db: D1Database,
   input: KraterWriteInput,
+  hooks: KraterWriteHooks = {},
 ): Promise<KraterWriteResult> {
   const writeClaimStartedAt = performance.now();
   validateWriteInput(input);
@@ -874,14 +929,26 @@ export async function writeClaim(
 
   while (retryCount <= MAX_CHAIN_RETRIES) {
     const before = await readProblemHead(db, input.problemId);
-    const expectedSeq = before.public_seq + 1;
+    await hooks.afterReadHead?.({ publicSeq: before.public_seq, chainDigest: before.chain_digest });
+    if (
+      !Number.isSafeInteger(before.public_seq) ||
+      before.public_seq < 0 ||
+      before.public_seq >= Number.MAX_SAFE_INTEGER
+    ) {
+      throw new KraterSequenceExhaustedError(
+        "Krater sequence allocation refuses an inexact or exhausted predecessor.",
+      );
+    }
+    // This candidate is cryptographic input derived from a durable predecessor.
+    // SQLite, not this value, allocates the stored sequence below.
+    const candidateSeq = before.public_seq + 1;
     const [nextChainDigest, nextRowDigest] = await Promise.all([
-      eventChainDigest(input.problemId, expectedSeq, payloadSha256, before.chain_digest),
-      eventRowDigest(input, expectedSeq, payloadSha256),
+      eventChainDigest(input.problemId, candidateSeq, payloadSha256, before.chain_digest),
+      eventRowDigest(input, candidateSeq, payloadSha256),
     ]);
     const [nextBuildDigest, nextCheckpointDigest] = await Promise.all([
       projectionBuildDigest(payloadSha256, nextRowDigest),
-      checkpointDigest(input.problemId, expectedSeq, nextChainDigest),
+      checkpointDigest(input.problemId, candidateSeq, nextChainDigest),
     ]);
 
     let results: D1Result<SequenceRow>[];
@@ -900,13 +967,12 @@ export async function writeClaim(
         ),
         statement(
           db,
-          `UPDATE problems SET public_seq = ?, chain_digest = ?, updated_at = ?
+          `UPDATE problems SET public_seq = public_seq + 1, chain_digest = ?, updated_at = ?
            WHERE id = ? AND public_seq = ? AND chain_digest = ? AND EXISTS (
              SELECT 1 FROM idempotency
              WHERE problem_id = ? AND idempotency_key = ? AND event_id IS NULL
            )
            RETURNING public_seq`,
-          expectedSeq,
           nextChainDigest,
           input.createdAt,
           input.problemId,
@@ -948,19 +1014,18 @@ export async function writeClaim(
           `INSERT INTO events
              (id, problem_id, seq, type, object_kind, object_id, object_version, payload_sha256,
               row_digest, chain_digest, created_at)
-           SELECT ?, ?, ?, 'claim.created', 'claim', ?, 1, ?, ?, ?, ?
-           FROM idempotency
-           WHERE problem_id = ? AND idempotency_key = ? AND event_id IS NULL`,
+           SELECT ?, p.id, p.public_seq, 'claim.created', 'claim', ?, 1, ?, ?, ?, ?
+           FROM problems p
+           JOIN idempotency i ON i.problem_id = p.id AND i.idempotency_key = ?
+           WHERE p.id = ? AND i.event_id IS NULL`,
           input.eventId,
-          input.problemId,
-          expectedSeq,
           input.claimId,
           payloadSha256,
           nextRowDigest,
           nextChainDigest,
           input.createdAt,
-          input.problemId,
           input.idempotencyKey,
+          input.problemId,
         ),
         statement(
           db,
@@ -1003,16 +1068,14 @@ export async function writeClaim(
           `INSERT INTO integrity_checkpoints
              (problem_id, checkpoint_seq, root_chain_digest, checkpoint_digest, checkpoint_version,
               checkpoint_mode, created_at)
-           SELECT ?, ?, ?, ?, 1, 'unsigned-v0', ?
-           FROM idempotency i
-           WHERE i.problem_id = ? AND i.idempotency_key = ? AND i.event_id IS NULL`,
-          input.problemId,
-          expectedSeq,
-          nextChainDigest,
+           SELECT p.id, p.public_seq, p.chain_digest, ?, 1, 'unsigned-v0', ?
+           FROM problems p
+           JOIN idempotency i ON i.problem_id = p.id AND i.idempotency_key = ?
+           WHERE p.id = ? AND i.event_id IS NULL`,
           nextCheckpointDigest,
           input.createdAt,
-          input.problemId,
           input.idempotencyKey,
+          input.problemId,
         ),
         statement(
           db,
@@ -1057,9 +1120,17 @@ export async function writeClaim(
     if (settled.event_id === null || settled.event_seq === null) {
       throw new Error("Krater write did not settle an event envelope.");
     }
+    const settledEventSeq = requireStoredSequence(
+      settled.event_seq,
+      "idempotency event sequence",
+      false,
+    );
 
     const allocated = results[1]?.results[0]?.public_seq;
-    if (allocated !== undefined && allocated !== settled.event_seq) {
+    if (
+      allocated !== undefined &&
+      requireStoredSequence(allocated, "allocated problem cursor", false) !== settledEventSeq
+    ) {
       throw new Error("Krater sequence allocation disagreed with the settled event.");
     }
 
@@ -1069,7 +1140,7 @@ export async function writeClaim(
       readEventById(db, settled.event_id).then((persisted) => readCheckpointByEvent(db, persisted)),
       readProblemHead(db, input.problemId),
     ]);
-    if (event.seq !== settled.event_seq || checkpoint.root_chain_digest !== event.chain_digest) {
+    if (event.seq !== settledEventSeq || checkpoint.root_chain_digest !== event.chain_digest) {
       throw new Error("Krater persisted integrity records disagree.");
     }
     if (event.row_digest === null || event.chain_digest === null) {
@@ -1079,7 +1150,7 @@ export async function writeClaim(
     const writePhaseMs = Math.round((performance.now() - writePhaseStartedAt) * 1_000) / 1_000;
     return {
       eventId: settled.event_id,
-      seq: settled.event_seq,
+      seq: settledEventSeq,
       idempotent: allocated === undefined,
       preCursor: before.public_seq,
       postCursor: after.public_seq,
@@ -1111,7 +1182,7 @@ export async function readCursor(db: D1Database, problemId: string): Promise<num
       problemId,
     ).first<CursorRow>();
     if (row === null) throw new KraterProblemNotFoundError("problem cursor does not exist.");
-    return row.public_seq;
+    return requireStoredSequence(row.public_seq, "problem cursor", true);
   } catch (error) {
     if (error instanceof KraterProblemNotFoundError) throw error;
     readError("cursor read could not be completed.");
@@ -1126,9 +1197,8 @@ export async function readEvents(
 ): Promise<KraterEvent[]> {
   requireIdentifier("problemId", problemId);
   if (
-    !Number.isInteger(afterSeq) ||
-    afterSeq < 0 ||
-    !Number.isInteger(limit) ||
+    !isSafeNonnegativeInteger(afterSeq) ||
+    !Number.isSafeInteger(limit) ||
     limit < 1 ||
     limit > MAX_EVENT_PAGE_SIZE
   ) {
@@ -1143,7 +1213,8 @@ export async function readEvents(
       afterSeq,
       limit,
     ).all<EventRow>();
-    return result.results.map((row) => {
+    return result.results.map((rawRow) => {
+      const row = eventRowWithSafeSequence(rawRow);
       if (row.row_digest === null || row.chain_digest === null) {
         backfillRequired("event reads require completed Krater integrity replay.");
       }
@@ -1175,7 +1246,7 @@ export async function readAllEvents(
   problemId: string,
   pageSize = MAX_EVENT_PAGE_SIZE,
 ): Promise<KraterEvent[]> {
-  if (!Number.isInteger(pageSize) || pageSize < 1 || pageSize > MAX_EVENT_PAGE_SIZE) {
+  if (!Number.isSafeInteger(pageSize) || pageSize < 1 || pageSize > MAX_EVENT_PAGE_SIZE) {
     inputError("full replay requires a valid event page size.");
   }
   const events: KraterEvent[] = [];
@@ -1208,7 +1279,7 @@ export async function readClaimProjections(
     return result.results.map((row) => ({
       claimId: row.claim_id,
       problemId: row.problem_id,
-      sourceSeq: row.source_seq,
+      sourceSeq: requireStoredSequence(row.source_seq, "projection source sequence", false),
       projectionVersion: row.projection_version,
       buildDigest: row.build_digest,
       stale: row.stale === 1,
@@ -1255,6 +1326,8 @@ export function replayClaimProjections(events: readonly KraterEvent[]): ClaimPro
   for (const event of events) {
     if (
       event.type !== "claim.created" ||
+      !isSafeNonnegativeInteger(event.seq) ||
+      event.seq === 0 ||
       event.seq !== priorSeq + 1 ||
       (problemId !== undefined && event.problemId !== problemId)
     ) {
@@ -1283,7 +1356,14 @@ export async function eventChainMatches(events: readonly KraterEvent[]): Promise
   let priorDigest = await genesisChainDigest(problemId);
   let priorSeq = 0;
   for (const event of events) {
-    if (event.problemId !== problemId || event.seq !== priorSeq + 1) return false;
+    if (
+      event.problemId !== problemId ||
+      !isSafeNonnegativeInteger(event.seq) ||
+      event.seq === 0 ||
+      event.seq !== priorSeq + 1
+    ) {
+      return false;
+    }
     const expected = await eventChainDigest(
       event.problemId,
       event.seq,
@@ -1318,7 +1398,11 @@ export function projectionReplayMatches(
 }
 
 export function cursorMatchesEvents(cursor: number, events: readonly KraterEvent[]): boolean {
-  return cursor === (events[events.length - 1]?.seq ?? 0);
+  return (
+    isSafeNonnegativeInteger(cursor) &&
+    events.every((event) => isSafeNonnegativeInteger(event.seq) && event.seq > 0) &&
+    cursor === (events[events.length - 1]?.seq ?? 0)
+  );
 }
 
 export function outboxMatchesEvents(
@@ -1352,7 +1436,7 @@ export function validateFtsReadInput(query: string, limit: number): void {
   if (
     query.trim().length === 0 ||
     query.length > 128 ||
-    !Number.isInteger(limit) ||
+    !Number.isSafeInteger(limit) ||
     limit < 1 ||
     limit > 50
   ) {
@@ -1470,6 +1554,18 @@ export async function inspectProblem(
         problemId,
       ),
       statement(db, "SELECT COUNT(*) AS count FROM events WHERE problem_id = ?", problemId),
+      statement(
+        db,
+        `SELECT COUNT(*) AS count
+         FROM event_content c JOIN events e ON e.id = c.event_id
+         WHERE e.problem_id = ?`,
+        problemId,
+      ),
+      statement(
+        db,
+        "SELECT COUNT(*) AS count FROM public_claim_fts WHERE problem_id = ?",
+        problemId,
+      ),
       statement(db, "SELECT COUNT(*) AS count FROM idempotency WHERE problem_id = ?", problemId),
       statement(db, "SELECT COUNT(*) AS count FROM outbox WHERE problem_id = ?", problemId),
       statement(
@@ -1482,6 +1578,8 @@ export async function inspectProblem(
       "claims",
       "claim_projections",
       "events",
+      "event_content",
+      "public_claim_fts",
       "idempotency",
       "outbox",
       "integrity_checkpoints",
@@ -1491,6 +1589,31 @@ export async function inspectProblem(
     );
   } catch (_error) {
     readError("problem state could not be inspected.");
+  }
+}
+
+/**
+ * Local rollback inspection deliberately reads the content table by its attempted event id.
+ * Joining through `events` would hide the exact orphan this check exists to detect.
+ */
+export async function inspectEventContentByEventId(
+  db: D1Database,
+  eventId: string,
+): Promise<number> {
+  requireIdentifier("eventId", eventId);
+  try {
+    const row = await statement(
+      db,
+      "SELECT COUNT(*) AS count FROM event_content WHERE event_id = ?",
+      eventId,
+    ).first<CountRow>();
+    if (row === null || !isSafeNonnegativeInteger(row.count)) {
+      readError("event content inspection returned an invalid count.");
+    }
+    return row.count;
+  } catch (error) {
+    if (error instanceof KraterReadError) throw error;
+    readError("event content could not be inspected.");
   }
 }
 
