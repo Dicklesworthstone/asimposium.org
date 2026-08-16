@@ -27,6 +27,7 @@
  */
 
 import { resolve } from "node:path";
+import { containsCredentialShape } from "@asimposium/contracts/diagnostic-safety";
 
 const PACKAGE_ROOT = resolve(import.meta.dir, "..");
 /** Repository-relative label. Never an absolute path. */
@@ -187,7 +188,15 @@ const MAX_BLOCKER_TEXT = 400;
 const ABSOLUTE_PATH_SHAPE =
   /(?:(?:^|[\s"'`([<=,;])(?:\/[^\s/]|[A-Za-z]:[\\/]|\\\\[^\s\\]))|(?:\bfile:\/\/)/;
 /** Token shapes this package has committed to keeping out of diagnostics, plus any long hex digest. */
-const CREDENTIAL_SHAPE = /asimp_ag_[A-Za-z0-9_-]{4,}|#v1\.[A-Za-z0-9._~-]{8,}|\b[A-Fa-f0-9]{32,}\b/;
+/**
+ * A long hex run is not a named credential family, so `containsCredentialShape`
+ * does not claim it. It stays a suite-local guard because a diagnostic here has
+ * no legitimate reason to carry a digest-shaped token. The ASI bearer and
+ * fragment-secret families were deliberately removed from this file: they now
+ * live in `@asimposium/contracts/diagnostic-safety`, and a second copy here
+ * would only be a place for the two to drift apart.
+ */
+const LONG_HEX_SHAPE = /\b[A-Fa-f0-9]{32,}\b/;
 
 /** A bounded, single-line, absolute-path-free and credential-free prose field. */
 function isBoundedSafeText(value: unknown): value is string {
@@ -198,7 +207,8 @@ function isBoundedSafeText(value: unknown): value is string {
     // biome-ignore lint/suspicious/noControlCharactersInRegex: refusing control characters is the point.
     !/[\u0000-\u001F\u007F]/.test(value) &&
     !ABSOLUTE_PATH_SHAPE.test(value) &&
-    !CREDENTIAL_SHAPE.test(value)
+    !LONG_HEX_SHAPE.test(value) &&
+    !containsCredentialShape(value)
   );
 }
 

@@ -56,6 +56,10 @@ async function harness(): Promise<Harness> {
 
 function dispatchOptions(h: Harness, rawBody: string | ArrayBufferView | ArrayBuffer) {
   return {
+    // The exact production/staging Worker origin every dispatch must name.
+    // Required, never defaulted: a missing origin is a configuration failure,
+    // not something the seam may infer.
+    stoaOrigin: STOA,
     path: "/v1/enrollments",
     method: "POST",
     route: ROUTE,
@@ -66,6 +70,32 @@ function dispatchOptions(h: Harness, rawBody: string | ArrayBufferView | ArrayBu
     kid: "agora-dispatch-test",
     now: NOW,
   };
+}
+
+/**
+ * A real CryptoKey that is structurally unable to sign. Passing it as the
+ * signing key turns "was the envelope minted?" into something the test can
+ * observe: reaching the signer raises `InvalidAccessError` (a DOMException),
+ * while every destination refusal is a `TypeError` raised before it. The
+ * plants below assert that ordering rather than a message, so rewording a
+ * refusal cannot quietly move it after the signature.
+ */
+async function unsignableKey(): Promise<CryptoKey> {
+  const pair = (await crypto.subtle.generateKey({ name: "Ed25519" }, true, [
+    "sign",
+    "verify",
+  ])) as unknown as CryptoKeyPair;
+  return pair.publicKey;
+}
+
+/** Await a dispatch that must fail closed, and hand back what it refused with. */
+async function rejectionOf(dispatch: Promise<unknown>): Promise<unknown> {
+  try {
+    await dispatch;
+  } catch (error) {
+    return error;
+  }
+  throw new Error("expected the dispatch to fail closed, but it resolved");
 }
 
 describe("S-6 Agora signed dispatch seam", () => {
@@ -330,14 +360,23 @@ describe("S-6 planted transport negatives", () => {
     let attempted = false;
     const options = {
       ...dispatchOptions(h, '{"requested_scopes":["promote"]}'),
-      stoaOrigin: "http://a.asimposium.invalid",
+      privateKey: await unsignableKey(),
       fetchImpl: async () => {
         attempted = true;
         return new Response(null, { status: 204 });
       },
     };
 
-    await expect(dispatchSignedSponsorRequest(options)).rejects.toThrow(/canonical Worker origin/);
+    // Non-vacuity: with the trusted origin the same call does reach the signer,
+    // so the key really is unusable and the discriminator below means something.
+    const signerFailure = await rejectionOf(dispatchSignedSponsorRequest(options));
+    expect(signerFailure).toBeInstanceOf(DOMException);
+
+    const originFailure = await rejectionOf(
+      dispatchSignedSponsorRequest({ ...options, stoaOrigin: "http://a.asimposium.invalid" }),
+    );
+    expect(originFailure).toBeInstanceOf(TypeError);
+    expect(originFailure).not.toBeInstanceOf(DOMException);
     expect(attempted).toBe(false);
   });
 
@@ -345,16 +384,21 @@ describe("S-6 planted transport negatives", () => {
     const h = await harness();
     let attempted = false;
 
-    await expect(
+    // TLS is not trust: an attacker-controlled HTTPS host is refused on the
+    // same path as plaintext, and still before the signer runs.
+    const failure = await rejectionOf(
       dispatchSignedSponsorRequest({
         ...dispatchOptions(h, '{"requested_scopes":["promote"]}'),
         stoaOrigin: "https://attacker.invalid",
+        privateKey: await unsignableKey(),
         fetchImpl: async () => {
           attempted = true;
           return new Response(null, { status: 204 });
         },
       }),
-    ).rejects.toThrow(/canonical Worker origin/);
+    );
+    expect(failure).toBeInstanceOf(TypeError);
+    expect(failure).not.toBeInstanceOf(DOMException);
     expect(attempted).toBe(false);
   });
 
@@ -362,12 +406,24 @@ describe("S-6 planted transport negatives", () => {
     const h = await harness();
     const base = dispatchOptions(h, '{"requested_scopes":["promote"]}');
 
-    // A remote host can never be allowed, however explicitly it is named.
+    // A remote host can never be allowed, however explicitly it is named. The
+    // allowance never gets a hearing: the destination is not trusted at all, so
+    // this is refused one gate earlier than the loopback rules.
     await expect(
       dispatchSignedSponsorRequest({
         ...base,
         stoaOrigin: "http://a.asimposium.invalid",
         insecureLoopbackOrigin: "http://a.asimposium.invalid",
+      }),
+    ).rejects.toBeInstanceOf(TypeError);
+
+    // And on the real HTTPS origin an allowance is refused rather than quietly
+    // ignored, so a staging flag left set in production fails closed.
+    await expect(
+      dispatchSignedSponsorRequest({
+        ...base,
+        stoaOrigin: STOA,
+        insecureLoopbackOrigin: "http://127.0.0.1:8787",
       }),
     ).rejects.toThrow(/plaintext loopback/);
 
@@ -381,14 +437,25 @@ describe("S-6 planted transport negatives", () => {
     ).rejects.toThrow(/configured origin exactly/);
 
     // Even a matching loopback host is not an origin declaration if it carries
-    // a path, query, fragment, or credentials.
-    await expect(
+    // a path, query, fragment, or credentials. The allowance is compared as an
+    // exact string, so this is refused before a signature exists to be replayed
+    // — which is the property worth pinning, not the sentence that reports it.
+    let attempted = false;
+    const pathAllowanceFailure = await rejectionOf(
       dispatchSignedSponsorRequest({
         ...base,
         stoaOrigin: "http://127.0.0.1:8787",
         insecureLoopbackOrigin: "http://127.0.0.1:8787/not-an-origin",
+        privateKey: await unsignableKey(),
+        fetchImpl: async () => {
+          attempted = true;
+          return new Response(null, { status: 204 });
+        },
       }),
-    ).rejects.toThrow(/contain only an origin/);
+    );
+    expect(pathAllowanceFailure).toBeInstanceOf(TypeError);
+    expect(pathAllowanceFailure).not.toBeInstanceOf(DOMException);
+    expect(attempted).toBe(false);
 
     // The one supported staging shape: plaintext loopback, named exactly.
     let destination: string | undefined;

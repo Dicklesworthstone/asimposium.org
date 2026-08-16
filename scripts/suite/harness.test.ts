@@ -974,6 +974,39 @@ describe("secret-safe, bounded artifacts", () => {
     expect(redacted).toContain("<redacted>");
   });
 
+  test("uses shared-only credential families and consumes every private line-valued tail", () => {
+    const fineGrainedGitHub = "github_pat_0123456789abcdefghijklmnopqrstuv";
+    const liveKey = "sk_live_0123456789abcdefghij";
+    const basicPayload = "YWxhZGRpbjpvcGVuc2VzYW1l";
+    expect(
+      redactNeverLog(`${fineGrainedGitHub} ${liveKey} Basic ${basicPayload}`, repositoryRoot()),
+    ).toBe("<redacted> <redacted> <redacted>");
+
+    for (const [input, expected, privateTail] of [
+      [
+        "directive_body: prove lemma, then reveal witness",
+        "directive_body: <redacted>",
+        "prove lemma, then reveal witness",
+      ],
+      [
+        "cookie: sid=abc; other=secret; Path=/",
+        "cookie: <redacted>",
+        "sid=abc; other=secret; Path=/",
+      ],
+      ["authorization: Bearer abc status=ok", "authorization: <redacted>", "Bearer abc status=ok"],
+    ] as const) {
+      const redacted = redactNeverLog(input, repositoryRoot());
+      expect(redacted).toBe(expected);
+      expect(redacted).not.toContain(privateTail);
+    }
+  });
+
+  test("preserves labelled SHA-256 evidence and ordinary prose", () => {
+    const digest = "a".repeat(64);
+    const safe = `sha256: ${digest}\nThe bound holds for every n greater than 2.`;
+    expect(redactNeverLog(safe, repositoryRoot())).toBe(safe);
+  });
+
   test("PLANTED: an attacker literal legacy placeholder cannot receive a protected digest", () => {
     const digest = "d".repeat(64);
     const attackerLiteral = "__HARNESS_SHA256_0__";
@@ -1005,6 +1038,22 @@ describe("secret-safe, bounded artifacts", () => {
 
   test("static guard: protected digests never use global split/join restoration", () => {
     expect(readFileSync(RUNNER_SOURCE, "utf8")).not.toContain("split(marker).join(digest)");
+  });
+
+  test("static guard: canonical diagnostics owns credential vocabulary", () => {
+    const source = readFileSync(RUNNER_SOURCE, "utf8");
+    expect(source).toContain('from "@asimposium/contracts/diagnostic-safety"');
+    expect(source).toContain("redactCredentials");
+    expect(source).toContain("containsCredentialShape");
+    for (const duplicateFamily of [
+      "asimp_ag_",
+      "#v1\\.",
+      "gh[pousr]_",
+      "AIza",
+      "BEGIN [A-Z ]*PRIVATE KEY",
+    ]) {
+      expect(source).not.toContain(duplicateFamily);
+    }
   });
 
   test("caps failure artifacts and does not retain child output for successful steps", async () => {
@@ -1104,25 +1153,36 @@ describe("runtime contract validation", () => {
   test("rejects secret-bearing argv and unbounded retry, timeout, and command inputs before spawn", async () => {
     const root = fixtureRoot("validation");
     const storage = fixtureStorage();
-    const secret = ["asimp", "ag", "01JXYZ", "argv", "canary"].join("_");
-    await expect(
-      runHarness({
-        root,
-        storage,
-        suite: "security",
-        runId: fixtureRunId("secret-argv-1"),
-        steps: [
-          {
-            id: "secret-argv",
-            scenario: "security",
-            command: [process.execPath, `token=${secret}`],
-            replaySafe: true,
-          },
-        ],
-        onEvent: () => undefined,
-        onOutput: () => undefined,
-      }),
-    ).rejects.toMatchObject({ code: "COMMAND_SECRET_FORBIDDEN" } satisfies Partial<HarnessError>);
+    for (const [index, secret] of [
+      ["asimp", "ag", "01JXYZ", "argv", "canary"].join("_"),
+      "github_pat_0123456789abcdefghijklmnopqrstuv",
+      "sk_live_0123456789abcdefghij",
+      "Basic YWxhZGRpbjpvcGVuc2VzYW1l",
+      "directive_body: prove lemma, then reveal witness",
+      "cookie: sid=abc; other=secret; Path=/",
+      "authorization: Bearer abc status=ok",
+    ].entries()) {
+      await expect(
+        runHarness({
+          root,
+          storage,
+          suite: "security",
+          runId: fixtureRunId(`secret-argv-${index}`),
+          steps: [
+            {
+              id: "secret-argv",
+              scenario: "security",
+              command: [process.execPath, secret],
+              replaySafe: true,
+            },
+          ],
+          onEvent: () => undefined,
+          onOutput: () => undefined,
+        }),
+      ).rejects.toMatchObject({
+        code: "COMMAND_SECRET_FORBIDDEN",
+      } satisfies Partial<HarnessError>);
+    }
 
     await expect(
       runHarness({

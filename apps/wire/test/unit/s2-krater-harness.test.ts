@@ -7,6 +7,7 @@ import {
   lstatSync,
   mkdtempSync,
   openSync,
+  readdirSync,
   readFileSync,
   symlinkSync,
 } from "node:fs";
@@ -17,6 +18,9 @@ import { S2_COST_RECEIPT_BINDINGS_KEYS, S2_COST_RECEIPT_ROOT_KEYS } from "@asimp
 
 import {
   buildS2CostMeasurementReceipt,
+  parseS2EventPageResult,
+  parseS2StateResult,
+  parseS2WriteResult,
   S2_COST_RECEIPT_RELATIVE_PATH,
   type S2CostReceiptProvenance,
   type S2SettledWriteResult,
@@ -25,6 +29,36 @@ import {
 
 const REPOSITORY_ROOT = resolve(import.meta.dir, "../../../..");
 const SCRIPT = "scripts/e2e-s2-krater.sh";
+
+/**
+ * The declared source list, read out of the harness itself.
+ *
+ * Tests that assert on closure must read the same array the script hashes, not
+ * a copy: a second list here would drift from the first and quietly stop
+ * proving anything.
+ */
+function declaredSourcePaths(): string[] {
+  const script = readFileSync(resolve(REPOSITORY_ROOT, SCRIPT), "utf8");
+  const block = /^readonly -a S2_SOURCE_PATHS=\(\n([\s\S]*?)^\)$/m.exec(script);
+  const body = block?.[1];
+  if (body === undefined) throw new Error("S2_SOURCE_PATHS array not found in the harness");
+  return body
+    .split("\n")
+    .map((line) => line.trim())
+    .filter((line) => line.length > 0 && !line.startsWith("#"));
+}
+
+/** The expected migration journal, likewise read from the harness. */
+function declaredMigrationJournal(): string[] {
+  const script = readFileSync(resolve(REPOSITORY_ROOT, SCRIPT), "utf8");
+  const block = /^readonly -a S2_EXPECTED_MIGRATION_JOURNAL=\(\n([\s\S]*?)^\)$/m.exec(script);
+  const body = block?.[1];
+  if (body === undefined) throw new Error("S2_EXPECTED_MIGRATION_JOURNAL array not found");
+  return body
+    .split("\n")
+    .map((line) => line.trim())
+    .filter((line) => line.length > 0 && !line.startsWith("#"));
+}
 const REAL_BINDING_INTEGRATION = resolve(
   REPOSITORY_ROOT,
   "apps/wire/test/integration/s2-krater-real-bindings.test.ts",
@@ -518,6 +552,59 @@ async function probeRealBindingCapability(): Promise<Run> {
 }
 
 describe("S2 to S7 normalized cost receipt", () => {
+  test("S2 response parsers retain only exact sequence and cursor values", () => {
+    const maximum = Number.MAX_SAFE_INTEGER;
+    const validWrite = {
+      ...FIRST_COST_WRITE,
+      seq: maximum,
+      pre_cursor: maximum - 1,
+      post_cursor: maximum,
+    };
+    expect(parseS2WriteResult(validWrite)).toMatchObject({
+      seq: maximum,
+      pre_cursor: maximum - 1,
+      post_cursor: maximum,
+    });
+    expect(
+      parseS2StateResult({
+        cursor: maximum,
+        counts: {},
+        chain_digest: "a".repeat(64),
+        checkpoint_digest: null,
+        checkpoint_mode: "unsigned-v0",
+      }),
+    ).toMatchObject({ cursor: maximum });
+    expect(
+      parseS2EventPageResult({
+        events: [{ seq: maximum }],
+        next_cursor: maximum,
+        has_more: false,
+      }),
+    ).toEqual({ sequences: [maximum], nextCursor: maximum, hasMore: false });
+
+    for (const invalid of [maximum + 1, 1.5]) {
+      expect(() => parseS2WriteResult({ ...validWrite, seq: invalid })).toThrow(
+        "S2_RESPONSE_INVALID",
+      );
+      expect(() =>
+        parseS2StateResult({
+          cursor: invalid,
+          counts: {},
+          chain_digest: "a".repeat(64),
+          checkpoint_digest: null,
+          checkpoint_mode: "unsigned-v0",
+        }),
+      ).toThrow("S2_RESPONSE_INVALID");
+      expect(() =>
+        parseS2EventPageResult({
+          events: [{ seq: invalid }],
+          next_cursor: invalid,
+          has_more: false,
+        }),
+      ).toThrow("S2_RESPONSE_INVALID");
+    }
+  });
+
   test("builds the verifier's exact receipt schema from successful settled write metrics", () => {
     const privateBodySentinel = "s2-private-body-must-not-appear";
     const metricsWithPrivateBody: readonly (
@@ -656,6 +743,10 @@ describe("S2 to S7 normalized cost receipt", () => {
 
     const shell = readFileSync(resolve(REPOSITORY_ROOT, SCRIPT), "utf8");
     expect(shell).toContain("scripts/verify-cost-model.ts");
+    expect(shell).toContain("bun.lock");
+    expect(shell).toContain("apps/wire/package.json");
+    expect(shell).toContain("packages/contracts/package.json");
+    expect(shell).toContain("packages/contracts/src/index.ts");
     expect(shell).toContain('S2_COST_RECEIPT_RELATIVE_PATH="s2-cost-input.json"');
     // biome-ignore lint/suspicious/noTemplateCurlyInString: asserts literal shell source text.
     const runIdValidation = shell.indexOf('if [[ ! "${S2_RUN_ID}" =~');
@@ -674,6 +765,7 @@ describe("S2 to S7 normalized cost receipt", () => {
     expect(onExit).toContain("write_evidence_receipt");
     expect(onExit).toContain("write_s2_cost_publication");
     expect(onExit).toContain("write_s2_cost_publication_commit");
+    expect(onExit).toContain("! s2_source_provenance_matches_start");
     expect(shell.indexOf("write_s2_cost_publication()")).toBeLessThan(
       shell.indexOf("write_s2_cost_publication_commit()"),
     );
@@ -797,6 +889,12 @@ describe("S2 to S7 normalized cost receipt", () => {
     expect(publicationWriters).not.toContain("renameSync(");
     expect(publicationWriters).not.toContain("unlinkSync(");
     expect(publicationWriters).not.toContain("rmSync(");
+    expect(publicationWriters).toContain("parseS2CostMeasurementReceiptBytes");
+    expect(publicationWriters).toContain("receipt.source_digest !== manifest.source_digest");
+    expect(publicationWriters).toContain("observedSourceDigest !== manifest.source_digest");
+    expect(shell).toContain("s2_run_owned_deadline()");
+    expect(shell).toContain("S2_MAIN_DEADLINE_AT");
+    expect(shell).not.toContain("S2_PLANT_SOURCE_PROVENANCE_DRIFT");
     expect(shell).toContain("S2_TERM_RESISTANT_START_FAILED");
     const termInterrupt = shell.slice(
       // biome-ignore lint/suspicious/noTemplateCurlyInString: asserts literal shell source text.
@@ -1562,6 +1660,494 @@ describe("registered S2 shell and lifecycle regressions", () => {
           captured_run_status: "fail",
         }),
       );
+    },
+    S2_SHELL_REGRESSION_TEST_TIMEOUT_MS,
+  );
+
+  /**
+   * The owned-command wrappers.
+   *
+   * `s2_run_owned_deadline` and `s2_bounded_capture` are the only bound on every
+   * external command the harness runs, so a wrapper that can hang is a harness
+   * that can hang. Both plants below run against the real helpers rather than a
+   * copy, and both target a specific way the previous implementation failed to
+   * return at all — not merely returned late.
+   */
+  test(
+    "PLANTED: a deadline expiring before setsid still terminates and reaps",
+    () => {
+      const run = runHarnessSync(
+        {
+          S2_RUN_ID: `s2u-${randomUUID().replaceAll("-", "").slice(0, 24)}`,
+          S2_SHELL_REGRESSION_TEST: "owned-wrapper-pre-setsid",
+        },
+        S2_SHELL_REGRESSION_TEST_TIMEOUT_MS,
+      );
+      expect(run.exitCode).toBe(0);
+      expect(ndjsonRecords(run)).toContainEqual(
+        expect.objectContaining({
+          suite: "s2-krater-shell",
+          status: "pass",
+          scenario: "owned-wrapper-deadline-before-setsid-terminates-without-hanging",
+          // 124 is the honest timeout. 123 would mean the group outlived the
+          // kill, which is a different fact and must not read as a clean one.
+          wrapper_status: 124,
+          survivors: 0,
+        }),
+      );
+    },
+    S2_SHELL_REGRESSION_TEST_TIMEOUT_MS,
+  );
+
+  test(
+    "PLANTED: a TERM-resistant descendant is escalated to KILL and proven gone",
+    () => {
+      const run = runHarnessSync(
+        {
+          S2_RUN_ID: `s2u-${randomUUID().replaceAll("-", "").slice(0, 24)}`,
+          S2_SHELL_REGRESSION_TEST: "owned-wrapper-term-resistant",
+        },
+        S2_SHELL_REGRESSION_TEST_TIMEOUT_MS,
+      );
+      expect(run.exitCode).toBe(0);
+      expect(ndjsonRecords(run)).toContainEqual(
+        expect.objectContaining({
+          suite: "s2-krater-shell",
+          status: "pass",
+          scenario: "owned-wrapper-term-resistant-descendant-is-killed-and-proven-gone",
+          survivors: 0,
+        }),
+      );
+    },
+    S2_SHELL_REGRESSION_TEST_TIMEOUT_MS,
+  );
+
+  /**
+   * Listener attribution.
+   *
+   * Six S-2 fixtures run concurrently and can collide on a port, so a
+   * machine-global listener scan reported a healthy sibling as this run's
+   * survivor. Ownership is now decided by exact pgid, marker, or persist path.
+   * The plant runs all three cases against a real concurrent listener, because
+   * assigning distinct ports would hide the defect rather than prove it fixed.
+   */
+  test(
+    "PLANTED: a concurrent foreign listener is not this run's survivor, but owned ones are",
+    () => {
+      const run = runHarnessSync(
+        {
+          S2_RUN_ID: `s2u-${randomUUID().replaceAll("-", "").slice(0, 24)}`,
+          S2_SHELL_REGRESSION_TEST: "foreign-listener-attribution",
+        },
+        S2_SHELL_REGRESSION_TEST_TIMEOUT_MS,
+      );
+      expect(run.exitCode).toBe(0);
+      const records = ndjsonRecords(run);
+      // The foreign listener gets its own typed diagnostic and does not fail
+      // this run: an honest observation about someone else.
+      expect(records).toContainEqual(
+        expect.objectContaining({
+          suite: "s2-krater-foreign-listener",
+          status: "info",
+          code: "S2_FOREIGN_LISTENER_OBSERVED",
+          owned_listener_pids: "",
+        }),
+      );
+      expect(records).toContainEqual(
+        expect.objectContaining({
+          suite: "s2-krater-shell",
+          status: "pass",
+          scenario:
+            "concurrent-foreign-listener-is-not-this-runs-survivor-while-marker-and-pgid-owned-listeners-still-are",
+          // Not blanket permissiveness: a marker-named listener is still caught
+          // by the process sweep, and a pgid-owned one by the listener scan.
+          marker_check: "process-match",
+          pgid_check: "listener-scan",
+        }),
+      );
+    },
+    S2_SHELL_REGRESSION_TEST_TIMEOUT_MS,
+  );
+
+  /**
+   * The frozen source snapshot.
+   *
+   * The commit used to be linked to a live working tree that was checked and
+   * then left unlocked. It is now linked to bytes already written to retained
+   * evidence, which later drift cannot move.
+   */
+  test(
+    "the source snapshot is frozen, exact, and cannot be rewritten",
+    () => {
+      const run = runHarnessSync(
+        {
+          S2_RUN_ID: `s2u-${randomUUID().replaceAll("-", "").slice(0, 24)}`,
+          S2_SHELL_REGRESSION_TEST: "source-snapshot-freeze",
+        },
+        S2_SHELL_REGRESSION_TEST_TIMEOUT_MS,
+      );
+      expect(run.exitCode).toBe(0);
+      const records = ndjsonRecords(run);
+      const snapshot = records.find((record) => record.suite === "s2-source-snapshot");
+      expect(snapshot).toEqual(
+        expect.objectContaining({ status: "pass", aggregate_digest: expect.any(String) }),
+      );
+      // Every provenance path is covered, not a convenient subset.
+      expect(snapshot?.entries).toBe(declaredSourcePaths().length);
+      expect(records).toContainEqual(
+        expect.objectContaining({
+          suite: "s2-krater-shell",
+          status: "pass",
+          scenario: "source-snapshot-is-frozen-exact-and-not-rewritable",
+        }),
+      );
+    },
+    S2_SHELL_REGRESSION_TEST_TIMEOUT_MS,
+  );
+
+  /**
+   * Execution-source closure.
+   *
+   * The retained receipt is S-2 Krater evidence, not a cost-model artifact: its
+   * manifest version is `s2-krater-evidence-v2`, its scope is
+   * `local-workerd-d1-do`, its bindings name DB and KRATER_OUTBOX, and its p95
+   * fields measure the Worker write path. So `source_digest` has to close over
+   * the executed Worker bytes, not only over the cost verifier.
+   *
+   * A hand-maintained list cannot support that: it was silently missing
+   * `scripts/harness/runner.ts` and `packages/contracts/src/diagnostic-safety.ts`.
+   * The harness now derives closure from the import graph over all five entry
+   * points, and this walk is independent of the harness so a deleted or
+   * bypassed checker still fails here.
+   */
+  const CLOSURE_ENTRY_POINTS = [
+    "scripts/verify-cost-model.ts",
+    "apps/wire/src/krater/worker.ts",
+    "apps/wire/src/krater/krater.ts",
+    "apps/wire/src/krater/outbox-do.ts",
+    "apps/wire/src/krater/s2-client.ts",
+  ];
+
+  test("the declared source list is closed over every executed import graph", () => {
+    const listed = new Set(declaredSourcePaths());
+    const walk = spawnSync(
+      "bun",
+      [
+        "--eval",
+        `
+        import { lstatSync, readFileSync, realpathSync } from "node:fs";
+        import { dirname, isAbsolute, relative, resolve } from "node:path";
+        const repoRoot = realpathSync(process.cwd());
+        const MAX_SOURCE_BYTES = 4 * 1024 * 1024;
+        const withinRepo = (candidate) => {
+          const rel = relative(repoRoot, candidate);
+          return rel !== "" && !rel.startsWith("..") && !isAbsolute(rel);
+        };
+        const isSafeSourceFile = (candidate) => {
+          let info;
+          try { info = lstatSync(candidate); } catch { return false; }
+          if (!info.isFile()) return false;
+          if (info.size > MAX_SOURCE_BYTES) throw new Error("source-too-large");
+          let real;
+          try { real = realpathSync(candidate); } catch { return false; }
+          if (real !== candidate || !withinRepo(real)) throw new Error("symlinked-source");
+          return true;
+        };
+        const packageRoot = resolve("packages/contracts");
+        const exportsMap = JSON.parse(
+          readFileSync(resolve(packageRoot, "package.json"), "utf8"),
+        ).exports ?? {};
+        // The Worker sources import extensionless, so a resolver without this
+        // cannot walk them at all — it throws ENOENT on "./krater".
+        const resolveLocalFile = (base) => {
+          if (!withinRepo(base)) throw new Error("import-escapes-repository");
+          for (const candidate of [base, base + ".ts", base + "/index.ts"]) {
+            if (isSafeSourceFile(candidate)) return candidate;
+          }
+          throw new Error("unresolved-relative-import:" + relative(repoRoot, base));
+        };
+        const resolveSpecifier = (specifier, importer) => {
+          if (specifier.startsWith("node:") || specifier.startsWith("bun:")) return undefined;
+          if (specifier.startsWith(".")) {
+            return resolveLocalFile(resolve(dirname(importer), specifier));
+          }
+          if (specifier === "@asimposium/contracts" || specifier.startsWith("@asimposium/contracts/")) {
+            const subpath = specifier === "@asimposium/contracts"
+              ? "."
+              : "./" + specifier.slice("@asimposium/contracts/".length);
+            const target = exportsMap[subpath];
+            if (typeof target !== "string") throw new Error("unmapped-export:" + specifier);
+            return resolve(packageRoot, target);
+          }
+          return undefined;
+        };
+        const STATIC = /(?:^|[\\s;}])(?:import|export)[^;]*?from\\s*["\\x27]([^"\\x27]+)["\\x27]/g;
+        const BARE = /(?:^|[\\s;}])import\\s*["\\x27]([^"\\x27]+)["\\x27]/g;
+        // Mirrored from the harness gate. A dynamic import cannot be closed over
+        // by a digest at all, and if only one of the two walkers rejected it
+        // they would disagree about what closure means.
+        const DYNAMIC = /\\bimport\\s*\\(/;
+        const seen = new Set();
+        const walk = (pathname) => {
+          const absolute = resolve(repoRoot, pathname);
+          if (seen.has(absolute)) return;
+          seen.add(absolute);
+          if (!withinRepo(absolute)) throw new Error("entry-escapes-repository");
+          if (!isSafeSourceFile(absolute)) throw new Error("unreadable-source");
+          const source = readFileSync(absolute, "utf8");
+          for (const pattern of [STATIC, BARE]) {
+            pattern.lastIndex = 0;
+            let match = pattern.exec(source);
+            while (match !== null) {
+              const next = resolveSpecifier(match[1], absolute);
+              if (next !== undefined) walk(next);
+              match = pattern.exec(source);
+            }
+          }
+        };
+        for (const entry of ${JSON.stringify(CLOSURE_ENTRY_POINTS)}) walk(entry);
+        process.stdout.write([...seen].map((p) => relative(process.cwd(), p)).sort().join("\\n"));
+        `,
+      ],
+      { cwd: REPOSITORY_ROOT, encoding: "utf8" },
+    );
+    expect(walk.status).toBe(0);
+    const reached = walk.stdout.split("\n").filter(Boolean);
+    // A vacuous walk would make the closure assertion trivially true, so the
+    // cost-model and Worker halves are both required to be present.
+    expect(reached).toContain("scripts/harness/runner.ts");
+    expect(reached).toContain("packages/contracts/src/diagnostic-safety.ts");
+    expect(reached).toContain("apps/wire/src/krater/worker.ts");
+    expect(reached).toContain("apps/wire/src/krater/krater.ts");
+    expect(reached).toContain("apps/wire/src/krater/outbox-do.ts");
+    expect(reached).toContain("apps/wire/src/krater/s2-client.ts");
+    expect(reached.length).toBeGreaterThan(10);
+    expect(reached.filter((path) => !listed.has(path))).toEqual([]);
+  });
+
+  /**
+   * Containment.
+   *
+   * The walker resolves relative specifiers, which makes every import string an
+   * input it must not trust. Without a repository-root rule, an import shaped
+   * like `../../../../tmp/x` would be read and its absolute path serialized into
+   * the published closure record. The plant appends an escaping entry point so
+   * the real gate is exercised, rather than putting an escaping import into the
+   * repository to be scanned.
+   */
+  test.each([
+    ["an absolute path outside the repository", "/etc/hosts"],
+    ["a relative traversal", "../../../../etc/hosts"],
+  ])("PLANTED: a closure entry point that is %s is refused", (_label, escapingEntry) => {
+    const run = runHarnessSync(
+      {
+        S2_RUN_ID: `s2u-${randomUUID().replaceAll("-", "").slice(0, 24)}`,
+        S2_PLANT_SOURCE_CLOSURE_ESCAPE_ENTRY: escapingEntry,
+      },
+      S2_SHELL_REGRESSION_TEST_TIMEOUT_MS,
+    );
+    const records = ndjsonRecords(run);
+    expect(records).toContainEqual(
+      expect.objectContaining({
+        suite: "s2-krater-source-closure",
+        status: "fail",
+        // A containment breach is a walk error, not an "unlisted" finding: the
+        // latter would publish the out-of-tree path it just refused to trust.
+        code: "S2_SOURCE_CLOSURE_WALK_FAILED",
+        reason: "entry-escapes-repository",
+      }),
+    );
+    expect(run.stdout).not.toContain("S2_SOURCE_CLOSURE_INCOMPLETE");
+    expect(run.stdout).not.toContain("/etc/hosts");
+    expect(
+      records.some(
+        (record) => record.suite === "s2-krater-source-closure" && record.status === "pass",
+      ),
+    ).toBe(false);
+  });
+
+  test("the harness publishes exactly the entry points it verified", () => {
+    // An advertised scope narrower than the walked scope is the same class of
+    // overstatement the closure gate exists to prevent.
+    const script = readFileSync(resolve(REPOSITORY_ROOT, SCRIPT), "utf8");
+    const block = /^readonly -a S2_CLOSURE_ENTRY_POINT_LIST=\(\n([\s\S]*?)^\)$/m.exec(script);
+    const body = block?.[1];
+    if (body === undefined) throw new Error("S2_CLOSURE_ENTRY_POINT_LIST not found");
+    const declared = body
+      .split("\n")
+      .map((line) => line.trim())
+      .filter((line) => line.length > 0 && !line.startsWith("#"));
+    expect(declared).toEqual(CLOSURE_ENTRY_POINTS);
+    const listed = new Set(declaredSourcePaths());
+    for (const entry of declared) expect(listed.has(entry)).toBe(true);
+  });
+
+  test("every run publishes a source-closure verdict, so a removed checker is visible", () => {
+    const runId = `s2u-${randomUUID().replaceAll("-", "").slice(0, 24)}`;
+    const run = runHarnessSync(
+      { S2_RUN_ID: runId, S2_SHELL_REGRESSION_TEST: "source-provenance-drift" },
+      S2_SHELL_REGRESSION_TEST_TIMEOUT_MS,
+    );
+    expect(ndjsonRecords(run)).toContainEqual(
+      expect.objectContaining({
+        suite: "s2-krater-source-closure",
+        status: "pass",
+        // Exact, not a substring match: a partial assertion would still pass if
+        // the harness silently narrowed the published scope back to the cost
+        // verifier, which is precisely the overstatement this record guards.
+        entry_points: CLOSURE_ENTRY_POINTS.join(","),
+      }),
+    );
+  });
+
+  test.each([
+    // Cost-model side.
+    ["scripts/harness/runner.ts"],
+    ["packages/contracts/src/diagnostic-safety.ts"],
+    // Worker side. These two are the reason the gate had to learn extensionless
+    // resolution: the Worker sources import `./krater` and `./outbox-do`, so
+    // before that the walk threw ENOENT and produced a walk-error instead of a
+    // closure verdict. An omission here could not have been detected at all.
+    ["apps/wire/src/krater/krater.ts"],
+    ["apps/wire/src/krater/outbox-do.ts"],
+  ])(
+    "PLANTED: omitting the live dependency %s from the list is refused before any run",
+    (omitted) => {
+      const runId = `s2u-${randomUUID().replaceAll("-", "").slice(0, 24)}`;
+      const run = runHarnessSync(
+        { S2_RUN_ID: runId, S2_PLANT_SOURCE_CLOSURE_OMIT: omitted },
+        S2_SHELL_REGRESSION_TEST_TIMEOUT_MS,
+      );
+      const records = ndjsonRecords(run);
+      expect(records).toContainEqual(
+        expect.objectContaining({
+          suite: "s2-krater-source-closure",
+          status: "fail",
+          code: "S2_SOURCE_CLOSURE_INCOMPLETE",
+          // The exact omitted dependency, not a generic count.
+          unlisted: omitted,
+        }),
+      );
+      // Refused before the run does anything: no phase, no receipt, no
+      // publication, and no source-provenance digest over the wrong list.
+      expect(run.stdout).not.toContain('"suite":"s2-cost-publication"');
+      expect(run.stdout).not.toContain('"suite":"s2-krater-source-provenance"');
+      expect(
+        records.some(
+          (record) => record.suite === "s2-krater-source-closure" && record.status === "pass",
+        ),
+      ).toBe(false);
+      expect(
+        existsSync(resolve(REPOSITORY_ROOT, "e2e/artifacts/s2-krater", runId, "manifest.json")),
+      ).toBe(false);
+    },
+    S2_SHELL_REGRESSION_TEST_TIMEOUT_MS,
+  );
+
+  test("the expected migration journal tracks db/migrations exactly and in order", () => {
+    // Registration only: pane2 owns 0015's content and its own tests. What this
+    // asserts is that the S2 harness cannot silently fall behind a new migration
+    // and keep passing its upgrade lanes against a stale journal.
+    const onDisk = readdirSync(resolve(REPOSITORY_ROOT, "db/migrations"))
+      .filter((name) => name.endsWith(".sql"))
+      .sort();
+    expect(declaredMigrationJournal()).toEqual(onDisk);
+    expect(onDisk).toContain("0015_sponsor_enrollment_bootstrap_invariant.sql");
+    const listed = new Set(declaredSourcePaths());
+    for (const name of onDisk) expect(listed.has(`db/migrations/${name}`)).toBe(true);
+  });
+
+  test(
+    "PLANTED: an in-list byte change is caught by the end-of-run digest re-read",
+    () => {
+      const runId = `s2u-${randomUUID().replaceAll("-", "").slice(0, 24)}`;
+      const run = runHarnessSync(
+        { S2_RUN_ID: runId, S2_SHELL_REGRESSION_TEST: "source-provenance-drift" },
+        S2_SHELL_REGRESSION_TEST_TIMEOUT_MS,
+      );
+      expect(run.exitCode).toBe(125);
+      // SCOPE OF THIS PROOF, stated exactly: the drifted file is a retained copy
+      // of a real dependency, and the copy is what the digest lists — it is not
+      // the module Bun executes. So this proves the end-of-run digest re-reads
+      // its inputs and refuses publication when listed bytes change mid-run. It
+      // does NOT prove the list covers the execution graph; that is the separate
+      // closure gate above, whose plant omits a genuinely live dependency.
+      expect(ndjsonRecords(run)).toContainEqual(
+        expect.objectContaining({
+          suite: "s2-krater-shell",
+          scenario: "planted-source-provenance-drift-requires-receipt-publication-refusal",
+          mutated_hashed_source: expect.any(String),
+          drift_origin: "scripts/harness/runner.ts",
+        }),
+      );
+
+      // Real bytes rather than filler: the copy must carry the original
+      // module's bytes verbatim as its prefix.
+      const driftOrigin = resolve(REPOSITORY_ROOT, "scripts/harness/runner.ts");
+      const originalBytes = readFileSync(driftOrigin, "utf8");
+      const driftedBytes = readFileSync(
+        resolve(REPOSITORY_ROOT, "e2e/artifacts/s2-krater", runId, "main/drifted-runner.ts"),
+        "utf8",
+      );
+      expect(driftedBytes.startsWith(originalBytes)).toBe(true);
+      expect(driftedBytes).toContain('s2PlantedRunnerDrift = "after"');
+      expect(driftedBytes).not.toBe(originalBytes);
+
+      // The working tree is never written. A regression that edited shared
+      // source would corrupt every concurrent run on this checkout.
+      expect(originalBytes).not.toContain("s2PlantedRunnerDrift");
+
+      // And the dependency it drifted is genuinely a declared source path, so
+      // the plant cannot degrade into the synthetic-bytes version it replaced.
+      expect(declaredSourcePaths()).toContain("scripts/harness/runner.ts");
+      expect(ndjsonRecords(run)).toContainEqual(
+        expect.objectContaining({
+          suite: "s2-krater-source-provenance",
+          status: "fail",
+          code: "S2_SOURCE_PROVENANCE_DRIFT",
+          action: "retain-failed-evidence-without-cost-publication",
+        }),
+      );
+      expect(ndjsonRecords(run)).toContainEqual(
+        expect.objectContaining({
+          suite: "s2-krater-evidence",
+          status: "fail",
+          evidence_retention_status: "pass",
+          captured_exit_code: 125,
+          captured_run_status: "fail",
+        }),
+      );
+      expect(run.stdout).not.toContain('"suite":"s2-cost-publication","status":"pass"');
+      expect(run.stdout).not.toContain('"suite":"s2-cost-publication-commit","status":"pass"');
+    },
+    S2_SHELL_REGRESSION_TEST_TIMEOUT_MS,
+  );
+
+  test(
+    "PLANTED: schema-valid receipt bytes with mismatched provenance cannot enter a manifest",
+    () => {
+      const runId = `s2u-${randomUUID().replaceAll("-", "").slice(0, 24)}`;
+      const run = runHarnessSync(
+        { S2_RUN_ID: runId, S2_SHELL_REGRESSION_TEST: "receipt-provenance-mismatch" },
+        S2_SHELL_REGRESSION_TEST_TIMEOUT_MS,
+      );
+      expect(run.exitCode).toBe(125);
+      expect(ndjsonRecords(run)).toContainEqual(
+        expect.objectContaining({
+          suite: "s2-krater-shell",
+          status: "pass",
+          scenario: "planted-schema-valid-receipt-provenance-mismatch-requires-manifest-refusal",
+        }),
+      );
+      expect(ndjsonRecords(run)).toContainEqual(
+        expect.objectContaining({
+          suite: "s2-krater-evidence",
+          status: "fail",
+          code: "S2_EVIDENCE_RECEIPT_FAILED",
+        }),
+      );
+      expect(run.stdout).not.toContain('"suite":"s2-cost-publication","status":"pass"');
+      expect(run.stdout).not.toContain('"suite":"s2-cost-publication-commit","status":"pass"');
     },
     S2_SHELL_REGRESSION_TEST_TIMEOUT_MS,
   );

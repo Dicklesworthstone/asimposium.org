@@ -1,9 +1,18 @@
 import { describe, expect, test } from "bun:test";
 import { spawn } from "node:child_process";
 import { once } from "node:events";
-import { existsSync, readdirSync, readFileSync } from "node:fs";
+import { existsSync, mkdtempSync, readdirSync, readFileSync, writeFileSync } from "node:fs";
 import { createConnection, createServer, type Socket } from "node:net";
-import { resolve } from "node:path";
+import { tmpdir } from "node:os";
+import { join, resolve } from "node:path";
+import { EnrollmentHelloResponseSchema } from "@asimposium/contracts";
+
+import {
+  LOCAL_D1_COMPLETION_SKIP_PLANT,
+  LOCAL_D1_EVIDENCE_CASES,
+  LOCAL_RESPONSE_MAX_BYTES,
+  boundedLocalResponse,
+} from "../../src/enrollment/local-d1-client.ts";
 
 /**
  * Lifecycle contract of the S-1 shell harness.
@@ -166,13 +175,17 @@ interface CapturedHarness {
 async function spawnCapturedHarness(
   args: readonly string[],
   env: Record<string, string> = {},
+  trace = false,
 ): Promise<CapturedHarness> {
   const [stdoutCapture, stderrCapture] = await Promise.all([socketCapture(), socketCapture()]);
+  const launch = trace
+    ? 'set -e; exec 3<>"/dev/tcp/127.0.0.1/$1"; exec 4<>"/dev/tcp/127.0.0.1/$2"; exec 1>&3 2>&4; shift 2; exec bash -x "$@"'
+    : 'set -e; exec 3<>"/dev/tcp/127.0.0.1/$1"; exec 4<>"/dev/tcp/127.0.0.1/$2"; exec 1>&3 2>&4; shift 2; exec bash "$@"';
   const subprocess = spawn(
     "bash",
     [
       "-c",
-      'set -e; exec 3<>"/dev/tcp/127.0.0.1/$1"; exec 4<>"/dev/tcp/127.0.0.1/$2"; exec 1>&3 2>&4; shift 2; exec bash "$@"',
+      launch,
       "s1-test-capture",
       String(stdoutCapture.port),
       String(stderrCapture.port),
@@ -242,8 +255,12 @@ function failureEvidence(run: Run): string {
   return `exit=${run.exitCode}\nenv_keys=${relevantEnvironment || "none"}\nstdout=${safeCaptureSummary(run.stdout)}\nstderr=${safeCaptureSummary(run.stderr)}`;
 }
 
-async function runScript(args: readonly string[], env: Record<string, string> = {}): Promise<Run> {
-  const harness = await spawnCapturedHarness(args, env);
+async function runScript(
+  args: readonly string[],
+  env: Record<string, string> = {},
+  trace = false,
+): Promise<Run> {
+  const harness = await spawnCapturedHarness(args, env, trace);
   const { child, stdoutCapture, stderrCapture } = harness;
   try {
     const exitCode = await waitForExitBefore(child.exited, RUN_SCRIPT_TIMEOUT_MS);
@@ -290,7 +307,49 @@ function enrollmentEnv(origin: string): Record<string, string> {
     ASIMP_S1_MODEL: "test-model",
     ASIMP_S1_HARNESS: "codex",
     ASIMP_S1_TEST_ALLOW_HTTP: "1",
+    ASIMP_S1_LOOPBACK_SELF_TEST: "loopback-enrollment-v1",
   };
+}
+
+function validHelloResponse(
+  origin: string,
+  nextActions = [
+    { action: "read", url: `${origin}/protocol.md`, reason: "read the protocol" },
+    { action: "read", url: `${origin}/skill.md`, reason: "read the skill" },
+  ],
+) {
+  return EnrollmentHelloResponseSchema.parse({
+    fellow: {
+      fellow_id: "fellow-s1-loopback",
+      name: "orchid-vector",
+      model: "test-model",
+      harness: "codex",
+    },
+    granted_scopes: ["review"],
+    granted_resources: {
+      problem_binding: "P-7F3K",
+      event_budget: 12,
+      fellow_grant_expires_at: 1_900_000_000_000,
+    },
+    next_actions: nextActions,
+  });
+}
+
+const OVERSIZED_RESPONSE_SENTINEL = "S1_OVERSIZE_RESPONSE_SENTINEL";
+const OVERSIZED_RESPONSE_BYTES = new TextEncoder().encode(
+  `${OVERSIZED_RESPONSE_SENTINEL}:${"x".repeat(300_000)}`,
+);
+
+function oversizedResponse(): Response {
+  return new Response(
+    new ReadableStream<Uint8Array>({
+      start(controller) {
+        controller.enqueue(OVERSIZED_RESPONSE_BYTES);
+        controller.close();
+      },
+    }),
+    { headers: { "Content-Type": "application/json" } },
+  );
 }
 
 async function assertWranglerBlocked(): Promise<void> {
@@ -298,6 +357,24 @@ async function assertWranglerBlocked(): Promise<void> {
   expect(run.exitCode).toBe(78);
   expect(record(run).status).toBe("blocked");
   expect(record(run).code).toBe("WRANGLER_REQUIRED");
+}
+
+async function runClientCompletionPlant(): Promise<Run> {
+  const child = Bun.spawn([process.execPath, "apps/wire/src/enrollment/local-d1-client.ts"], {
+    cwd: REPO_ROOT,
+    env: {
+      ...process.env,
+      S1_LOCAL_EVIDENCE_COMPLETION_SELF_TEST: "skip-mounted-device",
+    },
+    stdout: "pipe",
+    stderr: "pipe",
+  });
+  const [exitCode, stdout, stderr] = await Promise.all([
+    child.exited,
+    new Response(child.stdout).text(),
+    new Response(child.stderr).text(),
+  ]);
+  return { exitCode, stdout, stderr };
 }
 
 function phaseValue(stderr: string, phase: string, key: string): string | undefined {
@@ -371,6 +448,48 @@ describe("the in-memory child-output transport", () => {
   });
 });
 
+describe("the local-D1 response boundary", () => {
+  const decoder = new TextDecoder();
+  const streamResponse = (bytes: Uint8Array, contentLength?: string): Response =>
+    new Response(
+      new ReadableStream<Uint8Array>({
+        start(controller) {
+          controller.enqueue(bytes);
+          controller.close();
+        },
+      }),
+      {
+        headers: contentLength === undefined ? {} : { "content-length": contentLength },
+      },
+    );
+
+  test("accepts an exact-limit streamed response whether Content-Length is present or absent", async () => {
+    const bytes = new TextEncoder().encode("x".repeat(LOCAL_RESPONSE_MAX_BYTES));
+    for (const contentLength of [undefined, String(LOCAL_RESPONSE_MAX_BYTES)]) {
+      await expect(boundedLocalResponse(streamResponse(bytes, contentLength)).text()).resolves.toBe(
+        decoder.decode(bytes),
+      );
+    }
+  });
+
+  test("PLANTED: missing and lying Content-Length values cannot bypass the streamed +1 byte cap", async () => {
+    const sentinel = "S1_LOCAL_RESPONSE_OVER_LIMIT_SENTINEL";
+    const bytes = new TextEncoder().encode(
+      `${sentinel}${"x".repeat(LOCAL_RESPONSE_MAX_BYTES + 1 - sentinel.length)}`,
+    );
+    for (const contentLength of [undefined, "1", String(LOCAL_RESPONSE_MAX_BYTES + 1)]) {
+      let failure = "";
+      try {
+        await boundedLocalResponse(streamResponse(bytes, contentLength)).text();
+      } catch (error) {
+        failure = error instanceof Error ? error.message : String(error);
+      }
+      expect(failure).toBe("local-response-too-large");
+      expect(failure).not.toContain(sentinel);
+    }
+  });
+});
+
 /** A real listener, so "busy" means busy rather than "we think it might be". */
 function occupyPort(): { port: number; stop: () => void } {
   const server = Bun.serve({
@@ -387,6 +506,18 @@ function occupyPort(): { port: number; stop: () => void } {
 }
 
 describe("the self-test and the blocked external proof", () => {
+  test("PLANTED: skipping one non-legacy client completion refuses before it can write terminal evidence", async () => {
+    expect(LOCAL_D1_EVIDENCE_CASES).toContain(LOCAL_D1_COMPLETION_SKIP_PLANT);
+    const run = await runClientCompletionPlant();
+    expect(run.exitCode).toBe(1);
+    expect(run.stdout).toBe("");
+    expect(records({ ...run, stdout: run.stderr }).at(-1)).toMatchObject({
+      status: "fail",
+      code: "evidence-case-order",
+    });
+    expect(`${run.stdout}\n${run.stderr}`).not.toContain("S1_LOCAL_RESPONSE_OVER_LIMIT_SENTINEL");
+  });
+
   test("--self-test passes and leaks no fragment secret", async () => {
     const fragmentSentinel = "v1.S1FRAGMENT_SENTINEL_0123456789abcdefghijklm";
     const run = await runScript(["--self-test"]);
@@ -440,7 +571,7 @@ describe("the self-test and the blocked external proof", () => {
     ).toBe(false);
   });
 
-  test("D1: a rejected capsule GET emits a terminal failure even though its body is discarded", async () => {
+  test("loopback: a rejected capsule GET emits a terminal failure even though its body is discarded", async () => {
     const server = Bun.serve({
       port: 0,
       hostname: "127.0.0.1",
@@ -459,7 +590,7 @@ describe("the self-test and the blocked external proof", () => {
     }
   });
 
-  test("D1: a malformed poll response replaces an earlier proposal pass with a terminal failure", async () => {
+  test("loopback: a malformed poll response replaces an earlier proposal pass with a terminal failure", async () => {
     const server = Bun.serve({
       port: 0,
       hostname: "127.0.0.1",
@@ -491,7 +622,7 @@ describe("the self-test and the blocked external proof", () => {
     }
   });
 
-  test("D1: a poll-body construction failure replaces PROPOSAL_CREATED with one terminal failure", async () => {
+  test("loopback: a poll-body construction failure replaces PROPOSAL_CREATED with one terminal failure", async () => {
     let pollRequests = 0;
     const server = Bun.serve({
       port: 0,
@@ -527,6 +658,709 @@ describe("the self-test and the blocked external proof", () => {
       server.stop(true);
     }
   });
+
+  test("S1: an approved loopback flow sends its bearer only to hello and follows exactly the first safe read", async () => {
+    const token = `asimp_ag_${"A".repeat(26)}_${"B".repeat(43)}`;
+    let origin = "";
+    let helloAuthorization: string | null = null;
+    let protocolAuthorization: string | null = null;
+    let helloRequests = 0;
+    let protocolRequests = 0;
+    let skillRequests = 0;
+    const server = Bun.serve({
+      port: 0,
+      hostname: "127.0.0.1",
+      fetch: (request) => {
+        const { pathname } = new URL(request.url);
+        if (request.method === "GET" && pathname.startsWith("/join/")) {
+          return Response.json({ enrollment_id: "ASIMP-EN-7F3K9M2Q8R" });
+        }
+        if (request.method === "POST" && pathname === "/v1/fellows") {
+          return Response.json({ flow_handle: `flow_v1.${"C".repeat(43)}` }, { status: 201 });
+        }
+        if (request.method === "POST" && pathname === "/v1/fellows/flow") {
+          return Response.json({
+            status: "approved",
+            token,
+            hello_url: `${origin}/v1/hello`,
+            suggested_next: "GET /v1/hello with the bearer token",
+          });
+        }
+        if (request.method === "GET" && pathname === "/v1/hello") {
+          helloRequests += 1;
+          helloAuthorization = request.headers.get("authorization");
+          return Response.json(validHelloResponse(origin));
+        }
+        if (request.method === "GET" && pathname === "/protocol.md") {
+          protocolRequests += 1;
+          protocolAuthorization = request.headers.get("authorization");
+          return new Response("protocol", { headers: { "Content-Type": "text/markdown" } });
+        }
+        if (request.method === "GET" && pathname === "/skill.md") {
+          skillRequests += 1;
+          return new Response("skill", { headers: { "Content-Type": "text/markdown" } });
+        }
+        return new Response("not found", { status: 404 });
+      },
+    });
+    origin = `http://127.0.0.1:${server.port}`;
+    try {
+      const run = await runScript([], enrollmentEnv(origin));
+      expect(run.exitCode).toBe(0);
+      expect(records(run).map((entry) => entry.code)).toEqual([
+        "PROPOSAL_CREATED",
+        "TOKEN_ISSUED",
+        "HELLO_REACHED",
+        "FIRST_SAFE_READ_COMPLETED",
+        "LOCAL_TEST_ENROLLMENT_PASSED",
+      ]);
+      expect(record(run)).toMatchObject({ evidence_scope: "local-test" });
+      expect(helloRequests).toBe(1);
+      expect<string | null>(helloAuthorization).toBe(`Bearer ${token}`);
+      expect(protocolRequests).toBe(1);
+      expect(protocolAuthorization).toBeNull();
+      expect(skillRequests).toBe(0);
+      expect(run.stdout).not.toContain(token);
+      expect(run.stderr).not.toContain(token);
+      expect(run.stderr).not.toContain("state-retained");
+    } finally {
+      server.stop(true);
+    }
+  });
+
+  for (const scenario of [
+    {
+      stage: "capsule",
+      expectedCodes: ["RESPONSE_BODY_TOO_LARGE"],
+      expectedPaths: ["/join/ASIMP-EN-7F3K9M2Q8R"],
+    },
+    {
+      stage: "claim",
+      expectedCodes: ["RESPONSE_BODY_TOO_LARGE"],
+      expectedPaths: ["/join/ASIMP-EN-7F3K9M2Q8R", "/v1/fellows"],
+    },
+    {
+      stage: "poll",
+      expectedCodes: ["PROPOSAL_CREATED", "RESPONSE_BODY_TOO_LARGE"],
+      expectedPaths: ["/join/ASIMP-EN-7F3K9M2Q8R", "/v1/fellows", "/v1/fellows/flow"],
+    },
+    {
+      stage: "hello",
+      expectedCodes: ["PROPOSAL_CREATED", "TOKEN_ISSUED", "RESPONSE_BODY_TOO_LARGE"],
+      expectedPaths: ["/join/ASIMP-EN-7F3K9M2Q8R", "/v1/fellows", "/v1/fellows/flow", "/v1/hello"],
+    },
+    {
+      stage: "first-read",
+      expectedCodes: [
+        "PROPOSAL_CREATED",
+        "TOKEN_ISSUED",
+        "HELLO_REACHED",
+        "RESPONSE_BODY_TOO_LARGE",
+      ],
+      expectedPaths: [
+        "/join/ASIMP-EN-7F3K9M2Q8R",
+        "/v1/fellows",
+        "/v1/fellows/flow",
+        "/v1/hello",
+        "/protocol.md",
+      ],
+    },
+  ] as const) {
+    test(`S1 PLANTED: a fast oversized ${scenario.stage} response is refused before parsing or a later request`, async () => {
+      const token = `asimp_ag_${"A".repeat(26)}_${"B".repeat(43)}`;
+      let origin = "";
+      const paths: string[] = [];
+      const server = Bun.serve({
+        port: 0,
+        hostname: "127.0.0.1",
+        fetch: (request) => {
+          const { pathname } = new URL(request.url);
+          paths.push(pathname);
+          if (request.method === "GET" && pathname.startsWith("/join/")) {
+            return scenario.stage === "capsule"
+              ? oversizedResponse()
+              : Response.json({ enrollment_id: "ASIMP-EN-7F3K9M2Q8R" });
+          }
+          if (request.method === "POST" && pathname === "/v1/fellows") {
+            return scenario.stage === "claim"
+              ? oversizedResponse()
+              : Response.json({ flow_handle: `flow_v1.${"C".repeat(43)}` }, { status: 201 });
+          }
+          if (request.method === "POST" && pathname === "/v1/fellows/flow") {
+            return scenario.stage === "poll"
+              ? oversizedResponse()
+              : Response.json({
+                  status: "approved",
+                  token,
+                  hello_url: `${origin}/v1/hello`,
+                  suggested_next: "GET /v1/hello with the bearer token",
+                });
+          }
+          if (request.method === "GET" && pathname === "/v1/hello") {
+            return scenario.stage === "hello"
+              ? oversizedResponse()
+              : Response.json(validHelloResponse(origin));
+          }
+          if (request.method === "GET" && pathname === "/protocol.md") {
+            return scenario.stage === "first-read"
+              ? oversizedResponse()
+              : new Response("protocol", { headers: { "Content-Type": "text/markdown" } });
+          }
+          return new Response("not found", { status: 404 });
+        },
+      });
+      origin = `http://127.0.0.1:${server.port}`;
+      try {
+        const run = await runScript([], enrollmentEnv(origin));
+        expect(run.exitCode).toBe(1);
+        expect(records(run).map((entry) => entry.code)).toEqual([...scenario.expectedCodes]);
+        expect(paths).toEqual([...scenario.expectedPaths]);
+        expect(run.stdout).not.toContain(OVERSIZED_RESPONSE_SENTINEL);
+        expect(run.stderr).not.toContain(OVERSIZED_RESPONSE_SENTINEL);
+        expect(run.stdout).not.toContain(token);
+        expect(run.stderr).not.toContain(token);
+      } finally {
+        server.stop(true);
+      }
+    });
+  }
+
+  test("S1 PLANTED: a hostile CURL_HOME cannot inject curlrc behavior into capsule, claim, or poll", async () => {
+    const token = `asimp_ag_${"A".repeat(26)}_${"B".repeat(43)}`;
+    const curlHome = mkdtempSync(join(tmpdir(), "s1-hostile-curlrc-"));
+    writeFileSync(join(curlHome, ".curlrc"), 'header = "X-S1-Hostile-Curlrc: injected"\n', {
+      encoding: "utf8",
+      mode: 0o600,
+    });
+    let origin = "";
+    const hostileHeaderPaths: string[] = [];
+    const server = Bun.serve({
+      port: 0,
+      hostname: "127.0.0.1",
+      fetch: (request) => {
+        const { pathname } = new URL(request.url);
+        if (request.headers.has("x-s1-hostile-curlrc")) hostileHeaderPaths.push(pathname);
+        if (request.method === "GET" && pathname.startsWith("/join/")) {
+          return Response.json({ enrollment_id: "ASIMP-EN-7F3K9M2Q8R" });
+        }
+        if (request.method === "POST" && pathname === "/v1/fellows") {
+          return Response.json({ flow_handle: `flow_v1.${"C".repeat(43)}` }, { status: 201 });
+        }
+        if (request.method === "POST" && pathname === "/v1/fellows/flow") {
+          return Response.json({
+            status: "approved",
+            token,
+            hello_url: `${origin}/v1/hello`,
+            suggested_next: "GET /v1/hello with the bearer token",
+          });
+        }
+        if (request.method === "GET" && pathname === "/v1/hello") {
+          return Response.json(validHelloResponse(origin));
+        }
+        if (request.method === "GET" && pathname === "/protocol.md") {
+          return new Response("protocol", { headers: { "Content-Type": "text/markdown" } });
+        }
+        return new Response("not found", { status: 404 });
+      },
+    });
+    origin = `http://127.0.0.1:${server.port}`;
+    try {
+      const run = await runScript([], { ...enrollmentEnv(origin), CURL_HOME: curlHome });
+      expect(run.exitCode).toBe(0);
+      expect(records(run).map((entry) => entry.code)).toEqual([
+        "PROPOSAL_CREATED",
+        "TOKEN_ISSUED",
+        "HELLO_REACHED",
+        "FIRST_SAFE_READ_COMPLETED",
+        "LOCAL_TEST_ENROLLMENT_PASSED",
+      ]);
+      expect(hostileHeaderPaths).toEqual([]);
+      expect(run.stdout).not.toContain(token);
+      expect(run.stderr).not.toContain(token);
+    } finally {
+      server.stop(true);
+    }
+  });
+
+  test("S1 PLANTED: a valid hello for another Fellow is refused before the first read", async () => {
+    const token = `asimp_ag_${"A".repeat(26)}_${"B".repeat(43)}`;
+    let origin = "";
+    let helloAuthorization: string | null = null;
+    let firstReadRequests = 0;
+    const server = Bun.serve({
+      port: 0,
+      hostname: "127.0.0.1",
+      fetch: (request) => {
+        const { pathname } = new URL(request.url);
+        if (request.method === "GET" && pathname.startsWith("/join/")) {
+          return Response.json({ enrollment_id: "ASIMP-EN-7F3K9M2Q8R" });
+        }
+        if (request.method === "POST" && pathname === "/v1/fellows") {
+          return Response.json({ flow_handle: `flow_v1.${"C".repeat(43)}` }, { status: 201 });
+        }
+        if (request.method === "POST" && pathname === "/v1/fellows/flow") {
+          return Response.json({
+            status: "approved",
+            token,
+            hello_url: `${origin}/v1/hello`,
+            suggested_next: "GET /v1/hello with the bearer token",
+          });
+        }
+        if (request.method === "GET" && pathname === "/v1/hello") {
+          helloAuthorization = request.headers.get("authorization");
+          const response = validHelloResponse(origin);
+          return Response.json({
+            ...response,
+            fellow: { ...response.fellow, name: "other-fellow" },
+          });
+        }
+        if (request.method === "GET" && pathname === "/protocol.md") firstReadRequests += 1;
+        return new Response("not found", { status: 404 });
+      },
+    });
+    origin = `http://127.0.0.1:${server.port}`;
+    try {
+      const run = await runScript([], enrollmentEnv(origin));
+      expect(run.exitCode).toBe(1);
+      expect(records(run).map((entry) => entry.code)).toEqual([
+        "PROPOSAL_CREATED",
+        "TOKEN_ISSUED",
+        "HELLO_PRINCIPAL_MISMATCH",
+      ]);
+      expect<string | null>(helloAuthorization).toBe(`Bearer ${token}`);
+      expect(firstReadRequests).toBe(0);
+      expect(run.stdout).not.toContain(token);
+      expect(run.stderr).not.toContain(token);
+    } finally {
+      server.stop(true);
+    }
+  });
+
+  test("S1 PLANTED: bash -x cannot echo the join fragment or issued bearer", async () => {
+    const fragmentSecret = `v1.${"D".repeat(43)}`;
+    const token = `asimp_ag_${"A".repeat(26)}_${"B".repeat(43)}`;
+    let origin = "";
+    const server = Bun.serve({
+      port: 0,
+      hostname: "127.0.0.1",
+      fetch: (request) => {
+        const { pathname } = new URL(request.url);
+        if (request.method === "GET" && pathname.startsWith("/join/")) {
+          return Response.json({ enrollment_id: "ASIMP-EN-7F3K9M2Q8R" });
+        }
+        if (request.method === "POST" && pathname === "/v1/fellows") {
+          return Response.json({ flow_handle: `flow_v1.${"C".repeat(43)}` }, { status: 201 });
+        }
+        if (request.method === "POST" && pathname === "/v1/fellows/flow") {
+          return Response.json({
+            status: "approved",
+            token,
+            hello_url: `${origin}/v1/hello`,
+            suggested_next: "GET /v1/hello with the bearer token",
+          });
+        }
+        if (request.method === "GET" && pathname === "/v1/hello") {
+          return Response.json({ ...validHelloResponse(origin), diagnostic: token });
+        }
+        return new Response("not found", { status: 404 });
+      },
+    });
+    origin = `http://127.0.0.1:${server.port}`;
+    try {
+      const run = await runScript(
+        [],
+        {
+          ...enrollmentEnv(origin),
+          ASIMP_S1_JOIN_URL: `${origin}/join/ASIMP-EN-7F3K9M2Q8R#${fragmentSecret}`,
+        },
+        true,
+      );
+      expect(run.exitCode).toBe(1);
+      expect(record(run)).toMatchObject({ status: "fail", code: "TOKEN_ECHO_DETECTED" });
+      expect(run.stdout).not.toContain(fragmentSecret);
+      expect(run.stderr).not.toContain(fragmentSecret);
+      expect(run.stdout).not.toContain(token);
+      expect(run.stderr).not.toContain(token);
+    } finally {
+      server.stop(true);
+    }
+  });
+
+  for (const scenario of [
+    {
+      name: "missing hello_url",
+      approval: () => ({
+        status: "approved",
+        token: `asimp_ag_${"A".repeat(26)}_${"B".repeat(43)}`,
+      }),
+      code: "HELLO_URL_INVALID",
+    },
+    {
+      name: "malformed hello_url",
+      approval: (origin: string) => ({
+        status: "approved",
+        token: `asimp_ag_${"A".repeat(26)}_${"B".repeat(43)}`,
+        hello_url: `${origin}/v1/hello?unexpected=query`,
+        suggested_next: "GET /v1/hello with the bearer token",
+      }),
+      code: "HELLO_URL_INVALID",
+    },
+    {
+      name: "noncanonical dot-segment hello_url",
+      approval: (origin: string) => ({
+        status: "approved",
+        token: `asimp_ag_${"A".repeat(26)}_${"B".repeat(43)}`,
+        hello_url: `${origin}/v1/../v1/hello`,
+        suggested_next: "GET /v1/hello with the bearer token",
+      }),
+      code: "HELLO_URL_INVALID",
+    },
+    {
+      name: "malformed suggested_next",
+      approval: (origin: string) => ({
+        status: "approved",
+        token: `asimp_ag_${"A".repeat(26)}_${"B".repeat(43)}`,
+        hello_url: `${origin}/v1/hello`,
+        suggested_next: "POST /v1/hello with the bearer token",
+      }),
+      code: "SUGGESTED_NEXT_INVALID",
+    },
+  ]) {
+    test(`S1 PLANTED: approved metadata with ${scenario.name} stops before hello with a fixed code`, async () => {
+      let origin = "";
+      let helloRequests = 0;
+      const server = Bun.serve({
+        port: 0,
+        hostname: "127.0.0.1",
+        fetch: (request) => {
+          const { pathname } = new URL(request.url);
+          if (request.method === "GET" && pathname.startsWith("/join/")) {
+            return Response.json({ enrollment_id: "ASIMP-EN-7F3K9M2Q8R" });
+          }
+          if (request.method === "POST" && pathname === "/v1/fellows") {
+            return Response.json({ flow_handle: `flow_v1.${"C".repeat(43)}` }, { status: 201 });
+          }
+          if (request.method === "POST" && pathname === "/v1/fellows/flow") {
+            return Response.json(scenario.approval(origin));
+          }
+          if (request.method === "GET" && pathname === "/v1/hello") helloRequests += 1;
+          return new Response("not found", { status: 404 });
+        },
+      });
+      origin = `http://127.0.0.1:${server.port}`;
+      try {
+        const run = await runScript([], enrollmentEnv(origin));
+        expect(run.exitCode).toBe(1);
+        expect(records(run).map((entry) => entry.code)).toEqual([
+          "PROPOSAL_CREATED",
+          "TOKEN_ISSUED",
+          scenario.code,
+        ]);
+        expect(helloRequests).toBe(0);
+        expect(run.stdout).not.toContain(`asimp_ag_${"A".repeat(26)}_${"B".repeat(43)}`);
+        expect(run.stderr).not.toContain(`asimp_ag_${"A".repeat(26)}_${"B".repeat(43)}`);
+      } finally {
+        server.stop(true);
+      }
+    });
+  }
+
+  test("S1 PLANTED: a cross-origin hello_url is refused without contacting the attacker", async () => {
+    const token = `asimp_ag_${"A".repeat(26)}_${"B".repeat(43)}`;
+    let attackerRequests = 0;
+    const attacker = Bun.serve({
+      port: 0,
+      hostname: "127.0.0.1",
+      fetch: () => {
+        attackerRequests += 1;
+        return new Response("attacker");
+      },
+    });
+    let origin = "";
+    const server = Bun.serve({
+      port: 0,
+      hostname: "127.0.0.1",
+      fetch: (request) => {
+        const { pathname } = new URL(request.url);
+        if (request.method === "GET" && pathname.startsWith("/join/")) {
+          return Response.json({ enrollment_id: "ASIMP-EN-7F3K9M2Q8R" });
+        }
+        if (request.method === "POST" && pathname === "/v1/fellows") {
+          return Response.json({ flow_handle: `flow_v1.${"C".repeat(43)}` }, { status: 201 });
+        }
+        if (request.method === "POST" && pathname === "/v1/fellows/flow") {
+          return Response.json({
+            status: "approved",
+            token,
+            hello_url: `http://127.0.0.1:${attacker.port}/v1/hello`,
+            suggested_next: "GET /v1/hello with the bearer token",
+          });
+        }
+        return new Response("not found", { status: 404 });
+      },
+    });
+    origin = `http://127.0.0.1:${server.port}`;
+    try {
+      const run = await runScript([], enrollmentEnv(origin));
+      expect(run.exitCode).toBe(1);
+      expect(records(run).map((entry) => entry.code)).toEqual([
+        "PROPOSAL_CREATED",
+        "TOKEN_ISSUED",
+        "HELLO_URL_INVALID",
+      ]);
+      expect(attackerRequests).toBe(0);
+      expect(run.stdout).not.toContain(token);
+      expect(run.stderr).not.toContain(token);
+    } finally {
+      server.stop(true);
+      attacker.stop(true);
+    }
+  });
+
+  for (const scenario of [
+    { name: "absent next_actions", body: {}, code: "NEXT_ACTIONS_INVALID" },
+    {
+      name: "a malformed non-action granted_scopes field with a safe first read",
+      body: (origin: string) => ({
+        ...validHelloResponse(origin),
+        granted_scopes: "review",
+      }),
+      code: "HELLO_RESPONSE_INVALID",
+    },
+    {
+      name: "an unsafe first action",
+      body: (origin: string) =>
+        validHelloResponse(origin, [
+          { action: "write", url: `${origin}/protocol.md`, reason: "unsafe" },
+        ]),
+      code: "NEXT_ACTION_UNSAFE",
+    },
+  ]) {
+    test(`S1 PLANTED: hello with ${scenario.name} is refused before a follow-up request`, async () => {
+      const token = `asimp_ag_${"A".repeat(26)}_${"B".repeat(43)}`;
+      let origin = "";
+      let helloAuthorization: string | null = null;
+      let followUpRequests = 0;
+      const server = Bun.serve({
+        port: 0,
+        hostname: "127.0.0.1",
+        fetch: (request) => {
+          const { pathname } = new URL(request.url);
+          if (request.method === "GET" && pathname.startsWith("/join/")) {
+            return Response.json({ enrollment_id: "ASIMP-EN-7F3K9M2Q8R" });
+          }
+          if (request.method === "POST" && pathname === "/v1/fellows") {
+            return Response.json({ flow_handle: `flow_v1.${"C".repeat(43)}` }, { status: 201 });
+          }
+          if (request.method === "POST" && pathname === "/v1/fellows/flow") {
+            return Response.json({
+              status: "approved",
+              token,
+              hello_url: `${origin}/v1/hello`,
+              suggested_next: "GET /v1/hello with the bearer token",
+            });
+          }
+          if (request.method === "GET" && pathname === "/v1/hello") {
+            helloAuthorization = request.headers.get("authorization");
+            return Response.json(
+              typeof scenario.body === "function" ? scenario.body(origin) : scenario.body,
+            );
+          }
+          followUpRequests += 1;
+          return new Response("not found", { status: 404 });
+        },
+      });
+      origin = `http://127.0.0.1:${server.port}`;
+      try {
+        const run = await runScript([], enrollmentEnv(origin));
+        expect(run.exitCode).toBe(1);
+        expect(records(run).map((entry) => entry.code)).toEqual([
+          "PROPOSAL_CREATED",
+          "TOKEN_ISSUED",
+          scenario.code,
+        ]);
+        expect<string | null>(helloAuthorization).toBe(`Bearer ${token}`);
+        expect(followUpRequests).toBe(0);
+        expect(run.stdout).not.toContain(token);
+        expect(run.stderr).not.toContain(token);
+      } finally {
+        server.stop(true);
+      }
+    });
+  }
+
+  test("S1 PLANTED: a read action with a cross-origin URL is refused without contacting the attacker", async () => {
+    const token = `asimp_ag_${"A".repeat(26)}_${"B".repeat(43)}`;
+    let attackerRequests = 0;
+    const attacker = Bun.serve({
+      port: 0,
+      hostname: "127.0.0.1",
+      fetch: () => {
+        attackerRequests += 1;
+        return new Response("attacker");
+      },
+    });
+    let origin = "";
+    const server = Bun.serve({
+      port: 0,
+      hostname: "127.0.0.1",
+      fetch: (request) => {
+        const { pathname } = new URL(request.url);
+        if (request.method === "GET" && pathname.startsWith("/join/")) {
+          return Response.json({ enrollment_id: "ASIMP-EN-7F3K9M2Q8R" });
+        }
+        if (request.method === "POST" && pathname === "/v1/fellows") {
+          return Response.json({ flow_handle: `flow_v1.${"C".repeat(43)}` }, { status: 201 });
+        }
+        if (request.method === "POST" && pathname === "/v1/fellows/flow") {
+          return Response.json({
+            status: "approved",
+            token,
+            hello_url: `${origin}/v1/hello`,
+            suggested_next: "GET /v1/hello with the bearer token",
+          });
+        }
+        if (request.method === "GET" && pathname === "/v1/hello") {
+          return Response.json(
+            validHelloResponse(origin, [
+              {
+                action: "read",
+                url: `http://127.0.0.1:${attacker.port}/protocol.md`,
+                reason: "unsafe origin",
+              },
+            ]),
+          );
+        }
+        return new Response("not found", { status: 404 });
+      },
+    });
+    origin = `http://127.0.0.1:${server.port}`;
+    try {
+      const run = await runScript([], enrollmentEnv(origin));
+      expect(run.exitCode).toBe(1);
+      expect(records(run).map((entry) => entry.code)).toEqual([
+        "PROPOSAL_CREATED",
+        "TOKEN_ISSUED",
+        "NEXT_ACTION_UNSAFE",
+      ]);
+      expect(attackerRequests).toBe(0);
+      expect(run.stdout).not.toContain(token);
+      expect(run.stderr).not.toContain(token);
+    } finally {
+      server.stop(true);
+      attacker.stop(true);
+    }
+  });
+
+  for (const scenario of [
+    { name: "same-origin disallowed path", path: "/v1/sessions" },
+    { name: "same-origin query", path: "/protocol.md?unexpected=query" },
+  ]) {
+    test(`S1 PLANTED: a read action with a ${scenario.name} is refused without a follow-up request`, async () => {
+      const token = `asimp_ag_${"A".repeat(26)}_${"B".repeat(43)}`;
+      let origin = "";
+      let followUpRequests = 0;
+      const server = Bun.serve({
+        port: 0,
+        hostname: "127.0.0.1",
+        fetch: (request) => {
+          const { pathname } = new URL(request.url);
+          if (request.method === "GET" && pathname.startsWith("/join/")) {
+            return Response.json({ enrollment_id: "ASIMP-EN-7F3K9M2Q8R" });
+          }
+          if (request.method === "POST" && pathname === "/v1/fellows") {
+            return Response.json({ flow_handle: `flow_v1.${"C".repeat(43)}` }, { status: 201 });
+          }
+          if (request.method === "POST" && pathname === "/v1/fellows/flow") {
+            return Response.json({
+              status: "approved",
+              token,
+              hello_url: `${origin}/v1/hello`,
+              suggested_next: "GET /v1/hello with the bearer token",
+            });
+          }
+          if (request.method === "GET" && pathname === "/v1/hello") {
+            return Response.json(
+              validHelloResponse(origin, [
+                { action: "read", url: `${origin}${scenario.path}`, reason: "unsafe target" },
+              ]),
+            );
+          }
+          followUpRequests += 1;
+          return new Response("not found", { status: 404 });
+        },
+      });
+      origin = `http://127.0.0.1:${server.port}`;
+      try {
+        const run = await runScript([], enrollmentEnv(origin));
+        expect(run.exitCode).toBe(1);
+        expect(records(run).map((entry) => entry.code)).toEqual([
+          "PROPOSAL_CREATED",
+          "TOKEN_ISSUED",
+          "NEXT_ACTION_UNSAFE",
+        ]);
+        expect(followUpRequests).toBe(0);
+        expect(run.stdout).not.toContain(token);
+        expect(run.stderr).not.toContain(token);
+      } finally {
+        server.stop(true);
+      }
+    });
+  }
+
+  for (const scenario of ["hello", "first-read"] as const) {
+    test(`S1 PLANTED: a ${scenario} response that echoes the bearer fails without exposing it`, async () => {
+      const token = `asimp_ag_${"A".repeat(26)}_${"B".repeat(43)}`;
+      let origin = "";
+      let firstReadRequests = 0;
+      const server = Bun.serve({
+        port: 0,
+        hostname: "127.0.0.1",
+        fetch: (request) => {
+          const { pathname } = new URL(request.url);
+          if (request.method === "GET" && pathname.startsWith("/join/")) {
+            return Response.json({ enrollment_id: "ASIMP-EN-7F3K9M2Q8R" });
+          }
+          if (request.method === "POST" && pathname === "/v1/fellows") {
+            return Response.json({ flow_handle: `flow_v1.${"C".repeat(43)}` }, { status: 201 });
+          }
+          if (request.method === "POST" && pathname === "/v1/fellows/flow") {
+            return Response.json({
+              status: "approved",
+              token,
+              hello_url: `${origin}/v1/hello`,
+              suggested_next: "GET /v1/hello with the bearer token",
+            });
+          }
+          if (request.method === "GET" && pathname === "/v1/hello") {
+            return Response.json({
+              ...validHelloResponse(origin, [
+                { action: "read", url: `${origin}/protocol.md`, reason: "read" },
+              ]),
+              ...(scenario === "hello" ? { diagnostic: token } : {}),
+            });
+          }
+          if (request.method === "GET" && pathname === "/protocol.md") {
+            firstReadRequests += 1;
+            return new Response(scenario === "first-read" ? `echo:${token}` : "protocol");
+          }
+          return new Response("not found", { status: 404 });
+        },
+      });
+      origin = `http://127.0.0.1:${server.port}`;
+      try {
+        const run = await runScript([], enrollmentEnv(origin));
+        expect(run.exitCode).toBe(1);
+        expect(record(run)).toMatchObject({ status: "fail", code: "TOKEN_ECHO_DETECTED" });
+        expect(firstReadRequests).toBe(scenario === "hello" ? 0 : 1);
+        expect(run.stdout).not.toContain(token);
+        expect(run.stderr).not.toContain(token);
+        expect(run.stderr).not.toContain("state-retained");
+      } finally {
+        server.stop(true);
+      }
+    });
+  }
 
   test("multiple arguments are rejected with a terminal typed failure", async () => {
     const run = await runScript(["--self-test", "unexpected"]);
@@ -566,6 +1400,42 @@ describe("the self-test and the blocked external proof", () => {
     expect(source).not.toContain("SECONDS + TRANSIENT_INSPECTION_DEADLINE_SECONDS");
   });
 
+  test("S1: the bearer header is sourced from curl stdin configuration, not curl argv", () => {
+    const source = readFileSync(resolve(REPO_ROOT, SCRIPT), "utf8");
+    const curlBody = source.slice(
+      source.indexOf("curl_body()"),
+      source.indexOf("make_registration_body()"),
+    );
+    expect(curlBody).toContain('printf \'header = "Authorization: Bearer %s"\\n\' "$bearer_token"');
+    expect(curlBody).toContain("curl --disable --silent --fail-with-body --config - --request GET");
+    expect(curlBody.match(/\bcurl --disable\b/g)).toHaveLength(3);
+    expect(curlBody.match(/--max-filesize "\$EXTERNAL_RESPONSE_MAX_BYTES"/g)).toHaveLength(3);
+    expect(curlBody).toContain("bounded_response_body");
+    expect(curlBody).not.toMatch(/\bcurl --(?!disable\b)/);
+    expect(curlBody).not.toContain(
+      'curl_headers+=(--header "Authorization: Bearer $bearer_token")',
+    );
+    expect(curlBody).not.toContain('--header "Authorization: Bearer $bearer_token"');
+    expect(source).toContain(
+      'import { EnrollmentHelloResponseSchema } from "@asimposium/contracts";',
+    );
+    expect(source).toContain("set +x");
+    expect(source).toContain("readonly EXTERNAL_RESPONSE_MAX_BYTES=262144");
+  });
+
+  test("S1: every executable curl invocation disables caller curl configuration first", () => {
+    const source = readFileSync(resolve(REPO_ROOT, SCRIPT), "utf8");
+    const curlInvocations = source
+      .split("\n")
+      .filter((line) => !line.trimStart().startsWith("#"))
+      .filter((line) => /(^|[|( ])curl\s/.test(line))
+      .filter((line) => !line.includes("command -v curl"));
+    expect(curlInvocations).toHaveLength(5);
+    for (const invocation of curlInvocations) {
+      expect(invocation).toMatch(/\bcurl --disable\b/);
+    }
+  });
+
   test("a NUL-bearing retained artifact is byte-scanned rather than omitted", () => {
     const sentinel = "v1.S1FRAGMENT_SENTINEL_0123456789abcdefghijklm";
     const prefix = new TextEncoder().encode("sqlite\u0000untrusted:");
@@ -579,7 +1449,7 @@ describe("the self-test and the blocked external proof", () => {
     expect(bytesContain(bytes, sentinel)).toBe(true);
   });
 
-  test("the external three-harness / OAuth / staging proof stays blocked, never simulated", async () => {
+  test("S1 PLANTED: a missing external join origin stays blocked, never simulated", async () => {
     const run = await runScript([], {
       ASIMP_S1_JOIN_URL: "",
       ASIMP_S1_FELLOW_NAME: "",
@@ -590,6 +1460,103 @@ describe("the self-test and the blocked external proof", () => {
     const emitted = record(run);
     expect(emitted.status).toBe("blocked");
     expect(emitted.code).toBe("STAGING_JOIN_URL_REQUIRED");
+  });
+
+  test("S1 PLANTED: loopback HTTP is blocked unless its explicit self-test mode is valid", async () => {
+    const origin = `http://127.0.0.1:65535`;
+    const missingMode = await runScript([], {
+      ...enrollmentEnv(origin),
+      ASIMP_S1_LOOPBACK_SELF_TEST: "",
+    });
+    expect(missingMode.exitCode).toBe(78);
+    expect(record(missingMode)).toMatchObject({
+      status: "blocked",
+      code: "LOOPBACK_SELF_TEST_REQUIRED",
+    });
+
+    const invalidMode = await runScript([], {
+      ...enrollmentEnv(origin),
+      ASIMP_S1_LOOPBACK_SELF_TEST: "production",
+    });
+    expect(invalidMode.exitCode).toBe(78);
+    expect(record(invalidMode)).toMatchObject({
+      status: "blocked",
+      code: "LOOPBACK_SELF_TEST_INVALID",
+    });
+  });
+
+  test("S1 PLANTED: the loopback test switch cannot make a production origin eligible", async () => {
+    const run = await runScript([], {
+      ...enrollmentEnv("https://a.asimposium.org"),
+      ASIMP_S1_TEST_ALLOW_HTTP: "1",
+      ASIMP_S1_LOOPBACK_SELF_TEST: "loopback-enrollment-v1",
+    });
+    expect(run.exitCode).toBe(1);
+    expect(record(run)).toMatchObject({ status: "fail", code: "JOIN_URL_INVALID" });
+  });
+
+  test.each([
+    ["foreign", "https://evil.test"],
+    ["production", "https://a.asimposium.org"],
+    ["production lookalike", "https://a.asimposium.org.evil.test"],
+    ["staging with a non-canonical port", "https://a-staging.asimposium.org:443"],
+    ["malformed loopback port", "http://127.0.0.1:70000"],
+  ])(
+    "S1 PLANTED: a %s join origin is refused before curl can contact it",
+    async (_label, origin) => {
+      const run = await runScript([], {
+        ...enrollmentEnv(origin),
+        ASIMP_S1_TEST_ALLOW_HTTP: origin.startsWith("http://") ? "1" : "",
+        ASIMP_S1_LOOPBACK_SELF_TEST: origin.startsWith("http://")
+          ? "loopback-enrollment-v1"
+          : "",
+      });
+      expect(run.exitCode).toBe(1);
+      expect(records(run)).toHaveLength(1);
+      expect(record(run)).toMatchObject({ status: "fail", code: "JOIN_URL_INVALID" });
+    },
+  );
+
+  test("S1 PLANTED: a local non-loopback hostname is refused without contacting its listener", async () => {
+    let attackerRequests = 0;
+    const attacker = Bun.serve({
+      port: 0,
+      hostname: "127.0.0.1",
+      fetch: () => {
+        attackerRequests += 1;
+        return new Response("attacker");
+      },
+    });
+    try {
+      const run = await runScript([], {
+        ...enrollmentEnv(`http://localhost:${attacker.port}`),
+        ASIMP_S1_TEST_ALLOW_HTTP: "1",
+      });
+      expect(run.exitCode).toBe(1);
+      expect(record(run)).toMatchObject({ status: "fail", code: "JOIN_URL_INVALID" });
+      expect(attackerRequests).toBe(0);
+    } finally {
+      attacker.stop(true);
+    }
+  });
+
+  test("S1 PLANTED: a default-port loopback join URL is refused without invoking curl", async () => {
+    const probeDir = mkdtempSync(join(tmpdir(), "s1-default-port-curl-probe-"));
+    const marker = join(probeDir, "curl-was-invoked");
+    const fakeCurl = join(probeDir, "curl");
+    writeFileSync(fakeCurl, '#!/usr/bin/env bash\n: > "$S1_TEST_CURL_MARKER"\nexit 97\n', {
+      encoding: "utf8",
+      mode: 0o700,
+    });
+    const run = await runScript([], {
+      ...enrollmentEnv("http://127.0.0.1:80"),
+      ASIMP_S1_TEST_ALLOW_HTTP: "1",
+      S1_TEST_CURL_MARKER: marker,
+      PATH: `${probeDir}:${process.env.PATH ?? ""}`,
+    });
+    expect(run.exitCode).toBe(1);
+    expect(record(run)).toMatchObject({ status: "fail", code: "JOIN_URL_INVALID" });
+    expect(existsSync(marker)).toBe(false);
   });
 
   test("an unsupported harness identity is blocked, not silently accepted", async () => {
@@ -608,10 +1575,10 @@ describe("a pinned port is validated before anything is started", () => {
   for (const pinnedValues of [
     ["0", "80"],
     ["1023", "65536"],
-    ["70000", "not-a-port"],
+    ["70000", "02000", "not-a-port"],
     ["-1", "8080 8080"],
   ]) {
-    test(`PLANTED: invalid pinned ports ${pinnedValues.map((value) => JSON.stringify(value)).join(", ")} are refused`, async () => {
+    test(`S1 PLANTED: invalid pinned ports ${pinnedValues.map((value) => JSON.stringify(value)).join(", ")} are refused`, async () => {
       for (const pinned of pinnedValues) {
         const run = await runScript(["--local-d1"], { S1_LOCAL_PORT: pinned });
         expect(run.exitCode).toBe(78);
@@ -686,11 +1653,112 @@ describe("a pinned port is validated before anything is started", () => {
     );
   });
 
-  test("the ephemeral replay root is absent from Wrangler argv", () => {
+  /**
+   * The client-evidence gate is what turns "the client exited 0" into "the
+   * client proved these specific things", and its required-proof-slug clause is
+   * what guards the two repaired S-1 findings. Until these modes existed the
+   * gate had no negative at all: every real run presents a well-formed record,
+   * so any clause could have been inverted and the suite would have stayed
+   * green.
+   *
+   * Each mode drives the production `assert_local_client_evidence` against a
+   * planted artifact and pairs it with an accepted control, so a refusal is
+   * attributable to the single planted defect rather than to the fixture.
+   */
+  const EVIDENCE_MODES = [
+    [
+      "a missing record",
+      "missing",
+      "CLIENT_EVIDENCE_MISSING_SELF_TEST_PASSED",
+      "client-evidence-missing-refused",
+      "LOCAL_CLIENT_EVIDENCE_MISSING",
+    ],
+    [
+      "a duplicate record",
+      "duplicate",
+      "CLIENT_EVIDENCE_DUPLICATE_SELF_TEST_PASSED",
+      "client-evidence-duplicate-refused",
+      "LOCAL_CLIENT_EVIDENCE_NOT_SINGLE_RECORD",
+    ],
+    [
+      "one absent required proof slug",
+      "proof-missing",
+      "CLIENT_EVIDENCE_PROOF_MISSING_SELF_TEST_PASSED",
+      "client-evidence-proof-missing-refused",
+      "LOCAL_CLIENT_EVIDENCE_PROOF_MISSING",
+    ],
+  ] as const;
+
+  test.each(EVIDENCE_MODES)(
+    "PLANTED: %s is refused with its own code, and the control is accepted",
+    async (_label, mode, passCode, phase, refusalCode) => {
+      const run = await runScript([`--self-test-client-evidence-${mode}`]);
+      expect(run.exitCode).toBe(0);
+      expect(record(run).code).toBe(passCode);
+
+      // The refusal is the planted one, and the paired control was accepted by
+      // the same gate — without that half, "refused" would prove nothing.
+      expect(phaseValue(run.stderr, phase, "result")).toBe("refused");
+      expect(phaseValue(run.stderr, phase, "code")).toBe(refusalCode);
+      expect(phaseValue(run.stderr, phase, "control")).toBe("accepted");
+
+      // Ordering: the only terminal record is the pass, emitted after the gate
+      // assertions. A PASS reached before them would appear as an extra record.
+      expect(records(run)).toHaveLength(1);
+
+      // The fixtures carry a real per-run nonce; no part of a retained record
+      // may ride out on either stream.
+      expect(run.stdout).not.toContain("s1-local-d1-evidence");
+      expect(run.stderr).not.toContain("s1-local-d1-evidence");
+      expect(run.stdout).not.toContain("run_nonce");
+      expect(run.stderr).not.toContain("run_nonce");
+    },
+  );
+
+  test("PLANTED: the three evidence defects do not collapse onto one code", async () => {
+    // Distinctness is the property an operator depends on: "the client never
+    // wrote it", "it wrote two", and "it ran an older corpus" are different
+    // problems with different fixes, and a gate that reported one code for all
+    // three would pass every assertion above while being useless.
+    const codes = await Promise.all(
+      EVIDENCE_MODES.map(async ([, mode, , phase]) => {
+        const run = await runScript([`--self-test-client-evidence-${mode}`]);
+        return phaseValue(run.stderr, phase, "code");
+      }),
+    );
+    expect(codes.every((code) => typeof code === "string")).toBe(true);
+    expect(new Set(codes).size).toBe(EVIDENCE_MODES.length);
+  }, 120_000);
+
+  test("the self-test proof slugs are exactly the ones the production gate requires", () => {
+    // The fixture list and the gate's list are deliberately separate: injecting
+    // the required slugs into the validator would let an empty variable satisfy
+    // `every()` vacuously, which is fail-open in the one place that must not be.
+    // Keeping two lists costs a drift risk, so the drift is asserted away here.
+    const source = readFileSync(resolve(REPO_ROOT, SCRIPT), "utf8");
+    const gate = source.match(/const required = \[([^\]]*)\]/)?.[1];
+    const fixture = source.match(/EVIDENCE_PROOF_SLUGS=\(([^)]*)\)/)?.[1];
+    expect(gate).toBeDefined();
+    expect(fixture).toBeDefined();
+
+    const slugsIn = (block: string): string[] =>
+      [...block.matchAll(/"([a-z][a-z0-9-]{0,63})"/g)].map((match) => match[1] as string).sort();
+
+    expect(slugsIn(gate as string)).toHaveLength(3);
+    expect(slugsIn(fixture as string)).toEqual(slugsIn(gate as string));
+  });
+
+  test("S1: the replay root and dynamic loopback origin reach Workerd only through its scrubbed environment", () => {
     const source = readFileSync(resolve(REPO_ROOT, SCRIPT), "utf8");
     expect(source).toContain("CLOUDFLARE_INCLUDE_PROCESS_ENV=true");
     expect(source).toContain('export ENROLLMENT_REPLAY_KEY="$replay_key"');
+    expect(source).toContain('export S1_LOCAL_STOA_ORIGIN="$origin"');
+    expect(source).toContain('stoa_origin="$S1_LOCAL_STOA_ORIGIN"');
+    expect(source).toContain('export STOA_ORIGIN="$stoa_origin"');
+    expect(source).toContain("unset replay_key stoa_origin");
+    expect(source).toContain("unset S1_LOCAL_REPLAY_KEY S1_LOCAL_STOA_ORIGIN");
     expect(source).not.toContain('--var "ENROLLMENT_REPLAY_KEY:');
+    expect(source).not.toContain('--var "STOA_ORIGIN:');
   });
 
   test("PLANTED: a typed failure still scans its retained tree after cleanup", async () => {

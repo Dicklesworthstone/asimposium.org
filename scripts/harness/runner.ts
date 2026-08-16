@@ -22,6 +22,10 @@ import {
 } from "node:fs";
 import { homedir, tmpdir } from "node:os";
 import { basename, isAbsolute, join, relative, resolve, sep } from "node:path";
+import {
+  containsCredentialShape,
+  redactCredentials,
+} from "@asimposium/contracts/diagnostic-safety";
 
 export const HARNESS_SCHEMA_VERSION = "1.0";
 export const HARNESS_BLOCKED_EXIT_CODE = 78;
@@ -751,25 +755,12 @@ export function redactNeverLog(text: string, root: string): string {
       return `${prefix}${marker}`;
     },
   );
-  const patterns: readonly RegExp[] = [
-    /asimp_ag_[A-Za-z0-9_-]{4,}/g,
-    /#v1\.[A-Za-z0-9._~-]{4,}/g,
-    /\bBearer\s+[A-Za-z0-9._~+/-]{4,}={0,2}/gi,
-    /\b(?:authorization|cookie|set-cookie|token|access_token|refresh_token|id_token|secret|password|signature|sig|authorization_code|directive_body|workshop_body)\s*(?:=|:)\s*(?:"[^"]*"|'[^']*'|[^\s,;]+)/gi,
-    /\b(?:sk|rk|pk)-[A-Za-z0-9_-]{12,}/g,
-    /\bgh[pousr]_[A-Za-z0-9]{16,}/g,
-    /\bAIza[0-9A-Za-z_-]{20,}/g,
-    /\b[A-Za-z0-9]{32,}\b/g,
-    /-----BEGIN [A-Z ]*PRIVATE KEY-----[\s\S]*?-----END [A-Z ]*PRIVATE KEY-----/g,
-    /\/(?:private\/)?tmp(?:\/[A-Za-z0-9._-]+)+/g,
-  ];
-  for (const pattern of patterns) {
-    output = output.replace(pattern, "<redacted>");
-  }
-  output = output.replace(
-    /([?&](?:token|access_token|code|signature|sig)=)[^&#\s]+/gi,
-    "$1<redacted>",
-  );
+  // Credential shapes and labelled values have one canonical owner. Keep this
+  // before the harness-only opaque pass so line-valued headers and bodies retain
+  // their labels while losing their full value.
+  output = redactCredentials(output);
+  output = output.replace(/\b[A-Za-z0-9]{32,}\b/g, "<redacted>");
+  output = output.replace(/\/(?:private\/)?tmp(?:\/[A-Za-z0-9._-]+)+/g, "<redacted>");
   for (const { marker, digest } of protectedDigests) {
     output = restoreProtectedSha256Marker(output, marker, digest);
   }
@@ -2063,16 +2054,7 @@ function validateCommand(command: readonly string[] | undefined): void {
 }
 
 function containsForbiddenCommandSecret(value: string): boolean {
-  return [
-    /asimp_ag_[A-Za-z0-9_-]{4,}/,
-    /#v1\.[A-Za-z0-9._~-]{4,}/,
-    /\bBearer\s+[A-Za-z0-9._~+/-]{4,}={0,2}/i,
-    /\b(?:authorization|cookie|set-cookie|token|access_token|refresh_token|id_token|password|signature|sig|authorization_code|directive_body|workshop_body)\s*(?:=|:)\s*(?:"[^"]{4,}"|'[^']{4,}'|[^\s,;]{4,})/i,
-    /\b(?:sk|rk|pk)-[A-Za-z0-9_-]{12,}/,
-    /\bgh[pousr]_[A-Za-z0-9]{16,}/,
-    /\bAIza[0-9A-Za-z_-]{20,}/,
-    /\b[A-Za-z0-9]{32,}\b/,
-  ].some((pattern) => pattern.test(value));
+  return containsCredentialShape(value) || /\b[A-Za-z0-9]{32,}\b/.test(value);
 }
 
 function assertSafeMetadata(value: unknown, code: string, field: string): asserts value is string {

@@ -15,6 +15,7 @@
 
 import { homedir } from "node:os";
 import { relative, sep } from "node:path";
+import { redactCredentials } from "@asimposium/contracts/diagnostic-safety";
 
 /**
  * `blocked` means the package deliberately refused a gate it cannot yet satisfy and said
@@ -81,34 +82,16 @@ export interface PlanDiagnostic {
 
 export type Diagnostic = UnitDiagnostic | SummaryDiagnostic | PlanDiagnostic;
 
-const CREDENTIAL_PATTERNS: readonly RegExp[] = [
-  // ASImposium Fellow bearer tokens and enrollment fragment secrets (Fable §5.2, §5.5).
-  /asimp_ag_[A-Za-z0-9_-]{4,}/g,
-  /#v1\.[A-Za-z0-9._~-]{8,}/g,
-  /\bBearer\s+[A-Za-z0-9._~+/-]{8,}={0,2}/gi,
-  // Common third-party credential shapes, so a misconfigured child never leaks through a
-  // dispatcher-authored field.
-  /\b(?:sk|rk|pk)-[A-Za-z0-9_-]{12,}/g,
-  /\bgh[pousr]_[A-Za-z0-9]{16,}/g,
-  /\bAIza[0-9A-Za-z_-]{20,}/g,
-  /-----BEGIN [A-Z ]*PRIVATE KEY-----[\s\S]*?-----END [A-Z ]*PRIVATE KEY-----/g,
-];
-
 /**
- * Capture ceilings can cut a credential halfway through. Match those terminal
- * prefixes too: the minimum lengths above avoid false positives in ordinary
- * prose, while these bounded forms make a clipped secret no safer to print.
+ * Replace absolute filesystem locations and credential-shaped runs with stable tokens.
+ *
+ * Path masking stays here because it needs a caller-supplied repository root and
+ * the process home directory. The credential vocabulary does not: it is the
+ * shared never-log scanner in `@asimposium/contracts` (OPS.2a), so the
+ * dispatcher and every package refuse exactly the same shapes. Order is
+ * unchanged — paths first, then credentials — because a masked path must not
+ * hide a credential that followed it.
  */
-const CLIPPED_CREDENTIAL_PATTERNS: readonly RegExp[] = [
-  /asimp_ag_[A-Za-z0-9_-]{0,3}(?![A-Za-z0-9_-])/g,
-  /#v1\.[A-Za-z0-9._~-]{0,7}(?![A-Za-z0-9._~-])/g,
-  /\bBearer\s+[A-Za-z0-9._~+/-]{0,7}(?![A-Za-z0-9._~+/-])/gi,
-  /\b(?:sk|rk|pk)-[A-Za-z0-9_-]{0,11}(?![A-Za-z0-9_-])/g,
-  /\bgh[pousr]_[A-Za-z0-9]{0,15}(?![A-Za-z0-9])/g,
-  /\bAIza[0-9A-Za-z_-]{0,19}(?![0-9A-Za-z_-])/g,
-];
-
-/** Replace absolute filesystem locations and credential-shaped runs with stable tokens. */
 export function redact(text: string, root: string): string {
   let output = text;
   const home = homedir();
@@ -118,10 +101,7 @@ export function redact(text: string, root: string): string {
   ] as const) {
     if (absolute.length > 1) output = output.split(absolute).join(token);
   }
-  for (const pattern of [...CREDENTIAL_PATTERNS, ...CLIPPED_CREDENTIAL_PATTERNS]) {
-    output = output.replace(pattern, "<redacted>");
-  }
-  return output;
+  return redactCredentials(output);
 }
 
 /** Repository-relative POSIX display path. Anything outside the root is never printed. */

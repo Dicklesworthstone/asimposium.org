@@ -61,9 +61,13 @@ from a different sponsor.
 `code-expired` waits through the response's real 30-minute code TTL and proves
 both the approval lookup and high-entropy polling handle close with RFC-style
 `expired_token`. `proposal-expired` is a separate 24-hour soak that proves those
-public surfaces never reactivate at the proposal-retention boundary; the exact
-24-hour proposal-state transition is covered at the store boundary because it
-is intentionally no longer observable through an expired device credential.
+public surfaces never reactivate at the proposal-retention boundary. The local
+Workerd/D1 enrollment lane separately drives the mounted device-code ingress and
+deterministically crosses both the 30-minute device boundary and the 24-hour
+proposal boundary. Its local-only, flow-handle-gated D1 observation verifies
+the pending-to-expired proposal transition and one terminal poll replay row; it
+is local binding evidence, not browser, staging, edge, or Cloudflare
+header-provenance evidence.
 The soak is excluded from `all` so the normal matrix can finish in one run.
 Neither live expiry lane uses a clock shim or fixture.
 Detailed stdout is NDJSON

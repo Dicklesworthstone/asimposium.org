@@ -1,4 +1,5 @@
 import { describe, expect, test } from "bun:test";
+import { readFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { join } from "node:path";
 import {
@@ -73,9 +74,55 @@ describe("redaction", () => {
     expect(redact(key, ROOT)).toBe("<redacted>");
   });
 
+  // Clipped forms were dispatcher-only before OPS.2a consolidated the
+  // vocabulary. A capture ceiling that halves a token must not produce a string
+  // any consumer considers safe.
+  for (const [name, sample] of [
+    ["a truncated Fellow token", "asimp_ag_abc"],
+    ["a truncated fragment secret", "#v1.abc"],
+    ["a short Bearer value", "Bearer abc1234"],
+    ["a truncated GitHub token", "ghp_abc"],
+  ] as const) {
+    test(`${name} is masked`, () => {
+      const redacted = redact(sample, ROOT);
+      expect(redacted).toContain("<redacted>");
+      expect(redacted).not.toContain("abc");
+    });
+  }
+
+  test("a masked repository path does not hide a credential that follows it", () => {
+    const redacted = redact(`${ROOT}/apps/wire logged ghp_0123456789abcdefghij`, ROOT);
+    expect(redacted).toBe("<repo>/apps/wire logged <redacted>");
+  });
+
   test("ordinary scientific text is left alone", () => {
     const text = "claim C-12 depends_on C-7; falsifier missing";
     expect(redact(text, ROOT)).toBe(text);
+  });
+});
+
+describe("never-log vocabulary has one owner", () => {
+  // OPS.2a exists because four runners each carried their own credential
+  // patterns and disagreed about what a secret looks like. This is the
+  // structural lock: the dispatcher consumes the shared scanner and does not
+  // grow a fifth copy. Reintroducing a local pattern fails here even if every
+  // behavioural test above still passes.
+  const source = readFileSync(new URL("./report.ts", import.meta.url), "utf8");
+
+  test("the dispatcher imports the shared scanner from its narrow subpath", () => {
+    // The subpath, not the package root: the dispatcher needs one function, and
+    // pulling the whole contract surface in would make every Zod schema a
+    // dependency of printing a log line.
+    expect(source).toContain('from "@asimposium/contracts/diagnostic-safety"');
+    expect(source).toContain("redactCredentials");
+    expect(source).not.toContain('from "@asimposium/contracts"');
+  });
+
+  test("the dispatcher defines no credential pattern of its own", () => {
+    expect(source).not.toContain("asimp_ag_");
+    expect(source).not.toContain("Bearer");
+    expect(source).not.toContain("BEGIN [A-Z ]*PRIVATE KEY");
+    expect(source).not.toContain("CREDENTIAL_PATTERNS");
   });
 });
 

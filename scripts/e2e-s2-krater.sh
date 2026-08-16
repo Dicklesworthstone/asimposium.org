@@ -44,11 +44,19 @@ readonly S2_LEGACY_STOP_INSPECTION_TICKS=10
 readonly S2_WATCHDOG_MAX_UNCERTAIN_TICKS=50
 readonly S2_MAX_RETAINED_BYTES=67108864
 readonly S2_MAX_RETAINED_FILES=1024
+readonly S2_PROVENANCE_COMMAND_DEADLINE_SECONDS=10
+readonly S2_OWNED_COMMAND_DEADLINE_SECONDS=120
 readonly S2_EVIDENCE_ROOT="e2e/artifacts/s2-krater"
 readonly S2_COST_RECEIPT_RELATIVE_PATH="s2-cost-input.json"
 readonly S2_COST_MANIFEST_RELATIVE_PATH="manifest.json"
 readonly S2_COST_PUBLICATION_RELATIVE_PATH="s2-cost-publication.json"
 readonly S2_COST_PUBLICATION_COMMIT_RELATIVE_PATH="s2-cost-publication-commit.json"
+# The frozen source descriptor the commit is linked to. Not schema-governed:
+# widening the strict receipt/publication/commit contracts is out of this
+# slice's scope, and the fix does not need it. What it needs is for the source
+# state the commit attests to stop being a live working tree.
+readonly S2_SOURCE_SNAPSHOT_RELATIVE_PATH="s2-source-snapshot.json"
+readonly S2_SOURCE_SNAPSHOT_PENDING_RELATIVE_PATH=".s2-source-snapshot.json.pending"
 # A parallel child runs the full local D1 suite, including two real migration-journal lanes.
 # Keep the test bounded, but allow its documented work rather than converting a healthy child
 # into a synthetic TERM result before the journal is finished.
@@ -60,6 +68,13 @@ if ! [[ "${S2_LIFECYCLE_DEADLINE_SECONDS}" =~ ^[1-9][0-9]*$ ]]; then
   exit 1
 fi
 readonly S2_LIFECYCLE_DEADLINE_SECONDS
+S2_MAIN_DEADLINE_SECONDS="${S2_MAIN_DEADLINE_SECONDS:-900}"
+if ! [[ "${S2_MAIN_DEADLINE_SECONDS}" =~ ^[1-9][0-9]*$ ]]; then
+  printf '%s\n' '{"tool":"bash","package":"apps/wire","suite":"s2-krater-lifecycle","status":"fail","code":"S2_MAIN_DEADLINE_INVALID","reproduce":"scripts/e2e-s2-krater.sh"}'
+  exit 1
+fi
+readonly S2_MAIN_DEADLINE_SECONDS
+readonly S2_MAIN_DEADLINE_AT=$((SECONDS + S2_MAIN_DEADLINE_SECONDS))
 readonly -a S2_SOURCE_PATHS=(
   apps/wire/src/krater/krater.ts
   apps/wire/src/krater/worker.ts
@@ -87,13 +102,39 @@ readonly -a S2_SOURCE_PATHS=(
   db/migrations/0012_fellow_lifecycle_commands.sql
   db/migrations/0013_sponsor_fellow_cap.sql
   db/migrations/0014_sponsor_enrollment_rate_limit.sql
+  db/migrations/0015_sponsor_enrollment_bootstrap_invariant.sql
   scripts/verify-cost-model.ts
   scripts/verify-cost-model.test.ts
+  # `verify-cost-model.ts` imports these at runtime. They were absent while every
+  # other input it reads was listed, so the digest attested a source state that
+  # excluded live executable bytes: editing the runner or the diagnostic-safety
+  # module changed what the run executed without changing what it published.
+  # `s2_verify_source_closure` below now derives this closure mechanically
+  # instead of trusting that a human re-reads the import graph.
+  scripts/harness/runner.ts
+  packages/contracts/src/diagnostic-safety.ts
   packages/contracts/src/artifacts.ts
   packages/contracts/src/s2-cost-receipt.ts
+  packages/contracts/src/index.ts
+  # `index.ts` is a re-export barrel, so these four are executed by every run
+  # that touches the contracts entry point. The mechanical closure walk found
+  # them; the hand-maintained list had covered the barrel and stopped there.
+  packages/contracts/src/enrollment.ts
+  packages/contracts/src/ledger.ts
+  packages/contracts/src/problem.ts
+  packages/contracts/src/schema.ts
+  # Reachable from the listed `packages/contracts/test/unit/schema.test.ts`. It
+  # is not in the executed graph, but this array attests test sources as well as
+  # executed ones, and a listed file whose own imports escape the set leaves the
+  # attestation open at exactly the edge the closure walk is meant to close.
+  packages/contracts/src/diagnostics.ts
   packages/contracts/test/unit/schema.test.ts
   packages/contracts/generated/s2-cost-receipt.schema.json
   packages/contracts/generated/s2-cost-receipt.types.ts
+  package.json
+  bun.lock
+  apps/wire/package.json
+  packages/contracts/package.json
   scripts/e2e-s2-krater.sh
 )
 readonly -a S2_EXPECTED_MIGRATION_JOURNAL=(
@@ -111,7 +152,552 @@ readonly -a S2_EXPECTED_MIGRATION_JOURNAL=(
   0012_fellow_lifecycle_commands.sql
   0013_sponsor_fellow_cap.sql
   0014_sponsor_enrollment_rate_limit.sql
+  0015_sponsor_enrollment_bootstrap_invariant.sql
 )
+
+# Source provenance is part of the cost-receipt claim. Run each local command under a parent
+# watchdog rather than leaving Git or the byte reader unbounded during EXIT handling.
+s2_remaining_main_deadline() {
+  local remaining=$((S2_MAIN_DEADLINE_AT - SECONDS))
+  (( remaining > 0 )) || return 1
+  printf '%s\n' "${remaining}"
+}
+
+# Every bounded wait must be dominated by the run-wide deadline, not merely by
+# its own envelope. `S2_MAIN_DEADLINE_AT` governed only the two command wrappers
+# below, so a readiness loop that restarted its own 15-second budget, or a bare
+# `wait`, could hold the run open long past the bound the caller asked for. This
+# returns the earlier of the local and run-wide deadlines, which makes the bound
+# hold by construction rather than by every call site remembering to check it.
+s2_deadline_at() {
+  local at=$((SECONDS + $1))
+  (( at > S2_MAIN_DEADLINE_AT )) && at=${S2_MAIN_DEADLINE_AT}
+  printf '%s\n' "${at}"
+}
+
+# The owned-command runner, shared by both wrappers so they cannot diverge.
+#
+# The previous version forked, had the child `setsid()`, and immediately began
+# counting down. Two things were wrong with that, and both were reachable:
+#
+#   1. Nothing established that the child had become a group leader before the
+#      parent signalled `-$child`. If the deadline expired while the child was
+#      still between `fork` and `setsid`, `-$child` named no group, both TERM
+#      and KILL failed with ESRCH, and the blocking `waitpid($child, 0)` that
+#      followed had nothing to reap. The wrapper hung past its own deadline —
+#      the one thing it exists to prevent.
+#   2. Termination was a fixed 0.2s TERM, one conditional KILL keyed on the
+#      direct child alone, and no check that anything actually died. A
+#      TERM-resistant descendant survived; for the capturing wrapper it also
+#      held the pipe open, so the surrounding `$(...)` blocked forever even
+#      after Perl exited.
+#
+# So: an explicit pre-exec readiness handshake proves the group exists before
+# the parent will ever address it, termination escalates TERM -> KILL on bounded
+# polls, the direct child is reaped on a bounded loop, and the group is then
+# proven empty. Exit 124 means "timed out, nothing survived". Exit 123 means
+# "timed out and something is still alive", which is a different fact and must
+# not be reported as a clean timeout.
+# shellcheck disable=SC2016
+readonly S2_OWNED_COMMAND_PROGRAM='
+  my $deadline_seconds = shift @ARGV;
+  my $term_grace_seconds = 2;
+  my $settle_seconds = 2;
+  # Regression-only. Widens the fork->setsid window so a deadline can expire
+  # while the child is provably still in the parent group. Unset in real runs,
+  # and a malformed value fails closed rather than silently disabling itself.
+  my $pre_setsid_delay_ms = $ENV{S2_PLANT_WRAPPER_PRE_SETSID_DELAY_MS};
+  $pre_setsid_delay_ms = 0 unless defined $pre_setsid_delay_ms && $pre_setsid_delay_ms ne "";
+  $pre_setsid_delay_ms =~ /^[0-9]{1,6}$/ or exit 125;
+
+  pipe(my $ready_reader, my $ready_writer) or exit 125;
+  my $child = fork();
+  exit 125 unless defined $child;
+  if ($child == 0) {
+    close $ready_reader;
+    select undef, undef, undef, $pre_setsid_delay_ms / 1000 if $pre_setsid_delay_ms > 0;
+    setsid() or exit 125;
+    # The handshake is this proof, not merely a notification: the parent is
+    # allowed to signal -$pid only after the child has confirmed it is the
+    # leader of its own group.
+    getpgrp(0) == $$ or exit 125;
+    syswrite($ready_writer, "R", 1) == 1 or exit 125;
+    close $ready_writer or exit 125;
+    exec @ARGV;
+    exit 125;
+  }
+  close $ready_writer;
+  my $ready_flags = fcntl($ready_reader, F_GETFL, 0);
+  defined $ready_flags or exit 125;
+  fcntl($ready_reader, F_SETFL, $ready_flags | O_NONBLOCK) or exit 125;
+
+  sub owned_alive {
+    my ($pid, $have_group) = @_;
+    return $have_group ? (kill(0, -$pid) > 0 ? 1 : 0) : (kill(0, $pid) > 0 ? 1 : 0);
+  }
+
+  sub terminate_owned {
+    my ($pid, $have_group, $grace_seconds, $settle) = @_;
+    # Before the handshake the group does not exist, so the pid is the only
+    # honest target. Signalling -$pid here would be a no-op wearing the costume
+    # of a group kill.
+    my $signalled = $have_group ? -$pid : $pid;
+    kill "TERM", $signalled;
+    my $grace_deadline = time() + $grace_seconds;
+    while (time() < $grace_deadline) {
+      waitpid($pid, WNOHANG);
+      last unless owned_alive($pid, $have_group);
+      select undef, undef, undef, 0.05;
+    }
+    kill "KILL", $signalled if owned_alive($pid, $have_group);
+    my $reap_deadline = time() + $settle;
+    while (time() < $reap_deadline) {
+      last if waitpid($pid, WNOHANG) != 0;
+      select undef, undef, undef, 0.02;
+    }
+    # Without a group there is nothing further to prove empty; the pid was the
+    # whole owned set.
+    return 1 unless $have_group;
+    my $settle_deadline = time() + $settle;
+    while (time() < $settle_deadline) {
+      return 1 if kill(0, -$pid) == 0;
+      select undef, undef, undef, 0.05;
+    }
+    return 0;
+  }
+
+  my $have_group = 0;
+  my $deadline = time() + $deadline_seconds;
+  while (1) {
+    my $waited = waitpid($child, WNOHANG);
+    if ($waited == $child) {
+      my $status = $?;
+      exit(128 + ($status & 127)) if $status & 127;
+      exit($status >> 8);
+    }
+    if (!$have_group) {
+      my $ready_byte = "";
+      my $got = sysread($ready_reader, $ready_byte, 1);
+      $have_group = 1 if defined $got && $got == 1 && $ready_byte eq "R";
+    }
+    if (time() >= $deadline) {
+      my $no_survivors = terminate_owned($child, $have_group, $term_grace_seconds, $settle_seconds);
+      exit($no_survivors ? 124 : 123);
+    }
+    select undef, undef, undef, 0.02;
+  }
+'
+
+# Both wrappers derive their envelope here so the run-wide clamp and the
+# regression override are applied in exactly one place.
+s2_owned_command_timeout() {
+  local remaining timeout="$1"
+  remaining="$(s2_remaining_main_deadline)" || return 124
+  if [[ -n "${S2_PLANT_WRAPPER_DEADLINE_SECONDS:-}" ]]; then
+    [[ "${S2_PLANT_WRAPPER_DEADLINE_SECONDS}" =~ ^[0-9]{1,4}$ ]] || return 125
+    timeout=${S2_PLANT_WRAPPER_DEADLINE_SECONDS}
+  fi
+  (( remaining < timeout )) && timeout=${remaining}
+  printf '%s\n' "${timeout}"
+}
+
+s2_run_owned_deadline() {
+  local timeout
+  timeout="$(s2_owned_command_timeout "${S2_OWNED_COMMAND_DEADLINE_SECONDS}")" || return $?
+  perl -MPOSIX=setsid,WNOHANG -MFcntl=F_GETFL,F_SETFL,O_NONBLOCK \
+    -e "${S2_OWNED_COMMAND_PROGRAM}" "${timeout}" "$@"
+}
+
+s2_bounded_capture() {
+  local output timeout
+  timeout="$(s2_owned_command_timeout "${S2_PROVENANCE_COMMAND_DEADLINE_SECONDS}")" || return $?
+  output="$(perl -MPOSIX=setsid,WNOHANG -MFcntl=F_GETFL,F_SETFL,O_NONBLOCK \
+    -e "${S2_OWNED_COMMAND_PROGRAM}" "${timeout}" "$@")" || return 1
+  printf '%s' "${output}"
+}
+
+s2_current_source_digest() {
+  local digest
+  digest="$(s2_bounded_capture bun --eval '
+    import { createHash } from "node:crypto";
+    import {
+      closeSync, constants, fstatSync, lstatSync, openSync, readSync, realpathSync,
+    } from "node:fs";
+    import { isAbsolute, relative, resolve } from "node:path";
+    const paths = Bun.argv.slice(1);
+    if (paths.length === 0) process.exit(2);
+    const repoRoot = realpathSync(process.cwd());
+    const MAX_SOURCE_BYTES = 4 * 1024 * 1024;
+    const withinRepo = (candidate) => {
+      const relativePath = relative(repoRoot, candidate);
+      return relativePath !== "" && !relativePath.startsWith("..") && !isAbsolute(relativePath);
+    };
+    const sourceError = (reason) => {
+      throw new Error(reason);
+    };
+    const inspectSafeSource = (candidate) => {
+      let info;
+      try {
+        info = lstatSync(candidate);
+      } catch (error) {
+        if (error && typeof error === "object" && error.code === "ENOENT") return undefined;
+        sourceError("source-lstat-failed");
+      }
+      if (!info.isFile()) return undefined;
+      if (info.size > MAX_SOURCE_BYTES) sourceError("source-too-large");
+      let real;
+      try {
+        real = realpathSync(candidate);
+      } catch {
+        sourceError("source-realpath-failed");
+      }
+      if (real !== candidate || !withinRepo(real)) sourceError("symlinked-source");
+      return info;
+    };
+    const readTrustedSource = (pathname) => {
+      const candidate = resolve(repoRoot, pathname);
+      if (!withinRepo(candidate)) sourceError("source-escapes-repository");
+      const checked = inspectSafeSource(candidate);
+      if (checked === undefined) sourceError("unreadable-source");
+      let descriptor;
+      try {
+        descriptor = openSync(candidate, constants.O_RDONLY | constants.O_NOFOLLOW);
+      } catch {
+        sourceError("source-open-failed");
+      }
+      try {
+        let info;
+        try {
+          info = fstatSync(descriptor);
+        } catch {
+          sourceError("source-fstat-failed");
+        }
+        if (!info.isFile()) sourceError("non-regular-source");
+        if (info.size > MAX_SOURCE_BYTES) sourceError("source-too-large");
+        if (info.dev !== checked.dev || info.ino !== checked.ino) sourceError("source-raced-before-read");
+        const buffer = Buffer.alloc(info.size);
+        let offset = 0;
+        while (offset < info.size) {
+          let count;
+          try {
+            count = readSync(descriptor, buffer, offset, info.size - offset, offset);
+          } catch {
+            sourceError("source-read-failed");
+          }
+          if (count <= 0) break;
+          offset += count;
+        }
+        if (offset !== info.size) sourceError("short-source-read");
+        return buffer;
+      } finally {
+        try {
+          closeSync(descriptor);
+        } catch {
+          // A close failure cannot make untrusted source bytes trusted.
+        }
+      }
+    };
+    try {
+      const snapshot = () => paths.map((path) => ({ path, bytes: readTrustedSource(path) }));
+      const first = snapshot();
+      const second = snapshot();
+      if (first.some((entry, index) => !entry.bytes.equals(second[index].bytes))) process.exit(3);
+      const outer = createHash("sha256");
+      for (const entry of second) {
+        outer.update(createHash("sha256").update(entry.bytes).digest("hex"));
+        outer.update("  ");
+        outer.update(entry.path);
+        outer.update("\\n");
+      }
+      process.stdout.write(outer.digest("hex"));
+    } catch {
+      // This command substitution never publishes source-path or native-error
+      // details. The caller maps any failure to a fixed provenance code.
+      process.exit(4);
+    }
+  ' -- "${S2_PROVENANCE_SOURCE_PATHS[@]}")" || return 1
+  [[ "${digest}" =~ ^[a-f0-9]{64}$ ]] || return 1
+  printf '%s\n' "${digest}"
+}
+
+# The graphs this run executes, and therefore the graphs the frozen digest has
+# to close over.
+#
+# The retained receipt is not a cost-model artifact: its manifest calls itself
+# `s2-krater-evidence-v2`, its scope is `local-workerd-d1-do`, its bindings name
+# DB and KRATER_OUTBOX, and its p95 fields measure the Worker write path. Fable
+# S-2 asks for the write transaction and the outbox-drain DO alarm on real D1.
+# A `source_digest` on that receipt that did not close over the executed Worker
+# bytes would be attesting the wrong thing, so the Worker entry points belong
+# here beside the cost verifier rather than being covered only by inspection.
+readonly -a S2_CLOSURE_ENTRY_POINT_LIST=(
+  scripts/verify-cost-model.ts
+  apps/wire/src/krater/worker.ts
+  apps/wire/src/krater/krater.ts
+  apps/wire/src/krater/outbox-do.ts
+  apps/wire/src/krater/s2-client.ts
+)
+
+# Closure is a property of the import graph, not of anyone's memory. This walks
+# the graphs the run actually executes and requires every local file they reach
+# to be a declared source path. `scripts/harness/runner.ts` and the
+# diagnostic-safety module were both live dependencies that no listed path
+# covered; a hand-maintained list will drift again the next time an import is
+# added, so the list is now checked against the graph rather than asserted.
+s2_verify_source_closure() {
+  local outcome kind detail
+  local -a listed=("${S2_SOURCE_PATHS[@]}")
+  # Plant-only. Removing a genuinely live dependency from the list handed to the
+  # checker is the only way to prove the checker is what closes the graph: an
+  # in-list byte mutation proves the digest re-reads its inputs, which is a
+  # different claim. This runs before any phase, publication, or receipt exists.
+  if [[ -n "${S2_PLANT_SOURCE_CLOSURE_OMIT:-}" ]]; then
+    local -a retained=()
+    local omitted=0 candidate
+    for candidate in "${listed[@]}"; do
+      if [[ "${candidate}" == "${S2_PLANT_SOURCE_CLOSURE_OMIT}" ]]; then
+        omitted=1
+        continue
+      fi
+      retained+=("${candidate}")
+    done
+    if (( omitted != 1 )); then
+      printf '%s\n' "{\"tool\":\"bun\",\"package\":\"apps/wire\",\"suite\":\"s2-krater-source-closure\",\"status\":\"fail\",\"code\":\"S2_SOURCE_CLOSURE_PLANT_TARGET_UNLISTED\",\"omit_target\":\"${S2_PLANT_SOURCE_CLOSURE_OMIT}\",\"reproduce\":\"scripts/e2e-s2-krater.sh\"}"
+      return 1
+    fi
+    listed=("${retained[@]}")
+  fi
+  local -a entry_points=("${S2_CLOSURE_ENTRY_POINT_LIST[@]}")
+  # Plant-only. Appends an extra entry point so the containment rule is proved
+  # against the real gate without putting an escaping import into the repository.
+  if [[ -n "${S2_PLANT_SOURCE_CLOSURE_ESCAPE_ENTRY:-}" ]]; then
+    entry_points+=("${S2_PLANT_SOURCE_CLOSURE_ESCAPE_ENTRY}")
+  fi
+  outcome="$(S2_CLOSURE_ENTRY_POINTS="$(printf '%s\n' "${entry_points[@]}")" \
+    S2_CLOSURE_LISTED_PATHS="$(printf '%s\n' "${listed[@]}")" \
+    s2_bounded_capture bun --eval '
+    import {
+      closeSync, constants, fstatSync, lstatSync, openSync, readSync, realpathSync,
+    } from "node:fs";
+    import { dirname, isAbsolute, relative, resolve } from "node:path";
+
+    // Exact repository root, taken through realpath so candidate paths and
+    // their real paths are comparable. Every path this walker touches has to
+    // live under it: a relative specifier is attacker-shaped input as far as
+    // this program is concerned, and `../../../../tmp/x` would otherwise be
+    // read and its absolute path serialized into the published record.
+    const repoRoot = realpathSync(process.cwd());
+    const MAX_SOURCE_BYTES = 4 * 1024 * 1024;
+    const withinRepo = (candidate) => {
+      const relativePath = relative(repoRoot, candidate);
+      return relativePath !== "" && !relativePath.startsWith("..") && !isAbsolute(relativePath);
+    };
+    // `lstat`, never `stat`: a symlink is refused rather than followed, and the
+    // real path must match the candidate so no symlinked parent directory can
+    // move the read outside the tree the digest attests.
+    const isSafeSourceFile = (candidate) => {
+      let info;
+      try {
+        info = lstatSync(candidate);
+      } catch {
+        return false;
+      }
+      if (!info.isFile()) return false;
+      if (info.size > MAX_SOURCE_BYTES) throw new Error("source-too-large");
+      let real;
+      try {
+        real = realpathSync(candidate);
+      } catch {
+        return false;
+      }
+      if (real !== candidate || !withinRepo(real)) throw new Error("symlinked-source");
+      return true;
+    };
+
+    // Read through a descriptor opened O_NOFOLLOW, then size and read from that
+    // same descriptor. This is what makes the symlink claim exact rather than
+    // advisory: the final component cannot be a symlink, and the bytes come from
+    // the inode that was checked, not from whatever the path names afterwards.
+    // Parent components are covered by the realpath equality above. The residual
+    // is a rename landing between realpath and open, which is not closed here.
+    const readSourceFile = (candidate) => {
+      const descriptor = openSync(candidate, constants.O_RDONLY | constants.O_NOFOLLOW);
+      try {
+        const info = fstatSync(descriptor);
+        if (!info.isFile()) throw new Error("non-regular-source");
+        if (info.size > MAX_SOURCE_BYTES) throw new Error("source-too-large");
+        const buffer = Buffer.alloc(info.size);
+        let offset = 0;
+        while (offset < info.size) {
+          const read = readSync(descriptor, buffer, offset, info.size - offset, offset);
+          if (read <= 0) break;
+          offset += read;
+        }
+        if (offset !== info.size) throw new Error("short-source-read");
+        return buffer.toString("utf8");
+      } finally {
+        closeSync(descriptor);
+      }
+    };
+
+    const listed = new Set(
+      (process.env.S2_CLOSURE_LISTED_PATHS ?? "")
+        .split("\n")
+        .filter(Boolean)
+        .map((path) => resolve(path)),
+    );
+    const entryPoints = (process.env.S2_CLOSURE_ENTRY_POINTS ?? "").split("\n").filter(Boolean);
+    if (entryPoints.length === 0 || listed.size === 0) process.exit(2);
+
+    // The one workspace package the harness imports by name. Reading its export
+    // map rather than guessing a filename is what makes `@asimposium/contracts`
+    // and `@asimposium/contracts/diagnostic-safety` resolve to distinct files.
+    //
+    // The manifest goes through the same listed-and-safe policy as any other
+    // input first. It steers every bare-specifier resolution, so reading it
+    // unchecked would let the walk be directed by bytes the digest does not
+    // cover — including under an omission plant that removes exactly this path.
+    // Resolved on first use so the refusal travels the typed walk-error channel
+    // instead of escaping as an uncaught throw before the walk begins.
+    const packageRoot = resolve(repoRoot, "packages/contracts");
+    const packageManifestPath = resolve(packageRoot, "package.json");
+    let exportsMapCache;
+    const exportsMapFor = () => {
+      if (exportsMapCache !== undefined) return exportsMapCache;
+      if (!listed.has(packageManifestPath)) throw new Error("package-manifest-unlisted");
+      if (!isSafeSourceFile(packageManifestPath)) throw new Error("package-manifest-unreadable");
+      exportsMapCache = JSON.parse(readSourceFile(packageManifestPath)).exports ?? {};
+      return exportsMapCache;
+    };
+
+    // The Worker sources import extensionless (`from "./krater"`), so a resolver
+    // that only understood explicit `.ts` could not walk them at all: pointing
+    // it at worker.ts produced ENOENT and a walk-error, not a closure verdict.
+    // Candidate order matches the resolution the runtime performs.
+    const resolveLocalFile = (base) => {
+      // Containment is enforced here, before a path can be read or recorded, so
+      // an escaping specifier becomes a walk error rather than an "unlisted"
+      // finding carrying an out-of-tree absolute path.
+      if (!withinRepo(base)) throw new Error("import-escapes-repository");
+      for (const candidate of [base, `${base}.ts`, `${base}/index.ts`]) {
+        if (isSafeSourceFile(candidate)) return candidate;
+      }
+      // Fixed token. Reasons are published verbatim into a JSON diagnostic, so
+      // none of them interpolate a path: a filename could carry a quote or a
+      // backslash and turn the record into something a consumer cannot parse.
+      throw new Error("unresolved-relative-import");
+    };
+
+    const resolveSpecifier = (specifier, importer) => {
+      if (specifier.startsWith("node:") || specifier.startsWith("bun:")) return undefined;
+      if (specifier.startsWith(".")) return resolveLocalFile(resolve(dirname(importer), specifier));
+      if (specifier === "@asimposium/contracts" || specifier.startsWith("@asimposium/contracts/")) {
+        const subpath = specifier === "@asimposium/contracts"
+          ? "."
+          : `./${specifier.slice("@asimposium/contracts/".length)}`;
+        const target = exportsMapFor()[subpath];
+        if (typeof target !== "string") throw new Error("unmapped-export");
+        return resolve(packageRoot, target);
+      }
+      return undefined; // A published dependency, pinned by bun.lock, which is listed.
+    };
+
+    // Static specifiers only: a dynamic import cannot be closed over by a digest
+    // at all, so one is a hard failure rather than something to walk past.
+    // \x27 is the apostrophe: writing it escaped keeps this program free of the
+    // quote that would otherwise terminate the surrounding shell string.
+    const STATIC = /(?:^|[\s;}])(?:import|export)[^;]*?from\s*["\x27]([^"\x27]+)["\x27]/g;
+    const BARE = /(?:^|[\s;}])import\s*["\x27]([^"\x27]+)["\x27]/g;
+    const DYNAMIC = /\bimport\s*\(/;
+
+    const seen = new Set();
+    const missing = [];
+    const walk = (pathname) => {
+      const absolute = resolve(repoRoot, pathname);
+      if (seen.has(absolute)) return;
+      seen.add(absolute);
+      if (!withinRepo(absolute)) throw new Error("entry-escapes-repository");
+      if (!listed.has(absolute)) {
+        // One direct miss is enough to fail the gate, so an unlisted file is
+        // recorded and then left alone. Reading and recursing into it would
+        // mean the walker parses bytes the digest does not cover in order to
+        // report that the digest does not cover them.
+        missing.push(relative(repoRoot, absolute));
+        return;
+      }
+      if (!isSafeSourceFile(absolute)) throw new Error("unreadable-source");
+      const source = readSourceFile(absolute);
+      DYNAMIC.lastIndex = 0;
+      if (DYNAMIC.test(source)) throw new Error("dynamic-import");
+      for (const pattern of [STATIC, BARE]) {
+        pattern.lastIndex = 0;
+        let match = pattern.exec(source);
+        while (match !== null) {
+          const next = resolveSpecifier(match[1], absolute);
+          if (next !== undefined) walk(next);
+          match = pattern.exec(source);
+        }
+      }
+    };
+
+    // Two outcomes on two channels. An unreadable file, an unmapped export or a
+    // dynamic import is not "a missing path": serializing it into the same list
+    // would let a broken walk read as a closure finding, or worse, an empty walk
+    // read as success. Each gets its own kind so the shell can tell them apart.
+    try {
+      for (const entry of entryPoints) walk(entry);
+    } catch (error) {
+      process.stdout.write(`walk-error\t${String(error && error.message)}`);
+      process.exit(0);
+    }
+    if (seen.size === 0) {
+      process.stdout.write("walk-error\tempty-walk");
+      process.exit(0);
+    }
+    process.stdout.write(`missing\t${missing.sort().join(",")}`);
+  ')" || return 1
+  IFS=$'\t' read -r kind detail <<<"${outcome}"
+  # This gate runs before `emit` is defined, so it prints directly.
+  if [[ "${kind}" == "walk-error" ]]; then
+    printf '%s\n' "{\"tool\":\"bun\",\"package\":\"apps/wire\",\"suite\":\"s2-krater-source-closure\",\"status\":\"fail\",\"code\":\"S2_SOURCE_CLOSURE_WALK_FAILED\",\"reason\":\"${detail}\",\"reproduce\":\"scripts/e2e-s2-krater.sh\"}"
+    return 1
+  fi
+  if [[ "${kind}" != "missing" ]]; then
+    printf '%s\n' "{\"tool\":\"bun\",\"package\":\"apps/wire\",\"suite\":\"s2-krater-source-closure\",\"status\":\"fail\",\"code\":\"S2_SOURCE_CLOSURE_WALK_FAILED\",\"reason\":\"unrecognised-outcome\",\"reproduce\":\"scripts/e2e-s2-krater.sh\"}"
+    return 1
+  fi
+  if [[ -n "${detail}" ]]; then
+    printf '%s\n' "{\"tool\":\"bun\",\"package\":\"apps/wire\",\"suite\":\"s2-krater-source-closure\",\"status\":\"fail\",\"code\":\"S2_SOURCE_CLOSURE_INCOMPLETE\",\"unlisted\":\"${detail}\",\"reproduce\":\"scripts/e2e-s2-krater.sh\"}"
+    return 1
+  fi
+  # The published scope is the verified scope. Advertising a narrower entry set
+  # than was walked is the same class of overstatement the closure gate exists
+  # to prevent, so this is derived from the list rather than written out again.
+  local entry_points_json
+  entry_points_json="$(IFS=,; printf '%s' "${S2_CLOSURE_ENTRY_POINT_LIST[*]}")"
+  printf '%s\n' "{\"tool\":\"bun\",\"package\":\"apps/wire\",\"suite\":\"s2-krater-source-closure\",\"status\":\"pass\",\"entry_points\":\"${entry_points_json}\",\"reproduce\":\"scripts/e2e-s2-krater.sh\"}"
+}
+
+s2_current_dirty_state() {
+  local status
+  status="$(s2_bounded_capture git status --porcelain=v1 --untracked-files=all -- \
+    "${S2_PROVENANCE_SOURCE_PATHS[@]}")" || return 1
+  if [[ -n "${status}" ]]; then
+    printf '%s\n' "dirty"
+  else
+    printf '%s\n' "clean"
+  fi
+}
+
+s2_capture_source_provenance() {
+  local head dirty digest
+  head="$(s2_bounded_capture git rev-parse HEAD)" || return 1
+  [[ "${head}" =~ ^[a-f0-9]{40}$ ]] || return 1
+  dirty="$(s2_current_dirty_state)" || return 1
+  [[ "${dirty}" == "clean" || "${dirty}" == "dirty" ]] || return 1
+  digest="$(s2_current_source_digest)" || return 1
+  printf '%s\t%s\t%s\n' "${head}" "${dirty}" "${digest}"
+}
 
 random_hex() {
   local bytes="$1" value
@@ -157,15 +743,6 @@ if port_is_busy "${S2_PORT}"; then
   exit 1
 fi
 readonly S2_PORT
-S2_GIT_HEAD="$(git rev-parse HEAD)"
-readonly S2_GIT_HEAD
-if [[ -n "$(git status --porcelain=v1 --untracked-files=all -- "${S2_SOURCE_PATHS[@]}")" ]]; then
-  readonly S2_GIT_DIRTY="dirty"
-else
-  readonly S2_GIT_DIRTY="clean"
-fi
-S2_SOURCE_DIGEST="$(shasum -a 256 "${S2_SOURCE_PATHS[@]}" | shasum -a 256 | awk '{print $1}')"
-readonly S2_SOURCE_DIGEST
 if [[ ! -d e2e || -L e2e ]]; then
   printf '%s\n' '{"tool":"bash","package":"apps/wire","suite":"s2-krater-evidence","status":"fail","code":"S2_EVIDENCE_PARENT_INVALID","reproduce":"scripts/e2e-s2-krater.sh"}'
   exit 1
@@ -211,8 +788,84 @@ readonly S2_COST_RECEIPT_PATH="${S2_RUN_DIR}/${S2_COST_RECEIPT_RELATIVE_PATH}"
 readonly S2_COST_MANIFEST_PATH="${S2_RUN_DIR}/${S2_COST_MANIFEST_RELATIVE_PATH}"
 readonly S2_COST_PUBLICATION_PATH="${S2_RUN_DIR}/${S2_COST_PUBLICATION_RELATIVE_PATH}"
 readonly S2_COST_PUBLICATION_COMMIT_PATH="${S2_RUN_DIR}/${S2_COST_PUBLICATION_COMMIT_RELATIVE_PATH}"
+readonly S2_SOURCE_SNAPSHOT_PATH="${S2_RUN_DIR}/${S2_SOURCE_SNAPSHOT_RELATIVE_PATH}"
 S2_STATE_DIR="${S2_RUN_DIR}/main"
 readonly S2_STATE_DIR
+declare -a S2_PROVENANCE_SOURCE_PATHS=("${S2_SOURCE_PATHS[@]}")
+S2_PROVENANCE_TEST_SOURCE=""
+# The dependency the plant drifts. It is deliberately one the cost verifier
+# actually executes — `verify-cost-model.ts` imports it directly — so the planted
+# mutation is a change to load-bearing bytes rather than to filler.
+readonly S2_PROVENANCE_DRIFT_ORIGIN="scripts/harness/runner.ts"
+if [[ "${S2_SHELL_REGRESSION_TEST:-}" == "source-provenance-drift" ]]; then
+  # A plant over a synthetic file that nothing imports proves only that the digest
+  # re-reads its own list. It cannot distinguish a list that covers what runs from
+  # one that does not, which is exactly the defect this regression exists to catch.
+  # So the plant substitutes a retained copy of a real listed dependency for that
+  # dependency's own entry, and mutates the copy after capture: the drifting bytes
+  # are a real executable module's bytes. The working tree is never written.
+  S2_PROVENANCE_TEST_SOURCE="${S2_STATE_DIR}/drifted-runner.ts"
+  if ! cp "${S2_PROVENANCE_DRIFT_ORIGIN}" "${S2_PROVENANCE_TEST_SOURCE}"; then
+    printf '%s\n' '{"tool":"bash","package":"apps/wire","suite":"s2-krater-source-provenance","status":"fail","code":"S2_SOURCE_PROVENANCE_PLANT_COPY_FAILED","reproduce":"S2_SHELL_REGRESSION_TEST=source-provenance-drift scripts/e2e-s2-krater.sh"}'
+    exit 1
+  fi
+  s2_provenance_plant_substituted=0
+  for s2_provenance_index in "${!S2_PROVENANCE_SOURCE_PATHS[@]}"; do
+    if [[ "${S2_PROVENANCE_SOURCE_PATHS[s2_provenance_index]}" == "${S2_PROVENANCE_DRIFT_ORIGIN}" ]]; then
+      S2_PROVENANCE_SOURCE_PATHS[s2_provenance_index]="${S2_PROVENANCE_TEST_SOURCE}"
+      s2_provenance_plant_substituted=1
+    fi
+  done
+  # If the substitution found nothing, the chosen dependency is not a declared
+  # source path and the regression would be proving nothing. Fail closed rather
+  # than silently degrade into the synthetic-bytes plant this replaced.
+  if (( s2_provenance_plant_substituted != 1 )); then
+    printf '%s\n' '{"tool":"bash","package":"apps/wire","suite":"s2-krater-source-provenance","status":"fail","code":"S2_SOURCE_PROVENANCE_PLANT_TARGET_UNLISTED","reproduce":"S2_SHELL_REGRESSION_TEST=source-provenance-drift scripts/e2e-s2-krater.sh"}'
+    exit 1
+  fi
+  unset s2_provenance_index s2_provenance_plant_substituted
+fi
+# Gate the declared list against the executed import graph before anything is
+# hashed. A digest over an incomplete list is a confident statement about the
+# wrong thing, so this refuses to start rather than publishing one.
+#
+# The walk and the digest have to describe the same bytes. Running the gate and
+# then capturing left a window in which a listed file could gain a new import:
+# the walk saw the old graph, both the start and final digests saw the new
+# bytes, and the run would publish a digest over an import graph it never
+# closed. This tree has concurrent editors, so that window is not theoretical.
+# Sandwiching the gate between two independently bounded captures and requiring
+# equality collapses it: if anything moved across the walk, the two captures
+# disagree and the run refuses before hashing anything.
+S2_PRE_CLOSURE_SOURCE_PROVENANCE="$(s2_capture_source_provenance)" || {
+  printf '%s\n' '{"tool":"git+bun","package":"apps/wire","suite":"s2-krater-source-provenance","status":"fail","code":"S2_SOURCE_PROVENANCE_CAPTURE_FAILED","reproduce":"scripts/e2e-s2-krater.sh"}'
+  exit 1
+}
+s2_verify_source_closure || exit 1
+# Plant-only, and deterministic: drift lands after the walk and before the
+# second capture, which is exactly the window the sandwich exists to close. It
+# writes only the run-owned retained copy, never a repository path, so it
+# requires the copy substitution to already be in place.
+if [[ "${S2_PLANT_CLOSURE_CAPTURE_RACE:-0}" == "1" ]]; then
+  if [[ -z "${S2_PROVENANCE_TEST_SOURCE}" || ! -f "${S2_PROVENANCE_TEST_SOURCE}" || \
+    -L "${S2_PROVENANCE_TEST_SOURCE}" ]]; then
+    printf '%s\n' '{"tool":"bash","package":"apps/wire","suite":"s2-krater-source-provenance","status":"fail","code":"S2_CLOSURE_CAPTURE_RACE_PLANT_UNAVAILABLE","reproduce":"scripts/e2e-s2-krater.sh"}'
+    exit 1
+  fi
+  printf '%s\n' '' 'export const s2ClosureCaptureRaceDrift = true;' \
+    >>"${S2_PROVENANCE_TEST_SOURCE}"
+fi
+S2_START_SOURCE_PROVENANCE="$(s2_capture_source_provenance)" || {
+  printf '%s\n' '{"tool":"git+bun","package":"apps/wire","suite":"s2-krater-source-provenance","status":"fail","code":"S2_SOURCE_PROVENANCE_CAPTURE_FAILED","reproduce":"scripts/e2e-s2-krater.sh"}'
+  exit 1
+}
+if [[ "${S2_PRE_CLOSURE_SOURCE_PROVENANCE}" != "${S2_START_SOURCE_PROVENANCE}" ]]; then
+  printf '%s\n' '{"tool":"git+bun","package":"apps/wire","suite":"s2-krater-source-provenance","status":"fail","code":"S2_SOURCE_CLOSURE_CAPTURE_RACE","detail":"source changed across the closure walk; the walked graph and the hashed bytes are not the same source state","reproduce":"scripts/e2e-s2-krater.sh"}'
+  exit 1
+fi
+readonly S2_PRE_CLOSURE_SOURCE_PROVENANCE
+IFS=$'\t' read -r S2_GIT_HEAD S2_GIT_DIRTY S2_SOURCE_DIGEST <<<"${S2_START_SOURCE_PROVENANCE}"
+readonly S2_GIT_HEAD S2_GIT_DIRTY S2_SOURCE_DIGEST
 readonly S2_SERVER_LOG="${S2_STATE_DIR}/wrangler.log"
 readonly S2_ORIGIN="http://127.0.0.1:${S2_PORT}"
 S2_SERVER_PID=""
@@ -231,6 +884,9 @@ S2_COST_PHASE_UPGRADE_EMPTY="not-run"
 S2_COST_PHASE_UPGRADE_JOURNAL_EXISTING="not-run"
 S2_COST_PHASE_UPGRADE_JOURNAL_EMPTY="not-run"
 S2_COST_LOCAL_PHASES_COMPLETE=0
+# Set only by the no-Wrangler source-provenance regression below. A real local run always
+# revalidates when it has reached the otherwise publishable local-complete / exit-78 boundary.
+S2_SOURCE_PROVENANCE_REVALIDATE_ON_EXIT=0
 S2_LIFECYCLE_CHILD_PID=""
 S2_LIFECYCLE_CHILD_PGID=""
 S2_LIFECYCLE_CHILD_MARKER=""
@@ -379,6 +1035,23 @@ emit() {
   printf '%s\n' "$1"
 }
 
+# shellcheck disable=SC2329 # invoked from EXIT cleanup, which ShellCheck does not follow.
+s2_source_provenance_matches_start() {
+  local first second final_head final_dirty final_source_digest double_capture_match=true
+  first="$(s2_capture_source_provenance)" || return 1
+  second="$(s2_capture_source_provenance)" || return 1
+  IFS=$'\t' read -r final_head final_dirty final_source_digest <<<"${second}"
+  # Two independently bounded captures must agree. This rejects a checkout or source mutation
+  # that races the final recheck, not merely one that happens before it begins.
+  [[ "${first}" == "${second}" ]] || double_capture_match=false
+  if [[ "${final_head}" != "${S2_GIT_HEAD}" || "${final_dirty}" != "${S2_GIT_DIRTY}" || \
+    "${final_source_digest}" != "${S2_SOURCE_DIGEST}" || "${double_capture_match}" != true ]]; then
+    emit "{\"tool\":\"git+bun\",\"package\":\"apps/wire\",\"suite\":\"s2-krater-source-provenance\",\"status\":\"fail\",\"code\":\"S2_SOURCE_PROVENANCE_DRIFT\",\"start_revision\":\"${S2_GIT_HEAD}\",\"final_revision\":\"${final_head}\",\"start_dirty_state\":\"${S2_GIT_DIRTY}\",\"final_dirty_state\":\"${final_dirty}\",\"start_source_digest\":\"${S2_SOURCE_DIGEST}\",\"final_source_digest\":\"${final_source_digest}\",\"double_capture_match\":${double_capture_match},\"action\":\"retain-failed-evidence-without-cost-publication\",\"reproduce\":\"scripts/e2e-s2-krater.sh\"}"
+    return 1
+  fi
+  emit "{\"tool\":\"git+bun\",\"package\":\"apps/wire\",\"suite\":\"s2-krater-source-provenance\",\"status\":\"pass\",\"revision\":\"${S2_GIT_HEAD}\",\"dirty_state\":\"${S2_GIT_DIRTY}\",\"source_digest\":\"${S2_SOURCE_DIGEST}\",\"double_capture_match\":true,\"reproduce\":\"scripts/e2e-s2-krater.sh\"}"
+}
+
 json_decimal_or_null() {
   if is_decimal "$1"; then
     printf '%s' "$1"
@@ -393,6 +1066,17 @@ json_bool() {
   else
     printf 'false'
   fi
+}
+
+# An unmeasured field is not a false one. `json_bool` collapses "never probed"
+# into `false`, which publishes a measurement that was never taken; anything
+# that is not an explicit true/false is reported as null instead.
+json_bool_or_null() {
+  case "$1" in
+    true) printf 'true' ;;
+    false) printf 'false' ;;
+    *) printf 'null' ;;
+  esac
 }
 
 emit_release_race_failure() {
@@ -453,7 +1137,7 @@ emit_persistent_pre_release_helper_failure() {
 redacted_wrangler_cause() {
   local log_path="${1:-${S2_SERVER_LOG}}"
   # shellcheck disable=SC2016
-  S2_LOG_PATH="${log_path}" bun --eval '
+  S2_LOG_PATH="${log_path}" s2_run_owned_deadline bun --eval '
     const file = Bun.file(process.env.S2_LOG_PATH ?? "");
     const text = await file.text().catch(() => "wrangler log unavailable");
     const redacted = text
@@ -486,7 +1170,10 @@ if [[ ! -x "${S2_WRANGLER}" ]]; then
   emit '{"tool":"wrangler","package":"apps/wire","suite":"s2-krater-local-d1","status":"fail","code":"WRANGLER_UNAVAILABLE","reproduce":"scripts/e2e-s2-krater.sh"}'
   exit 1
 fi
-S2_WRANGLER_VERSION="$("${S2_WRANGLER}" --version)"
+S2_WRANGLER_VERSION="$(s2_bounded_capture "${S2_WRANGLER}" --version)" || {
+  emit '{"tool":"wrangler","package":"apps/wire","suite":"s2-krater-local-d1","status":"fail","code":"WRANGLER_VERSION_UNAVAILABLE","reproduce":"scripts/e2e-s2-krater.sh"}'
+  exit 1
+}
 readonly S2_WRANGLER_VERSION
 
 if [[ ! -d "${S2_STATE_DIR}" || -L "${S2_STATE_DIR}" ]]; then
@@ -1234,7 +1921,7 @@ start_pinned_supervisor() {
   S2_LAST_SUPERVISOR_MARKER="${marker}"
   S2_START_FAILURE_STAGE="pre-arm-release-fifo"
 
-  deadline=$((SECONDS + S2_READY_DEADLINE_SECONDS))
+  deadline="$(s2_deadline_at "${S2_READY_DEADLINE_SECONDS}")"
   while (( SECONDS < deadline )); do
     if [[ -p "${release_fifo}" && ! -L "${release_fifo}" ]]; then
       S2_START_FAILURE_STAGE="pre-arm-ownership"
@@ -1243,7 +1930,7 @@ start_pinned_supervisor() {
       # an unbounded FIFO wait. The parent-held read end also prevents SIGPIPE on that planted race.
       exec 7<>"${release_fifo}" || return 1
       if [[ "${plant_persistent_pre_release_helper}" == 1 ]]; then
-        deadline=$((SECONDS + S2_READY_DEADLINE_SECONDS))
+        deadline="$(s2_deadline_at "${S2_READY_DEADLINE_SECONDS}")"
         while (( SECONDS < deadline )); do
           if [[ -f "${persistent_helper_pid_file}" && ! -L "${persistent_helper_pid_file}" ]] && \
             IFS= read -r persistent_helper_pid <"${persistent_helper_pid_file}" && \
@@ -1315,7 +2002,7 @@ start_pinned_supervisor() {
       # durably acknowledged the exact arm gate. This separates a gate/signal/
       # checkpoint failure from a watchdog launch or PID-publication failure.
       S2_START_FAILURE_STAGE="watchdog-arm-ack"
-      deadline=$((SECONDS + S2_WATCHDOG_PUBLICATION_DEADLINE_SECONDS))
+      deadline="$(s2_deadline_at "${S2_WATCHDOG_PUBLICATION_DEADLINE_SECONDS}")"
       while (( SECONDS < deadline )); do
         if startup_journal_last_phase "${watchdog_startup}" "${pid}" && \
           [[ ${S2_STARTUP_JOURNAL_ARM_ACK} -eq 1 ]]; then
@@ -1331,7 +2018,7 @@ start_pinned_supervisor() {
         return 1
       fi
       S2_START_FAILURE_STAGE="watchdog-publication"
-      deadline=$((SECONDS + S2_WATCHDOG_PUBLICATION_DEADLINE_SECONDS))
+      deadline="$(s2_deadline_at "${S2_WATCHDOG_PUBLICATION_DEADLINE_SECONDS}")"
       watchdog_pid=""
       while (( SECONDS < deadline )); do
         if ! pre_release_supervisor_is_owned "${pid}" "${pid}" "${marker}"; then
@@ -1416,7 +2103,7 @@ start_pinned_supervisor() {
       # The release is not considered successful until the parent can observe the separately
       # identified watchdog in a healthy state. A missing, malformed, dead, or uncertainty state
       # fails closed and the still-pinned exact group is killed before this function returns.
-      deadline=$((SECONDS + S2_READY_DEADLINE_SECONDS))
+      deadline="$(s2_deadline_at "${S2_READY_DEADLINE_SECONDS}")"
       S2_START_FAILURE_STAGE="post-release-health"
       while (( SECONDS < deadline )); do
         supervisor_is_owned "${pid}" "${pid}" "${marker}" || break
@@ -1692,18 +2379,68 @@ lsof_scan_reaches_no_matches() {
   return 1
 }
 
+# Is this process group one this run created?
+s2_pgid_is_owned() {
+  local candidate="$1" owned
+  [[ "${candidate}" =~ ^[0-9]+$ ]] || return 1
+  for owned in "${S2_SERVER_PGID}" "${S2_LIFECYCLE_CHILD_PGID}" \
+    "${S2_LIFECYCLE_OWNED_PGIDS[@]:-}"; do
+    [[ -n "${owned}" && "${owned}" == "${candidate}" ]] && return 0
+  done
+  return 1
+}
+
+# Attribute listening PIDs to this run, or refuse to claim them.
+#
+# A port number is not an identity. Six S-2 fixtures run concurrently and
+# `choose_available_port` can hand two of them the same candidate, so the old
+# machine-global listener scan let a healthy sibling's listener be reported as
+# THIS run's survivor: fixture 1 proved its own group, processes and descriptors
+# clean, then failed on a neighbour and emitted
+# S2_LEGACY_EXACT_RESIDUAL_POSTCONDITION_UNPROVEN. Ownership is decided by exact
+# pgid, marker, or persist path. Anything else is foreign or unknown, and gets
+# its own diagnostic rather than this run's failure.
+s2_classify_listener_pids() {
+  local persist="$1" marker="$2" expected_pgid="${3:-}" pid row row_pgid row_command
+  S2_LISTENER_OWNED_PIDS=""
+  S2_LISTENER_FOREIGN_PIDS=""
+  [[ -n "${S2_LSOF_LAST_OUTPUT}" ]] || return 1
+  while IFS= read -r pid; do
+    [[ -n "${pid}" ]] || continue
+    # A malformed row is never evidence, in either direction.
+    [[ "${pid}" =~ ^[0-9]+$ ]] || return 1
+    row="$(LC_ALL=C ps -o pgid=,command= -p "${pid}" 2>/dev/null)" || row=""
+    if [[ -z "${row}" ]]; then
+      # It exited between the scan and this lookup. Unattributable, so it is
+      # recorded as unknown rather than silently credited to either side.
+      S2_LISTENER_FOREIGN_PIDS+="${pid} "
+      continue
+    fi
+    read -r row_pgid row_command <<<"${row}"
+    if [[ "${row_command}" == *"${persist}"* || "${row_command}" == *"${marker}"* ]]; then
+      S2_LISTENER_OWNED_PIDS+="${pid} "
+    elif [[ -n "${expected_pgid}" && "${row_pgid}" == "${expected_pgid}" ]]; then
+      S2_LISTENER_OWNED_PIDS+="${pid} "
+    elif s2_pgid_is_owned "${row_pgid}"; then
+      S2_LISTENER_OWNED_PIDS+="${pid} "
+    else
+      S2_LISTENER_FOREIGN_PIDS+="${pid} "
+    fi
+  done <<<"${S2_LSOF_LAST_OUTPUT}"
+  return 0
+}
+
 assert_no_run_survivors() {
-  local persist="$1" port="$2" marker="$3" rows line
+  local persist="$1" port="$2" marker="$3" expected_pgid="${4:-}" rows line port_busy=0
   S2_SURVIVOR_ASSERTION_FAILURE=""
+  S2_SURVIVOR_FOREIGN_LISTENERS=""
   lsof_scanner_is_healthy || { S2_SURVIVOR_ASSERTION_FAILURE="lsof-health"; return 1; }
   [[ -d "${persist}" && ! -L "${persist}" ]] || {
     S2_SURVIVOR_ASSERTION_FAILURE="persist-path"
     return 1
   }
-  if port_is_busy "${port}"; then
-    S2_SURVIVOR_ASSERTION_FAILURE="port-busy"
-    return 1
-  fi
+  # Observed now, judged after attribution: a busy port alone no longer decides.
+  port_is_busy "${port}" && port_busy=1
   rows="$(LC_ALL=C ps -axo pid=,pgid=,ppid=,stat=,command=)" || {
     S2_SURVIVOR_ASSERTION_FAILURE="process-scan"
     return 1
@@ -1717,14 +2454,30 @@ assert_no_run_survivors() {
   done <<<"${rows}"
   # lsof -t implicitly selects -w (suppress warnings). Re-enable warnings after -t so an
   # inaccessible recursive path cannot collapse to the same exit-1/empty result as no matches.
+  # This scan is already run-scoped: the path is this run's own persist directory.
   lsof_scan_reaches_no_matches -nP -t +w +D "${persist}" || {
     S2_SURVIVOR_ASSERTION_FAILURE="state-fd-scan"
     return 1
   }
-  lsof_scan_reaches_no_matches -nP -t +w -iTCP:"${port}" -sTCP:LISTEN || {
-    S2_SURVIVOR_ASSERTION_FAILURE="listener-scan"
+  if ! lsof_scan_reaches_no_matches -nP -t +w -iTCP:"${port}" -sTCP:LISTEN; then
+    if ! s2_classify_listener_pids "${persist}" "${marker}" "${expected_pgid}"; then
+      S2_SURVIVOR_ASSERTION_FAILURE="listener-scan"
+      return 1
+    fi
+    if [[ -n "${S2_LISTENER_OWNED_PIDS}" ]]; then
+      S2_SURVIVOR_ASSERTION_FAILURE="listener-scan"
+      return 1
+    fi
+    S2_SURVIVOR_FOREIGN_LISTENERS="${S2_LISTENER_FOREIGN_PIDS% }"
+    # Honest and typed, and deliberately not a failure of this run: a sibling
+    # fixture's listener says nothing about whether this run left survivors.
+    emit "{\"tool\":\"bash+lsof+ps\",\"package\":\"apps/wire\",\"suite\":\"s2-krater-foreign-listener\",\"status\":\"info\",\"code\":\"S2_FOREIGN_LISTENER_OBSERVED\",\"port\":${port},\"foreign_listener_pids\":\"${S2_SURVIVOR_FOREIGN_LISTENERS}\",\"owned_listener_pids\":\"\",\"reproduce\":\"scripts/e2e-s2-krater.sh\"}"
+  elif (( port_busy == 1 )); then
+    # Something holds the port that the scanner cannot enumerate, so it cannot
+    # be attributed to anyone. That is a refusal, not a foreign-listener note.
+    S2_SURVIVOR_ASSERTION_FAILURE="port-busy"
     return 1
-  }
+  fi
   return 0
 }
 
@@ -1783,8 +2536,11 @@ legacy_residual_group_is_exact() {
 
 legacy_reap_leader_lost_group() {
   local pid="$1" pgid="$2" marker="$3" persist="$4" port="$5" tick kill_tick
-  local holder_line holder_pid observed_holder_pgid holder_count=0
-  local controller_holds_state=false exact_group_holds_state=false
+  # Unknown until the state-fd scan actually runs. These were previously seeded
+  # to 0/false and emitted verbatim on a listener-scan failure, which published
+  # three observations nobody had made.
+  local holder_line holder_pid observed_holder_pgid holder_count=""
+  local controller_holds_state="" exact_group_holds_state=""
   for ((tick = 0; tick < S2_LEGACY_STOP_INSPECTION_TICKS; tick += 1)); do
     if ! kill -0 -- "-${pgid}" 2>/dev/null; then
       wait "${pid}" 2>/dev/null || :
@@ -1806,6 +2562,11 @@ legacy_reap_leader_lost_group() {
           wait "${pid}" 2>/dev/null || :
           if ! assert_no_run_survivors "${persist}" "${port}" "${marker}"; then
             if [[ "${S2_SURVIVOR_ASSERTION_FAILURE:-}" == "state-fd-scan" ]]; then
+              # Only inside this branch are the three fields measured, so only
+              # here do they stop being null.
+              holder_count=0
+              controller_holds_state=false
+              exact_group_holds_state=false
               while IFS= read -r holder_line; do
                 [[ -n "${holder_line}" ]] || continue
                 if [[ ! "${holder_line}" =~ ^([0-9]+)$ ]]; then
@@ -1819,7 +2580,7 @@ legacy_reap_leader_lost_group() {
                 [[ "${observed_holder_pgid}" == "${pgid}" ]] && exact_group_holds_state=true
               done <<<"${S2_LSOF_LAST_OUTPUT}"
             fi
-            emit "{\"tool\":\"bash+lsof+ps\",\"package\":\"apps/wire\",\"suite\":\"s2-krater-local-d1-upgrade\",\"status\":\"fail\",\"code\":\"S2_LEGACY_EXACT_RESIDUAL_POSTCONDITION_UNPROVEN\",\"check\":\"${S2_SURVIVOR_ASSERTION_FAILURE:-unknown}\",\"state_holder_count\":$(json_decimal_or_null "${holder_count}"),\"controller_holds_state\":$(json_bool "${controller_holds_state}"),\"exact_group_holds_state\":$(json_bool "${exact_group_holds_state}"),\"reproduce\":\"scripts/e2e-s2-krater.sh\"}"
+            emit "{\"tool\":\"bash+lsof+ps\",\"package\":\"apps/wire\",\"suite\":\"s2-krater-local-d1-upgrade\",\"status\":\"fail\",\"code\":\"S2_LEGACY_EXACT_RESIDUAL_POSTCONDITION_UNPROVEN\",\"check\":\"${S2_SURVIVOR_ASSERTION_FAILURE:-unknown}\",\"state_holder_count\":$(json_decimal_or_null "${holder_count}"),\"controller_holds_state\":$(json_bool_or_null "${controller_holds_state}"),\"exact_group_holds_state\":$(json_bool_or_null "${exact_group_holds_state}"),\"foreign_listener_pids\":\"${S2_SURVIVOR_FOREIGN_LISTENERS:-}\",\"reproduce\":\"scripts/e2e-s2-krater.sh\"}"
             return 1
           fi
           S2_LEGACY_STOP_REAPED_UNCERTAIN=1
@@ -2168,10 +2929,11 @@ write_evidence_receipt() {
   S2_RECEIPT_PHASE_UPGRADE_EMPTY="${S2_COST_PHASE_UPGRADE_EMPTY}" \
   S2_RECEIPT_PHASE_UPGRADE_JOURNAL_EXISTING="${S2_COST_PHASE_UPGRADE_JOURNAL_EXISTING}" \
   S2_RECEIPT_PHASE_UPGRADE_JOURNAL_EMPTY="${S2_COST_PHASE_UPGRADE_JOURNAL_EMPTY}" \
-  bun --eval '
+  s2_run_owned_deadline bun --eval '
     import { createHash } from "node:crypto";
     import {
       parseS2CostEvidenceManifestBytes,
+      parseS2CostMeasurementReceiptBytes,
       S2_COST_DURABLE_PUBLICATION_RESERVED_BYTES,
       S2_COST_DURABLE_PUBLICATION_RESERVED_NAMES,
       S2_COST_EVIDENCE_MANIFEST_VERSION,
@@ -2304,6 +3066,13 @@ write_evidence_receipt() {
               if (costReceipt.kind !== "file") throw new Error("cost-receipt-kind");
               const bytes = readFileSync(resolve(root, costReceiptRelativePath));
               if (bytes.byteLength !== costReceipt.bytes) throw new Error("cost-receipt-size");
+              const parsed = parseS2CostMeasurementReceiptBytes(bytes);
+              if (
+                parsed.run_id !== process.env.S2_RECEIPT_RUN_ID ||
+                parsed.revision !== process.env.S2_RECEIPT_REVISION ||
+                parsed.dirty_state !== process.env.S2_RECEIPT_DIRTY_STATE ||
+                parsed.source_digest !== process.env.S2_RECEIPT_SOURCE_DIGEST
+              ) throw new Error("cost-receipt-provenance");
               return {
                 path: costReceiptRelativePath,
                 digest: createHash("sha256").update(bytes).digest("hex"),
@@ -2388,10 +3157,11 @@ write_s2_cost_publication() {
   S2_PUBLICATION_MANIFEST="${S2_COST_MANIFEST_PATH}" \
   S2_PUBLICATION_RECEIPT="${S2_COST_RECEIPT_PATH}" \
   S2_PUBLICATION_PATH="${S2_COST_PUBLICATION_PATH}" \
-  bun --eval '
+  s2_run_owned_deadline bun --eval '
     import { createHash } from "node:crypto";
     import {
       parseS2CostEvidenceManifestBytes,
+      parseS2CostMeasurementReceiptBytes,
       parseS2CostReceiptPublicationBytes,
       S2_COST_EVIDENCE_MANIFEST_VERSION,
       S2_COST_MANIFEST_RELATIVE_PATH,
@@ -2481,12 +3251,17 @@ write_s2_cost_publication() {
       const manifestBytes = readFileSync(manifestPath);
       const receiptBytes = readFileSync(receiptPath);
       const manifest = parseS2CostEvidenceManifestBytes(manifestBytes);
+      const receipt = parseS2CostMeasurementReceiptBytes(receiptBytes);
       const phases = manifest.local_phase_status;
       if (
         manifest.manifest_version !== S2_COST_EVIDENCE_MANIFEST_VERSION || manifest.exit_code !== 78 ||
         !manifest.s2_cost_receipt || manifest.s2_cost_receipt.path !== S2_COST_RECEIPT_RELATIVE_PATH ||
         manifest.s2_cost_receipt.digest !== digest(receiptBytes) ||
         manifest.s2_cost_receipt.bytes !== receiptBytes.byteLength ||
+        receipt.run_id !== manifest.run_id ||
+        receipt.revision !== manifest.revision ||
+        receipt.dirty_state !== manifest.dirty_state ||
+        receipt.source_digest !== manifest.source_digest ||
         !phases || Object.values(phases).some((value) => value !== "pass")
       ) throw new Error("attestation");
       const publication = {
@@ -2513,6 +3288,125 @@ write_s2_cost_publication() {
   '
 }
 
+# Freeze the source state the commit will be linked to.
+#
+# The publication protocol re-read the working tree, checked it, and then wrote
+# the commit. Between that check and the atomic link the tree was unlocked, so
+# an accepted commit could name a source state that had already moved — and
+# nothing in the retained evidence recorded what the bytes actually were, so no
+# reader could tell afterwards. This writes an immutable per-path descriptor
+# first. Once it exists, later working-tree drift cannot change what the commit
+# is linked to, because the commit is linked to these bytes.
+# shellcheck disable=SC2329
+write_s2_source_snapshot() {
+  # shellcheck disable=SC2034,SC2016
+  S2_SNAPSHOT_ROOT="${S2_RUN_DIR}" \
+  S2_SNAPSHOT_PATH="${S2_SOURCE_SNAPSHOT_PATH}" \
+  S2_SNAPSHOT_PENDING="${S2_SOURCE_SNAPSHOT_PENDING_RELATIVE_PATH}" \
+  S2_SNAPSHOT_RELATIVE="${S2_SOURCE_SNAPSHOT_RELATIVE_PATH}" \
+  S2_SNAPSHOT_SOURCE_PATHS="$(printf '%s\n' "${S2_PROVENANCE_SOURCE_PATHS[@]}")" \
+  S2_SNAPSHOT_EXPECTED_DIGEST="${S2_SOURCE_DIGEST}" \
+  S2_SNAPSHOT_RUN_ID="${S2_RUN_ID}" \
+  S2_SNAPSHOT_REVISION="${S2_GIT_HEAD}" \
+  S2_SNAPSHOT_DIRTY_STATE="${S2_GIT_DIRTY}" \
+  s2_run_owned_deadline bun --eval '
+    import { createHash } from "node:crypto";
+    import {
+      closeSync, constants, fsyncSync, linkSync, lstatSync, openSync, readFileSync, writeSync,
+    } from "node:fs";
+    import { basename, dirname, resolve } from "node:path";
+
+    const root = process.env.S2_SNAPSHOT_ROOT ?? "";
+    const snapshotPath = process.env.S2_SNAPSHOT_PATH ?? "";
+    const pendingRelative = process.env.S2_SNAPSHOT_PENDING ?? "";
+    const snapshotRelative = process.env.S2_SNAPSHOT_RELATIVE ?? "";
+    const sourcePaths = (process.env.S2_SNAPSHOT_SOURCE_PATHS ?? "").split("\n").filter(Boolean);
+    const digest = (bytes) => createHash("sha256").update(bytes).digest("hex");
+    try {
+      if (!root || sourcePaths.length === 0) throw new Error("input");
+      const rootStat = lstatSync(root);
+      if (!rootStat.isDirectory() || rootStat.isSymbolicLink()) throw new Error("root");
+      if (resolve(snapshotPath) !== resolve(root, snapshotRelative)) throw new Error("path");
+      // Same double read as every other capture: bytes that change while being
+      // read are not a snapshot of anything.
+      const first = sourcePaths.map((path) => ({ path, bytes: readFileSync(path) }));
+      const second = sourcePaths.map((path) => ({ path, bytes: readFileSync(path) }));
+      if (first.some((entry, index) => !entry.bytes.equals(second[index].bytes))) {
+        throw new Error("source-mutated-during-read");
+      }
+      const aggregate = createHash("sha256");
+      const entries = [];
+      for (const entry of second) {
+        const entryDigest = digest(entry.bytes);
+        aggregate.update(entryDigest);
+        aggregate.update("  ");
+        aggregate.update(entry.path);
+        // Byte-identical to s2_current_source_digest, which is what defines the
+        // published source_digest. Its separator is the two-character sequence
+        // backslash-n rather than a newline, because that program is written
+        // inside a single-quoted shell string. Anything recomputing this digest
+        // must reproduce it exactly, or it computes a different function and
+        // then reports the difference as drift.
+        aggregate.update("\\n");
+        entries.push({ path: entry.path, digest: entryDigest, bytes: entry.bytes.byteLength });
+      }
+      const aggregateDigest = aggregate.digest("hex");
+      // A snapshot that disagrees with the run start is not something to record
+      // and move past; it means the run already failed its provenance claim.
+      if (aggregateDigest !== process.env.S2_SNAPSHOT_EXPECTED_DIGEST) throw new Error("drift");
+      const body = `${JSON.stringify({
+        schema_version: 1,
+        record: "s2_source_snapshot",
+        run_id: process.env.S2_SNAPSHOT_RUN_ID,
+        revision: process.env.S2_SNAPSHOT_REVISION,
+        dirty_state: process.env.S2_SNAPSHOT_DIRTY_STATE,
+        aggregate_digest: aggregateDigest,
+        entries,
+      })}\n`;
+      const bytes = Buffer.from(body, "utf8");
+      const directory = dirname(snapshotPath);
+      const privateSibling = resolve(directory, pendingRelative);
+      if (
+        basename(privateSibling) !== pendingRelative ||
+        dirname(privateSibling) !== resolve(directory)
+      ) throw new Error("pending-path");
+      let descriptor;
+      let directoryDescriptor;
+      try {
+        descriptor = openSync(
+          privateSibling, constants.O_WRONLY | constants.O_CREAT | constants.O_EXCL, 0o600,
+        );
+        let offset = 0;
+        while (offset < bytes.byteLength) {
+          const written = writeSync(descriptor, bytes, offset, bytes.byteLength - offset);
+          if (!Number.isSafeInteger(written) || written <= 0) throw new Error("short-write");
+          offset += written;
+        }
+        fsyncSync(descriptor);
+        closeSync(descriptor);
+        descriptor = undefined;
+        if (Buffer.compare(readFileSync(privateSibling), bytes) !== 0) throw new Error("readback");
+        linkSync(privateSibling, snapshotPath);
+        directoryDescriptor = openSync(directory, constants.O_RDONLY);
+        fsyncSync(directoryDescriptor);
+        closeSync(directoryDescriptor);
+        directoryDescriptor = undefined;
+        const finalStat = lstatSync(snapshotPath);
+        if (!finalStat.isFile() || finalStat.isSymbolicLink() || (finalStat.mode & 0o777) !== 0o600) {
+          throw new Error("final");
+        }
+      } finally {
+        if (descriptor !== undefined) closeSync(descriptor);
+        if (directoryDescriptor !== undefined) closeSync(directoryDescriptor);
+      }
+      console.log(JSON.stringify({ tool: "bash+bun", package: "apps/wire", suite: "s2-source-snapshot", status: "pass", aggregate_digest: aggregateDigest, entries: entries.length, reproduce: "scripts/e2e-s2-krater.sh" }));
+    } catch (error) {
+      console.log(JSON.stringify({ tool: "bash+bun", package: "apps/wire", suite: "s2-source-snapshot", status: "fail", code: "S2_SOURCE_SNAPSHOT_FAILED", cause: String(error && error.message), reproduce: "scripts/e2e-s2-krater.sh" }));
+      process.exit(1);
+    }
+  '
+}
+
 # Publication itself is still an incomplete statement: this final immutable record binds the
 # receipt, manifest, and publication together after every local phase has passed. The final
 # name and its retained pending sibling are both reserved by the manifest written beforehand.
@@ -2524,10 +3418,14 @@ write_s2_cost_publication_commit() {
   S2_COMMIT_RECEIPT="${S2_COST_RECEIPT_PATH}" \
   S2_COMMIT_PUBLICATION="${S2_COST_PUBLICATION_PATH}" \
   S2_COMMIT_PATH="${S2_COST_PUBLICATION_COMMIT_PATH}" \
-  bun --eval '
+  S2_COMMIT_SOURCE_PATHS="$(printf '%s\n' "${S2_PROVENANCE_SOURCE_PATHS[@]}")" \
+  S2_COMMIT_SOURCE_DIGEST="${S2_SOURCE_DIGEST}" \
+  S2_COMMIT_SNAPSHOT="${S2_SOURCE_SNAPSHOT_PATH}" \
+  s2_run_owned_deadline bun --eval '
     import { createHash } from "node:crypto";
     import {
       parseS2CostEvidenceManifestBytes,
+      parseS2CostMeasurementReceiptBytes,
       parseS2CostReceiptPublicationBytes,
       parseS2CostReceiptPublicationCommitBytes,
       S2_COST_EVIDENCE_MANIFEST_VERSION,
@@ -2556,8 +3454,32 @@ write_s2_cost_publication_commit() {
     const receiptPath = process.env.S2_COMMIT_RECEIPT ?? "";
     const publicationPath = process.env.S2_COMMIT_PUBLICATION ?? "";
     const commitPath = process.env.S2_COMMIT_PATH ?? "";
+    const sourcePaths = (process.env.S2_COMMIT_SOURCE_PATHS ?? "").split("\n").filter(Boolean);
     const digest = (bytes) => createHash("sha256").update(bytes).digest("hex");
-    const writeExclusiveDurably = (destination, pendingRelativePath, body) => {
+    const sourceDigest = () => {
+      if (sourcePaths.length === 0) throw new Error("source-paths");
+      const snapshot = () => sourcePaths.map((path) => ({ path, bytes: readFileSync(path) }));
+      const first = snapshot();
+      const second = snapshot();
+      if (first.some((entry, index) => !entry.bytes.equals(second[index].bytes))) {
+        throw new Error("source-mutated-during-read");
+      }
+      const hasher = createHash("sha256");
+      for (const entry of second) {
+        hasher.update(digest(entry.bytes));
+        hasher.update("  ");
+        hasher.update(entry.path);
+        // PRE-EXISTING DEFECT, fixed here: this used a real newline while
+        // s2_current_source_digest uses the literal two-character sequence. The
+        // two digests could therefore never be equal, so the guard comparing
+        // observedSourceDigest with S2_COMMIT_SOURCE_DIGEST always threw and no
+        // cost-publication commit could ever be written. It went unseen because
+        // reaching the commit requires a full green local run.
+        hasher.update("\\n");
+      }
+      return hasher.digest("hex");
+    };
+    const writeExclusiveDurably = (destination, pendingRelativePath, body, beforeLink) => {
       const directory = dirname(destination);
       const privateSibling = resolve(directory, pendingRelativePath);
       if (
@@ -2589,6 +3511,13 @@ write_s2_cost_publication_commit() {
           throw new Error("private-sibling");
         }
         if (Buffer.compare(readFileSync(privateSibling), bytes) !== 0) throw new Error("private-readback");
+        // The last thing before the commit becomes visible. Everything above is
+        // preparation on a private name nobody can observe; `linkSync` is the
+        // single instant that publishes an accepted commit, so the final source
+        // equality check belongs here and nowhere earlier. If it throws, the
+        // link never happens and no accepted commit exists to be linked to
+        // drifted source.
+        if (typeof beforeLink === "function") beforeLink();
         linkSync(privateSibling, destination);
         directoryDescriptor = openSync(directory, constants.O_RDONLY);
         fsyncSync(directoryDescriptor);
@@ -2622,13 +3551,41 @@ write_s2_cost_publication_commit() {
       const receiptBytes = readFileSync(receiptPath);
       const publicationBytes = readFileSync(publicationPath);
       const manifest = parseS2CostEvidenceManifestBytes(manifestBytes);
+      const receipt = parseS2CostMeasurementReceiptBytes(receiptBytes);
       const publication = parseS2CostReceiptPublicationBytes(publicationBytes);
       const phases = manifest.local_phase_status;
+      // The frozen descriptor, read before anything else is decided. The commit
+      // is linked to these bytes; the working tree is only ever checked for
+      // agreement with them, never used as the record itself.
+      const snapshotPath = process.env.S2_COMMIT_SNAPSHOT ?? "";
+      const snapshotStat = lstatSync(snapshotPath);
+      if (!snapshotStat.isFile() || snapshotStat.isSymbolicLink()) throw new Error("snapshot");
+      const snapshot = JSON.parse(readFileSync(snapshotPath, "utf8"));
+      if (
+        snapshot.record !== "s2_source_snapshot" ||
+        !Array.isArray(snapshot.entries) || snapshot.entries.length !== sourcePaths.length ||
+        snapshot.aggregate_digest !== process.env.S2_COMMIT_SOURCE_DIGEST ||
+        snapshot.aggregate_digest !== manifest.source_digest ||
+        snapshot.revision !== manifest.revision ||
+        snapshot.run_id !== manifest.run_id
+      ) throw new Error("snapshot-attestation");
+      // Per-path agreement, so a snapshot that aggregates to the right value
+      // over a different set of files cannot stand in for the real one.
+      for (let index = 0; index < sourcePaths.length; index += 1) {
+        if (snapshot.entries[index].path !== sourcePaths[index]) throw new Error("snapshot-paths");
+      }
+      const observedSourceDigest = sourceDigest();
       if (
         manifest.manifest_version !== S2_COST_EVIDENCE_MANIFEST_VERSION || manifest.exit_code !== 78 ||
         !manifest.s2_cost_receipt || manifest.s2_cost_receipt.path !== S2_COST_RECEIPT_RELATIVE_PATH ||
         manifest.s2_cost_receipt.digest !== digest(receiptBytes) ||
         manifest.s2_cost_receipt.bytes !== receiptBytes.byteLength ||
+        receipt.run_id !== manifest.run_id ||
+        receipt.revision !== manifest.revision ||
+        receipt.dirty_state !== manifest.dirty_state ||
+        receipt.source_digest !== manifest.source_digest ||
+        observedSourceDigest !== process.env.S2_COMMIT_SOURCE_DIGEST ||
+        observedSourceDigest !== manifest.source_digest ||
         publication.manifest.digest !== digest(manifestBytes) ||
         publication.receipt.digest !== digest(receiptBytes) ||
         publication.receipt.bytes !== receiptBytes.byteLength ||
@@ -2647,7 +3604,39 @@ write_s2_cost_publication_commit() {
       };
       const body = `${JSON.stringify(commit)}\n`;
       parseS2CostReceiptPublicationCommitBytes(Buffer.from(body, "utf8"));
-      writeExclusiveDurably(commitPath, S2_COST_PUBLICATION_COMMIT_PENDING_RELATIVE_PATH, body);
+      writeExclusiveDurably(
+        commitPath,
+        S2_COST_PUBLICATION_COMMIT_PENDING_RELATIVE_PATH,
+        body,
+        () => {
+          // WHAT THIS CHECK IS, AND IS NOT.
+          //
+          // The durable claim is the frozen snapshot: the commit is linked to
+          // bytes already written to retained evidence, and those cannot move
+          // afterwards. That is the part that holds unconditionally.
+          //
+          // This live re-read is a separate, weaker observation. There is an
+          // irreducible filesystem TOCTOU between reading the tree and
+          // `linkSync`, so it must not be described as atomic equality with the
+          // working tree, and nothing downstream should treat it that way. Its
+          // value is narrow and real: drift that has already happened by this
+          // instant prevents the link instead of being published.
+          //
+          // Regression-only: substitute the observed value so this exact branch
+          // is exercised. It injects a digest, never a filesystem write — a
+          // plant that mutated a listed path would be editing shared repository
+          // source from inside a proof harness.
+          const injected = process.env.S2_PLANT_COMMIT_FINAL_WINDOW_DIGEST;
+          if (injected !== undefined && injected !== "" && !/^[a-f0-9]{64}$/.test(injected)) {
+            throw new Error("plant-digest-malformed");
+          }
+          const finalDigest = injected ? injected : sourceDigest();
+          if (
+            finalDigest !== snapshot.aggregate_digest ||
+            finalDigest !== process.env.S2_COMMIT_SOURCE_DIGEST
+          ) throw new Error("final-window-source-drift");
+        },
+      );
       console.log(JSON.stringify({ tool: "bash+bun", package: "apps/wire", suite: "s2-cost-publication-commit", status: "pass", reproduce: "scripts/e2e-s2-krater.sh" }));
     } catch {
       console.log(JSON.stringify({ tool: "bash+bun", package: "apps/wire", suite: "s2-cost-publication-commit", status: "fail", code: "S2_COST_PUBLICATION_COMMIT_FAILED", reproduce: "scripts/e2e-s2-krater.sh" }));
@@ -2679,8 +3668,20 @@ on_exit() {
   if ! cleanup_workers; then
     final_status=125
   fi
+  if [[ ${final_status} -eq 78 && \
+    ( ${S2_COST_LOCAL_PHASES_COMPLETE} -eq 1 || ${S2_SOURCE_PROVENANCE_REVALIDATE_ON_EXIT} -eq 1 ) ]]; then
+    if ! s2_source_provenance_matches_start; then
+      # Evidence stays retained and explicitly failed, but the happy-path 78 below is no
+      # longer eligible to publish a cost receipt from mixed source/revision state.
+      final_status=125
+    fi
+  fi
   if [[ ${final_status} -eq 78 && ${S2_COST_LOCAL_PHASES_COMPLETE} -eq 1 ]]; then
-    if ! write_evidence_receipt "${final_status}" 1 || ! write_s2_cost_publication || \
+    if ! write_evidence_receipt "${final_status}" 1 || \
+      ! s2_source_provenance_matches_start || \
+      ! write_s2_cost_publication || \
+      ! s2_source_provenance_matches_start || \
+      ! write_s2_source_snapshot || \
       ! write_s2_cost_publication_commit; then
       final_status=125
     fi
@@ -2735,7 +3736,7 @@ start_worker() {
   # Transfer is complete only after every Worker handle is visible to EXIT cleanup.
   clear_most_recent_supervisor_if_marker "${S2_SERVER_MARKER}"
 
-  deadline=$((SECONDS + S2_READY_DEADLINE_SECONDS))
+  deadline="$(s2_deadline_at "${S2_READY_DEADLINE_SECONDS}")"
   while (( SECONDS < deadline )); do
     server_is_owned || break
     if ready_response="$(curl --fail --silent --show-error --connect-timeout 1 --max-time 1 \
@@ -2786,7 +3787,7 @@ run_phase() {
   phase_status="${S2_STARTED_STATUS_FILE}"
   phase_watchdog_pid="${S2_STARTED_WATCHDOG_PID}"
   phase_watchdog_health="${S2_STARTED_WATCHDOG_HEALTH}"
-  deadline=$((SECONDS + S2_PHASE_DEADLINE_SECONDS))
+  deadline="$(s2_deadline_at "${S2_PHASE_DEADLINE_SECONDS}")"
   while :; do
     if read_child_status "${phase_status}"; then
       if ! stop_pinned_supervisor "${phase_pid}" "${phase_pgid}" "${phase_marker}" \
@@ -2891,14 +3892,14 @@ run_legacy_upgrade() {
   S2_LEGACY_STATE_DIRS+=("${dir}")
   log="${dir}/wrangler.log"
 
-  if ! "${S2_WRANGLER}" d1 migrations apply DB --config "${S2_LEGACY_CONFIG}" --local \
+  if ! s2_run_owned_deadline "${S2_WRANGLER}" d1 migrations apply DB --config "${S2_LEGACY_CONFIG}" --local \
     --persist-to "${dir}" >"${dir}/legacy-migration.log" 2>&1; then
     emit_legacy_failure "${phase}" "S2_LEGACY_BASE_MIGRATION_FAILED" "${dir}/legacy-migration.log"
     return 1
   fi
 
   if [[ -n "${fixture}" ]]; then
-    if ! "${S2_WRANGLER}" d1 execute DB --config "${S2_LEGACY_CONFIG}" --local \
+    if ! s2_run_owned_deadline "${S2_WRANGLER}" d1 execute DB --config "${S2_LEGACY_CONFIG}" --local \
       --persist-to "${dir}" --file "${fixture}" >"${dir}/legacy-fixture.log" 2>&1; then
       emit_legacy_failure "${phase}" "S2_LEGACY_FIXTURE_LOAD_FAILED" "${dir}/legacy-fixture.log"
       return 1
@@ -2907,7 +3908,7 @@ run_legacy_upgrade() {
 
   # This is intentionally raw SQL, not `d1 migrations apply`; the JSONL emitted by the client
   # labels it `raw-sql-0004`. The migration-journal lane below covers the deploy mechanism.
-  if ! "${S2_WRANGLER}" d1 execute DB --config "${S2_LEGACY_CONFIG}" --local \
+  if ! s2_run_owned_deadline "${S2_WRANGLER}" d1 execute DB --config "${S2_LEGACY_CONFIG}" --local \
     --persist-to "${dir}" --file "${S2_FORWARD_MIGRATION}" >"${dir}/forward-migration.log" 2>&1; then
     emit_legacy_failure "${phase}" "S2_LEGACY_FORWARD_MIGRATION_FAILED" "${dir}/forward-migration.log"
     return 1
@@ -2939,7 +3940,7 @@ run_legacy_upgrade() {
   # runner. The Worker is restarted because the first stage must observe the schema before the
   # index exists.
   if [[ "${status}" -eq 0 && -n "${index_phase}" ]]; then
-    if ! "${S2_WRANGLER}" d1 execute DB --config "${S2_LEGACY_CONFIG}" --local \
+    if ! s2_run_owned_deadline "${S2_WRANGLER}" d1 execute DB --config "${S2_LEGACY_CONFIG}" --local \
       --persist-to "${dir}" --file "${S2_INDEX_MIGRATION}" >"${dir}/index-migration.log" 2>&1; then
       emit_legacy_failure "${index_phase}" "S2_LEGACY_INDEX_MIGRATION_FAILED" "${dir}/index-migration.log"
       return 1
@@ -2971,7 +3972,7 @@ assert_current_migration_journal() {
   local dir="$1" phase="$2" journal_path journal_stderr
   journal_path="${dir}/migration-journal.json"
   journal_stderr="${dir}/migration-journal.stderr"
-  if ! "${S2_WRANGLER}" d1 execute DB --config "${S2_UPGRADE_CONFIG}" --local \
+  if ! s2_run_owned_deadline "${S2_WRANGLER}" d1 execute DB --config "${S2_UPGRADE_CONFIG}" --local \
     --persist-to "${dir}" \
     --command 'SELECT id, name, applied_at FROM d1_migrations ORDER BY id' \
     --json >"${journal_path}" 2>"${journal_stderr}"; then
@@ -2993,7 +3994,7 @@ validate_current_migration_journal() {
   S2_JOURNAL_DIRTY_STATE="${S2_GIT_DIRTY}" \
   S2_JOURNAL_SOURCE_DIGEST="${S2_SOURCE_DIGEST}" \
   S2_JOURNAL_WRANGLER_VERSION="${S2_WRANGLER_VERSION}" \
-  bun --eval '
+  s2_run_owned_deadline bun --eval '
     const fail = (code) => {
       console.log(JSON.stringify({
         tool: "wrangler+bun",
@@ -3072,17 +4073,17 @@ run_migration_journal_upgrade() {
   fi
   S2_LEGACY_STATE_DIRS+=("${dir}")
   log="${dir}/wrangler.log"
-  if ! "${S2_WRANGLER}" d1 migrations apply DB --config "${S2_LEGACY_CONFIG}" --local \
+  if ! s2_run_owned_deadline "${S2_WRANGLER}" d1 migrations apply DB --config "${S2_LEGACY_CONFIG}" --local \
     --persist-to "${dir}" >"${dir}/legacy-migration.log" 2>&1; then
     emit_legacy_failure "${phase}" "S2_JOURNAL_LEGACY_BASE_FAILED" "${dir}/legacy-migration.log"
     return 1
   fi
-  if [[ -n "${fixture}" ]] && ! "${S2_WRANGLER}" d1 execute DB --config "${S2_LEGACY_CONFIG}" --local \
+  if [[ -n "${fixture}" ]] && ! s2_run_owned_deadline "${S2_WRANGLER}" d1 execute DB --config "${S2_LEGACY_CONFIG}" --local \
     --persist-to "${dir}" --file "${fixture}" >"${dir}/legacy-fixture.log" 2>&1; then
     emit_legacy_failure "${phase}" "S2_JOURNAL_FIXTURE_LOAD_FAILED" "${dir}/legacy-fixture.log"
     return 1
   fi
-  if ! "${S2_WRANGLER}" d1 migrations apply DB --config "${S2_UPGRADE_CONFIG}" --local \
+  if ! s2_run_owned_deadline "${S2_WRANGLER}" d1 migrations apply DB --config "${S2_UPGRADE_CONFIG}" --local \
     --persist-to "${dir}" >"${dir}/current-migrations.log" 2>&1; then
     emit_legacy_failure "${phase}" "S2_JOURNAL_CURRENT_APPLY_FAILED" "${dir}/current-migrations.log"
     return 1
@@ -3114,10 +4115,12 @@ run_legacy_upgrade_checked() {
 }
 
 assert_legacy_fixture_bytes() {
-  local fixture_digest migration_path migration_name expected_index=0
+  local fixture_digest migration_paths migration_path migration_name expected_index=0
   # The journal expectation is intentionally closed: a new migration must update both the
   # observed journal and the bounded provenance input list in the same review, rather than
   # silently making this upgrade proof describe only an old prefix.
+  migration_paths="$(s2_bounded_capture bash -c \
+    'LC_ALL=C find db/migrations -maxdepth 1 -type f -name "*.sql" -print | LC_ALL=C sort')" || return 1
   while IFS= read -r migration_path; do
     migration_name="${migration_path##*/}"
     if (( expected_index >= ${#S2_EXPECTED_MIGRATION_JOURNAL[@]} )) || \
@@ -3127,17 +4130,23 @@ assert_legacy_fixture_bytes() {
       return 1
     fi
     expected_index=$((expected_index + 1))
-  done < <(LC_ALL=C find db/migrations -maxdepth 1 -type f -name '*.sql' -print | LC_ALL=C sort)
+  done <<<"${migration_paths}"
   if (( expected_index != ${#S2_EXPECTED_MIGRATION_JOURNAL[@]} )); then
     emit '{"tool":"find","package":"apps/wire","suite":"s2-krater-migration-provenance","status":"fail","code":"S2_MIGRATION_SOURCE_JOURNAL_DRIFT","reproduce":"scripts/e2e-s2-krater.sh"}'
     return 1
   fi
-  if ! cmp -s apps/wire/src/krater/fixtures/legacy-migrations/0001_krater_v0.sql \
+  if ! s2_run_owned_deadline cmp -s apps/wire/src/krater/fixtures/legacy-migrations/0001_krater_v0.sql \
     db/migrations/0001_krater_v0.sql; then
     emit '{"tool":"cmp","package":"apps/wire","suite":"s2-krater-migration-provenance","status":"fail","code":"S2_LEGACY_FIXTURE_BYTE_DRIFT","reproduce":"scripts/e2e-s2-krater.sh"}'
     return 1
   fi
-  fixture_digest="$(shasum -a 256 db/migrations/0001_krater_v0.sql | awk '{print $1}')" || return 1
+  fixture_digest="$(s2_bounded_capture bun --eval '
+    import { createHash } from "node:crypto";
+    import { readFileSync } from "node:fs";
+    const path = Bun.argv[1];
+    if (typeof path !== "string") process.exit(2);
+    process.stdout.write(createHash("sha256").update(readFileSync(path)).digest("hex"));
+  ' -- db/migrations/0001_krater_v0.sql)" || return 1
   [[ "${fixture_digest}" =~ ^[a-f0-9]{64}$ ]] || return 1
   emit "{\"tool\":\"cmp+shasum\",\"package\":\"apps/wire\",\"suite\":\"s2-krater-migration-provenance\",\"revision\":\"${S2_GIT_HEAD}\",\"dirty_state\":\"${S2_GIT_DIRTY}\",\"source_digest\":\"${S2_SOURCE_DIGEST}\",\"fixture_digest\":\"${fixture_digest}\",\"byte_equal\":true,\"status\":\"pass\",\"reproduce\":\"scripts/e2e-s2-krater.sh\"}"
 }
@@ -3160,6 +4169,190 @@ run_s2_shell_regression_test() {
   if [[ ! "${mode}" =~ ^[a-z0-9][a-z0-9-]{0,63}$ ]]; then
     emit '{"tool":"bash","package":"apps/wire","suite":"s2-krater-shell","status":"fail","code":"S2_SHELL_REGRESSION_TEST_INVALID","reproduce":"scripts/e2e-s2-krater.sh"}'
     return 2
+  fi
+
+  # Both wrapper plants call the real `s2_run_owned_deadline` /
+  # `s2_bounded_capture`, not a copy: a copy would let the shipped helper rot
+  # while the regression kept passing against a fossil.
+  if [[ "${mode}" == "owned-wrapper-pre-setsid" ]]; then
+    local wrapper_started wrapper_elapsed wrapper_status wrapper_group_marker
+    wrapper_group_marker="s2-wrapper-presetsid-$(random_hex 8)" || return 1
+    wrapper_started=${SECONDS}
+    # A zero-second envelope with a widened fork->setsid window: the deadline is
+    # guaranteed to expire while the child is still in the controller's group,
+    # so `-$pid` names nothing. The old wrapper signalled it anyway and then
+    # blocked in `waitpid($pid, 0)` with nothing to reap.
+    S2_PLANT_WRAPPER_DEADLINE_SECONDS=0 \
+    S2_PLANT_WRAPPER_PRE_SETSID_DELAY_MS=1500 \
+      s2_run_owned_deadline /bin/sh -c "exec -a ${wrapper_group_marker} /bin/sleep 45"
+    wrapper_status=$?
+    wrapper_elapsed=$((SECONDS - wrapper_started))
+    # 124 is the honest timeout; 123 would mean survivors remained.
+    [[ ${wrapper_status} -eq 124 ]] || return 1
+    # The bound is the claim. The defect this replaces did not return late, it
+    # did not return at all, so a generous ceiling still distinguishes them.
+    (( wrapper_elapsed <= 15 )) || return 1
+    if pgrep -f "${wrapper_group_marker}" >/dev/null 2>&1; then return 1; fi
+    emit "{\"tool\":\"bash\",\"package\":\"apps/wire\",\"suite\":\"s2-krater-shell\",\"status\":\"pass\",\"scenario\":\"owned-wrapper-deadline-before-setsid-terminates-without-hanging\",\"wrapper_status\":${wrapper_status},\"elapsed_seconds\":${wrapper_elapsed},\"survivors\":0,\"reproduce\":\"S2_SHELL_REGRESSION_TEST=owned-wrapper-pre-setsid scripts/e2e-s2-krater.sh\"}"
+    return 0
+  fi
+
+  if [[ "${mode}" == "owned-wrapper-term-resistant" ]]; then
+    local wrapper_started wrapper_elapsed wrapper_status wrapper_group_marker wrapper_output
+    wrapper_group_marker="s2-wrapper-resistant-$(random_hex 8)" || return 1
+    wrapper_started=${SECONDS}
+    # A descendant that ignores TERM and holds stdout open. The old wrapper sent
+    # one TERM, saw the direct child gone, skipped the KILL entirely, and exited
+    # 124 while the survivor kept the capture's pipe open — so the surrounding
+    # command substitution blocked long after the wrapper claimed to have timed
+    # out. Escalation to a group KILL plus an emptiness proof is what closes it.
+    wrapper_output="$(S2_PLANT_WRAPPER_DEADLINE_SECONDS=1 \
+      s2_bounded_capture /bin/sh -c "
+        /bin/sh -c 'trap \"\" TERM; exec -a ${wrapper_group_marker} /bin/sleep 45' &
+        printf 'spawned'
+        /bin/sleep 45
+      ")"
+    wrapper_status=$?
+    wrapper_elapsed=$((SECONDS - wrapper_started))
+    # `s2_bounded_capture` maps any wrapper failure to 1; the load-bearing claim
+    # is that it returned promptly at all.
+    [[ ${wrapper_status} -eq 1 ]] || return 1
+    (( wrapper_elapsed <= 20 )) || return 1
+    [[ -z "${wrapper_output}" ]] || return 1
+    if pgrep -f "${wrapper_group_marker}" >/dev/null 2>&1; then return 1; fi
+    emit "{\"tool\":\"bash\",\"package\":\"apps/wire\",\"suite\":\"s2-krater-shell\",\"status\":\"pass\",\"scenario\":\"owned-wrapper-term-resistant-descendant-is-killed-and-proven-gone\",\"wrapper_status\":${wrapper_status},\"elapsed_seconds\":${wrapper_elapsed},\"survivors\":0,\"reproduce\":\"S2_SHELL_REGRESSION_TEST=owned-wrapper-term-resistant scripts/e2e-s2-krater.sh\"}"
+    return 0
+  fi
+
+  if [[ "${mode}" == "source-snapshot-freeze" ]]; then
+    local snapshot_aggregate snapshot_entries snapshot_mode expected_entries
+    write_s2_source_snapshot || return 1
+    [[ -f "${S2_SOURCE_SNAPSHOT_PATH}" && ! -L "${S2_SOURCE_SNAPSHOT_PATH}" ]] || return 1
+    snapshot_mode="$(LC_ALL=C stat -f '%Lp' "${S2_SOURCE_SNAPSHOT_PATH}" 2>/dev/null)" || return 1
+    [[ "${snapshot_mode}" == "600" ]] || return 1
+    snapshot_aggregate="$(S2_SNAPSHOT_READ_PATH="${S2_SOURCE_SNAPSHOT_PATH}" \
+      s2_bounded_capture bun --eval '
+      import { readFileSync } from "node:fs";
+      const snapshot = JSON.parse(readFileSync(process.env.S2_SNAPSHOT_READ_PATH, "utf8"));
+      process.stdout.write(`${snapshot.aggregate_digest} ${snapshot.entries.length}`);
+    ')" || return 1
+    read -r snapshot_aggregate snapshot_entries <<<"${snapshot_aggregate}"
+    # The frozen descriptor must agree with the run-start digest exactly, and
+    # cover every provenance path rather than a convenient subset.
+    [[ "${snapshot_aggregate}" == "${S2_SOURCE_DIGEST}" ]] || return 1
+    expected_entries=${#S2_PROVENANCE_SOURCE_PATHS[@]}
+    [[ "${snapshot_entries}" == "${expected_entries}" ]] || return 1
+    # Immutability is the whole point: the exclusive create must refuse a second
+    # write rather than silently replacing what a commit may already be bound to.
+    if write_s2_source_snapshot >/dev/null 2>&1; then return 1; fi
+    emit "{\"tool\":\"bash+bun\",\"package\":\"apps/wire\",\"suite\":\"s2-krater-shell\",\"status\":\"pass\",\"scenario\":\"source-snapshot-is-frozen-exact-and-not-rewritable\",\"aggregate_digest\":\"${snapshot_aggregate}\",\"entries\":${snapshot_entries},\"reproduce\":\"S2_SHELL_REGRESSION_TEST=source-snapshot-freeze scripts/e2e-s2-krater.sh\"}"
+    return 0
+  fi
+
+  if [[ "${mode}" == "foreign-listener-attribution" ]]; then
+    local listener_port foreign_pid owned_pid attribution_marker listener_program
+    attribution_marker="attribution-$(random_hex 8)" || return 1
+    listener_program='
+      use IO::Socket::INET;
+      use POSIX qw(setsid);
+      my $label = shift @ARGV;
+      my $port = shift @ARGV;
+      my $own_session = shift @ARGV;
+      setsid() if $own_session;
+      my $socket = IO::Socket::INET->new(
+        LocalAddr => "127.0.0.1", LocalPort => $port, Listen => 1, ReuseAddr => 1,
+      ) or exit 1;
+      $0 = $label;
+      print "listening\n";
+      $| = 1;
+      sleep 120;
+    '
+    listener_port="$(choose_available_port)" || return 1
+
+    # A genuine sibling: its own session, no marker, nothing of this run in its
+    # command line. Two fixtures colliding on one port is the exact condition
+    # that made a healthy neighbour read as this run's survivor.
+    perl -e "${listener_program}" "s2-unrelated-sibling-listener" "${listener_port}" 1 \
+      >/dev/null 2>&1 &
+    foreign_pid=$!
+    deadline="$(s2_deadline_at 10)"
+    while ! port_is_busy "${listener_port}"; do
+      (( SECONDS < deadline )) || { kill -KILL "${foreign_pid}" 2>/dev/null; return 1; }
+      sleep 0.05
+    done
+    # The load-bearing assertion: this run's cleanup succeeds while a foreign
+    # listener occupies the port it is checking.
+    if ! assert_no_run_survivors "${S2_STATE_DIR}" "${listener_port}" "${attribution_marker}"; then
+      kill -KILL "${foreign_pid}" 2>/dev/null
+      emit "{\"tool\":\"bash\",\"package\":\"apps/wire\",\"suite\":\"s2-krater-shell\",\"status\":\"fail\",\"code\":\"S2_FOREIGN_LISTENER_MISATTRIBUTED\",\"check\":\"${S2_SURVIVOR_ASSERTION_FAILURE:-unknown}\",\"reproduce\":\"S2_SHELL_REGRESSION_TEST=foreign-listener-attribution scripts/e2e-s2-krater.sh\"}"
+      return 1
+    fi
+    [[ -n "${S2_SURVIVOR_FOREIGN_LISTENERS}" ]] || {
+      kill -KILL "${foreign_pid}" 2>/dev/null
+      return 1
+    }
+    kill -KILL "${foreign_pid}" 2>/dev/null
+    wait "${foreign_pid}" 2>/dev/null || :
+
+    # The other side, so the fix is an attribution rule and not blanket
+    # permissiveness: a listener whose command names this run's marker must
+    # still fail the very same check.
+    listener_port="$(choose_available_port)" || return 1
+    perl -e "${listener_program}" "s2-pinned-supervisor-${attribution_marker}" \
+      "${listener_port}" 0 >/dev/null 2>&1 &
+    owned_pid=$!
+    deadline="$(s2_deadline_at 10)"
+    while ! port_is_busy "${listener_port}"; do
+      (( SECONDS < deadline )) || { kill -KILL "${owned_pid}" 2>/dev/null; return 1; }
+      sleep 0.05
+    done
+    if assert_no_run_survivors "${S2_STATE_DIR}" "${listener_port}" "${attribution_marker}"; then
+      kill -KILL "${owned_pid}" 2>/dev/null
+      emit "{\"tool\":\"bash\",\"package\":\"apps/wire\",\"suite\":\"s2-krater-shell\",\"status\":\"fail\",\"code\":\"S2_OWNED_LISTENER_NOT_DETECTED\",\"reproduce\":\"S2_SHELL_REGRESSION_TEST=foreign-listener-attribution scripts/e2e-s2-krater.sh\"}"
+      return 1
+    fi
+    # The process-table sweep sees this run's marker before the listener scan
+    # does, which is itself run-scoped; either way it must be this run's failure.
+    [[ "${S2_SURVIVOR_ASSERTION_FAILURE}" == "process-match" || \
+      "${S2_SURVIVOR_ASSERTION_FAILURE}" == "listener-scan" ]] || {
+      kill -KILL "${owned_pid}" 2>/dev/null
+      return 1
+    }
+    local marker_check="${S2_SURVIVOR_ASSERTION_FAILURE}"
+    kill -KILL "${owned_pid}" 2>/dev/null
+    wait "${owned_pid}" 2>/dev/null || :
+
+    # Third case, because the two above leave the pgid rule untested: the
+    # marker-named listener is caught by the process-table sweep before the
+    # listener scan is ever consulted. This one is named neutrally, so only
+    # `s2_pgid_is_owned` can classify it, and the failure must be listener-scan.
+    local pgid_pid pgid_owned pgid_check saved_server_pgid="${S2_SERVER_PGID}"
+    listener_port="$(choose_available_port)" || return 1
+    perl -e "${listener_program}" "s2-neutral-listener" "${listener_port}" 1 \
+      >/dev/null 2>&1 &
+    pgid_pid=$!
+    deadline="$(s2_deadline_at 10)"
+    while ! port_is_busy "${listener_port}"; do
+      (( SECONDS < deadline )) || { kill -KILL "${pgid_pid}" 2>/dev/null; return 1; }
+      sleep 0.05
+    done
+    pgid_owned="$(LC_ALL=C ps -o pgid= -p "${pgid_pid}" 2>/dev/null | tr -d '[:space:]')" || pgid_owned=""
+    [[ "${pgid_owned}" =~ ^[0-9]+$ ]] || { kill -KILL "${pgid_pid}" 2>/dev/null; return 1; }
+    S2_SERVER_PGID="${pgid_owned}"
+    if assert_no_run_survivors "${S2_STATE_DIR}" "${listener_port}" "${attribution_marker}"; then
+      S2_SERVER_PGID="${saved_server_pgid}"
+      kill -KILL "${pgid_pid}" 2>/dev/null
+      emit "{\"tool\":\"bash\",\"package\":\"apps/wire\",\"suite\":\"s2-krater-shell\",\"status\":\"fail\",\"code\":\"S2_OWNED_PGID_LISTENER_NOT_DETECTED\",\"reproduce\":\"S2_SHELL_REGRESSION_TEST=foreign-listener-attribution scripts/e2e-s2-krater.sh\"}"
+      return 1
+    fi
+    pgid_check="${S2_SURVIVOR_ASSERTION_FAILURE}"
+    S2_SERVER_PGID="${saved_server_pgid}"
+    kill -KILL "${pgid_pid}" 2>/dev/null
+    wait "${pgid_pid}" 2>/dev/null || :
+    [[ "${pgid_check}" == "listener-scan" ]] || return 1
+
+    emit "{\"tool\":\"bash+lsof+ps\",\"package\":\"apps/wire\",\"suite\":\"s2-krater-shell\",\"status\":\"pass\",\"scenario\":\"concurrent-foreign-listener-is-not-this-runs-survivor-while-marker-and-pgid-owned-listeners-still-are\",\"marker_check\":\"${marker_check}\",\"pgid_check\":\"${pgid_check}\",\"reproduce\":\"S2_SHELL_REGRESSION_TEST=foreign-listener-attribution scripts/e2e-s2-krater.sh\"}"
+    return 0
   fi
 
   if [[ "${mode}" == "pre-release-helper-classification" ]]; then
@@ -3237,7 +4430,7 @@ run_s2_shell_regression_test() {
       S2_PRE_ARM_OWNER_LOSS_RECORD="${parent_loss_record}" \
       bash "${BASH_SOURCE[0]}" >/dev/null 2>&1 &
     parent_loss_child=$!
-    deadline=$((SECONDS + S2_READY_DEADLINE_SECONDS))
+    deadline="$(s2_deadline_at "${S2_READY_DEADLINE_SECONDS}")"
     while [[ ! -f "${parent_loss_record}" || -L "${parent_loss_record}" ]]; do
       if (( SECONDS >= deadline )); then
         kill -KILL "${parent_loss_child}" 2>/dev/null || :
@@ -3359,7 +4552,7 @@ run_s2_shell_regression_test() {
           emit '{"tool":"bash","package":"apps/wire","suite":"s2-krater-shell","status":"fail","code":"S2_OWNER_LOSS_UNCERTAIN_START_FAILED","reproduce":"S2_SHELL_REGRESSION_TEST=owner-loss-uncertain scripts/e2e-s2-krater.sh"}'
           return 1
         }
-    deadline=$((SECONDS + S2_READY_DEADLINE_SECONDS))
+    deadline="$(s2_deadline_at "${S2_READY_DEADLINE_SECONDS}")"
     while :; do
       group_members "${S2_STARTED_PGID}" || return 1
       [[ ${S2_GROUP_MEMBER_COUNT} -ge 3 ]] && break
@@ -3414,7 +4607,7 @@ run_s2_shell_regression_test() {
         emit_owner_loss_uncertain_failure "S2_OWNER_LOSS_UNCERTAIN_RECORD_INVALID"
         return 1
       }
-    deadline=$((SECONDS + S2_WATCHDOG_MAX_UNCERTAIN_TICKS + 8))
+    deadline="$(s2_deadline_at "$((S2_WATCHDOG_MAX_UNCERTAIN_TICKS + 8))")"
     while kill -0 -- "-${supervisor_pgid}" 2>/dev/null; do
       (( SECONDS < deadline )) || {
         emit_owner_loss_uncertain_failure "S2_OWNER_LOSS_UNCERTAIN_GROUP_TIMEOUT"
@@ -3539,7 +4732,7 @@ run_s2_shell_regression_test() {
     supervisor_status="${S2_STARTED_STATUS_FILE}"
     supervisor_watchdog_pid="${S2_STARTED_WATCHDOG_PID}"
     supervisor_watchdog_health="${S2_STARTED_WATCHDOG_HEALTH}"
-    deadline=$((SECONDS + S2_READY_DEADLINE_SECONDS))
+    deadline="$(s2_deadline_at "${S2_READY_DEADLINE_SECONDS}")"
     while ! read_child_status "${supervisor_status}"; do
       supervisor_is_owned "${supervisor_pid}" "${supervisor_pgid}" "${supervisor_marker}" || {
         emit '{"tool":"bash","package":"apps/wire","suite":"s2-krater-shell","status":"fail","code":"S2_RELEASE_INTERLEAVING_OWNERSHIP_LOST","reproduce":"S2_SHELL_REGRESSION_TEST=release-interleaving scripts/e2e-s2-krater.sh"}'
@@ -3588,7 +4781,7 @@ run_s2_shell_regression_test() {
     supervisor_status="${S2_STARTED_STATUS_FILE}"
     supervisor_watchdog_pid="${S2_STARTED_WATCHDOG_PID}"
     supervisor_watchdog_health="${S2_STARTED_WATCHDOG_HEALTH}"
-    deadline=$((SECONDS + S2_READY_DEADLINE_SECONDS))
+    deadline="$(s2_deadline_at "${S2_READY_DEADLINE_SECONDS}")"
     while :; do
       group_members "${supervisor_pgid}" || return 1
       [[ ${S2_GROUP_MEMBER_COUNT} -ge 3 ]] && break
@@ -3596,7 +4789,7 @@ run_s2_shell_regression_test() {
       sleep 0.05
     done
     signal_owned_group TERM "${supervisor_pid}" "${supervisor_pgid}" "${supervisor_marker}" || return 1
-    deadline=$((SECONDS + S2_READY_DEADLINE_SECONDS))
+    deadline="$(s2_deadline_at "${S2_READY_DEADLINE_SECONDS}")"
     while :; do
       if read_child_status "${supervisor_status}" && [[ "${S2_CHILD_STATUS}" == "143" && \
         -p "${supervisor_status}.control" ]] && \
@@ -3690,7 +4883,7 @@ run_s2_shell_regression_test() {
     # it releases the leader and loses the authority to clean up the payload. The payload has a
     # four-second self-expiry solely to prevent a deliberately failing old implementation from
     # leaving a test process behind after the regression reports failure.
-    deadline=$((SECONDS + S2_READY_DEADLINE_SECONDS))
+    deadline="$(s2_deadline_at "${S2_READY_DEADLINE_SECONDS}")"
     while :; do
       group_members "${supervisor_pgid}" || {
         emit '{"tool":"bash","package":"apps/wire","suite":"s2-krater-shell","status":"fail","code":"S2_TERM_RESISTANT_GROUP_SCAN_FAILED","reproduce":"S2_SHELL_REGRESSION_TEST=term-resistant-release scripts/e2e-s2-krater.sh"}'
@@ -3724,7 +4917,7 @@ run_s2_shell_regression_test() {
         bash -c 'sleep 30'; then
       return 1
     fi
-    deadline=$((SECONDS + S2_READY_DEADLINE_SECONDS + S2_WATCHDOG_MAX_UNCERTAIN_TICKS))
+    deadline="$(s2_deadline_at "$((S2_READY_DEADLINE_SECONDS + S2_WATCHDOG_MAX_UNCERTAIN_TICKS))")"
     is_decimal "${S2_LAST_SUPERVISOR_PGID}" || return 1
     while kill -0 -- "-${S2_LAST_SUPERVISOR_PGID}" 2>/dev/null; do
       (( SECONDS < deadline )) || return 1
@@ -3989,9 +5182,9 @@ run_s2_shell_regression_test() {
     journal_valid="${S2_STATE_DIR}/journal-valid-$(random_hex 8).json"
     journal_alternate="${S2_STATE_DIR}/journal-alternate-$(random_hex 8).json"
     journal_invalid="${S2_STATE_DIR}/journal-invalid-$(random_hex 8).json"
-    printf '%s\n' '[{"success":true,"results":[{"id":1,"name":"0001_krater_v0.sql","applied_at":"2026-08-14 09:25:35.123456"},{"id":2,"name":"0002_enrollment_g0.sql","applied_at":"2026-08-14 09:25:37"},{"id":3,"name":"0003_auth_nonce_replay.sql","applied_at":"2026-08-14 09:25:37"},{"id":4,"name":"0004_krater_integrity_v1.sql","applied_at":"2026-08-14 09:25:37"},{"id":5,"name":"0005_krater_undigested_index.sql","applied_at":"2026-08-14 09:25:37"},{"id":6,"name":"0006_fellow_credential_lifecycle.sql","applied_at":"2026-08-14 09:25:37"},{"id":7,"name":"0007_outbox_quarantine_state.sql","applied_at":"2026-08-14 09:25:37"},{"id":8,"name":"0008_sponsors_bootstrap.sql","applied_at":"2026-08-14 09:25:37"},{"id":9,"name":"0009_device_flow.sql","applied_at":"2026-08-14 09:25:37"},{"id":10,"name":"0010_device_flow_hardening.sql","applied_at":"2026-08-14 09:25:37"},{"id":11,"name":"0011_fellow_credential_hardening.sql","applied_at":"2026-08-14 09:25:37"},{"id":12,"name":"0012_fellow_lifecycle_commands.sql","applied_at":"2026-08-14 09:25:37"},{"id":13,"name":"0013_sponsor_fellow_cap.sql","applied_at":"2026-08-14 09:25:37"},{"id":14,"name":"0014_sponsor_enrollment_rate_limit.sql","applied_at":"2026-08-14 09:25:37"}]}]' >"${journal_valid}"
-    printf '%s\n' '[{"success":true,"results":[{"id":1,"name":"0001_krater_v0.sql","applied_at":"2026-08-14 10:25:35"},{"id":2,"name":"0002_enrollment_g0.sql","applied_at":"2026-08-14 10:25:37"},{"id":3,"name":"0003_auth_nonce_replay.sql","applied_at":"2026-08-14 10:25:37"},{"id":4,"name":"0004_krater_integrity_v1.sql","applied_at":"2026-08-14 10:25:37"},{"id":5,"name":"0005_krater_undigested_index.sql","applied_at":"2026-08-14 10:25:37"},{"id":6,"name":"0006_fellow_credential_lifecycle.sql","applied_at":"2026-08-14 10:25:37"},{"id":7,"name":"0007_outbox_quarantine_state.sql","applied_at":"2026-08-14 10:25:37"},{"id":8,"name":"0008_sponsors_bootstrap.sql","applied_at":"2026-08-14 10:25:37"},{"id":9,"name":"0009_device_flow.sql","applied_at":"2026-08-14 10:25:37"},{"id":10,"name":"0010_device_flow_hardening.sql","applied_at":"2026-08-14 10:25:37"},{"id":11,"name":"0011_fellow_credential_hardening.sql","applied_at":"2026-08-14 10:25:37"},{"id":12,"name":"0012_fellow_lifecycle_commands.sql","applied_at":"2026-08-14 10:25:37"},{"id":13,"name":"0013_sponsor_fellow_cap.sql","applied_at":"2026-08-14 10:25:37"},{"id":14,"name":"0014_sponsor_enrollment_rate_limit.sql","applied_at":"2026-08-14 10:25:37"}]}]' >"${journal_alternate}"
-    printf '%s\n' '[{"success":true,"results":[{"id":1,"name":"0001_krater_v0.sql","applied_at":"2026/08/14 09:25:35"},{"id":2,"name":"0002_enrollment_g0.sql","applied_at":"2026-08-14 09:25:37"},{"id":3,"name":"0003_auth_nonce_replay.sql","applied_at":"2026-08-14 09:25:37"},{"id":4,"name":"0004_krater_integrity_v1.sql","applied_at":"2026-08-14 09:25:37"},{"id":5,"name":"0005_krater_undigested_index.sql","applied_at":"2026-08-14 09:25:37"},{"id":6,"name":"0006_fellow_credential_lifecycle.sql","applied_at":"2026-08-14 09:25:37"},{"id":7,"name":"0007_outbox_quarantine_state.sql","applied_at":"2026-08-14 09:25:37"},{"id":8,"name":"0008_sponsors_bootstrap.sql","applied_at":"2026-08-14 09:25:37"},{"id":9,"name":"0009_device_flow.sql","applied_at":"2026-08-14 09:25:37"},{"id":10,"name":"0010_device_flow_hardening.sql","applied_at":"2026-08-14 09:25:37"},{"id":11,"name":"0011_fellow_credential_hardening.sql","applied_at":"2026-08-14 09:25:37"},{"id":12,"name":"0012_fellow_lifecycle_commands.sql","applied_at":"2026-08-14 09:25:37"},{"id":13,"name":"0013_sponsor_fellow_cap.sql","applied_at":"2026-08-14 09:25:37"},{"id":14,"name":"0014_sponsor_enrollment_rate_limit.sql","applied_at":"2026-08-14 09:25:37"}]}]' >"${journal_invalid}"
+    printf '%s\n' '[{"success":true,"results":[{"id":1,"name":"0001_krater_v0.sql","applied_at":"2026-08-14 09:25:35.123456"},{"id":2,"name":"0002_enrollment_g0.sql","applied_at":"2026-08-14 09:25:37"},{"id":3,"name":"0003_auth_nonce_replay.sql","applied_at":"2026-08-14 09:25:37"},{"id":4,"name":"0004_krater_integrity_v1.sql","applied_at":"2026-08-14 09:25:37"},{"id":5,"name":"0005_krater_undigested_index.sql","applied_at":"2026-08-14 09:25:37"},{"id":6,"name":"0006_fellow_credential_lifecycle.sql","applied_at":"2026-08-14 09:25:37"},{"id":7,"name":"0007_outbox_quarantine_state.sql","applied_at":"2026-08-14 09:25:37"},{"id":8,"name":"0008_sponsors_bootstrap.sql","applied_at":"2026-08-14 09:25:37"},{"id":9,"name":"0009_device_flow.sql","applied_at":"2026-08-14 09:25:37"},{"id":10,"name":"0010_device_flow_hardening.sql","applied_at":"2026-08-14 09:25:37"},{"id":11,"name":"0011_fellow_credential_hardening.sql","applied_at":"2026-08-14 09:25:37"},{"id":12,"name":"0012_fellow_lifecycle_commands.sql","applied_at":"2026-08-14 09:25:37"},{"id":13,"name":"0013_sponsor_fellow_cap.sql","applied_at":"2026-08-14 09:25:37"},{"id":14,"name":"0014_sponsor_enrollment_rate_limit.sql","applied_at":"2026-08-14 09:25:37"},{"id":15,"name":"0015_sponsor_enrollment_bootstrap_invariant.sql","applied_at":"2026-08-14 09:25:37"}]}]' >"${journal_valid}"
+    printf '%s\n' '[{"success":true,"results":[{"id":1,"name":"0001_krater_v0.sql","applied_at":"2026-08-14 10:25:35"},{"id":2,"name":"0002_enrollment_g0.sql","applied_at":"2026-08-14 10:25:37"},{"id":3,"name":"0003_auth_nonce_replay.sql","applied_at":"2026-08-14 10:25:37"},{"id":4,"name":"0004_krater_integrity_v1.sql","applied_at":"2026-08-14 10:25:37"},{"id":5,"name":"0005_krater_undigested_index.sql","applied_at":"2026-08-14 10:25:37"},{"id":6,"name":"0006_fellow_credential_lifecycle.sql","applied_at":"2026-08-14 10:25:37"},{"id":7,"name":"0007_outbox_quarantine_state.sql","applied_at":"2026-08-14 10:25:37"},{"id":8,"name":"0008_sponsors_bootstrap.sql","applied_at":"2026-08-14 10:25:37"},{"id":9,"name":"0009_device_flow.sql","applied_at":"2026-08-14 10:25:37"},{"id":10,"name":"0010_device_flow_hardening.sql","applied_at":"2026-08-14 10:25:37"},{"id":11,"name":"0011_fellow_credential_hardening.sql","applied_at":"2026-08-14 10:25:37"},{"id":12,"name":"0012_fellow_lifecycle_commands.sql","applied_at":"2026-08-14 10:25:37"},{"id":13,"name":"0013_sponsor_fellow_cap.sql","applied_at":"2026-08-14 10:25:37"},{"id":14,"name":"0014_sponsor_enrollment_rate_limit.sql","applied_at":"2026-08-14 10:25:37"},{"id":15,"name":"0015_sponsor_enrollment_bootstrap_invariant.sql","applied_at":"2026-08-14 10:25:37"}]}]' >"${journal_alternate}"
+    printf '%s\n' '[{"success":true,"results":[{"id":1,"name":"0001_krater_v0.sql","applied_at":"2026/08/14 09:25:35"},{"id":2,"name":"0002_enrollment_g0.sql","applied_at":"2026-08-14 09:25:37"},{"id":3,"name":"0003_auth_nonce_replay.sql","applied_at":"2026-08-14 09:25:37"},{"id":4,"name":"0004_krater_integrity_v1.sql","applied_at":"2026-08-14 09:25:37"},{"id":5,"name":"0005_krater_undigested_index.sql","applied_at":"2026-08-14 09:25:37"},{"id":6,"name":"0006_fellow_credential_lifecycle.sql","applied_at":"2026-08-14 09:25:37"},{"id":7,"name":"0007_outbox_quarantine_state.sql","applied_at":"2026-08-14 09:25:37"},{"id":8,"name":"0008_sponsors_bootstrap.sql","applied_at":"2026-08-14 09:25:37"},{"id":9,"name":"0009_device_flow.sql","applied_at":"2026-08-14 09:25:37"},{"id":10,"name":"0010_device_flow_hardening.sql","applied_at":"2026-08-14 09:25:37"},{"id":11,"name":"0011_fellow_credential_hardening.sql","applied_at":"2026-08-14 09:25:37"},{"id":12,"name":"0012_fellow_lifecycle_commands.sql","applied_at":"2026-08-14 09:25:37"},{"id":13,"name":"0013_sponsor_fellow_cap.sql","applied_at":"2026-08-14 09:25:37"},{"id":14,"name":"0014_sponsor_enrollment_rate_limit.sql","applied_at":"2026-08-14 09:25:37"},{"id":15,"name":"0015_sponsor_enrollment_bootstrap_invariant.sql","applied_at":"2026-08-14 09:25:37"}]}]' >"${journal_invalid}"
     if valid_output="$(validate_current_migration_journal "${journal_valid}" journal-timestamp-valid)"; then :; else return 1; fi
     if alternate_output="$(validate_current_migration_journal "${journal_alternate}" journal-timestamp-alternate)"; then :; else return 1; fi
     if invalid_output="$(validate_current_migration_journal "${journal_invalid}" journal-timestamp-invalid)"; then return 1; fi
@@ -4198,7 +5391,7 @@ run_s2_shell_regression_test() {
     S2_SERVER_PERSIST="${S2_STATE_DIR}"
     S2_SERVER_PORT="${S2_PORT}"
     S2_ACTIVE_ORIGIN="http://127.0.0.1:1"
-    deadline=$((SECONDS + S2_READY_DEADLINE_SECONDS))
+    deadline="$(s2_deadline_at "${S2_READY_DEADLINE_SECONDS}")"
     while :; do
       payload_ready_seen=false
       payload_state_regular=false
@@ -4288,7 +5481,7 @@ run_s2_shell_regression_test() {
     watchdog_is_healthy "${supervisor_watchdog_pid}" "${supervisor_pid}" \
       "${supervisor_pgid}" "${supervisor_marker}" "${supervisor_watchdog_health}" || return 1
     kill -USR2 "${supervisor_watchdog_pid}" 2>/dev/null || return 1
-    deadline=$((SECONDS + S2_READY_DEADLINE_SECONDS))
+    deadline="$(s2_deadline_at "${S2_READY_DEADLINE_SECONDS}")"
     while (( SECONDS < deadline )); do
       read -r watchdog_state watchdog_health_pid < <(tail -n 1 "${supervisor_watchdog_health}") || return 1
       if [[ "${watchdog_state}" == "inspection-uncertain" && \
@@ -4338,7 +5531,7 @@ run_s2_shell_regression_test() {
     supervisor_status="${S2_STARTED_STATUS_FILE}"
     supervisor_watchdog_pid="${S2_STARTED_WATCHDOG_PID}"
     supervisor_watchdog_health="${S2_STARTED_WATCHDOG_HEALTH}"
-    deadline=$((SECONDS + S2_READY_DEADLINE_SECONDS))
+    deadline="$(s2_deadline_at "${S2_READY_DEADLINE_SECONDS}")"
     while ! read_child_status "${supervisor_status}"; do
       supervisor_is_owned "${supervisor_pid}" "${supervisor_pgid}" "${supervisor_marker}" || return 1
       (( SECONDS < deadline )) || return 1
@@ -4385,6 +5578,77 @@ run_s2_shell_regression_test() {
     done
     emit '{"tool":"bash","package":"apps/wire","suite":"s2-krater-shell","status":"pass","scenario":"planted-bearer-json-fragment-and-partial-log-secrets-redacted-before-clipping","reproduce":"S2_SHELL_REGRESSION_TEST=redaction scripts/e2e-s2-krater.sh"}'
     return 0
+  fi
+
+  if [[ "${mode}" == "source-provenance-drift" ]]; then
+    # A bounded no-Wrangler plant for the end-of-run guard. The exit starts at the ordinary
+    # external-blocker 78 boundary; on_exit must convert it to 125, retain failed evidence,
+    # and bypass every cost-publication writer.
+    S2_SOURCE_PROVENANCE_REVALIDATE_ON_EXIT=1
+    [[ -n "${S2_PROVENANCE_TEST_SOURCE}" && -f "${S2_PROVENANCE_TEST_SOURCE}" && \
+      ! -L "${S2_PROVENANCE_TEST_SOURCE}" ]] || return 1
+    # Mutate the retained copy of a real dependency in place. Appending to the
+    # module's own bytes keeps the drift semantically real — this is what an
+    # edit to `scripts/harness/runner.ts` mid-run would look like to the digest —
+    # while the working-tree file is left untouched.
+    printf '%s\n' '' 'export const s2PlantedRunnerDrift = "after";' \
+      >>"${S2_PROVENANCE_TEST_SOURCE}"
+    # The plant is only meaningful if the copy still differs from the original it
+    # was taken from; identical bytes would mean nothing drifted.
+    if cmp -s "${S2_PROVENANCE_DRIFT_ORIGIN}" "${S2_PROVENANCE_TEST_SOURCE}"; then
+      return 1
+    fi
+    emit "{\"tool\":\"bash\",\"package\":\"apps/wire\",\"suite\":\"s2-krater-shell\",\"status\":\"pass\",\"scenario\":\"planted-source-provenance-drift-requires-receipt-publication-refusal\",\"mutated_hashed_source\":\"${S2_PROVENANCE_TEST_SOURCE}\",\"drift_origin\":\"${S2_PROVENANCE_DRIFT_ORIGIN}\",\"reproduce\":\"S2_SHELL_REGRESSION_TEST=source-provenance-drift scripts/e2e-s2-krater.sh\"}"
+    return 78
+  fi
+
+  if [[ "${mode}" == "receipt-provenance-mismatch" ]]; then
+    # This writes a schema-valid receipt whose bytes deliberately name a different revision.
+    # The generic manifest writer must parse those bytes and refuse semantic provenance drift
+    # before any receipt publication sidecar is eligible to exist.
+    if ! s2_run_owned_deadline env \
+      S2_PLANT_RECEIPT_ROOT="${S2_RUN_DIR}" \
+      S2_PLANT_RECEIPT_PATH="${S2_COST_RECEIPT_PATH}" \
+      S2_PLANT_RUN_ID="${S2_RUN_ID}" \
+      S2_PLANT_DIRTY_STATE="${S2_GIT_DIRTY}" \
+      S2_PLANT_SOURCE_DIGEST="${S2_SOURCE_DIGEST}" \
+      bun --eval '
+        import { writeS2CostMeasurementReceipt } from "./apps/wire/src/krater/s2-client.ts";
+        const digest = (character) => character.repeat(64);
+        writeS2CostMeasurementReceipt([
+          {
+            event_id: "E-s2-plant-001", seq: 1, idempotent: false, pre_cursor: 0, post_cursor: 1,
+            payload_sha256: digest("1"), row_digest: digest("2"), build_digest: digest("3"),
+            chain_digest: digest("4"), checkpoint_digest: digest("5"), write_phase_ms: 1,
+            successful_batch_rows_read: 3, successful_batch_rows_written: 2,
+            successful_batch_sql_ms: 1, successful_batch_metric_scope: "settled-db.batch-only",
+            failed_retry_batch_metrics: "excluded-d1-error-has-no-meta", preflight_rows_read: 4,
+            preflight_rows_written: 0, preflight_sql_ms: 1, preflight_wall_ms: 1,
+            preflight_statements: 3, preflight_fast_path: true, write_claim_wall_ms: 1,
+            write_claim_wall_scope: "writeClaim-entry-to-return", lock_wait_ms: null,
+            retry_count: 0, outbox_handoff: "armed",
+          },
+        ], {
+          run_id: process.env.S2_PLANT_RUN_ID,
+          revision: "0".repeat(40),
+          dirty_state: process.env.S2_PLANT_DIRTY_STATE,
+          source_digest: process.env.S2_PLANT_SOURCE_DIGEST,
+        }, {
+          root: process.env.S2_PLANT_RECEIPT_ROOT,
+          receiptPath: process.env.S2_PLANT_RECEIPT_PATH,
+        });
+      '; then
+      return 1
+    fi
+    S2_COST_PHASE_EXERCISE="pass"
+    S2_COST_PHASE_RESTART_VERIFY="pass"
+    S2_COST_PHASE_UPGRADE_EXISTING="pass"
+    S2_COST_PHASE_UPGRADE_EMPTY="pass"
+    S2_COST_PHASE_UPGRADE_JOURNAL_EXISTING="pass"
+    S2_COST_PHASE_UPGRADE_JOURNAL_EMPTY="pass"
+    S2_COST_LOCAL_PHASES_COMPLETE=1
+    emit '{"tool":"bash+bun","package":"apps/wire","suite":"s2-krater-shell","status":"pass","scenario":"planted-schema-valid-receipt-provenance-mismatch-requires-manifest-refusal","reproduce":"S2_SHELL_REGRESSION_TEST=receipt-provenance-mismatch scripts/e2e-s2-krater.sh"}'
+    return 78
   fi
 
   if [[ "${mode}" == "provenance" ]]; then
@@ -4482,7 +5746,8 @@ launch_lifecycle_child() {
 
 wait_for_lifecycle_port() {
   local port="$1" pid="$2" pgid="$3" marker="$4" ready_file="$5" ready_id
-  local deadline=$((SECONDS + S2_READY_DEADLINE_SECONDS))
+  local deadline
+  deadline="$(s2_deadline_at "${S2_READY_DEADLINE_SECONDS}")"
   while (( SECONDS < deadline )); do
     supervisor_is_owned "${pid}" "${pgid}" "${marker}" || return 1
     if [[ -f "${ready_file}" && ! -L "${ready_file}" ]] && \
@@ -4499,7 +5764,11 @@ wait_for_lifecycle_child() {
   local pid="$1" pgid="$2" marker="$3" status_file="$4" watchdog_pid="$5"
   local watchdog_health="$6" state_dir="$7" port="$8" deadline_seconds="${9:-${S2_LIFECYCLE_DEADLINE_SECONDS}}" tick
   [[ "${deadline_seconds}" =~ ^[1-9][0-9]*$ ]] || return 125
-  local deadline=$((SECONDS + deadline_seconds))
+  # Clamped to the run-wide deadline. The lifecycle envelope defaults to 300s
+  # while the run's own bound may be far shorter, so an unclamped wait here let
+  # a single child outlive the deadline the caller actually asked for.
+  local deadline
+  deadline="$(s2_deadline_at "${deadline_seconds}")"
   while :; do
     if read_child_status "${status_file}"; then
       stop_pinned_supervisor "${pid}" "${pgid}" "${marker}" \
@@ -4693,7 +5962,7 @@ if ! assert_legacy_fixture_bytes; then
   exit 1
 fi
 
-if ! "${S2_WRANGLER}" d1 migrations apply DB --config "${S2_WRANGLER_CONFIG}" --local --persist-to "${S2_STATE_DIR}" >"${S2_STATE_DIR}/migration.log" 2>&1; then
+if ! s2_run_owned_deadline "${S2_WRANGLER}" d1 migrations apply DB --config "${S2_WRANGLER_CONFIG}" --local --persist-to "${S2_STATE_DIR}" >"${S2_STATE_DIR}/migration.log" 2>&1; then
   emit_wrangler_failure "LOCAL_D1_MIGRATION_FAILED"
   exit 1
 fi
@@ -4725,8 +5994,8 @@ fi
 if run_phase "exercise"; then
   S2_COST_PHASE_EXERCISE="pass"
 else
-  S2_COST_PHASE_EXERCISE="fail"
   S2_CLIENT_EXIT=$?
+  S2_COST_PHASE_EXERCISE="fail"
   stop_worker
   emit_wrangler_failure "LOCAL_D1_SCENARIO_FAILED"
   exit "${S2_CLIENT_EXIT}"
@@ -4741,8 +6010,8 @@ fi
 if run_phase "restart-verify"; then
   S2_COST_PHASE_RESTART_VERIFY="pass"
 else
-  S2_COST_PHASE_RESTART_VERIFY="fail"
   S2_CLIENT_EXIT=$?
+  S2_COST_PHASE_RESTART_VERIFY="fail"
   stop_worker
   emit_wrangler_failure "LOCAL_D1_RESTART_SCENARIO_FAILED"
   exit "${S2_CLIENT_EXIT}"
@@ -4756,15 +6025,15 @@ stop_worker
 if run_legacy_upgrade_checked "upgrade-existing" "${S2_LEGACY_EXISTING_FIXTURE}" "upgrade-indexed"; then
   S2_COST_PHASE_UPGRADE_EXISTING="pass"
 else
-  S2_COST_PHASE_UPGRADE_EXISTING="fail"
   S2_CLIENT_EXIT=$?
+  S2_COST_PHASE_UPGRADE_EXISTING="fail"
   exit "${S2_CLIENT_EXIT}"
 fi
 if run_legacy_upgrade_checked "upgrade-empty" ""; then
   S2_COST_PHASE_UPGRADE_EMPTY="pass"
 else
-  S2_COST_PHASE_UPGRADE_EMPTY="fail"
   S2_CLIENT_EXIT=$?
+  S2_COST_PHASE_UPGRADE_EMPTY="fail"
   exit "${S2_CLIENT_EXIT}"
 fi
 
@@ -4773,15 +6042,15 @@ fi
 if run_migration_journal_upgrade "upgrade-journal-existing" "${S2_LEGACY_EXISTING_FIXTURE}"; then
   S2_COST_PHASE_UPGRADE_JOURNAL_EXISTING="pass"
 else
-  S2_COST_PHASE_UPGRADE_JOURNAL_EXISTING="fail"
   S2_CLIENT_EXIT=$?
+  S2_COST_PHASE_UPGRADE_JOURNAL_EXISTING="fail"
   exit "${S2_CLIENT_EXIT}"
 fi
 if run_migration_journal_upgrade "upgrade-journal-empty" ""; then
   S2_COST_PHASE_UPGRADE_JOURNAL_EMPTY="pass"
 else
-  S2_COST_PHASE_UPGRADE_JOURNAL_EMPTY="fail"
   S2_CLIENT_EXIT=$?
+  S2_COST_PHASE_UPGRADE_JOURNAL_EMPTY="fail"
   exit "${S2_CLIENT_EXIT}"
 fi
 S2_COST_LOCAL_PHASES_COMPLETE=1

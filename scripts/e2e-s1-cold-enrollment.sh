@@ -29,6 +29,9 @@
 # interruption. It holds local workerd state and phase logs, never credentials,
 # and AGENTS.md forbids cleanup-by-deletion.
 set -euo pipefail
+# A caller may invoke this script with `bash -x`. Disable tracing before any
+# environment-provided enrollment URL or credential can be expanded.
+set +x
 umask 077
 
 # A bare shell status is not actionable evidence. Log only the failing line and
@@ -61,6 +64,8 @@ readonly TERMINATION_GRACE_SECONDS=5
 readonly TRANSIENT_INSPECTION_DEADLINE_SECONDS=1
 readonly FIXTURE_START_DEADLINE_SECONDS=10
 readonly SELF_TEST_CONTROLLER_DEADLINE_SECONDS=10
+readonly EXTERNAL_RESPONSE_MAX_BYTES=262144
+readonly RESPONSE_BODY_TOO_LARGE_MARKER="__S1_RESPONSE_BODY_TOO_LARGE__"
 readonly EXIT_CLEANUP_ATTEMPTS=2
 readonly PORT_ALLOCATION_ATTEMPTS=40
 readonly EPHEMERAL_PORT_FLOOR=20000
@@ -91,6 +96,10 @@ PHASE_LOG=""
 # rather than inside a command substitution. See the comment on `allocate_port`.
 RESOLVED_PORT=""
 RUN_TOKEN=""
+# Non-secret per-run marker written into the client's retained evidence record,
+# and the cap the reader enforces before parsing it.
+EVIDENCE_NONCE=""
+EVIDENCE_MAX_BYTES=$((64 * 1024))
 RUN_MODE="external"
 # Fault injection is test-only and deliberately disarmed while a fixture is
 # started. A caller cannot turn a real local-D1 run into a synthetic failure by
@@ -178,9 +187,11 @@ emit() {
   local status="$1"
   local code="$2"
   local reproduce="$REPRODUCE"
+  local evidence_scope=""
   if [[ "$RUN_MODE" == "local-d1" ]]; then reproduce="$REPRODUCE --local-d1"; fi
-  printf '{"tool":"curl+bun","package":"e2e","suite":"%s","version":"%s","duration_ms":%s,"status":"%s","code":"%s","reproduce":"%s"}\n' \
-    "$SUITE" "$VERSION" "$(duration_ms)" "$status" "$code" "$reproduce"
+  if [[ "$SELF_TEST_MODE" == "loopback-enrollment" ]]; then evidence_scope=",\"evidence_scope\":\"local-test\""; fi
+  printf '{"tool":"curl+bun","package":"e2e","suite":"%s","version":"%s","duration_ms":%s,"status":"%s","code":"%s","reproduce":"%s"%s}\n' \
+    "$SUITE" "$VERSION" "$(duration_ms)" "$status" "$code" "$reproduce" "$evidence_scope"
 }
 
 # Phase logging goes to the retained state directory and to stderr. It records
@@ -1028,7 +1039,10 @@ supported_harness() {
 # rather than something to discover as a bind failure.
 valid_port() {
   local port="$1"
-  [[ "$port" =~ ^[0-9]{1,5}$ ]] || return 1
+  # Bash arithmetic treats leading-zero operands as octal. Ports are copied
+  # into the trusted loopback origin, so reject noncanonical spellings before
+  # arithmetic can normalize one into a different authority.
+  [[ "$port" =~ ^[1-9][0-9]{0,4}$ ]] || return 1
   ((port >= 1024 && port <= 65535))
 }
 
@@ -1080,6 +1094,98 @@ resolve_run_token() {
   token="usr_s1_$$_${RANDOM}${RANDOM}"
   [[ "$token" =~ ^usr_s1_[0-9]+_[0-9]+$ ]] || failed "RUN_TOKEN_INVALID"
   RUN_TOKEN="$token"
+}
+
+# A non-secret, per-run marker that binds the client's retained evidence record
+# to this invocation. It is deliberately not the replay key and not the run
+# token: it is written into a retained artifact on purpose, so it must be
+# something whose disclosure costs nothing.
+resolve_evidence_nonce() {
+  local entropy
+  entropy="$(LC_ALL=C od -An -N16 -tx1 /dev/urandom 2>/dev/null | tr -d '[:space:]')" ||
+    failed "LOCAL_EVIDENCE_NONCE_UNAVAILABLE"
+  [[ "$entropy" =~ ^[a-f0-9]{32}$ ]] || failed "LOCAL_EVIDENCE_NONCE_UNAVAILABLE"
+  EVIDENCE_NONCE="$entropy"
+}
+
+# Parse the client's retained terminal record and prove it describes *this* run.
+#
+# The client's exit status says only that it did not throw. This is the half that
+# says what it actually proved: one terminal record, the exact schema, this run's
+# nonce and origin, and the specific case slugs whose absence would mean the
+# safety proofs did not execute. A pass is gated on this, not on the exit status
+# alone.
+assert_local_client_evidence() {
+  local origin="$1"
+  local path="$STATE_DIR/client-evidence.ndjson"
+  local size lines parse_exit=0
+
+  [[ -f "$path" && ! -L "$path" && -O "$path" && -r "$path" ]] ||
+    failed "LOCAL_CLIENT_EVIDENCE_MISSING"
+  size="$(LC_ALL=C wc -c <"$path" 2>/dev/null | tr -d '[:space:]')" ||
+    failed "LOCAL_CLIENT_EVIDENCE_UNREADABLE"
+  [[ "$size" =~ ^[0-9]+$ ]] || failed "LOCAL_CLIENT_EVIDENCE_UNREADABLE"
+  ((size > 0 && size <= EVIDENCE_MAX_BYTES)) || failed "LOCAL_CLIENT_EVIDENCE_SIZE_INVALID"
+  # Exactly one terminal record. A second line is an ambiguity the reader must
+  # never silently resolve by taking the first or the last.
+  lines="$(LC_ALL=C wc -l <"$path" 2>/dev/null | tr -d '[:space:]')" ||
+    failed "LOCAL_CLIENT_EVIDENCE_UNREADABLE"
+  [[ "$lines" == "1" ]] || failed "LOCAL_CLIENT_EVIDENCE_NOT_SINGLE_RECORD"
+
+  # The validator prints nothing from the record. Every failure is a fixed
+  # status, so no retained byte can reach a diagnostic through this path.
+  # shellcheck disable=SC2016
+  S1_EVIDENCE_NONCE="$EVIDENCE_NONCE" S1_EVIDENCE_ORIGIN="$origin" \
+    bun -e '
+      import { LOCAL_D1_EVIDENCE_CASES } from "./apps/wire/src/enrollment/local-d1-client.ts";
+      const required = LOCAL_D1_EVIDENCE_CASES;
+      let record;
+      try {
+        record = JSON.parse(await Bun.stdin.text());
+      } catch {
+        process.exit(2);
+      }
+      if (typeof record !== "object" || record === null || Array.isArray(record)) process.exit(2);
+      const expected = {
+        record: "s1-local-d1-evidence",
+        schema_version: 1,
+        tool: "bun+wrangler",
+        package: "apps/wire",
+        suite: "s1-enrollment-local-d1",
+        status: "pass",
+        run_nonce: process.env.S1_EVIDENCE_NONCE,
+        origin: process.env.S1_EVIDENCE_ORIGIN,
+        reproduce: "scripts/e2e-s1-cold-enrollment.sh --local-d1",
+      };
+      for (const [key, value] of Object.entries(expected)) {
+        if (record[key] !== value) process.exit(3);
+      }
+      if (typeof record.version !== "string" || record.version.length === 0) process.exit(3);
+      if (!Number.isSafeInteger(record.duration_ms) || record.duration_ms < 0) process.exit(3);
+      if (!Array.isArray(record.cases) || record.cases.length === 0) process.exit(3);
+      if (!record.cases.every((name) => typeof name === "string" && /^[a-z][a-z0-9-]{0,63}$/.test(name))) {
+        process.exit(3);
+      }
+      if (new Set(record.cases).size !== record.cases.length) process.exit(3);
+      // The client owns one declared corpus and this reader imports it directly.
+      // Order, cardinality, membership, and duplication are all evidence: a
+      // subset, an unknown addition, or a reordered list is an unproved run.
+      if (
+        record.cases.length !== required.length ||
+        !record.cases.every((name, index) => name === required[index])
+      ) process.exit(4);
+      // No unmodelled field may ride along in a record a reader treats as exact.
+      const allowed = new Set([...Object.keys(expected), "version", "duration_ms", "cases"]);
+      if (!Object.keys(record).every((key) => allowed.has(key))) process.exit(3);
+    ' <"$path" 2>/dev/null || parse_exit=$?
+  case "$parse_exit" in
+    0) ;;
+    2) failed "LOCAL_CLIENT_EVIDENCE_UNPARSEABLE" ;;
+    3) failed "LOCAL_CLIENT_EVIDENCE_SCHEMA_INVALID" ;;
+    4) failed "LOCAL_CLIENT_EVIDENCE_PROOF_MISSING" ;;
+    *) failed "LOCAL_CLIENT_EVIDENCE_UNTRUSTED" ;;
+  esac
+  log_phase "client-evidence-verified" "records=1 bytes=$size scope=retained-state"
 }
 
 resolve_local_replay_key() {
@@ -1560,29 +1666,215 @@ json_status() {
   json_field "$1" "status"
 }
 
+# An approval is not authority to follow an arbitrary URL. The capsule and the
+# approved response must agree on the single same-origin hello endpoint; a
+# query, fragment, or redirected host is rejected before curl is invoked.
+approved_hello_url() {
+  local body="$1"
+  local origin="$2"
+  printf '%s' "$body" | bun -e '
+let response;
+let base;
+let hello;
+try {
+  response = JSON.parse(await Bun.stdin.text());
+  base = new URL(process.argv[1]);
+  hello = new URL(response.hello_url);
+} catch {
+  process.exit(1);
+}
+const expected = new URL("/v1/hello", base);
+if (
+  typeof response.hello_url !== "string" ||
+  response.hello_url !== expected.href ||
+  hello.href !== expected.href ||
+  hello.username || hello.password || hello.search || hello.hash
+) process.exit(1);
+process.stdout.write(expected.href);
+' "$origin" 2>/dev/null
+}
+
+approved_suggested_next() {
+  local body="$1"
+  printf '%s' "$body" | bun -e '
+let response;
+try {
+  response = JSON.parse(await Bun.stdin.text());
+} catch {
+  process.exit(1);
+}
+if (response.suggested_next !== "GET /v1/hello with the bearer token") process.exit(1);
+' 2>/dev/null
+}
+
+# URL's parser normalizes default ports. The exact origin comparison is
+# load-bearing: accepting a spelling the shared contract rejects would make
+# the local HTTP test seam less strict than the credential-carrying protocol.
+canonical_join_url() {
+  local value="$1"
+  bun -e '
+let parsed;
+try {
+  parsed = new URL(process.argv[1]);
+} catch {
+  process.exit(1);
+}
+if (parsed.href !== process.argv[1]) process.exit(1);
+' "$value" 2>/dev/null
+}
+
+# Exit statuses deliberately distinguish a missing/malformed action list from
+# an unsafe first action, but never report a supplied URL or response body.
+first_safe_read_url() {
+  local body="$1"
+  local origin="$2"
+  printf '%s' "$body" | bun -e '
+let response;
+let base;
+try {
+  response = JSON.parse(await Bun.stdin.text());
+  base = new URL(process.argv[1]);
+} catch {
+  process.exit(2);
+}
+if (!Array.isArray(response.next_actions) || response.next_actions.length === 0) process.exit(2);
+const first = response.next_actions[0];
+if (!first || typeof first !== "object" || Array.isArray(first) || first.action !== "read" || typeof first.url !== "string") {
+  process.exit(3);
+}
+let target;
+try {
+  target = new URL(first.url);
+} catch {
+  process.exit(3);
+}
+if (
+  target.origin !== base.origin ||
+  target.username || target.password || target.search || target.hash ||
+  !["/protocol.md", "/skill.md"].includes(target.pathname)
+) process.exit(3);
+process.stdout.write(target.href);
+' "$origin" 2>/dev/null
+}
+
+# The shell intentionally imports the canonical contract instead of copying a
+# second hello schema. A bearer is valid only for the Fellow identity that this
+# registration sent, so a syntactically valid response for another principal
+# must not advance the driver.
+validate_hello_response() {
+  local body="$1"
+  local expected_name="$2"
+  local expected_model="$3"
+  local expected_harness="$4"
+  printf '%s' "$body" | ASIMP_S1_HELLO_NAME="$expected_name" \
+    ASIMP_S1_HELLO_MODEL="$expected_model" \
+    ASIMP_S1_HELLO_HARNESS="$expected_harness" \
+    bun -e '
+import { EnrollmentHelloResponseSchema } from "@asimposium/contracts";
+let response;
+try {
+  response = EnrollmentHelloResponseSchema.parse(JSON.parse(await Bun.stdin.text()));
+} catch {
+  process.exit(2);
+}
+if (
+  response.fellow.name !== process.env.ASIMP_S1_HELLO_NAME ||
+  response.fellow.model !== process.env.ASIMP_S1_HELLO_MODEL ||
+  response.fellow.harness !== process.env.ASIMP_S1_HELLO_HARNESS
+) process.exit(3);
+' 2>/dev/null
+}
+
+body_contains_token() {
+  local body="$1"
+  local token="$2"
+  [[ -n "$token" && "$body" == *"$token"* ]]
+}
+
+# This is the sole path from curl stdout into a shell variable. It stops before
+# retaining more than the cap and writes nothing on rejection, so neither a
+# huge error body nor an unbounded chunked response reaches JSON parsing.
+bounded_response_body() {
+  bun -e '
+const limit = Number(process.argv[1]);
+if (!Number.isSafeInteger(limit) || limit < 1) process.exit(64);
+const marker = process.argv[2];
+if (!marker) process.exit(64);
+const chunks = [];
+let size = 0;
+let tooLarge = false;
+for await (const chunk of Bun.stdin.stream()) {
+  size += chunk.byteLength;
+  if (size > limit) {
+    tooLarge = true;
+    break;
+  }
+  chunks.push(chunk);
+}
+process.stdout.write(tooLarge ? marker : Buffer.concat(chunks));
+' "$EXTERNAL_RESPONSE_MAX_BYTES" "$RESPONSE_BODY_TOO_LARGE_MARKER" 2>/dev/null
+}
+
+response_body_too_large() {
+  [[ "$1" == "$RESPONSE_BODY_TOO_LARGE_MARKER" ]]
+}
+
 curl_body() {
   local method="$1"
   local endpoint="$2"
   local body="${3:-}"
   local idempotency_key="${4:-}"
-  local result
+  local bearer_token="${5:-}"
+  local result curl_status
 
   # Curl diagnostics can echo a caller-supplied origin or credentials. The
   # runner deliberately retains neither: failures become fixed typed records.
+  # Curl argv is observable to sibling processes, so the bearer is supplied
+  # only via its stdin configuration, never through a --header argument.
   if [[ "$method" == "GET" ]]; then
-    if ! result="$(curl --silent --fail-with-body --request GET \
+    [[ -z "$bearer_token" ]] || valid_token "$bearer_token" || return 64
+    if [[ -n "$bearer_token" ]]; then
+      if result="$(printf 'header = "Authorization: Bearer %s"\n' "$bearer_token" \
+        | curl --disable --silent --fail-with-body --config - --request GET \
+          --connect-timeout "$CONNECT_TIMEOUT_SECONDS" --max-time "$REQUEST_TIMEOUT_SECONDS" \
+          --max-filesize "$EXTERNAL_RESPONSE_MAX_BYTES" \
+          --header 'Accept: application/json' "$endpoint" 2>/dev/null \
+        | bounded_response_body)"; then
+        response_body_too_large "$result" && return 22
+      else
+        curl_status=$?
+        # 63 is curl's known-length refusal; 23 is its write failure after the
+        # bounded collector closes on a streamed oversized body. HTTP refusal
+        # remains curl 22 and must keep its ordinary request-failure code.
+        if [[ "$curl_status" == "63" || "$curl_status" == "23" ]] || response_body_too_large "$result"; then return 22; fi
+        return 20
+      fi
+    elif result="$(curl --disable --silent --fail-with-body --request GET \
       --connect-timeout "$CONNECT_TIMEOUT_SECONDS" --max-time "$REQUEST_TIMEOUT_SECONDS" \
-      --header 'Accept: application/json' "$endpoint" 2>/dev/null)"; then
+      --max-filesize "$EXTERNAL_RESPONSE_MAX_BYTES" \
+      --header 'Accept: application/json' "$endpoint" 2>/dev/null \
+      | bounded_response_body)"; then
+      response_body_too_large "$result" && return 22
+    else
+      curl_status=$?
+      if [[ "$curl_status" == "63" || "$curl_status" == "23" ]] || response_body_too_large "$result"; then return 22; fi
       return 20
     fi
   elif [[ "$method" == "POST" ]]; then
+    [[ -z "$bearer_token" ]] || return 64
     [[ "$idempotency_key" =~ ^[A-Za-z0-9._-]{1,160}$ ]] || return 64
-    if ! result="$(printf '%s' "$body" | curl --silent --fail-with-body \
+    if result="$(printf '%s' "$body" | curl --disable --silent --fail-with-body \
       --request POST --connect-timeout "$CONNECT_TIMEOUT_SECONDS" \
       --max-time "$REQUEST_TIMEOUT_SECONDS" \
+      --max-filesize "$EXTERNAL_RESPONSE_MAX_BYTES" \
       --header 'Accept: application/json' --header 'Content-Type: application/json' \
       --header "Idempotency-Key: $idempotency_key" \
-      --data-binary @- "$endpoint" 2>/dev/null)"; then
+      --data-binary @- "$endpoint" 2>/dev/null \
+      | bounded_response_body)"; then
+      response_body_too_large "$result" && return 22
+    else
+      curl_status=$?
+      if [[ "$curl_status" == "63" || "$curl_status" == "23" ]] || response_body_too_large "$result"; then return 22; fi
       return 21
     fi
   else
@@ -1645,6 +1937,35 @@ run_helper_or_fail() {
   "$@" >/dev/null || failed "$failure_code"
 }
 
+run_curl_or_fail() {
+  local failure_code="$1"
+  local curl_status
+  shift
+  if "$@" >/dev/null; then
+    return
+  else
+    curl_status=$?
+  fi
+  [[ "$curl_status" == "22" ]] && failed "RESPONSE_BODY_TOO_LARGE"
+  failed "$failure_code"
+}
+
+capture_curl_or_fail() {
+  local destination="$1"
+  local failure_code="$2"
+  local result=""
+  local curl_status
+  shift 2
+  if result="$("$@")"; then
+    printf -v "$destination" '%s' "$result"
+    return
+  else
+    curl_status=$?
+  fi
+  [[ "$curl_status" == "22" ]] && failed "RESPONSE_BODY_TOO_LARGE"
+  failed "$failure_code"
+}
+
 self_test() {
   local fragment_sentinel="v1.S1FRAGMENT_SENTINEL_0123456789abcdefghijklm"
   local synthetic_url="https://a.example.test/join/ASIMP-EN-7F3K9M2Q8R#${fragment_sentinel}"
@@ -1672,7 +1993,7 @@ self_test() {
   for acceptable_port in 1024 8792 65535; do
     valid_port "$acceptable_port" || failed "SELF_TEST_PORT_VALIDATION_FAILED"
   done
-  for rejected_port in 0 80 1023 65536 70000 "" "not-a-port" "80 80" "-1"; do
+  for rejected_port in 0 80 1023 65536 70000 02000 "" "not-a-port" "80 80" "-1"; do
     if valid_port "$rejected_port"; then failed "SELF_TEST_PORT_VALIDATION_FAILED"; fi
   done
   resolve_run_token
@@ -2440,6 +2761,193 @@ self_test_replay_artifact_failure_path() {
   failed "PLANTED_REPLAY_ARTIFACT_FAILURE"
 }
 
+# --- client-evidence gate negatives -------------------------------------------
+#
+# `assert_local_client_evidence` is what turns "the client exited 0" into "the
+# client proved these specific things". Until these modes existed it had no
+# negative: any clause could be inverted and every real run would stay green,
+# because the happy path only ever presents a well-formed record. The clause
+# guarding the required proof slugs was the newest and the least covered.
+#
+# Each mode drives the *production* function against a planted artifact rather
+# than a reimplementation of its logic, and each plant differs from an accepted
+# record in exactly one dimension. The paired control is what makes that causal:
+# without it, "the gate refused" would also be satisfied by a fixture that was
+# malformed for some second, unnoticed reason.
+#
+# Nothing here contacts a service, and nothing is deleted. The origin is a fixed
+# loopback string that is only ever string-compared, and the nonce is the same
+# non-secret per-run marker the real path writes. Every fixture value is a
+# constant: no credential, response byte, or replay key can reach these files.
+readonly EVIDENCE_SELF_TEST_ORIGIN="http://127.0.0.1:1"
+
+# A JSON array from the client's one exported proof corpus. The optional second
+# argument is a self-test-only mutation; production callers never manufacture
+# a second copy of this declaration in shell.
+evidence_cases_json() {
+  local omit="${1:-}" mutation="${2:-complete}"
+  # shellcheck disable=SC2016
+  bun -e '
+    import { LOCAL_D1_EVIDENCE_CASES } from "./apps/wire/src/enrollment/local-d1-client.ts";
+    const omit = process.argv[1] ?? "";
+    const mutation = process.argv[2] ?? "complete";
+    const cases = [...LOCAL_D1_EVIDENCE_CASES];
+    if (omit !== "") {
+      const index = cases.indexOf(omit);
+      if (index < 0) process.exit(2);
+      cases.splice(index, 1);
+    }
+    if (mutation === "duplicate") cases.splice(1, 0, cases[0]);
+    else if (mutation === "unknown") cases[cases.length - 1] = "unknown-local-proof";
+    else if (mutation !== "complete") process.exit(2);
+    process.stdout.write(JSON.stringify(cases));
+  ' "$omit" "$mutation" 2>/dev/null
+}
+
+# One evidence line in the accepted shape, with `cases` supplied by the caller so
+# a plant can vary exactly that field. Appended, so a second call is a duplicate
+# record rather than a rewrite.
+write_evidence_line() {
+  local path="$1" cases_json="$2"
+  printf '{"record":"s1-local-d1-evidence","schema_version":1,"tool":"bun+wrangler","package":"apps/wire","suite":"s1-enrollment-local-d1","status":"pass","run_nonce":"%s","origin":"%s","reproduce":"scripts/e2e-s1-cold-enrollment.sh --local-d1","version":"self-test","duration_ms":0,"cases":%s}\n' \
+    "$EVIDENCE_NONCE" "$EVIDENCE_SELF_TEST_ORIGIN" "$cases_json" >>"$path"
+}
+
+# The typed code the production gate refuses with, or empty when it accepts.
+#
+# The gate calls `failed`, which emits one JSON record on stdout and exits, so it
+# is driven in a subshell — the alternative would be asserting against a copy of
+# the gate, which is exactly the thing that can drift. Only the fixed code is
+# read; no retained byte is printed here or by any caller.
+evidence_gate_code() {
+  local out="" status=0
+  out="$(assert_local_client_evidence "$EVIDENCE_SELF_TEST_ORIGIN" 2>/dev/null)" || status=$?
+  if ((status == 0)); then
+    printf '\n'
+    return 0
+  fi
+  if ((status != 1)); then
+    printf 'UNEXPECTED_STATUS_%s\n' "$status"
+    return 0
+  fi
+  if [[ "$out" =~ \"code\":\"([A-Z][A-Z0-9_]*)\" ]]; then
+    printf '%s\n' "${BASH_REMATCH[1]}"
+  else
+    printf 'UNPARSEABLE_RECORD\n'
+  fi
+}
+
+# A retained state directory plus the real non-secret nonce, and no evidence file
+# yet. Each call takes a fresh directory, so a control and its plant never have
+# to share one — which is how these modes avoid deleting or truncating anything.
+begin_evidence_self_test() {
+  lifecycle_state_dir "$1"
+  resolve_evidence_nonce
+}
+
+# PLANTED NEGATIVE: the client never wrote its record.
+self_test_client_evidence_missing() {
+  local code
+  begin_evidence_self_test "client-evidence-missing"
+
+  # Asserted before anything creates a record, so reaching this state needs no
+  # deletion.
+  code="$(evidence_gate_code)"
+  [[ "$code" == "LOCAL_CLIENT_EVIDENCE_MISSING" ]] ||
+    failed "CLIENT_EVIDENCE_MISSING_NOT_REFUSED"
+
+  # Causal control: the same gate, same directory, accepts a well-formed record,
+  # so the refusal above is caused by absence and not by the fixture.
+  write_evidence_line "$STATE_DIR/client-evidence.ndjson" "$(evidence_cases_json)"
+  code="$(evidence_gate_code)"
+  [[ -z "$code" ]] || failed "CLIENT_EVIDENCE_MISSING_CONTROL_REFUSED"
+
+  log_phase "client-evidence-missing-refused" \
+    "result=refused code=LOCAL_CLIENT_EVIDENCE_MISSING control=accepted"
+  emit "pass" "CLIENT_EVIDENCE_MISSING_SELF_TEST_PASSED"
+}
+
+# PLANTED NEGATIVE: two terminal records, which a reader must never resolve by
+# silently taking the first or the last.
+self_test_client_evidence_duplicate() {
+  local code evidence
+  begin_evidence_self_test "client-evidence-duplicate"
+  evidence="$STATE_DIR/client-evidence.ndjson"
+
+  # Control first: one record is accepted.
+  write_evidence_line "$evidence" "$(evidence_cases_json)"
+  code="$(evidence_gate_code)"
+  [[ -z "$code" ]] || failed "CLIENT_EVIDENCE_DUPLICATE_CONTROL_REFUSED"
+
+  # The plant differs in exactly one dimension: a second, identical record.
+  write_evidence_line "$evidence" "$(evidence_cases_json)"
+  code="$(evidence_gate_code)"
+  [[ "$code" == "LOCAL_CLIENT_EVIDENCE_NOT_SINGLE_RECORD" ]] ||
+    failed "CLIENT_EVIDENCE_DUPLICATE_NOT_REFUSED"
+
+  log_phase "client-evidence-duplicate-refused" \
+    "result=refused code=LOCAL_CLIENT_EVIDENCE_NOT_SINGLE_RECORD control=accepted records=2"
+  emit "pass" "CLIENT_EVIDENCE_DUPLICATE_SELF_TEST_PASSED"
+}
+
+# PLANTED NEGATIVE: a fully valid record whose only defect is one absent required
+# proof slug. This is the clause that guards the repaired findings, and its code
+# is distinct from a schema fault on purpose — "the client ran an older corpus"
+# and "the record is malformed" are different operator problems.
+self_test_client_evidence_proof_missing() {
+  local code omitted="${1:-claim-missing-idempotency-key-no-write}" label="${2:-proof-missing}"
+  begin_evidence_self_test "client-evidence-${label}"
+
+  write_evidence_line "$STATE_DIR/client-evidence.ndjson" "$(evidence_cases_json "$omitted")"
+  code="$(evidence_gate_code)"
+  [[ "$code" == "LOCAL_CLIENT_EVIDENCE_PROOF_MISSING" ]] ||
+    failed "CLIENT_EVIDENCE_PROOF_MISSING_NOT_REFUSED"
+
+  # Causal control in its own retained directory: the identical record *with*
+  # that slug is accepted, so the refusal is caused by the one omission rather
+  # than by anything else about the fixture.
+  begin_evidence_self_test "client-evidence-${label}-control"
+  write_evidence_line "$STATE_DIR/client-evidence.ndjson" "$(evidence_cases_json)"
+  code="$(evidence_gate_code)"
+  [[ -z "$code" ]] || failed "CLIENT_EVIDENCE_PROOF_CONTROL_REFUSED"
+
+  log_phase "client-evidence-proof-missing-refused" \
+    "result=refused code=LOCAL_CLIENT_EVIDENCE_PROOF_MISSING control=accepted omitted_slugs=1"
+  emit "pass" "CLIENT_EVIDENCE_PROOF_MISSING_SELF_TEST_PASSED"
+}
+
+# PLANTED NEGATIVES: a duplicate case cannot masquerade as two completed
+# proofs, and an unknown case cannot extend the declared corpus. Each control
+# uses the same imported client corpus with no mutation.
+self_test_client_evidence_case_mutation() {
+  local mutation="$1" code expected pass_code phase
+  case "$mutation" in
+    duplicate)
+      expected="LOCAL_CLIENT_EVIDENCE_SCHEMA_INVALID"
+      pass_code="CLIENT_EVIDENCE_CASE_DUPLICATE_SELF_TEST_PASSED"
+      phase="client-evidence-case-duplicate-refused"
+      ;;
+    unknown)
+      expected="LOCAL_CLIENT_EVIDENCE_PROOF_MISSING"
+      pass_code="CLIENT_EVIDENCE_CASE_UNKNOWN_SELF_TEST_PASSED"
+      phase="client-evidence-case-unknown-refused"
+      ;;
+    *) failed "CLIENT_EVIDENCE_MUTATION_INVALID" ;;
+  esac
+  begin_evidence_self_test "$phase"
+  write_evidence_line "$STATE_DIR/client-evidence.ndjson" "$(evidence_cases_json "" "$mutation")"
+  code="$(evidence_gate_code)"
+  [[ "$code" == "$expected" ]] || failed "CLIENT_EVIDENCE_CASE_MUTATION_NOT_REFUSED"
+
+  begin_evidence_self_test "${phase}-control"
+  write_evidence_line "$STATE_DIR/client-evidence.ndjson" "$(evidence_cases_json)"
+  code="$(evidence_gate_code)"
+  [[ -z "$code" ]] || failed "CLIENT_EVIDENCE_CASE_MUTATION_CONTROL_REFUSED"
+
+  log_phase "$phase" "result=refused code=$expected control=accepted mutation=$mutation"
+  emit "pass" "$pass_code"
+}
+
 # An interrupt arriving during the timed client phase.
 #
 # The client runs in its own process group and has a descendant of its own, which is
@@ -2482,7 +2990,7 @@ assert_port_ownership() {
   local parser='const text = await Bun.stdin.text(); const parsed = JSON.parse(text.slice(text.indexOf("["))); const rows = Array.isArray(parsed) ? (parsed[0]?.results ?? []) : []; process.stdout.write(String(rows[0]?.n ?? 0));'
 
   mint_body="$(printf '{"sponsor_id":"%s","request":{"requested_scopes":["review"]}}' "$token")"
-  if ! mint_status="$(printf '%s' "$mint_body" | curl --silent --output /dev/null \
+  if ! mint_status="$(printf '%s' "$mint_body" | curl --disable --silent --output /dev/null \
     --write-out '%{http_code}' --request POST \
     --connect-timeout "$CONNECT_TIMEOUT_SECONDS" --max-time "$REQUEST_TIMEOUT_SECONDS" \
     --header 'Content-Type: application/json' \
@@ -2545,6 +3053,7 @@ run_local_d1() {
   [[ -x "$LOCAL_WRANGLER" ]] || blocked "WRANGLER_REQUIRED"
 
   local local_port origin token server_log server_status_file ready readiness_deadline client_exit scope
+  local evidence_path
   local migration_exit=0
   local server_status="" server_status_read=0
   # Both resolvers refuse in this shell, so a pinned port that is invalid or busy
@@ -2554,6 +3063,7 @@ run_local_d1() {
   resolve_run_token
   token="$RUN_TOKEN"
   resolve_local_replay_key
+  resolve_evidence_nonce
   origin="http://127.0.0.1:${local_port}"
 
   STATE_DIR="$(mktemp -d -t asimposium-s1-enrollment)"
@@ -2587,15 +3097,19 @@ run_local_d1() {
   # even if wrangler later exits before workerd, so cleanup never authorizes a
   # leaderless/recycled numeric PGID.
   server_status_file="$STATE_DIR/.server-exit-status"
-  # Wrangler receives the ephemeral replay root through a deliberately
-  # sanitized process environment, never a command-line `--var` that routine
-  # process listings or retained launch diagnostics can capture.
+  # Wrangler receives the ephemeral replay root and this run's exact loopback
+  # origin through a deliberately sanitized process environment, never a
+  # command-line `--var` that routine process listings or retained launch
+  # diagnostics can capture. The local Worker must name the dynamically
+  # allocated loopback port, not infra/wrangler.toml's static development port.
   export S1_LOCAL_REPLAY_KEY="$LOCAL_REPLAY_KEY"
+  export S1_LOCAL_STOA_ORIGIN="$origin"
   # shellcheck disable=SC2016
   if ! start_pinned_supervisor "$server_status_file" "child" \
     bash -c '
       log="$1"; shift
       replay_key="$S1_LOCAL_REPLAY_KEY"
+      stoa_origin="$S1_LOCAL_STOA_ORIGIN"
       for env_name in $(compgen -e); do
         case "$env_name" in PATH|HOME|TMPDIR) ;;
           *) unset "$env_name" ;;
@@ -2603,17 +3117,18 @@ run_local_d1() {
       done
       export CLOUDFLARE_INCLUDE_PROCESS_ENV=true
       export ENROLLMENT_REPLAY_KEY="$replay_key"
-      unset replay_key
+      export STOA_ORIGIN="$stoa_origin"
+      unset replay_key stoa_origin
       exec "$@" >>"$log" 2>&1
     ' bash "$server_log" \
     "$LOCAL_WRANGLER" dev apps/wire/src/enrollment/local-d1-worker.ts \
       --config infra/wrangler.toml --local --persist-to "$STATE_DIR" --port "$local_port" \
       --inspector-port 0 \
       --log-level error --show-interactive-dev-session=false; then
-    unset S1_LOCAL_REPLAY_KEY
+    unset S1_LOCAL_REPLAY_KEY S1_LOCAL_STOA_ORIGIN
     failed "LOCAL_CHILD_GROUP_UNPROVEN"
   fi
-  unset S1_LOCAL_REPLAY_KEY
+  unset S1_LOCAL_REPLAY_KEY S1_LOCAL_STOA_ORIGIN
   if ! adopt_provisional_supervisor server; then
     finish_lifecycle_critical
     failed "LOCAL_CHILD_GROUP_UNPROVEN"
@@ -2639,7 +3154,7 @@ run_local_d1() {
       log_phase "child-supervisor-unavailable" "pid=$SERVER_PID"
       failed "LOCAL_CHILD_GROUP_UNPROVEN"
     fi
-    if curl --silent --output /dev/null --connect-timeout "$CONNECT_TIMEOUT_SECONDS" \
+    if curl --disable --silent --output /dev/null --connect-timeout "$CONNECT_TIMEOUT_SECONDS" \
       --max-time "$REQUEST_TIMEOUT_SECONDS" "$origin/join/ASIMP-EN-INVALID"; then
       ready=1
       break
@@ -2655,13 +3170,27 @@ run_local_d1() {
   assert_port_ownership "$origin" "$STATE_DIR" "$token"
 
   client_exit=0
+  # The evidence path is handed to the client rather than captured from its
+  # stdout. Redirecting stdout would retain whatever the process happened to
+  # print — a runtime warning, an imported module's stray write — into a file
+  # read as a security record. The client writes one self-checked record with
+  # `wx`, so the artifact is exactly what it vouched for and nothing else.
+  evidence_path="$STATE_DIR/client-evidence.ndjson"
+  [[ ! -e "$evidence_path" && ! -L "$evidence_path" ]] ||
+    failed "LOCAL_CLIENT_EVIDENCE_UNTRUSTED"
   run_with_deadline "$CLIENT_DEADLINE_SECONDS" \
-    env S1_LOCAL_ORIGIN="$origin" bun apps/wire/src/enrollment/local-d1-client.ts || client_exit=$?
+    env S1_LOCAL_ORIGIN="$origin" \
+      S1_LOCAL_EVIDENCE_PATH="$evidence_path" \
+      S1_LOCAL_EVIDENCE_NONCE="$EVIDENCE_NONCE" \
+      bun apps/wire/src/enrollment/local-d1-client.ts || client_exit=$?
   if ((client_exit != 0)); then
     ((client_exit == 124)) && log_phase "client-deadline" "deadline_s=$CLIENT_DEADLINE_SECONDS"
     terminal_local_client_failure "$client_exit"
   fi
   log_phase "client-passed" "exit=0"
+
+  # Exit 0 says the client did not throw. This says what it proved.
+  assert_local_client_evidence "$origin"
 
   # Cleanup is a gate in front of success, not a courtesy behind it. A pass record
   # emitted first and cleaned up afterwards is a record the EXIT trap can only
@@ -2699,8 +3228,21 @@ reject_unscoped_fault_injection() {
 }
 
 validate_enrollment_test_hooks() {
+  local allow_http="${ASIMP_S1_TEST_ALLOW_HTTP:-}"
+  local self_test_mode="${ASIMP_S1_LOOPBACK_SELF_TEST:-}"
+  if [[ -n "$self_test_mode" && "$self_test_mode" != "loopback-enrollment-v1" ]]; then
+    blocked "LOOPBACK_SELF_TEST_INVALID"
+  fi
+  if [[ -n "$allow_http" && "$allow_http" != "1" ]]; then
+    blocked "LOOPBACK_TEST_SWITCH_INVALID"
+  fi
+  if [[ -n "$allow_http" || -n "$self_test_mode" ]]; then
+    [[ "$allow_http" == "1" && "$self_test_mode" == "loopback-enrollment-v1" ]] ||
+      blocked "LOOPBACK_SELF_TEST_REQUIRED"
+    SELF_TEST_MODE="loopback-enrollment"
+  fi
   [[ -z "${S1_TEST_BODY_FAULT:-}" ]] && return 0
-  [[ "${ASIMP_S1_TEST_ALLOW_HTTP:-}" == "1" ]] || blocked "TEST_BODY_FAULT_TEST_ONLY"
+  [[ "$SELF_TEST_MODE" == "loopback-enrollment" ]] || blocked "TEST_BODY_FAULT_TEST_ONLY"
   [[ "${S1_TEST_BODY_FAULT}" == "poll-body-construction" ]] || blocked "TEST_BODY_FAULT_INVALID"
 }
 
@@ -2792,6 +3334,43 @@ main() {
     self_test_replay_artifact_scan
     return
   fi
+  if [[ "${1:-}" == "--self-test-client-evidence-missing" ]]; then
+    begin_self_test "client-evidence-missing"
+    self_test_client_evidence_missing
+    return
+  fi
+  if [[ "${1:-}" == "--self-test-client-evidence-duplicate" ]]; then
+    begin_self_test "client-evidence-duplicate"
+    self_test_client_evidence_duplicate
+    return
+  fi
+  if [[ "${1:-}" == "--self-test-client-evidence-proof-missing" ]]; then
+    begin_self_test "client-evidence-proof-missing"
+    self_test_client_evidence_proof_missing
+    return
+  fi
+  if [[ "${1:-}" == "--self-test-client-evidence-proof-missing-device" ]]; then
+    begin_self_test "client-evidence-proof-missing-device"
+    self_test_client_evidence_proof_missing \
+      "mounted-device-ingress-exact-replay-conflict" "proof-missing-device"
+    return
+  fi
+  if [[ "${1:-}" == "--self-test-client-evidence-proof-missing-expiry" ]]; then
+    begin_self_test "client-evidence-proof-missing-expiry"
+    self_test_client_evidence_proof_missing \
+      "stable-poll-key-24h-proposal-expiry-durable-state" "proof-missing-expiry"
+    return
+  fi
+  if [[ "${1:-}" == "--self-test-client-evidence-case-duplicate" ]]; then
+    begin_self_test "client-evidence-case-duplicate"
+    self_test_client_evidence_case_mutation "duplicate"
+    return
+  fi
+  if [[ "${1:-}" == "--self-test-client-evidence-case-unknown" ]]; then
+    begin_self_test "client-evidence-case-unknown"
+    self_test_client_evidence_case_mutation "unknown"
+    return
+  fi
   if [[ "${1:-}" == "--self-test-replay-artifact-failure" ]]; then
     begin_self_test "replay-artifact-failure"
     self_test_replay_artifact_failure_path
@@ -2878,19 +3457,27 @@ main() {
   local secret="${ASIMP_S1_JOIN_URL#*#}"
   local origin enrollment_id claim_endpoint poll_endpoint registration_body claim_response flow_handle
   local claim_idempotency_key poll_idempotency_key
-  local poll_body poll_response status token allow_http_test=0
+  local poll_body poll_response status token hello_url hello_response
+  local first_read_url first_read_response first_read_status hello_validation_status allow_http_test=0
 
   [[ "$ASIMP_S1_JOIN_URL" == *"#"* ]] || failed "FRAGMENT_SECRET_REQUIRED"
-  [[ "${ASIMP_S1_TEST_ALLOW_HTTP:-}" == "1" ]] && allow_http_test=1
+  [[ "$SELF_TEST_MODE" == "loopback-enrollment" ]] && allow_http_test=1
   if ((allow_http_test == 1)); then
-    # This exists solely for the black-box terminal-record test's loopback
-    # server. Ordinary enrollment remains HTTPS-only and this switch is never
-    # used by the staged three-harness proof.
-    [[ "$join_path" != *"?"* && "$join_path" == http://127.0.0.1:*/join/ASIMP-EN-* ]] ||
+    # This exists only behind the validated loopback self-test switch. It is
+    # local/test evidence, never staging evidence, and its terminal record
+    # carries that boundary explicitly.
+    [[ "$join_path" =~ ^http://127\.0\.0\.1:([1-9][0-9]{0,4})/join/ASIMP-EN-[A-HJKMNP-TV-Z0-9]{10,32}$ ]] ||
       failed "JOIN_URL_INVALID"
+    ((BASH_REMATCH[1] <= 65535)) || failed "JOIN_URL_INVALID"
   else
-    [[ "$join_path" != *"?"* && "$join_path" == https://*/join/ASIMP-EN-* ]] || failed "JOIN_URL_INVALID"
+    # The external acceptance run is staging-only. A staging credential is
+    # authority only at that exact Worker; accepting production, a lookalike
+    # host, port, userinfo, path, or query here would reintroduce the bearer
+    # redirector that the later hello same-origin pin is meant to stop.
+    [[ "$join_path" =~ ^https://a-staging\.asimposium\.org/join/ASIMP-EN-[A-HJKMNP-TV-Z0-9]{10,32}$ ]] ||
+      failed "JOIN_URL_INVALID"
   fi
+  canonical_join_url "$join_path" || failed "JOIN_URL_INVALID"
   valid_secret "$secret" || failed "FRAGMENT_SECRET_INVALID"
 
   origin="${join_path%%/join/*}"
@@ -2899,13 +3486,13 @@ main() {
 
   # Content negotiation precedes registration. The response is retained only
   # in memory and is never copied to an artifact or diagnostic.
-  run_helper_or_fail "CAPSULE_REQUEST_FAILED" curl_body GET "$join_path"
+  run_curl_or_fail "CAPSULE_REQUEST_FAILED" curl_body GET "$join_path"
 
   capture_helper_or_fail registration_body "REGISTRATION_BODY_INVALID" \
     make_registration_body "$enrollment_id" "$secret"
   claim_endpoint="$origin/v1/fellows"
   claim_idempotency_key="s1-claim-${enrollment_id}"
-  capture_helper_or_fail claim_response "ENROLLMENT_REQUEST_FAILED" \
+  capture_curl_or_fail claim_response "ENROLLMENT_REQUEST_FAILED" \
     curl_body POST "$claim_endpoint" "$registration_body" "$claim_idempotency_key"
   capture_helper_or_fail flow_handle "UNEXPECTED_RESPONSE_SHAPE" \
     json_field "$claim_response" "flow_handle"
@@ -2915,7 +3502,7 @@ main() {
   poll_endpoint="$origin/v1/fellows/flow"
   poll_idempotency_key="s1-poll-${enrollment_id}"
   capture_helper_or_fail poll_body "POLL_BODY_INVALID" make_poll_body "$flow_handle"
-  capture_helper_or_fail poll_response "ENROLLMENT_REQUEST_FAILED" \
+  capture_curl_or_fail poll_response "ENROLLMENT_REQUEST_FAILED" \
     curl_body POST "$poll_endpoint" "$poll_body" "$poll_idempotency_key"
   capture_helper_or_fail status "UNEXPECTED_RESPONSE_SHAPE" json_status "$poll_response"
   case "$status" in
@@ -2926,6 +3513,40 @@ main() {
       capture_helper_or_fail token "TOKEN_SHAPE_INVALID" json_field "$poll_response" "token"
       valid_token "$token" || failed "TOKEN_SHAPE_INVALID"
       emit "pass" "TOKEN_ISSUED"
+
+      capture_helper_or_fail hello_url "HELLO_URL_INVALID" \
+        approved_hello_url "$poll_response" "$origin"
+      run_helper_or_fail "SUGGESTED_NEXT_INVALID" approved_suggested_next "$poll_response"
+      capture_curl_or_fail hello_response "HELLO_REQUEST_FAILED" \
+        curl_body GET "$hello_url" "" "" "$token"
+      body_contains_token "$hello_response" "$token" && failed "TOKEN_ECHO_DETECTED"
+
+      if first_read_url="$(first_safe_read_url "$hello_response" "$origin")"; then
+        :
+      else
+        first_read_status=$?
+        case "$first_read_status" in
+          2) failed "NEXT_ACTIONS_INVALID" ;;
+          *) failed "NEXT_ACTION_UNSAFE" ;;
+        esac
+      fi
+      if validate_hello_response "$hello_response" "$ASIMP_S1_FELLOW_NAME" "$ASIMP_S1_MODEL" "$ASIMP_S1_HARNESS"; then
+        :
+      else
+        hello_validation_status=$?
+        case "$hello_validation_status" in
+          2) failed "HELLO_RESPONSE_INVALID" ;;
+          *) failed "HELLO_PRINCIPAL_MISMATCH" ;;
+        esac
+      fi
+      emit "pass" "HELLO_REACHED"
+      capture_curl_or_fail first_read_response "NEXT_ACTION_REQUEST_FAILED" \
+        curl_body GET "$first_read_url"
+      body_contains_token "$first_read_response" "$token" && failed "TOKEN_ECHO_DETECTED"
+      emit "pass" "FIRST_SAFE_READ_COMPLETED"
+      if ((allow_http_test == 1)); then
+        emit "pass" "LOCAL_TEST_ENROLLMENT_PASSED"
+      fi
       ;;
     access_denied)
       failed "SPONSOR_DENIED"

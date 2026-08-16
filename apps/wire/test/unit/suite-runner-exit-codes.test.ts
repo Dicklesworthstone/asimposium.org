@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test";
-import { mkdirSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, readFileSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 
@@ -144,6 +144,17 @@ function runnerFixture(options: FixtureOptions = {}): string {
     `${JSON.stringify({ name: "@asimposium/wire", version: "0.0.0", private: true }, null, 2)}\n`,
   );
   writeFileSync(join(dir, "scripts", "suites.ts"), readFileSync(join(PACKAGE_ROOT, RUNNER)));
+  // The copied runner lives outside the repository, so module resolution never
+  // walks up into the workspace. Link the real contracts package rather than
+  // vendoring a copy: a duplicated scanner would let the fixture pass while the
+  // shared credential families drifted, which is exactly what these plants exist
+  // to catch. Only the one package the runner imports is linked.
+  mkdirSync(join(dir, "node_modules", "@asimposium"), { recursive: true });
+  symlinkSync(
+    resolve(PACKAGE_ROOT, "../../packages/contracts"),
+    join(dir, "node_modules", "@asimposium", "contracts"),
+    "dir",
+  );
   const passingTest = [
     'import { expect, test } from "bun:test";',
     "",
@@ -337,6 +348,30 @@ describe("a deliberately blocked suite exits 78, never 0 and never 1", () => {
       undefined,
     ],
     ["a non-string", { reproduce: 42 }, undefined],
+    // Shared-only families. None of these is a long hex run, an absolute path,
+    // or a control character, so the suite-local guards cannot see them: if the
+    // shared `containsCredentialShape` import regressed, these are the cases
+    // that would silently start republishing.
+    [
+      "a Stripe-style live secret key",
+      { forbidden_substitutes: "do not paste sk_live_51Abc7DefGhiJklMnoPqr" },
+      "sk_live_",
+    ],
+    [
+      "a GitHub personal access token",
+      { blocked_on: "operator supplied ghp_A1b2C3d4E5f6G7h8I9j0KlMnOpQrStUv" },
+      "ghp_",
+    ],
+    [
+      "an Authorization bearer value",
+      { reproduce: "curl -H 'Authorization: Bearer sB7xQ2mR9tZ4kL0w' https://a.asimposium.org" },
+      "sB7xQ2mR9tZ4kL0w",
+    ],
+    [
+      "an inline PEM private key",
+      { blocked_on: "-----BEGIN PRIVATE KEY-----MIIBVgIBADXX-----END PRIVATE KEY-----" },
+      "BEGIN PRIVATE KEY",
+    ],
   ] as const) {
     test(`a blocker carrying ${label} is refused with exit 1, never republished`, async () => {
       const run = await runRunner("integration", runnerFixture({ probeFields }));
@@ -381,6 +416,29 @@ describe("a deliberately blocked suite exits 78, never 0 and never 1", () => {
     expect(packageJson.scripts?.["test:integration:s2-real"]).toBe(
       "S2_RUN_REAL_BINDING_INTEGRATION=1 bun test /dev/null --timeout=120000 test/integration/s2-krater-real-bindings.test.ts",
     );
+  }, 30_000);
+
+  test("prose that merely discusses credentials is still republished as blocked", async () => {
+    // The mirror of the shared-family plants: the scanner must not turn the
+    // vocabulary of a security blocker into a refusal. If these regress the
+    // suite goes red on a false positive rather than silently leaking.
+    const run = await runRunner(
+      "integration",
+      runnerFixture({
+        probeFields: {
+          blocked_on:
+            "Bearer tokens are hashed before storage and the fragment secret never reaches a log",
+          forbidden_substitutes:
+            "a mocked keyring presented as real signing; see https://developers.cloudflare.com/d1/ and test/support/bindings.ts",
+          reproduce: "cd apps/wire && bun run test:integration",
+        },
+      }),
+    );
+    expect(run.exitCode).toBe(BLOCKED_EXIT_CODE);
+    expect(run.records.length).toBe(2);
+    expect(run.records[0]?.status).toBe("blocked");
+    expect(run.records[0]?.blocked_on).toContain("Bearer tokens are hashed");
+    expect(run.records[0]?.forbidden_substitutes).toContain("test/support/bindings.ts");
   }, 30_000);
 
   test("a probe that also names its code on stderr is refused, and the refusal says why", async () => {
