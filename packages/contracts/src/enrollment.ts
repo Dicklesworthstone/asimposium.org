@@ -203,8 +203,6 @@ export const EnrollmentCapsuleProjectionSchema = z
     schema: z.literal("https://a.asimposium.org/schemas/enrollment-capsule.v1.json"),
     enrollment_id: EnrollmentIdSchema,
     secret_expires_at: z.number().int().positive(),
-    requested_scopes: z.array(RequestedScopeSchema).min(1).max(4),
-    requested_resources: EnrollmentResourceGrantsSchema,
     claim: z
       .object({
         method: z.literal("POST"),

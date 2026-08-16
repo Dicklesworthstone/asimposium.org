@@ -10,6 +10,7 @@ import {
   type DeviceLookupResponse,
   type EnrollmentApprovalCard,
   type EnrollmentCapsuleProjection,
+  EnrollmentCapsuleProjectionSchema,
   type EnrollmentClaimResponse,
   EnrollmentContractsSchema,
   type EnrollmentFlowPollRequest,
@@ -63,6 +64,10 @@ const JSON_SCHEMA_ARTIFACT = "generated/contracts-scaffold.schema.json";
 const ENROLLMENT_TYPES_ARTIFACT = "generated/enrollment.types.ts";
 const ENROLLMENT_JSON_SCHEMA_ARTIFACT = "generated/enrollment.schema.json";
 const ENROLLMENT_SCHEMA_ID = "https://a.asimposium.org/schemas/enrollment.v1.json";
+const ENROLLMENT_CAPSULE_JSON_SCHEMA_ARTIFACT =
+  "generated/enrollment-capsule.schema.json";
+const ENROLLMENT_CAPSULE_SCHEMA_ID =
+  "https://a.asimposium.org/schemas/enrollment-capsule.v1.json";
 const PROBLEM_TYPES_ARTIFACT = "generated/problem.types.ts";
 const PROBLEM_JSON_SCHEMA_ARTIFACT = "generated/problem.schema.json";
 const PROBLEM_SCHEMA_ID = "https://a.asimposium.org/schemas/problem.v1.json";
@@ -109,6 +114,17 @@ function generatedEnrollmentJsonSchema(): string {
     ...z.toJSONSchema(EnrollmentContractsSchema),
   };
 
+  return formatJson(document);
+}
+
+function generatedEnrollmentCapsuleJsonSchema(): string {
+  const document = {
+    $id: ENROLLMENT_CAPSULE_SCHEMA_ID,
+    title: "ASImposium public enrollment capsule",
+    description:
+      "Public fragment-safe onboarding projection. Sponsor-private scopes, directives, and budgets are intentionally absent.",
+    ...z.toJSONSchema(EnrollmentCapsuleProjectionSchema),
+  };
   return formatJson(document);
 }
 
@@ -258,6 +274,10 @@ export function generatedArtifacts(): readonly GeneratedArtifact[] {
     { relativePath: JSON_SCHEMA_ARTIFACT, content: generatedJsonSchema() },
     { relativePath: TYPES_ARTIFACT, content: generatedTypes() },
     { relativePath: ENROLLMENT_JSON_SCHEMA_ARTIFACT, content: generatedEnrollmentJsonSchema() },
+    {
+      relativePath: ENROLLMENT_CAPSULE_JSON_SCHEMA_ARTIFACT,
+      content: generatedEnrollmentCapsuleJsonSchema(),
+    },
     { relativePath: ENROLLMENT_TYPES_ARTIFACT, content: generatedEnrollmentTypes() },
     { relativePath: PROBLEM_JSON_SCHEMA_ARTIFACT, content: generatedProblemJsonSchema() },
     { relativePath: PROBLEM_TYPES_ARTIFACT, content: generatedProblemTypes() },

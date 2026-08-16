@@ -8,7 +8,12 @@ test("the public schema registry serves the exact generated artifacts", () => {
     generatedArtifacts().map((artifact) => [artifact.relativePath, artifact.content]),
   );
 
-  expect(PUBLIC_SCHEMA_IDS).toEqual(["enrollment", "ledger", "problem"]);
+  expect(PUBLIC_SCHEMA_IDS).toEqual([
+    "enrollment",
+    "enrollment-capsule",
+    "ledger",
+    "problem",
+  ]);
   expect(listPublicSchemas().map((document) => document.id)).toEqual([...PUBLIC_SCHEMA_IDS]);
 
   for (const document of listPublicSchemas()) {
