@@ -37,7 +37,7 @@ export const SUITE_SCRIPT: Readonly<Record<Suite, string>> = {
 export const SUITE_DESCRIPTION: Readonly<Record<Suite, string>> = {
   typecheck: "TypeScript compile check for every workspace package.",
   lint: "Lint and format check (Biome at the root; packages may run their own).",
-  unit: "Fast in-process tests with no network, no D1, no browser.",
+  unit: "Default local regression suite. Most packages are in-process; Wire also carries bounded local-D1 and shell lifecycle regressions, so this is not a no-D1 claim.",
   contract: "Golden corpus + generated schema + face snapshot agreement (Fable §16.2).",
   integration: "Real bindings, no mocks of D1/R2 (AGENTS.md 'Testing And Verification').",
   security: "Auth boundary, injection, cache-leak and secret-handling checks (Fable §14).",

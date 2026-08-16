@@ -12,6 +12,7 @@ import { existsSync } from "node:fs";
 import { homedir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
+import { runOwnedCommand } from "./cli.ts";
 import {
   blockedCommand,
   failCommand,
@@ -67,6 +68,353 @@ function summary(result: CliResult, suite: string): SummaryDiagnostic | undefine
   );
 }
 
+function childEnvironment(): Record<string, string> {
+  return process.env.PATH === undefined ? {} : { PATH: process.env.PATH };
+}
+
+function outputOverrunCommand(): string {
+  return `bun -e ${JSON.stringify(
+    "process.on('SIGTERM', () => {}); process.stdout.write('x'.repeat(65537)); setTimeout(() => process.exit(0), 800)",
+  )}`;
+}
+
+const PRODUCTION_STREAM_RETAINED_BYTES = 64 * 1024;
+const PRODUCTION_AGGREGATE_RETAINED_BYTES = 96 * 1024;
+
+const DELAYED_READY_SUPERVISOR = String.raw`
+use strict;
+use warnings;
+use POSIX qw(setsid);
+my $nonce = shift @ARGV;
+exit 125 if !defined setsid();
+$SIG{TERM} = sub {};
+$SIG{HUP} = sub {};
+my $target = fork();
+exit 125 if !defined $target;
+if ($target == 0) { exec @ARGV; exit 127; }
+select undef, undef, undef, 0.05;
+print STDERR "\036ASIMPOSIUM_SUITE_CONTROL $nonce ready $$\n";
+waitpid($target, 0);
+my $raw = $?;
+my $signal = $raw & 127;
+my $exit = $signal ? 128 + $signal : $raw >> 8;
+$SIG{USR1} = sub { exit $exit; };
+print STDERR "\036ASIMPOSIUM_SUITE_CONTROL $nonce exited $exit $signal $$ 1\n";
+while (1) { sleep 1; }
+`;
+
+const PID_MISMATCH_SUPERVISOR = String.raw`
+use strict;
+use warnings;
+use POSIX qw(setsid);
+my $nonce = shift @ARGV;
+exit 125 if !defined setsid();
+$SIG{TERM} = sub {};
+$SIG{HUP} = sub {};
+my $target = fork();
+exit 125 if !defined $target;
+if ($target == 0) { exec @ARGV; exit 127; }
+select undef, undef, undef, 0.05;
+print STDERR "\036ASIMPOSIUM_SUITE_CONTROL $nonce ready " . ($$ + 1) . "\n";
+waitpid($target, 0);
+while (1) { sleep 1; }
+`;
+
+const NEGATIVE_MEMBER_COUNT_SUPERVISOR = String.raw`
+use strict;
+use warnings;
+use POSIX qw(setsid);
+my $nonce = shift @ARGV;
+exit 125 if !defined setsid();
+print STDERR "\036ASIMPOSIUM_SUITE_CONTROL $nonce ready $$\n";
+$SIG{TERM} = sub {};
+$SIG{HUP} = sub {};
+my $target = fork();
+exit 125 if !defined $target;
+if ($target == 0) { exec @ARGV; exit 127; }
+waitpid($target, 0);
+my $raw = $?;
+my $signal = $raw & 127;
+my $exit = $signal ? 128 + $signal : $raw >> 8;
+$SIG{USR1} = sub { exit $exit; };
+print STDERR "\036ASIMPOSIUM_SUITE_CONTROL $nonce exited $exit $signal $$ -1\n";
+while (1) { sleep 1; }
+`;
+
+function processTable(): string {
+  const snapshot = Bun.spawnSync({
+    cmd: ["/bin/ps", "-axo", "command="],
+    stdout: "pipe",
+    stderr: "pipe",
+  });
+  expect(snapshot.exitCode).toBe(0);
+  return new TextDecoder().decode(snapshot.stdout);
+}
+
+function processIdForMarker(marker: string): number | undefined {
+  const snapshot = Bun.spawnSync({
+    cmd: ["/bin/ps", "-axo", "pid=,command="],
+    stdout: "pipe",
+    stderr: "pipe",
+  });
+  expect(snapshot.exitCode).toBe(0);
+  for (const line of new TextDecoder().decode(snapshot.stdout).split("\n")) {
+    const match = line.trim().match(/^(\d+)\s+(.*)$/);
+    const command = match?.[2];
+    if (match !== null && command?.includes(marker)) return Number(match[1]);
+  }
+  return undefined;
+}
+
+function stopDetachedFixture(marker: string): void {
+  const pid = processIdForMarker(marker);
+  if (pid === undefined) return;
+  process.kill(pid, "SIGKILL");
+}
+
+function aggregateOutputCommand(totalCapturedBytes: number, includeExitedControl: boolean): string {
+  return `my $prefix = "\\036ASIMPOSIUM_SUITE_CONTROL " . ("n" x 36) . " "; my $parent = getppid(); my $control = length($prefix . "ready $parent\\n")${includeExitedControl ? ' + length($prefix . "exited 0 0 $parent 1\\n")' : ""}; my $payload = ${totalCapturedBytes} - $control; my $stdout = 48 * 1024; die if $payload <= $stdout; syswrite(STDOUT, "x" x $stdout); syswrite(STDERR, ("y" x ($payload - $stdout - 1)) . "\\n");`;
+}
+
+describe("owned session launcher", () => {
+  test("the production 65536-byte per-stream limit completes with exact output", async () => {
+    const result = await runOwnedCommand({
+      command: ["perl", "-e", `syswrite(STDOUT, "x" x ${PRODUCTION_STREAM_RETAINED_BYTES}); exit 0;`],
+      cwd: process.cwd(),
+      env: childEnvironment(),
+      timeoutMs: 2_000,
+    });
+
+    expect(result.outcome).toBe("exited");
+    expect(result.stdout).toHaveLength(PRODUCTION_STREAM_RETAINED_BYTES);
+    expect(result.retainedStdoutBytes).toBe(PRODUCTION_STREAM_RETAINED_BYTES);
+    expect(result.retainedOutputBytes).toBeLessThanOrEqual(PRODUCTION_AGGREGATE_RETAINED_BYTES);
+  });
+
+  test("the production 65537-byte per-stream overrun retains no excess and leaves no owned survivor", async () => {
+    const marker = `suite-output-overrun-owned-${crypto.randomUUID()}`;
+    const result = await runOwnedCommand({
+      command: [
+        "perl",
+        "-e",
+        `use POSIX qw(_exit); my $marker = "${marker}"; pipe(my $read, my $write) or die; my $child = fork(); die unless defined $child; if ($child == 0) { $SIG{TERM} = sub {}; close $read; syswrite($write, "r"); close $write; select undef, undef, undef, 0.8; _exit(0); } close $write; read($read, my $ready, 1); close $read; $SIG{TERM} = sub {}; syswrite(STDOUT, "x" x ${PRODUCTION_STREAM_RETAINED_BYTES + 1}); select undef, undef, undef, 0.8; _exit(0);`,
+      ],
+      cwd: process.cwd(),
+      env: childEnvironment(),
+      timeoutMs: 2_000,
+    });
+
+    expect(result.outcome).toBe("output-overrun");
+    expect(result.cleanupProven).toBe(true);
+    expect(result.stdout).toHaveLength(PRODUCTION_STREAM_RETAINED_BYTES);
+    expect(result.retainedStdoutBytes).toBe(PRODUCTION_STREAM_RETAINED_BYTES);
+    expect(result.retainedOutputBytes).toBeLessThanOrEqual(PRODUCTION_AGGREGATE_RETAINED_BYTES);
+    expect(processTable()).not.toContain(marker);
+  });
+
+  test("the production 98304-byte aggregate limit completes exactly", async () => {
+    const result = await runOwnedCommand({
+      command: [
+        "perl",
+        "-e",
+        `${aggregateOutputCommand(PRODUCTION_AGGREGATE_RETAINED_BYTES, true)} exit 0;`,
+      ],
+      cwd: process.cwd(),
+      env: childEnvironment(),
+      timeoutMs: 2_000,
+    });
+
+    expect(result.outcome).toBe("exited");
+    expect(result.retainedStdoutBytes).toBe(48 * 1024);
+    expect(result.retainedOutputBytes).toBe(PRODUCTION_AGGREGATE_RETAINED_BYTES);
+  });
+
+  test("the production 98305-byte aggregate overrun leaves no owned survivor", async () => {
+    const marker = `suite-aggregate-overrun-owned-${crypto.randomUUID()}`;
+    const result = await runOwnedCommand({
+      command: [
+        "perl",
+        "-e",
+        `use POSIX qw(_exit); my $marker = "${marker}"; pipe(my $read, my $write) or die; my $child = fork(); die unless defined $child; if ($child == 0) { $SIG{TERM} = sub {}; close $read; syswrite($write, "r"); close $write; select undef, undef, undef, 0.8; _exit(0); } close $write; read($read, my $ready, 1); close $read; $SIG{TERM} = sub {}; ${aggregateOutputCommand(PRODUCTION_AGGREGATE_RETAINED_BYTES + 1, false)} select undef, undef, undef, 0.8; _exit(0);`,
+      ],
+      cwd: process.cwd(),
+      env: childEnvironment(),
+      timeoutMs: 2_000,
+    });
+
+    expect(result.outcome).toBe("output-overrun");
+    expect(result.cleanupProven).toBe(true);
+    expect(result.retainedStdoutBytes).toBeLessThanOrEqual(PRODUCTION_STREAM_RETAINED_BYTES);
+    expect(result.retainedStderrBytes).toBeLessThanOrEqual(PRODUCTION_STREAM_RETAINED_BYTES);
+    expect(result.retainedOutputBytes).toBe(PRODUCTION_AGGREGATE_RETAINED_BYTES);
+    expect(processTable()).not.toContain(marker);
+  });
+
+  test("a pre-ready overrun waits for the matching ownership handshake before group cleanup", async () => {
+    const marker = `suite-pre-ready-overrun-${crypto.randomUUID()}`;
+    const result = await runOwnedCommand({
+      command: [
+        "perl",
+        "-e",
+        `use POSIX qw(_exit); my $marker = "${marker}"; pipe(my $read, my $write) or die; my $child = fork(); die unless defined $child; if ($child == 0) { $SIG{TERM} = sub {}; close $read; syswrite($write, "r"); close $write; select undef, undef, undef, 0.8; _exit(0); } close $write; read($read, my $ready, 1); close $read; $SIG{TERM} = sub {}; syswrite(STDOUT, "x" x ${PRODUCTION_STREAM_RETAINED_BYTES + 1}); select undef, undef, undef, 0.8; _exit(0);`,
+      ],
+      cwd: process.cwd(),
+      env: childEnvironment(),
+      timeoutMs: 2_000,
+      supervisorScript: DELAYED_READY_SUPERVISOR,
+    });
+
+    expect(result.outcome).toBe("output-overrun");
+    expect(result.cleanupProven).toBe(true);
+    expect(processTable()).not.toContain(marker);
+  });
+
+  test("a nonce-ready PID mismatch fails closed after cleaning the actual owned group", async () => {
+    const marker = `suite-supervisor-pid-mismatch-${crypto.randomUUID()}`;
+    const result = await runOwnedCommand({
+      command: [
+        "perl",
+        "-e",
+        `my $marker = "${marker}"; $SIG{TERM} = sub {}; select undef, undef, undef, 0.8; exit 0;`,
+      ],
+      cwd: process.cwd(),
+      env: childEnvironment(),
+      timeoutMs: 2_000,
+      supervisorScript: PID_MISMATCH_SUPERVISOR,
+    });
+
+    expect(result.outcome).toBe("ownership-unproven");
+    expect(result.cleanupProven).toBe(true);
+    expect(processTable()).not.toContain(marker);
+  });
+
+  test("a supervisor memberCount -1 receives a fresh bounded host census", async () => {
+    const result = await runOwnedCommand({
+      command: ["perl", "-e", "exit 0;"],
+      cwd: process.cwd(),
+      env: childEnvironment(),
+      timeoutMs: 2_000,
+      supervisorScript: NEGATIVE_MEMBER_COUNT_SUPERVISOR,
+    });
+
+    expect(result.outcome).toBe("exited");
+    expect(result.exitCode).toBe(0);
+  });
+
+  test("a stalled inspector is bounded, reaped, and reported inspection-unproven", async () => {
+    const marker = `suite-stalled-inspector-${crypto.randomUUID()}`;
+    const startedAt = performance.now();
+    const result = await runOwnedCommand({
+      command: ["perl", "-e", "exit 0;"],
+      cwd: process.cwd(),
+      env: childEnvironment(),
+      timeoutMs: 2_000,
+      termGraceMs: 40,
+      killReapMs: 200,
+      inspectionCommand: [
+        "perl",
+        "-e",
+        `my $marker = "${marker}"; $SIG{TERM} = sub {}; select undef, undef, undef, 5;`,
+      ],
+      inspectionTimeoutMs: 25,
+      inspectionOutputBytes: 128,
+    });
+
+    expect(result.outcome).toBe("inspection-unproven");
+    expect(performance.now() - startedAt).toBeLessThan(750);
+    expect(processTable()).not.toContain(marker);
+  });
+
+  test("an oversized inspector is capped, reaped, and reported inspection-unproven", async () => {
+    const marker = `suite-oversized-inspector-${crypto.randomUUID()}`;
+    const startedAt = performance.now();
+    const result = await runOwnedCommand({
+      command: ["perl", "-e", "exit 0;"],
+      cwd: process.cwd(),
+      env: childEnvironment(),
+      timeoutMs: 2_000,
+      termGraceMs: 40,
+      killReapMs: 200,
+      inspectionCommand: [
+        "perl",
+        "-e",
+        `my $marker = "${marker}"; $SIG{TERM} = sub {}; syswrite(STDOUT, "x" x 129); select undef, undef, undef, 5;`,
+      ],
+      inspectionTimeoutMs: 25,
+      inspectionOutputBytes: 128,
+    });
+
+    expect(result.outcome).toBe("inspection-unproven");
+    expect(performance.now() - startedAt).toBeLessThan(750);
+    expect(processTable()).not.toContain(marker);
+  });
+
+  test("a timed-out target is terminated through its owned session and reaped", async () => {
+    const result = await runOwnedCommand({
+      command: ["/bin/sh", "-c", "sleep 5"],
+      cwd: process.cwd(),
+      env: childEnvironment(),
+      timeoutMs: 40,
+      termGraceMs: 40,
+      killReapMs: 200,
+      pipeDrainMs: 200,
+    });
+
+    expect(result.outcome).toBe("timeout");
+  });
+
+  test("a target that exits while leaving a same-session child is a fail-closed leak", async () => {
+    const result = await runOwnedCommand({
+      command: [
+        "perl",
+        "-e",
+        "use POSIX qw(_exit); pipe(my $read, my $write) or die; my $child = fork(); die unless defined $child; if ($child == 0) { $SIG{HUP} = sub {}; $SIG{TERM} = sub {}; close $read; syswrite($write, 'r'); close $write; select undef, undef, undef, 0.5; _exit(0); } close $write; read($read, my $ready, 1); close $read; _exit(0);",
+      ],
+      cwd: process.cwd(),
+      env: childEnvironment(),
+      timeoutMs: 2_000,
+      termGraceMs: 40,
+      killReapMs: 200,
+      pipeDrainMs: 200,
+    });
+
+    expect(result.outcome).toBe("descendant-leaked");
+  });
+
+  test("a detached inherited pipe holder is cancelled locally, not credited as dispatcher cleanup", async () => {
+    const marker = `suite-detached-pipe-boundary-${crypto.randomUUID()}`;
+    try {
+      const startedAt = performance.now();
+      const result = await runOwnedCommand({
+        command: [
+          "perl",
+          "-MPOSIX=setsid",
+          "-e",
+          `use POSIX qw(_exit); my $marker = "${marker}"; pipe(my $read, my $write) or die; my $child = fork(); die unless defined $child; if ($child == 0) { close $read; setsid(); $SIG{HUP} = sub {}; syswrite($write, 'r'); close $write; while (1) { sleep 1; } } close $write; read($read, my $ready, 1); close $read; _exit(0);`,
+        ],
+        cwd: process.cwd(),
+        env: childEnvironment(),
+        timeoutMs: 2_000,
+        termGraceMs: 40,
+        killReapMs: 200,
+        pipeDrainMs: 10,
+      });
+
+      expect(result.outcome).toBe("pipe-drain-unproven");
+      expect(performance.now() - startedAt).toBeLessThan(750);
+      // The process is intentionally outside our group and still live here. The
+      // dispatcher cancelled and released its readers; it did not clean this PID.
+      expect(processTable()).toContain(marker);
+    } finally {
+      // Test-only cleanup of the uniquely identified escaped fixture. This is not
+      // attributed to dispatcher cleanup and the fixture never self-retires.
+      stopDetachedFixture(marker);
+    }
+    await Bun.sleep(30);
+    expect(processTable()).not.toContain(marker);
+  });
+});
+
 describe("routing to real package commands", () => {
   test("a package script is executed and reported as a pass", async () => {
     const root = makeFixtureRepo({
@@ -100,8 +448,8 @@ describe("routing to real package commands", () => {
     expect(rootUnit?.reproduce).toBe("bun run toolchain:test");
   });
 
-  test("the root-owned G0 integration unit is dispatched only for the integration suite", async () => {
-    const marker = "g0-integration-ran";
+  test("the root-owned D1-before-G0 integration unit is dispatched only for the integration suite", async () => {
+    const marker = "toolchain-integration-ran";
     const root = makeFixtureRepo({
       rootScripts: { "toolchain:integration": markerCommand(marker) },
       packages: [{ dir: "apps/web", source: true }],
@@ -114,6 +462,43 @@ describe("routing to real package commands", () => {
     expect(rootUnit?.status).toBe("pass");
     expect(rootUnit?.script).toBe("toolchain:integration");
     expect(rootUnit?.reproduce).toBe("bun run toolchain:integration");
+  });
+
+  test("ordinary unit and integration dispatch strip ambient authority", async () => {
+    const authorityProbe = `bun -e ${JSON.stringify(
+      "if (process.env.S2_RUN_REAL_BINDING_INTEGRATION || process.env.CLOUDFLARE_API_TOKEN || process.env.WRANGLER_API_TOKEN || process.env.ASIMPOSIUM_SUITE_DEPTH !== '1') process.exit(41)",
+    )}`;
+    const root = makeFixtureRepo({
+      rootScripts: {
+        "toolchain:test": authorityProbe,
+        "toolchain:integration": authorityProbe,
+      },
+    });
+    const result = await runCli(root, ["unit", "integration", "--json"], {
+      S2_RUN_REAL_BINDING_INTEGRATION: "1",
+      CLOUDFLARE_API_TOKEN: "fixture-authority-not-forwarded",
+      WRANGLER_API_TOKEN: "fixture-authority-not-forwarded",
+    });
+
+    expect(result.exitCode).toBe(0);
+    expect(units(result).find((unit) => unit.suite === "unit")?.status).toBe("pass");
+    expect(units(result).find((unit) => unit.suite === "integration")?.status).toBe("pass");
+  });
+
+  test("ordinary unit and integration diagnostics name retained-output overrun", async () => {
+    const root = makeFixtureRepo({
+      rootScripts: {
+        "toolchain:test": outputOverrunCommand(),
+        "toolchain:integration": outputOverrunCommand(),
+      },
+    });
+    const result = await runCli(root, ["unit", "integration", "--json"]);
+
+    expect(result.exitCode).toBe(1);
+    expect(units(result).find((unit) => unit.suite === "unit")?.code).toBe("SUITE_OUTPUT_OVERRUN");
+    expect(units(result).find((unit) => unit.suite === "integration")?.code).toBe(
+      "SUITE_OUTPUT_OVERRUN",
+    );
   });
 
   test("selecting several suites runs them in CI doctrine order", async () => {
@@ -508,6 +893,65 @@ describe("--list plans without running", () => {
     expect(plans.every((plan) => plan.record === "plan")).toBe(true);
     expect(plans.find((plan) => plan.dir === "apps/wire")?.action).toBe("run");
     expect(plans.find((plan) => plan.dir === "packages/protocol")?.action).toBe("skip");
+  });
+
+  test("integration --list retains the root D1-before-G0 bridge without running it", async () => {
+    const marker = "must-not-run-integration";
+    const root = makeFixtureRepo({
+      rootScripts: { "toolchain:integration": markerCommand(marker) },
+      packages: [{ dir: "apps/web", source: true }],
+    });
+    const result = await runCli(root, ["integration", "--list", "--json"]);
+    expect(result.exitCode).toBe(0);
+    expect(existsSync(join(root, marker))).toBe(false);
+
+    const plans = result.stdout
+      .split("\n")
+      .filter((line) => line.trim().length > 0)
+      .map((line) => JSON.parse(line) as { record: string; dir: string; script?: string });
+    expect(plans.find((plan) => plan.dir === ".")).toEqual(
+      expect.objectContaining({ record: "plan", script: "toolchain:integration" }),
+    );
+  });
+
+  test("the toolchain bridge lists migration contract, local D1, then G0 without spawning", async () => {
+    const root = makeFixtureRepo();
+    const result = await runCli(root, ["--toolchain-integration", "--list"]);
+    expect(result.exitCode).toBe(0);
+    expect(result.stderr).toBe("");
+
+    const plans = result.stdout
+      .split("\n")
+      .filter((line) => line.trim().length > 0)
+      .map(
+        (line) =>
+          JSON.parse(line) as {
+            record: string;
+            step: string;
+            command: string;
+            timeout_ms: number;
+          },
+      );
+    expect(plans).toEqual([
+      expect.objectContaining({
+        record: "toolchain-integration-plan",
+        step: "d1-migration-contract",
+        command: "bun infra/migrate.test.mjs",
+        timeout_ms: 120_000,
+      }),
+      expect.objectContaining({
+        record: "toolchain-integration-plan",
+        step: "d1-migration-local",
+        command: "bun infra/migrate-local.test.mjs",
+        timeout_ms: 190_000,
+      }),
+      expect.objectContaining({
+        record: "toolchain-integration-plan",
+        step: "g0-spikes",
+        command: "bun scripts/suite/g0-spikes.ts",
+        timeout_ms: 1_230_000,
+      }),
+    ]);
   });
 });
 

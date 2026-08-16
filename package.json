@@ -28,7 +28,8 @@
     "test:e2e": "bun scripts/suite/cli.ts e2e --require-executed",
     "toolchain:typecheck": "tsc --noEmit -p tsconfig.json",
     "toolchain:lint": "biome check scripts package.json tsconfig.json tsconfig.base.json biome.json",
-    "toolchain:integration": "bun scripts/suite/g0-spikes.ts",
+    "toolchain:integration": "bun scripts/suite/cli.ts --toolchain-integration",
+    "test:integration:s2-real": "S2_RUN_REAL_BINDING_INTEGRATION=1 bun run --cwd apps/wire test:integration:s2-real",
     "toolchain:format": "biome check --write scripts package.json tsconfig.json tsconfig.base.json biome.json",
     "test:seed": "node docs/seed/sp4d/check.test.mjs && node docs/seed/rungs-1-5/check.test.mjs && bun docs/seed/rungs-1-5/check.mjs",
     "toolchain:test": "bun run test:seed && bun test /dev/null --timeout=120000 scripts/suite scripts/verify-cost-model.test.ts"

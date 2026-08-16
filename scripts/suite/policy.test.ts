@@ -38,6 +38,12 @@ describe("suite policy", () => {
     expect(new Set(scripts).size).toBe(scripts.length);
   });
 
+  test("the unit description is honest about Wire's bounded local D1 and shell regressions", () => {
+    expect(SUITE_DESCRIPTION.unit).toContain("local-D1");
+    expect(SUITE_DESCRIPTION.unit).toContain("shell lifecycle");
+    expect(SUITE_DESCRIPTION.unit).not.toContain("no D1");
+  });
+
   test("script names follow the AGENTS.md entry-point vocabulary", () => {
     expect(SUITE_SCRIPT.typecheck).toBe("typecheck");
     expect(SUITE_SCRIPT.lint).toBe("lint");
@@ -108,6 +114,25 @@ describe("suite policy", () => {
     expect(rootPackage.scripts.check).toContain("--require-executed");
     expect(rootPackage.scripts["test:performance"]).toContain("--require-executed");
     expect(rootPackage.scripts["test:e2e"]).toContain("--require-executed");
+  });
+
+  test("the ordinary default remains unit-only while real S2 authority is an explicit root opt-in", async () => {
+    const repositoryRoot = resolve(import.meta.dir, "../..");
+    const rootPackage = (await Bun.file(resolve(repositoryRoot, "package.json")).json()) as {
+      scripts: Record<string, string>;
+    };
+
+    expect(rootPackage.scripts.test).toBe("bun scripts/suite/cli.ts unit");
+    expect(rootPackage.scripts["test:integration"]).toBe("bun scripts/suite/cli.ts integration");
+    expect(rootPackage.scripts["test:integration"]).not.toContain(
+      "S2_RUN_REAL_BINDING_INTEGRATION",
+    );
+    expect(rootPackage.scripts["toolchain:integration"]).toBe(
+      "bun scripts/suite/cli.ts --toolchain-integration",
+    );
+    expect(rootPackage.scripts["test:integration:s2-real"]).toBe(
+      "S2_RUN_REAL_BINDING_INTEGRATION=1 bun run --cwd apps/wire test:integration:s2-real",
+    );
   });
 
   test("E2E entrypoints retain artifacts and the convenience alias delegates to its workspace", async () => {
