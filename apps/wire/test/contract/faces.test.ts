@@ -7,6 +7,7 @@ import type { Env } from "../../src/env";
 import {
   boundEnv,
   callWorker,
+  d1Shaped,
   executionContext,
   outboxShaped,
   r2Shaped,
@@ -34,7 +35,8 @@ import {
 const HEALTH_OK =
   '{"schema":"https://a.asimposium.org/schemas/internal.health.v1.json","ok":true,' +
   '"data":{"service":"wire","role":"stoa","format":"json",' +
-  '"bindings":{"DB":"bound","ARTIFACTS":"bound","KRATER_OUTBOX":"bound"}},' +
+  '"bindings":{"DB":"bound","ARTIFACTS":"bound","PUBLIC_ARTIFACTS":"bound",' +
+  '"KRATER_OUTBOX":"bound"}},' +
   '"degraded":[],"next_actions":[]}';
 
 const UNKNOWN_FORMAT =
@@ -51,7 +53,15 @@ const BINDING_MISSING =
   '"detail":"Missing or wrong-shaped bindings: DB.",' +
   '"fix_hint":"Bind every name in `missing` in the Worker configuration for this environment, ' +
   'then redeploy.","missing":["DB"],"bindings":{"DB":"missing","ARTIFACTS":"bound",' +
-  '"KRATER_OUTBOX":"bound"}}';
+  '"PUBLIC_ARTIFACTS":"bound","KRATER_OUTBOX":"bound"}}';
+
+const PUBLIC_ARTIFACTS_MISSING =
+  '{"type":"https://asimposium.org/errors/BINDING_MISSING",' +
+  '"title":"Required Worker bindings are not configured","status":503,"code":"BINDING_MISSING",' +
+  '"detail":"Missing or wrong-shaped bindings: PUBLIC_ARTIFACTS.",' +
+  '"fix_hint":"Bind every name in `missing` in the Worker configuration for this environment, ' +
+  'then redeploy.","missing":["PUBLIC_ARTIFACTS"],"bindings":{"DB":"bound",' +
+  '"ARTIFACTS":"bound","PUBLIC_ARTIFACTS":"missing","KRATER_OUTBOX":"bound"}}';
 
 const ENROLLMENT_UNAVAILABLE =
   '{"type":"https://asimposium.org/errors/ENROLLMENT_UNAVAILABLE",' +
@@ -244,12 +254,25 @@ describe("face wire format", () => {
   test("GET /internal/health with D1 unbound", async () => {
     const res = await callWorker("/internal/health", {
       ARTIFACTS: r2Shaped(),
+      PUBLIC_ARTIFACTS: r2Shaped(),
       KRATER_OUTBOX: outboxShaped(),
     });
 
     expect(res.status).toBe(503);
     expect(res.contentType).toBe("application/problem+json; charset=utf-8");
     expect(res.bodyText).toBe(BINDING_MISSING);
+  });
+
+  test("GET /internal/health with public artifact delivery unbound", async () => {
+    const res = await callWorker("/internal/health", {
+      DB: d1Shaped(),
+      ARTIFACTS: r2Shaped(),
+      KRATER_OUTBOX: outboxShaped(),
+    });
+
+    expect(res.status).toBe(503);
+    expect(res.contentType).toBe("application/problem+json; charset=utf-8");
+    expect(res.bodyText).toBe(PUBLIC_ARTIFACTS_MISSING);
   });
 
   test("GET /v1/hello fails closed when the trusted Stoa origin is absent", async () => {

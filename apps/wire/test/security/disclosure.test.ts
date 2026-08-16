@@ -5,6 +5,7 @@ import type { Env } from "../../src/env";
 import {
   boundEnv,
   callWorker,
+  d1Shaped,
   executionContext,
   outboxShaped,
   r2Shaped,
@@ -25,6 +26,7 @@ const CANARY_TOKEN = "asimp_ag_canary000000000000000000";
 const CANARY_SECRET = "canary-google-client-secret";
 const REPLAY_KEY = "CCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCC";
 const ENROLLMENT_ID = "ASIMP-EN-01JXYZ4K6Q";
+const TRUSTED_STOA_ORIGIN = "https://a.asimposium.org";
 
 const leakyEnv = (): unknown => ({
   ...boundEnv(),
@@ -57,6 +59,7 @@ describe("faces disclose no environment or binding values", () => {
   test("the BINDING_MISSING refusal names bindings, never their values", async () => {
     const res = await callWorker("/internal/health", {
       ARTIFACTS: r2Shaped(),
+      PUBLIC_ARTIFACTS: r2Shaped(),
       KRATER_OUTBOX: outboxShaped(),
       GOOGLE_CLIENT_SECRET: CANARY_SECRET,
       ASIMP_SERVICE_TOKEN: CANARY_TOKEN,
@@ -65,6 +68,22 @@ describe("faces disclose no environment or binding values", () => {
     expect(res.status).toBe(503);
     forbidden(res.bodyText);
     expect(res.bodyText).toContain('"missing":["DB"]');
+  });
+
+  test("a malformed public artifact binding is a typed refusal that withholds its value", async () => {
+    const res = await callWorker("/internal/health", {
+      DB: d1Shaped(),
+      ARTIFACTS: r2Shaped(),
+      PUBLIC_ARTIFACTS: { bucket_name: CANARY_SECRET },
+      KRATER_OUTBOX: outboxShaped(),
+    });
+
+    expect(res.status).toBe(503);
+    expect(res.body).toMatchObject({
+      code: "BINDING_MISSING",
+      missing: ["PUBLIC_ARTIFACTS"],
+    });
+    forbidden(res.bodyText);
   });
 
   test("the UNKNOWN_FORMAT refusal does not echo the rejected value back", async () => {
@@ -90,7 +109,7 @@ describe("faces disclose no environment or binding values", () => {
     const app = createApp();
     const response = await app.fetch(
       new Request("https://a.asimposium.org/v1/hello", { method: "POST" }),
-      boundEnv({ ENROLLMENT_REPLAY_KEY: REPLAY_KEY }),
+      boundEnv({ ENROLLMENT_REPLAY_KEY: REPLAY_KEY, STOA_ORIGIN: TRUSTED_STOA_ORIGIN }),
       executionContext() as unknown as Parameters<typeof app.fetch>[2],
     );
 
@@ -109,7 +128,7 @@ describe("faces disclose no environment or binding values", () => {
     const app = createApp();
     const response = await app.fetch(
       new Request("https://a.asimposium.org/join/not-an-enrollment-id"),
-      boundEnv({ ENROLLMENT_REPLAY_KEY: REPLAY_KEY }),
+      boundEnv({ ENROLLMENT_REPLAY_KEY: REPLAY_KEY, STOA_ORIGIN: TRUSTED_STOA_ORIGIN }),
       executionContext() as unknown as Parameters<typeof app.fetch>[2],
     );
 
@@ -166,12 +185,20 @@ describe("the isolate cache never crosses D1 binding identity", () => {
 
     const responseA = await app.fetch(
       request(),
-      boundEnv({ DB: first.db, ENROLLMENT_REPLAY_KEY: REPLAY_KEY }),
+      boundEnv({
+        DB: first.db,
+        ENROLLMENT_REPLAY_KEY: REPLAY_KEY,
+        STOA_ORIGIN: TRUSTED_STOA_ORIGIN,
+      }),
       executionContext() as unknown as Parameters<typeof app.fetch>[2],
     );
     const responseB = await app.fetch(
       request(),
-      boundEnv({ DB: second.db, ENROLLMENT_REPLAY_KEY: REPLAY_KEY }),
+      boundEnv({
+        DB: second.db,
+        ENROLLMENT_REPLAY_KEY: REPLAY_KEY,
+        STOA_ORIGIN: TRUSTED_STOA_ORIGIN,
+      }),
       executionContext() as unknown as Parameters<typeof app.fetch>[2],
     );
 

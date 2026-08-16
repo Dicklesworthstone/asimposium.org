@@ -10,12 +10,12 @@ import { boundEnv, executionContext } from "../support/bindings";
  * The binding names this Worker requires must be the binding names the Worker
  * configuration actually provides.
  *
- * The observed defect this closes: `src/env.ts` declared an R2 binding named
- * `CAS` while `infra/wrangler.toml` provides `ARTIFACTS`. Every suite in this
- * package passed, because every suite supplied its own env, and the Worker
- * would still have answered `503 BINDING_MISSING` the moment it ran under the
- * repository's only Wrangler configuration. A green package that cannot boot
- * is exactly the failure a scaffold exists to prevent.
+ * The observed defect this closes: the topology and generated configs bound a
+ * public-delivery R2 bucket while `src/env.ts` and the base config ignored it.
+ * Every suite supplied its own env, so the Worker could have answered a
+ * cheerful health response despite a required production binding being absent.
+ * A green package that cannot boot with the configured binding set is exactly
+ * the failure a scaffold exists to prevent.
  *
  * This reads `infra/wrangler.toml` as *text* and asserts agreement on names.
  * It runs no Wrangler command, starts no `workerd`, and proves nothing about
@@ -27,7 +27,12 @@ import { boundEnv, executionContext } from "../support/bindings";
 
 const CONFIG_PATH = resolve(import.meta.dir, "../../../../infra/wrangler.toml");
 
-async function configuredBindings(): Promise<string[]> {
+interface ConfiguredBindings {
+  names: string[];
+  r2Buckets: Array<{ binding: string; bucketName: string }>;
+}
+
+async function configuredBindings(): Promise<ConfiguredBindings> {
   const file = Bun.file(CONFIG_PATH);
   if (!(await file.exists())) {
     throw new Error(
@@ -38,7 +43,7 @@ async function configuredBindings(): Promise<string[]> {
   const toml = await file.text();
   const config = Bun.TOML.parse(toml) as {
     d1_databases?: Array<{ binding?: unknown }>;
-    r2_buckets?: Array<{ binding?: unknown }>;
+    r2_buckets?: Array<{ binding?: unknown; bucket_name?: unknown }>;
     durable_objects?: { bindings?: Array<{ name?: unknown }> };
   };
   const values = [
@@ -49,12 +54,29 @@ async function configuredBindings(): Promise<string[]> {
   if (values.some((value) => typeof value !== "string")) {
     throw new Error("infra/wrangler.toml contains a binding without a string name");
   }
-  return values as string[];
+
+  const r2Buckets = config.r2_buckets ?? [];
+  if (
+    r2Buckets.some(
+      (bucket) => typeof bucket.binding !== "string" || typeof bucket.bucket_name !== "string",
+    )
+  ) {
+    throw new Error(
+      "infra/wrangler.toml contains an R2 bucket without string binding and bucket_name",
+    );
+  }
+  return {
+    names: values as string[],
+    r2Buckets: (r2Buckets as Array<{ binding: string; bucket_name: string }>).map((bucket) => ({
+      binding: bucket.binding,
+      bucketName: bucket.bucket_name,
+    })),
+  };
 }
 
 describe("binding names agree with the Worker configuration", () => {
   test("every binding this Worker requires is provided by infra/wrangler.toml", async () => {
-    const provided = await configuredBindings();
+    const { names: provided } = await configuredBindings();
 
     expect(provided.length).toBeGreaterThan(0);
     for (const required of REQUIRED_BINDINGS) {
@@ -97,12 +119,31 @@ describe("binding names agree with the Worker configuration", () => {
   });
 
   test("the configuration provides no binding this Worker silently ignores", async () => {
-    const provided = await configuredBindings();
+    const { names: provided } = await configuredBindings();
 
     // Not a style rule: an unread binding is either a missing feature or a
     // stale config entry, and both should be a decision, not an accident.
     for (const name of provided) {
       expect(REQUIRED_BINDINGS as readonly string[]).toContain(name);
     }
+  });
+
+  test("the base config and required roster are the same exact binding set", async () => {
+    const { names: provided } = await configuredBindings();
+
+    // This includes the absence of HERALD_ROOMS: topology defers it uniformly
+    // until an exported W7 Durable Object class exists.
+    expect([...provided].sort()).toEqual([...REQUIRED_BINDINGS].sort());
+    expect(provided).not.toContain("HERALD_ROOMS");
+  });
+
+  test("the base config keeps private CAS and public artifact delivery separate", async () => {
+    const { r2Buckets } = await configuredBindings();
+
+    expect(r2Buckets).toEqual([
+      { binding: "ARTIFACTS", bucketName: "asimposium-artifacts-local" },
+      { binding: "PUBLIC_ARTIFACTS", bucketName: "asimposium-public-local" },
+    ]);
+    expect(r2Buckets[0]?.bucketName).not.toBe(r2Buckets[1]?.bucketName);
   });
 });

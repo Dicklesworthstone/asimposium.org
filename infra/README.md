@@ -129,16 +129,17 @@ rather than hidden.
 Stated plainly so this tooling is not mistaken for a working environment. **OPS.3
 cannot close on the strength of what is here.**
 
-- **The Worker does not yet implement the whole topology.** The topology's
-  `required_bindings` roster is five — `DB`, `ARTIFACTS`, `PUBLIC_ARTIFACTS`,
-  `HERALD_ROOMS`, `KRATER_OUTBOX`. `apps/wire`'s `Env` declares three of them:
-  `DB`, `ARTIFACTS`, and `KRATER_OUTBOX`. `PUBLIC_ARTIFACTS` has no counterpart
-  in the Worker, and `HERALD_ROOMS` is deferred (below). One Durable Object
-  class **is** exported — `KraterOutboxDrainer`, which is why its binding is
-  emitted rather than deferred. Closing the gap needs coordinated edits in
-  `apps/wire` **and** in `infra/wrangler.toml` (whose validator asserts exactly
-  one R2 bucket), which is why it is reported here rather than done
-  unilaterally.
+- **The Worker implements the emitted binding subset, not the whole topology.**
+  The topology's `required_bindings` roster is five — `DB`, `ARTIFACTS`,
+  `PUBLIC_ARTIFACTS`, `HERALD_ROOMS`, `KRATER_OUTBOX`. `apps/wire` requires the
+  four emitted bindings: D1, the private `ARTIFACTS` CAS bucket, the separate
+  `PUBLIC_ARTIFACTS` delivery bucket, and the outbox. `/internal/health` checks
+  their handle shapes only and discloses names plus bound/missing state, never
+  bucket values. It does not read, write, or serve either bucket: Fable §10.4's
+  `/sha256/<hex>` path remains direct R2 delivery. `HERALD_ROOMS` is still
+  deferred (below). One Durable Object class **is** exported —
+  `KraterOutboxDrainer`, which is why its binding is emitted rather than
+  deferred.
 - **A Durable Object binding without an exported class fails `wrangler deploy`.**
   `HERALD_ROOMS` is therefore declared in `environments.toml` but listed in
   `policy.deferred_bindings`, so it is withheld from every generated config

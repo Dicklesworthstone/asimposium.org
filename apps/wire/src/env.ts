@@ -15,8 +15,15 @@ import type { KraterOutboxNamespace } from "./krater/outbox-do";
 export interface Env {
   /** Krater's system of record (Fable §10.1). This Worker is its only writer. */
   DB: D1Database;
-  /** Krater's content-addressed body store (Fable §10.4), bound as ARTIFACTS. */
+  /** Krater's private content-addressed body store (Fable §10.4), bound as ARTIFACTS. */
   ARTIFACTS: R2Bucket;
+  /**
+   * Direct-R2 public artifact delivery (Fable §10.4), bound as
+   * PUBLIC_ARTIFACTS. The Worker checks only that this handle is structurally
+   * present; public `/sha256/<hex>` delivery remains a direct R2 path, not a
+   * Worker blob route.
+   */
+  PUBLIC_ARTIFACTS: R2Bucket;
   /** Durable retry owner for Krater's transactional outbox. */
   KRATER_OUTBOX: KraterOutboxNamespace;
   /**
@@ -41,7 +48,7 @@ export interface Env {
   STOA_ORIGIN?: string;
 }
 
-export const REQUIRED_BINDINGS = ["DB", "ARTIFACTS", "KRATER_OUTBOX"] as const;
+export const REQUIRED_BINDINGS = ["DB", "ARTIFACTS", "PUBLIC_ARTIFACTS", "KRATER_OUTBOX"] as const;
 
 export type RequiredBinding = (typeof REQUIRED_BINDINGS)[number];
 
@@ -66,6 +73,8 @@ const BINDING_PROBES: Record<RequiredBinding, (value: unknown) => boolean> = {
   DB: (value) =>
     isFunction(readProperty(value, "prepare")) && isFunction(readProperty(value, "batch")),
   ARTIFACTS: (value) =>
+    isFunction(readProperty(value, "get")) && isFunction(readProperty(value, "put")),
+  PUBLIC_ARTIFACTS: (value) =>
     isFunction(readProperty(value, "get")) && isFunction(readProperty(value, "put")),
   KRATER_OUTBOX: (value) =>
     isFunction(readProperty(value, "idFromName")) && isFunction(readProperty(value, "get")),

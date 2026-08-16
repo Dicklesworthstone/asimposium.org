@@ -15,7 +15,12 @@ describe("GET /internal/health", () => {
         service: "wire",
         role: "stoa",
         format: "json",
-        bindings: { DB: "bound", ARTIFACTS: "bound", KRATER_OUTBOX: "bound" },
+        bindings: {
+          DB: "bound",
+          ARTIFACTS: "bound",
+          PUBLIC_ARTIFACTS: "bound",
+          KRATER_OUTBOX: "bound",
+        },
       },
       degraded: [],
       next_actions: [],
@@ -62,6 +67,7 @@ describe("GET /internal/health", () => {
   test("reports 503 BINDING_MISSING when D1 is not bound", async () => {
     const res = await callWorker("/internal/health", {
       ARTIFACTS: r2Shaped(),
+      PUBLIC_ARTIFACTS: r2Shaped(),
       KRATER_OUTBOX: outboxShaped(),
     });
 
@@ -70,7 +76,12 @@ describe("GET /internal/health", () => {
     expect(res.body).toMatchObject({
       code: "BINDING_MISSING",
       missing: ["DB"],
-      bindings: { DB: "missing", ARTIFACTS: "bound", KRATER_OUTBOX: "bound" },
+      bindings: {
+        DB: "missing",
+        ARTIFACTS: "bound",
+        PUBLIC_ARTIFACTS: "bound",
+        KRATER_OUTBOX: "bound",
+      },
     });
   });
 
@@ -80,6 +91,7 @@ describe("GET /internal/health", () => {
     const res = await callWorker("/internal/health", {
       DB: d1Shaped(),
       ARTIFACTS: { name: "asimp-cas" },
+      PUBLIC_ARTIFACTS: r2Shaped(),
       KRATER_OUTBOX: outboxShaped(),
     });
 
@@ -87,8 +99,52 @@ describe("GET /internal/health", () => {
     expect(res.body).toMatchObject({
       code: "BINDING_MISSING",
       missing: ["ARTIFACTS"],
-      bindings: { DB: "bound", ARTIFACTS: "missing", KRATER_OUTBOX: "bound" },
+      bindings: {
+        DB: "bound",
+        ARTIFACTS: "missing",
+        PUBLIC_ARTIFACTS: "bound",
+        KRATER_OUTBOX: "bound",
+      },
     });
+  });
+
+  // PLANTED NEGATIVE 4 — the public delivery bucket is independently
+  // required, and its value must never be reflected by the coarse face.
+  test("refuses a missing PUBLIC_ARTIFACTS binding without disclosing a bucket value", async () => {
+    const res = await callWorker("/internal/health", {
+      DB: d1Shaped(),
+      ARTIFACTS: r2Shaped(),
+      KRATER_OUTBOX: outboxShaped(),
+    });
+
+    expect(res.status).toBe(503);
+    expect(res.body).toMatchObject({
+      code: "BINDING_MISSING",
+      missing: ["PUBLIC_ARTIFACTS"],
+      bindings: {
+        DB: "bound",
+        ARTIFACTS: "bound",
+        PUBLIC_ARTIFACTS: "missing",
+        KRATER_OUTBOX: "bound",
+      },
+    });
+  });
+
+  test("refuses a wrong-shaped PUBLIC_ARTIFACTS binding without echoing it", async () => {
+    const bucketValue = "asimposium-public-untrusted-handle";
+    const res = await callWorker("/internal/health", {
+      DB: d1Shaped(),
+      ARTIFACTS: r2Shaped(),
+      PUBLIC_ARTIFACTS: { bucket_name: bucketValue },
+      KRATER_OUTBOX: outboxShaped(),
+    });
+
+    expect(res.status).toBe(503);
+    expect(res.body).toMatchObject({
+      code: "BINDING_MISSING",
+      missing: ["PUBLIC_ARTIFACTS"],
+    });
+    expect(res.bodyText).not.toContain(bucketValue);
   });
 
   test("reports every missing binding at once, in declaration order", async () => {
@@ -98,6 +154,7 @@ describe("GET /internal/health", () => {
     expect((res.body as { missing: string[] }).missing).toEqual([
       "DB",
       "ARTIFACTS",
+      "PUBLIC_ARTIFACTS",
       "KRATER_OUTBOX",
     ]);
   });

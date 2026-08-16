@@ -61,6 +61,7 @@ export function boundEnv(overrides: Partial<Record<keyof Env, unknown>> = {}): E
   return {
     DB: d1Shaped(),
     ARTIFACTS: r2Shaped(),
+    PUBLIC_ARTIFACTS: r2Shaped(),
     KRATER_OUTBOX: outboxShaped(),
     ...overrides,
   } as Env;

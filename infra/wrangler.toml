@@ -18,6 +18,10 @@ migrations_dir = "../db/migrations"
 binding = "ARTIFACTS"
 bucket_name = "asimposium-artifacts-local"
 
+[[r2_buckets]]
+binding = "PUBLIC_ARTIFACTS"
+bucket_name = "asimposium-public-local"
+
 [[durable_objects.bindings]]
 name = "KRATER_OUTBOX"
 class_name = "KraterOutboxDrainer"

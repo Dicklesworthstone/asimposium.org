@@ -11,6 +11,13 @@ describe("binding probes", () => {
     expect(isBindingHealthy("ARTIFACTS", r2Shaped())).toBe(true);
   });
 
+  test("an R2-shaped handle passes the PUBLIC_ARTIFACTS probe without invoking it", () => {
+    // Every shim method throws; a structural health probe must not turn this
+    // into an R2 operation.
+    expect(() => isBindingHealthy("PUBLIC_ARTIFACTS", r2Shaped())).not.toThrow();
+    expect(isBindingHealthy("PUBLIC_ARTIFACTS", r2Shaped())).toBe(true);
+  });
+
   test("a Durable Object namespace-shaped handle passes the KRATER_OUTBOX probe", () => {
     expect(isBindingHealthy("KRATER_OUTBOX", outboxShaped())).toBe(true);
   });
@@ -53,8 +60,15 @@ describe("bindingStates", () => {
     expect(bindingStates(boundEnv({ ARTIFACTS: undefined }))).toEqual({
       DB: "bound",
       ARTIFACTS: "missing",
+      PUBLIC_ARTIFACTS: "bound",
       KRATER_OUTBOX: "bound",
     });
+  });
+
+  test("keeps the private and public R2 handles distinct in a fully bound fixture", () => {
+    const env = boundEnv();
+
+    expect(env.ARTIFACTS).not.toBe(env.PUBLIC_ARTIFACTS);
   });
 
   test("emits keys in declaration order so serialisation is deterministic", () => {

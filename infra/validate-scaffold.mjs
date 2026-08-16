@@ -154,6 +154,32 @@ function readSingleObjectArray(record, table, source) {
   return entry;
 }
 
+function readExactObjectArray(record, table, count, source) {
+  const value = record[table];
+  if (value === undefined) {
+    fail("MISSING_CONFIG_TABLE", `${source} must define [[${table}]].`);
+  }
+  if (!Array.isArray(value)) {
+    fail("UNSAFE_CONFIG_TABLE", `${source} must define [[${table}]], not [${table}].`);
+  }
+  if (value.length < count) {
+    fail(
+      "MISSING_CONFIG_TABLE",
+      `${source} must define exactly ${count} [[${table}]] entries; a required entry is missing.`,
+    );
+  }
+  if (value.length > count) {
+    fail(
+      "DUPLICATE_CONFIG_TABLE",
+      `${source} must define exactly ${count} [[${table}]] entries; duplicate, shadowed, or conflicting entries are not allowed.`,
+    );
+  }
+  if (value.some((entry) => !isRecord(entry))) {
+    fail("UNSAFE_CONFIG_TABLE", `${source} must define [[${table}]] entries as objects.`);
+  }
+  return value;
+}
+
 function readRequiredStringArray(record, key, source) {
   const value = record[key];
   if (value === undefined) {
@@ -392,20 +418,27 @@ export function validateScaffold(rootDirectory, configWorkspacePath = "infra/wra
     );
   }
 
-  const r2Bucket = readSingleObjectArray(parsedConfig, "r2_buckets", configSource);
-  assertExactKeys(r2Bucket, R2_BUCKET_CONFIG_KEYS, `${configSource} [[r2_buckets]]`);
-  assertExact(
-    readRequiredString(r2Bucket, "binding", configSource),
-    "ARTIFACTS",
-    "r2_buckets.binding",
-    configSource,
-  );
-  assertExact(
-    readRequiredString(r2Bucket, "bucket_name", configSource),
-    "asimposium-artifacts-local",
-    "r2_buckets.bucket_name",
-    configSource,
-  );
+  const r2Buckets = readExactObjectArray(parsedConfig, "r2_buckets", 2, configSource);
+  const requiredR2Buckets = [
+    { binding: "ARTIFACTS", bucketName: "asimposium-artifacts-local" },
+    { binding: "PUBLIC_ARTIFACTS", bucketName: "asimposium-public-local" },
+  ];
+  for (const [index, expected] of requiredR2Buckets.entries()) {
+    const r2Bucket = r2Buckets[index];
+    assertExactKeys(r2Bucket, R2_BUCKET_CONFIG_KEYS, `${configSource} [[r2_buckets]]`);
+    assertExact(
+      readRequiredString(r2Bucket, "binding", configSource),
+      expected.binding,
+      `r2_buckets[${index}].binding`,
+      configSource,
+    );
+    assertExact(
+      readRequiredString(r2Bucket, "bucket_name", configSource),
+      expected.bucketName,
+      `r2_buckets[${index}].bucket_name`,
+      configSource,
+    );
+  }
 
   const durableObjects = readRequiredObject(parsedConfig, "durable_objects", configSource);
   assertExactKeys(durableObjects, DURABLE_OBJECTS_CONFIG_KEYS, `${configSource} [durable_objects]`);

@@ -44,6 +44,10 @@ migrations_dir = "../db/migrations"
 binding = "ARTIFACTS"
 bucket_name = "asimposium-artifacts-local"
 
+[[r2_buckets]]
+binding = "PUBLIC_ARTIFACTS"
+bucket_name = "asimposium-public-local"
+
 [[durable_objects.bindings]]
 name = "KRATER_OUTBOX"
 class_name = "KraterOutboxDrainer"
@@ -147,6 +151,18 @@ try {
   const shadowedR2Config = validConfig.replace(
     "[[r2_buckets]]",
     '[r2_buckets]\nbinding = "ARTIFACTS_SHADOW"\nbucket_name = "conflicting-local"\n\n[[r2_buckets]]',
+  );
+  const missingPublicR2Config = validConfig.replace(
+    '\n[[r2_buckets]]\nbinding = "PUBLIC_ARTIFACTS"\nbucket_name = "asimposium-public-local"\n',
+    "\n",
+  );
+  const wrongPublicR2BindingConfig = validConfig.replace(
+    'binding = "PUBLIC_ARTIFACTS"',
+    'binding = "ARTIFACTS"',
+  );
+  const aliasedPublicR2BucketConfig = validConfig.replace(
+    'bucket_name = "asimposium-public-local"',
+    'bucket_name = "asimposium-artifacts-local"',
   );
   const missingMarkdownRuleConfig = validConfig.replace(
     '\n[[rules]]\ntype = "Text"\nglobs = ["**/*.md", "**/*.txt", "**/*.schema.json"]\nfallthrough = true\n',
@@ -292,6 +308,36 @@ value = "value"
           createCompleteFixtureRoot("shadowed-r2", shadowedR2Config),
           "infra/wrangler.toml",
           "MALFORMED_TOML",
+        );
+      },
+    },
+    {
+      name: "missing-public-r2-binding",
+      execute() {
+        expectFailure(
+          createCompleteFixtureRoot("missing-public-r2", missingPublicR2Config),
+          "infra/wrangler.toml",
+          "MISSING_CONFIG_TABLE",
+        );
+      },
+    },
+    {
+      name: "wrong-public-r2-binding",
+      execute() {
+        expectFailure(
+          createCompleteFixtureRoot("wrong-public-r2-binding", wrongPublicR2BindingConfig),
+          "infra/wrangler.toml",
+          "UNSAFE_CONFIG_VALUE",
+        );
+      },
+    },
+    {
+      name: "aliased-public-r2-bucket",
+      execute() {
+        expectFailure(
+          createCompleteFixtureRoot("aliased-public-r2", aliasedPublicR2BucketConfig),
+          "infra/wrangler.toml",
+          "UNSAFE_CONFIG_VALUE",
         );
       },
     },
@@ -557,7 +603,7 @@ value = "value"
     );
   }
   assert.deepEqual(failedCases, []);
-  assert.equal(cases.length, 32);
+  assert.equal(cases.length, 35);
 
   process.stdout.write(
     `${JSON.stringify({
