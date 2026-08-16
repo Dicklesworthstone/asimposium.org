@@ -64,7 +64,15 @@ const CREDENTIAL_HARDENING_MIGRATION = resolve(
   import.meta.dir,
   "../../../../db/migrations/0011_fellow_credential_hardening.sql",
 );
+const FELLOW_LIFECYCLE_COMMANDS_MIGRATION = resolve(
+  import.meta.dir,
+  "../../../../db/migrations/0012_fellow_lifecycle_commands.sql",
+);
 const DEVICE_MIGRATION = resolve(import.meta.dir, "../../../../db/migrations/0009_device_flow.sql");
+const SPONSOR_MIGRATION = resolve(
+  import.meta.dir,
+  "../../../../db/migrations/0008_sponsors_bootstrap.sql",
+);
 const DEVICE_HARDENING_MIGRATION = resolve(
   import.meta.dir,
   "../../../../db/migrations/0010_device_flow_hardening.sql",
@@ -173,6 +181,16 @@ function lifecycleDatabase(options: { readonly nullableDigest?: boolean } = {}):
 function database(options: { readonly nullableDigest?: boolean } = {}): Database {
   const sqlite = databaseBeforeCredentialHardening(options);
   sqlite.exec(readFileSync(CREDENTIAL_HARDENING_MIGRATION, "utf8"));
+  return sqlite;
+}
+
+function lifecycleCommandDatabase(): Database {
+  const sqlite = lifecycleDatabase();
+  sqlite.exec(readFileSync(SPONSOR_MIGRATION, "utf8"));
+  sqlite.exec(readFileSync(DEVICE_MIGRATION, "utf8"));
+  sqlite.exec(readFileSync(DEVICE_HARDENING_MIGRATION, "utf8"));
+  sqlite.exec(readFileSync(CREDENTIAL_HARDENING_MIGRATION, "utf8"));
+  sqlite.exec(readFileSync(FELLOW_LIFECYCLE_COMMANDS_MIGRATION, "utf8"));
   return sqlite;
 }
 
@@ -5320,5 +5338,593 @@ describe("availabilitySuggestions is bounded, exact and deterministic", () => {
         await memory.availabilitySuggestions(input),
       );
     }
+  });
+});
+
+describe("0012 sponsor lifecycle commands", () => {
+  function lifecycleServiceFixture() {
+    const clock = new DeviceTestClock();
+    const sqlite = lifecycleCommandDatabase();
+    const service = new EnrollmentService({
+      clock,
+      store: new D1EnrollmentStore(localD1(sqlite)),
+      replayProtector: new AesGcmEnrollmentReplayProtector(new Uint8Array(32)),
+    });
+    const sponsor = { type: "sponsor", sponsorId: "usr_lifecycle_service" } as const;
+    return { clock, service, sponsor, sqlite };
+  }
+
+  async function approvedLifecycleServiceFellow(
+    fixture: ReturnType<typeof lifecycleServiceFixture>,
+    name: string,
+  ) {
+    await fixture.service.bootstrapSponsor(fixture.sponsor);
+    const minted = await fixture.service.mint(fixture.sponsor, { requested_scopes: ["review"] });
+    const claimed = await fixture.service.claim({
+      enrollment_id: minted.enrollmentId,
+      secret: minted.secret,
+      name,
+      model: "test-model",
+      harness: "test-harness",
+    });
+    await fixture.service.decide(fixture.sponsor, minted.enrollmentId, {
+      enrollment_id: minted.enrollmentId,
+      decision: "approve",
+    });
+    return { minted, claimed };
+  }
+
+  function seededLifecycleCommandDatabase(): Database {
+    const sqlite = lifecycleCommandDatabase();
+    sqlite
+      .prepare("INSERT INTO sponsors (sponsor_id, created_at, last_seen_at) VALUES (?, ?, ?)")
+      .run(LIFECYCLE_SPONSOR, NOW, NOW);
+    seedLifecycleIdentity(sqlite);
+    insertLifecycleCredential(sqlite, {
+      id: "cred-lifecycle-command",
+      hash: "token-hash-1",
+      issuedAt: NOW,
+      proposalId: LIFECYCLE_PROPOSAL,
+    });
+    return sqlite;
+  }
+
+  function lifecycleReplay(
+    scope: "credential-revoke" | "fellow-lifecycle" | "sponsor-panic",
+    key: string,
+    marker: string,
+  ) {
+    return {
+      scope,
+      principalScope: `sponsor:${LIFECYCLE_SPONSOR}`,
+      key,
+      digest: fixtureDigest(`lifecycle-${marker}`),
+      now: NOW + 1,
+      encryptedResponse: {
+        ciphertext: `ciphertext-${marker}`,
+        initializationVector: `iv-${marker}`,
+      },
+    };
+  }
+
+  test("individual revoke appends one causal event, advances the head, and commits replay", async () => {
+    const sqlite = seededLifecycleCommandDatabase();
+    const d1 = localD1(sqlite);
+    const store = new D1EnrollmentStore(d1);
+    expect(
+      sqlite
+        .prepare<{ lifecycle_seq: number; issued_at: number; last_used_at: number | null }, []>(
+          `SELECT sponsor.lifecycle_seq, credential.issued_at, credential.last_used_at
+             FROM sponsors sponsor JOIN fellow_tokens credential
+               ON credential.sponsor_id = sponsor.sponsor_id
+            WHERE credential.credential_id = 'cred-lifecycle-command'`,
+        )
+        .get(),
+    ).toEqual({ lifecycle_seq: 0, issued_at: NOW, last_used_at: null });
+    expect(
+      await d1
+        .prepare(
+          `SELECT sponsor.lifecycle_seq, security.panic_at,
+                  credential.issued_at, credential.last_used_at
+             FROM sponsors sponsor
+             JOIN fellow_tokens credential ON credential.sponsor_id = sponsor.sponsor_id
+             LEFT JOIN enrollment_sponsor_security security
+               ON security.sponsor_id = sponsor.sponsor_id
+            WHERE sponsor.sponsor_id = ?
+              AND credential.fellow_id = ?
+              AND credential.credential_id = ?
+              AND credential.revoked_at IS NULL`,
+        )
+        .bind(LIFECYCLE_SPONSOR, LIFECYCLE_FELLOW, "cred-lifecycle-command")
+        .first<{
+          lifecycle_seq: number;
+          panic_at: number | null;
+          issued_at: number;
+          last_used_at: number | null;
+        }>(),
+    ).toEqual({ lifecycle_seq: 0, panic_at: null, issued_at: NOW, last_used_at: null });
+    const result = await store.revokeCredential({
+      sponsorId: LIFECYCLE_SPONSOR,
+      fellowId: LIFECYCLE_FELLOW,
+      credentialId: "cred-lifecycle-command",
+      eventId: `LEV-${"0".repeat(26)}`,
+      requestId: "a".repeat(64),
+      effectiveAt: NOW + 1,
+      replayFor: async () => lifecycleReplay("credential-revoke", "revoke-key", "revoke"),
+    });
+
+    expect(result).toEqual({ sponsorSeq: 1, effectiveAt: NOW + 1 });
+    expect(
+      sqlite
+        .prepare<{ revoked_at: number; revocation_event_id: string }, []>(
+          "SELECT revoked_at, revocation_event_id FROM fellow_tokens WHERE credential_id = 'cred-lifecycle-command'",
+        )
+        .get(),
+    ).toEqual({
+      revoked_at: NOW + 1,
+      revocation_event_id: `LEV-${"0".repeat(26)}`,
+    });
+    expect(
+      sqlite
+        .prepare<{ lifecycle_seq: number }, []>(
+          `SELECT lifecycle_seq FROM sponsors WHERE sponsor_id = '${LIFECYCLE_SPONSOR}'`,
+        )
+        .get()?.lifecycle_seq,
+    ).toBe(1);
+    expect(
+      sqlite.prepare<{ n: number }, []>("SELECT COUNT(*) AS n FROM fellow_lifecycle_events").get()
+        ?.n,
+    ).toBe(1);
+    expect(
+      sqlite.prepare<{ n: number }, []>("SELECT COUNT(*) AS n FROM enrollment_idempotency").get()
+        ?.n,
+    ).toBe(1);
+    expect(() =>
+      sqlite
+        .prepare("UPDATE fellow_lifecycle_events SET effective_at = ? WHERE event_id = ?")
+        .run(NOW + 2, `LEV-${"0".repeat(26)}`),
+    ).toThrow("lifecycle event is immutable");
+  });
+
+  test("status changes are event-bound and compromise creates family and review projections", async () => {
+    const sqlite = seededLifecycleCommandDatabase();
+    const store = new D1EnrollmentStore(localD1(sqlite));
+
+    expect(() =>
+      sqlite
+        .prepare("UPDATE enrollment_fellows SET status = 'paused' WHERE fellow_id = ?")
+        .run(LIFECYCLE_FELLOW),
+    ).toThrow("fellow lifecycle transition lacks event");
+
+    const paused = await store.transitionFellow({
+      sponsorId: LIFECYCLE_SPONSOR,
+      fellowId: LIFECYCLE_FELLOW,
+      toStatus: "paused",
+      eventId: `LEV-${"1".repeat(26)}`,
+      requestId: "b".repeat(64),
+      effectiveAt: NOW + 1,
+      replayFor: async () => lifecycleReplay("fellow-lifecycle", "pause-key", "pause"),
+    });
+    expect(paused.sponsorSeq).toBe(1);
+
+    const compromised = await store.transitionFellow({
+      sponsorId: LIFECYCLE_SPONSOR,
+      fellowId: LIFECYCLE_FELLOW,
+      toStatus: "compromised",
+      eventId: `LEV-${"2".repeat(26)}`,
+      requestId: "c".repeat(64),
+      effectiveAt: NOW + 2,
+      replayFor: async () => lifecycleReplay("fellow-lifecycle", "compromise-key", "compromise"),
+    });
+    expect(compromised.sponsorSeq).toBe(2);
+    expect(
+      sqlite
+        .prepare<{ status: string; status_changed_at: number; status_event_id: string }, []>(
+          "SELECT status, status_changed_at, status_event_id FROM enrollment_fellows WHERE fellow_id = 'fellow-lifecycle'",
+        )
+        .get(),
+    ).toEqual({
+      status: "compromised",
+      status_changed_at: NOW + 2,
+      status_event_id: `LEV-${"2".repeat(26)}`,
+    });
+    expect(
+      sqlite
+        .prepare<{ reason: string; family_revoked_through: number; event_id: string }, []>(
+          "SELECT reason, family_revoked_through, event_id FROM enrollment_fellow_security",
+        )
+        .get(),
+    ).toEqual({
+      reason: "compromised",
+      family_revoked_through: NOW + 2,
+      event_id: `LEV-${"2".repeat(26)}`,
+    });
+    expect(
+      sqlite
+        .prepare<{ review_from: number; flagged_at: number; state: string }, []>(
+          "SELECT review_from, flagged_at, state FROM fellow_write_review_windows",
+        )
+        .get(),
+    ).toEqual({ review_from: NOW, flagged_at: NOW + 2, state: "open" });
+    expect(await store.authenticateCredential("token-hash-1", NOW + 3, "bearer")).toBeUndefined();
+  });
+
+  test("sponsor panic invalidates existing credentials and every pre-panic grant", async () => {
+    const sqlite = seededLifecycleCommandDatabase();
+    const store = new D1EnrollmentStore(localD1(sqlite));
+    const result = await store.panicSponsor({
+      sponsorId: LIFECYCLE_SPONSOR,
+      eventId: `LEV-${"3".repeat(26)}`,
+      requestId: "d".repeat(64),
+      effectiveAt: NOW + 1,
+      replayFor: async () => lifecycleReplay("sponsor-panic", "panic-key", "panic"),
+    });
+    expect(result.sponsorSeq).toBe(1);
+    expect(
+      sqlite
+        .prepare<{ panic_at: number; panic_event_id: string }, []>(
+          "SELECT panic_at, panic_event_id FROM enrollment_sponsor_security",
+        )
+        .get(),
+    ).toEqual({ panic_at: NOW + 1, panic_event_id: `LEV-${"3".repeat(26)}` });
+    expect(await store.authenticateCredential("token-hash-1", NOW + 2, "bearer")).toBeUndefined();
+    expect(() =>
+      insertLifecycleCredential(sqlite, {
+        id: "cred-after-panic-from-old-grant",
+        hash: "token-after-panic-from-old-grant",
+        issuedAt: NOW + 2,
+      }),
+    ).toThrow("credential grant predates sponsor panic boundary");
+  });
+
+  test("foreign and missing targets stay one opaque store error", async () => {
+    const sqlite = seededLifecycleCommandDatabase();
+    const store = new D1EnrollmentStore(localD1(sqlite));
+    const attempts = [
+      {
+        sponsorId: "usr_foreign_sponsor",
+        fellowId: LIFECYCLE_FELLOW,
+        credentialId: "cred-lifecycle-command",
+      },
+      {
+        sponsorId: LIFECYCLE_SPONSOR,
+        fellowId: "missing-fellow",
+        credentialId: "missing-credential",
+      },
+    ];
+    for (const [index, target] of attempts.entries()) {
+      let code: string | undefined;
+      try {
+        await store.revokeCredential({
+          ...target,
+          eventId: `LEV-${String(index + 4).repeat(26)}`,
+          requestId: String(index + 5).repeat(64),
+          effectiveAt: NOW + 1,
+        });
+      } catch (error) {
+        code = (error as EnrollmentError).code;
+      }
+      expect(code).toBe("FELLOW_LIFECYCLE_NOT_CURRENT");
+    }
+    expect(
+      sqlite.prepare<{ n: number }, []>("SELECT COUNT(*) AS n FROM fellow_lifecycle_events").get()
+        ?.n,
+    ).toBe(0);
+  });
+
+  test("D1 lifecycle replay survives stale step-up without duplicating the command event", async () => {
+    const fixture = lifecycleServiceFixture();
+    const approved = await approvedLifecycleServiceFellow(fixture, "d1-replay-orchid");
+    const issued = await fixture.service.poll({ flow_handle: approved.claimed.flowHandle });
+    if (issued.status !== "approved") throw new Error("fixture token was not issued");
+    const fellow = (await fixture.service.fellows(fixture.sponsor))[0];
+    const credential = fellow?.credentials[0];
+    if (fellow === undefined || credential === undefined) {
+      throw new Error("fixture credential was not listed");
+    }
+    const request = {
+      fellow_id: fellow.fellowId,
+      credential_id: credential.credentialId,
+      confirm: "revoke-credential",
+      step_up_authenticated_at: Math.floor(fixture.clock.value / 1_000),
+    } as const;
+    const first = await fixture.service.revokeCredential(fixture.sponsor, request, {
+      idempotencyKey: "d1-lifecycle-replay-one",
+    });
+
+    fixture.clock.value += 16 * 60 * 1_000;
+    await expect(
+      fixture.service.revokeCredential(fixture.sponsor, request, {
+        idempotencyKey: "d1-lifecycle-replay-one",
+      }),
+    ).resolves.toEqual(first);
+    expect(
+      fixture.sqlite
+        .prepare<{ n: number }, []>("SELECT COUNT(*) AS n FROM fellow_lifecycle_events")
+        .get()?.n,
+    ).toBe(1);
+    expect(
+      fixture.sqlite
+        .prepare<{ n: number }, []>("SELECT COUNT(*) AS n FROM enrollment_idempotency")
+        .get()?.n,
+    ).toBe(1);
+  });
+
+  test("D1 sponsor panic prevents delayed issuance from a pre-panic approval", async () => {
+    const fixture = lifecycleServiceFixture();
+    const approved = await approvedLifecycleServiceFellow(fixture, "d1-panic-before-poll");
+    await fixture.service.panicSponsor(
+      fixture.sponsor,
+      {
+        confirm: "revoke-all-fellow-credentials",
+        step_up_authenticated_at: Math.floor(fixture.clock.value / 1_000),
+      },
+      { idempotencyKey: "d1-panic-before-poll-one" },
+    );
+
+    let code: string | undefined;
+    try {
+      await fixture.service.poll({ flow_handle: approved.claimed.flowHandle });
+    } catch (error) {
+      code = (error as EnrollmentError).code;
+    }
+    expect(code).toBe("FLOW_INVALID");
+    expect(
+      fixture.sqlite.prepare<{ n: number }, []>("SELECT COUNT(*) AS n FROM fellow_tokens").get()?.n,
+    ).toBe(0);
+    expect(
+      fixture.sqlite
+        .prepare<{ token_hash: string | null }, [string]>(
+          "SELECT token_hash FROM enrollment_proposals WHERE enrollment_id = ?",
+        )
+        .get(approved.minted.enrollmentId)?.token_hash,
+    ).toBeNull();
+  });
+
+  test("initial lifecycle projections cannot begin after the event head", () => {
+    const sqlite = lifecycleCommandDatabase();
+    expect(() =>
+      sqlite
+        .prepare(
+          "INSERT INTO sponsors (sponsor_id, created_at, last_seen_at, lifecycle_seq) VALUES (?, ?, ?, ?)",
+        )
+        .run("usr_bad_initial_head", NOW, NOW, 1),
+    ).toThrow("sponsor lifecycle head must begin at zero");
+
+    sqlite
+      .prepare("INSERT INTO sponsors (sponsor_id, created_at, last_seen_at) VALUES (?, ?, ?)")
+      .run(LIFECYCLE_SPONSOR, NOW, NOW);
+    expect(() =>
+      sqlite
+        .prepare(
+          `INSERT INTO enrollment_fellows (
+             fellow_id, sponsor_id, name, model, harness, created_at, status
+           ) VALUES (?, ?, ?, ?, ?, ?, ?)`,
+        )
+        .run(
+          "fellow-illegal-initial-state",
+          LIFECYCLE_SPONSOR,
+          "illegal-initial-state",
+          "test-model",
+          "test-harness",
+          NOW,
+          "paused",
+        ),
+    ).toThrow("Fellow lifecycle must begin active");
+  });
+
+  test("old events, heads, revocation evidence, and fabricated projections cannot be replayed", async () => {
+    const sqlite = seededLifecycleCommandDatabase();
+    const store = new D1EnrollmentStore(localD1(sqlite));
+    const pausedEvent = `LEV-${"6".repeat(26)}`;
+    await store.transitionFellow({
+      sponsorId: LIFECYCLE_SPONSOR,
+      fellowId: LIFECYCLE_FELLOW,
+      toStatus: "paused",
+      eventId: pausedEvent,
+      requestId: "6".repeat(64),
+      effectiveAt: NOW + 1,
+    });
+    await store.transitionFellow({
+      sponsorId: LIFECYCLE_SPONSOR,
+      fellowId: LIFECYCLE_FELLOW,
+      toStatus: "active",
+      eventId: `LEV-${"7".repeat(26)}`,
+      requestId: "7".repeat(64),
+      effectiveAt: NOW + 2,
+    });
+
+    expect(() =>
+      sqlite
+        .prepare(
+          "UPDATE enrollment_fellows SET status = 'paused', status_changed_at = ?, status_event_id = ? WHERE fellow_id = ?",
+        )
+        .run(NOW + 1, pausedEvent, LIFECYCLE_FELLOW),
+    ).toThrow("fellow lifecycle transition lacks event");
+    expect(() =>
+      sqlite
+        .prepare("UPDATE sponsors SET lifecycle_seq = 1 WHERE sponsor_id = ?")
+        .run(LIFECYCLE_SPONSOR),
+    ).toThrow("sponsor lifecycle head lacks event");
+    expect(() =>
+      sqlite
+        .prepare(
+          `INSERT INTO enrollment_fellow_security (
+             fellow_id, sponsor_id, family_revoked_through, reason, event_id, updated_at
+           ) VALUES (?, ?, ?, 'revoked', ?, ?)`,
+        )
+        .run(LIFECYCLE_FELLOW, LIFECYCLE_SPONSOR, NOW + 1, pausedEvent, NOW + 1),
+    ).toThrow("Fellow family revocation lacks event");
+    expect(() =>
+      sqlite
+        .prepare(
+          `INSERT INTO fellow_write_review_windows (
+             fellow_id, sponsor_id, review_from, flagged_at, event_id, state
+           ) VALUES (?, ?, ?, ?, ?, 'open')`,
+        )
+        .run(LIFECYCLE_FELLOW, LIFECYCLE_SPONSOR, NOW, NOW + 1, pausedEvent),
+    ).toThrow("Fellow review window lacks event");
+
+    await store.revokeCredential({
+      sponsorId: LIFECYCLE_SPONSOR,
+      fellowId: LIFECYCLE_FELLOW,
+      credentialId: "cred-lifecycle-command",
+      eventId: `LEV-${"8".repeat(26)}`,
+      requestId: "8".repeat(64),
+      effectiveAt: NOW + 3,
+    });
+    expect(() =>
+      sqlite
+        .prepare("UPDATE fellow_tokens SET revocation_event_id = NULL WHERE credential_id = ?")
+        .run("cred-lifecycle-command"),
+    ).toThrow("credential revocation evidence is immutable");
+  });
+
+  test("five synchronized sponsor commands all advance the bounded sequence", async () => {
+    const sqlite = lifecycleCommandDatabase();
+    sqlite
+      .prepare("INSERT INTO sponsors (sponsor_id, created_at, last_seen_at) VALUES (?, ?, ?)")
+      .run(LIFECYCLE_SPONSOR, NOW, NOW);
+    let initialReads = 0;
+    let releaseInitialReads: (() => void) | undefined;
+    const allInitialReads = new Promise<void>((resolve) => {
+      releaseInitialReads = resolve;
+    });
+    const store = new D1EnrollmentStore(
+      localD1(sqlite, {
+        serializeBatches: true,
+        afterFirstRead: async (query) => {
+          if (!query.includes("SELECT sponsor.lifecycle_seq, security.panic_at")) return;
+          initialReads += 1;
+          if (initialReads === 5) releaseInitialReads?.();
+          await allInitialReads;
+        },
+      }),
+    );
+
+    const results = await Promise.all(
+      Array.from({ length: 5 }, (_, index) =>
+        store.panicSponsor({
+          sponsorId: LIFECYCLE_SPONSOR,
+          eventId: `LEV-${String(index + 1).repeat(26)}`,
+          requestId: String(index + 1).repeat(64),
+          effectiveAt: NOW + 1,
+        }),
+      ),
+    );
+    expect(results.map((result) => result.sponsorSeq).sort((a, b) => a - b)).toEqual([
+      1, 2, 3, 4, 5,
+    ]);
+    expect(new Set(results.map((result) => result.effectiveAt)).size).toBe(5);
+    expect(
+      sqlite
+        .prepare<{ lifecycle_seq: number }, [string]>(
+          "SELECT lifecycle_seq FROM sponsors WHERE sponsor_id = ?",
+        )
+        .get(LIFECYCLE_SPONSOR)?.lifecycle_seq,
+    ).toBe(5);
+  });
+
+  test("an expired lifecycle replay key can name a new command without permanent event collision", async () => {
+    const fixture = lifecycleServiceFixture();
+    const approved = await approvedLifecycleServiceFellow(fixture, "reclaimed-lifecycle-key");
+    const fellow = (await fixture.service.fellows(fixture.sponsor))[0];
+    if (fellow === undefined) throw new Error("approved Fellow was not listed");
+    const key = "reclaimed-lifecycle-key-one";
+    await fixture.service.transitionFellow(
+      fixture.sponsor,
+      {
+        fellow_id: fellow.fellowId,
+        status: "paused",
+        confirm: "change-fellow-lifecycle",
+        step_up_authenticated_at: Math.floor(fixture.clock.value / 1_000),
+      },
+      { idempotencyKey: key },
+    );
+    fixture.clock.value += 24 * 60 * 60_000 + 1;
+    const resumed = await fixture.service.transitionFellow(
+      fixture.sponsor,
+      {
+        fellow_id: fellow.fellowId,
+        status: "active",
+        confirm: "change-fellow-lifecycle",
+        step_up_authenticated_at: Math.floor(fixture.clock.value / 1_000),
+      },
+      { idempotencyKey: key },
+    );
+    expect(resumed).toMatchObject({ status: "active", sponsor_seq: 2 });
+    expect(
+      fixture.sqlite
+        .prepare<{ n: number }, []>("SELECT COUNT(*) AS n FROM fellow_lifecycle_events")
+        .get()?.n,
+    ).toBe(2);
+    expect(approved.claimed.flowHandle).toMatch(/^flow_v1\./);
+  });
+
+  test("panic that commits after approval read rolls the stale approval batch back", async () => {
+    const clock = new DeviceTestClock();
+    const sqlite = lifecycleCommandDatabase();
+    let armed = false;
+    let releaseDecision: (() => void) | undefined;
+    let decisionRead: (() => void) | undefined;
+    const decisionReadObserved = new Promise<void>((resolve) => {
+      decisionRead = resolve;
+    });
+    const decisionMayContinue = new Promise<void>((resolve) => {
+      releaseDecision = resolve;
+    });
+    const store = new D1EnrollmentStore(
+      localD1(sqlite, {
+        afterFirstRead: async (query) => {
+          if (!armed || !query.includes("JOIN enrollment_proposals p")) return;
+          armed = false;
+          decisionRead?.();
+          await decisionMayContinue;
+        },
+      }),
+    );
+    const service = new EnrollmentService({
+      clock,
+      store,
+      replayProtector: new AesGcmEnrollmentReplayProtector(new Uint8Array(32)),
+    });
+    const sponsor = { type: "sponsor", sponsorId: "usr_panic_approval_race" } as const;
+    await service.bootstrapSponsor(sponsor);
+    const minted = await service.mint(sponsor, { requested_scopes: ["review"] });
+    const claimed = await service.claim({
+      enrollment_id: minted.enrollmentId,
+      secret: minted.secret,
+      name: "panic-race-fellow",
+      model: "test-model",
+      harness: "test-harness",
+    });
+    armed = true;
+    const decision = service.decide(sponsor, minted.enrollmentId, {
+      enrollment_id: minted.enrollmentId,
+      decision: "approve",
+    });
+    await decisionReadObserved;
+    await new D1EnrollmentStore(localD1(sqlite)).panicSponsor({
+      sponsorId: sponsor.sponsorId,
+      eventId: `LEV-${"9".repeat(26)}`,
+      requestId: "9".repeat(64),
+      effectiveAt: clock.value,
+    });
+    releaseDecision?.();
+    await expect(decision).rejects.toBeInstanceOf(EnrollmentPersistenceError);
+    expect(
+      sqlite
+        .prepare<{ status: string }, [string]>(
+          "SELECT status FROM enrollment_proposals WHERE enrollment_id = ?",
+        )
+        .get(minted.enrollmentId)?.status,
+    ).toBe("pending");
+    expect(
+      sqlite.prepare<{ n: number }, []>("SELECT COUNT(*) AS n FROM enrollment_grants").get()?.n,
+    ).toBe(0);
+    expect(
+      sqlite.prepare<{ n: number }, []>("SELECT COUNT(*) AS n FROM enrollment_fellows").get()?.n,
+    ).toBe(0);
+    expect(claimed.flowHandle).toMatch(/^flow_v1\./);
   });
 });

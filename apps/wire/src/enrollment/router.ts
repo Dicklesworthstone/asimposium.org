@@ -10,9 +10,15 @@ import {
   ProblemDocumentSchema,
   SponsorBootstrapRequestSchema,
   SponsorBootstrapResponseSchema,
+  SponsorCredentialRevokeRequestSchema,
+  SponsorCredentialRevokeResponseSchema,
   SponsorEnrollmentDecisionResponseSchema,
   SponsorEnrollmentDecisionSchema,
+  SponsorFellowLifecycleRequestSchema,
+  SponsorFellowLifecycleResponseSchema,
   SponsorFellowListResponseSchema,
+  SponsorPanicRequestSchema,
+  SponsorPanicResponseSchema,
   SponsorProposalListResponseSchema,
 } from "@asimposium/contracts";
 import { Hono } from "hono";
@@ -414,6 +420,62 @@ function enrollmentErrorResponse(error: EnrollmentError, request: Request): Resp
         "Send exactly `{}` and sign those two bytes with the sponsor service envelope.",
         enrollmentContractFields({}),
       );
+    case "CREDENTIAL_REVOKE_BODY_INVALID":
+      return problem(
+        422,
+        error.code,
+        "Credential revoke body is invalid",
+        "The signed JSON body does not match the individual credential-revocation contract.",
+        "Send the non-secret Fellow and credential ids, the exact confirmation, and the server-stamped recent-auth time.",
+        enrollmentContractFields({
+          fellow_id: "F-01JXYZ4K6Q8M2N3P4R5S6T7V8W",
+          credential_id: "cred-01JXYZ4K6Q8M2N3P4R5S6T7V8W",
+          confirm: "revoke-credential",
+          step_up_authenticated_at: 1_786_800_000,
+        }),
+      );
+    case "FELLOW_LIFECYCLE_BODY_INVALID":
+      return problem(
+        422,
+        error.code,
+        "Fellow lifecycle body is invalid",
+        "The signed JSON body does not match the Fellow lifecycle contract.",
+        "Send the non-secret Fellow id, one documented target status, the exact confirmation, and the server-stamped recent-auth time.",
+        enrollmentContractFields({
+          fellow_id: "F-01JXYZ4K6Q8M2N3P4R5S6T7V8W",
+          status: "paused",
+          confirm: "change-fellow-lifecycle",
+          step_up_authenticated_at: 1_786_800_000,
+        }),
+      );
+    case "SPONSOR_PANIC_BODY_INVALID":
+      return problem(
+        422,
+        error.code,
+        "Sponsor panic body is invalid",
+        "The signed JSON body does not match the sponsor-wide panic contract.",
+        "Send the exact destructive confirmation and the server-stamped recent-auth time.",
+        enrollmentContractFields({
+          confirm: "revoke-all-fellow-credentials",
+          step_up_authenticated_at: 1_786_800_000,
+        }),
+      );
+    case "STEP_UP_REQUIRED":
+      return problem(
+        403,
+        error.code,
+        "Recent authentication is required",
+        "This sensitive sponsor action does not carry current step-up evidence.",
+        "Reauthenticate in the Agora, then retry the exact action.",
+      );
+    case "FELLOW_LIFECYCLE_NOT_CURRENT":
+      return problem(
+        404,
+        error.code,
+        "Lifecycle target is unavailable",
+        "No current sponsor-owned lifecycle target can accept this action.",
+        "Refresh the sponsor console and act only on the current lifecycle state shown there.",
+      );
     case "DEVICE_CODE_UNKNOWN":
       return problem(
         404,
@@ -451,7 +513,7 @@ function enrollmentErrorResponse(error: EnrollmentError, request: Request): Resp
         409,
         "IDEMPOTENCY_CONFLICT",
         "Idempotency-Key does not match this request",
-        "This key was already used for a different enrollment request.",
+        "This key was already used for a different write request.",
         "Reuse the original request body with this key or choose a new key for a new operation.",
         enrollmentContractFields(idempotencyConflictExample(request)),
       );
@@ -645,7 +707,7 @@ function idempotencyOptions(request: Request): { readonly idempotencyKey: string
       400,
       "IDEMPOTENCY_KEY_INVALID",
       "Idempotency-Key is required and must be valid",
-      "A successful enrollment write can return one-time authority, so it requires a stable replay key.",
+      "A successful write may have a response that must be replayed exactly, so it requires a stable replay key.",
       "Send 1 to 160 letters, digits, dots, underscores, or hyphens and reuse the same key for an unchanged retry.",
       enrollmentContractFields(idempotencyHeaderExample(request)),
     );
@@ -1294,6 +1356,172 @@ function mountSponsorRoutes(app: Hono, options: EnrollmentRouterOptions): void {
         200,
         { "cache-control": "no-store" },
       );
+    } catch (error) {
+      const operational = enrollmentOperationalFailure(error);
+      if (operational !== undefined) return operational;
+      return error instanceof EnrollmentError
+        ? enrollmentErrorResponse(error, c.req.raw)
+        : enrollmentUnavailableResponse();
+    }
+  });
+
+  app.post("/v1/fellows/credentials/revoke", async (c) => {
+    if (hasQuery(c.req.raw)) {
+      return sponsorPathOnlyResponse(c.req.raw, "/v1/fellows/credentials/revoke");
+    }
+    const example = {
+      fellow_id: "F-01JXYZ4K6Q8M2N3P4R5S6T7V8W",
+      credential_id: "cred-01JXYZ4K6Q8M2N3P4R5S6T7V8W",
+      confirm: "revoke-credential",
+      step_up_authenticated_at: 1_786_800_000,
+    };
+    if (!hasJsonContentType(c.req.raw)) {
+      return jsonContentTypeRequiredResponse("/v1/fellows/credentials/revoke", example, true);
+    }
+    const authenticated = await requireSponsor(
+      options,
+      c.req.raw,
+      "/v1/fellows/credentials/revoke",
+      "fellow.credential.revoke",
+    );
+    if (authenticated instanceof Response) return authenticated;
+    try {
+      let body: unknown;
+      try {
+        body = verifiedJson(authenticated.rawBody);
+      } catch {
+        return enrollmentErrorResponse(
+          new EnrollmentError("CREDENTIAL_REVOKE_BODY_INVALID"),
+          c.req.raw,
+        );
+      }
+      const parsed = SponsorCredentialRevokeRequestSchema.safeParse(body);
+      if (!parsed.success) {
+        return enrollmentErrorResponse(
+          new EnrollmentError("CREDENTIAL_REVOKE_BODY_INVALID"),
+          c.req.raw,
+        );
+      }
+      const idempotency = idempotencyOptions(c.req.raw);
+      if (idempotency instanceof Response) return idempotency;
+      const response = await options.service.revokeCredential(
+        authenticated.principal,
+        parsed.data,
+        idempotency,
+      );
+      return c.json(SponsorCredentialRevokeResponseSchema.parse(response), 200, {
+        "cache-control": "no-store",
+      });
+    } catch (error) {
+      const operational = enrollmentOperationalFailure(error);
+      if (operational !== undefined) return operational;
+      return error instanceof EnrollmentError
+        ? enrollmentErrorResponse(error, c.req.raw)
+        : enrollmentUnavailableResponse();
+    }
+  });
+
+  app.post("/v1/fellows/lifecycle", async (c) => {
+    if (hasQuery(c.req.raw)) {
+      return sponsorPathOnlyResponse(c.req.raw, "/v1/fellows/lifecycle");
+    }
+    const example = {
+      fellow_id: "F-01JXYZ4K6Q8M2N3P4R5S6T7V8W",
+      status: "paused",
+      confirm: "change-fellow-lifecycle",
+      step_up_authenticated_at: 1_786_800_000,
+    };
+    if (!hasJsonContentType(c.req.raw)) {
+      return jsonContentTypeRequiredResponse("/v1/fellows/lifecycle", example, true);
+    }
+    const authenticated = await requireSponsor(
+      options,
+      c.req.raw,
+      "/v1/fellows/lifecycle",
+      "fellow.lifecycle.change",
+    );
+    if (authenticated instanceof Response) return authenticated;
+    try {
+      let body: unknown;
+      try {
+        body = verifiedJson(authenticated.rawBody);
+      } catch {
+        return enrollmentErrorResponse(
+          new EnrollmentError("FELLOW_LIFECYCLE_BODY_INVALID"),
+          c.req.raw,
+        );
+      }
+      const parsed = SponsorFellowLifecycleRequestSchema.safeParse(body);
+      if (!parsed.success) {
+        return enrollmentErrorResponse(
+          new EnrollmentError("FELLOW_LIFECYCLE_BODY_INVALID"),
+          c.req.raw,
+        );
+      }
+      const idempotency = idempotencyOptions(c.req.raw);
+      if (idempotency instanceof Response) return idempotency;
+      const response = await options.service.transitionFellow(
+        authenticated.principal,
+        parsed.data,
+        idempotency,
+      );
+      return c.json(SponsorFellowLifecycleResponseSchema.parse(response), 200, {
+        "cache-control": "no-store",
+      });
+    } catch (error) {
+      const operational = enrollmentOperationalFailure(error);
+      if (operational !== undefined) return operational;
+      return error instanceof EnrollmentError
+        ? enrollmentErrorResponse(error, c.req.raw)
+        : enrollmentUnavailableResponse();
+    }
+  });
+
+  app.post("/v1/sponsors/panic", async (c) => {
+    if (hasQuery(c.req.raw)) {
+      return sponsorPathOnlyResponse(c.req.raw, "/v1/sponsors/panic");
+    }
+    const example = {
+      confirm: "revoke-all-fellow-credentials",
+      step_up_authenticated_at: 1_786_800_000,
+    };
+    if (!hasJsonContentType(c.req.raw)) {
+      return jsonContentTypeRequiredResponse("/v1/sponsors/panic", example, true);
+    }
+    const authenticated = await requireSponsor(
+      options,
+      c.req.raw,
+      "/v1/sponsors/panic",
+      "sponsor.panic",
+    );
+    if (authenticated instanceof Response) return authenticated;
+    try {
+      let body: unknown;
+      try {
+        body = verifiedJson(authenticated.rawBody);
+      } catch {
+        return enrollmentErrorResponse(
+          new EnrollmentError("SPONSOR_PANIC_BODY_INVALID"),
+          c.req.raw,
+        );
+      }
+      const parsed = SponsorPanicRequestSchema.safeParse(body);
+      if (!parsed.success) {
+        return enrollmentErrorResponse(
+          new EnrollmentError("SPONSOR_PANIC_BODY_INVALID"),
+          c.req.raw,
+        );
+      }
+      const idempotency = idempotencyOptions(c.req.raw);
+      if (idempotency instanceof Response) return idempotency;
+      const response = await options.service.panicSponsor(
+        authenticated.principal,
+        parsed.data,
+        idempotency,
+      );
+      return c.json(SponsorPanicResponseSchema.parse(response), 200, {
+        "cache-control": "no-store",
+      });
     } catch (error) {
       const operational = enrollmentOperationalFailure(error);
       if (operational !== undefined) return operational;

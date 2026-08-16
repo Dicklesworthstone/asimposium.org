@@ -6,8 +6,11 @@ import {
   MintEnrollmentResponseSchema,
   OpaqueProblemSchema,
   ProblemDocumentSchema,
+  SponsorCredentialRevokeResponseSchema,
   SponsorEnrollmentDecisionResponseSchema,
+  SponsorFellowLifecycleResponseSchema,
   SponsorFellowListResponseSchema,
+  SponsorPanicResponseSchema,
   SponsorProposalListResponseSchema,
 } from "@asimposium/contracts";
 import type { Hono } from "hono";
@@ -182,6 +185,31 @@ async function claimOne(
   return json.flow_handle;
 }
 
+async function issuedLifecycleFixture(h: Harness, name: string) {
+  const principal = { type: "sponsor", sponsorId: SPONSOR } as const;
+  await h.service.bootstrapSponsor(principal);
+  const minted = await h.service.mint(principal, { requested_scopes: ["review"] });
+  const claimed = await h.service.claim({
+    enrollment_id: minted.enrollmentId,
+    secret: minted.secret,
+    name,
+    model: "anthropic/fable-5",
+    harness: "claude-code",
+  });
+  await h.service.decide(principal, minted.enrollmentId, {
+    enrollment_id: minted.enrollmentId,
+    decision: "approve",
+  });
+  const outcome = await h.service.poll({ flow_handle: claimed.flowHandle });
+  if (outcome.status !== "approved") throw new Error("lifecycle fixture token was not issued");
+  const fellow = (await h.service.fellows(principal))[0];
+  const credential = fellow?.credentials[0];
+  if (fellow === undefined || credential === undefined) {
+    throw new Error("lifecycle fixture credential was not listed");
+  }
+  return { principal, token: outcome.token, fellow, credential };
+}
+
 describe("sponsor enrollment routes", () => {
   test("an invalid decision-path id teaches before sponsor auth or state lookup", async () => {
     let sponsorAuthCalls = 0;
@@ -271,6 +299,9 @@ describe("sponsor enrollment routes", () => {
         body: "{}",
       },
       { method: "GET", path: "/v1/fellows" },
+      { method: "POST", path: "/v1/fellows/credentials/revoke", body: "{}" },
+      { method: "POST", path: "/v1/fellows/lifecycle", body: "{}" },
+      { method: "POST", path: "/v1/sponsors/panic", body: "{}" },
     ] as const;
 
     for (const scenario of cases) {
@@ -337,6 +368,9 @@ describe("sponsor enrollment routes", () => {
       "/v1/enrollments/ASIMP-EN-01JXYZ4K6Q/decision",
       "/v1/sponsors/bootstrap",
       "/v1/device-lookup",
+      "/v1/fellows/credentials/revoke",
+      "/v1/fellows/lifecycle",
+      "/v1/sponsors/panic",
     ] as const;
     for (const route of routes) {
       for (const contentType of [undefined, "text/plain", "application/json-seq"] as const) {
@@ -396,6 +430,24 @@ describe("sponsor enrollment routes", () => {
         body: '{"user_code":"ABCD-2345"}',
       },
       { method: "GET", path: "/v1/fellows", examplePath: "/v1/fellows" },
+      {
+        method: "POST",
+        path: "/v1/fellows/credentials/revoke",
+        examplePath: "/v1/fellows/credentials/revoke",
+        body: "{}",
+      },
+      {
+        method: "POST",
+        path: "/v1/fellows/lifecycle",
+        examplePath: "/v1/fellows/lifecycle",
+        body: "{}",
+      },
+      {
+        method: "POST",
+        path: "/v1/sponsors/panic",
+        examplePath: "/v1/sponsors/panic",
+        body: "{}",
+      },
     ] as const;
 
     for (const scenario of cases) {
@@ -638,6 +690,161 @@ describe("sponsor enrollment routes", () => {
     const serializedFellows = JSON.stringify(fellowPayload);
     expect(serializedFellows).not.toContain(outcome.token as string);
     expect(serializedFellows).not.toContain("token_hash");
+  });
+
+  test("signed lifecycle routes revoke, replay after step-up expiry, and hide foreign targets", async () => {
+    const clock = {
+      value: NOW * 1_000,
+      now() {
+        return this.value;
+      },
+    };
+    const h = await harness({ clock });
+    const fixture = await issuedLifecycleFixture(h, "route-revoke-orchid");
+    const body = JSON.stringify({
+      fellow_id: fixture.fellow.fellowId,
+      credential_id: fixture.credential.credentialId,
+      confirm: "revoke-credential",
+      step_up_authenticated_at: NOW,
+    });
+    const headers = await h.sign(
+      body,
+      "/v1/fellows/credentials/revoke",
+      "fellow.credential.revoke",
+    );
+    const replayKey = headers.get("idempotency-key");
+    const firstResponse = await h.app.fetch(
+      envelopeRequest("/v1/fellows/credentials/revoke", headers, "POST", body),
+    );
+    expect(firstResponse.status).toBe(200);
+    const first = SponsorCredentialRevokeResponseSchema.parse(await firstResponse.json());
+    expect(first).toMatchObject({
+      acknowledged: true,
+      fellow_id: fixture.fellow.fellowId,
+      credential_id: fixture.credential.credentialId,
+      sponsor_seq: 1,
+    });
+    const refusedHello = await h.app.fetch(
+      new Request(`${origin}/v1/hello`, {
+        headers: { authorization: `Bearer ${fixture.token}` },
+      }),
+    );
+    expect(refusedHello.status).toBe(401);
+
+    clock.value += 16 * 60 * 1_000;
+    const replayHeaders = await h.sign(
+      body,
+      "/v1/fellows/credentials/revoke",
+      "fellow.credential.revoke",
+    );
+    if (replayKey === null) throw new Error("fixture idempotency key missing");
+    replayHeaders.set("idempotency-key", replayKey);
+    const replayResponse = await h.app.fetch(
+      envelopeRequest("/v1/fellows/credentials/revoke", replayHeaders, "POST", body),
+    );
+    expect(replayResponse.status).toBe(200);
+    expect(SponsorCredentialRevokeResponseSchema.parse(await replayResponse.json())).toEqual(first);
+
+    const foreignBody = JSON.stringify({
+      fellow_id: fixture.fellow.fellowId,
+      credential_id: fixture.credential.credentialId,
+      confirm: "revoke-credential",
+      step_up_authenticated_at: Math.floor(clock.value / 1_000),
+    });
+    const foreignHeaders = await h.sign(
+      foreignBody,
+      "/v1/fellows/credentials/revoke",
+      "fellow.credential.revoke",
+      "POST",
+      "usr_foreign_sponsor",
+    );
+    const foreign = await h.app.fetch(
+      envelopeRequest("/v1/fellows/credentials/revoke", foreignHeaders, "POST", foreignBody),
+    );
+    expect(foreign.status).toBe(404);
+    expect(await foreign.json()).toMatchObject({ code: "FELLOW_LIFECYCLE_NOT_CURRENT" });
+  });
+
+  test("pause, resume, compromise, and panic return typed sponsor-only audit acknowledgements", async () => {
+    const clock = {
+      value: NOW * 1_000,
+      now() {
+        return this.value;
+      },
+    };
+    const h = await harness({ clock });
+    const fixture = await issuedLifecycleFixture(h, "route-lifecycle-orchid");
+    let expectedSequence = 1;
+    for (const status of ["paused", "active", "suspicious_review", "compromised"] as const) {
+      const body = JSON.stringify({
+        fellow_id: fixture.fellow.fellowId,
+        status,
+        confirm: "change-fellow-lifecycle",
+        step_up_authenticated_at: NOW,
+      });
+      const headers = await h.sign(body, "/v1/fellows/lifecycle", "fellow.lifecycle.change");
+      const response = await h.app.fetch(
+        envelopeRequest("/v1/fellows/lifecycle", headers, "POST", body),
+      );
+      expect(response.status).toBe(200);
+      expect(SponsorFellowLifecycleResponseSchema.parse(await response.json())).toMatchObject({
+        acknowledged: true,
+        fellow_id: fixture.fellow.fellowId,
+        status,
+        sponsor_seq: expectedSequence,
+      });
+      expectedSequence += 1;
+    }
+    expect((await h.service.fellows(fixture.principal))[0]?.status).toBe("compromised");
+
+    const panicBody = JSON.stringify({
+      confirm: "revoke-all-fellow-credentials",
+      step_up_authenticated_at: NOW,
+    });
+    const panicHeaders = await h.sign(panicBody, "/v1/sponsors/panic", "sponsor.panic");
+    const panic = await h.app.fetch(
+      envelopeRequest("/v1/sponsors/panic", panicHeaders, "POST", panicBody),
+    );
+    expect(panic.status).toBe(200);
+    expect(SponsorPanicResponseSchema.parse(await panic.json())).toMatchObject({
+      acknowledged: true,
+      sponsor_seq: expectedSequence,
+    });
+  });
+
+  test("lifecycle route contract and idempotency failures teach without target evidence", async () => {
+    const h = await harness({ clock: { now: () => NOW * 1_000 } });
+    const malformedBody = JSON.stringify({
+      fellow_id: "F-example",
+      credential_id: "cred-example",
+      confirm: "wrong-confirmation",
+      step_up_authenticated_at: NOW,
+    });
+    const malformedHeaders = await h.sign(
+      malformedBody,
+      "/v1/fellows/credentials/revoke",
+      "fellow.credential.revoke",
+    );
+    const malformed = await h.app.fetch(
+      envelopeRequest("/v1/fellows/credentials/revoke", malformedHeaders, "POST", malformedBody),
+    );
+    expect(malformed.status).toBe(422);
+    expect(ContractProblemSchema.parse(await malformed.json())).toMatchObject({
+      code: "CREDENTIAL_REVOKE_BODY_INVALID",
+      rule: "A5",
+    });
+
+    const validBody = JSON.stringify({
+      confirm: "revoke-all-fellow-credentials",
+      step_up_authenticated_at: NOW,
+    });
+    const noKeyHeaders = await h.sign(validBody, "/v1/sponsors/panic", "sponsor.panic");
+    noKeyHeaders.delete("idempotency-key");
+    const noKey = await h.app.fetch(
+      envelopeRequest("/v1/sponsors/panic", noKeyHeaders, "POST", validBody),
+    );
+    expect(noKey.status).toBe(400);
+    expect(await noKey.json()).toMatchObject({ code: "IDEMPOTENCY_KEY_INVALID" });
   });
 
   test("an elapsed pre-approval grant leaves no impossible card or misleading retry loop", async () => {

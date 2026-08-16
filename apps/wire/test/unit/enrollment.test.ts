@@ -1258,6 +1258,232 @@ describe("S-1 enrollment state machine", () => {
     expect(error.suggestions).toEqual(["fellow-5", "fellow-6", "fellow-7"]);
   });
 
+  test("credential revoke is exact-replay safe across the step-up boundary", async () => {
+    const { clock, service } = serviceFixture();
+    await service.bootstrapSponsor(sponsor);
+    const enrollment = await mintAndClaim(service, "revoke-orchid");
+    await service.decide(sponsor, enrollment.enrollmentId, {
+      enrollment_id: enrollment.enrollmentId,
+      decision: "approve",
+    });
+    const issued = await service.poll({ flow_handle: enrollment.flowHandle });
+    expect(issued.status).toBe("approved");
+    if (issued.status !== "approved") throw new Error("fixture token was not issued");
+    expect(await service.credentialBinding(issued.token)).toBeDefined();
+    const listed = await service.fellows(sponsor);
+    const owned = listed[0];
+    const credential = owned?.credentials[0];
+    if (owned === undefined || credential === undefined) {
+      throw new Error("fixture credential was not listed");
+    }
+    const body = {
+      fellow_id: owned.fellowId,
+      credential_id: credential.credentialId,
+      confirm: "revoke-credential",
+      step_up_authenticated_at: Math.floor(clock.value / 1_000),
+    } as const;
+    const first = await service.revokeCredential(sponsor, body, {
+      idempotencyKey: "revoke-credential-one",
+    });
+    expect(first).toMatchObject({
+      acknowledged: true,
+      fellow_id: owned.fellowId,
+      credential_id: credential.credentialId,
+      sponsor_seq: 1,
+    });
+    expect(await service.credentialBinding(issued.token)).toBeUndefined();
+
+    clock.value += 16 * 60 * 1_000;
+    expect(
+      await service.revokeCredential(sponsor, body, {
+        idempotencyKey: "revoke-credential-one",
+      }),
+    ).toEqual(first);
+    await expectEnrollmentError(
+      service.revokeCredential(sponsor, body, {
+        idempotencyKey: "revoke-credential-two",
+      }),
+      "STEP_UP_REQUIRED",
+    );
+  });
+
+  test("Fellow lifecycle and sponsor panic keep status, token authority, and audit order aligned", async () => {
+    const { clock, service } = serviceFixture();
+    await service.bootstrapSponsor(sponsor);
+    const enrollment = await mintAndClaim(service, "lifecycle-orchid");
+    await service.decide(sponsor, enrollment.enrollmentId, {
+      enrollment_id: enrollment.enrollmentId,
+      decision: "approve",
+    });
+    const issued = await service.poll({ flow_handle: enrollment.flowHandle });
+    if (issued.status !== "approved") throw new Error("fixture token was not issued");
+    const owned = (await service.fellows(sponsor))[0];
+    if (owned === undefined) throw new Error("fixture Fellow was not listed");
+    const stepUp = Math.floor(clock.value / 1_000);
+
+    const paused = await service.transitionFellow(
+      sponsor,
+      {
+        fellow_id: owned.fellowId,
+        status: "paused",
+        confirm: "change-fellow-lifecycle",
+        step_up_authenticated_at: stepUp,
+      },
+      { idempotencyKey: "lifecycle-pause-one" },
+    );
+    expect(paused).toMatchObject({ status: "paused", sponsor_seq: 1 });
+    expect(await service.credentialBinding(issued.token)).toBeUndefined();
+
+    const resumed = await service.transitionFellow(
+      sponsor,
+      {
+        fellow_id: owned.fellowId,
+        status: "active",
+        confirm: "change-fellow-lifecycle",
+        step_up_authenticated_at: stepUp,
+      },
+      { idempotencyKey: "lifecycle-resume-one" },
+    );
+    expect(resumed).toMatchObject({ status: "active", sponsor_seq: 2 });
+    expect(await service.credentialBinding(issued.token)).toBeDefined();
+
+    const panic = await service.panicSponsor(
+      sponsor,
+      {
+        confirm: "revoke-all-fellow-credentials",
+        step_up_authenticated_at: stepUp,
+      },
+      { idempotencyKey: "lifecycle-panic-one" },
+    );
+    expect(panic).toMatchObject({ acknowledged: true, sponsor_seq: 3 });
+    expect(await service.credentialBinding(issued.token)).toBeUndefined();
+
+    const compromised = await service.transitionFellow(
+      sponsor,
+      {
+        fellow_id: owned.fellowId,
+        status: "compromised",
+        confirm: "change-fellow-lifecycle",
+        step_up_authenticated_at: stepUp,
+      },
+      { idempotencyKey: "lifecycle-compromise-one" },
+    );
+    expect(compromised).toMatchObject({ status: "compromised", sponsor_seq: 4 });
+    expect((await service.fellows(sponsor))[0]?.status).toBe("compromised");
+    await expectEnrollmentError(
+      service.transitionFellow(
+        otherSponsor,
+        {
+          fellow_id: owned.fellowId,
+          status: "archived",
+          confirm: "change-fellow-lifecycle",
+          step_up_authenticated_at: stepUp,
+        },
+        { idempotencyKey: "foreign-lifecycle-one" },
+      ),
+      "FELLOW_LIFECYCLE_NOT_CURRENT",
+    );
+  });
+
+  test("sponsor panic invalidates an approved credential family before one-time issuance", async () => {
+    const { clock, service } = serviceFixture();
+    await service.bootstrapSponsor(sponsor);
+    const enrollment = await mintAndClaim(service, "panic-before-poll");
+    await service.decide(sponsor, enrollment.enrollmentId, {
+      enrollment_id: enrollment.enrollmentId,
+      decision: "approve",
+    });
+    await service.panicSponsor(
+      sponsor,
+      {
+        confirm: "revoke-all-fellow-credentials",
+        step_up_authenticated_at: Math.floor(clock.value / 1_000),
+      },
+      { idempotencyKey: "panic-before-poll-one" },
+    );
+
+    await expectEnrollmentError(
+      service.poll({ flow_handle: enrollment.flowHandle }),
+      "FLOW_INVALID",
+    );
+    expect((await service.fellows(sponsor))[0]?.credentials).toEqual([]);
+  });
+
+  test("one-time issuance rechecks every Fellow status after approval", async () => {
+    for (const [status, shouldIssue] of [
+      ["paused", false],
+      ["revoked", false],
+      ["compromised", false],
+      ["suspicious_review", true],
+    ] as const) {
+      const { clock, service } = serviceFixture();
+      await service.bootstrapSponsor(sponsor);
+      const enrollment = await mintAndClaim(service, `poll-status-${status.replace("_", "-")}`);
+      await service.decide(sponsor, enrollment.enrollmentId, {
+        enrollment_id: enrollment.enrollmentId,
+        decision: "approve",
+      });
+      const fellow = (await service.fellows(sponsor))[0];
+      if (fellow === undefined) throw new Error("approved Fellow was not listed");
+      await service.transitionFellow(
+        sponsor,
+        {
+          fellow_id: fellow.fellowId,
+          status,
+          confirm: "change-fellow-lifecycle",
+          step_up_authenticated_at: Math.floor(clock.value / 1_000),
+        },
+        { idempotencyKey: `poll-status-${status}` },
+      );
+
+      const poll = service.poll({ flow_handle: enrollment.flowHandle });
+      if (shouldIssue) {
+        await expect(poll).resolves.toMatchObject({ status: "approved" });
+      } else {
+        await expectEnrollmentError(poll, "FLOW_INVALID");
+        expect((await service.fellows(sponsor))[0]?.credentials).toEqual([]);
+      }
+    }
+  });
+
+  test("sponsor step-up accepts the exact fifteen-minute boundary and refuses older or future evidence", async () => {
+    for (const scenario of [
+      { label: "exact", offsetSeconds: -15 * 60, code: undefined },
+      { label: "too-old", offsetSeconds: -(15 * 60 + 1), code: "STEP_UP_REQUIRED" },
+      { label: "future", offsetSeconds: 1, code: "STEP_UP_REQUIRED" },
+    ] as const) {
+      const { clock, service } = serviceFixture();
+      await service.bootstrapSponsor(sponsor);
+      const call = service.panicSponsor(
+        sponsor,
+        {
+          confirm: "revoke-all-fellow-credentials",
+          step_up_authenticated_at: Math.floor(clock.value / 1_000) + scenario.offsetSeconds,
+        },
+        { idempotencyKey: `step-up-${scenario.label}` },
+      );
+      if (scenario.code === undefined) {
+        await expect(call).resolves.toMatchObject({ acknowledged: true, sponsor_seq: 1 });
+      } else {
+        await expectEnrollmentError(call, scenario.code);
+      }
+    }
+
+    const { clock, service } = serviceFixture();
+    await service.bootstrapSponsor(sponsor);
+    await expectEnrollmentError(
+      service.panicSponsor(
+        sponsor,
+        {
+          confirm: "revoke-all-fellow-credentials",
+          step_up_authenticated_at: Math.floor(clock.value / 1_000) + 0.5,
+        },
+        { idempotencyKey: "step-up-fractional" },
+      ),
+      "SPONSOR_PANIC_BODY_INVALID",
+    );
+  });
+
   test("body-only poll input and diagnostics never admit credential-shaped extras", async () => {
     const { service } = serviceFixture();
     await expectEnrollmentError(

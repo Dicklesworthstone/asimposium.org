@@ -20,8 +20,20 @@ import {
   MintEnrollmentRequestSchema,
   PENDING_PROPOSAL_TTL_MS,
   type RequestedScope,
+  type SponsorCredentialRevokeRequest,
+  SponsorCredentialRevokeRequestSchema,
+  type SponsorCredentialRevokeResponse,
+  SponsorCredentialRevokeResponseSchema,
   type SponsorEnrollmentDecision,
   SponsorEnrollmentDecisionSchema,
+  type SponsorFellowLifecycleRequest,
+  SponsorFellowLifecycleRequestSchema,
+  type SponsorFellowLifecycleResponse,
+  SponsorFellowLifecycleResponseSchema,
+  type SponsorPanicRequest,
+  SponsorPanicRequestSchema,
+  type SponsorPanicResponse,
+  SponsorPanicResponseSchema,
 } from "@asimposium/contracts";
 
 const BASE64URL = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_";
@@ -50,6 +62,7 @@ const ENROLLMENT_KEY_DERIVATION_SALT = new TextEncoder().encode(
 const ENROLLMENT_REPLAY_KEY_INFO = new TextEncoder().encode("encrypted-replay-aes-gcm-v1");
 const DEVICE_SOURCE_BUCKET_KEY_INFO = new TextEncoder().encode("device-source-bucket-hmac-v1");
 const POLL_TERMINAL_REPLAY_PRINCIPAL_VERSION = "flow-terminal-v1";
+export const SPONSOR_STEP_UP_WINDOW_SECONDS = 15 * 60;
 
 function generateUserCode(random: EnrollmentRandom): string {
   const chars: string[] = [];
@@ -77,6 +90,26 @@ function fellowStatusCanAuthenticate(status: FellowLifecycleStatus): boolean {
   return status === "active" || status === "suspicious_review";
 }
 
+function fellowLifecycleTransitionAllowed(
+  from: FellowLifecycleStatus,
+  to: Exclude<FellowLifecycleStatus, "pending">,
+): boolean {
+  return (
+    (from === "pending" && to === "active") ||
+    (from === "active" && ["paused", "revoked", "compromised", "suspicious_review"].includes(to)) ||
+    (from === "paused" && ["active", "revoked", "compromised", "suspicious_review"].includes(to)) ||
+    (from === "suspicious_review" && ["active", "paused", "revoked", "compromised"].includes(to)) ||
+    ((from === "revoked" || from === "compromised") && to === "archived")
+  );
+}
+
+function sponsorStepUpIsFresh(authenticatedAt: number, now: number): boolean {
+  const nowSeconds = Math.floor(now / 1_000);
+  if (!Number.isSafeInteger(authenticatedAt) || !Number.isSafeInteger(nowSeconds)) return false;
+  const age = nowSeconds - authenticatedAt;
+  return age >= 0 && age <= SPONSOR_STEP_UP_WINDOW_SECONDS;
+}
+
 export type EnrollmentErrorCode =
   | "FLOW_INVALID"
   | "HARNESS_AS_NAME"
@@ -91,6 +124,9 @@ export type EnrollmentErrorCode =
   | "DEVICE_LOOKUP_BODY_INVALID"
   | "DEVICE_LOOKUP_LOCKED"
   | "DEVICE_START_RATE_LIMITED"
+  | "CREDENTIAL_REVOKE_BODY_INVALID"
+  | "FELLOW_LIFECYCLE_BODY_INVALID"
+  | "FELLOW_LIFECYCLE_NOT_CURRENT"
   | "PAIRING_EXPIRED"
   | "PAIRING_INVALID"
   | "PROPOSAL_EXPIRED"
@@ -99,6 +135,8 @@ export type EnrollmentErrorCode =
   | "SCOPE_ESCALATION"
   | "SCOPE_NOT_REDUCED"
   | "SPONSOR_BOOTSTRAP_BODY_INVALID"
+  | "SPONSOR_PANIC_BODY_INVALID"
+  | "STEP_UP_REQUIRED"
   | "TOKEN_ALREADY_ISSUED"
   | "WRONG_PRINCIPAL";
 
@@ -394,7 +432,15 @@ export interface PollDecision {
 }
 
 export interface IdempotencyAttempt {
-  readonly scope: "mint" | "claim" | "decision" | "poll" | "device-start";
+  readonly scope:
+    | "mint"
+    | "claim"
+    | "decision"
+    | "poll"
+    | "device-start"
+    | "credential-revoke"
+    | "fellow-lifecycle"
+    | "sponsor-panic";
   readonly principalScope: string;
   readonly key: string;
   readonly digest: string;
@@ -415,6 +461,45 @@ export class EnrollmentIdempotencyRaceError extends Error {
     super("idempotency record was committed by a concurrent request");
     this.name = "EnrollmentIdempotencyRaceError";
   }
+}
+
+export interface CredentialRevokeAttempt {
+  readonly sponsorId: string;
+  readonly fellowId: string;
+  readonly credentialId: string;
+  readonly eventId: string;
+  readonly requestId: string;
+  readonly effectiveAt: number;
+  readonly replayFor?: (
+    result: LifecycleCommandResult,
+  ) => Promise<EnrollmentIdempotencyWrite | undefined>;
+}
+
+export interface FellowLifecycleAttempt {
+  readonly sponsorId: string;
+  readonly fellowId: string;
+  readonly toStatus: Exclude<FellowLifecycleStatus, "pending">;
+  readonly eventId: string;
+  readonly requestId: string;
+  readonly effectiveAt: number;
+  readonly replayFor?: (
+    result: LifecycleCommandResult,
+  ) => Promise<EnrollmentIdempotencyWrite | undefined>;
+}
+
+export interface SponsorPanicAttempt {
+  readonly sponsorId: string;
+  readonly eventId: string;
+  readonly requestId: string;
+  readonly effectiveAt: number;
+  readonly replayFor?: (
+    result: LifecycleCommandResult,
+  ) => Promise<EnrollmentIdempotencyWrite | undefined>;
+}
+
+export interface LifecycleCommandResult {
+  readonly sponsorSeq: number;
+  readonly effectiveAt: number;
 }
 
 /**
@@ -452,6 +537,9 @@ export interface EnrollmentStore {
    * false means it only moved last_seen_at.
    */
   bootstrapSponsor(sponsorId: string, now: number): Promise<boolean>;
+  revokeCredential(attempt: CredentialRevokeAttempt): Promise<LifecycleCommandResult>;
+  transitionFellow(attempt: FellowLifecycleAttempt): Promise<LifecycleCommandResult>;
+  panicSponsor(attempt: SponsorPanicAttempt): Promise<LifecycleCommandResult>;
   /** W3.5: create a device enrollment, its pending proposal, and the user-code mapping, atomically. */
   deviceCreate(input: DeviceCreateInput, idempotency?: EnrollmentIdempotencyWrite): Promise<void>;
   /**
@@ -1008,6 +1096,14 @@ export class InMemoryEnrollmentStore implements EnrollmentStore {
   readonly #records = new Map<string, EnrollmentRecord>();
   readonly #activeNames = new Map<string, string>();
   readonly #credentials = new Map<string, FellowCredentialBinding>();
+  readonly #fellowStatuses = new Map<string, FellowLifecycleStatus>();
+  readonly #fellowStatusChangedAt = new Map<string, number>();
+  readonly #sponsorPanicAt = new Map<string, number>();
+  readonly #familyRevokedThrough = new Map<string, number>();
+  readonly #lifecycleSeq = new Map<string, number>();
+  readonly #lifecycleEventIds = new Set<string>();
+  readonly #lifecycleRequestIds = new Set<string>();
+  readonly #reviewWindows = new Map<string, { reviewFrom: number; flaggedAt: number }>();
   readonly #sponsors = new Map<string, { createdAt: number; lastSeenAt: number }>();
   readonly #deviceCodes = new Map<string, { enrollmentId: string; expiresAt: number }>();
   readonly #deviceCodeExpiresAtByEnrollment = new Map<string, number>();
@@ -1148,6 +1244,13 @@ export class InMemoryEnrollmentStore implements EnrollmentStore {
         proposal.status = "expired";
         throw new EnrollmentError("PROPOSAL_EXPIRED");
       }
+      const panicAt = this.#sponsorPanicAt.get(attempt.sponsorId);
+      if (panicAt !== undefined && attempt.now <= panicAt) {
+        // A panic that linearized first cannot leave behind an approved but
+        // permanently unissuable grant. The unchanged keyed retry may succeed
+        // once its grant timestamp is strictly beyond the panic boundary.
+        throw new EnrollmentPersistenceError();
+      }
 
       const nameOwner = this.#activeNames.get(proposal.name);
       if (nameOwner !== undefined && nameOwner !== proposal.proposalId) {
@@ -1159,6 +1262,8 @@ export class InMemoryEnrollmentStore implements EnrollmentStore {
       proposal.grantedScopes = proposedScopes;
       proposal.grantedResources = proposedResources;
       proposal.grantedAt = attempt.now;
+      this.#fellowStatuses.set(proposal.fellowId, "active");
+      this.#fellowStatusChangedAt.set(proposal.fellowId, attempt.now);
       this.commitIdempotency(idempotency);
     });
   }
@@ -1239,7 +1344,10 @@ export class InMemoryEnrollmentStore implements EnrollmentStore {
         ) {
           continue;
         }
-        const status: FellowLifecycleStatus = "active";
+        const status = this.#fellowStatuses.get(proposal.fellowId) ?? "active";
+        const grantedAt = proposal.grantedAt;
+        const panicAt = this.#sponsorPanicAt.get(sponsorId);
+        const familyRevokedThrough = this.#familyRevokedThrough.get(proposal.fellowId);
         const credentials = [...this.#credentials.values()]
           .filter(
             (credential) =>
@@ -1247,6 +1355,8 @@ export class InMemoryEnrollmentStore implements EnrollmentStore {
               credential.revokedAt === undefined &&
               credential.issuedAt <= now &&
               now < credential.expiresAt &&
+              (panicAt === undefined || (grantedAt > panicAt && credential.issuedAt > panicAt)) &&
+              (familyRevokedThrough === undefined || credential.issuedAt > familyRevokedThrough) &&
               (credential.grantedResources.fellowGrantExpiresAt === undefined ||
                 now < credential.grantedResources.fellowGrantExpiresAt),
           )
@@ -1288,6 +1398,110 @@ export class InMemoryEnrollmentStore implements EnrollmentStore {
       }
       this.#sponsors.set(sponsorId, { createdAt: now, lastSeenAt: now });
       return true;
+    });
+  }
+
+  async revokeCredential(attempt: CredentialRevokeAttempt): Promise<LifecycleCommandResult> {
+    return this.serialized(async () => {
+      const credential = [...this.#credentials.entries()].find(
+        ([, candidate]) =>
+          candidate.sponsorId === attempt.sponsorId &&
+          candidate.fellowId === attempt.fellowId &&
+          candidate.credentialId === attempt.credentialId &&
+          candidate.revokedAt === undefined,
+      );
+      if (credential === undefined || !this.#sponsors.has(attempt.sponsorId)) {
+        throw new EnrollmentError("FELLOW_LIFECYCLE_NOT_CURRENT");
+      }
+      const [tokenHash, current] = credential;
+      const result = this.nextLifecycleResult(
+        attempt.sponsorId,
+        attempt.eventId,
+        attempt.requestId,
+        attempt.effectiveAt,
+      );
+      const idempotency = await attempt.replayFor?.(result);
+      this.commitIdempotency(idempotency);
+      this.#credentials.set(tokenHash, {
+        ...current,
+        revokedAt: Math.max(attempt.effectiveAt, current.issuedAt, current.lastUsedAt ?? 0),
+      });
+      this.commitLifecycleEvent(attempt.sponsorId, attempt.eventId, attempt.requestId, result);
+      return result;
+    });
+  }
+
+  async transitionFellow(attempt: FellowLifecycleAttempt): Promise<LifecycleCommandResult> {
+    return this.serialized(async () => {
+      const current = this.#fellowStatuses.get(attempt.fellowId);
+      const owned = [...this.#records.values()].some(
+        (record) =>
+          record.sponsorId === attempt.sponsorId && record.proposal?.fellowId === attempt.fellowId,
+      );
+      if (
+        current === undefined ||
+        !owned ||
+        !this.#sponsors.has(attempt.sponsorId) ||
+        !fellowLifecycleTransitionAllowed(current, attempt.toStatus)
+      ) {
+        throw new EnrollmentError("FELLOW_LIFECYCLE_NOT_CURRENT");
+      }
+      const effectiveAt = Math.max(
+        attempt.effectiveAt,
+        this.#fellowStatusChangedAt.get(attempt.fellowId) ?? attempt.effectiveAt,
+      );
+      const result = this.nextLifecycleResult(
+        attempt.sponsorId,
+        attempt.eventId,
+        attempt.requestId,
+        effectiveAt,
+      );
+      const idempotency = await attempt.replayFor?.(result);
+      this.commitIdempotency(idempotency);
+      if (attempt.toStatus === "revoked" || attempt.toStatus === "compromised") {
+        this.#familyRevokedThrough.set(attempt.fellowId, effectiveAt);
+      }
+      if (attempt.toStatus === "compromised") {
+        const issued = [...this.#credentials.values()]
+          .filter((credential) => credential.fellowId === attempt.fellowId)
+          .map((credential) => credential.issuedAt);
+        const fellowGrantedAt = [...this.#records.values()].find(
+          (record) => record.proposal?.fellowId === attempt.fellowId,
+        )?.proposal?.grantedAt;
+        const earliestIssuedAt = issued.length === 0 ? undefined : Math.min(...issued);
+        this.#reviewWindows.set(attempt.fellowId, {
+          reviewFrom: Math.max(
+            fellowGrantedAt ?? effectiveAt,
+            earliestIssuedAt ?? fellowGrantedAt ?? effectiveAt,
+          ),
+          flaggedAt: effectiveAt,
+        });
+      }
+      this.#fellowStatuses.set(attempt.fellowId, attempt.toStatus);
+      this.#fellowStatusChangedAt.set(attempt.fellowId, effectiveAt);
+      this.commitLifecycleEvent(attempt.sponsorId, attempt.eventId, attempt.requestId, result);
+      return result;
+    });
+  }
+
+  async panicSponsor(attempt: SponsorPanicAttempt): Promise<LifecycleCommandResult> {
+    return this.serialized(async () => {
+      if (!this.#sponsors.has(attempt.sponsorId)) {
+        throw new EnrollmentError("FELLOW_LIFECYCLE_NOT_CURRENT");
+      }
+      const current = this.#sponsorPanicAt.get(attempt.sponsorId);
+      const effectiveAt = Math.max(attempt.effectiveAt, (current ?? -1) + 1);
+      const result = this.nextLifecycleResult(
+        attempt.sponsorId,
+        attempt.eventId,
+        attempt.requestId,
+        effectiveAt,
+      );
+      const idempotency = await attempt.replayFor?.(result);
+      this.commitIdempotency(idempotency);
+      this.#sponsorPanicAt.set(attempt.sponsorId, effectiveAt);
+      this.commitLifecycleEvent(attempt.sponsorId, attempt.eventId, attempt.requestId, result);
+      return result;
     });
   }
 
@@ -1567,6 +1781,17 @@ export class InMemoryEnrollmentStore implements EnrollmentStore {
       ) {
         throw new EnrollmentPersistenceError();
       }
+      const panicAt = this.#sponsorPanicAt.get(record.sponsorId);
+      if (
+        panicAt !== undefined &&
+        (proposal.grantedAt === undefined || proposal.grantedAt <= panicAt)
+      ) {
+        throw new EnrollmentError("FLOW_INVALID");
+      }
+      const fellowStatus = this.#fellowStatuses.get(proposal.fellowId);
+      if (fellowStatus === undefined || !fellowStatusCanAuthenticate(fellowStatus)) {
+        throw new EnrollmentError("FLOW_INVALID");
+      }
       const issued = await attempt.createToken();
       const decision: PollDecision = { kind: "issued", token: issued.token };
       const idempotency = await attempt.replayFor?.(decision);
@@ -1585,7 +1810,7 @@ export class InMemoryEnrollmentStore implements EnrollmentStore {
         issuedAt: attempt.now,
         expiresAt: attempt.now + FELLOW_TOKEN_TTL_MS,
         credentialProfile: "bearer",
-        fellowStatus: "active",
+        fellowStatus,
       });
       this.commitIdempotency(idempotency);
       return decision;
@@ -1626,13 +1851,31 @@ export class InMemoryEnrollmentStore implements EnrollmentStore {
   ): Promise<FellowCredentialBinding | undefined> {
     return this.serialized(() => {
       const existing = this.#credentials.get(tokenHash);
+      const fellowStatus =
+        existing === undefined
+          ? undefined
+          : (this.#fellowStatuses.get(existing.fellowId) ?? existing.fellowStatus);
+      const panicAt =
+        existing === undefined ? undefined : this.#sponsorPanicAt.get(existing.sponsorId);
+      const familyRevokedThrough =
+        existing === undefined ? undefined : this.#familyRevokedThrough.get(existing.fellowId);
+      const grantedAt =
+        existing === undefined
+          ? undefined
+          : [...this.#records.values()].find(
+              (record) => record.proposal?.fellowId === existing.fellowId,
+            )?.proposal?.grantedAt;
       if (
         existing === undefined ||
         existing.credentialProfile !== expectedProfile ||
-        !fellowStatusCanAuthenticate(existing.fellowStatus) ||
+        fellowStatus === undefined ||
+        !fellowStatusCanAuthenticate(fellowStatus) ||
         existing.revokedAt !== undefined ||
         now < existing.issuedAt ||
         now >= existing.expiresAt ||
+        (panicAt !== undefined &&
+          (grantedAt === undefined || grantedAt <= panicAt || existing.issuedAt <= panicAt)) ||
+        (familyRevokedThrough !== undefined && existing.issuedAt <= familyRevokedThrough) ||
         (existing.grantedResources.fellowGrantExpiresAt !== undefined &&
           now >= existing.grantedResources.fellowGrantExpiresAt)
       ) {
@@ -1640,6 +1883,7 @@ export class InMemoryEnrollmentStore implements EnrollmentStore {
       }
       const authenticated = {
         ...existing,
+        fellowStatus,
         lastUsedAt: Math.max(existing.lastUsedAt ?? existing.issuedAt, now),
       };
       this.#credentials.set(tokenHash, authenticated);
@@ -1678,6 +1922,32 @@ export class InMemoryEnrollmentStore implements EnrollmentStore {
       encryptedResponse: idempotency.encryptedResponse,
       expiresAt: idempotency.now + IDEMPOTENCY_TTL_MS,
     });
+  }
+
+  private nextLifecycleResult(
+    sponsorId: string,
+    eventId: string,
+    requestId: string,
+    effectiveAt: number,
+  ): LifecycleCommandResult {
+    if (this.#lifecycleEventIds.has(eventId) || this.#lifecycleRequestIds.has(requestId)) {
+      throw new EnrollmentIdempotencyRaceError();
+    }
+    return {
+      sponsorSeq: (this.#lifecycleSeq.get(sponsorId) ?? 0) + 1,
+      effectiveAt,
+    };
+  }
+
+  private commitLifecycleEvent(
+    sponsorId: string,
+    eventId: string,
+    requestId: string,
+    result: LifecycleCommandResult,
+  ): void {
+    this.#lifecycleEventIds.add(eventId);
+    this.#lifecycleRequestIds.add(requestId);
+    this.#lifecycleSeq.set(sponsorId, result.sponsorSeq);
   }
 
   private assertClaimCredentials(
@@ -1990,6 +2260,199 @@ export class EnrollmentService {
   async fellows(sponsor: EnrollmentPrincipal): Promise<SponsorFellowRecord[]> {
     assertSponsor(sponsor);
     return this.#store.fellowsBySponsor(sponsor.sponsorId, this.#clock.now());
+  }
+
+  async revokeCredential(
+    sponsor: EnrollmentPrincipal,
+    rawRequest: SponsorCredentialRevokeRequest,
+    options: EnrollmentWriteOptions = {},
+  ): Promise<SponsorCredentialRevokeResponse> {
+    assertSponsor(sponsor);
+    const parsed = SponsorCredentialRevokeRequestSchema.safeParse(rawRequest);
+    if (!parsed.success) throw new EnrollmentError("CREDENTIAL_REVOKE_BODY_INVALID");
+    const now = this.#clock.now();
+    const prepared = await this.#prepareWrite<SponsorCredentialRevokeResponse>(
+      "credential-revoke",
+      `sponsor:${sponsor.sponsorId}`,
+      options.idempotencyKey,
+      {
+        sponsor: sponsor.sponsorId,
+        fellow_id: parsed.data.fellow_id,
+        credential_id: parsed.data.credential_id,
+        confirm: parsed.data.confirm,
+      },
+      now,
+    );
+    if (prepared.replay !== undefined) {
+      return SponsorCredentialRevokeResponseSchema.parse(await prepared.replay);
+    }
+    if (prepared.attempt === undefined) throw new EnrollmentError("IDEMPOTENCY_CONFLICT");
+    if (!sponsorStepUpIsFresh(parsed.data.step_up_authenticated_at, now)) {
+      throw new EnrollmentError("STEP_UP_REQUIRED");
+    }
+    const eventId = `LEV-${generateUlid(now, this.#random)}`;
+    const requestId = await sha256Hex(
+      `credential-revoke\0${sponsor.sponsorId}\0${prepared.attempt.key}\0${eventId}`,
+    );
+    const responseFor = (result: LifecycleCommandResult) =>
+      SponsorCredentialRevokeResponseSchema.parse({
+        acknowledged: true,
+        event_id: eventId,
+        fellow_id: parsed.data.fellow_id,
+        credential_id: parsed.data.credential_id,
+        sponsor_seq: result.sponsorSeq,
+        effective_at: result.effectiveAt,
+      });
+    try {
+      const result = await this.#store.revokeCredential({
+        sponsorId: sponsor.sponsorId,
+        fellowId: parsed.data.fellow_id,
+        credentialId: parsed.data.credential_id,
+        eventId,
+        requestId,
+        effectiveAt: now,
+        replayFor: async (committed) => this.#writeReplay(prepared.attempt, responseFor(committed)),
+      });
+      return responseFor(result);
+    } catch (error) {
+      if (
+        error instanceof EnrollmentIdempotencyRaceError ||
+        (error instanceof EnrollmentError && error.code === "FELLOW_LIFECYCLE_NOT_CURRENT")
+      ) {
+        const replay = await this.#store.idempotencyReplay(prepared.attempt);
+        if (replay !== undefined) {
+          return SponsorCredentialRevokeResponseSchema.parse(
+            await this.#decodeReplay<unknown>(replay),
+          );
+        }
+      }
+      throw error;
+    }
+  }
+
+  async transitionFellow(
+    sponsor: EnrollmentPrincipal,
+    rawRequest: SponsorFellowLifecycleRequest,
+    options: EnrollmentWriteOptions = {},
+  ): Promise<SponsorFellowLifecycleResponse> {
+    assertSponsor(sponsor);
+    const parsed = SponsorFellowLifecycleRequestSchema.safeParse(rawRequest);
+    if (!parsed.success) throw new EnrollmentError("FELLOW_LIFECYCLE_BODY_INVALID");
+    const now = this.#clock.now();
+    const prepared = await this.#prepareWrite<SponsorFellowLifecycleResponse>(
+      "fellow-lifecycle",
+      `sponsor:${sponsor.sponsorId}`,
+      options.idempotencyKey,
+      {
+        sponsor: sponsor.sponsorId,
+        fellow_id: parsed.data.fellow_id,
+        status: parsed.data.status,
+        confirm: parsed.data.confirm,
+      },
+      now,
+    );
+    if (prepared.replay !== undefined) {
+      return SponsorFellowLifecycleResponseSchema.parse(await prepared.replay);
+    }
+    if (prepared.attempt === undefined) throw new EnrollmentError("IDEMPOTENCY_CONFLICT");
+    if (!sponsorStepUpIsFresh(parsed.data.step_up_authenticated_at, now)) {
+      throw new EnrollmentError("STEP_UP_REQUIRED");
+    }
+    const eventId = `LEV-${generateUlid(now, this.#random)}`;
+    const requestId = await sha256Hex(
+      `fellow-lifecycle\0${sponsor.sponsorId}\0${prepared.attempt.key}\0${eventId}`,
+    );
+    const responseFor = (result: LifecycleCommandResult) =>
+      SponsorFellowLifecycleResponseSchema.parse({
+        acknowledged: true,
+        event_id: eventId,
+        fellow_id: parsed.data.fellow_id,
+        status: parsed.data.status,
+        sponsor_seq: result.sponsorSeq,
+        effective_at: result.effectiveAt,
+      });
+    try {
+      const result = await this.#store.transitionFellow({
+        sponsorId: sponsor.sponsorId,
+        fellowId: parsed.data.fellow_id,
+        toStatus: parsed.data.status,
+        eventId,
+        requestId,
+        effectiveAt: now,
+        replayFor: async (committed) => this.#writeReplay(prepared.attempt, responseFor(committed)),
+      });
+      return responseFor(result);
+    } catch (error) {
+      if (
+        error instanceof EnrollmentIdempotencyRaceError ||
+        (error instanceof EnrollmentError && error.code === "FELLOW_LIFECYCLE_NOT_CURRENT")
+      ) {
+        const replay = await this.#store.idempotencyReplay(prepared.attempt);
+        if (replay !== undefined) {
+          return SponsorFellowLifecycleResponseSchema.parse(
+            await this.#decodeReplay<unknown>(replay),
+          );
+        }
+      }
+      throw error;
+    }
+  }
+
+  async panicSponsor(
+    sponsor: EnrollmentPrincipal,
+    rawRequest: SponsorPanicRequest,
+    options: EnrollmentWriteOptions = {},
+  ): Promise<SponsorPanicResponse> {
+    assertSponsor(sponsor);
+    const parsed = SponsorPanicRequestSchema.safeParse(rawRequest);
+    if (!parsed.success) throw new EnrollmentError("SPONSOR_PANIC_BODY_INVALID");
+    const now = this.#clock.now();
+    const prepared = await this.#prepareWrite<SponsorPanicResponse>(
+      "sponsor-panic",
+      `sponsor:${sponsor.sponsorId}`,
+      options.idempotencyKey,
+      { sponsor: sponsor.sponsorId, confirm: parsed.data.confirm },
+      now,
+    );
+    if (prepared.replay !== undefined) {
+      return SponsorPanicResponseSchema.parse(await prepared.replay);
+    }
+    if (prepared.attempt === undefined) throw new EnrollmentError("IDEMPOTENCY_CONFLICT");
+    if (!sponsorStepUpIsFresh(parsed.data.step_up_authenticated_at, now)) {
+      throw new EnrollmentError("STEP_UP_REQUIRED");
+    }
+    const eventId = `LEV-${generateUlid(now, this.#random)}`;
+    const requestId = await sha256Hex(
+      `sponsor-panic\0${sponsor.sponsorId}\0${prepared.attempt.key}\0${eventId}`,
+    );
+    const responseFor = (result: LifecycleCommandResult) =>
+      SponsorPanicResponseSchema.parse({
+        acknowledged: true,
+        event_id: eventId,
+        sponsor_seq: result.sponsorSeq,
+        effective_at: result.effectiveAt,
+      });
+    try {
+      const result = await this.#store.panicSponsor({
+        sponsorId: sponsor.sponsorId,
+        eventId,
+        requestId,
+        effectiveAt: now,
+        replayFor: async (committed) => this.#writeReplay(prepared.attempt, responseFor(committed)),
+      });
+      return responseFor(result);
+    } catch (error) {
+      if (
+        error instanceof EnrollmentIdempotencyRaceError ||
+        (error instanceof EnrollmentError && error.code === "FELLOW_LIFECYCLE_NOT_CURRENT")
+      ) {
+        const replay = await this.#store.idempotencyReplay(prepared.attempt);
+        if (replay !== undefined) {
+          return SponsorPanicResponseSchema.parse(await this.#decodeReplay<unknown>(replay));
+        }
+      }
+      throw error;
+    }
   }
 
   /** W3.1: bootstrap the sponsor row; reports whether this call created it. */

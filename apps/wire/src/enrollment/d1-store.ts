@@ -15,6 +15,7 @@ import type { D1Database, D1PreparedStatement, D1Result } from "@cloudflare/work
 
 import {
   type ClaimAttempt,
+  type CredentialRevokeAttempt,
   type DecisionAttempt,
   type DeviceCreateInput,
   type DeviceLookupAttempt,
@@ -33,13 +34,16 @@ import {
   enrollmentNameFailure,
   FELLOW_TOKEN_TTL_MS,
   type FellowCredentialBinding,
+  type FellowLifecycleAttempt,
   type IdempotencyAttempt,
   isStrictEnrollmentScopeReduction,
+  type LifecycleCommandResult,
   nextEnrollmentPollPacing,
   type PollAttempt,
   type PollDecision,
   reduceEnrollmentResources,
   type SponsorFellowRecord,
+  type SponsorPanicAttempt,
   uniqueEnrollmentScopes,
 } from "./service.ts";
 
@@ -84,6 +88,7 @@ interface ProposalRow extends RecordAuthorityEvidenceRow {
   durable_granted_scopes_json: string | null;
   durable_granted_resources_json: string | null;
   durable_granted_at: number | null;
+  sponsor_panic_at: number | null;
 }
 
 interface PollingProposalRow extends ProposalRow {
@@ -91,6 +96,23 @@ interface PollingProposalRow extends ProposalRow {
   device_record_expires_at: number | null;
   device_mapping_expires_at: number | null;
   device_mapping_reclaimed_at: number | null;
+}
+
+interface LifecycleSponsorRow {
+  lifecycle_seq: number;
+  panic_at: number | null;
+}
+
+interface LifecycleCredentialRow extends LifecycleSponsorRow {
+  issued_at: number;
+  last_used_at: number | null;
+}
+
+interface LifecycleFellowRow extends LifecycleSponsorRow {
+  status: FellowLifecycleStatus;
+  created_at: number;
+  status_changed_at: number | null;
+  review_from: number;
 }
 
 interface UnboundDeviceProposalRow extends ProposalRow {
@@ -397,6 +419,23 @@ const SUGGESTION_COUNT = 3;
  * caller fails closed if the filter ever removes more than this covers.
  */
 const SUGGESTION_POLICY_OVERFETCH = 8;
+// A sponsor can legitimately issue several independent credential/status
+// commands at once. Each collision loses one monotonic-head round, so this cap
+// admits the full five-command sponsor burst while keeping D1 work bounded.
+const MAX_LIFECYCLE_SEQUENCE_RETRIES = 8;
+
+function d1LifecycleTransitionAllowed(
+  from: FellowLifecycleStatus,
+  to: Exclude<FellowLifecycleStatus, "pending">,
+): boolean {
+  return (
+    (from === "pending" && to === "active") ||
+    (from === "active" && ["paused", "revoked", "compromised", "suspicious_review"].includes(to)) ||
+    (from === "paused" && ["active", "revoked", "compromised", "suspicious_review"].includes(to)) ||
+    (from === "suspicious_review" && ["active", "paused", "revoked", "compromised"].includes(to)) ||
+    ((from === "revoked" || from === "compromised") && to === "archived")
+  );
+}
 
 /**
  * D1 implementation of the S-1 transition seam. All state-changing paths use
@@ -966,6 +1005,7 @@ export class D1EnrollmentStore implements EnrollmentStore {
 			        )
 			      )
 			      AND c.issued_at > COALESCE(security.panic_at, -1)
+			      AND f.granted_at > COALESCE(security.panic_at, -1)
 			      AND c.granted_scopes_json = f.granted_scopes_json
 			      AND c.granted_resources_json = f.granted_resources_json
 			      AND EXISTS (
@@ -1491,6 +1531,196 @@ export class D1EnrollmentStore implements EnrollmentStore {
     return (insert?.meta.changes ?? 0) === 1;
   }
 
+  async revokeCredential(attempt: CredentialRevokeAttempt): Promise<LifecycleCommandResult> {
+    for (let retry = 0; retry < MAX_LIFECYCLE_SEQUENCE_RETRIES; retry += 1) {
+      let current: LifecycleCredentialRow | null;
+      try {
+        current = await sql(
+          this.#db,
+          `SELECT sponsor.lifecycle_seq, security.panic_at,
+                  credential.issued_at, credential.last_used_at
+             FROM sponsors sponsor
+             JOIN fellow_tokens credential ON credential.sponsor_id = sponsor.sponsor_id
+             LEFT JOIN enrollment_sponsor_security security
+               ON security.sponsor_id = sponsor.sponsor_id
+            WHERE sponsor.sponsor_id = ?
+              AND credential.fellow_id = ?
+              AND credential.credential_id = ?
+              AND credential.revoked_at IS NULL`,
+          attempt.sponsorId,
+          attempt.fellowId,
+          attempt.credentialId,
+        ).first<LifecycleCredentialRow>();
+      } catch {
+        throw new EnrollmentPersistenceError();
+      }
+      if (current === null) {
+        throw new EnrollmentError("FELLOW_LIFECYCLE_NOT_CURRENT");
+      }
+      if (
+        !Number.isSafeInteger(current.lifecycle_seq) ||
+        !Number.isSafeInteger(current.issued_at) ||
+        (current.last_used_at !== null && !Number.isSafeInteger(current.last_used_at))
+      ) {
+        throw new EnrollmentPersistenceError();
+      }
+      if (attempt.effectiveAt < current.issued_at) {
+        throw new EnrollmentError("FELLOW_LIFECYCLE_NOT_CURRENT");
+      }
+      const result = {
+        sponsorSeq: current.lifecycle_seq + 1,
+        effectiveAt: attempt.effectiveAt,
+      } satisfies LifecycleCommandResult;
+      const replay = await attempt.replayFor?.(result);
+      const committed = await this.commitLifecycleCommand(
+        sql(
+          this.#db,
+          `INSERT INTO fellow_lifecycle_events (
+             event_id, sponsor_id, sponsor_seq, action, fellow_id, credential_id,
+             from_status, to_status, effective_at, review_from, request_id, created_at
+           ) VALUES (?, ?, ?, 'credential-revoked', ?, ?, NULL, NULL, ?, NULL, ?, ?)`,
+          attempt.eventId,
+          attempt.sponsorId,
+          result.sponsorSeq,
+          attempt.fellowId,
+          attempt.credentialId,
+          attempt.effectiveAt,
+          attempt.requestId,
+          attempt.effectiveAt,
+        ),
+        replay,
+      );
+      if (committed) return result;
+    }
+    throw new EnrollmentPersistenceError();
+  }
+
+  async transitionFellow(attempt: FellowLifecycleAttempt): Promise<LifecycleCommandResult> {
+    for (let retry = 0; retry < MAX_LIFECYCLE_SEQUENCE_RETRIES; retry += 1) {
+      let current: LifecycleFellowRow | null;
+      try {
+        current = await sql(
+          this.#db,
+          `SELECT sponsor.lifecycle_seq, security.panic_at, fellow.status, fellow.created_at,
+                  fellow.status_changed_at,
+                  MAX(fellow.created_at, COALESCE((
+                    SELECT MIN(credential.issued_at) FROM fellow_tokens credential
+                     WHERE credential.fellow_id = fellow.fellow_id
+                  ), fellow.created_at)) AS review_from
+             FROM sponsors sponsor
+             JOIN enrollment_fellows fellow ON fellow.sponsor_id = sponsor.sponsor_id
+             LEFT JOIN enrollment_sponsor_security security
+               ON security.sponsor_id = sponsor.sponsor_id
+            WHERE sponsor.sponsor_id = ? AND fellow.fellow_id = ?`,
+          attempt.sponsorId,
+          attempt.fellowId,
+        ).first<LifecycleFellowRow>();
+      } catch {
+        throw new EnrollmentPersistenceError();
+      }
+      if (current === null) {
+        throw new EnrollmentError("FELLOW_LIFECYCLE_NOT_CURRENT");
+      }
+      if (
+        !Number.isSafeInteger(current.lifecycle_seq) ||
+        !Number.isSafeInteger(current.review_from) ||
+        !Number.isSafeInteger(current.created_at) ||
+        (current.status_changed_at !== null && !Number.isSafeInteger(current.status_changed_at))
+      ) {
+        throw new EnrollmentPersistenceError();
+      }
+      if (
+        attempt.effectiveAt < current.created_at ||
+        !d1LifecycleTransitionAllowed(current.status, attempt.toStatus)
+      ) {
+        throw new EnrollmentError("FELLOW_LIFECYCLE_NOT_CURRENT");
+      }
+      const effectiveAt = Math.max(
+        attempt.effectiveAt,
+        current.status_changed_at ?? current.created_at,
+      );
+      const result = {
+        sponsorSeq: current.lifecycle_seq + 1,
+        effectiveAt,
+      } satisfies LifecycleCommandResult;
+      const replay = await attempt.replayFor?.(result);
+      const committed = await this.commitLifecycleCommand(
+        sql(
+          this.#db,
+          `INSERT INTO fellow_lifecycle_events (
+             event_id, sponsor_id, sponsor_seq, action, fellow_id, credential_id,
+             from_status, to_status, effective_at, review_from, request_id, created_at
+           ) VALUES (?, ?, ?, 'fellow-status-changed', ?, NULL, ?, ?, ?, ?, ?, ?)`,
+          attempt.eventId,
+          attempt.sponsorId,
+          result.sponsorSeq,
+          attempt.fellowId,
+          current.status,
+          attempt.toStatus,
+          effectiveAt,
+          attempt.toStatus === "compromised" ? current.review_from : null,
+          attempt.requestId,
+          effectiveAt,
+        ),
+        replay,
+      );
+      if (committed) return result;
+    }
+    throw new EnrollmentPersistenceError();
+  }
+
+  async panicSponsor(attempt: SponsorPanicAttempt): Promise<LifecycleCommandResult> {
+    for (let retry = 0; retry < MAX_LIFECYCLE_SEQUENCE_RETRIES; retry += 1) {
+      let current: LifecycleSponsorRow | null;
+      try {
+        current = await sql(
+          this.#db,
+          `SELECT sponsor.lifecycle_seq, security.panic_at
+             FROM sponsors sponsor
+             LEFT JOIN enrollment_sponsor_security security
+               ON security.sponsor_id = sponsor.sponsor_id
+            WHERE sponsor.sponsor_id = ?`,
+          attempt.sponsorId,
+        ).first<LifecycleSponsorRow>();
+      } catch {
+        throw new EnrollmentPersistenceError();
+      }
+      if (current === null) {
+        throw new EnrollmentError("FELLOW_LIFECYCLE_NOT_CURRENT");
+      }
+      if (
+        !Number.isSafeInteger(current.lifecycle_seq) ||
+        (current.panic_at !== null && !Number.isSafeInteger(current.panic_at))
+      ) {
+        throw new EnrollmentPersistenceError();
+      }
+      const effectiveAt = Math.max(attempt.effectiveAt, (current.panic_at ?? -1) + 1);
+      const result = {
+        sponsorSeq: current.lifecycle_seq + 1,
+        effectiveAt,
+      } satisfies LifecycleCommandResult;
+      const replay = await attempt.replayFor?.(result);
+      const committed = await this.commitLifecycleCommand(
+        sql(
+          this.#db,
+          `INSERT INTO fellow_lifecycle_events (
+             event_id, sponsor_id, sponsor_seq, action, fellow_id, credential_id,
+             from_status, to_status, effective_at, review_from, request_id, created_at
+           ) VALUES (?, ?, ?, 'sponsor-panic', NULL, NULL, NULL, NULL, ?, NULL, ?, ?)`,
+          attempt.eventId,
+          attempt.sponsorId,
+          result.sponsorSeq,
+          effectiveAt,
+          attempt.requestId,
+          effectiveAt,
+        ),
+        replay,
+      );
+      if (committed) return result;
+    }
+    throw new EnrollmentPersistenceError();
+  }
+
   async capsule(enrollmentId: string, now: number): Promise<EnrollmentCapsule> {
     const row = await sql(
       this.#db,
@@ -1639,6 +1869,9 @@ export class D1EnrollmentStore implements EnrollmentStore {
       ) {
         throw new EnrollmentPersistenceError();
       }
+      if (row.sponsor_panic_at !== null && row.durable_granted_at <= row.sponsor_panic_at) {
+        throw new EnrollmentError("FLOW_INVALID");
+      }
       if (
         row.granted_scopes_json === null ||
         row.granted_resources_json === null ||
@@ -1728,6 +1961,10 @@ export class D1EnrollmentStore implements EnrollmentStore {
                     AND current_grant.granted_scopes_json = ?
                     AND current_grant.granted_resources_json = ?
                     AND current_grant.granted_at = ?
+                    AND current_grant.granted_at > COALESCE((
+                      SELECT panic_at FROM enrollment_sponsor_security
+                       WHERE sponsor_id = current_grant.sponsor_id
+                    ), -1)
                     AND current_fellow.name COLLATE BINARY = ? COLLATE BINARY
                     AND current_fellow.model = ?
                     AND current_fellow.harness = ?
@@ -2067,6 +2304,10 @@ export class D1EnrollmentStore implements EnrollmentStore {
 			             AND grant_row.granted_at BETWEEN 1 AND 9007199254740991
 			             AND grant_row.granted_at >= grant_proposal.created_at
 			             AND grant_row.granted_at < grant_proposal.expires_at
+			             AND grant_row.granted_at > COALESCE((
+			               SELECT panic_at FROM enrollment_sponsor_security
+			                WHERE sponsor_id = grant_row.sponsor_id
+			             ), -1)
 			             AND fellow_tokens.issued_at >= grant_row.granted_at
 			             AND (
 			               (fellow_tokens.proposal_id IS NULL
@@ -2211,6 +2452,27 @@ export class D1EnrollmentStore implements EnrollmentStore {
     };
   }
 
+  private async commitLifecycleCommand(
+    event: D1PreparedStatement,
+    replay: EnrollmentIdempotencyWrite | undefined,
+  ): Promise<boolean> {
+    try {
+      const results = await this.#db.batch([
+        event,
+        ...(replay === undefined ? [] : [this.idempotencyStatement(replay)]),
+      ]);
+      // D1/SQLite may include AFTER-trigger projection writes in statement
+      // metadata. The top-level event insert is a VALUES statement guarded by
+      // strict triggers, so any positive count proves the command appended.
+      if ((results[0]?.meta.changes ?? 0) < 1) return false;
+      if (replay !== undefined && (results[1]?.meta.changes ?? 0) !== 1) return false;
+      return true;
+    } catch {
+      await this.raceIfPresent(replay);
+      return false;
+    }
+  }
+
   /**
    * The replay row, appended after the product effect in the same D1 batch.
    *
@@ -2325,6 +2587,8 @@ export class D1EnrollmentStore implements EnrollmentStore {
               g.granted_scopes_json AS durable_granted_scopes_json,
               g.granted_resources_json AS durable_granted_resources_json,
               g.granted_at AS durable_granted_at
+              ,(SELECT panic_at FROM enrollment_sponsor_security
+                  WHERE sponsor_id = e.sponsor_id) AS sponsor_panic_at
          FROM enrollment_records e
          JOIN enrollment_proposals p ON p.enrollment_id = e.enrollment_id
          LEFT JOIN enrollment_grants g ON g.proposal_id = p.proposal_id
@@ -2355,6 +2619,8 @@ export class D1EnrollmentStore implements EnrollmentStore {
               g.granted_scopes_json AS durable_granted_scopes_json,
               g.granted_resources_json AS durable_granted_resources_json,
               g.granted_at AS durable_granted_at
+              ,(SELECT panic_at FROM enrollment_sponsor_security
+                  WHERE sponsor_id = e.sponsor_id) AS sponsor_panic_at
          FROM enrollment_records e
          JOIN enrollment_proposals p ON p.enrollment_id = e.enrollment_id
          LEFT JOIN device_codes d ON d.enrollment_id = e.enrollment_id
@@ -2385,6 +2651,8 @@ export class D1EnrollmentStore implements EnrollmentStore {
               g.granted_scopes_json AS durable_granted_scopes_json,
               g.granted_resources_json AS durable_granted_resources_json,
               g.granted_at AS durable_granted_at
+              ,(SELECT panic_at FROM enrollment_sponsor_security
+                  WHERE sponsor_id = e.sponsor_id) AS sponsor_panic_at
          FROM enrollment_proposals p
          JOIN enrollment_records e ON e.enrollment_id = p.enrollment_id
          LEFT JOIN device_codes d ON d.enrollment_id = e.enrollment_id
