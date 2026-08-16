@@ -38,14 +38,11 @@ import {
  * the literal `hello_url` in the contracts' approved-response schema.
  */
 const STOA_ORIGIN = "https://a.asimposium.org";
-const ENROLLMENT_SCHEMA_URL =
-  "https://a.asimposium.org/schemas/enrollment.v1.json";
+const ENROLLMENT_SCHEMA_URL = "https://a.asimposium.org/schemas/enrollment.v1.json";
 const FRAGMENT_VALUE_PLACEHOLDER = "<value from the join URL fragment>";
 
 /** Contract failures teach request shape; credential and state refusals stay coarse. */
-function enrollmentContractFields(
-  example: Record<string, unknown>,
-): Record<string, unknown> {
+function enrollmentContractFields(example: Record<string, unknown>): Record<string, unknown> {
   return { rule: "A5", schema: ENROLLMENT_SCHEMA_URL, example };
 }
 
@@ -53,10 +50,7 @@ function requestPath(request: Request): string {
   return new URL(request.url).pathname;
 }
 
-function requestEndsInDecodedSegment(
-  request: Request,
-  expected: string,
-): boolean {
+function requestEndsInDecodedSegment(request: Request, expected: string): boolean {
   const finalSegment = requestPath(request).split("/").at(-1);
   if (finalSegment === undefined) return false;
   try {
@@ -100,8 +94,7 @@ export interface EnrollmentRouterOptions {
     route: string,
     action: string,
   ) => Promise<
-    | { readonly principal: EnrollmentPrincipal; readonly rawBody: Uint8Array }
-    | Response
+    { readonly principal: EnrollmentPrincipal; readonly rawBody: Uint8Array } | Response
   >;
 }
 
@@ -158,9 +151,7 @@ function jsonContentTypeRequiredResponse(
       path,
       headers: {
         "content-type": "application/json",
-        ...(requiresIdempotencyKey
-          ? { "Idempotency-Key": "enrollment-01JXYZ4K6Q" }
-          : {}),
+        ...(requiresIdempotencyKey ? { "Idempotency-Key": "enrollment-01JXYZ4K6Q" } : {}),
       },
       body,
     }),
@@ -181,11 +172,9 @@ function acceptQuality(parameters: readonly string[]): number {
   for (const parameter of parameters) {
     const [name, value, ...rest] = parameter.trim().split("=");
     if (name?.toLowerCase() !== "q") continue;
-    if (quality !== undefined || value === undefined || rest.length !== 0)
-      return 0;
+    if (quality !== undefined || value === undefined || rest.length !== 0) return 0;
     const normalized = value.trim();
-    if (!/^(?:0(?:\.\d{0,3})?|\.\d{1,3}|1(?:\.0{0,3})?)$/.test(normalized))
-      return 0;
+    if (!/^(?:0(?:\.\d{0,3})?|\.\d{1,3}|1(?:\.0{0,3})?)$/.test(normalized)) return 0;
     quality = Number(normalized);
   }
   return quality ?? 1;
@@ -234,8 +223,7 @@ function acceptedMediaRanges(accept: string): readonly AcceptedMediaRange[] {
     if (parts.length !== 2) continue;
     const type = parts[0]?.trim().toLowerCase() ?? "";
     const subtype = parts[1]?.trim().toLowerCase() ?? "";
-    if (type === "" || subtype === "" || (type === "*" && subtype !== "*"))
-      continue;
+    if (type === "" || subtype === "" || (type === "*" && subtype !== "*")) continue;
     ranges.push({ type, subtype, quality: acceptQuality(parameters) });
   }
   return ranges;
@@ -246,19 +234,14 @@ function selectCapsuleFace(accept: string): CapsuleFace {
   const ranges = acceptedMediaRanges(accept);
   const quality = new Map<CapsuleFace, number>();
   for (const face of Object.keys(CAPSULE_FACE_MEDIA) as CapsuleFace[]) {
-    const [faceType, faceSubtype] = CAPSULE_FACE_MEDIA[face].split("/") as [
-      string,
-      string,
-    ];
+    const [faceType, faceSubtype] = CAPSULE_FACE_MEDIA[face].split("/") as [string, string];
     let specificity = -1;
     let effectiveQuality = 0;
     for (const range of ranges) {
       const matchesType = range.type === "*" || range.type === faceType;
-      const matchesSubtype =
-        range.subtype === "*" || range.subtype === faceSubtype;
+      const matchesSubtype = range.subtype === "*" || range.subtype === faceSubtype;
       if (!matchesType || !matchesSubtype) continue;
-      const candidateSpecificity =
-        range.type === "*" ? 0 : range.subtype === "*" ? 1 : 2;
+      const candidateSpecificity = range.type === "*" ? 0 : range.subtype === "*" ? 1 : 2;
       if (candidateSpecificity > specificity) {
         specificity = candidateSpecificity;
         effectiveQuality = range.quality;
@@ -289,10 +272,7 @@ function ifNoneMatchMatches(header: string | undefined, etag: string): boolean {
   });
 }
 
-async function strongEtag(
-  face: "json" | "html" | "markdown",
-  body: string,
-): Promise<string> {
+async function strongEtag(face: "json" | "html" | "markdown", body: string): Promise<string> {
   const material = new TextEncoder().encode(`${face}\n${body}`);
   const digest = await crypto.subtle.digest("SHA-256", material.buffer);
   const hex = [...new Uint8Array(digest)]
@@ -301,10 +281,7 @@ async function strongEtag(
   return `"${hex}"`;
 }
 
-function enrollmentErrorResponse(
-  error: EnrollmentError,
-  request: Request,
-): Response {
+function enrollmentErrorResponse(error: EnrollmentError, request: Request): Response {
   switch (error.code) {
     case "NAME_INVALID":
     case "MODEL_AS_NAME":
@@ -655,16 +632,13 @@ function bearerToken(request: Request): string | undefined {
   if (authorization === null) return undefined;
   // Bound before hashing: bearer input is untrusted header data and a large
   // value must not create avoidable hashing work or a diagnostic surface.
-  const match =
-    /^([A-Za-z]+) +(asimp_ag_[0-9A-HJKMNP-TV-Z]{26}_[A-Za-z0-9_-]{43})$/.exec(
-      authorization,
-    );
+  const match = /^([A-Za-z]+) +(asimp_ag_[0-9A-HJKMNP-TV-Z]{26}_[A-Za-z0-9_-]{43})$/.exec(
+    authorization,
+  );
   return match?.[1]?.toLowerCase() === "bearer" ? match[2] : undefined;
 }
 
-function idempotencyOptions(
-  request: Request,
-): { readonly idempotencyKey: string } | Response {
+function idempotencyOptions(request: Request): { readonly idempotencyKey: string } | Response {
   const key = request.headers.get("idempotency-key");
   if (key === null || !/^[A-Za-z0-9._-]{1,160}$/.test(key)) {
     return problem(
@@ -687,20 +661,14 @@ function idempotencyOptions(
  */
 function trustedDeviceClientAddress(request: Request): string | undefined {
   const value = request.headers.get("cf-connecting-ip");
-  if (
-    value === null ||
-    value !== value.trim() ||
-    value.length < 2 ||
-    value.length > 45
-  ) {
+  if (value === null || value !== value.trim() || value.length < 2 || value.length > 45) {
     return undefined;
   }
   if (value.includes(":")) {
     if (!/^[0-9A-Fa-f:.]+$/.test(value)) return undefined;
     try {
       const hostname = new URL(`http://[${value}]/`).hostname;
-      if (!hostname.startsWith("[") || !hostname.endsWith("]"))
-        return undefined;
+      if (!hostname.startsWith("[") || !hostname.endsWith("]")) return undefined;
       return hostname.slice(1, -1).toLowerCase();
     } catch {
       return undefined;
@@ -710,9 +678,7 @@ function trustedDeviceClientAddress(request: Request): string | undefined {
   if (
     segments.length !== 4 ||
     segments.some(
-      (segment) =>
-        !/^(?:0|[1-9][0-9]{0,2})$/.test(segment) ||
-        Number.parseInt(segment, 10) > 255,
+      (segment) => !/^(?:0|[1-9][0-9]{0,2})$/.test(segment) || Number.parseInt(segment, 10) > 255,
     )
   ) {
     return undefined;
@@ -748,9 +714,7 @@ export function createEnrollmentRouter(options: EnrollmentRouterOptions): Hono {
       return capsuleUnavailableResponse();
     }
     try {
-      const projection = enrollmentCapsuleProjection(
-        await options.service.capsule(enrollmentId),
-      );
+      const projection = enrollmentCapsuleProjection(await options.service.capsule(enrollmentId));
       const face = selectCapsuleFace(c.req.header("accept") ?? "");
       const body =
         face === "json"
@@ -830,8 +794,7 @@ export function createEnrollmentRouter(options: EnrollmentRouterOptions): Hono {
       );
     }
     const trustedClientAddress = trustedDeviceClientAddress(c.req.raw);
-    if (trustedClientAddress === undefined)
-      return enrollmentUnavailableResponse();
+    if (trustedClientAddress === undefined) return enrollmentUnavailableResponse();
     const idempotency = idempotencyOptions(c.req.raw);
     if (idempotency instanceof Response) return idempotency;
     try {
@@ -892,10 +855,7 @@ export function createEnrollmentRouter(options: EnrollmentRouterOptions): Hono {
     try {
       const idempotency = idempotencyOptions(c.req.raw);
       if (idempotency instanceof Response) return idempotency;
-      const claim = await options.service.claim(
-        await jsonBody(c.req.raw),
-        idempotency,
-      );
+      const claim = await options.service.claim(await jsonBody(c.req.raw), idempotency);
       const result = EnrollmentClaimResponseSchema.parse({
         flow_handle: claim.flowHandle,
       });
@@ -943,10 +903,7 @@ export function createEnrollmentRouter(options: EnrollmentRouterOptions): Hono {
     try {
       const idempotency = idempotencyOptions(request);
       if (idempotency instanceof Response) return idempotency;
-      const result = await options.service.poll(
-        await jsonBody(request),
-        idempotency,
-      );
+      const result = await options.service.poll(await jsonBody(request), idempotency);
       return new Response(JSON.stringify(result), {
         status: 200,
         headers: {
@@ -984,9 +941,7 @@ export function createEnrollmentRouter(options: EnrollmentRouterOptions): Hono {
     try {
       const token = bearerToken(c.req.raw);
       const binding =
-        token === undefined
-          ? undefined
-          : await options.service.credentialBinding(token);
+        token === undefined ? undefined : await options.service.credentialBinding(token);
       if (binding === undefined) {
         return problem(
           401,
@@ -1017,14 +972,12 @@ export function createEnrollmentRouter(options: EnrollmentRouterOptions): Hono {
           ...(binding.grantedResources.artifactBudgetBytes === undefined
             ? {}
             : {
-                artifact_budget_bytes:
-                  binding.grantedResources.artifactBudgetBytes,
+                artifact_budget_bytes: binding.grantedResources.artifactBudgetBytes,
               }),
           ...(binding.grantedResources.fellowGrantExpiresAt === undefined
             ? {}
             : {
-                fellow_grant_expires_at:
-                  binding.grantedResources.fellowGrantExpiresAt,
+                fellow_grant_expires_at: binding.grantedResources.fellowGrantExpiresAt,
               }),
         },
         next_actions: [
@@ -1060,20 +1013,14 @@ async function requireSponsor(
   request: Request,
   route: string,
   action: string,
-): Promise<
-  | { readonly principal: EnrollmentPrincipal; readonly rawBody: Uint8Array }
-  | Response
-> {
+): Promise<{ readonly principal: EnrollmentPrincipal; readonly rawBody: Uint8Array } | Response> {
   if (options.verifiedSponsor === undefined) {
     return sponsorAuthUnavailableResponse();
   }
   try {
     const result = await options.verifiedSponsor(request, route, action);
     if (result instanceof Response) return result;
-    if (
-      !isEnrollmentPrincipal(result?.principal) ||
-      !(result?.rawBody instanceof Uint8Array)
-    ) {
+    if (!isEnrollmentPrincipal(result?.principal) || !(result?.rawBody instanceof Uint8Array)) {
       return sponsorAuthUnavailableResponse();
     }
     return result;
@@ -1097,19 +1044,11 @@ function isEnrollmentPrincipal(value: unknown): value is EnrollmentPrincipal {
   const principal = value as Record<string, unknown>;
   switch (principal.type) {
     case "sponsor":
-      return (
-        typeof principal.sponsorId === "string" &&
-        principal.sponsorId.length > 0
-      );
+      return typeof principal.sponsorId === "string" && principal.sponsorId.length > 0;
     case "fellow":
-      return (
-        typeof principal.fellowId === "string" && principal.fellowId.length > 0
-      );
+      return typeof principal.fellowId === "string" && principal.fellowId.length > 0;
     case "service":
-      return (
-        typeof principal.serviceId === "string" &&
-        principal.serviceId.length > 0
-      );
+      return typeof principal.serviceId === "string" && principal.serviceId.length > 0;
     default:
       return false;
   }
@@ -1121,19 +1060,11 @@ function verifiedJson(rawBody: Uint8Array): unknown {
 }
 
 /** Internal camelCase grants to the contract's snake_case resources object. */
-function contractResources(
-  grants: EnrollmentResourceGrants,
-): Record<string, unknown> {
+function contractResources(grants: EnrollmentResourceGrants): Record<string, unknown> {
   return {
-    ...(grants.problemBinding === undefined
-      ? {}
-      : { problem_binding: grants.problemBinding }),
-    ...(grants.firstDirective === undefined
-      ? {}
-      : { first_directive: grants.firstDirective }),
-    ...(grants.eventBudget === undefined
-      ? {}
-      : { event_budget: grants.eventBudget }),
+    ...(grants.problemBinding === undefined ? {} : { problem_binding: grants.problemBinding }),
+    ...(grants.firstDirective === undefined ? {} : { first_directive: grants.firstDirective }),
+    ...(grants.eventBudget === undefined ? {} : { event_budget: grants.eventBudget }),
     ...(grants.artifactBudgetBytes === undefined
       ? {}
       : { artifact_budget_bytes: grants.artifactBudgetBytes }),
@@ -1152,14 +1083,10 @@ function contractCard(card: {
   harness: string;
   reasoningEffort?: string;
   toolsNote?: string;
-  requestedScopes: readonly (
-    "promote" | "review" | "propose-problems" | "upload-artifacts"
-  )[];
+  requestedScopes: readonly ("promote" | "review" | "propose-problems" | "upload-artifacts")[];
   requestedResources: EnrollmentResourceGrants;
   effectiveGrantedScopes:
-    | readonly (
-        "promote" | "review" | "propose-problems" | "upload-artifacts"
-      )[]
+    | readonly ("promote" | "review" | "propose-problems" | "upload-artifacts")[]
     | null;
   effectiveGrantedResources: EnrollmentResourceGrants | null;
   proposalExpiresAt: number;
@@ -1171,9 +1098,7 @@ function contractCard(card: {
     name: card.name,
     model: card.model,
     harness: card.harness,
-    ...(card.reasoningEffort === undefined
-      ? {}
-      : { reasoning_effort: card.reasoningEffort }),
+    ...(card.reasoningEffort === undefined ? {} : { reasoning_effort: card.reasoningEffort }),
     ...(card.toolsNote === undefined ? {} : { tools_note: card.toolsNote }),
     requested_scopes: card.requestedScopes,
     requested_resources: contractResources(card.requestedResources),
@@ -1244,11 +1169,7 @@ function mountSponsorRoutes(app: Hono, options: EnrollmentRouterOptions): void {
       }
       const parsed = MintEnrollmentRequestSchema.safeParse(mintBody);
       if (!parsed.success) return mintBodyInvalidResponse();
-      const minted = await options.service.mint(
-        authenticated.principal,
-        parsed.data,
-        idempotency,
-      );
+      const minted = await options.service.mint(authenticated.principal, parsed.data, idempotency);
       const response = MintEnrollmentResponseSchema.parse({
         enrollment_id: minted.enrollmentId,
         join_url: `${STOA_ORIGIN}/join/${minted.enrollmentId}#${minted.secret}`,
@@ -1279,9 +1200,7 @@ function mountSponsorRoutes(app: Hono, options: EnrollmentRouterOptions): void {
     );
     if (authenticated instanceof Response) return authenticated;
     try {
-      const cards = await options.service.pendingApprovals(
-        authenticated.principal,
-      );
+      const cards = await options.service.pendingApprovals(authenticated.principal);
       return c.json(
         SponsorProposalListResponseSchema.parse({
           proposals: cards.map(contractCard),
@@ -1300,10 +1219,7 @@ function mountSponsorRoutes(app: Hono, options: EnrollmentRouterOptions): void {
 
   app.post("/v1/enrollments/:enrollmentId/decision", async (c) => {
     if (hasQuery(c.req.raw)) {
-      return sponsorPathOnlyResponse(
-        c.req.raw,
-        "/v1/enrollments/ASIMP-EN-01JXYZ4K6Q/decision",
-      );
+      return sponsorPathOnlyResponse(c.req.raw, "/v1/enrollments/ASIMP-EN-01JXYZ4K6Q/decision");
     }
     const enrollmentId = c.req.param("enrollmentId");
     if (!EnrollmentIdSchema.safeParse(enrollmentId).success) {
@@ -1346,26 +1262,14 @@ function mountSponsorRoutes(app: Hono, options: EnrollmentRouterOptions): void {
       // sides are caller-supplied, so comparing them discloses nothing about
       // either enrollment's existence.
       if (parsed.data.enrollment_id !== enrollmentId) {
-        return enrollmentErrorResponse(
-          new EnrollmentError("DECISION_TARGET_MISMATCH"),
-          c.req.raw,
-        );
+        return enrollmentErrorResponse(new EnrollmentError("DECISION_TARGET_MISMATCH"), c.req.raw);
       }
       const idempotency = idempotencyOptions(c.req.raw);
       if (idempotency instanceof Response) return idempotency;
-      await options.service.decide(
-        authenticated.principal,
-        enrollmentId,
-        parsed.data,
-        idempotency,
-      );
-      return c.json(
-        SponsorEnrollmentDecisionResponseSchema.parse({ acknowledged: true }),
-        200,
-        {
-          "cache-control": "no-store",
-        },
-      );
+      await options.service.decide(authenticated.principal, enrollmentId, parsed.data, idempotency);
+      return c.json(SponsorEnrollmentDecisionResponseSchema.parse({ acknowledged: true }), 200, {
+        "cache-control": "no-store",
+      });
     } catch (error) {
       const operational = enrollmentOperationalFailure(error);
       if (operational !== undefined) return operational;
@@ -1379,12 +1283,7 @@ function mountSponsorRoutes(app: Hono, options: EnrollmentRouterOptions): void {
     if (hasQuery(c.req.raw)) {
       return sponsorPathOnlyResponse(c.req.raw, "/v1/fellows");
     }
-    const authenticated = await requireSponsor(
-      options,
-      c.req.raw,
-      "/v1/fellows",
-      "fellows.list",
-    );
+    const authenticated = await requireSponsor(options, c.req.raw, "/v1/fellows", "fellows.list");
     if (authenticated instanceof Response) return authenticated;
     try {
       const fellows = await options.service.fellows(authenticated.principal);
@@ -1422,10 +1321,7 @@ function mountSponsorRoutes(app: Hono, options: EnrollmentRouterOptions): void {
     if (authenticated instanceof Response) return authenticated;
     const principal = authenticated.principal;
     if (principal.type !== "sponsor") {
-      return enrollmentErrorResponse(
-        new EnrollmentError("WRONG_PRINCIPAL"),
-        c.req.raw,
-      );
+      return enrollmentErrorResponse(new EnrollmentError("WRONG_PRINCIPAL"), c.req.raw);
     }
     let bootstrapBody: unknown;
     try {
@@ -1490,17 +1386,10 @@ function mountSponsorRoutes(app: Hono, options: EnrollmentRouterOptions): void {
           c.req.raw,
         );
       }
-      const card = await options.service.deviceLookup(
-        authenticated.principal,
-        lookupBody,
-      );
-      return c.json(
-        DeviceLookupResponseSchema.parse({ card: contractCard(card) }),
-        200,
-        {
-          "cache-control": "no-store",
-        },
-      );
+      const card = await options.service.deviceLookup(authenticated.principal, lookupBody);
+      return c.json(DeviceLookupResponseSchema.parse({ card: contractCard(card) }), 200, {
+        "cache-control": "no-store",
+      });
     } catch (error) {
       const operational = enrollmentOperationalFailure(error);
       if (operational !== undefined) return operational;

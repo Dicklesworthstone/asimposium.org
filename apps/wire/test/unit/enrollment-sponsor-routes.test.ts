@@ -11,18 +11,12 @@ import {
   SponsorProposalListResponseSchema,
 } from "@asimposium/contracts";
 import type { Hono } from "hono";
-import {
-  mintServiceEnvelope,
-  serviceEnvelopeHeaders,
-} from "../../../web/lib/service-envelope.ts";
+import { mintServiceEnvelope, serviceEnvelopeHeaders } from "../../../web/lib/service-envelope.ts";
 import { toHex } from "../../src/auth/canonical";
 import { authenticateServiceEnvelopeRequest } from "../../src/auth/http";
 import { VerificationKeyring } from "../../src/auth/keyring";
 import { MemoryNonceStore } from "../../src/auth/nonce";
-import {
-  createEnrollmentRouter,
-  type EnrollmentRouterOptions,
-} from "../../src/enrollment/router";
+import { createEnrollmentRouter, type EnrollmentRouterOptions } from "../../src/enrollment/router";
 import {
   EnrollmentService,
   enrollmentReplayProtectorFromBase64Url,
@@ -65,9 +59,7 @@ async function harness(options?: {
   const keyring = new VerificationKeyring([
     {
       kid: "agora-sponsor-test",
-      publicKeyHex: toHex(
-        new Uint8Array(await crypto.subtle.exportKey("raw", keypair.publicKey)),
-      ),
+      publicKeyHex: toHex(new Uint8Array(await crypto.subtle.exportKey("raw", keypair.publicKey))),
       notBefore: 0,
     },
   ]);
@@ -80,13 +72,7 @@ async function harness(options?: {
     ...(options?.clock === undefined ? {} : { clock: options.clock }),
   });
 
-  const sign: Harness["sign"] = async (
-    body,
-    route,
-    action,
-    method = "POST",
-    principalId,
-  ) => {
+  const sign: Harness["sign"] = async (body, route, action, method = "POST", principalId) => {
     const envelope = await mintServiceEnvelope({
       privateKey: keypair.privateKey,
       kid: "agora-sponsor-test",
@@ -137,12 +123,7 @@ async function harness(options?: {
   return { app, service, sign };
 }
 
-function envelopeRequest(
-  path: string,
-  headers: Headers,
-  method: string,
-  body?: string,
-): Request {
+function envelopeRequest(path: string, headers: Headers, method: string, body?: string): Request {
   return new Request(`${origin}${path}`, {
     method,
     headers,
@@ -160,9 +141,7 @@ async function mintOne(
 }> {
   const body = `{"requested_scopes":${scopes}}`;
   const headers = await h.sign(body, "/v1/enrollments", "enrollment.mint");
-  const response = await h.app.fetch(
-    envelopeRequest("/v1/enrollments", headers, "POST", body),
-  );
+  const response = await h.app.fetch(envelopeRequest("/v1/enrollments", headers, "POST", body));
   expect(response.status).toBe(201);
   const json = MintEnrollmentResponseSchema.parse(await response.json());
   const [url, fragment] = json.join_url.split("#");
@@ -209,9 +188,7 @@ describe("sponsor enrollment routes", () => {
     const h = await harness({
       verifiedSponsor: async () => {
         sponsorAuthCalls += 1;
-        throw new Error(
-          "invalid enrollment ids must not reach sponsor authentication",
-        );
+        throw new Error("invalid enrollment ids must not reach sponsor authentication");
       },
     });
     const response = await h.app.fetch(
@@ -233,9 +210,7 @@ describe("sponsor enrollment routes", () => {
       },
     });
     expect(JSON.stringify(problem)).not.toContain("not-an-enrollment-id");
-    expect(JSON.stringify(problem)).not.toContain(
-      "must not be parsed or echoed",
-    );
+    expect(JSON.stringify(problem)).not.toContain("must not be parsed or echoed");
     expect(sponsorAuthCalls).toBe(0);
   });
 
@@ -253,9 +228,7 @@ describe("sponsor enrollment routes", () => {
     expect(await unsigned.json()).toMatchObject({ code: "WRONG_PRINCIPAL" });
 
     const minted = await mintOne(h);
-    expect(
-      minted.joinUrl.startsWith("https://a.asimposium.org/join/ASIMP-EN-"),
-    ).toBe(true);
+    expect(minted.joinUrl.startsWith("https://a.asimposium.org/join/ASIMP-EN-")).toBe(true);
   });
 
   test("a Fellow bearer token is refused on sponsor routes", async () => {
@@ -263,17 +236,13 @@ describe("sponsor enrollment routes", () => {
     const body = '{"requested_scopes":["promote"]}';
     const headers = await h.sign(body, "/v1/enrollments", "enrollment.mint");
     headers.set("authorization", "Bearer asimp_ag_canary");
-    const response = await h.app.fetch(
-      envelopeRequest("/v1/enrollments", headers, "POST", body),
-    );
+    const response = await h.app.fetch(envelopeRequest("/v1/enrollments", headers, "POST", body));
     expect([401, 403]).toContain(response.status);
   });
 
   test("sponsor routes answer 503 when the auth seam is not configured", async () => {
     const h = await harness({ withSponsorSeam: false });
-    const response = await h.app.fetch(
-      new Request(`${origin}/v1/fellows`, { method: "GET" }),
-    );
+    const response = await h.app.fetch(new Request(`${origin}/v1/fellows`, { method: "GET" }));
     expect(response.status).toBe(503);
     expect(await response.json()).toMatchObject({
       code: "SPONSOR_AUTH_UNAVAILABLE",
@@ -360,9 +329,7 @@ describe("sponsor enrollment routes", () => {
     const h = await harness({
       verifiedSponsor: async () => {
         sponsorAuthCalls += 1;
-        throw new Error(
-          "media-type refusal must precede sponsor authentication",
-        );
+        throw new Error("media-type refusal must precede sponsor authentication");
       },
     });
     const routes = [
@@ -372,28 +339,16 @@ describe("sponsor enrollment routes", () => {
       "/v1/device-lookup",
     ] as const;
     for (const route of routes) {
-      for (const contentType of [
-        undefined,
-        "text/plain",
-        "application/json-seq",
-      ] as const) {
+      for (const contentType of [undefined, "text/plain", "application/json-seq"] as const) {
         const response = await h.app.fetch(
           new Request(`${origin}${route}`, {
             method: "POST",
-            ...(contentType === undefined
-              ? {}
-              : { headers: { "content-type": contentType } }),
-            body:
-              contentType === undefined ? new TextEncoder().encode("{}") : "{}",
+            ...(contentType === undefined ? {} : { headers: { "content-type": contentType } }),
+            body: contentType === undefined ? new TextEncoder().encode("{}") : "{}",
           }),
         );
-        expect(response.status, `${route}:${contentType ?? "missing"}`).toBe(
-          415,
-        );
-        expect(
-          await response.json(),
-          `${route}:${contentType ?? "missing"}`,
-        ).toMatchObject({
+        expect(response.status, `${route}:${contentType ?? "missing"}`).toBe(415);
+        expect(await response.json(), `${route}:${contentType ?? "missing"}`).toMatchObject({
           code: "JSON_CONTENT_TYPE_REQUIRED",
           rule: "A5",
           schema: "https://a.asimposium.org/schemas/enrollment.v1.json",
@@ -471,9 +426,7 @@ describe("sponsor enrollment routes", () => {
     const h = await harness();
     const body = "{not-json";
     const headers = await h.sign(body, "/v1/enrollments", "enrollment.mint");
-    const response = await h.app.fetch(
-      envelopeRequest("/v1/enrollments", headers, "POST", body),
-    );
+    const response = await h.app.fetch(envelopeRequest("/v1/enrollments", headers, "POST", body));
     expect(response.status).toBe(422);
     expect(await response.json()).toMatchObject({
       code: "MINT_BODY_INVALID",
@@ -614,9 +567,7 @@ describe("sponsor enrollment routes", () => {
       ),
     );
     expect(decided.status).toBe(200);
-    expect(
-      SponsorEnrollmentDecisionResponseSchema.parse(await decided.json()),
-    ).toEqual({
+    expect(SponsorEnrollmentDecisionResponseSchema.parse(await decided.json())).toEqual({
       acknowledged: true,
     });
 
@@ -630,9 +581,7 @@ describe("sponsor enrollment routes", () => {
     const list2 = await h.app.fetch(
       envelopeRequest("/v1/enrollments/proposals", listHeaders2, "GET"),
     );
-    expect(
-      SponsorProposalListResponseSchema.parse(await list2.json()).proposals,
-    ).toHaveLength(0);
+    expect(SponsorProposalListResponseSchema.parse(await list2.json()).proposals).toHaveLength(0);
 
     // The agent polls and wins the one token.
     const poll = await h.app.fetch(
@@ -659,12 +608,7 @@ describe("sponsor enrollment routes", () => {
     expect(hello.status).toBe(200);
 
     // The Fellows list shows the approved grant, newest first.
-    const fellowsHeaders = await h.sign(
-      "",
-      "/v1/fellows",
-      "fellows.list",
-      "GET",
-    );
+    const fellowsHeaders = await h.sign("", "/v1/fellows", "fellows.list", "GET");
     const fellowsResponse = await h.app.fetch(
       envelopeRequest("/v1/fellows", fellowsHeaders, "GET"),
     );
@@ -708,18 +652,12 @@ describe("sponsor enrollment routes", () => {
       requested_scopes: ["review"],
       fellow_grant_expires_in_ms: 1,
     });
-    const mintHeaders = await h.sign(
-      mintBody,
-      "/v1/enrollments",
-      "enrollment.mint",
-    );
+    const mintHeaders = await h.sign(mintBody, "/v1/enrollments", "enrollment.mint");
     const mintResponse = await h.app.fetch(
       envelopeRequest("/v1/enrollments", mintHeaders, "POST", mintBody),
     );
     expect(mintResponse.status).toBe(201);
-    const minted = MintEnrollmentResponseSchema.parse(
-      await mintResponse.json(),
-    );
+    const minted = MintEnrollmentResponseSchema.parse(await mintResponse.json());
     await claimOne(h, minted.enrollment_id, minted.secret, "elapsed-grant");
     clock.value += 1;
 
@@ -734,12 +672,7 @@ describe("sponsor enrollment routes", () => {
         "enrollment.decide",
       );
       return h.app.fetch(
-        envelopeRequest(
-          `/v1/enrollments/${minted.enrollment_id}/decision`,
-          headers,
-          "POST",
-          body,
-        ),
+        envelopeRequest(`/v1/enrollments/${minted.enrollment_id}/decision`, headers, "POST", body),
       );
     };
 
@@ -762,12 +695,8 @@ describe("sponsor enrollment routes", () => {
       envelopeRequest("/v1/enrollments/proposals", listHeaders, "GET"),
     );
     expect(list.status).toBe(200);
-    expect(
-      SponsorProposalListResponseSchema.parse(await list.json()).proposals,
-    ).toEqual([]);
-    expect(
-      await h.service.fellows({ type: "sponsor", sponsorId: SPONSOR }),
-    ).toEqual([]);
+    expect(SponsorProposalListResponseSchema.parse(await list.json()).proposals).toEqual([]);
+    expect(await h.service.fellows({ type: "sponsor", sponsorId: SPONSOR })).toEqual([]);
   });
 
   test("deny ends the flow and lists no fellow", async () => {
@@ -785,12 +714,7 @@ describe("sponsor enrollment routes", () => {
       "enrollment.decide",
     );
     const decided = await h.app.fetch(
-      envelopeRequest(
-        `/v1/enrollments/${enrollmentId}/decision`,
-        headers,
-        "POST",
-        body,
-      ),
+      envelopeRequest(`/v1/enrollments/${enrollmentId}/decision`, headers, "POST", body),
     );
     expect(decided.status).toBe(200);
 
@@ -806,16 +730,9 @@ describe("sponsor enrollment routes", () => {
     );
     expect(await poll.json()).toMatchObject({ status: "access_denied" });
 
-    const fellowsHeaders = await h.sign(
-      "",
-      "/v1/fellows",
-      "fellows.list",
-      "GET",
-    );
+    const fellowsHeaders = await h.sign("", "/v1/fellows", "fellows.list", "GET");
     const fellows = SponsorFellowListResponseSchema.parse(
-      await (
-        await h.app.fetch(envelopeRequest("/v1/fellows", fellowsHeaders, "GET"))
-      ).json(),
+      await (await h.app.fetch(envelopeRequest("/v1/fellows", fellowsHeaders, "GET"))).json(),
     );
     expect(fellows.fellows).toHaveLength(0);
   });
@@ -835,9 +752,7 @@ describe("sponsor enrollment routes", () => {
     const list = await h.app.fetch(
       envelopeRequest("/v1/enrollments/proposals", outsiderHeaders, "GET"),
     );
-    expect(
-      SponsorProposalListResponseSchema.parse(await list.json()).proposals,
-    ).toHaveLength(0);
+    expect(SponsorProposalListResponseSchema.parse(await list.json()).proposals).toHaveLength(0);
 
     // The outsider's decision attempt is not a pending proposal of theirs.
     const body = JSON.stringify({
@@ -852,12 +767,7 @@ describe("sponsor enrollment routes", () => {
       "usr_01JXYZOUTSIDER000000000",
     );
     const decided = await h.app.fetch(
-      envelopeRequest(
-        `/v1/enrollments/${enrollmentId}/decision`,
-        decisionHeaders,
-        "POST",
-        body,
-      ),
+      envelopeRequest(`/v1/enrollments/${enrollmentId}/decision`, decisionHeaders, "POST", body),
     );
     expect([403, 404]).toContain(decided.status);
   });
@@ -937,14 +847,10 @@ describe("sponsor enrollment routes", () => {
     );
     const list = SponsorProposalListResponseSchema.parse(
       await (
-        await h.app.fetch(
-          envelopeRequest("/v1/enrollments/proposals", listHeaders, "GET"),
-        )
+        await h.app.fetch(envelopeRequest("/v1/enrollments/proposals", listHeaders, "GET"))
       ).json(),
     );
-    expect(list.proposals.map((proposal) => proposal.enrollment_id)).toEqual([
-      second.enrollmentId,
-    ]);
+    expect(list.proposals.map((proposal) => proposal.enrollment_id)).toEqual([second.enrollmentId]);
   });
 
   test("signed malformed decision bodies teach the contract without lying about proposal state", async () => {
@@ -969,12 +875,7 @@ describe("sponsor enrollment routes", () => {
         "enrollment.decide",
       );
       const response = await h.app.fetch(
-        envelopeRequest(
-          `/v1/enrollments/${pathTarget}/decision`,
-          headers,
-          "POST",
-          body,
-        ),
+        envelopeRequest(`/v1/enrollments/${pathTarget}/decision`, headers, "POST", body),
       );
       expect(response.status).toBe(422);
       expect(await response.json()).toMatchObject({
@@ -1024,12 +925,7 @@ describe("sponsor enrollment routes", () => {
         "enrollment.decide",
       );
       const response = await h.app.fetch(
-        envelopeRequest(
-          `/v1/enrollments/${enrollmentId}/decision`,
-          headers,
-          "POST",
-          body,
-        ),
+        envelopeRequest(`/v1/enrollments/${enrollmentId}/decision`, headers, "POST", body),
       );
       expect(response.status, scenario.code).toBe(422);
       expect(await response.json(), scenario.code).toMatchObject({
@@ -1060,12 +956,7 @@ describe("sponsor enrollment routes", () => {
       "enrollment.decide",
     );
     const response = await h.app.fetch(
-      envelopeRequest(
-        `/v1/enrollments/${target}/decision`,
-        headers,
-        "POST",
-        body,
-      ),
+      envelopeRequest(`/v1/enrollments/${target}/decision`, headers, "POST", body),
     );
     expect(response.status).toBe(503);
     const responseText = await response.text();
@@ -1197,12 +1088,7 @@ describe("sponsor enrollment routes", () => {
     for (const scenario of cases) {
       const h = await harness();
       scenario.plant(h.service);
-      const headers = await h.sign(
-        scenario.body,
-        scenario.route,
-        scenario.action,
-        scenario.method,
-      );
+      const headers = await h.sign(scenario.body, scenario.route, scenario.action, scenario.method);
       const response = await h.app.fetch(
         envelopeRequest(scenario.path, headers, scenario.method, scenario.body),
       );
@@ -1234,12 +1120,7 @@ describe("sponsor enrollment routes", () => {
       "enrollment.decide",
     );
     const decided = await h.app.fetch(
-      envelopeRequest(
-        `/v1/enrollments/${enrollmentId}/decision`,
-        headers,
-        "POST",
-        body,
-      ),
+      envelopeRequest(`/v1/enrollments/${enrollmentId}/decision`, headers, "POST", body),
     );
     expect(decided.status).toBe(200);
 
@@ -1287,15 +1168,8 @@ describe("sponsor enrollment routes", () => {
   test("sponsor bootstrap creates the row once and is idempotent after", async () => {
     const h = await harness();
     const call = async (body: string) => {
-      const headers = await h.sign(
-        body,
-        "/v1/sponsors/bootstrap",
-        "sponsor.bootstrap",
-        "POST",
-      );
-      return h.app.fetch(
-        envelopeRequest("/v1/sponsors/bootstrap", headers, "POST", body),
-      );
+      const headers = await h.sign(body, "/v1/sponsors/bootstrap", "sponsor.bootstrap", "POST");
+      return h.app.fetch(envelopeRequest("/v1/sponsors/bootstrap", headers, "POST", body));
     };
 
     for (const malformed of ["", "not-json", '{"unexpected":true}']) {
@@ -1357,17 +1231,11 @@ describe("sponsor enrollment routes", () => {
     const list = await h.app.fetch(
       envelopeRequest("/v1/enrollments/proposals", listHeaders, "GET"),
     );
-    expect(
-      SponsorProposalListResponseSchema.parse(await list.json()).proposals,
-    ).toHaveLength(0);
+    expect(SponsorProposalListResponseSchema.parse(await list.json()).proposals).toHaveLength(0);
 
     // The sponsor looks it up by the human code and gets the full card.
     const lookupBody = JSON.stringify({ user_code: started.user_code });
-    const lookupHeaders = await h.sign(
-      lookupBody,
-      "/v1/device-lookup",
-      "enrollment.device.lookup",
-    );
+    const lookupHeaders = await h.sign(lookupBody, "/v1/device-lookup", "enrollment.device.lookup");
     const lookup = await h.app.fetch(
       envelopeRequest("/v1/device-lookup", lookupHeaders, "POST", lookupBody),
     );
@@ -1417,16 +1285,9 @@ describe("sponsor enrollment routes", () => {
     expect(hello.status).toBe(200);
 
     // The fellow now appears in the sponsor's list.
-    const fellowsHeaders = await h.sign(
-      "",
-      "/v1/fellows",
-      "fellows.list",
-      "GET",
-    );
+    const fellowsHeaders = await h.sign("", "/v1/fellows", "fellows.list", "GET");
     const fellows = SponsorFellowListResponseSchema.parse(
-      await (
-        await h.app.fetch(envelopeRequest("/v1/fellows", fellowsHeaders, "GET"))
-      ).json(),
+      await (await h.app.fetch(envelopeRequest("/v1/fellows", fellowsHeaders, "GET"))).json(),
     );
     expect(fellows.fellows.map((f) => f.name)).toContain("device-drifter");
   });
@@ -1435,21 +1296,11 @@ describe("sponsor enrollment routes", () => {
     const h = await harness();
     const badBody = JSON.stringify({ user_code: "ABCD-2345" });
     for (let attempt = 0; attempt < 5; attempt += 1) {
-      const headers = await h.sign(
-        badBody,
-        "/v1/device-lookup",
-        "enrollment.device.lookup",
-      );
-      const res = await h.app.fetch(
-        envelopeRequest("/v1/device-lookup", headers, "POST", badBody),
-      );
+      const headers = await h.sign(badBody, "/v1/device-lookup", "enrollment.device.lookup");
+      const res = await h.app.fetch(envelopeRequest("/v1/device-lookup", headers, "POST", badBody));
       expect(res.status).toBe(404);
     }
-    const headers = await h.sign(
-      badBody,
-      "/v1/device-lookup",
-      "enrollment.device.lookup",
-    );
+    const headers = await h.sign(badBody, "/v1/device-lookup", "enrollment.device.lookup");
     const locked = await h.app.fetch(
       envelopeRequest("/v1/device-lookup", headers, "POST", badBody),
     );
@@ -1461,14 +1312,8 @@ describe("sponsor enrollment routes", () => {
   test("a malformed user code teaches the format, not the state", async () => {
     const h = await harness();
     const badBody = JSON.stringify({ user_code: "not-a-code" });
-    const headers = await h.sign(
-      badBody,
-      "/v1/device-lookup",
-      "enrollment.device.lookup",
-    );
-    const res = await h.app.fetch(
-      envelopeRequest("/v1/device-lookup", headers, "POST", badBody),
-    );
+    const headers = await h.sign(badBody, "/v1/device-lookup", "enrollment.device.lookup");
+    const res = await h.app.fetch(envelopeRequest("/v1/device-lookup", headers, "POST", badBody));
     expect(res.status).toBe(422);
     const problem = await res.json();
     expect(problem).toMatchObject({
@@ -1484,14 +1329,8 @@ describe("sponsor enrollment routes", () => {
   test("valid-but-unknown user codes remain one opaque non-oracle face", async () => {
     const h = await harness();
     const body = JSON.stringify({ user_code: "ABCD-2345" });
-    const headers = await h.sign(
-      body,
-      "/v1/device-lookup",
-      "enrollment.device.lookup",
-    );
-    const res = await h.app.fetch(
-      envelopeRequest("/v1/device-lookup", headers, "POST", body),
-    );
+    const headers = await h.sign(body, "/v1/device-lookup", "enrollment.device.lookup");
+    const res = await h.app.fetch(envelopeRequest("/v1/device-lookup", headers, "POST", body));
     expect(res.status).toBe(404);
     const problem = await res.json();
     expect(problem).toMatchObject({ code: "DEVICE_CODE_UNKNOWN" });
@@ -1505,14 +1344,8 @@ describe("sponsor enrollment routes", () => {
   test("malformed signed JSON is a teaching lookup error, never a false outage", async () => {
     const h = await harness();
     const body = '{"user_code":';
-    const headers = await h.sign(
-      body,
-      "/v1/device-lookup",
-      "enrollment.device.lookup",
-    );
-    const res = await h.app.fetch(
-      envelopeRequest("/v1/device-lookup", headers, "POST", body),
-    );
+    const headers = await h.sign(body, "/v1/device-lookup", "enrollment.device.lookup");
+    const res = await h.app.fetch(envelopeRequest("/v1/device-lookup", headers, "POST", body));
     expect(res.status).toBe(422);
     expect(await res.json()).toMatchObject({
       code: "DEVICE_LOOKUP_BODY_INVALID",

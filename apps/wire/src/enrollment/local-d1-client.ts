@@ -9,10 +9,7 @@ if (typeof origin !== "string" || !/^http:\/\/127\.0\.0\.1:\d+$/.test(origin)) {
   const sponsorId = "usr_local_sponsor_s1";
   const fetchTimeoutMs = 5_000;
 
-  const localFetch = (
-    input: string,
-    init: RequestInit = {},
-  ): Promise<Response> =>
+  const localFetch = (input: string, init: RequestInit = {}): Promise<Response> =>
     fetch(input, {
       ...init,
       signal: init.signal ?? AbortSignal.timeout(fetchTimeoutMs),
@@ -99,8 +96,7 @@ if (typeof origin !== "string" || !/^http:\/\/127\.0\.0\.1:\d+$/.test(origin)) {
     const leakingFace = faces.find(
       ([_face, body]) =>
         body.includes(mintedSecret) ||
-        (mintedSecretMaterial.length > 0 &&
-          body.includes(mintedSecretMaterial)),
+        (mintedSecretMaterial.length > 0 && body.includes(mintedSecretMaterial)),
     )?.[0];
     if (leakingFace !== undefined) {
       // The face name is a fixed local-harness label, never caller content.
@@ -113,20 +109,12 @@ if (typeof origin !== "string" || !/^http:\/\/127\.0\.0\.1:\d+$/.test(origin)) {
    * real local-D1 run. This remains distinct from the normal assertion below,
    * which checks the Worker-rendered public faces.
    */
-  const assertPlantedMintedSecretLeakIsRefused = (
-    mintedSecret: string,
-  ): void => {
+  const assertPlantedMintedSecretLeakIsRefused = (mintedSecret: string): void => {
     const plantedFace = "planted-minted-secret-leak";
     try {
-      assertMintedSecretAbsentFromCapsuleFaces(
-        [[plantedFace, mintedSecret]],
-        mintedSecret,
-      );
+      assertMintedSecretAbsentFromCapsuleFaces([[plantedFace, mintedSecret]], mintedSecret);
     } catch (error) {
-      if (
-        error instanceof Error &&
-        error.message === `capsule-secret-boundary:${plantedFace}`
-      ) {
+      if (error instanceof Error && error.message === `capsule-secret-boundary:${plantedFace}`) {
         return;
       }
       throw error;
@@ -145,9 +133,7 @@ if (typeof origin !== "string" || !/^http:\/\/127\.0\.0\.1:\d+$/.test(origin)) {
     }
   };
 
-  const assertPlantedPrivateAuthorityLeakIsRefused = (
-    privateDirective: string,
-  ): void => {
+  const assertPlantedPrivateAuthorityLeakIsRefused = (privateDirective: string): void => {
     try {
       assertSponsorAuthorityAbsentFromCapsuleFaces(
         [["planted-private-authority-leak", privateDirective]],
@@ -156,8 +142,7 @@ if (typeof origin !== "string" || !/^http:\/\/127\.0\.0\.1:\d+$/.test(origin)) {
     } catch (error) {
       if (
         error instanceof Error &&
-        error.message ===
-          "capsule-private-authority-boundary:planted-private-authority-leak"
+        error.message === "capsule-private-authority-boundary:planted-private-authority-leak"
       ) {
         return;
       }
@@ -189,10 +174,7 @@ if (typeof origin !== "string" || !/^http:\/\/127\.0\.0\.1:\d+$/.test(origin)) {
       enrollmentId?: unknown;
       secret?: unknown;
     };
-    if (
-      typeof minted.enrollmentId !== "string" ||
-      typeof minted.secret !== "string"
-    ) {
+    if (typeof minted.enrollmentId !== "string" || typeof minted.secret !== "string") {
       throw new Error("mint-shape");
     }
     const mintReplay = await post("/__s1/mint", mintRequest, {
@@ -276,18 +258,13 @@ if (typeof origin !== "string" || !/^http:\/\/127\.0\.0\.1:\d+$/.test(origin)) {
     const plantedWrongSecretBody = (await plantedWrongSecret.json()) as {
       code?: unknown;
     };
-    if (
-      plantedWrongSecret.status !== 400 ||
-      plantedWrongSecretBody.code !== "PAIRING_INVALID"
-    ) {
+    if (plantedWrongSecret.status !== 400 || plantedWrongSecretBody.code !== "PAIRING_INVALID") {
       const safeCode =
         typeof plantedWrongSecretBody.code === "string" &&
         /^[A-Z][A-Z0-9_]{0,39}$/.test(plantedWrongSecretBody.code)
           ? plantedWrongSecretBody.code
           : "INVALID_CODE";
-      throw new Error(
-        `wrong-secret-status-${plantedWrongSecret.status}-code-${safeCode}`,
-      );
+      throw new Error(`wrong-secret-status-${plantedWrongSecret.status}-code-${safeCode}`);
     }
 
     const malformedName = await post(
@@ -344,10 +321,7 @@ if (typeof origin !== "string" || !/^http:\/\/127\.0\.0\.1:\d+$/.test(origin)) {
     const claimReplayBody = (await claimReplay.json()) as {
       flow_handle?: unknown;
     };
-    if (
-      claimReplay.status !== 202 ||
-      claimReplayBody.flow_handle !== claimBody.flow_handle
-    ) {
+    if (claimReplay.status !== 202 || claimReplayBody.flow_handle !== claimBody.flow_handle) {
       throw new Error("claim-lost-response-replay");
     }
     const claimConflict = await post(
@@ -358,19 +332,13 @@ if (typeof origin !== "string" || !/^http:\/\/127\.0\.0\.1:\d+$/.test(origin)) {
     const claimConflictBody = (await claimConflict.json()) as {
       code?: unknown;
     };
-    if (
-      claimConflict.status !== 409 ||
-      claimConflictBody.code !== "IDEMPOTENCY_CONFLICT"
-    ) {
+    if (claimConflict.status !== 409 || claimConflictBody.code !== "IDEMPOTENCY_CONFLICT") {
       throw new Error("claim-idempotency-conflict");
     }
 
     for (const enrollmentId of ["ASIMP-EN-7F3K9M2Q8R", minted.enrollmentId]) {
       const card = await post("/__s1/card", {
-        sponsor_id:
-          enrollmentId === minted.enrollmentId
-            ? "wrong-local-sponsor"
-            : sponsorId,
+        sponsor_id: enrollmentId === minted.enrollmentId ? "wrong-local-sponsor" : sponsorId,
         enrollment_id: enrollmentId,
       });
       const cardBody = (await card.json()) as { code?: unknown };
@@ -410,8 +378,7 @@ if (typeof origin !== "string" || !/^http:\/\/127\.0\.0\.1:\d+$/.test(origin)) {
       { sponsor_id: sponsorId, enrollment_id: minted.enrollmentId },
       { "idempotency-key": "local-decision-1" },
     );
-    if (approvalReplay.status !== 200)
-      throw new Error("decision-lost-response-replay");
+    if (approvalReplay.status !== 200) throw new Error("decision-lost-response-replay");
 
     const approvedCard = await post("/__s1/card", {
       sponsor_id: sponsorId,
@@ -440,10 +407,7 @@ if (typeof origin !== "string" || !/^http:\/\/127\.0\.0\.1:\d+$/.test(origin)) {
     const [issuedBody, issuedReplayBody] = (await Promise.all([
       issued.json(),
       issuedReplay.json(),
-    ])) as [
-      { status?: unknown; token?: unknown },
-      { status?: unknown; token?: unknown },
-    ];
+    ])) as [{ status?: unknown; token?: unknown }, { status?: unknown; token?: unknown }];
     if (
       issued.status !== 200 ||
       issuedBody.status !== "approved" ||
@@ -481,8 +445,7 @@ if (typeof origin !== "string" || !/^http:\/\/127\.0\.0\.1:\d+$/.test(origin)) {
       helloBody.granted_resources?.problem_binding !== privateProblem ||
       helloBody.granted_resources?.first_directive !== privateDirective ||
       helloBody.granted_resources?.event_budget !== privateEventBudget ||
-      helloBody.granted_resources?.artifact_budget_bytes !==
-        privateArtifactBudget
+      helloBody.granted_resources?.artifact_budget_bytes !== privateArtifactBudget
     ) {
       throw new Error("hello-binding");
     }
@@ -521,10 +484,7 @@ if (typeof origin !== "string" || !/^http:\/\/127\.0\.0\.1:\d+$/.test(origin)) {
         "idempotency-key": "local-claim-race-1",
       }),
     ]);
-    const raceBodies = (await Promise.all([
-      raceLeft.json(),
-      raceRight.json(),
-    ])) as Array<{
+    const raceBodies = (await Promise.all([raceLeft.json(), raceRight.json()])) as Array<{
       flow_handle?: unknown;
     }>;
     if (
@@ -585,10 +545,7 @@ if (typeof origin !== "string" || !/^http:\/\/127\.0\.0\.1:\d+$/.test(origin)) {
     const rollbackPendingBody = (await rollbackPending.json()) as {
       status?: unknown;
     };
-    if (
-      rollbackPending.status !== 200 ||
-      rollbackPendingBody.status !== "authorization_pending"
-    ) {
+    if (rollbackPending.status !== 200 || rollbackPendingBody.status !== "authorization_pending") {
       throw new Error("rollback-pending-poll");
     }
     const failedApproval = await post(
@@ -599,10 +556,7 @@ if (typeof origin !== "string" || !/^http:\/\/127\.0\.0\.1:\d+$/.test(origin)) {
     const failedApprovalBody = (await failedApproval.json()) as {
       code?: unknown;
     };
-    if (
-      failedApproval.status !== 400 ||
-      failedApprovalBody.code !== "NAME_TAKEN"
-    ) {
+    if (failedApproval.status !== 400 || failedApprovalBody.code !== "NAME_TAKEN") {
       throw new Error(
         failedApproval.status === 503
           ? "rollback-decision-operational-failure"
@@ -630,10 +584,7 @@ if (typeof origin !== "string" || !/^http:\/\/127\.0\.0\.1:\d+$/.test(origin)) {
     const rollbackDeniedBody = (await rollbackDenied.json()) as {
       status?: unknown;
     };
-    if (
-      rollbackDenied.status !== 200 ||
-      rollbackDeniedBody.status !== "access_denied"
-    ) {
+    if (rollbackDenied.status !== 200 || rollbackDeniedBody.status !== "access_denied") {
       throw new Error("stable-poll-key-denial-transition");
     }
 
@@ -645,9 +596,7 @@ if (typeof origin !== "string" || !/^http:\/\/127\.0\.0\.1:\d+$/.test(origin)) {
       Array.from({ length: 11 }, (_unused, index) =>
         startDevice(
           "198.51.100.40",
-          deviceStartBody(
-            `local-device-distinct-${String(index).padStart(2, "0")}`,
-          ),
+          deviceStartBody(`local-device-distinct-${String(index).padStart(2, "0")}`),
           `local-device-distinct-${String(index).padStart(2, "0")}`,
         ),
       ),
@@ -671,9 +620,7 @@ if (typeof origin !== "string" || !/^http:\/\/127\.0\.0\.1:\d+$/.test(origin)) {
     if (
       distinctSuccesses.length !== 10 ||
       distinctRefusals.length !== 1 ||
-      distinctSuccesses.some(
-        ({ body }) => !DeviceCodeStartResponseSchema.safeParse(body).success,
-      )
+      distinctSuccesses.some(({ body }) => !DeviceCodeStartResponseSchema.safeParse(body).success)
     ) {
       throw new Error("concurrent-device-start-source-limit");
     }
@@ -693,9 +640,7 @@ if (typeof origin !== "string" || !/^http:\/\/127\.0\.0\.1:\d+$/.test(origin)) {
       Array.from({ length: 9 }, (_unused, index) =>
         startDevice(
           boundaryAddress,
-          deviceStartBody(
-            `local-device-boundary-${String(index).padStart(2, "0")}`,
-          ),
+          deviceStartBody(`local-device-boundary-${String(index).padStart(2, "0")}`),
           `local-device-boundary-${String(index).padStart(2, "0")}`,
         ),
       ),
@@ -712,17 +657,14 @@ if (typeof origin !== "string" || !/^http:\/\/127\.0\.0\.1:\d+$/.test(origin)) {
       boundaryLeft.json(),
       boundaryRight.json(),
     ]);
-    const boundaryLeftParsed =
-      DeviceCodeStartResponseSchema.safeParse(boundaryLeftBody);
-    const boundaryRightParsed =
-      DeviceCodeStartResponseSchema.safeParse(boundaryRightBody);
+    const boundaryLeftParsed = DeviceCodeStartResponseSchema.safeParse(boundaryLeftBody);
+    const boundaryRightParsed = DeviceCodeStartResponseSchema.safeParse(boundaryRightBody);
     if (
       boundaryLeft.status !== 201 ||
       boundaryRight.status !== 201 ||
       !boundaryLeftParsed.success ||
       !boundaryRightParsed.success ||
-      JSON.stringify(boundaryLeftParsed.data) !==
-        JSON.stringify(boundaryRightParsed.data)
+      JSON.stringify(boundaryLeftParsed.data) !== JSON.stringify(boundaryRightParsed.data)
     ) {
       throw new Error("concurrent-device-start-final-slot-replay");
     }
@@ -738,9 +680,7 @@ if (typeof origin !== "string" || !/^http:\/\/127\.0\.0\.1:\d+$/.test(origin)) {
       deviceStartBody("local-device-stable-poll-expire"),
       "local-device-stable-poll-expire",
     );
-    const expiryStartBody = DeviceCodeStartResponseSchema.safeParse(
-      await expiryStart.json(),
-    );
+    const expiryStartBody = DeviceCodeStartResponseSchema.safeParse(await expiryStart.json());
     if (expiryStart.status !== 201 || !expiryStartBody.success) {
       throw new Error("stable-poll-key-expiry-start");
     }
@@ -751,25 +691,18 @@ if (typeof origin !== "string" || !/^http:\/\/127\.0\.0\.1:\d+$/.test(origin)) {
     const expiryPendingBody = (await expiryPending.json()) as {
       status?: unknown;
     };
-    if (
-      expiryPending.status !== 200 ||
-      expiryPendingBody.status !== "authorization_pending"
-    ) {
+    if (expiryPending.status !== 200 || expiryPendingBody.status !== "authorization_pending") {
       throw new Error("stable-poll-key-expiry-pending");
     }
     const advanced = await post("/__s1/advance-device-ttl", {});
-    if (advanced.status !== 200)
-      throw new Error("stable-poll-key-clock-advance");
+    if (advanced.status !== 200) throw new Error("stable-poll-key-clock-advance");
     const expiryTerminal = await post("/v1/device-token", expiryPollRequest, {
       "idempotency-key": "local-device-expiry-poll-1",
     });
     const expiryTerminalBody = (await expiryTerminal.json()) as {
       status?: unknown;
     };
-    if (
-      expiryTerminal.status !== 200 ||
-      expiryTerminalBody.status !== "expired_token"
-    ) {
+    if (expiryTerminal.status !== 200 || expiryTerminalBody.status !== "expired_token") {
       throw new Error("stable-poll-key-expiry-transition");
     }
 
@@ -810,9 +743,7 @@ if (typeof origin !== "string" || !/^http:\/\/127\.0\.0\.1:\d+$/.test(origin)) {
     // Only fixed harness-owned codes may cross the diagnostic boundary. Parser,
     // fetch, D1, and schema errors can contain response fragments or URLs.
     const candidate = error instanceof Error ? error.message : "";
-    const code = /^[a-z][a-z0-9-]{0,79}$/.test(candidate)
-      ? candidate
-      : "local-d1-scenario";
+    const code = /^[a-z][a-z0-9-]{0,79}$/.test(candidate) ? candidate : "local-d1-scenario";
     process.stderr.write(
       `${JSON.stringify({
         tool: "bun+wrangler",

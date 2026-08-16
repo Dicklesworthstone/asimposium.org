@@ -11,11 +11,7 @@ import {
 } from "@asimposium/contracts";
 // D1 proves JSON syntax; these schemas prove that stored authority still obeys
 // the public scope vocabulary and resource bounds when it is read back.
-import type {
-  D1Database,
-  D1PreparedStatement,
-  D1Result,
-} from "@cloudflare/workers-types";
+import type { D1Database, D1PreparedStatement, D1Result } from "@cloudflare/workers-types";
 
 import {
   type ClaimAttempt,
@@ -154,8 +150,7 @@ function credentialBindingEvidenceIsValid(row: CredentialRow): boolean {
     row.expires_at - row.issued_at <= FELLOW_TOKEN_TTL_MS &&
     (row.last_used_at === null ||
       (Number.isSafeInteger(row.last_used_at) && row.last_used_at >= 0)) &&
-    (row.revoked_at === null ||
-      (Number.isSafeInteger(row.revoked_at) && row.revoked_at >= 0))
+    (row.revoked_at === null || (Number.isSafeInteger(row.revoked_at) && row.revoked_at >= 0))
   );
 }
 
@@ -197,11 +192,8 @@ interface FellowGrantRow {
   sponsor_fellow_count: number;
 }
 
-const sql = (
-  db: D1Database,
-  query: string,
-  ...values: unknown[]
-): D1PreparedStatement => db.prepare(query).bind(...values);
+const sql = (db: D1Database, query: string, ...values: unknown[]): D1PreparedStatement =>
+  db.prepare(query).bind(...values);
 
 /**
  * How long a replay row stays claimable. Must match `IDEMPOTENCY_TTL_MS` in
@@ -230,8 +222,7 @@ function parseScopes(encoded: string): readonly RequestedScope[] {
     }
     const parsed = value.map((scope) => RequestedScopeSchema.parse(scope));
     const unique = uniqueEnrollmentScopes(parsed);
-    if (unique.length !== parsed.length)
-      throw new TypeError("duplicate scope payload");
+    if (unique.length !== parsed.length) throw new TypeError("duplicate scope payload");
     return unique;
   } catch {
     throw new EnrollmentPersistenceError();
@@ -256,15 +247,9 @@ function parseResources(encoded: string): EnrollmentResourceGrants {
       throw new TypeError("unknown resource grant");
     }
     const parsed = EnrollmentResourceGrantsSchema.parse({
-      ...(input.problemBinding === undefined
-        ? {}
-        : { problem_binding: input.problemBinding }),
-      ...(input.firstDirective === undefined
-        ? {}
-        : { first_directive: input.firstDirective }),
-      ...(input.eventBudget === undefined
-        ? {}
-        : { event_budget: input.eventBudget }),
+      ...(input.problemBinding === undefined ? {} : { problem_binding: input.problemBinding }),
+      ...(input.firstDirective === undefined ? {} : { first_directive: input.firstDirective }),
+      ...(input.eventBudget === undefined ? {} : { event_budget: input.eventBudget }),
       ...(input.artifactBudgetBytes === undefined
         ? {}
         : { artifact_budget_bytes: input.artifactBudgetBytes }),
@@ -273,15 +258,9 @@ function parseResources(encoded: string): EnrollmentResourceGrants {
         : { fellow_grant_expires_at: input.fellowGrantExpiresAt }),
     });
     return {
-      ...(parsed.problem_binding === undefined
-        ? {}
-        : { problemBinding: parsed.problem_binding }),
-      ...(parsed.first_directive === undefined
-        ? {}
-        : { firstDirective: parsed.first_directive }),
-      ...(parsed.event_budget === undefined
-        ? {}
-        : { eventBudget: parsed.event_budget }),
+      ...(parsed.problem_binding === undefined ? {} : { problemBinding: parsed.problem_binding }),
+      ...(parsed.first_directive === undefined ? {} : { firstDirective: parsed.first_directive }),
+      ...(parsed.event_budget === undefined ? {} : { eventBudget: parsed.event_budget }),
       ...(parsed.artifact_budget_bytes === undefined
         ? {}
         : { artifactBudgetBytes: parsed.artifact_budget_bytes }),
@@ -317,15 +296,13 @@ function requestedRecordWithEvidence(
     (row.kind === "join-url" &&
       (row.secret_expires_at <= row.record_created_at ||
         row.secret_expires_at - row.record_created_at > 30 * 60 * 1_000)) ||
-    (row.kind === "device" &&
-      row.secret_expires_at !== row.record_created_at) ||
+    (row.kind === "device" && row.secret_expires_at !== row.record_created_at) ||
     (row.secret_consumed_at !== null &&
       (row.secret_consumed_at < row.record_created_at ||
         row.secret_consumed_at >= row.secret_expires_at)) ||
     !Number.isSafeInteger(row.requested_resource_key_count) ||
     !Number.isSafeInteger(row.requested_resource_distinct_key_count) ||
-    row.requested_resource_key_count !==
-      row.requested_resource_distinct_key_count
+    row.requested_resource_key_count !== row.requested_resource_distinct_key_count
   ) {
     throw new EnrollmentPersistenceError();
   }
@@ -369,8 +346,7 @@ function recordEvidenceIsValid(row: RecordRow): boolean {
     row.secret_expires_at > 0 &&
     (row.invalidated === 0 || row.invalidated === 1) &&
     (row.secret_consumed_at === null ||
-      (Number.isSafeInteger(row.secret_consumed_at) &&
-        row.secret_consumed_at >= 0))
+      (Number.isSafeInteger(row.secret_consumed_at) && row.secret_consumed_at >= 0))
   );
 }
 
@@ -384,9 +360,7 @@ function proposalStatus(value: string): ProposalStatus {
 function isUniqueNameFailure(error: unknown): boolean {
   return (
     error instanceof Error &&
-    (/UNIQUE constraint failed: enrollment_fellows\.name/i.test(
-      error.message,
-    ) ||
+    (/UNIQUE constraint failed: enrollment_fellows\.name/i.test(error.message) ||
       /Fellow name already exists/i.test(error.message))
   );
 }
@@ -501,8 +475,7 @@ export class D1EnrollmentStore implements EnrollmentStore {
       } else {
         statements.push(insert());
       }
-      if (idempotency !== undefined)
-        statements.push(this.idempotencyStatement(idempotency));
+      if (idempotency !== undefined) statements.push(this.idempotencyStatement(idempotency));
       const results = await this.#db.batch(statements);
       if (results.every((result) => result.meta.changes === 1)) return true;
       await this.raceIfPresent(idempotency);
@@ -521,10 +494,7 @@ export class D1EnrollmentStore implements EnrollmentStore {
     }
   }
 
-  async claim(
-    attempt: ClaimAttempt,
-    idempotency?: EnrollmentIdempotencyWrite,
-  ): Promise<void> {
+  async claim(attempt: ClaimAttempt, idempotency?: EnrollmentIdempotencyWrite): Promise<void> {
     try {
       const statements: D1PreparedStatement[] = [
         sql(
@@ -560,16 +530,12 @@ export class D1EnrollmentStore implements EnrollmentStore {
           attempt.proposal.pollIntervalSeconds,
         ),
       ];
-      if (idempotency !== undefined)
-        statements.push(this.idempotencyStatement(idempotency));
+      if (idempotency !== undefined) statements.push(this.idempotencyStatement(idempotency));
       const results = await this.#db.batch(statements);
       if (results.every((result) => result.meta.changes === 1)) return;
       await this.raceIfPresent(idempotency);
     } catch (error) {
-      if (
-        error instanceof EnrollmentError ||
-        error instanceof EnrollmentIdempotencyRaceError
-      ) {
+      if (error instanceof EnrollmentError || error instanceof EnrollmentIdempotencyRaceError) {
         throw error;
       }
       await this.raceIfPresent(idempotency);
@@ -620,17 +586,12 @@ export class D1EnrollmentStore implements EnrollmentStore {
     attempt: DecisionAttempt,
     idempotency?: EnrollmentIdempotencyWrite,
   ): Promise<void> {
-    let row = await this.proposalByEnrollment(
-      attempt.enrollmentId,
-      attempt.sponsorId,
-    );
+    let row = await this.proposalByEnrollment(attempt.enrollmentId, attempt.sponsorId);
     let bindsDeviceSponsor = false;
     if (row === null) {
       // An unbound device enrollment belongs to nobody until a decision; the
       // first decider binds it inside the same batch.
-      const deviceRow = await this.unboundDeviceProposalByEnrollment(
-        attempt.enrollmentId,
-      );
+      const deviceRow = await this.unboundDeviceProposalByEnrollment(attempt.enrollmentId);
       row = deviceRow;
       bindsDeviceSponsor = deviceRow !== null;
       if (
@@ -643,8 +604,7 @@ export class D1EnrollmentStore implements EnrollmentStore {
     }
     if (row === null) throw new EnrollmentError("WRONG_PRINCIPAL");
     if (row.status === "expired") throw new EnrollmentError("PROPOSAL_EXPIRED");
-    if (row.status !== "pending")
-      throw new EnrollmentError("PROPOSAL_NOT_PENDING");
+    if (row.status !== "pending") throw new EnrollmentError("PROPOSAL_NOT_PENDING");
     const expirePendingProposal = async (): Promise<never> => {
       let result: D1Result<unknown>;
       try {
@@ -715,18 +675,13 @@ export class D1EnrollmentStore implements EnrollmentStore {
         const statements = [
           ...bindingStatements,
           proposalDecision,
-          ...(idempotency === undefined
-            ? []
-            : [this.idempotencyStatement(idempotency)]),
+          ...(idempotency === undefined ? [] : [this.idempotencyStatement(idempotency)]),
         ];
         const results = await this.#db.batch(statements);
         if (results.every((result) => result.meta.changes === 1)) return;
         await this.raceIfPresent(idempotency);
       } catch (error) {
-        if (
-          error instanceof EnrollmentError ||
-          error instanceof EnrollmentIdempotencyRaceError
-        ) {
+        if (error instanceof EnrollmentError || error instanceof EnrollmentIdempotencyRaceError) {
           throw error;
         }
         await this.raceIfPresent(idempotency);
@@ -737,19 +692,14 @@ export class D1EnrollmentStore implements EnrollmentStore {
 
     if (!proposalEvidenceIsValid(row)) throw new EnrollmentPersistenceError();
     const requested = requestedRecordWithEvidence(row);
-    const { scopes, resources } = this.reducedGrant(
-      requested,
-      attempt.decision,
-      attempt.now,
-    );
+    const { scopes, resources } = this.reducedGrant(requested, attempt.decision, attempt.now);
     if (
       resources.fellowGrantExpiresAt !== undefined &&
       attempt.now >= resources.fellowGrantExpiresAt
     ) {
       return expirePendingProposal();
     }
-    const nextStatus =
-      attempt.decision.decision === "approve" ? "approved" : "reduced";
+    const nextStatus = attempt.decision.decision === "approve" ? "approved" : "reduced";
     try {
       const proposalDecision = bindsDeviceSponsor
         ? sql(
@@ -808,8 +758,7 @@ export class D1EnrollmentStore implements EnrollmentStore {
           attempt.now,
         ),
       ];
-      if (idempotency !== undefined)
-        statements.push(this.idempotencyStatement(idempotency));
+      if (idempotency !== undefined) statements.push(this.idempotencyStatement(idempotency));
       const results = await this.#db.batch(statements);
       if (results.every((result) => result.meta.changes === 1)) return;
       await this.raceIfPresent(idempotency);
@@ -835,8 +784,7 @@ export class D1EnrollmentStore implements EnrollmentStore {
     const grantExpiresAt = requested.requestedResources.fellowGrantExpiresAt;
     if (
       row.status === "pending" &&
-      (now >= row.expires_at ||
-        (grantExpiresAt !== undefined && now >= grantExpiresAt))
+      (now >= row.expires_at || (grantExpiresAt !== undefined && now >= grantExpiresAt))
     ) {
       await sql(
         this.#db,
@@ -871,9 +819,7 @@ export class D1EnrollmentStore implements EnrollmentStore {
       name: row.name,
       model: row.model,
       harness: row.harness,
-      ...(row.reasoning_effort === null
-        ? {}
-        : { reasoningEffort: row.reasoning_effort }),
+      ...(row.reasoning_effort === null ? {} : { reasoningEffort: row.reasoning_effort }),
       ...(row.tools_note === null ? {} : { toolsNote: row.tools_note }),
       requestedScopes: requested.requestedScopes,
       requestedResources: requested.requestedResources,
@@ -945,9 +891,7 @@ export class D1EnrollmentStore implements EnrollmentStore {
         name: row.name,
         model: row.model,
         harness: row.harness,
-        ...(row.reasoning_effort === null
-          ? {}
-          : { reasoningEffort: row.reasoning_effort }),
+        ...(row.reasoning_effort === null ? {} : { reasoningEffort: row.reasoning_effort }),
         ...(row.tools_note === null ? {} : { toolsNote: row.tools_note }),
         requestedScopes: requested.requestedScopes,
         requestedResources: requested.requestedResources,
@@ -958,10 +902,7 @@ export class D1EnrollmentStore implements EnrollmentStore {
     });
   }
 
-  async fellowsBySponsor(
-    sponsorId: string,
-    now: number,
-  ): Promise<SponsorFellowRecord[]> {
+  async fellowsBySponsor(sponsorId: string, now: number): Promise<SponsorFellowRecord[]> {
     let rows: readonly FellowGrantRow[];
     try {
       const result = await sql(
@@ -1058,10 +999,7 @@ export class D1EnrollmentStore implements EnrollmentStore {
         now,
         now,
       ).all<FellowGrantRow>();
-      if (
-        result.results.length > 1500 ||
-        (result.results[0]?.sponsor_fellow_count ?? 0) > 500
-      ) {
+      if (result.results.length > 1500 || (result.results[0]?.sponsor_fellow_count ?? 0) > 500) {
         throw new EnrollmentPersistenceError();
       }
       rows = result.results;
@@ -1103,18 +1041,14 @@ export class D1EnrollmentStore implements EnrollmentStore {
       ) {
         continue;
       }
-      (fellow.credentials as SponsorFellowRecord["credentials"][number][]).push(
-        {
-          credentialId: row.credential_id,
-          profile: row.credential_profile,
-          issuedAt: row.issued_at,
-          expiresAt: row.expires_at,
-          ...(row.last_used_at === null
-            ? {}
-            : { lastUsedAt: row.last_used_at }),
-          active: row.status === "active" || row.status === "suspicious_review",
-        },
-      );
+      (fellow.credentials as SponsorFellowRecord["credentials"][number][]).push({
+        credentialId: row.credential_id,
+        profile: row.credential_profile,
+        issuedAt: row.issued_at,
+        expiresAt: row.expires_at,
+        ...(row.last_used_at === null ? {} : { lastUsedAt: row.last_used_at }),
+        active: row.status === "active" || row.status === "suspicious_review",
+      });
     }
     return [...fellows.values()];
   }
@@ -1252,13 +1186,12 @@ export class D1EnrollmentStore implements EnrollmentStore {
           input.record.createdAt,
           input.deviceExpiresAt,
         ),
-        ...(idempotency === undefined
-          ? []
-          : [this.idempotencyStatement(idempotency)]),
+        ...(idempotency === undefined ? [] : [this.idempotencyStatement(idempotency)]),
       ];
       const results = await this.#db.batch(statements);
       const collisionRow = (results[3]?.results?.[0] ?? undefined) as
-        { readonly collided?: number } | undefined;
+        | { readonly collided?: number }
+        | undefined;
       if (collisionRow?.collided !== 0 && collisionRow?.collided !== 1) {
         throw new EnrollmentPersistenceError();
       }
@@ -1287,9 +1220,7 @@ export class D1EnrollmentStore implements EnrollmentStore {
     }
   }
 
-  async deviceLookup(
-    attempt: DeviceLookupAttempt,
-  ): Promise<EnrollmentApprovalCard> {
+  async deviceLookup(attempt: DeviceLookupAttempt): Promise<EnrollmentApprovalCard> {
     const liveCodePredicate = `
       FROM device_codes d
       JOIN enrollment_records e ON e.enrollment_id = d.enrollment_id
@@ -1442,15 +1373,15 @@ export class D1EnrollmentStore implements EnrollmentStore {
       throw new EnrollmentPersistenceError();
     }
     const countRow = (results[4]?.results?.[0] ?? undefined) as
-      { readonly failures?: number } | undefined;
+      | { readonly failures?: number }
+      | undefined;
     if (countRow === undefined || !Number.isSafeInteger(countRow.failures)) {
       throw new EnrollmentPersistenceError();
     }
     if ((countRow.failures ?? 0) >= attempt.failureLimit) {
       throw new EnrollmentError("DEVICE_LOOKUP_LOCKED");
     }
-    const row = (results[5]?.results?.[0] ?? undefined) as
-      PendingProposalRow | undefined;
+    const row = (results[5]?.results?.[0] ?? undefined) as PendingProposalRow | undefined;
     const outcome = results[6];
     const outcomeChanges = outcome?.meta.changes ?? -1;
     if (row === undefined) {
@@ -1467,9 +1398,7 @@ export class D1EnrollmentStore implements EnrollmentStore {
       name: row.name,
       model: row.model,
       harness: row.harness,
-      ...(row.reasoning_effort === null
-        ? {}
-        : { reasoningEffort: row.reasoning_effort }),
+      ...(row.reasoning_effort === null ? {} : { reasoningEffort: row.reasoning_effort }),
       ...(row.tools_note === null ? {} : { toolsNote: row.tools_note }),
       requestedScopes: requested.requestedScopes,
       requestedResources: requested.requestedResources,
@@ -1483,10 +1412,7 @@ export class D1EnrollmentStore implements EnrollmentStore {
     enrollmentId: string,
     now: number,
   ): Promise<EnrollmentApprovalCard> {
-    const card = await this.deviceCardByEnrollmentForDecision(
-      enrollmentId,
-      now,
-    );
+    const card = await this.deviceCardByEnrollmentForDecision(enrollmentId, now);
     if (card === undefined) throw new EnrollmentError("PAIRING_INVALID");
     return card;
   }
@@ -1538,9 +1464,7 @@ export class D1EnrollmentStore implements EnrollmentStore {
       name: row.name,
       model: row.model,
       harness: row.harness,
-      ...(row.reasoning_effort === null
-        ? {}
-        : { reasoningEffort: row.reasoning_effort }),
+      ...(row.reasoning_effort === null ? {} : { reasoningEffort: row.reasoning_effort }),
       ...(row.tools_note === null ? {} : { toolsNote: row.tools_note }),
       requestedScopes: requested.requestedScopes,
       requestedResources,
@@ -1561,12 +1485,7 @@ export class D1EnrollmentStore implements EnrollmentStore {
         now,
         now,
       ),
-      sql(
-        this.#db,
-        "UPDATE sponsors SET last_seen_at = ? WHERE sponsor_id = ?",
-        now,
-        sponsorId,
-      ),
+      sql(this.#db, "UPDATE sponsors SET last_seen_at = ? WHERE sponsor_id = ?", now, sponsorId),
     ]);
     const insert = results[0];
     return (insert?.meta.changes ?? 0) === 1;
@@ -1622,13 +1541,10 @@ export class D1EnrollmentStore implements EnrollmentStore {
               "UPDATE enrollment_proposals SET status = 'expired' WHERE proposal_id = ? AND status = 'pending'",
               row.proposal_id,
             ),
-            ...(idempotency === undefined
-              ? []
-              : [this.idempotencyStatement(idempotency)]),
+            ...(idempotency === undefined ? [] : [this.idempotencyStatement(idempotency)]),
           ];
           const results = await this.#db.batch(statements);
-          if (results.every((result) => result.meta.changes === 1))
-            return decision;
+          if (results.every((result) => result.meta.changes === 1)) return decision;
           await this.raceIfPresent(idempotency);
           continue;
         } catch (error) {
@@ -1638,8 +1554,7 @@ export class D1EnrollmentStore implements EnrollmentStore {
         }
       }
       if (row.enrollment_kind === "device") {
-        if (row.device_record_expires_at === null)
-          throw new EnrollmentError("FLOW_INVALID");
+        if (row.device_record_expires_at === null) throw new EnrollmentError("FLOW_INVALID");
         if (row.device_mapping_expires_at === null) {
           if (
             row.device_mapping_reclaimed_at === null ||
@@ -1699,9 +1614,7 @@ export class D1EnrollmentStore implements EnrollmentStore {
         const idempotency = await attempt.replayFor?.(decision);
         if (idempotency === undefined) return decision;
         try {
-          const [result] = await this.#db.batch([
-            this.standaloneIdempotencyStatement(idempotency),
-          ]);
+          const [result] = await this.#db.batch([this.standaloneIdempotencyStatement(idempotency)]);
           if (result?.meta.changes === 1) return decision;
           await this.raceIfPresent(idempotency);
           throw new EnrollmentPersistenceError();
@@ -1735,9 +1648,7 @@ export class D1EnrollmentStore implements EnrollmentStore {
         throw new EnrollmentPersistenceError();
       }
       const durableScopes = parseScopes(row.durable_granted_scopes_json);
-      const durableResources = parseResources(
-        row.durable_granted_resources_json,
-      );
+      const durableResources = parseResources(row.durable_granted_resources_json);
       if (
         (row.status !== "approved" && row.status !== "reduced") ||
         !enrollmentGrantIsWithinRequest({
@@ -1766,13 +1677,10 @@ export class D1EnrollmentStore implements EnrollmentStore {
                   AND token_hash IS NULL`,
               row.proposal_id,
             ),
-            ...(idempotency === undefined
-              ? []
-              : [this.idempotencyStatement(idempotency)]),
+            ...(idempotency === undefined ? [] : [this.idempotencyStatement(idempotency)]),
           ];
           const results = await this.#db.batch(statements);
-          if (results.every((result) => result.meta.changes === 1))
-            return decision;
+          if (results.every((result) => result.meta.changes === 1)) return decision;
           await this.raceIfPresent(idempotency);
           continue;
         } catch (error) {
@@ -1870,11 +1778,9 @@ export class D1EnrollmentStore implements EnrollmentStore {
             row.proposal_id,
           ),
         ];
-        if (idempotency !== undefined)
-          statements.push(this.idempotencyStatement(idempotency));
+        if (idempotency !== undefined) statements.push(this.idempotencyStatement(idempotency));
         const results = await this.#db.batch(statements);
-        if (results.every((result) => result.meta.changes === 1))
-          return decision;
+        if (results.every((result) => result.meta.changes === 1)) return decision;
         await this.raceIfPresent(idempotency);
       } catch (error) {
         if (error instanceof EnrollmentIdempotencyRaceError) throw error;
@@ -1883,8 +1789,7 @@ export class D1EnrollmentStore implements EnrollmentStore {
       }
     }
     const final = await this.proposalByFlow(attempt.flowHandleHash);
-    if (final !== null && final.token_hash !== null)
-      return { kind: "already-issued" };
+    if (final !== null && final.token_hash !== null) return { kind: "already-issued" };
     throw new EnrollmentError("FLOW_INVALID");
   }
 
@@ -1895,9 +1800,7 @@ export class D1EnrollmentStore implements EnrollmentStore {
       .replace(/^-+|-+$/g, "")
       .replace(/-+/g, "-");
     const safeStem =
-      stem.length >= 1 &&
-      /^[a-z]/.test(stem) &&
-      enrollmentNameFailure(stem) === undefined
+      stem.length >= 1 && /^[a-z]/.test(stem) && enrollmentNameFailure(stem) === undefined
         ? stem.slice(0, 24).replace(/-+$/g, "")
         : "fellow";
     // One statement. The suffix series is generated inside SQLite and each
@@ -2176,13 +2079,7 @@ export class D1EnrollmentStore implements EnrollmentStore {
 			               )
 			             )
 		        )`;
-    const authorizationValues = [
-      tokenHash,
-      expectedProfile,
-      now,
-      now,
-      now,
-    ] as const;
+    const authorizationValues = [tokenHash, expectedProfile, now, now, now] as const;
     let candidate: CredentialRow | null;
     try {
       candidate = await sql(
@@ -2213,15 +2110,12 @@ export class D1EnrollmentStore implements EnrollmentStore {
       throw new EnrollmentPersistenceError();
     }
     if (
-      candidate.requested_resource_key_count !==
-        candidate.requested_resource_distinct_key_count ||
+      candidate.requested_resource_key_count !== candidate.requested_resource_distinct_key_count ||
       !Number.isSafeInteger(candidate.requested_record_created_at) ||
       candidate.requested_record_created_at < 1 ||
       (requestedResources.fellowGrantExpiresAt !== undefined &&
-        (requestedResources.fellowGrantExpiresAt <=
-          candidate.requested_record_created_at ||
-          requestedResources.fellowGrantExpiresAt -
-            candidate.requested_record_created_at >
+        (requestedResources.fellowGrantExpiresAt <= candidate.requested_record_created_at ||
+          requestedResources.fellowGrantExpiresAt - candidate.requested_record_created_at >
             FELLOW_TOKEN_TTL_MS)) ||
       !enrollmentGrantIsWithinRequest({
         status: candidate.proposal_status,
@@ -2346,9 +2240,7 @@ export class D1EnrollmentStore implements EnrollmentStore {
    * the fact that mechanism 2 is the only gate. The guard now lives in the CASE
    * alone, where it can be read.
    */
-  private idempotencyStatement(
-    write: EnrollmentIdempotencyWrite,
-  ): D1PreparedStatement {
+  private idempotencyStatement(write: EnrollmentIdempotencyWrite): D1PreparedStatement {
     return sql(
       this.#db,
       `INSERT INTO enrollment_idempotency (
@@ -2380,9 +2272,7 @@ export class D1EnrollmentStore implements EnrollmentStore {
    * preceding statement, so there is no `changes()` guard; the live-key abort of
    * mechanism 2 above is identical and equally load-bearing.
    */
-  private standaloneIdempotencyStatement(
-    write: EnrollmentIdempotencyWrite,
-  ): D1PreparedStatement {
+  private standaloneIdempotencyStatement(write: EnrollmentIdempotencyWrite): D1PreparedStatement {
     return sql(
       this.#db,
       `INSERT INTO enrollment_idempotency (
@@ -2409,9 +2299,7 @@ export class D1EnrollmentStore implements EnrollmentStore {
   }
 
   /** A completed concurrent write is retried by the service through ciphertext. */
-  private async raceIfPresent(
-    write: EnrollmentIdempotencyWrite | undefined,
-  ): Promise<void> {
+  private async raceIfPresent(write: EnrollmentIdempotencyWrite | undefined): Promise<void> {
     if (write === undefined) return;
     const replay = await this.idempotencyReplay(write);
     if (replay !== undefined) throw new EnrollmentIdempotencyRaceError();
@@ -2476,9 +2364,7 @@ export class D1EnrollmentStore implements EnrollmentStore {
     ).first<UnboundDeviceProposalRow>();
   }
 
-  private async proposalByFlow(
-    flowHandleHash: string,
-  ): Promise<PollingProposalRow | null> {
+  private async proposalByFlow(flowHandleHash: string): Promise<PollingProposalRow | null> {
     return sql(
       this.#db,
       `SELECT e.enrollment_id, e.sponsor_id, e.kind, e.secret_hash, e.secret_expires_at,
@@ -2522,24 +2408,18 @@ export class D1EnrollmentStore implements EnrollmentStore {
         resources: requested.requestedResources,
       };
     }
-    if (decision.decision === "deny")
-      throw new EnrollmentError("PROPOSAL_NOT_PENDING");
+    if (decision.decision === "deny") throw new EnrollmentError("PROPOSAL_NOT_PENDING");
     let scopes = requested.requestedScopes;
     if (decision.reduction.scopes !== undefined) {
       scopes = uniqueEnrollmentScopes(decision.reduction.scopes);
       if (!scopes.every((scope) => requested.requestedScopes.includes(scope))) {
         throw new EnrollmentError("SCOPE_ESCALATION");
       }
-      if (
-        !isStrictEnrollmentScopeReduction(requested.requestedScopes, scopes)
-      ) {
+      if (!isStrictEnrollmentScopeReduction(requested.requestedScopes, scopes)) {
         throw new EnrollmentError("SCOPE_NOT_REDUCED");
       }
     }
-    const resourceReduction = { ...decision.reduction } as Record<
-      string,
-      unknown
-    >;
+    const resourceReduction = { ...decision.reduction } as Record<string, unknown>;
     delete resourceReduction.scopes;
     const resources =
       Object.keys(resourceReduction).length === 0
@@ -2549,10 +2429,7 @@ export class D1EnrollmentStore implements EnrollmentStore {
             decision.reduction as EnrollmentGrantReduction,
             now,
           );
-    if (
-      decision.reduction.scopes === undefined &&
-      resources === requested.requestedResources
-    ) {
+    if (decision.reduction.scopes === undefined && resources === requested.requestedResources) {
       throw new EnrollmentError("SCOPE_NOT_REDUCED");
     }
     return { scopes, resources };

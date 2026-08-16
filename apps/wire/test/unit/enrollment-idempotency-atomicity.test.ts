@@ -55,10 +55,7 @@ import {
  * statements is likewise SQLite's here.
  */
 
-const MIGRATION = resolve(
-  import.meta.dir,
-  "../../../../db/migrations/0002_enrollment_g0.sql",
-);
+const MIGRATION = resolve(import.meta.dir, "../../../../db/migrations/0002_enrollment_g0.sql");
 const LIFECYCLE_MIGRATION = resolve(
   import.meta.dir,
   "../../../../db/migrations/0006_fellow_credential_lifecycle.sql",
@@ -67,10 +64,7 @@ const CREDENTIAL_HARDENING_MIGRATION = resolve(
   import.meta.dir,
   "../../../../db/migrations/0011_fellow_credential_hardening.sql",
 );
-const DEVICE_MIGRATION = resolve(
-  import.meta.dir,
-  "../../../../db/migrations/0009_device_flow.sql",
-);
+const DEVICE_MIGRATION = resolve(import.meta.dir, "../../../../db/migrations/0009_device_flow.sql");
 const DEVICE_HARDENING_MIGRATION = resolve(
   import.meta.dir,
   "../../../../db/migrations/0010_device_flow_hardening.sql",
@@ -104,17 +98,13 @@ function localD1(
           return { results: [], meta: { changes: result.changes } };
         },
         async first<T>(): Promise<T | null> {
-          const row = (sqlite
-            .prepare<T, LocalBinding[]>(query)
-            .get(...values) ?? null) as T | null;
+          const row = (sqlite.prepare<T, LocalBinding[]>(query).get(...values) ?? null) as T | null;
           await options.afterFirstRead?.(query);
           return row;
         },
         async all<T>(): Promise<{ results: T[] }> {
           return {
-            results: sqlite
-              .prepare<T, LocalBinding[]>(query)
-              .all(...values) as T[],
+            results: sqlite.prepare<T, LocalBinding[]>(query).all(...values) as T[],
           };
         },
       };
@@ -167,9 +157,7 @@ function localD1(
   } as unknown as D1Database;
 }
 
-function lifecycleDatabase(
-  options: { readonly nullableDigest?: boolean } = {},
-): Database {
+function lifecycleDatabase(options: { readonly nullableDigest?: boolean } = {}): Database {
   const schema = readFileSync(MIGRATION, "utf8");
   expect(schema).toContain(LOAD_BEARING_COLUMN);
   const sqlite = new Database(":memory:", { strict: true });
@@ -182,9 +170,7 @@ function lifecycleDatabase(
   return sqlite;
 }
 
-function database(
-  options: { readonly nullableDigest?: boolean } = {},
-): Database {
+function database(options: { readonly nullableDigest?: boolean } = {}): Database {
   const sqlite = databaseBeforeCredentialHardening(options);
   sqlite.exec(readFileSync(CREDENTIAL_HARDENING_MIGRATION, "utf8"));
   return sqlite;
@@ -198,10 +184,7 @@ function databaseBeforeCredentialHardening(
   const deviceHardening = readFileSync(DEVICE_HARDENING_MIGRATION, "utf8");
   sqlite.exec(
     options.nullableDigest === true
-      ? deviceHardening.replace(
-          "request_digest TEXT NOT NULL",
-          "request_digest TEXT",
-        )
+      ? deviceHardening.replace("request_digest TEXT NOT NULL", "request_digest TEXT")
       : deviceHardening,
   );
   return sqlite;
@@ -336,15 +319,9 @@ function isUnboundDeviceProposalQuery(query: string): boolean {
 
 function expectHardeningMigrationGuardRollback(sqlite: Database): void {
   const migration = readFileSync(DEVICE_HARDENING_MIGRATION, "utf8");
-  const guardCreateStart = migration.indexOf(
-    "CREATE TABLE device_flow_migration_guard",
-  );
-  const guardInsertStart = migration.indexOf(
-    "INSERT INTO device_flow_migration_guard",
-  );
-  const guardDropStart = migration.indexOf(
-    "DROP TABLE device_flow_migration_guard",
-  );
+  const guardCreateStart = migration.indexOf("CREATE TABLE device_flow_migration_guard");
+  const guardInsertStart = migration.indexOf("INSERT INTO device_flow_migration_guard");
+  const guardDropStart = migration.indexOf("DROP TABLE device_flow_migration_guard");
   expect(guardCreateStart).toBeGreaterThan(0);
   expect(guardInsertStart).toBeGreaterThan(guardCreateStart);
   expect(guardDropStart).toBeGreaterThan(guardInsertStart);
@@ -447,23 +424,17 @@ describe("device enrollment first-decider SQL", () => {
     });
     expect(() =>
       sqlite
-        .prepare(
-          "UPDATE enrollment_records SET device_expires_at = ? WHERE enrollment_id = ?",
-        )
+        .prepare("UPDATE enrollment_records SET device_expires_at = ? WHERE enrollment_id = ?")
         .run(deviceExpiresAt + 1, enrollmentId),
     ).toThrow();
     expect(() =>
       sqlite
-        .prepare(
-          "UPDATE enrollment_records SET created_at = ? WHERE enrollment_id = ?",
-        )
+        .prepare("UPDATE enrollment_records SET created_at = ? WHERE enrollment_id = ?")
         .run(NOW + 1, enrollmentId),
     ).toThrow("DEVICE_RECORD_CREATED_AT_IMMUTABLE");
     expect(() =>
       sqlite
-        .prepare(
-          "UPDATE enrollment_proposals SET expires_at = ? WHERE proposal_id = ?",
-        )
+        .prepare("UPDATE enrollment_proposals SET expires_at = ? WHERE proposal_id = ?")
         .run(NOW + 24 * 60 * 60_000 + 1, proposalId),
     ).toThrow("DEVICE_PROPOSAL_EXPIRY_IMMUTABLE");
     expect(() =>
@@ -499,31 +470,18 @@ describe("device enrollment first-decider SQL", () => {
     ).not.toThrow();
     const indexColumns = (indexName: string): string[] =>
       sqlite
-        .prepare<{ name: string }, [string]>(
-          "SELECT name FROM pragma_index_info(?) ORDER BY seqno",
-        )
+        .prepare<{ name: string }, [string]>("SELECT name FROM pragma_index_info(?) ORDER BY seqno")
         .all(indexName)
         .map((column) => column.name);
     expect(indexColumns("device_lookup_attempts_sponsor_time")).toEqual([
       "sponsor_id",
       "attempted_at",
     ]);
-    expect(indexColumns("device_lookup_attempts_time")).toEqual([
-      "attempted_at",
-      "id",
-    ]);
-    expect(indexColumns("device_codes_expiry")).toEqual([
-      "expires_at",
-      "enrollment_id",
-    ]);
-    const queryPlan = (
-      statement: string,
-      ...parameters: (string | number)[]
-    ): string =>
+    expect(indexColumns("device_lookup_attempts_time")).toEqual(["attempted_at", "id"]);
+    expect(indexColumns("device_codes_expiry")).toEqual(["expires_at", "enrollment_id"]);
+    const queryPlan = (statement: string, ...parameters: (string | number)[]): string =>
       sqlite
-        .prepare<{ detail: string }, (string | number)[]>(
-          `EXPLAIN QUERY PLAN ${statement}`,
-        )
+        .prepare<{ detail: string }, (string | number)[]>(`EXPLAIN QUERY PLAN ${statement}`)
         .all(...parameters)
         .map((step) => step.detail)
         .join("\n");
@@ -568,12 +526,7 @@ describe("device enrollment first-decider SQL", () => {
            requested_scopes_json, requested_resources_json, invalidated, created_at, kind
          ) VALUES (?, '', ?, ?, '[]', '{}', 0, ?, 'device')`,
       )
-      .run(
-        "ASIMP-EN-DEVICE-legacy-impossible",
-        "legacy-impossible-secret",
-        NOW,
-        NOW,
-      );
+      .run("ASIMP-EN-DEVICE-legacy-impossible", "legacy-impossible-secret", NOW, NOW);
 
     expectHardeningMigrationGuardRollback(sqlite);
   });
@@ -581,9 +534,7 @@ describe("device enrollment first-decider SQL", () => {
   test("0010 migration refuses a pre-existing enrollment kind outside its closed vocabulary", () => {
     const sqlite = lifecycleDatabase();
     sqlite.exec(readFileSync(DEVICE_MIGRATION, "utf8"));
-    sqlite
-      .prepare("UPDATE enrollment_records SET kind = 'legacy-unknown'")
-      .run();
+    sqlite.prepare("UPDATE enrollment_records SET kind = 'legacy-unknown'").run();
     sqlite
       .prepare(
         `INSERT INTO enrollment_records (
@@ -591,13 +542,7 @@ describe("device enrollment first-decider SQL", () => {
            requested_scopes_json, requested_resources_json, invalidated, created_at, kind
          ) VALUES (?, ?, ?, ?, '[]', '{}', 0, ?, 'legacy-unknown')`,
       )
-      .run(
-        "ASIMP-EN-legacy-kind",
-        "usr_legacy_kind",
-        "legacy-kind-secret",
-        NOW,
-        NOW,
-      );
+      .run("ASIMP-EN-legacy-kind", "usr_legacy_kind", "legacy-kind-secret", NOW, NOW);
 
     expectHardeningMigrationGuardRollback(sqlite);
   });
@@ -695,9 +640,7 @@ describe("device enrollment first-decider SQL", () => {
         .get(input.proposal.proposalId),
     ).toEqual({ status: "expired", token_hash: null });
     expect(
-      sqlite
-        .prepare<{ n: number }, []>("SELECT COUNT(*) AS n FROM fellow_tokens")
-        .get()?.n,
+      sqlite.prepare<{ n: number }, []>("SELECT COUNT(*) AS n FROM fellow_tokens").get()?.n,
     ).toBe(0);
   });
 
@@ -727,12 +670,7 @@ describe("device enrollment first-decider SQL", () => {
       idempotencyKey: "d1-stable-poll-approve-1",
     } as const;
     expect(
-      (
-        await service.poll(
-          { flow_handle: approveStart.device_code },
-          approveOptions,
-        )
-      ).status,
+      (await service.poll({ flow_handle: approveStart.device_code }, approveOptions)).status,
     ).toBe("authorization_pending");
     expect(terminalCount()).toBe(0);
     const approveCard = await service.deviceLookup(sponsor, {
@@ -742,17 +680,11 @@ describe("device enrollment first-decider SQL", () => {
       enrollment_id: approveCard.enrollmentId,
       decision: "approve",
     });
-    const approved = await service.poll(
-      { flow_handle: approveStart.device_code },
-      approveOptions,
-    );
+    const approved = await service.poll({ flow_handle: approveStart.device_code }, approveOptions);
     expect(approved.status).toBe("approved");
-    expect(
-      await service.poll(
-        { flow_handle: approveStart.device_code },
-        approveOptions,
-      ),
-    ).toEqual(approved);
+    expect(await service.poll({ flow_handle: approveStart.device_code }, approveOptions)).toEqual(
+      approved,
+    );
     expect(terminalCount()).toBe(1);
 
     const denyStart = await service.deviceStart(
@@ -765,10 +697,9 @@ describe("device enrollment first-decider SQL", () => {
       { trustedClientAddress: "198.51.100.62" },
     );
     const denyOptions = { idempotencyKey: "d1-stable-poll-deny-1" } as const;
-    expect(
-      (await service.poll({ flow_handle: denyStart.device_code }, denyOptions))
-        .status,
-    ).toBe("authorization_pending");
+    expect((await service.poll({ flow_handle: denyStart.device_code }, denyOptions)).status).toBe(
+      "authorization_pending",
+    );
     expect(terminalCount()).toBe(1);
     const denyCard = await service.deviceLookup(sponsor, {
       user_code: denyStart.user_code,
@@ -777,9 +708,7 @@ describe("device enrollment first-decider SQL", () => {
       enrollment_id: denyCard.enrollmentId,
       decision: "deny",
     });
-    expect(
-      await service.poll({ flow_handle: denyStart.device_code }, denyOptions),
-    ).toEqual({
+    expect(await service.poll({ flow_handle: denyStart.device_code }, denyOptions)).toEqual({
       status: "access_denied",
     });
     expect(terminalCount()).toBe(2);
@@ -797,41 +726,21 @@ describe("device enrollment first-decider SQL", () => {
       idempotencyKey: "d1-stable-poll-expire-1",
     } as const;
     expect(
-      (
-        await service.poll(
-          { flow_handle: expireStart.device_code },
-          expireOptions,
-        )
-      ).status,
+      (await service.poll({ flow_handle: expireStart.device_code }, expireOptions)).status,
     ).toBe("authorization_pending");
     expect(terminalCount()).toBe(2);
     clock.value += DEVICE_CODE_TTL_MS;
-    expect(
-      await service.poll(
-        { flow_handle: expireStart.device_code },
-        expireOptions,
-      ),
-    ).toEqual({
+    expect(await service.poll({ flow_handle: expireStart.device_code }, expireOptions)).toEqual({
       status: "expired_token",
     });
     expect(terminalCount()).toBe(2);
-    expect(
-      await service.poll(
-        { flow_handle: expireStart.device_code },
-        expireOptions,
-      ),
-    ).toEqual({
+    expect(await service.poll({ flow_handle: expireStart.device_code }, expireOptions)).toEqual({
       status: "expired_token",
     });
     expect(terminalCount()).toBe(2);
 
     clock.value += PENDING_PROPOSAL_TTL_MS - DEVICE_CODE_TTL_MS;
-    expect(
-      await service.poll(
-        { flow_handle: expireStart.device_code },
-        expireOptions,
-      ),
-    ).toEqual({
+    expect(await service.poll({ flow_handle: expireStart.device_code }, expireOptions)).toEqual({
       status: "expired_token",
     });
     expect(terminalCount()).toBe(3);
@@ -941,8 +850,7 @@ describe("device enrollment first-decider SQL", () => {
       );
       const encrypted = {
         ciphertext: Buffer.from(ciphertext).toString("base64url"),
-        initializationVector:
-          Buffer.from(initializationVector).toString("base64url"),
+        initializationVector: Buffer.from(initializationVector).toString("base64url"),
       };
       sqlite
         .prepare(
@@ -985,10 +893,7 @@ describe("device enrollment first-decider SQL", () => {
       decision: "deny",
     });
     expect(
-      await service.poll(
-        { flow_handle: pendingStart.device_code },
-        { idempotencyKey: pendingKey },
-      ),
+      await service.poll({ flow_handle: pendingStart.device_code }, { idempotencyKey: pendingKey }),
     ).toEqual({ status: "access_denied" });
 
     const issuedStart = await service.deviceStart(
@@ -1012,10 +917,7 @@ describe("device enrollment first-decider SQL", () => {
     const issuedKey = "legacy-issued-replay-1";
     await insertLegacyReplay(issuedStart.device_code, issuedKey, issued);
     expect(
-      await service.poll(
-        { flow_handle: issuedStart.device_code },
-        { idempotencyKey: issuedKey },
-      ),
+      await service.poll({ flow_handle: issuedStart.device_code }, { idempotencyKey: issuedKey }),
     ).toEqual(issued);
 
     const principalScopes = sqlite
@@ -1024,12 +926,10 @@ describe("device enrollment first-decider SQL", () => {
       )
       .all()
       .map((row) => row.principal_scope);
-    expect(
-      principalScopes.filter((scope) => scope.startsWith("flow:")),
-    ).toHaveLength(2);
-    expect(
-      principalScopes.filter((scope) => scope.startsWith("flow-terminal-v1:")),
-    ).toHaveLength(1);
+    expect(principalScopes.filter((scope) => scope.startsWith("flow:"))).toHaveLength(2);
+    expect(principalScopes.filter((scope) => scope.startsWith("flow-terminal-v1:"))).toHaveLength(
+      1,
+    );
   });
 
   test("a device proposal whose code mapping disappeared fails closed", async () => {
@@ -1056,9 +956,7 @@ describe("device enrollment first-decider SQL", () => {
 
   test("concurrent D1 lookup failures admit exactly five rows and atomically lock the sixth", async () => {
     const sqlite = deviceDatabase();
-    const store = new D1EnrollmentStore(
-      localD1(sqlite, { serializeBatches: true }),
-    );
+    const store = new D1EnrollmentStore(localD1(sqlite, { serializeBatches: true }));
     const input = deviceInput("atomic-lookup");
     await store.deviceCreate(input);
     const sponsorId = "usr_atomic_lookup";
@@ -1099,9 +997,7 @@ describe("device enrollment first-decider SQL", () => {
 
     const reopenedAt = NOW + DEVICE_LOOKUP_LOCKOUT_WINDOW_MS + 1;
     await expect(
-      store.deviceLookup(
-        deviceLookupAttempt(sponsorId, input.userCodeHash, reopenedAt),
-      ),
+      store.deviceLookup(deviceLookupAttempt(sponsorId, input.userCodeHash, reopenedAt)),
     ).resolves.toMatchObject({ name: input.proposal.name });
     expect(
       sqlite
@@ -1120,18 +1016,13 @@ describe("device enrollment first-decider SQL", () => {
 
     for (let attempt = 0; attempt < 100; attempt += 1) {
       await expect(
-        store.deviceLookup(
-          deviceLookupAttempt("usr_success_lookup", input.userCodeHash),
-        ),
+        store.deviceLookup(deviceLookupAttempt("usr_success_lookup", input.userCodeHash)),
       ).resolves.toMatchObject({ proposalId: input.proposal.proposalId });
     }
 
     expect(
-      sqlite
-        .prepare<{ n: number }, []>(
-          "SELECT COUNT(*) AS n FROM device_lookup_attempts",
-        )
-        .get()?.n,
+      sqlite.prepare<{ n: number }, []>("SELECT COUNT(*) AS n FROM device_lookup_attempts").get()
+        ?.n,
     ).toBe(0);
   });
 
@@ -1158,9 +1049,7 @@ describe("device enrollment first-decider SQL", () => {
         )
         .get(bucket)?.n,
     ).toBe(DEVICE_START_RATE_LIMIT_ATTEMPTS);
-    expect(
-      recordExists(sqlite, deviceInput("rate-refused").record.enrollmentId),
-    ).toBe(false);
+    expect(recordExists(sqlite, deviceInput("rate-refused").record.enrollmentId)).toBe(false);
 
     await expect(
       store.deviceCreate({
@@ -1193,11 +1082,7 @@ describe("device enrollment first-decider SQL", () => {
 
     expect(recordExists(sqlite, collision.record.enrollmentId)).toBe(false);
     expect(
-      sqlite
-        .prepare<{ n: number }, []>(
-          "SELECT COUNT(*) AS n FROM device_start_attempts",
-        )
-        .get()?.n,
+      sqlite.prepare<{ n: number }, []>("SELECT COUNT(*) AS n FROM device_start_attempts").get()?.n,
     ).toBe(1);
   });
 
@@ -1219,22 +1104,14 @@ describe("device enrollment first-decider SQL", () => {
     expect(recordExists(sqlite, conflicting.record.enrollmentId)).toBe(false);
     expect(replayRow(sqlite)).toEqual(before);
     expect(
-      sqlite
-        .prepare<{ n: number }, []>(
-          "SELECT COUNT(*) AS n FROM device_start_attempts",
-        )
-        .get()?.n,
+      sqlite.prepare<{ n: number }, []>("SELECT COUNT(*) AS n FROM device_start_attempts").get()?.n,
     ).toBe(1);
   });
 
   test("same-key replay wins over the source limit when another caller fills slot ten", async () => {
     const sqlite = deviceDatabase();
     const store = new D1EnrollmentStore(localD1(sqlite));
-    for (
-      let index = 0;
-      index < DEVICE_START_RATE_LIMIT_ATTEMPTS - 1;
-      index += 1
-    ) {
+    for (let index = 0; index < DEVICE_START_RATE_LIMIT_ATTEMPTS - 1; index += 1) {
       await store.deviceCreate(deviceInput(`replay-edge-fill-${index}`));
     }
     const winner = deviceInput("replay-edge-winner");
@@ -1248,11 +1125,7 @@ describe("device enrollment first-decider SQL", () => {
     expect(recordExists(sqlite, winner.record.enrollmentId)).toBe(true);
     expect(recordExists(sqlite, loser.record.enrollmentId)).toBe(false);
     expect(
-      sqlite
-        .prepare<{ n: number }, []>(
-          "SELECT COUNT(*) AS n FROM device_start_attempts",
-        )
-        .get()?.n,
+      sqlite.prepare<{ n: number }, []>("SELECT COUNT(*) AS n FROM device_start_attempts").get()?.n,
     ).toBe(DEVICE_START_RATE_LIMIT_ATTEMPTS);
   });
 
@@ -1277,11 +1150,7 @@ describe("device enrollment first-decider SQL", () => {
         .get(staleAt)?.n,
     ).toBe(25);
     expect(
-      sqlite
-        .prepare<{ n: number }, []>(
-          "SELECT COUNT(*) AS n FROM device_start_attempts",
-        )
-        .get()?.n,
+      sqlite.prepare<{ n: number }, []>("SELECT COUNT(*) AS n FROM device_start_attempts").get()?.n,
     ).toBe(26);
   });
 
@@ -1346,9 +1215,7 @@ describe("device enrollment first-decider SQL", () => {
         flowHandleHash: input.proposal.flowHandleHash,
         now: cleanupAt,
         createToken: async () => {
-          throw new Error(
-            "reclaimed expired mapping reached the token factory",
-          );
+          throw new Error("reclaimed expired mapping reached the token factory");
         },
       }),
     ).resolves.toEqual({ kind: "expired" });
@@ -1366,17 +1233,11 @@ describe("device enrollment first-decider SQL", () => {
     ).rejects.toBeInstanceOf(EnrollmentPersistenceError);
     expect(recordExists(sqlite, input.record.enrollmentId)).toBe(false);
     expect(
-      sqlite
-        .prepare<{ n: number }, []>(
-          "SELECT COUNT(*) AS n FROM device_start_attempts",
-        )
-        .get()?.n,
+      sqlite.prepare<{ n: number }, []>("SELECT COUNT(*) AS n FROM device_start_attempts").get()?.n,
     ).toBe(0);
     expect(() =>
       sqlite
-        .prepare(
-          "INSERT INTO device_start_attempts (client_bucket, attempted_at) VALUES (?, ?)",
-        )
+        .prepare("INSERT INTO device_start_attempts (client_bucket, attempted_at) VALUES (?, ?)")
         .run("198.51.100.8", NOW),
     ).toThrow();
   });
@@ -1391,9 +1252,7 @@ describe("device enrollment first-decider SQL", () => {
     const input = deviceInput("corrupt-card");
     await store.deviceCreate(input);
     sqlite
-      .prepare(
-        "UPDATE enrollment_records SET requested_scopes_json = '[]' WHERE enrollment_id = ?",
-      )
+      .prepare("UPDATE enrollment_records SET requested_scopes_json = '[]' WHERE enrollment_id = ?")
       .run(input.record.enrollmentId);
 
     await expect(
@@ -1416,11 +1275,7 @@ describe("device enrollment first-decider SQL", () => {
 
     await expect(
       store.deviceLookup(
-        deviceLookupAttempt(
-          "usr_expired_requested_grant",
-          input.userCodeHash,
-          NOW + 1,
-        ),
+        deviceLookupAttempt("usr_expired_requested_grant", input.userCodeHash, NOW + 1),
       ),
     ).rejects.toMatchObject({
       code: "DEVICE_CODE_UNKNOWN",
@@ -1468,11 +1323,7 @@ describe("device enrollment first-decider SQL", () => {
         .get(input.record.enrollmentId),
     ).toEqual({ sponsor_id: "", status: "pending" });
     expect(
-      sqlite
-        .prepare<{ n: number }, []>(
-          "SELECT COUNT(*) AS n FROM enrollment_fellows",
-        )
-        .get()?.n,
+      sqlite.prepare<{ n: number }, []>("SELECT COUNT(*) AS n FROM enrollment_fellows").get()?.n,
     ).toBe(0);
   });
 
@@ -1496,9 +1347,7 @@ describe("device enrollment first-decider SQL", () => {
         proposal: input.proposal,
         now: NOW,
       });
-      expect(
-        await store.pendingApprovalCardsBySponsor("usr_fixture_sponsor", NOW),
-      ).toHaveLength(1);
+      expect(await store.pendingApprovalCardsBySponsor("usr_fixture_sponsor", NOW)).toHaveLength(1);
 
       await expect(
         store.decision({
@@ -1524,17 +1373,10 @@ describe("device enrollment first-decider SQL", () => {
           .get(input.record.enrollmentId),
       ).toEqual({ sponsor_id: "usr_fixture_sponsor", status: "expired" });
       expect(
-        sqlite
-          .prepare<{ n: number }, []>(
-            "SELECT COUNT(*) AS n FROM enrollment_grants",
-          )
-          .get()?.n,
+        sqlite.prepare<{ n: number }, []>("SELECT COUNT(*) AS n FROM enrollment_grants").get()?.n,
       ).toBe(0);
       expect(
-        await store.pendingApprovalCardsBySponsor(
-          "usr_fixture_sponsor",
-          NOW + elapsedMs,
-        ),
+        await store.pendingApprovalCardsBySponsor("usr_fixture_sponsor", NOW + elapsedMs),
       ).toEqual([]);
       await expect(
         store.decision({
@@ -1597,18 +1439,10 @@ describe("device enrollment first-decider SQL", () => {
       expect(invalidatedPreRead).toBe(true);
       expect(state).toEqual({ sponsor_id: "", status: "expired" });
       expect(
-        sqlite
-          .prepare<{ n: number }, []>(
-            "SELECT COUNT(*) AS n FROM enrollment_fellows",
-          )
-          .get()?.n,
+        sqlite.prepare<{ n: number }, []>("SELECT COUNT(*) AS n FROM enrollment_fellows").get()?.n,
       ).toBe(0);
       expect(
-        sqlite
-          .prepare<{ n: number }, []>(
-            "SELECT COUNT(*) AS n FROM enrollment_grants",
-          )
-          .get()?.n,
+        sqlite.prepare<{ n: number }, []>("SELECT COUNT(*) AS n FROM enrollment_grants").get()?.n,
       ).toBe(0);
     },
   );
@@ -1652,12 +1486,8 @@ describe("device enrollment first-decider SQL", () => {
         ),
       );
 
-      const winner = outcomes.findIndex(
-        (outcome) => outcome.status === "fulfilled",
-      );
-      const loser = outcomes.findIndex(
-        (outcome) => outcome.status === "rejected",
-      );
+      const winner = outcomes.findIndex((outcome) => outcome.status === "fulfilled");
+      const loser = outcomes.findIndex((outcome) => outcome.status === "rejected");
       expect(winner).toBeGreaterThanOrEqual(0);
       expect(loser).toBeGreaterThanOrEqual(0);
       expect((outcomes[loser] as PromiseRejectedResult).reason).toMatchObject({
@@ -1672,25 +1502,14 @@ describe("device enrollment first-decider SQL", () => {
       expect(recordRow?.sponsor_id).toBe(sponsors[winner]);
       const expectedBindings = decisions[winner] === "deny" ? 0 : 1;
       expect(
-        sqlite
-          .prepare<{ n: number }, []>(
-            "SELECT COUNT(*) AS n FROM enrollment_fellows",
-          )
-          .get()?.n,
+        sqlite.prepare<{ n: number }, []>("SELECT COUNT(*) AS n FROM enrollment_fellows").get()?.n,
       ).toBe(expectedBindings);
       expect(
-        sqlite
-          .prepare<{ n: number }, []>(
-            "SELECT COUNT(*) AS n FROM enrollment_grants",
-          )
-          .get()?.n,
+        sqlite.prepare<{ n: number }, []>("SELECT COUNT(*) AS n FROM enrollment_grants").get()?.n,
       ).toBe(expectedBindings);
       expect(
-        sqlite
-          .prepare<{ n: number }, []>(
-            "SELECT COUNT(*) AS n FROM enrollment_idempotency",
-          )
-          .get()?.n,
+        sqlite.prepare<{ n: number }, []>("SELECT COUNT(*) AS n FROM enrollment_idempotency").get()
+          ?.n,
       ).toBe(0);
     },
   );
@@ -1751,13 +1570,9 @@ describe("the active-key abort rolls back the product effect with the replay row
     const store = new D1EnrollmentStore(localD1(sqlite));
 
     // First caller completes: effect and encrypted replay row in one batch.
-    expect(
-      await store.create(
-        record("ASIMP-EN-FIRST"),
-        undefined,
-        write(DIGEST_A, "first"),
-      ),
-    ).toBe(true);
+    expect(await store.create(record("ASIMP-EN-FIRST"), undefined, write(DIGEST_A, "first"))).toBe(
+      true,
+    );
     expect(recordExists(sqlite, "ASIMP-EN-FIRST")).toBe(true);
     const before = replayRow(sqlite);
     expect(before?.request_digest).toBe(DIGEST_A);
@@ -1768,11 +1583,7 @@ describe("the active-key abort rolls back the product effect with the replay row
     // passed the service's pre-check because the row did not exist yet.
     let refused = false;
     try {
-      await store.create(
-        record("ASIMP-EN-SECOND"),
-        undefined,
-        write(DIGEST_B, "second"),
-      );
+      await store.create(record("ASIMP-EN-SECOND"), undefined, write(DIGEST_B, "second"));
     } catch {
       refused = true;
     }
@@ -1784,18 +1595,11 @@ describe("the active-key abort rolls back the product effect with the replay row
     expect(replayRow(sqlite)).toEqual(before);
     // Exactly one replay row, and exactly one enrollment record.
     expect(
-      sqlite
-        .prepare<{ n: number }, []>(
-          "SELECT COUNT(*) AS n FROM enrollment_idempotency",
-        )
-        .get()?.n,
+      sqlite.prepare<{ n: number }, []>("SELECT COUNT(*) AS n FROM enrollment_idempotency").get()
+        ?.n,
     ).toBe(1);
     expect(
-      sqlite
-        .prepare<{ n: number }, []>(
-          "SELECT COUNT(*) AS n FROM enrollment_records",
-        )
-        .get()?.n,
+      sqlite.prepare<{ n: number }, []>("SELECT COUNT(*) AS n FROM enrollment_records").get()?.n,
     ).toBe(1);
   });
 
@@ -1807,19 +1611,11 @@ describe("the active-key abort rolls back the product effect with the replay row
     const sqlite = database({ nullableDigest: true });
     const store = new D1EnrollmentStore(localD1(sqlite));
 
+    expect(await store.create(record("ASIMP-EN-FIRST"), undefined, write(DIGEST_A, "first"))).toBe(
+      true,
+    );
     expect(
-      await store.create(
-        record("ASIMP-EN-FIRST"),
-        undefined,
-        write(DIGEST_A, "first"),
-      ),
-    ).toBe(true);
-    expect(
-      await store.create(
-        record("ASIMP-EN-SECOND"),
-        undefined,
-        write(DIGEST_B, "second"),
-      ),
+      await store.create(record("ASIMP-EN-SECOND"), undefined, write(DIGEST_B, "second")),
     ).toBe(true);
 
     const after = replayRow(sqlite);
@@ -1834,21 +1630,13 @@ describe("the active-key abort rolls back the product effect with the replay row
     const stale = NOW - 48 * 60 * 60 * 1_000;
 
     expect(
-      await store.create(
-        record("ASIMP-EN-STALE"),
-        undefined,
-        write(DIGEST_A, "stale", stale),
-      ),
+      await store.create(record("ASIMP-EN-STALE"), undefined, write(DIGEST_A, "stale", stale)),
     ).toBe(true);
     expect(replayRow(sqlite)?.expires_at).toBeLessThan(NOW);
 
-    expect(
-      await store.create(
-        record("ASIMP-EN-FRESH"),
-        undefined,
-        write(DIGEST_B, "fresh"),
-      ),
-    ).toBe(true);
+    expect(await store.create(record("ASIMP-EN-FRESH"), undefined, write(DIGEST_B, "fresh"))).toBe(
+      true,
+    );
     const reclaimed = replayRow(sqlite);
     expect(reclaimed?.request_digest).toBe(DIGEST_B);
     expect(reclaimed?.response_ciphertext).toBe("ciphertext-fresh");
@@ -1865,11 +1653,7 @@ describe("the active-key abort rolls back the product effect with the replay row
     // and the replay row must be skipped with it.
     let refused = false;
     try {
-      await store.create(
-        record("ASIMP-EN-NOOP"),
-        "ASIMP-EN-ABSENT",
-        write(DIGEST_A, "noop"),
-      );
+      await store.create(record("ASIMP-EN-NOOP"), "ASIMP-EN-ABSENT", write(DIGEST_A, "noop"));
     } catch {
       refused = true;
     }
@@ -1878,26 +1662,18 @@ describe("the active-key abort rolls back the product effect with the replay row
     expect(replayRow(sqlite)).toBeNull();
 
     // The key is still free: a later completed operation claims it normally.
-    expect(
-      await store.create(
-        record("ASIMP-EN-AFTER"),
-        undefined,
-        write(DIGEST_A, "after"),
-      ),
-    ).toBe(true);
+    expect(await store.create(record("ASIMP-EN-AFTER"), undefined, write(DIGEST_A, "after"))).toBe(
+      true,
+    );
     expect(replayRow(sqlite)?.response_ciphertext).toBe("ciphertext-after");
   });
 
   test("a digest mismatch on a live key is a conflict, and the reader never sees a NULL digest", async () => {
     const sqlite = database();
     const store = new D1EnrollmentStore(localD1(sqlite));
-    expect(
-      await store.create(
-        record("ASIMP-EN-FIRST"),
-        undefined,
-        write(DIGEST_A, "first"),
-      ),
-    ).toBe(true);
+    expect(await store.create(record("ASIMP-EN-FIRST"), undefined, write(DIGEST_A, "first"))).toBe(
+      true,
+    );
 
     // Same key, different request: the sequential path refuses before any effect.
     let code: string | undefined;
@@ -1992,14 +1768,7 @@ function seedLifecycleIdentity(
       `INSERT INTO enrollment_fellows (fellow_id, sponsor_id, name, model, harness, created_at)
        VALUES (?, ?, ?, ?, ?, ?)`,
     )
-    .run(
-      LIFECYCLE_FELLOW,
-      LIFECYCLE_SPONSOR,
-      "lifecycle-fellow",
-      "test-model",
-      "codex",
-      NOW,
-    );
+    .run(LIFECYCLE_FELLOW, LIFECYCLE_SPONSOR, "lifecycle-fellow", "test-model", "codex", NOW);
   sqlite
     .prepare(
       `INSERT INTO enrollment_grants (
@@ -2085,9 +1854,7 @@ function expectCredentialHardeningGuardRollback(
   ensureDeviceSchema(sqlite);
   const guardInsert = "INSERT INTO fellow_credential_migration_guard (valid)";
   const guardInsertStart = migration.indexOf(guardInsert);
-  const guardDropStart = migration.indexOf(
-    "DROP TABLE fellow_credential_migration_guard",
-  );
+  const guardDropStart = migration.indexOf("DROP TABLE fellow_credential_migration_guard");
   expect(guardInsertStart).toBeGreaterThan(0);
   expect(guardDropStart).toBeGreaterThan(guardInsertStart);
   let guardFailed = false;
@@ -2179,13 +1946,11 @@ describe("Fellow credential lifecycle constraints and authentication", () => {
       proposal_id: LIFECYCLE_PROPOSAL,
     });
     expect(() =>
-      sqlite
-        .prepare("UPDATE enrollment_credentials SET issued_at = issued_at + 1")
-        .run(),
+      sqlite.prepare("UPDATE enrollment_credentials SET issued_at = issued_at + 1").run(),
     ).toThrow("legacy enrollment credential table is frozen");
-    expect(() =>
-      sqlite.prepare("DELETE FROM enrollment_credentials").run(),
-    ).toThrow("legacy enrollment credential table is frozen");
+    expect(() => sqlite.prepare("DELETE FROM enrollment_credentials").run()).toThrow(
+      "legacy enrollment credential table is frozen",
+    );
     expect(() =>
       sqlite
         .prepare(
@@ -2226,9 +1991,7 @@ describe("Fellow credential lifecycle constraints and authentication", () => {
       }),
     ).toThrow("active credential cap reached");
     expect(
-      sqlite
-        .prepare<{ n: number }, []>("SELECT COUNT(*) AS n FROM fellow_tokens")
-        .get()?.n,
+      sqlite.prepare<{ n: number }, []>("SELECT COUNT(*) AS n FROM fellow_tokens").get()?.n,
     ).toBe(3);
   });
 
@@ -2270,24 +2033,17 @@ describe("Fellow credential lifecycle constraints and authentication", () => {
       .join("\n");
     expect(monotonicPlan).toContain("enrollment_credentials_fellow_issued_idx");
     const recording = recordingD1(sqlite);
-    await new D1EnrollmentStore(recording.db).fellowsBySponsor(
-      LIFECYCLE_SPONSOR,
-      NOW,
-    );
+    await new D1EnrollmentStore(recording.db).fellowsBySponsor(LIFECYCLE_SPONSOR, NOW);
     const [inventoryQuery] = recording.issued;
     expect(inventoryQuery).toBeDefined();
     const sponsorPlan = sqlite
-      .prepare<{ detail: string }, LocalBinding[]>(
-        `EXPLAIN QUERY PLAN ${inventoryQuery as string}`,
-      )
+      .prepare<{ detail: string }, LocalBinding[]>(`EXPLAIN QUERY PLAN ${inventoryQuery as string}`)
       .all(LIFECYCLE_SPONSOR, NOW, NOW, NOW)
       .map((row) => row.detail)
       .join("\n");
     expect(sponsorPlan).toContain("MATERIALIZE sponsor_fellow_page");
     expect(sponsorPlan).toContain("enrollment_grants_sponsor_page_idx");
-    expect(sponsorPlan).toContain(
-      "enrollment_credentials_sponsor_fellow_lifecycle_idx",
-    );
+    expect(sponsorPlan).toContain("enrollment_credentials_sponsor_fellow_lifecycle_idx");
     expect(sponsorPlan).not.toContain("SCAN grant_row");
   });
 
@@ -2315,9 +2071,7 @@ describe("Fellow credential lifecycle constraints and authentication", () => {
       }),
     ).toEqual({ kind: "expired" });
     const grantBefore = sqlite
-      .prepare<Record<string, string | number>, []>(
-        "SELECT * FROM enrollment_grants",
-      )
+      .prepare<Record<string, string | number>, []>("SELECT * FROM enrollment_grants")
       .get();
 
     sqlite.run("BEGIN");
@@ -2325,16 +2079,10 @@ describe("Fellow credential lifecycle constraints and authentication", () => {
     sqlite.run("COMMIT");
 
     expect(
-      sqlite
-        .prepare<Record<string, string | number>, []>(
-          "SELECT * FROM enrollment_grants",
-        )
-        .get(),
+      sqlite.prepare<Record<string, string | number>, []>("SELECT * FROM enrollment_grants").get(),
     ).toEqual(grantBefore);
     expect(
-      sqlite
-        .prepare<{ n: number }, []>("SELECT COUNT(*) AS n FROM fellow_tokens")
-        .get()?.n,
+      sqlite.prepare<{ n: number }, []>("SELECT COUNT(*) AS n FROM fellow_tokens").get()?.n,
     ).toBe(0);
   });
 
@@ -2401,11 +2149,7 @@ describe("Fellow credential lifecycle constraints and authentication", () => {
                   token_hash = NULL, token_issued_at = NULL
             WHERE proposal_id = ?`,
         )
-        .run(
-          fixedNow - 2_000,
-          fixedNow - 2_000 + PENDING_PROPOSAL_TTL_MS,
-          LIFECYCLE_PROPOSAL,
-        );
+        .run(fixedNow - 2_000, fixedNow - 2_000 + PENDING_PROPOSAL_TTL_MS, LIFECYCLE_PROPOSAL);
       sqlite.exec(readFileSync(LIFECYCLE_MIGRATION, "utf8"));
       ensureDeviceSchema(sqlite);
       return sqlite;
@@ -2549,9 +2293,7 @@ describe("Fellow credential lifecycle constraints and authentication", () => {
     ).toThrow("proposal evidence schema invalid");
     expect(() =>
       sqlite
-        .prepare(
-          "UPDATE enrollment_proposals SET last_poll_at = ? WHERE proposal_id = ?",
-        )
+        .prepare("UPDATE enrollment_proposals SET last_poll_at = ? WHERE proposal_id = ?")
         .run(NOW + 0.5, "proposal-trigger-valid"),
     ).toThrow("proposal evidence schema invalid");
     expect(() =>
@@ -2590,9 +2332,7 @@ describe("Fellow credential lifecycle constraints and authentication", () => {
   });
 
   test("0011 refuses sponsor-card identity drift in retained and future proposals", () => {
-    const retainedEnrollmentId = fixtureEnrollmentId(
-      "proposal-identity-retained",
-    );
+    const retainedEnrollmentId = fixtureEnrollmentId("proposal-identity-retained");
     const retained = new Database(":memory:", { strict: true });
     retained.run(readFileSync(MIGRATION, "utf8"));
     retained.exec(readFileSync(LIFECYCLE_MIGRATION, "utf8"));
@@ -2682,9 +2422,7 @@ describe("Fellow credential lifecycle constraints and authentication", () => {
     );
     expect(() =>
       future
-        .prepare(
-          "UPDATE enrollment_proposals SET model = ? WHERE proposal_id = ?",
-        )
+        .prepare("UPDATE enrollment_proposals SET model = ? WHERE proposal_id = ?")
         .run("changed-model", "proposal-identity-future-valid"),
     ).toThrow("proposal identity is immutable");
   });
@@ -2767,11 +2505,7 @@ describe("Fellow credential lifecycle constraints and authentication", () => {
           ),
       ).toThrow("enrollment record authority schema invalid");
       expect(
-        future
-          .prepare<{ n: number }, []>(
-            "SELECT COUNT(*) AS n FROM enrollment_records",
-          )
-          .get()?.n,
+        future.prepare<{ n: number }, []>("SELECT COUNT(*) AS n FROM enrollment_records").get()?.n,
       ).toBe(0);
     }
 
@@ -2861,11 +2595,7 @@ describe("Fellow credential lifecycle constraints and authentication", () => {
       const future = database();
       expect(() => insert(future)).toThrow(fixture.message);
       expect(
-        future
-          .prepare<{ n: number }, []>(
-            "SELECT COUNT(*) AS n FROM enrollment_records",
-          )
-          .get()?.n,
+        future.prepare<{ n: number }, []>("SELECT COUNT(*) AS n FROM enrollment_records").get()?.n,
       ).toBe(0);
     }
   });
@@ -2893,11 +2623,7 @@ describe("Fellow credential lifecycle constraints and authentication", () => {
     ensureDeviceSchema(retained);
     const store = new D1EnrollmentStore(localD1(retained));
     await expect(
-      store.verifyClaimCredentials(
-        "ASIMP-EN-ABCDEFGHJK",
-        secretHash,
-        Number.MAX_SAFE_INTEGER,
-      ),
+      store.verifyClaimCredentials("ASIMP-EN-ABCDEFGHJK", secretHash, Number.MAX_SAFE_INTEGER),
     ).rejects.toBeInstanceOf(EnrollmentPersistenceError);
     await expect(
       store.claim({
@@ -2926,11 +2652,8 @@ describe("Fellow credential lifecycle constraints and authentication", () => {
         .get()?.secret_consumed_at,
     ).toBeNull();
     expect(
-      retained
-        .prepare<{ n: number }, []>(
-          "SELECT COUNT(*) AS n FROM enrollment_proposals",
-        )
-        .get()?.n,
+      retained.prepare<{ n: number }, []>("SELECT COUNT(*) AS n FROM enrollment_proposals").get()
+        ?.n,
     ).toBe(0);
     expectCredentialHardeningGuardRollback(retained);
 
@@ -2974,31 +2697,23 @@ describe("Fellow credential lifecycle constraints and authentication", () => {
     for (const assignment of authorityMutations) {
       expect(() =>
         sqlite
-          .prepare(
-            `UPDATE enrollment_records SET ${assignment} WHERE enrollment_id = ?`,
-          )
+          .prepare(`UPDATE enrollment_records SET ${assignment} WHERE enrollment_id = ?`)
           .run(first.enrollmentId),
       ).toThrow("enrollment record authority is immutable");
     }
     expect(() =>
       sqlite
-        .prepare(
-          "UPDATE enrollment_records SET sponsor_id = ? WHERE enrollment_id = ?",
-        )
+        .prepare("UPDATE enrollment_records SET sponsor_id = ? WHERE enrollment_id = ?")
         .run("usr_other_sponsor", first.enrollmentId),
     ).toThrow("enrollment record state transition invalid");
     expect(
       sqlite
-        .prepare(
-          "UPDATE enrollment_records SET invalidated = 1 WHERE enrollment_id = ?",
-        )
+        .prepare("UPDATE enrollment_records SET invalidated = 1 WHERE enrollment_id = ?")
         .run(first.enrollmentId).changes,
     ).toBe(1);
     expect(() =>
       sqlite
-        .prepare(
-          "UPDATE enrollment_records SET invalidated = 0 WHERE enrollment_id = ?",
-        )
+        .prepare("UPDATE enrollment_records SET invalidated = 0 WHERE enrollment_id = ?")
         .run(first.enrollmentId),
     ).toThrow("enrollment record state transition invalid");
 
@@ -3006,17 +2721,13 @@ describe("Fellow credential lifecycle constraints and authentication", () => {
     expect(await store.create(second)).toBe(true);
     expect(
       sqlite
-        .prepare(
-          "UPDATE enrollment_records SET secret_consumed_at = ? WHERE enrollment_id = ?",
-        )
+        .prepare("UPDATE enrollment_records SET secret_consumed_at = ? WHERE enrollment_id = ?")
         .run(NOW + 1, second.enrollmentId).changes,
     ).toBe(1);
     for (const next of [null, NOW + 2] as const) {
       expect(() =>
         sqlite
-          .prepare(
-            "UPDATE enrollment_records SET secret_consumed_at = ? WHERE enrollment_id = ?",
-          )
+          .prepare("UPDATE enrollment_records SET secret_consumed_at = ? WHERE enrollment_id = ?")
           .run(next, second.enrollmentId),
       ).toThrow("enrollment record state transition invalid");
     }
@@ -3025,16 +2736,12 @@ describe("Fellow credential lifecycle constraints and authentication", () => {
     await store.deviceCreate(device);
     expect(
       sqlite
-        .prepare(
-          "UPDATE enrollment_records SET sponsor_id = ? WHERE enrollment_id = ?",
-        )
+        .prepare("UPDATE enrollment_records SET sponsor_id = ? WHERE enrollment_id = ?")
         .run("usr_device_bound", device.record.enrollmentId).changes,
     ).toBe(1);
     expect(() =>
       sqlite
-        .prepare(
-          "UPDATE enrollment_records SET sponsor_id = ? WHERE enrollment_id = ?",
-        )
+        .prepare("UPDATE enrollment_records SET sponsor_id = ? WHERE enrollment_id = ?")
         .run("usr_device_other", device.record.enrollmentId),
     ).toThrow("enrollment record state transition invalid");
   });
@@ -3166,11 +2873,7 @@ describe("Fellow credential lifecycle constraints and authentication", () => {
         ),
       ).toThrow("enrollment grant authority schema invalid");
       expect(
-        sqlite
-          .prepare<{ n: number }, []>(
-            "SELECT COUNT(*) AS n FROM enrollment_grants",
-          )
-          .get()?.n,
+        sqlite.prepare<{ n: number }, []>("SELECT COUNT(*) AS n FROM enrollment_grants").get()?.n,
       ).toBe(0);
     }
   });
@@ -3291,14 +2994,10 @@ describe("Fellow credential lifecycle constraints and authentication", () => {
       retained.run(readFileSync(MIGRATION, "utf8"));
       seedLifecycleIdentity(retained);
       retained
-        .prepare(
-          `UPDATE enrollment_fellows SET ${fixture.field} = ? WHERE fellow_id = ?`,
-        )
+        .prepare(`UPDATE enrollment_fellows SET ${fixture.field} = ? WHERE fellow_id = ?`)
         .run(fixture.value, LIFECYCLE_FELLOW);
       retained
-        .prepare(
-          `UPDATE enrollment_proposals SET ${fixture.field} = ? WHERE proposal_id = ?`,
-        )
+        .prepare(`UPDATE enrollment_proposals SET ${fixture.field} = ? WHERE proposal_id = ?`)
         .run(fixture.value, LIFECYCLE_PROPOSAL);
       retained
         .prepare(
@@ -3337,14 +3036,7 @@ describe("Fellow credential lifecycle constraints and authentication", () => {
              fellow_id, sponsor_id, name, model, harness, created_at
            ) VALUES (?, ?, ?, ?, ?, ?)`,
         )
-        .run(
-          "invalid-fellow-name",
-          LIFECYCLE_SPONSOR,
-          "Invalid",
-          "model",
-          "harness",
-          NOW,
-        ),
+        .run("invalid-fellow-name", LIFECYCLE_SPONSOR, "Invalid", "model", "harness", NOW),
     ).toThrow("Fellow identity schema invalid");
 
     const retainedNullId = new Database(":memory:", { strict: true });
@@ -3425,9 +3117,7 @@ describe("Fellow credential lifecycle constraints and authentication", () => {
     retainedBlob.run(readFileSync(MIGRATION, "utf8"));
     seedLifecycleIdentity(retainedBlob);
     retainedBlob
-      .prepare(
-        "UPDATE enrollment_fellows SET model = CAST(? AS BLOB) WHERE fellow_id = ?",
-      )
+      .prepare("UPDATE enrollment_fellows SET model = CAST(? AS BLOB) WHERE fellow_id = ?")
       .run("test-model", LIFECYCLE_FELLOW);
     retainedBlob
       .prepare(
@@ -3692,9 +3382,7 @@ describe("Fellow credential lifecycle constraints and authentication", () => {
     const sqlite = new Database(":memory:", { strict: true });
     sqlite.run(readFileSync(MIGRATION, "utf8"));
     seedLifecycleIdentity(sqlite);
-    sqlite
-      .prepare("DELETE FROM enrollment_grants WHERE proposal_id = ?")
-      .run(LIFECYCLE_PROPOSAL);
+    sqlite.prepare("DELETE FROM enrollment_grants WHERE proposal_id = ?").run(LIFECYCLE_PROPOSAL);
     sqlite
       .prepare(
         `UPDATE enrollment_proposals
@@ -3732,9 +3420,7 @@ describe("Fellow credential lifecycle constraints and authentication", () => {
 
     expectCredentialHardeningGuardRollback(sqlite);
     expect(
-      sqlite
-        .prepare<{ n: number }, []>("SELECT COUNT(*) AS n FROM fellow_tokens")
-        .get()?.n,
+      sqlite.prepare<{ n: number }, []>("SELECT COUNT(*) AS n FROM fellow_tokens").get()?.n,
     ).toBe(1);
   });
 
@@ -3888,11 +3574,7 @@ describe("Fellow credential lifecycle constraints and authentication", () => {
           : "enrollment grant approval binding mismatch",
       );
       expect(
-        future
-          .prepare<{ n: number }, []>(
-            "SELECT COUNT(*) AS n FROM enrollment_grants",
-          )
-          .get()?.n,
+        future.prepare<{ n: number }, []>("SELECT COUNT(*) AS n FROM enrollment_grants").get()?.n,
         fixture.label,
       ).toBe(0);
 
@@ -3924,9 +3606,7 @@ describe("Fellow credential lifecycle constraints and authentication", () => {
       } catch (error) {
         pollFailure = error;
       }
-      expect(pollFailure, fixture.label).toBeInstanceOf(
-        EnrollmentPersistenceError,
-      );
+      expect(pollFailure, fixture.label).toBeInstanceOf(EnrollmentPersistenceError);
       expect(tokenFactoryCalls, fixture.label).toBe(0);
       expect(
         pollDatabase
@@ -3962,18 +3642,12 @@ describe("Fellow credential lifecycle constraints and authentication", () => {
       let authFailure: unknown;
       let authBinding: unknown;
       try {
-        authBinding = await authStore.authenticateCredential(
-          "token-hash-1",
-          NOW + 1,
-          "bearer",
-        );
+        authBinding = await authStore.authenticateCredential("token-hash-1", NOW + 1, "bearer");
       } catch (error) {
         authFailure = error;
       }
       if ("authError" in fixture) {
-        expect(authFailure, fixture.label).toBeInstanceOf(
-          EnrollmentPersistenceError,
-        );
+        expect(authFailure, fixture.label).toBeInstanceOf(EnrollmentPersistenceError);
       } else {
         expect(authFailure, fixture.label).toBeUndefined();
         expect(authBinding, fixture.label).toBeUndefined();
@@ -4048,15 +3722,13 @@ describe("Fellow credential lifecycle constraints and authentication", () => {
       expect(() =>
         retained.exec(readFileSync(CREDENTIAL_HARDENING_MIGRATION, "utf8")),
       ).not.toThrow();
-      const retainedBinding = await new D1EnrollmentStore(
-        localD1(retained),
-      ).authenticateCredential("token-hash-1", NOW + 1, "bearer");
-      expect(retainedBinding?.grantedScopes).toEqual(
-        JSON.parse(fixture.grantedScopes),
+      const retainedBinding = await new D1EnrollmentStore(localD1(retained)).authenticateCredential(
+        "token-hash-1",
+        NOW + 1,
+        "bearer",
       );
-      expect(retainedBinding?.grantedResources).toEqual(
-        JSON.parse(fixture.grantedResources),
-      );
+      expect(retainedBinding?.grantedScopes).toEqual(JSON.parse(fixture.grantedScopes));
+      expect(retainedBinding?.grantedResources).toEqual(JSON.parse(fixture.grantedResources));
 
       const sqlite = database();
       seedLifecycleIdentity(
@@ -4088,15 +3760,9 @@ describe("Fellow credential lifecycle constraints and authentication", () => {
       });
       expect(result).toMatchObject({ kind: "issued" });
       expect(tokenFactoryCalls).toBe(1);
-      const binding = await store.authenticateCredential(
-        tokenHash,
-        NOW + 2,
-        "bearer",
-      );
+      const binding = await store.authenticateCredential(tokenHash, NOW + 2, "bearer");
       expect(binding?.grantedScopes).toEqual(JSON.parse(fixture.grantedScopes));
-      expect(binding?.grantedResources).toEqual(
-        JSON.parse(fixture.grantedResources),
-      );
+      expect(binding?.grantedResources).toEqual(JSON.parse(fixture.grantedResources));
     }
   });
 
@@ -4104,11 +3770,7 @@ describe("Fellow credential lifecycle constraints and authentication", () => {
     const sqlite = new Database(":memory:", { strict: true });
     sqlite.run(readFileSync(MIGRATION, "utf8"));
     seedLifecycleIdentity(sqlite);
-    sqlite
-      .prepare(
-        "UPDATE enrollment_grants SET granted_scopes_json = '[\"promote\"]'",
-      )
-      .run();
+    sqlite.prepare("UPDATE enrollment_grants SET granted_scopes_json = '[\"promote\"]'").run();
     sqlite
       .prepare(
         `INSERT INTO enrollment_credentials (
@@ -4178,21 +3840,14 @@ describe("Fellow credential lifecycle constraints and authentication", () => {
         .get(LIFECYCLE_PROPOSAL)?.token_hash,
     ).toBeNull();
     expect(
-      sqlite
-        .prepare<{ count: number }, []>(
-          "SELECT COUNT(*) AS count FROM fellow_tokens",
-        )
-        .get()?.count,
+      sqlite.prepare<{ count: number }, []>("SELECT COUNT(*) AS count FROM fellow_tokens").get()
+        ?.count,
     ).toBe(0);
   });
 
   test.each([
     ["before proposal creation", NOW - 1, NOW + 1],
-    [
-      "at proposal expiry",
-      NOW + PENDING_PROPOSAL_TTL_MS,
-      NOW + PENDING_PROPOSAL_TTL_MS - 1,
-    ],
+    ["at proposal expiry", NOW + PENDING_PROPOSAL_TTL_MS, NOW + PENDING_PROPOSAL_TTL_MS - 1],
     ["in the future", NOW + 100, NOW + 1],
   ] as const)(
     "pre-0011 polling refuses durable grant evidence %s without burning the flow",
@@ -4238,11 +3893,8 @@ describe("Fellow credential lifecycle constraints and authentication", () => {
           .get(LIFECYCLE_PROPOSAL)?.token_hash,
       ).toBeNull();
       expect(
-        sqlite
-          .prepare<{ count: number }, []>(
-            "SELECT COUNT(*) AS count FROM fellow_tokens",
-          )
-          .get()?.count,
+        sqlite.prepare<{ count: number }, []>("SELECT COUNT(*) AS count FROM fellow_tokens").get()
+          ?.count,
       ).toBe(0);
     },
   );
@@ -4299,11 +3951,8 @@ describe("Fellow credential lifecycle constraints and authentication", () => {
         .get(LIFECYCLE_PROPOSAL)?.token_hash,
     ).toBeNull();
     expect(
-      sqlite
-        .prepare<{ count: number }, []>(
-          "SELECT COUNT(*) AS count FROM fellow_tokens",
-        )
-        .get()?.count,
+      sqlite.prepare<{ count: number }, []>("SELECT COUNT(*) AS count FROM fellow_tokens").get()
+        ?.count,
     ).toBe(0);
   });
 
@@ -4397,21 +4046,16 @@ describe("Fellow credential lifecycle constraints and authentication", () => {
     const store = new D1EnrollmentStore(
       localD1(sqlite, {
         afterFirstRead: async (query) => {
-          if (mutated || !query.includes("FROM fellow_tokens WHERE token_hash"))
-            return;
+          if (mutated || !query.includes("FROM fellow_tokens WHERE token_hash")) return;
           mutated = true;
           sqlite
-            .prepare(
-              "UPDATE enrollment_records SET created_at = ? WHERE enrollment_id = ?",
-            )
+            .prepare("UPDATE enrollment_records SET created_at = ? WHERE enrollment_id = ?")
             .run(NOW + 1, LIFECYCLE_ENROLLMENT);
         },
       }),
     );
 
-    expect(
-      await store.authenticateCredential("token-hash-1", NOW + 2, "bearer"),
-    ).toBeUndefined();
+    expect(await store.authenticateCredential("token-hash-1", NOW + 2, "bearer")).toBeUndefined();
     expect(mutated).toBe(true);
     expect(
       sqlite
@@ -4475,9 +4119,7 @@ describe("Fellow credential lifecycle constraints and authentication", () => {
       issuedAt: NOW + 100,
     });
     expect(
-      sqlite
-        .prepare<{ n: number }, []>("SELECT COUNT(*) AS n FROM fellow_tokens")
-        .get()?.n,
+      sqlite.prepare<{ n: number }, []>("SELECT COUNT(*) AS n FROM fellow_tokens").get()?.n,
     ).toBe(4);
 
     expectCredentialHardeningGuardRollback(sqlite);
@@ -4510,9 +4152,7 @@ describe("Fellow credential lifecycle constraints and authentication", () => {
       }),
     ).toThrow("credential issuance cannot move backward");
     expect(
-      sqlite
-        .prepare<{ n: number }, []>("SELECT COUNT(*) AS n FROM fellow_tokens")
-        .get()?.n,
+      sqlite.prepare<{ n: number }, []>("SELECT COUNT(*) AS n FROM fellow_tokens").get()?.n,
     ).toBe(3);
   });
 
@@ -4541,11 +4181,7 @@ describe("Fellow credential lifecycle constraints and authentication", () => {
     const store = new D1EnrollmentStore(localD1(sqlite));
 
     expect(
-      await store.authenticateCredential(
-        "token-hash-legacy-escalated",
-        NOW + 1,
-        "bearer",
-      ),
+      await store.authenticateCredential("token-hash-legacy-escalated", NOW + 1, "bearer"),
     ).toBeUndefined();
     expect(
       sqlite
@@ -4568,13 +4204,9 @@ describe("Fellow credential lifecycle constraints and authentication", () => {
       proposalId: LIFECYCLE_PROPOSAL,
     });
     const beforeGrantStore = new D1EnrollmentStore(localD1(beforeGrant));
-    expect(
-      await beforeGrantStore.authenticateCredential(
-        "token-hash-1",
-        NOW + 1,
-        "bearer",
-      ),
-    ).toBe(undefined);
+    expect(await beforeGrantStore.authenticateCredential("token-hash-1", NOW + 1, "bearer")).toBe(
+      undefined,
+    );
     expect(
       beforeGrant
         .prepare<{ last_used_at: number | null }, [string]>(
@@ -4614,21 +4246,14 @@ describe("Fellow credential lifecycle constraints and authentication", () => {
     const fractionalStore = new D1EnrollmentStore(localD1(fractional));
     let caught: unknown;
     try {
-      await fractionalStore.authenticateCredential(
-        "token-hash-fractional",
-        NOW + 1,
-        "bearer",
-      );
+      await fractionalStore.authenticateCredential("token-hash-fractional", NOW + 1, "bearer");
     } catch (error) {
       caught = error;
     }
     expect(caught).toBeInstanceOf(EnrollmentPersistenceError);
     expect(
       fractional
-        .prepare<
-          { last_used_at: number | null; storage_class: string },
-          [string]
-        >(
+        .prepare<{ last_used_at: number | null; storage_class: string }, [string]>(
           `SELECT last_used_at, typeof(issued_at) AS storage_class
              FROM fellow_tokens WHERE credential_id = ?`,
         )
@@ -4686,10 +4311,7 @@ describe("Fellow credential lifecycle constraints and authentication", () => {
       expect(caught, fixture.label).toBeInstanceOf(EnrollmentPersistenceError);
       expect(
         sqlite
-          .prepare<
-            { last_used_at: number | null; storage_class: string },
-            [string]
-          >(
+          .prepare<{ last_used_at: number | null; storage_class: string }, [string]>(
             `SELECT last_used_at, typeof(credential_id) AS storage_class
                FROM fellow_tokens WHERE token_hash = ?`,
           )
@@ -4780,48 +4402,34 @@ describe("Fellow credential lifecycle constraints and authentication", () => {
     ] as const) {
       expect(() =>
         sqlite
-          .prepare(
-            `UPDATE enrollment_fellows SET ${column} = ? WHERE fellow_id = ?`,
-          )
+          .prepare(`UPDATE enrollment_fellows SET ${column} = ? WHERE fellow_id = ?`)
           .run(value, LIFECYCLE_FELLOW),
       ).toThrow("Fellow identity is immutable");
     }
     sqlite
-      .prepare(
-        "UPDATE enrollment_fellows SET status = 'paused' WHERE fellow_id = ?",
-      )
+      .prepare("UPDATE enrollment_fellows SET status = 'paused' WHERE fellow_id = ?")
       .run(LIFECYCLE_FELLOW);
     sqlite
-      .prepare(
-        "UPDATE enrollment_fellows SET status = 'active' WHERE fellow_id = ?",
-      )
+      .prepare("UPDATE enrollment_fellows SET status = 'active' WHERE fellow_id = ?")
       .run(LIFECYCLE_FELLOW);
 
     expect(() =>
       sqlite
-        .prepare(
-          "UPDATE fellow_tokens SET issued_at = ? WHERE credential_id = ?",
-        )
+        .prepare("UPDATE fellow_tokens SET issued_at = ? WHERE credential_id = ?")
         .run(NOW + 1, "credential-1"),
     ).toThrow("credential authority is immutable");
     expect(() =>
       sqlite
-        .prepare(
-          "UPDATE fellow_tokens SET granted_scopes_json = ? WHERE credential_id = ?",
-        )
+        .prepare("UPDATE fellow_tokens SET granted_scopes_json = ? WHERE credential_id = ?")
         .run('["promote"]', "credential-1"),
     ).toThrow("credential authority is immutable");
     expect(() =>
       sqlite
-        .prepare(
-          "UPDATE enrollment_grants SET granted_scopes_json = ? WHERE fellow_id = ?",
-        )
+        .prepare("UPDATE enrollment_grants SET granted_scopes_json = ? WHERE fellow_id = ?")
         .run('["promote"]', LIFECYCLE_FELLOW),
     ).toThrow("enrollment grant is immutable");
     expect(() =>
-      sqlite
-        .prepare("DELETE FROM enrollment_grants WHERE fellow_id = ?")
-        .run(LIFECYCLE_FELLOW),
+      sqlite.prepare("DELETE FROM enrollment_grants WHERE fellow_id = ?").run(LIFECYCLE_FELLOW),
     ).toThrow("enrollment grant cannot be deleted");
     expect(() =>
       sqlite
@@ -4831,14 +4439,7 @@ describe("Fellow credential lifecycle constraints and authentication", () => {
              granted_resources_json, granted_at
            ) VALUES (?, ?, ?, ?, ?, ?)`,
         )
-        .run(
-          LIFECYCLE_PROPOSAL,
-          LIFECYCLE_FELLOW,
-          LIFECYCLE_SPONSOR,
-          '["promote"]',
-          "{}",
-          NOW,
-        ),
+        .run(LIFECYCLE_PROPOSAL, LIFECYCLE_FELLOW, LIFECYCLE_SPONSOR, '["promote"]', "{}", NOW),
     ).toThrow("enrollment grant already exists");
     expect(() =>
       sqlite
@@ -4863,22 +4464,16 @@ describe("Fellow credential lifecycle constraints and authentication", () => {
     ).toThrow("credential identity already exists");
 
     sqlite
-      .prepare(
-        "UPDATE fellow_tokens SET last_used_at = ? WHERE credential_id = ?",
-      )
+      .prepare("UPDATE fellow_tokens SET last_used_at = ? WHERE credential_id = ?")
       .run(NOW + 5, "credential-1");
     expect(() =>
       sqlite
-        .prepare(
-          "UPDATE fellow_tokens SET last_used_at = ? WHERE credential_id = ?",
-        )
+        .prepare("UPDATE fellow_tokens SET last_used_at = ? WHERE credential_id = ?")
         .run(NOW + 4, "credential-1"),
     ).toThrow("credential last-used time is monotonic");
     expect(() =>
       sqlite
-        .prepare(
-          "UPDATE fellow_tokens SET last_used_at = ? WHERE credential_id = ?",
-        )
+        .prepare("UPDATE fellow_tokens SET last_used_at = ? WHERE credential_id = ?")
         .run(NOW + 5.5, "credential-1"),
     ).toThrow("credential last-used evidence schema invalid");
     expect(
@@ -4894,9 +4489,7 @@ describe("Fellow credential lifecycle constraints and authentication", () => {
     for (const invalidRevocation of [NOW + 5.5, 9_007_199_254_740_992]) {
       expect(() =>
         sqlite
-          .prepare(
-            "UPDATE fellow_tokens SET revoked_at = ? WHERE credential_id = ?",
-          )
+          .prepare("UPDATE fellow_tokens SET revoked_at = ? WHERE credential_id = ?")
           .run(invalidRevocation, "credential-1"),
       ).toThrow("credential revocation evidence schema invalid");
       expect(
@@ -4908,21 +4501,15 @@ describe("Fellow credential lifecycle constraints and authentication", () => {
       ).toBeNull();
     }
     sqlite
-      .prepare(
-        "UPDATE fellow_tokens SET revoked_at = ? WHERE credential_id = ?",
-      )
+      .prepare("UPDATE fellow_tokens SET revoked_at = ? WHERE credential_id = ?")
       .run(NOW + 6, "credential-1");
     expect(() =>
       sqlite
-        .prepare(
-          "UPDATE fellow_tokens SET revoked_at = NULL WHERE credential_id = ?",
-        )
+        .prepare("UPDATE fellow_tokens SET revoked_at = NULL WHERE credential_id = ?")
         .run("credential-1"),
     ).toThrow("credential revocation is monotonic");
     expect(() =>
-      sqlite
-        .prepare("DELETE FROM fellow_tokens WHERE credential_id = ?")
-        .run("credential-1"),
+      sqlite.prepare("DELETE FROM fellow_tokens WHERE credential_id = ?").run("credential-1"),
     ).toThrow("credential history cannot be deleted");
   });
 
@@ -4936,14 +4523,10 @@ describe("Fellow credential lifecycle constraints and authentication", () => {
       proposalId: LIFECYCLE_PROPOSAL,
     });
     sqlite
-      .prepare(
-        "UPDATE fellow_tokens SET revoked_at = ? WHERE credential_id = ?",
-      )
+      .prepare("UPDATE fellow_tokens SET revoked_at = ? WHERE credential_id = ?")
       .run(NOW + 1, "credential-terminal-replace");
     sqlite
-      .prepare(
-        "UPDATE enrollment_fellows SET status = 'revoked' WHERE fellow_id = ?",
-      )
+      .prepare("UPDATE enrollment_fellows SET status = 'revoked' WHERE fellow_id = ?")
       .run(LIFECYCLE_FELLOW);
 
     expect(() =>
@@ -4953,19 +4536,10 @@ describe("Fellow credential lifecycle constraints and authentication", () => {
              fellow_id, sponsor_id, name, model, harness, created_at
            ) VALUES (?, ?, ?, ?, ?, ?)`,
         )
-        .run(
-          LIFECYCLE_FELLOW,
-          LIFECYCLE_SPONSOR,
-          "lifecycle-fellow",
-          "test-model",
-          "codex",
-          NOW,
-        ),
+        .run(LIFECYCLE_FELLOW, LIFECYCLE_SPONSOR, "lifecycle-fellow", "test-model", "codex", NOW),
     ).toThrow("Fellow identity already exists");
     expect(() =>
-      sqlite
-        .prepare("DELETE FROM enrollment_fellows WHERE fellow_id = ?")
-        .run(LIFECYCLE_FELLOW),
+      sqlite.prepare("DELETE FROM enrollment_fellows WHERE fellow_id = ?").run(LIFECYCLE_FELLOW),
     ).toThrow("Fellow identity cannot be deleted");
     expect(
       sqlite
@@ -5001,11 +4575,7 @@ describe("Fellow credential lifecycle constraints and authentication", () => {
     });
     const store = new D1EnrollmentStore(localD1(sqlite));
 
-    const authenticated = await store.authenticateCredential(
-      "token-hash-1",
-      NOW + 1,
-      "bearer",
-    );
+    const authenticated = await store.authenticateCredential("token-hash-1", NOW + 1, "bearer");
     expect(authenticated?.lastUsedAt).toBe(NOW + 1);
     expect(authenticated?.fellowStatus).toBe("active");
     expect(
@@ -5015,28 +4585,19 @@ describe("Fellow credential lifecycle constraints and authentication", () => {
         )
         .get()?.last_used_at,
     ).toBe(NOW + 1);
-    expect(
-      await store.fellowsBySponsor(LIFECYCLE_SPONSOR, NOW + 1),
-    ).toMatchObject([
+    expect(await store.fellowsBySponsor(LIFECYCLE_SPONSOR, NOW + 1)).toMatchObject([
       {
         fellowId: LIFECYCLE_FELLOW,
         status: "active",
-        credentials: [
-          { credentialId: "credential-1", lastUsedAt: NOW + 1, active: true },
-        ],
+        credentials: [{ credentialId: "credential-1", lastUsedAt: NOW + 1, active: true }],
       },
     ]);
 
     expect(
-      await store.authenticateCredential(
-        "token-hash-1",
-        NOW + TOKEN_TTL_MS,
-        "bearer",
-      ),
+      await store.authenticateCredential("token-hash-1", NOW + TOKEN_TTL_MS, "bearer"),
     ).toBeUndefined();
     expect(
-      (await store.fellowsBySponsor(LIFECYCLE_SPONSOR, NOW + TOKEN_TTL_MS))[0]
-        ?.credentials,
+      (await store.fellowsBySponsor(LIFECYCLE_SPONSOR, NOW + TOKEN_TTL_MS))[0]?.credentials,
     ).toEqual([]);
     expect(
       sqlite
@@ -5047,29 +4608,21 @@ describe("Fellow credential lifecycle constraints and authentication", () => {
     ).toBe(NOW + 1);
 
     sqlite
-      .prepare(
-        "UPDATE enrollment_fellows SET status = 'suspicious_review' WHERE fellow_id = ?",
-      )
+      .prepare("UPDATE enrollment_fellows SET status = 'suspicious_review' WHERE fellow_id = ?")
       .run(LIFECYCLE_FELLOW);
     expect(
-      (await store.authenticateCredential("token-hash-1", NOW + 3, "bearer"))
-        ?.fellowStatus,
+      (await store.authenticateCredential("token-hash-1", NOW + 3, "bearer"))?.fellowStatus,
     ).toBe("suspicious_review");
-    expect(
-      (await store.fellowsBySponsor(LIFECYCLE_SPONSOR, NOW + 3))[0],
-    ).toMatchObject({
+    expect((await store.fellowsBySponsor(LIFECYCLE_SPONSOR, NOW + 3))[0]).toMatchObject({
       status: "suspicious_review",
       credentials: [{ credentialId: "credential-1", active: true }],
     });
     expect(
-      (await store.authenticateCredential("token-hash-1", NOW + 2, "bearer"))
-        ?.lastUsedAt,
+      (await store.authenticateCredential("token-hash-1", NOW + 2, "bearer"))?.lastUsedAt,
     ).toBe(NOW + 3);
 
     sqlite
-      .prepare(
-        "UPDATE enrollment_fellows SET status = 'active' WHERE fellow_id = ?",
-      )
+      .prepare("UPDATE enrollment_fellows SET status = 'active' WHERE fellow_id = ?")
       .run(LIFECYCLE_FELLOW);
     sqlite
       .prepare(
@@ -5077,13 +4630,8 @@ describe("Fellow credential lifecycle constraints and authentication", () => {
          VALUES (?, ?, ?)`,
       )
       .run(LIFECYCLE_SPONSOR, NOW, NOW);
-    expect(
-      await store.authenticateCredential("token-hash-1", NOW + 4, "bearer"),
-    ).toBeUndefined();
-    expect(
-      (await store.fellowsBySponsor(LIFECYCLE_SPONSOR, NOW + 4))[0]
-        ?.credentials,
-    ).toEqual([]);
+    expect(await store.authenticateCredential("token-hash-1", NOW + 4, "bearer")).toBeUndefined();
+    expect((await store.fellowsBySponsor(LIFECYCLE_SPONSOR, NOW + 4))[0]?.credentials).toEqual([]);
 
     expect(
       sqlite
@@ -5109,9 +4657,7 @@ describe("Fellow credential lifecycle constraints and authentication", () => {
         label: "pause",
         mutate: (sqlite: Database) =>
           sqlite
-            .prepare(
-              "UPDATE enrollment_fellows SET status = 'paused' WHERE fellow_id = ?",
-            )
+            .prepare("UPDATE enrollment_fellows SET status = 'paused' WHERE fellow_id = ?")
             .run(LIFECYCLE_FELLOW),
       },
       {
@@ -5139,11 +4685,7 @@ describe("Fellow credential lifecycle constraints and authentication", () => {
       const store = new D1EnrollmentStore(
         localD1(sqlite, {
           afterFirstRead: async (query) => {
-            if (
-              mutated ||
-              !query.includes("FROM fellow_tokens WHERE token_hash")
-            )
-              return;
+            if (mutated || !query.includes("FROM fellow_tokens WHERE token_hash")) return;
             mutated = true;
             race.mutate(sqlite);
           },
@@ -5180,26 +4722,18 @@ describe("Fellow credential lifecycle constraints and authentication", () => {
       if (terminal === "compromised") {
         expect(() =>
           sqlite
-            .prepare(
-              "UPDATE enrollment_fellows SET status = 'compromised' WHERE fellow_id = ?",
-            )
+            .prepare("UPDATE enrollment_fellows SET status = 'compromised' WHERE fellow_id = ?")
             .run(LIFECYCLE_FELLOW),
         ).toThrow("compromise requires credential family revocation");
         sqlite
-          .prepare(
-            "UPDATE fellow_tokens SET revoked_at = ? WHERE fellow_id = ?",
-          )
+          .prepare("UPDATE fellow_tokens SET revoked_at = ? WHERE fellow_id = ?")
           .run(NOW + 1, LIFECYCLE_FELLOW);
       }
       sqlite
         .prepare("UPDATE enrollment_fellows SET status = ? WHERE fellow_id = ?")
         .run(terminal, LIFECYCLE_FELLOW);
       expect(
-        await store.authenticateCredential(
-          `token-hash-${terminal}`,
-          NOW + 2,
-          "bearer",
-        ),
+        await store.authenticateCredential(`token-hash-${terminal}`, NOW + 2, "bearer"),
       ).toBeUndefined();
       expect(() =>
         insertLifecycleCredential(sqlite, {
@@ -5210,15 +4744,11 @@ describe("Fellow credential lifecycle constraints and authentication", () => {
       ).toThrow("terminal Fellow cannot receive live credential");
       expect(() =>
         sqlite
-          .prepare(
-            "UPDATE enrollment_fellows SET status = 'active' WHERE fellow_id = ?",
-          )
+          .prepare("UPDATE enrollment_fellows SET status = 'active' WHERE fellow_id = ?")
           .run(LIFECYCLE_FELLOW),
       ).toThrow("fellow lifecycle transition invalid");
       sqlite
-        .prepare(
-          "UPDATE enrollment_fellows SET status = 'archived' WHERE fellow_id = ?",
-        )
+        .prepare("UPDATE enrollment_fellows SET status = 'archived' WHERE fellow_id = ?")
         .run(LIFECYCLE_FELLOW);
       expect(() =>
         insertLifecycleCredential(sqlite, {
@@ -5229,9 +4759,7 @@ describe("Fellow credential lifecycle constraints and authentication", () => {
       ).toThrow("terminal Fellow cannot receive live credential");
       expect(() =>
         sqlite
-          .prepare(
-            "UPDATE enrollment_fellows SET status = 'active' WHERE fellow_id = ?",
-          )
+          .prepare("UPDATE enrollment_fellows SET status = 'active' WHERE fellow_id = ?")
           .run(LIFECYCLE_FELLOW),
       ).toThrow("fellow lifecycle transition invalid");
     }
@@ -5248,20 +4776,10 @@ describe("Fellow credential lifecycle constraints and authentication", () => {
     const store = new D1EnrollmentStore(localD1(sqlite));
 
     expect(
-      await store.authenticateCredential(
-        "token-hash-future",
-        NOW + 999,
-        "bearer",
-      ),
+      await store.authenticateCredential("token-hash-future", NOW + 999, "bearer"),
     ).toBeUndefined();
     expect(
-      (
-        await store.authenticateCredential(
-          "token-hash-future",
-          NOW + 1_000,
-          "bearer",
-        )
-      )?.lastUsedAt,
+      (await store.authenticateCredential("token-hash-future", NOW + 1_000, "bearer"))?.lastUsedAt,
     ).toBe(NOW + 1_000);
   });
 
@@ -5281,24 +4799,14 @@ describe("Fellow credential lifecycle constraints and authentication", () => {
     const store = new D1EnrollmentStore(localD1(sqlite));
 
     expect(
-      (
-        await store.authenticateCredential(
-          "token-hash-grant-expiry",
-          grantExpiresAt - 1,
-          "bearer",
-        )
-      )?.lastUsedAt,
+      (await store.authenticateCredential("token-hash-grant-expiry", grantExpiresAt - 1, "bearer"))
+        ?.lastUsedAt,
     ).toBe(grantExpiresAt - 1);
     expect(
-      await store.authenticateCredential(
-        "token-hash-grant-expiry",
-        grantExpiresAt,
-        "bearer",
-      ),
+      await store.authenticateCredential("token-hash-grant-expiry", grantExpiresAt, "bearer"),
     ).toBeUndefined();
     expect(
-      (await store.fellowsBySponsor(LIFECYCLE_SPONSOR, grantExpiresAt))[0]
-        ?.credentials,
+      (await store.fellowsBySponsor(LIFECYCLE_SPONSOR, grantExpiresAt))[0]?.credentials,
     ).toEqual([]);
     expect(
       sqlite
@@ -5348,13 +4856,9 @@ describe("Fellow credential lifecycle constraints and authentication", () => {
         .get(),
     ).toEqual({ status: "expired", token_hash: null });
     expect(
-      sqlite
-        .prepare<{ n: number }, []>("SELECT COUNT(*) AS n FROM fellow_tokens")
-        .get()?.n,
+      sqlite.prepare<{ n: number }, []>("SELECT COUNT(*) AS n FROM fellow_tokens").get()?.n,
     ).toBe(0);
-    expect(
-      await store.fellowsBySponsor(LIFECYCLE_SPONSOR, grantExpiresAt),
-    ).toMatchObject([
+    expect(await store.fellowsBySponsor(LIFECYCLE_SPONSOR, grantExpiresAt)).toMatchObject([
       {
         fellowId: LIFECYCLE_FELLOW,
         status: "active",
@@ -5405,9 +4909,7 @@ describe("Fellow credential lifecycle constraints and authentication", () => {
         .get(),
     ).toEqual({ status: "approved", token_hash: null });
     expect(
-      sqlite
-        .prepare<{ n: number }, []>("SELECT COUNT(*) AS n FROM fellow_tokens")
-        .get()?.n,
+      sqlite.prepare<{ n: number }, []>("SELECT COUNT(*) AS n FROM fellow_tokens").get()?.n,
     ).toBe(0);
   });
 
@@ -5464,8 +4966,7 @@ describe("Fellow credential lifecycle constraints and authentication", () => {
           .prepare<{ last_used_at: number | null }, [string]>(
             "SELECT last_used_at FROM fellow_tokens WHERE credential_id = ?",
           )
-          .get(`credential-corrupt-${fixture.label.replaceAll(" ", "-")}`)
-          ?.last_used_at,
+          .get(`credential-corrupt-${fixture.label.replaceAll(" ", "-")}`)?.last_used_at,
         fixture.label,
       ).toBeNull();
     }
@@ -5490,14 +4991,10 @@ describe("Fellow credential lifecycle constraints and authentication", () => {
         proposalId: LIFECYCLE_PROPOSAL,
       });
       sqlite
-        .prepare(
-          `UPDATE enrollment_fellows SET ${fixture.column} = ? WHERE fellow_id = ?`,
-        )
+        .prepare(`UPDATE enrollment_fellows SET ${fixture.column} = ? WHERE fellow_id = ?`)
         .run(fixture.value, LIFECYCLE_FELLOW);
       sqlite
-        .prepare(
-          `UPDATE enrollment_proposals SET ${fixture.column} = ? WHERE proposal_id = ?`,
-        )
+        .prepare(`UPDATE enrollment_proposals SET ${fixture.column} = ? WHERE proposal_id = ?`)
         .run(fixture.value, LIFECYCLE_PROPOSAL);
       const store = new D1EnrollmentStore(localD1(sqlite));
       let caught: unknown;
@@ -5537,10 +5034,7 @@ describe("Fellow credential lifecycle constraints and authentication", () => {
       clock: { now: () => NOW + 1 },
       random,
       store,
-      replayProtector: new AesGcmEnrollmentReplayProtector(
-        new Uint8Array(32),
-        random,
-      ),
+      replayProtector: new AesGcmEnrollmentReplayProtector(new Uint8Array(32), random),
     });
 
     expect(await service.credentialBinding(rawToken)).toBeUndefined();
@@ -5552,8 +5046,7 @@ describe("Fellow credential lifecycle constraints and authentication", () => {
         .get()?.last_used_at,
     ).toBeNull();
     expect(
-      (await store.authenticateCredential(tokenHash, NOW + 1, "dpop"))
-        ?.credentialProfile,
+      (await store.authenticateCredential(tokenHash, NOW + 1, "dpop"))?.credentialProfile,
     ).toBe("dpop");
   });
 });
@@ -5590,14 +5083,7 @@ function insertFellow(sqlite: Database, name: string, ordinal: number): void {
       `INSERT INTO enrollment_fellows (fellow_id, sponsor_id, name, model, harness, created_at)
        VALUES (?, ?, ?, ?, ?, ?)`,
     )
-    .run(
-      `fellow-${ordinal}`,
-      "usr_fixture_sponsor",
-      name,
-      "test-model",
-      "codex",
-      NOW,
-    );
+    .run(`fellow-${ordinal}`, "usr_fixture_sponsor", name, "test-model", "codex", NOW);
 }
 
 function occupy(sqlite: Database, names: readonly string[]): void {
@@ -5638,22 +5124,22 @@ describe("availabilitySuggestions is bounded, exact and deterministic", () => {
     occupy(sqlite, ["orchid-2"]);
     // `orchid-10` sorts before `orchid-2` as text. Ordering the candidates as
     // text, rather than on the generated integer, would offer it first.
-    expect(
-      await new D1EnrollmentStore(localD1(sqlite)).availabilitySuggestions(
-        "orchid",
-      ),
-    ).toEqual(["orchid-3", "orchid-4", "orchid-5"]);
+    expect(await new D1EnrollmentStore(localD1(sqlite)).availabilitySuggestions("orchid")).toEqual([
+      "orchid-3",
+      "orchid-4",
+      "orchid-5",
+    ]);
   });
 
   test("PLANTED: a non-numeric or deeper name in the namespace occupies nothing", async () => {
     const sqlite = database();
     occupy(sqlite, ["orchid-foo", "orchid-2-alpha"]);
     // Neither is equal to any generated candidate, so neither can occupy one.
-    expect(
-      await new D1EnrollmentStore(localD1(sqlite)).availabilitySuggestions(
-        "orchid",
-      ),
-    ).toEqual(["orchid-2", "orchid-3", "orchid-4"]);
+    expect(await new D1EnrollmentStore(localD1(sqlite)).availabilitySuggestions("orchid")).toEqual([
+      "orchid-2",
+      "orchid-3",
+      "orchid-4",
+    ]);
   });
 
   test("PLANTED: a leading-zero spelling does not suppress the canonical name", async () => {
@@ -5662,11 +5148,11 @@ describe("availabilitySuggestions is bounded, exact and deterministic", () => {
     // `orchid-02` is a different name. Any implementation that recovered the
     // suffix from stored text instead of comparing against generated text
     // would read it as 2 and wrongly retire a free candidate.
-    expect(
-      await new D1EnrollmentStore(localD1(sqlite)).availabilitySuggestions(
-        "orchid",
-      ),
-    ).toEqual(["orchid-2", "orchid-3", "orchid-4"]);
+    expect(await new D1EnrollmentStore(localD1(sqlite)).availabilitySuggestions("orchid")).toEqual([
+      "orchid-2",
+      "orchid-3",
+      "orchid-4",
+    ]);
   });
 
   test("PLANTED: a reserved candidate is skipped even though its stem is clean", async () => {
@@ -5674,11 +5160,11 @@ describe("availabilitySuggestions is bounded, exact and deterministic", () => {
     occupy(sqlite, ["gpt-5-2", "gpt-5-3", "gpt-5-4", "gpt-5-5"]);
     // `gpt-5` passes the name policy but `gpt-5-6` is reserved, so the
     // per-candidate check must survive; hoisting it to the stem returns it.
-    expect(
-      await new D1EnrollmentStore(localD1(sqlite)).availabilitySuggestions(
-        "gpt-5",
-      ),
-    ).toEqual(["gpt-5-7", "gpt-5-8", "gpt-5-9"]);
+    expect(await new D1EnrollmentStore(localD1(sqlite)).availabilitySuggestions("gpt-5")).toEqual([
+      "gpt-5-7",
+      "gpt-5-8",
+      "gpt-5-9",
+    ]);
   });
 
   test("PLANTED: a saturated range returns fewer suggestions, never an error", async () => {
@@ -5689,11 +5175,9 @@ describe("availabilitySuggestions is bounded, exact and deterministic", () => {
       Array.from({ length: 9_997 }, (_, offset) => `${stem}-${offset + 2}`),
     );
     // 2..9_998 held; the suffix law stops at 9_999, so exactly one remains.
-    expect(
-      await new D1EnrollmentStore(localD1(sqlite)).availabilitySuggestions(
-        stem,
-      ),
-    ).toEqual(["zzz-9999"]);
+    expect(await new D1EnrollmentStore(localD1(sqlite)).availabilitySuggestions(stem)).toEqual([
+      "zzz-9999",
+    ]);
   });
 
   test("PLANTED: 500 occupied suffixes still cost exactly one statement", async () => {
@@ -5703,9 +5187,7 @@ describe("availabilitySuggestions is bounded, exact and deterministic", () => {
       Array.from({ length: 500 }, (_, offset) => `orchid-${offset + 2}`),
     );
     const recording = recordingD1(sqlite);
-    const suggestions = await new D1EnrollmentStore(
-      recording.db,
-    ).availabilitySuggestions("orchid");
+    const suggestions = await new D1EnrollmentStore(recording.db).availabilitySuggestions("orchid");
     expect(suggestions).toEqual(["orchid-502", "orchid-503", "orchid-504"]);
     // The point-lookup implementation issued 503 statements for this shape, and
     // a batched one would issue 8. D1 allows 50 per invocation.
@@ -5720,9 +5202,7 @@ describe("availabilitySuggestions is bounded, exact and deterministic", () => {
       "orchid-4",
     ]);
     const recording = recordingD1(sqlite);
-    const suggestions = await new D1EnrollmentStore(
-      recording.db,
-    ).availabilitySuggestions("orchid");
+    const suggestions = await new D1EnrollmentStore(recording.db).availabilitySuggestions("orchid");
     // Siblings that are not canonical numeric candidates occupy nothing, so the
     // early gaps at 3, 5 and 6 survive a namespace with more siblings than the
     // whole suffix series, none of which is ever returned to the Worker.
@@ -5752,8 +5232,7 @@ describe("availabilitySuggestions is bounded, exact and deterministic", () => {
   });
 
   test("PLANTED: a failing D1 query becomes the typed refusal, carrying no driver text", async () => {
-    const raw =
-      "D1_ERROR: no such table: enrollment_fellows at /var/secret/path.sql";
+    const raw = "D1_ERROR: no such table: enrollment_fellows at /var/secret/path.sql";
     const failing = {
       prepare() {
         return {
@@ -5782,9 +5261,7 @@ describe("availabilitySuggestions is bounded, exact and deterministic", () => {
     expect(surface).not.toContain("D1_ERROR");
     expect(surface).not.toContain("no such table");
     expect(surface).not.toContain("/var/secret/path.sql");
-    expect((caught as Error).message).toBe(
-      "enrollment persistence is unavailable",
-    );
+    expect((caught as Error).message).toBe("enrollment persistence is unavailable");
   });
 
   test("PLANTED: the policy invariant's typed refusal survives the query wrap", async () => {
@@ -5814,9 +5291,7 @@ describe("availabilitySuggestions is bounded, exact and deterministic", () => {
 
     let caught: unknown;
     try {
-      await new D1EnrollmentStore(
-        fullPageOfReservedNames,
-      ).availabilitySuggestions("orchid");
+      await new D1EnrollmentStore(fullPageOfReservedNames).availabilitySuggestions("orchid");
     } catch (error) {
       caught = error;
     }
