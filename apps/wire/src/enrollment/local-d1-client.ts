@@ -3,6 +3,8 @@ import {
   SponsorEnrollmentDecisionResponseSchema,
 } from "@asimposium/contracts";
 
+import { SPONSOR_ENROLLMENT_RATE_LIMIT_ATTEMPTS } from "./service.ts";
+
 const origin = process.env.S1_LOCAL_ORIGIN;
 if (typeof origin !== "string" || !/^http:\/\/127\.0\.0\.1:\d+$/.test(origin)) {
   process.stderr.write('{"status":"fail","code":"LOCAL_ORIGIN_INVALID"}\n');
@@ -36,6 +38,11 @@ if (typeof origin !== "string" || !/^http:\/\/127\.0\.0\.1:\d+$/.test(origin)) {
     readonly start_replays: number;
   }
 
+  interface SponsorEnrollmentCounts {
+    readonly join_attempts: number;
+    readonly device_attempts: number;
+  }
+
   const readDeviceCounts = async (): Promise<DeviceCounts> => {
     const result = await localFetch(`${origin}/__s1/device-counts`);
     if (result.status !== 200) throw new Error("device-counts-status");
@@ -51,6 +58,21 @@ if (typeof origin !== "string" || !/^http:\/\/127\.0\.0\.1:\d+$/.test(origin)) {
       throw new Error("device-counts-shape");
     }
     return body as DeviceCounts;
+  };
+
+  const readSponsorEnrollmentCounts = async (): Promise<SponsorEnrollmentCounts> => {
+    const result = await post("/__s1/sponsor-enrollment-counts", { sponsor_id: sponsorId });
+    if (result.status !== 200) throw new Error("sponsor-enrollment-counts-status");
+    const body = (await result.json()) as Partial<SponsorEnrollmentCounts>;
+    if (
+      !Number.isSafeInteger(body.join_attempts) ||
+      !Number.isSafeInteger(body.device_attempts) ||
+      (body.join_attempts ?? -1) < 0 ||
+      (body.device_attempts ?? -1) < 0
+    ) {
+      throw new Error("sponsor-enrollment-counts-shape");
+    }
+    return body as SponsorEnrollmentCounts;
   };
 
   const deviceStartBody = (name: string): Record<string, unknown> => ({
@@ -638,6 +660,113 @@ if (typeof origin !== "string" || !/^http:\/\/127\.0\.0\.1:\d+$/.test(origin)) {
       throw new Error("stable-poll-key-denial-transition");
     }
 
+    // Real Workerd/D1 proof for the sponsor-owned rolling-day budget. Fill the
+    // remaining slots from the durable facts already created above, replay the
+    // final successful mint exactly, then prove a distinct key is refused
+    // without creating an eleventh fact.
+    const sponsorCountsBeforeFill = await readSponsorEnrollmentCounts();
+    const occupiedBeforeFill =
+      sponsorCountsBeforeFill.join_attempts + sponsorCountsBeforeFill.device_attempts;
+    if (occupiedBeforeFill < 1 || occupiedBeforeFill >= SPONSOR_ENROLLMENT_RATE_LIMIT_ATTEMPTS) {
+      throw new Error("sponsor-enrollment-budget-precondition");
+    }
+    let finalFillRequest: Record<string, unknown> = mintRequest;
+    let finalFillKey = "local-mint-1";
+    let finalFillBody: unknown = minted;
+    for (
+      let ordinal = occupiedBeforeFill;
+      ordinal < SPONSOR_ENROLLMENT_RATE_LIMIT_ATTEMPTS - 1;
+      ordinal += 1
+    ) {
+      const request = {
+        sponsor_id: sponsorId,
+        request: { requested_scopes: ["review"] },
+      };
+      const key = `local-sponsor-rate-fill-${ordinal}`;
+      const result = await post("/__s1/mint", request, { "idempotency-key": key });
+      const body = await result.json();
+      if (result.status !== 201) throw new Error("sponsor-enrollment-budget-fill");
+      finalFillRequest = request;
+      finalFillKey = key;
+      finalFillBody = body;
+    }
+    const finalFillReplay = await post("/__s1/mint", finalFillRequest, {
+      "idempotency-key": finalFillKey,
+    });
+    const finalFillReplayBody = await finalFillReplay.json();
+    if (
+      finalFillReplay.status !== 201 ||
+      JSON.stringify(finalFillReplayBody) !== JSON.stringify(finalFillBody)
+    ) {
+      throw new Error("sponsor-enrollment-budget-final-replay");
+    }
+    const finalDeviceStart = await startDevice(
+      "198.51.100.39",
+      deviceStartBody("local-sponsor-rate-final-device"),
+      "local-sponsor-rate-final-device-start",
+    );
+    const finalDeviceStartBody = DeviceCodeStartResponseSchema.safeParse(
+      await finalDeviceStart.json(),
+    );
+    if (finalDeviceStart.status !== 201 || !finalDeviceStartBody.success) {
+      throw new Error("sponsor-enrollment-budget-device-start");
+    }
+    const finalDeviceLookup = await post("/__s1/device-lookup", {
+      sponsor_id: sponsorId,
+      user_code: finalDeviceStartBody.data.user_code,
+    });
+    const finalDeviceLookupBody = (await finalDeviceLookup.json()) as {
+      card?: { enrollmentId?: unknown };
+    };
+    if (
+      finalDeviceLookup.status !== 200 ||
+      typeof finalDeviceLookupBody.card?.enrollmentId !== "string"
+    ) {
+      throw new Error("sponsor-enrollment-budget-device-lookup");
+    }
+    const finalDeviceDecision = {
+      sponsor_id: sponsorId,
+      enrollment_id: finalDeviceLookupBody.card.enrollmentId,
+      decision: {
+        enrollment_id: finalDeviceLookupBody.card.enrollmentId,
+        decision: "approve",
+        step_up_authenticated_at: decisionStepUpAuthenticatedAt,
+      },
+    };
+    const finalDeviceApproval = await post("/__s1/approve", finalDeviceDecision, {
+      "idempotency-key": "local-sponsor-rate-final-device-decision",
+    });
+    await assertDecisionAcknowledged(
+      finalDeviceApproval,
+      "sponsor-enrollment-budget-device-approval",
+    );
+    const finalDeviceApprovalReplay = await post("/__s1/approve", finalDeviceDecision, {
+      "idempotency-key": "local-sponsor-rate-final-device-decision",
+    });
+    await assertDecisionAcknowledged(
+      finalDeviceApprovalReplay,
+      "sponsor-enrollment-budget-device-replay",
+    );
+    const sponsorRateRefusal = await post(
+      "/__s1/mint",
+      { sponsor_id: sponsorId, request: { requested_scopes: ["review"] } },
+      { "idempotency-key": "local-sponsor-rate-refusal" },
+    );
+    const sponsorRateRefusalBody = (await sponsorRateRefusal.json()) as { code?: unknown };
+    if (
+      sponsorRateRefusal.status !== 429 ||
+      sponsorRateRefusalBody.code !== "SPONSOR_ENROLLMENT_RATE_LIMITED"
+    ) {
+      throw new Error("sponsor-enrollment-budget-refusal");
+    }
+    const sponsorCountsAfterRefusal = await readSponsorEnrollmentCounts();
+    if (
+      sponsorCountsAfterRefusal.join_attempts + sponsorCountsAfterRefusal.device_attempts !==
+      SPONSOR_ENROLLMENT_RATE_LIMIT_ATTEMPTS
+    ) {
+      throw new Error("sponsor-enrollment-budget-refusal-count");
+    }
+
     // Real Workerd/D1 concurrency proof: eleven independently keyed requests
     // arrive together at a fresh source. Exactly ten may commit, and the
     // refused request must not consume a product row, rate slot, or replay row.
@@ -796,6 +925,7 @@ if (typeof origin !== "string" || !/^http:\/\/127\.0\.0\.1:\d+$/.test(origin)) {
           "idempotency-digest-conflict",
           "concurrent-first-claim-replay",
           "failed-batch-does-not-poison-key",
+          "sponsor-enrollment-rolling-day-budget",
           "stable-poll-key-approval-transition",
           "stable-poll-key-denial-transition",
           "stable-poll-key-expiry-transition",

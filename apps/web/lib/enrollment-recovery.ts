@@ -37,6 +37,7 @@ export function enrollmentRecoveryDisposition(
 ): "retain" | "clear" {
   if (reason === "unconfigured") return "clear";
   if (reason === "unreachable") return "retain";
+  if (status === 429 && problemCode === "SPONSOR_ENROLLMENT_RATE_LIMITED") return "clear";
   const operationalCodes = new Set([
     "AUTH_REPLAY_STORE_UNAVAILABLE",
     "ENROLLMENT_UNAVAILABLE",

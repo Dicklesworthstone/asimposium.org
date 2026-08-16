@@ -162,6 +162,9 @@ test("only definite local or schema-valid non-ambiguous Worker refusals discard 
   expect(enrollmentRecoveryDisposition("refused", 403, "STEP_UP_REQUIRED")).toBe("clear");
   expect(enrollmentRecoveryDisposition("refused", 408, "ENROLLMENT_UNAVAILABLE")).toBe("retain");
   expect(enrollmentRecoveryDisposition("refused", 425, "ENROLLMENT_UNAVAILABLE")).toBe("retain");
+  expect(enrollmentRecoveryDisposition("refused", 429, "SPONSOR_ENROLLMENT_RATE_LIMITED")).toBe(
+    "clear",
+  );
   expect(enrollmentRecoveryDisposition("refused", 429, "ENROLLMENT_UNAVAILABLE")).toBe("retain");
   expect(enrollmentRecoveryDisposition("refused", 400, "ENROLLMENT_UNAVAILABLE")).toBe("retain");
   expect(enrollmentRecoveryDisposition("refused", 400, "INTERNAL_ERROR")).toBe("retain");

@@ -42,6 +42,10 @@ const INVALID_FELLOW_CAP_REACHED_TAUGHT = new URL(
   "../fixtures/invalid/problem-fellow-cap-reached-taught.json",
   import.meta.url,
 );
+const INVALID_SPONSOR_ENROLLMENT_RATE_LIMITED_TAUGHT = new URL(
+  "../fixtures/invalid/problem-sponsor-enrollment-rate-limited-taught.json",
+  import.meta.url,
+);
 const INVALID_UNKNOWN_FORMAT_WITHOUT_ALLOWED = new URL(
   "../fixtures/invalid/problem-unknown-format-no-allowed.json",
   import.meta.url,
@@ -53,6 +57,12 @@ const VALID_ADDITIONAL_PROBLEMS = [
   ["problem-request-body-too-large.json", "REQUEST_BODY_TOO_LARGE", 413, "opaque"],
   ["problem-lifecycle-busy.json", "LIFECYCLE_BUSY", 429, "opaque"],
   ["problem-fellow-cap-reached.json", "FELLOW_CAP_REACHED", 409, "opaque"],
+  [
+    "problem-sponsor-enrollment-rate-limited.json",
+    "SPONSOR_ENROLLMENT_RATE_LIMITED",
+    429,
+    "opaque",
+  ],
   ["problem-route-not-found.json", "ROUTE_NOT_FOUND", 404, "opaque"],
   ["problem-internal-error.json", "INTERNAL_ERROR", 500, "opaque"],
   ["problem-enrollment-id-invalid.json", "ENROLLMENT_ID_INVALID", 422, "contract"],
@@ -152,6 +162,19 @@ test("the sponsor Fellow cap is opaque and cannot carry teaching fields", async 
   expect(ContractProblemSchema.safeParse(document).success).toBe(false);
   expect(
     ProblemDocumentSchema.safeParse(await fixture(INVALID_FELLOW_CAP_REACHED_TAUGHT)).success,
+  ).toBe(false);
+});
+
+test("the sponsor enrollment budget is opaque and cannot carry teaching fields", async () => {
+  const document = await fixture(
+    new URL("../fixtures/valid/problem-sponsor-enrollment-rate-limited.json", import.meta.url),
+  );
+  expect(ProblemDocumentSchema.safeParse(document).success).toBe(true);
+  expect(OpaqueProblemSchema.safeParse(document).success).toBe(true);
+  expect(ContractProblemSchema.safeParse(document).success).toBe(false);
+  expect(
+    ProblemDocumentSchema.safeParse(await fixture(INVALID_SPONSOR_ENROLLMENT_RATE_LIMITED_TAUGHT))
+      .success,
   ).toBe(false);
 });
 

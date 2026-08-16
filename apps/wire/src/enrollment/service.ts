@@ -59,6 +59,9 @@ export const DEVICE_LOOKUP_LOCKOUT_WINDOW_MS = 15 * 60 * 1_000;
 export const DEVICE_START_RATE_LIMIT_ATTEMPTS = 10;
 export const DEVICE_START_RATE_LIMIT_WINDOW_MS = 15 * 60 * 1_000;
 export const DEFAULT_SPONSOR_ACTIVE_FELLOW_LIMIT = 5;
+/** W3.7 launch policy: successful distinct sponsor enrollment starts per rolling day. */
+export const SPONSOR_ENROLLMENT_RATE_LIMIT_ATTEMPTS = 10;
+export const SPONSOR_ENROLLMENT_RATE_LIMIT_WINDOW_MS = 24 * 60 * 60 * 1_000;
 const DEVICE_RECLAIM_BATCH_SIZE = 100;
 const ENROLLMENT_KEY_DERIVATION_SALT = new TextEncoder().encode(
   "asimposium-enrollment-key-derivation-v1",
@@ -152,6 +155,7 @@ export type EnrollmentErrorCode =
   | "REGISTRATION_BODY_INVALID"
   | "SCOPE_ESCALATION"
   | "SCOPE_NOT_REDUCED"
+  | "SPONSOR_ENROLLMENT_RATE_LIMITED"
   | "SPONSOR_BOOTSTRAP_BODY_INVALID"
   | "SPONSOR_PANIC_BODY_INVALID"
   | "STEP_UP_REQUIRED"
@@ -168,6 +172,17 @@ export class EnrollmentError extends Error {
     this.name = "EnrollmentError";
     this.code = code;
     this.suggestions = suggestions;
+  }
+}
+
+/** A sponsor-owned rolling-budget refusal with a truthful coarse retry delay. */
+export class SponsorEnrollmentRateLimitError extends EnrollmentError {
+  readonly retryAfterSeconds: number;
+
+  constructor(retryAfterSeconds: number) {
+    super("SPONSOR_ENROLLMENT_RATE_LIMITED");
+    this.name = "SponsorEnrollmentRateLimitError";
+    this.retryAfterSeconds = retryAfterSeconds;
   }
 }
 
@@ -1160,6 +1175,14 @@ export class InMemoryEnrollmentStore implements EnrollmentStore {
         ) {
           throw new EnrollmentError("PAIRING_INVALID");
         }
+      }
+      const enrollmentBudget = this.sponsorEnrollmentBudget(record.sponsorId, record.createdAt);
+      if (enrollmentBudget.count >= SPONSOR_ENROLLMENT_RATE_LIMIT_ATTEMPTS) {
+        throw this.sponsorEnrollmentRateLimitError(enrollmentBudget.latestAt, record.createdAt);
+      }
+      if (replacesEnrollmentId !== undefined) {
+        const predecessor = this.#records.get(replacesEnrollmentId);
+        if (predecessor === undefined) throw new EnrollmentError("PAIRING_INVALID");
         predecessor.invalidated = true;
       }
       this.#records.set(record.enrollmentId, record);
@@ -1286,6 +1309,12 @@ export class InMemoryEnrollmentStore implements EnrollmentStore {
       const nameOwner = this.#activeNames.get(proposal.name);
       if (nameOwner !== undefined && nameOwner !== proposal.proposalId) {
         throw new EnrollmentError("NAME_TAKEN");
+      }
+      if (isUnboundDevice) {
+        const enrollmentBudget = this.sponsorEnrollmentBudget(attempt.sponsorId, attempt.now);
+        if (enrollmentBudget.count >= SPONSOR_ENROLLMENT_RATE_LIMIT_ATTEMPTS) {
+          throw this.sponsorEnrollmentRateLimitError(enrollmentBudget.latestAt, attempt.now);
+        }
       }
       this.#activeNames.set(proposal.name, proposal.proposalId);
       if (isUnboundDevice) record.sponsorId = attempt.sponsorId;
@@ -1558,6 +1587,35 @@ export class InMemoryEnrollmentStore implements EnrollmentStore {
       if (status !== undefined && fellowStatusCanAuthenticate(status)) fellowIds.add(fellowId);
     }
     return fellowIds.size;
+  }
+
+  private sponsorEnrollmentBudget(
+    sponsorId: string,
+    now: number,
+  ): { readonly count: number; readonly latestAt: number | undefined } {
+    const windowBeginning = now - SPONSOR_ENROLLMENT_RATE_LIMIT_WINDOW_MS;
+    let count = 0;
+    let latestAt: number | undefined;
+    for (const record of this.#records.values()) {
+      if (record.sponsorId !== sponsorId) continue;
+      const attemptedAt = record.kind === "device" ? record.proposal?.grantedAt : record.createdAt;
+      if (attemptedAt !== undefined && attemptedAt > windowBeginning) {
+        count += 1;
+        latestAt = latestAt === undefined ? attemptedAt : Math.max(latestAt, attemptedAt);
+      }
+    }
+    return { count, latestAt };
+  }
+
+  private sponsorEnrollmentRateLimitError(
+    latestAt: number | undefined,
+    now: number,
+  ): SponsorEnrollmentRateLimitError {
+    if (latestAt === undefined) throw new EnrollmentPersistenceError();
+    const retryAfterSeconds =
+      Math.max(0, Math.ceil((latestAt + SPONSOR_ENROLLMENT_RATE_LIMIT_WINDOW_MS - now) / 1_000)) +
+      1;
+    return new SponsorEnrollmentRateLimitError(retryAfterSeconds);
   }
 
   async deviceCreate(

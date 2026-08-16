@@ -27,6 +27,7 @@ import {
   InMemoryEnrollmentStore,
   SPONSOR_STEP_UP_CLOCK_SKEW_SECONDS,
   SPONSOR_STEP_UP_WINDOW_SECONDS,
+  SponsorEnrollmentRateLimitError,
 } from "../../src/enrollment/service";
 
 /**
@@ -935,6 +936,43 @@ describe("sponsor enrollment routes", () => {
     const serialized = JSON.stringify(payload);
     expect(serialized).not.toContain(SPONSOR);
     expect(serialized).not.toContain("active_fellow_limit");
+    expect(serialized).not.toContain("database");
+  });
+
+  test("the sponsor enrollment budget is an opaque retryable 429", async () => {
+    const h = await harness({ clock: { now: () => NOW * 1_000 } });
+    h.service.decide = async () => {
+      throw new SponsorEnrollmentRateLimitError(90_001);
+    };
+    const enrollmentId = "ASIMP-EN-01JXYZ4K6Q";
+    const body = JSON.stringify({
+      enrollment_id: enrollmentId,
+      decision: "approve",
+      step_up_authenticated_at: NOW,
+    });
+    const headers = await h.sign(
+      body,
+      "/v1/enrollments/:enrollmentId/decision",
+      "enrollment.decide",
+    );
+    const response = await h.app.fetch(
+      envelopeRequest(`/v1/enrollments/${enrollmentId}/decision`, headers, "POST", body),
+    );
+
+    expect(response.status).toBe(429);
+    expect(response.headers.get("retry-after")).toBe("90001");
+    expect(response.headers.get("ratelimit-limit")).toBe("10");
+    expect(response.headers.get("ratelimit-remaining")).toBe("0");
+    expect(response.headers.get("ratelimit-reset")).toBe("90001");
+    expect(response.headers.get("cache-control")).toBe("no-store");
+    expect(response.headers.get("content-type")).toContain("application/problem+json");
+    const payload = await response.json();
+    expect(OpaqueProblemSchema.parse(payload)).toMatchObject({
+      code: "SPONSOR_ENROLLMENT_RATE_LIMITED",
+      status: 429,
+    });
+    const serialized = JSON.stringify(payload);
+    expect(serialized).not.toContain(SPONSOR);
     expect(serialized).not.toContain("database");
   });
 

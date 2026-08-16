@@ -42,6 +42,8 @@ import {
   type PollAttempt,
   type PollDecision,
   reduceEnrollmentResources,
+  SPONSOR_ENROLLMENT_RATE_LIMIT_WINDOW_MS,
+  SponsorEnrollmentRateLimitError,
   type SponsorFellowRecord,
   type SponsorPanicAttempt,
   uniqueEnrollmentScopes,
@@ -391,6 +393,10 @@ function isActiveFellowCapFailure(error: unknown): boolean {
   return error instanceof Error && /active Fellow cap reached/i.test(error.message);
 }
 
+function isSponsorEnrollmentRateFailure(error: unknown): boolean {
+  return error instanceof Error && /sponsor enrollment rate reached/i.test(error.message);
+}
+
 /**
  * The suggestion suffix law. Candidates are `<stem>-<n>` for n in
  * [2, 9_999], and a saturated range yields fewer than three suggestions rather
@@ -536,6 +542,9 @@ export class D1EnrollmentStore implements EnrollmentStore {
       ).first<{ enrollment_id: string }>();
       if (raced !== null) return false;
       await this.raceIfPresent(idempotency);
+      if (isSponsorEnrollmentRateFailure(error)) {
+        throw await this.sponsorEnrollmentRateLimitError(record.sponsorId, record.createdAt);
+      }
       throw new EnrollmentPersistenceError();
     }
   }
@@ -806,7 +815,10 @@ export class D1EnrollmentStore implements EnrollmentStore {
       ];
       if (idempotency !== undefined) statements.push(this.idempotencyStatement(idempotency));
       const results = await this.#db.batch(statements);
-      if (results.every((result) => result.meta.changes === 1)) return;
+      // The device-grant statement's AFTER trigger also writes the immutable
+      // rate projection, so D1/Bun may report two affected rows for that one
+      // statement. Every product statement must still change at least once.
+      if (results.every((result) => result.meta.changes >= 1)) return;
       await this.raceIfPresent(idempotency);
       throw new EnrollmentError("PROPOSAL_NOT_PENDING");
     } catch (error) {
@@ -819,6 +831,9 @@ export class D1EnrollmentStore implements EnrollmentStore {
       // idempotency conflict, not a capacity refusal.
       await this.raceIfPresent(idempotency);
       if (isUniqueNameFailure(error)) throw new EnrollmentError("NAME_TAKEN");
+      if (isSponsorEnrollmentRateFailure(error)) {
+        throw await this.sponsorEnrollmentRateLimitError(attempt.sponsorId, attempt.now);
+      }
       if (isActiveFellowCapFailure(error)) throw new EnrollmentError("FELLOW_CAP_REACHED");
       throw new EnrollmentPersistenceError();
     }
@@ -2595,8 +2610,9 @@ export class D1EnrollmentStore implements EnrollmentStore {
    * 1. `SELECT … WHERE changes() = 1` — the row is written only if the statement
    *    immediately before it in the batch modified exactly one row. A conditional
    *    effect that matched nothing therefore writes no replay row, so a no-op
-   *    cannot masquerade as a completed operation. The caller additionally
-   *    refuses to report success unless *every* statement changed one row.
+   *    cannot masquerade as a completed operation. Callers additionally
+   *    refuse success unless every top-level product statement reports a
+   *    positive change; D1 metadata may include an AFTER-trigger projection.
    *
    * 2. `request_digest = CASE … ELSE NULL` — **the abort.** On a conflict with a
    *    still-live key, this assigns NULL to a NOT NULL column
@@ -2675,6 +2691,44 @@ export class D1EnrollmentStore implements EnrollmentStore {
   }
 
   /** A completed concurrent write is retried by the service through ciphertext. */
+  private async sponsorEnrollmentRateLimitError(
+    sponsorId: string,
+    now: number,
+  ): Promise<SponsorEnrollmentRateLimitError> {
+    let row: { latest_attempt: number | null } | null;
+    try {
+      row = await sql(
+        this.#db,
+        `SELECT max(
+           coalesce((
+             SELECT created_at FROM enrollment_records
+              WHERE sponsor_id = ? AND kind = 'join-url'
+              ORDER BY created_at DESC LIMIT 1
+           ), 0),
+           coalesce((
+             SELECT attempted_at FROM sponsor_device_enrollment_attempts
+              WHERE sponsor_id = ?
+              ORDER BY attempted_at DESC LIMIT 1
+           ), 0)
+         ) AS latest_attempt`,
+        sponsorId,
+        sponsorId,
+      ).first<{ latest_attempt: number | null }>();
+    } catch {
+      throw new EnrollmentPersistenceError();
+    }
+    const latestAt = row?.latest_attempt;
+    if (!Number.isSafeInteger(latestAt) || (latestAt ?? 0) <= 0) {
+      throw new EnrollmentPersistenceError();
+    }
+    const retryAfterSeconds =
+      Math.max(
+        0,
+        Math.ceil(((latestAt as number) + SPONSOR_ENROLLMENT_RATE_LIMIT_WINDOW_MS - now) / 1_000),
+      ) + 1;
+    return new SponsorEnrollmentRateLimitError(retryAfterSeconds);
+  }
+
   private async raceIfPresent(write: EnrollmentIdempotencyWrite | undefined): Promise<void> {
     if (write === undefined) return;
     const replay = await this.idempotencyReplay(write);

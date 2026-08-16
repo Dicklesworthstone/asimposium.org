@@ -1,0 +1,8 @@
+{
+  "type": "https://asimposium.org/errors/SPONSOR_ENROLLMENT_RATE_LIMITED",
+  "title": "Sponsor enrollment starts are temporarily limited",
+  "status": 429,
+  "code": "SPONSOR_ENROLLMENT_RATE_LIMITED",
+  "detail": "This sponsor cannot start another enrollment during the current rolling day.",
+  "fix_hint": "Wait before starting another enrollment. Existing pending and approved flows remain usable."
+}

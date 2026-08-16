@@ -36,6 +36,9 @@ import {
   EnrollmentReplayConfigurationError,
   type EnrollmentResourceGrants,
   type EnrollmentService,
+  SPONSOR_ENROLLMENT_RATE_LIMIT_ATTEMPTS,
+  SPONSOR_ENROLLMENT_RATE_LIMIT_WINDOW_MS,
+  SponsorEnrollmentRateLimitError,
   type SponsorFellowRecord,
 } from "./service.ts";
 
@@ -486,6 +489,26 @@ function enrollmentErrorResponse(error: EnrollmentError, request: Request): Resp
         "This sponsor cannot activate another Fellow at its current capacity.",
         "Pause or retire an existing Fellow, or ask the operator to raise this sponsor's limit, then retry the exact action.",
       );
+    case "SPONSOR_ENROLLMENT_RATE_LIMITED": {
+      const response = problem(
+        429,
+        error.code,
+        "Sponsor enrollment starts are temporarily limited",
+        "This sponsor cannot start another enrollment during the current rolling day.",
+        "Wait before starting another enrollment. If this was a device flow, begin a fresh device enrollment after the retry window.",
+      );
+      // The authenticated sponsor may see its own coarse current budget, but
+      // not the timing or identity of any contributing attempt.
+      const retryAfterSeconds =
+        error instanceof SponsorEnrollmentRateLimitError
+          ? error.retryAfterSeconds
+          : SPONSOR_ENROLLMENT_RATE_LIMIT_WINDOW_MS / 1_000 + 1;
+      response.headers.set("retry-after", String(retryAfterSeconds));
+      response.headers.set("ratelimit-limit", String(SPONSOR_ENROLLMENT_RATE_LIMIT_ATTEMPTS));
+      response.headers.set("ratelimit-remaining", "0");
+      response.headers.set("ratelimit-reset", String(retryAfterSeconds));
+      return response;
+    }
     case "LIFECYCLE_BUSY": {
       const response = problem(
         429,

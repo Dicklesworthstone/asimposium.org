@@ -24,6 +24,8 @@ import {
   type EnrollmentRecord,
   EnrollmentService,
   InMemoryEnrollmentStore,
+  SPONSOR_ENROLLMENT_RATE_LIMIT_ATTEMPTS,
+  SPONSOR_ENROLLMENT_RATE_LIMIT_WINDOW_MS,
   SPONSOR_STEP_UP_CLOCK_SKEW_SECONDS,
   SPONSOR_STEP_UP_WINDOW_SECONDS,
 } from "../../src/enrollment/service";
@@ -73,6 +75,10 @@ const FELLOW_LIFECYCLE_COMMANDS_MIGRATION = resolve(
 const SPONSOR_FELLOW_CAP_MIGRATION = resolve(
   import.meta.dir,
   "../../../../db/migrations/0013_sponsor_fellow_cap.sql",
+);
+const SPONSOR_ENROLLMENT_RATE_LIMIT_MIGRATION = resolve(
+  import.meta.dir,
+  "../../../../db/migrations/0014_sponsor_enrollment_rate_limit.sql",
 );
 const DEVICE_MIGRATION = resolve(import.meta.dir, "../../../../db/migrations/0009_device_flow.sql");
 const SPONSOR_MIGRATION = resolve(
@@ -216,6 +222,12 @@ function lifecycleCommandDatabase(): Database {
 function sponsorFellowCapDatabase(): Database {
   const sqlite = lifecycleCommandDatabase();
   sqlite.exec(readFileSync(SPONSOR_FELLOW_CAP_MIGRATION, "utf8"));
+  return sqlite;
+}
+
+function sponsorEnrollmentRateDatabase(): Database {
+  const sqlite = sponsorFellowCapDatabase();
+  sqlite.exec(readFileSync(SPONSOR_ENROLLMENT_RATE_LIMIT_MIGRATION, "utf8"));
   return sqlite;
 }
 
@@ -7247,5 +7259,414 @@ describe("0013 sponsor Fellow capacity", () => {
         )
         .get()?.n,
     ).toBe(1);
+  });
+});
+
+describe("0014 sponsor enrollment rolling-day budget", () => {
+  const sponsorId = "usr_fixture_sponsor";
+
+  function rateRecord(label: string, at = NOW): EnrollmentRecord {
+    return {
+      ...record(`rate:${label}`),
+      sponsorId,
+      createdAt: at,
+      secretExpiresAt: at + 30 * 60_000,
+    };
+  }
+
+  test("the migration preserves retained attempts and immediately includes them", async () => {
+    const withDevice = sponsorFellowCapDatabase();
+    const withDeviceStore = new D1EnrollmentStore(localD1(withDevice));
+    for (let ordinal = 1; ordinal < SPONSOR_ENROLLMENT_RATE_LIMIT_ATTEMPTS; ordinal += 1) {
+      expect(await withDeviceStore.create(rateRecord(`retained-${ordinal}`))).toBe(true);
+    }
+    const retainedDevice = deviceInput("retained-device-attempt");
+    await withDeviceStore.deviceCreate(retainedDevice);
+    await withDeviceStore.decision({
+      enrollmentId: retainedDevice.record.enrollmentId,
+      sponsorId,
+      decision: { enrollment_id: retainedDevice.record.enrollmentId, decision: "approve" },
+      now: NOW,
+    });
+
+    withDevice.exec(readFileSync(SPONSOR_ENROLLMENT_RATE_LIMIT_MIGRATION, "utf8"));
+    const currentStore = new D1EnrollmentStore(localD1(withDevice));
+    await expect(currentStore.create(rateRecord("retained-refusal"))).rejects.toMatchObject({
+      code: "SPONSOR_ENROLLMENT_RATE_LIMITED",
+    } satisfies Partial<EnrollmentError>);
+    expect(
+      withDevice.prepare<{ n: number }, []>("SELECT COUNT(*) AS n FROM enrollment_grants").get()?.n,
+    ).toBe(1);
+    expect(
+      withDevice
+        .prepare<{ n: number }, []>("SELECT COUNT(*) AS n FROM sponsor_device_enrollment_attempts")
+        .get()?.n,
+    ).toBe(1);
+    expect(() =>
+      withDevice
+        .prepare("UPDATE sponsor_device_enrollment_attempts SET attempted_at = attempted_at + 1")
+        .run(),
+    ).toThrow("device enrollment attempt is immutable");
+    expect(() =>
+      withDevice.prepare("DELETE FROM sponsor_device_enrollment_attempts").run(),
+    ).toThrow("device enrollment attempt is immutable");
+
+    const withoutDevice = sponsorFellowCapDatabase();
+    const withoutDeviceStore = new D1EnrollmentStore(localD1(withoutDevice));
+    for (let ordinal = 1; ordinal < SPONSOR_ENROLLMENT_RATE_LIMIT_ATTEMPTS; ordinal += 1) {
+      expect(await withoutDeviceStore.create(rateRecord(`join-only-${ordinal}`))).toBe(true);
+    }
+    withoutDevice.exec(readFileSync(SPONSOR_ENROLLMENT_RATE_LIMIT_MIGRATION, "utf8"));
+    await expect(withoutDeviceStore.create(rateRecord("join-only-tenth"))).resolves.toBe(true);
+
+    const retainedOverLimit = sponsorFellowCapDatabase();
+    const retainedOverLimitStore = new D1EnrollmentStore(localD1(retainedOverLimit));
+    const retainedAttempts = SPONSOR_ENROLLMENT_RATE_LIMIT_ATTEMPTS + 25;
+    for (let ordinal = 1; ordinal <= retainedAttempts; ordinal += 1) {
+      expect(await retainedOverLimitStore.create(rateRecord(`over-limit-${ordinal}`))).toBe(true);
+    }
+    retainedOverLimit.exec(readFileSync(SPONSOR_ENROLLMENT_RATE_LIMIT_MIGRATION, "utf8"));
+    await expect(
+      retainedOverLimitStore.create(rateRecord("over-limit-refusal")),
+    ).rejects.toMatchObject({ code: "SPONSOR_ENROLLMENT_RATE_LIMITED" });
+    expect(
+      retainedOverLimit
+        .prepare<{ n: number }, []>("SELECT COUNT(*) AS n FROM enrollment_records")
+        .get()?.n,
+    ).toBe(retainedAttempts);
+  });
+
+  test("the full migration uses indexed durable facts and opens the oldest slot at 24 hours", async () => {
+    const migration = readFileSync(SPONSOR_ENROLLMENT_RATE_LIMIT_MIGRATION, "utf8");
+    expect(migration.match(/LIMIT 11/g)).toHaveLength(2);
+    expect(migration.match(/\) > 10 THEN/g)).toHaveLength(2);
+    expect(migration).toContain("sponsor_device_enrollment_attempts_sponsor_time_idx");
+    expect(migration).toContain("created_at > NEW.created_at - 86400000");
+    expect(migration).toContain("attempted_at > NEW.granted_at - 86400000");
+
+    const reordered = sponsorEnrollmentRateDatabase();
+    const reorderedStore = new D1EnrollmentStore(localD1(reordered));
+    await expect(reorderedStore.create(rateRecord("later-clock", NOW + 1))).resolves.toBe(true);
+    await expect(reorderedStore.create(rateRecord("earlier-clock", NOW))).resolves.toBe(true);
+
+    const reorderedAtLimit = sponsorEnrollmentRateDatabase();
+    const reorderedAtLimitStore = new D1EnrollmentStore(localD1(reorderedAtLimit));
+    for (let ordinal = 1; ordinal < SPONSOR_ENROLLMENT_RATE_LIMIT_ATTEMPTS; ordinal += 1) {
+      await reorderedAtLimitStore.create(rateRecord(`reordered-seed-${ordinal}`, NOW - 1));
+    }
+    await expect(
+      reorderedAtLimitStore.create(rateRecord("reordered-later-final", NOW + 1)),
+    ).resolves.toBe(true);
+    await expect(
+      reorderedAtLimitStore.create(rateRecord("reordered-earlier-refusal", NOW)),
+    ).rejects.toMatchObject({
+      code: "SPONSOR_ENROLLMENT_RATE_LIMITED",
+      retryAfterSeconds: 86402,
+    });
+
+    const sqlite = sponsorEnrollmentRateDatabase();
+    const store = new D1EnrollmentStore(localD1(sqlite));
+    for (let ordinal = 1; ordinal <= SPONSOR_ENROLLMENT_RATE_LIMIT_ATTEMPTS; ordinal += 1) {
+      expect(await store.create(rateRecord(`seed-${ordinal}`))).toBe(true);
+    }
+    expect(
+      sqlite.prepare<{ n: number }, []>("SELECT COUNT(*) AS n FROM enrollment_records").get()?.n,
+    ).toBe(SPONSOR_ENROLLMENT_RATE_LIMIT_ATTEMPTS);
+
+    const refusedWrite = {
+      ...write(fixtureDigest("rate-refused"), "rate-refused"),
+      key: "rate-refused-key",
+    };
+    await expect(
+      store.create(rateRecord("keyed-refusal"), undefined, refusedWrite),
+    ).rejects.toMatchObject({
+      code: "SPONSOR_ENROLLMENT_RATE_LIMITED",
+    } satisfies Partial<EnrollmentError>);
+    expect(
+      sqlite
+        .prepare<{ n: number }, [string]>(
+          "SELECT COUNT(*) AS n FROM enrollment_idempotency WHERE idempotency_key = ?",
+        )
+        .get(refusedWrite.key)?.n,
+    ).toBe(0);
+
+    const predecessorId = rateRecord("seed-1").enrollmentId;
+    await expect(
+      store.create(rateRecord("replacement-refusal"), predecessorId),
+    ).rejects.toMatchObject({
+      code: "SPONSOR_ENROLLMENT_RATE_LIMITED",
+    } satisfies Partial<EnrollmentError>);
+    expect(
+      sqlite
+        .prepare<{ invalidated: number }, [string]>(
+          "SELECT invalidated FROM enrollment_records WHERE enrollment_id = ?",
+        )
+        .get(predecessorId),
+    ).toEqual({ invalidated: 0 });
+    await expect(
+      store.create({ ...rateRecord("other-sponsor"), sponsorId: "usr_rate_other" }),
+    ).resolves.toBe(true);
+
+    await expect(store.create(rateRecord("clock-regression", NOW - 1))).rejects.toMatchObject({
+      code: "SPONSOR_ENROLLMENT_RATE_LIMITED",
+      retryAfterSeconds: 86402,
+    });
+    await expect(
+      store.create(
+        rateRecord("boundary-minus-one", NOW + SPONSOR_ENROLLMENT_RATE_LIMIT_WINDOW_MS - 1),
+      ),
+    ).rejects.toMatchObject({
+      code: "SPONSOR_ENROLLMENT_RATE_LIMITED",
+    } satisfies Partial<EnrollmentError>);
+    await expect(
+      store.create(rateRecord("boundary", NOW + SPONSOR_ENROLLMENT_RATE_LIMIT_WINDOW_MS)),
+    ).resolves.toBe(true);
+
+    const recordPlan = sqlite
+      .prepare<{ detail: string }, [string, number]>(
+        `EXPLAIN QUERY PLAN SELECT COUNT(*) FROM enrollment_records
+          WHERE sponsor_id = ? AND kind = 'join-url' AND created_at > ?`,
+      )
+      .all(sponsorId, NOW)
+      .map((row) => row.detail)
+      .join("\n");
+    expect(recordPlan).toContain("enrollment_records_sponsor_kind_created_idx");
+    const grantPlan = sqlite
+      .prepare<{ detail: string }, [string, number]>(
+        `EXPLAIN QUERY PLAN SELECT COUNT(*)
+           FROM sponsor_device_enrollment_attempts
+          WHERE sponsor_id = ? AND attempted_at > ?`,
+      )
+      .all(sponsorId, NOW)
+      .map((row) => row.detail)
+      .join("\n");
+    expect(grantPlan).toContain("sponsor_device_enrollment_attempts_sponsor_time_idx");
+  });
+
+  test("independent join and device keys contend for one final sponsor slot", async () => {
+    const sqlite = sponsorEnrollmentRateDatabase();
+    const store = new D1EnrollmentStore(localD1(sqlite, { serializeBatches: true }));
+    for (let ordinal = 1; ordinal < SPONSOR_ENROLLMENT_RATE_LIMIT_ATTEMPTS; ordinal += 1) {
+      expect(await store.create(rateRecord(`cross-path-seed-${ordinal}`))).toBe(true);
+    }
+    const device = deviceInput("cross-path-device");
+    await store.deviceCreate(device);
+
+    const joinIdempotency = {
+      ...write(fixtureDigest("cross-path-join"), "cross-path-join"),
+      key: "cross-path-join-key",
+    };
+    const deviceIdempotency = {
+      ...write(fixtureDigest("cross-path-device"), "cross-path-device"),
+      scope: "decision" as const,
+      key: "cross-path-device-key",
+    };
+    const outcomes = await Promise.allSettled([
+      store.create(rateRecord("cross-path-join"), undefined, joinIdempotency),
+      store.decision(
+        {
+          enrollmentId: device.record.enrollmentId,
+          sponsorId,
+          decision: { enrollment_id: device.record.enrollmentId, decision: "approve" },
+          now: NOW,
+        },
+        deviceIdempotency,
+      ),
+    ]);
+
+    expect(outcomes.filter((outcome) => outcome.status === "fulfilled")).toHaveLength(1);
+    const refusal = outcomes.find((outcome) => outcome.status === "rejected");
+    expect(refusal?.status).toBe("rejected");
+    if (refusal?.status === "rejected") {
+      expect(refusal.reason).toMatchObject({
+        code: "SPONSOR_ENROLLMENT_RATE_LIMITED",
+      } satisfies Partial<EnrollmentError>);
+    }
+    const occupied = sqlite
+      .prepare<{ n: number }, [string, string]>(
+        `SELECT
+           (SELECT COUNT(*) FROM enrollment_records
+             WHERE sponsor_id = ? AND kind = 'join-url')
+           +
+           (SELECT COUNT(*) FROM enrollment_grants
+             WHERE sponsor_id = ?) AS n`,
+      )
+      .get(sponsorId, sponsorId)?.n;
+    expect(occupied).toBe(SPONSOR_ENROLLMENT_RATE_LIMIT_ATTEMPTS);
+    expect(
+      sqlite.prepare<{ n: number }, []>("SELECT COUNT(*) AS n FROM enrollment_idempotency").get()
+        ?.n,
+    ).toBe(1);
+
+    const joinWon = outcomes[0]?.status === "fulfilled";
+    expect(
+      sqlite
+        .prepare<{ n: number }, [string]>(
+          "SELECT COUNT(*) AS n FROM enrollment_records WHERE enrollment_id = ?",
+        )
+        .get(rateRecord("cross-path-join").enrollmentId)?.n,
+    ).toBe(joinWon ? 1 : 0);
+    await expect(
+      store.deviceApprovalCardForDecision(device.record.enrollmentId, NOW),
+    ).resolves.toMatchObject({ status: joinWon ? "pending" : "approved" });
+  });
+
+  test("memory and D1 share one budget while defensive device denials stay free", async () => {
+    const fixtures = [
+      { name: "memory", store: new InMemoryEnrollmentStore(), sqlite: undefined },
+      {
+        name: "d1",
+        sqlite: sponsorEnrollmentRateDatabase(),
+        get store() {
+          return new D1EnrollmentStore(localD1(this.sqlite));
+        },
+      },
+    ] as const;
+
+    for (const fixture of fixtures) {
+      const store = fixture.store;
+      for (let ordinal = 1; ordinal < SPONSOR_ENROLLMENT_RATE_LIMIT_ATTEMPTS; ordinal += 1) {
+        expect(
+          await store.create(rateRecord(`${fixture.name}-join-${ordinal}`)),
+          fixture.name,
+        ).toBe(true);
+      }
+
+      const denied = deviceInput(`${fixture.name}-free-deny`);
+      await store.deviceCreate(denied);
+      await store.decision({
+        enrollmentId: denied.record.enrollmentId,
+        sponsorId,
+        decision: { enrollment_id: denied.record.enrollmentId, decision: "deny" },
+        now: NOW,
+      });
+
+      const accepted = deviceInput(`${fixture.name}-accepted`);
+      await store.deviceCreate(accepted);
+      await store.decision({
+        enrollmentId: accepted.record.enrollmentId,
+        sponsorId,
+        decision: { enrollment_id: accepted.record.enrollmentId, decision: "approve" },
+        now: NOW,
+      });
+
+      const refused = deviceInput(`${fixture.name}-refused`);
+      await store.deviceCreate(refused);
+      await expect(
+        store.decision({
+          enrollmentId: refused.record.enrollmentId,
+          sponsorId,
+          decision: { enrollment_id: refused.record.enrollmentId, decision: "approve" },
+          now: NOW,
+        }),
+      ).rejects.toMatchObject({
+        code: "SPONSOR_ENROLLMENT_RATE_LIMITED",
+      } satisfies Partial<EnrollmentError>);
+      await expect(
+        store.create(rateRecord(`${fixture.name}-regressed-clock`, NOW - 1)),
+        fixture.name,
+      ).rejects.toMatchObject({
+        code: "SPONSOR_ENROLLMENT_RATE_LIMITED",
+        retryAfterSeconds: 86402,
+      });
+      await expect(
+        store.deviceApprovalCardForDecision(refused.record.enrollmentId, NOW),
+      ).resolves.toMatchObject({ status: "pending" });
+      await expect(
+        store.create(
+          rateRecord(
+            `${fixture.name}-exact-window-boundary`,
+            NOW + SPONSOR_ENROLLMENT_RATE_LIMIT_WINDOW_MS,
+          ),
+        ),
+        fixture.name,
+      ).resolves.toBe(true);
+
+      if (fixture.sqlite !== undefined) {
+        expect(
+          fixture.sqlite
+            .prepare<{ sponsor_id: string; status: string }, [string]>(
+              `SELECT record.sponsor_id, proposal.status
+                 FROM enrollment_records record
+                 JOIN enrollment_proposals proposal
+                   ON proposal.enrollment_id = record.enrollment_id
+                WHERE record.enrollment_id = ?`,
+            )
+            .get(refused.record.enrollmentId),
+          fixture.name,
+        ).toEqual({ sponsor_id: "", status: "pending" });
+        expect(
+          fixture.sqlite
+            .prepare<{ n: number }, []>("SELECT COUNT(*) AS n FROM enrollment_grants")
+            .get()?.n,
+          fixture.name,
+        ).toBe(1);
+        expect(
+          fixture.sqlite
+            .prepare<{ n: number }, []>(
+              "SELECT COUNT(*) AS n FROM sponsor_device_enrollment_attempts",
+            )
+            .get()?.n,
+          fixture.name,
+        ).toBe(1);
+      }
+    }
+  });
+
+  test("exact mint replay and conflict both outrank a full sponsor budget", async () => {
+    const fixtures = ["memory", "d1"] as const;
+    for (const fixture of fixtures) {
+      const clock = new DeviceTestClock();
+      const sqlite = fixture === "d1" ? sponsorEnrollmentRateDatabase() : undefined;
+      const service = new EnrollmentService({
+        clock,
+        store:
+          sqlite === undefined
+            ? new InMemoryEnrollmentStore()
+            : new D1EnrollmentStore(localD1(sqlite)),
+        replayProtector: new AesGcmEnrollmentReplayProtector(new Uint8Array(32)),
+      });
+      const sponsor = { type: "sponsor", sponsorId: `usr_rate_${fixture}` } as const;
+      const request = { requested_scopes: ["review" as const] };
+      const first = await service.mint(sponsor, request, {
+        idempotencyKey: `rate-${fixture}-1`,
+      });
+      for (let ordinal = 2; ordinal <= SPONSOR_ENROLLMENT_RATE_LIMIT_ATTEMPTS; ordinal += 1) {
+        await service.mint(sponsor, request, {
+          idempotencyKey: `rate-${fixture}-${ordinal}`,
+        });
+      }
+
+      await expect(
+        service.mint(sponsor, request, { idempotencyKey: `rate-${fixture}-1` }),
+      ).resolves.toEqual(first);
+      await expect(
+        service.mint(
+          sponsor,
+          { requested_scopes: ["promote"] },
+          { idempotencyKey: `rate-${fixture}-1` },
+        ),
+      ).rejects.toMatchObject({ code: "IDEMPOTENCY_CONFLICT" });
+      await expect(
+        service.mint(sponsor, request, { idempotencyKey: `rate-${fixture}-11` }),
+      ).rejects.toMatchObject({ code: "SPONSOR_ENROLLMENT_RATE_LIMITED" });
+
+      if (sqlite !== undefined) {
+        expect(
+          sqlite
+            .prepare<{ n: number }, [string]>(
+              "SELECT COUNT(*) AS n FROM enrollment_records WHERE sponsor_id = ?",
+            )
+            .get(sponsor.sponsorId)?.n,
+        ).toBe(SPONSOR_ENROLLMENT_RATE_LIMIT_ATTEMPTS);
+        expect(
+          sqlite
+            .prepare<{ n: number }, [string]>(
+              "SELECT COUNT(*) AS n FROM enrollment_idempotency WHERE principal_scope = ?",
+            )
+            .get(`sponsor:${sponsor.sponsorId}`)?.n,
+        ).toBe(SPONSOR_ENROLLMENT_RATE_LIMIT_ATTEMPTS);
+      }
+    }
   });
 });

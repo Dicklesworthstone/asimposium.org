@@ -78,8 +78,8 @@ function unavailable(): Response {
  *  - a same-key/different-digest collision keeps its 409 and its exact code;
  *  - a device-start source limit keeps its production 429;
  *  - `WRONG_PRINCIPAL` and `STEP_UP_REQUIRED` keep 403;
- *  - every other typed enrollment failure keeps its exact code at 400, which is
- *    what the local-D1 client asserts for a name collision;
+ *  - typed rate limits keep 429, while every other typed enrollment failure
+ *    keeps its exact code at 400, which the client asserts for a name collision;
  *  - an untyped throw is operational, not a client error.
  *
  * Only `code` is ever emitted. No ciphertext, no key, no digest, no raw message.
@@ -93,7 +93,12 @@ function localFailure(error: unknown): Response {
   }
   if (error instanceof EnrollmentError) {
     if (error.code === "IDEMPOTENCY_CONFLICT") return response({ code: error.code }, 409);
-    if (error.code === "DEVICE_START_RATE_LIMITED") return response({ code: error.code }, 429);
+    if (
+      error.code === "DEVICE_START_RATE_LIMITED" ||
+      error.code === "SPONSOR_ENROLLMENT_RATE_LIMITED"
+    ) {
+      return response({ code: error.code }, 429);
+    }
     if (error.code === "WRONG_PRINCIPAL" || error.code === "STEP_UP_REQUIRED") {
       return response({ code: error.code }, 403);
     }
@@ -192,6 +197,36 @@ export default {
       }
     }
 
+    if (request.method === "POST" && url.pathname === "/__s1/sponsor-enrollment-counts") {
+      const body = await localBody(request);
+      if (body === undefined || typeof body.sponsor_id !== "string") {
+        return response({ code: "LOCAL_INPUT_INVALID" }, 400);
+      }
+      try {
+        const counts = await env.DB.prepare(
+          `SELECT
+             (SELECT COUNT(*) FROM enrollment_records
+               WHERE sponsor_id = ? AND kind = 'join-url') AS join_attempts,
+             (SELECT COUNT(*) FROM sponsor_device_enrollment_attempts
+               WHERE sponsor_id = ?) AS device_attempts`,
+        )
+          .bind(body.sponsor_id, body.sponsor_id)
+          .first<{ readonly join_attempts: number; readonly device_attempts: number }>();
+        if (
+          counts === null ||
+          !Number.isSafeInteger(counts.join_attempts) ||
+          !Number.isSafeInteger(counts.device_attempts) ||
+          counts.join_attempts < 0 ||
+          counts.device_attempts < 0
+        ) {
+          return unavailable();
+        }
+        return response(counts);
+      } catch {
+        return unavailable();
+      }
+    }
+
     if (request.method === "POST" && url.pathname === "/__s1/advance-device-ttl") {
       const body = await localBody(request);
       if (body === undefined || Object.keys(body).length !== 0 || localClockOffsetMs !== 0) {
@@ -229,6 +264,27 @@ export default {
           { idempotencyKey: request.headers.get("idempotency-key") ?? undefined },
         );
         return response({ acknowledged: true });
+      } catch (error) {
+        return localFailure(error);
+      }
+    }
+
+    if (request.method === "POST" && url.pathname === "/__s1/device-lookup") {
+      const body = await localBody(request);
+      if (
+        body === undefined ||
+        typeof body.sponsor_id !== "string" ||
+        typeof body.user_code !== "string"
+      ) {
+        return response({ code: "LOCAL_INPUT_INVALID" }, 400);
+      }
+      try {
+        return response({
+          card: await service.deviceLookup(
+            { type: "sponsor", sponsorId: body.sponsor_id },
+            { user_code: body.user_code },
+          ),
+        });
       } catch (error) {
         return localFailure(error);
       }
