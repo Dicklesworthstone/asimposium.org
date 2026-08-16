@@ -11,6 +11,7 @@ import {
   FellowRegistrationRequestSchema,
   MintEnrollmentRequestSchema,
   MintEnrollmentResponseSchema,
+  SponsorBootstrapRequestSchema,
   SponsorEnrollmentDecisionResponseSchema,
   SponsorEnrollmentDecisionSchema,
   SponsorFellowListResponseSchema,
@@ -42,6 +43,22 @@ const INVALID_DECISION_TARGET_FIXTURE = new URL(
   "../fixtures/invalid/enrollment-decision-missing-target.json",
   import.meta.url,
 );
+const INVALID_NUL_REGISTRATION_FIXTURE = new URL(
+  "../fixtures/invalid/enrollment-nul-persisted-text.json",
+  import.meta.url,
+);
+const VALID_BOOTSTRAP_REQUEST_FIXTURE = new URL(
+  "../fixtures/valid/enrollment-bootstrap-request.json",
+  import.meta.url,
+);
+const INVALID_BOOTSTRAP_REQUEST_FIXTURE = new URL(
+  "../fixtures/invalid/enrollment-bootstrap-request-extra.json",
+  import.meta.url,
+);
+const GENERATED_ENROLLMENT_SCHEMA = new URL(
+  "../../generated/enrollment.schema.json",
+  import.meta.url,
+);
 
 /** The synthetic enrollment every decision fixture in this suite decides. */
 const DECISION_TARGET = "ASIMP-EN-01JXYZ4K6Q";
@@ -71,6 +88,19 @@ test("the body-only Fellow registration contract accepts the synthetic valid fix
   }
 });
 
+test("the generated enrollment registry exposes the exact strict sponsor bootstrap body", async () => {
+  const generated = (await fixture(GENERATED_ENROLLMENT_SCHEMA)) as {
+    readonly required?: readonly string[];
+    readonly properties?: Record<string, unknown>;
+  };
+  expect(generated.required).toContain("sponsor_bootstrap_request");
+  expect(generated.properties?.sponsor_bootstrap_request).toEqual({
+    type: "object",
+    properties: {},
+    additionalProperties: false,
+  });
+});
+
 test("planted malformed enrollment secret is rejected", async () => {
   const parsed = FellowRegistrationRequestSchema.safeParse(await fixture(INVALID_FIXTURE));
 
@@ -91,6 +121,27 @@ test("credential fields remain inspectable for teachable names while malformed s
     FellowRegistrationCredentialFieldsSchema.safeParse({
       ...body,
       secret: MALFORMED_ENROLLMENT_SECRET,
+    }).success,
+  ).toBe(false);
+});
+
+test("persisted SQLite-facing text rejects NUL before migration or trigger length checks", async () => {
+  expect(
+    FellowRegistrationRequestSchema.safeParse(await fixture(INVALID_NUL_REGISTRATION_FIXTURE))
+      .success,
+  ).toBe(false);
+  expect(
+    DeviceCodeStartRequestSchema.safeParse({
+      name: "nul-device",
+      model: "model\u0000suffix",
+      harness: "test-harness",
+      requested_scopes: ["review"],
+    }).success,
+  ).toBe(false);
+  expect(
+    MintEnrollmentRequestSchema.safeParse({
+      requested_scopes: ["review"],
+      first_directive: `x\u0000${"a".repeat(2_100)}`,
     }).success,
   ).toBe(false);
 });
@@ -208,6 +259,17 @@ test("resource-grant fixtures prove strict mint and reduce contract boundaries",
   expect(
     SponsorEnrollmentDecisionSchema.safeParse(await fixture(INVALID_REDUCE_FIXTURE)).success,
   ).toBe(false);
+});
+
+test("sponsor bootstrap is the strict empty JSON object", async () => {
+  expect(
+    SponsorBootstrapRequestSchema.safeParse(await fixture(VALID_BOOTSTRAP_REQUEST_FIXTURE)).success,
+  ).toBe(true);
+  expect(
+    SponsorBootstrapRequestSchema.safeParse(await fixture(INVALID_BOOTSTRAP_REQUEST_FIXTURE))
+      .success,
+  ).toBe(false);
+  expect(SponsorBootstrapRequestSchema.safeParse([]).success).toBe(false);
 });
 
 test("decision fixtures prove the enrollment target is mandatory in the signed body", async () => {

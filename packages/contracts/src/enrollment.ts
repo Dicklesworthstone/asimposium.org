@@ -69,7 +69,15 @@ export const EnrollmentProblemBindingSchema = z
   .string()
   .regex(/^P-[A-Z0-9]{4,26}$/, "invalid problem binding");
 
-export const EnrollmentFirstDirectiveSchema = z.string().trim().min(1).max(2_000);
+// These values cross SQLite's text functions in migration and trigger proofs.
+// SQLite length/substr stop at U+0000 while JavaScript strings do not, so NUL
+// must be excluded at the shared contract rather than accepted with divergent
+// length semantics across the two runtimes.
+// biome-ignore lint/suspicious/noControlCharactersInRegex: U+0000 is the exact cross-runtime hazard excluded here.
+const EnrollmentSqlTextSchema = z.string().regex(/^[^\u0000]*$/, "must not contain NUL");
+export const EnrollmentDeclaredRuntimeSchema = EnrollmentSqlTextSchema.trim().min(1).max(160);
+
+export const EnrollmentFirstDirectiveSchema = EnrollmentSqlTextSchema.trim().min(1).max(2_000);
 export const EnrollmentEventBudgetSchema = z.number().int().min(1).max(10_000);
 export const EnrollmentArtifactBudgetBytesSchema = z.number().int().min(0).max(1_073_741_824);
 export const EnrollmentFellowGrantExpirySchema = z.number().int().positive().max(31_536_000_000);
@@ -84,8 +92,8 @@ export const FellowRegistrationCredentialFieldsSchema = z
   .object({
     enrollment_id: EnrollmentIdSchema,
     secret: EnrollmentSecretSchema,
-    model: z.string().trim().min(1).max(160),
-    harness: z.string().trim().min(1).max(160),
+    model: EnrollmentDeclaredRuntimeSchema,
+    harness: EnrollmentDeclaredRuntimeSchema,
     reasoning_effort: z.string().trim().min(1).max(80).optional(),
     tools_note: z.string().trim().min(1).max(1_000).optional(),
   })
@@ -96,8 +104,8 @@ export const FellowRegistrationRequestSchema = z
     enrollment_id: EnrollmentIdSchema,
     secret: EnrollmentSecretSchema,
     name: FellowNameSchema,
-    model: z.string().trim().min(1).max(160),
-    harness: z.string().trim().min(1).max(160),
+    model: EnrollmentDeclaredRuntimeSchema,
+    harness: EnrollmentDeclaredRuntimeSchema,
     reasoning_effort: z.string().trim().min(1).max(80).optional(),
     tools_note: z.string().trim().min(1).max(1_000).optional(),
   })
@@ -132,8 +140,8 @@ export const EnrollmentApprovalCardSchema = z
     proposal_id: z.string().min(1).max(80),
     status: EnrollmentProposalStatusSchema,
     name: FellowNameSchema,
-    model: z.string().min(1).max(160),
-    harness: z.string().min(1).max(160),
+    model: EnrollmentDeclaredRuntimeSchema,
+    harness: EnrollmentDeclaredRuntimeSchema,
     reasoning_effort: z.string().min(1).max(80).optional(),
     tools_note: z.string().min(1).max(1_000).optional(),
     requested_scopes: z.array(RequestedScopeSchema).min(1).max(4),
@@ -161,8 +169,8 @@ export const EnrollmentCapsuleGuidanceSchema = z
         enrollment_id: EnrollmentIdSchema,
         secret: EnrollmentSecretSchema,
         name: FellowNameSchema,
-        model: z.string().min(1).max(160),
-        harness: z.string().min(1).max(160),
+        model: EnrollmentDeclaredRuntimeSchema,
+        harness: EnrollmentDeclaredRuntimeSchema,
       })
       .strict(),
     registration_example_notice: z.string().min(1).max(500),
@@ -237,8 +245,8 @@ export const DEVICE_USER_CODE_PATTERN =
 export const DeviceCodeStartRequestSchema = z
   .object({
     name: FellowNameSchema,
-    model: z.string().trim().min(1).max(160),
-    harness: z.string().trim().min(1).max(160),
+    model: EnrollmentDeclaredRuntimeSchema,
+    harness: EnrollmentDeclaredRuntimeSchema,
     reasoning_effort: z.string().trim().min(1).max(80).optional(),
     tools_note: z.string().trim().min(1).max(1_000).optional(),
     requested_scopes: z.array(RequestedScopeSchema).min(1).max(4),
@@ -275,8 +283,8 @@ export const EnrollmentHelloResponseSchema = z
       .object({
         fellow_id: z.string().min(1).max(80),
         name: FellowNameSchema,
-        model: z.string().min(1).max(160),
-        harness: z.string().min(1).max(160),
+        model: EnrollmentDeclaredRuntimeSchema,
+        harness: EnrollmentDeclaredRuntimeSchema,
       })
       .strict(),
     granted_scopes: z.array(RequestedScopeSchema).min(1).max(4),
@@ -377,8 +385,8 @@ export const SponsorFellowSummarySchema = z
   .object({
     fellow_id: z.string().min(1).max(160),
     name: FellowNameSchema,
-    model: z.string().min(1).max(160),
-    harness: z.string().min(1).max(160),
+    model: EnrollmentDeclaredRuntimeSchema,
+    harness: EnrollmentDeclaredRuntimeSchema,
     status: FellowLifecycleStatusSchema,
     granted_scopes: z.array(RequestedScopeSchema).min(1).max(4),
     granted_resources: EnrollmentResourceGrantsSchema,
@@ -402,6 +410,9 @@ export const SponsorFellowListResponseSchema = z
 export const SponsorEnrollmentDecisionResponseSchema = z
   .object({ acknowledged: z.literal(true) })
   .strict();
+
+/** Sponsor bootstrap has no caller-controlled fields, but it is still an exact JSON write. */
+export const SponsorBootstrapRequestSchema = z.object({}).strict();
 
 /**
  * Sponsor bootstrap (W3.1): first contact through the Worker creates the
@@ -468,6 +479,7 @@ export const EnrollmentContractsSchema = z
     sponsor_fellow_summary: SponsorFellowSummarySchema,
     sponsor_fellow_list_response: SponsorFellowListResponseSchema,
     sponsor_enrollment_decision_response: SponsorEnrollmentDecisionResponseSchema,
+    sponsor_bootstrap_request: SponsorBootstrapRequestSchema,
     sponsor_bootstrap_response: SponsorBootstrapResponseSchema,
     device_code_start_request: DeviceCodeStartRequestSchema,
     device_code_start_response: DeviceCodeStartResponseSchema,
@@ -505,6 +517,7 @@ export type SponsorFellowListResponse = z.infer<typeof SponsorFellowListResponse
 export type SponsorEnrollmentDecisionResponse = z.infer<
   typeof SponsorEnrollmentDecisionResponseSchema
 >;
+export type SponsorBootstrapRequest = z.infer<typeof SponsorBootstrapRequestSchema>;
 export type SponsorBootstrapResponse = z.infer<typeof SponsorBootstrapResponseSchema>;
 export type DeviceCodeStartRequest = z.infer<typeof DeviceCodeStartRequestSchema>;
 export type DeviceCodeStartResponse = z.infer<typeof DeviceCodeStartResponseSchema>;

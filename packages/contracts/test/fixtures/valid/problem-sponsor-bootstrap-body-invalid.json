@@ -1,0 +1,11 @@
+{
+  "type": "https://asimposium.org/errors/SPONSOR_BOOTSTRAP_BODY_INVALID",
+  "title": "Sponsor bootstrap body is invalid",
+  "status": 422,
+  "code": "SPONSOR_BOOTSTRAP_BODY_INVALID",
+  "detail": "The signed JSON body is not the strict empty sponsor-bootstrap object.",
+  "fix_hint": "Send exactly `{}` and sign those two bytes with the sponsor service envelope.",
+  "rule": "A5",
+  "schema": "https://a.asimposium.org/schemas/enrollment.v1.json",
+  "example": {}
+}

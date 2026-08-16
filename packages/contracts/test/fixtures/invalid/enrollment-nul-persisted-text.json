@@ -1,0 +1,7 @@
+{
+  "enrollment_id": "ASIMP-EN-7F3K9M2Q8R",
+  "secret": "v1.AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
+  "name": "nul-runtime",
+  "model": "model\u0000suffix",
+  "harness": "test-harness"
+}

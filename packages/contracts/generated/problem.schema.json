@@ -39,14 +39,17 @@
                     "HARNESS_AS_NAME",
                     "IDEMPOTENCY_CONFLICT",
                     "IDEMPOTENCY_KEY_INVALID",
+                    "JSON_CONTENT_TYPE_REQUIRED",
                     "MINT_BODY_INVALID",
                     "MODEL_AS_NAME",
                     "NAME_INVALID",
                     "NAME_RESERVED",
                     "NAME_TAKEN",
                     "PATH_ONLY_REQUIRED",
+                    "REGISTRATION_BODY_INVALID",
                     "SCOPE_ESCALATION",
-                    "SCOPE_NOT_REDUCED"
+                    "SCOPE_NOT_REDUCED",
+                    "SPONSOR_BOOTSTRAP_BODY_INVALID"
                   ]
                 },
                 "detail": {
@@ -275,14 +278,17 @@
                 "HARNESS_AS_NAME",
                 "IDEMPOTENCY_CONFLICT",
                 "IDEMPOTENCY_KEY_INVALID",
+                "JSON_CONTENT_TYPE_REQUIRED",
                 "MINT_BODY_INVALID",
                 "MODEL_AS_NAME",
                 "NAME_INVALID",
                 "NAME_RESERVED",
                 "NAME_TAKEN",
                 "PATH_ONLY_REQUIRED",
+                "REGISTRATION_BODY_INVALID",
                 "SCOPE_ESCALATION",
-                "SCOPE_NOT_REDUCED"
+                "SCOPE_NOT_REDUCED",
+                "SPONSOR_BOOTSTRAP_BODY_INVALID"
               ]
             },
             "detail": {
@@ -489,14 +495,17 @@
         "HARNESS_AS_NAME",
         "IDEMPOTENCY_CONFLICT",
         "IDEMPOTENCY_KEY_INVALID",
+        "JSON_CONTENT_TYPE_REQUIRED",
         "MINT_BODY_INVALID",
         "MODEL_AS_NAME",
         "NAME_INVALID",
         "NAME_RESERVED",
         "NAME_TAKEN",
         "PATH_ONLY_REQUIRED",
+        "REGISTRATION_BODY_INVALID",
         "SCOPE_ESCALATION",
         "SCOPE_NOT_REDUCED",
+        "SPONSOR_BOOTSTRAP_BODY_INVALID",
         "UNKNOWN_FORMAT",
         "AUTH_REPLAY_STORE_UNAVAILABLE",
         "CAPSULE_UNAVAILABLE",

@@ -50,6 +50,14 @@ const VALID_ADDITIONAL_PROBLEMS = [
   ["problem-internal-error.json", "INTERNAL_ERROR", 500, "opaque"],
   ["problem-enrollment-id-invalid.json", "ENROLLMENT_ID_INVALID", 422, "contract"],
   ["problem-device-code-body-invalid.json", "DEVICE_CODE_BODY_INVALID", 422, "contract"],
+  ["problem-json-content-type-required.json", "JSON_CONTENT_TYPE_REQUIRED", 415, "contract"],
+  ["problem-registration-body-invalid.json", "REGISTRATION_BODY_INVALID", 422, "contract"],
+  [
+    "problem-sponsor-bootstrap-body-invalid.json",
+    "SPONSOR_BOOTSTRAP_BODY_INVALID",
+    422,
+    "contract",
+  ],
   ["problem-device-start-rate-limited.json", "DEVICE_START_RATE_LIMITED", 429, "opaque"],
   ["problem-unknown-format.json", "UNKNOWN_FORMAT", 400, "contract"],
 ] as const;

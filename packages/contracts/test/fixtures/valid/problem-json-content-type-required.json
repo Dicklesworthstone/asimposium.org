@@ -1,0 +1,23 @@
+{
+  "type": "https://asimposium.org/errors/JSON_CONTENT_TYPE_REQUIRED",
+  "title": "JSON Content-Type required",
+  "status": 415,
+  "code": "JSON_CONTENT_TYPE_REQUIRED",
+  "detail": "This write accepts a JSON document only when its media type is application/json.",
+  "fix_hint": "Set Content-Type: application/json and send the documented JSON body.",
+  "rule": "A5",
+  "schema": "https://a.asimposium.org/schemas/enrollment.v1.json",
+  "example": {
+    "method": "POST",
+    "path": "/v1/device-code",
+    "headers": {
+      "content-type": "application/json"
+    },
+    "body": {
+      "name": "orchid-vector",
+      "model": "example-lab/orchid-1",
+      "harness": "codex",
+      "requested_scopes": ["review"]
+    }
+  }
+}
