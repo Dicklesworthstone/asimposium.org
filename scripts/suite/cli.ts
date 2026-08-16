@@ -99,7 +99,7 @@ const OWNED_PROCESS_PIPE_DRAIN_MS = 500;
 const OWNED_PROCESS_STREAM_RETAINED_BYTES = 64 * 1024;
 const OWNED_PROCESS_AGGREGATE_RETAINED_BYTES = 96 * 1024;
 const OWNED_PROCESS_CONTROL_BUFFER_CHARS = 512;
-const OWNED_PROCESS_INSPECTION_TIMEOUT_MS = 200;
+const OWNED_PROCESS_INSPECTION_TIMEOUT_MS = 500;
 const OWNED_PROCESS_INSPECTION_STREAM_RETAINED_BYTES = 64 * 1024;
 const OWNED_PROCESS_INSPECTION_AGGREGATE_RETAINED_BYTES = 96 * 1024;
 const OWNED_PROCESS_MAX_INSPECTIONS_PER_CLEANUP = 4;
@@ -497,7 +497,10 @@ async function inspectOwnedProcessGroup(
   let snapshot: ReturnType<typeof Bun.spawn>;
   try {
     snapshot = Bun.spawn({
-      cmd: options.command === undefined ? ["/usr/bin/pgrep", "-g", String(leaderPid)] : [...options.command],
+      cmd:
+        options.command === undefined
+          ? ["/usr/bin/pgrep", "-g", String(leaderPid)]
+          : [...options.command],
       env: environmentForSuite(),
       stdin: "ignore",
       stdout: "pipe",
@@ -817,7 +820,10 @@ async function drainWithin(
   streams: readonly CapturedStream[],
   milliseconds: number,
 ): Promise<boolean> {
-  const drained = await valueBefore(Promise.all(streams.map((stream) => stream.done)), milliseconds);
+  const drained = await valueBefore(
+    Promise.all(streams.map((stream) => stream.done)),
+    milliseconds,
+  );
   if (drained !== undefined && !streams.some((stream) => stream.failed())) return true;
   await Promise.all(streams.map((stream) => stream.cancel()));
   return false;
@@ -861,12 +867,14 @@ async function releaseOrKillOwnedSession(
   memberCount?: number,
   inspector?: OwnedSessionInspectorOptions,
 ): Promise<OwnedCommandOutcome | undefined> {
-  const inspection = inspector ?? inspectionOptions({
-    command: [],
-    cwd: "",
-    env: {},
-    timeoutMs: 0,
-  });
+  const inspection =
+    inspector ??
+    inspectionOptions({
+      command: [],
+      cwd: "",
+      env: {},
+      timeoutMs: 0,
+    });
   const cleanupDeadlineAt =
     performance.now() +
     termGraceMs +
@@ -937,7 +945,9 @@ async function releaseOrKillOwnedSession(
     if (afterTerm.members.some((member) => member.pid !== leaderPid)) {
       const killed = await killOwnedGroupAndProveEmpty();
       if (killed !== undefined) return killed;
-    } else if ((await releaseOwnedLeader(leaderPid, inspection, cleanupDeadlineAt)) !== "released") {
+    } else if (
+      (await releaseOwnedLeader(leaderPid, inspection, cleanupDeadlineAt)) !== "released"
+    ) {
       return abandon("ownership-unproven");
     }
     return timeout ? "timeout" : "descendant-leaked";
@@ -998,7 +1008,13 @@ export async function runOwnedCommand(options: OwnedCommandOptions): Promise<Own
   let child: ReturnType<typeof Bun.spawn>;
   try {
     child = Bun.spawn({
-      cmd: ["perl", "-e", options.supervisorScript ?? OWNED_SESSION_SUPERVISOR, nonce, ...options.command],
+      cmd: [
+        "perl",
+        "-e",
+        options.supervisorScript ?? OWNED_SESSION_SUPERVISOR,
+        nonce,
+        ...options.command,
+      ],
       cwd: options.cwd,
       env: options.env,
       stdin: "ignore",
@@ -1041,9 +1057,26 @@ export async function runOwnedCommand(options: OwnedCommandOptions): Promise<Own
   // before any group signal can be considered owned.
   const supervisorPid = await valueBefore(stderr.ready, options.timeoutMs);
   if (supervisorPid === undefined) {
-    killDirectChild(child, "SIGKILL");
-    await reapDirectChild(child, killReapMs);
-    outcome = stdout.overflowed() || stderr.overflowed() ? "ownership-unproven" : "spawn-failed";
+    // A command deadline may elapse while its ready record is still queued. The
+    // direct child PID is a separate OS fact: only a fresh bounded census may
+    // promote it to a cleanup target. It never promotes pre-ready product bytes
+    // into a trusted output-overrun result.
+    const cleanup = await releaseOrKillOwnedSession(
+      child,
+      child.pid,
+      termGraceMs,
+      killReapMs,
+      true,
+      undefined,
+      inspector,
+    );
+    cleanupProven = cleanup === "timeout";
+    outcome =
+      stdout.overflowed() || stderr.overflowed()
+        ? "ownership-unproven"
+        : cleanup === "timeout"
+          ? "timeout"
+          : (cleanup ?? "spawn-failed");
   } else if (supervisorPid !== child.pid) {
     const cleanup = await releaseOrKillOwnedSession(
       child,
@@ -1088,17 +1121,16 @@ export async function runOwnedCommand(options: OwnedCommandOptions): Promise<Own
       if (completion?.kind === "output-overrun") {
         await finishOutputOverrun();
       } else if (completion === undefined || completion.control === undefined) {
-      outcome =
-        (await releaseOrKillOwnedSession(
-          child,
-          supervisorPid,
-          termGraceMs,
-          killReapMs,
-          true,
-          undefined,
-          inspector,
-        )) ??
-        "ownership-unproven";
+        outcome =
+          (await releaseOrKillOwnedSession(
+            child,
+            supervisorPid,
+            termGraceMs,
+            killReapMs,
+            true,
+            undefined,
+            inspector,
+          )) ?? "ownership-unproven";
       } else {
         const control = completion.control;
         exitCode = control.exitCode;
@@ -1194,9 +1226,9 @@ async function runToolchainIntegrationStep(
               ? "TOOLCHAIN_INTEGRATION_PIPE_DRAIN_UNPROVEN"
               : result.outcome === "inspection-unproven"
                 ? "TOOLCHAIN_INTEGRATION_INSPECTION_UNPROVEN"
-              : result.outcome === "ownership-unproven"
-                ? "TOOLCHAIN_INTEGRATION_OWNERSHIP_UNPROVEN"
-                : "TOOLCHAIN_INTEGRATION_SPAWN_FAILED";
+                : result.outcome === "ownership-unproven"
+                  ? "TOOLCHAIN_INTEGRATION_OWNERSHIP_UNPROVEN"
+                  : "TOOLCHAIN_INTEGRATION_SPAWN_FAILED";
     return {
       ...base,
       duration_ms: Math.round(performance.now() - startedAt),
@@ -1565,9 +1597,9 @@ async function runUnit(
               ? "SUITE_PIPE_DRAIN_UNPROVEN"
               : result.outcome === "inspection-unproven"
                 ? "SUITE_CLEANUP_INSPECTION_UNPROVEN"
-              : result.outcome === "ownership-unproven"
-                ? "SUITE_CLEANUP_OWNERSHIP_UNPROVEN"
-                : "SUITE_SPAWN_FAILED";
+                : result.outcome === "ownership-unproven"
+                  ? "SUITE_CLEANUP_OWNERSHIP_UNPROVEN"
+                  : "SUITE_SPAWN_FAILED";
     return {
       record: "unit",
       tool: TOOL,
@@ -1597,13 +1629,13 @@ async function runUnit(
               ? `"${command}" exited while a same-session descendant remained; ` +
                 "the dispatcher terminated the owned process group."
               : result.outcome === "pipe-drain-unproven"
-              ? `"${command}" released its owned session but inherited output pipes remained open.`
-              : result.outcome === "inspection-unproven"
-                ? `"${command}" could not complete its bounded owned-group inspection; ` +
-                  "the direct supervisor was stopped, but group cleanup could not be proved."
-                : result.outcome === "ownership-unproven"
-                  ? `"${command}" lost its owned session identity before cleanup could be proved.`
-                  : `"${command}" could not start the owned session supervisor.`,
+                ? `"${command}" released its owned session but inherited output pipes remained open.`
+                : result.outcome === "inspection-unproven"
+                  ? `"${command}" could not complete its bounded owned-group inspection; ` +
+                    "the direct supervisor was stopped, but group cleanup could not be proved."
+                  : result.outcome === "ownership-unproven"
+                    ? `"${command}" lost its owned session identity before cleanup could be proved.`
+                    : `"${command}" could not start the owned session supervisor.`,
     };
   }
 
