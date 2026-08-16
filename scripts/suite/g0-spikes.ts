@@ -1468,37 +1468,57 @@ export async function runG0Spikes(options: G0RunOptions): Promise<G0RunSummary> 
   return summarize(results, Math.round(performance.now() - startedAt));
 }
 
+/**
+ * Redact string fields before JSON encoding.
+ *
+ * Clipped credential shapes are deliberately recognized only at the end of an
+ * individual diagnostic field. Redacting the serialized JSON instead puts a
+ * closing quote after that field and hides the boundary from the scanner.
+ * Keeping the traversal here also preserves the aggregate's exact schema: only
+ * string values change, while keys, numbers, arrays, and object shape do not.
+ */
+function redactDiagnosticFields<T>(value: T, root: string): T {
+  if (typeof value === "string") return redact(value, root) as T;
+  if (Array.isArray(value)) {
+    return value.map((entry) => redactDiagnosticFields(entry, root)) as T;
+  }
+  if (typeof value === "object" && value !== null) {
+    return Object.fromEntries(
+      Object.entries(value).map(([key, entry]) => [key, redactDiagnosticFields(entry, root)]),
+    ) as T;
+  }
+  return value;
+}
+
 /** Serialize only the aggregate; child output is replayed on stderr, never here. */
 export function formatG0Summary(summary: G0RunSummary, root: string): string {
   return JSON.stringify(
-    JSON.parse(
-      redact(
-        JSON.stringify({
-          tool: "bun",
-          package: "asimposium",
-          suite: "g0-spikes-integration",
-          version: Bun.version,
-          duration_ms: summary.durationMs,
-          status: summary.status,
-          exit_code: summary.exitCode,
-          code: summary.code,
-          totals: summary.totals,
-          spikes: summary.results.map((result) => ({
-            id: result.id,
-            status: result.status,
-            code: result.code,
-            duration_ms: result.durationMs,
-            ...(result.exitCode === undefined ? {} : { exit_code: result.exitCode }),
-            ...(result.signal === undefined ? {} : { signal: result.signal }),
-            ...(result.outputTruncated === undefined
-              ? {}
-              : { output_truncated: result.outputTruncated }),
-          })),
-          s4: "owned by e2e/test:integration and intentionally not duplicated here",
-          reproduce: "bun run test:integration",
-        }),
-        root,
-      ),
+    redactDiagnosticFields(
+      {
+        tool: "bun",
+        package: "asimposium",
+        suite: "g0-spikes-integration",
+        version: Bun.version,
+        duration_ms: summary.durationMs,
+        status: summary.status,
+        exit_code: summary.exitCode,
+        code: summary.code,
+        totals: summary.totals,
+        spikes: summary.results.map((result) => ({
+          id: result.id,
+          status: result.status,
+          code: result.code,
+          duration_ms: result.durationMs,
+          ...(result.exitCode === undefined ? {} : { exit_code: result.exitCode }),
+          ...(result.signal === undefined ? {} : { signal: result.signal }),
+          ...(result.outputTruncated === undefined
+            ? {}
+            : { output_truncated: result.outputTruncated }),
+        })),
+        s4: "owned by e2e/test:integration and intentionally not duplicated here",
+        reproduce: "bun run test:integration",
+      },
+      root,
     ),
   );
 }
@@ -1511,22 +1531,20 @@ export function signalExitCode(signal: "SIGINT" | "SIGTERM"): number {
 /** Fail-closed diagnostic for a manifest that never got as far as running. */
 export function formatManifestFailure(error: G0ManifestError, root: string): string {
   return JSON.stringify(
-    JSON.parse(
-      redact(
-        JSON.stringify({
-          tool: "bun",
-          package: "asimposium",
-          suite: "g0-spikes-integration",
-          version: Bun.version,
-          duration_ms: 0,
-          status: "fail",
-          exit_code: 1,
-          code: error.code,
-          detail: error.detail,
-          reproduce: "bun run test:integration",
-        }),
-        root,
-      ),
+    redactDiagnosticFields(
+      {
+        tool: "bun",
+        package: "asimposium",
+        suite: "g0-spikes-integration",
+        version: Bun.version,
+        duration_ms: 0,
+        status: "fail",
+        exit_code: 1,
+        code: error.code,
+        detail: error.detail,
+        reproduce: "bun run test:integration",
+      },
+      root,
     ),
   );
 }

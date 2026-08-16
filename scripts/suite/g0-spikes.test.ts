@@ -1174,7 +1174,7 @@ describe("D9 — child output stays out of the stdout contract", () => {
     async () => {
       const root = fixtureRoot();
       const captured: string[] = [];
-      const token = "asimp_ag_abcdefghijklmnop";
+      const token = "asimp_ag_abcdefghijklmnop"; // ubs:ignore — deliberately inert redaction fixture
       await runG0Spikes({
         root,
         spikes: [executable(root, "s1", `printf '%s\\n' ${JSON.stringify(token)} >&2; exit 1`)],
@@ -1243,7 +1243,7 @@ describe("D9 — child output stays out of the stdout contract", () => {
     }
   });
 
-  test("PLANTED: a clipped credential prefix is redacted before an aggregate record is emitted", () => {
+  test("PLANTED: clipped credential fields are redacted without consuming a safe near-miss", () => {
     const root = fixtureRoot();
     const serialized = formatG0Summary(
       {
@@ -1251,7 +1251,7 @@ describe("D9 — child output stays out of the stdout contract", () => {
         code: "G0_SPIKES_FAILED",
         exitCode: 1,
         durationMs: 0,
-        totals: { pass: 0, fail: 1, blocked: 0 },
+        totals: { pass: 0, fail: 3, blocked: 0 },
         results: [
           {
             // This is the prefix a 3-byte capture ceiling can leave behind: it
@@ -1262,14 +1262,42 @@ describe("D9 — child output stays out of the stdout contract", () => {
             durationMs: 0,
             exitCode: 1,
           },
+          {
+            // A short prefix inside an ordinary path is not evidence of
+            // truncation: the shared scanner intentionally requires the
+            // clipped shape to end its individual field.
+            id: "safe/asimp_ag_xyz/report",
+            status: "fail",
+            code: "G0_SPIKE_FAILED",
+            durationMs: 0,
+            exitCode: 1,
+          },
+          {
+            // Both a complete credential and a separately clipped suffix in
+            // one field must be removed; stopping after one hit leaks the
+            // second value.
+            // ubs:ignore — deliberately inert complete-plus-clipped redaction fixture
+            id: "asimp_ag_abcdefghijklmnop then asimp_ag_def",
+            status: "fail",
+            code: "G0_SPIKE_FAILED",
+            durationMs: 0,
+            exitCode: 1,
+          },
         ],
       },
       root,
     );
 
+    const record = JSON.parse(serialized) as { spikes: Array<{ id: string }> };
     expect(serialized).not.toContain(root);
-    expect(serialized).not.toContain("asimp_ag_");
-    expect(serialized).toContain("<redacted>");
+    expect(serialized).not.toContain("asimp_ag_abc");
+    expect(serialized).not.toContain("asimp_ag_abcdefghijklmnop");
+    expect(serialized).not.toContain("asimp_ag_def");
+    expect(record.spikes.map(({ id }) => id)).toEqual([
+      "<repo>/<redacted>",
+      "safe/asimp_ag_xyz/report",
+      "<redacted> then <redacted>",
+    ]);
   });
 });
 
