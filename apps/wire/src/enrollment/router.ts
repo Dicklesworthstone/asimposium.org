@@ -12,8 +12,8 @@ import {
   SponsorBootstrapResponseSchema,
   SponsorCredentialRevokeRequestSchema,
   SponsorCredentialRevokeResponseSchema,
+  SponsorEnrollmentDecisionCommandSchema,
   SponsorEnrollmentDecisionResponseSchema,
-  SponsorEnrollmentDecisionSchema,
   SponsorFellowLifecycleRequestSchema,
   SponsorFellowLifecycleResponseSchema,
   SponsorFellowListResponseSchema,
@@ -320,6 +320,7 @@ function enrollmentErrorResponse(error: EnrollmentError, request: Request): Resp
             example: {
               enrollment_id: "ASIMP-EN-01JXYZ4K6Q",
               decision: "deny",
+              step_up_authenticated_at: 1_786_800_000,
             },
             suggestions: error.suggestions,
           },
@@ -370,6 +371,7 @@ function enrollmentErrorResponse(error: EnrollmentError, request: Request): Resp
           example: {
             enrollment_id: "ASIMP-EN-01JXYZ4K6Q",
             decision: "approve",
+            step_up_authenticated_at: 1_786_800_000,
           },
         },
       );
@@ -550,6 +552,7 @@ function enrollmentErrorResponse(error: EnrollmentError, request: Request): Resp
             enrollment_id: "ASIMP-EN-01JXYZ4K6Q",
             decision: "reduce",
             reduction: { scopes: ["review"] },
+            step_up_authenticated_at: 1_786_800_000,
           },
         },
       );
@@ -567,6 +570,7 @@ function enrollmentErrorResponse(error: EnrollmentError, request: Request): Resp
             enrollment_id: "ASIMP-EN-01JXYZ4K6Q",
             decision: "reduce",
             reduction: { scopes: ["review"] },
+            step_up_authenticated_at: 1_786_800_000,
           },
         },
       );
@@ -628,7 +632,7 @@ function decisionBodyInvalidResponse(): Response {
     "DECISION_BODY_INVALID",
     "Sponsor decision body is invalid",
     "The signed JSON body does not match the sponsor decision contract.",
-    "Send a strict approve, deny, or reduce object that includes the enrollment id named by the request path, then sign those exact bytes.",
+    "Send a strict approve, deny, or reduce command with the enrollment id named by the request path and Agora's server-stamped recent-auth time, then sign those exact bytes.",
     {
       rule: "ADR-20",
       schema: ENROLLMENT_SCHEMA_URL,
@@ -642,6 +646,7 @@ function decisionBodyInvalidResponse(): Response {
         body: {
           enrollment_id: "ASIMP-EN-01JXYZ4K6Q",
           decision: "approve",
+          step_up_authenticated_at: 1_786_800_000,
         },
       },
     },
@@ -662,7 +667,11 @@ function enrollmentIdInvalidResponse(): Response {
         "content-type": "application/json",
         "Idempotency-Key": "decision-01JXYZ4K6Q",
       },
-      body: { enrollment_id: "ASIMP-EN-01JXYZ4K6Q", decision: "approve" },
+      body: {
+        enrollment_id: "ASIMP-EN-01JXYZ4K6Q",
+        decision: "approve",
+        step_up_authenticated_at: 1_786_800_000,
+      },
     }),
   );
 }
@@ -1312,6 +1321,7 @@ function mountSponsorRoutes(app: Hono, options: EnrollmentRouterOptions): void {
         {
           enrollment_id: "ASIMP-EN-01JXYZ4K6Q",
           decision: "approve",
+          step_up_authenticated_at: 1_786_800_000,
         },
         true,
       );
@@ -1330,7 +1340,7 @@ function mountSponsorRoutes(app: Hono, options: EnrollmentRouterOptions): void {
       } catch {
         return decisionBodyInvalidResponse();
       }
-      const parsed = SponsorEnrollmentDecisionSchema.safeParse(decisionBody);
+      const parsed = SponsorEnrollmentDecisionCommandSchema.safeParse(decisionBody);
       if (!parsed.success) {
         return decisionBodyInvalidResponse();
       }

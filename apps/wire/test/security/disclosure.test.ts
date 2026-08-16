@@ -127,12 +127,16 @@ function capsuleDb(secretExpiresAt: number): {
   const row = {
     enrollment_id: ENROLLMENT_ID,
     sponsor_id: "usr_cache_regression",
-    secret_hash: "not-returned",
+    kind: "join-url",
+    secret_hash: "a".repeat(64),
     secret_expires_at: secretExpiresAt,
     requested_scopes_json: JSON.stringify(["review"]),
     requested_resources_json: "{}",
     invalidated: 0,
     secret_consumed_at: null,
+    record_created_at: secretExpiresAt - 60_000,
+    requested_resource_key_count: 0,
+    requested_resource_distinct_key_count: 0,
   };
   const db = {
     prepare() {

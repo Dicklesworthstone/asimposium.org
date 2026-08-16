@@ -14,6 +14,7 @@ import {
   SponsorBootstrapRequestSchema,
   SponsorCredentialRevokeRequestSchema,
   SponsorCredentialRevokeResponseSchema,
+  SponsorEnrollmentDecisionCommandSchema,
   SponsorEnrollmentDecisionResponseSchema,
   SponsorEnrollmentDecisionSchema,
   SponsorFellowLifecycleRequestSchema,
@@ -45,8 +46,16 @@ const VALID_DECISION_FIXTURE = new URL(
   "../fixtures/valid/enrollment-decision-approve.json",
   import.meta.url,
 );
+const VALID_DECISION_COMMAND_FIXTURE = new URL(
+  "../fixtures/valid/enrollment-decision-command-approve.json",
+  import.meta.url,
+);
 const INVALID_DECISION_TARGET_FIXTURE = new URL(
   "../fixtures/invalid/enrollment-decision-missing-target.json",
+  import.meta.url,
+);
+const INVALID_DECISION_COMMAND_FIXTURE = new URL(
+  "../fixtures/invalid/enrollment-decision-command-fractional-step-up.json",
   import.meta.url,
 );
 const INVALID_NUL_REGISTRATION_FIXTURE = new URL(
@@ -252,6 +261,37 @@ test("a sponsor decision cannot omit or malform the enrollment it decides", () =
         .success,
     ).toBe(false);
   }
+});
+
+test("the signed decision command requires server-stamped step-up evidence without changing intent", async () => {
+  const intent = await fixture(VALID_DECISION_FIXTURE);
+  const command = await fixture(VALID_DECISION_COMMAND_FIXTURE);
+  expect(SponsorEnrollmentDecisionSchema.safeParse(intent).success).toBe(true);
+  expect(SponsorEnrollmentDecisionSchema.safeParse(command).success).toBe(false);
+  expect(SponsorEnrollmentDecisionCommandSchema.safeParse(intent).success).toBe(false);
+  expect(SponsorEnrollmentDecisionCommandSchema.safeParse(command).success).toBe(true);
+  expect(
+    SponsorEnrollmentDecisionCommandSchema.safeParse(
+      await fixture(INVALID_DECISION_COMMAND_FIXTURE),
+    ).success,
+  ).toBe(false);
+  for (const stepUp of [-1, Number.NaN, Number.POSITIVE_INFINITY]) {
+    expect(
+      SponsorEnrollmentDecisionCommandSchema.safeParse({
+        enrollment_id: DECISION_TARGET,
+        decision: "deny",
+        step_up_authenticated_at: stepUp,
+      }).success,
+    ).toBe(false);
+  }
+  expect(
+    SponsorEnrollmentDecisionCommandSchema.safeParse({
+      enrollment_id: DECISION_TARGET,
+      decision: "approve",
+      step_up_authenticated_at: 1_786_800_000,
+      browser_claimed_recent_auth: true,
+    }).success,
+  ).toBe(false);
 });
 
 test("minting includes bounded optional problem, directive, budget, and expiry grants", () => {

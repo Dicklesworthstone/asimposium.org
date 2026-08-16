@@ -7,12 +7,12 @@ import type {
 } from "@asimposium/contracts";
 import {
   MintEnrollmentRequestSchema,
+  SponsorEnrollmentDecisionCommandSchema,
   SponsorEnrollmentDecisionSchema,
 } from "@asimposium/contracts";
 import { revalidatePath } from "next/cache";
 
 import { auth } from "@/auth";
-import { recentAuthOk } from "@/lib/recent-auth";
 import {
   bestEffortEnrollmentCacheInvalidation,
   enrollmentRecoveryConfigurationIsValid,
@@ -22,12 +22,9 @@ import {
   openEnrollmentRecoveryPayload,
   sealEnrollmentRecoveryPayload,
 } from "@/lib/enrollment-recovery";
+import { recentAuthOk } from "@/lib/recent-auth";
 import { isCanonicalSponsorId } from "@/lib/sponsor-id";
-import {
-  stoaDecideProposal,
-  stoaDeviceLookup,
-  stoaMintEnrollment,
-} from "@/lib/stoa";
+import { stoaDecideProposal, stoaDeviceLookup, stoaMintEnrollment } from "@/lib/stoa";
 
 export type MintResult =
   | {
@@ -48,15 +45,10 @@ export type DeviceLookupResult =
   | { readonly ok: false; readonly message: string };
 
 /** W3.5: find a pending device proposal by its human code. Read-only; decisions go through decideProposal with the recent-auth gate. */
-export async function lookupDeviceCode(
-  userCode: string,
-): Promise<DeviceLookupResult> {
+export async function lookupDeviceCode(userCode: string): Promise<DeviceLookupResult> {
   const sponsor = await requireSponsorId();
   if (!sponsor.ok) return sponsor;
-  const result = await stoaDeviceLookup(
-    sponsor.sponsorId,
-    userCode.trim().toUpperCase(),
-  );
+  const result = await stoaDeviceLookup(sponsor.sponsorId, userCode.trim().toUpperCase());
   if (!result.ok) {
     return {
       ok: false,
@@ -92,15 +84,10 @@ export type EnrollmentAttemptFingerprintResult =
 
 const ENROLLMENT_RECOVERY_WINDOW_MS = 24 * 60 * 60 * 1_000;
 
-async function recoveryOwnerForSponsor(
-  sponsorId: string,
-): Promise<string | undefined> {
+async function recoveryOwnerForSponsor(sponsorId: string): Promise<string | undefined> {
   const rootHex = process.env.ENROLLMENT_RECOVERY_HMAC_KEY_HEX;
   if (
-    !enrollmentRecoveryConfigurationIsValid(
-      rootHex,
-      process.env.SERVICE_ENVELOPE_PRIVATE_KEY_HEX,
-    )
+    !enrollmentRecoveryConfigurationIsValid(rootHex, process.env.SERVICE_ENVELOPE_PRIVATE_KEY_HEX)
   ) {
     return undefined;
   }
@@ -115,17 +102,11 @@ async function recoveryOwnerMatchesSponsor(
   sponsorId: string,
   expectedRecoveryOwner: unknown,
 ): Promise<boolean> {
-  if (
-    typeof expectedRecoveryOwner !== "string" ||
-    !/^[a-f0-9]{64}$/.test(expectedRecoveryOwner)
-  ) {
+  if (typeof expectedRecoveryOwner !== "string" || !/^[a-f0-9]{64}$/.test(expectedRecoveryOwner)) {
     return false;
   }
   const currentRecoveryOwner = await recoveryOwnerForSponsor(sponsorId);
-  return (
-    currentRecoveryOwner !== undefined &&
-    currentRecoveryOwner === expectedRecoveryOwner
-  );
+  return currentRecoveryOwner !== undefined && currentRecoveryOwner === expectedRecoveryOwner;
 }
 
 async function requireSponsorId(): Promise<
@@ -137,13 +118,11 @@ async function requireSponsorId(): Promise<
   | { readonly ok: false; readonly message: string }
 > {
   const session = await auth();
-  if (session?.user === undefined)
-    return { ok: false, message: "Not signed in." };
+  if (session?.user === undefined) return { ok: false, message: "Not signed in." };
   if (!isCanonicalSponsorId(session.user.id)) {
     return {
       ok: false,
-      message:
-        "Your sponsor identity has not been bootstrapped on this deployment.",
+      message: "Your sponsor identity has not been bootstrapped on this deployment.",
     };
   }
   return {
@@ -194,10 +173,7 @@ export async function fingerprintEnrollmentAttempt(
   }
   const rootHex = process.env.ENROLLMENT_RECOVERY_HMAC_KEY_HEX;
   if (
-    !enrollmentRecoveryConfigurationIsValid(
-      rootHex,
-      process.env.SERVICE_ENVELOPE_PRIVATE_KEY_HEX,
-    )
+    !enrollmentRecoveryConfigurationIsValid(rootHex, process.env.SERVICE_ENVELOPE_PRIVATE_KEY_HEX)
   ) {
     return {
       ok: false,
@@ -205,12 +181,7 @@ export async function fingerprintEnrollmentAttempt(
     };
   }
   try {
-    if (
-      !(await recoveryOwnerMatchesSponsor(
-        sponsor.sponsorId,
-        expectedRecoveryOwner,
-      ))
-    ) {
+    if (!(await recoveryOwnerMatchesSponsor(sponsor.sponsorId, expectedRecoveryOwner))) {
       return {
         ok: false,
         message:
@@ -256,11 +227,7 @@ export async function mintJoinUrl(
   idempotencyKey: string,
   expectedRecoveryOwner: string,
 ): Promise<MintResult> {
-  return dispatchPreparedMint(
-    recoveryPayload,
-    idempotencyKey,
-    expectedRecoveryOwner,
-  );
+  return dispatchPreparedMint(recoveryPayload, idempotencyKey, expectedRecoveryOwner);
 }
 
 async function dispatchPreparedMint(
@@ -270,12 +237,7 @@ async function dispatchPreparedMint(
 ): Promise<MintResult> {
   const sponsor = await requireSponsorId();
   if (!sponsor.ok) return { ...sponsor, recovery: "retain" };
-  if (
-    !(await recoveryOwnerMatchesSponsor(
-      sponsor.sponsorId,
-      expectedRecoveryOwner,
-    ))
-  ) {
+  if (!(await recoveryOwnerMatchesSponsor(sponsor.sponsorId, expectedRecoveryOwner))) {
     return {
       ok: false,
       recovery: "retain",
@@ -285,16 +247,12 @@ async function dispatchPreparedMint(
   }
   const rootHex = process.env.ENROLLMENT_RECOVERY_HMAC_KEY_HEX;
   if (
-    !enrollmentRecoveryConfigurationIsValid(
-      rootHex,
-      process.env.SERVICE_ENVELOPE_PRIVATE_KEY_HEX,
-    )
+    !enrollmentRecoveryConfigurationIsValid(rootHex, process.env.SERVICE_ENVELOPE_PRIVATE_KEY_HEX)
   ) {
     return {
       ok: false,
       recovery: "retain",
-      message:
-        "This deployment cannot open the prepared mint. Do not start a replacement.",
+      message: "This deployment cannot open the prepared mint. Do not start a replacement.",
     };
   }
   try {
@@ -309,12 +267,8 @@ async function dispatchPreparedMint(
     if (
       !parsed.success ||
       opened.idempotencyKey !== idempotencyKey ||
-      (await enrollmentRecoveryFingerprint(
-        rootHex,
-        sponsor.sponsorId,
-        "mint",
-        parsed.data,
-      )) !== opened.fingerprint
+      (await enrollmentRecoveryFingerprint(rootHex, sponsor.sponsorId, "mint", parsed.data)) !==
+        opened.fingerprint
     ) {
       throw new Error("invalid recovery payload");
     }
@@ -341,11 +295,7 @@ async function dispatchMint(
       recovery:
         result.reason === "unconfigured"
           ? "retain"
-          : enrollmentRecoveryDisposition(
-              result.reason,
-              result.status,
-              result.problemCode,
-            ),
+          : enrollmentRecoveryDisposition(result.reason, result.status, result.problemCode),
       message:
         result.reason === "unconfigured"
           ? "This deployment is not wired to the agent host."
@@ -369,29 +319,21 @@ export async function recoverMintJoinUrl(
   idempotencyKey: string,
   expectedRecoveryOwner: string,
 ): Promise<MintResult> {
-  return dispatchPreparedMint(
-    recoveryPayload,
-    idempotencyKey,
-    expectedRecoveryOwner,
-  );
+  return dispatchPreparedMint(recoveryPayload, idempotencyKey, expectedRecoveryOwner);
 }
 
 /**
  * Approve, reduce, or deny a pending proposal. This is a permanent public
- * binding, so W3.4 requires a recent interactive Google sign-in. The stable
- * server-stamped `authIssuedAt` is used here, never refreshable JWT `iat` or a
- * client-supplied time.
+ * binding, so W3.4 requires recent signed Google authentication evidence. The
+ * provider `auth_time` projected as `authIssuedAt` is used here, never
+ * refreshable JWT `iat`, callback arrival, or a client-supplied time.
  */
 export async function decideProposal(
   recoveryPayload: string,
   idempotencyKey: string,
   expectedRecoveryOwner: string,
 ): Promise<DecideResult> {
-  return dispatchPreparedDecision(
-    recoveryPayload,
-    idempotencyKey,
-    expectedRecoveryOwner,
-  );
+  return dispatchPreparedDecision(recoveryPayload, idempotencyKey, expectedRecoveryOwner);
 }
 
 async function dispatchPreparedDecision(
@@ -401,12 +343,7 @@ async function dispatchPreparedDecision(
 ): Promise<DecideResult> {
   const sponsor = await requireSponsorId();
   if (!sponsor.ok) return { ...sponsor, recovery: "retain" };
-  if (
-    !(await recoveryOwnerMatchesSponsor(
-      sponsor.sponsorId,
-      expectedRecoveryOwner,
-    ))
-  ) {
+  if (!(await recoveryOwnerMatchesSponsor(sponsor.sponsorId, expectedRecoveryOwner))) {
     return {
       ok: false,
       recovery: "retain",
@@ -414,26 +351,23 @@ async function dispatchPreparedDecision(
         "Your sponsor session changed after this decision was prepared. Reload under the intended sponsor, then retry the exact unchanged decision.",
     };
   }
-  if (!recentAuthOk(sponsor.authIssuedAt)) {
+  const stepUpAuthenticatedAt = sponsor.authIssuedAt;
+  if (typeof stepUpAuthenticatedAt !== "number" || !recentAuthOk(stepUpAuthenticatedAt)) {
     return {
       ok: false,
       recovery: "retain",
       message:
-        "Decisions need a Google sign-in from the last 15 minutes. Use Reauthenticate for decisions on this page, then decide again. The proposal is unchanged.",
+        "Decisions need a Google authentication time from the last 15 minutes. Recheck the Google evidence on this page; if it remains stale, sign in to your Google Account again. The proposal is unchanged.",
     };
   }
   const rootHex = process.env.ENROLLMENT_RECOVERY_HMAC_KEY_HEX;
   if (
-    !enrollmentRecoveryConfigurationIsValid(
-      rootHex,
-      process.env.SERVICE_ENVELOPE_PRIVATE_KEY_HEX,
-    )
+    !enrollmentRecoveryConfigurationIsValid(rootHex, process.env.SERVICE_ENVELOPE_PRIVATE_KEY_HEX)
   ) {
     return {
       ok: false,
       recovery: "retain",
-      message:
-        "This deployment cannot open the prepared decision. Do not start a replacement.",
+      message: "This deployment cannot open the prepared decision. Do not start a replacement.",
     };
   }
   try {
@@ -448,12 +382,8 @@ async function dispatchPreparedDecision(
     if (
       !parsed.success ||
       opened.idempotencyKey !== idempotencyKey ||
-      (await enrollmentRecoveryFingerprint(
-        rootHex,
-        sponsor.sponsorId,
-        "decision",
-        parsed.data,
-      )) !== opened.fingerprint
+      (await enrollmentRecoveryFingerprint(rootHex, sponsor.sponsorId, "decision", parsed.data)) !==
+        opened.fingerprint
     ) {
       throw new Error("invalid recovery payload");
     }
@@ -462,6 +392,7 @@ async function dispatchPreparedDecision(
       parsed.data.enrollment_id,
       parsed.data,
       opened.idempotencyKey,
+      stepUpAuthenticatedAt,
     );
   } catch {
     return {
@@ -478,24 +409,20 @@ async function dispatchDecision(
   enrollmentId: string,
   decision: SponsorEnrollmentDecision,
   idempotencyKey: string,
+  stepUpAuthenticatedAt: number,
 ): Promise<DecideResult> {
-  const result = await stoaDecideProposal(
-    sponsorId,
-    enrollmentId,
-    decision,
-    idempotencyKey,
-  );
+  const command = SponsorEnrollmentDecisionCommandSchema.parse({
+    ...decision,
+    step_up_authenticated_at: stepUpAuthenticatedAt,
+  });
+  const result = await stoaDecideProposal(sponsorId, enrollmentId, command, idempotencyKey);
   if (!result.ok) {
     return {
       ok: false,
       recovery:
         result.reason === "unconfigured"
           ? "retain"
-          : enrollmentRecoveryDisposition(
-              result.reason,
-              result.status,
-              result.problemCode,
-            ),
+          : enrollmentRecoveryDisposition(result.reason, result.status, result.problemCode),
       message:
         result.reason === "unconfigured"
           ? "This deployment is not wired to the agent host. The proposal is unchanged."
@@ -514,9 +441,5 @@ export async function recoverProposalDecision(
   idempotencyKey: string,
   expectedRecoveryOwner: string,
 ): Promise<DecideResult> {
-  return dispatchPreparedDecision(
-    recoveryPayload,
-    idempotencyKey,
-    expectedRecoveryOwner,
-  );
+  return dispatchPreparedDecision(recoveryPayload, idempotencyKey, expectedRecoveryOwner);
 }

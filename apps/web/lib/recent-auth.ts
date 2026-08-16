@@ -1,10 +1,13 @@
 /** Decision step-up window from W3.4, in whole epoch seconds. */
 export const RECENT_DECISION_WINDOW_SECONDS = 15 * 60;
+/** Match the signed Agora-to-Stoa envelope's bounded inter-plane clock skew. */
+export const RECENT_AUTH_CLOCK_SKEW_SECONDS = 60;
 
 /**
- * Fail-closed freshness check for the server-stamped interactive sign-in time.
- * Future, fractional, non-finite, and unsafe integers are not authentication
- * evidence; accepting any of them would turn clock/data corruption into access.
+ * Fail-closed freshness check for Google's signed authentication time.
+ * Fractional, non-finite, unsafe, and beyond-skew future values are not
+ * authentication evidence; accepting them would turn clock/data corruption
+ * into access.
  */
 export function recentAuthOk(
   authIssuedAt: number | undefined,
@@ -20,5 +23,8 @@ export function recentAuthOk(
     return false;
   }
   const age = nowSeconds - authIssuedAt;
-  return age >= 0 && age <= RECENT_DECISION_WINDOW_SECONDS;
+  return (
+    age >= -RECENT_AUTH_CLOCK_SKEW_SECONDS &&
+    age <= RECENT_DECISION_WINDOW_SECONDS + RECENT_AUTH_CLOCK_SKEW_SECONDS
+  );
 }

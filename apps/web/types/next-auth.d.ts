@@ -3,9 +3,9 @@ import type {} from "next-auth/jwt";
 
 /**
  * Propylon session additions. `authIssuedAt` carries the stable custom JWT
- * claim stamped only by an interactive Google sign-in (epoch seconds). The
- * standard JWT `iat` is deliberately unusable here: Auth.js refreshes it on
- * ordinary session reads.
+ * claim copied only from Google's validated ID-token `auth_time` claim
+ * (epoch seconds). The standard JWT `iat` is deliberately unusable here:
+ * Auth.js refreshes it on ordinary session reads.
  */
 declare module "next-auth" {
   interface Session {

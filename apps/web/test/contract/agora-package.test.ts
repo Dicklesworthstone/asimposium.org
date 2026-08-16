@@ -54,9 +54,7 @@ describe("Propylon configuration (Fable §5.1, §14.1) — structural guard", ()
   test("the shipped auth.ts satisfies every Propylon rule", () => {
     // Parsed, not pattern-matched: an adversarial probe defeated the three
     // regexes this replaced by reformatting, hyphenating and destructuring.
-    expect(formatAuthViolations(validateAuthFile(PACKAGE_DIR))).toBe(
-      "no violations",
-    );
+    expect(formatAuthViolations(validateAuthFile(PACKAGE_DIR))).toBe("no violations");
   });
 
   test("the configured provider set is exactly the Google module", () => {
@@ -71,7 +69,22 @@ describe("Propylon configuration (Fable §5.1, §14.1) — structural guard", ()
     expect(surface.imports).toEqual([
       "next-auth",
       "next-auth/providers/google",
+      "./lib/sponsor-id",
     ]);
+  });
+
+  test("OAuth callbacks request and preserve Google's signed authentication time", () => {
+    const configuredGoogle = surface.providers.entries[0]?.text ?? "";
+    expect(configuredGoogle).toContain(
+      `claims: '{"id_token":{"auth_time":{"essential":true}}}'`,
+    );
+    expect(configuredGoogle).not.toContain('prompt: "login"');
+    expect(configuredGoogle).not.toContain("max_age");
+    for (const page of ["app/page.tsx", "app/console/page.tsx", "app/approve/page.tsx"]) {
+      const source = readPackageFile(page);
+      expect(source).not.toContain('prompt: "login"');
+      expect(source).not.toContain("max_age");
+    }
   });
 
   test("the exported Propylon surface comes from that very factory call", () => {
@@ -127,15 +140,18 @@ describe("sponsor console trust boundary", () => {
     expect(stoa).not.toContain("mintServiceEnvelope");
   });
 
-  test("Google subjects are not promoted to Worker sponsor ids", () => {
-    expect(auth).not.toMatch(/session\.user\.id\s*=\s*token\.sub/);
+  test("validated Google subjects deterministically become opaque Worker sponsor ids", () => {
+    expect(auth).toContain(
+      'import { isCanonicalSponsorId, sponsorIdFromGoogleSubject } from "./lib/sponsor-id"',
+    );
+    expect(auth).toContain("token.sub = await sponsorIdFromGoogleSubject(profile?.sub)");
+    expect(auth).toContain("if (isCanonicalSponsorId(token.sub)) session.user.id = token.sub");
+    expect(auth).not.toMatch(/session\.user\.id\s*=\s*`usr_\$\{token\.sub\}`/);
     expect(actions).toContain("isCanonicalSponsorId");
   });
 
   test("server actions parse decision bodies at runtime before dispatch", () => {
-    expect(actions).toContain(
-      "SponsorEnrollmentDecisionSchema.safeParse(opened.request)",
-    );
+    expect(actions).toContain("SponsorEnrollmentDecisionSchema.safeParse(opened.request)");
     expect(actions).toContain("parsed.data.enrollment_id,");
     expect(actions).toContain("return dispatchPreparedDecision(");
     expect(actions).toContain("recoveryPayload,");
@@ -143,31 +159,19 @@ describe("sponsor console trust boundary", () => {
 
   test("sponsor minting sends validated, configurable least-authority enrollment settings", () => {
     const cards = readPackageFile("app/console/cards.tsx");
-    expect(actions).toContain(
-      "MintEnrollmentRequestSchema.safeParse(opened.request)",
-    );
-    expect(actions).toContain(
-      "stoaMintEnrollment(sponsorId, request, idempotencyKey)",
-    );
+    expect(actions).toContain("MintEnrollmentRequestSchema.safeParse(opened.request)");
+    expect(actions).toContain("stoaMintEnrollment(sponsorId, request, idempotencyKey)");
     expect(actions).not.toContain(
       'requested_scopes: ["promote", "review", "propose-problems", "upload-artifacts"]',
     );
-    expect(cards).toContain(
-      'recoveredDraft?.requested_scopes ?? ["promote", "review"]',
-    );
+    expect(cards).toContain('recoveredDraft?.requested_scopes ?? ["promote", "review"]');
     expect(cards).toContain("Broader powers are");
     expect(cards).toContain("opt-in.");
-    expect(cards).toContain(
-      "problem_binding: problemBinding.trim().toUpperCase()",
-    );
+    expect(cards).toContain("problem_binding: problemBinding.trim().toUpperCase()");
     expect(cards).toContain("first_directive: firstDirective.trim()");
     expect(cards).toContain("event_budget: eventLimit");
-    expect(cards).toContain(
-      "artifact_budget_bytes: artifactLimitMiB * 1_048_576",
-    );
-    expect(cards).toContain(
-      "fellow_grant_expires_in_ms: grantLifetimeDays * 86_400_000",
-    );
+    expect(cards).toContain("artifact_budget_bytes: artifactLimitMiB * 1_048_576");
+    expect(cards).toContain("fellow_grant_expires_in_ms: grantLifetimeDays * 86_400_000");
     expect(cards).toContain("expires_in_ms: joinLifetimeMinutes * 60_000");
   });
 
@@ -199,15 +203,11 @@ describe("sponsor console trust boundary", () => {
     const consolePage = readPackageFile("app/console/page.tsx");
     const approvePage = readPackageFile("app/approve/page.tsx");
     const rootLayout = readPackageFile("app/layout.tsx");
-    const recoverySentinel = readPackageFile(
-      "app/enrollment-recovery-sentinel.tsx",
-    );
+    const recoverySentinel = readPackageFile("app/enrollment-recovery-sentinel.tsx");
     expect(actions).toContain("did not confirm the mint");
     expect(actions).toContain("Retry without changing these settings");
     expect(actions).toContain("did not confirm the outcome");
-    expect(actions).not.toContain(
-      "The agent host did not answer. The proposal is unchanged.",
-    );
+    expect(actions).not.toContain("The agent host did not answer. The proposal is unchanged.");
     expect(cards).toContain("optionalDurationMilliseconds");
     expect(cards).toContain("Grant lifetime from decision (seconds)");
     expect(cards).toContain("resources.event_budget - 1");
@@ -223,23 +223,20 @@ describe("sponsor console trust boundary", () => {
     expect(actions).toContain("recoverProposalDecision(");
     expect(actions).toContain("opened.idempotencyKey !== idempotencyKey");
     expect(actions).toContain("opened.idempotencyKey,");
+    expect(actions).toContain("SponsorEnrollmentDecisionCommandSchema.parse");
+    expect(actions).toContain("step_up_authenticated_at: stepUpAuthenticatedAt");
+    expect(stoa).toContain("SponsorEnrollmentDecisionCommand");
     expect(actions).toContain("recoveryOwnerMatchesSponsor(");
     expect(actions).toContain("currentRecoveryOwner !== undefined &&");
     expect(actions).toContain("currentRecoveryOwner === expectedRecoveryOwner");
     expect(
-      consolePage.match(
-        /key=\{recoveryOwner \?\? "enrollment-writes-unavailable"\}/g,
-      ),
+      consolePage.match(/key=\{recoveryOwner \?\? "enrollment-writes-unavailable"\}/g),
     ).toHaveLength(2);
-    expect(approvePage).toContain(
-      'key={recoveryOwner ?? "enrollment-writes-unavailable"}',
-    );
+    expect(approvePage).toContain('key={recoveryOwner ?? "enrollment-writes-unavailable"}');
     const approveForm = readPackageFile("app/approve/form.tsx");
     expect(approveForm).toContain("<DecisionRecoveryList");
     expect(approveForm).toContain("onDecisionRecovered=");
-    expect(approveForm).toContain(
-      "cardDecisionUnresolved || retainedDecisionUnresolved",
-    );
+    expect(approveForm).toContain("cardDecisionUnresolved || retainedDecisionUnresolved");
     expect(rootLayout).toContain("<EnrollmentRecoverySentinel />");
     expect(recoverySentinel).toContain('addEventListener("beforeunload"');
     expect(recoverySentinel).toContain(
@@ -262,14 +259,9 @@ describe("sponsor console trust boundary", () => {
     const mintCall = cards.indexOf("const result = await mintJoinUrl(");
     const successStart = cards.indexOf("if (result.ok)", mintCall);
     const successEnd = cards.indexOf("} else {", successStart);
-    const remember = cards.indexOf(
-      "successfulMintFingerprint.current =",
-      successStart,
-    );
+    const remember = cards.indexOf("successfulMintFingerprint.current =", successStart);
     const display = cards.indexOf("setJoinUrl(result.joinUrl)", successStart);
-    const doneStart = cards.indexOf(
-      "const fingerprint = successfulMintFingerprint.current",
-    );
+    const doneStart = cards.indexOf("const fingerprint = successfulMintFingerprint.current");
     const acknowledge = cards.indexOf("clearEnrollmentAttempt(", doneStart);
     const dismiss = cards.indexOf("setJoinUrl(null)", doneStart);
     for (const position of [
@@ -285,9 +277,7 @@ describe("sponsor console trust boundary", () => {
       expect(position).toBeGreaterThanOrEqual(0);
     }
     expect(remember).toBeLessThan(display);
-    expect(cards.slice(successStart, successEnd)).not.toContain(
-      "clearEnrollmentAttempt",
-    );
+    expect(cards.slice(successStart, successEnd)).not.toContain("clearEnrollmentAttempt");
     expect(doneStart).toBeLessThan(acknowledge);
     expect(acknowledge).toBeLessThan(dismiss);
     expect(idempotency).not.toContain("subtle.digest");
@@ -297,13 +287,15 @@ describe("sponsor console trust boundary", () => {
     expect(idempotency).toContain("No enrollment write was sent");
   });
 
-  test("the explicit step-up buttons force a Google challenge", () => {
+  test("the evidence-refresh buttons use only Google's supported account chooser", () => {
     const consolePage = readPackageFile("app/console/page.tsx");
     const approvePage = readPackageFile("app/approve/page.tsx");
     for (const page of [consolePage, approvePage]) {
-      expect(page).toContain('prompt: "login"');
-      expect(page).toContain('max_age: "0"');
-      expect(page).toContain("Reauthenticate for decisions");
+      expect(page).toContain('prompt: "select_account"');
+      expect(page).not.toContain('prompt: "login"');
+      expect(page).not.toContain("max_age");
+      expect(page).toContain("Recheck Google authentication");
+      expect(page).toContain("signed authentication time");
     }
   });
 
@@ -416,11 +408,7 @@ describe("OPS.1 gate entry points", () => {
     expect(manifest.dependencies["next"]).toMatch(/^16\./);
     expect(manifest.dependencies["next-auth"]).toMatch(/^5\./);
     expect(manifest.devDependencies["tailwindcss"]).toMatch(/^4\./);
-    expect(readPackageFile("postcss.config.mjs")).toContain(
-      "@tailwindcss/postcss",
-    );
-    expect(readPackageFile("app/globals.css")).toContain(
-      '@import "tailwindcss"',
-    );
+    expect(readPackageFile("postcss.config.mjs")).toContain("@tailwindcss/postcss");
+    expect(readPackageFile("app/globals.css")).toContain('@import "tailwindcss"');
   });
 });

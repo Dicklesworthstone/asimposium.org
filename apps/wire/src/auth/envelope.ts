@@ -101,7 +101,7 @@ export interface VerifyOptions {
   permittedActions: readonly string[];
 }
 
-const DEFAULT_CLOCK_SKEW_SECONDS = 60;
+export const SERVICE_ENVELOPE_CLOCK_SKEW_SECONDS = 60;
 /** Two minutes. An envelope is created and consumed within one request. */
 const DEFAULT_MAX_LIFETIME_SECONDS = 120;
 const SIGNATURE_HEX_LENGTH = 128; // 64 bytes
@@ -225,7 +225,7 @@ export async function verifyServiceEnvelope(
     return refuse("action_not_permitted");
   }
 
-  const skew = options.clockSkewSeconds ?? DEFAULT_CLOCK_SKEW_SECONDS;
+  const skew = options.clockSkewSeconds ?? SERVICE_ENVELOPE_CLOCK_SKEW_SECONDS;
   const maxLifetime = options.maxLifetimeSeconds ?? DEFAULT_MAX_LIFETIME_SECONDS;
   if (claims.exp <= claims.iat) return refuse("malformed");
   if (claims.exp - claims.iat > maxLifetime) return refuse("lifetime_too_long");

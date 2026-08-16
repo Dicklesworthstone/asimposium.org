@@ -25,6 +25,8 @@ import {
   EnrollmentService,
   enrollmentReplayProtectorFromBase64Url,
   InMemoryEnrollmentStore,
+  SPONSOR_STEP_UP_CLOCK_SKEW_SECONDS,
+  SPONSOR_STEP_UP_WINDOW_SECONDS,
 } from "../../src/enrollment/service";
 
 /**
@@ -73,7 +75,7 @@ async function harness(options?: {
     replayProtector: enrollmentReplayProtectorFromBase64Url(
       "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
     ),
-    ...(options?.clock === undefined ? {} : { clock: options.clock }),
+    clock: options?.clock ?? { now: () => NOW * 1_000 },
   });
 
   const sign: Harness["sign"] = async (body, route, action, method = "POST", principalId) => {
@@ -200,6 +202,7 @@ async function issuedLifecycleFixture(h: Harness, name: string) {
   await h.service.decide(principal, minted.enrollmentId, {
     enrollment_id: minted.enrollmentId,
     decision: "approve",
+    step_up_authenticated_at: NOW,
   });
   const outcome = await h.service.poll({ flow_handle: claimed.flowHandle });
   if (outcome.status !== "approved") throw new Error("lifecycle fixture token was not issued");
@@ -508,6 +511,7 @@ describe("sponsor enrollment routes", () => {
       const body = JSON.stringify({
         enrollment_id: enrollmentId,
         decision: "approve",
+        step_up_authenticated_at: NOW,
       });
       const headers = await h.sign(
         body,
@@ -530,12 +534,17 @@ describe("sponsor enrollment routes", () => {
     expect(await collision.json()).toMatchObject({
       code: "NAME_TAKEN",
       suggestions: expect.arrayContaining([expect.any(String)]),
-      example: { enrollment_id: "ASIMP-EN-01JXYZ4K6Q", decision: "deny" },
+      example: {
+        enrollment_id: "ASIMP-EN-01JXYZ4K6Q",
+        decision: "deny",
+        step_up_authenticated_at: 1_786_800_000,
+      },
     });
 
     const impossibleRenameBody = JSON.stringify({
       enrollment_id: second.enrollmentId,
       decision: "approve",
+      step_up_authenticated_at: NOW,
       name: "one-suggestion-cannot-go-here",
     });
     const impossibleRenameHeaders = await h.sign(
@@ -559,6 +568,7 @@ describe("sponsor enrollment routes", () => {
     const denyBody = JSON.stringify({
       enrollment_id: second.enrollmentId,
       decision: "deny",
+      step_up_authenticated_at: NOW,
     });
     const denyHeaders = await h.sign(
       denyBody,
@@ -605,6 +615,7 @@ describe("sponsor enrollment routes", () => {
     const decisionBody = JSON.stringify({
       enrollment_id: enrollmentId,
       decision: "approve",
+      step_up_authenticated_at: NOW,
     });
     const decisionHeaders = await h.sign(
       decisionBody,
@@ -901,7 +912,11 @@ describe("sponsor enrollment routes", () => {
       throw new EnrollmentError("FELLOW_CAP_REACHED");
     };
     const enrollmentId = "ASIMP-EN-01JXYZ4K6Q";
-    const body = JSON.stringify({ enrollment_id: enrollmentId, decision: "approve" });
+    const body = JSON.stringify({
+      enrollment_id: enrollmentId,
+      decision: "approve",
+      step_up_authenticated_at: NOW,
+    });
     const headers = await h.sign(
       body,
       "/v1/enrollments/:enrollmentId/decision",
@@ -925,7 +940,7 @@ describe("sponsor enrollment routes", () => {
 
   test("an elapsed pre-approval grant leaves no impossible card or misleading retry loop", async () => {
     const clock = {
-      value: NOW,
+      value: NOW * 1_000,
       now() {
         return this.value;
       },
@@ -948,6 +963,7 @@ describe("sponsor enrollment routes", () => {
       const body = JSON.stringify({
         enrollment_id: minted.enrollment_id,
         decision: "approve",
+        step_up_authenticated_at: NOW,
       });
       const headers = await h.sign(
         body,
@@ -990,6 +1006,7 @@ describe("sponsor enrollment routes", () => {
     const body = JSON.stringify({
       enrollment_id: enrollmentId,
       decision: "deny",
+      step_up_authenticated_at: NOW,
     });
     const headers = await h.sign(
       body,
@@ -1041,6 +1058,7 @@ describe("sponsor enrollment routes", () => {
     const body = JSON.stringify({
       enrollment_id: enrollmentId,
       decision: "approve",
+      step_up_authenticated_at: NOW,
     });
     const decisionHeaders = await h.sign(
       body,
@@ -1065,6 +1083,7 @@ describe("sponsor enrollment routes", () => {
     const body = JSON.stringify({
       enrollment_id: first.enrollmentId,
       decision: "approve",
+      step_up_authenticated_at: NOW,
     });
     const retargetHeaders = await h.sign(
       body,
@@ -1136,6 +1155,74 @@ describe("sponsor enrollment routes", () => {
     expect(list.proposals.map((proposal) => proposal.enrollment_id)).toEqual([second.enrollmentId]);
   });
 
+  test("the Worker owns decision step-up while committed product replay survives expiry", async () => {
+    const clock = {
+      value: NOW * 1_000,
+      now() {
+        return this.value;
+      },
+    };
+    const h = await harness({ clock });
+    const minted = await mintOne(h);
+    await claimOne(h, minted.enrollmentId, minted.secret, "step-up-orchid");
+
+    const send = async (
+      command: Record<string, unknown>,
+      idempotencyKey: string,
+    ): Promise<Response> => {
+      const body = JSON.stringify(command);
+      const headers = await h.sign(
+        body,
+        "/v1/enrollments/:enrollmentId/decision",
+        "enrollment.decide",
+      );
+      headers.set("idempotency-key", idempotencyKey);
+      return h.app.fetch(
+        envelopeRequest(`/v1/enrollments/${minted.enrollmentId}/decision`, headers, "POST", body),
+      );
+    };
+
+    const missing = await send(
+      { enrollment_id: minted.enrollmentId, decision: "approve" },
+      "decision-step-up-missing",
+    );
+    expect(missing.status).toBe(422);
+    expect(await missing.json()).toMatchObject({ code: "DECISION_BODY_INVALID" });
+
+    for (const [label, stepUp] of [
+      ["stale", NOW - SPONSOR_STEP_UP_WINDOW_SECONDS - SPONSOR_STEP_UP_CLOCK_SKEW_SECONDS - 1],
+      ["future", NOW + SPONSOR_STEP_UP_CLOCK_SKEW_SECONDS + 1],
+    ] as const) {
+      const refused = await send(
+        {
+          enrollment_id: minted.enrollmentId,
+          decision: "approve",
+          step_up_authenticated_at: stepUp,
+        },
+        `decision-step-up-${label}`,
+      );
+      expect(refused.status, label).toBe(403);
+      expect(await refused.json(), label).toMatchObject({ code: "STEP_UP_REQUIRED" });
+    }
+    expect(await h.service.pendingApprovals({ type: "sponsor", sponsorId: SPONSOR })).toHaveLength(
+      1,
+    );
+
+    const committedCommand = {
+      enrollment_id: minted.enrollmentId,
+      decision: "approve",
+      step_up_authenticated_at: NOW + SPONSOR_STEP_UP_CLOCK_SKEW_SECONDS,
+    } as const;
+    expect(await send(committedCommand, "decision-step-up-replay")).toMatchObject({ status: 200 });
+    // The accepted +skew timestamp must itself age past window+skew before the
+    // second call, so this proves replay precedence rather than fresh evidence.
+    clock.value +=
+      (SPONSOR_STEP_UP_WINDOW_SECONDS + 2 * SPONSOR_STEP_UP_CLOCK_SKEW_SECONDS + 1) * 1_000;
+    expect(await send(committedCommand, "decision-step-up-replay")).toMatchObject({ status: 200 });
+    expect(await h.service.pendingApprovals({ type: "sponsor", sponsorId: SPONSOR })).toEqual([]);
+    expect(await h.service.fellows({ type: "sponsor", sponsorId: SPONSOR })).toHaveLength(1);
+  });
+
   test("signed malformed decision bodies teach the contract without lying about proposal state", async () => {
     const h = await harness();
     const pathTarget = "ASIMP-EN-0000000000";
@@ -1147,6 +1234,7 @@ describe("sponsor enrollment routes", () => {
       JSON.stringify({
         enrollment_id: pathTarget,
         decision: "deny",
+        step_up_authenticated_at: NOW,
         extra: true,
       }),
     ];
@@ -1175,6 +1263,7 @@ describe("sponsor enrollment routes", () => {
           body: {
             enrollment_id: "ASIMP-EN-01JXYZ4K6Q",
             decision: "approve",
+            step_up_authenticated_at: 1_786_800_000,
           },
         },
       });
@@ -1201,6 +1290,7 @@ describe("sponsor enrollment routes", () => {
         enrollment_id: enrollmentId,
         decision: "reduce",
         reduction: scenario.reduction,
+        step_up_authenticated_at: NOW,
       });
       const headers = await h.sign(
         body,
@@ -1219,6 +1309,7 @@ describe("sponsor enrollment routes", () => {
           enrollment_id: "ASIMP-EN-01JXYZ4K6Q",
           decision: "reduce",
           reduction: { scopes: ["review"] },
+          step_up_authenticated_at: 1_786_800_000,
         },
       });
     }
@@ -1232,7 +1323,11 @@ describe("sponsor enrollment routes", () => {
         throw new Error("private planted service fault");
       },
     });
-    const body = JSON.stringify({ enrollment_id: target, decision: "approve" });
+    const body = JSON.stringify({
+      enrollment_id: target,
+      decision: "approve",
+      step_up_authenticated_at: NOW,
+    });
     const headers = await h.sign(
       body,
       "/v1/enrollments/:enrollmentId/decision",
@@ -1317,7 +1412,7 @@ describe("sponsor enrollment routes", () => {
         route: "/v1/enrollments/:enrollmentId/decision",
         action: "enrollment.decide",
         method: "POST",
-        body: '{"enrollment_id":"ASIMP-EN-0000000000","decision":"approve"}',
+        body: '{"enrollment_id":"ASIMP-EN-0000000000","decision":"approve","step_up_authenticated_at":1786000000}',
         plant: (service) => {
           Object.defineProperty(service, "decide", {
             value: async () => {
@@ -1396,6 +1491,7 @@ describe("sponsor enrollment routes", () => {
     const body = JSON.stringify({
       enrollment_id: enrollmentId,
       decision: "approve",
+      step_up_authenticated_at: NOW,
     });
     const headers = await h.sign(
       body,
@@ -1530,6 +1626,7 @@ describe("sponsor enrollment routes", () => {
     const decisionBody = JSON.stringify({
       enrollment_id: card.enrollment_id,
       decision: "approve",
+      step_up_authenticated_at: NOW,
     });
     const decisionHeaders = await h.sign(
       decisionBody,

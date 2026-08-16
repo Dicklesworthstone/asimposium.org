@@ -7,8 +7,15 @@ import Idp from "next-auth/providers/google";
 export const { handlers, auth, signIn, signOut } = NextAuth({
   providers: [Idp({ allowDangerousEmailAccountLinking: false })],
   callbacks: {
-    jwt({ token, account }) {
-      if (account) token.authTime = Math.floor(Date.now() / 1_000);
+    jwt({ token, account, profile }) {
+      if (account) {
+        token.authTime =
+          typeof profile?.auth_time === "number" &&
+          Number.isSafeInteger(profile.auth_time) &&
+          profile.auth_time >= 0
+            ? profile.auth_time
+            : undefined;
+      }
       return token;
     },
     session({ session, token }) {

@@ -79,6 +79,8 @@ export {
   type SponsorCredentialSummary,
   SponsorCredentialSummarySchema,
   type SponsorEnrollmentDecision,
+  type SponsorEnrollmentDecisionCommand,
+  SponsorEnrollmentDecisionCommandSchema,
   type SponsorEnrollmentDecisionResponse,
   SponsorEnrollmentDecisionResponseSchema,
   SponsorEnrollmentDecisionSchema,

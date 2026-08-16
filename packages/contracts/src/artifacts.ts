@@ -28,6 +28,7 @@ import {
   type SponsorCredentialRevokeRequest,
   type SponsorCredentialRevokeResponse,
   type SponsorEnrollmentDecision,
+  type SponsorEnrollmentDecisionCommand,
   type SponsorFellowLifecycleRequest,
   type SponsorFellowLifecycleResponse,
   type SponsorFellowLifecycleTarget,
@@ -158,6 +159,7 @@ function generatedEnrollmentTypes(): string {
     "MintEnrollmentRequest",
     "RequestedScope",
     "SponsorEnrollmentDecision",
+    "SponsorEnrollmentDecisionCommand",
     "SponsorCredentialRevokeRequest",
     "SponsorCredentialRevokeResponse",
     "SponsorFellowLifecycleRequest",
@@ -186,6 +188,7 @@ function generatedEnrollmentTypes(): string {
     MintEnrollmentRequest: MintEnrollmentRequest;
     RequestedScope: RequestedScope;
     SponsorEnrollmentDecision: SponsorEnrollmentDecision;
+    SponsorEnrollmentDecisionCommand: SponsorEnrollmentDecisionCommand;
     SponsorCredentialRevokeRequest: SponsorCredentialRevokeRequest;
     SponsorCredentialRevokeResponse: SponsorCredentialRevokeResponse;
     SponsorFellowLifecycleRequest: SponsorFellowLifecycleRequest;

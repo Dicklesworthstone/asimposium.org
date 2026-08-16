@@ -656,6 +656,124 @@
         }
       ]
     },
+    "sponsor_enrollment_decision_command": {
+      "oneOf": [
+        {
+          "type": "object",
+          "properties": {
+            "enrollment_id": {
+              "type": "string",
+              "pattern": "^ASIMP-EN-[A-HJKMNP-TV-Z0-9]{10,32}$"
+            },
+            "decision": {
+              "type": "string",
+              "const": "approve"
+            },
+            "step_up_authenticated_at": {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 9007199254740991
+            }
+          },
+          "required": [
+            "enrollment_id",
+            "decision",
+            "step_up_authenticated_at"
+          ],
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "properties": {
+            "enrollment_id": {
+              "type": "string",
+              "pattern": "^ASIMP-EN-[A-HJKMNP-TV-Z0-9]{10,32}$"
+            },
+            "decision": {
+              "type": "string",
+              "const": "reduce"
+            },
+            "reduction": {
+              "type": "object",
+              "properties": {
+                "scopes": {
+                  "minItems": 1,
+                  "maxItems": 4,
+                  "type": "array",
+                  "items": {
+                    "type": "string",
+                    "enum": [
+                      "promote",
+                      "review",
+                      "propose-problems",
+                      "upload-artifacts"
+                    ]
+                  }
+                },
+                "problem_binding": {
+                  "type": "null"
+                },
+                "first_directive": {
+                  "type": "null"
+                },
+                "event_budget": {
+                  "type": "integer",
+                  "minimum": 1,
+                  "maximum": 10000
+                },
+                "artifact_budget_bytes": {
+                  "type": "integer",
+                  "minimum": 0,
+                  "maximum": 1073741824
+                },
+                "fellow_grant_expires_in_ms": {
+                  "type": "integer",
+                  "exclusiveMinimum": 0,
+                  "maximum": 31536000000
+                }
+              },
+              "additionalProperties": false
+            },
+            "step_up_authenticated_at": {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 9007199254740991
+            }
+          },
+          "required": [
+            "enrollment_id",
+            "decision",
+            "reduction",
+            "step_up_authenticated_at"
+          ],
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "properties": {
+            "enrollment_id": {
+              "type": "string",
+              "pattern": "^ASIMP-EN-[A-HJKMNP-TV-Z0-9]{10,32}$"
+            },
+            "decision": {
+              "type": "string",
+              "const": "deny"
+            },
+            "step_up_authenticated_at": {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 9007199254740991
+            }
+          },
+          "required": [
+            "enrollment_id",
+            "decision",
+            "step_up_authenticated_at"
+          ],
+          "additionalProperties": false
+        }
+      ]
+    },
     "mint_response": {
       "type": "object",
       "properties": {
@@ -2020,6 +2138,7 @@
     "fellow_registration_credential_fields",
     "fellow_registration_request",
     "sponsor_enrollment_decision",
+    "sponsor_enrollment_decision_command",
     "mint_response",
     "sponsor_proposal_list_response",
     "sponsor_credential_summary",

@@ -1,5 +1,6 @@
 import NextAuth from "next-auth";
 import Google from "next-auth/providers/google";
+import { isCanonicalSponsorId, sponsorIdFromGoogleSubject } from "./lib/sponsor-id";
 
 /**
  * Propylon, human half (Fable §5.1): Google is the only human identity
@@ -19,22 +20,44 @@ import Google from "next-auth/providers/google";
  * and never appear in a build artifact.
  */
 export const { handlers, auth, signIn, signOut } = NextAuth({
-  providers: [Google],
+  // Google does not support relying parties forcing Google-account
+  // reauthentication. Request its signed `auth_time` claim instead and use
+  // that provider evidence verbatim; an old or missing claim fails closed for
+  // sensitive actions rather than turning a fresh OAuth callback into proof.
+  providers: [
+    Google({
+      authorization: {
+        params: { claims: '{"id_token":{"auth_time":{"essential":true}}}' },
+      },
+    }),
+  ],
   session: { strategy: "jwt" },
   callbacks: {
     // Auth.js refreshes the JWT's standard `iat` whenever it serves a session,
     // so `iat` cannot prove a recent Google sign-in. Preserve our own stable
-    // authentication time and advance it only when an OAuth account is
-    // present — the interactive sign-in/sign-up callback, never a session read.
-    jwt({ token, account }) {
-      if (account) token.authTime = Math.floor(Date.now() / 1_000);
+    // authentication time and replace it only from the validated Google ID
+    // token on an OAuth callback, never from callback arrival or session read.
+    async jwt({ token, account, profile }) {
+      if (account) {
+        // Adapterless Auth.js deliberately assigns a fresh internal UUID to
+        // each OAuth callback. Replace it with a deterministic application
+        // principal derived from Google's validated, stable subject.
+        token.sub = await sponsorIdFromGoogleSubject(profile?.sub);
+        token.authTime =
+          typeof profile?.auth_time === "number" &&
+          Number.isSafeInteger(profile.auth_time) &&
+          profile.auth_time >= 0
+            ? profile.auth_time
+            : undefined;
+      }
       return token;
     },
     // The sponsor principal id Agora signs envelopes with: `usr_` plus the
-    // Google `sub` — opaque, stable, never an email. The console and every
-    // Stoa call gate on this canonical shape (isCanonicalSponsorId).
+    // digest of Google's `sub` — opaque, stable, never an email or raw provider
+    // identifier. The console and Stoa both gate on the canonical shape.
     session({ session, token }) {
-      if (token.sub) session.user.id = `usr_${token.sub}`;
+      if (isCanonicalSponsorId(token.sub)) session.user.id = token.sub;
+      else Reflect.deleteProperty(session.user, "id");
       if (typeof token.authTime === "number") session.authIssuedAt = token.authTime;
       return session;
     },

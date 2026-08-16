@@ -15,6 +15,8 @@ import {
   EnrollmentService,
   type EnrollmentStore,
   InMemoryEnrollmentStore,
+  SPONSOR_STEP_UP_CLOCK_SKEW_SECONDS,
+  SPONSOR_STEP_UP_WINDOW_SECONDS,
   safeEnrollmentDiagnostic,
 } from "../../src/enrollment/service.ts";
 
@@ -69,6 +71,10 @@ function serviceFixture() {
       ),
     }),
   };
+}
+
+function currentStepUp(clock: MutableClock): number {
+  return Math.floor(clock.value / 1_000);
 }
 
 function storeProxy(
@@ -393,6 +399,7 @@ describe("S-1 enrollment state machine", () => {
       service.decide(sponsor, card.enrollmentId, {
         enrollment_id: card.enrollmentId,
         decision: "approve",
+        step_up_authenticated_at: currentStepUp(clock),
       }),
       "WRONG_PRINCIPAL",
     );
@@ -402,6 +409,7 @@ describe("S-1 enrollment state machine", () => {
   });
 
   test("an operational device-card fallback failure is not rewritten as wrong-principal", async () => {
+    const clock = new MutableClock();
     const base = new InMemoryEnrollmentStore();
     const store = storeProxy(base, {
       deviceApprovalCardForDecision: async () => {
@@ -409,6 +417,7 @@ describe("S-1 enrollment state machine", () => {
       },
     });
     const service = new EnrollmentService({
+      clock,
       store,
       random: new DeterministicRandom(),
       replayProtector: new AesGcmEnrollmentReplayProtector(new Uint8Array(32)),
@@ -420,12 +429,13 @@ describe("S-1 enrollment state machine", () => {
       service.decide(sponsor, card.enrollmentId, {
         enrollment_id: card.enrollmentId,
         decision: "approve",
+        step_up_authenticated_at: currentStepUp(clock),
       }),
     ).rejects.toBeInstanceOf(EnrollmentPersistenceError);
   });
 
   test("mints a 256-bit fragment secret, stores only hashes, and issues one token after approval", async () => {
-    const { service, store } = serviceFixture();
+    const { clock, service, store } = serviceFixture();
     const { enrollmentId, secret, flowHandle } = await mintAndClaim(service);
 
     expect(secret).toMatch(/^v1\.[A-Za-z0-9_-]{43}$/);
@@ -452,6 +462,7 @@ describe("S-1 enrollment state machine", () => {
     await service.decide(sponsor, enrollmentId, {
       enrollment_id: enrollmentId,
       decision: "reduce",
+      step_up_authenticated_at: currentStepUp(clock),
       reduction: {
         scopes: ["review"],
         event_budget: 6,
@@ -536,10 +547,18 @@ describe("S-1 enrollment state machine", () => {
     const { enrollmentId, flowHandle } = await mintAndClaim(service, "deny-orchid");
     await expectEnrollmentError(service.approvalCard(fellow, enrollmentId), "WRONG_PRINCIPAL");
     await expectEnrollmentError(
-      service.decide(otherSponsor, enrollmentId, { enrollment_id: enrollmentId, decision: "deny" }),
+      service.decide(otherSponsor, enrollmentId, {
+        enrollment_id: enrollmentId,
+        decision: "deny",
+        step_up_authenticated_at: currentStepUp(clock),
+      }),
       "WRONG_PRINCIPAL",
     );
-    await service.decide(sponsor, enrollmentId, { enrollment_id: enrollmentId, decision: "deny" });
+    await service.decide(sponsor, enrollmentId, {
+      enrollment_id: enrollmentId,
+      decision: "deny",
+      step_up_authenticated_at: currentStepUp(clock),
+    });
     expect(await service.poll({ flow_handle: flowHandle })).toEqual({ status: "access_denied" });
   });
 
@@ -557,6 +576,7 @@ describe("S-1 enrollment state machine", () => {
     await service.decide(sponsor, minted.enrollmentId, {
       enrollment_id: minted.enrollmentId,
       decision: "approve",
+      step_up_authenticated_at: currentStepUp(clock),
     });
     expect((await service.poll({ flow_handle: claim.flowHandle })).status).toBe("approved");
   });
@@ -607,6 +627,7 @@ describe("S-1 enrollment state machine", () => {
       await service.decide(sponsor, enrollmentId, {
         enrollment_id: enrollmentId,
         decision: "approve",
+        step_up_authenticated_at: currentStepUp(clock),
       });
       const approved = await service.poll({ flow_handle: flowHandle }, options);
       expect(approved.status).toBe("approved");
@@ -614,7 +635,7 @@ describe("S-1 enrollment state machine", () => {
     }
 
     {
-      const { service } = serviceFixture();
+      const { clock, service } = serviceFixture();
       const { enrollmentId, flowHandle } = await mintAndClaim(service, "stable-poll-deny-orchid");
       const options = { idempotencyKey: "stable-poll-deny-1" } as const;
       expect((await service.poll({ flow_handle: flowHandle }, options)).status).toBe(
@@ -623,6 +644,7 @@ describe("S-1 enrollment state machine", () => {
       await service.decide(sponsor, enrollmentId, {
         enrollment_id: enrollmentId,
         decision: "deny",
+        step_up_authenticated_at: currentStepUp(clock),
       });
       expect(await service.poll({ flow_handle: flowHandle }, options)).toEqual({
         status: "access_denied",
@@ -653,12 +675,20 @@ describe("S-1 enrollment state machine", () => {
   });
 
   test("approval double-post and flow-poll race yield exactly one credential", async () => {
-    const { service } = serviceFixture();
+    const { clock, service } = serviceFixture();
     const { enrollmentId, flowHandle } = await mintAndClaim(service, "race-orchid");
 
     const approvals = await Promise.allSettled([
-      service.decide(sponsor, enrollmentId, { enrollment_id: enrollmentId, decision: "approve" }),
-      service.decide(sponsor, enrollmentId, { enrollment_id: enrollmentId, decision: "approve" }),
+      service.decide(sponsor, enrollmentId, {
+        enrollment_id: enrollmentId,
+        decision: "approve",
+        step_up_authenticated_at: currentStepUp(clock),
+      }),
+      service.decide(sponsor, enrollmentId, {
+        enrollment_id: enrollmentId,
+        decision: "approve",
+        step_up_authenticated_at: currentStepUp(clock),
+      }),
     ]);
     expect(approvals.filter((outcome) => outcome.status === "fulfilled")).toHaveLength(1);
 
@@ -694,7 +724,9 @@ describe("S-1 enrollment state machine", () => {
       },
     });
     const random = new DeterministicRandom();
+    const clock = new MutableClock();
     const service = new EnrollmentService({
+      clock,
       store,
       random,
       replayProtector: new AesGcmEnrollmentReplayProtector(new Uint8Array(32), random),
@@ -703,6 +735,7 @@ describe("S-1 enrollment state machine", () => {
     await service.decide(sponsor, enrollmentId, {
       enrollment_id: enrollmentId,
       decision: "approve",
+      step_up_authenticated_at: currentStepUp(clock),
     });
     const options = { idempotencyKey: "poll-race-replay-1" } as const;
     const results = await Promise.all([
@@ -735,6 +768,7 @@ describe("S-1 enrollment state machine", () => {
       service.decide(sponsor, enrollmentId, {
         enrollment_id: enrollmentId,
         decision: "reduce",
+        step_up_authenticated_at: currentStepUp(clock),
         reduction: { scopes: ["upload-artifacts"] },
       }),
       "SCOPE_ESCALATION",
@@ -743,6 +777,7 @@ describe("S-1 enrollment state machine", () => {
       service.decide(sponsor, enrollmentId, {
         enrollment_id: enrollmentId,
         decision: "reduce",
+        step_up_authenticated_at: currentStepUp(clock),
         reduction: { event_budget: 12 },
       }),
       "SCOPE_NOT_REDUCED",
@@ -750,6 +785,7 @@ describe("S-1 enrollment state machine", () => {
     await service.decide(sponsor, enrollmentId, {
       enrollment_id: enrollmentId,
       decision: "reduce",
+      step_up_authenticated_at: currentStepUp(clock),
       reduction: { problem_binding: null, first_directive: null, event_budget: 11 },
     });
   });
@@ -769,6 +805,7 @@ describe("S-1 enrollment state machine", () => {
       service.decide(sponsor, minted.enrollmentId, {
         enrollment_id: minted.enrollmentId,
         decision: "reduce",
+        step_up_authenticated_at: currentStepUp(clock),
         reduction: {
           event_budget: 20,
           artifact_budget_bytes: 1_048_576,
@@ -792,17 +829,19 @@ describe("S-1 enrollment state machine", () => {
   });
 
   test("simultaneous same-name approvals allow one immutable Fellow binding", async () => {
-    const { service } = serviceFixture();
+    const { clock, service } = serviceFixture();
     const first = await mintAndClaim(service, "shared-orchid");
     const second = await mintAndClaim(service, "shared-orchid");
     const outcomes = await Promise.allSettled([
       service.decide(sponsor, first.enrollmentId, {
         enrollment_id: first.enrollmentId,
         decision: "approve",
+        step_up_authenticated_at: currentStepUp(clock),
       }),
       service.decide(sponsor, second.enrollmentId, {
         enrollment_id: second.enrollmentId,
         decision: "approve",
+        step_up_authenticated_at: currentStepUp(clock),
       }),
     ]);
     expect(outcomes.filter((outcome) => outcome.status === "fulfilled")).toHaveLength(1);
@@ -847,7 +886,7 @@ describe("S-1 enrollment state machine", () => {
   });
 
   test("lost-response recovery replays the original claim, decision, and one-time token", async () => {
-    const { service } = serviceFixture();
+    const { clock, service } = serviceFixture();
     const minted = await service.mint(sponsor, { requested_scopes: ["review"] });
     const claimBody = {
       enrollment_id: minted.enrollmentId,
@@ -864,14 +903,22 @@ describe("S-1 enrollment state machine", () => {
       service.decide(
         sponsor,
         minted.enrollmentId,
-        { enrollment_id: minted.enrollmentId, decision: "approve" },
+        {
+          enrollment_id: minted.enrollmentId,
+          decision: "approve",
+          step_up_authenticated_at: currentStepUp(clock),
+        },
         { idempotencyKey: "decision-idempotency-1" },
       ),
     ).resolves.toBeUndefined();
     await service.decide(
       sponsor,
       minted.enrollmentId,
-      { enrollment_id: minted.enrollmentId, decision: "approve" },
+      {
+        enrollment_id: minted.enrollmentId,
+        decision: "approve",
+        step_up_authenticated_at: currentStepUp(clock),
+      },
       { idempotencyKey: "decision-idempotency-1" },
     );
     const issued = await service.poll(
@@ -882,6 +929,136 @@ describe("S-1 enrollment state machine", () => {
     await expect(
       service.poll({ flow_handle: claim.flowHandle }, { idempotencyKey: "poll-idempotency-1" }),
     ).resolves.toEqual(issued);
+  });
+
+  test("decision step-up honors the authenticated transport skew at both freshness boundaries", async () => {
+    for (const scenario of [
+      { label: "exact-window", offsetSeconds: -SPONSOR_STEP_UP_WINDOW_SECONDS, code: undefined },
+      {
+        label: "oldest-with-skew",
+        offsetSeconds: -(SPONSOR_STEP_UP_WINDOW_SECONDS + SPONSOR_STEP_UP_CLOCK_SKEW_SECONDS),
+        code: undefined,
+      },
+      {
+        label: "one-second-too-old",
+        offsetSeconds: -(SPONSOR_STEP_UP_WINDOW_SECONDS + SPONSOR_STEP_UP_CLOCK_SKEW_SECONDS + 1),
+        code: "STEP_UP_REQUIRED",
+      },
+      {
+        label: "future-with-skew",
+        offsetSeconds: SPONSOR_STEP_UP_CLOCK_SKEW_SECONDS,
+        code: undefined,
+      },
+      {
+        label: "one-second-too-future",
+        offsetSeconds: SPONSOR_STEP_UP_CLOCK_SKEW_SECONDS + 1,
+        code: "STEP_UP_REQUIRED",
+      },
+    ] as const) {
+      const { clock, service } = serviceFixture();
+      const { enrollmentId } = await mintAndClaim(service, `decision-${scenario.label}`);
+      const decision = {
+        enrollment_id: enrollmentId,
+        decision: "approve",
+        step_up_authenticated_at: currentStepUp(clock) + scenario.offsetSeconds,
+      } as const;
+
+      if (scenario.code === undefined) {
+        await expect(service.decide(sponsor, enrollmentId, decision)).resolves.toBeUndefined();
+        await expect(service.approvalCard(sponsor, enrollmentId)).resolves.toMatchObject({
+          status: "approved",
+        });
+      } else {
+        await expectEnrollmentError(service.decide(sponsor, enrollmentId, decision), scenario.code);
+        await expect(service.approvalCard(sponsor, enrollmentId)).resolves.toMatchObject({
+          status: "pending",
+        });
+      }
+    }
+  });
+
+  test("malformed decision step-up evidence is refused without settling the proposal", async () => {
+    for (const scenario of [
+      { label: "fractional", step_up_authenticated_at: 1_700_000_000.5 },
+      { label: "missing" },
+    ] as const) {
+      const { service } = serviceFixture();
+      const { enrollmentId } = await mintAndClaim(service, `decision-${scenario.label}`);
+      const decision =
+        "step_up_authenticated_at" in scenario
+          ? {
+              enrollment_id: enrollmentId,
+              decision: "approve",
+              step_up_authenticated_at: scenario.step_up_authenticated_at,
+            }
+          : { enrollment_id: enrollmentId, decision: "approve" };
+      await expectEnrollmentError(
+        service.decide(sponsor, enrollmentId, decision as never),
+        "DECISION_BODY_INVALID",
+      );
+      await expect(service.approvalCard(sponsor, enrollmentId)).resolves.toMatchObject({
+        status: "pending",
+      });
+    }
+  });
+
+  test("a stale decision records nothing, while a committed decision replays after step-up expiry", async () => {
+    const clock = new MutableClock();
+    const base = new InMemoryEnrollmentStore();
+    let decisionWrites = 0;
+    const store = storeProxy(base, {
+      decision: async (attempt, idempotency) => {
+        decisionWrites += 1;
+        await base.decision(attempt, idempotency);
+      },
+    });
+    const service = new EnrollmentService({
+      clock,
+      store,
+      random: new DeterministicRandom(),
+      replayProtector: new AesGcmEnrollmentReplayProtector(new Uint8Array(32)),
+    });
+    const { enrollmentId } = await mintAndClaim(service, "decision-stale-retry");
+    const before = await base.storageSnapshot(enrollmentId);
+    const key = "decision-step-up-retry-1";
+    const stale = {
+      enrollment_id: enrollmentId,
+      decision: "approve",
+      step_up_authenticated_at:
+        currentStepUp(clock) -
+        (SPONSOR_STEP_UP_WINDOW_SECONDS + SPONSOR_STEP_UP_CLOCK_SKEW_SECONDS + 1),
+    } as const;
+
+    await expectEnrollmentError(
+      service.decide(sponsor, enrollmentId, stale, { idempotencyKey: key }),
+      "STEP_UP_REQUIRED",
+    );
+    expect(decisionWrites).toBe(0);
+    expect(await base.storageSnapshot(enrollmentId)).toEqual(before);
+    await expect(service.approvalCard(sponsor, enrollmentId)).resolves.toMatchObject({
+      status: "pending",
+    });
+
+    const fresh = { ...stale, step_up_authenticated_at: currentStepUp(clock) };
+    await expect(
+      service.decide(sponsor, enrollmentId, fresh, { idempotencyKey: key }),
+    ).resolves.toBeUndefined();
+    expect(decisionWrites).toBe(1);
+
+    clock.value +=
+      (SPONSOR_STEP_UP_WINDOW_SECONDS + SPONSOR_STEP_UP_CLOCK_SKEW_SECONDS + 1) * 1_000;
+    await expect(
+      service.decide(sponsor, enrollmentId, fresh, { idempotencyKey: key }),
+    ).resolves.toBeUndefined();
+    expect(decisionWrites).toBe(1);
+
+    // Reauthentication changes only command evidence, never the semantic
+    // product request. The same key must therefore replay instead of conflict.
+    const refreshed = { ...fresh, step_up_authenticated_at: currentStepUp(clock) };
+    await expect(
+      service.decide(sponsor, enrollmentId, refreshed, { idempotencyKey: key }),
+    ).resolves.toBeUndefined();
+    expect(decisionWrites).toBe(1);
   });
 
   test("same-key concurrent first claim writers converge on one encrypted replay", async () => {
@@ -917,13 +1094,19 @@ describe("S-1 enrollment state machine", () => {
         return card;
       },
     });
+    const clock = new MutableClock();
     const service = new EnrollmentService({
+      clock,
       store,
       random: new DeterministicRandom(),
       replayProtector: new AesGcmEnrollmentReplayProtector(new Uint8Array(32)),
     });
     const { enrollmentId } = await mintAndClaim(service, "decision-race-orchid");
-    const decision = { enrollment_id: enrollmentId, decision: "approve" } as const;
+    const decision = {
+      enrollment_id: enrollmentId,
+      decision: "approve",
+      step_up_authenticated_at: currentStepUp(clock),
+    } as const;
 
     const outcomes = await Promise.all([
       service.decide(sponsor, enrollmentId, decision, { idempotencyKey: "decision-race-1" }),
@@ -955,14 +1138,20 @@ describe("S-1 enrollment state machine", () => {
         return base.deviceApprovalCardForDecision(enrollmentId, now);
       },
     });
+    const clock = new MutableClock();
     const service = new EnrollmentService({
+      clock,
       store,
       random: new DeterministicRandom(),
       replayProtector: new AesGcmEnrollmentReplayProtector(new Uint8Array(32)),
     });
     const started = await service.deviceStart(deviceProposal, deviceStartOptions);
     const card = await service.deviceLookup(sponsor, { user_code: started.user_code });
-    const decision = { enrollment_id: card.enrollmentId, decision: "approve" } as const;
+    const decision = {
+      enrollment_id: card.enrollmentId,
+      decision: "approve",
+      step_up_authenticated_at: currentStepUp(clock),
+    } as const;
     const delayed = service.decide(sponsor, card.enrollmentId, decision, {
       idempotencyKey: "device-decision-fallback-race-1",
     });
@@ -1225,9 +1414,13 @@ describe("S-1 enrollment state machine", () => {
   });
 
   test("approval cards report deny status without retaining requested grants as effective authority", async () => {
-    const { service } = serviceFixture();
+    const { clock, service } = serviceFixture();
     const { enrollmentId } = await mintAndClaim(service, "denied-orchid");
-    await service.decide(sponsor, enrollmentId, { enrollment_id: enrollmentId, decision: "deny" });
+    await service.decide(sponsor, enrollmentId, {
+      enrollment_id: enrollmentId,
+      decision: "deny",
+      step_up_authenticated_at: currentStepUp(clock),
+    });
     await expect(service.approvalCard(sponsor, enrollmentId)).resolves.toMatchObject({
       status: "denied",
       effectiveGrantedScopes: null,
@@ -1236,12 +1429,13 @@ describe("S-1 enrollment state machine", () => {
   });
 
   test("availability suggestions stay policy-valid and actually available under collision pressure", async () => {
-    const { service } = serviceFixture();
+    const { clock, service } = serviceFixture();
     for (const name of ["fellow-2", "fellow-3", "fellow-4"]) {
       const enrollment = await mintAndClaim(service, name);
       await service.decide(sponsor, enrollment.enrollmentId, {
         enrollment_id: enrollment.enrollmentId,
         decision: "approve",
+        step_up_authenticated_at: currentStepUp(clock),
       });
     }
     const minted = await service.mint(sponsor, { requested_scopes: ["review"] });
@@ -1265,6 +1459,7 @@ describe("S-1 enrollment state machine", () => {
     await service.decide(sponsor, enrollment.enrollmentId, {
       enrollment_id: enrollment.enrollmentId,
       decision: "approve",
+      step_up_authenticated_at: currentStepUp(clock),
     });
     const issued = await service.poll({ flow_handle: enrollment.flowHandle });
     expect(issued.status).toBe("approved");
@@ -1293,7 +1488,8 @@ describe("S-1 enrollment state machine", () => {
     });
     expect(await service.credentialBinding(issued.token)).toBeUndefined();
 
-    clock.value += 16 * 60 * 1_000;
+    clock.value +=
+      (SPONSOR_STEP_UP_WINDOW_SECONDS + SPONSOR_STEP_UP_CLOCK_SKEW_SECONDS + 1) * 1_000;
     expect(
       await service.revokeCredential(sponsor, body, {
         idempotencyKey: "revoke-credential-one",
@@ -1314,6 +1510,7 @@ describe("S-1 enrollment state machine", () => {
     await service.decide(sponsor, enrollment.enrollmentId, {
       enrollment_id: enrollment.enrollmentId,
       decision: "approve",
+      step_up_authenticated_at: currentStepUp(clock),
     });
     const issued = await service.poll({ flow_handle: enrollment.flowHandle });
     if (issued.status !== "approved") throw new Error("fixture token was not issued");
@@ -1392,6 +1589,7 @@ describe("S-1 enrollment state machine", () => {
     await service.decide(sponsor, enrollment.enrollmentId, {
       enrollment_id: enrollment.enrollmentId,
       decision: "approve",
+      step_up_authenticated_at: currentStepUp(clock),
     });
     await service.panicSponsor(
       sponsor,
@@ -1422,6 +1620,7 @@ describe("S-1 enrollment state machine", () => {
       await service.decide(sponsor, enrollment.enrollmentId, {
         enrollment_id: enrollment.enrollmentId,
         decision: "approve",
+        step_up_authenticated_at: currentStepUp(clock),
       });
       const fellow = (await service.fellows(sponsor))[0];
       if (fellow === undefined) throw new Error("approved Fellow was not listed");
@@ -1446,11 +1645,19 @@ describe("S-1 enrollment state machine", () => {
     }
   });
 
-  test("sponsor step-up accepts the exact fifteen-minute boundary and refuses older or future evidence", async () => {
+  test("sponsor step-up applies the signed-transport skew at its outer boundaries", async () => {
     for (const scenario of [
       { label: "exact", offsetSeconds: -15 * 60, code: undefined },
-      { label: "too-old", offsetSeconds: -(15 * 60 + 1), code: "STEP_UP_REQUIRED" },
-      { label: "future", offsetSeconds: 1, code: "STEP_UP_REQUIRED" },
+      {
+        label: "too-old",
+        offsetSeconds: -(SPONSOR_STEP_UP_WINDOW_SECONDS + SPONSOR_STEP_UP_CLOCK_SKEW_SECONDS + 1),
+        code: "STEP_UP_REQUIRED",
+      },
+      {
+        label: "future",
+        offsetSeconds: SPONSOR_STEP_UP_CLOCK_SKEW_SECONDS + 1,
+        code: "STEP_UP_REQUIRED",
+      },
     ] as const) {
       const { clock, service } = serviceFixture();
       await service.bootstrapSponsor(sponsor);

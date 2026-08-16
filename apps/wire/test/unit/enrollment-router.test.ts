@@ -134,7 +134,11 @@ describe("S-1 mountable enrollment router", () => {
       { path: "/v1/enrollments", body: { requested_scopes: ["review"] } },
       {
         path: `/v1/enrollments/${enrollmentId}/decision`,
-        body: { enrollment_id: enrollmentId, decision: "approve" },
+        body: {
+          enrollment_id: enrollmentId,
+          decision: "approve",
+          step_up_authenticated_at: 1_700_000_000,
+        },
       },
     ] as const;
 
@@ -850,6 +854,7 @@ describe("S-1 mountable enrollment router", () => {
     await service.decide(sponsor, minted.enrollmentId, {
       enrollment_id: minted.enrollmentId,
       decision: "approve",
+      step_up_authenticated_at: Math.floor(clock.value / 1_000),
     });
 
     const issued = await request(router, "/v1/device-token", {
@@ -955,6 +960,7 @@ describe("S-1 mountable enrollment router", () => {
     await service.decide(sponsor, minted.enrollmentId, {
       enrollment_id: minted.enrollmentId,
       decision: "approve",
+      step_up_authenticated_at: Math.floor(clock.value / 1_000),
     });
     const issued = await service.poll({ flow_handle: claim.flowHandle });
     expect(issued.status).toBe("approved");
@@ -994,6 +1000,7 @@ describe("S-1 mountable enrollment router", () => {
     await service.decide(sponsor, minted.enrollmentId, {
       enrollment_id: minted.enrollmentId,
       decision: "approve",
+      step_up_authenticated_at: Math.floor(clock.value / 1_000),
     });
     clock.value += 1;
 
@@ -1034,12 +1041,14 @@ describe("S-1 mountable enrollment router", () => {
         service.decide(sponsor, minted.enrollmentId, {
           enrollment_id: minted.enrollmentId,
           decision: "approve",
+          step_up_authenticated_at: Math.floor(clock.value / 1_000),
         }),
       ).rejects.toMatchObject({ code: "PROPOSAL_EXPIRED" });
       await expect(
         service.decide(sponsor, minted.enrollmentId, {
           enrollment_id: minted.enrollmentId,
           decision: "approve",
+          step_up_authenticated_at: Math.floor(clock.value / 1_000),
         }),
       ).rejects.toMatchObject({ code: "PROPOSAL_EXPIRED" });
       expect(await service.pendingApprovals(sponsor)).toEqual([]);

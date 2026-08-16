@@ -24,12 +24,18 @@ function response(body: unknown, status = 200): Response {
 }
 
 /**
- * The replay key is resolved once per isolate and cached against the binding
- * value, so a rotated binding rebuilds and an unchanged one does not re-derive a
- * key on every request. Bindings are only readable inside `fetch`, so "once" is
- * first-request-lazy rather than module-load.
+ * The replay key is resolved once per isolate and cached against both binding
+ * identities, so a rotated key or replaced D1 binding rebuilds while unchanged
+ * bindings do not re-derive a key on every request. Bindings are only readable
+ * inside `fetch`, so "once" is first-request-lazy rather than module-load.
  */
-let cached: { readonly key: string; readonly service: EnrollmentService } | undefined;
+let cached:
+  | {
+      readonly db: D1Database;
+      readonly key: string;
+      readonly service: EnrollmentService;
+    }
+  | undefined;
 let localClockOffsetMs = 0;
 
 /**
@@ -40,14 +46,16 @@ let localClockOffsetMs = 0;
  * than to start a second enrollment.
  */
 function resolveService(env: LocalEnrollmentEnv): EnrollmentService | Response {
-  if (cached !== undefined && cached.key === env.ENROLLMENT_REPLAY_KEY) return cached.service;
+  if (cached !== undefined && cached.db === env.DB && cached.key === env.ENROLLMENT_REPLAY_KEY) {
+    return cached.service;
+  }
   try {
     const service = new EnrollmentService({
       store: new D1EnrollmentStore(env.DB),
       replayProtector: enrollmentReplayProtectorFromBase64Url(env.ENROLLMENT_REPLAY_KEY),
       clock: { now: () => Date.now() + localClockOffsetMs },
     });
-    cached = { key: env.ENROLLMENT_REPLAY_KEY, service };
+    cached = { db: env.DB, key: env.ENROLLMENT_REPLAY_KEY, service };
     return service;
   } catch {
     // Deliberately swallows the cause: nothing about the key material, not even
@@ -69,7 +77,7 @@ function unavailable(): Response {
  *    the client for a key the operator misconfigured;
  *  - a same-key/different-digest collision keeps its 409 and its exact code;
  *  - a device-start source limit keeps its production 429;
- *  - `WRONG_PRINCIPAL` keeps 403;
+ *  - `WRONG_PRINCIPAL` and `STEP_UP_REQUIRED` keep 403;
  *  - every other typed enrollment failure keeps its exact code at 400, which is
  *    what the local-D1 client asserts for a name collision;
  *  - an untyped throw is operational, not a client error.
@@ -86,7 +94,9 @@ function localFailure(error: unknown): Response {
   if (error instanceof EnrollmentError) {
     if (error.code === "IDEMPOTENCY_CONFLICT") return response({ code: error.code }, 409);
     if (error.code === "DEVICE_START_RATE_LIMITED") return response({ code: error.code }, 429);
-    if (error.code === "WRONG_PRINCIPAL") return response({ code: error.code }, 403);
+    if (error.code === "WRONG_PRINCIPAL" || error.code === "STEP_UP_REQUIRED") {
+      return response({ code: error.code }, 403);
+    }
     return response({ code: error.code }, 400);
   }
   return unavailable();
@@ -199,26 +209,26 @@ export default {
         body === undefined ||
         typeof body.sponsor_id !== "string" ||
         typeof body.enrollment_id !== "string" ||
-        (body.decision !== undefined &&
-          (typeof body.decision !== "object" || body.decision === null))
+        typeof body.decision !== "object" ||
+        body.decision === null
       ) {
         return response({ code: "LOCAL_INPUT_INVALID" }, 400);
       }
-      // The harness names the target once, at the top level. Default the signed
-      // body's `enrollment_id` from it, but let an explicitly supplied one win
-      // so a mismatch can still be driven through the service's target check.
-      const suppliedDecision = (body.decision ?? { decision: "approve" }) as Record<
-        string,
-        unknown
-      >;
+      // The local client plays Agora here and must supply the complete signed
+      // command, including its server-stamped step-up evidence. This Worker
+      // never invents authentication evidence for a caller.
+      const suppliedDecision = body.decision as Record<string, unknown>;
       try {
         await service.decide(
           { type: "sponsor", sponsorId: body.sponsor_id },
           body.enrollment_id,
-          { enrollment_id: body.enrollment_id, ...suppliedDecision } as never,
+          {
+            enrollment_id: body.enrollment_id,
+            ...suppliedDecision,
+          } as never,
           { idempotencyKey: request.headers.get("idempotency-key") ?? undefined },
         );
-        return response({ status: "approved" });
+        return response({ acknowledged: true });
       } catch (error) {
         return localFailure(error);
       }

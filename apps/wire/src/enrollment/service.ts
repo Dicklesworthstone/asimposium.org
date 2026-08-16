@@ -25,6 +25,8 @@ import {
   type SponsorCredentialRevokeResponse,
   SponsorCredentialRevokeResponseSchema,
   type SponsorEnrollmentDecision,
+  type SponsorEnrollmentDecisionCommand,
+  SponsorEnrollmentDecisionCommandSchema,
   SponsorEnrollmentDecisionSchema,
   type SponsorFellowLifecycleRequest,
   SponsorFellowLifecycleRequestSchema,
@@ -35,6 +37,7 @@ import {
   type SponsorPanicResponse,
   SponsorPanicResponseSchema,
 } from "@asimposium/contracts";
+import { SERVICE_ENVELOPE_CLOCK_SKEW_SECONDS } from "../auth/envelope.ts";
 
 const BASE64URL = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_";
 const CROCKFORD32 = "0123456789ABCDEFGHJKMNPQRSTVWXYZ";
@@ -64,6 +67,7 @@ const ENROLLMENT_REPLAY_KEY_INFO = new TextEncoder().encode("encrypted-replay-ae
 const DEVICE_SOURCE_BUCKET_KEY_INFO = new TextEncoder().encode("device-source-bucket-hmac-v1");
 const POLL_TERMINAL_REPLAY_PRINCIPAL_VERSION = "flow-terminal-v1";
 export const SPONSOR_STEP_UP_WINDOW_SECONDS = 15 * 60;
+export const SPONSOR_STEP_UP_CLOCK_SKEW_SECONDS = SERVICE_ENVELOPE_CLOCK_SKEW_SECONDS;
 
 function generateUserCode(random: EnrollmentRandom): string {
   const chars: string[] = [];
@@ -108,10 +112,21 @@ function sponsorStepUpIsFresh(authenticatedAt: number, now: number): boolean {
   const nowSeconds = Math.floor(now / 1_000);
   if (!Number.isSafeInteger(authenticatedAt) || !Number.isSafeInteger(nowSeconds)) return false;
   const age = nowSeconds - authenticatedAt;
-  return age >= 0 && age <= SPONSOR_STEP_UP_WINDOW_SECONDS;
+  return (
+    age >= -SPONSOR_STEP_UP_CLOCK_SKEW_SECONDS &&
+    age <= SPONSOR_STEP_UP_WINDOW_SECONDS + SPONSOR_STEP_UP_CLOCK_SKEW_SECONDS
+  );
+}
+
+function sponsorEnrollmentDecisionIntent(
+  command: SponsorEnrollmentDecisionCommand,
+): SponsorEnrollmentDecision {
+  const { step_up_authenticated_at: _stepUpAuthenticatedAt, ...intent } = command;
+  return SponsorEnrollmentDecisionSchema.parse(intent);
 }
 
 export type EnrollmentErrorCode =
+  | "DECISION_BODY_INVALID"
   | "FLOW_INVALID"
   | "HARNESS_AS_NAME"
   | "IDEMPOTENCY_CONFLICT"
@@ -2648,18 +2663,19 @@ export class EnrollmentService {
   async decide(
     sponsor: EnrollmentPrincipal,
     enrollmentId: string,
-    rawDecision: SponsorEnrollmentDecision,
+    rawDecision: SponsorEnrollmentDecisionCommand,
     options: EnrollmentWriteOptions = {},
   ): Promise<void> {
     assertSponsor(sponsor);
-    const parsed = SponsorEnrollmentDecisionSchema.safeParse(rawDecision);
-    if (!parsed.success) throw new EnrollmentError("PROPOSAL_NOT_PENDING");
+    const parsed = SponsorEnrollmentDecisionCommandSchema.safeParse(rawDecision);
+    if (!parsed.success) throw new EnrollmentError("DECISION_BODY_INVALID");
+    const decision = sponsorEnrollmentDecisionIntent(parsed.data);
     // The Worker is the single validator, so the target binding lives here too
     // and not only on the HTTP edge: a decision authored for one enrollment can
     // never settle another, whatever the caller. Refused before the product
     // idempotency key is prepared, so a retargeted decision creates no product
     // replay record.
-    if (parsed.data.enrollment_id !== enrollmentId) {
+    if (decision.enrollment_id !== enrollmentId) {
       throw new EnrollmentError("DECISION_TARGET_MISMATCH");
     }
     const now = this.#clock.now();
@@ -2670,11 +2686,14 @@ export class EnrollmentService {
       {
         sponsor: sponsor.sponsorId,
         enrollmentId,
-        decision: parsed.data,
+        decision,
       },
       now,
     );
     if (replay.replay !== undefined) return;
+    if (!sponsorStepUpIsFresh(parsed.data.step_up_authenticated_at, now)) {
+      throw new EnrollmentError("STEP_UP_REQUIRED");
+    }
     const recoverCommittedDecision = async (): Promise<boolean> => {
       if (replay.attempt === undefined) return false;
       const completed = await this.#store.idempotencyReplay(replay.attempt);
@@ -2709,7 +2728,7 @@ export class EnrollmentService {
         {
           enrollmentId,
           sponsorId: sponsor.sponsorId,
-          decision: parsed.data,
+          decision,
           now,
         },
         idempotency,

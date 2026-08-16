@@ -338,12 +338,22 @@ describe("hex helpers", () => {
 });
 
 describe("canonical sponsor ids", () => {
-  test("usr_ plus a Google sub is the only accepted shape", async () => {
-    const { isCanonicalSponsorId } = await import("../../lib/sponsor-id.ts");
-    // A real Google sub is 1-60 chars of digits; usr_-prefixed is canonical.
-    expect(isCanonicalSponsorId("usr_105234567890123456789")).toBe(true);
-    // The bare sub, an email, and an empty suffix are all non-canonical and
-    // must never reach an envelope's principal_id.
+  test("a Google subject deterministically derives one bounded opaque sponsor id", async () => {
+    const { isCanonicalSponsorId, sponsorIdFromGoogleSubject } = await import(
+      "../../lib/sponsor-id.ts"
+    );
+    const first = await sponsorIdFromGoogleSubject("105234567890123456789");
+    const retry = await sponsorIdFromGoogleSubject("105234567890123456789");
+    const second = await sponsorIdFromGoogleSubject("205234567890123456789");
+    expect(first).toBe(retry);
+    expect(first).not.toBe(second);
+    expect(isCanonicalSponsorId(first)).toBe(true);
+    expect(isCanonicalSponsorId(await sponsorIdFromGoogleSubject("Z".repeat(255)))).toBe(true);
+    expect(await sponsorIdFromGoogleSubject("Z".repeat(256))).toBeUndefined();
+    expect(await sponsorIdFromGoogleSubject("subject\u0000suffix")).toBeUndefined();
+    expect(await sponsorIdFromGoogleSubject(undefined)).toBeUndefined();
+    // Raw provider subjects, emails, and empty suffixes never reach an
+    // envelope's principal_id.
     expect(isCanonicalSponsorId("105234567890123456789")).toBe(false);
     expect(isCanonicalSponsorId("usr_")).toBe(false);
     expect(isCanonicalSponsorId("sponsor@example.com")).toBe(false);

@@ -1,31 +1,30 @@
 import "server-only";
 
 import {
+  type DeviceLookupResponse,
+  DeviceLookupResponseSchema,
   type MintEnrollmentRequest,
   type MintEnrollmentResponse,
   MintEnrollmentResponseSchema,
   type ProblemCode,
   ProblemDocumentSchema,
-  type SponsorEnrollmentDecision,
-  type SponsorEnrollmentDecisionResponse,
-  SponsorEnrollmentDecisionResponseSchema,
-  type DeviceLookupResponse,
-  DeviceLookupResponseSchema,
   type SponsorBootstrapResponse,
   SponsorBootstrapResponseSchema,
+  type SponsorEnrollmentDecisionCommand,
+  type SponsorEnrollmentDecisionResponse,
+  SponsorEnrollmentDecisionResponseSchema,
   type SponsorFellowListResponse,
   SponsorFellowListResponseSchema,
   type SponsorProposalListResponse,
   SponsorProposalListResponseSchema,
 } from "@asimposium/contracts";
-
-import { dispatchSignedSponsorRequest } from "./stoa-sponsor";
 import {
   enrollmentRecoveryConfigurationIsValid,
   enrollmentRecoveryOwner,
 } from "./enrollment-recovery";
 import { importEd25519PrivateSeedHex } from "./service-envelope";
 import { isCanonicalSponsorId } from "./sponsor-id";
+import { dispatchSignedSponsorRequest } from "./stoa-sponsor";
 
 /**
  * Agora's typed client for the Stoa sponsor surface. Server-only: it reads the
@@ -72,8 +71,7 @@ async function signingConfig(): Promise<StoaSigningConfig | undefined> {
   const hex = process.env.SERVICE_ENVELOPE_PRIVATE_KEY_HEX;
   const kid = process.env.SERVICE_ENVELOPE_KID;
   if (hex === undefined || kid === undefined) return undefined;
-  if (!/^[0-9a-f]{64}$/.test(hex) || !/^[A-Za-z0-9._-]{1,64}$/.test(kid))
-    return undefined;
+  if (!/^[0-9a-f]{64}$/.test(hex) || !/^[A-Za-z0-9._-]{1,64}$/.test(kid)) return undefined;
   try {
     return { privateKey: await importEd25519PrivateSeedHex(hex), kid };
   } catch {
@@ -172,16 +170,11 @@ export async function stoaEnrollmentWritesConfigured(): Promise<boolean> {
 }
 
 /** Opaque sponsor binding for client-memory recovery; never exposes the sponsor id itself. */
-export async function stoaEnrollmentRecoveryOwner(
-  sponsorId: string,
-): Promise<string | undefined> {
+export async function stoaEnrollmentRecoveryOwner(sponsorId: string): Promise<string | undefined> {
   if (!isCanonicalSponsorId(sponsorId)) return undefined;
   const rootHex = process.env.ENROLLMENT_RECOVERY_HMAC_KEY_HEX;
   if (
-    !enrollmentRecoveryConfigurationIsValid(
-      rootHex,
-      process.env.SERVICE_ENVELOPE_PRIVATE_KEY_HEX,
-    )
+    !enrollmentRecoveryConfigurationIsValid(rootHex, process.env.SERVICE_ENVELOPE_PRIVATE_KEY_HEX)
   ) {
     return undefined;
   }
@@ -227,7 +220,7 @@ export function stoaPendingProposals(
 export function stoaDecideProposal(
   principalId: string,
   enrollmentId: string,
-  decision: SponsorEnrollmentDecision,
+  decision: SponsorEnrollmentDecisionCommand,
   idempotencyKey: string,
 ): Promise<StoaCall<SponsorEnrollmentDecisionResponse>> {
   return callStoa({
@@ -242,9 +235,7 @@ export function stoaDecideProposal(
   });
 }
 
-export function stoaFellows(
-  principalId: string,
-): Promise<StoaCall<SponsorFellowListResponse>> {
+export function stoaFellows(principalId: string): Promise<StoaCall<SponsorFellowListResponse>> {
   return callStoa({
     method: "GET",
     route: ROUTE_FELLOWS,

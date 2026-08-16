@@ -24,6 +24,8 @@ import {
   type EnrollmentRecord,
   EnrollmentService,
   InMemoryEnrollmentStore,
+  SPONSOR_STEP_UP_CLOCK_SKEW_SECONDS,
+  SPONSOR_STEP_UP_WINDOW_SECONDS,
 } from "../../src/enrollment/service";
 
 /**
@@ -236,6 +238,7 @@ function deviceDatabase(): Database {
 }
 
 const NOW = 1_786_000_000_000;
+const STEP_UP_AT = Math.floor(NOW / 1_000);
 
 function fixtureDigest(label: string): string {
   return createHash("sha256").update(label).digest("hex");
@@ -720,6 +723,7 @@ describe("device enrollment first-decider SQL", () => {
     await service.decide(sponsor, approveCard.enrollmentId, {
       enrollment_id: approveCard.enrollmentId,
       decision: "approve",
+      step_up_authenticated_at: STEP_UP_AT,
     });
     const approved = await service.poll({ flow_handle: approveStart.device_code }, approveOptions);
     expect(approved.status).toBe("approved");
@@ -748,6 +752,7 @@ describe("device enrollment first-decider SQL", () => {
     await service.decide(sponsor, denyCard.enrollmentId, {
       enrollment_id: denyCard.enrollmentId,
       decision: "deny",
+      step_up_authenticated_at: STEP_UP_AT,
     });
     expect(await service.poll({ flow_handle: denyStart.device_code }, denyOptions)).toEqual({
       status: "access_denied",
@@ -794,6 +799,156 @@ describe("device enrollment first-decider SQL", () => {
     ).toEqual({ status: "expired" });
   });
 
+  test("D1 decision step-up refuses without mutation and replays a committed result after expiry", async () => {
+    const { clock, service, sqlite } = d1DeviceServiceFixture();
+    const sponsor = { type: "sponsor", sponsorId: "usr_decision_step_up_d1" } as const;
+    const started = await service.deviceStart(
+      {
+        name: "d1-decision-step-up",
+        model: "test-model",
+        harness: "codex",
+        requested_scopes: ["review"],
+      },
+      { trustedClientAddress: "198.51.100.67" },
+    );
+    const card = await service.deviceLookup(sponsor, { user_code: started.user_code });
+    const options = { idempotencyKey: "d1-decision-step-up-1" } as const;
+    await expect(
+      service.decide(
+        sponsor,
+        card.enrollmentId,
+        {
+          enrollment_id: card.enrollmentId,
+          decision: "approve",
+          step_up_authenticated_at:
+            STEP_UP_AT - SPONSOR_STEP_UP_WINDOW_SECONDS - SPONSOR_STEP_UP_CLOCK_SKEW_SECONDS - 1,
+        },
+        options,
+      ),
+    ).rejects.toMatchObject({ code: "STEP_UP_REQUIRED" });
+    expect(
+      sqlite
+        .prepare<{ status: string }, [string]>(
+          "SELECT status FROM enrollment_proposals WHERE enrollment_id = ?",
+        )
+        .get(card.enrollmentId),
+    ).toEqual({ status: "pending" });
+    expect(
+      sqlite
+        .prepare<{ n: number }, []>(
+          "SELECT COUNT(*) AS n FROM enrollment_idempotency WHERE scope = 'decision'",
+        )
+        .get()?.n,
+    ).toBe(0);
+    expect(
+      sqlite.prepare<{ n: number }, []>("SELECT COUNT(*) AS n FROM enrollment_grants").get()?.n,
+    ).toBe(0);
+
+    const committed = {
+      enrollment_id: card.enrollmentId,
+      decision: "approve",
+      step_up_authenticated_at: STEP_UP_AT,
+    } as const;
+    await expect(
+      service.decide(sponsor, card.enrollmentId, committed, options),
+    ).resolves.toBeUndefined();
+    clock.value +=
+      (SPONSOR_STEP_UP_WINDOW_SECONDS + SPONSOR_STEP_UP_CLOCK_SKEW_SECONDS + 1) * 1_000;
+    await expect(
+      service.decide(sponsor, card.enrollmentId, committed, options),
+    ).resolves.toBeUndefined();
+    await expect(
+      service.decide(
+        sponsor,
+        card.enrollmentId,
+        { ...committed, step_up_authenticated_at: Math.floor(clock.value / 1_000) },
+        options,
+      ),
+    ).resolves.toBeUndefined();
+    expect(
+      sqlite
+        .prepare<{ n: number }, []>(
+          "SELECT COUNT(*) AS n FROM enrollment_idempotency WHERE scope = 'decision'",
+        )
+        .get()?.n,
+    ).toBe(1);
+    expect(
+      sqlite.prepare<{ n: number }, []>("SELECT COUNT(*) AS n FROM enrollment_grants").get()?.n,
+    ).toBe(1);
+  });
+
+  test("D1 same-key decisions converge after both replay preflights miss", async () => {
+    const clock = new DeviceTestClock();
+    const sqlite = deviceDatabase();
+    let barrierEnabled = false;
+    let preflightReaders = 0;
+    let releasePreflights: (() => void) | undefined;
+    const bothPreflightsRead = new Promise<void>((resolve) => {
+      releasePreflights = resolve;
+    });
+    const db = localD1(sqlite, {
+      serializeBatches: true,
+      afterFirstRead: async (query) => {
+        if (!barrierEnabled || !query.includes("FROM enrollment_idempotency")) return;
+        preflightReaders += 1;
+        if (preflightReaders === 2) {
+          barrierEnabled = false;
+          releasePreflights?.();
+        }
+        await bothPreflightsRead;
+      },
+    });
+    const service = new EnrollmentService({
+      clock,
+      store: new D1EnrollmentStore(db),
+      replayProtector: new AesGcmEnrollmentReplayProtector(new Uint8Array(32)),
+    });
+    const sponsor = { type: "sponsor", sponsorId: "usr_decision_race_d1" } as const;
+    const started = await service.deviceStart(
+      {
+        name: "d1-decision-race-replay",
+        model: "test-model",
+        harness: "codex",
+        requested_scopes: ["review"],
+      },
+      { trustedClientAddress: "198.51.100.68" },
+    );
+    const card = await service.deviceLookup(sponsor, { user_code: started.user_code });
+    const command = {
+      enrollment_id: card.enrollmentId,
+      decision: "approve",
+      step_up_authenticated_at: STEP_UP_AT,
+    } as const;
+    const options = { idempotencyKey: "d1-decision-race-replay-1" } as const;
+
+    barrierEnabled = true;
+    await expect(
+      Promise.all([
+        service.decide(sponsor, card.enrollmentId, command, options),
+        service.decide(sponsor, card.enrollmentId, command, options),
+      ]),
+    ).resolves.toEqual([undefined, undefined]);
+
+    expect(preflightReaders).toBe(2);
+    expect(
+      sqlite
+        .prepare<{ status: string }, [string]>(
+          "SELECT status FROM enrollment_proposals WHERE enrollment_id = ?",
+        )
+        .get(card.enrollmentId),
+    ).toEqual({ status: "approved" });
+    expect(
+      sqlite.prepare<{ n: number }, []>("SELECT COUNT(*) AS n FROM enrollment_grants").get()?.n,
+    ).toBe(1);
+    expect(
+      sqlite
+        .prepare<{ n: number }, []>(
+          "SELECT COUNT(*) AS n FROM enrollment_idempotency WHERE scope = 'decision'",
+        )
+        .get()?.n,
+    ).toBe(1);
+  });
+
   test("D1 same-key terminal polls recover after both replay preflights miss", async () => {
     const clock = new DeviceTestClock();
     const sqlite = deviceDatabase();
@@ -832,6 +987,7 @@ describe("device enrollment first-decider SQL", () => {
     await service.decide(sponsor, card.enrollmentId, {
       enrollment_id: card.enrollmentId,
       decision: "approve",
+      step_up_authenticated_at: STEP_UP_AT,
     });
     const options = { idempotencyKey: "d1-poll-race-replay-1" } as const;
     const results = await Promise.all([
@@ -932,6 +1088,7 @@ describe("device enrollment first-decider SQL", () => {
     await service.decide(sponsor, pendingCard.enrollmentId, {
       enrollment_id: pendingCard.enrollmentId,
       decision: "deny",
+      step_up_authenticated_at: STEP_UP_AT,
     });
     expect(
       await service.poll({ flow_handle: pendingStart.device_code }, { idempotencyKey: pendingKey }),
@@ -952,6 +1109,7 @@ describe("device enrollment first-decider SQL", () => {
     await service.decide(sponsor, issuedCard.enrollmentId, {
       enrollment_id: issuedCard.enrollmentId,
       decision: "approve",
+      step_up_authenticated_at: STEP_UP_AT,
     });
     const issued = await service.poll({ flow_handle: issuedStart.device_code });
     expect(issued.status).toBe("approved");
@@ -5489,6 +5647,7 @@ describe("0012 sponsor lifecycle commands", () => {
     await fixture.service.decide(fixture.sponsor, minted.enrollmentId, {
       enrollment_id: minted.enrollmentId,
       decision: "approve",
+      step_up_authenticated_at: Math.floor(fixture.clock.value / 1_000),
     });
     return { minted, claimed };
   }
@@ -6461,6 +6620,7 @@ describe("0012 sponsor lifecycle commands", () => {
     const decision = service.decide(sponsor, minted.enrollmentId, {
       enrollment_id: minted.enrollmentId,
       decision: "approve",
+      step_up_authenticated_at: Math.floor(clock.value / 1_000),
     });
     await decisionReadObserved;
     await new D1EnrollmentStore(localD1(sqlite)).panicSponsor({
@@ -6514,7 +6674,11 @@ describe("0013 sponsor Fellow capacity", () => {
     await service.decide(
       sponsor,
       minted.enrollmentId,
-      { enrollment_id: minted.enrollmentId, decision: "approve" },
+      {
+        enrollment_id: minted.enrollmentId,
+        decision: "approve",
+        step_up_authenticated_at: STEP_UP_AT,
+      },
       decisionKey === undefined ? {} : { idempotencyKey: decisionKey },
     );
     return minted.enrollmentId;
@@ -6762,7 +6926,11 @@ describe("0013 sponsor Fellow capacity", () => {
         await fixture.service.decide(
           sponsor,
           minted.enrollmentId,
-          { enrollment_id: minted.enrollmentId, decision: "approve" },
+          {
+            enrollment_id: minted.enrollmentId,
+            decision: "approve",
+            step_up_authenticated_at: Math.floor(fixture.clock.value / 1_000),
+          },
           { idempotencyKey: `cap-six-${fixture.name}` },
         );
         throw new Error("expected FELLOW_CAP_REACHED");
@@ -6794,7 +6962,11 @@ describe("0013 sponsor Fellow capacity", () => {
         fixture.service.decide(
           sponsor,
           minted.enrollmentId,
-          { enrollment_id: minted.enrollmentId, decision: "approve" },
+          {
+            enrollment_id: minted.enrollmentId,
+            decision: "approve",
+            step_up_authenticated_at: Math.floor(fixture.clock.value / 1_000),
+          },
           { idempotencyKey: `cap-six-${fixture.name}` },
         ),
       ).resolves.toBeUndefined();
@@ -6908,7 +7080,11 @@ describe("0013 sponsor Fellow capacity", () => {
         service.decide(
           sponsor,
           enrollmentId,
-          { enrollment_id: enrollmentId, decision: "approve" },
+          {
+            enrollment_id: enrollmentId,
+            decision: "approve",
+            step_up_authenticated_at: STEP_UP_AT,
+          },
           { idempotencyKey: `cap-shared-key-${fixture}` },
         ),
       );
@@ -7019,7 +7195,11 @@ describe("0013 sponsor Fellow capacity", () => {
     const approval = service.decide(
       sponsor,
       minted.enrollmentId,
-      { enrollment_id: minted.enrollmentId, decision: "approve" },
+      {
+        enrollment_id: minted.enrollmentId,
+        decision: "approve",
+        step_up_authenticated_at: Math.floor(clock.value / 1_000),
+      },
       { idempotencyKey: "cap-race-approve" },
     );
     const resume = service.transitionFellow(

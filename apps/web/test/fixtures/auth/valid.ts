@@ -6,8 +6,15 @@ export const { handlers, auth, signIn, signOut } = NextAuth({
   providers: [Google],
   session: { strategy: "jwt" },
   callbacks: {
-    jwt({ token, account }) {
-      if (account) token.authTime = Math.floor(Date.now() / 1_000);
+    jwt({ token, account, profile }) {
+      if (account) {
+        token.authTime =
+          typeof profile?.auth_time === "number" &&
+          Number.isSafeInteger(profile.auth_time) &&
+          profile.auth_time >= 0
+            ? profile.auth_time
+            : undefined;
+      }
       return token;
     },
     session({ session, token }) {

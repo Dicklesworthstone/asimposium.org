@@ -342,16 +342,43 @@ export const EnrollmentGrantReductionSchema = z
  * parameter. Sponsor isolation answers *whose* enrollment; this answers
  * *which* (ADR-20).
  */
+const SponsorEnrollmentApproveSchema = z
+  .object({ enrollment_id: EnrollmentIdSchema, decision: z.literal("approve") })
+  .strict();
+const SponsorEnrollmentReduceSchema = z
+  .object({
+    enrollment_id: EnrollmentIdSchema,
+    decision: z.literal("reduce"),
+    reduction: EnrollmentGrantReductionSchema,
+  })
+  .strict();
+const SponsorEnrollmentDenySchema = z
+  .object({ enrollment_id: EnrollmentIdSchema, decision: z.literal("deny") })
+  .strict();
+
 export const SponsorEnrollmentDecisionSchema = z.discriminatedUnion("decision", [
-  z.object({ enrollment_id: EnrollmentIdSchema, decision: z.literal("approve") }).strict(),
-  z
-    .object({
-      enrollment_id: EnrollmentIdSchema,
-      decision: z.literal("reduce"),
-      reduction: EnrollmentGrantReductionSchema,
-    })
-    .strict(),
-  z.object({ enrollment_id: EnrollmentIdSchema, decision: z.literal("deny") }).strict(),
+  SponsorEnrollmentApproveSchema,
+  SponsorEnrollmentReduceSchema,
+  SponsorEnrollmentDenySchema,
+]);
+
+/**
+ * The signed Agora-to-Stoa command adds server-stamped interactive-auth
+ * evidence to the stable sponsor intent. The Worker validates this timestamp;
+ * it is deliberately excluded from the product idempotency digest so that a
+ * committed response remains recoverable after the freshness window and an
+ * unchanged intent can be retried after reauthentication.
+ */
+export const SponsorEnrollmentDecisionCommandSchema = z.discriminatedUnion("decision", [
+  SponsorEnrollmentApproveSchema.extend({
+    step_up_authenticated_at: z.number().int().nonnegative(),
+  }).strict(),
+  SponsorEnrollmentReduceSchema.extend({
+    step_up_authenticated_at: z.number().int().nonnegative(),
+  }).strict(),
+  SponsorEnrollmentDenySchema.extend({
+    step_up_authenticated_at: z.number().int().nonnegative(),
+  }).strict(),
 ]);
 
 /**
@@ -551,6 +578,7 @@ export const EnrollmentContractsSchema = z
     fellow_registration_credential_fields: FellowRegistrationCredentialFieldsSchema,
     fellow_registration_request: FellowRegistrationRequestSchema,
     sponsor_enrollment_decision: SponsorEnrollmentDecisionSchema,
+    sponsor_enrollment_decision_command: SponsorEnrollmentDecisionCommandSchema,
     mint_response: MintEnrollmentResponseSchema,
     sponsor_proposal_list_response: SponsorProposalListResponseSchema,
     sponsor_credential_summary: SponsorCredentialSummarySchema,
@@ -596,6 +624,9 @@ export type EnrollmentHelloResponse = z.infer<typeof EnrollmentHelloResponseSche
 export type EnrollmentNextAction = z.infer<typeof EnrollmentNextActionSchema>;
 export type MintEnrollmentRequest = z.infer<typeof MintEnrollmentRequestSchema>;
 export type SponsorEnrollmentDecision = z.infer<typeof SponsorEnrollmentDecisionSchema>;
+export type SponsorEnrollmentDecisionCommand = z.infer<
+  typeof SponsorEnrollmentDecisionCommandSchema
+>;
 export type MintEnrollmentResponse = z.infer<typeof MintEnrollmentResponseSchema>;
 export type SponsorProposalListResponse = z.infer<typeof SponsorProposalListResponseSchema>;
 export type SponsorCredentialSummary = z.infer<typeof SponsorCredentialSummarySchema>;

@@ -1,21 +1,37 @@
 import { describe, expect, test } from "bun:test";
 
-import { RECENT_DECISION_WINDOW_SECONDS, recentAuthOk } from "../../lib/recent-auth.ts";
+import {
+  RECENT_AUTH_CLOCK_SKEW_SECONDS,
+  RECENT_DECISION_WINDOW_SECONDS,
+  recentAuthOk,
+} from "../../lib/recent-auth.ts";
 
 describe("sponsor decision recent-auth boundary", () => {
   const now = 1_800_000_000;
 
-  test("accepts the inclusive fifteen-minute window", () => {
+  test("accepts the inclusive window plus bounded inter-plane clock skew", () => {
     expect(recentAuthOk(now, now)).toBe(true);
-    expect(recentAuthOk(now - RECENT_DECISION_WINDOW_SECONDS, now)).toBe(true);
-    expect(recentAuthOk(now - RECENT_DECISION_WINDOW_SECONDS - 1, now)).toBe(false);
+    expect(
+      recentAuthOk(
+        now - RECENT_DECISION_WINDOW_SECONDS - RECENT_AUTH_CLOCK_SKEW_SECONDS,
+        now,
+      ),
+    ).toBe(true);
+    expect(
+      recentAuthOk(
+        now - RECENT_DECISION_WINDOW_SECONDS - RECENT_AUTH_CLOCK_SKEW_SECONDS - 1,
+        now,
+      ),
+    ).toBe(false);
+    expect(recentAuthOk(now + RECENT_AUTH_CLOCK_SKEW_SECONDS, now)).toBe(true);
+    expect(recentAuthOk(now + RECENT_AUTH_CLOCK_SKEW_SECONDS + 1, now)).toBe(false);
   });
 
-  test("fails closed for missing, negative, future, fractional, and non-finite claims", () => {
+  test("fails closed for missing, negative, too-future, fractional, and non-finite claims", () => {
     for (const claim of [
       undefined,
       -1,
-      now + 1,
+      now + RECENT_AUTH_CLOCK_SKEW_SECONDS + 1,
       now - 0.5,
       Number.NaN,
       Number.POSITIVE_INFINITY,
@@ -27,7 +43,8 @@ describe("sponsor decision recent-auth boundary", () => {
   });
 
   test("an ordinary later session read cannot make an old claim fresh", () => {
-    const signedInAt = now - RECENT_DECISION_WINDOW_SECONDS - 1;
+    const signedInAt =
+      now - RECENT_DECISION_WINDOW_SECONDS - RECENT_AUTH_CLOCK_SKEW_SECONDS - 1;
     expect(recentAuthOk(signedInAt, now)).toBe(false);
     expect(recentAuthOk(signedInAt, now + 60)).toBe(false);
   });

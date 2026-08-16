@@ -38,8 +38,15 @@ function config(overrides: { providers?: string; options?: string; extra?: strin
     export const { handlers, auth, signIn, signOut } = NextAuth({
       providers: ${overrides.providers ?? "[Google]"},
       callbacks: {
-        jwt({ token, account }) {
-          if (account) token.authTime = Math.floor(Date.now() / 1_000);
+        jwt({ token, account, profile }) {
+          if (account) {
+            token.authTime =
+              typeof profile?.auth_time === "number" &&
+              Number.isSafeInteger(profile.auth_time) &&
+              profile.auth_time >= 0
+                ? profile.auth_time
+                : undefined;
+          }
           return token;
         },
         session({ session, token }) {
@@ -67,13 +74,17 @@ describe("the baseline configuration is clean", () => {
   });
 
   test("the allowlists stay minimal and are stated, not inferred", () => {
-    expect([...ALLOWED_IMPORTS].sort()).toEqual(["next-auth", "next-auth/providers/google"]);
+    expect([...ALLOWED_IMPORTS].sort()).toEqual([
+      "./lib/sponsor-id",
+      "next-auth",
+      "next-auth/providers/google",
+    ]);
     expect(ALLOWED_ENV_EXPRESSION).toBe("process.env.NODE_ENV");
   });
 });
 
 describe("recent-auth is stable across ordinary session reads", () => {
-  test("the account-guarded custom claim is the only accepted wiring", () => {
+  test("the account-guarded provider claim is the only accepted wiring", () => {
     const surface = readAuthSurface(readFileSync(join(FIXTURES, "valid.ts"), "utf8")).recentAuth;
     expect(surface).toMatchObject({
       callbacksPresent: true,
@@ -96,12 +107,30 @@ describe("recent-auth is stable across ordinary session reads", () => {
     expect(codesOf(validateAuthConfig(source))).toContain("AUTH_RECENT_AUTH_REFRESHABLE");
   });
 
-  test("PLANTED: stamping on every JWT callback is refused", () => {
+  test("PLANTED: callback arrival time cannot replace provider authentication time", () => {
     const source = readFileSync(join(FIXTURES, "valid.ts"), "utf8").replace(
+      `if (account) {
+        token.authTime =
+          typeof profile?.auth_time === "number" &&
+          Number.isSafeInteger(profile.auth_time) &&
+          profile.auth_time >= 0
+            ? profile.auth_time
+            : undefined;
+      }`,
       "if (account) token.authTime = Math.floor(Date.now() / 1_000);",
-      "token.authTime = Math.floor(Date.now() / 1_000);",
     );
     expect(codesOf(validateAuthConfig(source))).toContain("AUTH_RECENT_AUTH_REFRESHABLE");
+  });
+
+  test("PLANTED: malformed provider auth_time cannot become recent-auth evidence", () => {
+    const baseline = readFileSync(join(FIXTURES, "valid.ts"), "utf8");
+    for (const mutation of [
+      baseline.replace("Number.isSafeInteger(profile.auth_time) &&\n", ""),
+      baseline.replace("profile.auth_time >= 0\n", "true\n"),
+      baseline.replace('typeof profile?.auth_time === "number" &&\n', "true &&\n"),
+    ]) {
+      expect(codesOf(validateAuthConfig(mutation))).toContain("AUTH_RECENT_AUTH_REFRESHABLE");
+    }
   });
 
   test("PLANTED: an unguarded session projection is refused", () => {
@@ -116,7 +145,7 @@ describe("recent-auth is stable across ordinary session reads", () => {
     const baseline = readFileSync(join(FIXTURES, "valid.ts"), "utf8");
     const aliasedStamp = baseline.replace(
       "return token;",
-      "const tokenAlias = token; tokenAlias.authTime = Math.floor(Date.now() / 1_000); return token;",
+      "const tokenAlias = token; tokenAlias.authTime = profile?.auth_time; return token;",
     );
     const aliasedProjection = baseline.replace(
       "return session;",

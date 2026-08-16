@@ -20,7 +20,8 @@
  *
  * The contract, all from Fable §5.1 and §14.1:
  *
- *  1. **Imports are allowlisted.** Only `next-auth` and the Google provider.
+ *  1. **Imports are allowlisted.** Only `next-auth`, the Google provider, and
+ *     the pure canonical sponsor-id helper.
  *     Otherwise `import { env } from "./secrets"` walks straight through every
  *     other rule in this file.
  *  2. **Exactly one Auth.js factory call**, resolved to the *imported* default
@@ -37,10 +38,11 @@
  *     `globalThis` anywhere in the file — aliased, bracketed, computed, inside
  *     a callback, inside an IIFE, inside a static initialiser — is refused.
  *     Auth.js resolves `AUTH_*` itself; this file never needs a secret.
- *  6. **Recent authentication uses a stable custom claim.** The JWT callback
- *     stamps `authTime` only while an OAuth account is present, and the session
- *     callback projects only that claim. Auth.js refreshes standard `iat` on
- *     session reads, so consulting it would turn page refresh into step-up.
+ *  6. **Recent authentication uses Google evidence.** The JWT callback copies
+ *     only the validated ID-token `auth_time` claim while an OAuth account is
+ *     present, and the session callback projects only that stable custom
+ *     claim. Auth.js refreshes standard `iat` on session reads, so consulting
+ *     it would turn page refresh into step-up.
  *
  * Anything unresolvable is a refusal. A checker that treats "I could not see
  * it" as "it is not there" reports a property it never established.
@@ -169,19 +171,24 @@ const RULES: Record<AuthViolationCode, { rule: string; fix_hint: string }> = {
   AUTH_RECENT_AUTH_REFRESHABLE: {
     rule: "ASI-RECENT-AUTH",
     fix_hint:
-      "Never derive recent authentication from token.iat or an unconditional JWT callback. Auth.js refreshes iat on session reads; use the account-guarded token.authTime claim.",
+      "Never derive recent authentication from callback arrival or token.iat. Copy a validated, nonnegative safe-integer Google profile.auth_time only on an account callback, then project that stable token.authTime claim.",
   },
 };
 
 const NEXT_AUTH_MODULE = "next-auth";
 const PROVIDER_PREFIX = "next-auth/providers/";
 const GOOGLE_PROVIDER = `${PROVIDER_PREFIX}google`;
+const SPONSOR_ID_HELPER = "./lib/sponsor-id";
 
 /**
  * Modules `auth.ts` may import. Adding an entry is a deliberate decision about
  * what can influence identity, and belongs in a commit a reviewer reads.
  */
-export const ALLOWED_IMPORTS: ReadonlySet<string> = new Set([NEXT_AUTH_MODULE, GOOGLE_PROVIDER]);
+export const ALLOWED_IMPORTS: ReadonlySet<string> = new Set([
+  NEXT_AUTH_MODULE,
+  GOOGLE_PROVIDER,
+  SPONSOR_ID_HELPER,
+]);
 
 /**
  * Global objects that can reach the process environment. Every syntactic route
@@ -532,24 +539,58 @@ function isWithin(node: ts.Node, ancestor: ts.Node): boolean {
   return false;
 }
 
-function isEpochSecondsNow(node: ts.Expression): boolean {
-  if (!ts.isCallExpression(node) || node.arguments.length !== 1) return false;
-  if (!propertyAccess(node.expression, "Math", "floor")) return false;
-  const quotient = node.arguments[0];
-  if (
-    quotient === undefined ||
-    !ts.isBinaryExpression(quotient) ||
-    quotient.operatorToken.kind !== ts.SyntaxKind.SlashToken
-  ) {
-    return false;
-  }
-  return (
-    ts.isCallExpression(quotient.left) &&
-    quotient.left.arguments.length === 0 &&
-    propertyAccess(quotient.left.expression, "Date", "now") &&
-    ts.isNumericLiteral(quotient.right) &&
-    quotient.right.text === "1000"
-  );
+function isProviderAuthTimeAccess(
+  node: ts.Node | undefined,
+  profileBinding: string | undefined,
+): node is ts.PropertyAccessExpression {
+  return propertyAccess(node, profileBinding, "auth_time");
+}
+
+function isSafeProviderAuthTimeExpression(
+  node: ts.Expression,
+  profileBinding: string | undefined,
+): boolean {
+  if (!ts.isConditionalExpression(node)) return false;
+  if (!isProviderAuthTimeAccess(node.whenTrue, profileBinding)) return false;
+  if (!ts.isIdentifier(node.whenFalse) || node.whenFalse.text !== "undefined") return false;
+
+  let numberType = false;
+  let safeInteger = false;
+  let nonnegative = false;
+  const visit = (part: ts.Node): void => {
+    if (ts.isBinaryExpression(part)) {
+      if (
+        [ts.SyntaxKind.EqualsEqualsToken, ts.SyntaxKind.EqualsEqualsEqualsToken].includes(
+          part.operatorToken.kind,
+        ) &&
+        ts.isTypeOfExpression(part.left) &&
+        isProviderAuthTimeAccess(part.left.expression, profileBinding) &&
+        ts.isStringLiteral(part.right) &&
+        part.right.text === "number"
+      ) {
+        numberType = true;
+      }
+      if (
+        part.operatorToken.kind === ts.SyntaxKind.GreaterThanEqualsToken &&
+        isProviderAuthTimeAccess(part.left, profileBinding) &&
+        ts.isNumericLiteral(part.right) &&
+        part.right.text === "0"
+      ) {
+        nonnegative = true;
+      }
+    }
+    if (
+      ts.isCallExpression(part) &&
+      part.arguments.length === 1 &&
+      propertyAccess(part.expression, "Number", "isSafeInteger") &&
+      isProviderAuthTimeAccess(part.arguments[0], profileBinding)
+    ) {
+      safeInteger = true;
+    }
+    ts.forEachChild(part, visit);
+  };
+  visit(node.condition);
+  return numberType && safeInteger && nonnegative;
 }
 
 function isInsideTruthyIf(node: ts.Node, binding: string | undefined, stop: ts.Node): boolean {
@@ -596,7 +637,7 @@ function isInsideNumberGuard(
   return false;
 }
 
-/** Prove that ordinary session reads cannot refresh the decision step-up time. */
+/** Prove that only validated provider evidence can set decision step-up time. */
 export function recentAuthSurface(sourceFile: ts.SourceFile): RecentAuthSurface {
   const empty: RecentAuthSurface = {
     callbacksPresent: false,
@@ -630,6 +671,7 @@ export function recentAuthSurface(sourceFile: ts.SourceFile): RecentAuthSurface 
   // refreshable write that a callback-local walk never sees.
   const jwtToken = jwt.fn === undefined ? undefined : callbackBinding(jwt.fn, "token");
   const account = jwt.fn === undefined ? undefined : callbackBinding(jwt.fn, "account");
+  const profile = jwt.fn === undefined ? undefined : callbackBinding(jwt.fn, "profile");
   const sessionToken = session.fn === undefined ? undefined : callbackBinding(session.fn, "token");
   const sessionBinding =
     session.fn === undefined ? undefined : callbackBinding(session.fn, "session");
@@ -648,7 +690,7 @@ export function recentAuthSurface(sourceFile: ts.SourceFile): RecentAuthSurface 
           jwt.fn !== undefined &&
           isWithin(node, jwt.fn) &&
           propertyAccess(node.left, jwtToken, "authTime") &&
-          isEpochSecondsNow(node.right) &&
+          isSafeProviderAuthTimeExpression(node.right, profile) &&
           isInsideTruthyIf(node, account, jwt.fn)
         ) {
           surface.safeJwtStampCount += 1;
@@ -922,7 +964,7 @@ export function validateAuthConfig(source: string, file = "auth.ts"): AuthViolat
       violation(
         "AUTH_RECENT_AUTH_REFRESHABLE",
         file,
-        `Recent-auth wiring is unsafe: ${recentAuth.jwtStampCount} authTime stamp(s), ${recentAuth.safeJwtStampCount} account-guarded epoch stamp(s), ${recentAuth.sessionProjectionCount} session projection(s), ${recentAuth.safeSessionProjectionCount} guarded stable projection(s), ${recentAuth.iatReads.length} iat read(s).`,
+        `Recent-auth wiring is unsafe: ${recentAuth.jwtStampCount} authTime stamp(s), ${recentAuth.safeJwtStampCount} account-guarded provider auth_time stamp(s), ${recentAuth.sessionProjectionCount} session projection(s), ${recentAuth.safeSessionProjectionCount} guarded stable projection(s), ${recentAuth.iatReads.length} iat read(s).`,
       ),
     );
   }

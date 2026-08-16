@@ -1,4 +1,7 @@
-import { DeviceCodeStartResponseSchema } from "@asimposium/contracts";
+import {
+  DeviceCodeStartResponseSchema,
+  SponsorEnrollmentDecisionResponseSchema,
+} from "@asimposium/contracts";
 
 const origin = process.env.S1_LOCAL_ORIGIN;
 if (typeof origin !== "string" || !/^http:\/\/127\.0\.0\.1:\d+$/.test(origin)) {
@@ -7,6 +10,7 @@ if (typeof origin !== "string" || !/^http:\/\/127\.0\.0\.1:\d+$/.test(origin)) {
 } else {
   const startedAt = performance.now();
   const sponsorId = "usr_local_sponsor_s1";
+  const decisionStepUpAuthenticatedAt = Math.floor(Date.now() / 1_000);
   const fetchTimeoutMs = 5_000;
 
   const localFetch = (input: string, init: RequestInit = {}): Promise<Response> =>
@@ -78,6 +82,13 @@ if (typeof origin !== "string" || !/^http:\/\/127\.0\.0\.1:\d+$/.test(origin)) {
       after.start_attempts - before.start_attempts !== expected ||
       after.start_replays - before.start_replays !== expected
     ) {
+      throw new Error(code);
+    }
+  };
+
+  const assertDecisionAcknowledged = async (result: Response, code: string): Promise<void> => {
+    const body = await result.json();
+    if (result.status !== 200 || !SponsorEnrollmentDecisionResponseSchema.safeParse(body).success) {
       throw new Error(code);
     }
   };
@@ -364,21 +375,51 @@ if (typeof origin !== "string" || !/^http:\/\/127\.0\.0\.1:\d+$/.test(origin)) {
       throw new Error("pending-flow");
     }
 
+    const missingStepUp = await post(
+      "/__s1/approve",
+      {
+        sponsor_id: sponsorId,
+        enrollment_id: minted.enrollmentId,
+        decision: {
+          enrollment_id: minted.enrollmentId,
+          decision: "approve",
+        },
+      },
+      { "idempotency-key": "local-decision-1" },
+    );
+    const missingStepUpBody = (await missingStepUp.json()) as { code?: unknown };
+    if (missingStepUp.status !== 400 || missingStepUpBody.code !== "DECISION_BODY_INVALID") {
+      throw new Error("decision-step-up-command-required");
+    }
+
     const approval = await post(
       "/__s1/approve",
       {
         sponsor_id: sponsorId,
         enrollment_id: minted.enrollmentId,
+        decision: {
+          enrollment_id: minted.enrollmentId,
+          decision: "approve",
+          step_up_authenticated_at: decisionStepUpAuthenticatedAt,
+        },
       },
       { "idempotency-key": "local-decision-1" },
     );
-    if (approval.status !== 200) throw new Error("approval-status");
+    await assertDecisionAcknowledged(approval, "approval-status");
     const approvalReplay = await post(
       "/__s1/approve",
-      { sponsor_id: sponsorId, enrollment_id: minted.enrollmentId },
+      {
+        sponsor_id: sponsorId,
+        enrollment_id: minted.enrollmentId,
+        decision: {
+          enrollment_id: minted.enrollmentId,
+          decision: "approve",
+          step_up_authenticated_at: decisionStepUpAuthenticatedAt,
+        },
+      },
       { "idempotency-key": "local-decision-1" },
     );
-    if (approvalReplay.status !== 200) throw new Error("decision-lost-response-replay");
+    await assertDecisionAcknowledged(approvalReplay, "decision-lost-response-replay");
 
     const approvedCard = await post("/__s1/card", {
       sponsor_id: sponsorId,
@@ -550,7 +591,15 @@ if (typeof origin !== "string" || !/^http:\/\/127\.0\.0\.1:\d+$/.test(origin)) {
     }
     const failedApproval = await post(
       "/__s1/approve",
-      { sponsor_id: sponsorId, enrollment_id: rollbackMintBody.enrollmentId },
+      {
+        sponsor_id: sponsorId,
+        enrollment_id: rollbackMintBody.enrollmentId,
+        decision: {
+          enrollment_id: rollbackMintBody.enrollmentId,
+          decision: "approve",
+          step_up_authenticated_at: decisionStepUpAuthenticatedAt,
+        },
+      },
       { "idempotency-key": "local-decision-rollback-1" },
     );
     const failedApprovalBody = (await failedApproval.json()) as {
@@ -571,11 +620,12 @@ if (typeof origin !== "string" || !/^http:\/\/127\.0\.0\.1:\d+$/.test(origin)) {
         decision: {
           enrollment_id: rollbackMintBody.enrollmentId,
           decision: "deny",
+          step_up_authenticated_at: decisionStepUpAuthenticatedAt,
         },
       },
       { "idempotency-key": "local-decision-rollback-1" },
     );
-    if (recoveredDeny.status !== 200) throw new Error("rollback-key-poisoned");
+    await assertDecisionAcknowledged(recoveredDeny, "rollback-key-poisoned");
     const rollbackDenied = await post(
       "/v1/fellows/flow",
       { flow_handle: rollbackClaimBody.flow_handle },
@@ -696,6 +746,20 @@ if (typeof origin !== "string" || !/^http:\/\/127\.0\.0\.1:\d+$/.test(origin)) {
     }
     const advanced = await post("/__s1/advance-device-ttl", {});
     if (advanced.status !== 200) throw new Error("stable-poll-key-clock-advance");
+    const expiredStepUpReplay = await post(
+      "/__s1/approve",
+      {
+        sponsor_id: sponsorId,
+        enrollment_id: minted.enrollmentId,
+        decision: {
+          enrollment_id: minted.enrollmentId,
+          decision: "approve",
+          step_up_authenticated_at: decisionStepUpAuthenticatedAt,
+        },
+      },
+      { "idempotency-key": "local-decision-1" },
+    );
+    await assertDecisionAcknowledged(expiredStepUpReplay, "decision-replay-after-step-up-expiry");
     const expiryTerminal = await post("/v1/device-token", expiryPollRequest, {
       "idempotency-key": "local-device-expiry-poll-1",
     });
@@ -727,6 +791,8 @@ if (typeof origin !== "string" || !/^http:\/\/127\.0\.0\.1:\d+$/.test(origin)) {
           "approve-token-hello-binding",
           "authenticated-private-authority-recovery",
           "encrypted-idempotency-lost-response",
+          "decision-step-up-command-required",
+          "decision-replay-after-step-up-expiry",
           "idempotency-digest-conflict",
           "concurrent-first-claim-replay",
           "failed-batch-does-not-poison-key",

@@ -20,7 +20,7 @@ import worker from "../../src/enrollment/local-d1-worker";
  *    blames the caller for an operator's misconfiguration;
  *  - the codes the S-1 contract depends on survive: 409 for a same-key /
  *    different-digest collision, 403 for `WRONG_PRINCIPAL`, and the exact code at
- *    400 for everything else typed.
+ *    400 for typed contract/state failures.
  *
  * No response may carry the key, a ciphertext, a digest, or a raw message.
  */
@@ -78,9 +78,10 @@ function freshDatabase(): D1Database {
   return localD1(sqlite);
 }
 
-/** Two distinct, well-formed 256-bit base64url keys. */
+/** Distinct, well-formed 256-bit base64url keys. */
 const KEY_A = "A".repeat(43);
 const KEY_B = "B".repeat(43);
+const KEY_C = "C".repeat(43);
 const syntheticJoinSecret = (): string => `v1.${"x".repeat(43)}`;
 
 const context = {} as ExecutionContext;
@@ -164,6 +165,19 @@ describe("a replay row that will not decrypt is operational, not a client error"
   });
 });
 
+test("the local isolate cache never reuses a service across D1 binding identities", async () => {
+  const first = await call(freshDatabase(), KEY_C, "/__s1/mint", mintBody);
+  expect(first.status).toBe(201);
+  const enrollmentId = first.body.enrollmentId as string;
+
+  const absentFromSecondBinding = await call(freshDatabase(), KEY_C, "/__s1/card", {
+    sponsor_id: mintBody.sponsor_id,
+    enrollment_id: enrollmentId,
+  });
+  expect(absentFromSecondBinding.status).toBe(403);
+  expect(absentFromSecondBinding.body).toEqual({ code: "WRONG_PRINCIPAL" });
+});
+
 describe("the codes the S-1 contract depends on survive the harness", () => {
   test("an identical retry under one key replays instead of minting twice", async () => {
     const db = freshDatabase();
@@ -206,25 +220,25 @@ describe("the codes the S-1 contract depends on survive the harness", () => {
     expect(card.body).toEqual({ code: "WRONG_PRINCIPAL" });
   });
 
-  test("a typed enrollment failure keeps its exact code at 400", async () => {
+  test("a typed enrollment target failure keeps its exact code at 400", async () => {
     const db = freshDatabase();
     const minted = await call(db, KEY_A, "/__s1/mint", mintBody);
     expect(minted.status).toBe(201);
 
-    // The owning sponsor decides an enrollment nobody has claimed yet. Note the
-    // payload shape matters to the service: an explicit decision object reaches
-    // the proposal-status check, while omitting it is answered by the principal
-    // boundary instead (see the sibling existence-hiding test).
+    // The owning sponsor sends a structurally valid command whose signed target
+    // differs from the local route target, so this reaches the service's target
+    // binding rather than the local-input or step-up boundary.
     const approval = await call(db, KEY_A, "/__s1/approve", {
       sponsor_id: mintBody.sponsor_id,
       enrollment_id: minted.body.enrollmentId as string,
       decision: {
-        enrollment_id: minted.body.enrollmentId as string,
-        decision: "reduce",
+        enrollment_id: "ASIMP-EN-0000000000",
+        decision: "approve",
+        step_up_authenticated_at: Math.floor(Date.now() / 1_000),
       },
     });
     expect(approval.status).toBe(400);
-    expect(approval.body).toEqual({ code: "PROPOSAL_NOT_PENDING" });
+    expect(approval.body).toEqual({ code: "DECISION_TARGET_MISMATCH" });
     // The old harness collapsed every failure here into one local label.
     expect(approval.body.code).not.toBe("LOCAL_APPROVAL_FAILED");
     expect(approval.body.code).not.toBe("ENROLLMENT_UNAVAILABLE");
@@ -237,6 +251,11 @@ describe("the codes the S-1 contract depends on survive the harness", () => {
     const approval = await call(freshDatabase(), KEY_A, "/__s1/approve", {
       sponsor_id: mintBody.sponsor_id,
       enrollment_id: "ASIMP-EN-0000000000",
+      decision: {
+        enrollment_id: "ASIMP-EN-0000000000",
+        decision: "deny",
+        step_up_authenticated_at: Math.floor(Date.now() / 1_000),
+      },
     });
     expect(approval.status).toBe(403);
     expect(approval.body).toEqual({ code: "WRONG_PRINCIPAL" });
