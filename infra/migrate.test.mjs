@@ -14,16 +14,22 @@ import { performance } from "node:perf_hooks";
 import { fileURLToPath } from "node:url";
 import { REDACTED_TOKEN } from "@asimposium/contracts/diagnostic-safety";
 import {
+  assertReadLimit,
   assertRehearsalIsNotAnApplication,
+  bootstrapTargetDisposition,
+  catalogFingerprint,
+  classifySchemaLineage,
   declaresDestructive,
   describeDestructiveStatements,
   digestOf,
   MigrationError,
   planMigrations,
+  readBootstrapManifest,
   readMigrationDirectory,
   readStateFile,
   redactStderr,
   resolvePinnedWranglerCommand,
+  runBoundedCommand,
 } from "./migrate.mjs";
 import { maskAbsolutePaths } from "./validate-environments.mjs";
 
@@ -99,6 +105,46 @@ function directory(name, files) {
   return root;
 }
 
+function bootstrapFixtureRoot(name, artifactSql, artifactDigest = digestOf(artifactSql)) {
+  const root = join(space, name);
+  const bootstrap = join(root, "db", "bootstrap");
+  mkdirSync(bootstrap, { recursive: true });
+  writeFileSync(join(bootstrap, "0015_final_schema_v1.sql"), artifactSql, "utf8");
+  writeFileSync(
+    join(bootstrap, "manifest.json"),
+    JSON.stringify({
+      version: 1,
+      default_artifact_id: "0015-final-schema-v1",
+      artifacts: [
+        {
+          id: "0015-final-schema-v1",
+          file: "0015_final_schema_v1.sql",
+          head_sequence: 15,
+          digest: artifactDigest,
+          schema_digest: "a".repeat(64),
+          legacy_0009_schema_digest: "b".repeat(64),
+        },
+      ],
+      schema_heads: [{ sequence: 15, schema_digest: "a".repeat(64) }],
+    }),
+    "utf8",
+  );
+  return root;
+}
+
+function closedPipe(bytes = []) {
+  return new ReadableStream({
+    start(controller) {
+      for (const value of bytes) controller.enqueue(value);
+      controller.close();
+    },
+  });
+}
+
+function neverClosingPipe() {
+  return new ReadableStream({ start() {} });
+}
+
 function expectFailure(label, expectedCode, fn) {
   try {
     fn();
@@ -121,7 +167,610 @@ const record = (migration) => ({
 
 const cases = [
   {
+    name: "catalog-first bootstrap lineage distinguishes empty, historical, baseline, legacy, and contamination",
+    execute() {
+      const migrations = readMigrationDirectory(join(repositoryRoot, "db/migrations"));
+      const productCatalog = [
+        {
+          type: "table",
+          name: "product",
+          table: "product",
+          sql: "CREATE TABLE product (id TEXT);",
+        },
+      ];
+      const currentDigest = catalogFingerprint(productCatalog);
+      const legacyCatalog = [
+        { type: "table", name: "legacy", table: "legacy", sql: "CREATE TABLE legacy (id TEXT);" },
+      ];
+      const manifest = {
+        default_artifact_id: "0015-final-schema-v1",
+        artifacts: [
+          {
+            id: "0015-final-schema-v1",
+            head_sequence: 15,
+            digest: "a".repeat(64),
+            schema_digest: currentDigest,
+            legacy_0009_schema_digest: catalogFingerprint(legacyCatalog),
+          },
+        ],
+        schema_heads: [{ sequence: 15, schema_digest: currentDigest }],
+      };
+      const historical = migrations.slice(0, 15).map(record);
+      const legacy = migrations.slice(0, 9).map(record);
+
+      assert.equal(
+        classifySchemaLineage({ catalog: [], journal: [], lineage: [], migrations, manifest }).kind,
+        "provably-empty",
+      );
+      const wranglerPlatformMetadata = {
+        type: "table",
+        name: "_cf_METADATA",
+        table: "_cf_METADATA",
+        sql: `CREATE TABLE _cf_METADATA (
+        key INTEGER PRIMARY KEY,
+        value BLOB
+      )`,
+      };
+      assert.equal(
+        catalogFingerprint([...productCatalog, wranglerPlatformMetadata]),
+        currentDigest,
+        "the exact Wrangler D1 metadata table must not rewrite product authority",
+      );
+      assert.deepEqual(
+        classifySchemaLineage({
+          catalog: [wranglerPlatformMetadata],
+          journal: [],
+          lineage: [],
+          migrations,
+          manifest,
+        }),
+        { kind: "provably-empty", head: 0 },
+        "the exact Wrangler D1 metadata table must not contaminate an otherwise empty target",
+      );
+      for (const [label, lookalike] of [
+        [
+          "wrong type",
+          {
+            ...wranglerPlatformMetadata,
+            type: "view",
+            sql: "CREATE VIEW _cf_METADATA AS SELECT 1",
+          },
+        ],
+        ["wrong table", { ...wranglerPlatformMetadata, table: "product_metadata" }],
+        [
+          "wrong SQL",
+          {
+            ...wranglerPlatformMetadata,
+            sql: "CREATE TABLE _cf_METADATA (key TEXT PRIMARY KEY, value BLOB)",
+          },
+        ],
+      ]) {
+        assert.equal(
+          classifySchemaLineage({
+            catalog: [lookalike],
+            journal: [],
+            lineage: [],
+            migrations,
+            manifest,
+          }).kind,
+          "unknown-or-contaminated",
+          `Wrangler metadata lookalike with ${label} must remain product evidence`,
+        );
+      }
+      for (const name of ["_asimposium_migrations", "_asimposium_schema_lineage"]) {
+        assert.equal(
+          classifySchemaLineage({
+            catalog: [
+              {
+                type: "table",
+                name,
+                table: name,
+                sql: `CREATE TABLE ${name} (id TEXT);`,
+              },
+            ],
+            journal: [],
+            lineage: [],
+            migrations,
+            manifest,
+          }).kind,
+          "unknown-or-contaminated",
+          `a lone ${name} table must not make a target bootstrap-empty`,
+        );
+      }
+      assert.equal(
+        classifySchemaLineage({
+          catalog: [
+            {
+              type: "table",
+              name: "_asimposium_unowned_control_like_object",
+              table: "_asimposium_unowned_control_like_object",
+              sql: "CREATE TABLE _asimposium_unowned_control_like_object (id TEXT);",
+            },
+          ],
+          journal: [],
+          lineage: [],
+          migrations,
+          manifest,
+        }).kind,
+        "unknown-or-contaminated",
+      );
+      assert.equal(
+        classifySchemaLineage({
+          catalog: [
+            ...productCatalog,
+            {
+              type: "table",
+              name: "_asimposium_migrations",
+              table: "_asimposium_migrations",
+              sql: "CREATE TABLE _asimposium_migrations (...);",
+            },
+          ],
+          journal: historical,
+          lineage: [],
+          migrations,
+          manifest,
+        }).kind,
+        "historical-current-0015",
+      );
+      assert.equal(
+        classifySchemaLineage({
+          catalog: [
+            ...productCatalog,
+            {
+              type: "table",
+              name: "_asimposium_migrations",
+              table: "_asimposium_migrations",
+              sql: "CREATE TABLE _asimposium_migrations (...);",
+            },
+            {
+              type: "table",
+              name: "_asimposium_schema_lineage",
+              table: "_asimposium_schema_lineage",
+              sql: "CREATE TABLE _asimposium_schema_lineage (...);",
+            },
+          ],
+          journal: [],
+          lineage: [
+            {
+              lineage: "bootstrap-baseline15",
+              artifact_id: "0015-final-schema-v1",
+              artifact_digest: "a".repeat(64),
+              schema_digest: currentDigest,
+            },
+          ],
+          migrations,
+          manifest,
+        }).kind,
+        "bootstrap-baseline15",
+      );
+      assert.equal(
+        classifySchemaLineage({
+          catalog: [
+            ...legacyCatalog,
+            {
+              type: "table",
+              name: "_asimposium_migrations",
+              table: "_asimposium_migrations",
+              sql: "CREATE TABLE _asimposium_migrations (...);",
+            },
+          ],
+          journal: legacy,
+          lineage: [],
+          migrations,
+          manifest,
+        }).kind,
+        "legacy-0009",
+      );
+      assert.equal(
+        classifySchemaLineage({
+          catalog: [
+            ...productCatalog,
+            {
+              type: "table",
+              name: "contamination",
+              table: "contamination",
+              sql: "CREATE TABLE contamination (id TEXT);",
+            },
+          ],
+          journal: [],
+          lineage: [],
+          migrations,
+          manifest,
+        }).kind,
+        "unknown-or-contaminated",
+      );
+
+      const forward = {
+        id: "0016_forward.sql",
+        sequence: 16,
+        digest: "b".repeat(64),
+        sql: CREATE_B,
+      };
+      const historicalPlan = planMigrations([...migrations, forward], historical, plainOptions);
+      const baselinePlan = planMigrations([...migrations, forward], [], {
+        ...plainOptions,
+        baseline: { head: 15 },
+      });
+      assert.deepEqual(
+        historicalPlan.to_apply.map((migration) => migration.id),
+        [forward.id],
+      );
+      assert.deepEqual(
+        baselinePlan.to_apply.map((migration) => migration.id),
+        [forward.id],
+      );
+
+      // Model the completed, durable 0016 command: its DDL and its exact
+      // journal record both exist before the next classification. The new head
+      // must be registered with its post-apply raw sqlite_schema fingerprint.
+      const forwardProductCatalog = [
+        ...productCatalog,
+        { type: "table", name: "b", table: "b", sql: CREATE_B.trim() },
+      ];
+      const forwardDigest = catalogFingerprint(forwardProductCatalog);
+      const forwardManifest = {
+        ...manifest,
+        schema_heads: [
+          ...manifest.schema_heads,
+          { sequence: forward.sequence, schema_digest: forwardDigest },
+        ],
+      };
+      const historicalAfterApply = [...historical, record(forward)];
+      const historicalForward = classifySchemaLineage({
+        catalog: [
+          ...forwardProductCatalog,
+          {
+            type: "table",
+            name: "_asimposium_migrations",
+            table: "_asimposium_migrations",
+            sql: "CREATE TABLE _asimposium_migrations (...);",
+          },
+        ],
+        journal: historicalAfterApply,
+        lineage: [],
+        migrations: [...migrations, forward],
+        manifest: forwardManifest,
+      });
+      assert.deepEqual(historicalForward, { kind: "historical-forward", head: 16 });
+      assert.equal(
+        planMigrations([...migrations, forward], historicalAfterApply, plainOptions).idempotent,
+        true,
+      );
+
+      const bootstrapAfterApply = classifySchemaLineage({
+        catalog: [
+          ...forwardProductCatalog,
+          {
+            type: "table",
+            name: "_asimposium_migrations",
+            table: "_asimposium_migrations",
+            sql: "CREATE TABLE _asimposium_migrations (...);",
+          },
+          {
+            type: "table",
+            name: "_asimposium_schema_lineage",
+            table: "_asimposium_schema_lineage",
+            sql: "CREATE TABLE _asimposium_schema_lineage (...);",
+          },
+        ],
+        journal: [record(forward)],
+        lineage: [
+          {
+            lineage: "bootstrap-baseline15",
+            artifact_id: "0015-final-schema-v1",
+            artifact_digest: "a".repeat(64),
+            schema_digest: currentDigest,
+          },
+        ],
+        migrations: [...migrations, forward],
+        manifest: forwardManifest,
+      });
+      assert.deepEqual(bootstrapAfterApply, {
+        kind: "bootstrap-baseline15",
+        head: 16,
+        artifact_id: "0015-final-schema-v1",
+        journal_records: 1,
+      });
+      assert.equal(
+        planMigrations([...migrations, forward], [record(forward)], {
+          ...plainOptions,
+          baseline: { head: bootstrapAfterApply.head },
+        }).idempotent,
+        true,
+      );
+
+      assert.equal(bootstrapTargetDisposition({ kind: "provably-empty" }), "ready");
+      assert.equal(
+        bootstrapTargetDisposition({ kind: "bootstrap-baseline15", head: 15 }),
+        "idempotent",
+      );
+      expectFailure(
+        "historical current bootstrap refusal",
+        "BOOTSTRAP_HISTORICAL_LINEAGE_REFUSED",
+        () => bootstrapTargetDisposition({ kind: "historical-current-0015", head: 15 }),
+      );
+      expectFailure(
+        "historical forward bootstrap refusal",
+        "BOOTSTRAP_HISTORICAL_LINEAGE_REFUSED",
+        () => bootstrapTargetDisposition({ kind: "historical-forward", head: 16 }),
+      );
+      expectFailure("contaminated bootstrap refusal", "BOOTSTRAP_TARGET_REFUSED", () =>
+        bootstrapTargetDisposition({ kind: "unknown-or-contaminated", head: 0 }),
+      );
+
+      // The fingerprint is over sqlite_schema.sql bytes. Collapsing whitespace
+      // would turn these distinct string literals into the same authority.
+      assert.notEqual(
+        catalogFingerprint([
+          {
+            type: "table",
+            name: "literal",
+            table: "literal",
+            sql: "CREATE TABLE literal (v TEXT DEFAULT 'a b');",
+          },
+        ]),
+        catalogFingerprint([
+          {
+            type: "table",
+            name: "literal",
+            table: "literal",
+            sql: "CREATE TABLE literal (v TEXT DEFAULT 'a  b');",
+          },
+        ]),
+      );
+
+      expectFailure("catalog overrun", "LOCAL_D1_CATALOG_OVERRUN", () =>
+        assertReadLimit(new Array(513).fill({}), 512, "LOCAL_D1_CATALOG_OVERRUN"),
+      );
+      expectFailure("journal overrun", "LOCAL_D1_JOURNAL_OVERRUN", () =>
+        assertReadLimit(new Array(257).fill({}), 256, "LOCAL_D1_JOURNAL_OVERRUN"),
+      );
+      expectFailure("lineage overrun", "LOCAL_D1_LINEAGE_OVERRUN", () =>
+        assertReadLimit(new Array(9).fill({}), 8, "LOCAL_D1_LINEAGE_OVERRUN"),
+      );
+
+      const exactManifest = readBootstrapManifest(repositoryRoot);
+      assert.equal(exactManifest.artifacts.length, 1);
+      assert.equal(/\bIF\s+NOT\s+EXISTS\b/i.test(exactManifest.artifacts[0].sql), false);
+    },
+  },
+  {
+    name: "bootstrap artifact loader refuses collision masking and digest drift before any apply",
+    execute() {
+      const collisionMasking = "CREATE TABLE IF NOT EXISTS collision_masking (id TEXT);\n";
+      expectFailure("collision-masking artifact", "BOOTSTRAP_ARTIFACT_COLLISION_MASKING", () =>
+        readBootstrapManifest(bootstrapFixtureRoot("bootstrap-if-not-exists", collisionMasking)),
+      );
+      const digestDrift = "CREATE TABLE digest_drift (id TEXT);\n";
+      expectFailure("artifact digest drift", "BOOTSTRAP_ARTIFACT_DRIFT", () =>
+        readBootstrapManifest(
+          bootstrapFixtureRoot("bootstrap-digest-drift", digestDrift, "c".repeat(64)),
+        ),
+      );
+    },
+  },
+  {
+    name: "bounded local command strips parent authority and refuses unsafe containment outcomes",
+    async execute() {
+      const plantedAuthority = {
+        CLOUDFLARE_API_TOKEN: "cf-local-executor-test-authority",
+        WRANGLER_API_TOKEN: "wrangler-local-executor-test-authority",
+        S2_RUN_TOKEN: "s2-local-executor-test-authority",
+      };
+      const priorAuthority = Object.fromEntries(
+        Object.keys(plantedAuthority).map((name) => [name, process.env[name]]),
+      );
+      const expectedChildEnvironment =
+        process.platform === "win32"
+          ? {
+              LANG: "C",
+              PATH: "C:\\Windows\\System32",
+              SystemRoot: "C:\\Windows",
+              TZ: "UTC",
+            }
+          : {
+              LANG: "C",
+              LC_ALL: "C",
+              PATH: "/usr/local/bin:/usr/bin:/bin",
+              TZ: "UTC",
+            };
+      const observedChildEnvironments = [];
+      Object.assign(process.env, plantedAuthority);
+      const outputSignals = [];
+      try {
+        const output = await runBoundedCommand({
+          cmd: ["fixture"],
+          cwd: repositoryRoot,
+          timeoutMs: 10,
+          termGraceMs: 1,
+          killReapMs: 1,
+          pipeDrainMs: 1,
+          stdoutMaxBytes: 3,
+          spawn(options) {
+            assert.equal(options.detached, true);
+            assert.equal(options.stdin, "ignore");
+            assert.equal(options.stdout, "pipe");
+            assert.equal(options.stderr, "pipe");
+            assert.deepEqual(options.env, expectedChildEnvironment);
+            observedChildEnvironments.push(options.env);
+            return {
+              pid: 41,
+              exited: new Promise(() => {}),
+              stderr: closedPipe(),
+              stdout: closedPipe([new Uint8Array([1, 2, 3, 4])]),
+            };
+          },
+          signalGroup(_child, signal) {
+            outputSignals.push(signal);
+          },
+          groupExists() {
+            return false;
+          },
+        });
+        assert.equal(output.outcome, "output-overrun");
+        assert.deepEqual(outputSignals, ["SIGTERM"]);
+        assert.equal(output.stdout, "");
+
+        const pipeSignals = [];
+        const pipe = await runBoundedCommand({
+          cmd: ["fixture"],
+          cwd: repositoryRoot,
+          timeoutMs: 10,
+          termGraceMs: 1,
+          killReapMs: 1,
+          pipeDrainMs: 1,
+          spawn() {
+            return {
+              pid: 42,
+              exited: Promise.resolve(0),
+              stderr: closedPipe(),
+              stdout: neverClosingPipe(),
+            };
+          },
+          signalGroup(_child, signal) {
+            pipeSignals.push(signal);
+          },
+          groupExists() {
+            return pipeSignals.length < 2;
+          },
+        });
+        assert.equal(pipe.outcome, "pipe-drain-unproven");
+        assert.deepEqual(pipeSignals, ["SIGTERM", "SIGKILL"]);
+
+        const lockedPipeSignals = [];
+        const lockedPipe = await runBoundedCommand({
+          cmd: ["fixture"],
+          cwd: repositoryRoot,
+          timeoutMs: 10,
+          termGraceMs: 1,
+          killReapMs: 1,
+          pipeDrainMs: 1,
+          spawn() {
+            return {
+              pid: 43,
+              exited: new Promise(() => {}),
+              stderr: closedPipe(),
+              stdout: {
+                getReader() {
+                  throw new Error("fixture locked stream");
+                },
+              },
+            };
+          },
+          signalGroup(_child, signal) {
+            lockedPipeSignals.push(signal);
+          },
+          groupExists() {
+            return false;
+          },
+        });
+        assert.equal(lockedPipe.outcome, "pipe-drain-unproven");
+        assert.deepEqual(lockedPipeSignals, ["SIGTERM"]);
+
+        const timeoutSignals = [];
+        const timeout = await runBoundedCommand({
+          cmd: ["fixture"],
+          cwd: repositoryRoot,
+          timeoutMs: 10,
+          termGraceMs: 1,
+          killReapMs: 1,
+          pipeDrainMs: 1,
+          spawn() {
+            return {
+              pid: 44,
+              exited: new Promise(() => {}),
+              stderr: closedPipe(),
+              stdout: closedPipe(),
+            };
+          },
+          signalGroup(_child, signal) {
+            timeoutSignals.push(signal);
+          },
+          groupExists() {
+            return timeoutSignals.length < 2;
+          },
+        });
+        assert.equal(timeout.outcome, "timeout");
+        assert.deepEqual(timeoutSignals, ["SIGTERM", "SIGKILL"]);
+
+        const unreapedSignals = [];
+        const unreaped = await runBoundedCommand({
+          cmd: ["fixture"],
+          cwd: repositoryRoot,
+          timeoutMs: 10,
+          termGraceMs: 1,
+          killReapMs: 1,
+          pipeDrainMs: 1,
+          spawn() {
+            return {
+              pid: 45,
+              exited: Promise.resolve(0),
+              stderr: closedPipe(),
+              stdout: closedPipe(),
+            };
+          },
+          signalGroup(_child, signal) {
+            unreapedSignals.push(signal);
+          },
+          groupExists() {
+            return true;
+          },
+        });
+        assert.equal(unreaped.outcome, "process-reap-unproven");
+        assert.deepEqual(unreapedSignals, ["SIGTERM", "SIGKILL"]);
+
+        const processGroupSignals = [];
+        const processGroupMember = await runBoundedCommand({
+          cmd: ["fixture"],
+          cwd: repositoryRoot,
+          timeoutMs: 10,
+          termGraceMs: 1,
+          killReapMs: 1,
+          pipeDrainMs: 1,
+          spawn() {
+            return {
+              pid: 46,
+              exited: Promise.resolve(0),
+              stderr: closedPipe(),
+              stdout: closedPipe(),
+            };
+          },
+          signalGroup(_child, signal) {
+            processGroupSignals.push(signal);
+          },
+          groupExists() {
+            return processGroupSignals.length === 0;
+          },
+        });
+        // The signal is for an observed member of the owned process group.
+        // A process that escaped with setsid() is intentionally outside this
+        // proof boundary; pipe closure cannot make a claim about it.
+        assert.equal(processGroupMember.containment_scope, "process-group-only");
+        assert.equal(processGroupMember.outcome, "process-group-survivor-observed");
+        assert.deepEqual(processGroupSignals, ["SIGTERM"]);
+
+        assert.equal(observedChildEnvironments.length, 1);
+        for (const environment of observedChildEnvironments) {
+          for (const [name, value] of Object.entries(plantedAuthority)) {
+            assert.equal(name in environment, false, `${name} must not reach a local child`);
+            assert.equal(
+              Object.values(environment).includes(value),
+              false,
+              `${name} value must not reach a local child`,
+            );
+          }
+        }
+      } finally {
+        for (const [name, prior] of Object.entries(priorAuthority)) {
+          if (prior === undefined) delete process.env[name];
+          else process.env[name] = prior;
+        }
+      }
+    },
+  },
+  {
     name: "the pinned Wrangler command ignores PATH and executes the exact workspace entry",
+    requiresWrangler: true,
     execute() {
       const declaredVersion = exactDeclaredWranglerVersion();
       const command = resolvePinnedWranglerCommand(repositoryRoot);
@@ -1014,10 +1663,18 @@ const cases = [
   },
 ];
 
+const pureOnly = process.env.MIGRATE_TEST_PURE_ONLY === "1";
+const executed = [];
+const skipped = [];
 const failed = [];
 for (const testCase of cases) {
+  if (pureOnly && testCase.requiresWrangler === true) {
+    skipped.push(testCase.name);
+    continue;
+  }
   try {
-    testCase.execute();
+    await testCase.execute();
+    executed.push(testCase.name);
   } catch (error) {
     failed.push({
       name: testCase.name,
@@ -1036,7 +1693,8 @@ if (failed.length === 0) {
       duration_ms: Math.round(performance.now() - startedAt),
       status: "pass",
       reproduce,
-      cases_executed: cases.map(({ name }) => name),
+      cases_executed: executed,
+      ...(pureOnly ? { cases_skipped_for_s2_isolation: skipped } : {}),
       temporary_space_fixtures_retained: true,
       no_database_touched: true,
     })}\n`,

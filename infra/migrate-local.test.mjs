@@ -6,11 +6,21 @@ import { dirname, resolve } from "node:path";
 import { performance } from "node:perf_hooks";
 import { fileURLToPath } from "node:url";
 import {
+  assertReadLimit,
+  bootstrapInstallSql,
+  catalogFingerprint,
+  classifySchemaLineage,
   LEDGER_TABLE,
+  MAX_CATALOG_ROWS,
+  MAX_JOURNAL_ROWS,
+  MAX_LINEAGE_ROWS,
   MigrationError,
+  planMigrations,
+  readBootstrapManifest,
   readMigrationDirectory,
   redactStderr,
   resolvePinnedWranglerCommand,
+  runBoundedCommand,
 } from "./migrate.mjs";
 
 /**
@@ -42,12 +52,23 @@ const localConfigPaths = new Map();
 const migrations = readMigrationDirectory(resolve(root, "db/migrations"));
 const migrationBySequence = new Map(migrations.map((migration) => [migration.sequence, migration]));
 const migration0015 = migrationBySequence.get(15);
+const bootstrapManifest = readBootstrapManifest(root);
+const bootstrapArtifact = bootstrapManifest.artifacts[0];
 assert.ok(migration0015, "0015 must exist before the local rollback gate can run");
 assert.equal(
   migration0015.id,
   "0015_sponsor_enrollment_bootstrap_invariant.sql",
   "sequence 0015 must remain the sponsor-bootstrap invariant",
 );
+
+const syntheticForwardMigration = {
+  id: "0016_bootstrap_lineage_convergence.sql",
+  sequence: 16,
+  digest: "c".repeat(64),
+  sql: "CREATE TABLE bootstrap_lineage_forward (id TEXT PRIMARY KEY);",
+};
+const migrationsWithSyntheticForward = [...migrations, syntheticForwardMigration];
+const localPlanOptions = { environmentName: "local", destructiveAllowed: false };
 
 const MIGRATION_OBJECTS = [
   "sponsor_enrollment_bootstrap_migration_witness",
@@ -124,139 +145,41 @@ function remainingBefore(deadline, label) {
   return remaining;
 }
 
-async function waitForChildExit(child, timeoutMs) {
-  let timer;
-  const timeout = new Promise((resolve) => {
-    timer = setTimeout(() => resolve({ exited: false }), timeoutMs);
-  });
-  const exited = child.exited.then((exitCode) => ({ exited: true, exitCode }));
-  const result = await Promise.race([exited, timeout]);
-  clearTimeout(timer);
-  return result;
-}
-
-function signalDirectChild(child, signal) {
-  // Signal the Bun-owned handle, never process.kill(child.pid): a PID can be
-  // reused if the child exits between checks, whereas this handle remains tied
-  // to the direct Wrangler process that Bun spawned.
-  try {
-    return child.kill(signal);
-  } catch {
-    return false;
-  }
-}
-
-async function reapBoundedChild(
-  child,
-  executionWindowMs,
-  { terminateGraceMs = TERMINATE_GRACE_MS, killReapMs = KILL_REAP_MS } = {},
-) {
-  const initial = await waitForChildExit(child, executionWindowMs);
-  if (initial.exited) {
-    return {
-      exitCode: initial.exitCode,
-      forcedSignal: null,
-      reaped: true,
-      timedOut: false,
-    };
-  }
-
-  assert.ok(
-    Number.isSafeInteger(child.pid) && child.pid > 0,
-    "local D1 command must retain a direct Bun child PID for timeout reaping",
-  );
-  signalDirectChild(child, "SIGTERM");
-  const afterTerminate = await waitForChildExit(child, terminateGraceMs);
-  if (afterTerminate.exited) {
-    return {
-      exitCode: afterTerminate.exitCode,
-      forcedSignal: "SIGTERM",
-      reaped: true,
-      timedOut: true,
-    };
-  }
-
-  signalDirectChild(child, "SIGKILL");
-  const afterKill = await waitForChildExit(child, killReapMs);
-  return {
-    exitCode: afterKill.exited ? afterKill.exitCode : undefined,
-    forcedSignal: "SIGKILL",
-    reaped: afterKill.exited,
-    timedOut: true,
-  };
-}
-
-async function readChildOutput(child, timeoutMs) {
-  let timer;
-  const output = Promise.all([
-    new Response(child.stdout).text(),
-    new Response(child.stderr).text(),
-  ]).then(([stdout, stderr]) => ({ complete: true, stderr, stdout }));
-  const timeout = new Promise((resolve) => {
-    timer = setTimeout(() => resolve({ complete: false }), timeoutMs);
-  });
-  const result = await Promise.race([output, timeout]);
-  clearTimeout(timer);
-  return result;
-}
-
 /**
- * This is intentionally test-local rather than a shared helper change: it is
- * the same local Wrangler D1 arguments and JSON transport as `localD1()`, with
- * an outside-repository persistence root and explicit deadlines. It shares the
- * runner's lock-pinned command resolver, so neither lane can select a global
- * Wrangler through PATH.
+ * This uses the shipped bounded executor with an outside-repository persistence
+ * root, so this integration lane exercises the same group/pipe containment as
+ * the real local migration CLI while retaining its isolated test databases.
  */
 async function boundedLocalD1(databaseName, args, label) {
   const deadline = commandDeadline(label);
-  let child;
-  try {
-    child = Bun.spawn({
-      cmd: [
-        ...resolvePinnedWranglerCommand(root),
-        "d1",
-        "execute",
-        databaseName,
-        "--local",
-        "--config",
-        localConfigPath(databaseName),
-        "--persist-to",
-        persistenceRoot,
-        "--json",
-        ...args,
-      ],
-      cwd: root,
-      stdout: "pipe",
-      stderr: "pipe",
-    });
-  } catch {
-    throw new MigrationError("LOCAL_D1_COMMAND_FAILED", `Could not start local D1 ${label}.`);
-  }
-
   const executionWindowMs = remainingBefore(deadline, label) - COMMAND_REAP_RESERVE_MS;
   assert.ok(executionWindowMs > 0, `local D1 ${label} lacks time for bounded child reaping`);
-  const reaped = await reapBoundedChild(child, executionWindowMs);
-  if (reaped.timedOut) {
+  const result = await runBoundedCommand({
+    cmd: [
+      ...resolvePinnedWranglerCommand(root),
+      "d1",
+      "execute",
+      databaseName,
+      "--local",
+      "--config",
+      localConfigPath(databaseName),
+      "--persist-to",
+      persistenceRoot,
+      "--json",
+      ...args,
+    ],
+    cwd: root,
+    timeoutMs: executionWindowMs,
+  });
+  if (result.outcome !== "exited") {
     throw new MigrationError(
-      "LOCAL_D1_COMMAND_TIMEOUT",
-      reaped.reaped
-        ? `Local D1 ${label} exceeded its deadline and was reaped.`
-        : `Local D1 ${label} exceeded its deadline after SIGKILL.`,
+      result.outcome === "timeout" ? "LOCAL_D1_COMMAND_TIMEOUT" : "LOCAL_D1_COMMAND_FAILED",
+      `Local D1 ${label} did not complete through the bounded executor.`,
     );
   }
-  const output = await readChildOutput(
-    child,
-    Math.min(OUTPUT_DRAIN_MS, remainingBefore(deadline, label)),
-  );
-  if (!output.complete) {
-    throw new MigrationError(
-      "LOCAL_D1_COMMAND_TIMEOUT",
-      `Local D1 ${label} exceeded its deadline while draining output.`,
-    );
-  }
-  if (reaped.exitCode !== 0) {
-    const safeStderr = redactStderr(output.stderr);
-    const safeStdout = redactStderr(output.stdout);
+  if (result.exitCode !== 0) {
+    const safeStderr = redactStderr(result.stderr);
+    const safeStdout = redactStderr(result.stdout);
     throw new MigrationError(
       "LOCAL_D1_COMMAND_FAILED",
       `A local D1 ${label} command failed.`,
@@ -265,7 +188,7 @@ async function boundedLocalD1(databaseName, args, label) {
         : { output: safeStdout, stream: "stdout" },
     );
   }
-  return output.stdout;
+  return result.stdout;
 }
 
 async function localJson(databaseName, command, label) {
@@ -309,6 +232,95 @@ async function applyMigrations(databaseName, first, last) {
   for (let sequence = first; sequence <= last; sequence += 1) {
     await applyMigration(databaseName, sequence);
   }
+}
+
+async function readCatalog(databaseName, label) {
+  const rows = (
+    await localJson(
+      databaseName,
+      `SELECT type, name, tbl_name, sql FROM sqlite_schema ORDER BY type, name LIMIT ${MAX_CATALOG_ROWS + 1};`,
+      label,
+    )
+  ).flatMap((statement) => statement.results ?? []);
+  return assertReadLimit(rows, MAX_CATALOG_ROWS, "LOCAL_D1_CATALOG_OVERRUN").map((row) => ({
+    type: String(row.type),
+    name: String(row.name),
+    table: String(row.tbl_name),
+    sql: row.sql === null ? null : String(row.sql),
+  }));
+}
+
+async function readJournal(databaseName, label) {
+  const rows = (
+    await localJson(
+      databaseName,
+      `SELECT id, sequence, digest FROM ${LEDGER_TABLE} ORDER BY sequence LIMIT ${MAX_JOURNAL_ROWS + 1};`,
+      label,
+    )
+  ).flatMap((statement) => statement.results ?? []);
+  return assertReadLimit(rows, MAX_JOURNAL_ROWS, "LOCAL_D1_JOURNAL_OVERRUN").map((row) => ({
+    id: String(row.id),
+    sequence: Number(row.sequence),
+    digest: String(row.digest),
+  }));
+}
+
+function manifestWithSyntheticForward(catalog) {
+  return {
+    ...bootstrapManifest,
+    schema_heads: [
+      ...bootstrapManifest.schema_heads,
+      {
+        sequence: syntheticForwardMigration.sequence,
+        schema_digest: catalogFingerprint(catalog),
+      },
+    ],
+  };
+}
+
+function productCatalog(catalog) {
+  return catalog.filter(
+    (entry) =>
+      !entry.name.startsWith("sqlite_") &&
+      entry.name !== "_asimposium_migrations" &&
+      entry.name !== "_asimposium_schema_lineage" &&
+      entry.name !== "_cf_METADATA",
+  );
+}
+
+function wranglerPlatformMetadata(catalog) {
+  return catalog.filter((entry) => entry.name === "_cf_METADATA");
+}
+
+const WRANGLER_LOCAL_METADATA_SQL = `CREATE TABLE _cf_METADATA (
+        key INTEGER PRIMARY KEY,
+        value BLOB
+      )`;
+
+function exactWranglerPlatformMetadata(catalog) {
+  return catalog.filter(
+    (entry) =>
+      entry.type === "table" &&
+      entry.name === "_cf_METADATA" &&
+      entry.table === "_cf_METADATA" &&
+      entry.sql === WRANGLER_LOCAL_METADATA_SQL,
+  );
+}
+
+async function readLineage(databaseName, label) {
+  const rows = (
+    await localJson(
+      databaseName,
+      `SELECT lineage, artifact_id, artifact_digest, schema_digest FROM _asimposium_schema_lineage LIMIT ${MAX_LINEAGE_ROWS + 1};`,
+      label,
+    )
+  ).flatMap((statement) => statement.results ?? []);
+  return assertReadLimit(rows, MAX_LINEAGE_ROWS, "LOCAL_D1_LINEAGE_OVERRUN").map((row) => ({
+    lineage: String(row.lineage),
+    artifact_id: String(row.artifact_id),
+    artifact_digest: String(row.artifact_digest),
+    schema_digest: String(row.schema_digest),
+  }));
 }
 
 function validAuthoritySeed() {
@@ -433,33 +445,6 @@ function assertSafeCause(error) {
 
 const cases = [
   {
-    name: "a-timeout-controller-escalates-a-stuck-direct-child-without-awaiting-it",
-    async execute() {
-      const signals = [];
-      const neverExits = new Promise(() => {});
-      const reaped = await reapBoundedChild(
-        {
-          exited: neverExits,
-          kill(signal) {
-            signals.push(signal);
-            return true;
-          },
-          pid: 24_680,
-        },
-        1,
-        { killReapMs: 1, terminateGraceMs: 1 },
-      );
-
-      assert.deepEqual(signals, ["SIGTERM", "SIGKILL"]);
-      assert.deepEqual(reaped, {
-        exitCode: undefined,
-        forcedSignal: "SIGKILL",
-        reaped: false,
-        timedOut: true,
-      });
-    },
-  },
-  {
     name: "a-successful-local-command-returns-json",
     async execute() {
       const result = await localJson(uniqueDatabaseName("json"), "SELECT 1 AS ok;", "json-success");
@@ -481,6 +466,120 @@ const cases = [
         thrown = error;
       }
       assertSafeCause(thrown);
+    },
+  },
+  {
+    name: "bootstrap baseline applies only to empty local D1 and leaves an empty journal",
+    async execute() {
+      const databaseName = uniqueDatabaseName("bootstrap");
+      // A real Wrangler D1 command creates its own exact `_cf_METADATA`
+      // table. It is platform control metadata, not caller contamination:
+      // classification and the atomic bootstrap guard must still admit the
+      // otherwise empty database, while any other table remains a refusal.
+      await localJson(databaseName, "SELECT 1 AS ok;", "bootstrap-platform-metadata");
+      const beforeBootstrap = await readCatalog(databaseName, "bootstrap-preflight-catalog");
+      assert.equal(exactWranglerPlatformMetadata(beforeBootstrap).length, 1);
+      assert.deepEqual(
+        classifySchemaLineage({
+          catalog: beforeBootstrap,
+          journal: [],
+          lineage: [],
+          migrations,
+          manifest: bootstrapManifest,
+        }),
+        { kind: "provably-empty", head: 0 },
+        "the exact Wrangler platform table must not defeat empty-only bootstrap",
+      );
+      await localJson(
+        databaseName,
+        bootstrapInstallSql(bootstrapArtifact, appliedAt),
+        "bootstrap-empty-apply",
+      );
+      const catalog = await readCatalog(databaseName, "bootstrap-catalog");
+      assert.equal(catalogFingerprint(catalog), bootstrapArtifact.schema_digest);
+      const journal = await readJournal(databaseName, "bootstrap-empty-journal");
+      const lineage = await readLineage(databaseName, "bootstrap-lineage");
+      const witness = (
+        await localJson(
+          databaseName,
+          "SELECT singleton, rule_version, passed FROM sponsor_enrollment_bootstrap_migration_witness;",
+          "bootstrap-witness",
+        )
+      ).flatMap((statement) => statement.results ?? []);
+      assert.equal(journal.length, 0, "bootstrap must not fabricate historical journal rows");
+      assert.deepEqual(
+        witness.map((row) => ({
+          singleton: Number(row.singleton),
+          rule_version: Number(row.rule_version),
+          passed: Number(row.passed),
+        })),
+        [{ singleton: 1, rule_version: 1, passed: 1 }],
+        "bootstrap must record exactly the immutable 0015 witness tuple",
+      );
+      assert.equal(
+        classifySchemaLineage({
+          catalog,
+          journal,
+          lineage,
+          migrations,
+          manifest: bootstrapManifest,
+        }).kind,
+        "bootstrap-baseline15",
+      );
+
+      // The installer is idempotent by classifier, rather than collision
+      // masking: a second raw apply fails, while the durable lineage is the
+      // positive proof that a runner must no-op.
+      let secondApply;
+      try {
+        await localJson(
+          databaseName,
+          bootstrapInstallSql(bootstrapArtifact, appliedAt),
+          "bootstrap-rerun",
+        );
+      } catch (error) {
+        secondApply = error;
+      }
+      assertSafeCause(secondApply);
+
+      const contaminated = uniqueDatabaseName("bootstrap-contaminated");
+      await localJson(
+        contaminated,
+        "CREATE TABLE contamination (id TEXT);",
+        "bootstrap-contamination",
+      );
+      let contaminatedApply;
+      try {
+        await localJson(
+          contaminated,
+          bootstrapInstallSql(bootstrapArtifact, appliedAt),
+          "bootstrap-contamination-refusal",
+        );
+      } catch (error) {
+        contaminatedApply = error;
+      }
+      assertSafeCause(contaminatedApply);
+      const residue = oneRow(
+        await localJson(
+          contaminated,
+          `SELECT COUNT(*) AS objects
+             FROM sqlite_schema
+            WHERE name NOT LIKE 'sqlite_%'
+              AND NOT (
+                type = 'table'
+                AND name = '_cf_METADATA'
+                AND tbl_name = '_cf_METADATA'
+                AND sql = ${sqlLiteral(WRANGLER_LOCAL_METADATA_SQL)}
+              );`,
+          "bootstrap-contamination-residue",
+        ),
+        "bootstrap-contamination-residue",
+      );
+      assert.equal(
+        Number(residue.objects),
+        1,
+        "contamination must refuse before lineage or schema apply",
+      );
     },
   },
   {
@@ -560,6 +659,185 @@ const cases = [
         },
         { singleton: 1, rule_version: 1, passed: 1 },
         "successful 0015 retry must retain the exact singleton witness",
+      );
+
+      // One causal convergence case starts from the committed historical 0015
+      // state, a newly installed bootstrap state, and the committed legacy
+      // 0009 shape. The later 0016 manifest is derived once from historical
+      // output and is deliberately reused for both 0016 classifications.
+      const historicalCatalog = await readCatalog(databaseName, "historical-0015-catalog");
+      const historicalJournal = await readJournal(databaseName, "historical-0015-journal");
+      assert.equal(
+        catalogFingerprint(historicalCatalog),
+        bootstrapArtifact.schema_digest,
+        "actual historical 0015 must match the committed baseline fingerprint",
+      );
+      assert.deepEqual(
+        classifySchemaLineage({
+          catalog: historicalCatalog,
+          journal: historicalJournal,
+          lineage: [],
+          migrations,
+          manifest: bootstrapManifest,
+        }),
+        { kind: "historical-current-0015", head: 15 },
+      );
+
+      const legacyDatabase = uniqueDatabaseName("legacy-0009");
+      await localJson(legacyDatabase, LEDGER_DDL, "legacy-journal-create");
+      await applyMigrations(legacyDatabase, 1, 9);
+      const legacyCatalog = await readCatalog(legacyDatabase, "legacy-0009-catalog");
+      const legacyJournal = await readJournal(legacyDatabase, "legacy-0009-journal");
+      assert.equal(
+        catalogFingerprint(legacyCatalog),
+        bootstrapArtifact.legacy_0009_schema_digest,
+        "actual exact legacy 0009 must match the committed legacy fingerprint",
+      );
+      assert.deepEqual(
+        classifySchemaLineage({
+          catalog: legacyCatalog,
+          journal: legacyJournal,
+          lineage: [],
+          migrations,
+          manifest: bootstrapManifest,
+        }),
+        { kind: "legacy-0009", head: 9 },
+      );
+
+      const bootstrapDatabase = uniqueDatabaseName("lineage-bootstrap");
+      await localJson(
+        bootstrapDatabase,
+        bootstrapInstallSql(bootstrapArtifact, appliedAt),
+        "lineage-bootstrap-apply",
+      );
+      const bootstrapCatalog = await readCatalog(bootstrapDatabase, "lineage-bootstrap-catalog");
+      const bootstrapJournal = await readJournal(bootstrapDatabase, "lineage-bootstrap-journal");
+      const bootstrapLineage = await readLineage(bootstrapDatabase, "lineage-bootstrap-lineage");
+      assert.equal(catalogFingerprint(bootstrapCatalog), bootstrapArtifact.schema_digest);
+      assert.deepEqual(
+        wranglerPlatformMetadata(bootstrapCatalog),
+        wranglerPlatformMetadata(historicalCatalog),
+        "historical and bootstrap local D1 catalogs must carry identical platform metadata",
+      );
+      assert.deepEqual(productCatalog(bootstrapCatalog), productCatalog(historicalCatalog));
+      assert.deepEqual(
+        classifySchemaLineage({
+          catalog: bootstrapCatalog,
+          journal: bootstrapJournal,
+          lineage: bootstrapLineage,
+          migrations,
+          manifest: bootstrapManifest,
+        }),
+        {
+          kind: "bootstrap-baseline15",
+          head: 15,
+          artifact_id: bootstrapArtifact.id,
+          journal_records: 0,
+        },
+      );
+
+      assert.deepEqual(
+        planMigrations(
+          migrationsWithSyntheticForward,
+          historicalJournal,
+          localPlanOptions,
+        ).to_apply.map((migration) => migration.id),
+        [syntheticForwardMigration.id],
+      );
+      assert.deepEqual(
+        planMigrations(migrationsWithSyntheticForward, bootstrapJournal, {
+          ...localPlanOptions,
+          baseline: { head: 15 },
+        }).to_apply.map((migration) => migration.id),
+        [syntheticForwardMigration.id],
+      );
+      await localJson(
+        databaseName,
+        migrationJournalCommand(syntheticForwardMigration),
+        "historical-forward-apply",
+      );
+      await localJson(
+        bootstrapDatabase,
+        migrationJournalCommand(syntheticForwardMigration),
+        "bootstrap-forward-apply",
+      );
+      const historicalForwardCatalog = await readCatalog(
+        databaseName,
+        "historical-forward-catalog",
+      );
+      const historicalForwardJournal = await readJournal(
+        databaseName,
+        "historical-forward-journal",
+      );
+      const bootstrapForwardCatalog = await readCatalog(
+        bootstrapDatabase,
+        "bootstrap-forward-catalog",
+      );
+      const bootstrapForwardJournal = await readJournal(
+        bootstrapDatabase,
+        "bootstrap-forward-journal",
+      );
+      const sharedForwardManifest = manifestWithSyntheticForward(historicalForwardCatalog);
+      assert.equal(
+        catalogFingerprint(historicalForwardCatalog),
+        catalogFingerprint(bootstrapForwardCatalog),
+        "the shared 0016 must leave byte-identical product catalog fingerprints",
+      );
+      assert.deepEqual(
+        productCatalog(historicalForwardCatalog),
+        productCatalog(bootstrapForwardCatalog),
+        "the shared 0016 must leave byte-identical product catalog entries",
+      );
+      const historicalForwardLineage = classifySchemaLineage({
+        catalog: historicalForwardCatalog,
+        journal: historicalForwardJournal,
+        lineage: [],
+        migrations: migrationsWithSyntheticForward,
+        manifest: sharedForwardManifest,
+      });
+      assert.deepEqual(historicalForwardLineage, { kind: "historical-forward", head: 16 });
+      const bootstrapForwardLineage = classifySchemaLineage({
+        catalog: bootstrapForwardCatalog,
+        journal: bootstrapForwardJournal,
+        lineage: bootstrapLineage,
+        migrations: migrationsWithSyntheticForward,
+        manifest: sharedForwardManifest,
+      });
+      assert.deepEqual(bootstrapForwardLineage, {
+        kind: "bootstrap-baseline15",
+        head: 16,
+        artifact_id: bootstrapArtifact.id,
+        journal_records: 1,
+      });
+      assert.equal(
+        planMigrations(migrationsWithSyntheticForward, historicalForwardJournal, localPlanOptions)
+          .idempotent,
+        true,
+        "historical-forward lineage must reclassify to an empty second plan",
+      );
+      assert.equal(
+        planMigrations(migrationsWithSyntheticForward, bootstrapForwardJournal, {
+          ...localPlanOptions,
+          baseline: { head: bootstrapForwardLineage.head },
+        }).idempotent,
+        true,
+        "bootstrap-forward lineage must reclassify to an empty second plan",
+      );
+      await localJson(
+        bootstrapDatabase,
+        "CREATE TABLE planted_divergent_forward (id TEXT PRIMARY KEY);",
+        "bootstrap-forward-divergent-ddl",
+      );
+      assert.equal(
+        classifySchemaLineage({
+          catalog: await readCatalog(bootstrapDatabase, "bootstrap-forward-divergent-catalog"),
+          journal: await readJournal(bootstrapDatabase, "bootstrap-forward-divergent-journal"),
+          lineage: bootstrapLineage,
+          migrations: migrationsWithSyntheticForward,
+          manifest: sharedForwardManifest,
+        }).kind,
+        "unknown-or-contaminated",
+        "divergent DDL must not ride the shared 0016 suffix",
       );
 
       for (const [label, statement] of [

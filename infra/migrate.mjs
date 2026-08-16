@@ -1,3 +1,4 @@
+import { Buffer } from "node:buffer";
 import { createHash } from "node:crypto";
 import { existsSync, lstatSync, readdirSync, readFileSync } from "node:fs";
 import { dirname, join, resolve } from "node:path";
@@ -68,6 +69,34 @@ const INSTALLED_WRANGLER_MANIFEST = "apps/wire/node_modules/wrangler/package.jso
 const INSTALLED_WRANGLER_ENTRY = "apps/wire/node_modules/wrangler/bin/wrangler.js";
 
 const MAX_CAUSAL_STDERR = 600;
+export const LOCAL_D1_COMMAND_TIMEOUT_MS = 15_000;
+export const LOCAL_D1_TERM_GRACE_MS = 500;
+export const LOCAL_D1_KILL_REAP_MS = 500;
+export const LOCAL_D1_PIPE_DRAIN_MS = 500;
+export const LOCAL_D1_STDOUT_MAX_BYTES = 1_048_576;
+export const LOCAL_D1_STDERR_MAX_BYTES = 65_536;
+
+function minimalLocalToolEnvironment() {
+  // The command and pinned Wrangler entry are absolute, so neither a Cloudflare
+  // credential nor a caller-selected PATH needs to cross this local-only
+  // boundary. Keep only the platform basics that Bun and child diagnostics
+  // need. In particular, do not inherit CLOUDFLARE_*, WRANGLER_*, or any S2
+  // authority from the parent process.
+  if (process.platform === "win32") {
+    return {
+      LANG: "C",
+      PATH: "C:\\Windows\\System32",
+      SystemRoot: "C:\\Windows",
+      TZ: "UTC",
+    };
+  }
+  return {
+    LANG: "C",
+    LC_ALL: "C",
+    PATH: "/usr/local/bin:/usr/bin:/bin",
+    TZ: "UTC",
+  };
+}
 
 /**
  * Turn a tool's stderr into something safe to put in a diagnostic.
@@ -318,9 +347,13 @@ export function describeDestructiveStatements(sql) {
  * @param options     { environmentName, destructiveAllowed }
  */
 export function planMigrations(migrations, applied, options) {
-  const { environmentName, destructiveAllowed } = options;
+  const { environmentName, destructiveAllowed, baseline } = options;
+  const baselineHead = baseline?.head ?? 0;
   const appliedById = new Map(applied.map((record) => [record.id, record]));
-  const highestApplied = applied.reduce((max, record) => Math.max(max, record.sequence), 0);
+  const highestApplied = applied.reduce(
+    (max, record) => Math.max(max, record.sequence),
+    baselineHead,
+  );
 
   for (const record of applied) {
     if (!migrations.some((migration) => migration.id === record.id)) {
@@ -335,6 +368,10 @@ export function planMigrations(migrations, applied, options) {
   const skipped = [];
 
   for (const migration of migrations) {
+    if (migration.sequence <= baselineHead) {
+      skipped.push({ id: migration.id, reason: "bootstrap_baseline" });
+      continue;
+    }
     const record = appliedById.get(migration.id);
     if (record !== undefined) {
       // Drift: the file changed after it ran, so the database and the
@@ -405,8 +442,337 @@ export function planMigrations(migrations, applied, options) {
  * the first migration it records. It holds no product data.
  */
 export const LEDGER_TABLE = "_asimposium_migrations";
+export const LINEAGE_TABLE = "_asimposium_schema_lineage";
+export const BOOTSTRAP_MANIFEST_PATH = "db/bootstrap/manifest.json";
+export const MAX_CATALOG_ROWS = 512;
+export const MAX_JOURNAL_ROWS = 256;
+export const MAX_LINEAGE_ROWS = 8;
+
+const BOOTSTRAP_LINEAGE = "bootstrap-baseline15";
+const LEGACY_HEAD = 9;
+const RUNNER_CONTROL_CATALOG_OBJECTS = new Set([LEDGER_TABLE, LINEAGE_TABLE]);
+const WRANGLER_LOCAL_METADATA_SQL = `CREATE TABLE _cf_METADATA (
+        key INTEGER PRIMARY KEY,
+        value BLOB
+      )`;
+
+function isSqliteInternalCatalogObject(entry) {
+  return entry.name.startsWith("sqlite_");
+}
+
+// `_cf_METADATA` is created by the Wrangler/Miniflare D1 runtime, not by any
+// ASImposium migration. It is platform control only in this exact catalog
+// shape. A product object that merely borrows its name remains visible and
+// contaminates the target rather than being silently ignored.
+function isExactWranglerLocalMetadata(entry) {
+  return (
+    entry.type === "table" &&
+    entry.name === "_cf_METADATA" &&
+    entry.table === "_cf_METADATA" &&
+    entry.sql === WRANGLER_LOCAL_METADATA_SQL
+  );
+}
+
+function isCatalogFingerprintControl(entry) {
+  return (
+    isSqliteInternalCatalogObject(entry) ||
+    RUNNER_CONTROL_CATALOG_OBJECTS.has(entry.name) ||
+    isExactWranglerLocalMetadata(entry)
+  );
+}
+
+function isEmptyTargetControl(entry) {
+  return isSqliteInternalCatalogObject(entry) || isExactWranglerLocalMetadata(entry);
+}
+
+/**
+ * A product-schema catalog is the only safe bootstrap authority. Migration
+ * journal rows are a claim about the past, not proof that the target is empty
+ * or has the expected DDL. The digest deliberately excludes runner metadata:
+ * historical-current and bootstrap-baseline15 carry different bookkeeping but
+ * must expose the same product semantics to a later 0016 migration. The
+ * manifest pins the raw sqlite_schema fingerprint at every admitted head, so
+ * a bootstrap's exact forward journal suffix cannot vouch for contaminated
+ * DDL by itself.
+ */
+export function catalogFingerprint(catalog) {
+  const canonical = catalog
+    // Only the two runner-owned tables are metadata. A product object merely
+    // *named* `_asimposium_*` is catalog evidence and must contaminate the
+    // target rather than disappear from the classifier's authority.
+    .filter((entry) => !isCatalogFingerprintControl(entry))
+    .map((entry) => ({
+      type: entry.type,
+      name: entry.name,
+      table: entry.table,
+      // sqlite_schema.sql is the authority: do not normalize whitespace,
+      // especially not inside string literals where it changes semantics.
+      sql: typeof entry.sql === "string" ? entry.sql : null,
+    }));
+  canonical.sort((left, right) =>
+    Buffer.compare(
+      Buffer.from(`${left.type}\u0000${left.name}`, "utf8"),
+      Buffer.from(`${right.type}\u0000${right.name}`, "utf8"),
+    ),
+  );
+  return digestOf(JSON.stringify(canonical));
+}
+
+export function assertReadLimit(rows, maximum, code) {
+  if (rows.length > maximum) {
+    fail(code, "The local D1 metadata read exceeded its fixed safety limit.");
+  }
+  return rows;
+}
+
+function exactAppliedPrefix(applied, migrations, head) {
+  if (applied.length !== head) return false;
+  return applied.every((record, index) => {
+    const migration = migrations[index];
+    return (
+      migration !== undefined &&
+      record.id === migration.id &&
+      record.sequence === migration.sequence &&
+      record.digest === migration.digest &&
+      record.sequence === index + 1
+    );
+  });
+}
+
+function exactAppliedSuffix(applied, migrations, baselineHead, head) {
+  if (head < baselineHead || applied.length !== head - baselineHead) return false;
+  return applied.every((record, index) => {
+    const sequence = baselineHead + index + 1;
+    const migration = migrations[sequence - 1];
+    return (
+      migration !== undefined &&
+      record.id === migration.id &&
+      record.sequence === sequence &&
+      record.digest === migration.digest
+    );
+  });
+}
+
+function schemaHeadsDescending(manifest) {
+  return [...manifest.schema_heads].sort((left, right) => right.sequence - left.sequence);
+}
+
+/**
+ * Classify only catalog facts read from the target. It never creates a ledger
+ * while inspecting emptiness: doing so would contaminate the very target whose
+ * empty-only eligibility it is deciding.
+ */
+export function classifySchemaLineage({ catalog, journal, lineage, migrations, manifest }) {
+  // The local Wrangler table does not make an empty target nonempty. Runner
+  // bookkeeping does: a lone or forged ledger/lineage table cannot be treated
+  // as a fresh database, even though those tables are excluded from the
+  // product fingerprint used for exact historical classification.
+  const visible = catalog.filter((entry) => !isEmptyTargetControl(entry));
+  if (visible.length === 0) return { kind: "provably-empty", head: 0 };
+
+  const productDigest = catalogFingerprint(catalog);
+  const artifact = manifest.artifacts.find(
+    (candidate) => candidate.id === manifest.default_artifact_id,
+  );
+  if (artifact === undefined)
+    fail("BOOTSTRAP_MANIFEST_INVALID", "The bootstrap manifest has no default artifact.");
+
+  const hasLineageTable = catalog.some(
+    (entry) => entry.type === "table" && entry.name === LINEAGE_TABLE,
+  );
+  const hasJournal = catalog.some((entry) => entry.type === "table" && entry.name === LEDGER_TABLE);
+  const expectedHead = artifact.head_sequence;
+
+  const schemaHeads = schemaHeadsDescending(manifest);
+  const bootstrapHead = schemaHeads.find(
+    (candidate) =>
+      exactAppliedSuffix(journal, migrations, expectedHead, candidate.sequence) &&
+      productDigest === candidate.schema_digest,
+  );
+  if (
+    hasLineageTable &&
+    hasJournal &&
+    lineage.length === 1 &&
+    lineage[0].lineage === BOOTSTRAP_LINEAGE &&
+    lineage[0].artifact_id === artifact.id &&
+    lineage[0].artifact_digest === artifact.digest &&
+    lineage[0].schema_digest === artifact.schema_digest &&
+    bootstrapHead !== undefined
+  ) {
+    return {
+      kind: BOOTSTRAP_LINEAGE,
+      head: bootstrapHead.sequence,
+      artifact_id: artifact.id,
+      journal_records: journal.length,
+    };
+  }
+
+  const historicalHead = schemaHeads.find(
+    (candidate) =>
+      exactAppliedPrefix(journal, migrations, candidate.sequence) &&
+      productDigest === candidate.schema_digest,
+  );
+  if (!hasLineageTable && hasJournal && historicalHead !== undefined) {
+    return {
+      kind:
+        historicalHead.sequence === expectedHead ? "historical-current-0015" : "historical-forward",
+      head: historicalHead.sequence,
+    };
+  }
+
+  if (
+    !hasLineageTable &&
+    hasJournal &&
+    exactAppliedPrefix(journal, migrations, LEGACY_HEAD) &&
+    productDigest === artifact.legacy_0009_schema_digest
+  ) {
+    return { kind: "legacy-0009", head: LEGACY_HEAD };
+  }
+
+  return { kind: "unknown-or-contaminated", head: 0, product_digest: productDigest };
+}
+
+export function bootstrapTargetDisposition(lineage) {
+  if (lineage.kind === "provably-empty") return "ready";
+  if (lineage.kind === BOOTSTRAP_LINEAGE) return "idempotent";
+  if (lineage.kind === "legacy-0009") {
+    fail(
+      "LEGACY_0009_BRIDGE_BLOCKED",
+      "Exact legacy 0001-0009 is recognized, but no authority bridge is approved. Obtain an operator disposition before any bridge exists.",
+    );
+  }
+  if (lineage.kind === "historical-current-0015" || lineage.kind === "historical-forward") {
+    fail(
+      "BOOTSTRAP_HISTORICAL_LINEAGE_REFUSED",
+      "The target already has exact historical migration lineage; bootstrap never replaces history.",
+    );
+  }
+  fail(
+    "BOOTSTRAP_TARGET_REFUSED",
+    "Bootstrap requires a provably empty catalog; the target has unknown or contaminated schema state.",
+  );
+}
+
+export function readBootstrapManifest(root) {
+  const path = assertRepositoryContained(root, BOOTSTRAP_MANIFEST_PATH, "The bootstrap manifest");
+  if (!existsSync(path) || lstatSync(path).isSymbolicLink() || !lstatSync(path).isFile()) {
+    fail("BOOTSTRAP_MANIFEST_INVALID", "The bootstrap manifest must be a regular repository file.");
+  }
+  let manifest;
+  try {
+    manifest = JSON.parse(readFileSync(path, "utf8"));
+  } catch {
+    fail("BOOTSTRAP_MANIFEST_INVALID", "The bootstrap manifest must be JSON.");
+  }
+  if (
+    manifest === null ||
+    typeof manifest !== "object" ||
+    Array.isArray(manifest) ||
+    manifest.version !== 1 ||
+    typeof manifest.default_artifact_id !== "string" ||
+    !Array.isArray(manifest.artifacts) ||
+    manifest.artifacts.length !== 1 ||
+    !Array.isArray(manifest.schema_heads) ||
+    manifest.schema_heads.length < 1
+  ) {
+    fail(
+      "BOOTSTRAP_MANIFEST_INVALID",
+      "The bootstrap manifest must name exactly one version-1 artifact.",
+    );
+  }
+  const artifact = manifest.artifacts[0];
+  if (
+    artifact === null ||
+    typeof artifact !== "object" ||
+    Array.isArray(artifact) ||
+    artifact.id !== manifest.default_artifact_id ||
+    artifact.file !== "0015_final_schema_v1.sql" ||
+    !DIGEST.test(artifact.digest) ||
+    !DIGEST.test(artifact.schema_digest) ||
+    !DIGEST.test(artifact.legacy_0009_schema_digest) ||
+    artifact.head_sequence !== 15
+  ) {
+    fail(
+      "BOOTSTRAP_MANIFEST_INVALID",
+      "The bootstrap manifest artifact is not the exact baseline-0015 shape.",
+    );
+  }
+  let previousHead = 0;
+  for (const schemaHead of manifest.schema_heads) {
+    if (
+      schemaHead === null ||
+      typeof schemaHead !== "object" ||
+      Array.isArray(schemaHead) ||
+      !Number.isSafeInteger(schemaHead.sequence) ||
+      schemaHead.sequence <= previousHead ||
+      !DIGEST.test(schemaHead.schema_digest)
+    ) {
+      fail(
+        "BOOTSTRAP_MANIFEST_INVALID",
+        "Bootstrap schema heads must be ascending exact raw catalog digests.",
+      );
+    }
+    previousHead = schemaHead.sequence;
+  }
+  const baselineSchemaHead = manifest.schema_heads[0];
+  if (
+    baselineSchemaHead.sequence !== artifact.head_sequence ||
+    baselineSchemaHead.schema_digest !== artifact.schema_digest
+  ) {
+    fail(
+      "BOOTSTRAP_MANIFEST_INVALID",
+      "The first bootstrap schema head must pin the selected baseline artifact digest.",
+    );
+  }
+  const artifactPath = assertRepositoryContained(
+    root,
+    `db/bootstrap/${artifact.file}`,
+    "The bootstrap artifact",
+  );
+  if (
+    !existsSync(artifactPath) ||
+    lstatSync(artifactPath).isSymbolicLink() ||
+    !lstatSync(artifactPath).isFile()
+  ) {
+    fail(
+      "BOOTSTRAP_ARTIFACT_INVALID",
+      "The selected bootstrap artifact must be a regular repository file.",
+    );
+  }
+  const sql = readFileSync(artifactPath, "utf8");
+  if (digestOf(sql) !== artifact.digest) {
+    fail(
+      "BOOTSTRAP_ARTIFACT_DRIFT",
+      "The selected bootstrap artifact digest does not match its manifest.",
+    );
+  }
+  if (/\bIF\s+NOT\s+EXISTS\b/i.test(scanSql(sql).code)) {
+    fail(
+      "BOOTSTRAP_ARTIFACT_COLLISION_MASKING",
+      "The bootstrap artifact must not mask an existing schema object.",
+    );
+  }
+  return { ...manifest, artifacts: [{ ...artifact, sql }] };
+}
 
 const LEDGER_DDL = `CREATE TABLE IF NOT EXISTS ${LEDGER_TABLE} (
+  id TEXT PRIMARY KEY,
+  sequence INTEGER NOT NULL,
+  digest TEXT NOT NULL,
+  applied_at TEXT NOT NULL
+);`;
+
+const BOOTSTRAP_LINEAGE_DDL = `CREATE TABLE ${LINEAGE_TABLE} (
+  singleton INTEGER PRIMARY KEY CHECK (singleton = 1),
+  lineage TEXT NOT NULL CHECK (lineage = '${BOOTSTRAP_LINEAGE}'),
+  artifact_id TEXT NOT NULL,
+  artifact_digest TEXT NOT NULL CHECK (length(artifact_digest) = 64),
+  schema_digest TEXT NOT NULL CHECK (length(schema_digest) = 64),
+  empty_guard INTEGER NOT NULL CHECK (empty_guard = 1),
+  installed_at TEXT NOT NULL
+);`;
+
+const BOOTSTRAP_LEDGER_DDL = `CREATE TABLE ${LEDGER_TABLE} (
   id TEXT PRIMARY KEY,
   sequence INTEGER NOT NULL,
   digest TEXT NOT NULL,
@@ -495,14 +861,260 @@ export function resolvePinnedWranglerCommand(root, fileSystem = {}) {
   return [process.execPath, entry];
 }
 
+function within(promise, timeoutMs) {
+  let timer;
+  const timeout = new Promise((resolve) => {
+    timer = setTimeout(() => resolve({ settled: false }), timeoutMs);
+  });
+  return Promise.race([promise.then((value) => ({ settled: true, value })), timeout]).finally(() =>
+    clearTimeout(timer),
+  );
+}
+
+function captureBoundedPipe(stream, maximumBytes) {
+  let resolveOverrun;
+  const overrun = new Promise((resolve) => {
+    resolveOverrun = resolve;
+  });
+  let resolveFailure;
+  const failure = new Promise((resolve) => {
+    resolveFailure = resolve;
+  });
+  const done = (async () => {
+    if (stream === null || stream === undefined) {
+      return { failed: false, overrun: false, text: "" };
+    }
+    const chunks = [];
+    let retained = 0;
+    let exceeded = false;
+    let failed = false;
+    let reader;
+    const markFailed = () => {
+      if (!failed) {
+        failed = true;
+        resolveFailure();
+      }
+    };
+    try {
+      reader = stream.getReader();
+      for (;;) {
+        const { done: streamDone, value } = await reader.read();
+        if (streamDone) break;
+        if (!exceeded && value !== undefined) {
+          if (retained + value.byteLength > maximumBytes) {
+            exceeded = true;
+            resolveOverrun();
+          } else {
+            chunks.push(value);
+            retained += value.byteLength;
+          }
+        }
+        // After an overrun, continue draining instead of retaining bytes. The
+        // controller simultaneously kills the owned process group, and this
+        // drain prevents a pipe-full child from blocking reaping.
+      }
+    } catch {
+      markFailed();
+    } finally {
+      try {
+        reader?.releaseLock();
+      } catch {
+        markFailed();
+      }
+    }
+    const bytes = new Uint8Array(retained);
+    let offset = 0;
+    for (const chunk of chunks) {
+      bytes.set(chunk, offset);
+      offset += chunk.byteLength;
+    }
+    return { failed, overrun: exceeded, text: new TextDecoder().decode(bytes) };
+  })();
+  return { done, failure, overrun };
+}
+
+function signalOwnedProcessGroup(child, signal) {
+  try {
+    if (process.platform === "win32") {
+      child.kill(signal);
+      return;
+    }
+    // Bun detached=true calls setsid() on POSIX. The child PID is therefore
+    // the process-group leader, and a negative PID reaches its process-group
+    // members instead of only the direct wrapper. A descendant that performs
+    // another setsid() escapes this observable boundary; pipe closure is not
+    // evidence that such a self-detached process has exited.
+    process.kill(-child.pid, signal);
+  } catch {
+    try {
+      child.kill(signal);
+    } catch {
+      // Exit between the deadline and signal delivery is an expected race.
+    }
+  }
+}
+
+function ownedProcessGroupExists(child) {
+  if (process.platform === "win32") return false;
+  try {
+    process.kill(-child.pid, 0);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+async function groupGoneWithin(child, groupExists, timeoutMs) {
+  const deadline = performance.now() + timeoutMs;
+  while (groupExists(child)) {
+    if (performance.now() >= deadline) return false;
+    await new Promise((resolve) => setTimeout(resolve, Math.min(10, timeoutMs)));
+  }
+  return true;
+}
+
+async function terminateOwnedProcessGroup(
+  child,
+  pipes,
+  signalGroup,
+  groupExists,
+  termGraceMs,
+  killReapMs,
+) {
+  signalGroup(child, "SIGTERM");
+  let groupGone = await groupGoneWithin(child, groupExists, termGraceMs);
+  if (!groupGone) {
+    signalGroup(child, "SIGKILL");
+    groupGone = await groupGoneWithin(child, groupExists, killReapMs);
+  }
+  const drained = await within(Promise.all([pipes.stdout.done, pipes.stderr.done]), killReapMs);
+  return { groupGone, pipesDrained: drained.settled };
+}
+
+/**
+ * Execute an owned command with a wall-clock deadline, process-group teardown,
+ * and bounded concurrent pipe drains. The injectable spawn and group-signal
+ * seams exist so containment refusal paths are testable without launching
+ * Wrangler, Workerd, or local D1.
+ */
+export async function runBoundedCommand({
+  cmd,
+  cwd,
+  timeoutMs = LOCAL_D1_COMMAND_TIMEOUT_MS,
+  termGraceMs = LOCAL_D1_TERM_GRACE_MS,
+  killReapMs = LOCAL_D1_KILL_REAP_MS,
+  pipeDrainMs = LOCAL_D1_PIPE_DRAIN_MS,
+  stdoutMaxBytes = LOCAL_D1_STDOUT_MAX_BYTES,
+  stderrMaxBytes = LOCAL_D1_STDERR_MAX_BYTES,
+  spawn = Bun.spawn,
+  signalGroup = signalOwnedProcessGroup,
+  groupExists = ownedProcessGroupExists,
+}) {
+  let child;
+  try {
+    child = spawn({
+      cmd,
+      cwd,
+      stdin: "ignore",
+      stdout: "pipe",
+      stderr: "pipe",
+      detached: true,
+      env: minimalLocalToolEnvironment(),
+    });
+  } catch {
+    return { outcome: "spawn-failed", stderr: "", stdout: "" };
+  }
+
+  const pipes = {
+    stderr: captureBoundedPipe(child.stderr, stderrMaxBytes),
+    stdout: captureBoundedPipe(child.stdout, stdoutMaxBytes),
+  };
+  let deadlineTimer;
+  const deadline = new Promise((resolve) => {
+    deadlineTimer = setTimeout(() => resolve({ kind: "timeout" }), timeoutMs);
+  });
+  const first = await Promise.race([
+    child.exited.then((exitCode) => ({ kind: "exited", exitCode })),
+    pipes.stdout.failure.then(() => ({ kind: "pipe-drain-unproven" })),
+    pipes.stderr.failure.then(() => ({ kind: "pipe-drain-unproven" })),
+    pipes.stdout.overrun.then(() => ({ kind: "output-overrun" })),
+    pipes.stderr.overrun.then(() => ({ kind: "output-overrun" })),
+    deadline,
+  ]);
+  clearTimeout(deadlineTimer);
+
+  let outcome = "exited";
+  let exitCode;
+  if (first.kind === "exited") {
+    exitCode = first.exitCode;
+    const drained = await within(Promise.all([pipes.stdout.done, pipes.stderr.done]), pipeDrainMs);
+    // This can observe only the owned process group. It cannot establish that
+    // a grandchild which called setsid() has exited; in particular, a later
+    // pipe close is not proof about that escaped process.
+    const processGroupMemberRemains = groupExists(child);
+    if (!drained.settled || processGroupMemberRemains) {
+      const termination = await terminateOwnedProcessGroup(
+        child,
+        pipes,
+        signalGroup,
+        groupExists,
+        termGraceMs,
+        killReapMs,
+      );
+      if (!termination.groupGone) outcome = "process-reap-unproven";
+      else if (!termination.pipesDrained) outcome = "pipe-drain-unproven";
+      else if (processGroupMemberRemains) outcome = "process-group-survivor-observed";
+      else outcome = "pipe-drain-unproven";
+    }
+  } else {
+    const termination = await terminateOwnedProcessGroup(
+      child,
+      pipes,
+      signalGroup,
+      groupExists,
+      termGraceMs,
+      killReapMs,
+    );
+    if (!termination.groupGone) outcome = "process-reap-unproven";
+    else if (!termination.pipesDrained) outcome = "pipe-drain-unproven";
+    else outcome = first.kind;
+    const exited = await within(child.exited, killReapMs);
+    if (exited.settled) exitCode = exited.value;
+  }
+
+  const settledPipes = await within(
+    Promise.all([pipes.stdout.done, pipes.stderr.done]),
+    pipeDrainMs,
+  );
+  if (!settledPipes.settled) {
+    if (outcome === "exited") outcome = "pipe-drain-unproven";
+    return {
+      containment_scope: "process-group-only",
+      exitCode,
+      outcome,
+      stderr: "",
+      stdout: "",
+    };
+  }
+  const [stdout, stderr] = settledPipes.value;
+  if ((stdout.failed || stderr.failed) && outcome === "exited") outcome = "pipe-drain-unproven";
+  return {
+    containment_scope: "process-group-only",
+    exitCode,
+    outcome,
+    stderr: stderr.text,
+    stdout: stdout.text,
+  };
+}
+
 /**
  * Run a local D1 command through Wrangler.
  *
  * `--local` only. This function never accepts a `--remote` flag and never reads
  * a credential; a remote application is refused earlier, by the caller.
  */
-export function localD1(root, databaseName, args) {
-  const result = Bun.spawnSync({
+export async function localD1(root, databaseName, args) {
+  const result = await runBoundedCommand({
     cmd: [
       ...resolvePinnedWranglerCommand(root),
       "d1",
@@ -515,32 +1127,49 @@ export function localD1(root, databaseName, args) {
       ...args,
     ],
     cwd: root,
-    stdout: "pipe",
-    stderr: "pipe",
   });
-  const stdout = result.stdout.toString();
-  if (result.exitCode !== 0) {
+  if (result.outcome === "timeout") {
+    fail("LOCAL_D1_COMMAND_TIMEOUT", "A local D1 command exceeded its fixed deadline.");
+  }
+  if (result.outcome === "output-overrun") {
+    fail("LOCAL_D1_OUTPUT_OVERRUN", "A local D1 command exceeded its fixed output limit.");
+  }
+  if (result.outcome === "pipe-drain-unproven") {
+    fail("LOCAL_D1_PIPE_DRAIN_UNPROVEN", "A local D1 command did not close its pipes after exit.");
+  }
+  if (result.outcome === "process-reap-unproven") {
+    fail("LOCAL_D1_PROCESS_REAP_UNPROVEN", "A local D1 process group could not be reaped safely.");
+  }
+  if (result.outcome === "process-group-survivor-observed") {
+    fail(
+      "LOCAL_D1_PROCESS_GROUP_SURVIVOR",
+      "A local D1 command left a process-group member after its direct child exited.",
+    );
+  }
+  if (result.outcome === "spawn-failed" || result.exitCode !== 0) {
     // Wrangler's stderr is the only account of *why* this failed, so it is
     // carried through rather than swallowed — but bounded and redacted, so the
     // diagnostic stays safe to paste into an issue.
     const stderrText = redactStderr(result.stderr.toString());
-    const stdoutText = redactStderr(stdout);
+    const stdoutText = redactStderr(result.stdout);
     fail(
       "LOCAL_D1_COMMAND_FAILED",
-      `A local D1 command exited ${result.exitCode}.`,
+      result.outcome === "spawn-failed"
+        ? "A local D1 command could not be started."
+        : `A local D1 command exited ${result.exitCode}.`,
       stderrText !== ""
         ? { output: stderrText, stream: "stderr" }
         : { output: stdoutText, stream: "stdout" },
     );
   }
-  return stdout;
+  return result.stdout;
 }
 
-function readLocalLedger(root, databaseName) {
-  localD1(root, databaseName, ["--command", LEDGER_DDL]);
-  const raw = localD1(root, databaseName, [
+async function readLocalLedger(root, databaseName) {
+  await localD1(root, databaseName, ["--command", LEDGER_DDL]);
+  const raw = await localD1(root, databaseName, [
     "--command",
-    `SELECT id, sequence, digest FROM ${LEDGER_TABLE} ORDER BY sequence;`,
+    `SELECT id, sequence, digest FROM ${LEDGER_TABLE} ORDER BY sequence LIMIT ${MAX_JOURNAL_ROWS + 1};`,
   ]);
   let parsed;
   try {
@@ -549,11 +1178,138 @@ function readLocalLedger(root, databaseName) {
     fail("LOCAL_D1_UNREADABLE", "Could not parse the local D1 response as JSON.");
   }
   const rows = Array.isArray(parsed) ? (parsed[0]?.results ?? []) : [];
+  assertReadLimit(rows, MAX_JOURNAL_ROWS, "LOCAL_D1_JOURNAL_OVERRUN");
   return rows.map((row) => ({
     id: String(row.id),
     sequence: Number(row.sequence),
     digest: String(row.digest),
   }));
+}
+
+function parseLocalD1Rows(raw, unreadableCode) {
+  let parsed;
+  try {
+    parsed = JSON.parse(raw);
+  } catch {
+    fail(unreadableCode, "Could not parse the local D1 response as JSON.");
+  }
+  const rows = Array.isArray(parsed) ? parsed[0]?.results : undefined;
+  if (!Array.isArray(rows)) fail(unreadableCode, "Local D1 did not return a result array.");
+  return rows;
+}
+
+/** Read-only catalog snapshot used before any bootstrap metadata exists. */
+async function readLocalCatalog(root, databaseName) {
+  const rows = parseLocalD1Rows(
+    await localD1(root, databaseName, [
+      "--command",
+      `SELECT type, name, tbl_name, sql FROM sqlite_schema ORDER BY type, name LIMIT ${MAX_CATALOG_ROWS + 1};`,
+    ]),
+    "LOCAL_D1_CATALOG_UNREADABLE",
+  );
+  return assertReadLimit(rows, MAX_CATALOG_ROWS, "LOCAL_D1_CATALOG_OVERRUN").map((row) => ({
+    type: String(row.type),
+    name: String(row.name),
+    table: String(row.tbl_name),
+    sql: row.sql === null ? null : String(row.sql),
+  }));
+}
+
+async function readOptionalLocalRows(
+  root,
+  databaseName,
+  catalog,
+  table,
+  columns,
+  maximum,
+  overrunCode,
+) {
+  if (!catalog.some((entry) => entry.type === "table" && entry.name === table)) return [];
+  return assertReadLimit(
+    parseLocalD1Rows(
+      await localD1(root, databaseName, [
+        "--command",
+        `SELECT ${columns} FROM ${table} ORDER BY 1 LIMIT ${maximum + 1};`,
+      ]),
+      "LOCAL_D1_CATALOG_UNREADABLE",
+    ),
+    maximum,
+    overrunCode,
+  );
+}
+
+async function readLocalLineageSnapshot(root, databaseName) {
+  const catalog = await readLocalCatalog(root, databaseName);
+  const journal = (
+    await readOptionalLocalRows(
+      root,
+      databaseName,
+      catalog,
+      LEDGER_TABLE,
+      "id, sequence, digest",
+      MAX_JOURNAL_ROWS,
+      "LOCAL_D1_JOURNAL_OVERRUN",
+    )
+  ).map((row) => ({
+    id: String(row.id),
+    sequence: Number(row.sequence),
+    digest: String(row.digest),
+  }));
+  const lineage = (
+    await readOptionalLocalRows(
+      root,
+      databaseName,
+      catalog,
+      LINEAGE_TABLE,
+      "lineage, artifact_id, artifact_digest, schema_digest",
+      MAX_LINEAGE_ROWS,
+      "LOCAL_D1_LINEAGE_OVERRUN",
+    )
+  ).map((row) => ({
+    lineage: String(row.lineage),
+    artifact_id: String(row.artifact_id),
+    artifact_digest: String(row.artifact_digest),
+    schema_digest: String(row.schema_digest),
+  }));
+  return { catalog, journal, lineage };
+}
+
+export function bootstrapInstallSql(artifact, appliedAt) {
+  // The CAS-like empty guard is evaluated inside one D1 command batch with
+  // every CREATE. A racing or contaminated target hits the CHECK, rolling back
+  // the lineage table, the empty journal, the witness, and every artifact
+  // statement together. D1 command batches are the transaction boundary here;
+  // explicit BEGIN/COMMIT is not portable through `wrangler d1 execute`.
+  const guard = `(SELECT CASE WHEN COUNT(*) = 0 THEN 1 ELSE 0 END FROM sqlite_schema WHERE name NOT LIKE 'sqlite_%' AND name <> '${LINEAGE_TABLE}' AND NOT (type = 'table' AND name = '_cf_METADATA' AND tbl_name = '_cf_METADATA' AND sql = ${sqlLiteral(WRANGLER_LOCAL_METADATA_SQL)}))`;
+  const sql = `${BOOTSTRAP_LINEAGE_DDL}
+INSERT INTO ${LINEAGE_TABLE} (singleton, lineage, artifact_id, artifact_digest, schema_digest, empty_guard, installed_at)
+VALUES (1, ${sqlLiteral(BOOTSTRAP_LINEAGE)}, ${sqlLiteral(artifact.id)}, ${sqlLiteral(artifact.digest)}, ${sqlLiteral(artifact.schema_digest)}, ${guard}, ${sqlLiteral(appliedAt)});
+${BOOTSTRAP_LEDGER_DDL}
+${artifact.sql}
+INSERT INTO sponsor_enrollment_bootstrap_migration_witness (singleton, rule_version, passed)
+VALUES (1, 1, 1);`;
+  return sql;
+}
+
+async function bootstrapLocalSchema(root, databaseName, artifact, appliedAt) {
+  await localD1(root, databaseName, ["--command", bootstrapInstallSql(artifact, appliedAt)]);
+}
+
+function assertForwardHeadsRegistered(plan, manifest) {
+  const artifact = manifest.artifacts.find(
+    (candidate) => candidate.id === manifest.default_artifact_id,
+  );
+  for (const pending of plan.to_apply) {
+    if (
+      pending.sequence > artifact.head_sequence &&
+      !manifest.schema_heads.some((schemaHead) => schemaHead.sequence === pending.sequence)
+    ) {
+      fail(
+        "SCHEMA_HEAD_FINGERPRINT_MISSING",
+        `Migration ${pending.sequence} has no pinned post-apply catalog fingerprint.`,
+      );
+    }
+  }
 }
 
 /**
@@ -564,9 +1320,9 @@ function readLocalLedger(root, databaseName) {
  * process creates no file it would then have to remove, so it has no delete
  * path at all.
  */
-function applyLocalMigration(root, databaseName, migration, appliedAt) {
+async function applyLocalMigration(root, databaseName, migration, appliedAt) {
   const sql = `${migration.sql}\nINSERT INTO ${LEDGER_TABLE} (id, sequence, digest, applied_at) VALUES (${sqlLiteral(migration.id)}, ${migration.sequence}, ${sqlLiteral(migration.digest)}, ${sqlLiteral(appliedAt)});`;
-  localD1(root, databaseName, ["--command", sql]);
+  await localD1(root, databaseName, ["--command", sql]);
 }
 
 /**
@@ -666,10 +1422,22 @@ export function assertRehearsalIsNotAnApplication(options) {
       "--state-file describes a rehearsal and cannot be combined with --apply; an application reads the target's own ledger.",
     );
   }
+  if (options.bootstrap !== undefined && options.state !== undefined) {
+    fail(
+      "STATE_FILE_WITH_BOOTSTRAP",
+      "--bootstrap reads the target catalog and cannot be combined with a rehearsal state file.",
+    );
+  }
 }
 
 function parseArguments(argv) {
-  const options = { env: undefined, state: undefined, apply: false, confirmProduction: false };
+  const options = {
+    env: undefined,
+    state: undefined,
+    apply: false,
+    bootstrap: undefined,
+    confirmProduction: false,
+  };
   for (let index = 0; index < argv.length; index += 1) {
     const argument = argv[index];
     if (argument === "--env") {
@@ -680,12 +1448,15 @@ function parseArguments(argv) {
       index += 1;
     } else if (argument === "--apply") {
       options.apply = true;
+    } else if (argument === "--bootstrap") {
+      options.bootstrap = argv[index + 1];
+      index += 1;
     } else if (argument === "--i-understand-this-is-production") {
       options.confirmProduction = true;
     } else {
       fail(
         "INVALID_ARGUMENT",
-        "Usage: bun infra/migrate.mjs --env <local|staging|production> [--state-file <path>] [--apply]",
+        "Usage: bun infra/migrate.mjs --env <local|staging|production> [--state-file <path>] [--bootstrap <artifact-id>] [--apply]",
       );
     }
   }
@@ -706,7 +1477,7 @@ function diagnostic(status, startedAt, phase, details = {}) {
   };
 }
 
-function main() {
+async function main() {
   const startedAt = performance.now();
   let phase = "arguments";
   try {
@@ -726,6 +1497,102 @@ function main() {
       assertRepositoryContained(root, "db/migrations", "The migrations directory"),
     );
     const localDatabase = environment.kind === "local" ? "asimposium-local" : undefined;
+    let baseline;
+
+    if (options.bootstrap !== undefined) {
+      if (localDatabase === undefined) {
+        fail(
+          "BOOTSTRAP_REMOTE_UNAVAILABLE",
+          "Bootstrap is intentionally local-only until an operator authorizes a disposable remote D1 run.",
+        );
+      }
+      const manifest = readBootstrapManifest(root);
+      const artifact = manifest.artifacts.find((candidate) => candidate.id === options.bootstrap);
+      if (artifact === undefined) {
+        fail(
+          "BOOTSTRAP_ARTIFACT_REFUSED",
+          "The requested bootstrap artifact id is not in the manifest.",
+        );
+      }
+      const snapshot = await readLocalLineageSnapshot(root, localDatabase);
+      const lineage = classifySchemaLineage({ ...snapshot, migrations, manifest });
+      if (bootstrapTargetDisposition(lineage) === "idempotent") {
+        process.stdout.write(
+          `${JSON.stringify(
+            diagnostic("pass", startedAt, "bootstrap", {
+              environment: options.env,
+              bootstrap_artifact: artifact.id,
+              lineage: BOOTSTRAP_LINEAGE,
+              idempotent: true,
+              journal_records: lineage.journal_records,
+            }),
+          )}\n`,
+        );
+        return;
+      }
+      if (!options.apply) {
+        process.stdout.write(
+          `${JSON.stringify(
+            diagnostic("pass", startedAt, "bootstrap-plan", {
+              environment: options.env,
+              bootstrap_artifact: artifact.id,
+              lineage: lineage.kind,
+              ready_to_apply: true,
+            }),
+          )}\n`,
+        );
+        return;
+      }
+      await bootstrapLocalSchema(root, localDatabase, artifact, new Date().toISOString());
+      const after = classifySchemaLineage({
+        ...(await readLocalLineageSnapshot(root, localDatabase)),
+        migrations,
+        manifest,
+      });
+      if (after.kind !== BOOTSTRAP_LINEAGE || after.artifact_id !== artifact.id) {
+        fail(
+          "BOOTSTRAP_LINEAGE_UNVERIFIED",
+          "Bootstrap completed without the expected durable baseline lineage.",
+        );
+      }
+      process.stdout.write(
+        `${JSON.stringify(
+          diagnostic("pass", startedAt, "bootstrap", {
+            environment: options.env,
+            bootstrap_artifact: artifact.id,
+            lineage: BOOTSTRAP_LINEAGE,
+            idempotent: false,
+            journal_records: 0,
+          }),
+        )}\n`,
+      );
+      return;
+    }
+
+    let localSnapshot;
+    let localManifest;
+    if (localDatabase !== undefined && options.state === undefined) {
+      localManifest = readBootstrapManifest(root);
+      localSnapshot = await readLocalLineageSnapshot(root, localDatabase);
+      const lineage = classifySchemaLineage({
+        ...localSnapshot,
+        migrations,
+        manifest: localManifest,
+      });
+      if (lineage.kind === BOOTSTRAP_LINEAGE) baseline = { head: lineage.head };
+      if (lineage.kind === "legacy-0009") {
+        fail(
+          "LEGACY_0009_BRIDGE_BLOCKED",
+          "Exact legacy 0001-0009 is recognized, but an authority bridge requires a separate operator disposition.",
+        );
+      }
+      if (lineage.kind === "unknown-or-contaminated") {
+        fail(
+          "SCHEMA_LINEAGE_REFUSED",
+          "The local D1 catalog is neither exact historical nor an authorized bootstrap lineage.",
+        );
+      }
+    }
     // A local environment has a real (miniflare) D1 available with no
     // credential, so its applied-records come from the database itself rather
     // than from a rehearsal file.
@@ -733,7 +1600,11 @@ function main() {
       options.state !== undefined
         ? readStateFile(assertRepositoryContained(root, options.state, "The state file path"))
         : localDatabase !== undefined
-          ? readLocalLedger(root, localDatabase)
+          ? localSnapshot?.catalog.some(
+              (entry) => entry.type === "table" && entry.name === LEDGER_TABLE,
+            )
+            ? localSnapshot.journal
+            : await readLocalLedger(root, localDatabase)
           : [];
     const plan = planMigrations(migrations, applied, {
       environmentName: options.env,
@@ -741,7 +1612,10 @@ function main() {
       // The topology is the authority on what each target permits; recomputing
       // it here would make `destructive_operations_allowed` decorative.
       destructiveAllowed: environment.destructive_operations_allowed,
+      baseline,
     });
+
+    if (localManifest !== undefined) assertForwardHeadsRegistered(plan, localManifest);
 
     if (!options.apply) {
       process.stdout.write(
@@ -786,8 +1660,32 @@ function main() {
     const appliedNow = [];
     for (const pending of plan.to_apply) {
       const migration = migrations.find((candidate) => candidate.id === pending.id);
-      applyLocalMigration(root, localDatabase, migration, appliedAt);
+      await applyLocalMigration(root, localDatabase, migration, appliedAt);
       appliedNow.push({ id: migration.id, digest: migration.digest });
+    }
+
+    const afterSnapshot = await readLocalLineageSnapshot(root, localDatabase);
+    const afterLineage = classifySchemaLineage({
+      ...afterSnapshot,
+      migrations,
+      manifest: localManifest,
+    });
+    if (afterLineage.kind === "unknown-or-contaminated") {
+      fail(
+        "SCHEMA_LINEAGE_UNVERIFIED",
+        "Applied migrations did not leave an exact reclassifiable local schema lineage.",
+      );
+    }
+    const secondPlan = planMigrations(migrations, afterSnapshot.journal, {
+      environmentName: options.env,
+      destructiveAllowed: environment.destructive_operations_allowed,
+      ...(afterLineage.kind === BOOTSTRAP_LINEAGE ? { baseline: { head: afterLineage.head } } : {}),
+    });
+    if (!secondPlan.idempotent) {
+      fail(
+        "MIGRATION_RECLASSIFY_NOT_IDEMPOTENT",
+        "Applied migrations did not produce an empty second migration plan.",
+      );
     }
 
     process.stdout.write(
@@ -825,5 +1723,5 @@ function main() {
 }
 
 if (process.argv[1] === fileURLToPath(import.meta.url)) {
-  main();
+  await main();
 }

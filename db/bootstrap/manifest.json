@@ -1,0 +1,20 @@
+{
+  "version": 1,
+  "default_artifact_id": "0015-final-schema-v1",
+  "artifacts": [
+    {
+      "id": "0015-final-schema-v1",
+      "file": "0015_final_schema_v1.sql",
+      "head_sequence": 15,
+      "digest": "241094e838d8adcf7f1abe23d1931b697ad8325b54058e36ec2ee42d2b6fc583",
+      "schema_digest": "3e8b81fc3243eccc8b2e98c71c69cf85c638f53cd7c5fa4eedd664f461b5e0a0",
+      "legacy_0009_schema_digest": "9c181ab05292c25bd5ff5bfba72d4f4188269a0073f4e025a77d2505a3aaac2e"
+    }
+  ],
+  "schema_heads": [
+    {
+      "sequence": 15,
+      "schema_digest": "3e8b81fc3243eccc8b2e98c71c69cf85c638f53cd7c5fa4eedd664f461b5e0a0"
+    }
+  ]
+}
