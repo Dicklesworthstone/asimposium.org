@@ -445,7 +445,7 @@ readonly -a S2_CLOSURE_ENTRY_POINT_LIST=(
 # covered; a hand-maintained list will drift again the next time an import is
 # added, so the list is now checked against the graph rather than asserted.
 s2_verify_source_closure() {
-  local outcome kind detail
+  local outcome kind detail entry_point_count
   local -a listed=("${S2_SOURCE_PATHS[@]}")
   # Plant-only. Removing a genuinely live dependency from the list handed to the
   # checker is the only way to prove the checker is what closes the graph: an
@@ -462,16 +462,28 @@ s2_verify_source_closure() {
       retained+=("${candidate}")
     done
     if (( omitted != 1 )); then
-      printf '%s\n' "{\"tool\":\"bun\",\"package\":\"apps/wire\",\"suite\":\"s2-krater-source-closure\",\"status\":\"fail\",\"code\":\"S2_SOURCE_CLOSURE_PLANT_TARGET_UNLISTED\",\"omit_target\":\"${S2_PLANT_SOURCE_CLOSURE_OMIT}\",\"reproduce\":\"scripts/e2e-s2-krater.sh\"}"
+      printf '%s\n' '{"tool":"bun","package":"apps/wire","suite":"s2-krater-source-closure","status":"fail","code":"S2_SOURCE_CLOSURE_PLANT_TARGET_UNLISTED","reason":"plant-target-unlisted","reproduce":"scripts/e2e-s2-krater.sh"}'
       return 1
     fi
     listed=("${retained[@]}")
+  fi
+  entry_point_count=${#S2_CLOSURE_ENTRY_POINT_LIST[@]}
+  if (( entry_point_count != 5 )); then
+    printf '%s\n' '{"tool":"bun","package":"apps/wire","suite":"s2-krater-source-closure","status":"fail","code":"S2_SOURCE_CLOSURE_ENTRY_POINTS_INVALID","reason":"entry-point-count-invalid","reproduce":"scripts/e2e-s2-krater.sh"}'
+    return 1
   fi
   local -a entry_points=("${S2_CLOSURE_ENTRY_POINT_LIST[@]}")
   # Plant-only. Appends an extra entry point so the containment rule is proved
   # against the real gate without putting an escaping import into the repository.
   if [[ -n "${S2_PLANT_SOURCE_CLOSURE_ESCAPE_ENTRY:-}" ]]; then
     entry_points+=("${S2_PLANT_SOURCE_CLOSURE_ESCAPE_ENTRY}")
+  fi
+  # The dynamic-import plant is a retained, run-owned source file. It is added
+  # to both sets only for this invocation so the real walker reaches the
+  # otherwise uncloseable syntax without weakening the canonical five entries.
+  if [[ -n "${S2_CLOSURE_DYNAMIC_IMPORT_ENTRY:-}" ]]; then
+    listed+=("${S2_CLOSURE_DYNAMIC_IMPORT_ENTRY}")
+    entry_points+=("${S2_CLOSURE_DYNAMIC_IMPORT_ENTRY}")
   fi
   outcome="$(S2_CLOSURE_ENTRY_POINTS="$(printf '%s\n' "${entry_points[@]}")" \
     S2_CLOSURE_LISTED_PATHS="$(printf '%s\n' "${listed[@]}")" \
@@ -492,51 +504,88 @@ s2_verify_source_closure() {
       const relativePath = relative(repoRoot, candidate);
       return relativePath !== "" && !relativePath.startsWith("..") && !isAbsolute(relativePath);
     };
+    const sourceError = (reason) => {
+      throw new Error(reason);
+    };
     // `lstat`, never `stat`: a symlink is refused rather than followed, and the
     // real path must match the candidate so no symlinked parent directory can
-    // move the read outside the tree the digest attests.
-    const isSafeSourceFile = (candidate) => {
+    // move the read outside the tree the digest attests. It returns the exact
+    // pre-open identity, which readTrustedSource compares with the descriptor.
+    const inspectSafeSource = (candidate) => {
+      if (!withinRepo(candidate)) sourceError("source-escapes-repository");
       let info;
       try {
         info = lstatSync(candidate);
-      } catch {
-        return false;
+      } catch (error) {
+        if (error && typeof error === "object" && error.code === "ENOENT") return undefined;
+        sourceError("source-lstat-failed");
       }
-      if (!info.isFile()) return false;
-      if (info.size > MAX_SOURCE_BYTES) throw new Error("source-too-large");
+      if (info.isSymbolicLink()) sourceError("symlinked-source");
+      if (!info.isFile()) return undefined;
+      if (info.size > MAX_SOURCE_BYTES) sourceError("source-too-large");
       let real;
       try {
         real = realpathSync(candidate);
       } catch {
-        return false;
+        sourceError("source-realpath-failed");
       }
-      if (real !== candidate || !withinRepo(real)) throw new Error("symlinked-source");
-      return true;
+      if (real !== candidate || !withinRepo(real)) sourceError("symlinked-source");
+      return info;
     };
+    const isSafeSourceFile = (candidate) => inspectSafeSource(candidate) !== undefined;
 
     // Read through a descriptor opened O_NOFOLLOW, then size and read from that
     // same descriptor. This is what makes the symlink claim exact rather than
     // advisory: the final component cannot be a symlink, and the bytes come from
     // the inode that was checked, not from whatever the path names afterwards.
-    // Parent components are covered by the realpath equality above. The residual
-    // is a rename landing between realpath and open, which is not closed here.
-    const readSourceFile = (candidate) => {
-      const descriptor = openSync(candidate, constants.O_RDONLY | constants.O_NOFOLLOW);
+    // Parent components are covered by the realpath equality above. The fstat
+    // identity check closes a replacement between the inspection and the open.
+    const readTrustedSource = (candidate) => {
+      const checked = inspectSafeSource(candidate);
+      if (checked === undefined) sourceError("unreadable-source");
+      let descriptor;
       try {
-        const info = fstatSync(descriptor);
-        if (!info.isFile()) throw new Error("non-regular-source");
-        if (info.size > MAX_SOURCE_BYTES) throw new Error("source-too-large");
-        const buffer = Buffer.alloc(info.size);
+        descriptor = openSync(candidate, constants.O_RDONLY | constants.O_NOFOLLOW);
+      } catch {
+        sourceError("source-open-failed");
+      }
+      try {
+        let info;
+        try {
+          info = fstatSync(descriptor);
+        } catch {
+          sourceError("source-fstat-failed");
+        }
+        if (!info.isFile()) sourceError("non-regular-source");
+        if (info.size > MAX_SOURCE_BYTES) sourceError("source-too-large");
+        if (info.dev !== checked.dev || info.ino !== checked.ino) {
+          sourceError("source-raced-before-read");
+        }
+        let buffer;
+        try {
+          buffer = Buffer.alloc(info.size);
+        } catch {
+          sourceError("source-read-failed");
+        }
         let offset = 0;
         while (offset < info.size) {
-          const read = readSync(descriptor, buffer, offset, info.size - offset, offset);
+          let read;
+          try {
+            read = readSync(descriptor, buffer, offset, info.size - offset, offset);
+          } catch {
+            sourceError("source-read-failed");
+          }
           if (read <= 0) break;
           offset += read;
         }
-        if (offset !== info.size) throw new Error("short-source-read");
+        if (offset !== info.size) sourceError("short-source-read");
         return buffer.toString("utf8");
       } finally {
-        closeSync(descriptor);
+        try {
+          closeSync(descriptor);
+        } catch {
+          // A close failure never validates the source bytes.
+        }
       }
     };
 
@@ -564,9 +613,23 @@ s2_verify_source_closure() {
     let exportsMapCache;
     const exportsMapFor = () => {
       if (exportsMapCache !== undefined) return exportsMapCache;
-      if (!listed.has(packageManifestPath)) throw new Error("package-manifest-unlisted");
-      if (!isSafeSourceFile(packageManifestPath)) throw new Error("package-manifest-unreadable");
-      exportsMapCache = JSON.parse(readSourceFile(packageManifestPath)).exports ?? {};
+      if (!listed.has(packageManifestPath)) sourceError("package-manifest-unlisted");
+      if (!isSafeSourceFile(packageManifestPath)) sourceError("package-manifest-unreadable");
+      let manifest;
+      try {
+        manifest = JSON.parse(readTrustedSource(packageManifestPath));
+      } catch (error) {
+        if (error instanceof Error && error.message.startsWith("source-")) throw error;
+        sourceError("package-manifest-json-invalid");
+      }
+      if (manifest === null || typeof manifest !== "object") {
+        sourceError("package-manifest-json-invalid");
+      }
+      const exportsMap = manifest.exports ?? {};
+      if (exportsMap === null || typeof exportsMap !== "object") {
+        sourceError("package-manifest-json-invalid");
+      }
+      exportsMapCache = exportsMap;
       return exportsMapCache;
     };
 
@@ -578,14 +641,14 @@ s2_verify_source_closure() {
       // Containment is enforced here, before a path can be read or recorded, so
       // an escaping specifier becomes a walk error rather than an "unlisted"
       // finding carrying an out-of-tree absolute path.
-      if (!withinRepo(base)) throw new Error("import-escapes-repository");
+      if (!withinRepo(base)) sourceError("import-escapes-repository");
       for (const candidate of [base, `${base}.ts`, `${base}/index.ts`]) {
         if (isSafeSourceFile(candidate)) return candidate;
       }
       // Fixed token. Reasons are published verbatim into a JSON diagnostic, so
       // none of them interpolate a path: a filename could carry a quote or a
       // backslash and turn the record into something a consumer cannot parse.
-      throw new Error("unresolved-relative-import");
+      sourceError("unresolved-relative-import");
     };
 
     const resolveSpecifier = (specifier, importer) => {
@@ -596,7 +659,7 @@ s2_verify_source_closure() {
           ? "."
           : `./${specifier.slice("@asimposium/contracts/".length)}`;
         const target = exportsMapFor()[subpath];
-        if (typeof target !== "string") throw new Error("unmapped-export");
+        if (typeof target !== "string") sourceError("unmapped-export");
         return resolve(packageRoot, target);
       }
       return undefined; // A published dependency, pinned by bun.lock, which is listed.
@@ -616,7 +679,7 @@ s2_verify_source_closure() {
       const absolute = resolve(repoRoot, pathname);
       if (seen.has(absolute)) return;
       seen.add(absolute);
-      if (!withinRepo(absolute)) throw new Error("entry-escapes-repository");
+      if (!withinRepo(absolute)) sourceError("entry-escapes-repository");
       if (!listed.has(absolute)) {
         // One direct miss is enough to fail the gate, so an unlisted file is
         // recorded and then left alone. Reading and recursing into it would
@@ -625,10 +688,10 @@ s2_verify_source_closure() {
         missing.push(relative(repoRoot, absolute));
         return;
       }
-      if (!isSafeSourceFile(absolute)) throw new Error("unreadable-source");
-      const source = readSourceFile(absolute);
+      if (!isSafeSourceFile(absolute)) sourceError("unreadable-source");
+      const source = readTrustedSource(absolute);
       DYNAMIC.lastIndex = 0;
-      if (DYNAMIC.test(source)) throw new Error("dynamic-import");
+      if (DYNAMIC.test(source)) sourceError("dynamic-import");
       for (const pattern of [STATIC, BARE]) {
         pattern.lastIndex = 0;
         let match = pattern.exec(source);
@@ -644,10 +707,19 @@ s2_verify_source_closure() {
     // dynamic import is not "a missing path": serializing it into the same list
     // would let a broken walk read as a closure finding, or worse, an empty walk
     // read as success. Each gets its own kind so the shell can tell them apart.
+    const KNOWN_REASONS = new Set([
+      "dynamic-import", "entry-escapes-repository", "empty-walk", "import-escapes-repository",
+      "non-regular-source", "package-manifest-json-invalid", "package-manifest-unlisted",
+      "package-manifest-unreadable", "short-source-read", "source-escapes-repository",
+      "source-fstat-failed", "source-lstat-failed", "source-open-failed", "source-raced-before-read",
+      "source-read-failed", "source-realpath-failed", "source-too-large", "symlinked-source",
+      "unmapped-export", "unreadable-source", "unresolved-relative-import",
+    ]);
     try {
       for (const entry of entryPoints) walk(entry);
     } catch (error) {
-      process.stdout.write(`walk-error\t${String(error && error.message)}`);
+      const reason = error instanceof Error ? error.message : "";
+      process.stdout.write(`walk-error\t${KNOWN_REASONS.has(reason) ? reason : "walker-native-failure"}`);
       process.exit(0);
     }
     if (seen.size === 0) {
@@ -675,7 +747,7 @@ s2_verify_source_closure() {
   # to prevent, so this is derived from the list rather than written out again.
   local entry_points_json
   entry_points_json="$(IFS=,; printf '%s' "${S2_CLOSURE_ENTRY_POINT_LIST[*]}")"
-  printf '%s\n' "{\"tool\":\"bun\",\"package\":\"apps/wire\",\"suite\":\"s2-krater-source-closure\",\"status\":\"pass\",\"entry_points\":\"${entry_points_json}\",\"reproduce\":\"scripts/e2e-s2-krater.sh\"}"
+  printf '%s\n' "{\"tool\":\"bun\",\"package\":\"apps/wire\",\"suite\":\"s2-krater-source-closure\",\"status\":\"pass\",\"entry_point_count\":${entry_point_count},\"entry_points\":\"${entry_points_json}\",\"reproduce\":\"scripts/e2e-s2-krater.sh\"}"
 }
 
 s2_current_dirty_state() {
@@ -793,6 +865,7 @@ S2_STATE_DIR="${S2_RUN_DIR}/main"
 readonly S2_STATE_DIR
 declare -a S2_PROVENANCE_SOURCE_PATHS=("${S2_SOURCE_PATHS[@]}")
 S2_PROVENANCE_TEST_SOURCE=""
+S2_CLOSURE_DYNAMIC_IMPORT_ENTRY=""
 # The dependency the plant drifts. It is deliberately one the cost verifier
 # actually executes — `verify-cost-model.ts` imports it directly — so the planted
 # mutation is a change to load-bearing bytes rather than to filler.
@@ -824,6 +897,19 @@ if [[ "${S2_SHELL_REGRESSION_TEST:-}" == "source-provenance-drift" ]]; then
     exit 1
   fi
   unset s2_provenance_index s2_provenance_plant_substituted
+fi
+if [[ "${S2_PLANT_SOURCE_CLOSURE_DYNAMIC_IMPORT:-0}" == "1" ]]; then
+  S2_CLOSURE_DYNAMIC_IMPORT_ENTRY="${S2_STATE_DIR}/closure-dynamic-import.ts"
+  if [[ -e "${S2_CLOSURE_DYNAMIC_IMPORT_ENTRY}" || -L "${S2_CLOSURE_DYNAMIC_IMPORT_ENTRY}" ]]; then
+    printf '%s\n' '{"tool":"bash","package":"apps/wire","suite":"s2-krater-source-closure","status":"fail","code":"S2_SOURCE_CLOSURE_DYNAMIC_PLANT_PATH_OCCUPIED","reproduce":"scripts/e2e-s2-krater.sh"}'
+    exit 1
+  fi
+  if ! printf '%s\n' 'export const s2ClosureDynamicPlant = () => import("./not-run");' \
+    >"${S2_CLOSURE_DYNAMIC_IMPORT_ENTRY}"; then
+    printf '%s\n' '{"tool":"bash","package":"apps/wire","suite":"s2-krater-source-closure","status":"fail","code":"S2_SOURCE_CLOSURE_DYNAMIC_PLANT_CREATE_FAILED","reproduce":"scripts/e2e-s2-krater.sh"}'
+    exit 1
+  fi
+  S2_PROVENANCE_SOURCE_PATHS+=("${S2_CLOSURE_DYNAMIC_IMPORT_ENTRY}")
 fi
 # Gate the declared list against the executed import graph before anything is
 # hashed. A digest over an incomplete list is a confident statement about the
@@ -1170,10 +1256,18 @@ if [[ ! -x "${S2_WRANGLER}" ]]; then
   emit '{"tool":"wrangler","package":"apps/wire","suite":"s2-krater-local-d1","status":"fail","code":"WRANGLER_UNAVAILABLE","reproduce":"scripts/e2e-s2-krater.sh"}'
   exit 1
 fi
-S2_WRANGLER_VERSION="$(s2_bounded_capture "${S2_WRANGLER}" --version)" || {
-  emit '{"tool":"wrangler","package":"apps/wire","suite":"s2-krater-local-d1","status":"fail","code":"WRANGLER_VERSION_UNAVAILABLE","reproduce":"scripts/e2e-s2-krater.sh"}'
-  exit 1
-}
+if [[ "${S2_SHELL_REGRESSION_TEST:-}" == post-release-safe-checkpoint-child ]]; then
+  # This recursively launched controller executes only `bash -c 'sleep 30'` under the pinned
+  # supervisor; it never starts Wrangler.  Its parent has already checked the real binary, and
+  # avoiding a second version process keeps this pure ownership plant out of the global command
+  # deadline while it is deliberately frozen at the checkpoint barrier.
+  S2_WRANGLER_VERSION="not-invoked-pure-post-release-controller"
+else
+  S2_WRANGLER_VERSION="$(s2_bounded_capture "${S2_WRANGLER}" --version)" || {
+    emit '{"tool":"wrangler","package":"apps/wire","suite":"s2-krater-local-d1","status":"fail","code":"WRANGLER_VERSION_UNAVAILABLE","reproduce":"scripts/e2e-s2-krater.sh"}'
+    exit 1
+  }
+fi
 readonly S2_WRANGLER_VERSION
 
 if [[ ! -d "${S2_STATE_DIR}" || -L "${S2_STATE_DIR}" ]]; then
@@ -1200,6 +1294,23 @@ S2_START_FAILURE_STAGE=""
 S2_START_SUPERVISOR_EXIT_STATUS=""
 S2_STARTUP_JOURNAL_PHASE=""
 S2_STARTUP_JOURNAL_ARM_ACK=0
+S2_STARTUP_JOURNAL_POST_RELEASE_READY=0
+S2_POST_RELEASE_SAFE_BARRIER_OBSERVED=0
+S2_POST_RELEASE_READY_PREDICATE_SAMPLES=0
+# The post-release checkpoint regression has an additional direct Bash controller.  It is not a
+# pinned supervisor: it owns a nested script which owns one.  Keep an exact tag and the direct
+# child PID from the instant it is forked so every early return and EXIT cleanup can retire and
+# reap that controller before evidence is sealed.
+S2_POST_RELEASE_CONTROLLER_PID=""
+S2_POST_RELEASE_CONTROLLER_MARKER=""
+S2_POST_RELEASE_CONTROLLER_STATE_DIR=""
+S2_POST_RELEASE_CONTROLLER_PORT=""
+S2_POST_RELEASE_CONTROLLER_STATUS=""
+S2_POST_RELEASE_CONTROLLER_BARRIER=""
+S2_POST_RELEASE_CONTROLLER_CONTINUE=""
+S2_POST_RELEASE_CONTROLLER_PREDICATE=""
+S2_POST_RELEASE_CONTROLLER_RETURNED=""
+S2_POST_RELEASE_CONTROLLER_IDENTITY=""
 S2_PRE_RELEASE_RESAMPLE_ATTEMPTS=0
 S2_PRE_RELEASE_ACCEPTED_SAMPLES=0
 S2_PRE_RELEASE_REJECTED_SAMPLES=0
@@ -1374,6 +1485,30 @@ checkpoint_file_matches() {
   [[ "${line}" == "${checkpoint} ${expected_pid}" ]]
 }
 
+# The external post-release controller sees individually published exact samples while the child
+# remains frozen at its pre-trap barrier.  An observer never reads an append-in-progress ledger:
+# each sequence number becomes visible only through its own O_EXCL record.
+post_release_ready_predicate_samples() {
+  local prefix="$1" expected_pid="$2" file line phase seen_pid sequence extra expected_sequence=1
+  S2_POST_RELEASE_READY_PREDICATE_SAMPLES=0
+  while :; do
+    file="${prefix}.${expected_sequence}"
+    if [[ ! -e "${file}" && ! -L "${file}" ]]; then
+      return 0
+    fi
+    [[ -f "${file}" && ! -L "${file}" ]] || return 1
+    {
+      IFS= read -r line || return 1
+      if IFS= read -r extra; then return 1; fi
+    } <"${file}"
+    read -r phase seen_pid sequence extra <<<"${line}"
+    [[ "${phase}" == ready-predicate && "${seen_pid}" == "${expected_pid}" && \
+      "${sequence}" == "${expected_sequence}" && -z "${extra:-}" ]] || return 1
+    S2_POST_RELEASE_READY_PREDICATE_SAMPLES=$((S2_POST_RELEASE_READY_PREDICATE_SAMPLES + 1))
+    expected_sequence=$((expected_sequence + 1))
+  done
+}
+
 single_decimal_file() {
   local file="$1" line extra
   [[ -f "${file}" && ! -L "${file}" ]] || return 1
@@ -1388,6 +1523,7 @@ startup_journal_last_phase() {
   local file="$1" expected_pid="$2" line phase seen_pid extra state=0
   S2_STARTUP_JOURNAL_PHASE=""
   S2_STARTUP_JOURNAL_ARM_ACK=0
+  S2_STARTUP_JOURNAL_POST_RELEASE_READY=0
   [[ -f "${file}" && ! -L "${file}" ]] || return 1
   while :; do
     line=""
@@ -1411,13 +1547,18 @@ startup_journal_last_phase() {
       7:watchdog-pid-published) state=8 ;;
       8:await-release) state=9 ;;
       9:release-gate-consumed) state=10 ;;
+      10:post-release-ready)
+        state=11
+        S2_STARTUP_JOURNAL_POST_RELEASE_READY=1
+        ;;
       2:arm-gate-mismatch|2:arm-abort-consumed|2:arm-owner-lost|\
       4:arm-checkpoint-write-failed|6:launch-checkpoint-corrupt|\
       9:release-gate-mismatch|9:release-abort-consumed|9:release-owner-lost)
         state=99
         ;;
       [1-9]:signal-term|[1-9]:signal-hup|[1-9]:signal-int|\
-      10:signal-term|10:signal-hup|10:signal-int)
+      10:signal-term|10:signal-hup|10:signal-int|\
+      11:signal-term|11:signal-hup|11:signal-int)
         state=99
         ;;
       *) return 1 ;;
@@ -1532,12 +1673,20 @@ start_pinned_supervisor() {
   local plant_watchdog_ps_hang="${S2_PLANT_WATCHDOG_PS_HANG:-0}"
   local plant_supervisor_signal_after_watchdog="${S2_PLANT_SUPERVISOR_SIGNAL_AFTER_WATCHDOG:-none}"
   local plant_fragmented_arm_token="${S2_PLANT_FRAGMENTED_ARM_TOKEN:-0}"
+  local plant_post_release_checkpoint_delay="${S2_PLANT_POST_RELEASE_CHECKPOINT_DELAY_SECONDS:-0}"
+  local plant_post_release_safe_barrier="${S2_PLANT_POST_RELEASE_SAFE_BARRIER:-0}"
+  local plant_post_release_safe_barrier_abort="${S2_PLANT_POST_RELEASE_SAFE_BARRIER_ABORT:-0}"
+  local plant_post_release_safe_barrier_external="${S2_PLANT_POST_RELEASE_SAFE_BARRIER_EXTERNAL:-0}"
+  local plant_post_release_ready_predicate="${S2_PLANT_POST_RELEASE_READY_PREDICATE:-none}"
+  local post_release_ready_predicate post_release_ready_predicate_samples=0
   shift 5
   S2_START_FAILURE_STAGE="input-validation"
   S2_LAST_SUPERVISOR_PGID=""
   S2_LAST_SUPERVISOR_MARKER=""
   S2_START_SUPERVISOR_EXIT_STATUS=""
   S2_STARTUP_JOURNAL_PHASE=""
+  S2_STARTUP_JOURNAL_POST_RELEASE_READY=0
+  S2_POST_RELEASE_SAFE_BARRIER_OBSERVED=0
   case "${plant_watchdog_publication_delay}" in
     0|16) ;;
     *) return 1 ;;
@@ -1582,6 +1731,33 @@ start_pinned_supervisor() {
     0|1) ;;
     *) return 1 ;;
   esac
+  case "${plant_post_release_checkpoint_delay}" in
+    0|2) ;;
+    *) return 1 ;;
+  esac
+  case "${plant_post_release_safe_barrier}" in
+    0|1) ;;
+    *) return 1 ;;
+  esac
+  case "${plant_post_release_safe_barrier_abort}" in
+    0|1) ;;
+    *) return 1 ;;
+  esac
+  case "${plant_post_release_safe_barrier_external}" in
+    0|1) ;;
+    *) return 1 ;;
+  esac
+  case "${plant_post_release_ready_predicate}" in
+    none|malformed|partial) ;;
+    *) return 1 ;;
+  esac
+  [[ "${plant_post_release_safe_barrier_abort}" == 0 || \
+    "${plant_post_release_safe_barrier}" == 1 ]] || return 1
+  [[ "${plant_post_release_safe_barrier_external}" == 0 || \
+    "${plant_post_release_safe_barrier}" == 1 ]] || return 1
+  [[ "${plant_post_release_ready_predicate}" == none || \
+    ( "${plant_post_release_safe_barrier}" == 1 && \
+      "${plant_post_release_safe_barrier_external}" == 1 ) ]] || return 1
   [[ -d "${persist}" && ! -L "${persist}" && "${port}" =~ ^[0-9]+$ ]] || return 1
   case "${proof_scope}" in
     server|client) ;;
@@ -1614,6 +1790,15 @@ start_pinned_supervisor() {
   [[ ! -e "${watchdog_scan_hang_armed}" && ! -L "${watchdog_scan_hang_armed}" ]] || return 1
   arm_fragment_observed="${status_file}.watchdog.arm-fragment-observed"
   [[ ! -e "${arm_fragment_observed}" && ! -L "${arm_fragment_observed}" ]] || return 1
+  post_release_safe_barrier="${status_file}.post-release-safe-barrier"
+  post_release_safe_continue="${status_file}.post-release-safe-continue"
+  post_release_ready_predicate="${status_file}.post-release-ready-predicate"
+  [[ ! -e "${post_release_safe_barrier}" && ! -L "${post_release_safe_barrier}" && \
+    ! -e "${post_release_safe_continue}" && ! -L "${post_release_safe_continue}" && \
+    ! -e "${post_release_ready_predicate}.1" && ! -L "${post_release_ready_predicate}.1" && \
+    ! -e "${post_release_ready_predicate}.2" && ! -L "${post_release_ready_predicate}.2" && \
+    ! -e "${post_release_ready_predicate}.1.pending" && \
+    ! -L "${post_release_ready_predicate}.1.pending" ]] || return 1
   release_token="$(random_hex 16)" || return 1
   arm_token="$(random_hex 16)" || return 1
   abort_token="$(random_hex 16)" || return 1
@@ -1661,9 +1846,14 @@ start_pinned_supervisor() {
     plant_supervisor_signal_after_watchdog="${22}"
     watchdog_scan_hang_armed="${23}"
     plant_fragmented_arm_token="${24}"
-    shift 24
+    plant_post_release_checkpoint_delay="${25}"
+    plant_post_release_safe_barrier="${26}"
+    plant_post_release_safe_barrier_abort="${27}"
+    shift 27
     supervisor_pid="$$"
     arm_fragment_observed="${status_file}.watchdog.arm-fragment-observed"
+    post_release_safe_barrier="${status_file}.post-release-safe-barrier"
+    post_release_safe_continue="${status_file}.post-release-safe-continue"
     record_startup_phase() {
       printf "%s %s\n" "$1" "${supervisor_pid}" >&6
     }
@@ -1867,7 +2057,20 @@ start_pinned_supervisor() {
     fi
     wait_for_gate_value "${release_token}" release
     exec 8>&-
-    exec 6>&-
+    if [[ "${plant_post_release_safe_barrier}" == 1 ]]; then
+      (umask 077; set -o noclobber; \
+        printf "before-final-traps %s\\n" "${supervisor_pid}" >"${post_release_safe_barrier}") \
+        2>/dev/null || exit "${checkpoint_io_status}"
+      while :; do
+        if [[ -f "${post_release_safe_continue}" && ! -L "${post_release_safe_continue}" ]] && \
+          IFS= read -r post_release_safe_line <"${post_release_safe_continue}" && \
+          [[ "${post_release_safe_line}" == "continue ${supervisor_pid}" ]]; then
+          break
+        fi
+        kill -0 "${owner_pid}" 2>/dev/null || exit 125
+        sleep 0.05
+      done
+    fi
     if [[ "${plant_supervisor_exit_on_term}" == 1 ]]; then
       # Regression-only: make the post-release leader leave on group TERM so the legacy stop
       # branch must prove or refuse the remaining TERM-resistant group without a PID fallback.
@@ -1880,6 +2083,16 @@ start_pinned_supervisor() {
     # reaps its own exact watchdog before exiting. The controller never dismisses the watchdog
     # first and then hopes to reach the leader with a second signal.
     trap "kill -USR1 ${watchdog_pid} 2>/dev/null || :; wait ${watchdog_pid} 2>/dev/null || :; exit 0" USR1
+    # The parent may publish readiness only after this canonical journal checkpoint. Before it,
+    # a group TERM can still select the pre-release trap, which exits the leader and leaves the
+    # watchdog to self-retire after its bounded uncertainty period. Keep the journal FD open
+    # through the checkpoint so the controller can distinguish a consumed release with installed
+    # post-release traps from a merely successful FIFO write.
+    if [[ "${plant_post_release_checkpoint_delay}" == 2 ]]; then
+      sleep 2 || exit 125
+    fi
+    record_startup_phase post-release-ready || exit "${checkpoint_io_status}"
+    exec 6>&-
     "$@" &
     child="$!"
     if wait "${child}"; then child_status=0; else child_status="$?"; fi
@@ -1915,6 +2128,9 @@ start_pinned_supervisor() {
     "${plant_supervisor_signal_after_watchdog}" \
     "${watchdog_scan_hang_armed}" \
     "${plant_fragmented_arm_token}" \
+    "${plant_post_release_checkpoint_delay}" \
+    "${plant_post_release_safe_barrier}" \
+    "${plant_post_release_safe_barrier_abort}" \
     "$@" &
   pid=$!
   S2_LAST_SUPERVISOR_PGID="${pid}"
@@ -2100,16 +2316,82 @@ start_pinned_supervisor() {
       fi
       exec 7>&-
 
+      if [[ "${plant_post_release_safe_barrier}" == 1 ]]; then
+        S2_START_FAILURE_STAGE="post-release-safe-checkpoint"
+        deadline="$(s2_deadline_at "${S2_READY_DEADLINE_SECONDS}")"
+        while (( SECONDS < deadline )); do
+          if checkpoint_file_matches \
+            "${post_release_safe_barrier}" before-final-traps "${pid}"; then
+            S2_POST_RELEASE_SAFE_BARRIER_OBSERVED=1
+            break
+          fi
+          supervisor_is_owned "${pid}" "${pid}" "${marker}" || break
+          sleep 0.05
+        done
+        [[ ${S2_POST_RELEASE_SAFE_BARRIER_OBSERVED} -eq 1 ]] || return 1
+        if [[ "${plant_post_release_safe_barrier_abort}" == 1 ]]; then
+          signal_owned_group TERM "${pid}" "${pid}" "${marker}" || return 1
+          for ((tick = 0; tick < S2_TERMINATE_WAIT_TICKS; tick += 1)); do
+            kill -0 -- "-${pid}" 2>/dev/null || break
+            sleep 0.1
+          done
+          kill -0 -- "-${pid}" 2>/dev/null && return 1
+          wait "${pid}" 2>/dev/null || :
+          return 1
+        fi
+        if [[ "${plant_post_release_safe_barrier_external}" != 1 ]]; then
+          (umask 077; set -o noclobber; \
+            printf "continue %s\\n" "${pid}" >"${post_release_safe_continue}") \
+            2>/dev/null || return 1
+        fi
+      fi
+
       # The release is not considered successful until the parent can observe the separately
       # identified watchdog in a healthy state. A missing, malformed, dead, or uncertainty state
       # fails closed and the still-pinned exact group is killed before this function returns.
       deadline="$(s2_deadline_at "${S2_READY_DEADLINE_SECONDS}")"
       S2_START_FAILURE_STAGE="post-release-health"
       while (( SECONDS < deadline )); do
+        watchdog_ready=false
         supervisor_is_owned "${pid}" "${pid}" "${marker}" || break
         if [[ -f "${watchdog_pid_file}" && ! -L "${watchdog_pid_file}" ]] && \
           IFS= read -r watchdog_pid <"${watchdog_pid_file}" && is_decimal "${watchdog_pid}" && \
           watchdog_is_healthy "${watchdog_pid}" "${pid}" "${pid}" "${marker}" "${watchdog_health}"; then
+          watchdog_ready=true
+        fi
+        # The external controller plant deliberately leaves the child frozen before final traps
+        # and the canonical checkpoint. Two ordered samples prove this very start call evaluated
+        # a healthy watchdog twice without returning. If the post-release-ready conjunct below is
+        # removed, the first healthy sample returns and the second can never be written.
+        if [[ "${plant_post_release_safe_barrier_external}" == 1 && \
+          "${S2_POST_RELEASE_SAFE_BARRIER_OBSERVED}" == 1 && \
+          "${watchdog_ready}" == true ]]; then
+          post_release_ready_predicate_samples=$((post_release_ready_predicate_samples + 1))
+          if [[ "${plant_post_release_ready_predicate}" == partial ]]; then
+            [[ ${post_release_ready_predicate_samples} -eq 1 ]] || return 1
+            (umask 077; set -o noclobber; \
+              printf "ready-predicate %s" "${pid}" \
+                >"${post_release_ready_predicate}.1.pending") \
+              2>/dev/null || return 1
+            return 1
+          fi
+          if [[ "${plant_post_release_ready_predicate}" == malformed ]]; then
+            [[ ${post_release_ready_predicate_samples} -eq 1 ]] || return 1
+            (umask 077; set -o noclobber; \
+              printf "ready-predicate %s malformed\\n" "${pid}" \
+                >"${post_release_ready_predicate}.1") \
+              2>/dev/null || return 1
+            return 1
+          fi
+          (umask 077; set -o noclobber; \
+            printf "ready-predicate %s %s\\n" "${pid}" \
+              "${post_release_ready_predicate_samples}" \
+              >"${post_release_ready_predicate}.${post_release_ready_predicate_samples}") \
+            2>/dev/null || return 1
+        fi
+        if startup_journal_last_phase "${watchdog_startup}" "${pid}" && \
+          [[ ${S2_STARTUP_JOURNAL_POST_RELEASE_READY} -eq 1 ]] && \
+          [[ "${watchdog_ready}" == true ]]; then
           S2_STARTED_PID="${pid}"
           S2_STARTED_PGID="${pid}"
           S2_STARTED_MARKER="${marker}"
@@ -2819,6 +3101,175 @@ stop_lifecycle_supervisors() {
   return "${result}"
 }
 
+clear_post_release_controller() {
+  S2_POST_RELEASE_CONTROLLER_PID=""
+  S2_POST_RELEASE_CONTROLLER_MARKER=""
+  S2_POST_RELEASE_CONTROLLER_STATE_DIR=""
+  S2_POST_RELEASE_CONTROLLER_PORT=""
+  S2_POST_RELEASE_CONTROLLER_STATUS=""
+  S2_POST_RELEASE_CONTROLLER_BARRIER=""
+  S2_POST_RELEASE_CONTROLLER_CONTINUE=""
+  S2_POST_RELEASE_CONTROLLER_PREDICATE=""
+  S2_POST_RELEASE_CONTROLLER_RETURNED=""
+  S2_POST_RELEASE_CONTROLLER_IDENTITY=""
+}
+
+post_release_controller_record_is_safe() {
+  [[ "${S2_POST_RELEASE_CONTROLLER_PID}" =~ ^[0-9]+$ && \
+    "${S2_POST_RELEASE_CONTROLLER_MARKER}" =~ ^s2-post-release-controller-s2u-[a-f0-9]{48}$ && \
+    "${S2_POST_RELEASE_CONTROLLER_STATE_DIR}" == "${S2_STATE_DIR}" && \
+    -d "${S2_POST_RELEASE_CONTROLLER_STATE_DIR}" && \
+    ! -L "${S2_POST_RELEASE_CONTROLLER_STATE_DIR}" && \
+    "${S2_POST_RELEASE_CONTROLLER_PORT}" == "${S2_PORT}" && \
+    "${S2_POST_RELEASE_CONTROLLER_IDENTITY}" == \
+      "${S2_POST_RELEASE_CONTROLLER_STATUS}.controller-owner" ]]
+}
+
+post_release_controller_identity_matches() {
+  local line extra
+  [[ -f "${S2_POST_RELEASE_CONTROLLER_IDENTITY}" && \
+    ! -L "${S2_POST_RELEASE_CONTROLLER_IDENTITY}" ]] || return 1
+  {
+    IFS= read -r line || return 1
+    if IFS= read -r extra; then return 1; fi
+  } <"${S2_POST_RELEASE_CONTROLLER_IDENTITY}"
+  [[ "${line}" == "controller-owner ${S2_POST_RELEASE_CONTROLLER_PID} ${S2_PARENT_PID} ${S2_POST_RELEASE_CONTROLLER_MARKER}" ]]
+}
+
+post_release_controller_command_is_exact() {
+  local pid="$1" expected_parent="$2" row seen_pid seen_parent seen_stat seen_command
+  post_release_controller_record_is_safe || return 1
+  row="$(LC_ALL=C ps -o pid=,ppid=,stat=,command= -p "${pid}" 2>/dev/null)" || return 1
+  read -r seen_pid seen_parent seen_stat seen_command <<<"${row}"
+  [[ "${seen_pid}" == "${pid}" && "${seen_parent}" == "${expected_parent}" && \
+    "${seen_stat}" != Z* && \
+    "${seen_command}" == *"e2e-s2-krater.sh"* ]] || return 1
+  kill -0 "${pid}" 2>/dev/null
+}
+
+post_release_controller_is_zombie() {
+  local pid="$1" state
+  state="$(LC_ALL=C ps -o stat= -p "${pid}" 2>/dev/null | tr -d '[:space:]')" || return 1
+  [[ "${state}" == Z* ]]
+}
+
+post_release_controller_cleanup_refusal() {
+  emit '{"tool":"bash+ps+lsof","package":"apps/wire","suite":"s2-krater-shell","status":"refused","code":"S2_POST_RELEASE_CONTROLLER_CLEANUP_UNPROVEN","reproduce":"scripts/e2e-s2-krater.sh"}'
+  return 1
+}
+
+# The controller is a direct tracked child, but it owns a nested script whose stdout/stderr and
+# checkpoints are under this run's state directory.  TERM gives that child a chance to run its own
+# exact-supervisor cleanup; KILL is only used after a fresh marker-and-parent identity proof.  The
+# final direct-child reap and retained-state survivor scan are both required before this record can
+# be cleared or an EXIT handler may publish evidence.
+# shellcheck disable=SC2329
+cleanup_post_release_controller() {
+  local pid="${S2_POST_RELEASE_CONTROLLER_PID}" tick
+  [[ -n "${pid}" ]] || return 0
+  post_release_controller_record_is_safe || {
+    post_release_controller_cleanup_refusal
+    return 1
+  }
+  if kill -0 "${pid}" 2>/dev/null && ! post_release_controller_is_zombie "${pid}"; then
+    post_release_controller_command_is_exact "${pid}" "${S2_PARENT_PID}" || {
+      post_release_controller_cleanup_refusal
+      return 1
+    }
+    kill -TERM "${pid}" 2>/dev/null || {
+      post_release_controller_cleanup_refusal
+      return 1
+    }
+    for ((tick = 0; tick < S2_TERMINATE_WAIT_TICKS; tick += 1)); do
+      kill -0 "${pid}" 2>/dev/null || break
+      sleep 0.05
+    done
+    if kill -0 "${pid}" 2>/dev/null && ! post_release_controller_is_zombie "${pid}"; then
+      post_release_controller_command_is_exact "${pid}" "${S2_PARENT_PID}" || {
+        post_release_controller_cleanup_refusal
+        return 1
+      }
+      kill -KILL "${pid}" 2>/dev/null || {
+        post_release_controller_cleanup_refusal
+        return 1
+      }
+      for ((tick = 0; tick < S2_TERMINATE_WAIT_TICKS; tick += 1)); do
+        kill -0 "${pid}" 2>/dev/null || break
+        sleep 0.05
+      done
+    fi
+  fi
+  wait "${pid}" 2>/dev/null || :
+  ! kill -0 "${pid}" 2>/dev/null || {
+    post_release_controller_cleanup_refusal
+    return 1
+  }
+  assert_no_run_survivors \
+    "${S2_POST_RELEASE_CONTROLLER_STATE_DIR}" \
+    "${S2_POST_RELEASE_CONTROLLER_PORT}" \
+    "${S2_POST_RELEASE_CONTROLLER_MARKER}" || {
+      post_release_controller_cleanup_refusal
+      return 1
+    }
+  clear_post_release_controller
+}
+
+post_release_controller_refuse() {
+  cleanup_post_release_controller || return 125
+  return 1
+}
+
+# Spawn the raw controller with a unique argv marker and register its direct PID in the very next
+# shell operation.  The controller's own run gets a distinct artifact root; these sidecars are
+# only the parent-owned cross-process contract and remain under this run's state directory.
+start_post_release_controller() {
+  local predicate_mode="$1" controller_base controller_run_id controller_stdout controller_stderr controller_path
+  [[ "${predicate_mode}" == none || "${predicate_mode}" == malformed || \
+    "${predicate_mode}" == partial ]] || return 1
+  [[ -z "${S2_POST_RELEASE_CONTROLLER_PID}" ]] || return 1
+  controller_base="${S2_STATE_DIR}/post-release-safe-controller-$(random_hex 8)" || return 1
+  controller_run_id="s2u-$(random_hex 24)" || return 1
+  S2_POST_RELEASE_CONTROLLER_MARKER="s2-post-release-controller-${controller_run_id}"
+  S2_POST_RELEASE_CONTROLLER_STATE_DIR="${S2_STATE_DIR}"
+  S2_POST_RELEASE_CONTROLLER_PORT="${S2_PORT}"
+  S2_POST_RELEASE_CONTROLLER_STATUS="${controller_base}.status"
+  S2_POST_RELEASE_CONTROLLER_BARRIER="${S2_POST_RELEASE_CONTROLLER_STATUS}.post-release-safe-barrier"
+  S2_POST_RELEASE_CONTROLLER_CONTINUE="${S2_POST_RELEASE_CONTROLLER_STATUS}.post-release-safe-continue"
+  S2_POST_RELEASE_CONTROLLER_PREDICATE="${S2_POST_RELEASE_CONTROLLER_STATUS}.post-release-ready-predicate"
+  S2_POST_RELEASE_CONTROLLER_RETURNED="${controller_base}.start-returned"
+  S2_POST_RELEASE_CONTROLLER_IDENTITY="${S2_POST_RELEASE_CONTROLLER_STATUS}.controller-owner"
+  controller_stdout="${controller_base}.child.stdout"
+  controller_stderr="${controller_base}.child.stderr"
+  for controller_path in \
+    "${S2_POST_RELEASE_CONTROLLER_STATUS}" "${S2_POST_RELEASE_CONTROLLER_BARRIER}" \
+    "${S2_POST_RELEASE_CONTROLLER_CONTINUE}" "${S2_POST_RELEASE_CONTROLLER_PREDICATE}.1" \
+    "${S2_POST_RELEASE_CONTROLLER_PREDICATE}.2" \
+    "${S2_POST_RELEASE_CONTROLLER_PREDICATE}.1.pending" \
+    "${S2_POST_RELEASE_CONTROLLER_RETURNED}" "${S2_POST_RELEASE_CONTROLLER_IDENTITY}" \
+    "${controller_stdout}" "${controller_stderr}"; do
+    [[ ! -e "${controller_path}" && ! -L "${controller_path}" ]] || {
+      clear_post_release_controller
+      return 1
+    }
+  done
+  env \
+    S2_RUN_ID="${controller_run_id}" \
+    S2_SHELL_REGRESSION_TEST=post-release-safe-checkpoint-child \
+    S2_POST_RELEASE_SAFE_CONTROLLER_BASE="${controller_base}" \
+    S2_POST_RELEASE_SAFE_CONTROLLER_MARKER="${S2_POST_RELEASE_CONTROLLER_MARKER}" \
+    S2_POST_RELEASE_SAFE_CONTROLLER_IDENTITY="${S2_POST_RELEASE_CONTROLLER_IDENTITY}" \
+    S2_PLANT_POST_RELEASE_READY_PREDICATE="${predicate_mode}" \
+    bash "${BASH_SOURCE[0]}" \
+      >"${controller_stdout}" 2>"${controller_stderr}" &
+  # This assignment is intentionally adjacent to `$!`: an EXIT trap must already have the exact
+  # direct child while all later validation, parsing, and controller-side observations run.
+  S2_POST_RELEASE_CONTROLLER_PID=$!
+  if ! is_decimal "${S2_POST_RELEASE_CONTROLLER_PID}"; then
+    clear_post_release_controller
+    return 1
+  fi
+}
+
 # shellcheck disable=SC2329
 most_recent_supervisor_is_tracked() {
   local marker="$1" index
@@ -2897,6 +3348,7 @@ stop_most_recent_untracked_supervisor() {
 # shellcheck disable=SC2329
 cleanup_workers() {
   local result=0
+  cleanup_post_release_controller || result=1
   stop_most_recent_untracked_supervisor || result=1
   stop_lifecycle_supervisors || result=1
   stop_worker || result=1
@@ -3656,7 +4108,7 @@ create_evidence_subdir() {
 
 # shellcheck disable=SC2329
 on_exit() {
-  local original_status="$?" final_status
+  local original_status="$?" final_status cleanup_proven=true
   trap - EXIT
   # A first signal has already selected the preserved status. Ignore follow-up
   # termination signals while exact cleanup and immutable evidence publication run.
@@ -3667,6 +4119,7 @@ on_exit() {
   final_status="${original_status}"
   if ! cleanup_workers; then
     final_status=125
+    cleanup_proven=false
   fi
   if [[ ${final_status} -eq 78 && \
     ( ${S2_COST_LOCAL_PHASES_COMPLETE} -eq 1 || ${S2_SOURCE_PROVENANCE_REVALIDATE_ON_EXIT} -eq 1 ) ]]; then
@@ -3685,6 +4138,12 @@ on_exit() {
       ! write_s2_cost_publication_commit; then
       final_status=125
     fi
+  elif [[ "${cleanup_proven}" != true ]]; then
+    # An artifact directory may be retained for diagnosis, but its bytes must not be sealed as
+    # a coherent evidence manifest while an owned process or descriptor could still mutate them.
+    # The prior cleanup diagnostic remains the typed cause; this record makes the non-publication
+    # boundary explicit without claiming a final artifact digest.
+    emit '{"tool":"bash","package":"apps/wire","suite":"s2-krater-evidence","status":"refused","code":"S2_EVIDENCE_PUBLICATION_SKIPPED_UNPROVEN_CLEANUP","reproduce":"scripts/e2e-s2-krater.sh"}'
   elif ! write_evidence_receipt "${final_status}" 0; then
     final_status=125
   fi
@@ -3832,6 +4291,33 @@ run_legacy_phase() {
   return "${phase_status}"
 }
 
+# A legacy phase may deliberately return failure after an exact reap, but EXIT must not turn
+# that already-proved terminal state into an unrelated ownership failure. This handoff is narrow:
+# it accepts only a now-empty recorded group plus the full run-scoped process, descriptor, and
+# listener proof. Any missing identity, a live group, or an uncertain scanner leaves the fields
+# intact so ordinary EXIT cleanup continues to fail closed.
+clear_legacy_terminal_server_state() {
+  local marker="${S2_SERVER_MARKER}" pgid="${S2_SERVER_PGID}" recorded_marker
+  is_decimal "${pgid}" && [[ -n "${marker}" && -d "${S2_SERVER_PERSIST}" && \
+    ! -L "${S2_SERVER_PERSIST}" && "${S2_SERVER_PORT}" =~ ^[0-9]+$ ]] || return 1
+  ! kill -0 -- "-${pgid}" 2>/dev/null || return 1
+  assert_no_run_survivors "${S2_SERVER_PERSIST}" "${S2_SERVER_PORT}" "${marker}" || return 1
+  if [[ -n "${S2_MOST_RECENT_SUPERVISOR}" ]]; then
+    read -r _ _ _ recorded_marker _ <<<"${S2_MOST_RECENT_SUPERVISOR}"
+    [[ "${recorded_marker}" == "${marker}" ]] || return 1
+    clear_most_recent_supervisor_if_marker "${marker}"
+  fi
+  S2_SERVER_PID=""
+  S2_SERVER_PGID=""
+  S2_SERVER_MARKER=""
+  S2_SERVER_WATCHDOG_PID=""
+  S2_SERVER_WATCHDOG_HEALTH=""
+  S2_SERVER_PERSIST=""
+  S2_SERVER_PORT=""
+  S2_ACTIVE_HARNESS_TOKEN=""
+  S2_ACTIVE_HARNESS_RUN_ID=""
+}
+
 stop_legacy_worker_or_fail() {
   local stop_status
   # Keep the exact residual-group KILL proof distinct from a naturally vanished group. Both
@@ -3847,9 +4333,25 @@ stop_legacy_worker_or_fail() {
   unset S2_LEGACY_STOP_CONTEXT
   if [[ ${stop_status} -ne 0 ]]; then
     # The bounded residual branch proved zero survivors but intentionally reports failure: the
-    # upgrade phase cannot call that teardown clean. Forget its dead handles so EXIT cleanup does
-    # not re-inspect an already-reaped group and turn a precise failure into a stale one.
+    # upgrade phase cannot call that teardown clean. Transfer that proved terminal state across
+    # the EXIT boundary before clearing the server fields: the packed newest-supervisor record is
+    # otherwise a second, stale ownership obligation, and a concurrent lsof/ps observation can
+    # turn a completed exact reap into S2_CLEANUP_OWNERSHIP_UNPROVEN.
     if [[ "${S2_LEGACY_STOP_REAPED_UNCERTAIN:-0}" == 1 ]]; then
+      local reaped_marker="${S2_SERVER_MARKER}" recorded_marker
+      if [[ -n "${S2_MOST_RECENT_SUPERVISOR}" ]]; then
+        read -r _ _ _ recorded_marker _ <<<"${S2_MOST_RECENT_SUPERVISOR}"
+        [[ -n "${reaped_marker}" && "${recorded_marker}" == "${reaped_marker}" ]] || return 1
+        # Test-only: leave the stale record in place so the focused plant proves the
+        # post-reap handoff check is load-bearing. It never authorizes a signal.
+        if [[ "${S2_PLANT_LEGACY_RETAIN_STALE_HANDOFF:-0}" != 1 ]]; then
+          clear_most_recent_supervisor_if_marker "${reaped_marker}"
+        fi
+      fi
+      if [[ -n "${S2_MOST_RECENT_SUPERVISOR}" ]]; then
+        emit '{"tool":"bash","package":"apps/wire","suite":"s2-krater-local-d1-upgrade","status":"fail","code":"S2_LEGACY_REAPED_HANDOFF_STALE","reproduce":"scripts/e2e-s2-krater.sh"}'
+        return 1
+      fi
       S2_SERVER_PID=""
       S2_SERVER_PGID=""
       S2_SERVER_MARKER=""
@@ -3860,6 +4362,11 @@ stop_legacy_worker_or_fail() {
       S2_ACTIVE_HARNESS_TOKEN=""
       S2_ACTIVE_HARNESS_RUN_ID=""
       unset S2_LEGACY_STOP_REAPED_UNCERTAIN
+    elif clear_legacy_terminal_server_state; then
+      # A failed legacy stop can still have a fully proved terminal postcondition. Retain the
+      # phase's typed failure, but do not leave a dead server handle for EXIT to mistake for a
+      # new ownership obligation and replace that status with 125.
+      :
     fi
     return 1
   fi
@@ -4948,6 +5455,204 @@ run_s2_shell_regression_test() {
     return 0
   fi
 
+  if [[ "${mode}" == "post-release-safe-checkpoint-child" ]]; then
+    local controller_base controller_status returned_record controller_marker controller_identity
+    controller_base="${S2_POST_RELEASE_SAFE_CONTROLLER_BASE:-}"
+    controller_marker="${S2_POST_RELEASE_SAFE_CONTROLLER_MARKER:-}"
+    controller_identity="${S2_POST_RELEASE_SAFE_CONTROLLER_IDENTITY:-}"
+    [[ "${controller_base}" == "${S2_EVIDENCE_ROOT}/"* && \
+      "${controller_marker}" =~ ^s2-post-release-controller-s2u-[a-f0-9]{48}$ && \
+      "${controller_identity}" == "${controller_base}.status.controller-owner" && \
+      ! -e "${controller_base}.start-returned" && ! -L "${controller_base}.start-returned" && \
+      ! -e "${controller_identity}" && ! -L "${controller_identity}" ]] || return 1
+    controller_status="${controller_base}.status"
+    returned_record="${controller_base}.start-returned"
+    (umask 077; set -o noclobber; \
+      printf 'controller-owner %s %s %s\n' "$$" "${PPID}" "${controller_marker}" \
+        >"${controller_identity}") 2>/dev/null || return 1
+    S2_PLANT_POST_RELEASE_SAFE_BARRIER=1 \
+      S2_PLANT_POST_RELEASE_SAFE_BARRIER_EXTERNAL=1 \
+      start_pinned_supervisor "${controller_status}" post-release-safe-checkpoint-child \
+        "${S2_STATE_DIR}" "${S2_PORT}" client bash -c 'sleep 30' || return 1
+    (umask 077; set -o noclobber; \
+      printf 'start-returned %s %s %s %s %s\n' \
+        "${S2_STARTED_PID}" "${S2_STARTED_PGID}" "${S2_STARTED_MARKER}" \
+        "${S2_STATE_DIR}" "${S2_PORT}" >"${returned_record}") 2>/dev/null || return 1
+    stop_pinned_supervisor \
+      "${S2_STARTED_PID}" "${S2_STARTED_PGID}" "${S2_STARTED_MARKER}" \
+      "${S2_STARTED_WATCHDOG_PID}" "${S2_STARTED_WATCHDOG_HEALTH}" \
+      "${S2_STATE_DIR}" "${S2_PORT}" client || return 1
+    kill -0 -- "-${S2_STARTED_PGID}" 2>/dev/null && return 1
+    return 0
+  fi
+
+  if [[ "${mode}" == "post-release-safe-checkpoint" ]]; then
+    local safe_status_file safe_pid safe_pgid safe_marker
+    local controller_status controller_barrier controller_continue controller_predicate controller_returned controller_pid
+    local barrier_line barrier_phase barrier_supervisor_pid barrier_extra controller_status_code
+    local safe_persist safe_port partial_bytes="" parser_status cleanup_status
+    local parser_supervisor_pid partial_supervisor_pid
+    start_post_release_controller none || return 1
+    controller_status="${S2_POST_RELEASE_CONTROLLER_STATUS}"
+    controller_barrier="${S2_POST_RELEASE_CONTROLLER_BARRIER}"
+    controller_continue="${S2_POST_RELEASE_CONTROLLER_CONTINUE}"
+    controller_predicate="${S2_POST_RELEASE_CONTROLLER_PREDICATE}"
+    controller_returned="${S2_POST_RELEASE_CONTROLLER_RETURNED}"
+    controller_pid="${S2_POST_RELEASE_CONTROLLER_PID}"
+    deadline="$(s2_deadline_at "${S2_READY_DEADLINE_SECONDS}")"
+    barrier_supervisor_pid=""
+    while (( SECONDS < deadline )); do
+      if [[ -f "${controller_barrier}" && ! -L "${controller_barrier}" ]]; then
+        {
+          IFS= read -r barrier_line || barrier_line=""
+          if IFS= read -r barrier_extra; then barrier_line=""; fi
+        } <"${controller_barrier}"
+        read -r barrier_phase barrier_supervisor_pid barrier_extra <<<"${barrier_line}"
+        if [[ "${barrier_phase}" == before-final-traps && \
+          "${barrier_supervisor_pid}" =~ ^[0-9]+$ && -z "${barrier_extra:-}" ]]; then
+          break
+        fi
+        barrier_supervisor_pid=""
+      fi
+      post_release_controller_command_is_exact "${controller_pid}" "${S2_PARENT_PID}" || break
+      sleep 0.05
+    done
+    [[ "${barrier_supervisor_pid}" =~ ^[0-9]+$ && \
+      ! -e "${controller_returned}" && ! -L "${controller_returned}" ]] || \
+      post_release_controller_refuse
+    post_release_controller_identity_matches || post_release_controller_refuse
+    # The child has consumed release but remains before final traps/checkpoint. It must execute
+    # the ready predicate twice without publishing the start-returned marker. This is a causal
+    # barrier: deleting only POST_RELEASE_READY makes the first healthy predicate return, so the
+    # second ordered sample cannot exist while this controller still holds the child barrier.
+    deadline="$(s2_deadline_at "${S2_READY_DEADLINE_SECONDS}")"
+    while (( SECONDS < deadline )); do
+      if [[ -f "${controller_predicate}.1" && ! -L "${controller_predicate}.1" ]]; then
+        post_release_ready_predicate_samples "${controller_predicate}" "${barrier_supervisor_pid}" || return 1
+        [[ ${S2_POST_RELEASE_READY_PREDICATE_SAMPLES} -ge 2 ]] && break
+      fi
+      [[ ! -e "${controller_returned}" && ! -L "${controller_returned}" ]] || break
+      post_release_controller_command_is_exact "${controller_pid}" "${S2_PARENT_PID}" || break
+      sleep 0.05
+    done
+    [[ ${S2_POST_RELEASE_READY_PREDICATE_SAMPLES} -ge 2 && \
+      ! -e "${controller_returned}" && ! -L "${controller_returned}" ]] || {
+      post_release_controller_refuse
+    }
+    (umask 077; set -o noclobber; \
+      printf 'continue %s\n' "${barrier_supervisor_pid}" >"${controller_continue}") \
+      2>/dev/null || post_release_controller_refuse
+    if wait "${controller_pid}" 2>/dev/null; then
+      controller_status_code=0
+    else
+      controller_status_code=$?
+    fi
+    [[ ${controller_status_code} -eq 0 && -f "${controller_returned}" && \
+      ! -L "${controller_returned}" ]] || post_release_controller_refuse
+    cleanup_post_release_controller || return 1
+    read -r barrier_phase safe_pid safe_pgid safe_marker safe_persist safe_port barrier_extra \
+      <"${controller_returned}" || return 1
+    [[ "${barrier_phase}" == start-returned && "${safe_pid}" =~ ^[0-9]+$ && \
+      "${safe_pgid}" == "${safe_pid}" && -n "${safe_marker}" && \
+      -d "${safe_persist}" && ! -L "${safe_persist}" && \
+      "${safe_port}" =~ ^[0-9]+$ && -z "${barrier_extra:-}" ]] || return 1
+    startup_journal_last_phase "${controller_status}.watchdog.startup" "${safe_pid}" || return 1
+    [[ "${S2_STARTUP_JOURNAL_PHASE}" == post-release-ready && \
+      "${S2_STARTUP_JOURNAL_POST_RELEASE_READY}" == 1 ]] || return 1
+    assert_no_run_survivors "${safe_persist}" "${safe_port}" "${safe_marker}" || return 1
+
+    # A controller whose predicate parser rejects the first record returns early.  The marker is
+    # retained for diagnosis, but the parent must synchronously reap the registered direct child
+    # and its nested supervisor before this mode may continue or EXIT can publish evidence.
+    start_post_release_controller malformed || return 1
+    controller_barrier="${S2_POST_RELEASE_CONTROLLER_BARRIER}"
+    controller_predicate="${S2_POST_RELEASE_CONTROLLER_PREDICATE}"
+    controller_returned="${S2_POST_RELEASE_CONTROLLER_RETURNED}"
+    controller_pid="${S2_POST_RELEASE_CONTROLLER_PID}"
+    deadline="$(s2_deadline_at "${S2_READY_DEADLINE_SECONDS}")"
+    while (( SECONDS < deadline )); do
+      [[ -f "${controller_predicate}.1" && ! -L "${controller_predicate}.1" ]] && break
+      post_release_controller_command_is_exact "${controller_pid}" "${S2_PARENT_PID}" || break
+      sleep 0.05
+    done
+    [[ -f "${controller_barrier}" && ! -L "${controller_barrier}" ]] || \
+      post_release_controller_refuse
+    {
+      IFS= read -r barrier_line || barrier_line=""
+      if IFS= read -r barrier_extra; then barrier_line=""; fi
+    } <"${controller_barrier}"
+    read -r barrier_phase parser_supervisor_pid barrier_extra <<<"${barrier_line}"
+    [[ "${barrier_phase}" == before-final-traps && \
+      "${parser_supervisor_pid}" =~ ^[0-9]+$ && -z "${barrier_extra:-}" ]] || \
+      post_release_controller_refuse
+    if post_release_ready_predicate_samples "${controller_predicate}" "${parser_supervisor_pid}"; then
+      parser_status=0
+    else
+      parser_status=$?
+    fi
+    [[ ${parser_status} -eq 1 && ! -e "${controller_returned}" && \
+      ! -L "${controller_returned}" ]] || post_release_controller_refuse
+    if post_release_controller_refuse; then
+      return 1
+    else
+      cleanup_status=$?
+    fi
+    [[ ${cleanup_status} -eq 1 ]] || return 1
+
+    # A partial record is retained only under a private pending name.  Its exact final `.1` name
+    # never appears, so the same parser reports zero samples and cannot release the frozen child.
+    start_post_release_controller partial || return 1
+    controller_barrier="${S2_POST_RELEASE_CONTROLLER_BARRIER}"
+    controller_predicate="${S2_POST_RELEASE_CONTROLLER_PREDICATE}"
+    controller_returned="${S2_POST_RELEASE_CONTROLLER_RETURNED}"
+    controller_pid="${S2_POST_RELEASE_CONTROLLER_PID}"
+    deadline="$(s2_deadline_at "${S2_READY_DEADLINE_SECONDS}")"
+    while (( SECONDS < deadline )); do
+      if [[ -f "${controller_predicate}.1.pending" && ! -L "${controller_predicate}.1.pending" ]]; then
+        partial_bytes="$(<"${controller_predicate}.1.pending")"
+        if [[ -f "${controller_barrier}" && ! -L "${controller_barrier}" ]]; then
+          {
+            IFS= read -r barrier_line || barrier_line=""
+            if IFS= read -r barrier_extra; then barrier_line=""; fi
+          } <"${controller_barrier}"
+          read -r barrier_phase partial_supervisor_pid barrier_extra <<<"${barrier_line}"
+          [[ "${barrier_phase}" == before-final-traps && \
+            "${partial_supervisor_pid}" =~ ^[0-9]+$ && -z "${barrier_extra:-}" && \
+            "${partial_bytes}" == "ready-predicate ${partial_supervisor_pid}" ]] && break
+        fi
+      fi
+      post_release_controller_command_is_exact "${controller_pid}" "${S2_PARENT_PID}" || break
+      sleep 0.05
+    done
+    [[ "${partial_supervisor_pid}" =~ ^[0-9]+$ ]] || post_release_controller_refuse
+    post_release_ready_predicate_samples "${controller_predicate}" "${partial_supervisor_pid}" || \
+      post_release_controller_refuse
+    [[ "${partial_bytes}" == "ready-predicate ${partial_supervisor_pid}" && \
+      ${S2_POST_RELEASE_READY_PREDICATE_SAMPLES} -eq 0 && \
+      ! -e "${controller_predicate}.1" && ! -L "${controller_predicate}.1" && \
+      ! -e "${controller_returned}" && ! -L "${controller_returned}" ]] || \
+      post_release_controller_refuse
+    cleanup_post_release_controller || return 1
+
+    safe_status_file="${S2_STATE_DIR}/post-release-safe-checkpoint-abort-$(random_hex 8).status"
+    if S2_PLANT_POST_RELEASE_SAFE_BARRIER=1 \
+      S2_PLANT_POST_RELEASE_SAFE_BARRIER_ABORT=1 \
+      start_pinned_supervisor "${safe_status_file}" post-release-safe-checkpoint-abort \
+        "${S2_STATE_DIR}" "${S2_PORT}" client bash -c 'sleep 30'; then
+      return 1
+    fi
+    [[ "${S2_POST_RELEASE_SAFE_BARRIER_OBSERVED}" == 1 && \
+      "${S2_START_FAILURE_STAGE}" == "post-release-safe-checkpoint" ]] || return 1
+    startup_journal_last_phase "${safe_status_file}.watchdog.startup" "${S2_LAST_SUPERVISOR_PGID}" || return 1
+    [[ "${S2_STARTUP_JOURNAL_PHASE}" == signal-term && \
+      "${S2_STARTUP_JOURNAL_POST_RELEASE_READY}" == 0 ]] || return 1
+    kill -0 -- "-${S2_LAST_SUPERVISOR_PGID}" 2>/dev/null && return 1
+    assert_no_run_survivors "${S2_STATE_DIR}" "${S2_PORT}" "${S2_LAST_SUPERVISOR_MARKER}" || return 1
+    emit '{"tool":"bash+ps","package":"apps/wire","suite":"s2-krater-shell","status":"refused","code":"S2_POST_RELEASE_SAFE_CHECKPOINT_TERMINATED","start_failure_stage":"post-release-safe-checkpoint","no_exact_group_survivor":true,"reproduce":"S2_SHELL_REGRESSION_TEST=post-release-safe-checkpoint scripts/e2e-s2-krater.sh"}'
+    emit '{"tool":"bash+ps+lsof","package":"apps/wire","suite":"s2-krater-shell","status":"pass","scenario":"release-consumption-is-not-ready-until-final-traps-and-canonical-post-release-checkpoint","post_release_safe_barrier_observed":true,"controller_identity_attested":true,"controller_visible_ready_predicate_samples":2,"start_returned_before_controller_release":false,"parser_early_return_controller_reaped":true,"partial_predicate_final_visible":false,"partial_predicate_observer_samples":0,"no_exact_group_survivor":true,"reproduce":"S2_SHELL_REGRESSION_TEST=post-release-safe-checkpoint scripts/e2e-s2-krater.sh"}'
+    return 0
+  fi
+
   if [[ "${mode}" == "watchdog-startup-diagnostics" ]]; then
     local fixture expected_status expected_phase expected_stage payload_started_file signal_name fixture_started_at fixture_elapsed
     for fixture in \
@@ -5460,6 +6165,10 @@ run_s2_shell_regression_test() {
     fi
     [[ ${stop_status} -eq 1 && "${S2_ACTIVE_ORIGIN}" == "http://127.0.0.1:1" && \
       -z "${S2_SERVER_PID}" ]] || return 1
+    if [[ -n "${S2_MOST_RECENT_SUPERVISOR}" ]]; then
+      emit '{"tool":"bash","package":"apps/wire","suite":"s2-krater-shell","status":"fail","code":"S2_LEGACY_REAPED_HANDOFF_STALE","reproduce":"S2_SHELL_REGRESSION_TEST=legacy-leader-loss scripts/e2e-s2-krater.sh"}'
+      return 1
+    fi
     if kill -0 -- "-${S2_STARTED_PGID}" 2>/dev/null; then return 1; fi
     assert_no_run_survivors "${S2_STATE_DIR}" "${S2_PORT}" "${S2_STARTED_MARKER}" || return 1
     emit "{\"tool\":\"bash\",\"package\":\"apps/wire\",\"suite\":\"s2-krater-shell\",\"status\":\"pass\",\"scenario\":\"legacy-term-leader-loss-bounds-inspection-publishes-uncertainty-and-kills-only-exact-residual-group\",\"detached_ps_one_shot_consumed\":${detached_ps_one_shot_consumed},\"detached_ps_one_shot_stage\":\"${detached_ps_failure_once_stage}\",\"pre_release_capture_uncertain_samples\":${S2_PRE_RELEASE_CAPTURE_UNCERTAIN_SAMPLES},\"post_arm_inspection_uncertain_samples\":${S2_POST_ARM_INSPECTION_UNCERTAIN_SAMPLES},\"cleanup_action\":\"kill-exact-residual-group\",\"reproduce\":\"S2_SHELL_REGRESSION_TEST=${mode} scripts/e2e-s2-krater.sh\"}"
@@ -5598,7 +6307,7 @@ run_s2_shell_regression_test() {
     if cmp -s "${S2_PROVENANCE_DRIFT_ORIGIN}" "${S2_PROVENANCE_TEST_SOURCE}"; then
       return 1
     fi
-    emit "{\"tool\":\"bash\",\"package\":\"apps/wire\",\"suite\":\"s2-krater-shell\",\"status\":\"pass\",\"scenario\":\"planted-source-provenance-drift-requires-receipt-publication-refusal\",\"mutated_hashed_source\":\"${S2_PROVENANCE_TEST_SOURCE}\",\"drift_origin\":\"${S2_PROVENANCE_DRIFT_ORIGIN}\",\"reproduce\":\"S2_SHELL_REGRESSION_TEST=source-provenance-drift scripts/e2e-s2-krater.sh\"}"
+    emit "{\"tool\":\"bash\",\"package\":\"apps/wire\",\"suite\":\"s2-krater-shell\",\"status\":\"pass\",\"scenario\":\"planted-source-provenance-drift-requires-receipt-publication-refusal\",\"mutated_hashed_source\":\"main/drifted-runner.ts\",\"drift_origin\":\"${S2_PROVENANCE_DRIFT_ORIGIN}\",\"reproduce\":\"S2_SHELL_REGRESSION_TEST=source-provenance-drift scripts/e2e-s2-krater.sh\"}"
     return 78
   fi
 

@@ -920,6 +920,7 @@ const S2_SHELL_REGRESSION_MODES = [
   "watchdog-uncertainty",
   "watchdog-self-retire",
   "watchdog-publication-delay",
+  "post-release-safe-checkpoint",
   "watchdog-startup-diagnostics",
   "watchdog-post-arm-abort",
   "watchdog-pre-publication-exit",
@@ -1282,6 +1283,18 @@ describe("registered S2 shell and lifecycle regressions", () => {
           if (mode === "legacy-leader-loss") {
             expect(run.stdout).toContain('"code":"S2_LEGACY_SUPERVISOR_INSPECTION_UNCERTAIN"');
             expect(run.stdout).toContain('"action":"kill-exact-residual-group"');
+            expect(run.stdout).not.toContain('"code":"S2_LEGACY_REAPED_HANDOFF_STALE"');
+            expect(run.stdout).not.toContain('"code":"S2_CLEANUP_OWNERSHIP_UNPROVEN"');
+          } else if (mode === "post-release-safe-checkpoint") {
+            expect(run.stdout).toContain('"code":"S2_POST_RELEASE_SAFE_CHECKPOINT_TERMINATED"');
+            expect(run.stdout).toContain(
+              '"scenario":"release-consumption-is-not-ready-until-final-traps-and-canonical-post-release-checkpoint"',
+            );
+            expect(run.stdout).toContain('"post_release_safe_barrier_observed":true');
+            expect(run.stdout).toContain('"controller_visible_ready_predicate_samples":2');
+            expect(run.stdout).toContain('"start_returned_before_controller_release":false');
+            expect(run.stdout).toContain('"no_exact_group_survivor":true');
+            expect(run.stdout).not.toContain('"code":"S2_CLEANUP_OWNERSHIP_UNPROVEN"');
           } else if (mode === "legacy-leader-loss-transient-ps") {
             const transientProof = ndjsonRecords(run).find(
               (entry) => entry.assertion === "payload-ready-in-exact-group-with-retained-state-fd",
@@ -1363,6 +1376,53 @@ describe("registered S2 shell and lifecycle regressions", () => {
   );
 
   test(
+    "PLANTED: retaining the exact-reap handoff record is refused before EXIT can re-inspect it",
+    () => {
+      const runId = `s2u-${randomUUID().replaceAll("-", "").slice(0, 24)}`;
+      const run = runHarnessSync(
+        {
+          S2_RUN_ID: runId,
+          S2_SHELL_REGRESSION_TEST: "legacy-leader-loss",
+          S2_PLANT_LEGACY_RETAIN_STALE_HANDOFF: "1",
+        },
+        S2_SHELL_REGRESSION_WATCHDOG_MS,
+      );
+      assertS2RunThenScanForSurvivors(
+        "legacy-leader-loss-stale-exact-reap-handoff",
+        () => {
+          // The exact residual kill still occurred. The sole plant leaves the
+          // packed newest-supervisor record behind, and the handoff invariant
+          // catches that stale state before ordinary EXIT cleanup can mistake it
+          // for a new live ownership obligation.
+          expect(run.exitCode).toBe(125);
+          expect(run.stdout).toContain('"code":"S2_LEGACY_SUPERVISOR_INSPECTION_UNCERTAIN"');
+          expect(run.stdout).toContain('"action":"kill-exact-residual-group"');
+          expect(ndjsonRecords(run)).toContainEqual(
+            expect.objectContaining({
+              suite: "s2-krater-local-d1-upgrade",
+              status: "fail",
+              code: "S2_LEGACY_REAPED_HANDOFF_STALE",
+            }),
+          );
+          // This one defect leaves the dead server record unhanded-off. It must remain a typed
+          // cleanup refusal, not become a sealed evidence manifest that a still-live owner could
+          // mutate after publication.
+          expect(run.stdout).toContain('"code":"S2_CLEANUP_OWNERSHIP_UNPROVEN"');
+          expect(run.stdout).toContain('"code":"S2_EVIDENCE_PUBLICATION_SKIPPED_UNPROVEN_CLEANUP"');
+          expect(
+            existsSync(resolve(REPOSITORY_ROOT, "e2e/artifacts/s2-krater", runId, "manifest.json")),
+          ).toBe(false);
+          expect(run.stdout).not.toContain(
+            "legacy-term-leader-loss-bounds-inspection-publishes-uncertainty-and-kills-only-exact-residual-group",
+          );
+        },
+        () => liveS2LifecycleProcesses(runId),
+      );
+    },
+    S2_SHELL_REGRESSION_TEST_TIMEOUT_MS,
+  );
+
+  test(
     "PLANTED: the ordinary clean-stop bypass cannot satisfy legacy leader-loss coverage",
     () => {
       const runId = `s2u-${randomUUID().replaceAll("-", "").slice(0, 24)}`;
@@ -1391,6 +1451,16 @@ describe("registered S2 shell and lifecycle regressions", () => {
             }),
           );
           expect(run.stdout).toContain('"code":"S2_SHELL_REGRESSION_FAILED"');
+          expect(run.stdout).not.toContain('"code":"S2_CLEANUP_OWNERSHIP_UNPROVEN"');
+          expect(ndjsonRecords(run)).toContainEqual(
+            expect.objectContaining({
+              suite: "s2-krater-evidence",
+              status: "fail",
+              evidence_retention_status: "pass",
+              captured_exit_code: 1,
+              captured_run_status: "fail",
+            }),
+          );
           expect(run.stdout).not.toContain('"code":"S2_LEGACY_SUPERVISOR_INSPECTION_UNCERTAIN"');
           expect(run.stdout).not.toContain('"action":"kill-exact-residual-group"');
           expect(run.stdout).not.toContain(
@@ -1835,7 +1905,9 @@ describe("registered S2 shell and lifecycle regressions", () => {
       [
         "--eval",
         `
-        import { lstatSync, readFileSync, realpathSync } from "node:fs";
+        import {
+          closeSync, constants, fstatSync, lstatSync, openSync, readSync, realpathSync,
+        } from "node:fs";
         import { dirname, isAbsolute, relative, resolve } from "node:path";
         const repoRoot = realpathSync(process.cwd());
         const MAX_SOURCE_BYTES = 4 * 1024 * 1024;
@@ -1843,28 +1915,90 @@ describe("registered S2 shell and lifecycle regressions", () => {
           const rel = relative(repoRoot, candidate);
           return rel !== "" && !rel.startsWith("..") && !isAbsolute(rel);
         };
-        const isSafeSourceFile = (candidate) => {
+        const sourceError = (reason) => { throw new Error(reason); };
+        const inspectSafeSource = (candidate) => {
+          if (!withinRepo(candidate)) sourceError("source-escapes-repository");
           let info;
-          try { info = lstatSync(candidate); } catch { return false; }
-          if (!info.isFile()) return false;
-          if (info.size > MAX_SOURCE_BYTES) throw new Error("source-too-large");
+          try {
+            info = lstatSync(candidate);
+          } catch (error) {
+            if (error && typeof error === "object" && error.code === "ENOENT") return undefined;
+            sourceError("source-lstat-failed");
+          }
+          if (info.isSymbolicLink()) sourceError("symlinked-source");
+          if (!info.isFile()) return undefined;
+          if (info.size > MAX_SOURCE_BYTES) sourceError("source-too-large");
           let real;
-          try { real = realpathSync(candidate); } catch { return false; }
-          if (real !== candidate || !withinRepo(real)) throw new Error("symlinked-source");
-          return true;
+          try { real = realpathSync(candidate); } catch { sourceError("source-realpath-failed"); }
+          if (real !== candidate || !withinRepo(real)) sourceError("symlinked-source");
+          return info;
         };
-        const packageRoot = resolve("packages/contracts");
-        const exportsMap = JSON.parse(
-          readFileSync(resolve(packageRoot, "package.json"), "utf8"),
-        ).exports ?? {};
+        const isSafeSourceFile = (candidate) => inspectSafeSource(candidate) !== undefined;
+        const readTrustedSource = (candidate) => {
+          const checked = inspectSafeSource(candidate);
+          if (checked === undefined) sourceError("unreadable-source");
+          let descriptor;
+          try {
+            descriptor = openSync(candidate, constants.O_RDONLY | constants.O_NOFOLLOW);
+          } catch {
+            sourceError("source-open-failed");
+          }
+          try {
+            let info;
+            try { info = fstatSync(descriptor); } catch { sourceError("source-fstat-failed"); }
+            if (!info.isFile()) sourceError("non-regular-source");
+            if (info.size > MAX_SOURCE_BYTES) sourceError("source-too-large");
+            if (info.dev !== checked.dev || info.ino !== checked.ino) {
+              sourceError("source-raced-before-read");
+            }
+            const buffer = Buffer.alloc(info.size);
+            let offset = 0;
+            while (offset < info.size) {
+              let bytesRead;
+              try {
+                bytesRead = readSync(descriptor, buffer, offset, info.size - offset, offset);
+              } catch {
+                sourceError("source-read-failed");
+              }
+              if (bytesRead <= 0) break;
+              offset += bytesRead;
+            }
+            if (offset !== info.size) sourceError("short-source-read");
+            return buffer.toString("utf8");
+          } finally {
+            try { closeSync(descriptor); } catch { /* no trusted bytes after close failure */ }
+          }
+        };
+        const listed = new Set(
+          ${JSON.stringify(declaredSourcePaths())}.map((path) => resolve(repoRoot, path)),
+        );
+        const packageRoot = resolve(repoRoot, "packages/contracts");
+        const packageManifestPath = resolve(packageRoot, "package.json");
+        const exportsMapFor = () => {
+          if (!listed.has(packageManifestPath)) sourceError("package-manifest-unlisted");
+          if (!isSafeSourceFile(packageManifestPath)) sourceError("package-manifest-unreadable");
+          let manifest;
+          try { manifest = JSON.parse(readTrustedSource(packageManifestPath)); } catch (error) {
+            if (error instanceof Error && error.message.startsWith("source-")) throw error;
+            sourceError("package-manifest-json-invalid");
+          }
+          if (manifest === null || typeof manifest !== "object") {
+            sourceError("package-manifest-json-invalid");
+          }
+          const exportsMap = manifest.exports ?? {};
+          if (exportsMap === null || typeof exportsMap !== "object") {
+            sourceError("package-manifest-json-invalid");
+          }
+          return exportsMap;
+        };
         // The Worker sources import extensionless, so a resolver without this
         // cannot walk them at all — it throws ENOENT on "./krater".
         const resolveLocalFile = (base) => {
-          if (!withinRepo(base)) throw new Error("import-escapes-repository");
+          if (!withinRepo(base)) sourceError("import-escapes-repository");
           for (const candidate of [base, base + ".ts", base + "/index.ts"]) {
             if (isSafeSourceFile(candidate)) return candidate;
           }
-          throw new Error("unresolved-relative-import:" + relative(repoRoot, base));
+          sourceError("unresolved-relative-import");
         };
         const resolveSpecifier = (specifier, importer) => {
           if (specifier.startsWith("node:") || specifier.startsWith("bun:")) return undefined;
@@ -1875,8 +2009,8 @@ describe("registered S2 shell and lifecycle regressions", () => {
             const subpath = specifier === "@asimposium/contracts"
               ? "."
               : "./" + specifier.slice("@asimposium/contracts/".length);
-            const target = exportsMap[subpath];
-            if (typeof target !== "string") throw new Error("unmapped-export:" + specifier);
+            const target = exportsMapFor()[subpath];
+            if (typeof target !== "string") sourceError("unmapped-export");
             return resolve(packageRoot, target);
           }
           return undefined;
@@ -1892,9 +2026,12 @@ describe("registered S2 shell and lifecycle regressions", () => {
           const absolute = resolve(repoRoot, pathname);
           if (seen.has(absolute)) return;
           seen.add(absolute);
-          if (!withinRepo(absolute)) throw new Error("entry-escapes-repository");
-          if (!isSafeSourceFile(absolute)) throw new Error("unreadable-source");
-          const source = readFileSync(absolute, "utf8");
+          if (!withinRepo(absolute)) sourceError("entry-escapes-repository");
+          if (!listed.has(absolute)) sourceError("unlisted-source");
+          if (!isSafeSourceFile(absolute)) sourceError("unreadable-source");
+          const source = readTrustedSource(absolute);
+          DYNAMIC.lastIndex = 0;
+          if (DYNAMIC.test(source)) sourceError("dynamic-import");
           for (const pattern of [STATIC, BARE]) {
             pattern.lastIndex = 0;
             let match = pattern.exec(source);
@@ -1905,8 +2042,22 @@ describe("registered S2 shell and lifecycle regressions", () => {
             }
           }
         };
-        for (const entry of ${JSON.stringify(CLOSURE_ENTRY_POINTS)}) walk(entry);
-        process.stdout.write([...seen].map((p) => relative(process.cwd(), p)).sort().join("\\n"));
+        const KNOWN_REASONS = new Set([
+          "dynamic-import", "entry-escapes-repository", "import-escapes-repository",
+          "non-regular-source", "package-manifest-json-invalid", "package-manifest-unlisted",
+          "package-manifest-unreadable", "short-source-read", "source-escapes-repository",
+          "source-fstat-failed", "source-lstat-failed", "source-open-failed", "source-raced-before-read",
+          "source-read-failed", "source-realpath-failed", "source-too-large", "symlinked-source",
+          "unlisted-source", "unmapped-export", "unreadable-source", "unresolved-relative-import",
+        ]);
+        try {
+          for (const entry of ${JSON.stringify(CLOSURE_ENTRY_POINTS)}) walk(entry);
+        } catch (error) {
+          const reason = error instanceof Error ? error.message : "";
+          process.stdout.write("walk-error\\t" + (KNOWN_REASONS.has(reason) ? reason : "walker-native-failure"));
+          process.exit(0);
+        }
+        process.stdout.write([...seen].map((p) => relative(repoRoot, p)).sort().join("\\n"));
         `,
       ],
       { cwd: REPOSITORY_ROOT, encoding: "utf8" },
@@ -1935,10 +2086,8 @@ describe("registered S2 shell and lifecycle regressions", () => {
    * the real gate is exercised, rather than putting an escaping import into the
    * repository to be scanned.
    */
-  test.each([
-    ["an absolute path outside the repository", "/etc/hosts"],
-    ["a relative traversal", "../../../../etc/hosts"],
-  ])("PLANTED: a closure entry point that is %s is refused", (_label, escapingEntry) => {
+  test("PLANTED: a relative traversal closure entry point is refused", () => {
+    const escapingEntry = "../../../../outside-repository/closure-plant.ts";
     const run = runHarnessSync(
       {
         S2_RUN_ID: `s2u-${randomUUID().replaceAll("-", "").slice(0, 24)}`,
@@ -1958,7 +2107,8 @@ describe("registered S2 shell and lifecycle regressions", () => {
       }),
     );
     expect(run.stdout).not.toContain("S2_SOURCE_CLOSURE_INCOMPLETE");
-    expect(run.stdout).not.toContain("/etc/hosts");
+    expect(run.stdout).not.toContain("outside-repository");
+    expect(run.stdout).not.toContain(REPOSITORY_ROOT);
     expect(
       records.some(
         (record) => record.suite === "s2-krater-source-closure" && record.status === "pass",
@@ -1982,23 +2132,164 @@ describe("registered S2 shell and lifecycle regressions", () => {
     for (const entry of declared) expect(listed.has(entry)).toBe(true);
   });
 
-  test("every run publishes a source-closure verdict, so a removed checker is visible", () => {
-    const runId = `s2u-${randomUUID().replaceAll("-", "").slice(0, 24)}`;
-    const run = runHarnessSync(
-      { S2_RUN_ID: runId, S2_SHELL_REGRESSION_TEST: "source-provenance-drift" },
-      S2_SHELL_REGRESSION_TEST_TIMEOUT_MS,
-    );
-    expect(ndjsonRecords(run)).toContainEqual(
-      expect.objectContaining({
-        suite: "s2-krater-source-closure",
-        status: "pass",
-        // Exact, not a substring match: a partial assertion would still pass if
-        // the harness silently narrowed the published scope back to the cost
-        // verifier, which is precisely the overstatement this record guards.
-        entry_points: CLOSURE_ENTRY_POINTS.join(","),
-      }),
-    );
-  });
+  test(
+    "every run publishes a source-closure verdict, so a removed checker is visible",
+    () => {
+      const runId = `s2u-${randomUUID().replaceAll("-", "").slice(0, 24)}`;
+      const run = runHarnessSync(
+        { S2_RUN_ID: runId, S2_SHELL_REGRESSION_TEST: "source-provenance-drift" },
+        S2_SHELL_REGRESSION_TEST_TIMEOUT_MS,
+      );
+      expect(ndjsonRecords(run)).toContainEqual(
+        expect.objectContaining({
+          suite: "s2-krater-source-closure",
+          status: "pass",
+          entry_point_count: 5,
+          // Exact, not a substring match: a partial assertion would still pass if
+          // the harness silently narrowed the published scope back to the cost
+          // verifier, which is precisely the overstatement this record guards.
+          entry_points: CLOSURE_ENTRY_POINTS.join(","),
+        }),
+      );
+    },
+    S2_SHELL_REGRESSION_TEST_TIMEOUT_MS,
+  );
+
+  test(
+    "PLANTED: omitting the contracts manifest fails before it can direct bare-import resolution",
+    () => {
+      const runId = `s2u-${randomUUID().replaceAll("-", "").slice(0, 24)}`;
+      const run = runHarnessSync(
+        {
+          S2_RUN_ID: runId,
+          S2_SHELL_REGRESSION_TEST: "provenance",
+          S2_PLANT_SOURCE_CLOSURE_OMIT: "packages/contracts/package.json",
+        },
+        S2_SHELL_REGRESSION_TEST_TIMEOUT_MS,
+      );
+      const records = ndjsonRecords(run);
+      expect(run.exitCode).toBe(1);
+      expect(records).toContainEqual(
+        expect.objectContaining({
+          suite: "s2-krater-source-closure",
+          status: "fail",
+          code: "S2_SOURCE_CLOSURE_WALK_FAILED",
+          reason: "package-manifest-unlisted",
+        }),
+      );
+      expect(run.stdout).not.toContain("packages/contracts/package.json");
+      expect(run.stdout).not.toContain(REPOSITORY_ROOT);
+      expect(run.stdout).not.toContain('"suite":"s2-cost-publication"');
+      expect(
+        records.some(
+          (record) => record.suite === "s2-krater-source-closure" && record.status === "pass",
+        ),
+      ).toBe(false);
+      expect(
+        existsSync(resolve(REPOSITORY_ROOT, "e2e/artifacts/s2-krater", runId, "manifest.json")),
+      ).toBe(false);
+    },
+    S2_SHELL_REGRESSION_TEST_TIMEOUT_MS,
+  );
+
+  test(
+    "PLANTED: a run-owned dynamic import is rejected by both closure walkers before publication",
+    () => {
+      const runId = `s2u-${randomUUID().replaceAll("-", "").slice(0, 24)}`;
+      const run = runHarnessSync(
+        {
+          S2_RUN_ID: runId,
+          S2_SHELL_REGRESSION_TEST: "provenance",
+          S2_PLANT_SOURCE_CLOSURE_DYNAMIC_IMPORT: "1",
+        },
+        S2_SHELL_REGRESSION_TEST_TIMEOUT_MS,
+      );
+      const records = ndjsonRecords(run);
+      expect(run.exitCode).toBe(1);
+      expect(records).toContainEqual(
+        expect.objectContaining({
+          suite: "s2-krater-source-closure",
+          status: "fail",
+          code: "S2_SOURCE_CLOSURE_WALK_FAILED",
+          reason: "dynamic-import",
+        }),
+      );
+      expect(run.stdout).not.toContain("closure-dynamic-import.ts");
+      expect(run.stdout).not.toContain(REPOSITORY_ROOT);
+      expect(run.stdout).not.toContain('"suite":"s2-cost-publication"');
+      expect(
+        records.some(
+          (record) => record.suite === "s2-krater-source-closure" && record.status === "pass",
+        ),
+      ).toBe(false);
+
+      const independent = spawnSync(
+        "bun",
+        [
+          "--eval",
+          `
+          import {
+            closeSync, constants, fstatSync, lstatSync, openSync, readSync, realpathSync,
+          } from "node:fs";
+          import { isAbsolute, relative, resolve } from "node:path";
+          const root = realpathSync(process.cwd());
+          const candidate = resolve(root, Bun.argv[1]);
+          const within = (path) => {
+            const rel = relative(root, path);
+            return rel !== "" && !rel.startsWith("..") && !isAbsolute(rel);
+          };
+          const fail = (reason) => { throw new Error(reason); };
+          if (!within(candidate)) fail("source-escapes-repository");
+          let checked;
+          try { checked = lstatSync(candidate); } catch { fail("source-lstat-failed"); }
+          if (checked.isSymbolicLink()) fail("symlinked-source");
+          if (!checked.isFile()) fail("non-regular-source");
+          if (checked.size > 4 * 1024 * 1024) fail("source-too-large");
+          let real;
+          try {
+            real = realpathSync(candidate);
+          } catch {
+            fail("source-realpath-failed");
+          }
+          if (real !== candidate) fail("symlinked-source");
+          let descriptor;
+          try { descriptor = openSync(candidate, constants.O_RDONLY | constants.O_NOFOLLOW); } catch {
+            fail("source-open-failed");
+          }
+          let source;
+          try {
+            let opened;
+            try { opened = fstatSync(descriptor); } catch { fail("source-fstat-failed"); }
+            if (!opened.isFile()) fail("non-regular-source");
+            if (opened.size > 4 * 1024 * 1024) fail("source-too-large");
+            if (opened.dev !== checked.dev || opened.ino !== checked.ino) fail("source-raced-before-read");
+            const bytes = Buffer.alloc(opened.size);
+            let read;
+            try { read = readSync(descriptor, bytes, 0, opened.size, 0); } catch {
+              fail("source-read-failed");
+            }
+            if (read !== opened.size) fail("short-source-read");
+            source = bytes.toString("utf8");
+          } finally {
+            try { closeSync(descriptor); } catch { /* fixed failure is enough for this plant */ }
+          }
+          if (/\\bimport\\s*\\(/.test(source)) {
+            process.stdout.write("dynamic-import");
+            process.exit(0);
+          }
+          process.stdout.write("dynamic-import-missed");
+          `,
+          "--",
+          `e2e/artifacts/s2-krater/${runId}/main/closure-dynamic-import.ts`,
+        ],
+        { cwd: REPOSITORY_ROOT, encoding: "utf8" },
+      );
+      expect(independent.status).toBe(0);
+      expect(independent.stderr).toBe("");
+      expect(independent.stdout).toBe("dynamic-import");
+    },
+    S2_SHELL_REGRESSION_TEST_TIMEOUT_MS,
+  );
 
   test.each([
     // Cost-model side.
@@ -2076,7 +2367,7 @@ describe("registered S2 shell and lifecycle regressions", () => {
         expect.objectContaining({
           suite: "s2-krater-shell",
           scenario: "planted-source-provenance-drift-requires-receipt-publication-refusal",
-          mutated_hashed_source: expect.any(String),
+          mutated_hashed_source: "main/drifted-runner.ts",
           drift_origin: "scripts/harness/runner.ts",
         }),
       );
@@ -2119,6 +2410,49 @@ describe("registered S2 shell and lifecycle regressions", () => {
       );
       expect(run.stdout).not.toContain('"suite":"s2-cost-publication","status":"pass"');
       expect(run.stdout).not.toContain('"suite":"s2-cost-publication-commit","status":"pass"');
+      expect(run.stdout).not.toContain(REPOSITORY_ROOT);
+    },
+    S2_SHELL_REGRESSION_TEST_TIMEOUT_MS,
+  );
+
+  test(
+    "PLANTED: a retained run-owned edit after the closure walk aborts the provenance sandwich",
+    () => {
+      const runId = `s2u-${randomUUID().replaceAll("-", "").slice(0, 24)}`;
+      const run = runHarnessSync(
+        {
+          S2_RUN_ID: runId,
+          S2_SHELL_REGRESSION_TEST: "source-provenance-drift",
+          S2_PLANT_CLOSURE_CAPTURE_RACE: "1",
+        },
+        S2_SHELL_REGRESSION_TEST_TIMEOUT_MS,
+      );
+      const records = ndjsonRecords(run);
+      expect(run.exitCode).toBe(1);
+      // The matching no-race control above reaches the regular end-of-run drift
+      // guard. This single-cause edit lands before that mode executes, exactly
+      // between the first bounded capture and the second one.
+      expect(records).toContainEqual(
+        expect.objectContaining({
+          suite: "s2-krater-source-closure",
+          status: "pass",
+          entry_point_count: 5,
+          entry_points: CLOSURE_ENTRY_POINTS.join(","),
+        }),
+      );
+      expect(records).toContainEqual(
+        expect.objectContaining({
+          suite: "s2-krater-source-provenance",
+          status: "fail",
+          code: "S2_SOURCE_CLOSURE_CAPTURE_RACE",
+        }),
+      );
+      expect(run.stdout).not.toContain('"suite":"s2-cost-publication"');
+      expect(run.stdout).not.toContain('"suite":"s2-cost-publication-commit"');
+      expect(run.stdout).not.toContain(REPOSITORY_ROOT);
+      expect(
+        existsSync(resolve(REPOSITORY_ROOT, "e2e/artifacts/s2-krater", runId, "manifest.json")),
+      ).toBe(false);
     },
     S2_SHELL_REGRESSION_TEST_TIMEOUT_MS,
   );
