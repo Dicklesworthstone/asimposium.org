@@ -1,5 +1,6 @@
 import { expect, test } from "bun:test";
 
+import { containsCredentialShape } from "@asimposium/contracts/diagnostic-safety";
 import {
   aggregateScreeningRun,
   isSafeScreeningDiagnosticLabel,
@@ -249,6 +250,16 @@ test("PLANTED NEGATIVE: modern token families are refused as metadata without lo
     "xoxp-1234567890-abcdefghijklmnop",
     "AKIAIOSFODNN7EXAMPLE",
     "eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiJmaXh0dXJlIn0.signaturefragment",
+    // Families the local vocabulary never had, reached only through the shared
+    // scanner. The first two are the `rk`/`pk` siblings of `sk`: a restricted
+    // live key is as much a secret as a secret key, and both published cleanly
+    // until `containsCredentialShape` was composed in. The third is a Fellow
+    // token clipped by a capture ceiling — the full 26+43 form was already
+    // refused by the local prefix rule, the truncation was not, and a clipped
+    // credential is no safer to print than a whole one.
+    "rk_live_51h8xyzabcdef",
+    "pk_live_abcdefghijkl",
+    "asimp_ag_abcd",
   ];
   const corpus: readonly ScreeningCorpusExample[] = [
     fixture(1, "legitimate"),
@@ -284,6 +295,60 @@ test("PLANTED NEGATIVE: modern token families are refused as metadata without lo
     expect(message).toBe("Observation version metadata is unsafe or malformed.");
     expect(message).not.toContain(token);
   }
+});
+
+test("PLANTED POSITIVE: near-miss labels survive the composed scanner", () => {
+  // Composing a second scanner into the label guard must not turn the evidence
+  // path into an outage. These are the near misses: a stratum word that merely
+  // names a credential concept, and version strings that share a credential
+  // prefix. Both assertions matter — the first shows the shared scanner is not
+  // the thing admitting them, so the second is testing the composed guard.
+  for (const label of [
+    "token-smuggling",
+    "sk-1",
+    "s4-manifest-2026-08-13-v2",
+    "fixture-deterministic-v1-not-a-model",
+  ]) {
+    expect(containsCredentialShape(label)).toBe(false);
+    expect(isSafeScreeningDiagnosticLabel(label)).toBe(true);
+  }
+});
+
+test("PLANTED POSITIVE: the stratum domain keeps its own vocabulary on purpose", () => {
+  // The deliberate boundary. `safeStratumLabel` does not consult the shared
+  // scanner, because that scanner cannot tell a credential from a natural
+  // stratum once spaces are allowed. This is the load-bearing pair: the shared
+  // scanner *would* refuse both labels, and both must still publish.
+  const prompting = "Basic prompting";
+  const analysis = "Bearer analysis";
+  expect(containsCredentialShape(prompting)).toBe(true);
+  expect(containsCredentialShape(analysis)).toBe(true);
+
+  const corpus: readonly ScreeningCorpusExample[] = [
+    fixture(1, "legitimate", { stratum: prompting }),
+    fixture(2, "hard-reject", { stratum: analysis }),
+  ];
+  const observations: readonly ScreeningObservation[] = corpus.map((example) => ({
+    example_id: example.id,
+    evaluated_body_digest: example.body_digest as string,
+    decision: example.ground_truth === "hard-reject" ? "reject" : "pass",
+    coarse_category: example.policy_category,
+    category_score_bands: BANDS,
+    model_version: IDENTITY.model_version,
+    policy_version: IDENTITY.policy_version,
+    configuration_digest: IDENTITY.configuration_digest,
+    provider_status: "ok",
+    decision_path: "provider",
+    status_code: "SCREENED",
+    latency_ms: 4,
+    retry_count: 0,
+  }));
+  const report = aggregateScreeningRun(corpus, observations, IDENTITY, {
+    ...S4_THRESHOLDS,
+    minimum_legitimate_examples: 1,
+    minimum_hard_reject_examples: 1,
+  });
+  expect(report.by_stratum.map((metric) => metric.label).sort()).toEqual([prompting, analysis]);
 });
 
 test("a well-formed stratum still reaches the by_stratum breakdown", () => {

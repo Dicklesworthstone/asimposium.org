@@ -1,3 +1,4 @@
+import { containsCredentialShape } from "@asimposium/contracts/diagnostic-safety";
 import type {
   ExpectedScreeningOutcome,
   GroundTruth,
@@ -352,12 +353,32 @@ function isBareHighEntropyDiagnosticLabel(value: string): boolean {
   return value.split(/[._:\-\s/]+/).some(isHighEntropyDiagnosticSegment);
 }
 
+/**
+ * These labels are copied verbatim into the published run report, so the local
+ * vocabulary above is composed with the canonical scanner rather than trusted
+ * alone. The two disagree, and each covers families the other does not: this
+ * file knows `ya29.`, AWS, JWT, Slack, bare `v1.` and a generic entropy rule
+ * that `diagnostic-safety` deliberately refuses to carry, while the shared
+ * module knows the `rk`/`pk` siblings of `sk` and the *clipped* forms of a
+ * credential, which are no safer to print than a whole one. Composition keeps
+ * both; delegation would have traded one set of leaks for another.
+ *
+ * The shape test above is what makes the shared scanner safe to add here. Under
+ * `[A-Za-z0-9._:-]` its whitespace-bearing classes cannot fire at all —
+ * `Bearer …`, `Basic …` and PEM blocks all need a space, `#v1.` needs `#`, and
+ * the query-parameter class needs `?`/`&`/`=`. What remains reachable is exactly
+ * the prefixed-token families, which is the intent.
+ *
+ * That reasoning is domain-specific and does not carry to `safeStratumLabel`
+ * below, which admits spaces on purpose. See the boundary noted there.
+ */
 export function isSafeScreeningDiagnosticLabel(value: unknown): value is string {
   return (
     typeof value === "string" &&
     /^[A-Za-z0-9._:-]{1,128}$/.test(value) &&
     !isSecretShapedMetadata(value) &&
-    !isBareHighEntropyDiagnosticLabel(value)
+    !isBareHighEntropyDiagnosticLabel(value) &&
+    !containsCredentialShape(value)
   );
 }
 
@@ -378,6 +399,22 @@ export function isSha256Digest(value: unknown): value is string {
  * credential-shaped labels remain refused by the secret and entropy checks.
  * This field is operator-authored, so the guard closes accidental disclosure
  * paths rather than treating a malicious manifest as a supported threat model.
+ *
+ * Deliberate boundary: this predicate does **not** call `containsCredentialShape`,
+ * though `isSafeScreeningDiagnosticLabel` above does. Those spaces are the whole
+ * reason. The shared `Bearer|Basic\s+…{8,}` class cannot fire on a diagnostic
+ * label, but it fires readily here, and it cannot tell a credential from a
+ * stratum: `Basic prompting`, `Basic chemistry` and `Bearer analysis` are all
+ * refused by it. The local rule below wants sixteen characters after the
+ * keyword, which is what keeps those labels publishable.
+ *
+ * The cost is stated rather than hidden. An 8-to-15 character bearer value, or
+ * one carrying `+`, `/` or `~`, passes here and would not pass the shared
+ * scanner. Closing that would refuse ordinary strata, and a report that cannot
+ * name its own strata is an outage in the evidence path, not a safety win
+ * (`diagnostic-safety.ts`, "no generic-entropy heuristic"). Given an
+ * operator-authored field the leak is the cheaper side of that trade; revisit it
+ * only if `stratum` ever becomes attacker-authored.
  */
 function safeStratumLabel(value: unknown): value is string {
   return (
