@@ -973,6 +973,14 @@ S2_COST_LOCAL_PHASES_COMPLETE=0
 # Set only by the no-Wrangler source-provenance regression below. A real local run always
 # revalidates when it has reached the otherwise publishable local-complete / exit-78 boundary.
 S2_SOURCE_PROVENANCE_REVALIDATE_ON_EXIT=0
+# A deliberately incomplete post-release predicate is retained as diagnostic bytes, but it is
+# not a coherent terminal observation and must never be sealed into a manifest. This flag is
+# assigned only by the in-process causal plant after those partial bytes have actually been
+# published; caller input cannot suppress evidence publication on an ordinary run.
+S2_EVIDENCE_SEALING_REFUSED_FOR_PARTIAL_OBSERVATION=0
+S2_ON_EXIT_CLEANUP_ACTIVE=0
+S2_PARTIAL_PENDING_TERM_PATH=""
+S2_PARTIAL_PENDING_TERM_PID=""
 S2_LIFECYCLE_CHILD_PID=""
 S2_LIFECYCLE_CHILD_PGID=""
 S2_LIFECYCLE_CHILD_MARKER=""
@@ -1119,6 +1127,26 @@ export S2_WATCHDOG_PROGRAM
 
 emit() {
   printf '%s\n' "$1"
+}
+
+# Regression-only TERM hook used by the outer-EXIT race plant. The child advertises that it is
+# stopped immediately before pending publication; the outer process then enters EXIT cleanup and
+# TERM reaches this hook. Refusal is armed before the pending name becomes visible.
+# shellcheck disable=SC2329 # installed by name as a TERM trap in the planted child.
+partial_pending_term_trap() {
+  trap - TERM
+  S2_EVIDENCE_SEALING_REFUSED_FOR_PARTIAL_OBSERVATION=1
+  if [[ ! "${S2_PARTIAL_PENDING_TERM_PID}" =~ ^[0-9]+$ || \
+    -z "${S2_POST_RELEASE_SAFE_CONTROLLER_BASE:-}" || \
+    "${S2_PARTIAL_PENDING_TERM_PATH}" != \
+      "${S2_POST_RELEASE_SAFE_CONTROLLER_BASE}.status.post-release-ready-predicate.1.pending" || \
+    -e "${S2_PARTIAL_PENDING_TERM_PATH}" || -L "${S2_PARTIAL_PENDING_TERM_PATH}" ]]; then
+    exit 125
+  fi
+  (umask 077; set -o noclobber; \
+    printf "ready-predicate %s" "${S2_PARTIAL_PENDING_TERM_PID}" \
+      >"${S2_PARTIAL_PENDING_TERM_PATH}") 2>/dev/null || exit 125
+  exit 143
 }
 
 # shellcheck disable=SC2329 # invoked from EXIT cleanup, which ShellCheck does not follow.
@@ -1304,6 +1332,7 @@ S2_POST_RELEASE_READY_PREDICATE_SAMPLES=0
 S2_POST_RELEASE_CONTROLLER_PID=""
 S2_POST_RELEASE_CONTROLLER_MARKER=""
 S2_POST_RELEASE_CONTROLLER_STATE_DIR=""
+S2_POST_RELEASE_CONTROLLER_CHILD_STATE_DIR=""
 S2_POST_RELEASE_CONTROLLER_PORT=""
 S2_POST_RELEASE_CONTROLLER_STATUS=""
 S2_POST_RELEASE_CONTROLLER_BARRIER=""
@@ -1311,6 +1340,12 @@ S2_POST_RELEASE_CONTROLLER_CONTINUE=""
 S2_POST_RELEASE_CONTROLLER_PREDICATE=""
 S2_POST_RELEASE_CONTROLLER_RETURNED=""
 S2_POST_RELEASE_CONTROLLER_IDENTITY=""
+S2_POST_RELEASE_CONTROLLER_CLEANUP_STAGE=none
+S2_POST_RELEASE_CONTROLLER_CLEANUP_DETAIL=none
+# Fault-injection state is in-process and one-shot: the first exact KILL dispatch can be
+# acknowledged without delivery so the bounded post-KILL liveness refusal is reachable. A
+# second cleanup attempt always uses the real signal and reaps the retained direct child.
+S2_POST_RELEASE_CONTROLLER_KILL_ACK_PLANT_CONSUMED=0
 S2_PRE_RELEASE_RESAMPLE_ATTEMPTS=0
 S2_PRE_RELEASE_ACCEPTED_SAMPLES=0
 S2_PRE_RELEASE_REJECTED_SAMPLES=0
@@ -1678,7 +1713,10 @@ start_pinned_supervisor() {
   local plant_post_release_safe_barrier_abort="${S2_PLANT_POST_RELEASE_SAFE_BARRIER_ABORT:-0}"
   local plant_post_release_safe_barrier_external="${S2_PLANT_POST_RELEASE_SAFE_BARRIER_EXTERNAL:-0}"
   local plant_post_release_ready_predicate="${S2_PLANT_POST_RELEASE_READY_PREDICATE:-none}"
-  local post_release_ready_predicate post_release_ready_predicate_samples=0
+  local plant_post_release_partial_pending_barrier="${S2_PLANT_POST_RELEASE_PARTIAL_PENDING_BARRIER:-0}"
+  local plant_post_release_outer_term_before_pending="${S2_PLANT_POST_RELEASE_OUTER_TERM_BEFORE_PENDING:-0}"
+  local post_release_ready_predicate post_release_ready_predicate_pending
+  local post_release_ready_predicate_final post_release_ready_predicate_samples=0
   shift 5
   S2_START_FAILURE_STAGE="input-validation"
   S2_LAST_SUPERVISOR_PGID=""
@@ -1751,6 +1789,20 @@ start_pinned_supervisor() {
     none|malformed|partial) ;;
     *) return 1 ;;
   esac
+  case "${plant_post_release_partial_pending_barrier}" in
+    0|1) ;;
+    *) return 1 ;;
+  esac
+  case "${plant_post_release_outer_term_before_pending}" in
+    0|1) ;;
+    *) return 1 ;;
+  esac
+  [[ "${plant_post_release_partial_pending_barrier}" == 0 || \
+    "${plant_post_release_ready_predicate}" == partial ]] || return 1
+  [[ "${plant_post_release_outer_term_before_pending}" == 0 || \
+    "${plant_post_release_ready_predicate}" == partial ]] || return 1
+  [[ "${plant_post_release_partial_pending_barrier}" == 0 || \
+    "${plant_post_release_outer_term_before_pending}" == 0 ]] || return 1
   [[ "${plant_post_release_safe_barrier_abort}" == 0 || \
     "${plant_post_release_safe_barrier}" == 1 ]] || return 1
   [[ "${plant_post_release_safe_barrier_external}" == 0 || \
@@ -2367,27 +2419,55 @@ start_pinned_supervisor() {
           "${S2_POST_RELEASE_SAFE_BARRIER_OBSERVED}" == 1 && \
           "${watchdog_ready}" == true ]]; then
           post_release_ready_predicate_samples=$((post_release_ready_predicate_samples + 1))
+          post_release_ready_predicate_pending="${post_release_ready_predicate}.${post_release_ready_predicate_samples}.pending"
+          post_release_ready_predicate_final="${post_release_ready_predicate}.${post_release_ready_predicate_samples}"
           if [[ "${plant_post_release_ready_predicate}" == partial ]]; then
             [[ ${post_release_ready_predicate_samples} -eq 1 ]] || return 1
+            # Arm evidence refusal before the first pending byte can become visible. If TERM
+            # arrives immediately after publication, the child's EXIT path is already unable to
+            # seal an incomplete observation.
+            S2_EVIDENCE_SEALING_REFUSED_FOR_PARTIAL_OBSERVATION=1
+            if [[ "${plant_post_release_outer_term_before_pending}" == 1 ]]; then
+              S2_PARTIAL_PENDING_TERM_PATH="${post_release_ready_predicate_pending}"
+              S2_PARTIAL_PENDING_TERM_PID="${pid}"
+              trap partial_pending_term_trap TERM
+              (umask 077; set -o noclobber; \
+                printf "pre-pending %s\n" "${pid}" \
+                  >"${post_release_ready_predicate}.pre-pending-barrier") \
+                2>/dev/null || return 1
+              while :; do sleep 0.05; done
+            fi
             (umask 077; set -o noclobber; \
               printf "ready-predicate %s" "${pid}" \
-                >"${post_release_ready_predicate}.1.pending") \
+                >"${post_release_ready_predicate_pending}") \
               2>/dev/null || return 1
+            if [[ "${plant_post_release_partial_pending_barrier}" == 1 ]]; then
+              # The parent observes the complete pending record and sends TERM. Holding here
+              # makes that ordering deterministic instead of hoping TERM wins a scheduler race.
+              while :; do sleep 0.05; done
+            fi
             return 1
           fi
           if [[ "${plant_post_release_ready_predicate}" == malformed ]]; then
             [[ ${post_release_ready_predicate_samples} -eq 1 ]] || return 1
             (umask 077; set -o noclobber; \
               printf "ready-predicate %s malformed\\n" "${pid}" \
-                >"${post_release_ready_predicate}.1") \
+                >"${post_release_ready_predicate_pending}") \
               2>/dev/null || return 1
+            ln "${post_release_ready_predicate_pending}" \
+              "${post_release_ready_predicate_final}" 2>/dev/null || return 1
             return 1
           fi
           (umask 077; set -o noclobber; \
             printf "ready-predicate %s %s\\n" "${pid}" \
               "${post_release_ready_predicate_samples}" \
-              >"${post_release_ready_predicate}.${post_release_ready_predicate_samples}") \
+              >"${post_release_ready_predicate_pending}") \
             2>/dev/null || return 1
+          # The private record is closed before link(2) publishes its immutable final name. An
+          # observer therefore sees either no sequence number or all its bytes, never an
+          # O_EXCL-created but still-being-written final file.
+          ln "${post_release_ready_predicate_pending}" \
+            "${post_release_ready_predicate_final}" 2>/dev/null || return 1
         fi
         if startup_journal_last_phase "${watchdog_startup}" "${pid}" && \
           [[ ${S2_STARTUP_JOURNAL_POST_RELEASE_READY} -eq 1 ]] && \
@@ -3105,6 +3185,7 @@ clear_post_release_controller() {
   S2_POST_RELEASE_CONTROLLER_PID=""
   S2_POST_RELEASE_CONTROLLER_MARKER=""
   S2_POST_RELEASE_CONTROLLER_STATE_DIR=""
+  S2_POST_RELEASE_CONTROLLER_CHILD_STATE_DIR=""
   S2_POST_RELEASE_CONTROLLER_PORT=""
   S2_POST_RELEASE_CONTROLLER_STATUS=""
   S2_POST_RELEASE_CONTROLLER_BARRIER=""
@@ -3120,6 +3201,8 @@ post_release_controller_record_is_safe() {
     "${S2_POST_RELEASE_CONTROLLER_STATE_DIR}" == "${S2_STATE_DIR}" && \
     -d "${S2_POST_RELEASE_CONTROLLER_STATE_DIR}" && \
     ! -L "${S2_POST_RELEASE_CONTROLLER_STATE_DIR}" && \
+    "${S2_POST_RELEASE_CONTROLLER_CHILD_STATE_DIR}" == \
+      "${S2_EVIDENCE_ROOT}/${S2_POST_RELEASE_CONTROLLER_MARKER#s2-post-release-controller-}/main" && \
     "${S2_POST_RELEASE_CONTROLLER_PORT}" == "${S2_PORT}" && \
     "${S2_POST_RELEASE_CONTROLLER_IDENTITY}" == \
       "${S2_POST_RELEASE_CONTROLLER_STATUS}.controller-owner" ]]
@@ -3154,7 +3237,7 @@ post_release_controller_is_zombie() {
 }
 
 post_release_controller_cleanup_refusal() {
-  emit '{"tool":"bash+ps+lsof","package":"apps/wire","suite":"s2-krater-shell","status":"refused","code":"S2_POST_RELEASE_CONTROLLER_CLEANUP_UNPROVEN","reproduce":"scripts/e2e-s2-krater.sh"}'
+  emit "{\"tool\":\"bash+ps+lsof\",\"package\":\"apps/wire\",\"suite\":\"s2-krater-shell\",\"status\":\"refused\",\"code\":\"S2_POST_RELEASE_CONTROLLER_CLEANUP_UNPROVEN\",\"reason\":\"${S2_POST_RELEASE_CONTROLLER_CLEANUP_STAGE}\",\"detail\":\"${S2_POST_RELEASE_CONTROLLER_CLEANUP_DETAIL}\",\"reproduce\":\"scripts/e2e-s2-krater.sh\"}"
   return 1
 }
 
@@ -3167,15 +3250,19 @@ post_release_controller_cleanup_refusal() {
 cleanup_post_release_controller() {
   local pid="${S2_POST_RELEASE_CONTROLLER_PID}" tick
   [[ -n "${pid}" ]] || return 0
+  S2_POST_RELEASE_CONTROLLER_CLEANUP_DETAIL=none
+  S2_POST_RELEASE_CONTROLLER_CLEANUP_STAGE=record
   post_release_controller_record_is_safe || {
     post_release_controller_cleanup_refusal
     return 1
   }
   if kill -0 "${pid}" 2>/dev/null && ! post_release_controller_is_zombie "${pid}"; then
+    S2_POST_RELEASE_CONTROLLER_CLEANUP_STAGE=term-identity
     post_release_controller_command_is_exact "${pid}" "${S2_PARENT_PID}" || {
       post_release_controller_cleanup_refusal
       return 1
     }
+    S2_POST_RELEASE_CONTROLLER_CLEANUP_STAGE=term-signal
     kill -TERM "${pid}" 2>/dev/null || {
       post_release_controller_cleanup_refusal
       return 1
@@ -3185,32 +3272,87 @@ cleanup_post_release_controller() {
       sleep 0.05
     done
     if kill -0 "${pid}" 2>/dev/null && ! post_release_controller_is_zombie "${pid}"; then
+      S2_POST_RELEASE_CONTROLLER_CLEANUP_STAGE=kill-identity
       post_release_controller_command_is_exact "${pid}" "${S2_PARENT_PID}" || {
         post_release_controller_cleanup_refusal
         return 1
       }
-      kill -KILL "${pid}" 2>/dev/null || {
-        post_release_controller_cleanup_refusal
-        return 1
-      }
+      S2_POST_RELEASE_CONTROLLER_CLEANUP_STAGE=kill-signal
+      if [[ "${S2_PLANT_POST_RELEASE_CONTROLLER_KILL_ACK_LIVE:-0}" == 1 && \
+        ${S2_POST_RELEASE_CONTROLLER_KILL_ACK_PLANT_CONSUMED} -eq 0 ]]; then
+        # One-shot fault injection: model an acknowledged KILL dispatch whose exact target is
+        # still observable as the same live, non-zombie direct child. The second cleanup attempt
+        # cannot take this branch and therefore performs the real KILL/reap.
+        S2_POST_RELEASE_CONTROLLER_KILL_ACK_PLANT_CONSUMED=1
+      else
+        kill -KILL "${pid}" 2>/dev/null || {
+          post_release_controller_cleanup_refusal
+          return 1
+        }
+      fi
       for ((tick = 0; tick < S2_TERMINATE_WAIT_TICKS; tick += 1)); do
         kill -0 "${pid}" 2>/dev/null || break
         sleep 0.05
       done
+      if kill -0 "${pid}" 2>/dev/null && ! post_release_controller_is_zombie "${pid}"; then
+        S2_POST_RELEASE_CONTROLLER_CLEANUP_STAGE=post-kill-live
+        S2_POST_RELEASE_CONTROLLER_CLEANUP_DETAIL=exact-live-non-zombie
+        post_release_controller_cleanup_refusal
+        return 1
+      fi
     fi
   fi
+  S2_POST_RELEASE_CONTROLLER_CLEANUP_STAGE=reap
   wait "${pid}" 2>/dev/null || :
+  S2_POST_RELEASE_CONTROLLER_CLEANUP_STAGE=post-reap-absence
   ! kill -0 "${pid}" 2>/dev/null || {
     post_release_controller_cleanup_refusal
     return 1
   }
-  assert_no_run_survivors \
-    "${S2_POST_RELEASE_CONTROLLER_STATE_DIR}" \
-    "${S2_POST_RELEASE_CONTROLLER_PORT}" \
-    "${S2_POST_RELEASE_CONTROLLER_MARKER}" || {
+  # The controller has a distinct child run root. Scanning the parent state here
+  # races the still-live parent harness and mistakes its own retained sidecars
+  # for a controller survivor. Once the direct child is reaped, scan the child
+  # root that its nested supervisor/watchdog could actually retain instead.
+  if [[ -e "${S2_POST_RELEASE_CONTROLLER_IDENTITY}" || \
+    -L "${S2_POST_RELEASE_CONTROLLER_IDENTITY}" ]]; then
+    S2_POST_RELEASE_CONTROLLER_CLEANUP_STAGE=child-state-proof
+    [[ -f "${S2_POST_RELEASE_CONTROLLER_IDENTITY}" && \
+      ! -L "${S2_POST_RELEASE_CONTROLLER_IDENTITY}" && \
+      -d "${S2_POST_RELEASE_CONTROLLER_CHILD_STATE_DIR}" && \
+      ! -L "${S2_POST_RELEASE_CONTROLLER_CHILD_STATE_DIR}" ]] || {
+      S2_POST_RELEASE_CONTROLLER_CLEANUP_DETAIL=child-state
       post_release_controller_cleanup_refusal
       return 1
     }
+    S2_POST_RELEASE_CONTROLLER_CLEANUP_STAGE=survivor-scan
+    assert_no_run_survivors \
+      "${S2_POST_RELEASE_CONTROLLER_CHILD_STATE_DIR}" \
+      "${S2_POST_RELEASE_CONTROLLER_PORT}" \
+      "${S2_POST_RELEASE_CONTROLLER_MARKER}" || {
+      S2_POST_RELEASE_CONTROLLER_CLEANUP_DETAIL="${S2_SURVIVOR_ASSERTION_FAILURE:-unknown}"
+      post_release_controller_cleanup_refusal
+      return 1
+    }
+  fi
+  if [[ ${S2_ON_EXIT_CLEANUP_ACTIVE} -eq 1 && \
+    -f "${S2_POST_RELEASE_CONTROLLER_PREDICATE}.1.pending" && \
+    ! -L "${S2_POST_RELEASE_CONTROLLER_PREDICATE}.1.pending" && \
+    ! -e "${S2_POST_RELEASE_CONTROLLER_PREDICATE}.1" && \
+    ! -L "${S2_POST_RELEASE_CONTROLLER_PREDICATE}.1" ]]; then
+    # Pending may become visible after on_exit's first observation but while TERM cleanup is
+    # reaping the child. Carry that fact across clear_post_release_controller so publication
+    # cannot lose the observation by clearing its only pathname.
+    S2_EVIDENCE_SEALING_REFUSED_FOR_PARTIAL_OBSERVATION=1
+    S2_POST_RELEASE_CONTROLLER_CLEANUP_STAGE=partial-observation-propagation
+    if [[ -e "${S2_POST_RELEASE_CONTROLLER_CHILD_STATE_DIR%/main}/${S2_COST_MANIFEST_RELATIVE_PATH}" || \
+      -L "${S2_POST_RELEASE_CONTROLLER_CHILD_STATE_DIR%/main}/${S2_COST_MANIFEST_RELATIVE_PATH}" ]]; then
+      S2_POST_RELEASE_CONTROLLER_CLEANUP_DETAIL=child-evidence-sealed
+      post_release_controller_cleanup_refusal
+      return 1
+    fi
+    emit '{"tool":"bash+ps+lsof","package":"apps/wire","suite":"s2-krater-shell","status":"refused","code":"S2_POST_RELEASE_PARTIAL_OBSERVATION_PROPAGATED_DURING_EXIT_CLEANUP","pending_visible":true,"final_visible":false,"child_manifest_sealed":false,"reproduce":"S2_SHELL_REGRESSION_TEST=post-release-safe-checkpoint S2_PLANT_POST_RELEASE_OUTER_TERM_BEFORE_PENDING=1 scripts/e2e-s2-krater.sh"}'
+  fi
+  S2_POST_RELEASE_CONTROLLER_CLEANUP_STAGE=complete
   clear_post_release_controller
 }
 
@@ -3231,6 +3373,7 @@ start_post_release_controller() {
   controller_run_id="s2u-$(random_hex 24)" || return 1
   S2_POST_RELEASE_CONTROLLER_MARKER="s2-post-release-controller-${controller_run_id}"
   S2_POST_RELEASE_CONTROLLER_STATE_DIR="${S2_STATE_DIR}"
+  S2_POST_RELEASE_CONTROLLER_CHILD_STATE_DIR="${S2_EVIDENCE_ROOT}/${controller_run_id}/main"
   S2_POST_RELEASE_CONTROLLER_PORT="${S2_PORT}"
   S2_POST_RELEASE_CONTROLLER_STATUS="${controller_base}.status"
   S2_POST_RELEASE_CONTROLLER_BARRIER="${S2_POST_RELEASE_CONTROLLER_STATUS}.post-release-safe-barrier"
@@ -3245,6 +3388,8 @@ start_post_release_controller() {
     "${S2_POST_RELEASE_CONTROLLER_CONTINUE}" "${S2_POST_RELEASE_CONTROLLER_PREDICATE}.1" \
     "${S2_POST_RELEASE_CONTROLLER_PREDICATE}.2" \
     "${S2_POST_RELEASE_CONTROLLER_PREDICATE}.1.pending" \
+    "${S2_POST_RELEASE_CONTROLLER_PREDICATE}.2.pending" \
+    "${S2_POST_RELEASE_CONTROLLER_PREDICATE}.pre-pending-barrier" \
     "${S2_POST_RELEASE_CONTROLLER_RETURNED}" "${S2_POST_RELEASE_CONTROLLER_IDENTITY}" \
     "${controller_stdout}" "${controller_stderr}"; do
     [[ ! -e "${controller_path}" && ! -L "${controller_path}" ]] || {
@@ -4116,7 +4261,19 @@ on_exit() {
   if [[ "${S2_PLANT_ON_EXIT_SECOND_SIGNAL:-0}" == "1" ]]; then
     kill -TERM "$$"
   fi
+  # A controller child arms the flag before publishing. The parent additionally derives the
+  # same refusal from the exact pending-without-final state, closing the interval between child
+  # publication and the parent's ordinary observation/assignment if the parent receives TERM.
+  if [[ ${S2_EVIDENCE_SEALING_REFUSED_FOR_PARTIAL_OBSERVATION} -eq 0 && \
+    -n "${S2_POST_RELEASE_CONTROLLER_PREDICATE}" && \
+    -f "${S2_POST_RELEASE_CONTROLLER_PREDICATE}.1.pending" && \
+    ! -L "${S2_POST_RELEASE_CONTROLLER_PREDICATE}.1.pending" && \
+    ! -e "${S2_POST_RELEASE_CONTROLLER_PREDICATE}.1" && \
+    ! -L "${S2_POST_RELEASE_CONTROLLER_PREDICATE}.1" ]]; then
+    S2_EVIDENCE_SEALING_REFUSED_FOR_PARTIAL_OBSERVATION=1
+  fi
   final_status="${original_status}"
+  S2_ON_EXIT_CLEANUP_ACTIVE=1
   if ! cleanup_workers; then
     final_status=125
     cleanup_proven=false
@@ -4144,6 +4301,10 @@ on_exit() {
     # The prior cleanup diagnostic remains the typed cause; this record makes the non-publication
     # boundary explicit without claiming a final artifact digest.
     emit '{"tool":"bash","package":"apps/wire","suite":"s2-krater-evidence","status":"refused","code":"S2_EVIDENCE_PUBLICATION_SKIPPED_UNPROVEN_CLEANUP","reproduce":"scripts/e2e-s2-krater.sh"}'
+  elif [[ ${S2_EVIDENCE_SEALING_REFUSED_FOR_PARTIAL_OBSERVATION} -eq 1 ]]; then
+    # The pending predicate is useful retained diagnosis, but it never acquired the immutable
+    # final name consumed by the observer. Do not turn incomplete bytes into a sealed manifest.
+    emit '{"tool":"bash","package":"apps/wire","suite":"s2-krater-evidence","status":"refused","code":"S2_EVIDENCE_PUBLICATION_SKIPPED_PARTIAL_OBSERVATION","reproduce":"scripts/e2e-s2-krater.sh"}'
   elif ! write_evidence_receipt "${final_status}" 0; then
     final_status=125
   fi
@@ -4154,6 +4315,14 @@ trap on_exit EXIT
 trap 'exit 130' INT
 trap 'exit 143' TERM
 trap 'exit 129' HUP
+if [[ "${S2_SHELL_REGRESSION_TEST:-}" == post-release-safe-checkpoint-child && \
+  "${S2_PLANT_POST_RELEASE_CONTROLLER_IGNORE_FIRST_TERM:-0}" == 1 ]]; then
+  # Dedicated cleanup fault injection. The nested controller absorbs exactly the first TERM, so
+  # its parent must enter the KILL branch under test. A later cleanup TERM exits normally and
+  # gives the child's own exact-supervisor cleanup a chance to finish.
+  S2_POST_RELEASE_CONTROLLER_TERM_PLANT_COUNT=0
+  trap 'if [[ ${S2_POST_RELEASE_CONTROLLER_TERM_PLANT_COUNT} -eq 0 ]]; then S2_POST_RELEASE_CONTROLLER_TERM_PLANT_COUNT=1; else exit 143; fi' TERM
+fi
 
 start_worker() {
   # Defaults keep the primary run's call sites unchanged; the upgrade stages pass their own
@@ -5486,13 +5655,78 @@ run_s2_shell_regression_test() {
     return 0
   fi
 
+  if [[ "${mode}" == "post-release-controller-kill-refusal" ]]; then
+    local kill_refusal_controller_pid first_cleanup_status
+    local exact_live_non_zombie_after_kill=false second_cleanup_reaped=false
+    [[ "${S2_PLANT_POST_RELEASE_CONTROLLER_IGNORE_FIRST_TERM:-0}" == 1 && \
+      "${S2_PLANT_POST_RELEASE_CONTROLLER_KILL_ACK_LIVE:-0}" == 1 ]] || return 1
+    start_post_release_controller none || return 1
+    kill_refusal_controller_pid="${S2_POST_RELEASE_CONTROLLER_PID}"
+    deadline="$(s2_deadline_at "${S2_READY_DEADLINE_SECONDS}")"
+    while (( SECONDS < deadline )); do
+      if post_release_controller_identity_matches && \
+        post_release_controller_command_is_exact \
+          "${kill_refusal_controller_pid}" "${S2_PARENT_PID}"; then
+        break
+      fi
+      sleep 0.05
+    done
+    if ! post_release_controller_identity_matches || \
+      ! post_release_controller_command_is_exact \
+        "${kill_refusal_controller_pid}" "${S2_PARENT_PID}"; then
+      post_release_controller_refuse
+      return $?
+    fi
+    if cleanup_post_release_controller; then
+      return 1
+    else
+      first_cleanup_status=$?
+    fi
+    if [[ ${first_cleanup_status} -eq 1 && \
+      "${S2_POST_RELEASE_CONTROLLER_CLEANUP_STAGE}" == post-kill-live && \
+      "${S2_POST_RELEASE_CONTROLLER_CLEANUP_DETAIL}" == exact-live-non-zombie && \
+      ${S2_POST_RELEASE_CONTROLLER_KILL_ACK_PLANT_CONSUMED} -eq 1 ]] && \
+      post_release_controller_command_is_exact \
+        "${kill_refusal_controller_pid}" "${S2_PARENT_PID}" && \
+      ! post_release_controller_is_zombie "${kill_refusal_controller_pid}"; then
+      exact_live_non_zombie_after_kill=true
+    fi
+    if [[ "${exact_live_non_zombie_after_kill}" != true ]]; then
+      cleanup_post_release_controller || :
+      return 1
+    fi
+    cleanup_post_release_controller || return 1
+    [[ "${S2_POST_RELEASE_CONTROLLER_CLEANUP_STAGE}" == complete && \
+      -z "${S2_POST_RELEASE_CONTROLLER_PID}" ]] || return 1
+    second_cleanup_reaped=true
+    emit "{\"tool\":\"bash+ps+lsof\",\"package\":\"apps/wire\",\"suite\":\"s2-krater-shell\",\"status\":\"pass\",\"terminal\":true,\"scenario\":\"live-controller-after-acknowledged-kill-refuses-before-wait-and-next-cleanup-reaps\",\"first_cleanup_status\":$(json_decimal_or_null "${first_cleanup_status}"),\"post_kill_live_non_zombie\":$(json_bool "${exact_live_non_zombie_after_kill}"),\"cleanup_refused_before_wait\":true,\"second_cleanup_reaped\":$(json_bool "${second_cleanup_reaped}"),\"no_controller_survivor\":true,\"reproduce\":\"S2_SHELL_REGRESSION_TEST=post-release-controller-kill-refusal S2_PLANT_POST_RELEASE_CONTROLLER_IGNORE_FIRST_TERM=1 S2_PLANT_POST_RELEASE_CONTROLLER_KILL_ACK_LIVE=1 scripts/e2e-s2-krater.sh\"}"
+    return 0
+  fi
+
   if [[ "${mode}" == "post-release-safe-checkpoint" ]]; then
     local safe_status_file safe_pid safe_pgid safe_marker
     local controller_status controller_barrier controller_continue controller_predicate controller_returned controller_pid
     local barrier_line barrier_phase barrier_supervisor_pid barrier_extra controller_status_code
     local safe_persist safe_port partial_bytes="" parser_status cleanup_status
-    local parser_supervisor_pid partial_supervisor_pid
-    start_post_release_controller none || return 1
+    local parser_supervisor_pid partial_supervisor_pid partial_child_run_dir
+    local plant_partial_refusal="${S2_PLANT_POST_RELEASE_PARTIAL_REFUSAL:-0}"
+    local plant_partial_pending_barrier="${S2_PLANT_POST_RELEASE_PARTIAL_PENDING_BARRIER:-0}"
+    local plant_outer_term_before_pending="${S2_PLANT_POST_RELEASE_OUTER_TERM_BEFORE_PENDING:-0}"
+    local post_release_safe_barrier_observed=false controller_identity_attested=false
+    local controller_visible_ready_predicate_samples=0
+    local start_returned_before_controller_release=true
+    local parser_early_return_controller_reaped=false
+    local partial_predicate_final_visible=true partial_predicate_observer_samples=-1
+    local partial_observation_controller_reaped=false partial_controller_evidence_sealed=true
+    local partial_pending_term_barrier_observed=false
+    local no_exact_group_survivor=false
+    [[ "${plant_partial_refusal}" == 0 || "${plant_partial_refusal}" == 1 ]] || return 1
+    [[ "${plant_partial_pending_barrier}" == "${plant_partial_refusal}" ]] || return 1
+    [[ "${plant_outer_term_before_pending}" == 0 || \
+      ( "${plant_outer_term_before_pending}" == 1 && \
+        "${plant_partial_refusal}" == 0 && "${plant_partial_pending_barrier}" == 0 ) ]] || return 1
+    if [[ "${plant_partial_refusal}" == 0 && "${plant_outer_term_before_pending}" == 0 ]]; then
+      start_post_release_controller none || return 1
     controller_status="${S2_POST_RELEASE_CONTROLLER_STATUS}"
     controller_barrier="${S2_POST_RELEASE_CONTROLLER_BARRIER}"
     controller_continue="${S2_POST_RELEASE_CONTROLLER_CONTINUE}"
@@ -5517,10 +5751,18 @@ run_s2_shell_regression_test() {
       post_release_controller_command_is_exact "${controller_pid}" "${S2_PARENT_PID}" || break
       sleep 0.05
     done
-    [[ "${barrier_supervisor_pid}" =~ ^[0-9]+$ && \
-      ! -e "${controller_returned}" && ! -L "${controller_returned}" ]] || \
+    if ! [[ "${barrier_supervisor_pid}" =~ ^[0-9]+$ && \
+      ! -e "${controller_returned}" && ! -L "${controller_returned}" ]]; then
       post_release_controller_refuse
-    post_release_controller_identity_matches || post_release_controller_refuse
+      return $?
+    fi
+    post_release_safe_barrier_observed=true
+    start_returned_before_controller_release=false
+    if ! post_release_controller_identity_matches; then
+      post_release_controller_refuse
+      return $?
+    fi
+    controller_identity_attested=true
     # The child has consumed release but remains before final traps/checkpoint. It must execute
     # the ready predicate twice without publishing the start-returned marker. This is a causal
     # barrier: deleting only POST_RELEASE_READY makes the first healthy predicate return, so the
@@ -5528,27 +5770,39 @@ run_s2_shell_regression_test() {
     deadline="$(s2_deadline_at "${S2_READY_DEADLINE_SECONDS}")"
     while (( SECONDS < deadline )); do
       if [[ -f "${controller_predicate}.1" && ! -L "${controller_predicate}.1" ]]; then
-        post_release_ready_predicate_samples "${controller_predicate}" "${barrier_supervisor_pid}" || return 1
+        if ! post_release_ready_predicate_samples \
+          "${controller_predicate}" "${barrier_supervisor_pid}"; then
+          post_release_controller_refuse
+          return $?
+        fi
         [[ ${S2_POST_RELEASE_READY_PREDICATE_SAMPLES} -ge 2 ]] && break
       fi
       [[ ! -e "${controller_returned}" && ! -L "${controller_returned}" ]] || break
       post_release_controller_command_is_exact "${controller_pid}" "${S2_PARENT_PID}" || break
       sleep 0.05
     done
-    [[ ${S2_POST_RELEASE_READY_PREDICATE_SAMPLES} -ge 2 && \
-      ! -e "${controller_returned}" && ! -L "${controller_returned}" ]] || {
+    if ! [[ ${S2_POST_RELEASE_READY_PREDICATE_SAMPLES} -ge 2 && \
+      ! -e "${controller_returned}" && ! -L "${controller_returned}" ]]; then
       post_release_controller_refuse
-    }
+      return $?
+    fi
+    controller_visible_ready_predicate_samples="${S2_POST_RELEASE_READY_PREDICATE_SAMPLES}"
     (umask 077; set -o noclobber; \
       printf 'continue %s\n' "${barrier_supervisor_pid}" >"${controller_continue}") \
-      2>/dev/null || post_release_controller_refuse
+      2>/dev/null || {
+        post_release_controller_refuse
+        return $?
+      }
     if wait "${controller_pid}" 2>/dev/null; then
       controller_status_code=0
     else
       controller_status_code=$?
     fi
-    [[ ${controller_status_code} -eq 0 && -f "${controller_returned}" && \
-      ! -L "${controller_returned}" ]] || post_release_controller_refuse
+    if ! [[ ${controller_status_code} -eq 0 && -f "${controller_returned}" && \
+      ! -L "${controller_returned}" ]]; then
+      post_release_controller_refuse
+      return $?
+    fi
     cleanup_post_release_controller || return 1
     read -r barrier_phase safe_pid safe_pgid safe_marker safe_persist safe_port barrier_extra \
       <"${controller_returned}" || return 1
@@ -5575,29 +5829,40 @@ run_s2_shell_regression_test() {
       post_release_controller_command_is_exact "${controller_pid}" "${S2_PARENT_PID}" || break
       sleep 0.05
     done
-    [[ -f "${controller_barrier}" && ! -L "${controller_barrier}" ]] || \
+    if ! [[ -f "${controller_barrier}" && ! -L "${controller_barrier}" ]]; then
       post_release_controller_refuse
+      return $?
+    fi
     {
       IFS= read -r barrier_line || barrier_line=""
       if IFS= read -r barrier_extra; then barrier_line=""; fi
     } <"${controller_barrier}"
     read -r barrier_phase parser_supervisor_pid barrier_extra <<<"${barrier_line}"
-    [[ "${barrier_phase}" == before-final-traps && \
-      "${parser_supervisor_pid}" =~ ^[0-9]+$ && -z "${barrier_extra:-}" ]] || \
+    if ! [[ "${barrier_phase}" == before-final-traps && \
+      "${parser_supervisor_pid}" =~ ^[0-9]+$ && -z "${barrier_extra:-}" ]]; then
       post_release_controller_refuse
+      return $?
+    fi
     if post_release_ready_predicate_samples "${controller_predicate}" "${parser_supervisor_pid}"; then
       parser_status=0
     else
       parser_status=$?
     fi
-    [[ ${parser_status} -eq 1 && ! -e "${controller_returned}" && \
-      ! -L "${controller_returned}" ]] || post_release_controller_refuse
+    if ! [[ ${parser_status} -eq 1 && ! -e "${controller_returned}" && \
+      ! -L "${controller_returned}" ]]; then
+      post_release_controller_refuse
+      return $?
+    fi
     if post_release_controller_refuse; then
       return 1
     else
       cleanup_status=$?
     fi
-    [[ ${cleanup_status} -eq 1 ]] || return 1
+    [[ ${cleanup_status} -eq 1 && \
+      "${S2_POST_RELEASE_CONTROLLER_CLEANUP_STAGE}" == complete && \
+      -z "${S2_POST_RELEASE_CONTROLLER_PID}" ]] || return 1
+    parser_early_return_controller_reaped=true
+    fi
 
     # A partial record is retained only under a private pending name.  Its exact final `.1` name
     # never appears, so the same parser reports zero samples and cannot release the frozen child.
@@ -5606,6 +5871,41 @@ run_s2_shell_regression_test() {
     controller_predicate="${S2_POST_RELEASE_CONTROLLER_PREDICATE}"
     controller_returned="${S2_POST_RELEASE_CONTROLLER_RETURNED}"
     controller_pid="${S2_POST_RELEASE_CONTROLLER_PID}"
+    partial_child_run_dir="${S2_POST_RELEASE_CONTROLLER_CHILD_STATE_DIR%/main}"
+    if [[ "${plant_outer_term_before_pending}" == 1 ]]; then
+      local pre_pending_barrier pre_pending_line pre_pending_phase pre_pending_pid pre_pending_extra
+      pre_pending_barrier="${controller_predicate}.pre-pending-barrier"
+      pre_pending_pid=""
+      deadline="$(s2_deadline_at "${S2_READY_DEADLINE_SECONDS}")"
+      while (( SECONDS < deadline )); do
+        if [[ -f "${pre_pending_barrier}" && ! -L "${pre_pending_barrier}" ]]; then
+          {
+            IFS= read -r pre_pending_line || pre_pending_line=""
+            if IFS= read -r pre_pending_extra; then pre_pending_line=""; fi
+          } <"${pre_pending_barrier}"
+          read -r pre_pending_phase pre_pending_pid pre_pending_extra <<<"${pre_pending_line}"
+          if [[ "${pre_pending_phase}" == pre-pending && \
+            "${pre_pending_pid}" =~ ^[0-9]+$ && -z "${pre_pending_extra:-}" ]]; then
+            break
+          fi
+          pre_pending_pid=""
+        fi
+        post_release_controller_command_is_exact "${controller_pid}" "${S2_PARENT_PID}" || break
+        sleep 0.05
+      done
+      if ! [[ "${pre_pending_pid}" =~ ^[0-9]+$ && \
+        ! -e "${controller_predicate}.1.pending" && \
+        ! -L "${controller_predicate}.1.pending" && \
+        ! -e "${controller_predicate}.1" && ! -L "${controller_predicate}.1" ]] || \
+        ! post_release_controller_command_is_exact "${controller_pid}" "${S2_PARENT_PID}"; then
+        post_release_controller_refuse
+        return $?
+      fi
+      # The pre-pending barrier is visible while pending is provably absent. Enter the real outer
+      # TERM trap now; EXIT cleanup's TERM causes the held child to publish pending mid-cleanup.
+      kill -TERM "$$"
+      return 1
+    fi
     deadline="$(s2_deadline_at "${S2_READY_DEADLINE_SECONDS}")"
     while (( SECONDS < deadline )); do
       if [[ -f "${controller_predicate}.1.pending" && ! -L "${controller_predicate}.1.pending" ]]; then
@@ -5624,15 +5924,58 @@ run_s2_shell_regression_test() {
       post_release_controller_command_is_exact "${controller_pid}" "${S2_PARENT_PID}" || break
       sleep 0.05
     done
-    [[ "${partial_supervisor_pid}" =~ ^[0-9]+$ ]] || post_release_controller_refuse
-    post_release_ready_predicate_samples "${controller_predicate}" "${partial_supervisor_pid}" || \
+    if ! [[ "${partial_supervisor_pid}" =~ ^[0-9]+$ ]]; then
       post_release_controller_refuse
-    [[ "${partial_bytes}" == "ready-predicate ${partial_supervisor_pid}" && \
+      return $?
+    fi
+    if ! post_release_ready_predicate_samples \
+      "${controller_predicate}" "${partial_supervisor_pid}"; then
+      post_release_controller_refuse
+      return $?
+    fi
+    if ! [[ "${partial_bytes}" == "ready-predicate ${partial_supervisor_pid}" && \
       ${S2_POST_RELEASE_READY_PREDICATE_SAMPLES} -eq 0 && \
       ! -e "${controller_predicate}.1" && ! -L "${controller_predicate}.1" && \
-      ! -e "${controller_returned}" && ! -L "${controller_returned}" ]] || \
+      ! -e "${controller_returned}" && ! -L "${controller_returned}" ]]; then
       post_release_controller_refuse
+      return $?
+    fi
+    partial_predicate_final_visible=false
+    partial_predicate_observer_samples="${S2_POST_RELEASE_READY_PREDICATE_SAMPLES}"
+    if [[ "${plant_partial_refusal}" == 1 ]]; then
+      if [[ "${plant_partial_pending_barrier}" == 1 ]]; then
+        post_release_controller_command_is_exact \
+          "${controller_pid}" "${S2_PARENT_PID}" || {
+            post_release_controller_refuse
+            return $?
+          }
+        partial_pending_term_barrier_observed=true
+      fi
+      # Arm the outer run before sending TERM to the held child. Its EXIT handler also derives
+      # this state directly from pending-without-final, so an external TERM in this interval
+      # cannot make either process seal a manifest.
+      S2_EVIDENCE_SEALING_REFUSED_FOR_PARTIAL_OBSERVATION=1
+      post_release_controller_refuse
+      cleanup_status=$?
+      [[ ${cleanup_status} -eq 1 && \
+        "${S2_POST_RELEASE_CONTROLLER_CLEANUP_STAGE}" == complete && \
+        -z "${S2_POST_RELEASE_CONTROLLER_PID}" && \
+        ! -e "${partial_child_run_dir}/${S2_COST_MANIFEST_RELATIVE_PATH}" && \
+        ! -L "${partial_child_run_dir}/${S2_COST_MANIFEST_RELATIVE_PATH}" ]] || return 125
+      partial_observation_controller_reaped=true
+      partial_controller_evidence_sealed=false
+      emit "{\"tool\":\"bash+ps+lsof\",\"package\":\"apps/wire\",\"suite\":\"s2-krater-shell\",\"status\":\"refused\",\"terminal\":true,\"scenario\":\"partial-post-release-predicate-is-never-a-ready-observation\",\"code\":\"S2_POST_RELEASE_PARTIAL_OBSERVATION_REFUSED\",\"partial_predicate_final_visible\":$(json_bool "${partial_predicate_final_visible}"),\"partial_predicate_observer_samples\":$(json_decimal_or_null "${partial_predicate_observer_samples}"),\"partial_pending_term_barrier_observed\":$(json_bool "${partial_pending_term_barrier_observed}"),\"partial_observation_controller_reaped\":$(json_bool "${partial_observation_controller_reaped}"),\"partial_controller_evidence_sealed\":$(json_bool "${partial_controller_evidence_sealed}"),\"evidence_sealing_refused\":true,\"reproduce\":\"S2_SHELL_REGRESSION_TEST=post-release-safe-checkpoint S2_PLANT_POST_RELEASE_PARTIAL_REFUSAL=1 S2_PLANT_POST_RELEASE_PARTIAL_PENDING_BARRIER=1 scripts/e2e-s2-krater.sh\"}"
+      return 1
+    fi
     cleanup_post_release_controller || return 1
+    [[ "${S2_POST_RELEASE_CONTROLLER_CLEANUP_STAGE}" == complete && \
+      -z "${S2_POST_RELEASE_CONTROLLER_PID}" ]] || return 1
+    partial_observation_controller_reaped=true
+    if [[ ! -e "${partial_child_run_dir}/${S2_COST_MANIFEST_RELATIVE_PATH}" && \
+      ! -L "${partial_child_run_dir}/${S2_COST_MANIFEST_RELATIVE_PATH}" ]]; then
+      partial_controller_evidence_sealed=false
+    fi
+    [[ "${partial_controller_evidence_sealed}" == false ]] || return 1
 
     safe_status_file="${S2_STATE_DIR}/post-release-safe-checkpoint-abort-$(random_hex 8).status"
     if S2_PLANT_POST_RELEASE_SAFE_BARRIER=1 \
@@ -5648,8 +5991,9 @@ run_s2_shell_regression_test() {
       "${S2_STARTUP_JOURNAL_POST_RELEASE_READY}" == 0 ]] || return 1
     kill -0 -- "-${S2_LAST_SUPERVISOR_PGID}" 2>/dev/null && return 1
     assert_no_run_survivors "${S2_STATE_DIR}" "${S2_PORT}" "${S2_LAST_SUPERVISOR_MARKER}" || return 1
+    no_exact_group_survivor=true
     emit '{"tool":"bash+ps","package":"apps/wire","suite":"s2-krater-shell","status":"refused","code":"S2_POST_RELEASE_SAFE_CHECKPOINT_TERMINATED","start_failure_stage":"post-release-safe-checkpoint","no_exact_group_survivor":true,"reproduce":"S2_SHELL_REGRESSION_TEST=post-release-safe-checkpoint scripts/e2e-s2-krater.sh"}'
-    emit '{"tool":"bash+ps+lsof","package":"apps/wire","suite":"s2-krater-shell","status":"pass","scenario":"release-consumption-is-not-ready-until-final-traps-and-canonical-post-release-checkpoint","post_release_safe_barrier_observed":true,"controller_identity_attested":true,"controller_visible_ready_predicate_samples":2,"start_returned_before_controller_release":false,"parser_early_return_controller_reaped":true,"partial_predicate_final_visible":false,"partial_predicate_observer_samples":0,"no_exact_group_survivor":true,"reproduce":"S2_SHELL_REGRESSION_TEST=post-release-safe-checkpoint scripts/e2e-s2-krater.sh"}'
+    emit "{\"tool\":\"bash+ps+lsof\",\"package\":\"apps/wire\",\"suite\":\"s2-krater-shell\",\"status\":\"pass\",\"terminal\":true,\"scenario\":\"release-consumption-is-not-ready-until-final-traps-and-canonical-post-release-checkpoint\",\"post_release_safe_barrier_observed\":$(json_bool "${post_release_safe_barrier_observed}"),\"controller_identity_attested\":$(json_bool "${controller_identity_attested}"),\"controller_visible_ready_predicate_samples\":$(json_decimal_or_null "${controller_visible_ready_predicate_samples}"),\"start_returned_before_controller_release\":$(json_bool "${start_returned_before_controller_release}"),\"parser_early_return_controller_reaped\":$(json_bool "${parser_early_return_controller_reaped}"),\"partial_predicate_final_visible\":$(json_bool "${partial_predicate_final_visible}"),\"partial_predicate_observer_samples\":$(json_decimal_or_null "${partial_predicate_observer_samples}"),\"partial_observation_controller_reaped\":$(json_bool "${partial_observation_controller_reaped}"),\"partial_controller_evidence_sealed\":$(json_bool "${partial_controller_evidence_sealed}"),\"no_exact_group_survivor\":$(json_bool "${no_exact_group_survivor}"),\"reproduce\":\"S2_SHELL_REGRESSION_TEST=post-release-safe-checkpoint scripts/e2e-s2-krater.sh\"}"
     return 0
   fi
 

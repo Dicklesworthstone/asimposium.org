@@ -527,6 +527,22 @@ function liveS2LifecycleProcesses(runId: string): string[] {
   return parseS2LifecycleProcessTable(runId, captureS2LifecycleProcessTable());
 }
 
+function retainedPostReleaseControllerRunIds(runId: string): string[] {
+  const main = resolve(REPOSITORY_ROOT, "e2e/artifacts/s2-krater", runId, "main");
+  return readdirSync(main)
+    .filter((name) => name.endsWith(".status.controller-owner"))
+    .map((name) => {
+      const owner = readFileSync(resolve(main, name), "utf8");
+      const match =
+        /^controller-owner [0-9]+ [0-9]+ s2-post-release-controller-(s2u-[a-f0-9]{48})\n$/u.exec(
+          owner,
+        );
+      const childRunId = match?.[1];
+      if (childRunId === undefined) throw new Error("malformed retained controller owner record");
+      return childRunId;
+    });
+}
+
 function liveProcessesContainingMarker(marker: string): string[] {
   const scan = runCaptured("/bin/ps", ["-axo", "pid=,pgid=,ppid=,stat=,command="], {}, 5_000);
   const rows = parseS2LifecycleProcessTable("marker-scan-never-matches-a-path", {
@@ -902,14 +918,35 @@ describe("S2 to S7 normalized cost receipt", () => {
       shell.indexOf("post_release_controller_identity_matches() {"),
       shell.indexOf("most_recent_supervisor_is_tracked()"),
     );
-    expect(postReleaseController).toContain('S2_POST_RELEASE_CONTROLLER_PID=$!');
+    expect(postReleaseController).toContain("S2_POST_RELEASE_CONTROLLER_PID=$!");
     expect(postReleaseController).toContain("post_release_controller_identity_matches()");
+    // biome-ignore lint/suspicious/noTemplateCurlyInString: asserts literal shell source text.
     expect(postReleaseController).toContain('kill -TERM "${pid}"');
+    // biome-ignore lint/suspicious/noTemplateCurlyInString: asserts literal shell source text.
     expect(postReleaseController).toContain('kill -KILL "${pid}"');
+    // biome-ignore lint/suspicious/noTemplateCurlyInString: asserts literal shell source text.
     expect(postReleaseController).toContain('wait "${pid}"');
     expect(postReleaseController).toContain("assert_no_run_survivors");
+    expect(postReleaseController).toContain("S2_POST_RELEASE_CONTROLLER_CHILD_STATE_DIR");
+    expect(postReleaseController).toContain("child-state-proof");
     expect(postReleaseController).toContain("S2_POST_RELEASE_CONTROLLER_CLEANUP_UNPROVEN");
+    expect(postReleaseController).toContain("post-kill-live");
+    expect(postReleaseController.indexOf("post-kill-live")).toBeLessThan(
+      // biome-ignore lint/suspicious/noTemplateCurlyInString: asserts refusal precedes bare wait.
+      postReleaseController.indexOf('wait "${pid}"'),
+    );
+    const postReleaseCleanup = shell.slice(
+      shell.indexOf("cleanup_post_release_controller() {"),
+      shell.indexOf("post_release_controller_refuse() {"),
+    );
+    expect(postReleaseCleanup).toContain(
+      "S2_POST_RELEASE_PARTIAL_OBSERVATION_PROPAGATED_DURING_EXIT_CLEANUP",
+    );
+    expect(
+      postReleaseCleanup.indexOf("S2_EVIDENCE_SEALING_REFUSED_FOR_PARTIAL_OBSERVATION=1"),
+    ).toBeLessThan(postReleaseCleanup.lastIndexOf("clear_post_release_controller"));
     expect(shell).toContain("cleanup_post_release_controller || result=1");
+    expect(shell).toContain("S2_EVIDENCE_PUBLICATION_SKIPPED_PARTIAL_OBSERVATION");
     const postReleasePredicate = shell.slice(
       shell.indexOf("post_release_ready_predicate_samples() {"),
       shell.indexOf("single_decimal_file()"),
@@ -921,10 +958,29 @@ describe("S2 to S7 normalized cost receipt", () => {
       shell.indexOf("read_child_status()"),
     );
     // biome-ignore lint/suspicious/noTemplateCurlyInString: asserts literal shell source text.
-    expect(postReleaseStart).toContain('>"${post_release_ready_predicate}.${post_release_ready_predicate_samples}"');
+    expect(postReleaseStart).toContain('>"${post_release_ready_predicate_pending}"');
+    // biome-ignore lint/suspicious/noTemplateCurlyInString: asserts atomic final-name publication.
+    expect(postReleaseStart).toContain('ln "${post_release_ready_predicate_pending}"');
+    // biome-ignore lint/suspicious/noTemplateCurlyInString: asserts atomic final-name publication.
+    expect(postReleaseStart).toContain('"${post_release_ready_predicate_final}"');
+    expect(
+      postReleaseStart.indexOf("S2_EVIDENCE_SEALING_REFUSED_FOR_PARTIAL_OBSERVATION=1"),
+    ).toBeLessThan(
+      // biome-ignore lint/suspicious/noTemplateCurlyInString: asserts refusal is armed pre-write.
+      postReleaseStart.indexOf('>"${post_release_ready_predicate_pending}"'),
+    );
     // biome-ignore lint/suspicious/noTemplateCurlyInString: rejects append-visible predicate ledgers.
     expect(postReleaseStart).not.toContain('>>"${post_release_ready_predicate}');
     expect(postReleaseStart).toContain("S2_PLANT_POST_RELEASE_READY_PREDICATE");
+    const postReleaseCheckpoint = shell.slice(
+      shell.indexOf(modeBranch("post-release-safe-checkpoint")),
+      shell.indexOf(modeBranch("watchdog-startup-diagnostics")),
+    );
+    expect(postReleaseCheckpoint).toContain("S2_PLANT_POST_RELEASE_PARTIAL_REFUSAL");
+    expect(postReleaseCheckpoint).toContain("S2_POST_RELEASE_PARTIAL_OBSERVATION_REFUSED");
+    // A bare OR-list call recreates the original false green: the outer dispatcher invokes this
+    // function in an `if`, so Bash suppresses errexit throughout the function body.
+    expect(postReleaseCheckpoint).not.toMatch(/\|\|\s*post_release_controller_refuse(?:\s|$)/u);
     const termInterrupt = shell.slice(
       // biome-ignore lint/suspicious/noTemplateCurlyInString: asserts literal shell source text.
       shell.indexOf('if [[ "${mode}" == "term-interrupt-cleanup" ]]'),
@@ -949,6 +1005,7 @@ const S2_SHELL_REGRESSION_MODES = [
   "watchdog-uncertainty",
   "watchdog-self-retire",
   "watchdog-publication-delay",
+  "post-release-controller-kill-refusal",
   "post-release-safe-checkpoint",
   "watchdog-startup-diagnostics",
   "watchdog-post-arm-abort",
@@ -1275,7 +1332,16 @@ describe("registered S2 shell and lifecycle regressions", () => {
       const runId = `s2u-${randomUUID().replaceAll("-", "").slice(0, 24)}`;
       expect(runId).not.toContain(mode);
       const run = runHarnessSync(
-        { S2_RUN_ID: runId, S2_SHELL_REGRESSION_TEST: mode },
+        {
+          S2_RUN_ID: runId,
+          S2_SHELL_REGRESSION_TEST: mode,
+          ...(mode === "post-release-controller-kill-refusal"
+            ? {
+                S2_PLANT_POST_RELEASE_CONTROLLER_IGNORE_FIRST_TERM: "1",
+                S2_PLANT_POST_RELEASE_CONTROLLER_KILL_ACK_LIVE: "1",
+              }
+            : {}),
+        },
         S2_SHELL_REGRESSION_WATCHDOG_MS,
       );
       assertS2RunThenScanForSurvivors(
@@ -1314,21 +1380,71 @@ describe("registered S2 shell and lifecycle regressions", () => {
             expect(run.stdout).toContain('"action":"kill-exact-residual-group"');
             expect(run.stdout).not.toContain('"code":"S2_LEGACY_REAPED_HANDOFF_STALE"');
             expect(run.stdout).not.toContain('"code":"S2_CLEANUP_OWNERSHIP_UNPROVEN"');
+          } else if (mode === "post-release-controller-kill-refusal") {
+            expect(ndjsonRecords(run)).toContainEqual(
+              expect.objectContaining({
+                suite: "s2-krater-shell",
+                status: "refused",
+                code: "S2_POST_RELEASE_CONTROLLER_CLEANUP_UNPROVEN",
+                reason: "post-kill-live",
+                detail: "exact-live-non-zombie",
+              }),
+            );
+            expect(ndjsonRecords(run)).toContainEqual({
+              tool: "bash+ps+lsof",
+              package: "apps/wire",
+              suite: "s2-krater-shell",
+              status: "pass",
+              terminal: true,
+              scenario:
+                "live-controller-after-acknowledged-kill-refuses-before-wait-and-next-cleanup-reaps",
+              first_cleanup_status: 1,
+              post_kill_live_non_zombie: true,
+              cleanup_refused_before_wait: true,
+              second_cleanup_reaped: true,
+              no_controller_survivor: true,
+              reproduce:
+                "S2_SHELL_REGRESSION_TEST=post-release-controller-kill-refusal S2_PLANT_POST_RELEASE_CONTROLLER_IGNORE_FIRST_TERM=1 S2_PLANT_POST_RELEASE_CONTROLLER_KILL_ACK_LIVE=1 scripts/e2e-s2-krater.sh",
+            });
+            expect(run.stdout).not.toContain('"code":"S2_CLEANUP_OWNERSHIP_UNPROVEN"');
+            expect(run.stdout).not.toContain(
+              '"code":"S2_EVIDENCE_PUBLICATION_SKIPPED_UNPROVEN_CLEANUP"',
+            );
           } else if (mode === "post-release-safe-checkpoint") {
             expect(run.stdout).toContain('"code":"S2_POST_RELEASE_SAFE_CHECKPOINT_TERMINATED"');
-            expect(run.stdout).toContain(
-              '"scenario":"release-consumption-is-not-ready-until-final-traps-and-canonical-post-release-checkpoint"',
+            const terminalProofs = ndjsonRecords(run).filter(
+              (record) =>
+                record.suite === "s2-krater-shell" &&
+                record.status === "pass" &&
+                record.terminal === true,
             );
-            expect(run.stdout).toContain('"post_release_safe_barrier_observed":true');
-            expect(run.stdout).toContain('"controller_identity_attested":true');
-            expect(run.stdout).toContain('"controller_visible_ready_predicate_samples":2');
-            expect(run.stdout).toContain('"start_returned_before_controller_release":false');
-            expect(run.stdout).toContain('"parser_early_return_controller_reaped":true');
-            expect(run.stdout).toContain('"partial_predicate_final_visible":false');
-            expect(run.stdout).toContain('"partial_predicate_observer_samples":0');
-            expect(run.stdout).toContain('"no_exact_group_survivor":true');
+            expect(terminalProofs).toEqual([
+              {
+                tool: "bash+ps+lsof",
+                package: "apps/wire",
+                suite: "s2-krater-shell",
+                status: "pass",
+                terminal: true,
+                scenario:
+                  "release-consumption-is-not-ready-until-final-traps-and-canonical-post-release-checkpoint",
+                post_release_safe_barrier_observed: true,
+                controller_identity_attested: true,
+                controller_visible_ready_predicate_samples: 2,
+                start_returned_before_controller_release: false,
+                parser_early_return_controller_reaped: true,
+                partial_predicate_final_visible: false,
+                partial_predicate_observer_samples: 0,
+                partial_observation_controller_reaped: true,
+                partial_controller_evidence_sealed: false,
+                no_exact_group_survivor: true,
+                reproduce:
+                  "S2_SHELL_REGRESSION_TEST=post-release-safe-checkpoint scripts/e2e-s2-krater.sh",
+              },
+            ]);
             expect(run.stdout).not.toContain('"code":"S2_CLEANUP_OWNERSHIP_UNPROVEN"');
-            expect(run.stdout).not.toContain('"code":"S2_POST_RELEASE_CONTROLLER_CLEANUP_UNPROVEN"');
+            expect(run.stdout).not.toContain(
+              '"code":"S2_POST_RELEASE_CONTROLLER_CLEANUP_UNPROVEN"',
+            );
             expect(run.stdout).not.toContain(
               '"code":"S2_EVIDENCE_PUBLICATION_SKIPPED_UNPROVEN_CLEANUP"',
             );
@@ -1408,6 +1524,149 @@ describe("registered S2 shell and lifecycle regressions", () => {
         () => liveS2LifecycleProcesses(runId),
       );
       console.log(JSON.stringify({ suite: "s2-shell-regression-matrix", mode, phase: "pass" }));
+    },
+    S2_SHELL_REGRESSION_TEST_TIMEOUT_MS,
+  );
+
+  test(
+    "PLANTED: a partial post-release predicate refuses the run after reaping its controller",
+    () => {
+      const runId = `s2u-${randomUUID().replaceAll("-", "").slice(0, 24)}`;
+      const run = runHarnessSync(
+        {
+          S2_RUN_ID: runId,
+          S2_SHELL_REGRESSION_TEST: "post-release-safe-checkpoint",
+          S2_PLANT_POST_RELEASE_PARTIAL_REFUSAL: "1",
+          S2_PLANT_POST_RELEASE_PARTIAL_PENDING_BARRIER: "1",
+        },
+        S2_SHELL_REGRESSION_WATCHDOG_MS,
+      );
+      assertS2RunThenScanForSurvivors(
+        "post-release-partial-observation-refusal",
+        () => {
+          const records = ndjsonRecords(run);
+          expect(run.exitCode).toBe(1);
+          expect(records).toContainEqual({
+            tool: "bash+ps+lsof",
+            package: "apps/wire",
+            suite: "s2-krater-shell",
+            status: "refused",
+            terminal: true,
+            scenario: "partial-post-release-predicate-is-never-a-ready-observation",
+            code: "S2_POST_RELEASE_PARTIAL_OBSERVATION_REFUSED",
+            partial_predicate_final_visible: false,
+            partial_predicate_observer_samples: 0,
+            partial_pending_term_barrier_observed: true,
+            partial_observation_controller_reaped: true,
+            partial_controller_evidence_sealed: false,
+            evidence_sealing_refused: true,
+            reproduce:
+              "S2_SHELL_REGRESSION_TEST=post-release-safe-checkpoint S2_PLANT_POST_RELEASE_PARTIAL_REFUSAL=1 S2_PLANT_POST_RELEASE_PARTIAL_PENDING_BARRIER=1 scripts/e2e-s2-krater.sh",
+          });
+          expect(records).toContainEqual(
+            expect.objectContaining({
+              suite: "s2-krater-shell",
+              status: "fail",
+              code: "S2_SHELL_REGRESSION_FAILED",
+              scenario: "post-release-safe-checkpoint",
+              exit_code: 1,
+            }),
+          );
+          expect(records).toContainEqual(
+            expect.objectContaining({
+              suite: "s2-krater-evidence",
+              status: "refused",
+              code: "S2_EVIDENCE_PUBLICATION_SKIPPED_PARTIAL_OBSERVATION",
+            }),
+          );
+          expect(
+            records.some(
+              (record) =>
+                record.suite === "s2-krater-shell" &&
+                record.status === "pass" &&
+                record.terminal === true,
+            ),
+          ).toBe(false);
+          expect(
+            records.some(
+              (record) =>
+                record.suite === "s2-krater-evidence" &&
+                record.evidence_retention_status === "pass",
+            ),
+          ).toBe(false);
+          expect(
+            existsSync(resolve(REPOSITORY_ROOT, "e2e/artifacts/s2-krater", runId, "manifest.json")),
+          ).toBe(false);
+          expect(run.stdout).not.toContain('"code":"S2_CLEANUP_OWNERSHIP_UNPROVEN"');
+          expect(run.stdout).not.toContain('"code":"S2_POST_RELEASE_CONTROLLER_CLEANUP_UNPROVEN"');
+        },
+        () => liveS2LifecycleProcesses(runId),
+      );
+    },
+    S2_SHELL_REGRESSION_TEST_TIMEOUT_MS,
+  );
+
+  test(
+    "PLANTED: outer TERM before pending visibility carries the later child observation across cleanup",
+    () => {
+      const runId = `s2u-${randomUUID().replaceAll("-", "").slice(0, 24)}`;
+      const run = runHarnessSync(
+        {
+          S2_RUN_ID: runId,
+          S2_SHELL_REGRESSION_TEST: "post-release-safe-checkpoint",
+          S2_PLANT_POST_RELEASE_OUTER_TERM_BEFORE_PENDING: "1",
+        },
+        S2_SHELL_REGRESSION_WATCHDOG_MS,
+      );
+      assertS2RunThenScanForSurvivors(
+        "outer-term-before-partial-pending",
+        () => {
+          const records = ndjsonRecords(run);
+          expect(run.exitCode).toBe(143);
+          expect(records).toContainEqual({
+            tool: "bash+ps+lsof",
+            package: "apps/wire",
+            suite: "s2-krater-shell",
+            status: "refused",
+            code: "S2_POST_RELEASE_PARTIAL_OBSERVATION_PROPAGATED_DURING_EXIT_CLEANUP",
+            pending_visible: true,
+            final_visible: false,
+            child_manifest_sealed: false,
+            reproduce:
+              "S2_SHELL_REGRESSION_TEST=post-release-safe-checkpoint S2_PLANT_POST_RELEASE_OUTER_TERM_BEFORE_PENDING=1 scripts/e2e-s2-krater.sh",
+          });
+          expect(records).toContainEqual(
+            expect.objectContaining({
+              suite: "s2-krater-evidence",
+              status: "refused",
+              code: "S2_EVIDENCE_PUBLICATION_SKIPPED_PARTIAL_OBSERVATION",
+            }),
+          );
+          expect(
+            records.some(
+              (record) =>
+                record.suite === "s2-krater-shell" &&
+                record.status === "pass" &&
+                record.terminal === true,
+            ),
+          ).toBe(false);
+          expect(
+            existsSync(resolve(REPOSITORY_ROOT, "e2e/artifacts/s2-krater", runId, "manifest.json")),
+          ).toBe(false);
+          const childRunIds = retainedPostReleaseControllerRunIds(runId);
+          expect(childRunIds).toHaveLength(1);
+          for (const childRunId of childRunIds) {
+            expect(
+              existsSync(
+                resolve(REPOSITORY_ROOT, "e2e/artifacts/s2-krater", childRunId, "manifest.json"),
+              ),
+            ).toBe(false);
+          }
+          expect(run.stdout).not.toContain('"code":"S2_CLEANUP_OWNERSHIP_UNPROVEN"');
+          expect(run.stdout).not.toContain('"code":"S2_POST_RELEASE_CONTROLLER_CLEANUP_UNPROVEN"');
+        },
+        () => liveS2LifecycleProcesses(runId),
+      );
     },
     S2_SHELL_REGRESSION_TEST_TIMEOUT_MS,
   );
