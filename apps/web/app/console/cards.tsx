@@ -8,15 +8,29 @@ import type {
   SponsorEnrollmentDecision,
 } from "@asimposium/contracts";
 import { useRouter } from "next/navigation";
-import { useEffect, useRef, useState, useTransition } from "react";
+import {
+  useEffect,
+  useRef,
+  useState,
+  useSyncExternalStore,
+  useTransition,
+} from "react";
 
-import { decideProposal, fingerprintEnrollmentAttempt, mintJoinUrl } from "./actions";
+import {
+  decideProposal,
+  fingerprintEnrollmentAttempt,
+  mintJoinUrl,
+  recoverMintJoinUrl,
+  recoverProposalDecision,
+} from "./actions";
 import {
   availableSessionStorage,
   clearEnrollmentAttempt,
   enrollmentAttemptKey,
   enrollmentAttemptsRemain,
+  retainedEnrollmentAttempts,
   type EnrollmentAttemptFallback,
+  type RetainedEnrollmentAttempt,
 } from "./idempotency";
 
 const MINT_SCOPES: readonly {
@@ -59,6 +73,16 @@ const transientDecisionDrafts = new Map<string, TransientDecisionDraft>();
 const transientMintAttempts = new Map<string, EnrollmentAttemptFallback>();
 const transientDecisionAttempts = new Map<string, EnrollmentAttemptFallback>();
 
+const subscribeToStaticBrowserState = () => () => undefined;
+
+function useBrowserStorageReady(): boolean {
+  return useSyncExternalStore(
+    subscribeToStaticBrowserState,
+    () => true,
+    () => false,
+  );
+}
+
 function attemptFallbackForOwner(
   owners: Map<string, EnrollmentAttemptFallback>,
   owner: string | undefined,
@@ -75,11 +99,21 @@ function transientDecisionKey(owner: string, enrollmentId: string): string {
   return `${owner}:${enrollmentId}`;
 }
 
+function clearTransientDecisionDraft(owner: string, fingerprint: string): void {
+  for (const [key, draft] of transientDecisionDrafts) {
+    if (draft.owner === owner && draft.fingerprint === fingerprint) {
+      transientDecisionDrafts.delete(key);
+    }
+  }
+}
+
 function transientMintDraftKey(owner: string, fingerprint: string): string {
   return `${owner}:${fingerprint}`;
 }
 
-function latestMintDraft(owner: string | undefined): TransientMintDraft | undefined {
+function latestMintDraft(
+  owner: string | undefined,
+): TransientMintDraft | undefined {
   if (owner === undefined) return undefined;
   const drafts = [...transientMintDrafts.values()];
   for (let index = drafts.length - 1; index >= 0; index -= 1) {
@@ -89,9 +123,38 @@ function latestMintDraft(owner: string | undefined): TransientMintDraft | undefi
   return undefined;
 }
 
-function decisionDraftsForOwner(owner: string | undefined): readonly TransientDecisionDraft[] {
+function decisionDraftsForOwner(
+  owner: string | undefined,
+): readonly TransientDecisionDraft[] {
   if (owner === undefined) return [];
-  return [...transientDecisionDrafts.values()].filter((draft) => draft.owner === owner);
+  return [...transientDecisionDrafts.values()].filter(
+    (draft) => draft.owner === owner,
+  );
+}
+
+function retainedAttemptsForOwner(
+  scope: "mint" | "decision",
+  fallback: EnrollmentAttemptFallback,
+  owner: string | undefined,
+  browserStorageReady: boolean,
+): {
+  readonly attempts: readonly RetainedEnrollmentAttempt[];
+  readonly unreadable: boolean;
+} {
+  if (owner === undefined) return { attempts: [], unreadable: false };
+  try {
+    return {
+      attempts: retainedEnrollmentAttempts(
+        scope,
+        browserStorageReady ? availableSessionStorage() : undefined,
+        fallback,
+        owner,
+      ),
+      unreadable: false,
+    };
+  } catch {
+    return { attempts: [], unreadable: true };
+  }
 }
 
 function optionalWholeNumber(
@@ -111,7 +174,10 @@ function optionalWholeNumber(
   return value;
 }
 
-function optionalDurationMilliseconds(raw: string, label: string): number | undefined {
+function optionalDurationMilliseconds(
+  raw: string,
+  label: string,
+): number | undefined {
   const trimmed = raw.trim();
   if (trimmed === "") return undefined;
   const seconds = Number(trimmed);
@@ -122,7 +188,9 @@ function optionalDurationMilliseconds(raw: string, label: string): number | unde
     milliseconds < 1 ||
     milliseconds > 31_536_000_000
   ) {
-    throw new Error(`${label} must be from 0.001 seconds to 365 days, in millisecond steps.`);
+    throw new Error(
+      `${label} must be from 0.001 seconds to 365 days, in millisecond steps.`,
+    );
   }
   return milliseconds;
 }
@@ -141,22 +209,35 @@ export function MintCard({
   readonly recoveryOwner?: string;
 }) {
   const recoveredResult =
-    recoveryOwner === undefined ? null : (transientMintResults.get(recoveryOwner) ?? null);
+    recoveryOwner === undefined
+      ? null
+      : (transientMintResults.get(recoveryOwner) ?? null);
   const recoveredDraftState = latestMintDraft(recoveryOwner);
   const recoveredDraft = recoveredDraftState?.request;
   const router = useRouter();
+  const browserStorageReady = useBrowserStorageReady();
   const [pending, startTransition] = useTransition();
-  const [joinUrl, setJoinUrl] = useState<string | null>(recoveredResult?.joinUrl ?? null);
-  const [expiresAt, setExpiresAt] = useState<number | null>(recoveredResult?.expiresAt ?? null);
+  const [joinUrl, setJoinUrl] = useState<string | null>(
+    recoveredResult?.joinUrl ?? null,
+  );
+  const [expiresAt, setExpiresAt] = useState<number | null>(
+    recoveredResult?.expiresAt ?? null,
+  );
   const [error, setError] = useState<string | null>(null);
   const [copied, setCopied] = useState(false);
-  const [requestedScopes, setRequestedScopes] = useState<readonly RequestedScope[]>(
-    recoveredDraft?.requested_scopes ?? ["promote", "review"],
+  const [requestedScopes, setRequestedScopes] = useState<
+    readonly RequestedScope[]
+  >(recoveredDraft?.requested_scopes ?? ["promote", "review"]);
+  const [problemBinding, setProblemBinding] = useState(
+    recoveredDraft?.problem_binding ?? "",
   );
-  const [problemBinding, setProblemBinding] = useState(recoveredDraft?.problem_binding ?? "");
-  const [firstDirective, setFirstDirective] = useState(recoveredDraft?.first_directive ?? "");
+  const [firstDirective, setFirstDirective] = useState(
+    recoveredDraft?.first_directive ?? "",
+  );
   const [eventBudget, setEventBudget] = useState(
-    recoveredDraft?.event_budget === undefined ? "" : String(recoveredDraft.event_budget),
+    recoveredDraft?.event_budget === undefined
+      ? ""
+      : String(recoveredDraft.event_budget),
   );
   const [artifactBudgetMiB, setArtifactBudgetMiB] = useState(
     recoveredDraft?.artifact_budget_bytes === undefined
@@ -173,49 +254,34 @@ export function MintCard({
       ? "30"
       : String(recoveredDraft.expires_in_ms / 60_000),
   );
-  const mintAttemptFallback = attemptFallbackForOwner(transientMintAttempts, recoveryOwner);
-  const mintAttempts = useRef<EnrollmentAttemptFallback>(mintAttemptFallback);
-  const mintInFlight = useRef(false);
-  const successfulMintFingerprint = useRef<string | null>(recoveredResult?.fingerprint ?? null);
-  const [navigationWarning, setNavigationWarning] = useState(
-    () =>
-      enrollmentAttemptsRemain(
-        "mint",
-        availableSessionStorage(),
-        mintAttemptFallback,
-        recoveryOwner,
-      ) ||
-      recoveredResult !== null ||
-      recoveredDraft !== undefined,
+  const mintAttemptFallback = attemptFallbackForOwner(
+    transientMintAttempts,
+    recoveryOwner,
   );
-
-  useEffect(() => {
-    setNavigationWarning(
-      enrollmentAttemptsRemain(
-        "mint",
-        availableSessionStorage(),
-        mintAttempts.current,
-        recoveryOwner,
-      ) ||
-        recoveredResult !== null ||
-        recoveredDraft !== undefined,
-    );
-  }, [recoveredDraft, recoveredResult, recoveryOwner]);
-
-  useEffect(() => {
-    if (!navigationWarning) return;
-    const warn = (event: BeforeUnloadEvent) => {
-      event.preventDefault();
-      event.returnValue = "";
-    };
-    window.addEventListener("beforeunload", warn);
-    return () => window.removeEventListener("beforeunload", warn);
-  }, [navigationWarning]);
+  const mintInFlight = useRef(false);
+  const successfulMintFingerprint = useRef<string | null>(
+    recoveredResult?.fingerprint ?? null,
+  );
+  const retainedMintState = retainedAttemptsForOwner(
+    "mint",
+    mintAttemptFallback,
+    recoveryOwner,
+    browserStorageReady,
+  );
+  const retainedMintAttempt = retainedMintState.attempts[0];
+  const [recoveryRevision, setRecoveryRevision] = useState(0);
+  void recoveryRevision;
+  const navigationWarning =
+    retainedMintState.unreadable ||
+    retainedMintState.attempts.length > 0 ||
+    recoveredResult !== null ||
+    recoveredDraft !== undefined;
 
   if (!configured) {
     return (
       <p className="quiet">
-        Join-URL minting is disabled because this deployment cannot prepare recoverable writes.
+        Join-URL minting is disabled because this deployment cannot prepare
+        recoverable writes.
       </p>
     );
   }
@@ -238,15 +304,19 @@ Do not send me a password. I will approve you from a card.`;
     return (
       <div aria-live="polite">
         <p>
-          <strong>Your one-time join URL is inside this block.</strong> Paste the whole block into
-          your agent&rsquo;s harness; it tells the agent what this is, how to register, and how to
-          keep the fragment secret out of URLs and logs. This page does not put the secret in
-          browser storage. Stoa retains its SHA-256 hash plus an authenticated encrypted replay for
-          24 hours so an unchanged retry can recover it. Save it before leaving or reloading this
-          page.
+          <strong>Your one-time join URL is inside this block.</strong> Paste
+          the whole block into your agent&rsquo;s harness; it tells the agent
+          what this is, how to register, and how to keep the fragment secret out
+          of URLs and logs. This page does not put the secret in browser
+          storage. Stoa retains its SHA-256 hash plus an authenticated encrypted
+          replay for 24 hours so an unchanged retry can recover it. Save it
+          before leaving or reloading this page.
         </p>
         <pre className="pasteblock join-url">{pasteBlock}</pre>
-        <div className="auth-row" style={{ flexDirection: "row", marginTop: "0.6rem" }}>
+        <div
+          className="auth-row"
+          style={{ flexDirection: "row", marginTop: "0.6rem" }}
+        >
           <button
             className="btn-quiet"
             type="button"
@@ -256,7 +326,10 @@ Do not send me a password. I will approve you from a card.`;
                   setCopied(true);
                   setTimeout(() => setCopied(false), 1_500);
                 },
-                () => setError("Clipboard access was refused. Select and copy the block manually."),
+                () =>
+                  setError(
+                    "Clipboard access was refused. Select and copy the block manually.",
+                  ),
               );
             }}
           >
@@ -273,7 +346,7 @@ Do not send me a password. I will approve you from a card.`;
                   "mint",
                   fingerprint,
                   availableSessionStorage(),
-                  mintAttempts.current,
+                  mintAttemptFallback,
                   recoveryOwner,
                 )
               ) {
@@ -283,18 +356,14 @@ Do not send me a password. I will approve you from a card.`;
                 return;
               }
               successfulMintFingerprint.current = null;
-              if (recoveryOwner !== undefined) transientMintResults.delete(recoveryOwner);
+              if (recoveryOwner !== undefined)
+                transientMintResults.delete(recoveryOwner);
               if (recoveryOwner !== undefined) {
-                transientMintDrafts.delete(transientMintDraftKey(recoveryOwner, fingerprint));
+                transientMintDrafts.delete(
+                  transientMintDraftKey(recoveryOwner, fingerprint),
+                );
               }
-              setNavigationWarning(
-                enrollmentAttemptsRemain(
-                  "mint",
-                  availableSessionStorage(),
-                  mintAttempts.current,
-                  recoveryOwner,
-                ),
-              );
+              setRecoveryRevision((revision) => revision + 1);
               setJoinUrl(null);
               setExpiresAt(null);
               setCopied(false);
@@ -306,7 +375,9 @@ Do not send me a password. I will approve you from a card.`;
           </button>
         </div>
         {expiresAt !== null && (
-          <p className="quiet">The URL expires {new Date(expiresAt).toLocaleString()}.</p>
+          <p className="quiet">
+            The URL expires {new Date(expiresAt).toLocaleString()}.
+          </p>
         )}
         {error !== null && (
           <p className="quiet" role="alert">
@@ -317,28 +388,103 @@ Do not send me a password. I will approve you from a card.`;
     );
   }
 
-  const mintDraftLocked = recoveredDraftState !== undefined;
-  const mintBodyUnavailable = navigationWarning && !mintDraftLocked;
+  const mintRecoveryLocked =
+    recoveredDraftState === undefined && retainedMintAttempt !== undefined;
+  const mintDraftLocked =
+    recoveredDraftState !== undefined || mintRecoveryLocked;
+  const mintBodyUnavailable =
+    navigationWarning &&
+    recoveredDraftState === undefined &&
+    retainedMintAttempt === undefined;
 
   return (
     <div>
       <p>
-        Mint a one-time join URL, then paste it into your agent&rsquo;s harness. The secret lives in
-        the URL fragment: browsers never transmit it, and the agent submits it exactly once in its
-        registration POST. The agent&rsquo;s proposal appears below for your approval.
+        Mint a one-time join URL, then paste it into your agent&rsquo;s harness.
+        The secret lives in the URL fragment: browsers never transmit it, and
+        the agent submits it exactly once in its registration POST. The
+        agent&rsquo;s proposal appears below for your approval.
       </p>
       {mintDraftLocked && (
         <p className="quiet" role="status">
-          This document has an unresolved mint. The exact fields are locked so this button can
-          only retry the original idempotent write.
+          This tab has an unresolved mint. Its exact encrypted request and
+          Idempotency-Key are locked to the sponsor who prepared it.
         </p>
       )}
+      {mintRecoveryLocked &&
+        retainedMintAttempt !== undefined &&
+        recoveryOwner !== undefined && (
+          <div className="reduce-panel" role="status">
+            <p>
+              The exact request survived the reload as authenticated ciphertext.
+              Recovering it sends the same body with the same Idempotency-Key;
+              it never creates a replacement attempt.
+            </p>
+            <button
+              className="btn-quiet"
+              type="button"
+              disabled={pending}
+              onClick={() => {
+                if (mintInFlight.current) return;
+                mintInFlight.current = true;
+                setError(null);
+                startTransition(async () => {
+                  try {
+                    const result = await recoverMintJoinUrl(
+                      retainedMintAttempt.recoveryPayload,
+                      retainedMintAttempt.key,
+                      recoveryOwner,
+                    );
+                    if (result.ok) {
+                      successfulMintFingerprint.current =
+                        retainedMintAttempt.fingerprint;
+                      transientMintResults.set(recoveryOwner, {
+                        owner: recoveryOwner,
+                        joinUrl: result.joinUrl,
+                        expiresAt: result.expiresAt,
+                        fingerprint: retainedMintAttempt.fingerprint,
+                      });
+                      setJoinUrl(result.joinUrl);
+                      setExpiresAt(result.expiresAt);
+                      return;
+                    }
+                    if (result.recovery === "clear") {
+                      const cleared = clearEnrollmentAttempt(
+                        "mint",
+                        retainedMintAttempt.fingerprint,
+                        availableSessionStorage(),
+                        mintAttemptFallback,
+                        recoveryOwner,
+                      );
+                      setRecoveryRevision((revision) => revision + 1);
+                      setError(
+                        cleared
+                          ? result.message
+                          : `${result.message} This tab could not clear the retained marker.`,
+                      );
+                    } else {
+                      setError(result.message);
+                    }
+                  } catch {
+                    setError(
+                      "The browser could not reach the recovery action. The exact mint marker remains retained; retry it unchanged.",
+                    );
+                  } finally {
+                    mintInFlight.current = false;
+                  }
+                });
+              }}
+            >
+              {pending ? "Recovering…" : "Recover the exact mint"}
+            </button>
+          </div>
+        )}
       {mintBodyUnavailable && (
         <p className="quiet" role="alert">
-          This tab retains an unresolved mint key from before a reload, but the private form body
-          was deliberately never persisted. To avoid minting a duplicate, this form is locked.
-          Verify the earlier outcome; close this tab only if you intentionally want to discard its
-          recovery safeguard.
+          This tab has an unresolved mint marker, but its recovery storage
+          cannot be read safely. To avoid minting a duplicate, this form is
+          locked. Verify the earlier outcome; close this tab only if you
+          intentionally want to discard its recovery safeguard.
         </p>
       )}
       <form
@@ -349,7 +495,12 @@ Do not send me a password. I will approve you from a card.`;
             if (requestedScopes.length === 0) {
               throw new Error("Choose at least one requested scope.");
             }
-            const eventLimit = optionalWholeNumber(eventBudget, "Event budget", 1, 10_000);
+            const eventLimit = optionalWholeNumber(
+              eventBudget,
+              "Event budget",
+              1,
+              10_000,
+            );
             const artifactLimitMiB = optionalWholeNumber(
               artifactBudgetMiB,
               "Artifact budget",
@@ -372,42 +523,60 @@ Do not send me a password. I will approve you from a card.`;
               throw new Error("Join URL lifetime is required.");
             }
             request = {
-              requested_scopes: MINT_SCOPES.map(({ scope }) => scope).filter((scope) =>
-                requestedScopes.includes(scope),
+              requested_scopes: MINT_SCOPES.map(({ scope }) => scope).filter(
+                (scope) => requestedScopes.includes(scope),
               ),
               expires_in_ms: joinLifetimeMinutes * 60_000,
               ...(problemBinding.trim() === ""
                 ? {}
                 : { problem_binding: problemBinding.trim().toUpperCase() }),
-              ...(firstDirective.trim() === "" ? {} : { first_directive: firstDirective.trim() }),
+              ...(firstDirective.trim() === ""
+                ? {}
+                : { first_directive: firstDirective.trim() }),
               ...(eventLimit === undefined ? {} : { event_budget: eventLimit }),
               ...(artifactLimitMiB === undefined
                 ? {}
                 : { artifact_budget_bytes: artifactLimitMiB * 1_048_576 }),
               ...(grantLifetimeDays === undefined
                 ? {}
-                : { fellow_grant_expires_in_ms: grantLifetimeDays * 86_400_000 }),
+                : {
+                    fellow_grant_expires_in_ms: grantLifetimeDays * 86_400_000,
+                  }),
             };
           } catch (cause) {
-            setError(cause instanceof Error ? cause.message : "Check the enrollment settings.");
+            setError(
+              cause instanceof Error
+                ? cause.message
+                : "Check the enrollment settings.",
+            );
             return;
           }
           if (mintInFlight.current) {
-            setError("A mint is already in progress. Wait for its outcome before submitting again.");
+            setError(
+              "A mint is already in progress. Wait for its outcome before submitting again.",
+            );
             return;
           }
           mintInFlight.current = true;
           startTransition(async () => {
             try {
-              const fingerprintResult = await fingerprintEnrollmentAttempt("mint", request);
+              if (recoveryOwner === undefined) {
+                throw new Error(
+                  "This deployment cannot bind recoverable writes to this sponsor.",
+                );
+              }
+              const proposedIdempotencyKey = `console-${crypto.randomUUID()}`;
+              const fingerprintResult = await fingerprintEnrollmentAttempt(
+                "mint",
+                request,
+                recoveryOwner,
+                proposedIdempotencyKey,
+              );
               if (!fingerprintResult.ok) {
                 setError(fingerprintResult.message);
                 return;
               }
               const storage = availableSessionStorage();
-              if (recoveryOwner === undefined) {
-                throw new Error("This deployment cannot bind recoverable writes to this sponsor.");
-              }
               const unresolvedDraft = latestMintDraft(recoveryOwner);
               if (
                 unresolvedDraft !== undefined &&
@@ -420,20 +589,33 @@ Do not send me a password. I will approve you from a card.`;
               const attempt = enrollmentAttemptKey(
                 "mint",
                 fingerprintResult.fingerprint,
+                fingerprintResult.recoveryPayload,
                 fingerprintResult.serverNow,
                 storage,
-                mintAttempts.current,
-                undefined,
+                mintAttemptFallback,
+                () => proposedIdempotencyKey,
                 recoveryOwner,
               );
               transientMintDrafts.set(
-                transientMintDraftKey(recoveryOwner, fingerprintResult.fingerprint),
-                { owner: recoveryOwner, fingerprint: fingerprintResult.fingerprint, request },
+                transientMintDraftKey(
+                  recoveryOwner,
+                  fingerprintResult.fingerprint,
+                ),
+                {
+                  owner: recoveryOwner,
+                  fingerprint: fingerprintResult.fingerprint,
+                  request,
+                },
               );
-              setNavigationWarning(true);
-              const result = await mintJoinUrl(request, attempt.key, unresolvedDraft !== undefined);
+              setRecoveryRevision((revision) => revision + 1);
+              const result = await mintJoinUrl(
+                attempt.recoveryPayload,
+                attempt.key,
+                recoveryOwner,
+              );
               if (result.ok) {
-                successfulMintFingerprint.current = fingerprintResult.fingerprint;
+                successfulMintFingerprint.current =
+                  fingerprintResult.fingerprint;
                 transientMintResults.set(recoveryOwner, {
                   owner: recoveryOwner,
                   joinUrl: result.joinUrl,
@@ -448,7 +630,7 @@ Do not send me a password. I will approve you from a card.`;
                     "mint",
                     fingerprintResult.fingerprint,
                     storage,
-                    mintAttempts.current,
+                    mintAttemptFallback,
                     recoveryOwner,
                   );
                   setError(
@@ -458,21 +640,17 @@ Do not send me a password. I will approve you from a card.`;
                   );
                   if (cleared) {
                     transientMintDrafts.delete(
-                      transientMintDraftKey(recoveryOwner, fingerprintResult.fingerprint),
-                    );
-                    setNavigationWarning(
-                      enrollmentAttemptsRemain(
-                        "mint",
-                        storage,
-                        mintAttempts.current,
+                      transientMintDraftKey(
                         recoveryOwner,
+                        fingerprintResult.fingerprint,
                       ),
                     );
+                    setRecoveryRevision((revision) => revision + 1);
                   }
                 } else {
                   setError(
                     attempt.keyReloadSafe
-                      ? `${result.message} Do not reload or close this tab: the key survives reload, but the exact form fields live only in this document's memory. Same-site navigation can restore them.`
+                      ? `${result.message} This tab retained the exact request as authenticated ciphertext; after a reload, use Recover the exact mint.`
                       : `${result.message} Keep this browser document open: the exact fields and key live only in its memory. Same-site navigation can restore them; reload cannot.`,
                   );
                 }
@@ -493,7 +671,8 @@ Do not send me a password. I will approve you from a card.`;
           <fieldset>
             <legend>Requested scopes</legend>
             <p className="quiet">
-              The common promote + review pair is selected. Broader powers are opt-in.
+              The common promote + review pair is selected. Broader powers are
+              opt-in.
             </p>
             {MINT_SCOPES.map(({ scope, label }) => (
               <label key={scope} className="check">
@@ -505,7 +684,9 @@ Do not send me a password. I will approve you from a card.`;
                     setRequestedScopes(
                       event.target.checked
                         ? [...requestedScopes, scope]
-                        : requestedScopes.filter((requested) => requested !== scope),
+                        : requestedScopes.filter(
+                            (requested) => requested !== scope,
+                          ),
                     )
                   }
                 />
@@ -585,12 +766,20 @@ Do not send me a password. I will approve you from a card.`;
             </label>
           </div>
           <p className="quiet">
-            Blank budget fields are an explicit unbounded grant. You can still impose finite limits
-            on the approval card.
+            Blank budget fields are an explicit unbounded grant. You can still
+            impose finite limits on the approval card.
           </p>
         </div>
-        <button className="btn-google" type="submit" disabled={pending || mintBodyUnavailable}>
-          {pending ? "Minting…" : mintDraftLocked ? "Retry the exact mint" : "Mint a join URL"}
+        <button
+          className="btn-google"
+          type="submit"
+          disabled={pending || mintBodyUnavailable || mintRecoveryLocked}
+        >
+          {pending
+            ? "Minting…"
+            : mintDraftLocked
+              ? "Retry the exact mint"
+              : "Mint a join URL"}
         </button>
       </form>
       {error !== null && (
@@ -604,9 +793,157 @@ Do not send me a password. I will approve you from a card.`;
 
 interface ProposalManagerProps {
   readonly cards: readonly EnrollmentApprovalCard[];
-  readonly hostState: "live" | "unreachable" | "unconfigured";
+  readonly hostState: "live" | "refused" | "unreachable" | "unconfigured";
   readonly writesConfigured: boolean;
   readonly recoveryOwner?: string;
+}
+
+export type DecisionRecoveryResolution =
+  | {
+      readonly ok: true;
+      readonly decision: SponsorEnrollmentDecision["decision"];
+    }
+  | { readonly ok: false; readonly message: string };
+
+function RetainedDecisionRecovery({
+  attempt,
+  recoveryOwner,
+  fallback,
+  onResolved,
+}: {
+  readonly attempt: RetainedEnrollmentAttempt;
+  readonly recoveryOwner: string;
+  readonly fallback: EnrollmentAttemptFallback;
+  readonly onResolved: (resolution: DecisionRecoveryResolution) => void;
+}) {
+  const router = useRouter();
+  const [pending, startTransition] = useTransition();
+  const [error, setError] = useState<string | null>(null);
+
+  return (
+    <div className="reduce-panel" role="status">
+      <p>
+        An exact decision survived reload as authenticated ciphertext. Recover
+        it before making a different enrollment decision.
+      </p>
+      <button
+        className="btn-quiet"
+        type="button"
+        disabled={pending}
+        onClick={() => {
+          setError(null);
+          startTransition(async () => {
+            try {
+              const result = await recoverProposalDecision(
+                attempt.recoveryPayload,
+                attempt.key,
+                recoveryOwner,
+              );
+              if (!result.ok && result.recovery === "retain") {
+                setError(result.message);
+                return;
+              }
+              const cleared = clearEnrollmentAttempt(
+                "decision",
+                attempt.fingerprint,
+                availableSessionStorage(),
+                fallback,
+                recoveryOwner,
+              );
+              if (!cleared) {
+                setError(
+                  result.ok
+                    ? "The decision was recovered, but this tab could not clear its marker. Verify the proposal state before closing the tab."
+                    : `${result.message} This tab could not clear its confirmed marker.`,
+                );
+                return;
+              }
+              clearTransientDecisionDraft(recoveryOwner, attempt.fingerprint);
+              onResolved(
+                result.ok ? result : { ok: false, message: result.message },
+              );
+              router.refresh();
+            } catch {
+              setError(
+                "The browser could not reach the recovery action. The exact decision marker remains retained; retry it unchanged.",
+              );
+            }
+          });
+        }}
+      >
+        {pending ? "Recovering…" : "Recover the exact decision"}
+      </button>
+      {error !== null && (
+        <p className="quiet" role="alert">
+          {error}
+        </p>
+      )}
+    </div>
+  );
+}
+
+export function DecisionRecoveryList({
+  recoveryOwner,
+  onRecoveryStateChange,
+  onDecisionRecovered,
+}: {
+  readonly recoveryOwner?: string;
+  readonly onRecoveryStateChange?: (unresolved: boolean) => void;
+  readonly onDecisionRecovered?: (
+    resolution: DecisionRecoveryResolution,
+  ) => void;
+}) {
+  const browserStorageReady = useBrowserStorageReady();
+  const [, setRecoveryRevision] = useState(0);
+  const [resolution, setResolution] =
+    useState<DecisionRecoveryResolution | null>(null);
+  const fallback = attemptFallbackForOwner(
+    transientDecisionAttempts,
+    recoveryOwner,
+  );
+  const state = retainedAttemptsForOwner(
+    "decision",
+    fallback,
+    recoveryOwner,
+    browserStorageReady,
+  );
+  const unresolved = state.unreadable || state.attempts.length > 0;
+
+  useEffect(() => {
+    onRecoveryStateChange?.(unresolved);
+  }, [onRecoveryStateChange, unresolved]);
+
+  if (recoveryOwner === undefined) return null;
+  return (
+    <>
+      {state.unreadable && (
+        <p className="quiet" role="alert">
+          This tab has an unresolved decision marker, but its authenticated
+          recovery body cannot be read safely. New decisions are locked.
+        </p>
+      )}
+      {resolution !== null && (
+        <p className="quiet" role={resolution.ok ? "status" : "alert"}>
+          {resolution.ok
+            ? "The exact decision was recovered and recorded."
+            : resolution.message}
+        </p>
+      )}
+      {state.attempts.map((attempt) => (
+        <RetainedDecisionRecovery
+          key={attempt.fingerprint}
+          attempt={attempt}
+          recoveryOwner={recoveryOwner}
+          fallback={fallback}
+          onResolved={(recovered) => {
+            if (onDecisionRecovered === undefined) setResolution(recovered);
+            else onDecisionRecovered(recovered);
+            setRecoveryRevision((revision) => revision + 1);
+          }}
+        />
+      ))}
+    </>
+  );
 }
 
 export function ProposalManager({
@@ -615,43 +952,99 @@ export function ProposalManager({
   writesConfigured,
   recoveryOwner,
 }: ProposalManagerProps) {
-  if (hostState !== "live") {
-    return (
-      <p className="quiet">
-        {hostState === "unconfigured"
-          ? "The agent host is not configured on this deployment."
-          : "The agent host did not answer; proposals could not be loaded."}
-      </p>
-    );
-  }
+  const browserStorageReady = useBrowserStorageReady();
+  const [, setRecoveryRevision] = useState(0);
+  const [recoveryResolution, setRecoveryResolution] =
+    useState<DecisionRecoveryResolution | null>(null);
+  const decisionFallback = attemptFallbackForOwner(
+    transientDecisionAttempts,
+    recoveryOwner,
+  );
+  const retainedDecisionState = retainedAttemptsForOwner(
+    "decision",
+    decisionFallback,
+    recoveryOwner,
+    browserStorageReady,
+  );
   const liveEnrollmentIds = new Set(cards.map((card) => card.enrollment_id));
   const orphanedRecoveryCards = decisionDraftsForOwner(recoveryOwner)
     .filter((draft) => !liveEnrollmentIds.has(draft.enrollmentId))
     .map((draft) => draft.card);
   const visibleCards = [...cards, ...orphanedRecoveryCards];
-  const decisionBodiesUnavailable =
-    enrollmentAttemptsRemain(
-      "decision",
-      availableSessionStorage(),
-      attemptFallbackForOwner(transientDecisionAttempts, recoveryOwner),
-      recoveryOwner,
-    ) && decisionDraftsForOwner(recoveryOwner).length === 0;
+  const transientFingerprints = new Set(
+    decisionDraftsForOwner(recoveryOwner).map((draft) => draft.fingerprint),
+  );
+  const retainedOnlyDecisions = retainedDecisionState.attempts.filter(
+    (attempt) => !transientFingerprints.has(attempt.fingerprint),
+  );
+  const decisionBodiesUnavailable = retainedDecisionState.unreadable;
+  const anotherRecoveryIsPending =
+    retainedDecisionState.attempts.length > 0 ||
+    decisionDraftsForOwner(recoveryOwner).length > 0;
   const effectiveWritesConfigured =
-    writesConfigured && recoveryOwner !== undefined && !decisionBodiesUnavailable;
+    writesConfigured &&
+    recoveryOwner !== undefined &&
+    !decisionBodiesUnavailable;
+  const retainedRecoveryControls =
+    recoveryOwner === undefined
+      ? null
+      : retainedOnlyDecisions.map((attempt) => (
+          <RetainedDecisionRecovery
+            key={attempt.fingerprint}
+            attempt={attempt}
+            recoveryOwner={recoveryOwner}
+            fallback={decisionFallback}
+            onResolved={(recovered) => {
+              setRecoveryResolution(recovered);
+              setRecoveryRevision((revision) => revision + 1);
+            }}
+          />
+        ));
+  const recoveryNotice =
+    recoveryResolution === null ? null : (
+      <p className="quiet" role={recoveryResolution.ok ? "status" : "alert"}>
+        {recoveryResolution.ok
+          ? "The exact decision was recovered and recorded."
+          : recoveryResolution.message}
+      </p>
+    );
+  if (hostState !== "live") {
+    return (
+      <>
+        <p className="quiet">
+          {hostState === "unconfigured"
+            ? "The agent host is not configured on this deployment."
+            : hostState === "refused"
+              ? "The agent host refused the proposal list."
+              : "The agent host did not answer; proposals could not be loaded."}
+        </p>
+        {decisionBodiesUnavailable && (
+          <p className="quiet" role="alert">
+            This tab has an unresolved decision marker, but its authenticated
+            recovery body cannot be read safely. New decisions are locked.
+          </p>
+        )}
+        {recoveryNotice}
+        {retainedRecoveryControls}
+      </>
+    );
+  }
   if (visibleCards.length === 0) {
     return (
       <>
         <p className="quiet">
-          Nothing pending. When your agent registers from a join URL, its proposal appears here for
-          your decision.
+          Nothing pending. When your agent registers from a join URL, its
+          proposal appears here for your decision.
         </p>
         {decisionBodiesUnavailable && (
           <p className="quiet" role="alert">
-            This tab retains an unresolved decision key from before a reload, but its exact body
-            was not persisted. New decisions are locked until you verify that outcome or
-            intentionally reset the tab.
+            This tab has an unresolved decision marker, but its recovery storage
+            cannot be read safely. New decisions are locked until you verify
+            that outcome or intentionally reset the tab.
           </p>
         )}
+        {recoveryNotice}
+        {retainedRecoveryControls}
       </>
     );
   }
@@ -659,19 +1052,22 @@ export function ProposalManager({
     <>
       {decisionBodiesUnavailable && (
         <p className="quiet" role="alert">
-          This tab retains an unresolved decision key from before a reload. New decisions are
-          locked because its exact private body is unavailable.
+          This tab has an unresolved decision marker, but its authenticated
+          recovery body cannot be read safely. New decisions are locked.
         </p>
       )}
+      {recoveryNotice}
+      {retainedRecoveryControls}
       <ul className="proposal-list">
-      {visibleCards.map((card) => (
-        <ProposalCard
-          key={card.proposal_id}
-          card={card}
-          writesConfigured={effectiveWritesConfigured}
-          recoveryOwner={recoveryOwner}
-        />
-      ))}
+        {visibleCards.map((card) => (
+          <ProposalCard
+            key={card.proposal_id}
+            card={card}
+            writesConfigured={effectiveWritesConfigured}
+            otherRecoveryPending={anotherRecoveryIsPending}
+            recoveryOwner={recoveryOwner}
+          />
+        ))}
       </ul>
     </>
   );
@@ -682,75 +1078,94 @@ export function ProposalCard({
   onDecided,
   onRecoveryStateChange,
   writesConfigured,
+  otherRecoveryPending = false,
+  externalRecoveryController = false,
   recoveryOwner,
 }: {
   readonly card: EnrollmentApprovalCard;
-  readonly onDecided?: (decision: SponsorEnrollmentDecision["decision"]) => void;
+  readonly onDecided?: (
+    decision: SponsorEnrollmentDecision["decision"],
+  ) => void;
   readonly onRecoveryStateChange?: (unresolved: boolean) => void;
   readonly writesConfigured: boolean;
+  readonly otherRecoveryPending?: boolean;
+  readonly externalRecoveryController?: boolean;
   readonly recoveryOwner?: string;
 }) {
   const router = useRouter();
+  const browserStorageReady = useBrowserStorageReady();
   const [pending, startTransition] = useTransition();
   const [error, setError] = useState<string | null>(null);
   const [reduceOpen, setReduceOpen] = useState(false);
-  const [keptScopes, setKeptScopes] = useState<readonly string[]>(card.requested_scopes);
+  const [keptScopes, setKeptScopes] = useState<readonly string[]>(
+    card.requested_scopes,
+  );
   const [dropProblem, setDropProblem] = useState(false);
   const [dropDirective, setDropDirective] = useState(false);
   const [eventBudget, setEventBudget] = useState("");
   const [artifactBudget, setArtifactBudget] = useState("");
   const [grantSeconds, setGrantSeconds] = useState("");
-  const [confirmation, setConfirmation] = useState<"approve" | "deny" | null>(null);
-  const decisionAttempts = useRef<EnrollmentAttemptFallback>(
-    attemptFallbackForOwner(transientDecisionAttempts, recoveryOwner),
+  const [confirmation, setConfirmation] = useState<"approve" | "deny" | null>(
+    null,
+  );
+  const decisionAttemptFallback = attemptFallbackForOwner(
+    transientDecisionAttempts,
+    recoveryOwner,
   );
   const decisionInFlight = useRef(false);
   const decisionDraftKey =
-    recoveryOwner === undefined ? undefined : transientDecisionKey(recoveryOwner, card.enrollment_id);
+    recoveryOwner === undefined
+      ? undefined
+      : transientDecisionKey(recoveryOwner, card.enrollment_id);
   const recoveredDecisionDraft =
-    decisionDraftKey === undefined ? undefined : transientDecisionDrafts.get(decisionDraftKey);
-  const [decisionWarning, setDecisionWarning] = useState(recoveredDecisionDraft !== undefined);
+    decisionDraftKey === undefined
+      ? undefined
+      : transientDecisionDrafts.get(decisionDraftKey);
+  const [decisionRecoveryRevision, setDecisionRecoveryRevision] = useState(0);
+  void decisionRecoveryRevision;
+  const decisionAttemptState = retainedAttemptsForOwner(
+    "decision",
+    decisionAttemptFallback,
+    recoveryOwner,
+    browserStorageReady,
+  );
+  const decisionWarning =
+    decisionAttemptState.unreadable ||
+    decisionAttemptState.attempts.length > 0 ||
+    recoveredDecisionDraft !== undefined;
 
   useEffect(() => {
-    const unresolved =
-      enrollmentAttemptsRemain(
-        "decision",
-        availableSessionStorage(),
-        decisionAttempts.current,
-        recoveryOwner,
-      ) || recoveredDecisionDraft !== undefined;
-    setDecisionWarning(unresolved);
-    onRecoveryStateChange?.(unresolved);
-  }, [onRecoveryStateChange, recoveredDecisionDraft, recoveryOwner]);
-
-  useEffect(() => {
-    if (!decisionWarning) return;
-    const warn = (event: BeforeUnloadEvent) => {
-      event.preventDefault();
-      event.returnValue = "";
-    };
-    window.addEventListener("beforeunload", warn);
-    return () => window.removeEventListener("beforeunload", warn);
-  }, [decisionWarning]);
+    onRecoveryStateChange?.(decisionWarning);
+  }, [decisionWarning, onRecoveryStateChange]);
 
   const submitDecision = (decision: SponsorEnrollmentDecision) => {
     setError(null);
     if (decisionInFlight.current) {
-      setError("A decision is already in progress. Wait for its outcome before submitting again.");
+      setError(
+        "A decision is already in progress. Wait for its outcome before submitting again.",
+      );
       return;
     }
     decisionInFlight.current = true;
     startTransition(async () => {
       try {
-        const fingerprintResult = await fingerprintEnrollmentAttempt("decision", decision);
+        if (recoveryOwner === undefined || decisionDraftKey === undefined) {
+          throw new Error(
+            "This deployment cannot bind recoverable writes to this sponsor.",
+          );
+        }
+        const proposedIdempotencyKey = `console-${crypto.randomUUID()}`;
+        const fingerprintResult = await fingerprintEnrollmentAttempt(
+          "decision",
+          decision,
+          recoveryOwner,
+          proposedIdempotencyKey,
+        );
         if (!fingerprintResult.ok) {
           setError(fingerprintResult.message);
           return;
         }
         const storage = availableSessionStorage();
-        if (recoveryOwner === undefined || decisionDraftKey === undefined) {
-          throw new Error("This deployment cannot bind recoverable writes to this sponsor.");
-        }
         if (
           recoveredDecisionDraft !== undefined &&
           recoveredDecisionDraft.fingerprint !== fingerprintResult.fingerprint
@@ -762,10 +1177,11 @@ export function ProposalCard({
         const attempt = enrollmentAttemptKey(
           "decision",
           fingerprintResult.fingerprint,
+          fingerprintResult.recoveryPayload,
           fingerprintResult.serverNow,
           storage,
-          decisionAttempts.current,
-          undefined,
+          decisionAttemptFallback,
+          () => proposedIdempotencyKey,
           recoveryOwner,
         );
         transientDecisionDrafts.set(decisionDraftKey, {
@@ -775,13 +1191,12 @@ export function ProposalCard({
           decision,
           card,
         });
-        setDecisionWarning(true);
+        setDecisionRecoveryRevision((revision) => revision + 1);
         onRecoveryStateChange?.(true);
         const result = await decideProposal(
-          card.enrollment_id,
-          decision,
+          attempt.recoveryPayload,
           attempt.key,
-          recoveredDecisionDraft !== undefined,
+          recoveryOwner,
         );
         if (!result.ok) {
           if (result.recovery === "clear") {
@@ -789,7 +1204,7 @@ export function ProposalCard({
               "decision",
               fingerprintResult.fingerprint,
               storage,
-              decisionAttempts.current,
+              decisionAttemptFallback,
               recoveryOwner,
             );
             setError(
@@ -799,19 +1214,12 @@ export function ProposalCard({
             );
             if (cleared) {
               transientDecisionDrafts.delete(decisionDraftKey);
-              setDecisionWarning(
-                enrollmentAttemptsRemain(
-                  "decision",
-                  storage,
-                  decisionAttempts.current,
-                  recoveryOwner,
-                ),
-              );
+              setDecisionRecoveryRevision((revision) => revision + 1);
               onRecoveryStateChange?.(
                 enrollmentAttemptsRemain(
                   "decision",
                   storage,
-                  decisionAttempts.current,
+                  decisionAttemptFallback,
                   recoveryOwner,
                 ),
               );
@@ -819,18 +1227,18 @@ export function ProposalCard({
           } else {
             setError(
               attempt.keyReloadSafe
-                ? `${result.message} Do not reload or close this tab: the key survives reload, but the exact decision lives only in this document's memory. Same-site navigation can restore it.`
+                ? `${result.message} This tab retained the exact decision as authenticated ciphertext; after a reload, use Recover the exact decision.`
                 : `${result.message} Keep this browser document open: the exact decision and key live only in its memory. Same-site navigation can restore them; reload cannot.`,
             );
           }
         } else {
           const cleared = clearEnrollmentAttempt(
-              "decision",
-              fingerprintResult.fingerprint,
-              storage,
-              decisionAttempts.current,
-              recoveryOwner,
-            );
+            "decision",
+            fingerprintResult.fingerprint,
+            storage,
+            decisionAttemptFallback,
+            recoveryOwner,
+          );
           if (!cleared) {
             setError(
               "The decision succeeded, but this tab could not clear its recovery marker. Verify the proposal is no longer pending, then close this tab to reset the marker.",
@@ -838,19 +1246,12 @@ export function ProposalCard({
             return;
           }
           transientDecisionDrafts.delete(decisionDraftKey);
-          setDecisionWarning(
-            enrollmentAttemptsRemain(
-              "decision",
-              storage,
-              decisionAttempts.current,
-              recoveryOwner,
-            ),
-          );
+          setDecisionRecoveryRevision((revision) => revision + 1);
           onRecoveryStateChange?.(
             enrollmentAttemptsRemain(
               "decision",
               storage,
-              decisionAttempts.current,
+              decisionAttemptFallback,
               recoveryOwner,
             ),
           );
@@ -877,7 +1278,9 @@ export function ProposalCard({
   const reduce = () => {
     setError(null);
     const reduction: EnrollmentGrantReduction = {};
-    const kept = card.requested_scopes.filter((scope) => keptScopes.includes(scope));
+    const kept = card.requested_scopes.filter((scope) =>
+      keptScopes.includes(scope),
+    );
     if (kept.length !== card.requested_scopes.length) {
       if (kept.length === 0) {
         setError("A reduction must keep at least one scope.");
@@ -903,7 +1306,9 @@ export function ProposalCard({
         label: "Event budget",
         minimum: 1,
         maximum:
-          resources.event_budget === undefined ? 10_000 : resources.event_budget - 1,
+          resources.event_budget === undefined
+            ? 10_000
+            : resources.event_budget - 1,
         assign: (value) => {
           reduction.event_budget = value;
         },
@@ -926,7 +1331,11 @@ export function ProposalCard({
       try {
         value = optionalWholeNumber(raw, label, minimum, maximum);
       } catch (cause) {
-        setError(cause instanceof Error ? cause.message : `Check ${label.toLowerCase()}.`);
+        setError(
+          cause instanceof Error
+            ? cause.message
+            : `Check ${label.toLowerCase()}.`,
+        );
         return;
       }
       if (value === undefined) continue;
@@ -934,9 +1343,14 @@ export function ProposalCard({
     }
     let grantLifetimeMs: number | undefined;
     try {
-      grantLifetimeMs = optionalDurationMilliseconds(grantSeconds, "Grant lifetime");
+      grantLifetimeMs = optionalDurationMilliseconds(
+        grantSeconds,
+        "Grant lifetime",
+      );
     } catch (cause) {
-      setError(cause instanceof Error ? cause.message : "Check the grant lifetime.");
+      setError(
+        cause instanceof Error ? cause.message : "Check the grant lifetime.",
+      );
       return;
     }
     if (grantLifetimeMs !== undefined) {
@@ -944,8 +1358,13 @@ export function ProposalCard({
         resources.fellow_grant_expires_at === undefined
           ? undefined
           : resources.fellow_grant_expires_at - Date.now();
-      if (currentRemainingMs !== undefined && grantLifetimeMs >= currentRemainingMs) {
-        setError("Grant lifetime must end before the currently requested grant expiry.");
+      if (
+        currentRemainingMs !== undefined &&
+        grantLifetimeMs >= currentRemainingMs
+      ) {
+        setError(
+          "Grant lifetime must end before the currently requested grant expiry.",
+        );
         return;
       }
       reduction.fellow_grant_expires_in_ms = grantLifetimeMs;
@@ -1006,12 +1425,15 @@ export function ProposalCard({
         <dd>{new Date(card.proposal_expires_at).toLocaleString()}</dd>
       </dl>
 
-      {recoveredDecisionDraft !== undefined && (
+      {recoveredDecisionDraft !== undefined && !externalRecoveryController && (
         <div className="reduce-panel" role="status">
           <p>
-            <strong>This tab has an unconfirmed {recoveredDecisionDraft.decision.decision}.</strong>{" "}
-            Retry the exact unchanged decision to recover its recorded outcome before editing or
-            choosing another action.
+            <strong>
+              This tab has an unconfirmed{" "}
+              {recoveredDecisionDraft.decision.decision}.
+            </strong>{" "}
+            Retry the exact unchanged decision to recover its recorded outcome
+            before editing or choosing another action.
           </p>
           <button
             className="btn-quiet"
@@ -1026,15 +1448,29 @@ export function ProposalCard({
 
       {!writesConfigured && (
         <p className="quiet">
-          Decisions are disabled because this deployment cannot prepare recoverable writes.
+          Decisions are disabled because this deployment cannot prepare
+          recoverable writes.
         </p>
       )}
+      {writesConfigured &&
+        otherRecoveryPending &&
+        recoveredDecisionDraft === undefined && (
+          <p className="quiet">
+            A different enrollment decision must be recovered before this card
+            can be changed.
+          </p>
+        )}
 
       <div className="auth-row proposal-actions">
         <button
           className="btn-google"
           type="button"
-          disabled={pending || !writesConfigured || recoveredDecisionDraft !== undefined}
+          disabled={
+            pending ||
+            !writesConfigured ||
+            otherRecoveryPending ||
+            decisionWarning
+          }
           onClick={() => decide("approve")}
         >
           Approve
@@ -1042,7 +1478,12 @@ export function ProposalCard({
         <button
           className="btn-quiet"
           type="button"
-          disabled={pending || !writesConfigured || recoveredDecisionDraft !== undefined}
+          disabled={
+            pending ||
+            !writesConfigured ||
+            otherRecoveryPending ||
+            decisionWarning
+          }
           aria-controls={`reduce-${card.proposal_id}`}
           aria-expanded={reduceOpen}
           onClick={() => {
@@ -1055,7 +1496,12 @@ export function ProposalCard({
         <button
           className="btn-quiet"
           type="button"
-          disabled={pending || !writesConfigured || recoveredDecisionDraft !== undefined}
+          disabled={
+            pending ||
+            !writesConfigured ||
+            otherRecoveryPending ||
+            decisionWarning
+          }
           onClick={() => decide("deny")}
         >
           Deny
@@ -1073,9 +1519,11 @@ export function ProposalCard({
           </p>
           <div className="auth-row proposal-actions">
             <button
-              className={confirmation === "approve" ? "btn-google" : "btn-quiet"}
+              className={
+                confirmation === "approve" ? "btn-google" : "btn-quiet"
+              }
               type="button"
-              disabled={pending || recoveredDecisionDraft !== undefined}
+              disabled={pending || otherRecoveryPending || decisionWarning}
               onClick={() =>
                 submitDecision({
                   enrollment_id: card.enrollment_id,
@@ -1149,7 +1597,10 @@ export function ProposalCard({
                     ? 10_000
                     : Math.max(0, resources.event_budget - 1)
                 }
-                disabled={resources.event_budget !== undefined && resources.event_budget <= 1}
+                disabled={
+                  resources.event_budget !== undefined &&
+                  resources.event_budget <= 1
+                }
                 value={eventBudget}
                 placeholder={String(resources.event_budget ?? "")}
                 onChange={(event) => setEventBudget(event.target.value)}
@@ -1172,7 +1623,9 @@ export function ProposalCard({
               />
             </label>
             <label>
-              <span className="quiet">Grant lifetime from decision (seconds)</span>
+              <span className="quiet">
+                Grant lifetime from decision (seconds)
+              </span>
               <input
                 type="number"
                 min={0.001}
@@ -1191,7 +1644,7 @@ export function ProposalCard({
           <button
             className="btn-quiet"
             type="button"
-            disabled={pending || recoveredDecisionDraft !== undefined}
+            disabled={pending || otherRecoveryPending || decisionWarning}
             onClick={reduce}
           >
             {pending ? "Sending…" : "Approve with these reductions"}

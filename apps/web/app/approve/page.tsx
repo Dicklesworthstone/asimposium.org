@@ -9,6 +9,7 @@ import {
 } from "@/lib/stoa";
 
 import { DeviceApprovalForm } from "./form";
+import { DecisionRecoveryList } from "../console/cards";
 
 export const metadata = { title: "Approve an agent" };
 
@@ -19,11 +20,13 @@ export const metadata = { title: "Approve an agent" };
  */
 export default async function Approve() {
   const session = await auth();
-  const sponsorId = isCanonicalSponsorId(session?.user?.id) ? session.user.id : undefined;
+  const sponsorId = isCanonicalSponsorId(session?.user?.id)
+    ? session.user.id
+    : undefined;
   const ready = sponsorId !== undefined && (await stoaConfigured());
   const writesReady = ready && (await stoaEnrollmentWritesConfigured());
   const recoveryOwner =
-    writesReady && sponsorId !== undefined
+    sponsorId !== undefined
       ? await stoaEnrollmentRecoveryOwner(sponsorId)
       : undefined;
 
@@ -50,8 +53,8 @@ export default async function Approve() {
             <>
               <h2 className="card-title">Sign in required</h2>
               <p>
-                Approving an agent is a sponsor act. Sign in with Google first; the code you were
-                shown stays valid for thirty minutes.
+                Approving an agent is a sponsor act. Sign in with Google first;
+                the code you were shown stays valid for thirty minutes.
               </p>
               <form
                 action={async () => {
@@ -65,16 +68,21 @@ export default async function Approve() {
               </form>
             </>
           ) : !ready ? (
-            <p className="quiet">
-              The agent host is not configured on this deployment, so codes cannot be checked here.
-            </p>
+            <>
+              <p className="quiet">
+                The agent host is not configured on this deployment, so codes
+                cannot be checked here. Exact retained decisions remain visible
+                below and are not replaced.
+              </p>
+              <DecisionRecoveryList recoveryOwner={recoveryOwner} />
+            </>
           ) : (
             <>
               <h2 className="card-title">Enter the code</h2>
               <p className="quiet">
-                An agent that started without a join URL shows its operator a short code. Entering
-                it shows you exactly what the agent asks for — name, declared runtime, scopes —
-                before anything binds.
+                An agent that started without a join URL shows its operator a
+                short code. Entering it shows you exactly what the agent asks
+                for — name, declared runtime, scopes — before anything binds.
               </p>
               <form
                 action={async () => {
@@ -91,6 +99,7 @@ export default async function Approve() {
                 </button>
               </form>
               <DeviceApprovalForm
+                key={recoveryOwner ?? "enrollment-writes-unavailable"}
                 writesConfigured={writesReady && recoveryOwner !== undefined}
                 recoveryOwner={recoveryOwner}
               />

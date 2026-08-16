@@ -1,6 +1,10 @@
 "use server";
 
-import type { EnrollmentApprovalCard } from "@asimposium/contracts";
+import type {
+  EnrollmentApprovalCard,
+  MintEnrollmentRequest,
+  SponsorEnrollmentDecision,
+} from "@asimposium/contracts";
 import {
   MintEnrollmentRequestSchema,
   SponsorEnrollmentDecisionSchema,
@@ -13,9 +17,16 @@ import {
   enrollmentRecoveryConfigurationIsValid,
   enrollmentRecoveryDisposition,
   enrollmentRecoveryFingerprint,
+  enrollmentRecoveryOwner,
+  openEnrollmentRecoveryPayload,
+  sealEnrollmentRecoveryPayload,
 } from "@/lib/enrollment-recovery";
 import { isCanonicalSponsorId } from "@/lib/sponsor-id";
-import { stoaDecideProposal, stoaDeviceLookup, stoaMintEnrollment } from "@/lib/stoa";
+import {
+  stoaDecideProposal,
+  stoaDeviceLookup,
+  stoaMintEnrollment,
+} from "@/lib/stoa";
 
 export type MintResult =
   | {
@@ -36,10 +47,15 @@ export type DeviceLookupResult =
   | { readonly ok: false; readonly message: string };
 
 /** W3.5: find a pending device proposal by its human code. Read-only; decisions go through decideProposal with the recent-auth gate. */
-export async function lookupDeviceCode(userCode: string): Promise<DeviceLookupResult> {
+export async function lookupDeviceCode(
+  userCode: string,
+): Promise<DeviceLookupResult> {
   const sponsor = await requireSponsorId();
   if (!sponsor.ok) return sponsor;
-  const result = await stoaDeviceLookup(sponsor.sponsorId, userCode.trim().toUpperCase());
+  const result = await stoaDeviceLookup(
+    sponsor.sponsorId,
+    userCode.trim().toUpperCase(),
+  );
   if (!result.ok) {
     return {
       ok: false,
@@ -53,7 +69,10 @@ export async function lookupDeviceCode(userCode: string): Promise<DeviceLookupRe
 }
 
 export type DecideResult =
-  | { readonly ok: true }
+  | {
+      readonly ok: true;
+      readonly decision: SponsorEnrollmentDecision["decision"];
+    }
   | {
       readonly ok: false;
       readonly message: string;
@@ -62,22 +81,75 @@ export type DecideResult =
     };
 
 export type EnrollmentAttemptFingerprintResult =
-  | { readonly ok: true; readonly fingerprint: string; readonly serverNow: number }
+  | {
+      readonly ok: true;
+      readonly fingerprint: string;
+      readonly recoveryPayload: string;
+      readonly serverNow: number;
+    }
   | { readonly ok: false; readonly message: string };
 
+const ENROLLMENT_RECOVERY_WINDOW_MS = 24 * 60 * 60 * 1_000;
+
+async function recoveryOwnerForSponsor(
+  sponsorId: string,
+): Promise<string | undefined> {
+  const rootHex = process.env.ENROLLMENT_RECOVERY_HMAC_KEY_HEX;
+  if (
+    !enrollmentRecoveryConfigurationIsValid(
+      rootHex,
+      process.env.SERVICE_ENVELOPE_PRIVATE_KEY_HEX,
+    )
+  ) {
+    return undefined;
+  }
+  try {
+    return await enrollmentRecoveryOwner(rootHex, sponsorId);
+  } catch {
+    return undefined;
+  }
+}
+
+async function recoveryOwnerMatchesSponsor(
+  sponsorId: string,
+  expectedRecoveryOwner: unknown,
+): Promise<boolean> {
+  if (
+    typeof expectedRecoveryOwner !== "string" ||
+    !/^[a-f0-9]{64}$/.test(expectedRecoveryOwner)
+  ) {
+    return false;
+  }
+  const currentRecoveryOwner = await recoveryOwnerForSponsor(sponsorId);
+  return (
+    currentRecoveryOwner !== undefined &&
+    currentRecoveryOwner === expectedRecoveryOwner
+  );
+}
+
 async function requireSponsorId(): Promise<
-  | { readonly ok: true; readonly sponsorId: string; readonly authIssuedAt?: number }
+  | {
+      readonly ok: true;
+      readonly sponsorId: string;
+      readonly authIssuedAt?: number;
+    }
   | { readonly ok: false; readonly message: string }
 > {
   const session = await auth();
-  if (session?.user === undefined) return { ok: false, message: "Not signed in." };
+  if (session?.user === undefined)
+    return { ok: false, message: "Not signed in." };
   if (!isCanonicalSponsorId(session.user.id)) {
     return {
       ok: false,
-      message: "Your sponsor identity has not been bootstrapped on this deployment.",
+      message:
+        "Your sponsor identity has not been bootstrapped on this deployment.",
     };
   }
-  return { ok: true, sponsorId: session.user.id, authIssuedAt: session.authIssuedAt };
+  return {
+    ok: true,
+    sponsorId: session.user.id,
+    authIssuedAt: session.authIssuedAt,
+  };
 }
 
 /**
@@ -91,11 +163,19 @@ async function requireSponsorId(): Promise<
 export async function fingerprintEnrollmentAttempt(
   scope: "mint" | "decision",
   request: unknown,
+  expectedRecoveryOwner: string,
+  idempotencyKey: unknown,
 ): Promise<EnrollmentAttemptFingerprintResult> {
   const sponsor = await requireSponsorId();
   if (!sponsor.ok) return sponsor;
   if (scope !== "mint" && scope !== "decision") {
     return { ok: false, message: "The enrollment attempt type is invalid." };
+  }
+  if (
+    typeof idempotencyKey !== "string" ||
+    !/^console-[A-Za-z0-9._-]{1,152}$/.test(idempotencyKey)
+  ) {
+    return { ok: false, message: "The enrollment recovery key is invalid." };
   }
   if (scope === "decision" && !recentAuthOk(sponsor.authIssuedAt)) {
     return {
@@ -118,21 +198,49 @@ export async function fingerprintEnrollmentAttempt(
       process.env.SERVICE_ENVELOPE_PRIVATE_KEY_HEX,
     )
   ) {
-    return { ok: false, message: "This deployment cannot prepare recoverable writes." };
+    return {
+      ok: false,
+      message: "This deployment cannot prepare recoverable writes.",
+    };
   }
   try {
+    if (
+      !(await recoveryOwnerMatchesSponsor(
+        sponsor.sponsorId,
+        expectedRecoveryOwner,
+      ))
+    ) {
+      return {
+        ok: false,
+        message:
+          "Your sponsor session changed. Reload this page before preparing an enrollment write.",
+      };
+    }
+    const serverNow = Date.now();
+    const fingerprint = await enrollmentRecoveryFingerprint(
+      rootHex,
+      sponsor.sponsorId,
+      scope,
+      parsed.data,
+    );
     return {
       ok: true,
-      fingerprint: await enrollmentRecoveryFingerprint(
-        rootHex,
-        sponsor.sponsorId,
+      fingerprint,
+      recoveryPayload: await sealEnrollmentRecoveryPayload(rootHex, {
+        sponsorId: sponsor.sponsorId,
         scope,
-        parsed.data,
-      ),
-      serverNow: Date.now(),
+        fingerprint,
+        idempotencyKey,
+        expiresAt: serverNow + ENROLLMENT_RECOVERY_WINDOW_MS,
+        request: parsed.data,
+      }),
+      serverNow,
     };
   } catch {
-    return { ok: false, message: "The browser could not prepare a recoverable write." };
+    return {
+      ok: false,
+      message: "The browser could not prepare a recoverable write.",
+    };
   }
 }
 
@@ -143,28 +251,100 @@ export async function fingerprintEnrollmentAttempt(
  * is never persisted.
  */
 export async function mintJoinUrl(
-  request: unknown,
+  recoveryPayload: string,
   idempotencyKey: string,
-  recovering = false,
+  expectedRecoveryOwner: string,
+): Promise<MintResult> {
+  return dispatchPreparedMint(
+    recoveryPayload,
+    idempotencyKey,
+    expectedRecoveryOwner,
+  );
+}
+
+async function dispatchPreparedMint(
+  recoveryPayload: string,
+  idempotencyKey: string,
+  expectedRecoveryOwner: string,
 ): Promise<MintResult> {
   const sponsor = await requireSponsorId();
-  if (!sponsor.ok) return { ...sponsor, recovery: recovering ? "retain" : "clear" };
-  const parsed = MintEnrollmentRequestSchema.safeParse(request);
-  if (!parsed.success) {
+  if (!sponsor.ok) return { ...sponsor, recovery: "retain" };
+  if (
+    !(await recoveryOwnerMatchesSponsor(
+      sponsor.sponsorId,
+      expectedRecoveryOwner,
+    ))
+  ) {
     return {
       ok: false,
-      message: "Check the enrollment settings and try again.",
-      recovery: recovering ? "retain" : "clear",
+      recovery: "retain",
+      message:
+        "Your sponsor session changed after this write was prepared. Reload under the intended sponsor, then retry the exact unchanged attempt.",
     };
   }
-  const result = await stoaMintEnrollment(sponsor.sponsorId, parsed.data, idempotencyKey);
+  const rootHex = process.env.ENROLLMENT_RECOVERY_HMAC_KEY_HEX;
+  if (
+    !enrollmentRecoveryConfigurationIsValid(
+      rootHex,
+      process.env.SERVICE_ENVELOPE_PRIVATE_KEY_HEX,
+    )
+  ) {
+    return {
+      ok: false,
+      recovery: "retain",
+      message:
+        "This deployment cannot open the prepared mint. Do not start a replacement.",
+    };
+  }
+  try {
+    const opened = await openEnrollmentRecoveryPayload(
+      rootHex,
+      recoveryPayload,
+      sponsor.sponsorId,
+      "mint",
+      Date.now(),
+    );
+    const parsed = MintEnrollmentRequestSchema.safeParse(opened.request);
+    if (
+      !parsed.success ||
+      opened.idempotencyKey !== idempotencyKey ||
+      (await enrollmentRecoveryFingerprint(
+        rootHex,
+        sponsor.sponsorId,
+        "mint",
+        parsed.data,
+      )) !== opened.fingerprint
+    ) {
+      throw new Error("invalid recovery payload");
+    }
+    return dispatchMint(sponsor.sponsorId, parsed.data, opened.idempotencyKey);
+  } catch {
+    return {
+      ok: false,
+      recovery: "retain",
+      message:
+        "The prepared mint could not be authenticated or its recovery window ended. Verify the earlier outcome; do not start a replacement automatically.",
+    };
+  }
+}
+
+async function dispatchMint(
+  sponsorId: string,
+  request: MintEnrollmentRequest,
+  idempotencyKey: string,
+): Promise<MintResult> {
+  const result = await stoaMintEnrollment(sponsorId, request, idempotencyKey);
   if (!result.ok) {
     return {
       ok: false,
       recovery:
-        recovering && result.reason === "unconfigured"
+        result.reason === "unconfigured"
           ? "retain"
-          : enrollmentRecoveryDisposition(result.reason, result.status),
+          : enrollmentRecoveryDisposition(
+              result.reason,
+              result.status,
+              result.problemCode,
+            ),
       message:
         result.reason === "unconfigured"
           ? "This deployment is not wired to the agent host."
@@ -182,6 +362,19 @@ export async function mintJoinUrl(
   };
 }
 
+/** Recover the exact normalized mint body after a crash or full reload. */
+export async function recoverMintJoinUrl(
+  recoveryPayload: string,
+  idempotencyKey: string,
+  expectedRecoveryOwner: string,
+): Promise<MintResult> {
+  return dispatchPreparedMint(
+    recoveryPayload,
+    idempotencyKey,
+    expectedRecoveryOwner,
+  );
+}
+
 /**
  * Approve, reduce, or deny a pending proposal. This is a permanent public
  * binding, so W3.4 requires a recent interactive Google sign-in. The stable
@@ -189,43 +382,119 @@ export async function mintJoinUrl(
  * client-supplied time.
  */
 export async function decideProposal(
-  enrollmentId: string,
-  decision: unknown,
+  recoveryPayload: string,
   idempotencyKey: string,
-  recovering = false,
+  expectedRecoveryOwner: string,
+): Promise<DecideResult> {
+  return dispatchPreparedDecision(
+    recoveryPayload,
+    idempotencyKey,
+    expectedRecoveryOwner,
+  );
+}
+
+async function dispatchPreparedDecision(
+  recoveryPayload: string,
+  idempotencyKey: string,
+  expectedRecoveryOwner: string,
 ): Promise<DecideResult> {
   const sponsor = await requireSponsorId();
-  if (!sponsor.ok) return { ...sponsor, recovery: recovering ? "retain" : "clear" };
+  if (!sponsor.ok) return { ...sponsor, recovery: "retain" };
+  if (
+    !(await recoveryOwnerMatchesSponsor(
+      sponsor.sponsorId,
+      expectedRecoveryOwner,
+    ))
+  ) {
+    return {
+      ok: false,
+      recovery: "retain",
+      message:
+        "Your sponsor session changed after this decision was prepared. Reload under the intended sponsor, then retry the exact unchanged decision.",
+    };
+  }
   if (!recentAuthOk(sponsor.authIssuedAt)) {
     return {
       ok: false,
-      recovery: recovering ? "retain" : "clear",
+      recovery: "retain",
       message:
         "Decisions need a Google sign-in from the last 15 minutes. Use Reauthenticate for decisions on this page, then decide again. The proposal is unchanged.",
     };
   }
-  const parsed = SponsorEnrollmentDecisionSchema.safeParse(decision);
-  if (!parsed.success || parsed.data.enrollment_id !== enrollmentId) {
+  const rootHex = process.env.ENROLLMENT_RECOVERY_HMAC_KEY_HEX;
+  if (
+    !enrollmentRecoveryConfigurationIsValid(
+      rootHex,
+      process.env.SERVICE_ENVELOPE_PRIVATE_KEY_HEX,
+    )
+  ) {
     return {
       ok: false,
-      message: "The decision request is invalid.",
-      recovery: recovering ? "retain" : "clear",
+      recovery: "retain",
+      message:
+        "This deployment cannot open the prepared decision. Do not start a replacement.",
     };
   }
+  try {
+    const opened = await openEnrollmentRecoveryPayload(
+      rootHex,
+      recoveryPayload,
+      sponsor.sponsorId,
+      "decision",
+      Date.now(),
+    );
+    const parsed = SponsorEnrollmentDecisionSchema.safeParse(opened.request);
+    if (
+      !parsed.success ||
+      opened.idempotencyKey !== idempotencyKey ||
+      (await enrollmentRecoveryFingerprint(
+        rootHex,
+        sponsor.sponsorId,
+        "decision",
+        parsed.data,
+      )) !== opened.fingerprint
+    ) {
+      throw new Error("invalid recovery payload");
+    }
+    return dispatchDecision(
+      sponsor.sponsorId,
+      parsed.data.enrollment_id,
+      parsed.data,
+      opened.idempotencyKey,
+    );
+  } catch {
+    return {
+      ok: false,
+      recovery: "retain",
+      message:
+        "The prepared decision could not be authenticated or its recovery window ended. Verify the earlier outcome; do not start a replacement automatically.",
+    };
+  }
+}
 
+async function dispatchDecision(
+  sponsorId: string,
+  enrollmentId: string,
+  decision: SponsorEnrollmentDecision,
+  idempotencyKey: string,
+): Promise<DecideResult> {
   const result = await stoaDecideProposal(
-    sponsor.sponsorId,
+    sponsorId,
     enrollmentId,
-    parsed.data,
+    decision,
     idempotencyKey,
   );
   if (!result.ok) {
     return {
       ok: false,
       recovery:
-        recovering && result.reason === "unconfigured"
+        result.reason === "unconfigured"
           ? "retain"
-          : enrollmentRecoveryDisposition(result.reason, result.status),
+          : enrollmentRecoveryDisposition(
+              result.reason,
+              result.status,
+              result.problemCode,
+            ),
       message:
         result.reason === "unconfigured"
           ? "This deployment is not wired to the agent host. The proposal is unchanged."
@@ -235,5 +504,18 @@ export async function decideProposal(
     };
   }
   revalidatePath("/console");
-  return { ok: true };
+  return { ok: true, decision: decision.decision };
+}
+
+/** Recover an exact prepared decision even when its pending card disappeared. */
+export async function recoverProposalDecision(
+  recoveryPayload: string,
+  idempotencyKey: string,
+  expectedRecoveryOwner: string,
+): Promise<DecideResult> {
+  return dispatchPreparedDecision(
+    recoveryPayload,
+    idempotencyKey,
+    expectedRecoveryOwner,
+  );
 }

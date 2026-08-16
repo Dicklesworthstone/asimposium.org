@@ -4,6 +4,8 @@ import {
   type MintEnrollmentRequest,
   type MintEnrollmentResponse,
   MintEnrollmentResponseSchema,
+  type ProblemCode,
+  ProblemDocumentSchema,
   type SponsorEnrollmentDecision,
   type SponsorEnrollmentDecisionResponse,
   SponsorEnrollmentDecisionResponseSchema,
@@ -20,7 +22,7 @@ import {
 import { dispatchSignedSponsorRequest } from "./stoa-sponsor";
 import {
   enrollmentRecoveryConfigurationIsValid,
-  enrollmentRecoveryFingerprint,
+  enrollmentRecoveryOwner,
 } from "./enrollment-recovery";
 import { importEd25519PrivateSeedHex } from "./service-envelope";
 import { isCanonicalSponsorId } from "./sponsor-id";
@@ -58,6 +60,7 @@ export type StoaCall<T> =
       readonly reason: "unconfigured" | "unreachable" | "refused";
       readonly status?: number;
       readonly detail?: string;
+      readonly problemCode?: ProblemCode;
     };
 
 interface StoaSigningConfig {
@@ -69,7 +72,8 @@ async function signingConfig(): Promise<StoaSigningConfig | undefined> {
   const hex = process.env.SERVICE_ENVELOPE_PRIVATE_KEY_HEX;
   const kid = process.env.SERVICE_ENVELOPE_KID;
   if (hex === undefined || kid === undefined) return undefined;
-  if (!/^[0-9a-f]{64}$/.test(hex) || !/^[A-Za-z0-9._-]{1,64}$/.test(kid)) return undefined;
+  if (!/^[0-9a-f]{64}$/.test(hex) || !/^[A-Za-z0-9._-]{1,64}$/.test(kid))
+    return undefined;
   try {
     return { privateKey: await importEd25519PrivateSeedHex(hex), kid };
   } catch {
@@ -77,22 +81,24 @@ async function signingConfig(): Promise<StoaSigningConfig | undefined> {
   }
 }
 
-/** The refusal detail: retain only a short problem JSON `title`, never the raw body. */
-async function refusalDetail(response: Response): Promise<string | undefined> {
+/** Retain only schema-validated problem metadata, never the raw refusal body. */
+async function refusalInfo(
+  response: Response,
+): Promise<{ readonly detail?: string; readonly problemCode?: ProblemCode }> {
   try {
     const text = await response.text();
-    if (text.length > 65_536) return undefined;
-    const parsed: unknown = JSON.parse(text);
-    if (typeof parsed === "object" && parsed !== null && "title" in parsed) {
-      // One-field boundary read off a problem body; presence checked by `in`.
-      const record: Record<string, unknown> = parsed as Record<string, unknown>;
-      const title = record.title;
-      if (typeof title === "string") return title.slice(0, 200);
-    }
+    if (text.length > 65_536) return {};
+    const value: unknown = JSON.parse(text);
+    const problem = ProblemDocumentSchema.safeParse(value);
+    if (!problem.success || problem.data.status !== response.status) return {};
+    return {
+      detail: problem.data.title.slice(0, 200),
+      problemCode: problem.data.code,
+    };
   } catch {
-    // A refusal with an unparseable body still reports its status.
+    // A refusal without a valid Worker problem remains ambiguous.
   }
-  return undefined;
+  return {};
 }
 
 async function callStoa<T>(options: {
@@ -133,11 +139,12 @@ async function callStoa<T>(options: {
     return { ok: false, reason: "unreachable" };
   }
   if (!response.ok) {
+    const refusal = await refusalInfo(response);
     return {
       ok: false,
       reason: "refused",
       status: response.status,
-      detail: await refusalDetail(response),
+      ...refusal,
     };
   }
   try {
@@ -168,9 +175,7 @@ export async function stoaEnrollmentWritesConfigured(): Promise<boolean> {
 export async function stoaEnrollmentRecoveryOwner(
   sponsorId: string,
 ): Promise<string | undefined> {
-  if (!isCanonicalSponsorId(sponsorId) || !(await stoaEnrollmentWritesConfigured())) {
-    return undefined;
-  }
+  if (!isCanonicalSponsorId(sponsorId)) return undefined;
   const rootHex = process.env.ENROLLMENT_RECOVERY_HMAC_KEY_HEX;
   if (
     !enrollmentRecoveryConfigurationIsValid(
@@ -181,9 +186,7 @@ export async function stoaEnrollmentRecoveryOwner(
     return undefined;
   }
   try {
-    return await enrollmentRecoveryFingerprint(rootHex, sponsorId, "mint", {
-      purpose: "client-memory-owner-v1",
-    });
+    return await enrollmentRecoveryOwner(rootHex, sponsorId);
   } catch {
     return undefined;
   }
@@ -239,7 +242,9 @@ export function stoaDecideProposal(
   });
 }
 
-export function stoaFellows(principalId: string): Promise<StoaCall<SponsorFellowListResponse>> {
+export function stoaFellows(
+  principalId: string,
+): Promise<StoaCall<SponsorFellowListResponse>> {
   return callStoa({
     method: "GET",
     route: ROUTE_FELLOWS,

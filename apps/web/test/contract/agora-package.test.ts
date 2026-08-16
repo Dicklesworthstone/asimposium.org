@@ -54,7 +54,9 @@ describe("Propylon configuration (Fable §5.1, §14.1) — structural guard", ()
   test("the shipped auth.ts satisfies every Propylon rule", () => {
     // Parsed, not pattern-matched: an adversarial probe defeated the three
     // regexes this replaced by reformatting, hyphenating and destructuring.
-    expect(formatAuthViolations(validateAuthFile(PACKAGE_DIR))).toBe("no violations");
+    expect(formatAuthViolations(validateAuthFile(PACKAGE_DIR))).toBe(
+      "no violations",
+    );
   });
 
   test("the configured provider set is exactly the Google module", () => {
@@ -66,7 +68,10 @@ describe("Propylon configuration (Fable §5.1, §14.1) — structural guard", ()
     expect(surface.providers.entries.map((entry) => entry.module)).toEqual([
       "next-auth/providers/google",
     ]);
-    expect(surface.imports).toEqual(["next-auth", "next-auth/providers/google"]);
+    expect(surface.imports).toEqual([
+      "next-auth",
+      "next-auth/providers/google",
+    ]);
   });
 
   test("the exported Propylon surface comes from that very factory call", () => {
@@ -128,24 +133,41 @@ describe("sponsor console trust boundary", () => {
   });
 
   test("server actions parse decision bodies at runtime before dispatch", () => {
-    expect(actions).toContain("SponsorEnrollmentDecisionSchema.safeParse(decision)");
-    expect(actions).toContain("parsed.data.enrollment_id !== enrollmentId");
+    expect(actions).toContain(
+      "SponsorEnrollmentDecisionSchema.safeParse(opened.request)",
+    );
+    expect(actions).toContain("parsed.data.enrollment_id,");
+    expect(actions).toContain("return dispatchPreparedDecision(");
+    expect(actions).toContain("recoveryPayload,");
   });
 
   test("sponsor minting sends validated, configurable least-authority enrollment settings", () => {
     const cards = readPackageFile("app/console/cards.tsx");
-    expect(actions).toContain("MintEnrollmentRequestSchema.safeParse(request)");
-    expect(actions).toContain("stoaMintEnrollment(sponsor.sponsorId, parsed.data, idempotencyKey)");
+    expect(actions).toContain(
+      "MintEnrollmentRequestSchema.safeParse(opened.request)",
+    );
+    expect(actions).toContain(
+      "stoaMintEnrollment(sponsorId, request, idempotencyKey)",
+    );
     expect(actions).not.toContain(
       'requested_scopes: ["promote", "review", "propose-problems", "upload-artifacts"]',
     );
-    expect(cards).toContain('recoveredDraft?.requested_scopes ?? ["promote", "review"]');
-    expect(cards).toContain("Broader powers are opt-in.");
-    expect(cards).toContain("problem_binding: problemBinding.trim().toUpperCase()");
+    expect(cards).toContain(
+      'recoveredDraft?.requested_scopes ?? ["promote", "review"]',
+    );
+    expect(cards).toContain("Broader powers are");
+    expect(cards).toContain("opt-in.");
+    expect(cards).toContain(
+      "problem_binding: problemBinding.trim().toUpperCase()",
+    );
     expect(cards).toContain("first_directive: firstDirective.trim()");
     expect(cards).toContain("event_budget: eventLimit");
-    expect(cards).toContain("artifact_budget_bytes: artifactLimitMiB * 1_048_576");
-    expect(cards).toContain("fellow_grant_expires_in_ms: grantLifetimeDays * 86_400_000");
+    expect(cards).toContain(
+      "artifact_budget_bytes: artifactLimitMiB * 1_048_576",
+    );
+    expect(cards).toContain(
+      "fellow_grant_expires_in_ms: grantLifetimeDays * 86_400_000",
+    );
     expect(cards).toContain("expires_in_ms: joinLifetimeMinutes * 60_000");
   });
 
@@ -174,42 +196,105 @@ describe("sponsor console trust boundary", () => {
     const cards = readPackageFile("app/console/cards.tsx");
     const idempotency = readPackageFile("app/console/idempotency.ts");
     const recovery = readPackageFile("lib/enrollment-recovery.ts");
+    const consolePage = readPackageFile("app/console/page.tsx");
+    const approvePage = readPackageFile("app/approve/page.tsx");
+    const rootLayout = readPackageFile("app/layout.tsx");
+    const recoverySentinel = readPackageFile(
+      "app/enrollment-recovery-sentinel.tsx",
+    );
     expect(actions).toContain("did not confirm the mint");
     expect(actions).toContain("Retry without changing these settings");
     expect(actions).toContain("did not confirm the outcome");
-    expect(actions).not.toContain("The agent host did not answer. The proposal is unchanged.");
+    expect(actions).not.toContain(
+      "The agent host did not answer. The proposal is unchanged.",
+    );
     expect(cards).toContain("optionalDurationMilliseconds");
     expect(cards).toContain("Grant lifetime from decision (seconds)");
     expect(cards).toContain("resources.event_budget - 1");
     expect(cards).toContain("resources.artifact_budget_bytes - 1");
-    expect(cards).toContain('fingerprintEnrollmentAttempt("mint", request)');
-    expect(cards).toContain('fingerprintEnrollmentAttempt("decision", decision)');
+    expect(cards).toContain("fingerprintEnrollmentAttempt(");
+    expect(cards).toContain("recoverMintJoinUrl(");
+    expect(cards).toContain("recoverProposalDecision(");
+    expect(cards).toContain("retainedEnrollmentAttempts(");
+    expect(cards).toContain("recoveryOwner,");
+    expect(actions).toContain("expectedRecoveryOwner");
+    expect(actions).toContain("openEnrollmentRecoveryPayload(");
+    expect(actions).toContain("recoverMintJoinUrl(");
+    expect(actions).toContain("recoverProposalDecision(");
+    expect(actions).toContain("opened.idempotencyKey !== idempotencyKey");
+    expect(actions).toContain("opened.idempotencyKey,");
+    expect(actions).toContain("recoveryOwnerMatchesSponsor(");
+    expect(actions).toContain("currentRecoveryOwner !== undefined &&");
+    expect(actions).toContain("currentRecoveryOwner === expectedRecoveryOwner");
+    expect(
+      consolePage.match(
+        /key=\{recoveryOwner \?\? "enrollment-writes-unavailable"\}/g,
+      ),
+    ).toHaveLength(2);
+    expect(approvePage).toContain(
+      'key={recoveryOwner ?? "enrollment-writes-unavailable"}',
+    );
+    const approveForm = readPackageFile("app/approve/form.tsx");
+    expect(approveForm).toContain("<DecisionRecoveryList");
+    expect(approveForm).toContain("onDecisionRecovered=");
+    expect(approveForm).toContain(
+      "cardDecisionUnresolved || retainedDecisionUnresolved",
+    );
+    expect(rootLayout).toContain("<EnrollmentRecoverySentinel />");
+    expect(recoverySentinel).toContain('addEventListener("beforeunload"');
+    expect(recoverySentinel).toContain(
+      "enrollmentRecoveryMarkersMayRemain(availableSessionStorage())",
+    );
+    expect(cards).not.toContain('addEventListener("beforeunload"');
+    expect(cards).toContain("otherRecoveryPending || decisionWarning");
+    expect(cards).toContain("proposedIdempotencyKey");
+    expect(recovery).toContain("idempotencyKey: candidate.idempotencyKey");
     expect(cards).toContain("mintInFlight.current");
     expect(cards).toContain("decisionInFlight.current");
     expect(cards).toContain("MINT_SCOPES.map(({ scope }) => scope).filter");
     expect(actions).toContain("ENROLLMENT_RECOVERY_HMAC_KEY_HEX");
     expect(actions).toContain("enrollmentRecoveryConfigurationIsValid(");
     expect(recovery).toContain("recoveryKeyHex !== serviceEnvelopeKeyHex");
-    expect(recovery).toContain('status >= 400 && status < 500 ? "clear" : "retain"');
-    const successStart = cards.indexOf("if (result.ok)");
+    expect(stoa).toContain("ProblemDocumentSchema.safeParse");
+    expect(stoa).toContain("problem.data.status !== response.status");
+    expect(recovery).toContain("status !== 408");
+    expect(recovery).toContain("problemCode !== undefined");
+    const mintCall = cards.indexOf("const result = await mintJoinUrl(");
+    const successStart = cards.indexOf("if (result.ok)", mintCall);
     const successEnd = cards.indexOf("} else {", successStart);
     const remember = cards.indexOf(
-      "successfulMintFingerprint.current = fingerprintResult.fingerprint",
+      "successfulMintFingerprint.current =",
       successStart,
     );
     const display = cards.indexOf("setJoinUrl(result.joinUrl)", successStart);
-    const doneStart = cards.indexOf("const fingerprint = successfulMintFingerprint.current");
+    const doneStart = cards.indexOf(
+      "const fingerprint = successfulMintFingerprint.current",
+    );
     const acknowledge = cards.indexOf("clearEnrollmentAttempt(", doneStart);
     const dismiss = cards.indexOf("setJoinUrl(null)", doneStart);
-    for (const position of [successStart, successEnd, remember, display, doneStart, acknowledge, dismiss]) {
+    for (const position of [
+      mintCall,
+      successStart,
+      successEnd,
+      remember,
+      display,
+      doneStart,
+      acknowledge,
+      dismiss,
+    ]) {
       expect(position).toBeGreaterThanOrEqual(0);
     }
     expect(remember).toBeLessThan(display);
-    expect(cards.slice(successStart, successEnd)).not.toContain("clearEnrollmentAttempt");
+    expect(cards.slice(successStart, successEnd)).not.toContain(
+      "clearEnrollmentAttempt",
+    );
     expect(doneStart).toBeLessThan(acknowledge);
     expect(acknowledge).toBeLessThan(dismiss);
     expect(idempotency).not.toContain("subtle.digest");
     expect(idempotency).not.toContain("TextEncoder");
+    expect(idempotency).toContain("recoveryPayload");
+    expect(idempotency).toContain(".v2`");
+    expect(idempotency).toContain("No enrollment write was sent");
   });
 
   test("the explicit step-up buttons force a Google challenge", () => {
@@ -331,7 +416,11 @@ describe("OPS.1 gate entry points", () => {
     expect(manifest.dependencies["next"]).toMatch(/^16\./);
     expect(manifest.dependencies["next-auth"]).toMatch(/^5\./);
     expect(manifest.devDependencies["tailwindcss"]).toMatch(/^4\./);
-    expect(readPackageFile("postcss.config.mjs")).toContain("@tailwindcss/postcss");
-    expect(readPackageFile("app/globals.css")).toContain('@import "tailwindcss"');
+    expect(readPackageFile("postcss.config.mjs")).toContain(
+      "@tailwindcss/postcss",
+    );
+    expect(readPackageFile("app/globals.css")).toContain(
+      '@import "tailwindcss"',
+    );
   });
 });

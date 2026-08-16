@@ -1,3 +1,5 @@
+import { enrollmentRecoveryPayloadIsValid } from "@/lib/enrollment-recovery";
+
 const MAX_RETAINED_ATTEMPTS = 8;
 const ATTEMPT_REPLAY_WINDOW_MS = 24 * 60 * 60 * 1_000;
 
@@ -9,33 +11,42 @@ export interface EnrollmentAttemptStorage {
   removeItem(key: string): void;
 }
 
-interface StoredAttempt {
+export interface RetainedEnrollmentAttempt {
   readonly fingerprint: string;
   readonly key: string;
+  readonly recoveryPayload: string;
   readonly expiresAt: number;
 }
 
 export type EnrollmentAttemptFallback = Map<
   string,
-  { readonly key: string; readonly expiresAt: number }
+  {
+    readonly key: string;
+    readonly recoveryPayload: string;
+    readonly expiresAt: number;
+  }
 >;
 
 interface StoredAttempts {
-  readonly version: 1;
-  readonly attempts: readonly StoredAttempt[];
+  readonly version: 2;
+  readonly attempts: readonly RetainedEnrollmentAttempt[];
 }
 
 function storageKey(scope: EnrollmentAttemptScope, namespace: string): string {
   if (namespace !== "shared" && !/^[a-f0-9]{64}$/.test(namespace)) {
     throw new Error("enrollment attempt storage namespace is invalid");
   }
-  return `asimposium.enrollment.${scope}-attempts.${namespace}.v1`;
+  return `asimposium.enrollment.${scope}-attempts.${namespace}.v2`;
 }
 
 function retainFallback(
   fallback: EnrollmentAttemptFallback,
   identity: string,
-  attempt: { readonly key: string; readonly expiresAt: number },
+  attempt: {
+    readonly key: string;
+    readonly recoveryPayload: string;
+    readonly expiresAt: number;
+  },
 ): void {
   fallback.delete(identity);
   fallback.set(identity, attempt);
@@ -43,22 +54,25 @@ function retainFallback(
 
 function retainedIdentityCount(
   scope: EnrollmentAttemptScope,
-  retained: readonly StoredAttempt[],
+  retained: readonly RetainedEnrollmentAttempt[],
   fallback: EnrollmentAttemptFallback,
 ): number {
   const identities = new Set(retained.map((attempt) => attempt.fingerprint));
   const prefix = `${scope}:`;
   for (const identity of fallback.keys()) {
-    if (identity.startsWith(prefix)) identities.add(identity.slice(prefix.length));
+    if (identity.startsWith(prefix))
+      identities.add(identity.slice(prefix.length));
   }
   return identities.size;
 }
 
-function parsedAttempts(raw: string | null): readonly StoredAttempt[] {
+function parsedAttempts(
+  raw: string | null,
+): readonly RetainedEnrollmentAttempt[] {
   if (raw === null) return [];
   const parsed = JSON.parse(raw) as Partial<StoredAttempts>;
   if (
-    parsed.version !== 1 ||
+    parsed.version !== 2 ||
     !Array.isArray(parsed.attempts) ||
     parsed.attempts.length > MAX_RETAINED_ATTEMPTS
   ) {
@@ -74,6 +88,7 @@ function parsedAttempts(raw: string | null): readonly StoredAttempt[] {
       !/^[a-f0-9]{64}$/.test(attempt.fingerprint) ||
       typeof attempt.key !== "string" ||
       !/^console-[A-Za-z0-9._-]{1,152}$/.test(attempt.key) ||
+      !enrollmentRecoveryPayloadIsValid(attempt.recoveryPayload) ||
       typeof attempt.expiresAt !== "number" ||
       !Number.isSafeInteger(attempt.expiresAt) ||
       attempt.expiresAt <= 0 ||
@@ -83,18 +98,25 @@ function parsedAttempts(raw: string | null): readonly StoredAttempt[] {
     }
     fingerprints.add(attempt.fingerprint);
   }
-  return attempts as readonly StoredAttempt[];
+  return attempts as readonly RetainedEnrollmentAttempt[];
 }
 
 type AttemptRead =
-  | { readonly ok: true; readonly attempts: readonly StoredAttempt[] }
+  | {
+      readonly ok: true;
+      readonly attempts: readonly RetainedEnrollmentAttempt[];
+    }
   | { readonly ok: false };
 
 function readAttempts(
   scope: EnrollmentAttemptScope,
-  storage: EnrollmentAttemptStorage | undefined,
+  storage: EnrollmentAttemptStorage | null | undefined,
   namespace: string,
 ): AttemptRead {
+  // `undefined` is the server-render/no-browser state. `null` means a browser
+  // was present but access failed, which must never be confused with an empty
+  // recovery store after reload.
+  if (storage === null) return { ok: false };
   if (storage === undefined) return { ok: true, attempts: [] };
   try {
     return {
@@ -108,17 +130,17 @@ function readAttempts(
 
 function writeAttempts(
   scope: EnrollmentAttemptScope,
-  attempts: readonly StoredAttempt[],
-  storage: EnrollmentAttemptStorage | undefined,
+  attempts: readonly RetainedEnrollmentAttempt[],
+  storage: EnrollmentAttemptStorage | null | undefined,
   namespace: string,
 ): boolean {
-  if (storage === undefined) return false;
+  if (storage === null || storage === undefined) return false;
   try {
     if (attempts.length === 0) storage.removeItem(storageKey(scope, namespace));
     else
       storage.setItem(
         storageKey(scope, namespace),
-        JSON.stringify({ version: 1, attempts }),
+        JSON.stringify({ version: 2, attempts }),
       );
     return true;
   } catch {
@@ -128,21 +150,26 @@ function writeAttempts(
 
 export interface PreparedEnrollmentAttempt {
   readonly key: string;
-  /** Only the opaque key survives reload; the caller must reconstruct the exact request body. */
+  /** Authenticated ciphertext containing the exact normalized request body. */
+  readonly recoveryPayload: string;
   readonly keyReloadSafe: boolean;
 }
 
 export function enrollmentAttemptKey(
   scope: EnrollmentAttemptScope,
   fingerprint: string,
+  recoveryPayload: string,
   serverNow: number,
-  storage: EnrollmentAttemptStorage | undefined,
+  storage: EnrollmentAttemptStorage | null | undefined,
   fallback: EnrollmentAttemptFallback,
   createKey: () => string = () => `console-${crypto.randomUUID()}`,
   storageNamespace = "shared",
 ): PreparedEnrollmentAttempt {
   if (!/^[a-f0-9]{64}$/.test(fingerprint)) {
     throw new Error("enrollment attempt fingerprint is invalid");
+  }
+  if (!enrollmentRecoveryPayloadIsValid(recoveryPayload)) {
+    throw new Error("enrollment attempt recovery payload is invalid");
   }
   if (!Number.isSafeInteger(serverNow) || serverNow <= 0) {
     throw new Error("enrollment attempt time is invalid");
@@ -161,15 +188,25 @@ export function enrollmentAttemptKey(
         "The 24-hour recovery window for these exact settings has ended. To avoid a duplicate enrollment, this tab will not mint a replacement. Verify the earlier outcome; close this tab only if you intentionally want to start over.",
       );
     }
-    return { key: fallbackPrior.key, keyReloadSafe: false };
+    return {
+      key: fallbackPrior.key,
+      recoveryPayload: fallbackPrior.recoveryPayload,
+      keyReloadSafe: false,
+    };
   }
   const retained = read.attempts;
-  const retainedPrior = retained.find((attempt) => attempt.fingerprint === fingerprint);
+  const retainedPrior = retained.find(
+    (attempt) => attempt.fingerprint === fingerprint,
+  );
   const fallbackPrior = fallback.get(fallbackKey);
   const prior =
     retainedPrior === undefined
       ? fallbackPrior
-      : { key: retainedPrior.key, expiresAt: retainedPrior.expiresAt };
+      : {
+          key: retainedPrior.key,
+          recoveryPayload: retainedPrior.recoveryPayload,
+          expiresAt: retainedPrior.expiresAt,
+        };
   if (prior !== undefined) {
     if (prior.expiresAt <= serverNow) {
       throw new Error(
@@ -177,9 +214,15 @@ export function enrollmentAttemptKey(
       );
     }
     retainFallback(fallback, fallbackKey, prior);
-    return { key: prior.key, keyReloadSafe: retainedPrior !== undefined };
+    return {
+      key: prior.key,
+      recoveryPayload: prior.recoveryPayload,
+      keyReloadSafe: retainedPrior !== undefined,
+    };
   }
-  if (retainedIdentityCount(scope, retained, fallback) >= MAX_RETAINED_ATTEMPTS) {
+  if (
+    retainedIdentityCount(scope, retained, fallback) >= MAX_RETAINED_ATTEMPTS
+  ) {
     throw new Error(
       "Eight enrollment attempts still have unresolved recovery markers in this tab. Verify and finish one of them, or close this tab only if you intentionally want to reset those safeguards.",
     );
@@ -196,28 +239,57 @@ export function enrollmentAttemptKey(
   if (!Number.isSafeInteger(expiresAt)) {
     throw new Error("enrollment attempt time is invalid");
   }
-  retainFallback(fallback, fallbackKey, { key, expiresAt });
   const keyReloadSafe = writeAttempts(
     scope,
     [
-      { fingerprint, key, expiresAt },
+      { fingerprint, key, recoveryPayload, expiresAt },
       ...retained.filter((attempt) => attempt.fingerprint !== fingerprint),
     ],
     storage,
     storageNamespace,
   );
-  return { key, keyReloadSafe };
+  if (!keyReloadSafe) {
+    throw new Error(
+      "Browser recovery storage is unavailable. No enrollment write was sent; enable session storage and try again.",
+    );
+  }
+  retainFallback(fallback, fallbackKey, { key, recoveryPayload, expiresAt });
+  return { key, recoveryPayload, keyReloadSafe };
+}
+
+/** Return exact encrypted retries owned by this tab, or fail closed on unreadable storage. */
+export function retainedEnrollmentAttempts(
+  scope: EnrollmentAttemptScope,
+  storage: EnrollmentAttemptStorage | null | undefined,
+  fallback: EnrollmentAttemptFallback,
+  storageNamespace = "shared",
+): readonly RetainedEnrollmentAttempt[] {
+  const read = readAttempts(scope, storage, storageNamespace);
+  if (!read.ok) {
+    throw new Error("Browser storage is temporarily unavailable.");
+  }
+  const byFingerprint = new Map(
+    read.attempts.map((attempt) => [attempt.fingerprint, attempt] as const),
+  );
+  const prefix = `${scope}:`;
+  for (const [identity, attempt] of fallback) {
+    if (!identity.startsWith(prefix)) continue;
+    const fingerprint = identity.slice(prefix.length);
+    byFingerprint.set(fingerprint, { fingerprint, ...attempt });
+  }
+  return [...byFingerprint.values()];
 }
 
 export function clearEnrollmentAttempt(
   scope: EnrollmentAttemptScope,
   fingerprint: string,
-  storage: EnrollmentAttemptStorage | undefined,
+  storage: EnrollmentAttemptStorage | null | undefined,
   fallback: EnrollmentAttemptFallback,
   storageNamespace = "shared",
 ): boolean {
   if (!/^[a-f0-9]{64}$/.test(fingerprint)) return false;
   const fallbackKey = `${scope}:${fingerprint}`;
+  if (storage === null) return false;
   if (storage === undefined) {
     fallback.delete(fallbackKey);
     return true;
@@ -237,21 +309,50 @@ export function clearEnrollmentAttempt(
 /** Conservatively report whether this tab still owns any unresolved marker. */
 export function enrollmentAttemptsRemain(
   scope: EnrollmentAttemptScope,
-  storage: EnrollmentAttemptStorage | undefined,
+  storage: EnrollmentAttemptStorage | null | undefined,
   fallback: EnrollmentAttemptFallback,
   storageNamespace = "shared",
 ): boolean {
   const prefix = `${scope}:`;
-  if ([...fallback.keys()].some((identity) => identity.startsWith(prefix))) return true;
+  if ([...fallback.keys()].some((identity) => identity.startsWith(prefix)))
+    return true;
+  if (storage === null) return true;
   if (storage === undefined) return false;
   const read = readAttempts(scope, storage, storageNamespace);
   return !read.ok || read.attempts.length > 0;
 }
 
-export function availableSessionStorage(): EnrollmentAttemptStorage | undefined {
+export function availableSessionStorage(): Storage | null {
   try {
     return window.sessionStorage;
   } catch {
-    return undefined;
+    return null;
+  }
+}
+
+/**
+ * Root-layout unload guard: true means at least one tab-scoped recovery marker
+ * may remain. Inaccessible storage is deliberately `true`; after reload there
+ * is no honest way to distinguish "disabled and empty" from "temporarily
+ * unreadable with a one-time key inside".
+ */
+export function enrollmentRecoveryMarkersMayRemain(
+  storage: Pick<Storage, "length" | "key" | "getItem"> | null,
+): boolean {
+  if (storage === null) return true;
+  try {
+    for (let index = 0; index < storage.length; index += 1) {
+      const key = storage.key(index);
+      if (
+        key?.startsWith("asimposium.enrollment.") === true &&
+        key.endsWith(".v2") &&
+        storage.getItem(key) !== null
+      ) {
+        return true;
+      }
+    }
+    return false;
+  } catch {
+    return true;
   }
 }
