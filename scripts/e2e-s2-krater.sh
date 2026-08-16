@@ -5703,11 +5703,26 @@ run_s2_shell_regression_test() {
         >"${controller_identity}") 2>/dev/null || return 1
     if [[ "${S2_PLANT_POST_RELEASE_READY_PREDICATE:-none}" == exit-race ]]; then
       local exit_race_ready exit_race_request exit_race_line
+      local exit_race_load_barrier exit_race_load_barrier_root
+      local exit_race_load_barrier_token exit_race_load_barrier_size
+      local exit_race_load_ready_pending exit_race_load_ready
+      local exit_race_load_release_pending exit_race_load_release
+      local exit_race_load_release_line
       S2_EVIDENCE_SEALING_REFUSED_FOR_CONTROLLER_EXIT_RACE=1
       exit_race_ready="${controller_status}.exit-race-ready"
       exit_race_request="${controller_status}.exit-race-request"
       (umask 077; set -o noclobber; \
         printf 'exit-race-ready %s\n' "$$" >"${exit_race_ready}") 2>/dev/null || return 1
+      exit_race_load_barrier="${S2_PLANT_POST_RELEASE_CONTROLLER_LOAD_BARRIER:-0}"
+      exit_race_load_barrier_root="${S2_PLANT_POST_RELEASE_CONTROLLER_LOAD_BARRIER_ROOT:-}"
+      exit_race_load_barrier_token="${S2_PLANT_POST_RELEASE_CONTROLLER_LOAD_BARRIER_TOKEN:-}"
+      exit_race_load_barrier_size="${S2_PLANT_POST_RELEASE_CONTROLLER_LOAD_BARRIER_SIZE:-}"
+      [[ "${exit_race_load_barrier}" == 0 || "${exit_race_load_barrier}" == 1 ]] || return 1
+      if [[ "${exit_race_load_barrier}" == 0 ]]; then
+        [[ -z "${exit_race_load_barrier_root}" && \
+          -z "${exit_race_load_barrier_token}" && \
+          -z "${exit_race_load_barrier_size}" ]] || return 1
+      fi
       deadline="$(s2_deadline_at "${S2_READY_DEADLINE_SECONDS}")"
       while (( SECONDS < deadline )); do
         if [[ -f "${exit_race_request}" && ! -L "${exit_race_request}" ]]; then
@@ -5715,7 +5730,57 @@ run_s2_shell_regression_test() {
             IFS= read -r exit_race_line || exit_race_line=""
             if IFS= read -r _; then exit_race_line=""; fi
           } <"${exit_race_request}"
-          [[ "${exit_race_line}" == "exit-before-term-identity $$" ]] && return 1
+          if [[ "${exit_race_line}" == "exit-before-term-identity $$" ]]; then
+            if [[ "${exit_race_load_barrier}" == 1 ]]; then
+              [[ "${exit_race_load_barrier_root}" == /* && \
+                -d "${exit_race_load_barrier_root}" && \
+                ! -L "${exit_race_load_barrier_root}" && \
+                "${exit_race_load_barrier_token}" =~ ^[A-Za-z0-9][A-Za-z0-9._-]{0,79}$ && \
+                "${exit_race_load_barrier_size}" =~ ^[1-9][0-9]?$ && \
+                ${exit_race_load_barrier_size} -ge 2 && \
+                ${exit_race_load_barrier_size} -le 16 ]] || return 1
+              exit_race_load_ready="${exit_race_load_barrier_root}/${exit_race_load_barrier_token}.ready"
+              exit_race_load_ready_pending="${exit_race_load_ready}.pending"
+              exit_race_load_release="${exit_race_load_barrier_root}/release"
+              exit_race_load_release_pending="${exit_race_load_release}.pending"
+              [[ ! -e "${exit_race_load_ready}" && ! -L "${exit_race_load_ready}" && \
+                ! -e "${exit_race_load_ready_pending}" && \
+                ! -L "${exit_race_load_ready_pending}" && \
+                ! -e "${exit_race_load_release}" && ! -L "${exit_race_load_release}" && \
+                ! -e "${exit_race_load_release_pending}" && \
+                ! -L "${exit_race_load_release_pending}" ]] || return 1
+              (umask 077; set -o noclobber; \
+                printf 'exit-race-load-request-observed %s %s %s %s\n' \
+                  "$$" "${PPID}" "${exit_race_load_barrier_token}" \
+                  "${exit_race_load_barrier_size}" \
+                  >"${exit_race_load_ready_pending}") 2>/dev/null || return 1
+              ln "${exit_race_load_ready_pending}" \
+                "${exit_race_load_ready}" 2>/dev/null || return 1
+              deadline="$(s2_deadline_at "${S2_READY_DEADLINE_SECONDS}")"
+              exit_race_load_release_line=""
+              while (( SECONDS < deadline )); do
+                if [[ -e "${exit_race_load_release}" || -L "${exit_race_load_release}" ]]; then
+                  [[ -f "${exit_race_load_release}" && \
+                    ! -L "${exit_race_load_release}" ]] || return 1
+                  {
+                    IFS= read -r exit_race_load_release_line || \
+                      exit_race_load_release_line=""
+                    if IFS= read -r _; then
+                      exit_race_load_release_line=""
+                    fi
+                  } <"${exit_race_load_release}"
+                  [[ "${exit_race_load_release_line}" == \
+                    "exit-race-load-release ${exit_race_load_barrier_size}" ]] || return 1
+                  break
+                fi
+                kill -0 "${PPID}" 2>/dev/null || return 1
+                sleep 0.01
+              done
+              [[ "${exit_race_load_release_line}" == \
+                "exit-race-load-release ${exit_race_load_barrier_size}" ]] || return 1
+            fi
+            return 1
+          fi
         fi
         kill -0 "${PPID}" 2>/dev/null || return 1
         sleep 0.01

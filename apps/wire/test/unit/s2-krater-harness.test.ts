@@ -4,12 +4,14 @@ import { randomUUID } from "node:crypto";
 import {
   closeSync,
   existsSync,
+  linkSync,
   lstatSync,
   mkdtempSync,
   openSync,
   readdirSync,
   readFileSync,
   symlinkSync,
+  writeFileSync,
 } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
@@ -68,6 +70,7 @@ const S2_SHELL_REGRESSION_TEST_TIMEOUT_MS = 120_000;
 const CONCURRENT_CONTROLLER_SETUP_MS = 5_000;
 const CONCURRENT_PROCESS_GROUP_GRACE_MS = 2_000;
 const CONCURRENT_CAPTURE_TEST_TIMEOUT_MS = 25_000;
+const EXIT_RACE_LOAD_BARRIER_WAIT_MS = 10_000;
 const CONCURRENT_LEGACY_TEST_TIMEOUT_MS =
   CONCURRENT_CONTROLLER_SETUP_MS +
   S2_SHELL_REGRESSION_WATCHDOG_MS +
@@ -467,6 +470,74 @@ function runCapturedConcurrently(
 
 async function runHarness(env: Record<string, string>, deadlineMs: number): Promise<Run> {
   return runCaptured("bash", [SCRIPT], env, deadlineMs);
+}
+
+function runHarnessConcurrently(env: Record<string, string>, deadlineMs: number): Promise<Run> {
+  return runCapturedConcurrently("bash", [SCRIPT], env, deadlineMs);
+}
+
+interface ExitRaceLoadReadyRecord {
+  readonly controllerPid: number;
+  readonly parentPid: number;
+  readonly token: string;
+  readonly size: number;
+}
+
+function readExitRaceLoadReadyRecord(
+  barrierRoot: string,
+  token: string,
+  size: number,
+): ExitRaceLoadReadyRecord | undefined {
+  const readyPath = join(barrierRoot, `${token}.ready`);
+  if (!existsSync(readyPath)) return undefined;
+  const readyStat = lstatSync(readyPath);
+  if (!readyStat.isFile() || readyStat.isSymbolicLink()) {
+    throw new Error(`exit-race load ready path is not a regular file: ${token}`);
+  }
+  const match =
+    /^exit-race-load-request-observed ([1-9][0-9]*) ([1-9][0-9]*) ([A-Za-z0-9][A-Za-z0-9._-]{0,79}) ([1-9][0-9]?)\n$/u.exec(
+      readFileSync(readyPath, "utf8"),
+    );
+  const controllerPid = Number(match?.[1]);
+  const parentPid = Number(match?.[2]);
+  const observedToken = match?.[3];
+  const observedSize = Number(match?.[4]);
+  if (
+    match === null ||
+    !Number.isSafeInteger(controllerPid) ||
+    controllerPid <= 0 ||
+    !Number.isSafeInteger(parentPid) ||
+    parentPid <= 0 ||
+    observedToken !== token ||
+    observedSize !== size
+  ) {
+    throw new Error(`exit-race load ready record is malformed: ${token}`);
+  }
+  return { controllerPid, parentPid, token: observedToken, size: observedSize };
+}
+
+async function waitForExitRaceLoadReadyRecords(
+  barrierRoot: string,
+  tokens: readonly string[],
+  deadlineMs: number,
+): Promise<ExitRaceLoadReadyRecord[]> {
+  const deadline = Date.now() + deadlineMs;
+  while (Date.now() < deadline) {
+    const records = tokens.map((token) =>
+      readExitRaceLoadReadyRecord(barrierRoot, token, tokens.length),
+    );
+    if (records.every((record): record is ExitRaceLoadReadyRecord => record !== undefined)) {
+      return records;
+    }
+    await new Promise<void>((resolveWait) => setTimeout(resolveWait, 10));
+  }
+  const visibleTokens = tokens.filter(
+    (token) => readExitRaceLoadReadyRecord(barrierRoot, token, tokens.length) !== undefined,
+  );
+  throw new Error(
+    `exit-race load barrier timed out: ready=${visibleTokens.length}/${tokens.length}; ` +
+      `tokens=${visibleTokens.join(",") || "none"}`,
+  );
 }
 
 /**
@@ -942,6 +1013,17 @@ describe("S2 to S7 normalized cost receipt", () => {
     expect(postReleaseCleanup).toContain(
       "S2_POST_RELEASE_PARTIAL_OBSERVATION_PROPAGATED_DURING_EXIT_CLEANUP",
     );
+    const exitRaceInitialLive = postReleaseCleanup.indexOf(
+      // biome-ignore lint/suspicious/noTemplateCurlyInString: asserts literal shell source text.
+      'if post_release_controller_is_live_non_zombie "${pid}"; then',
+    );
+    const exitRaceRequest = postReleaseCleanup.indexOf("printf 'exit-before-term-identity %s\\n'");
+    const exitRaceTermIdentity = postReleaseCleanup.indexOf(
+      "S2_POST_RELEASE_CONTROLLER_CLEANUP_STAGE=term-identity\n",
+    );
+    expect(exitRaceInitialLive).toBeGreaterThanOrEqual(0);
+    expect(exitRaceRequest).toBeGreaterThan(exitRaceInitialLive);
+    expect(exitRaceTermIdentity).toBeGreaterThan(exitRaceRequest);
     expect(
       postReleaseCleanup.indexOf("S2_EVIDENCE_SEALING_REFUSED_FOR_PARTIAL_OBSERVATION=1"),
     ).toBeLessThan(postReleaseCleanup.lastIndexOf("clear_post_release_controller"));
@@ -981,6 +1063,21 @@ describe("S2 to S7 normalized cost receipt", () => {
     // A bare OR-list call recreates the original false green: the outer dispatcher invokes this
     // function in an `if`, so Bash suppresses errexit throughout the function body.
     expect(postReleaseCheckpoint).not.toMatch(/\|\|\s*post_release_controller_refuse(?:\s|$)/u);
+    const exitRaceChildStart = shell.indexOf(
+      // biome-ignore lint/suspicious/noTemplateCurlyInString: asserts literal shell source text.
+      'if [[ "${S2_PLANT_POST_RELEASE_READY_PREDICATE:-none}" == exit-race ]]',
+    );
+    const exitRaceChild = shell.slice(
+      exitRaceChildStart,
+      shell.indexOf("S2_PLANT_POST_RELEASE_SAFE_BARRIER=1", exitRaceChildStart),
+    );
+    const exitRaceChildRequest = exitRaceChild.indexOf(
+      // biome-ignore lint/suspicious/noTemplateCurlyInString: asserts literal shell source text.
+      'if [[ "${exit_race_line}" == "exit-before-term-identity $$" ]]',
+    );
+    const exitRaceSharedReady = exitRaceChild.indexOf("exit-race-load-request-observed");
+    expect(exitRaceChildRequest).toBeGreaterThanOrEqual(0);
+    expect(exitRaceSharedReady).toBeGreaterThan(exitRaceChildRequest);
     const termInterrupt = shell.slice(
       // biome-ignore lint/suspicious/noTemplateCurlyInString: asserts literal shell source text.
       shell.indexOf('if [[ "${mode}" == "term-interrupt-cleanup" ]]'),
@@ -1694,24 +1791,113 @@ describe("registered S2 shell and lifecycle regressions", () => {
   );
 
   test(
-    "PLANTED: term-identity exit races remain bounded under concurrent controller load",
+    "PLANTED: four term-identity exit races overlap at a shared controller barrier",
     async () => {
+      const barrierRoot = mkdtempSync(join(tmpdir(), "asimposium-s2-exit-race-load-"));
+      const releasePendingPath = join(barrierRoot, "release.pending");
+      const releasePath = join(barrierRoot, "release");
       const fixtures = Array.from({ length: 4 }, (_, index) => ({
         index,
         runId: `s2u-${randomUUID().replaceAll("-", "").slice(0, 24)}`,
+        barrierToken: `fixture-${index}-${randomUUID().replaceAll("-", "").slice(0, 16)}`,
       }));
-      const runs = await Promise.all(
-        fixtures.map((fixture) =>
-          runHarness(
-            {
-              S2_RUN_ID: fixture.runId,
-              S2_SHELL_REGRESSION_TEST: "post-release-controller-term-identity-exit-race",
-              S2_PLANT_POST_RELEASE_CONTROLLER_EXIT_BEFORE_TERM_IDENTITY: "1",
-            },
-            S2_SHELL_REGRESSION_WATCHDOG_MS,
-          ),
-        ),
+      let settledBeforeRelease = 0;
+      const runPromises = fixtures.map((fixture) =>
+        runHarnessConcurrently(
+          {
+            S2_RUN_ID: fixture.runId,
+            S2_SHELL_REGRESSION_TEST: "post-release-controller-term-identity-exit-race",
+            S2_PLANT_POST_RELEASE_CONTROLLER_EXIT_BEFORE_TERM_IDENTITY: "1",
+            S2_PLANT_POST_RELEASE_CONTROLLER_LOAD_BARRIER: "1",
+            S2_PLANT_POST_RELEASE_CONTROLLER_LOAD_BARRIER_ROOT: barrierRoot,
+            S2_PLANT_POST_RELEASE_CONTROLLER_LOAD_BARRIER_TOKEN: fixture.barrierToken,
+            S2_PLANT_POST_RELEASE_CONTROLLER_LOAD_BARRIER_SIZE: String(fixtures.length),
+          },
+          S2_SHELL_REGRESSION_WATCHDOG_MS,
+        ).finally(() => {
+          settledBeforeRelease += 1;
+        }),
       );
+      let barrierFailure: Error | undefined;
+      let releasePublished = false;
+      try {
+        const readyRecords = await waitForExitRaceLoadReadyRecords(
+          barrierRoot,
+          fixtures.map((fixture) => fixture.barrierToken),
+          EXIT_RACE_LOAD_BARRIER_WAIT_MS,
+        );
+        expect(readyRecords).toHaveLength(fixtures.length);
+        expect(new Set(readyRecords.map((record) => record.controllerPid)).size).toBe(
+          fixtures.length,
+        );
+        expect(new Set(readyRecords.map((record) => record.parentPid)).size).toBe(fixtures.length);
+        expect(readyRecords.map((record) => record.token).sort()).toEqual(
+          fixtures.map((fixture) => fixture.barrierToken).sort(),
+        );
+        expect(new Set(readyRecords.map((record) => record.size))).toEqual(
+          new Set([fixtures.length]),
+        );
+        expect(settledBeforeRelease).toBe(0);
+        expect(existsSync(releasePath)).toBe(false);
+        expect(existsSync(releasePendingPath)).toBe(false);
+
+        const barrierProcessSnapshot = captureS2LifecycleProcessTable();
+        expect(barrierProcessSnapshot.status).toBe(0);
+        expect(barrierProcessSnapshot.signal).toBeNull();
+        const liveNonZombieRows = new Map(
+          barrierProcessSnapshot.stdout
+            .split("\n")
+            .map((line) => line.trim().split(/\s+/u))
+            .filter((fields) => fields.length >= 4 && fields[3]?.startsWith("Z") === false)
+            .map((fields) => [Number(fields[0]), Number(fields[2])] as const)
+            .filter(
+              ([pid, parentPid]) =>
+                Number.isSafeInteger(pid) &&
+                pid > 0 &&
+                Number.isSafeInteger(parentPid) &&
+                parentPid > 0,
+            ),
+        );
+        expect(
+          readyRecords.every(
+            (record) =>
+              liveNonZombieRows.get(record.controllerPid) === record.parentPid &&
+              liveNonZombieRows.has(record.parentPid),
+          ),
+        ).toBe(true);
+        expect(
+          readyRecords.every(
+            (record) =>
+              !readyRecords.some((otherRecord) => record.controllerPid === otherRecord.parentPid),
+          ),
+        ).toBe(true);
+      } catch (error) {
+        barrierFailure = error instanceof Error ? error : new Error(String(error));
+      }
+
+      try {
+        writeFileSync(releasePendingPath, `exit-race-load-release ${fixtures.length}\n`, {
+          encoding: "utf8",
+          flag: "wx",
+          mode: 0o600,
+        });
+        linkSync(releasePendingPath, releasePath);
+        releasePublished = true;
+      } catch (error) {
+        const publicationFailure =
+          error instanceof Error
+            ? error
+            : new Error(`release publication failed: ${String(error)}`);
+        barrierFailure =
+          barrierFailure === undefined
+            ? publicationFailure
+            : new AggregateError(
+                [barrierFailure, publicationFailure],
+                "exit-race load barrier observation and release publication both failed",
+              );
+      }
+
+      const runs = await Promise.all(runPromises);
       const survivorSnapshot = captureS2LifecycleProcessTable();
       const failures = collectAllFixtureVerificationFailures(fixtures, (fixture, index) => {
         const run = runs[index];
@@ -1719,6 +1905,7 @@ describe("registered S2 shell and lifecycle regressions", () => {
         assertS2RunThenScanForSurvivors(
           `term-identity-exit-race-${fixture.index}`,
           () => {
+            expect(releasePublished).toBe(true);
             expect(run.exitCode).toBe(0);
             expect(ndjsonRecords(run)).toContainEqual(
               expect.objectContaining({
@@ -1740,11 +1927,15 @@ describe("registered S2 shell and lifecycle regressions", () => {
           () => parseS2LifecycleProcessTable(fixture.runId, survivorSnapshot),
         );
       });
-      if (failures.length !== 0) {
+      const allFailures = [
+        ...(barrierFailure === undefined ? [] : [{ index: -1, error: barrierFailure }]),
+        ...failures,
+      ];
+      if (allFailures.length !== 0) {
         throw new AggregateError(
-          failures.map((failure) => failure.error),
-          `concurrent term-identity exit-race failures: ${failures
-            .map((failure) => failure.index)
+          allFailures.map((failure) => failure.error),
+          `deterministic concurrent term-identity exit-race failures: ${allFailures
+            .map((failure) => (failure.index === -1 ? "barrier" : failure.index))
             .join(",")}`,
         );
       }
