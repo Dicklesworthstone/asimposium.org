@@ -55,6 +55,7 @@ readonly READINESS_DEADLINE_SECONDS=45
 readonly CLIENT_DEADLINE_SECONDS=180
 readonly MIGRATION_DEADLINE_SECONDS=120
 readonly OWNERSHIP_QUERY_DEADLINE_SECONDS=30
+readonly ARTIFACT_SCAN_DEADLINE_SECONDS=15
 readonly SUPERVISOR_STOP_DEADLINE_SECONDS=10
 readonly TERMINATION_GRACE_SECONDS=5
 readonly TRANSIENT_INSPECTION_DEADLINE_SECONDS=1
@@ -1098,52 +1099,100 @@ scan_retained_files_for_secret() {
   # The JavaScript is intentionally single-quoted; shell interpolation here
   # would risk placing the searched secret into generated source or output.
   # shellcheck disable=SC2016
-  printf '%s' "$secret" | bun -e '
-    import { lstat, readdir, readFile } from "node:fs/promises";
+  printf '%s' "$secret" | perl -e '
+    $SIG{ALRM} = sub { exit 124 };
+    alarm shift @ARGV;
+    exec @ARGV;
+  ' "$ARTIFACT_SCAN_DEADLINE_SECONDS" bun -e '
+    import { constants } from "node:fs";
+    import { lstat, open, opendir } from "node:fs/promises";
     import { join } from "node:path";
 
     const root = process.argv[1];
     const secret = Buffer.from(await Bun.stdin.text());
     let total = 0;
     let files = 0;
+    let entries = 0;
+    let directories = 0;
     const MAX_FILE = 64 * 1024 * 1024;
     const MAX_TOTAL = 128 * 1024 * 1024;
+    const MAX_ENTRIES = 10_000;
+    const MAX_DIRECTORIES = 1_000;
+    const MAX_DEPTH = 32;
 
-    async function walk(directory) {
-      const entries = await readdir(directory, { withFileTypes: true });
-      for (const entry of entries) {
+    async function walk(directory, depth) {
+      if (depth > MAX_DEPTH || ++directories > MAX_DIRECTORIES) {
+        throw new Error("tree-bound");
+      }
+      const directoryBefore = await lstat(directory);
+      if (!directoryBefore.isDirectory() || directoryBefore.isSymbolicLink()) {
+        throw new Error("directory-shape");
+      }
+      const handle = await opendir(directory);
+      for await (const entry of handle) {
+        if (++entries > MAX_ENTRIES) throw new Error("entry-bound");
         const path = join(directory, entry.name);
         const evidence = await lstat(path);
         if (evidence.isSymbolicLink()) throw new Error("symlink");
         if (evidence.isDirectory()) {
-          await walk(path);
+          await walk(path, depth + 1);
           continue;
         }
         if (!evidence.isFile() || evidence.size > MAX_FILE) {
           throw new Error("unscannable");
         }
-        total += evidence.size;
-        files += 1;
-        if (total > MAX_TOTAL) throw new Error("unbounded");
-        if ((await readFile(path)).includes(secret)) process.exit(3);
+        const file = await open(
+          path,
+          constants.O_RDONLY | constants.O_NOFOLLOW,
+        );
+        try {
+          const opened = await file.stat();
+          if (
+            !opened.isFile() ||
+            opened.dev !== evidence.dev ||
+            opened.ino !== evidence.ino ||
+            opened.size !== evidence.size ||
+            opened.size > MAX_FILE
+          ) {
+            throw new Error("file-changed");
+          }
+          total += opened.size;
+          files += 1;
+          if (total > MAX_TOTAL) throw new Error("byte-bound");
+          if ((await file.readFile()).includes(secret)) process.exit(3);
+        } finally {
+          await file.close();
+        }
       }
+      const directoryAfter = await lstat(directory);
+      if (
+        !directoryAfter.isDirectory() ||
+        directoryAfter.isSymbolicLink() ||
+        directoryAfter.dev !== directoryBefore.dev ||
+        directoryAfter.ino !== directoryBefore.ino
+      ) throw new Error("directory-changed");
     }
 
     try {
-      await walk(root);
+      await walk(root, 0);
       process.stdout.write(`${files} ${total}`);
     } catch {
       process.exit(4);
     }
-  ' "$root" >/dev/null 2>&1 || scan_status=$?
+  ' "$root" 2>/dev/null || scan_status=$?
   return "$scan_status"
 }
 
 assert_local_replay_key_not_retained() {
-  local scan_status=0
-  scan_retained_files_for_secret "$STATE_DIR" "$LOCAL_REPLAY_KEY" || scan_status=$?
+  local scan_status=0 scan_summary=""
+  scan_summary="$(scan_retained_files_for_secret "$STATE_DIR" "$LOCAL_REPLAY_KEY")" || scan_status=$?
   case "$scan_status" in
-    0) log_phase "replay-key-artifact-scan" "result=absent scope=retained-state" ;;
+    0)
+      [[ "$scan_summary" =~ ^([0-9]+)[[:space:]]([0-9]+)$ ]] ||
+        failed "LOCAL_REPLAY_KEY_ARTIFACT_SCAN_UNTRUSTED"
+      log_phase "replay-key-artifact-scan" \
+        "result=absent scope=retained-state files=${BASH_REMATCH[1]} bytes=${BASH_REMATCH[2]} deadline_s=$ARTIFACT_SCAN_DEADLINE_SECONDS"
+      ;;
     3) failed "LOCAL_REPLAY_KEY_RETAINED" ;;
     *) failed "LOCAL_REPLAY_KEY_ARTIFACT_SCAN_UNTRUSTED" ;;
   esac
@@ -2360,15 +2409,18 @@ self_test_named_phase() {
 # replay key is written. Only exit 3 demonstrates that the byte scanner found
 # the planted value without echoing it.
 self_test_replay_artifact_scan() {
-  local scan_status=0
+  local scan_status=0 scan_summary=""
   lifecycle_state_dir "replay-artifact-scan"
   LOCAL_REPLAY_KEY="S1ArtifactScanCanary_0123456789abcdefghijkl"
   [[ "${#LOCAL_REPLAY_KEY}" -eq 43 ]] || failed "REPLAY_ARTIFACT_CANARY_INVALID"
-  printf '%s' "$LOCAL_REPLAY_KEY" >"$STATE_DIR/planted-replay-key-canary"
-  scan_retained_files_for_secret "$STATE_DIR" "$LOCAL_REPLAY_KEY" || scan_status=$?
+  mkdir "$STATE_DIR/nested"
+  printf '\0prefix:%s:suffix\0' "$LOCAL_REPLAY_KEY" >"$STATE_DIR/nested/planted-replay-key-canary.bin"
+  scan_summary="$(scan_retained_files_for_secret "$STATE_DIR" "$LOCAL_REPLAY_KEY")" || scan_status=$?
   ((scan_status == 3)) || failed "REPLAY_ARTIFACT_SCAN_FALSE_NEGATIVE"
+  [[ -z "$scan_summary" ]] || failed "REPLAY_ARTIFACT_SCAN_SECRET_OUTPUT"
   LOCAL_REPLAY_KEY=""
-  log_phase "replay-key-artifact-plant-refused" "result=detected scope=retained-state"
+  log_phase "replay-key-artifact-plant-refused" \
+    "result=detected scope=retained-state artifact=nested-nul deadline_s=$ARTIFACT_SCAN_DEADLINE_SECONDS"
   emit "pass" "REPLAY_ARTIFACT_SCAN_SELF_TEST_PASSED"
 }
 

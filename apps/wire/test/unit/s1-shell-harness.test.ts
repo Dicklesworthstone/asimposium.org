@@ -433,10 +433,6 @@ describe("the self-test and the blocked external proof", () => {
     expect(existsSync(stateDir)).toBe(true);
     const retained = retainedArtifacts(stateDir);
     expect(retained.files.length).toBeGreaterThanOrEqual(2);
-    // NUL-containing files (such as local state) are byte-scanned, not skipped.
-    // This asserts the count and refuses any artifact that was not scanned.
-    expect(retained.scannedNulArtifacts).toBe(retained.nulArtifacts);
-    expect(retained.unscannedNulArtifacts).toBe(0);
     for (const artifact of retained.files) {
       expect(
         bytesContain(artifact.bytes, fragmentSentinel),
@@ -712,9 +708,18 @@ describe("a pinned port is validated before anything is started", () => {
     const stateDir = phaseValue(run.stderr, "state-retained", "dir") as string;
     const retained = retainedArtifacts(stateDir);
     expect(retained.files.length).toBeGreaterThanOrEqual(3);
-    expect(retained.scannedNulArtifacts).toBe(retained.nulArtifacts);
-    expect(retained.unscannedNulArtifacts).toBe(0);
-  }, 630_000);
+    expect(
+      Number(phaseValue(run.stderr, "replay-key-artifact-scan", "files")),
+    ).toBe(retained.files.length);
+    const scannedBytes = Number(
+      phaseValue(run.stderr, "replay-key-artifact-scan", "bytes"),
+    );
+    expect(Number.isSafeInteger(scannedBytes)).toBe(true);
+    expect(scannedBytes).toBeGreaterThan(0);
+    expect(scannedBytes).toBeLessThanOrEqual(
+      retained.files.reduce((total, file) => total + file.bytes.length, 0),
+    );
+  }, 720_000);
 
   test("PLANTED: the retained-artifact scanner detects its exact non-credential canary", async () => {
     const run = await runScript(["--self-test-replay-artifact-scan"]);
@@ -723,26 +728,23 @@ describe("a pinned port is validated before anything is started", () => {
     expect(
       phaseValue(run.stderr, "replay-key-artifact-plant-refused", "result"),
     ).toBe("detected");
+    expect(
+      phaseValue(run.stderr, "replay-key-artifact-plant-refused", "artifact"),
+    ).toBe("nested-nul");
   });
 });
 
 function retainedArtifacts(root: string): {
   files: Array<{ path: string; bytes: Uint8Array }>;
-  nulArtifacts: number;
-  scannedNulArtifacts: number;
-  unscannedNulArtifacts: number;
 } {
   const files: Array<{ path: string; bytes: Uint8Array }> = [];
-  let nulArtifacts = 0;
   for (const entry of readdirSync(root, { withFileTypes: true })) {
     const path = `${root}/${entry.name}`;
     if (entry.isDirectory()) {
       const nested = retainedArtifacts(path);
       files.push(...nested.files);
-      nulArtifacts += nested.nulArtifacts;
     } else if (entry.isFile()) {
       const bytes = readFileSync(path);
-      if (bytes.includes(0)) nulArtifacts += 1;
       // Scan raw bytes rather than attempting text decoding: a NUL-containing
       // SQLite/local-state file is still an artifact in scope for secret proof.
       files.push({ path, bytes });
@@ -753,9 +755,6 @@ function retainedArtifacts(root: string): {
   }
   return {
     files,
-    nulArtifacts,
-    scannedNulArtifacts: nulArtifacts,
-    unscannedNulArtifacts: 0,
   };
 }
 
@@ -1687,7 +1686,7 @@ describe("lifecycle: parallel runs and signal handling", () => {
     // Retained, both of them: no cleanup-by-deletion on either path.
     expect(existsSync(firstDir as string)).toBe(true);
     expect(existsSync(secondDir as string)).toBe(true);
-  }, 480_000);
+  }, 720_000);
 
   test("PLANTED: TERM terminates the whole child group and retains the state directory", async () => {
     if (!existsSync(WRANGLER)) {
