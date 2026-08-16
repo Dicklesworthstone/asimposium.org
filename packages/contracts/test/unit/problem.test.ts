@@ -50,6 +50,10 @@ const INVALID_UNKNOWN_FORMAT_WITHOUT_ALLOWED = new URL(
   "../fixtures/invalid/problem-unknown-format-no-allowed.json",
   import.meta.url,
 );
+const INVALID_FELLOW_LIST_CURSOR_INVALID_UNTAUGHT = new URL(
+  "../fixtures/invalid/problem-fellow-list-cursor-invalid-untaught.json",
+  import.meta.url,
+);
 
 const VALID_ADDITIONAL_PROBLEMS = [
   ["problem-unauthorized.json", "UNAUTHORIZED", 401, "opaque"],
@@ -69,6 +73,7 @@ const VALID_ADDITIONAL_PROBLEMS = [
   ["problem-device-code-body-invalid.json", "DEVICE_CODE_BODY_INVALID", 422, "contract"],
   ["problem-json-content-type-required.json", "JSON_CONTENT_TYPE_REQUIRED", 415, "contract"],
   ["problem-registration-body-invalid.json", "REGISTRATION_BODY_INVALID", 422, "contract"],
+  ["problem-fellow-list-cursor-invalid.json", "FELLOW_LIST_CURSOR_INVALID", 422, "contract"],
   [
     "problem-sponsor-bootstrap-body-invalid.json",
     "SPONSOR_BOOTSTRAP_BODY_INVALID",
@@ -138,6 +143,10 @@ test("a contract refusal that teaches nothing is not a valid contract refusal", 
   // Dropping them is the regression this fixture exists to fail on.
   expect(ProblemDocumentSchema.safeParse(await fixture(INVALID_UNTAUGHT)).success).toBe(false);
   expect(ContractProblemSchema.safeParse(await fixture(INVALID_UNTAUGHT)).success).toBe(false);
+  expect(
+    ContractProblemSchema.safeParse(await fixture(INVALID_FELLOW_LIST_CURSOR_INVALID_UNTAUGHT))
+      .success,
+  ).toBe(false);
 });
 
 test("the device-start throttle is opaque and cannot carry teaching fields", async () => {

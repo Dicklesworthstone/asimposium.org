@@ -6,17 +6,20 @@ import {
   DeviceLookupRequestSchema,
   EnrollmentFlowPollRequestSchema,
   EnrollmentSecretSchema,
+  encodeSponsorFellowCursor,
   FellowNameSchema,
   FellowRegistrationCredentialFieldsSchema,
   FellowRegistrationRequestSchema,
   MintEnrollmentRequestSchema,
   MintEnrollmentResponseSchema,
+  parseSponsorFellowCursor,
   SponsorBootstrapRequestSchema,
   SponsorCredentialRevokeRequestSchema,
   SponsorCredentialRevokeResponseSchema,
   SponsorEnrollmentDecisionCommandSchema,
   SponsorEnrollmentDecisionResponseSchema,
   SponsorEnrollmentDecisionSchema,
+  SponsorFellowCursorSchema,
   SponsorFellowLifecycleRequestSchema,
   SponsorFellowLifecycleResponseSchema,
   SponsorFellowListResponseSchema,
@@ -368,6 +371,10 @@ const VALID_FELLOW_LIST_FIXTURE = new URL(
   "../fixtures/valid/enrollment-fellow-list.json",
   import.meta.url,
 );
+const VALID_FELLOW_LIST_PAGE_FIXTURE = new URL(
+  "../fixtures/valid/enrollment-fellow-list-page.json",
+  import.meta.url,
+);
 const VALID_DECISION_RESPONSE_FIXTURE = new URL(
   "../fixtures/valid/enrollment-decision-response.json",
   import.meta.url,
@@ -378,6 +385,10 @@ const INVALID_MINT_RESPONSE_FIXTURE = new URL(
 );
 const INVALID_FELLOW_LIST_FIXTURE = new URL(
   "../fixtures/invalid/enrollment-fellow-list-extra.json",
+  import.meta.url,
+);
+const INVALID_FELLOW_LIST_CURSOR_FIXTURE = new URL(
+  "../fixtures/invalid/enrollment-fellow-list-cursor.json",
   import.meta.url,
 );
 
@@ -414,6 +425,7 @@ test("the sponsor fellow list exposes hygiene metadata but no bearer or token ha
       profile: "bearer",
       active: true,
     });
+    expect(parsed.data.next_cursor).toBeNull();
     const fellow = parsed.data.fellows[0];
     const credential = fellow?.credentials[0];
     expect(fellow).toBeDefined();
@@ -430,6 +442,7 @@ test("the sponsor fellow list exposes hygiene metadata but no bearer or token ha
               })),
             },
           ],
+          next_cursor: null,
         }).success,
       ).toBe(false);
     }
@@ -438,6 +451,51 @@ test("the sponsor fellow list exposes hygiene metadata but no bearer or token ha
   expect(
     SponsorFellowListResponseSchema.safeParse(await fixture(INVALID_FELLOW_LIST_FIXTURE)).success,
   ).toBe(false);
+  expect(
+    SponsorFellowListResponseSchema.safeParse(await fixture(INVALID_FELLOW_LIST_CURSOR_FIXTURE))
+      .success,
+  ).toBe(false);
+});
+
+test("a Fellow cursor is versioned, length-prefixed, and accepts only its canonical spelling", async () => {
+  const paged = SponsorFellowListResponseSchema.parse(
+    await fixture(VALID_FELLOW_LIST_PAGE_FIXTURE),
+  );
+  const cursor = paged.next_cursor;
+  expect(cursor).not.toBeNull();
+  if (cursor === null) return;
+  expect(SponsorFellowCursorSchema.safeParse(cursor).success).toBe(true);
+  expect(parseSponsorFellowCursor(cursor)).toEqual({
+    granted_at: 1_786_800_000_000,
+    fellow_id: "fellow-01JXYZ",
+  });
+  expect(
+    encodeSponsorFellowCursor({
+      granted_at: 1_786_800_000_000,
+      fellow_id: "fellow-01JXYZ",
+    }),
+  ).toBe(cursor);
+
+  // Padding creates the same decoded bytes but must not become a second cursor spelling.
+  expect(SponsorFellowCursorSchema.safeParse(`${cursor}=`).success).toBe(false);
+  expect(parseSponsorFellowCursor(`f1.${cursor.slice(3)}A`)).toBeUndefined();
+});
+
+test("the generated cursor schema names its runtime-only canonical-frame boundary", async () => {
+  const generated = (await fixture(GENERATED_ENROLLMENT_SCHEMA)) as {
+    properties?: Record<string, { pattern?: string; description?: string }>;
+  };
+  const cursor = generated.properties?.sponsor_fellow_cursor;
+  expect(cursor).toBeDefined();
+  if (cursor === undefined) return;
+
+  // This matches the public transport schema but not the runtime's decoded
+  // frame. Freezing that difference prevents a published schema from silently
+  // claiming equivalence that Zod's JSON Schema renderer cannot express.
+  expect(new RegExp(cursor.pattern ?? "").test("f1.not-a-canonical-cursor")).toBe(true);
+  expect(SponsorFellowCursorSchema.safeParse("f1.not-a-canonical-cursor").success).toBe(false);
+  expect(cursor.description).toContain("deliberate superset");
+  expect(cursor.description).toContain("runtime additionally requires");
 });
 
 test("the decision acknowledgement is exactly one literal", async () => {

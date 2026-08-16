@@ -29,9 +29,12 @@ import {
   type SponsorCredentialRevokeResponse,
   type SponsorEnrollmentDecision,
   type SponsorEnrollmentDecisionCommand,
+  type SponsorFellowCursor,
+  type SponsorFellowCursorKey,
   type SponsorFellowLifecycleRequest,
   type SponsorFellowLifecycleResponse,
   type SponsorFellowLifecycleTarget,
+  type SponsorFellowListResponse,
   type SponsorPanicRequest,
   type SponsorPanicResponse,
 } from "./enrollment.ts";
@@ -165,6 +168,9 @@ function generatedEnrollmentTypes(): string {
     "SponsorFellowLifecycleRequest",
     "SponsorFellowLifecycleResponse",
     "SponsorFellowLifecycleTarget",
+    "SponsorFellowCursor",
+    "SponsorFellowCursorKey",
+    "SponsorFellowListResponse",
     "SponsorPanicRequest",
     "SponsorPanicResponse",
   ] as const satisfies readonly (keyof {
@@ -194,6 +200,9 @@ function generatedEnrollmentTypes(): string {
     SponsorFellowLifecycleRequest: SponsorFellowLifecycleRequest;
     SponsorFellowLifecycleResponse: SponsorFellowLifecycleResponse;
     SponsorFellowLifecycleTarget: SponsorFellowLifecycleTarget;
+    SponsorFellowCursor: SponsorFellowCursor;
+    SponsorFellowCursorKey: SponsorFellowCursorKey;
+    SponsorFellowListResponse: SponsorFellowListResponse;
     SponsorPanicRequest: SponsorPanicRequest;
     SponsorPanicResponse: SponsorPanicResponse;
   })[];

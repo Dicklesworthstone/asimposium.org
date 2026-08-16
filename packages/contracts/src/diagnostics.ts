@@ -1,3 +1,5 @@
+import { redactCredentials } from "./diagnostic-safety.ts";
+
 export const CONTRACTS_PACKAGE = "@asimposium/contracts";
 export const CONTRACTS_VERSION = "0.0.0";
 
@@ -32,12 +34,21 @@ export interface SafeDiagnosticInput {
 /**
  * Diagnostics are deliberately structured and omit error bodies, paths, and
  * environment data so a failed contract gate cannot echo a secret.
+ *
+ * Safety here is primarily *typed*: `status`, `code` and `reproduce` are closed
+ * vocabularies, and every caller in this package passes a literal `suite`. That
+ * leaves `suite` as the one free-form string, so it is scanned with the shared
+ * never-log vocabulary as defense in depth against a future dynamic caller.
+ *
+ * The scan redacts rather than throws. A diagnostic emitter that throws
+ * destroys the very failure it was called to report, so the record is always
+ * emitted and a credential-shaped suite name is printed as `<redacted>`.
  */
 export function safeDiagnostic(input: SafeDiagnosticInput): string {
   const record = {
     tool: "bun",
     package: CONTRACTS_PACKAGE,
-    suite: input.suite,
+    suite: redactCredentials(input.suite),
     version: CONTRACTS_VERSION,
     duration_ms: Math.max(0, Math.round(performance.now() - input.startedAt)),
     status: input.status,

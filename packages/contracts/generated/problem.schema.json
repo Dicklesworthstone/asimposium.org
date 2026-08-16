@@ -52,6 +52,7 @@
                     "SPONSOR_BOOTSTRAP_BODY_INVALID",
                     "CREDENTIAL_REVOKE_BODY_INVALID",
                     "FELLOW_LIFECYCLE_BODY_INVALID",
+                    "FELLOW_LIST_CURSOR_INVALID",
                     "SPONSOR_PANIC_BODY_INVALID"
                   ]
                 },
@@ -300,6 +301,7 @@
                 "SPONSOR_BOOTSTRAP_BODY_INVALID",
                 "CREDENTIAL_REVOKE_BODY_INVALID",
                 "FELLOW_LIFECYCLE_BODY_INVALID",
+                "FELLOW_LIST_CURSOR_INVALID",
                 "SPONSOR_PANIC_BODY_INVALID"
               ]
             },
@@ -526,6 +528,7 @@
         "SPONSOR_BOOTSTRAP_BODY_INVALID",
         "CREDENTIAL_REVOKE_BODY_INVALID",
         "FELLOW_LIFECYCLE_BODY_INVALID",
+        "FELLOW_LIST_CURSOR_INVALID",
         "SPONSOR_PANIC_BODY_INVALID",
         "UNKNOWN_FORMAT",
         "AUTH_REPLAY_STORE_UNAVAILABLE",

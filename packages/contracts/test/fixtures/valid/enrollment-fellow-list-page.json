@@ -12,17 +12,8 @@
         "event_budget": 12
       },
       "granted_at": 1786800000000,
-      "credentials": [
-        {
-          "credential_id": "cred-01JXYZ",
-          "profile": "bearer",
-          "issued_at": 1786800000000,
-          "expires_at": 1818336000000,
-          "last_used_at": 1786800001000,
-          "active": true
-        }
-      ]
+      "credentials": []
     }
   ],
-  "next_cursor": null
+  "next_cursor": "f1.djF8MTM6MTc4NjgwMDAwMDAwMHwxMzpmZWxsb3ctMDFKWFla"
 }

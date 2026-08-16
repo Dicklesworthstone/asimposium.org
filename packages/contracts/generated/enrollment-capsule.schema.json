@@ -9,6 +9,10 @@
       "type": "string",
       "const": "https://a.asimposium.org/schemas/enrollment-capsule.v1.json"
     },
+    "origin": {
+      "type": "string",
+      "pattern": "^(?:https:\\/\\/a\\.asimposium\\.org|https:\\/\\/a-staging\\.asimposium\\.org|http:\\/\\/127\\.0\\.0\\.1:(?:[1-9]|[1-7][0-9]|8[1-9]|9[0-9]|[1-9][0-9]{2,3}|[1-5][0-9]{4}|6[0-4][0-9]{3}|65[0-4][0-9]{2}|655[0-2][0-9]|6553[0-5]))$"
+    },
     "enrollment_id": {
       "type": "string",
       "pattern": "^ASIMP-EN-[A-HJKMNP-TV-Z0-9]{10,32}$"
@@ -214,6 +218,7 @@
   },
   "required": [
     "schema",
+    "origin",
     "enrollment_id",
     "secret_expires_at",
     "claim",

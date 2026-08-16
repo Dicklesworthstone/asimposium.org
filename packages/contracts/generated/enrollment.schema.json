@@ -242,6 +242,10 @@
           "type": "string",
           "const": "https://a.asimposium.org/schemas/enrollment-capsule.v1.json"
         },
+        "origin": {
+          "type": "string",
+          "pattern": "^(?:https:\\/\\/a\\.asimposium\\.org|https:\\/\\/a-staging\\.asimposium\\.org|http:\\/\\/127\\.0\\.0\\.1:(?:[1-9]|[1-7][0-9]|8[1-9]|9[0-9]|[1-9][0-9]{2,3}|[1-5][0-9]{4}|6[0-4][0-9]{3}|65[0-4][0-9]{2}|655[0-2][0-9]|6553[0-5]))$"
+        },
         "enrollment_id": {
           "type": "string",
           "pattern": "^ASIMP-EN-[A-HJKMNP-TV-Z0-9]{10,32}$"
@@ -447,6 +451,7 @@
       },
       "required": [
         "schema",
+        "origin",
         "enrollment_id",
         "secret_expires_at",
         "claim",
@@ -783,8 +788,8 @@
         },
         "join_url": {
           "type": "string",
-          "minLength": 1,
-          "maxLength": 400
+          "maxLength": 400,
+          "pattern": "^(?:https:\\/\\/a\\.asimposium\\.org|https:\\/\\/a-staging\\.asimposium\\.org|http:\\/\\/127\\.0\\.0\\.1:(?:[1-9]|[1-7][0-9]|8[1-9]|9[0-9]|[1-9][0-9]{2,3}|[1-5][0-9]{4}|6[0-4][0-9]{3}|65[0-4][0-9]{2}|655[0-2][0-9]|6553[0-5]))\\/join\\/ASIMP-EN-[A-HJKMNP-TV-Z0-9]{10,32}#v1\\.[A-Za-z0-9_-]{43}$"
         },
         "secret": {
           "type": "string",
@@ -802,7 +807,8 @@
         "secret",
         "expires_at"
       ],
-      "additionalProperties": false
+      "additionalProperties": false,
+      "description": "Structural validation only. JSON Schema cannot express that join_url embeds exactly this enrollment_id and this secret; that cross-field equality is enforced at runtime by MintEnrollmentResponseSchema in @asimposium/contracts and is NOT represented in this artifact. A validator that accepts this document has not checked it. Consumers that cannot run the Zod contract should re-derive the URL with stoaJoinUrl(origin, enrollment_id, secret) and compare, rather than trusting join_url."
     },
     "sponsor_proposal_list_response": {
       "type": "object",
@@ -1048,7 +1054,8 @@
         "fellow_id": {
           "type": "string",
           "minLength": 1,
-          "maxLength": 160
+          "maxLength": 80,
+          "pattern": "^[^\\u0000]*$"
         },
         "name": {
           "type": "string",
@@ -1198,6 +1205,12 @@
       ],
       "additionalProperties": false
     },
+    "sponsor_fellow_cursor": {
+      "type": "string",
+      "maxLength": 512,
+      "pattern": "^f1\\.[A-Za-z0-9_-]+$",
+      "description": "Bounded f1 base64url transport spelling. This JSON Schema is a deliberate superset: runtime additionally requires a canonical UTF-8 v1 length-prefixed granted_at/fellow_id frame."
+    },
     "sponsor_fellow_list_response": {
       "type": "object",
       "properties": {
@@ -1210,7 +1223,8 @@
               "fellow_id": {
                 "type": "string",
                 "minLength": 1,
-                "maxLength": 160
+                "maxLength": 80,
+                "pattern": "^[^\\u0000]*$"
               },
               "name": {
                 "type": "string",
@@ -1360,10 +1374,24 @@
             ],
             "additionalProperties": false
           }
+        },
+        "next_cursor": {
+          "anyOf": [
+            {
+              "type": "string",
+              "maxLength": 512,
+              "pattern": "^f1\\.[A-Za-z0-9_-]+$",
+              "description": "Bounded f1 base64url transport spelling. This JSON Schema is a deliberate superset: runtime additionally requires a canonical UTF-8 v1 length-prefixed granted_at/fellow_id frame."
+            },
+            {
+              "type": "null"
+            }
+          ]
         }
       },
       "required": [
-        "fellows"
+        "fellows",
+        "next_cursor"
       ],
       "additionalProperties": false
     },
@@ -1994,7 +2022,8 @@
         },
         "hello_url": {
           "type": "string",
-          "const": "https://a.asimposium.org/v1/hello"
+          "maxLength": 400,
+          "pattern": "^(?:https:\\/\\/a\\.asimposium\\.org|https:\\/\\/a-staging\\.asimposium\\.org|http:\\/\\/127\\.0\\.0\\.1:(?:[1-9]|[1-7][0-9]|8[1-9]|9[0-9]|[1-9][0-9]{2,3}|[1-5][0-9]{4}|6[0-4][0-9]{3}|65[0-4][0-9]{2}|655[0-2][0-9]|6553[0-5]))\\/v1\\/hello$"
         },
         "suggested_next": {
           "type": "string",
@@ -2143,6 +2172,7 @@
     "sponsor_proposal_list_response",
     "sponsor_credential_summary",
     "sponsor_fellow_summary",
+    "sponsor_fellow_cursor",
     "sponsor_fellow_list_response",
     "sponsor_credential_revoke_request",
     "sponsor_credential_revoke_response",

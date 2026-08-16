@@ -1,0 +1,15 @@
+{
+  "type": "https://asimposium.org/errors/FELLOW_LIST_CURSOR_INVALID",
+  "title": "Fellow list cursor is invalid",
+  "status": 422,
+  "code": "FELLOW_LIST_CURSOR_INVALID",
+  "detail": "The Fellow page cursor is not a canonical cursor from this inventory.",
+  "fix_hint": "Start at GET /v1/fellows, then follow the next_cursor exactly as a path segment.",
+  "rule": "A5",
+  "schema": "https://a.asimposium.org/schemas/enrollment.v1.json",
+  "example": {
+    "method": "GET",
+    "path": "/v1/fellows/after/f1.djF8MTM6MTc4NjgwMDAwMDAwMHwxMzpmZWxsb3ctMDFKWFla",
+    "query": "none"
+  }
+}

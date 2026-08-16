@@ -16,9 +16,228 @@ export const PENDING_PROPOSAL_TTL_MS = 24 * 60 * 60 * 1000;
 
 const BASE64URL_256_BIT = "[A-Za-z0-9_-]{43}";
 
+/**
+ * One spelling of the enrollment id body, shared by `EnrollmentIdSchema` and
+ * the join-URL pattern. Two copies could drift, and a join URL that accepted an
+ * id the id schema rejected is precisely the incoherence the mint response's
+ * cross-field check exists to catch.
+ */
+const ENROLLMENT_ID_BODY = `${ENROLLMENT_ID_PREFIX}[A-HJKMNP-TV-Z0-9]{10,32}`;
+
+/**
+ * The closed set of Stoa origins an enrollment URL may name.
+ *
+ * An enrollment URL is credential-carrying infrastructure: a join URL points a
+ * Fellow at whatever origin it names, and a `hello_url` is the first thing an
+ * approved agent fetches with its bearer token. The origin therefore may never
+ * be derived from the request — `Host`, `X-Forwarded-Host` and friends are
+ * caller-supplied, and a Worker that echoed one would hand an attacker a
+ * credential redirector. AGENTS.md teaches agents exactly one origin; this is
+ * the enumeration of the environments that origin is allowed to be.
+ *
+ * Loopback is explicit rather than a wildcard so a misconfigured deployment
+ * cannot quietly downgrade to plaintext against a remote host.
+ */
+export const PRODUCTION_STOA_ORIGIN = "https://a.asimposium.org";
+export const STAGING_STOA_ORIGIN = "https://a-staging.asimposium.org";
+
+const LOOPBACK_STOA_ORIGIN = /^http:\/\/127\.0\.0\.1:(\d{1,5})$/;
+
+/**
+ * The origin domain must be closed under the URL builders.
+ *
+ * `stoaHelloUrl` and `stoaJoinUrl` concatenate a trusted origin with a fixed
+ * path, and `StoaHelloUrlSchema` / `StoaJoinUrlSchema` require their input to
+ * be byte-canonical. So any origin this predicate accepts but `URL` rewrites
+ * produces builder output its own schema rejects. `http://127.0.0.1:80` was
+ * exactly that: the port passes every range check, but `URL` drops a default
+ * port, so a mint could durably issue an enrollment and then fail validating
+ * the response it had already committed. Requiring the origin to survive the
+ * same round trip closes the domain instead of patching the one port.
+ */
+function isCanonicalOrigin(value: string): boolean {
+  try {
+    return new URL(value).origin === value;
+  } catch {
+    return false;
+  }
+}
+
+/** True only for the two deployed origins or an exact loopback origin with a valid port. */
+export function isTrustedStoaOrigin(value: unknown): value is string {
+  if (typeof value !== "string") return false;
+  if (value === PRODUCTION_STOA_ORIGIN || value === STAGING_STOA_ORIGIN) return true;
+  const loopback = LOOPBACK_STOA_ORIGIN.exec(value);
+  if (loopback === null) return false;
+  const digits = loopback[1];
+  if (digits === undefined) return false;
+  const port = Number(digits);
+  // `String(port) === digits` rejects a leading zero, which `Number` would
+  // otherwise accept and silently normalise into a different origin string.
+  if (!(Number.isInteger(port) && port >= 1 && port <= 65_535 && String(port) === digits)) {
+    return false;
+  }
+  return isCanonicalOrigin(value);
+}
+
+/**
+ * The same domain, written so it survives into the published JSON Schema.
+ *
+ * `refine()` is invisible to `toJSONSchema`, so the generated artifacts
+ * described `origin`, `hello_url` and `join_url` as bare strings. An external
+ * validator holding our own published schema would have accepted
+ * `https://evil.test/join/…` — the artifact overstated what the contract
+ * accepts, which is worse than having no artifact.
+ *
+ * These patterns are layered *before* the predicates, never instead of them, so
+ * runtime behaviour is unchanged: a value must satisfy both. The port
+ * alternation encodes 1–65535 with no leading zero and no `80`, which is
+ * exactly what `isTrustedStoaOrigin` accepts after the canonical round trip.
+ * That equivalence is asserted over a corpus in `stoa-origin.test.ts` rather
+ * than merely claimed here.
+ */
+const LOOPBACK_PORT_PATTERN =
+  "(?:[1-9]|[1-7][0-9]|8[1-9]|9[0-9]|[1-9][0-9]{2,3}|[1-5][0-9]{4}|6[0-4][0-9]{3}|65[0-4][0-9]{2}|655[0-2][0-9]|6553[0-5])";
+
+const literalForPattern = (value: string): string => value.replaceAll(".", "\\.");
+
+const TRUSTED_ORIGIN_ALTERNATION = `(?:${literalForPattern(PRODUCTION_STOA_ORIGIN)}|${literalForPattern(STAGING_STOA_ORIGIN)}|http://127\\.0\\.0\\.1:${LOOPBACK_PORT_PATTERN})`;
+
+/** JSON-Schema-visible spellings of the three credential-carrying URL shapes. */
+export const STOA_ORIGIN_PATTERN = `^${TRUSTED_ORIGIN_ALTERNATION}$`;
+
+export const StoaOriginSchema = z
+  .string()
+  .regex(new RegExp(STOA_ORIGIN_PATTERN))
+  .refine(isTrustedStoaOrigin, "origin is not a trusted Stoa origin");
+
+/** The one path an approved agent is sent to, relative to its configured origin. */
+export const STOA_HELLO_PATH = "/v1/hello";
+
+/**
+ * Build the `hello_url` for a configured origin.
+ *
+ * Deliberately a builder rather than a template: it refuses an untrusted
+ * origin, emits exactly one path, and carries no credentials, query, or
+ * fragment. A `hello_url` that grew a query string would put agent-followed
+ * state into a URL, and one that grew a fragment would look like the join URL,
+ * whose fragment *is* a secret.
+ */
+export function stoaHelloUrl(origin: string): string {
+  if (!isTrustedStoaOrigin(origin)) {
+    throw new TypeError("hello url requires a trusted Stoa origin");
+  }
+  return `${origin}${STOA_HELLO_PATH}`;
+}
+
+/**
+ * Shared shape rules: byte-canonical spelling, trusted origin, no credentials,
+ * no query string.
+ *
+ * The canonicality check is load-bearing, not tidiness. `new URL()` normalizes
+ * before it reports: it lowercases the host, drops a default `:443`, and
+ * rewrites `:08787` to `:8787`. Validating only `parsed.origin` would therefore
+ * accept `https://A.ASIMPOSIUM.ORG/v1/hello`, `https://a.asimposium.org:443/…`
+ * and `http://127.0.0.1:08787/…` — spellings `StoaOriginSchema` refuses
+ * outright, and which every comment here promises are exact.
+ *
+ * That mismatch is not cosmetic: these URLs are compared as strings (the mint
+ * response cross-checks its own fields against the join URL) and are copied by
+ * humans. Two accepted spellings of "the same" URL mean a coherence check can
+ * pass on one and fail on the other. Requiring `parsed.href === value` is the
+ * smallest rule that closes it for these fixed ASCII paths, because a
+ * canonical input is exactly the input `URL` round-trips unchanged.
+ */
+function parseStoaUrl(value: string): URL | undefined {
+  let parsed: URL;
+  try {
+    parsed = new URL(value);
+  } catch {
+    return undefined;
+  }
+  if (parsed.href !== value) return undefined;
+  if (!isTrustedStoaOrigin(parsed.origin)) return undefined;
+  if (parsed.username !== "" || parsed.password !== "" || parsed.search !== "") return undefined;
+  return parsed;
+}
+
+export const STOA_HELLO_URL_PATTERN = `^${TRUSTED_ORIGIN_ALTERNATION}${STOA_HELLO_PATH}$`;
+
+/** Exactly `<trusted origin>/v1/hello`; no credentials, query, or fragment. */
+export const StoaHelloUrlSchema = z
+  .string()
+  .max(400)
+  .regex(new RegExp(STOA_HELLO_URL_PATTERN))
+  .refine((value) => {
+    const parsed = parseStoaUrl(value);
+    return parsed !== undefined && parsed.pathname === STOA_HELLO_PATH && parsed.hash === "";
+  }, "invalid Stoa hello url");
+
+export interface ParsedStoaJoinUrl {
+  readonly origin: string;
+  readonly enrollmentId: string;
+  readonly secret: string;
+}
+
+/**
+ * Parse `<trusted origin>/join/<enrollment id>#<secret>` — exactly that.
+ *
+ * The fragment is mandatory, not merely permitted: a join URL without its
+ * one-time secret is not a weaker join URL, it is a different object that
+ * cannot enroll anything, and emitting one would send a sponsor to a dead
+ * page while the secret leaked somewhere else. Both the path segment and the
+ * fragment are validated against their own contracts, and the path must be
+ * exactly two segments so `/join/<id>/extra` cannot ride along.
+ */
+export function parseStoaJoinUrl(value: string): ParsedStoaJoinUrl | undefined {
+  const parsed = parseStoaUrl(value);
+  if (parsed === undefined) return undefined;
+  const segments = parsed.pathname.split("/");
+  if (segments.length !== 3 || segments[0] !== "" || segments[1] !== "join") return undefined;
+  const enrollmentId = segments[2];
+  if (enrollmentId === undefined || !EnrollmentIdSchema.safeParse(enrollmentId).success) {
+    return undefined;
+  }
+  // An absent fragment leaves `hash` empty, which is exactly the case a
+  // `startsWith` check would have waved through.
+  if (!parsed.hash.startsWith("#")) return undefined;
+  const secret = parsed.hash.slice(1);
+  if (!EnrollmentSecretSchema.safeParse(secret).success) return undefined;
+  return { origin: parsed.origin, enrollmentId, secret };
+}
+
+export const STOA_JOIN_URL_PATTERN = `^${TRUSTED_ORIGIN_ALTERNATION}/join/${ENROLLMENT_ID_BODY}#${ENROLLMENT_SECRET_VERSION}\\.${BASE64URL_256_BIT}$`;
+
+export const StoaJoinUrlSchema = z
+  .string()
+  .max(400)
+  .regex(new RegExp(STOA_JOIN_URL_PATTERN))
+  .refine((value) => parseStoaJoinUrl(value) !== undefined, "invalid Stoa join url");
+
+/**
+ * Build the join URL for a configured origin.
+ *
+ * Every input is re-validated rather than trusted: the origin because it must
+ * never come from a request, and the id/secret because a builder that
+ * concatenated an unvalidated secret would be the one place a malformed
+ * credential could still reach a sponsor's screen.
+ */
+export function stoaJoinUrl(origin: string, enrollmentId: string, secret: string): string {
+  if (!isTrustedStoaOrigin(origin)) {
+    throw new TypeError("join url requires a trusted Stoa origin");
+  }
+  if (!EnrollmentIdSchema.safeParse(enrollmentId).success) {
+    throw new TypeError("join url requires a valid enrollment id");
+  }
+  if (!EnrollmentSecretSchema.safeParse(secret).success) {
+    throw new TypeError("join url requires a valid enrollment secret");
+  }
+  return `${origin}/join/${enrollmentId}#${secret}`;
+}
+
 export const EnrollmentIdSchema = z
   .string()
-  .regex(/^ASIMP-EN-[A-HJKMNP-TV-Z0-9]{10,32}$/, "invalid enrollment id");
+  .regex(new RegExp(`^${ENROLLMENT_ID_BODY}$`), "invalid enrollment id");
 
 /** A versioned, 32-byte base64url secret. It may only be sent in a POST body. */
 export const EnrollmentSecretSchema = z
@@ -85,6 +304,147 @@ export const FellowIdSchema = EnrollmentSqlTextSchema.min(1).max(80);
 /** Non-secret credential row identity. This is never the bearer or its hash. */
 export const FellowCredentialIdSchema = EnrollmentSqlTextSchema.min(1).max(160);
 export const EnrollmentDeclaredRuntimeSchema = EnrollmentSqlTextSchema.trim().min(1).max(160);
+
+/** Sponsor inventory pages are deliberately bounded even when its history is not. */
+export const SPONSOR_FELLOW_PAGE_SIZE = 500;
+/** A path segment, including its version prefix, must stay cheaply parseable. */
+export const SPONSOR_FELLOW_CURSOR_MAX_LENGTH = 512;
+
+/** The durable key immediately after a sponsor Fellow page. */
+export const SponsorFellowCursorKeySchema = z
+  .object({
+    granted_at: z.number().int().safe().positive(),
+    fellow_id: FellowIdSchema,
+  })
+  .strict();
+
+const SPONSOR_FELLOW_CURSOR_PREFIX = "f1.";
+const SPONSOR_FELLOW_CURSOR_FRAME_PREFIX = "v1|";
+const cursorEncoder = new TextEncoder();
+const cursorDecoder = new TextDecoder("utf-8", { fatal: true });
+
+function cursorBase64Url(bytes: Uint8Array): string {
+  let binary = "";
+  for (const byte of bytes) binary += String.fromCharCode(byte);
+  return btoa(binary).replaceAll("+", "-").replaceAll("/", "_").replaceAll("=", "");
+}
+
+function cursorBase64UrlBytes(value: string): Uint8Array | undefined {
+  if (!/^[A-Za-z0-9_-]+$/.test(value)) return undefined;
+  try {
+    const base64 = `${value.replaceAll("-", "+").replaceAll("_", "/")}${"=".repeat(
+      (4 - (value.length % 4)) % 4,
+    )}`;
+    const binary = atob(base64);
+    const bytes = new Uint8Array(binary.length);
+    for (let index = 0; index < binary.length; index += 1) {
+      bytes[index] = binary.charCodeAt(index);
+    }
+    return bytes;
+  } catch {
+    return undefined;
+  }
+}
+
+function equalCursorBytes(left: Uint8Array, right: Uint8Array): boolean {
+  if (left.length !== right.length) return false;
+  for (let index = 0; index < left.length; index += 1) {
+    if (left[index] !== right[index]) return false;
+  }
+  return true;
+}
+
+function readCursorField(
+  bytes: Uint8Array,
+  offset: number,
+): { readonly value: Uint8Array; readonly offset: number } | undefined {
+  const colon = bytes.indexOf(0x3a, offset);
+  if (colon <= offset) return undefined;
+  let lengthText: string;
+  try {
+    lengthText = cursorDecoder.decode(bytes.slice(offset, colon));
+  } catch {
+    return undefined;
+  }
+  if (!/^[1-9][0-9]{0,2}$/.test(lengthText)) return undefined;
+  const length = Number(lengthText);
+  const start = colon + 1;
+  const end = start + length;
+  if (end > bytes.length) return undefined;
+  return { value: bytes.slice(start, end), offset: end };
+}
+
+function cursorFrame(key: SponsorFellowCursorKey): Uint8Array {
+  const grantedAt = String(key.granted_at);
+  const fellowId = cursorEncoder.encode(key.fellow_id);
+  return cursorEncoder.encode(
+    `${SPONSOR_FELLOW_CURSOR_FRAME_PREFIX}${grantedAt.length}:${grantedAt}|${fellowId.length}:${key.fellow_id}`,
+  );
+}
+
+/**
+ * Versioned, length-prefixed and byte-canonical page cursor. It is an opaque
+ * transport token, not an authority token: the sponsor predicate independently
+ * scopes every lookup, so no MAC or server-side cursor state is necessary.
+ */
+export function encodeSponsorFellowCursor(key: SponsorFellowCursorKey): string {
+  const parsed = SponsorFellowCursorKeySchema.parse(key);
+  return `${SPONSOR_FELLOW_CURSOR_PREFIX}${cursorBase64Url(cursorFrame(parsed))}`;
+}
+
+/** Return the cursor key only for one exact, canonical cursor spelling. */
+export function parseSponsorFellowCursor(value: unknown): SponsorFellowCursorKey | undefined {
+  if (
+    typeof value !== "string" ||
+    value.length > SPONSOR_FELLOW_CURSOR_MAX_LENGTH ||
+    !value.startsWith(SPONSOR_FELLOW_CURSOR_PREFIX)
+  ) {
+    return undefined;
+  }
+  const encoded = value.slice(SPONSOR_FELLOW_CURSOR_PREFIX.length);
+  const bytes = cursorBase64UrlBytes(encoded);
+  if (bytes === undefined) return undefined;
+  const prefix = cursorEncoder.encode(SPONSOR_FELLOW_CURSOR_FRAME_PREFIX);
+  if (!equalCursorBytes(bytes.slice(0, prefix.length), prefix)) return undefined;
+  const grantedAtField = readCursorField(bytes, prefix.length);
+  if (grantedAtField === undefined || bytes[grantedAtField.offset] !== 0x7c) return undefined;
+  const fellowIdField = readCursorField(bytes, grantedAtField.offset + 1);
+  if (fellowIdField === undefined || fellowIdField.offset !== bytes.length) return undefined;
+  let grantedAtText: string;
+  let fellowId: string;
+  try {
+    grantedAtText = cursorDecoder.decode(grantedAtField.value);
+    fellowId = cursorDecoder.decode(fellowIdField.value);
+  } catch {
+    return undefined;
+  }
+  if (!/^[1-9][0-9]{0,15}$/.test(grantedAtText)) return undefined;
+  const parsed = SponsorFellowCursorKeySchema.safeParse({
+    granted_at: Number(grantedAtText),
+    fellow_id: fellowId,
+  });
+  if (!parsed.success || String(parsed.data.granted_at) !== grantedAtText) return undefined;
+  return encodeSponsorFellowCursor(parsed.data) === value ? parsed.data : undefined;
+}
+
+/**
+ * JSON Schema can describe this cursor's bounded transport spelling, but it
+ * cannot close the decoded length-prefixed frame without a custom vocabulary.
+ * The generated face therefore names that intentionally broader boundary; the
+ * runtime parser below remains the authority for path acceptance.
+ */
+const SPONSOR_FELLOW_CURSOR_SCHEMA_DESCRIPTION =
+  "Bounded f1 base64url transport spelling. This JSON Schema is a deliberate superset: runtime additionally requires a canonical UTF-8 v1 length-prefixed granted_at/fellow_id frame.";
+
+export const SponsorFellowCursorSchema = z
+  .string()
+  .max(SPONSOR_FELLOW_CURSOR_MAX_LENGTH)
+  .regex(/^f1\.[A-Za-z0-9_-]+$/)
+  .describe(SPONSOR_FELLOW_CURSOR_SCHEMA_DESCRIPTION)
+  .refine(
+    (value) => parseSponsorFellowCursor(value) !== undefined,
+    "must be a canonical Fellow cursor",
+  );
 
 export const EnrollmentFirstDirectiveSchema = EnrollmentSqlTextSchema.trim().min(1).max(2_000);
 export const EnrollmentEventBudgetSchema = z.number().int().min(1).max(10_000);
@@ -209,7 +569,15 @@ export const EnrollmentCapsuleGuidanceSchema = z
 /** Canonical agent projection of a path-only enrollment capsule. */
 export const EnrollmentCapsuleProjectionSchema = z
   .object({
+    // `schema` is an identifier and `origin` is a destination. The identifier
+    // stays canonical in every environment so a document validates against one
+    // published schema; the destination is the configured plane, because the
+    // capsule's curl blocks are executable and a staging capsule that named
+    // production would send a real enrollment secret to the wrong plane.
+    // Parsing it here means an untrusted origin cannot reach any face: the
+    // projection refuses to construct before Markdown, JSON, or HTML renders.
     schema: z.literal("https://a.asimposium.org/schemas/enrollment-capsule.v1.json"),
+    origin: StoaOriginSchema,
     enrollment_id: EnrollmentIdSchema,
     secret_expires_at: z.number().int().positive(),
     claim: z
@@ -389,11 +757,40 @@ export const SponsorEnrollmentDecisionCommandSchema = z.discriminatedUnion("deci
 export const MintEnrollmentResponseSchema = z
   .object({
     enrollment_id: EnrollmentIdSchema,
-    join_url: z.string().min(1).max(400),
+    join_url: StoaJoinUrlSchema,
     secret: EnrollmentSecretSchema,
     expires_at: z.number().int().positive(),
   })
-  .strict();
+  .strict()
+  // A mint response that names one enrollment and links another is one
+  // document lying: the sponsor copies the URL, not the fields beside it.
+  .superRefine((value, ctx) => {
+    const parsed = parseStoaJoinUrl(value.join_url);
+    if (parsed === undefined) return;
+    if (parsed.enrollmentId !== value.enrollment_id) {
+      ctx.addIssue({
+        code: "custom",
+        path: ["join_url"],
+        message: "join_url enrollment id does not match enrollment_id",
+      });
+    }
+    if (parsed.secret !== value.secret) {
+      ctx.addIssue({
+        code: "custom",
+        path: ["join_url"],
+        message: "join_url fragment does not match secret",
+      });
+    }
+  })
+  // An explicit boundary rather than a silent one. The patterns above make the
+  // *shape* of `join_url` checkable anywhere, but no standard JSON Schema
+  // keyword can say that the id and secret embedded in that URL are the same
+  // ones in the sibling fields — and that is the check the whole document
+  // exists for. Rather than let the artifact imply equivalence it does not
+  // have, the artifact says what it cannot verify.
+  .describe(
+    "Structural validation only. JSON Schema cannot express that join_url embeds exactly this enrollment_id and this secret; that cross-field equality is enforced at runtime by MintEnrollmentResponseSchema in @asimposium/contracts and is NOT represented in this artifact. A validator that accepts this document has not checked it. Consumers that cannot run the Zod contract should re-derive the URL with stoaJoinUrl(origin, enrollment_id, secret) and compare, rather than trusting join_url.",
+  );
 
 /** Pending proposals awaiting the sponsor's decision, oldest first. */
 export const SponsorProposalListResponseSchema = z
@@ -417,7 +814,7 @@ export const SponsorCredentialSummarySchema = z
 /** A Fellow as the sponsor console lists it. No token and no token hash. */
 export const SponsorFellowSummarySchema = z
   .object({
-    fellow_id: z.string().min(1).max(160),
+    fellow_id: FellowIdSchema,
     name: FellowNameSchema,
     model: EnrollmentDeclaredRuntimeSchema,
     harness: EnrollmentDeclaredRuntimeSchema,
@@ -433,7 +830,8 @@ export const SponsorFellowSummarySchema = z
 
 export const SponsorFellowListResponseSchema = z
   .object({
-    fellows: z.array(SponsorFellowSummarySchema).max(500),
+    fellows: z.array(SponsorFellowSummarySchema).max(SPONSOR_FELLOW_PAGE_SIZE),
+    next_cursor: SponsorFellowCursorSchema.nullable(),
   })
   .strict();
 
@@ -563,7 +961,7 @@ export const EnrollmentApprovedResponseSchema = z
   .object({
     status: z.literal("approved"),
     token: FellowTokenSchema,
-    hello_url: z.literal("https://a.asimposium.org/v1/hello"),
+    hello_url: StoaHelloUrlSchema,
     suggested_next: z.literal("GET /v1/hello with the bearer token"),
   })
   .strict();
@@ -583,6 +981,7 @@ export const EnrollmentContractsSchema = z
     sponsor_proposal_list_response: SponsorProposalListResponseSchema,
     sponsor_credential_summary: SponsorCredentialSummarySchema,
     sponsor_fellow_summary: SponsorFellowSummarySchema,
+    sponsor_fellow_cursor: SponsorFellowCursorSchema,
     sponsor_fellow_list_response: SponsorFellowListResponseSchema,
     sponsor_credential_revoke_request: SponsorCredentialRevokeRequestSchema,
     sponsor_credential_revoke_response: SponsorCredentialRevokeResponseSchema,
@@ -616,6 +1015,8 @@ export type FellowId = z.infer<typeof FellowIdSchema>;
 export type FellowCredentialId = z.infer<typeof FellowCredentialIdSchema>;
 export type FellowLifecycleEventId = z.infer<typeof FellowLifecycleEventIdSchema>;
 export type FellowCredentialProfile = z.infer<typeof FellowCredentialProfileSchema>;
+export type SponsorFellowCursorKey = z.infer<typeof SponsorFellowCursorKeySchema>;
+export type SponsorFellowCursor = z.infer<typeof SponsorFellowCursorSchema>;
 export type FellowRegistrationRequest = z.infer<typeof FellowRegistrationRequestSchema>;
 export type EnrollmentApprovalCard = z.infer<typeof EnrollmentApprovalCardSchema>;
 export type EnrollmentCapsuleProjection = z.infer<typeof EnrollmentCapsuleProjectionSchema>;
