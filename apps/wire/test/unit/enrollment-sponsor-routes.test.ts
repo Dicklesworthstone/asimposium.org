@@ -701,6 +701,26 @@ describe("sponsor enrollment routes", () => {
     };
     const h = await harness({ clock });
     const fixture = await issuedLifecycleFixture(h, "route-revoke-orchid");
+    const foreignBody = JSON.stringify({
+      fellow_id: fixture.fellow.fellowId,
+      credential_id: fixture.credential.credentialId,
+      confirm: "revoke-credential",
+      step_up_authenticated_at: NOW,
+    });
+    const foreignHeaders = await h.sign(
+      foreignBody,
+      "/v1/fellows/credentials/revoke",
+      "fellow.credential.revoke",
+      "POST",
+      "usr_foreign_sponsor",
+    );
+    const foreign = await h.app.fetch(
+      envelopeRequest("/v1/fellows/credentials/revoke", foreignHeaders, "POST", foreignBody),
+    );
+    expect(foreign.status).toBe(404);
+    expect(await foreign.json()).toMatchObject({ code: "FELLOW_LIFECYCLE_NOT_CURRENT" });
+    expect(await h.service.credentialBinding(fixture.token)).toBeDefined();
+
     const body = JSON.stringify({
       fellow_id: fixture.fellow.fellowId,
       credential_id: fixture.credential.credentialId,
@@ -744,25 +764,6 @@ describe("sponsor enrollment routes", () => {
     );
     expect(replayResponse.status).toBe(200);
     expect(SponsorCredentialRevokeResponseSchema.parse(await replayResponse.json())).toEqual(first);
-
-    const foreignBody = JSON.stringify({
-      fellow_id: fixture.fellow.fellowId,
-      credential_id: fixture.credential.credentialId,
-      confirm: "revoke-credential",
-      step_up_authenticated_at: Math.floor(clock.value / 1_000),
-    });
-    const foreignHeaders = await h.sign(
-      foreignBody,
-      "/v1/fellows/credentials/revoke",
-      "fellow.credential.revoke",
-      "POST",
-      "usr_foreign_sponsor",
-    );
-    const foreign = await h.app.fetch(
-      envelopeRequest("/v1/fellows/credentials/revoke", foreignHeaders, "POST", foreignBody),
-    );
-    expect(foreign.status).toBe(404);
-    expect(await foreign.json()).toMatchObject({ code: "FELLOW_LIFECYCLE_NOT_CURRENT" });
   });
 
   test("pause, resume, compromise, and panic return typed sponsor-only audit acknowledgements", async () => {
@@ -810,6 +811,26 @@ describe("sponsor enrollment routes", () => {
       acknowledged: true,
       sponsor_seq: expectedSequence,
     });
+  });
+
+  test("sponsor panic immediately disables a live route-issued credential", async () => {
+    const h = await harness({ clock: { now: () => NOW * 1_000 } });
+    const fixture = await issuedLifecycleFixture(h, "route-live-panic-orchid");
+    expect(await h.service.credentialBinding(fixture.token)).toBeDefined();
+    const body = JSON.stringify({
+      confirm: "revoke-all-fellow-credentials",
+      step_up_authenticated_at: NOW,
+    });
+    const headers = await h.sign(body, "/v1/sponsors/panic", "sponsor.panic");
+    const response = await h.app.fetch(
+      envelopeRequest("/v1/sponsors/panic", headers, "POST", body),
+    );
+    expect(response.status).toBe(200);
+    expect(SponsorPanicResponseSchema.parse(await response.json())).toMatchObject({
+      acknowledged: true,
+      sponsor_seq: 1,
+    });
+    expect(await h.service.credentialBinding(fixture.token)).toBeUndefined();
   });
 
   test("lifecycle route contract and idempotency failures teach without target evidence", async () => {

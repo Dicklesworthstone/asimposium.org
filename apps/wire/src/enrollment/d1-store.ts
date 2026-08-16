@@ -419,10 +419,9 @@ const SUGGESTION_COUNT = 3;
  * caller fails closed if the filter ever removes more than this covers.
  */
 const SUGGESTION_POLICY_OVERFETCH = 8;
-// A sponsor can legitimately issue several independent credential/status
-// commands at once. Each collision loses one monotonic-head round, so this cap
-// admits the full five-command sponsor burst while keeping D1 work bounded.
-const MAX_LIFECYCLE_SEQUENCE_RETRIES = 8;
+const LIFECYCLE_LEASE_TTL_MS = 10_000;
+const LIFECYCLE_LEASE_RETRY_MS = 25;
+const MAX_LIFECYCLE_LEASE_ATTEMPTS = 40;
 
 function d1LifecycleTransitionAllowed(
   from: FellowLifecycleStatus,
@@ -1532,7 +1531,13 @@ export class D1EnrollmentStore implements EnrollmentStore {
   }
 
   async revokeCredential(attempt: CredentialRevokeAttempt): Promise<LifecycleCommandResult> {
-    for (let retry = 0; retry < MAX_LIFECYCLE_SEQUENCE_RETRIES; retry += 1) {
+    const reservedHead = await this.acquireLifecycleLease(
+      attempt.sponsorId,
+      attempt.eventId,
+      attempt.effectiveAt,
+    );
+    let committed = false;
+    try {
       let current: LifecycleCredentialRow | null;
       try {
         current = await sql(
@@ -1559,6 +1564,7 @@ export class D1EnrollmentStore implements EnrollmentStore {
       }
       if (
         !Number.isSafeInteger(current.lifecycle_seq) ||
+        current.lifecycle_seq !== reservedHead ||
         !Number.isSafeInteger(current.issued_at) ||
         (current.last_used_at !== null && !Number.isSafeInteger(current.last_used_at))
       ) {
@@ -1568,11 +1574,11 @@ export class D1EnrollmentStore implements EnrollmentStore {
         throw new EnrollmentError("FELLOW_LIFECYCLE_NOT_CURRENT");
       }
       const result = {
-        sponsorSeq: current.lifecycle_seq + 1,
+        sponsorSeq: reservedHead + 1,
         effectiveAt: attempt.effectiveAt,
       } satisfies LifecycleCommandResult;
       const replay = await attempt.replayFor?.(result);
-      const committed = await this.commitLifecycleCommand(
+      committed = await this.commitLifecycleCommand(
         sql(
           this.#db,
           `INSERT INTO fellow_lifecycle_events (
@@ -1591,12 +1597,20 @@ export class D1EnrollmentStore implements EnrollmentStore {
         replay,
       );
       if (committed) return result;
+      throw new EnrollmentPersistenceError();
+    } finally {
+      if (!committed) await this.releaseLifecycleLease(attempt.sponsorId, attempt.eventId);
     }
-    throw new EnrollmentPersistenceError();
   }
 
   async transitionFellow(attempt: FellowLifecycleAttempt): Promise<LifecycleCommandResult> {
-    for (let retry = 0; retry < MAX_LIFECYCLE_SEQUENCE_RETRIES; retry += 1) {
+    const reservedHead = await this.acquireLifecycleLease(
+      attempt.sponsorId,
+      attempt.eventId,
+      attempt.effectiveAt,
+    );
+    let committed = false;
+    try {
       let current: LifecycleFellowRow | null;
       try {
         current = await sql(
@@ -1623,6 +1637,7 @@ export class D1EnrollmentStore implements EnrollmentStore {
       }
       if (
         !Number.isSafeInteger(current.lifecycle_seq) ||
+        current.lifecycle_seq !== reservedHead ||
         !Number.isSafeInteger(current.review_from) ||
         !Number.isSafeInteger(current.created_at) ||
         (current.status_changed_at !== null && !Number.isSafeInteger(current.status_changed_at))
@@ -1640,11 +1655,11 @@ export class D1EnrollmentStore implements EnrollmentStore {
         current.status_changed_at ?? current.created_at,
       );
       const result = {
-        sponsorSeq: current.lifecycle_seq + 1,
+        sponsorSeq: reservedHead + 1,
         effectiveAt,
       } satisfies LifecycleCommandResult;
       const replay = await attempt.replayFor?.(result);
-      const committed = await this.commitLifecycleCommand(
+      committed = await this.commitLifecycleCommand(
         sql(
           this.#db,
           `INSERT INTO fellow_lifecycle_events (
@@ -1665,12 +1680,20 @@ export class D1EnrollmentStore implements EnrollmentStore {
         replay,
       );
       if (committed) return result;
+      throw new EnrollmentPersistenceError();
+    } finally {
+      if (!committed) await this.releaseLifecycleLease(attempt.sponsorId, attempt.eventId);
     }
-    throw new EnrollmentPersistenceError();
   }
 
   async panicSponsor(attempt: SponsorPanicAttempt): Promise<LifecycleCommandResult> {
-    for (let retry = 0; retry < MAX_LIFECYCLE_SEQUENCE_RETRIES; retry += 1) {
+    const reservedHead = await this.acquireLifecycleLease(
+      attempt.sponsorId,
+      attempt.eventId,
+      attempt.effectiveAt,
+    );
+    let committed = false;
+    try {
       let current: LifecycleSponsorRow | null;
       try {
         current = await sql(
@@ -1690,17 +1713,18 @@ export class D1EnrollmentStore implements EnrollmentStore {
       }
       if (
         !Number.isSafeInteger(current.lifecycle_seq) ||
+        current.lifecycle_seq !== reservedHead ||
         (current.panic_at !== null && !Number.isSafeInteger(current.panic_at))
       ) {
         throw new EnrollmentPersistenceError();
       }
       const effectiveAt = Math.max(attempt.effectiveAt, (current.panic_at ?? -1) + 1);
       const result = {
-        sponsorSeq: current.lifecycle_seq + 1,
+        sponsorSeq: reservedHead + 1,
         effectiveAt,
       } satisfies LifecycleCommandResult;
       const replay = await attempt.replayFor?.(result);
-      const committed = await this.commitLifecycleCommand(
+      committed = await this.commitLifecycleCommand(
         sql(
           this.#db,
           `INSERT INTO fellow_lifecycle_events (
@@ -1717,8 +1741,10 @@ export class D1EnrollmentStore implements EnrollmentStore {
         replay,
       );
       if (committed) return result;
+      throw new EnrollmentPersistenceError();
+    } finally {
+      if (!committed) await this.releaseLifecycleLease(attempt.sponsorId, attempt.eventId);
     }
-    throw new EnrollmentPersistenceError();
   }
 
   async capsule(enrollmentId: string, now: number): Promise<EnrollmentCapsule> {
@@ -2450,6 +2476,76 @@ export class D1EnrollmentStore implements EnrollmentStore {
         initializationVector: row.response_initialization_vector,
       },
     };
+  }
+
+  private async acquireLifecycleLease(
+    sponsorId: string,
+    eventId: string,
+    effectiveAt: number,
+  ): Promise<number> {
+    const expiresAt = effectiveAt + LIFECYCLE_LEASE_TTL_MS;
+    if (!Number.isSafeInteger(expiresAt)) throw new EnrollmentPersistenceError();
+    for (let attempt = 0; attempt < MAX_LIFECYCLE_LEASE_ATTEMPTS; attempt += 1) {
+      let row: { lifecycle_seq: number } | null;
+      try {
+        row = await sql(
+          this.#db,
+          `UPDATE sponsors
+              SET lifecycle_lease_token = ?, lifecycle_lease_expires_at = ?
+            WHERE sponsor_id = ?
+              AND (lifecycle_lease_token IS NULL
+                OR lifecycle_lease_expires_at <= ?
+                OR lifecycle_lease_token = ?)
+            RETURNING lifecycle_seq`,
+          eventId,
+          expiresAt,
+          sponsorId,
+          effectiveAt,
+          eventId,
+        ).first<{ lifecycle_seq: number }>();
+      } catch {
+        throw new EnrollmentPersistenceError();
+      }
+      if (row !== null) {
+        if (!Number.isSafeInteger(row.lifecycle_seq) || row.lifecycle_seq < 0) {
+          await this.releaseLifecycleLease(sponsorId, eventId);
+          throw new EnrollmentPersistenceError();
+        }
+        return row.lifecycle_seq;
+      }
+      if (attempt === 0) {
+        let sponsor: { sponsor_id: string } | null;
+        try {
+          sponsor = await sql(
+            this.#db,
+            "SELECT sponsor_id FROM sponsors WHERE sponsor_id = ?",
+            sponsorId,
+          ).first<{ sponsor_id: string }>();
+        } catch {
+          throw new EnrollmentPersistenceError();
+        }
+        if (sponsor === null) throw new EnrollmentError("FELLOW_LIFECYCLE_NOT_CURRENT");
+      }
+      if (attempt + 1 < MAX_LIFECYCLE_LEASE_ATTEMPTS) {
+        await new Promise<void>((resolve) => setTimeout(resolve, LIFECYCLE_LEASE_RETRY_MS));
+      }
+    }
+    throw new EnrollmentError("FELLOW_LIFECYCLE_BUSY");
+  }
+
+  private async releaseLifecycleLease(sponsorId: string, eventId: string): Promise<void> {
+    try {
+      await sql(
+        this.#db,
+        `UPDATE sponsors
+            SET lifecycle_lease_token = NULL, lifecycle_lease_expires_at = NULL
+          WHERE sponsor_id = ? AND lifecycle_lease_token = ?`,
+        sponsorId,
+        eventId,
+      ).run();
+    } catch {
+      // A failed command remains unauthorized and the short lease is reclaimable.
+    }
   }
 
   private async commitLifecycleCommand(

@@ -5486,6 +5486,43 @@ describe("0012 sponsor lifecycle commands", () => {
     ).toThrow("lifecycle event is immutable");
   });
 
+  test("a concurrent successful authentication cannot defeat individual revocation", async () => {
+    const sqlite = seededLifecycleCommandDatabase();
+    let raced = false;
+    const store = new D1EnrollmentStore(
+      localD1(sqlite, {
+        afterFirstRead: async (query) => {
+          if (raced || !query.includes("credential.issued_at, credential.last_used_at")) return;
+          raced = true;
+          expect(
+            await new D1EnrollmentStore(localD1(sqlite)).authenticateCredential(
+              "token-hash-1",
+              NOW + 10,
+              "bearer",
+            ),
+          ).toBeDefined();
+        },
+      }),
+    );
+    const result = await store.revokeCredential({
+      sponsorId: LIFECYCLE_SPONSOR,
+      fellowId: LIFECYCLE_FELLOW,
+      credentialId: "cred-lifecycle-command",
+      eventId: `LEV-${"A".repeat(26)}`,
+      requestId: "a".repeat(64),
+      effectiveAt: NOW + 1,
+    });
+    expect(result).toEqual({ sponsorSeq: 1, effectiveAt: NOW + 1 });
+    expect(
+      sqlite
+        .prepare<{ last_used_at: number; revoked_at: number }, [string]>(
+          "SELECT last_used_at, revoked_at FROM fellow_tokens WHERE credential_id = ?",
+        )
+        .get("cred-lifecycle-command"),
+    ).toEqual({ last_used_at: NOW + 10, revoked_at: NOW + 10 });
+    expect(await store.authenticateCredential("token-hash-1", NOW + 11, "bearer")).toBeUndefined();
+  });
+
   test("status changes are event-bound and compromise creates family and review projections", async () => {
     const sqlite = seededLifecycleCommandDatabase();
     const store = new D1EnrollmentStore(localD1(sqlite));
@@ -5547,6 +5584,36 @@ describe("0012 sponsor lifecycle commands", () => {
         .get(),
     ).toEqual({ review_from: NOW, flagged_at: NOW + 2, state: "open" });
     expect(await store.authenticateCredential("token-hash-1", NOW + 3, "bearer")).toBeUndefined();
+  });
+
+  test("a reordered status command never regresses lifecycle evidence time", async () => {
+    const sqlite = seededLifecycleCommandDatabase();
+    const store = new D1EnrollmentStore(localD1(sqlite));
+    const paused = await store.transitionFellow({
+      sponsorId: LIFECYCLE_SPONSOR,
+      fellowId: LIFECYCLE_FELLOW,
+      toStatus: "paused",
+      eventId: `LEV-${"B".repeat(26)}`,
+      requestId: "b".repeat(64),
+      effectiveAt: NOW + 2,
+    });
+    const resumed = await store.transitionFellow({
+      sponsorId: LIFECYCLE_SPONSOR,
+      fellowId: LIFECYCLE_FELLOW,
+      toStatus: "active",
+      eventId: `LEV-${"C".repeat(26)}`,
+      requestId: "c".repeat(64),
+      effectiveAt: NOW + 1,
+    });
+    expect(paused.effectiveAt).toBe(NOW + 2);
+    expect(resumed).toEqual({ sponsorSeq: 2, effectiveAt: NOW + 2 });
+    expect(
+      sqlite
+        .prepare<{ status: string; status_changed_at: number }, [string]>(
+          "SELECT status, status_changed_at FROM enrollment_fellows WHERE fellow_id = ?",
+        )
+        .get(LIFECYCLE_FELLOW),
+    ).toEqual({ status: "active", status_changed_at: NOW + 2 });
   });
 
   test("sponsor panic invalidates existing credentials and every pre-panic grant", async () => {

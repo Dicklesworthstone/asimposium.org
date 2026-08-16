@@ -33,6 +33,8 @@ DROP TABLE enrollment_idempotency;
 ALTER TABLE enrollment_idempotency_with_lifecycle RENAME TO enrollment_idempotency;
 
 ALTER TABLE sponsors ADD COLUMN lifecycle_seq INTEGER NOT NULL DEFAULT 0;
+ALTER TABLE sponsors ADD COLUMN lifecycle_lease_token TEXT;
+ALTER TABLE sponsors ADD COLUMN lifecycle_lease_expires_at INTEGER;
 
 CREATE TABLE fellow_lifecycle_events (
   event_id TEXT PRIMARY KEY,
@@ -127,6 +129,8 @@ END;
 CREATE TRIGGER sponsors_lifecycle_initial_insert
 BEFORE INSERT ON sponsors
 WHEN NEW.lifecycle_seq <> 0
+  OR NEW.lifecycle_lease_token IS NOT NULL
+  OR NEW.lifecycle_lease_expires_at IS NOT NULL
 BEGIN
   SELECT RAISE(ABORT, 'sponsor lifecycle head must begin at zero');
 END;
@@ -191,6 +195,9 @@ WHEN NOT EXISTS (
   SELECT 1 FROM sponsors sponsor
    WHERE sponsor.sponsor_id = NEW.sponsor_id
      AND sponsor.lifecycle_seq + 1 = NEW.sponsor_seq
+     AND sponsor.lifecycle_lease_token = NEW.event_id
+     AND sponsor.lifecycle_lease_expires_at IS NOT NULL
+     AND NEW.created_at <= sponsor.lifecycle_lease_expires_at
 )
 OR NOT (
   (NEW.action = 'credential-revoked' AND EXISTS (
@@ -466,7 +473,9 @@ BEGIN
      );
 
   UPDATE sponsors
-     SET lifecycle_seq = NEW.sponsor_seq
+     SET lifecycle_seq = NEW.sponsor_seq,
+         lifecycle_lease_token = NULL,
+         lifecycle_lease_expires_at = NULL
    WHERE sponsor_id = NEW.sponsor_id
      AND lifecycle_seq + 1 = NEW.sponsor_seq;
 END;
@@ -478,9 +487,29 @@ WHEN NEW.lifecycle_seq IS NOT OLD.lifecycle_seq
   SELECT 1 FROM fellow_lifecycle_events event
    WHERE event.sponsor_id = NEW.sponsor_id
      AND event.sponsor_seq = NEW.lifecycle_seq
+     AND event.event_id = OLD.lifecycle_lease_token
+     AND NEW.lifecycle_lease_token IS NULL
+     AND NEW.lifecycle_lease_expires_at IS NULL
 ))
 BEGIN
   SELECT RAISE(ABORT, 'sponsor lifecycle head lacks event');
+END;
+
+CREATE TRIGGER sponsors_lifecycle_lease_schema
+BEFORE UPDATE OF lifecycle_lease_token, lifecycle_lease_expires_at ON sponsors
+WHEN NOT (
+  (NEW.lifecycle_lease_token IS NULL AND NEW.lifecycle_lease_expires_at IS NULL)
+  OR (
+    typeof(NEW.lifecycle_lease_token) = 'text'
+    AND length(NEW.lifecycle_lease_token) = 30
+    AND substr(NEW.lifecycle_lease_token, 1, 4) = 'LEV-'
+    AND substr(NEW.lifecycle_lease_token, 5) NOT GLOB '*[^0-9A-HJKMNP-TV-Z]*'
+    AND typeof(NEW.lifecycle_lease_expires_at) = 'integer'
+    AND NEW.lifecycle_lease_expires_at BETWEEN 1 AND 9007199254740991
+  )
+)
+BEGIN
+  SELECT RAISE(ABORT, 'sponsor lifecycle lease outside schema');
 END;
 
 CREATE TRIGGER fellow_lifecycle_events_immutable_update
