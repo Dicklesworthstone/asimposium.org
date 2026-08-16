@@ -2530,7 +2530,7 @@ export class D1EnrollmentStore implements EnrollmentStore {
         await new Promise<void>((resolve) => setTimeout(resolve, LIFECYCLE_LEASE_RETRY_MS));
       }
     }
-    throw new EnrollmentError("FELLOW_LIFECYCLE_BUSY");
+    throw new EnrollmentError("LIFECYCLE_BUSY");
   }
 
   private async releaseLifecycleLease(sponsorId: string, eventId: string): Promise<void> {

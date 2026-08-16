@@ -5847,49 +5847,118 @@ describe("0012 sponsor lifecycle commands", () => {
     ).toThrow("credential revocation evidence is immutable");
   });
 
-  test("five synchronized sponsor commands all advance the bounded sequence", async () => {
+  test("nine contending sponsor commands serialize without a retry cliff and retain exact replay", async () => {
     const sqlite = lifecycleCommandDatabase();
     sqlite
       .prepare("INSERT INTO sponsors (sponsor_id, created_at, last_seen_at) VALUES (?, ?, ?)")
       .run(LIFECYCLE_SPONSOR, NOW, NOW);
-    let initialReads = 0;
-    let releaseInitialReads: (() => void) | undefined;
-    const allInitialReads = new Promise<void>((resolve) => {
-      releaseInitialReads = resolve;
-    });
+    let leaseProbes = 0;
     const store = new D1EnrollmentStore(
       localD1(sqlite, {
         serializeBatches: true,
         afterFirstRead: async (query) => {
-          if (!query.includes("SELECT sponsor.lifecycle_seq, security.panic_at")) return;
-          initialReads += 1;
-          if (initialReads === 5) releaseInitialReads?.();
-          await allInitialReads;
+          if (query.includes("SET lifecycle_lease_token = ?")) leaseProbes += 1;
         },
       }),
     );
+    const replayProtector = new AesGcmEnrollmentReplayProtector(new Uint8Array(32));
+    const commands = Array.from({ length: 9 }, (_, index) => {
+      const ordinal = index + 1;
+      return {
+        eventId: `LEV-${String(ordinal).repeat(26)}`,
+        idempotencyKey: `panic-concurrency-${ordinal}`,
+        requestId: fixtureDigest(`panic-concurrency-request-${ordinal}`),
+      };
+    });
 
     const results = await Promise.all(
-      Array.from({ length: 5 }, (_, index) =>
+      commands.map((command) =>
         store.panicSponsor({
           sponsorId: LIFECYCLE_SPONSOR,
-          eventId: `LEV-${String(index + 1).repeat(26)}`,
-          requestId: String(index + 1).repeat(64),
+          eventId: command.eventId,
+          requestId: command.requestId,
           effectiveAt: NOW + 1,
+          replayFor: async (result) => ({
+            ...lifecycleReplay("sponsor-panic", command.idempotencyKey, command.idempotencyKey),
+            encryptedResponse: await replayProtector.seal(
+              JSON.stringify({
+                eventId: command.eventId,
+                idempotencyKey: command.idempotencyKey,
+                ...result,
+              }),
+            ),
+          }),
         }),
       ),
     );
     expect(results.map((result) => result.sponsorSeq).sort((a, b) => a - b)).toEqual([
-      1, 2, 3, 4, 5,
+      1, 2, 3, 4, 5, 6, 7, 8, 9,
     ]);
-    expect(new Set(results.map((result) => result.effectiveAt)).size).toBe(5);
+    expect(new Set(results.map((result) => result.effectiveAt)).size).toBe(9);
+    expect(leaseProbes).toBeGreaterThan(9);
     expect(
       sqlite
-        .prepare<{ lifecycle_seq: number }, [string]>(
-          "SELECT lifecycle_seq FROM sponsors WHERE sponsor_id = ?",
+        .prepare<
+          {
+            lifecycle_seq: number;
+            lifecycle_lease_token: string | null;
+            lifecycle_lease_expires_at: number | null;
+          },
+          [string]
+        >(
+          `SELECT lifecycle_seq, lifecycle_lease_token, lifecycle_lease_expires_at
+             FROM sponsors WHERE sponsor_id = ?`,
         )
-        .get(LIFECYCLE_SPONSOR)?.lifecycle_seq,
-    ).toBe(5);
+        .get(LIFECYCLE_SPONSOR),
+    ).toEqual({
+      lifecycle_seq: 9,
+      lifecycle_lease_token: null,
+      lifecycle_lease_expires_at: null,
+    });
+    expect(
+      sqlite.prepare<{ n: number }, []>("SELECT COUNT(*) AS n FROM fellow_lifecycle_events").get()
+        ?.n,
+    ).toBe(9);
+    const replayRows = sqlite
+      .prepare<
+        {
+          idempotency_key: string;
+          response_ciphertext: string;
+          response_initialization_vector: string;
+        },
+        []
+      >(
+        `SELECT idempotency_key, response_ciphertext, response_initialization_vector
+           FROM enrollment_idempotency
+          WHERE scope = 'sponsor-panic'
+          ORDER BY idempotency_key`,
+      )
+      .all();
+    expect(replayRows).toHaveLength(9);
+    for (const row of replayRows) {
+      const command = commands.find(
+        (candidate) => candidate.idempotencyKey === row.idempotency_key,
+      );
+      if (command === undefined) throw new Error("unexpected lifecycle replay key");
+      const response = JSON.parse(
+        await replayProtector.open({
+          ciphertext: row.response_ciphertext,
+          initializationVector: row.response_initialization_vector,
+        }),
+      ) as {
+        eventId: string;
+        idempotencyKey: string;
+        sponsorSeq: number;
+        effectiveAt: number;
+      };
+      const result = results[commands.indexOf(command)];
+      expect(response).toEqual({
+        eventId: command.eventId,
+        idempotencyKey: command.idempotencyKey,
+        sponsorSeq: result?.sponsorSeq,
+        effectiveAt: result?.effectiveAt,
+      });
+    }
   });
 
   test("an expired lifecycle replay key can name a new command without permanent event collision", async () => {

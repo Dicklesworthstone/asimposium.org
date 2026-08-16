@@ -476,6 +476,17 @@ function enrollmentErrorResponse(error: EnrollmentError, request: Request): Resp
         "No current sponsor-owned lifecycle target can accept this action.",
         "Refresh the sponsor console and act only on the current lifecycle state shown there.",
       );
+    case "LIFECYCLE_BUSY": {
+      const response = problem(
+        429,
+        error.code,
+        "Another sponsor lifecycle action is committing",
+        "A sensitive action for this sponsor is already being committed.",
+        "Retry this exact body with the same Idempotency-Key after one second.",
+      );
+      response.headers.set("retry-after", "1");
+      return response;
+    }
     case "DEVICE_CODE_UNKNOWN":
       return problem(
         404,

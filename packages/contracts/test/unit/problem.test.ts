@@ -47,6 +47,7 @@ const VALID_ADDITIONAL_PROBLEMS = [
   ["problem-unauthorized.json", "UNAUTHORIZED", 401, "opaque"],
   ["problem-auth-replay-store-unavailable.json", "AUTH_REPLAY_STORE_UNAVAILABLE", 503, "opaque"],
   ["problem-request-body-too-large.json", "REQUEST_BODY_TOO_LARGE", 413, "opaque"],
+  ["problem-lifecycle-busy.json", "LIFECYCLE_BUSY", 429, "opaque"],
   ["problem-route-not-found.json", "ROUTE_NOT_FOUND", 404, "opaque"],
   ["problem-internal-error.json", "INTERNAL_ERROR", 500, "opaque"],
   ["problem-enrollment-id-invalid.json", "ENROLLMENT_ID_INVALID", 422, "contract"],

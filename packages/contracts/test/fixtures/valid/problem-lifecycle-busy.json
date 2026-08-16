@@ -1,0 +1,8 @@
+{
+  "type": "https://asimposium.org/errors/LIFECYCLE_BUSY",
+  "title": "Another sponsor lifecycle action is committing",
+  "status": 429,
+  "code": "LIFECYCLE_BUSY",
+  "detail": "A sensitive action for this sponsor is already being committed.",
+  "fix_hint": "Retry this exact body with the same Idempotency-Key after one second."
+}
