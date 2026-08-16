@@ -4,6 +4,7 @@ node_modules/
 .ntm/
 .wrangler/
 e2e/artifacts/
+/infra/deploy-resolved/
 .env
 .env.*
 # br doctor per-run artifacts

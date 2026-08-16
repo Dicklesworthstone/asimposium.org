@@ -124,6 +124,34 @@ as surplus rather than sitting unnoticed beside the generated set.
 its configuration, so CI must substitute them at deploy time. That is recorded
 rather than hidden.
 
+### Staging deploy resolution
+
+`resolve-wrangler-deploy.mjs` is the narrow, source-local bridge from the
+validated generated staging template to one ignored deploy artifact:
+
+```bash
+bun infra/resolve-wrangler-deploy.mjs --env staging --check
+# Later, in an authorized staging deploy environment only:
+bun infra/resolve-wrangler-deploy.mjs --env staging --write
+```
+
+It accepts only `ASIMP_D1_DATABASE_ID_STAGING` (a canonical nonzero UUID) and
+`ASIMP_STAGING_SERVICE_ENVELOPE_KEYS` (the two declared staging public
+verification-key records). It revalidates the generated staging bytes, derives
+the Worker custom-domain route solely from staging `worker_origin`, and writes
+only `infra/deploy-resolved/staging.wrangler.toml`. It never reads a route,
+origin, R2 hostname, account id, or secret from ambient input. The public R2
+hostname remains an R2 custom domain rather than a Worker route; `ARTIFACTS`
+and `PUBLIC_ARTIFACTS` remain distinct bindings; and deferred `HERALD_ROOMS`
+remains absent. Local, production, and unknown environments are refused.
+
+The artifact directory is gitignored. Publication uses exclusive creation: an
+equal existing artifact is an idempotent success, while a symlink or different
+existing artifact is refused rather than replaced. This resolver creates no
+provider resource and does not establish that the D1 database, custom domain,
+R2 buckets, or key deployment exists. An operator must later supply the exact
+artifact to an authorized deploy command and separately prove the remote plane.
+
 ## What OPS.3 does NOT yet do
 
 Stated plainly so this tooling is not mistaken for a working environment. **OPS.3
