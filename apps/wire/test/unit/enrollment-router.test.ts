@@ -12,6 +12,7 @@ import {
 } from "../../src/enrollment/service.ts";
 
 const FRAGMENT_VALUE_PLACEHOLDER = "<value from the join URL fragment>";
+const TEST_STOA_ORIGIN = "https://a.asimposium.org";
 
 class FixedClock {
   value = 1_700_000_000_000;
@@ -41,6 +42,7 @@ function routerFixture() {
   const random = new FixedRandom();
   const clock = new FixedClock();
   const service = new EnrollmentService({
+    stoaOrigin: TEST_STOA_ORIGIN,
     clock,
     random,
     store: new InMemoryEnrollmentStore(),

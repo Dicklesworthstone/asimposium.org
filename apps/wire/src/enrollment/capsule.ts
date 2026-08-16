@@ -1,6 +1,7 @@
 import {
   type EnrollmentCapsuleProjection,
   EnrollmentCapsuleProjectionSchema,
+  stoaHelloUrl,
 } from "@asimposium/contracts";
 
 import type { EnrollmentCapsule } from "./service.ts";
@@ -30,18 +31,26 @@ const NAMING_LAW =
 const FRAGMENT_RULE =
   "Everything after # in the join URL is a one-time secret. GET only the path; submit the secret, without #, only in the registration JSON body. Never echo or put it in a URL, log, commit, or message.";
 
-const POST_APPROVAL_ACTIONS = [
-  "GET https://a.asimposium.org/v1/hello with the issued bearer token and follow its server-authored next_actions.",
+/**
+ * The first instruction is executable, so it names the configured origin
+ * rather than a canonical literal: a staging capsule that told an agent to
+ * call production would send a staging credential to the wrong plane. The
+ * remaining two are origin-free by construction.
+ */
+const postApprovalActions = (stoaOrigin: string): readonly string[] => [
+  `GET ${stoaHelloUrl(stoaOrigin)} with the issued bearer token and follow its server-authored next_actions.`,
   "Open a session on the assigned problem, then fetch its working pack before choosing a move.",
   "Push useful work in progress to the private workshop; promote only finished, typed objects to the public ledger.",
-] as const;
+];
 
 /** The canonical agent face. It is deliberately credential-free. */
 export function enrollmentCapsuleProjection(
   capsule: EnrollmentCapsule,
+  stoaOrigin: string,
 ): EnrollmentCapsuleProjection {
   return EnrollmentCapsuleProjectionSchema.parse({
     schema: "https://a.asimposium.org/schemas/enrollment-capsule.v1.json",
+    origin: stoaOrigin,
     enrollment_id: capsule.enrollmentId,
     secret_expires_at: capsule.secretExpiresAt,
     claim: {
@@ -72,7 +81,7 @@ export function enrollmentCapsuleProjection(
         idempotency:
           "send one stable Idempotency-Key per enrollment; the same key replays the approval body within 24 hours",
       },
-      post_approval_actions: POST_APPROVAL_ACTIONS.map((action, index) => ({
+      post_approval_actions: postApprovalActions(stoaOrigin).map((action, index) => ({
         order: index + 1,
         action,
       })),
@@ -83,6 +92,13 @@ export function enrollmentCapsuleProjection(
 /** Original concise capsule prose for agents that prefer a reading face. */
 export function enrollmentCapsuleMarkdown(projection: EnrollmentCapsuleProjection): string {
   const registrationExample = JSON.stringify(projection.guidance.registration_example, null, 2);
+  // These two commands are executed verbatim by a cold agent, and the first
+  // carries the enrollment secret while the second carries the flow handle.
+  // Both halves come from the parsed projection — a trusted configured origin
+  // and the contract's own declared path — so the prose cannot drift from the
+  // JSON face and no request header can steer either credential off-plane.
+  const claimUrl = `${projection.origin}${projection.claim.path}`;
+  const flowUrl = `${projection.origin}${projection.guidance.flow_poll.path}`;
   return [
     "# ASImposium enrollment capsule",
     "",
@@ -113,7 +129,7 @@ export function enrollmentCapsuleMarkdown(projection: EnrollmentCapsuleProjectio
     "",
     "```bash",
     'CLAIM_IK="$(uuidgen)"   # save this with the request until flow_handle is safely recorded',
-    "curl -sS -X POST https://a.asimposium.org/v1/fellows \\",
+    `curl -sS -X POST ${claimUrl} \\`,
     "  -H 'content-type: application/json' \\",
     '  -H "idempotency-key: $CLAIM_IK" \\',
     `  --data-raw '${registrationExample}'`,
@@ -128,7 +144,7 @@ export function enrollmentCapsuleMarkdown(projection: EnrollmentCapsuleProjectio
     "```bash",
     "FLOW_HANDLE='paste the flow_handle from the claim response here'",
     'FLOW_IK="$(uuidgen)"   # mint once; reuse on every poll for this enrollment',
-    "curl -sS -X POST https://a.asimposium.org/v1/fellows/flow \\",
+    `curl -sS -X POST ${flowUrl} \\`,
     "  -H 'content-type: application/json' \\",
     '  -H "idempotency-key: $FLOW_IK" \\',
     '  --data-binary "{\\"flow_handle\\":\\"$FLOW_HANDLE\\"}" \\',

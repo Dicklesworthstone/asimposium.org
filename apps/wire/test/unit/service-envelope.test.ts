@@ -147,10 +147,15 @@ describe("canonicalization", () => {
     expect(await canonicalDigest(shuffled)).toBe(await canonicalDigest(ordered));
   });
 
-  test("length prefixes defeat the concatenation collision", async () => {
-    // ("a:1","b") and ("a","1:b") are the classic pair a delimiter-only scheme
-    // cannot tell apart. If these ever collide, one signature authorises a
-    // different principal than the one that was signed for.
+  test("a colon inside a signed value is carried literally, not as framing", async () => {
+    // `action` and `principal_id` are NOT adjacent in CANONICAL_FIELDS —
+    // `principal_type` sits between them — so a value-joined encoding does not
+    // actually collide on this pair, and calling it "the classic collision"
+    // overstated what it proves. What it does prove is still worth keeping: a
+    // `:` inside a value changes the digest instead of being read as a
+    // delimiter. The genuine adjacent-field collision, where a delimiter-only
+    // scheme really cannot tell two claim sets apart, is planted in
+    // auth-canonical-vectors.test.ts against `principal_type`/`principal_id`.
     const left = await canonicalDigest(await baseClaims({ action: "a:1", principal_id: "b" }));
     const right = await canonicalDigest(await baseClaims({ action: "a", principal_id: "1:b" }));
     expect(left).not.toBe(right);
@@ -158,7 +163,7 @@ describe("canonicalization", () => {
 
   test("a record separator inside a value cannot reframe the field list", async () => {
     const injected = await canonicalDigest(
-      await baseClaims({ action: `ab14:principal_id:5:evil` }),
+      await baseClaims({ action: `ab\x1e14:principal_id:5:evil\x1e` }),
     );
     const honest = await canonicalDigest(await baseClaims({ action: "ab" }));
     expect(injected).not.toBe(honest);
@@ -297,8 +302,8 @@ describe("claim bounds are enforced before canonicalization or crypto", () => {
 
   test.each([
     ["action", "directive\ncreate"],
-    ["principal_id", "usr_01"],
-    ["kid", "agora a"],
+    ["principal_id", "usr_01\x1e"],
+    ["kid", "agora\x00a"],
     ["route", "/v1/x\n"],
   ])("refuses a control character in %s", async (field, value) => {
     const h = await harness();
@@ -329,7 +334,7 @@ describe("claim bounds are enforced before canonicalization or crypto", () => {
   test("canonicalization stays total even for claims the verifier refuses", async () => {
     // Framing must be correct for input validation would reject; the two jobs
     // are separate on purpose (defence in depth).
-    const claims = await baseClaims({ action: "ab\nc:d" });
+    const claims = await baseClaims({ action: `a${String.fromCharCode(0x1e)}b\nc:d` });
     expect(() => canonicalBytes(claims)).not.toThrow();
     expect(parseEnvelope({ claims, signature: "0".repeat(128) })).toBeUndefined();
   });

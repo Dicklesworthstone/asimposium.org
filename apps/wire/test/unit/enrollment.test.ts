@@ -53,6 +53,7 @@ const deviceProposal = {
   requested_scopes: ["review"],
 } as const;
 const deviceStartOptions = { trustedClientAddress: "198.51.100.7" } as const;
+const trustedTestStoaOrigin = "https://a.asimposium.org";
 
 function serviceFixture() {
   const clock = new MutableClock();
@@ -62,6 +63,7 @@ function serviceFixture() {
     clock,
     store,
     service: new EnrollmentService({
+      stoaOrigin: trustedTestStoaOrigin,
       clock,
       store,
       random,
@@ -142,6 +144,7 @@ describe("S-1 enrollment state machine", () => {
     }
     const tailThenLow = new TailThenLowRandom();
     const sampled = new EnrollmentService({
+      stoaOrigin: trustedTestStoaOrigin,
       store: new InMemoryEnrollmentStore(),
       random: tailThenLow,
       replayProtector: new AesGcmEnrollmentReplayProtector(new Uint8Array(32)),
@@ -152,6 +155,7 @@ describe("S-1 enrollment state machine", () => {
 
     const broken: EnrollmentRandom = { bytes: (length) => new Uint8Array(length).fill(255) };
     const unavailable = new EnrollmentService({
+      stoaOrigin: trustedTestStoaOrigin,
       store: new InMemoryEnrollmentStore(),
       random: broken,
       replayProtector: new AesGcmEnrollmentReplayProtector(new Uint8Array(32)),
@@ -174,6 +178,7 @@ describe("S-1 enrollment state machine", () => {
     }
     const random = new SameUserCodeRandom();
     const service = new EnrollmentService({
+      stoaOrigin: trustedTestStoaOrigin,
       store: new InMemoryEnrollmentStore(),
       random,
       replayProtector: new AesGcmEnrollmentReplayProtector(new Uint8Array(32)),
@@ -242,6 +247,7 @@ describe("S-1 enrollment state machine", () => {
       },
     });
     const service = new EnrollmentService({
+      stoaOrigin: trustedTestStoaOrigin,
       store,
       random: new DeterministicRandom(),
       replayProtector: new AesGcmEnrollmentReplayProtector(new Uint8Array(32)),
@@ -325,6 +331,7 @@ describe("S-1 enrollment state machine", () => {
       },
     });
     const service = new EnrollmentService({
+      stoaOrigin: trustedTestStoaOrigin,
       clock,
       store,
       random: new DeterministicRandom(),
@@ -417,6 +424,7 @@ describe("S-1 enrollment state machine", () => {
       },
     });
     const service = new EnrollmentService({
+      stoaOrigin: trustedTestStoaOrigin,
       clock,
       store,
       random: new DeterministicRandom(),
@@ -726,6 +734,7 @@ describe("S-1 enrollment state machine", () => {
     const random = new DeterministicRandom();
     const clock = new MutableClock();
     const service = new EnrollmentService({
+      stoaOrigin: trustedTestStoaOrigin,
       clock,
       store,
       random,
@@ -1013,6 +1022,7 @@ describe("S-1 enrollment state machine", () => {
       },
     });
     const service = new EnrollmentService({
+      stoaOrigin: trustedTestStoaOrigin,
       clock,
       store,
       random: new DeterministicRandom(),
@@ -1096,6 +1106,7 @@ describe("S-1 enrollment state machine", () => {
     });
     const clock = new MutableClock();
     const service = new EnrollmentService({
+      stoaOrigin: trustedTestStoaOrigin,
       clock,
       store,
       random: new DeterministicRandom(),
@@ -1140,6 +1151,7 @@ describe("S-1 enrollment state machine", () => {
     });
     const clock = new MutableClock();
     const service = new EnrollmentService({
+      stoaOrigin: trustedTestStoaOrigin,
       clock,
       store,
       random: new DeterministicRandom(),
@@ -1167,18 +1179,22 @@ describe("S-1 enrollment state machine", () => {
   });
 
   test("replay protection is required, stable across isolates, and decrypt failure is operational", async () => {
-    expect(() => new EnrollmentService()).toThrow(EnrollmentReplayConfigurationError);
+    expect(() => new EnrollmentService({ stoaOrigin: trustedTestStoaOrigin })).toThrow(
+      EnrollmentReplayConfigurationError,
+    );
 
     const clock = new MutableClock();
     const store = new InMemoryEnrollmentStore();
     const key = Uint8Array.from({ length: 32 }, (_value, index) => index + 1);
     const first = new EnrollmentService({
+      stoaOrigin: trustedTestStoaOrigin,
       clock,
       store,
       random: new DeterministicRandom(),
       replayProtector: new AesGcmEnrollmentReplayProtector(key),
     });
     const replayedBySecondIsolate = new EnrollmentService({
+      stoaOrigin: trustedTestStoaOrigin,
       clock,
       store,
       random: new DeterministicRandom(),
@@ -1191,6 +1207,7 @@ describe("S-1 enrollment state machine", () => {
     ).resolves.toEqual(minted);
 
     const wrongKeyIsolate = new EnrollmentService({
+      stoaOrigin: trustedTestStoaOrigin,
       clock,
       store,
       random: new DeterministicRandom(),
@@ -1711,5 +1728,31 @@ describe("S-1 enrollment state machine", () => {
     expect(diagnostic).not.toContain(canary);
     expect(diagnostic).not.toContain("/Users/");
     expect(diagnostic).not.toContain("flow_v1.");
+  });
+
+  test("diagnostics redact a credential-shaped caller suite while retaining safe metadata", () => {
+    const suiteSecret = "asimp_ag_DIAGNOSTIC_SUITE_SECRET_BYTES";
+    const diagnostic = safeEnrollmentDiagnostic({
+      suite: `enrollment.${suiteSecret}.regression`,
+      startedAt: performance.now(),
+      status: "fail",
+      code: "FLOW_INVALID",
+    });
+
+    expect(diagnostic).not.toContain(suiteSecret);
+    let parsedDiagnostic: unknown;
+    try {
+      parsedDiagnostic = JSON.parse(diagnostic) as unknown;
+    } catch {
+      throw new Error("safe-enrollment-diagnostic-json");
+    }
+    expect(parsedDiagnostic).toMatchObject({
+      tool: "bun",
+      package: "@asimposium/wire",
+      suite: "enrollment.<redacted>.regression",
+      status: "fail",
+      code: "FLOW_INVALID",
+      reproduce: "cd apps/wire && bun run test:unit",
+    });
   });
 });

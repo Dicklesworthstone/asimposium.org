@@ -59,6 +59,12 @@ const ENROLLMENT_UNAVAILABLE =
   '"detail":"The enrollment replay binding is missing or malformed.",' +
   '"fix_hint":"Set the enrollment replay key for this environment and retry."}';
 
+const STOA_ORIGIN_UNAVAILABLE =
+  '{"type":"https://asimposium.org/errors/ENROLLMENT_UNAVAILABLE",' +
+  '"title":"Enrollment is not configured on this Worker","status":503,"code":"ENROLLMENT_UNAVAILABLE",' +
+  '"detail":"The Stoa origin binding is missing or is not a trusted origin.",' +
+  '"fix_hint":"Set the Stoa origin for this environment and retry."}';
+
 const ROUTE_NOT_FOUND =
   '{"type":"https://asimposium.org/errors/ROUTE_NOT_FOUND","title":"No such route","status":404,' +
   '"code":"ROUTE_NOT_FOUND","detail":"This Worker serves no route at /nope.",' +
@@ -71,9 +77,15 @@ const INTERNAL_ERROR =
   '"detail":"An unexpected error occurred. Its details are not disclosed on this face.",' +
   '"fix_hint":"Retry the request. If it persists, report the route and the time of the attempt."}';
 
+const TRUSTED_STOA_ORIGIN = "https://a.asimposium.org";
+
+function trustedStoaEnv(): Env {
+  return boundEnv({ STOA_ORIGIN: TRUSTED_STOA_ORIGIN });
+}
+
 describe("face wire format", () => {
   test("GET /capabilities names every live agent enrollment write", async () => {
-    const res = await callWorker("/capabilities", {});
+    const res = await callWorker("/capabilities", trustedStoaEnv());
     expect(res.status).toBe(200);
     expect(res.headers.get("cache-control")).toContain("max-age=60");
     const body = JSON.parse(res.bodyText) as { agent_writes: string[] };
@@ -240,12 +252,35 @@ describe("face wire format", () => {
     expect(res.bodyText).toBe(BINDING_MISSING);
   });
 
-  test("GET /v1/hello reaches the mounted enrollment service", async () => {
-    const res = await callWorker("/v1/hello");
+  test("GET /v1/hello fails closed when the trusted Stoa origin is absent", async () => {
+    const res = await callWorker("/v1/hello", boundEnv());
+
+    expect(res.status).toBe(503);
+    expect(res.contentType).toBe("application/problem+json; charset=utf-8");
+    expect(res.bodyText).toBe(STOA_ORIGIN_UNAVAILABLE);
+  });
+
+  test("GET /v1/hello reaches the replay-key configuration check after trusted-origin validation", async () => {
+    const res = await callWorker("/v1/hello", trustedStoaEnv());
 
     expect(res.status).toBe(503);
     expect(res.contentType).toBe("application/problem+json; charset=utf-8");
     expect(res.bodyText).toBe(ENROLLMENT_UNAVAILABLE);
+  });
+
+  test("encoded static and malformed dynamic Fellow paths reach the outer enrollment owner", async () => {
+    const paths = [
+      // Hono 4.13.2 treats this as the mounted POST /v1/fellows/flow route.
+      "/v1/fellows/%66low",
+      // Runtime-invalid after configuration, but still an owned dynamic shape.
+      "/v1/fellows/after/f1.not-a-canonical-cursor",
+    ];
+
+    for (const path of paths) {
+      const res = await callWorker(path, trustedStoaEnv());
+      expect(res.status, path).toBe(503);
+      expect(res.body, path).toMatchObject({ code: "ENROLLMENT_UNAVAILABLE", status: 503 });
+    }
   });
 
   test("every mounted Propylon path shape reaches enrollment configuration", async () => {
@@ -256,8 +291,15 @@ describe("face wire format", () => {
       "/v1/enrollments/proposals",
       "/v1/enrollments/ASIMP-EN-01JXYZ4K6Q/decision",
       "/v1/fellows",
+      "/v1/fellows/after/f1.djF8MTM6MTc4NjgwMDAwMDAwMHwxMzpmZWxsb3ctMDFKWFla",
+      // The outer app owns the dynamic shape even when the router will later
+      // refuse this runtime-invalid frame before sponsor authentication.
+      "/v1/fellows/after/f1.not-a-canonical-cursor",
       "/v1/fellows/credentials/revoke",
       "/v1/fellows/flow",
+      // Hono matches decoded static segments; an encoded spelling remains the
+      // same owned /flow endpoint rather than falling through the outer app.
+      "/v1/fellows/%66low",
       "/v1/fellows/lifecycle",
       "/v1/hello",
       "/v1/sponsors/panic",
@@ -269,12 +311,13 @@ describe("face wire format", () => {
       "/%6Aoin/%C0",
       "/v1/enrollments/%ZZ/decision",
       "/v1/enrollments/%C0/decision",
+      "/v1/fellows/after/%ZZ",
       "/v1/%65nrollments/%ZZ/decision",
       "/%76%31/enrollments/%C0/%64ecision",
     ];
 
     for (const path of paths) {
-      const res = await callWorker(path);
+      const res = await callWorker(path, trustedStoaEnv());
       expect(res.status, path).toBe(503);
       expect(res.bodyText, path).toBe(ENROLLMENT_UNAVAILABLE);
     }
@@ -287,6 +330,9 @@ describe("face wire format", () => {
       "/v1/enrollment",
       "/v1/enrollments/ASIMP-EN-01JXYZ4K6Q",
       "/v1/enrollments/ASIMP-EN-01JXYZ4K6Q/decision/extra",
+      "/v1/fellows/after/",
+      "/v1/fellows/after/f1.cursor/extra",
+      "/v1/fellows/%66low/extra",
       "/v1/hello/",
       "/v1/hello%2F",
       "/v1/%2Fhello",
@@ -309,6 +355,7 @@ describe("face wire format", () => {
       "/v1/fellows%2Fflow",
       "/v1/fellows/credentials%2Frevoke",
       "/v1/fellows%2Flifecycle",
+      "/v1/fellows/after/f1.cursor%2Ftail",
       "/v1/sponsors%2Fpanic",
     ];
 

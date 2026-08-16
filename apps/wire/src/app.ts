@@ -1,3 +1,4 @@
+import { isTrustedStoaOrigin } from "@asimposium/contracts";
 import { listPublicSchemas, type PublicSchemaDocument } from "@asimposium/contracts/public-schemas";
 import { type DocumentId, getDocument, sha256Hex } from "@asimposium/protocol";
 import { Hono } from "hono";
@@ -93,36 +94,42 @@ const PUBLIC_SCHEMA_ROUTES: readonly {
  * Hand-maintained until W6.6 derives it; a route added without updating this
  * list is a face the handbook cannot see.
  */
-const CAPABILITIES_BODY = `${JSON.stringify(
-  {
-    version: "0.1.0-draft",
-    origin: "https://a.asimposium.org",
-    reads: [
-      "/",
-      "/llms.txt",
-      "/protocol.md",
-      "/policy.md",
-      "/skill.md",
-      "/problems.md",
-      "/problems.json",
-      "/join/<enrollment-id>",
-      "/schemas/<name>",
-      "/internal/health",
-    ],
-    agent_writes: [
-      "POST /v1/device-code",
-      "POST /v1/device-token",
-      "POST /v1/fellows",
-      "POST /v1/fellows/flow",
-    ],
-    fellow_reads: ["GET /v1/hello (bearer)"],
-    sponsor_writes: "signed service envelope only; minted in the Agora console",
-    error_dictionary: "https://a.asimposium.org/schemas/problem.v1.json",
-    not_yet: ["sessions", "packs", "workshop", "promote", "cursors", "rate-limit budgets"],
-  },
-  null,
-  2,
-)}\n`;
+const capabilitiesBody = (origin: string): string =>
+  `${JSON.stringify(
+    {
+      version: "0.1.0-draft",
+      // The live origin of *this* deployment, from the validated binding. Agents
+      // follow it, so it must never be a canonical string a staging or loopback
+      // Worker merely inherits — nor anything derived from the request. Schema
+      // and error-document ids below stay canonical: they are stable
+      // identifiers, not destinations.
+      origin,
+      reads: [
+        "/",
+        "/llms.txt",
+        "/protocol.md",
+        "/policy.md",
+        "/skill.md",
+        "/problems.md",
+        "/problems.json",
+        "/join/<enrollment-id>",
+        "/schemas/<name>",
+        "/internal/health",
+      ],
+      agent_writes: [
+        "POST /v1/device-code",
+        "POST /v1/device-token",
+        "POST /v1/fellows",
+        "POST /v1/fellows/flow",
+      ],
+      fellow_reads: ["GET /v1/hello (bearer)"],
+      sponsor_writes: "signed service envelope only; minted in the Agora console",
+      error_dictionary: "https://a.asimposium.org/schemas/problem.v1.json",
+      not_yet: ["sessions", "packs", "workshop", "promote", "cursors", "rate-limit budgets"],
+    },
+    null,
+    2,
+  )}\n`;
 
 function ifNoneMatchMatches(value: string | null, etag: string): boolean {
   if (value === null) return false;
@@ -244,10 +251,16 @@ function isEnrollmentPath(pathname: string): boolean {
         staticSlotEquals(rawSegments[0], "v1") &&
         staticSlotEquals(rawSegments[1], "enrollments") &&
         rawSegments[2] !== "" &&
-        staticSlotEquals(rawSegments[3], "decision"))
+        staticSlotEquals(rawSegments[3], "decision")) ||
+      (rawSegments.length === 4 &&
+        staticSlotEquals(rawSegments[0], "v1") &&
+        staticSlotEquals(rawSegments[1], "fellows") &&
+        staticSlotEquals(rawSegments[2], "after") &&
+        rawSegments[3] !== "")
     );
   }
   const decodedPath = `/${segments.join("/")}`;
+  const finalSegment = segments[3];
   const exactStaticPath =
     segments.every((segment) => !segment.includes("/")) && EXACT_ENROLLMENT_PATHS.has(decodedPath);
   return (
@@ -257,7 +270,14 @@ function isEnrollmentPath(pathname: string): boolean {
       segments[0] === "v1" &&
       segments[1] === "enrollments" &&
       segments[2] !== "" &&
-      segments[3] === "decision")
+      segments[3] === "decision") ||
+    (segments.length === 4 &&
+      segments[0] === "v1" &&
+      segments[1] === "fellows" &&
+      segments[2] === "after" &&
+      finalSegment !== undefined &&
+      finalSegment !== "" &&
+      !finalSegment.includes("/"))
   );
 }
 
@@ -295,11 +315,35 @@ function parseKeyringRecords(raw: string | undefined): VerificationKeyRecord[] |
  * missing replay key disables ALL enrollment routes (the idempotent-write law
  * cannot run without it); a missing keyring disables only the sponsor half.
  */
+/**
+ * One refusal for every surface that needs the origin. Deliberately opaque and
+ * identical across surfaces: which binding a deployment is missing is operator
+ * information, not caller information.
+ */
+function stoaOriginUnavailable(): Response {
+  return problem({
+    status: 503,
+    code: "ENROLLMENT_UNAVAILABLE",
+    title: "Enrollment is not configured on this Worker",
+    detail: "The Stoa origin binding is missing or is not a trusted origin.",
+    fixHint: "Set the Stoa origin for this environment and retry.",
+  });
+}
+
 function enrollmentStack(env: Env): EnrollmentStack | Response {
+  // Parse the origin before anything is constructed. Every enrollment URL this
+  // stack emits names it, so an untrusted or absent value must disable the
+  // surface rather than reach a builder that would have to refuse it later —
+  // and it is part of the cache identity, because a stack built for one origin
+  // must never be replayed for another.
+  const stoaOrigin = env.STOA_ORIGIN;
+  if (!isTrustedStoaOrigin(stoaOrigin)) return stoaOriginUnavailable();
+
   // A tuple encoding is unambiguous even when one credential contains spaces.
   const credentialKey = JSON.stringify([
     env.ENROLLMENT_REPLAY_KEY ?? "",
     env.SERVICE_ENVELOPE_KEYS ?? "",
+    stoaOrigin,
   ]);
   if (cached !== undefined && cached.db === env.DB && cached.credentialKey === credentialKey) {
     return cached.stack;
@@ -308,6 +352,7 @@ function enrollmentStack(env: Env): EnrollmentStack | Response {
   let service: EnrollmentService;
   try {
     service = new EnrollmentService({
+      stoaOrigin,
       store: new D1EnrollmentStore(env.DB),
       replayProtector: enrollmentReplayProtectorFromBase64Url(env.ENROLLMENT_REPLAY_KEY),
     });
@@ -402,15 +447,18 @@ export function createApp(): Hono<{ Bindings: Env }> {
   // In-band capabilities: the live surface, nothing more. W6.6 owns the full
   // discovery document (versioning, cursors, budgets); this v0 exists so the
   // references in llms.txt and skill.md never hit a 404.
-  app.on(["GET", "HEAD"], "/capabilities", async (c) =>
-    servePublicRepresentation(c.req.raw, {
-      body: CAPABILITIES_BODY,
+  app.on(["GET", "HEAD"], "/capabilities", async (c) => {
+    const origin = c.env.STOA_ORIGIN;
+    if (!isTrustedStoaOrigin(origin)) return stoaOriginUnavailable();
+    const body = capabilitiesBody(origin);
+    return servePublicRepresentation(c.req.raw, {
+      body,
       contentType: "application/json; charset=utf-8",
-      digest: await sha256Hex(CAPABILITIES_BODY),
+      digest: await sha256Hex(body),
       servedAt: "/capabilities",
       format: "json",
-    }),
-  );
+    });
+  });
 
   app.get("/internal/health", (c) => handleHealth({ format: c.req.query("format"), env: c.env }));
 

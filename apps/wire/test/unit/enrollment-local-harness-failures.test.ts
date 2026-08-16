@@ -3,8 +3,15 @@ import { describe, expect, test } from "bun:test";
 import { readFileSync } from "node:fs";
 import { resolve } from "node:path";
 
+import { getDocument } from "@asimposium/protocol";
+
 import type { D1Database, ExecutionContext } from "@cloudflare/workers-types";
 
+import {
+  bodyEchoesBearer,
+  firstSafeReadUrl,
+  SAFE_FIRST_READ_PATHS,
+} from "../../src/enrollment/local-d1-client";
 import worker from "../../src/enrollment/local-d1-worker";
 
 /**
@@ -82,6 +89,8 @@ function freshDatabase(): D1Database {
 const KEY_A = "A".repeat(43);
 const KEY_B = "B".repeat(43);
 const KEY_C = "C".repeat(43);
+const LOCAL_STOA_ORIGIN = "http://127.0.0.1:8787";
+const MISSING_STOA_ORIGIN = Symbol("missing-stoa-origin");
 const syntheticJoinSecret = (): string => `v1.${"x".repeat(43)}`;
 
 const context = {} as ExecutionContext;
@@ -92,14 +101,17 @@ async function call(
   path: string,
   body: unknown,
   headers: Record<string, string> = {},
+  stoaOrigin: unknown | typeof MISSING_STOA_ORIGIN = LOCAL_STOA_ORIGIN,
 ): Promise<{ status: number; body: Record<string, unknown>; raw: string }> {
+  const env: Record<string, unknown> = { DB: db, ENROLLMENT_REPLAY_KEY: replayKey };
+  if (stoaOrigin !== MISSING_STOA_ORIGIN) env.STOA_ORIGIN = stoaOrigin;
   const response = await worker.fetch(
     new Request(`https://local.invalid${path}`, {
       method: "POST",
       headers: { "content-type": "application/json", ...headers },
       body: JSON.stringify(body),
     }),
-    { DB: db, ENROLLMENT_REPLAY_KEY: replayKey },
+    env as never,
     context,
   );
   const raw = await response.text();
@@ -113,6 +125,29 @@ async function call(
 }
 
 const mintBody = { sponsor_id: "usr_harness_sponsor", request: { requested_scopes: ["review"] } };
+
+describe("the trusted local Stoa origin is an explicit fixture boundary", () => {
+  test.each([
+    ["absent", MISSING_STOA_ORIGIN],
+    ["foreign", "https://evil.test"],
+    ["noncanonical loopback", "http://127.0.0.1:08787"],
+  ])("PLANTED: a %s origin refuses before minting", async (_label, origin) => {
+    const result = await call(freshDatabase(), KEY_A, "/__s1/mint", mintBody, {}, origin);
+    expect(result.status).toBe(503);
+    expect(result.body).toEqual({ code: "ENROLLMENT_UNAVAILABLE" });
+    expect(result.raw).not.toContain(LOCAL_STOA_ORIGIN);
+  });
+
+  test("PLANTED: an invalid origin cannot reuse the same D1/key service cache entry", async () => {
+    const db = freshDatabase();
+    const valid = await call(db, KEY_A, "/__s1/mint", mintBody);
+    expect(valid.status).toBe(201);
+
+    const refused = await call(db, KEY_A, "/__s1/mint", mintBody, {}, "https://evil.test");
+    expect(refused.status).toBe(503);
+    expect(refused.body).toEqual({ code: "ENROLLMENT_UNAVAILABLE" });
+  });
+});
 
 describe("a replay key the operator did not supply is a typed 503", () => {
   for (const [label, key] of [
@@ -265,5 +300,257 @@ describe("the codes the S-1 contract depends on survive the harness", () => {
     const result = await call(freshDatabase(), KEY_A, "/__s1/mint", { sponsor_id: 42 });
     expect(result.status).toBe(400);
     expect(result.body).toEqual({ code: "LOCAL_INPUT_INVALID" });
+  });
+
+  test("a keyless write on a fresh enrollment is refused and leaves no proposal", async () => {
+    const db = freshDatabase();
+    const minted = await call(db, KEY_A, "/__s1/mint", mintBody, {
+      "idempotency-key": "harness-mint-1",
+    });
+    expect(minted.status).toBe(201);
+    const { enrollmentId, secret } = minted.body as { enrollmentId: string; secret: string };
+
+    const claim = {
+      enrollment_id: enrollmentId,
+      secret,
+      name: "harness-orchid",
+      model: "harness-model",
+      harness: "codex",
+    };
+    const cardState = async (): Promise<string> => {
+      const card = await call(db, KEY_A, "/__s1/card", {
+        sponsor_id: mintBody.sponsor_id,
+        enrollment_id: enrollmentId,
+      });
+      return `${card.status}:${card.raw}`;
+    };
+
+    // The refusal comes *first*, on an enrollment that has never been claimed.
+    // Ordering it after a successful claim would make the assertions below
+    // insensitive: the proposal would exist either way.
+    const before = await cardState();
+    const refused = await call(db, KEY_A, "/v1/fellows", claim);
+    expect(refused.status).toBe(400);
+    expect(refused.body.code).toBe("IDEMPOTENCY_KEY_INVALID");
+    expect(await cardState()).toBe(before);
+
+    // The enrollment is still unspent: a first keyed claim succeeds as a fresh
+    // 202. Had the refused attempt written a proposal, this could not.
+    const accepted = await call(db, KEY_A, "/v1/fellows", claim, {
+      "idempotency-key": "harness-claim-1",
+    });
+    expect(accepted.status).toBe(202);
+    expect(typeof accepted.body.flow_handle).toBe("string");
+
+    // Causal closer: the observed state does move when a write really lands, so
+    // the unchanged-state assertion above is not vacuous.
+    expect(await cardState()).not.toBe(before);
+  });
+});
+
+/**
+ * The first safe read has to be a real successful canonical read, not a 200 this
+ * harness invented. These drive the local worker's own `fetch` — no network, no
+ * Wrangler — and assert the bytes are the production document.
+ */
+describe("the public texts hello names are served by the production handler", () => {
+  const publicRead = async (
+    path: string,
+    headers: Record<string, string> = {},
+    method = "GET",
+  ): Promise<Response> =>
+    worker.fetch(
+      new Request(`https://local.invalid${path}`, { method, headers }),
+      {
+        DB: freshDatabase(),
+        ENROLLMENT_REPLAY_KEY: KEY_A,
+        STOA_ORIGIN: LOCAL_STOA_ORIGIN,
+      } as never,
+      context,
+    );
+
+  for (const path of SAFE_FIRST_READ_PATHS) {
+    test(`${path} is a 200 canonical markdown read with a non-empty body`, async () => {
+      const response = await publicRead(path);
+      expect(response.status).toBe(200);
+      expect(response.headers.get("content-type")).toBe("text/markdown; charset=utf-8");
+      expect((await response.text()).trim().length).toBeGreaterThan(0);
+    });
+
+    test(`${path} serves the exact production document, not a harness fixture`, async () => {
+      // The causal half. A fixture body would satisfy the status and
+      // content-type assertions above; only comparing against the registry the
+      // deployed Worker reads proves the production handler is what ran.
+      const expected = getDocument(path === "/protocol.md" ? "protocol" : "skill");
+      const served = await publicRead(path);
+      expect(await served.text()).toBe(expected.body);
+      expect(served.headers.get("etag")).toBe(`"${expected.digest}"`);
+    });
+
+    test(`${path} needs no Authorization header`, async () => {
+      // Reads are free (Rule A5). The S-1 driver sends this request with no
+      // credential, so a 401/403 here would mean its first action cannot work.
+      const response = await publicRead(path);
+      expect(response.status).toBe(200);
+    });
+  }
+
+  test("the public-text delegation does not inherit an enrollment misconfiguration", async () => {
+    // Enrollment is unusable with an empty replay key — that must not make a
+    // free public read fail, because the read does not depend on it.
+    const response = await worker.fetch(
+      new Request("https://local.invalid/protocol.md"),
+      { DB: freshDatabase(), ENROLLMENT_REPLAY_KEY: "", STOA_ORIGIN: LOCAL_STOA_ORIGIN } as never,
+      context,
+    );
+    expect(response.status).toBe(200);
+  });
+
+  test("PLANTED: the delegation is read-only and path-exact", async () => {
+    // A write verb on a public-text path, and a neighbouring path, must not be
+    // handed to the production app by this narrow delegation.
+    const written = await publicRead("/protocol.md", {}, "POST");
+    expect(written.status).not.toBe(200);
+    const neighbour = await publicRead("/protocol.md/extra");
+    expect(neighbour.status).not.toBe(200);
+  });
+});
+
+/**
+ * The first-safe-read seam, planted without sending a single attacker request.
+ *
+ * The S-1 local lane follows hello's own `next_actions`, which means a hostile or
+ * misconfigured `STOA_ORIGIN` could otherwise aim a freshly issued bearer at a
+ * host of someone else's choosing. Proving that refusal by *making* the request
+ * would mean this suite contacts an attacker-controlled URL to demonstrate that
+ * it does not. Importing the pure validator instead keeps the proof causal and
+ * the network untouched — and it is the reason the client exports it.
+ */
+describe("hello's first next_action is validated before the driver follows it", () => {
+  const localOrigin = "http://127.0.0.1:23992";
+  const helloWith = (first: unknown): unknown => ({ next_actions: [first, { action: "read" }] });
+  const safeFirst = { action: "read", url: `${localOrigin}/protocol.md`, reason: "the rules" };
+
+  test("accepts the exact read action the Worker composes from its trusted origin", () => {
+    expect(firstSafeReadUrl(helloWith(safeFirst), localOrigin)).toBe(`${localOrigin}/protocol.md`);
+  });
+
+  for (const path of SAFE_FIRST_READ_PATHS) {
+    test(`accepts the allow-listed path ${path}`, () => {
+      expect(
+        firstSafeReadUrl(helloWith({ ...safeFirst, url: `${localOrigin}${path}` }), localOrigin),
+      ).toBe(`${localOrigin}${path}`);
+    });
+  }
+
+  test.each([
+    ["a cross-origin host", { ...safeFirst, url: "https://evil.test/protocol.md" }],
+    ["a same-host different-port origin", { ...safeFirst, url: "http://127.0.0.1:1/protocol.md" }],
+    ["a different scheme", { ...safeFirst, url: "https://127.0.0.1:23992/protocol.md" }],
+    ["userinfo smuggling", { ...safeFirst, url: "http://a:b@127.0.0.1:23992/protocol.md" }],
+    ["a query string", { ...safeFirst, url: `${localOrigin}/protocol.md?token=x` }],
+    ["a fragment", { ...safeFirst, url: `${localOrigin}/protocol.md#v1.x` }],
+    ["an unlisted path", { ...safeFirst, url: `${localOrigin}/v1/hello` }],
+    // These three are the reason the rule is raw string equality. Each one
+    // *parses* to the canonical value — `pathname === "/protocol.md"`, and
+    // `search`/`hash` both empty string — so a parsed origin+pathname comparison
+    // accepts all three and the driver follows bytes the Worker never composed.
+    [
+      "a path-traversal spelling that normalizes to canonical",
+      { ...safeFirst, url: `${localOrigin}/v1/../protocol.md` },
+    ],
+    ["a bare trailing question mark", { ...safeFirst, url: `${localOrigin}/protocol.md?` }],
+    ["a bare trailing hash", { ...safeFirst, url: `${localOrigin}/protocol.md#` }],
+    [
+      "a traversal spelling with a suffix",
+      { ...safeFirst, url: `${localOrigin}/v1/../protocol.md/x` },
+    ],
+    ["a double slash before the path", { ...safeFirst, url: `${localOrigin}//protocol.md` }],
+    ["a percent-encoded path", { ...safeFirst, url: `${localOrigin}/protocol%2Emd` }],
+    ["a trailing slash", { ...safeFirst, url: `${localOrigin}/protocol.md/` }],
+    ["a write action", { ...safeFirst, action: "write" }],
+    ["a promote action", { ...safeFirst, action: "promote" }],
+    ["a missing action verb", { url: `${localOrigin}/protocol.md` }],
+    ["a non-string url", { action: "read", url: 42 }],
+    ["an unparseable url", { action: "read", url: "not-a-url" }],
+    ["a null action entry", null],
+    ["an array action entry", []],
+  ])("PLANTED: %s is refused without a follow-up request", (_label, first) => {
+    expect(() => firstSafeReadUrl(helloWith(first), localOrigin)).toThrow("next-action-unsafe");
+  });
+
+  test.each([
+    ["/v1/../protocol.md", `${localOrigin}/v1/../protocol.md`],
+    ["/protocol.md?", `${localOrigin}/protocol.md?`],
+    ["/protocol.md#", `${localOrigin}/protocol.md#`],
+  ])(
+    "PLANTED: %s normalizes to canonical, so only raw equality can refuse it",
+    (_label, hostile) => {
+      // The causal half of the three plants above. This asserts the *old* rule
+      // would have accepted them: parsed pathname is exactly the canonical path
+      // and both search and hash are empty. Without this, "rejected" proves
+      // nothing — a typo would be rejected too. No request is made here; the
+      // validator is pure, which is the point of exporting it.
+      const parsed = new URL(hostile);
+      expect(parsed.pathname).toBe("/protocol.md");
+      expect(parsed.search).toBe("");
+      expect(parsed.hash).toBe("");
+      expect(parsed.origin).toBe(localOrigin);
+      expect(hostile).not.toBe(`${localOrigin}/protocol.md`);
+
+      expect(() =>
+        firstSafeReadUrl(helloWith({ ...safeFirst, url: hostile }), localOrigin),
+      ).toThrow("next-action-unsafe");
+    },
+  );
+
+  test("returns the raw canonical string it was given, not a reparse of it", () => {
+    const canonical = `${localOrigin}/skill.md`;
+    expect(firstSafeReadUrl(helloWith({ ...safeFirst, url: canonical }), localOrigin)).toBe(
+      canonical,
+    );
+  });
+
+  test.each([
+    ["an absent next_actions list", {}],
+    ["an empty next_actions list", { next_actions: [] }],
+    ["a non-array next_actions", { next_actions: "read /protocol.md" }],
+    ["a null hello body", null],
+  ])("PLANTED: %s is a contract failure, not an unsafe action", (_label, hello) => {
+    expect(() => firstSafeReadUrl(hello, localOrigin)).toThrow("next-actions-missing");
+  });
+
+  test("PLANTED: a safe action is still refused when the issuing origin is unparseable", () => {
+    expect(() => firstSafeReadUrl(helloWith(safeFirst), "not-an-origin")).toThrow(
+      "next-actions-missing",
+    );
+  });
+});
+
+describe("no response body may echo the bearer", () => {
+  const token = `asimp_ag_${"A".repeat(26)}_${"z".repeat(43)}`;
+
+  test("PLANTED: an exact bearer in the body is an echo", () => {
+    expect(bodyEchoesBearer(`{"debug":"${token}"}`, token)).toBe(true);
+  });
+
+  test("PLANTED: the prefix-stripped material is an echo too", () => {
+    // A face that renders the opaque half without `asimp_ag_` has still
+    // published the credential; matching only the whole string would miss it.
+    expect(bodyEchoesBearer(`{"debug":"${token.slice("asimp_ag_".length)}"}`, token)).toBe(true);
+  });
+
+  test("an ordinary hello body is not an echo", () => {
+    expect(
+      bodyEchoesBearer('{"fellow":{"name":"local-orchid"},"granted_scopes":["review"]}', token),
+    ).toBe(false);
+  });
+
+  test("the bare prefix by itself is not an echo", () => {
+    expect(bodyEchoesBearer('{"token_prefix":"asimp_ag_"}', token)).toBe(false);
+  });
+
+  test("an empty token can never report an echo", () => {
+    expect(bodyEchoesBearer("anything at all", "")).toBe(false);
   });
 });

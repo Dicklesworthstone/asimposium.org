@@ -3,6 +3,7 @@ import {
   ContractProblemSchema,
   DeviceCodeStartResponseSchema,
   DeviceLookupResponseSchema,
+  encodeSponsorFellowCursor,
   MintEnrollmentResponseSchema,
   OpaqueProblemSchema,
   ProblemDocumentSchema,
@@ -22,6 +23,7 @@ import { MemoryNonceStore } from "../../src/auth/nonce";
 import { createEnrollmentRouter, type EnrollmentRouterOptions } from "../../src/enrollment/router";
 import {
   EnrollmentError,
+  EnrollmentPersistenceError,
   EnrollmentService,
   enrollmentReplayProtectorFromBase64Url,
   InMemoryEnrollmentStore,
@@ -39,7 +41,9 @@ import {
 
 const NOW = 1_786_000_000;
 const origin = "https://a.asimposium.invalid";
+const TEST_STOA_ORIGIN = "https://a.asimposium.org";
 const SPONSOR = "usr_01JXYZSPONSOR0000000000";
+const FOREIGN_SPONSOR = "usr_01JXYZFOREIGN000000000";
 let signedRequestSequence = 0;
 
 interface Harness {
@@ -58,6 +62,7 @@ async function harness(options?: {
   readonly withSponsorSeam?: false;
   readonly verifiedSponsor?: EnrollmentRouterOptions["verifiedSponsor"];
   readonly clock?: { now(): number };
+  readonly store?: InMemoryEnrollmentStore;
 }): Promise<Harness> {
   const keypair = (await crypto.subtle.generateKey({ name: "Ed25519" }, true, [
     "sign",
@@ -72,7 +77,8 @@ async function harness(options?: {
   ]);
   const nonces = new MemoryNonceStore();
   const service = new EnrollmentService({
-    store: new InMemoryEnrollmentStore(),
+    stoaOrigin: TEST_STOA_ORIGIN,
+    store: options?.store ?? new InMemoryEnrollmentStore(),
     replayProtector: enrollmentReplayProtectorFromBase64Url(
       "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
     ),
@@ -189,8 +195,14 @@ async function claimOne(
   return json.flow_handle;
 }
 
-async function issuedLifecycleFixture(h: Harness, name: string) {
-  const principal = { type: "sponsor", sponsorId: SPONSOR } as const;
+async function issuedLifecycleFixture(
+  h: Harness,
+  name: string,
+  principal: { readonly type: "sponsor"; readonly sponsorId: string } = {
+    type: "sponsor",
+    sponsorId: SPONSOR,
+  },
+) {
   await h.service.bootstrapSponsor(principal);
   const minted = await h.service.mint(principal, { requested_scopes: ["review"] });
   const claimed = await h.service.claim({
@@ -435,6 +447,11 @@ describe("sponsor enrollment routes", () => {
         body: '{"user_code":"ABCD-2345"}',
       },
       { method: "GET", path: "/v1/fellows", examplePath: "/v1/fellows" },
+      {
+        method: "GET",
+        path: "/v1/fellows/after/f1.djF8MTM6MTc4NjgwMDAwMDAwMHwxMzpmZWxsb3ctMDFKWFla",
+        examplePath: "/v1/fellows/after/<cursor>",
+      },
       {
         method: "POST",
         path: "/v1/fellows/credentials/revoke",
@@ -705,6 +722,154 @@ describe("sponsor enrollment routes", () => {
     expect(serializedFellows).not.toContain("token_hash");
   });
 
+  test("PLANTED: tied 501st Fellow is reachable only through its signed keyset continuation", async () => {
+    const store = new InMemoryEnrollmentStore();
+    const h = await harness({ store });
+    const grantedAt = NOW * 1_000;
+    const dayPlusOne = 24 * 60 * 60 * 1_000 + 1;
+
+    for (let index = 0; index <= 500; index += 1) {
+      const suffix = String(index).padStart(4, "0");
+      await store.create({
+        enrollmentId: `ASIMP-EN-PAGE${suffix}`,
+        sponsorId: SPONSOR,
+        secretHash: `page-secret-${suffix}`,
+        createdAt: grantedAt + index * dayPlusOne,
+        secretExpiresAt: grantedAt + index * dayPlusOne + 1,
+        requestedScopes: ["review"],
+        requestedResources: {},
+        invalidated: false,
+        proposal: {
+          proposalId: `page-proposal-${suffix}`,
+          fellowId: `F-page-${suffix}`,
+          flowHandleHash: `page-flow-${suffix}`,
+          name: `page-fellow-${suffix}`,
+          model: "example/page-model",
+          harness: "codex",
+          createdAt: grantedAt + index * dayPlusOne,
+          expiresAt: grantedAt + index * dayPlusOne + 1,
+          status: "approved",
+          grantedScopes: ["review"],
+          grantedResources: {},
+          grantedAt,
+          pollIntervalSeconds: 5,
+        },
+      });
+    }
+
+    const firstHeaders = await h.sign("", "/v1/fellows", "fellows.list", "GET");
+    const firstResponse = await h.app.fetch(envelopeRequest("/v1/fellows", firstHeaders, "GET"));
+    expect(firstResponse.status).toBe(200);
+    const first = SponsorFellowListResponseSchema.parse(await firstResponse.json());
+    expect(first.fellows).toHaveLength(500);
+    expect(first.fellows[0]?.fellow_id).toBe("F-page-0000");
+    expect(first.fellows.at(-1)?.fellow_id).toBe("F-page-0499");
+    expect(first.next_cursor).not.toBeNull();
+    if (first.next_cursor === null) throw new Error("501st Fellow did not produce a continuation");
+
+    const afterHeaders = await h.sign("", "/v1/fellows/after/:cursor", "fellows.list", "GET");
+    const afterResponse = await h.app.fetch(
+      envelopeRequest(`/v1/fellows/after/${first.next_cursor}`, afterHeaders, "GET"),
+    );
+    expect(afterResponse.status).toBe(200);
+    const after = SponsorFellowListResponseSchema.parse(await afterResponse.json());
+    expect(after).toMatchObject({
+      fellows: [{ fellow_id: "F-page-0500", granted_at: grantedAt }],
+      next_cursor: null,
+    });
+    expect(after.fellows).toHaveLength(1);
+  });
+
+  test("PLANTED: an invalid cursor is refused before sponsor auth, while a query wins that order", async () => {
+    let sponsorAuthCalls = 0;
+    const h = await harness({
+      verifiedSponsor: async () => {
+        sponsorAuthCalls += 1;
+        throw new Error("cursor rejection must happen before authentication");
+      },
+    });
+    const invalid = await h.app.fetch(
+      new Request(`${origin}/v1/fellows/after/f1.not-a-canonical-cursor`, { method: "GET" }),
+    );
+    expect(invalid.status).toBe(422);
+    expect(await invalid.json()).toMatchObject({
+      code: "FELLOW_LIST_CURSOR_INVALID",
+      rule: "A5",
+      schema: "https://a.asimposium.org/schemas/enrollment.v1.json",
+      example: { method: "GET", path: expect.stringContaining("/v1/fellows/after/f1.") },
+    });
+    expect(sponsorAuthCalls).toBe(0);
+
+    const queryCanary = "cursor-query-must-win-order";
+    const query = await h.app.fetch(
+      new Request(
+        `${origin}/v1/fellows/after/f1.not-a-canonical-cursor?credential=${queryCanary}`,
+        { method: "GET" },
+      ),
+    );
+    expect(query.status).toBe(400);
+    const queryText = await query.text();
+    expect(JSON.parse(queryText)).toMatchObject({ code: "PATH_ONLY_REQUIRED" });
+    expect(queryText).not.toContain(queryCanary);
+    expect(sponsorAuthCalls).toBe(0);
+  });
+
+  test("PLANTED: a signed Fellow continuation is sponsor-scoped and its envelope cannot replay", async () => {
+    const h = await harness();
+    const fixture = await issuedLifecycleFixture(h, "cursor-owner");
+    const ownerListHeaders = await h.sign("", "/v1/fellows", "fellows.list", "GET");
+    const ownerList = SponsorFellowListResponseSchema.parse(
+      await (await h.app.fetch(envelopeRequest("/v1/fellows", ownerListHeaders, "GET"))).json(),
+    );
+    expect(ownerList.next_cursor).toBeNull();
+    expect(ownerList.fellows[0]?.fellow_id).toBe(fixture.fellow.fellowId);
+    const ownerGrantedAt = ownerList.fellows[0]?.granted_at;
+    if (ownerGrantedAt === undefined)
+      throw new Error("owner Fellow was not present on the first page");
+    // This key is immediately before the owner in descending grant order. If
+    // the continuation lost its sponsor predicate, the foreign call below
+    // would return cursor-owner; a key past that row would hide the regression.
+    const ownerCursor = encodeSponsorFellowCursor({
+      granted_at: ownerGrantedAt + 1,
+      fellow_id: "fellow-cursor-floor",
+    });
+    const ownerHeaders = await h.sign("", "/v1/fellows/after/:cursor", "fellows.list", "GET");
+    const ownerResponse = await h.app.fetch(
+      envelopeRequest(`/v1/fellows/after/${ownerCursor}`, ownerHeaders, "GET"),
+    );
+    expect(ownerResponse.status).toBe(200);
+    expect(SponsorFellowListResponseSchema.parse(await ownerResponse.json()).fellows).toEqual([
+      expect.objectContaining({ fellow_id: fixture.fellow.fellowId }),
+    ]);
+    const foreignHeaders = await h.sign(
+      "",
+      "/v1/fellows/after/:cursor",
+      "fellows.list",
+      "GET",
+      FOREIGN_SPONSOR,
+    );
+    const foreignResponse = await h.app.fetch(
+      envelopeRequest(`/v1/fellows/after/${ownerCursor}`, foreignHeaders, "GET"),
+    );
+    expect(foreignResponse.status).toBe(200);
+    expect(SponsorFellowListResponseSchema.parse(await foreignResponse.json())).toEqual({
+      fellows: [],
+      next_cursor: null,
+    });
+    expect((await h.service.fellows(fixture.principal))[0]?.fellowId).toBe(fixture.fellow.fellowId);
+
+    const replayHeaders = await h.sign("", "/v1/fellows/after/:cursor", "fellows.list", "GET");
+    const first = await h.app.fetch(
+      envelopeRequest(`/v1/fellows/after/${ownerCursor}`, replayHeaders, "GET"),
+    );
+    expect(first.status).toBe(200);
+    const replay = await h.app.fetch(
+      envelopeRequest(`/v1/fellows/after/${ownerCursor}`, replayHeaders, "GET"),
+    );
+    expect(replay.status).toBe(401);
+    expect(await replay.json()).toMatchObject({ code: "UNAUTHORIZED" });
+  });
+
   test("signed lifecycle routes revoke, replay after step-up expiry, and hide foreign targets", async () => {
     const clock = {
       value: NOW * 1_000,
@@ -777,6 +942,213 @@ describe("sponsor enrollment routes", () => {
     );
     expect(replayResponse.status).toBe(200);
     expect(SponsorCredentialRevokeResponseSchema.parse(await replayResponse.json())).toEqual(first);
+  });
+
+  test("PLANTED: a foreign sponsor cannot transition another sponsor's Fellow or poison its key", async () => {
+    const h = await harness({ clock: { now: () => NOW * 1_000 } });
+    const fixture = await issuedLifecycleFixture(h, "route-foreign-transition-target");
+    const foreignPrincipal = { type: "sponsor", sponsorId: FOREIGN_SPONSOR } as const;
+    const foreignFixture = await issuedLifecycleFixture(
+      h,
+      "route-foreign-transition-owner",
+      foreignPrincipal,
+    );
+    const key = "foreign-lifecycle-transition-key";
+    const foreignBody = JSON.stringify({
+      fellow_id: fixture.fellow.fellowId,
+      status: "paused",
+      confirm: "change-fellow-lifecycle",
+      step_up_authenticated_at: NOW,
+    });
+    const foreignHeaders = await h.sign(
+      foreignBody,
+      "/v1/fellows/lifecycle",
+      "fellow.lifecycle.change",
+      "POST",
+      FOREIGN_SPONSOR,
+    );
+    foreignHeaders.set("idempotency-key", key);
+    const foreign = await h.app.fetch(
+      envelopeRequest("/v1/fellows/lifecycle", foreignHeaders, "POST", foreignBody),
+    );
+    expect(foreign.status).toBe(404);
+    expect(await foreign.json()).toMatchObject({ code: "FELLOW_LIFECYCLE_NOT_CURRENT" });
+    expect((await h.service.fellows(fixture.principal))[0]?.status).toBe("active");
+    expect(await h.service.credentialBinding(fixture.token)).toBeDefined();
+
+    // Same foreign principal and key, but a valid target: the refusal above
+    // must not leave an idempotency record that turns this into a replay/conflict.
+    const ownedBody = JSON.stringify({
+      fellow_id: foreignFixture.fellow.fellowId,
+      status: "paused",
+      confirm: "change-fellow-lifecycle",
+      step_up_authenticated_at: NOW,
+    });
+    const ownedHeaders = await h.sign(
+      ownedBody,
+      "/v1/fellows/lifecycle",
+      "fellow.lifecycle.change",
+      "POST",
+      FOREIGN_SPONSOR,
+    );
+    ownedHeaders.set("idempotency-key", key);
+    const owned = await h.app.fetch(
+      envelopeRequest("/v1/fellows/lifecycle", ownedHeaders, "POST", ownedBody),
+    );
+    expect(owned.status).toBe(200);
+    expect(SponsorFellowLifecycleResponseSchema.parse(await owned.json())).toMatchObject({
+      fellow_id: foreignFixture.fellow.fellowId,
+      status: "paused",
+    });
+  });
+
+  test("PLANTED: an illegal lifecycle transition neither mutates nor claims its key", async () => {
+    const h = await harness({ clock: { now: () => NOW * 1_000 } });
+    const fixture = await issuedLifecycleFixture(h, "route-illegal-transition");
+    const key = "illegal-lifecycle-transition-key";
+    const illegalBody = JSON.stringify({
+      fellow_id: fixture.fellow.fellowId,
+      status: "archived",
+      confirm: "change-fellow-lifecycle",
+      step_up_authenticated_at: NOW,
+    });
+    const illegalHeaders = await h.sign(
+      illegalBody,
+      "/v1/fellows/lifecycle",
+      "fellow.lifecycle.change",
+    );
+    illegalHeaders.set("idempotency-key", key);
+    const illegal = await h.app.fetch(
+      envelopeRequest("/v1/fellows/lifecycle", illegalHeaders, "POST", illegalBody),
+    );
+    expect(illegal.status).toBe(404);
+    expect(await illegal.json()).toMatchObject({ code: "FELLOW_LIFECYCLE_NOT_CURRENT" });
+    expect((await h.service.fellows(fixture.principal))[0]?.status).toBe("active");
+    expect(await h.service.credentialBinding(fixture.token)).toBeDefined();
+
+    const legalBody = JSON.stringify({
+      fellow_id: fixture.fellow.fellowId,
+      status: "paused",
+      confirm: "change-fellow-lifecycle",
+      step_up_authenticated_at: NOW,
+    });
+    const legalHeaders = await h.sign(
+      legalBody,
+      "/v1/fellows/lifecycle",
+      "fellow.lifecycle.change",
+    );
+    legalHeaders.set("idempotency-key", key);
+    const legal = await h.app.fetch(
+      envelopeRequest("/v1/fellows/lifecycle", legalHeaders, "POST", legalBody),
+    );
+    expect(legal.status).toBe(200);
+    expect(SponsorFellowLifecycleResponseSchema.parse(await legal.json())).toMatchObject({
+      fellow_id: fixture.fellow.fellowId,
+      status: "paused",
+    });
+  });
+
+  test("PLANTED: a first-use stale step-up cannot mutate or reserve a lifecycle key", async () => {
+    const h = await harness({ clock: { now: () => NOW * 1_000 } });
+    const fixture = await issuedLifecycleFixture(h, "route-stale-lifecycle-step-up");
+    const key = "stale-lifecycle-step-up-key";
+    const staleBody = JSON.stringify({
+      fellow_id: fixture.fellow.fellowId,
+      status: "paused",
+      confirm: "change-fellow-lifecycle",
+      step_up_authenticated_at:
+        NOW - SPONSOR_STEP_UP_WINDOW_SECONDS - SPONSOR_STEP_UP_CLOCK_SKEW_SECONDS - 1,
+    });
+    const staleHeaders = await h.sign(
+      staleBody,
+      "/v1/fellows/lifecycle",
+      "fellow.lifecycle.change",
+    );
+    staleHeaders.set("idempotency-key", key);
+    const stale = await h.app.fetch(
+      envelopeRequest("/v1/fellows/lifecycle", staleHeaders, "POST", staleBody),
+    );
+    expect(stale.status).toBe(403);
+    expect(await stale.json()).toMatchObject({ code: "STEP_UP_REQUIRED" });
+    expect((await h.service.fellows(fixture.principal))[0]?.status).toBe("active");
+    expect(await h.service.credentialBinding(fixture.token)).toBeDefined();
+
+    // The timestamp is not part of the stable intent digest. A reauthenticated
+    // retry must be the first committed use of this key, not a stale replay.
+    const freshBody = JSON.stringify({
+      fellow_id: fixture.fellow.fellowId,
+      status: "paused",
+      confirm: "change-fellow-lifecycle",
+      step_up_authenticated_at: NOW,
+    });
+    const freshHeaders = await h.sign(
+      freshBody,
+      "/v1/fellows/lifecycle",
+      "fellow.lifecycle.change",
+    );
+    freshHeaders.set("idempotency-key", key);
+    const fresh = await h.app.fetch(
+      envelopeRequest("/v1/fellows/lifecycle", freshHeaders, "POST", freshBody),
+    );
+    expect(fresh.status).toBe(200);
+    expect(SponsorFellowLifecycleResponseSchema.parse(await fresh.json())).toMatchObject({
+      fellow_id: fixture.fellow.fellowId,
+      status: "paused",
+    });
+  });
+
+  test("PLANTED: a live lifecycle key rejects a different intent without mutation or replay drift", async () => {
+    const h = await harness({ clock: { now: () => NOW * 1_000 } });
+    const fixture = await issuedLifecycleFixture(h, "route-lifecycle-key-conflict");
+    const key = "lifecycle-intent-conflict-key";
+    const pausedBody = JSON.stringify({
+      fellow_id: fixture.fellow.fellowId,
+      status: "paused",
+      confirm: "change-fellow-lifecycle",
+      step_up_authenticated_at: NOW,
+    });
+    const pausedHeaders = await h.sign(
+      pausedBody,
+      "/v1/fellows/lifecycle",
+      "fellow.lifecycle.change",
+    );
+    pausedHeaders.set("idempotency-key", key);
+    const first = await h.app.fetch(
+      envelopeRequest("/v1/fellows/lifecycle", pausedHeaders, "POST", pausedBody),
+    );
+    expect(first.status).toBe(200);
+    const firstPayload = SponsorFellowLifecycleResponseSchema.parse(await first.json());
+
+    const resumeBody = JSON.stringify({
+      fellow_id: fixture.fellow.fellowId,
+      status: "active",
+      confirm: "change-fellow-lifecycle",
+      step_up_authenticated_at: NOW,
+    });
+    const resumeHeaders = await h.sign(
+      resumeBody,
+      "/v1/fellows/lifecycle",
+      "fellow.lifecycle.change",
+    );
+    resumeHeaders.set("idempotency-key", key);
+    const conflict = await h.app.fetch(
+      envelopeRequest("/v1/fellows/lifecycle", resumeHeaders, "POST", resumeBody),
+    );
+    expect(conflict.status).toBe(409);
+    expect(await conflict.json()).toMatchObject({ code: "IDEMPOTENCY_CONFLICT" });
+    expect((await h.service.fellows(fixture.principal))[0]?.status).toBe("paused");
+
+    const replayHeaders = await h.sign(
+      pausedBody,
+      "/v1/fellows/lifecycle",
+      "fellow.lifecycle.change",
+    );
+    replayHeaders.set("idempotency-key", key);
+    const replay = await h.app.fetch(
+      envelopeRequest("/v1/fellows/lifecycle", replayHeaders, "POST", pausedBody),
+    );
+    expect(replay.status).toBe(200);
+    expect(SponsorFellowLifecycleResponseSchema.parse(await replay.json())).toEqual(firstPayload);
   });
 
   test("pause, resume, compromise, and panic return typed sponsor-only audit acknowledgements", async () => {
@@ -1468,7 +1840,7 @@ describe("sponsor enrollment routes", () => {
         method: "GET",
         body: "",
         plant: (service) => {
-          Object.defineProperty(service, "fellows", {
+          Object.defineProperty(service, "fellowPage", {
             value: async () => {
               throw new Error(privateMessage);
             },
@@ -1484,20 +1856,38 @@ describe("sponsor enrollment routes", () => {
         method: "GET",
         body: "",
         plant: (service) => {
-          Object.defineProperty(service, "fellows", {
-            value: async () => [
-              {
-                name: "private-schema-state-code",
-                model: "",
-                harness: "",
-                grantedScopes: [],
-                grantedResources: {},
-                grantedAt: 0,
-              },
-            ],
+          Object.defineProperty(service, "fellowPage", {
+            value: async () => ({
+              fellows: [
+                {
+                  name: "private-schema-state-code",
+                  model: "",
+                  harness: "",
+                  grantedScopes: [],
+                  grantedResources: {},
+                  grantedAt: 0,
+                },
+              ],
+            }),
           });
         },
         forbidden: ["private-schema-state-code", "PAIRING_INVALID"],
+      },
+      {
+        name: "fellow continuation authority-corruption fault",
+        path: "/v1/fellows/after/f1.djF8MTM6MTc4NjgwMDAwMDAwMHwxMzpmZWxsb3ctMDFKWFla",
+        route: "/v1/fellows/after/:cursor",
+        action: "fellows.list",
+        method: "GET",
+        body: "",
+        plant: (service) => {
+          Object.defineProperty(service, "fellowPage", {
+            value: async () => {
+              throw new EnrollmentPersistenceError();
+            },
+          });
+        },
+        forbidden: [privateMessage, "PROPOSAL_NOT_PENDING", "PAIRING_INVALID"],
       },
     ];
 

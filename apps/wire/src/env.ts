@@ -30,6 +30,15 @@ export interface Env {
    * Absent disables sponsor routes only.
    */
   SERVICE_ENVELOPE_KEYS?: string;
+  /**
+   * The trusted Stoa origin this deployment issues enrollment URLs for
+   * (production, staging, or an explicit loopback). Non-secret, and
+   * deliberately a binding rather than anything derived from a request:
+   * `Host` and `X-Forwarded-Host` are caller-supplied, and an enrollment URL
+   * built from one would be a credential redirector. Absent or untrusted
+   * disables enrollment with a typed 503 rather than falling back.
+   */
+  STOA_ORIGIN?: string;
 }
 
 export const REQUIRED_BINDINGS = ["DB", "ARTIFACTS", "KRATER_OUTBOX"] as const;

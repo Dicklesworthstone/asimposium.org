@@ -54,7 +54,7 @@
       "canonical_sha256": "896cca4ec36a98ef9a401e0d5bf751d0c1a9aec7bfb43b4aa165d375de56f865"
     },
     "delimiter-collision-a": {
-      "note": "Paired with -b. Fields ('a:1','b') and ('a','1:b') must not canonicalize alike; a delimiter-only scheme collides here and lets one signature authorise a different principal.",
+      "note": "Paired with -b. These two move a ':' between 'action' and 'principal_id'. They are NOT adjacent in the field list -- 'principal_type' sits between them -- so a value-joined encoding does not actually collide on this pair, and this pair is not a counterexample to one. What it pins is narrower and still worth pinning: a ':' inside a signed value is carried literally and changes the digest, rather than being read as framing. The real adjacent-field collision, where a delimiter-only scheme genuinely cannot tell two claim sets apart, is planted in apps/wire/test/unit/auth-canonical-vectors.test.ts.",
       "claims": {
         "v": "asimp-env-1",
         "kid": "agora-2026-08-a",
@@ -74,7 +74,7 @@
       "canonical_sha256": "3f29545613e1512c0904aa0e87ca6c463ba6544b468e65fc0f350d6808ca02ac"
     },
     "delimiter-collision-b": {
-      "note": "Paired with -a.",
+      "note": "Paired with -a. See that entry's note: this pair pins literal-':' handling, not a naive-concatenation collision.",
       "claims": {
         "v": "asimp-env-1",
         "kid": "agora-2026-08-a",

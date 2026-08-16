@@ -8,6 +8,8 @@ import {
   FellowNameSchema,
   type RequestedScope,
   RequestedScopeSchema,
+  SPONSOR_FELLOW_PAGE_SIZE,
+  type SponsorFellowCursorKey,
 } from "@asimposium/contracts";
 // D1 proves JSON syntax; these schemas prove that stored authority still obeys
 // the public scope vocabulary and resource bounds when it is read back.
@@ -44,6 +46,7 @@ import {
   reduceEnrollmentResources,
   SPONSOR_ENROLLMENT_RATE_LIMIT_WINDOW_MS,
   SponsorEnrollmentRateLimitError,
+  type SponsorFellowPage,
   type SponsorFellowRecord,
   type SponsorPanicAttempt,
   uniqueEnrollmentScopes,
@@ -213,7 +216,8 @@ interface FellowGrantRow {
   issued_at: number | null;
   expires_at: number | null;
   last_used_at: number | null;
-  sponsor_fellow_count: number;
+  page_position: number;
+  authority_valid: number;
 }
 
 const sql = (db: D1Database, query: string, ...values: unknown[]): D1PreparedStatement =>
@@ -395,6 +399,13 @@ function isActiveFellowCapFailure(error: unknown): boolean {
 
 function isSponsorEnrollmentRateFailure(error: unknown): boolean {
   return error instanceof Error && /sponsor enrollment rate reached/i.test(error.message);
+}
+
+function isSponsorBootstrapRequiredFailure(error: unknown): boolean {
+  return (
+    error instanceof Error &&
+    /sponsor bootstrap required before enrollment decision/i.test(error.message)
+  );
 }
 
 /**
@@ -681,6 +692,27 @@ export class D1EnrollmentStore implements EnrollmentStore {
     if (attempt.now >= row.expires_at) {
       return expirePendingProposal();
     }
+    // A signed decision is a legitimate first Worker contact for `/approve`.
+    // Keep this update-then-conditional-insert pair in the same D1 batch as
+    // the binding, status change, Fellow/grant, and replay. It deliberately
+    // avoids INSERT OR IGNORE so the schema's duplicate-insert guard can make
+    // raw INSERT OR REPLACE unable to delete an accountable sponsor row.
+    const sponsorBootstrapStatements: D1PreparedStatement[] = [
+      sql(
+        this.#db,
+        "UPDATE sponsors SET last_seen_at = ? WHERE sponsor_id = ?",
+        attempt.now,
+        attempt.sponsorId,
+      ),
+      sql(
+        this.#db,
+        `INSERT INTO sponsors (sponsor_id, created_at, last_seen_at)
+         SELECT ?, ?, ? WHERE changes() = 0`,
+        attempt.sponsorId,
+        attempt.now,
+        attempt.now,
+      ),
+    ];
     const bindingStatements: D1PreparedStatement[] = bindsDeviceSponsor
       ? [
           sql(
@@ -728,18 +760,31 @@ export class D1EnrollmentStore implements EnrollmentStore {
               attempt.now,
             );
         const statements = [
+          ...sponsorBootstrapStatements,
           ...bindingStatements,
           proposalDecision,
           ...(idempotency === undefined ? [] : [this.idempotencyStatement(idempotency)]),
         ];
         const results = await this.#db.batch(statements);
-        if (results.every((result) => result.meta.changes === 1)) return;
+        // A pre-existing sponsor makes the conditional INSERT a zero-change
+        // no-op; every later decision/replay effect must still change exactly
+        // one row.
+        if (
+          results
+            .slice(sponsorBootstrapStatements.length)
+            .every((result) => result.meta.changes === 1)
+        ) {
+          return;
+        }
         await this.raceIfPresent(idempotency);
       } catch (error) {
         if (error instanceof EnrollmentError || error instanceof EnrollmentIdempotencyRaceError) {
           throw error;
         }
         await this.raceIfPresent(idempotency);
+        if (isSponsorBootstrapRequiredFailure(error)) {
+          throw new EnrollmentError("FELLOW_LIFECYCLE_NOT_CURRENT");
+        }
         throw new EnrollmentPersistenceError();
       }
       throw new EnrollmentError("PROPOSAL_NOT_PENDING");
@@ -787,6 +832,7 @@ export class D1EnrollmentStore implements EnrollmentStore {
             attempt.now,
           );
       const statements: D1PreparedStatement[] = [
+        ...sponsorBootstrapStatements,
         ...bindingStatements,
         proposalDecision,
         sql(
@@ -818,7 +864,11 @@ export class D1EnrollmentStore implements EnrollmentStore {
       // The device-grant statement's AFTER trigger also writes the immutable
       // rate projection, so D1/Bun may report two affected rows for that one
       // statement. Every product statement must still change at least once.
-      if (results.every((result) => result.meta.changes >= 1)) return;
+      if (
+        results.slice(sponsorBootstrapStatements.length).every((result) => result.meta.changes >= 1)
+      ) {
+        return;
+      }
       await this.raceIfPresent(idempotency);
       throw new EnrollmentError("PROPOSAL_NOT_PENDING");
     } catch (error) {
@@ -830,6 +880,9 @@ export class D1EnrollmentStore implements EnrollmentStore {
       // a different request body under the winner's key is still an
       // idempotency conflict, not a capacity refusal.
       await this.raceIfPresent(idempotency);
+      if (isSponsorBootstrapRequiredFailure(error)) {
+        throw new EnrollmentError("FELLOW_LIFECYCLE_NOT_CURRENT");
+      }
       if (isUniqueNameFailure(error)) throw new EnrollmentError("NAME_TAKEN");
       if (isSponsorEnrollmentRateFailure(error)) {
         throw await this.sponsorEnrollmentRateLimitError(attempt.sponsorId, attempt.now);
@@ -969,59 +1022,127 @@ export class D1EnrollmentStore implements EnrollmentStore {
     });
   }
 
-  async fellowsBySponsor(sponsorId: string, now: number): Promise<SponsorFellowRecord[]> {
+  async fellowsBySponsor(
+    sponsorId: string,
+    now: number,
+    after?: SponsorFellowCursorKey,
+  ): Promise<SponsorFellowPage> {
     let rows: readonly FellowGrantRow[];
     try {
+      const keyDiscovery =
+        after === undefined
+          ? `sponsor_fellow_keys AS MATERIALIZED (
+               SELECT grant_key.proposal_id, grant_key.fellow_id, grant_key.sponsor_id,
+                      grant_key.granted_scopes_json, grant_key.granted_resources_json,
+                      grant_key.granted_at
+                 FROM enrollment_grants AS grant_key
+                      INDEXED BY enrollment_grants_sponsor_page_idx
+                WHERE grant_key.sponsor_id = ?
+                ORDER BY grant_key.granted_at DESC, grant_key.fellow_id ASC
+                LIMIT ${SPONSOR_FELLOW_PAGE_SIZE + 1}
+             )`
+          : `same_timestamp_keys AS MATERIALIZED (
+               SELECT grant_key.proposal_id, grant_key.fellow_id, grant_key.sponsor_id,
+                      grant_key.granted_scopes_json, grant_key.granted_resources_json,
+                      grant_key.granted_at
+                 FROM enrollment_grants AS grant_key
+                      INDEXED BY enrollment_grants_sponsor_page_idx
+                WHERE grant_key.sponsor_id = ?
+                  AND grant_key.granted_at = ?
+                  AND grant_key.fellow_id > ?
+                ORDER BY grant_key.granted_at DESC, grant_key.fellow_id ASC
+                LIMIT ${SPONSOR_FELLOW_PAGE_SIZE + 1}
+             ), older_timestamp_keys AS MATERIALIZED (
+               SELECT grant_key.proposal_id, grant_key.fellow_id, grant_key.sponsor_id,
+                      grant_key.granted_scopes_json, grant_key.granted_resources_json,
+                      grant_key.granted_at
+                 FROM enrollment_grants AS grant_key
+                      INDEXED BY enrollment_grants_sponsor_page_idx
+                WHERE grant_key.sponsor_id = ?
+                  AND grant_key.granted_at < ?
+                ORDER BY grant_key.granted_at DESC, grant_key.fellow_id ASC
+                LIMIT ${SPONSOR_FELLOW_PAGE_SIZE + 1}
+             ), sponsor_fellow_keys AS MATERIALIZED (
+               SELECT proposal_id, fellow_id, sponsor_id, granted_scopes_json,
+                      granted_resources_json, granted_at
+                 FROM same_timestamp_keys
+               UNION ALL
+               SELECT proposal_id, fellow_id, sponsor_id, granted_scopes_json,
+                      granted_resources_json, granted_at
+                 FROM older_timestamp_keys
+                ORDER BY granted_at DESC, fellow_id ASC
+                LIMIT ${SPONSOR_FELLOW_PAGE_SIZE + 1}
+             )`;
+      const bindings =
+        after === undefined
+          ? [sponsorId, now, now, now]
+          : [
+              sponsorId,
+              after.granted_at,
+              after.fellow_id,
+              sponsorId,
+              after.granted_at,
+              now,
+              now,
+              now,
+            ];
       const result = await sql(
         this.#db,
-        `WITH sponsor_fellow_page AS MATERIALIZED (
+        `WITH ${keyDiscovery}, sponsor_fellow_page AS MATERIALIZED (
 			       SELECT fellow.fellow_id, fellow.name, fellow.model, fellow.harness, fellow.status,
-			              fellow.sponsor_id, grant_row.proposal_id AS grant_proposal_id,
+			              grant_row.sponsor_id, grant_row.proposal_id AS grant_proposal_id,
 			              grant_row.granted_scopes_json, grant_row.granted_resources_json,
-			              grant_row.granted_at
-			         FROM enrollment_grants grant_row
-			         JOIN enrollment_fellows fellow
+			              grant_row.granted_at,
+			              CASE WHEN fellow.fellow_id IS NOT NULL
+			                     AND grant_proposal.proposal_id IS NOT NULL
+			                     AND grant_enrollment.enrollment_id IS NOT NULL
+			                     AND fellow.name COLLATE BINARY = grant_proposal.name COLLATE BINARY
+			                     AND fellow.model = grant_proposal.model
+			                     AND fellow.harness = grant_proposal.harness
+			                     AND grant_proposal.granted_scopes_json = grant_row.granted_scopes_json
+			                     AND grant_proposal.granted_resources_json = grant_row.granted_resources_json
+			                     AND (
+			                       grant_proposal.status IN ('approved', 'reduced')
+			                       OR (
+			                         grant_proposal.status = 'expired'
+			                         AND grant_proposal.token_hash IS NULL
+			                         AND grant_proposal.token_issued_at IS NULL
+			                         AND json_type(
+			                           grant_row.granted_resources_json,
+			                           '$.fellowGrantExpiresAt'
+			                         ) = 'integer'
+			                       )
+			                     )
+			                   THEN 1 ELSE 0 END AS authority_valid
+			         FROM sponsor_fellow_keys grant_row
+			         LEFT JOIN enrollment_fellows fellow
 			           ON fellow.fellow_id = grant_row.fellow_id
 			          AND fellow.sponsor_id = grant_row.sponsor_id
-			         JOIN enrollment_proposals grant_proposal
+			         LEFT JOIN enrollment_proposals grant_proposal
 			           ON grant_proposal.proposal_id = grant_row.proposal_id
 			          AND grant_proposal.fellow_id = grant_row.fellow_id
-			         JOIN enrollment_records grant_enrollment
+			         LEFT JOIN enrollment_records grant_enrollment
 			           ON grant_enrollment.enrollment_id = grant_proposal.enrollment_id
 			          AND grant_enrollment.sponsor_id = grant_row.sponsor_id
-			        WHERE grant_row.sponsor_id = ?
-			          AND fellow.name COLLATE BINARY = grant_proposal.name COLLATE BINARY
-			          AND fellow.model = grant_proposal.model
-			          AND fellow.harness = grant_proposal.harness
-			          AND grant_proposal.granted_scopes_json = grant_row.granted_scopes_json
-			          AND grant_proposal.granted_resources_json = grant_row.granted_resources_json
-			          AND (
-			            grant_proposal.status IN ('approved', 'reduced')
-			            OR (
-			              grant_proposal.status = 'expired'
-			              AND grant_proposal.token_hash IS NULL
-			              AND grant_proposal.token_issued_at IS NULL
-			              AND json_type(
-			                grant_row.granted_resources_json,
-			                '$.fellowGrantExpiresAt'
-			              ) = 'integer'
-			            )
-			          )
-			        ORDER BY grant_row.granted_at DESC, grant_row.fellow_id
-			        LIMIT 501
-			     ), sponsor_fellows AS (
-			       SELECT sponsor_fellow_page.*, COUNT(*) OVER () AS sponsor_fellow_count
+			        ORDER BY grant_row.granted_at DESC, grant_row.fellow_id ASC
+			        LIMIT ${SPONSOR_FELLOW_PAGE_SIZE + 1}
+			     ), sponsor_fellows AS MATERIALIZED (
+			       SELECT sponsor_fellow_page.*,
+			              ROW_NUMBER() OVER (
+			                ORDER BY granted_at DESC, fellow_id ASC
+			              ) AS page_position
 			         FROM sponsor_fellow_page
 			     )
 			   SELECT f.fellow_id, f.name, f.model, f.harness, f.status,
 			          f.granted_scopes_json, f.granted_resources_json, f.granted_at,
 			          c.credential_id, c.credential_profile, c.issued_at, c.expires_at,
-			          c.last_used_at, f.sponsor_fellow_count
+			          c.last_used_at, f.page_position, f.authority_valid
 			     FROM sponsor_fellows f
 			     LEFT JOIN enrollment_sponsor_security security ON security.sponsor_id = f.sponsor_id
 			     LEFT JOIN fellow_tokens c INDEXED BY enrollment_credentials_sponsor_fellow_lifecycle_idx
 			       ON c.fellow_id = f.fellow_id
 			      AND c.sponsor_id = f.sponsor_id
+			      AND f.page_position <= ${SPONSOR_FELLOW_PAGE_SIZE}
 			      AND c.revoked_at IS NULL
 			      AND c.expires_at > ?
 			      AND c.issued_at <= ?
@@ -1060,14 +1181,11 @@ export class D1EnrollmentStore implements EnrollmentStore {
 			             )
 			           )
 			      )
-			    ORDER BY f.granted_at DESC, c.issued_at DESC
+			    ORDER BY f.granted_at DESC, f.fellow_id ASC, c.issued_at DESC, c.credential_id ASC
 			    LIMIT 1501`,
-        sponsorId,
-        now,
-        now,
-        now,
+        ...bindings,
       ).all<FellowGrantRow>();
-      if (result.results.length > 1500 || (result.results[0]?.sponsor_fellow_count ?? 0) > 500) {
+      if (result.results.length > 1501) {
         throw new EnrollmentPersistenceError();
       }
       rows = result.results;
@@ -1077,7 +1195,25 @@ export class D1EnrollmentStore implements EnrollmentStore {
     }
 
     const fellows = new Map<string, SponsorFellowRecord>();
+    let hasNextPage = false;
+    let pageTail: SponsorFellowRecord | undefined;
     for (const row of rows) {
+      // Key discovery deliberately happens before authority joins so each D1
+      // branch stays bounded on 0011's sponsor page index. A left join makes a
+      // retained/corrupt key an operational failure instead of silently
+      // filtering it out and falsely terminating or truncating history.
+      if (row.authority_valid !== 1) throw new EnrollmentPersistenceError();
+      if (
+        !Number.isInteger(row.page_position) ||
+        row.page_position < 1 ||
+        row.page_position > SPONSOR_FELLOW_PAGE_SIZE + 1
+      ) {
+        throw new EnrollmentPersistenceError();
+      }
+      if (row.page_position > SPONSOR_FELLOW_PAGE_SIZE) {
+        hasNextPage = true;
+        continue;
+      }
       let fellow = fellows.get(row.fellow_id);
       if (fellow === undefined) {
         let grantedScopes: readonly RequestedScope[];
@@ -1100,6 +1236,7 @@ export class D1EnrollmentStore implements EnrollmentStore {
           credentials: [],
         };
         fellows.set(row.fellow_id, fellow);
+        pageTail = fellow;
       }
       if (
         row.credential_id === null ||
@@ -1118,7 +1255,14 @@ export class D1EnrollmentStore implements EnrollmentStore {
         active: row.status === "active" || row.status === "suspicious_review",
       });
     }
-    return [...fellows.values()];
+    const page = [...fellows.values()];
+    if (hasNextPage && pageTail === undefined) throw new EnrollmentPersistenceError();
+    return {
+      fellows: page,
+      ...(hasNextPage && pageTail !== undefined
+        ? { nextCursor: { granted_at: pageTail.grantedAt, fellow_id: pageTail.fellowId } }
+        : {}),
+    };
   }
 
   async deviceCreate(
@@ -1543,19 +1687,22 @@ export class D1EnrollmentStore implements EnrollmentStore {
   }
 
   async bootstrapSponsor(sponsorId: string, now: number): Promise<boolean> {
-    // INSERT OR IGNORE first so `created` is exact; the follow-up UPDATE moves
-    // only last_seen_at. Two statements in one batch keep the pair atomic.
+    // UPDATE first distinguishes an existing row from an absent one; the
+    // conditional INSERT then creates only the latter in the same batch. This
+    // avoids INSERT OR IGNORE so the schema can reject raw INSERT OR REPLACE of
+    // a sponsor that already anchors enrollment authority.
     const results = await this.#db.batch([
+      sql(this.#db, "UPDATE sponsors SET last_seen_at = ? WHERE sponsor_id = ?", now, sponsorId),
       sql(
         this.#db,
-        "INSERT OR IGNORE INTO sponsors (sponsor_id, created_at, last_seen_at) VALUES (?, ?, ?)",
+        `INSERT INTO sponsors (sponsor_id, created_at, last_seen_at)
+         SELECT ?, ?, ? WHERE changes() = 0`,
         sponsorId,
         now,
         now,
       ),
-      sql(this.#db, "UPDATE sponsors SET last_seen_at = ? WHERE sponsor_id = ?", now, sponsorId),
     ]);
-    const insert = results[0];
+    const insert = results[1];
     return (insert?.meta.changes ?? 0) === 1;
   }
 

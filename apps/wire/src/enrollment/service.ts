@@ -16,10 +16,12 @@ import {
   FellowNameSchema,
   FellowRegistrationCredentialFieldsSchema,
   FellowRegistrationRequestSchema,
+  isTrustedStoaOrigin,
   type MintEnrollmentRequest,
   MintEnrollmentRequestSchema,
   PENDING_PROPOSAL_TTL_MS,
   type RequestedScope,
+  SPONSOR_FELLOW_PAGE_SIZE,
   type SponsorCredentialRevokeRequest,
   SponsorCredentialRevokeRequestSchema,
   type SponsorCredentialRevokeResponse,
@@ -28,6 +30,7 @@ import {
   type SponsorEnrollmentDecisionCommand,
   SponsorEnrollmentDecisionCommandSchema,
   SponsorEnrollmentDecisionSchema,
+  type SponsorFellowCursorKey,
   type SponsorFellowLifecycleRequest,
   SponsorFellowLifecycleRequestSchema,
   type SponsorFellowLifecycleResponse,
@@ -36,7 +39,9 @@ import {
   SponsorPanicRequestSchema,
   type SponsorPanicResponse,
   SponsorPanicResponseSchema,
+  stoaHelloUrl,
 } from "@asimposium/contracts";
+import { redactCredentials } from "@asimposium/contracts/diagnostic-safety";
 import { SERVICE_ENVELOPE_CLOCK_SKEW_SECONDS } from "../auth/envelope.ts";
 
 const BASE64URL = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_";
@@ -96,6 +101,34 @@ function fellowStatusCanAuthenticate(status: FellowLifecycleStatus): boolean {
   // Suspicious-review Fellows retain read access for sponsor diagnosis. Write
   // authorization must additionally quarantine that status in centralized policy.
   return status === "active" || status === "suspicious_review";
+}
+
+/** SQLite BINARY ordering for the opaque Fellow identity, reproduced in memory. */
+function compareFellowIdBinary(left: string, right: string): number {
+  const leftBytes = new TextEncoder().encode(left);
+  const rightBytes = new TextEncoder().encode(right);
+  const limit = Math.min(leftBytes.length, rightBytes.length);
+  for (let index = 0; index < limit; index += 1) {
+    const difference = (leftBytes[index] ?? 0) - (rightBytes[index] ?? 0);
+    if (difference !== 0) return difference;
+  }
+  return leftBytes.length - rightBytes.length;
+}
+
+function compareFellowPageOrder(
+  left: Pick<SponsorFellowRecord, "grantedAt" | "fellowId">,
+  right: Pick<SponsorFellowRecord, "grantedAt" | "fellowId">,
+): number {
+  if (left.grantedAt !== right.grantedAt) return right.grantedAt - left.grantedAt;
+  return compareFellowIdBinary(left.fellowId, right.fellowId);
+}
+
+function followsFellowCursor(record: SponsorFellowRecord, after: SponsorFellowCursorKey): boolean {
+  return (
+    record.grantedAt < after.granted_at ||
+    (record.grantedAt === after.granted_at &&
+      compareFellowIdBinary(record.fellowId, after.fellow_id) > 0)
+  );
 }
 
 function fellowLifecycleTransitionAllowed(
@@ -197,6 +230,19 @@ export class EnrollmentReplayConfigurationError extends Error {
   }
 }
 
+/**
+ * The configured Stoa origin is absent or untrusted. Distinct from the replay
+ * error so an operator can tell which binding is wrong, while both surface to
+ * a caller as the same opaque 503: which binding a deployment is missing is
+ * operator information.
+ */
+export class EnrollmentStoaOriginError extends Error {
+  constructor() {
+    super("enrollment stoa origin is unavailable");
+    this.name = "EnrollmentStoaOriginError";
+  }
+}
+
 /** A D1 failure is operational, never an enrollment or credential verdict. */
 export class EnrollmentPersistenceError extends Error {
   constructor() {
@@ -241,6 +287,13 @@ export interface SponsorFellowRecord {
   readonly grantedResources: EnrollmentResourceGrants;
   readonly grantedAt: number;
   readonly credentials: readonly SponsorCredentialRecord[];
+}
+
+/** One bounded, deterministic sponsor inventory page. */
+export interface SponsorFellowPage {
+  readonly fellows: readonly SponsorFellowRecord[];
+  /** Present only when another page is reachable after this one. */
+  readonly nextCursor?: SponsorFellowCursorKey;
 }
 
 export interface EnrollmentClock {
@@ -323,7 +376,7 @@ export type EnrollmentFlowResult =
   | {
       readonly status: "approved";
       readonly token: string;
-      readonly hello_url: "https://a.asimposium.org/v1/hello";
+      readonly hello_url: string;
       readonly suggested_next: "GET /v1/hello with the bearer token";
     };
 
@@ -563,8 +616,12 @@ export interface EnrollmentStore {
    * to `expired` first, matching approvalCard's lazy-expiry rule.
    */
   pendingApprovalCardsBySponsor(sponsorId: string, now: number): Promise<EnrollmentApprovalCard[]>;
-  /** Approval grants and non-secret credential hygiene for the sponsor console. */
-  fellowsBySponsor(sponsorId: string, now: number): Promise<SponsorFellowRecord[]>;
+  /** Approval grants and non-secret credential hygiene for one sponsor-console page. */
+  fellowsBySponsor(
+    sponsorId: string,
+    now: number,
+    after?: SponsorFellowCursorKey,
+  ): Promise<SponsorFellowPage>;
   /**
    * W3.1: upsert the sponsor row. Returns true when this call created it;
    * false means it only moved last_seen_at.
@@ -1247,6 +1304,7 @@ export class InMemoryEnrollmentStore implements EnrollmentStore {
       }
 
       if (attempt.decision.decision === "deny") {
+        this.ensureSponsorForDecision(attempt.sponsorId, attempt.now);
         // The first decider binds an unbound device enrollment, even to deny it.
         if (isUnboundDevice) record.sponsorId = attempt.sponsorId;
         proposal.status = "denied";
@@ -1316,6 +1374,7 @@ export class InMemoryEnrollmentStore implements EnrollmentStore {
           throw this.sponsorEnrollmentRateLimitError(enrollmentBudget.latestAt, attempt.now);
         }
       }
+      this.ensureSponsorForDecision(attempt.sponsorId, attempt.now);
       this.#activeNames.set(proposal.name, proposal.proposalId);
       if (isUnboundDevice) record.sponsorId = attempt.sponsorId;
       proposal.status = attempt.decision.decision === "approve" ? "approved" : "reduced";
@@ -1391,7 +1450,11 @@ export class InMemoryEnrollmentStore implements EnrollmentStore {
     });
   }
 
-  async fellowsBySponsor(sponsorId: string, now: number): Promise<SponsorFellowRecord[]> {
+  async fellowsBySponsor(
+    sponsorId: string,
+    now: number,
+    after?: SponsorFellowCursorKey,
+  ): Promise<SponsorFellowPage> {
     return this.serialized(() => {
       const fellows: SponsorFellowRecord[] = [];
       for (const record of this.#records.values()) {
@@ -1431,7 +1494,11 @@ export class InMemoryEnrollmentStore implements EnrollmentStore {
               credential.issuedAt <= now &&
               now < credential.expiresAt,
           }))
-          .sort((left, right) => right.issuedAt - left.issuedAt);
+          .sort(
+            (left, right) =>
+              right.issuedAt - left.issuedAt ||
+              compareFellowIdBinary(left.credentialId, right.credentialId),
+          );
         fellows.push({
           fellowId: proposal.fellowId,
           name: proposal.name,
@@ -1444,8 +1511,19 @@ export class InMemoryEnrollmentStore implements EnrollmentStore {
           credentials,
         });
       }
-      fellows.sort((left, right) => right.grantedAt - left.grantedAt);
-      return fellows;
+      const ordered = fellows
+        .filter((record) => after === undefined || followsFellowCursor(record, after))
+        .sort(compareFellowPageOrder)
+        .slice(0, SPONSOR_FELLOW_PAGE_SIZE + 1);
+      const page = ordered.slice(0, SPONSOR_FELLOW_PAGE_SIZE);
+      const sentinel = ordered[SPONSOR_FELLOW_PAGE_SIZE];
+      const tail = page.at(-1);
+      return {
+        fellows: page,
+        ...(sentinel === undefined || tail === undefined
+          ? {}
+          : { nextCursor: { granted_at: tail.grantedAt, fellow_id: tail.fellowId } }),
+      };
     });
   }
 
@@ -2085,6 +2163,26 @@ export class InMemoryEnrollmentStore implements EnrollmentStore {
     }
   }
 
+  /**
+   * A signed sponsor decision may be the human's first Worker contact (the
+   * `/approve` device flow does not pass through `/console`).  Create the
+   * accountability row in the same serialized transition that binds/settles
+   * the proposal; callers that fail before this point create neither a row nor
+   * any Fellow authority.
+   */
+  private ensureSponsorForDecision(sponsorId: string, now: number): void {
+    const existing = this.#sponsors.get(sponsorId);
+    if (existing !== undefined) {
+      existing.lastSeenAt = now;
+      return;
+    }
+    this.#sponsors.set(sponsorId, {
+      createdAt: now,
+      lastSeenAt: now,
+      activeFellowLimit: DEFAULT_SPONSOR_ACTIVE_FELLOW_LIMIT,
+    });
+  }
+
   /** Test-only storage inspection; it intentionally exposes hashes but never plaintext credentials. */
   async storageSnapshot(enrollmentId: string): Promise<EnrollmentStorageSnapshot | undefined> {
     return this.serialized(() => {
@@ -2104,6 +2202,21 @@ export class InMemoryEnrollmentStore implements EnrollmentStore {
           : { tokenHash: record.proposal.tokenHash }),
         ...(record.proposal === undefined ? {} : { fellowId: record.proposal.fellowId }),
       };
+    });
+  }
+
+  /** Test-only sponsor inspection; it contains accountability metadata, never credentials. */
+  async sponsorSnapshot(sponsorId: string): Promise<
+    | {
+        readonly createdAt: number;
+        readonly lastSeenAt: number;
+        readonly activeFellowLimit: number;
+      }
+    | undefined
+  > {
+    return this.serialized(() => {
+      const sponsor = this.#sponsors.get(sponsorId);
+      return sponsor === undefined ? undefined : { ...sponsor };
     });
   }
 
@@ -2127,6 +2240,17 @@ export class InMemoryEnrollmentStore implements EnrollmentStore {
 }
 
 export interface EnrollmentServiceOptions {
+  /**
+   * The trusted Stoa origin every emitted enrollment URL names. Immutable for
+   * the life of the service: it comes from a validated binding, never a
+   * request, so no handler can be tricked into re-pointing a credential.
+   *
+   * Required, deliberately. A default would mean an omitted caller silently
+   * emits production URLs from a staging or loopback Worker — the exact
+   * mis-pointing this binding exists to prevent, and the one failure mode that
+   * would look correct in every local test.
+   */
+  readonly stoaOrigin: string;
   readonly store?: EnrollmentStore;
   readonly clock?: EnrollmentClock;
   readonly random?: EnrollmentRandom;
@@ -2138,13 +2262,25 @@ export class EnrollmentService {
   readonly #clock: EnrollmentClock;
   readonly #random: EnrollmentRandom;
   readonly #replayProtector: EnrollmentReplayProtector;
+  readonly #stoaOrigin: string;
 
-  constructor(options: EnrollmentServiceOptions = {}) {
+  constructor(options: EnrollmentServiceOptions) {
     this.#store = options.store ?? new InMemoryEnrollmentStore();
     this.#clock = options.clock ?? systemClock;
     this.#random = options.random ?? systemRandom;
     if (options.replayProtector === undefined) throw new EnrollmentReplayConfigurationError();
     this.#replayProtector = options.replayProtector;
+    // Fail closed at construction. A service that reached a request with an
+    // untrusted origin would have to refuse mid-flow, after a token may
+    // already have been minted; and there is no default, so an omitted origin
+    // is a construction error rather than a silent production URL.
+    if (!isTrustedStoaOrigin(options.stoaOrigin)) throw new EnrollmentStoaOriginError();
+    this.#stoaOrigin = options.stoaOrigin;
+  }
+
+  /** The immutable origin every enrollment URL from this service names. */
+  get stoaOrigin(): string {
+    return this.#stoaOrigin;
   }
 
   async #prepareWrite<T>(
@@ -2373,10 +2509,18 @@ export class EnrollmentService {
     return this.#store.pendingApprovalCardsBySponsor(sponsor.sponsorId, this.#clock.now());
   }
 
-  /** The sponsor's Fellows: grant facts and non-secret credential hygiene. */
+  /** The sponsor's first Fellow page, retained for existing in-process callers. */
   async fellows(sponsor: EnrollmentPrincipal): Promise<SponsorFellowRecord[]> {
+    return [...(await this.fellowPage(sponsor)).fellows];
+  }
+
+  /** The sponsor's bounded Fellow page: grant facts and non-secret credential hygiene. */
+  async fellowPage(
+    sponsor: EnrollmentPrincipal,
+    after?: SponsorFellowCursorKey,
+  ): Promise<SponsorFellowPage> {
     assertSponsor(sponsor);
-    return this.#store.fellowsBySponsor(sponsor.sponsorId, this.#clock.now());
+    return this.#store.fellowsBySponsor(sponsor.sponsorId, this.#clock.now(), after);
   }
 
   async revokeCredential(
@@ -2908,7 +3052,7 @@ export class EnrollmentService {
         return EnrollmentApprovedResponseSchema.parse({
           status: "approved",
           token: outcome.token,
-          hello_url: "https://a.asimposium.org/v1/hello",
+          hello_url: stoaHelloUrl(this.#stoaOrigin),
           suggested_next: "GET /v1/hello with the bearer token",
         });
     }
@@ -2935,7 +3079,7 @@ export function safeEnrollmentDiagnostic(input: {
   return JSON.stringify({
     tool: "bun",
     package: "@asimposium/wire",
-    suite: input.suite,
+    suite: redactCredentials(input.suite),
     version: "0.0.0",
     duration_ms: Math.max(0, Math.round(performance.now() - input.startedAt)),
     status: input.status,

@@ -1,0 +1,369 @@
+import { Database } from "bun:sqlite";
+import { describe, expect, test } from "bun:test";
+import { readFileSync } from "node:fs";
+import { resolve } from "node:path";
+import { PRODUCTION_STOA_ORIGIN, STAGING_STOA_ORIGIN, stoaHelloUrl } from "@asimposium/contracts";
+import type { D1Database } from "@cloudflare/workers-types";
+
+import { createApp } from "../../src/app.ts";
+import {
+  enrollmentCapsuleMarkdown,
+  enrollmentCapsuleProjection,
+} from "../../src/enrollment/capsule.ts";
+import { EnrollmentService } from "../../src/enrollment/service.ts";
+
+/**
+ * The Stoa origin is a binding, never a request.
+ *
+ * Every enrollment URL this Worker emits — join URL, `hello_url`, capsule
+ * instructions, `next_actions` — points an agent or a sponsor somewhere. If any
+ * of them could be derived from `Host`, `X-Forwarded-Host`, or the request URL,
+ * an attacker who can set a header would have a credential redirector: a join
+ * URL that carries a real secret to a host of their choosing. These tests
+ * assert the hostile inputs are inert, not merely unused.
+ */
+
+const LOOPBACK = "http://127.0.0.1:8787";
+
+/**
+ * `HeadersInit` is a DOM lib type and the Worker tsconfig has no DOM. Derive
+ * the same shape from the runtime's own `Headers` constructor so the header
+ * literals below stay fully checked rather than widened to `any`.
+ */
+type TestHeaders = NonNullable<ConstructorParameters<typeof Headers>[0]>;
+
+const ctx = {
+  waitUntil: () => undefined,
+  passThroughOnException: () => undefined,
+} as never;
+
+function envWith(stoaOrigin: unknown): never {
+  return { STOA_ORIGIN: stoaOrigin } as never;
+}
+
+async function capabilities(stoaOrigin: unknown, requestUrl: string, headers: TestHeaders = {}) {
+  const app = createApp();
+  const response = await app.fetch(new Request(requestUrl, { headers }), envWith(stoaOrigin), ctx);
+  return { status: response.status, text: await response.text() };
+}
+
+describe("capabilities origin comes from the binding", () => {
+  test.each([PRODUCTION_STOA_ORIGIN, STAGING_STOA_ORIGIN, LOOPBACK])(
+    "%s is reported as the live origin",
+    async (origin) => {
+      const result = await capabilities(origin, "https://a.asimposium.org/capabilities");
+      expect(result.status).toBe(200);
+      expect(JSON.parse(result.text).origin).toBe(origin);
+    },
+  );
+
+  test("schema and error-document ids stay canonical while the origin follows the binding", async () => {
+    const result = await capabilities(STAGING_STOA_ORIGIN, "https://a.asimposium.org/capabilities");
+    const body = JSON.parse(result.text);
+    expect(body.origin).toBe(STAGING_STOA_ORIGIN);
+    // A stable identifier is not a destination: it must not drift per environment.
+    expect(body.error_dictionary).toBe("https://a.asimposium.org/schemas/problem.v1.json");
+  });
+
+  test.each([
+    ["absent", undefined],
+    ["empty", ""],
+    ["an untrusted origin", "https://evil.test"],
+    ["a lookalike host", "https://a.asimposium.org.evil.test"],
+    ["plaintext production", "http://a.asimposium.org"],
+    ["a non-string", 8787],
+  ])("PLANTED: %s binding fails closed rather than defaulting", async (_label, origin) => {
+    const result = await capabilities(origin, "https://a.asimposium.org/capabilities");
+    expect(result.status).toBe(503);
+    // The refusal names no binding value and leaks no canonical fallback.
+    expect(result.text).not.toContain(PRODUCTION_STOA_ORIGIN);
+  });
+});
+
+describe("hostile request inputs cannot move the origin", () => {
+  test.each([
+    ["a hostile request URL", "https://evil.test/capabilities", {}],
+    ["a hostile Host header", "https://a.asimposium.org/capabilities", { host: "evil.test" }],
+    [
+      "a hostile X-Forwarded-Host",
+      "https://a.asimposium.org/capabilities",
+      { "x-forwarded-host": "evil.test" },
+    ],
+    [
+      "a hostile Forwarded header",
+      "https://a.asimposium.org/capabilities",
+      { forwarded: "host=evil.test;proto=https" },
+    ],
+    [
+      "a hostile X-Forwarded-Proto",
+      "http://127.0.0.1:8787/capabilities",
+      { "x-forwarded-proto": "https", "x-forwarded-host": "a.asimposium.org" },
+    ],
+  ])("PLANTED: %s leaves the reported origin unchanged", async (_label, url, headers) => {
+    const result = await capabilities(STAGING_STOA_ORIGIN, url, headers as TestHeaders);
+    expect(result.status).toBe(200);
+    const body = JSON.parse(result.text);
+    expect(body.origin).toBe(STAGING_STOA_ORIGIN);
+    expect(result.text).not.toContain("evil.test");
+  });
+});
+
+describe("the service origin is immutable and required", () => {
+  const replayProtector = {
+    seal: async () => ({ ciphertext: "c", initializationVector: "iv" }),
+    open: async () => "{}",
+  };
+
+  test.each([PRODUCTION_STOA_ORIGIN, STAGING_STOA_ORIGIN, LOOPBACK])(
+    "%s is retained verbatim",
+    (origin) => {
+      const service = new EnrollmentService({ stoaOrigin: origin, replayProtector } as never);
+      expect(service.stoaOrigin).toBe(origin);
+    },
+  );
+
+  test.each([
+    ["an untrusted origin", "https://evil.test"],
+    ["an empty origin", ""],
+    ["a request-shaped origin with a path", "https://a.asimposium.org/v1"],
+  ])("PLANTED: %s is refused at construction", (_label, origin) => {
+    expect(() => new EnrollmentService({ stoaOrigin: origin, replayProtector } as never)).toThrow();
+  });
+
+  test("PLANTED: an omitted origin cannot silently become production", () => {
+    // The option is required, so this is a type error as well as a throw. The
+    // runtime assertion is what protects a JavaScript caller.
+    expect(() => new EnrollmentService({ replayProtector } as never)).toThrow();
+  });
+});
+
+describe("capsule executable URLs follow the configured origin", () => {
+  const capsule = {
+    enrollmentId: "ASIMP-EN-01JXYZ4K6Q",
+    secretExpiresAt: 1_786_000_000,
+  } as never;
+
+  test.each([PRODUCTION_STOA_ORIGIN, STAGING_STOA_ORIGIN, LOOPBACK])(
+    "%s appears in the post-approval instruction",
+    (origin) => {
+      const projection = enrollmentCapsuleProjection(capsule, origin);
+      const actions = JSON.stringify(projection.guidance.post_approval_actions);
+      expect(actions).toContain(stoaHelloUrl(origin));
+      if (origin !== PRODUCTION_STOA_ORIGIN) {
+        // A staging capsule that told an agent to call production would send a
+        // staging credential to the wrong plane.
+        expect(actions).not.toContain(`GET ${stoaHelloUrl(PRODUCTION_STOA_ORIGIN)}`);
+      }
+    },
+  );
+
+  test.each([PRODUCTION_STOA_ORIGIN, STAGING_STOA_ORIGIN, LOOPBACK])(
+    "%s is carried on the JSON face as a validated field",
+    (origin) => {
+      expect(enrollmentCapsuleProjection(capsule, origin).origin).toBe(origin);
+    },
+  );
+
+  test("PLANTED: an untrusted origin cannot construct a projection, so no face can render it", () => {
+    // The schema parses the origin, so the refusal happens before Markdown,
+    // JSON, or HTML exists — there is no face left to leak a bad endpoint.
+    expect(() => enrollmentCapsuleProjection(capsule, "https://evil.test")).toThrow();
+    expect(() =>
+      enrollmentCapsuleProjection(capsule, "https://a.asimposium.org.evil.test"),
+    ).toThrow();
+  });
+});
+
+/**
+ * The Markdown capsule is executed, not just read.
+ *
+ * A cold agent copy-pastes these two curl commands: the first carries the
+ * enrollment secret in its body, the second the flow handle. Hardcoding the
+ * production endpoint meant a staging or loopback capsule handed an agent a
+ * command that posted a live credential to the wrong plane, while every other
+ * signal on the page said staging. These assertions fail against that code.
+ */
+describe("executable capsule Markdown is rendered at the configured origin", () => {
+  const capsule = {
+    enrollmentId: "ASIMP-EN-01JXYZ4K6Q",
+    secretExpiresAt: 1_786_000_000,
+  } as never;
+
+  const markdownFor = (origin: string): string =>
+    enrollmentCapsuleMarkdown(enrollmentCapsuleProjection(capsule, origin));
+
+  test.each([PRODUCTION_STOA_ORIGIN, STAGING_STOA_ORIGIN, LOOPBACK])(
+    "%s renders both POST commands against itself",
+    (origin) => {
+      const markdown = markdownFor(origin);
+      expect(markdown).toContain(`curl -sS -X POST ${origin}/v1/fellows \\`);
+      expect(markdown).toContain(`curl -sS -X POST ${origin}/v1/fellows/flow \\`);
+    },
+  );
+
+  test.each([STAGING_STOA_ORIGIN, LOOPBACK])(
+    "PLANTED: a %s capsule names no production endpoint anywhere in its Markdown",
+    (origin) => {
+      expect(markdownFor(origin)).not.toContain(PRODUCTION_STOA_ORIGIN);
+    },
+  );
+
+  test("the absence assertion is not vacuous: a production capsule does name production", () => {
+    const markdown = markdownFor(PRODUCTION_STOA_ORIGIN);
+    expect(markdown).toContain(`curl -sS -X POST ${PRODUCTION_STOA_ORIGIN}/v1/fellows \\`);
+    expect(markdown).toContain(PRODUCTION_STOA_ORIGIN);
+  });
+
+  test.each([PRODUCTION_STOA_ORIGIN, STAGING_STOA_ORIGIN, LOOPBACK])(
+    "%s: every absolute URL in the Markdown belongs to the configured origin",
+    (origin) => {
+      // A sweep rather than a fixed list, so a future hardcoded endpoint fails
+      // here even if nobody remembers to add a case for it.
+      const urls = markdownFor(origin).match(/https?:\/\/[^\s"'`)\\]+/g) ?? [];
+      expect(urls.length).toBeGreaterThan(0);
+      for (const url of urls) {
+        expect(url.startsWith(`${origin}/`)).toBe(true);
+      }
+    },
+  );
+
+  test("the rendered endpoints follow the contract's own declared paths", () => {
+    // Prose drifting from the JSON face is the same defect class as the
+    // hardcoded origin, so the curl block is derived from the projection.
+    const projection = enrollmentCapsuleProjection(capsule, STAGING_STOA_ORIGIN);
+    const markdown = enrollmentCapsuleMarkdown(projection);
+    expect(markdown).toContain(`${projection.origin}${projection.claim.path}`);
+    expect(markdown).toContain(`${projection.origin}${projection.guidance.flow_poll.path}`);
+  });
+});
+
+/**
+ * The isolate cache must not outlive an origin change.
+ *
+ * `createApp` builds the Propylon stack once per isolate and caches it against
+ * the D1 handle plus a credential tuple. The stack closes over an immutable
+ * origin, so if that tuple ignored the origin, a rebind would keep serving URLs
+ * built for the previous environment while every binding claimed otherwise —
+ * the failure would be invisible until a live credential arrived on the wrong
+ * plane. This exercises a real enrollment surface rather than `/capabilities`,
+ * because the capsule is the document an agent actually executes.
+ *
+ * PLANT: delete `stoaOrigin` from `credentialKey` in `src/app.ts` and the
+ * second fetch below replays the first origin, failing this test.
+ */
+describe("the isolate cache is keyed on the Stoa origin", () => {
+  const MIGRATIONS = ["0002_enrollment_g0.sql", "0009_device_flow.sql"];
+  const ENROLLMENT_ID = "ASIMP-EN-01JXYZ4K6Q";
+  const REPLAY_KEY = "a".repeat(43);
+
+  /**
+   * Real SQLite running the real migrations, wrapped in D1's method shape. The
+   * SQL is not simulated; only the binding surface is adapted. Nothing here is
+   * evidence that deployed D1 behaves this way, and no such claim is made.
+   */
+  function seededDatabase(): D1Database {
+    const sqlite = new Database(":memory:", { strict: true });
+    for (const migration of MIGRATIONS) {
+      sqlite.exec(
+        readFileSync(resolve(import.meta.dir, "../../../../db/migrations", migration), "utf8"),
+      );
+    }
+    const createdAt = Date.now();
+    sqlite
+      .prepare(
+        `INSERT INTO enrollment_records (enrollment_id, sponsor_id, secret_hash,
+           secret_expires_at, requested_scopes_json, requested_resources_json,
+           invalidated, secret_consumed_at, created_at, kind)
+         VALUES (?, ?, ?, ?, ?, ?, 0, NULL, ?, 'join-url')`,
+      )
+      .run(
+        ENROLLMENT_ID,
+        "usr_origincache",
+        "a".repeat(64),
+        createdAt + 15 * 60 * 1_000,
+        JSON.stringify(["promote"]),
+        JSON.stringify({}),
+        createdAt,
+      );
+    const prepare = (query: string) => ({
+      bind(...values: (string | number | null)[]) {
+        return {
+          async run() {
+            const statement = sqlite.prepare(query);
+            if (/^\s*SELECT\b/i.test(query)) {
+              return { results: statement.all(...values), meta: { changes: 0 } };
+            }
+            return { results: [], meta: { changes: statement.run(...values).changes } };
+          },
+          async first<T>(): Promise<T | null> {
+            return (sqlite.prepare(query).get(...values) ?? null) as T | null;
+          },
+          async all<T>(): Promise<{ results: T[] }> {
+            return { results: sqlite.prepare(query).all(...values) as T[] };
+          },
+        };
+      },
+    });
+    return {
+      prepare,
+      async batch(statements: readonly { run(): Promise<unknown> }[]) {
+        sqlite.run("BEGIN");
+        try {
+          const results = [];
+          for (const statement of statements) results.push(await statement.run());
+          sqlite.run("COMMIT");
+          return results;
+        } catch (error) {
+          sqlite.run("ROLLBACK");
+          throw error;
+        }
+      },
+    } as unknown as D1Database;
+  }
+
+  async function capsuleMarkdown(
+    app: ReturnType<typeof createApp>,
+    db: D1Database,
+    origin: string,
+  ) {
+    const response = await app.fetch(
+      new Request(`https://a.asimposium.org/join/${ENROLLMENT_ID}`, {
+        headers: { accept: "text/markdown" },
+      }),
+      { DB: db, ENROLLMENT_REPLAY_KEY: REPLAY_KEY, STOA_ORIGIN: origin } as never,
+      ctx,
+    );
+    return { status: response.status, text: await response.text() };
+  }
+
+  test("rebinding the origin on one app and one database changes the emitted capsule URLs", async () => {
+    // One app instance and one D1 handle for both requests: the only thing that
+    // differs is STOA_ORIGIN, so a cache hit here is a cache bug.
+    const app = createApp();
+    const db = seededDatabase();
+
+    const staging = await capsuleMarkdown(app, db, STAGING_STOA_ORIGIN);
+    expect(staging.status).toBe(200);
+    expect(staging.text).toContain(`curl -sS -X POST ${STAGING_STOA_ORIGIN}/v1/fellows \\`);
+
+    const loopback = await capsuleMarkdown(app, db, LOOPBACK);
+    expect(loopback.status).toBe(200);
+    expect(loopback.text).toContain(`curl -sS -X POST ${LOOPBACK}/v1/fellows \\`);
+    // The load-bearing assertion: no residue of the origin the stack was first
+    // built for, in the executable command or the post-approval hello URL.
+    expect(loopback.text).not.toContain(STAGING_STOA_ORIGIN);
+    expect(loopback.text).toContain(stoaHelloUrl(LOOPBACK));
+
+    // And back again, so the proof is not an artifact of one ordering.
+    const backToStaging = await capsuleMarkdown(app, db, STAGING_STOA_ORIGIN);
+    expect(backToStaging.text).toContain(`curl -sS -X POST ${STAGING_STOA_ORIGIN}/v1/fellows \\`);
+    expect(backToStaging.text).not.toContain(LOOPBACK);
+
+    // The whole document is parameterized by the origin and by nothing else:
+    // substituting one origin for the other reproduces the other response byte
+    // for byte. A stale cached stack cannot satisfy this, and neither can a
+    // capsule that still carries a hardcoded endpoint somewhere in its prose.
+    expect(loopback.text).toBe(staging.text.replaceAll(STAGING_STOA_ORIGIN, LOOPBACK));
+    expect(backToStaging.text).toBe(staging.text);
+  });
+});

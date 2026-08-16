@@ -4,7 +4,11 @@ import { Buffer } from "node:buffer";
 import { createHash } from "node:crypto";
 import { readFileSync } from "node:fs";
 import { resolve } from "node:path";
-import { PENDING_PROPOSAL_TTL_MS } from "@asimposium/contracts";
+import {
+  PENDING_PROPOSAL_TTL_MS,
+  SPONSOR_FELLOW_PAGE_SIZE,
+  STAGING_STOA_ORIGIN,
+} from "@asimposium/contracts";
 import type { D1Database } from "@cloudflare/workers-types";
 
 import { D1EnrollmentStore } from "../../src/enrollment/d1-store";
@@ -29,6 +33,16 @@ import {
   SPONSOR_STEP_UP_CLOCK_SKEW_SECONDS,
   SPONSOR_STEP_UP_WINDOW_SECONDS,
 } from "../../src/enrollment/service";
+
+/**
+ * One explicit trusted origin for every service built here.
+ *
+ * Staging rather than production on purpose: these fixtures must never be able
+ * to pass by accidentally matching the canonical production string, so a
+ * regression that reintroduced a production default would fail these tests
+ * instead of hiding behind them.
+ */
+const TEST_STOA_ORIGIN = STAGING_STOA_ORIGIN;
 
 /**
  * The active-key abort, proven against the real migration.
@@ -79,6 +93,10 @@ const SPONSOR_FELLOW_CAP_MIGRATION = resolve(
 const SPONSOR_ENROLLMENT_RATE_LIMIT_MIGRATION = resolve(
   import.meta.dir,
   "../../../../db/migrations/0014_sponsor_enrollment_rate_limit.sql",
+);
+const SPONSOR_ENROLLMENT_BOOTSTRAP_INVARIANT_MIGRATION = resolve(
+  import.meta.dir,
+  "../../../../db/migrations/0015_sponsor_enrollment_bootstrap_invariant.sql",
 );
 const DEVICE_MIGRATION = resolve(import.meta.dir, "../../../../db/migrations/0009_device_flow.sql");
 const SPONSOR_MIGRATION = resolve(
@@ -231,6 +249,118 @@ function sponsorEnrollmentRateDatabase(): Database {
   return sqlite;
 }
 
+const BOOTSTRAP_INVARIANT_MIGRATION_ID = "0015_sponsor_enrollment_bootstrap_invariant.sql";
+const BOOTSTRAP_INVARIANT_MIGRATION_SEQUENCE = 15;
+const BOOTSTRAP_INVARIANT_MIGRATION_OBJECTS = [
+  "sponsor_enrollment_bootstrap_migration_witness",
+  "sponsor_enrollment_bootstrap_migration_witness_immutable_update",
+  "sponsor_enrollment_bootstrap_migration_witness_immutable_delete",
+  "enrollment_proposals_sponsor_bootstrap_decision",
+  "enrollment_fellows_sponsor_bootstrap_insert",
+  "enrollment_grants_sponsor_bootstrap_insert",
+  "sponsors_enrollment_authority_delete",
+  "sponsors_identity_history_immutable",
+  "sponsors_enrollment_authority_duplicate_insert",
+] as const;
+
+/**
+ * Mirrors the runner's one-command unit: the full migration followed by its
+ * journal entry is one D1 transaction. A migration failure must leave neither
+ * its durable witness nor an applied-history row behind, so a corrected retry
+ * starts from exactly the preflight schema.
+ */
+function applyBootstrapInvariantMigrationBatch(sqlite: Database): void {
+  const migration = readFileSync(SPONSOR_ENROLLMENT_BOOTSTRAP_INVARIANT_MIGRATION, "utf8");
+  sqlite.run("BEGIN");
+  let committed = false;
+  try {
+    sqlite.exec(migration);
+    const witness = sqlite
+      .prepare<{ singleton: number }, []>(
+        `SELECT singleton
+           FROM sponsor_enrollment_bootstrap_migration_witness
+          WHERE singleton = 1`,
+      )
+      .get();
+    // bun:sqlite's `exec` continues after this CHECK refusal, while Wrangler
+    // reports the failed command. Treat the absent source-authored witness as
+    // that command failure before committing so the explicit D1 transaction
+    // still proves full-DDL and journal rollback.
+    if (witness === null) {
+      throw new Error("sponsor enrollment bootstrap witness CHECK rejected legacy history");
+    }
+    sqlite
+      .prepare(
+        `INSERT INTO _asimposium_migrations (id, sequence, digest, applied_at)
+         VALUES (?, ?, ?, ?)`,
+      )
+      .run(
+        BOOTSTRAP_INVARIANT_MIGRATION_ID,
+        BOOTSTRAP_INVARIANT_MIGRATION_SEQUENCE,
+        createHash("sha256").update(migration).digest("hex"),
+        "2026-08-16T00:00:00.000Z",
+      );
+    sqlite.run("COMMIT");
+    committed = true;
+  } catch (error) {
+    if (!committed) sqlite.run("ROLLBACK");
+    throw error;
+  }
+}
+
+function createMigrationJournal(sqlite: Database): void {
+  sqlite.exec(`CREATE TABLE _asimposium_migrations (
+    id TEXT PRIMARY KEY,
+    sequence INTEGER NOT NULL,
+    digest TEXT NOT NULL,
+    applied_at TEXT NOT NULL
+  );`);
+}
+
+function expectBootstrapInvariantMigrationUnapplied(sqlite: Database): void {
+  expect(
+    sqlite
+      .prepare<{ n: number }, [string]>(
+        "SELECT COUNT(*) AS n FROM _asimposium_migrations WHERE id = ?",
+      )
+      .get(BOOTSTRAP_INVARIANT_MIGRATION_ID)?.n,
+  ).toBe(0);
+  for (const name of BOOTSTRAP_INVARIANT_MIGRATION_OBJECTS) {
+    expect(
+      sqlite
+        .prepare<{ n: number }, [string]>("SELECT COUNT(*) AS n FROM sqlite_master WHERE name = ?")
+        .get(name)?.n,
+    ).toBe(0);
+  }
+}
+
+function expectBootstrapInvariantMigrationApplied(sqlite: Database): void {
+  expect(
+    sqlite
+      .prepare<{ singleton: number; rule_version: number; passed: number }, []>(
+        `SELECT singleton, rule_version, passed
+           FROM sponsor_enrollment_bootstrap_migration_witness`,
+      )
+      .get(),
+  ).toEqual({ singleton: 1, rule_version: 1, passed: 1 });
+  expect(() =>
+    sqlite
+      .prepare(
+        "UPDATE sponsor_enrollment_bootstrap_migration_witness SET rule_version = rule_version + 1",
+      )
+      .run(),
+  ).toThrow("sponsor enrollment bootstrap witness is immutable");
+  expect(() =>
+    sqlite.prepare("DELETE FROM sponsor_enrollment_bootstrap_migration_witness").run(),
+  ).toThrow("sponsor enrollment bootstrap witness cannot be deleted");
+}
+
+function sponsorEnrollmentBootstrapInvariantDatabase(): Database {
+  const sqlite = sponsorEnrollmentRateDatabase();
+  sqlite.exec(readFileSync(SPONSOR_ENROLLMENT_BOOTSTRAP_INVARIANT_MIGRATION, "utf8"));
+  return sqlite;
+}
+
 function databaseBeforeCredentialHardening(
   options: { readonly nullableDigest?: boolean } = {},
 ): Database {
@@ -246,7 +376,9 @@ function databaseBeforeCredentialHardening(
 }
 
 function deviceDatabase(): Database {
-  return database();
+  const sqlite = database();
+  sqlite.exec(readFileSync(SPONSOR_MIGRATION, "utf8"));
+  return sqlite;
 }
 
 const NOW = 1_786_000_000_000;
@@ -280,6 +412,7 @@ function d1DeviceServiceFixture(): {
     clock,
     sqlite,
     service: new EnrollmentService({
+      stoaOrigin: TEST_STOA_ORIGIN,
       clock,
       store: new D1EnrollmentStore(localD1(sqlite)),
       replayProtector: new AesGcmEnrollmentReplayProtector(new Uint8Array(32)),
@@ -911,6 +1044,7 @@ describe("device enrollment first-decider SQL", () => {
       },
     });
     const service = new EnrollmentService({
+      stoaOrigin: TEST_STOA_ORIGIN,
       clock,
       store: new D1EnrollmentStore(db),
       replayProtector: new AesGcmEnrollmentReplayProtector(new Uint8Array(32)),
@@ -979,6 +1113,7 @@ describe("device enrollment first-decider SQL", () => {
       },
     });
     const service = new EnrollmentService({
+      stoaOrigin: TEST_STOA_ORIGIN,
       clock,
       store: new D1EnrollmentStore(db),
       replayProtector: new AesGcmEnrollmentReplayProtector(new Uint8Array(32)),
@@ -1032,6 +1167,7 @@ describe("device enrollment first-decider SQL", () => {
     );
     let predecessorIv = 0;
     const service = new EnrollmentService({
+      stoaOrigin: TEST_STOA_ORIGIN,
       clock,
       store: new D1EnrollmentStore(localD1(sqlite)),
       replayProtector: protector,
@@ -2006,6 +2142,72 @@ function seedLifecycleIdentity(
   }
 }
 
+/** Raw D1 fixture for pagination: all authority joins stay real, no mocked rows. */
+function seedSponsorFellowPage(sqlite: Database, tiedCount: number): void {
+  const insertRecord = sqlite.prepare(
+    `INSERT INTO enrollment_records (
+       enrollment_id, sponsor_id, secret_hash, secret_expires_at,
+       requested_scopes_json, requested_resources_json, created_at
+     ) VALUES (?, ?, ?, ?, ?, ?, ?)`,
+  );
+  const insertProposal = sqlite.prepare(
+    `INSERT INTO enrollment_proposals (
+       proposal_id, enrollment_id, fellow_id, flow_handle_hash, name, model, harness,
+       created_at, expires_at, status, granted_scopes_json, granted_resources_json,
+       token_hash, token_issued_at, poll_interval_seconds
+     ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'pending', NULL, NULL, NULL, NULL, 5)`,
+  );
+  const approveProposal = sqlite.prepare(
+    `UPDATE enrollment_proposals
+        SET status = 'approved', granted_scopes_json = ?, granted_resources_json = ?
+      WHERE proposal_id = ?`,
+  );
+  const insertFellow = sqlite.prepare(
+    `INSERT INTO enrollment_fellows (fellow_id, sponsor_id, name, model, harness, created_at)
+     VALUES (?, ?, ?, ?, ?, ?)`,
+  );
+  const insertGrant = sqlite.prepare(
+    `INSERT INTO enrollment_grants (
+       proposal_id, fellow_id, sponsor_id, granted_scopes_json,
+       granted_resources_json, granted_at
+     ) VALUES (?, ?, ?, ?, ?, ?)`,
+  );
+  const scopes = '["review"]';
+  const resources = "{}";
+
+  for (let index = 0; index <= tiedCount; index += 1) {
+    const suffix = String(index).padStart(4, "0");
+    const enrollmentId = fixtureEnrollmentId(`pagination-${suffix}`);
+    const proposalId = `proposal-pagination-${suffix}`;
+    const fellowId = `fellow-page-${suffix}`;
+    const name = `page-fellow-${suffix}`;
+    const grantedAt = index === tiedCount ? NOW - 1 : NOW;
+    insertRecord.run(
+      enrollmentId,
+      LIFECYCLE_SPONSOR,
+      fixtureDigest(`pagination-secret-${suffix}`),
+      NOW + 30 * 60_000,
+      scopes,
+      resources,
+      NOW,
+    );
+    insertProposal.run(
+      proposalId,
+      enrollmentId,
+      fellowId,
+      fixtureDigest(`pagination-flow-${suffix}`),
+      name,
+      "test-model",
+      "codex",
+      grantedAt,
+      grantedAt + PENDING_PROPOSAL_TTL_MS,
+    );
+    approveProposal.run(scopes, resources, proposalId);
+    insertFellow.run(fellowId, LIFECYCLE_SPONSOR, name, "test-model", "codex", NOW);
+    insertGrant.run(proposalId, fellowId, LIFECYCLE_SPONSOR, scopes, resources, grantedAt);
+  }
+}
+
 function insertLifecycleCredential(
   sqlite: Database,
   input: {
@@ -2253,9 +2455,118 @@ describe("Fellow credential lifecycle constraints and authentication", () => {
       .map((row) => row.detail)
       .join("\n");
     expect(sponsorPlan).toContain("MATERIALIZE sponsor_fellow_page");
+    expect(inventoryQuery).toContain("sponsor_fellow_keys AS MATERIALIZED");
+    expect(inventoryQuery).toContain("LIMIT 501");
+    expect(inventoryQuery).toContain("LIMIT 1501");
     expect(sponsorPlan).toContain("enrollment_grants_sponsor_page_idx");
     expect(sponsorPlan).toContain("enrollment_credentials_sponsor_fellow_lifecycle_idx");
-    expect(sponsorPlan).not.toContain("SCAN grant_row");
+    expect(sponsorPlan).not.toContain("SCAN grant_key");
+  });
+
+  test("PLANTED: 501 tied Fellow grants use both bounded 0011 keyset branches before authority joins", async () => {
+    const sqlite = database();
+    // 501 equal timestamps prove the Fellow-id tie-breaker. One older grant
+    // proves the continuation's second, independently bounded index branch.
+    seedSponsorFellowPage(sqlite, SPONSOR_FELLOW_PAGE_SIZE + 1);
+    const recording = recordingD1(sqlite);
+    const store = new D1EnrollmentStore(recording.db);
+
+    const first = await store.fellowsBySponsor(LIFECYCLE_SPONSOR, NOW);
+    expect(first.fellows).toHaveLength(SPONSOR_FELLOW_PAGE_SIZE);
+    expect(first.fellows[0]?.fellowId).toBe("fellow-page-0000");
+    expect(first.fellows.at(-1)?.fellowId).toBe("fellow-page-0499");
+    expect(first.nextCursor).toEqual({
+      granted_at: NOW,
+      fellow_id: "fellow-page-0499",
+    });
+
+    const after = first.nextCursor;
+    if (after === undefined) throw new Error("tied 501st row did not mint a continuation key");
+    const second = await store.fellowsBySponsor(LIFECYCLE_SPONSOR, NOW, after);
+    expect(second).toMatchObject({
+      fellows: [
+        { fellowId: "fellow-page-0500", grantedAt: NOW },
+        { fellowId: "fellow-page-0501", grantedAt: NOW - 1 },
+      ],
+    });
+    expect(second.fellows).toHaveLength(2);
+    expect(second.nextCursor).toBeUndefined();
+
+    const continuationQuery = recording.issued.at(-1);
+    expect(continuationQuery).toBeDefined();
+    const query = continuationQuery as string;
+    expect(query).toContain("same_timestamp_keys AS MATERIALIZED");
+    expect(query).toContain("older_timestamp_keys AS MATERIALIZED");
+    expect(query).toContain("AND grant_key.granted_at = ?");
+    expect(query).toContain("AND grant_key.fellow_id > ?");
+    expect(query).toContain("AND grant_key.granted_at < ?");
+    expect(query.match(/INDEXED BY enrollment_grants_sponsor_page_idx/g)?.length).toBe(2);
+    expect(query.match(/LIMIT 501/g)?.length).toBeGreaterThanOrEqual(3);
+    expect(query).toContain("LIMIT 1501");
+    expect(query.indexOf("sponsor_fellow_keys AS MATERIALIZED")).toBeLessThan(
+      query.indexOf("LEFT JOIN enrollment_fellows fellow"),
+    );
+    expect(query).toContain(
+      "ORDER BY f.granted_at DESC, f.fellow_id ASC, c.issued_at DESC, c.credential_id ASC",
+    );
+
+    const plan = sqlite
+      .prepare<{ detail: string }, LocalBinding[]>(`EXPLAIN QUERY PLAN ${query}`)
+      .all(
+        LIFECYCLE_SPONSOR,
+        after.granted_at,
+        after.fellow_id,
+        LIFECYCLE_SPONSOR,
+        after.granted_at,
+        NOW,
+        NOW,
+        NOW,
+      )
+      .map((row) => row.detail)
+      .join("\n");
+    expect(plan).toContain("MATERIALIZE same_timestamp_keys");
+    expect(plan).toContain("MATERIALIZE older_timestamp_keys");
+    expect(plan).toContain(
+      "SEARCH grant_key USING INDEX enrollment_grants_sponsor_page_idx (sponsor_id=? AND granted_at=? AND fellow_id>?)",
+    );
+    expect(plan).toContain(
+      "SEARCH grant_key USING INDEX enrollment_grants_sponsor_page_idx (sponsor_id=? AND granted_at<?)",
+    );
+    expect(plan.match(/enrollment_grants_sponsor_page_idx/g)?.length).toBeGreaterThanOrEqual(2);
+    expect(plan).toContain("enrollment_credentials_sponsor_fellow_lifecycle_idx");
+    expect(plan).not.toContain("SCAN grant_key");
+  });
+
+  test("PLANTED: a real corrupt top key fails closed instead of truncating its valid later Fellow", async () => {
+    const sqlite = database();
+    // Seed two real, valid durable grants: the later timestamp is the page
+    // head; the older one must stay valid and reachable if the corrupt head
+    // were ever silently inner-joined away.
+    seedSponsorFellowPage(sqlite, 1);
+    const store = new D1EnrollmentStore(localD1(sqlite));
+    expect((await store.fellowsBySponsor(LIFECYCLE_SPONSOR, NOW)).fellows).toMatchObject([
+      { fellowId: "fellow-page-0000", grantedAt: NOW },
+      { fellowId: "fellow-page-0001", grantedAt: NOW - 1 },
+    ]);
+
+    // This is the one guard that makes the planted authority mismatch
+    // impossible in current D1 history. Disable only it in this in-memory
+    // fixture, then leave the older authority chain untouched.
+    sqlite.exec("DROP TRIGGER enrollment_proposals_identity_immutable");
+    sqlite
+      .prepare("UPDATE enrollment_proposals SET harness = 'corrupt-harness' WHERE proposal_id = ?")
+      .run("proposal-pagination-0000");
+    expect(
+      sqlite
+        .prepare<{ harness: string }, [string]>(
+          "SELECT harness FROM enrollment_proposals WHERE proposal_id = ?",
+        )
+        .get("proposal-pagination-0001"),
+    ).toEqual({ harness: "codex" });
+
+    await expect(store.fellowsBySponsor(LIFECYCLE_SPONSOR, NOW)).rejects.toBeInstanceOf(
+      EnrollmentPersistenceError,
+    );
   });
 
   test("0011 preserves an expired durable grant that never issued a credential", async () => {
@@ -4796,7 +5107,7 @@ describe("Fellow credential lifecycle constraints and authentication", () => {
         )
         .get()?.last_used_at,
     ).toBe(NOW + 1);
-    expect(await store.fellowsBySponsor(LIFECYCLE_SPONSOR, NOW + 1)).toMatchObject([
+    expect((await store.fellowsBySponsor(LIFECYCLE_SPONSOR, NOW + 1)).fellows).toMatchObject([
       {
         fellowId: LIFECYCLE_FELLOW,
         status: "active",
@@ -4808,7 +5119,7 @@ describe("Fellow credential lifecycle constraints and authentication", () => {
       await store.authenticateCredential("token-hash-1", NOW + TOKEN_TTL_MS, "bearer"),
     ).toBeUndefined();
     expect(
-      (await store.fellowsBySponsor(LIFECYCLE_SPONSOR, NOW + TOKEN_TTL_MS))[0]?.credentials,
+      (await store.fellowsBySponsor(LIFECYCLE_SPONSOR, NOW + TOKEN_TTL_MS)).fellows[0]?.credentials,
     ).toEqual([]);
     expect(
       sqlite
@@ -4824,7 +5135,7 @@ describe("Fellow credential lifecycle constraints and authentication", () => {
     expect(
       (await store.authenticateCredential("token-hash-1", NOW + 3, "bearer"))?.fellowStatus,
     ).toBe("suspicious_review");
-    expect((await store.fellowsBySponsor(LIFECYCLE_SPONSOR, NOW + 3))[0]).toMatchObject({
+    expect((await store.fellowsBySponsor(LIFECYCLE_SPONSOR, NOW + 3)).fellows[0]).toMatchObject({
       status: "suspicious_review",
       credentials: [{ credentialId: "credential-1", active: true }],
     });
@@ -4842,7 +5153,9 @@ describe("Fellow credential lifecycle constraints and authentication", () => {
       )
       .run(LIFECYCLE_SPONSOR, NOW, NOW);
     expect(await store.authenticateCredential("token-hash-1", NOW + 4, "bearer")).toBeUndefined();
-    expect((await store.fellowsBySponsor(LIFECYCLE_SPONSOR, NOW + 4))[0]?.credentials).toEqual([]);
+    expect(
+      (await store.fellowsBySponsor(LIFECYCLE_SPONSOR, NOW + 4)).fellows[0]?.credentials,
+    ).toEqual([]);
 
     expect(
       sqlite
@@ -5017,7 +5330,7 @@ describe("Fellow credential lifecycle constraints and authentication", () => {
       await store.authenticateCredential("token-hash-grant-expiry", grantExpiresAt, "bearer"),
     ).toBeUndefined();
     expect(
-      (await store.fellowsBySponsor(LIFECYCLE_SPONSOR, grantExpiresAt))[0]?.credentials,
+      (await store.fellowsBySponsor(LIFECYCLE_SPONSOR, grantExpiresAt)).fellows[0]?.credentials,
     ).toEqual([]);
     expect(
       sqlite
@@ -5069,14 +5382,16 @@ describe("Fellow credential lifecycle constraints and authentication", () => {
     expect(
       sqlite.prepare<{ n: number }, []>("SELECT COUNT(*) AS n FROM fellow_tokens").get()?.n,
     ).toBe(0);
-    expect(await store.fellowsBySponsor(LIFECYCLE_SPONSOR, grantExpiresAt)).toMatchObject([
-      {
-        fellowId: LIFECYCLE_FELLOW,
-        status: "active",
-        grantedResources: { fellowGrantExpiresAt: grantExpiresAt },
-        credentials: [],
-      },
-    ]);
+    expect((await store.fellowsBySponsor(LIFECYCLE_SPONSOR, grantExpiresAt)).fellows).toMatchObject(
+      [
+        {
+          fellowId: LIFECYCLE_FELLOW,
+          status: "active",
+          grantedResources: { fellowGrantExpiresAt: grantExpiresAt },
+          credentials: [],
+        },
+      ],
+    );
   });
 
   test("polling refuses corrupt durable scopes before the one-time token factory runs", async () => {
@@ -5242,6 +5557,7 @@ describe("Fellow credential lifecycle constraints and authentication", () => {
     const store = new D1EnrollmentStore(localD1(sqlite));
     const random = { bytes: (length: number) => new Uint8Array(length) };
     const service = new EnrollmentService({
+      stoaOrigin: TEST_STOA_ORIGIN,
       clock: { now: () => NOW + 1 },
       random,
       store,
@@ -5635,6 +5951,7 @@ describe("0012 sponsor lifecycle commands", () => {
     const clock = new DeviceTestClock();
     const sqlite = lifecycleCommandDatabase();
     const service = new EnrollmentService({
+      stoaOrigin: TEST_STOA_ORIGIN,
       clock,
       store: new D1EnrollmentStore(localD1(sqlite, options)),
       replayProtector: new AesGcmEnrollmentReplayProtector(new Uint8Array(32)),
@@ -6614,6 +6931,7 @@ describe("0012 sponsor lifecycle commands", () => {
       }),
     );
     const service = new EnrollmentService({
+      stoaOrigin: TEST_STOA_ORIGIN,
       clock,
       store,
       replayProtector: new AesGcmEnrollmentReplayProtector(new Uint8Array(32)),
@@ -6883,6 +7201,7 @@ describe("0013 sponsor Fellow capacity", () => {
         name: "memory",
         clock: memoryClock,
         service: new EnrollmentService({
+          stoaOrigin: TEST_STOA_ORIGIN,
           clock: memoryClock,
           store: new InMemoryEnrollmentStore(),
           replayProtector: new AesGcmEnrollmentReplayProtector(new Uint8Array(32)),
@@ -6892,6 +7211,7 @@ describe("0013 sponsor Fellow capacity", () => {
         name: "d1",
         clock: d1Clock,
         service: new EnrollmentService({
+          stoaOrigin: TEST_STOA_ORIGIN,
           clock: d1Clock,
           store: new D1EnrollmentStore(localD1(d1Sqlite)),
           replayProtector: new AesGcmEnrollmentReplayProtector(new Uint8Array(32)),
@@ -7016,7 +7336,10 @@ describe("0013 sponsor Fellow capacity", () => {
 
     for (const fixture of fixtures) {
       const clock = new DeviceTestClock();
-      const sqlite = fixture === "d1" ? sponsorFellowCapDatabase() : undefined;
+      // Keep the current sponsor-row invariant on the D1 branch: this race
+      // remains a capacity/idempotency proof, while ensuring 0015's guards do
+      // not alter the winner-before-cap precedence.
+      const sqlite = fixture === "d1" ? sponsorEnrollmentBootstrapInvariantDatabase() : undefined;
       let armed = false;
       let concurrentReads = 0;
       let releaseReads: (() => void) | undefined;
@@ -7065,6 +7388,7 @@ describe("0013 sponsor Fellow capacity", () => {
               }),
             );
       const service = new EnrollmentService({
+        stoaOrigin: TEST_STOA_ORIGIN,
         clock,
         store,
         replayProtector: new AesGcmEnrollmentReplayProtector(new Uint8Array(32)),
@@ -7151,6 +7475,7 @@ describe("0013 sponsor Fellow capacity", () => {
       bothReads = resolve;
     });
     const service = new EnrollmentService({
+      stoaOrigin: TEST_STOA_ORIGIN,
       clock,
       store: new D1EnrollmentStore(
         localD1(sqlite, {
@@ -7619,6 +7944,7 @@ describe("0014 sponsor enrollment rolling-day budget", () => {
       const clock = new DeviceTestClock();
       const sqlite = fixture === "d1" ? sponsorEnrollmentRateDatabase() : undefined;
       const service = new EnrollmentService({
+        stoaOrigin: TEST_STOA_ORIGIN,
         clock,
         store:
           sqlite === undefined
@@ -7668,5 +7994,576 @@ describe("0014 sponsor enrollment rolling-day budget", () => {
         ).toBe(SPONSOR_ENROLLMENT_RATE_LIMIT_ATTEMPTS);
       }
     }
+  });
+});
+
+describe("0015 sponsor enrollment bootstrap invariant", () => {
+  test("0015 rejects a retained orphan Fellow without schema or journal residue, then permits the corrected retry", () => {
+    const sqlite = sponsorEnrollmentRateDatabase();
+    const orphanSponsorId = "usr_bootstrap_orphan_fellow";
+    createMigrationJournal(sqlite);
+    sqlite
+      .prepare(
+        `INSERT INTO enrollment_fellows (fellow_id, sponsor_id, name, model, harness, created_at)
+         VALUES (?, ?, ?, ?, ?, ?)`,
+      )
+      .run(
+        "fellow-bootstrap-orphan",
+        orphanSponsorId,
+        "bootstrap-orphan-fellow",
+        "test-model",
+        "test-harness",
+        NOW,
+      );
+
+    expect(
+      sqlite
+        .prepare<{ n: number }, [string]>(
+          `SELECT COUNT(*) AS n
+             FROM enrollment_fellows fellow
+             LEFT JOIN sponsors sponsor ON sponsor.sponsor_id = fellow.sponsor_id
+            WHERE fellow.sponsor_id = ? AND sponsor.sponsor_id IS NULL`,
+        )
+        .get(orphanSponsorId)?.n,
+    ).toBe(1);
+    expect(
+      sqlite
+        .prepare<{ n: number }, [string]>(
+          `SELECT COUNT(*) AS n
+             FROM enrollment_grants grant_row
+             LEFT JOIN sponsors sponsor ON sponsor.sponsor_id = grant_row.sponsor_id
+            WHERE grant_row.sponsor_id = ? AND sponsor.sponsor_id IS NULL`,
+        )
+        .get(orphanSponsorId)?.n,
+    ).toBe(0);
+
+    expect(() => applyBootstrapInvariantMigrationBatch(sqlite)).toThrow(
+      "sponsor enrollment bootstrap witness CHECK rejected legacy history",
+    );
+    expectBootstrapInvariantMigrationUnapplied(sqlite);
+    expect(
+      sqlite
+        .prepare<{ n: number }, [string]>(
+          "SELECT COUNT(*) AS n FROM enrollment_fellows WHERE sponsor_id = ?",
+        )
+        .get(orphanSponsorId)?.n,
+    ).toBe(1);
+
+    sqlite
+      .prepare("INSERT INTO sponsors (sponsor_id, created_at, last_seen_at) VALUES (?, ?, ?)")
+      .run(orphanSponsorId, NOW, NOW);
+    expect(() => applyBootstrapInvariantMigrationBatch(sqlite)).not.toThrow();
+    expect(
+      sqlite
+        .prepare<{ sequence: number }, [string]>(
+          "SELECT sequence FROM _asimposium_migrations WHERE id = ?",
+        )
+        .get(BOOTSTRAP_INVARIANT_MIGRATION_ID),
+    ).toEqual({ sequence: BOOTSTRAP_INVARIANT_MIGRATION_SEQUENCE });
+    expectBootstrapInvariantMigrationApplied(sqlite);
+  });
+
+  test("0015 rejects a retained orphan grant without schema or journal residue, then permits the corrected retry", () => {
+    const sqlite = lifecycleDatabase();
+    const fellowSponsorId = "usr_bootstrap_grant_fellow";
+    const orphanGrantSponsorId = "usr_bootstrap_orphan_grant";
+    const enrollmentId = fixtureEnrollmentId("bootstrap-orphan-grant");
+    const proposalId = "proposal-bootstrap-orphan-grant";
+    const fellowId = "fellow-bootstrap-grant";
+    sqlite.exec(readFileSync(SPONSOR_MIGRATION, "utf8"));
+    sqlite.exec(readFileSync(DEVICE_MIGRATION, "utf8"));
+    sqlite.exec(readFileSync(DEVICE_HARDENING_MIGRATION, "utf8"));
+    sqlite
+      .prepare("INSERT INTO sponsors (sponsor_id, created_at, last_seen_at) VALUES (?, ?, ?)")
+      .run(fellowSponsorId, NOW, NOW);
+    sqlite
+      .prepare(
+        `INSERT INTO enrollment_records (
+           enrollment_id, sponsor_id, secret_hash, secret_expires_at,
+           requested_scopes_json, requested_resources_json, created_at
+         ) VALUES (?, ?, ?, ?, ?, ?, ?)`,
+      )
+      .run(
+        enrollmentId,
+        fellowSponsorId,
+        fixtureDigest("bootstrap-orphan-grant-secret"),
+        NOW + 30 * 60_000,
+        '["review"]',
+        "{}",
+        NOW,
+      );
+    sqlite
+      .prepare(
+        `INSERT INTO enrollment_proposals (
+           proposal_id, enrollment_id, fellow_id, flow_handle_hash, name, model, harness,
+           created_at, expires_at, status, granted_scopes_json, granted_resources_json,
+           token_hash, token_issued_at, poll_interval_seconds
+         ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'pending', NULL, NULL, NULL, NULL, 5)`,
+      )
+      .run(
+        proposalId,
+        enrollmentId,
+        fellowId,
+        fixtureDigest("bootstrap-orphan-grant-flow"),
+        "bootstrap-orphan-grant",
+        "test-model",
+        "test-harness",
+        NOW,
+        NOW + PENDING_PROPOSAL_TTL_MS,
+      );
+    sqlite
+      .prepare(
+        `UPDATE enrollment_proposals
+            SET status = 'approved', granted_scopes_json = ?, granted_resources_json = ?
+          WHERE proposal_id = ?`,
+      )
+      .run('["review"]', "{}", proposalId);
+    sqlite
+      .prepare(
+        `INSERT INTO enrollment_fellows (fellow_id, sponsor_id, name, model, harness, created_at)
+         VALUES (?, ?, ?, ?, ?, ?)`,
+      )
+      .run(fellowId, fellowSponsorId, "bootstrap-orphan-grant", "test-model", "test-harness", NOW);
+    sqlite
+      .prepare(
+        `INSERT INTO enrollment_grants (
+           proposal_id, fellow_id, sponsor_id, granted_scopes_json, granted_resources_json, granted_at
+         ) VALUES (?, ?, ?, ?, ?, ?)`,
+      )
+      .run(proposalId, fellowId, orphanGrantSponsorId, '["review"]', "{}", NOW);
+    // This retained grant predates 0011's future-write binding trigger. Apply
+    // the remaining pre-0015 source history only after seeding it, so the sole
+    // 0015 preflight defect is the absent grant sponsor, not an invalid new
+    // write under today's guard.
+    sqlite.exec(readFileSync(CREDENTIAL_HARDENING_MIGRATION, "utf8"));
+    sqlite.exec(readFileSync(FELLOW_LIFECYCLE_COMMANDS_MIGRATION, "utf8"));
+    sqlite.exec(readFileSync(SPONSOR_FELLOW_CAP_MIGRATION, "utf8"));
+    sqlite.exec(readFileSync(SPONSOR_ENROLLMENT_RATE_LIMIT_MIGRATION, "utf8"));
+    createMigrationJournal(sqlite);
+
+    expect(
+      sqlite
+        .prepare<{ n: number }, [string]>(
+          `SELECT COUNT(*) AS n
+             FROM enrollment_fellows fellow
+             LEFT JOIN sponsors sponsor ON sponsor.sponsor_id = fellow.sponsor_id
+            WHERE fellow.sponsor_id = ? AND sponsor.sponsor_id IS NULL`,
+        )
+        .get(fellowSponsorId)?.n,
+    ).toBe(0);
+    expect(
+      sqlite
+        .prepare<{ n: number }, [string]>(
+          `SELECT COUNT(*) AS n
+             FROM enrollment_grants grant_row
+             LEFT JOIN sponsors sponsor ON sponsor.sponsor_id = grant_row.sponsor_id
+            WHERE grant_row.sponsor_id = ? AND sponsor.sponsor_id IS NULL`,
+        )
+        .get(orphanGrantSponsorId)?.n,
+    ).toBe(1);
+
+    expect(() => applyBootstrapInvariantMigrationBatch(sqlite)).toThrow(
+      "sponsor enrollment bootstrap witness CHECK rejected legacy history",
+    );
+    expectBootstrapInvariantMigrationUnapplied(sqlite);
+    expect(
+      sqlite
+        .prepare<{ n: number }, [string]>(
+          "SELECT COUNT(*) AS n FROM enrollment_grants WHERE sponsor_id = ?",
+        )
+        .get(orphanGrantSponsorId)?.n,
+    ).toBe(1);
+
+    sqlite
+      .prepare("INSERT INTO sponsors (sponsor_id, created_at, last_seen_at) VALUES (?, ?, ?)")
+      .run(orphanGrantSponsorId, NOW, NOW);
+    expect(() => applyBootstrapInvariantMigrationBatch(sqlite)).not.toThrow();
+    expect(
+      sqlite
+        .prepare<{ sequence: number }, [string]>(
+          "SELECT sequence FROM _asimposium_migrations WHERE id = ?",
+        )
+        .get(BOOTSTRAP_INVARIANT_MIGRATION_ID),
+    ).toEqual({ sequence: BOOTSTRAP_INVARIANT_MIGRATION_SEQUENCE });
+    expectBootstrapInvariantMigrationApplied(sqlite);
+  });
+
+  test("0015 keeps a sponsor's legitimate capacity update available after it anchors a Fellow", () => {
+    const sqlite = sponsorEnrollmentBootstrapInvariantDatabase();
+    const sponsorId = "usr_bootstrap_capacity";
+    sqlite
+      .prepare("INSERT INTO sponsors (sponsor_id, created_at, last_seen_at) VALUES (?, ?, ?)")
+      .run(sponsorId, NOW, NOW);
+    sqlite
+      .prepare(
+        `INSERT INTO enrollment_fellows (fellow_id, sponsor_id, name, model, harness, created_at)
+         VALUES (?, ?, ?, ?, ?, ?)`,
+      )
+      .run(
+        "fellow-bootstrap-capacity",
+        sponsorId,
+        "bootstrap-capacity-fellow",
+        "test-model",
+        "test-harness",
+        NOW,
+      );
+
+    expect(
+      sqlite
+        .prepare("UPDATE sponsors SET active_fellow_limit = ? WHERE sponsor_id = ?")
+        .run(6, sponsorId).changes,
+    ).toBe(1);
+    expect(
+      sqlite
+        .prepare<{ active_fellow_limit: number }, [string]>(
+          "SELECT active_fellow_limit FROM sponsors WHERE sponsor_id = ?",
+        )
+        .get(sponsorId)?.active_fellow_limit,
+    ).toBe(6);
+  });
+
+  test("a fresh device approval bootstraps its sponsor, replays exactly, and remains lifecycle-operable in memory and D1", async () => {
+    for (const kind of ["memory", "d1"] as const) {
+      const clock = new DeviceTestClock();
+      const sqlite = kind === "d1" ? sponsorEnrollmentBootstrapInvariantDatabase() : undefined;
+      const memoryStore = kind === "memory" ? new InMemoryEnrollmentStore() : undefined;
+      const service = new EnrollmentService({
+        stoaOrigin: TEST_STOA_ORIGIN,
+        clock,
+        store: memoryStore ?? new D1EnrollmentStore(localD1(sqlite as Database)),
+        replayProtector: new AesGcmEnrollmentReplayProtector(new Uint8Array(32)),
+      });
+      const sponsor = { type: "sponsor", sponsorId: `usr_bootstrap_device_${kind}` } as const;
+      const started = await service.deviceStart(
+        {
+          name: `bootstrap-${kind}-device`,
+          model: "test-model",
+          harness: "codex",
+          requested_scopes: ["promote", "review"],
+        },
+        { trustedClientAddress: kind === "memory" ? "198.51.100.71" : "198.51.100.72" },
+      );
+      const card = await service.deviceLookup(sponsor, { user_code: started.user_code });
+      const decision = {
+        enrollment_id: card.enrollmentId,
+        decision: "reduce" as const,
+        reduction: { scopes: ["review" as const] },
+        step_up_authenticated_at: Math.floor(clock.value / 1_000),
+      };
+      const options = { idempotencyKey: `bootstrap-device-${kind}` } as const;
+      const firstDecisionAt = clock.value;
+
+      await expect(
+        service.decide(sponsor, card.enrollmentId, decision, options),
+      ).resolves.toBeUndefined();
+      clock.value +=
+        (SPONSOR_STEP_UP_WINDOW_SECONDS + SPONSOR_STEP_UP_CLOCK_SKEW_SECONDS + 1) * 1_000;
+      await expect(
+        service.decide(sponsor, card.enrollmentId, decision, options),
+      ).resolves.toBeUndefined();
+      await expect(
+        service.decide(
+          sponsor,
+          card.enrollmentId,
+          {
+            enrollment_id: card.enrollmentId,
+            decision: "deny",
+            step_up_authenticated_at: Math.floor(clock.value / 1_000),
+          },
+          options,
+        ),
+      ).rejects.toMatchObject({ code: "IDEMPOTENCY_CONFLICT" });
+
+      // A later decision by the same sponsor must refresh accountability
+      // contact, without rewriting identity, creation history, or capacity.
+      clock.value += 1_000;
+      const later = await service.deviceStart(
+        {
+          name: `bootstrap-${kind}-second-device`,
+          model: "test-model",
+          harness: "codex",
+          requested_scopes: ["review"],
+        },
+        { trustedClientAddress: kind === "memory" ? "198.51.100.73" : "198.51.100.74" },
+      );
+      const laterCard = await service.deviceLookup(sponsor, { user_code: later.user_code });
+      await expect(
+        service.decide(
+          sponsor,
+          laterCard.enrollmentId,
+          {
+            enrollment_id: laterCard.enrollmentId,
+            decision: "deny",
+            step_up_authenticated_at: Math.floor(clock.value / 1_000),
+          },
+          { idempotencyKey: `bootstrap-device-later-${kind}` },
+        ),
+      ).resolves.toBeUndefined();
+
+      if (memoryStore !== undefined) {
+        expect(await memoryStore.sponsorSnapshot(sponsor.sponsorId)).toEqual({
+          createdAt: firstDecisionAt,
+          lastSeenAt: clock.value,
+          activeFellowLimit: 5,
+        });
+      }
+
+      if (sqlite !== undefined) {
+        const afterLaterDecision = sqlite
+          .prepare<
+            {
+              sponsor_id: string;
+              created_at: number;
+              last_seen_at: number;
+              active_fellow_limit: number;
+            },
+            [string]
+          >(
+            `SELECT sponsor_id, created_at, last_seen_at, active_fellow_limit
+               FROM sponsors WHERE sponsor_id = ?`,
+          )
+          .get(sponsor.sponsorId);
+        expect(afterLaterDecision).toEqual({
+          sponsor_id: sponsor.sponsorId,
+          created_at: firstDecisionAt,
+          last_seen_at: clock.value,
+          active_fellow_limit: 5,
+        });
+      }
+
+      // Bootstrap remains an allowed last-seen update, but cannot rewrite the
+      // identity/history/cap fields that the raw negative plants below defend.
+      clock.value += 1_000;
+      const rebootstrap = await service.bootstrapSponsor(sponsor);
+      expect(rebootstrap).toEqual({ created: false, at: clock.value });
+      if (memoryStore !== undefined) {
+        expect(await memoryStore.sponsorSnapshot(sponsor.sponsorId)).toEqual({
+          createdAt: firstDecisionAt,
+          lastSeenAt: clock.value,
+          activeFellowLimit: 5,
+        });
+      }
+
+      if (sqlite !== undefined) {
+        const original = sqlite
+          .prepare<
+            {
+              sponsor_id: string;
+              created_at: number;
+              last_seen_at: number;
+              active_fellow_limit: number;
+            },
+            [string]
+          >(
+            `SELECT sponsor_id, created_at, last_seen_at, active_fellow_limit
+               FROM sponsors WHERE sponsor_id = ?`,
+          )
+          .get(sponsor.sponsorId);
+        if (original == null) throw new Error("fresh decision did not retain its sponsor row");
+        expect(original.last_seen_at).toBe(clock.value);
+        expect(() =>
+          sqlite.prepare("DELETE FROM sponsors WHERE sponsor_id = ?").run(sponsor.sponsorId),
+        ).toThrow("sponsor enrollment authority cannot be deleted");
+        expect(() =>
+          sqlite
+            .prepare("UPDATE sponsors SET sponsor_id = ? WHERE sponsor_id = ?")
+            .run("usr_bootstrap_device_rebound", sponsor.sponsorId),
+        ).toThrow("sponsor identity and creation history are immutable");
+        expect(() =>
+          sqlite
+            .prepare("UPDATE sponsors SET created_at = created_at + 1 WHERE sponsor_id = ?")
+            .run(sponsor.sponsorId),
+        ).toThrow("sponsor identity and creation history are immutable");
+        expect(() =>
+          sqlite
+            .prepare(
+              "INSERT OR REPLACE INTO sponsors (sponsor_id, created_at, last_seen_at) VALUES (?, ?, ?)",
+            )
+            .run(sponsor.sponsorId, original.created_at + 1, clock.value + 1),
+        ).toThrow("sponsor enrollment authority cannot be replaced");
+        expect(
+          sqlite
+            .prepare<
+              {
+                sponsor_id: string;
+                created_at: number;
+                last_seen_at: number;
+                active_fellow_limit: number;
+              },
+              [string]
+            >(
+              `SELECT sponsor_id, created_at, last_seen_at, active_fellow_limit
+                 FROM sponsors WHERE sponsor_id = ?`,
+            )
+            .get(sponsor.sponsorId),
+        ).toEqual(original);
+      }
+
+      const issued = await service.poll({ flow_handle: started.device_code });
+      if (issued.status !== "approved") throw new Error("fixture token was not issued");
+      const fellow = (await service.fellows(sponsor))[0];
+      const credential = fellow?.credentials[0];
+      if (fellow === undefined || credential === undefined) {
+        throw new Error("fresh sponsor did not retain the approved Fellow credential");
+      }
+      await expect(
+        service.revokeCredential(
+          sponsor,
+          {
+            fellow_id: fellow.fellowId,
+            credential_id: credential.credentialId,
+            confirm: "revoke-credential",
+            step_up_authenticated_at: Math.floor(clock.value / 1_000),
+          },
+          { idempotencyKey: `bootstrap-device-revoke-${kind}` },
+        ),
+      ).resolves.toMatchObject({ acknowledged: true, sponsor_seq: 1 });
+      await expect(service.credentialBinding(issued.token)).resolves.toBeUndefined();
+      await expect(
+        service.panicSponsor(
+          sponsor,
+          {
+            confirm: "revoke-all-fellow-credentials",
+            step_up_authenticated_at: Math.floor(clock.value / 1_000),
+          },
+          { idempotencyKey: `bootstrap-device-panic-${kind}` },
+        ),
+      ).resolves.toMatchObject({ acknowledged: true, sponsor_seq: 2 });
+
+      if (sqlite !== undefined) {
+        expect(
+          sqlite
+            .prepare<{ n: number }, [string]>(
+              "SELECT COUNT(*) AS n FROM sponsors WHERE sponsor_id = ?",
+            )
+            .get(sponsor.sponsorId)?.n,
+        ).toBe(1);
+        expect(
+          sqlite
+            .prepare<{ n: number }, [string]>(
+              "SELECT COUNT(*) AS n FROM enrollment_fellows WHERE sponsor_id = ?",
+            )
+            .get(sponsor.sponsorId)?.n,
+        ).toBe(1);
+        expect(
+          sqlite
+            .prepare<{ n: number }, [string]>(
+              "SELECT COUNT(*) AS n FROM enrollment_grants WHERE sponsor_id = ?",
+            )
+            .get(sponsor.sponsorId)?.n,
+        ).toBe(1);
+        expect(
+          sqlite
+            .prepare<{ n: number }, [string]>(
+              "SELECT COUNT(*) AS n FROM enrollment_idempotency WHERE principal_scope = ? AND scope = 'decision'",
+            )
+            .get(`sponsor:${sponsor.sponsorId}`)?.n,
+        ).toBe(2);
+      }
+    }
+  });
+
+  test("D1 rolls back first-contact bootstrap, join approval, and replay together on a planted Fellow insert failure", async () => {
+    const clock = new DeviceTestClock();
+    const sqlite = sponsorEnrollmentBootstrapInvariantDatabase();
+    let failFellowInsert = true;
+    const service = new EnrollmentService({
+      stoaOrigin: TEST_STOA_ORIGIN,
+      clock,
+      store: new D1EnrollmentStore(
+        localD1(sqlite, {
+          onStatement: (query) => {
+            if (failFellowInsert && query.includes("INSERT INTO enrollment_fellows")) {
+              throw new Error("planted fellow insert failure");
+            }
+          },
+        }),
+      ),
+      replayProtector: new AesGcmEnrollmentReplayProtector(new Uint8Array(32)),
+    });
+    const sponsor = { type: "sponsor", sponsorId: "usr_bootstrap_join" } as const;
+    const minted = await service.mint(sponsor, { requested_scopes: ["review"] });
+    await service.claim({
+      enrollment_id: minted.enrollmentId,
+      secret: minted.secret,
+      name: "bootstrap-join-fellow",
+      model: "test-model",
+      harness: "test-harness",
+    });
+    const decision = {
+      enrollment_id: minted.enrollmentId,
+      decision: "approve" as const,
+      step_up_authenticated_at: Math.floor(clock.value / 1_000),
+    };
+    const options = { idempotencyKey: "bootstrap-join-atomic" } as const;
+
+    await expect(
+      service.decide(sponsor, minted.enrollmentId, decision, options),
+    ).rejects.toBeInstanceOf(EnrollmentPersistenceError);
+    expect(
+      sqlite
+        .prepare<{ n: number }, [string]>("SELECT COUNT(*) AS n FROM sponsors WHERE sponsor_id = ?")
+        .get(sponsor.sponsorId)?.n,
+    ).toBe(0);
+    expect(
+      sqlite.prepare<{ n: number }, []>("SELECT COUNT(*) AS n FROM enrollment_fellows").get()?.n,
+    ).toBe(0);
+    expect(
+      sqlite.prepare<{ n: number }, []>("SELECT COUNT(*) AS n FROM enrollment_grants").get()?.n,
+    ).toBe(0);
+    expect(
+      sqlite
+        .prepare<{ n: number }, []>(
+          "SELECT COUNT(*) AS n FROM enrollment_idempotency WHERE scope = 'decision'",
+        )
+        .get()?.n,
+    ).toBe(0);
+    expect(
+      sqlite
+        .prepare<{ status: string }, [string]>(
+          "SELECT status FROM enrollment_proposals WHERE enrollment_id = ?",
+        )
+        .get(minted.enrollmentId)?.status,
+    ).toBe("pending");
+
+    failFellowInsert = false;
+    await expect(
+      service.decide(sponsor, minted.enrollmentId, decision, options),
+    ).resolves.toBeUndefined();
+    clock.value +=
+      (SPONSOR_STEP_UP_WINDOW_SECONDS + SPONSOR_STEP_UP_CLOCK_SKEW_SECONDS + 1) * 1_000;
+    await expect(
+      service.decide(sponsor, minted.enrollmentId, decision, options),
+    ).resolves.toBeUndefined();
+    await expect(
+      service.decide(
+        sponsor,
+        minted.enrollmentId,
+        {
+          enrollment_id: minted.enrollmentId,
+          decision: "deny",
+          step_up_authenticated_at: Math.floor(clock.value / 1_000),
+        },
+        options,
+      ),
+    ).rejects.toMatchObject({ code: "IDEMPOTENCY_CONFLICT" });
+    expect(
+      sqlite
+        .prepare<{ n: number }, [string]>("SELECT COUNT(*) AS n FROM sponsors WHERE sponsor_id = ?")
+        .get(sponsor.sponsorId)?.n,
+    ).toBe(1);
+    expect(
+      sqlite.prepare<{ n: number }, []>("SELECT COUNT(*) AS n FROM enrollment_fellows").get()?.n,
+    ).toBe(1);
+    expect(
+      sqlite.prepare<{ n: number }, []>("SELECT COUNT(*) AS n FROM enrollment_grants").get()?.n,
+    ).toBe(1);
+    expect(
+      sqlite
+        .prepare<{ n: number }, []>(
+          "SELECT COUNT(*) AS n FROM enrollment_idempotency WHERE scope = 'decision'",
+        )
+        .get()?.n,
+    ).toBe(1);
   });
 });

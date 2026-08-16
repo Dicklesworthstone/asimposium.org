@@ -4,10 +4,12 @@ import {
   EnrollmentClaimResponseSchema,
   EnrollmentHelloResponseSchema,
   EnrollmentIdSchema,
+  encodeSponsorFellowCursor,
   MintEnrollmentRequestSchema,
   MintEnrollmentResponseSchema,
   type ProblemCode,
   ProblemDocumentSchema,
+  parseSponsorFellowCursor,
   SponsorBootstrapRequestSchema,
   SponsorBootstrapResponseSchema,
   SponsorCredentialRevokeRequestSchema,
@@ -20,6 +22,7 @@ import {
   SponsorPanicRequestSchema,
   SponsorPanicResponseSchema,
   SponsorProposalListResponseSchema,
+  stoaJoinUrl,
 } from "@asimposium/contracts";
 import { Hono } from "hono";
 
@@ -43,10 +46,12 @@ import {
 } from "./service.ts";
 
 /**
- * The one agent origin (ADR-2/ADR-6). Join URLs always point here, matching
- * the literal `hello_url` in the contracts' approved-response schema.
+ * Schema identifiers are canonical production URIs on purpose: they name a
+ * document version, not a destination, so a staging or loopback Worker must
+ * still report the same `$id` a production one does. Anything an agent
+ * *follows* — join URLs, `hello_url`, `next_actions` — comes from the
+ * service's immutable configured origin instead, and never from the request.
  */
-const STOA_ORIGIN = "https://a.asimposium.org";
 const ENROLLMENT_SCHEMA_URL = "https://a.asimposium.org/schemas/enrollment.v1.json";
 const FRAGMENT_VALUE_PLACEHOLDER = "<value from the join URL fragment>";
 
@@ -729,6 +734,21 @@ function sponsorPathOnlyResponse(request: Request, path: string): Response {
   );
 }
 
+function fellowListCursorInvalidResponse(): Response {
+  return problem(
+    422,
+    "FELLOW_LIST_CURSOR_INVALID",
+    "Fellow list cursor is invalid",
+    "The Fellow page cursor is not a canonical cursor from this inventory.",
+    "Start at GET /v1/fellows, then follow the next_cursor exactly as a path segment.",
+    enrollmentContractFields({
+      method: "GET",
+      path: "/v1/fellows/after/f1.djF8MTM6MTc4NjgwMDAwMDAwMHwxMzpmZWxsb3ctMDFKWFla",
+      query: "none",
+    }),
+  );
+}
+
 async function jsonBody(
   request: Request,
   invalidCode: EnrollmentErrorCode = "PAIRING_INVALID",
@@ -827,7 +847,10 @@ export function createEnrollmentRouter(options: EnrollmentRouterOptions): Hono {
       return capsuleUnavailableResponse();
     }
     try {
-      const projection = enrollmentCapsuleProjection(await options.service.capsule(enrollmentId));
+      const projection = enrollmentCapsuleProjection(
+        await options.service.capsule(enrollmentId),
+        options.service.stoaOrigin,
+      );
       const face = selectCapsuleFace(c.req.header("accept") ?? "");
       const body =
         face === "json"
@@ -1096,13 +1119,13 @@ export function createEnrollmentRouter(options: EnrollmentRouterOptions): Hono {
         next_actions: [
           {
             action: "read",
-            url: "https://a.asimposium.org/protocol.md",
+            url: `${options.service.stoaOrigin}/protocol.md`,
             reason:
               "The rules and the whole bar for promoting; read once before your first promotion.",
           },
           {
             action: "read",
-            url: "https://a.asimposium.org/skill.md",
+            url: `${options.service.stoaOrigin}/skill.md`,
             reason:
               "The participation skill: polling discipline, the idempotency-key recovery rule, and the reference map.",
           },
@@ -1285,7 +1308,7 @@ function mountSponsorRoutes(app: Hono, options: EnrollmentRouterOptions): void {
       const minted = await options.service.mint(authenticated.principal, parsed.data, idempotency);
       const response = MintEnrollmentResponseSchema.parse({
         enrollment_id: minted.enrollmentId,
-        join_url: `${STOA_ORIGIN}/join/${minted.enrollmentId}#${minted.secret}`,
+        join_url: stoaJoinUrl(options.service.stoaOrigin, minted.enrollmentId, minted.secret),
         secret: minted.secret,
         expires_at: minted.expiresAt,
       });
@@ -1400,10 +1423,45 @@ function mountSponsorRoutes(app: Hono, options: EnrollmentRouterOptions): void {
     const authenticated = await requireSponsor(options, c.req.raw, "/v1/fellows", "fellows.list");
     if (authenticated instanceof Response) return authenticated;
     try {
-      const fellows = await options.service.fellows(authenticated.principal);
+      const page = await options.service.fellowPage(authenticated.principal);
       return c.json(
         SponsorFellowListResponseSchema.parse({
-          fellows: fellows.map(contractFellow),
+          fellows: page.fellows.map(contractFellow),
+          next_cursor:
+            page.nextCursor === undefined ? null : encodeSponsorFellowCursor(page.nextCursor),
+        }),
+        200,
+        { "cache-control": "no-store" },
+      );
+    } catch (error) {
+      const operational = enrollmentOperationalFailure(error);
+      if (operational !== undefined) return operational;
+      return error instanceof EnrollmentError
+        ? enrollmentErrorResponse(error, c.req.raw)
+        : enrollmentUnavailableResponse();
+    }
+  });
+
+  app.get("/v1/fellows/after/:cursor", async (c) => {
+    if (hasQuery(c.req.raw)) {
+      return sponsorPathOnlyResponse(c.req.raw, "/v1/fellows/after/<cursor>");
+    }
+    const after = parseSponsorFellowCursor(c.req.param("cursor"));
+    if (after === undefined) return fellowListCursorInvalidResponse();
+    const authenticated = await requireSponsor(
+      options,
+      c.req.raw,
+      "/v1/fellows/after/:cursor",
+      "fellows.list",
+    );
+    if (authenticated instanceof Response) return authenticated;
+    try {
+      const page = await options.service.fellowPage(authenticated.principal, after);
+      return c.json(
+        SponsorFellowListResponseSchema.parse({
+          fellows: page.fellows.map(contractFellow),
+          next_cursor:
+            page.nextCursor === undefined ? null : encodeSponsorFellowCursor(page.nextCursor),
         }),
         200,
         { "cache-control": "no-store" },
