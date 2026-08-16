@@ -871,6 +871,22 @@ function within(promise, timeoutMs) {
   );
 }
 
+/**
+ * Drain one child pipe under a byte bound, and hand the caller a way to let go.
+ *
+ * The `cancel` seam is not a convenience. `runBoundedCommand` reports a bounded
+ * failure the moment a drain cannot be proven, and every such exit abandons
+ * `done` while the reader is still parked inside `reader.read()`. Abandoning a
+ * promise does not close anything: the reader keeps its lock on the OS pipe for
+ * the lifetime of the process, so a run that truthfully reported
+ * `pipe-drain-unproven` still left a detached holder behind. Cancelling is what
+ * makes that report complete rather than merely honest.
+ *
+ * `cancel` is idempotent, safe before the reader exists (a stream whose
+ * `getReader()` threw), and safe after `done` has already released. It starts
+ * cleanup but never becomes another deadline: the caller lets the existing
+ * drain window observe `done` while cancellation unwinds the parked read.
+ */
 function captureBoundedPipe(stream, maximumBytes) {
   let resolveOverrun;
   const overrun = new Promise((resolve) => {
@@ -880,6 +896,39 @@ function captureBoundedPipe(stream, maximumBytes) {
   const failure = new Promise((resolve) => {
     resolveFailure = resolve;
   });
+  let reader;
+  let cancellation;
+  let drainFinished = false;
+  let released = false;
+  const release = () => {
+    if (released || reader === undefined) return;
+    try {
+      reader.releaseLock();
+      released = true;
+    } catch {
+      // A parked read holds the lock until cancellation settles. The
+      // cancellation completion path below retries this exact release.
+    }
+  };
+  const cancel = () => {
+    if (cancellation !== undefined) return cancellation;
+    cancellation = (async () => {
+      if (reader === undefined || drainFinished) return;
+      try {
+        // Rejects the parked read, which unwinds the drain loop below.
+        await reader.cancel();
+      } catch {
+        // The caller preserves its pre-existing typed refusal; cancellation is
+        // cleanup and must not replace it with an unbounded exception.
+      } finally {
+        release();
+      }
+    })();
+    // An already-idle reader can be released synchronously. A parked read
+    // throws here, then the bounded cancellation completion retries it.
+    release();
+    return cancellation;
+  };
   const done = (async () => {
     if (stream === null || stream === undefined) {
       return { failed: false, overrun: false, text: "" };
@@ -888,7 +937,6 @@ function captureBoundedPipe(stream, maximumBytes) {
     let retained = 0;
     let exceeded = false;
     let failed = false;
-    let reader;
     const markFailed = () => {
       if (!failed) {
         failed = true;
@@ -916,11 +964,8 @@ function captureBoundedPipe(stream, maximumBytes) {
     } catch {
       markFailed();
     } finally {
-      try {
-        reader?.releaseLock();
-      } catch {
-        markFailed();
-      }
+      drainFinished = true;
+      release();
     }
     const bytes = new Uint8Array(retained);
     let offset = 0;
@@ -930,7 +975,32 @@ function captureBoundedPipe(stream, maximumBytes) {
     }
     return { failed, overrun: exceeded, text: new TextDecoder().decode(bytes) };
   })();
-  return { done, failure, overrun };
+  return { cancel, done, failure, overrun, release };
+}
+
+/**
+ * Start cancellation of both owned readers without adding a second deadline.
+ * The existing pipe-drain observation remains the only time budget for the
+ * caller. A malformed stream may leave its cancellation promise unresolved,
+ * but it cannot make `runBoundedCommand` wait beyond that pre-existing window.
+ */
+function cancelBoundedPipes(pipes) {
+  const cancellation = Promise.all([pipes.stdout.cancel(), pipes.stderr.cancel()]);
+  // Each pipe swallows its own cancellation error. Keep this final release as a
+  // second chance for a reader whose parked read only unlocked asynchronously.
+  void cancellation.finally(() => {
+    pipes.stdout.release();
+    pipes.stderr.release();
+  });
+  pipes.stdout.release();
+  pipes.stderr.release();
+  return cancellation;
+}
+
+/** Release already-drained readers without cancelling a successful command. */
+function releaseBoundedPipes(pipes) {
+  pipes.stdout.release();
+  pipes.stderr.release();
 }
 
 function signalOwnedProcessGroup(child, signal) {
@@ -980,15 +1050,29 @@ async function terminateOwnedProcessGroup(
   groupExists,
   termGraceMs,
   killReapMs,
+  platform,
 ) {
   signalGroup(child, "SIGTERM");
-  let groupGone = await groupGoneWithin(child, groupExists, termGraceMs);
-  if (!groupGone) {
-    signalGroup(child, "SIGKILL");
-    groupGone = await groupGoneWithin(child, groupExists, killReapMs);
+  let reaped;
+  let directExit;
+  if (platform === "win32") {
+    // Bun has no POSIX process-group signal equivalent on Windows. This is a
+    // direct-child-only claim, and it must prove that direct child reaped.
+    directExit = await within(child.exited, termGraceMs);
+    if (!directExit.settled) {
+      signalGroup(child, "SIGKILL");
+      directExit = await within(child.exited, killReapMs);
+    }
+    reaped = directExit.settled;
+  } else {
+    reaped = await groupGoneWithin(child, groupExists, termGraceMs);
+    if (!reaped) {
+      signalGroup(child, "SIGKILL");
+      reaped = await groupGoneWithin(child, groupExists, killReapMs);
+    }
   }
   const drained = await within(Promise.all([pipes.stdout.done, pipes.stderr.done]), killReapMs);
-  return { groupGone, pipesDrained: drained.settled };
+  return { directExit, pipesDrained: drained.settled, reaped };
 }
 
 /**
@@ -1009,6 +1093,7 @@ export async function runBoundedCommand({
   spawn = Bun.spawn,
   signalGroup = signalOwnedProcessGroup,
   groupExists = ownedProcessGroupExists,
+  platform = process.platform,
 }) {
   let child;
   try {
@@ -1028,6 +1113,14 @@ export async function runBoundedCommand({
   const pipes = {
     stderr: captureBoundedPipe(child.stderr, stderrMaxBytes),
     stdout: captureBoundedPipe(child.stdout, stdoutMaxBytes),
+  };
+  const containmentScope = platform === "win32" ? "direct-child-only" : "process-group-only";
+  let pipeCancellation;
+  const cancelPipes = () => {
+    if (pipeCancellation === undefined) {
+      pipeCancellation = cancelBoundedPipes(pipes);
+    }
+    return pipeCancellation;
   };
   let deadlineTimer;
   const deadline = new Promise((resolve) => {
@@ -1051,8 +1144,9 @@ export async function runBoundedCommand({
     // This can observe only the owned process group. It cannot establish that
     // a grandchild which called setsid() has exited; in particular, a later
     // pipe close is not proof about that escaped process.
-    const processGroupMemberRemains = groupExists(child);
+    const processGroupMemberRemains = platform === "win32" ? false : groupExists(child);
     if (!drained.settled || processGroupMemberRemains) {
+      cancelPipes();
       const termination = await terminateOwnedProcessGroup(
         child,
         pipes,
@@ -1060,13 +1154,16 @@ export async function runBoundedCommand({
         groupExists,
         termGraceMs,
         killReapMs,
+        platform,
       );
-      if (!termination.groupGone) outcome = "process-reap-unproven";
-      else if (!termination.pipesDrained) outcome = "pipe-drain-unproven";
+      if (!termination.reaped) {
+        outcome = platform === "win32" ? "direct-child-reap-unproven" : "process-reap-unproven";
+      } else if (!termination.pipesDrained) outcome = "pipe-drain-unproven";
       else if (processGroupMemberRemains) outcome = "process-group-survivor-observed";
       else outcome = "pipe-drain-unproven";
     }
   } else {
+    cancelPipes();
     const termination = await terminateOwnedProcessGroup(
       child,
       pipes,
@@ -1074,12 +1171,17 @@ export async function runBoundedCommand({
       groupExists,
       termGraceMs,
       killReapMs,
+      platform,
     );
-    if (!termination.groupGone) outcome = "process-reap-unproven";
-    else if (!termination.pipesDrained) outcome = "pipe-drain-unproven";
+    if (!termination.reaped) {
+      outcome = platform === "win32" ? "direct-child-reap-unproven" : "process-reap-unproven";
+    } else if (!termination.pipesDrained) outcome = "pipe-drain-unproven";
     else outcome = first.kind;
-    const exited = await within(child.exited, killReapMs);
-    if (exited.settled) exitCode = exited.value;
+    if (termination.directExit?.settled) exitCode = termination.directExit.value;
+    else if (platform !== "win32") {
+      const exited = await within(child.exited, killReapMs);
+      if (exited.settled) exitCode = exited.value;
+    }
   }
 
   const settledPipes = await within(
@@ -1088,8 +1190,10 @@ export async function runBoundedCommand({
   );
   if (!settledPipes.settled) {
     if (outcome === "exited") outcome = "pipe-drain-unproven";
+    // The drains are still parked. This is the exit that used to strand them.
+    cancelPipes();
     return {
-      containment_scope: "process-group-only",
+      containment_scope: containmentScope,
       exitCode,
       outcome,
       stderr: "",
@@ -1098,8 +1202,10 @@ export async function runBoundedCommand({
   }
   const [stdout, stderr] = settledPipes.value;
   if ((stdout.failed || stderr.failed) && outcome === "exited") outcome = "pipe-drain-unproven";
+  if (outcome === "exited") releaseBoundedPipes(pipes);
+  else cancelPipes();
   return {
-    containment_scope: "process-group-only",
+    containment_scope: containmentScope,
     exitCode,
     outcome,
     stderr: stderr.text,
@@ -1139,6 +1245,12 @@ export async function localD1(root, databaseName, args) {
   }
   if (result.outcome === "process-reap-unproven") {
     fail("LOCAL_D1_PROCESS_REAP_UNPROVEN", "A local D1 process group could not be reaped safely.");
+  }
+  if (result.outcome === "direct-child-reap-unproven") {
+    fail(
+      "LOCAL_D1_DIRECT_CHILD_REAP_UNPROVEN",
+      "A local D1 direct child could not be reaped safely.",
+    );
   }
   if (result.outcome === "process-group-survivor-observed") {
     fail(
@@ -1280,7 +1392,7 @@ export function bootstrapInstallSql(artifact, appliedAt) {
   // the lineage table, the empty journal, the witness, and every artifact
   // statement together. D1 command batches are the transaction boundary here;
   // explicit BEGIN/COMMIT is not portable through `wrangler d1 execute`.
-  const guard = `(SELECT CASE WHEN COUNT(*) = 0 THEN 1 ELSE 0 END FROM sqlite_schema WHERE name NOT LIKE 'sqlite_%' AND name <> '${LINEAGE_TABLE}' AND NOT (type = 'table' AND name = '_cf_METADATA' AND tbl_name = '_cf_METADATA' AND sql = ${sqlLiteral(WRANGLER_LOCAL_METADATA_SQL)}))`;
+  const guard = `(SELECT CASE WHEN COUNT(*) = 0 THEN 1 ELSE 0 END FROM sqlite_schema WHERE substr(name, 1, 7) <> 'sqlite_' AND name <> '${LINEAGE_TABLE}' AND NOT (type = 'table' AND name = '_cf_METADATA' AND tbl_name = '_cf_METADATA' AND sql = ${sqlLiteral(WRANGLER_LOCAL_METADATA_SQL)}))`;
   const sql = `${BOOTSTRAP_LINEAGE_DDL}
 INSERT INTO ${LINEAGE_TABLE} (singleton, lineage, artifact_id, artifact_digest, schema_digest, empty_guard, installed_at)
 VALUES (1, ${sqlLiteral(BOOTSTRAP_LINEAGE)}, ${sqlLiteral(artifact.id)}, ${sqlLiteral(artifact.digest)}, ${sqlLiteral(artifact.schema_digest)}, ${guard}, ${sqlLiteral(appliedAt)});

@@ -234,14 +234,28 @@ async function applyMigrations(databaseName, first, last) {
   }
 }
 
-async function readCatalog(databaseName, label) {
-  const rows = (
-    await localJson(
-      databaseName,
-      `SELECT type, name, tbl_name, sql FROM sqlite_schema ORDER BY type, name LIMIT ${MAX_CATALOG_ROWS + 1};`,
-      label,
-    )
-  ).flatMap((statement) => statement.results ?? []);
+const CATALOG_QUERY = `SELECT type, name, tbl_name, sql
+  FROM sqlite_schema
+ ORDER BY type, name
+ LIMIT ${MAX_CATALOG_ROWS + 1};`;
+const JOURNAL_QUERY = `SELECT id, sequence, digest
+  FROM ${LEDGER_TABLE}
+ ORDER BY sequence
+ LIMIT ${MAX_JOURNAL_ROWS + 1};`;
+const LINEAGE_QUERY = `SELECT lineage, artifact_id, artifact_digest, schema_digest
+  FROM _asimposium_schema_lineage
+ LIMIT ${MAX_LINEAGE_ROWS + 1};`;
+
+function statementRows(result, index, label) {
+  const statement = result[index];
+  assert.ok(
+    statement !== undefined && statement !== null && Array.isArray(statement.results),
+    `local D1 ${label} statement ${index} must return rows`,
+  );
+  return statement.results;
+}
+
+function catalogFromRows(rows) {
   return assertReadLimit(rows, MAX_CATALOG_ROWS, "LOCAL_D1_CATALOG_OVERRUN").map((row) => ({
     type: String(row.type),
     name: String(row.name),
@@ -250,19 +264,42 @@ async function readCatalog(databaseName, label) {
   }));
 }
 
-async function readJournal(databaseName, label) {
-  const rows = (
-    await localJson(
-      databaseName,
-      `SELECT id, sequence, digest FROM ${LEDGER_TABLE} ORDER BY sequence LIMIT ${MAX_JOURNAL_ROWS + 1};`,
-      label,
-    )
-  ).flatMap((statement) => statement.results ?? []);
+function journalFromRows(rows) {
   return assertReadLimit(rows, MAX_JOURNAL_ROWS, "LOCAL_D1_JOURNAL_OVERRUN").map((row) => ({
     id: String(row.id),
     sequence: Number(row.sequence),
     digest: String(row.digest),
   }));
+}
+
+function lineageFromRows(rows) {
+  return assertReadLimit(rows, MAX_LINEAGE_ROWS, "LOCAL_D1_LINEAGE_OVERRUN").map((row) => ({
+    lineage: String(row.lineage),
+    artifact_id: String(row.artifact_id),
+    artifact_digest: String(row.artifact_digest),
+    schema_digest: String(row.schema_digest),
+  }));
+}
+
+async function readCatalog(databaseName, label) {
+  const result = await localJson(databaseName, CATALOG_QUERY, label);
+  return catalogFromRows(statementRows(result, 0, label));
+}
+
+// These are independent readbacks of the same local D1 snapshot. Combining
+// them into one Wrangler command preserves every raw catalog/journal/lineage
+// assertion while keeping the fixed suite deadline meaningful on real D1.
+async function readSnapshot(databaseName, label, includeLineage = false) {
+  const statements = includeLineage
+    ? `${CATALOG_QUERY}\n${JOURNAL_QUERY}\n${LINEAGE_QUERY}`
+    : `${CATALOG_QUERY}\n${JOURNAL_QUERY}`;
+  const result = await localJson(databaseName, statements, label);
+  const snapshot = {
+    catalog: catalogFromRows(statementRows(result, 0, label)),
+    journal: journalFromRows(statementRows(result, 1, label)),
+  };
+  if (includeLineage) snapshot.lineage = lineageFromRows(statementRows(result, 2, label));
+  return snapshot;
 }
 
 function manifestWithSyntheticForward(catalog) {
@@ -305,22 +342,6 @@ function exactWranglerPlatformMetadata(catalog) {
       entry.table === "_cf_METADATA" &&
       entry.sql === WRANGLER_LOCAL_METADATA_SQL,
   );
-}
-
-async function readLineage(databaseName, label) {
-  const rows = (
-    await localJson(
-      databaseName,
-      `SELECT lineage, artifact_id, artifact_digest, schema_digest FROM _asimposium_schema_lineage LIMIT ${MAX_LINEAGE_ROWS + 1};`,
-      label,
-    )
-  ).flatMap((statement) => statement.results ?? []);
-  return assertReadLimit(rows, MAX_LINEAGE_ROWS, "LOCAL_D1_LINEAGE_OVERRUN").map((row) => ({
-    lineage: String(row.lineage),
-    artifact_id: String(row.artifact_id),
-    artifact_digest: String(row.artifact_digest),
-    schema_digest: String(row.schema_digest),
-  }));
 }
 
 function validAuthoritySeed() {
@@ -495,10 +516,12 @@ const cases = [
         bootstrapInstallSql(bootstrapArtifact, appliedAt),
         "bootstrap-empty-apply",
       );
-      const catalog = await readCatalog(databaseName, "bootstrap-catalog");
+      const { catalog, journal, lineage } = await readSnapshot(
+        databaseName,
+        "bootstrap-snapshot",
+        true,
+      );
       assert.equal(catalogFingerprint(catalog), bootstrapArtifact.schema_digest);
-      const journal = await readJournal(databaseName, "bootstrap-empty-journal");
-      const lineage = await readLineage(databaseName, "bootstrap-lineage");
       const witness = (
         await localJson(
           databaseName,
@@ -564,7 +587,7 @@ const cases = [
           contaminated,
           `SELECT COUNT(*) AS objects
              FROM sqlite_schema
-            WHERE name NOT LIKE 'sqlite_%'
+            WHERE substr(name, 1, 7) <> 'sqlite_'
               AND NOT (
                 type = 'table'
                 AND name = '_cf_METADATA'
@@ -580,6 +603,61 @@ const cases = [
         1,
         "contamination must refuse before lineage or schema apply",
       );
+
+      // SQLite LIKE treats `_` as a wildcard and can fold case, but the
+      // catalog classifier only excludes an exact lowercase `sqlite_` prefix.
+      // This real D1 object must therefore refuse atomically and remain the
+      // only non-platform residue after the failed CAS install.
+      const sqlitePrefixLookalike = uniqueDatabaseName("bootstrap-sqlite-prefix-lookalike");
+      await localJson(
+        sqlitePrefixLookalike,
+        "CREATE TABLE sqliteX_intruder (id TEXT);",
+        "bootstrap-sqlite-prefix-lookalike",
+      );
+      const lookalikeCatalog = await readCatalog(
+        sqlitePrefixLookalike,
+        "bootstrap-sqlite-prefix-lookalike-catalog",
+      );
+      assert.equal(
+        classifySchemaLineage({
+          catalog: lookalikeCatalog,
+          journal: [],
+          lineage: [],
+          migrations,
+          manifest: bootstrapManifest,
+        }).kind,
+        "unknown-or-contaminated",
+      );
+      let lookalikeApply;
+      try {
+        await localJson(
+          sqlitePrefixLookalike,
+          bootstrapInstallSql(bootstrapArtifact, appliedAt),
+          "bootstrap-sqlite-prefix-lookalike-refusal",
+        );
+      } catch (error) {
+        lookalikeApply = error;
+      }
+      assertSafeCause(lookalikeApply);
+      const lookalikeResidue = oneRow(
+        await localJson(
+          sqlitePrefixLookalike,
+          `SELECT COUNT(*) AS objects,
+                  SUM(CASE WHEN type = 'table' AND name = 'sqliteX_intruder' THEN 1 ELSE 0 END) AS intruder
+             FROM sqlite_schema
+            WHERE substr(name, 1, 7) <> 'sqlite_'
+              AND NOT (
+                type = 'table'
+                AND name = '_cf_METADATA'
+                AND tbl_name = '_cf_METADATA'
+                AND sql = ${sqlLiteral(WRANGLER_LOCAL_METADATA_SQL)}
+              );`,
+          "bootstrap-sqlite-prefix-lookalike-residue",
+        ),
+        "bootstrap-sqlite-prefix-lookalike-residue",
+      );
+      assert.equal(Number(lookalikeResidue.objects), 1);
+      assert.equal(Number(lookalikeResidue.intruder), 1);
     },
   },
   {
@@ -665,8 +743,10 @@ const cases = [
       // state, a newly installed bootstrap state, and the committed legacy
       // 0009 shape. The later 0016 manifest is derived once from historical
       // output and is deliberately reused for both 0016 classifications.
-      const historicalCatalog = await readCatalog(databaseName, "historical-0015-catalog");
-      const historicalJournal = await readJournal(databaseName, "historical-0015-journal");
+      const { catalog: historicalCatalog, journal: historicalJournal } = await readSnapshot(
+        databaseName,
+        "historical-0015-snapshot",
+      );
       assert.equal(
         catalogFingerprint(historicalCatalog),
         bootstrapArtifact.schema_digest,
@@ -686,8 +766,10 @@ const cases = [
       const legacyDatabase = uniqueDatabaseName("legacy-0009");
       await localJson(legacyDatabase, LEDGER_DDL, "legacy-journal-create");
       await applyMigrations(legacyDatabase, 1, 9);
-      const legacyCatalog = await readCatalog(legacyDatabase, "legacy-0009-catalog");
-      const legacyJournal = await readJournal(legacyDatabase, "legacy-0009-journal");
+      const { catalog: legacyCatalog, journal: legacyJournal } = await readSnapshot(
+        legacyDatabase,
+        "legacy-0009-snapshot",
+      );
       assert.equal(
         catalogFingerprint(legacyCatalog),
         bootstrapArtifact.legacy_0009_schema_digest,
@@ -710,9 +792,11 @@ const cases = [
         bootstrapInstallSql(bootstrapArtifact, appliedAt),
         "lineage-bootstrap-apply",
       );
-      const bootstrapCatalog = await readCatalog(bootstrapDatabase, "lineage-bootstrap-catalog");
-      const bootstrapJournal = await readJournal(bootstrapDatabase, "lineage-bootstrap-journal");
-      const bootstrapLineage = await readLineage(bootstrapDatabase, "lineage-bootstrap-lineage");
+      const {
+        catalog: bootstrapCatalog,
+        journal: bootstrapJournal,
+        lineage: bootstrapLineage,
+      } = await readSnapshot(bootstrapDatabase, "lineage-bootstrap-snapshot", true);
       assert.equal(catalogFingerprint(bootstrapCatalog), bootstrapArtifact.schema_digest);
       assert.deepEqual(
         wranglerPlatformMetadata(bootstrapCatalog),
@@ -761,22 +845,10 @@ const cases = [
         migrationJournalCommand(syntheticForwardMigration),
         "bootstrap-forward-apply",
       );
-      const historicalForwardCatalog = await readCatalog(
-        databaseName,
-        "historical-forward-catalog",
-      );
-      const historicalForwardJournal = await readJournal(
-        databaseName,
-        "historical-forward-journal",
-      );
-      const bootstrapForwardCatalog = await readCatalog(
-        bootstrapDatabase,
-        "bootstrap-forward-catalog",
-      );
-      const bootstrapForwardJournal = await readJournal(
-        bootstrapDatabase,
-        "bootstrap-forward-journal",
-      );
+      const { catalog: historicalForwardCatalog, journal: historicalForwardJournal } =
+        await readSnapshot(databaseName, "historical-forward-snapshot");
+      const { catalog: bootstrapForwardCatalog, journal: bootstrapForwardJournal } =
+        await readSnapshot(bootstrapDatabase, "bootstrap-forward-snapshot");
       const sharedForwardManifest = manifestWithSyntheticForward(historicalForwardCatalog);
       assert.equal(
         catalogFingerprint(historicalForwardCatalog),
@@ -828,10 +900,14 @@ const cases = [
         "CREATE TABLE planted_divergent_forward (id TEXT PRIMARY KEY);",
         "bootstrap-forward-divergent-ddl",
       );
+      const divergent = await readSnapshot(
+        bootstrapDatabase,
+        "bootstrap-forward-divergent-snapshot",
+      );
       assert.equal(
         classifySchemaLineage({
-          catalog: await readCatalog(bootstrapDatabase, "bootstrap-forward-divergent-catalog"),
-          journal: await readJournal(bootstrapDatabase, "bootstrap-forward-divergent-journal"),
+          catalog: divergent.catalog,
+          journal: divergent.journal,
           lineage: bootstrapLineage,
           migrations: migrationsWithSyntheticForward,
           manifest: sharedForwardManifest,

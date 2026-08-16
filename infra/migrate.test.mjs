@@ -145,6 +145,63 @@ function neverClosingPipe() {
   return new ReadableStream({ start() {} });
 }
 
+/** A reader whose pending drain and cancellation both remain unproven. */
+function unprovenPipe() {
+  return {
+    getReader() {
+      return {
+        cancel() {
+          return new Promise(() => {});
+        },
+        read() {
+          return new Promise(() => {});
+        },
+        releaseLock() {
+          throw new TypeError("fixture reader remains locked");
+        },
+      };
+    },
+  };
+}
+
+/**
+ * A pipe that parks a reader exactly the way a stuck child does, and records
+ * whether anything ever let go of it. `pull` never settles, so the drain loop
+ * sits inside `read()` until something cancels the reader; the underlying
+ * `cancel` hook is the only way that can be observed from outside.
+ */
+function parkedPipe() {
+  const state = { cancelCount: 0 };
+  state.stream = new ReadableStream({
+    pull() {
+      return new Promise(() => {});
+    },
+    cancel() {
+      state.cancelCount += 1;
+    },
+  });
+  return state;
+}
+
+/** One over-limit chunk followed by a parked read, with cancellation observed. */
+function overflowThenParkedPipe() {
+  const state = { cancelCount: 0, sent: false };
+  state.stream = new ReadableStream({
+    pull(controller) {
+      if (!state.sent) {
+        state.sent = true;
+        controller.enqueue(new Uint8Array([1, 2, 3, 4]));
+        return;
+      }
+      return new Promise(() => {});
+    },
+    cancel() {
+      state.cancelCount += 1;
+    },
+  });
+  return state;
+}
+
 function expectFailure(label, expectedCode, fn) {
   try {
     fn();
@@ -226,6 +283,24 @@ const cases = [
         }),
         { kind: "provably-empty", head: 0 },
         "the exact Wrangler D1 metadata table must not contaminate an otherwise empty target",
+      );
+      assert.equal(
+        classifySchemaLineage({
+          catalog: [
+            {
+              type: "table",
+              name: "sqliteX_intruder",
+              table: "sqliteX_intruder",
+              sql: "CREATE TABLE sqliteX_intruder (id TEXT);",
+            },
+          ],
+          journal: [],
+          lineage: [],
+          migrations,
+          manifest,
+        }).kind,
+        "unknown-or-contaminated",
+        "only an exact lowercase sqlite_ prefix is SQLite control metadata",
       );
       for (const [label, lookalike] of [
         [
@@ -484,6 +559,9 @@ const cases = [
         bootstrapTargetDisposition({ kind: "bootstrap-baseline15", head: 15 }),
         "idempotent",
       );
+      expectFailure("legacy 0009 bridge refusal", "LEGACY_0009_BRIDGE_BLOCKED", () =>
+        bootstrapTargetDisposition({ kind: "legacy-0009", head: 9 }),
+      );
       expectFailure(
         "historical current bootstrap refusal",
         "BOOTSTRAP_HISTORICAL_LINEAGE_REFUSED",
@@ -517,6 +595,25 @@ const cases = [
             sql: "CREATE TABLE literal (v TEXT DEFAULT 'a  b');",
           },
         ]),
+      );
+      const binaryOrderedCatalog = [
+        {
+          type: "table",
+          name: "zeta",
+          table: "zeta",
+          sql: "CREATE TABLE zeta (id TEXT);",
+        },
+        {
+          type: "table",
+          name: "éclair",
+          table: "éclair",
+          sql: "CREATE TABLE éclair (id TEXT);",
+        },
+      ];
+      assert.equal(
+        catalogFingerprint(binaryOrderedCatalog),
+        catalogFingerprint([...binaryOrderedCatalog].reverse()),
+        "catalog fingerprints must use byte-stable ordering, independent of sqlite_schema row order",
       );
 
       expectFailure("catalog overrun", "LOCAL_D1_CATALOG_OVERRUN", () =>
@@ -624,7 +721,7 @@ const cases = [
               pid: 42,
               exited: Promise.resolve(0),
               stderr: closedPipe(),
-              stdout: neverClosingPipe(),
+              stdout: unprovenPipe(),
             };
           },
           signalGroup(_child, signal) {
@@ -749,6 +846,67 @@ const cases = [
         assert.equal(processGroupMember.outcome, "process-group-survivor-observed");
         assert.deepEqual(processGroupSignals, ["SIGTERM"]);
 
+        let resolveWindowsChild;
+        const windowsSignals = [];
+        const windowsDirectChild = await runBoundedCommand({
+          cmd: ["fixture"],
+          cwd: repositoryRoot,
+          timeoutMs: 10,
+          termGraceMs: 1,
+          killReapMs: 1,
+          pipeDrainMs: 1,
+          platform: "win32",
+          spawn() {
+            return {
+              pid: 47,
+              exited: new Promise((resolve) => {
+                resolveWindowsChild = resolve;
+              }),
+              stderr: closedPipe(),
+              stdout: closedPipe(),
+            };
+          },
+          signalGroup(_child, signal) {
+            windowsSignals.push(signal);
+            if (signal === "SIGKILL") resolveWindowsChild(137);
+          },
+          groupExists() {
+            assert.fail("Windows containment must not claim or inspect a POSIX process group");
+          },
+        });
+        assert.equal(windowsDirectChild.containment_scope, "direct-child-only");
+        assert.equal(windowsDirectChild.outcome, "timeout");
+        assert.equal(windowsDirectChild.exitCode, 137);
+        assert.deepEqual(windowsSignals, ["SIGTERM", "SIGKILL"]);
+
+        const windowsUnreapedSignals = [];
+        const windowsUnreaped = await runBoundedCommand({
+          cmd: ["fixture"],
+          cwd: repositoryRoot,
+          timeoutMs: 10,
+          termGraceMs: 1,
+          killReapMs: 1,
+          pipeDrainMs: 1,
+          platform: "win32",
+          spawn() {
+            return {
+              pid: 48,
+              exited: new Promise(() => {}),
+              stderr: closedPipe(),
+              stdout: closedPipe(),
+            };
+          },
+          signalGroup(_child, signal) {
+            windowsUnreapedSignals.push(signal);
+          },
+          groupExists() {
+            assert.fail("Windows containment must not claim or inspect a POSIX process group");
+          },
+        });
+        assert.equal(windowsUnreaped.containment_scope, "direct-child-only");
+        assert.equal(windowsUnreaped.outcome, "direct-child-reap-unproven");
+        assert.deepEqual(windowsUnreapedSignals, ["SIGTERM", "SIGKILL"]);
+
         assert.equal(observedChildEnvironments.length, 1);
         for (const environment of observedChildEnvironments) {
           for (const [name, value] of Object.entries(plantedAuthority)) {
@@ -766,6 +924,158 @@ const cases = [
           else process.env[name] = prior;
         }
       }
+    },
+  },
+  {
+    name: "a bounded failure releases both pipe readers instead of stranding them",
+    async execute() {
+      // Both pipes park, so no drain can be proven and the run must report a
+      // bounded failure. The question this case exists for is what happens to
+      // the readers afterwards: reporting `pipe-drain-unproven` while a reader
+      // stays parked on the OS pipe leaves a detached holder alive for the rest
+      // of the process, which is a leak the outcome string does not mention.
+      const stdout = parkedPipe();
+      const stderr = parkedPipe();
+      const signals = [];
+      const stuck = await runBoundedCommand({
+        cmd: ["fixture"],
+        cwd: repositoryRoot,
+        timeoutMs: 10,
+        termGraceMs: 1,
+        killReapMs: 1,
+        pipeDrainMs: 1,
+        spawn() {
+          return {
+            pid: 44,
+            exited: Promise.resolve(0),
+            stderr: stderr.stream,
+            stdout: stdout.stream,
+          };
+        },
+        signalGroup(_child, signal) {
+          signals.push(signal);
+        },
+        groupExists() {
+          return false;
+        },
+      });
+
+      // The bounded report is unchanged; this case adds to it rather than
+      // relaxing it, and the deadlines above are the same ones the sibling
+      // cases use.
+      assert.equal(stuck.outcome, "pipe-drain-unproven");
+      assert.equal(stuck.containment_scope, "process-group-only");
+      assert.deepEqual(signals, ["SIGTERM"]);
+
+      // Causal: without a cancel seam these are 0, because abandoning `done`
+      // closes nothing.
+      assert.equal(stdout.cancelCount, 1, "stdout reader was never cancelled");
+      assert.equal(stderr.cancelCount, 1, "stderr reader was never cancelled");
+
+      // The detached-holder proof itself. A reader that still owns the stream
+      // leaves it locked; both must be released by the time the caller is told
+      // the run is over.
+      assert.equal(stdout.stream.locked, false, "stdout stream is still locked");
+      assert.equal(stderr.stream.locked, false, "stderr stream is still locked");
+
+      // The overrun path reaches the same bounded cancellation before process
+      // teardown. It starts with a real over-limit chunk, then parks the next
+      // read, so a missing cancellation would leave `cancelCount` at zero even
+      // though the outcome string remained output-overrun.
+      const overflow = overflowThenParkedPipe();
+      const overflowStderr = neverClosingPipe();
+      const overflowSignals = [];
+      const outputOverrun = await runBoundedCommand({
+        cmd: ["fixture"],
+        cwd: repositoryRoot,
+        timeoutMs: 10,
+        termGraceMs: 1,
+        killReapMs: 1,
+        pipeDrainMs: 1,
+        stdoutMaxBytes: 3,
+        spawn() {
+          return {
+            pid: 47,
+            exited: new Promise(() => {}),
+            stderr: overflowStderr,
+            stdout: overflow.stream,
+          };
+        },
+        signalGroup(_child, signal) {
+          overflowSignals.push(signal);
+        },
+        groupExists() {
+          return false;
+        },
+      });
+      assert.equal(outputOverrun.outcome, "output-overrun");
+      assert.deepEqual(overflowSignals, ["SIGTERM"]);
+      assert.equal(overflow.cancelCount, 1, "overrun reader was never cancelled");
+      assert.equal(overflow.stream.locked, false, "overrun stream is still locked");
+      assert.equal(overflowStderr.locked, false, "overrun stderr stream is still locked");
+
+      // A reaping refusal starts the same cleanup before it reports failure.
+      // This is separate from the process-group signal proof above: the group
+      // never disappears here, while the pipe itself can be released.
+      const reapPipe = parkedPipe();
+      const reapSignals = [];
+      const unreapedReader = await runBoundedCommand({
+        cmd: ["fixture"],
+        cwd: repositoryRoot,
+        timeoutMs: 10,
+        termGraceMs: 1,
+        killReapMs: 1,
+        pipeDrainMs: 1,
+        spawn() {
+          return {
+            pid: 48,
+            exited: Promise.resolve(0),
+            stderr: closedPipe(),
+            stdout: reapPipe.stream,
+          };
+        },
+        signalGroup(_child, signal) {
+          reapSignals.push(signal);
+        },
+        groupExists() {
+          return true;
+        },
+      });
+      assert.equal(unreapedReader.outcome, "process-reap-unproven");
+      assert.deepEqual(reapSignals, ["SIGTERM", "SIGKILL"]);
+      assert.equal(reapPipe.cancelCount, 1, "unreaped reader was never cancelled");
+      assert.equal(reapPipe.stream.locked, false, "unreaped stream is still locked");
+
+      // Idempotent: the successful path releases too, and a stream whose
+      // `getReader()` threw has nothing to release but must not throw on the
+      // way out either.
+      const clean = await runBoundedCommand({
+        cmd: ["fixture"],
+        cwd: repositoryRoot,
+        timeoutMs: 10,
+        termGraceMs: 1,
+        killReapMs: 1,
+        pipeDrainMs: 10,
+        spawn() {
+          return {
+            pid: 45,
+            exited: Promise.resolve(0),
+            stderr: closedPipe(),
+            stdout: {
+              getReader() {
+                throw new Error("fixture locked stream");
+              },
+            },
+          };
+        },
+        signalGroup(_child, signal) {
+          signals.push(signal);
+        },
+        groupExists() {
+          return false;
+        },
+      });
+      assert.equal(clean.outcome, "pipe-drain-unproven");
     },
   },
   {
