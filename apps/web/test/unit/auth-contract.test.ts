@@ -2,7 +2,9 @@ import { describe, expect, test } from "bun:test";
 import { readFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 
+import Google from "next-auth/providers/google";
 import ts from "typescript";
+import parseProviders from "../../node_modules/@auth/core/lib/utils/providers.js";
 
 import {
   ALLOWED_ENV_EXPRESSION,
@@ -40,6 +42,23 @@ interface ExportedNumericLiteral {
   readonly end: number;
 }
 
+function bindingNameContains(name: ts.BindingName, exportName: string): boolean {
+  if (ts.isIdentifier(name)) return name.text === exportName;
+  return name.elements.some(
+    (element) => !ts.isOmittedExpression(element) && bindingNameContains(element.name, exportName),
+  );
+}
+
+function exportDeclarationExportsName(
+  statement: ts.ExportDeclaration,
+  exportName: string,
+): boolean {
+  const exportClause = statement.exportClause;
+  if (exportClause === undefined) return false;
+  if (ts.isNamespaceExport(exportClause)) return exportClause.name.text === exportName;
+  return exportClause.elements.some((element) => element.name.text === exportName);
+}
+
 /**
  * Read one top-level `export const NAME = <number>` without evaluating or
  * importing the module. A computed value is deliberately unprovable here: the
@@ -58,15 +77,48 @@ function exportedNumericLiteral(
     true,
     ts.ScriptKind.TS,
   );
+  const parseDiagnostics = (
+    sourceFile as typeof sourceFile & { readonly parseDiagnostics?: readonly ts.Diagnostic[] }
+  ).parseDiagnostics;
+  if (parseDiagnostics === undefined || parseDiagnostics.length > 0) {
+    throw new Error(`${fileName} contains TypeScript parse diagnostics`);
+  }
   let found: ExportedNumericLiteral | undefined;
 
   for (const statement of sourceFile.statements) {
-    if (!ts.isVariableStatement(statement)) continue;
+    if (ts.isExportDeclaration(statement)) {
+      if (exportDeclarationExportsName(statement, exportName)) {
+        throw new Error(`${fileName} must export const ${exportName} as one numeric literal`);
+      }
+      continue;
+    }
     const modifiers = ts.canHaveModifiers(statement) ? ts.getModifiers(statement) : undefined;
     if (!modifiers?.some((modifier) => modifier.kind === ts.SyntaxKind.ExportKeyword)) continue;
 
+    if (
+      (ts.isFunctionDeclaration(statement) ||
+        ts.isClassDeclaration(statement) ||
+        ts.isEnumDeclaration(statement) ||
+        ts.isInterfaceDeclaration(statement) ||
+        ts.isTypeAliasDeclaration(statement) ||
+        ts.isModuleDeclaration(statement) ||
+        ts.isImportEqualsDeclaration(statement)) &&
+      statement.name !== undefined &&
+      ts.isIdentifier(statement.name) &&
+      statement.name.text === exportName
+    ) {
+      throw new Error(`${fileName} must export const ${exportName} as one numeric literal`);
+    }
+    if (!ts.isVariableStatement(statement)) continue;
+
     for (const declaration of statement.declarationList.declarations) {
-      if (!ts.isIdentifier(declaration.name) || declaration.name.text !== exportName) continue;
+      if (!bindingNameContains(declaration.name, exportName)) continue;
+      if (!ts.isIdentifier(declaration.name)) {
+        throw new Error(`${fileName} must export const ${exportName} as one numeric literal`);
+      }
+      if (modifiers.some((modifier) => modifier.kind === ts.SyntaxKind.DeclareKeyword)) {
+        throw new Error(`${fileName} must not declare ${exportName}`);
+      }
       if (
         (statement.declarationList.flags & ts.NodeFlags.Const) === 0 ||
         declaration.initializer === undefined ||
@@ -128,6 +180,27 @@ function scan(fixture: string): AuthViolation[] {
   return validateAuthConfig(readFileSync(join(FIXTURES, `${fixture}.ts`), "utf8"), `${fixture}.ts`);
 }
 
+const GOOGLE_AUTH_TIME_CLAIMS = { id_token: { auth_time: { essential: true } } };
+
+function normalizedGoogleClaims(claims: unknown): string {
+  const { provider } = parseProviders({
+    url: new URL("https://asimposium.org/api/auth"),
+    providerId: "google",
+    config: {
+      providers: [
+        Google({
+          authorization: { params: { claims } },
+        }),
+      ],
+    },
+  });
+  const serialized = provider?.authorization?.url.searchParams.get("claims");
+  if (serialized === null || serialized === undefined) {
+    throw new Error("Auth.js did not emit a Google claims parameter");
+  }
+  return serialized;
+}
+
 function codesOf(violations: readonly AuthViolation[]): AuthViolationCode[] {
   return violations.map((v) => v.code);
 }
@@ -187,6 +260,22 @@ describe("the baseline configuration is clean", () => {
 });
 
 describe("recent-auth is stable across ordinary session reads", () => {
+  test("Auth.js sends the configured Google auth_time request as a JSON object", () => {
+    const serialized = normalizedGoogleClaims(GOOGLE_AUTH_TIME_CLAIMS);
+    const parsed: unknown = JSON.parse(serialized);
+
+    expect(parsed).toEqual(GOOGLE_AUTH_TIME_CLAIMS);
+    expect(typeof parsed).toBe("object");
+  });
+
+  test("PLANTED: a pre-serialized Google claims value normalizes to a JSON string, not the object Google requires", () => {
+    const serialized = normalizedGoogleClaims(JSON.stringify(GOOGLE_AUTH_TIME_CLAIMS));
+    const parsed: unknown = JSON.parse(serialized);
+
+    expect(typeof parsed).toBe("string");
+    expect(parsed).not.toEqual(GOOGLE_AUTH_TIME_CLAIMS);
+  });
+
   test("the account-guarded provider claim is the only accepted wiring", () => {
     const surface = readAuthSurface(readFileSync(join(FIXTURES, "valid.ts"), "utf8")).recentAuth;
     expect(surface).toMatchObject({
@@ -302,6 +391,58 @@ describe("recent-auth clock skew stays aligned with the signed service envelope"
     const wireDrift = clockSkewsFromSource(webSource, wireMutation);
     expect(webDrift.web).not.toBe(webDrift.wire);
     expect(wireDrift.web).not.toBe(wireDrift.wire);
+  });
+
+  test.each([
+    ["trailing identifier", "export const X = 60foo;"],
+    ["legacy octal", "export const X = 060;"],
+  ])("PLANTED: %s clock-skew source is rejected before literal inspection", (_label, source) => {
+    expect(() => exportedNumericLiteral(source, "malformed-clock-skew.ts", "X")).toThrow(
+      "contains TypeScript parse diagnostics",
+    );
+  });
+
+  test("PLANTED: an ambient clock-skew declaration is not a runtime literal", () => {
+    expect(() =>
+      exportedNumericLiteral("export declare const X = 60;", "ambient-clock-skew.ts", "X"),
+    ).toThrow("must not declare X");
+  });
+
+  test("PLANTED: a later named export cannot alias a second binding over the direct literal", () => {
+    const source = "export const X = 60; const Y = 61; export { Y as X };";
+    expect(() => exportedNumericLiteral(source, "aliased-clock-skew.ts", "X")).toThrow(
+      "must export const X as one numeric literal",
+    );
+  });
+
+  test("PLANTED: a namespace export cannot shadow the direct clock-skew literal", () => {
+    const source = 'export const X = 60; export * as X from "./other";';
+    expect(() => exportedNumericLiteral(source, "namespace-clock-skew.ts", "X")).toThrow(
+      "must export const X as one numeric literal",
+    );
+  });
+
+  test("PLANTED: an exported destructured binding cannot masquerade as the direct literal", () => {
+    const source = "export const { X } = { X: 60 };";
+    expect(() => exportedNumericLiteral(source, "destructured-clock-skew.ts", "X")).toThrow(
+      "must export const X as one numeric literal",
+    );
+  });
+
+  test.each([
+    ["function", "export function X() {}"],
+    ["class", "export class X {}"],
+    ["enum", "export enum X { value }"],
+    ["interface", "export interface X {}"],
+    ["type", "export type X = number;"],
+  ])("PLANTED: an exported %s cannot shadow the clock-skew literal", (_label, declaration) => {
+    expect(() =>
+      exportedNumericLiteral(
+        `export const X = 60;\n${declaration}`,
+        "duplicate-clock-skew.ts",
+        "X",
+      ),
+    ).toThrow("must export const X as one numeric literal");
   });
 });
 

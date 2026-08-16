@@ -75,9 +75,7 @@ describe("Propylon configuration (Fable §5.1, §14.1) — structural guard", ()
 
   test("OAuth callbacks request and preserve Google's signed authentication time", () => {
     const configuredGoogle = surface.providers.entries[0]?.text ?? "";
-    expect(configuredGoogle).toContain(
-      `claims: '{"id_token":{"auth_time":{"essential":true}}}'`,
-    );
+    expect(configuredGoogle).toContain("claims: { id_token: { auth_time: { essential: true } } }");
     expect(configuredGoogle).not.toContain('prompt: "login"');
     expect(configuredGoogle).not.toContain("max_age");
     for (const page of ["app/page.tsx", "app/console/page.tsx", "app/approve/page.tsx"]) {
@@ -487,6 +485,53 @@ describe("sponsor console trust boundary", () => {
     expect(approve).toContain("Approving an agent is a sponsor act");
     // No unkeyed recovery list may reappear on the approve page.
     expect(approve).not.toMatch(/<DecisionRecoveryList\s+recoveryOwner=/u);
+  });
+
+  test("PLANTED: a root principal-change fence scrubs every enrollment surface before one RSC refresh", () => {
+    const consolePage = readPackageFile("app/console/page.tsx");
+    const approvePage = readPackageFile("app/approve/page.tsx");
+    const sentinel = readPackageFile("app/enrollment-recovery-sentinel.tsx");
+
+    for (const page of [consolePage, approvePage]) {
+      expect(page).toContain(
+        'import { EnrollmentRecoveryFence } from "../enrollment-recovery-sentinel"',
+      );
+      expect(page).toContain("const recoveryRenderToken = crypto.randomUUID()");
+      expect(page).toContain("enabled={sponsorId !== undefined}");
+      expect(page).toContain("renderToken={recoveryRenderToken}");
+    }
+    const consoleFence = consolePage.indexOf("<EnrollmentRecoveryFence");
+    const consoleMint = consolePage.indexOf("<MintCard", consoleFence);
+    const consoleLifecycle = consolePage.indexOf("<LifecycleManager", consoleFence);
+    const consoleFenceEnd = consolePage.indexOf("</EnrollmentRecoveryFence>", consoleFence);
+    for (const position of [consoleFence, consoleMint, consoleLifecycle, consoleFenceEnd]) {
+      expect(position).toBeGreaterThanOrEqual(0);
+    }
+    expect(consoleFence).toBeLessThan(consoleMint);
+    expect(consoleMint).toBeLessThan(consoleLifecycle);
+    expect(consoleLifecycle).toBeLessThan(consoleFenceEnd);
+
+    const scrub = sentinel.indexOf("if (scrubbed)");
+    const hidden = sentinel.indexOf(
+      "Enrollment data and recovery controls are hidden while this",
+      scrub,
+    );
+    const children = sentinel.indexOf("return children;", scrub);
+    expect(scrub).toBeGreaterThanOrEqual(0);
+    expect(hidden).toBeGreaterThan(scrub);
+    expect(children).toBeGreaterThan(hidden);
+    for (const signal of [
+      'window.addEventListener("focus", reconcileOwner)',
+      'window.addEventListener("pageshow", reconcileOwner)',
+      'window.addEventListener("storage", reconcileOwner)',
+      'document.addEventListener("visibilitychange", reconcileWhenVisible)',
+    ]) {
+      expect(sentinel).toContain(signal);
+    }
+    const begin = sentinel.indexOf("if (!beginEnrollmentRecoveryReconciliation()) return;");
+    const refresh = sentinel.indexOf("router.refresh();", begin);
+    expect(begin).toBeGreaterThanOrEqual(0);
+    expect(refresh).toBeGreaterThan(begin);
   });
 
   test("the retained-decision recovery control has a synchronous double-submit barrier", () => {

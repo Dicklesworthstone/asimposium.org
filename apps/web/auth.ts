@@ -27,7 +27,7 @@ export const { handlers, auth, signIn, signOut } = NextAuth({
   providers: [
     Google({
       authorization: {
-        params: { claims: '{"id_token":{"auth_time":{"essential":true}}}' },
+        params: { claims: { id_token: { auth_time: { essential: true } } } },
       },
     }),
   ],
