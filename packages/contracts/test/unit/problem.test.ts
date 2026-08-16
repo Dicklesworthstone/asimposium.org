@@ -46,6 +46,7 @@ const INVALID_UNKNOWN_FORMAT_WITHOUT_ALLOWED = new URL(
 const VALID_ADDITIONAL_PROBLEMS = [
   ["problem-unauthorized.json", "UNAUTHORIZED", 401, "opaque"],
   ["problem-auth-replay-store-unavailable.json", "AUTH_REPLAY_STORE_UNAVAILABLE", 503, "opaque"],
+  ["problem-request-body-too-large.json", "REQUEST_BODY_TOO_LARGE", 413, "opaque"],
   ["problem-route-not-found.json", "ROUTE_NOT_FOUND", 404, "opaque"],
   ["problem-internal-error.json", "INTERNAL_ERROR", 500, "opaque"],
   ["problem-enrollment-id-invalid.json", "ENROLLMENT_ID_INVALID", 422, "contract"],
@@ -208,11 +209,13 @@ test("an opaque refusal may not acquire the teaching fields", async () => {
 
 test("credential and proposal-state refusals stay in the opaque class", () => {
   for (const code of [
+    "FELLOW_LIFECYCLE_NOT_CURRENT",
     "FELLOW_TOKEN_INVALID",
     "FLOW_INVALID",
     "PAIRING_INVALID",
     "PROPOSAL_EXPIRED",
     "PROPOSAL_NOT_PENDING",
+    "STEP_UP_REQUIRED",
     "WRONG_PRINCIPAL",
   ] as const) {
     const document = {
@@ -225,6 +228,21 @@ test("credential and proposal-state refusals stay in the opaque class", () => {
     };
     expect(OpaqueProblemSchema.safeParse(document).success, code).toBe(true);
     expect(ContractProblemSchema.safeParse(document).success, code).toBe(false);
+  }
+});
+
+test("lifecycle body failures teach while lifecycle state remains opaque", () => {
+  for (const code of [
+    "CREDENTIAL_REVOKE_BODY_INVALID",
+    "FELLOW_LIFECYCLE_BODY_INVALID",
+    "SPONSOR_PANIC_BODY_INVALID",
+  ] as const) {
+    expect(CONTRACT_PROBLEM_CODES).toContain(code);
+    expect(OPAQUE_PROBLEM_CODES).not.toContain(code as never);
+  }
+  for (const code of ["FELLOW_LIFECYCLE_NOT_CURRENT", "STEP_UP_REQUIRED"] as const) {
+    expect(OPAQUE_PROBLEM_CODES).toContain(code);
+    expect(CONTRACT_PROBLEM_CODES).not.toContain(code as never);
   }
 });
 

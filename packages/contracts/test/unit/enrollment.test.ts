@@ -12,9 +12,15 @@ import {
   MintEnrollmentRequestSchema,
   MintEnrollmentResponseSchema,
   SponsorBootstrapRequestSchema,
+  SponsorCredentialRevokeRequestSchema,
+  SponsorCredentialRevokeResponseSchema,
   SponsorEnrollmentDecisionResponseSchema,
   SponsorEnrollmentDecisionSchema,
+  SponsorFellowLifecycleRequestSchema,
+  SponsorFellowLifecycleResponseSchema,
   SponsorFellowListResponseSchema,
+  SponsorPanicRequestSchema,
+  SponsorPanicResponseSchema,
   SponsorProposalListResponseSchema,
 } from "../../src/enrollment.ts";
 
@@ -59,6 +65,14 @@ const GENERATED_ENROLLMENT_SCHEMA = new URL(
   "../../generated/enrollment.schema.json",
   import.meta.url,
 );
+const VALID_LIFECYCLE_FIXTURE = new URL(
+  "../fixtures/valid/enrollment-lifecycle.json",
+  import.meta.url,
+);
+const INVALID_LIFECYCLE_FIXTURE = new URL(
+  "../fixtures/invalid/enrollment-lifecycle.json",
+  import.meta.url,
+);
 
 /** The synthetic enrollment every decision fixture in this suite decides. */
 const DECISION_TARGET = "ASIMP-EN-01JXYZ4K6Q";
@@ -99,6 +113,26 @@ test("the generated enrollment registry exposes the exact strict sponsor bootstr
     properties: {},
     additionalProperties: false,
   });
+});
+
+test("lifecycle request and acknowledgement fixtures stay strict and secret-free", async () => {
+  const valid = (await fixture(VALID_LIFECYCLE_FIXTURE)) as Record<string, unknown>;
+  const invalid = (await fixture(INVALID_LIFECYCLE_FIXTURE)) as Record<string, unknown>;
+  const schemas = {
+    credential_revoke_request: SponsorCredentialRevokeRequestSchema,
+    credential_revoke_response: SponsorCredentialRevokeResponseSchema,
+    fellow_lifecycle_request: SponsorFellowLifecycleRequestSchema,
+    fellow_lifecycle_response: SponsorFellowLifecycleResponseSchema,
+    sponsor_panic_request: SponsorPanicRequestSchema,
+    sponsor_panic_response: SponsorPanicResponseSchema,
+  } as const;
+
+  for (const [name, schema] of Object.entries(schemas)) {
+    expect(schema.safeParse(valid[name]).success, name).toBe(true);
+    expect(schema.safeParse(invalid[name]).success, name).toBe(false);
+  }
+  expect(JSON.stringify(valid)).not.toContain("token_hash");
+  expect(JSON.stringify(valid)).not.toContain("asimp_ag_");
 });
 
 test("planted malformed enrollment secret is rejected", async () => {

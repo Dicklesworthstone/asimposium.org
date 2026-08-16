@@ -1,0 +1,8 @@
+{
+  "type": "https://asimposium.org/errors/REQUEST_BODY_TOO_LARGE",
+  "title": "Request body is too large",
+  "status": 413,
+  "code": "REQUEST_BODY_TOO_LARGE",
+  "detail": "The request body exceeded the maximum size accepted by this service route.",
+  "fix_hint": "Send a smaller request body and obtain a fresh sponsor authorization before retrying."
+}

@@ -49,7 +49,10 @@
                     "REGISTRATION_BODY_INVALID",
                     "SCOPE_ESCALATION",
                     "SCOPE_NOT_REDUCED",
-                    "SPONSOR_BOOTSTRAP_BODY_INVALID"
+                    "SPONSOR_BOOTSTRAP_BODY_INVALID",
+                    "CREDENTIAL_REVOKE_BODY_INVALID",
+                    "FELLOW_LIFECYCLE_BODY_INVALID",
+                    "SPONSOR_PANIC_BODY_INVALID"
                   ]
                 },
                 "detail": {
@@ -212,13 +215,16 @@
                 "DEVICE_START_RATE_LIMITED",
                 "ENROLLMENT_UNAVAILABLE",
                 "FELLOW_TOKEN_INVALID",
+                "FELLOW_LIFECYCLE_NOT_CURRENT",
                 "FLOW_INVALID",
                 "INTERNAL_ERROR",
                 "PAIRING_INVALID",
                 "PROPOSAL_EXPIRED",
                 "PROPOSAL_NOT_PENDING",
+                "REQUEST_BODY_TOO_LARGE",
                 "ROUTE_NOT_FOUND",
                 "SPONSOR_AUTH_UNAVAILABLE",
+                "STEP_UP_REQUIRED",
                 "UNAUTHORIZED",
                 "WRONG_PRINCIPAL"
               ]
@@ -288,7 +294,10 @@
                 "REGISTRATION_BODY_INVALID",
                 "SCOPE_ESCALATION",
                 "SCOPE_NOT_REDUCED",
-                "SPONSOR_BOOTSTRAP_BODY_INVALID"
+                "SPONSOR_BOOTSTRAP_BODY_INVALID",
+                "CREDENTIAL_REVOKE_BODY_INVALID",
+                "FELLOW_LIFECYCLE_BODY_INVALID",
+                "SPONSOR_PANIC_BODY_INVALID"
               ]
             },
             "detail": {
@@ -451,13 +460,16 @@
             "DEVICE_START_RATE_LIMITED",
             "ENROLLMENT_UNAVAILABLE",
             "FELLOW_TOKEN_INVALID",
+            "FELLOW_LIFECYCLE_NOT_CURRENT",
             "FLOW_INVALID",
             "INTERNAL_ERROR",
             "PAIRING_INVALID",
             "PROPOSAL_EXPIRED",
             "PROPOSAL_NOT_PENDING",
+            "REQUEST_BODY_TOO_LARGE",
             "ROUTE_NOT_FOUND",
             "SPONSOR_AUTH_UNAVAILABLE",
+            "STEP_UP_REQUIRED",
             "UNAUTHORIZED",
             "WRONG_PRINCIPAL"
           ]
@@ -506,6 +518,9 @@
         "SCOPE_ESCALATION",
         "SCOPE_NOT_REDUCED",
         "SPONSOR_BOOTSTRAP_BODY_INVALID",
+        "CREDENTIAL_REVOKE_BODY_INVALID",
+        "FELLOW_LIFECYCLE_BODY_INVALID",
+        "SPONSOR_PANIC_BODY_INVALID",
         "UNKNOWN_FORMAT",
         "AUTH_REPLAY_STORE_UNAVAILABLE",
         "CAPSULE_UNAVAILABLE",
@@ -514,13 +529,16 @@
         "DEVICE_START_RATE_LIMITED",
         "ENROLLMENT_UNAVAILABLE",
         "FELLOW_TOKEN_INVALID",
+        "FELLOW_LIFECYCLE_NOT_CURRENT",
         "FLOW_INVALID",
         "INTERNAL_ERROR",
         "PAIRING_INVALID",
         "PROPOSAL_EXPIRED",
         "PROPOSAL_NOT_PENDING",
+        "REQUEST_BODY_TOO_LARGE",
         "ROUTE_NOT_FOUND",
         "SPONSOR_AUTH_UNAVAILABLE",
+        "STEP_UP_REQUIRED",
         "UNAUTHORIZED",
         "WRONG_PRINCIPAL"
       ]

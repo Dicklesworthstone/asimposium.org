@@ -1,0 +1,41 @@
+{
+  "credential_revoke_request": {
+    "fellow_id": "F-01JXYZFELLOW00000000000",
+    "credential_id": "cred-01JXYZ0000000000000000",
+    "confirm": "revoke-all",
+    "step_up_authenticated_at": 1786000000
+  },
+  "credential_revoke_response": {
+    "acknowledged": true,
+    "event_id": "LEV-00000000000000000000000000",
+    "fellow_id": "F-01JXYZFELLOW00000000000",
+    "credential_id": "cred-01JXYZ0000000000000000",
+    "sponsor_seq": 0,
+    "effective_at": 1786000000123
+  },
+  "fellow_lifecycle_request": {
+    "fellow_id": "F-01JXYZFELLOW00000000000",
+    "status": "pending",
+    "confirm": "change-fellow-lifecycle",
+    "step_up_authenticated_at": 1786000000
+  },
+  "fellow_lifecycle_response": {
+    "acknowledged": true,
+    "event_id": "LEV-00000000000000000000000001",
+    "fellow_id": "F-01JXYZFELLOW00000000000",
+    "status": "compromised",
+    "sponsor_seq": 18,
+    "effective_at": 1786000001123,
+    "private_token_hash": "must-never-pass"
+  },
+  "sponsor_panic_request": {
+    "confirm": "revoke-all-fellow-credentials",
+    "step_up_authenticated_at": -1
+  },
+  "sponsor_panic_response": {
+    "acknowledged": false,
+    "event_id": "LEV-00000000000000000000000002",
+    "sponsor_seq": 19,
+    "effective_at": 1786000002123
+  }
+}

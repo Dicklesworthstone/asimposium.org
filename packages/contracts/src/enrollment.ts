@@ -53,6 +53,11 @@ export const FellowLifecycleStatusSchema = z.enum([
   "suspicious_review",
 ]);
 
+/** Append-only lifecycle event identity returned to the owning sponsor. */
+export const FellowLifecycleEventIdSchema = z
+  .string()
+  .regex(/^LEV-[0-9A-HJKMNP-TV-Z]{26}$/, "invalid lifecycle event id");
+
 export const FellowCredentialProfileSchema = z.enum(["bearer", "dpop", "http-message-signature"]);
 
 /** A Fellow name is the compact public identifier defined by Fable §5.4. */
@@ -75,6 +80,10 @@ export const EnrollmentProblemBindingSchema = z
 // length semantics across the two runtimes.
 // biome-ignore lint/suspicious/noControlCharactersInRegex: U+0000 is the exact cross-runtime hazard excluded here.
 const EnrollmentSqlTextSchema = z.string().regex(/^[^\u0000]*$/, "must not contain NUL");
+/** Durable identity accepts every retained 0011-valid Fellow row. */
+export const FellowIdSchema = EnrollmentSqlTextSchema.min(1).max(80);
+/** Non-secret credential row identity. This is never the bearer or its hash. */
+export const FellowCredentialIdSchema = EnrollmentSqlTextSchema.min(1).max(160);
 export const EnrollmentDeclaredRuntimeSchema = EnrollmentSqlTextSchema.trim().min(1).max(160);
 
 export const EnrollmentFirstDirectiveSchema = EnrollmentSqlTextSchema.trim().min(1).max(2_000);
@@ -401,6 +410,77 @@ export const SponsorFellowListResponseSchema = z
   })
   .strict();
 
+/** Individually revoke one non-secret credential identity owned by a Fellow. */
+export const SponsorCredentialRevokeRequestSchema = z
+  .object({
+    fellow_id: FellowIdSchema,
+    credential_id: FellowCredentialIdSchema,
+    confirm: z.literal("revoke-credential"),
+    step_up_authenticated_at: z.number().int().nonnegative(),
+  })
+  .strict();
+
+export const SponsorCredentialRevokeResponseSchema = z
+  .object({
+    acknowledged: z.literal(true),
+    event_id: FellowLifecycleEventIdSchema,
+    fellow_id: FellowIdSchema,
+    credential_id: FellowCredentialIdSchema,
+    sponsor_seq: z.number().int().positive(),
+    effective_at: z.number().int().positive(),
+  })
+  .strict();
+
+/**
+ * Sponsor-controlled Fellow posture. `pending` is protocol-internal and can
+ * become active only through approval; it is intentionally absent here.
+ */
+export const SponsorFellowLifecycleTargetSchema = z.enum([
+  "active",
+  "paused",
+  "revoked",
+  "archived",
+  "compromised",
+  "suspicious_review",
+]);
+
+export const SponsorFellowLifecycleRequestSchema = z
+  .object({
+    fellow_id: FellowIdSchema,
+    status: SponsorFellowLifecycleTargetSchema,
+    confirm: z.literal("change-fellow-lifecycle"),
+    step_up_authenticated_at: z.number().int().nonnegative(),
+  })
+  .strict();
+
+export const SponsorFellowLifecycleResponseSchema = z
+  .object({
+    acknowledged: z.literal(true),
+    event_id: FellowLifecycleEventIdSchema,
+    fellow_id: FellowIdSchema,
+    status: SponsorFellowLifecycleTargetSchema,
+    sponsor_seq: z.number().int().positive(),
+    effective_at: z.number().int().positive(),
+  })
+  .strict();
+
+/** The explicit destructive confirmation required by the sponsor panic button. */
+export const SponsorPanicRequestSchema = z
+  .object({
+    confirm: z.literal("revoke-all-fellow-credentials"),
+    step_up_authenticated_at: z.number().int().nonnegative(),
+  })
+  .strict();
+
+export const SponsorPanicResponseSchema = z
+  .object({
+    acknowledged: z.literal(true),
+    event_id: FellowLifecycleEventIdSchema,
+    sponsor_seq: z.number().int().positive(),
+    effective_at: z.number().int().positive(),
+  })
+  .strict();
+
 /**
  * Decision acknowledgement. Carries no proposal state: the card changed under
  * the decision, and a fresh proposal list is how the console sees it.
@@ -476,6 +556,12 @@ export const EnrollmentContractsSchema = z
     sponsor_credential_summary: SponsorCredentialSummarySchema,
     sponsor_fellow_summary: SponsorFellowSummarySchema,
     sponsor_fellow_list_response: SponsorFellowListResponseSchema,
+    sponsor_credential_revoke_request: SponsorCredentialRevokeRequestSchema,
+    sponsor_credential_revoke_response: SponsorCredentialRevokeResponseSchema,
+    sponsor_fellow_lifecycle_request: SponsorFellowLifecycleRequestSchema,
+    sponsor_fellow_lifecycle_response: SponsorFellowLifecycleResponseSchema,
+    sponsor_panic_request: SponsorPanicRequestSchema,
+    sponsor_panic_response: SponsorPanicResponseSchema,
     sponsor_enrollment_decision_response: SponsorEnrollmentDecisionResponseSchema,
     sponsor_bootstrap_request: SponsorBootstrapRequestSchema,
     sponsor_bootstrap_response: SponsorBootstrapResponseSchema,
@@ -498,6 +584,9 @@ export type EnrollmentSecret = z.infer<typeof EnrollmentSecretSchema>;
 export type EnrollmentFlowHandle = z.infer<typeof EnrollmentFlowHandleSchema>;
 export type FellowToken = z.infer<typeof FellowTokenSchema>;
 export type FellowLifecycleStatus = z.infer<typeof FellowLifecycleStatusSchema>;
+export type FellowId = z.infer<typeof FellowIdSchema>;
+export type FellowCredentialId = z.infer<typeof FellowCredentialIdSchema>;
+export type FellowLifecycleEventId = z.infer<typeof FellowLifecycleEventIdSchema>;
 export type FellowCredentialProfile = z.infer<typeof FellowCredentialProfileSchema>;
 export type FellowRegistrationRequest = z.infer<typeof FellowRegistrationRequestSchema>;
 export type EnrollmentApprovalCard = z.infer<typeof EnrollmentApprovalCardSchema>;
@@ -512,6 +601,13 @@ export type SponsorProposalListResponse = z.infer<typeof SponsorProposalListResp
 export type SponsorCredentialSummary = z.infer<typeof SponsorCredentialSummarySchema>;
 export type SponsorFellowSummary = z.infer<typeof SponsorFellowSummarySchema>;
 export type SponsorFellowListResponse = z.infer<typeof SponsorFellowListResponseSchema>;
+export type SponsorCredentialRevokeRequest = z.infer<typeof SponsorCredentialRevokeRequestSchema>;
+export type SponsorCredentialRevokeResponse = z.infer<typeof SponsorCredentialRevokeResponseSchema>;
+export type SponsorFellowLifecycleTarget = z.infer<typeof SponsorFellowLifecycleTargetSchema>;
+export type SponsorFellowLifecycleRequest = z.infer<typeof SponsorFellowLifecycleRequestSchema>;
+export type SponsorFellowLifecycleResponse = z.infer<typeof SponsorFellowLifecycleResponseSchema>;
+export type SponsorPanicRequest = z.infer<typeof SponsorPanicRequestSchema>;
+export type SponsorPanicResponse = z.infer<typeof SponsorPanicResponseSchema>;
 export type SponsorEnrollmentDecisionResponse = z.infer<
   typeof SponsorEnrollmentDecisionResponseSchema
 >;

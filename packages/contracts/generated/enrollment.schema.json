@@ -1249,6 +1249,219 @@
       ],
       "additionalProperties": false
     },
+    "sponsor_credential_revoke_request": {
+      "type": "object",
+      "properties": {
+        "fellow_id": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 80,
+          "pattern": "^[^\\u0000]*$"
+        },
+        "credential_id": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 160,
+          "pattern": "^[^\\u0000]*$"
+        },
+        "confirm": {
+          "type": "string",
+          "const": "revoke-credential"
+        },
+        "step_up_authenticated_at": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 9007199254740991
+        }
+      },
+      "required": [
+        "fellow_id",
+        "credential_id",
+        "confirm",
+        "step_up_authenticated_at"
+      ],
+      "additionalProperties": false
+    },
+    "sponsor_credential_revoke_response": {
+      "type": "object",
+      "properties": {
+        "acknowledged": {
+          "type": "boolean",
+          "const": true
+        },
+        "event_id": {
+          "type": "string",
+          "pattern": "^LEV-[0-9A-HJKMNP-TV-Z]{26}$"
+        },
+        "fellow_id": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 80,
+          "pattern": "^[^\\u0000]*$"
+        },
+        "credential_id": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 160,
+          "pattern": "^[^\\u0000]*$"
+        },
+        "sponsor_seq": {
+          "type": "integer",
+          "exclusiveMinimum": 0,
+          "maximum": 9007199254740991
+        },
+        "effective_at": {
+          "type": "integer",
+          "exclusiveMinimum": 0,
+          "maximum": 9007199254740991
+        }
+      },
+      "required": [
+        "acknowledged",
+        "event_id",
+        "fellow_id",
+        "credential_id",
+        "sponsor_seq",
+        "effective_at"
+      ],
+      "additionalProperties": false
+    },
+    "sponsor_fellow_lifecycle_request": {
+      "type": "object",
+      "properties": {
+        "fellow_id": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 80,
+          "pattern": "^[^\\u0000]*$"
+        },
+        "status": {
+          "type": "string",
+          "enum": [
+            "active",
+            "paused",
+            "revoked",
+            "archived",
+            "compromised",
+            "suspicious_review"
+          ]
+        },
+        "confirm": {
+          "type": "string",
+          "const": "change-fellow-lifecycle"
+        },
+        "step_up_authenticated_at": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 9007199254740991
+        }
+      },
+      "required": [
+        "fellow_id",
+        "status",
+        "confirm",
+        "step_up_authenticated_at"
+      ],
+      "additionalProperties": false
+    },
+    "sponsor_fellow_lifecycle_response": {
+      "type": "object",
+      "properties": {
+        "acknowledged": {
+          "type": "boolean",
+          "const": true
+        },
+        "event_id": {
+          "type": "string",
+          "pattern": "^LEV-[0-9A-HJKMNP-TV-Z]{26}$"
+        },
+        "fellow_id": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 80,
+          "pattern": "^[^\\u0000]*$"
+        },
+        "status": {
+          "type": "string",
+          "enum": [
+            "active",
+            "paused",
+            "revoked",
+            "archived",
+            "compromised",
+            "suspicious_review"
+          ]
+        },
+        "sponsor_seq": {
+          "type": "integer",
+          "exclusiveMinimum": 0,
+          "maximum": 9007199254740991
+        },
+        "effective_at": {
+          "type": "integer",
+          "exclusiveMinimum": 0,
+          "maximum": 9007199254740991
+        }
+      },
+      "required": [
+        "acknowledged",
+        "event_id",
+        "fellow_id",
+        "status",
+        "sponsor_seq",
+        "effective_at"
+      ],
+      "additionalProperties": false
+    },
+    "sponsor_panic_request": {
+      "type": "object",
+      "properties": {
+        "confirm": {
+          "type": "string",
+          "const": "revoke-all-fellow-credentials"
+        },
+        "step_up_authenticated_at": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 9007199254740991
+        }
+      },
+      "required": [
+        "confirm",
+        "step_up_authenticated_at"
+      ],
+      "additionalProperties": false
+    },
+    "sponsor_panic_response": {
+      "type": "object",
+      "properties": {
+        "acknowledged": {
+          "type": "boolean",
+          "const": true
+        },
+        "event_id": {
+          "type": "string",
+          "pattern": "^LEV-[0-9A-HJKMNP-TV-Z]{26}$"
+        },
+        "sponsor_seq": {
+          "type": "integer",
+          "exclusiveMinimum": 0,
+          "maximum": 9007199254740991
+        },
+        "effective_at": {
+          "type": "integer",
+          "exclusiveMinimum": 0,
+          "maximum": 9007199254740991
+        }
+      },
+      "required": [
+        "acknowledged",
+        "event_id",
+        "sponsor_seq",
+        "effective_at"
+      ],
+      "additionalProperties": false
+    },
     "sponsor_enrollment_decision_response": {
       "type": "object",
       "properties": {
@@ -1812,6 +2025,12 @@
     "sponsor_credential_summary",
     "sponsor_fellow_summary",
     "sponsor_fellow_list_response",
+    "sponsor_credential_revoke_request",
+    "sponsor_credential_revoke_response",
+    "sponsor_fellow_lifecycle_request",
+    "sponsor_fellow_lifecycle_response",
+    "sponsor_panic_request",
+    "sponsor_panic_response",
     "sponsor_enrollment_decision_response",
     "sponsor_bootstrap_request",
     "sponsor_bootstrap_response",

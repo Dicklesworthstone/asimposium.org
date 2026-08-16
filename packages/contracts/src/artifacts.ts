@@ -18,11 +18,21 @@ import {
   type EnrollmentHelloResponse,
   type EnrollmentId,
   type EnrollmentSecret,
+  type FellowCredentialId,
+  type FellowId,
+  type FellowLifecycleEventId,
   type FellowRegistrationRequest,
   type FellowToken,
   type MintEnrollmentRequest,
   type RequestedScope,
+  type SponsorCredentialRevokeRequest,
+  type SponsorCredentialRevokeResponse,
   type SponsorEnrollmentDecision,
+  type SponsorFellowLifecycleRequest,
+  type SponsorFellowLifecycleResponse,
+  type SponsorFellowLifecycleTarget,
+  type SponsorPanicRequest,
+  type SponsorPanicResponse,
 } from "./enrollment.ts";
 import {
   LedgerContractsSchema,
@@ -141,10 +151,20 @@ function generatedEnrollmentTypes(): string {
     "EnrollmentHelloResponse",
     "EnrollmentSecret",
     "FellowRegistrationRequest",
+    "FellowId",
+    "FellowCredentialId",
+    "FellowLifecycleEventId",
     "FellowToken",
     "MintEnrollmentRequest",
     "RequestedScope",
     "SponsorEnrollmentDecision",
+    "SponsorCredentialRevokeRequest",
+    "SponsorCredentialRevokeResponse",
+    "SponsorFellowLifecycleRequest",
+    "SponsorFellowLifecycleResponse",
+    "SponsorFellowLifecycleTarget",
+    "SponsorPanicRequest",
+    "SponsorPanicResponse",
   ] as const satisfies readonly (keyof {
     DeviceCodeStartRequest: DeviceCodeStartRequest;
     DeviceCodeStartResponse: DeviceCodeStartResponse;
@@ -158,11 +178,21 @@ function generatedEnrollmentTypes(): string {
     EnrollmentId: EnrollmentId;
     EnrollmentHelloResponse: EnrollmentHelloResponse;
     EnrollmentSecret: EnrollmentSecret;
+    FellowCredentialId: FellowCredentialId;
+    FellowId: FellowId;
+    FellowLifecycleEventId: FellowLifecycleEventId;
     FellowRegistrationRequest: FellowRegistrationRequest;
     FellowToken: FellowToken;
     MintEnrollmentRequest: MintEnrollmentRequest;
     RequestedScope: RequestedScope;
     SponsorEnrollmentDecision: SponsorEnrollmentDecision;
+    SponsorCredentialRevokeRequest: SponsorCredentialRevokeRequest;
+    SponsorCredentialRevokeResponse: SponsorCredentialRevokeResponse;
+    SponsorFellowLifecycleRequest: SponsorFellowLifecycleRequest;
+    SponsorFellowLifecycleResponse: SponsorFellowLifecycleResponse;
+    SponsorFellowLifecycleTarget: SponsorFellowLifecycleTarget;
+    SponsorPanicRequest: SponsorPanicRequest;
+    SponsorPanicResponse: SponsorPanicResponse;
   })[];
   return [
     "// Generated from src/enrollment.ts by `bun run generate`. Do not edit.",
