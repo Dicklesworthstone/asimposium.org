@@ -2,6 +2,8 @@ import { describe, expect, test } from "bun:test";
 import { readFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 
+import ts from "typescript";
+
 import {
   ALLOWED_ENV_EXPRESSION,
   ALLOWED_IMPORTS,
@@ -20,6 +22,107 @@ import {
  * the file and false in the running application.
  */
 const FIXTURES = join(dirname(import.meta.dir), "fixtures", "auth");
+const WEB_RECENT_AUTH_FILE = join(import.meta.dir, "..", "..", "lib", "recent-auth.ts");
+const WIRE_SERVICE_ENVELOPE_FILE = join(
+  import.meta.dir,
+  "..",
+  "..",
+  "..",
+  "wire",
+  "src",
+  "auth",
+  "envelope.ts",
+);
+
+interface ExportedNumericLiteral {
+  readonly value: number;
+  readonly start: number;
+  readonly end: number;
+}
+
+/**
+ * Read one top-level `export const NAME = <number>` without evaluating or
+ * importing the module. A computed value is deliberately unprovable here: the
+ * guard must compare the two source literals without creating a Web→Wire
+ * runtime dependency.
+ */
+function exportedNumericLiteral(
+  source: string,
+  fileName: string,
+  exportName: string,
+): ExportedNumericLiteral {
+  const sourceFile = ts.createSourceFile(
+    fileName,
+    source,
+    ts.ScriptTarget.ESNext,
+    true,
+    ts.ScriptKind.TS,
+  );
+  let found: ExportedNumericLiteral | undefined;
+
+  for (const statement of sourceFile.statements) {
+    if (!ts.isVariableStatement(statement)) continue;
+    const modifiers = ts.canHaveModifiers(statement) ? ts.getModifiers(statement) : undefined;
+    if (!modifiers?.some((modifier) => modifier.kind === ts.SyntaxKind.ExportKeyword)) continue;
+
+    for (const declaration of statement.declarationList.declarations) {
+      if (!ts.isIdentifier(declaration.name) || declaration.name.text !== exportName) continue;
+      if (
+        (statement.declarationList.flags & ts.NodeFlags.Const) === 0 ||
+        declaration.initializer === undefined ||
+        !ts.isNumericLiteral(declaration.initializer)
+      ) {
+        throw new Error(`${fileName} must export const ${exportName} as one numeric literal`);
+      }
+      if (found !== undefined) throw new Error(`${fileName} exports ${exportName} more than once`);
+
+      const value = Number(declaration.initializer.text);
+      if (!Number.isSafeInteger(value) || value < 0) {
+        throw new Error(`${fileName} exports ${exportName} as an invalid clock-skew literal`);
+      }
+      found = {
+        value,
+        start: declaration.initializer.getStart(sourceFile),
+        end: declaration.initializer.end,
+      };
+    }
+  }
+
+  if (found === undefined) throw new Error(`${fileName} does not export ${exportName}`);
+  return found;
+}
+
+function clockSkewsFromSource(
+  webSource: string,
+  wireSource: string,
+): {
+  readonly web: number;
+  readonly wire: number;
+} {
+  return {
+    web: exportedNumericLiteral(
+      webSource,
+      "apps/web/lib/recent-auth.ts",
+      "RECENT_AUTH_CLOCK_SKEW_SECONDS",
+    ).value,
+    wire: exportedNumericLiteral(
+      wireSource,
+      "apps/wire/src/auth/envelope.ts",
+      "SERVICE_ENVELOPE_CLOCK_SKEW_SECONDS",
+    ).value,
+  };
+}
+
+function mutateExportedNumericLiteral(
+  source: string,
+  fileName: string,
+  exportName: string,
+): string {
+  const literal = exportedNumericLiteral(source, fileName, exportName);
+  const replacement =
+    literal.value === Number.MAX_SAFE_INTEGER ? literal.value - 1 : literal.value + 1;
+  return `${source.slice(0, literal.start)}${replacement}${source.slice(literal.end)}`;
+}
 
 function scan(fixture: string): AuthViolation[] {
   return validateAuthConfig(readFileSync(join(FIXTURES, `${fixture}.ts`), "utf8"), `${fixture}.ts`);
@@ -171,6 +274,34 @@ describe("recent-auth is stable across ordinary session reads", () => {
     );
     expect(codesOf(validateAuthConfig(helper))).toContain("AUTH_RECENT_AUTH_REFRESHABLE");
     expect(codesOf(validateAuthConfig(computed))).toContain("AUTH_RECENT_AUTH_REFRESHABLE");
+  });
+});
+
+describe("recent-auth clock skew stays aligned with the signed service envelope", () => {
+  const webSource = readFileSync(WEB_RECENT_AUTH_FILE, "utf8");
+  const wireSource = readFileSync(WIRE_SERVICE_ENVELOPE_FILE, "utf8");
+
+  test("the Web and Wire exported source literals are equal", () => {
+    const skews = clockSkewsFromSource(webSource, wireSource);
+    expect(skews.web).toBe(skews.wire);
+  });
+
+  test("PLANTED: changing either source literal creates detectable drift", () => {
+    const webMutation = mutateExportedNumericLiteral(
+      webSource,
+      "apps/web/lib/recent-auth.ts",
+      "RECENT_AUTH_CLOCK_SKEW_SECONDS",
+    );
+    const wireMutation = mutateExportedNumericLiteral(
+      wireSource,
+      "apps/wire/src/auth/envelope.ts",
+      "SERVICE_ENVELOPE_CLOCK_SKEW_SECONDS",
+    );
+
+    const webDrift = clockSkewsFromSource(webMutation, wireSource);
+    const wireDrift = clockSkewsFromSource(webSource, wireMutation);
+    expect(webDrift.web).not.toBe(webDrift.wire);
+    expect(wireDrift.web).not.toBe(wireDrift.wire);
   });
 });
 

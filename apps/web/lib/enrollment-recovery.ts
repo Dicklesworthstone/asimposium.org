@@ -1,4 +1,26 @@
-export type EnrollmentRecoveryScope = "mint" | "decision";
+export type EnrollmentRecoveryScope =
+  | "mint"
+  | "decision"
+  | "credential-revoke"
+  | "fellow-lifecycle"
+  | "sponsor-panic";
+
+const RECOVERY_SCOPES: ReadonlySet<EnrollmentRecoveryScope> = new Set([
+  "mint",
+  "decision",
+  "credential-revoke",
+  "fellow-lifecycle",
+  "sponsor-panic",
+]);
+
+export function isEnrollmentRecoveryScope(
+  value: unknown,
+): value is EnrollmentRecoveryScope {
+  return (
+    typeof value === "string" &&
+    RECOVERY_SCOPES.has(value as EnrollmentRecoveryScope)
+  );
+}
 
 const RECOVERY_KEY = /^[0-9a-f]{64}$/;
 const IDEMPOTENCY_KEY = /^console-[A-Za-z0-9._-]{1,152}$/;
@@ -139,7 +161,7 @@ export async function sealEnrollmentRecoveryPayload(
 ): Promise<string> {
   if (
     payload.sponsorId.length === 0 ||
-    (payload.scope !== "mint" && payload.scope !== "decision") ||
+    !isEnrollmentRecoveryScope(payload.scope) ||
     !RECOVERY_KEY.test(payload.fingerprint) ||
     !IDEMPOTENCY_KEY.test(payload.idempotencyKey) ||
     !Number.isSafeInteger(payload.expiresAt) ||

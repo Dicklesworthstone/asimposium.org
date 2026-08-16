@@ -47,19 +47,17 @@ export const GATE_PREFIX = "ASIMP-GATE";
  * reaches a gate record, and available to callers that need to echo tool output
  * into an artifact.
  *
- * Each pattern is targeted. A greedy "redact anything long" rule would mangle
- * legitimate diagnostics and teach readers to ignore the output.
+ * Credential families live in the shared contracts scanner. The remaining
+ * rules are web-gate context: environment labels and local filesystem paths.
+ * A greedy "redact anything long" rule would mangle legitimate diagnostics and
+ * teach readers to ignore the output.
  */
-const REDACTIONS: ReadonlyArray<readonly [RegExp, string]> = [
-  // Fellow bearer tokens (Fable §5.5) — masked, never printed.
-  [/asimp_ag_[A-Za-z0-9_-]+/g, "asimp_ag_<redacted>"],
-  // Enrollment secret from a join URL fragment (ADR-20).
-  [/#v1\.[A-Za-z0-9._-]+/g, "#v1.<redacted>"],
-  // Authorization headers in any casing.
-  [/\b(bearer)\s+[A-Za-z0-9._~+/=-]+/gi, "$1 <redacted>"],
-  // `NAME=value` / `NAME: value` for secret-shaped names.
+const WEB_CONTEXT_REDACTIONS: ReadonlyArray<readonly [RegExp, string]> = [
+  // `NAME=value` / `NAME: value` for secret-shaped names. Quoted values use
+  // shell-style escapes; bytes attached to a closing quote without a structural
+  // delimiter stay redacted rather than becoming a plausible secret tail.
   [
-    /\b([A-Z0-9_]*(?:SECRET|TOKEN|PASSWORD|PASSWD|API_?KEY|CLIENT_ID|PRIVATE_KEY)[A-Z0-9_]*)\s*[=:]\s*("[^"]*"|'[^']*'|\S+)/g,
+    /\b([A-Z0-9_]*(?:SECRET|TOKEN|PASSWORD|PASSWD|API_?KEY|CLIENT_ID|PRIVATE_KEY)[A-Z0-9_]*)\s*[=:]\s*("(?:\\[\s\S]|[^"\\])*"(?:[^\s,;)\]}]+)?|'(?:\\[\s\S]|[^'\\])*'(?:[^\s,;)\]}]+)?|"(?:\\[\s\S]|[^"\\])*$|'(?:\\[\s\S]|[^'\\])*$|\S+)/g,
     "$1=<redacted>",
   ],
   // POSIX absolute paths that identify a machine or a home directory.
@@ -72,8 +70,8 @@ const REDACTIONS: ReadonlyArray<readonly [RegExp, string]> = [
 ];
 
 export function scrubDiagnostic(text: string): string {
-  let out = text;
-  for (const [pattern, replacement] of REDACTIONS) {
+  let out = redactCredentials(text);
+  for (const [pattern, replacement] of WEB_CONTEXT_REDACTIONS) {
     out = out.replace(pattern, replacement);
   }
   return out;
@@ -109,3 +107,4 @@ export function buildGateRecord(
 export function formatGateRecord(record: GateRecord): string {
   return `${GATE_PREFIX} ${JSON.stringify(record)}`;
 }
+import { redactCredentials } from "@asimposium/contracts/diagnostic-safety";

@@ -3,12 +3,19 @@
 import type {
   EnrollmentApprovalCard,
   MintEnrollmentRequest,
+  SponsorCredentialRevokeRequest,
   SponsorEnrollmentDecision,
+  SponsorFellowLifecycleRequest,
+  SponsorFellowLifecycleTarget,
+  SponsorPanicRequest,
 } from "@asimposium/contracts";
 import {
   MintEnrollmentRequestSchema,
+  SponsorCredentialRevokeRequestSchema,
   SponsorEnrollmentDecisionCommandSchema,
   SponsorEnrollmentDecisionSchema,
+  SponsorFellowLifecycleRequestSchema,
+  SponsorPanicRequestSchema,
 } from "@asimposium/contracts";
 import { revalidatePath } from "next/cache";
 
@@ -24,7 +31,14 @@ import {
 } from "@/lib/enrollment-recovery";
 import { recentAuthOk } from "@/lib/recent-auth";
 import { isCanonicalSponsorId } from "@/lib/sponsor-id";
-import { stoaDecideProposal, stoaDeviceLookup, stoaMintEnrollment } from "@/lib/stoa";
+import {
+  stoaDecideProposal,
+  stoaDeviceLookup,
+  stoaMintEnrollment,
+  stoaPanicSponsor,
+  stoaRevokeCredential,
+  stoaTransitionFellow,
+} from "@/lib/stoa";
 
 export type MintResult =
   | {
@@ -83,6 +97,93 @@ export type EnrollmentAttemptFingerprintResult =
   | { readonly ok: false; readonly message: string };
 
 const ENROLLMENT_RECOVERY_WINDOW_MS = 24 * 60 * 60 * 1_000;
+
+export type LifecycleAttemptScope =
+  | "credential-revoke"
+  | "fellow-lifecycle"
+  | "sponsor-panic";
+
+type CredentialRevokeIntent = Omit<
+  SponsorCredentialRevokeRequest,
+  "step_up_authenticated_at"
+>;
+type FellowLifecycleIntent = Omit<
+  SponsorFellowLifecycleRequest,
+  "step_up_authenticated_at"
+>;
+type SponsorPanicIntent = Omit<SponsorPanicRequest, "step_up_authenticated_at">;
+
+type LifecycleIntent =
+  | { readonly scope: "credential-revoke"; readonly request: CredentialRevokeIntent }
+  | { readonly scope: "fellow-lifecycle"; readonly request: FellowLifecycleIntent }
+  | { readonly scope: "sponsor-panic"; readonly request: SponsorPanicIntent };
+
+export type LifecycleReceipt =
+  | {
+      readonly kind: "credential-revoke";
+      readonly eventId: string;
+      readonly fellowId: string;
+      readonly credentialId: string;
+      readonly sponsorSeq: number;
+      readonly effectiveAt: number;
+    }
+  | {
+      readonly kind: "fellow-lifecycle";
+      readonly eventId: string;
+      readonly fellowId: string;
+      readonly status: SponsorFellowLifecycleTarget;
+      readonly sponsorSeq: number;
+      readonly effectiveAt: number;
+    }
+  | {
+      readonly kind: "sponsor-panic";
+      readonly eventId: string;
+      readonly sponsorSeq: number;
+      readonly effectiveAt: number;
+    };
+
+export type LifecycleResult =
+  | { readonly ok: true; readonly receipt: LifecycleReceipt }
+  | {
+      readonly ok: false;
+      readonly message: string;
+      /** Retain only when transport loss leaves the Worker's commit unknown. */
+      readonly recovery: "retain" | "clear";
+    };
+
+function isLifecycleAttemptScope(value: unknown): value is LifecycleAttemptScope {
+  return (
+    value === "credential-revoke" ||
+    value === "fellow-lifecycle" ||
+    value === "sponsor-panic"
+  );
+}
+
+function lifecycleIntent(
+  scope: LifecycleAttemptScope,
+  request: unknown,
+): LifecycleIntent | undefined {
+  switch (scope) {
+    case "credential-revoke": {
+      const parsed = SponsorCredentialRevokeRequestSchema.omit({
+        step_up_authenticated_at: true,
+      }).safeParse(request);
+      return parsed.success ? { scope, request: parsed.data } : undefined;
+    }
+    case "fellow-lifecycle": {
+      const parsed = SponsorFellowLifecycleRequestSchema.omit({
+        step_up_authenticated_at: true,
+      }).safeParse(request);
+      return parsed.success ? { scope, request: parsed.data } : undefined;
+    }
+    case "sponsor-panic": {
+      const parsed = SponsorPanicRequestSchema.omit({
+        step_up_authenticated_at: true,
+      }).safeParse(request);
+      return parsed.success ? { scope, request: parsed.data } : undefined;
+    }
+  }
+}
 
 async function recoveryOwnerForSponsor(sponsorId: string): Promise<string | undefined> {
   const rootHex = process.env.ENROLLMENT_RECOVERY_HMAC_KEY_HEX;
@@ -214,6 +315,263 @@ export async function fingerprintEnrollmentAttempt(
       message: "The browser could not prepare a recoverable write.",
     };
   }
+}
+
+/**
+ * Seal an exact credential or lifecycle command before it leaves the browser.
+ * Fresh Google evidence is checked both here and immediately before dispatch;
+ * the signed timestamp itself is never accepted from the client or stored in
+ * the recoverable request.
+ */
+export async function fingerprintLifecycleAttempt(
+  scope: LifecycleAttemptScope,
+  request: unknown,
+  expectedRecoveryOwner: string,
+  idempotencyKey: unknown,
+): Promise<EnrollmentAttemptFingerprintResult> {
+  const sponsor = await requireSponsorId();
+  if (!sponsor.ok) return sponsor;
+  if (!isLifecycleAttemptScope(scope)) {
+    return { ok: false, message: "The lifecycle attempt type is invalid." };
+  }
+  if (
+    typeof idempotencyKey !== "string" ||
+    !/^console-[A-Za-z0-9._-]{1,152}$/.test(idempotencyKey)
+  ) {
+    return { ok: false, message: "The lifecycle recovery key is invalid." };
+  }
+  const intent = lifecycleIntent(scope, request);
+  if (intent === undefined) {
+    return { ok: false, message: "The lifecycle command is invalid." };
+  }
+  if (!recentAuthOk(sponsor.authIssuedAt)) {
+    return {
+      ok: false,
+      message:
+        "Credential and lifecycle controls need a Google authentication time from the last 15 minutes. Reauthenticate before preparing this command.",
+    };
+  }
+  const rootHex = process.env.ENROLLMENT_RECOVERY_HMAC_KEY_HEX;
+  if (
+    !enrollmentRecoveryConfigurationIsValid(rootHex, process.env.SERVICE_ENVELOPE_PRIVATE_KEY_HEX)
+  ) {
+    return {
+      ok: false,
+      message: "This deployment cannot prepare recoverable lifecycle commands.",
+    };
+  }
+  try {
+    if (!(await recoveryOwnerMatchesSponsor(sponsor.sponsorId, expectedRecoveryOwner))) {
+      return {
+        ok: false,
+        message:
+          "Your sponsor session changed. Reload this page before preparing a lifecycle command.",
+      };
+    }
+    const serverNow = Date.now();
+    const fingerprint = await enrollmentRecoveryFingerprint(
+      rootHex,
+      sponsor.sponsorId,
+      scope,
+      intent.request,
+    );
+    return {
+      ok: true,
+      fingerprint,
+      recoveryPayload: await sealEnrollmentRecoveryPayload(rootHex, {
+        sponsorId: sponsor.sponsorId,
+        scope,
+        fingerprint,
+        idempotencyKey,
+        expiresAt: serverNow + ENROLLMENT_RECOVERY_WINDOW_MS,
+        request: intent.request,
+      }),
+      serverNow,
+    };
+  } catch {
+    return {
+      ok: false,
+      message: "The browser could not prepare a recoverable lifecycle command.",
+    };
+  }
+}
+
+function lifecycleFailure(result: {
+  readonly reason: "unconfigured" | "unreachable" | "refused";
+  readonly status?: number;
+  readonly detail?: string;
+  readonly problemCode?: string;
+}): LifecycleResult {
+  return {
+    ok: false,
+    recovery:
+      result.reason === "unconfigured"
+        ? "retain"
+        : enrollmentRecoveryDisposition(result.reason, result.status, result.problemCode),
+    message:
+      result.reason === "unconfigured"
+        ? "This deployment is not wired to the agent host. Keep the exact lifecycle command for recovery."
+        : result.reason === "unreachable"
+          ? "The agent host did not confirm the lifecycle command. Retry it unchanged to reuse its Idempotency-Key."
+          : (result.detail ?? "The lifecycle command was not accepted."),
+  };
+}
+
+async function dispatchLifecycle(
+  sponsorId: string,
+  intent: LifecycleIntent,
+  idempotencyKey: string,
+  stepUpAuthenticatedAt: number,
+): Promise<LifecycleResult> {
+  switch (intent.scope) {
+    case "credential-revoke": {
+      const command = SponsorCredentialRevokeRequestSchema.parse({
+        ...intent.request,
+        step_up_authenticated_at: stepUpAuthenticatedAt,
+      });
+      const result = await stoaRevokeCredential(sponsorId, command, idempotencyKey);
+      if (!result.ok) return lifecycleFailure(result);
+      bestEffortEnrollmentCacheInvalidation(() => revalidatePath("/console"));
+      return {
+        ok: true,
+        receipt: {
+          kind: intent.scope,
+          eventId: result.data.event_id,
+          fellowId: result.data.fellow_id,
+          credentialId: result.data.credential_id,
+          sponsorSeq: result.data.sponsor_seq,
+          effectiveAt: result.data.effective_at,
+        },
+      };
+    }
+    case "fellow-lifecycle": {
+      const command = SponsorFellowLifecycleRequestSchema.parse({
+        ...intent.request,
+        step_up_authenticated_at: stepUpAuthenticatedAt,
+      });
+      const result = await stoaTransitionFellow(sponsorId, command, idempotencyKey);
+      if (!result.ok) return lifecycleFailure(result);
+      bestEffortEnrollmentCacheInvalidation(() => revalidatePath("/console"));
+      return {
+        ok: true,
+        receipt: {
+          kind: intent.scope,
+          eventId: result.data.event_id,
+          fellowId: result.data.fellow_id,
+          status: result.data.status,
+          sponsorSeq: result.data.sponsor_seq,
+          effectiveAt: result.data.effective_at,
+        },
+      };
+    }
+    case "sponsor-panic": {
+      const command = SponsorPanicRequestSchema.parse({
+        ...intent.request,
+        step_up_authenticated_at: stepUpAuthenticatedAt,
+      });
+      const result = await stoaPanicSponsor(sponsorId, command, idempotencyKey);
+      if (!result.ok) return lifecycleFailure(result);
+      bestEffortEnrollmentCacheInvalidation(() => revalidatePath("/console"));
+      return {
+        ok: true,
+        receipt: {
+          kind: intent.scope,
+          eventId: result.data.event_id,
+          sponsorSeq: result.data.sponsor_seq,
+          effectiveAt: result.data.effective_at,
+        },
+      };
+    }
+  }
+}
+
+async function dispatchPreparedLifecycle(
+  scope: LifecycleAttemptScope,
+  recoveryPayload: string,
+  idempotencyKey: string,
+  expectedRecoveryOwner: string,
+): Promise<LifecycleResult> {
+  const sponsor = await requireSponsorId();
+  if (!sponsor.ok) return { ...sponsor, recovery: "retain" };
+  if (!(await recoveryOwnerMatchesSponsor(sponsor.sponsorId, expectedRecoveryOwner))) {
+    return {
+      ok: false,
+      recovery: "retain",
+      message:
+        "Your sponsor session changed after this lifecycle command was prepared. Reload under the intended sponsor, then retry the exact unchanged command.",
+    };
+  }
+  const stepUpAuthenticatedAt = sponsor.authIssuedAt;
+  if (typeof stepUpAuthenticatedAt !== "number" || !recentAuthOk(stepUpAuthenticatedAt)) {
+    return {
+      ok: false,
+      recovery: "retain",
+      message:
+        "Credential and lifecycle controls need a Google authentication time from the last 15 minutes. Recheck the Google evidence on this page; if it remains stale, sign in to your Google Account again. The command is unchanged.",
+    };
+  }
+  const rootHex = process.env.ENROLLMENT_RECOVERY_HMAC_KEY_HEX;
+  if (
+    !enrollmentRecoveryConfigurationIsValid(rootHex, process.env.SERVICE_ENVELOPE_PRIVATE_KEY_HEX)
+  ) {
+    return {
+      ok: false,
+      recovery: "retain",
+      message: "This deployment cannot open the prepared lifecycle command. Do not start a replacement.",
+    };
+  }
+  try {
+    const opened = await openEnrollmentRecoveryPayload(
+      rootHex,
+      recoveryPayload,
+      sponsor.sponsorId,
+      scope,
+      Date.now(),
+    );
+    const intent = lifecycleIntent(scope, opened.request);
+    if (
+      intent === undefined ||
+      opened.idempotencyKey !== idempotencyKey ||
+      (await enrollmentRecoveryFingerprint(
+        rootHex,
+        sponsor.sponsorId,
+        scope,
+        intent.request,
+      )) !== opened.fingerprint
+    ) {
+      throw new Error("invalid recovery payload");
+    }
+    return dispatchLifecycle(
+      sponsor.sponsorId,
+      intent,
+      opened.idempotencyKey,
+      stepUpAuthenticatedAt,
+    );
+  } catch {
+    return {
+      ok: false,
+      recovery: "retain",
+      message:
+        "The prepared lifecycle command could not be authenticated or its recovery window ended. Verify the earlier outcome; do not start a replacement automatically.",
+    };
+  }
+}
+
+/** Dispatch a prepared, exact lifecycle command or recover that command after reload. */
+export async function recoverLifecycleAttempt(
+  scope: LifecycleAttemptScope,
+  recoveryPayload: string,
+  idempotencyKey: string,
+  expectedRecoveryOwner: string,
+): Promise<LifecycleResult> {
+  if (!isLifecycleAttemptScope(scope)) {
+    return {
+      ok: false,
+      recovery: "clear",
+      message: "The stored lifecycle command type is invalid.",
+    };
+  }
+  return dispatchPreparedLifecycle(scope, recoveryPayload, idempotencyKey, expectedRecoveryOwner);
 }
 
 /**

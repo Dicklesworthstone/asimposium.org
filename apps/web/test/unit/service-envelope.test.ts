@@ -1,4 +1,4 @@
-import { describe, expect, test } from "bun:test";
+import { describe, expect, mock, spyOn, test } from "bun:test";
 import { Buffer } from "node:buffer";
 import { readFileSync } from "node:fs";
 import { dirname, join } from "node:path";
@@ -17,6 +17,13 @@ import {
   sha256Hex,
   toHex,
 } from "../../lib/service-envelope.ts";
+import { dispatchSignedSponsorRequest } from "../../lib/stoa-sponsor.ts";
+
+// The production-only marker correctly rejects a direct Bun import. Replacing
+// only that marker lets this unit file exercise the unchanged public server
+// API; no production test seam or client import is introduced.
+mock.module("server-only", () => ({}));
+const { stoaConfigured, stoaMintEnrollment } = await import("../../lib/stoa.ts");
 
 /**
  * S-6 cross-plane auth, apex signing side (asimposiumorg-vw3).
@@ -55,12 +62,80 @@ const vectorNames = Object.keys(corpus.vectors);
 
 const NOW = 1786000000;
 const BODY = '{"focus":"the simply-connected case"}';
+const STOA_ENVIRONMENT_KEYS = [
+  "STOA_ORIGIN",
+  "SERVICE_ENVELOPE_PRIVATE_KEY_HEX",
+  "SERVICE_ENVELOPE_KID",
+  "HOST",
+  "X_FORWARDED_HOST",
+  "X_FORWARDED_PROTO",
+] as const;
+
+type StoaEnvironmentKey = (typeof STOA_ENVIRONMENT_KEYS)[number];
+type StoaEnvironment = Partial<Record<StoaEnvironmentKey, string>>;
+
+async function withStoaEnvironment<T>(
+  values: StoaEnvironment,
+  operation: () => Promise<T>,
+): Promise<T> {
+  const original = new Map<StoaEnvironmentKey, string | undefined>();
+  for (const key of STOA_ENVIRONMENT_KEYS) original.set(key, process.env[key]);
+
+  try {
+    for (const key of STOA_ENVIRONMENT_KEYS) {
+      const value = values[key];
+      if (value === undefined) delete process.env[key];
+      else process.env[key] = value;
+    }
+    return await operation();
+  } finally {
+    for (const key of STOA_ENVIRONMENT_KEYS) {
+      const value = original.get(key);
+      if (value === undefined) delete process.env[key];
+      else process.env[key] = value;
+    }
+  }
+}
 
 async function makeKeypair(): Promise<CryptoKeyPair> {
   return (await crypto.subtle.generateKey({ name: "Ed25519" }, true, [
     "sign",
     "verify",
   ])) as CryptoKeyPair;
+}
+
+interface DispatchCounters {
+  signed: number;
+  readonly destinations: string[];
+}
+
+async function dispatchToConfiguredOrigin(
+  stoaOrigin: unknown,
+  counters: DispatchCounters,
+  insecureLoopbackOrigin?: string,
+): Promise<Response> {
+  const keypair = await makeKeypair();
+  return dispatchSignedSponsorRequest({
+    stoaOrigin: stoaOrigin as string,
+    path: "/v1/sponsor-probe",
+    method: "POST",
+    route: "/v1/sponsor-probe",
+    action: "sponsor.probe",
+    sponsorId: "usr_1",
+    rawBody: BODY,
+    privateKey: keypair.privateKey,
+    kid: "origin-test",
+    now: NOW,
+    ...(insecureLoopbackOrigin === undefined ? {} : { insecureLoopbackOrigin }),
+    mintEnvelopeImpl: async (options) => {
+      counters.signed += 1;
+      return mintServiceEnvelope(options);
+    },
+    fetchImpl: async (input) => {
+      counters.destinations.push(String(input));
+      return new Response(null, { status: 204 });
+    },
+  });
 }
 
 describe("canonicalization agrees with the Worker, byte for byte", () => {
@@ -328,6 +403,167 @@ describe("the session never crosses the seam", () => {
     });
     expect(JSON.stringify(envelope)).not.toContain("do-not-log-this");
     expect(envelope.claims.payload_sha256).toBe(await payloadDigest(secretish));
+  });
+});
+
+describe("configured Stoa origin binding", () => {
+  const production = "https://a.asimposium.org";
+  const staging = "https://a-staging.asimposium.org";
+  const loopback = "http://127.0.0.1:8787";
+
+  test.each([production, staging])("dispatches only to configured trusted HTTPS %s", async (origin) => {
+    const counters: DispatchCounters = { signed: 0, destinations: [] };
+    await expect(dispatchToConfiguredOrigin(origin, counters)).resolves.toMatchObject({ status: 204 });
+    expect(counters.signed).toBe(1);
+    expect(counters.destinations).toEqual([`${origin}/v1/sponsor-probe`]);
+  });
+
+  test("exact configured loopback still requires and accepts its explicit allowance", async () => {
+    const counters: DispatchCounters = { signed: 0, destinations: [] };
+    await expect(dispatchToConfiguredOrigin(loopback, counters, loopback)).resolves.toMatchObject({
+      status: 204,
+    });
+    expect(counters.signed).toBe(1);
+    expect(counters.destinations).toEqual([`${loopback}/v1/sponsor-probe`]);
+  });
+
+  test.each([
+    ["missing", undefined],
+    ["malformed trailing slash", `${production}/`],
+    ["lookalike", "https://a-staging.asimposium.org.evil.invalid"],
+    ["foreign", "https://evil.invalid"],
+  ])("PLANTED: %s origin refuses before signing or fetch", async (_label, origin) => {
+    const counters: DispatchCounters = { signed: 0, destinations: [] };
+    await expect(dispatchToConfiguredOrigin(origin, counters)).rejects.toThrow(
+      "trusted configured origin",
+    );
+    expect(counters.signed).toBe(0);
+    expect(counters.destinations).toEqual([]);
+  });
+
+  test("PLANTED: loopback allowance cannot be used to widen configured HTTPS", async () => {
+    const counters: DispatchCounters = { signed: 0, destinations: [] };
+    await expect(dispatchToConfiguredOrigin(staging, counters, staging)).rejects.toThrow(
+      "limited to plaintext loopback",
+    );
+    expect(counters.signed).toBe(0);
+    expect(counters.destinations).toEqual([]);
+  });
+});
+
+describe("public Agora Stoa origin binding", () => {
+  const staging = "https://a-staging.asimposium.org";
+  const production = "https://a.asimposium.org";
+  const enrollmentId = "ASIMP-EN-ABCDEFGHJK";
+  const enrollmentSecret = `v1.${"A".repeat(43)}`;
+  const signingEnvironment = {
+    SERVICE_ENVELOPE_PRIVATE_KEY_HEX: "11".repeat(32),
+    SERVICE_ENVELOPE_KID: "origin-runtime-test",
+  } as const;
+
+  test.each([
+    ["missing", undefined],
+    ["malformed trailing slash", `${staging}/`],
+  ] as const)("PLANTED: %s STOA_ORIGIN refuses before crypto import or fetch", async (_label, origin) => {
+    const importKeySpy = spyOn(crypto.subtle, "importKey");
+    const fetchSpy = spyOn(globalThis, "fetch").mockRejectedValue(
+      new Error("untrusted Stoa origin must not reach fetch"),
+    );
+
+    try {
+      await withStoaEnvironment(
+        { ...signingEnvironment, STOA_ORIGIN: origin },
+        async () => {
+          await expect(stoaConfigured()).resolves.toBe(false);
+          await expect(
+            stoaMintEnrollment(
+              "usr_origin-runtime-test",
+              { requested_scopes: ["review"] },
+              "origin-runtime-refusal-1",
+            ),
+          ).resolves.toEqual({ ok: false, reason: "unconfigured" });
+        },
+      );
+
+      expect(importKeySpy).not.toHaveBeenCalled();
+      expect(fetchSpy).not.toHaveBeenCalled();
+    } finally {
+      fetchSpy.mockRestore();
+      importKeySpy.mockRestore();
+    }
+  });
+
+  test("configured staging ignores hostile Host-style environment values and fetches only staging", async () => {
+    const importKeySpy = spyOn(crypto.subtle, "importKey");
+    const fetchSpy = spyOn(globalThis, "fetch").mockResolvedValue(new Response(null, { status: 503 }));
+
+    try {
+      await withStoaEnvironment(
+        {
+          ...signingEnvironment,
+          STOA_ORIGIN: staging,
+          HOST: "a.asimposium.org",
+          X_FORWARDED_HOST: "evil.invalid",
+          X_FORWARDED_PROTO: "http",
+        },
+        async () => {
+          await expect(stoaConfigured()).resolves.toBe(true);
+          await expect(
+            stoaMintEnrollment(
+              "usr_origin-runtime-test",
+              { requested_scopes: ["review"] },
+              "origin-runtime-staging-1",
+            ),
+          ).resolves.toEqual({ ok: false, reason: "refused", status: 503 });
+          expect(process.env.HOST).toBe("a.asimposium.org");
+          expect(process.env.X_FORWARDED_HOST).toBe("evil.invalid");
+          expect(process.env.X_FORWARDED_PROTO).toBe("http");
+        },
+      );
+
+      expect(importKeySpy).toHaveBeenCalled();
+      expect(fetchSpy.mock.calls.map(([input]) => String(input))).toEqual([
+        `${staging}/v1/enrollments`,
+      ]);
+    } finally {
+      fetchSpy.mockRestore();
+      importKeySpy.mockRestore();
+    }
+  });
+
+  test("PLANTED: staging rejects a coherent production mint response before it becomes paste data", async () => {
+    const fetchSpy = spyOn(globalThis, "fetch").mockResolvedValue(
+      new Response(
+        JSON.stringify({
+          enrollment_id: enrollmentId,
+          join_url: `${production}/join/${enrollmentId}#${enrollmentSecret}`,
+          secret: enrollmentSecret,
+          expires_at: 1_700_000_000_000,
+        }),
+        { status: 200, headers: { "content-type": "application/json" } },
+      ),
+    );
+
+    try {
+      await withStoaEnvironment(
+        { ...signingEnvironment, STOA_ORIGIN: staging },
+        async () => {
+          const result = await stoaMintEnrollment(
+            "usr_origin-runtime-test",
+            { requested_scopes: ["review"] },
+            "origin-runtime-cross-environment-1",
+          );
+          expect(result).toEqual({ ok: false, reason: "unreachable" });
+          expect("data" in result).toBe(false);
+        },
+      );
+
+      expect(fetchSpy.mock.calls.map(([input]) => String(input))).toEqual([
+        `${staging}/v1/enrollments`,
+      ]);
+    } finally {
+      fetchSpy.mockRestore();
+    }
   });
 });
 

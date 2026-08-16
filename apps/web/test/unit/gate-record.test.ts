@@ -1,4 +1,6 @@
 import { describe, expect, test } from "bun:test";
+import { readFileSync } from "node:fs";
+import { join } from "node:path";
 
 import {
   buildGateRecord,
@@ -8,6 +10,10 @@ import {
 } from "../../scripts/gate-record.ts";
 
 const RUNTIME = { runner: "bun", runnerVersion: "1.3.8" };
+const gateRecordSource = readFileSync(
+  join(import.meta.dir, "../../scripts/gate-record.ts"),
+  "utf8",
+);
 
 describe("scrubDiagnostic — the never-log list (Fable §14.3)", () => {
   test("masks Fellow bearer tokens", () => {
@@ -24,7 +30,7 @@ describe("scrubDiagnostic — the never-log list (Fable §14.3)", () => {
     );
     expect(scrubbed).not.toContain("s3cr3t-material_here");
     expect(scrubbed).toContain("https://a.asimposium.org/join/ASIMP-EN-01JXYZ");
-    expect(scrubbed).toContain("#v1.<redacted>");
+    expect(scrubbed).toBe("https://a.asimposium.org/join/ASIMP-EN-01JXYZ<redacted>");
   });
 
   test("masks secret-shaped environment assignments, keeping the name", () => {
@@ -37,6 +43,29 @@ describe("scrubDiagnostic — the never-log list (Fable §14.3)", () => {
     expect(scrubbed).toContain("AUTH_GOOGLE_SECRET=<redacted>");
     // Non-secret configuration survives, or the output stops being useful.
     expect(scrubbed).toContain("PORT=3000");
+  });
+
+  test.each([
+    [
+      "double-quoted",
+      `AUTH_SECRET="${String.raw`hunter\"2 tail`}" status=fail`,
+      "status=fail",
+    ],
+    [
+      "single-quoted",
+      `AUTH_SECRET='${String.raw`hunter\'2 tail`}' status=pass`,
+      "status=pass",
+    ],
+  ] as const)("PLANTED: %s escaped assignment redacts its complete value", (_label, input, status) => {
+    const scrubbed = scrubDiagnostic(input);
+    expect(scrubbed).toBe(`AUTH_SECRET=<redacted> ${status}`);
+    expect(scrubbed).not.toContain("hunter");
+    expect(scrubbed).not.toContain("2 tail");
+  });
+
+  test("PLANTED: an undelimited quoted-value suffix remains redacted", () => {
+    const input = `AUTH_SECRET="${String.raw`hunter\"2 tail`}"status=fail PORT=3000`;
+    expect(scrubDiagnostic(input)).toBe("AUTH_SECRET=<redacted> PORT=3000");
   });
 
   test("masks local absolute paths on POSIX and Windows", () => {
@@ -56,6 +85,44 @@ describe("scrubDiagnostic — the never-log list (Fable §14.3)", () => {
   test("does not mangle the Stoa origin", () => {
     const text = "writes go to https://a.asimposium.org/v1/sessions";
     expect(scrubDiagnostic(text)).toBe(text);
+  });
+
+  test("uses shared-only credential families and replaces every occurrence", () => {
+    const first = "github_pat_0123456789abcdefghijkl";
+    const second = "sk_live_0123456789abcdefghijkl";
+    const redacted = scrubDiagnostic(`first ${first}; second ${second}; repeat ${first}`);
+    expect(redacted).toBe("first <redacted>; second <redacted>; repeat <redacted>");
+    expect(redacted).not.toContain(first);
+    expect(redacted).not.toContain(second);
+  });
+
+  test("shared labelled fields consume multiword, header, and cookie tails", () => {
+    expect(scrubDiagnostic("directive_body: prove lemma, then reveal witness")).toBe(
+      "directive_body: <redacted>",
+    );
+    expect(scrubDiagnostic("Authorization: Basic YWxhZGRpbjpvcGVuc2VzYW1l status=ok")).toBe(
+      "Authorization: <redacted>",
+    );
+    expect(scrubDiagnostic("Cookie: sid=abc; other=secret; Path=/")).toBe(
+      "Cookie: <redacted>",
+    );
+  });
+
+  test("leaves safe prose and short version identifiers intact", () => {
+    const text =
+      "AUTH_SECRET is a documentation label; Bearer tokens are hashed before storage; pk-3 is a version.";
+    expect(scrubDiagnostic(text)).toBe(text);
+  });
+
+  test("does not retain credential-family regexes now owned by contracts", () => {
+    expect(gateRecordSource).toContain(
+      'import { redactCredentials } from "@asimposium/contracts/diagnostic-safety"',
+    );
+    expect(gateRecordSource).toContain("WEB_CONTEXT_REDACTIONS");
+    expect(gateRecordSource).not.toContain("asimp_ag_[");
+    expect(gateRecordSource).not.toContain("#v1\\.");
+    expect(gateRecordSource).not.toContain("Bearer|Basic");
+    expect(gateRecordSource).not.toContain("github_pat_");
   });
 });
 

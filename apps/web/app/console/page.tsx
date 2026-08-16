@@ -1,11 +1,16 @@
-import type { EnrollmentApprovalCard, SponsorFellowSummary } from "@asimposium/contracts";
-import { ProblemsIndexResponseSchema } from "@asimposium/contracts";
+import type {
+  EnrollmentApprovalCard,
+  SponsorFellowCursor,
+  SponsorFellowSummary,
+} from "@asimposium/contracts";
+import { ProblemsIndexResponseSchema, SponsorFellowCursorSchema } from "@asimposium/contracts";
 import Link from "next/link";
 
 import { auth, signIn } from "@/auth";
 import { LAUNCH_STAGE, SITE } from "@/lib/site";
 import { isCanonicalSponsorId } from "@/lib/sponsor-id";
 import {
+  configuredStoaOrigin,
   stoaBootstrapSponsor,
   stoaConfigured,
   stoaEnrollmentRecoveryOwner,
@@ -14,7 +19,7 @@ import {
   stoaPendingProposals,
 } from "@/lib/stoa";
 
-import { MintCard, ProposalManager } from "./cards";
+import { LifecycleManager, MintCard, ProposalManager } from "./cards";
 
 export const metadata = { title: "Console" };
 
@@ -25,8 +30,18 @@ export const metadata = { title: "Console" };
  */
 
 type HostState = "live" | "unreachable" | "unconfigured" | "refused";
+type ConsoleSearchParams = Promise<{ readonly fellow_cursor?: string | readonly string[] }>;
 
-async function probe(url: string): Promise<string> {
+function requestedFellowCursor(
+  value: string | readonly string[] | undefined,
+): SponsorFellowCursor | undefined {
+  if (typeof value !== "string") return undefined;
+  const parsed = SponsorFellowCursorSchema.safeParse(value);
+  return parsed.success ? parsed.data : undefined;
+}
+
+async function probe(url: string | undefined): Promise<string> {
+  if (url === undefined) return "unconfigured";
   try {
     const res = await fetch(url, {
       cache: "no-store",
@@ -42,9 +57,10 @@ async function probe(url: string): Promise<string> {
  * The ledger row reports a probed count from the public problems index, never
  * a static claim. A parse failure reads as unreachable, not as zero.
  */
-async function probeLedger(): Promise<string> {
+async function probeLedger(stoaOrigin: string | undefined): Promise<string> {
+  if (stoaOrigin === undefined) return "unconfigured";
   try {
-    const res = await fetch(`${SITE.stoa}/problems.json`, {
+    const res = await fetch(`${stoaOrigin}/problems.json`, {
       cache: "no-store",
       signal: AbortSignal.timeout(3_000),
     });
@@ -58,7 +74,8 @@ async function probeLedger(): Promise<string> {
   }
 }
 
-export default async function Console() {
+export default async function Console({ searchParams }: { searchParams: ConsoleSearchParams }) {
+  const fellowCursor = requestedFellowCursor((await searchParams).fellow_cursor);
   const session = await auth();
   const who = session?.user?.name ?? session?.user?.email ?? null;
 
@@ -106,6 +123,7 @@ export default async function Console() {
   }
 
   const sponsorId = isCanonicalSponsorId(session?.user?.id) ? session.user.id : undefined;
+  const stoaOrigin = configuredStoaOrigin();
   const configured = sponsorId !== undefined && (await stoaConfigured());
   const writesConfigured = configured && (await stoaEnrollmentWritesConfigured());
   const recoveryOwner =
@@ -113,9 +131,9 @@ export default async function Console() {
 
   let proposalState: HostState = configured ? "unreachable" : "unconfigured";
   let fellowState: HostState = configured ? "unreachable" : "unconfigured";
-  let refusalDetail: string | undefined;
   let proposals: readonly EnrollmentApprovalCard[] = [];
   let fellows: readonly SponsorFellowSummary[] = [];
+  let nextFellowCursor: SponsorFellowCursor | null = null;
 
   if (configured && sponsorId !== undefined) {
     // Each card reports its own outcome: a failed Fellows call must not hide a
@@ -124,25 +142,22 @@ export default async function Console() {
     // bookkeeping and never blocks the console.
     const [proposalResult, fellowResult] = await Promise.all([
       stoaPendingProposals(sponsorId),
-      stoaFellows(sponsorId),
+      stoaFellows(sponsorId, fellowCursor),
       stoaBootstrapSponsor(sponsorId),
     ]);
     proposalState = proposalResult.ok ? "live" : proposalResult.reason;
     fellowState = fellowResult.ok ? "live" : fellowResult.reason;
     if (proposalResult.ok) proposals = proposalResult.data.proposals;
-    if (fellowResult.ok) fellows = fellowResult.data.fellows;
-    if (!proposalResult.ok && proposalResult.reason === "refused") {
-      refusalDetail = proposalResult.detail;
-    }
-    if (refusalDetail === undefined && !fellowResult.ok && fellowResult.reason === "refused") {
-      refusalDetail = fellowResult.detail;
+    if (fellowResult.ok) {
+      fellows = fellowResult.data.fellows;
+      nextFellowCursor = fellowResult.data.next_cursor;
     }
   }
 
   const [stoa, artifacts, ledger] = await Promise.all([
-    probe(`${SITE.stoa}/internal/health`),
+    probe(stoaOrigin === undefined ? undefined : `${stoaOrigin}/internal/health`),
     probe(SITE.artifacts),
-    probeLedger(),
+    probeLedger(stoaOrigin),
   ]);
 
   return (
@@ -181,7 +196,7 @@ export default async function Console() {
             <dt>Session</dt>
             <dd>
               Host-only cookie on this domain; it is never sent to{" "}
-              <code>{SITE.stoa.replace("https://", "")}</code>
+              <code>{stoaOrigin?.replace(/^https?:\/\//, "") ?? "an unconfigured agent host"}</code>
             </dd>
             <dt>Stage</dt>
             <dd>{LAUNCH_STAGE}</dd>
@@ -235,33 +250,24 @@ export default async function Console() {
           <h2 className="card-title" id="fellows-title">
             Your Fellows
           </h2>
-          {fellowState !== "live" ? (
+          <LifecycleManager
+            key={recoveryOwner ?? "enrollment-writes-unavailable"}
+            fellows={fellows}
+            hostState={fellowState}
+            writesConfigured={writesConfigured && recoveryOwner !== undefined}
+            recoveryOwner={recoveryOwner}
+          />
+          {nextFellowCursor === null ? null : (
             <p className="quiet">
-              {fellowState === "unconfigured"
-                ? "The agent host is not configured on this deployment."
-                : fellowState === "refused"
-                  ? `The agent host refused the list${refusalDetail !== undefined ? `: ${refusalDetail}` : "."}`
-                  : "The Fellows list could not be loaded just now."}
+              <Link href={`/console?fellow_cursor=${encodeURIComponent(nextFellowCursor)}`}>
+                Older Fellows →
+              </Link>
             </p>
-          ) : fellows.length === 0 ? (
+          )}
+          {fellowCursor === undefined ? null : (
             <p className="quiet">
-              None yet. Approved Fellows appear here with their declared model, harness, and granted
-              scopes.
+              <Link href="/console">← Newest Fellows</Link>
             </p>
-          ) : (
-            <ul className="status-rows">
-              {fellows.map((fellow) => (
-                <li key={fellow.name}>
-                  <span>
-                    <strong>{fellow.name}</strong> · {fellow.model} · {fellow.harness} · scopes:{" "}
-                    {fellow.granted_scopes.join(", ")}
-                  </span>
-                  <span className="state">
-                    since {new Date(fellow.granted_at).toLocaleDateString()}
-                  </span>
-                </li>
-              ))}
-            </ul>
           )}
         </section>
 

@@ -68,7 +68,19 @@ export default async function Approve() {
                 The agent host is not configured on this deployment, so codes cannot be checked
                 here. Exact retained decisions remain visible below and are not replaced.
               </p>
-              <DecisionRecoveryList recoveryOwner={recoveryOwner} />
+              {/*
+                Keyed by owner for the same reason the ready branch below is.
+                `recoveryOwner` is an opaque per-sponsor digest, so a session
+                change from owner A to owner B on this tab changes it. Without a
+                key React reconciles the same element at the same position and
+                keeps the list's internal state — A's resolution notice and
+                revision counter — while rendering B's markers. The sentinel is
+                deliberately not hex, so it cannot collide with a real owner.
+              */}
+              <DecisionRecoveryList
+                key={recoveryOwner ?? "enrollment-recovery-unavailable"}
+                recoveryOwner={recoveryOwner}
+              />
             </>
           ) : (
             <>
@@ -89,8 +101,9 @@ export default async function Approve() {
                 </button>
               </form>
               <p className="quiet">
-                Approval requires Google&rsquo;s signed authentication time to be recent. If it remains
-                stale, sign in to your Google Account again, then recheck.
+                Approval requires Google&rsquo;s signed authentication time to be recent. Google
+                does not let this site force account reauthentication; if the evidence remains
+                stale, sign in to your Google Account again and recheck here.
               </p>
               <DeviceApprovalForm
                 key={recoveryOwner ?? "enrollment-writes-unavailable"}

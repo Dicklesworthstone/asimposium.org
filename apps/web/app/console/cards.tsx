@@ -6,6 +6,8 @@ import type {
   MintEnrollmentRequest,
   RequestedScope,
   SponsorEnrollmentDecision,
+  SponsorFellowLifecycleTarget,
+  SponsorFellowSummary,
 } from "@asimposium/contracts";
 import { useRouter } from "next/navigation";
 import {
@@ -19,16 +21,24 @@ import {
 import {
   decideProposal,
   fingerprintEnrollmentAttempt,
+  fingerprintLifecycleAttempt,
   mintJoinUrl,
+  recoverLifecycleAttempt,
   recoverMintJoinUrl,
   recoverProposalDecision,
+  type LifecycleAttemptScope,
+  type LifecycleReceipt,
 } from "./actions";
+import { buildJoinPasteBlock } from "./join-paste";
 import {
   availableSessionStorage,
+  claimEnrollmentRecoveryLock,
   clearEnrollmentAttempt,
   enrollmentAttemptKey,
   enrollmentAttemptsRemain,
+  releaseEnrollmentRecoveryLock,
   retainedEnrollmentAttempts,
+  type EnrollmentAttemptScope,
   type EnrollmentAttemptFallback,
   type RetainedEnrollmentAttempt,
 } from "./idempotency";
@@ -72,6 +82,7 @@ const transientMintDrafts = new Map<string, TransientMintDraft>();
 const transientDecisionDrafts = new Map<string, TransientDecisionDraft>();
 const transientMintAttempts = new Map<string, EnrollmentAttemptFallback>();
 const transientDecisionAttempts = new Map<string, EnrollmentAttemptFallback>();
+const transientLifecycleAttempts = new Map<string, EnrollmentAttemptFallback>();
 
 const subscribeToStaticBrowserState = () => () => undefined;
 
@@ -133,7 +144,7 @@ function decisionDraftsForOwner(
 }
 
 function retainedAttemptsForOwner(
-  scope: "mint" | "decision",
+  scope: EnrollmentAttemptScope,
   fallback: EnrollmentAttemptFallback,
   owner: string | undefined,
   browserStorageReady: boolean,
@@ -287,20 +298,15 @@ export function MintCard({
   }
 
   if (joinUrl !== null) {
-    const pasteBlock = `You are pairing with ASImposium as my agent.
-Your join URL is  ${joinUrl}
-
-1. GET the path only, up to but not including the "#". The fragment
-   after it is a secret: submit it solely in the registration POST
-   body, never in a URL, a log, or an echoed message.
-2. Follow the capsule you get back. Do not invent a token.
-3. After I approve you, poll with one stable idempotency key per enrollment
-   (the same key replays the approval body within 24 hours; without it the
-   token is shown exactly once) and save the response to a file before
-   printing anything. Then GET https://a.asimposium.org/v1/hello
-   and follow next_actions. Prefer session -> pack -> workshop -> promote.
-
-Do not send me a password. I will approve you from a card.`;
+    const pasteBlock = buildJoinPasteBlock(joinUrl);
+    if (pasteBlock === undefined) {
+      return (
+        <p className="quiet" role="alert">
+          The recovered join URL did not pass the trusted-origin check. Do not
+          use it; refresh the console and mint a new enrollment.
+        </p>
+      );
+    }
     return (
       <div aria-live="polite">
         <p>
@@ -819,6 +825,23 @@ function RetainedDecisionRecovery({
   const router = useRouter();
   const [pending, startTransition] = useTransition();
   const [error, setError] = useState<string | null>(null);
+  /**
+   * Synchronous double-submit barrier.
+   *
+   * `pending` is state: it is false until React re-renders after the transition
+   * is scheduled, so two invocations that both run before that render — a
+   * double click, or a synthetic double dispatch — both read `disabled={pending}`
+   * as false and both reach `recoverProposalDecision`. That would issue the same
+   * sealed recovery twice. The lock flips in the same tick as the first call, so
+   * the second returns before any action is issued. `disabled` stays as the
+   * visible affordance; this is the one that actually holds.
+   *
+   * The claim and release live in `idempotency.ts` so they can be driven by a
+   * test without a renderer. A ref is already a `{ current: boolean }` cell, so
+   * the helper takes exactly what this passes — the tested path and the shipped
+   * path are the same code, not two spellings of it.
+   */
+  const inFlight = useRef(false);
 
   return (
     <div className="reduce-panel" role="status">
@@ -831,6 +854,7 @@ function RetainedDecisionRecovery({
         type="button"
         disabled={pending}
         onClick={() => {
+          if (!claimEnrollmentRecoveryLock(inFlight)) return;
           setError(null);
           startTransition(async () => {
             try {
@@ -867,6 +891,12 @@ function RetainedDecisionRecovery({
               setError(
                 "The browser could not reach the recovery action. The exact decision marker remains retained; retry it unchanged.",
               );
+            } finally {
+              // Released on every path, including the retained-error paths above:
+              // a refusal that leaves the marker retained has to stay retryable,
+              // and the barrier exists to collapse concurrent invocations, not to
+              // make the control single-use.
+              releaseEnrollmentRecoveryLock(inFlight);
             }
           });
         }}
@@ -1658,5 +1688,416 @@ export function ProposalCard({
         </p>
       )}
     </li>
+  );
+}
+
+const LIFECYCLE_TARGETS: Readonly<
+  Record<SponsorFellowSummary["status"], readonly SponsorFellowLifecycleTarget[]>
+> = {
+  pending: ["active"],
+  active: ["paused", "revoked", "compromised", "suspicious_review"],
+  paused: ["active", "revoked", "compromised", "suspicious_review"],
+  suspicious_review: ["active", "paused", "revoked", "compromised"],
+  revoked: ["archived"],
+  compromised: ["archived"],
+  archived: [],
+};
+
+const LIFECYCLE_LABELS: Readonly<Record<SponsorFellowLifecycleTarget, string>> = {
+  active: "Resume active",
+  paused: "Pause Fellow",
+  revoked: "Revoke Fellow",
+  archived: "Archive Fellow",
+  compromised: "Mark compromised",
+  suspicious_review: "Mark for suspicious-review",
+};
+
+function lifecycleScopeLabel(scope: LifecycleAttemptScope): string {
+  switch (scope) {
+    case "credential-revoke":
+      return "credential revocation";
+    case "fellow-lifecycle":
+      return "Fellow lifecycle change";
+    case "sponsor-panic":
+      return "sponsor panic";
+  }
+}
+
+function LifecycleReceiptView({ receipt }: { readonly receipt: LifecycleReceipt }) {
+  const detail =
+    receipt.kind === "credential-revoke"
+      ? `Credential ${receipt.credentialId} was revoked for Fellow ${receipt.fellowId}.`
+      : receipt.kind === "fellow-lifecycle"
+        ? `Fellow ${receipt.fellowId} is now ${receipt.status}.`
+        : "All current Fellow credentials were revoked.";
+  return (
+    <div className="reduce-panel" aria-live="polite">
+      <p>{detail}</p>
+      <dl className="facts">
+        <dt>Lifecycle event</dt>
+        <dd>{receipt.eventId}</dd>
+        <dt>Sponsor sequence</dt>
+        <dd>{receipt.sponsorSeq}</dd>
+        <dt>Effective</dt>
+        <dd>{new Date(receipt.effectiveAt).toLocaleString()}</dd>
+      </dl>
+    </div>
+  );
+}
+
+/**
+ * Sponsor-only credential hygiene and Fellow posture controls. The console
+ * lists only existing non-secret projection fields; every mutating command is
+ * sealed before dispatch and recovers with its exact body and idempotency key.
+ */
+export function LifecycleManager({
+  fellows,
+  hostState,
+  writesConfigured,
+  recoveryOwner,
+}: {
+  readonly fellows: readonly SponsorFellowSummary[];
+  readonly hostState: "live" | "unreachable" | "unconfigured" | "refused";
+  readonly writesConfigured: boolean;
+  readonly recoveryOwner?: string;
+}) {
+  const router = useRouter();
+  const browserStorageReady = useBrowserStorageReady();
+  const [pending, startTransition] = useTransition();
+  const [error, setError] = useState<string | null>(null);
+  const [receipt, setReceipt] = useState<LifecycleReceipt | null>(null);
+  const [confirming, setConfirming] = useState<string | null>(null);
+  const [recoveryRevision, setRecoveryRevision] = useState(0);
+  const lifecycleInFlight = useRef(false);
+  const lifecycleAttemptFallback = attemptFallbackForOwner(
+    transientLifecycleAttempts,
+    recoveryOwner,
+  );
+  void recoveryRevision;
+
+  const retained = (
+    ["credential-revoke", "fellow-lifecycle", "sponsor-panic"] as const
+  ).map((scope) => ({
+    scope,
+    state: retainedAttemptsForOwner(
+      scope,
+      lifecycleAttemptFallback,
+      recoveryOwner,
+      browserStorageReady,
+    ),
+  }));
+  const unreadableRecovery = retained.some(({ state }) => state.unreadable);
+  const retainedAttempt = retained.find(({ state }) => state.attempts[0] !== undefined);
+  const recoveryLocked = unreadableRecovery || retainedAttempt !== undefined;
+  const controlsDisabled =
+    pending || !writesConfigured || recoveryOwner === undefined || recoveryLocked;
+
+  const clearAttempt = (
+    scope: LifecycleAttemptScope,
+    fingerprint: string,
+  ): boolean =>
+    clearEnrollmentAttempt(
+      scope,
+      fingerprint,
+      availableSessionStorage(),
+      lifecycleAttemptFallback,
+      recoveryOwner,
+    );
+
+  const settle = (
+    scope: LifecycleAttemptScope,
+    fingerprint: string,
+    result: Awaited<ReturnType<typeof recoverLifecycleAttempt>>,
+  ) => {
+    if (result.ok) {
+      const cleared = clearAttempt(scope, fingerprint);
+      setReceipt(result.receipt);
+      setConfirming(null);
+      setRecoveryRevision((revision) => revision + 1);
+      if (!cleared) {
+        setError(
+          "The lifecycle command was acknowledged, but this tab could not clear its retained marker. Do not begin another safety command in this tab until you reload and recover the exact marker.",
+        );
+      }
+      router.refresh();
+      return;
+    }
+    if (result.recovery === "clear") {
+      const cleared = clearAttempt(scope, fingerprint);
+      setRecoveryRevision((revision) => revision + 1);
+      setError(
+        cleared
+          ? result.message
+          : `${result.message} This tab could not clear the retained marker.`,
+      );
+      return;
+    }
+    setError(result.message);
+  };
+
+  const prepareAndDispatch = (
+    scope: LifecycleAttemptScope,
+    request: unknown,
+  ) => {
+    if (lifecycleInFlight.current) return;
+    lifecycleInFlight.current = true;
+    setError(null);
+    startTransition(async () => {
+      try {
+        if (recoveryOwner === undefined) {
+          throw new Error("This deployment cannot bind lifecycle recovery to this sponsor.");
+        }
+        const proposedIdempotencyKey = `console-${crypto.randomUUID()}`;
+        const prepared = await fingerprintLifecycleAttempt(
+          scope,
+          request,
+          recoveryOwner,
+          proposedIdempotencyKey,
+        );
+        if (!prepared.ok) {
+          setError(prepared.message);
+          return;
+        }
+        const attempt = enrollmentAttemptKey(
+          scope,
+          prepared.fingerprint,
+          prepared.recoveryPayload,
+          prepared.serverNow,
+          availableSessionStorage(),
+          lifecycleAttemptFallback,
+          () => proposedIdempotencyKey,
+          recoveryOwner,
+        );
+        setRecoveryRevision((revision) => revision + 1);
+        const result = await recoverLifecycleAttempt(
+          scope,
+          attempt.recoveryPayload,
+          attempt.key,
+          recoveryOwner,
+        );
+        settle(scope, prepared.fingerprint, result);
+      } catch (cause) {
+        setError(
+          cause instanceof Error
+            ? cause.message
+            : "The browser could not prepare a recoverable lifecycle command. Retry it unchanged.",
+        );
+      } finally {
+        lifecycleInFlight.current = false;
+      }
+    });
+  };
+
+  const recoverExactAttempt = (
+    scope: LifecycleAttemptScope,
+    attempt: RetainedEnrollmentAttempt,
+  ) => {
+    if (lifecycleInFlight.current || recoveryOwner === undefined) return;
+    lifecycleInFlight.current = true;
+    setError(null);
+    startTransition(async () => {
+      try {
+        const result = await recoverLifecycleAttempt(
+          scope,
+          attempt.recoveryPayload,
+          attempt.key,
+          recoveryOwner,
+        );
+        settle(scope, attempt.fingerprint, result);
+      } catch {
+        setError(
+          "The browser could not reach the recovery action. The exact lifecycle marker remains retained; retry it unchanged.",
+        );
+      } finally {
+        lifecycleInFlight.current = false;
+      }
+    });
+  };
+
+  const retainedRecoveryControls = (
+    <>
+      {unreadableRecovery ? (
+        <p className="quiet" role="alert">
+          This tab has an unreadable lifecycle recovery marker. To avoid a conflicting safety command,
+          controls remain locked; verify the earlier outcome before using another tab.
+        </p>
+      ) : null}
+      {retained.map(({ scope, state }) =>
+        state.attempts.map((attempt) => (
+          <div className="reduce-panel" key={`${scope}:${attempt.fingerprint}`} role="status">
+            <p>
+              An exact {lifecycleScopeLabel(scope)} command survived reload as authenticated ciphertext.
+              Recover it before starting another lifecycle command.
+            </p>
+            <button
+              className="btn-quiet"
+              type="button"
+              disabled={pending || recoveryOwner === undefined}
+              onClick={() => recoverExactAttempt(scope, attempt)}
+            >
+              {pending ? "Recovering…" : `Recover exact ${lifecycleScopeLabel(scope)}`}
+            </button>
+          </div>
+        )),
+      )}
+    </>
+  );
+
+  if (hostState !== "live") {
+    return (
+      <div>
+        {retainedRecoveryControls}
+        <p className="quiet">
+          {hostState === "unconfigured"
+            ? "The agent host is not configured on this deployment."
+            : hostState === "refused"
+              ? "The agent host refused the Fellows list."
+              : "The Fellows list could not be loaded just now."}
+        </p>
+      </div>
+    );
+  }
+
+  return (
+    <div>
+      <p className="quiet">
+        Credential revocation, Fellow posture, and sponsor panic require a Google authentication
+        time from the last 15 minutes. The console never renders a credential token or token hash.
+      </p>
+      {!writesConfigured || recoveryOwner === undefined ? (
+        <p className="quiet" role="alert">
+          Lifecycle controls are disabled because this deployment cannot prepare recoverable writes.
+        </p>
+      ) : null}
+      {retainedRecoveryControls}
+      {receipt !== null ? <LifecycleReceiptView receipt={receipt} /> : null}
+      {fellows.length === 0 ? (
+        <p className="quiet">
+          None yet. Approved Fellows appear here with their declared model, harness, and granted scopes.
+        </p>
+      ) : (
+        <ul className="status-rows">
+          {fellows.map((fellow) => (
+            <li key={fellow.fellow_id}>
+              <span>
+                <strong>{fellow.name}</strong> · {fellow.model} · {fellow.harness} · {fellow.status}
+                <br />
+                scopes: {fellow.granted_scopes.join(", ")}
+                {fellow.credentials.length > 0 ? (
+                  <span>
+                    <br />
+                    credentials: {fellow.credentials.map((credential) => (
+                      <span key={credential.credential_id}>
+                        {credential.profile} issued {new Date(credential.issued_at).toLocaleDateString()}
+                        {credential.active ? " · active" : " · inactive"}
+                        {credential.active ? (
+                          <button
+                            className="btn-quiet"
+                            type="button"
+                            disabled={controlsDisabled}
+                            onClick={() =>
+                              setConfirming(
+                                `credential-revoke:${fellow.fellow_id}:${credential.credential_id}`,
+                              )
+                            }
+                          >
+                            Revoke credential
+                          </button>
+                        ) : null}
+                        {confirming ===
+                        `credential-revoke:${fellow.fellow_id}:${credential.credential_id}` ? (
+                          <button
+                            className="btn-quiet"
+                            type="button"
+                            disabled={controlsDisabled}
+                            onClick={() =>
+                              prepareAndDispatch("credential-revoke", {
+                                fellow_id: fellow.fellow_id,
+                                credential_id: credential.credential_id,
+                                confirm: "revoke-credential",
+                              })
+                            }
+                          >
+                            Confirm revocation
+                          </button>
+                        ) : null}{" "}
+                      </span>
+                    ))}
+                  </span>
+                ) : null}
+              </span>
+              <span className="state">
+                since {new Date(fellow.granted_at).toLocaleDateString()}
+                {LIFECYCLE_TARGETS[fellow.status].map((status) => {
+                  const confirmationKey = `fellow-lifecycle:${fellow.fellow_id}:${status}`;
+                  return (
+                    <span key={status}>
+                      <button
+                        className="btn-quiet"
+                        type="button"
+                        disabled={controlsDisabled}
+                        onClick={() => setConfirming(confirmationKey)}
+                      >
+                        {LIFECYCLE_LABELS[status]}
+                      </button>
+                      {confirming === confirmationKey ? (
+                        <button
+                          className="btn-quiet"
+                          type="button"
+                          disabled={controlsDisabled}
+                          onClick={() =>
+                            prepareAndDispatch("fellow-lifecycle", {
+                              fellow_id: fellow.fellow_id,
+                              status,
+                              confirm: "change-fellow-lifecycle",
+                            })
+                          }
+                        >
+                          Confirm {LIFECYCLE_LABELS[status].toLowerCase()}
+                        </button>
+                      ) : null}{" "}
+                    </span>
+                  );
+                })}
+              </span>
+            </li>
+          ))}
+        </ul>
+      )}
+      <div className="reduce-panel">
+        <p>
+          Sponsor panic revokes all current Fellow credentials. It does not expose or recover any
+          credential secret in this console.
+        </p>
+        {confirming === "sponsor-panic" ? (
+          <button
+            className="btn-quiet"
+            type="button"
+            disabled={controlsDisabled}
+            onClick={() =>
+              prepareAndDispatch("sponsor-panic", {
+                confirm: "revoke-all-fellow-credentials",
+              })
+            }
+          >
+            Confirm sponsor panic
+          </button>
+        ) : (
+          <button
+            className="btn-quiet"
+            type="button"
+            disabled={controlsDisabled}
+            onClick={() => setConfirming("sponsor-panic")}
+          >
+            Start sponsor panic confirmation
+          </button>
+        )}
+      </div>
+      {error !== null ? (
+        <p className="quiet" role="alert">
+          {error}
+        </p>
+      ) : null}
+    </div>
   );
 }

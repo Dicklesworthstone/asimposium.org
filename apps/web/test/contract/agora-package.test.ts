@@ -130,6 +130,7 @@ describe("Propylon configuration (Fable §5.1, §14.1) — structural guard", ()
 
 describe("sponsor console trust boundary", () => {
   const stoa = readPackageFile("lib/stoa.ts");
+  const stoaSponsor = readPackageFile("lib/stoa-sponsor.ts");
   const auth = readPackageFile("auth.ts");
   const actions = readPackageFile("app/console/actions.ts");
 
@@ -138,6 +139,38 @@ describe("sponsor console trust boundary", () => {
     expect(stoa).toContain("dispatchSignedSponsorRequest");
     expect(stoa).not.toMatch(/\bfetch\s*\(/);
     expect(stoa).not.toContain("mintServiceEnvelope");
+  });
+
+  test("the configured Stoa origin is closed, environment-only, and cannot fall back to production", () => {
+    const consolePage = readPackageFile("app/console/page.tsx");
+    expect(stoa).toContain("isTrustedStoaOrigin");
+    expect(stoa).toContain("process.env.STOA_ORIGIN");
+    expect(stoa).toContain("const stoaOrigin = configuredStoaOrigin()");
+    expect(stoa).toContain("if (stoaOrigin === undefined) return { ok: false, reason: \"unconfigured\" }");
+    expect(stoa).toContain("stoaOrigin,");
+    expect(stoa).toContain('insecureLoopbackOrigin: stoaOrigin');
+    expect(stoa).toContain("parseStoaJoinUrl(response.join_url)");
+    expect(stoa).toContain("parsedJoinUrl.origin !== stoaOrigin");
+    expect(stoa).not.toContain("SITE.stoa");
+    expect(stoaSponsor).toContain("isTrustedStoaOrigin");
+    expect(stoaSponsor).not.toContain("SITE.stoa");
+    expect(stoaSponsor).toContain("stoaOrigin: string");
+    expect(stoaSponsor).toContain("Insecure Stoa origin allowance must name the configured origin exactly");
+    expect(consolePage).toContain("configuredStoaOrigin");
+    expect(consolePage).toContain("probeLedger(stoaOrigin)");
+    expect(consolePage).toContain("stoaOrigin}/problems.json");
+    expect(consolePage).not.toContain("SITE.stoa}/problems.json");
+    expect(consolePage).not.toContain("SITE.stoa}/internal/health");
+  });
+
+  test("the client join handoff uses the runtime-tested validated-origin renderer", () => {
+    const cards = readPackageFile("app/console/cards.tsx");
+    const joinPaste = readPackageFile("app/console/join-paste.ts");
+    expect(cards).toContain('import { buildJoinPasteBlock } from "./join-paste"');
+    expect(cards).toContain("const pasteBlock = buildJoinPasteBlock(joinUrl)");
+    expect(cards).not.toContain("https://a.asimposium.org/v1/hello");
+    expect(joinPaste).toContain("parseStoaJoinUrl");
+    expect(joinPaste).toContain("stoaHelloUrl(parsed.origin)");
   });
 
   test("validated Google subjects deterministically become opaque Worker sponsor ids", () => {
@@ -231,7 +264,7 @@ describe("sponsor console trust boundary", () => {
     expect(actions).toContain("currentRecoveryOwner === expectedRecoveryOwner");
     expect(
       consolePage.match(/key=\{recoveryOwner \?\? "enrollment-writes-unavailable"\}/g),
-    ).toHaveLength(2);
+    ).toHaveLength(3);
     expect(approvePage).toContain('key={recoveryOwner ?? "enrollment-writes-unavailable"}');
     const approveForm = readPackageFile("app/approve/form.tsx");
     expect(approveForm).toContain("<DecisionRecoveryList");
@@ -287,6 +320,115 @@ describe("sponsor console trust boundary", () => {
     expect(idempotency).toContain("No enrollment write was sent");
   });
 
+  test("lifecycle controls retain exact commands, legal transitions, and non-secret receipts", () => {
+    const cards = readPackageFile("app/console/cards.tsx");
+    const idempotency = readPackageFile("app/console/idempotency.ts");
+    const recovery = readPackageFile("lib/enrollment-recovery.ts");
+    const consolePage = readPackageFile("app/console/page.tsx");
+
+    for (const routeAndAction of [
+      'ROUTE_CREDENTIAL_REVOKE = "/v1/fellows/credentials/revoke"',
+      'ROUTE_FELLOW_LIFECYCLE = "/v1/fellows/lifecycle"',
+      'ROUTE_SPONSOR_PANIC = "/v1/sponsors/panic"',
+      'ACTION_CREDENTIAL_REVOKE = "fellow.credential.revoke"',
+      'ACTION_FELLOW_LIFECYCLE = "fellow.lifecycle.change"',
+      'ACTION_SPONSOR_PANIC = "sponsor.panic"',
+    ]) {
+      expect(stoa).toContain(routeAndAction);
+    }
+    expect(actions).toContain("fingerprintLifecycleAttempt(");
+    expect(actions).toContain("recoverLifecycleAttempt(");
+    expect(actions).toContain("step_up_authenticated_at: stepUpAuthenticatedAt");
+    expect(actions).toContain("SponsorCredentialRevokeRequestSchema.omit");
+    expect(actions).toContain("SponsorFellowLifecycleRequestSchema.omit");
+    expect(actions).toContain("SponsorPanicRequestSchema.omit");
+    expect(cards).toContain("LIFECYCLE_TARGETS");
+    expect(cards).toContain('revoked: ["archived"]');
+    expect(cards).toContain('compromised: ["archived"]');
+    expect(cards).toContain("Confirm sponsor panic");
+    expect(cards).toContain("LifecycleReceiptView");
+    expect(cards).toContain("never renders a credential token or token hash");
+    expect(idempotency).toContain('"credential-revoke"');
+    expect(idempotency).toContain('"fellow-lifecycle"');
+    expect(idempotency).toContain('"sponsor-panic"');
+    expect(recovery).toContain('"credential-revoke"');
+    expect(recovery).toContain('"fellow-lifecycle"');
+    expect(recovery).toContain('"sponsor-panic"');
+    expect(consolePage).toContain("<LifecycleManager");
+  });
+
+  test("Fellow history stays server-mediated and continuation does not fork lifecycle controls", () => {
+    const consolePage = readPackageFile("app/console/page.tsx");
+
+    expect(stoa).toContain('ROUTE_FELLOWS_AFTER = "/v1/fellows/after/:cursor"');
+    expect(stoa).toContain('action: ACTION_FELLOWS');
+    expect(stoa).toContain(
+      `path: cursor === undefined ? ROUTE_FELLOWS : \`/v1/fellows/after/\${cursor}\``,
+    );
+    expect(stoa).toContain("SponsorFellowCursorSchema.parse(after)");
+    expect(consolePage).toContain("SponsorFellowCursorSchema.safeParse(value)");
+    expect(consolePage).toContain("stoaFellows(sponsorId, fellowCursor)");
+    expect(consolePage).toContain("nextFellowCursor = fellowResult.data.next_cursor");
+    expect(consolePage).toContain(`/console?fellow_cursor=\${encodeURIComponent(nextFellowCursor)}`);
+    expect(consolePage).toContain('href="/console"');
+    expect(consolePage).toContain("<LifecycleManager");
+    expect(consolePage).not.toContain("prepareAndDispatch(");
+  });
+
+  test("PLANTED: a retained lifecycle retry remains actionable when the Fellows read is non-live", () => {
+    const cards = readPackageFile("app/console/cards.tsx");
+    const managerStart = cards.indexOf("export function LifecycleManager");
+    const recoveryControlsStart = cards.indexOf(
+      "const retainedRecoveryControls = (",
+      managerStart,
+    );
+    const nonLiveStart = cards.indexOf('if (hostState !== "live")', managerStart);
+    const normalLiveReturn = cards.indexOf("\n  return (\n    <div>", nonLiveStart);
+    const nonLiveBranch = cards.slice(nonLiveStart, normalLiveReturn);
+    const recoveryControls = cards.slice(recoveryControlsStart, nonLiveStart);
+    const settleStart = cards.indexOf("const settle = (", managerStart);
+    const prepareStart = cards.indexOf("const prepareAndDispatch = (", settleStart);
+    const settle = cards.slice(settleStart, prepareStart);
+    const recoverExactStart = cards.indexOf(
+      "const recoverExactAttempt = (",
+      managerStart,
+    );
+    const recoverExact = cards.slice(recoverExactStart, recoveryControlsStart);
+
+    for (const position of [
+      managerStart,
+      recoveryControlsStart,
+      nonLiveStart,
+      normalLiveReturn,
+      settleStart,
+      prepareStart,
+      recoverExactStart,
+    ]) {
+      expect(position).toBeGreaterThanOrEqual(0);
+    }
+    expect(recoveryControlsStart).toBeLessThan(nonLiveStart);
+    expect(nonLiveBranch).toContain("{retainedRecoveryControls}");
+    expect(recoveryControls).toContain("state.attempts.map((attempt) => (");
+    expect(recoveryControls).toContain("recoverExactAttempt(scope, attempt)");
+    expect(recoveryControls).toContain(
+      "disabled={pending || recoveryOwner === undefined}",
+    );
+    expect(nonLiveBranch).not.toContain("fellows.map(");
+    expect(nonLiveBranch).not.toContain("prepareAndDispatch(");
+    expect(nonLiveBranch).not.toContain("Start sponsor panic confirmation");
+
+    expect(recoverExact).toContain("recoverLifecycleAttempt(");
+    expect(recoverExact).toContain("attempt.recoveryPayload");
+    expect(recoverExact).toContain("attempt.key");
+    expect(recoverExact).toContain("settle(scope, attempt.fingerprint, result)");
+    const clear = settle.indexOf("const cleared = clearAttempt(scope, fingerprint)");
+    const receipt = settle.indexOf("setReceipt(result.receipt)");
+    const refresh = settle.indexOf("router.refresh()");
+    expect(clear).toBeGreaterThanOrEqual(0);
+    expect(receipt).toBeGreaterThan(clear);
+    expect(refresh).toBeGreaterThan(receipt);
+  });
+
   test("the evidence-refresh buttons use only Google's supported account chooser", () => {
     const consolePage = readPackageFile("app/console/page.tsx");
     const approvePage = readPackageFile("app/approve/page.tsx");
@@ -297,6 +439,86 @@ describe("sponsor console trust boundary", () => {
       expect(page).toContain("Recheck Google authentication");
       expect(page).toContain("signed authentication time");
     }
+  });
+
+  /**
+   * Owner-scoped recovery state must not survive a sponsor change on one tab.
+   *
+   * `recoveryOwner` is an opaque per-sponsor digest, so owner A → owner B moves
+   * it. React reconciles by position and element type: an unkeyed component in
+   * the same slot keeps its internal state across that change, which would show
+   * A's resolution notice above B's markers. Every approve branch that renders
+   * recovery UI is therefore keyed by owner.
+   *
+   * These are source assertions, not a mounted render — this package has no DOM
+   * test runtime, and `cards.tsx` cannot be imported by a test because it pulls
+   * the `"use server"` action module. They pin the keying and the barrier's
+   * ordering; they do not execute React's reconciler or a real double click.
+   */
+  test("every approve branch that renders recovery UI is keyed by recovery owner", () => {
+    const approve = readPackageFile("app/approve/page.tsx");
+    const deviceForm = readPackageFile("app/approve/form.tsx");
+
+    // Both keyed components, with their sentinels captured from the source
+    // rather than restated here — asserting a literal this test typed would
+    // prove nothing about the page.
+    const keyed = [
+      ...approve.matchAll(
+        /<(DecisionRecoveryList|DeviceApprovalForm)\s+key=\{recoveryOwner \?\? "([^"]+)"\}/gu,
+      ),
+    ];
+    // Branch 2 renders the list directly; branch 3 renders the form, and the
+    // list it nests remounts with it, so the inner element needs no key.
+    expect(keyed.map((match) => match[1]).sort()).toEqual([
+      "DecisionRecoveryList",
+      "DeviceApprovalForm",
+    ]);
+    expect(deviceForm).toContain("<DecisionRecoveryList");
+    for (const match of keyed) {
+      const sentinel = match[2] ?? "";
+      // A real owner is a 64-hex digest, so a non-hex sentinel cannot collide
+      // with one and be mistaken for a genuine owner scope.
+      expect(sentinel).not.toMatch(/^[a-f0-9]{64}$/u);
+      expect(sentinel.length).toBeGreaterThan(0);
+    }
+    // Distinct sentinels, so the two branches cannot share a reconciliation slot.
+    expect(new Set(keyed.map((match) => match[2])).size).toBe(2);
+    // Branch 1 is signed-out and renders no recovery surface to key.
+    expect(approve).toContain("Approving an agent is a sponsor act");
+    // No unkeyed recovery list may reappear on the approve page.
+    expect(approve).not.toMatch(/<DecisionRecoveryList\s+recoveryOwner=/u);
+  });
+
+  test("the retained-decision recovery control has a synchronous double-submit barrier", () => {
+    const cards = readPackageFile("app/console/cards.tsx");
+    const claimAt = cards.indexOf("if (!claimEnrollmentRecoveryLock(inFlight)) return;");
+    const dispatchAt = cards.indexOf("await recoverProposalDecision(");
+    const releaseAt = cards.indexOf("releaseEnrollmentRecoveryLock(inFlight);");
+
+    // The barrier is a ref, so it flips in the same tick. `pending` is state and
+    // is still false for a second invocation that runs before the next render,
+    // which is why `disabled` alone cannot hold this.
+    expect(cards).toContain("const inFlight = useRef(false);");
+    expect(claimAt).toBeGreaterThan(-1);
+    // Claim before dispatch, or two invocations both reach the action.
+    expect(claimAt).toBeLessThan(dispatchAt);
+    // Released after the action, on every path, so a retained refusal stays
+    // retryable rather than making the control single-use.
+    expect(releaseAt).toBeGreaterThan(dispatchAt);
+    // Exactly one claim and one release: a second pair elsewhere would mean
+    // another path could hold or drop the same barrier.
+    expect(cards.match(/claimEnrollmentRecoveryLock\(/gu)).toHaveLength(1);
+    expect(cards.match(/releaseEnrollmentRecoveryLock\(/gu)).toHaveLength(1);
+    // The lock body itself is not inline here. That is what makes the unit test
+    // in `test/unit/console-idempotency.test.ts` a test of the shipped path
+    // rather than of a second spelling that could drift from it.
+    expect(cards).not.toContain("inFlight.current = true");
+    expect(cards).not.toContain("inFlight.current = false");
+    expect(readPackageFile("app/console/idempotency.ts")).toContain(
+      "export function claimEnrollmentRecoveryLock(cell: { current: boolean }): boolean {",
+    );
+    // The visible affordance stays, but it is no longer the only guard.
+    expect(cards).toContain("disabled={pending}");
   });
 
   test("the console exposes state changes and expandable controls to assistive technology", () => {

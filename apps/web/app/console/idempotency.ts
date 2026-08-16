@@ -3,7 +3,12 @@ import { enrollmentRecoveryPayloadIsValid } from "@/lib/enrollment-recovery";
 const MAX_RETAINED_ATTEMPTS = 8;
 const ATTEMPT_REPLAY_WINDOW_MS = 24 * 60 * 60 * 1_000;
 
-export type EnrollmentAttemptScope = "mint" | "decision";
+export type EnrollmentAttemptScope =
+  | "mint"
+  | "decision"
+  | "credential-revoke"
+  | "fellow-lifecycle"
+  | "sponsor-panic";
 
 export interface EnrollmentAttemptStorage {
   getItem(key: string): string | null;
@@ -355,4 +360,28 @@ export function enrollmentRecoveryMarkersMayRemain(
   } catch {
     return true;
   }
+}
+
+/**
+ * Claim the single-flight lock guarding one retained enrollment recovery.
+ *
+ * `useTransition`'s `pending` is state, so it stays false for any invocation
+ * that runs before the next render: a double click issues the same sealed
+ * recovery twice, and a one-time enrollment result is not something to issue
+ * twice. This flips in the same tick as the first caller, so a second caller is
+ * turned away before any action is dispatched.
+ *
+ * The cell is a plain `{ current: boolean }` rather than a React ref type, so
+ * the lock is testable without a renderer while remaining exactly what the
+ * component passes. Callers must release it in a `finally`, or a refusal that
+ * leaves the marker retained would stop being retryable.
+ */
+export function claimEnrollmentRecoveryLock(cell: { current: boolean }): boolean {
+  if (cell.current) return false;
+  cell.current = true;
+  return true;
+}
+
+export function releaseEnrollmentRecoveryLock(cell: { current: boolean }): void {
+  cell.current = false;
 }

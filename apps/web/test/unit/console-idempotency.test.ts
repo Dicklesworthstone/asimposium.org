@@ -1,10 +1,13 @@
 import { expect, test } from "bun:test";
 
 import {
+  claimEnrollmentRecoveryLock,
   clearEnrollmentAttempt,
   enrollmentAttemptKey as prepareEnrollmentAttemptKey,
   enrollmentAttemptsRemain,
   enrollmentRecoveryMarkersMayRemain,
+  releaseEnrollmentRecoveryLock,
+  type EnrollmentAttemptScope,
   type EnrollmentAttemptFallback,
   type EnrollmentAttemptStorage,
 } from "../../app/console/idempotency.ts";
@@ -45,7 +48,7 @@ const NOW = 1_786_000_000_000;
 const RECOVERY_PAYLOAD = `v1.${"A".repeat(16)}.${"B".repeat(22)}`;
 
 function enrollmentAttemptKey(
-  scope: "mint" | "decision",
+  scope: EnrollmentAttemptScope,
   fingerprint: string,
   serverNow: number,
   storage: EnrollmentAttemptStorage | null | undefined,
@@ -152,6 +155,49 @@ test("editing away and back preserves each fingerprint key, while success clears
   );
   expect(b2.key).toBe("console-key-2");
   expect(a3.key).toBe("console-key-3");
+});
+
+test("lifecycle recovery reuses only the exact command scope and key", () => {
+  const storage = new MemoryStorage();
+  const revoke = enrollmentAttemptKey(
+    "credential-revoke",
+    FINGERPRINT_A,
+    NOW,
+    storage,
+    new Map(),
+    () => "console-revoke",
+    OWNER_A,
+  );
+  const replay = enrollmentAttemptKey(
+    "credential-revoke",
+    FINGERPRINT_A,
+    NOW + 1,
+    storage,
+    new Map(),
+    () => {
+      throw new Error("exact lifecycle replay minted a replacement key");
+    },
+    OWNER_A,
+  );
+  const transition = enrollmentAttemptKey(
+    "fellow-lifecycle",
+    FINGERPRINT_A,
+    NOW + 1,
+    storage,
+    new Map(),
+    () => "console-transition",
+    OWNER_A,
+  );
+
+  expect(replay).toEqual(revoke);
+  expect(transition.key).toBe("console-transition");
+  expect(transition.key).not.toBe(revoke.key);
+  expect(
+    clearEnrollmentAttempt("credential-revoke", FINGERPRINT_A, storage, new Map(), OWNER_A),
+  ).toBe(true);
+  expect(
+    enrollmentAttemptsRemain("fellow-lifecycle", storage, new Map(), OWNER_A),
+  ).toBe(true);
 });
 
 test("an edit-back hit remains recoverable when the bounded cache is full", () => {
@@ -602,4 +648,59 @@ test("one sponsor cannot consume or clear another sponsor's recovery capacity", 
   expect(enrollmentAttemptsRemain("mint", storage, new Map(), OWNER_A)).toBe(
     true,
   );
+});
+
+/**
+ * The synchronous barrier behind the retained-decision recovery control.
+ *
+ * Deferred on purpose: both invocations happen before anything releases, which
+ * is exactly the window `useTransition`'s `pending` leaves open — it is still
+ * false until React re-renders, so a double click reaches the action twice and
+ * issues the same sealed one-time recovery twice.
+ *
+ * This drives the same functions `cards.tsx` calls, on the same
+ * `{ current: boolean }` shape a ref already is, so it is the shipped path
+ * rather than a second spelling of it.
+ */
+test("two recovery invocations before release admit exactly one", () => {
+  const cell = { current: false };
+  let dispatched = 0;
+  const invoke = () => {
+    if (!claimEnrollmentRecoveryLock(cell)) return;
+    dispatched += 1;
+  };
+
+  invoke();
+  invoke();
+
+  expect(dispatched).toBe(1);
+  expect(cell.current).toBe(true);
+});
+
+test("releasing the recovery lock readmits a retry", () => {
+  const cell = { current: false };
+
+  // A refusal that leaves the marker retained has to stay retryable, so the
+  // barrier must collapse concurrent invocations without making the control
+  // single-use.
+  expect(claimEnrollmentRecoveryLock(cell)).toBe(true);
+  expect(claimEnrollmentRecoveryLock(cell)).toBe(false);
+
+  releaseEnrollmentRecoveryLock(cell);
+  expect(cell.current).toBe(false);
+  expect(claimEnrollmentRecoveryLock(cell)).toBe(true);
+  // Still one at a time after the retry is admitted.
+  expect(claimEnrollmentRecoveryLock(cell)).toBe(false);
+});
+
+test("recovery locks are per-cell, so one retained decision cannot block another", () => {
+  const first = { current: false };
+  const second = { current: false };
+
+  expect(claimEnrollmentRecoveryLock(first)).toBe(true);
+  // No module-level state: a second retained attempt renders its own control
+  // with its own ref and must still be recoverable while the first is in flight.
+  expect(claimEnrollmentRecoveryLock(second)).toBe(true);
+  expect(claimEnrollmentRecoveryLock(first)).toBe(false);
+  expect(claimEnrollmentRecoveryLock(second)).toBe(false);
 });

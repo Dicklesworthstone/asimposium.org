@@ -3,18 +3,31 @@ import "server-only";
 import {
   type DeviceLookupResponse,
   DeviceLookupResponseSchema,
+  isTrustedStoaOrigin,
   type MintEnrollmentRequest,
   type MintEnrollmentResponse,
   MintEnrollmentResponseSchema,
   type ProblemCode,
   ProblemDocumentSchema,
+  parseStoaJoinUrl,
   type SponsorBootstrapResponse,
   SponsorBootstrapResponseSchema,
+  type SponsorCredentialRevokeRequest,
+  type SponsorCredentialRevokeResponse,
+  SponsorCredentialRevokeResponseSchema,
   type SponsorEnrollmentDecisionCommand,
   type SponsorEnrollmentDecisionResponse,
   SponsorEnrollmentDecisionResponseSchema,
+  type SponsorFellowCursor,
+  SponsorFellowCursorSchema,
+  type SponsorFellowLifecycleRequest,
+  type SponsorFellowLifecycleResponse,
+  SponsorFellowLifecycleResponseSchema,
   type SponsorFellowListResponse,
   SponsorFellowListResponseSchema,
+  type SponsorPanicRequest,
+  type SponsorPanicResponse,
+  SponsorPanicResponseSchema,
   type SponsorProposalListResponse,
   SponsorProposalListResponseSchema,
 } from "@asimposium/contracts";
@@ -41,6 +54,10 @@ const ROUTE_MINT = "/v1/enrollments";
 const ROUTE_PROPOSALS = "/v1/enrollments/proposals";
 const ROUTE_DECISION = "/v1/enrollments/:enrollmentId/decision";
 const ROUTE_FELLOWS = "/v1/fellows";
+const ROUTE_FELLOWS_AFTER = "/v1/fellows/after/:cursor";
+const ROUTE_CREDENTIAL_REVOKE = "/v1/fellows/credentials/revoke";
+const ROUTE_FELLOW_LIFECYCLE = "/v1/fellows/lifecycle";
+const ROUTE_SPONSOR_PANIC = "/v1/sponsors/panic";
 const ROUTE_BOOTSTRAP = "/v1/sponsors/bootstrap";
 const ROUTE_DEVICE_LOOKUP = "/v1/device-lookup";
 
@@ -48,6 +65,9 @@ const ACTION_MINT = "enrollment.mint";
 const ACTION_PROPOSALS = "enrollment.proposals.list";
 const ACTION_DECIDE = "enrollment.decide";
 const ACTION_FELLOWS = "fellows.list";
+const ACTION_CREDENTIAL_REVOKE = "fellow.credential.revoke";
+const ACTION_FELLOW_LIFECYCLE = "fellow.lifecycle.change";
+const ACTION_SPONSOR_PANIC = "sponsor.panic";
 const ACTION_BOOTSTRAP = "sponsor.bootstrap";
 const ACTION_DEVICE_LOOKUP = "enrollment.device.lookup";
 
@@ -65,6 +85,17 @@ export type StoaCall<T> =
 interface StoaSigningConfig {
   readonly privateKey: CryptoKey;
   readonly kid: string;
+}
+
+/**
+ * Resolve the sole Worker origin for this server process. It is intentionally
+ * environment-only: request Host and forwarding headers are attacker input.
+ * There is no production fallback, so a preview with no explicit origin cannot
+ * accidentally sign or fetch against production.
+ */
+export function configuredStoaOrigin(): string | undefined {
+  const origin = process.env.STOA_ORIGIN;
+  return isTrustedStoaOrigin(origin) ? origin : undefined;
 }
 
 async function signingConfig(): Promise<StoaSigningConfig | undefined> {
@@ -110,11 +141,14 @@ async function callStoa<T>(options: {
   /** The exact body bytes — signed and sent, never reserialized. */
   readonly body: string;
   readonly idempotencyKey?: string;
-  readonly parse: (value: unknown) => T;
+  /** Parse the response while retaining the exact origin used for this request. */
+  readonly parse: (value: unknown, stoaOrigin: string) => T;
 }): Promise<StoaCall<T>> {
   if (!isCanonicalSponsorId(options.principalId)) {
     return { ok: false, reason: "unconfigured" };
   }
+  const stoaOrigin = configuredStoaOrigin();
+  if (stoaOrigin === undefined) return { ok: false, reason: "unconfigured" };
   const config = await signingConfig();
   if (config === undefined) return { ok: false, reason: "unconfigured" };
 
@@ -129,6 +163,8 @@ async function callStoa<T>(options: {
       rawBody: options.body,
       privateKey: config.privateKey,
       kid: config.kid,
+      stoaOrigin,
+      ...(stoaOrigin.startsWith("http://127.0.0.1:") ? { insecureLoopbackOrigin: stoaOrigin } : {}),
       now: Math.floor(Date.now() / 1_000),
       timeoutMs: 8_000,
       idempotencyKey: options.idempotencyKey,
@@ -146,21 +182,22 @@ async function callStoa<T>(options: {
     };
   }
   try {
-    return { ok: true, data: options.parse(await response.json()) };
+    return { ok: true, data: options.parse(await response.json(), stoaOrigin) };
   } catch {
     // A 2xx that does not parse to the contract is a host failure, not data.
     return { ok: false, reason: "unreachable" };
   }
 }
 
-/** True when this deployment holds an envelope signing key (production does; preview never must). */
+/** True only when this deployment has a trusted configured origin and signing key. */
 export async function stoaConfigured(): Promise<boolean> {
-  return (await signingConfig()) !== undefined;
+  return configuredStoaOrigin() !== undefined && (await signingConfig()) !== undefined;
 }
 
 /** True when sponsor writes have both signing and stable recovery-key configuration. */
 export async function stoaEnrollmentWritesConfigured(): Promise<boolean> {
   return (
+    configuredStoaOrigin() !== undefined &&
     (await signingConfig()) !== undefined &&
     enrollmentRecoveryConfigurationIsValid(
       process.env.ENROLLMENT_RECOVERY_HMAC_KEY_HEX,
@@ -172,6 +209,7 @@ export async function stoaEnrollmentWritesConfigured(): Promise<boolean> {
 /** Opaque sponsor binding for client-memory recovery; never exposes the sponsor id itself. */
 export async function stoaEnrollmentRecoveryOwner(sponsorId: string): Promise<string | undefined> {
   if (!isCanonicalSponsorId(sponsorId)) return undefined;
+  if (configuredStoaOrigin() === undefined) return undefined;
   const rootHex = process.env.ENROLLMENT_RECOVERY_HMAC_KEY_HEX;
   if (
     !enrollmentRecoveryConfigurationIsValid(rootHex, process.env.SERVICE_ENVELOPE_PRIVATE_KEY_HEX)
@@ -199,7 +237,14 @@ export function stoaMintEnrollment(
     principalId,
     body,
     idempotencyKey,
-    parse: (value) => MintEnrollmentResponseSchema.parse(value),
+    parse: (value, stoaOrigin) => {
+      const response = MintEnrollmentResponseSchema.parse(value);
+      const parsedJoinUrl = parseStoaJoinUrl(response.join_url);
+      if (parsedJoinUrl === undefined || parsedJoinUrl.origin !== stoaOrigin) {
+        throw new TypeError("mint response join URL must name the dispatched Stoa origin");
+      }
+      return response;
+    },
   });
 }
 
@@ -235,15 +280,70 @@ export function stoaDecideProposal(
   });
 }
 
-export function stoaFellows(principalId: string): Promise<StoaCall<SponsorFellowListResponse>> {
+export function stoaFellows(
+  principalId: string,
+  after?: SponsorFellowCursor,
+): Promise<StoaCall<SponsorFellowListResponse>> {
+  const cursor = after === undefined ? undefined : SponsorFellowCursorSchema.parse(after);
   return callStoa({
     method: "GET",
-    route: ROUTE_FELLOWS,
-    path: ROUTE_FELLOWS,
+    route: cursor === undefined ? ROUTE_FELLOWS : ROUTE_FELLOWS_AFTER,
+    path: cursor === undefined ? ROUTE_FELLOWS : `/v1/fellows/after/${cursor}`,
     action: ACTION_FELLOWS,
     principalId,
     body: "",
     parse: (value) => SponsorFellowListResponseSchema.parse(value),
+  });
+}
+
+export function stoaRevokeCredential(
+  principalId: string,
+  request: SponsorCredentialRevokeRequest,
+  idempotencyKey: string,
+): Promise<StoaCall<SponsorCredentialRevokeResponse>> {
+  return callStoa({
+    method: "POST",
+    route: ROUTE_CREDENTIAL_REVOKE,
+    path: ROUTE_CREDENTIAL_REVOKE,
+    action: ACTION_CREDENTIAL_REVOKE,
+    principalId,
+    body: JSON.stringify(request),
+    idempotencyKey,
+    parse: (value) => SponsorCredentialRevokeResponseSchema.parse(value),
+  });
+}
+
+export function stoaTransitionFellow(
+  principalId: string,
+  request: SponsorFellowLifecycleRequest,
+  idempotencyKey: string,
+): Promise<StoaCall<SponsorFellowLifecycleResponse>> {
+  return callStoa({
+    method: "POST",
+    route: ROUTE_FELLOW_LIFECYCLE,
+    path: ROUTE_FELLOW_LIFECYCLE,
+    action: ACTION_FELLOW_LIFECYCLE,
+    principalId,
+    body: JSON.stringify(request),
+    idempotencyKey,
+    parse: (value) => SponsorFellowLifecycleResponseSchema.parse(value),
+  });
+}
+
+export function stoaPanicSponsor(
+  principalId: string,
+  request: SponsorPanicRequest,
+  idempotencyKey: string,
+): Promise<StoaCall<SponsorPanicResponse>> {
+  return callStoa({
+    method: "POST",
+    route: ROUTE_SPONSOR_PANIC,
+    path: ROUTE_SPONSOR_PANIC,
+    action: ACTION_SPONSOR_PANIC,
+    principalId,
+    body: JSON.stringify(request),
+    idempotencyKey,
+    parse: (value) => SponsorPanicResponseSchema.parse(value),
   });
 }
 

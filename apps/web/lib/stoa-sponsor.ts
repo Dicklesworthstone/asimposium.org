@@ -13,8 +13,9 @@
  * out of this transport prevents an Agora convenience layer from becoming a
  * second writer or validator.
  */
+import { isTrustedStoaOrigin } from "@asimposium/contracts";
+
 import { mintServiceEnvelope, serviceEnvelopeHeaders } from "./service-envelope";
-import { SITE } from "./site";
 
 /** The only fetch shape this sealed transport needs: a fully resolved Stoa URL. */
 export type StoaFetch = (input: string, init: RequestInit) => Promise<Response>;
@@ -29,21 +30,12 @@ export const DEFAULT_STOA_TIMEOUT_MS = 10_000;
 export const MAX_STOA_TIMEOUT_MS = 60_000;
 
 /**
- * The one deliberate exception to the pinned production origin, for a local
- * staging or test Worker. It is not a boolean: the caller must name the exact
- * origin it is permitting, that origin must equal `stoaOrigin`, and it must be
- * plaintext loopback. A misconfigured production environment variable
- * therefore cannot silently redirect a signed envelope to another HTTPS host.
+ * Signed dispatch stays within the exact environment-configured Stoa origin.
+ * Plaintext is permitted only for an explicitly matching local loopback Worker.
  */
-const LOOPBACK_HOSTNAMES = new Set(["localhost", "127.0.0.1", "[::1]"]);
-
 export interface DispatchSignedSponsorRequestOptions {
-  /**
-   * Origin of the Worker plane. Omit in production: the canonical Stoa origin
-   * is pinned in `SITE`. The only accepted override is the exact plaintext
-   * loopback origin named by `insecureLoopbackOrigin` for local integration.
-   */
-  stoaOrigin?: string;
+  /** Exact environment-configured Worker origin, validated by shared contracts. */
+  stoaOrigin: string;
   /** Absolute Worker path. It must stay on `stoaOrigin`. */
   path: string;
   /** HTTP method bound by the envelope. */
@@ -122,41 +114,32 @@ function resolveTimeoutMs(timeoutMs: number | undefined): number {
 }
 
 /**
- * The destination must be the trusted HTTPS Stoa origin, or the exact
- * plaintext loopback origin the caller explicitly named.  Everything else —
- * plaintext remote hosts, `file:`, `data:`, an origin carrying credentials —
- * fails closed here, before a signature exists to be replayed elsewhere.
+ * The destination must be one of the shared contract's trusted origins. Exact
+ * plaintext loopback additionally needs an explicit matching allowance.
+ * Everything else fails closed here, before a signature exists to be replayed.
  */
-function assertTrustedStoaOrigin(origin: URL, insecureLoopbackOrigin: string | undefined): void {
-  if (origin.origin === SITE.stoa) return;
-  if (insecureLoopbackOrigin === undefined) {
-    throw new TypeError("Stoa origin must be the canonical Worker origin");
+function assertTrustedStoaOrigin(
+  stoaOrigin: string,
+  insecureLoopbackOrigin: string | undefined,
+): URL {
+  if (!isTrustedStoaOrigin(stoaOrigin)) {
+    throw new TypeError("Stoa origin is not a trusted configured origin");
   }
-  let declared: URL;
-  try {
-    declared = new URL(insecureLoopbackOrigin);
-  } catch {
-    throw new TypeError("Insecure Stoa origin allowance must be an absolute origin");
+  const origin = new URL(stoaOrigin);
+  if (origin.protocol === "https:") {
+    if (insecureLoopbackOrigin !== undefined) {
+      throw new TypeError("Insecure Stoa origin allowance is limited to plaintext loopback");
+    }
+    return origin;
   }
-  if (
-    declared.pathname !== "/" ||
-    declared.search !== "" ||
-    declared.hash !== "" ||
-    declared.username !== "" ||
-    declared.password !== ""
-  ) {
-    throw new TypeError("Insecure Stoa origin allowance must contain only an origin");
-  }
-  if (declared.origin !== origin.origin) {
+  if (insecureLoopbackOrigin !== stoaOrigin) {
     throw new TypeError("Insecure Stoa origin allowance must name the configured origin exactly");
   }
-  if (origin.protocol !== "http:" || !LOOPBACK_HOSTNAMES.has(origin.hostname)) {
-    throw new TypeError("Insecure Stoa origin allowance is limited to plaintext loopback");
-  }
+  return origin;
 }
 
 function stoaRequestUrl(
-  stoaOrigin: string | undefined,
+  stoaOrigin: string,
   path: string,
   insecureLoopbackOrigin: string | undefined,
 ): string {
@@ -164,17 +147,7 @@ function stoaRequestUrl(
     throw new TypeError("Stoa request path must be an absolute path on the configured origin");
   }
 
-  const origin = new URL(stoaOrigin ?? SITE.stoa);
-  if (
-    origin.pathname !== "/" ||
-    origin.search !== "" ||
-    origin.hash !== "" ||
-    origin.username !== "" ||
-    origin.password !== ""
-  ) {
-    throw new TypeError("Stoa origin must contain only an origin");
-  }
-  assertTrustedStoaOrigin(origin, insecureLoopbackOrigin);
+  const origin = assertTrustedStoaOrigin(stoaOrigin, insecureLoopbackOrigin);
   const destination = new URL(path, origin);
   if (
     destination.origin !== origin.origin ||
