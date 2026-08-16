@@ -550,6 +550,53 @@ SELECT 0
                 )
               )
         )
+        OR EXISTS (
+          SELECT 1
+            FROM json_each(enrollment.requested_resources_json) requested_resource
+           WHERE requested_resource.key IN (
+             'eventBudget', 'artifactBudgetBytes', 'fellowGrantExpiresAt'
+           )
+             AND json_type(
+               grant_row.granted_resources_json,
+               '$.' || requested_resource.key
+             ) IS NULL
+        )
+        OR (
+          proposal.status = 'reduced'
+          AND json_array_length(grant_row.granted_scopes_json)
+                = json_array_length(enrollment.requested_scopes_json)
+          AND NOT EXISTS (
+            SELECT 1
+              FROM json_each(enrollment.requested_resources_json) requested_resource
+             WHERE requested_resource.key IN ('problemBinding', 'firstDirective')
+               AND json_type(
+                 grant_row.granted_resources_json,
+                 '$.' || requested_resource.key
+               ) IS NULL
+          )
+          AND NOT EXISTS (
+            SELECT 1
+              FROM json_each(enrollment.requested_resources_json) requested_resource
+             WHERE requested_resource.key IN (
+               'eventBudget', 'artifactBudgetBytes', 'fellowGrantExpiresAt'
+             )
+               AND json_extract(
+                 grant_row.granted_resources_json,
+                 '$.' || requested_resource.key
+               ) < requested_resource.value
+          )
+          AND NOT EXISTS (
+            SELECT 1
+              FROM json_each(grant_row.granted_resources_json) granted_resource
+             WHERE granted_resource.key IN (
+               'eventBudget', 'artifactBudgetBytes', 'fellowGrantExpiresAt'
+             )
+               AND json_type(
+                 enrollment.requested_resources_json,
+                 '$.' || granted_resource.key
+               ) IS NULL
+          )
+        )
         OR (
           proposal.status = 'approved'
           AND (
@@ -1903,6 +1950,53 @@ WHEN NOT EXISTS (
                '$.' || granted_resource.key
              )
            )
+     )
+     AND NOT EXISTS (
+       SELECT 1
+         FROM json_each(enrollment.requested_resources_json) requested_resource
+        WHERE requested_resource.key IN (
+          'eventBudget', 'artifactBudgetBytes', 'fellowGrantExpiresAt'
+        )
+          AND json_type(
+            NEW.granted_resources_json,
+            '$.' || requested_resource.key
+          ) IS NULL
+     )
+     AND (
+       proposal.status <> 'reduced'
+       OR json_array_length(NEW.granted_scopes_json)
+            < json_array_length(enrollment.requested_scopes_json)
+       OR EXISTS (
+         SELECT 1
+           FROM json_each(enrollment.requested_resources_json) requested_resource
+          WHERE requested_resource.key IN ('problemBinding', 'firstDirective')
+            AND json_type(
+              NEW.granted_resources_json,
+              '$.' || requested_resource.key
+            ) IS NULL
+       )
+       OR EXISTS (
+         SELECT 1
+           FROM json_each(enrollment.requested_resources_json) requested_resource
+          WHERE requested_resource.key IN (
+            'eventBudget', 'artifactBudgetBytes', 'fellowGrantExpiresAt'
+          )
+            AND json_extract(
+              NEW.granted_resources_json,
+              '$.' || requested_resource.key
+            ) < requested_resource.value
+       )
+       OR EXISTS (
+         SELECT 1
+           FROM json_each(NEW.granted_resources_json) granted_resource
+          WHERE granted_resource.key IN (
+            'eventBudget', 'artifactBudgetBytes', 'fellowGrantExpiresAt'
+          )
+            AND json_type(
+              enrollment.requested_resources_json,
+              '$.' || granted_resource.key
+            ) IS NULL
+       )
      )
      AND (
        proposal.status <> 'approved'

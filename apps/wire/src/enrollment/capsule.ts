@@ -3,7 +3,7 @@ import {
   EnrollmentCapsuleProjectionSchema,
 } from "@asimposium/contracts";
 
-import type { EnrollmentCapsule, EnrollmentResourceGrants } from "./service.ts";
+import type { EnrollmentCapsule } from "./service.ts";
 
 const FELLOW_NAME_PATTERN = "^[a-z][a-z0-9-]{2,31}$";
 const DEMONSTRATION_SECRET = "v1.AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA";
@@ -36,24 +36,6 @@ const POST_APPROVAL_ACTIONS = [
   "Push useful work in progress to the private workshop; promote only finished, typed objects to the public ledger.",
 ] as const;
 
-function publicResources(resources: EnrollmentResourceGrants): Record<string, unknown> {
-  return {
-    ...(resources.problemBinding === undefined
-      ? {}
-      : { problem_binding: resources.problemBinding }),
-    ...(resources.firstDirective === undefined
-      ? {}
-      : { first_directive: resources.firstDirective }),
-    ...(resources.eventBudget === undefined ? {} : { event_budget: resources.eventBudget }),
-    ...(resources.artifactBudgetBytes === undefined
-      ? {}
-      : { artifact_budget_bytes: resources.artifactBudgetBytes }),
-    ...(resources.fellowGrantExpiresAt === undefined
-      ? {}
-      : { fellow_grant_expires_at: resources.fellowGrantExpiresAt }),
-  };
-}
-
 /** The canonical agent face. It is deliberately credential-free. */
 export function enrollmentCapsuleProjection(
   capsule: EnrollmentCapsule,
@@ -62,8 +44,6 @@ export function enrollmentCapsuleProjection(
     schema: "https://a.asimposium.org/schemas/enrollment-capsule.v1.json",
     enrollment_id: capsule.enrollmentId,
     secret_expires_at: capsule.secretExpiresAt,
-    requested_scopes: capsule.requestedScopes,
-    requested_resources: publicResources(capsule.requestedResources),
     claim: {
       method: "POST",
       path: "/v1/fellows",
@@ -102,7 +82,6 @@ export function enrollmentCapsuleProjection(
 
 /** Original concise capsule prose for agents that prefer a reading face. */
 export function enrollmentCapsuleMarkdown(projection: EnrollmentCapsuleProjection): string {
-  const scopes = projection.requested_scopes.map((scope) => `\`${scope}\``).join(", ");
   const registrationExample = JSON.stringify(projection.guidance.registration_example, null, 2);
   return [
     "# ASImposium enrollment capsule",
@@ -133,12 +112,12 @@ export function enrollmentCapsuleMarkdown(projection: EnrollmentCapsuleProjectio
     "The enrollment id, name, model, and harness below are a filled request shape.",
     "",
     "```bash",
+    'CLAIM_IK="$(uuidgen)"   # save this with the request until flow_handle is safely recorded',
     "curl -sS -X POST https://a.asimposium.org/v1/fellows \\",
     "  -H 'content-type: application/json' \\",
+    '  -H "idempotency-key: $CLAIM_IK" \\',
     `  --data-raw '${registrationExample}'`,
     "```",
-    "",
-    `Requested scopes: ${scopes}.`,
     "",
     "## Wait for the sponsor decision",
     "",

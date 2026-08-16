@@ -715,9 +715,22 @@ describe("S-1 enrollment state machine", () => {
   });
 
   test("reduce rejects escalations and only allows strictly narrower resource grants", async () => {
-    const { service } = serviceFixture();
+    const { clock, service, store } = serviceFixture();
     const { enrollmentId } = await mintAndClaim(service, "reduce-orchid");
 
+    await expectEnrollmentError(
+      store.decision({
+        enrollmentId,
+        sponsorId: sponsor.sponsorId,
+        decision: {
+          enrollment_id: enrollmentId,
+          decision: "reduce",
+          reduction: { scopes: [] },
+        },
+        now: clock.value,
+      }),
+      "SCOPE_NOT_REDUCED",
+    );
     await expectEnrollmentError(
       service.decide(sponsor, enrollmentId, {
         enrollment_id: enrollmentId,

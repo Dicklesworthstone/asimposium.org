@@ -43,15 +43,18 @@ readonly REPRODUCE="scripts/e2e-s1-cold-enrollment.sh"
 readonly BLOCKED_EXIT_CODE=78
 readonly HARNESS_IDENTITIES=("claude-code" "codex" "gemini-cli")
 readonly LOCAL_WRANGLER="apps/wire/node_modules/.bin/wrangler"
-# Local-D1-only deterministic test binding. Production must inject a distinct
-# secret binding; the Worker fails closed when this binding is absent.
-readonly LOCAL_REPLAY_KEY="AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"
+# Per-run local replay root. It exists only in this shell and the owned Wrangler
+# process environment; retained D1 artifacts must not be decryptable with a
+# repository-known fixture key.
+LOCAL_REPLAY_KEY=""
 
 # Bounds. Every one of these exists so a wedged child cannot hold a gate open.
 readonly CONNECT_TIMEOUT_SECONDS=3
 readonly REQUEST_TIMEOUT_SECONDS=15
 readonly READINESS_DEADLINE_SECONDS=45
 readonly CLIENT_DEADLINE_SECONDS=180
+readonly MIGRATION_DEADLINE_SECONDS=120
+readonly OWNERSHIP_QUERY_DEADLINE_SECONDS=30
 readonly SUPERVISOR_STOP_DEADLINE_SECONDS=10
 readonly TERMINATION_GRACE_SECONDS=5
 readonly TRANSIENT_INSPECTION_DEADLINE_SECONDS=1
@@ -80,12 +83,14 @@ CLIENT_IDENTITY=""
 CLIENT_MARKER=""
 CLIENT_STATUS_FILE=""
 CLIENT_STATUS_AUTH=""
+CLIENT_LABEL=""
 STATE_DIR=""
 PHASE_LOG=""
 # Resolved by `resolve_port` / `resolve_run_token`, which refuse in this shell
 # rather than inside a command substitution. See the comment on `allocate_port`.
 RESOLVED_PORT=""
 RUN_TOKEN=""
+RUN_MODE="external"
 # Fault injection is test-only and deliberately disarmed while a fixture is
 # started. A caller cannot turn a real local-D1 run into a synthetic failure by
 # inheriting this environment variable.
@@ -171,8 +176,10 @@ transient_retry_deadline_elapsed() {
 emit() {
   local status="$1"
   local code="$2"
+  local reproduce="$REPRODUCE"
+  if [[ "$RUN_MODE" == "local-d1" ]]; then reproduce="$REPRODUCE --local-d1"; fi
   printf '{"tool":"curl+bun","package":"e2e","suite":"%s","version":"%s","duration_ms":%s,"status":"%s","code":"%s","reproduce":"%s"}\n' \
-    "$SUITE" "$VERSION" "$(duration_ms)" "$status" "$code" "$REPRODUCE"
+    "$SUITE" "$VERSION" "$(duration_ms)" "$status" "$code" "$reproduce"
 }
 
 # Phase logging goes to the retained state directory and to stderr. It records
@@ -882,7 +889,7 @@ cleanup_all() {
     reap_provisional_direct_child || status=1
   fi
   if [[ -n "$CLIENT_PID" ]]; then
-    if terminate_child "$CLIENT_PID" "$CLIENT_PGID" "$CLIENT_IDENTITY" "$CLIENT_MARKER" "client"; then
+    if terminate_child "$CLIENT_PID" "$CLIENT_PGID" "$CLIENT_IDENTITY" "$CLIENT_MARKER" "${CLIENT_LABEL:-client}"; then
       clear_client_state
     else
       status=1
@@ -905,6 +912,7 @@ clear_client_state() {
   CLIENT_MARKER=""
   CLIENT_STATUS_FILE=""
   CLIENT_STATUS_AUTH=""
+  CLIENT_LABEL=""
 }
 
 clear_server_state() {
@@ -1057,12 +1065,91 @@ resolve_port() {
 
 # Sets RUN_TOKEN: a per-run synthetic sponsor id. Deliberately not a secret, and
 # deliberately SQL- and shell-safe, because it is interpolated into the local D1
-# ownership query below: lowercase, digits and hyphens only.
+# ownership query below. It must also satisfy the production SponsorId contract
+# because the ownership mint traverses the same D1 record guard as a real mint.
 resolve_run_token() {
   local token
-  token="s1-$$-${RANDOM}${RANDOM}"
-  [[ "$token" =~ ^[a-z0-9-]+$ ]] || failed "RUN_TOKEN_INVALID"
+  token="usr_s1_$$_${RANDOM}${RANDOM}"
+  [[ "$token" =~ ^usr_s1_[0-9]+_[0-9]+$ ]] || failed "RUN_TOKEN_INVALID"
   RUN_TOKEN="$token"
+}
+
+resolve_local_replay_key() {
+  local entropy key
+  entropy="$(LC_ALL=C od -An -N32 -tx1 /dev/urandom 2>/dev/null | tr -d '[:space:]')" ||
+    failed "LOCAL_REPLAY_KEY_UNAVAILABLE"
+  [[ "$entropy" =~ ^[a-f0-9]{64}$ ]] || failed "LOCAL_REPLAY_KEY_UNAVAILABLE"
+  key="$(bun -e '
+    const hex = process.argv[1];
+    if (!/^[a-f0-9]{64}$/.test(hex)) process.exit(1);
+    process.stdout.write(Buffer.from(hex, "hex").toString("base64url"));
+  ' "$entropy" 2>/dev/null)" || failed "LOCAL_REPLAY_KEY_UNAVAILABLE"
+  [[ "$key" =~ ^[A-Za-z0-9_-]{43}$ ]] || failed "LOCAL_REPLAY_KEY_UNAVAILABLE"
+  LOCAL_REPLAY_KEY="$key"
+}
+
+# Inspect the retained local state byte-for-byte without ever printing the
+# secret being sought. Exit 3 means a match; every other nonzero status means
+# the artifact tree could not be proved complete. The caller supplies the
+# secret over stdin so it is absent from argv and diagnostics.
+scan_retained_files_for_secret() {
+  local root="$1" secret="$2" scan_status=0
+  [[ -n "$secret" && -d "$root" && ! -L "$root" && -O "$root" ]] || return 4
+  # The JavaScript is intentionally single-quoted; shell interpolation here
+  # would risk placing the searched secret into generated source or output.
+  # shellcheck disable=SC2016
+  printf '%s' "$secret" | bun -e '
+    import { lstat, readdir, readFile } from "node:fs/promises";
+    import { join } from "node:path";
+
+    const root = process.argv[1];
+    const secret = Buffer.from(await Bun.stdin.text());
+    let total = 0;
+    let files = 0;
+    const MAX_FILE = 64 * 1024 * 1024;
+    const MAX_TOTAL = 128 * 1024 * 1024;
+
+    async function walk(directory) {
+      const entries = await readdir(directory, { withFileTypes: true });
+      for (const entry of entries) {
+        const path = join(directory, entry.name);
+        const evidence = await lstat(path);
+        if (evidence.isSymbolicLink()) throw new Error("symlink");
+        if (evidence.isDirectory()) {
+          await walk(path);
+          continue;
+        }
+        if (!evidence.isFile() || evidence.size > MAX_FILE) {
+          throw new Error("unscannable");
+        }
+        total += evidence.size;
+        files += 1;
+        if (total > MAX_TOTAL) throw new Error("unbounded");
+        if ((await readFile(path)).includes(secret)) process.exit(3);
+      }
+    }
+
+    try {
+      await walk(root);
+      process.stdout.write(`${files} ${total}`);
+    } catch {
+      process.exit(4);
+    }
+  ' "$root" >/dev/null 2>&1 || scan_status=$?
+  return "$scan_status"
+}
+
+assert_local_replay_key_not_retained() {
+  local scan_status=0
+  scan_retained_files_for_secret "$STATE_DIR" "$LOCAL_REPLAY_KEY" || scan_status=$?
+  case "$scan_status" in
+    0) log_phase "replay-key-artifact-scan" "result=absent scope=retained-state" ;;
+    3) failed "LOCAL_REPLAY_KEY_RETAINED" ;;
+    *) failed "LOCAL_REPLAY_KEY_ARTIFACT_SCAN_UNTRUSTED" ;;
+  esac
+  # The server is gone and the retained files have been checked. Keep no
+  # unnecessary copy in the long-lived parent shell after this point.
+  LOCAL_REPLAY_KEY=""
 }
 
 # Make an opaque, per-supervisor status authenticator. It is never logged and is
@@ -1299,6 +1386,7 @@ adopt_provisional_supervisor() {
       CLIENT_MARKER="$PROVISIONAL_MARKER"
       CLIENT_STATUS_FILE="$PROVISIONAL_STATUS_FILE"
       CLIENT_STATUS_AUTH="$PROVISIONAL_STATUS_AUTH"
+      CLIENT_LABEL="$PROVISIONAL_LABEL"
       ;;
     server)
       SERVER_PID="$PROVISIONAL_PID"
@@ -1321,17 +1409,18 @@ adopt_provisional_supervisor() {
 # file; success still requires retiring the live supervisor and proving the group
 # empty before client ownership is cleared.
 settle_completed_client_group() {
+  local label="${1:-client}"
   local members
   if ! group_is_ours "$CLIENT_PGID" "$CLIENT_IDENTITY" "$CLIENT_MARKER"; then
-    log_phase "client-complete-supervisor-unavailable" "pgid=$CLIENT_PGID"
+    log_phase "${label}-complete-supervisor-unavailable" "pgid=$CLIENT_PGID"
     return 1
   fi
   if ! members="$(live_group_members_bounded "$CLIENT_PGID")"; then
-    log_phase "client-complete-inspection-unavailable" "pgid=$CLIENT_PGID"
+    log_phase "${label}-complete-inspection-unavailable" "pgid=$CLIENT_PGID"
     return 1
   fi
-  log_phase "client-complete-pinned" "pgid=$CLIENT_PGID pids=$(commas "$members")"
-  terminate_child "$CLIENT_PID" "$CLIENT_PGID" "$CLIENT_IDENTITY" "$CLIENT_MARKER" "client-complete"
+  log_phase "${label}-complete-pinned" "pgid=$CLIENT_PGID pids=$(commas "$members")"
+  terminate_child "$CLIENT_PID" "$CLIENT_PGID" "$CLIENT_IDENTITY" "$CLIENT_MARKER" "${label}-complete"
 }
 
 # Run a command with an overall deadline. The real command is held behind a
@@ -1343,42 +1432,57 @@ settle_completed_client_group() {
 # The deadline is bounded in both directions: the command is started in its own
 # process group so a timeout can be cleaned up as a group, and the timeout path
 # escalates TERM to KILL and reaps, rather than sending one signal and hoping.
-run_with_deadline() {
-  local seconds="$1"
-  shift
-  local child_status="" status_read=0 status_file=""
+run_named_with_deadline() {
+  local label="$1"
+  local seconds="$2"
+  shift 2
+  local child_status="" status_read=0 status_file="" deadline_label=""
+  [[ "$label" =~ ^[a-z][a-z0-9-]{0,31}$ ]] || return 125
+  [[ "$seconds" =~ ^[1-9][0-9]*$ ]] || return 125
   [[ -n "$STATE_DIR" ]] || return 125
-  status_file="$STATE_DIR/.client-exit-status"
-  start_pinned_supervisor "$status_file" "client" "$@" || return 125
+  status_file="$STATE_DIR/.${label}-exit-status"
+  [[ ! -e "$status_file" && ! -L "$status_file" ]] || return 125
+  start_pinned_supervisor "$status_file" "$label" "$@" || return 125
   if ! adopt_provisional_supervisor client; then
     finish_lifecycle_critical
     return 125
   fi
-  log_phase "client-started" "pid=$CLIENT_PID scope=group supervisor=pinned-before-exec"
+  log_phase "${label}-started" "pid=$CLIENT_PID scope=group supervisor=pinned-before-exec deadline_s=$seconds"
 
   local deadline=$((SECONDS + seconds))
   while ((SECONDS < deadline)); do
     status_read=0
     child_status="$(recorded_child_status "$CLIENT_STATUS_FILE" "$CLIENT_PID" "$CLIENT_STATUS_AUTH")" || status_read=$?
     if ((status_read == 0)); then
-      log_phase "client-status-recorded" "status=$child_status"
-      if ! settle_completed_client_group; then return 125; fi
+      log_phase "${label}-status-recorded" "status=$child_status"
+      if ! settle_completed_client_group "$label"; then return 125; fi
       clear_client_state
       return "$child_status"
     fi
     if ((status_read == 2)); then
-      log_phase "client-status-invalid" "file=$CLIENT_STATUS_FILE"
+      log_phase "${label}-status-invalid" "file=$CLIENT_STATUS_FILE"
       return 125
     fi
     if ! group_is_ours "$CLIENT_PGID" "$CLIENT_IDENTITY" "$CLIENT_MARKER"; then
-      log_phase "client-supervisor-unavailable" "pid=$CLIENT_PID"
+      log_phase "${label}-supervisor-unavailable" "pid=$CLIENT_PID"
       return 125
     fi
     sleep 0.1
   done
-  terminate_child "$CLIENT_PID" "$CLIENT_PGID" "$CLIENT_IDENTITY" "$CLIENT_MARKER" "deadline" || return 125
+  if [[ "$label" == "client" ]]; then
+    deadline_label="deadline"
+  else
+    deadline_label="${label}-deadline"
+  fi
+  terminate_child "$CLIENT_PID" "$CLIENT_PGID" "$CLIENT_IDENTITY" "$CLIENT_MARKER" "$deadline_label" || return 125
   clear_client_state
   return 124
+}
+
+run_with_deadline() {
+  local seconds="$1"
+  shift
+  run_named_with_deadline "client" "$seconds" "$@"
 }
 
 json_field() {
@@ -1404,6 +1508,7 @@ curl_body() {
   local method="$1"
   local endpoint="$2"
   local body="${3:-}"
+  local idempotency_key="${4:-}"
   local result
 
   # Curl diagnostics can echo a caller-supplied origin or credentials. The
@@ -1415,10 +1520,12 @@ curl_body() {
       return 20
     fi
   elif [[ "$method" == "POST" ]]; then
+    [[ "$idempotency_key" =~ ^[A-Za-z0-9._-]{1,160}$ ]] || return 64
     if ! result="$(printf '%s' "$body" | curl --silent --fail-with-body \
       --request POST --connect-timeout "$CONNECT_TIMEOUT_SECONDS" \
       --max-time "$REQUEST_TIMEOUT_SECONDS" \
       --header 'Accept: application/json' --header 'Content-Type: application/json' \
+      --header "Idempotency-Key: $idempotency_key" \
       --data-binary @- "$endpoint" 2>/dev/null)"; then
       return 21
     fi
@@ -1513,7 +1620,7 @@ self_test() {
     if valid_port "$rejected_port"; then failed "SELF_TEST_PORT_VALIDATION_FAILED"; fi
   done
   resolve_run_token
-  [[ "$RUN_TOKEN" =~ ^[a-z0-9-]+$ ]] || failed "SELF_TEST_RUN_TOKEN_FAILED"
+  [[ "$RUN_TOKEN" =~ ^usr_s1_[0-9]+_[0-9]+$ ]] || failed "SELF_TEST_RUN_TOKEN_FAILED"
 
   # The group-ownership gate that stands in front of every group signal. Both
   # directions matter: a pid that owns no group must be refused, and this
@@ -2211,6 +2318,60 @@ self_test_deadline() {
   emit "pass" "DEADLINE_SELF_TEST_PASSED"
 }
 
+# The real local-D1 run wires both Wrangler maintenance phases through the same
+# named supervisor primitive as the client. This fixture keeps the exact phase
+# label load-bearing while planting a TERM-resistant descendant, so timeout and
+# external-signal tests prove the named wiring rather than only the generic
+# deadline helper.
+self_test_named_phase() {
+  local label="${S1_NAMED_PHASE:-}" behavior="${S1_NAMED_PHASE_BEHAVIOR:-}"
+  local seconds=1 pid_file phase_exit=0 descendant="" liveness=0
+  [[ "$label" == "migration" || "$label" == "ownership-query" ]] ||
+    blocked "NAMED_PHASE_INVALID"
+  [[ "$behavior" == "deadline" || "$behavior" == "interrupt" ]] ||
+    blocked "NAMED_PHASE_BEHAVIOR_INVALID"
+  [[ "$behavior" == "deadline" ]] || seconds=300
+  lifecycle_state_dir "named-${label}-${behavior}"
+  pid_file="$STATE_DIR/descendant.pid"
+  # shellcheck disable=SC2016
+  run_named_with_deadline "$label" "$seconds" \
+    env S1_LIFECYCLE_PID_FILE="$pid_file" bash -c '
+      bash -c "trap \"\" TERM; sleep 300" &
+      printf "%s\n" "$!" >"$S1_LIFECYCLE_PID_FILE"
+      sleep 300
+    ' || phase_exit=$?
+  if [[ "$behavior" == "interrupt" ]]; then
+    failed "NAMED_PHASE_NOT_INTERRUPTED"
+  fi
+  ((phase_exit == 124)) || failed "NAMED_PHASE_DEADLINE_STATUS_INVALID"
+  descendant="$(tr -d '[:space:]' <"$pid_file" 2>/dev/null || true)"
+  [[ "$descendant" =~ ^[0-9]+$ ]] || failed "NAMED_PHASE_DESCENDANT_UNKNOWN"
+  [[ -z "$CLIENT_PID$CLIENT_PGID$CLIENT_IDENTITY$CLIENT_LABEL" ]] ||
+    failed "NAMED_PHASE_OWNERSHIP_RETAINED"
+  wait_for_pid_absence "$descendant" || liveness=$?
+  ((liveness == 1)) || failed "NAMED_PHASE_DESCENDANT_SURVIVED"
+  log_phase "named-phase-deadline-cleaned" \
+    "phase=$label descendant=$descendant exit=124 group_empty=yes"
+  emit "pass" "NAMED_PHASE_DEADLINE_SELF_TEST_PASSED"
+}
+
+# PLANTED NEGATIVE for the production retained-artifact scan. The canary is a
+# fixed non-credential string and is intentionally retained as proof; no real
+# replay key is written. Only exit 3 demonstrates that the byte scanner found
+# the planted value without echoing it.
+self_test_replay_artifact_scan() {
+  local scan_status=0
+  lifecycle_state_dir "replay-artifact-scan"
+  LOCAL_REPLAY_KEY="S1ArtifactScanCanary_0123456789abcdefghijkl"
+  [[ "${#LOCAL_REPLAY_KEY}" -eq 43 ]] || failed "REPLAY_ARTIFACT_CANARY_INVALID"
+  printf '%s' "$LOCAL_REPLAY_KEY" >"$STATE_DIR/planted-replay-key-canary"
+  scan_retained_files_for_secret "$STATE_DIR" "$LOCAL_REPLAY_KEY" || scan_status=$?
+  ((scan_status == 3)) || failed "REPLAY_ARTIFACT_SCAN_FALSE_NEGATIVE"
+  LOCAL_REPLAY_KEY=""
+  log_phase "replay-key-artifact-plant-refused" "result=detected scope=retained-state"
+  emit "pass" "REPLAY_ARTIFACT_SCAN_SELF_TEST_PASSED"
+}
+
 # An interrupt arriving during the timed client phase.
 #
 # The client runs in its own process group and has a descendant of its own, which is
@@ -2247,28 +2408,52 @@ assert_port_ownership() {
   local origin="$1"
   local state_dir="$2"
   local token="$3"
-  local mint_body mint_status count
+  local mint_body mint_status count query_exit=0
+  local query_result="$state_dir/ownership-result"
+  local query_log="$state_dir/ownership.log"
+  local parser='const text = await Bun.stdin.text(); const parsed = JSON.parse(text.slice(text.indexOf("["))); const rows = Array.isArray(parsed) ? (parsed[0]?.results ?? []) : []; process.stdout.write(String(rows[0]?.n ?? 0));'
 
   mint_body="$(printf '{"sponsor_id":"%s","request":{"requested_scopes":["review"]}}' "$token")"
   if ! mint_status="$(printf '%s' "$mint_body" | curl --silent --output /dev/null \
     --write-out '%{http_code}' --request POST \
     --connect-timeout "$CONNECT_TIMEOUT_SECONDS" --max-time "$REQUEST_TIMEOUT_SECONDS" \
-    --header 'Content-Type: application/json' --data-binary @- "$origin/__s1/mint" 2>/dev/null)"; then
+    --header 'Content-Type: application/json' \
+    --header "Idempotency-Key: s1-ownership-${token}" \
+    --data-binary @- "$origin/__s1/mint" 2>/dev/null)"; then
     failed "LOCAL_PORT_OWNERSHIP_UNPROVEN"
   fi
-  [[ "$mint_status" == "201" ]] || failed "LOCAL_PORT_OWNERSHIP_UNPROVEN"
+  if [[ "$mint_status" != "201" ]]; then
+    log_phase "port-ownership-mint-refused" "status=$mint_status"
+    failed "LOCAL_PORT_OWNERSHIP_UNPROVEN"
+  fi
 
-  if ! count="$("$LOCAL_WRANGLER" d1 execute DB --config infra/wrangler.toml --local \
-    --persist-to "$state_dir" --json \
-    --command "SELECT COUNT(*) AS n FROM enrollment_records WHERE sponsor_id = '${token}'" \
-    2>>"$state_dir/ownership.log" | bun -e '
-const text = await Bun.stdin.text();
-const parsed = JSON.parse(text.slice(text.indexOf("[")));
-const rows = Array.isArray(parsed) ? (parsed[0]?.results ?? []) : [];
-process.stdout.write(String(rows[0]?.n ?? 0));
-' 2>/dev/null)"; then
-    failed "LOCAL_PORT_OWNERSHIP_UNPROVEN"
-  fi
+  [[ ! -e "$query_result" && ! -L "$query_result" ]] || failed "LOCAL_PORT_OWNERSHIP_RESULT_UNTRUSTED"
+  # Keep Wrangler, its parser, and every descendant in one identity-pinned
+  # process group. The parser writes one bounded, non-secret count into a fresh
+  # retained file; the parent never waits in an unbounded command substitution.
+  # shellcheck disable=SC2016
+  run_named_with_deadline "ownership-query" "$OWNERSHIP_QUERY_DEADLINE_SECONDS" \
+    bash -c '
+      result="$1"
+      log="$2"
+      parser="$3"
+      shift 3
+      set -o pipefail
+      set -C
+      "$@" 2>>"$log" | bun -e "$parser" >"$result"
+    ' bash "$query_result" "$query_log" "$parser" \
+    "$LOCAL_WRANGLER" d1 execute DB --config infra/wrangler.toml --local \
+      --persist-to "$state_dir" --json \
+      --command "SELECT COUNT(*) AS n FROM enrollment_records WHERE sponsor_id = '${token}'" || query_exit=$?
+  case "$query_exit" in
+    0) ;;
+    124) failed "LOCAL_PORT_OWNERSHIP_QUERY_TIMEOUT" ;;
+    125) failed "LOCAL_PORT_OWNERSHIP_QUERY_CONTAINMENT_UNPROVEN" ;;
+    *) failed "LOCAL_PORT_OWNERSHIP_UNPROVEN" ;;
+  esac
+  [[ -f "$query_result" && ! -L "$query_result" && -O "$query_result" && -r "$query_result" ]] ||
+    failed "LOCAL_PORT_OWNERSHIP_RESULT_UNTRUSTED"
+  count="$(<"$query_result")" || failed "LOCAL_PORT_OWNERSHIP_UNPROVEN"
   [[ "$count" =~ ^[0-9]+$ ]] || failed "LOCAL_PORT_OWNERSHIP_UNPROVEN"
   ((count >= 1)) || failed "LOCAL_PORT_OWNERSHIP_UNPROVEN"
   log_phase "port-ownership-proven" "rows=$count"
@@ -2292,6 +2477,7 @@ run_local_d1() {
   [[ -x "$LOCAL_WRANGLER" ]] || blocked "WRANGLER_REQUIRED"
 
   local local_port origin token server_log server_status_file ready readiness_deadline client_exit scope
+  local migration_exit=0
   local server_status="" server_status_read=0
   # Both resolvers refuse in this shell, so a pinned port that is invalid or busy
   # ends the run here — before mktemp, before migrations, before any child.
@@ -2299,6 +2485,7 @@ run_local_d1() {
   local_port="$RESOLVED_PORT"
   resolve_run_token
   token="$RUN_TOKEN"
+  resolve_local_replay_key
   origin="http://127.0.0.1:${local_port}"
 
   STATE_DIR="$(mktemp -d -t asimposium-s1-enrollment)"
@@ -2311,10 +2498,20 @@ run_local_d1() {
   log_phase "state-retained" "dir=$STATE_DIR"
   log_phase "port-allocated" "port=$local_port pinned=$([[ -n "${S1_LOCAL_PORT:-}" ]] && printf 'yes' || printf 'no')"
 
-  if ! "$LOCAL_WRANGLER" d1 migrations apply DB --config infra/wrangler.toml --local \
-    --persist-to "$STATE_DIR" >"$STATE_DIR/migrations.log" 2>&1; then
-    failed "LOCAL_D1_MIGRATION_FAILED"
-  fi
+  # Migrations can spawn Wrangler descendants and touch the same retained D1
+  # state as the server. They therefore use the identical stopped, identity-
+  # pinned supervisor contract instead of an untracked foreground process.
+  # shellcheck disable=SC2016
+  run_named_with_deadline "migration" "$MIGRATION_DEADLINE_SECONDS" \
+    bash -c 'log="$1"; shift; exec "$@" >"$log" 2>&1' bash "$STATE_DIR/migrations.log" \
+    "$LOCAL_WRANGLER" d1 migrations apply DB --config infra/wrangler.toml --local \
+      --persist-to "$STATE_DIR" || migration_exit=$?
+  case "$migration_exit" in
+    0) ;;
+    124) failed "LOCAL_D1_MIGRATION_TIMEOUT" ;;
+    125) failed "LOCAL_D1_MIGRATION_CONTAINMENT_UNPROVEN" ;;
+    *) failed "LOCAL_D1_MIGRATION_FAILED" ;;
+  esac
   log_phase "migrations-applied" "log=$STATE_DIR/migrations.log"
 
   # Workerd starts only beneath a stopped, identity-pinned supervisor. Its group
@@ -2389,6 +2586,7 @@ run_local_d1() {
   # something of ours is still running whatever the process table says.
   cleanup_all || failed "LOCAL_CLEANUP_INCOMPLETE"
   port_is_free "$local_port" || failed "LOCAL_PORT_STILL_HELD"
+  assert_local_replay_key_not_retained
   log_phase "cleanup-verified" "port=$local_port port_free=yes children=none"
 
   emit "pass" "LOCAL_D1_ENROLLMENT_PASSED"
@@ -2411,7 +2609,7 @@ begin_self_test() {
 }
 
 reject_unscoped_fault_injection() {
-  [[ -z "${S1_FAULT_INJECT:-}" && -z "${S1_KERNEL_PROBE_FAULT:-}" && -z "${S1_INTERRUPT_WINDOW:-}" && -z "${S1_INTERRUPT_OWNER:-}" ]] ||
+  [[ -z "${S1_FAULT_INJECT:-}" && -z "${S1_KERNEL_PROBE_FAULT:-}" && -z "${S1_INTERRUPT_WINDOW:-}" && -z "${S1_INTERRUPT_OWNER:-}" && -z "${S1_NAMED_PHASE:-}" && -z "${S1_NAMED_PHASE_BEHAVIOR:-}" ]] ||
     blocked "FAULT_INJECTION_TEST_ONLY"
 }
 
@@ -2427,6 +2625,7 @@ main() {
   trap 'on_interrupt HUP' HUP
   trap 'on_exit' EXIT
 
+  if (($# == 1)) && [[ "$1" == "--local-d1" ]]; then RUN_MODE="local-d1"; fi
   require_tooling
   (($# <= 1)) || failed "ARGUMENT_COUNT_INVALID"
   if [[ "${1:-}" == "--self-test" ]]; then
@@ -2496,6 +2695,16 @@ main() {
   if [[ "${1:-}" == "--self-test-deadline" ]]; then
     begin_self_test "deadline"
     self_test_deadline
+    return
+  fi
+  if [[ "${1:-}" == "--self-test-named-phase" ]]; then
+    begin_self_test "named-phase"
+    self_test_named_phase
+    return
+  fi
+  if [[ "${1:-}" == "--self-test-replay-artifact-scan" ]]; then
+    begin_self_test "replay-artifact-scan"
+    self_test_replay_artifact_scan
     return
   fi
   if [[ "${1:-}" == "--self-test-client-group" ]]; then
@@ -2576,6 +2785,7 @@ main() {
   local join_path="${ASIMP_S1_JOIN_URL%%#*}"
   local secret="${ASIMP_S1_JOIN_URL#*#}"
   local origin enrollment_id claim_endpoint poll_endpoint registration_body claim_response flow_handle
+  local claim_idempotency_key poll_idempotency_key
   local poll_body poll_response status token allow_http_test=0
 
   [[ "$ASIMP_S1_JOIN_URL" == *"#"* ]] || failed "FRAGMENT_SECRET_REQUIRED"
@@ -2602,17 +2812,19 @@ main() {
   capture_helper_or_fail registration_body "REGISTRATION_BODY_INVALID" \
     make_registration_body "$enrollment_id" "$secret"
   claim_endpoint="$origin/v1/fellows"
+  claim_idempotency_key="s1-claim-${enrollment_id}"
   capture_helper_or_fail claim_response "ENROLLMENT_REQUEST_FAILED" \
-    curl_body POST "$claim_endpoint" "$registration_body"
+    curl_body POST "$claim_endpoint" "$registration_body" "$claim_idempotency_key"
   capture_helper_or_fail flow_handle "UNEXPECTED_RESPONSE_SHAPE" \
     json_field "$claim_response" "flow_handle"
   valid_flow_handle "$flow_handle" || failed "FLOW_HANDLE_INVALID"
   emit "pass" "PROPOSAL_CREATED"
 
   poll_endpoint="$origin/v1/fellows/flow"
+  poll_idempotency_key="s1-poll-${enrollment_id}"
   capture_helper_or_fail poll_body "POLL_BODY_INVALID" make_poll_body "$flow_handle"
   capture_helper_or_fail poll_response "ENROLLMENT_REQUEST_FAILED" \
-    curl_body POST "$poll_endpoint" "$poll_body"
+    curl_body POST "$poll_endpoint" "$poll_body" "$poll_idempotency_key"
   capture_helper_or_fail status "UNEXPECTED_RESPONSE_SHAPE" json_status "$poll_response"
   case "$status" in
     authorization_pending)

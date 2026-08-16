@@ -64,7 +64,8 @@ async function socketCapture(): Promise<SocketCapture> {
   let capturedBytes = 0;
   let didOverflow = false;
   let ended = false;
-  let pendingRead: ((result: { done: boolean; value?: Uint8Array }) => void) | undefined;
+  let pendingRead:
+    ((result: { done: boolean; value?: Uint8Array }) => void) | undefined;
   let parentSide: Socket | undefined;
   let resolveFinished: (() => void) | undefined;
   const finished = new Promise<void>((resolve) => {
@@ -167,7 +168,10 @@ async function spawnCapturedHarness(
   args: readonly string[],
   env: Record<string, string> = {},
 ): Promise<CapturedHarness> {
-  const [stdoutCapture, stderrCapture] = await Promise.all([socketCapture(), socketCapture()]);
+  const [stdoutCapture, stderrCapture] = await Promise.all([
+    socketCapture(),
+    socketCapture(),
+  ]);
   const subprocess = spawn(
     "bash",
     [
@@ -220,7 +224,8 @@ function safeCaptureSummary(value: string): string {
     if (!line.startsWith("{")) return [];
     try {
       const parsed = JSON.parse(line) as { code?: unknown };
-      return typeof parsed.code === "string" && /^[A-Z][A-Z0-9_]{0,63}$/.test(parsed.code)
+      return typeof parsed.code === "string" &&
+        /^[A-Z][A-Z0-9_]{0,63}$/.test(parsed.code)
         ? [parsed.code]
         : [];
     } catch {
@@ -228,7 +233,9 @@ function safeCaptureSummary(value: string): string {
     }
   });
   const phases = lines.flatMap((line) => {
-    const match = line.match(/^\[s1-cold-enrollment\] ([a-z][a-z0-9-]{0,63})(?:\s|$)/);
+    const match = line.match(
+      /^\[s1-cold-enrollment\] ([a-z][a-z0-9-]{0,63})(?:\s|$)/,
+    );
     return match?.[1] ? [match[1]] : [];
   });
   return `bytes=${Buffer.byteLength(value)} lines=${lines.length} codes=${[...new Set(codes)].join(",") || "none"} phases=${[...new Set(phases)].join(",") || "none"}`;
@@ -242,14 +249,22 @@ function failureEvidence(run: Run): string {
   return `exit=${run.exitCode}\nenv_keys=${relevantEnvironment || "none"}\nstdout=${safeCaptureSummary(run.stdout)}\nstderr=${safeCaptureSummary(run.stderr)}`;
 }
 
-async function runScript(args: readonly string[], env: Record<string, string> = {}): Promise<Run> {
+async function runScript(
+  args: readonly string[],
+  env: Record<string, string> = {},
+): Promise<Run> {
   const harness = await spawnCapturedHarness(args, env);
   const { child, stdoutCapture, stderrCapture } = harness;
   try {
-    const exitCode = await waitForExitBefore(child.exited, RUN_SCRIPT_TIMEOUT_MS);
+    const exitCode = await waitForExitBefore(
+      child.exited,
+      RUN_SCRIPT_TIMEOUT_MS,
+    );
     if (exitCode === undefined) {
       const forcedExit = await terminateExactChild(child);
-      throw new Error(`script exceeded its test deadline; forced_exit=${String(forcedExit)}`);
+      throw new Error(
+        `script exceeded its test deadline; forced_exit=${String(forcedExit)}`,
+      );
     }
     const [stdout, stderr] = await Promise.all([
       settleSocketCapture(stdoutCapture),
@@ -300,16 +315,20 @@ async function assertWranglerBlocked(): Promise<void> {
   expect(record(run).code).toBe("WRANGLER_REQUIRED");
 }
 
-function phaseValue(stderr: string, phase: string, key: string): string | undefined {
+function phaseValue(
+  stderr: string,
+  phase: string,
+  key: string,
+): string | undefined {
   const line = stderr.split("\n").find((entry) => entry.includes(` ${phase} `));
   return line?.match(new RegExp(`${key}=([^\\s]+)`))?.[1];
 }
 
 describe("the in-memory child-output transport", () => {
   test("reports malformed NDJSON without echoing its bytes", () => {
-    expect(() => records({ exitCode: 1, stdout: '{"code":"BROKEN"', stderr: "" })).toThrow(
-      "S1_OUTPUT_RECORD_INVALID",
-    );
+    expect(() =>
+      records({ exitCode: 1, stdout: '{"code":"BROKEN"', stderr: "" }),
+    ).toThrow("S1_OUTPUT_RECORD_INVALID");
   });
 
   test("reassembles a terminal record split across delayed TCP packets", async () => {
@@ -322,7 +341,9 @@ describe("the in-memory child-output transport", () => {
       const closed = once(client, "close");
       client.end('RECORD"}\n');
       await closed;
-      expect(await settleSocketCapture(capture)).toBe('{"code":"SPLIT_RECORD"}\n');
+      expect(await settleSocketCapture(capture)).toBe(
+        '{"code":"SPLIT_RECORD"}\n',
+      );
     } finally {
       client.destroy();
       capture.close();
@@ -362,7 +383,9 @@ describe("the in-memory child-output transport", () => {
       } catch (error) {
         failure = error instanceof Error ? error.message : String(error);
       }
-      expect(failure).toBe(`S1_CAPTURE_LIMIT_EXCEEDED bytes=${CAPTURE_LIMIT_BYTES + 1}`);
+      expect(failure).toBe(
+        `S1_CAPTURE_LIMIT_EXCEEDED bytes=${CAPTURE_LIMIT_BYTES + 1}`,
+      );
       expect(failure.includes("xxxx")).toBe(false);
     } finally {
       client.destroy();
@@ -373,12 +396,17 @@ describe("the in-memory child-output transport", () => {
 
 /** A real listener, so "busy" means busy rather than "we think it might be". */
 function occupyPort(): { port: number; stop: () => void } {
-  const server = Bun.serve({ port: 0, hostname: "127.0.0.1", fetch: () => new Response("busy") });
+  const server = Bun.serve({
+    port: 0,
+    hostname: "127.0.0.1",
+    fetch: () => new Response("busy"),
+  });
   const { port } = server;
   // `Server.port` is optional in Bun's types because a unix-socket server has
   // none. This one is TCP, and a test that pinned `undefined` as its port would
   // assert nothing at all, so the absence is an error rather than a fallback.
-  if (typeof port !== "number") throw new Error("expected a TCP port for the squatter");
+  if (typeof port !== "number")
+    throw new Error("expected a TCP port for the squatter");
   return { port, stop: () => server.stop(true) };
 }
 
@@ -397,7 +425,9 @@ describe("the self-test and the blocked external proof", () => {
       "ps-truncated-tail",
       "ps-truncated-before-self",
     ]) {
-      expect(run.stderr).toContain(`self-test-parser-refused fault=${fault} action=not-accepted`);
+      expect(run.stderr).toContain(
+        `self-test-parser-refused fault=${fault} action=not-accepted`,
+      );
     }
     const stateDir = phaseValue(run.stderr, "state-retained", "dir") as string;
     expect(existsSync(stateDir)).toBe(true);
@@ -427,7 +457,8 @@ describe("the self-test and the blocked external proof", () => {
     expect(await terminateExactChild(settled)).toBe(0);
     expect(killCalls).toBe(0);
 
-    const errno = (code: "ESRCH" | "EPERM") => Object.assign(new Error(code), { code });
+    const errno = (code: "ESRCH" | "EPERM") =>
+      Object.assign(new Error(code), { code });
     expect(
       processGone(123, () => {
         throw errno("ESRCH");
@@ -447,9 +478,15 @@ describe("the self-test and the blocked external proof", () => {
       fetch: () => new Response("refused", { status: 503 }),
     });
     try {
-      const run = await runScript([], enrollmentEnv(`http://127.0.0.1:${server.port}`));
+      const run = await runScript(
+        [],
+        enrollmentEnv(`http://127.0.0.1:${server.port}`),
+      );
       expect(run.exitCode).toBe(1);
-      expect(record(run)).toMatchObject({ status: "fail", code: "CAPSULE_REQUEST_FAILED" });
+      expect(record(run)).toMatchObject({
+        status: "fail",
+        code: "CAPSULE_REQUEST_FAILED",
+      });
       expect(records(run)).toHaveLength(1);
     } finally {
       server.stop(true);
@@ -466,20 +503,29 @@ describe("the self-test and the blocked external proof", () => {
           return Response.json({ enrollment_id: "ASIMP-EN-7F3K9M2Q8R" });
         }
         if (pathname === "/v1/fellows") {
-          return Response.json({ flow_handle: `flow_v1.${"B".repeat(43)}` }, { status: 201 });
+          return Response.json(
+            { flow_handle: `flow_v1.${"B".repeat(43)}` },
+            { status: 201 },
+          );
         }
         if (pathname === "/v1/fellows/flow") return Response.json({});
         return new Response("not found", { status: 404 });
       },
     });
     try {
-      const run = await runScript([], enrollmentEnv(`http://127.0.0.1:${server.port}`));
+      const run = await runScript(
+        [],
+        enrollmentEnv(`http://127.0.0.1:${server.port}`),
+      );
       expect(run.exitCode).toBe(1);
       expect(records(run).map((entry) => entry.code)).toEqual([
         "PROPOSAL_CREATED",
         "UNEXPECTED_RESPONSE_SHAPE",
       ]);
-      expect(record(run)).toMatchObject({ status: "fail", code: "UNEXPECTED_RESPONSE_SHAPE" });
+      expect(record(run)).toMatchObject({
+        status: "fail",
+        code: "UNEXPECTED_RESPONSE_SHAPE",
+      });
     } finally {
       server.stop(true);
     }
@@ -496,7 +542,10 @@ describe("the self-test and the blocked external proof", () => {
           return Response.json({ enrollment_id: "ASIMP-EN-7F3K9M2Q8R" });
         }
         if (pathname === "/v1/fellows") {
-          return Response.json({ flow_handle: `flow_v1.${"B".repeat(43)}` }, { status: 201 });
+          return Response.json(
+            { flow_handle: `flow_v1.${"B".repeat(43)}` },
+            { status: 201 },
+          );
         }
         if (pathname === "/v1/fellows/flow") pollRequests += 1;
         return new Response("not found", { status: 404 });
@@ -512,7 +561,10 @@ describe("the self-test and the blocked external proof", () => {
         "PROPOSAL_CREATED",
         "POLL_BODY_INVALID",
       ]);
-      expect(record(run)).toMatchObject({ status: "fail", code: "POLL_BODY_INVALID" });
+      expect(record(run)).toMatchObject({
+        status: "fail",
+        code: "POLL_BODY_INVALID",
+      });
       expect(pollRequests).toBe(0);
     } finally {
       server.stop(true);
@@ -523,11 +575,16 @@ describe("the self-test and the blocked external proof", () => {
     const run = await runScript(["--self-test", "unexpected"]);
     expect(run.exitCode).toBe(1);
     expect(records(run)).toHaveLength(1);
-    expect(record(run)).toMatchObject({ status: "fail", code: "ARGUMENT_COUNT_INVALID" });
+    expect(record(run)).toMatchObject({
+      status: "fail",
+      code: "ARGUMENT_COUNT_INVALID",
+    });
   });
 
   test("kernel probe faults are validated and scoped to the kernel self-test", async () => {
-    const invalid = await runScript(["--self-test"], { S1_KERNEL_PROBE_FAULT: "not-a-fault" });
+    const invalid = await runScript(["--self-test"], {
+      S1_KERNEL_PROBE_FAULT: "not-a-fault",
+    });
     expect(invalid.exitCode).toBe(78);
     expect(record(invalid)).toMatchObject({
       status: "blocked",
@@ -549,7 +606,9 @@ describe("the self-test and the blocked external proof", () => {
     expect(source).toContain("absolute_time_us()");
     expect(source).toContain("transient_retry_deadline_us()");
     expect(source).toContain('transient_retry_deadline_elapsed "$deadline"');
-    expect(source).not.toContain("SECONDS + TRANSIENT_INSPECTION_DEADLINE_SECONDS");
+    expect(source).not.toContain(
+      "SECONDS + TRANSIENT_INSPECTION_DEADLINE_SECONDS",
+    );
   });
 
   test("a NUL-bearing retained artifact is byte-scanned rather than omitted", () => {
@@ -611,7 +670,9 @@ describe("a pinned port is validated before anything is started", () => {
   test("PLANTED: a pinned port that is already listening is refused, not served by the squatter", async () => {
     const listener = occupyPort();
     try {
-      const run = await runScript(["--local-d1"], { S1_LOCAL_PORT: String(listener.port) });
+      const run = await runScript(["--local-d1"], {
+        S1_LOCAL_PORT: String(listener.port),
+      });
       expect(run.exitCode).toBe(78);
       expect(record(run).code).toBe("PINNED_PORT_BUSY");
       expect(run.stderr).not.toContain("child-started");
@@ -641,19 +702,28 @@ describe("a pinned port is validated before anything is started", () => {
     expect(phaseValue(run.stderr, "port-allocated", "pinned")).toBe("no");
     // Readiness is tied to this run's own D1 state, not merely to "something answered".
     expect(run.stderr).toContain("port-ownership-proven");
-    expect(record(run).code).toBe("LOCAL_D1_ENROLLMENT_PASSED");
+    expect(record(run)).toMatchObject({
+      code: "LOCAL_D1_ENROLLMENT_PASSED",
+      reproduce: "scripts/e2e-s1-cold-enrollment.sh --local-d1",
+    });
+    expect(phaseValue(run.stderr, "replay-key-artifact-scan", "result")).toBe(
+      "absent",
+    );
     const stateDir = phaseValue(run.stderr, "state-retained", "dir") as string;
     const retained = retainedArtifacts(stateDir);
     expect(retained.files.length).toBeGreaterThanOrEqual(3);
     expect(retained.scannedNulArtifacts).toBe(retained.nulArtifacts);
     expect(retained.unscannedNulArtifacts).toBe(0);
-    for (const artifact of retained.files) {
-      expect(
-        bytesContain(artifact.bytes, "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"),
-        `local replay key leaked to ${artifact.path}`,
-      ).toBe(false);
-    }
-  }, 120_000);
+  }, 630_000);
+
+  test("PLANTED: the retained-artifact scanner detects its exact non-credential canary", async () => {
+    const run = await runScript(["--self-test-replay-artifact-scan"]);
+    expect(run.exitCode).toBe(0);
+    expect(record(run).code).toBe("REPLAY_ARTIFACT_SCAN_SELF_TEST_PASSED");
+    expect(
+      phaseValue(run.stderr, "replay-key-artifact-plant-refused", "result"),
+    ).toBe("detected");
+  });
 });
 
 function retainedArtifacts(root: string): {
@@ -676,7 +746,10 @@ function retainedArtifacts(root: string): {
       // Scan raw bytes rather than attempting text decoding: a NUL-containing
       // SQLite/local-state file is still an artifact in scope for secret proof.
       files.push({ path, bytes });
-    } else throw new Error(`retained state contains a non-regular artifact: ${path}`);
+    } else
+      throw new Error(
+        `retained state contains a non-regular artifact: ${path}`,
+      );
   }
   return {
     files,
@@ -777,10 +850,11 @@ interface SpawnedHarness {
 // before a test is allowed to force-stop only the Bun child it created.
 const PROCESS_PROOF_TIMEOUT_MS = 5_000;
 const HARNESS_CLEANUP_TIMEOUT_MS = 30_000;
-// The shell has an absolute 45 s readiness gate, a 180 s client gate, and
-// bounded TERM/KILL/absence gates. Keep the parent deadline beyond their sum so
-// a correct bounded cleanup is never mistaken for a stuck test process.
-const RUN_SCRIPT_TIMEOUT_MS = 300_000;
+// The shell has separate 120 s migration, 45 s readiness, 15 s ownership HTTP,
+// 30 s ownership-query, and 180 s client gates, followed by bounded group
+// cleanup. Keep the parent beyond their complete serial composition so a
+// correct terminal record is never replaced by the test controller's timeout.
+const RUN_SCRIPT_TIMEOUT_MS = 600_000;
 
 /** The small common surface shared by Bun's piped stderr readers. */
 interface PipeReader {
@@ -840,11 +914,16 @@ function abandonReader(reader: PipeReader): void {
  * proves any workload groups itself; the test must never guess at a PGID or send
  * a broad signal while reporting a timeout.
  */
-async function terminateExactChild(child: SpawnedHarness): Promise<number | undefined> {
+async function terminateExactChild(
+  child: SpawnedHarness,
+): Promise<number | undefined> {
   if (child.exitCode !== null) return child.exitCode;
 
   child.kill("SIGTERM");
-  const gracefulExit = await waitForExitBefore(child.exited, HARNESS_CLEANUP_TIMEOUT_MS);
+  const gracefulExit = await waitForExitBefore(
+    child.exited,
+    HARNESS_CLEANUP_TIMEOUT_MS,
+  );
   if (gracefulExit !== undefined) return gracefulExit;
 
   // The exit promise and timeout can settle on adjacent turns. Re-read Bun's
@@ -926,34 +1005,54 @@ describe("lifecycle: process-group cleanup reaches descendants, not just the lea
   test("PLANTED: a payload that exits leaves its descendant to a pinned supervisor cleanup", async () => {
     const run = await runScript(["--self-test-lifecycle"]);
     const emitted = record(run);
-    expect(`${run.stderr}\n${JSON.stringify(emitted)}`).toContain("lifecycle-group-retired");
+    expect(`${run.stderr}\n${JSON.stringify(emitted)}`).toContain(
+      "lifecycle-group-retired",
+    );
     expect(run.exitCode).toBe(0);
     expect(emitted.status).toBe("pass");
     expect(emitted.code).toBe("LIFECYCLE_SELF_TEST_PASSED");
 
     // The payload is complete, but a live, identity-pinned supervisor remains
     // with its descendant. That is what keeps later group cleanup authorized.
-    const descendant = Number(phaseValue(run.stderr, "lifecycle-descendant", "pid"));
-    const leader = Number(phaseValue(run.stderr, "lifecycle-pinned-supervisor", "leader"));
+    const descendant = Number(
+      phaseValue(run.stderr, "lifecycle-descendant", "pid"),
+    );
+    const leader = Number(
+      phaseValue(run.stderr, "lifecycle-pinned-supervisor", "leader"),
+    );
     expect(Number.isInteger(descendant)).toBe(true);
-    expect(phaseValue(run.stderr, "lifecycle-pinned-supervisor", "status")).toBe("0");
     expect(
-      phaseValue(run.stderr, "lifecycle-pinned-supervisor", "survivors")?.split(","),
+      phaseValue(run.stderr, "lifecycle-pinned-supervisor", "status"),
+    ).toBe("0");
+    expect(
+      phaseValue(run.stderr, "lifecycle-pinned-supervisor", "survivors")?.split(
+        ",",
+      ),
     ).toContain(String(descendant));
     expect(phaseValue(run.stderr, "lifecycle-group-retired", "cleanup")).toBe(
       "post-kill-absence-proven",
     );
     expect(run.stderr).not.toContain("lifecycle-table-incomplete");
-    expect(phaseValue(run.stderr, "lifecycle-sole-visible-leader", "table")).toBe("complete");
-    expect(phaseValue(run.stderr, "lifecycle-sole-visible-leader", "action")).toBe("group-kill");
+    expect(
+      phaseValue(run.stderr, "lifecycle-sole-visible-leader", "table"),
+    ).toBe("complete");
+    expect(
+      phaseValue(run.stderr, "lifecycle-sole-visible-leader", "action"),
+    ).toBe("group-kill");
     // Cleanup signalled the proven group, not the pid.
     expect(phaseValue(run.stderr, "lifecycle-killed", "scope")).toBe("group");
-    expect(phaseValue(run.stderr, "lifecycle-killed", "pgid")).toBe(String(leader));
+    expect(phaseValue(run.stderr, "lifecycle-killed", "pgid")).toBe(
+      String(leader),
+    );
 
     // Verified here, not merely reported by the script under test.
     expect(await waitForExit(descendant)).toBe(true);
 
-    const stateDir = phaseValue(run.stderr, "lifecycle-state-retained", "dir") as string;
+    const stateDir = phaseValue(
+      run.stderr,
+      "lifecycle-state-retained",
+      "dir",
+    ) as string;
     expect(existsSync(stateDir)).toBe(true);
     const phases = readFileSync(`${stateDir}/phases.log`, "utf8");
     expect(phases).toContain("lifecycle-pinned-supervisor");
@@ -969,12 +1068,18 @@ describe("lifecycle: process-group cleanup reaches descendants, not just the lea
     expect(run.exitCode).toBe(0);
     expect(emitted.status).toBe("pass");
     expect(emitted.code).toBe("LIFECYCLE_SELF_TEST_PASSED");
-    expect(phaseValue(run.stderr, "lifecycle-observation-retried", "reason")).toBe(
-      "validated-snapshot-omitted-required-pid",
-    );
+    expect(
+      phaseValue(run.stderr, "lifecycle-observation-retried", "reason"),
+    ).toBe("validated-snapshot-omitted-required-pid");
 
-    const descendant = Number(phaseValue(run.stderr, "lifecycle-descendant", "pid"));
-    const survivors = phaseValue(run.stderr, "lifecycle-pinned-supervisor", "survivors");
+    const descendant = Number(
+      phaseValue(run.stderr, "lifecycle-descendant", "pid"),
+    );
+    const survivors = phaseValue(
+      run.stderr,
+      "lifecycle-pinned-supervisor",
+      "survivors",
+    );
     expect(Number.isInteger(descendant)).toBe(true);
     expect(survivors?.split(",")).toContain(String(descendant));
     expect(phaseValue(run.stderr, "lifecycle-group-retired", "cleanup")).toBe(
@@ -1002,14 +1107,22 @@ describe("lifecycle: process-group cleanup reaches descendants, not just the lea
       expect(run.exitCode).toBe(0);
       expect(record(run).code).toBe(code);
       expect(run.stderr).toContain(`${phase}-group-unproven`);
-      expect(phaseValue(run.stderr, `${phase}-preexec-kill`, "scope")).toBe("direct");
-      const pid = Number(phaseValue(run.stderr, `${phase}-preexec-reaped`, "pid"));
+      expect(phaseValue(run.stderr, `${phase}-preexec-kill`, "scope")).toBe(
+        "direct",
+      );
+      const pid = Number(
+        phaseValue(run.stderr, `${phase}-preexec-reaped`, "pid"),
+      );
       expect(Number.isInteger(pid)).toBe(true);
       // This is independently checked outside the script: no direct child and
       // no group remain, while the log pins that no negative-PGID fallback ran.
       expect(await waitForExit(pid)).toBe(true);
       expect(await waitForGroupExit(pid)).toBe(true);
-      const stateDir = phaseValue(run.stderr, "state-retained", "dir") as string;
+      const stateDir = phaseValue(
+        run.stderr,
+        "state-retained",
+        "dir",
+      ) as string;
       const phases = readFileSync(`${stateDir}/phases.log`, "utf8");
       expect(phases).toContain("preexec-failure-cleaned");
       expect(phases).toContain("payload=not-started");
@@ -1023,24 +1136,39 @@ describe("lifecycle: process-group cleanup reaches descendants, not just the lea
     expect(record(run).code).toBe("PROVISIONAL_PID_REUSE_SELF_TEST_PASSED");
     expect(run.stderr).toContain("provisional-reuse-preexec-identity-mismatch");
     expect(run.stderr).toContain("action=not-signalled");
-    const pid = Number(phaseValue(run.stderr, "provisional-reuse-refused", "pid"));
+    const pid = Number(
+      phaseValue(run.stderr, "provisional-reuse-refused", "pid"),
+    );
     expect(Number.isInteger(pid)).toBe(true);
-    expect(phaseValue(run.stderr, "provisional-reuse-refused", "survived")).toBe("yes");
+    expect(
+      phaseValue(run.stderr, "provisional-reuse-refused", "survived"),
+    ).toBe("yes");
     expect(await waitForExit(pid)).toBe(true);
     expect(await waitForGroupExit(pid)).toBe(true);
   }, 60_000);
 
   test("PLANTED: persistent provisional inspection-unknown exhausts its bound without signalling", async () => {
-    const run = await runScript(["--self-test-provisional-inspection-unknown"], {
-      S1_FAULT_INJECT: "provisional-inspection-unknown",
-    });
+    const run = await runScript(
+      ["--self-test-provisional-inspection-unknown"],
+      {
+        S1_FAULT_INJECT: "provisional-inspection-unknown",
+      },
+    );
     expect(run.exitCode).toBe(0);
-    expect(record(run).code).toBe("PROVISIONAL_INSPECTION_UNKNOWN_SELF_TEST_PASSED");
-    expect(run.stderr).toContain("provisional-unknown-preexec-inspection-unknown");
+    expect(record(run).code).toBe(
+      "PROVISIONAL_INSPECTION_UNKNOWN_SELF_TEST_PASSED",
+    );
+    expect(run.stderr).toContain(
+      "provisional-unknown-preexec-inspection-unknown",
+    );
     expect(run.stderr).toContain("action=not-signalled deadline_s=1");
-    const pid = Number(phaseValue(run.stderr, "provisional-inspection-refused", "pid"));
+    const pid = Number(
+      phaseValue(run.stderr, "provisional-inspection-refused", "pid"),
+    );
     expect(Number.isInteger(pid)).toBe(true);
-    expect(phaseValue(run.stderr, "provisional-inspection-refused", "survived")).toBe("yes");
+    expect(
+      phaseValue(run.stderr, "provisional-inspection-refused", "survived"),
+    ).toBe("yes");
     expect(await waitForExit(pid)).toBe(true);
     expect(await waitForGroupExit(pid)).toBe(true);
   }, 60_000);
@@ -1048,17 +1176,23 @@ describe("lifecycle: process-group cleanup reaches descendants, not just the lea
   test("PLANTED: a descendant that ignores TERM is reported as a survivor and then killed", async () => {
     const run = await runScript(["--self-test-lifecycle-kill"]);
     const emitted = record(run);
-    expect(`${run.stderr}\n${JSON.stringify(emitted)}`).toContain("lifecycle-group-retired");
+    expect(`${run.stderr}\n${JSON.stringify(emitted)}`).toContain(
+      "lifecycle-group-retired",
+    );
     expect(run.exitCode).toBe(0);
     expect(emitted.code).toBe("LIFECYCLE_SELF_TEST_PASSED");
 
-    const descendant = Number(phaseValue(run.stderr, "lifecycle-descendant", "pid"));
+    const descendant = Number(
+      phaseValue(run.stderr, "lifecycle-descendant", "pid"),
+    );
     // TERM delivered, ignored, reported, escalated — in that order, and the
     // survivor is named rather than silently absorbed by a "terminated" line.
-    expect(phaseValue(run.stderr, "lifecycle-survivors", "pids")?.split(",")).toContain(
-      String(descendant),
+    expect(
+      phaseValue(run.stderr, "lifecycle-survivors", "pids")?.split(","),
+    ).toContain(String(descendant));
+    expect(phaseValue(run.stderr, "lifecycle-survivors", "after_s")).toMatch(
+      /^[0-9]+$/,
     );
-    expect(phaseValue(run.stderr, "lifecycle-survivors", "after_s")).toMatch(/^[0-9]+$/);
     expect(phaseValue(run.stderr, "lifecycle-killed", "signal")).toBe("KILL");
     expect(phaseValue(run.stderr, "lifecycle-killed", "scope")).toBe("group");
     expect(await waitForExit(descendant)).toBe(true);
@@ -1070,13 +1204,21 @@ describe("lifecycle: process-group cleanup reaches descendants, not just the lea
     expect(run.exitCode).toBe(0);
     expect(emitted.code).toBe("UNOWNED_REFUSAL_SELF_TEST_PASSED");
     expect(run.stderr).toContain("leader-absent-refused");
-    expect(phaseValue(run.stderr, "leader-absent-refused", "marker")).toBe("exact");
-    expect(phaseValue(run.stderr, "leader-absent-refused", "reason")).toBe("leader-absent");
-    expect(phaseValue(run.stderr, "leader-absent-refused", "action")).toBe("not-signalled");
+    expect(phaseValue(run.stderr, "leader-absent-refused", "marker")).toBe(
+      "exact",
+    );
+    expect(phaseValue(run.stderr, "leader-absent-refused", "reason")).toBe(
+      "leader-absent",
+    );
+    expect(phaseValue(run.stderr, "leader-absent-refused", "action")).toBe(
+      "not-signalled",
+    );
     expect(run.stderr).toContain("unowned-group-unproven");
     expect(run.stderr).toContain("unowned-refused");
     expect(run.stderr).not.toContain("scope=pid-tree");
-    const descendant = Number(phaseValue(run.stderr, "unowned-refused", "descendant"));
+    const descendant = Number(
+      phaseValue(run.stderr, "unowned-refused", "descendant"),
+    );
     expect(await waitForExit(descendant)).toBe(true);
   }, 60_000);
 });
@@ -1085,29 +1227,41 @@ describe("lifecycle: containment failures stay fail-closed", () => {
   test("PLANTED: repeated exit-0 clients with live descendants launch and clean deterministically", async () => {
     for (let attempt = 1; attempt <= 12; attempt += 1) {
       const run = await runScript(["--self-test-client-success-descendant"]);
-      expect(`attempt=${attempt} exit=${run.exitCode}\n${run.stderr}`).toContain(
-        `attempt=${attempt} exit=0`,
+      expect(
+        `attempt=${attempt} exit=${run.exitCode}\n${run.stderr}`,
+      ).toContain(`attempt=${attempt} exit=0`);
+      expect(record(run).code).toBe(
+        "CLIENT_SUCCESS_DESCENDANT_SELF_TEST_PASSED",
       );
-      expect(record(run).code).toBe("CLIENT_SUCCESS_DESCENDANT_SELF_TEST_PASSED");
       expect(run.stderr).toContain("client-complete-pinned");
       expect(run.stderr).toContain("client-complete-killed");
-      const descendant = Number(phaseValue(run.stderr, "client-success-cleaned", "descendant"));
+      const descendant = Number(
+        phaseValue(run.stderr, "client-success-cleaned", "descendant"),
+      );
       expect(await waitForExit(descendant)).toBe(true);
     }
   }, 120_000);
 
   test("D4: an observed valid-row omission is distinct from ordinary TERM-proof survivor cleanup", async () => {
-    const run = await runScript(["--self-test-partial-ps"], { S1_FAULT_INJECT: "ps-partial" });
+    const run = await runScript(["--self-test-partial-ps"], {
+      S1_FAULT_INJECT: "ps-partial",
+    });
     expect(run.exitCode).toBe(0);
     expect(record(run).code).toBe("PARTIAL_PS_SELF_TEST_PASSED");
     expect(run.stderr).toContain("child-omitted-descendant-suspected");
     expect(run.stderr).toContain("child-killed");
-    const descendant = Number(phaseValue(run.stderr, "partial-ps-killed", "descendant"));
+    const descendant = Number(
+      phaseValue(run.stderr, "partial-ps-killed", "descendant"),
+    );
     expect(await waitForExit(descendant)).toBe(true);
 
-    const control = await runScript(["--self-test-partial-ps-negative-control"]);
+    const control = await runScript([
+      "--self-test-partial-ps-negative-control",
+    ]);
     expect(control.exitCode).toBe(0);
-    expect(record(control).code).toBe("PARTIAL_PS_NEGATIVE_CONTROL_SELF_TEST_PASSED");
+    expect(record(control).code).toBe(
+      "PARTIAL_PS_NEGATIVE_CONTROL_SELF_TEST_PASSED",
+    );
     expect(control.stderr).not.toContain("child-omitted-descendant-suspected");
     expect(control.stderr).not.toContain("child-table-incomplete");
     expect(control.stderr).toContain("child-survivors");
@@ -1126,12 +1280,22 @@ describe("lifecycle: containment failures stay fail-closed", () => {
       expect(run.exitCode).toBe(0);
       expect(record(run).code).toBe("PS_TABLE_PARSER_REFUSAL_SELF_TEST_PASSED");
       expect(phaseValue(run.stderr, "ps-parser-refused", "fault")).toBe(fault);
-      expect(phaseValue(run.stderr, "ps-parser-refused", "survived")).toBe("yes");
-      expect(phaseValue(run.stderr, "ps-parser-refused", "action")).toBe("not-signalled");
-      const descendant = Number(phaseValue(run.stderr, "ps-parser-survivor-cleaned", "descendant"));
+      expect(phaseValue(run.stderr, "ps-parser-refused", "survived")).toBe(
+        "yes",
+      );
+      expect(phaseValue(run.stderr, "ps-parser-refused", "action")).toBe(
+        "not-signalled",
+      );
+      const descendant = Number(
+        phaseValue(run.stderr, "ps-parser-survivor-cleaned", "descendant"),
+      );
       expect(Number.isInteger(descendant)).toBe(true);
       expect(await waitForExit(descendant)).toBe(true);
-      const stateDir = phaseValue(run.stderr, "state-retained", "dir") as string;
+      const stateDir = phaseValue(
+        run.stderr,
+        "state-retained",
+        "dir",
+      ) as string;
       const phases = readFileSync(`${stateDir}/phases.log`, "utf8");
       expect(phases.indexOf("ps-parser-refused")).toBeLessThan(
         phases.indexOf("ps-parser-survivor-cleaned"),
@@ -1140,7 +1304,9 @@ describe("lifecycle: containment failures stay fail-closed", () => {
   }, 60_000);
 
   test("PLANTED: failed cleanup retains ownership for the EXIT retry", async () => {
-    const run = await runScript(["--self-test-cleanup-retry"], { S1_FAULT_INJECT: "ps-once" });
+    const run = await runScript(["--self-test-cleanup-retry"], {
+      S1_FAULT_INJECT: "ps-once",
+    });
     expect(run.exitCode).toBe(1);
     const emitted = record(run);
     expect(emitted.status).toBe("fail");
@@ -1149,8 +1315,12 @@ describe("lifecycle: containment failures stay fail-closed", () => {
     expect(run.stderr).toContain("child-inspection-unavailable");
     expect(run.stderr).toContain("cleanup-retry-first-failure");
     expect(run.stderr).toContain("child-killed");
-    const descendant = Number(phaseValue(run.stderr, "cleanup-retry-first-failure", "descendant"));
-    const leader = Number(phaseValue(run.stderr, "cleanup-retry-first-failure", "leader"));
+    const descendant = Number(
+      phaseValue(run.stderr, "cleanup-retry-first-failure", "descendant"),
+    );
+    const leader = Number(
+      phaseValue(run.stderr, "cleanup-retry-first-failure", "leader"),
+    );
     expect(await waitForExit(descendant)).toBe(true);
     expect(await waitForGroupExit(leader)).toBe(true);
   }, 60_000);
@@ -1168,13 +1338,18 @@ describe("lifecycle: containment failures stay fail-closed", () => {
   test("D3: an unmarked Bun exit 1 is unknown, not a kernel absence", async () => {
     const run = await runScript(["--self-test"]);
     expect(run.exitCode).toBe(0);
-    expect(run.stderr).toContain("self-test-kernel-probe-refused fault=bun-exit-1 state=unknown");
+    expect(run.stderr).toContain(
+      "self-test-kernel-probe-refused fault=bun-exit-1 state=unknown",
+    );
   });
 
   test("unknown arguments have a typed terminal refusal", async () => {
     const run = await runScript(["--not-an-s1-mode"]);
     expect(run.exitCode).toBe(1);
-    expect(record(run)).toMatchObject({ status: "fail", code: "UNKNOWN_ARGUMENT" });
+    expect(record(run)).toMatchObject({
+      status: "fail",
+      code: "UNKNOWN_ARGUMENT",
+    });
   });
 
   test("PLANTED: cleanup-incomplete is the final typed record after an already-nonzero body", async () => {
@@ -1183,19 +1358,26 @@ describe("lifecycle: containment failures stay fail-closed", () => {
     });
     expect(run.exitCode).toBe(1);
     const codes = records(run).map((entry) => entry.code);
-    expect(codes.slice(-2)).toEqual(["BODY_FAILURE_EXPECTED", "CLEANUP_INCOMPLETE"]);
+    expect(codes.slice(-2)).toEqual([
+      "BODY_FAILURE_EXPECTED",
+      "CLEANUP_INCOMPLETE",
+    ]);
     expect(record(run).code).toBe("CLEANUP_INCOMPLETE");
     expect(run.stderr.indexOf("BODY_FAILURE_EXPECTED")).toBeLessThan(
       run.stderr.lastIndexOf("CLEANUP_INCOMPLETE"),
     );
     expect(run.stderr).toContain("cleanup-incomplete exit_status=1");
-    const leader = Number(phaseValue(run.stderr, "cleanup-terminal-child", "leader"));
+    const leader = Number(
+      phaseValue(run.stderr, "cleanup-terminal-child", "leader"),
+    );
     expect(Number.isInteger(leader)).toBe(true);
     expect(await waitForGroupExit(leader)).toBe(true);
   }, 60_000);
 
   test("PLANTED: fault injection is test-only and cannot alter a local-D1 run", async () => {
-    const run = await runScript(["--local-d1"], { S1_FAULT_INJECT: "ps-partial" });
+    const run = await runScript(["--local-d1"], {
+      S1_FAULT_INJECT: "ps-partial",
+    });
     expect(run.exitCode).toBe(78);
     expect(record(run).code).toBe("FAULT_INJECTION_TEST_ONLY");
     expect(run.stderr).not.toContain("child-started");
@@ -1205,26 +1387,35 @@ describe("lifecycle: containment failures stay fail-closed", () => {
     const run = await runScript(["--self-test-exit-gate"]);
     expect(run.exitCode).toBe(0);
     expect(record(run).code).toBe("EXIT_GATE_SELF_TEST_PASSED");
-    const descendant = Number(phaseValue(run.stderr, "exit-gate-child", "descendant"));
+    const descendant = Number(
+      phaseValue(run.stderr, "exit-gate-child", "descendant"),
+    );
     expect(Number.isInteger(descendant)).toBe(true);
     expect(run.stderr).toContain("child-killed");
     expect(await waitForExit(descendant)).toBe(true);
   }, 60_000);
 
   test("PLANTED: a one-shot EXIT inspection fault retries cleanup before preserving a pass", async () => {
-    const run = await runScript(["--self-test-exit-gate"], { S1_FAULT_INJECT: "ps-once" });
+    const run = await runScript(["--self-test-exit-gate"], {
+      S1_FAULT_INJECT: "ps-once",
+    });
     expect(run.exitCode).toBe(0);
     expect(record(run).code).toBe("EXIT_GATE_SELF_TEST_PASSED");
     expect(run.stderr).toContain("exit-cleanup-retry");
     expect(run.stderr).toContain("exit-cleanup-recovered");
-    const descendant = Number(phaseValue(run.stderr, "exit-gate-child", "descendant"));
+    const descendant = Number(
+      phaseValue(run.stderr, "exit-gate-child", "descendant"),
+    );
     expect(await waitForExit(descendant)).toBe(true);
   }, 60_000);
 
   test("terminal interrupt record is corrected after EXIT recovers its first cleanup attempt", async () => {
-    const harness = await spawnCapturedHarness(["--self-test-interrupt-cleanup-retry"], {
-      S1_FAULT_INJECT: "ps-once",
-    });
+    const harness = await spawnCapturedHarness(
+      ["--self-test-interrupt-cleanup-retry"],
+      {
+        S1_FAULT_INJECT: "ps-once",
+      },
+    );
     const { child } = harness;
     const decoder = new TextDecoder();
     let reader: PipeReader | undefined;
@@ -1237,18 +1428,28 @@ describe("lifecycle: containment failures stay fail-closed", () => {
         "interrupt-retry-ready",
         30_000,
       );
-      const leader = Number(phaseValue(stderr, "interrupt-retry-ready", "leader"));
+      const leader = Number(
+        phaseValue(stderr, "interrupt-retry-ready", "leader"),
+      );
       expect(Number.isInteger(leader)).toBe(true);
 
       child.kill("SIGTERM");
-      const exitCode = await waitForExitBefore(child.exited, HARNESS_CLEANUP_TIMEOUT_MS);
+      const exitCode = await waitForExitBefore(
+        child.exited,
+        HARNESS_CLEANUP_TIMEOUT_MS,
+      );
       if (exitCode === undefined) {
         const forcedExit = await terminateExactChild(child);
         throw new Error(
           `interrupt cleanup retry did not exit; forced_exit=${String(forcedExit)}; stderr=${safeCaptureSummary(stderr)}`,
         );
       }
-      stderr = await drainStderrBefore(reader, decoder, stderr, HARNESS_CLEANUP_TIMEOUT_MS);
+      stderr = await drainStderrBefore(
+        reader,
+        decoder,
+        stderr,
+        HARNESS_CLEANUP_TIMEOUT_MS,
+      );
       assertCaptureComplete(harness.stderrCapture);
       const run = {
         exitCode,
@@ -1256,7 +1457,10 @@ describe("lifecycle: containment failures stay fail-closed", () => {
         stderr,
       };
       expect(records(run)).toHaveLength(1);
-      expect(record(run)).toMatchObject({ status: "fail", code: "INTERRUPTED_TERM" });
+      expect(record(run)).toMatchObject({
+        status: "fail",
+        code: "INTERRUPTED_TERM",
+      });
       expect(stderr).toContain("interrupted-cleanup-pending");
       expect(stderr).toContain("interrupted-cleanup-recovered");
       expect(stderr).not.toContain("CLEANUP_INCOMPLETE");
@@ -1279,7 +1483,9 @@ describe("lifecycle: containment failures stay fail-closed", () => {
     expect(record(run).status).toBe("fail");
     expect(run.stderr).toContain("exit-cleanup-retry");
     expect(run.stderr).toContain("exit-cleanup-recovered");
-    const leader = Number(phaseValue(run.stderr, "interrupt-retry-ready", "leader"));
+    const leader = Number(
+      phaseValue(run.stderr, "interrupt-retry-ready", "leader"),
+    );
     expect(Number.isInteger(leader)).toBe(true);
     expect(await waitForGroupExit(leader)).toBe(true);
   }, 30_000);
@@ -1289,18 +1495,107 @@ describe("lifecycle: containment failures stay fail-closed", () => {
     expect(run.exitCode).toBe(0);
     expect(record(run).code).toBe("DEADLINE_SELF_TEST_PASSED");
     expect(run.stderr).toContain("deadline-killed");
-    const descendant = Number(phaseValue(run.stderr, "deadline-cleaned", "descendant"));
+    const descendant = Number(
+      phaseValue(run.stderr, "deadline-cleaned", "descendant"),
+    );
     expect(await waitForExit(descendant)).toBe(true);
   }, 60_000);
+
+  test("PLANTED: both named Wrangler phases time out only after their stubborn groups are gone", async () => {
+    for (const phase of ["migration", "ownership-query"] as const) {
+      const run = await runScript(["--self-test-named-phase"], {
+        S1_NAMED_PHASE: phase,
+        S1_NAMED_PHASE_BEHAVIOR: "deadline",
+      });
+      expect(run.exitCode, phase).toBe(0);
+      expect(record(run).code, phase).toBe(
+        "NAMED_PHASE_DEADLINE_SELF_TEST_PASSED",
+      );
+      expect(run.stderr, phase).toContain(`${phase}-started`);
+      expect(run.stderr, phase).toContain(`${phase}-deadline-killed`);
+      expect(run.stderr, phase).toContain(
+        `named-phase-deadline-cleaned phase=${phase}`,
+      );
+      const descendant = Number(
+        phaseValue(run.stderr, "named-phase-deadline-cleaned", "descendant"),
+      );
+      const leader = Number(phaseValue(run.stderr, `${phase}-started`, "pid"));
+      expect(Number.isInteger(descendant), phase).toBe(true);
+      expect(Number.isInteger(leader), phase).toBe(true);
+      expect(await waitForExit(descendant), phase).toBe(true);
+      expect(await waitForGroupExit(leader), phase).toBe(true);
+    }
+  }, 90_000);
+
+  test("PLANTED: TERM during either named phase uses that phase's adopted ownership", async () => {
+    for (const phase of ["migration", "ownership-query"] as const) {
+      const harness = await spawnCapturedHarness(["--self-test-named-phase"], {
+        S1_NAMED_PHASE: phase,
+        S1_NAMED_PHASE_BEHAVIOR: "interrupt",
+      });
+      const { child } = harness;
+      const decoder = new TextDecoder();
+      let reader: PipeReader | undefined;
+      try {
+        reader = harness.stderrCapture.reader;
+        let stderr = await waitForStderrMarker(
+          child,
+          reader,
+          decoder,
+          `${phase}-started`,
+          30_000,
+        );
+        const leader = Number(phaseValue(stderr, `${phase}-started`, "pid"));
+        const stateDir = phaseValue(stderr, "state-retained", "dir") as string;
+        expect(Number.isInteger(leader), phase).toBe(true);
+        expect(stateDir, phase).toBeDefined();
+        expect(await waitForFile(`${stateDir}/descendant.pid`), phase).toBe(
+          true,
+        );
+        child.kill("SIGTERM");
+        const exitCode = await waitForExitBefore(
+          child.exited,
+          HARNESS_CLEANUP_TIMEOUT_MS,
+        );
+        expect(exitCode, phase).toBe(1);
+        stderr = await drainStderrBefore(
+          reader,
+          decoder,
+          stderr,
+          HARNESS_CLEANUP_TIMEOUT_MS,
+        );
+        expect(
+          record({
+            exitCode: exitCode ?? 1,
+            stdout: await settleSocketCapture(harness.stdoutCapture),
+            stderr,
+          }).code,
+          phase,
+        ).toBe("INTERRUPTED_TERM");
+        expect(stderr, phase).toContain(`cleanup-begin signal=TERM`);
+        expect(stderr, phase).toContain(`${phase}-`);
+        const descendant = Number(
+          readFileSync(`${stateDir}/descendant.pid`, "utf8").trim(),
+        );
+        expect(Number.isInteger(descendant), phase).toBe(true);
+        expect(await waitForExit(descendant), phase).toBe(true);
+        expect(await waitForGroupExit(leader), phase).toBe(true);
+      } finally {
+        await terminateExactChild(child);
+        if (reader) abandonReader(reader);
+        harness.closeCaptures();
+      }
+    }
+  }, 120_000);
 
   test("PLANTED: missing status is running, while malformed and stale retained paths are untrusted", async () => {
     const run = await runScript(["--self-test-status-integrity"]);
     expect(run.exitCode).toBe(0);
     expect(record(run).code).toBe("STATUS_INTEGRITY_SELF_TEST_PASSED");
     expect(run.stderr).toContain("status-integrity-refused");
-    expect(phaseValue(run.stderr, "status-integrity-refused", "malformed")).toBe(
-      "tested-and-untrusted",
-    );
+    expect(
+      phaseValue(run.stderr, "status-integrity-refused", "malformed"),
+    ).toBe("tested-and-untrusted");
   });
 });
 
@@ -1325,7 +1620,9 @@ describe("lifecycle: parallel runs and signal handling", () => {
         S1_INTERRUPT_WINDOW: window,
         S1_INTERRUPT_OWNER: owner,
       });
-      expect(`window=${window}\n${run.stderr}`).toContain("lifecycle-interrupt-deferred");
+      expect(`window=${window}\n${run.stderr}`).toContain(
+        "lifecycle-interrupt-deferred",
+      );
       expect(run.exitCode).toBe(1);
       expect(record(run).code).toBe("INTERRUPTED_TERM");
       expect(run.stderr).not.toContain("CLEANUP_INCOMPLETE");
@@ -1337,7 +1634,9 @@ describe("lifecycle: parallel runs and signal handling", () => {
       expect(cleanupAt).toBeGreaterThan(dispatchedAt);
 
       if (window === "before-background-spawn") {
-        expect(phaseValue(run.stderr, "lifecycle-critical-window", "provisional")).toBe("none");
+        expect(
+          phaseValue(run.stderr, "lifecycle-critical-window", "provisional"),
+        ).toBe("none");
         expect(run.stderr).not.toContain("cont-authorized");
         continue;
       }
@@ -1346,9 +1645,12 @@ describe("lifecycle: parallel runs and signal handling", () => {
       const checkpointPid = Number(
         phaseValue(run.stderr, "lifecycle-critical-window", "provisional"),
       );
-      const adoptedPhase = owner === "client" ? "client-adopted" : "critical-server-adopted";
+      const adoptedPhase =
+        owner === "client" ? "client-adopted" : "critical-server-adopted";
       const adoptedPid = Number(phaseValue(run.stderr, adoptedPhase, "pid"));
-      const ownedPid = Number.isInteger(checkpointPid) ? checkpointPid : adoptedPid;
+      const ownedPid = Number.isInteger(checkpointPid)
+        ? checkpointPid
+        : adoptedPid;
       expect(Number.isInteger(ownedPid)).toBe(true);
       expect(await waitForExit(ownedPid)).toBe(true);
       expect(await waitForGroupExit(ownedPid)).toBe(true);
@@ -1368,7 +1670,9 @@ describe("lifecycle: parallel runs and signal handling", () => {
     const detail = (run: Run) =>
       `exit=${run.exitCode} port=${phaseValue(run.stderr, "port-allocated", "port")} ` +
       `code=${String(record(run).code)}`;
-    expect(`first ${detail(first)} | second ${detail(second)}`).toContain("exit=0 port=");
+    expect(`first ${detail(first)} | second ${detail(second)}`).toContain(
+      "exit=0 port=",
+    );
     expect(first.exitCode).toBe(0);
     expect(second.exitCode).toBe(0);
 
@@ -1383,7 +1687,7 @@ describe("lifecycle: parallel runs and signal handling", () => {
     // Retained, both of them: no cleanup-by-deletion on either path.
     expect(existsSync(firstDir as string)).toBe(true);
     expect(existsSync(secondDir as string)).toBe(true);
-  }, 180_000);
+  }, 480_000);
 
   test("PLANTED: TERM terminates the whole child group and retains the state directory", async () => {
     if (!existsSync(WRANGLER)) {
@@ -1398,7 +1702,13 @@ describe("lifecycle: parallel runs and signal handling", () => {
     let reader: PipeReader | undefined;
     try {
       reader = harness.stderrCapture.reader;
-      let stderr = await waitForStderrMarker(child, reader, decoder, "child-started", 90_000);
+      let stderr = await waitForStderrMarker(
+        child,
+        reader,
+        decoder,
+        "child-started",
+        90_000,
+      );
       expect(stderr).toContain("child-started");
 
       const wranglerPid = Number(phaseValue(stderr, "child-started", "pid"));
@@ -1409,14 +1719,22 @@ describe("lifecycle: parallel runs and signal handling", () => {
       expect(stateDir).toBeDefined();
 
       child.kill("SIGTERM");
-      const exitCode = await waitForExitBefore(child.exited, HARNESS_CLEANUP_TIMEOUT_MS);
+      const exitCode = await waitForExitBefore(
+        child.exited,
+        HARNESS_CLEANUP_TIMEOUT_MS,
+      );
       if (exitCode === undefined) {
         const forcedExit = await terminateExactChild(child);
         throw new Error(
           `TERM did not stop the local-D1 harness; forced_exit=${String(forcedExit)}; stderr=${safeCaptureSummary(stderr)}`,
         );
       }
-      stderr = await drainStderrBefore(reader, decoder, stderr, HARNESS_CLEANUP_TIMEOUT_MS);
+      stderr = await drainStderrBefore(
+        reader,
+        decoder,
+        stderr,
+        HARNESS_CLEANUP_TIMEOUT_MS,
+      );
       assertCaptureComplete(harness.stderrCapture);
 
       // A signalled run is a failure with a typed code, not a silent zero.
@@ -1443,7 +1761,7 @@ describe("lifecycle: parallel runs and signal handling", () => {
       if (reader) abandonReader(reader);
       harness.closeCaptures();
     }
-  }, 180_000);
+  }, 480_000);
 
   test("PLANTED: HUP terminates the local-D1 worker group and releases its port FD", async () => {
     if (!existsSync(WRANGLER)) {
@@ -1456,21 +1774,35 @@ describe("lifecycle: parallel runs and signal handling", () => {
     let reader: PipeReader | undefined;
     try {
       reader = harness.stderrCapture.reader;
-      let stderr = await waitForStderrMarker(child, reader, decoder, "child-started", 90_000);
+      let stderr = await waitForStderrMarker(
+        child,
+        reader,
+        decoder,
+        "child-started",
+        90_000,
+      );
       const supervisor = Number(phaseValue(stderr, "child-started", "pid"));
       const localPort = Number(phaseValue(stderr, "child-started", "port"));
       expect(Number.isInteger(supervisor)).toBe(true);
       expect(Number.isInteger(localPort)).toBe(true);
 
       child.kill("SIGHUP");
-      const exitCode = await waitForExitBefore(child.exited, HARNESS_CLEANUP_TIMEOUT_MS);
+      const exitCode = await waitForExitBefore(
+        child.exited,
+        HARNESS_CLEANUP_TIMEOUT_MS,
+      );
       if (exitCode === undefined) {
         const forcedExit = await terminateExactChild(child);
         throw new Error(
           `HUP did not stop the local-D1 harness; forced_exit=${String(forcedExit)}; stderr=${safeCaptureSummary(stderr)}`,
         );
       }
-      stderr = await drainStderrBefore(reader, decoder, stderr, HARNESS_CLEANUP_TIMEOUT_MS);
+      stderr = await drainStderrBefore(
+        reader,
+        decoder,
+        stderr,
+        HARNESS_CLEANUP_TIMEOUT_MS,
+      );
       assertCaptureComplete(harness.stderrCapture);
 
       expect(exitCode).toBe(1);
@@ -1490,7 +1822,7 @@ describe("lifecycle: parallel runs and signal handling", () => {
       if (reader) abandonReader(reader);
       harness.closeCaptures();
     }
-  }, 180_000);
+  }, 480_000);
 
   test("PLANTED: TERM during the client phase terminates the client supervisor group", async () => {
     const harness = await spawnCapturedHarness(["--self-test-client-group"]);
@@ -1499,22 +1831,38 @@ describe("lifecycle: parallel runs and signal handling", () => {
     let reader: PipeReader | undefined;
     try {
       reader = harness.stderrCapture.reader;
-      let stderr = await waitForStderrMarker(child, reader, decoder, "client-started", 30_000);
+      let stderr = await waitForStderrMarker(
+        child,
+        reader,
+        decoder,
+        "client-started",
+        30_000,
+      );
       expect(stderr).toContain("client-started");
       const stateDir = phaseValue(stderr, "state-retained", "dir") as string;
       const supervisor = Number(phaseValue(stderr, "client-started", "pid"));
       expect(await waitForFile(`${stateDir}/descendant.pid`)).toBe(true);
-      const descendant = Number(readFileSync(`${stateDir}/descendant.pid`, "utf8").trim());
+      const descendant = Number(
+        readFileSync(`${stateDir}/descendant.pid`, "utf8").trim(),
+      );
 
       child.kill("SIGTERM");
-      const exitCode = await waitForExitBefore(child.exited, HARNESS_CLEANUP_TIMEOUT_MS);
+      const exitCode = await waitForExitBefore(
+        child.exited,
+        HARNESS_CLEANUP_TIMEOUT_MS,
+      );
       if (exitCode === undefined) {
         const forcedExit = await terminateExactChild(child);
         throw new Error(
           `TERM did not stop the client-phase harness; forced_exit=${String(forcedExit)}; stderr=${safeCaptureSummary(stderr)}`,
         );
       }
-      stderr = await drainStderrBefore(reader, decoder, stderr, HARNESS_CLEANUP_TIMEOUT_MS);
+      stderr = await drainStderrBefore(
+        reader,
+        decoder,
+        stderr,
+        HARNESS_CLEANUP_TIMEOUT_MS,
+      );
       assertCaptureComplete(harness.stderrCapture);
 
       expect(exitCode).toBe(1);
@@ -1543,25 +1891,48 @@ describe("lifecycle: parallel runs and signal handling", () => {
     let reader: PipeReader | undefined;
     try {
       reader = harness.stderrCapture.reader;
-      let stderr = await waitForStderrMarker(child, reader, decoder, "client-started", 30_000);
+      let stderr = await waitForStderrMarker(
+        child,
+        reader,
+        decoder,
+        "client-started",
+        30_000,
+      );
       const stateDir = phaseValue(stderr, "state-retained", "dir") as string;
       const supervisor = Number(phaseValue(stderr, "client-started", "pid"));
       expect(await waitForFile(`${stateDir}/descendant.pid`)).toBe(true);
-      const descendant = Number(readFileSync(`${stateDir}/descendant.pid`, "utf8").trim());
+      const descendant = Number(
+        readFileSync(`${stateDir}/descendant.pid`, "utf8").trim(),
+      );
 
       child.kill("SIGTERM");
-      stderr = await waitForStderrMarker(child, reader, decoder, "cleanup-begin", 10_000, stderr);
+      stderr = await waitForStderrMarker(
+        child,
+        reader,
+        decoder,
+        "cleanup-begin",
+        10_000,
+        stderr,
+      );
       // The first handler has installed the INT/TERM/HUP mask before it emits
       // cleanup-begin, so this is genuinely a second signal during cleanup.
       child.kill("SIGHUP");
-      const exitCode = await waitForExitBefore(child.exited, HARNESS_CLEANUP_TIMEOUT_MS);
+      const exitCode = await waitForExitBefore(
+        child.exited,
+        HARNESS_CLEANUP_TIMEOUT_MS,
+      );
       if (exitCode === undefined) {
         const forcedExit = await terminateExactChild(child);
         throw new Error(
           `second signal bypassed cleanup; forced_exit=${String(forcedExit)}; stderr=${safeCaptureSummary(stderr)}`,
         );
       }
-      stderr = await drainStderrBefore(reader, decoder, stderr, HARNESS_CLEANUP_TIMEOUT_MS);
+      stderr = await drainStderrBefore(
+        reader,
+        decoder,
+        stderr,
+        HARNESS_CLEANUP_TIMEOUT_MS,
+      );
       assertCaptureComplete(harness.stderrCapture);
 
       expect(exitCode).toBe(1);

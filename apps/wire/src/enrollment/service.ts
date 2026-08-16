@@ -237,8 +237,6 @@ export interface EnrollmentApprovalCard {
 export interface EnrollmentCapsule {
   readonly enrollmentId: string;
   readonly secretExpiresAt: number;
-  readonly requestedScopes: readonly RequestedScope[];
-  readonly requestedResources: EnrollmentResourceGrants;
 }
 
 export interface EnrollmentClaimResult {
@@ -819,12 +817,65 @@ function sameScopes(left: readonly RequestedScope[], right: readonly RequestedSc
   );
 }
 
+/**
+ * Mechanical ceiling for persisted approval authority. An absent numeric cap
+ * means unbounded, so a reduction may introduce or lower one but may never
+ * remove a cap that the sponsor requested. Text bindings may only remain
+ * byte-identical or be removed. Approved authority is semantically exact;
+ * reduced authority must contain at least one genuine narrowing.
+ */
+export function enrollmentGrantIsWithinRequest(input: {
+  readonly status: "approved" | "reduced";
+  readonly requestedScopes: readonly RequestedScope[];
+  readonly requestedResources: EnrollmentResourceGrants;
+  readonly grantedScopes: readonly RequestedScope[];
+  readonly grantedResources: EnrollmentResourceGrants;
+}): boolean {
+  const requestedScopeSet = new Set(input.requestedScopes);
+  if (
+    input.grantedScopes.length === 0 ||
+    input.grantedScopes.some((scope) => !requestedScopeSet.has(scope))
+  ) {
+    return false;
+  }
+
+  for (const key of ["problemBinding", "firstDirective"] as const) {
+    const requested = input.requestedResources[key];
+    const granted = input.grantedResources[key];
+    if (granted !== undefined && granted !== requested) return false;
+  }
+  for (const key of ["eventBudget", "artifactBudgetBytes", "fellowGrantExpiresAt"] as const) {
+    const requested = input.requestedResources[key];
+    const granted = input.grantedResources[key];
+    if (requested !== undefined && (granted === undefined || granted > requested)) return false;
+  }
+
+  const scopesMatch = sameScopes(input.requestedScopes, input.grantedScopes);
+  const resourceKeys = [
+    "problemBinding",
+    "firstDirective",
+    "eventBudget",
+    "artifactBudgetBytes",
+    "fellowGrantExpiresAt",
+  ] as const;
+  const resourcesMatch = resourceKeys.every(
+    (key) => input.requestedResources[key] === input.grantedResources[key],
+  );
+  return input.status === "approved"
+    ? scopesMatch && resourcesMatch
+    : !scopesMatch || !resourcesMatch;
+}
+
 export function isStrictEnrollmentScopeReduction(
   requested: readonly RequestedScope[],
   reduced: readonly RequestedScope[],
 ): boolean {
   const requestedSet = new Set(requested);
-  return reduced.every((scope) => requestedSet.has(scope)) && !sameScopes(requested, reduced);
+  return (
+    reduced.length > 0 &&
+    reduced.every((scope) => requestedSet.has(scope)) &&
+    !sameScopes(requested, reduced)
+  );
 }
 
 /**
@@ -1421,8 +1472,6 @@ export class InMemoryEnrollmentStore implements EnrollmentStore {
       return {
         enrollmentId: record.enrollmentId,
         secretExpiresAt: record.secretExpiresAt,
-        requestedScopes: record.requestedScopes,
-        requestedResources: record.requestedResources,
       };
     });
   }
@@ -1506,6 +1555,17 @@ export class InMemoryEnrollmentStore implements EnrollmentStore {
         proposal.status = "expired";
         this.commitIdempotency(idempotency);
         return decision;
+      }
+      if (
+        !enrollmentGrantIsWithinRequest({
+          status: proposal.status,
+          requestedScopes: record.requestedScopes,
+          requestedResources: record.requestedResources,
+          grantedScopes: proposal.grantedScopes,
+          grantedResources: proposal.grantedResources,
+        })
+      ) {
+        throw new EnrollmentPersistenceError();
       }
       const issued = await attempt.createToken();
       const decision: PollDecision = { kind: "issued", token: issued.token };
