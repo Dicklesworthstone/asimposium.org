@@ -8,6 +8,7 @@ import {
 import { toHex } from "../../src/auth/canonical";
 import {
   authenticateServiceEnvelopeRequest,
+  MAX_SERVICE_ENVELOPE_BODY_BYTES,
   parseAuthenticatedJsonBody,
   SERVICE_ENVELOPE_HEADER,
   type ServiceEnvelopeIngressOptions,
@@ -234,5 +235,169 @@ describe("exact request bytes are bound before JSON parsing", () => {
         permittedActions: [],
       }),
     );
+  });
+});
+
+describe("pre-authentication request bodies are byte bounded", () => {
+  test("accepts an exact-limit body without requiring Content-Length", async () => {
+    const h = await harness();
+    const body = "x".repeat(MAX_SERVICE_ENVELOPE_BODY_BYTES);
+    const request = await h.makeRequest(body);
+    request.headers.delete("content-length");
+
+    const result = await authenticateServiceEnvelopeRequest(request, h.options);
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    expect(result.rawBody.byteLength).toBe(MAX_SERVICE_ENVELOPE_BODY_BYTES);
+  });
+
+  test("rejects an honestly declared oversized body before consuming it", async () => {
+    const h = await harness();
+    const body = "x".repeat(MAX_SERVICE_ENVELOPE_BODY_BYTES + 1);
+    const request = await h.makeRequest(body);
+    request.headers.set("content-length", String(body.length));
+
+    const result = await authenticateServiceEnvelopeRequest(request, h.options);
+    expect(result.ok).toBe(false);
+    if (result.ok) return;
+    expect(result.response.status).toBe(413);
+    expect(await result.response.json()).toMatchObject({ code: "REQUEST_BODY_TOO_LARGE" });
+  });
+
+  test("a false-low Content-Length cannot bypass the streamed byte cap", async () => {
+    const h = await harness();
+    const body = "x".repeat(MAX_SERVICE_ENVELOPE_BODY_BYTES + 1);
+    const request = await h.makeRequest(body);
+    request.headers.set("content-length", "1");
+
+    const result = await authenticateServiceEnvelopeRequest(request, h.options);
+    expect(result.ok).toBe(false);
+    if (result.ok) return;
+    expect(result.response.status).toBe(413);
+    expect(await result.response.json()).toMatchObject({ code: "REQUEST_BODY_TOO_LARGE" });
+  });
+
+  test("ambiguous lengths, compressed bodies, and stream failures fail closed", async () => {
+    const h = await harness();
+    const signed = await h.makeRequest("{}");
+    const cases = [
+      { headers: { "content-length": "1, 2" }, body: signed.body },
+      { headers: { "content-encoding": "gzip" }, body: signed.body },
+      {
+        headers: {},
+        body: new ReadableStream<Uint8Array>({
+          start(controller) {
+            controller.error(new Error("private stream failure"));
+          },
+        }),
+      },
+    ] as const;
+
+    for (const [index, scenario] of cases.entries()) {
+      const headers = new Headers(signed.headers);
+      for (const [name, value] of Object.entries(scenario.headers)) headers.set(name, value);
+      const request = {
+        method: "POST",
+        headers,
+        body: scenario.body,
+      } as unknown as Request;
+      const result = await authenticateServiceEnvelopeRequest(request, h.options);
+      expect(result.ok, String(index)).toBe(false);
+      if (!result.ok) {
+        expect(result.response.status, String(index)).toBe(401);
+        expect(await result.response.json(), String(index)).toMatchObject({ code: "UNAUTHORIZED" });
+      }
+    }
+  });
+
+  test("early size and encoding refusals cancel the body and preserve the signed nonce", async () => {
+    for (const refusalHeader of [
+      ["content-length", String(MAX_SERVICE_ENVELOPE_BODY_BYTES + 1)],
+      ["content-encoding", "gzip"],
+    ] as const) {
+      const h = await harness();
+      const body = '{"bounded":true}';
+      const signed = await h.makeRequest(body);
+      const refusedHeaders = new Headers(signed.headers);
+      refusedHeaders.set(refusalHeader[0], refusalHeader[1]);
+      let cancellations = 0;
+      const refusedBody = new ReadableStream<Uint8Array>({
+        pull(controller) {
+          controller.enqueue(new TextEncoder().encode(body));
+          controller.close();
+        },
+        cancel() {
+          cancellations += 1;
+        },
+      });
+      const refused = await authenticateServiceEnvelopeRequest(
+        { method: "POST", headers: refusedHeaders, body: refusedBody } as unknown as Request,
+        h.options,
+      );
+      expect(refused.ok).toBe(false);
+      expect(cancellations).toBe(1);
+
+      const retry = await authenticateServiceEnvelopeRequest(
+        new Request(`${origin}/internal/auth-spike`, {
+          method: "POST",
+          headers: signed.headers,
+          body,
+        }),
+        h.options,
+      );
+      expect(retry.ok).toBe(true);
+    }
+  });
+
+  test("locked bodies and both oversized chunk shapes become typed refusals", async () => {
+    const lockedHarness = await harness();
+    const locked = await lockedHarness.makeRequest("{}");
+    const lock = locked.body?.getReader();
+    const lockedResult = await authenticateServiceEnvelopeRequest(locked, lockedHarness.options);
+    expect(lockedResult.ok).toBe(false);
+    if (!lockedResult.ok) expect(lockedResult.response.status).toBe(401);
+    await lock?.cancel();
+    lock?.releaseLock();
+
+    for (const chunks of [
+      [new Uint8Array(MAX_SERVICE_ENVELOPE_BODY_BYTES), new Uint8Array(1)],
+      [new Uint8Array(MAX_SERVICE_ENVELOPE_BODY_BYTES + 1)],
+    ]) {
+      const h = await harness();
+      const signed = await h.makeRequest("{}");
+      const headers = new Headers(signed.headers);
+      headers.delete("content-length");
+      let cancellations = 0;
+      const body = new ReadableStream<Uint8Array>({
+        start(controller) {
+          controller.enqueue(new Uint8Array(0));
+          for (const chunk of chunks) controller.enqueue(chunk);
+        },
+        cancel() {
+          cancellations += 1;
+        },
+      });
+      const result = await authenticateServiceEnvelopeRequest(
+        { method: "POST", headers, body } as unknown as Request,
+        h.options,
+      );
+      expect(result.ok).toBe(false);
+      if (!result.ok) expect(result.response.status).toBe(413);
+      expect(cancellations).toBe(1);
+    }
+  });
+
+  test("identity encoding and a truthful low length preserve exact bytes", async () => {
+    const h = await harness();
+    const body = '{"identity":true}';
+    const request = await h.makeRequest(body, {
+      extraHeaders: {
+        "content-encoding": "identity",
+        "content-length": String(new TextEncoder().encode(body).byteLength),
+      },
+    });
+    const result = await authenticateServiceEnvelopeRequest(request, h.options);
+    expect(result.ok).toBe(true);
+    if (result.ok) expect(new TextDecoder().decode(result.rawBody)).toBe(body);
   });
 });

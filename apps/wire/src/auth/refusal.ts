@@ -29,6 +29,18 @@ export function envelopeRefusalProblem(reason: EnvelopeRefusalReason): Response 
   });
 }
 
+/** Coarse refusal for a body that exceeded the pre-authentication byte cap. */
+export function requestBodyTooLargeProblem(): Response {
+  return problem({
+    status: 413,
+    code: "REQUEST_BODY_TOO_LARGE",
+    title: "Request body is too large",
+    detail: "The request body exceeded the maximum size accepted by this service route.",
+    fixHint:
+      "Send a smaller request body and obtain a fresh sponsor authorization before retrying.",
+  });
+}
+
 /** Safe, route-level refusal for bearer/envelope/cookie class confusion. */
 export function wrongPrincipalProblem(): Response {
   return problem({
