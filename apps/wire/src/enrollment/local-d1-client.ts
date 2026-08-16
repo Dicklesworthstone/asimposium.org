@@ -124,7 +124,8 @@ export function boundedLocalResponse(response: Response): Response {
   if (
     declaredLength !== null &&
     /^(?:0|[1-9][0-9]*)$/.test(declaredLength) &&
-    (!Number.isSafeInteger(Number(declaredLength)) || Number(declaredLength) > LOCAL_RESPONSE_MAX_BYTES)
+    (!Number.isSafeInteger(Number(declaredLength)) ||
+      Number(declaredLength) > LOCAL_RESPONSE_MAX_BYTES)
   ) {
     return oversizedLocalResponse(response);
   }
@@ -894,10 +895,13 @@ if (!import.meta.main) {
       expectedJoinHello.fellow.model !== "local-model" ||
       expectedJoinHello.fellow.harness !== "codex" ||
       JSON.stringify(expectedJoinHello.granted_scopes) !== JSON.stringify(["review"]) ||
-      expectedJoinHello.granted_resources.problem_binding !== privateProblem ||
-      expectedJoinHello.granted_resources.first_directive !== privateDirective ||
-      expectedJoinHello.granted_resources.event_budget !== privateEventBudget ||
-      expectedJoinHello.granted_resources.artifact_budget_bytes !== privateArtifactBudget
+      JSON.stringify(expectedJoinHello.granted_resources) !==
+        JSON.stringify({
+          problem_binding: privateProblem,
+          first_directive: privateDirective,
+          event_budget: privateEventBudget,
+          artifact_budget_bytes: privateArtifactBudget,
+        })
     ) {
       throw new Error("join-hello-binding-proof-content");
     }

@@ -8,10 +8,10 @@ import { join, resolve } from "node:path";
 import { EnrollmentHelloResponseSchema } from "@asimposium/contracts";
 
 import {
+  boundedLocalResponse,
   LOCAL_D1_COMPLETION_SKIP_PLANT,
   LOCAL_D1_EVIDENCE_CASES,
   LOCAL_RESPONSE_MAX_BYTES,
-  boundedLocalResponse,
 } from "../../src/enrollment/local-d1-client.ts";
 
 /**
@@ -359,24 +359,6 @@ async function assertWranglerBlocked(): Promise<void> {
   expect(record(run).code).toBe("WRANGLER_REQUIRED");
 }
 
-async function runClientCompletionPlant(): Promise<Run> {
-  const child = Bun.spawn([process.execPath, "apps/wire/src/enrollment/local-d1-client.ts"], {
-    cwd: REPO_ROOT,
-    env: {
-      ...process.env,
-      S1_LOCAL_EVIDENCE_COMPLETION_SELF_TEST: "skip-mounted-device",
-    },
-    stdout: "pipe",
-    stderr: "pipe",
-  });
-  const [exitCode, stdout, stderr] = await Promise.all([
-    child.exited,
-    new Response(child.stdout).text(),
-    new Response(child.stderr).text(),
-  ]);
-  return { exitCode, stdout, stderr };
-}
-
 function phaseValue(stderr: string, phase: string, key: string): string | undefined {
   const line = stderr.split("\n").find((entry) => entry.includes(` ${phase} `));
   return line?.match(new RegExp(`${key}=([^\\s]+)`))?.[1];
@@ -508,13 +490,15 @@ function occupyPort(): { port: number; stop: () => void } {
 describe("the self-test and the blocked external proof", () => {
   test("PLANTED: skipping one non-legacy client completion refuses before it can write terminal evidence", async () => {
     expect(LOCAL_D1_EVIDENCE_CASES).toContain(LOCAL_D1_COMPLETION_SKIP_PLANT);
-    const run = await runClientCompletionPlant();
-    expect(run.exitCode).toBe(1);
-    expect(run.stdout).toBe("");
-    expect(records({ ...run, stdout: run.stderr }).at(-1)).toMatchObject({
-      status: "fail",
-      code: "evidence-case-order",
-    });
+    const run = await runScript(["--self-test-client-evidence-completion-skip"]);
+    expect(run.exitCode).toBe(0);
+    expect(record(run)).toMatchObject({ code: "CLIENT_EVIDENCE_COMPLETION_SKIP_SELF_TEST_PASSED" });
+    expect(phaseValue(run.stderr, "client-evidence-completion-skip-refused", "result")).toBe(
+      "refused",
+    );
+    expect(phaseValue(run.stderr, "client-evidence-completion-skip-refused", "code")).toBe(
+      "evidence-case-order",
+    );
     expect(`${run.stdout}\n${run.stderr}`).not.toContain("S1_LOCAL_RESPONSE_OVER_LIMIT_SENTINEL");
   });
 
@@ -1255,6 +1239,9 @@ describe("the self-test and the blocked external proof", () => {
   for (const scenario of [
     { name: "same-origin disallowed path", path: "/v1/sessions" },
     { name: "same-origin query", path: "/protocol.md?unexpected=query" },
+    { name: "same-origin dot-segment alias", path: "/v1/../protocol.md" },
+    { name: "same-origin empty-query alias", path: "/protocol.md?" },
+    { name: "same-origin empty-fragment alias", path: "/protocol.md#" },
   ]) {
     test(`S1 PLANTED: a read action with a ${scenario.name} is refused without a follow-up request`, async () => {
       const token = `asimp_ag_${"A".repeat(26)}_${"B".repeat(43)}`;
@@ -1507,9 +1494,7 @@ describe("the self-test and the blocked external proof", () => {
       const run = await runScript([], {
         ...enrollmentEnv(origin),
         ASIMP_S1_TEST_ALLOW_HTTP: origin.startsWith("http://") ? "1" : "",
-        ASIMP_S1_LOOPBACK_SELF_TEST: origin.startsWith("http://")
-          ? "loopback-enrollment-v1"
-          : "",
+        ASIMP_S1_LOOPBACK_SELF_TEST: origin.startsWith("http://") ? "loopback-enrollment-v1" : "",
       });
       expect(run.exitCode).toBe(1);
       expect(records(run)).toHaveLength(1);
@@ -1687,6 +1672,41 @@ describe("a pinned port is validated before anything is started", () => {
       "client-evidence-proof-missing-refused",
       "LOCAL_CLIENT_EVIDENCE_PROOF_MISSING",
     ],
+    [
+      "one absent mounted-device proof slug",
+      "proof-missing-device",
+      "CLIENT_EVIDENCE_PROOF_MISSING_SELF_TEST_PASSED",
+      "client-evidence-proof-missing-refused",
+      "LOCAL_CLIENT_EVIDENCE_PROOF_MISSING",
+    ],
+    [
+      "one absent 24-hour durable-state proof slug",
+      "proof-missing-expiry",
+      "CLIENT_EVIDENCE_PROOF_MISSING_SELF_TEST_PASSED",
+      "client-evidence-proof-missing-refused",
+      "LOCAL_CLIENT_EVIDENCE_PROOF_MISSING",
+    ],
+    [
+      "a duplicate case slug",
+      "case-duplicate",
+      "CLIENT_EVIDENCE_CASE_DUPLICATE_SELF_TEST_PASSED",
+      "client-evidence-case-duplicate-refused",
+      "LOCAL_CLIENT_EVIDENCE_CASE_DUPLICATE",
+    ],
+    [
+      "an unknown case slug",
+      "case-unknown",
+      "CLIENT_EVIDENCE_CASE_UNKNOWN_SELF_TEST_PASSED",
+      "client-evidence-case-unknown-refused",
+      "LOCAL_CLIENT_EVIDENCE_CASE_UNKNOWN",
+    ],
+    [
+      "a reordered case corpus",
+      "case-reorder",
+      "CLIENT_EVIDENCE_CASE_REORDER_SELF_TEST_PASSED",
+      "client-evidence-case-reorder-refused",
+      "LOCAL_CLIENT_EVIDENCE_CASE_ORDER_INVALID",
+    ],
   ] as const;
 
   test.each(EVIDENCE_MODES)(
@@ -1715,37 +1735,42 @@ describe("a pinned port is validated before anything is started", () => {
     },
   );
 
-  test("PLANTED: the three evidence defects do not collapse onto one code", async () => {
-    // Distinctness is the property an operator depends on: "the client never
-    // wrote it", "it wrote two", and "it ran an older corpus" are different
-    // problems with different fixes, and a gate that reported one code for all
-    // three would pass every assertion above while being useless.
+  test("PLANTED: evidence failure classes do not collapse onto one code", async () => {
+    // Distinctness is the property an operator depends on: a missing record,
+    // duplicate record, missing proof, duplicate case, unknown case, and a
+    // reordered corpus all need different operator repairs. A gate that
+    // reported one code for every class would pass each isolated refusal while
+    // still being operationally useless.
+    const distinctModes = [
+      EVIDENCE_MODES[0], // missing record
+      EVIDENCE_MODES[1], // duplicate record
+      EVIDENCE_MODES[2], // missing proof (the next two rows are variants)
+      EVIDENCE_MODES[5], // duplicate case
+      EVIDENCE_MODES[6], // unknown case
+      EVIDENCE_MODES[7], // reordered corpus
+    ];
     const codes = await Promise.all(
-      EVIDENCE_MODES.map(async ([, mode, , phase]) => {
+      distinctModes.map(async ([, mode, , phase]) => {
         const run = await runScript([`--self-test-client-evidence-${mode}`]);
         return phaseValue(run.stderr, phase, "code");
       }),
     );
     expect(codes.every((code) => typeof code === "string")).toBe(true);
-    expect(new Set(codes).size).toBe(EVIDENCE_MODES.length);
+    expect(new Set(codes).size).toBe(distinctModes.length);
   }, 120_000);
 
-  test("the self-test proof slugs are exactly the ones the production gate requires", () => {
-    // The fixture list and the gate's list are deliberately separate: injecting
-    // the required slugs into the validator would let an empty variable satisfy
-    // `every()` vacuously, which is fail-open in the one place that must not be.
-    // Keeping two lists costs a drift risk, so the drift is asserted away here.
+  test("the production evidence gate imports the client's complete declared corpus", () => {
     const source = readFileSync(resolve(REPO_ROOT, SCRIPT), "utf8");
-    const gate = source.match(/const required = \[([^\]]*)\]/)?.[1];
-    const fixture = source.match(/EVIDENCE_PROOF_SLUGS=\(([^)]*)\)/)?.[1];
-    expect(gate).toBeDefined();
-    expect(fixture).toBeDefined();
-
-    const slugsIn = (block: string): string[] =>
-      [...block.matchAll(/"([a-z][a-z0-9-]{0,63})"/g)].map((match) => match[1] as string).sort();
-
-    expect(slugsIn(gate as string)).toHaveLength(3);
-    expect(slugsIn(fixture as string)).toEqual(slugsIn(gate as string));
+    expect(LOCAL_D1_EVIDENCE_CASES.length).toBeGreaterThan(3);
+    expect(new Set(LOCAL_D1_EVIDENCE_CASES).size).toBe(LOCAL_D1_EVIDENCE_CASES.length);
+    expect(source).toContain(
+      'import { LOCAL_D1_EVIDENCE_CASES } from "./apps/wire/src/enrollment/local-d1-client.ts";',
+    );
+    expect(source).toContain("record.cases.length !== required.length");
+    expect(source).toContain("name === required[index]");
+    expect(source).toContain("required.includes(name)");
+    expect(source).toContain("LOCAL_CLIENT_EVIDENCE_CASE_UNKNOWN");
+    expect(source).not.toContain("EVIDENCE_PROOF_SLUGS");
   });
 
   test("S1: the replay root and dynamic loopback origin reach Workerd only through its scrubbed environment", () => {

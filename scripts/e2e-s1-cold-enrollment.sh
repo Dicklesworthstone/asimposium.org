@@ -1166,14 +1166,15 @@ assert_local_client_evidence() {
       if (!record.cases.every((name) => typeof name === "string" && /^[a-z][a-z0-9-]{0,63}$/.test(name))) {
         process.exit(3);
       }
-      if (new Set(record.cases).size !== record.cases.length) process.exit(3);
+      if (new Set(record.cases).size !== record.cases.length) process.exit(4);
       // The client owns one declared corpus and this reader imports it directly.
-      // Order, cardinality, membership, and duplication are all evidence: a
-      // subset, an unknown addition, or a reordered list is an unproved run.
-      if (
-        record.cases.length !== required.length ||
-        !record.cases.every((name, index) => name === required[index])
-      ) process.exit(4);
+      // Check membership before cardinality/order so an added unknown is not
+      // misreported as a missing proof. Each remaining distinction has a
+      // separate fixed diagnostic: omission, duplication, and reordering need
+      // different operator repairs.
+      if (!record.cases.every((name) => required.includes(name))) process.exit(5);
+      if (record.cases.length !== required.length) process.exit(6);
+      if (!record.cases.every((name, index) => name === required[index])) process.exit(7);
       // No unmodelled field may ride along in a record a reader treats as exact.
       const allowed = new Set([...Object.keys(expected), "version", "duration_ms", "cases"]);
       if (!Object.keys(record).every((key) => allowed.has(key))) process.exit(3);
@@ -1182,7 +1183,10 @@ assert_local_client_evidence() {
     0) ;;
     2) failed "LOCAL_CLIENT_EVIDENCE_UNPARSEABLE" ;;
     3) failed "LOCAL_CLIENT_EVIDENCE_SCHEMA_INVALID" ;;
-    4) failed "LOCAL_CLIENT_EVIDENCE_PROOF_MISSING" ;;
+    4) failed "LOCAL_CLIENT_EVIDENCE_CASE_DUPLICATE" ;;
+    5) failed "LOCAL_CLIENT_EVIDENCE_CASE_UNKNOWN" ;;
+    6) failed "LOCAL_CLIENT_EVIDENCE_PROOF_MISSING" ;;
+    7) failed "LOCAL_CLIENT_EVIDENCE_CASE_ORDER_INVALID" ;;
     *) failed "LOCAL_CLIENT_EVIDENCE_UNTRUSTED" ;;
   esac
   log_phase "client-evidence-verified" "records=1 bytes=$size scope=retained-state"
@@ -1742,18 +1746,17 @@ const first = response.next_actions[0];
 if (!first || typeof first !== "object" || Array.isArray(first) || first.action !== "read" || typeof first.url !== "string") {
   process.exit(3);
 }
-let target;
-try {
-  target = new URL(first.url);
-} catch {
-  process.exit(3);
-}
-if (
-  target.origin !== base.origin ||
-  target.username || target.password || target.search || target.hash ||
-  !["/protocol.md", "/skill.md"].includes(target.pathname)
-) process.exit(3);
-process.stdout.write(target.href);
+// This is intentionally a raw closed-set comparison. Parsing and emitting
+// the parsed href would normalize aliases such as /v1/../protocol.md before
+// the request is made, making the shell less strict than the local client.
+// Empty query and fragment delimiters are aliases too, so they are refused by
+// the exact source-string comparison rather than normalized away.
+const allowed = [
+  new URL("/protocol.md", base).href,
+  new URL("/skill.md", base).href,
+];
+if (!allowed.includes(first.url)) process.exit(3);
+process.stdout.write(first.url);
 ' "$origin" 2>/dev/null
 }
 
@@ -2798,7 +2801,10 @@ evidence_cases_json() {
       cases.splice(index, 1);
     }
     if (mutation === "duplicate") cases.splice(1, 0, cases[0]);
-    else if (mutation === "unknown") cases[cases.length - 1] = "unknown-local-proof";
+    // Retain all declared cases and append exactly one unknown: replacing a
+    // required case would simultaneously exercise missing-proof handling.
+    else if (mutation === "unknown") cases.push("unknown-local-proof");
+    else if (mutation === "reorder") [cases[0], cases[1]] = [cases[1], cases[0]];
     else if (mutation !== "complete") process.exit(2);
     process.stdout.write(JSON.stringify(cases));
   ' "$omit" "$mutation" 2>/dev/null
@@ -2916,21 +2922,26 @@ self_test_client_evidence_proof_missing() {
   emit "pass" "CLIENT_EVIDENCE_PROOF_MISSING_SELF_TEST_PASSED"
 }
 
-# PLANTED NEGATIVES: a duplicate case cannot masquerade as two completed
-# proofs, and an unknown case cannot extend the declared corpus. Each control
-# uses the same imported client corpus with no mutation.
+# PLANTED NEGATIVES: duplicate, unknown, and reordered cases are different
+# evidence failures. Each control uses the same imported client corpus with no
+# mutation.
 self_test_client_evidence_case_mutation() {
   local mutation="$1" code expected pass_code phase
   case "$mutation" in
     duplicate)
-      expected="LOCAL_CLIENT_EVIDENCE_SCHEMA_INVALID"
+      expected="LOCAL_CLIENT_EVIDENCE_CASE_DUPLICATE"
       pass_code="CLIENT_EVIDENCE_CASE_DUPLICATE_SELF_TEST_PASSED"
       phase="client-evidence-case-duplicate-refused"
       ;;
     unknown)
-      expected="LOCAL_CLIENT_EVIDENCE_PROOF_MISSING"
+      expected="LOCAL_CLIENT_EVIDENCE_CASE_UNKNOWN"
       pass_code="CLIENT_EVIDENCE_CASE_UNKNOWN_SELF_TEST_PASSED"
       phase="client-evidence-case-unknown-refused"
+      ;;
+    reorder)
+      expected="LOCAL_CLIENT_EVIDENCE_CASE_ORDER_INVALID"
+      pass_code="CLIENT_EVIDENCE_CASE_REORDER_SELF_TEST_PASSED"
+      phase="client-evidence-case-reorder-refused"
       ;;
     *) failed "CLIENT_EVIDENCE_MUTATION_INVALID" ;;
   esac
@@ -2946,6 +2957,22 @@ self_test_client_evidence_case_mutation() {
 
   log_phase "$phase" "result=refused code=$expected control=accepted mutation=$mutation"
   emit "pass" "$pass_code"
+}
+
+# PLANTED NEGATIVE: the client skips one non-legacy completion while its
+# declaration remains intact. The client must refuse before it writes a terminal
+# evidence record; only its fixed terminal code is inspected, never its bytes.
+self_test_client_evidence_completion_skip() {
+  local output="" status=0
+  output="$(env S1_LOCAL_EVIDENCE_COMPLETION_SELF_TEST=skip-mounted-device \
+    bun apps/wire/src/enrollment/local-d1-client.ts 2>&1)" || status=$?
+  if ((status != 1)); then failed "CLIENT_EVIDENCE_COMPLETION_SKIP_STATUS"; fi
+  if [[ "$output" != *'"status":"fail"'* || "$output" != *'"code":"evidence-case-order"'* ]]; then
+    failed "CLIENT_EVIDENCE_COMPLETION_SKIP_NOT_REFUSED"
+  fi
+  log_phase "client-evidence-completion-skip-refused" \
+    "result=refused code=evidence-case-order terminal=client declaration=intact"
+  emit "pass" "CLIENT_EVIDENCE_COMPLETION_SKIP_SELF_TEST_PASSED"
 }
 
 # An interrupt arriving during the timed client phase.
@@ -3369,6 +3396,16 @@ main() {
   if [[ "${1:-}" == "--self-test-client-evidence-case-unknown" ]]; then
     begin_self_test "client-evidence-case-unknown"
     self_test_client_evidence_case_mutation "unknown"
+    return
+  fi
+  if [[ "${1:-}" == "--self-test-client-evidence-case-reorder" ]]; then
+    begin_self_test "client-evidence-case-reorder"
+    self_test_client_evidence_case_mutation "reorder"
+    return
+  fi
+  if [[ "${1:-}" == "--self-test-client-evidence-completion-skip" ]]; then
+    begin_self_test "client-evidence-completion-skip"
+    self_test_client_evidence_completion_skip
     return
   fi
   if [[ "${1:-}" == "--self-test-replay-artifact-failure" ]]; then
