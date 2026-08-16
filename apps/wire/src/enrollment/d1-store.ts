@@ -87,6 +87,7 @@ interface ProposalRow extends RecordAuthorityEvidenceRow {
   last_poll_at: number | null;
   durable_granted_scopes_json: string | null;
   durable_granted_resources_json: string | null;
+  durable_granted_at: number | null;
 }
 
 interface PollingProposalRow extends ProposalRow {
@@ -1717,6 +1718,15 @@ export class D1EnrollmentStore implements EnrollmentStore {
         throw new EnrollmentPersistenceError();
       }
       if (
+        typeof row.durable_granted_at !== "number" ||
+        !Number.isSafeInteger(row.durable_granted_at) ||
+        row.durable_granted_at < row.created_at ||
+        row.durable_granted_at >= row.expires_at ||
+        attempt.now < row.durable_granted_at
+      ) {
+        throw new EnrollmentPersistenceError();
+      }
+      if (
         row.granted_scopes_json === null ||
         row.granted_resources_json === null ||
         row.granted_scopes_json !== row.durable_granted_scopes_json ||
@@ -1809,6 +1819,7 @@ export class D1EnrollmentStore implements EnrollmentStore {
                     AND current_grant.sponsor_id = current_record.sponsor_id
                     AND current_grant.granted_scopes_json = ?
                     AND current_grant.granted_resources_json = ?
+                    AND current_grant.granted_at = ?
                     AND current_fellow.name COLLATE BINARY = ? COLLATE BINARY
                     AND current_fellow.model = ?
                     AND current_fellow.harness = ?
@@ -1836,6 +1847,7 @@ export class D1EnrollmentStore implements EnrollmentStore {
             row.fellow_id,
             row.durable_granted_scopes_json,
             row.durable_granted_resources_json,
+            row.durable_granted_at,
             row.name,
             row.model,
             row.harness,
@@ -2423,7 +2435,8 @@ export class D1EnrollmentStore implements EnrollmentStore {
               p.granted_scopes_json, p.granted_resources_json, p.token_hash, p.token_issued_at,
               p.poll_interval_seconds, p.last_poll_at,
               g.granted_scopes_json AS durable_granted_scopes_json,
-              g.granted_resources_json AS durable_granted_resources_json
+              g.granted_resources_json AS durable_granted_resources_json,
+              g.granted_at AS durable_granted_at
          FROM enrollment_records e
          JOIN enrollment_proposals p ON p.enrollment_id = e.enrollment_id
          LEFT JOIN enrollment_grants g ON g.proposal_id = p.proposal_id
@@ -2452,7 +2465,8 @@ export class D1EnrollmentStore implements EnrollmentStore {
               p.poll_interval_seconds, p.last_poll_at,
               d.expires_at AS device_mapping_expires_at,
               g.granted_scopes_json AS durable_granted_scopes_json,
-              g.granted_resources_json AS durable_granted_resources_json
+              g.granted_resources_json AS durable_granted_resources_json,
+              g.granted_at AS durable_granted_at
          FROM enrollment_records e
          JOIN enrollment_proposals p ON p.enrollment_id = e.enrollment_id
          LEFT JOIN device_codes d ON d.enrollment_id = e.enrollment_id
@@ -2483,7 +2497,8 @@ export class D1EnrollmentStore implements EnrollmentStore {
               p.granted_scopes_json, p.granted_resources_json, p.token_hash, p.token_issued_at,
               p.poll_interval_seconds, p.last_poll_at,
               g.granted_scopes_json AS durable_granted_scopes_json,
-              g.granted_resources_json AS durable_granted_resources_json
+              g.granted_resources_json AS durable_granted_resources_json,
+              g.granted_at AS durable_granted_at
          FROM enrollment_proposals p
          JOIN enrollment_records e ON e.enrollment_id = p.enrollment_id
          LEFT JOIN device_codes d ON d.enrollment_id = e.enrollment_id

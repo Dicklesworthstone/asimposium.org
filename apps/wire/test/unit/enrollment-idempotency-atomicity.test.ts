@@ -4186,6 +4186,67 @@ describe("Fellow credential lifecycle constraints and authentication", () => {
     ).toBe(0);
   });
 
+  test.each([
+    ["before proposal creation", NOW - 1, NOW + 1],
+    [
+      "at proposal expiry",
+      NOW + PENDING_PROPOSAL_TTL_MS,
+      NOW + PENDING_PROPOSAL_TTL_MS - 1,
+    ],
+    ["in the future", NOW + 100, NOW + 1],
+  ] as const)(
+    "pre-0011 polling refuses durable grant evidence %s without burning the flow",
+    async (_case, grantedAt, pollNow) => {
+      const sqlite = new Database(":memory:", { strict: true });
+      sqlite.run(readFileSync(MIGRATION, "utf8"));
+      seedLifecycleIdentity(
+        sqlite,
+        "{}",
+        '["review"]',
+        grantedAt,
+        NOW,
+        NOW + PENDING_PROPOSAL_TTL_MS,
+        "{}",
+        '["review"]',
+        false,
+      );
+      sqlite.exec(readFileSync(LIFECYCLE_MIGRATION, "utf8"));
+      sqlite.exec(readFileSync(DEVICE_MIGRATION, "utf8"));
+      sqlite.exec(readFileSync(DEVICE_HARDENING_MIGRATION, "utf8"));
+      let tokenFactoryCalls = 0;
+
+      await expect(
+        new D1EnrollmentStore(localD1(sqlite)).poll({
+          flowHandleHash: "lifecycle-flow-hash",
+          now: pollNow,
+          createToken: async () => {
+            tokenFactoryCalls += 1;
+            return {
+              token:
+                "asimp_ag_0123456789ABCDEFGHJKMNPQRS_AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
+              tokenHash: fixtureDigest(`invalid-grant-evidence-${_case}`),
+            };
+          },
+        }),
+      ).rejects.toBeInstanceOf(EnrollmentPersistenceError);
+      expect(tokenFactoryCalls).toBe(0);
+      expect(
+        sqlite
+          .prepare<{ token_hash: string | null }, [string]>(
+            "SELECT token_hash FROM enrollment_proposals WHERE proposal_id = ?",
+          )
+          .get(LIFECYCLE_PROPOSAL)?.token_hash,
+      ).toBeNull();
+      expect(
+        sqlite
+          .prepare<{ count: number }, []>(
+            "SELECT COUNT(*) AS count FROM fellow_tokens",
+          )
+          .get()?.count,
+      ).toBe(0);
+    },
+  );
+
   test("a requested-authority change during token generation cannot burn the one-time flow", async () => {
     const sqlite = new Database(":memory:", { strict: true });
     sqlite.run(readFileSync(MIGRATION, "utf8"));
