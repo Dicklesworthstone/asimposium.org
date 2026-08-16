@@ -273,7 +273,12 @@ describe("S-1 enrollment state machine", () => {
       "DEVICE_LOOKUP_LOCKED",
     );
 
-    clock.value += DEVICE_LOOKUP_LOCKOUT_WINDOW_MS + 1;
+    clock.value += DEVICE_LOOKUP_LOCKOUT_WINDOW_MS;
+    await expectEnrollmentError(
+      service.deviceLookup(sponsor, { user_code: started.user_code }),
+      "DEVICE_LOOKUP_LOCKED",
+    );
+    clock.value += 1;
     await expect(
       service.deviceLookup(sponsor, { user_code: started.user_code }),
     ).resolves.toMatchObject({ name: deviceProposal.name });
@@ -346,6 +351,35 @@ describe("S-1 enrollment state machine", () => {
     clock.value += 1;
     expect(await service.poll({ flow_handle: started.device_code })).toEqual({
       status: "expired_token",
+    });
+  });
+
+  test("polling first at the requested grant boundary durably expires a pending proposal", async () => {
+    const { clock, service } = serviceFixture();
+    const minted = await service.mint(sponsor, {
+      requested_scopes: ["review"],
+      fellow_grant_expires_in_ms: 1,
+    });
+    const claim = await service.claim({
+      enrollment_id: minted.enrollmentId,
+      secret: minted.secret,
+      name: "pending-grant-expiry",
+      model: "test-model",
+      harness: "test-harness",
+    });
+
+    expect(await service.poll({ flow_handle: claim.flowHandle })).toEqual({
+      status: "authorization_pending",
+      retry_after_seconds: 5,
+    });
+    clock.value += 1;
+    expect(await service.poll({ flow_handle: claim.flowHandle })).toEqual({
+      status: "expired_token",
+    });
+    expect(await service.approvalCard(sponsor, minted.enrollmentId)).toMatchObject({
+      status: "expired",
+      effectiveGrantedScopes: null,
+      effectiveGrantedResources: null,
     });
   });
 

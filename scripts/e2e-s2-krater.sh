@@ -22,8 +22,19 @@ readonly S2_FORWARD_MIGRATION="db/migrations/0004_krater_integrity_v1.sql"
 readonly S2_INDEX_MIGRATION="db/migrations/0005_krater_undigested_index.sql"
 readonly S2_BIND_IP="127.0.0.1"
 readonly S2_READY_DEADLINE_SECONDS=15
+# Bash internally backs off fork(EAGAIN) for roughly 1+2+4+8 seconds before an
+# asynchronous child launch returns control. Watchdog publication therefore
+# needs a distinct envelope that cannot race that mandatory runtime retry.
+readonly S2_WATCHDOG_PUBLICATION_DEADLINE_SECONDS=25
+readonly S2_SUPERVISOR_GATE_MISMATCH_STATUS=65
+readonly S2_SUPERVISOR_STARTUP_CREATE_STATUS=73
+readonly S2_SUPERVISOR_CHECKPOINT_IO_STATUS=74
 readonly S2_PHASE_DEADLINE_SECONDS=75
 readonly S2_TERMINATE_WAIT_TICKS=20
+# A pre-release abort is consumed by the already-open private FIFO, never by a
+# numeric controller-side signal. This envelope dominates Bash's roughly
+# 15-second async-fork retry plus the 16-second causal delay plant.
+readonly S2_PRE_RELEASE_ABORT_WAIT_TICKS=400
 readonly S2_LEGACY_STOP_INSPECTION_TICKS=10
 # The legacy controller gets a one-second bounded window to observe the exact
 # watchdog after TERM removes the leader. The watchdog must remain available
@@ -248,12 +259,15 @@ health_file="$4"
 plant_uncertainty="$5"
 max_uncertain_ticks="$6"
 exit_on_term="$7"
+plant_ps_hang="$8"
+scan_hang_armed="$9"
 watchdog_pid="$$"
 last_health=""
 uncertain_ticks=0
 force_uncertainty=0
 [[ "${max_uncertain_ticks}" =~ ^[1-9][0-9]*$ ]] || exit 125
 [[ "${exit_on_term}" =~ ^[01]$ ]] || exit 125
+[[ "${plant_ps_hang}" =~ ^[01]$ ]] || exit 125
 trap "exit 0" USR1
 if [[ "${plant_uncertainty}" == 1 ]]; then
   # Regression-only handshake. The controller first proves this exact
@@ -275,7 +289,27 @@ publish_health() {
 }
 snapshot_supervisor() {
   local line seen_pid seen_pgid seen_ppid seen_stat seen_command
-  line="$(LC_ALL=C ps -o pid=,pgid=,ppid=,stat=,command= -p "${supervisor_pid}" 2>/dev/null)" || return 1
+  if [[ "${plant_ps_hang}" == 1 ]]; then
+    # The marker is created by the same process that owns the alarm, after the
+    # deadline is armed and immediately before exec. A controller cannot use
+    # this fixture to signal the watchdog before the bounded scan is causal.
+    line="$(LC_ALL=C perl -MFcntl=:DEFAULT -e '\''
+      $SIG{ALRM}="DEFAULT";
+      alarm 1;
+      my ($marker_path, $expected_pid, @command) = @ARGV;
+      umask 0077;
+      sysopen(my $marker_file, $marker_path, O_WRONLY | O_CREAT | O_EXCL, 0600) or exit 125;
+      print {$marker_file} "scan-hang-armed $expected_pid\n" or exit 125;
+      close($marker_file) or exit 125;
+      exec @command;
+      exit 125;
+    '\'' -- "${scan_hang_armed}" "${watchdog_pid}" perl -e '\''sleep 30'\'' 2>/dev/null)" || return 1
+  else
+    # The inherited alarm survives exec and bounds a kernel-stalled ps. Bash
+    # can therefore service its pending USR1 dismissal trap within one second.
+    line="$(LC_ALL=C perl -e '\''$SIG{ALRM}="DEFAULT"; alarm 1; exec @ARGV; exit 125'\'' -- \
+      ps -o pid=,pgid=,ppid=,stat=,command= -p "${supervisor_pid}" 2>/dev/null)" || return 1
+  fi
   [[ -n "${line}" ]] || return 1
   read -r seen_pid seen_pgid seen_ppid seen_stat seen_command <<<"${line}"
   [[ "${seen_pid}" =~ ^[0-9]+$ && "${seen_pgid}" =~ ^[0-9]+$ && "${seen_ppid}" =~ ^[0-9]+$ ]] || return 1
@@ -468,14 +502,22 @@ S2_PLANTED_RELEASE_PID=""
 S2_PLANTED_RELEASE_PGID=""
 S2_PLANTED_RELEASE_MARKER=""
 S2_LAST_SUPERVISOR_PGID=""
+S2_LAST_SUPERVISOR_MARKER=""
+S2_START_FAILURE_STAGE=""
+S2_START_SUPERVISOR_EXIT_STATUS=""
+S2_STARTUP_JOURNAL_PHASE=""
+S2_STARTUP_JOURNAL_ARM_ACK=0
 S2_PRE_RELEASE_RESAMPLE_ATTEMPTS=0
 S2_PRE_RELEASE_ACCEPTED_SAMPLES=0
 S2_PRE_RELEASE_REJECTED_SAMPLES=0
+S2_PRE_RELEASE_CAPTURE_UNCERTAIN_SAMPLES=0
+S2_POST_ARM_INSPECTION_UNCERTAIN_SAMPLES=0
 S2_PRE_RELEASE_MAX_GROUP_MEMBER_COUNT=0
 S2_PRE_RELEASE_REAPED_PGID=""
 S2_PRE_RELEASE_EXPECTED_HELPER_PID=""
 S2_PRE_RELEASE_EXPECTED_HELPER_REJECTED_SAMPLES=0
 S2_DETACHED_PROCESS_TABLE=""
+S2_DETACHED_SCAN_PHASE=""
 # This packed record is published before any release write. It closes the caller-assignment
 # gap: an EXIT trap can still prove and release the exact newest supervisor while a caller is
 # between start_pinned_supervisor and its Worker/lifecycle bookkeeping. Fields are PID, PGID,
@@ -493,6 +535,29 @@ is_decimal() {
 # `ps`; the scanner is therefore never counted as a member of the group it observes.
 detached_process_table_read() {
   [[ "${S2_PLANT_DETACHED_PS_FAILURE:-0}" == "1" ]] && return 97
+  if [[ "${S2_PLANT_DETACHED_PS_FAILURE_ONCE:-0}" == "1" ]]; then
+    local one_shot_marker="${S2_STATE_DIR}/.detached-ps-failure-once"
+    local one_shot_stage="${S2_PLANT_DETACHED_PS_FAILURE_ONCE_STAGE:-pre-arm}"
+    local one_shot_stage_matches=0
+    case "${one_shot_stage}" in
+      pre-arm)
+        [[ "${S2_START_FAILURE_STAGE}" == "pre-arm-ownership" ]] && \
+          one_shot_stage_matches=1
+        ;;
+      post-arm)
+        [[ "${S2_START_FAILURE_STAGE}" == "watchdog-publication" && \
+          "${S2_DETACHED_SCAN_PHASE}" == "watchdog" ]] && \
+          one_shot_stage_matches=1
+        ;;
+      *) return 98 ;;
+    esac
+    if [[ ${one_shot_stage_matches} -eq 1 ]]; then
+      if (set -o noclobber; : >"${one_shot_marker}") 2>/dev/null; then
+        return 97
+      fi
+      [[ -f "${one_shot_marker}" && ! -L "${one_shot_marker}" ]] || return 98
+    fi
+  fi
   command -v perl >/dev/null 2>&1 || return 1
   LC_ALL=C exec perl -MPOSIX=setsid -e 'setsid() or exit 125; exec @ARGV' -- ps "$@"
 }
@@ -573,6 +638,7 @@ watchdog_is_healthy() {
 # classifiers below: only the release gate needs a session-detached scanner.
 pre_release_supervisor_is_owned() {
   local pid="$1" pgid="$2" marker="$3" line
+  S2_DETACHED_SCAN_PHASE="supervisor"
   read_detached_process_snapshot -o pid=,pgid=,ppid=,stat=,command= -p "${pid}" || return 1
   line="${S2_DETACHED_PROCESS_SNAPSHOT}"
   read -r seen_pid seen_pgid seen_ppid seen_stat seen_command <<<"${line}"
@@ -594,7 +660,8 @@ pre_release_watchdog_is_healthy() {
   [[ -n "${line}" ]] || return 1
   read -r health_state health_pid <<<"${line}"
   [[ "${health_state}" == "healthy" && "${health_pid}" == "${watchdog_pid}" ]] || return 1
-  read_detached_process_snapshot -o pid=,pgid=,ppid=,stat=,command= -p "${watchdog_pid}" || return 1
+  S2_DETACHED_SCAN_PHASE="watchdog"
+  read_detached_process_snapshot -o pid=,pgid=,ppid=,stat=,command= -p "${watchdog_pid}" || return 2
   line="${S2_DETACHED_PROCESS_SNAPSHOT}"
   read -r seen_pid seen_pgid seen_ppid seen_stat seen_command <<<"${line}"
   is_decimal "${seen_pid}" && is_decimal "${seen_pgid}" && is_decimal "${seen_ppid}" || return 1
@@ -602,6 +669,69 @@ pre_release_watchdog_is_healthy() {
     "${seen_ppid}" == "${supervisor_pid}" && "${seen_stat}" != T* && \
     "${seen_stat}" != Z* && "${seen_command}" == *"s2-parent-watchdog-${marker}"* ]] || return 1
   kill -0 "${watchdog_pid}" 2>/dev/null && kill -0 -- "-${pgid}" 2>/dev/null
+}
+
+checkpoint_file_matches() {
+  local file="$1" checkpoint="$2" expected_pid="$3" line extra
+  [[ -f "${file}" && ! -L "${file}" ]] || return 1
+  {
+    IFS= read -r line || return 1
+    if IFS= read -r extra; then return 1; fi
+  } <"${file}"
+  [[ "${line}" == "${checkpoint} ${expected_pid}" ]]
+}
+
+single_decimal_file() {
+  local file="$1" line extra
+  [[ -f "${file}" && ! -L "${file}" ]] || return 1
+  {
+    IFS= read -r line || return 1
+    if IFS= read -r extra; then return 1; fi
+  } <"${file}"
+  is_decimal "${line}"
+}
+
+startup_journal_last_phase() {
+  local file="$1" expected_pid="$2" line phase seen_pid extra state=0
+  S2_STARTUP_JOURNAL_PHASE=""
+  S2_STARTUP_JOURNAL_ARM_ACK=0
+  [[ -f "${file}" && ! -L "${file}" ]] || return 1
+  while :; do
+    line=""
+    if ! IFS= read -r line; then
+      [[ -z "${line}" ]] || return 1
+      break
+    fi
+    read -r phase seen_pid extra <<<"${line}"
+    [[ -z "${extra:-}" && "${seen_pid}" == "${expected_pid}" ]] || return 1
+    case "${state}:${phase}" in
+      0:supervisor-started) state=1 ;;
+      1:await-arm) state=2 ;;
+      2:arm-gate-consumed) state=3 ;;
+      3:arm-checkpoint-attempt) state=4 ;;
+      4:arm-checkpoint-published)
+        state=5
+        S2_STARTUP_JOURNAL_ARM_ACK=1
+        ;;
+      5:launch-checkpoint-attempt) state=6 ;;
+      6:launch-checkpoint-published) state=7 ;;
+      7:watchdog-pid-published) state=8 ;;
+      8:await-release) state=9 ;;
+      9:release-gate-consumed) state=10 ;;
+      2:arm-gate-mismatch|2:arm-abort-consumed|2:arm-owner-lost|\
+      4:arm-checkpoint-write-failed|6:launch-checkpoint-corrupt|\
+      9:release-gate-mismatch|9:release-abort-consumed|9:release-owner-lost)
+        state=99
+        ;;
+      [1-9]:signal-term|[1-9]:signal-hup|[1-9]:signal-int|\
+      10:signal-term|10:signal-hup|10:signal-int)
+        state=99
+        ;;
+      *) return 1 ;;
+    esac
+    S2_STARTUP_JOURNAL_PHASE="${phase}"
+  done <"${file}"
+  [[ -n "${S2_STARTUP_JOURNAL_PHASE}" ]]
 }
 
 # These cleanup paths run before any release token is written. They reuse the detached proof
@@ -626,6 +756,63 @@ kill_pre_release_owned_group_to_zero() {
     fi
     sleep 0.1
   done
+  # A first KILL can still take time to become observable while a process is in
+  # kernel state. The unreaped direct child still owns PID == PGID, so retrying
+  # this exact group cannot target a recycled identity. ESRCH is acceptable only
+  # when a fresh kernel check proves the group already disappeared.
+  if ! kill -KILL -- "-${pgid}" 2>/dev/null && kill -0 -- "-${pgid}" 2>/dev/null; then
+    return 1
+  fi
+  for ((tick = 0; tick < S2_TERMINATE_WAIT_TICKS; tick += 1)); do
+    if ! kill -0 -- "-${pgid}" 2>/dev/null; then
+      if wait "${pid}" 2>/dev/null; then
+        S2_START_SUPERVISOR_EXIT_STATUS=0
+      else
+        S2_START_SUPERVISOR_EXIT_STATUS=$?
+      fi
+      if [[ "${proof_scope}" == "server" ]]; then
+        assert_no_run_survivors "${persist}" "${port}" "${marker}" || return 1
+      fi
+      S2_PRE_RELEASE_REAPED_PGID="${pgid}"
+      return 0
+    fi
+    sleep 0.1
+  done
+  return 1
+}
+
+# Before release, the group leader is still a direct child blocked on its private FIFO. An abort
+# token lets that exact child kill its own session without asking a failed process-table scanner to
+# authorize a controller-side group signal. This is the fail-closed cleanup path for inspection
+# uncertainty: no payload token is sent, and success requires the known child and group to vanish.
+abort_pre_release_supervisor_to_zero() {
+  local pid="$1" pgid="$2" marker="$3" abort_token="$4" persist="$5" port="$6" proof_scope="$7" tick
+  # Bash may asynchronously reap a background child and cache its status before
+  # an explicit `wait`, so neither the numeric PID nor PGID is durable signal
+  # authority here. Write only to the already-open private FIFO. The child
+  # recognizes the unguessable abort token at either gate and kills its own
+  # exact group; if it is between gates, the token remains queued until the
+  # bounded launch/backoff section completes.
+  printf '%s\n' "${abort_token}" >&7 || {
+    exec 7>&-
+    return 1
+  }
+  exec 7>&-
+  for ((tick = 0; tick < S2_PRE_RELEASE_ABORT_WAIT_TICKS; tick += 1)); do
+    if ! kill -0 -- "-${pgid}" 2>/dev/null; then
+      if wait "${pid}" 2>/dev/null; then
+        S2_START_SUPERVISOR_EXIT_STATUS=0
+      else
+        S2_START_SUPERVISOR_EXIT_STATUS=$?
+      fi
+      if [[ "${proof_scope}" == "server" ]]; then
+        assert_no_run_survivors "${persist}" "${port}" "${marker}" || return 1
+      fi
+      S2_PRE_RELEASE_REAPED_PGID="${pgid}"
+      return 0
+    fi
+    sleep 0.1
+  done
   return 1
 }
 
@@ -634,13 +821,74 @@ kill_pre_release_owned_group_to_zero() {
 # exist until identity and kernel group ownership have been proved by the parent.
 start_pinned_supervisor() {
   local status_file="$1" label="$2" persist="$3" port="$4" proof_scope="$5"
-  local marker pid deadline control_fifo release_fifo release_token arm_token persistent_helper_pid_file
+  local marker pid deadline control_fifo release_fifo release_token arm_token abort_token persistent_helper_pid_file
   local persistent_helper_pid=""
-  local watchdog_pid_file watchdog_health watchdog_pid tick release_sent=0
+  local watchdog_pid_file watchdog_health watchdog_startup watchdog_scan_hang_armed arm_fragment_observed watchdog_pid watchdog_snapshot_status tick release_sent=0 watchdog_proved=0
   local plant_watchdog_exit_on_term="${S2_PLANT_WATCHDOG_EXIT_ON_TERM:-0}"
   local plant_supervisor_exit_on_term="${S2_PLANT_SUPERVISOR_EXIT_ON_TERM:-0}"
   local plant_persistent_pre_release_helper="${S2_PLANT_PERSISTENT_PRE_RELEASE_HELPER:-0}"
+  local plant_watchdog_publication_delay="${S2_PLANT_WATCHDOG_PUBLICATION_DELAY_SECONDS:-0}"
+  local plant_supervisor_exit_before_watchdog_publication="${S2_PLANT_SUPERVISOR_EXIT_BEFORE_WATCHDOG_PUBLICATION:-0}"
+  local plant_abort_after_watchdog_launch="${S2_PLANT_ABORT_AFTER_WATCHDOG_LAUNCH:-0}"
+  local plant_watchdog_checkpoint_corruption="${S2_PLANT_WATCHDOG_CHECKPOINT_CORRUPTION:-none}"
+  local plant_supervisor_signal_after_arm="${S2_PLANT_SUPERVISOR_SIGNAL_AFTER_ARM:-none}"
+  local plant_watchdog_checkpoint_open_failure="${S2_PLANT_WATCHDOG_CHECKPOINT_OPEN_FAILURE:-0}"
+  local plant_wrong_arm_token="${S2_PLANT_WRONG_ARM_TOKEN:-0}"
+  local plant_startup_journal_preexisting="${S2_PLANT_STARTUP_JOURNAL_PREEXISTING:-0}"
+  local plant_startup_journal_append_failure="${S2_PLANT_STARTUP_JOURNAL_APPEND_FAILURE_AFTER_ARM:-0}"
+  local plant_watchdog_ps_hang="${S2_PLANT_WATCHDOG_PS_HANG:-0}"
+  local plant_supervisor_signal_after_watchdog="${S2_PLANT_SUPERVISOR_SIGNAL_AFTER_WATCHDOG:-none}"
+  local plant_fragmented_arm_token="${S2_PLANT_FRAGMENTED_ARM_TOKEN:-0}"
   shift 5
+  S2_START_FAILURE_STAGE="input-validation"
+  S2_LAST_SUPERVISOR_PGID=""
+  S2_LAST_SUPERVISOR_MARKER=""
+  S2_START_SUPERVISOR_EXIT_STATUS=""
+  S2_STARTUP_JOURNAL_PHASE=""
+  case "${plant_watchdog_publication_delay}" in
+    0|16) ;;
+    *) return 1 ;;
+  esac
+  case "${plant_supervisor_exit_before_watchdog_publication}" in
+    0|1) ;;
+    *) return 1 ;;
+  esac
+  case "${plant_abort_after_watchdog_launch}" in
+    0|1) ;;
+    *) return 1 ;;
+  esac
+  case "${plant_supervisor_signal_after_arm}" in
+    none|HUP|INT|TERM) ;;
+    *) return 1 ;;
+  esac
+  case "${plant_watchdog_checkpoint_open_failure}" in
+    0|1) ;;
+    *) return 1 ;;
+  esac
+  case "${plant_wrong_arm_token}" in
+    0|1) ;;
+    *) return 1 ;;
+  esac
+  case "${plant_startup_journal_preexisting}" in
+    0|1) ;;
+    *) return 1 ;;
+  esac
+  case "${plant_startup_journal_append_failure}" in
+    0|1) ;;
+    *) return 1 ;;
+  esac
+  case "${plant_watchdog_ps_hang}" in
+    0|1) ;;
+    *) return 1 ;;
+  esac
+  case "${plant_supervisor_signal_after_watchdog}" in
+    none|HUP|INT|TERM) ;;
+    *) return 1 ;;
+  esac
+  case "${plant_fragmented_arm_token}" in
+    0|1) ;;
+    *) return 1 ;;
+  esac
   [[ -d "${persist}" && ! -L "${persist}" && "${port}" =~ ^[0-9]+$ ]] || return 1
   case "${proof_scope}" in
     server|client) ;;
@@ -650,6 +898,8 @@ start_pinned_supervisor() {
   S2_PRE_RELEASE_RESAMPLE_ATTEMPTS=0
   S2_PRE_RELEASE_ACCEPTED_SAMPLES=0
   S2_PRE_RELEASE_REJECTED_SAMPLES=0
+  S2_PRE_RELEASE_CAPTURE_UNCERTAIN_SAMPLES=0
+  S2_POST_ARM_INSPECTION_UNCERTAIN_SAMPLES=0
   S2_PRE_RELEASE_MAX_GROUP_MEMBER_COUNT=0
   S2_PRE_RELEASE_REAPED_PGID=""
   S2_PRE_RELEASE_EXPECTED_HELPER_PID=""
@@ -665,14 +915,35 @@ start_pinned_supervisor() {
   [[ ! -e "${watchdog_pid_file}" && ! -L "${watchdog_pid_file}" ]] || return 1
   watchdog_health="${status_file}.watchdog.health"
   [[ ! -e "${watchdog_health}" && ! -L "${watchdog_health}" ]] || return 1
+  watchdog_startup="${status_file}.watchdog.startup"
+  [[ ! -e "${watchdog_startup}" && ! -L "${watchdog_startup}" ]] || return 1
+  watchdog_scan_hang_armed="${status_file}.watchdog.scan-hang-armed"
+  [[ ! -e "${watchdog_scan_hang_armed}" && ! -L "${watchdog_scan_hang_armed}" ]] || return 1
+  arm_fragment_observed="${status_file}.watchdog.arm-fragment-observed"
+  [[ ! -e "${arm_fragment_observed}" && ! -L "${arm_fragment_observed}" ]] || return 1
   release_token="$(random_hex 16)" || return 1
   arm_token="$(random_hex 16)" || return 1
+  abort_token="$(random_hex 16)" || return 1
+  if [[ "${plant_startup_journal_preexisting}" == 1 ]]; then
+    (umask 077; set -o noclobber; printf '%s\n' startup-sentinel >"${watchdog_startup}") \
+      2>/dev/null || return 1
+  fi
 
   # macOS does not ship a `setsid` executable. POSIX::setsid is part of the system Perl and
   # creates a fresh session/process group without Bash job-control mode, which otherwise can
   # detach background jobs from the harness runner and leave their parent identity unusable.
   command -v perl >/dev/null 2>&1 || return 1
-  perl -MPOSIX=setsid -e 'setsid() or die "setsid: $!"; exec @ARGV' -- bash -c '
+  perl -MPOSIX=setsid,dup2 -MFcntl=:DEFAULT -e '
+    setsid() or exit 125;
+    $SIG{HUP} = $SIG{INT} = $SIG{TERM} = "DEFAULT";
+    my $journal_path = shift @ARGV;
+    umask 0077;
+    sysopen(my $journal, $journal_path, O_WRONLY | O_CREAT | O_EXCL, 0600) or exit 73;
+    dup2(fileno($journal), 6) == 6 or exit 73;
+    $^F = 6;
+    exec @ARGV;
+    exit 125;
+  ' -- "${watchdog_startup}" bash -c '
     marker="$1"
     status_file="$2"
     owner_pid="$3"
@@ -684,41 +955,97 @@ start_pinned_supervisor() {
     plant_supervisor_exit_on_term="$9"
     plant_persistent_pre_release_helper="${10}"
     persistent_helper_pid_file="${11}"
-    shift 11
+    plant_watchdog_publication_delay="${12}"
+    plant_supervisor_exit_before_watchdog_publication="${13}"
+    abort_token="${14}"
+    plant_watchdog_checkpoint_corruption="${15}"
+    plant_supervisor_signal_after_arm="${16}"
+    plant_watchdog_checkpoint_open_failure="${17}"
+    gate_mismatch_status="${18}"
+    checkpoint_io_status="${19}"
+    plant_startup_journal_append_failure="${20}"
+    plant_watchdog_ps_hang="${21}"
+    plant_supervisor_signal_after_watchdog="${22}"
+    watchdog_scan_hang_armed="${23}"
+    plant_fragmented_arm_token="${24}"
+    shift 24
     supervisor_pid="$$"
+    arm_fragment_observed="${status_file}.watchdog.arm-fragment-observed"
+    record_startup_phase() {
+      printf "%s %s\n" "$1" "${supervisor_pid}" >&6
+    }
+    pre_release_signal() {
+      local signal_name="$1" signal_status="$2"
+      record_startup_phase "signal-${signal_name}" || :
+      trap - TERM HUP INT
+      exec 6>&-
+      exit "${signal_status}"
+    }
+    record_startup_phase supervisor-started || exit "${checkpoint_io_status}"
+    trap "pre_release_signal term 143" TERM
+    trap "pre_release_signal hup 129" HUP
+    trap "pre_release_signal int 130" INT
     release_fifo="${status_file}.release"
     [[ ! -e "${release_fifo}" && ! -L "${release_fifo}" ]] || exit 125
     mkfifo -m 600 "${release_fifo}" || exit 125
     exec 8<>"${release_fifo}" || exit 125
     wait_for_gate_value() {
-      local expected="$1" value
+      local expected="$1" gate_name="$2" value="" fragment=""
       # Gate reads are builtins and never create a group member. Controller-side
       # process-table observations run through a detached `setsid` scanner, so
       # they cannot turn their own sampling process into a second descendant of
       # this blocked supervisor.
       while :; do
-        if IFS= read -r -t 0.2 value <&8; then
-          [[ "${value}" == "${expected}" ]] || exit 125
+        fragment=""
+        if IFS= read -r -t 0.2 fragment <&8; then
+          value="${value}${fragment}"
+          if [[ "${value}" == "${abort_token}" ]]; then
+            record_startup_phase "${gate_name}-abort-consumed" || :
+            trap - TERM HUP INT
+            kill -KILL -- "-${supervisor_pid}" 2>/dev/null || exit 125
+            exit 125
+          fi
+          if [[ "${value}" != "${expected}" ]]; then
+            record_startup_phase "${gate_name}-gate-mismatch" || :
+            exit "${gate_mismatch_status}"
+          fi
+          record_startup_phase "${gate_name}-gate-consumed" || exit "${checkpoint_io_status}"
           return 0
+        fi
+        # Bash can return a timeout after consuming only part of a FIFO line;
+        # the partial bytes remain in the destination variable but are no
+        # longer in the FIFO. Preserve them across samples so scheduler delay
+        # cannot turn one atomic controller write into a false gate mismatch.
+        value="${value}${fragment}"
+        if [[ "${plant_fragmented_arm_token}" == 1 && "${gate_name}" == arm && \
+          -n "${fragment}" && ! -e "${arm_fragment_observed}" && \
+          ! -L "${arm_fragment_observed}" ]]; then
+          (umask 077; set -o noclobber; \
+            printf "arm-fragment-observed %s\n" "${supervisor_pid}" >"${arm_fragment_observed}") \
+            2>/dev/null || exit "${checkpoint_io_status}"
+        fi
+        if (( ${#value} > 160 )); then
+          record_startup_phase "${gate_name}-gate-mismatch" || :
+          exit "${gate_mismatch_status}"
         fi
         if ! kill -0 "${owner_pid}" 2>/dev/null; then
           # Before the watchdog exists, this supervisor is the only process
           # able to retire its private group. Killing the exact group, rather
           # than merely exiting, also reaps any planted pre-release helper.
+          record_startup_phase "${gate_name}-owner-lost" || :
           trap - TERM HUP INT
           kill -KILL -- "-${supervisor_pid}" 2>/dev/null || exit 125
           exit 125
         fi
       done
     }
-    trap "exit 125" TERM HUP INT
     if [[ "${plant_persistent_pre_release_helper}" == 1 ]]; then
       # Regression-only: this one-process helper has no child of its own, but
       # its argv deliberately carries the supervisor marker. Publish its exact
       # PID before the controller samples the group so a process-table observer
       # cannot impersonate the planted helper in the proof.
       [[ ! -e "${persistent_helper_pid_file}" && ! -L "${persistent_helper_pid_file}" ]] || exit 125
-      bash -c "exec -a s2-persistent-pre-release-helper-s2-pinned-supervisor-${marker} tail -f /dev/null" &
+      bash -c "exec -a s2-persistent-pre-release-helper-s2-pinned-supervisor-${marker} tail -f /dev/null" 6>&- &
       persistent_helper_pid="$!"
       [[ "${persistent_helper_pid}" =~ ^[0-9]+$ ]] || exit 125
       printf "%s\\n" "${persistent_helper_pid}" >"${persistent_helper_pid_file}" || exit 125
@@ -726,14 +1053,72 @@ start_pinned_supervisor() {
     # The controller first arms the parent-loss watchdog while this supervisor remains blocked.
     # Only after it proves the watchdog exact healthy identity does it send the separate
     # release value.  Thus parent death cannot fall into the old release-to-watchdog gap.
-    wait_for_gate_value "${arm_token}"
+    [[ ! -e "${arm_fragment_observed}" && ! -L "${arm_fragment_observed}" ]] || exit 125
+    record_startup_phase await-arm || exit "${checkpoint_io_status}"
+    wait_for_gate_value "${arm_token}" arm
+    if [[ "${plant_supervisor_signal_after_arm}" != none ]]; then
+      kill "-${plant_supervisor_signal_after_arm}" "${supervisor_pid}" || exit 125
+      exit 125
+    fi
+    if [[ "${plant_startup_journal_append_failure}" == 1 ]]; then
+      exec 6>&-
+    fi
     # Keep FD 8 open across both gates. Closing then reopening after watchdog publication gives
     # a concurrent controller write an interval in which its release value can be lost. The
     # watchdog receives an explicit closed FD below, and the payload inherits none.
     watchdog_pid_file="${status_file}.watchdog.pid"
     watchdog_health="${status_file}.watchdog.health"
+    watchdog_arm_consumed="${status_file}.watchdog.arm-consumed"
+    watchdog_launch_status="${status_file}.watchdog.launch"
     [[ ! -e "${watchdog_pid_file}" && ! -L "${watchdog_pid_file}" ]] || exit 125
     [[ ! -e "${watchdog_health}" && ! -L "${watchdog_health}" ]] || exit 125
+    [[ ! -e "${watchdog_scan_hang_armed}" && ! -L "${watchdog_scan_hang_armed}" ]] || exit 125
+    [[ ! -e "${watchdog_arm_consumed}" && ! -L "${watchdog_arm_consumed}" ]] || exit 125
+    [[ ! -e "${watchdog_launch_status}" && ! -L "${watchdog_launch_status}" ]] || exit 125
+    if [[ "${plant_watchdog_checkpoint_open_failure}" == 1 ]]; then
+      watchdog_arm_consumed="${status_file}.missing-checkpoint-dir/arm-consumed"
+    fi
+    record_startup_phase arm-checkpoint-attempt || exit "${checkpoint_io_status}"
+    if ! printf "arm-consumed %s\n" "${supervisor_pid}" >"${watchdog_arm_consumed}"; then
+      record_startup_phase arm-checkpoint-write-failed || :
+      exit "${checkpoint_io_status}"
+    fi
+    record_startup_phase arm-checkpoint-published || exit "${checkpoint_io_status}"
+    record_startup_phase launch-checkpoint-attempt || exit "${checkpoint_io_status}"
+    case "${plant_watchdog_checkpoint_corruption}" in
+      none)
+        printf "spawn-attempted %s\n" "${supervisor_pid}" >"${watchdog_launch_status}" || \
+          exit "${checkpoint_io_status}"
+        record_startup_phase launch-checkpoint-published || exit "${checkpoint_io_status}"
+        ;;
+      empty)
+        : >"${watchdog_launch_status}" || exit 125
+        record_startup_phase launch-checkpoint-corrupt || :
+        exit 125
+        ;;
+      malformed)
+        printf "not-a-checkpoint\n" >"${watchdog_launch_status}" || exit 125
+        record_startup_phase launch-checkpoint-corrupt || :
+        exit 125
+        ;;
+      extra-line)
+        printf "spawn-attempted %s\nextra\n" "${supervisor_pid}" >"${watchdog_launch_status}" || exit 125
+        record_startup_phase launch-checkpoint-corrupt || :
+        exit 125
+        ;;
+      wrong-pid)
+        printf "spawn-attempted %s\n" "$((supervisor_pid + 1))" >"${watchdog_launch_status}" || exit 125
+        record_startup_phase launch-checkpoint-corrupt || :
+        exit 125
+        ;;
+      *) exit 125 ;;
+    esac
+    if [[ "${plant_supervisor_exit_before_watchdog_publication}" == 1 ]]; then
+      exit 125
+    fi
+    if [[ "${plant_watchdog_publication_delay}" == 16 ]]; then
+      sleep 16 || exit 125
+    fi
     # This is a separate Bash process so its `$$` is its real process-table PID. It remains in
     # the pinned group. Inspection uncertainty is published and retried; it never makes the
     # watchdog silently disappear, and it never authorizes a signal.
@@ -741,17 +1126,55 @@ start_pinned_supervisor() {
       "${supervisor_pid}" "${owner_pid}" "${marker}" \
       "${watchdog_health}" "${plant_watchdog_uncertainty}" \
       "${max_watchdog_uncertain_ticks}" "${plant_watchdog_exit_on_term}" \
-      8>&- >/dev/null 2>&1 &
+      "${plant_watchdog_ps_hang}" "${watchdog_scan_hang_armed}" \
+      6>&- 8>&- >/dev/null 2>&1 &
     watchdog_pid="$!"
+    [[ "${watchdog_pid}" =~ ^[0-9]+$ ]] || exit 125
     printf "%s\n" "${watchdog_pid}" >"${watchdog_pid_file}" || exit 125
+    record_startup_phase watchdog-pid-published || exit "${checkpoint_io_status}"
     if [[ "${S2_PLANT_SUPERVISOR_EXIT_AFTER_WATCHDOG:-0}" == 1 ]]; then
       exit 125
     fi
     # While still blocked, TERM must also dismiss the watchdog.  This covers both controller
     # cancellation and the watchdog own parent-loss TERM without stranding an orphan helper.
-    trap "kill -USR1 ${watchdog_pid} 2>/dev/null || :; wait ${watchdog_pid} 2>/dev/null || :; exit 125" TERM HUP INT
-    wait_for_gate_value "${release_token}"
+    post_watchdog_signal() {
+      local signal_name="$1" signal_status="$2"
+      record_startup_phase "signal-${signal_name}" || :
+      trap - TERM HUP INT
+      exec 6>&-
+      kill -USR1 "${watchdog_pid}" 2>/dev/null || :
+      wait "${watchdog_pid}" 2>/dev/null || :
+      exit "${signal_status}"
+    }
+    trap "post_watchdog_signal term 143" TERM
+    trap "post_watchdog_signal hup 129" HUP
+    trap "post_watchdog_signal int 130" INT
+    record_startup_phase await-release || exit "${checkpoint_io_status}"
+    if [[ "${plant_supervisor_signal_after_watchdog}" != none ]]; then
+      if [[ "${plant_watchdog_ps_hang}" == 1 ]]; then
+        scan_hang_deadline=$((SECONDS + 5))
+        scan_hang_proved=0
+        while (( SECONDS < scan_hang_deadline )); do
+          if [[ -f "${watchdog_scan_hang_armed}" && ! -L "${watchdog_scan_hang_armed}" ]]; then
+            {
+              IFS= read -r scan_hang_line || scan_hang_line=""
+              if IFS= read -r scan_hang_extra; then scan_hang_line=""; fi
+            } <"${watchdog_scan_hang_armed}"
+            if [[ "${scan_hang_line}" == "scan-hang-armed ${watchdog_pid}" ]]; then
+              scan_hang_proved=1
+              break
+            fi
+          fi
+          sleep 0.05
+        done
+        [[ ${scan_hang_proved} -eq 1 ]] || exit 125
+      fi
+      kill "-${plant_supervisor_signal_after_watchdog}" "${supervisor_pid}" || exit 125
+      exit 125
+    fi
+    wait_for_gate_value "${release_token}" release
     exec 8>&-
+    exec 6>&-
     if [[ "${plant_supervisor_exit_on_term}" == 1 ]]; then
       # Regression-only: make the post-release leader leave on group TERM so the legacy stop
       # branch must prove or refuse the remaining TERM-resistant group without a PID fallback.
@@ -786,13 +1209,29 @@ start_pinned_supervisor() {
     "${plant_supervisor_exit_on_term}" \
     "${plant_persistent_pre_release_helper}" \
     "${persistent_helper_pid_file}" \
+    "${plant_watchdog_publication_delay}" \
+    "${plant_supervisor_exit_before_watchdog_publication}" \
+    "${abort_token}" \
+    "${plant_watchdog_checkpoint_corruption}" \
+    "${plant_supervisor_signal_after_arm}" \
+    "${plant_watchdog_checkpoint_open_failure}" \
+    "${S2_SUPERVISOR_GATE_MISMATCH_STATUS}" \
+    "${S2_SUPERVISOR_CHECKPOINT_IO_STATUS}" \
+    "${plant_startup_journal_append_failure}" \
+    "${plant_watchdog_ps_hang}" \
+    "${plant_supervisor_signal_after_watchdog}" \
+    "${watchdog_scan_hang_armed}" \
+    "${plant_fragmented_arm_token}" \
     "$@" &
   pid=$!
   S2_LAST_SUPERVISOR_PGID="${pid}"
+  S2_LAST_SUPERVISOR_MARKER="${marker}"
+  S2_START_FAILURE_STAGE="pre-arm-release-fifo"
 
   deadline=$((SECONDS + S2_READY_DEADLINE_SECONDS))
   while (( SECONDS < deadline )); do
     if [[ -p "${release_fifo}" && ! -L "${release_fifo}" ]]; then
+      S2_START_FAILURE_STAGE="pre-arm-ownership"
       # Open the parent side read/write before the final proof. A later write uses this already-open
       # descriptor, so a child exit in the proof-to-release window cannot turn pathname open into
       # an unbounded FIFO wait. The parent-held read end also prevents SIGPIPE on that planted race.
@@ -843,45 +1282,96 @@ start_pinned_supervisor() {
         done
       fi
       if ! pre_release_group_is_stably_pinned "${pid}" "${marker}"; then
-        exec 7>&-
-        if pre_release_supervisor_is_owned "${pid}" "${pid}" "${marker}"; then
-          kill_pre_release_owned_group_to_zero "${pid}" "${pid}" "${marker}" "${persist}" "${port}" \
-            "${proof_scope}" || return 1
-          S2_PRE_RELEASE_REAPED_PGID="${pid}"
-        fi
+        abort_pre_release_supervisor_to_zero "${pid}" "${pid}" "${marker}" "${abort_token}" \
+          "${persist}" "${port}" "${proof_scope}" || return 1
         return 1
       fi
       # Arm the watchdog over the already-open descriptor, then prove its parent/supervisor
       # identity before release.  The child command is still blocked, so no workerd descendant
       # can exist in this interval.
-      if ! printf '%s\n' "${arm_token}" >&7; then exec 7>&-; return 1; fi
-      deadline=$((SECONDS + S2_READY_DEADLINE_SECONDS))
-      watchdog_pid=""
+      S2_START_FAILURE_STAGE="watchdog-arm-write"
+      if [[ "${plant_wrong_arm_token}" == 1 ]]; then
+        if ! printf '%s\n' wrong-arm-token >&7; then exec 7>&-; return 1; fi
+      elif [[ "${plant_fragmented_arm_token}" == 1 ]]; then
+        if ! printf '%s' "${arm_token:0:16}" >&7; then exec 7>&-; return 1; fi
+        deadline=$((SECONDS + 5))
+        while ! checkpoint_file_matches \
+          "${arm_fragment_observed}" arm-fragment-observed "${pid}"; do
+          if (( SECONDS >= deadline )); then exec 7>&-; return 1; fi
+          sleep 0.05
+        done
+        if ! printf '%s\n' "${arm_token:16}" >&7; then exec 7>&-; return 1; fi
+      elif ! printf '%s\n' "${arm_token}" >&7; then
+        exec 7>&-
+        return 1
+      fi
+      # Publication work is not considered to have started until the child has
+      # durably acknowledged the exact arm gate. This separates a gate/signal/
+      # checkpoint failure from a watchdog launch or PID-publication failure.
+      S2_START_FAILURE_STAGE="watchdog-arm-ack"
+      deadline=$((SECONDS + S2_WATCHDOG_PUBLICATION_DEADLINE_SECONDS))
       while (( SECONDS < deadline )); do
-        pre_release_supervisor_is_owned "${pid}" "${pid}" "${marker}" || break
-        if [[ -f "${watchdog_pid_file}" && ! -L "${watchdog_pid_file}" ]] && \
-          IFS= read -r watchdog_pid <"${watchdog_pid_file}" && is_decimal "${watchdog_pid}" && \
-          pre_release_watchdog_is_healthy "${watchdog_pid}" "${pid}" "${pid}" "${marker}" "${watchdog_health}"; then
+        if startup_journal_last_phase "${watchdog_startup}" "${pid}" && \
+          [[ ${S2_STARTUP_JOURNAL_ARM_ACK} -eq 1 ]]; then
           break
         fi
+        kill -0 -- "-${pid}" 2>/dev/null || break
         sleep 0.05
       done
-      if ! pre_release_supervisor_is_owned "${pid}" "${pid}" "${marker}" || \
-        [[ -z "${watchdog_pid}" ]] || \
-        ! pre_release_watchdog_is_healthy "${watchdog_pid}" "${pid}" "${pid}" "${marker}" "${watchdog_health}"; then
-        exec 7>&-
-        if pre_release_supervisor_is_owned "${pid}" "${pid}" "${marker}"; then
-          kill_pre_release_owned_group_to_zero "${pid}" "${pid}" "${marker}" "${persist}" "${port}" \
-            "${proof_scope}" || return 1
+      if ! startup_journal_last_phase "${watchdog_startup}" "${pid}" || \
+        [[ ${S2_STARTUP_JOURNAL_ARM_ACK} -ne 1 ]]; then
+        abort_pre_release_supervisor_to_zero "${pid}" "${pid}" "${marker}" "${abort_token}" \
+          "${persist}" "${port}" "${proof_scope}" || return 1
+        return 1
+      fi
+      S2_START_FAILURE_STAGE="watchdog-publication"
+      deadline=$((SECONDS + S2_WATCHDOG_PUBLICATION_DEADLINE_SECONDS))
+      watchdog_pid=""
+      while (( SECONDS < deadline )); do
+        if ! pre_release_supervisor_is_owned "${pid}" "${pid}" "${marker}"; then
+          S2_POST_ARM_INSPECTION_UNCERTAIN_SAMPLES=$((
+            S2_POST_ARM_INSPECTION_UNCERTAIN_SAMPLES + 1
+          ))
+          if ! kill -0 -- "-${pid}" 2>/dev/null; then
+            break
+          fi
+          sleep 0.2
+          continue
         fi
-        kill -0 -- "-${pid}" 2>/dev/null && return 1
-        wait "${pid}" 2>/dev/null || :
+        if [[ "${plant_abort_after_watchdog_launch}" == 1 && \
+          -f "${status_file}.watchdog.launch" && ! -L "${status_file}.watchdog.launch" ]]; then
+          S2_START_FAILURE_STAGE="watchdog-publication-abort-plant"
+          abort_pre_release_supervisor_to_zero "${pid}" "${pid}" "${marker}" "${abort_token}" \
+            "${persist}" "${port}" "${proof_scope}" || return 1
+          return 1
+        fi
+        if [[ -f "${watchdog_pid_file}" && ! -L "${watchdog_pid_file}" ]] && \
+          IFS= read -r watchdog_pid <"${watchdog_pid_file}" && is_decimal "${watchdog_pid}"; then
+          if pre_release_watchdog_is_healthy \
+            "${watchdog_pid}" "${pid}" "${pid}" "${marker}" "${watchdog_health}"; then
+            watchdog_proved=1
+            break
+          else
+            watchdog_snapshot_status=$?
+            if [[ ${watchdog_snapshot_status} -eq 2 ]]; then
+              S2_POST_ARM_INSPECTION_UNCERTAIN_SAMPLES=$((
+                S2_POST_ARM_INSPECTION_UNCERTAIN_SAMPLES + 1
+              ))
+            fi
+          fi
+        fi
+        sleep 0.2
+      done
+      if [[ ${watchdog_proved} -ne 1 ]]; then
+        abort_pre_release_supervisor_to_zero "${pid}" "${pid}" "${marker}" "${abort_token}" \
+          "${persist}" "${port}" "${proof_scope}" || return 1
         return 1
       fi
       # This assignment precedes every release write. An EXIT trap can therefore use the same
       # exact persistence, port, and proof scope that the eventual owner would use, even if a
       # signal lands between this line and the caller recording its own ownership fields.
       S2_MOST_RECENT_SUPERVISOR="${pid} ${pid} ${S2_PARENT_PID} ${marker} ${watchdog_pid} ${watchdog_health} ${persist} ${port} ${proof_scope}"
+      S2_START_FAILURE_STAGE="payload-release"
       if [[ "${S2_PLANT_RELEASE_INTERLEAVING:-0}" == 1 ]]; then
         # FD 8 remains continuously open across watchdog publication and this release write;
         # the exact cleanup record above removes the former release-to-owner gap.
@@ -921,6 +1411,7 @@ start_pinned_supervisor() {
       # identified watchdog in a healthy state. A missing, malformed, dead, or uncertainty state
       # fails closed and the still-pinned exact group is killed before this function returns.
       deadline=$((SECONDS + S2_READY_DEADLINE_SECONDS))
+      S2_START_FAILURE_STAGE="post-release-health"
       while (( SECONDS < deadline )); do
         supervisor_is_owned "${pid}" "${pid}" "${marker}" || break
         if [[ -f "${watchdog_pid_file}" && ! -L "${watchdog_pid_file}" ]] && \
@@ -932,6 +1423,7 @@ start_pinned_supervisor() {
           S2_STARTED_STATUS_FILE="${status_file}"
           S2_STARTED_WATCHDOG_PID="${watchdog_pid}"
           S2_STARTED_WATCHDOG_HEALTH="${watchdog_health}"
+          S2_START_FAILURE_STAGE="ready"
           return 0
         fi
         sleep 0.05
@@ -945,6 +1437,14 @@ start_pinned_supervisor() {
       fi
       kill -0 -- "-${pid}" 2>/dev/null && return 1
       wait "${pid}" 2>/dev/null || :
+      return 1
+    fi
+    if ! kill -0 "${pid}" 2>/dev/null; then
+      if wait "${pid}" 2>/dev/null; then
+        S2_START_SUPERVISOR_EXIT_STATUS=0
+      else
+        S2_START_SUPERVISOR_EXIT_STATUS=$?
+      fi
       return 1
     fi
     sleep 0.05
@@ -1056,8 +1556,18 @@ pre_release_group_is_stably_pinned() {
     # One detached scan is the complete sample. It sees the supervisor and any
     # helper in one process-table instant, after the scanner has left this
     # group; no command-substitution child can manufacture the second member.
-    capture_detached_process_table \
-      -o pid=,pgid=,ppid=,stat=,command= -g "${pid}" || return 1
+    if ! capture_detached_process_table \
+      -o pid=,pgid=,ppid=,stat=,command= -g "${pid}"; then
+      # A failed scan proves neither absence nor ownership loss. Refuse to
+      # accept this sample, but keep the retry inside the existing finite
+      # pre-release budget so transient host fork/ps pressure cannot turn a
+      # healthy pinned group into a false terminal failure.
+      S2_PRE_RELEASE_CAPTURE_UNCERTAIN_SAMPLES=$((
+        S2_PRE_RELEASE_CAPTURE_UNCERTAIN_SAMPLES + 1
+      ))
+      (( attempts == 40 )) || sleep 0.05
+      continue
+    fi
     while IFS= read -r line; do
       [[ -n "${line}" ]] || continue
       read -r seen_pid seen_pgid seen_ppid seen_stat seen_command <<<"${line}"
@@ -2634,6 +3144,7 @@ run_s2_shell_regression_test() {
   local payload_pid state_holders holder_status lsof_held_file lsof_transient_marker
   local payload_ready_seen payload_state_regular payload_pid_valid state_holder_exact
   local group_sufficient payload_in_group lsof_observation
+  local arm_consumed spawn_attempted watchdog_pid_published supervisor_exit_status_json startup_phase_json
 
   if [[ ! "${mode}" =~ ^[a-z0-9][a-z0-9-]{0,63}$ ]]; then
     emit '{"tool":"bash","package":"apps/wire","suite":"s2-krater-shell","status":"fail","code":"S2_SHELL_REGRESSION_TEST_INVALID","reproduce":"scripts/e2e-s2-krater.sh"}'
@@ -2665,13 +3176,33 @@ run_s2_shell_regression_test() {
   fi
 
   if [[ "${mode}" == "detached-ps-failure" ]]; then
+    local payload_release_file status_file
     S2_DETACHED_PROCESS_TABLE="stale-result-must-not-survive"
     if S2_PLANT_DETACHED_PS_FAILURE=1 \
       capture_detached_process_table -o pid=,pgid=,ppid=,stat=,command= -p "$$"; then
       return 1
     fi
     [[ -z "${S2_DETACHED_PROCESS_TABLE}" ]] || return 1
-    emit '{"tool":"bash","package":"apps/wire","suite":"s2-krater-shell","status":"pass","scenario":"detached-ps-failure-propagates-and-clears-partial-process-table","reproduce":"S2_SHELL_REGRESSION_TEST=detached-ps-failure scripts/e2e-s2-krater.sh"}'
+    status_file="${S2_STATE_DIR}/detached-ps-failure-$(random_hex 8).status"
+    payload_release_file="${S2_STATE_DIR}/detached-ps-failure-$(random_hex 8).released"
+    if S2_PLANT_DETACHED_PS_FAILURE=1 \
+      start_pinned_supervisor "${status_file}" detached-ps-failure \
+        "${S2_STATE_DIR}" "${S2_PORT}" client \
+        bash -c 'printf released >"$1"; sleep 30' s2-detached-ps-failure-payload \
+          "${payload_release_file}"; then
+      return 1
+    fi
+    [[ "${S2_START_FAILURE_STAGE}" == "pre-arm-ownership" && \
+      ${S2_PRE_RELEASE_RESAMPLE_ATTEMPTS} -eq 40 && \
+      ${S2_PRE_RELEASE_ACCEPTED_SAMPLES} -eq 0 && \
+      ${S2_PRE_RELEASE_CAPTURE_UNCERTAIN_SAMPLES} -eq 40 && \
+      ! -e "${payload_release_file}" && ! -L "${payload_release_file}" ]] || return 1
+    is_decimal "${S2_LAST_SUPERVISOR_PGID}" && \
+      [[ -n "${S2_LAST_SUPERVISOR_MARKER}" ]] || return 1
+    [[ "${S2_PRE_RELEASE_REAPED_PGID}" == "${S2_LAST_SUPERVISOR_PGID}" && \
+      "${S2_START_SUPERVISOR_EXIT_STATUS}" == 137 ]] || return 1
+    kill -0 -- "-${S2_LAST_SUPERVISOR_PGID}" 2>/dev/null && return 1
+    emit '{"tool":"bash+fifo","package":"apps/wire","suite":"s2-krater-shell","status":"pass","scenario":"detached-ps-failure-propagates-remains-bounded-refuses-release-and-aborts-the-exact-child-owned-group","start_failure_stage":"pre-arm-ownership","pre_release_capture_uncertain_samples":40,"payload_release_refused":true,"abort_token_consumed":true,"supervisor_exit_status":137,"no_exact_group_survivor":true,"reproduce":"S2_SHELL_REGRESSION_TEST=detached-ps-failure scripts/e2e-s2-krater.sh"}'
     return 0
   fi
 
@@ -3195,6 +3726,254 @@ run_s2_shell_regression_test() {
     return 0
   fi
 
+  if [[ "${mode}" == "watchdog-publication-delay" ]]; then
+    local publication_started_at publication_elapsed
+    status_file="${S2_STATE_DIR}/watchdog-publication-delay-$(random_hex 8).status"
+    publication_started_at="${SECONDS}"
+    S2_PLANT_WATCHDOG_PUBLICATION_DELAY_SECONDS=16 \
+      start_pinned_supervisor "${status_file}" watchdog-publication-delay \
+        "${S2_STATE_DIR}" "${S2_PORT}" client bash -c 'sleep 30' || return 1
+    publication_elapsed=$((SECONDS - publication_started_at))
+    [[ ${publication_elapsed} -ge 16 && "${S2_START_FAILURE_STAGE}" == "ready" ]] || return 1
+    stop_pinned_supervisor \
+      "${S2_STARTED_PID}" "${S2_STARTED_PGID}" "${S2_STARTED_MARKER}" \
+      "${S2_STARTED_WATCHDOG_PID}" "${S2_STARTED_WATCHDOG_HEALTH}" \
+      "${S2_STATE_DIR}" "${S2_PORT}" client || return 1
+    kill -0 -- "-${S2_STARTED_PGID}" 2>/dev/null && return 1
+    emit '{"tool":"bash+ps","package":"apps/wire","suite":"s2-krater-shell","status":"pass","scenario":"watchdog-publication-deadline-exceeds-runtime-fork-backoff-envelope","publication_delay_seconds":16,"payload_released_after_watchdog_proof":true,"no_exact_group_survivor":true,"reproduce":"S2_SHELL_REGRESSION_TEST=watchdog-publication-delay scripts/e2e-s2-krater.sh"}'
+    return 0
+  fi
+
+  if [[ "${mode}" == "watchdog-startup-diagnostics" ]]; then
+    local fixture expected_status expected_phase expected_stage payload_started_file signal_name fixture_started_at fixture_elapsed
+    for fixture in \
+      preexisting-journal wrong-arm signal-hup signal-int signal-term \
+      append-failure checkpoint-open-failure signal-term-hung-watchdog-scan; do
+      status_file="${S2_STATE_DIR}/watchdog-startup-${fixture}-$(random_hex 8).status"
+      payload_started_file="${S2_STATE_DIR}/watchdog-startup-${fixture}-$(random_hex 8).payload"
+      expected_phase=""
+      expected_stage=watchdog-arm-ack
+      case "${fixture}" in
+        preexisting-journal)
+          expected_status="${S2_SUPERVISOR_STARTUP_CREATE_STATUS}"
+          if S2_PLANT_STARTUP_JOURNAL_PREEXISTING=1 \
+            start_pinned_supervisor "${status_file}" "watchdog-startup-${fixture}" \
+              "${S2_STATE_DIR}" "${S2_PORT}" client \
+              bash -c 'printf started >"$1"' s2-watchdog-startup-payload \
+                "${payload_started_file}"; then
+            return 1
+          fi
+          [[ "${S2_START_FAILURE_STAGE}" == "pre-arm-release-fifo" && \
+            "${S2_START_SUPERVISOR_EXIT_STATUS}" == "${expected_status}" && \
+            ! -e "${status_file}.release" && ! -L "${status_file}.release" && \
+            "$(<"${status_file}.watchdog.startup")" == startup-sentinel ]] || return 1
+          ;;
+        wrong-arm)
+          expected_status="${S2_SUPERVISOR_GATE_MISMATCH_STATUS}"
+          expected_phase=arm-gate-mismatch
+          if S2_PLANT_WRONG_ARM_TOKEN=1 \
+            start_pinned_supervisor "${status_file}" "watchdog-startup-${fixture}" \
+              "${S2_STATE_DIR}" "${S2_PORT}" client \
+              bash -c 'printf started >"$1"' s2-watchdog-startup-payload \
+                "${payload_started_file}"; then
+            return 1
+          fi
+          ;;
+        signal-hup|signal-int|signal-term)
+          case "${fixture}" in
+            signal-hup) signal_name=HUP; expected_status=129 ;;
+            signal-int) signal_name=INT; expected_status=130 ;;
+            signal-term) signal_name=TERM; expected_status=143 ;;
+            *) return 1 ;;
+          esac
+          expected_phase="${fixture}"
+          if S2_PLANT_SUPERVISOR_SIGNAL_AFTER_ARM="${signal_name}" \
+            start_pinned_supervisor "${status_file}" "watchdog-startup-${fixture}" \
+              "${S2_STATE_DIR}" "${S2_PORT}" client \
+              bash -c 'printf started >"$1"' s2-watchdog-startup-payload \
+                "${payload_started_file}"; then
+            return 1
+          fi
+          ;;
+        signal-term-hung-watchdog-scan)
+          expected_status=143
+          expected_phase=signal-term
+          expected_stage=watchdog-publication
+          fixture_started_at="${SECONDS}"
+          if S2_PLANT_WATCHDOG_PS_HANG=1 \
+            S2_PLANT_SUPERVISOR_SIGNAL_AFTER_WATCHDOG=TERM \
+            start_pinned_supervisor "${status_file}" "watchdog-startup-${fixture}" \
+              "${S2_STATE_DIR}" "${S2_PORT}" client \
+              bash -c 'printf started >"$1"' s2-watchdog-startup-payload \
+                "${payload_started_file}"; then
+            return 1
+          fi
+          fixture_elapsed=$((SECONDS - fixture_started_at))
+          [[ -f "${status_file}.watchdog.pid" && \
+            ! -L "${status_file}.watchdog.pid" && \
+            ${fixture_elapsed} -ge 1 && \
+            ${fixture_elapsed} -lt ${S2_WATCHDOG_PUBLICATION_DEADLINE_SECONDS} ]] || return 1
+          IFS= read -r watchdog_pid <"${status_file}.watchdog.pid" || return 1
+          is_decimal "${watchdog_pid}" || return 1
+          checkpoint_file_matches \
+            "${status_file}.watchdog.scan-hang-armed" scan-hang-armed "${watchdog_pid}" || return 1
+          ;;
+        append-failure)
+          expected_status="${S2_SUPERVISOR_CHECKPOINT_IO_STATUS}"
+          expected_phase=arm-gate-consumed
+          if S2_PLANT_STARTUP_JOURNAL_APPEND_FAILURE_AFTER_ARM=1 \
+            start_pinned_supervisor "${status_file}" "watchdog-startup-${fixture}" \
+              "${S2_STATE_DIR}" "${S2_PORT}" client \
+              bash -c 'printf started >"$1"' s2-watchdog-startup-payload \
+                "${payload_started_file}"; then
+            return 1
+          fi
+          ;;
+        checkpoint-open-failure)
+          expected_status="${S2_SUPERVISOR_CHECKPOINT_IO_STATUS}"
+          expected_phase=arm-checkpoint-write-failed
+          if S2_PLANT_WATCHDOG_CHECKPOINT_OPEN_FAILURE=1 \
+            start_pinned_supervisor "${status_file}" "watchdog-startup-${fixture}" \
+              "${S2_STATE_DIR}" "${S2_PORT}" client \
+              bash -c 'printf started >"$1"' s2-watchdog-startup-payload \
+                "${payload_started_file}"; then
+            return 1
+          fi
+          ;;
+        *) return 1 ;;
+      esac
+      [[ "${S2_START_SUPERVISOR_EXIT_STATUS}" == "${expected_status}" && \
+        ! -e "${payload_started_file}" && ! -L "${payload_started_file}" && \
+        "$(stat -f '%Lp' "${status_file}.watchdog.startup")" == 600 ]] || return 1
+      if [[ -n "${expected_phase}" ]]; then
+        [[ "${S2_START_FAILURE_STAGE}" == "${expected_stage}" ]] || return 1
+        startup_journal_last_phase \
+          "${status_file}.watchdog.startup" "${S2_LAST_SUPERVISOR_PGID}" || return 1
+        [[ "${S2_STARTUP_JOURNAL_PHASE}" == "${expected_phase}" ]] || return 1
+      fi
+      kill -0 -- "-${S2_LAST_SUPERVISOR_PGID}" 2>/dev/null && return 1
+      assert_no_run_survivors \
+        "${S2_STATE_DIR}" "${S2_PORT}" "${S2_LAST_SUPERVISOR_MARKER}" || return 1
+    done
+    status_file="${S2_STATE_DIR}/watchdog-startup-fragmented-arm-$(random_hex 8).status"
+    payload_started_file="${S2_STATE_DIR}/watchdog-startup-fragmented-arm-$(random_hex 8).payload"
+    S2_PLANT_FRAGMENTED_ARM_TOKEN=1 \
+      start_pinned_supervisor "${status_file}" watchdog-startup-fragmented-arm \
+        "${S2_STATE_DIR}" "${S2_PORT}" client \
+        bash -c 'printf started >"$1"; sleep 30' s2-watchdog-startup-payload \
+          "${payload_started_file}" || return 1
+    checkpoint_file_matches \
+      "${status_file}.watchdog.arm-fragment-observed" \
+      arm-fragment-observed "${S2_STARTED_PID}" || return 1
+    deadline=$((SECONDS + 5))
+    while [[ ! -f "${payload_started_file}" ]]; do
+      (( SECONDS < deadline )) || return 1
+      sleep 0.05
+    done
+    [[ ! -L "${payload_started_file}" && \
+      "$(stat -f '%z' "${payload_started_file}")" == 7 ]] || return 1
+    stop_pinned_supervisor \
+      "${S2_STARTED_PID}" "${S2_STARTED_PGID}" "${S2_STARTED_MARKER}" \
+      "${S2_STARTED_WATCHDOG_PID}" "${S2_STARTED_WATCHDOG_HEALTH}" \
+      "${S2_STATE_DIR}" "${S2_PORT}" client || return 1
+    kill -0 -- "-${S2_STARTED_PGID}" 2>/dev/null && return 1
+    emit '{"tool":"bash+fifo","package":"apps/wire","suite":"s2-krater-shell","status":"pass","scenario":"preopened-startup-journal-types-create-gate-signal-append-and-fragmented-read-outcomes","journal_mode":"0600","startup_create_status":73,"gate_mismatch_status":65,"signal_hup_status":129,"signal_int_status":130,"signal_term_status":143,"append_failure_status":74,"watchdog_scan_deadline_seconds":1,"fragmented_arm_token_accepted":true,"payload_release_refused_for_failures":true,"no_exact_group_survivor":true,"reproduce":"S2_SHELL_REGRESSION_TEST=watchdog-startup-diagnostics scripts/e2e-s2-krater.sh"}'
+    return 0
+  fi
+
+  if [[ "${mode}" == "watchdog-post-arm-abort" ]]; then
+    local abort_started_at abort_elapsed payload_started_file
+    status_file="${S2_STATE_DIR}/watchdog-post-arm-abort-$(random_hex 8).status"
+    payload_started_file="${S2_STATE_DIR}/watchdog-post-arm-abort-$(random_hex 8).payload"
+    abort_started_at="${SECONDS}"
+    if S2_PLANT_WATCHDOG_PUBLICATION_DELAY_SECONDS=16 \
+      S2_PLANT_ABORT_AFTER_WATCHDOG_LAUNCH=1 \
+      start_pinned_supervisor "${status_file}" watchdog-post-arm-abort \
+        "${S2_STATE_DIR}" "${S2_PORT}" client \
+        bash -c 'printf started >"$1"' s2-watchdog-post-arm-abort-payload \
+          "${payload_started_file}"; then
+      return 1
+    fi
+    abort_elapsed=$((SECONDS - abort_started_at))
+    [[ "${S2_START_FAILURE_STAGE}" == "watchdog-publication-abort-plant" && \
+      "${S2_START_SUPERVISOR_EXIT_STATUS}" == 137 && \
+      ${abort_elapsed} -ge 16 && ${abort_elapsed} -lt 40 && \
+      -f "${status_file}.watchdog.arm-consumed" && \
+      ! -L "${status_file}.watchdog.arm-consumed" && \
+      -f "${status_file}.watchdog.launch" && ! -L "${status_file}.watchdog.launch" && \
+      -f "${status_file}.watchdog.pid" && ! -L "${status_file}.watchdog.pid" && \
+      ! -e "${payload_started_file}" && ! -L "${payload_started_file}" ]] || return 1
+    checkpoint_file_matches \
+      "${status_file}.watchdog.arm-consumed" arm-consumed \
+      "${S2_LAST_SUPERVISOR_PGID}" || return 1
+    checkpoint_file_matches \
+      "${status_file}.watchdog.launch" spawn-attempted \
+      "${S2_LAST_SUPERVISOR_PGID}" || return 1
+    single_decimal_file "${status_file}.watchdog.pid" || return 1
+    kill -0 -- "-${S2_LAST_SUPERVISOR_PGID}" 2>/dev/null && return 1
+    assert_no_run_survivors \
+      "${S2_STATE_DIR}" "${S2_PORT}" "${S2_LAST_SUPERVISOR_MARKER}" || return 1
+    emit "{\"tool\":\"bash+fifo\",\"package\":\"apps/wire\",\"suite\":\"s2-krater-shell\",\"status\":\"pass\",\"scenario\":\"post-arm-abort-remains-queued-across-publication-delay-and-kills-the-exact-child-owned-group\",\"arm_consumed\":true,\"spawn_attempted\":true,\"watchdog_pid_published\":true,\"supervisor_exit_status\":137,\"payload_release_refused\":true,\"no_exact_group_survivor\":true,\"reproduce\":\"S2_SHELL_REGRESSION_TEST=watchdog-post-arm-abort scripts/e2e-s2-krater.sh\"}"
+    return 0
+  fi
+
+  if [[ "${mode}" == "watchdog-pre-publication-exit" ]]; then
+    local payload_started_file
+    status_file="${S2_STATE_DIR}/watchdog-pre-publication-exit-$(random_hex 8).status"
+    payload_started_file="${S2_STATE_DIR}/watchdog-pre-publication-exit-$(random_hex 8).payload"
+    if S2_PLANT_SUPERVISOR_EXIT_BEFORE_WATCHDOG_PUBLICATION=1 \
+      start_pinned_supervisor "${status_file}" watchdog-pre-publication-exit \
+        "${S2_STATE_DIR}" "${S2_PORT}" client \
+        bash -c 'printf started >"$1"' s2-watchdog-pre-publication-payload \
+          "${payload_started_file}"; then
+      return 1
+    fi
+    [[ "${S2_START_FAILURE_STAGE}" == "watchdog-publication" && \
+      "${S2_START_SUPERVISOR_EXIT_STATUS}" == 125 && \
+      -f "${status_file}.watchdog.launch" && ! -L "${status_file}.watchdog.launch" && \
+      ! -e "${status_file}.watchdog.pid" && ! -L "${status_file}.watchdog.pid" && \
+      ! -e "${payload_started_file}" && ! -L "${payload_started_file}" ]] || return 1
+    checkpoint_file_matches \
+      "${status_file}.watchdog.launch" spawn-attempted \
+      "${S2_LAST_SUPERVISOR_PGID}" || return 1
+    kill -0 -- "-${S2_LAST_SUPERVISOR_PGID}" 2>/dev/null && return 1
+    assert_no_run_survivors \
+      "${S2_STATE_DIR}" "${S2_PORT}" "${S2_LAST_SUPERVISOR_MARKER}" || return 1
+    emit '{"tool":"bash+ps","package":"apps/wire","suite":"s2-krater-shell","status":"pass","scenario":"supervisor-exit-before-watchdog-pid-publication-is-typed-bounded-and-never-releases-payload","start_failure_stage":"watchdog-publication","supervisor_exit_status":125,"payload_release_refused":true,"no_exact_group_survivor":true,"reproduce":"S2_SHELL_REGRESSION_TEST=watchdog-pre-publication-exit scripts/e2e-s2-krater.sh"}'
+    return 0
+  fi
+
+  if [[ "${mode}" == "watchdog-checkpoint-corruption" ]]; then
+    local checkpoint_shape payload_started_file
+    for checkpoint_shape in empty malformed extra-line wrong-pid; do
+      status_file="${S2_STATE_DIR}/watchdog-checkpoint-${checkpoint_shape}-$(random_hex 8).status"
+      payload_started_file="${S2_STATE_DIR}/watchdog-checkpoint-${checkpoint_shape}-$(random_hex 8).payload"
+      if S2_PLANT_WATCHDOG_CHECKPOINT_CORRUPTION="${checkpoint_shape}" \
+        start_pinned_supervisor "${status_file}" "watchdog-checkpoint-${checkpoint_shape}" \
+          "${S2_STATE_DIR}" "${S2_PORT}" client \
+          bash -c 'printf started >"$1"' s2-watchdog-checkpoint-payload \
+            "${payload_started_file}"; then
+        return 1
+      fi
+      [[ "${S2_START_FAILURE_STAGE}" == "watchdog-publication" && \
+        "${S2_START_SUPERVISOR_EXIT_STATUS}" == 125 && \
+        ! -e "${payload_started_file}" && ! -L "${payload_started_file}" ]] || return 1
+      checkpoint_file_matches \
+        "${status_file}.watchdog.arm-consumed" arm-consumed \
+        "${S2_LAST_SUPERVISOR_PGID}" || return 1
+      if checkpoint_file_matches \
+        "${status_file}.watchdog.launch" spawn-attempted \
+        "${S2_LAST_SUPERVISOR_PGID}"; then
+        return 1
+      fi
+      kill -0 -- "-${S2_LAST_SUPERVISOR_PGID}" 2>/dev/null && return 1
+      assert_no_run_survivors \
+        "${S2_STATE_DIR}" "${S2_PORT}" "${S2_LAST_SUPERVISOR_MARKER}" || return 1
+    done
+    emit '{"tool":"bash+fifo","package":"apps/wire","suite":"s2-krater-shell","status":"pass","scenario":"malformed-watchdog-checkpoints-never-count-as-publication","empty_refused":true,"malformed_refused":true,"extra_line_refused":true,"wrong_pid_refused":true,"payload_release_refused":true,"no_exact_group_survivor":true,"reproduce":"S2_SHELL_REGRESSION_TEST=watchdog-checkpoint-corruption scripts/e2e-s2-krater.sh"}'
+    return 0
+  fi
+
   if [[ "${mode}" == "journal-timestamps" ]]; then
     journal_valid="${S2_STATE_DIR}/journal-valid-$(random_hex 8).json"
     journal_alternate="${S2_STATE_DIR}/journal-alternate-$(random_hex 8).json"
@@ -3318,7 +4097,9 @@ run_s2_shell_regression_test() {
     return 0
   fi
 
-  if [[ "${mode}" == "legacy-leader-loss" ]]; then
+  if [[ "${mode}" == "legacy-leader-loss" || \
+    "${mode}" == "legacy-leader-loss-transient-ps" || \
+    "${mode}" == "legacy-leader-loss-transient-post-arm-ps" ]]; then
     status_file="${S2_STATE_DIR}/legacy-leader-loss-$(random_hex 8).status"
     payload_ready_file="${S2_STATE_DIR}/legacy-leader-loss-$(random_hex 8).ready"
     payload_state_file="${S2_STATE_DIR}/legacy-leader-loss-$(random_hex 8).held-open"
@@ -3336,7 +4117,18 @@ run_s2_shell_regression_test() {
     # in the exact pinned group and through lsof on the open file. Unlike the former four-second
     # payload, this process has no independent expiry that can race an aggregate test scheduler.
     # shellcheck disable=SC2016
-    S2_PLANT_WATCHDOG_EXIT_ON_TERM="${plant_clean_stop_bypass}" \
+    local detached_ps_failure_once=0 detached_ps_failure_once_stage=pre-arm
+    local detached_ps_one_shot_consumed=false
+    if [[ "${mode}" == "legacy-leader-loss-transient-ps" || \
+      "${mode}" == "legacy-leader-loss-transient-post-arm-ps" ]]; then
+      detached_ps_failure_once=1
+    fi
+    if [[ "${mode}" == "legacy-leader-loss-transient-post-arm-ps" ]]; then
+      detached_ps_failure_once_stage=post-arm
+    fi
+    if ! S2_PLANT_DETACHED_PS_FAILURE_ONCE="${detached_ps_failure_once}" \
+      S2_PLANT_DETACHED_PS_FAILURE_ONCE_STAGE="${detached_ps_failure_once_stage}" \
+      S2_PLANT_WATCHDOG_EXIT_ON_TERM="${plant_clean_stop_bypass}" \
       S2_PLANT_SUPERVISOR_EXIT_ON_TERM=1 \
       start_pinned_supervisor "${status_file}" legacy-leader-loss "${S2_STATE_DIR}" "${S2_PORT}" server \
         bash -c '
@@ -3354,7 +4146,39 @@ run_s2_shell_regression_test() {
           printf "%s\n" "$$" >"${ready_file}" || exit 125
           while :; do read -r -t 1 ignored || :; done
         ' s2-legacy-leader-loss-payload \
-          "${payload_ready_file}" "${payload_state_file}" "${payload_behavior}" || return 1
+          "${payload_ready_file}" "${payload_state_file}" "${payload_behavior}"; then
+      arm_consumed=false
+      spawn_attempted=false
+      watchdog_pid_published=false
+      supervisor_exit_status_json=null
+      startup_phase_json=null
+      checkpoint_file_matches \
+        "${status_file}.watchdog.arm-consumed" arm-consumed \
+        "${S2_LAST_SUPERVISOR_PGID}" && arm_consumed=true
+      checkpoint_file_matches \
+        "${status_file}.watchdog.launch" spawn-attempted \
+        "${S2_LAST_SUPERVISOR_PGID}" && spawn_attempted=true
+      single_decimal_file "${status_file}.watchdog.pid" && watchdog_pid_published=true
+      if is_decimal "${S2_START_SUPERVISOR_EXIT_STATUS}"; then
+        supervisor_exit_status_json="${S2_START_SUPERVISOR_EXIT_STATUS}"
+      fi
+      if startup_journal_last_phase \
+        "${status_file}.watchdog.startup" "${S2_LAST_SUPERVISOR_PGID}"; then
+        startup_phase_json="\"${S2_STARTUP_JOURNAL_PHASE}\""
+      fi
+      emit "{\"tool\":\"bash+ps\",\"package\":\"apps/wire\",\"suite\":\"s2-krater-shell\",\"status\":\"fail\",\"code\":\"S2_LEGACY_LEADER_LOSS_START_FAILED\",\"start_failure_stage\":\"${S2_START_FAILURE_STAGE}\",\"startup_phase\":${startup_phase_json},\"arm_consumed\":${arm_consumed},\"spawn_attempted\":${spawn_attempted},\"watchdog_pid_published\":${watchdog_pid_published},\"supervisor_exit_status\":${supervisor_exit_status_json},\"pre_release_capture_uncertain_samples\":${S2_PRE_RELEASE_CAPTURE_UNCERTAIN_SAMPLES},\"post_arm_inspection_uncertain_samples\":${S2_POST_ARM_INSPECTION_UNCERTAIN_SAMPLES},\"reproduce\":\"S2_SHELL_REGRESSION_TEST=${mode} scripts/e2e-s2-krater.sh\"}"
+      return 1
+    fi
+    if [[ "${detached_ps_failure_once}" == 1 ]]; then
+      [[ -f "${S2_STATE_DIR}/.detached-ps-failure-once" && \
+        ! -L "${S2_STATE_DIR}/.detached-ps-failure-once" ]] || return 1
+      detached_ps_one_shot_consumed=true
+      if [[ "${detached_ps_failure_once_stage}" == "pre-arm" ]]; then
+        [[ ${S2_PRE_RELEASE_CAPTURE_UNCERTAIN_SAMPLES} -ge 1 ]] || return 1
+      else
+        [[ ${S2_POST_ARM_INSPECTION_UNCERTAIN_SAMPLES} -ge 1 ]] || return 1
+      fi
+    fi
     S2_SERVER_PID="${S2_STARTED_PID}"
     S2_SERVER_PGID="${S2_STARTED_PGID}"
     S2_SERVER_MARKER="${S2_STARTED_MARKER}"
@@ -3417,7 +4241,7 @@ run_s2_shell_regression_test() {
       fi
       sleep 0.05
     done
-    emit '{"tool":"bash+lsof+ps","package":"apps/wire","suite":"s2-krater-shell","status":"pass","scenario":"legacy-leader-loss","assertion":"payload-ready-in-exact-group-with-retained-state-fd","payload_in_exact_group":true,"state_fd_held":true,"reproduce":"S2_SHELL_REGRESSION_TEST=legacy-leader-loss scripts/e2e-s2-krater.sh"}'
+    emit "{\"tool\":\"bash+lsof+ps\",\"package\":\"apps/wire\",\"suite\":\"s2-krater-shell\",\"status\":\"pass\",\"scenario\":\"legacy-leader-loss\",\"assertion\":\"payload-ready-in-exact-group-with-retained-state-fd\",\"payload_in_exact_group\":true,\"state_fd_held\":true,\"detached_ps_one_shot_consumed\":${detached_ps_one_shot_consumed},\"detached_ps_one_shot_stage\":\"${detached_ps_failure_once_stage}\",\"pre_release_capture_uncertain_samples\":${S2_PRE_RELEASE_CAPTURE_UNCERTAIN_SAMPLES},\"post_arm_inspection_uncertain_samples\":${S2_POST_ARM_INSPECTION_UNCERTAIN_SAMPLES},\"reproduce\":\"S2_SHELL_REGRESSION_TEST=${mode} scripts/e2e-s2-krater.sh\"}"
     S2_LEGACY_REQUIRED_HELD_FILE="${payload_state_file}"
     if stop_legacy_worker_or_fail; then
       stop_status=0
@@ -3434,7 +4258,7 @@ run_s2_shell_regression_test() {
       -z "${S2_SERVER_PID}" ]] || return 1
     if kill -0 -- "-${S2_STARTED_PGID}" 2>/dev/null; then return 1; fi
     assert_no_run_survivors "${S2_STATE_DIR}" "${S2_PORT}" "${S2_STARTED_MARKER}" || return 1
-    emit '{"tool":"bash","package":"apps/wire","suite":"s2-krater-shell","status":"pass","scenario":"legacy-term-leader-loss-bounds-inspection-publishes-uncertainty-and-kills-only-exact-residual-group","reproduce":"S2_SHELL_REGRESSION_TEST=legacy-leader-loss scripts/e2e-s2-krater.sh"}'
+    emit "{\"tool\":\"bash\",\"package\":\"apps/wire\",\"suite\":\"s2-krater-shell\",\"status\":\"pass\",\"scenario\":\"legacy-term-leader-loss-bounds-inspection-publishes-uncertainty-and-kills-only-exact-residual-group\",\"detached_ps_one_shot_consumed\":${detached_ps_one_shot_consumed},\"detached_ps_one_shot_stage\":\"${detached_ps_failure_once_stage}\",\"pre_release_capture_uncertain_samples\":${S2_PRE_RELEASE_CAPTURE_UNCERTAIN_SAMPLES},\"post_arm_inspection_uncertain_samples\":${S2_POST_ARM_INSPECTION_UNCERTAIN_SAMPLES},\"cleanup_action\":\"kill-exact-residual-group\",\"reproduce\":\"S2_SHELL_REGRESSION_TEST=${mode} scripts/e2e-s2-krater.sh\"}"
     return 0
   fi
 

@@ -1,5 +1,7 @@
 import {
+  EnrollmentDeclaredRuntimeSchema,
   type EnrollmentGrantReduction,
+  EnrollmentIdSchema,
   EnrollmentResourceGrantsSchema,
   type FellowCredentialProfile,
   type FellowLifecycleStatus,
@@ -45,6 +47,7 @@ type ProposalStatus = "pending" | "approved" | "reduced" | "denied" | "expired";
 interface RecordRow {
   enrollment_id: string;
   sponsor_id: string;
+  kind: "join-url" | "device";
   secret_hash: string;
   secret_expires_at: number;
   requested_scopes_json: string;
@@ -53,7 +56,13 @@ interface RecordRow {
   secret_consumed_at: number | null;
 }
 
-interface ProposalRow extends RecordRow {
+interface RecordAuthorityEvidenceRow extends RecordRow {
+  record_created_at: number;
+  requested_resource_key_count: number;
+  requested_resource_distinct_key_count: number;
+}
+
+interface ProposalRow extends RecordAuthorityEvidenceRow {
   proposal_id: string;
   fellow_id: string;
   flow_handle_hash: string;
@@ -106,17 +115,34 @@ interface CredentialRow {
 
 function credentialBindingIdentityIsValid(row: CredentialRow): boolean {
   return (
+    typeof row.fellow_id === "string" &&
     row.fellow_id.length >= 1 &&
     row.fellow_id.length <= 80 &&
+    !row.fellow_id.includes("\0") &&
+    typeof row.credential_id === "string" &&
     row.credential_id.length >= 1 &&
     row.credential_id.length <= 160 &&
+    !row.credential_id.includes("\0") &&
+    typeof row.sponsor_id === "string" &&
     row.sponsor_id.length >= 1 &&
     row.sponsor_id.length <= 160 &&
+    !row.sponsor_id.includes("\0") &&
     FellowNameSchema.safeParse(row.name).success &&
-    row.model.length >= 1 &&
-    row.model.length <= 160 &&
-    row.harness.length >= 1 &&
-    row.harness.length <= 160
+    EnrollmentDeclaredRuntimeSchema.safeParse(row.model).success &&
+    EnrollmentDeclaredRuntimeSchema.safeParse(row.harness).success
+  );
+}
+
+function credentialBindingEvidenceIsValid(row: CredentialRow): boolean {
+  return (
+    Number.isSafeInteger(row.issued_at) &&
+    row.issued_at >= 0 &&
+    Number.isSafeInteger(row.expires_at) &&
+    row.expires_at > row.issued_at &&
+    row.expires_at - row.issued_at <= FELLOW_TOKEN_TTL_MS &&
+    (row.last_used_at === null ||
+      (Number.isSafeInteger(row.last_used_at) && row.last_used_at >= 0)) &&
+    (row.revoked_at === null || (Number.isSafeInteger(row.revoked_at) && row.revoked_at >= 0))
   );
 }
 
@@ -128,10 +154,7 @@ interface IdempotencyRow {
 }
 
 /** Columns selected by `pendingApprovalCardsBySponsor`: record join pending proposal. */
-interface PendingProposalRow {
-  enrollment_id: string;
-  requested_scopes_json: string;
-  requested_resources_json: string;
+interface PendingProposalRow extends RecordAuthorityEvidenceRow {
   proposal_id: string;
   name: string;
   model: string;
@@ -189,7 +212,10 @@ function parseScopes(encoded: string): readonly RequestedScope[] {
     if (!Array.isArray(value) || value.length < 1 || value.length > 4) {
       throw new TypeError("invalid scope payload");
     }
-    return uniqueEnrollmentScopes(value.map((scope) => RequestedScopeSchema.parse(scope)));
+    const parsed = value.map((scope) => RequestedScopeSchema.parse(scope));
+    const unique = uniqueEnrollmentScopes(parsed);
+    if (unique.length !== parsed.length) throw new TypeError("duplicate scope payload");
+    return unique;
   } catch {
     throw new EnrollmentPersistenceError();
   }
@@ -252,6 +278,70 @@ function requestedRecord(
   };
 }
 
+function requestedRecordWithEvidence(
+  row: RecordAuthorityEvidenceRow,
+): Pick<EnrollmentRecord, "requestedScopes" | "requestedResources"> {
+  if (
+    !recordEvidenceIsValid(row) ||
+    !Number.isSafeInteger(row.record_created_at) ||
+    row.record_created_at < 1 ||
+    (row.kind === "join-url" &&
+      (row.secret_expires_at <= row.record_created_at ||
+        row.secret_expires_at - row.record_created_at > 30 * 60 * 1_000)) ||
+    (row.kind === "device" && row.secret_expires_at !== row.record_created_at) ||
+    (row.secret_consumed_at !== null &&
+      (row.secret_consumed_at < row.record_created_at ||
+        row.secret_consumed_at >= row.secret_expires_at)) ||
+    !Number.isSafeInteger(row.requested_resource_key_count) ||
+    !Number.isSafeInteger(row.requested_resource_distinct_key_count) ||
+    row.requested_resource_key_count !== row.requested_resource_distinct_key_count
+  ) {
+    throw new EnrollmentPersistenceError();
+  }
+  const requested = requestedRecord(row);
+  const grantExpiresAt = requested.requestedResources.fellowGrantExpiresAt;
+  if (
+    grantExpiresAt !== undefined &&
+    (grantExpiresAt <= row.record_created_at ||
+      grantExpiresAt - row.record_created_at > 365 * 24 * 60 * 60 * 1_000)
+  ) {
+    throw new EnrollmentPersistenceError();
+  }
+  return requested;
+}
+
+function proposalEvidenceIsValid(row: {
+  readonly created_at: number;
+  readonly expires_at: number;
+}) {
+  return (
+    Number.isSafeInteger(row.created_at) &&
+    row.created_at >= 1 &&
+    Number.isSafeInteger(row.expires_at) &&
+    row.expires_at - row.created_at === 24 * 60 * 60 * 1_000
+  );
+}
+
+function recordEvidenceIsValid(row: RecordRow): boolean {
+  return (
+    typeof row.enrollment_id === "string" &&
+    EnrollmentIdSchema.safeParse(row.enrollment_id).success &&
+    typeof row.sponsor_id === "string" &&
+    (row.sponsor_id === ""
+      ? row.kind === "device"
+      : /^usr_[A-Za-z0-9_-]{1,60}$/.test(row.sponsor_id)) &&
+    typeof row.secret_hash === "string" &&
+    /^[0-9a-f]{64}$/.test(row.secret_hash) &&
+    typeof row.requested_scopes_json === "string" &&
+    typeof row.requested_resources_json === "string" &&
+    Number.isSafeInteger(row.secret_expires_at) &&
+    row.secret_expires_at > 0 &&
+    (row.invalidated === 0 || row.invalidated === 1) &&
+    (row.secret_consumed_at === null ||
+      (Number.isSafeInteger(row.secret_consumed_at) && row.secret_consumed_at >= 0))
+  );
+}
+
 function proposalStatus(value: string): ProposalStatus {
   if (["pending", "approved", "reduced", "denied", "expired"].includes(value)) {
     return value as ProposalStatus;
@@ -262,7 +352,8 @@ function proposalStatus(value: string): ProposalStatus {
 function isUniqueNameFailure(error: unknown): boolean {
   return (
     error instanceof Error &&
-    /UNIQUE constraint failed: enrollment_fellows\.name/i.test(error.message)
+    (/UNIQUE constraint failed: enrollment_fellows\.name/i.test(error.message) ||
+      /Fellow name already exists/i.test(error.message))
   );
 }
 
@@ -403,6 +494,8 @@ export class D1EnrollmentStore implements EnrollmentStore {
           `UPDATE enrollment_records
              SET secret_consumed_at = ?
            WHERE enrollment_id = ? AND secret_hash = ? AND invalidated = 0
+             AND typeof(secret_expires_at) = 'integer'
+             AND secret_expires_at BETWEEN 1 AND 9007199254740991
              AND secret_consumed_at IS NULL AND secret_expires_at > ?`,
           attempt.now,
           attempt.enrollmentId,
@@ -449,20 +542,29 @@ export class D1EnrollmentStore implements EnrollmentStore {
     secretHash: string,
     now: number,
   ): Promise<void> {
-    let row: RecordRow | null;
+    let row: RecordAuthorityEvidenceRow | null;
     try {
       row = await sql(
         this.#db,
-        `SELECT enrollment_id, sponsor_id, secret_hash, secret_expires_at,
-                requested_scopes_json, requested_resources_json, invalidated, secret_consumed_at
+        `SELECT enrollment_id, sponsor_id, kind, secret_hash, secret_expires_at,
+                requested_scopes_json, requested_resources_json, invalidated, secret_consumed_at,
+                created_at AS record_created_at,
+                (SELECT COUNT(*) FROM json_each(requested_resources_json))
+                  AS requested_resource_key_count,
+                (SELECT COUNT(DISTINCT key) FROM json_each(requested_resources_json))
+                  AS requested_resource_distinct_key_count
            FROM enrollment_records WHERE enrollment_id = ?`,
         enrollmentId,
-      ).first<RecordRow>();
+      ).first<RecordAuthorityEvidenceRow>();
     } catch {
       throw new EnrollmentPersistenceError();
     }
+    if (row === null) throw new EnrollmentError("PAIRING_INVALID");
+    if (!recordEvidenceIsValid(row)) throw new EnrollmentPersistenceError();
+    // Parse authority before comparing credentials. A corrupt retained record
+    // is operational state, never a pairing oracle or an authorization input.
+    requestedRecordWithEvidence(row);
     if (
-      row === null ||
       !secretSafeEqual(row.secret_hash, secretHash) ||
       row.invalidated === 1 ||
       now >= row.secret_expires_at ||
@@ -580,7 +682,8 @@ export class D1EnrollmentStore implements EnrollmentStore {
       throw new EnrollmentError("PROPOSAL_NOT_PENDING");
     }
 
-    const requested = requestedRecord(row);
+    if (!proposalEvidenceIsValid(row)) throw new EnrollmentPersistenceError();
+    const requested = requestedRecordWithEvidence(row);
     const { scopes, resources } = this.reducedGrant(requested, attempt.decision, attempt.now);
     if (
       resources.fellowGrantExpiresAt !== undefined &&
@@ -668,7 +771,8 @@ export class D1EnrollmentStore implements EnrollmentStore {
   ): Promise<EnrollmentApprovalCard> {
     const row = await this.proposalByEnrollment(enrollmentId, sponsorId);
     if (row === null) throw new EnrollmentError("WRONG_PRINCIPAL");
-    const requested = requestedRecord(row);
+    if (!proposalEvidenceIsValid(row)) throw new EnrollmentPersistenceError();
+    const requested = requestedRecordWithEvidence(row);
     const grantExpiresAt = requested.requestedResources.fellowGrantExpiresAt;
     if (
       row.status === "pending" &&
@@ -753,7 +857,13 @@ export class D1EnrollmentStore implements EnrollmentStore {
     ).run();
     const rows = await sql(
       this.#db,
-      `SELECT e.enrollment_id, e.requested_scopes_json, e.requested_resources_json,
+      `SELECT e.enrollment_id, e.sponsor_id, e.kind, e.secret_hash, e.secret_expires_at,
+              e.requested_scopes_json, e.requested_resources_json, e.invalidated,
+              e.secret_consumed_at, e.created_at AS record_created_at,
+              (SELECT COUNT(*) FROM json_each(e.requested_resources_json))
+                AS requested_resource_key_count,
+              (SELECT COUNT(DISTINCT key) FROM json_each(e.requested_resources_json))
+                AS requested_resource_distinct_key_count,
               p.proposal_id, p.name, p.model, p.harness, p.reasoning_effort, p.tools_note,
               p.created_at, p.expires_at, p.status
          FROM enrollment_records e
@@ -763,21 +873,25 @@ export class D1EnrollmentStore implements EnrollmentStore {
         LIMIT 100`,
       sponsorId,
     ).all<PendingProposalRow>();
-    return rows.results.map((row) => ({
-      enrollmentId: row.enrollment_id,
-      proposalId: row.proposal_id,
-      status: "pending" as const,
-      name: row.name,
-      model: row.model,
-      harness: row.harness,
-      ...(row.reasoning_effort === null ? {} : { reasoningEffort: row.reasoning_effort }),
-      ...(row.tools_note === null ? {} : { toolsNote: row.tools_note }),
-      requestedScopes: parseScopes(row.requested_scopes_json),
-      requestedResources: parseResources(row.requested_resources_json),
-      effectiveGrantedScopes: null,
-      effectiveGrantedResources: null,
-      proposalExpiresAt: row.expires_at,
-    }));
+    return rows.results.map((row) => {
+      if (!proposalEvidenceIsValid(row)) throw new EnrollmentPersistenceError();
+      const requested = requestedRecordWithEvidence(row);
+      return {
+        enrollmentId: row.enrollment_id,
+        proposalId: row.proposal_id,
+        status: "pending" as const,
+        name: row.name,
+        model: row.model,
+        harness: row.harness,
+        ...(row.reasoning_effort === null ? {} : { reasoningEffort: row.reasoning_effort }),
+        ...(row.tools_note === null ? {} : { toolsNote: row.tools_note }),
+        requestedScopes: requested.requestedScopes,
+        requestedResources: requested.requestedResources,
+        effectiveGrantedScopes: null,
+        effectiveGrantedResources: null,
+        proposalExpiresAt: row.expires_at,
+      };
+    });
   }
 
   async fellowsBySponsor(sponsorId: string, now: number): Promise<SponsorFellowRecord[]> {
@@ -1201,7 +1315,13 @@ export class D1EnrollmentStore implements EnrollmentStore {
         ),
         sql(
           this.#db,
-          `SELECT e.enrollment_id, e.requested_scopes_json, e.requested_resources_json,
+          `SELECT e.enrollment_id, e.sponsor_id, e.kind, e.secret_hash, e.secret_expires_at,
+                  e.requested_scopes_json, e.requested_resources_json, e.invalidated,
+                  e.secret_consumed_at, e.created_at AS record_created_at,
+                  (SELECT COUNT(*) FROM json_each(e.requested_resources_json))
+                    AS requested_resource_key_count,
+                  (SELECT COUNT(DISTINCT key) FROM json_each(e.requested_resources_json))
+                    AS requested_resource_distinct_key_count,
                   p.proposal_id, p.name, p.model, p.harness, p.reasoning_effort, p.tools_note,
                   p.created_at, p.expires_at, p.status
              ${liveCodePredicate}
@@ -1261,6 +1381,8 @@ export class D1EnrollmentStore implements EnrollmentStore {
       throw new EnrollmentError("DEVICE_CODE_UNKNOWN");
     }
     if (outcomeChanges !== 0) throw new EnrollmentPersistenceError();
+    if (!proposalEvidenceIsValid(row)) throw new EnrollmentPersistenceError();
+    const requested = requestedRecordWithEvidence(row);
     return {
       enrollmentId: row.enrollment_id,
       proposalId: row.proposal_id,
@@ -1270,8 +1392,8 @@ export class D1EnrollmentStore implements EnrollmentStore {
       harness: row.harness,
       ...(row.reasoning_effort === null ? {} : { reasoningEffort: row.reasoning_effort }),
       ...(row.tools_note === null ? {} : { toolsNote: row.tools_note }),
-      requestedScopes: parseScopes(row.requested_scopes_json),
-      requestedResources: parseResources(row.requested_resources_json),
+      requestedScopes: requested.requestedScopes,
+      requestedResources: requested.requestedResources,
       effectiveGrantedScopes: null,
       effectiveGrantedResources: null,
       proposalExpiresAt: row.expires_at,
@@ -1293,9 +1415,15 @@ export class D1EnrollmentStore implements EnrollmentStore {
   ): Promise<EnrollmentApprovalCard | undefined> {
     const row = await sql(
       this.#db,
-      `SELECT e.enrollment_id, e.requested_scopes_json, e.requested_resources_json,
+      `SELECT e.enrollment_id, e.sponsor_id, e.kind, e.secret_hash, e.secret_expires_at,
+              e.requested_scopes_json, e.requested_resources_json, e.invalidated,
+              e.secret_consumed_at, e.created_at AS record_created_at,
+              (SELECT COUNT(*) FROM json_each(e.requested_resources_json))
+                AS requested_resource_key_count,
+              (SELECT COUNT(DISTINCT key) FROM json_each(e.requested_resources_json))
+                AS requested_resource_distinct_key_count,
               p.proposal_id, p.name, p.model, p.harness, p.reasoning_effort, p.tools_note,
-              p.expires_at, p.status
+              p.created_at, p.expires_at, p.status
          FROM enrollment_records e
          JOIN enrollment_proposals p ON p.enrollment_id = e.enrollment_id
          JOIN device_codes d ON d.enrollment_id = e.enrollment_id
@@ -1305,7 +1433,9 @@ export class D1EnrollmentStore implements EnrollmentStore {
       now,
     ).first<PendingProposalRow>();
     if (row === null) return undefined;
-    const requestedResources = parseResources(row.requested_resources_json);
+    if (!proposalEvidenceIsValid(row)) throw new EnrollmentPersistenceError();
+    const requested = requestedRecordWithEvidence(row);
+    const requestedResources = requested.requestedResources;
     if (
       row.status === "pending" &&
       (now >= row.expires_at ||
@@ -1328,7 +1458,7 @@ export class D1EnrollmentStore implements EnrollmentStore {
       harness: row.harness,
       ...(row.reasoning_effort === null ? {} : { reasoningEffort: row.reasoning_effort }),
       ...(row.tools_note === null ? {} : { toolsNote: row.tools_note }),
-      requestedScopes: parseScopes(row.requested_scopes_json),
+      requestedScopes: requested.requestedScopes,
       requestedResources,
       effectiveGrantedScopes: null,
       effectiveGrantedResources: null,
@@ -1356,16 +1486,24 @@ export class D1EnrollmentStore implements EnrollmentStore {
   async capsule(enrollmentId: string, now: number): Promise<EnrollmentCapsule> {
     const row = await sql(
       this.#db,
-      `SELECT enrollment_id, sponsor_id, secret_hash, secret_expires_at,
-              requested_scopes_json, requested_resources_json, invalidated, secret_consumed_at
+      `SELECT enrollment_id, sponsor_id, kind, secret_hash, secret_expires_at,
+              requested_scopes_json, requested_resources_json, invalidated, secret_consumed_at,
+              created_at AS record_created_at,
+              (SELECT COUNT(*) FROM json_each(requested_resources_json))
+                AS requested_resource_key_count,
+              (SELECT COUNT(DISTINCT key) FROM json_each(requested_resources_json))
+                AS requested_resource_distinct_key_count
          FROM enrollment_records
         WHERE enrollment_id = ? AND invalidated = 0 AND secret_consumed_at IS NULL
+          AND typeof(secret_expires_at) = 'integer'
+          AND secret_expires_at BETWEEN 1 AND 9007199254740991
           AND secret_expires_at > ?`,
       enrollmentId,
       now,
-    ).first<RecordRow>();
+    ).first<RecordAuthorityEvidenceRow>();
     if (row === null) throw new EnrollmentError("PAIRING_INVALID");
-    const requested = requestedRecord(row);
+    if (!recordEvidenceIsValid(row)) throw new EnrollmentPersistenceError();
+    const requested = requestedRecordWithEvidence(row);
     return {
       enrollmentId: row.enrollment_id,
       secretExpiresAt: row.secret_expires_at,
@@ -1379,40 +1517,14 @@ export class D1EnrollmentStore implements EnrollmentStore {
       const row = await this.proposalByFlow(attempt.flowHandleHash);
       if (row === null) throw new EnrollmentError("FLOW_INVALID");
       if (row.token_hash !== null) return { kind: "already-issued" };
-      if (row.enrollment_kind === "device") {
-        if (row.device_record_expires_at === null) throw new EnrollmentError("FLOW_INVALID");
-        if (row.device_mapping_expires_at === null) {
-          if (
-            row.device_mapping_reclaimed_at === null ||
-            attempt.now < row.device_record_expires_at
-          ) {
-            throw new EnrollmentError("FLOW_INVALID");
-          }
-        } else if (
-          row.device_mapping_reclaimed_at !== null ||
-          row.device_mapping_expires_at !== row.device_record_expires_at
-        ) {
-          throw new EnrollmentError("FLOW_INVALID");
-        }
-        if (attempt.now >= row.device_record_expires_at) {
-          const decision: PollDecision = { kind: "expired" };
-          const idempotency = await attempt.replayFor?.(decision);
-          if (idempotency === undefined) return decision;
-          try {
-            const [result] = await this.#db.batch([
-              this.standaloneIdempotencyStatement(idempotency),
-            ]);
-            if (result?.meta.changes === 1) return decision;
-            await this.raceIfPresent(idempotency);
-            throw new EnrollmentPersistenceError();
-          } catch (error) {
-            if (error instanceof EnrollmentIdempotencyRaceError) throw error;
-            await this.raceIfPresent(idempotency);
-            throw new EnrollmentPersistenceError();
-          }
-        }
-      }
-      if (row.status === "pending" && attempt.now >= row.expires_at) {
+      if (!proposalEvidenceIsValid(row)) throw new EnrollmentPersistenceError();
+      const requestedResources = requestedRecordWithEvidence(row).requestedResources;
+      if (
+        row.status === "pending" &&
+        (attempt.now >= row.expires_at ||
+          (requestedResources.fellowGrantExpiresAt !== undefined &&
+            attempt.now >= requestedResources.fellowGrantExpiresAt))
+      ) {
         const decision: PollDecision = { kind: "expired" };
         const idempotency = await attempt.replayFor?.(decision);
         try {
@@ -1432,6 +1544,29 @@ export class D1EnrollmentStore implements EnrollmentStore {
           if (error instanceof EnrollmentIdempotencyRaceError) throw error;
           await this.raceIfPresent(idempotency);
           throw new EnrollmentPersistenceError();
+        }
+      }
+      if (row.enrollment_kind === "device") {
+        if (row.device_record_expires_at === null) throw new EnrollmentError("FLOW_INVALID");
+        if (row.device_mapping_expires_at === null) {
+          if (
+            row.device_mapping_reclaimed_at === null ||
+            attempt.now < row.device_record_expires_at
+          ) {
+            throw new EnrollmentError("FLOW_INVALID");
+          }
+        } else if (
+          row.device_mapping_reclaimed_at !== null ||
+          row.device_mapping_expires_at !== row.device_record_expires_at
+        ) {
+          throw new EnrollmentError("FLOW_INVALID");
+        }
+        if (attempt.now >= row.device_record_expires_at) {
+          // This is expiry of the short device mapping, not yet a durable
+          // proposal terminal state. Persisting it under the stable poll key
+          // would replay past the proposal's 24-hour expiry and prevent the
+          // required status transition below from ever running.
+          return { kind: "expired" };
         }
       }
       if (row.status === "pending") {
@@ -1701,6 +1836,74 @@ export class D1EnrollmentStore implements EnrollmentStore {
 			             AND grant_proposal.granted_resources_json = grant_row.granted_resources_json
 			             AND grant_row.granted_scopes_json = fellow_tokens.granted_scopes_json
 			             AND grant_row.granted_resources_json = fellow_tokens.granted_resources_json
+			             AND NOT EXISTS (
+			               SELECT 1
+			                 FROM json_each(grant_row.granted_scopes_json) granted_scope
+			                WHERE NOT EXISTS (
+			                  SELECT 1
+			                    FROM json_each(grant_enrollment.requested_scopes_json) requested_scope
+			                   WHERE requested_scope.value = granted_scope.value
+			                )
+			             )
+			             AND NOT EXISTS (
+			               SELECT 1
+			                 FROM json_each(grant_row.granted_resources_json) granted_resource
+			                WHERE (
+			                  granted_resource.key IN ('problemBinding', 'firstDirective')
+			                  AND (
+			                    json_type(
+			                      grant_enrollment.requested_resources_json,
+			                      '$.' || granted_resource.key
+			                    ) IS NULL
+			                    OR json_extract(
+			                      grant_enrollment.requested_resources_json,
+			                      '$.' || granted_resource.key
+			                    ) IS NOT granted_resource.value
+			                  )
+			                )
+			                   OR (
+			                     granted_resource.key IN (
+			                       'eventBudget', 'artifactBudgetBytes', 'fellowGrantExpiresAt'
+			                     )
+			                     AND json_type(
+			                       grant_enrollment.requested_resources_json,
+			                       '$.' || granted_resource.key
+			                     ) IS NOT NULL
+			                     AND granted_resource.value > json_extract(
+			                       grant_enrollment.requested_resources_json,
+			                       '$.' || granted_resource.key
+			                     )
+			                   )
+			             )
+			             AND (
+			               grant_proposal.status <> 'approved'
+			               OR (
+			                 json_array_length(grant_row.granted_scopes_json)
+			                   = json_array_length(grant_enrollment.requested_scopes_json)
+			                 AND (
+			                   SELECT COUNT(*) FROM json_each(grant_row.granted_resources_json)
+			                 ) = (
+			                   SELECT COUNT(*) FROM json_each(grant_enrollment.requested_resources_json)
+			                 )
+			                 AND NOT EXISTS (
+			                   SELECT 1
+			                     FROM json_each(grant_row.granted_resources_json) granted_resource
+			                    WHERE json_type(
+			                      grant_enrollment.requested_resources_json,
+			                      '$.' || granted_resource.key
+			                    ) IS NOT granted_resource.type
+			                       OR json_extract(
+			                         grant_enrollment.requested_resources_json,
+			                         '$.' || granted_resource.key
+			                       ) IS NOT granted_resource.value
+			                 )
+			               )
+			             )
+			             AND typeof(grant_row.granted_at) = 'integer'
+			             AND grant_row.granted_at BETWEEN 1 AND 9007199254740991
+			             AND grant_row.granted_at >= grant_proposal.created_at
+			             AND grant_row.granted_at < grant_proposal.expires_at
+			             AND fellow_tokens.issued_at >= grant_row.granted_at
 			             AND (
 			               (fellow_tokens.proposal_id IS NULL
 			                 AND fellow_tokens.credential_origin = 'harness-migration')
@@ -1724,7 +1927,12 @@ export class D1EnrollmentStore implements EnrollmentStore {
       throw new EnrollmentPersistenceError();
     }
     if (candidate === null) return undefined;
-    if (!credentialBindingIdentityIsValid(candidate)) throw new EnrollmentPersistenceError();
+    if (
+      !credentialBindingIdentityIsValid(candidate) ||
+      !credentialBindingEvidenceIsValid(candidate)
+    ) {
+      throw new EnrollmentPersistenceError();
+    }
     let grantedScopes: readonly RequestedScope[];
     let grantedResources: EnrollmentResourceGrants;
     try {
@@ -1898,8 +2106,13 @@ export class D1EnrollmentStore implements EnrollmentStore {
   ): Promise<ProposalRow | null> {
     return sql(
       this.#db,
-      `SELECT e.enrollment_id, e.sponsor_id, e.secret_hash, e.secret_expires_at,
+      `SELECT e.enrollment_id, e.sponsor_id, e.kind, e.secret_hash, e.secret_expires_at,
               e.requested_scopes_json, e.requested_resources_json, e.invalidated, e.secret_consumed_at,
+              e.created_at AS record_created_at,
+              (SELECT COUNT(*) FROM json_each(e.requested_resources_json))
+                AS requested_resource_key_count,
+              (SELECT COUNT(DISTINCT key) FROM json_each(e.requested_resources_json))
+                AS requested_resource_distinct_key_count,
               p.proposal_id, p.fellow_id, p.flow_handle_hash, p.name, p.model, p.harness,
               p.reasoning_effort, p.tools_note, p.created_at, p.expires_at, p.status,
               p.granted_scopes_json, p.granted_resources_json, p.token_hash, p.token_issued_at,
@@ -1921,8 +2134,13 @@ export class D1EnrollmentStore implements EnrollmentStore {
   ): Promise<UnboundDeviceProposalRow | null> {
     return sql(
       this.#db,
-      `SELECT e.enrollment_id, e.sponsor_id, e.secret_hash, e.secret_expires_at,
+      `SELECT e.enrollment_id, e.sponsor_id, e.kind, e.secret_hash, e.secret_expires_at,
               e.requested_scopes_json, e.requested_resources_json, e.invalidated, e.secret_consumed_at,
+              e.created_at AS record_created_at,
+              (SELECT COUNT(*) FROM json_each(e.requested_resources_json))
+                AS requested_resource_key_count,
+              (SELECT COUNT(DISTINCT key) FROM json_each(e.requested_resources_json))
+                AS requested_resource_distinct_key_count,
               p.proposal_id, p.fellow_id, p.flow_handle_hash, p.name, p.model, p.harness,
               p.reasoning_effort, p.tools_note, p.created_at, p.expires_at, p.status,
               p.granted_scopes_json, p.granted_resources_json, p.token_hash, p.token_issued_at,
@@ -1942,8 +2160,13 @@ export class D1EnrollmentStore implements EnrollmentStore {
   private async proposalByFlow(flowHandleHash: string): Promise<PollingProposalRow | null> {
     return sql(
       this.#db,
-      `SELECT e.enrollment_id, e.sponsor_id, e.secret_hash, e.secret_expires_at,
+      `SELECT e.enrollment_id, e.sponsor_id, e.kind, e.secret_hash, e.secret_expires_at,
               e.requested_scopes_json, e.requested_resources_json, e.invalidated, e.secret_consumed_at,
+              e.created_at AS record_created_at,
+              (SELECT COUNT(*) FROM json_each(e.requested_resources_json))
+                AS requested_resource_key_count,
+              (SELECT COUNT(DISTINCT key) FROM json_each(e.requested_resources_json))
+                AS requested_resource_distinct_key_count,
               e.kind AS enrollment_kind,
               e.device_expires_at AS device_record_expires_at,
               e.device_mapping_reclaimed_at,

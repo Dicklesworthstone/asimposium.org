@@ -95,8 +95,10 @@ export type EnrollmentErrorCode =
   | "PAIRING_INVALID"
   | "PROPOSAL_EXPIRED"
   | "PROPOSAL_NOT_PENDING"
+  | "REGISTRATION_BODY_INVALID"
   | "SCOPE_ESCALATION"
   | "SCOPE_NOT_REDUCED"
+  | "SPONSOR_BOOTSTRAP_BODY_INVALID"
   | "TOKEN_ALREADY_ISSUED"
   | "WRONG_PRINCIPAL";
 
@@ -1435,6 +1437,18 @@ export class InMemoryEnrollmentStore implements EnrollmentStore {
       const proposal = record?.proposal;
       if (record === undefined || proposal === undefined) throw new EnrollmentError("FLOW_INVALID");
       if (proposal.tokenHash !== undefined) return { kind: "already-issued" };
+      if (
+        proposal.status === "pending" &&
+        (attempt.now >= proposal.expiresAt ||
+          (record.requestedResources.fellowGrantExpiresAt !== undefined &&
+            attempt.now >= record.requestedResources.fellowGrantExpiresAt))
+      ) {
+        const decision: PollDecision = { kind: "expired" };
+        const idempotency = await attempt.replayFor?.(decision);
+        proposal.status = "expired";
+        this.commitIdempotency(idempotency);
+        return decision;
+      }
       if (record.kind === "device") {
         const deviceCodeExpiresAt = this.#deviceCodeExpiresAtByEnrollment.get(record.enrollmentId);
         if (deviceCodeExpiresAt === undefined) throw new EnrollmentError("FLOW_INVALID");
@@ -1449,18 +1463,12 @@ export class InMemoryEnrollmentStore implements EnrollmentStore {
           throw new EnrollmentError("FLOW_INVALID");
         }
         if (attempt.now >= deviceCodeExpiresAt) {
-          const decision: PollDecision = { kind: "expired" };
-          const idempotency = await attempt.replayFor?.(decision);
-          this.commitIdempotency(idempotency);
-          return decision;
+          // The short device-code mapping expired, but the durable proposal
+          // remains pending until its own 24-hour boundary. Do not consume the
+          // stable terminal replay key here: doing so would mask the later
+          // proposal-expiry transition for another full replay-retention day.
+          return { kind: "expired" };
         }
-      }
-      if (proposal.status === "pending" && attempt.now >= proposal.expiresAt) {
-        const decision: PollDecision = { kind: "expired" };
-        const idempotency = await attempt.replayFor?.(decision);
-        proposal.status = "expired";
-        this.commitIdempotency(idempotency);
-        return decision;
       }
       if (proposal.status === "pending") {
         const pacing = nextEnrollmentPollPacing({
@@ -1849,7 +1857,7 @@ export class EnrollmentService {
       throw new EnrollmentError(rejectedName, await this.#store.availabilitySuggestions(name));
     }
     const parsed = FellowRegistrationRequestSchema.safeParse(rawRequest);
-    if (!parsed.success) throw new EnrollmentError("NAME_INVALID");
+    if (!parsed.success) throw new EnrollmentError("REGISTRATION_BODY_INVALID");
     const flowHandle = generateVersionedSecret("flow_v1", this.#random);
     const flowHandleHash = await sha256Hex(flowHandle);
     const result = { flowHandle };

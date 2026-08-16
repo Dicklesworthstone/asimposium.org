@@ -705,7 +705,10 @@ describe("S2 to S7 normalized cost receipt", () => {
     expect(start).not.toContain("blocked_snapshot");
     expect(start).toContain("Publish its exact");
     expect(start).toContain("observer");
-    expect(start).toContain("IFS= read -r -t 0.2 value <&8");
+    expect(start).toContain("IFS= read -r -t 0.2 fragment <&8");
+    // biome-ignore lint/suspicious/noTemplateCurlyInString: asserts literal shell source text.
+    expect(start).toContain('value="${value}${fragment}"');
+    expect(start).toContain("S2_PLANT_FRAGMENTED_ARM_TOKEN");
     // biome-ignore lint/suspicious/noTemplateCurlyInString: asserts literal shell source text.
     expect(start).toContain('kill -0 "${owner_pid}"');
     // biome-ignore lint/suspicious/noTemplateCurlyInString: asserts literal shell source text.
@@ -818,6 +821,11 @@ const S2_SHELL_REGRESSION_MODES = [
   "term-resistant-release",
   "watchdog-uncertainty",
   "watchdog-self-retire",
+  "watchdog-publication-delay",
+  "watchdog-startup-diagnostics",
+  "watchdog-post-arm-abort",
+  "watchdog-pre-publication-exit",
+  "watchdog-checkpoint-corruption",
   "parent-loss",
   "owner-loss-uncertain",
   "unowned-refusal",
@@ -826,6 +834,8 @@ const S2_SHELL_REGRESSION_MODES = [
   "lsof-scan-failure",
   "legacy-cleanup-failure",
   "legacy-leader-loss",
+  "legacy-leader-loss-transient-ps",
+  "legacy-leader-loss-transient-post-arm-ps",
   "redaction",
   "provenance",
   "indexed-phase-status",
@@ -1174,6 +1184,56 @@ describe("registered S2 shell and lifecycle regressions", () => {
           if (mode === "legacy-leader-loss") {
             expect(run.stdout).toContain('"code":"S2_LEGACY_SUPERVISOR_INSPECTION_UNCERTAIN"');
             expect(run.stdout).toContain('"action":"kill-exact-residual-group"');
+          } else if (mode === "legacy-leader-loss-transient-ps") {
+            const transientProof = ndjsonRecords(run).find(
+              (entry) => entry.assertion === "payload-ready-in-exact-group-with-retained-state-fd",
+            );
+            expect(transientProof).toMatchObject({
+              detached_ps_one_shot_consumed: true,
+              detached_ps_one_shot_stage: "pre-arm",
+              payload_in_exact_group: true,
+              state_fd_held: true,
+            });
+            expect(transientProof?.pre_release_capture_uncertain_samples).toBeGreaterThanOrEqual(1);
+            const terminalProof = ndjsonRecords(run).find(
+              (entry) =>
+                entry.scenario ===
+                "legacy-term-leader-loss-bounds-inspection-publishes-uncertainty-and-kills-only-exact-residual-group",
+            );
+            expect(terminalProof).toMatchObject({
+              detached_ps_one_shot_consumed: true,
+              detached_ps_one_shot_stage: "pre-arm",
+              cleanup_action: "kill-exact-residual-group",
+              reproduce:
+                "S2_SHELL_REGRESSION_TEST=legacy-leader-loss-transient-ps scripts/e2e-s2-krater.sh",
+            });
+            expect(run.stdout).toContain('"code":"S2_LEGACY_SUPERVISOR_INSPECTION_UNCERTAIN"');
+            expect(run.stdout).toContain('"action":"kill-exact-residual-group"');
+          } else if (mode === "legacy-leader-loss-transient-post-arm-ps") {
+            const transientProof = ndjsonRecords(run).find(
+              (entry) => entry.assertion === "payload-ready-in-exact-group-with-retained-state-fd",
+            );
+            expect(transientProof).toMatchObject({
+              detached_ps_one_shot_consumed: true,
+              detached_ps_one_shot_stage: "post-arm",
+              payload_in_exact_group: true,
+              state_fd_held: true,
+            });
+            expect(transientProof?.post_arm_inspection_uncertain_samples).toBeGreaterThanOrEqual(1);
+            const terminalProof = ndjsonRecords(run).find(
+              (entry) =>
+                entry.scenario ===
+                "legacy-term-leader-loss-bounds-inspection-publishes-uncertainty-and-kills-only-exact-residual-group",
+            );
+            expect(terminalProof).toMatchObject({
+              detached_ps_one_shot_consumed: true,
+              detached_ps_one_shot_stage: "post-arm",
+              cleanup_action: "kill-exact-residual-group",
+              reproduce:
+                "S2_SHELL_REGRESSION_TEST=legacy-leader-loss-transient-post-arm-ps scripts/e2e-s2-krater.sh",
+            });
+            expect(run.stdout).toContain('"code":"S2_LEGACY_SUPERVISOR_INSPECTION_UNCERTAIN"');
+            expect(run.stdout).toContain('"action":"kill-exact-residual-group"');
           } else if (mode === "persistent-pre-release-helper") {
             expect(run.stdout).toContain('"pre_release_resample_attempts":40');
             expect(run.stdout).toContain('"pre_release_accepted_samples":0');
@@ -1237,6 +1297,112 @@ describe("registered S2 shell and lifecycle regressions", () => {
           expect(run.stdout).not.toContain('"action":"kill-exact-residual-group"');
           expect(run.stdout).not.toContain(
             "legacy-term-leader-loss-bounds-inspection-publishes-uncertainty-and-kills-only-exact-residual-group",
+          );
+        },
+        () => liveS2LifecycleProcesses(runId),
+      );
+    },
+    S2_SHELL_REGRESSION_TEST_TIMEOUT_MS,
+  );
+
+  test(
+    "PLANTED: a legacy supervisor exit after arm reports its exact publication checkpoint",
+    () => {
+      const runId = `s2u-${randomUUID().replaceAll("-", "").slice(0, 24)}`;
+      const run = runHarnessSync(
+        {
+          S2_RUN_ID: runId,
+          S2_SHELL_REGRESSION_TEST: "legacy-leader-loss",
+          S2_PLANT_SUPERVISOR_EXIT_BEFORE_WATCHDOG_PUBLICATION: "1",
+        },
+        S2_SHELL_REGRESSION_WATCHDOG_MS,
+      );
+      assertS2RunThenScanForSurvivors(
+        "legacy-start-pre-publication-exit",
+        () => {
+          expect(run.exitCode).toBe(1);
+          expect(ndjsonRecords(run)).toContainEqual(
+            expect.objectContaining({
+              suite: "s2-krater-shell",
+              status: "fail",
+              code: "S2_LEGACY_LEADER_LOSS_START_FAILED",
+              start_failure_stage: "watchdog-publication",
+              arm_consumed: true,
+              spawn_attempted: true,
+              watchdog_pid_published: false,
+              supervisor_exit_status: 125,
+            }),
+          );
+        },
+        () => liveS2LifecycleProcesses(runId),
+      );
+    },
+    S2_SHELL_REGRESSION_TEST_TIMEOUT_MS,
+  );
+
+  test(
+    "PLANTED: a pre-publication TERM is distinct from gate and checkpoint failure",
+    () => {
+      const runId = `s2u-${randomUUID().replaceAll("-", "").slice(0, 24)}`;
+      const run = runHarnessSync(
+        {
+          S2_RUN_ID: runId,
+          S2_SHELL_REGRESSION_TEST: "legacy-leader-loss",
+          S2_PLANT_SUPERVISOR_SIGNAL_AFTER_ARM: "TERM",
+        },
+        S2_SHELL_REGRESSION_WATCHDOG_MS,
+      );
+      assertS2RunThenScanForSurvivors(
+        "legacy-start-pre-publication-term",
+        () => {
+          expect(run.exitCode).toBe(1);
+          expect(ndjsonRecords(run)).toContainEqual(
+            expect.objectContaining({
+              suite: "s2-krater-shell",
+              status: "fail",
+              code: "S2_LEGACY_LEADER_LOSS_START_FAILED",
+              start_failure_stage: "watchdog-arm-ack",
+              startup_phase: "signal-term",
+              arm_consumed: false,
+              spawn_attempted: false,
+              watchdog_pid_published: false,
+              supervisor_exit_status: 143,
+            }),
+          );
+        },
+        () => liveS2LifecycleProcesses(runId),
+      );
+    },
+    S2_SHELL_REGRESSION_TEST_TIMEOUT_MS,
+  );
+
+  test(
+    "PLANTED: a wrong-PID launch sidecar is never reported as a completed checkpoint",
+    () => {
+      const runId = `s2u-${randomUUID().replaceAll("-", "").slice(0, 24)}`;
+      const run = runHarnessSync(
+        {
+          S2_RUN_ID: runId,
+          S2_SHELL_REGRESSION_TEST: "legacy-leader-loss",
+          S2_PLANT_WATCHDOG_CHECKPOINT_CORRUPTION: "wrong-pid",
+        },
+        S2_SHELL_REGRESSION_WATCHDOG_MS,
+      );
+      assertS2RunThenScanForSurvivors(
+        "legacy-start-wrong-pid-checkpoint",
+        () => {
+          expect(run.exitCode).toBe(1);
+          expect(ndjsonRecords(run)).toContainEqual(
+            expect.objectContaining({
+              suite: "s2-krater-shell",
+              status: "fail",
+              code: "S2_LEGACY_LEADER_LOSS_START_FAILED",
+              start_failure_stage: "watchdog-publication",
+              arm_consumed: true,
+              spawn_attempted: false,
+              watchdog_pid_published: false,
+              supervisor_exit_status: 125,
+            }),
           );
         },
         () => liveS2LifecycleProcesses(runId),

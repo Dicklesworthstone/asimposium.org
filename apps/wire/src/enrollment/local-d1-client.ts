@@ -6,7 +6,7 @@ if (typeof origin !== "string" || !/^http:\/\/127\.0\.0\.1:\d+$/.test(origin)) {
   process.exitCode = 1;
 } else {
   const startedAt = performance.now();
-  const sponsorId = "local-sponsor-s1";
+  const sponsorId = "usr_local_sponsor_s1";
   const fetchTimeoutMs = 5_000;
 
   const localFetch = (input: string, init: RequestInit = {}): Promise<Response> =>
@@ -440,7 +440,14 @@ if (typeof origin !== "string" || !/^http:\/\/127\.0\.0\.1:\d+$/.test(origin)) {
       { sponsor_id: sponsorId, enrollment_id: rollbackMintBody.enrollmentId },
       { "idempotency-key": "local-decision-rollback-1" },
     );
-    if (failedApproval.status !== 400) throw new Error("rollback-decision-failure");
+    const failedApprovalBody = (await failedApproval.json()) as { code?: unknown };
+    if (failedApproval.status !== 400 || failedApprovalBody.code !== "NAME_TAKEN") {
+      throw new Error(
+        failedApproval.status === 503
+          ? "rollback-decision-operational-failure"
+          : "rollback-decision-unexpected-result",
+      );
+    }
     const recoveredDeny = await post(
       "/__s1/approve",
       {

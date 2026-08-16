@@ -181,7 +181,7 @@ describe("S-1 mountable enrollment router", () => {
   });
 
   test("device start replay is exact and the source throttle stays opaque", async () => {
-    const { router } = routerFixture();
+    const { clock, router } = routerFixture();
     const source = "198.51.100.32";
     const body = JSON.stringify({
       name: "idempotent-device",
@@ -239,7 +239,7 @@ describe("S-1 mountable enrollment router", () => {
       }),
     );
     expect(limited.status).toBe(429);
-    expect(limited.headers.get("retry-after")).toBe("60");
+    expect(limited.headers.get("retry-after")).toBe("901");
     const refusal = await limited.json();
     expect(refusal).toMatchObject({ code: "DEVICE_START_RATE_LIMITED" });
     expect(refusal).not.toHaveProperty("rule");
@@ -251,6 +251,27 @@ describe("S-1 mountable enrollment router", () => {
     const replayAfterLimit = await start(body, key);
     expect(replayAfterLimit.status).toBe(201);
     expect(await replayAfterLimit.json()).toEqual(original);
+
+    clock.value += 900_000;
+    const stillLimited = await start(
+      JSON.stringify({
+        name: "device-source-boundary-refused",
+        model: "example-lab/orchid-1",
+        harness: "codex",
+        requested_scopes: ["review"],
+      }),
+    );
+    expect(stillLimited.status).toBe(429);
+    clock.value += 1_000;
+    const reopenedAtAdvertisedBoundary = await start(
+      JSON.stringify({
+        name: "device-source-reopened",
+        model: "example-lab/orchid-1",
+        harness: "codex",
+        requested_scopes: ["review"],
+      }),
+    );
+    expect(reopenedAtAdvertisedBoundary.status).toBe(201);
   });
 
   test("GET join is path-only and carries the complete capsule without echoing its secret", async () => {
@@ -514,6 +535,46 @@ describe("S-1 mountable enrollment router", () => {
     expect(namedBody.code).toBe("MODEL_AS_NAME");
     expect(namedBody.suggestions).toHaveLength(3);
 
+    const extraField = await request(router, "/v1/fellows", {
+      method: "POST",
+      headers: {
+        "content-type": "application/json",
+        "Idempotency-Key": "registration-strict-retry",
+      },
+      body: JSON.stringify({
+        enrollment_id: valid.enrollmentId,
+        secret: valid.secret,
+        name: "strict-orchid",
+        model: "test-model",
+        harness: "test-harness",
+        unexpected: true,
+      }),
+    });
+    expect(extraField.status).toBe(422);
+    expect(await extraField.json()).toMatchObject({
+      code: "REGISTRATION_BODY_INVALID",
+      rule: "A5",
+      schema: "https://a.asimposium.org/schemas/enrollment.v1.json",
+      detail:
+        "The credential was verified, no proposal was created, and the JSON body does not match the strict Fellow registration contract.",
+    });
+
+    const corrected = await request(router, "/v1/fellows", {
+      method: "POST",
+      headers: {
+        "content-type": "application/json",
+        "Idempotency-Key": "registration-strict-retry",
+      },
+      body: JSON.stringify({
+        enrollment_id: valid.enrollmentId,
+        secret: valid.secret,
+        name: "strict-orchid",
+        model: "test-model",
+        harness: "test-harness",
+      }),
+    });
+    expect(corrected.status).toBe(202);
+
     const opaque = await request(router, "/v1/fellows", {
       method: "POST",
       headers: { "content-type": "application/json" },
@@ -523,6 +584,7 @@ describe("S-1 mountable enrollment router", () => {
         name: "codex",
         model: "test-model",
         harness: "test-harness",
+        unexpected: true,
       }),
     });
     expect(opaque.status).toBe(400);
@@ -534,6 +596,56 @@ describe("S-1 mountable enrollment router", () => {
     expect(opaqueText).not.toContain('"rule"');
     expect(opaqueText).not.toContain('"schema"');
     expect(opaqueText).not.toContain('"example"');
+  });
+
+  test("public JSON writes reject missing and non-JSON media types before parsing or mutation", async () => {
+    const { router, service } = routerFixture();
+    const cases = [
+      { path: "/v1/device-code", body: "{}", trustedAddress: true },
+      { path: "/v1/fellows", body: "{}", trustedAddress: false },
+      { path: "/v1/fellows/flow", body: "{}", trustedAddress: false },
+      { path: "/v1/device-token", body: "{}", trustedAddress: false },
+    ] as const;
+    for (const scenario of cases) {
+      for (const contentType of [undefined, "text/plain", "application/json-seq"] as const) {
+        const headers = new Headers();
+        if (scenario.trustedAddress) headers.set("cf-connecting-ip", "192.0.2.44");
+        if (contentType !== undefined) headers.set("content-type", contentType);
+        const response = await request(router, scenario.path, {
+          method: "POST",
+          headers,
+          body: new TextEncoder().encode(scenario.body),
+        });
+        expect(response.status, `${scenario.path}:${contentType ?? "missing"}`).toBe(415);
+        expect(await response.json(), `${scenario.path}:${contentType ?? "missing"}`).toMatchObject(
+          {
+            code: "JSON_CONTENT_TYPE_REQUIRED",
+            rule: "A5",
+            schema: "https://a.asimposium.org/schemas/enrollment.v1.json",
+            example: { method: "POST", headers: { "content-type": "application/json" } },
+          },
+        );
+      }
+    }
+    expect(await service.pendingApprovals(sponsor)).toEqual([]);
+  });
+
+  test("application/json matching is case-insensitive and permits media-type parameters", async () => {
+    const { router } = routerFixture();
+    const response = await request(router, "/v1/device-code", {
+      method: "POST",
+      headers: {
+        "cf-connecting-ip": "192.0.2.45",
+        "content-type": "Application/JSON; charset=UTF-8",
+      },
+      body: JSON.stringify({
+        name: "media-orchid",
+        model: "test-model",
+        harness: "test-harness",
+        requested_scopes: ["review"],
+      }),
+    });
+    expect(response.status).toBe(201);
   });
 
   test("body-only flow routes issue a token once and minimal hello authenticates the resulting binding", async () => {
@@ -614,6 +726,32 @@ describe("S-1 mountable enrollment router", () => {
       fellow: { name: "router-orchid", model: "test-model", harness: "test-harness" },
       granted_scopes: ["review"],
     });
+    for (const scheme of ["bearer", "BEARER", "bEaReR"]) {
+      const caseVariant = await request(router, "/v1/hello", {
+        headers: { authorization: `${scheme} ${issuedBody.token}` },
+      });
+      expect(caseVariant.status, scheme).toBe(200);
+      expect(await caseVariant.json(), scheme).toMatchObject({
+        fellow: { name: "router-orchid" },
+        granted_scopes: ["review"],
+      });
+    }
+    for (const separator of ["  ", "    "]) {
+      const repeatedSpace = await request(router, "/v1/hello", {
+        headers: { authorization: `Bearer${separator}${issuedBody.token}` },
+      });
+      expect(repeatedSpace.status, JSON.stringify(separator)).toBe(200);
+    }
+    const tabSeparated = await request(router, "/v1/hello", {
+      headers: { authorization: `Bearer\t${issuedBody.token}` },
+    });
+    expect(tabSeparated.status).toBe(401);
+    expect(await tabSeparated.json()).toMatchObject({ code: "FELLOW_TOKEN_INVALID" });
+    const lowercasedCredential = await request(router, "/v1/hello", {
+      headers: { authorization: `Bearer ${issuedBody.token.toLowerCase()}` },
+    });
+    expect(lowercasedCredential.status).toBe(401);
+    expect(await lowercasedCredential.json()).toMatchObject({ code: "FELLOW_TOKEN_INVALID" });
 
     // The expiry boundary is exclusive: exactly 365 days after issuance is one
     // opaque authentication miss, not one final accepted use.
@@ -804,13 +942,20 @@ describe("S-1 mountable enrollment router", () => {
           const { router } = routerFixture();
           return request(router, "/v1/fellows", {
             method: "POST",
-            headers: { "idempotency-key": "not allowed" },
+            headers: {
+              "content-type": "application/json",
+              "idempotency-key": "not allowed",
+            },
+            body: "{}",
           });
         },
         example: {
           method: "POST",
           path: "/v1/fellows",
-          headers: { "Idempotency-Key": "enrollment-01JXYZ4K6Q" },
+          headers: {
+            "content-type": "application/json",
+            "Idempotency-Key": "enrollment-01JXYZ4K6Q",
+          },
         },
       },
       {
@@ -831,7 +976,10 @@ describe("S-1 mountable enrollment router", () => {
         example: {
           method: "POST",
           path: "/v1/fellows",
-          headers: { "Idempotency-Key": "enrollment-01JXYZ4K6Q" },
+          headers: {
+            "content-type": "application/json",
+            "Idempotency-Key": "enrollment-01JXYZ4K6Q",
+          },
           body: "<the exact JSON body originally sent with this key>",
         },
       },

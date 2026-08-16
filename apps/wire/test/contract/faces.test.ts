@@ -261,6 +261,13 @@ describe("face wire format", () => {
       "/v1/%68ello",
       "/join/ASIMP-EN-01JXYZ4K6Q%2Fstill-one-segment",
       "/v1/enrollments/ASIMP-EN-01JXYZ4K6Q%2Fstill-one-segment/decision",
+      "/join/%ZZ",
+      "/%6aoin/%ZZ",
+      "/%6Aoin/%C0",
+      "/v1/enrollments/%ZZ/decision",
+      "/v1/enrollments/%C0/decision",
+      "/v1/%65nrollments/%ZZ/decision",
+      "/%76%31/enrollments/%C0/%64ecision",
     ];
 
     for (const path of paths) {

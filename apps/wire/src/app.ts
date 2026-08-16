@@ -218,7 +218,31 @@ function isEnrollmentPath(pathname: string): boolean {
     if (rawSegments.shift() !== "") return false;
     segments = rawSegments.map((segment) => decodeURIComponent(segment));
   } catch {
-    return false;
+    // A malformed dynamic value is still owned by the dynamic enrollment
+    // route, whose validator returns the route-specific safe refusal. Match
+    // only the two structural shapes here. Decode each required static slot
+    // independently so a valid encoded spelling such as `%6aoin` cannot be
+    // preempted merely because the separate dynamic slot is malformed.
+    const rawSegments = pathname.split("/");
+    if (rawSegments.shift() !== "") return false;
+    const staticSlotEquals = (raw: string | undefined, expected: string): boolean => {
+      if (raw === undefined) return false;
+      try {
+        return decodeURIComponent(raw) === expected;
+      } catch {
+        return false;
+      }
+    };
+    return (
+      (rawSegments.length === 2 &&
+        staticSlotEquals(rawSegments[0], "join") &&
+        rawSegments[1] !== "") ||
+      (rawSegments.length === 4 &&
+        staticSlotEquals(rawSegments[0], "v1") &&
+        staticSlotEquals(rawSegments[1], "enrollments") &&
+        rawSegments[2] !== "" &&
+        staticSlotEquals(rawSegments[3], "decision"))
+    );
   }
   const decodedPath = `/${segments.join("/")}`;
   const exactStaticPath =

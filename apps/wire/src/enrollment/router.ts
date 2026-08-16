@@ -8,6 +8,7 @@ import {
   MintEnrollmentResponseSchema,
   type ProblemCode,
   ProblemDocumentSchema,
+  SponsorBootstrapRequestSchema,
   SponsorBootstrapResponseSchema,
   SponsorEnrollmentDecisionResponseSchema,
   SponsorEnrollmentDecisionSchema,
@@ -49,11 +50,24 @@ function requestPath(request: Request): string {
   return new URL(request.url).pathname;
 }
 
+function requestEndsInDecodedSegment(request: Request, expected: string): boolean {
+  const finalSegment = requestPath(request).split("/").at(-1);
+  if (finalSegment === undefined) return false;
+  try {
+    return decodeURIComponent(finalSegment) === expected;
+  } catch {
+    return false;
+  }
+}
+
 function idempotencyHeaderExample(request: Request): Record<string, unknown> {
   return {
     method: request.method,
     path: requestPath(request),
-    headers: { "Idempotency-Key": "enrollment-01JXYZ4K6Q" },
+    headers: {
+      "content-type": "application/json",
+      "Idempotency-Key": "enrollment-01JXYZ4K6Q",
+    },
   };
 }
 
@@ -112,6 +126,29 @@ function problem(
 
 function hasQuery(request: Request): boolean {
   return new URL(request.url).search !== "";
+}
+
+function hasJsonContentType(request: Request): boolean {
+  const contentType = request.headers.get("content-type");
+  if (contentType === null) return false;
+  const [mediaType] = contentType.split(";", 1);
+  return mediaType?.trim().toLowerCase() === "application/json";
+}
+
+function jsonContentTypeRequiredResponse(path: string, body: Record<string, unknown>): Response {
+  return problem(
+    415,
+    "JSON_CONTENT_TYPE_REQUIRED",
+    "JSON Content-Type required",
+    "This write accepts a JSON document only when its media type is application/json.",
+    "Set Content-Type: application/json and send the documented JSON body.",
+    enrollmentContractFields({
+      method: "POST",
+      path,
+      headers: { "content-type": "application/json" },
+      body,
+    }),
+  );
 }
 
 type CapsuleFace = "json" | "html" | "markdown";
@@ -243,7 +280,38 @@ function enrollmentErrorResponse(error: EnrollmentError, request: Request): Resp
     case "MODEL_AS_NAME":
     case "HARNESS_AS_NAME":
     case "NAME_RESERVED":
+      return problem(
+        422,
+        error.code,
+        "Fellow name needs revision",
+        "The requested public Fellow name cannot be used.",
+        "Choose one of `suggestions` or supply another lowercase, hyphen-separated Fellow name.",
+        {
+          rule: "P-EN-NAME",
+          schema: ENROLLMENT_SCHEMA_URL,
+          example: { name: "orchid-vector" },
+          suggestions: error.suggestions,
+        },
+      );
     case "NAME_TAKEN":
+      if (requestEndsInDecodedSegment(request, "decision")) {
+        return problem(
+          422,
+          error.code,
+          "Fellow name is no longer available",
+          "Another approved Fellow already owns the proposed public name.",
+          "Deny this proposal, then have the agent start a new enrollment with one of `suggestions` or another available name; a sponsor decision cannot rename it.",
+          {
+            rule: "P-EN-NAME",
+            schema: ENROLLMENT_SCHEMA_URL,
+            example: {
+              enrollment_id: "ASIMP-EN-01JXYZ4K6Q",
+              decision: "deny",
+            },
+            suggestions: error.suggestions,
+          },
+        );
+      }
       return problem(
         422,
         error.code,
@@ -263,7 +331,7 @@ function enrollmentErrorResponse(error: EnrollmentError, request: Request): Resp
         error.code,
         "Principal cannot perform this enrollment action",
         "This identity is not authorized for the requested enrollment action.",
-        "Use the sponsor identity for a sponsor decision or a valid Fellow bearer token for hello.",
+        "Refresh the sponsor's pending proposal list and act only on a current card. Fellow-only routes require a valid Fellow bearer token.",
       );
     case "PROPOSAL_NOT_PENDING":
     case "PROPOSAL_EXPIRED":
@@ -312,6 +380,30 @@ function enrollmentErrorResponse(error: EnrollmentError, request: Request): Resp
         "Send the eight-character user code in its documented 4-4 form, then sign those exact bytes.",
         enrollmentContractFields({ user_code: "ABCD-2345" }),
       );
+    case "REGISTRATION_BODY_INVALID":
+      return problem(
+        422,
+        error.code,
+        "Fellow registration body is invalid",
+        "The credential was verified, no proposal was created, and the JSON body does not match the strict Fellow registration contract.",
+        "Correct the body, then reuse the same fragment secret and Idempotency-Key. Send only the documented enrollment id, proposed name, declared runtime, and optional declared runtime fields.",
+        enrollmentContractFields({
+          enrollment_id: "ASIMP-EN-01JXYZ4K6Q",
+          secret: FRAGMENT_VALUE_PLACEHOLDER,
+          name: "orchid-vector",
+          model: "example-lab/orchid-1",
+          harness: "codex",
+        }),
+      );
+    case "SPONSOR_BOOTSTRAP_BODY_INVALID":
+      return problem(
+        422,
+        error.code,
+        "Sponsor bootstrap body is invalid",
+        "The signed JSON body is not the strict empty sponsor-bootstrap object.",
+        "Send exactly `{}` and sign those two bytes with the sponsor service envelope.",
+        enrollmentContractFields({}),
+      );
     case "DEVICE_CODE_UNKNOWN":
       return problem(
         404,
@@ -320,14 +412,17 @@ function enrollmentErrorResponse(error: EnrollmentError, request: Request): Resp
         "No pending device proposal matches that user code.",
         "Check the code with the agent's operator. Codes expire thirty minutes after they are shown.",
       );
-    case "DEVICE_LOOKUP_LOCKED":
-      return problem(
+    case "DEVICE_LOOKUP_LOCKED": {
+      const response = problem(
         429,
         "DEVICE_LOOKUP_LOCKED",
         "Too many failed code attempts",
         "Several recent user-code lookups failed, so code entry is locked for a while.",
-        "Wait fifteen minutes before trying another code.",
+        "Wait at least fifteen minutes and one second before trying another code.",
       );
+      response.headers.set("retry-after", "901");
+      return response;
+    }
     case "DEVICE_START_RATE_LIMITED": {
       const response = problem(
         429,
@@ -338,7 +433,7 @@ function enrollmentErrorResponse(error: EnrollmentError, request: Request): Resp
       );
       // A fixed coarse retry hint helps a well-behaved client without exposing
       // the bucket threshold or the precise age of another attempt.
-      response.headers.set("retry-after", "60");
+      response.headers.set("retry-after", "901");
       return response;
     }
     case "IDEMPOTENCY_CONFLICT":
@@ -509,8 +604,10 @@ function bearerToken(request: Request): string | undefined {
   if (authorization === null) return undefined;
   // Bound before hashing: bearer input is untrusted header data and a large
   // value must not create avoidable hashing work or a diagnostic surface.
-  const match = /^Bearer (asimp_ag_[0-9A-HJKMNP-TV-Z]{26}_[A-Za-z0-9_-]{43})$/.exec(authorization);
-  return match?.[1];
+  const match = /^([A-Za-z]+) +(asimp_ag_[0-9A-HJKMNP-TV-Z]{26}_[A-Za-z0-9_-]{43})$/.exec(
+    authorization,
+  );
+  return match?.[1]?.toLowerCase() === "bearer" ? match[2] : undefined;
 }
 
 function idempotencyOptions(request: Request): { readonly idempotencyKey?: string } | Response {
@@ -654,6 +751,14 @@ export function createEnrollmentRouter(options: EnrollmentRouterOptions): Hono {
         }),
       );
     }
+    if (!hasJsonContentType(c.req.raw)) {
+      return jsonContentTypeRequiredResponse("/v1/device-code", {
+        name: "orchid-vector",
+        model: "example-lab/orchid-1",
+        harness: "codex",
+        requested_scopes: ["review"],
+      });
+    }
     const trustedClientAddress = trustedDeviceClientAddress(c.req.raw);
     if (trustedClientAddress === undefined) return enrollmentUnavailableResponse();
     const idempotency = idempotencyOptions(c.req.raw);
@@ -697,6 +802,15 @@ export function createEnrollmentRouter(options: EnrollmentRouterOptions): Hono {
         }),
       );
     }
+    if (!hasJsonContentType(c.req.raw)) {
+      return jsonContentTypeRequiredResponse("/v1/fellows", {
+        enrollment_id: "ASIMP-EN-01JXYZ4K6Q",
+        secret: FRAGMENT_VALUE_PLACEHOLDER,
+        name: "orchid-vector",
+        model: "example-lab/orchid-1",
+        harness: "codex",
+      });
+    }
     try {
       const idempotency = idempotencyOptions(c.req.raw);
       if (idempotency instanceof Response) return idempotency;
@@ -730,6 +844,11 @@ export function createEnrollmentRouter(options: EnrollmentRouterOptions): Hono {
           body: { flow_handle: "<flow handle from the claim response>" },
         }),
       );
+    }
+    if (!hasJsonContentType(request)) {
+      return jsonContentTypeRequiredResponse(route, {
+        flow_handle: "<flow handle from the claim response>",
+      });
     }
     try {
       const idempotency = idempotencyOptions(request);
@@ -966,6 +1085,11 @@ function mountSponsorRoutes(app: Hono, options: EnrollmentRouterOptions): void {
     if (hasQuery(c.req.raw)) {
       return sponsorPathOnlyResponse(c.req.raw, "/v1/enrollments");
     }
+    if (!hasJsonContentType(c.req.raw)) {
+      return jsonContentTypeRequiredResponse("/v1/enrollments", {
+        requested_scopes: ["promote"],
+      });
+    }
     const authenticated = await requireSponsor(
       options,
       c.req.raw,
@@ -1037,6 +1161,12 @@ function mountSponsorRoutes(app: Hono, options: EnrollmentRouterOptions): void {
     const enrollmentId = c.req.param("enrollmentId");
     if (!EnrollmentIdSchema.safeParse(enrollmentId).success) {
       return enrollmentIdInvalidResponse();
+    }
+    if (!hasJsonContentType(c.req.raw)) {
+      return jsonContentTypeRequiredResponse("/v1/enrollments/ASIMP-EN-01JXYZ4K6Q/decision", {
+        enrollment_id: "ASIMP-EN-01JXYZ4K6Q",
+        decision: "approve",
+      });
     }
     const authenticated = await requireSponsor(
       options,
@@ -1110,6 +1240,9 @@ function mountSponsorRoutes(app: Hono, options: EnrollmentRouterOptions): void {
     if (hasQuery(c.req.raw)) {
       return sponsorPathOnlyResponse(c.req.raw, "/v1/sponsors/bootstrap");
     }
+    if (!hasJsonContentType(c.req.raw)) {
+      return jsonContentTypeRequiredResponse("/v1/sponsors/bootstrap", {});
+    }
     const authenticated = await requireSponsor(
       options,
       c.req.raw,
@@ -1120,6 +1253,21 @@ function mountSponsorRoutes(app: Hono, options: EnrollmentRouterOptions): void {
     const principal = authenticated.principal;
     if (principal.type !== "sponsor") {
       return enrollmentErrorResponse(new EnrollmentError("WRONG_PRINCIPAL"), c.req.raw);
+    }
+    let bootstrapBody: unknown;
+    try {
+      bootstrapBody = verifiedJson(authenticated.rawBody);
+    } catch {
+      return enrollmentErrorResponse(
+        new EnrollmentError("SPONSOR_BOOTSTRAP_BODY_INVALID"),
+        c.req.raw,
+      );
+    }
+    if (!SponsorBootstrapRequestSchema.safeParse(bootstrapBody).success) {
+      return enrollmentErrorResponse(
+        new EnrollmentError("SPONSOR_BOOTSTRAP_BODY_INVALID"),
+        c.req.raw,
+      );
     }
     try {
       const result = await options.service.bootstrapSponsor(principal);
@@ -1144,6 +1292,12 @@ function mountSponsorRoutes(app: Hono, options: EnrollmentRouterOptions): void {
   // W3.5: the sponsor's entry into the device flow. The user code is the
   // lookup key; the answer is the same approval card the console renders.
   app.post("/v1/device-lookup", async (c) => {
+    if (hasQuery(c.req.raw)) {
+      return sponsorPathOnlyResponse(c.req.raw, "/v1/device-lookup");
+    }
+    if (!hasJsonContentType(c.req.raw)) {
+      return jsonContentTypeRequiredResponse("/v1/device-lookup", { user_code: "ABCD-2345" });
+    }
     const authenticated = await requireSponsor(
       options,
       c.req.raw,

@@ -249,6 +249,12 @@ describe("sponsor enrollment routes", () => {
         path: "/v1/enrollments/ASIMP-EN-0000000000/decision",
         body: "{}",
       },
+      {
+        method: "POST",
+        path: "/v1/device-lookup",
+        examplePath: "/v1/device-lookup",
+        body: "{}",
+      },
       { method: "GET", path: "/v1/fellows" },
     ] as const;
 
@@ -256,6 +262,9 @@ describe("sponsor enrollment routes", () => {
       const response = await h.app.fetch(
         new Request(`${origin}${scenario.path}`, {
           method: scenario.method,
+          ...(scenario.method === "POST"
+            ? { headers: { "content-type": "application/json" } }
+            : {}),
           ...("body" in scenario ? { body: scenario.body } : {}),
         }),
       );
@@ -287,11 +296,50 @@ describe("sponsor enrollment routes", () => {
       >;
       const h = await harness({ verifiedSponsor });
       const response = await h.app.fetch(
-        new Request(`${origin}/v1/enrollments`, { method: "POST", body: "{}" }),
+        new Request(`${origin}/v1/enrollments`, {
+          method: "POST",
+          headers: { "content-type": "application/json" },
+          body: "{}",
+        }),
       );
       expect(response.status).toBe(503);
       expect(await response.json()).toMatchObject({ code: "SPONSOR_AUTH_UNAVAILABLE" });
     }
+  });
+
+  test("sponsor JSON writes reject missing and non-JSON media types before authentication", async () => {
+    let sponsorAuthCalls = 0;
+    const h = await harness({
+      verifiedSponsor: async () => {
+        sponsorAuthCalls += 1;
+        throw new Error("media-type refusal must precede sponsor authentication");
+      },
+    });
+    const routes = [
+      "/v1/enrollments",
+      "/v1/enrollments/ASIMP-EN-01JXYZ4K6Q/decision",
+      "/v1/sponsors/bootstrap",
+      "/v1/device-lookup",
+    ] as const;
+    for (const route of routes) {
+      for (const contentType of [undefined, "text/plain", "application/json-seq"] as const) {
+        const response = await h.app.fetch(
+          new Request(`${origin}${route}`, {
+            method: "POST",
+            ...(contentType === undefined ? {} : { headers: { "content-type": contentType } }),
+            body: contentType === undefined ? new TextEncoder().encode("{}") : "{}",
+          }),
+        );
+        expect(response.status, `${route}:${contentType ?? "missing"}`).toBe(415);
+        expect(await response.json(), `${route}:${contentType ?? "missing"}`).toMatchObject({
+          code: "JSON_CONTENT_TYPE_REQUIRED",
+          rule: "A5",
+          schema: "https://a.asimposium.org/schemas/enrollment.v1.json",
+          example: { method: "POST", headers: { "content-type": "application/json" } },
+        });
+      }
+    }
+    expect(sponsorAuthCalls).toBe(0);
   });
 
   test("sponsor routes reject unsigned query components before authentication", async () => {
@@ -314,6 +362,18 @@ describe("sponsor enrollment routes", () => {
         path: "/v1/enrollments/ASIMP-EN-0000000000/decision",
         examplePath: "/v1/enrollments/ASIMP-EN-01JXYZ4K6Q/decision",
         body: "{}",
+      },
+      {
+        method: "POST",
+        path: "/v1/sponsors/bootstrap",
+        examplePath: "/v1/sponsors/bootstrap",
+        body: "{}",
+      },
+      {
+        method: "POST",
+        path: "/v1/device-lookup",
+        examplePath: "/v1/device-lookup",
+        body: '{"user_code":"ABCD-2345"}',
       },
       { method: "GET", path: "/v1/fellows", examplePath: "/v1/fellows" },
     ] as const;
@@ -355,6 +415,80 @@ describe("sponsor enrollment routes", () => {
         body: { requested_scopes: ["promote"] },
       },
     });
+  });
+
+  test("a decision-time name collision gives an executable deny-and-remint recovery", async () => {
+    const h = await harness();
+    const first = await mintOne(h);
+    await claimOne(h, first.enrollmentId, first.secret, "collision-orchid");
+    const second = await mintOne(h);
+    await claimOne(h, second.enrollmentId, second.secret, "collision-orchid");
+
+    const approve = async (
+      enrollmentId: string,
+      decisionSegment = "decision",
+    ): Promise<Response> => {
+      const body = JSON.stringify({ enrollment_id: enrollmentId, decision: "approve" });
+      const headers = await h.sign(
+        body,
+        "/v1/enrollments/:enrollmentId/decision",
+        "enrollment.decide",
+      );
+      return h.app.fetch(
+        envelopeRequest(
+          `/v1/enrollments/${enrollmentId}/${decisionSegment}`,
+          headers,
+          "POST",
+          body,
+        ),
+      );
+    };
+
+    expect((await approve(first.enrollmentId)).status).toBe(200);
+    const collision = await approve(second.enrollmentId, "%64ecision");
+    expect(collision.status).toBe(422);
+    expect(await collision.json()).toMatchObject({
+      code: "NAME_TAKEN",
+      suggestions: expect.arrayContaining([expect.any(String)]),
+      example: { enrollment_id: "ASIMP-EN-01JXYZ4K6Q", decision: "deny" },
+    });
+
+    const impossibleRenameBody = JSON.stringify({
+      enrollment_id: second.enrollmentId,
+      decision: "approve",
+      name: "one-suggestion-cannot-go-here",
+    });
+    const impossibleRenameHeaders = await h.sign(
+      impossibleRenameBody,
+      "/v1/enrollments/:enrollmentId/decision",
+      "enrollment.decide",
+    );
+    const impossibleRename = await h.app.fetch(
+      envelopeRequest(
+        `/v1/enrollments/${second.enrollmentId}/decision`,
+        impossibleRenameHeaders,
+        "POST",
+        impossibleRenameBody,
+      ),
+    );
+    expect(impossibleRename.status).toBe(422);
+    expect(await impossibleRename.json()).toMatchObject({ code: "DECISION_BODY_INVALID" });
+
+    const denyBody = JSON.stringify({ enrollment_id: second.enrollmentId, decision: "deny" });
+    const denyHeaders = await h.sign(
+      denyBody,
+      "/v1/enrollments/:enrollmentId/decision",
+      "enrollment.decide",
+    );
+    const denied = await h.app.fetch(
+      envelopeRequest(
+        `/v1/enrollments/${second.enrollmentId}/decision`,
+        denyHeaders,
+        "POST",
+        denyBody,
+      ),
+    );
+    expect(denied.status).toBe(200);
   });
 
   test("the full loop: mint, claim, card, approve, token, hello, fellows", async () => {
@@ -955,18 +1089,29 @@ describe("sponsor enrollment routes", () => {
 
   test("sponsor bootstrap creates the row once and is idempotent after", async () => {
     const h = await harness();
-    const call = async () => {
-      const headers = await h.sign("", "/v1/sponsors/bootstrap", "sponsor.bootstrap", "POST");
-      return h.app.fetch(envelopeRequest("/v1/sponsors/bootstrap", headers, "POST"));
+    const call = async (body: string) => {
+      const headers = await h.sign(body, "/v1/sponsors/bootstrap", "sponsor.bootstrap", "POST");
+      return h.app.fetch(envelopeRequest("/v1/sponsors/bootstrap", headers, "POST", body));
     };
 
-    const first = await call();
+    for (const malformed of ["", "not-json", '{"unexpected":true}']) {
+      const refusal = await call(malformed);
+      expect(refusal.status, malformed).toBe(422);
+      expect(await refusal.json(), malformed).toMatchObject({
+        code: "SPONSOR_BOOTSTRAP_BODY_INVALID",
+        rule: "A5",
+        schema: "https://a.asimposium.org/schemas/enrollment.v1.json",
+        example: {},
+      });
+    }
+
+    const first = await call("{}");
     expect(first.status).toBe(201);
     const created = (await first.json()) as { created: boolean; sponsor_id: string };
     expect(created.created).toBe(true);
     expect(created.sponsor_id).toBe(SPONSOR);
 
-    const second = await call();
+    const second = await call("{}");
     expect(second.status).toBe(200);
     expect(((await second.json()) as { created: boolean }).created).toBe(false);
   });
@@ -1070,6 +1215,7 @@ describe("sponsor enrollment routes", () => {
       envelopeRequest("/v1/device-lookup", headers, "POST", badBody),
     );
     expect(locked.status).toBe(429);
+    expect(locked.headers.get("retry-after")).toBe("901");
     expect(await locked.json()).toMatchObject({ code: "DEVICE_LOOKUP_LOCKED" });
   });
 
