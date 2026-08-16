@@ -1821,6 +1821,7 @@ legacy_reap_leader_lost_group() {
             return 1
           fi
           S2_LEGACY_STOP_REAPED_UNCERTAIN=1
+          S2_LEGACY_STOP_EXACT_RESIDUAL_KILLED=1
           return 1
         fi
         sleep 0.1
@@ -2830,6 +2831,10 @@ run_legacy_phase() {
 
 stop_legacy_worker_or_fail() {
   local stop_status
+  # Keep the exact residual-group KILL proof distinct from a naturally vanished group. Both
+  # outcomes remain non-clean legacy teardown, but only the former may satisfy the planted
+  # leader-loss coverage assertion.
+  S2_LEGACY_STOP_EXACT_RESIDUAL_KILLED=0
   S2_LEGACY_STOP_CONTEXT=1
   if stop_worker; then
     stop_status=0
@@ -4253,7 +4258,7 @@ run_s2_shell_regression_test() {
       stop_status=$?
     fi
     unset S2_LEGACY_REQUIRED_HELD_FILE
-    if [[ ${stop_status} -eq 0 ]]; then
+    if [[ ${stop_status} -eq 0 || "${S2_LEGACY_STOP_EXACT_RESIDUAL_KILLED:-0}" != 1 ]]; then
       assert_no_run_survivors "${S2_STATE_DIR}" "${S2_PORT}" "${S2_STARTED_MARKER}" || return 1
       emit '{"tool":"bash","package":"apps/wire","suite":"s2-krater-shell","status":"fail","code":"S2_LEGACY_LEADER_LOSS_BRANCH_NOT_REACHED","observed":"ordinary-clean-stop","expected":"inspection-uncertain-exact-residual-group","reproduce":"S2_SHELL_REGRESSION_TEST=legacy-leader-loss scripts/e2e-s2-krater.sh"}'
       return 1
