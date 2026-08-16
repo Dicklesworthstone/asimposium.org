@@ -25,7 +25,6 @@ import {
   enrollmentRecoveryConfigurationIsValid,
   enrollmentRecoveryDisposition,
   enrollmentRecoveryFingerprint,
-  enrollmentRecoveryOwner,
   openEnrollmentRecoveryPayload,
   sealEnrollmentRecoveryPayload,
 } from "@/lib/enrollment-recovery";
@@ -34,6 +33,7 @@ import { isCanonicalSponsorId } from "@/lib/sponsor-id";
 import {
   stoaDecideProposal,
   stoaDeviceLookup,
+  stoaEnrollmentRecoveryOwner,
   stoaMintEnrollment,
   stoaPanicSponsor,
   stoaRevokeCredential,
@@ -186,17 +186,22 @@ function lifecycleIntent(
 }
 
 async function recoveryOwnerForSponsor(sponsorId: string): Promise<string | undefined> {
-  const rootHex = process.env.ENROLLMENT_RECOVERY_HMAC_KEY_HEX;
-  if (
-    !enrollmentRecoveryConfigurationIsValid(rootHex, process.env.SERVICE_ENVELOPE_PRIVATE_KEY_HEX)
-  ) {
-    return undefined;
-  }
-  try {
-    return await enrollmentRecoveryOwner(rootHex, sponsorId);
-  } catch {
-    return undefined;
-  }
+  return stoaEnrollmentRecoveryOwner(sponsorId);
+}
+
+/**
+ * A post-signal server read used only to release the client recovery fence.
+ * The response contains the existing opaque recovery digest, never a sponsor
+ * id; an unauthenticated or unconfigured request deliberately releases nothing.
+ */
+export async function reconcileEnrollmentRecoveryOwner(): Promise<
+  { readonly ok: true; readonly recoveryOwner: string | null } | { readonly ok: false }
+> {
+  const session = await auth();
+  if (session?.user === undefined) return { ok: true, recoveryOwner: null };
+  if (!isCanonicalSponsorId(session.user.id)) return { ok: false };
+  const recoveryOwner = await recoveryOwnerForSponsor(session.user.id);
+  return recoveryOwner === undefined ? { ok: false } : { ok: true, recoveryOwner };
 }
 
 async function recoveryOwnerMatchesSponsor(

@@ -2,6 +2,7 @@ import type { Metadata } from "next";
 import type { ReactNode } from "react";
 
 import { SITE } from "@/lib/site";
+import { reconcileEnrollmentRecoveryOwner } from "./console/actions";
 import { EnrollmentRecoverySentinel } from "./enrollment-recovery-sentinel";
 import "./globals.css";
 
@@ -48,7 +49,9 @@ export default function RootLayout({ children }: { children: ReactNode }) {
   return (
     <html lang="en">
       <body className="min-h-screen bg-paper text-ink antialiased">
-        <EnrollmentRecoverySentinel />
+        <EnrollmentRecoverySentinel
+          reconcileEnrollmentRecoveryOwner={reconcileEnrollmentRecoveryOwner}
+        />
         {children}
       </body>
     </html>

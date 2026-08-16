@@ -19,6 +19,7 @@ import {
   stoaPendingProposals,
 } from "@/lib/stoa";
 
+import { EnrollmentRecoveryFence } from "../enrollment-recovery-sentinel";
 import { LifecycleManager, MintCard, ProposalManager } from "./cards";
 
 export const metadata = { title: "Console" };
@@ -78,6 +79,7 @@ export default async function Console({ searchParams }: { searchParams: ConsoleS
   const fellowCursor = requestedFellowCursor((await searchParams).fellow_cursor);
   const session = await auth();
   const who = session?.user?.name ?? session?.user?.email ?? null;
+  const recoveryRenderToken = crypto.randomUUID();
 
   if (!who) {
     return (
@@ -218,58 +220,64 @@ export default async function Console({ searchParams }: { searchParams: ConsoleS
           </p>
         </section>
 
-        <section className="card" aria-labelledby="onboard-title">
-          <h2 className="card-title" id="onboard-title">
-            Onboard an agent
-          </h2>
-          <MintCard
-            key={recoveryOwner ?? "enrollment-writes-unavailable"}
-            configured={writesConfigured && recoveryOwner !== undefined}
-            recoveryOwner={recoveryOwner}
-          />
-          <p className="quiet">
-            An agent that started without a join URL shows you a short code instead; enter it at{" "}
-            <Link href="/approve">/approve</Link>.
-          </p>
-        </section>
-
-        <section className="card" aria-labelledby="proposals-title">
-          <h2 className="card-title" id="proposals-title">
-            Pending proposals
-          </h2>
-          <ProposalManager
-            key={recoveryOwner ?? "enrollment-writes-unavailable"}
-            cards={proposals}
-            hostState={proposalState}
-            writesConfigured={writesConfigured && recoveryOwner !== undefined}
-            recoveryOwner={recoveryOwner}
-          />
-        </section>
-
-        <section className="card" aria-labelledby="fellows-title">
-          <h2 className="card-title" id="fellows-title">
-            Your Fellows
-          </h2>
-          <LifecycleManager
-            key={recoveryOwner ?? "enrollment-writes-unavailable"}
-            fellows={fellows}
-            hostState={fellowState}
-            writesConfigured={writesConfigured && recoveryOwner !== undefined}
-            recoveryOwner={recoveryOwner}
-          />
-          {nextFellowCursor === null ? null : (
+        <EnrollmentRecoveryFence
+          enabled={sponsorId !== undefined}
+          recoveryOwner={recoveryOwner}
+          renderToken={recoveryRenderToken}
+        >
+          <section className="card" aria-labelledby="onboard-title">
+            <h2 className="card-title" id="onboard-title">
+              Onboard an agent
+            </h2>
+            <MintCard
+              key={recoveryOwner ?? "enrollment-writes-unavailable"}
+              configured={writesConfigured && recoveryOwner !== undefined}
+              recoveryOwner={recoveryOwner}
+            />
             <p className="quiet">
-              <Link href={`/console?fellow_cursor=${encodeURIComponent(nextFellowCursor)}`}>
-                Older Fellows →
-              </Link>
+              An agent that started without a join URL shows you a short code instead; enter it at{" "}
+              <Link href="/approve">/approve</Link>.
             </p>
-          )}
-          {fellowCursor === undefined ? null : (
-            <p className="quiet">
-              <Link href="/console">← Newest Fellows</Link>
-            </p>
-          )}
-        </section>
+          </section>
+
+          <section className="card" aria-labelledby="proposals-title">
+            <h2 className="card-title" id="proposals-title">
+              Pending proposals
+            </h2>
+            <ProposalManager
+              key={recoveryOwner ?? "enrollment-writes-unavailable"}
+              cards={proposals}
+              hostState={proposalState}
+              writesConfigured={writesConfigured && recoveryOwner !== undefined}
+              recoveryOwner={recoveryOwner}
+            />
+          </section>
+
+          <section className="card" aria-labelledby="fellows-title">
+            <h2 className="card-title" id="fellows-title">
+              Your Fellows
+            </h2>
+            <LifecycleManager
+              key={recoveryOwner ?? "enrollment-writes-unavailable"}
+              fellows={fellows}
+              hostState={fellowState}
+              writesConfigured={writesConfigured && recoveryOwner !== undefined}
+              recoveryOwner={recoveryOwner}
+            />
+            {nextFellowCursor === null ? null : (
+              <p className="quiet">
+                <Link href={`/console?fellow_cursor=${encodeURIComponent(nextFellowCursor)}`}>
+                  Older Fellows →
+                </Link>
+              </p>
+            )}
+            {fellowCursor === undefined ? null : (
+              <p className="quiet">
+                <Link href="/console">← Newest Fellows</Link>
+              </p>
+            )}
+          </section>
+        </EnrollmentRecoveryFence>
 
         <section className="card" aria-labelledby="planes-title">
           <h2 className="card-title" id="planes-title">

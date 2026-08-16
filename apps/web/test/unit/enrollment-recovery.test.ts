@@ -281,6 +281,7 @@ test("mintJoinUrl returns the exact Stoa authority when revalidation throws, wit
     expires_at: 1_786_000_000,
   });
   let stoaCalls = 0;
+  let ownerChecks = 0;
   let revalidations = 0;
 
   // `mock.module` is process-global and this runner shares one process across
@@ -314,6 +315,11 @@ test("mintJoinUrl returns the exact Stoa authority when revalidation throws, wit
     throw new Error(`${name} must not be called on the mint path`);
   };
   mock.module("@/lib/stoa", () => ({
+    stoaEnrollmentRecoveryOwner: async (candidateSponsorId: string) => {
+      ownerChecks += 1;
+      expect(candidateSponsorId).toBe(sponsorId);
+      return owner;
+    },
     stoaMintEnrollment: async () => {
       stoaCalls += 1;
       return { ok: true, data: authority };
@@ -351,6 +357,7 @@ test("mintJoinUrl returns the exact Stoa authority when revalidation throws, wit
 
   // Non-vacuity: both sides of the composition genuinely ran. Without these a
   // refusal before Stoa would satisfy nothing below and still look green.
+  expect(ownerChecks).toBe(1);
   expect(stoaCalls).toBe(1);
   expect(revalidations).toBe(1);
 

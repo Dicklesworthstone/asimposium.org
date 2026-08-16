@@ -268,7 +268,10 @@ describe("sponsor console trust boundary", () => {
     expect(approveForm).toContain("<DecisionRecoveryList");
     expect(approveForm).toContain("onDecisionRecovered=");
     expect(approveForm).toContain("cardDecisionUnresolved || retainedDecisionUnresolved");
-    expect(rootLayout).toContain("<EnrollmentRecoverySentinel />");
+    expect(rootLayout).toContain('import { reconcileEnrollmentRecoveryOwner } from "./console/actions"');
+    expect(rootLayout).toContain(
+      "<EnrollmentRecoverySentinel\n          reconcileEnrollmentRecoveryOwner={reconcileEnrollmentRecoveryOwner}",
+    );
     expect(recoverySentinel).toContain('addEventListener("beforeunload"');
     expect(recoverySentinel).toContain(
       "enrollmentRecoveryMarkersMayRemain(availableSessionStorage())",
@@ -491,6 +494,7 @@ describe("sponsor console trust boundary", () => {
     const consolePage = readPackageFile("app/console/page.tsx");
     const approvePage = readPackageFile("app/approve/page.tsx");
     const sentinel = readPackageFile("app/enrollment-recovery-sentinel.tsx");
+    const actions = readPackageFile("app/console/actions.ts");
 
     for (const page of [consolePage, approvePage]) {
       expect(page).toContain(
@@ -498,6 +502,7 @@ describe("sponsor console trust boundary", () => {
       );
       expect(page).toContain("const recoveryRenderToken = crypto.randomUUID()");
       expect(page).toContain("enabled={sponsorId !== undefined}");
+      expect(page).toContain("recoveryOwner={recoveryOwner}");
       expect(page).toContain("renderToken={recoveryRenderToken}");
     }
     const consoleFence = consolePage.indexOf("<EnrollmentRecoveryFence");
@@ -510,6 +515,11 @@ describe("sponsor console trust boundary", () => {
     expect(consoleFence).toBeLessThan(consoleMint);
     expect(consoleMint).toBeLessThan(consoleLifecycle);
     expect(consoleLifecycle).toBeLessThan(consoleFenceEnd);
+    const signedOutApprove = approvePage.indexOf("{sponsorId === undefined ? (");
+    const approveFence = approvePage.indexOf("<EnrollmentRecoveryFence");
+    expect(signedOutApprove).toBeGreaterThanOrEqual(0);
+    expect(approveFence).toBeGreaterThan(signedOutApprove);
+    expect(approvePage.slice(signedOutApprove, approveFence)).toContain("Sign in required");
 
     const scrub = sentinel.indexOf("if (scrubbed)");
     const hidden = sentinel.indexOf(
@@ -528,10 +538,35 @@ describe("sponsor console trust boundary", () => {
     ]) {
       expect(sentinel).toContain(signal);
     }
-    const begin = sentinel.indexOf("if (!beginEnrollmentRecoveryReconciliation()) return;");
-    const refresh = sentinel.indexOf("router.refresh();", begin);
+    const action = sentinel.indexOf("reconcileEnrollmentRecoveryOwner()");
+    const begin = sentinel.indexOf("const generation = beginEnrollmentRecoveryReconciliation();");
+    const record = sentinel.indexOf(
+      "recordEnrollmentRecoveryOwner(generation, result.recoveryOwner)",
+    );
+    const refresh = sentinel.indexOf("router.refresh();", record);
+    const ownerMatch = sentinel.indexOf("return activeRecoveryFence.allowedRecoveryOwner !== recoveryOwner;");
     expect(begin).toBeGreaterThanOrEqual(0);
-    expect(refresh).toBeGreaterThan(begin);
+    expect(action).toBeGreaterThan(begin);
+    expect(record).toBeGreaterThan(action);
+    expect(refresh).toBeGreaterThan(record);
+    expect(ownerMatch).toBeGreaterThanOrEqual(0);
+    expect(sentinel).not.toContain("blockedRecoveryFenceToken !== renderToken");
+    expect(sentinel).not.toContain("recoveryOwner ?? null");
+    expect(sentinel).toContain("if (!enabled) return false;");
+    expect(sentinel).toContain('if (activeRecoveryFence.phase !== "confirmed") return true;');
+    expect(sentinel).toContain("if (activeRecoveryFence.allowedRecoveryOwner === null) return true;");
+
+    const actionStart = actions.indexOf("export async function reconcileEnrollmentRecoveryOwner()");
+    const actionEnd = actions.indexOf("async function recoveryOwnerMatchesSponsor", actionStart);
+    const ownerAction = actions.slice(actionStart, actionEnd);
+    expect(actionStart).toBeGreaterThanOrEqual(0);
+    expect(actionEnd).toBeGreaterThan(actionStart);
+    expect(ownerAction).toContain("const session = await auth();");
+    expect(ownerAction).toContain("if (session?.user === undefined) return { ok: true, recoveryOwner: null };");
+    expect(ownerAction).toContain("if (!isCanonicalSponsorId(session.user.id)) return { ok: false };");
+    expect(ownerAction).toContain("await recoveryOwnerForSponsor(session.user.id)");
+    expect(ownerAction).toContain("return recoveryOwner === undefined ? { ok: false }");
+    expect(ownerAction).not.toContain("sponsorId:");
   });
 
   test("the retained-decision recovery control has a synchronous double-submit barrier", () => {

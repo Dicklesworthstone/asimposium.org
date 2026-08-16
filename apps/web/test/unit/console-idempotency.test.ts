@@ -3,14 +3,22 @@ import { expect, test } from "bun:test";
 import {
   claimEnrollmentRecoveryLock,
   clearEnrollmentAttempt,
-  enrollmentAttemptKey as prepareEnrollmentAttemptKey,
+  type EnrollmentAttemptFallback,
+  type EnrollmentAttemptScope,
+  type EnrollmentAttemptStorage,
   enrollmentAttemptsRemain,
   enrollmentRecoveryMarkersMayRemain,
+  enrollmentAttemptKey as prepareEnrollmentAttemptKey,
   releaseEnrollmentRecoveryLock,
-  type EnrollmentAttemptScope,
-  type EnrollmentAttemptFallback,
-  type EnrollmentAttemptStorage,
 } from "../../app/console/idempotency.ts";
+import {
+  beginEnrollmentRecoveryReconciliation,
+  enrollmentRecoveryFenceContent,
+  enrollmentRecoveryFenceIsScrubbed,
+  mountEnrollmentRecoveryFence,
+  recordEnrollmentRecoveryOwner,
+  settleEnrollmentRecoveryFailure,
+} from "../../app/enrollment-recovery-sentinel.tsx";
 
 class MemoryStorage implements Storage {
   readonly values = new Map<string, string>();
@@ -331,6 +339,105 @@ test("the root-layout sentinel sees every retained namespace and fails closed on
     getItem: () => null,
   };
   expect(enrollmentRecoveryMarkersMayRemain(unreadable)).toBe(true);
+});
+
+test("a signed-out disabled surface stays visible without registering a recovery fence", () => {
+  const unmount = mountEnrollmentRecoveryFence("signed-out", false);
+  try {
+    expect(enrollmentRecoveryFenceIsScrubbed(undefined, false)).toBe(false);
+    expect(beginEnrollmentRecoveryReconciliation()).toBeUndefined();
+  } finally {
+    unmount();
+  }
+});
+
+test("PLANTED: each recovery fence remains owner-scoped through failed, stale, signed-out, and same-owner reconciliations", () => {
+  const unmountA1 = mountEnrollmentRecoveryFence("server-render-a1", true);
+  let unmountA2: (() => void) | undefined;
+  let unmountUnconfiguredA2: (() => void) | undefined;
+  let unmountB: (() => void) | undefined;
+  let unmountA3: (() => void) | undefined;
+  try {
+    expect(enrollmentRecoveryFenceIsScrubbed(OWNER_A, true)).toBe(false);
+    const generationA1 = beginEnrollmentRecoveryReconciliation();
+    if (generationA1 === undefined) throw new Error("mounted owner A1 did not start reconciliation");
+    // A signal scrubs every fence, including a sponsor page whose recovery
+    // configuration temporarily produced no owner.
+    expect(enrollmentRecoveryFenceIsScrubbed(OWNER_A, true)).toBe(true);
+    expect(enrollmentRecoveryFenceIsScrubbed(undefined, true)).toBe(true);
+    const lateAResult = "https://a.asimposium.org/join/A#v1.secret";
+    expect(enrollmentRecoveryFenceContent(enrollmentRecoveryFenceIsScrubbed(OWNER_A, true), lateAResult)).not.toBe(
+      lateAResult,
+    );
+
+    // A queued stale A2 and an unconfigured owner-less A2 both remain hidden
+    // before the independently derived owner result arrives.
+    unmountA2 = mountEnrollmentRecoveryFence("server-render-a2", true);
+    unmountUnconfiguredA2 = mountEnrollmentRecoveryFence("server-render-a2-unconfigured", true);
+    expect(enrollmentRecoveryFenceIsScrubbed(OWNER_A, true)).toBe(true);
+    expect(enrollmentRecoveryFenceIsScrubbed(undefined, true)).toBe(true);
+
+    expect(recordEnrollmentRecoveryOwner(generationA1, "usr_not-an-opaque-recovery-owner")).toBe(false);
+    expect(recordEnrollmentRecoveryOwner(generationA1, OWNER_B)).toBe(true);
+    // Confirmation for B is per owner: both mounted A fences and a later A
+    // promise stay hidden, while B can render without router.refresh granting
+    // any authority by itself.
+    expect(enrollmentRecoveryFenceIsScrubbed(OWNER_A, true)).toBe(true);
+    expect(enrollmentRecoveryFenceIsScrubbed(OWNER_B, true)).toBe(false);
+    expect(enrollmentRecoveryFenceIsScrubbed(undefined, true)).toBe(true);
+    expect(enrollmentRecoveryFenceContent(enrollmentRecoveryFenceIsScrubbed(OWNER_A, true), lateAResult)).not.toBe(
+      lateAResult,
+    );
+    unmountB = mountEnrollmentRecoveryFence("server-render-b", true);
+    expect(enrollmentRecoveryFenceIsScrubbed(OWNER_B, true)).toBe(false);
+    unmountA3 = mountEnrollmentRecoveryFence("server-render-a3", true);
+    expect(enrollmentRecoveryFenceIsScrubbed(OWNER_A, true)).toBe(true);
+    const bSurface = "B recovery surface";
+    expect(enrollmentRecoveryFenceContent(enrollmentRecoveryFenceIsScrubbed(OWNER_B, true), bSurface)).toBe(
+      bSurface,
+    );
+
+    // Transport/configuration failure remains scrubbed, but opens generation 2
+    // for a later signal. A late generation-1 confirmation cannot settle it.
+    const failedGeneration = beginEnrollmentRecoveryReconciliation();
+    if (failedGeneration === undefined) throw new Error("B did not start a retryable reconciliation");
+    expect(enrollmentRecoveryFenceIsScrubbed(undefined, true)).toBe(true);
+    expect(settleEnrollmentRecoveryFailure(failedGeneration)).toBe(true);
+    expect(enrollmentRecoveryFenceIsScrubbed(OWNER_B, true)).toBe(true);
+    expect(enrollmentRecoveryFenceIsScrubbed(undefined, true)).toBe(true);
+    const retryGeneration = beginEnrollmentRecoveryReconciliation();
+    if (retryGeneration === undefined) throw new Error("failed generation did not admit retry");
+    expect(recordEnrollmentRecoveryOwner(failedGeneration, OWNER_B)).toBe(false);
+    expect(enrollmentRecoveryFenceIsScrubbed(OWNER_B, true)).toBe(true);
+    expect(recordEnrollmentRecoveryOwner(retryGeneration, OWNER_B)).toBe(true);
+    expect(enrollmentRecoveryFenceIsScrubbed(OWNER_B, true)).toBe(false);
+    expect(enrollmentRecoveryFenceIsScrubbed(OWNER_A, true)).toBe(true);
+
+    // Signed-out confirmation is an explicit null state, never an undefined
+    // owner match. A future B requires another current-generation confirmation.
+    const signedOutGeneration = beginEnrollmentRecoveryReconciliation();
+    if (signedOutGeneration === undefined) throw new Error("B did not start signed-out reconciliation");
+    expect(recordEnrollmentRecoveryOwner(signedOutGeneration, null)).toBe(true);
+    expect(enrollmentRecoveryFenceIsScrubbed(undefined, true)).toBe(true);
+    expect(enrollmentRecoveryFenceIsScrubbed(OWNER_B, true)).toBe(true);
+    const returnGeneration = beginEnrollmentRecoveryReconciliation();
+    if (returnGeneration === undefined) throw new Error("signed-out confirmation did not admit B retry");
+    expect(recordEnrollmentRecoveryOwner(returnGeneration, OWNER_B)).toBe(true);
+    expect(enrollmentRecoveryFenceIsScrubbed(OWNER_B, true)).toBe(false);
+
+    // The same owner is safe only after its own exact-generation confirmation.
+    const sameOwnerGeneration = beginEnrollmentRecoveryReconciliation();
+    if (sameOwnerGeneration === undefined) throw new Error("B did not start same-owner reconciliation");
+    expect(recordEnrollmentRecoveryOwner(sameOwnerGeneration, OWNER_A)).toBe(true);
+    expect(enrollmentRecoveryFenceIsScrubbed(OWNER_A, true)).toBe(false);
+    expect(enrollmentRecoveryFenceIsScrubbed(OWNER_B, true)).toBe(true);
+  } finally {
+    unmountA3?.();
+    unmountB?.();
+    unmountUnconfiguredA2?.();
+    unmountA2?.();
+    unmountA1();
+  }
 });
 
 test("malformed persistent recovery state fails closed without replacing any key", () => {
