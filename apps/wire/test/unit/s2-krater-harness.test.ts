@@ -766,6 +766,8 @@ describe("S2 to S7 normalized cost receipt", () => {
     expect(onExit).toContain("write_s2_cost_publication");
     expect(onExit).toContain("write_s2_cost_publication_commit");
     expect(onExit).toContain("! s2_source_provenance_matches_start");
+    expect(onExit).toContain("cleanup_workers");
+    expect(onExit).toContain("S2_EVIDENCE_PUBLICATION_SKIPPED_UNPROVEN_CLEANUP");
     expect(shell.indexOf("write_s2_cost_publication()")).toBeLessThan(
       shell.indexOf("write_s2_cost_publication_commit()"),
     );
@@ -896,6 +898,33 @@ describe("S2 to S7 normalized cost receipt", () => {
     expect(shell).toContain("S2_MAIN_DEADLINE_AT");
     expect(shell).not.toContain("S2_PLANT_SOURCE_PROVENANCE_DRIFT");
     expect(shell).toContain("S2_TERM_RESISTANT_START_FAILED");
+    const postReleaseController = shell.slice(
+      shell.indexOf("post_release_controller_identity_matches() {"),
+      shell.indexOf("most_recent_supervisor_is_tracked()"),
+    );
+    expect(postReleaseController).toContain('S2_POST_RELEASE_CONTROLLER_PID=$!');
+    expect(postReleaseController).toContain("post_release_controller_identity_matches()");
+    expect(postReleaseController).toContain('kill -TERM "${pid}"');
+    expect(postReleaseController).toContain('kill -KILL "${pid}"');
+    expect(postReleaseController).toContain('wait "${pid}"');
+    expect(postReleaseController).toContain("assert_no_run_survivors");
+    expect(postReleaseController).toContain("S2_POST_RELEASE_CONTROLLER_CLEANUP_UNPROVEN");
+    expect(shell).toContain("cleanup_post_release_controller || result=1");
+    const postReleasePredicate = shell.slice(
+      shell.indexOf("post_release_ready_predicate_samples() {"),
+      shell.indexOf("single_decimal_file()"),
+    );
+    // biome-ignore lint/suspicious/noTemplateCurlyInString: asserts literal shell source text.
+    expect(postReleasePredicate).toContain('file="${prefix}.${expected_sequence}"');
+    const postReleaseStart = shell.slice(
+      shell.indexOf("start_pinned_supervisor() {"),
+      shell.indexOf("read_child_status()"),
+    );
+    // biome-ignore lint/suspicious/noTemplateCurlyInString: asserts literal shell source text.
+    expect(postReleaseStart).toContain('>"${post_release_ready_predicate}.${post_release_ready_predicate_samples}"');
+    // biome-ignore lint/suspicious/noTemplateCurlyInString: rejects append-visible predicate ledgers.
+    expect(postReleaseStart).not.toContain('>>"${post_release_ready_predicate}');
+    expect(postReleaseStart).toContain("S2_PLANT_POST_RELEASE_READY_PREDICATE");
     const termInterrupt = shell.slice(
       // biome-ignore lint/suspicious/noTemplateCurlyInString: asserts literal shell source text.
       shell.indexOf('if [[ "${mode}" == "term-interrupt-cleanup" ]]'),
@@ -1291,10 +1320,18 @@ describe("registered S2 shell and lifecycle regressions", () => {
               '"scenario":"release-consumption-is-not-ready-until-final-traps-and-canonical-post-release-checkpoint"',
             );
             expect(run.stdout).toContain('"post_release_safe_barrier_observed":true');
+            expect(run.stdout).toContain('"controller_identity_attested":true');
             expect(run.stdout).toContain('"controller_visible_ready_predicate_samples":2');
             expect(run.stdout).toContain('"start_returned_before_controller_release":false');
+            expect(run.stdout).toContain('"parser_early_return_controller_reaped":true');
+            expect(run.stdout).toContain('"partial_predicate_final_visible":false');
+            expect(run.stdout).toContain('"partial_predicate_observer_samples":0');
             expect(run.stdout).toContain('"no_exact_group_survivor":true');
             expect(run.stdout).not.toContain('"code":"S2_CLEANUP_OWNERSHIP_UNPROVEN"');
+            expect(run.stdout).not.toContain('"code":"S2_POST_RELEASE_CONTROLLER_CLEANUP_UNPROVEN"');
+            expect(run.stdout).not.toContain(
+              '"code":"S2_EVIDENCE_PUBLICATION_SKIPPED_UNPROVEN_CLEANUP"',
+            );
           } else if (mode === "legacy-leader-loss-transient-ps") {
             const transientProof = ndjsonRecords(run).find(
               (entry) => entry.assertion === "payload-ready-in-exact-group-with-retained-state-fd",
