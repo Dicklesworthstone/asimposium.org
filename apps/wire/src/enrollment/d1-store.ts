@@ -387,6 +387,10 @@ function isUniqueNameFailure(error: unknown): boolean {
   );
 }
 
+function isActiveFellowCapFailure(error: unknown): boolean {
+  return error instanceof Error && /active Fellow cap reached/i.test(error.message);
+}
+
 /**
  * The suggestion suffix law. Candidates are `<stem>-<n>` for n in
  * [2, 9_999], and a saturated range yields fewer than three suggestions rather
@@ -808,8 +812,14 @@ export class D1EnrollmentStore implements EnrollmentStore {
     } catch (error) {
       if (error instanceof EnrollmentError) throw error;
       if (error instanceof EnrollmentIdempotencyRaceError) throw error;
-      if (isUniqueNameFailure(error)) throw new EnrollmentError("NAME_TAKEN");
+      // A concurrent winner under this key is authoritative even when this
+      // batch happened to lose on a product constraint first. In particular,
+      // one remaining Fellow slot can make the losing batch observe the cap;
+      // a different request body under the winner's key is still an
+      // idempotency conflict, not a capacity refusal.
       await this.raceIfPresent(idempotency);
+      if (isUniqueNameFailure(error)) throw new EnrollmentError("NAME_TAKEN");
+      if (isActiveFellowCapFailure(error)) throw new EnrollmentError("FELLOW_CAP_REACHED");
       throw new EnrollmentPersistenceError();
     }
   }
@@ -2570,8 +2580,9 @@ export class D1EnrollmentStore implements EnrollmentStore {
       if ((results[0]?.meta.changes ?? 0) < 1) return false;
       if (replay !== undefined && (results[1]?.meta.changes ?? 0) !== 1) return false;
       return true;
-    } catch {
+    } catch (error) {
       await this.raceIfPresent(replay);
+      if (isActiveFellowCapFailure(error)) throw new EnrollmentError("FELLOW_CAP_REACHED");
       return false;
     }
   }

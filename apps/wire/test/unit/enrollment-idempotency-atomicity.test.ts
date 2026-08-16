@@ -17,7 +17,7 @@ import {
   DEVICE_START_RATE_LIMIT_WINDOW_MS,
   type DeviceCreateInput,
   type DeviceLookupAttempt,
-  type EnrollmentError,
+  EnrollmentError,
   EnrollmentIdempotencyRaceError,
   EnrollmentIdentifierCollisionError,
   EnrollmentPersistenceError,
@@ -67,6 +67,10 @@ const CREDENTIAL_HARDENING_MIGRATION = resolve(
 const FELLOW_LIFECYCLE_COMMANDS_MIGRATION = resolve(
   import.meta.dir,
   "../../../../db/migrations/0012_fellow_lifecycle_commands.sql",
+);
+const SPONSOR_FELLOW_CAP_MIGRATION = resolve(
+  import.meta.dir,
+  "../../../../db/migrations/0013_sponsor_fellow_cap.sql",
 );
 const DEVICE_MIGRATION = resolve(import.meta.dir, "../../../../db/migrations/0009_device_flow.sql");
 const SPONSOR_MIGRATION = resolve(
@@ -204,6 +208,12 @@ function databaseBeforeLifecycleCommands(): Database {
 function lifecycleCommandDatabase(): Database {
   const sqlite = databaseBeforeLifecycleCommands();
   sqlite.exec(readFileSync(FELLOW_LIFECYCLE_COMMANDS_MIGRATION, "utf8"));
+  return sqlite;
+}
+
+function sponsorFellowCapDatabase(): Database {
+  const sqlite = lifecycleCommandDatabase();
+  sqlite.exec(readFileSync(SPONSOR_FELLOW_CAP_MIGRATION, "utf8"));
   return sqlite;
 }
 
@@ -6475,5 +6485,587 @@ describe("0012 sponsor lifecycle commands", () => {
       sqlite.prepare<{ n: number }, []>("SELECT COUNT(*) AS n FROM enrollment_fellows").get()?.n,
     ).toBe(0);
     expect(claimed.flowHandle).toMatch(/^flow_v1\./);
+  });
+});
+
+describe("0013 sponsor Fellow capacity", () => {
+  const sponsorId = "usr_fellow_cap";
+
+  async function approveFellow(
+    service: EnrollmentService,
+    sponsor: { readonly type: "sponsor"; readonly sponsorId: string },
+    ordinal: number,
+    decisionKey?: string,
+    fellowGrantExpiresInMs?: number,
+  ): Promise<string> {
+    const minted = await service.mint(sponsor, {
+      requested_scopes: ["review"],
+      ...(fellowGrantExpiresInMs === undefined
+        ? {}
+        : { fellow_grant_expires_in_ms: fellowGrantExpiresInMs }),
+    });
+    await service.claim({
+      enrollment_id: minted.enrollmentId,
+      secret: minted.secret,
+      name: `service-cap-${ordinal}`,
+      model: "test-model",
+      harness: "test-harness",
+    });
+    await service.decide(
+      sponsor,
+      minted.enrollmentId,
+      { enrollment_id: minted.enrollmentId, decision: "approve" },
+      decisionKey === undefined ? {} : { idempotencyKey: decisionKey },
+    );
+    return minted.enrollmentId;
+  }
+
+  function insertSponsor(sqlite: Database): void {
+    sqlite
+      .prepare("INSERT INTO sponsors (sponsor_id, created_at, last_seen_at) VALUES (?, ?, ?)")
+      .run(sponsorId, NOW, NOW);
+  }
+
+  function insertFellow(sqlite: Database, ordinal: number): void {
+    sqlite
+      .prepare(
+        `INSERT INTO enrollment_fellows (
+           fellow_id, sponsor_id, name, model, harness, created_at
+         ) VALUES (?, ?, ?, 'test-model', 'test-harness', ?)`,
+      )
+      .run(`F-CAP-${ordinal}`, sponsorId, `cap-fellow-${ordinal}`, NOW + ordinal);
+  }
+
+  test("0013 preserves retained over-cap Fellows but blocks growth until the sponsor converges", async () => {
+    const sqlite = lifecycleCommandDatabase();
+    insertSponsor(sqlite);
+    for (let ordinal = 1; ordinal <= 6; ordinal += 1) insertFellow(sqlite, ordinal);
+
+    const migration = readFileSync(SPONSOR_FELLOW_CAP_MIGRATION, "utf8");
+    sqlite.exec(migration);
+
+    expect(
+      sqlite
+        .prepare<{ n: number }, []>(
+          "SELECT COUNT(*) AS n FROM pragma_table_info('sponsors') WHERE name = 'active_fellow_limit'",
+        )
+        .get()?.n,
+    ).toBe(1);
+    expect(
+      sqlite.prepare<{ n: number }, []>("SELECT COUNT(*) AS n FROM enrollment_fellows").get()?.n,
+    ).toBe(6);
+    expect(() => insertFellow(sqlite, 7)).toThrow("active Fellow cap reached");
+
+    const store = new D1EnrollmentStore(localD1(sqlite));
+    await store.transitionFellow({
+      sponsorId,
+      fellowId: "F-CAP-6",
+      toStatus: "paused",
+      eventId: `LEV-${"7".repeat(26)}`,
+      requestId: "7".repeat(64),
+      effectiveAt: NOW + 100,
+    });
+    expect(() => insertFellow(sqlite, 7)).toThrow("active Fellow cap reached");
+
+    await store.transitionFellow({
+      sponsorId,
+      fellowId: "F-CAP-5",
+      toStatus: "paused",
+      eventId: `LEV-${"8".repeat(26)}`,
+      requestId: "8".repeat(64),
+      effectiveAt: NOW + 101,
+    });
+    insertFellow(sqlite, 7);
+    expect(
+      sqlite
+        .prepare<{ n: number }, []>(
+          "SELECT COUNT(*) AS n FROM enrollment_fellows WHERE status IN ('active', 'suspicious_review')",
+        )
+        .get()?.n,
+    ).toBe(5);
+  });
+
+  test("0013 enforces five live Fellows, permits a bounded operator raise, and guards resume", async () => {
+    const sqlite = lifecycleCommandDatabase();
+    insertSponsor(sqlite);
+    for (let ordinal = 1; ordinal <= 5; ordinal += 1) insertFellow(sqlite, ordinal);
+    sqlite.exec(readFileSync(SPONSOR_FELLOW_CAP_MIGRATION, "utf8"));
+
+    expect(
+      sqlite
+        .prepare<{ active_fellow_limit: number }, [string]>(
+          "SELECT active_fellow_limit FROM sponsors WHERE sponsor_id = ?",
+        )
+        .get(sponsorId)?.active_fellow_limit,
+    ).toBe(5);
+    expect(() => insertFellow(sqlite, 6)).toThrow("active Fellow cap reached");
+
+    sqlite
+      .prepare("UPDATE sponsors SET active_fellow_limit = 6 WHERE sponsor_id = ?")
+      .run(sponsorId);
+    insertFellow(sqlite, 6);
+    expect(() =>
+      sqlite
+        .prepare("UPDATE sponsors SET active_fellow_limit = 5 WHERE sponsor_id = ?")
+        .run(sponsorId),
+    ).toThrow("active Fellow limit is below current use");
+
+    const store = new D1EnrollmentStore(localD1(sqlite));
+    await store.transitionFellow({
+      sponsorId,
+      fellowId: "F-CAP-6",
+      toStatus: "paused",
+      eventId: `LEV-${"6".repeat(26)}`,
+      requestId: "6".repeat(64),
+      effectiveAt: NOW + 100,
+    });
+    sqlite
+      .prepare("UPDATE sponsors SET active_fellow_limit = 5 WHERE sponsor_id = ?")
+      .run(sponsorId);
+
+    try {
+      await store.transitionFellow({
+        sponsorId,
+        fellowId: "F-CAP-6",
+        toStatus: "active",
+        eventId: `LEV-${"7".repeat(26)}`,
+        requestId: "7".repeat(64),
+        effectiveAt: NOW + 101,
+      });
+      throw new Error("expected FELLOW_CAP_REACHED");
+    } catch (error) {
+      expect(error).toBeInstanceOf(EnrollmentError);
+      expect((error as EnrollmentError).code).toBe("FELLOW_CAP_REACHED");
+    }
+    expect(
+      sqlite
+        .prepare<{ status: string }, [string]>(
+          "SELECT status FROM enrollment_fellows WHERE fellow_id = ?",
+        )
+        .get("F-CAP-6")?.status,
+    ).toBe("paused");
+    expect(
+      sqlite.prepare<{ n: number }, []>("SELECT COUNT(*) AS n FROM fellow_lifecycle_events").get()
+        ?.n,
+    ).toBe(1);
+    expect(
+      sqlite
+        .prepare<{ lifecycle_lease_token: string | null }, [string]>(
+          "SELECT lifecycle_lease_token FROM sponsors WHERE sponsor_id = ?",
+        )
+        .get(sponsorId)?.lifecycle_lease_token,
+    ).toBeNull();
+    expect(
+      sqlite
+        .prepare<{ n: number }, []>(
+          "SELECT COUNT(*) AS n FROM enrollment_idempotency WHERE scope = 'fellow-lifecycle'",
+        )
+        .get()?.n,
+    ).toBe(0);
+
+    const plan = sqlite
+      .prepare<{ detail: string }, [string]>(
+        `EXPLAIN QUERY PLAN
+         SELECT COUNT(*) FROM enrollment_fellows
+          WHERE sponsor_id = ? AND status IN ('active', 'suspicious_review')`,
+      )
+      .all(sponsorId)
+      .map((row) => row.detail)
+      .join("\n");
+    expect(plan).toContain("enrollment_fellows_sponsor_status_idx");
+  });
+
+  test("0013 keeps the operator limit within the bounded sponsor inventory contract", () => {
+    const sqlite = sponsorFellowCapDatabase();
+    insertSponsor(sqlite);
+    for (const limit of [4, 501, 1.5]) {
+      expect(() =>
+        sqlite
+          .prepare("UPDATE sponsors SET active_fellow_limit = ? WHERE sponsor_id = ?")
+          .run(limit, sponsorId),
+      ).toThrow();
+    }
+    sqlite
+      .prepare("UPDATE sponsors SET active_fellow_limit = 500 WHERE sponsor_id = ?")
+      .run(sponsorId);
+    expect(
+      sqlite
+        .prepare<{ active_fellow_limit: number }, [string]>(
+          "SELECT active_fellow_limit FROM sponsors WHERE sponsor_id = ?",
+        )
+        .get(sponsorId)?.active_fellow_limit,
+    ).toBe(500);
+  });
+
+  test("memory and D1 approval refuse Fellow six without consuming its pending decision key", async () => {
+    const d1Sqlite = sponsorFellowCapDatabase();
+    const sponsor = { type: "sponsor", sponsorId } as const;
+    const memoryClock = new DeviceTestClock();
+    const d1Clock = new DeviceTestClock();
+    const fixtures = [
+      {
+        name: "memory",
+        clock: memoryClock,
+        service: new EnrollmentService({
+          clock: memoryClock,
+          store: new InMemoryEnrollmentStore(),
+          replayProtector: new AesGcmEnrollmentReplayProtector(new Uint8Array(32)),
+        }),
+      },
+      {
+        name: "d1",
+        clock: d1Clock,
+        service: new EnrollmentService({
+          clock: d1Clock,
+          store: new D1EnrollmentStore(localD1(d1Sqlite)),
+          replayProtector: new AesGcmEnrollmentReplayProtector(new Uint8Array(32)),
+        }),
+      },
+    ] as const;
+
+    for (const fixture of fixtures) {
+      await fixture.service.bootstrapSponsor(sponsor);
+      for (let ordinal = 1; ordinal <= 5; ordinal += 1) {
+        await approveFellow(fixture.service, sponsor, ordinal, undefined, 1);
+      }
+      const firstFellow = (await fixture.service.fellows(sponsor))[0];
+      if (firstFellow === undefined) throw new Error("cap fixture Fellow was not listed");
+      await fixture.service.transitionFellow(
+        sponsor,
+        {
+          fellow_id: firstFellow.fellowId,
+          status: "suspicious_review",
+          confirm: "change-fellow-lifecycle",
+          step_up_authenticated_at: Math.floor(fixture.clock.value / 1_000),
+        },
+        { idempotencyKey: `cap-review-${fixture.name}` },
+      );
+      fixture.clock.value += 1;
+      await fixture.service.panicSponsor(
+        sponsor,
+        {
+          confirm: "revoke-all-fellow-credentials",
+          step_up_authenticated_at: Math.floor(fixture.clock.value / 1_000),
+        },
+        { idempotencyKey: `cap-panic-${fixture.name}` },
+      );
+      fixture.clock.value += 1;
+      const minted = await fixture.service.mint(sponsor, { requested_scopes: ["review"] });
+      await fixture.service.claim({
+        enrollment_id: minted.enrollmentId,
+        secret: minted.secret,
+        name: "service-cap-six",
+        model: "test-model",
+        harness: "test-harness",
+      });
+      try {
+        await fixture.service.decide(
+          sponsor,
+          minted.enrollmentId,
+          { enrollment_id: minted.enrollmentId, decision: "approve" },
+          { idempotencyKey: `cap-six-${fixture.name}` },
+        );
+        throw new Error("expected FELLOW_CAP_REACHED");
+      } catch (error) {
+        expect(error).toBeInstanceOf(EnrollmentError);
+        expect((error as EnrollmentError).code).toBe("FELLOW_CAP_REACHED");
+      }
+      expect((await fixture.service.fellows(sponsor)).length, fixture.name).toBe(5);
+      expect(
+        (await fixture.service.pendingApprovals(sponsor)).some(
+          (proposal) =>
+            proposal.enrollmentId === minted.enrollmentId && proposal.status === "pending",
+        ),
+        fixture.name,
+      ).toBe(true);
+
+      fixture.clock.value += 1;
+      await fixture.service.transitionFellow(
+        sponsor,
+        {
+          fellow_id: firstFellow.fellowId,
+          status: "paused",
+          confirm: "change-fellow-lifecycle",
+          step_up_authenticated_at: Math.floor(fixture.clock.value / 1_000),
+        },
+        { idempotencyKey: `cap-pause-${fixture.name}` },
+      );
+      await expect(
+        fixture.service.decide(
+          sponsor,
+          minted.enrollmentId,
+          { enrollment_id: minted.enrollmentId, decision: "approve" },
+          { idempotencyKey: `cap-six-${fixture.name}` },
+        ),
+      ).resolves.toBeUndefined();
+      const fellows = await fixture.service.fellows(sponsor);
+      expect(fellows.length, fixture.name).toBe(6);
+      expect(
+        fellows.filter(
+          (fellow) => fellow.status === "active" || fellow.status === "suspicious_review",
+        ).length,
+        fixture.name,
+      ).toBe(5);
+      expect(
+        (await fixture.service.pendingApprovals(sponsor)).some(
+          (proposal) => proposal.enrollmentId === minted.enrollmentId,
+        ),
+        fixture.name,
+      ).toBe(false);
+    }
+
+    expect(
+      d1Sqlite
+        .prepare<{ n: number }, []>(
+          "SELECT COUNT(*) AS n FROM enrollment_idempotency WHERE scope = 'decision'",
+        )
+        .get()?.n,
+    ).toBe(1);
+    expect(
+      d1Sqlite.prepare<{ n: number }, []>("SELECT COUNT(*) AS n FROM enrollment_grants").get()?.n,
+    ).toBe(6);
+  });
+
+  test("a shared key conflict outranks the cap after concurrent approval preflights miss", async () => {
+    const sponsor = { type: "sponsor", sponsorId } as const;
+    const fixtures = ["memory", "d1"] as const;
+
+    for (const fixture of fixtures) {
+      const clock = new DeviceTestClock();
+      const sqlite = fixture === "d1" ? sponsorFellowCapDatabase() : undefined;
+      let armed = false;
+      let concurrentReads = 0;
+      let releaseReads: (() => void) | undefined;
+      let bothReads: (() => void) | undefined;
+      const readsMayContinue = new Promise<void>((resolve) => {
+        releaseReads = resolve;
+      });
+      const bothReadsObserved = new Promise<void>((resolve) => {
+        bothReads = resolve;
+      });
+      const memoryStore = new InMemoryEnrollmentStore();
+      const store =
+        sqlite === undefined
+          ? new Proxy(memoryStore, {
+              get(target, property) {
+                if (property === "idempotencyReplay") {
+                  return async (...args: Parameters<typeof target.idempotencyReplay>) => {
+                    const replay = await target.idempotencyReplay(...args);
+                    if (armed) {
+                      concurrentReads += 1;
+                      if (concurrentReads === 2) {
+                        armed = false;
+                        bothReads?.();
+                      }
+                      await readsMayContinue;
+                    }
+                    return replay;
+                  };
+                }
+                const value = Reflect.get(target, property);
+                return typeof value === "function" ? value.bind(target) : value;
+              },
+            })
+          : new D1EnrollmentStore(
+              localD1(sqlite, {
+                serializeBatches: true,
+                afterFirstRead: async (query) => {
+                  if (!armed || !query.includes("JOIN enrollment_proposals p")) return;
+                  concurrentReads += 1;
+                  if (concurrentReads === 2) {
+                    armed = false;
+                    bothReads?.();
+                  }
+                  await readsMayContinue;
+                },
+              }),
+            );
+      const service = new EnrollmentService({
+        clock,
+        store,
+        replayProtector: new AesGcmEnrollmentReplayProtector(new Uint8Array(32)),
+      });
+
+      await service.bootstrapSponsor(sponsor);
+      for (let ordinal = 1; ordinal <= 4; ordinal += 1) {
+        await approveFellow(service, sponsor, ordinal);
+      }
+      const pending = [] as string[];
+      for (const ordinal of [5, 6]) {
+        const minted = await service.mint(sponsor, { requested_scopes: ["review"] });
+        await service.claim({
+          enrollment_id: minted.enrollmentId,
+          secret: minted.secret,
+          name: `service-cap-shared-${fixture}-${ordinal}`,
+          model: "test-model",
+          harness: "test-harness",
+        });
+        pending.push(minted.enrollmentId);
+      }
+
+      armed = true;
+      const decisions = pending.map((enrollmentId) =>
+        service.decide(
+          sponsor,
+          enrollmentId,
+          { enrollment_id: enrollmentId, decision: "approve" },
+          { idempotencyKey: `cap-shared-key-${fixture}` },
+        ),
+      );
+      await bothReadsObserved;
+      releaseReads?.();
+      const outcomes = await Promise.allSettled(decisions);
+
+      expect(outcomes.filter((outcome) => outcome.status === "fulfilled").length, fixture).toBe(1);
+      const rejected = outcomes.find((outcome) => outcome.status === "rejected");
+      expect(rejected?.status, fixture).toBe("rejected");
+      if (rejected?.status === "rejected") {
+        expect(rejected.reason, fixture).toBeInstanceOf(EnrollmentError);
+        expect((rejected.reason as EnrollmentError).code, fixture).toBe("IDEMPOTENCY_CONFLICT");
+      }
+      expect(
+        (await service.fellows(sponsor)).filter(
+          (fellow) => fellow.status === "active" || fellow.status === "suspicious_review",
+        ).length,
+        fixture,
+      ).toBe(5);
+      expect(
+        (await service.pendingApprovals(sponsor)).filter((proposal) =>
+          pending.includes(proposal.enrollmentId),
+        ).length,
+        fixture,
+      ).toBe(1);
+      expect(concurrentReads).toBe(2);
+      if (sqlite !== undefined) {
+        expect(
+          sqlite
+            .prepare<{ n: number }, [string]>(
+              "SELECT COUNT(*) AS n FROM enrollment_idempotency WHERE idempotency_key = ?",
+            )
+            .get(`cap-shared-key-${fixture}`)?.n,
+        ).toBe(1);
+      }
+    }
+  });
+
+  test("a fifth approval racing a paused-Fellow resume commits exactly one capacity consumer", async () => {
+    const sqlite = sponsorFellowCapDatabase();
+    const clock = new DeviceTestClock();
+    const sponsor = { type: "sponsor", sponsorId } as const;
+    const observed = new Set<"decision" | "resume">();
+    let armed = false;
+    let releaseReads: (() => void) | undefined;
+    let bothReads: (() => void) | undefined;
+    const readsMayContinue = new Promise<void>((resolve) => {
+      releaseReads = resolve;
+    });
+    const bothReadsObserved = new Promise<void>((resolve) => {
+      bothReads = resolve;
+    });
+    const service = new EnrollmentService({
+      clock,
+      store: new D1EnrollmentStore(
+        localD1(sqlite, {
+          serializeBatches: true,
+          afterFirstRead: async (query) => {
+            if (!armed) return;
+            let matched = false;
+            if (query.includes("JOIN enrollment_proposals p")) {
+              observed.add("decision");
+              matched = true;
+            }
+            if (query.includes("SELECT sponsor.lifecycle_seq") && query.includes("fellow.status")) {
+              observed.add("resume");
+              matched = true;
+            }
+            if (!matched) return;
+            if (observed.size === 2) {
+              armed = false;
+              bothReads?.();
+            }
+            await readsMayContinue;
+          },
+        }),
+      ),
+      replayProtector: new AesGcmEnrollmentReplayProtector(new Uint8Array(32)),
+    });
+
+    await service.bootstrapSponsor(sponsor);
+    for (let ordinal = 1; ordinal <= 5; ordinal += 1) {
+      await approveFellow(service, sponsor, ordinal);
+    }
+    const paused = (await service.fellows(sponsor))[0];
+    if (paused === undefined) throw new Error("race fixture Fellow was not listed");
+    await service.transitionFellow(
+      sponsor,
+      {
+        fellow_id: paused.fellowId,
+        status: "paused",
+        confirm: "change-fellow-lifecycle",
+        step_up_authenticated_at: Math.floor(clock.value / 1_000),
+      },
+      { idempotencyKey: "cap-race-pause" },
+    );
+    const minted = await service.mint(sponsor, { requested_scopes: ["review"] });
+    await service.claim({
+      enrollment_id: minted.enrollmentId,
+      secret: minted.secret,
+      name: "service-cap-racer",
+      model: "test-model",
+      harness: "test-harness",
+    });
+
+    armed = true;
+    const approval = service.decide(
+      sponsor,
+      minted.enrollmentId,
+      { enrollment_id: minted.enrollmentId, decision: "approve" },
+      { idempotencyKey: "cap-race-approve" },
+    );
+    const resume = service.transitionFellow(
+      sponsor,
+      {
+        fellow_id: paused.fellowId,
+        status: "active",
+        confirm: "change-fellow-lifecycle",
+        step_up_authenticated_at: Math.floor(clock.value / 1_000),
+      },
+      { idempotencyKey: "cap-race-resume" },
+    );
+    await bothReadsObserved;
+    releaseReads?.();
+    const outcomes = await Promise.allSettled([approval, resume]);
+
+    expect(observed).toEqual(new Set(["decision", "resume"]));
+    expect(outcomes.filter((outcome) => outcome.status === "fulfilled").length).toBe(1);
+    const rejected = outcomes.find((outcome) => outcome.status === "rejected");
+    expect(rejected?.status).toBe("rejected");
+    if (rejected?.status === "rejected") {
+      expect(rejected.reason).toBeInstanceOf(EnrollmentError);
+      expect((rejected.reason as EnrollmentError).code).toBe("FELLOW_CAP_REACHED");
+    }
+    expect(
+      sqlite
+        .prepare<{ n: number }, [string]>(
+          `SELECT COUNT(*) AS n FROM enrollment_fellows
+            WHERE sponsor_id = ? AND status IN ('active', 'suspicious_review')`,
+        )
+        .get(sponsorId)?.n,
+    ).toBe(5);
+    expect(
+      sqlite
+        .prepare<{ lifecycle_lease_token: string | null }, [string]>(
+          "SELECT lifecycle_lease_token FROM sponsors WHERE sponsor_id = ?",
+        )
+        .get(sponsorId)?.lifecycle_lease_token,
+    ).toBeNull();
+    expect(
+      sqlite
+        .prepare<{ n: number }, []>(
+          `SELECT COUNT(*) AS n FROM enrollment_idempotency
+            WHERE idempotency_key IN ('cap-race-approve', 'cap-race-resume')`,
+        )
+        .get()?.n,
+    ).toBe(1);
   });
 });

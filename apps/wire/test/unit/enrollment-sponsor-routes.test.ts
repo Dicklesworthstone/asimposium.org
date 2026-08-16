@@ -895,6 +895,34 @@ describe("sponsor enrollment routes", () => {
     expect(serialized).not.toContain("database");
   });
 
+  test("the sponsor Fellow cap is a coarse 409 and exposes no policy internals", async () => {
+    const h = await harness({ clock: { now: () => NOW * 1_000 } });
+    h.service.decide = async () => {
+      throw new EnrollmentError("FELLOW_CAP_REACHED");
+    };
+    const enrollmentId = "ASIMP-EN-01JXYZ4K6Q";
+    const body = JSON.stringify({ enrollment_id: enrollmentId, decision: "approve" });
+    const headers = await h.sign(
+      body,
+      "/v1/enrollments/:enrollmentId/decision",
+      "enrollment.decide",
+    );
+    const response = await h.app.fetch(
+      envelopeRequest(`/v1/enrollments/${enrollmentId}/decision`, headers, "POST", body),
+    );
+
+    expect(response.status).toBe(409);
+    const payload = await response.json();
+    expect(OpaqueProblemSchema.parse(payload)).toMatchObject({
+      code: "FELLOW_CAP_REACHED",
+      status: 409,
+    });
+    const serialized = JSON.stringify(payload);
+    expect(serialized).not.toContain(SPONSOR);
+    expect(serialized).not.toContain("active_fellow_limit");
+    expect(serialized).not.toContain("database");
+  });
+
   test("an elapsed pre-approval grant leaves no impossible card or misleading retry loop", async () => {
     const clock = {
       value: NOW,

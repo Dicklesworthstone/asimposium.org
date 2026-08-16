@@ -55,6 +55,7 @@ export const DEVICE_LOOKUP_LOCKOUT_FAILURES = 5;
 export const DEVICE_LOOKUP_LOCKOUT_WINDOW_MS = 15 * 60 * 1_000;
 export const DEVICE_START_RATE_LIMIT_ATTEMPTS = 10;
 export const DEVICE_START_RATE_LIMIT_WINDOW_MS = 15 * 60 * 1_000;
+export const DEFAULT_SPONSOR_ACTIVE_FELLOW_LIMIT = 5;
 const DEVICE_RECLAIM_BATCH_SIZE = 100;
 const ENROLLMENT_KEY_DERIVATION_SALT = new TextEncoder().encode(
   "asimposium-enrollment-key-derivation-v1",
@@ -124,6 +125,7 @@ export type EnrollmentErrorCode =
   | "DEVICE_LOOKUP_BODY_INVALID"
   | "DEVICE_LOOKUP_LOCKED"
   | "DEVICE_START_RATE_LIMITED"
+  | "FELLOW_CAP_REACHED"
   | "CREDENTIAL_REVOKE_BODY_INVALID"
   | "FELLOW_LIFECYCLE_BODY_INVALID"
   | "FELLOW_LIFECYCLE_NOT_CURRENT"
@@ -1105,7 +1107,10 @@ export class InMemoryEnrollmentStore implements EnrollmentStore {
   readonly #lifecycleEventIds = new Set<string>();
   readonly #lifecycleRequestIds = new Set<string>();
   readonly #reviewWindows = new Map<string, { reviewFrom: number; flaggedAt: number }>();
-  readonly #sponsors = new Map<string, { createdAt: number; lastSeenAt: number }>();
+  readonly #sponsors = new Map<
+    string,
+    { createdAt: number; lastSeenAt: number; activeFellowLimit: number }
+  >();
   readonly #deviceCodes = new Map<string, { enrollmentId: string; expiresAt: number }>();
   readonly #deviceCodeExpiresAtByEnrollment = new Map<string, number>();
   readonly #activeDeviceMappingEnrollments = new Set<string>();
@@ -1128,6 +1133,7 @@ export class InMemoryEnrollmentStore implements EnrollmentStore {
     idempotency?: EnrollmentIdempotencyWrite,
   ): Promise<boolean> {
     return this.serialized(() => {
+      this.assertIdempotencyVacant(idempotency);
       if (this.#records.has(record.enrollmentId)) return false;
       if (replacesEnrollmentId !== undefined) {
         const predecessor = this.#records.get(replacesEnrollmentId);
@@ -1149,6 +1155,7 @@ export class InMemoryEnrollmentStore implements EnrollmentStore {
 
   async claim(attempt: ClaimAttempt, idempotency?: EnrollmentIdempotencyWrite): Promise<void> {
     await this.serialized(() => {
+      this.assertIdempotencyVacant(idempotency);
       const record = this.#records.get(attempt.enrollmentId);
       this.assertClaimCredentials(record, attempt.secretHash, attempt.now);
       const confirmed = record as EnrollmentRecord;
@@ -1173,6 +1180,7 @@ export class InMemoryEnrollmentStore implements EnrollmentStore {
     idempotency?: EnrollmentIdempotencyWrite,
   ): Promise<void> {
     await this.serialized(() => {
+      this.assertIdempotencyVacant(idempotency);
       const record = this.#records.get(attempt.enrollmentId);
       const isUnboundDevice =
         record !== undefined && record.kind === "device" && record.sponsorId === "";
@@ -1251,6 +1259,13 @@ export class InMemoryEnrollmentStore implements EnrollmentStore {
         // permanently unissuable grant. The unchanged keyed retry may succeed
         // once its grant timestamp is strictly beyond the panic boundary.
         throw new EnrollmentPersistenceError();
+      }
+      if (
+        this.activeFellowCount(attempt.sponsorId) >=
+        (this.#sponsors.get(attempt.sponsorId)?.activeFellowLimit ??
+          DEFAULT_SPONSOR_ACTIVE_FELLOW_LIMIT)
+      ) {
+        throw new EnrollmentError("FELLOW_CAP_REACHED");
       }
 
       const nameOwner = this.#activeNames.get(proposal.name);
@@ -1397,7 +1412,11 @@ export class InMemoryEnrollmentStore implements EnrollmentStore {
         existing.lastSeenAt = now;
         return false;
       }
-      this.#sponsors.set(sponsorId, { createdAt: now, lastSeenAt: now });
+      this.#sponsors.set(sponsorId, {
+        createdAt: now,
+        lastSeenAt: now,
+        activeFellowLimit: DEFAULT_SPONSOR_ACTIVE_FELLOW_LIMIT,
+      });
       return true;
     });
   }
@@ -1446,6 +1465,15 @@ export class InMemoryEnrollmentStore implements EnrollmentStore {
         !fellowLifecycleTransitionAllowed(current, attempt.toStatus)
       ) {
         throw new EnrollmentError("FELLOW_LIFECYCLE_NOT_CURRENT");
+      }
+      if (
+        !fellowStatusCanAuthenticate(current) &&
+        fellowStatusCanAuthenticate(attempt.toStatus) &&
+        this.activeFellowCount(attempt.sponsorId) >=
+          (this.#sponsors.get(attempt.sponsorId)?.activeFellowLimit ??
+            DEFAULT_SPONSOR_ACTIVE_FELLOW_LIMIT)
+      ) {
+        throw new EnrollmentError("FELLOW_CAP_REACHED");
       }
       const effectiveAt = Math.max(
         attempt.effectiveAt,
@@ -1506,18 +1534,23 @@ export class InMemoryEnrollmentStore implements EnrollmentStore {
     });
   }
 
+  private activeFellowCount(sponsorId: string): number {
+    const fellowIds = new Set<string>();
+    for (const record of this.#records.values()) {
+      const fellowId = record.proposal?.fellowId;
+      if (record.sponsorId !== sponsorId || fellowId === undefined) continue;
+      const status = this.#fellowStatuses.get(fellowId);
+      if (status !== undefined && fellowStatusCanAuthenticate(status)) fellowIds.add(fellowId);
+    }
+    return fellowIds.size;
+  }
+
   async deviceCreate(
     input: DeviceCreateInput,
     idempotency?: EnrollmentIdempotencyWrite,
   ): Promise<void> {
     return this.serialized(() => {
-      if (idempotency !== undefined) {
-        const recordKey = `${idempotency.scope}:${idempotency.principalScope}:${idempotency.key}`;
-        const existing = this.#idempotency.get(recordKey);
-        if (existing !== undefined && idempotency.now < existing.expiresAt) {
-          throw new EnrollmentIdempotencyRaceError();
-        }
-      }
+      this.assertIdempotencyVacant(idempotency);
       let reclaimed = 0;
       for (
         let index = 0;
@@ -1709,6 +1742,7 @@ export class InMemoryEnrollmentStore implements EnrollmentStore {
       ) {
         const decision: PollDecision = { kind: "expired" };
         const idempotency = await attempt.replayFor?.(decision);
+        this.assertIdempotencyVacant(idempotency);
         proposal.status = "expired";
         this.commitIdempotency(idempotency);
         return decision;
@@ -1767,6 +1801,7 @@ export class InMemoryEnrollmentStore implements EnrollmentStore {
       ) {
         const decision: PollDecision = { kind: "expired" };
         const idempotency = await attempt.replayFor?.(decision);
+        this.assertIdempotencyVacant(idempotency);
         proposal.status = "expired";
         this.commitIdempotency(idempotency);
         return decision;
@@ -1796,6 +1831,7 @@ export class InMemoryEnrollmentStore implements EnrollmentStore {
       const issued = await attempt.createToken();
       const decision: PollDecision = { kind: "issued", token: issued.token };
       const idempotency = await attempt.replayFor?.(decision);
+      this.assertIdempotencyVacant(idempotency);
       proposal.tokenHash = issued.tokenHash;
       proposal.tokenIssuedAt = attempt.now;
       this.#credentials.set(issued.tokenHash, {
@@ -1913,16 +1949,23 @@ export class InMemoryEnrollmentStore implements EnrollmentStore {
 
   private commitIdempotency(idempotency: EnrollmentIdempotencyWrite | undefined): void {
     if (idempotency === undefined) return;
+    this.assertIdempotencyVacant(idempotency);
     const recordKey = `${idempotency.scope}:${idempotency.principalScope}:${idempotency.key}`;
-    const existing = this.#idempotency.get(recordKey);
-    if (existing !== undefined && idempotency.now < existing.expiresAt) {
-      throw new EnrollmentIdempotencyRaceError();
-    }
     this.#idempotency.set(recordKey, {
       digest: idempotency.digest,
       encryptedResponse: idempotency.encryptedResponse,
       expiresAt: idempotency.now + IDEMPOTENCY_TTL_MS,
     });
+  }
+
+  /** Refuse a race before any in-memory product mutation that cannot roll back. */
+  private assertIdempotencyVacant(idempotency: EnrollmentIdempotencyWrite | undefined): void {
+    if (idempotency === undefined) return;
+    const recordKey = `${idempotency.scope}:${idempotency.principalScope}:${idempotency.key}`;
+    const existing = this.#idempotency.get(recordKey);
+    if (existing !== undefined && idempotency.now < existing.expiresAt) {
+      throw new EnrollmentIdempotencyRaceError();
+    }
   }
 
   private nextLifecycleResult(

@@ -38,6 +38,10 @@ const INVALID_DEVICE_START_RATE_LIMITED_TAUGHT = new URL(
   "../fixtures/invalid/problem-device-start-rate-limited-taught.json",
   import.meta.url,
 );
+const INVALID_FELLOW_CAP_REACHED_TAUGHT = new URL(
+  "../fixtures/invalid/problem-fellow-cap-reached-taught.json",
+  import.meta.url,
+);
 const INVALID_UNKNOWN_FORMAT_WITHOUT_ALLOWED = new URL(
   "../fixtures/invalid/problem-unknown-format-no-allowed.json",
   import.meta.url,
@@ -48,6 +52,7 @@ const VALID_ADDITIONAL_PROBLEMS = [
   ["problem-auth-replay-store-unavailable.json", "AUTH_REPLAY_STORE_UNAVAILABLE", 503, "opaque"],
   ["problem-request-body-too-large.json", "REQUEST_BODY_TOO_LARGE", 413, "opaque"],
   ["problem-lifecycle-busy.json", "LIFECYCLE_BUSY", 429, "opaque"],
+  ["problem-fellow-cap-reached.json", "FELLOW_CAP_REACHED", 409, "opaque"],
   ["problem-route-not-found.json", "ROUTE_NOT_FOUND", 404, "opaque"],
   ["problem-internal-error.json", "INTERNAL_ERROR", 500, "opaque"],
   ["problem-enrollment-id-invalid.json", "ENROLLMENT_ID_INVALID", 422, "contract"],
@@ -135,6 +140,18 @@ test("the device-start throttle is opaque and cannot carry teaching fields", asy
   expect(
     ProblemDocumentSchema.safeParse(await fixture(INVALID_DEVICE_START_RATE_LIMITED_TAUGHT))
       .success,
+  ).toBe(false);
+});
+
+test("the sponsor Fellow cap is opaque and cannot carry teaching fields", async () => {
+  const document = await fixture(
+    new URL("../fixtures/valid/problem-fellow-cap-reached.json", import.meta.url),
+  );
+  expect(ProblemDocumentSchema.safeParse(document).success).toBe(true);
+  expect(OpaqueProblemSchema.safeParse(document).success).toBe(true);
+  expect(ContractProblemSchema.safeParse(document).success).toBe(false);
+  expect(
+    ProblemDocumentSchema.safeParse(await fixture(INVALID_FELLOW_CAP_REACHED_TAUGHT)).success,
   ).toBe(false);
 });
 

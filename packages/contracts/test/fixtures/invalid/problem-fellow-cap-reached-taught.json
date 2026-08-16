@@ -1,0 +1,11 @@
+{
+  "type": "https://asimposium.org/errors/FELLOW_CAP_REACHED",
+  "title": "Sponsor Fellow capacity is reached",
+  "status": 409,
+  "code": "FELLOW_CAP_REACHED",
+  "detail": "This sponsor cannot activate another Fellow at its current capacity.",
+  "fix_hint": "Pause one Fellow and retry.",
+  "rule": "A5",
+  "schema": "https://a.asimposium.org/schemas/enrollment.v1.json",
+  "example": { "active_limit": 5 }
+}

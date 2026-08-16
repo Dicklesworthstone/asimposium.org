@@ -476,6 +476,14 @@ function enrollmentErrorResponse(error: EnrollmentError, request: Request): Resp
         "No current sponsor-owned lifecycle target can accept this action.",
         "Refresh the sponsor console and act only on the current lifecycle state shown there.",
       );
+    case "FELLOW_CAP_REACHED":
+      return problem(
+        409,
+        error.code,
+        "Sponsor Fellow capacity is reached",
+        "This sponsor cannot activate another Fellow at its current capacity.",
+        "Pause or retire an existing Fellow, or ask the operator to raise this sponsor's limit, then retry the exact action.",
+      );
     case "LIFECYCLE_BUSY": {
       const response = problem(
         429,
