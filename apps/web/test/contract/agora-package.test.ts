@@ -139,7 +139,7 @@ describe("sponsor console trust boundary", () => {
     expect(actions).not.toContain(
       'requested_scopes: ["promote", "review", "propose-problems", "upload-artifacts"]',
     );
-    expect(cards).toContain('"promote",\n    "review"');
+    expect(cards).toContain('recoveredDraft?.requested_scopes ?? ["promote", "review"]');
     expect(cards).toContain("Broader powers are opt-in.");
     expect(cards).toContain("problem_binding: problemBinding.trim().toUpperCase()");
     expect(cards).toContain("first_directive: firstDirective.trim()");
@@ -154,6 +154,7 @@ describe("sponsor console trust boundary", () => {
     for (const label of [
       "Problem assignment",
       "First directive",
+      "Agent-declared tools",
       "Event budget",
       "Artifact budget",
       "Fellow grant expires",
@@ -163,9 +164,52 @@ describe("sponsor console trust boundary", () => {
     }
     expect(cards).toContain('? "Unbounded"');
     expect(cards).toContain('? "No grant expiry"');
+    expect(cards).toContain('card.tools_note ?? "None declared"');
     expect(cards).toContain(
       "This grants every requested scope and resource limit shown above to this Fellow.",
     );
+  });
+
+  test("ambiguous writes keep recovery truthful and strict reductions are expressible", () => {
+    const cards = readPackageFile("app/console/cards.tsx");
+    const idempotency = readPackageFile("app/console/idempotency.ts");
+    const recovery = readPackageFile("lib/enrollment-recovery.ts");
+    expect(actions).toContain("did not confirm the mint");
+    expect(actions).toContain("Retry without changing these settings");
+    expect(actions).toContain("did not confirm the outcome");
+    expect(actions).not.toContain("The agent host did not answer. The proposal is unchanged.");
+    expect(cards).toContain("optionalDurationMilliseconds");
+    expect(cards).toContain("Grant lifetime from decision (seconds)");
+    expect(cards).toContain("resources.event_budget - 1");
+    expect(cards).toContain("resources.artifact_budget_bytes - 1");
+    expect(cards).toContain('fingerprintEnrollmentAttempt("mint", request)');
+    expect(cards).toContain('fingerprintEnrollmentAttempt("decision", decision)');
+    expect(cards).toContain("mintInFlight.current");
+    expect(cards).toContain("decisionInFlight.current");
+    expect(cards).toContain("MINT_SCOPES.map(({ scope }) => scope).filter");
+    expect(actions).toContain("ENROLLMENT_RECOVERY_HMAC_KEY_HEX");
+    expect(actions).toContain("enrollmentRecoveryConfigurationIsValid(");
+    expect(recovery).toContain("recoveryKeyHex !== serviceEnvelopeKeyHex");
+    expect(recovery).toContain('status >= 400 && status < 500 ? "clear" : "retain"');
+    const successStart = cards.indexOf("if (result.ok)");
+    const successEnd = cards.indexOf("} else {", successStart);
+    const remember = cards.indexOf(
+      "successfulMintFingerprint.current = fingerprintResult.fingerprint",
+      successStart,
+    );
+    const display = cards.indexOf("setJoinUrl(result.joinUrl)", successStart);
+    const doneStart = cards.indexOf("const fingerprint = successfulMintFingerprint.current");
+    const acknowledge = cards.indexOf("clearEnrollmentAttempt(", doneStart);
+    const dismiss = cards.indexOf("setJoinUrl(null)", doneStart);
+    for (const position of [successStart, successEnd, remember, display, doneStart, acknowledge, dismiss]) {
+      expect(position).toBeGreaterThanOrEqual(0);
+    }
+    expect(remember).toBeLessThan(display);
+    expect(cards.slice(successStart, successEnd)).not.toContain("clearEnrollmentAttempt");
+    expect(doneStart).toBeLessThan(acknowledge);
+    expect(acknowledge).toBeLessThan(dismiss);
+    expect(idempotency).not.toContain("subtle.digest");
+    expect(idempotency).not.toContain("TextEncoder");
   });
 
   test("the explicit step-up buttons force a Google challenge", () => {

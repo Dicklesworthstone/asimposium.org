@@ -364,6 +364,7 @@
 .console .facts dd {
   margin: 0.1rem 0 0;
   color: var(--color-ink2);
+  overflow-wrap: anywhere;
 }
 .console .status-rows {
   list-style: none;

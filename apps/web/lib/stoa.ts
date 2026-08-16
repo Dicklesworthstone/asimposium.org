@@ -18,6 +18,10 @@ import {
 } from "@asimposium/contracts";
 
 import { dispatchSignedSponsorRequest } from "./stoa-sponsor";
+import {
+  enrollmentRecoveryConfigurationIsValid,
+  enrollmentRecoveryFingerprint,
+} from "./enrollment-recovery";
 import { importEd25519PrivateSeedHex } from "./service-envelope";
 import { isCanonicalSponsorId } from "./sponsor-id";
 
@@ -149,6 +153,42 @@ export async function stoaConfigured(): Promise<boolean> {
   return (await signingConfig()) !== undefined;
 }
 
+/** True when sponsor writes have both signing and stable recovery-key configuration. */
+export async function stoaEnrollmentWritesConfigured(): Promise<boolean> {
+  return (
+    (await signingConfig()) !== undefined &&
+    enrollmentRecoveryConfigurationIsValid(
+      process.env.ENROLLMENT_RECOVERY_HMAC_KEY_HEX,
+      process.env.SERVICE_ENVELOPE_PRIVATE_KEY_HEX,
+    )
+  );
+}
+
+/** Opaque sponsor binding for client-memory recovery; never exposes the sponsor id itself. */
+export async function stoaEnrollmentRecoveryOwner(
+  sponsorId: string,
+): Promise<string | undefined> {
+  if (!isCanonicalSponsorId(sponsorId) || !(await stoaEnrollmentWritesConfigured())) {
+    return undefined;
+  }
+  const rootHex = process.env.ENROLLMENT_RECOVERY_HMAC_KEY_HEX;
+  if (
+    !enrollmentRecoveryConfigurationIsValid(
+      rootHex,
+      process.env.SERVICE_ENVELOPE_PRIVATE_KEY_HEX,
+    )
+  ) {
+    return undefined;
+  }
+  try {
+    return await enrollmentRecoveryFingerprint(rootHex, sponsorId, "mint", {
+      purpose: "client-memory-owner-v1",
+    });
+  } catch {
+    return undefined;
+  }
+}
+
 export function stoaMintEnrollment(
   principalId: string,
   request: MintEnrollmentRequest,
@@ -237,7 +277,7 @@ export function stoaBootstrapSponsor(
     path: ROUTE_BOOTSTRAP,
     action: ACTION_BOOTSTRAP,
     principalId,
-    body: "",
+    body: "{}",
     parse: (value) => SponsorBootstrapResponseSchema.parse(value),
   });
 }

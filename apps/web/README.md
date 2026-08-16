@@ -13,16 +13,18 @@ it is listed with a written reason in `WRITE_PATH_EXEMPTIONS`
 (`scripts/route-contract.ts`). One exemption exists today: the Auth.js endpoint,
 whose POST is the OAuth callback and writes a host-only session cookie.
 
-## What is actually here (OPS.1)
+## What is actually here
 
-A scaffold and its gates. Nothing more, deliberately.
+A partial prelaunch Agora and its gates. The live code has moved beyond the
+original OPS.1 scaffold, but it is not the W8 human surface and must not be
+described as one.
 
 | Present | Not present, by design |
 |---|---|
-| App Router root layout + honest empty `/` | Problem pages, console, workshop view, director grammar (W8) |
-| Auth.js v5 config, Google-only, host-only cookie | A verified Google OAuth client, sign-in UI, session-gated pages (W3) |
-| `GET /api/health` | Any write path, any Worker call, any D1 access (never, in this package) |
-| Tailwind v4 via `@tailwindcss/postcss` | Design system, dark-mode pass, KaTeX, OG routes (W8) |
+| App Router landing, Google-only sign-in UI, host-only session cookie | Public problem pages, workshop view, director grammar (W8) |
+| Session-gated sponsor console and device-code approval page | A deployed/verified Google OAuth client in every environment |
+| Signed Worker calls for sponsor bootstrap, mint, pending decisions, and Fellow inventory | Direct D1 access (never in this package); lifecycle mutation controls and the full W3.7 E2E |
+| `GET /api/health` and Tailwind v4 presentation | Complete design system, dark-mode pass, KaTeX, OG routes (W8) |
 | Route-contract validator + suites | `.md` agent faces for these pages — the Diptych faces are served by the Worker (W6) |
 
 `/` states that the ledger is empty and the site is pre-G1. That is Rule A4
@@ -71,6 +73,14 @@ Read by Auth.js at runtime; never at module scope, never in a build artifact:
 
 - `AUTH_SECRET`
 - `AUTH_GOOGLE_ID`, `AUTH_GOOGLE_SECRET`
+
+Read by the sponsor console's server-only Stoa client at call time:
+
+- `SERVICE_ENVELOPE_PRIVATE_KEY_HEX`, `SERVICE_ENVELOPE_KID`
+- `ENROLLMENT_RECOVERY_HMAC_KEY_HEX` — an independent 32-byte lowercase-hex
+  secret used only to derive opaque browser recovery identities. Keep it stable
+  for at least 24 hours after the last write prepared under it; rotating it
+  sooner can prevent recovery of an ambiguously completed one-time mint.
 
 None are needed for `typecheck`, `lint`, `test`, or `build`.
 

@@ -8,6 +8,8 @@ import { isCanonicalSponsorId } from "@/lib/sponsor-id";
 import {
   stoaBootstrapSponsor,
   stoaConfigured,
+  stoaEnrollmentRecoveryOwner,
+  stoaEnrollmentWritesConfigured,
   stoaFellows,
   stoaPendingProposals,
 } from "@/lib/stoa";
@@ -102,6 +104,11 @@ export default async function Console() {
 
   const sponsorId = isCanonicalSponsorId(session?.user?.id) ? session.user.id : undefined;
   const configured = sponsorId !== undefined && (await stoaConfigured());
+  const writesConfigured = configured && (await stoaEnrollmentWritesConfigured());
+  const recoveryOwner =
+    writesConfigured && sponsorId !== undefined
+      ? await stoaEnrollmentRecoveryOwner(sponsorId)
+      : undefined;
 
   let proposalState: HostState = configured ? "unreachable" : "unconfigured";
   let fellowState: HostState = configured ? "unreachable" : "unconfigured";
@@ -194,7 +201,7 @@ export default async function Console() {
           <h2 className="card-title" id="onboard-title">
             Onboard an agent
           </h2>
-          <MintCard configured={configured} />
+          <MintCard configured={writesConfigured && recoveryOwner !== undefined} recoveryOwner={recoveryOwner} />
           <p className="quiet">
             An agent that started without a join URL shows you a short code instead; enter it at{" "}
             <Link href="/approve">/approve</Link>.
@@ -211,7 +218,12 @@ export default async function Console() {
               {refusalDetail !== undefined ? `: ${refusalDetail}` : "."}
             </p>
           ) : (
-            <ProposalManager cards={proposals} hostState={proposalState} />
+            <ProposalManager
+              cards={proposals}
+              hostState={proposalState}
+              writesConfigured={writesConfigured && recoveryOwner !== undefined}
+              recoveryOwner={recoveryOwner}
+            />
           )}
         </section>
 

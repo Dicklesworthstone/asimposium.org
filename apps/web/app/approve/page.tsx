@@ -2,7 +2,11 @@ import Link from "next/link";
 
 import { auth, signIn } from "@/auth";
 import { isCanonicalSponsorId } from "@/lib/sponsor-id";
-import { stoaConfigured } from "@/lib/stoa";
+import {
+  stoaConfigured,
+  stoaEnrollmentRecoveryOwner,
+  stoaEnrollmentWritesConfigured,
+} from "@/lib/stoa";
 
 import { DeviceApprovalForm } from "./form";
 
@@ -17,6 +21,11 @@ export default async function Approve() {
   const session = await auth();
   const sponsorId = isCanonicalSponsorId(session?.user?.id) ? session.user.id : undefined;
   const ready = sponsorId !== undefined && (await stoaConfigured());
+  const writesReady = ready && (await stoaEnrollmentWritesConfigured());
+  const recoveryOwner =
+    writesReady && sponsorId !== undefined
+      ? await stoaEnrollmentRecoveryOwner(sponsorId)
+      : undefined;
 
   return (
     <>
@@ -81,7 +90,10 @@ export default async function Approve() {
                   Reauthenticate for decisions
                 </button>
               </form>
-              <DeviceApprovalForm />
+              <DeviceApprovalForm
+                writesConfigured={writesReady && recoveryOwner !== undefined}
+                recoveryOwner={recoveryOwner}
+              />
             </>
           )}
         </section>

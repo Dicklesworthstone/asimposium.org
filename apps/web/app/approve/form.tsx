@@ -30,11 +30,18 @@ function hasInvalidDeviceCodeCharacter(input: string): boolean {
  * Worker (five failures in fifteen minutes lock the window), so this form
  * never retries on the sponsor's behalf.
  */
-export function DeviceApprovalForm() {
+export function DeviceApprovalForm({
+  writesConfigured,
+  recoveryOwner,
+}: {
+  readonly writesConfigured: boolean;
+  readonly recoveryOwner?: string;
+}) {
   const [code, setCode] = useState("");
   const [card, setCard] = useState<EnrollmentApprovalCard | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [recordedDecision, setRecordedDecision] = useState<"approved" | "denied" | null>(null);
+  const [decisionUnresolved, setDecisionUnresolved] = useState(false);
   const [pending, startTransition] = useTransition();
   const announcement =
     recordedDecision !== null ? "Decision recorded" : card === null ? "" : "Proposal found";
@@ -77,6 +84,9 @@ export function DeviceApprovalForm() {
           <ul className="proposal-list" aria-label="Device proposal">
             <ProposalCard
               card={card}
+              writesConfigured={writesConfigured}
+              recoveryOwner={recoveryOwner}
+              onRecoveryStateChange={setDecisionUnresolved}
               onDecided={(decision) => {
                 setCard(null);
                 setRecordedDecision(decision === "deny" ? "denied" : "approved");
@@ -86,13 +96,14 @@ export function DeviceApprovalForm() {
           <button
             className="btn-quiet"
             type="button"
+            disabled={pending || decisionUnresolved}
             onClick={() => {
               setCard(null);
               setCode("");
               setError(null);
             }}
           >
-            Enter a different code
+            {decisionUnresolved ? "Resolve this decision first" : "Enter a different code"}
           </button>
         </div>
       ) : (
