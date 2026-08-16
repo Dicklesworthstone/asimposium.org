@@ -276,22 +276,40 @@ describe("owned session launcher", () => {
     expect(processTable()).not.toContain(marker);
   });
 
-  test("a nonce-ready PID mismatch fails closed after cleaning the actual owned group", async () => {
+  test("a PID-mismatch refusal cancels inherited pipes after cleaning only the owned group", async () => {
     const marker = `suite-supervisor-pid-mismatch-${crypto.randomUUID()}`;
-    const result = await runOwnedCommand({
-      command: [
-        "perl",
-        "-e",
-        `my $marker = "${marker}"; $SIG{TERM} = sub {}; select undef, undef, undef, 0.8; exit 0;`,
-      ],
-      cwd: process.cwd(),
-      env: childEnvironment(),
-      timeoutMs: 2_000,
-      supervisorScript: PID_MISMATCH_SUPERVISOR,
-    });
+    const cancelled: ("stdout" | "stderr")[] = [];
+    try {
+      const startedAt = performance.now();
+      const result = await runOwnedCommand({
+        command: [
+          "perl",
+          "-MPOSIX=setsid",
+          "-e",
+          `use POSIX qw(_exit); my $marker = "${marker}"; pipe(my $read, my $write) or die; my $child = fork(); die unless defined $child; if ($child == 0) { close $read; setsid(); $SIG{HUP} = sub {}; $SIG{TERM} = sub {}; syswrite($write, 'r'); close $write; while (1) { sleep 1; } } close $write; read($read, my $ready, 1); close $read; $SIG{TERM} = sub {}; while (1) { sleep 1; }`,
+        ],
+        cwd: process.cwd(),
+        env: childEnvironment(),
+        timeoutMs: 2_000,
+        termGraceMs: 40,
+        killReapMs: 200,
+        pipeDrainMs: 5_000,
+        supervisorScript: PID_MISMATCH_SUPERVISOR,
+        onPipeCancelRequested: (pipe) => cancelled.push(pipe),
+      });
 
-    expect(result.outcome).toBe("ownership-unproven");
-    expect(result.cleanupProven).toBe(true);
+      expect(result.outcome).toBe("ownership-unproven");
+      expect(result.cleanupProven).toBe(true);
+      expect(cancelled.sort()).toEqual(["stderr", "stdout"]);
+      // The detached holder is deliberately outside the owned group. Finishing
+      // well before pipeDrainMs proves the typed refusal cancels its local readers;
+      // the still-live marker proves the dispatcher did not claim or kill that PID.
+      expect(performance.now() - startedAt).toBeLessThan(3_000);
+      expect(processTable()).toContain(marker);
+    } finally {
+      stopDetachedFixture(marker);
+    }
+    await Bun.sleep(30);
     expect(processTable()).not.toContain(marker);
   });
 
@@ -416,7 +434,7 @@ describe("owned session launcher", () => {
     expect(result.outcome).toBe("descendant-leaked");
   });
 
-  test("a detached inherited pipe holder is cancelled locally, not credited as dispatcher cleanup", async () => {
+  test("a detached inherited pipe holder receives one bounded reader cancellation, not dispatcher cleanup", async () => {
     const marker = `suite-detached-pipe-boundary-${crypto.randomUUID()}`;
     const cancelled: ("stdout" | "stderr")[] = [];
     try {

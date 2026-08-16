@@ -516,12 +516,12 @@ async function inspectOwnedProcessGroup(
     retainedBytes: 0,
     limitBytes: options.outputLimitBytes,
   };
-  const stdout = captureStream(
+  const stdout = captureBoundedPipe(
     snapshot.stdout as ReadableStream<Uint8Array>,
     options.streamLimitBytes,
     budget,
   );
-  const stderr = captureStream(
+  const stderr = captureBoundedPipe(
     snapshot.stderr as ReadableStream<Uint8Array>,
     options.streamLimitBytes,
     budget,
@@ -668,7 +668,7 @@ function retainedByteLimit(value: number | undefined, fallback: number): number 
   return value !== undefined && Number.isSafeInteger(value) && value > 0 ? value : fallback;
 }
 
-function captureStream(
+function captureBoundedPipe(
   stream: ReadableStream<Uint8Array>,
   streamLimitBytes: number,
   budget: RetainedOutputBudget,
@@ -1075,14 +1075,14 @@ export async function runOwnedCommand(options: OwnedCommandOptions): Promise<Own
     };
   }
 
-  const stdout = captureStream(
+  const stdout = captureBoundedPipe(
     child.stdout as ReadableStream<Uint8Array>,
     streamLimitBytes,
     budget,
     undefined,
     () => options.onPipeCancelRequested?.("stdout"),
   );
-  const stderr = captureStream(
+  const stderr = captureBoundedPipe(
     child.stderr as ReadableStream<Uint8Array>,
     streamLimitBytes,
     budget,
@@ -1211,11 +1211,11 @@ export async function runOwnedCommand(options: OwnedCommandOptions): Promise<Own
     }
   }
 
-  if (
-    outcome === "output-overrun" ||
-    outcome === "inspection-unproven" ||
-    outcome === "ownership-unproven"
-  ) {
+  // A typed lifecycle failure never retains a local pipe reader while bounded
+  // cleanup is being assessed. `cancel()` is one-shot and never awaits a
+  // detached inheritor's pipe close; normal successful exits still get their
+  // bounded drain before release.
+  if (outcome !== "exited") {
     cancelCapturedPipes([stdout, stderr]);
   }
   const drained = await drainWithin([stdout, stderr], pipeDrainMs);
