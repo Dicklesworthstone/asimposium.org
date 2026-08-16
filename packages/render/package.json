@@ -21,6 +21,7 @@
     "spike:s5": "bun scripts/s5-spike.ts"
   },
   "devDependencies": {
+    "@asimposium/contracts": "workspace:*",
     "@types/bun": "1.3.8",
     "typescript": "5.9.3"
   }

@@ -1,4 +1,5 @@
 import { describe, expect, test } from "bun:test";
+import { readFileSync } from "node:fs";
 
 import {
   assertSafeRunId,
@@ -194,6 +195,131 @@ describe("assertSecretSafe", () => {
     expect(() =>
       assertSecretSafe(record({ runtime: "bun-1.3.8 workstation abc" }), env),
     ).not.toThrow();
+  });
+});
+
+/**
+ * The shared scanner is a dependency, not a copy (OPS.2a, asimposiumorg-233).
+ *
+ * Every value below is chosen so that the *only* rule that can refuse it lives in
+ * `@asimposium/contracts/diagnostic-safety`. None contains a 32-character run, so
+ * `hasGenericSecretToken` cannot fire; none contains a 32-character hex run, so
+ * `hasLongHexToken` cannot; none is an absolute path, and the env map is empty so
+ * no environment secret can. Delete the import and these go green-to-red — which
+ * is the point. A family the deleted local array already matched would still be
+ * refused by a stale copy and would prove nothing about delegation.
+ */
+describe("shared scanner delegation", () => {
+  for (const [name, value] of [
+    // Basic auth: the local array carried Bearer and no Basic at all.
+    ["HTTP Basic credential", "Basic dGVzdDpzZWNyZXQ="],
+    // Clipped forms: the local array had length floors (16 / 22 / 20) that a
+    // capture ceiling cutting the token in half slipped straight under.
+    ["truncated GitHub classic token", "ghp_short"],
+    ["truncated GitHub fine-grained token", "github_pat_trunc"],
+    ["truncated Google API key", "AIzaShort"],
+    // Labelled never-log fields: refused for what the label declares, not shape.
+    ["labelled password field", "password: hunter2"],
+    ["multi-attribute cookie header", "cookie: sid=abc; other=secret"],
+    ["non-Bearer authorization scheme", "authorization: Token abc"],
+    ["private directive body", "directive_body: prove lemma, then reveal witness"],
+    // Query credential.
+    ["query token parameter", "callback?token=abcd1234"],
+  ] as const) {
+    test(`refuses a ${name} only the shared scanner knows`, () => {
+      // Causality, asserted rather than claimed: every local guard is provably
+      // inert on this value, so the refusal below can only come from the shared
+      // scanner. `hasGenericSecretToken` and `hasLongHexToken` both need a
+      // 32-character run, `ABSOLUTE_PATH` needs a rooted path, and the env map is
+      // empty. If someone drops the import, nothing else is left to throw.
+      expect(value).not.toMatch(/[A-Za-z0-9_-]{32,}/);
+      expect(value).not.toMatch(/[0-9a-f]{32,}/i);
+      expect(value).not.toMatch(/(^|[\s"'=(:])(\/[A-Za-z0-9._~-]+\/|[A-Za-z]:\\)/);
+
+      expect(() => assertSecretSafe({ nested: { detail: value } }, {})).toThrow(
+        DiagnosticSafetyError,
+      );
+    });
+  }
+
+  // Families the local array also matched. These do not prove delegation; they
+  // prove the union did not *lose* anything when the copy went away.
+  for (const [name, value] of [
+    ["live Stripe secret key", "sk_live_51HxAbCdEfGhIjKlMnOp"],
+    ["full GitHub fine-grained token", "github_pat_11ABCDEFG0abcdefghijklmnop"],
+    ["truncated PEM block", "-----BEGIN RSA PRIVATE KEY-----\nMIIEpQIBAAKCAQ"],
+    ["truncated Bearer credential", "Bearer abc"],
+    ["Fellow token", "asimp_ag_abcd"],
+  ] as const) {
+    test(`still refuses a ${name} after consolidation`, () => {
+      expect(() => assertSecretSafe({ nested: { detail: value } }, {})).toThrow(
+        DiagnosticSafetyError,
+      );
+    });
+  }
+
+  // The union widened the vocabulary; it must not have widened it onto prose.
+  // `Bearer tokens…` and `pk-3` are the exact strings a lookahead-based clipped
+  // rule used to eat, which is why the shared clipped patterns are terminal-only.
+  for (const [name, value] of [
+    ["prose naming a credential family", "Bearer tokens are hashed before storage"],
+    ["short version string sharing a key prefix", "renderer pk-3 emitted the fragment"],
+    ["prose naming a header", "authorization header omitted from the record"],
+    ["ordinary failure detail", "expected 3 fragments, received 2"],
+  ] as const) {
+    test(`accepts ${name}`, () => {
+      expect(() => assertSecretSafe({ nested: { detail: value } }, {})).not.toThrow();
+    });
+  }
+
+  test("resolves the shared subpath from this package's own module graph", async () => {
+    const shared = await import("@asimposium/contracts/diagnostic-safety");
+    expect(typeof shared.containsCredentialShape).toBe("function");
+    expect(shared.containsCredentialShape("Basic dGVzdDpzZWNyZXQ=")).toBe(true);
+    expect(shared.containsCredentialShape("expected 3 fragments, received 2")).toBe(false);
+  });
+
+  test("declares the shared scanner as a dependency rather than relying on hoisting", () => {
+    const manifest = JSON.parse(
+      readFileSync(new URL("../../package.json", import.meta.url), "utf8"),
+    ) as { dependencies?: Record<string, string>; devDependencies?: Record<string, string> };
+    const declared = { ...manifest.dependencies, ...manifest.devDependencies };
+    expect(declared["@asimposium/contracts"]).toBe("workspace:*");
+  });
+
+  test("keeps no local copy of a known credential family", () => {
+    const source = readFileSync(new URL("../../scripts/diagnostics.ts", import.meta.url), "utf8");
+    expect(source).toContain('from "@asimposium/contracts/diagnostic-safety"');
+    expect(source).toContain("containsCredentialShape(value)");
+
+    // Scan executable code only. Naming a credential family in a comment is
+    // documentation and must stay legal — the thing being forbidden is a second
+    // *implementation* of the vocabulary, which can only live in code. Scanning
+    // raw source would make an honest explanatory comment fail the gate, so the
+    // module's comments come off first. This slicer assumes `//` and `/* */`
+    // never appear inside a string or regex literal in this one file, which the
+    // executable-line assertions below would catch if it ever stopped holding.
+    const code = source
+      .replace(/\/\*[\s\S]*?\*\//g, " ")
+      .replace(/(^|\s)\/\/.*$/gm, "$1")
+      .trim();
+    expect(code).toContain("containsCredentialShape(value)");
+    expect(code).not.toContain("CREDENTIAL_SHAPES");
+    for (const fragment of [
+      "asimp_ag_",
+      "#v1",
+      "Bearer",
+      "gh[pousr]",
+      "github_pat_",
+      "AIza",
+      "PRIVATE KEY",
+    ]) {
+      expect(code).not.toContain(fragment);
+    }
+    // The stricter contextual guards stay local; consolidation must not take them.
+    for (const guard of ["ABSOLUTE_PATH", "GENERIC_HIGH_ENTROPY_TOKEN", "LONG_HEX_TOKEN"]) {
+      expect(source).toContain(guard);
+    }
   });
 });
 

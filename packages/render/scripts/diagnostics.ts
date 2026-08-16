@@ -1,16 +1,30 @@
 /**
  * Secret-safe suite diagnostics.
  *
- * Provisional and package-local: the shared harness is OPS.2a
- * (asimposiumorg-233). When it lands, both packages should import that instead
- * of keeping a copy.
- *
  * The record answers the question a build log has to answer: which tool, which
  * package, which suite, which version, how long, pass or fail, and how do I run
  * it again. It answers nothing else — `assertSecretSafe` refuses to emit a
  * record carrying a local absolute path, a credential-shaped string, or the
  * value of a sensitive environment variable.
+ *
+ * Division of labour with OPS.2a (asimposiumorg-233). The **known credential
+ * families** — Fellow tokens, enrollment fragments, Bearer/Basic, Stripe-style
+ * keys, GitHub classic and fine-grained tokens, Google API keys, PEM blocks,
+ * their clipped forms, labelled never-log fields and query credentials — are
+ * owned by `@asimposium/contracts/diagnostic-safety` and are no longer restated
+ * here. One vocabulary, one place to extend.
+ *
+ * What stays local are the **contextual guards**, which are stricter than the
+ * shared vocabulary and depend on state the shared module does not have: an
+ * absolute-path check, the values of this process's sensitive environment
+ * variables, a long-hex rule, and a generic high-entropy rule. The shared
+ * module deliberately carries no entropy heuristic — it would refuse ordinary
+ * identifiers for every consumer — so this package keeps that stricter policy
+ * for itself, where a diagnostic record has a small closed field set and the
+ * cost of a false refusal is bounded.
  */
+
+import { containsCredentialShape } from "@asimposium/contracts/diagnostic-safety";
 
 export interface SuiteDiagnostic {
   readonly tool: string;
@@ -38,17 +52,15 @@ export class DiagnosticSafetyError extends Error {
 /** POSIX absolute path or Windows drive path appearing anywhere in a value. */
 const ABSOLUTE_PATH = /(^|[\s"'=(:])(\/[A-Za-z0-9._~-]+\/|[A-Za-z]:\\)/;
 
-/** Credential shapes this project mints or carries (Fable §5.5, §14.2). */
-const CREDENTIAL_SHAPES: readonly RegExp[] = [
-  /asimp_ag_[A-Za-z0-9]/,
-  /#v1\.[A-Za-z0-9]/,
-  /\bBearer\s+\S/i,
-  /-----BEGIN [A-Z ]*PRIVATE KEY-----/,
-  /\b(?:sk|rk|pk)(?:[-_](?:live|test))?[-_][A-Za-z0-9_-]{12,}\b/,
-  /\bgh[pousr]_[A-Za-z0-9]{16,}\b/,
-  /\bgithub_pat_[A-Za-z0-9_]{22,}\b/,
-  /\bAIza[0-9A-Za-z_-]{20,}\b/,
-];
+/*
+ * Known credential families are no longer listed here. `containsCredentialShape`
+ * is the shared OPS.2a vocabulary and is a strict superset of the array this
+ * replaced: it adds Basic, the clipped forms a capture ceiling produces,
+ * labelled never-log fields and query credentials, and it fixes divergences the
+ * copies had accumulated — this package required only one character after
+ * `asimp_ag_` where the dispatcher required four, and bounded long hex at a word
+ * boundary where this one did not.
+ */
 
 const GENERIC_HIGH_ENTROPY_TOKEN = /[A-Za-z0-9_-]{32,}/g;
 const LONG_HEX_TOKEN = /[0-9a-f]{32,}/i;
@@ -109,7 +121,7 @@ function assertSafeString(field: string, value: string, secrets: readonly string
   if (ABSOLUTE_PATH.test(value)) {
     throw new DiagnosticSafetyError(field, "contains a local absolute path");
   }
-  if (CREDENTIAL_SHAPES.some((shape) => shape.test(value)))
+  if (containsCredentialShape(value))
     throw new DiagnosticSafetyError(field, "contains a credential-shaped string");
   for (const secret of secrets) {
     if (value.includes(secret))
