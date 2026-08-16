@@ -721,7 +721,9 @@ async function runCheckerContainmentPlant(): Promise<{
   readonly stdout: string;
   readonly stderr: string;
   readonly exitCode: number;
+  readonly durationMs: number;
 }> {
+  const startedAt = performance.now();
   const child = Bun.spawn({
     cmd: ["bash", "scripts/e2e-s3-split.sh"],
     cwd: root,
@@ -738,15 +740,17 @@ async function runCheckerContainmentPlant(): Promise<{
     new Response(child.stderr).text(),
     child.exited,
   ]);
-  return { stdout, stderr, exitCode };
+  return { stdout, stderr, exitCode, durationMs: performance.now() - startedAt };
 }
 
 function expectCheckerContainmentPlant(result: {
   readonly stdout: string;
   readonly stderr: string;
   readonly exitCode: number;
+  readonly durationMs: number;
 }): void {
   expect(result.exitCode).toBe(1);
+  expect(result.durationMs).toBeLessThan(30_000);
   expect(result.stdout).toContain('"code":"LOCAL_SPLIT_CHECKER_CONTAINMENT_FAILED"');
   for (const assertion of [
     "checker_containment_fixture_has_owned_group_listener_and_state_fd",
@@ -769,7 +773,9 @@ test(
   async () => {
     expectCheckerContainmentPlant(await runCheckerContainmentPlant());
   },
-  { timeout: 30_000 },
+  // The assertion above is the semantic prompt-exit bound; this larger limit
+  // is only a leak-safe outer watchdog that leaves room for typed cleanup.
+  { timeout: 120_000 },
 );
 
 test(
@@ -780,7 +786,9 @@ test(
     );
     for (const result of results) expectCheckerContainmentPlant(result);
   },
-  { timeout: 60_000 },
+  // Each result retains its 30-second semantic bound. This outer ceiling must
+  // not TERM a still-cleaning child before its typed evidence can converge.
+  { timeout: 120_000 },
 );
 
 test(

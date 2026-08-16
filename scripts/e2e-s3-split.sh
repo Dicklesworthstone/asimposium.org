@@ -1201,14 +1201,14 @@ run_checker_containment_self_test() {
   checker_pgid="${CHECKER_PGID}"
   emit '{"tool":"bash","package":"@asimposium/wire","suite":"s3-local-bindings","assertion":"checker_containment_fixture_has_owned_group_listener_and_state_fd","status":"pass","reproduce":"bash scripts/e2e-s3-split.sh"}'
 
-  # This first refusal sends no signal. The first EXIT cleanup attempt consumes
-  # the second planted inspection failure; its bounded retry must then use the
-  # same retained pid + pgid + lstart + marker before signaling the group.
-  TEST_GROUP_INSPECTION_FAILURES_REMAINING="${CLEANUP_RETRY_ATTEMPTS}"
+  # This first refusal sends no signal. Arm only the fault it is about to
+  # consume: if an outer watchdog interrupts this phase, EXIT cleanup must not
+  # inherit two planted failures and exhaust both of its bounded attempts.
+  TEST_GROUP_INSPECTION_FAILURES_REMAINING=1
   CHECKER_SUPERVISOR_LIFECYCLE_STATUS="injected_inspection_failure"
   CHECKER_PAYLOAD_LIFECYCLE_STATUS="not_observed"
   cleanup_checker_and_verify; cleanup_status=$?
-  (( cleanup_status != 0 && TEST_GROUP_INSPECTION_FAILURES_REMAINING == 1 )) || return 1
+  (( cleanup_status != 0 && TEST_GROUP_INSPECTION_FAILURES_REMAINING == 0 )) || return 1
   [[ "${CHECKER_PGID}" == "${checker_pgid}" ]] || return 1
   supervisor_identity_is_exact "${CHECKER_SUPERVISOR_PID}" "${CHECKER_PGID}" \
     "${CHECKER_SUPERVISOR_STARTED_AT}" "${CHECKER_SUPERVISOR_TOKEN}" || return 1
@@ -1220,6 +1220,10 @@ run_checker_containment_self_test() {
   holders="$(checker_state_holder_pids)"; status=$?
   (( status == 0 )) && [[ -n "${holders}" ]] || return 1
   emit '{"tool":"bash","package":"@asimposium/wire","suite":"s3-local-bindings","assertion":"checker_containment_refusal_sends_no_signal_and_retains_exact_ownership","status":"pass","reproduce":"bash scripts/e2e-s3-split.sh"}'
+  # Plant exactly one EXIT-attempt uncertainty only after the foreground
+  # refusal has been observed. The second bounded cleanup attempt must then
+  # reclaim the same exact group.
+  TEST_GROUP_INSPECTION_FAILURES_REMAINING=1
   CHECKER_SUPERVISOR_LIFECYCLE_STATUS="cleanup_unproven"
   return 125
 }
