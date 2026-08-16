@@ -5,12 +5,17 @@ import { readFile } from "node:fs/promises";
 import { dirname, relative, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 
-const CHECK_VERSION = "1.4.0";
+// 1.5.0 tightens acceptance: a rendered section that cannot be extracted is
+// drift rather than an exemption, and a non-canonical dossier filename is
+// refused before any read. Inputs that passed under 1.4.0 can fail under this.
+const CHECK_VERSION = "1.5.0";
 const root = dirname(fileURLToPath(import.meta.url));
 const args = new Set(process.argv.slice(2));
 const checkLinks = args.has("--check-links");
 const checkArtifacts = args.has("--check-artifacts");
 const selfTest = args.has("--self-test");
+const selfTestFail = args.has("--self-test-fail");
+const selfTestMiss = args.has("--self-test-miss");
 const emitDigests = args.has("--emit-digests");
 const runtimeVersion = typeof Bun === "undefined" ? process.version : Bun.version;
 const started = performance.now();
@@ -58,6 +63,17 @@ function isIsoDate(value) {
 
 function isSha256(value) {
   return typeof value === "string" && /^[a-f0-9]{64}$/.test(value);
+}
+
+/**
+ * The only filename shape a dossier may name. It has no directory part, so it
+ * cannot carry `..`, an absolute root, or a drive letter, and `resolve(root, …)`
+ * on a value that satisfies it cannot leave this directory. Two call sites need
+ * that answer — one to diagnose it, one to refuse a read before attempting it —
+ * so the shape is defined once here rather than twice inline.
+ */
+function isCanonicalDossierFilename(file) {
+  return typeof file === "string" && /^[0-9]{2}-[a-z0-9-]+\.md$/.test(file);
 }
 
 function documentationPathVersion(url) {
@@ -179,9 +195,25 @@ function extractMarkdownSection(body, heading) {
   return afterHeading.slice(0, nextHeading === -1 ? undefined : nextHeading).trim();
 }
 
+/**
+ * An absent section is drift, not an exemption.
+ *
+ * The heading presence check in `checkDossierMarkdown` accepts a substring
+ * anywhere in the body, while `extractMarkdownSection` requires a standalone
+ * heading line. Decorating a heading satisfies the first and defeats the
+ * second: `## Exact statement (draft)` contains `## Exact statement`, so no
+ * `E_DOSSIER_HEADING` fires, and the anchored `^…\s*$` match returns null. This
+ * used to return silently, which meant the strongest possible drift — the
+ * published statement having no comparable section at all — was the one case
+ * that passed. Nothing else binds manifest statement text to the rendered
+ * dossier, so that silence was the whole guard.
+ */
 function validateRenderedSection(body, heading, expected, location, code) {
   const actual = extractMarkdownSection(body, heading);
-  if (actual === null) return;
+  if (actual === null) {
+    diagnostic(code, location, `${heading} must be a standalone heading line`);
+    return;
+  }
   if (normalizeRenderedSection(actual) !== normalizeRenderedSection(expected)) {
     diagnostic(code, location, `${heading} must match the manifest exactly apart from inline-code presentation`);
   }
@@ -228,7 +260,7 @@ function validateDossier(dossier, oraclesById, renderExpectations) {
   if (!Number.isInteger(dossier.rung) || dossier.rung < 1 || dossier.rung > 5) {
     diagnostic("E_RUNG", location, "rung must be an integer from 1 through 5");
   }
-  if (!/^[0-9]{2}-[a-z0-9-]+\.md$/.test(dossier.file ?? "")) {
+  if (!isCanonicalDossierFilename(dossier.file)) {
     diagnostic("E_DOSSIER_FILE", location, "file must be a local numbered Markdown filename");
   }
   if (!Array.isArray(dossier.success_criteria) || dossier.success_criteria.length < 2) {
@@ -281,6 +313,23 @@ function validateDossier(dossier, oraclesById, renderExpectations) {
 }
 
 async function checkDossierMarkdown(dossier) {
+  /**
+   * Refuse before touching the filesystem. `validateDossier` already diagnoses a
+   * non-canonical name, but recording a diagnostic does not stop this function:
+   * both run unconditionally over every dossier, so a manifest naming
+   * `../../../../etc/passwd` still reached `resolve(root, …)` and read it. The
+   * run failed afterwards either way, which is why this was never a false
+   * accept — but a checker that reads outside its own directory while
+   * complaining about it is not the boundary this file claims to hold.
+   */
+  if (!isCanonicalDossierFilename(dossier?.file)) {
+    diagnostic(
+      "E_DOSSIER_FILE",
+      `manifest.json:${dossier?.id ?? "unknown"}`,
+      "dossier file is not a local numbered Markdown filename; no read was attempted",
+    );
+    return;
+  }
   const path = resolve(root, dossier.file);
   const pathLabel = safePath(path);
   let body;
@@ -331,6 +380,68 @@ async function checkDossierMarkdown(dossier) {
   }
   if (!body.includes(dossier.oracle_id)) {
     diagnostic("E_ORACLE_REFERENCE", pathLabel, `dossier does not name hidden oracle ${dossier.oracle_id}`);
+  }
+  validateOracleDisclosure(oraclesById.get(dossier.oracle_id), body, pathLabel);
+}
+
+/**
+ * Oracle leaves this checker already treats as the hidden answer itself, as
+ * opposed to a binding a dossier is required to publish. The list is derived
+ * from `validateCalibrationPlant` above, which already reads
+ * `planted_candidate` and `smallest_counterexample` as the calibration answer,
+ * plus the reproduction target value a participant is supposed to recompute.
+ *
+ * Paths are read from `oracles.json` at run time. No answer text is written
+ * into this checker, so the guard cannot itself become a disclosure.
+ *
+ * Deliberately NOT adjudicated here, because deciding them is a judgement
+ * about the seed science rather than a mechanical derivation, and both are
+ * present in participant-facing text today:
+ *
+ *   - `declaration` (`Nat.exists_infinite_primes`) — plausibly the formalization
+ *     answer, plausibly a legitimate citation.
+ *   - `expected_review_verdict` (`refuted`) — plausibly a leaked verdict,
+ *     plausibly the "expected ledger objects and validator behavior" section
+ *     that this checker separately requires.
+ *
+ * Their absence from this list is an open question, not a clearance. Numeric
+ * leaves are skipped by construction: only non-empty strings are compared, so
+ * a bare `1` cannot match ordinary prose.
+ */
+const HIDDEN_ORACLE_ANSWER_PATHS = [
+  ["planted_candidate"],
+  ["planted_defect"],
+  ["smallest_counterexample", "reason"],
+  ["decimal"],
+];
+
+function hiddenOracleAnswers(oracle) {
+  const answers = [];
+  for (const path of HIDDEN_ORACLE_ANSWER_PATHS) {
+    let node = oracle?.data;
+    for (const key of path) node = isObject(node) ? node[key] : undefined;
+    if (typeof node === "string" && node.trim().length > 0) {
+      answers.push({ path: path.join("."), value: node });
+    }
+  }
+  return answers;
+}
+
+/**
+ * Refuse a participant-facing dossier that republishes a hidden oracle answer.
+ * The diagnostic names only the oracle field path: echoing the matched value
+ * would move the disclosure from the dossier into CI output.
+ */
+function validateOracleDisclosure(oracle, body, pathLabel) {
+  if (typeof body !== "string") return;
+  for (const answer of hiddenOracleAnswers(oracle)) {
+    if (body.includes(answer.value)) {
+      diagnostic(
+        "E_ORACLE_DISCLOSED",
+        pathLabel,
+        `participant-facing dossier discloses hidden oracle answer ${answer.path}`,
+      );
+    }
   }
 }
 
@@ -432,47 +543,108 @@ async function checkPinnedArtifacts(dossiers) {
   }
 }
 
-function runPlantedNegative(fixture) {
+/**
+ * Run one planted control and decide the harness's own verdict.
+ *
+ * Ordering is the whole point and was previously wrong: the fixture's expected
+ * diagnostics must be discarded FIRST, and only then may a control failure be
+ * recorded. Recording before the splice pushed `E_NEGATIVE_NOT_DETECTED` at an
+ * index at or after `before`, so the same splice deleted the one diagnostic
+ * that signals a missing plant — a missing plant still exited 0. Every control
+ * routes through this helper so that ordering exists in exactly one place.
+ *
+ * The matched diagnostic's detail is reported next to its code because a code
+ * alone does not identify which branch produced it: one validator can emit the
+ * same code from several branches, so a control asserting only the code stays
+ * green when a regression moves the failure to a different branch. Details are
+ * safe to print — the disclosure diagnostic names an oracle field path and
+ * never its value.
+ */
+async function runPlantedControl(id, location, expectedDiagnostic, run) {
   const before = diagnostics.length;
-  validateSource(fixture.source, `fixtures/planted-negative-missing-anchor.json:${fixture.id}`);
-  const detected = diagnostics.slice(before).some((entry) => entry.code === fixture.expected_diagnostic);
-  if (!detected) {
-    diagnostic("E_NEGATIVE_NOT_DETECTED", "fixtures/planted-negative-missing-anchor.json", `expected ${fixture.expected_diagnostic} was not detected`);
-  }
+  // Awaited, not called bare: the traversal control drives an async validator,
+  // and a synchronous call would inspect `diagnostics` before that validator
+  // ever pushed one — every async plant would read as missing. Synchronous
+  // plants are unaffected, since awaiting a non-promise still resolves before
+  // the slice below.
+  await run();
+  const detected = diagnostics.slice(before).find((entry) => entry.code === expectedDiagnostic);
   diagnostics.splice(before, diagnostics.length - before);
-  if (detected) console.log(`planted-negative id=${fixture.id} status=detected diagnostic=${fixture.expected_diagnostic}`);
-}
-
-function runPlantedRenderedDrift(fixture) {
-  const before = diagnostics.length;
-  validateRenderedSection(
-    fixture.body,
-    fixture.heading,
-    fixture.expected_text,
-    `fixtures/planted-negative-rendered-statement-drift.json:${fixture.id}`,
-    fixture.expected_diagnostic,
-  );
-  const detected = diagnostics.slice(before).some((entry) => entry.code === fixture.expected_diagnostic);
   if (!detected) {
     diagnostic(
       "E_NEGATIVE_NOT_DETECTED",
-      "fixtures/planted-negative-rendered-statement-drift.json",
-      `expected ${fixture.expected_diagnostic} was not detected`,
+      location,
+      `expected ${expectedDiagnostic} was not detected`,
     );
+    return;
   }
-  diagnostics.splice(before, diagnostics.length - before);
-  if (detected) console.log(`planted-negative id=${fixture.id} status=detected diagnostic=${fixture.expected_diagnostic}`);
+  console.log(
+    `planted-negative id=${id} status=detected diagnostic=${expectedDiagnostic} detail=${detected.detail}`,
+  );
+}
+
+function runPlantedNegative(fixture) {
+  return runPlantedControl(
+    fixture.id,
+    "fixtures/planted-negative-missing-anchor.json",
+    fixture.expected_diagnostic,
+    () =>
+      validateSource(
+        fixture.source,
+        `fixtures/planted-negative-missing-anchor.json:${fixture.id}`,
+      ),
+  );
+}
+
+function runPlantedRenderedDrift(fixture) {
+  return runPlantedControl(
+    fixture.id,
+    "fixtures/planted-negative-rendered-statement-drift.json",
+    fixture.expected_diagnostic,
+    () =>
+      validateRenderedSection(
+        fixture.body,
+        fixture.heading,
+        fixture.expected_text,
+        `fixtures/planted-negative-rendered-statement-drift.json:${fixture.id}`,
+        fixture.expected_diagnostic,
+      ),
+  );
+}
+
+/**
+ * Causal control for the absent-section branch. The fixture's body contains the
+ * required heading only as a substring of a decorated one, so the anchored
+ * extraction returns null. Restore the bare `if (actual === null) return;` and
+ * this control misses with `E_NEGATIVE_NOT_DETECTED`.
+ */
+function runPlantedDecoratedHeading(fixture) {
+  return runPlantedControl(
+    fixture.id,
+    "fixtures/planted-negative-decorated-heading.json",
+    fixture.expected_diagnostic,
+    () =>
+      validateRenderedSection(
+        fixture.body,
+        fixture.heading,
+        fixture.expected_text,
+        `fixtures/planted-negative-decorated-heading.json:${fixture.id}`,
+        fixture.expected_diagnostic,
+      ),
+  );
 }
 
 function runPlantedDocumentationVersionDrift(fixture) {
-  const before = diagnostics.length;
-  validateSource(fixture.source, `fixtures/planted-negative-doc-url-version-alone.json:${fixture.id}`);
-  const detected = diagnostics.slice(before).some((entry) => entry.code === fixture.expected_diagnostic);
-  if (!detected) {
-    diagnostic("E_NEGATIVE_NOT_DETECTED", "fixtures/planted-negative-doc-url-version-alone.json", `expected ${fixture.expected_diagnostic} was not detected`);
-  }
-  diagnostics.splice(before, diagnostics.length - before);
-  if (detected) console.log(`planted-negative id=${fixture.id} status=detected diagnostic=${fixture.expected_diagnostic}`);
+  return runPlantedControl(
+    fixture.id,
+    "fixtures/planted-negative-doc-url-version-alone.json",
+    fixture.expected_diagnostic,
+    () =>
+      validateSource(
+        fixture.source,
+        `fixtures/planted-negative-doc-url-version-alone.json:${fixture.id}`,
+      ),
+  );
 }
 
 function validateCalibrationPlant(dossier, oracle, location) {
@@ -493,25 +665,119 @@ function validateCalibrationPlant(dossier, oracle, location) {
 }
 
 function runPlantedArtifactDrift(fixture) {
-  const before = diagnostics.length;
-  validateArtifactBinding(fixture.source, fixture.oracle, `fixtures/planted-negative-artifact-drift.json:${fixture.id}`);
-  const detected = diagnostics.slice(before).some((entry) => entry.code === fixture.expected_diagnostic);
-  if (!detected) {
-    diagnostic("E_NEGATIVE_NOT_DETECTED", "fixtures/planted-negative-artifact-drift.json", `expected ${fixture.expected_diagnostic} was not detected`);
-  }
-  diagnostics.splice(before, diagnostics.length - before);
-  if (detected) console.log(`planted-negative id=${fixture.id} status=detected diagnostic=${fixture.expected_diagnostic}`);
+  return runPlantedControl(
+    fixture.id,
+    "fixtures/planted-negative-artifact-drift.json",
+    fixture.expected_diagnostic,
+    () =>
+      validateArtifactBinding(
+        fixture.source,
+        fixture.oracle,
+        `fixtures/planted-negative-artifact-drift.json:${fixture.id}`,
+      ),
+  );
 }
 
 function runPlantedCalibrationDrift(fixture) {
-  const before = diagnostics.length;
-  validateCalibrationPlant(fixture.dossier, fixture.oracle, `fixtures/planted-negative-calibration-drift.json:${fixture.id}`);
-  const detected = diagnostics.slice(before).some((entry) => entry.code === fixture.expected_diagnostic);
-  if (!detected) {
-    diagnostic("E_NEGATIVE_NOT_DETECTED", "fixtures/planted-negative-calibration-drift.json", `expected ${fixture.expected_diagnostic} was not detected`);
-  }
-  diagnostics.splice(before, diagnostics.length - before);
-  if (detected) console.log(`planted-negative id=${fixture.id} status=detected diagnostic=${fixture.expected_diagnostic}`);
+  return runPlantedControl(
+    fixture.id,
+    "fixtures/planted-negative-calibration-drift.json",
+    fixture.expected_diagnostic,
+    () =>
+      validateCalibrationPlant(
+        fixture.dossier,
+        fixture.oracle,
+        `fixtures/planted-negative-calibration-drift.json:${fixture.id}`,
+      ),
+  );
+}
+
+/**
+ * Causal control for the disclosure guard. The plant is entirely synthetic:
+ * it carries no real oracle text, so this control can never itself publish an
+ * answer, and it stays inline rather than in `fixtures/` for the same reason.
+ * If the guard is removed, `E_ORACLE_DISCLOSED` stops firing here and the run
+ * fails with `E_NEGATIVE_NOT_DETECTED`.
+ */
+function runPlantedOracleDisclosure() {
+  const plantedAnswer = "SYNTHETIC-PLANTED-ORACLE-ANSWER-NOT-REAL-CONTENT";
+  return runPlantedControl(
+    "synthetic-oracle-disclosure",
+    "planted-negative:synthetic-oracle-disclosure",
+    "E_ORACLE_DISCLOSED",
+    () =>
+      validateOracleDisclosure(
+        { data: { planted_candidate: plantedAnswer } },
+        `## Exact statement\n${plantedAnswer}\n`,
+        "planted-negative:synthetic-oracle-disclosure",
+      ),
+  );
+}
+
+/**
+ * Causal control for the pre-read filename guard.
+ *
+ * The synthetic dossier names a path that escapes this directory but is
+ * certain to exist, so the counterfactual is observable rather than hypothetical:
+ * remove the early return in `checkDossierMarkdown` and the read succeeds, the
+ * heading checks fire against the wrong file's bytes, `E_DOSSIER_FILE` is never
+ * emitted from that function, and this control misses with
+ * `E_NEGATIVE_NOT_DETECTED`. With the guard in place nothing outside the seed
+ * directory is opened at all. Entirely in memory: no file is created, written,
+ * copied, or removed, and the traversal target is only ever named, never read.
+ */
+function runPlantedFilenameTraversal() {
+  return runPlantedControl(
+    "synthetic-filename-traversal",
+    "planted-negative:synthetic-filename-traversal",
+    "E_DOSSIER_FILE",
+    () =>
+      checkDossierMarkdown({
+        id: "synthetic-filename-traversal",
+        file: "../../../package.json",
+        title: "Synthetic traversal control",
+        statement: "not compared",
+        falsifier: "not compared",
+        freshness_date: "2026-08-13",
+        oracle_id: "synthetic-oracle",
+        sources: [],
+      }),
+  );
+}
+
+/**
+ * Ordering control for the plant harness itself. It runs a committed fixture
+ * through the real validator while expecting a diagnostic that validator can
+ * never emit, so the control must miss. A missing plant has to survive the
+ * splice and exit non-zero; if `E_NEGATIVE_NOT_DETECTED` is ever filtered away
+ * again, this exits 0 and its test fails. In-memory only: nothing is created,
+ * written, copied, or removed.
+ */
+function runMissingPlantControl(fixture) {
+  return runPlantedControl(
+    "synthetic-missing-plant",
+    "missing-plant-control",
+    "E_DIAGNOSTIC_NEVER_EMITTED_BY_THIS_VALIDATOR",
+    () => validateSource(fixture.source, "missing-plant-control"),
+  );
+}
+
+/**
+ * Exit-code control. Every other planted negative discards its diagnostic so a
+ * self-test run can still pass; that proves detection but never proves this
+ * checker *fails* on a bad input, which is the only property that makes it
+ * usable as a gate.
+ *
+ * `--self-test-fail` runs one already-committed invalid fixture through the
+ * real validator and deliberately RETAINS its diagnostic, so the process exits
+ * non-zero with a genuine code. It reads committed fixtures only and mutates
+ * nothing: no file is created, written, copied, or removed.
+ */
+function runRetainedFailure(fixture) {
+  validateSource(
+    fixture.source,
+    `retained-failure:fixtures/planted-negative-missing-anchor.json:${fixture.id}`,
+  );
 }
 
 function printDigestCandidates(oracles, dossiers) {
@@ -519,12 +785,13 @@ function printDigestCandidates(oracles, dossiers) {
   for (const dossier of dossiers) console.log(`digest render=${dossier.id} sha256=${digest(renderDossier(dossier))}`);
 }
 
-const [manifest, oracleDocument, renderDocument, missingAnchorFixture, renderedDriftFixture, documentationVersionFixture, artifactDriftFixture, calibrationDriftFixture] = await Promise.all([
+const [manifest, oracleDocument, renderDocument, missingAnchorFixture, renderedDriftFixture, decoratedHeadingFixture, documentationVersionFixture, artifactDriftFixture, calibrationDriftFixture] = await Promise.all([
   readJson("manifest.json"),
   readJson("oracles.json"),
   readJson("fixtures/render-expectations.json"),
   readJson("fixtures/planted-negative-missing-anchor.json"),
   readJson("fixtures/planted-negative-rendered-statement-drift.json"),
+  readJson("fixtures/planted-negative-decorated-heading.json"),
   readJson("fixtures/planted-negative-doc-url-version-alone.json"),
   readJson("fixtures/planted-negative-artifact-drift.json"),
   readJson("fixtures/planted-negative-calibration-drift.json"),
@@ -559,11 +826,16 @@ validateCalibrationPlant(
   "oracles.json:oracle-calibration-unbounded-primes-v1",
 );
 await Promise.all(dossiers.map(checkDossierMarkdown));
-if (selfTest) runPlantedNegative(missingAnchorFixture);
-if (selfTest) runPlantedRenderedDrift(renderedDriftFixture);
-if (selfTest) runPlantedDocumentationVersionDrift(documentationVersionFixture);
-if (selfTest) runPlantedArtifactDrift(artifactDriftFixture);
-if (selfTest) runPlantedCalibrationDrift(calibrationDriftFixture);
+if (selfTest) await runPlantedNegative(missingAnchorFixture);
+if (selfTest) await runPlantedRenderedDrift(renderedDriftFixture);
+if (selfTest) await runPlantedDecoratedHeading(decoratedHeadingFixture);
+if (selfTest) await runPlantedDocumentationVersionDrift(documentationVersionFixture);
+if (selfTest) await runPlantedArtifactDrift(artifactDriftFixture);
+if (selfTest) await runPlantedCalibrationDrift(calibrationDriftFixture);
+if (selfTest) await runPlantedOracleDisclosure();
+if (selfTest) await runPlantedFilenameTraversal();
+if (selfTestFail) runRetainedFailure(missingAnchorFixture);
+if (selfTestMiss) await runMissingPlantControl(missingAnchorFixture);
 if (emitDigests) printDigestCandidates(oracles, dossiers);
 if (checkLinks) await checkExternalLinks(dossiers);
 if (checkArtifacts) await checkPinnedArtifacts(dossiers);
@@ -575,10 +847,20 @@ const suite = checkLinks && checkArtifacts
     ? "source-contract+links"
     : checkArtifacts
       ? "source-contract+artifacts"
-      : selfTest
-        ? "source-contract+planted-negative"
-        : "source-contract";
-const reproductionArgs = [checkLinks ? "--check-links" : null, checkArtifacts ? "--check-artifacts" : null, selfTest ? "--self-test" : null]
+      : selfTestFail
+        ? "source-contract+retained-failure"
+        : selfTestMiss
+          ? "source-contract+missing-plant-control"
+          : selfTest
+            ? "source-contract+planted-negative"
+            : "source-contract";
+const reproductionArgs = [
+  checkLinks ? "--check-links" : null,
+  checkArtifacts ? "--check-artifacts" : null,
+  selfTest ? "--self-test" : null,
+  selfTestFail ? "--self-test-fail" : null,
+  selfTestMiss ? "--self-test-miss" : null,
+]
   .filter(Boolean)
   .join(" ");
 const reproduction = `bun docs/seed/rungs-1-5/check.mjs${reproductionArgs ? ` ${reproductionArgs}` : ""}`;

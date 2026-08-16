@@ -1,0 +1,8 @@
+{
+  "id": "negative-decorated-heading",
+  "heading": "## Exact statement",
+  "body": "# Controlled checker fixture\n\n## Exact statement (draft)\n\nFor every natural number n, there exists a natural prime p such that p ≤ n.\n\n## Next section\n",
+  "expected_text": "For every natural number n, there exists a natural prime p such that n ≤ p.",
+  "expected_diagnostic": "E_RENDERED_STATEMENT_DRIFT",
+  "note": "The body carries the required heading as a substring but never as a standalone heading line, so the presence check passes and the anchored extraction returns null. The statement below it is also genuinely drifted, so a run that reaches the comparison would fail on content too; the point of this fixture is that the comparison must not be skipped."
+}

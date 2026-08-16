@@ -91,6 +91,38 @@ test("rung-7 template requires predictions, bounded checks, and an external-revi
   assert.ok(validateNewTheoryTemplate(slate.new_theory_template).some((error) => error.code === "NEW_THEORY_TEMPLATE_INCOMPLETE"));
 });
 
+test("every rung-6 slate dossier reaches the contract, not only SP4D", async () => {
+  const [{ dossiers, errors }, slate] = await Promise.all([
+    runCheck(),
+    readFile(sourcePaths.slate, "utf8").then(JSON.parse),
+  ]);
+  assert.deepEqual(errors, []);
+  // Without this the loop below passes vacuously on an empty slate.
+  assert.ok(slate.dossiers.length > 0, "the slate carries no dossiers to validate");
+  const validated = new Set(dossiers.map((dossier) => dossier.id));
+  for (const dossier of slate.dossiers) {
+    assert.ok(validated.has(dossier.id), `slate dossier ${dossier.id} was not validated`);
+  }
+});
+
+test("planted negative: a slate dossier losing its no-resolution language is rejected", async () => {
+  const slate = JSON.parse(await readFile(sourcePaths.slate, "utf8"));
+  const [dossier] = slate.dossiers;
+  dossier.no_resolution_language = "";
+  const errors = validateDossier(dossier);
+  assert.ok(
+    errors.some((error) => error.code === "MISSING_REQUIRED_TEXT"),
+    `expected MISSING_REQUIRED_TEXT for ${dossier.id}`,
+  );
+});
+
+test("planted negative: a slate dossier without a pre-publication recheck is rejected", async () => {
+  const slate = JSON.parse(await readFile(sourcePaths.slate, "utf8"));
+  const [dossier] = slate.dossiers;
+  dossier.status_freshness = { ...dossier.status_freshness, prepublication_recheck_required: false };
+  assert.ok(validateDossier(dossier).some((error) => error.code === "FRESHNESS_POLICY_INVALID"));
+});
+
 test("CLI-oriented check succeeds with secret-safe diagnostics", () => {
   const result = spawnSync(process.execPath, [resolve(here, "check.mjs")], { encoding: "utf8" });
   assert.equal(result.status, 0, result.stderr);
