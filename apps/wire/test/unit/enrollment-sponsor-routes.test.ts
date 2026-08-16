@@ -21,6 +21,7 @@ import { VerificationKeyring } from "../../src/auth/keyring";
 import { MemoryNonceStore } from "../../src/auth/nonce";
 import { createEnrollmentRouter, type EnrollmentRouterOptions } from "../../src/enrollment/router";
 import {
+  EnrollmentError,
   EnrollmentService,
   enrollmentReplayProtectorFromBase64Url,
   InMemoryEnrollmentStore,
@@ -866,6 +867,32 @@ describe("sponsor enrollment routes", () => {
     );
     expect(noKey.status).toBe(400);
     expect(await noKey.json()).toMatchObject({ code: "IDEMPOTENCY_KEY_INVALID" });
+  });
+
+  test("lifecycle contention is a coarse retryable 429 rather than a database outage", async () => {
+    const h = await harness({ clock: { now: () => NOW * 1_000 } });
+    h.service.panicSponsor = async () => {
+      throw new EnrollmentError("LIFECYCLE_BUSY");
+    };
+    const body = JSON.stringify({
+      confirm: "revoke-all-fellow-credentials",
+      step_up_authenticated_at: NOW,
+    });
+    const headers = await h.sign(body, "/v1/sponsors/panic", "sponsor.panic");
+    const response = await h.app.fetch(
+      envelopeRequest("/v1/sponsors/panic", headers, "POST", body),
+    );
+
+    expect(response.status).toBe(429);
+    expect(response.headers.get("retry-after")).toBe("1");
+    const payload = await response.json();
+    expect(OpaqueProblemSchema.parse(payload)).toMatchObject({
+      code: "LIFECYCLE_BUSY",
+      status: 429,
+    });
+    const serialized = JSON.stringify(payload);
+    expect(serialized).not.toContain(SPONSOR);
+    expect(serialized).not.toContain("database");
   });
 
   test("an elapsed pre-approval grant leaves no impossible card or misleading retry loop", async () => {

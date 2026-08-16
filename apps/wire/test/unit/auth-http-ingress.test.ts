@@ -400,4 +400,27 @@ describe("pre-authentication request bodies are byte bounded", () => {
     expect(result.ok).toBe(true);
     if (result.ok) expect(new TextDecoder().decode(result.rawBody)).toBe(body);
   });
+
+  test("a byte stream exercises the BYOB path without detaching retained request bytes", async () => {
+    const h = await harness();
+    const bodyText = '{"byob":true}';
+    const signed = await h.makeRequest(bodyText);
+    const headers = new Headers(signed.headers);
+    headers.delete("content-length");
+    const bodyBytes = new TextEncoder().encode(bodyText);
+    const byteStream = new ReadableStream<Uint8Array>({
+      type: "bytes",
+      start(controller: { enqueue(chunk: Uint8Array): void; close(): void }) {
+        controller.enqueue(bodyBytes);
+        controller.close();
+      },
+    } as never);
+
+    const result = await authenticateServiceEnvelopeRequest(
+      { method: "POST", headers, body: byteStream } as unknown as Request,
+      h.options,
+    );
+    expect(result.ok).toBe(true);
+    if (result.ok) expect(new TextDecoder().decode(result.rawBody)).toBe(bodyText);
+  });
 });

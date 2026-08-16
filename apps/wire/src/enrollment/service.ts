@@ -2318,7 +2318,8 @@ export class EnrollmentService {
     } catch (error) {
       if (
         error instanceof EnrollmentIdempotencyRaceError ||
-        (error instanceof EnrollmentError && error.code === "FELLOW_LIFECYCLE_NOT_CURRENT")
+        (error instanceof EnrollmentError &&
+          (error.code === "FELLOW_LIFECYCLE_NOT_CURRENT" || error.code === "LIFECYCLE_BUSY"))
       ) {
         const replay = await this.#store.idempotencyReplay(prepared.attempt);
         if (replay !== undefined) {
@@ -2386,7 +2387,8 @@ export class EnrollmentService {
     } catch (error) {
       if (
         error instanceof EnrollmentIdempotencyRaceError ||
-        (error instanceof EnrollmentError && error.code === "FELLOW_LIFECYCLE_NOT_CURRENT")
+        (error instanceof EnrollmentError &&
+          (error.code === "FELLOW_LIFECYCLE_NOT_CURRENT" || error.code === "LIFECYCLE_BUSY"))
       ) {
         const replay = await this.#store.idempotencyReplay(prepared.attempt);
         if (replay !== undefined) {
@@ -2445,7 +2447,8 @@ export class EnrollmentService {
     } catch (error) {
       if (
         error instanceof EnrollmentIdempotencyRaceError ||
-        (error instanceof EnrollmentError && error.code === "FELLOW_LIFECYCLE_NOT_CURRENT")
+        (error instanceof EnrollmentError &&
+          (error.code === "FELLOW_LIFECYCLE_NOT_CURRENT" || error.code === "LIFECYCLE_BUSY"))
       ) {
         const replay = await this.#store.idempotencyReplay(prepared.attempt);
         if (replay !== undefined) {

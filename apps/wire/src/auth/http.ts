@@ -162,7 +162,11 @@ async function readBoundedRequestBody(request: Request): Promise<BoundedBodyRead
     cancel();
     return { ok: false, reason: "malformed" };
   } finally {
-    reader.releaseLock();
+    try {
+      reader.releaseLock();
+    } catch {
+      // A hostile or already-invalid stream must not replace the typed result.
+    }
   }
   return { ok: true, bytes: bytes.subarray(0, total) };
 }

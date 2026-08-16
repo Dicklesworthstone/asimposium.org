@@ -7,6 +7,51 @@ PRAGMA foreign_keys = ON;
 -- The replay row is still written in the same D1 batch as the command event.
 -- `request_digest NOT NULL` remains the conflict-abort mechanism: do not relax
 -- it while widening the vocabulary.
+--
+-- 0012 cannot honestly manufacture causal history for lifecycle projections
+-- written by an older Worker or by maintenance SQL. A neutral zero panic row
+-- carries no authority effect and remains upgrade-compatible; every actual
+-- panic, revocation, or non-active Fellow must be resolved before this
+-- event-first migration can install. Run this preflight before any schema or
+-- projection mutation so its evidence cannot be normalized away.
+CREATE TABLE fellow_lifecycle_migration_guard (
+  valid INTEGER NOT NULL
+);
+
+CREATE TRIGGER fellow_lifecycle_migration_guard_reject
+BEFORE INSERT ON fellow_lifecycle_migration_guard
+WHEN NEW.valid = 0
+BEGIN
+  SELECT RAISE(ABORT, 'fellow lifecycle history must be resolved before migration');
+END;
+
+INSERT INTO fellow_lifecycle_migration_guard (valid)
+SELECT 0
+ WHERE EXISTS (
+   SELECT 1 FROM enrollment_sponsor_security security
+    WHERE typeof(security.sponsor_id) <> 'text'
+       OR length(security.sponsor_id) NOT BETWEEN 5 AND 64
+       OR substr(security.sponsor_id, 1, 4) <> 'usr_'
+       OR substr(security.sponsor_id, 5) GLOB '*[^A-Za-z0-9_-]*'
+       OR typeof(security.panic_at) <> 'integer'
+       OR security.panic_at NOT BETWEEN 0 AND 9007199254740991
+       OR typeof(security.updated_at) <> 'integer'
+       OR security.updated_at NOT BETWEEN security.panic_at AND 9007199254740991
+       OR security.panic_at <> 0
+       OR security.updated_at <> 0
+ )
+ OR EXISTS (
+   SELECT 1 FROM enrollment_fellows fellow
+    WHERE fellow.status <> 'active'
+ )
+ OR EXISTS (
+   SELECT 1 FROM fellow_tokens credential
+    WHERE credential.revoked_at IS NOT NULL
+ );
+
+DROP TRIGGER fellow_lifecycle_migration_guard_reject;
+DROP TABLE fellow_lifecycle_migration_guard;
+
 CREATE TABLE enrollment_idempotency_with_lifecycle (
   scope TEXT NOT NULL CHECK (scope IN (
     'mint', 'claim', 'decision', 'poll', 'device-start',
@@ -164,29 +209,6 @@ CREATE TABLE fellow_write_review_windows (
   CHECK (typeof(flagged_at) = 'integer' AND flagged_at BETWEEN 1 AND 9007199254740991)
 );
 
--- Retained sponsor panic evidence used a nonnegative timestamp contract. Keep
--- zero upgrade-compatible, but every new event time is strictly positive.
-CREATE TABLE fellow_lifecycle_migration_guard (
-  valid INTEGER NOT NULL CONSTRAINT fellow_lifecycle_migration_guard CHECK (valid = 1)
-);
-
-INSERT INTO fellow_lifecycle_migration_guard (valid)
-SELECT 0
- WHERE EXISTS (
-   SELECT 1 FROM enrollment_sponsor_security security
-    WHERE typeof(security.sponsor_id) <> 'text'
-       OR length(security.sponsor_id) NOT BETWEEN 5 AND 64
-       OR substr(security.sponsor_id, 1, 4) <> 'usr_'
-       OR substr(security.sponsor_id, 5) GLOB '*[^A-Za-z0-9_-]*'
-       OR typeof(security.panic_at) <> 'integer'
-       OR security.panic_at NOT BETWEEN 0 AND 9007199254740991
-       OR typeof(security.updated_at) <> 'integer'
-       OR security.updated_at NOT BETWEEN security.panic_at AND 9007199254740991
-       OR security.panic_event_id IS NOT NULL
- );
-
-DROP TABLE fellow_lifecycle_migration_guard;
-
 -- The event statement is the command. It may append only when the next sponsor
 -- sequence and the exact current projection state agree.
 CREATE TRIGGER fellow_lifecycle_events_command_guard
@@ -197,7 +219,6 @@ WHEN NOT EXISTS (
      AND sponsor.lifecycle_seq + 1 = NEW.sponsor_seq
      AND sponsor.lifecycle_lease_token = NEW.event_id
      AND sponsor.lifecycle_lease_expires_at IS NOT NULL
-     AND NEW.created_at <= sponsor.lifecycle_lease_expires_at
 )
 OR NOT (
   (NEW.action = 'credential-revoked' AND EXISTS (
@@ -477,7 +498,8 @@ BEGIN
          lifecycle_lease_token = NULL,
          lifecycle_lease_expires_at = NULL
    WHERE sponsor_id = NEW.sponsor_id
-     AND lifecycle_seq + 1 = NEW.sponsor_seq;
+     AND lifecycle_seq + 1 = NEW.sponsor_seq
+     AND lifecycle_lease_token = NEW.event_id;
 END;
 
 CREATE TRIGGER sponsors_lifecycle_seq_event_bound

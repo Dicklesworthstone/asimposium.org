@@ -90,7 +90,9 @@ type LocalBinding = string | number | null;
 function localD1(
   sqlite: Database,
   options: {
+    readonly afterBatchCommit?: () => Promise<void>;
     readonly afterFirstRead?: (query: string) => Promise<void>;
+    readonly onStatement?: (query: string) => void;
     readonly serializeBatches?: boolean;
   } = {},
 ): D1Database {
@@ -98,6 +100,7 @@ function localD1(
     bind(...values: LocalBinding[]) {
       return {
         async run() {
+          options.onStatement?.(query);
           const statement = sqlite.prepare<unknown, LocalBinding[]>(query);
           if (/^\s*SELECT\b/i.test(query)) {
             return { results: statement.all(...values), meta: { changes: 0 } };
@@ -106,11 +109,13 @@ function localD1(
           return { results: [], meta: { changes: result.changes } };
         },
         async first<T>(): Promise<T | null> {
+          options.onStatement?.(query);
           const row = (sqlite.prepare<T, LocalBinding[]>(query).get(...values) ?? null) as T | null;
           await options.afterFirstRead?.(query);
           return row;
         },
         async all<T>(): Promise<{ results: T[] }> {
+          options.onStatement?.(query);
           return {
             results: sqlite.prepare<T, LocalBinding[]>(query).all(...values) as T[],
           };
@@ -127,6 +132,7 @@ function localD1(
     }[],
   ) => {
     sqlite.run("BEGIN");
+    let committed = false;
     try {
       const results: {
         readonly results?: readonly unknown[];
@@ -134,9 +140,11 @@ function localD1(
       }[] = [];
       for (const statement of statements) results.push(await statement.run());
       sqlite.run("COMMIT");
+      committed = true;
+      await options.afterBatchCommit?.();
       return results;
     } catch (error) {
-      sqlite.run("ROLLBACK");
+      if (!committed) sqlite.run("ROLLBACK");
       throw error;
     }
   };
@@ -184,12 +192,17 @@ function database(options: { readonly nullableDigest?: boolean } = {}): Database
   return sqlite;
 }
 
-function lifecycleCommandDatabase(): Database {
+function databaseBeforeLifecycleCommands(): Database {
   const sqlite = lifecycleDatabase();
   sqlite.exec(readFileSync(SPONSOR_MIGRATION, "utf8"));
   sqlite.exec(readFileSync(DEVICE_MIGRATION, "utf8"));
   sqlite.exec(readFileSync(DEVICE_HARDENING_MIGRATION, "utf8"));
   sqlite.exec(readFileSync(CREDENTIAL_HARDENING_MIGRATION, "utf8"));
+  return sqlite;
+}
+
+function lifecycleCommandDatabase(): Database {
+  const sqlite = databaseBeforeLifecycleCommands();
   sqlite.exec(readFileSync(FELLOW_LIFECYCLE_COMMANDS_MIGRATION, "utf8"));
   return sqlite;
 }
@@ -5342,12 +5355,108 @@ describe("availabilitySuggestions is bounded, exact and deterministic", () => {
 });
 
 describe("0012 sponsor lifecycle commands", () => {
-  function lifecycleServiceFixture() {
+  test("0012 refuses lifecycle projections that have no causal event history", () => {
+    const expectGuardRollback = (sqlite: Database) => {
+      expect(
+        sqlite
+          .prepare<{ invalid: number }, []>(
+            `SELECT EXISTS (
+               SELECT 1 FROM enrollment_fellows WHERE status <> 'active'
+             ) OR EXISTS (
+               SELECT 1 FROM fellow_tokens WHERE revoked_at IS NOT NULL
+             ) OR EXISTS (
+               SELECT 1 FROM enrollment_sponsor_security
+                WHERE panic_at <> 0 OR updated_at <> 0
+             ) AS invalid`,
+          )
+          .get()?.invalid,
+      ).toBe(1);
+      const migration = readFileSync(FELLOW_LIFECYCLE_COMMANDS_MIGRATION, "utf8");
+      const guardEnd = migration.indexOf(
+        "\n\nDROP TRIGGER fellow_lifecycle_migration_guard_reject;",
+      );
+      if (guardEnd < 0) throw new Error("0012 lifecycle guard boundary disappeared");
+      sqlite.run("BEGIN");
+      // Bun's multi-statement exec can continue after a middle-statement
+      // constraint error. End this exact-source execution at the guard insert
+      // so the planted failure cannot be masked by later successful DDL.
+      expect(() => sqlite.exec(migration.slice(0, guardEnd))).toThrow(
+        "fellow lifecycle history must be resolved before migration",
+      );
+      sqlite.run("ROLLBACK");
+      expect(
+        sqlite
+          .prepare<{ n: number }, []>(
+            "SELECT COUNT(*) AS n FROM pragma_table_info('sponsors') WHERE name = 'lifecycle_seq'",
+          )
+          .get()?.n,
+      ).toBe(0);
+    };
+
+    const nonActive = databaseBeforeLifecycleCommands();
+    nonActive
+      .prepare("INSERT INTO sponsors (sponsor_id, created_at, last_seen_at) VALUES (?, ?, ?)")
+      .run(LIFECYCLE_SPONSOR, NOW, NOW);
+    seedLifecycleIdentity(nonActive);
+    nonActive
+      .prepare("UPDATE enrollment_fellows SET status = 'paused' WHERE fellow_id = ?")
+      .run(LIFECYCLE_FELLOW);
+    expect(
+      nonActive
+        .prepare<{ status: string }, [string]>(
+          "SELECT status FROM enrollment_fellows WHERE fellow_id = ?",
+        )
+        .get(LIFECYCLE_FELLOW)?.status,
+    ).toBe("paused");
+    expectGuardRollback(nonActive);
+
+    const revoked = databaseBeforeLifecycleCommands();
+    revoked
+      .prepare("INSERT INTO sponsors (sponsor_id, created_at, last_seen_at) VALUES (?, ?, ?)")
+      .run(LIFECYCLE_SPONSOR, NOW, NOW);
+    seedLifecycleIdentity(revoked);
+    insertLifecycleCredential(revoked, {
+      id: "cred-retained-revocation",
+      hash: "token-hash-1",
+      issuedAt: NOW,
+      proposalId: LIFECYCLE_PROPOSAL,
+    });
+    revoked
+      .prepare("UPDATE fellow_tokens SET revoked_at = ? WHERE credential_id = ?")
+      .run(NOW + 1, "cred-retained-revocation");
+    expectGuardRollback(revoked);
+
+    const panicked = databaseBeforeLifecycleCommands();
+    panicked
+      .prepare("INSERT INTO sponsors (sponsor_id, created_at, last_seen_at) VALUES (?, ?, ?)")
+      .run(LIFECYCLE_SPONSOR, NOW, NOW);
+    panicked
+      .prepare(
+        "INSERT INTO enrollment_sponsor_security (sponsor_id, panic_at, updated_at) VALUES (?, ?, ?)",
+      )
+      .run(LIFECYCLE_SPONSOR, NOW, NOW);
+    expectGuardRollback(panicked);
+
+    const neutral = databaseBeforeLifecycleCommands();
+    neutral
+      .prepare("INSERT INTO sponsors (sponsor_id, created_at, last_seen_at) VALUES (?, ?, ?)")
+      .run(LIFECYCLE_SPONSOR, NOW, NOW);
+    neutral
+      .prepare(
+        "INSERT INTO enrollment_sponsor_security (sponsor_id, panic_at, updated_at) VALUES (?, 0, 0)",
+      )
+      .run(LIFECYCLE_SPONSOR);
+    expect(() =>
+      neutral.exec(readFileSync(FELLOW_LIFECYCLE_COMMANDS_MIGRATION, "utf8")),
+    ).not.toThrow();
+  });
+
+  function lifecycleServiceFixture(options: Parameters<typeof localD1>[1] = {}) {
     const clock = new DeviceTestClock();
     const sqlite = lifecycleCommandDatabase();
     const service = new EnrollmentService({
       clock,
-      store: new D1EnrollmentStore(localD1(sqlite)),
+      store: new D1EnrollmentStore(localD1(sqlite, options)),
       replayProtector: new AesGcmEnrollmentReplayProtector(new Uint8Array(32)),
     });
     const sponsor = { type: "sponsor", sponsorId: "usr_lifecycle_service" } as const;
@@ -5595,7 +5704,7 @@ describe("0012 sponsor lifecycle commands", () => {
       toStatus: "paused",
       eventId: `LEV-${"B".repeat(26)}`,
       requestId: "b".repeat(64),
-      effectiveAt: NOW + 2,
+      effectiveAt: NOW + 10_000,
     });
     const resumed = await store.transitionFellow({
       sponsorId: LIFECYCLE_SPONSOR,
@@ -5605,15 +5714,15 @@ describe("0012 sponsor lifecycle commands", () => {
       requestId: "c".repeat(64),
       effectiveAt: NOW + 1,
     });
-    expect(paused.effectiveAt).toBe(NOW + 2);
-    expect(resumed).toEqual({ sponsorSeq: 2, effectiveAt: NOW + 2 });
+    expect(paused.effectiveAt).toBe(NOW + 10_000);
+    expect(resumed).toEqual({ sponsorSeq: 2, effectiveAt: NOW + 10_000 });
     expect(
       sqlite
         .prepare<{ status: string; status_changed_at: number }, [string]>(
           "SELECT status, status_changed_at FROM enrollment_fellows WHERE fellow_id = ?",
         )
         .get(LIFECYCLE_FELLOW),
-    ).toEqual({ status: "active", status_changed_at: NOW + 2 });
+    ).toEqual({ status: "active", status_changed_at: NOW + 10_000 });
   });
 
   test("sponsor panic invalidates existing credentials and every pre-panic grant", async () => {
@@ -5952,13 +6061,317 @@ describe("0012 sponsor lifecycle commands", () => {
         effectiveAt: number;
       };
       const result = results[commands.indexOf(command)];
+      if (result === undefined) throw new Error("missing lifecycle command result");
       expect(response).toEqual({
         eventId: command.eventId,
         idempotencyKey: command.idempotencyKey,
-        sponsorSeq: result?.sponsorSeq,
-        effectiveAt: result?.effectiveAt,
+        sponsorSeq: result.sponsorSeq,
+        effectiveAt: result.effectiveAt,
       });
     }
+  });
+
+  test("a live lifecycle lease is not stolen and exhaustion writes no event or replay", async () => {
+    const sqlite = lifecycleCommandDatabase();
+    sqlite
+      .prepare("INSERT INTO sponsors (sponsor_id, created_at, last_seen_at) VALUES (?, ?, ?)")
+      .run(LIFECYCLE_SPONSOR, NOW, NOW);
+    const heldEvent = `LEV-${"A".repeat(26)}`;
+    sqlite
+      .prepare(
+        `UPDATE sponsors
+            SET lifecycle_lease_token = ?, lifecycle_lease_expires_at = ?
+          WHERE sponsor_id = ?`,
+      )
+      .run(heldEvent, NOW + 5_000, LIFECYCLE_SPONSOR);
+    let issuedStatements = 0;
+    const store = new D1EnrollmentStore(
+      localD1(sqlite, {
+        onStatement: () => {
+          issuedStatements += 1;
+        },
+      }),
+    );
+
+    let refusal: unknown;
+    try {
+      await store.panicSponsor({
+        sponsorId: LIFECYCLE_SPONSOR,
+        eventId: `LEV-${"B".repeat(26)}`,
+        requestId: "b".repeat(64),
+        effectiveAt: NOW + 1,
+        replayFor: async () => lifecycleReplay("sponsor-panic", "busy-panic", "busy-panic"),
+      });
+    } catch (error) {
+      refusal = error;
+    }
+    expect(refusal).toMatchObject({ code: "LIFECYCLE_BUSY" });
+    expect(issuedStatements).toBe(17);
+    expect(
+      sqlite
+        .prepare<{ lifecycle_seq: number; lifecycle_lease_token: string | null }, [string]>(
+          "SELECT lifecycle_seq, lifecycle_lease_token FROM sponsors WHERE sponsor_id = ?",
+        )
+        .get(LIFECYCLE_SPONSOR),
+    ).toEqual({ lifecycle_seq: 0, lifecycle_lease_token: heldEvent });
+    expect(
+      sqlite.prepare<{ n: number }, []>("SELECT COUNT(*) AS n FROM fellow_lifecycle_events").get()
+        ?.n,
+    ).toBe(0);
+    expect(
+      sqlite.prepare<{ n: number }, []>("SELECT COUNT(*) AS n FROM enrollment_idempotency").get()
+        ?.n,
+    ).toBe(0);
+  });
+
+  test("an expired lifecycle lease is reclaimed and fences its stale owner", async () => {
+    const sqlite = lifecycleCommandDatabase();
+    sqlite
+      .prepare("INSERT INTO sponsors (sponsor_id, created_at, last_seen_at) VALUES (?, ?, ?)")
+      .run(LIFECYCLE_SPONSOR, NOW, NOW);
+    const staleEvent = `LEV-${"C".repeat(26)}`;
+    sqlite
+      .prepare(
+        `UPDATE sponsors
+            SET lifecycle_lease_token = ?, lifecycle_lease_expires_at = ?
+          WHERE sponsor_id = ?`,
+      )
+      .run(staleEvent, NOW, LIFECYCLE_SPONSOR);
+    const store = new D1EnrollmentStore(localD1(sqlite));
+    const winnerEvent = `LEV-${"D".repeat(26)}`;
+
+    expect(
+      await store.panicSponsor({
+        sponsorId: LIFECYCLE_SPONSOR,
+        eventId: winnerEvent,
+        requestId: "d".repeat(64),
+        effectiveAt: NOW + 1,
+      }),
+    ).toEqual({ sponsorSeq: 1, effectiveAt: NOW + 1 });
+    expect(
+      sqlite
+        .prepare<
+          {
+            lifecycle_seq: number;
+            lifecycle_lease_token: string | null;
+            lifecycle_lease_expires_at: number | null;
+          },
+          [string]
+        >(
+          `SELECT lifecycle_seq, lifecycle_lease_token, lifecycle_lease_expires_at
+             FROM sponsors WHERE sponsor_id = ?`,
+        )
+        .get(LIFECYCLE_SPONSOR),
+    ).toEqual({
+      lifecycle_seq: 1,
+      lifecycle_lease_token: null,
+      lifecycle_lease_expires_at: null,
+    });
+    expect(() =>
+      sqlite
+        .prepare(
+          `INSERT INTO fellow_lifecycle_events (
+             event_id, sponsor_id, sponsor_seq, action, fellow_id, credential_id,
+             from_status, to_status, effective_at, review_from, request_id, created_at
+           ) VALUES (?, ?, 2, 'sponsor-panic', NULL, NULL, NULL, NULL, ?, NULL, ?, ?)`,
+        )
+        .run(staleEvent, LIFECYCLE_SPONSOR, NOW + 2, "c".repeat(64), NOW + 2),
+    ).toThrow("lifecycle command is not current");
+  });
+
+  test("a failed lifecycle batch releases only its own lease", async () => {
+    const sqlite = lifecycleCommandDatabase();
+    sqlite
+      .prepare("INSERT INTO sponsors (sponsor_id, created_at, last_seen_at) VALUES (?, ?, ?)")
+      .run(LIFECYCLE_SPONSOR, NOW, NOW);
+    const collision = lifecycleReplay("sponsor-panic", "collision-panic", "first");
+    sqlite
+      .prepare(
+        `INSERT INTO enrollment_idempotency (
+           scope, principal_scope, idempotency_key, request_digest,
+           response_ciphertext, response_initialization_vector, expires_at
+         ) VALUES (?, ?, ?, ?, ?, ?, ?)`,
+      )
+      .run(
+        collision.scope,
+        collision.principalScope,
+        collision.key,
+        collision.digest,
+        collision.encryptedResponse.ciphertext,
+        collision.encryptedResponse.initializationVector,
+        collision.now + 24 * 60 * 60_000,
+      );
+    const store = new D1EnrollmentStore(localD1(sqlite));
+
+    let refusal: unknown;
+    try {
+      await store.panicSponsor({
+        sponsorId: LIFECYCLE_SPONSOR,
+        eventId: `LEV-${"E".repeat(26)}`,
+        requestId: "e".repeat(64),
+        effectiveAt: NOW + 1,
+        replayFor: async () => lifecycleReplay("sponsor-panic", "collision-panic", "different"),
+      });
+    } catch (error) {
+      refusal = error;
+    }
+    expect(refusal).toMatchObject({ code: "IDEMPOTENCY_CONFLICT" });
+    expect(
+      sqlite
+        .prepare<{ lifecycle_seq: number; lifecycle_lease_token: string | null }, [string]>(
+          "SELECT lifecycle_seq, lifecycle_lease_token FROM sponsors WHERE sponsor_id = ?",
+        )
+        .get(LIFECYCLE_SPONSOR),
+    ).toEqual({ lifecycle_seq: 0, lifecycle_lease_token: null });
+    expect(
+      sqlite.prepare<{ n: number }, []>("SELECT COUNT(*) AS n FROM fellow_lifecycle_events").get()
+        ?.n,
+    ).toBe(0);
+  });
+
+  test("an ambiguous lease acquisition conditionally releases the acquired token", async () => {
+    const sqlite = lifecycleCommandDatabase();
+    sqlite
+      .prepare("INSERT INTO sponsors (sponsor_id, created_at, last_seen_at) VALUES (?, ?, ?)")
+      .run(LIFECYCLE_SPONSOR, NOW, NOW);
+    let injectLoss = true;
+    const store = new D1EnrollmentStore(
+      localD1(sqlite, {
+        afterFirstRead: async (query) => {
+          if (!injectLoss || !query.includes("SET lifecycle_lease_token = ?")) return;
+          injectLoss = false;
+          throw new Error("planted lost lease-acquisition response");
+        },
+      }),
+    );
+
+    await expect(
+      store.panicSponsor({
+        sponsorId: LIFECYCLE_SPONSOR,
+        eventId: `LEV-${"F".repeat(26)}`,
+        requestId: "f".repeat(64),
+        effectiveAt: NOW + 1,
+      }),
+    ).rejects.toBeInstanceOf(EnrollmentPersistenceError);
+    expect(
+      sqlite
+        .prepare<{ lifecycle_seq: number; lifecycle_lease_token: string | null }, [string]>(
+          "SELECT lifecycle_seq, lifecycle_lease_token FROM sponsors WHERE sponsor_id = ?",
+        )
+        .get(LIFECYCLE_SPONSOR),
+    ).toEqual({ lifecycle_seq: 0, lifecycle_lease_token: null });
+    expect(
+      sqlite.prepare<{ n: number }, []>("SELECT COUNT(*) AS n FROM fellow_lifecycle_events").get()
+        ?.n,
+    ).toBe(0);
+  });
+
+  test("a committed lifecycle batch with a lost response is recovered from exact ciphertext", async () => {
+    const sqlite = seededLifecycleCommandDatabase();
+    let injectLoss = true;
+    const store = new D1EnrollmentStore(
+      localD1(sqlite, {
+        afterBatchCommit: async () => {
+          if (!injectLoss) return;
+          injectLoss = false;
+          throw new Error("planted lost committed lifecycle response");
+        },
+      }),
+    );
+    const protector = new AesGcmEnrollmentReplayProtector(new Uint8Array(32));
+    const response = {
+      eventId: `LEV-${"G".repeat(26)}`,
+      sponsorSeq: 1,
+      effectiveAt: NOW + 1,
+    };
+    const replay = {
+      ...lifecycleReplay("credential-revoke", "lost-commit-revoke", "lost-commit-revoke"),
+      encryptedResponse: await protector.seal(JSON.stringify(response)),
+    };
+
+    await expect(
+      store.revokeCredential({
+        sponsorId: LIFECYCLE_SPONSOR,
+        fellowId: LIFECYCLE_FELLOW,
+        credentialId: "cred-lifecycle-command",
+        eventId: response.eventId,
+        requestId: "1".repeat(64),
+        effectiveAt: response.effectiveAt,
+        replayFor: async () => replay,
+      }),
+    ).rejects.toBeInstanceOf(EnrollmentIdempotencyRaceError);
+    const persisted = await store.idempotencyReplay(replay);
+    if (persisted === undefined) throw new Error("committed lifecycle replay was not retained");
+    expect(JSON.parse(await protector.open(persisted.encryptedResponse))).toEqual(response);
+    expect(
+      sqlite
+        .prepare<{ lifecycle_seq: number; lifecycle_lease_token: string | null }, [string]>(
+          "SELECT lifecycle_seq, lifecycle_lease_token FROM sponsors WHERE sponsor_id = ?",
+        )
+        .get(LIFECYCLE_SPONSOR),
+    ).toEqual({ lifecycle_seq: 1, lifecycle_lease_token: null });
+    expect(
+      sqlite.prepare<{ n: number }, []>("SELECT COUNT(*) AS n FROM fellow_lifecycle_events").get()
+        ?.n,
+    ).toBe(1);
+  });
+
+  test("the sponsor service returns the exact committed lifecycle response after transport loss", async () => {
+    let armed = false;
+    let responseLost = false;
+    const fixture = lifecycleServiceFixture({
+      afterBatchCommit: async () => {
+        if (!armed || responseLost) return;
+        responseLost = true;
+        throw new Error("planted lost sponsor lifecycle response");
+      },
+    });
+    await fixture.service.bootstrapSponsor(fixture.sponsor);
+    const request = {
+      confirm: "revoke-all-fellow-credentials",
+      step_up_authenticated_at: Math.floor(fixture.clock.value / 1_000),
+    } as const;
+    armed = true;
+
+    const recovered = await fixture.service.panicSponsor(fixture.sponsor, request, {
+      idempotencyKey: "lost-commit-service-panic",
+    });
+    expect(responseLost).toBe(true);
+    expect(recovered).toMatchObject({
+      acknowledged: true,
+      sponsor_seq: 1,
+      effective_at: fixture.clock.value,
+    });
+    expect(recovered.event_id).toMatch(/^LEV-[0-9A-HJKMNP-TV-Z]{26}$/);
+    expect(
+      fixture.sqlite
+        .prepare<{ event_id: string; sponsor_seq: number; effective_at: number }, [string]>(
+          `SELECT event_id, sponsor_seq, effective_at
+             FROM fellow_lifecycle_events WHERE sponsor_id = ?`,
+        )
+        .get(fixture.sponsor.sponsorId),
+    ).toEqual({
+      event_id: recovered.event_id,
+      sponsor_seq: recovered.sponsor_seq,
+      effective_at: recovered.effective_at,
+    });
+    expect(
+      fixture.sqlite
+        .prepare<{ n: number }, []>("SELECT COUNT(*) AS n FROM enrollment_idempotency")
+        .get()?.n,
+    ).toBe(1);
+
+    fixture.clock.value += 16 * 60 * 1_000;
+    await expect(
+      fixture.service.panicSponsor(fixture.sponsor, request, {
+        idempotencyKey: "lost-commit-service-panic",
+      }),
+    ).resolves.toEqual(recovered);
+    expect(
+      fixture.sqlite
+        .prepare<{ n: number }, []>("SELECT COUNT(*) AS n FROM fellow_lifecycle_events")
+        .get()?.n,
+    ).toBe(1);
   });
 
   test("an expired lifecycle replay key can name a new command without permanent event collision", async () => {

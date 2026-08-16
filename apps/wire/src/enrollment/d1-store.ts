@@ -419,9 +419,13 @@ const SUGGESTION_COUNT = 3;
  * caller fails closed if the filter ever removes more than this covers.
  */
 const SUGGESTION_POLICY_OVERFETCH = 8;
-const LIFECYCLE_LEASE_TTL_MS = 10_000;
-const LIFECYCLE_LEASE_RETRY_MS = 25;
-const MAX_LIFECYCLE_LEASE_ATTEMPTS = 40;
+const LIFECYCLE_LEASE_TTL_MS = 5_000;
+const MAX_LIFECYCLE_LEASE_ATTEMPTS = 16;
+
+function lifecycleLeaseRetryDelay(eventId: string, attempt: number): number {
+  const jitter = eventId.charCodeAt((attempt + 4) % eventId.length) % 11;
+  return Math.min(50, 10 + attempt * 3 + jitter);
+}
 
 function d1LifecycleTransitionAllowed(
   from: FellowLifecycleStatus,
@@ -2504,6 +2508,7 @@ export class D1EnrollmentStore implements EnrollmentStore {
           eventId,
         ).first<{ lifecycle_seq: number }>();
       } catch {
+        await this.releaseLifecycleLease(sponsorId, eventId);
         throw new EnrollmentPersistenceError();
       }
       if (row !== null) {
@@ -2527,7 +2532,9 @@ export class D1EnrollmentStore implements EnrollmentStore {
         if (sponsor === null) throw new EnrollmentError("FELLOW_LIFECYCLE_NOT_CURRENT");
       }
       if (attempt + 1 < MAX_LIFECYCLE_LEASE_ATTEMPTS) {
-        await new Promise<void>((resolve) => setTimeout(resolve, LIFECYCLE_LEASE_RETRY_MS));
+        await new Promise<void>((resolve) =>
+          setTimeout(resolve, lifecycleLeaseRetryDelay(eventId, attempt)),
+        );
       }
     }
     throw new EnrollmentError("LIFECYCLE_BUSY");
