@@ -55,6 +55,18 @@ export function enrollmentRecoveryDisposition(
     : "retain";
 }
 
+/** A committed Worker result must never be hidden by ancillary UI cache work. */
+export function bestEffortEnrollmentCacheInvalidation(
+  invalidate: () => void,
+): void {
+  try {
+    invalidate();
+  } catch {
+    // The caller already holds the authoritative one-time result. The client
+    // refresh is sufficient; cache invalidation is never allowed to suppress it.
+  }
+}
+
 function decodeHexKey(hex: string): ArrayBuffer {
   if (!RECOVERY_KEY.test(hex)) {
     throw new Error("enrollment recovery key must be 32 lowercase-hex bytes");

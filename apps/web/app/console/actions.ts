@@ -14,6 +14,7 @@ import { revalidatePath } from "next/cache";
 import { auth } from "@/auth";
 import { recentAuthOk } from "@/lib/recent-auth";
 import {
+  bestEffortEnrollmentCacheInvalidation,
   enrollmentRecoveryConfigurationIsValid,
   enrollmentRecoveryDisposition,
   enrollmentRecoveryFingerprint,
@@ -353,7 +354,7 @@ async function dispatchMint(
             : (result.detail ?? "The agent host refused the mint."),
     };
   }
-  revalidatePath("/console");
+  bestEffortEnrollmentCacheInvalidation(() => revalidatePath("/console"));
   return {
     ok: true,
     joinUrl: result.data.join_url,
@@ -503,7 +504,7 @@ async function dispatchDecision(
             : (result.detail ?? "The decision was not accepted."),
     };
   }
-  revalidatePath("/console");
+  bestEffortEnrollmentCacheInvalidation(() => revalidatePath("/console"));
   return { ok: true, decision: decision.decision };
 }
 

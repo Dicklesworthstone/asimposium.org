@@ -2,6 +2,7 @@ import { expect, test } from "bun:test";
 import { MintEnrollmentRequestSchema } from "@asimposium/contracts";
 
 import {
+  bestEffortEnrollmentCacheInvalidation,
   enrollmentRecoveryConfigurationIsValid,
   enrollmentRecoveryDisposition,
   enrollmentRecoveryFingerprint,
@@ -191,4 +192,15 @@ test("only definite local or schema-valid non-ambiguous Worker refusals discard 
   ).toBe("retain");
   expect(enrollmentRecoveryDisposition("refused")).toBe("retain");
   expect(enrollmentRecoveryDisposition("refused", 302)).toBe("retain");
+});
+
+test("cache invalidation cannot suppress an already committed one-time result", () => {
+  let calls = 0;
+  expect(() =>
+    bestEffortEnrollmentCacheInvalidation(() => {
+      calls += 1;
+      throw new Error("cache unavailable");
+    }),
+  ).not.toThrow();
+  expect(calls).toBe(1);
 });
