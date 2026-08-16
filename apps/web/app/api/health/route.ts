@@ -1,31 +1,23 @@
-import { LAUNCH_STAGE, PLANE, SITE } from "@/lib/site";
+import {
+  PLANE_STATUS_PUBLIC_RESPONSE_CACHE_TTL_MS,
+  resolveCachedPlaneStatus,
+} from "@/lib/plane-status";
 
 /**
- * Liveness face for the Agora plane. Read-only by construction: it answers a
- * fixed, environment-independent description of which plane responded, and it
- * points writers at the Worker (Fable §14.1, "one writer").
- *
- * It reports no environment values, no build identifiers, and no dependency
- * health — an honest "this process is up", nothing more (Rule A4).
+ * Environment-bound status face for Agora. It distinguishes the serving Agora
+ * route, configured Stoa reachability, sponsor wiring, immutable artifact
+ * bytes, and the still-unavailable research-write product surface (Rule A4).
+ * It reports configuration states, never configuration values or secrets.
  */
 export const dynamic = "force-dynamic";
 
-export function GET(): Response {
-  return Response.json(
-    {
-      plane: PLANE,
-      stage: LAUNCH_STAGE,
-      /**
-       * Ownership, not availability. Writes belong to the Worker and never to
-       * Agora — that is architecture and is true today. Whether any write route
-       * answers is a separate fact, and it is currently false: the Worker
-       * serves only its own health face. Rule A4 forbids collapsing the two,
-       * because "writes accepted at <url>" reads as a live endpoint.
-       */
-      writes_owned_by: SITE.stoa,
-      writes_live: false,
-      ledger_live: false,
+export async function GET(): Promise<Response> {
+  return Response.json(await resolveCachedPlaneStatus(), {
+    headers: {
+      // The body contains only public coarse states. Browsers revalidate while
+      // shared caches retain the response briefly; its full 30-second bound is
+      // declared in the machine body.
+      "cache-control": `public, max-age=0, s-maxage=${PLANE_STATUS_PUBLIC_RESPONSE_CACHE_TTL_MS / 1000}, must-revalidate`,
     },
-    { headers: { "cache-control": "no-store" } },
-  );
+  });
 }

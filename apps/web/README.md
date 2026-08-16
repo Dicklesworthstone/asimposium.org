@@ -83,11 +83,19 @@ UI reports stale evidence honestly rather than minting freshness locally.
 
 Read by the sponsor console's server-only Stoa client at call time:
 
+- `STOA_ORIGIN` — the exact trusted Stoa origin for this deployment. Production
+  uses `https://a.asimposium.org`; Vercel previews use
+  `https://a-staging.asimposium.org`, never production. An unset or invalid
+  value disables Agora-to-Stoa dispatch rather than falling back to either.
 - `SERVICE_ENVELOPE_PRIVATE_KEY_HEX`, `SERVICE_ENVELOPE_KID`
 - `ENROLLMENT_RECOVERY_HMAC_KEY_HEX` — an independent 32-byte lowercase-hex
   secret used only to derive opaque browser recovery identities. Keep it stable
   for at least 24 hours after the last write prepared under it; rotating it
   sooner can prevent recovery of an ambiguously completed one-time mint.
+- `ARTIFACT_CANARY_VERSION=v1` — non-secret deployment marker set only after
+  the operator uploads the exact source-defined immutable public canary. Until
+  then status reports `not_provisioned`; the marker never supplies an origin,
+  URL, body, or digest.
 
 None are needed for `typecheck`, `lint`, `test`, or `build`.
 

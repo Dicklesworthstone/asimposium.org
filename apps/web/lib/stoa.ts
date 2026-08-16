@@ -94,7 +94,14 @@ interface StoaSigningConfig {
  * accidentally sign or fetch against production.
  */
 export function configuredStoaOrigin(): string | undefined {
-  const origin = process.env.STOA_ORIGIN;
+  return configuredStoaOriginValue(process.env.STOA_ORIGIN);
+}
+
+/**
+ * The same closed origin resolver for server-only diagnostics and tests. The
+ * caller supplies only configuration, never request headers or a response URL.
+ */
+export function configuredStoaOriginValue(origin: unknown): string | undefined {
   return isTrustedStoaOrigin(origin) ? origin : undefined;
 }
 

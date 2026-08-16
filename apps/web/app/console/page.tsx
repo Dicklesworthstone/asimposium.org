@@ -3,10 +3,15 @@ import type {
   SponsorFellowCursor,
   SponsorFellowSummary,
 } from "@asimposium/contracts";
-import { ProblemsIndexResponseSchema, SponsorFellowCursorSchema } from "@asimposium/contracts";
+import { SponsorFellowCursorSchema } from "@asimposium/contracts";
 import Link from "next/link";
 
 import { auth, signIn } from "@/auth";
+import {
+  consolePlaneStatusRows,
+  planeStatusFreshnessCopy,
+  resolveCachedPlaneStatus,
+} from "@/lib/plane-status";
 import { LAUNCH_STAGE, SITE } from "@/lib/site";
 import { isCanonicalSponsorId } from "@/lib/sponsor-id";
 import {
@@ -39,40 +44,6 @@ function requestedFellowCursor(
   if (typeof value !== "string") return undefined;
   const parsed = SponsorFellowCursorSchema.safeParse(value);
   return parsed.success ? parsed.data : undefined;
-}
-
-async function probe(url: string | undefined): Promise<string> {
-  if (url === undefined) return "unconfigured";
-  try {
-    const res = await fetch(url, {
-      cache: "no-store",
-      signal: AbortSignal.timeout(3_000),
-    });
-    return res.ok ? "live" : `answering ${res.status}`;
-  } catch {
-    return "unreachable";
-  }
-}
-
-/**
- * The ledger row reports a probed count from the public problems index, never
- * a static claim. A parse failure reads as unreachable, not as zero.
- */
-async function probeLedger(stoaOrigin: string | undefined): Promise<string> {
-  if (stoaOrigin === undefined) return "unconfigured";
-  try {
-    const res = await fetch(`${stoaOrigin}/problems.json`, {
-      cache: "no-store",
-      signal: AbortSignal.timeout(3_000),
-    });
-    if (!res.ok) return `answering ${res.status}`;
-    const parsed = ProblemsIndexResponseSchema.safeParse(await res.json());
-    if (!parsed.success) return "answering, but not in contract shape";
-    const count = parsed.data.problems.length;
-    return count === 0 ? "live · no public problems yet" : `live · ${count} public problems`;
-  } catch {
-    return "unreachable";
-  }
 }
 
 export default async function Console({ searchParams }: { searchParams: ConsoleSearchParams }) {
@@ -156,11 +127,7 @@ export default async function Console({ searchParams }: { searchParams: ConsoleS
     }
   }
 
-  const [stoa, artifacts, ledger] = await Promise.all([
-    probe(stoaOrigin === undefined ? undefined : `${stoaOrigin}/internal/health`),
-    probe(SITE.artifacts),
-    probeLedger(stoaOrigin),
-  ]);
+  const planeStatusRows = consolePlaneStatusRows(await resolveCachedPlaneStatus());
 
   return (
     <>
@@ -281,25 +248,16 @@ export default async function Console({ searchParams }: { searchParams: ConsoleS
 
         <section className="card" aria-labelledby="planes-title">
           <h2 className="card-title" id="planes-title">
-            Plane status, probed just now
+            Plane status, checked recently
           </h2>
+          <p className="quiet">{planeStatusFreshnessCopy()}</p>
           <ul className="status-rows">
-            <li>
-              <span>Agora, the human plane</span>
-              <span className="state live">live · you are using it</span>
-            </li>
-            <li>
-              <span>Stoa, the agent host</span>
-              <span className={stoa === "live" ? "state live" : "state"}>{stoa}</span>
-            </li>
-            <li>
-              <span>Artifacts, the content store</span>
-              <span className={artifacts === "live" ? "state live" : "state"}>{artifacts}</span>
-            </li>
-            <li>
-              <span>The public ledger</span>
-              <span className={ledger.startsWith("live") ? "state live" : "state"}>{ledger}</span>
-            </li>
+            {planeStatusRows.map((row) => (
+              <li key={row.key}>
+                <span>{row.label}</span>
+                <span className={row.healthy ? "state live" : "state"}>{row.value}</span>
+              </li>
+            ))}
           </ul>
         </section>
 

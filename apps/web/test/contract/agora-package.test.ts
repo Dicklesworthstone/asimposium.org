@@ -6,11 +6,17 @@
  * back the Pages Router, widens the Auth.js cookie to the whole domain, or
  * drops a gate entry point turns `bun run test:contract` red.
  */
-import { describe, expect, test } from "bun:test";
+import { describe, expect, mock, test } from "bun:test";
 import { existsSync, readFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 
-import { GET } from "../../app/api/health/route.ts";
+// The route deliberately pulls in server-only diagnostics. Register this file's
+// own test-only marker replacement before dynamically loading the route, so the
+// contract suite does not rely on another test file or process having done so.
+mock.module("server-only", () => ({}));
+const { GET } = await import("../../app/api/health/route.ts");
+const { resolvePlaneStatus } = await import("../../lib/plane-status.ts");
+
 import {
   formatAuthViolations,
   PROPYLON_EXPORTS,
@@ -141,6 +147,7 @@ describe("sponsor console trust boundary", () => {
 
   test("the configured Stoa origin is closed, environment-only, and cannot fall back to production", () => {
     const consolePage = readPackageFile("app/console/page.tsx");
+    const planeStatus = readPackageFile("lib/plane-status.ts");
     expect(stoa).toContain("isTrustedStoaOrigin");
     expect(stoa).toContain("process.env.STOA_ORIGIN");
     expect(stoa).toContain("const stoaOrigin = configuredStoaOrigin()");
@@ -155,10 +162,17 @@ describe("sponsor console trust boundary", () => {
     expect(stoaSponsor).toContain("stoaOrigin: string");
     expect(stoaSponsor).toContain("Insecure Stoa origin allowance must name the configured origin exactly");
     expect(consolePage).toContain("configuredStoaOrigin");
-    expect(consolePage).toContain("probeLedger(stoaOrigin)");
-    expect(consolePage).toContain("stoaOrigin}/problems.json");
+    expect(consolePage).toContain("resolveCachedPlaneStatus");
+    expect(consolePage).toContain("Plane status, checked recently");
+    expect(consolePage).toContain("planeStatusFreshnessCopy()");
+    expect(consolePage).not.toContain("Plane status, probed just now");
     expect(consolePage).not.toContain("SITE.stoa}/problems.json");
     expect(consolePage).not.toContain("SITE.stoa}/internal/health");
+    expect(planeStatus).toContain("artifactOriginForStoaOrigin");
+    expect(planeStatus).toContain("case PRODUCTION_STOA_ORIGIN:");
+    expect(planeStatus).toContain("case STAGING_STOA_ORIGIN:");
+    expect(planeStatus).toContain('redirect: "error"');
+    expect(planeStatus).not.toContain("process.env.HOST");
   });
 
   test("the client join handoff uses the runtime-tested validated-origin renderer", () => {
@@ -625,34 +639,74 @@ describe("sponsor console trust boundary", () => {
 
 describe("the health face states availability, never implies it", () => {
   test("GET /api/health returns exactly the declared fields", async () => {
-    const response = GET();
+    const response = await GET();
     expect(response.status).toBe(200);
-    expect(response.headers.get("cache-control")).toBe("no-store");
+    expect(response.headers.get("cache-control")).toBe(
+      "public, max-age=0, s-maxage=15, must-revalidate",
+    );
     expect(await response.json()).toEqual({
       plane: "agora",
       stage: "pre-G1",
-      // Ownership is architecture and is true today; liveness is a separate
-      // fact and is false. Rule A4 forbids collapsing them into one phrase.
-      writes_owned_by: "https://a.asimposium.org",
-      writes_live: false,
-      ledger_live: false,
+      freshness: {
+        console_snapshot_max_age_seconds: 15,
+        public_response_max_age_seconds: 30,
+      },
+      agora: { reachability: "serving" },
+      stoa: {
+        origin_configuration: "missing",
+        internal_health_reachability: "not_probed",
+        capabilities_reachability: "not_probed",
+        sponsor_dispatch_configuration: "missing",
+        enrollment_recovery_hmac_configuration: "missing",
+        sponsor_enrollment_write_configuration: "not_configured",
+      },
+      artifacts: { origin_mapping: "not_configured", canary: "not_provisioned" },
+      ledger: {
+        public_index: "not_probed",
+        public_index_entries: null,
+        research_writes: "not_implemented",
+        product_readiness: "not_ready",
+      },
     });
   });
 
   test("no field advertises a capability that does not exist", async () => {
-    const body = (await GET().json()) as Record<string, unknown>;
-    // "accepted at"/"endpoint"/"available" all read as a live route. No write
-    // route exists on either plane yet.
-    for (const key of Object.keys(body)) {
-      expect(key).not.toMatch(/accept|endpoint|available|ready/i);
-    }
-    expect(body.writes_live).toBe(false);
-    expect(body.ledger_live).toBe(false);
+    const body = (await (await GET()).json()) as {
+      freshness: {
+        console_snapshot_max_age_seconds: number;
+        public_response_max_age_seconds: number;
+      };
+      stoa: { sponsor_enrollment_write_configuration: string };
+      ledger: { research_writes: string; product_readiness: string; public_index: string };
+    };
+    expect(body.stoa.sponsor_enrollment_write_configuration).toBe("not_configured");
+    expect(body.ledger.research_writes).toBe("not_implemented");
+    expect(body.ledger.product_readiness).toBe("not_ready");
+    expect(body.ledger.public_index).toBe("not_probed");
+    expect(body.freshness).toEqual({
+      console_snapshot_max_age_seconds: 15,
+      public_response_max_age_seconds: 30,
+    });
   });
 
-  test("the face discloses no environment value", async () => {
-    process.env.ASIMP_HEALTH_CANARY = "canary-health-value";
-    expect(await GET().text()).not.toContain("canary-health-value");
+  test("the face discloses none of the actual plane-status environment values", async () => {
+    const environment = {
+      STOA_ORIGIN: "https://a-staging.asimposium.org",
+      SERVICE_ENVELOPE_PRIVATE_KEY_HEX: "c".repeat(64),
+      SERVICE_ENVELOPE_KID: "contract-disclosure-kid",
+      ENROLLMENT_RECOVERY_HMAC_KEY_HEX: "d".repeat(64),
+      ARTIFACT_CANARY_VERSION: "v1",
+    } as const;
+    const body = JSON.stringify(
+      await resolvePlaneStatus({
+        environment,
+        fetchImpl: async () => new Response(null, { status: 503 }),
+      }),
+    );
+
+    for (const value of Object.values(environment)) {
+      expect(body).not.toContain(value);
+    }
   });
 });
 
