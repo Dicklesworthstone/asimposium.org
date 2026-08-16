@@ -973,6 +973,13 @@ on_exit() {
       if ((attempt > 1)); then
         log_phase "exit-cleanup-recovered" "attempt=$attempt exit_status=$status"
       fi
+      # Every retained local-D1 tree is checked after owned processes are gone,
+      # including failures and interrupts. A prior failure record cannot excuse
+      # retaining an unchecked replay root; scan uncertainty becomes the final
+      # typed failure while the original body status remains available earlier.
+      if [[ -n "$LOCAL_REPLAY_KEY" && -n "$STATE_DIR" ]]; then
+        assert_local_replay_key_not_retained
+      fi
       if [[ -n "$INTERRUPT_TERMINAL_CODE" ]]; then
         log_phase "interrupted-cleanup-recovered" "code=$INTERRUPT_TERMINAL_CODE attempt=$attempt"
         emit "fail" "$INTERRUPT_TERMINAL_CODE"
@@ -2424,6 +2431,15 @@ self_test_replay_artifact_scan() {
   emit "pass" "REPLAY_ARTIFACT_SCAN_SELF_TEST_PASSED"
 }
 
+# Prove that EXIT, rather than only the happy path, checks a retained tree after
+# an ordinary typed failure. The random key is never written; the expected scan
+# result is absence followed by preservation of the original failure record.
+self_test_replay_artifact_failure_path() {
+  lifecycle_state_dir "replay-artifact-failure"
+  resolve_local_replay_key
+  failed "PLANTED_REPLAY_ARTIFACT_FAILURE"
+}
+
 # An interrupt arriving during the timed client phase.
 #
 # The client runs in its own process group and has a descendant of its own, which is
@@ -2571,16 +2587,33 @@ run_local_d1() {
   # even if wrangler later exits before workerd, so cleanup never authorizes a
   # leaderless/recycled numeric PGID.
   server_status_file="$STATE_DIR/.server-exit-status"
+  # Wrangler receives the ephemeral replay root through a deliberately
+  # sanitized process environment, never a command-line `--var` that routine
+  # process listings or retained launch diagnostics can capture.
+  export S1_LOCAL_REPLAY_KEY="$LOCAL_REPLAY_KEY"
   # shellcheck disable=SC2016
   if ! start_pinned_supervisor "$server_status_file" "child" \
-    bash -c 'log="$1"; shift; "$@" >>"$log" 2>&1' bash "$server_log" \
+    bash -c '
+      log="$1"; shift
+      replay_key="$S1_LOCAL_REPLAY_KEY"
+      for env_name in $(compgen -e); do
+        case "$env_name" in PATH|HOME|TMPDIR) ;;
+          *) unset "$env_name" ;;
+        esac
+      done
+      export CLOUDFLARE_INCLUDE_PROCESS_ENV=true
+      export ENROLLMENT_REPLAY_KEY="$replay_key"
+      unset replay_key
+      exec "$@" >>"$log" 2>&1
+    ' bash "$server_log" \
     "$LOCAL_WRANGLER" dev apps/wire/src/enrollment/local-d1-worker.ts \
       --config infra/wrangler.toml --local --persist-to "$STATE_DIR" --port "$local_port" \
       --inspector-port 0 \
-      --var "ENROLLMENT_REPLAY_KEY:${LOCAL_REPLAY_KEY}" \
       --log-level error --show-interactive-dev-session=false; then
+    unset S1_LOCAL_REPLAY_KEY
     failed "LOCAL_CHILD_GROUP_UNPROVEN"
   fi
+  unset S1_LOCAL_REPLAY_KEY
   if ! adopt_provisional_supervisor server; then
     finish_lifecycle_critical
     failed "LOCAL_CHILD_GROUP_UNPROVEN"
@@ -2757,6 +2790,13 @@ main() {
   if [[ "${1:-}" == "--self-test-replay-artifact-scan" ]]; then
     begin_self_test "replay-artifact-scan"
     self_test_replay_artifact_scan
+    return
+  fi
+  if [[ "${1:-}" == "--self-test-replay-artifact-failure" ]]; then
+    begin_self_test "replay-artifact-failure"
+    self_test_replay_artifact_failure_path
+    # `failed` exits through the retained-artifact gate.
+    # shellcheck disable=SC2317
     return
   fi
   if [[ "${1:-}" == "--self-test-client-group" ]]; then
