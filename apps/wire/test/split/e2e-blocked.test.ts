@@ -258,6 +258,18 @@ test("the S-3 harness binds readiness to its child and excludes the deployed ent
     "function throwIfRouteBindingPoisoned(",
     "function publicRowsForRequest(",
   );
+  const dollar = "$";
+  const supervisorPidExpansion = `${dollar}{supervisor_pid}`;
+  const pgidExpansion = `${dollar}{pgid}`;
+  const stopGroupSource = sourceRegion(script, "stop_group() {", "stop_worker() {");
+  const killEscalationSource = stopGroupSource.slice(
+    stopGroupSource.indexOf(`signal_exact_group KILL "${supervisorPidExpansion}"`),
+  );
+  const reapedGroupWaitSource = sourceRegion(
+    script,
+    "wait_for_reaped_group_empty() {",
+    "stop_group() {",
+  );
   const publicShapePoisonAssertionSource = sourceRegion(
     checker,
     '"post_promotion_public_projection_search_and_export_apply_shape_guards",',
@@ -283,6 +295,7 @@ test("the S-3 harness binds readiness to its child and excludes the deployed ent
   expect(script).toContain("S3_SELF_TEST_TERM_RESISTANT_CHILD");
   expect(script).toContain("S3_SELF_TEST_IDENTITY_MISMATCH");
   expect(script).toContain("S3_SELF_TEST_SECOND_SIGNAL_DURING_CLEANUP");
+  expect(script).toContain("S3_SELF_TEST_POST_REAP_INSPECTION_FAILURE");
   expect(script).toContain("S3_SELF_TEST_PROVISIONAL_EXACT_FAILURE");
   expect(script).toContain("S3_SELF_TEST_STARTUP_SIGNAL_WINDOW");
   expect(script).toContain("S3_SELF_TEST_CHECKER_TIMEOUT");
@@ -294,6 +307,18 @@ test("the S-3 harness binds readiness to its child and excludes the deployed ent
   expect(script).toContain("listener_pids_are_in_group");
   expect(script).toContain("assert_no_survivors");
   expect(script).toContain("signal_exact_group KILL");
+  expect(
+    killEscalationSource.indexOf(`wait_for_killed_direct_child_reap "${supervisorPidExpansion}"`),
+  ).toBeGreaterThanOrEqual(0);
+  expect(
+    killEscalationSource.indexOf(`wait_for_killed_direct_child_reap "${supervisorPidExpansion}"`),
+  ).toBeLessThan(killEscalationSource.indexOf(`wait_for_reaped_group_empty "${pgidExpansion}"`));
+  expect(reapedGroupWaitSource).toContain(`inspect_reaped_group_members "${pgidExpansion}"`);
+  expect(reapedGroupWaitSource).not.toContain("signal_exact");
+  expect(reapedGroupWaitSource).not.toMatch(/\bkill\s+-/u);
+  expect(stopGroupSource.indexOf("if (( supervisor_reaped == 1 )); then")).toBeLessThan(
+    stopGroupSource.indexOf(`signal_exact_group TERM "${supervisorPidExpansion}"`),
+  );
   expect(script).toContain("trap '' HUP INT TERM");
   expect(script).toContain("cleanup_with_retry");
   expect(script).toContain("signal_exact_direct_supervisor");
@@ -302,7 +327,6 @@ test("the S-3 harness binds readiness to its child and excludes the deployed ent
   expect(script).toContain("LOCAL_SPLIT_CHECKER_CONTAINMENT_FAILED");
   const containmentDispatch =
     "if (( checker_containment_mode == 1 )); then\n  run_checker_containment_self_test;";
-  const dollar = "$";
   const productionWorkerDispatch = `start_supervised_payload server "${dollar}{SERVER_LOG}" "${dollar}{WRANGLER}" dev "${dollar}{ENTRYPOINT}"`;
   expect(script.indexOf(containmentDispatch)).toBeGreaterThanOrEqual(0);
   expect(script.indexOf(containmentDispatch)).toBeLessThan(
@@ -842,9 +866,44 @@ test(
     expect(exitCode).toBe(0);
     for (const assertion of [
       "payload_leader_exits_while_pinned_supervisor_and_resistant_descendant_remain",
+      "term_resistant_supervisor_reaped_before_group_zero_scan",
       "term_resistant_group_has_zero_survivors",
       "term_resistant_fixture_releases_its_test_port",
       "term_resistant_state_fd_has_zero_survivors",
+    ]) {
+      expect(stdout).toContain(`"assertion":"${assertion}"`);
+    }
+    expect(`${stdout}\n${stderr}`).not.toContain('"status":"fail"');
+  },
+  { timeout: 15_000 },
+);
+
+test(
+  "PLANTED: a post-reap inspection failure retries without re-signalling the remembered PGID",
+  async () => {
+    const child = Bun.spawn({
+      cmd: ["bash", "scripts/e2e-s3-split.sh"],
+      cwd: root,
+      env: {
+        PATH: process.env.PATH ?? "",
+        HOME: process.env.HOME ?? "",
+        S3_SELF_TEST_POST_REAP_INSPECTION_FAILURE: "1",
+      },
+      stdout: "pipe",
+      stderr: "pipe",
+    });
+    const [stdout, stderr, exitCode] = await Promise.all([
+      new Response(child.stdout).text(),
+      new Response(child.stderr).text(),
+      child.exited,
+    ]);
+    expect(exitCode).toBe(0);
+    for (const assertion of [
+      "post_reap_inspection_failure_retains_inspection_only_ownership",
+      "post_reap_retry_inspects_without_resignalling_remembered_pgid",
+      "post_reap_retry_has_zero_group_survivors",
+      "post_reap_retry_releases_its_test_port",
+      "post_reap_retry_has_zero_state_fd_survivors",
     ]) {
       expect(stdout).toContain(`"assertion":"${assertion}"`);
     }

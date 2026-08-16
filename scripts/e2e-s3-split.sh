@@ -117,6 +117,7 @@ SERVER_SUPERVISOR_TOKEN=""
 SERVER_PAYLOAD_PID=""
 SERVER_PAYLOAD_PID_FILE=""
 SERVER_PAYLOAD_STATUS_FILE=""
+SERVER_SUPERVISOR_REAPED=0
 CLEANUP_PENDING_PGID=""
 CHECKER_SUPERVISOR_PID=""
 CHECKER_PGID=""
@@ -125,6 +126,7 @@ CHECKER_SUPERVISOR_TOKEN=""
 CHECKER_PAYLOAD_PID=""
 CHECKER_PAYLOAD_PID_FILE=""
 CHECKER_PAYLOAD_STATUS_FILE=""
+CHECKER_SUPERVISOR_REAPED=0
 CHECKER_CLEANUP_PENDING_PGID=""
 CHECKER_RESOURCE_PORT=""
 CONTROLLER_PGID=""
@@ -146,6 +148,12 @@ TEST_REPEAT_SIGNAL_DURING_CLEANUP=0
 TEST_REPEATED_SIGNALS_SENT=0
 TEST_EXPECT_PAYLOAD_LEADER_EXIT=0
 TEST_PAYLOAD_LEADER_EXIT_OBSERVED=0
+TEST_KILLED_SUPERVISOR_REAPED_BEFORE_SCAN=0
+TEST_POST_REAP_GROUP_INSPECTION_FAILURES_REMAINING=0
+TEST_POST_REAP_GROUP_INSPECTION_FAILURE_OBSERVED=0
+TEST_POST_REAP_INSPECTION_ONLY_RETRY_OBSERVED=0
+TEST_POST_REAP_SIGNAL_ATTEMPTS=0
+REAPED_GROUP_MEMBERS=""
 TEST_IDENTITY_RECOVERY=0
 TEST_IDENTITY_REAL_STARTED_AT=""
 TEST_IDENTITY_REAL_TOKEN=""
@@ -251,6 +259,14 @@ signal_exact_direct_supervisor() {
 
 signal_exact_group() {
   local signal="$1" pid="$2" pgid="$3" started_at="$4" token="$5"
+  # Once an owned supervisor has been killed and reaped, its remembered PGID is
+  # observation state only. It is no longer a live identity anchor that can
+  # authorize another group signal, even if a retry reaches this helper.
+  if { (( SERVER_SUPERVISOR_REAPED == 1 )) && [[ "${pid}" == "${SERVER_SUPERVISOR_PID}" && "${pgid}" == "${SERVER_PGID}" ]]; } || \
+    { (( CHECKER_SUPERVISOR_REAPED == 1 )) && [[ "${pid}" == "${CHECKER_SUPERVISOR_PID}" && "${pgid}" == "${CHECKER_PGID}" ]]; }; then
+    TEST_POST_REAP_SIGNAL_ATTEMPTS=$((TEST_POST_REAP_SIGNAL_ATTEMPTS + 1))
+    return 1
+  fi
   supervisor_identity_is_exact "${pid}" "${pgid}" "${started_at}" "${token}" || return 1
   kill -"${signal}" -- "-${pgid}" 2>/dev/null
 }
@@ -261,14 +277,36 @@ signal_exact_group_supervisor() {
   kill -"${signal}" "${pid}" 2>/dev/null
 }
 
+wait_supports_full_completion() {
+  LC_ALL=C help wait 2>/dev/null | LC_ALL=C grep -Eq '^wait: wait \[-[^]]*f'
+}
+
 wait_for_killed_direct_child_reap() {
-  local pid="$1" wait_status
-  if help wait 2>/dev/null | grep -Fq -- 'If the -f option is supplied'; then
-    if wait -f "${pid}" 2>/dev/null; then wait_status=0; else wait_status=$?; fi
-  else
-    if wait "${pid}" 2>/dev/null; then wait_status=0; else wait_status=$?; fi
-  fi
-  (( wait_status != 127 ))
+  local pid="$1" state status wait_status
+  [[ "${pid}" =~ ^[0-9]+$ ]] || return 1
+  # `wait` is a reap only after the kernel has observed death. In particular,
+  # plain `wait PID` can return for a stopped job on Bash versions without -f.
+  # Polling first also keeps this cleanup bounded if an assumed SIGKILL ever did
+  # not terminate the exact direct child.
+  for _wait in $(seq 1 "${CLEANUP_KILL_ATTEMPTS}"); do
+    state="$(ps -o stat= -p "${pid}" 2>/dev/null)"; status=$?
+    if (( status == 1 )) && [[ -z "${state}" ]]; then
+      :
+    elif (( status != 0 )); then
+      return 1
+    elif [[ "${state}" != *Z* ]]; then
+      sleep 0.05
+      continue
+    fi
+    if wait_supports_full_completion; then
+      if wait -f "${pid}" 2>/dev/null; then wait_status=0; else wait_status=$?; fi
+    else
+      if wait "${pid}" 2>/dev/null; then wait_status=0; else wait_status=$?; fi
+    fi
+    (( wait_status != 127 ))
+    return
+  done
+  return 1
 }
 
 clear_supervisor_scratch() {
@@ -406,6 +444,7 @@ adopt_supervisor() {
       SERVER_SUPERVISOR_TOKEN="${SUPERVISOR_TOKEN}"
       SERVER_PAYLOAD_PID_FILE="${SUPERVISOR_PAYLOAD_PID_FILE}"
       SERVER_PAYLOAD_STATUS_FILE="${SUPERVISOR_PAYLOAD_STATUS_FILE}"
+      SERVER_SUPERVISOR_REAPED=0
       CLEANUP_PENDING_PGID="${SERVER_PGID}"
       ;;
     checker)
@@ -416,6 +455,7 @@ adopt_supervisor() {
       CHECKER_SUPERVISOR_TOKEN="${SUPERVISOR_TOKEN}"
       CHECKER_PAYLOAD_PID_FILE="${SUPERVISOR_PAYLOAD_PID_FILE}"
       CHECKER_PAYLOAD_STATUS_FILE="${SUPERVISOR_PAYLOAD_STATUS_FILE}"
+      CHECKER_SUPERVISOR_REAPED=0
       CHECKER_CLEANUP_PENDING_PGID="${CHECKER_PGID}"
       ;;
     *) return 1 ;;
@@ -644,11 +684,55 @@ supervisor_reports_payload_exit() {
   [[ "${status_line}" == "payload_exited:${payload_pid}:"* ]]
 }
 
+# Parse the real process table before applying the one planted failure seam.
+# Output travels through a parent-shell global so the countdown and observation
+# markers cannot disappear inside command substitution.
+inspect_reaped_group_members() {
+  local pgid="$1" parsed status
+  REAPED_GROUP_MEMBERS=""
+  parsed="$(group_members "${pgid}")"; status=$?
+  (( status == 0 )) || return "${status}"
+  REAPED_GROUP_MEMBERS="${parsed}"
+  if (( TEST_POST_REAP_GROUP_INSPECTION_FAILURES_REMAINING > 0 )); then
+    TEST_POST_REAP_GROUP_INSPECTION_FAILURES_REMAINING=$((TEST_POST_REAP_GROUP_INSPECTION_FAILURES_REMAINING - 1))
+    TEST_POST_REAP_GROUP_INSPECTION_FAILURE_OBSERVED=1
+    return 1
+  fi
+}
+
+# SIGKILL has already been delivered while the exact supervisor was live, and
+# that direct child has been reaped. A retry may only inspect the remembered
+# group until it is empty; it must never signal a bare, recyclable PGID.
+wait_for_reaped_group_empty() {
+  local pgid="$1" status
+  if (( TEST_POST_REAP_GROUP_INSPECTION_FAILURE_OBSERVED == 1 )); then
+    TEST_POST_REAP_INSPECTION_ONLY_RETRY_OBSERVED=1
+  fi
+  for _wait in $(seq 1 "${CLEANUP_KILL_ATTEMPTS}"); do
+    inspect_reaped_group_members "${pgid}"; status=$?
+    (( status == 0 )) || return 1
+    [[ -z "${REAPED_GROUP_MEMBERS}" ]] && return 0
+    sleep 0.1
+  done
+  return 1
+}
+
 stop_group() {
   local pgid="$1" supervisor_pid="$2" started_at="$3" token="$4" owner="$5"
-  local members status compact listeners holders release_sent=0
+  local members status compact listeners holders release_sent=0 supervisor_reaped
   [[ "${pgid}" =~ ^[0-9]+$ ]] || return 1
   [[ "${pgid}" != "${CONTROLLER_PGID}" ]] || return 1
+
+  case "${owner}" in
+    server) supervisor_reaped="${SERVER_SUPERVISOR_REAPED}" ;;
+    checker) supervisor_reaped="${CHECKER_SUPERVISOR_REAPED}" ;;
+    *) return 1 ;;
+  esac
+  [[ "${supervisor_reaped}" =~ ^[01]$ ]] || return 1
+  if (( supervisor_reaped == 1 )); then
+    wait_for_reaped_group_empty "${pgid}"
+    return
+  fi
 
   if (( TEST_GROUP_INSPECTION_FAILURES_REMAINING > 0 )); then
     TEST_GROUP_INSPECTION_FAILURES_REMAINING=$((TEST_GROUP_INSPECTION_FAILURES_REMAINING - 1))
@@ -691,13 +775,20 @@ stop_group() {
     # The exact supervisor deliberately survives TERM, so it pins the group id
     # until the escalation decision. A remembered numeric PGID is never enough.
     signal_exact_group KILL "${supervisor_pid}" "${pgid}" "${started_at}" "${token}" || return 1
-    for _wait in $(seq 1 "${CLEANUP_KILL_ATTEMPTS}"); do
-      members="$(group_members "${pgid}")"; status=$?
-      (( status == 0 )) || return 1
-      [[ -z "${members}" ]] && return 0
-      sleep 0.1
-    done
-    return 1
+    # Reap the direct supervisor before asking `ps` for an empty group. Waiting
+    # only after stop_group returned made the post-KILL scan depend on Bash's
+    # asynchronous child reaper and could exhaust the bounded scan under load.
+    wait_for_killed_direct_child_reap "${supervisor_pid}" || return 1
+    case "${owner}" in
+      server) SERVER_SUPERVISOR_REAPED=1 ;;
+      checker) CHECKER_SUPERVISOR_REAPED=1 ;;
+      *) return 1 ;;
+    esac
+    if [[ "${owner}" == "server" ]] && (( TEST_EXPECT_PAYLOAD_LEADER_EXIT == 1 )); then
+      TEST_KILLED_SUPERVISOR_REAPED_BEFORE_SCAN=1
+    fi
+    wait_for_reaped_group_empty "${pgid}"
+    return
   fi
 }
 
@@ -709,10 +800,11 @@ stop_worker() {
   fi
   stop_group "${SERVER_PGID}" "${SERVER_SUPERVISOR_PID}" \
     "${SERVER_SUPERVISOR_STARTED_AT}" "${SERVER_SUPERVISOR_TOKEN}" server || cleanup_status=$?
-  # Ownership is cleared only after successful cleanup. A transient inspection
-  # failure therefore leaves the exact identity available to the bounded retry.
+  # Ownership is cleared only after successful cleanup. Before reaping, a
+  # transient failure retains exact signal identity; after reaping, the same
+  # fields authorize bounded inspection only and can never authorize a signal.
   (( cleanup_status == 0 )) || return "${cleanup_status}"
-  if [[ -n "${SERVER_SUPERVISOR_PID}" ]]; then
+  if [[ -n "${SERVER_SUPERVISOR_PID}" ]] && (( SERVER_SUPERVISOR_REAPED == 0 )); then
     if ! wait "${SERVER_SUPERVISOR_PID}" 2>/dev/null; then :; fi
   fi
   SERVER_SUPERVISOR_PID=""
@@ -722,6 +814,7 @@ stop_worker() {
   SERVER_PAYLOAD_PID=""
   SERVER_PAYLOAD_PID_FILE=""
   SERVER_PAYLOAD_STATUS_FILE=""
+  SERVER_SUPERVISOR_REAPED=0
   SUPERVISOR_DIRECT_CHILD=0
   SUPERVISOR_READY=0
 }
@@ -735,7 +828,7 @@ stop_checker() {
   stop_group "${CHECKER_PGID}" "${CHECKER_SUPERVISOR_PID}" \
     "${CHECKER_SUPERVISOR_STARTED_AT}" "${CHECKER_SUPERVISOR_TOKEN}" checker || cleanup_status=$?
   (( cleanup_status == 0 )) || return "${cleanup_status}"
-  if [[ -n "${CHECKER_SUPERVISOR_PID}" ]]; then
+  if [[ -n "${CHECKER_SUPERVISOR_PID}" ]] && (( CHECKER_SUPERVISOR_REAPED == 0 )); then
     if ! wait "${CHECKER_SUPERVISOR_PID}" 2>/dev/null; then :; fi
   fi
   CHECKER_SUPERVISOR_PID=""
@@ -745,6 +838,7 @@ stop_checker() {
   CHECKER_PAYLOAD_PID=""
   CHECKER_PAYLOAD_PID_FILE=""
   CHECKER_PAYLOAD_STATUS_FILE=""
+  CHECKER_SUPERVISOR_REAPED=0
 }
 
 cleanup_checker_and_verify() {
@@ -1228,7 +1322,9 @@ run_term_resistant_descendant_self_test() {
   pgid="${SERVER_PGID}"
   stop_worker || return 1
   (( TEST_PAYLOAD_LEADER_EXIT_OBSERVED == 1 )) || return 1
+  (( TEST_KILLED_SUPERVISOR_REAPED_BEFORE_SCAN == 1 )) || return 1
   emit '{"tool":"bash","package":"@asimposium/wire","suite":"s3-local-bindings","assertion":"payload_leader_exits_while_pinned_supervisor_and_resistant_descendant_remain","status":"pass","reproduce":"bash scripts/e2e-s3-split.sh"}'
+  emit '{"tool":"bash","package":"@asimposium/wire","suite":"s3-local-bindings","assertion":"term_resistant_supervisor_reaped_before_group_zero_scan","status":"pass","reproduce":"bash scripts/e2e-s3-split.sh"}'
   assert_group_empty "${pgid}" || return 1
   emit '{"tool":"bash","package":"@asimposium/wire","suite":"s3-local-bindings","assertion":"term_resistant_group_has_zero_survivors","status":"pass","reproduce":"bash scripts/e2e-s3-split.sh"}'
   assert_listener_empty || return 1
@@ -1256,9 +1352,35 @@ run_second_signal_cleanup_self_test() {
   exit 0
 }
 
+run_post_reap_inspection_failure_self_test() {
+  local pgid cleanup_status
+  start_term_resistant_fixture || return 1
+  pgid="${SERVER_PGID}"
+  TEST_POST_REAP_GROUP_INSPECTION_FAILURES_REMAINING=1
+  stop_worker; cleanup_status=$?
+  (( cleanup_status != 0 )) || return 1
+  (( SERVER_SUPERVISOR_REAPED == 1 )) || return 1
+  (( TEST_POST_REAP_GROUP_INSPECTION_FAILURE_OBSERVED == 1 )) || return 1
+  (( TEST_POST_REAP_GROUP_INSPECTION_FAILURES_REMAINING == 0 )) || return 1
+  (( TEST_POST_REAP_SIGNAL_ATTEMPTS == 0 )) || return 1
+  emit '{"tool":"bash","package":"@asimposium/wire","suite":"s3-local-bindings","assertion":"post_reap_inspection_failure_retains_inspection_only_ownership","status":"pass","reproduce":"bash scripts/e2e-s3-split.sh"}'
+
+  cleanup_with_retry || return 1
+  (( TEST_POST_REAP_INSPECTION_ONLY_RETRY_OBSERVED == 1 )) || return 1
+  (( TEST_POST_REAP_SIGNAL_ATTEMPTS == 0 )) || return 1
+  emit '{"tool":"bash","package":"@asimposium/wire","suite":"s3-local-bindings","assertion":"post_reap_retry_inspects_without_resignalling_remembered_pgid","status":"pass","reproduce":"bash scripts/e2e-s3-split.sh"}'
+  assert_group_empty "${pgid}" || return 1
+  emit '{"tool":"bash","package":"@asimposium/wire","suite":"s3-local-bindings","assertion":"post_reap_retry_has_zero_group_survivors","status":"pass","reproduce":"bash scripts/e2e-s3-split.sh"}'
+  assert_listener_empty || return 1
+  emit '{"tool":"bash","package":"@asimposium/wire","suite":"s3-local-bindings","assertion":"post_reap_retry_releases_its_test_port","status":"pass","reproduce":"bash scripts/e2e-s3-split.sh"}'
+  assert_state_holders_empty || return 1
+  emit '{"tool":"bash","package":"@asimposium/wire","suite":"s3-local-bindings","assertion":"post_reap_retry_has_zero_state_fd_survivors","status":"pass","reproduce":"bash scripts/e2e-s3-split.sh"}'
+}
+
 term_mode="${S3_SELF_TEST_TERM_RESISTANT_CHILD:-0}"
 identity_mode="${S3_SELF_TEST_IDENTITY_MISMATCH:-0}"
 second_signal_mode="${S3_SELF_TEST_SECOND_SIGNAL_DURING_CLEANUP:-0}"
+post_reap_inspection_mode="${S3_SELF_TEST_POST_REAP_INSPECTION_FAILURE:-0}"
 provisional_exact_mode="${S3_SELF_TEST_PROVISIONAL_EXACT_FAILURE:-0}"
 pid_reuse_mode="${S3_SELF_TEST_PID_REUSE:-0}"
 checker_timeout_mode="${S3_SELF_TEST_CHECKER_TIMEOUT:-0}"
@@ -1267,12 +1389,13 @@ checker_exit_one_mode="${S3_SELF_TEST_CHECKER_EXIT_1:-0}"
 TEST_DISPATCH_STARTUP_SIGNAL_OWNER="${S3_SELF_TEST_DISPATCH_STARTUP_SIGNAL:-}"
 TEST_STARTUP_SIGNAL_WINDOW="${S3_SELF_TEST_STARTUP_SIGNAL_WINDOW:-}"
 if [[ ! "${term_mode}" =~ ^[01]$ || ! "${identity_mode}" =~ ^[01]$ || \
-  ! "${second_signal_mode}" =~ ^[01]$ || ! "${provisional_exact_mode}" =~ ^[01]$ || \
+  ! "${second_signal_mode}" =~ ^[01]$ || ! "${post_reap_inspection_mode}" =~ ^[01]$ || \
+  ! "${provisional_exact_mode}" =~ ^[01]$ || \
   ! "${pid_reuse_mode}" =~ ^[01]$ || ! "${checker_timeout_mode}" =~ ^[01]$ || \
   ! "${checker_containment_mode}" =~ ^[01]$ || ! "${checker_exit_one_mode}" =~ ^[01]$ ]] || \
   { [[ -n "${TEST_DISPATCH_STARTUP_SIGNAL_OWNER}" ]] && [[ ! "${TEST_DISPATCH_STARTUP_SIGNAL_OWNER}" =~ ^(server|checker)$ ]]; } || \
   { [[ -n "${TEST_STARTUP_SIGNAL_WINDOW}" ]] && [[ ! "${TEST_STARTUP_SIGNAL_WINDOW}" =~ ^(background_spawn|scratch_assignment|stop_proof|adoption|cont_release|return)$ ]]; } || \
-  (( term_mode + identity_mode + second_signal_mode + provisional_exact_mode + \
+  (( term_mode + identity_mode + second_signal_mode + post_reap_inspection_mode + provisional_exact_mode + \
     pid_reuse_mode + checker_timeout_mode + checker_containment_mode + checker_exit_one_mode + \
     (${#TEST_STARTUP_SIGNAL_WINDOW} > 0) + (${#TEST_DISPATCH_STARTUP_SIGNAL_OWNER} > 0) > 1 )); then
   emit '{"tool":"bash","package":"@asimposium/wire","suite":"s3-local-bindings","status":"fail","code":"S3_SELF_TEST_MODE_INVALID","reproduce":"bash scripts/e2e-s3-split.sh"}'
@@ -1290,6 +1413,10 @@ if (( identity_mode == 1 )); then
 fi
 if (( second_signal_mode == 1 )); then
   run_second_signal_cleanup_self_test || exit 1
+fi
+if (( post_reap_inspection_mode == 1 )); then
+  run_post_reap_inspection_failure_self_test || exit 1
+  exit 0
 fi
 if (( provisional_exact_mode == 1 )); then
   run_provisional_exact_check_self_test || exit 1
