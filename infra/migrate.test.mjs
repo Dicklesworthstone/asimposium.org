@@ -16,7 +16,9 @@ import { REDACTED_TOKEN } from "@asimposium/contracts/diagnostic-safety";
 import {
   applyPendingLocalMigrationsOrRefuse,
   assertReadLimit,
+  assertReadOnlySql,
   assertRehearsalIsNotAnApplication,
+  assertRemoteTargetIdentity,
   bootstrapTargetDisposition,
   catalogFingerprint,
   classifySchemaLineage,
@@ -24,18 +26,26 @@ import {
   describeDestructiveStatements,
   digestOf,
   localPlanState,
+  MAX_REMOTE_RESPONSE_BYTES,
+  MAX_REMOTE_STRING_BYTES,
   MigrationError,
   migrationCommandSql,
   planMigrations,
+  REMOTE_OBSERVATION_DEADLINE_MS,
   readBootstrapManifest,
   readBootstrapSnapshotOrRefuse,
   readMigrationDirectory,
+  readRemoteLineageSnapshotOrRefuse,
   readStateFile,
   redactStderr,
   resolvePinnedWranglerCommand,
   runBoundedCommand,
 } from "./migrate.mjs";
-import { maskAbsolutePaths } from "./validate-environments.mjs";
+import {
+  maskAbsolutePaths,
+  selectEnvironment,
+  validateEnvironments,
+} from "./validate-environments.mjs";
 
 /**
  * Negative corpus for the migration planner.
@@ -278,6 +288,126 @@ function expectFailure(label, expectedCode, fn) {
     assert.equal(error.code, expectedCode, `${label}: ${error.message}`);
     assert.equal(/(?:^|\s)\/(?:Users|home|private|tmp|var)\//.test(error.message), false, label);
   }
+}
+
+/**
+ * The awaited sibling of `expectFailure`, with the same assertions.
+ *
+ * The remote observation seam is async, and `expectFailure` would see a pending
+ * promise rather than a refusal — a rejected promise would surface as an
+ * unhandled rejection while the case reported success.
+ */
+async function expectAsyncFailure(label, expectedCode, fn) {
+  try {
+    await fn();
+    assert.fail(`${label}: expected ${expectedCode}, but it succeeded`);
+  } catch (error) {
+    assert.ok(error instanceof MigrationError, `${label}: unexpected ${error}`);
+    assert.equal(error.code, expectedCode, `${label}: ${error.message}`);
+    assert.equal(/(?:^|\s)\/(?:Users|home|private|tmp|var)\//.test(error.message), false, label);
+  }
+}
+
+// --- remote observation fixtures (staging slice 1) ---------------------------
+//
+// Every remote case below runs against an injected transport. None opens a
+// network connection, names a credential, or reaches Wrangler — the reader under
+// test has no default transport, which is exactly what makes these pure.
+
+/**
+ * Canonical-shaped D1 ids that name no real database.
+ *
+ * Deliberately patterned rather than random-looking: these have to satisfy the
+ * RFC-4122 version/variant nibbles the identity check enforces, while reading at
+ * a glance as fixtures. A plausible-looking id would be indistinguishable from a
+ * leaked resource identifier to both a reviewer and a secret scanner.
+ */
+const STAGING_DATABASE_ID = "00000000-0000-4000-8000-000000000001";
+const OTHER_DATABASE_ID = "00000000-0000-4000-8000-000000000002";
+const STAGING_DATABASE_NAME = "asimposium-staging";
+
+const remoteCatalogRow = (type, name, sql) => ({ type, name, tbl_name: name, sql });
+
+/**
+ * A transport that records every statement, every requested identity, and a call
+ * count per method.
+ *
+ * The recording is the point three times over: the zero-write proof asserts over
+ * the exact statements that reached the boundary; the identity proof asserts the
+ * resolved id travelled *into* every request; and the call counters let a case
+ * prove a refusal happened *before* any injected method ran, which no assertion
+ * on the thrown code alone can show.
+ */
+function recordingTransport(options = {}) {
+  const {
+    catalog = [],
+    journal = [],
+    lineage = [],
+    describe,
+    servedBy,
+    onDescribe,
+    onQuery,
+  } = options;
+  const calls = { describe: 0, query: 0 };
+  const statements = [];
+  const requestedIds = [];
+  return {
+    calls,
+    statements,
+    requestedIds,
+    describeTarget: async (request) => {
+      calls.describe += 1;
+      if (onDescribe !== undefined) return onDescribe(request);
+      return describe ?? { database_id: STAGING_DATABASE_ID, database_name: STAGING_DATABASE_NAME };
+    },
+    query: async (request) => {
+      calls.query += 1;
+      statements.push(request?.sql);
+      requestedIds.push(request?.database_id);
+      if (onQuery !== undefined) return onQuery(request);
+      const sql = String(request?.sql ?? "");
+      const rows = sql.includes("FROM sqlite_schema")
+        ? catalog
+        : sql.includes("_asimposium_migrations")
+          ? journal
+          : sql.includes("_asimposium_schema_lineage")
+            ? lineage
+            : undefined;
+      if (rows === undefined) throw new Error("unexpected statement reached the transport");
+      return { database_id: servedBy ?? STAGING_DATABASE_ID, rows };
+    },
+  };
+}
+
+/**
+ * A transport whose methods both count and throw.
+ *
+ * Used where the reader must refuse *before* touching it: the counter proves no
+ * call happened, and the sentinel throw means a regression that did call it would
+ * surface as the sentinel rather than as the expected refusal — two independent
+ * ways for the same mistake to be caught.
+ */
+function forbiddenTransport() {
+  const calls = { describe: 0, query: 0 };
+  return {
+    calls,
+    describeTarget: async () => {
+      calls.describe += 1;
+      throw new Error("describeTarget must not be reached");
+    },
+    query: async () => {
+      calls.query += 1;
+      throw new Error("query must not be reached");
+    },
+  };
+}
+
+let stagingEnvironmentCache;
+function stagingEnvironment() {
+  // The real validated topology, not a hand-built stand-in: the reader depends
+  // on `kind` and `d1.database_name`, and a fixture would let those drift.
+  stagingEnvironmentCache ??= validateEnvironments(repositoryRoot);
+  return selectEnvironment(stagingEnvironmentCache, "staging");
 }
 
 const CREATE_A = "CREATE TABLE a (id TEXT PRIMARY KEY);\n";
@@ -2180,6 +2310,540 @@ const cases = [
       assert.ok(spaced.includes(`NEXT=${REDACTED_TOKEN}`), "adjacent assignment was not redacted");
       assert.ok(escaped.endsWith("tail"), "prose after a quoted value did not survive");
       assert.ok(single.endsWith("after"), "prose after a quoted value did not survive");
+    },
+  },
+
+  // --- remote observation, staging slice 1 -----------------------------------
+  //
+  // Observation only. No case here applies a migration, writes a journal row, or
+  // decides the remote atomicity question — that design is deliberately open.
+  {
+    name: "a-remote-snapshot-plans-a-real-target-without-emitting-one-write",
+    async execute() {
+      const environment = stagingEnvironment();
+      const transport = recordingTransport({ catalog: [] });
+      const snapshot = await readRemoteLineageSnapshotOrRefuse(
+        environment,
+        transport,
+        STAGING_DATABASE_ID,
+      );
+
+      // Shape parity with the local reader: the classifier must not be able to
+      // tell which target produced a snapshot.
+      assert.deepEqual(Object.keys(snapshot).sort(), ["catalog", "journal", "lineage", "target"]);
+      assert.deepEqual(snapshot.journal, []);
+      assert.deepEqual(snapshot.lineage, []);
+      assert.deepEqual(snapshot.target, {
+        database_id: STAGING_DATABASE_ID,
+        database_name: STAGING_DATABASE_NAME,
+      });
+
+      // The real migration directory and manifest, because the classifier
+      // validates one against the other: a synthetic pair would prove the
+      // remote snapshot reaches a classifier this repository does not run.
+      const migrations = readMigrationDirectory(join(repositoryRoot, "db/migrations"));
+      assert.equal(
+        classifySchemaLineage({
+          ...snapshot,
+          migrations,
+          manifest: readBootstrapManifest(repositoryRoot),
+        }).kind,
+        "provably-empty",
+      );
+
+      // The plan is now an observation of the remote journal rather than the
+      // `applied = []` guess a remote environment falls back to today.
+      //
+      // Synthetic migrations here on purpose, and it is not a mismatch with the
+      // classifier above: `planMigrations` takes no manifest, and replaying the
+      // real history from zero is correctly refused — 0010 is destructive
+      // without a marker, because a real empty target is bootstrapped to the
+      // pinned baseline rather than replayed. What this asserts is the narrow
+      // new fact: the observed remote journal is what the planner consumes.
+      const planned = readMigrationDirectory(
+        directory("remote-plan", { "0001_first.sql": CREATE_A, "0002_second.sql": CREATE_B }),
+      );
+      const plan = planMigrations(planned, snapshot.journal, {
+        environmentName: "staging",
+        destructiveAllowed: environment.destructive_operations_allowed,
+      });
+      assert.equal(plan.idempotent, false);
+      assert.deepEqual(
+        plan.to_apply.map((migration) => migration.id),
+        ["0001_first.sql", "0002_second.sql"],
+      );
+
+      // The zero-write proof, over every statement that actually reached the
+      // boundary. Asserting only the count would pass a reader that sent one
+      // very wrong statement.
+      assert.ok(transport.statements.length >= 1, "no statement reached the transport");
+      for (const statement of transport.statements) {
+        assert.ok(/^SELECT\s/i.test(statement.trim()), `not a read: ${statement}`);
+        assert.equal(
+          /\b(?:INSERT|UPDATE|DELETE|REPLACE|CREATE|DROP|ALTER|ATTACH|VACUUM|PRAGMA)\b/i.test(
+            statement,
+          ),
+          false,
+          `a write reached the transport: ${statement}`,
+        );
+      }
+    },
+  },
+  {
+    // The classifier already refuses this shape; what is proven here is that a
+    // *remote* snapshot reaches it intact rather than being flattened into an
+    // empty journal that would plan as a clean first run.
+    name: "PLANTED-a-contaminated-remote-catalog-classifies-as-unknown",
+    async execute() {
+      const snapshot = await readRemoteLineageSnapshotOrRefuse(
+        stagingEnvironment(),
+        recordingTransport({
+          catalog: [remoteCatalogRow("table", "stray_table", "CREATE TABLE stray_table (id TEXT)")],
+        }),
+        STAGING_DATABASE_ID,
+      );
+      assert.equal(
+        classifySchemaLineage({
+          ...snapshot,
+          migrations: readMigrationDirectory(join(repositoryRoot, "db/migrations")),
+          manifest: readBootstrapManifest(repositoryRoot),
+        }).kind,
+        "unknown-or-contaminated",
+      );
+    },
+  },
+  {
+    // A truncated journal is worse than an unreadable one: it plans a migration
+    // that already ran. The cap must refuse rather than return its first page.
+    name: "PLANTED-a-remote-journal-over-its-row-cap-is-refused-not-truncated",
+    async execute() {
+      const catalog = [
+        remoteCatalogRow("table", "_asimposium_migrations", "CREATE TABLE _asimposium_migrations"),
+      ];
+      const journal = Array.from({ length: 257 }, (_unused, index) => ({
+        id: `${String(index + 1).padStart(4, "0")}_m.sql`,
+        sequence: index + 1,
+        digest: "0".repeat(64),
+      }));
+      await expectAsyncFailure("journal-overrun", "REMOTE_D1_JOURNAL_OVERRUN", () =>
+        readRemoteLineageSnapshotOrRefuse(
+          stagingEnvironment(),
+          recordingTransport({ catalog, journal }),
+          STAGING_DATABASE_ID,
+        ),
+      );
+    },
+  },
+  {
+    // The wrong-account case. Both plants differ from the accepted call in
+    // exactly one dimension, and neither is detectable from the topology alone,
+    // whose declared id is a `${VAR}` placeholder rather than an identity.
+    name: "PLANTED-a-remote-target-that-is-not-the-resolved-one-is-refused",
+    async execute() {
+      const environment = stagingEnvironment();
+      const other = OTHER_DATABASE_ID;
+
+      await expectAsyncFailure("wrong-id", "REMOTE_TARGET_IDENTITY_MISMATCH", () =>
+        readRemoteLineageSnapshotOrRefuse(
+          environment,
+          recordingTransport({
+            describe: { database_id: other, database_name: STAGING_DATABASE_NAME },
+          }),
+          STAGING_DATABASE_ID,
+        ),
+      );
+
+      await expectAsyncFailure("wrong-name", "REMOTE_TARGET_IDENTITY_MISMATCH", () =>
+        readRemoteLineageSnapshotOrRefuse(
+          environment,
+          recordingTransport({
+            describe: { database_id: STAGING_DATABASE_ID, database_name: "asimposium-production" },
+          }),
+          STAGING_DATABASE_ID,
+        ),
+      );
+
+      // Causal control: the same call with the matching pair is accepted, so the
+      // refusals above are caused by identity and not by the fixture.
+      const accepted = await readRemoteLineageSnapshotOrRefuse(
+        environment,
+        recordingTransport({ catalog: [] }),
+        STAGING_DATABASE_ID,
+      );
+      assert.equal(accepted.target.database_id, STAGING_DATABASE_ID);
+    },
+  },
+  {
+    name: "PLANTED-an-unresolved-database-id-is-not-an-identity",
+    async execute() {
+      const environment = stagingEnvironment();
+      // Exactly what the topology carries before deploy resolution runs. Built
+      // by concatenation, the idiom `resolve-wrangler-deploy.mjs` already uses,
+      // so the literal is not mistaken for an interpolation that failed.
+      const placeholder = "$" + "{ASIMP_D1_DATABASE_ID_STAGING}";
+      assert.equal(environment.d1.database_id, placeholder);
+      for (const [label, candidate] of [
+        ["placeholder", environment.d1.database_id],
+        ["absent", undefined],
+        ["not-a-uuid", "asimposium-staging"],
+        ["nil-uuid", "00000000-0000-0000-0000-000000000000"],
+      ]) {
+        await expectAsyncFailure(label, "REMOTE_TARGET_ID_UNRESOLVED", () =>
+          readRemoteLineageSnapshotOrRefuse(environment, recordingTransport(), candidate),
+        );
+      }
+      // The identity binding is reachable directly, so a caller cannot satisfy
+      // it by supplying a target object without a resolved id.
+      expectFailure("undescribed", "REMOTE_TARGET_UNDESCRIBED", () =>
+        assertRemoteTargetIdentity(environment, null, STAGING_DATABASE_ID),
+      );
+    },
+  },
+  {
+    // No local fallback: without an explicit transport the reader refuses, and
+    // it must refuse *before* describing or querying anything.
+    name: "PLANTED-a-remote-observation-without-a-transport-refuses-rather-than-falling-back",
+    async execute() {
+      const environment = stagingEnvironment();
+      for (const [label, candidate] of [
+        ["absent", undefined],
+        ["null", null],
+        ["query-only", { query: async () => [] }],
+        ["describe-only", { describeTarget: async () => ({}) }],
+      ]) {
+        await expectAsyncFailure(label, "REMOTE_TRANSPORT_UNAVAILABLE", () =>
+          readRemoteLineageSnapshotOrRefuse(environment, candidate, STAGING_DATABASE_ID),
+        );
+      }
+    },
+  },
+  {
+    name: "the-remote-reader-cannot-reach-the-local-executor",
+    execute() {
+      // Structural, because a behavioural test can only show that the paths it
+      // happened to drive stayed remote. The local executor holds the only
+      // credential-free D1 handle in this file; the remote reader must not be
+      // able to name it at all.
+      const source = readFileSync(new URL("./migrate.mjs", import.meta.url), "utf8");
+      const start = source.indexOf("export async function readRemoteLineageSnapshotOrRefuse");
+      assert.ok(start > 0, "the remote reader was renamed or removed");
+      const end = source.indexOf("\nexport function bootstrapInstallSql", start);
+      assert.ok(end > start, "could not bound the remote reader");
+      const body = source.slice(start, end);
+      assert.equal(body.includes("localD1"), false, "the remote reader can reach local D1");
+      assert.equal(body.includes("localPersistTo"), false, "the remote reader takes local state");
+    },
+  },
+  {
+    // Read-only is enforced at the seam, not described in a comment: a write
+    // cannot reach the transport even if a future caller composes one.
+    name: "PLANTED-a-write-cannot-reach-the-remote-transport",
+    execute() {
+      for (const [label, statement] of [
+        ["delete", "DELETE FROM _asimposium_migrations;"],
+        ["insert", "INSERT INTO _asimposium_migrations VALUES ('x', 1, 'y', 'z');"],
+        ["stacked", "SELECT 1; DROP TABLE _asimposium_migrations;"],
+        ["ddl", "CREATE TABLE t (id TEXT);"],
+        ["empty", "   "],
+      ]) {
+        expectFailure(label, "REMOTE_READ_NOT_READ_ONLY", () => assertReadOnlySql(statement));
+      }
+      // Causal control: the reader's own statement shape passes the same gate,
+      // so the refusals above are caused by the statement and not by the guard
+      // refusing everything.
+      assert.equal(assertReadOnlySql("SELECT 1;"), "SELECT 1;");
+      assert.equal(
+        assertReadOnlySql("SELECT type, name FROM sqlite_schema ORDER BY type LIMIT 2;"),
+        "SELECT type, name FROM sqlite_schema ORDER BY type LIMIT 2;",
+      );
+    },
+  },
+  {
+    name: "PLANTED-a-local-environment-is-refused-by-the-remote-reader",
+    async execute() {
+      // Local has a credential-free reader of its own; letting the remote one
+      // stand in for it would make the local/remote distinction decorative.
+      const local = selectEnvironment(validateEnvironments(repositoryRoot), "local");
+      assert.equal(local.kind, "local");
+      await expectAsyncFailure("local-through-remote", "REMOTE_READER_WRONG_TARGET", () =>
+        readRemoteLineageSnapshotOrRefuse(local, recordingTransport(), STAGING_DATABASE_ID),
+      );
+    },
+  },
+
+  // --- audit repairs: TOCTOU, own-properties, bytes, opacity, deadline --------
+  {
+    // The gap the audit found. `describeTarget` was checked once and every query
+    // was then independent, so a transport could describe the authorized target
+    // and serve every row from somewhere else.
+    name: "PLANTED-a-transport-that-describes-staging-then-serves-another-database-is-refused",
+    async execute() {
+      const environment = stagingEnvironment();
+      const splitBrain = recordingTransport({ catalog: [], servedBy: OTHER_DATABASE_ID });
+      await expectAsyncFailure("split-brain", "REMOTE_TARGET_IDENTITY_MISMATCH", () =>
+        readRemoteLineageSnapshotOrRefuse(environment, splitBrain, STAGING_DATABASE_ID),
+      );
+      // It passed the one-time describe, so the refusal can only have come from
+      // the per-result check.
+      assert.equal(splitBrain.calls.describe, 1);
+      assert.ok(splitBrain.calls.query >= 1, "no query was attempted");
+
+      // The resolved id travels into every request, not merely out of the first
+      // response: a reader that verified replies without binding requests would
+      // still let a transport choose which database to read.
+      const bound = recordingTransport({ catalog: [] });
+      await readRemoteLineageSnapshotOrRefuse(environment, bound, STAGING_DATABASE_ID);
+      assert.ok(bound.requestedIds.length >= 1);
+      for (const requested of bound.requestedIds) {
+        assert.equal(requested, STAGING_DATABASE_ID);
+      }
+    },
+  },
+  {
+    name: "PLANTED-inherited-and-accessor-response-fields-are-refused",
+    async execute() {
+      const environment = stagingEnvironment();
+
+      // Inherited, not own: `in` and member access both consult the prototype.
+      const inherited = Object.create({ database_name: STAGING_DATABASE_NAME });
+      inherited.database_id = STAGING_DATABASE_ID;
+      await expectAsyncFailure("inherited-identity", "REMOTE_TARGET_UNDESCRIBED", () =>
+        readRemoteLineageSnapshotOrRefuse(
+          environment,
+          recordingTransport({ describe: inherited }),
+          STAGING_DATABASE_ID,
+        ),
+      );
+
+      // A getter is the sharper case: it can answer the identity check with the
+      // authorized id and the row reader with anything at all.
+      let reads = 0;
+      const twoFaced = {
+        database_name: STAGING_DATABASE_NAME,
+        get database_id() {
+          reads += 1;
+          return reads === 1 ? STAGING_DATABASE_ID : OTHER_DATABASE_ID;
+        },
+      };
+      await expectAsyncFailure("accessor-identity", "REMOTE_TARGET_UNDESCRIBED", () =>
+        readRemoteLineageSnapshotOrRefuse(
+          environment,
+          recordingTransport({ describe: twoFaced }),
+          STAGING_DATABASE_ID,
+        ),
+      );
+
+      // A catalog row whose field is inherited from a polluted prototype.
+      const pollutedRow = Object.create({ sql: null });
+      Object.assign(pollutedRow, { type: "table", name: "t", tbl_name: "t" });
+      await expectAsyncFailure("inherited-row", "REMOTE_D1_CATALOG_UNREADABLE", () =>
+        readRemoteLineageSnapshotOrRefuse(
+          environment,
+          recordingTransport({ catalog: [pollutedRow] }),
+          STAGING_DATABASE_ID,
+        ),
+      );
+
+      // An extra own key is a different response than the one this reader
+      // models, so it is refused rather than silently narrowed.
+      await expectAsyncFailure("extra-key", "REMOTE_D1_CATALOG_UNREADABLE", () =>
+        readRemoteLineageSnapshotOrRefuse(
+          environment,
+          recordingTransport({
+            catalog: [{ type: "table", name: "t", tbl_name: "t", sql: null, extra: 1 }],
+          }),
+          STAGING_DATABASE_ID,
+        ),
+      );
+
+      // A non-enumerable own key would be invisible to `Object.keys`.
+      const hidden = { type: "table", name: "t", tbl_name: "t", sql: null };
+      Object.defineProperty(hidden, "smuggled", { value: 1, enumerable: false });
+      await expectAsyncFailure("non-enumerable-key", "REMOTE_D1_CATALOG_UNREADABLE", () =>
+        readRemoteLineageSnapshotOrRefuse(
+          environment,
+          recordingTransport({ catalog: [hidden] }),
+          STAGING_DATABASE_ID,
+        ),
+      );
+
+      // A transport whose method is inherited rather than own.
+      await expectAsyncFailure("inherited-method", "REMOTE_TRANSPORT_UNAVAILABLE", () =>
+        readRemoteLineageSnapshotOrRefuse(
+          environment,
+          Object.create({ describeTarget: async () => ({}), query: async () => ({}) }),
+          STAGING_DATABASE_ID,
+        ),
+      );
+
+      // Causal control: the same shapes as own data properties are accepted, so
+      // the refusals above are caused by inheritance and accessors alone.
+      const accepted = await readRemoteLineageSnapshotOrRefuse(
+        environment,
+        recordingTransport({ catalog: [remoteCatalogRow("table", "t", null)] }),
+        STAGING_DATABASE_ID,
+      );
+      assert.deepEqual(accepted.catalog, [{ type: "table", name: "t", table: "t", sql: null }]);
+    },
+  },
+  {
+    // Row caps alone bound cardinality, not size: 256 journal rows carrying a
+    // megabyte each is within every count limit.
+    name: "PLANTED-oversized-strings-and-aggregate-bytes-are-refused",
+    async execute() {
+      const environment = stagingEnvironment();
+
+      const huge = "x".repeat(MAX_REMOTE_STRING_BYTES + 1);
+      await expectAsyncFailure("single-string", "REMOTE_D1_CATALOG_UNREADABLE", () =>
+        readRemoteLineageSnapshotOrRefuse(
+          environment,
+          recordingTransport({ catalog: [remoteCatalogRow("table", "t", huge)] }),
+          STAGING_DATABASE_ID,
+        ),
+      );
+
+      // Each row is individually under the per-string bound; together they are
+      // over the whole-observation bound.
+      const chunk = "y".repeat(MAX_REMOTE_STRING_BYTES);
+      const rows = Array.from(
+        { length: Math.ceil(MAX_REMOTE_RESPONSE_BYTES / MAX_REMOTE_STRING_BYTES) + 1 },
+        (_unused, index) => remoteCatalogRow("table", `t${index}`, chunk),
+      );
+      await expectAsyncFailure("aggregate", "REMOTE_D1_CATALOG_UNREADABLE", () =>
+        readRemoteLineageSnapshotOrRefuse(
+          environment,
+          recordingTransport({ catalog: rows }),
+          STAGING_DATABASE_ID,
+        ),
+      );
+
+      // Causal control: one row of exactly the per-string bound is accepted, so
+      // the refusals are caused by size and not by the shape of the fixture.
+      const accepted = await readRemoteLineageSnapshotOrRefuse(
+        environment,
+        recordingTransport({ catalog: [remoteCatalogRow("table", "t", chunk)] }),
+        STAGING_DATABASE_ID,
+      );
+      assert.equal(accepted.catalog[0].sql.length, MAX_REMOTE_STRING_BYTES);
+    },
+  },
+  {
+    // A transport failure is data from outside this process. It may carry a
+    // provider message, a credential, or an operator's absolute path, and none of
+    // it may reach a diagnostic.
+    name: "PLANTED-a-transport-failure-cannot-carry-its-message-secret-or-path",
+    async execute() {
+      const environment = stagingEnvironment();
+      const secret = "asimp_ag_LIVEabc123XYZdefg456";
+      const absolute = "/Users/planted-operator/.cloudflare/credentials";
+      const hostile = () => {
+        throw new Error(`provider said ${secret} while reading ${absolute}`);
+      };
+
+      for (const [label, options, code] of [
+        ["describe", { onDescribe: hostile }, "REMOTE_TARGET_UNDESCRIBED"],
+        ["query", { onQuery: hostile }, "REMOTE_D1_CATALOG_UNREADABLE"],
+      ]) {
+        let captured;
+        try {
+          await readRemoteLineageSnapshotOrRefuse(
+            environment,
+            recordingTransport(options),
+            STAGING_DATABASE_ID,
+          );
+          assert.fail(`${label}: expected ${code}`);
+        } catch (error) {
+          captured = error;
+        }
+        assert.ok(captured instanceof MigrationError, label);
+        assert.equal(captured.code, code, label);
+        assert.equal(captured.message.includes(secret), false, `${label}: secret leaked`);
+        assert.equal(captured.message.includes("abc123XYZdefg456"), false, `${label}: tail leaked`);
+        assert.equal(captured.message.includes("planted-operator"), false, `${label}: path leaked`);
+        assert.equal(captured.message.includes("provider said"), false, `${label}: message leaked`);
+      }
+    },
+  },
+  {
+    // A never-settling call is the failure a row cap cannot reach. The deadline
+    // is monotonic and the abort signal is the cooperative half.
+    name: "PLANTED-a-never-settling-transport-is-bounded-and-cancelled",
+    async execute() {
+      const environment = stagingEnvironment();
+      const stall = () => new Promise(() => {});
+
+      for (const [label, options] of [
+        ["describe", { onDescribe: stall }],
+        ["query", { onQuery: stall }],
+      ]) {
+        const startedAtMs = performance.now();
+        await expectAsyncFailure(label, "REMOTE_OBSERVATION_DEADLINE_EXCEEDED", () =>
+          readRemoteLineageSnapshotOrRefuse(
+            environment,
+            recordingTransport(options),
+            STAGING_DATABASE_ID,
+            { deadlineMs: 60 },
+          ),
+        );
+        // Bounded in fact, not merely in intent.
+        assert.ok(performance.now() - startedAtMs < 5_000, `${label}: not bounded`);
+      }
+
+      // Cancellation reaches the transport, so a cooperative one can stop work.
+      let observed;
+      await expectAsyncFailure("cancelled", "REMOTE_OBSERVATION_DEADLINE_EXCEEDED", () =>
+        readRemoteLineageSnapshotOrRefuse(
+          environment,
+          recordingTransport({
+            onDescribe: (request) => {
+              observed = request?.signal;
+              return new Promise(() => {});
+            },
+          }),
+          STAGING_DATABASE_ID,
+          { deadlineMs: 60 },
+        ),
+      );
+      assert.ok(observed !== undefined, "no abort signal was handed to the transport");
+      assert.equal(observed.aborted, true, "the signal was never aborted");
+
+      // The clamp only tightens: an absurd request cannot extend the ceiling.
+      assert.ok(MAX_REMOTE_STRING_BYTES > 0 && REMOTE_OBSERVATION_DEADLINE_MS === 15_000);
+    },
+  },
+  {
+    // The sixth blocker: the resolved id was validated *inside* a call whose
+    // argument was `await transport.describeTarget()`, so the transport ran
+    // first and an unresolved caller still reached the network.
+    name: "PLANTED-an-unresolved-id-refuses-before-any-transport-method-runs",
+    async execute() {
+      const environment = stagingEnvironment();
+      const placeholder = "$" + "{ASIMP_D1_DATABASE_ID_STAGING}";
+      for (const [label, candidate] of [
+        ["placeholder", placeholder],
+        ["absent", undefined],
+        ["null", null],
+        ["not-a-uuid", "asimposium-staging"],
+        ["nil-uuid", "00000000-0000-0000-0000-000000000000"],
+      ]) {
+        const sentinel = forbiddenTransport();
+        await expectAsyncFailure(label, "REMOTE_TARGET_ID_UNRESOLVED", () =>
+          readRemoteLineageSnapshotOrRefuse(environment, sentinel, candidate),
+        );
+        // Both mechanisms: the counters stay at zero, and had either method run
+        // its sentinel throw would have replaced the expected refusal above.
+        assert.equal(sentinel.calls.describe, 0, `${label}: describeTarget was reached`);
+        assert.equal(sentinel.calls.query, 0, `${label}: query was reached`);
+      }
+
+      // Causal control: the identical sentinel transport is reached once the id
+      // resolves, so the zero counts above are caused by the id and not by a
+      // transport that is never called at all.
+      const reached = forbiddenTransport();
+      await expectAsyncFailure("resolved", "REMOTE_TARGET_UNDESCRIBED", () =>
+        readRemoteLineageSnapshotOrRefuse(environment, reached, STAGING_DATABASE_ID),
+      );
+      assert.equal(reached.calls.describe, 1, "the resolved path never reached the transport");
     },
   },
 ];

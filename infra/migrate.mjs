@@ -1543,6 +1543,475 @@ async function readLocalLineageSnapshot(root, databaseName, localPersistTo = und
   return { catalog, journal, lineage };
 }
 
+/**
+ * Remote D1 metadata observation (bead asimposiumorg-doa, staging slice 1).
+ *
+ * `readLocalLineageSnapshot` above needs no credential, because Wrangler's local
+ * D1 is workerd's own SQLite. A remote target has neither that property nor a
+ * safe default, so this reader takes its transport as an argument and has **no
+ * default transport at all**: there is no path through this file that can reach
+ * Cloudflare on its own. A caller that has not supplied one gets a typed
+ * refusal, never a network call and never a silent downgrade to local.
+ *
+ * Scope is deliberately observation only. Nothing here applies a migration or
+ * writes a journal row. The remote apply path and its atomicity question — can
+ * `migration; INSERT INTO ledger` be made atomic over the D1 HTTP API, or does
+ * it need a reconciled two-phase journal — are open and must not be inferred
+ * from the existence of this reader.
+ */
+
+/**
+ * The transport contract, validated before use.
+ *
+ * `describeTarget({signal})` answers which database responded; `query({sql,
+ * database_id, signal})` runs one read against a named target and returns the
+ * identity that served it. Both are required: a transport that could answer
+ * queries without attributing them would leave the per-result identity check
+ * below with nothing to compare.
+ *
+ * The methods must be **own data properties**. `typeof transport.query` also
+ * accepts an inherited method or an accessor, and an accessor can hand a
+ * different function to the check than to the call.
+ */
+function assertRemoteTransport(transport) {
+  assertRemotePlainObject(transport, "REMOTE_TRANSPORT_UNAVAILABLE");
+  for (const method of ["describeTarget", "query"]) {
+    if (typeof ownDataValue(transport, method, "REMOTE_TRANSPORT_UNAVAILABLE") !== "function") {
+      fail(
+        "REMOTE_TRANSPORT_UNAVAILABLE",
+        "A remote D1 observation requires an explicit transport exposing describeTarget and query as own methods; this runner never opens one itself.",
+      );
+    }
+  }
+}
+
+/** One deadline covers describe plus every query, measured monotonically. */
+export const REMOTE_OBSERVATION_DEADLINE_MS = 15_000;
+/** Any single string a remote target may return. Generous enough for DDL. */
+export const MAX_REMOTE_STRING_BYTES = 8_192;
+/** Every string across one whole observation, summed. */
+export const MAX_REMOTE_RESPONSE_BYTES = 256 * 1024;
+
+function createRemoteBudget(deadlineMs = REMOTE_OBSERVATION_DEADLINE_MS) {
+  // Clamped to the fixed ceiling, so a caller-supplied value can only ever be
+  // stricter. Monotonic, not wall-clock: a clock step must not extend or
+  // collapse the deadline, and `Date.now()` would let it do both.
+  const bounded =
+    typeof deadlineMs === "number" && Number.isFinite(deadlineMs) && deadlineMs > 0
+      ? Math.min(deadlineMs, REMOTE_OBSERVATION_DEADLINE_MS)
+      : REMOTE_OBSERVATION_DEADLINE_MS;
+  return { deadlineAt: performance.now() + bounded, bytes: 0 };
+}
+
+function assertRemotePlainObject(record, code) {
+  if (typeof record !== "object" || record === null || Array.isArray(record)) {
+    fail(code, "A remote response must be a plain object.");
+  }
+}
+
+/**
+ * Read one property that must be present, **own**, and a plain data property.
+ *
+ * `in` and ordinary member access both consult the prototype chain, so a
+ * response inheriting `database_id` from a polluted `Object.prototype` would
+ * satisfy either. An accessor is refused for a second and sharper reason: a
+ * getter can return one value to the identity check and another to the row
+ * reader, which is the exact split-brain this reader exists to close.
+ */
+function ownDataValue(record, key, code) {
+  assertRemotePlainObject(record, code);
+  if (!Object.hasOwn(record, key)) {
+    fail(code, "A remote response is missing a required own property.");
+  }
+  const descriptor = Object.getOwnPropertyDescriptor(record, key);
+  if (
+    descriptor === undefined ||
+    typeof descriptor.get === "function" ||
+    typeof descriptor.set === "function"
+  ) {
+    fail(code, "A remote response property must be a data property, not an accessor.");
+  }
+  return descriptor.value;
+}
+
+/**
+ * The response carries these keys and nothing else.
+ *
+ * `Object.getOwnPropertyNames` rather than `Object.keys`, so a non-enumerable
+ * own property cannot ride along unseen, and symbols are refused outright.
+ */
+function assertExactOwnKeys(record, allowed, code) {
+  assertRemotePlainObject(record, code);
+  const names = Object.getOwnPropertyNames(record);
+  if (names.length !== allowed.length || Object.getOwnPropertySymbols(record).length !== 0) {
+    fail(code, "A remote response carried an unexpected key set.");
+  }
+  for (const key of allowed) {
+    if (!Object.hasOwn(record, key)) {
+      fail(code, "A remote response carried an unexpected key set.");
+    }
+  }
+}
+
+/** Charge one string against both the per-field and whole-observation bounds. */
+function chargeRemoteBytes(budget, text, code) {
+  const bytes = Buffer.byteLength(text, "utf8");
+  if (bytes > MAX_REMOTE_STRING_BYTES) {
+    fail(code, "A remote response string exceeded its fixed size limit.");
+  }
+  budget.bytes += bytes;
+  if (budget.bytes > MAX_REMOTE_RESPONSE_BYTES) {
+    fail(code, "A remote observation exceeded its fixed total response size.");
+  }
+  return text;
+}
+
+function ownBoundedString(record, key, budget, code) {
+  const value = ownDataValue(record, key, code);
+  if (typeof value !== "string") fail(code, "A remote response field must be a string.");
+  return chargeRemoteBytes(budget, value, code);
+}
+
+function ownNullableBoundedString(record, key, budget, code) {
+  const value = ownDataValue(record, key, code);
+  if (value === null) return null;
+  if (typeof value !== "string") fail(code, "A remote response field must be a string or null.");
+  return chargeRemoteBytes(budget, value, code);
+}
+
+function ownSafeInteger(record, key, code) {
+  const value = ownDataValue(record, key, code);
+  if (typeof value !== "number" || !Number.isSafeInteger(value)) {
+    fail(code, "A remote response field must be a safe integer.");
+  }
+  return value;
+}
+
+function assertRemoteReadLimit(rows, maximum, code) {
+  if (rows.length > maximum) {
+    fail(code, "A remote D1 metadata read exceeded its fixed safety limit.");
+  }
+  return rows;
+}
+
+/**
+ * Bound one transport call in time, and flatten whatever it throws.
+ *
+ * A never-settling call is the failure mode a row cap cannot reach, so the
+ * deadline is enforced here rather than trusted to the transport. The abort
+ * signal is the cooperative half: a transport that honours it stops work, and
+ * one that ignores it is abandoned anyway.
+ *
+ * The caught value is discarded deliberately. A transport failure is data from
+ * outside this process and may carry a provider message, a credential, or an
+ * absolute path; replacing it with a fixed code is the only way to guarantee
+ * none of that reaches a diagnostic.
+ */
+async function awaitBoundedRemote(budget, invoke, code) {
+  if (performance.now() >= budget.deadlineAt) {
+    fail(
+      "REMOTE_OBSERVATION_DEADLINE_EXCEEDED",
+      "The remote observation exceeded its fixed deadline.",
+    );
+  }
+  const controller = new AbortController();
+  let timer;
+  // An explicit flag, not a second clock reading. Re-comparing `performance.now()`
+  // against the deadline in the catch misattributed an expiry whenever timer
+  // granularity left the clock a fraction below it, reporting a transport failure
+  // for what was actually a deadline.
+  let expired = false;
+  try {
+    return await Promise.race([
+      (async () => invoke(controller.signal))(),
+      new Promise((_resolve, reject) => {
+        timer = setTimeout(
+          () => {
+            expired = true;
+            controller.abort();
+            reject(new Error("remote-observation-deadline"));
+          },
+          Math.max(0, budget.deadlineAt - performance.now()),
+        );
+        timer.unref?.();
+      }),
+    ]);
+  } catch {
+    if (expired) {
+      fail(
+        "REMOTE_OBSERVATION_DEADLINE_EXCEEDED",
+        "The remote observation exceeded its fixed deadline.",
+      );
+    }
+    fail(code, "A remote D1 metadata call did not complete.");
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
+/**
+ * Every statement this reader is permitted to emit.
+ *
+ * Enforcing read-only by inspecting statements at the test boundary would only
+ * describe the ones a test happened to look at. Refusing here makes it
+ * structural: a write cannot reach the transport at all. Stacked statements are
+ * refused for the same reason one `SELECT` is allowed — `SELECT 1; DROP TABLE x`
+ * is not a read, and a reader that accepted it would be read-only in name only.
+ */
+export function assertReadOnlySql(sql) {
+  const trimmed = typeof sql === "string" ? sql.trim() : "";
+  const body = trimmed.endsWith(";") ? trimmed.slice(0, -1).trim() : trimmed;
+  if (body === "" || body.includes(";") || !/^SELECT\s/i.test(body)) {
+    fail(
+      "REMOTE_READ_NOT_READ_ONLY",
+      "A remote observation may emit exactly one SELECT statement.",
+    );
+  }
+  return sql;
+}
+
+/**
+ * Canonical D1 identifier shape.
+ *
+ * Deliberately not imported from `resolve-wrangler-deploy.mjs`: that module
+ * loads a platform `openat` binding at import time for its publication path, and
+ * a metadata reader must not drag an FFI dependency into the migration runner to
+ * borrow one regular expression.
+ */
+const REMOTE_DATABASE_ID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/;
+
+/**
+ * Bind the database that answered to the one deploy resolution chose, before a
+ * single row is trusted.
+ *
+ * The topology carries `${ASIMP_D1_DATABASE_ID_STAGING}` — a placeholder, not an
+ * identity — so the declared id can never be the value compared. The resolved id
+ * comes from the caller that performed deploy resolution; the observed id comes
+ * from the database that actually responded. Name alone is not enough: two
+ * accounts can each hold an `asimposium-staging`, and the wrong-account case is
+ * precisely what this exists to catch.
+ */
+export function assertResolvedDatabaseId(resolvedDatabaseId) {
+  // Its own function and its own call site, ahead of every injected method. An
+  // earlier revision passed `await transport.describeTarget()` as an *argument*
+  // to the identity check, so the transport ran first and an unresolved caller
+  // still reached the network: the check was correct and simply arrived after
+  // the thing it was meant to prevent.
+  if (typeof resolvedDatabaseId !== "string" || !REMOTE_DATABASE_ID.test(resolvedDatabaseId)) {
+    fail(
+      "REMOTE_TARGET_ID_UNRESOLVED",
+      "A remote observation requires the resolved D1 database id; the topology placeholder is not an identity.",
+    );
+  }
+  return resolvedDatabaseId;
+}
+
+export function assertRemoteTargetIdentity(
+  environment,
+  observed,
+  resolvedDatabaseId,
+  budget = createRemoteBudget(),
+) {
+  assertResolvedDatabaseId(resolvedDatabaseId);
+  assertExactOwnKeys(observed, ["database_id", "database_name"], "REMOTE_TARGET_UNDESCRIBED");
+  const databaseId = ownBoundedString(observed, "database_id", budget, "REMOTE_TARGET_UNDESCRIBED");
+  const databaseName = ownBoundedString(
+    observed,
+    "database_name",
+    budget,
+    "REMOTE_TARGET_UNDESCRIBED",
+  );
+  if (databaseId !== resolvedDatabaseId) {
+    fail(
+      "REMOTE_TARGET_IDENTITY_MISMATCH",
+      "The database that answered is not the resolved deploy target.",
+    );
+  }
+  if (databaseName !== environment.d1.database_name) {
+    fail(
+      "REMOTE_TARGET_IDENTITY_MISMATCH",
+      "The database that answered does not carry the declared topology database name.",
+    );
+  }
+  return { database_id: databaseId, database_name: databaseName };
+}
+
+/**
+ * One bounded read, bound to the resolved identity in both directions.
+ *
+ * Checking `describeTarget()` once and then trusting independent queries is
+ * split-brain: a transport can describe staging, then serve every subsequent row
+ * from a different database, and nothing downstream would notice. The resolved
+ * id therefore travels *into* each request and the identity that served it is
+ * required *back* on each response, so every row is attributable to the target
+ * that was authorized rather than to whichever one answered first.
+ */
+async function readRemoteRows(transport, budget, sql, resolvedDatabaseId, unreadableCode) {
+  // Outside the bounded call on purpose: a read-only violation is this runner's
+  // own defect and must surface as itself, not be flattened into a transport
+  // failure code.
+  const statement = assertReadOnlySql(sql);
+  const response = await awaitBoundedRemote(
+    budget,
+    (signal) => transport.query({ sql: statement, database_id: resolvedDatabaseId, signal }),
+    unreadableCode,
+  );
+  assertExactOwnKeys(response, ["database_id", "rows"], unreadableCode);
+  if (ownBoundedString(response, "database_id", budget, unreadableCode) !== resolvedDatabaseId) {
+    fail(
+      "REMOTE_TARGET_IDENTITY_MISMATCH",
+      "A remote result was served by a database other than the resolved target.",
+    );
+  }
+  const rows = ownDataValue(response, "rows", unreadableCode);
+  if (!Array.isArray(rows)) fail(unreadableCode, "Remote D1 did not return a result array.");
+  return rows;
+}
+
+async function readOptionalRemoteRows(
+  transport,
+  budget,
+  catalog,
+  table,
+  columns,
+  maximum,
+  resolvedDatabaseId,
+  unreadableCode,
+  overrunCode,
+) {
+  if (!catalog.some((entry) => entry.type === "table" && entry.name === table)) return [];
+  return assertRemoteReadLimit(
+    await readRemoteRows(
+      transport,
+      budget,
+      `SELECT ${columns} FROM ${table} ORDER BY 1 LIMIT ${maximum + 1};`,
+      resolvedDatabaseId,
+      unreadableCode,
+    ),
+    maximum,
+    overrunCode,
+  );
+}
+
+/**
+ * The remote counterpart of `readLocalLineageSnapshot`.
+ *
+ * `catalog`, `journal` and `lineage` are shape-identical to the local reader's,
+ * so `classifySchemaLineage` consumes either without knowing which target it
+ * came from — the classification rules stay one implementation. `target` is
+ * additive and carries the proven identity for a receipt; the classifier
+ * ignores it.
+ */
+export async function readRemoteLineageSnapshotOrRefuse(
+  environment,
+  transport,
+  resolvedDatabaseId,
+  // Clamped, never loosened: a caller may tighten the deadline but cannot
+  // disable or extend it. The option exists so a never-settling transport can be
+  // proven bounded in milliseconds instead of asserted in a comment; omitting it
+  // yields the fixed default.
+  { deadlineMs = REMOTE_OBSERVATION_DEADLINE_MS } = {},
+) {
+  if (environment.kind === "local") {
+    fail(
+      "REMOTE_READER_WRONG_TARGET",
+      "A local environment has a credential-free reader of its own; the remote reader must not stand in for it.",
+    );
+  }
+  // Local validation first, and in this order: neither line below may run
+  // before the resolved id is known good, or an unresolved caller still reaches
+  // an injected method. `assertRemoteTransport` inspects shape only.
+  const targetId = assertResolvedDatabaseId(resolvedDatabaseId);
+  assertRemoteTransport(transport);
+
+  const budget = createRemoteBudget(deadlineMs);
+  const target = assertRemoteTargetIdentity(
+    environment,
+    await awaitBoundedRemote(
+      budget,
+      (signal) => transport.describeTarget({ signal }),
+      "REMOTE_TARGET_UNDESCRIBED",
+    ),
+    targetId,
+    budget,
+  );
+
+  const catalog = assertRemoteReadLimit(
+    await readRemoteRows(
+      transport,
+      budget,
+      `SELECT type, name, tbl_name, sql FROM sqlite_schema ORDER BY type, name LIMIT ${MAX_CATALOG_ROWS + 1};`,
+      targetId,
+      "REMOTE_D1_CATALOG_UNREADABLE",
+    ),
+    MAX_CATALOG_ROWS,
+    "REMOTE_D1_CATALOG_OVERRUN",
+  ).map((row) => {
+    // `String(row.type)` accepted an inherited value, an accessor, and an object
+    // with a hostile `toString`. Each field is now an own data property of a
+    // declared primitive type, against an exact key set.
+    assertExactOwnKeys(row, ["type", "name", "tbl_name", "sql"], "REMOTE_D1_CATALOG_UNREADABLE");
+    return {
+      type: ownBoundedString(row, "type", budget, "REMOTE_D1_CATALOG_UNREADABLE"),
+      name: ownBoundedString(row, "name", budget, "REMOTE_D1_CATALOG_UNREADABLE"),
+      table: ownBoundedString(row, "tbl_name", budget, "REMOTE_D1_CATALOG_UNREADABLE"),
+      sql: ownNullableBoundedString(row, "sql", budget, "REMOTE_D1_CATALOG_UNREADABLE"),
+    };
+  });
+
+  const journal = (
+    await readOptionalRemoteRows(
+      transport,
+      budget,
+      catalog,
+      LEDGER_TABLE,
+      "id, sequence, digest",
+      MAX_JOURNAL_ROWS,
+      targetId,
+      "REMOTE_D1_JOURNAL_UNREADABLE",
+      "REMOTE_D1_JOURNAL_OVERRUN",
+    )
+  ).map((row) => {
+    assertExactOwnKeys(row, ["id", "sequence", "digest"], "REMOTE_D1_JOURNAL_UNREADABLE");
+    return {
+      id: ownBoundedString(row, "id", budget, "REMOTE_D1_JOURNAL_UNREADABLE"),
+      sequence: ownSafeInteger(row, "sequence", "REMOTE_D1_JOURNAL_UNREADABLE"),
+      digest: ownBoundedString(row, "digest", budget, "REMOTE_D1_JOURNAL_UNREADABLE"),
+    };
+  });
+
+  const lineage = (
+    await readOptionalRemoteRows(
+      transport,
+      budget,
+      catalog,
+      LINEAGE_TABLE,
+      "singleton, lineage, artifact_id, artifact_digest, schema_digest, empty_guard",
+      MAX_LINEAGE_ROWS,
+      targetId,
+      "REMOTE_D1_LINEAGE_UNREADABLE",
+      "REMOTE_D1_LINEAGE_OVERRUN",
+    )
+  ).map((row) => {
+    const code = "REMOTE_D1_LINEAGE_UNREADABLE";
+    assertExactOwnKeys(
+      row,
+      ["singleton", "lineage", "artifact_id", "artifact_digest", "schema_digest", "empty_guard"],
+      code,
+    );
+    return {
+      singleton: ownSafeInteger(row, "singleton", code),
+      lineage: ownBoundedString(row, "lineage", budget, code),
+      artifact_id: ownBoundedString(row, "artifact_id", budget, code),
+      artifact_digest: ownBoundedString(row, "artifact_digest", budget, code),
+      schema_digest: ownBoundedString(row, "schema_digest", budget, code),
+      empty_guard: ownSafeInteger(row, "empty_guard", code),
+    };
+  });
+
+  return { catalog, journal, lineage, target };
+}
+
 export function bootstrapInstallSql(artifact, appliedAt) {
   // The CAS-like empty guard is evaluated inside one D1 command batch with
   // every CREATE. A racing or contaminated target hits the CHECK, rolling back
