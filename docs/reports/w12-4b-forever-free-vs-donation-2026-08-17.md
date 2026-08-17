@@ -33,9 +33,14 @@ shape; this is the point of OQ-9 calling the question "architecture-neutral."
 - Derived: pack reads ≈ 19K/day; workshop writes ≈ 10K/day; promotions ≈ 800/day.
 - Lurker storm: 10K concurrent readers polling `/cursor` at a 10-second interval = **1,000 req/s** of
   a one-integer, edge-cached response.
-  **Source divergence, and an unresolved inconsistency in the model.** Fable §15 states "≈ 100 req/s"
-  for this same scenario; 10,000 requests per 10 seconds is 1,000/s, so the plan figure appears to be
-  off by 10×. But correcting it exposes a larger problem the plan does not address:
+  **Source divergence — RESOLVED upstream 2026-08-17.** Fable §15 previously stated "≈ 100 req/s"
+  for this same scenario; 10,000 requests per 10 seconds is 1,000/s — a 10× slip. As of 2026-08-17
+  §15 is corrected: it prints 1,000 req/s, records the billed-request fact (cache hits still bill
+  the standard request rate; cache-based reconciliation is refuted), and reconciles via the
+  operator's stated ceiling — a fully sustained month-long storm tops out ≈ $836 against the
+  ≈$1,000/mo ceiling. The three candidate reconciliations below are preserved for the record; the
+  accepted resolution is (1) + the ceiling: storms are duration-bounded, and even the absurd
+  sustained case fits. Historical record of the defect:
 
   | Quantity | Value |
   |---|---|
@@ -132,18 +137,22 @@ costs.
 base-load worst month already exceeds the ≤ $30/1K-Fellow target, and the whole bill falls on one
 person under A — before any storm cost is counted.
 
-### Unresolved cost question — blocks the magnitude claim
+### Cost question — RESOLVED 2026-08-17 by the operator's ceiling
 
 An earlier draft of this report called the bill "personal-scale." **That characterization is
-withdrawn as unproven.** It inherits §15's cost table, and that table cannot be reconciled with a
-sustained 1,000 req/s storm (57.6× its own stated monthly volume, above). Until one of the three
-reconciliations is established, the honest position is:
+withdrawn as unproven.** The resolution came from the operator (2026-08-17): the affordability
+target is **≈$1,000/mo ceiling, efficiency-first, viral = fund it** — replacing the ≤$30/1K-Fellow
+framing this section was written against. Against that ceiling the arithmetic closes: the
+billed-request fact is established (pinned sources below; cache hits still bill the standard
+request rate), and a fully sustained month-long 1,000 req/s storm is 2.592B requests ≈ $780 +
+≈$51 CPU ≈ **$836/mo — under the ceiling**. The three numbered work items below are therefore
+no longer load-bearing for the magnitude claim; the /cursor measurement obligation still stands
+(recorded on c52 and 7ft) because efficiency, not affordability, is the operator's goal. Kept for
+the record, the honest position this section documented:
 
 - The **steady-state, non-storm** figures (~$5–15/mo; ~$15 @1K Fellows) are as stated by §15 and are
   small.
-- The **storm-inclusive** figure is **unknown to this report**. If a sustained storm is billed as
-  Worker invocations, the cost is orders of magnitude above the table. If it is duration-bounded or
-  edge-served without per-request billing, the table may stand.
+- The **storm-inclusive** figure was unknown here until the ceiling reconciliation above.
 
 **Required arithmetic before any cost-based conclusion is relied on** — this is the concrete work
 item, and it belongs to whoever owns the cost model, not to this bead:
