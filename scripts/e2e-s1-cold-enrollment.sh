@@ -54,7 +54,7 @@ readonly LOCAL_D1_CLIENT="$REPO_ROOT/apps/wire/src/enrollment/local-d1-client.ts
 # search set is also the PATH inherited by local Wrangler: its /usr/bin/env
 # node shebang must not turn a hostile caller PATH into code that receives the
 # replay root.
-readonly TRUSTED_TOOL_PATH="/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin"
+readonly TRUSTED_TOOL_PATH="/opt/homebrew/bin:/usr/local/bin:/usr/sbin:/usr/bin:/bin"
 resolve_trusted_tool() {
   local name="$1" candidate="" directory base
   candidate="$(PATH="$TRUSTED_TOOL_PATH" command -v -- "$name" 2>/dev/null)" || return 1
@@ -69,7 +69,8 @@ NODE_BIN="$(resolve_trusted_tool node)" || { printf 'BLOCKED s1-cold-enrollment:
 PERL_BIN="$(resolve_trusted_tool perl)" || { printf 'BLOCKED s1-cold-enrollment: PERL_REQUIRED\n' >&2; exit 78; }
 CURL_BIN="$(resolve_trusted_tool curl)" || { printf 'BLOCKED s1-cold-enrollment: CURL_REQUIRED\n' >&2; exit 78; }
 PS_BIN="$(resolve_trusted_tool ps)" || { printf 'BLOCKED s1-cold-enrollment: PS_REQUIRED\n' >&2; exit 78; }
-readonly BASH_BIN BUN_BIN NODE_BIN PERL_BIN CURL_BIN PS_BIN
+LSOF_BIN="$(resolve_trusted_tool lsof)" || { printf 'BLOCKED s1-cold-enrollment: LSOF_REQUIRED\n' >&2; exit 78; }
+readonly BASH_BIN BUN_BIN NODE_BIN PERL_BIN CURL_BIN PS_BIN LSOF_BIN
 readonly PINNED_RUNTIME_PATH="${BASH_BIN%/*}:${BUN_BIN%/*}:${NODE_BIN%/*}:/usr/bin:/bin"
 PATH="$PINNED_RUNTIME_PATH"
 export PATH
@@ -142,7 +143,7 @@ LOCAL_RETAINED_ROOTS=()
 # running child. Its bytes are never command arguments and it is closed in the
 # parent before the stopped supervisor is observed.
 readonly PRIVATE_SERVER_HANDOFF_FD=9
-SERVER_HANDOFF_OPEN=0
+PRIVATE_HANDOFF_PRELAUNCH_HELPER_OBSERVED=0
 # Resolved by `resolve_port` / `resolve_run_token`, which refuse in this shell
 # rather than inside a command substitution. See the comment on `allocate_port`.
 RESOLVED_PORT=""
@@ -386,7 +387,21 @@ prepare_local_runtime_roots() {
     "XDG_RUNTIME_DIR=$LOCAL_RUNTIME_XDG_RUNTIME"
     "WRANGLER_CACHE_DIR=$LOCAL_RUNTIME_WRANGLER_CACHE"
     "WRANGLER_LOG_PATH=$LOCAL_RUNTIME_WRANGLER_LOG"
-    "CLOUDFLARE_LOAD_DEV_VARS_FROM_DOT_ENV=false"
+    # `--env-file` always names this private empty file. Wrangler therefore
+    # bypasses config-relative .dev.vars and default .env discovery, while this
+    # true setting permits only the scrubbed process bindings needed by Workerd.
+    "CLOUDFLARE_LOAD_DEV_VARS_FROM_DOT_ENV=true"
+    # Wrangler 4.123 enables Miniflare's local trace collector by default;
+    # it retains request/response bodies (including minted flow material) in
+    # the persistence tree. Disable that optional collector and explorer for
+    # this secret-bearing lane rather than accepting a scanned disclosure.
+    "X_LOCAL_OBSERVABILITY=false"
+    "X_LOCAL_EXPLORER=false"
+    # Bun otherwise serializes transpiled source into XDG cache. This suite
+    # deliberately contains inert flow/join/bearer-shaped negative fixtures,
+    # so disable that disk cache rather than manufacturing scanner matches that
+    # are not live enrollment material.
+    "BUN_RUNTIME_TRANSPILER_CACHE_PATH=0"
     "BUN_INSTALL_CACHE_DIR=$LOCAL_RUNTIME_BUN_CACHE"
   )
   reconcile_local_runtime_roots
@@ -601,6 +616,31 @@ supervisor_argv_excludes() {
   [[ "$pid" =~ ^[1-9][0-9]*$ && "$replay_key" =~ ^[A-Za-z0-9_-]{43}$ && "$origin" =~ ^http://127\.0\.0\.1:[1-9][0-9]{0,4}$ ]] || return 1
   argv="$($PS_BIN -ww -p "$pid" -o args= 2>/dev/null)" || return 1
   [[ -n "$argv" && "$argv" != *"$replay_key"* && "$argv" != *"$origin"* ]]
+}
+
+# Normalize the two supported `lsof` no-match conventions without making the
+# production secret proof depend on the host: both 0/empty and 1/empty mean no
+# descriptor; any nonempty output proves it remains open; all other states are
+# inspection-unknown and must be refused.
+supervisor_fd_observer_result() {
+  local status="$1" observed="$2"
+  [[ "$status" =~ ^[0-9]+$ ]] || return 2
+  [[ -z "$observed" ]] || return 1
+  case "$status" in
+    0 | 1) return 0 ;;
+    *) return 2 ;;
+  esac
+}
+
+# A stopped supervisor is deliberately long lived, so its descriptor table is
+# part of the retained-secret boundary as much as argv. The normalizer above
+# accepts both macOS and Linux no-match conventions; observer errors stay
+# unproven.
+supervisor_fd_is_closed() {
+  local pid="$1" fd="$2" observed status=0
+  [[ "$pid" =~ ^[1-9][0-9]*$ && "$fd" =~ ^[0-9]+$ ]] || return 2
+  observed="$("$LSOF_BIN" -nP -a -p "$pid" -d "$fd" -F fn 2>/dev/null)" || status=$?
+  supervisor_fd_observer_result "$status" "$observed"
 }
 
 # The process group id of a pid; non-zero when the process is gone, the pid is not
@@ -1199,8 +1239,8 @@ on_exit() {
 }
 
 require_tooling() {
-  command -v bun >/dev/null 2>&1 || blocked "BUN_REQUIRED"
-  command -v curl >/dev/null 2>&1 || blocked "CURL_REQUIRED"
+  [[ -x "$BUN_BIN" ]] || blocked "BUN_REQUIRED"
+  [[ -x "$CURL_BIN" ]] || blocked "CURL_REQUIRED"
 }
 
 valid_secret() {
@@ -1382,21 +1422,39 @@ assert_local_client_evidence() {
   log_phase "client-evidence-verified" "records=1 bytes=$size scope=retained-state"
 }
 
+derive_local_replay_key_from_entropy() {
+  local entropy="$1" observer_file="${2:-}" key
+  [[ "$entropy" =~ ^[a-f0-9]{64}$ ]] || return 1
+  if [[ -n "$observer_file" ]]; then
+    [[ "$observer_file" == "$STATE_DIR/"* && ! -e "$observer_file" && ! -L "$observer_file" ]] || return 1
+  fi
+  key="$(printf '%s' "$entropy" | "${LOCAL_RUNTIME_ENV[@]}" "$BASH_BIN" -c '
+    cwd="$1"; shift
+    cd -- "$cwd" || exit 125
+    exec "$@"
+  ' "$BASH_BIN" "$LOCAL_RUNTIME_CWD" "$BUN_BIN" -e '
+    import { constants, openSync, closeSync, writeSync } from "node:fs";
+    const observerPath = process.argv[1] ?? "";
+    if (observerPath) {
+      const fd = openSync(observerPath, constants.O_WRONLY | constants.O_CREAT | constants.O_EXCL | constants.O_NOFOLLOW, 0o600);
+      writeSync(fd, `${process.pid}\n`);
+      closeSync(fd);
+      await Bun.sleep(1_000);
+    }
+    const hex = (await Bun.stdin.text()).trim();
+    if (!/^[a-f0-9]{64}$/.test(hex)) process.exit(1);
+    process.stdout.write(Buffer.from(hex, "hex").toString("base64url"));
+  ' "$observer_file" 2>/dev/null)" || return 1
+  [[ "$key" =~ ^[A-Za-z0-9_-]{43}$ ]] || return 1
+  printf '%s' "$key"
+}
+
 resolve_local_replay_key() {
   local entropy key
   entropy="$(LC_ALL=C od -An -N32 -tx1 /dev/urandom 2>/dev/null | tr -d '[:space:]')" ||
     failed "LOCAL_REPLAY_KEY_UNAVAILABLE"
   [[ "$entropy" =~ ^[a-f0-9]{64}$ ]] || failed "LOCAL_REPLAY_KEY_UNAVAILABLE"
-  key="$("${LOCAL_RUNTIME_ENV[@]}" bash -c '
-    cd -- "$1" || exit 125
-    shift
-    exec "$@"
-  ' bash "$LOCAL_RUNTIME_CWD" bun -e '
-    const hex = process.argv[1];
-    if (!/^[a-f0-9]{64}$/.test(hex)) process.exit(1);
-    process.stdout.write(Buffer.from(hex, "hex").toString("base64url"));
-  ' "$entropy" 2>/dev/null)" || failed "LOCAL_REPLAY_KEY_UNAVAILABLE"
-  [[ "$key" =~ ^[A-Za-z0-9_-]{43}$ ]] || failed "LOCAL_REPLAY_KEY_UNAVAILABLE"
+  key="$(derive_local_replay_key_from_entropy "$entropy")" || failed "LOCAL_REPLAY_KEY_UNAVAILABLE"
   LOCAL_REPLAY_KEY="$key"
 }
 
@@ -1413,15 +1471,15 @@ scan_retained_files_for_secret() {
   # The JavaScript is intentionally single-quoted; shell interpolation here
   # would risk placing the searched secret into generated source or output.
   # shellcheck disable=SC2016
-  printf '%s' "$secret" | perl -e '
+  printf '%s' "$secret" | "$PERL_BIN" -e '
     $SIG{ALRM} = sub { exit 124 };
     alarm shift @ARGV;
     exec @ARGV;
-  ' "$ARTIFACT_SCAN_DEADLINE_SECONDS" "${LOCAL_RUNTIME_ENV[@]}" bash -c '
+  ' "$ARTIFACT_SCAN_DEADLINE_SECONDS" "${LOCAL_RUNTIME_ENV[@]}" "$BASH_BIN" -c '
     cd -- "$1" || exit 125
     shift
     exec "$@"
-  ' bash "$LOCAL_RUNTIME_CWD" bun -e '
+  ' "$BASH_BIN" "$LOCAL_RUNTIME_CWD" "$BUN_BIN" -e '
     import { constants } from "node:fs";
     import { lstat, open, opendir } from "node:fs/promises";
     import { join } from "node:path";
@@ -1546,8 +1604,22 @@ assert_local_replay_key_not_retained() {
       log_phase "replay-key-artifact-scan" \
         "result=absent phase=$scan_phase scope=declared-retained-roots files=${BASH_REMATCH[1]} bytes=${BASH_REMATCH[2]} deadline_s=$ARTIFACT_SCAN_DEADLINE_SECONDS"
       ;;
-    3) failed "LOCAL_REPLAY_KEY_RETAINED" ;;
-    5 | 6 | 7) failed "LOCAL_SECRET_MATERIAL_RETAINED" ;;
+    3)
+      log_phase "retained-secret-family-detected" "phase=$scan_phase family=replay-key value=not-echoed"
+      failed "LOCAL_REPLAY_KEY_RETAINED"
+      ;;
+    5)
+      log_phase "retained-secret-family-detected" "phase=$scan_phase family=flow-handle value=not-echoed"
+      failed "LOCAL_SECRET_MATERIAL_RETAINED"
+      ;;
+    6)
+      log_phase "retained-secret-family-detected" "phase=$scan_phase family=join-secret value=not-echoed"
+      failed "LOCAL_SECRET_MATERIAL_RETAINED"
+      ;;
+    7)
+      log_phase "retained-secret-family-detected" "phase=$scan_phase family=fellow-bearer value=not-echoed"
+      failed "LOCAL_SECRET_MATERIAL_RETAINED"
+      ;;
     *) failed "LOCAL_REPLAY_KEY_ARTIFACT_SCAN_UNTRUSTED" ;;
   esac
 }
@@ -1610,10 +1682,24 @@ start_pinned_supervisor() {
   shift 2
   local stopped_deadline=0 stopped_status=0 identity_status=0 status_auth="" marker=""
   local capture_deadline="" proof_status=0
+  local use_private_handoff=0 handoff_replay_key="" handoff_stoa_origin="" supervisor_program=""
+
+  if [[ "${1:-}" == "--private-fd9-handoff" ]]; then
+    [[ $# -ge 4 && "${4:-}" == "--" ]] || return 1
+    handoff_replay_key="$2"
+    handoff_stoa_origin="$3"
+    [[ "$handoff_replay_key" =~ ^[A-Za-z0-9_-]{43}$ && "$handoff_stoa_origin" =~ ^http://127\.0\.0\.1:[1-9][0-9]{0,4}$ ]] || return 1
+    use_private_handoff=1
+    PRIVATE_HANDOFF_PRELAUNCH_HELPER_OBSERVED=0
+    shift 4
+  fi
 
   private_state_directory || return 1
   ((${#LOCAL_RUNTIME_ENV[@]} > 0)) || return 1
   [[ "$(dirname "$status_file")" == "$STATE_DIR" && ! -e "$status_file" && ! -L "$status_file" ]] || return 1
+  if ((use_private_handoff == 1)); then
+    private_workerd_handoff_fd_is_ambient_closed || return 1
+  fi
   capture_deadline="$(transient_retry_deadline_us)" || return 1
   status_auth="$(new_status_authenticator)" || return 1
   marker="$(new_supervisor_marker)" || return 1
@@ -1632,19 +1718,56 @@ start_pinned_supervisor() {
     return 130
   fi
 
+  # All controller helpers above execute before the replay/origin pipe exists.
+  # Re-probe the caller shell and then an inherited helper immediately before
+  # the exact background redirection. The latter is a causal check: if an
+  # ambient fd 9 ever existed while deriving the deadline/auth/marker, this
+  # child sees it and launch is refused before a stopped leader can inherit it.
+  if ((use_private_handoff == 1)); then
+    private_workerd_handoff_fd_is_ambient_closed &&
+      private_workerd_handoff_prelaunch_helper_observes_closed || {
+        clear_provisional_state
+        finish_lifecycle_critical
+        return 1
+      }
+    PRIVATE_HANDOFF_PRELAUNCH_HELPER_OBSERVED=1
+  fi
+
   set -m
+  # This one body serves normal and fd9-handoff launches. The only difference
+  # is the exact background-command redirection below, so lifecycle behavior
+  # cannot drift between the two paths.
   # shellcheck disable=SC2016
-  "${LOCAL_RUNTIME_ENV[@]}" "$BASH_BIN" -c '
+  supervisor_program='
     status_file="$1"
     status_auth="$2"
-    shift 2
+    handoff_enabled="$3"
+    shift 3
+    [[ "$handoff_enabled" == "0" || "$handoff_enabled" == "1" ]] || exit 125
     # A group TERM kills normal payload members but pins this leader. The
     # controller can still prove its identity before any escalation; the final
     # direct KILL is only used when it is the sole remaining group member.
     trap "kill -STOP \"$$\"" TERM
     kill -STOP "$$"
     "$@" &
+    spawn_status="$?"
     child="$!"
+    if ((spawn_status != 0)); then
+      [[ "$child" =~ ^[1-9][0-9]*$ ]] && kill -KILL -- "$child" 2>/dev/null || true
+      [[ "$child" =~ ^[1-9][0-9]*$ ]] && wait "$child" 2>/dev/null || true
+      exit 125
+    fi
+    # The payload inherits descriptor 9 while the leader is stopped. Once it
+    # has forked, the leader must drop its own copy before it can wait or park;
+    # otherwise an adopted Workerd handoff pipe would remain readable for this
+    # supervisor lifetime. If that close ever fails, terminate and reap
+    # the just-created direct child before refusing rather than parking with an
+    # uncertain secret-bearing descriptor.
+    if [[ "$handoff_enabled" == "1" ]] && ! exec 9<&-; then
+      kill -KILL -- "$child" 2>/dev/null || true
+      wait "$child" 2>/dev/null || true
+      exit 125
+    fi
     child_status=0
     wait "$child" || child_status=$?
     [[ "$child_status" =~ ^[0-9]+$ ]] || exit 125
@@ -1667,7 +1790,15 @@ start_pinned_supervisor() {
       hold="$!"
       wait "$hold" || true
     done
-  ' "$marker" "$status_file" "$status_auth" "$@" &
+  '
+  if ((use_private_handoff == 1)); then
+    "${LOCAL_RUNTIME_ENV[@]}" "$BASH_BIN" -c "$supervisor_program" \
+      "$marker" "$status_file" "$status_auth" "1" "$@" \
+      9<<<"$handoff_replay_key"$'\n'"$handoff_stoa_origin" &
+  else
+    "${LOCAL_RUNTIME_ENV[@]}" "$BASH_BIN" -c "$supervisor_program" \
+      "$marker" "$status_file" "$status_auth" "0" "$@" 9<&- &
+  fi
   # The trap is still deferred across the unavoidable `&` -> `$!` boundary.
   # From this first possible assignment onward, cleanup reads globally owned
   # provisional state rather than caller-local scratch variables.
@@ -1773,58 +1904,86 @@ start_pinned_supervisor() {
   return 0
 }
 
-# The replay root is delivered after the stopped leader is born through one
-# inherited anonymous descriptor. Unlike an `env NAME=value command` argument,
-# neither the variable name/value pair nor the origin can be retained in the
-# long-lived supervisor argv. Descriptor 9 is rejected if the caller already
-# owns it; this runner must never silently replace an ambient channel.
-open_private_workerd_handoff() {
-  local replay_key="$1" stoa_origin="$2"
-  [[ "$SERVER_HANDOFF_OPEN" == "0" && "$replay_key" =~ ^[A-Za-z0-9_-]{43}$ && "$stoa_origin" =~ ^http://127\.0\.0\.1:[1-9][0-9]{0,4}$ ]] || return 1
-  if { : <&9; } 2>/dev/null; then return 1; fi
-  exec 9<<<"$replay_key"$'\n'"$stoa_origin"
-  SERVER_HANDOFF_OPEN=1
+# The controller must never own the replay/origin pipe. It proves descriptor 9
+# absent before helpers run, then passes the here-string only as a redirection
+# on the exact background supervisor invocation. This external observer is the
+# causal companion: a real helper inherits any ambient descriptor the parent
+# had leaked, so it refuses before the stopped leader can be created.
+private_workerd_handoff_fd_is_ambient_closed() {
+  if { : <&9; } 2>/dev/null || { : >&9; } 2>/dev/null; then return 1; fi
 }
 
-close_private_workerd_handoff() {
-  [[ "$SERVER_HANDOFF_OPEN" == "1" ]] || return 0
-  exec 9<&-
-  SERVER_HANDOFF_OPEN=0
+private_workerd_handoff_prelaunch_helper_observes_closed() {
+  "${LOCAL_RUNTIME_ENV[@]}" "$BASH_BIN" -c '
+    if { : <&9; } 2>/dev/null || { : >&9; } 2>/dev/null; then exit 1; fi
+  '
+}
+
+# The payload writes this fixed acknowledgement only after its own descriptor
+# close, before it exports either binding or execs Wrangler. That creates one
+# bounded pre-CONT handoff window and lets the controller inspect the exact
+# parked supervisor afterwards instead of mistaking a short-lived launch for
+# a lifetime descriptor proof.
+wait_for_private_workerd_handoff_adoption() {
+  local ack_file="$1" deadline="" record="" bytes=""
+  [[ "$ack_file" == "$STATE_DIR/"* ]] || return 2
+  deadline=$((SECONDS + SUPERVISOR_STOP_DEADLINE_SECONDS))
+  while ((SECONDS < deadline)); do
+    if [[ -e "$ack_file" || -L "$ack_file" ]]; then
+      [[ -f "$ack_file" && ! -L "$ack_file" && -O "$ack_file" && -r "$ack_file" ]] || return 2
+      bytes="$(LC_ALL=C wc -c <"$ack_file" 2>/dev/null | tr -d '[:space:]')" || return 2
+      [[ "$bytes" == "9" ]] || return 2
+      record="$(<"$ack_file")" || return 2
+      [[ "$record" == "consumed" ]] || return 2
+      return 0
+    fi
+    sleep 0.02
+  done
+  return 1
 }
 
 # Start one stopped supervisor whose child reads the replay/origin handoff from
 # descriptor 9, closes that descriptor, and only then exports the two Worker
 # bindings. The full wrapper chain begins under LOCAL_RUNTIME_ENV in
 # start_pinned_supervisor, including the supervisor itself and Wrangler's node
-# shebang. `--env-file` plus the false flag make this exact Wrangler version
-# skip config-relative .dev.vars and default .env discovery.
+# shebang. `--env-file` always names the private empty file, which makes this
+# exact Wrangler version skip config-relative .dev.vars and default .env
+# discovery while still admitting the wrapper's scrubbed process bindings.
 start_private_workerd_supervisor() {
-  local status_file="$1" label="$2" replay_key="$3" stoa_origin="$4" cwd="$5" log="$6"
+  local status_file="$1" label="$2" replay_key="$3" stoa_origin="$4" cwd="$5" log="$6" handoff_ack=""
   shift 6
-  open_private_workerd_handoff "$replay_key" "$stoa_origin" || return 1
+  handoff_ack="$STATE_DIR/.${label}-handoff-consumed"
+  [[ ! -e "$handoff_ack" && ! -L "$handoff_ack" ]] || return 1
   if ! start_pinned_supervisor "$status_file" "$label" \
+    --private-fd9-handoff "$replay_key" "$stoa_origin" -- \
     "$BASH_BIN" -c '
-      handoff_fd="$1"; cwd="$2"; log="$3"; shift 3
+      handoff_fd="$1"; cwd="$2"; log="$3"; handoff_ack="$4"; shift 4
       [[ "$handoff_fd" == "9" ]] || exit 125
       IFS= read -r replay_key <&9 || exit 125
       IFS= read -r stoa_origin <&9 || exit 125
       if IFS= read -r unexpected <&9; then exit 125; fi
       [[ "$replay_key" =~ ^[A-Za-z0-9_-]{43}$ && "$stoa_origin" =~ ^http://127\.0\.0\.1:[1-9][0-9]{0,4}$ ]] || exit 125
       exec 9<&-
+      set -C
+      if ! printf "consumed\n" >"$handoff_ack"; then exit 125; fi
+      set +C
       replay_name="$(printf "%s" ENROLLMENT_REPLAY_ KEY)"
       origin_name="$(printf "%s" STOA_ ORIGIN)"
       export "$replay_name=$replay_key"
       export "$origin_name=$stoa_origin"
       export CLOUDFLARE_INCLUDE_PROCESS_ENV=true
-      unset replay_key stoa_origin replay_name origin_name
+      unset replay_key
+      unset stoa_origin
+      unset replay_name
+      unset origin_name
       cd -- "$cwd" || exit 125
       exec "$@" >>"$log" 2>&1
-    ' "$BASH_BIN" "$PRIVATE_SERVER_HANDOFF_FD" "$cwd" "$log" "$@"; then
-    close_private_workerd_handoff || true
+    ' "$BASH_BIN" "$PRIVATE_SERVER_HANDOFF_FD" "$cwd" "$log" "$handoff_ack" "$@"; then
     return 1
   fi
-  close_private_workerd_handoff || return 1
-  supervisor_argv_excludes "$PROVISIONAL_PID" "$replay_key" "$stoa_origin"
+  wait_for_private_workerd_handoff_adoption "$handoff_ack" || return 1
+  supervisor_argv_excludes "$PROVISIONAL_PID" "$replay_key" "$stoa_origin" || return 1
+  supervisor_fd_is_closed "$PROVISIONAL_PID" "$PRIVATE_SERVER_HANDOFF_FD"
 }
 
 adopt_provisional_supervisor() {
@@ -1957,16 +2116,31 @@ readonly LOCAL_CLIENT_CAPTURE_PROGRAM='
     if (!stat.isFile() || stat.size !== 0) throw new Error("capture-shape");
     return handle;
   }
+  async function writeAll(handle, chunk) {
+    let offset = 0;
+    while (offset < chunk.byteLength) {
+      const remaining = chunk.subarray(offset);
+      const { bytesWritten } = await handle.write(remaining);
+      if (!Number.isSafeInteger(bytesWritten) || bytesWritten <= 0 || bytesWritten > remaining.byteLength) {
+        throw new Error("capture-write-progress");
+      }
+      offset += bytesWritten;
+    }
+  }
   async function copy(stream, handle) {
     let size = 0;
     for await (const chunk of stream) {
-      size += chunk.byteLength;
-      if (size > MAX_BYTES) {
+      const nextSize = size + chunk.byteLength;
+      if (nextSize > MAX_BYTES) {
+        const remaining = MAX_BYTES - size;
+        if (remaining > 0) await writeAll(handle, chunk.subarray(0, remaining));
+        size = nextSize;
         overflow = true;
         child.kill();
         break;
       }
-      await handle.write(chunk);
+      size = nextSize;
+      await writeAll(handle, chunk);
     }
   }
   try {
@@ -1993,14 +2167,75 @@ run_bounded_local_client_capture() {
   "$BUN_BIN" -e "$LOCAL_CLIENT_CAPTURE_PROGRAM" "$stdout_path" "$stderr_path" "$@"
 }
 
+# These are the only two client streams, and the capture wrapper has already
+# closed them before its supervisor records completion. Scan their exact opened
+# inodes now; scanning Workerd's mutable D1/WAL tree at this lifecycle point is
+# neither stable nor necessary for the client-output boundary. The full
+# declared-root scanner remains the post-child-cleanup and EXIT proof.
+readonly LOCAL_CLIENT_STREAM_SCAN_PROGRAM='
+  import { constants } from "node:fs";
+  import { lstat, open } from "node:fs/promises";
+  const paths = process.argv.slice(1);
+  const secret = Buffer.from(await Bun.stdin.text());
+  const MAX_CAPTURE_BYTES = 256 * 1024;
+  if (paths.length !== 2 || new Set(paths).size !== 2 || secret.length === 0) process.exit(4);
+  let total = 0;
+  try {
+    for (const path of paths) {
+      const evidence = await lstat(path);
+      if (!evidence.isFile() || evidence.isSymbolicLink() || evidence.size > MAX_CAPTURE_BYTES) process.exit(4);
+      const file = await open(path, constants.O_RDONLY | constants.O_NOFOLLOW);
+      try {
+        const opened = await file.stat();
+        if (!opened.isFile() || opened.dev !== evidence.dev || opened.ino !== evidence.ino || opened.size !== evidence.size || opened.size > MAX_CAPTURE_BYTES) process.exit(4);
+        const bytes = await file.readFile();
+        if (bytes.includes(secret)) process.exit(3);
+        const text = Buffer.from(bytes).toString("latin1");
+        if (/flow_v1\.[A-Za-z0-9_-]{43}/.test(text)) process.exit(5);
+        if (/v1\.[A-Za-z0-9_-]{43}/.test(text)) process.exit(6);
+        if (/asimp_ag_[0-9A-HJKMNP-TV-Z]{26}_[A-Za-z0-9_-]{43}/.test(text)) process.exit(7);
+        total += opened.size;
+      } finally {
+        await file.close();
+      }
+    }
+    process.stdout.write(`2 ${total}`);
+  } catch {
+    process.exit(4);
+  }
+'
+
+scan_closed_local_client_streams_for_secret() {
+  local stdout_path="$1" stderr_path="$2" secret="$3" scan_status=0
+  [[ -n "$secret" && "$stdout_path" == "$STATE_DIR/"* && "$stderr_path" == "$STATE_DIR/"* ]] || return 4
+  printf '%s' "$secret" | "$PERL_BIN" -e '
+    $SIG{ALRM} = sub { exit 124 };
+    alarm shift @ARGV;
+    exec @ARGV;
+  ' "$ARTIFACT_SCAN_DEADLINE_SECONDS" "${LOCAL_RUNTIME_ENV[@]}" "$BASH_BIN" -c '
+    cwd="$1"; shift
+    cd -- "$cwd" || exit 125
+    exec "$@"
+  ' "$BASH_BIN" "$LOCAL_RUNTIME_CWD" "$BUN_BIN" -e "$LOCAL_CLIENT_STREAM_SCAN_PROGRAM" \
+    "$stdout_path" "$stderr_path" 2>/dev/null || scan_status=$?
+  return "$scan_status"
+}
+
 assert_local_client_streams_not_retained() {
-  local stdout_path="$1" stderr_path="$2"
+  local stdout_path="$1" stderr_path="$2" scan_probe scan_status=0 scan_summary=""
   [[ -f "$stdout_path" && ! -L "$stdout_path" && -O "$stdout_path" && -r "$stdout_path" ]] ||
     failed "LOCAL_CLIENT_STDOUT_UNTRUSTED"
   [[ -f "$stderr_path" && ! -L "$stderr_path" && -O "$stderr_path" && -r "$stderr_path" ]] ||
     failed "LOCAL_CLIENT_STDERR_UNTRUSTED"
-  assert_local_replay_key_not_retained "client-streams"
-  log_phase "client-streams-scanned" "stdout=retained stderr=retained scope=declared-retained-roots"
+  scan_probe="${LOCAL_REPLAY_KEY:-S1ClientStreamExactRootProbe_0123456789abcdef}"
+  scan_summary="$(scan_closed_local_client_streams_for_secret "$stdout_path" "$stderr_path" "$scan_probe")" || scan_status=$?
+  case "$scan_status" in
+    0) [[ "$scan_summary" =~ ^2[[:space:]][0-9]+$ ]] || failed "LOCAL_CLIENT_STREAM_SCAN_UNTRUSTED" ;;
+    3) failed "LOCAL_CLIENT_STREAM_REPLAY_KEY_RETAINED" ;;
+    5 | 6 | 7) failed "LOCAL_CLIENT_STREAM_SECRET_MATERIAL_RETAINED" ;;
+    *) failed "LOCAL_CLIENT_STREAM_SCAN_UNTRUSTED" ;;
+  esac
+  log_phase "client-streams-scanned" "stdout=retained stderr=retained scope=closed-capture-inodes"
 }
 
 json_field() {
@@ -3196,6 +3431,200 @@ self_test_supervisor_argv_observer() {
   emit "pass" "SUPERVISOR_ARGV_OBSERVER_SELF_TEST_PASSED"
 }
 
+# PLANTED NEGATIVE: the real entropy-to-replay-key derivation keeps the 32-byte
+# input on stdin. The observer catches the exact pinned Bun child while it is
+# deliberately paused before reading that pipe, and rejects if either the known
+# entropy or its deterministic replay root appears in argv.
+self_test_replay_derivation_argv_observer() {
+  local entropy="0000000000000000000000000000000000000000000000000000000000000000"
+  local expected_key="AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"
+  local observer_file="" observed_pid="" argv="" key=""
+  local deadline=0 derivation_status=0 bytes=""
+  lifecycle_state_dir "replay-derivation-argv"
+  [[ "${#entropy}" -eq 64 && "${#expected_key}" -eq 43 ]] || failed "REPLAY_DERIVATION_CANARY_INVALID"
+  observer_file="$STATE_DIR/.replay-derivation-observer"
+  coproc REPLAY_DERIVATION { derive_local_replay_key_from_entropy "$entropy" "$observer_file"; }
+  deadline=$((SECONDS + SUPERVISOR_STOP_DEADLINE_SECONDS))
+  while ((SECONDS < deadline)); do
+    if [[ -e "$observer_file" || -L "$observer_file" ]]; then
+      [[ -f "$observer_file" && ! -L "$observer_file" && -O "$observer_file" && -r "$observer_file" ]] || failed "REPLAY_DERIVATION_OBSERVER_UNTRUSTED"
+      bytes="$(LC_ALL=C wc -c <"$observer_file" 2>/dev/null | tr -d '[:space:]')" || failed "REPLAY_DERIVATION_OBSERVER_UNTRUSTED"
+      observed_pid="$(<"$observer_file")" || failed "REPLAY_DERIVATION_OBSERVER_UNTRUSTED"
+      [[ "$bytes" =~ ^[1-9][0-9]{0,5}$ && "$observed_pid" =~ ^[1-9][0-9]*$ ]] || failed "REPLAY_DERIVATION_OBSERVER_UNTRUSTED"
+      break
+    fi
+    sleep 0.02
+  done
+  [[ "$observed_pid" =~ ^[1-9][0-9]*$ ]] || failed "REPLAY_DERIVATION_OBSERVER_TIMEOUT"
+  argv="$("$PS_BIN" -ww -p "$observed_pid" -o args= 2>/dev/null)" || failed "REPLAY_DERIVATION_ARGV_UNPROVEN"
+  [[ -n "$argv" && "$argv" != *"$entropy"* && "$argv" != *"$expected_key"* ]] || failed "REPLAY_DERIVATION_ARGV_SECRET_RETAINED"
+  if ! IFS= read -r key <&"${REPLAY_DERIVATION[0]}"; then
+    [[ -n "$key" ]] || failed "REPLAY_DERIVATION_UNAVAILABLE"
+  fi
+  wait "$REPLAY_DERIVATION_PID" || derivation_status=$?
+  [[ "$derivation_status" == "0" && "$key" == "$expected_key" ]] || failed "REPLAY_DERIVATION_UNAVAILABLE"
+  log_phase "replay-derivation-argv-observed" \
+    "result=absent scope=process-table channel=stdin interpreter=absolute"
+  emit "pass" "REPLAY_DERIVATION_ARGV_OBSERVER_SELF_TEST_PASSED"
+}
+
+# PLANTED NEGATIVE: use the actual Workerd private-FD wrapper with an inert
+# payload, wait for the post-close acknowledgement, and require lsof to report
+# descriptor 9 absent from the exact still-live stopped supervisor. This fails
+# if the leader keeps the pipe after forking its payload.
+self_test_private_handoff_fd_closure() {
+  local replay_key="S1PrivateHandoffFdCanary_0123456789abcdefgh"
+  local origin="http://127.0.0.1:43123" status_file="" read_control write_control
+  local read_status=0 write_status=0 normal_status_file normal_attestation
+  local normal_status="" normal_status_read=0 normal_deadline=0 normal_result=""
+  lifecycle_state_dir "private-handoff-fd"
+  [[ "${#replay_key}" -eq 43 ]] || failed "PRIVATE_HANDOFF_FD_CANARY_INVALID"
+  read_control="$STATE_DIR/fd9-readonly-control"
+  write_control="$STATE_DIR/fd9-writeonly-control"
+  printf 'control\n' >"$read_control"
+
+  # These are the controller's own inherited descriptors. The production
+  # start must refuse rather than replace either mode; `:` performs only a
+  # descriptor duplication, so the controls neither consume nor write bytes.
+  exec 9<"$read_control"
+  start_private_workerd_supervisor "$STATE_DIR/.private-handoff-fd-read-status" "private-handoff-fd-read" \
+    "$replay_key" "$origin" "$LOCAL_RUNTIME_CWD" "$STATE_DIR/private-handoff-fd-read.log" \
+    "$BASH_BIN" -c 'exit 0' "$BASH_BIN" || read_status=$?
+  ((read_status != 0)) || failed "PRIVATE_HANDOFF_FD_READABLE_FALSE_GREEN"
+  { : <&9; } 2>/dev/null || failed "PRIVATE_HANDOFF_FD_READABLE_REPLACED"
+  exec 9<&-
+
+  : >"$write_control"
+  exec 9>"$write_control"
+  start_private_workerd_supervisor "$STATE_DIR/.private-handoff-fd-write-status" "private-handoff-fd-write" \
+    "$replay_key" "$origin" "$LOCAL_RUNTIME_CWD" "$STATE_DIR/private-handoff-fd-write.log" \
+    "$BASH_BIN" -c 'exit 0' "$BASH_BIN" || write_status=$?
+  ((write_status != 0)) || failed "PRIVATE_HANDOFF_FD_WRITEABLE_FALSE_GREEN"
+  { : >&9; } 2>/dev/null || failed "PRIVATE_HANDOFF_FD_WRITEABLE_REPLACED"
+  exec 9>&-
+  [[ "$(LC_ALL=C wc -c <"$read_control" 2>/dev/null | tr -d '[:space:]')" == "8" &&
+    "$(LC_ALL=C wc -c <"$write_control" 2>/dev/null | tr -d '[:space:]')" == "0" ]] ||
+    failed "PRIVATE_HANDOFF_FD_AMBIENT_CONTROL_MUTATED"
+
+  # Generic supervisors do not reject an ambient caller fd; their exact
+  # background invocation instead closes fd9 for the env-i leader and payload.
+  # Keep the controller copy live across launch to prove that child-only close
+  # neither replaces nor consumes the caller descriptor.
+  normal_status_file="$STATE_DIR/.normal-fd9-status"
+  normal_attestation="$STATE_DIR/normal-fd9-attestation"
+  exec 9<"$read_control"
+  start_pinned_supervisor "$normal_status_file" "normal-fd9" \
+    "$BASH_BIN" -c '
+      attestation="$1"
+      if { : <&9; } 2>/dev/null || { : >&9; } 2>/dev/null; then exit 125; fi
+      set -C
+      printf "closed\n" >"$attestation"
+    ' "$BASH_BIN" "$normal_attestation" || failed "NORMAL_SUPERVISOR_FD_START_UNPROVEN"
+  { : <&9; } 2>/dev/null || failed "NORMAL_SUPERVISOR_PARENT_FD_REPLACED"
+  exec 9<&-
+  adopt_provisional_supervisor server || failed "NORMAL_SUPERVISOR_FD_ADOPTION_UNPROVEN"
+  normal_deadline=$((SECONDS + FIXTURE_START_DEADLINE_SECONDS))
+  while ((SECONDS < normal_deadline)); do
+    normal_status_read=0
+    normal_status="$(recorded_child_status "$SERVER_STATUS_FILE" "$SERVER_PID" "$SERVER_STATUS_AUTH")" || normal_status_read=$?
+    ((normal_status_read == 0)) && break
+    ((normal_status_read == 2)) && failed "NORMAL_SUPERVISOR_FD_STATUS_UNPROVEN"
+    sleep 0.02
+  done
+  [[ "$normal_status" == "0" && -f "$normal_attestation" && ! -L "$normal_attestation" ]] ||
+    failed "NORMAL_SUPERVISOR_FD_STATUS_UNPROVEN"
+  normal_result="$(<"$normal_attestation")" || failed "NORMAL_SUPERVISOR_FD_STATUS_UNPROVEN"
+  [[ "$normal_result" == "closed" ]] || failed "NORMAL_SUPERVISOR_FD_INHERITED"
+  cleanup_all || failed "NORMAL_SUPERVISOR_FD_CLEANUP_UNPROVEN"
+
+  status_file="$STATE_DIR/.private-handoff-fd-status"
+  start_private_workerd_supervisor "$status_file" "private-handoff-fd" \
+    "$replay_key" "$origin" "$LOCAL_RUNTIME_CWD" "$STATE_DIR/private-handoff-fd.log" \
+    "$BASH_BIN" -c 'while :; do sleep 300; done' "$BASH_BIN" ||
+    failed "PRIVATE_HANDOFF_FD_CLOSURE_UNPROVEN"
+  supervisor_fd_is_closed "$PROVISIONAL_PID" "$PRIVATE_SERVER_HANDOFF_FD" ||
+    failed "PRIVATE_HANDOFF_FD_CLOSURE_UNPROVEN"
+  [[ "$PRIVATE_HANDOFF_PRELAUNCH_HELPER_OBSERVED" == "1" ]] ||
+    failed "PRIVATE_HANDOFF_PRELAUNCH_HELPER_UNPROVEN"
+  log_phase "private-handoff-fd-observed" \
+    "result=closed scope=live-fd supervisor=exact payload=detached prelaunch-helper=closed ambient-read=refused ambient-write=refused normal-ambient=closed"
+  adopt_provisional_supervisor server || failed "PRIVATE_HANDOFF_FD_ADOPTION_FAILED"
+  finish_lifecycle_critical
+  cleanup_all || failed "PRIVATE_HANDOFF_FD_CLEANUP_FAILED"
+  emit "pass" "PRIVATE_HANDOFF_FD_CLOSURE_SELF_TEST_PASSED"
+}
+
+# PLANTED paired controls for the host-normalized lsof parser. These do not
+# mock the live FD check: they make its no-match/error interpretation total so
+# the private-handoff plant above can only pass from a real empty descriptor
+# table, on either supported lsof convention.
+self_test_supervisor_fd_observer_normalization() {
+  lifecycle_state_dir "supervisor-fd-observer"
+  supervisor_fd_observer_result 0 "" || failed "SUPERVISOR_FD_OBSERVER_MAC_CONTROL_REJECTED"
+  supervisor_fd_observer_result 1 "" || failed "SUPERVISOR_FD_OBSERVER_LINUX_CONTROL_REJECTED"
+  if supervisor_fd_observer_result 0 $'p123\nf9\nnpip'; then
+    failed "SUPERVISOR_FD_OBSERVER_HELD_FALSE_GREEN"
+  fi
+  if supervisor_fd_observer_result 2 ""; then
+    failed "SUPERVISOR_FD_OBSERVER_DIAGNOSTIC_FALSE_GREEN"
+  fi
+  log_phase "supervisor-fd-observer-controls" \
+    "mac-empty=accepted linux-empty=accepted holder=refused diagnostic=refused"
+  emit "pass" "SUPERVISOR_FD_OBSERVER_CONTROLS_SELF_TEST_PASSED"
+}
+
+# PLANTED isolation control: a hostile caller PATH and join URL enter this
+# self-test process, but the real pinned supervisor/payload chain receives only
+# LOCAL_RUNTIME_ENV. The payload writes a fixed attestation after checking every
+# writable root and the absence of both caller values; a fake executable marker
+# is checked by the TypeScript harness outside this process.
+self_test_private_runtime_env() {
+  local attestation control_attestation status_file child_status="" status_read=0 result=""
+  local control_result="" status_deadline=0
+  lifecycle_state_dir "private-runtime-env"
+  attestation="$STATE_DIR/private-runtime-env-attestation"
+  control_attestation="$STATE_DIR/private-runtime-env-unsanitized-control"
+  status_file="$STATE_DIR/.private-runtime-env-status"
+  # The paired control deliberately bypasses the supervisor. It must see the
+  # hostile caller values, so the following real pinned path is not a vacuous
+  # test that merely supplied no sensitive caller environment.
+  "$BASH_BIN" -c '
+    attestation="$1"
+    [[ -n "${S1_PRIVATE_RUNTIME_ENV_CONTROL_SENTINEL:-}" &&
+      "${ASIMP_S1_JOIN_URL:-}" == "${S1_PRIVATE_RUNTIME_ENV_CONTROL_SENTINEL}" &&
+      -n "${S1_PRIVATE_RUNTIME_ENV_FAKE_MARKER:-}" ]] || exit 125
+    set -C
+    printf "caller-visible\n" >"$attestation"
+  ' "$BASH_BIN" "$control_attestation" || failed "PRIVATE_RUNTIME_ENV_CONTROL_UNPROVEN"
+  control_result="$(<"$control_attestation")" || failed "PRIVATE_RUNTIME_ENV_CONTROL_UNPROVEN"
+  [[ "$control_result" == "caller-visible" ]] || failed "PRIVATE_RUNTIME_ENV_CONTROL_UNPROVEN"
+
+  start_pinned_supervisor "$status_file" "private-runtime-env" \
+    "$BASH_BIN" -c '
+      attestation="$1"; runtime_root="$2"; pinned_path="$3"
+      [[ "$HOME" == "$runtime_root/home" && "$TMPDIR" == "$runtime_root/tmp" && "$XDG_CONFIG_HOME" == "$runtime_root/xdg-config" && "$XDG_CACHE_HOME" == "$runtime_root/xdg-cache" && "$XDG_DATA_HOME" == "$runtime_root/xdg-data" && "$XDG_STATE_HOME" == "$runtime_root/xdg-state" && "$XDG_RUNTIME_DIR" == "$runtime_root/xdg-runtime" && "$WRANGLER_CACHE_DIR" == "$runtime_root/wrangler-cache" && "$WRANGLER_LOG_PATH" == "$runtime_root/wrangler-log" && "$BUN_INSTALL_CACHE_DIR" == "$runtime_root/bun-cache" && "$PATH" == "$pinned_path" && -z "${ASIMP_S1_JOIN_URL:-}" && -z "${S1_PRIVATE_RUNTIME_ENV_CONTROL_SENTINEL:-}" && -z "${S1_PRIVATE_RUNTIME_ENV_FAKE_MARKER:-}" && "$X_LOCAL_OBSERVABILITY" == "false" && "$BUN_RUNTIME_TRANSPILER_CACHE_PATH" == "0" ]] || exit 125
+      set -C
+      printf "isolated\n" >"$attestation"
+    ' "$BASH_BIN" "$attestation" "$LOCAL_RUNTIME_ROOT" "$PINNED_RUNTIME_PATH" ||
+    failed "PRIVATE_RUNTIME_ENV_UNPROVEN"
+  adopt_provisional_supervisor server || failed "PRIVATE_RUNTIME_ENV_ADOPTION_UNPROVEN"
+  status_deadline=$((SECONDS + FIXTURE_START_DEADLINE_SECONDS))
+  while ((SECONDS < status_deadline)); do
+    status_read=0
+    child_status="$(recorded_child_status "$SERVER_STATUS_FILE" "$SERVER_PID" "$SERVER_STATUS_AUTH")" || status_read=$?
+    ((status_read == 0)) && break
+    ((status_read == 2)) && failed "PRIVATE_RUNTIME_ENV_STATUS_UNPROVEN"
+    sleep 0.02
+  done
+  [[ "$child_status" == "0" ]] || failed "PRIVATE_RUNTIME_ENV_STATUS_UNPROVEN"
+  result="$(<"$attestation")" || failed "PRIVATE_RUNTIME_ENV_UNPROVEN"
+  [[ "$result" == "isolated" ]] || failed "PRIVATE_RUNTIME_ENV_UNPROVEN"
+  cleanup_all || failed "PRIVATE_RUNTIME_ENV_CLEANUP_UNPROVEN"
+  log_phase "private-runtime-env-observed" \
+    "result=isolated scope=supervisor-payload path=pinned join-url=absent control=caller-visible"
+  emit "pass" "PRIVATE_RUNTIME_ENV_SELF_TEST_PASSED"
+}
+
 # PLANTED NEGATIVE: exercise the actual bounded local-client capture wrapper,
 # place only a secret-shaped diagnostic on its stderr stream, then require the
 # retained-root scanner to refuse it without naming the stream or material.
@@ -3214,12 +3643,60 @@ self_test_client_stream_secret_refusal() {
     failed "CLIENT_STREAM_CAPTURE_FAILED"
   [[ -f "$stdout_path" && -f "$stderr_path" && ! -L "$stdout_path" && ! -L "$stderr_path" ]] ||
     failed "CLIENT_STREAM_CAPTURE_UNTRUSTED"
-  summary="$(scan_declared_retained_roots_for_secret "S1ClientStreamExactRootNotPresent_012345678")" || status=$?
+  summary="$(scan_closed_local_client_streams_for_secret "$stdout_path" "$stderr_path" "S1ClientStreamExactRootNotPresent_012345678")" || status=$?
   ((status == 5)) || failed "CLIENT_STREAM_SECRET_FALSE_NEGATIVE"
   [[ -z "$summary" ]] || failed "CLIENT_STREAM_SECRET_OUTPUT"
   log_phase "client-stream-secret-plant-refused" \
-    "result=detected stream=stderr scope=declared-retained-roots"
+    "result=detected stream=stderr scope=closed-capture-inodes"
   emit "pass" "CLIENT_STREAM_SECRET_SELF_TEST_PASSED"
+}
+
+# PLANTED NEGATIVE: one small secret-shaped stderr write is captured and then a
+# second write exceeds the fixed 256 KiB cap by one byte. The runner must return
+# its bounded-overflow status and the exact closed-file scan must still detect
+# the first write. Either a dropped stream or an unbounded capture fails this
+# paired causal plant.
+self_test_client_stream_overflow_secret_refusal() {
+  local stdout_path stderr_path attempted_path attempted_bytes captured_bytes
+  local capture_cap=$((256 * 1024)) status=0 scan_status=0 summary=""
+  lifecycle_state_dir "client-stream-overflow-secret"
+  stdout_path="$STATE_DIR/client.stdout"
+  stderr_path="$STATE_DIR/client.stderr"
+  attempted_path="$STATE_DIR/client-overflow-attempted-bytes"
+  run_with_deadline 20 \
+    "${LOCAL_RUNTIME_ENV[@]}" \
+    "$BASH_BIN" -c 'cwd="$1"; shift; cd -- "$cwd" || exit 125; exec "$@"' \
+    "$BASH_BIN" "$LOCAL_RUNTIME_CWD" \
+    "$BUN_BIN" -e "$LOCAL_CLIENT_CAPTURE_PROGRAM" \
+    "$stdout_path" "$stderr_path" "$BUN_BIN" -e '
+      import { writeFileSync } from "node:fs";
+      const [attemptedPath, captureCapText] = process.argv.slice(1);
+      const secret = "flow_v1." + "s".repeat(43);
+      const captureCap = Number(captureCapText);
+      const fillerBytes = captureCap + 1 - Buffer.byteLength(secret);
+      if (!Number.isSafeInteger(captureCap) || captureCap < Buffer.byteLength(secret) || fillerBytes < 0) process.exit(125);
+      const attempted = Buffer.byteLength(secret) + fillerBytes;
+      writeFileSync(attemptedPath, `${attempted}\n`, { encoding: "utf8", flag: "wx", mode: 0o600 });
+      process.stderr.write(secret);
+      await Bun.sleep(100);
+      process.stderr.write("x".repeat(fillerBytes));
+    ' "$attempted_path" "$capture_cap" || status=$?
+  ((status == 126)) || failed "CLIENT_STREAM_OVERFLOW_FALSE_GREEN"
+  [[ -f "$attempted_path" && ! -L "$attempted_path" && -O "$attempted_path" && -r "$attempted_path" ]] ||
+    failed "CLIENT_STREAM_OVERFLOW_ATTEMPT_UNTRUSTED"
+  attempted_bytes="$(<"$attempted_path")" || failed "CLIENT_STREAM_OVERFLOW_ATTEMPT_UNTRUSTED"
+  captured_bytes="$(LC_ALL=C wc -c <"$stderr_path" 2>/dev/null | tr -d '[:space:]')" ||
+    failed "CLIENT_STREAM_OVERFLOW_CAPTURE_UNTRUSTED"
+  [[ "$attempted_bytes" =~ ^[0-9]+$ && "$captured_bytes" =~ ^[0-9]+$ ]] ||
+    failed "CLIENT_STREAM_OVERFLOW_MEASUREMENT_INVALID"
+  ((attempted_bytes == capture_cap + 1 && captured_bytes == capture_cap)) ||
+    failed "CLIENT_STREAM_OVERFLOW_MEASUREMENT_INVALID"
+  summary="$(scan_closed_local_client_streams_for_secret "$stdout_path" "$stderr_path" "S1ClientStreamExactRootNotPresent_012345678")" || scan_status=$?
+  ((scan_status == 5)) || failed "CLIENT_STREAM_OVERFLOW_SECRET_FALSE_NEGATIVE"
+  [[ -z "$summary" ]] || failed "CLIENT_STREAM_OVERFLOW_SECRET_OUTPUT"
+  log_phase "client-stream-overflow-secret-plant-refused" \
+    "result=detected stream=stderr attempted-bytes=$attempted_bytes captured-bytes=$captured_bytes cap=$capture_cap scope=closed-capture-inodes"
+  emit "pass" "CLIENT_STREAM_OVERFLOW_SECRET_SELF_TEST_PASSED"
 }
 
 # Prove that EXIT, rather than only the happy path, checks a retained tree after
@@ -3609,6 +4086,7 @@ run_local_d1() {
     failed "LOCAL_CHILD_GROUP_UNPROVEN"
   fi
   log_phase "child-argv-secret-observed" "result=absent scope=process-table handoff=private-fd"
+  log_phase "child-handoff-fd-observed" "result=closed scope=live-fd handoff=private-fd window=bounded-pre-cont"
   if ! adopt_provisional_supervisor server; then
     finish_lifecycle_critical
     failed "LOCAL_CHILD_GROUP_UNPROVEN"
@@ -3836,9 +4314,34 @@ main() {
     self_test_supervisor_argv_observer
     return
   fi
+  if [[ "${1:-}" == "--self-test-replay-derivation-argv-observer" ]]; then
+    begin_self_test "replay-derivation-argv-observer"
+    self_test_replay_derivation_argv_observer
+    return
+  fi
+  if [[ "${1:-}" == "--self-test-private-handoff-fd" ]]; then
+    begin_self_test "private-handoff-fd"
+    self_test_private_handoff_fd_closure
+    return
+  fi
+  if [[ "${1:-}" == "--self-test-supervisor-fd-observer" ]]; then
+    begin_self_test "supervisor-fd-observer"
+    self_test_supervisor_fd_observer_normalization
+    return
+  fi
+  if [[ "${1:-}" == "--self-test-private-runtime-env" ]]; then
+    begin_self_test "private-runtime-env"
+    self_test_private_runtime_env
+    return
+  fi
   if [[ "${1:-}" == "--self-test-client-stream-secret" ]]; then
     begin_self_test "client-stream-secret"
     self_test_client_stream_secret_refusal
+    return
+  fi
+  if [[ "${1:-}" == "--self-test-client-stream-overflow-secret" ]]; then
+    begin_self_test "client-stream-overflow-secret"
+    self_test_client_stream_overflow_secret_refusal
     return
   fi
   if [[ "${1:-}" == "--self-test-client-evidence-missing" ]]; then

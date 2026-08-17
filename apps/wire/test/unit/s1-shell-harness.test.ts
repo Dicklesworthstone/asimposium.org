@@ -1627,12 +1627,16 @@ describe("a pinned port is validated before anything is started", () => {
       "runtime/xdg-runtime",
       "runtime/wrangler-cache",
       "runtime/wrangler-log",
+      "runtime/wrangler-env",
       "runtime/bun-cache",
     ]) {
       expect(existsSync(`${stateDir}/${root}`), `missing confined runtime root ${root}`).toBe(true);
     }
     expect(run.stderr).toContain("retained-roots-reconciled phase=before-pass roots=1");
     expect(run.stderr).toContain("retained-roots-reconciled phase=exit roots=1");
+    expect(phaseValue(run.stderr, "child-argv-secret-observed", "result")).toBe("absent");
+    expect(phaseValue(run.stderr, "child-handoff-fd-observed", "result")).toBe("closed");
+    expect(phaseValue(run.stderr, "client-streams-scanned", "scope")).toBe("closed-capture-inodes");
     const retained = retainedArtifacts(stateDir);
     expect(retained.files.length).toBeGreaterThanOrEqual(3);
     expect(Number(phaseValue(run.stderr, "replay-key-artifact-scan", "files"))).toBe(
@@ -1688,6 +1692,116 @@ describe("a pinned port is validated before anything is started", () => {
     expect(phaseValue(run.stderr, "runtime-root-outside-refused", "result")).toBe("refused");
     expect(phaseValue(run.stderr, "runtime-root-outside-refused", "action")).toBe("not-created");
     expect(`${run.stdout}\n${run.stderr}`).not.toContain("s1-runtime-outside-canary-");
+  });
+
+  test("PLANTED: the replay derivation observer sees neither stdin entropy nor its key in the live Bun argv", async () => {
+    const entropy = "0".repeat(64);
+    const derivedKey = "A".repeat(43);
+    const run = await runScript(["--self-test-replay-derivation-argv-observer"]);
+    expect(run.exitCode).toBe(0);
+    expect(record(run).code).toBe("REPLAY_DERIVATION_ARGV_OBSERVER_SELF_TEST_PASSED");
+    expect(phaseValue(run.stderr, "replay-derivation-argv-observed", "result")).toBe("absent");
+    expect(`${run.stdout}\n${run.stderr}`).not.toContain(entropy);
+    expect(`${run.stdout}\n${run.stderr}`).not.toContain(derivedKey);
+  });
+
+  test("PLANTED: after acknowledged private-FD adoption, the exact parked supervisor no longer holds fd9", async () => {
+    const run = await runScript(["--self-test-private-handoff-fd"]);
+    expect(run.exitCode).toBe(0);
+    expect(record(run).code).toBe("PRIVATE_HANDOFF_FD_CLOSURE_SELF_TEST_PASSED");
+    expect(phaseValue(run.stderr, "private-handoff-fd-observed", "result")).toBe("closed");
+    expect(phaseValue(run.stderr, "private-handoff-fd-observed", "supervisor")).toBe("exact");
+    expect(phaseValue(run.stderr, "private-handoff-fd-observed", "prelaunch-helper")).toBe(
+      "closed",
+    );
+    expect(phaseValue(run.stderr, "private-handoff-fd-observed", "ambient-read")).toBe("refused");
+    expect(phaseValue(run.stderr, "private-handoff-fd-observed", "ambient-write")).toBe("refused");
+    expect(phaseValue(run.stderr, "private-handoff-fd-observed", "normal-ambient")).toBe("closed");
+  }, 30_000);
+
+  test("PLANTED: a hostile caller environment cannot enter the private runtime payload", async () => {
+    const probeDir = mkdtempSync(join(tmpdir(), "s1-private-runtime-env-probe-"));
+    const fakeExecutableMarker = join(probeDir, "hostile-env-was-invoked");
+    const fakeEnv = join(probeDir, "env");
+    const joinUrlSentinel = "S1_PRIVATE_RUNTIME_JOIN_URL_SENTINEL";
+    const writableRootSentinel = join(probeDir, "caller-writable-root-sentinel");
+    writeFileSync(fakeEnv, '#!/bin/sh\n: > "$S1_PRIVATE_RUNTIME_ENV_FAKE_MARKER"\nexit 97\n', {
+      encoding: "utf8",
+      mode: 0o700,
+    });
+
+    const run = await runScript(["--self-test-private-runtime-env"], {
+      PATH: `${probeDir}:${process.env.PATH ?? ""}`,
+      ASIMP_S1_JOIN_URL: joinUrlSentinel,
+      HOME: writableRootSentinel,
+      TMP: writableRootSentinel,
+      TEMP: writableRootSentinel,
+      XDG_CONFIG_HOME: writableRootSentinel,
+      XDG_CACHE_HOME: writableRootSentinel,
+      XDG_DATA_HOME: writableRootSentinel,
+      XDG_STATE_HOME: writableRootSentinel,
+      XDG_RUNTIME_DIR: writableRootSentinel,
+      WRANGLER_CACHE_DIR: writableRootSentinel,
+      WRANGLER_LOG_PATH: writableRootSentinel,
+      BUN_INSTALL_CACHE_DIR: writableRootSentinel,
+      S1_PRIVATE_RUNTIME_ENV_CONTROL_SENTINEL: joinUrlSentinel,
+      S1_PRIVATE_RUNTIME_ENV_FAKE_MARKER: fakeExecutableMarker,
+    });
+
+    expect(run.exitCode).toBe(0);
+    expect(record(run).code).toBe("PRIVATE_RUNTIME_ENV_SELF_TEST_PASSED");
+    expect(phaseValue(run.stderr, "private-runtime-env-observed", "result")).toBe("isolated");
+    expect(phaseValue(run.stderr, "private-runtime-env-observed", "scope")).toBe(
+      "supervisor-payload",
+    );
+    expect(phaseValue(run.stderr, "private-runtime-env-observed", "path")).toBe("pinned");
+    expect(phaseValue(run.stderr, "private-runtime-env-observed", "join-url")).toBe("absent");
+    expect(phaseValue(run.stderr, "private-runtime-env-observed", "control")).toBe(
+      "caller-visible",
+    );
+    expect(existsSync(fakeExecutableMarker)).toBe(false);
+    for (const sentinel of [joinUrlSentinel, writableRootSentinel]) {
+      expect(run.stdout).not.toContain(sentinel);
+      expect(run.stderr).not.toContain(sentinel);
+    }
+  }, 30_000);
+
+  test("PLANTED: a +1-byte overflow still leaves its earlier secret-shaped client diagnostic for exact inode scanning", async () => {
+    const cap = 256 * 1024;
+    const run = await runScript(["--self-test-client-stream-overflow-secret"]);
+    expect(run.exitCode).toBe(0);
+    expect(record(run).code).toBe("CLIENT_STREAM_OVERFLOW_SECRET_SELF_TEST_PASSED");
+    expect(phaseValue(run.stderr, "client-stream-overflow-secret-plant-refused", "result")).toBe(
+      "detected",
+    );
+    const attemptedBytes = Number(
+      phaseValue(run.stderr, "client-stream-overflow-secret-plant-refused", "attempted-bytes"),
+    );
+    const capturedBytes = Number(
+      phaseValue(run.stderr, "client-stream-overflow-secret-plant-refused", "captured-bytes"),
+    );
+    expect(Number.isSafeInteger(attemptedBytes)).toBe(true);
+    expect(Number.isSafeInteger(capturedBytes)).toBe(true);
+    expect(
+      Number(phaseValue(run.stderr, "client-stream-overflow-secret-plant-refused", "cap")),
+    ).toBe(cap);
+    expect(attemptedBytes).toBe(cap + 1);
+    expect(capturedBytes).toBe(cap);
+    expect(phaseValue(run.stderr, "client-stream-overflow-secret-plant-refused", "scope")).toBe(
+      "closed-capture-inodes",
+    );
+  }, 30_000);
+
+  test("PLANTED: both lsof empty-table conventions pass, while a held fd and diagnostic failure refuse", async () => {
+    const run = await runScript(["--self-test-supervisor-fd-observer"]);
+    expect(run.exitCode).toBe(0);
+    expect(record(run).code).toBe("SUPERVISOR_FD_OBSERVER_CONTROLS_SELF_TEST_PASSED");
+    expect(phaseValue(run.stderr, "supervisor-fd-observer-controls", "mac-empty")).toBe("accepted");
+    expect(phaseValue(run.stderr, "supervisor-fd-observer-controls", "linux-empty")).toBe(
+      "accepted",
+    );
+    expect(phaseValue(run.stderr, "supervisor-fd-observer-controls", "holder")).toBe("refused");
+    expect(phaseValue(run.stderr, "supervisor-fd-observer-controls", "diagnostic")).toBe("refused");
   });
 
   /**
@@ -1825,15 +1939,19 @@ describe("a pinned port is validated before anything is started", () => {
     expect(source).not.toContain("EVIDENCE_PROOF_SLUGS");
   });
 
-  test("S1: the replay root and dynamic loopback origin reach Workerd only through its scrubbed environment", () => {
+  test("S1 regression surface: the rejected argv handoff strings are absent", () => {
     const source = readFileSync(resolve(REPO_ROOT, SCRIPT), "utf8");
     expect(source).toContain("CLOUDFLARE_INCLUDE_PROCESS_ENV=true");
-    expect(source).toContain('export ENROLLMENT_REPLAY_KEY="$replay_key"');
-    expect(source).toContain('export S1_LOCAL_STOA_ORIGIN="$origin"');
-    expect(source).toContain('stoa_origin="$S1_LOCAL_STOA_ORIGIN"');
-    expect(source).toContain('export STOA_ORIGIN="$stoa_origin"');
-    expect(source).toContain("unset replay_key stoa_origin");
-    expect(source).toContain("unset S1_LOCAL_REPLAY_KEY S1_LOCAL_STOA_ORIGIN");
+    for (const rejectedHandoff of [
+      'export ENROLLMENT_REPLAY_KEY="$replay_key"',
+      'export S1_LOCAL_STOA_ORIGIN="$origin"',
+      'stoa_origin="$S1_LOCAL_STOA_ORIGIN"',
+      'export STOA_ORIGIN="$stoa_origin"',
+      "unset replay_key stoa_origin",
+      "unset S1_LOCAL_REPLAY_KEY S1_LOCAL_STOA_ORIGIN",
+    ]) {
+      expect(source).not.toContain(rejectedHandoff);
+    }
     expect(source).not.toContain('--var "ENROLLMENT_REPLAY_KEY:');
     expect(source).not.toContain('--var "STOA_ORIGIN:');
   });
