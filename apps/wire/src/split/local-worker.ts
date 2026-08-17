@@ -178,6 +178,10 @@ const LOCAL_S4_NEGATIVE_DEDUP_WINDOW_SECONDS = 15 * 60;
 const LOCAL_HARNESS_AUTHORITY_TOKEN = /^[a-f0-9]{64}$/u;
 const LOCAL_HARNESS_READINESS_NONCE = /^s3-ready-[a-f0-9]{32}$/u;
 const LOCAL_SPONSOR_ID = "local-sponsor-fixture";
+// This fails `ID_PATTERN`, so it cannot identify any sponsor admitted by the
+// local harness. Private probes still take the same D1 lookup path before the
+// opaque response, rather than letting missing authority bypass storage.
+const ANONYMOUS_PRIVATE_LOOKUP_SPONSOR_ID = "_anonymous-private-lookup";
 const ID_PATTERN = /^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$/u;
 const TEST_D1_BIND_FAULT_HEADER = "x-asimp-local-test-fault";
 const TEST_D1_BIND_FAULT = "d1-bind-reject";
@@ -186,6 +190,8 @@ const TEST_PUBLIC_ROW_POISON_HEADER = "x-asimp-local-shape-poison";
 const TEST_ROUTE_BINDING_POISON_HEADER = "x-asimp-local-route-binding-poison";
 const TEST_S4_FELLOW_AUTHORITY_HEADER = "x-asimp-local-s4-fellow-authority";
 const TEST_S4_FELLOW_ID_HEADER = "x-asimp-local-s4-fellow-id";
+const TEST_S3_SPONSOR_AUTHORITY_HEADER = "x-asimp-local-s3-sponsor-authority";
+const TEST_S3_SPONSOR_ID_HEADER = "x-asimp-local-s3-sponsor-id";
 const TEST_S4_FIXTURE_AUTHORITY_HEADER = "x-asimp-local-s4-fixture-authority";
 const TEST_S4_NOW_SECONDS_HEADER = "x-asimp-local-s4-now-seconds";
 const LOCAL_HARNESS_AUTHORITY_HEADERS = [
@@ -195,6 +201,7 @@ const LOCAL_HARNESS_AUTHORITY_HEADERS = [
   TEST_PUBLIC_ROW_POISON_HEADER,
   TEST_ROUTE_BINDING_POISON_HEADER,
   TEST_S4_FELLOW_AUTHORITY_HEADER,
+  TEST_S3_SPONSOR_AUTHORITY_HEADER,
   TEST_S4_FIXTURE_AUTHORITY_HEADER,
 ] as const;
 const LOCAL_FORBIDDEN_PUBLIC_KEY_FORMS = new Set([
@@ -1473,6 +1480,20 @@ function localWorkshopFellowId(request: Request, env: LocalSplitEnv): string {
   return requested !== null && validId(requested) ? requested : LOCAL_FELLOW_ID;
 }
 
+/**
+ * The production surface obtains this from Propylon rather than a request
+ * header. This local-only, token-gated selector exists solely so the real
+ * Workerd/R2 harness can prove that an authenticated but different sponsor
+ * receives the same private 404 as an anonymous caller.
+ */
+function localWorkshopSponsorId(request: Request, env: LocalSplitEnv): string {
+  if (!hasLocalHarnessAuthority(request, env, TEST_S3_SPONSOR_AUTHORITY_HEADER)) {
+    return LOCAL_SPONSOR_ID;
+  }
+  const requested = request.headers.get(TEST_S3_SPONSOR_ID_HEADER);
+  return requested !== null && validId(requested) ? requested : LOCAL_SPONSOR_ID;
+}
+
 export function localHarnessPublicReadinessNonce(
   env: Pick<LocalSplitEnv, "S3_RUN_TOKEN" | "S3_READINESS_NONCE">,
 ): string | undefined {
@@ -1604,6 +1625,7 @@ async function pushWorkshop(request: Request, env: LocalSplitEnv): Promise<Respo
     return json({ code: "LOCAL_PRIVATE_SPILL_REQUIRED" }, 400);
   }
   const fellowId = localWorkshopFellowId(request, env);
+  const sponsorId = localWorkshopSponsorId(request, env);
 
   const digest = await sha256Hex(bodyMd);
   const bodyKey = stagedPrivateKey(digest);
@@ -1649,7 +1671,7 @@ async function pushWorkshop(request: Request, env: LocalSplitEnv): Promise<Respo
        FROM s3_local_fellow_workshop_ids AS ids
        JOIN s3_local_workshop_cursors AS cursor ON cursor.fellow_id = ids.fellow_id
        WHERE ids.fellow_id = ?2 AND cursor.problem_id = ?1`,
-    ).bind(problemId, fellowId, LOCAL_SPONSOR_ID, LOCAL_SESSION_ID, bodyKey, digest),
+    ).bind(problemId, fellowId, sponsorId, LOCAL_SESSION_ID, bodyKey, digest),
   ];
   if (d1FaultRequested(request, env)) {
     // Deliberately trip D1's real primary-key constraint after R2 PUT. D1's
@@ -1688,22 +1710,19 @@ async function privateArtifact(
   env: LocalSplitEnv,
   workshopId: string,
 ): Promise<Response> {
-  throwIfRouteBindingPoisoned(request, env);
-  if (!hasLocalHarnessAuthority(request, env, "x-asimp-local-sponsor")) return notFound();
+  const sponsorId = hasLocalHarnessAuthority(request, env, "x-asimp-local-sponsor")
+    ? localWorkshopSponsorId(request, env)
+    : ANONYMOUS_PRIVATE_LOOKUP_SPONSOR_ID;
   const workshop = await env.DB.prepare(
     `SELECT id, problem_id, fellow_id, sponsor_id, session_id, workshop_seq, body_key, body_digest,
             promoted_event_id
-     FROM s3_local_workshops WHERE id = ?1`,
+     FROM s3_local_workshops
+     WHERE id = ?1 AND sponsor_id = ?2 AND session_id = ?3`,
   )
-    .bind(workshopId)
+    .bind(workshopId, sponsorId, LOCAL_SESSION_ID)
     .first<WorkshopRow>();
-  if (
-    workshop === null ||
-    workshop.sponsor_id !== LOCAL_SPONSOR_ID ||
-    workshop.session_id !== LOCAL_SESSION_ID
-  ) {
-    return notFound();
-  }
+  throwIfRouteBindingPoisoned(request, env);
+  if (workshop === null) return notFound();
   const object = await env.ARTIFACTS.get(workshop.body_key);
   if (object === null) return notFound();
   const metadata = object.customMetadata;

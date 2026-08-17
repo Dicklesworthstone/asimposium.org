@@ -39,6 +39,7 @@ const EXPECTED_LOCAL_BINDING_ASSERTIONS: string[] = [
   "S4_title_history_field_reaches_contextual_provider_without_public_effect",
   "all_eleven_async_route_entry_faults_return_one_exact_nonreflective_binding_failure",
   "anonymous_or_stale_private_authority_is_not_found_without_a_private_cache_entry",
+  "authenticated_cross_sponsor_private_authority_is_indistinguishable_from_anonymous",
   "caller_cannot_choose_a_claim_identifier",
   "caller_cannot_choose_a_workshop_identifier",
   "concurrent_promotions_allocate_server_claim_ids_and_D1_RETURNING_public_sequences_without_burns",
@@ -46,6 +47,7 @@ const EXPECTED_LOCAL_BINDING_ASSERTIONS: string[] = [
   "duplicate_and_P2_P4_refusals_leave_the_public_projection_at_its_original_cursor",
   "large_workshop_body_spills_to_R2_and_gets_a_server_owned_workshop_id",
   "local_workerd_reports_D1_and_R2_bindings_with_a_public_readiness_nonce_but_never_authority",
+  "missing_private_id_cross_sponsor_authority_is_indistinguishable_from_anonymous",
   "missing_problem_never_fabricates_an_empty_public_projection",
   "near_duplicate_promotion_is_refused_citing_P11_without_a_cursor_burn",
   "one_promotion_atomically_allocates_the_first_public_claim_and_binds_its_public_artifact",
@@ -59,6 +61,7 @@ const EXPECTED_LOCAL_BINDING_ASSERTIONS: string[] = [
   "post_promotion_md_is_a_private-free_rendered_face_with_a_representation_etag",
   "post_promotion_md_matching_validator_returns_a_private-free_304",
   "post_promotion_public_projection_search_and_export_apply_shape_guards",
+  "private_not_found_response_is_invariant_across_existence_classes_for_each_principal",
   "private_only_problem_is_byte_indistinguishable_from_unknown_on_every_public_route",
   "public_errors_search_and_export_never_reflect_private_probe_material",
   "public_faces_begin_only_after_a_committed_ledger_event",
@@ -242,6 +245,11 @@ test("the S-3 harness binds readiness to its child and excludes the deployed ent
     "async function publicExport(",
     "async function publicArtifact(",
   );
+  const privateArtifactSource = sourceRegion(
+    worker,
+    "async function privateArtifact(",
+    "async function duplicateClaim(",
+  );
   const fetchSource = worker.slice(worker.indexOf("  async fetch("));
   const exactBindingFailureSource = sourceRegion(
     worker,
@@ -355,7 +363,19 @@ test("the S-3 harness binds readiness to its child and excludes the deployed ent
   expect(occurrences(faceSource, "assertS3RenderedFaceShape(face, format);")).toBe(1);
   expect(worker).toContain("FROM s3_local_public_cursors");
   expect(worker).toContain('const LOCAL_SPONSOR_ID = "local-sponsor-fixture";');
+  expect(worker).toContain(
+    'const ANONYMOUS_PRIVATE_LOOKUP_SPONSOR_ID = "_anonymous-private-lookup";',
+  );
   expect(worker).not.toContain("function localSponsorId(");
+  expect(privateArtifactSource).toContain(
+    "? localWorkshopSponsorId(request, env)\n    : ANONYMOUS_PRIVATE_LOOKUP_SPONSOR_ID",
+  );
+  expect(occurrences(privateArtifactSource, "env.DB.prepare(")).toBe(1);
+  expect(privateArtifactSource).toContain("WHERE id = ?1 AND sponsor_id = ?2 AND session_id = ?3");
+  expect(privateArtifactSource).toContain(".bind(workshopId, sponsorId, LOCAL_SESSION_ID)");
+  expect(privateArtifactSource.indexOf("if (workshop === null) return notFound();")).toBeLessThan(
+    privateArtifactSource.indexOf("await env.ARTIFACTS.get(workshop.body_key)"),
+  );
   expect(faultGateSource).toContain(
     "request.headers.get(TEST_D1_BIND_FAULT_HEADER) === TEST_D1_BIND_FAULT",
   );

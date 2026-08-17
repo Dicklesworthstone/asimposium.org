@@ -61,9 +61,12 @@ const LOCAL_S4_NEGATIVE_DEDUP_MARKER = "S4-NEGATIVE-DEDUP-FIXTURE";
 const LOCAL_S4_BENIGN_OUTAGE_MARKER = "S4-BENIGN-OUTAGE-FIXTURE";
 const localS4FellowAuthorityHeader = "x-asimp-local-s4-fellow-authority";
 const localS4FellowIdHeader = "x-asimp-local-s4-fellow-id";
+const localS3SponsorAuthorityHeader = "x-asimp-local-s3-sponsor-authority";
+const localS3SponsorIdHeader = "x-asimp-local-s3-sponsor-id";
 const localS4FixtureAuthorityHeader = "x-asimp-local-s4-fixture-authority";
 const localS4NowSecondsHeader = "x-asimp-local-s4-now-seconds";
 const localSponsorId = "local-sponsor-fixture";
+const crossSponsorId = "s3-cross-sponsor";
 const authoritativeFieldFixHint =
   "Remove author-writable disposition, proof, confidence, certification, or status-upgrade fields; the ledger computes disposition after independent review.";
 const duplicateClaimFixHint =
@@ -396,6 +399,28 @@ async function main(): Promise<void> {
       headers: { "x-asimp-local-sponsor": "local-sponsor" },
     }),
   );
+  const crossSponsorPrivate = await snapshot(
+    await localFetch(`${origin}/__s3/private/${workshopId}`, {
+      headers: {
+        "x-asimp-local-sponsor": localAuthorityToken,
+        [localS3SponsorAuthorityHeader]: localAuthorityToken,
+        [localS3SponsorIdHeader]: crossSponsorId,
+      },
+    }),
+  );
+  const missingPrivateWorkshopId = "W-s3-does-not-exist";
+  const anonymousMissingPrivate = await snapshot(
+    await localFetch(`${origin}/__s3/private/${missingPrivateWorkshopId}`),
+  );
+  const crossSponsorMissingPrivate = await snapshot(
+    await localFetch(`${origin}/__s3/private/${missingPrivateWorkshopId}`, {
+      headers: {
+        "x-asimp-local-sponsor": localAuthorityToken,
+        [localS3SponsorAuthorityHeader]: localAuthorityToken,
+        [localS3SponsorIdHeader]: crossSponsorId,
+      },
+    }),
+  );
   check(
     "anonymous_or_stale_private_authority_is_not_found_without_a_private_cache_entry",
     anonymousPrivate.response.status === 404 &&
@@ -417,6 +442,57 @@ async function main(): Promise<void> {
         localSponsorId,
       ]),
     `status ${anonymousPrivate.response.status}`,
+  );
+  check(
+    "authenticated_cross_sponsor_private_authority_is_indistinguishable_from_anonymous",
+    crossSponsorPrivate.response.status === 404 &&
+      crossSponsorPrivate.response.headers.get("cache-control") === "no-store" &&
+      crossSponsorPrivate.body === anonymousPrivate.body &&
+      crossSponsorPrivate.headers === anonymousPrivate.headers &&
+      hasNoPrivateMaterial(crossSponsorPrivate, [
+        privateCanary,
+        workshopId,
+        privateDigest,
+        privateBodyKey,
+        localSponsorId,
+        crossSponsorId,
+      ]),
+    "an authenticated cross-sponsor principal could distinguish or read the private workshop",
+  );
+  check(
+    "missing_private_id_cross_sponsor_authority_is_indistinguishable_from_anonymous",
+    anonymousMissingPrivate.response.status === 404 &&
+      anonymousMissingPrivate.response.headers.get("cache-control") === "no-store" &&
+      crossSponsorMissingPrivate.response.status === 404 &&
+      crossSponsorMissingPrivate.response.headers.get("cache-control") === "no-store" &&
+      crossSponsorMissingPrivate.body === anonymousMissingPrivate.body &&
+      crossSponsorMissingPrivate.headers === anonymousMissingPrivate.headers &&
+      hasNoPrivateMaterial(anonymousMissingPrivate, [
+        privateCanary,
+        workshopId,
+        privateDigest,
+        privateBodyKey,
+        localSponsorId,
+        missingPrivateWorkshopId,
+      ]) &&
+      hasNoPrivateMaterial(crossSponsorMissingPrivate, [
+        privateCanary,
+        workshopId,
+        privateDigest,
+        privateBodyKey,
+        localSponsorId,
+        crossSponsorId,
+        missingPrivateWorkshopId,
+      ]),
+    "a missing private identifier reveals cross-sponsor authority or reaches private material",
+  );
+  check(
+    "private_not_found_response_is_invariant_across_existence_classes_for_each_principal",
+    anonymousPrivate.body === anonymousMissingPrivate.body &&
+      anonymousPrivate.headers === anonymousMissingPrivate.headers &&
+      crossSponsorPrivate.body === crossSponsorMissingPrivate.body &&
+      crossSponsorPrivate.headers === crossSponsorMissingPrivate.headers,
+    "a private not-found response varies by workshop existence for one principal",
   );
   const ownerPrivate = await snapshot(
     await localFetch(`${origin}/__s3/private/${workshopId}`, {
