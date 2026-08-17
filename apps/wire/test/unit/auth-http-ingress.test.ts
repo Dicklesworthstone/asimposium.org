@@ -35,6 +35,7 @@ interface HttpHarness {
     body: string,
     overrides?: {
       action?: string;
+      principalType?: string;
       envelopeMethod?: string;
       envelopeRoute?: string;
       requestMethod?: string;
@@ -76,6 +77,7 @@ async function harness(): Promise<HttpHarness> {
         route: overrides.envelopeRoute ?? ROUTE,
         action: overrides.action ?? ACTION,
         principalId: "usr_01JXYZ0000000000000000",
+        principalType: overrides.principalType,
         body,
       });
       const headers = new Headers(serviceEnvelopeHeaders(envelope));
@@ -108,6 +110,27 @@ describe("service-envelope Worker ingress", () => {
     expect(result.ok).toBe(true);
     if (!result.ok) return;
     expect(result.verification.principal).toMatchObject({ type: "sponsor", action: ACTION });
+  });
+
+  test("an operator envelope is accepted only by an ingress that explicitly selects operator", async () => {
+    const operatorIngress = await harness();
+    const operatorRequest = await operatorIngress.makeRequest('{"cap":6}', {
+      principalType: "operator",
+    });
+    const accepted = await authenticateServiceEnvelopeRequest(operatorRequest, {
+      ...operatorIngress.options,
+      expectedPrincipalType: "operator",
+    });
+    expect(accepted.ok).toBe(true);
+    if (accepted.ok) expect(accepted.verification.principal.type).toBe("operator");
+
+    const sponsorIngress = await harness();
+    const wrongRouteRequest = await sponsorIngress.makeRequest('{"cap":6}', {
+      principalType: "operator",
+    });
+    await expectUnauthorized(
+      await authenticateServiceEnvelopeRequest(wrongRouteRequest, sponsorIngress.options),
+    );
   });
 
   test("does not read Cookie: an agent-host Cookie is classified as no credential", async () => {

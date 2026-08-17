@@ -98,6 +98,10 @@ const SPONSOR_ENROLLMENT_BOOTSTRAP_INVARIANT_MIGRATION = resolve(
   import.meta.dir,
   "../../../../db/migrations/0015_sponsor_enrollment_bootstrap_invariant.sql",
 );
+const OPERATOR_FELLOW_CAP_OVERRIDE_MIGRATION = resolve(
+  import.meta.dir,
+  "../../../../db/migrations/0016_operator_fellow_cap_override.sql",
+);
 const DEVICE_MIGRATION = resolve(import.meta.dir, "../../../../db/migrations/0009_device_flow.sql");
 const SPONSOR_MIGRATION = resolve(
   import.meta.dir,
@@ -358,6 +362,12 @@ function expectBootstrapInvariantMigrationApplied(sqlite: Database): void {
 function sponsorEnrollmentBootstrapInvariantDatabase(): Database {
   const sqlite = sponsorEnrollmentRateDatabase();
   sqlite.exec(readFileSync(SPONSOR_ENROLLMENT_BOOTSTRAP_INVARIANT_MIGRATION, "utf8"));
+  return sqlite;
+}
+
+function operatorFellowCapOverrideDatabase(): Database {
+  const sqlite = sponsorEnrollmentBootstrapInvariantDatabase();
+  sqlite.exec(readFileSync(OPERATOR_FELLOW_CAP_OVERRIDE_MIGRATION, "utf8"));
   return sqlite;
 }
 
@@ -7584,6 +7594,350 @@ describe("0013 sponsor Fellow capacity", () => {
         )
         .get()?.n,
     ).toBe(1);
+  });
+});
+
+describe("0016 operator Fellow-cap override audit", () => {
+  const sponsorId = "usr_operator_cap_target";
+  const operator = {
+    type: "operator",
+    operatorId: "usr_operator_cap_actor",
+    serviceEnvelopeKid: "operator-cap-test",
+  } as const;
+  const sponsor = { type: "sponsor", sponsorId } as const;
+
+  function overrideRequest(
+    activeFellowLimit: number,
+    expectedActiveFellowLimit = 5,
+    expectedSponsorSeq = 0,
+    reason = "operator capacity review",
+    stepUpAuthenticatedAt = STEP_UP_AT,
+  ) {
+    return {
+      sponsor_id: sponsorId,
+      expected_active_fellow_limit: expectedActiveFellowLimit,
+      expected_sponsor_seq: expectedSponsorSeq,
+      active_fellow_limit: activeFellowLimit,
+      reason,
+      confirm: "override-fellow-cap" as const,
+      step_up_authenticated_at: stepUpAuthenticatedAt,
+    };
+  }
+
+  function serviceFixture(options: Parameters<typeof localD1>[1] = {}) {
+    const sqlite = operatorFellowCapOverrideDatabase();
+    const clock = new DeviceTestClock();
+    const service = new EnrollmentService({
+      stoaOrigin: TEST_STOA_ORIGIN,
+      clock,
+      store: new D1EnrollmentStore(localD1(sqlite, options)),
+      replayProtector: new AesGcmEnrollmentReplayProtector(new Uint8Array(32)),
+    });
+    return { sqlite, clock, service };
+  }
+
+  test("rebuilds the closed replay scope and makes the immutable audit row the only cap-transition authority", async () => {
+    const { sqlite, clock, service } = serviceFixture();
+    await service.bootstrapSponsor(sponsor);
+
+    const receipt = await service.overrideSponsorFellowCap(
+      operator,
+      overrideRequest(6, 5, 0, "😀".repeat(600)),
+      { idempotencyKey: "operator-cap-first" },
+    );
+
+    expect(receipt).toMatchObject({
+      acknowledged: true,
+      sponsor_id: sponsorId,
+      sponsor_seq: 1,
+      previous_active_fellow_limit: 5,
+      active_fellow_limit: 6,
+      step_up_authenticated_at: STEP_UP_AT,
+      signer_kid: operator.serviceEnvelopeKid,
+    });
+    expect(receipt.audit_event_id).toMatch(/^OFC-[0-9A-HJKMNP-TV-Z]{26}$/);
+    expect(
+      sqlite
+        .prepare<
+          {
+            operator_id: string;
+            sponsor_seq: number;
+            previous_active_fellow_limit: number;
+            active_fellow_limit: number;
+            reason_length: number;
+            step_up_authenticated_at: number;
+            signer_kid: string;
+          },
+          [string]
+        >(
+          `SELECT operator_id, sponsor_seq, previous_active_fellow_limit,
+                  active_fellow_limit, length(reason) AS reason_length,
+                  step_up_authenticated_at, signer_kid
+             FROM sponsor_fellow_cap_audit_events
+            WHERE audit_event_id = ?`,
+        )
+        .get(receipt.audit_event_id),
+    ).toEqual({
+      operator_id: operator.operatorId,
+      sponsor_seq: 1,
+      previous_active_fellow_limit: 5,
+      active_fellow_limit: 6,
+      reason_length: 600,
+      step_up_authenticated_at: STEP_UP_AT,
+      signer_kid: operator.serviceEnvelopeKid,
+    });
+    expect(
+      sqlite
+        .prepare<{ active_fellow_limit: number; fellow_cap_seq: number }, [string]>(
+          "SELECT active_fellow_limit, fellow_cap_seq FROM sponsors WHERE sponsor_id = ?",
+        )
+        .get(sponsorId),
+    ).toEqual({ active_fellow_limit: 6, fellow_cap_seq: 1 });
+    expect(
+      sqlite
+        .prepare<{ n: number }, []>(
+          "SELECT COUNT(*) AS n FROM enrollment_idempotency WHERE scope = 'operator-fellow-cap'",
+        )
+        .get()?.n,
+    ).toBe(1);
+
+    // These are raw SQL plants, not helper assertions. They prove that no
+    // transient permit or old audit row can authorize a later cap-only,
+    // sequence-only, or fabricated next-transition update.
+    for (const statement of [
+      "UPDATE sponsors SET active_fellow_limit = 7 WHERE sponsor_id = 'usr_operator_cap_target'",
+      "UPDATE sponsors SET fellow_cap_seq = 2 WHERE sponsor_id = 'usr_operator_cap_target'",
+      "UPDATE sponsors SET active_fellow_limit = 7, fellow_cap_seq = 2 WHERE sponsor_id = 'usr_operator_cap_target'",
+    ]) {
+      expect(() => sqlite.exec(statement)).toThrow(
+        "Fellow-cap transition requires immutable operator audit",
+      );
+    }
+    expect(() =>
+      sqlite
+        .prepare(
+          `INSERT INTO sponsor_fellow_cap_audit_events (
+             audit_event_id, sponsor_id, operator_id, sponsor_seq,
+             previous_active_fellow_limit, active_fellow_limit, reason,
+             step_up_authenticated_at, signer_kid, request_id, created_at
+           ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+        )
+        .run(
+          `OFC-${"B".repeat(26)}`,
+          sponsorId,
+          operator.operatorId,
+          1,
+          5,
+          7,
+          "stale raw audit row",
+          STEP_UP_AT,
+          operator.serviceEnvelopeKid,
+          "b".repeat(64),
+          NOW + 1,
+        ),
+    ).toThrow("operator Fellow-cap audit is stale");
+    expect(() =>
+      sqlite
+        .prepare(
+          `INSERT INTO sponsor_fellow_cap_audit_events (
+             audit_event_id, sponsor_id, operator_id, sponsor_seq,
+             previous_active_fellow_limit, active_fellow_limit, reason,
+             step_up_authenticated_at, signer_kid, request_id, created_at
+           ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+        )
+        .run(
+          `OFC-${"C".repeat(26)}`,
+          sponsorId,
+          operator.operatorId,
+          2,
+          6,
+          7,
+          "NUL-bearing audit reason\u0000must not persist",
+          STEP_UP_AT,
+          operator.serviceEnvelopeKid,
+          "c".repeat(64),
+          NOW + 1,
+        ),
+    ).toThrow();
+    expect(
+      sqlite
+        .prepare<{ n: number }, []>("SELECT COUNT(*) AS n FROM sponsor_fellow_cap_audit_events")
+        .get()?.n,
+    ).toBe(1);
+    expect(
+      sqlite
+        .prepare<{ n: number }, []>(
+          "SELECT COUNT(*) AS n FROM sqlite_master WHERE name = 'sponsor_fellow_cap_apply_permits'",
+        )
+        .get()?.n,
+    ).toBe(0);
+    expect(() =>
+      sqlite
+        .prepare("UPDATE sponsor_fellow_cap_audit_events SET reason = ? WHERE audit_event_id = ?")
+        .run("altered reason", receipt.audit_event_id),
+    ).toThrow("operator Fellow-cap audit events are immutable");
+    expect(() =>
+      sqlite
+        .prepare("DELETE FROM sponsor_fellow_cap_audit_events WHERE audit_event_id = ?")
+        .run(receipt.audit_event_id),
+    ).toThrow("operator Fellow-cap audit events cannot be deleted");
+
+    // A committed receipt remains replayable after step-up expiry. A different
+    // payload under the same key cannot overwrite it, and a fresh stale-CAS
+    // attempt adds neither audit nor replay state.
+    clock.value += (SPONSOR_STEP_UP_WINDOW_SECONDS + 1) * 1_000;
+    await expect(
+      service.overrideSponsorFellowCap(operator, overrideRequest(6, 5, 0, "😀".repeat(600)), {
+        idempotencyKey: "operator-cap-first",
+      }),
+    ).resolves.toEqual(receipt);
+    await expect(
+      service.overrideSponsorFellowCap(
+        operator,
+        overrideRequest(7, 5, 0, "different stable intent"),
+        { idempotencyKey: "operator-cap-first" },
+      ),
+    ).rejects.toMatchObject({ code: "IDEMPOTENCY_CONFLICT" });
+    await expect(
+      service.overrideSponsorFellowCap(
+        operator,
+        overrideRequest(7, 5, 0, "fresh but stale precondition", Math.floor(clock.value / 1_000)),
+        { idempotencyKey: "operator-cap-stale" },
+      ),
+    ).rejects.toMatchObject({ code: "OPERATOR_FELLOW_CAP_NOT_CURRENT" });
+
+    // ABA plant: a delayed command that observed cap=5/seq=0 must not become
+    // current merely because a later operator returned the cap to five.
+    const returnToFive = await service.overrideSponsorFellowCap(
+      operator,
+      overrideRequest(5, 6, 1, "deliberate capacity return", Math.floor(clock.value / 1_000)),
+      { idempotencyKey: "operator-cap-return" },
+    );
+    expect(returnToFive.sponsor_seq).toBe(2);
+    await expect(
+      service.overrideSponsorFellowCap(
+        operator,
+        overrideRequest(7, 5, 0, "delayed ABA command must lose", Math.floor(clock.value / 1_000)),
+        { idempotencyKey: "operator-cap-aba-stale" },
+      ),
+    ).rejects.toMatchObject({ code: "OPERATOR_FELLOW_CAP_NOT_CURRENT" });
+    expect(
+      sqlite
+        .prepare<{ n: number }, []>("SELECT COUNT(*) AS n FROM sponsor_fellow_cap_audit_events")
+        .get()?.n,
+    ).toBe(2);
+    expect(
+      sqlite
+        .prepare<{ n: number }, []>(
+          "SELECT COUNT(*) AS n FROM enrollment_idempotency WHERE scope = 'operator-fellow-cap'",
+        )
+        .get()?.n,
+    ).toBe(2);
+  });
+
+  test("two commands that observed the same cap leave exactly one sequenced receipt", async () => {
+    let reads = 0;
+    let releaseReads: (() => void) | undefined;
+    let bothReads: (() => void) | undefined;
+    const readsMayContinue = new Promise<void>((resolve) => {
+      releaseReads = resolve;
+    });
+    const bothReadsObserved = new Promise<void>((resolve) => {
+      bothReads = resolve;
+    });
+    const { sqlite, service } = serviceFixture({
+      serializeBatches: true,
+      afterFirstRead: async (query) => {
+        if (!query.includes("SELECT active_fellow_limit, fellow_cap_seq")) return;
+        reads += 1;
+        if (reads === 2) bothReads?.();
+        await readsMayContinue;
+      },
+    });
+    await service.bootstrapSponsor(sponsor);
+
+    const first = service.overrideSponsorFellowCap(
+      operator,
+      overrideRequest(6, 5, 0, "first concurrent command"),
+      { idempotencyKey: "operator-cap-race-1" },
+    );
+    const second = service.overrideSponsorFellowCap(
+      operator,
+      overrideRequest(7, 5, 0, "second concurrent command"),
+      { idempotencyKey: "operator-cap-race-2" },
+    );
+    await bothReadsObserved;
+    releaseReads?.();
+    const outcomes = await Promise.allSettled([first, second]);
+
+    expect(reads).toBe(2);
+    expect(outcomes.filter((outcome) => outcome.status === "fulfilled")).toHaveLength(1);
+    const rejected = outcomes.find((outcome) => outcome.status === "rejected");
+    expect(rejected?.status).toBe("rejected");
+    if (rejected?.status === "rejected") {
+      expect(rejected.reason).toMatchObject({ code: "OPERATOR_FELLOW_CAP_NOT_CURRENT" });
+    }
+    expect(
+      sqlite
+        .prepare<{ n: number }, []>("SELECT COUNT(*) AS n FROM sponsor_fellow_cap_audit_events")
+        .get()?.n,
+    ).toBe(1);
+    expect(
+      sqlite
+        .prepare<{ active_fellow_limit: number; fellow_cap_seq: number }, [string]>(
+          "SELECT active_fellow_limit, fellow_cap_seq FROM sponsors WHERE sponsor_id = ?",
+        )
+        .get(sponsorId),
+    ).toMatchObject({ fellow_cap_seq: 1 });
+    expect(
+      sqlite
+        .prepare<{ n: number }, []>(
+          "SELECT COUNT(*) AS n FROM enrollment_idempotency WHERE scope = 'operator-fellow-cap'",
+        )
+        .get()?.n,
+    ).toBe(1);
+  });
+
+  test("audit history uses bounded descending sequence keysets across same-time inserts", async () => {
+    const { clock, service } = serviceFixture();
+    await service.bootstrapSponsor(sponsor);
+    let activeFellowLimit = 5;
+    let sponsorSeq = 0;
+    for (let sequence = 1; sequence <= 102; sequence += 1) {
+      const nextLimit = activeFellowLimit === 5 ? 6 : 5;
+      const receipt = await service.overrideSponsorFellowCap(
+        operator,
+        overrideRequest(
+          nextLimit,
+          activeFellowLimit,
+          sponsorSeq,
+          `operator history receipt ${sequence}`,
+        ),
+        { idempotencyKey: `operator-cap-history-${sequence}` },
+      );
+      activeFellowLimit = nextLimit;
+      sponsorSeq = receipt.sponsor_seq;
+    }
+
+    const first = await service.operatorFellowCapAuditPage(operator, sponsorId);
+    expect(first.auditEvents).toHaveLength(100);
+    expect(first.auditEvents.map((event) => event.sponsorSeq)).toEqual(
+      Array.from({ length: 100 }, (_unused, index) => 102 - index),
+    );
+    expect(first.nextCursor).toEqual({ sponsor_seq: 3 });
+    expect(new Set(first.auditEvents.map((event) => event.effectiveAt))).toEqual(
+      new Set([clock.value]),
+    );
+
+    const newest = await service.overrideSponsorFellowCap(
+      operator,
+      overrideRequest(6, activeFellowLimit, sponsorSeq, "new same-time audit receipt"),
+      { idempotencyKey: "operator-cap-history-newest" },
+    );
+    expect(newest.sponsor_seq).toBe(103);
+    const second = await service.operatorFellowCapAuditPage(operator, sponsorId, first.nextCursor);
+    expect(second.auditEvents.map((event) => event.sponsorSeq)).toEqual([2, 1]);
+    expect(second.nextCursor).toBeUndefined();
   });
 });
 

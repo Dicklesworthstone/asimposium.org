@@ -1,11 +1,18 @@
 import { Database } from "bun:sqlite";
 import { describe, expect, test } from "bun:test";
-import { readFileSync } from "node:fs";
+import { readdirSync, readFileSync } from "node:fs";
 import { resolve } from "node:path";
-import { PRODUCTION_STOA_ORIGIN, STAGING_STOA_ORIGIN, stoaHelloUrl } from "@asimposium/contracts";
+import {
+  OperatorFellowCapOverrideResponseSchema,
+  PRODUCTION_STOA_ORIGIN,
+  STAGING_STOA_ORIGIN,
+  stoaHelloUrl,
+} from "@asimposium/contracts";
 import type { D1Database } from "@cloudflare/workers-types";
 
+import { mintServiceEnvelope, serviceEnvelopeHeaders } from "../../../web/lib/service-envelope.ts";
 import { createApp } from "../../src/app.ts";
+import { toHex } from "../../src/auth/canonical.ts";
 import {
   enrollmentCapsuleMarkdown,
   enrollmentCapsuleProjection,
@@ -365,5 +372,192 @@ describe("the isolate cache is keyed on the Stoa origin", () => {
     // capsule that still carries a hardcoded endpoint somewhere in its prose.
     expect(loopback.text).toBe(staging.text.replaceAll(STAGING_STOA_ORIGIN, LOOPBACK));
     expect(backToStaging.text).toBe(staging.text);
+  });
+});
+
+describe("operator Fellow-cap ingress is separately authenticated and allowlisted", () => {
+  const REPLAY_KEY = "b".repeat(43);
+  const SPONSOR_ID = "usr_operator_cap_target";
+  const OPERATOR_ID = "usr_operator_cap_actor";
+
+  function latestD1(): { readonly db: D1Database; readonly sqlite: Database } {
+    const sqlite = new Database(":memory:", { strict: true });
+    for (const migration of readdirSync(resolve(import.meta.dir, "../../../../db/migrations"))
+      .filter((name) => /^\d{4}_.+\.sql$/.test(name))
+      .sort()) {
+      sqlite.exec(
+        readFileSync(resolve(import.meta.dir, "../../../../db/migrations", migration), "utf8"),
+      );
+    }
+    const prepare = (query: string) => ({
+      bind(...values: (string | number | null)[]) {
+        return {
+          async run() {
+            const statement = sqlite.prepare(query);
+            if (/^\s*SELECT\b/i.test(query)) {
+              return { results: statement.all(...values), meta: { changes: 0 } };
+            }
+            return { results: [], meta: { changes: statement.run(...values).changes } };
+          },
+          async first<T>(): Promise<T | null> {
+            return (sqlite.prepare(query).get(...values) ?? null) as T | null;
+          },
+          async all<T>(): Promise<{ results: T[] }> {
+            return { results: sqlite.prepare(query).all(...values) as T[] };
+          },
+        };
+      },
+    });
+    return {
+      sqlite,
+      db: {
+        prepare,
+        async batch(statements: readonly { run(): Promise<unknown> }[]) {
+          sqlite.run("BEGIN");
+          try {
+            const results = [];
+            for (const statement of statements) results.push(await statement.run());
+            sqlite.run("COMMIT");
+            return results;
+          } catch (error) {
+            sqlite.run("ROLLBACK");
+            throw error;
+          }
+        },
+      } as unknown as D1Database,
+    };
+  }
+
+  async function signedOperatorRequest(
+    privateKey: CryptoKey,
+    kid: string,
+    operatorId = OPERATOR_ID,
+  ): Promise<Request> {
+    const now = Math.floor(Date.now() / 1_000);
+    const body = JSON.stringify({
+      sponsor_id: SPONSOR_ID,
+      expected_active_fellow_limit: 5,
+      expected_sponsor_seq: 0,
+      active_fellow_limit: 6,
+      reason: "Reviewed capacity need for active Fellows.",
+      confirm: "override-fellow-cap",
+      step_up_authenticated_at: now,
+    });
+    const envelope = await mintServiceEnvelope({
+      privateKey,
+      kid,
+      now,
+      method: "POST",
+      route: "/v1/operators/fellow-cap",
+      action: "operator.fellow-cap.override",
+      principalId: operatorId,
+      principalType: "operator",
+      body,
+    });
+    const headers = new Headers(serviceEnvelopeHeaders(envelope));
+    headers.set("idempotency-key", `operator-cap-${crypto.randomUUID()}`);
+    return new Request("https://a.asimposium.org/v1/operators/fellow-cap", {
+      method: "POST",
+      headers,
+      body,
+    });
+  }
+
+  test("a signed allowlisted operator reaches the D1 audit command, while a cache rebind denies the same identity", async () => {
+    const { db, sqlite } = latestD1();
+    sqlite
+      .prepare("INSERT INTO sponsors (sponsor_id, created_at, last_seen_at) VALUES (?, ?, ?)")
+      .run(SPONSOR_ID, Date.now(), Date.now());
+    const keypair = (await crypto.subtle.generateKey({ name: "Ed25519" }, true, [
+      "sign",
+      "verify",
+    ])) as unknown as CryptoKeyPair;
+    const kid = "operator-app-test";
+    const keyring = JSON.stringify([
+      {
+        kid,
+        publicKeyHex: toHex(
+          new Uint8Array(await crypto.subtle.exportKey("raw", keypair.publicKey)),
+        ),
+        notBefore: 0,
+      },
+    ]);
+    const app = createApp();
+    const allowedEnv = {
+      DB: db,
+      ENROLLMENT_REPLAY_KEY: REPLAY_KEY,
+      STOA_ORIGIN: LOOPBACK,
+      SERVICE_ENVELOPE_KEYS: keyring,
+      OPERATOR_PRINCIPAL_IDS: OPERATOR_ID,
+    };
+    const accepted = await app.fetch(
+      await signedOperatorRequest(keypair.privateKey, kid),
+      allowedEnv as never,
+      ctx,
+    );
+    expect(accepted.status).toBe(200);
+    expect(OperatorFellowCapOverrideResponseSchema.parse(await accepted.json())).toMatchObject({
+      sponsor_id: SPONSOR_ID,
+      sponsor_seq: 1,
+      previous_active_fellow_limit: 5,
+      active_fellow_limit: 6,
+    });
+
+    // Same isolate and D1 handle, only the allowlist changes. If the cache key
+    // omitted it, the previous stack would accept the old operator and fall as
+    // far as a stale-CAS 409 instead of this pre-state 401 refusal.
+    const revokedEnv = { ...allowedEnv, OPERATOR_PRINCIPAL_IDS: "usr_someone_else" };
+    const refused = await app.fetch(
+      await signedOperatorRequest(keypair.privateKey, kid),
+      revokedEnv as never,
+      ctx,
+    );
+    expect(refused.status).toBe(401);
+    expect(await refused.json()).toMatchObject({ code: "UNAUTHORIZED" });
+    expect(
+      sqlite
+        .prepare<{ n: number }, []>("SELECT COUNT(*) AS n FROM sponsor_fellow_cap_audit_events")
+        .get()?.n,
+    ).toBe(1);
+  });
+
+  test("malformed operator allowlist disables the route rather than broadening it", async () => {
+    const { db, sqlite } = latestD1();
+    sqlite
+      .prepare("INSERT INTO sponsors (sponsor_id, created_at, last_seen_at) VALUES (?, ?, ?)")
+      .run(SPONSOR_ID, Date.now(), Date.now());
+    const keypair = (await crypto.subtle.generateKey({ name: "Ed25519" }, true, [
+      "sign",
+      "verify",
+    ])) as unknown as CryptoKeyPair;
+    const kid = "operator-malformed-allowlist";
+    const keyring = JSON.stringify([
+      {
+        kid,
+        publicKeyHex: toHex(
+          new Uint8Array(await crypto.subtle.exportKey("raw", keypair.publicKey)),
+        ),
+        notBefore: 0,
+      },
+    ]);
+    const app = createApp();
+    const response = await app.fetch(
+      await signedOperatorRequest(keypair.privateKey, kid),
+      {
+        DB: db,
+        ENROLLMENT_REPLAY_KEY: REPLAY_KEY,
+        STOA_ORIGIN: LOOPBACK,
+        SERVICE_ENVELOPE_KEYS: keyring,
+        OPERATOR_PRINCIPAL_IDS: `${OPERATOR_ID},${OPERATOR_ID}`,
+      } as never,
+      ctx,
+    );
+    expect(response.status).toBe(503);
+    expect(await response.json()).toMatchObject({ code: "OPERATOR_AUTH_UNAVAILABLE" });
+    expect(
+      sqlite
+        .prepare<{ n: number }, []>("SELECT COUNT(*) AS n FROM sponsor_fellow_cap_audit_events")
+        .get()?.n,
+    ).toBe(0);
   });
 });

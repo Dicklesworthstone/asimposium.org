@@ -6,6 +6,8 @@ import {
   encodeSponsorFellowCursor,
   MintEnrollmentResponseSchema,
   OpaqueProblemSchema,
+  OperatorFellowCapOverrideResponseSchema,
+  OperatorFellowCapStateResponseSchema,
   ProblemDocumentSchema,
   SponsorCredentialRevokeResponseSchema,
   SponsorEnrollmentDecisionResponseSchema,
@@ -44,6 +46,7 @@ const origin = "https://a.asimposium.invalid";
 const TEST_STOA_ORIGIN = "https://a.asimposium.org";
 const SPONSOR = "usr_01JXYZSPONSOR0000000000";
 const FOREIGN_SPONSOR = "usr_01JXYZFOREIGN000000000";
+const OPERATOR = "usr_01JXYZOPERATOR000000000";
 let signedRequestSequence = 0;
 
 interface Harness {
@@ -55,12 +58,15 @@ interface Harness {
     action: string,
     method?: string,
     principalId?: string,
+    principalType?: string,
   ): Promise<Headers>;
 }
 
 async function harness(options?: {
   readonly withSponsorSeam?: false;
   readonly verifiedSponsor?: EnrollmentRouterOptions["verifiedSponsor"];
+  readonly withOperatorSeam?: false;
+  readonly verifiedOperator?: EnrollmentRouterOptions["verifiedOperator"];
   readonly clock?: { now(): number };
   readonly store?: InMemoryEnrollmentStore;
 }): Promise<Harness> {
@@ -85,7 +91,14 @@ async function harness(options?: {
     clock: options?.clock ?? { now: () => NOW * 1_000 },
   });
 
-  const sign: Harness["sign"] = async (body, route, action, method = "POST", principalId) => {
+  const sign: Harness["sign"] = async (
+    body,
+    route,
+    action,
+    method = "POST",
+    principalId,
+    principalType,
+  ) => {
     const envelope = await mintServiceEnvelope({
       privateKey: keypair.privateKey,
       kid: "agora-sponsor-test",
@@ -94,6 +107,7 @@ async function harness(options?: {
       route,
       action,
       principalId: principalId ?? SPONSOR,
+      principalType,
       body,
     });
     const headers = new Headers(serviceEnvelopeHeaders(envelope));
@@ -126,6 +140,33 @@ async function harness(options?: {
                 principal: {
                   type: "sponsor",
                   sponsorId: result.verification.principal.id,
+                } as const,
+                rawBody: result.rawBody,
+              };
+            }),
+        }),
+    ...(options?.withOperatorSeam === false
+      ? {}
+      : {
+          verifiedOperator:
+            options?.verifiedOperator ??
+            (async (request, route, action) => {
+              const result = await authenticateServiceEnvelopeRequest(request, {
+                keyring,
+                nonces,
+                now: NOW,
+                issuer: "agora",
+                audience: "stoa",
+                route,
+                permittedActions: [action],
+                expectedPrincipalType: "operator",
+              });
+              if (!result.ok) return result.response;
+              return {
+                principal: {
+                  type: "operator",
+                  operatorId: result.verification.principal.id,
+                  serviceEnvelopeKid: result.verification.principal.kid,
                 } as const,
                 rawBody: result.rawBody,
               };
@@ -228,6 +269,107 @@ async function issuedLifecycleFixture(
 }
 
 describe("sponsor enrollment routes", () => {
+  test("allowlisted operator route requires an operator envelope, exact CAS body, and returns the audit receipt", async () => {
+    const h = await harness();
+    await h.service.bootstrapSponsor({ type: "sponsor", sponsorId: SPONSOR });
+    const body = JSON.stringify({
+      sponsor_id: SPONSOR,
+      expected_active_fellow_limit: 5,
+      expected_sponsor_seq: 0,
+      active_fellow_limit: 6,
+      reason: "Reviewed capacity need for active Fellows.",
+      confirm: "override-fellow-cap",
+      step_up_authenticated_at: NOW,
+    });
+    const headers = await h.sign(
+      body,
+      "/v1/operators/fellow-cap",
+      "operator.fellow-cap.override",
+      "POST",
+      OPERATOR,
+      "operator",
+    );
+    const accepted = await h.app.fetch(
+      envelopeRequest("/v1/operators/fellow-cap", headers, "POST", body),
+    );
+    expect(accepted.status).toBe(200);
+    expect(OperatorFellowCapOverrideResponseSchema.parse(await accepted.json())).toMatchObject({
+      sponsor_id: SPONSOR,
+      sponsor_seq: 1,
+      previous_active_fellow_limit: 5,
+      active_fellow_limit: 6,
+    });
+    const stateHeaders = await h.sign(
+      "",
+      "/v1/operators/sponsors/:sponsorId/fellow-cap",
+      "operator.fellow-cap.read",
+      "GET",
+      OPERATOR,
+      "operator",
+    );
+    const state = await h.app.fetch(
+      envelopeRequest(`/v1/operators/sponsors/${SPONSOR}/fellow-cap`, stateHeaders, "GET"),
+    );
+    expect(state.status).toBe(200);
+    expect(OperatorFellowCapStateResponseSchema.parse(await state.json())).toEqual({
+      sponsor_id: SPONSOR,
+      active_fellow_limit: 6,
+      sponsor_seq: 1,
+    });
+
+    const sponsorEnvelope = await h.sign(
+      body,
+      "/v1/operators/fellow-cap",
+      "operator.fellow-cap.override",
+    );
+    const refused = await h.app.fetch(
+      envelopeRequest("/v1/operators/fellow-cap", sponsorEnvelope, "POST", body),
+    );
+    expect(refused.status).toBe(401);
+    expect(await refused.json()).toMatchObject({ code: "UNAUTHORIZED" });
+
+    const invalidBody = JSON.stringify({
+      sponsor_id: SPONSOR,
+      expected_active_fellow_limit: 6,
+      active_fellow_limit: 7,
+      reason: "missing optimistic precondition",
+      confirm: "override-fellow-cap",
+      step_up_authenticated_at: NOW,
+    });
+    const invalidHeaders = await h.sign(
+      invalidBody,
+      "/v1/operators/fellow-cap",
+      "operator.fellow-cap.override",
+      "POST",
+      OPERATOR,
+      "operator",
+    );
+    const invalid = await h.app.fetch(
+      envelopeRequest("/v1/operators/fellow-cap", invalidHeaders, "POST", invalidBody),
+    );
+    expect(invalid.status).toBe(422);
+    expect(ContractProblemSchema.parse(await invalid.json())).toMatchObject({
+      code: "OPERATOR_FELLOW_CAP_BODY_INVALID",
+      rule: "A5",
+      example: { expected_sponsor_seq: 0 },
+    });
+  });
+
+  test("operator cap route fails closed when its separately configured auth seam is absent", async () => {
+    const h = await harness({ withOperatorSeam: false });
+    const response = await h.app.fetch(
+      new Request(`${origin}/v1/operators/fellow-cap`, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: "{}",
+      }),
+    );
+    expect(response.status).toBe(503);
+    expect(OpaqueProblemSchema.parse(await response.json())).toMatchObject({
+      code: "OPERATOR_AUTH_UNAVAILABLE",
+    });
+  });
+
   test("an invalid decision-path id teaches before sponsor auth or state lookup", async () => {
     let sponsorAuthCalls = 0;
     const h = await harness({
