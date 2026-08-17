@@ -302,9 +302,11 @@ interface ToolchainIntegrationSummaryRecord {
   code:
     | "TOOLCHAIN_INTEGRATION_COMPLETE"
     | "TOOLCHAIN_INTEGRATION_BLOCKED"
-    | "TOOLCHAIN_INTEGRATION_FAILED";
+    | "TOOLCHAIN_INTEGRATION_FAILED"
+    | "TOOLCHAIN_INTEGRATION_RECURSION";
   totals: Readonly<Record<ToolchainIntegrationStatus, number>>;
   reproduce: "bun run toolchain:integration";
+  detail?: string;
 }
 
 type ToolchainIntegrationRecord =
@@ -429,6 +431,16 @@ function environmentForSuite(depth?: number): Record<string, string> {
   }
   if (depth !== undefined) environment[DEPTH_ENV] = String(depth + 1);
   return environment;
+}
+
+/**
+ * The dispatch depth every entry point shares. `environmentForSuite(depth)` is the only
+ * writer of `DEPTH_ENV`, and it builds a fresh environment rather than inheriting one, so
+ * any dispatch path that omits its depth silently resets this counter to zero and disables
+ * every recursion refusal below it.
+ */
+function dispatcherDepth(): number {
+  return Number.parseInt(process.env[DEPTH_ENV] ?? "0", 10) || 0;
 }
 
 async function valueBefore<T>(promise: Promise<T>, milliseconds: number): Promise<T | undefined> {
@@ -1726,6 +1738,7 @@ async function runToolchainIntegrationStep(
   step: (typeof TOOLCHAIN_INTEGRATION_STEPS)[number],
   root: string,
   timeoutMs: number,
+  depth: number,
 ): Promise<ToolchainIntegrationStepRecord> {
   const startedAt = performance.now();
   const base = {
@@ -1743,7 +1756,10 @@ async function runToolchainIntegrationStep(
   const result = await runOwnedCommand({
     command: step.command,
     cwd: root,
-    env: environmentForSuite(),
+    // A step is one dispatch hop below this bridge, so it inherits depth + 1. Dropping the
+    // depth here would reset the counter and let a step command re-enter the dispatcher
+    // without ever reaching MAX_DEPTH.
+    env: environmentForSuite(depth),
     timeoutMs,
     termGraceMs: TOOLCHAIN_INTEGRATION_TERM_GRACE_MS,
     killReapMs: TOOLCHAIN_INTEGRATION_KILL_REAP_MS,
@@ -1823,6 +1839,7 @@ async function runToolchainIntegrationStep(
 async function runToolchainIntegrationCli(
   argv: readonly string[],
   defaultRoot: string,
+  depth: number,
 ): Promise<number> {
   let options: ToolchainIntegrationOptions;
   try {
@@ -1860,6 +1877,33 @@ async function runToolchainIntegrationCli(
     return 0;
   }
 
+  // The same recursion refusal `preflight` applies to suite dispatch, transposed for the
+  // one path that never routes through it. A bridge at depth d spawns its steps at d + 1,
+  // so refusing at MAX_DEPTH stops the chain *before* a step command runs rather than
+  // spawning one whose own nested dispatcher would be refused anyway. This is checked
+  // after `--list` so the resolved plan stays a pure, side-effect-free projection.
+  if (depth >= MAX_DEPTH) {
+    emitToolchainIntegration(
+      {
+        record: "toolchain-integration-summary",
+        tool: TOOL,
+        package: "asimposium",
+        suite: "toolchain-integration",
+        version: Bun.version,
+        duration_ms: 0,
+        status: "fail",
+        code: "TOOLCHAIN_INTEGRATION_RECURSION",
+        totals: { pass: 0, fail: 0, blocked: 0 },
+        reproduce: "bun run toolchain:integration",
+        detail:
+          `integration bridge nested ${depth} deep; a step command is calling the root ` +
+          "dispatcher back. No step was spawned.",
+      },
+      options.root,
+    );
+    return 2;
+  }
+
   const startedAt = performance.now();
   const deadline = startedAt + TOOLCHAIN_INTEGRATION_TOTAL_TIMEOUT_MS;
   const totals: Record<ToolchainIntegrationStatus, number> = { pass: 0, fail: 0, blocked: 0 };
@@ -1894,6 +1938,7 @@ async function runToolchainIntegrationCli(
       step,
       options.root,
       Math.min(step.timeoutMs, remaining - cleanupReserve),
+      depth,
     );
     totals[record.status] += 1;
     emitToolchainIntegration(record, options.root);
@@ -2298,12 +2343,19 @@ function preflight(options: Options, depth: number): UnitDiagnostic {
     package_version: rootPackage.version,
   };
 
-  if (depth > MAX_DEPTH) {
+  // One hop, exactly as the integration bridge reasons at MAX_DEPTH: this dispatcher would
+  // spawn its root and workspace package scripts at depth + 1. Refusing at *exactly*
+  // MAX_DEPTH stops the chain before those side effects run, instead of paying a full round
+  // of package spawns and leaving only each child dispatcher to refuse. `--list` is exempt
+  // in `main`, which never reaches a spawn, so the resolved plan stays a pure projection.
+  if (depth >= MAX_DEPTH) {
     return {
       ...base,
       status: "fail",
       code: "SUITE_RECURSION",
-      detail: `dispatcher nested ${depth} deep; a package script is calling the root suite back`,
+      detail:
+        `dispatcher nested ${depth} deep at the ${MAX_DEPTH}-hop limit; a package script is ` +
+        "calling the root suite back. No root or workspace package script was spawned.",
     };
   }
   if (pinned === undefined) {
@@ -2363,7 +2415,7 @@ async function main(argv: string[]): Promise<number> {
   }
 
   const filters = options.filters ?? [];
-  const depth = Number.parseInt(process.env[DEPTH_ENV] ?? "0", 10) || 0;
+  const depth = dispatcherDepth();
 
   let workspaces: Workspace[];
   let preflightDiagnostic: UnitDiagnostic;
@@ -2515,7 +2567,7 @@ if (import.meta.main) {
   const here = fileURLToPath(new URL(".", import.meta.url));
   const defaultRoot = resolve(here, "..", "..");
   const exitCode = argv.includes("--toolchain-integration")
-    ? await runToolchainIntegrationCli(argv, defaultRoot)
+    ? await runToolchainIntegrationCli(argv, defaultRoot, dispatcherDepth())
     : await main(argv);
   process.exit(exitCode);
 }

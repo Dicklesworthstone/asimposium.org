@@ -8,7 +8,15 @@
 
 import { describe, expect, test } from "bun:test";
 import { spawnSync } from "node:child_process";
-import { closeSync, existsSync, mkdtempSync, openSync, readFileSync } from "node:fs";
+import {
+  closeSync,
+  existsSync,
+  mkdirSync,
+  mkdtempSync,
+  openSync,
+  readFileSync,
+  writeFileSync,
+} from "node:fs";
 import { homedir, tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
@@ -1801,6 +1809,62 @@ describe("preflight and usage", () => {
     expect(result.stdout).toContain("SUITE_RECURSION");
   });
 
+  const ROOT_UNIT_MARKER = "root-unit-must-not-run";
+  const PACKAGE_UNIT_MARKER = "package-unit-must-not-run";
+
+  /**
+   * A repository whose root toolchain unit *and* workspace package unit both record that
+   * they ran. Either marker appearing proves the dispatcher spawned a real side effect.
+   */
+  function makeSpawnWitnessRepo(): string {
+    return makeFixtureRepo({
+      rootScripts: { "toolchain:test": markerCommand(ROOT_UNIT_MARKER) },
+      packages: [
+        {
+          dir: "apps/web",
+          source: true,
+          scripts: { "test:unit": markerCommand(PACKAGE_UNIT_MARKER) },
+        },
+      ],
+    });
+  }
+
+  function spawnWitnessed(root: string): { rootUnit: boolean; packageUnit: boolean } {
+    return {
+      rootUnit: existsSync(join(root, ROOT_UNIT_MARKER)),
+      packageUnit: existsSync(join(root, "apps/web", PACKAGE_UNIT_MARKER)),
+    };
+  }
+
+  test("PLANTED: at exactly MAX_DEPTH the refusal precedes every spawn site", async () => {
+    const root = makeSpawnWitnessRepo();
+    const result = await runCli(root, ["unit", "--json"], { ASIMPOSIUM_SUITE_DEPTH: "2" });
+
+    expect(result.exitCode).toBe(2);
+    expect(result.stdout).toContain("SUITE_RECURSION");
+    // The whole point of the exact-limit refusal. While preflight used `depth > MAX_DEPTH`,
+    // depth 2 passed, runUnit spawned both of these at depth 3, and only each grandchild
+    // dispatcher refused -- one full round of package side effects past the limit.
+    expect(spawnWitnessed(root)).toEqual({ rootUnit: false, packageUnit: false });
+  });
+
+  test("--list at MAX_DEPTH stays a pure projection: plan only, nothing spawned", async () => {
+    const root = makeSpawnWitnessRepo();
+    const result = await runCli(root, ["unit", "--list", "--json"], {
+      ASIMPOSIUM_SUITE_DEPTH: "2",
+    });
+
+    expect(result.exitCode).toBe(0);
+    expect(result.stdout).not.toContain("SUITE_RECURSION");
+    const emitted = result.stdout
+      .split("\n")
+      .filter((line) => line.trim().length > 0)
+      .map((line) => JSON.parse(line) as { record: string });
+    expect(emitted.length).toBeGreaterThan(0);
+    expect(emitted.every((record) => record.record === "plan")).toBe(true);
+    expect(spawnWitnessed(root)).toEqual({ rootUnit: false, packageUnit: false });
+  });
+
   test("an unknown suite lists the known ones instead of failing silently", async () => {
     const result = await runCli(makeFixtureRepo(), ["units"]);
     expect(result.exitCode).toBe(2);
@@ -1926,6 +1990,92 @@ describe("--list plans without running", () => {
         command: "bun scripts/suite/g0-spikes.ts",
         timeout_ms: 1_230_000,
       }),
+    ]);
+  });
+});
+
+describe("the executing toolchain bridge carries its dispatch depth", () => {
+  const DEPTH_MARKER = "bridge-step-depth";
+
+  /**
+   * A fixture repository whose three real bridge step commands exist on disk. The first
+   * step records the depth it actually observed, so the recursion counter is proved across
+   * the real spawn boundary rather than injected into the process under test.
+   */
+  function makeBridgeFixture(): string {
+    const root = makeFixtureRepo();
+    mkdirSync(join(root, "infra"), { recursive: true });
+    mkdirSync(join(root, "scripts", "suite"), { recursive: true });
+    writeFileSync(
+      join(root, "infra", "migrate.test.mjs"),
+      'import { writeFileSync } from "node:fs";\n' +
+        'const depth = process.env.ASIMPOSIUM_SUITE_DEPTH ?? "unset";\n' +
+        `writeFileSync(${JSON.stringify(DEPTH_MARKER)}, depth + "\\n");\n` +
+        'process.stdout.write("BRIDGE_STEP_DEPTH=" + depth + "\\n");\n',
+    );
+    writeFileSync(join(root, "infra", "migrate-local.test.mjs"), "process.exit(0);\n");
+    writeFileSync(join(root, "scripts", "suite", "g0-spikes.ts"), "process.exit(0);\n");
+    return root;
+  }
+
+  function bridgeRecords(result: CliResult): { record: string; step?: string; code: string }[] {
+    return result.stdout
+      .split("\n")
+      .filter((line) => line.trim().length > 0)
+      .map((line) => JSON.parse(line) as { record: string; step?: string; code: string });
+  }
+
+  test("PLANTED: a bridge at depth 1 spawns its first step at depth 2, never unset", async () => {
+    const root = makeBridgeFixture();
+    const result = await runCli(root, ["--toolchain-integration"], {
+      ASIMPOSIUM_SUITE_DEPTH: "1",
+    });
+
+    // The step observed depth+1 across a real spawn. Before the fix this read "unset",
+    // which reset the counter and left the recursion refusal permanently unreachable.
+    expect(readFileSync(join(root, DEPTH_MARKER), "utf8")).toBe("2\n");
+    expect(result.stderr).toContain("BRIDGE_STEP_DEPTH=2");
+    expect(result.exitCode).toBe(0);
+    expect(bridgeRecords(result).at(-1)).toEqual(
+      expect.objectContaining({
+        record: "toolchain-integration-summary",
+        code: "TOOLCHAIN_INTEGRATION_COMPLETE",
+      }),
+    );
+  });
+
+  test("PLANTED: at MAX_DEPTH the bridge refuses before any step side effect", async () => {
+    const root = makeBridgeFixture();
+    const result = await runCli(root, ["--toolchain-integration"], {
+      ASIMPOSIUM_SUITE_DEPTH: "2",
+    });
+
+    // Refusal precedes the spawn: the first step's marker file must never appear.
+    expect(existsSync(join(root, DEPTH_MARKER))).toBe(false);
+    expect(result.stderr).toBe("");
+    expect(result.exitCode).toBe(2);
+    expect(bridgeRecords(result)).toEqual([
+      expect.objectContaining({
+        record: "toolchain-integration-summary",
+        status: "fail",
+        code: "TOOLCHAIN_INTEGRATION_RECURSION",
+        totals: { pass: 0, fail: 0, blocked: 0 },
+      }),
+    ]);
+  });
+
+  test("the recursion refusal never reaches --list: the plan stays an exact projection", async () => {
+    const root = makeBridgeFixture();
+    const result = await runCli(root, ["--toolchain-integration", "--list"], {
+      ASIMPOSIUM_SUITE_DEPTH: "9",
+    });
+
+    expect(result.exitCode).toBe(0);
+    expect(existsSync(join(root, DEPTH_MARKER))).toBe(false);
+    expect(bridgeRecords(result).map((record) => record.step)).toEqual([
+      "d1-migration-contract",
+      "d1-migration-local",
+      "g0-spikes",
     ]);
   });
 });
