@@ -1720,6 +1720,33 @@ describe("registered S2 shell and lifecycle regressions", () => {
     ).toEqual([]);
   });
 
+  test("PLANTED: a pure shell regression never spends or depends on a Wrangler version process", () => {
+    const pureRunId = `s2u-${randomUUID().replaceAll("-", "").slice(0, 24)}`;
+    const pure = runHarnessSync(
+      {
+        S2_RUN_ID: pureRunId,
+        S2_SHELL_REGRESSION_TEST: "pre-release-helper-classification",
+        S2_PLANT_WRANGLER_VERSION_UNAVAILABLE: "1",
+      },
+      S2_SHELL_REGRESSION_WATCHDOG_MS,
+    );
+    expect(pure.exitCode).toBe(0);
+    expect(pure.stdout).toContain(
+      '"scenario":"pre-release-helper-classifier-accepts-only-the-supervisors-exact-live-ps-child"',
+    );
+    expect(typedDiagnosticCodes(pure)).not.toContain("WRANGLER_VERSION_UNAVAILABLE");
+
+    const product = runHarnessSync(
+      {
+        S2_RUN_ID: `s2u-${randomUUID().replaceAll("-", "").slice(0, 24)}`,
+        S2_PLANT_WRANGLER_VERSION_UNAVAILABLE: "1",
+      },
+      30_000,
+    );
+    expect(product.exitCode).toBe(1);
+    expect(typedDiagnosticCodes(product)).toContain("WRANGLER_VERSION_UNAVAILABLE");
+  });
+
   test(
     "PLANTED: a deadline before setsid kills only the exact gated fork child",
     async () => {

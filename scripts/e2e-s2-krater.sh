@@ -1285,12 +1285,17 @@ if [[ ! -x "${S2_WRANGLER}" ]]; then
   emit '{"tool":"wrangler","package":"apps/wire","suite":"s2-krater-local-d1","status":"fail","code":"WRANGLER_UNAVAILABLE","reproduce":"scripts/e2e-s2-krater.sh"}'
   exit 1
 fi
-if [[ "${S2_SHELL_REGRESSION_TEST:-}" == post-release-safe-checkpoint-child ]]; then
-  # This recursively launched controller executes only `bash -c 'sleep 30'` under the pinned
-  # supervisor; it never starts Wrangler.  Its parent has already checked the real binary, and
-  # avoiding a second version process keeps this pure ownership plant out of the global command
-  # deadline while it is deliberately frozen at the checkpoint barrier.
-  S2_WRANGLER_VERSION="not-invoked-pure-post-release-controller"
+if [[ -n "${S2_SHELL_REGRESSION_TEST:-}" ]]; then
+  # Every registered shell regression returns through run_s2_shell_regression_test
+  # before the real D1/Workerd lane. Spawning Wrangler here was unused product
+  # work: the 31-case matrix paid the process and 10-second provenance deadline
+  # once per pure lifecycle plant, and host starvation could turn those unrelated
+  # cases into WRANGLER_VERSION_UNAVAILABLE. The executable check above remains a
+  # cheap source/install precondition; only a product lane asks Wrangler to run.
+  S2_WRANGLER_VERSION="not-invoked-pure-shell-regression"
+elif [[ "${S2_PLANT_WRANGLER_VERSION_UNAVAILABLE:-0}" == 1 ]]; then
+  emit '{"tool":"wrangler","package":"apps/wire","suite":"s2-krater-local-d1","status":"fail","code":"WRANGLER_VERSION_UNAVAILABLE","reproduce":"scripts/e2e-s2-krater.sh"}'
+  exit 1
 else
   S2_WRANGLER_VERSION="$(s2_bounded_capture "${S2_WRANGLER}" --version)" || {
     emit '{"tool":"wrangler","package":"apps/wire","suite":"s2-krater-local-d1","status":"fail","code":"WRANGLER_VERSION_UNAVAILABLE","reproduce":"scripts/e2e-s2-krater.sh"}'
