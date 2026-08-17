@@ -3,6 +3,7 @@ import Link from "next/link";
 import { auth, signIn } from "@/auth";
 import { isCanonicalSponsorId } from "@/lib/sponsor-id";
 import {
+  stoaBootstrapSponsor,
   stoaConfigured,
   stoaEnrollmentRecoveryOwner,
   stoaEnrollmentWritesConfigured,
@@ -24,6 +25,12 @@ export default async function Approve() {
   const sponsorId = isCanonicalSponsorId(session?.user?.id) ? session.user.id : undefined;
   const ready = sponsorId !== undefined && (await stoaConfigured());
   const writesReady = ready && (await stoaEnrollmentWritesConfigured());
+  if (ready) {
+    // A fresh sponsor may land here before ever opening the console, and the
+    // Worker now refuses decisions from a sponsor with no row. Bootstrap
+    // through the single writer first; bookkeeping, never blocks the page.
+    await stoaBootstrapSponsor(sponsorId);
+  }
   const recoveryOwner =
     sponsorId !== undefined ? await stoaEnrollmentRecoveryOwner(sponsorId) : undefined;
 
