@@ -112,6 +112,26 @@ interface Record_ {
 
 const startedAt = Date.now();
 
+/** Lifecycle state selected only after the shared teardown owner settles. */
+let teardownFailed = 0;
+let deadlineExceeded = false;
+let terminalPublished = false;
+
+/** Return one shared promise no matter which lifecycle path requests teardown. */
+export function oneShotAsync(work: () => Promise<void>): () => Promise<void> {
+  let owned: Promise<void> | undefined;
+  return () => {
+    owned ??= work();
+    return owned;
+  };
+}
+
+/** Latch the deadline synchronously before the first teardown await. */
+async function latchDeadlineAndTeardown(teardownOnce: () => Promise<void>): Promise<void> {
+  deadlineExceeded = true;
+  await teardownOnce();
+}
+
 function emit(record: Omit<Record_, "duration_ms">): void {
   process.stdout.write(`${JSON.stringify({ ...record, duration_ms: Date.now() - startedAt })}\n`);
 }
@@ -299,38 +319,66 @@ async function main(): Promise<Omit<Record_, "duration_ms">> {
 
   let browser: Browser | undefined;
   let context: BrowserContext | undefined;
+  // The deadline callback and `finally` share one teardown owner. Whichever
+  // path arrives first starts the closes; the other joins the same promise, so
+  // context/browser can never be closed concurrently by competing owners.
+  const teardownOnce = oneShotAsync(async () => {
+    const teardown: unknown[] = [];
+    let teardownTimedOut = false;
+    let teardownTimer: ReturnType<typeof setTimeout> | undefined;
+    const teardownBound = new Promise<void>((resolve) => {
+      teardownTimer = setTimeout(() => {
+        teardownTimedOut = true;
+        resolve();
+      }, CLOSE_GRACE_MS);
+      teardownTimer.unref?.();
+    });
+    await Promise.race([
+      (async () => {
+        await context?.close().catch((error: unknown) => teardown.push(error));
+        await browser?.close().catch((error: unknown) => teardown.push(error));
+      })(),
+      teardownBound,
+    ]);
+    if (teardownTimer !== undefined) clearTimeout(teardownTimer);
+    if (teardownTimedOut) {
+      teardownFailed = -1;
+    } else if (teardown.length > 0) {
+      teardownFailed = teardown.length;
+    }
+  });
   // A single monotonic bound over post-configuration browser work, including
   // browser teardown. `readConfiguration()` is synchronously blocking by
   // design; the production shell owns and causally tests the outer
   // `run_bounded` deadline across that stdin phase. Running this file directly
   // is therefore not standalone whole-run boundedness proof.
   const budget = setTimeout(() => {
+    // `latchDeadlineAndTeardown` executes synchronously through its first await.
+    // If normal completion races this callback, the terminal selector therefore
+    // sees the fired deadline before either path waits on shared teardown.
     // A hung await cannot be unwound by throwing, so this path exits the
-    // process — but it closes the browser FIRST, with its own bound, instead of
-    // trusting exit to tidy up. Exiting immediately here is what would orphan
-    // Chromium. If even the close hangs, the inner grace fires and the shell's
-    // process-group sweep is the remaining backstop.
+    // process — but it joins the single bounded teardown owner FIRST instead of
+    // trusting exit to tidy up. The shell's group sweep remains the backstop if
+    // teardown reports its bound expired.
     void (async () => {
-      const grace = setTimeout(() => process.exit(1), CLOSE_GRACE_MS);
-      grace.unref?.();
-      await context?.close().catch(() => undefined);
-      await browser?.close().catch(() => undefined);
-      clearTimeout(grace);
-      emit({
-        tool: "playwright",
-        package: "e2e",
-        suite: SUITE,
-        status: "fail",
-        code: "RUNNER_DEADLINE_EXCEEDED",
-        apex_host: apexHost,
-        agent_host: agentHost,
-        cookie: null,
-        cookie_probe: null,
-        receipt: null,
-        edge_request_id: null,
-        detail: `the runner exceeded its ${TOTAL_BUDGET_MS}ms budget`,
+      await latchDeadlineAndTeardown(teardownOnce);
+      publishTerminal({
+        exitStatus: 1,
+        record: {
+          tool: "playwright",
+          package: "e2e",
+          suite: SUITE,
+          status: "fail",
+          code: "RUNNER_DEADLINE_EXCEEDED",
+          apex_host: apexHost,
+          agent_host: agentHost,
+          cookie: null,
+          cookie_probe: null,
+          receipt: null,
+          edge_request_id: null,
+          detail: `the runner exceeded its ${TOTAL_BUDGET_MS}ms budget`,
+        },
       });
-      process.exit(1);
     })();
   }, TOTAL_BUDGET_MS);
   budget.unref?.();
@@ -626,39 +674,23 @@ async function main(): Promise<Omit<Record_, "duration_ms">> {
     // left to stop it. The budget is only cleared once teardown has finished,
     // and a teardown that outlives its own bound is recorded as a typed failure
     // rather than being awaited indefinitely.
-    const teardown: unknown[] = [];
-    let teardownTimedOut = false;
-    let teardownTimer: ReturnType<typeof setTimeout> | undefined;
-    const teardownBound = new Promise<void>((resolve) => {
-      teardownTimer = setTimeout(() => {
-        teardownTimedOut = true;
-        resolve();
-      }, CLOSE_GRACE_MS);
-      teardownTimer.unref?.();
-    });
-    await Promise.race([
-      (async () => {
-        await context?.close().catch((error: unknown) => teardown.push(error));
-        await browser?.close().catch((error: unknown) => teardown.push(error));
-      })(),
-      teardownBound,
-    ]);
-    if (teardownTimer !== undefined) clearTimeout(teardownTimer);
+    await teardownOnce();
     clearTimeout(budget);
-    if (teardownTimedOut) {
-      teardownFailed = -1;
-    } else if (teardown.length > 0) {
-      teardownFailed = teardown.length;
-    }
   }
 }
-
-/** Set by `main`'s `finally` when context/browser teardown threw. */
-let teardownFailed = 0;
 
 export interface RunnerTerminalOutcome {
   readonly record: Omit<Record_, "duration_ms">;
   readonly exitStatus: number;
+}
+
+/** Exactly one production path may publish the terminal record. */
+function publishTerminal(terminal: RunnerTerminalOutcome): never {
+  if (!terminalPublished) {
+    terminalPublished = true;
+    emit(terminal.record);
+  }
+  process.exit(terminal.exitStatus);
 }
 
 /**
@@ -672,7 +704,19 @@ export interface RunnerTerminalOutcome {
 export function resolveTerminalOutcome(
   outcome: RunnerTerminalOutcome,
   teardownFailureCount: number,
+  didDeadlineExpire = false,
 ): RunnerTerminalOutcome {
+  if (didDeadlineExpire) {
+    return {
+      exitStatus: 1,
+      record: {
+        ...outcome.record,
+        status: "fail",
+        code: "RUNNER_DEADLINE_EXCEEDED",
+        detail: `the ${TOTAL_BUDGET_MS}ms runner deadline fired and superseded the ${outcome.record.status} ${outcome.record.code} outcome`,
+      },
+    };
+  }
   if (teardownFailureCount === 0) return outcome;
   const timedOut = teardownFailureCount === -1;
   return {
@@ -709,7 +753,7 @@ function unexpectedOutcome(error: unknown): RunnerTerminalOutcome {
   };
 }
 
-function terminalSelectorSelfTest(): never {
+async function terminalSelectorSelfTest(): Promise<never> {
   const blockedOutcome: RunnerTerminalOutcome = {
     exitStatus: BLOCKED_EXIT,
     record: {
@@ -729,7 +773,7 @@ function terminalSelectorSelfTest(): never {
   };
   const teardown = resolveTerminalOutcome(blockedOutcome, 1);
   const clean = resolveTerminalOutcome(blockedOutcome, 0);
-  const passed =
+  const teardownPassed =
     teardown.exitStatus === 1 &&
     teardown.record.status === "fail" &&
     teardown.record.code === "RUNNER_TEARDOWN_FAILED" &&
@@ -739,11 +783,51 @@ function terminalSelectorSelfTest(): never {
     `${JSON.stringify({
       suite: SUITE,
       assertion: "blocked-runner-teardown-failure-overrides",
-      status: passed ? "pass" : "fail",
+      status: teardownPassed ? "pass" : "fail",
       self_test: true,
     })}\n`,
   );
-  process.exit(passed ? 0 : 1);
+
+  // Deterministic completion/deadline race. The deadline callback latches its
+  // verdict synchronously, then joins the same gated teardown promise as the
+  // normal path. Replacing `oneShotAsync` with two owners or selecting the pass
+  // after the deadline latch makes this record fail.
+  let releaseTeardown!: () => void;
+  const teardownGate = new Promise<void>((resolve) => {
+    releaseTeardown = resolve;
+  });
+  let teardownOwnerCalls = 0;
+  deadlineExceeded = false;
+  let latchObservedBeforeTeardown = false;
+  const observingTeardown = oneShotAsync(async () => {
+    teardownOwnerCalls += 1;
+    latchObservedBeforeTeardown = deadlineExceeded;
+    await teardownGate;
+  });
+  const deadlineSettlement = latchDeadlineAndTeardown(observingTeardown);
+  const normalSettlement = observingTeardown();
+  releaseTeardown();
+  await Promise.all([deadlineSettlement, normalSettlement]);
+  const passOutcome: RunnerTerminalOutcome = {
+    exitStatus: 0,
+    record: { ...blockedOutcome.record, status: "pass", code: "OK" },
+  };
+  const deadline = resolveTerminalOutcome(passOutcome, 0, deadlineExceeded);
+  const deadlinePassed =
+    teardownOwnerCalls === 1 &&
+    latchObservedBeforeTeardown &&
+    deadline.exitStatus === 1 &&
+    deadline.record.status === "fail" &&
+    deadline.record.code === "RUNNER_DEADLINE_EXCEEDED";
+  process.stdout.write(
+    `${JSON.stringify({
+      suite: SUITE,
+      assertion: "runner-deadline-race-overrides-pass",
+      status: deadlinePassed ? "pass" : "fail",
+      self_test: true,
+    })}\n`,
+  );
+  process.exit(teardownPassed && deadlinePassed ? 0 : 1);
 }
 
 async function runEntrypoint(): Promise<never> {
@@ -758,14 +842,13 @@ async function runEntrypoint(): Promise<never> {
         ? { record: error.record, exitStatus: error.status }
         : unexpectedOutcome(error);
   }
-  const terminal = resolveTerminalOutcome(outcome, teardownFailed);
-  emit(terminal.record);
-  process.exit(terminal.exitStatus);
+  const terminal = resolveTerminalOutcome(outcome, teardownFailed, deadlineExceeded);
+  publishTerminal(terminal);
 }
 
 // Importing this module for the pure planted test must never start a browser or
 // consume the test runner's stdin. Direct `bun <file>` execution still does.
 if (import.meta.main) {
-  if (process.argv[2] === "--self-test-terminal-selector") terminalSelectorSelfTest();
+  if (process.argv[2] === "--self-test-terminal-selector") await terminalSelectorSelfTest();
   await runEntrypoint();
 }

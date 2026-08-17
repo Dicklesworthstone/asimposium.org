@@ -1,5 +1,4 @@
 import { expect, test } from "bun:test";
-import { spawnSync } from "node:child_process";
 import { createHash } from "node:crypto";
 import {
   chmodSync,
@@ -141,7 +140,9 @@ const S3_OUTER_DEADLINE_PLANT_MS = 2_000;
 const S3_OUTER_LEASE_RETIRE_WAIT_MS = 5_000;
 const S3_MARKER_INSPECTION_TIMEOUT_MS = 1_000;
 const S3_MARKER_CENSUS_MAX_BYTES = 1_000_000;
-const S3_OWNED_COMMAND_RUNNER_URL = pathToFileURL(resolve(root, "scripts/suite/cli.ts")).href;
+const S3_MARKER_CENSUS_MAX_ATTEMPTS = 3;
+const S3_OWNED_COMMAND_RUNNER_PATH = resolve(root, "scripts/suite/cli.ts");
+const S3_OWNED_COMMAND_RUNNER_URL = pathToFileURL(S3_OWNED_COMMAND_RUNNER_PATH).href;
 
 const OWNED_COMMAND_OUTCOMES = {
   exited: true,
@@ -162,6 +163,8 @@ interface S3OwnedCommandOptions {
   readonly outerTimeoutMs?: number;
   /** Test-only plant: target starts in the helper's private pinned result directory. */
   readonly targetCwd?: "private";
+  /** Test-only plant: the post-run runner digest must fail after causal target execution. */
+  readonly runnerDigestPlant?: "after";
   /** Test-only bootstrap refusal plants; all must leave the original inode authoritative. */
   readonly bootstrapPlant?:
     | "malformed"
@@ -171,6 +174,7 @@ interface S3OwnedCommandOptions {
     | "partial"
     | "overrun"
     | "eof"
+    | "runner-digest"
     | "tamper"
     | "symlink"
     | "path-swap";
@@ -199,6 +203,8 @@ interface FreshRuntimeInvocation {
   resultFdClosed: boolean;
   readonly nonce: string;
   readonly timeoutMs: number;
+  readonly retainedStreamBytes: number;
+  readonly retainedOutputBytes: number;
   readonly deadlineAt: number;
   readonly terminateAt: number;
   readonly helper: ReturnType<typeof Bun.spawn>;
@@ -254,6 +260,7 @@ interface FreshRuntimeBootstrap {
   readonly directory: ExactInodeIdentity;
   readonly directoryPath: string;
   readonly runnerUrl: string;
+  readonly runnerSha256: string;
   readonly options: {
     readonly command: readonly string[];
     readonly cwd: string;
@@ -576,6 +583,7 @@ function applyFreshRuntimeBootstrapPlant(
 function freshRuntimeDispatcherEnvironment(
   identity: ExactFileIdentity,
   digest: string,
+  runnerDigestPlant: S3OwnedCommandOptions["runnerDigestPlant"],
 ): Record<string, string> {
   return {
     ...s3OwnedEnvironment(),
@@ -585,6 +593,9 @@ function freshRuntimeDispatcherEnvironment(
     S3_FRESH_RUNTIME_BOOTSTRAP_NLINK: identity.nlink,
     S3_FRESH_RUNTIME_BOOTSTRAP_SIZE: identity.size,
     S3_FRESH_RUNTIME_BOOTSTRAP_SHA256: digest,
+    ...(runnerDigestPlant === "after"
+      ? { S3_FRESH_RUNTIME_RUNNER_AFTER_SHA256: "0".repeat(64) }
+      : {}),
   };
 }
 
@@ -598,11 +609,13 @@ import {
   fsyncSync,
   lstatSync,
   openSync,
+  readFileSync,
   readSync,
   unlinkSync,
   writeSync,
 } from "node:fs";
 import { isAbsolute, join } from "node:path";
+import { fileURLToPath } from "node:url";
 
 const BOOTSTRAP_MAX_BYTES = 65536;
 const RESULT_MAX_BYTES = ${S3_FRESH_RUNTIME_RESULT_MAX_BYTES};
@@ -611,6 +624,7 @@ const RETAINED_COLLISION_EXIT_CODE = 92;
 const BOOTSTRAP_NAME = "${S3_FRESH_RUNTIME_BOOTSTRAP_NAME}";
 const RESULT_NAME = "result.json";
 const RUNNER_URL = ${JSON.stringify(S3_OWNED_COMMAND_RUNNER_URL)};
+const OWNED_OUTCOMES = new Set(${JSON.stringify(Object.keys(OWNED_COMMAND_OUTCOMES))});
 const decimal = /^(?:0|[1-9][0-9]*)$/u;
 const sha256 = /^[0-9a-f]{64}$/u;
 let bootstrapFd;
@@ -681,12 +695,108 @@ const isStringRecord = (value) =>
   );
 const isSafeIntegerAtLeast = (value, floor) =>
   Number.isSafeInteger(value) && value >= floor;
+const hasRequiredAllowedKeys = (value, required, allowed) =>
+  isRecord(value) &&
+  required.every((key) => Object.hasOwn(value, key)) &&
+  Object.keys(value).every((key) => allowed.includes(key));
+const exactUtf8Text = (value, retainedBytes) => {
+  if (typeof value !== "string" || value.includes("\uFFFD")) return false;
+  const bytes = Buffer.from(value, "utf8");
+  if (bytes.byteLength !== retainedBytes) return false;
+  try {
+    return new TextDecoder("utf-8", { fatal: true }).decode(bytes) === value;
+  } catch {
+    return false;
+  }
+};
+const outcomeFieldsValid = (value, hasExitCode, hasCleanup) => {
+  switch (value.outcome) {
+    case "exited":
+      return hasExitCode && !hasCleanup;
+    case "timeout":
+      return !Object.hasOwn(value, "signal") &&
+        !hasExitCode &&
+        hasCleanup &&
+        value.cleanupProven === true;
+    case "output-overrun":
+      return hasCleanup && value.cleanupProven === true;
+    case "descendant-leaked":
+    case "pipe-drain-unproven":
+      return hasExitCode && !hasCleanup;
+    case "inspection-unproven":
+      return hasExitCode
+        ? !hasCleanup || value.cleanupProven === false
+        : hasCleanup && value.cleanupProven === false;
+    case "ownership-unproven":
+      // Without a completed target record, every production branch carries its
+      // cleanup observation. With an exit record, cleanup may be absent or may
+      // survive a later control-channel failure as either boolean.
+      return hasExitCode || hasCleanup;
+    case "spawn-failed":
+      // Production start-failed is the supervisor's fixed fork-failure record:
+      // exit 125, signal 0, followed by a direct-child cleanup observation.
+      // Pre-lease spawn/write failures have no exit or signal and may carry only
+      // that cleanup boolean.
+      return hasExitCode
+        ? value.exitCode === 125 && !Object.hasOwn(value, "signal") && hasCleanup
+        : !Object.hasOwn(value, "signal");
+    default:
+      return false;
+  }
+};
+const isOwnedResult = (value, options) => {
+  const required = [
+    "outcome",
+    "stdout",
+    "stderr",
+    "retainedStdoutBytes",
+    "retainedStderrBytes",
+    "retainedOutputBytes",
+  ];
+  const allowed = [...required, "exitCode", "signal", "cleanupProven"];
+  if (!hasRequiredAllowedKeys(value, required, allowed) || !OWNED_OUTCOMES.has(value.outcome)) {
+    return false;
+  }
+  const hasExitCode = Object.hasOwn(value, "exitCode");
+  const hasSignal = Object.hasOwn(value, "signal");
+  const hasCleanup = Object.hasOwn(value, "cleanupProven");
+  const signalMatch =
+    hasSignal && typeof value.signal === "string"
+      ? /^SIG([1-9][0-9]{0,2})$/u.exec(value.signal)
+      : null;
+  const signalNumber = Number(signalMatch?.[1]);
+  if (
+    (hasExitCode && (!isSafeIntegerAtLeast(value.exitCode, 0) || value.exitCode > 255)) ||
+    (hasSignal &&
+      (!hasExitCode ||
+        typeof value.signal !== "string" ||
+        signalMatch === null ||
+        signalNumber > 127 ||
+        value.exitCode !== 128 + signalNumber)) ||
+    (hasCleanup && typeof value.cleanupProven !== "boolean") ||
+    !outcomeFieldsValid(value, hasExitCode, hasCleanup) ||
+    !isSafeIntegerAtLeast(value.retainedStdoutBytes, 0) ||
+    !isSafeIntegerAtLeast(value.retainedStderrBytes, 0) ||
+    !isSafeIntegerAtLeast(value.retainedOutputBytes, 0) ||
+    value.retainedStdoutBytes > options.retainedStreamBytes ||
+    value.retainedStderrBytes > options.retainedStreamBytes ||
+    value.retainedOutputBytes > options.retainedOutputBytes ||
+    value.retainedOutputBytes !== value.retainedStdoutBytes + value.retainedStderrBytes ||
+    !exactUtf8Text(value.stdout, value.retainedStdoutBytes) ||
+    !exactUtf8Text(value.stderr, value.retainedStderrBytes)
+  ) {
+    return false;
+  }
+  return true;
+};
 const isBootstrap = (value) => {
   if (
-    !hasExactKeys(value, ["nonce", "result", "directory", "directoryPath", "runnerUrl", "options"]) ||
+    !hasExactKeys(value, ["nonce", "result", "directory", "directoryPath", "runnerUrl", "runnerSha256", "options"]) ||
     typeof value.nonce !== "string" ||
     !/^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/u.test(value.nonce) ||
     value.runnerUrl !== RUNNER_URL ||
+    typeof value.runnerSha256 !== "string" ||
+    !sha256.test(value.runnerSha256) ||
     typeof value.directoryPath !== "string" ||
     !isAbsolute(value.directoryPath) ||
     !isIdentity(value.result) ||
@@ -717,9 +827,20 @@ const isBootstrap = (value) => {
     isSafeIntegerAtLeast(options.termGraceMs, 0) &&
     isSafeIntegerAtLeast(options.killReapMs, 0) &&
     isSafeIntegerAtLeast(options.pipeDrainMs, 0) &&
-    isSafeIntegerAtLeast(options.retainedStreamBytes, 0) &&
-    isSafeIntegerAtLeast(options.retainedOutputBytes, 0)
+    isSafeIntegerAtLeast(options.retainedStreamBytes, 1) &&
+    isSafeIntegerAtLeast(options.retainedOutputBytes, 1)
   );
+};
+const runnerDigestMatches = (bootstrap, expected = bootstrap.runnerSha256) => {
+  try {
+    const runnerPath = fileURLToPath(bootstrap.runnerUrl);
+    return (
+      isAbsolute(runnerPath) &&
+      createHash("sha256").update(readFileSync(runnerPath)).digest("hex") === expected
+    );
+  } catch {
+    return false;
+  }
 };
 const expectedBootstrapIdentity = () => {
   const identity = {
@@ -843,9 +964,18 @@ try {
   }
   // The fixed result name is gone, and the held inode has nlink zero, before
   // this dynamic import can execute target code.
+  if (!runnerDigestMatches(bootstrap)) failClosed(BOOTSTRAP_EXIT_CODE);
   const module = await import(bootstrap.runnerUrl);
   const result = await module.runOwnedCommand(bootstrap.options);
-  const cleanupProven = result.outcome === "exited" || result.cleanupProven === true;
+  const runnerAfterSha256 = process.env.S3_FRESH_RUNTIME_RUNNER_AFTER_SHA256;
+  if (
+    (runnerAfterSha256 !== undefined && !sha256.test(runnerAfterSha256)) ||
+    !runnerDigestMatches(bootstrap, runnerAfterSha256 ?? bootstrap.runnerSha256) ||
+    !isOwnedResult(result, bootstrap.options)
+  ) {
+    failClosed(BOOTSTRAP_EXIT_CODE);
+  }
+  const cleanupProven = result.outcome === "exited" ? true : result.cleanupProven === true;
   const publication = Buffer.from(JSON.stringify({
     nonce: bootstrap.nonce,
     kind: "result",
@@ -1048,6 +1178,9 @@ async function invokeFreshOwnedS3Command(
     resultIdentity,
   } = makeFreshRuntimeDirectory();
   const nonce = crypto.randomUUID();
+  const retainedStreamBytes = options.retainedStreamBytes ?? S3_OWNED_STREAM_BYTES;
+  const retainedOutputBytes = options.retainedOutputBytes ?? S3_OWNED_OUTPUT_BYTES;
+  const runnerSha256 = freshRuntimeBootstrapDigest(readFileSync(S3_OWNED_COMMAND_RUNNER_PATH));
   const serializable = {
     command,
     cwd: options.targetCwd === "private" ? directory : root,
@@ -1062,8 +1195,8 @@ async function invokeFreshOwnedS3Command(
     termGraceMs: S3_OWNED_TERM_GRACE_MS,
     killReapMs: S3_OWNED_KILL_REAP_MS,
     pipeDrainMs: S3_OWNED_PIPE_DRAIN_MS,
-    retainedStreamBytes: options.retainedStreamBytes ?? S3_OWNED_STREAM_BYTES,
-    retainedOutputBytes: options.retainedOutputBytes ?? S3_OWNED_OUTPUT_BYTES,
+    retainedStreamBytes,
+    retainedOutputBytes,
   };
   let helper: ReturnType<typeof Bun.spawn> | undefined;
   let stdoutCapture: FreshRuntimePipeCapture | undefined;
@@ -1076,6 +1209,7 @@ async function invokeFreshOwnedS3Command(
         directory: directoryIdentity,
         directoryPath: directory,
         runnerUrl: S3_OWNED_COMMAND_RUNNER_URL,
+        runnerSha256,
         options: serializable,
       },
       options.bootstrapPlant,
@@ -1099,7 +1233,11 @@ async function invokeFreshOwnedS3Command(
     helper = Bun.spawn({
       cmd: [process.execPath, "-e", FRESH_OWNED_COMMAND_DISPATCHER],
       cwd: directory,
-      env: freshRuntimeDispatcherEnvironment(bootstrapIdentity, bootstrapDigest),
+      env: freshRuntimeDispatcherEnvironment(
+        bootstrapIdentity,
+        bootstrapDigest,
+        options.runnerDigestPlant,
+      ),
       stdin: "ignore",
       stdout: "pipe",
       stderr: "pipe",
@@ -1132,6 +1270,8 @@ async function invokeFreshOwnedS3Command(
       resultFdClosed: false,
       nonce,
       timeoutMs,
+      retainedStreamBytes,
+      retainedOutputBytes,
       deadlineAt,
       terminateAt,
       helper,
@@ -1197,6 +1337,11 @@ function freshRuntimeBootstrapBytes(
       return Buffer.concat([canonical, Buffer.alloc(S3_FRESH_RUNTIME_BOOTSTRAP_MAX_BYTES, 0x20)]);
     case "eof":
       return Buffer.alloc(0);
+    case "runner-digest":
+      return Buffer.from(
+        `${JSON.stringify({ ...bootstrap, runnerSha256: "0".repeat(64) })}\n`,
+        "utf8",
+      );
     case "tamper":
     case "symlink":
     case "path-swap":
@@ -1551,36 +1696,151 @@ function rereadRetainedFreshRuntimeResult(
   assertPinnedFreshRuntimeDirectory(invocation, label);
 }
 
-function isOwnedCommandResult(value: unknown): value is OwnedCommandResult {
-  if (value === null || typeof value !== "object") return false;
-  const result = value as Record<string, unknown>;
+function hasExactRecordKeys(
+  value: unknown,
+  keys: readonly string[],
+): value is Record<string, unknown> {
+  if (value === null || typeof value !== "object" || Array.isArray(value)) return false;
+  const actual = Object.keys(value).sort();
+  const expected = [...keys].sort();
+  return actual.length === expected.length && actual.every((key, index) => key === expected[index]);
+}
+
+function hasRequiredAllowedRecordKeys(
+  value: unknown,
+  required: readonly string[],
+  allowed: readonly string[],
+): value is Record<string, unknown> {
+  if (value === null || typeof value !== "object" || Array.isArray(value)) return false;
+  const record = value as Record<string, unknown>;
   return (
-    typeof result.outcome === "string" &&
-    Object.hasOwn(OWNED_COMMAND_OUTCOMES, result.outcome) &&
-    typeof result.stdout === "string" &&
-    typeof result.stderr === "string" &&
-    Number.isSafeInteger(result.retainedStdoutBytes) &&
-    Number(result.retainedStdoutBytes) >= 0 &&
-    Number.isSafeInteger(result.retainedStderrBytes) &&
-    Number(result.retainedStderrBytes) >= 0 &&
-    Number.isSafeInteger(result.retainedOutputBytes) &&
-    Number(result.retainedOutputBytes) >= 0 &&
-    (result.exitCode === undefined || Number.isSafeInteger(result.exitCode)) &&
-    (result.signal === undefined || typeof result.signal === "string") &&
-    (result.cleanupProven === undefined || typeof result.cleanupProven === "boolean")
+    required.every((key) => Object.hasOwn(record, key)) &&
+    Object.keys(record).every((key) => allowed.includes(key))
   );
 }
 
-function isFreshOwnedS3ResultPayload(value: unknown): value is {
+function isExactUtf8Text(value: unknown, retainedBytes: number): value is string {
+  if (typeof value !== "string" || value.includes("\uFFFD")) return false;
+  const bytes = Buffer.from(value, "utf8");
+  if (bytes.byteLength !== retainedBytes) return false;
+  try {
+    return new TextDecoder("utf-8", { fatal: true }).decode(bytes) === value;
+  } catch {
+    return false;
+  }
+}
+
+function ownedOutcomeFieldsValid(
+  result: Record<string, unknown>,
+  hasExitCode: boolean,
+  hasCleanup: boolean,
+): boolean {
+  switch (result.outcome) {
+    case "exited":
+      return hasExitCode && !hasCleanup;
+    case "timeout":
+      return (
+        !hasExitCode &&
+        !Object.hasOwn(result, "signal") &&
+        hasCleanup &&
+        result.cleanupProven === true
+      );
+    case "output-overrun":
+      return hasCleanup && result.cleanupProven === true;
+    case "descendant-leaked":
+    case "pipe-drain-unproven":
+      return hasExitCode && !hasCleanup;
+    case "inspection-unproven":
+      return hasExitCode
+        ? !hasCleanup || result.cleanupProven === false
+        : hasCleanup && result.cleanupProven === false;
+    case "ownership-unproven":
+      // Cleanup and ownership are separate claims, but a pre-completion
+      // ownership refusal always reports the cleanup observation it obtained.
+      return hasExitCode || hasCleanup;
+    case "spawn-failed":
+      return hasExitCode
+        ? result.exitCode === 125 && !Object.hasOwn(result, "signal") && hasCleanup
+        : !Object.hasOwn(result, "signal");
+    default:
+      return false;
+  }
+}
+
+function isOwnedCommandResult(
+  value: unknown,
+  retainedStreamBytes = S3_OWNED_STREAM_BYTES,
+  retainedOutputBytes = S3_OWNED_OUTPUT_BYTES,
+): value is OwnedCommandResult {
+  const required = [
+    "outcome",
+    "stdout",
+    "stderr",
+    "retainedStdoutBytes",
+    "retainedStderrBytes",
+    "retainedOutputBytes",
+  ] as const;
+  const allowed = [...required, "exitCode", "signal", "cleanupProven"] as const;
+  if (!hasRequiredAllowedRecordKeys(value, required, allowed)) return false;
+  const result = value as Record<string, unknown>;
+  const hasExitCode = Object.hasOwn(result, "exitCode");
+  const hasSignal = Object.hasOwn(result, "signal");
+  const hasCleanup = Object.hasOwn(result, "cleanupProven");
+  const signalMatch =
+    hasSignal && typeof result.signal === "string"
+      ? /^SIG([1-9][0-9]{0,2})$/u.exec(result.signal)
+      : null;
+  const signalNumber = Number(signalMatch?.[1]);
+  const stdoutBytes = Number(result.retainedStdoutBytes);
+  const stderrBytes = Number(result.retainedStderrBytes);
+  const outputBytes = Number(result.retainedOutputBytes);
+  return (
+    typeof result.outcome === "string" &&
+    Object.hasOwn(OWNED_COMMAND_OUTCOMES, result.outcome) &&
+    Number.isSafeInteger(result.retainedStdoutBytes) &&
+    stdoutBytes >= 0 &&
+    stdoutBytes <= retainedStreamBytes &&
+    Number.isSafeInteger(result.retainedStderrBytes) &&
+    stderrBytes >= 0 &&
+    stderrBytes <= retainedStreamBytes &&
+    Number.isSafeInteger(result.retainedOutputBytes) &&
+    outputBytes >= 0 &&
+    outputBytes <= retainedOutputBytes &&
+    Number.isSafeInteger(stdoutBytes + stderrBytes) &&
+    outputBytes === stdoutBytes + stderrBytes &&
+    isExactUtf8Text(result.stdout, stdoutBytes) &&
+    isExactUtf8Text(result.stderr, stderrBytes) &&
+    (!hasExitCode ||
+      (Number.isSafeInteger(result.exitCode) &&
+        Number(result.exitCode) >= 0 &&
+        Number(result.exitCode) <= 255)) &&
+    (!hasSignal ||
+      (hasExitCode &&
+        signalMatch !== null &&
+        signalNumber <= 127 &&
+        result.exitCode === 128 + signalNumber)) &&
+    (!hasCleanup || typeof result.cleanupProven === "boolean") &&
+    ownedOutcomeFieldsValid(result, hasExitCode, hasCleanup)
+  );
+}
+
+function isFreshOwnedS3ResultPayload(
+  value: unknown,
+  retainedStreamBytes = S3_OWNED_STREAM_BYTES,
+  retainedOutputBytes = S3_OWNED_OUTPUT_BYTES,
+): value is {
+  readonly nonce: string;
   readonly kind: "result";
   readonly result: OwnedCommandResult;
   readonly cleanupProven: boolean;
 } {
-  if (value === null || typeof value !== "object") return false;
-  const record = value as Record<string, unknown>;
+  if (!hasExactRecordKeys(value, ["nonce", "kind", "result", "cleanupProven"])) return false;
+  const record = value;
   if (
+    typeof record.nonce !== "string" ||
+    !/^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/u.test(record.nonce) ||
     record.kind !== "result" ||
-    !isOwnedCommandResult(record.result) ||
+    !isOwnedCommandResult(record.result, retainedStreamBytes, retainedOutputBytes) ||
     typeof record.cleanupProven !== "boolean"
   ) {
     return false;
@@ -1622,7 +1882,13 @@ async function readFreshOwnedS3Result(
   if (record.nonce !== invocation.nonce) {
     throw new Error(`${label}_FRESH_RUNTIME_RESULT_NONCE_MISMATCH`);
   }
-  if (!isFreshOwnedS3ResultPayload(record)) {
+  if (
+    !isFreshOwnedS3ResultPayload(
+      record,
+      invocation.retainedStreamBytes,
+      invocation.retainedOutputBytes,
+    )
+  ) {
     throw new Error(`${label}_FRESH_RUNTIME_RESULT_SHAPE`);
   }
   const canonical = Buffer.from(`${JSON.stringify(parsed)}\n`, "utf8");
@@ -1810,9 +2076,7 @@ function decodeExactMarkerCensusCapture(
     stdout.byteLength > S3_MARKER_CENSUS_MAX_BYTES ||
     stderr.byteLength > S3_MARKER_CENSUS_MAX_BYTES
   ) {
-    throw new Error(
-      `S3_EXACT_MARKER_INSPECTION_OVERRUN:${stdout.byteLength}:${stderr.byteLength}`,
-    );
+    throw new Error(`S3_EXACT_MARKER_INSPECTION_OVERRUN:${stdout.byteLength}:${stderr.byteLength}`);
   }
   try {
     const decoder = new TextDecoder("utf-8", { fatal: true });
@@ -1825,11 +2089,16 @@ function decodeExactMarkerCensusCapture(
   }
 }
 
-function parseExactMarkerCensus(stdout: string, stderr: string, marker: string): number[] {
+interface ExactMarkerProcessRow {
+  readonly pid: number;
+  readonly command: string;
+}
+
+function parseExactMarkerCensusRows(stdout: string, stderr: string): ExactMarkerProcessRow[] {
   if (stderr !== "") throw new Error("S3_EXACT_MARKER_INSPECTION_STDERR");
   if (!stdout.endsWith("\n")) throw new Error("S3_EXACT_MARKER_INSPECTION_TRUNCATED");
   const lines = stdout.slice(0, -1).split("\n");
-  const pids: number[] = [];
+  const rows: ExactMarkerProcessRow[] = [];
   const seenPids = new Set<number>();
   let runnerPresent = false;
   for (const line of lines) {
@@ -1846,71 +2115,230 @@ function parseExactMarkerCensus(stdout: string, stderr: string, marker: string):
     }
     seenPids.add(pid);
     if (pid === process.pid) runnerPresent = true;
-    if (command.includes(marker)) pids.push(pid);
+    rows.push({ pid, command });
   }
   if (!runnerPresent) throw new Error("S3_EXACT_MARKER_INSPECTION_NONVACUOUS");
-  return pids;
+  return rows;
 }
 
-function exactMarkerPs(pid: number) {
-  return spawnSync("/bin/ps", ["-ww", "-p", String(pid), "-o", "pid=,command="], {
-    cwd: root,
-    maxBuffer: S3_MARKER_CENSUS_MAX_BYTES,
-    timeout: S3_MARKER_INSPECTION_TIMEOUT_MS,
-  });
+function parseExactMarkerCensus(stdout: string, stderr: string, marker: string): number[] {
+  return parseExactMarkerCensusRows(stdout, stderr)
+    .filter((row) => row.command.includes(marker))
+    .map((row) => row.pid);
 }
 
-function exactMarkerProcessIds(targetPid: number, marker: string): number[] {
-  if (!Number.isSafeInteger(targetPid) || targetPid <= 1 || targetPid === process.pid) {
+function parseExactMarkerRunnerCensus(stdout: string, stderr: string): void {
+  const rows = parseExactMarkerCensusRows(stdout, stderr);
+  if (rows.length !== 1 || rows[0]?.pid !== process.pid) {
+    throw new Error("S3_EXACT_MARKER_INSPECTION_RUNNER_SHAPE");
+  }
+}
+
+function parseExactMarkerTargetCensus(
+  stdout: string,
+  stderr: string,
+  marker: string,
+  targetPid: number,
+): number[] {
+  const rows = parseExactMarkerCensusRows(stdout, stderr);
+  if (
+    rows.length !== 2 ||
+    rows[0]?.pid !== process.pid ||
+    rows[1]?.pid !== targetPid ||
+    !rows[1].command.includes(marker)
+  ) {
+    throw new Error("S3_EXACT_MARKER_INSPECTION_IDENTITY_MISMATCH");
+  }
+  return [targetPid];
+}
+
+function exactMarkerResultBytes(text: string, retainedBytes: number, label: string): Buffer {
+  if (
+    !Number.isSafeInteger(retainedBytes) ||
+    retainedBytes < 0 ||
+    retainedBytes > S3_MARKER_CENSUS_MAX_BYTES ||
+    text.includes("\uFFFD")
+  ) {
+    throw new Error(`${label}_INVALID_UTF8`);
+  }
+  const bytes = Buffer.from(text, "utf8");
+  if (bytes.byteLength !== retainedBytes) throw new Error(`${label}_INVALID_UTF8`);
+  let decoded: string;
+  try {
+    decoded = new TextDecoder("utf-8", { fatal: true }).decode(bytes);
+  } catch {
+    throw new Error(`${label}_INVALID_UTF8`);
+  }
+  if (decoded !== text) throw new Error(`${label}_INVALID_UTF8`);
+  return bytes;
+}
+
+async function exactMarkerPs(
+  pid: number,
+  deadlineAt: number,
+): Promise<{
+  readonly status: number;
+  readonly stdout: Buffer;
+  readonly stderr: Buffer;
+}> {
+  // Direct spawnSync pipes are forbidden here: Bun 1.3.8 under bun test can
+  // report status 0 with two empty in-memory pipes. Reuse the authenticated,
+  // pinned, unlinked fresh-runtime result inode instead of adding a raw file or
+  // numeric-fd fallback.
+  const remainingOuterMs = Math.floor(deadlineAt - performance.now());
+  const commandTimeoutMs = Math.min(
+    S3_MARKER_INSPECTION_TIMEOUT_MS,
+    remainingOuterMs - S3_FRESH_RUNTIME_DIRECT_REAP_MS - 1,
+  );
+  if (commandTimeoutMs < 1) {
+    throw new Error("S3_EXACT_MARKER_INSPECTION_DEADLINE");
+  }
+  const observation = await runFreshOwnedS3Command(
+    ["/bin/ps", "-ww", "-p", String(pid), "-o", "pid=,command="],
+    "S3_EXACT_MARKER_PS",
+    {
+      timeoutMs: commandTimeoutMs,
+      outerTimeoutMs: remainingOuterMs,
+      retainedStreamBytes: S3_MARKER_CENSUS_MAX_BYTES,
+      retainedOutputBytes: S3_MARKER_CENSUS_MAX_BYTES,
+    },
+  );
+  if (performance.now() > deadlineAt) {
+    throw new Error("S3_EXACT_MARKER_INSPECTION_DEADLINE");
+  }
+  const result = observation.result;
+  const status = result.exitCode;
+  if (
+    !observation.cleanupProven ||
+    result.outcome !== "exited" ||
+    typeof status !== "number" ||
+    !Number.isSafeInteger(status) ||
+    !Number.isSafeInteger(result.retainedOutputBytes) ||
+    result.retainedOutputBytes !== result.retainedStdoutBytes + result.retainedStderrBytes ||
+    result.retainedOutputBytes > S3_MARKER_CENSUS_MAX_BYTES
+  ) {
+    throw new Error("S3_EXACT_MARKER_INSPECTION_UNPROVEN");
+  }
+  return {
+    status,
+    stdout: exactMarkerResultBytes(
+      result.stdout,
+      result.retainedStdoutBytes,
+      "S3_EXACT_MARKER_STDOUT",
+    ),
+    stderr: exactMarkerResultBytes(
+      result.stderr,
+      result.retainedStderrBytes,
+      "S3_EXACT_MARKER_STDERR",
+    ),
+  };
+}
+
+interface ExactMarkerTarget {
+  readonly pid: number;
+  readonly marker: string;
+}
+
+async function observeExactMarkerTargets(
+  targets: readonly ExactMarkerTarget[],
+  deadlineAt: number,
+): Promise<number[]> {
+  if (
+    targets.length === 0 ||
+    targets.length > 2 ||
+    new Set(targets.map((target) => target.pid)).size !== targets.length ||
+    targets.some(
+      (target) =>
+        !Number.isSafeInteger(target.pid) ||
+        target.pid <= 1 ||
+        target.pid === process.pid ||
+        target.marker.length === 0,
+    )
+  ) {
     throw new Error("S3_EXACT_MARKER_TARGET_PID_INVALID");
   }
-  const runnerInspection = exactMarkerPs(process.pid);
-  if (
-    runnerInspection.error !== undefined ||
-    runnerInspection.signal !== null ||
-    runnerInspection.status !== 0
-  ) {
+  const runnerInspection = await exactMarkerPs(process.pid, deadlineAt);
+  if (runnerInspection.status !== 0) {
     throw new Error("S3_EXACT_MARKER_INSPECTION_UNPROVEN");
   }
-  const runner = decodeExactMarkerCensusCapture(
-    runnerInspection.stdout,
-    runnerInspection.stderr,
-  );
-  const targetInspection = exactMarkerPs(targetPid);
-  if (
-    targetInspection.error !== undefined ||
-    targetInspection.signal !== null ||
-    (targetInspection.status !== 0 && targetInspection.status !== 1)
-  ) {
-    throw new Error("S3_EXACT_MARKER_INSPECTION_UNPROVEN");
-  }
-  if (targetInspection.status === 1) {
-    if (
-      !Buffer.isBuffer(targetInspection.stdout) ||
-      !Buffer.isBuffer(targetInspection.stderr) ||
-      targetInspection.stdout.byteLength !== 0 ||
-      targetInspection.stderr.byteLength !== 0
-    ) {
-      throw new Error("S3_EXACT_MARKER_INSPECTION_NO_MATCH_SHAPE");
+  const runner = decodeExactMarkerCensusCapture(runnerInspection.stdout, runnerInspection.stderr);
+  parseExactMarkerRunnerCensus(runner.stdout, runner.stderr);
+  const survivors: number[] = [];
+  for (const target of targets) {
+    const targetInspection = await exactMarkerPs(target.pid, deadlineAt);
+    if (targetInspection.status !== 0 && targetInspection.status !== 1) {
+      throw new Error("S3_EXACT_MARKER_INSPECTION_UNPROVEN");
     }
-    return parseExactMarkerCensus(runner.stdout, runner.stderr, marker);
+    if (targetInspection.status === 1) {
+      if (targetInspection.stdout.byteLength !== 0 || targetInspection.stderr.byteLength !== 0) {
+        throw new Error("S3_EXACT_MARKER_INSPECTION_NO_MATCH_SHAPE");
+      }
+      continue;
+    }
+    const captured = decodeExactMarkerCensusCapture(
+      targetInspection.stdout,
+      targetInspection.stderr,
+    );
+    survivors.push(
+      ...parseExactMarkerTargetCensus(
+        runner.stdout + captured.stdout,
+        runner.stderr + captured.stderr,
+        target.marker,
+        target.pid,
+      ),
+    );
   }
-  const target = decodeExactMarkerCensusCapture(
-    targetInspection.stdout,
-    targetInspection.stderr,
+  return survivors;
+}
+
+async function exactMarkerProcessIds(
+  targetPid: number,
+  marker: string,
+  deadlineAt: number,
+): Promise<number[]> {
+  return await observeExactMarkerTargets([{ pid: targetPid, marker }], deadlineAt);
+}
+
+type ExactMarkerObserver = (
+  targets: readonly ExactMarkerTarget[],
+  deadlineAt: number,
+) => Promise<number[]>;
+
+async function waitForExactMarkerAbsences(
+  targets: readonly ExactMarkerTarget[],
+  observe: ExactMarkerObserver = observeExactMarkerTargets,
+): Promise<void> {
+  const deadline = performance.now() + S3_OUTER_LEASE_RETIRE_WAIT_MS;
+  let pending = [...targets];
+  let lastPids = pending.map((target) => target.pid);
+  // Reusing an evidence inode would commingle observations. With deletion out
+  // of scope, the explicit cap retains at most attempts * (runner + targets):
+  // six private invocation directories for one PID, nine for the two-PID plant.
+  for (
+    let attempt = 0;
+    attempt < S3_MARKER_CENSUS_MAX_ATTEMPTS && performance.now() < deadline;
+    attempt += 1
+  ) {
+    const soleTarget = pending[0];
+    lastPids =
+      pending.length === 1 && soleTarget !== undefined
+        ? observe === observeExactMarkerTargets
+          ? await exactMarkerProcessIds(soleTarget.pid, soleTarget.marker, deadline)
+          : await observe(pending, deadline)
+        : await observe(pending, deadline);
+    if (lastPids.length === 0) return;
+    pending = pending.filter((target) => lastPids.includes(target.pid));
+    if (attempt + 1 < S3_MARKER_CENSUS_MAX_ATTEMPTS && performance.now() < deadline) {
+      await Bun.sleep(20);
+    }
+  }
+  throw new Error(
+    `S3_OUTER_DEADLINE_MARKER_SURVIVED:${pending.map((target) => target.marker).join(",")}:${lastPids.join(",")}`,
   );
-  return parseExactMarkerCensus(runner.stdout + target.stdout, runner.stderr + target.stderr, marker);
 }
 
 async function waitForExactMarkerAbsence(targetPid: number, marker: string): Promise<void> {
-  const deadline = performance.now() + S3_OUTER_LEASE_RETIRE_WAIT_MS;
-  let lastPids: number[] = [];
-  while (performance.now() < deadline) {
-    lastPids = exactMarkerProcessIds(targetPid, marker);
-    if (lastPids.length === 0) return;
-    await Bun.sleep(20);
-  }
-  throw new Error(`S3_OUTER_DEADLINE_MARKER_SURVIVED:${marker}:${lastPids.join(",")}`);
+  await waitForExactMarkerAbsences([{ pid: targetPid, marker }]);
 }
 
 async function waitForExactReadyMarker(path: string, marker: string): Promise<number> {
@@ -1926,15 +2354,71 @@ async function waitForExactReadyMarker(path: string, marker: string): Promise<nu
   throw new Error(`S3_OUTER_DEADLINE_TARGET_NOT_READY:${JSON.stringify(observed)}`);
 }
 
-test("PLANTED: fresh result parser refuses prototype outcomes and inconsistent cleanup authority", () => {
+interface ExactReadyProcessGroup {
+  readonly leaderPid: number;
+  readonly leaderPgid: number;
+  readonly descendantPid: number;
+  readonly descendantPgid: number;
+}
+
+function parseExactReadyProcessGroup(
+  observed: string,
+  nonce: string,
+): ExactReadyProcessGroup | undefined {
+  const match = new RegExp(
+    `^${nonce} ([1-9][0-9]*) ([1-9][0-9]*) ([1-9][0-9]*) ([1-9][0-9]*)\\n$`,
+    "u",
+  ).exec(observed);
+  if (match === null) return undefined;
+  const leaderPid = Number(match[1]);
+  const leaderPgid = Number(match[2]);
+  const descendantPid = Number(match[3]);
+  const descendantPgid = Number(match[4]);
+  if (
+    ![leaderPid, leaderPgid, descendantPid, descendantPgid].every((value) =>
+      Number.isSafeInteger(value),
+    ) ||
+    leaderPid <= 1 ||
+    descendantPid <= 1 ||
+    leaderPid === descendantPid ||
+    leaderPid === process.pid ||
+    descendantPid === process.pid ||
+    leaderPgid !== descendantPgid
+  ) {
+    return undefined;
+  }
+  return { leaderPid, leaderPgid, descendantPid, descendantPgid };
+}
+
+async function waitForExactReadyProcessGroup(
+  path: string,
+  nonce: string,
+): Promise<ExactReadyProcessGroup> {
+  const deadline = performance.now() + S3_OUTER_DEADLINE_PLANT_MS;
+  let observed = "";
+  while (performance.now() < deadline) {
+    observed = readFileSync(path, "utf8");
+    const group = parseExactReadyProcessGroup(observed, nonce);
+    if (group !== undefined) return group;
+    await Bun.sleep(20);
+  }
+  throw new Error(`S3_OUTER_DEADLINE_GROUP_NOT_READY:${JSON.stringify(observed)}`);
+}
+
+test("PLANTED: fresh result parser enforces exact schema bytes and cleanup correlations", () => {
+  const nonce = crypto.randomUUID();
   const exited = {
     outcome: "exited",
+    exitCode: 0,
     stdout: "",
     stderr: "",
     retainedStdoutBytes: 0,
     retainedStderrBytes: 0,
     retainedOutputBytes: 0,
   };
+  expect(
+    isFreshOwnedS3ResultPayload({ nonce, kind: "result", result: exited, cleanupProven: true }),
+  ).toBe(true);
   expect(
     isOwnedCommandResult({
       outcome: "toString",
@@ -1946,8 +2430,106 @@ test("PLANTED: fresh result parser refuses prototype outcomes and inconsistent c
     }),
   ).toBe(false);
   expect(
-    isFreshOwnedS3ResultPayload({ kind: "result", result: exited, cleanupProven: false }),
+    isFreshOwnedS3ResultPayload({ nonce, kind: "result", result: exited, cleanupProven: false }),
   ).toBe(false);
+  expect(
+    isFreshOwnedS3ResultPayload({
+      nonce,
+      kind: "result",
+      result: { ...exited, cleanupProven: false },
+      cleanupProven: true,
+    }),
+  ).toBe(false);
+  expect(
+    isFreshOwnedS3ResultPayload({
+      nonce,
+      kind: "result",
+      result: { ...exited, injected: true },
+      cleanupProven: true,
+    }),
+  ).toBe(false);
+  expect(
+    isFreshOwnedS3ResultPayload({
+      nonce,
+      kind: "result",
+      result: exited,
+      cleanupProven: true,
+      injected: true,
+    }),
+  ).toBe(false);
+  expect(
+    isOwnedCommandResult({
+      ...exited,
+      stdout: "x",
+      retainedStdoutBytes: 0,
+    }),
+  ).toBe(false);
+  expect(
+    isOwnedCommandResult({
+      ...exited,
+      retainedStdoutBytes: 1,
+      retainedOutputBytes: 0,
+    }),
+  ).toBe(false);
+  expect(
+    isOwnedCommandResult({
+      outcome: "timeout",
+      signal: "SIG9",
+      stdout: "",
+      stderr: "",
+      retainedStdoutBytes: 0,
+      retainedStderrBytes: 0,
+      retainedOutputBytes: 0,
+      cleanupProven: false,
+    }),
+  ).toBe(false);
+  expect(isOwnedCommandResult({ ...exited, exitCode: 137, signal: "SIG9" })).toBe(true);
+  expect(isOwnedCommandResult({ ...exited, exitCode: 138, signal: "SIG9" })).toBe(false);
+  expect(isOwnedCommandResult({ ...exited, exitCode: 128, signal: "SIG0" })).toBe(false);
+  expect(
+    isOwnedCommandResult({
+      outcome: "timeout",
+      exitCode: 0,
+      stdout: "",
+      stderr: "",
+      retainedStdoutBytes: 0,
+      retainedStderrBytes: 0,
+      retainedOutputBytes: 0,
+      cleanupProven: true,
+    }),
+  ).toBe(false);
+  expect(
+    isFreshOwnedS3ResultPayload({
+      nonce,
+      kind: "result",
+      result: {
+        outcome: "ownership-unproven",
+        stdout: "",
+        stderr: "",
+        retainedStdoutBytes: 0,
+        retainedStderrBytes: 0,
+        retainedOutputBytes: 0,
+        cleanupProven: false,
+      },
+      cleanupProven: false,
+    }),
+  ).toBe(true);
+  expect(
+    isFreshOwnedS3ResultPayload({
+      nonce,
+      kind: "result",
+      result: {
+        outcome: "ownership-unproven",
+        stdout: "",
+        stderr: "",
+        retainedStdoutBytes: 0,
+        retainedStderrBytes: 0,
+        retainedOutputBytes: 0,
+        cleanupProven: true,
+      },
+      cleanupProven: true,
+    }),
+  ).toBe(true);
 });
 
 test("PLANTED: exact marker census refuses empty and truncated snapshots", () => {
@@ -1960,7 +2542,23 @@ test("PLANTED: exact marker census refuses empty and truncated snapshots", () =>
   );
 });
 
-test("PLANTED: bounded exact-marker pipe capture accepts one anchored Buffer and refuses unsafe captures", () => {
+test("PLANTED: pair-aware absence cannot pass when only the leader retires", async () => {
+  const leader = { pid: process.pid + 100_000, marker: `leader-${crypto.randomUUID()}` };
+  const descendant = {
+    pid: process.pid + 100_001,
+    marker: `descendant-${crypto.randomUUID()}`,
+  };
+  const observations: number[][] = [];
+  await expect(
+    waitForExactMarkerAbsences([leader, descendant], async (targets) => {
+      observations.push(targets.map((target) => target.pid));
+      return targets.filter((target) => target.pid === descendant.pid).map((target) => target.pid);
+    }),
+  ).rejects.toThrow(`S3_OUTER_DEADLINE_MARKER_SURVIVED:${descendant.marker}:${descendant.pid}`);
+  expect(observations).toEqual([[leader.pid, descendant.pid], [descendant.pid], [descendant.pid]]);
+});
+
+test("PLANTED: direct status-zero empty pipes and unsafe exact-marker captures always refuse", () => {
   const marker = `s3-census-capture-${crypto.randomUUID()}`;
   const anchored = Buffer.from(`${process.pid} bun-test-census-anchor\n`, "utf8");
   const decoded = decodeExactMarkerCensusCapture(anchored, Buffer.alloc(0));
@@ -1972,24 +2570,42 @@ test("PLANTED: bounded exact-marker pipe capture accepts one anchored Buffer and
     "S3_EXACT_MARKER_INSPECTION_EMPTY",
   );
   expect(() =>
-    decodeExactMarkerCensusCapture(
-      Buffer.alloc(S3_MARKER_CENSUS_MAX_BYTES + 1),
-      Buffer.alloc(0),
-    ),
+    decodeExactMarkerCensusCapture(Buffer.alloc(S3_MARKER_CENSUS_MAX_BYTES + 1), Buffer.alloc(0)),
   ).toThrow("S3_EXACT_MARKER_INSPECTION_OVERRUN");
+  expect(() => decodeExactMarkerCensusCapture(Buffer.from([0xff, 0x0a]), Buffer.alloc(0))).toThrow(
+    "S3_EXACT_MARKER_INSPECTION_INVALID_UTF8",
+  );
+
+  const targetPid = process.pid + 1;
+  expect(
+    parseExactMarkerTargetCensus(
+      `${process.pid} runner\n${targetPid} target ${marker}\n`,
+      "",
+      marker,
+      targetPid,
+    ),
+  ).toEqual([targetPid]);
   expect(() =>
-    decodeExactMarkerCensusCapture(Buffer.from([0xff, 0x0a]), Buffer.alloc(0)),
-  ).toThrow("S3_EXACT_MARKER_INSPECTION_INVALID_UTF8");
+    parseExactMarkerTargetCensus(
+      `${process.pid} runner\n${targetPid} reused-without-marker\n`,
+      "",
+      marker,
+      targetPid,
+    ),
+  ).toThrow("S3_EXACT_MARKER_INSPECTION_IDENTITY_MISMATCH");
 });
 
-test("PLANTED: exact /bin/ps pipe capture is nonempty and anchored to the live test runner", () => {
+test("PLANTED: fresh pinned /bin/ps capture is nonempty and anchored to the live test runner", async () => {
   const marker = `s3-census-live-${crypto.randomUUID()}`;
-  const inspection = exactMarkerPs(process.pid);
-  expect(inspection.error).toBeUndefined();
-  expect(inspection.signal).toBeNull();
+  const deadline = performance.now() + S3_OUTER_LEASE_RETIRE_WAIT_MS;
+  const inspection = await exactMarkerPs(process.pid, deadline);
   expect(inspection.status).toBe(0);
   const capture = decodeExactMarkerCensusCapture(inspection.stdout, inspection.stderr);
   expect(parseExactMarkerCensus(capture.stdout, capture.stderr, marker)).toEqual([]);
+  expect(performance.now()).toBeLessThanOrEqual(deadline);
+  await expect(
+    exactMarkerPs(process.pid, performance.now() + S3_FRESH_RUNTIME_DIRECT_REAP_MS),
+  ).rejects.toThrow("S3_EXACT_MARKER_INSPECTION_DEADLINE");
 });
 
 for (const bootstrapPlant of [
@@ -2000,6 +2616,7 @@ for (const bootstrapPlant of [
   "partial",
   "overrun",
   "eof",
+  "runner-digest",
   "tamper",
   "symlink",
   "path-swap",
@@ -2045,9 +2662,14 @@ for (const bootstrapPlant of [
           ),
         ).toEqual(Buffer.alloc(0));
         const original = fstatSync(invocation.resultFd, { bigint: true }) as ExactBigIntStat;
-        const named = lstatSync(invocation.resultPath, { bigint: true }) as ExactBigIntStat;
-        expect(sameExactIdentity(original, invocation.resultIdentity)).toBe(true);
-        expect(sameExactIdentity(named, invocation.resultIdentity)).toBe(true);
+        if (bootstrapPlant === "runner-digest") {
+          expect(sameIdentityExceptNlink(original, invocation.resultIdentity, 0n)).toBe(true);
+          expect(() => lstatSync(invocation.resultPath)).toThrow();
+        } else {
+          const named = lstatSync(invocation.resultPath, { bigint: true }) as ExactBigIntStat;
+          expect(sameExactIdentity(original, invocation.resultIdentity)).toBe(true);
+          expect(sameExactIdentity(named, invocation.resultIdentity)).toBe(true);
+        }
         expect(original.size).toBe(0n);
         const bootstrapOriginal = fstatSync(invocation.bootstrapFd, {
           bigint: true,
@@ -2061,9 +2683,9 @@ for (const bootstrapPlant of [
             ),
           ).toBe(true);
         } else {
-          expect(
-            sameIdentityExceptNlink(bootstrapOriginal, invocation.bootstrapIdentity, 0n),
-          ).toBe(true);
+          expect(sameIdentityExceptNlink(bootstrapOriginal, invocation.bootstrapIdentity, 0n)).toBe(
+            true,
+          );
           expect(bootstrapOriginal.size.toString(10)).toBe(invocation.bootstrapIdentity.size);
           if (bootstrapPlant === "symlink") {
             expect(lstatSync(invocation.bootstrapPath).isSymbolicLink()).toBe(true);
@@ -2089,6 +2711,36 @@ for (const bootstrapPlant of [
     { timeout: 20_000 },
   );
 }
+
+test(
+  "PLANTED: post-run runner digest mismatch refuses publication after causal target execution",
+  async () => {
+    const markerDirectory = makePrivateFixtureDirectory();
+    const markerPath = join(markerDirectory, `runner-after-${crypto.randomUUID()}`);
+    const invocation = await invokeFreshOwnedS3Command(
+      [
+        "perl",
+        "-e",
+        'open(my $marker, ">", $ARGV[0]) or exit 111; print {$marker} "target-ran-before-after-digest-check\\n" or exit 112; close($marker) or exit 113;',
+        markerPath,
+      ],
+      { timeoutMs: 2_000, runnerDigestPlant: "after" },
+    );
+    try {
+      expect(await settleFreshRuntime(invocation)).toBe("exited");
+      expect(invocation.exitCode).toBe(S3_FRESH_RUNTIME_BOOTSTRAP_EXIT_CODE);
+      expect(invocation.helper.signalCode).toBeNull();
+      expect(readFileSync(markerPath, "utf8")).toBe("target-ran-before-after-digest-check\n");
+      const result = fstatSync(invocation.resultFd, { bigint: true }) as ExactBigIntStat;
+      expect(sameIdentityExceptNlink(result, invocation.resultIdentity, 0n)).toBe(true);
+      expect(result.size).toBe(0n);
+      expect(() => lstatSync(invocation.resultPath)).toThrow();
+    } finally {
+      await retireAndCloseFreshRuntime(invocation);
+    }
+  },
+  { timeout: 10_000 },
+);
 
 test("PLANTED: an overrun pipe requests and settles cancellation exactly once", async () => {
   let cancellations = 0;
@@ -2204,9 +2856,7 @@ test(
     );
     expect(FRESH_OWNED_COMMAND_DISPATCHER).not.toContain("process.argv");
     expect(FRESH_OWNED_COMMAND_DISPATCHER).not.toContain("process.stdin");
-    const bootstrapUnlink = FRESH_OWNED_COMMAND_DISPATCHER.indexOf(
-      "unlinkSync(BOOTSTRAP_NAME);",
-    );
+    const bootstrapUnlink = FRESH_OWNED_COMMAND_DISPATCHER.indexOf("unlinkSync(BOOTSTRAP_NAME);");
     const bootstrapClose = FRESH_OWNED_COMMAND_DISPATCHER.indexOf(
       "closeQuietly(bootstrapFd);",
       bootstrapUnlink,
@@ -2217,11 +2867,27 @@ test(
     expect(FRESH_OWNED_COMMAND_DISPATCHER.indexOf("unlinkSync(RESULT_NAME);")).toBeLessThan(
       FRESH_OWNED_COMMAND_DISPATCHER.indexOf("await import(bootstrap.runnerUrl)"),
     );
-    expect(FRESH_OWNED_COMMAND_DISPATCHER.indexOf("await import(bootstrap.runnerUrl)")).toBeLessThan(
-      FRESH_OWNED_COMMAND_DISPATCHER.indexOf(
-        "const result = await module.runOwnedCommand(bootstrap.options);",
-      ),
+    const importAt = FRESH_OWNED_COMMAND_DISPATCHER.indexOf("await import(bootstrap.runnerUrl)");
+    const resultAt = FRESH_OWNED_COMMAND_DISPATCHER.indexOf(
+      "const result = await module.runOwnedCommand(bootstrap.options);",
     );
+    const digestBeforeImport = FRESH_OWNED_COMMAND_DISPATCHER.lastIndexOf(
+      "runnerDigestMatches(bootstrap)",
+      importAt,
+    );
+    const digestAfterResult = FRESH_OWNED_COMMAND_DISPATCHER.indexOf(
+      "runnerDigestMatches(bootstrap,",
+      resultAt,
+    );
+    expect(digestBeforeImport).toBeGreaterThan(
+      FRESH_OWNED_COMMAND_DISPATCHER.indexOf("unlinkSync(RESULT_NAME);"),
+    );
+    expect(digestBeforeImport).toBeLessThan(importAt);
+    expect(digestAfterResult).toBeGreaterThan(resultAt);
+    expect(digestAfterResult).toBeLessThan(
+      FRESH_OWNED_COMMAND_DISPATCHER.indexOf("const publication = Buffer.from"),
+    );
+    expect(importAt).toBeLessThan(resultAt);
   },
   { timeout: 20_000 },
 );
@@ -2282,9 +2948,9 @@ while (my $line = <$fds>) {
       const bootstrapOriginal = fstatSync(invocation.bootstrapFd, {
         bigint: true,
       }) as ExactBigIntStat;
-      expect(
-        sameIdentityExceptNlink(bootstrapOriginal, invocation.bootstrapIdentity, 0n),
-      ).toBe(true);
+      expect(sameIdentityExceptNlink(bootstrapOriginal, invocation.bootstrapIdentity, 0n)).toBe(
+        true,
+      );
       expect(bootstrapOriginal.size.toString(10)).toBe(invocation.bootstrapIdentity.size);
       const original = fstatSync(invocation.resultFd, { bigint: true }) as ExactBigIntStat;
       expect(sameIdentityExceptNlink(original, invocation.resultIdentity, 0n)).toBe(true);
@@ -2546,25 +3212,34 @@ test(
   async () => {
     const fixtureDirectory = makePrivateFixtureDirectory();
     const marker = `s3-fresh-outer-deadline-${crypto.randomUUID()}`;
+    const readyNonce = crypto.randomUUID();
     const readyPath = createPrivateFixtureFile(fixtureDirectory, "target.ready");
-    const barrierPath = join(fixtureDirectory, "target.barrier");
+    const descendantStatePath = createPrivateFixtureFile(
+      fixtureDirectory,
+      "target-descendant.ready",
+    );
     const invocation = await invokeFreshOwnedS3Command(
       [
-        "/bin/bash",
-        "-c",
-        // The target can publish readiness only from its own live process and
-        // then cannot finish before the absent private barrier appears.
-        String.raw`umask 077; printf '%s %s\n' "$0" "$$" > "$1"; while [ ! -e "$2" ]; do /bin/sleep 0.01; done`,
+        "perl",
+        "-e",
+        // The leader publishes only after its durable child has reported the
+        // exact same PGID. Both ignore TERM/HUP and remain independently live;
+        // no short-lived sleep subprocess can satisfy this readiness record.
+        String.raw`use strict; use warnings; use POSIX qw(getpgrp); my ($marker, $nonce, $ready_path, $child_path) = @ARGV; $SIG{TERM} = sub {}; $SIG{HUP} = sub {}; my $leader_pid = $$; my $leader_pgid = getpgrp(); my $child = fork(); exit 125 unless defined $child; if ($child == 0) { $SIG{TERM} = sub {}; $SIG{HUP} = sub {}; my $child_pgid = getpgrp(); open(my $state, ">", $child_path) or exit 126; print {$state} "$nonce $$ $child_pgid\n" or exit 126; close($state) or exit 126; while (1) { select undef, undef, undef, 0.05; } } my $child_record = ""; for (1 .. 200) { if (open(my $state, "<", $child_path)) { local $/; $child_record = <$state> // ""; close($state) or exit 127; last if $child_record =~ /^\Q$nonce\E [1-9][0-9]* [1-9][0-9]*\n$/; } select undef, undef, undef, 0.005; } my ($observed_nonce, $child_pid, $child_pgid) = $child_record =~ /^(\S+) ([1-9][0-9]*) ([1-9][0-9]*)\n$/; exit 127 unless defined $child_pgid && $observed_nonce eq $nonce && $child_pid == $child && $child_pgid == $leader_pgid; open(my $ready, ">", $ready_path) or exit 128; print {$ready} "$nonce $leader_pid $leader_pgid $child_pid $child_pgid\n" or exit 128; close($ready) or exit 128; while (1) { select undef, undef, undef, 0.05; }`,
         marker,
+        readyNonce,
         readyPath,
-        barrierPath,
+        descendantStatePath,
       ],
       { timeoutMs: 20_000, outerTimeoutMs: S3_OUTER_DEADLINE_PLANT_MS },
     );
 
     try {
-      const targetPid = await waitForExactReadyMarker(readyPath, marker);
-      expect(targetPid).toBeGreaterThan(1);
+      const group = await waitForExactReadyProcessGroup(readyPath, readyNonce);
+      expect(readFileSync(readyPath, "utf8")).toBe(
+        `${readyNonce} ${group.leaderPid} ${group.leaderPgid} ${group.descendantPid} ${group.descendantPgid}\n`,
+      );
+      expect(group.leaderPgid).toBe(group.descendantPgid);
       const settlement = await settleFreshRuntime(invocation);
       expect(settlement).toBe("timed-out");
       expect(invocation.timeoutWon).toBe(true);
@@ -2587,7 +3262,12 @@ test(
       expect(sameIdentityExceptNlink(original, invocation.resultIdentity, 0n)).toBe(true);
       expect(original.size).toBe(0n);
       expect(() => lstatSync(invocation.resultPath)).toThrow();
-      await waitForExactMarkerAbsence(targetPid, marker);
+      // One leader-only observation cannot green this plant: the same absolute
+      // census deadline must independently prove both published PIDs absent.
+      await waitForExactMarkerAbsences([
+        { pid: group.leaderPid, marker },
+        { pid: group.descendantPid, marker },
+      ]);
     } finally {
       await retireAndCloseFreshRuntime(invocation);
     }

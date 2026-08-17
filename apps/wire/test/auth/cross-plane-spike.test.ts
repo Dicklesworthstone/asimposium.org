@@ -94,16 +94,46 @@ function readBounded(path: string): string {
   }
 }
 
+interface ShellLifecycle {
+  readonly cleanupUnproven: boolean;
+  readonly survivors: boolean;
+}
+
 /**
- * The survivor answer for a normally-exited run, read from the script's own
- * record rather than probed from outside.
+ * Derive the nested-group lifecycle verdict from exact shell NDJSON and exit.
  *
- * Named and separate so the mapping is directly testable in both polarities: a
- * derivation only reachable through a live shell run is one nobody can prove is
- * wired to anything.
+ * Substring matching is not evidence: the same words can occur in `detail`, a
+ * different suite, or a non-terminal record. Exit 125 is independently
+ * fail-closed because it is the script's reserved cleanup-unproven status; the
+ * exact typed terminal record covers a captured refusal even if a wrapper
+ * translates the status. Either polarity means survivors cannot be disproved.
  */
-function survivorsFromRecord(stdout: string): boolean {
-  return stdout.includes('"assertion":"no-child-survivors","status":"fail"');
+function shellLifecycleFromRecords(stdout: string, exitCode: number): ShellLifecycle {
+  let typedCleanupRefusal = false;
+  let typedSurvivorFailure = false;
+  for (const line of stdout.split("\n")) {
+    if (line.length === 0) continue;
+    let record: unknown;
+    try {
+      record = JSON.parse(line);
+    } catch {
+      continue;
+    }
+    if (record === null || Array.isArray(record) || typeof record !== "object") continue;
+    const fields = record as Record<string, unknown>;
+    if (fields.suite !== "s6-cross-plane-auth") continue;
+    if (fields.status === "blocked" && fields.code === "CLEANUP_UNPROVEN") {
+      typedCleanupRefusal = true;
+    }
+    if (fields.assertion === "no-child-survivors" && fields.status === "fail") {
+      typedSurvivorFailure = true;
+    }
+  }
+  const cleanupUnproven = exitCode === 125 || typedCleanupRefusal || typedSurvivorFailure;
+  return {
+    cleanupUnproven,
+    survivors: cleanupUnproven,
+  };
 }
 
 interface ShellRun {
@@ -403,26 +433,26 @@ async function runShell(
 
     // NOTHING BELOW MAY USE THE PGID — not a signal, and not a probe.
     //
-    // A run we had to hard-kill cannot claim its nested groups were reaped: the
-    // script's trap was cut short, and this controller cannot see those groups.
-    // That boundary is reported, never papered over, and no pgid ledger is kept:
-    // bare pgids are not identity, so a list of them is unsafe to signal from and
-    // fail-open to census. Real containment needs nonce-bearing supervisors,
-    // which this pass deliberately does not build.
-    const cleanupUnproven = timedOut;
-
     // Only now are the parent's descriptors released.
     releaseCaptureFds();
 
     const stdout = readBounded(stdoutPath);
     const stderr = readBounded(stderrPath);
 
+    // A run we had to hard-kill cannot claim its nested groups were reaped: the
+    // script's trap was cut short, and this controller cannot see those groups.
+    // An in-budget script refusal is equally unproven and is derived from exact
+    // typed NDJSON plus the reserved exit 125, never a broad substring. No pgid
+    // ledger is kept: bare pgids are not identity.
+    const shellLifecycle = shellLifecycleFromRecords(stdout, exitCode);
+    const cleanupUnproven = timedOut || shellLifecycle.cleanupUnproven;
+
     // The normally-exited run takes its survivor answer from the script's OWN
     // record. Its EXIT trap reaps its nested groups from the inside, where those
     // pgids are still pinned, and fails the run with `no-child-survivors` if any
     // lived. That is strictly better evidence than an outside probe, and unlike
     // the probe it needs no pgid after the reap.
-    const survivors = raced === "deadline" ? pinnedSurvivors : survivorsFromRecord(stdout);
+    const survivors = raced === "deadline" ? pinnedSurvivors : shellLifecycle.survivors;
 
     // AN EMPTY CAPTURE CAN NEVER PASS FOR A SUCCESSFUL RUN.
     //
@@ -792,7 +822,9 @@ describe("the receipt is structured, bound, and matched as a fixed string", () =
     expect(runner).toContain("RUNNER_TEARDOWN_FAILED");
     expect(runner).toContain("teardownFailed");
     const tail = runner.slice(runner.indexOf("async function runEntrypoint()"));
-    const select = tail.indexOf("resolveTerminalOutcome(outcome, teardownFailed)");
+    const select = tail.indexOf(
+      "resolveTerminalOutcome(outcome, teardownFailed, deadlineExceeded)",
+    );
     const emitTerminal = tail.indexOf("emit(terminal.record)");
     // Both positions must exist before order is compared. The former test
     // searched for `teardownFailed > 0` while production used `!== 0`; -1 was
@@ -807,10 +839,12 @@ describe("the receipt is structured, bound, and matched as a fixed string", () =
     // process. Importing/spawning Bun directly inside Bun's test process
     // perturbs nested capture descriptors on the affected runtime.
     const runner = read(RUNNER);
-    expect(runner).toContain("function terminalSelectorSelfTest()");
+    expect(runner).toContain("async function terminalSelectorSelfTest()");
     expect(runner).toContain("resolveTerminalOutcome(blockedOutcome, 1)");
     expect(runner).toContain("resolveTerminalOutcome(blockedOutcome, 0)");
+    expect(runner).toContain("resolveTerminalOutcome(passOutcome, 0, deadlineExceeded)");
     expect(runner).toContain('assertion: "blocked-runner-teardown-failure-overrides"');
+    expect(runner).toContain('assertion: "runner-deadline-race-overrides-pass"');
   });
 
   test("neither reader spins on EAGAIN", () => {
@@ -952,6 +986,39 @@ describe("the run is bounded and leaves no survivors", () => {
     const reaper = shellFunction(source, "reap_children");
     expect(reaper).toContain("REAP_SURVIVORS=1");
     expect(reaper).toContain("continue");
+  });
+
+  test("every production wait is gated by bounded group disappearance", () => {
+    const settlement = shellFunction(source, "group_settled_before_wait");
+    expect(settlement).toContain('kill -0 -- "-${pid}"');
+    // A partial process-list snapshot is not authority to enter a blocking
+    // wait, even when the command exits zero or reports only a zombie row.
+    expect(settlement).not.toContain("/bin/ps");
+
+    const ordered = (body: string, settlementNeedle: string, waitNeedle: string): void => {
+      const settled = body.indexOf(settlementNeedle);
+      const waited = body.indexOf(waitNeedle, settled + settlementNeedle.length);
+      expect(settled).toBeGreaterThanOrEqual(0);
+      expect(waited).toBeGreaterThan(settled);
+    };
+    ordered(
+      shellFunction(source, "reap_children"),
+      'group_settled_before_wait "$pid"',
+      'wait "$pid"',
+    );
+    const bounded = shellFunction(source, "run_bounded");
+    ordered(bounded, 'group_settled_before_wait "$dog"', 'wait "$dog"');
+    ordered(bounded, 'group_settled_before_wait "$pid"', 'wait "$pid"');
+
+    const writer = shellFunction(source, "finish_secret_writer");
+    let cursor = 0;
+    for (let branch = 0; branch < 2; branch++) {
+      const settled = writer.indexOf('group_settled_before_wait "$SECRET_WRITER_PID"', cursor);
+      const waited = writer.indexOf('wait "$SECRET_WRITER_PID"', settled);
+      expect(settled).toBeGreaterThanOrEqual(cursor);
+      expect(waited).toBeGreaterThan(settled);
+      cursor = waited + 1;
+    }
   });
 
   test("lifecycle signalling and census are group-only", () => {
@@ -1136,17 +1203,40 @@ describe("the browser runner cannot exit before cleanup", () => {
   test("the status is applied only after the finally has closed the browser", () => {
     const tail = runner.slice(runner.indexOf("async function runEntrypoint()"));
     expect(tail).toContain("error instanceof RunnerExit");
-    expect(tail).toContain("resolveTerminalOutcome(outcome, teardownFailed)");
+    expect(tail).toContain("resolveTerminalOutcome(outcome, teardownFailed, deadlineExceeded)");
     expect(tail).toContain("process.exit(terminal.exitStatus)");
     const cleanup = runner.slice(runner.indexOf("} finally {"));
-    expect(cleanup).toContain("await context?.close()");
-    expect(cleanup).toContain("await browser?.close()");
+    expect(cleanup).toContain("await teardownOnce()");
   });
 
-  test("the hard deadline closes the browser before exiting", () => {
-    const budget = runner.slice(runner.indexOf("const budget = setTimeout("));
-    expect(budget).toContain("await browser?.close()");
-    expect(budget).toContain("CLOSE_GRACE_MS");
+  test("the hard deadline latches first and joins one bounded teardown owner", () => {
+    const budgetStart = runner.indexOf("const budget = setTimeout(");
+    const budgetEnd = runner.indexOf("}, TOTAL_BUDGET_MS);", budgetStart);
+    expect(budgetStart).toBeGreaterThanOrEqual(0);
+    expect(budgetEnd).toBeGreaterThan(budgetStart);
+    const budget = runner.slice(budgetStart, budgetEnd);
+    expect(budget).toContain("await latchDeadlineAndTeardown(teardownOnce)");
+    expect(budget).not.toContain("context?.close()");
+    expect(budget).not.toContain("browser?.close()");
+    expect(runner.match(/context\?\.close\(\)/g)).toHaveLength(1);
+    expect(runner.match(/browser\?\.close\(\)/g)).toHaveLength(1);
+    expect(runner).toContain("const teardownOnce = oneShotAsync(");
+    const latchStart = runner.indexOf("async function latchDeadlineAndTeardown(");
+    const latchEnd = runner.indexOf("\n}", latchStart);
+    expect(latchStart).toBeGreaterThanOrEqual(0);
+    expect(latchEnd).toBeGreaterThan(latchStart);
+    const latch = runner.slice(latchStart, latchEnd);
+    const latchAssignment = latch.indexOf("deadlineExceeded = true;");
+    const firstAwait = latch.indexOf("await teardownOnce()");
+    expect(latchAssignment).toBeGreaterThanOrEqual(0);
+    expect(firstAwait).toBeGreaterThanOrEqual(0);
+    expect(latchAssignment).toBeLessThan(firstAwait);
+    // Both racing production paths publish through one synchronous latch.
+    expect(runner.match(/publishTerminal\(/g)).toHaveLength(3);
+    expect(budget).toContain("publishTerminal({");
+    expect(runner.slice(runner.indexOf("async function runEntrypoint()"))).toContain(
+      "publishTerminal(terminal)",
+    );
   });
 
   test("the cookie-probe comment does not claim the cookie was presented", () => {
@@ -1271,13 +1361,36 @@ describe("the shell's causal self-tests actually run", () => {
         '"assertion":"reaper-kill-dispatch-failure-retains-owner","status":"pass"',
       );
       expect(stdout, diag(run)).toContain(
+        '"assertion":"reaper-successful-kill-without-settlement-is-explicit","status":"pass"',
+      );
+      expect(stdout, diag(run)).toContain(
+        '"assertion":"stopped-watchdog-handshake-status","status":"pass"',
+      );
+      expect(stdout, diag(run)).toContain(
+        '"assertion":"successful-supervisor-kill-without-settlement-status","status":"pass"',
+      );
+      expect(stdout, diag(run)).toContain(
         '"assertion":"secret-writer-child-before-open-is-bounded","status":"pass"',
+      );
+      // Both causal KILL-refusal outputs are mandatory. Removing either the
+      // typed status check or its clock-bound proof must break this file.
+      expect(stdout, diag(run)).toContain(
+        '"assertion":"secret-writer-kill-dispatch-failure-status","status":"pass"',
+      );
+      expect(stdout, diag(run)).toContain(
+        '"assertion":"secret-writer-kill-dispatch-failure-is-bounded","status":"pass"',
+      );
+      expect(stdout, diag(run)).toContain(
+        '"assertion":"stopped-secret-writer-completion-status","status":"pass"',
       );
       expect(stdout, diag(run)).toContain(
         '"assertion":"browser-blocked-record-is-buffered","status":"pass"',
       );
       expect(stdout, diag(run)).toContain(
         '"assertion":"blocked-runner-teardown-failure-overrides","status":"pass"',
+      );
+      expect(stdout, diag(run)).toContain(
+        '"assertion":"runner-deadline-race-overrides-pass","status":"pass"',
       );
       expect(stdout, diag(run)).toContain(
         '"assertion":"generated-shim-executes-and-mints","status":"pass"',
@@ -1453,13 +1566,53 @@ exit 42
     expect(readFileSync(selfExited, "utf8")).toBe("self-exited");
   });
 
-  test("PLANTED: the record-derived survivor answer is wired in both polarities", () => {
-    // Causal, not cosmetic. An inverted comparison, a hardcoded `false`, or a
-    // wrong assertion name each break exactly one of these three lines, so the
-    // normal-exit branch cannot silently stop reporting a real survivor.
-    expect(survivorsFromRecord('{"assertion":"no-child-survivors","status":"fail"}')).toBe(true);
-    expect(survivorsFromRecord('{"assertion":"no-child-survivors","status":"pass"}')).toBe(false);
-    expect(survivorsFromRecord("")).toBe(false);
+  test("PLANTED: exact typed lifecycle records are wired in both polarities", () => {
+    // A real terminal/survivor record is authoritative, while the same words in
+    // a detail field or another suite are not. Exit 125 is independently the
+    // script's reserved cleanup-unproven status.
+    expect(
+      shellLifecycleFromRecords(
+        '{"suite":"s6-cross-plane-auth","assertion":"no-child-survivors","status":"fail"}',
+        1,
+      ),
+    ).toEqual({ cleanupUnproven: true, survivors: true });
+    expect(
+      shellLifecycleFromRecords(
+        '{"suite":"s6-cross-plane-auth","status":"blocked","code":"CLEANUP_UNPROVEN"}',
+        125,
+      ),
+    ).toEqual({ cleanupUnproven: true, survivors: true });
+    expect(
+      shellLifecycleFromRecords(
+        '{"suite":"s6-cross-plane-auth","status":"pass","detail":"CLEANUP_UNPROVEN no-child-survivors fail"}',
+        0,
+      ),
+    ).toEqual({ cleanupUnproven: false, survivors: false });
+    expect(
+      shellLifecycleFromRecords(
+        '{"suite":"another-suite","status":"blocked","code":"CLEANUP_UNPROVEN"}',
+        0,
+      ),
+    ).toEqual({ cleanupUnproven: false, survivors: false });
+    expect(shellLifecycleFromRecords("", 125)).toEqual({
+      cleanupUnproven: true,
+      survivors: true,
+    });
+  });
+
+  test("PLANTED: an in-budget typed cleanup refusal reaches the outer verdict", async () => {
+    const dir = mkdtempSync(join(process.env.TMPDIR ?? tmpdir(), "s6-cleanup-terminal-"));
+    const plant = join(dir, "cleanup-unproven.sh");
+    writeFileSync(
+      plant,
+      '#!/usr/bin/env bash\nprintf \'%s\\n\' \'{"suite":"s6-cross-plane-auth","status":"blocked","code":"CLEANUP_UNPROVEN"}\'\nexit 125\n',
+      { mode: 0o700 },
+    );
+    const run = await runShell([], withoutS6Env(), plant, { runTimeoutMs: 2_000 });
+    expect(run.timedOut, diag(run)).toBe(false);
+    expect(run.exitCode, diag(run)).toBe(125);
+    expect(run.cleanupUnproven, diag(run)).toBe(true);
+    expect(run.survivors, diag(run)).toBe(true);
   });
 
   test("an over-cap capture is rejected, not truncated", () => {
@@ -1492,7 +1645,10 @@ exit 42
       self.indexOf("async function runShell("),
       self.indexOf("/** Failure context."),
     );
-    expect(controller).toContain("const cleanupUnproven = timedOut;");
+    expect(controller).toContain(
+      "const cleanupUnproven = timedOut || shellLifecycle.cleanupUnproven;",
+    );
+    expect(controller).toContain("shellLifecycleFromRecords(stdout, exitCode)");
     expect(controller).not.toContain("S6_PGID_LEDGER");
     expect(controller).not.toContain("ledgerSurvivors");
     expect(code(SCRIPT)).not.toContain("ledger_note");

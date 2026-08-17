@@ -23,12 +23,16 @@ const OUTER_TERM_GRACE_MS = 15_000;
 const OUTER_KILL_GRACE_MS = 5_000;
 
 const FAULT_PLANTS = {
+  TOKEN_LIFECYCLE_TEST_AUX_PID_REUSE: "0",
   TOKEN_LIFECYCLE_TEST_BUSY_PORT: "0",
+  TOKEN_LIFECYCLE_TEST_CLEANUP_CENSUS_PARTIAL: "0",
   TOKEN_LIFECYCLE_TEST_DETACHED: "0",
   TOKEN_LIFECYCLE_TEST_LOG_LEAK: "0",
   TOKEN_LIFECYCLE_TEST_PARTIAL_PS: "0",
   TOKEN_LIFECYCLE_TEST_PID_REUSE: "0",
   TOKEN_LIFECYCLE_TEST_PRE_GO_FAILURE: "0",
+  TOKEN_LIFECYCLE_TEST_SUPERVISOR_CHALLENGE_FAILURE: "0",
+  TOKEN_LIFECYCLE_TEST_SUPERVISOR_STARTED_FAILURE: "0",
 } as const;
 
 async function settleWithin<Value>(
@@ -79,11 +83,14 @@ function processGroupIsEmpty(pgid: number): boolean {
   const probe = Bun.spawnSync({
     cmd: ["/bin/kill", "-0", `-${pgid}`],
     stdout: "ignore",
-    stderr: "ignore",
+    stderr: "pipe",
   });
   if (probe.exitCode === 0) return false;
-  if (probe.exitCode === 1) return true;
-  throw new Error(`token lifecycle process-group probe failed with ${probe.exitCode}`);
+  const diagnostic = probe.stderr.toString();
+  if (probe.exitCode === 1 && diagnostic.includes("No such process")) return true;
+  throw new Error(
+    `token lifecycle process-group probe failed with ${probe.exitCode}: ${diagnostic.trim()}`,
+  );
 }
 
 async function assertOwnedLeaderCurrent(identity: OwnedProcessIdentity): Promise<void> {
@@ -143,10 +150,7 @@ async function settleSpawnFailure(
     if (settled === undefined) {
       throw new Error("token lifecycle provisional supervisor could not be reaped");
     }
-    const singletonGroupEmpty = await waitUntil(
-      () => processGroupIsEmpty(child.pid),
-      killGraceMs,
-    );
+    const singletonGroupEmpty = await waitUntil(() => processGroupIsEmpty(child.pid), killGraceMs);
     if (!singletonGroupEmpty) {
       throw new Error("token lifecycle unpinned supervisor left a process-group survivor");
     }
@@ -241,23 +245,24 @@ async function runOwnedProcess(options: {
       stdout: Bun.file(stdoutPath),
       stderr: Bun.file(stderrPath),
     });
-    exited = child.exited;
+    const spawnedChild = child;
+    exited = spawnedChild.exited;
     const identityReady = await waitUntil(() => {
       if (!existsSync(supervisorReadyPath)) return false;
       const [pid, pgid, nonce, commandToken] = readFileSync(supervisorReadyPath, "utf8")
         .trim()
         .split("\t");
       if (
-        Number(pid) !== child.pid ||
-        Number(pgid) !== child.pid ||
+        Number(pid) !== spawnedChild.pid ||
+        Number(pgid) !== spawnedChild.pid ||
         nonce !== supervisorNonce ||
         commandToken !== options.expectedCommandToken
       ) {
         return false;
       }
       identity = {
-        pid: child.pid,
-        pgid: child.pid,
+        pid: spawnedChild.pid,
+        pgid: spawnedChild.pid,
         nonce: supervisorNonce,
         commandToken: options.expectedCommandToken,
         challengePath: supervisorChallengePath,
@@ -327,13 +332,7 @@ async function runOwnedProcess(options: {
   } catch (error) {
     if (child === undefined || exited === undefined) throw error;
     try {
-      await settleSpawnFailure(
-        child,
-        exited,
-        identity,
-        options.termGraceMs,
-        options.killGraceMs,
-      );
+      await settleSpawnFailure(child, exited, identity, options.termGraceMs, options.killGraceMs);
     } catch (cleanupError) {
       throw new AggregateError(
         [error, cleanupError],
@@ -406,11 +405,20 @@ test("token lifecycle harness self-test is ordinary-unit registered and never la
   expect(script).toContain("assert_migration_journal || exit 1");
   expect(script).toContain("assert_source_closure_unchanged || exit 1");
   expect(script).toContain("TOKEN_LIFECYCLE_TEST_BUSY_PORT");
+  expect(script).toContain("TOKEN_LIFECYCLE_TEST_AUX_PID_REUSE");
+  expect(script).toContain("TOKEN_LIFECYCLE_TEST_CLEANUP_CENSUS_PARTIAL");
   expect(script).toContain("TOKEN_LIFECYCLE_TEST_DETACHED");
   expect(script).toContain("TOKEN_LIFECYCLE_TEST_PARTIAL_PS");
   expect(script).toContain("TOKEN_LIFECYCLE_TEST_PID_REUSE");
   expect(script).toContain("TOKEN_LIFECYCLE_TEST_LOG_LEAK");
   expect(script).toContain("TOKEN_LIFECYCLE_TEST_PRE_GO_FAILURE");
+  expect(script).toContain("TOKEN_LIFECYCLE_TEST_SUPERVISOR_CHALLENGE_FAILURE");
+  expect(script).toContain("TOKEN_LIFECYCLE_TEST_SUPERVISOR_STARTED_FAILURE");
+  expect(script).toContain('signal_probe_state "-${pgid}"');
+  expect(script).toContain("cleanup_census_exit_zero_empty_cannot_false_reap");
+  expect(script).toContain("auxiliary_pid_reuse_identity_drift_refused_without_signal");
+  expect(script).toContain("supervisor_postfork_control_failure_retired_exact_group");
+  expect(script.indexOf('open(my $started, ">"')).toBeLessThan(script.indexOf("$worker = fork()"));
   expect(script).toContain("SERVER_TARGET_GATE_OPENED=1");
   expect(script).toContain("startup_gate_supervisor_reaped_before_target_launch");
   expect(script).toContain("TOKEN_LIFECYCLE_BARRIER_CAPABILITY");
@@ -482,45 +490,70 @@ test("PLANTED: a pre-go assertion failure reaps and empties its pinned superviso
   expect(processGroupIsEmpty(pinnedPgid)).toBe(true);
 });
 
-test("token lifecycle fault matrix is ordinary, provider-free, and causally proves every local cleanup plant", async () => {
-  const cases: readonly {
-    readonly plant: keyof typeof FAULT_PLANTS;
-    readonly code: string;
-    readonly requiresWorkerCleanup: boolean;
-  }[] = [
-    {
-      plant: "TOKEN_LIFECYCLE_TEST_PRE_GO_FAILURE",
-      code: "TOKEN_LIFECYCLE_PRE_GO_FAILURE_PLANT",
-      requiresWorkerCleanup: true,
-    },
-    {
-      plant: "TOKEN_LIFECYCLE_TEST_BUSY_PORT",
-      code: "TOKEN_LIFECYCLE_PORT_ALREADY_BOUND",
-      requiresWorkerCleanup: false,
-    },
-    {
-      plant: "TOKEN_LIFECYCLE_TEST_PARTIAL_PS",
-      code: "TOKEN_LIFECYCLE_RESPONDER_IDENTITY_UNPROVEN",
-      requiresWorkerCleanup: true,
-    },
-    {
-      plant: "TOKEN_LIFECYCLE_TEST_PID_REUSE",
-      code: "TOKEN_LIFECYCLE_RESPONDER_IDENTITY_DRIFT",
-      requiresWorkerCleanup: true,
-    },
-    {
-      plant: "TOKEN_LIFECYCLE_TEST_DETACHED",
-      code: "TOKEN_LIFECYCLE_DETACHED_STATE_PROCESS_DETECTED",
-      requiresWorkerCleanup: true,
-    },
-    {
-      plant: "TOKEN_LIFECYCLE_TEST_LOG_LEAK",
-      code: "TOKEN_LIFECYCLE_SECRET_LOG_LEAK",
-      requiresWorkerCleanup: true,
-    },
-  ];
+const FAULT_CASES: readonly {
+  readonly plant: keyof typeof FAULT_PLANTS;
+  readonly code: string;
+  readonly requiresWorkerCleanup: boolean;
+  readonly cleanupAssertion?: string;
+}[] = [
+  {
+    plant: "TOKEN_LIFECYCLE_TEST_PRE_GO_FAILURE",
+    code: "TOKEN_LIFECYCLE_PRE_GO_FAILURE_PLANT",
+    requiresWorkerCleanup: true,
+  },
+  {
+    plant: "TOKEN_LIFECYCLE_TEST_BUSY_PORT",
+    code: "TOKEN_LIFECYCLE_PORT_ALREADY_BOUND",
+    requiresWorkerCleanup: false,
+  },
+  {
+    plant: "TOKEN_LIFECYCLE_TEST_AUX_PID_REUSE",
+    code: "TOKEN_LIFECYCLE_AUX_PID_REUSE_PLANT",
+    requiresWorkerCleanup: false,
+    cleanupAssertion: "auxiliary_pid_reuse_identity_drift_refused_without_signal",
+  },
+  {
+    plant: "TOKEN_LIFECYCLE_TEST_PARTIAL_PS",
+    code: "TOKEN_LIFECYCLE_RESPONDER_IDENTITY_UNPROVEN",
+    requiresWorkerCleanup: true,
+  },
+  {
+    plant: "TOKEN_LIFECYCLE_TEST_CLEANUP_CENSUS_PARTIAL",
+    code: "TOKEN_LIFECYCLE_CLEANUP_CENSUS_PARTIAL_PLANT",
+    requiresWorkerCleanup: true,
+    cleanupAssertion: "cleanup_census_exit_zero_empty_cannot_false_reap",
+  },
+  {
+    plant: "TOKEN_LIFECYCLE_TEST_SUPERVISOR_STARTED_FAILURE",
+    code: "TOKEN_LIFECYCLE_SUPERVISOR_STARTED_FAILURE_PLANT",
+    requiresWorkerCleanup: true,
+    cleanupAssertion: "supervisor_postfork_control_failure_retired_exact_group",
+  },
+  {
+    plant: "TOKEN_LIFECYCLE_TEST_SUPERVISOR_CHALLENGE_FAILURE",
+    code: "TOKEN_LIFECYCLE_SUPERVISOR_CHALLENGE_FAILURE_PLANT",
+    requiresWorkerCleanup: true,
+    cleanupAssertion: "supervisor_postfork_control_failure_retired_exact_group",
+  },
+  {
+    plant: "TOKEN_LIFECYCLE_TEST_PID_REUSE",
+    code: "TOKEN_LIFECYCLE_RESPONDER_IDENTITY_DRIFT",
+    requiresWorkerCleanup: true,
+  },
+  {
+    plant: "TOKEN_LIFECYCLE_TEST_DETACHED",
+    code: "TOKEN_LIFECYCLE_DETACHED_STATE_PROCESS_DETECTED",
+    requiresWorkerCleanup: true,
+  },
+  {
+    plant: "TOKEN_LIFECYCLE_TEST_LOG_LEAK",
+    code: "TOKEN_LIFECYCLE_SECRET_LOG_LEAK",
+    requiresWorkerCleanup: true,
+  },
+];
 
-  for (const current of cases) {
+for (const current of FAULT_CASES) {
+  test(`token lifecycle fault plant ${current.plant} is provider-free and causally cleaned`, async () => {
     const result = await runHarness([], { [current.plant]: "1" });
     expect(result.exitCode).toBe(1);
     expect(result.stdout).toContain(`"code":"${current.code}"`);
@@ -532,14 +565,17 @@ test("token lifecycle fault matrix is ordinary, provider-free, and causally prov
     } else {
       expect(result.stdout).not.toContain("ready_workerd_responder_pid_pgid_start_and_argv_pinned");
     }
+    if (current.cleanupAssertion !== undefined) {
+      expect(result.stdout).toContain(`"assertion":"${current.cleanupAssertion}","status":"pass"`);
+    }
     if (current.plant === "TOKEN_LIFECYCLE_TEST_PRE_GO_FAILURE") {
       expect(result.stdout).toContain(
         '"assertion":"startup_gate_supervisor_reaped_before_target_launch","status":"pass","wrangler_started":false',
       );
       expect(result.stdout).not.toContain("ready_workerd_responder_pid_pgid_start_and_argv_pinned");
     }
-  }
-});
+  });
+}
 
 test("token lifecycle bounded live local Workerd+D1 proof is ordinary-unit registered", async () => {
   const result = await runHarness();
@@ -558,9 +594,7 @@ test("token lifecycle bounded live local Workerd+D1 proof is ordinary-unit regis
     .trim()
     .split("\n")
     .map((line) => JSON.parse(line) as Record<string, unknown>);
-  const authorizationRecord = records.find(
-    (record) => record.record === "authorization-decision",
-  );
+  const authorizationRecord = records.find((record) => record.record === "authorization-decision");
   expect(authorizationRecord).toBeDefined();
   expect(authorizationRecord?.assertion).toBe(
     "central_policy_post_revoke_refusal_no_mounted_effectful_route",

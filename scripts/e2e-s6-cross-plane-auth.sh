@@ -220,6 +220,7 @@ CLEANED_UP=0
 # If the group is gone there is nothing left to signal, and that is the correct
 # outcome rather than a second guess.
 SIGNAL_KILL_FAILURE_PLANT=0
+SIGNAL_KILL_NO_SETTLE_PLANT=0
 signal_group() {
   local pid="$1" signal="$2"
   # In-process self-test fault only. The assignment above overwrites any
@@ -227,7 +228,33 @@ signal_group() {
   if (( SIGNAL_KILL_FAILURE_PLANT == 1 )) && [[ "$signal" == "KILL" ]]; then
     return 1
   fi
+  # A successful syscall does not prove settlement: a stopped or
+  # uninterruptible group can remain live. This self-test fault reports a
+  # successful KILL dispatch without changing the group, so every caller must
+  # prove disappearance before it may wait or unregister.
+  if (( SIGNAL_KILL_NO_SETTLE_PLANT == 1 )) && [[ "$signal" == "KILL" ]]; then
+    return 0
+  fi
   kill "-${signal}" -- "-${pid}" 2>/dev/null
+}
+
+# Bounded, PRE-REAP settlement proof. The direct leader is still registered for
+# every call, so its group identity remains the one this owner created. Once
+# this reports absent, `wait` is only the reap of an already-settled child. No
+# caller may signal or probe the numeric identity after that wait.
+CHILD_SETTLE_ATTEMPTS=80
+CHILD_SETTLE_POLL_SECONDS=0.05
+group_settled_before_wait() {
+  local pid="$1" attempts=0
+  while (( attempts < CHILD_SETTLE_ATTEMPTS )); do
+    kill -0 -- "-${pid}" 2>/dev/null || return 0
+    # A process listing is not settlement authority: a partial exit-zero
+    # snapshot can omit a stopped or uninterruptible member. Only absence of
+    # the still-owned process group permits the subsequent direct-child reap.
+    sleep "$CHILD_SETTLE_POLL_SECONDS"
+    attempts=$((attempts + 1))
+  done
+  return 1
 }
 
 # Ownership records are ACTIVE-ONLY.
@@ -296,7 +323,20 @@ reap_children() {
         continue
       fi
     fi
+    if ! group_settled_before_wait "$pid"; then
+      # Even a successful KILL dispatch is not settlement proof. Do not enter
+      # an unbounded wait; retain the live owner for a later cleanup attempt.
+      REAP_SURVIVORS=1
+      continue
+    fi
     wait "$pid" 2>/dev/null || true
+    if [[ "${SECRET_WRITER_PID:-}" == "$pid" ]]; then
+      # A prior `finish_secret_writer` KILL refusal retained this live owner.
+      # This successful reap is the first point where its state may be cleared.
+      exec 3>&-
+      SECRET_WRITER_PID=""
+      SECRET_WRITER_DONE_FIFO=""
+    fi
     unregister_child "$pid"
   done
 }
@@ -404,6 +444,7 @@ minimal_env_command() {
 # `printf` is a builtin, so the record never becomes an argv anywhere.
 SECRET_WRITER_PID=""
 SECRET_WRITER_DONE_FIFO=""
+SECRET_WRITER_STOP_AFTER_COMPLETION_PLANT=0
 start_secret_writer() {
   local fifo="$1" record="$2"
   SECRET_WRITER_DONE_FIFO="${fifo}.writer-done"
@@ -416,6 +457,9 @@ start_secret_writer() {
     local writer_result="ok"
     printf '%s\n' "$record" > "$fifo" || writer_result="write-failed"
     printf '%s\n' "$writer_result" >&3 || exit 1
+    if (( SECRET_WRITER_STOP_AFTER_COMPLETION_PLANT == 1 )); then
+      kill -STOP "$BASHPID"
+    fi
     [[ "$writer_result" == "ok" ]]
   ) &
   SECRET_WRITER_PID=$!
@@ -434,13 +478,33 @@ finish_secret_writer() {
     # The writer is our direct, still-unreaped child, so its numeric group
     # identity is pinned at this instant. KILL is uncatchable; nothing below
     # signals or probes the number after `wait` releases it for reuse.
-    signal_group "$SECRET_WRITER_PID" KILL || true
+    if ! signal_group "$SECRET_WRITER_PID" KILL; then
+      if kill -0 -- "-${SECRET_WRITER_PID}" 2>/dev/null; then
+        # Do not wait on a writer that is proven live after KILL failed. Close
+        # only the completion channel; the pid and active ownership record stay
+        # intact so a later cleanup owner can safely retry while identity is
+        # still pinned.
+        exec 3>&-
+        return "$EX_CLEANUP_UNPROVEN"
+      fi
+    fi
+    if ! group_settled_before_wait "$SECRET_WRITER_PID"; then
+      exec 3>&-
+      return "$EX_CLEANUP_UNPROVEN"
+    fi
     wait "$SECRET_WRITER_PID" 2>/dev/null || true
     unregister_child "$SECRET_WRITER_PID"
     exec 3>&-
     SECRET_WRITER_PID=""
     SECRET_WRITER_DONE_FIFO=""
     return "$EX_SECRET_WRITER_UNAVAILABLE"
+  fi
+  # A completion token proves only that the write finished. The writer can be
+  # stopped before exit, so prove settlement on the still-pinned group before
+  # entering `wait`; expiry retains ownership and fails closed.
+  if ! group_settled_before_wait "$SECRET_WRITER_PID"; then
+    exec 3>&-
+    return "$EX_CLEANUP_UNPROVEN"
   fi
   wait "$SECRET_WRITER_PID" 2>/dev/null || writer_status=$?
   # Same rule as any other child: the record goes as soon as the reap is proven.
@@ -466,6 +530,7 @@ new_secret_fifo() {
 # Regression-only in-process fault. It is assigned only by `self_test`; no
 # environment variable or live invocation can switch it on.
 WATCHDOG_FLAG_WRITE_PLANT=0
+WATCHDOG_STOP_AFTER_HANDSHAKE_PLANT=0
 
 # run_bounded <seconds> <stdout_file> <stdin_file|-> <command...>
 #
@@ -534,6 +599,9 @@ run_bounded() {
   (
     completion=""
     if IFS= read -r -t "$seconds" completion <&4 && [[ "$completion" == "done" ]]; then
+      if (( WATCHDOG_STOP_AFTER_HANDSHAKE_PLANT == 1 )); then
+        kill -STOP "$BASHPID"
+      fi
       exit 2
     fi
     if (( WATCHDOG_FLAG_WRITE_PLANT == 1 )) || ! printf 'x' > "$flag" 2>/dev/null; then
@@ -561,6 +629,14 @@ run_bounded() {
   # includes the command deadline plus that fixed publication reserve without
   # extending the command's own allowance.
   IFS= read -r -t "$((seconds + 4))" outcome <&5 || outcome="controller:${EX_WATCHDOG_UNAVAILABLE}"
+  if ! group_settled_before_wait "$dog"; then
+    # The result/completion handshake does not prove the watchdog exited. A
+    # stopped watchdog retains its ownership record and makes the run
+    # cleanup-unproven; it can never strand this controller in `wait`.
+    exec 4>&-
+    exec 5>&-
+    return "$EX_CLEANUP_UNPROVEN"
+  fi
   wait "$dog" 2>/dev/null || dog_status=$?
   unregister_child "$dog"
   exec 4>&-
@@ -605,6 +681,13 @@ run_bounded() {
   # identity for the next cleanup owner; this call fails closed within its
   # published watchdog reserve.
   (( cleanup_unproven == 0 )) || return "$EX_CLEANUP_UNPROVEN"
+
+  if ! group_settled_before_wait "$pid"; then
+    # KILL dispatch success is not proof that a stopped/uninterruptible group
+    # settled. Keep the supervisor registered and refuse within the fixed
+    # settlement window instead of entering an unbounded wait.
+    return "$EX_CLEANUP_UNPROVEN"
+  fi
 
   # This is the FIRST reap of the supervisor. No signal or existence probe uses
   # `$pid` below this line.
@@ -1427,6 +1510,11 @@ self_test() {
   # five-second idle pause adds no causal coverage and can conceal a hang behind
   # the outer controller's fixed 100-second bound.
   REAP_GRACE_SECONDS=0.2
+  # Keep the production four-second settlement window here: on loaded macOS an
+  # ordinary KILLed group can remain observable for longer than one second.
+  # The deliberately non-settling plants still fit beneath the unchanged outer
+  # 100-second self-test ceiling.
+  CHILD_SETTLE_ATTEMPTS=80
   check() {
     if [[ "$2" == "$3" ]]; then
       emit "{\"suite\":\"${SUITE}\",\"assertion\":\"$(json_string "$1")\",\"status\":\"pass\",\"detail\":\"self-test\"}"
@@ -1476,6 +1564,29 @@ self_test() {
   else
     emit "{\"suite\":\"${SUITE}\",\"assertion\":\"reaper-actually-kills\",\"status\":\"pass\",\"detail\":\"self-test\"}"
   fi
+
+  # A successful KILL dispatch is not settlement proof. This child is already
+  # stopped, and the injected signal seam reports success without changing it.
+  # The reaper must return cleanup-unproven within the settlement window while
+  # retaining ownership; a real disarmed KILL then performs the only wait.
+  CHILD_PIDS=()
+  local stopped_reaper_dir stopped_reaper_ready stopped_reaper_status stopped_reaper_records
+  stopped_reaper_dir="$(mktemp -d "${TMPDIR:-/tmp}/s6-stopped-reaper.XXXXXX" 2>/dev/null)" || stopped_reaper_dir=""
+  stopped_reaper_ready="${stopped_reaper_dir}/ready"
+  bash "$SCRIPT_SELF" --self-test-stopped-victim "$stopped_reaper_ready" &
+  local stopped_reaper=$!
+  CHILD_PIDS+=("$stopped_reaper")
+  local stopped_reaper_deadline=$((SECONDS + 5))
+  while [[ ! -s "$stopped_reaper_ready" ]] && (( SECONDS < stopped_reaper_deadline )); do sleep 0.05; done
+  SIGNAL_KILL_NO_SETTLE_PLANT=1
+  reap_children
+  stopped_reaper_status="$REAP_SURVIVORS"
+  stopped_reaper_records="${#CHILD_PIDS[@]}"
+  SIGNAL_KILL_NO_SETTLE_PLANT=0
+  reap_children
+  check "reaper-successful-kill-without-settlement-is-explicit" "$stopped_reaper_status" "1"
+  check "reaper-stopped-child-retains-owner" "$stopped_reaper_records" "1"
+  check "reaper-stopped-child-retry-reaps-owner" "${REAP_SURVIVORS}:${#CHILD_PIDS[@]}" "0:0"
 
   # Causal: run_bounded must stop a child that outlives its bound and report
   # 124, and it must do so on the CLOCK. An iteration-counting bound drifts far
@@ -1569,6 +1680,33 @@ self_test() {
     emit "{\"suite\":\"${SUITE}\",\"assertion\":\"watchdog-kill-dispatch-failure-is-bounded\",\"status\":\"fail\",\"detail\":\"the injected KILL refusal took ${kill_failure_elapsed}s\"}"
   fi
 
+  # Handshake then STOP: the watchdog publishes completion but never exits.
+  # Its wait must expire cleanup-unproven with both live owners retained.
+  CHILD_PIDS=()
+  local stopped_watchdog_status=0 stopped_watchdog_records
+  WATCHDOG_STOP_AFTER_HANDSHAKE_PLANT=1
+  run_bounded 10 "$bounded_out" - true || stopped_watchdog_status=$?
+  WATCHDOG_STOP_AFTER_HANDSHAKE_PLANT=0
+  stopped_watchdog_records="${#CHILD_PIDS[@]}"
+  reap_children
+  check "stopped-watchdog-handshake-status" "$stopped_watchdog_status" "$EX_CLEANUP_UNPROVEN"
+  check "stopped-watchdog-handshake-retains-owners" "$stopped_watchdog_records" "2"
+  check "stopped-watchdog-retry-reaps-owners" "${REAP_SURVIVORS}:${#CHILD_PIDS[@]}" "0:0"
+
+  # Supervisor KILL reports success but deliberately leaves the group live.
+  # `run_bounded` must prove settlement before its supervisor wait, retain that
+  # owner on expiry, and let only a disarmed reaper wait/unregister it.
+  CHILD_PIDS=()
+  local stopped_supervisor_status=0 stopped_supervisor_records
+  SIGNAL_KILL_NO_SETTLE_PLANT=1
+  run_bounded 10 "$bounded_out" - true || stopped_supervisor_status=$?
+  SIGNAL_KILL_NO_SETTLE_PLANT=0
+  stopped_supervisor_records="${#CHILD_PIDS[@]}"
+  reap_children
+  check "successful-supervisor-kill-without-settlement-status" "$stopped_supervisor_status" "$EX_CLEANUP_UNPROVEN"
+  check "successful-supervisor-kill-without-settlement-retains-owner" "$stopped_supervisor_records" "1"
+  check "stopped-supervisor-retry-reaps-owner" "${REAP_SURVIVORS}:${#CHILD_PIDS[@]}" "0:0"
+
   # Child-before-open: no consumer ever opens the secret FIFO. The completion
   # handshake must bound `finish_secret_writer`, KILL the still-pinned writer,
   # reap it and remove its active ownership record.
@@ -1588,6 +1726,60 @@ self_test() {
     failures=$((failures + 1))
     emit "{\"suite\":\"${SUITE}\",\"assertion\":\"secret-writer-child-before-open-is-bounded\",\"status\":\"fail\",\"detail\":\"the writer took ${writer_plant_elapsed}s without a FIFO reader\"}"
   fi
+
+  # The same no-reader plant with its group KILL rejected. The timed-out writer
+  # is still live and blocked in FIFO open, so `finish_secret_writer` must
+  # return cleanup-unproven without waiting, retain the active owner, and let a
+  # later disarmed reaper perform the only wait/unregister.
+  CHILD_PIDS=()
+  local writer_kill_status=0 writer_kill_started=$SECONDS writer_kill_elapsed
+  SIGNAL_KILL_FAILURE_PLANT=1
+  if new_secret_fifo && start_secret_writer "$SECRET_FIFO" "planted-secret-writer-kill-refusal"; then
+    finish_secret_writer || writer_kill_status=$?
+  else
+    writer_kill_status="$EX_SECRET_WRITER_UNAVAILABLE"
+  fi
+  writer_kill_elapsed=$((SECONDS - writer_kill_started))
+  local writer_kill_records="${#CHILD_PIDS[@]}"
+  SIGNAL_KILL_FAILURE_PLANT=0
+  reap_children
+  check "secret-writer-kill-dispatch-failure-status" "$writer_kill_status" "$EX_CLEANUP_UNPROVEN"
+  check "secret-writer-kill-dispatch-failure-retains-owner" "$writer_kill_records" "1"
+  check "secret-writer-kill-dispatch-retry-reaps-owner" \
+    "${REAP_SURVIVORS}:${#CHILD_PIDS[@]}:${SECRET_WRITER_PID}" "0:0:"
+  if (( writer_kill_elapsed <= SECRET_WRITER_WAIT_SECONDS + 2 )); then
+    emit "{\"suite\":\"${SUITE}\",\"assertion\":\"secret-writer-kill-dispatch-failure-is-bounded\",\"status\":\"pass\",\"detail\":\"the injected KILL refusal returned in ${writer_kill_elapsed}s with its owner retained\"}"
+  else
+    failures=$((failures + 1))
+    emit "{\"suite\":\"${SUITE}\",\"assertion\":\"secret-writer-kill-dispatch-failure-is-bounded\",\"status\":\"fail\",\"detail\":\"the injected KILL refusal took ${writer_kill_elapsed}s\"}"
+  fi
+
+  # Completion token then STOP: the FIFO bytes and `ok` handshake arrive, but
+  # the writer remains live before exit. A token is not settlement proof, so
+  # `finish_secret_writer` must refuse within the settlement bound and retain
+  # the owner until a disarmed reaper proves its exit.
+  CHILD_PIDS=()
+  local stopped_writer_status=0 stopped_writer_records stopped_writer_payload=""
+  if new_secret_fifo && exec 7<>"$SECRET_FIFO"; then
+    SECRET_WRITER_STOP_AFTER_COMPLETION_PLANT=1
+    if start_secret_writer "$SECRET_FIFO" "planted-stopped-writer" && \
+      IFS= read -r -t 2 stopped_writer_payload <&7; then
+      finish_secret_writer || stopped_writer_status=$?
+    else
+      stopped_writer_status="$EX_SECRET_WRITER_UNAVAILABLE"
+    fi
+    SECRET_WRITER_STOP_AFTER_COMPLETION_PLANT=0
+    exec 7>&-
+  else
+    stopped_writer_status="$EX_SECRET_WRITER_UNAVAILABLE"
+  fi
+  stopped_writer_records="${#CHILD_PIDS[@]}"
+  reap_children
+  check "stopped-secret-writer-payload-arrived" "$stopped_writer_payload" "planted-stopped-writer"
+  check "stopped-secret-writer-completion-status" "$stopped_writer_status" "$EX_CLEANUP_UNPROVEN"
+  check "stopped-secret-writer-retains-owner" "$stopped_writer_records" "1"
+  check "stopped-secret-writer-retry-reaps-owner" \
+    "${REAP_SURVIVORS}:${#CHILD_PIDS[@]}:${SECRET_WRITER_PID}" "0:0:"
 
   # A browser blocked record is buffered as data and produces zero bytes until
   # the post-cleanup publisher is invoked.
@@ -1625,6 +1817,12 @@ self_test() {
   else
     failures=$((failures + 1))
     emit "{\"suite\":\"${SUITE}\",\"assertion\":\"blocked-runner-teardown-failure-overrides\",\"status\":\"fail\",\"detail\":\"the runner selector did not publish its causal pass record\"}"
+  fi
+  if [[ "$selector_record" == *'"assertion":"runner-deadline-race-overrides-pass","status":"pass"'* ]]; then
+    emit "{\"suite\":\"${SUITE}\",\"assertion\":\"runner-deadline-race-overrides-pass\",\"status\":\"pass\",\"detail\":\"self-test\"}"
+  else
+    failures=$((failures + 1))
+    emit "{\"suite\":\"${SUITE}\",\"assertion\":\"runner-deadline-race-overrides-pass\",\"status\":\"fail\",\"detail\":\"the runner selector did not publish its deadline-race pass record\"}"
   fi
 
   # Causal descendant plants.
@@ -2224,6 +2422,17 @@ main() {
   export -n ASIMP_S6_TEST_GOOGLE_USER 2>/dev/null || true
   export -n ASIMP_S6_FELLOW_TOKEN 2>/dev/null || true
   export -n ASIMP_S6_SIGNING_KEY_HEX 2>/dev/null || true
+
+  # Hidden stopped child for successful-dispatch/no-settlement plants. It owns
+  # its readiness marker and stops itself only after publishing the exact pid;
+  # the parent never probes that number after cleanup.
+  if [[ "${1:-}" == "--self-test-stopped-victim" ]]; then
+    local stopped_marker="${2:?stopped marker required}"
+    trap '' HUP TERM
+    printf '%s' "$BASHPID" > "$stopped_marker"
+    kill -STOP "$BASHPID"
+    while :; do sleep 3600; done
+  fi
 
   # Hidden acknowledgement child used by cleanup plants. It publishes readiness
   # only after its TERM trap is installed, then owns the termination record; no

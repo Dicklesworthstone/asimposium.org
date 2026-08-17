@@ -74,9 +74,15 @@ SERVER_SUPERVISOR_STARTED=""
 SERVER_TARGET_GATE_OPENED=0
 RESPONDER_PID=""
 RESPONDER_IDENTITY=""
-RESPONDER_DESCENDANTS=""
 BUSY_PORT_PID=""
+BUSY_PORT_IDENTITY=""
+BUSY_PORT_MARKER=""
 PLANTED_DETACHED_PID=""
+PLANTED_DETACHED_IDENTITY=""
+PLANTED_DETACHED_MARKER=""
+AUX_REUSE_PID=""
+AUX_REUSE_IDENTITY=""
+AUX_REUSE_MARKER=""
 SOURCE_CLOSURE_BEFORE=""
 SOURCE_CLOSURE_AFTER=""
 LOG_CANARY_BEARER=""
@@ -231,10 +237,61 @@ group_members() {
   ps -eo pid=,pgid= 2>/dev/null | awk -v wanted="${pgid}" '$2 == wanted { print $1 }'
 }
 
-group_is_empty() {
-  local members
-  members="$(group_members "$1")" || return 1
-  [[ -z "${members}" ]]
+cleanup_group_members() {
+  # This deliberately fallible census is diagnostic only. The planted empty
+  # result proves that cleanup never treats an exit-zero/truncated ps snapshot
+  # as evidence that a process group disappeared.
+  [[ "${TOKEN_LIFECYCLE_TEST_CLEANUP_CENSUS_PARTIAL:-0}" != "1" ]] || return 0
+  group_members "$1"
+}
+
+signal_probe_state() {
+  local target="$1" diagnostic status
+  if diagnostic="$(LC_ALL=C /bin/kill -0 "${target}" 2>&1)"; then
+    printf '%s\n' "live"
+    return 0
+  else
+    status=$?
+  fi
+  if (( status == 1 )) && [[ "${diagnostic}" == *"No such process"* ]]; then
+    printf '%s\n' "absent"
+    return 0
+  fi
+  return 1
+}
+
+group_liveness() {
+  local pgid="$1"
+  [[ "${pgid}" =~ ^[0-9]+$ && "${pgid}" != "0" ]] || return 1
+  signal_probe_state "-${pgid}"
+}
+
+process_liveness() {
+  local pid="$1"
+  [[ "${pid}" =~ ^[0-9]+$ && "${pid}" != "0" ]] || return 1
+  signal_probe_state "${pid}"
+}
+
+wait_for_group_absence() {
+  local pgid="$1" deadline="$2" state
+  while (( SECONDS < deadline )); do
+    state="$(group_liveness "${pgid}")" || return 2
+    [[ "${state}" != "absent" ]] || return 0
+    sleep 0.05
+  done
+  state="$(group_liveness "${pgid}")" || return 2
+  [[ "${state}" == "absent" ]]
+}
+
+wait_for_process_absence() {
+  local pid="$1" deadline="$2" state
+  while (( SECONDS < deadline )); do
+    state="$(process_liveness "${pid}")" || return 2
+    [[ "${state}" != "absent" ]] || return 0
+    sleep 0.05
+  done
+  state="$(process_liveness "${pid}")" || return 2
+  [[ "${state}" == "absent" ]]
 }
 
 raw_process_identity() {
@@ -291,7 +348,6 @@ capture_responder_identity() {
   [[ "${command}" == *workerd* ]] || return 1
   RESPONDER_PID="${responder}"
   RESPONDER_IDENTITY="${identity}"
-  RESPONDER_DESCENDANTS="$(group_members "${SERVER_PGID}")"
 }
 
 responder_identity_is_current() {
@@ -354,24 +410,101 @@ assert_responder_identity() {
   }
 }
 
+capture_auxiliary_identity() {
+  local pid="$1" marker="$2" deadline identity seen_pid
+  deadline=$((SECONDS + 2))
+  (( deadline > SCRIPT_DEADLINE )) && deadline="${SCRIPT_DEADLINE}"
+  while (( SECONDS < deadline )); do
+    identity="$(raw_process_identity "${pid}" 2>/dev/null || true)"
+    if [[ -n "${identity}" && "${identity}" == *"${marker}"* ]]; then
+      IFS=$'\t' read -r seen_pid _ _ _ <<<"${identity}"
+      if [[ "${seen_pid}" == "${pid}" ]]; then
+        printf '%s\n' "${identity}"
+        return 0
+      fi
+    fi
+    sleep 0.01
+  done
+  return 1
+}
+
 stop_auxiliary_child() {
-  local pid="$1" label="$2"
+  local pid="$1" label="$2" expected_identity="$3" marker="$4"
+  local current deadline state wait_status
   [[ -n "${pid}" ]] || return 0
-  if kill -0 "${pid}" 2>/dev/null; then
-    kill -TERM "${pid}" 2>/dev/null || {
+  state="$(process_liveness "${pid}")" || {
+    fail "TOKEN_LIFECYCLE_${label}_LIVENESS_UNPROVEN"
+    return 1
+  }
+  if [[ "${state}" == "absent" ]]; then
+    wait "${pid}" 2>/dev/null || true
+    return 0
+  fi
+
+  current="$(raw_process_identity "${pid}" 2>/dev/null || true)"
+  # A start-up proof failure may reach the trap before the caller publishes
+  # the full identity. The private argv nonce is then the only provisional
+  # authority; pin the complete identity once and use it for both signals.
+  if [[ -z "${expected_identity}" && -n "${current}" && "${current}" == *"${marker}"* ]]; then
+    expected_identity="${current}"
+  fi
+  if [[ -z "${expected_identity}" \
+    || "${current}" != "${expected_identity}" \
+    || "${current}" != *"${marker}"* ]]; then
+    fail "TOKEN_LIFECYCLE_${label}_IDENTITY_DRIFT"
+    return 1
+  fi
+
+  if ! kill -TERM "${pid}" 2>/dev/null; then
+    state="$(process_liveness "${pid}")" || {
+      fail "TOKEN_LIFECYCLE_${label}_LIVENESS_UNPROVEN"
+      return 1
+    }
+    [[ "${state}" == "absent" ]] || {
       fail "TOKEN_LIFECYCLE_${label}_TERM_UNDELIVERED"
       return 1
     }
   fi
-  local deadline=$((SECONDS + CLEANUP_GRACE_SECONDS))
+  deadline=$((SECONDS + CLEANUP_GRACE_SECONDS))
   (( deadline > SCRIPT_DEADLINE )) && deadline="${SCRIPT_DEADLINE}"
-  while (( SECONDS < deadline )); do
-    if ! kill -0 "${pid}" 2>/dev/null; then
-      wait "${pid}" 2>/dev/null || true
-      return 0
-    fi
-    sleep 0.1
-  done
+  if wait_for_process_absence "${pid}" "${deadline}"; then
+    wait "${pid}" 2>/dev/null || true
+    return 0
+  else
+    wait_status=$?
+  fi
+  (( wait_status != 2 )) || {
+    fail "TOKEN_LIFECYCLE_${label}_LIVENESS_UNPROVEN"
+    return 1
+  }
+
+  current="$(raw_process_identity "${pid}" 2>/dev/null || true)"
+  if [[ "${current}" != "${expected_identity}" || "${current}" != *"${marker}"* ]]; then
+    fail "TOKEN_LIFECYCLE_${label}_IDENTITY_DRIFT"
+    return 1
+  fi
+  kill -KILL "${pid}" 2>/dev/null || {
+    state="$(process_liveness "${pid}")" || {
+      fail "TOKEN_LIFECYCLE_${label}_LIVENESS_UNPROVEN"
+      return 1
+    }
+    [[ "${state}" == "absent" ]] || {
+      fail "TOKEN_LIFECYCLE_${label}_KILL_UNDELIVERED"
+      return 1
+    }
+  }
+  deadline=$((SECONDS + CLEANUP_GRACE_SECONDS))
+  (( deadline > SCRIPT_DEADLINE )) && deadline="${SCRIPT_DEADLINE}"
+  if wait_for_process_absence "${pid}" "${deadline}"; then
+    wait "${pid}" 2>/dev/null || true
+    return 0
+  else
+    wait_status=$?
+  fi
+  (( wait_status != 2 )) || {
+    fail "TOKEN_LIFECYCLE_${label}_LIVENESS_UNPROVEN"
+    return 1
+  }
   fail "TOKEN_LIFECYCLE_${label}_SURVIVOR"
   return 1
 }
@@ -446,12 +579,17 @@ scan_retained_logs() {
 
 start_busy_port_plant() {
   [[ "${TOKEN_LIFECYCLE_TEST_BUSY_PORT:-0}" == "1" ]] || return 0
+  BUSY_PORT_MARKER="token-lifecycle-busy-port-$(${BUN} --eval 'console.log(crypto.randomUUID())')"
   TOKEN_LIFECYCLE_BUSY_PORT="${PORT}" "${BUN}" --eval '
     const port = Number(process.env.TOKEN_LIFECYCLE_BUSY_PORT);
     Bun.serve({ port, fetch: () => new Response("plant") });
     await Bun.sleep(600_000);
-  ' >/dev/null 2>&1 &
+  ' "${BUSY_PORT_MARKER}" >/dev/null 2>&1 &
   BUSY_PORT_PID=$!
+  BUSY_PORT_IDENTITY="$(capture_auxiliary_identity "${BUSY_PORT_PID}" "${BUSY_PORT_MARKER}")" || {
+    fail "TOKEN_LIFECYCLE_BUSY_PORT_IDENTITY_UNAVAILABLE"
+    return 1
+  }
   local deadline=$((SECONDS + CLEANUP_GRACE_SECONDS))
   (( deadline > SCRIPT_DEADLINE )) && deadline="${SCRIPT_DEADLINE}"
   while (( SECONDS < deadline )); do
@@ -464,9 +602,15 @@ start_busy_port_plant() {
 
 start_detached_state_plant() {
   [[ "${TOKEN_LIFECYCLE_TEST_DETACHED:-0}" == "1" ]] || return 0
+  PLANTED_DETACHED_MARKER="token-lifecycle-detached-$(${BUN} --eval 'console.log(crypto.randomUUID())')"
   perl -MPOSIX=setsid -e 'setsid() or die "setsid"; sleep 600' \
-    "TOKEN_LIFECYCLE_STATE=${STATE_DIR}" >/dev/null 2>&1 &
+    "${PLANTED_DETACHED_MARKER}" "TOKEN_LIFECYCLE_STATE=${STATE_DIR}" >/dev/null 2>&1 &
   PLANTED_DETACHED_PID=$!
+  PLANTED_DETACHED_IDENTITY="$(capture_auxiliary_identity \
+    "${PLANTED_DETACHED_PID}" "${PLANTED_DETACHED_MARKER}")" || {
+    fail "TOKEN_LIFECYCLE_DETACHED_IDENTITY_UNAVAILABLE"
+    return 1
+  }
   local deadline=$((SECONDS + CLEANUP_GRACE_SECONDS))
   (( deadline > SCRIPT_DEADLINE )) && deadline="${SCRIPT_DEADLINE}"
   while (( SECONDS < deadline )); do
@@ -480,8 +624,64 @@ start_detached_state_plant() {
   return 1
 }
 
+run_auxiliary_pid_reuse_plant() {
+  local signal_record deadline wait_status
+  [[ "${TOKEN_LIFECYCLE_TEST_AUX_PID_REUSE:-0}" == "1" ]] || return 0
+  AUX_REUSE_MARKER="token-lifecycle-aux-reuse-$(${BUN} --eval 'console.log(crypto.randomUUID())')"
+  signal_record="${STATE_DIR}/aux-reuse.signal"
+  perl -e '
+    my ($marker, $signal_record) = @ARGV;
+    $SIG{"TERM"} = sub {
+      open(my $record, ">", $signal_record) or die "signal-record";
+      print $record "TERM\n";
+      close($record);
+      exit 91;
+    };
+    select(undef, undef, undef, 1.0);
+  ' "${AUX_REUSE_MARKER}" "${signal_record}" >/dev/null 2>&1 &
+  AUX_REUSE_PID=$!
+  AUX_REUSE_IDENTITY="$(capture_auxiliary_identity \
+    "${AUX_REUSE_PID}" "${AUX_REUSE_MARKER}")" || {
+    fail "TOKEN_LIFECYCLE_AUX_PID_REUSE_IDENTITY_UNAVAILABLE"
+    return 1
+  }
+
+  if stop_auxiliary_child "${AUX_REUSE_PID}" "AUX_PID_REUSE" \
+    "${AUX_REUSE_IDENTITY} planted-reused-start-time" "${AUX_REUSE_MARKER}"; then
+    fail "TOKEN_LIFECYCLE_AUX_PID_REUSE_NOT_REFUSED"
+    return 1
+  fi
+
+  deadline=$((SECONDS + 3))
+  (( deadline > SCRIPT_DEADLINE )) && deadline="${SCRIPT_DEADLINE}"
+  if wait_for_process_absence "${AUX_REUSE_PID}" "${deadline}"; then
+    if wait "${AUX_REUSE_PID}"; then
+      wait_status=0
+    else
+      wait_status=$?
+    fi
+  else
+    if ! stop_auxiliary_child "${AUX_REUSE_PID}" "AUX_PID_REUSE_RECOVERY" \
+      "${AUX_REUSE_IDENTITY}" "${AUX_REUSE_MARKER}"; then
+      return 1
+    fi
+    fail "TOKEN_LIFECYCLE_AUX_PID_REUSE_NATURAL_EXIT_UNPROVEN"
+    return 1
+  fi
+  AUX_REUSE_PID=""
+  AUX_REUSE_IDENTITY=""
+  AUX_REUSE_MARKER=""
+  [[ "${wait_status}" == "0" && ! -e "${signal_record}" ]] || {
+    fail "TOKEN_LIFECYCLE_AUX_PID_REUSE_UNRELATED_SIGNALLED"
+    return 1
+  }
+  emit "{\"suite\":\"${SUITE}\",\"assertion\":\"auxiliary_pid_reuse_identity_drift_refused_without_signal\",\"status\":\"pass\"}"
+  fail "TOKEN_LIFECYCLE_AUX_PID_REUSE_PLANT"
+  return 1
+}
+
 stop_worker() {
-  local members cleanup_deadline worker_pgid
+  local cleanup_census cleanup_deadline group_state leader_state signal_status wait_status worker_pgid
   [[ -n "${SERVER_PID}" ]] || return 0
   [[ -n "${SERVER_PGID}" ]] || {
     fail "TOKEN_LIFECYCLE_WORKER_GROUP_UNKNOWN"
@@ -493,59 +693,134 @@ stop_worker() {
   }
   worker_pgid="${SERVER_PGID}"
 
-  members="$(group_members "${SERVER_PGID}")" || {
+  cleanup_census="$(cleanup_group_members "${SERVER_PGID}")" || {
     fail "TOKEN_LIFECYCLE_GROUP_INSPECTION_UNAVAILABLE"
     return 1
   }
-  if [[ -n "${members}" ]]; then
+  if [[ "${TOKEN_LIFECYCLE_TEST_CLEANUP_CENSUS_PARTIAL:-0}" == "1" \
+    && -n "${cleanup_census}" ]]; then
+    fail "TOKEN_LIFECYCLE_CLEANUP_CENSUS_PLANT_INACTIVE"
+    return 1
+  fi
+
+  group_state="$(group_liveness "${SERVER_PGID}")" || {
+    fail "TOKEN_LIFECYCLE_GROUP_LIVENESS_UNPROVEN"
+    return 1
+  }
+  if [[ "${group_state}" == "live" ]]; then
     # The group signal is authorized only by the original direct-child identity,
     # not a numeric PID/PGID that could have been recycled after readiness.
     if ! server_group_signal_is_authorized; then
-      fail "TOKEN_LIFECYCLE_GROUP_LEADER_REAP_UNPROVEN"
-      return 1
+      # A post-fork supervisor control failure retires its own exact group. Give
+      # that fail-closed path a bounded chance to settle; never signal the bare
+      # PGID after its challenge anchor has disappeared.
+      cleanup_deadline=$((SECONDS + CLEANUP_GRACE_SECONDS))
+      (( cleanup_deadline > SCRIPT_DEADLINE )) && cleanup_deadline="${SCRIPT_DEADLINE}"
+      if wait_for_group_absence "${SERVER_PGID}" "${cleanup_deadline}"; then
+        group_state="absent"
+      else
+        wait_status=$?
+        if (( wait_status == 2 )); then
+          fail "TOKEN_LIFECYCLE_GROUP_LIVENESS_UNPROVEN"
+        else
+          fail "TOKEN_LIFECYCLE_GROUP_LEADER_REAP_UNPROVEN"
+        fi
+        return 1
+      fi
+    else
+      signal_status=0
+      kill -TERM "-${SERVER_PGID}" 2>/dev/null || signal_status=$?
+      if (( signal_status != 0 )); then
+        group_state="$(group_liveness "${SERVER_PGID}")" || {
+          fail "TOKEN_LIFECYCLE_GROUP_LIVENESS_UNPROVEN"
+          return 1
+        }
+        [[ "${group_state}" == "absent" ]] || {
+          fail "TOKEN_LIFECYCLE_TERM_UNDELIVERED"
+          return 1
+        }
+      fi
     fi
-    kill -TERM "-${SERVER_PGID}" 2>/dev/null || {
-      fail "TOKEN_LIFECYCLE_TERM_UNDELIVERED"
-      return 1
-    }
   fi
 
-  cleanup_deadline=$((SECONDS + CLEANUP_GRACE_SECONDS))
-  (( cleanup_deadline > SCRIPT_DEADLINE )) && cleanup_deadline="${SCRIPT_DEADLINE}"
-  while (( SECONDS < cleanup_deadline )); do
-    if group_is_empty "${SERVER_PGID}"; then
-      wait "${SERVER_PID}" 2>/dev/null || true
-      break
+  if [[ "${group_state}" == "live" ]]; then
+    cleanup_deadline=$((SECONDS + CLEANUP_GRACE_SECONDS))
+    (( cleanup_deadline > SCRIPT_DEADLINE )) && cleanup_deadline="${SCRIPT_DEADLINE}"
+    if wait_for_group_absence "${SERVER_PGID}" "${cleanup_deadline}"; then
+      group_state="absent"
+    else
+      wait_status=$?
+      (( wait_status != 2 )) || {
+        fail "TOKEN_LIFECYCLE_GROUP_LIVENESS_UNPROVEN"
+        return 1
+      }
     fi
-    sleep 0.1
-  done
+  fi
 
-  if ! group_is_empty "${SERVER_PGID}"; then
+  if [[ "${group_state}" == "live" ]]; then
     # KILL remains safe only while the original direct-child identity still
     # names this group. A responder mismatch alone does not remove that anchor.
     if ! server_group_signal_is_authorized; then
-      fail "TOKEN_LIFECYCLE_GROUP_LEADER_REAP_UNPROVEN"
-      return 1
-    fi
-    kill -KILL "-${SERVER_PGID}" 2>/dev/null || {
-      fail "TOKEN_LIFECYCLE_KILL_UNDELIVERED"
-      return 1
-    }
-    cleanup_deadline=$((SECONDS + CLEANUP_GRACE_SECONDS))
-    (( cleanup_deadline > SCRIPT_DEADLINE )) && cleanup_deadline="${SCRIPT_DEADLINE}"
-    while (( SECONDS < cleanup_deadline )); do
-      if group_is_empty "${SERVER_PGID}"; then
-        wait "${SERVER_PID}" 2>/dev/null || true
-        break
+      cleanup_deadline=$((SECONDS + CLEANUP_GRACE_SECONDS))
+      (( cleanup_deadline > SCRIPT_DEADLINE )) && cleanup_deadline="${SCRIPT_DEADLINE}"
+      if wait_for_group_absence "${SERVER_PGID}" "${cleanup_deadline}"; then
+        group_state="absent"
+      else
+        wait_status=$?
+        if (( wait_status == 2 )); then
+          fail "TOKEN_LIFECYCLE_GROUP_LIVENESS_UNPROVEN"
+        else
+          fail "TOKEN_LIFECYCLE_GROUP_LEADER_REAP_UNPROVEN"
+        fi
+        return 1
       fi
-      sleep 0.1
-    done
+    else
+      signal_status=0
+      kill -KILL "-${SERVER_PGID}" 2>/dev/null || signal_status=$?
+      if (( signal_status != 0 )); then
+        group_state="$(group_liveness "${SERVER_PGID}")" || {
+          fail "TOKEN_LIFECYCLE_GROUP_LIVENESS_UNPROVEN"
+          return 1
+        }
+        [[ "${group_state}" == "absent" ]] || {
+          fail "TOKEN_LIFECYCLE_KILL_UNDELIVERED"
+          return 1
+        }
+      fi
+    fi
   fi
 
-  group_is_empty "${SERVER_PGID}" || {
-    fail "TOKEN_LIFECYCLE_WORKER_SURVIVOR"
+  if [[ "${group_state}" == "live" ]]; then
+    cleanup_deadline=$((SECONDS + CLEANUP_GRACE_SECONDS))
+    (( cleanup_deadline > SCRIPT_DEADLINE )) && cleanup_deadline="${SCRIPT_DEADLINE}"
+    if wait_for_group_absence "${SERVER_PGID}" "${cleanup_deadline}"; then
+      group_state="absent"
+    else
+      wait_status=$?
+      if (( wait_status == 2 )); then
+        fail "TOKEN_LIFECYCLE_GROUP_LIVENESS_UNPROVEN"
+      else
+        fail "TOKEN_LIFECYCLE_WORKER_SURVIVOR"
+      fi
+      return 1
+    fi
+  fi
+
+  [[ "${group_state}" == "absent" ]] || {
+    fail "TOKEN_LIFECYCLE_GROUP_LIVENESS_UNPROVEN"
     return 1
   }
+  leader_state="$(process_liveness "${SERVER_PID}")" || {
+    fail "TOKEN_LIFECYCLE_GROUP_LEADER_EXIT_UNPROVEN"
+    return 1
+  }
+  [[ "${leader_state}" == "absent" ]] || {
+    fail "TOKEN_LIFECYCLE_GROUP_LEADER_EXIT_UNPROVEN"
+    return 1
+  }
+  # The kernel has proved both the group and direct child absent, so Bash's
+  # stored child status is now nonblocking to consume.
+  wait "${SERVER_PID}" 2>/dev/null || true
   port_is_free || {
     fail "TOKEN_LIFECYCLE_LISTENER_SURVIVOR"
     return 1
@@ -558,14 +833,15 @@ stop_worker() {
     fail "TOKEN_LIFECYCLE_STATE_FD_SURVIVOR"
     return 1
   }
-  for member in ${RESPONDER_DESCENDANTS}; do
-    if kill -0 "${member}" 2>/dev/null; then
-      fail "TOKEN_LIFECYCLE_DESCENDANT_SURVIVOR"
-      return 1
-    fi
-  done
   if (( SERVER_TARGET_GATE_OPENED == 0 )); then
     emit "{\"suite\":\"${SUITE}\",\"assertion\":\"startup_gate_supervisor_reaped_before_target_launch\",\"status\":\"pass\",\"wrangler_started\":false}"
+  fi
+  if [[ "${TOKEN_LIFECYCLE_TEST_CLEANUP_CENSUS_PARTIAL:-0}" == "1" ]]; then
+    emit "{\"suite\":\"${SUITE}\",\"assertion\":\"cleanup_census_exit_zero_empty_cannot_false_reap\",\"status\":\"pass\"}"
+  fi
+  if [[ "${TOKEN_LIFECYCLE_TEST_SUPERVISOR_STARTED_FAILURE:-0}" == "1" \
+    || "${TOKEN_LIFECYCLE_TEST_SUPERVISOR_CHALLENGE_FAILURE:-0}" == "1" ]]; then
+    emit "{\"suite\":\"${SUITE}\",\"assertion\":\"supervisor_postfork_control_failure_retired_exact_group\",\"status\":\"pass\"}"
   fi
   SERVER_PID=""
   SERVER_PGID=""
@@ -577,8 +853,12 @@ stop_worker() {
 finalize() {
   local status=$?
   trap - EXIT INT TERM HUP
-  if ! stop_auxiliary_child "${PLANTED_DETACHED_PID}" "PLANTED_DETACHED"; then status=1; fi
-  if ! stop_auxiliary_child "${BUSY_PORT_PID}" "BUSY_PORT"; then status=1; fi
+  if ! stop_auxiliary_child "${AUX_REUSE_PID}" "AUX_PID_REUSE_RECOVERY" \
+    "${AUX_REUSE_IDENTITY}" "${AUX_REUSE_MARKER}"; then status=1; fi
+  if ! stop_auxiliary_child "${PLANTED_DETACHED_PID}" "PLANTED_DETACHED" \
+    "${PLANTED_DETACHED_IDENTITY}" "${PLANTED_DETACHED_MARKER}"; then status=1; fi
+  if ! stop_auxiliary_child "${BUSY_PORT_PID}" "BUSY_PORT" \
+    "${BUSY_PORT_IDENTITY}" "${BUSY_PORT_MARKER}"; then status=1; fi
   if ! stop_worker; then status=1; fi
   exit "${status}"
 }
@@ -634,6 +914,7 @@ readonly ORIGIN="http://127.0.0.1:${PORT}"
 
 start_busy_port_plant || exit 1
 port_is_free || { fail "TOKEN_LIFECYCLE_PORT_ALREADY_BOUND"; exit 1; }
+run_auxiliary_pid_reuse_plant || exit 1
 
 KEY_MATERIAL="$(${BUN} --eval '
 const pair = await crypto.subtle.generateKey({ name: "Ed25519" }, true, ["sign", "verify"]);
@@ -698,48 +979,77 @@ assert_migration_journal || exit 1
     TOKEN_LIFECYCLE_SUPERVISOR_CHALLENGE="${SERVER_SUPERVISOR_CHALLENGE}" \
     TOKEN_LIFECYCLE_SUPERVISOR_RESPONSE="${SERVER_SUPERVISOR_RESPONSE}" \
     TOKEN_LIFECYCLE_SUPERVISOR_STARTED="${SERVER_SUPERVISOR_STARTED}" \
+    TOKEN_LIFECYCLE_TEST_SUPERVISOR_STARTED_FAILURE="${TOKEN_LIFECYCLE_TEST_SUPERVISOR_STARTED_FAILURE:-0}" \
+    TOKEN_LIFECYCLE_TEST_SUPERVISOR_CHALLENGE_FAILURE="${TOKEN_LIFECYCLE_TEST_SUPERVISOR_CHALLENGE_FAILURE:-0}" \
     exec perl -MPOSIX=WNOHANG -e '
       my $marker = shift @ARGV;
       die "marker" unless $marker eq $ENV{"TOKEN_LIFECYCLE_SUPERVISOR_MARKER"};
       my $leader = $$;
       my $group = getpgrp(0);
       die "group" unless $leader == $group;
-      $SIG{"TERM"} = sub {};
+      my $worker;
+      my $retiring = 0;
+      $SIG{"TERM"} = sub { exit 125 unless defined($worker) && $worker > 0; };
       open(my $ready, ">", $ENV{"TOKEN_LIFECYCLE_SUPERVISOR_READY"}) or die "ready";
       print $ready join("\t", $leader, $group, $ENV{"TOKEN_LIFECYCLE_SUPERVISOR_NONCE"}) . "\n";
       close($ready);
       my $last_challenge = "";
+      my $postfork = 0;
+      my $challenge_fault_used = 0;
       my $answer_challenge = sub {
         return unless -e $ENV{"TOKEN_LIFECYCLE_SUPERVISOR_CHALLENGE"};
         open(my $challenge_file, "<", $ENV{"TOKEN_LIFECYCLE_SUPERVISOR_CHALLENGE"}) or die "challenge";
         my $challenge = <$challenge_file> // "";
-        close($challenge_file);
+        close($challenge_file) or die "challenge-close";
         $challenge =~ s/\s+$//;
         return if $challenge eq "" || $challenge eq $last_challenge;
+        if ($postfork && $ENV{"TOKEN_LIFECYCLE_TEST_SUPERVISOR_CHALLENGE_FAILURE"} eq "1" && !$challenge_fault_used) {
+          $challenge_fault_used = 1;
+          die "planted-challenge-response";
+        }
         open(my $response, ">", $ENV{"TOKEN_LIFECYCLE_SUPERVISOR_RESPONSE"}) or die "response";
-        print $response join("\t", $challenge, $leader, $group, $ENV{"TOKEN_LIFECYCLE_SUPERVISOR_NONCE"}) . "\n";
-        close($response);
+        print $response join("\t", $challenge, $leader, $group, $ENV{"TOKEN_LIFECYCLE_SUPERVISOR_NONCE"}) . "\n" or die "response-write";
+        close($response) or die "response-close";
         $last_challenge = $challenge;
       };
       until (-e $ENV{"TOKEN_LIFECYCLE_SUPERVISOR_GO"}) {
         $answer_challenge->();
         select(undef, undef, undef, 0.01);
       }
-      my $worker = fork();
+      open(my $started, ">", $ENV{"TOKEN_LIFECYCLE_SUPERVISOR_STARTED"}) or die "started-open";
+      $worker = fork();
       die "fork" unless defined($worker);
       if ($worker == 0) {
         $SIG{"TERM"} = "DEFAULT";
         exec @ARGV or die "exec";
       }
-      open(my $started, ">", $ENV{"TOKEN_LIFECYCLE_SUPERVISOR_STARTED"}) or die "started";
-      print $started "$worker\n";
-      close($started);
+      $postfork = 1;
+      my $retire_group = sub {
+        return if $retiring;
+        $retiring = 1;
+        kill "TERM", -$group;
+        my $retire_deadline = time + 2;
+        while (time < $retire_deadline) {
+          my $done = waitpid($worker, WNOHANG);
+          exit 125 if $done == $worker || $done < 0;
+          select(undef, undef, undef, 0.01);
+        }
+        kill "KILL", -$group;
+        exit 125;
+      };
+      if ($ENV{"TOKEN_LIFECYCLE_TEST_SUPERVISOR_STARTED_FAILURE"} eq "1") {
+        print $started join("\t", "forked", $worker) . "\n" or $retire_group->();
+        close($started) or $retire_group->();
+        $retire_group->();
+      }
+      print $started join("\t", "started", $worker) . "\n" or $retire_group->();
+      close($started) or $retire_group->();
       my $status;
       while (1) {
-        $answer_challenge->();
+        eval { $answer_challenge->(); 1 } or $retire_group->();
         my $done = waitpid($worker, WNOHANG);
         if ($done == $worker) { $status = $?; last; }
-        die "waitpid" if $done < 0;
+        $retire_group->() if $done < 0;
         select(undef, undef, undef, 0.01);
       }
       my $code = ($status & 127) ? 128 + ($status & 127) : $status >> 8;
@@ -795,14 +1105,38 @@ printf '%s\n' "go" >"${SERVER_SUPERVISOR_GO}" || {
 }
 supervisor_start_deadline=$((SECONDS + 5))
 (( supervisor_start_deadline > SCRIPT_DEADLINE )) && supervisor_start_deadline="${SCRIPT_DEADLINE}"
+supervisor_started_phase=""
+supervisor_worker_pid=""
+supervisor_started_extra=""
 while (( SECONDS < supervisor_start_deadline )); do
-  [[ -s "${SERVER_SUPERVISOR_STARTED}" ]] && break
+  if [[ -s "${SERVER_SUPERVISOR_STARTED}" ]] &&
+    IFS=$'\t' read -r supervisor_started_phase supervisor_worker_pid supervisor_started_extra \
+      <"${SERVER_SUPERVISOR_STARTED}"; then
+    break
+  fi
   sleep 0.01
 done
-[[ -s "${SERVER_SUPERVISOR_STARTED}" ]] || {
+if [[ "${TOKEN_LIFECYCLE_TEST_SUPERVISOR_STARTED_FAILURE:-0}" == "1" \
+  && "${supervisor_started_phase}" == "forked" \
+  && "${supervisor_worker_pid}" =~ ^[0-9]+$ \
+  && -z "${supervisor_started_extra}" ]]; then
+  fail "TOKEN_LIFECYCLE_SUPERVISOR_STARTED_FAILURE_PLANT"
+  exit 1
+fi
+[[ "${supervisor_started_phase}" == "started" \
+  && "${supervisor_worker_pid}" =~ ^[0-9]+$ \
+  && -z "${supervisor_started_extra}" ]] || {
   fail "TOKEN_LIFECYCLE_WRANGLER_LAUNCH_UNPROVEN"
   exit 1
 }
+if [[ "${TOKEN_LIFECYCLE_TEST_SUPERVISOR_CHALLENGE_FAILURE:-0}" == "1" ]]; then
+  if challenge_server_supervisor; then
+    fail "TOKEN_LIFECYCLE_SUPERVISOR_CHALLENGE_FAILURE_INACTIVE"
+    exit 1
+  fi
+  fail "TOKEN_LIFECYCLE_SUPERVISOR_CHALLENGE_FAILURE_PLANT"
+  exit 1
+fi
 
 ready_deadline=$((SECONDS + READY_DEADLINE_SECONDS))
 (( ready_deadline > SCRIPT_DEADLINE )) && ready_deadline="${SCRIPT_DEADLINE}"
@@ -821,6 +1155,10 @@ if [[ "${TOKEN_LIFECYCLE_TEST_PID_REUSE:-0}" == "1" ]]; then
 fi
 assert_responder_identity || exit 1
 emit "{\"suite\":\"${SUITE}\",\"assertion\":\"ready_workerd_responder_pid_pgid_start_and_argv_pinned\",\"status\":\"pass\"}"
+if [[ "${TOKEN_LIFECYCLE_TEST_CLEANUP_CENSUS_PARTIAL:-0}" == "1" ]]; then
+  fail "TOKEN_LIFECYCLE_CLEANUP_CENSUS_PARTIAL_PLANT"
+  exit 1
+fi
 start_detached_state_plant || exit 1
 
 read -r -d '' CLIENT_SOURCE <<'BUN' || true
