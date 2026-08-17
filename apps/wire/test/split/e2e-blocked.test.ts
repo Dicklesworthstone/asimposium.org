@@ -82,6 +82,260 @@ const LOCAL_WORKER_BUNDLE_SENTINELS = [
   "s3_local_fellow_workshop_ids",
 ] as const;
 
+const S3_CHILD_TIMEOUT_MS = 100_000;
+const S3_CHILD_MAX_BUFFER_BYTES = 1_000_000;
+const S3_CHILD_REPORT_TIMEOUT_SECONDS = "5";
+const S3_CHILD_REPORT_PATH = "/s3-child-report";
+const S3_CHILD_TERM_GRACE_MS = 500;
+const S3_CHILD_KILL_GRACE_MS = 500;
+
+interface S3ChildLimits {
+  readonly timeoutMs: number;
+  readonly maxBufferBytes: number;
+  readonly termGraceMs: number;
+  readonly killGraceMs: number;
+}
+
+interface S3ChildOptions {
+  readonly limits?: Partial<S3ChildLimits>;
+  readonly allowedExitCodes?: readonly number[];
+}
+
+const DEFAULT_S3_CHILD_LIMITS: S3ChildLimits = {
+  timeoutMs: S3_CHILD_TIMEOUT_MS,
+  maxBufferBytes: S3_CHILD_MAX_BUFFER_BYTES,
+  termGraceMs: S3_CHILD_TERM_GRACE_MS,
+  killGraceMs: S3_CHILD_KILL_GRACE_MS,
+};
+
+function childLimits(overrides: Partial<S3ChildLimits> = {}): S3ChildLimits {
+  const limits = { ...DEFAULT_S3_CHILD_LIMITS, ...overrides };
+  if (
+    !Number.isSafeInteger(limits.timeoutMs) ||
+    !Number.isSafeInteger(limits.maxBufferBytes) ||
+    !Number.isSafeInteger(limits.termGraceMs) ||
+    !Number.isSafeInteger(limits.killGraceMs) ||
+    limits.timeoutMs < 1 ||
+    limits.maxBufferBytes < 1 ||
+    limits.termGraceMs < 1 ||
+    limits.killGraceMs < 1
+  ) {
+    throw new Error("S3_CHILD_LIMITS_INVALID");
+  }
+  return limits;
+}
+
+function sleep(milliseconds: number): Promise<void> {
+  return new Promise((resolveSleep) => setTimeout(resolveSleep, milliseconds));
+}
+
+type ChildGroupCensus = "empty" | "members" | "unproven";
+
+function childGroupCensus(pgid: number): ChildGroupCensus {
+  try {
+    process.kill(-pgid, 0);
+    return "members";
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === "ESRCH") return "empty";
+    return "unproven";
+  }
+}
+
+async function exitWithin(
+  exited: Promise<number>,
+  milliseconds: number,
+): Promise<number | undefined> {
+  let timeoutId: ReturnType<typeof setTimeout> | undefined;
+  try {
+    return await Promise.race([
+      exited,
+      new Promise<undefined>((resolveTimeout) => {
+        timeoutId = setTimeout(() => resolveTimeout(undefined), milliseconds);
+      }),
+    ]);
+  } finally {
+    if (timeoutId !== undefined) clearTimeout(timeoutId);
+  }
+}
+
+function signalOwnedChildGroup(pgid: number, signal: NodeJS.Signals, label: string): void {
+  if (childGroupCensus(pgid) !== "members") {
+    throw new Error(`${label}_GROUP_OWNERSHIP_UNPROVEN`);
+  }
+  try {
+    process.kill(-pgid, signal);
+  } catch {
+    throw new Error(`${label}_GROUP_SIGNAL_FAILED:${signal}`);
+  }
+}
+
+async function cleanupOwnedChildGroup(
+  exited: Promise<number>,
+  pgid: number,
+  limits: S3ChildLimits,
+  label: string,
+): Promise<void> {
+  let census = childGroupCensus(pgid);
+  if (census === "unproven") throw new Error(`${label}_GROUP_CENSUS_UNPROVEN`);
+  if (census === "empty") {
+    const exitCode = await exitWithin(exited, limits.killGraceMs);
+    if (exitCode === undefined) throw new Error(`${label}_REAP_TIMEOUT`);
+    return;
+  }
+
+  signalOwnedChildGroup(pgid, "SIGTERM", label);
+  const termExit = await exitWithin(exited, limits.termGraceMs);
+  census = childGroupCensus(pgid);
+  if (census === "unproven") throw new Error(`${label}_GROUP_CENSUS_UNPROVEN`);
+  if (census === "members") {
+    signalOwnedChildGroup(pgid, "SIGKILL", label);
+  }
+  const killExit = termExit ?? (await exitWithin(exited, limits.killGraceMs));
+  if (killExit === undefined) throw new Error(`${label}_REAP_TIMEOUT`);
+  census = childGroupCensus(pgid);
+  if (census === "unproven") throw new Error(`${label}_GROUP_CENSUS_UNPROVEN`);
+  if (census !== "empty") throw new Error(`${label}_GROUP_SURVIVORS`);
+}
+
+async function runBoundedS3Child(
+  command: readonly string[],
+  label: string,
+  options: S3ChildOptions = {},
+): Promise<{
+  readonly stdout: string;
+  readonly stderr: string;
+  readonly exitCode: number;
+}> {
+  const limits = childLimits(options.limits);
+  const allowedExitCodes = options.allowedExitCodes ?? [0];
+  const reportToken = crypto.randomUUID();
+  let settleReport: (result: string | Error) => void = () => {};
+  const report = new Promise<string>((resolveReport, rejectReport) => {
+    settleReport = (result) => {
+      if (result instanceof Error) rejectReport(result);
+      else resolveReport(result);
+    };
+  });
+  let reportSettled = false;
+  const settleReportOnce = (result: string | Error): void => {
+    if (reportSettled) return;
+    reportSettled = true;
+    settleReport(result);
+  };
+  const server = Bun.serve({
+    hostname: "127.0.0.1",
+    port: 0,
+    fetch: async (request) => {
+      const rejectReport = (code: string, status: number): Response => {
+        settleReportOnce(new Error(`${label}_REPORT_${code}`));
+        return new Response(null, { status });
+      };
+      if (request.method !== "POST" || new URL(request.url).pathname !== S3_CHILD_REPORT_PATH) {
+        return rejectReport("PATH_INVALID", 404);
+      }
+      if (request.headers.get("x-s3-child-report-token") !== reportToken) {
+        return rejectReport("TOKEN_INVALID", 403);
+      }
+      const contentLength = Number(request.headers.get("content-length"));
+      if (
+        !Number.isSafeInteger(contentLength) ||
+        contentLength < 1 ||
+        contentLength > limits.maxBufferBytes
+      ) {
+        return rejectReport("OUTPUT_OVERRUN", 413);
+      }
+      try {
+        const output = new Uint8Array(await request.arrayBuffer());
+        if (output.byteLength !== contentLength || output.byteLength > limits.maxBufferBytes) {
+          return rejectReport("OUTPUT_OVERRUN", 413);
+        }
+        settleReportOnce(new TextDecoder().decode(output));
+        return new Response(null, { status: 204 });
+      } catch {
+        return rejectReport("READ_FAILURE", 400);
+      }
+    },
+  });
+  const reportUrl = `http://127.0.0.1:${server.port}${S3_CHILD_REPORT_PATH}`;
+  let child: ReturnType<typeof Bun.spawn>;
+  try {
+    child = Bun.spawn({
+      cmd: [
+        "bash",
+        "-c",
+        [
+          "set -o pipefail",
+          '"$@" 2>&1 | curl --silent --show-error --fail --max-time "$S3_CHILD_REPORT_TIMEOUT_SECONDS" --request POST --header "x-s3-child-report-token: $S3_CHILD_REPORT_TOKEN" --data-binary @- "$S3_CHILD_REPORT_URL"',
+          'statuses=("${PIPESTATUS[@]}")',
+          '(( statuses[1] == 0 )) || exit 125',
+          'exit "${statuses[0]}"',
+        ].join("\n"),
+        "--",
+        ...command,
+      ],
+      cwd: root,
+      env: {
+        ...process.env,
+        S3_CHILD_REPORT_TIMEOUT_SECONDS,
+        S3_CHILD_REPORT_TOKEN: reportToken,
+        S3_CHILD_REPORT_URL: reportUrl,
+      },
+      detached: true,
+      stdout: "ignore",
+      stderr: "ignore",
+    });
+  } catch (error) {
+    server.stop(true);
+    throw new Error(
+      `${label}_LAUNCH_ERROR:${error instanceof Error ? error.name : "UNKNOWN"}`,
+    );
+  }
+  const exited = child.exited;
+  const statusFailure = exited.then((exitCode) => {
+    if (exitCode === 129) throw new Error(`${label}_SIGNALLED:HUP`);
+    if (exitCode === 130) throw new Error(`${label}_SIGNALLED:INT`);
+    if (exitCode === 143) throw new Error(`${label}_SIGNALLED:TERM`);
+    if (!allowedExitCodes.includes(exitCode)) throw new Error(`${label}_STATUS:${exitCode}`);
+    return new Promise<never>(() => {});
+  });
+  let timeoutId: ReturnType<typeof setTimeout> | undefined;
+  let complete = false;
+  let primaryFailure: unknown;
+  try {
+    const timeout = new Promise<never>((_resolveTimeout, rejectTimeout) => {
+      timeoutId = setTimeout(() => {
+        rejectTimeout(new Error(`${label}_TIMEOUT:${limits.timeoutMs}`));
+      }, limits.timeoutMs);
+    });
+    const [stdout, exitCode] = await Promise.race([
+      Promise.all([report, exited]),
+      statusFailure,
+      timeout,
+    ]);
+    if (childGroupCensus(child.pid) !== "empty") {
+      throw new Error(`${label}_GROUP_SURVIVORS_AFTER_EXIT`);
+    }
+    complete = true;
+    return { stdout, stderr: "", exitCode };
+  } catch (error) {
+    primaryFailure = error;
+    throw error;
+  } finally {
+    if (timeoutId !== undefined) clearTimeout(timeoutId);
+    if (!complete) {
+      try {
+        await cleanupOwnedChildGroup(exited, child.pid, limits, label);
+      } catch (cleanupFailure) {
+        const primary = primaryFailure instanceof Error ? primaryFailure.message : "UNKNOWN";
+        throw new Error(
+          `${label}_CLEANUP_FAILED:${cleanupFailure instanceof Error ? cleanupFailure.message : "UNKNOWN"}:PRIMARY:${primary}`,
+        );
+      }
+    }
+    server.stop(true);
+  }
+}
+
 function localWorkerBundleSentinels(bundle: string): readonly string[] {
   return LOCAL_WORKER_BUNDLE_SENTINELS.filter((sentinel) => bundle.includes(sentinel));
 }
@@ -162,12 +416,11 @@ async function isolatedProductionBundle(
   productionEntrypoint: string,
   localWorkerEntrypoint: string,
 ): Promise<string> {
-  // Keep the graph proof outside Bun's long-lived test process. Other suites
-  // legitimately install build plugins, and Bun 1.3.x can retain their loader
-  // registrations across later Bun.build calls. A fresh child preserves the
-  // actual bundler assertion without making aggregate order part of the test.
-  const child = Bun.spawn({
-    cmd: [
+  // Keep the graph proof outside Bun's long-lived test process. The child
+  // seam is bounded because Bun test can otherwise hide a stalled child or
+  // truncate an overlarge build result into a misleading empty bundle.
+  const { stdout, stderr, exitCode } = await runBoundedS3Child(
+    [
       process.execPath,
       "-e",
       ISOLATED_BUILD_SCRIPT,
@@ -175,17 +428,13 @@ async function isolatedProductionBundle(
       productionEntrypoint,
       localWorkerEntrypoint,
     ],
-    cwd: root,
-    stdout: "pipe",
-    stderr: "pipe",
-  });
-  const [stdout, stderr, exitCode] = await Promise.all([
-    new Response(child.stdout).text(),
-    new Response(child.stderr).text(),
-    child.exited,
-  ]);
+    "S3_ISOLATED_BUILD",
+  );
   if (exitCode !== 0) {
     throw new Error(`S3_ISOLATED_BUILD_FAILED:${mode}:${exitCode}\n${stderr}`);
+  }
+  if (stdout.length === 0) {
+    throw new Error(`S3_ISOLATED_BUILD_OUTPUT_EMPTY:${mode}`);
   }
   return stdout;
 }
@@ -1040,17 +1289,14 @@ test(
 test(
   "the S-3 command proves local bindings and blocks only staging proof",
   async () => {
-    const child = Bun.spawn({
-      cmd: ["bash", "scripts/e2e-s3-split.sh"],
-      cwd: root,
-      stdout: "pipe",
-      stderr: "pipe",
-    });
-    const [stdout, stderr, exitCode] = await Promise.all([
-      new Response(child.stdout).text(),
-      new Response(child.stderr).text(),
-      child.exited,
-    ]);
+    const { stdout, stderr, exitCode } = await runBoundedS3Child(
+      ["bash", "scripts/e2e-s3-split.sh"],
+      "S3_COMMAND",
+      { allowedExitCodes: [0, 78] },
+    );
+    if (stdout.length === 0) {
+      throw new Error("S3_COMMAND_OUTPUT_EMPTY");
+    }
     const records = stdout
       .split("\n")
       .filter((line) => line.length > 0)
@@ -1059,6 +1305,17 @@ test(
       (record) => record.suite === "s3-local-bindings" && record.status === "pass",
     );
     const staging = records.find((record) => record.suite === "s3-staging-paired-principal");
+    if (local === undefined || staging === undefined) {
+      throw new Error(
+        `S3_COMMAND_SUMMARIES_MISSING:${JSON.stringify(
+          records.map((record) => ({
+            suite: record.suite,
+            status: record.status,
+            code: record.code,
+          })),
+        )}`,
+      );
+    }
     const assertions = records.filter(
       (record) =>
         record.suite === "e2e-s3-split-local" &&
