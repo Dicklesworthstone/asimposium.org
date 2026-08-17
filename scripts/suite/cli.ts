@@ -24,6 +24,7 @@
  * Run `bun run suite --help` for the full contract.
  */
 
+import { closeSync } from "node:fs";
 import { isAbsolute, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import {
@@ -447,12 +448,14 @@ async function valueBefore<T>(promise: Promise<T>, milliseconds: number): Promis
 const OWNED_SESSION_SUPERVISOR = String.raw`
 use strict;
 use warnings;
+use Fcntl qw(F_SETFD FD_CLOEXEC);
 use POSIX qw(setsid WNOHANG _exit);
-my $nonce = shift @ARGV;
 if (!defined setsid()) {
-  print STDERR "\036ASIMPOSIUM_SUITE_CONTROL $nonce start-failed 125 0 $$ -1\n";
   exit 125;
 }
+
+open(my $control, ">&=3") or exit 125;
+defined fcntl($control, F_SETFD, FD_CLOEXEC) or exit 125;
 
 sub parent_lease_is_open {
   my $readable = "";
@@ -472,24 +475,41 @@ sub retire_orphaned_group {
   _exit(125);
 }
 
+sub publish_control {
+  my ($record) = @_;
+  my $written = syswrite($control, $record);
+  retire_orphaned_group() if !defined $written || $written != length($record);
+}
+
 $SIG{TERM} = sub {};
 $SIG{HUP} = sub {};
 $SIG{PIPE} = sub { retire_orphaned_group(); };
 
+# The nonce arrives over the private parent lease, not argv or product stdio.
+# Receiving it establishes the pre-fork liveness gate, and a live dispatcher
+# keeps the same writer open until bounded cleanup or normal release completes.
+my $nonce = <STDIN>;
+retire_orphaned_group() if !defined $nonce;
+chomp $nonce;
+retire_orphaned_group() if $nonce !~ /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/;
+# If the writer died after its nonce entered the kernel buffer, catch that EOF
+# before forking. A death in the remaining check/fork interval is still retired
+# by the first wait-loop lease poll, together with the exact owned group.
+retire_orphaned_group() if !parent_lease_is_open();
+
 my $target = fork();
 if (!defined $target) {
-  print STDERR "\036ASIMPOSIUM_SUITE_CONTROL $nonce start-failed 125 0 $$ -1\n";
+  publish_control("\036ASIMPOSIUM_SUITE_CONTROL $nonce start-failed 125 0 $$ -1\n");
   exit 125;
 }
 if ($target == 0) {
+  close($control) or _exit(127);
   # Package commands historically receive /dev/null on stdin. Reopen it here so
   # the target cannot consume the supervisor's private parent-liveness lease.
-  open STDIN, "<", "/dev/null" or exit 127;
-  exec @ARGV;
-  exit 127;
+  open STDIN, "<", "/dev/null" or _exit(127);
+  exec @ARGV or _exit(127);
 }
-print STDERR "\036ASIMPOSIUM_SUITE_CONTROL $nonce ready $$\n"
-  or retire_orphaned_group();
+publish_control("\036ASIMPOSIUM_SUITE_CONTROL $nonce ready $$\n");
 my $raw;
 while (1) {
   my $waited = waitpid($target, WNOHANG);
@@ -503,8 +523,7 @@ while (1) {
 my $signal = $raw & 127;
 my $exit = $signal ? 128 + $signal : $raw >> 8;
 $SIG{USR1} = sub { exit $exit; };
-print STDERR "\036ASIMPOSIUM_SUITE_CONTROL $nonce exited $exit $signal $$ -1\n"
-  or retire_orphaned_group();
+publish_control("\036ASIMPOSIUM_SUITE_CONTROL $nonce exited $exit $signal $$ -1\n");
 while (parent_lease_is_open()) { select undef, undef, undef, 0.05; }
 retire_orphaned_group();
 `;
@@ -723,6 +742,21 @@ interface CapturedStream {
   text(): string;
 }
 
+interface DrainableCapture {
+  done: Promise<void>;
+  cancel(): void;
+  failed(): boolean;
+}
+
+type ControlStart =
+  | { kind: "ready"; supervisorPid: number }
+  | { kind: "start-failed"; event: ControlEvent };
+
+interface CapturedControl extends DrainableCapture {
+  start: Promise<ControlStart | undefined>;
+  completion: Promise<ControlEvent | undefined>;
+}
+
 interface RetainedOutputBudget {
   retainedBytes: number;
   limitBytes: number;
@@ -825,7 +859,15 @@ function captureBoundedPipe(
   const cancel = (): void => {
     const firstRequest = !cancellationRequested;
     cancellationRequested = true;
-    if (firstRequest) onCancelRequested?.();
+    if (firstRequest) {
+      try {
+        onCancelRequested?.();
+      } catch {
+        // Test/diagnostic hooks are never allowed to interrupt pipe release or
+        // strand the owned supervisor. The failed stream remains fail-closed.
+        streamFailed = true;
+      }
+    }
     if (reader === undefined || cancellationDelivered) return;
     cancellationDelivered = true;
     try {
@@ -911,16 +953,206 @@ function captureBoundedPipe(
   };
 }
 
-function withoutControlRecords(stderr: string, nonce: string): string {
+function captureControlPipe(
+  stream: ReadableStream<Uint8Array>,
+  nonce: string,
+  expectedSupervisorPid: number,
+): CapturedControl {
   const prefix = `\u001eASIMPOSIUM_SUITE_CONTROL ${nonce} `;
-  return stderr
-    .split("\n")
-    .filter((line) => !line.startsWith(prefix))
-    .join("\n");
+  let state: "start" | "completion" | "terminal" | "invalid" = "start";
+  let buffered = "";
+  let observedBytes = 0;
+  let streamFailed = false;
+  let cancellationRequested = false;
+  let cancellationDelivered = false;
+  let reader: ReturnType<(typeof stream)["getReader"]> | undefined;
+  let resolveStart!: (start: ControlStart | undefined) => void;
+  let resolveCompletion!: (event: ControlEvent | undefined) => void;
+  let startResolved = false;
+  let completionResolved = false;
+  const start = new Promise<ControlStart | undefined>((resolve) => {
+    resolveStart = resolve;
+  });
+  const completion = new Promise<ControlEvent | undefined>((resolve) => {
+    resolveCompletion = resolve;
+  });
+  const resolveStartOnce = (value: ControlStart | undefined): void => {
+    if (startResolved) return;
+    startResolved = true;
+    resolveStart(value);
+  };
+  const resolveCompletionOnce = (value: ControlEvent | undefined): void => {
+    if (completionResolved) return;
+    completionResolved = true;
+    resolveCompletion(value);
+  };
+  const currentState = (): typeof state => state;
+  const releaseReader = (): void => {
+    try {
+      reader?.releaseLock();
+    } catch {
+      // A pending read may still be completing cancellation.
+    }
+  };
+  const cancel = (): void => {
+    cancellationRequested = true;
+    if (reader === undefined || cancellationDelivered) return;
+    cancellationDelivered = true;
+    try {
+      void reader.cancel().catch(() => {
+        // Closing the parent fd in runOwnedCommand is the final bounded release.
+      });
+    } catch {
+      // A concurrent terminal read can reject cancellation synchronously.
+    }
+    releaseReader();
+  };
+  const invalidate = (): void => {
+    if (state === "invalid") return;
+    state = "invalid";
+    streamFailed = true;
+    resolveStartOnce(undefined);
+    resolveCompletionOnce(undefined);
+    cancel();
+  };
+  const parseTerminal = (fields: string[], kind: "exited" | "start-failed") => {
+    const canonicalUnsigned = /^(?:0|[1-9]\d*)$/;
+    const canonicalPositive = /^[1-9]\d*$/;
+    const canonicalMemberCount = /^(?:-1|0|[1-9]\d*)$/;
+    if (
+      fields.length !== 5 ||
+      !canonicalUnsigned.test(fields[1] ?? "") ||
+      !canonicalUnsigned.test(fields[2] ?? "") ||
+      !canonicalPositive.test(fields[3] ?? "") ||
+      !canonicalMemberCount.test(fields[4] ?? "")
+    ) {
+      return undefined;
+    }
+    const exitCode = Number(fields[1]);
+    const signalNumber = Number(fields[2]);
+    const supervisorPid = Number(fields[3]);
+    const memberCount = Number(fields[4]);
+    if (
+      !Number.isSafeInteger(exitCode) ||
+      exitCode < 0 ||
+      exitCode > 255 ||
+      !Number.isSafeInteger(signalNumber) ||
+      signalNumber < 0 ||
+      signalNumber > 127 ||
+      supervisorPid !== expectedSupervisorPid ||
+      !Number.isSafeInteger(memberCount) ||
+      memberCount < -1
+    ) {
+      return undefined;
+    }
+    return {
+      kind,
+      exitCode,
+      ...(signalNumber === 0 ? {} : { signal: `SIG${signalNumber}` }),
+      supervisorPid,
+      memberCount,
+    } satisfies ControlEvent;
+  };
+  const inspectLine = (line: string): void => {
+    if (state === "terminal" || state === "invalid" || !line.startsWith(prefix)) {
+      invalidate();
+      return;
+    }
+    // The control grammar is byte-exact: single ASCII spaces, no trimming or
+    // alternate whitespace. This keeps a malformed supervisor from being
+    // accidentally normalized into an authoritative lifecycle event.
+    const fields = line.slice(prefix.length).split(" ");
+    if (state === "start") {
+      if (fields[0] === "ready") {
+        if (!/^[1-9]\d*$/.test(fields[1] ?? "")) {
+          invalidate();
+          return;
+        }
+        const supervisorPid = Number(fields[1]);
+        if (fields.length !== 2 || supervisorPid !== expectedSupervisorPid) {
+          invalidate();
+          return;
+        }
+        state = "completion";
+        resolveStartOnce({ kind: "ready", supervisorPid });
+        return;
+      }
+      if (fields[0] === "start-failed") {
+        const event = parseTerminal(fields, "start-failed");
+        if (event === undefined) {
+          invalidate();
+          return;
+        }
+        state = "terminal";
+        resolveStartOnce({ kind: "start-failed", event });
+        resolveCompletionOnce(event);
+        return;
+      }
+      invalidate();
+      return;
+    }
+    if (fields[0] !== "exited") {
+      invalidate();
+      return;
+    }
+    const event = parseTerminal(fields, "exited");
+    if (event === undefined) {
+      invalidate();
+      return;
+    }
+    state = "terminal";
+    resolveCompletionOnce(event);
+  };
+  const done = (async (): Promise<void> => {
+    try {
+      const activeReader = stream.getReader();
+      reader = activeReader;
+      if (cancellationRequested) {
+        cancel();
+        return;
+      }
+      const decoder = new TextDecoder("utf-8", { fatal: true });
+      while (true) {
+        const next = await activeReader.read();
+        if (next.done) break;
+        observedBytes += next.value.byteLength;
+        if (observedBytes > OWNED_PROCESS_CONTROL_BUFFER_CHARS) {
+          invalidate();
+          return;
+        }
+        buffered += decoder.decode(next.value, { stream: true });
+        let newline = buffered.indexOf("\n");
+        while (newline >= 0) {
+          inspectLine(buffered.slice(0, newline));
+          if (currentState() === "invalid") return;
+          buffered = buffered.slice(newline + 1);
+          newline = buffered.indexOf("\n");
+        }
+      }
+      buffered += decoder.decode();
+      // A clean EOF before the terminal record is not itself a malformed record:
+      // bounded cleanup may deliberately retire the supervisor after `ready`.
+      // The caller classifies the missing event using its fresh ownership census.
+      if (buffered.length !== 0) invalidate();
+    } catch {
+      if (!cancellationRequested) invalidate();
+    } finally {
+      releaseReader();
+      resolveStartOnce(undefined);
+      resolveCompletionOnce(undefined);
+    }
+  })();
+  return {
+    done,
+    start,
+    completion,
+    cancel,
+    failed: () => streamFailed,
+  };
 }
 
 async function drainWithin(
-  streams: readonly CapturedStream[],
+  streams: readonly DrainableCapture[],
   milliseconds: number,
 ): Promise<boolean> {
   const drained = await valueBefore(
@@ -932,7 +1164,7 @@ async function drainWithin(
   return false;
 }
 
-function cancelCapturedPipes(streams: readonly CapturedStream[]): void {
+function cancelCapturedPipes(streams: readonly DrainableCapture[]): void {
   for (const stream of streams) stream.cancel();
 }
 
@@ -973,6 +1205,7 @@ async function releaseOrKillOwnedSession(
   timeout: boolean,
   memberCount?: number,
   inspector?: OwnedSessionInspectorOptions,
+  retireThroughParentLease?: () => void,
 ): Promise<OwnedCommandOutcome | undefined> {
   const inspection =
     inspector ??
@@ -990,7 +1223,16 @@ async function releaseOrKillOwnedSession(
   const abandon = async (
     outcome: "inspection-unproven" | "ownership-unproven",
   ): Promise<OwnedCommandOutcome> => {
-    killDirectChild(child, "SIGKILL");
+    if (retireThroughParentLease !== undefined) {
+      // Once ready is PID-pinned, the supervisor itself is the safest authority
+      // for an inspection-failure teardown: EOF makes it SIGKILL its own group.
+      // Killing only that leader would disable the lease monitor and could
+      // strand the still-running target we can no longer safely inspect.
+      retireThroughParentLease();
+    } else {
+      // Custom test supervisors do not implement the production lease protocol.
+      killDirectChild(child, "SIGKILL");
+    }
     await reapBefore(child, cleanupDeadlineAt);
     return outcome;
   };
@@ -1060,9 +1302,7 @@ async function releaseOrKillOwnedSession(
   }
   if (release === "unproven") return abandon("ownership-unproven");
   if (!(await reapBefore(child, cleanupDeadlineAt))) {
-    killDirectChild(child, "SIGKILL");
-    await reapBefore(child, cleanupDeadlineAt);
-    return "ownership-unproven";
+    return abandon("ownership-unproven");
   }
   return timeout ? "timeout" : hadDescendant ? "descendant-leaked" : undefined;
 }
@@ -1073,6 +1313,7 @@ async function terminateForOutputOverrun(
   termGraceMs: number,
   killReapMs: number,
   inspector: OwnedSessionInspectorOptions,
+  retireThroughParentLease?: () => void,
 ): Promise<OwnedCommandOutcome> {
   if (supervisorPid !== undefined) {
     return (
@@ -1084,6 +1325,7 @@ async function terminateForOutputOverrun(
         true,
         undefined,
         inspector,
+        retireThroughParentLease,
       )) ?? "ownership-unproven"
     );
   }
@@ -1098,7 +1340,6 @@ type CompletionObservation =
 
 export async function runOwnedCommand(options: OwnedCommandOptions): Promise<OwnedCommandResult> {
   const nonce = crypto.randomUUID();
-  const controlPrefix = `\u001eASIMPOSIUM_SUITE_CONTROL ${nonce} `;
   const budget: RetainedOutputBudget = {
     retainedBytes: 0,
     limitBytes: retainedByteLimit(
@@ -1118,7 +1359,7 @@ export async function runOwnedCommand(options: OwnedCommandOptions): Promise<Own
         "perl",
         "-e",
         options.supervisorScript ?? OWNED_SESSION_SUPERVISOR,
-        nonce,
+        ...(options.supervisorScript === undefined ? [] : [nonce]),
         ...options.command,
       ],
       cwd: options.cwd,
@@ -1126,9 +1367,9 @@ export async function runOwnedCommand(options: OwnedCommandOptions): Promise<Own
       // This write end is a kernel-backed parent-liveness lease. The supervisor
       // monitors EOF while the target runs and while it awaits normal SIGUSR1
       // release, so dispatcher death cannot leave an orphaned owned group.
-      stdin: "pipe",
-      stdout: "pipe",
-      stderr: "pipe",
+      // fd3 is a supervisor-only control pipe. The fork child closes it before
+      // exec, so product output cannot collide with or forge lifecycle records.
+      stdio: ["pipe", "pipe", "pipe", "pipe"],
     });
   } catch {
     return {
@@ -1141,7 +1382,52 @@ export async function runOwnedCommand(options: OwnedCommandOptions): Promise<Own
     };
   }
 
-  const ownershipLease = child.stdin;
+  // This spawn site fixes stdin to "pipe"; Bun therefore returns its FileSink.
+  const ownershipLease = child.stdin as {
+    write(bytes: string): number;
+    flush(): number | Promise<number>;
+    end(): void;
+  };
+  let ownershipLeaseClosed = false;
+  const closeOwnershipLease = (): void => {
+    if (ownershipLeaseClosed) return;
+    ownershipLeaseClosed = true;
+    try {
+      ownershipLease.end();
+    } catch {
+      // EOF/broken-writer is the supervisor's fail-closed retirement signal.
+    }
+  };
+  const retireThroughParentLease =
+    options.supervisorScript === undefined ? closeOwnershipLease : undefined;
+  const controlFd = child.stdio[3];
+  if (!Number.isSafeInteger(controlFd) || Number(controlFd) < 0) {
+    closeOwnershipLease();
+    killDirectChild(child, "SIGKILL");
+    const cleanupProven = await reapDirectChild(
+      child,
+      options.killReapMs ?? OWNED_PROCESS_KILL_REAP_MS,
+    );
+    return {
+      outcome: "spawn-failed",
+      stdout: "",
+      stderr: "",
+      retainedStdoutBytes: 0,
+      retainedStderrBytes: 0,
+      retainedOutputBytes: 0,
+      cleanupProven,
+    };
+  }
+  let controlFdClosed = false;
+  const closeControlFd = (): void => {
+    if (controlFdClosed) return;
+    controlFdClosed = true;
+    try {
+      closeSync(Number(controlFd));
+    } catch {
+      // The raw extra-pipe descriptor may already have been released on error.
+    }
+  };
   try {
     const stdout = captureBoundedPipe(
       child.stdout as ReadableStream<Uint8Array>,
@@ -1154,9 +1440,10 @@ export async function runOwnedCommand(options: OwnedCommandOptions): Promise<Own
       child.stderr as ReadableStream<Uint8Array>,
       streamLimitBytes,
       budget,
-      controlPrefix,
+      undefined,
       () => options.onPipeCancelRequested?.("stderr"),
     );
+    const control = captureControlPipe(Bun.file(Number(controlFd)).stream(), nonce, child.pid);
     const termGraceMs = options.termGraceMs ?? OWNED_PROCESS_TERM_GRACE_MS;
     const killReapMs = options.killReapMs ?? OWNED_PROCESS_KILL_REAP_MS;
     const pipeDrainMs = options.pipeDrainMs ?? OWNED_PROCESS_PIPE_DRAIN_MS;
@@ -1166,14 +1453,114 @@ export async function runOwnedCommand(options: OwnedCommandOptions): Promise<Own
     let signal: string | undefined;
     let cleanupProven: boolean | undefined;
 
+    if (options.supervisorScript === undefined) {
+      try {
+        const leaseRecord = `${nonce}\n`;
+        if (ownershipLease.write(leaseRecord) !== Buffer.byteLength(leaseRecord)) {
+          throw new Error("partial parent-lease write");
+        }
+        const remaining = Math.max(
+          0,
+          options.timeoutMs - Math.round(performance.now() - startedAt),
+        );
+        if ((await valueBefore(Promise.resolve(ownershipLease.flush()), remaining)) === undefined) {
+          throw new Error("parent-lease flush exceeded command deadline");
+        }
+      } catch {
+        closeOwnershipLease();
+        // The supervisor has already called setsid before reading this record.
+        // EOF therefore lets it retire its own exact group even if it consumed a
+        // partial/full nonce before the parent observed the write failure.
+        cleanupProven = await reapDirectChild(child, killReapMs);
+        cancelCapturedPipes([stdout, stderr, control]);
+        await drainWithin([stdout, stderr, control], pipeDrainMs);
+        return {
+          outcome: "spawn-failed",
+          stdout: stdout.text(),
+          stderr: stderr.text(),
+          retainedStdoutBytes: stdout.retainedBytes(),
+          retainedStderrBytes: stderr.retainedBytes(),
+          retainedOutputBytes: budget.retainedBytes,
+          cleanupProven,
+        };
+      }
+    }
+
+    const lifecycleCheckpoint = async (
+      phase: "ready" | "completed",
+      supervisorPid: number,
+    ): Promise<void> => {
+      const hook = options.onLifecycleCheckpoint;
+      if (hook === undefined) return;
+      const remaining = Math.max(0, options.timeoutMs - Math.round(performance.now() - startedAt));
+      const observation = await valueBefore(
+        Promise.resolve()
+          .then(() => hook(phase, supervisorPid))
+          .then(
+            () => ({ kind: "completed" as const }),
+            (error: unknown) => ({ kind: "rejected" as const, error }),
+          ),
+        remaining,
+      );
+      if (observation?.kind === "completed") return;
+
+      const checkpointError =
+        observation?.kind === "rejected"
+          ? observation.error
+          : new Error(`suite lifecycle checkpoint ${phase} exceeded its command deadline`);
+      const cleanup = await releaseOrKillOwnedSession(
+        child,
+        supervisorPid,
+        termGraceMs,
+        killReapMs,
+        true,
+        undefined,
+        inspector,
+        retireThroughParentLease,
+      );
+      cancelCapturedPipes([stdout, stderr, control]);
+      const drained = await drainWithin([stdout, stderr, control], pipeDrainMs);
+      if (cleanup !== "timeout" || !drained) {
+        throw new AggregateError(
+          [
+            checkpointError,
+            new Error(
+              `suite lifecycle checkpoint cleanup was unproven: ${cleanup ?? "released-without-timeout-proof"}; pipes=${drained ? "drained" : "unproven"}`,
+            ),
+          ],
+          `suite lifecycle checkpoint ${phase} failed before cleanup was proved`,
+        );
+      }
+      throw checkpointError;
+    };
+
     // Product output is not authority. Even if it crosses a retained-byte ceiling
     // first, wait for the nonce-bound ready record and pin it to Bun's direct child
     // before any group signal can be considered owned.
-    const supervisorPid = await valueBefore(stderr.ready, options.timeoutMs);
-    if (supervisorPid !== undefined && supervisorPid === child.pid) {
-      await options.onLifecycleCheckpoint?.("ready", supervisorPid);
+    const readyWaitMs = Math.max(0, options.timeoutMs - Math.round(performance.now() - startedAt));
+    const startObservation = await valueBefore(
+      control.start.then((start) => ({ start })),
+      readyWaitMs,
+    );
+    const controlStart = startObservation?.start;
+    const supervisorPid = controlStart?.kind === "ready" ? controlStart.supervisorPid : undefined;
+    if (controlStart?.kind === "ready") {
+      await lifecycleCheckpoint("ready", controlStart.supervisorPid);
     }
-    if (supervisorPid === undefined) {
+    if (controlStart?.kind === "start-failed") {
+      exitCode = controlStart.event.exitCode;
+      signal = controlStart.event.signal;
+      cleanupProven = await reapDirectChild(child, killReapMs);
+      if (options.supervisorScript === undefined) {
+        outcome = "spawn-failed";
+      } else {
+        // A custom supervisor is not production authority for the claim that
+        // fork() failed and no same-group child exists. Reaping only its leader
+        // cannot upgrade that assertion into proved cleanup.
+        cleanupProven = false;
+        outcome = "ownership-unproven";
+      }
+    } else if (supervisorPid === undefined) {
       // A command deadline may elapse while its ready record is still queued. The
       // direct child PID is a separate OS fact: only a fresh bounded census may
       // promote it to a cleanup target. It never promotes pre-ready product bytes
@@ -1186,10 +1573,14 @@ export async function runOwnedCommand(options: OwnedCommandOptions): Promise<Own
         true,
         undefined,
         inspector,
+        retireThroughParentLease,
       );
       cleanupProven = cleanup === "timeout";
       outcome =
-        stdout.overflowed() || stderr.overflowed()
+        startObservation !== undefined ||
+        control.failed() ||
+        stdout.overflowed() ||
+        stderr.overflowed()
           ? "ownership-unproven"
           : cleanup === "timeout"
             ? "timeout"
@@ -1203,6 +1594,7 @@ export async function runOwnedCommand(options: OwnedCommandOptions): Promise<Own
         true,
         undefined,
         inspector,
+        retireThroughParentLease,
       );
       cleanupProven = cleanup === "timeout";
       outcome = "ownership-unproven";
@@ -1214,6 +1606,7 @@ export async function runOwnedCommand(options: OwnedCommandOptions): Promise<Own
           termGraceMs,
           killReapMs,
           inspector,
+          retireThroughParentLease,
         );
         if (cleanup === "inspection-unproven" || cleanup === "ownership-unproven") {
           cleanupProven = false;
@@ -1232,7 +1625,7 @@ export async function runOwnedCommand(options: OwnedCommandOptions): Promise<Own
         );
         const completion = await valueBefore(
           Promise.race<CompletionObservation>([
-            stderr.completion.then((control) => ({ kind: "completed", control })),
+            control.completion.then((event) => ({ kind: "completed", control: event })),
             stdout.overrun.then(() => ({ kind: "output-overrun" })),
             stderr.overrun.then(() => ({ kind: "output-overrun" })),
           ]),
@@ -1241,16 +1634,21 @@ export async function runOwnedCommand(options: OwnedCommandOptions): Promise<Own
         if (completion?.kind === "output-overrun") {
           await finishOutputOverrun();
         } else if (completion === undefined || completion.control === undefined) {
+          const cleanup = await releaseOrKillOwnedSession(
+            child,
+            supervisorPid,
+            termGraceMs,
+            killReapMs,
+            true,
+            undefined,
+            inspector,
+            retireThroughParentLease,
+          );
+          cleanupProven = cleanup === "timeout";
           outcome =
-            (await releaseOrKillOwnedSession(
-              child,
-              supervisorPid,
-              termGraceMs,
-              killReapMs,
-              true,
-              undefined,
-              inspector,
-            )) ?? "ownership-unproven";
+            completion !== undefined || control.failed()
+              ? "ownership-unproven"
+              : (cleanup ?? "ownership-unproven");
         } else {
           const control = completion.control;
           exitCode = control.exitCode;
@@ -1266,11 +1664,12 @@ export async function runOwnedCommand(options: OwnedCommandOptions): Promise<Own
               true,
               undefined,
               inspector,
+              retireThroughParentLease,
             );
             cleanupProven = cleanup === "timeout";
             outcome = control.kind === "start-failed" ? "spawn-failed" : "ownership-unproven";
           } else {
-            await options.onLifecycleCheckpoint?.("completed", supervisorPid);
+            await lifecycleCheckpoint("completed", supervisorPid);
             outcome =
               (await releaseOrKillOwnedSession(
                 child,
@@ -1280,6 +1679,7 @@ export async function runOwnedCommand(options: OwnedCommandOptions): Promise<Own
                 false,
                 control.memberCount,
                 inspector,
+                retireThroughParentLease,
               )) ?? "exited";
           }
         }
@@ -1291,10 +1691,12 @@ export async function runOwnedCommand(options: OwnedCommandOptions): Promise<Own
     // detached inheritor's pipe close; normal successful exits still get their
     // bounded drain before release.
     if (outcome !== "exited") {
-      cancelCapturedPipes([stdout, stderr]);
+      cancelCapturedPipes([stdout, stderr, control]);
     }
-    const drained = await drainWithin([stdout, stderr], pipeDrainMs);
-    if (outcome === "exited" && (stdout.overflowed() || stderr.overflowed())) {
+    const drained = await drainWithin([stdout, stderr, control], pipeDrainMs);
+    if (control.failed()) {
+      outcome = "ownership-unproven";
+    } else if (outcome === "exited" && (stdout.overflowed() || stderr.overflowed())) {
       outcome = "output-overrun";
       cleanupProven = true;
     } else if (outcome === "exited" && !drained) {
@@ -1305,7 +1707,7 @@ export async function runOwnedCommand(options: OwnedCommandOptions): Promise<Own
       ...(exitCode === undefined ? {} : { exitCode }),
       ...(signal === undefined ? {} : { signal }),
       stdout: stdout.text(),
-      stderr: withoutControlRecords(stderr.text(), nonce),
+      stderr: stderr.text(),
       retainedStdoutBytes: stdout.retainedBytes(),
       retainedStderrBytes: stderr.retainedBytes(),
       retainedOutputBytes: budget.retainedBytes,
@@ -1315,7 +1717,8 @@ export async function runOwnedCommand(options: OwnedCommandOptions): Promise<Own
     // Normal release has already reaped the supervisor. Closing the writer here
     // also makes exceptions and fail-closed returns unable to park a
     // lease-waiting leader.
-    ownershipLease.end();
+    closeOwnershipLease();
+    closeControlFd();
   }
 }
 

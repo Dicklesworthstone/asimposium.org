@@ -1,10 +1,9 @@
 /**
  * Integration tests for the root suite dispatcher (bead asimposiumorg-8xn, OPS.1).
  *
- * Every test spawns the real CLI as a child process against a real fixture repository on
- * disk. Nothing is mocked: the "passing" packages really exit 0, the planted failing
- * package really exits nonzero, and the assertions read the dispatcher's real stdout,
- * stderr and exit code.
+ * CLI acceptance cases spawn the real command against real fixture repositories on disk.
+ * The owned-session section also exercises the exported launcher directly with explicit
+ * planted supervisor/inspector seams so lifecycle failures remain causally attributable.
  */
 
 import { describe, expect, test } from "bun:test";
@@ -13,7 +12,7 @@ import { closeSync, existsSync, mkdtempSync, openSync, readFileSync } from "node
 import { homedir, tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
-import { runOwnedCommand, suiteExecutionLimits } from "./cli.ts";
+import { type OwnedCommandOptions, type OwnedCommandResult, suiteExecutionLimits } from "./cli.ts";
 import {
   blockedCommand,
   failCommand,
@@ -32,22 +31,55 @@ interface CliResult {
   stderr: string;
 }
 
+let testCaptureRoot: string | undefined;
+
+function capturePath(name: string): string {
+  testCaptureRoot ??= mkdtempSync(join(tmpdir(), "asimposium-suite-capture-"));
+  return join(testCaptureRoot, name);
+}
+
+const FILE_CAPTURE_EXEC = `
+use strict;
+use warnings;
+my $stdout_path = shift @ARGV;
+my $stderr_path = shift @ARGV;
+open STDOUT, ">", $stdout_path or exit 126;
+open STDERR, ">", $stderr_path or exit 126;
+exec @ARGV or exit 127;
+`;
+
 async function runCli(
   root: string,
   args: string[],
   env: Record<string, string> = {},
 ): Promise<CliResult> {
+  const stdoutPath = capturePath("cli.stdout");
+  const stderrPath = capturePath("cli.stderr");
+  closeSync(openSync(stdoutPath, "w", 0o600));
+  closeSync(openSync(stderrPath, "w", 0o600));
   const child = Bun.spawn({
-    cmd: ["bun", CLI, "--root", root, ...args],
-    stdout: "pipe",
-    stderr: "pipe",
+    cmd: [
+      "perl",
+      "-e",
+      FILE_CAPTURE_EXEC,
+      stdoutPath,
+      stderrPath,
+      "bun",
+      CLI,
+      "--root",
+      root,
+      ...args,
+    ],
+    stdout: "ignore",
+    stderr: "ignore",
     env: { ...process.env, ASIMPOSIUM_SUITE_DEPTH: "0", ...env },
   });
-  const [stdout, stderr] = await Promise.all([
-    new Response(child.stdout).text(),
-    new Response(child.stderr).text(),
-  ]);
-  return { exitCode: await child.exited, stdout, stderr };
+  const exitCode = await child.exited;
+  return {
+    exitCode,
+    stdout: readFileSync(stdoutPath, "utf8"),
+    stderr: readFileSync(stderrPath, "utf8"),
+  };
 }
 
 function records(result: CliResult): (UnitDiagnostic | SummaryDiagnostic)[] {
@@ -73,6 +105,148 @@ function childEnvironment(): Record<string, string> {
   return process.env.PATH === undefined ? {} : { PATH: process.env.PATH };
 }
 
+let ownedCommandHelperRoot: string | undefined;
+
+function ownedCommandResultPath(): string {
+  ownedCommandHelperRoot ??= mkdtempSync(join(tmpdir(), "asimposium-suite-owned-command-"));
+  return join(ownedCommandHelperRoot, "result.json");
+}
+
+async function runOwnedCommand(options: OwnedCommandOptions): Promise<OwnedCommandResult> {
+  if (options.onLifecycleCheckpoint !== undefined) {
+    throw new Error("lifecycle checkpoint cases require the dedicated asynchronous helper");
+  }
+  const onPipeCancelRequested = options.onPipeCancelRequested;
+  const nonce = crypto.randomUUID();
+  const resultPath = ownedCommandResultPath();
+  closeSync(openSync(resultPath, "w", 0o600));
+  const serializable = {
+    ...options,
+    onPipeCancelRequested: undefined,
+    onLifecycleCheckpoint: undefined,
+  };
+  const helperSource = `
+    import { runOwnedCommand } from ${JSON.stringify(pathToFileURL(CLI).href)};
+    const options = ${JSON.stringify(serializable)};
+    const cancellations = [];
+    ${onPipeCancelRequested === undefined ? "" : "options.onPipeCancelRequested = (pipe) => cancellations.push(pipe);"}
+    try {
+      const result = await runOwnedCommand(options);
+      await Bun.write(
+        ${JSON.stringify(resultPath)},
+        JSON.stringify({ nonce: ${JSON.stringify(nonce)}, kind: "result", result, cancellations }) + "\\n",
+      );
+    } catch (error) {
+      await Bun.write(
+        ${JSON.stringify(resultPath)},
+        JSON.stringify({
+          nonce: ${JSON.stringify(nonce)},
+          kind: "rejection",
+          message: error instanceof Error ? error.message : String(error),
+        }) + "\\n",
+      );
+    }
+  `;
+  const helper = spawnSync(process.execPath, ["-e", helperSource], {
+    env: childEnvironment(),
+    encoding: "utf8",
+    timeout: 30_000,
+    maxBuffer: 1024 * 1024,
+  });
+  if (helper.error !== undefined || helper.status !== 0 || helper.signal !== null) {
+    throw new Error(
+      `owned-command helper failed: status=${helper.status}; signal=${helper.signal}; error=${helper.error?.message ?? "none"}; stderr=${helper.stderr.slice(0, 4_096)}`,
+    );
+  }
+  let payload = "";
+  for (let attempt = 0; attempt < 10; attempt += 1) {
+    payload = readFileSync(resultPath, "utf8");
+    if (payload.length > 0) break;
+    await Bun.sleep(10);
+  }
+  const parsed = JSON.parse(payload) as {
+    nonce?: unknown;
+    kind?: unknown;
+    message?: unknown;
+    result?: OwnedCommandResult;
+    cancellations?: unknown;
+  };
+  if (parsed.nonce !== nonce) {
+    throw new Error("owned-command helper result nonce mismatch");
+  }
+  if (parsed.kind === "rejection") {
+    throw new Error(typeof parsed.message === "string" ? parsed.message : "owned-command rejected");
+  }
+  if (
+    parsed.kind !== "result" ||
+    parsed.result === undefined ||
+    !Array.isArray(parsed.cancellations) ||
+    parsed.cancellations.some((pipe) => pipe !== "stdout" && pipe !== "stderr")
+  ) {
+    throw new Error(`owned-command helper emitted malformed output: ${payload.slice(0, 4_096)}`);
+  }
+  for (const pipe of parsed.cancellations as ("stdout" | "stderr")[]) {
+    onPipeCancelRequested?.(pipe);
+  }
+  return parsed.result;
+}
+
+function runOwnedCommandWithThrowingCancel(
+  options: Omit<OwnedCommandOptions, "onPipeCancelRequested" | "onLifecycleCheckpoint">,
+): OwnedCommandResult {
+  const nonce = crypto.randomUUID();
+  const resultPath = ownedCommandResultPath();
+  closeSync(openSync(resultPath, "w", 0o600));
+  const helperSource = `
+    import { runOwnedCommand } from ${JSON.stringify(pathToFileURL(CLI).href)};
+    try {
+      const result = await runOwnedCommand({
+        ...${JSON.stringify(options)},
+        onPipeCancelRequested: () => { throw new Error("planted pipe-cancel callback failure"); },
+      });
+      await Bun.write(
+        ${JSON.stringify(resultPath)},
+        JSON.stringify({ nonce: ${JSON.stringify(nonce)}, kind: "result", result }) + "\\n",
+      );
+    } catch (error) {
+      await Bun.write(
+        ${JSON.stringify(resultPath)},
+        JSON.stringify({
+          nonce: ${JSON.stringify(nonce)},
+          kind: "rejection",
+          message: error instanceof Error ? error.message : String(error),
+        }) + "\\n",
+      );
+    }
+  `;
+  const helper = spawnSync(process.execPath, ["-e", helperSource], {
+    env: childEnvironment(),
+    encoding: "utf8",
+    timeout: 30_000,
+    maxBuffer: 1024 * 1024,
+  });
+  if (helper.error !== undefined || helper.status !== 0 || helper.signal !== null) {
+    throw new Error(
+      `throwing-cancel helper failed: status=${helper.status}; signal=${helper.signal}; error=${helper.error?.message ?? "none"}`,
+    );
+  }
+  const payload = readFileSync(resultPath, "utf8");
+  const parsed = JSON.parse(payload) as {
+    nonce?: unknown;
+    kind?: unknown;
+    message?: unknown;
+    result?: OwnedCommandResult;
+  };
+  if (parsed.nonce !== nonce || parsed.kind !== "result" || parsed.result === undefined) {
+    throw new Error(
+      typeof parsed.message === "string"
+        ? parsed.message
+        : `throwing-cancel helper emitted malformed output: ${payload.slice(0, 4_096)}`,
+    );
+  }
+  return parsed.result;
+}
+
 function outputOverrunCommand(): string {
   return `bun -e ${JSON.stringify(
     "process.on('SIGTERM', () => {}); process.stdout.write('x'.repeat(65537)); setTimeout(() => process.exit(0), 800)",
@@ -85,38 +259,46 @@ const PRODUCTION_AGGREGATE_RETAINED_BYTES = 96 * 1024;
 const DELAYED_READY_SUPERVISOR = String.raw`
 use strict;
 use warnings;
+use Fcntl qw(F_SETFD FD_CLOEXEC);
 use POSIX qw(setsid);
 my $nonce = shift @ARGV;
 exit 125 if !defined setsid();
+open(my $control, ">&=3") or exit 125;
+defined fcntl($control, F_SETFD, FD_CLOEXEC) or exit 125;
+sub publish_control { my ($record) = @_; my $written = syswrite($control, $record); exit 125 if !defined $written || $written != length($record); }
 $SIG{TERM} = sub {};
 $SIG{HUP} = sub {};
 my $target = fork();
 exit 125 if !defined $target;
-if ($target == 0) { exec @ARGV; exit 127; }
+if ($target == 0) { close($control) or exit 127; exec @ARGV or exit 127; }
 select undef, undef, undef, 0.05;
-print STDERR "\036ASIMPOSIUM_SUITE_CONTROL $nonce ready $$\n";
+publish_control("\036ASIMPOSIUM_SUITE_CONTROL $nonce ready $$\n");
 waitpid($target, 0);
 my $raw = $?;
 my $signal = $raw & 127;
 my $exit = $signal ? 128 + $signal : $raw >> 8;
 $SIG{USR1} = sub { exit $exit; };
-print STDERR "\036ASIMPOSIUM_SUITE_CONTROL $nonce exited $exit $signal $$ 1\n";
+publish_control("\036ASIMPOSIUM_SUITE_CONTROL $nonce exited $exit $signal $$ 1\n");
 while (1) { sleep 1; }
 `;
 
 const PID_MISMATCH_SUPERVISOR = String.raw`
 use strict;
 use warnings;
+use Fcntl qw(F_SETFD FD_CLOEXEC);
 use POSIX qw(setsid);
 my $nonce = shift @ARGV;
 exit 125 if !defined setsid();
+open(my $control, ">&=3") or exit 125;
+defined fcntl($control, F_SETFD, FD_CLOEXEC) or exit 125;
+sub publish_control { my ($record) = @_; my $written = syswrite($control, $record); exit 125 if !defined $written || $written != length($record); }
 $SIG{TERM} = sub {};
 $SIG{HUP} = sub {};
 my $target = fork();
 exit 125 if !defined $target;
-if ($target == 0) { exec @ARGV; exit 127; }
+if ($target == 0) { close($control) or exit 127; exec @ARGV or exit 127; }
 select undef, undef, undef, 0.05;
-print STDERR "\036ASIMPOSIUM_SUITE_CONTROL $nonce ready " . ($$ + 1) . "\n";
+publish_control("\036ASIMPOSIUM_SUITE_CONTROL $nonce ready " . ($$ + 1) . "\n");
 waitpid($target, 0);
 while (1) { sleep 1; }
 `;
@@ -124,43 +306,171 @@ while (1) { sleep 1; }
 const NEGATIVE_MEMBER_COUNT_SUPERVISOR = String.raw`
 use strict;
 use warnings;
+use Fcntl qw(F_SETFD FD_CLOEXEC);
 use POSIX qw(setsid);
 my $nonce = shift @ARGV;
 exit 125 if !defined setsid();
-print STDERR "\036ASIMPOSIUM_SUITE_CONTROL $nonce ready $$\n";
+open(my $control, ">&=3") or exit 125;
+defined fcntl($control, F_SETFD, FD_CLOEXEC) or exit 125;
+sub publish_control { my ($record) = @_; my $written = syswrite($control, $record); exit 125 if !defined $written || $written != length($record); }
+publish_control("\036ASIMPOSIUM_SUITE_CONTROL $nonce ready $$\n");
 $SIG{TERM} = sub {};
 $SIG{HUP} = sub {};
 my $target = fork();
 exit 125 if !defined $target;
-if ($target == 0) { exec @ARGV; exit 127; }
+if ($target == 0) { close($control) or exit 127; exec @ARGV or exit 127; }
 waitpid($target, 0);
 my $raw = $?;
 my $signal = $raw & 127;
 my $exit = $signal ? 128 + $signal : $raw >> 8;
 $SIG{USR1} = sub { exit $exit; };
-print STDERR "\036ASIMPOSIUM_SUITE_CONTROL $nonce exited $exit $signal $$ -1\n";
+publish_control("\036ASIMPOSIUM_SUITE_CONTROL $nonce exited $exit $signal $$ -1\n");
 while (1) { sleep 1; }
 `;
 
+const FRAGMENTED_CONTROL_SUPERVISOR = String.raw`
+use strict;
+use warnings;
+use POSIX qw(setsid);
+my $nonce = shift @ARGV;
+exit 125 if !defined setsid();
+open(my $control, ">&=3") or exit 125;
+$SIG{TERM} = sub {};
+$SIG{HUP} = sub {};
+sub publish_fragmented {
+  my ($record) = @_;
+  my $midpoint = int(length($record) / 2);
+  my $first = syswrite($control, substr($record, 0, $midpoint));
+  exit 125 if !defined $first || $first != $midpoint;
+  select undef, undef, undef, 0.02;
+  my $second = syswrite($control, substr($record, $midpoint));
+  exit 125 if !defined $second || $second != length($record) - $midpoint;
+}
+my $target = fork();
+exit 125 if !defined $target;
+if ($target == 0) { close($control) or exit 127; exec @ARGV or exit 127; }
+publish_fragmented("\036ASIMPOSIUM_SUITE_CONTROL $nonce ready $$\n");
+waitpid($target, 0);
+my $raw = $?;
+my $signal = $raw & 127;
+my $exit = $signal ? 128 + $signal : $raw >> 8;
+$SIG{USR1} = sub { exit $exit; };
+publish_fragmented("\036ASIMPOSIUM_SUITE_CONTROL $nonce exited $exit $signal $$ -1\n");
+while (1) { sleep 1; }
+`;
+
+function invalidControlSupervisor(
+  publication:
+    | "malformed"
+    | "invalid-utf8"
+    | "noncanonical-whitespace"
+    | "noncanonical-number"
+    | "duplicate-ready"
+    | "out-of-order"
+    | "oversized",
+): string {
+  const publish = {
+    malformed: 'syswrite($control, "not-a-control-record\\n");',
+    "invalid-utf8": 'syswrite($control, pack("C", 255));',
+    "noncanonical-whitespace":
+      'syswrite($control, "\\036ASIMPOSIUM_SUITE_CONTROL $nonce ready  $$\\n");',
+    "noncanonical-number":
+      'syswrite($control, "\\036ASIMPOSIUM_SUITE_CONTROL $nonce ready +$$\\n");',
+    "duplicate-ready":
+      'syswrite($control, "\\036ASIMPOSIUM_SUITE_CONTROL $nonce ready $$\\n\\036ASIMPOSIUM_SUITE_CONTROL $nonce ready $$\\n");',
+    "out-of-order":
+      'syswrite($control, "\\036ASIMPOSIUM_SUITE_CONTROL $nonce exited 0 0 $$ -1\\n");',
+    oversized: 'syswrite($control, "x" x 513);',
+  }[publication];
+  return `
+use strict;
+use warnings;
+use POSIX qw(setsid);
+my $nonce = shift @ARGV;
+exit 125 if !defined setsid();
+open(my $control, ">&=3") or exit 125;
+$SIG{TERM} = sub {};
+$SIG{HUP} = sub {};
+${publish}
+while (1) { sleep 1; }
+`;
+}
+
+function terminalControlSupervisor(
+  publication:
+    | "start-failed"
+    | "start-failed-with-child"
+    | "start-failed-extra"
+    | "missing-terminal"
+    | "partial-line"
+    | "duplicate-terminal",
+  marker: string,
+): string {
+  const publish = {
+    "start-failed":
+      'syswrite($control, "\\036ASIMPOSIUM_SUITE_CONTROL $nonce start-failed 125 0 $$ -1\\n"); exit 125;',
+    "start-failed-with-child":
+      'my $child = fork(); exit 125 if !defined $child; if ($child == 0) { close($control); $SIG{TERM} = sub {}; $SIG{HUP} = sub {}; sleep 5; exit 0; } syswrite($control, "\\036ASIMPOSIUM_SUITE_CONTROL $nonce start-failed 125 0 $$ -1\\n"); exit 125;',
+    "start-failed-extra":
+      'syswrite($control, "\\036ASIMPOSIUM_SUITE_CONTROL $nonce start-failed 125 0 $$ -1\\nextra\\n"); exit 125;',
+    "missing-terminal":
+      'syswrite($control, "\\036ASIMPOSIUM_SUITE_CONTROL $nonce ready $$\\n"); exit 0;',
+    "partial-line": 'syswrite($control, "\\036ASIMPOSIUM_SUITE_CONTROL $nonce ready $$"); exit 0;',
+    "duplicate-terminal":
+      'syswrite($control, "\\036ASIMPOSIUM_SUITE_CONTROL $nonce ready $$\\n\\036ASIMPOSIUM_SUITE_CONTROL $nonce exited 0 0 $$ -1\\n\\036ASIMPOSIUM_SUITE_CONTROL $nonce exited 0 0 $$ -1\\n"); $SIG{USR1} = sub { exit 0; }; while (1) { sleep 1; }',
+  }[publication];
+  return `
+use strict;
+use warnings;
+use POSIX qw(setsid);
+my $nonce = shift @ARGV;
+my $marker = ${JSON.stringify(marker)};
+exit 125 if !defined setsid();
+open(my $control, ">&=3") or exit 125;
+$SIG{TERM} = sub {};
+$SIG{HUP} = sub {};
+${publish}
+`;
+}
+
 function processTable(): string {
+  const stdoutPath = capturePath("ps-command.stdout");
+  const stderrPath = capturePath("ps-command.stderr");
+  closeSync(openSync(stdoutPath, "w", 0o600));
+  closeSync(openSync(stderrPath, "w", 0o600));
   const snapshot = Bun.spawnSync({
-    cmd: ["/bin/ps", "-axo", "command="],
-    stdout: "pipe",
-    stderr: "pipe",
+    cmd: ["perl", "-e", FILE_CAPTURE_EXEC, stdoutPath, stderrPath, "/bin/ps", "-axo", "command="],
+    stdout: "ignore",
+    stderr: "ignore",
   });
   expect(snapshot.exitCode).toBe(0);
-  return new TextDecoder().decode(snapshot.stdout);
+  expect(readFileSync(stderrPath, "utf8")).toBe("");
+  return readFileSync(stdoutPath, "utf8");
 }
 
 function processIdsForMarker(marker: string): number[] {
+  const stdoutPath = capturePath("ps-pid-command.stdout");
+  const stderrPath = capturePath("ps-pid-command.stderr");
+  closeSync(openSync(stdoutPath, "w", 0o600));
+  closeSync(openSync(stderrPath, "w", 0o600));
   const snapshot = Bun.spawnSync({
-    cmd: ["/bin/ps", "-axo", "pid=,command="],
-    stdout: "pipe",
-    stderr: "pipe",
+    cmd: [
+      "perl",
+      "-e",
+      FILE_CAPTURE_EXEC,
+      stdoutPath,
+      stderrPath,
+      "/bin/ps",
+      "-axo",
+      "pid=,command=",
+    ],
+    stdout: "ignore",
+    stderr: "ignore",
   });
   expect(snapshot.exitCode).toBe(0);
+  expect(readFileSync(stderrPath, "utf8")).toBe("");
   const pids: number[] = [];
-  for (const line of new TextDecoder().decode(snapshot.stdout).split("\n")) {
+  for (const line of readFileSync(stdoutPath, "utf8").split("\n")) {
     const match = line.trim().match(/^(\d+)\s+(.*)$/);
     const command = match?.[2];
     if (match !== null && command?.includes(marker)) pids.push(Number(match[1]));
@@ -197,14 +507,17 @@ function spawnCrashableOwnedCommand(checkpoint: "ready" | "completed", targetSou
       command: ["perl", "-e", ${JSON.stringify(targetSource)}],
       cwd: ${JSON.stringify(process.cwd())},
       env: ${JSON.stringify(childEnvironment())},
-      timeoutMs: 30_000,
+      timeoutMs: 5 * 60_000,
       onLifecycleCheckpoint: async (phase, supervisorPid) => {
         if (phase !== ${JSON.stringify(checkpoint)}) return;
         await Bun.write(
           ${JSON.stringify(checkpointPath)},
           "checkpoint " + phase + " " + supervisorPid + "\\n",
         );
-        await Bun.sleep(30_000);
+        // The outer test kills this dispatcher at the checkpoint. A much longer
+        // fallback than its 30s observation window prevents the hold from
+        // self-releasing under scheduler delay while remaining bounded.
+        await Bun.sleep(5 * 60_000);
       },
     });
   `;
@@ -216,6 +529,50 @@ function spawnCrashableOwnedCommand(checkpoint: "ready" | "completed", targetSou
     stderr: "ignore",
   });
   return { helper, checkpointPath };
+}
+
+function spawnThrowingLifecycleCommand(checkpoint: "ready" | "completed", targetSource: string) {
+  const resultPath = newParentLeaseCheckpointPath();
+  const planted = `planted ${checkpoint} lifecycle hook failure`;
+  const helperSource = `
+    import { runOwnedCommand } from ${JSON.stringify(pathToFileURL(CLI).href)};
+    let supervisorPid;
+    try {
+      await runOwnedCommand({
+        command: ["perl", "-e", ${JSON.stringify(targetSource)}],
+        cwd: ${JSON.stringify(process.cwd())},
+        env: ${JSON.stringify(childEnvironment())},
+        timeoutMs: 2_000,
+        termGraceMs: 40,
+        killReapMs: 300,
+        pipeDrainMs: 200,
+        supervisorScript: ${JSON.stringify(DELAYED_READY_SUPERVISOR)},
+        onLifecycleCheckpoint: (phase, pid) => {
+          if (phase !== ${JSON.stringify(checkpoint)}) return;
+          supervisorPid = pid;
+          throw new Error(${JSON.stringify(planted)});
+        },
+      });
+      await Bun.write(${JSON.stringify(resultPath)}, JSON.stringify({ kind: "resolved" }) + "\\n");
+    } catch (error) {
+      await Bun.write(
+        ${JSON.stringify(resultPath)},
+        JSON.stringify({
+          kind: "rejected",
+          supervisorPid,
+          message: error instanceof Error ? error.message : String(error),
+        }) + "\\n",
+      );
+    }
+  `;
+  const helper = Bun.spawn({
+    cmd: ["bun", "-e", helperSource],
+    env: childEnvironment(),
+    stdin: "ignore",
+    stdout: "ignore",
+    stderr: "ignore",
+  });
+  return { helper, planted, resultPath };
 }
 
 async function waitForLifecycleCheckpoint(
@@ -241,6 +598,41 @@ async function waitForLifecycleCheckpoint(
     }
   }
   throw new Error(`checkpoint helper timed out before ${expected}`);
+}
+
+async function waitForLifecycleRejection(
+  helper: ReturnType<typeof Bun.spawn>,
+  resultPath: string,
+  timeoutMs = 30_000,
+): Promise<{ message: string; supervisorPid: number }> {
+  const deadline = performance.now() + timeoutMs;
+  while (performance.now() < deadline) {
+    if (existsSync(resultPath)) {
+      const parsed = JSON.parse(readFileSync(resultPath, "utf8")) as {
+        kind?: unknown;
+        message?: unknown;
+        supervisorPid?: unknown;
+      };
+      if (
+        parsed.kind !== "rejected" ||
+        typeof parsed.message !== "string" ||
+        !Number.isSafeInteger(parsed.supervisorPid) ||
+        Number(parsed.supervisorPid) <= 1
+      ) {
+        throw new Error(`malformed lifecycle rejection: ${JSON.stringify(parsed)}`);
+      }
+      return { message: parsed.message, supervisorPid: Number(parsed.supervisorPid) };
+    }
+    const exitCode = await Promise.race([helper.exited, Bun.sleep(20).then(() => undefined)]);
+    if (exitCode !== undefined) {
+      // Bun may resolve `exited` just ahead of the child's final small-file
+      // publication becoming visible to this isolate.
+      await Bun.sleep(50);
+      if (existsSync(resultPath)) continue;
+      throw new Error(`lifecycle helper exited ${exitCode} before publishing its rejection`);
+    }
+  }
+  throw new Error("lifecycle helper timed out before publishing its rejection");
 }
 
 function ownedGroupPids(pgid: number, timeoutMs = 1_000): number[] {
@@ -327,8 +719,8 @@ async function stopOwnedFixtureGroup(pgid: number | undefined): Promise<void> {
   await waitForOwnedGroupEmpty(pgid);
 }
 
-function aggregateOutputCommand(totalCapturedBytes: number, includeExitedControl: boolean): string {
-  return `my $prefix = "\\036ASIMPOSIUM_SUITE_CONTROL " . ("n" x 36) . " "; my $parent = getppid(); my $control = length($prefix . "ready $parent\\n")${includeExitedControl ? ' + length($prefix . "exited 0 0 $parent 1\\n")' : ""}; my $payload = ${totalCapturedBytes} - $control; my $stdout = 48 * 1024; die if $payload <= $stdout; syswrite(STDOUT, "x" x $stdout); syswrite(STDERR, ("y" x ($payload - $stdout - 1)) . "\\n");`;
+function aggregateOutputCommand(totalCapturedBytes: number): string {
+  return `my $payload = ${totalCapturedBytes}; my $stdout = 48 * 1024; die if $payload <= $stdout; syswrite(STDOUT, "x" x $stdout); syswrite(STDERR, ("y" x ($payload - $stdout - 1)) . "\\n");`;
 }
 
 describe("owned session launcher", () => {
@@ -374,12 +766,34 @@ describe("owned session launcher", () => {
     expect(processTable()).not.toContain(marker);
   });
 
+  test("a throwing pipe-cancel observer cannot interrupt exact-group cleanup", () => {
+    const marker = `suite-throwing-pipe-cancel-${crypto.randomUUID()}`;
+    const result = runOwnedCommandWithThrowingCancel({
+      command: [
+        "perl",
+        "-e",
+        `my $marker = "${marker}"; $SIG{TERM} = sub {}; $SIG{HUP} = sub {}; syswrite(STDOUT, "x" x ${PRODUCTION_STREAM_RETAINED_BYTES + 1}); while (1) { sleep 1; }`,
+      ],
+      cwd: process.cwd(),
+      env: childEnvironment(),
+      timeoutMs: 2_000,
+      termGraceMs: 40,
+      killReapMs: 200,
+      pipeDrainMs: 200,
+    });
+
+    expect(result.outcome).toBe("output-overrun");
+    expect(result.cleanupProven).toBe(true);
+    expect(result.retainedStdoutBytes).toBe(PRODUCTION_STREAM_RETAINED_BYTES);
+    expect(processTable()).not.toContain(marker);
+  });
+
   test("the production 98304-byte aggregate limit completes exactly", async () => {
     const result = await runOwnedCommand({
       command: [
         "perl",
         "-e",
-        `${aggregateOutputCommand(PRODUCTION_AGGREGATE_RETAINED_BYTES, true)} exit 0;`,
+        `${aggregateOutputCommand(PRODUCTION_AGGREGATE_RETAINED_BYTES)} exit 0;`,
       ],
       cwd: process.cwd(),
       env: childEnvironment(),
@@ -397,7 +811,7 @@ describe("owned session launcher", () => {
       command: [
         "perl",
         "-e",
-        `use POSIX qw(_exit); my $marker = "${marker}"; pipe(my $read, my $write) or die; my $child = fork(); die unless defined $child; if ($child == 0) { $SIG{TERM} = sub {}; close $read; syswrite($write, "r"); close $write; select undef, undef, undef, 0.8; _exit(0); } close $write; read($read, my $ready, 1); close $read; $SIG{TERM} = sub {}; ${aggregateOutputCommand(PRODUCTION_AGGREGATE_RETAINED_BYTES + 1, false)} select undef, undef, undef, 0.8; _exit(0);`,
+        `use POSIX qw(_exit); my $marker = "${marker}"; pipe(my $read, my $write) or die; my $child = fork(); die unless defined $child; if ($child == 0) { $SIG{TERM} = sub {}; close $read; syswrite($write, "r"); close $write; select undef, undef, undef, 0.8; _exit(0); } close $write; read($read, my $ready, 1); close $read; $SIG{TERM} = sub {}; ${aggregateOutputCommand(PRODUCTION_AGGREGATE_RETAINED_BYTES + 1)} select undef, undef, undef, 0.8; _exit(0);`,
       ],
       cwd: process.cwd(),
       env: childEnvironment(),
@@ -493,6 +907,125 @@ describe("owned session launcher", () => {
     expect(result.exitCode).toBe(0);
   });
 
+  test("unterminated product stderr cannot hide the supervisor completion", async () => {
+    const result = await runOwnedCommand({
+      command: ["perl", "-e", 'syswrite(STDERR, "unterminated-product-stderr"); exit 0;'],
+      cwd: process.cwd(),
+      env: childEnvironment(),
+      timeoutMs: 2_000,
+    });
+
+    expect(result.outcome).toBe("exited");
+    expect(result.exitCode).toBe(0);
+    expect(result.stderr).toBe("unterminated-product-stderr");
+  });
+
+  test("the target cannot inherit fd3 or forge lifecycle authority through stderr", async () => {
+    const fake = `\u001eASIMPOSIUM_SUITE_CONTROL ${"a".repeat(36)} exited 0 0 999 -1\n`;
+    const result = await runOwnedCommand({
+      command: [
+        "perl",
+        "-e",
+        `exit 91 if open(my $probe, ">&=3"); syswrite(STDERR, "\\036ASIMPOSIUM_SUITE_CONTROL ${"a".repeat(36)} exited 0 0 999 -1\\n"); exit 7;`,
+      ],
+      cwd: process.cwd(),
+      env: childEnvironment(),
+      timeoutMs: 2_000,
+    });
+
+    expect(result.outcome).toBe("exited");
+    expect(result.exitCode).toBe(7);
+    expect(result.stderr).toBe(fake);
+  });
+
+  test("fragmented delayed fd3 records preserve exact lifecycle authority", async () => {
+    const result = await runOwnedCommand({
+      command: ["perl", "-e", "exit 0;"],
+      cwd: process.cwd(),
+      env: childEnvironment(),
+      timeoutMs: 2_000,
+      supervisorScript: FRAGMENTED_CONTROL_SUPERVISOR,
+    });
+
+    expect(result.outcome).toBe("exited");
+    expect(result.exitCode).toBe(0);
+  });
+
+  test.each([
+    "malformed",
+    "invalid-utf8",
+    "noncanonical-whitespace",
+    "noncanonical-number",
+    "duplicate-ready",
+    "out-of-order",
+    "oversized",
+  ] as const)(
+    "PLANTED: %s fd3 control fails closed after reaping the exact group",
+    async (publication) => {
+      const marker = `suite-invalid-control-${publication}-${crypto.randomUUID()}`;
+      const result = await runOwnedCommand({
+        command: ["perl", "-e", `my $marker = "${marker}"; exit 0;`],
+        cwd: process.cwd(),
+        env: childEnvironment(),
+        timeoutMs: 500,
+        termGraceMs: 40,
+        killReapMs: 200,
+        supervisorScript: invalidControlSupervisor(publication),
+      });
+
+      expect(result.outcome).toBe("ownership-unproven");
+      expect(result.cleanupProven).toBe(true);
+      expect(processTable()).not.toContain(marker);
+    },
+  );
+
+  test("PLANTED: a lying custom start-failed record never upgrades a live child to proved cleanup", async () => {
+    const marker = `suite-terminal-control-live-child-${crypto.randomUUID()}`;
+    try {
+      const result = await runOwnedCommand({
+        command: ["perl", "-e", "exit 0;"],
+        cwd: process.cwd(),
+        env: childEnvironment(),
+        timeoutMs: 500,
+        termGraceMs: 40,
+        killReapMs: 200,
+        supervisorScript: terminalControlSupervisor("start-failed-with-child", marker),
+      });
+
+      expect(result.outcome).toBe("ownership-unproven");
+      expect(result.cleanupProven).toBe(false);
+      expect(processTable()).toContain(marker);
+    } finally {
+      stopDetachedFixture(marker);
+    }
+  });
+
+  test.each([
+    "start-failed",
+    "start-failed-extra",
+    "missing-terminal",
+    "partial-line",
+    "duplicate-terminal",
+  ] as const)(
+    "PLANTED: custom-supervisor %s cannot claim proved production cleanup",
+    async (publication) => {
+      const marker = `suite-terminal-control-${publication}-${crypto.randomUUID()}`;
+      const result = await runOwnedCommand({
+        command: ["perl", "-e", "exit 0;"],
+        cwd: process.cwd(),
+        env: childEnvironment(),
+        timeoutMs: 500,
+        termGraceMs: 40,
+        killReapMs: 200,
+        supervisorScript: terminalControlSupervisor(publication, marker),
+      });
+
+      expect(result.outcome).toBe("ownership-unproven");
+      expect(result.cleanupProven).not.toBe(true);
+      expect(processTable()).not.toContain(marker);
+    },
+  );
+
   test("dispatcher death retires a still-running target through the parent lease", async () => {
     let supervisorPid: number | undefined;
     const { helper, checkpointPath } = spawnCrashableOwnedCommand(
@@ -538,6 +1071,34 @@ describe("owned session launcher", () => {
     }
   }, 60_000);
 
+  test.each(["ready", "completed"] as const)(
+    "a throwing %s lifecycle hook rejects only after its exact group is reaped",
+    async (checkpoint) => {
+      let supervisorPid: number | undefined;
+      const fixture = spawnThrowingLifecycleCommand(
+        checkpoint,
+        checkpoint === "ready"
+          ? "$SIG{TERM} = sub {}; $SIG{HUP} = sub {}; while (1) { sleep 1; }"
+          : "exit 0;",
+      );
+      try {
+        const rejection = await waitForLifecycleRejection(fixture.helper, fixture.resultPath);
+        supervisorPid = rejection.supervisorPid;
+        expect(rejection.message).toBe(fixture.planted);
+        expect(await fixture.helper.exited).toBe(0);
+        expect(ownedGroupPids(supervisorPid)).toEqual([]);
+      } finally {
+        try {
+          fixture.helper.kill("SIGKILL");
+        } catch {
+          // The lifecycle helper is expected to have exited after publishing.
+        }
+        await stopOwnedFixtureGroup(supervisorPid);
+      }
+    },
+    60_000,
+  );
+
   test("the target sees EOF instead of the supervisor parent lease on stdin", async () => {
     const result = await runOwnedCommand({
       command: [
@@ -570,14 +1131,18 @@ describe("owned session launcher", () => {
     expect(result.outcome).toBe("inspection-unproven");
   });
 
-  test("a stalled inspector is bounded, reaped, and reported inspection-unproven", async () => {
+  test("a stalled inspector retires a live target through the parent lease", async () => {
     const marker = `suite-stalled-inspector-${crypto.randomUUID()}`;
     const startedAt = performance.now();
     const result = await runOwnedCommand({
-      command: ["perl", "-e", "exit 0;"],
+      command: [
+        "perl",
+        "-e",
+        `my $marker = "${marker}"; $SIG{TERM} = sub {}; $SIG{HUP} = sub {}; while (1) { sleep 1; }`,
+      ],
       cwd: process.cwd(),
       env: childEnvironment(),
-      timeoutMs: 2_000,
+      timeoutMs: 100,
       termGraceMs: 40,
       killReapMs: 200,
       inspectionCommand: [
