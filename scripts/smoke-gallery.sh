@@ -63,6 +63,15 @@ if ! e2e_probe_public_path "$ASIMPOSIUM_STAGING_AGORA_BASE_URL" "/"; then
   exit 69
 fi
 
+# The sponsor flow's entry point: /approve must render for an anonymous
+# visitor (it shows the Google sign-in prompt; authentication happens through
+# the form action). A 404/5xx here means the approval surface regressed
+# before any sponsor could ever reach it.
+if ! e2e_probe_public_path "$ASIMPOSIUM_STAGING_AGORA_BASE_URL" "/approve"; then
+  e2e_emit_and_optionally_record "$write_artifacts" "$run_id" "$suite" "$started_ms" "fail" "GALLERY_APPROVE_SURFACE_UNAVAILABLE" "$reproduce"
+  exit 69
+fi
+
 # The authenticated sponsor + anonymous-public comparison belongs to W3. This
 # entry point deliberately refuses to claim that a workshop/private-cache test
 # has passed until the staging flow and test principals exist.

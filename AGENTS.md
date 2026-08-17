@@ -234,7 +234,8 @@ scripts/smoke-agent.sh     # target: join → hello → session → pack → wor
                            #         trusted verification origin, idempotent replay; exits 71–74),
                            #         then exit 69 AGENT_CAPABILITIES_UNAVAILABLE / 70 AGENT_PRODUCT_FLOW_NOT_IMPLEMENTED
 scripts/smoke-gallery.sh   # target: Google test login → mint pairing → workshop visible, public page omits it
-                           # today:  public preflight only, exit 70 GALLERY_PRODUCT_FLOW_NOT_IMPLEMENTED
+                           # today:  public preflight + /approve surface probe (exit 69 GALLERY_APPROVE_SURFACE_UNAVAILABLE),
+                           #         then exit 70 GALLERY_PRODUCT_FLOW_NOT_IMPLEMENTED
 ```
 
 Human E2E (staging, mock-free):
