@@ -50,6 +50,29 @@ readonly LOCAL_WRANGLER="$REPO_ROOT/apps/wire/node_modules/.bin/wrangler"
 readonly LOCAL_WRANGLER_CONFIG="$REPO_ROOT/infra/wrangler.toml"
 readonly LOCAL_D1_WORKER="$REPO_ROOT/apps/wire/src/enrollment/local-d1-worker.ts"
 readonly LOCAL_D1_CLIENT="$REPO_ROOT/apps/wire/src/enrollment/local-d1-client.ts"
+# Never resolve an executable through a caller-controlled PATH. This fixed
+# search set is also the PATH inherited by local Wrangler: its /usr/bin/env
+# node shebang must not turn a hostile caller PATH into code that receives the
+# replay root.
+readonly TRUSTED_TOOL_PATH="/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin"
+resolve_trusted_tool() {
+  local name="$1" candidate="" directory base
+  candidate="$(PATH="$TRUSTED_TOOL_PATH" command -v -- "$name" 2>/dev/null)" || return 1
+  [[ "$candidate" == /* && -f "$candidate" && -x "$candidate" ]] || return 1
+  directory="${candidate%/*}"
+  base="${candidate##*/}"
+  (cd -P -- "$directory" && printf '%s/%s' "$PWD" "$base")
+}
+BASH_BIN="$(resolve_trusted_tool bash)" || { printf 'BLOCKED s1-cold-enrollment: BASH_REQUIRED\n' >&2; exit 78; }
+BUN_BIN="$(resolve_trusted_tool bun)" || { printf 'BLOCKED s1-cold-enrollment: BUN_REQUIRED\n' >&2; exit 78; }
+NODE_BIN="$(resolve_trusted_tool node)" || { printf 'BLOCKED s1-cold-enrollment: NODE_REQUIRED\n' >&2; exit 78; }
+PERL_BIN="$(resolve_trusted_tool perl)" || { printf 'BLOCKED s1-cold-enrollment: PERL_REQUIRED\n' >&2; exit 78; }
+CURL_BIN="$(resolve_trusted_tool curl)" || { printf 'BLOCKED s1-cold-enrollment: CURL_REQUIRED\n' >&2; exit 78; }
+PS_BIN="$(resolve_trusted_tool ps)" || { printf 'BLOCKED s1-cold-enrollment: PS_REQUIRED\n' >&2; exit 78; }
+readonly BASH_BIN BUN_BIN NODE_BIN PERL_BIN CURL_BIN PS_BIN
+readonly PINNED_RUNTIME_PATH="${BASH_BIN%/*}:${BUN_BIN%/*}:${NODE_BIN%/*}:/usr/bin:/bin"
+PATH="$PINNED_RUNTIME_PATH"
+export PATH
 # Per-run local replay root. It exists only in this shell and the owned Wrangler
 # process environment; retained D1 artifacts must not be decryptable with a
 # repository-known fixture key.
@@ -111,9 +134,15 @@ LOCAL_RUNTIME_XDG_STATE=""
 LOCAL_RUNTIME_XDG_RUNTIME=""
 LOCAL_RUNTIME_WRANGLER_CACHE=""
 LOCAL_RUNTIME_WRANGLER_LOG=""
+LOCAL_RUNTIME_WRANGLER_ENV_FILE=""
 LOCAL_RUNTIME_BUN_CACHE=""
 LOCAL_RUNTIME_ENV=()
 LOCAL_RETAINED_ROOTS=()
+# A one-shot inherited descriptor carries the replay/origin pair to the
+# running child. Its bytes are never command arguments and it is closed in the
+# parent before the stopped supervisor is observed.
+readonly PRIVATE_SERVER_HANDOFF_FD=9
+SERVER_HANDOFF_OPEN=0
 # Resolved by `resolve_port` / `resolve_run_token`, which refuse in this shell
 # rather than inside a command substitution. See the comment on `allocate_port`.
 RESOLVED_PORT=""
@@ -252,28 +281,74 @@ private_state_directory() {
   [[ -n "$STATE_DIR" && -d "$STATE_DIR" && ! -L "$STATE_DIR" && -O "$STATE_DIR" && -r "$STATE_DIR" && -w "$STATE_DIR" && -x "$STATE_DIR" ]]
 }
 
-# A runtime root is valid only when it is inside this invocation's retained state
-# directory and remains a private real directory. The prefix check happens before
-# mkdir, so a caller cannot turn an attempted outside root into a write.
-private_local_runtime_directory() {
-  local root="$1"
+# Canonicalize a directory candidate through its existing parent before any mkdir.
+# A lexical prefix is not containment: runtime/../../outside starts with runtime
+# but resolves outside it. Every runtime root below is created parent-first, so
+# this total operation never needs to guess at a nonexistent ancestor.
+canonical_local_runtime_candidate() {
+  local root="$1" parent base resolved_parent
   private_state_directory || return 1
-  [[ -n "$LOCAL_RUNTIME_ROOT" && ( "$root" == "$LOCAL_RUNTIME_ROOT" || "$root" == "$LOCAL_RUNTIME_ROOT/"* ) ]] || return 1
+  [[ -n "$LOCAL_RUNTIME_ROOT" && "$LOCAL_RUNTIME_ROOT" == /* && "$root" == /* ]] || return 1
+  parent="${root%/*}"
+  base="${root##*/}"
+  [[ -n "$parent" && -n "$base" && "$base" != "." && "$base" != ".." ]] || return 1
+  resolved_parent="$(cd -P -- "$parent" 2>/dev/null && printf '%s' "$PWD")" || return 1
+  [[ "$resolved_parent" == /* ]] || return 1
+  printf '%s/%s' "$resolved_parent" "$base"
+}
+
+true_runtime_descendant() {
+  local candidate="$1"
+  [[ "$candidate" == "$LOCAL_RUNTIME_ROOT" || "$candidate" == "$LOCAL_RUNTIME_ROOT/"* ]]
+}
+
+# A runtime root is valid only when its canonical path is a true descendant of
+# this invocation's retained state directory and it remains a private real
+# directory. The resolution happens before mkdir, so no lexical `..` bypass can
+# create a canary outside STATE_DIR.
+private_local_runtime_directory() {
+  local root="$1" expected actual
+  private_state_directory || return 1
+  expected="$(canonical_local_runtime_candidate "$root")" || return 1
+  true_runtime_descendant "$expected" || return 1
   [[ -d "$root" && ! -L "$root" && -O "$root" && -r "$root" && -w "$root" && -x "$root" ]]
+  actual="$(cd -P -- "$root" 2>/dev/null && printf '%s' "$PWD")" || return 1
+  [[ "$actual" == "$expected" ]]
 }
 
 create_private_local_runtime_directory() {
-  local root="$1"
-  [[ -n "$LOCAL_RUNTIME_ROOT" && ( "$root" == "$LOCAL_RUNTIME_ROOT" || "$root" == "$LOCAL_RUNTIME_ROOT/"* ) ]] || return 1
-  mkdir -p -- "$root" || return 1
-  private_local_runtime_directory "$root"
+  local root="$1" canonical
+  canonical="$(canonical_local_runtime_candidate "$root")" || return 1
+  true_runtime_descendant "$canonical" || return 1
+  mkdir -p -- "$canonical" || return 1
+  private_local_runtime_directory "$canonical"
+}
+
+create_private_local_runtime_file() {
+  local path="$1" parent canonical_parent canonical_path
+  private_state_directory || return 1
+  parent="${path%/*}"
+  canonical_parent="$(canonical_local_runtime_candidate "$parent")" || return 1
+  true_runtime_descendant "$canonical_parent" || return 1
+  [[ -d "$canonical_parent" && ! -L "$canonical_parent" && -O "$canonical_parent" ]] || return 1
+  canonical_path="$canonical_parent/${path##*/}"
+  [[ ! -e "$canonical_path" && ! -L "$canonical_path" ]] || return 1
+  set -C
+  if ! : >"$canonical_path"; then
+    set +C
+    return 1
+  fi
+  set +C
+  [[ -f "$canonical_path" && ! -L "$canonical_path" && -O "$canonical_path" && -r "$canonical_path" && -w "$canonical_path" ]]
 }
 
 prepare_local_runtime_roots() {
-  local root
+  local root canonical_state
   private_state_directory || return 1
-  [[ -n "${PATH:-}" ]] || return 1
-  LOCAL_RUNTIME_ROOT="$STATE_DIR/runtime"
+  [[ -n "$PINNED_RUNTIME_PATH" ]] || return 1
+  canonical_state="$(cd -P -- "$STATE_DIR" 2>/dev/null && printf '%s' "$PWD")" || return 1
+  [[ "$canonical_state" == /* ]] || return 1
+  LOCAL_RUNTIME_ROOT="$canonical_state/runtime"
   LOCAL_RUNTIME_HOME="$LOCAL_RUNTIME_ROOT/home"
   LOCAL_RUNTIME_TMP="$LOCAL_RUNTIME_ROOT/tmp"
   LOCAL_RUNTIME_CWD="$LOCAL_RUNTIME_ROOT/cwd"
@@ -284,6 +359,7 @@ prepare_local_runtime_roots() {
   LOCAL_RUNTIME_XDG_RUNTIME="$LOCAL_RUNTIME_ROOT/xdg-runtime"
   LOCAL_RUNTIME_WRANGLER_CACHE="$LOCAL_RUNTIME_ROOT/wrangler-cache"
   LOCAL_RUNTIME_WRANGLER_LOG="$LOCAL_RUNTIME_ROOT/wrangler-log"
+  LOCAL_RUNTIME_WRANGLER_ENV_FILE="$LOCAL_RUNTIME_ROOT/wrangler-env"
   LOCAL_RUNTIME_BUN_CACHE="$LOCAL_RUNTIME_ROOT/bun-cache"
   for root in \
     "$LOCAL_RUNTIME_ROOT" "$LOCAL_RUNTIME_HOME" "$LOCAL_RUNTIME_TMP" "$LOCAL_RUNTIME_CWD" \
@@ -292,12 +368,13 @@ prepare_local_runtime_roots() {
     "$LOCAL_RUNTIME_WRANGLER_LOG" "$LOCAL_RUNTIME_BUN_CACHE"; do
     create_private_local_runtime_directory "$root" || return 1
   done
+  create_private_local_runtime_file "$LOCAL_RUNTIME_WRANGLER_ENV_FILE" || return 1
   # This is the only retention declaration. Every concrete writable runtime root
   # is below it, so one inode-safe traversal covers the whole retained surface.
   LOCAL_RETAINED_ROOTS=("$STATE_DIR")
   LOCAL_RUNTIME_ENV=(
     env -i
-    "PATH=$PATH"
+    "PATH=$PINNED_RUNTIME_PATH"
     "HOME=$LOCAL_RUNTIME_HOME"
     "TMPDIR=$LOCAL_RUNTIME_TMP"
     "TMP=$LOCAL_RUNTIME_TMP"
@@ -309,6 +386,7 @@ prepare_local_runtime_roots() {
     "XDG_RUNTIME_DIR=$LOCAL_RUNTIME_XDG_RUNTIME"
     "WRANGLER_CACHE_DIR=$LOCAL_RUNTIME_WRANGLER_CACHE"
     "WRANGLER_LOG_PATH=$LOCAL_RUNTIME_WRANGLER_LOG"
+    "CLOUDFLARE_LOAD_DEV_VARS_FROM_DOT_ENV=false"
     "BUN_INSTALL_CACHE_DIR=$LOCAL_RUNTIME_BUN_CACHE"
   )
   reconcile_local_runtime_roots
@@ -325,6 +403,7 @@ reconcile_local_runtime_roots() {
     "$LOCAL_RUNTIME_WRANGLER_LOG" "$LOCAL_RUNTIME_BUN_CACHE"; do
     private_local_runtime_directory "$root" || return 1
   done
+  [[ -f "$LOCAL_RUNTIME_WRANGLER_ENV_FILE" && ! -L "$LOCAL_RUNTIME_WRANGLER_ENV_FILE" && -O "$LOCAL_RUNTIME_WRANGLER_ENV_FILE" && -r "$LOCAL_RUNTIME_WRANGLER_ENV_FILE" && -w "$LOCAL_RUNTIME_WRANGLER_ENV_FILE" ]] || return 1
 }
 
 # Failure-only fault injection, only for a named self-test mode. These hooks
@@ -412,7 +491,7 @@ try {
 ps_table() {
   local table filtered
   ps_table_unavailable && return 1
-  table="$(ps -A -o pid=,ppid=,pgid=,stat= 2>/dev/null)" || return 1
+  table="$($PS_BIN -A -o pid=,ppid=,pgid=,stat= 2>/dev/null)" || return 1
   [[ -n "$table" ]] || return 1
   # These mutations happen before validation and exercise the actual parser
   # rejection path. The first places a malformed row after the runner row (the
@@ -491,7 +570,7 @@ process_identity() {
   # intentionally excluded: during an EXIT trap the shell may already have begun
   # reparenting children, and treating that expected change as PID reuse would
   # withhold cleanup from the very group we proved at launch.
-  identity="$(ps -p "$1" -o pgid=,lstart=,comm= 2>/dev/null)" || status=$?
+  identity="$($PS_BIN -p "$1" -o pgid=,lstart=,comm= 2>/dev/null)" || status=$?
   if ((status != 0)); then
     # `ps -p` exits non-zero for "no such process" and for a real failure alike.
     # Signal 0 distinguishes an extant-but-uninspectable process without changing
@@ -499,19 +578,29 @@ process_identity() {
     # so bounded callers can retry and persistent unknown authorizes no signal.
     kernel_signal_zero_state "$1" || liveness=$?
     ((liveness == 1)) || return 2
-    if ps -p "$$" -o pid= >/dev/null 2>&1; then return 1; fi
+    if $PS_BIN -p "$$" -o pid= >/dev/null 2>&1; then return 1; fi
     return 2
   fi
   identity="$(printf '%s' "$identity" | tr -s '[:space:]' ' ')"
   [[ -n "${identity// /}" ]] || return 2
   if [[ -n "$marker" ]]; then
-    argv="$(ps -p "$1" -o args= 2>/dev/null)" || return 2
+    argv="$($PS_BIN -p "$1" -o args= 2>/dev/null)" || return 2
     # The marker is generated from /dev/urandom and passed as bash's $0. It is
     # therefore present in argv before the payload is released, while lstart
     # remains the independent birth identity for a recycled numeric PID/PGID.
     [[ "$argv" == *"$marker"* ]] || return 1
   fi
   printf '%s' "$identity"
+}
+
+# Read exactly the live supervisor command line through the pinned system ps.
+# The caller compares it in memory only; a credential-bearing value is never
+# copied into a phase record or diagnostic.
+supervisor_argv_excludes() {
+  local pid="$1" replay_key="$2" origin="$3" argv
+  [[ "$pid" =~ ^[1-9][0-9]*$ && "$replay_key" =~ ^[A-Za-z0-9_-]{43}$ && "$origin" =~ ^http://127\.0\.0\.1:[1-9][0-9]{0,4}$ ]] || return 1
+  argv="$($PS_BIN -ww -p "$pid" -o args= 2>/dev/null)" || return 1
+  [[ -n "$argv" && "$argv" != *"$replay_key"* && "$argv" != *"$origin"* ]]
 }
 
 # The process group id of a pid; non-zero when the process is gone, the pid is not
@@ -1072,34 +1161,37 @@ on_interrupt() {
 # which is why reaching here with work left to do is itself reportable.
 on_exit() {
   local status="$?"
-  local attempt=1
+  local attempt=1 cleanup_proven=0
   trap - EXIT
   trap '' HUP INT TERM
   LIFECYCLE_CRITICAL=0
   while ((attempt <= EXIT_CLEANUP_ATTEMPTS)); do
     if cleanup_all; then
+      cleanup_proven=1
       if ((attempt > 1)); then
         log_phase "exit-cleanup-recovered" "attempt=$attempt exit_status=$status"
       fi
-      # Every declared retained local-D1 root is reconciled and scanned after
-      # owned processes are gone, including success, failures, and interrupts.
-      # The success path performed the same scan before its pass record; this
-      # second pass catches late writes made while cleanup was settling.
-      if [[ -n "$STATE_DIR" && ( -n "$LOCAL_REPLAY_KEY" || "$RUN_MODE" == "local-d1" ) ]]; then
-        assert_local_replay_key_not_retained "exit"
-        LOCAL_REPLAY_KEY=""
-      fi
-      if [[ -n "$INTERRUPT_TERMINAL_CODE" ]]; then
-        log_phase "interrupted-cleanup-recovered" "code=$INTERRUPT_TERMINAL_CODE attempt=$attempt"
-        emit "fail" "$INTERRUPT_TERMINAL_CODE"
-      fi
-      return "$status"
+      break
     fi
     if ((attempt < EXIT_CLEANUP_ATTEMPTS)); then
       log_phase "exit-cleanup-retry" "attempt=$attempt exit_status=$status"
     fi
     attempt=$((attempt + 1))
   done
+  # Retained-state proof is independent from process cleanup. In particular, a
+  # second unprovable cleanup attempt must not turn an unchecked replay root or
+  # client diagnostic into a CLEANUP_INCOMPLETE false green.
+  if [[ -n "$STATE_DIR" && ( -n "$LOCAL_REPLAY_KEY" || "$RUN_MODE" == "local-d1" ) ]]; then
+    assert_local_replay_key_not_retained "exit"
+    LOCAL_REPLAY_KEY=""
+  fi
+  if ((cleanup_proven == 1)); then
+    if [[ -n "$INTERRUPT_TERMINAL_CODE" ]]; then
+      log_phase "interrupted-cleanup-recovered" "code=$INTERRUPT_TERMINAL_CODE attempt=$attempt"
+      emit "fail" "$INTERRUPT_TERMINAL_CODE"
+    fi
+    return "$status"
+  fi
   log_phase "cleanup-incomplete" "exit_status=$status"
   printf 'FAILED %s: %s body_exit=%s\n' "$SUITE" "CLEANUP_INCOMPLETE" "$status" >&2
   emit "fail" "CLEANUP_INCOMPLETE"
@@ -1520,6 +1612,7 @@ start_pinned_supervisor() {
   local capture_deadline="" proof_status=0
 
   private_state_directory || return 1
+  ((${#LOCAL_RUNTIME_ENV[@]} > 0)) || return 1
   [[ "$(dirname "$status_file")" == "$STATE_DIR" && ! -e "$status_file" && ! -L "$status_file" ]] || return 1
   capture_deadline="$(transient_retry_deadline_us)" || return 1
   status_auth="$(new_status_authenticator)" || return 1
@@ -1541,7 +1634,7 @@ start_pinned_supervisor() {
 
   set -m
   # shellcheck disable=SC2016
-  bash -c '
+  "${LOCAL_RUNTIME_ENV[@]}" "$BASH_BIN" -c '
     status_file="$1"
     status_auth="$2"
     shift 2
@@ -1680,6 +1773,60 @@ start_pinned_supervisor() {
   return 0
 }
 
+# The replay root is delivered after the stopped leader is born through one
+# inherited anonymous descriptor. Unlike an `env NAME=value command` argument,
+# neither the variable name/value pair nor the origin can be retained in the
+# long-lived supervisor argv. Descriptor 9 is rejected if the caller already
+# owns it; this runner must never silently replace an ambient channel.
+open_private_workerd_handoff() {
+  local replay_key="$1" stoa_origin="$2"
+  [[ "$SERVER_HANDOFF_OPEN" == "0" && "$replay_key" =~ ^[A-Za-z0-9_-]{43}$ && "$stoa_origin" =~ ^http://127\.0\.0\.1:[1-9][0-9]{0,4}$ ]] || return 1
+  if { : <&9; } 2>/dev/null; then return 1; fi
+  exec 9<<<"$replay_key"$'\n'"$stoa_origin"
+  SERVER_HANDOFF_OPEN=1
+}
+
+close_private_workerd_handoff() {
+  [[ "$SERVER_HANDOFF_OPEN" == "1" ]] || return 0
+  exec 9<&-
+  SERVER_HANDOFF_OPEN=0
+}
+
+# Start one stopped supervisor whose child reads the replay/origin handoff from
+# descriptor 9, closes that descriptor, and only then exports the two Worker
+# bindings. The full wrapper chain begins under LOCAL_RUNTIME_ENV in
+# start_pinned_supervisor, including the supervisor itself and Wrangler's node
+# shebang. `--env-file` plus the false flag make this exact Wrangler version
+# skip config-relative .dev.vars and default .env discovery.
+start_private_workerd_supervisor() {
+  local status_file="$1" label="$2" replay_key="$3" stoa_origin="$4" cwd="$5" log="$6"
+  shift 6
+  open_private_workerd_handoff "$replay_key" "$stoa_origin" || return 1
+  if ! start_pinned_supervisor "$status_file" "$label" \
+    "$BASH_BIN" -c '
+      handoff_fd="$1"; cwd="$2"; log="$3"; shift 3
+      [[ "$handoff_fd" == "9" ]] || exit 125
+      IFS= read -r replay_key <&9 || exit 125
+      IFS= read -r stoa_origin <&9 || exit 125
+      if IFS= read -r unexpected <&9; then exit 125; fi
+      [[ "$replay_key" =~ ^[A-Za-z0-9_-]{43}$ && "$stoa_origin" =~ ^http://127\.0\.0\.1:[1-9][0-9]{0,4}$ ]] || exit 125
+      exec 9<&-
+      replay_name="$(printf "%s" ENROLLMENT_REPLAY_ KEY)"
+      origin_name="$(printf "%s" STOA_ ORIGIN)"
+      export "$replay_name=$replay_key"
+      export "$origin_name=$stoa_origin"
+      export CLOUDFLARE_INCLUDE_PROCESS_ENV=true
+      unset replay_key stoa_origin replay_name origin_name
+      cd -- "$cwd" || exit 125
+      exec "$@" >>"$log" 2>&1
+    ' "$BASH_BIN" "$PRIVATE_SERVER_HANDOFF_FD" "$cwd" "$log" "$@"; then
+    close_private_workerd_handoff || true
+    return 1
+  fi
+  close_private_workerd_handoff || return 1
+  supervisor_argv_excludes "$PROVISIONAL_PID" "$replay_key" "$stoa_origin"
+}
+
 adopt_provisional_supervisor() {
   local owner="$1"
   [[ "$LIFECYCLE_CRITICAL" == "1" ]] || return 1
@@ -1791,6 +1938,69 @@ run_with_deadline() {
   local seconds="$1"
   shift
   run_named_with_deadline "client" "$seconds" "$@"
+}
+
+# This source is passed only to the pinned absolute Bun interpreter. Keeping it
+# as data lets the production client path and the secret-diagnostic plant invoke
+# the exact same O_EXCL|O_NOFOLLOW bounded capture primitive.
+readonly LOCAL_CLIENT_CAPTURE_PROGRAM='
+  import { constants } from "node:fs";
+  import { open } from "node:fs/promises";
+  const [stdoutPath, stderrPath, command, ...args] = process.argv.slice(1);
+  const MAX_BYTES = 256 * 1024;
+  if (!stdoutPath || !stderrPath || !command || stdoutPath === stderrPath || typeof constants.O_NOFOLLOW !== "number") process.exit(125);
+  let child;
+  let overflow = false;
+  async function openCapture(path) {
+    const handle = await open(path, constants.O_WRONLY | constants.O_CREAT | constants.O_EXCL | constants.O_NOFOLLOW, 0o600);
+    const stat = await handle.stat();
+    if (!stat.isFile() || stat.size !== 0) throw new Error("capture-shape");
+    return handle;
+  }
+  async function copy(stream, handle) {
+    let size = 0;
+    for await (const chunk of stream) {
+      size += chunk.byteLength;
+      if (size > MAX_BYTES) {
+        overflow = true;
+        child.kill();
+        break;
+      }
+      await handle.write(chunk);
+    }
+  }
+  try {
+    const [stdout, stderr] = await Promise.all([openCapture(stdoutPath), openCapture(stderrPath)]);
+    child = Bun.spawn([command, ...args], { stdout: "pipe", stderr: "pipe" });
+    await Promise.all([copy(child.stdout, stdout), copy(child.stderr, stderr), child.exited]);
+    const status = await child.exited;
+    await Promise.all([stdout.close(), stderr.close()]);
+    process.exit(overflow ? 126 : status);
+  } catch {
+    try { child?.kill(); } catch {}
+    process.exit(125);
+  }
+'
+
+# Capture the local client streams as private, bounded retained artifacts. The
+# wrapper opens both paths with O_EXCL|O_NOFOLLOW, never prints an exception, and
+# kills an over-producing client before the group supervisor records completion.
+# Thus a client diagnostic cannot disappear outside the retained-root scanner.
+run_bounded_local_client_capture() {
+  local stdout_path="$1" stderr_path="$2"
+  shift 2
+  [[ -n "$stdout_path" && -n "$stderr_path" && ! -e "$stdout_path" && ! -L "$stdout_path" && ! -e "$stderr_path" && ! -L "$stderr_path" ]] || return 125
+  "$BUN_BIN" -e "$LOCAL_CLIENT_CAPTURE_PROGRAM" "$stdout_path" "$stderr_path" "$@"
+}
+
+assert_local_client_streams_not_retained() {
+  local stdout_path="$1" stderr_path="$2"
+  [[ -f "$stdout_path" && ! -L "$stdout_path" && -O "$stdout_path" && -r "$stdout_path" ]] ||
+    failed "LOCAL_CLIENT_STDOUT_UNTRUSTED"
+  [[ -f "$stderr_path" && ! -L "$stderr_path" && -O "$stderr_path" && -r "$stderr_path" ]] ||
+    failed "LOCAL_CLIENT_STDERR_UNTRUSTED"
+  assert_local_replay_key_not_retained "client-streams"
+  log_phase "client-streams-scanned" "stdout=retained stderr=retained scope=declared-retained-roots"
 }
 
 json_field() {
@@ -2460,6 +2670,7 @@ self_test_cleanup_terminal_order() {
   local marker identity="" identity_status=0 identity_deadline
   [[ "${S1_FAULT_INJECT:-}" == "ps-unreadable" ]] || failed "CLEANUP_TERMINAL_FAULT_REQUIRED"
   lifecycle_state_dir "cleanup-terminal-order"
+  resolve_local_replay_key
   marker="$(new_supervisor_marker)" || failed "CLEANUP_TERMINAL_MARKER_UNAVAILABLE"
   set -m
   bash -c 'sleep 2; :' "$marker" &
@@ -2946,7 +3157,10 @@ self_test_secret_material_artifact_scan() {
 self_test_runtime_root_outside_refusal() {
   local escaped_root=""
   lifecycle_state_dir "runtime-root-outside"
-  escaped_root="$STATE_DIR/../s1-runtime-outside-canary-$$-$RANDOM"
+  # This begins with the old lexical runtime prefix and would create outside
+  # STATE_DIR before the repair. Canonical parent resolution must reject it
+  # before mkdir receives the path.
+  escaped_root="$LOCAL_RUNTIME_ROOT/../../s1-runtime-outside-canary-$$-$RANDOM"
   if create_private_local_runtime_directory "$escaped_root"; then
     failed "LOCAL_RUNTIME_ROOT_OUTSIDE_ACCEPTED"
   fi
@@ -2955,6 +3169,57 @@ self_test_runtime_root_outside_refusal() {
   log_phase "runtime-root-outside-refused" \
     "result=refused canary=outside-state action=not-created scope=runtime-root"
   emit "pass" "RUNTIME_ROOT_OUTSIDE_SELF_TEST_PASSED"
+}
+
+# PLANTED NEGATIVE: this uses the real pinned-supervisor primitive with an
+# inert secret-shaped value deliberately placed in its payload argv. The pinned
+# ps observer must detect it without printing it; the production Workerd launch
+# uses the inverse assertion after its private-FD handoff.
+self_test_supervisor_argv_observer() {
+  local status_file="$STATE_DIR/.argv-observer-status" canary="S1SupervisorArgvCanary_0123456789abcdefghij"
+  lifecycle_state_dir "supervisor-argv-observer"
+  [[ "${#canary}" -eq 43 ]] || failed "SUPERVISOR_ARGV_CANARY_INVALID"
+  status_file="$STATE_DIR/.argv-observer-status"
+  if ! start_pinned_supervisor "$status_file" "argv-observer" \
+    "$BASH_BIN" -c 'sleep 300' "$BASH_BIN" "$canary"; then
+    failed "SUPERVISOR_ARGV_OBSERVER_START_FAILED"
+  fi
+  if supervisor_argv_excludes "$PROVISIONAL_PID" "$canary" "http://127.0.0.1:1"; then
+    reap_provisional_direct_child || true
+    finish_lifecycle_critical
+    failed "SUPERVISOR_ARGV_OBSERVER_FALSE_GREEN"
+  fi
+  log_phase "supervisor-argv-secret-plant-refused" \
+    "result=detected scope=process-table payload=not-echoed"
+  reap_provisional_direct_child || failed "SUPERVISOR_ARGV_OBSERVER_REAP_FAILED"
+  finish_lifecycle_critical
+  emit "pass" "SUPERVISOR_ARGV_OBSERVER_SELF_TEST_PASSED"
+}
+
+# PLANTED NEGATIVE: exercise the actual bounded local-client capture wrapper,
+# place only a secret-shaped diagnostic on its stderr stream, then require the
+# retained-root scanner to refuse it without naming the stream or material.
+self_test_client_stream_secret_refusal() {
+  local stdout_path stderr_path material="flow_v1.S1ClientStreamCanary_0123456789abcdefghijkl" status=0 summary=""
+  lifecycle_state_dir "client-stream-secret"
+  [[ "$material" =~ ^flow_v1\.[A-Za-z0-9_-]{43}$ ]] || failed "CLIENT_STREAM_CANARY_INVALID"
+  stdout_path="$STATE_DIR/client.stdout"
+  stderr_path="$STATE_DIR/client.stderr"
+  run_with_deadline 20 \
+    "${LOCAL_RUNTIME_ENV[@]}" \
+    "$BASH_BIN" -c 'cwd="$1"; shift; cd -- "$cwd" || exit 125; exec "$@"' \
+    "$BASH_BIN" "$LOCAL_RUNTIME_CWD" \
+    "$BUN_BIN" -e "$LOCAL_CLIENT_CAPTURE_PROGRAM" \
+    "$stdout_path" "$stderr_path" "$BASH_BIN" -c 'printf "%s" "$1" >&2' "$BASH_BIN" "$material" ||
+    failed "CLIENT_STREAM_CAPTURE_FAILED"
+  [[ -f "$stdout_path" && -f "$stderr_path" && ! -L "$stdout_path" && ! -L "$stderr_path" ]] ||
+    failed "CLIENT_STREAM_CAPTURE_UNTRUSTED"
+  summary="$(scan_declared_retained_roots_for_secret "S1ClientStreamExactRootNotPresent_012345678")" || status=$?
+  ((status == 5)) || failed "CLIENT_STREAM_SECRET_FALSE_NEGATIVE"
+  [[ -z "$summary" ]] || failed "CLIENT_STREAM_SECRET_OUTPUT"
+  log_phase "client-stream-secret-plant-refused" \
+    "result=detected stream=stderr scope=declared-retained-roots"
+  emit "pass" "CLIENT_STREAM_SECRET_SELF_TEST_PASSED"
 }
 
 # Prove that EXIT, rather than only the happy path, checks a retained tree after
@@ -3238,19 +3503,20 @@ assert_port_ownership() {
   # retained file; the parent never waits in an unbounded command substitution.
   # shellcheck disable=SC2016
   run_named_with_deadline "ownership-query" "$OWNERSHIP_QUERY_DEADLINE_SECONDS" \
-    "${LOCAL_RUNTIME_ENV[@]}" bash -c '
+    "${LOCAL_RUNTIME_ENV[@]}" "$BASH_BIN" -c '
       cwd="$1"
       result="$2"
       log="$3"
       parser="$4"
-      shift 4
+      bun_bin="$5"
+      shift 5
       cd -- "$cwd" || exit 125
       set -o pipefail
       set -C
-      "$@" 2>>"$log" | bun -e "$parser" >"$result"
-    ' bash "$LOCAL_RUNTIME_CWD" "$query_result" "$query_log" "$parser" \
+      "$@" 2>>"$log" | "$bun_bin" -e "$parser" >"$result"
+    ' "$BASH_BIN" "$LOCAL_RUNTIME_CWD" "$query_result" "$query_log" "$parser" "$BUN_BIN" \
     "$LOCAL_WRANGLER" d1 execute DB --config "$LOCAL_WRANGLER_CONFIG" --local \
-    --persist-to "$state_dir" --json \
+    --persist-to "$state_dir" --env-file "$LOCAL_RUNTIME_WRANGLER_ENV_FILE" --json \
       --command "SELECT COUNT(*) AS n FROM enrollment_records WHERE sponsor_id = '${token}'" || query_exit=$?
   case "$query_exit" in
     0) ;;
@@ -3284,7 +3550,7 @@ run_local_d1() {
   [[ -x "$LOCAL_WRANGLER" ]] || blocked "WRANGLER_REQUIRED"
 
   local local_port origin token server_log server_status_file ready readiness_deadline client_exit scope
-  local evidence_path
+  local evidence_path client_stdout client_stderr
   local migration_exit=0
   local server_status="" server_status_read=0
   # Both resolvers refuse in this shell, so a pinned port that is invalid or busy
@@ -3313,10 +3579,10 @@ run_local_d1() {
   # pinned supervisor contract instead of an untracked foreground process.
   # shellcheck disable=SC2016
   run_named_with_deadline "migration" "$MIGRATION_DEADLINE_SECONDS" \
-    "${LOCAL_RUNTIME_ENV[@]}" bash -c 'cwd="$1"; log="$2"; shift 2; cd -- "$cwd" || exit 125; exec "$@" >"$log" 2>&1' \
-    bash "$LOCAL_RUNTIME_CWD" "$STATE_DIR/migrations.log" \
+    "${LOCAL_RUNTIME_ENV[@]}" "$BASH_BIN" -c 'cwd="$1"; log="$2"; shift 2; cd -- "$cwd" || exit 125; exec "$@" >"$log" 2>&1' \
+    "$BASH_BIN" "$LOCAL_RUNTIME_CWD" "$STATE_DIR/migrations.log" \
     "$LOCAL_WRANGLER" d1 migrations apply DB --config "$LOCAL_WRANGLER_CONFIG" --local \
-    --persist-to "$STATE_DIR" || migration_exit=$?
+    --persist-to "$STATE_DIR" --env-file "$LOCAL_RUNTIME_WRANGLER_ENV_FILE" || migration_exit=$?
   case "$migration_exit" in
     0) ;;
     124) failed "LOCAL_D1_MIGRATION_TIMEOUT" ;;
@@ -3330,27 +3596,19 @@ run_local_d1() {
   # even if wrangler later exits before workerd, so cleanup never authorizes a
   # leaderless/recycled numeric PGID.
   server_status_file="$STATE_DIR/.server-exit-status"
-  # Wrangler receives the ephemeral replay root and this run's exact loopback
-  # origin through an empty inherited environment, never a command-line `--var`
-  # or a host HOME/TMPDIR/XDG/Wrangler cache. The local Worker must name the
-  # dynamically allocated loopback port, not the static development port.
-  # shellcheck disable=SC2016
-  if ! start_pinned_supervisor "$server_status_file" "child" \
-    "${LOCAL_RUNTIME_ENV[@]}" \
-    CLOUDFLARE_INCLUDE_PROCESS_ENV=true \
-    "ENROLLMENT_REPLAY_KEY=$LOCAL_REPLAY_KEY" \
-    "STOA_ORIGIN=$origin" \
-    bash -c '
-      cwd="$1"; log="$2"; shift 2
-      cd -- "$cwd" || exit 125
-      exec "$@" >>"$log" 2>&1
-    ' bash "$LOCAL_RUNTIME_CWD" "$server_log" \
+  # The replay root/origin cross the stopped-supervisor boundary only through
+  # its inherited private descriptor. The observer below reads that actual live
+  # supervisor argv before adoption and refuses a raw handoff.
+  if ! start_private_workerd_supervisor "$server_status_file" "child" \
+    "$LOCAL_REPLAY_KEY" "$origin" "$LOCAL_RUNTIME_CWD" "$server_log" \
     "$LOCAL_WRANGLER" dev "$LOCAL_D1_WORKER" \
-      --config "$LOCAL_WRANGLER_CONFIG" --local --persist-to "$STATE_DIR" --port "$local_port" \
+    --config "$LOCAL_WRANGLER_CONFIG" --local --persist-to "$STATE_DIR" --port "$local_port" \
+      --env-file "$LOCAL_RUNTIME_WRANGLER_ENV_FILE" \
       --inspector-port 0 \
       --log-level error --show-interactive-dev-session=false; then
     failed "LOCAL_CHILD_GROUP_UNPROVEN"
   fi
+  log_phase "child-argv-secret-observed" "result=absent scope=process-table handoff=private-fd"
   if ! adopt_provisional_supervisor server; then
     finish_lifecycle_critical
     failed "LOCAL_CHILD_GROUP_UNPROVEN"
@@ -3398,6 +3656,8 @@ run_local_d1() {
   # read as a security record. The client writes one self-checked record with
   # `wx`, so the artifact is exactly what it vouched for and nothing else.
   evidence_path="$STATE_DIR/client-evidence.ndjson"
+  client_stdout="$STATE_DIR/client.stdout"
+  client_stderr="$STATE_DIR/client.stderr"
   [[ ! -e "$evidence_path" && ! -L "$evidence_path" ]] ||
     failed "LOCAL_CLIENT_EVIDENCE_UNTRUSTED"
   run_with_deadline "$CLIENT_DEADLINE_SECONDS" \
@@ -3405,8 +3665,11 @@ run_local_d1() {
     "S1_LOCAL_ORIGIN=$origin" \
       S1_LOCAL_EVIDENCE_PATH="$evidence_path" \
       S1_LOCAL_EVIDENCE_NONCE="$EVIDENCE_NONCE" \
-      bash -c 'cwd="$1"; shift; cd -- "$cwd" || exit 125; exec "$@"' \
-      bash "$LOCAL_RUNTIME_CWD" bun "$LOCAL_D1_CLIENT" || client_exit=$?
+      "$BASH_BIN" -c 'cwd="$1"; shift; cd -- "$cwd" || exit 125; exec "$@"' \
+      "$BASH_BIN" "$LOCAL_RUNTIME_CWD" \
+      "$BUN_BIN" -e "$LOCAL_CLIENT_CAPTURE_PROGRAM" \
+      "$client_stdout" "$client_stderr" "$BUN_BIN" "$LOCAL_D1_CLIENT" || client_exit=$?
+  assert_local_client_streams_not_retained "$client_stdout" "$client_stderr"
   if ((client_exit != 0)); then
     ((client_exit == 124)) && log_phase "client-deadline" "deadline_s=$CLIENT_DEADLINE_SECONDS"
     terminal_local_client_failure "$client_exit"
@@ -3568,6 +3831,16 @@ main() {
     self_test_runtime_root_outside_refusal
     return
   fi
+  if [[ "${1:-}" == "--self-test-supervisor-argv-observer" ]]; then
+    begin_self_test "supervisor-argv-observer"
+    self_test_supervisor_argv_observer
+    return
+  fi
+  if [[ "${1:-}" == "--self-test-client-stream-secret" ]]; then
+    begin_self_test "client-stream-secret"
+    self_test_client_stream_secret_refusal
+    return
+  fi
   if [[ "${1:-}" == "--self-test-client-evidence-missing" ]]; then
     begin_self_test "client-evidence-missing"
     self_test_client_evidence_missing
@@ -3691,20 +3964,24 @@ main() {
   # The external three-harness / OAuth / staging proof is deliberately blocked
   # rather than simulated: no fixture mode exists for it, and a local run must
   # never be read as that evidence.
-  [[ -n "${ASIMP_S1_JOIN_URL:-}" ]] || blocked "STAGING_JOIN_URL_REQUIRED"
+  local supplied_join_url="${ASIMP_S1_JOIN_URL:-}"
+  [[ -n "$supplied_join_url" ]] || blocked "STAGING_JOIN_URL_REQUIRED"
   [[ -n "${ASIMP_S1_FELLOW_NAME:-}" ]] || blocked "FELLOW_NAME_REQUIRED"
   [[ -n "${ASIMP_S1_MODEL:-}" ]] || blocked "MODEL_REQUIRED"
   [[ -n "${ASIMP_S1_HARNESS:-}" ]] || blocked "HARNESS_REQUIRED"
   supported_harness "$ASIMP_S1_HARNESS" || blocked "HARNESS_IDENTITY_UNSUPPORTED"
 
-  local join_path="${ASIMP_S1_JOIN_URL%%#*}"
-  local secret="${ASIMP_S1_JOIN_URL#*#}"
+  local join_path="${supplied_join_url%%#*}"
+  local secret="${supplied_join_url#*#}"
   local origin enrollment_id claim_endpoint poll_endpoint registration_body claim_response flow_handle
   local claim_idempotency_key poll_idempotency_key
   local poll_body poll_response status token hello_url hello_response
   local first_read_url first_read_response first_read_status hello_validation_status allow_http_test=0
 
-  [[ "$ASIMP_S1_JOIN_URL" == *"#"* ]] || failed "FRAGMENT_SECRET_REQUIRED"
+  [[ "$supplied_join_url" == *"#"* ]] || failed "FRAGMENT_SECRET_REQUIRED"
+  # Do not leave the fragment-bearing input inherited by later URL/JSON/curl
+  # helpers. The two parsed local values below remain shell-local only.
+  unset ASIMP_S1_JOIN_URL supplied_join_url
   [[ "$SELF_TEST_MODE" == "loopback-enrollment" ]] && allow_http_test=1
   if ((allow_http_test == 1)); then
     # This exists only behind the validated loopback self-test switch. It is
