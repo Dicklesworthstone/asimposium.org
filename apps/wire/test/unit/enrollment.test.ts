@@ -1,6 +1,6 @@
 import { describe, expect, test } from "bun:test";
 import { Buffer } from "node:buffer";
-import { ProblemDocumentSchema, type MintEnrollmentRequest } from "@asimposium/contracts";
+import { type MintEnrollmentRequest, ProblemDocumentSchema } from "@asimposium/contracts";
 
 import {
   AesGcmEnrollmentReplayProtector,
@@ -1200,9 +1200,13 @@ describe("S-1 enrollment state machine", () => {
   });
 
   test("replay protection is required, stable across isolates, and decrypt failure is operational", async () => {
-    expect(() => new EnrollmentService({ stoaOrigin: trustedTestStoaOrigin, agoraOrigin: "https://asimposium.org" })).toThrow(
-      EnrollmentReplayConfigurationError,
-    );
+    expect(
+      () =>
+        new EnrollmentService({
+          stoaOrigin: trustedTestStoaOrigin,
+          agoraOrigin: "https://asimposium.org",
+        }),
+    ).toThrow(EnrollmentReplayConfigurationError);
 
     const clock = new MutableClock();
     const store = new InMemoryEnrollmentStore();
@@ -1857,9 +1861,7 @@ describe("centralized Fellow write authorization", () => {
     };
   }
 
-  function decide(
-    overrides: DecisionOverrides = {},
-  ) {
+  function decide(overrides: DecisionOverrides = {}) {
     return authorizeFellowWrite(input(overrides));
   }
 
@@ -1972,9 +1974,9 @@ describe("centralized Fellow write authorization", () => {
       inspect({ credential: { grantedScopes: ["review"] }, effect: "promote" }).operatorReason,
     ).toBe("scope_not_granted");
 
-    expect(
-      inspect({ target: existingTarget({ membershipRole: "observer" }) }).operatorReason,
-    ).toBe("role_not_permitted");
+    expect(inspect({ target: existingTarget({ membershipRole: "observer" }) }).operatorReason).toBe(
+      "role_not_permitted",
+    );
 
     expect(inspect({ target: existingTarget({ membershipRole: undefined }) }).operatorReason).toBe(
       "not_a_member",
@@ -2018,7 +2020,13 @@ describe("centralized Fellow write authorization", () => {
     expect(invalid.operatorReason).toBe("scope_not_granted");
     expect(invalid.decision.decision).toBe("refuse");
 
-    for (const fellowStatus of ["pending", "paused", "revoked", "compromised", "archived"] as const) {
+    for (const fellowStatus of [
+      "pending",
+      "paused",
+      "revoked",
+      "compromised",
+      "archived",
+    ] as const) {
       expect(inspect({ credential: { fellowStatus } }).operatorReason).toBe(
         "fellow_status_not_writable",
       );
@@ -2033,7 +2041,12 @@ describe("centralized Fellow write authorization", () => {
     };
 
     expect(decide(workshop)).toEqual({ decision: "allow", effect: "workshop.push" });
-    expect(inspect({ ...workshop, credential: { ...workshop.credential, fellowStatus: "suspicious_review" } })).toEqual({
+    expect(
+      inspect({
+        ...workshop,
+        credential: { ...workshop.credential, fellowStatus: "suspicious_review" },
+      }),
+    ).toEqual({
       decision: {
         decision: "quarantine",
         effect: "workshop.push",
@@ -2088,9 +2101,9 @@ describe("centralized Fellow write authorization", () => {
         effect: "promote",
       });
     }
-    expect(
-      inspect({ target: existingTarget({ membershipRole: "observer" }) }).operatorReason,
-    ).toBe("role_not_permitted");
+    expect(inspect({ target: existingTarget({ membershipRole: "observer" }) }).operatorReason).toBe(
+      "role_not_permitted",
+    );
     expect(
       decide({ effect: "review", target: existingTarget({ membershipRole: "observer" }) }),
     ).toEqual({ decision: "allow", effect: "review" });
