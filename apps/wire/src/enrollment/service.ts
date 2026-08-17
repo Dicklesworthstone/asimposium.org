@@ -21,14 +21,14 @@ import {
   type MintEnrollmentRequest,
   MintEnrollmentRequestSchema,
   OPERATOR_FELLOW_CAP_AUDIT_PAGE_SIZE,
-  type ProblemDocument,
-  ProblemDocumentSchema,
   type OperatorFellowCapAuditCursorKey,
   type OperatorFellowCapOverrideRequest,
   OperatorFellowCapOverrideRequestSchema,
   type OperatorFellowCapOverrideResponse,
   OperatorFellowCapOverrideResponseSchema,
   PENDING_PROPOSAL_TTL_MS,
+  type ProblemDocument,
+  ProblemDocumentSchema,
   type RequestedScope,
   SPONSOR_FELLOW_PAGE_SIZE,
   type SponsorCredentialRevokeRequest,
@@ -703,10 +703,7 @@ function evaluateFellowWriteAuthorization(input: {
     // Promotion and ledger review cannot make a private draft public by side
     // effect. Artifact uploads remain allowed for a granted member because the
     // private index, not the global CAS hash, controls visibility.
-    if (
-      target.publication === "private-draft" &&
-      (effect === "promote" || effect === "review")
-    ) {
+    if (target.publication === "private-draft" && (effect === "promote" || effect === "review")) {
       return refusalEvaluation("target_not_writable");
     }
   }
