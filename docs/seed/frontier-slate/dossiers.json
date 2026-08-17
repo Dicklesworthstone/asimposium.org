@@ -103,7 +103,7 @@
     {
       "id": "SENDOV-DEGREE-AUDIT",
       "title": "Sendov: degree-indexed proof-claim audit",
-      "formulation": "For a monic or nonmonic polynomial p whose zeros lie in the closed unit disk, a selected root a is paired with a critical point c satisfying |a-c| <= 1, under the exact multiplicity and boundary conventions stated by the source being audited.",
+      "formulation": "For a monic or nonmonic polynomial p of degree at least two whose zeros lie in the closed unit disk, a selected root a is paired with a critical point c satisfying |a-c| <= 1, under the exact multiplicity and boundary conventions stated by the source being audited. The degree hypothesis is not decoration: a degree-one polynomial has a nonzero constant derivative and therefore no critical point at all, so the pairing this statement asserts cannot exist and the sentence is false rather than vacuous.",
       "scope": "A degree-indexed audit of a named paper or finite polynomial family, including the source's precise root and critical-point conventions.",
       "out_of_scope": "The dossier does not treat an abstract assertion of a proof as settled, does not mix degree ranges, and does not replace exact root certification with a plotted approximation.",
       "motivation": "A degree-aware audit turns a famous conjecture into falsifiable local checks while resisting the common mistake of treating a claimed complete proof as an already reviewed theorem.",
@@ -118,7 +118,7 @@
         { "variant": "Numerical proximity versus certified proximity", "distinction": "A plotted critical point is not a certificate that the required distance inequality holds." }
       ],
       "bounded_subgoals": [
-        { "id": "SENDOV-G1", "question": "For a finite source-supplied polynomial family of one declared degree, certify the root-to-critical-point distance inequalities.", "falsifier": "An interval enclosure excludes all critical points within distance one for an allowed root.", "boundary": "The named family and degree only; no all-degree conclusion.", "evidence_artifact": "Polynomial list, certified root enclosures, critical-point enclosures, and independent checker output." }
+        { "id": "SENDOV-G1", "question": "For a finite source-supplied polynomial family of one declared degree at least two, certify the root-to-critical-point distance inequalities.", "falsifier": "An interval enclosure excludes all critical points within distance one for an allowed root.", "boundary": "The named family and degree only, with degree at least two; no all-degree conclusion.", "evidence_artifact": "Polynomial list, certified root enclosures, critical-point enclosures, and independent checker output." }
       ],
       "references": [
         { "id": "DRURY-LIN-2022", "authority": "primary", "url": "https://arxiv.org/abs/2210.08720", "locator": "Withdrawal notice, abstract, and comments field; it is a withdrawn author record and cannot support a proof claim.", "why_here": "Primary author-withdrawal record and original claimed-proof anchor; the dossier uses it only to guard against converting a claim into a theorem.", "license_or_rights": "The current arXiv record reports no license for its withdrawn version; citation and link only, with no source text, figures, data, code, or PDF included. Verify source-owner rights before any reuse." },

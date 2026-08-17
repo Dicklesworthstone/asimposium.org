@@ -14,10 +14,17 @@ import { fileURLToPath } from "node:url";
 const here = dirname(fileURLToPath(import.meta.url));
 const repositoryRoot = resolve(here, "../../..");
 const SOURCE_AUDIT_DATE = "2026-08-17";
+// The mandatory review vocabulary. `licenses_or_rights` was missing while
+// `observed_defect_class` in review-matrix.json already named "missing
+// per-source license/right boundaries" as a defect this gate exists to catch,
+// and while `validReference` below already enforced the per-reference field.
+// A matrix that names a defect class but does not require the corresponding
+// check leaves a reviewer free to sign off without ever looking at it.
 const requiredChecks = [
   "exact_formulation",
   "variant_distinctions",
   "primary_anchors",
+  "licenses_or_rights",
   "falsifier",
   "settlement_and_no_claim",
   "bounded_subgoals",
@@ -35,6 +42,7 @@ export const sourcePaths = {
   report: resolve(here, "review-report.json"),
   checker: resolve(here, "check.mjs"),
   checkerTest: resolve(here, "check.test.mjs"),
+  packageManifest: resolve(repositoryRoot, "package.json"),
 };
 
 function diagnostic(code, dossier, detail) {
@@ -561,12 +569,12 @@ export function validateReport(report, sourceTexts) {
   return errors;
 }
 
-async function verifyLinks(dossiers) {
+async function verifyLinks(dossiers, fetchImpl) {
   const results = await Promise.all(
     dossiers.flatMap((dossier) =>
       dossier.references.map(async (reference) => {
         try {
-          const response = await fetch(reference.url, {
+          const response = await fetchImpl(reference.url, {
             method: "GET",
             headers: { Range: "bytes=0-0" },
             signal: AbortSignal.timeout(12_000),
@@ -592,7 +600,7 @@ async function verifyLinks(dossiers) {
   return results.filter(Boolean);
 }
 
-export async function runCheck({ verifyLinks: shouldVerifyLinks = false } = {}) {
+export async function runCheck({ verifyLinks: shouldVerifyLinks = false, fetchImpl = fetch } = {}) {
   const [sp4dText, sp4dMarkdown, slateText, matrix, report] = await Promise.all([
     readFile(sourcePaths.sp4d, "utf8"),
     readFile(sourcePaths.sp4dMarkdown, "utf8"),
@@ -619,7 +627,12 @@ export async function runCheck({ verifyLinks: shouldVerifyLinks = false } = {}) 
   // is pinned here rather than in itself, since no file can contain its own
   // digest.
   const pinnedMachinery = await Promise.all(
-    [sourcePaths.matrix, sourcePaths.checker, sourcePaths.checkerTest].map((path) =>
+    [
+      sourcePaths.matrix,
+      sourcePaths.checker,
+      sourcePaths.checkerTest,
+      sourcePaths.packageManifest,
+    ].map((path) =>
       readFile(path, "utf8"),
     ),
   );
@@ -629,6 +642,7 @@ export async function runCheck({ verifyLinks: shouldVerifyLinks = false } = {}) 
       "docs/seed/sp4d/review-matrix.json": pinnedMachinery[0],
       "docs/seed/sp4d/check.mjs": pinnedMachinery[1],
       "docs/seed/sp4d/check.test.mjs": pinnedMachinery[2],
+      "package.json": pinnedMachinery[3],
     }),
   );
   for (const dossier of dossiers) {
@@ -652,7 +666,7 @@ export async function runCheck({ verifyLinks: shouldVerifyLinks = false } = {}) 
       errors.push(diagnostic("DOSSIER_RESOLUTION_CLAIM_PRESENT", dossier.id, label));
     }
   }
-  if (shouldVerifyLinks) errors.push(...(await verifyLinks(dossiers)));
+  if (shouldVerifyLinks) errors.push(...(await verifyLinks(dossiers, fetchImpl)));
   return { dossiers, errors };
 }
 

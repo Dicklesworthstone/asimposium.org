@@ -322,6 +322,7 @@ test("planted negative: drift in the matrix or the checker breaks its recorded d
     "docs/seed/sp4d/review-matrix.json": sourcePaths.matrix,
     "docs/seed/sp4d/check.mjs": sourcePaths.checker,
     "docs/seed/sp4d/check.test.mjs": sourcePaths.checkerTest,
+    "package.json": sourcePaths.packageManifest,
   };
   for (const [recorded, path] of Object.entries(pinned)) {
     assert.ok(typeof report.source_digests?.[recorded] === "string", `${recorded} must be pinned`);
@@ -341,6 +342,57 @@ test("planted negative: drift in the matrix or the checker breaks its recorded d
       [],
     );
   }
+});
+
+test("planted negative: root test registration must actually enable link verification", async () => {
+  // The link verifier existed and was reachable only by hand. A capability that
+  // no registered lane invokes is indistinguishable from an absent one, so this
+  // pins the seam itself rather than the function: `test:seed` must run this
+  // checker AND pass --verify-links, and the flag must be the thing that turns
+  // verification on.
+  const manifest = JSON.parse(await readFile(resolve(here, "../../..", "package.json"), "utf8"));
+  const seedLane = manifest.scripts?.["test:seed"];
+  assert.ok(typeof seedLane === "string", "test:seed must be registered");
+  assert.ok(
+    seedLane.includes("docs/seed/sp4d/check.mjs"),
+    "test:seed must invoke the SP4D checker, not only its unit test",
+  );
+  assert.ok(
+    /docs\/seed\/sp4d\/check\.mjs\s+--verify-links/.test(seedLane),
+    "test:seed must pass --verify-links to the SP4D checker",
+  );
+  // toolchain:test is the lane the root gate runs, so the registration must
+  // survive one level up as well.
+  assert.ok(
+    manifest.scripts?.["toolchain:test"]?.includes("test:seed"),
+    "toolchain:test must chain test:seed",
+  );
+
+  // Non-vacuity: the flag is load-bearing. Without it the checker performs no
+  // link verification, so a lane that omitted it would prove nothing.
+  let fetchCalls = 0;
+  const unavailableFetch = async () => {
+    fetchCalls += 1;
+    return { ok: false, status: 599 };
+  };
+  const withoutFlag = await runCheck({ fetchImpl: unavailableFetch });
+  assert.equal(fetchCalls, 0, "the unflagged run must not fetch any source URL");
+  const withFlag = await runCheck({ verifyLinks: true, fetchImpl: unavailableFetch });
+  const expectedLinkCount = withFlag.dossiers.reduce(
+    (count, dossier) => count + dossier.references.length,
+    0,
+  );
+  assert.equal(fetchCalls, expectedLinkCount, "the flagged run must fetch every source URL");
+  assert.deepEqual(
+    withoutFlag.errors.filter((error) => error.code === "SOURCE_LINK_UNAVAILABLE"),
+    [],
+    "the unflagged run must not be performing link verification",
+  );
+  assert.equal(
+    withFlag.errors.filter((error) => error.code === "SOURCE_LINK_UNAVAILABLE").length,
+    expectedLinkCount,
+    "the planted unavailable fetch must prove the flagged branch is load-bearing",
+  );
 });
 
 test("CLI-oriented check succeeds with secret-safe diagnostics", () => {

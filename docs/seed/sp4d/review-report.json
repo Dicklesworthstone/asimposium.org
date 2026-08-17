@@ -5,10 +5,11 @@
   "source_digests": {
     "docs/seed/sp4d/dossier.json": "6e33f0b0e4c5c3c45506e211dcdacc592bc3ae8b693426e53824c79636e3463d",
     "docs/seed/sp4d/SP4D.md": "18a98737dd0ed3119e5f98f1e813ace60833ee43d3bde88f251f15c7b37e618d",
-    "docs/seed/frontier-slate/dossiers.json": "8e2a50b6baaf562e2f06df57af7d2bbf8873897fa290e0e7d0ad2560db1b95c9",
-    "docs/seed/sp4d/review-matrix.json": "1ecc89c857f55bbb762ef9225843f1ca85c6a10d9a3520df9cc601ea0a438733",
-    "docs/seed/sp4d/check.mjs": "f2c9de36a2d7c89b507d73b3d0f44bc3b2fbdeab5c69b5facde0b7f87b9d96b7",
-    "docs/seed/sp4d/check.test.mjs": "24db3ab28eaba2fcec5e1addc1f8e84117ba7cb571c396f37a02d21d537b74de"
+    "docs/seed/frontier-slate/dossiers.json": "dc12634ea34f9a49ab1a694abe207cb42a6af61487f63af43c97c65da56588b0",
+    "docs/seed/sp4d/review-matrix.json": "f121f98dff3578f6ea2bb13ae2e2bad6ebb1155080c26bce25dcebdb4ae60145",
+    "docs/seed/sp4d/check.mjs": "d362ba159f74dcb2138d0a07aec9fdc23ca11d84e20fa67bca90faae5b8064b5",
+    "docs/seed/sp4d/check.test.mjs": "641fda6be43b70da6b2ddde998b98016f04901f0366289ed4fa8c416316ade6c",
+    "package.json": "5b1aff4635cb9ab7b3559b76fd6fbc3060cefeae8972b28b05378dc4a516edf2"
   },
   "reviewer_record": [
     {
@@ -30,7 +31,8 @@
   "unresolved_questions": [
     "External specialists must confirm every SP4D category distinction and primary locator.",
     "Each frontier dossier needs a fresh domain-expert literature/status check immediately before real sharpening or publication.",
-    "No runtime ingestion, public rendering, or ledger validation has been exercised by this source-preparation item."
+    "No runtime ingestion, public rendering, or ledger validation has been exercised by this source-preparation item.",
+    "The 2026-08-17 degree-at-least-two repair to SENDOV-DEGREE-AUDIT was made by the source-preparation author, not by a complex analyst. It corrects an omitted hypothesis against the standard statement; whether the resulting formulation is adequate for the audit this dossier proposes is exactly the question the still-absent independent mathematical formulation review must answer, and no reviewer has answered it."
   ],
   "corrections": [
     "Corrected the SP4D prose DOI to the same Donaldson record used by the structured dossier and made that agreement executable.",
@@ -38,6 +40,9 @@
     "Corrected the group-ring source identifier to match the linked author record and marked the withdrawn Sendov record as a warning anchor rather than proof support.",
     "Added per-source license/right and reuse-boundary records, rendered them, and planted checks for missing rights and prose-anchor drift.",
     "2026-08-17: the rendered SP4D face had drifted from all five declared locators after the dossier was revised. Rewrote the anchor set as a list carrying each locator verbatim, with no markdown inside the locator strings, so the reader and the citation checker read the same string rather than a paraphrase of it.",
+    "2026-08-17 (closure-audit rework): the SENDOV-DEGREE-AUDIT formulation omitted the degree hypothesis. Sendov's conjecture requires degree at least two; a degree-one polynomial has a nonzero constant derivative and therefore no critical point, so the stated root-to-critical-point pairing cannot exist and the sentence was false rather than merely imprecise. Added 'of degree at least two' to the formulation with the reason stated inline, and carried the hypothesis into SENDOV-G1's question and boundary. This is a source-fidelity repair to the written statement; it is not, and must not be read as, a mathematical review of the conjecture or of any claimed proof.",
+    "2026-08-17 (closure-audit rework): link verification existed in check.mjs behind --verify-links but no registered lane passed the flag, so the ordinary root test run performed no link checking at all. Registered 'node docs/seed/sp4d/check.mjs --verify-links' inside package.json test:seed, which toolchain:test already chains, and pinned package.json in this report. The causal plant injects a deterministic unavailable fetch: an unflagged run must make zero calls, while a flagged run must fetch every recorded reference and emit one SOURCE_LINK_UNAVAILABLE diagnostic per call. Dropping the flag or the root registration now fails instead of passing quietly.",
+    "2026-08-17 (closure-audit rework): the mandatory review vocabulary omitted licenses or rights, even though observed_defect_class already named 'missing per-source license/right boundaries' and validReference already enforced the per-reference field. Added 'licenses_or_rights' to requiredChecks and to all ten review-matrix rows, so a reviewer cannot sign the matrix without having been asked for it. Re-pinned every affected source and dossier digest; the digest guards caught each edited file before the pins were updated, which is the behaviour those guards exist for.",
     "2026-08-17: the review matrix predated the current dossiers by four days and carried no prepared_at, source digests, dossier digests, review_state, or unresolved questions. Added all five; the ten dossier digests and three source digests are recomputed from the files as they now stand.",
     "2026-08-17: the reviewer record previously listed only the source-preparation author, which made the two unfilled external seats invisible. Both are now explicit records with approval_state not_started and a checked field that explicitly records that nothing was checked, so an unstaffed review reads as unstaffed rather than absent.",
     "2026-08-17 (independent audit REJECT of the checker): the face rule bound only the heading, the reference URLs, and the locators, all of which a paraphrase preserves. A face could therefore keep every anchor intact while restating the formulation in the wrong category, dropping the external-review gate, and announcing a resolution. The rendered face is now generated from the dossier and required to equal those bytes, so formulation, each variant distinction, each bounded subgoal with its falsifier, the no-resolution language, the expert gate, and every locator and licence bind at once and cannot drift independently.",
