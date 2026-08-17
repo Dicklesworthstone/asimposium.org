@@ -1745,6 +1745,17 @@ describe("registered S2 shell and lifecycle regressions", () => {
     );
     expect(product.exitCode).toBe(1);
     expect(typedDiagnosticCodes(product)).toContain("WRANGLER_VERSION_UNAVAILABLE");
+
+    const explicitProduct = runHarnessSync(
+      {
+        S2_RUN_ID: `s2u-${randomUUID().replaceAll("-", "").slice(0, 24)}`,
+        S2_SHELL_REGRESSION_TEST: "none",
+        S2_PLANT_WRANGLER_VERSION_UNAVAILABLE: "1",
+      },
+      30_000,
+    );
+    expect(explicitProduct.exitCode).toBe(1);
+    expect(typedDiagnosticCodes(explicitProduct)).toContain("WRANGLER_VERSION_UNAVAILABLE");
   });
 
   test(

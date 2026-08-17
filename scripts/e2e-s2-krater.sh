@@ -1285,7 +1285,7 @@ if [[ ! -x "${S2_WRANGLER}" ]]; then
   emit '{"tool":"wrangler","package":"apps/wire","suite":"s2-krater-local-d1","status":"fail","code":"WRANGLER_UNAVAILABLE","reproduce":"scripts/e2e-s2-krater.sh"}'
   exit 1
 fi
-if [[ -n "${S2_SHELL_REGRESSION_TEST:-}" ]]; then
+if [[ "${S2_SHELL_REGRESSION_TEST:-none}" != "none" ]]; then
   # Every registered shell regression returns through run_s2_shell_regression_test
   # before the real D1/Workerd lane. Spawning Wrangler here was unused product
   # work: the 31-case matrix paid the process and 10-second provenance deadline

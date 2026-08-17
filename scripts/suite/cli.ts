@@ -231,6 +231,11 @@ export interface OwnedCommandOptions {
   supervisorScript?: string;
   /** Test seam only: observes the first bounded cancel-and-release request per captured pipe. */
   onPipeCancelRequested?: (pipe: "stdout" | "stderr") => void;
+  /** Test seam only: establishes deterministic parent-loss checkpoints. */
+  onLifecycleCheckpoint?: (
+    phase: "ready" | "completed",
+    supervisorPid: number,
+  ) => void | Promise<void>;
 }
 
 export interface OwnedCommandResult {
@@ -448,9 +453,6 @@ if (!defined setsid()) {
   print STDERR "\036ASIMPOSIUM_SUITE_CONTROL $nonce start-failed 125 0 $$ -1\n";
   exit 125;
 }
-print STDERR "\036ASIMPOSIUM_SUITE_CONTROL $nonce ready $$\n";
-$SIG{TERM} = sub {};
-$SIG{HUP} = sub {};
 
 sub parent_lease_is_open {
   my $readable = "";
@@ -470,6 +472,10 @@ sub retire_orphaned_group {
   _exit(125);
 }
 
+$SIG{TERM} = sub {};
+$SIG{HUP} = sub {};
+$SIG{PIPE} = sub { retire_orphaned_group(); };
+
 my $target = fork();
 if (!defined $target) {
   print STDERR "\036ASIMPOSIUM_SUITE_CONTROL $nonce start-failed 125 0 $$ -1\n";
@@ -482,6 +488,8 @@ if ($target == 0) {
   exec @ARGV;
   exit 127;
 }
+print STDERR "\036ASIMPOSIUM_SUITE_CONTROL $nonce ready $$\n"
+  or retire_orphaned_group();
 my $raw;
 while (1) {
   my $waited = waitpid($target, WNOHANG);
@@ -494,18 +502,9 @@ while (1) {
 }
 my $signal = $raw & 127;
 my $exit = $signal ? 128 + $signal : $raw >> 8;
-my $members = -1;
-my $snapshot_pid = open my $snapshot, "-|", "/bin/ps", "-axo", "pid=,pgid=,stat=";
-if ($snapshot_pid) {
-  $members = 0;
-  while (my $line = <$snapshot>) {
-    my ($pid, $pgid, $state) = split " ", $line;
-    $members++ if defined $state && $pid != $snapshot_pid && $pgid == $$ && $state !~ /Z/;
-  }
-  close $snapshot;
-}
 $SIG{USR1} = sub { exit $exit; };
-print STDERR "\036ASIMPOSIUM_SUITE_CONTROL $nonce exited $exit $signal $$ $members\n";
+print STDERR "\036ASIMPOSIUM_SUITE_CONTROL $nonce exited $exit $signal $$ -1\n"
+  or retire_orphaned_group();
 while (parent_lease_is_open()) { select undef, undef, undef, 0.05; }
 retire_orphaned_group();
 `;
@@ -1144,7 +1143,8 @@ export async function runOwnedCommand(options: OwnedCommandOptions): Promise<Own
   }
 
   const ownershipLease = child.stdin;
-  const stdout = captureBoundedPipe(
+  try {
+    const stdout = captureBoundedPipe(
     child.stdout as ReadableStream<Uint8Array>,
     streamLimitBytes,
     budget,
@@ -1171,6 +1171,9 @@ export async function runOwnedCommand(options: OwnedCommandOptions): Promise<Own
   // first, wait for the nonce-bound ready record and pin it to Bun's direct child
   // before any group signal can be considered owned.
   const supervisorPid = await valueBefore(stderr.ready, options.timeoutMs);
+  if (supervisorPid !== undefined && supervisorPid === child.pid) {
+    await options.onLifecycleCheckpoint?.("ready", supervisorPid);
+  }
   if (supervisorPid === undefined) {
     // A command deadline may elapse while its ready record is still queued. The
     // direct child PID is a separate OS fact: only a fresh bounded census may
@@ -1265,6 +1268,7 @@ export async function runOwnedCommand(options: OwnedCommandOptions): Promise<Own
           cleanupProven = cleanup === "timeout";
           outcome = control.kind === "start-failed" ? "spawn-failed" : "ownership-unproven";
         } else {
+          await options.onLifecycleCheckpoint?.("completed", supervisorPid);
           outcome =
             (await releaseOrKillOwnedSession(
               child,
@@ -1294,7 +1298,7 @@ export async function runOwnedCommand(options: OwnedCommandOptions): Promise<Own
   } else if (outcome === "exited" && !drained) {
     outcome = "pipe-drain-unproven";
   }
-  const result = {
+    return {
     outcome,
     ...(exitCode === undefined ? {} : { exitCode }),
     ...(signal === undefined ? {} : { signal }),
@@ -1304,11 +1308,13 @@ export async function runOwnedCommand(options: OwnedCommandOptions): Promise<Own
     retainedStderrBytes: stderr.retainedBytes(),
     retainedOutputBytes: budget.retainedBytes,
     ...(cleanupProven === undefined ? {} : { cleanupProven }),
-  };
-  // Normal release has already reaped the supervisor. Closing the writer here
-  // also makes any fail-closed return unable to park a lease-waiting leader.
-  ownershipLease.end();
-  return result;
+    };
+  } finally {
+    // Normal release has already reaped the supervisor. Closing the writer here
+    // also makes exceptions and fail-closed returns unable to park a
+    // lease-waiting leader.
+    ownershipLease.end();
+  }
 }
 
 async function runToolchainIntegrationStep(
