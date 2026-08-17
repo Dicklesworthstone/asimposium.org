@@ -13,9 +13,9 @@ import {
   FellowRegistrationRequestSchema,
   MintEnrollmentRequestSchema,
   MintEnrollmentResponseSchema,
+  OperatorFellowCapAuditPageResponseSchema,
   OperatorFellowCapOverrideRequestSchema,
   OperatorFellowCapOverrideResponseSchema,
-  OperatorFellowCapAuditPageResponseSchema,
   OperatorFellowCapStateResponseSchema,
   parseOperatorFellowCapAuditCursor,
   parseSponsorFellowCursor,
@@ -203,7 +203,7 @@ test("operator Fellow-cap reasons use SQLite's code-point length, not UTF-16 len
   ).toBe(false);
 });
 
-test("operator Fellow-cap reason JSON Schema has the same trim and Unicode semantics as Zod", async () => {
+test("operator Fellow-cap reason JSON Schema has the same Unicode and whitespace-boundary semantics as Zod", async () => {
   const request = {
     sponsor_id: "usr_operator_cap_target",
     expected_active_fellow_limit: 5,
@@ -223,14 +223,21 @@ test("operator Fellow-cap reason JSON Schema has the same trim and Unicode seman
       }
     >;
   };
-  const pattern = generated.properties?.operator_fellow_cap_override_request?.properties?.reason?.allOf?.at(
-    -1,
-  )?.pattern;
+  const pattern =
+    generated.properties?.operator_fellow_cap_override_request?.properties?.reason?.allOf?.at(
+      -1,
+    )?.pattern;
   expect(typeof pattern).toBe("string");
   const jsonSchemaReason = new RegExp(pattern as string, "u");
   const cases = [
-    [" \t1234567890\t ", true],
-    [" \t123456789\t ", false],
+    ["a".repeat(9), false],
+    ["1234567890", true],
+    ["a".repeat(1_000), true],
+    ["a".repeat(1_001), false],
+    ["\t1234567890", false],
+    ["1234567890\n", false],
+    ["\u00a01234567890", false],
+    [`${"a".repeat(10)}\u3000`, false],
     ["😀".repeat(5), false],
     ["😀".repeat(600), true],
   ] as const;

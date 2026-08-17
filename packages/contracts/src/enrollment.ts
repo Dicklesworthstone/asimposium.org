@@ -994,6 +994,14 @@ export const OperatorFellowCapSignerKidSchema = z
   .regex(/^[A-Za-z0-9._-]{1,64}$/, "invalid operator Fellow-cap signer key id");
 
 /**
+ * Raw JSON-schema parity for the durable reason. The wire form is already
+ * normalized: it contains exactly 10 through 1,000 Unicode code points and
+ * has no ECMAScript-whitespace endpoint. SQLite enforces the identical
+ * immutable-audit rule without relying on a lossy trim transform.
+ */
+const OPERATOR_FELLOW_CAP_REASON_PATTERN = /^(?=\S)(?:[\s\S]){9,999}\S$/u;
+
+/**
  * Operator-only per-sponsor capacity command. The reason is durable audit
  * material, so it is bounded, non-empty, and cannot contain SQLite's NUL
  * boundary. `step_up_authenticated_at` is stamped by Agora, not trusted from
@@ -1010,12 +1018,10 @@ export const OperatorFellowCapOverrideRequestSchema = z
     // counts Unicode code points. This Unicode-mode expression makes the Zod
     // acceptance rule match the immutable-audit CHECK exactly, including astral
     // characters; it also survives into the generated schema as a pattern.
-    // JSON Schema validates the original JSON bytes while Zod stores the
-    // trimmed durable value. This pattern recognizes exactly the strings whose
-    // JavaScript trim() result has 10-1000 Unicode code points (including
-    // astral characters), so external schema validation cannot admit a body
-    // the Worker later rejects solely because of leading/trailing whitespace.
-    reason: EnrollmentSqlTextSchema.trim().regex(/^\s*(?=\S)(?:[\s\S]){9,999}\S\s*$/u),
+    // JSON Schema and runtime validate the exact same untrimmed bytes. This
+    // avoids a browser-valid whitespace spelling that would later become a
+    // distinct immutable audit receipt after a hidden server transform.
+    reason: EnrollmentSqlTextSchema.regex(OPERATOR_FELLOW_CAP_REASON_PATTERN),
     confirm: z.literal("override-fellow-cap"),
     step_up_authenticated_at: z.number().int().nonnegative(),
   })
@@ -1055,7 +1061,7 @@ export const OperatorFellowCapAuditEventSchema = z
     sponsor_seq: z.number().int().positive(),
     previous_active_fellow_limit: z.number().int().min(5).max(500),
     active_fellow_limit: z.number().int().min(5).max(500),
-    reason: EnrollmentSqlTextSchema.regex(/^(?:[\s\S]){10,1000}$/u),
+    reason: EnrollmentSqlTextSchema.regex(OPERATOR_FELLOW_CAP_REASON_PATTERN),
     step_up_authenticated_at: z.number().int().nonnegative(),
     signer_kid: OperatorFellowCapSignerKidSchema,
     effective_at: z.number().int().positive(),
@@ -1065,7 +1071,9 @@ export const OperatorFellowCapAuditEventSchema = z
 /** Operator-only immutable audit history, ordered newest sequence first. */
 export const OperatorFellowCapAuditPageResponseSchema = z
   .object({
-    audit_events: z.array(OperatorFellowCapAuditEventSchema).max(OPERATOR_FELLOW_CAP_AUDIT_PAGE_SIZE),
+    audit_events: z
+      .array(OperatorFellowCapAuditEventSchema)
+      .max(OPERATOR_FELLOW_CAP_AUDIT_PAGE_SIZE),
     next_cursor: OperatorFellowCapAuditCursorSchema.nullable(),
   })
   .strict();
