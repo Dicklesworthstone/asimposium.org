@@ -74,7 +74,7 @@ set -m
 readonly SUITE="s6-cross-plane-auth"
 readonly EX_CONFIG=78
 readonly EX_FAIL=1
-# A child was reaped but its process group could not be proven empty.
+# A child could not be reaped, or its process group could not be proven empty.
 # Distinct from a plain failure so no caller can read it as success.
 readonly EX_CLEANUP_UNPROVEN=125
 # The bound could not be armed, because no private directory was available for
@@ -219,8 +219,14 @@ CLEANED_UP=0
 # record has not yet been removed, and the number now belongs to something else.
 # If the group is gone there is nothing left to signal, and that is the correct
 # outcome rather than a second guess.
+SIGNAL_KILL_FAILURE_PLANT=0
 signal_group() {
   local pid="$1" signal="$2"
+  # In-process self-test fault only. The assignment above overwrites any
+  # inherited environment value, so a live invocation cannot enable it.
+  if (( SIGNAL_KILL_FAILURE_PLANT == 1 )) && [[ "$signal" == "KILL" ]]; then
+    return 1
+  fi
   kill "-${signal}" -- "-${pid}" 2>/dev/null
 }
 
@@ -255,24 +261,12 @@ unregister_child() {
   CHILD_PIDS=(${kept[@]+"${kept[@]}"})
 }
 
-# True while any recorded group still has a member alive.
-#
-# Group-only for the same reason as `signal_group`: a bare-pid probe would
-# classify an unrelated process that reused a departed child's number as our
-# survivor, and report a cleanup failure that is not ours.
-group_alive() {
-  local pid
-  for pid in ${CHILD_PIDS[@]+"${CHILD_PIDS[@]}"}; do
-    kill -0 -- "-${pid}" 2>/dev/null && return 0
-  done
-  return 1
-}
-
 # Sets REAP_SURVIVORS. It must NOT print its result: a caller writing
 # `survivors="$(reap_children)"` would run the whole reap — every `wait`
 # included — inside a subshell, so the parent would never actually reap the
 # children it owns.
 REAP_SURVIVORS=0
+REAP_GRACE_SECONDS=5
 
 reap_children() {
   # Every child this script starts is recorded, its whole group is signalled,
@@ -288,13 +282,19 @@ reap_children() {
   # Keep the historical five-second grace without probing after a reap. The
   # former poll could never observe an empty group while an unreaped leader was
   # still a member, and its final post-wait census used recyclable numbers.
-  (( ${#CHILD_PIDS[@]} > 0 )) && sleep 5
+  (( ${#CHILD_PIDS[@]} > 0 )) && sleep "$REAP_GRACE_SECONDS"
   for pid in ${CHILD_PIDS[@]+"${CHILD_PIDS[@]}"}; do
     # KILL is dispatched while the direct leader is still unreaped and pins the
     # group identity. If dispatch fails while that exact group is still live,
     # cleanup is unproven; ESRCH means the group is already empty.
-    if ! signal_group "$pid" KILL && kill -0 -- "-${pid}" 2>/dev/null; then
-      REAP_SURVIVORS=1
+    if ! signal_group "$pid" KILL; then
+      if kill -0 -- "-${pid}" 2>/dev/null; then
+        # The still-unreaped leader pins this group, but a failed KILL gives no
+        # basis for an unbounded wait. Retain the active ownership record and
+        # report cleanup-unproven; a later owner may retry while it is pinned.
+        REAP_SURVIVORS=1
+        continue
+      fi
     fi
     wait "$pid" 2>/dev/null || true
     unregister_child "$pid"
@@ -600,12 +600,17 @@ run_bounded() {
       cleanup_unproven=1
     fi
   fi
+  # A failed KILL against a group proven live must not fall into an unbounded
+  # wait. Its still-unreaped supervisor remains registered and pins the numeric
+  # identity for the next cleanup owner; this call fails closed within its
+  # published watchdog reserve.
+  (( cleanup_unproven == 0 )) || return "$EX_CLEANUP_UNPROVEN"
+
   # This is the FIRST reap of the supervisor. No signal or existence probe uses
   # `$pid` below this line.
   wait "$pid" 2>/dev/null || true
   unregister_child "$pid"
 
-  (( cleanup_unproven == 0 )) || return "$EX_CLEANUP_UNPROVEN"
   [[ -f "$flag" && "$status" -ne "$EX_WATCHDOG_UNAVAILABLE" ]] && status=124
   return "$status"
 }
@@ -1417,6 +1422,11 @@ finish() {
 
 self_test() {
   local failures=0 r
+  # Production retains its five-second TERM grace. Every self-test descendant
+  # below has a deterministic readiness barrier and owns a TERM sidecar, so a
+  # five-second idle pause adds no causal coverage and can conceal a hang behind
+  # the outer controller's fixed 100-second bound.
+  REAP_GRACE_SECONDS=0.2
   check() {
     if [[ "$2" == "$3" ]]; then
       emit "{\"suite\":\"${SUITE}\",\"assertion\":\"$(json_string "$1")\",\"status\":\"pass\",\"detail\":\"self-test\"}"
@@ -1453,8 +1463,7 @@ self_test() {
   reaper_plant_dir="$(mktemp -d "${TMPDIR:-/tmp}/s6-reaper-plant.XXXXXX" 2>/dev/null)" || reaper_plant_dir=""
   reaper_ready="${reaper_plant_dir}/ready"
   reaper_term="${reaper_plant_dir}/term-observed"
-  bash -c "trap 'printf term-observed > \"\$2\"; exit 0' TERM; printf ready > \"\$1\"; while :; do sleep 1; done" \
-    _ "$reaper_ready" "$reaper_term" &
+  bash "$SCRIPT_SELF" --self-test-ack-victim "$reaper_ready" "$reaper_term" &
   local victim=$!
   CHILD_PIDS+=("$victim")
   local reaper_ready_deadline=$((SECONDS + 5))
@@ -1523,6 +1532,42 @@ self_test() {
   check "watchdog-flag-write-failure-ready" "$watchdog_ready_value" "ready"
   check "watchdog-flag-write-failure-child-exits-zero" "$watchdog_term_value" "term-observed"
   check "watchdog-flag-write-failure-is-authoritative" "$watchdog_status" "$EX_WATCHDOG_UNAVAILABLE"
+
+  # Causal KILL-dispatch failure. The watchdog's final KILL is rejected while
+  # the supervisor is still live. `run_bounded` must return cleanup-unproven on
+  # its own clock, retaining the active record instead of waiting forever. The
+  # same injected failure is then driven through `reap_children`, which must
+  # also return with the record intact; only after the fault is disarmed may a
+  # successful KILL reap and unregister the pinned group.
+  CHILD_PIDS=()
+  local kill_failure_status=0 kill_failure_started=$SECONDS kill_failure_elapsed
+  SIGNAL_KILL_FAILURE_PLANT=1
+  run_bounded 1 "$bounded_out" - sleep 30 || kill_failure_status=$?
+  kill_failure_elapsed=$((SECONDS - kill_failure_started))
+  local kill_failure_records_after_bound="${#CHILD_PIDS[@]}"
+  # Both reaps below target a TERM-resistant supervisor specifically to reach
+  # the KILL branch. Its ordinary five-second TERM grace adds no coverage here,
+  # so this in-process plant sets that unrelated pause to zero and restores the
+  # production value before any later check.
+  local saved_reap_grace="$REAP_GRACE_SECONDS"
+  REAP_GRACE_SECONDS=0
+  reap_children
+  local kill_failure_reap_verdict="$REAP_SURVIVORS"
+  local kill_failure_records_after_failed_reap="${#CHILD_PIDS[@]}"
+  SIGNAL_KILL_FAILURE_PLANT=0
+  reap_children
+  REAP_GRACE_SECONDS="$saved_reap_grace"
+  check "watchdog-kill-dispatch-failure-status" "$kill_failure_status" "$EX_CLEANUP_UNPROVEN"
+  check "watchdog-kill-dispatch-failure-retains-owner" "$kill_failure_records_after_bound" "1"
+  check "reaper-kill-dispatch-failure-is-explicit" "$kill_failure_reap_verdict" "1"
+  check "reaper-kill-dispatch-failure-retains-owner" "$kill_failure_records_after_failed_reap" "1"
+  check "kill-dispatch-retry-reaps-owner" "${REAP_SURVIVORS}:${#CHILD_PIDS[@]}" "0:0"
+  if (( kill_failure_elapsed <= 6 )); then
+    emit "{\"suite\":\"${SUITE}\",\"assertion\":\"watchdog-kill-dispatch-failure-is-bounded\",\"status\":\"pass\",\"detail\":\"the injected KILL refusal returned in ${kill_failure_elapsed}s without waiting on the live supervisor\"}"
+  else
+    failures=$((failures + 1))
+    emit "{\"suite\":\"${SUITE}\",\"assertion\":\"watchdog-kill-dispatch-failure-is-bounded\",\"status\":\"fail\",\"detail\":\"the injected KILL refusal took ${kill_failure_elapsed}s\"}"
+  fi
 
   # Child-before-open: no consumer ever opens the secret FIFO. The completion
   # handshake must bound `finish_secret_writer`, KILL the still-pinned writer,
@@ -2204,6 +2249,10 @@ main() {
   if [[ "${1:-}" == "--self-test-signal-victim" ]]; then
     local victim_marker="${2:?marker required}"
     local terminated_marker="${3:?terminated marker required}"
+    # Hidden causal mode: its descendant has an interruptible builtin wait and
+    # a TERM acknowledgement, so the production five-second grace is unrelated
+    # to what this plant proves.
+    REAP_GRACE_SECONDS=0.2
     bash "$SCRIPT_SELF" --self-test-ack-victim "$victim_marker" "$terminated_marker" &
     local sleeper=$!
     CHILD_PIDS+=("$sleeper")

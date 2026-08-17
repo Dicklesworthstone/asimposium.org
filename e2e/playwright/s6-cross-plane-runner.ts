@@ -299,7 +299,11 @@ async function main(): Promise<Omit<Record_, "duration_ms">> {
 
   let browser: Browser | undefined;
   let context: BrowserContext | undefined;
-  // A single monotonic bound over the whole run, including browser teardown.
+  // A single monotonic bound over post-configuration browser work, including
+  // browser teardown. `readConfiguration()` is synchronously blocking by
+  // design; the production shell owns and causally tests the outer
+  // `run_bounded` deadline across that stdin phase. Running this file directly
+  // is therefore not standalone whole-run boundedness proof.
   const budget = setTimeout(() => {
     // A hung await cannot be unwound by throwing, so this path exits the
     // process — but it closes the browser FIRST, with its own bound, instead of

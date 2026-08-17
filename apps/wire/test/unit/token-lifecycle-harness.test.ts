@@ -28,7 +28,7 @@ const FAULT_PLANTS = {
   TOKEN_LIFECYCLE_TEST_LOG_LEAK: "0",
   TOKEN_LIFECYCLE_TEST_PARTIAL_PS: "0",
   TOKEN_LIFECYCLE_TEST_PID_REUSE: "0",
-  TOKEN_LIFECYCLE_TEST_PRE_IDENTITY_FAILURE: "0",
+  TOKEN_LIFECYCLE_TEST_PRE_GO_FAILURE: "0",
 } as const;
 
 async function settleWithin<Value>(
@@ -410,7 +410,9 @@ test("token lifecycle harness self-test is ordinary-unit registered and never la
   expect(script).toContain("TOKEN_LIFECYCLE_TEST_PARTIAL_PS");
   expect(script).toContain("TOKEN_LIFECYCLE_TEST_PID_REUSE");
   expect(script).toContain("TOKEN_LIFECYCLE_TEST_LOG_LEAK");
-  expect(script).toContain("TOKEN_LIFECYCLE_TEST_PRE_IDENTITY_FAILURE");
+  expect(script).toContain("TOKEN_LIFECYCLE_TEST_PRE_GO_FAILURE");
+  expect(script).toContain("SERVER_TARGET_GATE_OPENED=1");
+  expect(script).toContain("startup_gate_supervisor_reaped_before_target_launch");
   expect(script).toContain("TOKEN_LIFECYCLE_BARRIER_CAPABILITY");
   expect(script).toContain('"deterministic_barrier":true');
   expect(script).toContain("panic-leaves-no-active-minted-credential");
@@ -487,8 +489,8 @@ test("token lifecycle fault matrix is ordinary, provider-free, and causally prov
     readonly requiresWorkerCleanup: boolean;
   }[] = [
     {
-      plant: "TOKEN_LIFECYCLE_TEST_PRE_IDENTITY_FAILURE",
-      code: "TOKEN_LIFECYCLE_PRE_IDENTITY_FAILURE_PLANT",
+      plant: "TOKEN_LIFECYCLE_TEST_PRE_GO_FAILURE",
+      code: "TOKEN_LIFECYCLE_PRE_GO_FAILURE_PLANT",
       requiresWorkerCleanup: true,
     },
     {
@@ -530,7 +532,7 @@ test("token lifecycle fault matrix is ordinary, provider-free, and causally prov
     } else {
       expect(result.stdout).not.toContain("ready_workerd_responder_pid_pgid_start_and_argv_pinned");
     }
-    if (current.plant === "TOKEN_LIFECYCLE_TEST_PRE_IDENTITY_FAILURE") {
+    if (current.plant === "TOKEN_LIFECYCLE_TEST_PRE_GO_FAILURE") {
       expect(result.stdout).toContain(
         '"assertion":"startup_gate_supervisor_reaped_before_target_launch","status":"pass","wrangler_started":false',
       );
@@ -568,12 +570,16 @@ test("token lifecycle bounded live local Workerd+D1 proof is ordinary-unit regis
   expect(authorizationRecord?.event_id).toMatch(/^LEV-[0-9A-HJKMNP-TV-Z]{26}$/);
   expect(authorizationRecord?.request_id).toMatch(/^token-lifecycle-revoke-alpha-\d+$/);
   expect(authorizationRecord?.authorization_decision).toBe("refuse");
-  expect(authorizationRecord?.auth_state).toBe("credential_revoked");
+  expect(authorizationRecord?.auth_state).toBe("revoked");
   expect(authorizationRecord?.code).toBe("UNAUTHORIZED");
-  expect(authorizationRecord?.latency_ms).toBeNumber();
-  expect(Number.isFinite(authorizationRecord?.latency_ms)).toBe(true);
-  expect(authorizationRecord?.latency_ms).toBeGreaterThanOrEqual(0);
-  expect(authorizationRecord?.latency_ms).toBeLessThanOrEqual(60_000);
+  const authorizationLatencyMs = authorizationRecord?.latency_ms;
+  expect(authorizationLatencyMs).toBeNumber();
+  if (typeof authorizationLatencyMs !== "number") {
+    throw new Error("authorization latency is not numeric");
+  }
+  expect(Number.isFinite(authorizationLatencyMs)).toBe(true);
+  expect(authorizationLatencyMs).toBeGreaterThanOrEqual(0);
+  expect(authorizationLatencyMs).toBeLessThanOrEqual(60_000);
   expect(authorizationRecord?.assertion_diff).toContain("operator=credential_revoked");
   expect(authorizationRecord?.assertion_diff).toContain("canary=<redacted>");
   expect(result.stdout).toContain('"code":"W4_FELLOW_MUTATION_NOT_IMPLEMENTED"');
@@ -618,7 +624,7 @@ test("OPS.2a authorization evidence bounds and redacts every emitted string fiel
 test("PLANTED: actual authorization evidence invokes the central seam and binds real ids", () => {
   const script = readFileSync(SCRIPT, "utf8");
   const record = script.slice(
-    script.indexOf("const authorizationStartedAt = performance.now();"),
+    script.indexOf("const postRevokeNow = revokedReceipt.effective_at;"),
     script.indexOf("function activeCredentialFor("),
   );
   expect(record.length).toBeGreaterThan(0);
@@ -632,7 +638,9 @@ test("PLANTED: actual authorization evidence invokes the central seam and binds 
   expect(record).toContain("performance.now() - authorizationStartedAt");
   expect(record).toContain("fellowAuthorizationResponse(postRevokeAuthorization.decision)");
   expect(record).toContain('postRevokeCallerProblem?.code === "UNAUTHORIZED"');
-  expect(record).toContain("authState: postRevokeAuthorization.operatorReason");
+  expect(record).toContain("!JSON.stringify(postRevokeCallerProblem).includes(");
+  expect(record).toContain('postRevokeAuthState === "revoked"');
+  expect(record).toContain("authState: postRevokeAuthState");
   expect(record).toContain("code: postRevokeCallerProblem.code");
   expect(record).toContain("latencyMs: authorizationLatencyMs");
   expect(record).not.toContain("requestId: key(");
@@ -645,10 +653,10 @@ test("PLANTED: the evidence canary enters that record and must be changed by red
     script.indexOf("const authorizationLine = authorizationEvidence({"),
     script.indexOf("function activeCredentialFor("),
   );
-  expect(record).toContain("canary=${authorizationEvidenceCanary}");
+  expect(record).toContain("canary=$" + "{authorizationEvidenceCanary}");
   expect(record).toContain("!authorizationLine.includes(authorizationEvidenceCanary)");
   expect(record).toContain("authorizationLine.includes(REDACTED_TOKEN)");
-  expect(record).toContain("process.stdout.write(`${authorizationLine}\\n`)");
+  expect(record).toContain("process.stdout.write(`$" + "{authorizationLine}\\n`)");
 });
 
 test("the still-blocked boundaries are declared, not quietly asserted", () => {

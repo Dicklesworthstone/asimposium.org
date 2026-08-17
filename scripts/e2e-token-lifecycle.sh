@@ -63,6 +63,15 @@ SERVER_PID=""
 SERVER_PGID=""
 CONTROLLER_PGID=""
 SERVER_LEADER_IDENTITY=""
+SERVER_IDENTITY_STATE=""
+SERVER_SUPERVISOR_NONCE=""
+SERVER_SUPERVISOR_MARKER=""
+SERVER_SUPERVISOR_READY=""
+SERVER_SUPERVISOR_GO=""
+SERVER_SUPERVISOR_CHALLENGE=""
+SERVER_SUPERVISOR_RESPONSE=""
+SERVER_SUPERVISOR_STARTED=""
+SERVER_TARGET_GATE_OPENED=0
 RESPONDER_PID=""
 RESPONDER_IDENTITY=""
 RESPONDER_DESCENDANTS=""
@@ -292,6 +301,52 @@ responder_identity_is_current() {
   [[ "$(process_identity "${SERVER_PID}")" == "${SERVER_LEADER_IDENTITY}" ]]
 }
 
+challenge_server_supervisor() {
+  local challenge deadline seen_challenge seen_pid seen_pgid seen_nonce
+  [[ -n "${SERVER_SUPERVISOR_NONCE}" \
+    && -n "${SERVER_SUPERVISOR_CHALLENGE}" \
+    && -n "${SERVER_SUPERVISOR_RESPONSE}" ]] || return 1
+  challenge="$(${BUN} --eval 'console.log(crypto.randomUUID())')" || return 1
+  [[ -n "${challenge}" ]] || return 1
+  printf '%s\n' "${challenge}" >"${SERVER_SUPERVISOR_CHALLENGE}" || return 1
+  deadline=$((SECONDS + 2))
+  (( deadline > SCRIPT_DEADLINE )) && deadline="${SCRIPT_DEADLINE}"
+  while (( SECONDS < deadline )); do
+    if [[ -f "${SERVER_SUPERVISOR_RESPONSE}" ]] &&
+      IFS=$'\t' read -r seen_challenge seen_pid seen_pgid seen_nonce \
+        <"${SERVER_SUPERVISOR_RESPONSE}" &&
+      [[ "${seen_challenge}" == "${challenge}" \
+        && "${seen_pid}" == "${SERVER_PID}" \
+        && "${seen_pgid}" == "${SERVER_PGID}" \
+        && "${seen_nonce}" == "${SERVER_SUPERVISOR_NONCE}" ]]; then
+      return 0
+    fi
+    sleep 0.01
+  done
+  return 1
+}
+
+server_group_signal_is_authorized() {
+  case "${SERVER_IDENTITY_STATE}" in
+    pinned)
+      [[ -n "${SERVER_LEADER_IDENTITY}" ]] || return 1
+      [[ "$(raw_process_identity "${SERVER_PID}")" == "${SERVER_LEADER_IDENTITY}" ]] || return 1
+      challenge_server_supervisor
+      ;;
+    supervisor)
+      # Before the private ready record is published, the random marker in the
+      # direct child's argv is the only signal anchor. It cannot be inherited
+      # by an unrelated PID-reuse target.
+      [[ "${SERVER_PGID}" == "${SERVER_PID}" ]] || return 1
+      [[ "$(raw_process_identity "${SERVER_PID}")" == *"${SERVER_SUPERVISOR_MARKER}"* ]]
+      ;;
+    supervisor-ready)
+      challenge_server_supervisor
+      ;;
+    *) return 1 ;;
+  esac
+}
+
 assert_responder_identity() {
   responder_identity_is_current || {
     fail "TOKEN_LIFECYCLE_RESPONDER_IDENTITY_DRIFT"
@@ -445,7 +500,7 @@ stop_worker() {
   if [[ -n "${members}" ]]; then
     # The group signal is authorized only by the original direct-child identity,
     # not a numeric PID/PGID that could have been recycled after readiness.
-    if [[ "$(raw_process_identity "${SERVER_PID}")" != "${SERVER_LEADER_IDENTITY}" ]]; then
+    if ! server_group_signal_is_authorized; then
       fail "TOKEN_LIFECYCLE_GROUP_LEADER_REAP_UNPROVEN"
       return 1
     fi
@@ -468,7 +523,7 @@ stop_worker() {
   if ! group_is_empty "${SERVER_PGID}"; then
     # KILL remains safe only while the original direct-child identity still
     # names this group. A responder mismatch alone does not remove that anchor.
-    if [[ "$(raw_process_identity "${SERVER_PID}")" != "${SERVER_LEADER_IDENTITY}" ]]; then
+    if ! server_group_signal_is_authorized; then
       fail "TOKEN_LIFECYCLE_GROUP_LEADER_REAP_UNPROVEN"
       return 1
     fi
@@ -509,8 +564,13 @@ stop_worker() {
       return 1
     fi
   done
+  if (( SERVER_TARGET_GATE_OPENED == 0 )); then
+    emit "{\"suite\":\"${SUITE}\",\"assertion\":\"startup_gate_supervisor_reaped_before_target_launch\",\"status\":\"pass\",\"wrangler_started\":false}"
+  fi
   SERVER_PID=""
   SERVER_PGID=""
+  SERVER_LEADER_IDENTITY=""
+  SERVER_IDENTITY_STATE=""
   emit "{\"suite\":\"${SUITE}\",\"assertion\":\"workerd_group_descendants_listener_and_state_fds_reaped\",\"status\":\"pass\",\"pgid\":\"${worker_pgid}\"}"
 }
 
@@ -555,6 +615,11 @@ readonly CLIENT_LOG="${STATE_DIR}/client.jsonl"
 readonly CLIENT_ERROR_LOG="${STATE_DIR}/client.stderr"
 readonly POST_STOP_D1_LOG="${STATE_DIR}/post-stop-d1.json"
 readonly POST_STOP_D1_ERROR_LOG="${STATE_DIR}/post-stop-d1.stderr"
+SERVER_SUPERVISOR_READY="${STATE_DIR}/supervisor.ready"
+SERVER_SUPERVISOR_GO="${STATE_DIR}/supervisor.go"
+SERVER_SUPERVISOR_CHALLENGE="${STATE_DIR}/supervisor.challenge"
+SERVER_SUPERVISOR_RESPONSE="${STATE_DIR}/supervisor.response"
+SERVER_SUPERVISOR_STARTED="${STATE_DIR}/supervisor.started"
 
 CONTROLLER_PGID="$(ps -o pgid= -p $$ 2>/dev/null | tr -d ' ')"
 [[ "${CONTROLLER_PGID}" =~ ^[0-9]+$ ]] || { fail "TOKEN_LIFECYCLE_CONTROLLER_GROUP_UNKNOWN"; exit 1; }
@@ -606,39 +671,136 @@ BARRIER_CAPABILITY="$(${BUN} --eval '
   const bytes = crypto.getRandomValues(new Uint8Array(32));
   console.log(Buffer.from(bytes).toString("hex"));
 ')"
+SERVER_SUPERVISOR_NONCE="$(${BUN} --eval '
+  const bytes = crypto.getRandomValues(new Uint8Array(24));
+  console.log(Buffer.from(bytes).toString("hex"));
+')"
+SERVER_SUPERVISOR_MARKER="token-lifecycle-supervisor-${SERVER_SUPERVISOR_NONCE}"
 
 require_remaining
 "${WRANGLER}" d1 migrations apply DB --config "${CONFIG}" --local --persist-to "${STATE_DIR}" \
   --env-file /dev/null >"${MIGRATION_LOG}" 2>&1 || { fail "TOKEN_LIFECYCLE_MIGRATIONS_FAILED"; exit 1; }
 assert_migration_journal || exit 1
 
-# The secret-bearing bindings are inherited only by the Workerd launch. This
-# explicit Wrangler switch is required for a local process environment; the
-# values never appear in argv, diagnostics, or the local D1 state tree.
+# The nonce-bearing supervisor is the stable process-group leader. It cannot
+# launch Wrangler until the parent validates its private ready record and opens
+# the go gate, and it continues answering fresh challenges while the Worker is
+# live. Secret bindings remain environment-only and never enter argv.
 (
   AGORA_ORIGIN="https://asimposium.org" ENROLLMENT_REPLAY_KEY="${REPLAY_KEY}" \
     STOA_ORIGIN="${ORIGIN}" \
     TOKEN_LIFECYCLE_BARRIER_CAP="${BARRIER_CAPABILITY}" \
     SERVICE_ENVELOPE_KEYS="${KEYRING_JSON}" CLOUDFLARE_INCLUDE_PROCESS_ENV=true \
-    exec "${WRANGLER}" dev --config "${CONFIG}" --local --persist-to "${STATE_DIR}" --port "${PORT}" \
-      --inspector-port 0 --log-level error --env-file /dev/null
+    TOKEN_LIFECYCLE_SUPERVISOR_NONCE="${SERVER_SUPERVISOR_NONCE}" \
+    TOKEN_LIFECYCLE_SUPERVISOR_MARKER="${SERVER_SUPERVISOR_MARKER}" \
+    TOKEN_LIFECYCLE_SUPERVISOR_READY="${SERVER_SUPERVISOR_READY}" \
+    TOKEN_LIFECYCLE_SUPERVISOR_GO="${SERVER_SUPERVISOR_GO}" \
+    TOKEN_LIFECYCLE_SUPERVISOR_CHALLENGE="${SERVER_SUPERVISOR_CHALLENGE}" \
+    TOKEN_LIFECYCLE_SUPERVISOR_RESPONSE="${SERVER_SUPERVISOR_RESPONSE}" \
+    TOKEN_LIFECYCLE_SUPERVISOR_STARTED="${SERVER_SUPERVISOR_STARTED}" \
+    exec perl -MPOSIX=WNOHANG -e '
+      my $marker = shift @ARGV;
+      die "marker" unless $marker eq $ENV{"TOKEN_LIFECYCLE_SUPERVISOR_MARKER"};
+      my $leader = $$;
+      my $group = getpgrp(0);
+      die "group" unless $leader == $group;
+      $SIG{"TERM"} = sub {};
+      open(my $ready, ">", $ENV{"TOKEN_LIFECYCLE_SUPERVISOR_READY"}) or die "ready";
+      print $ready join("\t", $leader, $group, $ENV{"TOKEN_LIFECYCLE_SUPERVISOR_NONCE"}) . "\n";
+      close($ready);
+      my $last_challenge = "";
+      my $answer_challenge = sub {
+        return unless -e $ENV{"TOKEN_LIFECYCLE_SUPERVISOR_CHALLENGE"};
+        open(my $challenge_file, "<", $ENV{"TOKEN_LIFECYCLE_SUPERVISOR_CHALLENGE"}) or die "challenge";
+        my $challenge = <$challenge_file> // "";
+        close($challenge_file);
+        $challenge =~ s/\s+$//;
+        return if $challenge eq "" || $challenge eq $last_challenge;
+        open(my $response, ">", $ENV{"TOKEN_LIFECYCLE_SUPERVISOR_RESPONSE"}) or die "response";
+        print $response join("\t", $challenge, $leader, $group, $ENV{"TOKEN_LIFECYCLE_SUPERVISOR_NONCE"}) . "\n";
+        close($response);
+        $last_challenge = $challenge;
+      };
+      until (-e $ENV{"TOKEN_LIFECYCLE_SUPERVISOR_GO"}) {
+        $answer_challenge->();
+        select(undef, undef, undef, 0.01);
+      }
+      my $worker = fork();
+      die "fork" unless defined($worker);
+      if ($worker == 0) {
+        $SIG{"TERM"} = "DEFAULT";
+        exec @ARGV or die "exec";
+      }
+      open(my $started, ">", $ENV{"TOKEN_LIFECYCLE_SUPERVISOR_STARTED"}) or die "started";
+      print $started "$worker\n";
+      close($started);
+      my $status;
+      while (1) {
+        $answer_challenge->();
+        my $done = waitpid($worker, WNOHANG);
+        if ($done == $worker) { $status = $?; last; }
+        die "waitpid" if $done < 0;
+        select(undef, undef, undef, 0.01);
+      }
+      my $code = ($status & 127) ? 128 + ($status & 127) : $status >> 8;
+      exit($code);
+    ' "${SERVER_SUPERVISOR_MARKER}" "${WRANGLER}" dev --config "${CONFIG}" --local \
+      --persist-to "${STATE_DIR}" --port "${PORT}" --inspector-port 0 --log-level error \
+      --env-file /dev/null
 ) >"${SERVER_LOG}" 2>&1 &
 SERVER_PID=$!
+SERVER_PGID="${SERVER_PID}"
+SERVER_IDENTITY_STATE="supervisor"
 
-for _ in $(seq 1 50); do
-  SERVER_PGID="$(ps -o pgid= -p "${SERVER_PID}" 2>/dev/null | tr -d ' ')"
-  if [[ "${SERVER_PGID}" =~ ^[0-9]+$ && "${SERVER_PGID}" == "${SERVER_PID}" \
-    && "${SERVER_PGID}" != "${CONTROLLER_PGID}" ]]; then
+supervisor_ready_deadline=$((SECONDS + 5))
+(( supervisor_ready_deadline > SCRIPT_DEADLINE )) && supervisor_ready_deadline="${SCRIPT_DEADLINE}"
+supervisor_ready_pid=""
+supervisor_ready_pgid=""
+supervisor_ready_nonce=""
+while (( SECONDS < supervisor_ready_deadline )); do
+  if [[ -f "${SERVER_SUPERVISOR_READY}" ]] &&
+    IFS=$'\t' read -r supervisor_ready_pid supervisor_ready_pgid supervisor_ready_nonce \
+      <"${SERVER_SUPERVISOR_READY}" &&
+    [[ "${supervisor_ready_pid}" == "${SERVER_PID}" \
+      && "${supervisor_ready_pgid}" == "${SERVER_PGID}" \
+      && "${supervisor_ready_nonce}" == "${SERVER_SUPERVISOR_NONCE}" ]]; then
     break
   fi
-  sleep 0.05
+  sleep 0.01
 done
-[[ "${SERVER_PGID}" == "${SERVER_PID}" && "${SERVER_PGID}" != "${CONTROLLER_PGID}" ]] || {
-  fail "TOKEN_LIFECYCLE_WORKER_GROUP_UNPROVEN"
+[[ "${supervisor_ready_pid}" == "${SERVER_PID}" \
+  && "${supervisor_ready_pgid}" == "${SERVER_PGID}" \
+  && "${supervisor_ready_nonce}" == "${SERVER_SUPERVISOR_NONCE}" ]] || {
+  fail "TOKEN_LIFECYCLE_SUPERVISOR_IDENTITY_UNPROVEN"
   exit 1
 }
+SERVER_IDENTITY_STATE="supervisor-ready"
+if [[ "${TOKEN_LIFECYCLE_TEST_PRE_GO_FAILURE:-0}" == "1" ]]; then
+  [[ ! -e "${SERVER_SUPERVISOR_STARTED}" ]] || {
+    fail "TOKEN_LIFECYCLE_PRE_GO_TARGET_STARTED"
+    exit 1
+  }
+  fail "TOKEN_LIFECYCLE_PRE_GO_FAILURE_PLANT"
+  exit 1
+fi
 SERVER_LEADER_IDENTITY="$(raw_process_identity "${SERVER_PID}")" || {
   fail "TOKEN_LIFECYCLE_GROUP_LEADER_IDENTITY_UNAVAILABLE"
+  exit 1
+}
+SERVER_IDENTITY_STATE="pinned"
+SERVER_TARGET_GATE_OPENED=1
+printf '%s\n' "go" >"${SERVER_SUPERVISOR_GO}" || {
+  fail "TOKEN_LIFECYCLE_SUPERVISOR_GO_UNPUBLISHED"
+  exit 1
+}
+supervisor_start_deadline=$((SECONDS + 5))
+(( supervisor_start_deadline > SCRIPT_DEADLINE )) && supervisor_start_deadline="${SCRIPT_DEADLINE}"
+while (( SECONDS < supervisor_start_deadline )); do
+  [[ -s "${SERVER_SUPERVISOR_STARTED}" ]] && break
+  sleep 0.01
+done
+[[ -s "${SERVER_SUPERVISOR_STARTED}" ]] || {
+  fail "TOKEN_LIFECYCLE_WRANGLER_LAUNCH_UNPROVEN"
   exit 1
 }
 
@@ -674,7 +836,10 @@ import {
 } from "@asimposium/contracts";
 import { REDACTED_TOKEN, redactCredentials } from "@asimposium/contracts/diagnostic-safety";
 import { mintServiceEnvelope, serviceEnvelopeHeaders } from "./apps/web/lib/service-envelope.ts";
-import { inspectFellowWriteAuthorization } from "./apps/wire/src/enrollment/service.ts";
+import {
+  fellowAuthorizationResponse,
+  inspectFellowWriteAuthorization,
+} from "./apps/wire/src/enrollment/service.ts";
 
 const origin = process.env.TOKEN_LIFECYCLE_ORIGIN;
 const privateJwk = process.env.TOKEN_LIFECYCLE_PRIVATE_JWK;
@@ -941,9 +1106,15 @@ function key(label: string) {
 const AUTHORIZATION_EVIDENCE_FIELD_LIMIT = 160;
 const AUTHORIZATION_EVIDENCE_DIFF_LIMIT = 240;
 const AUTHORIZATION_EVIDENCE_RECORD_LIMIT = 2_048;
+const AUTHORIZATION_EVIDENCE_LATENCY_LIMIT_MS = 60_000;
 
 function boundedEvidenceField(value: string, limit = AUTHORIZATION_EVIDENCE_FIELD_LIMIT): string {
   return redactCredentials(value).slice(0, limit);
+}
+
+function boundedEvidenceLatency(value: number): number {
+  assert(Number.isFinite(value) && value >= 0, "authz-evidence-latency-finite");
+  return Math.min(value, AUTHORIZATION_EVIDENCE_LATENCY_LIMIT_MS);
 }
 
 function authorizationEvidence(input: {
@@ -952,9 +1123,12 @@ function authorizationEvidence(input: {
   sponsorId: string;
   fellowId: string;
   scopeOrGrant: string;
+  authState: string;
   decision: "allow" | "quarantine" | "refuse";
+  code: string;
   requestId: string;
   eventId: string;
+  latencyMs: number;
   assertionDiff: string;
 }): string {
   const record = {
@@ -965,9 +1139,12 @@ function authorizationEvidence(input: {
     sponsor_id: boundedEvidenceField(input.sponsorId),
     fellow_id: boundedEvidenceField(input.fellowId),
     scope_or_grant: boundedEvidenceField(input.scopeOrGrant),
+    auth_state: boundedEvidenceField(input.authState),
     authorization_decision: boundedEvidenceField(input.decision),
+    code: boundedEvidenceField(input.code),
     request_id: boundedEvidenceField(input.requestId),
     event_id: boundedEvidenceField(input.eventId),
+    latency_ms: boundedEvidenceLatency(input.latencyMs),
     assertion_diff: boundedEvidenceField(input.assertionDiff, AUTHORIZATION_EVIDENCE_DIFF_LIMIT),
     status: boundedEvidenceField("pass"),
   };
@@ -1238,39 +1415,45 @@ await assertTokenRejected(alpha.token, "individual-revoke");
 // evaluator with identities and the durable event returned by the real D1
 // revoke above. The request id is the exact idempotency key that caused that
 // event, not a second correlation id generated for the log line.
+const postRevokeNow = revokedReceipt.effective_at;
+const postRevokeCredential = {
+  fellowId: alpha.fellowId,
+  credentialId: alphaCredential.credential_id,
+  sponsorId: sponsorA,
+  name: alphaRecord.name,
+  model: alphaRecord.model,
+  harness: alphaRecord.harness,
+  grantedScopes: alphaRecord.granted_scopes,
+  grantedResources: {
+    ...(alphaRecord.granted_resources.problem_binding === undefined
+      ? {}
+      : { problemBinding: alphaRecord.granted_resources.problem_binding }),
+    ...(alphaRecord.granted_resources.event_budget === undefined
+      ? {}
+      : { eventBudget: alphaRecord.granted_resources.event_budget }),
+    ...(alphaRecord.granted_resources.artifact_budget_bytes === undefined
+      ? {}
+      : { artifactBudgetBytes: alphaRecord.granted_resources.artifact_budget_bytes }),
+    ...(alphaRecord.granted_resources.fellow_grant_expires_at === undefined
+      ? {}
+      : { fellowGrantExpiresAt: alphaRecord.granted_resources.fellow_grant_expires_at }),
+  },
+  // Authorization never reads credential material; this diagnostic binding
+  // intentionally has none available from the sponsor-safe list response.
+  tokenHash: "not-observed-by-authorization",
+  issuedAt: alphaCredential.issued_at,
+  expiresAt: alphaCredential.expires_at,
+  revokedAt: revokedReceipt.effective_at,
+  credentialProfile: alphaCredential.profile,
+  fellowStatus: alphaRecord.status,
+};
+const postRevokeAuthState =
+  postRevokeCredential.revokedAt <= postRevokeNow ? "revoked" : postRevokeCredential.fellowStatus;
+assert(postRevokeAuthState === "revoked", "central-authz-state-revoked");
+const authorizationStartedAt = performance.now();
 const postRevokeAuthorization = inspectFellowWriteAuthorization({
   effect: "review",
-  credential: {
-    fellowId: alpha.fellowId,
-    credentialId: alphaCredential.credential_id,
-    sponsorId: sponsorA,
-    name: alphaRecord.name,
-    model: alphaRecord.model,
-    harness: alphaRecord.harness,
-    grantedScopes: alphaRecord.granted_scopes,
-    grantedResources: {
-      ...(alphaRecord.granted_resources.problem_binding === undefined
-        ? {}
-        : { problemBinding: alphaRecord.granted_resources.problem_binding }),
-      ...(alphaRecord.granted_resources.event_budget === undefined
-        ? {}
-        : { eventBudget: alphaRecord.granted_resources.event_budget }),
-      ...(alphaRecord.granted_resources.artifact_budget_bytes === undefined
-        ? {}
-        : { artifactBudgetBytes: alphaRecord.granted_resources.artifact_budget_bytes }),
-      ...(alphaRecord.granted_resources.fellow_grant_expires_at === undefined
-        ? {}
-        : { fellowGrantExpiresAt: alphaRecord.granted_resources.fellow_grant_expires_at }),
-    },
-    // Authorization never reads credential material; this diagnostic binding
-    // intentionally has none available from the sponsor-safe list response.
-    tokenHash: "not-observed-by-authorization",
-    issuedAt: alphaCredential.issued_at,
-    expiresAt: alphaCredential.expires_at,
-    revokedAt: revokedReceipt.effective_at,
-    credentialProfile: alphaCredential.profile,
-    fellowStatus: alphaRecord.status,
-  },
+  credential: postRevokeCredential,
   target: {
     kind: "existing-problem",
     problemId: "P-TOKEN-LIFECYCLE",
@@ -1279,19 +1462,29 @@ const postRevokeAuthorization = inspectFellowWriteAuthorization({
     membershipRole: "observer",
   },
   usage: { eventsRecorded: 0, artifactBytesRecorded: 0 },
-  now: revokedReceipt.effective_at,
+  now: postRevokeNow,
 });
+const authorizationLatencyMs = performance.now() - authorizationStartedAt;
 assert(postRevokeAuthorization.decision.decision === "refuse", "central-authz-post-revoke-refuse");
 assert(postRevokeAuthorization.operatorReason === "credential_revoked", "central-authz-post-revoke-reason");
+const postRevokeCallerProblem = fellowAuthorizationResponse(postRevokeAuthorization.decision);
+assert(postRevokeCallerProblem?.code === "UNAUTHORIZED", "central-authz-caller-code");
+assert(
+  !JSON.stringify(postRevokeCallerProblem).includes(postRevokeAuthorization.operatorReason),
+  "central-authz-caller-problem-opaque",
+);
 const authorizationLine = authorizationEvidence({
   assertion: "central_policy_post_revoke_refusal_no_mounted_effectful_route",
   credentialId: alphaCredential.credential_id,
   sponsorId: sponsorA,
   fellowId: alpha.fellowId,
   scopeOrGrant: "review",
+  authState: postRevokeAuthState,
   decision: "refuse",
+  code: postRevokeCallerProblem.code,
   requestId: revokeKey,
   eventId: revokedReceipt.event_id,
+  latencyMs: authorizationLatencyMs,
   assertionDiff: `expected=refuse observed=${postRevokeAuthorization.decision.decision} operator=${postRevokeAuthorization.operatorReason} canary=${authorizationEvidenceCanary}`,
 });
 assert(!authorizationLine.includes(authorizationEvidenceCanary), "authz-evidence-canary-redacted");

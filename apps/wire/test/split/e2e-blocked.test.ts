@@ -1852,31 +1852,61 @@ function parseExactMarkerCensus(stdout: string, stderr: string, marker: string):
   return pids;
 }
 
-function exactMarkerProcessIds(marker: string): number[] {
-  const inspection = spawnSync("/bin/ps", ["-axww", "-o", "pid=,command="], {
+function exactMarkerPs(pid: number) {
+  return spawnSync("/bin/ps", ["-ww", "-p", String(pid), "-o", "pid=,command="], {
     cwd: root,
-    encoding: "buffer",
     maxBuffer: S3_MARKER_CENSUS_MAX_BYTES,
-    stdio: ["ignore", "pipe", "pipe"],
     timeout: S3_MARKER_INSPECTION_TIMEOUT_MS,
   });
+}
+
+function exactMarkerProcessIds(targetPid: number, marker: string): number[] {
+  if (!Number.isSafeInteger(targetPid) || targetPid <= 1 || targetPid === process.pid) {
+    throw new Error("S3_EXACT_MARKER_TARGET_PID_INVALID");
+  }
+  const runnerInspection = exactMarkerPs(process.pid);
   if (
-    inspection.error !== undefined ||
-    inspection.signal !== null ||
-    !Number.isSafeInteger(inspection.status) ||
-    inspection.status !== 0
+    runnerInspection.error !== undefined ||
+    runnerInspection.signal !== null ||
+    runnerInspection.status !== 0
   ) {
     throw new Error("S3_EXACT_MARKER_INSPECTION_UNPROVEN");
   }
-  const capture = decodeExactMarkerCensusCapture(inspection.stdout, inspection.stderr);
-  return parseExactMarkerCensus(capture.stdout, capture.stderr, marker);
+  const runner = decodeExactMarkerCensusCapture(
+    runnerInspection.stdout,
+    runnerInspection.stderr,
+  );
+  const targetInspection = exactMarkerPs(targetPid);
+  if (
+    targetInspection.error !== undefined ||
+    targetInspection.signal !== null ||
+    (targetInspection.status !== 0 && targetInspection.status !== 1)
+  ) {
+    throw new Error("S3_EXACT_MARKER_INSPECTION_UNPROVEN");
+  }
+  if (targetInspection.status === 1) {
+    if (
+      !Buffer.isBuffer(targetInspection.stdout) ||
+      !Buffer.isBuffer(targetInspection.stderr) ||
+      targetInspection.stdout.byteLength !== 0 ||
+      targetInspection.stderr.byteLength !== 0
+    ) {
+      throw new Error("S3_EXACT_MARKER_INSPECTION_NO_MATCH_SHAPE");
+    }
+    return parseExactMarkerCensus(runner.stdout, runner.stderr, marker);
+  }
+  const target = decodeExactMarkerCensusCapture(
+    targetInspection.stdout,
+    targetInspection.stderr,
+  );
+  return parseExactMarkerCensus(runner.stdout + target.stdout, runner.stderr + target.stderr, marker);
 }
 
-async function waitForExactMarkerAbsence(marker: string): Promise<void> {
+async function waitForExactMarkerAbsence(targetPid: number, marker: string): Promise<void> {
   const deadline = performance.now() + S3_OUTER_LEASE_RETIRE_WAIT_MS;
   let lastPids: number[] = [];
   while (performance.now() < deadline) {
-    lastPids = exactMarkerProcessIds(marker);
+    lastPids = exactMarkerProcessIds(targetPid, marker);
     if (lastPids.length === 0) return;
     await Bun.sleep(20);
   }
@@ -1950,6 +1980,16 @@ test("PLANTED: bounded exact-marker pipe capture accepts one anchored Buffer and
   expect(() =>
     decodeExactMarkerCensusCapture(Buffer.from([0xff, 0x0a]), Buffer.alloc(0)),
   ).toThrow("S3_EXACT_MARKER_INSPECTION_INVALID_UTF8");
+});
+
+test("PLANTED: exact /bin/ps pipe capture is nonempty and anchored to the live test runner", () => {
+  const marker = `s3-census-live-${crypto.randomUUID()}`;
+  const inspection = exactMarkerPs(process.pid);
+  expect(inspection.error).toBeUndefined();
+  expect(inspection.signal).toBeNull();
+  expect(inspection.status).toBe(0);
+  const capture = decodeExactMarkerCensusCapture(inspection.stdout, inspection.stderr);
+  expect(parseExactMarkerCensus(capture.stdout, capture.stderr, marker)).toEqual([]);
 });
 
 for (const bootstrapPlant of [
@@ -2461,7 +2501,7 @@ test(
 
       expect(freshResult.result.outcome).toBe("timeout");
       expect(freshResult.cleanupProven).toBe(true);
-      await waitForExactMarkerAbsence(marker);
+      await waitForExactMarkerAbsence(targetPid, marker);
     } finally {
       await retireAndCloseFreshRuntime(invocation);
     }
@@ -2493,7 +2533,7 @@ test(
       expect(freshResult.result.outcome).toBe("output-overrun");
       expect(freshResult.cleanupProven).toBe(true);
       expect(freshResult.result.retainedStdoutBytes).toBe(128);
-      await waitForExactMarkerAbsence(marker);
+      await waitForExactMarkerAbsence(targetPid, marker);
     } finally {
       await retireAndCloseFreshRuntime(invocation);
     }
@@ -2547,7 +2587,7 @@ test(
       expect(sameIdentityExceptNlink(original, invocation.resultIdentity, 0n)).toBe(true);
       expect(original.size).toBe(0n);
       expect(() => lstatSync(invocation.resultPath)).toThrow();
-      await waitForExactMarkerAbsence(marker);
+      await waitForExactMarkerAbsence(targetPid, marker);
     } finally {
       await retireAndCloseFreshRuntime(invocation);
     }
