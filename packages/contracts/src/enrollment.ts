@@ -111,6 +111,96 @@ export const StoaOriginSchema = z
   .regex(new RegExp(STOA_ORIGIN_PATTERN))
   .refine(isTrustedStoaOrigin, "origin is not a trusted Stoa origin");
 
+/**
+ * The Agora (human plane) origin, enumerated per environment — the apex twin of
+ * the Stoa rules above (Fable ADR-2, ADR-6; the device-code flow is §5.3).
+ *
+ * Fable writes the sponsor's destination as the *path* `/approve`, never as an
+ * absolute URL, so which origin that path hangs off is a per-environment
+ * configuration fact rather than a protocol constant. Enumerating it here is
+ * what will let a staging Stoa send a sponsor to a staging Agora instead of
+ * handing them the production apex mid-enrollment, which would move a human
+ * across planes without saying so.
+ *
+ * These constants designate the allowed spellings and do not establish DNS,
+ * certificate, deployment, or any other provider state.
+ *
+ * Loopback is deliberately absent, unlike the Stoa set. The accepted topology
+ * for this work names exactly two Agora origins; inventing a third for local
+ * development would be a design decision this vocabulary has no mandate to make,
+ * and a silent one is worse than an explicit gap.
+ *
+ * Nothing consumes these yet. They are published so the per-environment binding
+ * can be reviewed on its own, before anything changes what a deployment emits.
+ */
+export const PRODUCTION_AGORA_ORIGIN = "https://asimposium.org";
+export const STAGING_AGORA_ORIGIN = "https://staging.asimposium.org";
+
+/** True only for the two designated per-environment Agora origins, byte-canonically spelled. */
+export function isTrustedAgoraOrigin(value: unknown): value is string {
+  if (typeof value !== "string") return false;
+  if (value !== PRODUCTION_AGORA_ORIGIN && value !== STAGING_AGORA_ORIGIN) return false;
+  // The same round trip the Stoa predicate uses. Both constants already satisfy
+  // it, so this cannot reject either today; it is here so that editing one into
+  // a non-canonical spelling fails closed instead of quietly widening what the
+  // builder below will emit.
+  return isCanonicalOrigin(value);
+}
+
+const TRUSTED_AGORA_ORIGIN_ALTERNATION = `(?:${literalForPattern(PRODUCTION_AGORA_ORIGIN)}|${literalForPattern(STAGING_AGORA_ORIGIN)})`;
+
+/** JSON-Schema-visible spelling of the trusted Agora origin set. */
+export const AGORA_ORIGIN_PATTERN = `^${TRUSTED_AGORA_ORIGIN_ALTERNATION}$`;
+
+export const AgoraOriginSchema = z
+  .string()
+  .regex(new RegExp(AGORA_ORIGIN_PATTERN))
+  .refine(isTrustedAgoraOrigin, "origin is not a trusted Agora origin");
+
+/** The one path a sponsor is sent to, relative to the deployment's own Agora origin. */
+export const AGORA_APPROVE_PATH = "/approve";
+
+/**
+ * Build the sponsor's approval URL for a configured origin.
+ *
+ * A builder rather than a template, for the same reason `stoaHelloUrl` is one:
+ * it refuses an untrusted origin and emits exactly one path. The approval URL is
+ * read and followed by a human, so it carries no credentials, query, or
+ * fragment — the `user_code` is typed into the page, never carried in the link.
+ */
+export function agoraApproveUrl(origin: string): string {
+  if (!isTrustedAgoraOrigin(origin)) {
+    throw new TypeError("approve url requires a trusted Agora origin");
+  }
+  return `${origin}${AGORA_APPROVE_PATH}`;
+}
+
+/** Byte-canonical, trusted-origin, credential-free — the Agora twin of `parseStoaUrl`. */
+function parseAgoraUrl(value: string): URL | undefined {
+  let parsed: URL;
+  try {
+    parsed = new URL(value);
+  } catch {
+    return undefined;
+  }
+  if (parsed.href !== value) return undefined;
+  if (!isTrustedAgoraOrigin(parsed.origin)) return undefined;
+  if (parsed.username !== "" || parsed.password !== "" || parsed.search !== "") return undefined;
+  return parsed;
+}
+
+export const AGORA_APPROVE_URL_PATTERN = `^${TRUSTED_AGORA_ORIGIN_ALTERNATION}${AGORA_APPROVE_PATH}$`;
+
+/** Exactly `<trusted Agora origin>/approve`; no credentials, query, or fragment. */
+export const AgoraApproveUrlSchema = z
+  .string()
+  .max(400)
+  .regex(new RegExp(AGORA_APPROVE_URL_PATTERN))
+  .refine((value) => {
+    const parsed = parseAgoraUrl(value);
+    return parsed !== undefined && parsed.pathname === AGORA_APPROVE_PATH && parsed.hash === "";
+  }, "invalid Agora approve url");
+
 /** The one path an approved agent is sent to, relative to its configured origin. */
 export const STOA_HELLO_PATH = "/v1/hello";
 
