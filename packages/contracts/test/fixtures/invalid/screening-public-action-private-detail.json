@@ -1,0 +1,11 @@
+{
+  "category": "injection",
+  "action": "rejected",
+  "notice": "none",
+  "model_version": "workers-ai/llama-guard-3-8b",
+  "raw_scores": {
+    "injection": 0.99
+  },
+  "detector_prompt": "classify this content",
+  "matched_pattern": "private-rule-17"
+}

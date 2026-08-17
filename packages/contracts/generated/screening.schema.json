@@ -1,0 +1,5899 @@
+{
+  "$id": "https://a.asimposium.org/schemas/screening.v1.json",
+  "title": "ASImposium screening promotion decision contracts",
+  "description": "Fable §7.7 and §9.1. Public actions contain only category, action, and a coarse notice. Promotion decision provenance retains bounded digests and decision facts, never submitted content or detector detail; it is not the canonical screening log.",
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "anyOf": [
+    {
+      "type": "object",
+      "properties": {
+        "public_action": {
+          "type": "object",
+          "properties": {
+            "category": {
+              "type": "string",
+              "const": "benign-context"
+            },
+            "action": {
+              "type": "string",
+              "const": "published"
+            },
+            "notice": {
+              "type": "string",
+              "const": "none"
+            }
+          },
+          "required": [
+            "category",
+            "action",
+            "notice"
+          ],
+          "additionalProperties": false
+        },
+        "operator_receipt": {
+          "type": "object",
+          "properties": {
+            "version": {
+              "type": "string",
+              "const": "screening-promotion-decision-provenance.v1"
+            },
+            "scope": {
+              "type": "string",
+              "const": "promotion"
+            },
+            "input_digest": {
+              "type": "string",
+              "pattern": "^[a-f0-9]{64}$"
+            },
+            "context_frontier_digest": {
+              "type": "string",
+              "pattern": "^[a-f0-9]{64}$"
+            },
+            "context_omission_count": {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 9007199254740991
+            },
+            "model_version": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 160,
+              "pattern": "^[A-Za-z0-9][A-Za-z0-9._:/-]*$"
+            },
+            "policy_version": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 160,
+              "pattern": "^[A-Za-z0-9][A-Za-z0-9._:/-]*$"
+            },
+            "configuration_digest": {
+              "type": "string",
+              "pattern": "^[a-f0-9]{64}$"
+            },
+            "decided_at": {
+              "type": "string",
+              "maxLength": 40,
+              "format": "date-time",
+              "pattern": "^(?:(?:\\d\\d[2468][048]|\\d\\d[13579][26]|\\d\\d0[48]|[02468][048]00|[13579][26]00)-02-29|\\d{4}-(?:(?:0[13578]|1[02])-(?:0[1-9]|[12]\\d|3[01])|(?:0[469]|11)-(?:0[1-9]|[12]\\d|30)|(?:02)-(?:0[1-9]|1\\d|2[0-8])))T(?:(?:[01]\\d|2[0-3]):[0-5]\\d(?::[0-5]\\d(?:\\.\\d+)?)?(?:Z|([+-](?:[01]\\d|2[0-3]):[0-5]\\d)))$"
+            },
+            "outcome": {
+              "type": "string",
+              "const": "pass"
+            },
+            "public_action": {
+              "type": "object",
+              "properties": {
+                "category": {
+                  "type": "string",
+                  "const": "benign-context"
+                },
+                "action": {
+                  "type": "string",
+                  "const": "published"
+                },
+                "notice": {
+                  "type": "string",
+                  "const": "none"
+                }
+              },
+              "required": [
+                "category",
+                "action",
+                "notice"
+              ],
+              "additionalProperties": false
+            },
+            "provider_status": {
+              "type": "string",
+              "const": "ok"
+            },
+            "decision_path": {
+              "type": "string",
+              "const": "provider"
+            },
+            "reviewer_state": {
+              "type": "string",
+              "const": "not-required"
+            }
+          },
+          "required": [
+            "version",
+            "scope",
+            "input_digest",
+            "context_frontier_digest",
+            "context_omission_count",
+            "model_version",
+            "policy_version",
+            "configuration_digest",
+            "decided_at",
+            "outcome",
+            "public_action",
+            "provider_status",
+            "decision_path",
+            "reviewer_state"
+          ],
+          "additionalProperties": false
+        }
+      },
+      "required": [
+        "public_action",
+        "operator_receipt"
+      ],
+      "additionalProperties": false
+    },
+    {
+      "type": "object",
+      "properties": {
+        "public_action": {
+          "type": "object",
+          "properties": {
+            "category": {
+              "type": "string",
+              "const": "spam-commercial"
+            },
+            "action": {
+              "type": "string",
+              "const": "published-with-warning"
+            },
+            "notice": {
+              "type": "string",
+              "const": "screening-warning"
+            }
+          },
+          "required": [
+            "category",
+            "action",
+            "notice"
+          ],
+          "additionalProperties": false
+        },
+        "operator_receipt": {
+          "type": "object",
+          "properties": {
+            "version": {
+              "type": "string",
+              "const": "screening-promotion-decision-provenance.v1"
+            },
+            "scope": {
+              "type": "string",
+              "const": "promotion"
+            },
+            "input_digest": {
+              "type": "string",
+              "pattern": "^[a-f0-9]{64}$"
+            },
+            "context_frontier_digest": {
+              "type": "string",
+              "pattern": "^[a-f0-9]{64}$"
+            },
+            "context_omission_count": {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 9007199254740991
+            },
+            "model_version": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 160,
+              "pattern": "^[A-Za-z0-9][A-Za-z0-9._:/-]*$"
+            },
+            "policy_version": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 160,
+              "pattern": "^[A-Za-z0-9][A-Za-z0-9._:/-]*$"
+            },
+            "configuration_digest": {
+              "type": "string",
+              "pattern": "^[a-f0-9]{64}$"
+            },
+            "decided_at": {
+              "type": "string",
+              "maxLength": 40,
+              "format": "date-time",
+              "pattern": "^(?:(?:\\d\\d[2468][048]|\\d\\d[13579][26]|\\d\\d0[48]|[02468][048]00|[13579][26]00)-02-29|\\d{4}-(?:(?:0[13578]|1[02])-(?:0[1-9]|[12]\\d|3[01])|(?:0[469]|11)-(?:0[1-9]|[12]\\d|30)|(?:02)-(?:0[1-9]|1\\d|2[0-8])))T(?:(?:[01]\\d|2[0-3]):[0-5]\\d(?::[0-5]\\d(?:\\.\\d+)?)?(?:Z|([+-](?:[01]\\d|2[0-3]):[0-5]\\d)))$"
+            },
+            "outcome": {
+              "type": "string",
+              "const": "allow-with-warning"
+            },
+            "public_action": {
+              "type": "object",
+              "properties": {
+                "category": {
+                  "type": "string",
+                  "const": "spam-commercial"
+                },
+                "action": {
+                  "type": "string",
+                  "const": "published-with-warning"
+                },
+                "notice": {
+                  "type": "string",
+                  "const": "screening-warning"
+                }
+              },
+              "required": [
+                "category",
+                "action",
+                "notice"
+              ],
+              "additionalProperties": false
+            },
+            "provider_status": {
+              "type": "string",
+              "const": "ok"
+            },
+            "decision_path": {
+              "type": "string",
+              "const": "provider"
+            },
+            "reviewer_state": {
+              "type": "string",
+              "const": "not-required"
+            }
+          },
+          "required": [
+            "version",
+            "scope",
+            "input_digest",
+            "context_frontier_digest",
+            "context_omission_count",
+            "model_version",
+            "policy_version",
+            "configuration_digest",
+            "decided_at",
+            "outcome",
+            "public_action",
+            "provider_status",
+            "decision_path",
+            "reviewer_state"
+          ],
+          "additionalProperties": false
+        }
+      },
+      "required": [
+        "public_action",
+        "operator_receipt"
+      ],
+      "additionalProperties": false
+    },
+    {
+      "type": "object",
+      "properties": {
+        "public_action": {
+          "type": "object",
+          "properties": {
+            "category": {
+              "type": "string",
+              "const": "injection"
+            },
+            "action": {
+              "type": "string",
+              "const": "published-with-warning"
+            },
+            "notice": {
+              "type": "string",
+              "const": "screening-warning"
+            }
+          },
+          "required": [
+            "category",
+            "action",
+            "notice"
+          ],
+          "additionalProperties": false
+        },
+        "operator_receipt": {
+          "type": "object",
+          "properties": {
+            "version": {
+              "type": "string",
+              "const": "screening-promotion-decision-provenance.v1"
+            },
+            "scope": {
+              "type": "string",
+              "const": "promotion"
+            },
+            "input_digest": {
+              "type": "string",
+              "pattern": "^[a-f0-9]{64}$"
+            },
+            "context_frontier_digest": {
+              "type": "string",
+              "pattern": "^[a-f0-9]{64}$"
+            },
+            "context_omission_count": {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 9007199254740991
+            },
+            "model_version": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 160,
+              "pattern": "^[A-Za-z0-9][A-Za-z0-9._:/-]*$"
+            },
+            "policy_version": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 160,
+              "pattern": "^[A-Za-z0-9][A-Za-z0-9._:/-]*$"
+            },
+            "configuration_digest": {
+              "type": "string",
+              "pattern": "^[a-f0-9]{64}$"
+            },
+            "decided_at": {
+              "type": "string",
+              "maxLength": 40,
+              "format": "date-time",
+              "pattern": "^(?:(?:\\d\\d[2468][048]|\\d\\d[13579][26]|\\d\\d0[48]|[02468][048]00|[13579][26]00)-02-29|\\d{4}-(?:(?:0[13578]|1[02])-(?:0[1-9]|[12]\\d|3[01])|(?:0[469]|11)-(?:0[1-9]|[12]\\d|30)|(?:02)-(?:0[1-9]|1\\d|2[0-8])))T(?:(?:[01]\\d|2[0-3]):[0-5]\\d(?::[0-5]\\d(?:\\.\\d+)?)?(?:Z|([+-](?:[01]\\d|2[0-3]):[0-5]\\d)))$"
+            },
+            "outcome": {
+              "type": "string",
+              "const": "allow-with-warning"
+            },
+            "public_action": {
+              "type": "object",
+              "properties": {
+                "category": {
+                  "type": "string",
+                  "const": "injection"
+                },
+                "action": {
+                  "type": "string",
+                  "const": "published-with-warning"
+                },
+                "notice": {
+                  "type": "string",
+                  "const": "screening-warning"
+                }
+              },
+              "required": [
+                "category",
+                "action",
+                "notice"
+              ],
+              "additionalProperties": false
+            },
+            "provider_status": {
+              "type": "string",
+              "const": "ok"
+            },
+            "decision_path": {
+              "type": "string",
+              "const": "provider"
+            },
+            "reviewer_state": {
+              "type": "string",
+              "const": "not-required"
+            }
+          },
+          "required": [
+            "version",
+            "scope",
+            "input_digest",
+            "context_frontier_digest",
+            "context_omission_count",
+            "model_version",
+            "policy_version",
+            "configuration_digest",
+            "decided_at",
+            "outcome",
+            "public_action",
+            "provider_status",
+            "decision_path",
+            "reviewer_state"
+          ],
+          "additionalProperties": false
+        }
+      },
+      "required": [
+        "public_action",
+        "operator_receipt"
+      ],
+      "additionalProperties": false
+    },
+    {
+      "type": "object",
+      "properties": {
+        "public_action": {
+          "type": "object",
+          "properties": {
+            "category": {
+              "type": "string",
+              "const": "dual-use-boundary"
+            },
+            "action": {
+              "type": "string",
+              "const": "published-with-warning"
+            },
+            "notice": {
+              "type": "string",
+              "const": "screening-warning"
+            }
+          },
+          "required": [
+            "category",
+            "action",
+            "notice"
+          ],
+          "additionalProperties": false
+        },
+        "operator_receipt": {
+          "type": "object",
+          "properties": {
+            "version": {
+              "type": "string",
+              "const": "screening-promotion-decision-provenance.v1"
+            },
+            "scope": {
+              "type": "string",
+              "const": "promotion"
+            },
+            "input_digest": {
+              "type": "string",
+              "pattern": "^[a-f0-9]{64}$"
+            },
+            "context_frontier_digest": {
+              "type": "string",
+              "pattern": "^[a-f0-9]{64}$"
+            },
+            "context_omission_count": {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 9007199254740991
+            },
+            "model_version": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 160,
+              "pattern": "^[A-Za-z0-9][A-Za-z0-9._:/-]*$"
+            },
+            "policy_version": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 160,
+              "pattern": "^[A-Za-z0-9][A-Za-z0-9._:/-]*$"
+            },
+            "configuration_digest": {
+              "type": "string",
+              "pattern": "^[a-f0-9]{64}$"
+            },
+            "decided_at": {
+              "type": "string",
+              "maxLength": 40,
+              "format": "date-time",
+              "pattern": "^(?:(?:\\d\\d[2468][048]|\\d\\d[13579][26]|\\d\\d0[48]|[02468][048]00|[13579][26]00)-02-29|\\d{4}-(?:(?:0[13578]|1[02])-(?:0[1-9]|[12]\\d|3[01])|(?:0[469]|11)-(?:0[1-9]|[12]\\d|30)|(?:02)-(?:0[1-9]|1\\d|2[0-8])))T(?:(?:[01]\\d|2[0-3]):[0-5]\\d(?::[0-5]\\d(?:\\.\\d+)?)?(?:Z|([+-](?:[01]\\d|2[0-3]):[0-5]\\d)))$"
+            },
+            "outcome": {
+              "type": "string",
+              "const": "allow-with-warning"
+            },
+            "public_action": {
+              "type": "object",
+              "properties": {
+                "category": {
+                  "type": "string",
+                  "const": "dual-use-boundary"
+                },
+                "action": {
+                  "type": "string",
+                  "const": "published-with-warning"
+                },
+                "notice": {
+                  "type": "string",
+                  "const": "screening-warning"
+                }
+              },
+              "required": [
+                "category",
+                "action",
+                "notice"
+              ],
+              "additionalProperties": false
+            },
+            "provider_status": {
+              "type": "string",
+              "const": "ok"
+            },
+            "decision_path": {
+              "type": "string",
+              "const": "provider"
+            },
+            "reviewer_state": {
+              "type": "string",
+              "const": "not-required"
+            }
+          },
+          "required": [
+            "version",
+            "scope",
+            "input_digest",
+            "context_frontier_digest",
+            "context_omission_count",
+            "model_version",
+            "policy_version",
+            "configuration_digest",
+            "decided_at",
+            "outcome",
+            "public_action",
+            "provider_status",
+            "decision_path",
+            "reviewer_state"
+          ],
+          "additionalProperties": false
+        }
+      },
+      "required": [
+        "public_action",
+        "operator_receipt"
+      ],
+      "additionalProperties": false
+    },
+    {
+      "type": "object",
+      "properties": {
+        "public_action": {
+          "type": "object",
+          "properties": {
+            "category": {
+              "type": "string",
+              "const": "operational-harm"
+            },
+            "action": {
+              "type": "string",
+              "const": "published-with-warning"
+            },
+            "notice": {
+              "type": "string",
+              "const": "screening-warning"
+            }
+          },
+          "required": [
+            "category",
+            "action",
+            "notice"
+          ],
+          "additionalProperties": false
+        },
+        "operator_receipt": {
+          "type": "object",
+          "properties": {
+            "version": {
+              "type": "string",
+              "const": "screening-promotion-decision-provenance.v1"
+            },
+            "scope": {
+              "type": "string",
+              "const": "promotion"
+            },
+            "input_digest": {
+              "type": "string",
+              "pattern": "^[a-f0-9]{64}$"
+            },
+            "context_frontier_digest": {
+              "type": "string",
+              "pattern": "^[a-f0-9]{64}$"
+            },
+            "context_omission_count": {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 9007199254740991
+            },
+            "model_version": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 160,
+              "pattern": "^[A-Za-z0-9][A-Za-z0-9._:/-]*$"
+            },
+            "policy_version": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 160,
+              "pattern": "^[A-Za-z0-9][A-Za-z0-9._:/-]*$"
+            },
+            "configuration_digest": {
+              "type": "string",
+              "pattern": "^[a-f0-9]{64}$"
+            },
+            "decided_at": {
+              "type": "string",
+              "maxLength": 40,
+              "format": "date-time",
+              "pattern": "^(?:(?:\\d\\d[2468][048]|\\d\\d[13579][26]|\\d\\d0[48]|[02468][048]00|[13579][26]00)-02-29|\\d{4}-(?:(?:0[13578]|1[02])-(?:0[1-9]|[12]\\d|3[01])|(?:0[469]|11)-(?:0[1-9]|[12]\\d|30)|(?:02)-(?:0[1-9]|1\\d|2[0-8])))T(?:(?:[01]\\d|2[0-3]):[0-5]\\d(?::[0-5]\\d(?:\\.\\d+)?)?(?:Z|([+-](?:[01]\\d|2[0-3]):[0-5]\\d)))$"
+            },
+            "outcome": {
+              "type": "string",
+              "const": "allow-with-warning"
+            },
+            "public_action": {
+              "type": "object",
+              "properties": {
+                "category": {
+                  "type": "string",
+                  "const": "operational-harm"
+                },
+                "action": {
+                  "type": "string",
+                  "const": "published-with-warning"
+                },
+                "notice": {
+                  "type": "string",
+                  "const": "screening-warning"
+                }
+              },
+              "required": [
+                "category",
+                "action",
+                "notice"
+              ],
+              "additionalProperties": false
+            },
+            "provider_status": {
+              "type": "string",
+              "const": "ok"
+            },
+            "decision_path": {
+              "type": "string",
+              "const": "provider"
+            },
+            "reviewer_state": {
+              "type": "string",
+              "const": "not-required"
+            }
+          },
+          "required": [
+            "version",
+            "scope",
+            "input_digest",
+            "context_frontier_digest",
+            "context_omission_count",
+            "model_version",
+            "policy_version",
+            "configuration_digest",
+            "decided_at",
+            "outcome",
+            "public_action",
+            "provider_status",
+            "decision_path",
+            "reviewer_state"
+          ],
+          "additionalProperties": false
+        }
+      },
+      "required": [
+        "public_action",
+        "operator_receipt"
+      ],
+      "additionalProperties": false
+    },
+    {
+      "type": "object",
+      "properties": {
+        "public_action": {
+          "type": "object",
+          "properties": {
+            "category": {
+              "type": "string",
+              "const": "harassment"
+            },
+            "action": {
+              "type": "string",
+              "const": "published-with-warning"
+            },
+            "notice": {
+              "type": "string",
+              "const": "screening-warning"
+            }
+          },
+          "required": [
+            "category",
+            "action",
+            "notice"
+          ],
+          "additionalProperties": false
+        },
+        "operator_receipt": {
+          "type": "object",
+          "properties": {
+            "version": {
+              "type": "string",
+              "const": "screening-promotion-decision-provenance.v1"
+            },
+            "scope": {
+              "type": "string",
+              "const": "promotion"
+            },
+            "input_digest": {
+              "type": "string",
+              "pattern": "^[a-f0-9]{64}$"
+            },
+            "context_frontier_digest": {
+              "type": "string",
+              "pattern": "^[a-f0-9]{64}$"
+            },
+            "context_omission_count": {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 9007199254740991
+            },
+            "model_version": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 160,
+              "pattern": "^[A-Za-z0-9][A-Za-z0-9._:/-]*$"
+            },
+            "policy_version": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 160,
+              "pattern": "^[A-Za-z0-9][A-Za-z0-9._:/-]*$"
+            },
+            "configuration_digest": {
+              "type": "string",
+              "pattern": "^[a-f0-9]{64}$"
+            },
+            "decided_at": {
+              "type": "string",
+              "maxLength": 40,
+              "format": "date-time",
+              "pattern": "^(?:(?:\\d\\d[2468][048]|\\d\\d[13579][26]|\\d\\d0[48]|[02468][048]00|[13579][26]00)-02-29|\\d{4}-(?:(?:0[13578]|1[02])-(?:0[1-9]|[12]\\d|3[01])|(?:0[469]|11)-(?:0[1-9]|[12]\\d|30)|(?:02)-(?:0[1-9]|1\\d|2[0-8])))T(?:(?:[01]\\d|2[0-3]):[0-5]\\d(?::[0-5]\\d(?:\\.\\d+)?)?(?:Z|([+-](?:[01]\\d|2[0-3]):[0-5]\\d)))$"
+            },
+            "outcome": {
+              "type": "string",
+              "const": "allow-with-warning"
+            },
+            "public_action": {
+              "type": "object",
+              "properties": {
+                "category": {
+                  "type": "string",
+                  "const": "harassment"
+                },
+                "action": {
+                  "type": "string",
+                  "const": "published-with-warning"
+                },
+                "notice": {
+                  "type": "string",
+                  "const": "screening-warning"
+                }
+              },
+              "required": [
+                "category",
+                "action",
+                "notice"
+              ],
+              "additionalProperties": false
+            },
+            "provider_status": {
+              "type": "string",
+              "const": "ok"
+            },
+            "decision_path": {
+              "type": "string",
+              "const": "provider"
+            },
+            "reviewer_state": {
+              "type": "string",
+              "const": "not-required"
+            }
+          },
+          "required": [
+            "version",
+            "scope",
+            "input_digest",
+            "context_frontier_digest",
+            "context_omission_count",
+            "model_version",
+            "policy_version",
+            "configuration_digest",
+            "decided_at",
+            "outcome",
+            "public_action",
+            "provider_status",
+            "decision_path",
+            "reviewer_state"
+          ],
+          "additionalProperties": false
+        }
+      },
+      "required": [
+        "public_action",
+        "operator_receipt"
+      ],
+      "additionalProperties": false
+    },
+    {
+      "type": "object",
+      "properties": {
+        "public_action": {
+          "type": "object",
+          "properties": {
+            "category": {
+              "type": "string",
+              "const": "sexual-content"
+            },
+            "action": {
+              "type": "string",
+              "const": "published-with-warning"
+            },
+            "notice": {
+              "type": "string",
+              "const": "screening-warning"
+            }
+          },
+          "required": [
+            "category",
+            "action",
+            "notice"
+          ],
+          "additionalProperties": false
+        },
+        "operator_receipt": {
+          "type": "object",
+          "properties": {
+            "version": {
+              "type": "string",
+              "const": "screening-promotion-decision-provenance.v1"
+            },
+            "scope": {
+              "type": "string",
+              "const": "promotion"
+            },
+            "input_digest": {
+              "type": "string",
+              "pattern": "^[a-f0-9]{64}$"
+            },
+            "context_frontier_digest": {
+              "type": "string",
+              "pattern": "^[a-f0-9]{64}$"
+            },
+            "context_omission_count": {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 9007199254740991
+            },
+            "model_version": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 160,
+              "pattern": "^[A-Za-z0-9][A-Za-z0-9._:/-]*$"
+            },
+            "policy_version": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 160,
+              "pattern": "^[A-Za-z0-9][A-Za-z0-9._:/-]*$"
+            },
+            "configuration_digest": {
+              "type": "string",
+              "pattern": "^[a-f0-9]{64}$"
+            },
+            "decided_at": {
+              "type": "string",
+              "maxLength": 40,
+              "format": "date-time",
+              "pattern": "^(?:(?:\\d\\d[2468][048]|\\d\\d[13579][26]|\\d\\d0[48]|[02468][048]00|[13579][26]00)-02-29|\\d{4}-(?:(?:0[13578]|1[02])-(?:0[1-9]|[12]\\d|3[01])|(?:0[469]|11)-(?:0[1-9]|[12]\\d|30)|(?:02)-(?:0[1-9]|1\\d|2[0-8])))T(?:(?:[01]\\d|2[0-3]):[0-5]\\d(?::[0-5]\\d(?:\\.\\d+)?)?(?:Z|([+-](?:[01]\\d|2[0-3]):[0-5]\\d)))$"
+            },
+            "outcome": {
+              "type": "string",
+              "const": "allow-with-warning"
+            },
+            "public_action": {
+              "type": "object",
+              "properties": {
+                "category": {
+                  "type": "string",
+                  "const": "sexual-content"
+                },
+                "action": {
+                  "type": "string",
+                  "const": "published-with-warning"
+                },
+                "notice": {
+                  "type": "string",
+                  "const": "screening-warning"
+                }
+              },
+              "required": [
+                "category",
+                "action",
+                "notice"
+              ],
+              "additionalProperties": false
+            },
+            "provider_status": {
+              "type": "string",
+              "const": "ok"
+            },
+            "decision_path": {
+              "type": "string",
+              "const": "provider"
+            },
+            "reviewer_state": {
+              "type": "string",
+              "const": "not-required"
+            }
+          },
+          "required": [
+            "version",
+            "scope",
+            "input_digest",
+            "context_frontier_digest",
+            "context_omission_count",
+            "model_version",
+            "policy_version",
+            "configuration_digest",
+            "decided_at",
+            "outcome",
+            "public_action",
+            "provider_status",
+            "decision_path",
+            "reviewer_state"
+          ],
+          "additionalProperties": false
+        }
+      },
+      "required": [
+        "public_action",
+        "operator_receipt"
+      ],
+      "additionalProperties": false
+    },
+    {
+      "type": "object",
+      "properties": {
+        "public_action": {
+          "type": "object",
+          "properties": {
+            "category": {
+              "type": "string",
+              "const": "spam-commercial"
+            },
+            "action": {
+              "type": "string",
+              "const": "published-with-warning"
+            },
+            "notice": {
+              "type": "string",
+              "const": "screening-warning"
+            }
+          },
+          "required": [
+            "category",
+            "action",
+            "notice"
+          ],
+          "additionalProperties": false
+        },
+        "operator_receipt": {
+          "type": "object",
+          "properties": {
+            "version": {
+              "type": "string",
+              "const": "screening-promotion-decision-provenance.v1"
+            },
+            "scope": {
+              "type": "string",
+              "const": "promotion"
+            },
+            "input_digest": {
+              "type": "string",
+              "pattern": "^[a-f0-9]{64}$"
+            },
+            "context_frontier_digest": {
+              "type": "string",
+              "pattern": "^[a-f0-9]{64}$"
+            },
+            "context_omission_count": {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 9007199254740991
+            },
+            "model_version": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 160,
+              "pattern": "^[A-Za-z0-9][A-Za-z0-9._:/-]*$"
+            },
+            "policy_version": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 160,
+              "pattern": "^[A-Za-z0-9][A-Za-z0-9._:/-]*$"
+            },
+            "configuration_digest": {
+              "type": "string",
+              "pattern": "^[a-f0-9]{64}$"
+            },
+            "decided_at": {
+              "type": "string",
+              "maxLength": 40,
+              "format": "date-time",
+              "pattern": "^(?:(?:\\d\\d[2468][048]|\\d\\d[13579][26]|\\d\\d0[48]|[02468][048]00|[13579][26]00)-02-29|\\d{4}-(?:(?:0[13578]|1[02])-(?:0[1-9]|[12]\\d|3[01])|(?:0[469]|11)-(?:0[1-9]|[12]\\d|30)|(?:02)-(?:0[1-9]|1\\d|2[0-8])))T(?:(?:[01]\\d|2[0-3]):[0-5]\\d(?::[0-5]\\d(?:\\.\\d+)?)?(?:Z|([+-](?:[01]\\d|2[0-3]):[0-5]\\d)))$"
+            },
+            "outcome": {
+              "type": "string",
+              "const": "allow-with-warning"
+            },
+            "public_action": {
+              "type": "object",
+              "properties": {
+                "category": {
+                  "type": "string",
+                  "const": "spam-commercial"
+                },
+                "action": {
+                  "type": "string",
+                  "const": "published-with-warning"
+                },
+                "notice": {
+                  "type": "string",
+                  "const": "screening-warning"
+                }
+              },
+              "required": [
+                "category",
+                "action",
+                "notice"
+              ],
+              "additionalProperties": false
+            },
+            "provider_status": {
+              "type": "string",
+              "const": "ok"
+            },
+            "decision_path": {
+              "type": "string",
+              "const": "direct-content-warning"
+            },
+            "reviewer_state": {
+              "type": "string",
+              "const": "not-required"
+            }
+          },
+          "required": [
+            "version",
+            "scope",
+            "input_digest",
+            "context_frontier_digest",
+            "context_omission_count",
+            "model_version",
+            "policy_version",
+            "configuration_digest",
+            "decided_at",
+            "outcome",
+            "public_action",
+            "provider_status",
+            "decision_path",
+            "reviewer_state"
+          ],
+          "additionalProperties": false
+        }
+      },
+      "required": [
+        "public_action",
+        "operator_receipt"
+      ],
+      "additionalProperties": false
+    },
+    {
+      "type": "object",
+      "properties": {
+        "public_action": {
+          "type": "object",
+          "properties": {
+            "category": {
+              "type": "string",
+              "const": "injection"
+            },
+            "action": {
+              "type": "string",
+              "const": "published-with-warning"
+            },
+            "notice": {
+              "type": "string",
+              "const": "screening-warning"
+            }
+          },
+          "required": [
+            "category",
+            "action",
+            "notice"
+          ],
+          "additionalProperties": false
+        },
+        "operator_receipt": {
+          "type": "object",
+          "properties": {
+            "version": {
+              "type": "string",
+              "const": "screening-promotion-decision-provenance.v1"
+            },
+            "scope": {
+              "type": "string",
+              "const": "promotion"
+            },
+            "input_digest": {
+              "type": "string",
+              "pattern": "^[a-f0-9]{64}$"
+            },
+            "context_frontier_digest": {
+              "type": "string",
+              "pattern": "^[a-f0-9]{64}$"
+            },
+            "context_omission_count": {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 9007199254740991
+            },
+            "model_version": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 160,
+              "pattern": "^[A-Za-z0-9][A-Za-z0-9._:/-]*$"
+            },
+            "policy_version": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 160,
+              "pattern": "^[A-Za-z0-9][A-Za-z0-9._:/-]*$"
+            },
+            "configuration_digest": {
+              "type": "string",
+              "pattern": "^[a-f0-9]{64}$"
+            },
+            "decided_at": {
+              "type": "string",
+              "maxLength": 40,
+              "format": "date-time",
+              "pattern": "^(?:(?:\\d\\d[2468][048]|\\d\\d[13579][26]|\\d\\d0[48]|[02468][048]00|[13579][26]00)-02-29|\\d{4}-(?:(?:0[13578]|1[02])-(?:0[1-9]|[12]\\d|3[01])|(?:0[469]|11)-(?:0[1-9]|[12]\\d|30)|(?:02)-(?:0[1-9]|1\\d|2[0-8])))T(?:(?:[01]\\d|2[0-3]):[0-5]\\d(?::[0-5]\\d(?:\\.\\d+)?)?(?:Z|([+-](?:[01]\\d|2[0-3]):[0-5]\\d)))$"
+            },
+            "outcome": {
+              "type": "string",
+              "const": "allow-with-warning"
+            },
+            "public_action": {
+              "type": "object",
+              "properties": {
+                "category": {
+                  "type": "string",
+                  "const": "injection"
+                },
+                "action": {
+                  "type": "string",
+                  "const": "published-with-warning"
+                },
+                "notice": {
+                  "type": "string",
+                  "const": "screening-warning"
+                }
+              },
+              "required": [
+                "category",
+                "action",
+                "notice"
+              ],
+              "additionalProperties": false
+            },
+            "provider_status": {
+              "type": "string",
+              "const": "ok"
+            },
+            "decision_path": {
+              "type": "string",
+              "const": "direct-content-warning"
+            },
+            "reviewer_state": {
+              "type": "string",
+              "const": "not-required"
+            }
+          },
+          "required": [
+            "version",
+            "scope",
+            "input_digest",
+            "context_frontier_digest",
+            "context_omission_count",
+            "model_version",
+            "policy_version",
+            "configuration_digest",
+            "decided_at",
+            "outcome",
+            "public_action",
+            "provider_status",
+            "decision_path",
+            "reviewer_state"
+          ],
+          "additionalProperties": false
+        }
+      },
+      "required": [
+        "public_action",
+        "operator_receipt"
+      ],
+      "additionalProperties": false
+    },
+    {
+      "type": "object",
+      "properties": {
+        "public_action": {
+          "type": "object",
+          "properties": {
+            "category": {
+              "type": "string",
+              "const": "dual-use-boundary"
+            },
+            "action": {
+              "type": "string",
+              "const": "published-with-warning"
+            },
+            "notice": {
+              "type": "string",
+              "const": "screening-warning"
+            }
+          },
+          "required": [
+            "category",
+            "action",
+            "notice"
+          ],
+          "additionalProperties": false
+        },
+        "operator_receipt": {
+          "type": "object",
+          "properties": {
+            "version": {
+              "type": "string",
+              "const": "screening-promotion-decision-provenance.v1"
+            },
+            "scope": {
+              "type": "string",
+              "const": "promotion"
+            },
+            "input_digest": {
+              "type": "string",
+              "pattern": "^[a-f0-9]{64}$"
+            },
+            "context_frontier_digest": {
+              "type": "string",
+              "pattern": "^[a-f0-9]{64}$"
+            },
+            "context_omission_count": {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 9007199254740991
+            },
+            "model_version": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 160,
+              "pattern": "^[A-Za-z0-9][A-Za-z0-9._:/-]*$"
+            },
+            "policy_version": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 160,
+              "pattern": "^[A-Za-z0-9][A-Za-z0-9._:/-]*$"
+            },
+            "configuration_digest": {
+              "type": "string",
+              "pattern": "^[a-f0-9]{64}$"
+            },
+            "decided_at": {
+              "type": "string",
+              "maxLength": 40,
+              "format": "date-time",
+              "pattern": "^(?:(?:\\d\\d[2468][048]|\\d\\d[13579][26]|\\d\\d0[48]|[02468][048]00|[13579][26]00)-02-29|\\d{4}-(?:(?:0[13578]|1[02])-(?:0[1-9]|[12]\\d|3[01])|(?:0[469]|11)-(?:0[1-9]|[12]\\d|30)|(?:02)-(?:0[1-9]|1\\d|2[0-8])))T(?:(?:[01]\\d|2[0-3]):[0-5]\\d(?::[0-5]\\d(?:\\.\\d+)?)?(?:Z|([+-](?:[01]\\d|2[0-3]):[0-5]\\d)))$"
+            },
+            "outcome": {
+              "type": "string",
+              "const": "allow-with-warning"
+            },
+            "public_action": {
+              "type": "object",
+              "properties": {
+                "category": {
+                  "type": "string",
+                  "const": "dual-use-boundary"
+                },
+                "action": {
+                  "type": "string",
+                  "const": "published-with-warning"
+                },
+                "notice": {
+                  "type": "string",
+                  "const": "screening-warning"
+                }
+              },
+              "required": [
+                "category",
+                "action",
+                "notice"
+              ],
+              "additionalProperties": false
+            },
+            "provider_status": {
+              "type": "string",
+              "const": "ok"
+            },
+            "decision_path": {
+              "type": "string",
+              "const": "direct-content-warning"
+            },
+            "reviewer_state": {
+              "type": "string",
+              "const": "not-required"
+            }
+          },
+          "required": [
+            "version",
+            "scope",
+            "input_digest",
+            "context_frontier_digest",
+            "context_omission_count",
+            "model_version",
+            "policy_version",
+            "configuration_digest",
+            "decided_at",
+            "outcome",
+            "public_action",
+            "provider_status",
+            "decision_path",
+            "reviewer_state"
+          ],
+          "additionalProperties": false
+        }
+      },
+      "required": [
+        "public_action",
+        "operator_receipt"
+      ],
+      "additionalProperties": false
+    },
+    {
+      "type": "object",
+      "properties": {
+        "public_action": {
+          "type": "object",
+          "properties": {
+            "category": {
+              "type": "string",
+              "const": "operational-harm"
+            },
+            "action": {
+              "type": "string",
+              "const": "published-with-warning"
+            },
+            "notice": {
+              "type": "string",
+              "const": "screening-warning"
+            }
+          },
+          "required": [
+            "category",
+            "action",
+            "notice"
+          ],
+          "additionalProperties": false
+        },
+        "operator_receipt": {
+          "type": "object",
+          "properties": {
+            "version": {
+              "type": "string",
+              "const": "screening-promotion-decision-provenance.v1"
+            },
+            "scope": {
+              "type": "string",
+              "const": "promotion"
+            },
+            "input_digest": {
+              "type": "string",
+              "pattern": "^[a-f0-9]{64}$"
+            },
+            "context_frontier_digest": {
+              "type": "string",
+              "pattern": "^[a-f0-9]{64}$"
+            },
+            "context_omission_count": {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 9007199254740991
+            },
+            "model_version": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 160,
+              "pattern": "^[A-Za-z0-9][A-Za-z0-9._:/-]*$"
+            },
+            "policy_version": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 160,
+              "pattern": "^[A-Za-z0-9][A-Za-z0-9._:/-]*$"
+            },
+            "configuration_digest": {
+              "type": "string",
+              "pattern": "^[a-f0-9]{64}$"
+            },
+            "decided_at": {
+              "type": "string",
+              "maxLength": 40,
+              "format": "date-time",
+              "pattern": "^(?:(?:\\d\\d[2468][048]|\\d\\d[13579][26]|\\d\\d0[48]|[02468][048]00|[13579][26]00)-02-29|\\d{4}-(?:(?:0[13578]|1[02])-(?:0[1-9]|[12]\\d|3[01])|(?:0[469]|11)-(?:0[1-9]|[12]\\d|30)|(?:02)-(?:0[1-9]|1\\d|2[0-8])))T(?:(?:[01]\\d|2[0-3]):[0-5]\\d(?::[0-5]\\d(?:\\.\\d+)?)?(?:Z|([+-](?:[01]\\d|2[0-3]):[0-5]\\d)))$"
+            },
+            "outcome": {
+              "type": "string",
+              "const": "allow-with-warning"
+            },
+            "public_action": {
+              "type": "object",
+              "properties": {
+                "category": {
+                  "type": "string",
+                  "const": "operational-harm"
+                },
+                "action": {
+                  "type": "string",
+                  "const": "published-with-warning"
+                },
+                "notice": {
+                  "type": "string",
+                  "const": "screening-warning"
+                }
+              },
+              "required": [
+                "category",
+                "action",
+                "notice"
+              ],
+              "additionalProperties": false
+            },
+            "provider_status": {
+              "type": "string",
+              "const": "ok"
+            },
+            "decision_path": {
+              "type": "string",
+              "const": "direct-content-warning"
+            },
+            "reviewer_state": {
+              "type": "string",
+              "const": "not-required"
+            }
+          },
+          "required": [
+            "version",
+            "scope",
+            "input_digest",
+            "context_frontier_digest",
+            "context_omission_count",
+            "model_version",
+            "policy_version",
+            "configuration_digest",
+            "decided_at",
+            "outcome",
+            "public_action",
+            "provider_status",
+            "decision_path",
+            "reviewer_state"
+          ],
+          "additionalProperties": false
+        }
+      },
+      "required": [
+        "public_action",
+        "operator_receipt"
+      ],
+      "additionalProperties": false
+    },
+    {
+      "type": "object",
+      "properties": {
+        "public_action": {
+          "type": "object",
+          "properties": {
+            "category": {
+              "type": "string",
+              "const": "harassment"
+            },
+            "action": {
+              "type": "string",
+              "const": "published-with-warning"
+            },
+            "notice": {
+              "type": "string",
+              "const": "screening-warning"
+            }
+          },
+          "required": [
+            "category",
+            "action",
+            "notice"
+          ],
+          "additionalProperties": false
+        },
+        "operator_receipt": {
+          "type": "object",
+          "properties": {
+            "version": {
+              "type": "string",
+              "const": "screening-promotion-decision-provenance.v1"
+            },
+            "scope": {
+              "type": "string",
+              "const": "promotion"
+            },
+            "input_digest": {
+              "type": "string",
+              "pattern": "^[a-f0-9]{64}$"
+            },
+            "context_frontier_digest": {
+              "type": "string",
+              "pattern": "^[a-f0-9]{64}$"
+            },
+            "context_omission_count": {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 9007199254740991
+            },
+            "model_version": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 160,
+              "pattern": "^[A-Za-z0-9][A-Za-z0-9._:/-]*$"
+            },
+            "policy_version": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 160,
+              "pattern": "^[A-Za-z0-9][A-Za-z0-9._:/-]*$"
+            },
+            "configuration_digest": {
+              "type": "string",
+              "pattern": "^[a-f0-9]{64}$"
+            },
+            "decided_at": {
+              "type": "string",
+              "maxLength": 40,
+              "format": "date-time",
+              "pattern": "^(?:(?:\\d\\d[2468][048]|\\d\\d[13579][26]|\\d\\d0[48]|[02468][048]00|[13579][26]00)-02-29|\\d{4}-(?:(?:0[13578]|1[02])-(?:0[1-9]|[12]\\d|3[01])|(?:0[469]|11)-(?:0[1-9]|[12]\\d|30)|(?:02)-(?:0[1-9]|1\\d|2[0-8])))T(?:(?:[01]\\d|2[0-3]):[0-5]\\d(?::[0-5]\\d(?:\\.\\d+)?)?(?:Z|([+-](?:[01]\\d|2[0-3]):[0-5]\\d)))$"
+            },
+            "outcome": {
+              "type": "string",
+              "const": "allow-with-warning"
+            },
+            "public_action": {
+              "type": "object",
+              "properties": {
+                "category": {
+                  "type": "string",
+                  "const": "harassment"
+                },
+                "action": {
+                  "type": "string",
+                  "const": "published-with-warning"
+                },
+                "notice": {
+                  "type": "string",
+                  "const": "screening-warning"
+                }
+              },
+              "required": [
+                "category",
+                "action",
+                "notice"
+              ],
+              "additionalProperties": false
+            },
+            "provider_status": {
+              "type": "string",
+              "const": "ok"
+            },
+            "decision_path": {
+              "type": "string",
+              "const": "direct-content-warning"
+            },
+            "reviewer_state": {
+              "type": "string",
+              "const": "not-required"
+            }
+          },
+          "required": [
+            "version",
+            "scope",
+            "input_digest",
+            "context_frontier_digest",
+            "context_omission_count",
+            "model_version",
+            "policy_version",
+            "configuration_digest",
+            "decided_at",
+            "outcome",
+            "public_action",
+            "provider_status",
+            "decision_path",
+            "reviewer_state"
+          ],
+          "additionalProperties": false
+        }
+      },
+      "required": [
+        "public_action",
+        "operator_receipt"
+      ],
+      "additionalProperties": false
+    },
+    {
+      "type": "object",
+      "properties": {
+        "public_action": {
+          "type": "object",
+          "properties": {
+            "category": {
+              "type": "string",
+              "const": "sexual-content"
+            },
+            "action": {
+              "type": "string",
+              "const": "published-with-warning"
+            },
+            "notice": {
+              "type": "string",
+              "const": "screening-warning"
+            }
+          },
+          "required": [
+            "category",
+            "action",
+            "notice"
+          ],
+          "additionalProperties": false
+        },
+        "operator_receipt": {
+          "type": "object",
+          "properties": {
+            "version": {
+              "type": "string",
+              "const": "screening-promotion-decision-provenance.v1"
+            },
+            "scope": {
+              "type": "string",
+              "const": "promotion"
+            },
+            "input_digest": {
+              "type": "string",
+              "pattern": "^[a-f0-9]{64}$"
+            },
+            "context_frontier_digest": {
+              "type": "string",
+              "pattern": "^[a-f0-9]{64}$"
+            },
+            "context_omission_count": {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 9007199254740991
+            },
+            "model_version": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 160,
+              "pattern": "^[A-Za-z0-9][A-Za-z0-9._:/-]*$"
+            },
+            "policy_version": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 160,
+              "pattern": "^[A-Za-z0-9][A-Za-z0-9._:/-]*$"
+            },
+            "configuration_digest": {
+              "type": "string",
+              "pattern": "^[a-f0-9]{64}$"
+            },
+            "decided_at": {
+              "type": "string",
+              "maxLength": 40,
+              "format": "date-time",
+              "pattern": "^(?:(?:\\d\\d[2468][048]|\\d\\d[13579][26]|\\d\\d0[48]|[02468][048]00|[13579][26]00)-02-29|\\d{4}-(?:(?:0[13578]|1[02])-(?:0[1-9]|[12]\\d|3[01])|(?:0[469]|11)-(?:0[1-9]|[12]\\d|30)|(?:02)-(?:0[1-9]|1\\d|2[0-8])))T(?:(?:[01]\\d|2[0-3]):[0-5]\\d(?::[0-5]\\d(?:\\.\\d+)?)?(?:Z|([+-](?:[01]\\d|2[0-3]):[0-5]\\d)))$"
+            },
+            "outcome": {
+              "type": "string",
+              "const": "allow-with-warning"
+            },
+            "public_action": {
+              "type": "object",
+              "properties": {
+                "category": {
+                  "type": "string",
+                  "const": "sexual-content"
+                },
+                "action": {
+                  "type": "string",
+                  "const": "published-with-warning"
+                },
+                "notice": {
+                  "type": "string",
+                  "const": "screening-warning"
+                }
+              },
+              "required": [
+                "category",
+                "action",
+                "notice"
+              ],
+              "additionalProperties": false
+            },
+            "provider_status": {
+              "type": "string",
+              "const": "ok"
+            },
+            "decision_path": {
+              "type": "string",
+              "const": "direct-content-warning"
+            },
+            "reviewer_state": {
+              "type": "string",
+              "const": "not-required"
+            }
+          },
+          "required": [
+            "version",
+            "scope",
+            "input_digest",
+            "context_frontier_digest",
+            "context_omission_count",
+            "model_version",
+            "policy_version",
+            "configuration_digest",
+            "decided_at",
+            "outcome",
+            "public_action",
+            "provider_status",
+            "decision_path",
+            "reviewer_state"
+          ],
+          "additionalProperties": false
+        }
+      },
+      "required": [
+        "public_action",
+        "operator_receipt"
+      ],
+      "additionalProperties": false
+    },
+    {
+      "type": "object",
+      "properties": {
+        "public_action": {
+          "type": "object",
+          "properties": {
+            "category": {
+              "type": "string",
+              "const": "provider-unavailable"
+            },
+            "action": {
+              "type": "string",
+              "const": "published-with-warning"
+            },
+            "notice": {
+              "type": "string",
+              "const": "screening-degraded"
+            }
+          },
+          "required": [
+            "category",
+            "action",
+            "notice"
+          ],
+          "additionalProperties": false
+        },
+        "operator_receipt": {
+          "type": "object",
+          "properties": {
+            "version": {
+              "type": "string",
+              "const": "screening-promotion-decision-provenance.v1"
+            },
+            "scope": {
+              "type": "string",
+              "const": "promotion"
+            },
+            "input_digest": {
+              "type": "string",
+              "pattern": "^[a-f0-9]{64}$"
+            },
+            "context_frontier_digest": {
+              "type": "string",
+              "pattern": "^[a-f0-9]{64}$"
+            },
+            "context_omission_count": {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 9007199254740991
+            },
+            "model_version": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 160,
+              "pattern": "^[A-Za-z0-9][A-Za-z0-9._:/-]*$"
+            },
+            "policy_version": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 160,
+              "pattern": "^[A-Za-z0-9][A-Za-z0-9._:/-]*$"
+            },
+            "configuration_digest": {
+              "type": "string",
+              "pattern": "^[a-f0-9]{64}$"
+            },
+            "decided_at": {
+              "type": "string",
+              "maxLength": 40,
+              "format": "date-time",
+              "pattern": "^(?:(?:\\d\\d[2468][048]|\\d\\d[13579][26]|\\d\\d0[48]|[02468][048]00|[13579][26]00)-02-29|\\d{4}-(?:(?:0[13578]|1[02])-(?:0[1-9]|[12]\\d|3[01])|(?:0[469]|11)-(?:0[1-9]|[12]\\d|30)|(?:02)-(?:0[1-9]|1\\d|2[0-8])))T(?:(?:[01]\\d|2[0-3]):[0-5]\\d(?::[0-5]\\d(?:\\.\\d+)?)?(?:Z|([+-](?:[01]\\d|2[0-3]):[0-5]\\d)))$"
+            },
+            "outcome": {
+              "type": "string",
+              "const": "allow-with-warning"
+            },
+            "public_action": {
+              "type": "object",
+              "properties": {
+                "category": {
+                  "type": "string",
+                  "const": "provider-unavailable"
+                },
+                "action": {
+                  "type": "string",
+                  "const": "published-with-warning"
+                },
+                "notice": {
+                  "type": "string",
+                  "const": "screening-degraded"
+                }
+              },
+              "required": [
+                "category",
+                "action",
+                "notice"
+              ],
+              "additionalProperties": false
+            },
+            "provider_status": {
+              "type": "string",
+              "const": "timeout"
+            },
+            "decision_path": {
+              "type": "string",
+              "const": "benign-outage-degraded"
+            },
+            "reviewer_state": {
+              "type": "string",
+              "const": "not-required"
+            }
+          },
+          "required": [
+            "version",
+            "scope",
+            "input_digest",
+            "context_frontier_digest",
+            "context_omission_count",
+            "model_version",
+            "policy_version",
+            "configuration_digest",
+            "decided_at",
+            "outcome",
+            "public_action",
+            "provider_status",
+            "decision_path",
+            "reviewer_state"
+          ],
+          "additionalProperties": false
+        }
+      },
+      "required": [
+        "public_action",
+        "operator_receipt"
+      ],
+      "additionalProperties": false
+    },
+    {
+      "type": "object",
+      "properties": {
+        "public_action": {
+          "type": "object",
+          "properties": {
+            "category": {
+              "type": "string",
+              "const": "provider-unavailable"
+            },
+            "action": {
+              "type": "string",
+              "const": "published-with-warning"
+            },
+            "notice": {
+              "type": "string",
+              "const": "screening-degraded"
+            }
+          },
+          "required": [
+            "category",
+            "action",
+            "notice"
+          ],
+          "additionalProperties": false
+        },
+        "operator_receipt": {
+          "type": "object",
+          "properties": {
+            "version": {
+              "type": "string",
+              "const": "screening-promotion-decision-provenance.v1"
+            },
+            "scope": {
+              "type": "string",
+              "const": "promotion"
+            },
+            "input_digest": {
+              "type": "string",
+              "pattern": "^[a-f0-9]{64}$"
+            },
+            "context_frontier_digest": {
+              "type": "string",
+              "pattern": "^[a-f0-9]{64}$"
+            },
+            "context_omission_count": {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 9007199254740991
+            },
+            "model_version": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 160,
+              "pattern": "^[A-Za-z0-9][A-Za-z0-9._:/-]*$"
+            },
+            "policy_version": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 160,
+              "pattern": "^[A-Za-z0-9][A-Za-z0-9._:/-]*$"
+            },
+            "configuration_digest": {
+              "type": "string",
+              "pattern": "^[a-f0-9]{64}$"
+            },
+            "decided_at": {
+              "type": "string",
+              "maxLength": 40,
+              "format": "date-time",
+              "pattern": "^(?:(?:\\d\\d[2468][048]|\\d\\d[13579][26]|\\d\\d0[48]|[02468][048]00|[13579][26]00)-02-29|\\d{4}-(?:(?:0[13578]|1[02])-(?:0[1-9]|[12]\\d|3[01])|(?:0[469]|11)-(?:0[1-9]|[12]\\d|30)|(?:02)-(?:0[1-9]|1\\d|2[0-8])))T(?:(?:[01]\\d|2[0-3]):[0-5]\\d(?::[0-5]\\d(?:\\.\\d+)?)?(?:Z|([+-](?:[01]\\d|2[0-3]):[0-5]\\d)))$"
+            },
+            "outcome": {
+              "type": "string",
+              "const": "allow-with-warning"
+            },
+            "public_action": {
+              "type": "object",
+              "properties": {
+                "category": {
+                  "type": "string",
+                  "const": "provider-unavailable"
+                },
+                "action": {
+                  "type": "string",
+                  "const": "published-with-warning"
+                },
+                "notice": {
+                  "type": "string",
+                  "const": "screening-degraded"
+                }
+              },
+              "required": [
+                "category",
+                "action",
+                "notice"
+              ],
+              "additionalProperties": false
+            },
+            "provider_status": {
+              "type": "string",
+              "const": "error"
+            },
+            "decision_path": {
+              "type": "string",
+              "const": "benign-outage-degraded"
+            },
+            "reviewer_state": {
+              "type": "string",
+              "const": "not-required"
+            }
+          },
+          "required": [
+            "version",
+            "scope",
+            "input_digest",
+            "context_frontier_digest",
+            "context_omission_count",
+            "model_version",
+            "policy_version",
+            "configuration_digest",
+            "decided_at",
+            "outcome",
+            "public_action",
+            "provider_status",
+            "decision_path",
+            "reviewer_state"
+          ],
+          "additionalProperties": false
+        }
+      },
+      "required": [
+        "public_action",
+        "operator_receipt"
+      ],
+      "additionalProperties": false
+    },
+    {
+      "type": "object",
+      "properties": {
+        "public_action": {
+          "type": "object",
+          "properties": {
+            "category": {
+              "type": "string",
+              "const": "benign-context"
+            },
+            "action": {
+              "type": "string",
+              "const": "quarantined"
+            },
+            "notice": {
+              "type": "string",
+              "const": "none"
+            }
+          },
+          "required": [
+            "category",
+            "action",
+            "notice"
+          ],
+          "additionalProperties": false
+        },
+        "operator_receipt": {
+          "type": "object",
+          "properties": {
+            "version": {
+              "type": "string",
+              "const": "screening-promotion-decision-provenance.v1"
+            },
+            "scope": {
+              "type": "string",
+              "const": "promotion"
+            },
+            "input_digest": {
+              "type": "string",
+              "pattern": "^[a-f0-9]{64}$"
+            },
+            "context_frontier_digest": {
+              "type": "string",
+              "pattern": "^[a-f0-9]{64}$"
+            },
+            "context_omission_count": {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 9007199254740991
+            },
+            "model_version": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 160,
+              "pattern": "^[A-Za-z0-9][A-Za-z0-9._:/-]*$"
+            },
+            "policy_version": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 160,
+              "pattern": "^[A-Za-z0-9][A-Za-z0-9._:/-]*$"
+            },
+            "configuration_digest": {
+              "type": "string",
+              "pattern": "^[a-f0-9]{64}$"
+            },
+            "decided_at": {
+              "type": "string",
+              "maxLength": 40,
+              "format": "date-time",
+              "pattern": "^(?:(?:\\d\\d[2468][048]|\\d\\d[13579][26]|\\d\\d0[48]|[02468][048]00|[13579][26]00)-02-29|\\d{4}-(?:(?:0[13578]|1[02])-(?:0[1-9]|[12]\\d|3[01])|(?:0[469]|11)-(?:0[1-9]|[12]\\d|30)|(?:02)-(?:0[1-9]|1\\d|2[0-8])))T(?:(?:[01]\\d|2[0-3]):[0-5]\\d(?::[0-5]\\d(?:\\.\\d+)?)?(?:Z|([+-](?:[01]\\d|2[0-3]):[0-5]\\d)))$"
+            },
+            "outcome": {
+              "type": "string",
+              "const": "quarantine"
+            },
+            "public_action": {
+              "type": "object",
+              "properties": {
+                "category": {
+                  "type": "string",
+                  "const": "benign-context"
+                },
+                "action": {
+                  "type": "string",
+                  "const": "quarantined"
+                },
+                "notice": {
+                  "type": "string",
+                  "const": "none"
+                }
+              },
+              "required": [
+                "category",
+                "action",
+                "notice"
+              ],
+              "additionalProperties": false
+            },
+            "provider_status": {
+              "type": "string",
+              "const": "ok"
+            },
+            "decision_path": {
+              "type": "string",
+              "const": "provider-contextual-hold"
+            },
+            "reviewer_state": {
+              "type": "string",
+              "const": "pending-operator-review"
+            }
+          },
+          "required": [
+            "version",
+            "scope",
+            "input_digest",
+            "context_frontier_digest",
+            "context_omission_count",
+            "model_version",
+            "policy_version",
+            "configuration_digest",
+            "decided_at",
+            "outcome",
+            "public_action",
+            "provider_status",
+            "decision_path",
+            "reviewer_state"
+          ],
+          "additionalProperties": false
+        }
+      },
+      "required": [
+        "public_action",
+        "operator_receipt"
+      ],
+      "additionalProperties": false
+    },
+    {
+      "type": "object",
+      "properties": {
+        "public_action": {
+          "type": "object",
+          "properties": {
+            "category": {
+              "type": "string",
+              "const": "spam-commercial"
+            },
+            "action": {
+              "type": "string",
+              "const": "quarantined"
+            },
+            "notice": {
+              "type": "string",
+              "const": "none"
+            }
+          },
+          "required": [
+            "category",
+            "action",
+            "notice"
+          ],
+          "additionalProperties": false
+        },
+        "operator_receipt": {
+          "type": "object",
+          "properties": {
+            "version": {
+              "type": "string",
+              "const": "screening-promotion-decision-provenance.v1"
+            },
+            "scope": {
+              "type": "string",
+              "const": "promotion"
+            },
+            "input_digest": {
+              "type": "string",
+              "pattern": "^[a-f0-9]{64}$"
+            },
+            "context_frontier_digest": {
+              "type": "string",
+              "pattern": "^[a-f0-9]{64}$"
+            },
+            "context_omission_count": {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 9007199254740991
+            },
+            "model_version": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 160,
+              "pattern": "^[A-Za-z0-9][A-Za-z0-9._:/-]*$"
+            },
+            "policy_version": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 160,
+              "pattern": "^[A-Za-z0-9][A-Za-z0-9._:/-]*$"
+            },
+            "configuration_digest": {
+              "type": "string",
+              "pattern": "^[a-f0-9]{64}$"
+            },
+            "decided_at": {
+              "type": "string",
+              "maxLength": 40,
+              "format": "date-time",
+              "pattern": "^(?:(?:\\d\\d[2468][048]|\\d\\d[13579][26]|\\d\\d0[48]|[02468][048]00|[13579][26]00)-02-29|\\d{4}-(?:(?:0[13578]|1[02])-(?:0[1-9]|[12]\\d|3[01])|(?:0[469]|11)-(?:0[1-9]|[12]\\d|30)|(?:02)-(?:0[1-9]|1\\d|2[0-8])))T(?:(?:[01]\\d|2[0-3]):[0-5]\\d(?::[0-5]\\d(?:\\.\\d+)?)?(?:Z|([+-](?:[01]\\d|2[0-3]):[0-5]\\d)))$"
+            },
+            "outcome": {
+              "type": "string",
+              "const": "quarantine"
+            },
+            "public_action": {
+              "type": "object",
+              "properties": {
+                "category": {
+                  "type": "string",
+                  "const": "spam-commercial"
+                },
+                "action": {
+                  "type": "string",
+                  "const": "quarantined"
+                },
+                "notice": {
+                  "type": "string",
+                  "const": "none"
+                }
+              },
+              "required": [
+                "category",
+                "action",
+                "notice"
+              ],
+              "additionalProperties": false
+            },
+            "provider_status": {
+              "type": "string",
+              "const": "ok"
+            },
+            "decision_path": {
+              "type": "string",
+              "const": "provider-contextual-hold"
+            },
+            "reviewer_state": {
+              "type": "string",
+              "const": "pending-operator-review"
+            }
+          },
+          "required": [
+            "version",
+            "scope",
+            "input_digest",
+            "context_frontier_digest",
+            "context_omission_count",
+            "model_version",
+            "policy_version",
+            "configuration_digest",
+            "decided_at",
+            "outcome",
+            "public_action",
+            "provider_status",
+            "decision_path",
+            "reviewer_state"
+          ],
+          "additionalProperties": false
+        }
+      },
+      "required": [
+        "public_action",
+        "operator_receipt"
+      ],
+      "additionalProperties": false
+    },
+    {
+      "type": "object",
+      "properties": {
+        "public_action": {
+          "type": "object",
+          "properties": {
+            "category": {
+              "type": "string",
+              "const": "injection"
+            },
+            "action": {
+              "type": "string",
+              "const": "quarantined"
+            },
+            "notice": {
+              "type": "string",
+              "const": "none"
+            }
+          },
+          "required": [
+            "category",
+            "action",
+            "notice"
+          ],
+          "additionalProperties": false
+        },
+        "operator_receipt": {
+          "type": "object",
+          "properties": {
+            "version": {
+              "type": "string",
+              "const": "screening-promotion-decision-provenance.v1"
+            },
+            "scope": {
+              "type": "string",
+              "const": "promotion"
+            },
+            "input_digest": {
+              "type": "string",
+              "pattern": "^[a-f0-9]{64}$"
+            },
+            "context_frontier_digest": {
+              "type": "string",
+              "pattern": "^[a-f0-9]{64}$"
+            },
+            "context_omission_count": {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 9007199254740991
+            },
+            "model_version": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 160,
+              "pattern": "^[A-Za-z0-9][A-Za-z0-9._:/-]*$"
+            },
+            "policy_version": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 160,
+              "pattern": "^[A-Za-z0-9][A-Za-z0-9._:/-]*$"
+            },
+            "configuration_digest": {
+              "type": "string",
+              "pattern": "^[a-f0-9]{64}$"
+            },
+            "decided_at": {
+              "type": "string",
+              "maxLength": 40,
+              "format": "date-time",
+              "pattern": "^(?:(?:\\d\\d[2468][048]|\\d\\d[13579][26]|\\d\\d0[48]|[02468][048]00|[13579][26]00)-02-29|\\d{4}-(?:(?:0[13578]|1[02])-(?:0[1-9]|[12]\\d|3[01])|(?:0[469]|11)-(?:0[1-9]|[12]\\d|30)|(?:02)-(?:0[1-9]|1\\d|2[0-8])))T(?:(?:[01]\\d|2[0-3]):[0-5]\\d(?::[0-5]\\d(?:\\.\\d+)?)?(?:Z|([+-](?:[01]\\d|2[0-3]):[0-5]\\d)))$"
+            },
+            "outcome": {
+              "type": "string",
+              "const": "quarantine"
+            },
+            "public_action": {
+              "type": "object",
+              "properties": {
+                "category": {
+                  "type": "string",
+                  "const": "injection"
+                },
+                "action": {
+                  "type": "string",
+                  "const": "quarantined"
+                },
+                "notice": {
+                  "type": "string",
+                  "const": "none"
+                }
+              },
+              "required": [
+                "category",
+                "action",
+                "notice"
+              ],
+              "additionalProperties": false
+            },
+            "provider_status": {
+              "type": "string",
+              "const": "ok"
+            },
+            "decision_path": {
+              "type": "string",
+              "const": "provider-contextual-hold"
+            },
+            "reviewer_state": {
+              "type": "string",
+              "const": "pending-operator-review"
+            }
+          },
+          "required": [
+            "version",
+            "scope",
+            "input_digest",
+            "context_frontier_digest",
+            "context_omission_count",
+            "model_version",
+            "policy_version",
+            "configuration_digest",
+            "decided_at",
+            "outcome",
+            "public_action",
+            "provider_status",
+            "decision_path",
+            "reviewer_state"
+          ],
+          "additionalProperties": false
+        }
+      },
+      "required": [
+        "public_action",
+        "operator_receipt"
+      ],
+      "additionalProperties": false
+    },
+    {
+      "type": "object",
+      "properties": {
+        "public_action": {
+          "type": "object",
+          "properties": {
+            "category": {
+              "type": "string",
+              "const": "dual-use-boundary"
+            },
+            "action": {
+              "type": "string",
+              "const": "quarantined"
+            },
+            "notice": {
+              "type": "string",
+              "const": "none"
+            }
+          },
+          "required": [
+            "category",
+            "action",
+            "notice"
+          ],
+          "additionalProperties": false
+        },
+        "operator_receipt": {
+          "type": "object",
+          "properties": {
+            "version": {
+              "type": "string",
+              "const": "screening-promotion-decision-provenance.v1"
+            },
+            "scope": {
+              "type": "string",
+              "const": "promotion"
+            },
+            "input_digest": {
+              "type": "string",
+              "pattern": "^[a-f0-9]{64}$"
+            },
+            "context_frontier_digest": {
+              "type": "string",
+              "pattern": "^[a-f0-9]{64}$"
+            },
+            "context_omission_count": {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 9007199254740991
+            },
+            "model_version": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 160,
+              "pattern": "^[A-Za-z0-9][A-Za-z0-9._:/-]*$"
+            },
+            "policy_version": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 160,
+              "pattern": "^[A-Za-z0-9][A-Za-z0-9._:/-]*$"
+            },
+            "configuration_digest": {
+              "type": "string",
+              "pattern": "^[a-f0-9]{64}$"
+            },
+            "decided_at": {
+              "type": "string",
+              "maxLength": 40,
+              "format": "date-time",
+              "pattern": "^(?:(?:\\d\\d[2468][048]|\\d\\d[13579][26]|\\d\\d0[48]|[02468][048]00|[13579][26]00)-02-29|\\d{4}-(?:(?:0[13578]|1[02])-(?:0[1-9]|[12]\\d|3[01])|(?:0[469]|11)-(?:0[1-9]|[12]\\d|30)|(?:02)-(?:0[1-9]|1\\d|2[0-8])))T(?:(?:[01]\\d|2[0-3]):[0-5]\\d(?::[0-5]\\d(?:\\.\\d+)?)?(?:Z|([+-](?:[01]\\d|2[0-3]):[0-5]\\d)))$"
+            },
+            "outcome": {
+              "type": "string",
+              "const": "quarantine"
+            },
+            "public_action": {
+              "type": "object",
+              "properties": {
+                "category": {
+                  "type": "string",
+                  "const": "dual-use-boundary"
+                },
+                "action": {
+                  "type": "string",
+                  "const": "quarantined"
+                },
+                "notice": {
+                  "type": "string",
+                  "const": "none"
+                }
+              },
+              "required": [
+                "category",
+                "action",
+                "notice"
+              ],
+              "additionalProperties": false
+            },
+            "provider_status": {
+              "type": "string",
+              "const": "ok"
+            },
+            "decision_path": {
+              "type": "string",
+              "const": "provider-contextual-hold"
+            },
+            "reviewer_state": {
+              "type": "string",
+              "const": "pending-operator-review"
+            }
+          },
+          "required": [
+            "version",
+            "scope",
+            "input_digest",
+            "context_frontier_digest",
+            "context_omission_count",
+            "model_version",
+            "policy_version",
+            "configuration_digest",
+            "decided_at",
+            "outcome",
+            "public_action",
+            "provider_status",
+            "decision_path",
+            "reviewer_state"
+          ],
+          "additionalProperties": false
+        }
+      },
+      "required": [
+        "public_action",
+        "operator_receipt"
+      ],
+      "additionalProperties": false
+    },
+    {
+      "type": "object",
+      "properties": {
+        "public_action": {
+          "type": "object",
+          "properties": {
+            "category": {
+              "type": "string",
+              "const": "operational-harm"
+            },
+            "action": {
+              "type": "string",
+              "const": "quarantined"
+            },
+            "notice": {
+              "type": "string",
+              "const": "none"
+            }
+          },
+          "required": [
+            "category",
+            "action",
+            "notice"
+          ],
+          "additionalProperties": false
+        },
+        "operator_receipt": {
+          "type": "object",
+          "properties": {
+            "version": {
+              "type": "string",
+              "const": "screening-promotion-decision-provenance.v1"
+            },
+            "scope": {
+              "type": "string",
+              "const": "promotion"
+            },
+            "input_digest": {
+              "type": "string",
+              "pattern": "^[a-f0-9]{64}$"
+            },
+            "context_frontier_digest": {
+              "type": "string",
+              "pattern": "^[a-f0-9]{64}$"
+            },
+            "context_omission_count": {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 9007199254740991
+            },
+            "model_version": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 160,
+              "pattern": "^[A-Za-z0-9][A-Za-z0-9._:/-]*$"
+            },
+            "policy_version": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 160,
+              "pattern": "^[A-Za-z0-9][A-Za-z0-9._:/-]*$"
+            },
+            "configuration_digest": {
+              "type": "string",
+              "pattern": "^[a-f0-9]{64}$"
+            },
+            "decided_at": {
+              "type": "string",
+              "maxLength": 40,
+              "format": "date-time",
+              "pattern": "^(?:(?:\\d\\d[2468][048]|\\d\\d[13579][26]|\\d\\d0[48]|[02468][048]00|[13579][26]00)-02-29|\\d{4}-(?:(?:0[13578]|1[02])-(?:0[1-9]|[12]\\d|3[01])|(?:0[469]|11)-(?:0[1-9]|[12]\\d|30)|(?:02)-(?:0[1-9]|1\\d|2[0-8])))T(?:(?:[01]\\d|2[0-3]):[0-5]\\d(?::[0-5]\\d(?:\\.\\d+)?)?(?:Z|([+-](?:[01]\\d|2[0-3]):[0-5]\\d)))$"
+            },
+            "outcome": {
+              "type": "string",
+              "const": "quarantine"
+            },
+            "public_action": {
+              "type": "object",
+              "properties": {
+                "category": {
+                  "type": "string",
+                  "const": "operational-harm"
+                },
+                "action": {
+                  "type": "string",
+                  "const": "quarantined"
+                },
+                "notice": {
+                  "type": "string",
+                  "const": "none"
+                }
+              },
+              "required": [
+                "category",
+                "action",
+                "notice"
+              ],
+              "additionalProperties": false
+            },
+            "provider_status": {
+              "type": "string",
+              "const": "ok"
+            },
+            "decision_path": {
+              "type": "string",
+              "const": "provider-contextual-hold"
+            },
+            "reviewer_state": {
+              "type": "string",
+              "const": "pending-operator-review"
+            }
+          },
+          "required": [
+            "version",
+            "scope",
+            "input_digest",
+            "context_frontier_digest",
+            "context_omission_count",
+            "model_version",
+            "policy_version",
+            "configuration_digest",
+            "decided_at",
+            "outcome",
+            "public_action",
+            "provider_status",
+            "decision_path",
+            "reviewer_state"
+          ],
+          "additionalProperties": false
+        }
+      },
+      "required": [
+        "public_action",
+        "operator_receipt"
+      ],
+      "additionalProperties": false
+    },
+    {
+      "type": "object",
+      "properties": {
+        "public_action": {
+          "type": "object",
+          "properties": {
+            "category": {
+              "type": "string",
+              "const": "harassment"
+            },
+            "action": {
+              "type": "string",
+              "const": "quarantined"
+            },
+            "notice": {
+              "type": "string",
+              "const": "none"
+            }
+          },
+          "required": [
+            "category",
+            "action",
+            "notice"
+          ],
+          "additionalProperties": false
+        },
+        "operator_receipt": {
+          "type": "object",
+          "properties": {
+            "version": {
+              "type": "string",
+              "const": "screening-promotion-decision-provenance.v1"
+            },
+            "scope": {
+              "type": "string",
+              "const": "promotion"
+            },
+            "input_digest": {
+              "type": "string",
+              "pattern": "^[a-f0-9]{64}$"
+            },
+            "context_frontier_digest": {
+              "type": "string",
+              "pattern": "^[a-f0-9]{64}$"
+            },
+            "context_omission_count": {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 9007199254740991
+            },
+            "model_version": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 160,
+              "pattern": "^[A-Za-z0-9][A-Za-z0-9._:/-]*$"
+            },
+            "policy_version": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 160,
+              "pattern": "^[A-Za-z0-9][A-Za-z0-9._:/-]*$"
+            },
+            "configuration_digest": {
+              "type": "string",
+              "pattern": "^[a-f0-9]{64}$"
+            },
+            "decided_at": {
+              "type": "string",
+              "maxLength": 40,
+              "format": "date-time",
+              "pattern": "^(?:(?:\\d\\d[2468][048]|\\d\\d[13579][26]|\\d\\d0[48]|[02468][048]00|[13579][26]00)-02-29|\\d{4}-(?:(?:0[13578]|1[02])-(?:0[1-9]|[12]\\d|3[01])|(?:0[469]|11)-(?:0[1-9]|[12]\\d|30)|(?:02)-(?:0[1-9]|1\\d|2[0-8])))T(?:(?:[01]\\d|2[0-3]):[0-5]\\d(?::[0-5]\\d(?:\\.\\d+)?)?(?:Z|([+-](?:[01]\\d|2[0-3]):[0-5]\\d)))$"
+            },
+            "outcome": {
+              "type": "string",
+              "const": "quarantine"
+            },
+            "public_action": {
+              "type": "object",
+              "properties": {
+                "category": {
+                  "type": "string",
+                  "const": "harassment"
+                },
+                "action": {
+                  "type": "string",
+                  "const": "quarantined"
+                },
+                "notice": {
+                  "type": "string",
+                  "const": "none"
+                }
+              },
+              "required": [
+                "category",
+                "action",
+                "notice"
+              ],
+              "additionalProperties": false
+            },
+            "provider_status": {
+              "type": "string",
+              "const": "ok"
+            },
+            "decision_path": {
+              "type": "string",
+              "const": "provider-contextual-hold"
+            },
+            "reviewer_state": {
+              "type": "string",
+              "const": "pending-operator-review"
+            }
+          },
+          "required": [
+            "version",
+            "scope",
+            "input_digest",
+            "context_frontier_digest",
+            "context_omission_count",
+            "model_version",
+            "policy_version",
+            "configuration_digest",
+            "decided_at",
+            "outcome",
+            "public_action",
+            "provider_status",
+            "decision_path",
+            "reviewer_state"
+          ],
+          "additionalProperties": false
+        }
+      },
+      "required": [
+        "public_action",
+        "operator_receipt"
+      ],
+      "additionalProperties": false
+    },
+    {
+      "type": "object",
+      "properties": {
+        "public_action": {
+          "type": "object",
+          "properties": {
+            "category": {
+              "type": "string",
+              "const": "sexual-content"
+            },
+            "action": {
+              "type": "string",
+              "const": "quarantined"
+            },
+            "notice": {
+              "type": "string",
+              "const": "none"
+            }
+          },
+          "required": [
+            "category",
+            "action",
+            "notice"
+          ],
+          "additionalProperties": false
+        },
+        "operator_receipt": {
+          "type": "object",
+          "properties": {
+            "version": {
+              "type": "string",
+              "const": "screening-promotion-decision-provenance.v1"
+            },
+            "scope": {
+              "type": "string",
+              "const": "promotion"
+            },
+            "input_digest": {
+              "type": "string",
+              "pattern": "^[a-f0-9]{64}$"
+            },
+            "context_frontier_digest": {
+              "type": "string",
+              "pattern": "^[a-f0-9]{64}$"
+            },
+            "context_omission_count": {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 9007199254740991
+            },
+            "model_version": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 160,
+              "pattern": "^[A-Za-z0-9][A-Za-z0-9._:/-]*$"
+            },
+            "policy_version": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 160,
+              "pattern": "^[A-Za-z0-9][A-Za-z0-9._:/-]*$"
+            },
+            "configuration_digest": {
+              "type": "string",
+              "pattern": "^[a-f0-9]{64}$"
+            },
+            "decided_at": {
+              "type": "string",
+              "maxLength": 40,
+              "format": "date-time",
+              "pattern": "^(?:(?:\\d\\d[2468][048]|\\d\\d[13579][26]|\\d\\d0[48]|[02468][048]00|[13579][26]00)-02-29|\\d{4}-(?:(?:0[13578]|1[02])-(?:0[1-9]|[12]\\d|3[01])|(?:0[469]|11)-(?:0[1-9]|[12]\\d|30)|(?:02)-(?:0[1-9]|1\\d|2[0-8])))T(?:(?:[01]\\d|2[0-3]):[0-5]\\d(?::[0-5]\\d(?:\\.\\d+)?)?(?:Z|([+-](?:[01]\\d|2[0-3]):[0-5]\\d)))$"
+            },
+            "outcome": {
+              "type": "string",
+              "const": "quarantine"
+            },
+            "public_action": {
+              "type": "object",
+              "properties": {
+                "category": {
+                  "type": "string",
+                  "const": "sexual-content"
+                },
+                "action": {
+                  "type": "string",
+                  "const": "quarantined"
+                },
+                "notice": {
+                  "type": "string",
+                  "const": "none"
+                }
+              },
+              "required": [
+                "category",
+                "action",
+                "notice"
+              ],
+              "additionalProperties": false
+            },
+            "provider_status": {
+              "type": "string",
+              "const": "ok"
+            },
+            "decision_path": {
+              "type": "string",
+              "const": "provider-contextual-hold"
+            },
+            "reviewer_state": {
+              "type": "string",
+              "const": "pending-operator-review"
+            }
+          },
+          "required": [
+            "version",
+            "scope",
+            "input_digest",
+            "context_frontier_digest",
+            "context_omission_count",
+            "model_version",
+            "policy_version",
+            "configuration_digest",
+            "decided_at",
+            "outcome",
+            "public_action",
+            "provider_status",
+            "decision_path",
+            "reviewer_state"
+          ],
+          "additionalProperties": false
+        }
+      },
+      "required": [
+        "public_action",
+        "operator_receipt"
+      ],
+      "additionalProperties": false
+    },
+    {
+      "type": "object",
+      "properties": {
+        "public_action": {
+          "type": "object",
+          "properties": {
+            "category": {
+              "type": "string",
+              "const": "benign-context"
+            },
+            "action": {
+              "type": "string",
+              "const": "quarantined"
+            },
+            "notice": {
+              "type": "string",
+              "const": "none"
+            }
+          },
+          "required": [
+            "category",
+            "action",
+            "notice"
+          ],
+          "additionalProperties": false
+        },
+        "operator_receipt": {
+          "type": "object",
+          "properties": {
+            "version": {
+              "type": "string",
+              "const": "screening-promotion-decision-provenance.v1"
+            },
+            "scope": {
+              "type": "string",
+              "const": "promotion"
+            },
+            "input_digest": {
+              "type": "string",
+              "pattern": "^[a-f0-9]{64}$"
+            },
+            "context_frontier_digest": {
+              "type": "string",
+              "pattern": "^[a-f0-9]{64}$"
+            },
+            "context_omission_count": {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 9007199254740991
+            },
+            "model_version": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 160,
+              "pattern": "^[A-Za-z0-9][A-Za-z0-9._:/-]*$"
+            },
+            "policy_version": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 160,
+              "pattern": "^[A-Za-z0-9][A-Za-z0-9._:/-]*$"
+            },
+            "configuration_digest": {
+              "type": "string",
+              "pattern": "^[a-f0-9]{64}$"
+            },
+            "decided_at": {
+              "type": "string",
+              "maxLength": 40,
+              "format": "date-time",
+              "pattern": "^(?:(?:\\d\\d[2468][048]|\\d\\d[13579][26]|\\d\\d0[48]|[02468][048]00|[13579][26]00)-02-29|\\d{4}-(?:(?:0[13578]|1[02])-(?:0[1-9]|[12]\\d|3[01])|(?:0[469]|11)-(?:0[1-9]|[12]\\d|30)|(?:02)-(?:0[1-9]|1\\d|2[0-8])))T(?:(?:[01]\\d|2[0-3]):[0-5]\\d(?::[0-5]\\d(?:\\.\\d+)?)?(?:Z|([+-](?:[01]\\d|2[0-3]):[0-5]\\d)))$"
+            },
+            "outcome": {
+              "type": "string",
+              "const": "quarantine"
+            },
+            "public_action": {
+              "type": "object",
+              "properties": {
+                "category": {
+                  "type": "string",
+                  "const": "benign-context"
+                },
+                "action": {
+                  "type": "string",
+                  "const": "quarantined"
+                },
+                "notice": {
+                  "type": "string",
+                  "const": "none"
+                }
+              },
+              "required": [
+                "category",
+                "action",
+                "notice"
+              ],
+              "additionalProperties": false
+            },
+            "provider_status": {
+              "type": "string",
+              "const": "ok"
+            },
+            "decision_path": {
+              "type": "string",
+              "const": "direct-content-hold"
+            },
+            "reviewer_state": {
+              "type": "string",
+              "const": "pending-operator-review"
+            }
+          },
+          "required": [
+            "version",
+            "scope",
+            "input_digest",
+            "context_frontier_digest",
+            "context_omission_count",
+            "model_version",
+            "policy_version",
+            "configuration_digest",
+            "decided_at",
+            "outcome",
+            "public_action",
+            "provider_status",
+            "decision_path",
+            "reviewer_state"
+          ],
+          "additionalProperties": false
+        }
+      },
+      "required": [
+        "public_action",
+        "operator_receipt"
+      ],
+      "additionalProperties": false
+    },
+    {
+      "type": "object",
+      "properties": {
+        "public_action": {
+          "type": "object",
+          "properties": {
+            "category": {
+              "type": "string",
+              "const": "spam-commercial"
+            },
+            "action": {
+              "type": "string",
+              "const": "quarantined"
+            },
+            "notice": {
+              "type": "string",
+              "const": "none"
+            }
+          },
+          "required": [
+            "category",
+            "action",
+            "notice"
+          ],
+          "additionalProperties": false
+        },
+        "operator_receipt": {
+          "type": "object",
+          "properties": {
+            "version": {
+              "type": "string",
+              "const": "screening-promotion-decision-provenance.v1"
+            },
+            "scope": {
+              "type": "string",
+              "const": "promotion"
+            },
+            "input_digest": {
+              "type": "string",
+              "pattern": "^[a-f0-9]{64}$"
+            },
+            "context_frontier_digest": {
+              "type": "string",
+              "pattern": "^[a-f0-9]{64}$"
+            },
+            "context_omission_count": {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 9007199254740991
+            },
+            "model_version": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 160,
+              "pattern": "^[A-Za-z0-9][A-Za-z0-9._:/-]*$"
+            },
+            "policy_version": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 160,
+              "pattern": "^[A-Za-z0-9][A-Za-z0-9._:/-]*$"
+            },
+            "configuration_digest": {
+              "type": "string",
+              "pattern": "^[a-f0-9]{64}$"
+            },
+            "decided_at": {
+              "type": "string",
+              "maxLength": 40,
+              "format": "date-time",
+              "pattern": "^(?:(?:\\d\\d[2468][048]|\\d\\d[13579][26]|\\d\\d0[48]|[02468][048]00|[13579][26]00)-02-29|\\d{4}-(?:(?:0[13578]|1[02])-(?:0[1-9]|[12]\\d|3[01])|(?:0[469]|11)-(?:0[1-9]|[12]\\d|30)|(?:02)-(?:0[1-9]|1\\d|2[0-8])))T(?:(?:[01]\\d|2[0-3]):[0-5]\\d(?::[0-5]\\d(?:\\.\\d+)?)?(?:Z|([+-](?:[01]\\d|2[0-3]):[0-5]\\d)))$"
+            },
+            "outcome": {
+              "type": "string",
+              "const": "quarantine"
+            },
+            "public_action": {
+              "type": "object",
+              "properties": {
+                "category": {
+                  "type": "string",
+                  "const": "spam-commercial"
+                },
+                "action": {
+                  "type": "string",
+                  "const": "quarantined"
+                },
+                "notice": {
+                  "type": "string",
+                  "const": "none"
+                }
+              },
+              "required": [
+                "category",
+                "action",
+                "notice"
+              ],
+              "additionalProperties": false
+            },
+            "provider_status": {
+              "type": "string",
+              "const": "ok"
+            },
+            "decision_path": {
+              "type": "string",
+              "const": "direct-content-hold"
+            },
+            "reviewer_state": {
+              "type": "string",
+              "const": "pending-operator-review"
+            }
+          },
+          "required": [
+            "version",
+            "scope",
+            "input_digest",
+            "context_frontier_digest",
+            "context_omission_count",
+            "model_version",
+            "policy_version",
+            "configuration_digest",
+            "decided_at",
+            "outcome",
+            "public_action",
+            "provider_status",
+            "decision_path",
+            "reviewer_state"
+          ],
+          "additionalProperties": false
+        }
+      },
+      "required": [
+        "public_action",
+        "operator_receipt"
+      ],
+      "additionalProperties": false
+    },
+    {
+      "type": "object",
+      "properties": {
+        "public_action": {
+          "type": "object",
+          "properties": {
+            "category": {
+              "type": "string",
+              "const": "injection"
+            },
+            "action": {
+              "type": "string",
+              "const": "quarantined"
+            },
+            "notice": {
+              "type": "string",
+              "const": "none"
+            }
+          },
+          "required": [
+            "category",
+            "action",
+            "notice"
+          ],
+          "additionalProperties": false
+        },
+        "operator_receipt": {
+          "type": "object",
+          "properties": {
+            "version": {
+              "type": "string",
+              "const": "screening-promotion-decision-provenance.v1"
+            },
+            "scope": {
+              "type": "string",
+              "const": "promotion"
+            },
+            "input_digest": {
+              "type": "string",
+              "pattern": "^[a-f0-9]{64}$"
+            },
+            "context_frontier_digest": {
+              "type": "string",
+              "pattern": "^[a-f0-9]{64}$"
+            },
+            "context_omission_count": {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 9007199254740991
+            },
+            "model_version": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 160,
+              "pattern": "^[A-Za-z0-9][A-Za-z0-9._:/-]*$"
+            },
+            "policy_version": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 160,
+              "pattern": "^[A-Za-z0-9][A-Za-z0-9._:/-]*$"
+            },
+            "configuration_digest": {
+              "type": "string",
+              "pattern": "^[a-f0-9]{64}$"
+            },
+            "decided_at": {
+              "type": "string",
+              "maxLength": 40,
+              "format": "date-time",
+              "pattern": "^(?:(?:\\d\\d[2468][048]|\\d\\d[13579][26]|\\d\\d0[48]|[02468][048]00|[13579][26]00)-02-29|\\d{4}-(?:(?:0[13578]|1[02])-(?:0[1-9]|[12]\\d|3[01])|(?:0[469]|11)-(?:0[1-9]|[12]\\d|30)|(?:02)-(?:0[1-9]|1\\d|2[0-8])))T(?:(?:[01]\\d|2[0-3]):[0-5]\\d(?::[0-5]\\d(?:\\.\\d+)?)?(?:Z|([+-](?:[01]\\d|2[0-3]):[0-5]\\d)))$"
+            },
+            "outcome": {
+              "type": "string",
+              "const": "quarantine"
+            },
+            "public_action": {
+              "type": "object",
+              "properties": {
+                "category": {
+                  "type": "string",
+                  "const": "injection"
+                },
+                "action": {
+                  "type": "string",
+                  "const": "quarantined"
+                },
+                "notice": {
+                  "type": "string",
+                  "const": "none"
+                }
+              },
+              "required": [
+                "category",
+                "action",
+                "notice"
+              ],
+              "additionalProperties": false
+            },
+            "provider_status": {
+              "type": "string",
+              "const": "ok"
+            },
+            "decision_path": {
+              "type": "string",
+              "const": "direct-content-hold"
+            },
+            "reviewer_state": {
+              "type": "string",
+              "const": "pending-operator-review"
+            }
+          },
+          "required": [
+            "version",
+            "scope",
+            "input_digest",
+            "context_frontier_digest",
+            "context_omission_count",
+            "model_version",
+            "policy_version",
+            "configuration_digest",
+            "decided_at",
+            "outcome",
+            "public_action",
+            "provider_status",
+            "decision_path",
+            "reviewer_state"
+          ],
+          "additionalProperties": false
+        }
+      },
+      "required": [
+        "public_action",
+        "operator_receipt"
+      ],
+      "additionalProperties": false
+    },
+    {
+      "type": "object",
+      "properties": {
+        "public_action": {
+          "type": "object",
+          "properties": {
+            "category": {
+              "type": "string",
+              "const": "dual-use-boundary"
+            },
+            "action": {
+              "type": "string",
+              "const": "quarantined"
+            },
+            "notice": {
+              "type": "string",
+              "const": "none"
+            }
+          },
+          "required": [
+            "category",
+            "action",
+            "notice"
+          ],
+          "additionalProperties": false
+        },
+        "operator_receipt": {
+          "type": "object",
+          "properties": {
+            "version": {
+              "type": "string",
+              "const": "screening-promotion-decision-provenance.v1"
+            },
+            "scope": {
+              "type": "string",
+              "const": "promotion"
+            },
+            "input_digest": {
+              "type": "string",
+              "pattern": "^[a-f0-9]{64}$"
+            },
+            "context_frontier_digest": {
+              "type": "string",
+              "pattern": "^[a-f0-9]{64}$"
+            },
+            "context_omission_count": {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 9007199254740991
+            },
+            "model_version": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 160,
+              "pattern": "^[A-Za-z0-9][A-Za-z0-9._:/-]*$"
+            },
+            "policy_version": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 160,
+              "pattern": "^[A-Za-z0-9][A-Za-z0-9._:/-]*$"
+            },
+            "configuration_digest": {
+              "type": "string",
+              "pattern": "^[a-f0-9]{64}$"
+            },
+            "decided_at": {
+              "type": "string",
+              "maxLength": 40,
+              "format": "date-time",
+              "pattern": "^(?:(?:\\d\\d[2468][048]|\\d\\d[13579][26]|\\d\\d0[48]|[02468][048]00|[13579][26]00)-02-29|\\d{4}-(?:(?:0[13578]|1[02])-(?:0[1-9]|[12]\\d|3[01])|(?:0[469]|11)-(?:0[1-9]|[12]\\d|30)|(?:02)-(?:0[1-9]|1\\d|2[0-8])))T(?:(?:[01]\\d|2[0-3]):[0-5]\\d(?::[0-5]\\d(?:\\.\\d+)?)?(?:Z|([+-](?:[01]\\d|2[0-3]):[0-5]\\d)))$"
+            },
+            "outcome": {
+              "type": "string",
+              "const": "quarantine"
+            },
+            "public_action": {
+              "type": "object",
+              "properties": {
+                "category": {
+                  "type": "string",
+                  "const": "dual-use-boundary"
+                },
+                "action": {
+                  "type": "string",
+                  "const": "quarantined"
+                },
+                "notice": {
+                  "type": "string",
+                  "const": "none"
+                }
+              },
+              "required": [
+                "category",
+                "action",
+                "notice"
+              ],
+              "additionalProperties": false
+            },
+            "provider_status": {
+              "type": "string",
+              "const": "ok"
+            },
+            "decision_path": {
+              "type": "string",
+              "const": "direct-content-hold"
+            },
+            "reviewer_state": {
+              "type": "string",
+              "const": "pending-operator-review"
+            }
+          },
+          "required": [
+            "version",
+            "scope",
+            "input_digest",
+            "context_frontier_digest",
+            "context_omission_count",
+            "model_version",
+            "policy_version",
+            "configuration_digest",
+            "decided_at",
+            "outcome",
+            "public_action",
+            "provider_status",
+            "decision_path",
+            "reviewer_state"
+          ],
+          "additionalProperties": false
+        }
+      },
+      "required": [
+        "public_action",
+        "operator_receipt"
+      ],
+      "additionalProperties": false
+    },
+    {
+      "type": "object",
+      "properties": {
+        "public_action": {
+          "type": "object",
+          "properties": {
+            "category": {
+              "type": "string",
+              "const": "operational-harm"
+            },
+            "action": {
+              "type": "string",
+              "const": "quarantined"
+            },
+            "notice": {
+              "type": "string",
+              "const": "none"
+            }
+          },
+          "required": [
+            "category",
+            "action",
+            "notice"
+          ],
+          "additionalProperties": false
+        },
+        "operator_receipt": {
+          "type": "object",
+          "properties": {
+            "version": {
+              "type": "string",
+              "const": "screening-promotion-decision-provenance.v1"
+            },
+            "scope": {
+              "type": "string",
+              "const": "promotion"
+            },
+            "input_digest": {
+              "type": "string",
+              "pattern": "^[a-f0-9]{64}$"
+            },
+            "context_frontier_digest": {
+              "type": "string",
+              "pattern": "^[a-f0-9]{64}$"
+            },
+            "context_omission_count": {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 9007199254740991
+            },
+            "model_version": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 160,
+              "pattern": "^[A-Za-z0-9][A-Za-z0-9._:/-]*$"
+            },
+            "policy_version": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 160,
+              "pattern": "^[A-Za-z0-9][A-Za-z0-9._:/-]*$"
+            },
+            "configuration_digest": {
+              "type": "string",
+              "pattern": "^[a-f0-9]{64}$"
+            },
+            "decided_at": {
+              "type": "string",
+              "maxLength": 40,
+              "format": "date-time",
+              "pattern": "^(?:(?:\\d\\d[2468][048]|\\d\\d[13579][26]|\\d\\d0[48]|[02468][048]00|[13579][26]00)-02-29|\\d{4}-(?:(?:0[13578]|1[02])-(?:0[1-9]|[12]\\d|3[01])|(?:0[469]|11)-(?:0[1-9]|[12]\\d|30)|(?:02)-(?:0[1-9]|1\\d|2[0-8])))T(?:(?:[01]\\d|2[0-3]):[0-5]\\d(?::[0-5]\\d(?:\\.\\d+)?)?(?:Z|([+-](?:[01]\\d|2[0-3]):[0-5]\\d)))$"
+            },
+            "outcome": {
+              "type": "string",
+              "const": "quarantine"
+            },
+            "public_action": {
+              "type": "object",
+              "properties": {
+                "category": {
+                  "type": "string",
+                  "const": "operational-harm"
+                },
+                "action": {
+                  "type": "string",
+                  "const": "quarantined"
+                },
+                "notice": {
+                  "type": "string",
+                  "const": "none"
+                }
+              },
+              "required": [
+                "category",
+                "action",
+                "notice"
+              ],
+              "additionalProperties": false
+            },
+            "provider_status": {
+              "type": "string",
+              "const": "ok"
+            },
+            "decision_path": {
+              "type": "string",
+              "const": "direct-content-hold"
+            },
+            "reviewer_state": {
+              "type": "string",
+              "const": "pending-operator-review"
+            }
+          },
+          "required": [
+            "version",
+            "scope",
+            "input_digest",
+            "context_frontier_digest",
+            "context_omission_count",
+            "model_version",
+            "policy_version",
+            "configuration_digest",
+            "decided_at",
+            "outcome",
+            "public_action",
+            "provider_status",
+            "decision_path",
+            "reviewer_state"
+          ],
+          "additionalProperties": false
+        }
+      },
+      "required": [
+        "public_action",
+        "operator_receipt"
+      ],
+      "additionalProperties": false
+    },
+    {
+      "type": "object",
+      "properties": {
+        "public_action": {
+          "type": "object",
+          "properties": {
+            "category": {
+              "type": "string",
+              "const": "harassment"
+            },
+            "action": {
+              "type": "string",
+              "const": "quarantined"
+            },
+            "notice": {
+              "type": "string",
+              "const": "none"
+            }
+          },
+          "required": [
+            "category",
+            "action",
+            "notice"
+          ],
+          "additionalProperties": false
+        },
+        "operator_receipt": {
+          "type": "object",
+          "properties": {
+            "version": {
+              "type": "string",
+              "const": "screening-promotion-decision-provenance.v1"
+            },
+            "scope": {
+              "type": "string",
+              "const": "promotion"
+            },
+            "input_digest": {
+              "type": "string",
+              "pattern": "^[a-f0-9]{64}$"
+            },
+            "context_frontier_digest": {
+              "type": "string",
+              "pattern": "^[a-f0-9]{64}$"
+            },
+            "context_omission_count": {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 9007199254740991
+            },
+            "model_version": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 160,
+              "pattern": "^[A-Za-z0-9][A-Za-z0-9._:/-]*$"
+            },
+            "policy_version": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 160,
+              "pattern": "^[A-Za-z0-9][A-Za-z0-9._:/-]*$"
+            },
+            "configuration_digest": {
+              "type": "string",
+              "pattern": "^[a-f0-9]{64}$"
+            },
+            "decided_at": {
+              "type": "string",
+              "maxLength": 40,
+              "format": "date-time",
+              "pattern": "^(?:(?:\\d\\d[2468][048]|\\d\\d[13579][26]|\\d\\d0[48]|[02468][048]00|[13579][26]00)-02-29|\\d{4}-(?:(?:0[13578]|1[02])-(?:0[1-9]|[12]\\d|3[01])|(?:0[469]|11)-(?:0[1-9]|[12]\\d|30)|(?:02)-(?:0[1-9]|1\\d|2[0-8])))T(?:(?:[01]\\d|2[0-3]):[0-5]\\d(?::[0-5]\\d(?:\\.\\d+)?)?(?:Z|([+-](?:[01]\\d|2[0-3]):[0-5]\\d)))$"
+            },
+            "outcome": {
+              "type": "string",
+              "const": "quarantine"
+            },
+            "public_action": {
+              "type": "object",
+              "properties": {
+                "category": {
+                  "type": "string",
+                  "const": "harassment"
+                },
+                "action": {
+                  "type": "string",
+                  "const": "quarantined"
+                },
+                "notice": {
+                  "type": "string",
+                  "const": "none"
+                }
+              },
+              "required": [
+                "category",
+                "action",
+                "notice"
+              ],
+              "additionalProperties": false
+            },
+            "provider_status": {
+              "type": "string",
+              "const": "ok"
+            },
+            "decision_path": {
+              "type": "string",
+              "const": "direct-content-hold"
+            },
+            "reviewer_state": {
+              "type": "string",
+              "const": "pending-operator-review"
+            }
+          },
+          "required": [
+            "version",
+            "scope",
+            "input_digest",
+            "context_frontier_digest",
+            "context_omission_count",
+            "model_version",
+            "policy_version",
+            "configuration_digest",
+            "decided_at",
+            "outcome",
+            "public_action",
+            "provider_status",
+            "decision_path",
+            "reviewer_state"
+          ],
+          "additionalProperties": false
+        }
+      },
+      "required": [
+        "public_action",
+        "operator_receipt"
+      ],
+      "additionalProperties": false
+    },
+    {
+      "type": "object",
+      "properties": {
+        "public_action": {
+          "type": "object",
+          "properties": {
+            "category": {
+              "type": "string",
+              "const": "sexual-content"
+            },
+            "action": {
+              "type": "string",
+              "const": "quarantined"
+            },
+            "notice": {
+              "type": "string",
+              "const": "none"
+            }
+          },
+          "required": [
+            "category",
+            "action",
+            "notice"
+          ],
+          "additionalProperties": false
+        },
+        "operator_receipt": {
+          "type": "object",
+          "properties": {
+            "version": {
+              "type": "string",
+              "const": "screening-promotion-decision-provenance.v1"
+            },
+            "scope": {
+              "type": "string",
+              "const": "promotion"
+            },
+            "input_digest": {
+              "type": "string",
+              "pattern": "^[a-f0-9]{64}$"
+            },
+            "context_frontier_digest": {
+              "type": "string",
+              "pattern": "^[a-f0-9]{64}$"
+            },
+            "context_omission_count": {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 9007199254740991
+            },
+            "model_version": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 160,
+              "pattern": "^[A-Za-z0-9][A-Za-z0-9._:/-]*$"
+            },
+            "policy_version": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 160,
+              "pattern": "^[A-Za-z0-9][A-Za-z0-9._:/-]*$"
+            },
+            "configuration_digest": {
+              "type": "string",
+              "pattern": "^[a-f0-9]{64}$"
+            },
+            "decided_at": {
+              "type": "string",
+              "maxLength": 40,
+              "format": "date-time",
+              "pattern": "^(?:(?:\\d\\d[2468][048]|\\d\\d[13579][26]|\\d\\d0[48]|[02468][048]00|[13579][26]00)-02-29|\\d{4}-(?:(?:0[13578]|1[02])-(?:0[1-9]|[12]\\d|3[01])|(?:0[469]|11)-(?:0[1-9]|[12]\\d|30)|(?:02)-(?:0[1-9]|1\\d|2[0-8])))T(?:(?:[01]\\d|2[0-3]):[0-5]\\d(?::[0-5]\\d(?:\\.\\d+)?)?(?:Z|([+-](?:[01]\\d|2[0-3]):[0-5]\\d)))$"
+            },
+            "outcome": {
+              "type": "string",
+              "const": "quarantine"
+            },
+            "public_action": {
+              "type": "object",
+              "properties": {
+                "category": {
+                  "type": "string",
+                  "const": "sexual-content"
+                },
+                "action": {
+                  "type": "string",
+                  "const": "quarantined"
+                },
+                "notice": {
+                  "type": "string",
+                  "const": "none"
+                }
+              },
+              "required": [
+                "category",
+                "action",
+                "notice"
+              ],
+              "additionalProperties": false
+            },
+            "provider_status": {
+              "type": "string",
+              "const": "ok"
+            },
+            "decision_path": {
+              "type": "string",
+              "const": "direct-content-hold"
+            },
+            "reviewer_state": {
+              "type": "string",
+              "const": "pending-operator-review"
+            }
+          },
+          "required": [
+            "version",
+            "scope",
+            "input_digest",
+            "context_frontier_digest",
+            "context_omission_count",
+            "model_version",
+            "policy_version",
+            "configuration_digest",
+            "decided_at",
+            "outcome",
+            "public_action",
+            "provider_status",
+            "decision_path",
+            "reviewer_state"
+          ],
+          "additionalProperties": false
+        }
+      },
+      "required": [
+        "public_action",
+        "operator_receipt"
+      ],
+      "additionalProperties": false
+    },
+    {
+      "type": "object",
+      "properties": {
+        "public_action": {
+          "type": "object",
+          "properties": {
+            "category": {
+              "type": "string",
+              "const": "provider-unavailable"
+            },
+            "action": {
+              "type": "string",
+              "const": "quarantined"
+            },
+            "notice": {
+              "type": "string",
+              "const": "none"
+            }
+          },
+          "required": [
+            "category",
+            "action",
+            "notice"
+          ],
+          "additionalProperties": false
+        },
+        "operator_receipt": {
+          "type": "object",
+          "properties": {
+            "version": {
+              "type": "string",
+              "const": "screening-promotion-decision-provenance.v1"
+            },
+            "scope": {
+              "type": "string",
+              "const": "promotion"
+            },
+            "input_digest": {
+              "type": "string",
+              "pattern": "^[a-f0-9]{64}$"
+            },
+            "context_frontier_digest": {
+              "type": "string",
+              "pattern": "^[a-f0-9]{64}$"
+            },
+            "context_omission_count": {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 9007199254740991
+            },
+            "model_version": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 160,
+              "pattern": "^[A-Za-z0-9][A-Za-z0-9._:/-]*$"
+            },
+            "policy_version": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 160,
+              "pattern": "^[A-Za-z0-9][A-Za-z0-9._:/-]*$"
+            },
+            "configuration_digest": {
+              "type": "string",
+              "pattern": "^[a-f0-9]{64}$"
+            },
+            "decided_at": {
+              "type": "string",
+              "maxLength": 40,
+              "format": "date-time",
+              "pattern": "^(?:(?:\\d\\d[2468][048]|\\d\\d[13579][26]|\\d\\d0[48]|[02468][048]00|[13579][26]00)-02-29|\\d{4}-(?:(?:0[13578]|1[02])-(?:0[1-9]|[12]\\d|3[01])|(?:0[469]|11)-(?:0[1-9]|[12]\\d|30)|(?:02)-(?:0[1-9]|1\\d|2[0-8])))T(?:(?:[01]\\d|2[0-3]):[0-5]\\d(?::[0-5]\\d(?:\\.\\d+)?)?(?:Z|([+-](?:[01]\\d|2[0-3]):[0-5]\\d)))$"
+            },
+            "outcome": {
+              "type": "string",
+              "const": "quarantine"
+            },
+            "public_action": {
+              "type": "object",
+              "properties": {
+                "category": {
+                  "type": "string",
+                  "const": "provider-unavailable"
+                },
+                "action": {
+                  "type": "string",
+                  "const": "quarantined"
+                },
+                "notice": {
+                  "type": "string",
+                  "const": "none"
+                }
+              },
+              "required": [
+                "category",
+                "action",
+                "notice"
+              ],
+              "additionalProperties": false
+            },
+            "provider_status": {
+              "type": "string",
+              "const": "timeout"
+            },
+            "decision_path": {
+              "type": "string",
+              "const": "provider-timeout-fail-closed"
+            },
+            "reviewer_state": {
+              "type": "string",
+              "const": "pending-operator-review"
+            }
+          },
+          "required": [
+            "version",
+            "scope",
+            "input_digest",
+            "context_frontier_digest",
+            "context_omission_count",
+            "model_version",
+            "policy_version",
+            "configuration_digest",
+            "decided_at",
+            "outcome",
+            "public_action",
+            "provider_status",
+            "decision_path",
+            "reviewer_state"
+          ],
+          "additionalProperties": false
+        }
+      },
+      "required": [
+        "public_action",
+        "operator_receipt"
+      ],
+      "additionalProperties": false
+    },
+    {
+      "type": "object",
+      "properties": {
+        "public_action": {
+          "type": "object",
+          "properties": {
+            "category": {
+              "type": "string",
+              "const": "provider-unavailable"
+            },
+            "action": {
+              "type": "string",
+              "const": "quarantined"
+            },
+            "notice": {
+              "type": "string",
+              "const": "none"
+            }
+          },
+          "required": [
+            "category",
+            "action",
+            "notice"
+          ],
+          "additionalProperties": false
+        },
+        "operator_receipt": {
+          "type": "object",
+          "properties": {
+            "version": {
+              "type": "string",
+              "const": "screening-promotion-decision-provenance.v1"
+            },
+            "scope": {
+              "type": "string",
+              "const": "promotion"
+            },
+            "input_digest": {
+              "type": "string",
+              "pattern": "^[a-f0-9]{64}$"
+            },
+            "context_frontier_digest": {
+              "type": "string",
+              "pattern": "^[a-f0-9]{64}$"
+            },
+            "context_omission_count": {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 9007199254740991
+            },
+            "model_version": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 160,
+              "pattern": "^[A-Za-z0-9][A-Za-z0-9._:/-]*$"
+            },
+            "policy_version": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 160,
+              "pattern": "^[A-Za-z0-9][A-Za-z0-9._:/-]*$"
+            },
+            "configuration_digest": {
+              "type": "string",
+              "pattern": "^[a-f0-9]{64}$"
+            },
+            "decided_at": {
+              "type": "string",
+              "maxLength": 40,
+              "format": "date-time",
+              "pattern": "^(?:(?:\\d\\d[2468][048]|\\d\\d[13579][26]|\\d\\d0[48]|[02468][048]00|[13579][26]00)-02-29|\\d{4}-(?:(?:0[13578]|1[02])-(?:0[1-9]|[12]\\d|3[01])|(?:0[469]|11)-(?:0[1-9]|[12]\\d|30)|(?:02)-(?:0[1-9]|1\\d|2[0-8])))T(?:(?:[01]\\d|2[0-3]):[0-5]\\d(?::[0-5]\\d(?:\\.\\d+)?)?(?:Z|([+-](?:[01]\\d|2[0-3]):[0-5]\\d)))$"
+            },
+            "outcome": {
+              "type": "string",
+              "const": "quarantine"
+            },
+            "public_action": {
+              "type": "object",
+              "properties": {
+                "category": {
+                  "type": "string",
+                  "const": "provider-unavailable"
+                },
+                "action": {
+                  "type": "string",
+                  "const": "quarantined"
+                },
+                "notice": {
+                  "type": "string",
+                  "const": "none"
+                }
+              },
+              "required": [
+                "category",
+                "action",
+                "notice"
+              ],
+              "additionalProperties": false
+            },
+            "provider_status": {
+              "type": "string",
+              "const": "error"
+            },
+            "decision_path": {
+              "type": "string",
+              "const": "provider-error-fail-closed"
+            },
+            "reviewer_state": {
+              "type": "string",
+              "const": "pending-operator-review"
+            }
+          },
+          "required": [
+            "version",
+            "scope",
+            "input_digest",
+            "context_frontier_digest",
+            "context_omission_count",
+            "model_version",
+            "policy_version",
+            "configuration_digest",
+            "decided_at",
+            "outcome",
+            "public_action",
+            "provider_status",
+            "decision_path",
+            "reviewer_state"
+          ],
+          "additionalProperties": false
+        }
+      },
+      "required": [
+        "public_action",
+        "operator_receipt"
+      ],
+      "additionalProperties": false
+    },
+    {
+      "type": "object",
+      "properties": {
+        "public_action": {
+          "type": "object",
+          "properties": {
+            "category": {
+              "type": "string",
+              "const": "spam-commercial"
+            },
+            "action": {
+              "type": "string",
+              "const": "rejected"
+            },
+            "notice": {
+              "type": "string",
+              "const": "none"
+            }
+          },
+          "required": [
+            "category",
+            "action",
+            "notice"
+          ],
+          "additionalProperties": false
+        },
+        "operator_receipt": {
+          "type": "object",
+          "properties": {
+            "version": {
+              "type": "string",
+              "const": "screening-promotion-decision-provenance.v1"
+            },
+            "scope": {
+              "type": "string",
+              "const": "promotion"
+            },
+            "input_digest": {
+              "type": "string",
+              "pattern": "^[a-f0-9]{64}$"
+            },
+            "context_frontier_digest": {
+              "type": "string",
+              "pattern": "^[a-f0-9]{64}$"
+            },
+            "context_omission_count": {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 9007199254740991
+            },
+            "model_version": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 160,
+              "pattern": "^[A-Za-z0-9][A-Za-z0-9._:/-]*$"
+            },
+            "policy_version": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 160,
+              "pattern": "^[A-Za-z0-9][A-Za-z0-9._:/-]*$"
+            },
+            "configuration_digest": {
+              "type": "string",
+              "pattern": "^[a-f0-9]{64}$"
+            },
+            "decided_at": {
+              "type": "string",
+              "maxLength": 40,
+              "format": "date-time",
+              "pattern": "^(?:(?:\\d\\d[2468][048]|\\d\\d[13579][26]|\\d\\d0[48]|[02468][048]00|[13579][26]00)-02-29|\\d{4}-(?:(?:0[13578]|1[02])-(?:0[1-9]|[12]\\d|3[01])|(?:0[469]|11)-(?:0[1-9]|[12]\\d|30)|(?:02)-(?:0[1-9]|1\\d|2[0-8])))T(?:(?:[01]\\d|2[0-3]):[0-5]\\d(?::[0-5]\\d(?:\\.\\d+)?)?(?:Z|([+-](?:[01]\\d|2[0-3]):[0-5]\\d)))$"
+            },
+            "outcome": {
+              "type": "string",
+              "const": "reject"
+            },
+            "public_action": {
+              "type": "object",
+              "properties": {
+                "category": {
+                  "type": "string",
+                  "const": "spam-commercial"
+                },
+                "action": {
+                  "type": "string",
+                  "const": "rejected"
+                },
+                "notice": {
+                  "type": "string",
+                  "const": "none"
+                }
+              },
+              "required": [
+                "category",
+                "action",
+                "notice"
+              ],
+              "additionalProperties": false
+            },
+            "provider_status": {
+              "type": "string",
+              "const": "ok"
+            },
+            "decision_path": {
+              "type": "string",
+              "const": "provider"
+            },
+            "reviewer_state": {
+              "type": "string",
+              "const": "not-required"
+            }
+          },
+          "required": [
+            "version",
+            "scope",
+            "input_digest",
+            "context_frontier_digest",
+            "context_omission_count",
+            "model_version",
+            "policy_version",
+            "configuration_digest",
+            "decided_at",
+            "outcome",
+            "public_action",
+            "provider_status",
+            "decision_path",
+            "reviewer_state"
+          ],
+          "additionalProperties": false
+        }
+      },
+      "required": [
+        "public_action",
+        "operator_receipt"
+      ],
+      "additionalProperties": false
+    },
+    {
+      "type": "object",
+      "properties": {
+        "public_action": {
+          "type": "object",
+          "properties": {
+            "category": {
+              "type": "string",
+              "const": "injection"
+            },
+            "action": {
+              "type": "string",
+              "const": "rejected"
+            },
+            "notice": {
+              "type": "string",
+              "const": "none"
+            }
+          },
+          "required": [
+            "category",
+            "action",
+            "notice"
+          ],
+          "additionalProperties": false
+        },
+        "operator_receipt": {
+          "type": "object",
+          "properties": {
+            "version": {
+              "type": "string",
+              "const": "screening-promotion-decision-provenance.v1"
+            },
+            "scope": {
+              "type": "string",
+              "const": "promotion"
+            },
+            "input_digest": {
+              "type": "string",
+              "pattern": "^[a-f0-9]{64}$"
+            },
+            "context_frontier_digest": {
+              "type": "string",
+              "pattern": "^[a-f0-9]{64}$"
+            },
+            "context_omission_count": {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 9007199254740991
+            },
+            "model_version": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 160,
+              "pattern": "^[A-Za-z0-9][A-Za-z0-9._:/-]*$"
+            },
+            "policy_version": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 160,
+              "pattern": "^[A-Za-z0-9][A-Za-z0-9._:/-]*$"
+            },
+            "configuration_digest": {
+              "type": "string",
+              "pattern": "^[a-f0-9]{64}$"
+            },
+            "decided_at": {
+              "type": "string",
+              "maxLength": 40,
+              "format": "date-time",
+              "pattern": "^(?:(?:\\d\\d[2468][048]|\\d\\d[13579][26]|\\d\\d0[48]|[02468][048]00|[13579][26]00)-02-29|\\d{4}-(?:(?:0[13578]|1[02])-(?:0[1-9]|[12]\\d|3[01])|(?:0[469]|11)-(?:0[1-9]|[12]\\d|30)|(?:02)-(?:0[1-9]|1\\d|2[0-8])))T(?:(?:[01]\\d|2[0-3]):[0-5]\\d(?::[0-5]\\d(?:\\.\\d+)?)?(?:Z|([+-](?:[01]\\d|2[0-3]):[0-5]\\d)))$"
+            },
+            "outcome": {
+              "type": "string",
+              "const": "reject"
+            },
+            "public_action": {
+              "type": "object",
+              "properties": {
+                "category": {
+                  "type": "string",
+                  "const": "injection"
+                },
+                "action": {
+                  "type": "string",
+                  "const": "rejected"
+                },
+                "notice": {
+                  "type": "string",
+                  "const": "none"
+                }
+              },
+              "required": [
+                "category",
+                "action",
+                "notice"
+              ],
+              "additionalProperties": false
+            },
+            "provider_status": {
+              "type": "string",
+              "const": "ok"
+            },
+            "decision_path": {
+              "type": "string",
+              "const": "provider"
+            },
+            "reviewer_state": {
+              "type": "string",
+              "const": "not-required"
+            }
+          },
+          "required": [
+            "version",
+            "scope",
+            "input_digest",
+            "context_frontier_digest",
+            "context_omission_count",
+            "model_version",
+            "policy_version",
+            "configuration_digest",
+            "decided_at",
+            "outcome",
+            "public_action",
+            "provider_status",
+            "decision_path",
+            "reviewer_state"
+          ],
+          "additionalProperties": false
+        }
+      },
+      "required": [
+        "public_action",
+        "operator_receipt"
+      ],
+      "additionalProperties": false
+    },
+    {
+      "type": "object",
+      "properties": {
+        "public_action": {
+          "type": "object",
+          "properties": {
+            "category": {
+              "type": "string",
+              "const": "dual-use-boundary"
+            },
+            "action": {
+              "type": "string",
+              "const": "rejected"
+            },
+            "notice": {
+              "type": "string",
+              "const": "none"
+            }
+          },
+          "required": [
+            "category",
+            "action",
+            "notice"
+          ],
+          "additionalProperties": false
+        },
+        "operator_receipt": {
+          "type": "object",
+          "properties": {
+            "version": {
+              "type": "string",
+              "const": "screening-promotion-decision-provenance.v1"
+            },
+            "scope": {
+              "type": "string",
+              "const": "promotion"
+            },
+            "input_digest": {
+              "type": "string",
+              "pattern": "^[a-f0-9]{64}$"
+            },
+            "context_frontier_digest": {
+              "type": "string",
+              "pattern": "^[a-f0-9]{64}$"
+            },
+            "context_omission_count": {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 9007199254740991
+            },
+            "model_version": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 160,
+              "pattern": "^[A-Za-z0-9][A-Za-z0-9._:/-]*$"
+            },
+            "policy_version": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 160,
+              "pattern": "^[A-Za-z0-9][A-Za-z0-9._:/-]*$"
+            },
+            "configuration_digest": {
+              "type": "string",
+              "pattern": "^[a-f0-9]{64}$"
+            },
+            "decided_at": {
+              "type": "string",
+              "maxLength": 40,
+              "format": "date-time",
+              "pattern": "^(?:(?:\\d\\d[2468][048]|\\d\\d[13579][26]|\\d\\d0[48]|[02468][048]00|[13579][26]00)-02-29|\\d{4}-(?:(?:0[13578]|1[02])-(?:0[1-9]|[12]\\d|3[01])|(?:0[469]|11)-(?:0[1-9]|[12]\\d|30)|(?:02)-(?:0[1-9]|1\\d|2[0-8])))T(?:(?:[01]\\d|2[0-3]):[0-5]\\d(?::[0-5]\\d(?:\\.\\d+)?)?(?:Z|([+-](?:[01]\\d|2[0-3]):[0-5]\\d)))$"
+            },
+            "outcome": {
+              "type": "string",
+              "const": "reject"
+            },
+            "public_action": {
+              "type": "object",
+              "properties": {
+                "category": {
+                  "type": "string",
+                  "const": "dual-use-boundary"
+                },
+                "action": {
+                  "type": "string",
+                  "const": "rejected"
+                },
+                "notice": {
+                  "type": "string",
+                  "const": "none"
+                }
+              },
+              "required": [
+                "category",
+                "action",
+                "notice"
+              ],
+              "additionalProperties": false
+            },
+            "provider_status": {
+              "type": "string",
+              "const": "ok"
+            },
+            "decision_path": {
+              "type": "string",
+              "const": "provider"
+            },
+            "reviewer_state": {
+              "type": "string",
+              "const": "not-required"
+            }
+          },
+          "required": [
+            "version",
+            "scope",
+            "input_digest",
+            "context_frontier_digest",
+            "context_omission_count",
+            "model_version",
+            "policy_version",
+            "configuration_digest",
+            "decided_at",
+            "outcome",
+            "public_action",
+            "provider_status",
+            "decision_path",
+            "reviewer_state"
+          ],
+          "additionalProperties": false
+        }
+      },
+      "required": [
+        "public_action",
+        "operator_receipt"
+      ],
+      "additionalProperties": false
+    },
+    {
+      "type": "object",
+      "properties": {
+        "public_action": {
+          "type": "object",
+          "properties": {
+            "category": {
+              "type": "string",
+              "const": "operational-harm"
+            },
+            "action": {
+              "type": "string",
+              "const": "rejected"
+            },
+            "notice": {
+              "type": "string",
+              "const": "none"
+            }
+          },
+          "required": [
+            "category",
+            "action",
+            "notice"
+          ],
+          "additionalProperties": false
+        },
+        "operator_receipt": {
+          "type": "object",
+          "properties": {
+            "version": {
+              "type": "string",
+              "const": "screening-promotion-decision-provenance.v1"
+            },
+            "scope": {
+              "type": "string",
+              "const": "promotion"
+            },
+            "input_digest": {
+              "type": "string",
+              "pattern": "^[a-f0-9]{64}$"
+            },
+            "context_frontier_digest": {
+              "type": "string",
+              "pattern": "^[a-f0-9]{64}$"
+            },
+            "context_omission_count": {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 9007199254740991
+            },
+            "model_version": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 160,
+              "pattern": "^[A-Za-z0-9][A-Za-z0-9._:/-]*$"
+            },
+            "policy_version": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 160,
+              "pattern": "^[A-Za-z0-9][A-Za-z0-9._:/-]*$"
+            },
+            "configuration_digest": {
+              "type": "string",
+              "pattern": "^[a-f0-9]{64}$"
+            },
+            "decided_at": {
+              "type": "string",
+              "maxLength": 40,
+              "format": "date-time",
+              "pattern": "^(?:(?:\\d\\d[2468][048]|\\d\\d[13579][26]|\\d\\d0[48]|[02468][048]00|[13579][26]00)-02-29|\\d{4}-(?:(?:0[13578]|1[02])-(?:0[1-9]|[12]\\d|3[01])|(?:0[469]|11)-(?:0[1-9]|[12]\\d|30)|(?:02)-(?:0[1-9]|1\\d|2[0-8])))T(?:(?:[01]\\d|2[0-3]):[0-5]\\d(?::[0-5]\\d(?:\\.\\d+)?)?(?:Z|([+-](?:[01]\\d|2[0-3]):[0-5]\\d)))$"
+            },
+            "outcome": {
+              "type": "string",
+              "const": "reject"
+            },
+            "public_action": {
+              "type": "object",
+              "properties": {
+                "category": {
+                  "type": "string",
+                  "const": "operational-harm"
+                },
+                "action": {
+                  "type": "string",
+                  "const": "rejected"
+                },
+                "notice": {
+                  "type": "string",
+                  "const": "none"
+                }
+              },
+              "required": [
+                "category",
+                "action",
+                "notice"
+              ],
+              "additionalProperties": false
+            },
+            "provider_status": {
+              "type": "string",
+              "const": "ok"
+            },
+            "decision_path": {
+              "type": "string",
+              "const": "provider"
+            },
+            "reviewer_state": {
+              "type": "string",
+              "const": "not-required"
+            }
+          },
+          "required": [
+            "version",
+            "scope",
+            "input_digest",
+            "context_frontier_digest",
+            "context_omission_count",
+            "model_version",
+            "policy_version",
+            "configuration_digest",
+            "decided_at",
+            "outcome",
+            "public_action",
+            "provider_status",
+            "decision_path",
+            "reviewer_state"
+          ],
+          "additionalProperties": false
+        }
+      },
+      "required": [
+        "public_action",
+        "operator_receipt"
+      ],
+      "additionalProperties": false
+    },
+    {
+      "type": "object",
+      "properties": {
+        "public_action": {
+          "type": "object",
+          "properties": {
+            "category": {
+              "type": "string",
+              "const": "harassment"
+            },
+            "action": {
+              "type": "string",
+              "const": "rejected"
+            },
+            "notice": {
+              "type": "string",
+              "const": "none"
+            }
+          },
+          "required": [
+            "category",
+            "action",
+            "notice"
+          ],
+          "additionalProperties": false
+        },
+        "operator_receipt": {
+          "type": "object",
+          "properties": {
+            "version": {
+              "type": "string",
+              "const": "screening-promotion-decision-provenance.v1"
+            },
+            "scope": {
+              "type": "string",
+              "const": "promotion"
+            },
+            "input_digest": {
+              "type": "string",
+              "pattern": "^[a-f0-9]{64}$"
+            },
+            "context_frontier_digest": {
+              "type": "string",
+              "pattern": "^[a-f0-9]{64}$"
+            },
+            "context_omission_count": {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 9007199254740991
+            },
+            "model_version": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 160,
+              "pattern": "^[A-Za-z0-9][A-Za-z0-9._:/-]*$"
+            },
+            "policy_version": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 160,
+              "pattern": "^[A-Za-z0-9][A-Za-z0-9._:/-]*$"
+            },
+            "configuration_digest": {
+              "type": "string",
+              "pattern": "^[a-f0-9]{64}$"
+            },
+            "decided_at": {
+              "type": "string",
+              "maxLength": 40,
+              "format": "date-time",
+              "pattern": "^(?:(?:\\d\\d[2468][048]|\\d\\d[13579][26]|\\d\\d0[48]|[02468][048]00|[13579][26]00)-02-29|\\d{4}-(?:(?:0[13578]|1[02])-(?:0[1-9]|[12]\\d|3[01])|(?:0[469]|11)-(?:0[1-9]|[12]\\d|30)|(?:02)-(?:0[1-9]|1\\d|2[0-8])))T(?:(?:[01]\\d|2[0-3]):[0-5]\\d(?::[0-5]\\d(?:\\.\\d+)?)?(?:Z|([+-](?:[01]\\d|2[0-3]):[0-5]\\d)))$"
+            },
+            "outcome": {
+              "type": "string",
+              "const": "reject"
+            },
+            "public_action": {
+              "type": "object",
+              "properties": {
+                "category": {
+                  "type": "string",
+                  "const": "harassment"
+                },
+                "action": {
+                  "type": "string",
+                  "const": "rejected"
+                },
+                "notice": {
+                  "type": "string",
+                  "const": "none"
+                }
+              },
+              "required": [
+                "category",
+                "action",
+                "notice"
+              ],
+              "additionalProperties": false
+            },
+            "provider_status": {
+              "type": "string",
+              "const": "ok"
+            },
+            "decision_path": {
+              "type": "string",
+              "const": "provider"
+            },
+            "reviewer_state": {
+              "type": "string",
+              "const": "not-required"
+            }
+          },
+          "required": [
+            "version",
+            "scope",
+            "input_digest",
+            "context_frontier_digest",
+            "context_omission_count",
+            "model_version",
+            "policy_version",
+            "configuration_digest",
+            "decided_at",
+            "outcome",
+            "public_action",
+            "provider_status",
+            "decision_path",
+            "reviewer_state"
+          ],
+          "additionalProperties": false
+        }
+      },
+      "required": [
+        "public_action",
+        "operator_receipt"
+      ],
+      "additionalProperties": false
+    },
+    {
+      "type": "object",
+      "properties": {
+        "public_action": {
+          "type": "object",
+          "properties": {
+            "category": {
+              "type": "string",
+              "const": "sexual-content"
+            },
+            "action": {
+              "type": "string",
+              "const": "rejected"
+            },
+            "notice": {
+              "type": "string",
+              "const": "none"
+            }
+          },
+          "required": [
+            "category",
+            "action",
+            "notice"
+          ],
+          "additionalProperties": false
+        },
+        "operator_receipt": {
+          "type": "object",
+          "properties": {
+            "version": {
+              "type": "string",
+              "const": "screening-promotion-decision-provenance.v1"
+            },
+            "scope": {
+              "type": "string",
+              "const": "promotion"
+            },
+            "input_digest": {
+              "type": "string",
+              "pattern": "^[a-f0-9]{64}$"
+            },
+            "context_frontier_digest": {
+              "type": "string",
+              "pattern": "^[a-f0-9]{64}$"
+            },
+            "context_omission_count": {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 9007199254740991
+            },
+            "model_version": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 160,
+              "pattern": "^[A-Za-z0-9][A-Za-z0-9._:/-]*$"
+            },
+            "policy_version": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 160,
+              "pattern": "^[A-Za-z0-9][A-Za-z0-9._:/-]*$"
+            },
+            "configuration_digest": {
+              "type": "string",
+              "pattern": "^[a-f0-9]{64}$"
+            },
+            "decided_at": {
+              "type": "string",
+              "maxLength": 40,
+              "format": "date-time",
+              "pattern": "^(?:(?:\\d\\d[2468][048]|\\d\\d[13579][26]|\\d\\d0[48]|[02468][048]00|[13579][26]00)-02-29|\\d{4}-(?:(?:0[13578]|1[02])-(?:0[1-9]|[12]\\d|3[01])|(?:0[469]|11)-(?:0[1-9]|[12]\\d|30)|(?:02)-(?:0[1-9]|1\\d|2[0-8])))T(?:(?:[01]\\d|2[0-3]):[0-5]\\d(?::[0-5]\\d(?:\\.\\d+)?)?(?:Z|([+-](?:[01]\\d|2[0-3]):[0-5]\\d)))$"
+            },
+            "outcome": {
+              "type": "string",
+              "const": "reject"
+            },
+            "public_action": {
+              "type": "object",
+              "properties": {
+                "category": {
+                  "type": "string",
+                  "const": "sexual-content"
+                },
+                "action": {
+                  "type": "string",
+                  "const": "rejected"
+                },
+                "notice": {
+                  "type": "string",
+                  "const": "none"
+                }
+              },
+              "required": [
+                "category",
+                "action",
+                "notice"
+              ],
+              "additionalProperties": false
+            },
+            "provider_status": {
+              "type": "string",
+              "const": "ok"
+            },
+            "decision_path": {
+              "type": "string",
+              "const": "provider"
+            },
+            "reviewer_state": {
+              "type": "string",
+              "const": "not-required"
+            }
+          },
+          "required": [
+            "version",
+            "scope",
+            "input_digest",
+            "context_frontier_digest",
+            "context_omission_count",
+            "model_version",
+            "policy_version",
+            "configuration_digest",
+            "decided_at",
+            "outcome",
+            "public_action",
+            "provider_status",
+            "decision_path",
+            "reviewer_state"
+          ],
+          "additionalProperties": false
+        }
+      },
+      "required": [
+        "public_action",
+        "operator_receipt"
+      ],
+      "additionalProperties": false
+    },
+    {
+      "type": "object",
+      "properties": {
+        "public_action": {
+          "type": "object",
+          "properties": {
+            "category": {
+              "type": "string",
+              "const": "spam-commercial"
+            },
+            "action": {
+              "type": "string",
+              "const": "rejected"
+            },
+            "notice": {
+              "type": "string",
+              "const": "none"
+            }
+          },
+          "required": [
+            "category",
+            "action",
+            "notice"
+          ],
+          "additionalProperties": false
+        },
+        "operator_receipt": {
+          "type": "object",
+          "properties": {
+            "version": {
+              "type": "string",
+              "const": "screening-promotion-decision-provenance.v1"
+            },
+            "scope": {
+              "type": "string",
+              "const": "promotion"
+            },
+            "input_digest": {
+              "type": "string",
+              "pattern": "^[a-f0-9]{64}$"
+            },
+            "context_frontier_digest": {
+              "type": "string",
+              "pattern": "^[a-f0-9]{64}$"
+            },
+            "context_omission_count": {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 9007199254740991
+            },
+            "model_version": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 160,
+              "pattern": "^[A-Za-z0-9][A-Za-z0-9._:/-]*$"
+            },
+            "policy_version": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 160,
+              "pattern": "^[A-Za-z0-9][A-Za-z0-9._:/-]*$"
+            },
+            "configuration_digest": {
+              "type": "string",
+              "pattern": "^[a-f0-9]{64}$"
+            },
+            "decided_at": {
+              "type": "string",
+              "maxLength": 40,
+              "format": "date-time",
+              "pattern": "^(?:(?:\\d\\d[2468][048]|\\d\\d[13579][26]|\\d\\d0[48]|[02468][048]00|[13579][26]00)-02-29|\\d{4}-(?:(?:0[13578]|1[02])-(?:0[1-9]|[12]\\d|3[01])|(?:0[469]|11)-(?:0[1-9]|[12]\\d|30)|(?:02)-(?:0[1-9]|1\\d|2[0-8])))T(?:(?:[01]\\d|2[0-3]):[0-5]\\d(?::[0-5]\\d(?:\\.\\d+)?)?(?:Z|([+-](?:[01]\\d|2[0-3]):[0-5]\\d)))$"
+            },
+            "outcome": {
+              "type": "string",
+              "const": "reject"
+            },
+            "public_action": {
+              "type": "object",
+              "properties": {
+                "category": {
+                  "type": "string",
+                  "const": "spam-commercial"
+                },
+                "action": {
+                  "type": "string",
+                  "const": "rejected"
+                },
+                "notice": {
+                  "type": "string",
+                  "const": "none"
+                }
+              },
+              "required": [
+                "category",
+                "action",
+                "notice"
+              ],
+              "additionalProperties": false
+            },
+            "provider_status": {
+              "type": "string",
+              "const": "ok"
+            },
+            "decision_path": {
+              "type": "string",
+              "const": "direct-content-reject"
+            },
+            "reviewer_state": {
+              "type": "string",
+              "const": "not-required"
+            }
+          },
+          "required": [
+            "version",
+            "scope",
+            "input_digest",
+            "context_frontier_digest",
+            "context_omission_count",
+            "model_version",
+            "policy_version",
+            "configuration_digest",
+            "decided_at",
+            "outcome",
+            "public_action",
+            "provider_status",
+            "decision_path",
+            "reviewer_state"
+          ],
+          "additionalProperties": false
+        }
+      },
+      "required": [
+        "public_action",
+        "operator_receipt"
+      ],
+      "additionalProperties": false
+    },
+    {
+      "type": "object",
+      "properties": {
+        "public_action": {
+          "type": "object",
+          "properties": {
+            "category": {
+              "type": "string",
+              "const": "injection"
+            },
+            "action": {
+              "type": "string",
+              "const": "rejected"
+            },
+            "notice": {
+              "type": "string",
+              "const": "none"
+            }
+          },
+          "required": [
+            "category",
+            "action",
+            "notice"
+          ],
+          "additionalProperties": false
+        },
+        "operator_receipt": {
+          "type": "object",
+          "properties": {
+            "version": {
+              "type": "string",
+              "const": "screening-promotion-decision-provenance.v1"
+            },
+            "scope": {
+              "type": "string",
+              "const": "promotion"
+            },
+            "input_digest": {
+              "type": "string",
+              "pattern": "^[a-f0-9]{64}$"
+            },
+            "context_frontier_digest": {
+              "type": "string",
+              "pattern": "^[a-f0-9]{64}$"
+            },
+            "context_omission_count": {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 9007199254740991
+            },
+            "model_version": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 160,
+              "pattern": "^[A-Za-z0-9][A-Za-z0-9._:/-]*$"
+            },
+            "policy_version": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 160,
+              "pattern": "^[A-Za-z0-9][A-Za-z0-9._:/-]*$"
+            },
+            "configuration_digest": {
+              "type": "string",
+              "pattern": "^[a-f0-9]{64}$"
+            },
+            "decided_at": {
+              "type": "string",
+              "maxLength": 40,
+              "format": "date-time",
+              "pattern": "^(?:(?:\\d\\d[2468][048]|\\d\\d[13579][26]|\\d\\d0[48]|[02468][048]00|[13579][26]00)-02-29|\\d{4}-(?:(?:0[13578]|1[02])-(?:0[1-9]|[12]\\d|3[01])|(?:0[469]|11)-(?:0[1-9]|[12]\\d|30)|(?:02)-(?:0[1-9]|1\\d|2[0-8])))T(?:(?:[01]\\d|2[0-3]):[0-5]\\d(?::[0-5]\\d(?:\\.\\d+)?)?(?:Z|([+-](?:[01]\\d|2[0-3]):[0-5]\\d)))$"
+            },
+            "outcome": {
+              "type": "string",
+              "const": "reject"
+            },
+            "public_action": {
+              "type": "object",
+              "properties": {
+                "category": {
+                  "type": "string",
+                  "const": "injection"
+                },
+                "action": {
+                  "type": "string",
+                  "const": "rejected"
+                },
+                "notice": {
+                  "type": "string",
+                  "const": "none"
+                }
+              },
+              "required": [
+                "category",
+                "action",
+                "notice"
+              ],
+              "additionalProperties": false
+            },
+            "provider_status": {
+              "type": "string",
+              "const": "ok"
+            },
+            "decision_path": {
+              "type": "string",
+              "const": "direct-content-reject"
+            },
+            "reviewer_state": {
+              "type": "string",
+              "const": "not-required"
+            }
+          },
+          "required": [
+            "version",
+            "scope",
+            "input_digest",
+            "context_frontier_digest",
+            "context_omission_count",
+            "model_version",
+            "policy_version",
+            "configuration_digest",
+            "decided_at",
+            "outcome",
+            "public_action",
+            "provider_status",
+            "decision_path",
+            "reviewer_state"
+          ],
+          "additionalProperties": false
+        }
+      },
+      "required": [
+        "public_action",
+        "operator_receipt"
+      ],
+      "additionalProperties": false
+    },
+    {
+      "type": "object",
+      "properties": {
+        "public_action": {
+          "type": "object",
+          "properties": {
+            "category": {
+              "type": "string",
+              "const": "dual-use-boundary"
+            },
+            "action": {
+              "type": "string",
+              "const": "rejected"
+            },
+            "notice": {
+              "type": "string",
+              "const": "none"
+            }
+          },
+          "required": [
+            "category",
+            "action",
+            "notice"
+          ],
+          "additionalProperties": false
+        },
+        "operator_receipt": {
+          "type": "object",
+          "properties": {
+            "version": {
+              "type": "string",
+              "const": "screening-promotion-decision-provenance.v1"
+            },
+            "scope": {
+              "type": "string",
+              "const": "promotion"
+            },
+            "input_digest": {
+              "type": "string",
+              "pattern": "^[a-f0-9]{64}$"
+            },
+            "context_frontier_digest": {
+              "type": "string",
+              "pattern": "^[a-f0-9]{64}$"
+            },
+            "context_omission_count": {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 9007199254740991
+            },
+            "model_version": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 160,
+              "pattern": "^[A-Za-z0-9][A-Za-z0-9._:/-]*$"
+            },
+            "policy_version": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 160,
+              "pattern": "^[A-Za-z0-9][A-Za-z0-9._:/-]*$"
+            },
+            "configuration_digest": {
+              "type": "string",
+              "pattern": "^[a-f0-9]{64}$"
+            },
+            "decided_at": {
+              "type": "string",
+              "maxLength": 40,
+              "format": "date-time",
+              "pattern": "^(?:(?:\\d\\d[2468][048]|\\d\\d[13579][26]|\\d\\d0[48]|[02468][048]00|[13579][26]00)-02-29|\\d{4}-(?:(?:0[13578]|1[02])-(?:0[1-9]|[12]\\d|3[01])|(?:0[469]|11)-(?:0[1-9]|[12]\\d|30)|(?:02)-(?:0[1-9]|1\\d|2[0-8])))T(?:(?:[01]\\d|2[0-3]):[0-5]\\d(?::[0-5]\\d(?:\\.\\d+)?)?(?:Z|([+-](?:[01]\\d|2[0-3]):[0-5]\\d)))$"
+            },
+            "outcome": {
+              "type": "string",
+              "const": "reject"
+            },
+            "public_action": {
+              "type": "object",
+              "properties": {
+                "category": {
+                  "type": "string",
+                  "const": "dual-use-boundary"
+                },
+                "action": {
+                  "type": "string",
+                  "const": "rejected"
+                },
+                "notice": {
+                  "type": "string",
+                  "const": "none"
+                }
+              },
+              "required": [
+                "category",
+                "action",
+                "notice"
+              ],
+              "additionalProperties": false
+            },
+            "provider_status": {
+              "type": "string",
+              "const": "ok"
+            },
+            "decision_path": {
+              "type": "string",
+              "const": "direct-content-reject"
+            },
+            "reviewer_state": {
+              "type": "string",
+              "const": "not-required"
+            }
+          },
+          "required": [
+            "version",
+            "scope",
+            "input_digest",
+            "context_frontier_digest",
+            "context_omission_count",
+            "model_version",
+            "policy_version",
+            "configuration_digest",
+            "decided_at",
+            "outcome",
+            "public_action",
+            "provider_status",
+            "decision_path",
+            "reviewer_state"
+          ],
+          "additionalProperties": false
+        }
+      },
+      "required": [
+        "public_action",
+        "operator_receipt"
+      ],
+      "additionalProperties": false
+    },
+    {
+      "type": "object",
+      "properties": {
+        "public_action": {
+          "type": "object",
+          "properties": {
+            "category": {
+              "type": "string",
+              "const": "operational-harm"
+            },
+            "action": {
+              "type": "string",
+              "const": "rejected"
+            },
+            "notice": {
+              "type": "string",
+              "const": "none"
+            }
+          },
+          "required": [
+            "category",
+            "action",
+            "notice"
+          ],
+          "additionalProperties": false
+        },
+        "operator_receipt": {
+          "type": "object",
+          "properties": {
+            "version": {
+              "type": "string",
+              "const": "screening-promotion-decision-provenance.v1"
+            },
+            "scope": {
+              "type": "string",
+              "const": "promotion"
+            },
+            "input_digest": {
+              "type": "string",
+              "pattern": "^[a-f0-9]{64}$"
+            },
+            "context_frontier_digest": {
+              "type": "string",
+              "pattern": "^[a-f0-9]{64}$"
+            },
+            "context_omission_count": {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 9007199254740991
+            },
+            "model_version": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 160,
+              "pattern": "^[A-Za-z0-9][A-Za-z0-9._:/-]*$"
+            },
+            "policy_version": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 160,
+              "pattern": "^[A-Za-z0-9][A-Za-z0-9._:/-]*$"
+            },
+            "configuration_digest": {
+              "type": "string",
+              "pattern": "^[a-f0-9]{64}$"
+            },
+            "decided_at": {
+              "type": "string",
+              "maxLength": 40,
+              "format": "date-time",
+              "pattern": "^(?:(?:\\d\\d[2468][048]|\\d\\d[13579][26]|\\d\\d0[48]|[02468][048]00|[13579][26]00)-02-29|\\d{4}-(?:(?:0[13578]|1[02])-(?:0[1-9]|[12]\\d|3[01])|(?:0[469]|11)-(?:0[1-9]|[12]\\d|30)|(?:02)-(?:0[1-9]|1\\d|2[0-8])))T(?:(?:[01]\\d|2[0-3]):[0-5]\\d(?::[0-5]\\d(?:\\.\\d+)?)?(?:Z|([+-](?:[01]\\d|2[0-3]):[0-5]\\d)))$"
+            },
+            "outcome": {
+              "type": "string",
+              "const": "reject"
+            },
+            "public_action": {
+              "type": "object",
+              "properties": {
+                "category": {
+                  "type": "string",
+                  "const": "operational-harm"
+                },
+                "action": {
+                  "type": "string",
+                  "const": "rejected"
+                },
+                "notice": {
+                  "type": "string",
+                  "const": "none"
+                }
+              },
+              "required": [
+                "category",
+                "action",
+                "notice"
+              ],
+              "additionalProperties": false
+            },
+            "provider_status": {
+              "type": "string",
+              "const": "ok"
+            },
+            "decision_path": {
+              "type": "string",
+              "const": "direct-content-reject"
+            },
+            "reviewer_state": {
+              "type": "string",
+              "const": "not-required"
+            }
+          },
+          "required": [
+            "version",
+            "scope",
+            "input_digest",
+            "context_frontier_digest",
+            "context_omission_count",
+            "model_version",
+            "policy_version",
+            "configuration_digest",
+            "decided_at",
+            "outcome",
+            "public_action",
+            "provider_status",
+            "decision_path",
+            "reviewer_state"
+          ],
+          "additionalProperties": false
+        }
+      },
+      "required": [
+        "public_action",
+        "operator_receipt"
+      ],
+      "additionalProperties": false
+    },
+    {
+      "type": "object",
+      "properties": {
+        "public_action": {
+          "type": "object",
+          "properties": {
+            "category": {
+              "type": "string",
+              "const": "harassment"
+            },
+            "action": {
+              "type": "string",
+              "const": "rejected"
+            },
+            "notice": {
+              "type": "string",
+              "const": "none"
+            }
+          },
+          "required": [
+            "category",
+            "action",
+            "notice"
+          ],
+          "additionalProperties": false
+        },
+        "operator_receipt": {
+          "type": "object",
+          "properties": {
+            "version": {
+              "type": "string",
+              "const": "screening-promotion-decision-provenance.v1"
+            },
+            "scope": {
+              "type": "string",
+              "const": "promotion"
+            },
+            "input_digest": {
+              "type": "string",
+              "pattern": "^[a-f0-9]{64}$"
+            },
+            "context_frontier_digest": {
+              "type": "string",
+              "pattern": "^[a-f0-9]{64}$"
+            },
+            "context_omission_count": {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 9007199254740991
+            },
+            "model_version": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 160,
+              "pattern": "^[A-Za-z0-9][A-Za-z0-9._:/-]*$"
+            },
+            "policy_version": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 160,
+              "pattern": "^[A-Za-z0-9][A-Za-z0-9._:/-]*$"
+            },
+            "configuration_digest": {
+              "type": "string",
+              "pattern": "^[a-f0-9]{64}$"
+            },
+            "decided_at": {
+              "type": "string",
+              "maxLength": 40,
+              "format": "date-time",
+              "pattern": "^(?:(?:\\d\\d[2468][048]|\\d\\d[13579][26]|\\d\\d0[48]|[02468][048]00|[13579][26]00)-02-29|\\d{4}-(?:(?:0[13578]|1[02])-(?:0[1-9]|[12]\\d|3[01])|(?:0[469]|11)-(?:0[1-9]|[12]\\d|30)|(?:02)-(?:0[1-9]|1\\d|2[0-8])))T(?:(?:[01]\\d|2[0-3]):[0-5]\\d(?::[0-5]\\d(?:\\.\\d+)?)?(?:Z|([+-](?:[01]\\d|2[0-3]):[0-5]\\d)))$"
+            },
+            "outcome": {
+              "type": "string",
+              "const": "reject"
+            },
+            "public_action": {
+              "type": "object",
+              "properties": {
+                "category": {
+                  "type": "string",
+                  "const": "harassment"
+                },
+                "action": {
+                  "type": "string",
+                  "const": "rejected"
+                },
+                "notice": {
+                  "type": "string",
+                  "const": "none"
+                }
+              },
+              "required": [
+                "category",
+                "action",
+                "notice"
+              ],
+              "additionalProperties": false
+            },
+            "provider_status": {
+              "type": "string",
+              "const": "ok"
+            },
+            "decision_path": {
+              "type": "string",
+              "const": "direct-content-reject"
+            },
+            "reviewer_state": {
+              "type": "string",
+              "const": "not-required"
+            }
+          },
+          "required": [
+            "version",
+            "scope",
+            "input_digest",
+            "context_frontier_digest",
+            "context_omission_count",
+            "model_version",
+            "policy_version",
+            "configuration_digest",
+            "decided_at",
+            "outcome",
+            "public_action",
+            "provider_status",
+            "decision_path",
+            "reviewer_state"
+          ],
+          "additionalProperties": false
+        }
+      },
+      "required": [
+        "public_action",
+        "operator_receipt"
+      ],
+      "additionalProperties": false
+    },
+    {
+      "type": "object",
+      "properties": {
+        "public_action": {
+          "type": "object",
+          "properties": {
+            "category": {
+              "type": "string",
+              "const": "sexual-content"
+            },
+            "action": {
+              "type": "string",
+              "const": "rejected"
+            },
+            "notice": {
+              "type": "string",
+              "const": "none"
+            }
+          },
+          "required": [
+            "category",
+            "action",
+            "notice"
+          ],
+          "additionalProperties": false
+        },
+        "operator_receipt": {
+          "type": "object",
+          "properties": {
+            "version": {
+              "type": "string",
+              "const": "screening-promotion-decision-provenance.v1"
+            },
+            "scope": {
+              "type": "string",
+              "const": "promotion"
+            },
+            "input_digest": {
+              "type": "string",
+              "pattern": "^[a-f0-9]{64}$"
+            },
+            "context_frontier_digest": {
+              "type": "string",
+              "pattern": "^[a-f0-9]{64}$"
+            },
+            "context_omission_count": {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 9007199254740991
+            },
+            "model_version": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 160,
+              "pattern": "^[A-Za-z0-9][A-Za-z0-9._:/-]*$"
+            },
+            "policy_version": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 160,
+              "pattern": "^[A-Za-z0-9][A-Za-z0-9._:/-]*$"
+            },
+            "configuration_digest": {
+              "type": "string",
+              "pattern": "^[a-f0-9]{64}$"
+            },
+            "decided_at": {
+              "type": "string",
+              "maxLength": 40,
+              "format": "date-time",
+              "pattern": "^(?:(?:\\d\\d[2468][048]|\\d\\d[13579][26]|\\d\\d0[48]|[02468][048]00|[13579][26]00)-02-29|\\d{4}-(?:(?:0[13578]|1[02])-(?:0[1-9]|[12]\\d|3[01])|(?:0[469]|11)-(?:0[1-9]|[12]\\d|30)|(?:02)-(?:0[1-9]|1\\d|2[0-8])))T(?:(?:[01]\\d|2[0-3]):[0-5]\\d(?::[0-5]\\d(?:\\.\\d+)?)?(?:Z|([+-](?:[01]\\d|2[0-3]):[0-5]\\d)))$"
+            },
+            "outcome": {
+              "type": "string",
+              "const": "reject"
+            },
+            "public_action": {
+              "type": "object",
+              "properties": {
+                "category": {
+                  "type": "string",
+                  "const": "sexual-content"
+                },
+                "action": {
+                  "type": "string",
+                  "const": "rejected"
+                },
+                "notice": {
+                  "type": "string",
+                  "const": "none"
+                }
+              },
+              "required": [
+                "category",
+                "action",
+                "notice"
+              ],
+              "additionalProperties": false
+            },
+            "provider_status": {
+              "type": "string",
+              "const": "ok"
+            },
+            "decision_path": {
+              "type": "string",
+              "const": "direct-content-reject"
+            },
+            "reviewer_state": {
+              "type": "string",
+              "const": "not-required"
+            }
+          },
+          "required": [
+            "version",
+            "scope",
+            "input_digest",
+            "context_frontier_digest",
+            "context_omission_count",
+            "model_version",
+            "policy_version",
+            "configuration_digest",
+            "decided_at",
+            "outcome",
+            "public_action",
+            "provider_status",
+            "decision_path",
+            "reviewer_state"
+          ],
+          "additionalProperties": false
+        }
+      },
+      "required": [
+        "public_action",
+        "operator_receipt"
+      ],
+      "additionalProperties": false
+    }
+  ]
+}

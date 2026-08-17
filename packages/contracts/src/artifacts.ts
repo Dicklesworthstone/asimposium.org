@@ -71,6 +71,18 @@ import {
   S2CostReceiptPublicationSchema,
 } from "./s2-cost-receipt.ts";
 import { CONTRACT_SCAFFOLD_SCHEMA_ID, ContractScaffoldSchema } from "./schema.ts";
+import {
+  type ScreeningCoarseCategory,
+  ScreeningContractsSchema,
+  type ScreeningDecisionPath,
+  type ScreeningOutcome,
+  type ScreeningPromotionDecisionProvenance,
+  type ScreeningProviderStatus,
+  type ScreeningPublicAction,
+  type ScreeningPublicationAction,
+  type ScreeningPublicNotice,
+  type ScreeningReviewState,
+} from "./screening.ts";
 
 export interface GeneratedArtifact {
   readonly relativePath: string;
@@ -98,6 +110,9 @@ const S2_COST_RECEIPT_SCHEMA_ID = "https://a.asimposium.org/schemas/s2-cost-rece
 const LEDGER_TYPES_ARTIFACT = "generated/ledger.types.ts";
 const LEDGER_JSON_SCHEMA_ARTIFACT = "generated/ledger.schema.json";
 const LEDGER_SCHEMA_ID = "https://a.asimposium.org/schemas/ledger.v1.json";
+const SCREENING_TYPES_ARTIFACT = "generated/screening.types.ts";
+const SCREENING_JSON_SCHEMA_ARTIFACT = "generated/screening.schema.json";
+const SCREENING_SCHEMA_ID = "https://a.asimposium.org/schemas/screening.v1.json";
 
 export function packageDirectory(): string {
   return fileURLToPath(new URL("../", import.meta.url));
@@ -336,6 +351,48 @@ function generatedLedgerTypes(): string {
   ].join("\n");
 }
 
+function generatedScreeningJsonSchema(): string {
+  const document = {
+    $id: SCREENING_SCHEMA_ID,
+    title: "ASImposium screening promotion decision contracts",
+    description:
+      "Fable §7.7 and §9.1. Public actions contain only category, action, and a coarse notice. Promotion decision provenance retains bounded digests and decision facts, never submitted content or detector detail; it is not the canonical screening log.",
+    ...z.toJSONSchema(ScreeningContractsSchema),
+  };
+  return formatJson(document);
+}
+
+function generatedScreeningTypes(): string {
+  const typeNames = [
+    "ScreeningCoarseCategory",
+    "ScreeningContracts",
+    "ScreeningDecisionPath",
+    "ScreeningPromotionDecisionProvenance",
+    "ScreeningOutcome",
+    "ScreeningProviderStatus",
+    "ScreeningPublicationAction",
+    "ScreeningPublicAction",
+    "ScreeningPublicNotice",
+    "ScreeningReviewState",
+  ] as const satisfies readonly (keyof {
+    ScreeningCoarseCategory: ScreeningCoarseCategory;
+    ScreeningContracts: import("./screening.ts").ScreeningContracts;
+    ScreeningDecisionPath: ScreeningDecisionPath;
+    ScreeningPromotionDecisionProvenance: ScreeningPromotionDecisionProvenance;
+    ScreeningOutcome: ScreeningOutcome;
+    ScreeningProviderStatus: ScreeningProviderStatus;
+    ScreeningPublicationAction: ScreeningPublicationAction;
+    ScreeningPublicAction: ScreeningPublicAction;
+    ScreeningPublicNotice: ScreeningPublicNotice;
+    ScreeningReviewState: ScreeningReviewState;
+  })[];
+  return [
+    "// Generated from src/screening.ts by `bun run generate`. Do not edit.",
+    `export type { ${typeNames.join(", ")} } from "../src/screening.ts";`,
+    "",
+  ].join("\n");
+}
+
 export function generatedArtifacts(): readonly GeneratedArtifact[] {
   return [
     { relativePath: JSON_SCHEMA_ARTIFACT, content: generatedJsonSchema() },
@@ -350,6 +407,8 @@ export function generatedArtifacts(): readonly GeneratedArtifact[] {
     { relativePath: PROBLEM_TYPES_ARTIFACT, content: generatedProblemTypes() },
     { relativePath: LEDGER_JSON_SCHEMA_ARTIFACT, content: generatedLedgerJsonSchema() },
     { relativePath: LEDGER_TYPES_ARTIFACT, content: generatedLedgerTypes() },
+    { relativePath: SCREENING_JSON_SCHEMA_ARTIFACT, content: generatedScreeningJsonSchema() },
+    { relativePath: SCREENING_TYPES_ARTIFACT, content: generatedScreeningTypes() },
     {
       relativePath: S2_COST_RECEIPT_JSON_SCHEMA_ARTIFACT,
       content: generatedS2CostReceiptJsonSchema(),
