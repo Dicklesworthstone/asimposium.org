@@ -8,23 +8,26 @@ import { fileURLToPath } from "node:url";
 import {
   assertReadLimit,
   bootstrapInstallSql,
+  REMOTE_D1_SCHEDULING_MARGIN_MS as CLEANUP_SCHEDULING_MARGIN_MS,
   catalogFingerprint,
   classifySchemaLineage,
   digestOf,
+  LOCAL_D1_KILL_REAP_MS as KILL_REAP_MS,
   LEDGER_TABLE,
   LINEAGE_TABLE,
-  localD1,
   MAX_CATALOG_ROWS,
   MAX_JOURNAL_ROWS,
   MAX_LINEAGE_ROWS,
   MigrationError,
   migrationCommandSql,
+  LOCAL_D1_PIPE_DRAIN_MS as OUTPUT_DRAIN_MS,
   planMigrations,
   readBootstrapManifest,
   readMigrationDirectory,
   redactStderr,
   resolvePinnedWranglerCommand,
   runBoundedCommand,
+  LOCAL_D1_TERM_GRACE_MS as TERMINATE_GRACE_MS,
 } from "./migrate.mjs";
 
 /**
@@ -44,10 +47,31 @@ const persistenceRoot = resolve(
   `asimposium-migrate-local-${randomUUID().replaceAll("-", "")}`,
 );
 const PER_COMMAND_TIMEOUT_MS = 15_000;
-const TERMINATE_GRACE_MS = 500;
-const KILL_REAP_MS = 500;
-const OUTPUT_DRAIN_MS = 500;
-const COMMAND_REAP_RESERVE_MS = TERMINATE_GRACE_MS + KILL_REAP_MS + OUTPUT_DRAIN_MS;
+// Keep the same six bounded cleanup windows as `runBoundedCommand` in
+// `infra/migrate.mjs`: TERM grace; SIGKILL reap; termination drain; direct-child
+// reap; final pipe drain; and bounded pipe-cancellation settlement.
+const COMMAND_CONTAINMENT_RESERVE_MS = TERMINATE_GRACE_MS + KILL_REAP_MS * 3 + OUTPUT_DRAIN_MS * 2;
+const COMMAND_REAP_RESERVE_MS = COMMAND_CONTAINMENT_RESERVE_MS + CLEANUP_SCHEDULING_MARGIN_MS;
+/**
+ * The smallest execution window worth spawning a local D1 command into.
+ *
+ * The reap reserve alone is NOT a floor on execution: it only reserves the tail
+ * needed to terminate a child, so a nearly exhausted whole-suite budget still
+ * cleared it and handed a real `wrangler d1 execute` a window far too small to
+ * finish in. The command then timed out and was reported as
+ * "did not complete through the bounded executor" — a statement about the
+ * MIGRATION, when the actual cause was the suite budget being spent. That
+ * misattribution is the defect: a reader is sent to the migration and to
+ * Wrangler for a failure neither one caused.
+ *
+ * This mirrors `REMOTE_D1_EXECUTION_FLOOR_MS` in `infra/migrate.mjs`, where the
+ * same rule already refuses BEFORE the spawn rather than starting a command the
+ * remaining budget cannot contain. Refusing early is the only point at which the
+ * distinction is still recoverable; once a doomed child is running, every
+ * outcome looks like a command failure.
+ */
+const LOCAL_D1_EXECUTION_FLOOR_MS = 3_000;
+const LOCAL_D1_COMMAND_WINDOW_MS = COMMAND_REAP_RESERVE_MS + LOCAL_D1_EXECUTION_FLOOR_MS;
 const TOTAL_TIMEOUT_MS = 180_000;
 const deadlineAt = startedAt + TOTAL_TIMEOUT_MS;
 const appliedAt = "2026-08-16T00:00:00.000Z";
@@ -126,20 +150,68 @@ function localConfigPath(databaseName) {
   return configPath;
 }
 
-function commandDeadline(label) {
-  const remaining = Math.floor(deadlineAt - performance.now());
-  const commandBudget = Math.min(PER_COMMAND_TIMEOUT_MS, remaining);
-  assert.ok(
-    commandBudget > COMMAND_REAP_RESERVE_MS,
-    `local D1 suite exhausted its deadline before ${label}`,
-  );
-  return performance.now() + commandBudget;
+function commandDeadline(observedAt = performance.now()) {
+  const suiteRemainingMs = Math.max(0, Math.floor(deadlineAt - observedAt));
+  const remainingMs = Math.min(PER_COMMAND_TIMEOUT_MS, suiteRemainingMs);
+  return { deadlineAt: observedAt + remainingMs, remainingMs };
 }
 
-function remainingBefore(deadline, label) {
-  const remaining = Math.floor(deadline - performance.now());
-  assert.ok(remaining > 0, `local D1 ${label} exceeded its deadline`);
-  return remaining;
+/**
+ * Decide, from the remaining budget alone, whether a command may start.
+ *
+ * PURE on purpose. The allocation is the whole decision, so keeping it free of
+ * clocks, spawns and I/O is what lets the boundary be proven at exact values
+ * instead of provoked by timing. Every spawn site below takes its `timeoutMs`
+ * from this function's window, so a refusal is structurally the only way for a
+ * truncated budget to reach a child: there is no second path to a timeout.
+ */
+function localExecutionAllocation(remainingMs) {
+  const executionWindowMs = Math.max(0, remainingMs - COMMAND_REAP_RESERVE_MS);
+  if (executionWindowMs < LOCAL_D1_EXECUTION_FLOOR_MS) {
+    return { kind: "budget-exhausted", remainingMs, executionWindowMs };
+  }
+  return { kind: "ok", remainingMs, executionWindowMs };
+}
+
+/**
+ * The window a command may use, or a typed refusal naming the real cause.
+ *
+ * The code is distinct from `LOCAL_D1_COMMAND_TIMEOUT` and
+ * `LOCAL_D1_COMMAND_FAILED` precisely so the two cannot be confused again: this
+ * one says the SUITE ran out of budget and nothing was started, which is a fact
+ * about the harness, not about the migration it was about to apply.
+ */
+function localExecutionWindowOrRefuse(remainingMs, label) {
+  const allocation = localExecutionAllocation(remainingMs);
+  if (allocation.kind !== "ok") {
+    throw new MigrationError(
+      "LOCAL_D1_SUITE_BUDGET_EXHAUSTED",
+      `The local D1 suite budget left ${allocation.remainingMs}ms total for ${label}, providing ${allocation.executionWindowMs}ms for execution after its ${COMMAND_REAP_RESERVE_MS}ms cleanup reserve, below the ${LOCAL_D1_EXECUTION_FLOOR_MS}ms execution floor; no command was started.`,
+    );
+  }
+  return allocation.executionWindowMs;
+}
+
+/**
+ * The ONE pre-spawn seam. Every local child in this file is started here.
+ *
+ * Sharing it is what makes "a doomed command is never started" provable rather
+ * than merely arranged: the guard and the spawn are the same two lines for every
+ * caller, so there is no second site that could compute a window differently and
+ * quietly reintroduce the truncated-window launch.
+ *
+ * `runner`, `remainingMs`, and `observedAt` are injectable ONLY so the boundary
+ * can be driven at an exact budget with a runner that records entry. Production
+ * callers pass none of them and get the real bounded executor and the real
+ * shared deadline, so the seam a plant exercises is the seam that ships.
+ */
+async function runBoundedLocalCommand(label, command, { runner, remainingMs, observedAt } = {}) {
+  const remaining = remainingMs ?? commandDeadline(observedAt).remainingMs;
+  // The refusal happens HERE, before `runner` is named on the next line. That
+  // ordering is the property under test: a plant whose runner counts entries
+  // must observe zero.
+  const timeoutMs = localExecutionWindowOrRefuse(remaining, label);
+  return await (runner ?? runBoundedCommand)({ ...command, timeoutMs });
 }
 
 /**
@@ -147,11 +219,13 @@ function remainingBefore(deadline, label) {
  * root, so this integration lane exercises the same group/pipe containment as
  * the real local migration CLI while retaining its isolated test databases.
  */
-async function boundedLocalD1(databaseName, args, label) {
-  const deadline = commandDeadline(label);
-  const executionWindowMs = remainingBefore(deadline, label) - COMMAND_REAP_RESERVE_MS;
-  assert.ok(executionWindowMs > 0, `local D1 ${label} lacks time for bounded child reaping`);
-  const result = await runBoundedCommand({
+async function boundedLocalD1(
+  databaseName,
+  args,
+  label,
+  configPath = localConfigPath(databaseName),
+) {
+  const result = await runBoundedLocalCommand(label, {
     cmd: [
       ...resolvePinnedWranglerCommand(root),
       "d1",
@@ -159,14 +233,13 @@ async function boundedLocalD1(databaseName, args, label) {
       databaseName,
       "--local",
       "--config",
-      localConfigPath(databaseName),
+      configPath,
       "--persist-to",
       persistenceRoot,
       "--json",
       ...args,
     ],
     cwd: root,
-    timeoutMs: executionWindowMs,
   });
   if (result.outcome !== "exited") {
     throw new MigrationError(
@@ -201,7 +274,12 @@ async function localJson(databaseName, command, label) {
 }
 
 async function runnerConfigJson(command, label) {
-  const raw = await localD1(root, "asimposium-local", ["--command", command], persistenceRoot);
+  const raw = await boundedLocalD1(
+    "asimposium-local",
+    ["--command", command],
+    label,
+    "infra/wrangler.toml",
+  );
   try {
     const parsed = JSON.parse(raw);
     assert.ok(
@@ -216,16 +294,9 @@ async function runnerConfigJson(command, label) {
 }
 
 async function runActualLocalMigrationCli(args, label) {
-  const deadline = commandDeadline(label);
-  const executionWindowMs = remainingBefore(deadline, label) - COMMAND_REAP_RESERVE_MS;
-  assert.ok(
-    executionWindowMs > 0,
-    `actual local CLI ${label} lacks time for bounded child reaping`,
-  );
-  const result = await runBoundedCommand({
+  const result = await runBoundedLocalCommand(label, {
     cmd: [process.execPath, "infra/migrate.mjs", ...args],
     cwd: root,
-    timeoutMs: executionWindowMs,
   });
   assert.equal(result.outcome, "exited", `actual local CLI ${label} must exit normally`);
   try {
@@ -551,6 +622,154 @@ function assertSafeCause(error) {
 }
 
 const cases = [
+  {
+    // PLANTED: a truncated execution window must never reach a child.
+    //
+    // The observed failure was `apply-6` reported as "did not complete through
+    // the bounded executor" 1.4s before the whole-suite deadline: the reap
+    // reserve cleared, a real `wrangler d1 execute` was handed ~1400ms, and its
+    // inevitable timeout was attributed to the migration. This plant fixes the
+    // boundary at exact values instead of provoking it, so it is deterministic
+    // and does not move `TOTAL_TIMEOUT_MS` or `PER_COMMAND_TIMEOUT_MS`.
+    name: "a-nearly-exhausted-suite-budget-refuses-before-spawning-a-doomed-command",
+    async execute() {
+      // CAUSAL: drive the real pre-spawn seam at the exact reported budget with
+      // a runner that records entry. This is the no-spawn proof — not the
+      // arithmetic below, and not a source-shape count. If the pre-spawn floor
+      // refusal were removed, the seam would enter the runner with the
+      // truncated window and `runnerEntries` would be 1.
+      // Historical observation, deliberately literal rather than derived from
+      // the reserve whose composition this case is meant to catch.
+      const REPORTED_REMAINING_MS = 2_900;
+      let runnerEntries = 0;
+      const recordingRunner = () => {
+        runnerEntries += 1;
+        throw new Error("a truncated execution window reached the runner");
+      };
+
+      let refusedBeforeSpawn;
+      try {
+        await runBoundedLocalCommand(
+          "apply-6",
+          { cmd: [process.execPath, "--version"], cwd: root },
+          { runner: recordingRunner, remainingMs: REPORTED_REMAINING_MS },
+        );
+        assert.fail("a truncated window must refuse before any spawn");
+      } catch (error) {
+        refusedBeforeSpawn = error;
+      }
+      assert.ok(refusedBeforeSpawn instanceof MigrationError);
+      assert.equal(refusedBeforeSpawn.code, "LOCAL_D1_SUITE_BUDGET_EXHAUSTED");
+      assert.equal(runnerEntries, 0, "the seam entered the runner with a doomed window");
+      assert.equal(
+        refusedBeforeSpawn.message,
+        "The local D1 suite budget left 2900ms total for apply-6, providing 0ms for execution after its 3250ms cleanup reserve, below the 3000ms execution floor; no command was started.",
+      );
+
+      // The production deadline calculator must feed the SAME typed refusal.
+      // Previously its assertion fired first, replacing this code with a generic
+      // AssertionError and hiding the exact remaining-budget diagnosis.
+      let expiredDeadlineRunnerEntries = 0;
+      let expiredDeadlineRefusal;
+      try {
+        await runBoundedLocalCommand(
+          "expired-deadline",
+          { cmd: [process.execPath, "--version"], cwd: root },
+          {
+            runner: () => {
+              expiredDeadlineRunnerEntries += 1;
+              throw new Error("an expired suite deadline reached the runner");
+            },
+            observedAt: deadlineAt + 1,
+          },
+        );
+        assert.fail("an expired suite deadline must refuse before any spawn");
+      } catch (error) {
+        expiredDeadlineRefusal = error;
+      }
+      assert.ok(expiredDeadlineRefusal instanceof MigrationError);
+      assert.equal(expiredDeadlineRefusal.code, "LOCAL_D1_SUITE_BUDGET_EXHAUSTED");
+      assert.equal(expiredDeadlineRunnerEntries, 0);
+      assert.equal(
+        expiredDeadlineRefusal.message,
+        "The local D1 suite budget left 0ms total for expired-deadline, providing 0ms for execution after its 3250ms cleanup reserve, below the 3000ms execution floor; no command was started.",
+      );
+
+      // POSITIVE CONTROL: the same seam DOES spawn when the budget allows, and
+      // hands over exactly the guarded window. Without this the refusal above
+      // could pass by refusing everything.
+      let admittedEntries = 0;
+      let handedTimeoutMs;
+      const admittingRunner = (options) => {
+        admittedEntries += 1;
+        handedTimeoutMs = options.timeoutMs;
+        return { outcome: "exited", exitCode: 0, stdout: "", stderr: "" };
+      };
+      const admittedRemainingMs = 6_250;
+      const admittedResult = await runBoundedLocalCommand(
+        "apply-6",
+        { cmd: [process.execPath, "--version"], cwd: root },
+        { runner: admittingRunner, remainingMs: admittedRemainingMs },
+      );
+      assert.equal(admittedEntries, 1, "an admitted budget must reach the runner exactly once");
+      assert.equal(handedTimeoutMs, LOCAL_D1_EXECUTION_FLOOR_MS);
+      assert.equal(admittedResult.outcome, "exited");
+
+      // SECONDARY: the boundary arithmetic itself, at exact values, no clock.
+      const reported = localExecutionAllocation(REPORTED_REMAINING_MS);
+      assert.equal(reported.kind, "budget-exhausted");
+      assert.equal(reported.remainingMs, 2_900);
+      assert.equal(reported.executionWindowMs, 0);
+
+      // INDEPENDENT COMPOSITION: these literal expectations prevent a wrong
+      // reserve from making its own derived boundary plant pass. The canonical
+      // bounded executor has six 500ms cleanup windows plus 250ms of scheduling
+      // margin, and the local execution floor adds another 3000ms.
+      assert.equal(TERMINATE_GRACE_MS, 500);
+      assert.equal(KILL_REAP_MS, 500);
+      assert.equal(OUTPUT_DRAIN_MS, 500);
+      assert.equal(CLEANUP_SCHEDULING_MARGIN_MS, 250);
+      assert.equal(COMMAND_CONTAINMENT_RESERVE_MS, 3_000);
+      assert.equal(COMMAND_REAP_RESERVE_MS, 3_250);
+      assert.equal(LOCAL_D1_EXECUTION_FLOOR_MS, 3_000);
+      assert.equal(LOCAL_D1_COMMAND_WINDOW_MS, 6_250);
+
+      // Exact boundary, both sides, with no clock involved.
+      const oneMillisecondShort = localExecutionAllocation(6_249);
+      assert.equal(oneMillisecondShort.kind, "budget-exhausted");
+      assert.equal(oneMillisecondShort.executionWindowMs, 2_999);
+      const admitted = localExecutionAllocation(6_250);
+      assert.equal(admitted.kind, "ok");
+      // An admitted window still withholds the whole reap tail, so a command
+      // that uses all of it can still be terminated inside the same budget.
+      assert.equal(admitted.executionWindowMs, LOCAL_D1_EXECUTION_FLOOR_MS);
+
+      // The refusal is typed, and typed DISTINCTLY: reusing the command codes
+      // would recreate the misattribution this plant exists to prevent.
+      let refusal;
+      try {
+        localExecutionWindowOrRefuse(2_900, "apply-6");
+        assert.fail("a truncated window must refuse before any spawn");
+      } catch (error) {
+        refusal = error;
+      }
+      assert.ok(refusal instanceof MigrationError);
+      assert.equal(refusal.code, "LOCAL_D1_SUITE_BUDGET_EXHAUSTED");
+      assert.notEqual(refusal.code, "LOCAL_D1_COMMAND_TIMEOUT");
+      assert.notEqual(refusal.code, "LOCAL_D1_COMMAND_FAILED");
+      assert.ok(
+        refusal.message.includes("no command was started"),
+        "the refusal must say nothing was started",
+      );
+
+      // No source-shape assertion here on purpose. Counting occurrences of the
+      // runner's name in this file counts its own literal, its comments, and the
+      // assertion message, so it fails for edits that change nothing and proves
+      // nothing about behaviour. The causal seam test above is the proof; every
+      // real site reaching it is enforced by the seam owning both the guard and
+      // the spawn, which no caller can partially adopt.
+    },
+  },
   {
     name: "a-successful-local-command-returns-json",
     async execute() {
