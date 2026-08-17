@@ -1,4 +1,5 @@
 #!/usr/bin/env bash
+# shellcheck disable=SC2016 # Single-quoted programs are expanded by their inner shells.
 # S-6 cross-plane auth, live preview spike (bead asimposiumorg-vw3).
 #
 # Proves the seam against REAL infrastructure: a Vercel preview running Auth.js
@@ -241,7 +242,6 @@ GROUP_QUEUED_CHILD_RECORDS=0
 GROUP_PROTOCOL_STATE="idle"
 GROUP_TERMINAL_SEEN=0
 GROUP_ALLOW_CHILD_BEFORE_ACK=0
-GROUP_CHILD_STATUS=""
 
 mint_owner_token() {
   local label="$1"
@@ -256,8 +256,8 @@ register_child() {
   local pid="$1" token="$2" kind="${3:-ordinary}"
   local index="${#CHILD_PIDS[@]}"
   CHILD_PIDS+=("$pid")
-  CHILD_OWNER_TOKENS[$index]="$token"
-  CHILD_KINDS[$index]="$kind"
+  CHILD_OWNER_TOKENS[index]="$token"
+  CHILD_KINDS[index]="$kind"
 }
 
 child_record_index() {
@@ -292,7 +292,6 @@ prepare_group_control() {
   GROUP_PROTOCOL_STATE="boot"
   GROUP_TERMINAL_SEEN=0
   GROUP_ALLOW_CHILD_BEFORE_ACK=0
-  GROUP_CHILD_STATUS=""
 }
 
 adopt_group_control() {
@@ -301,7 +300,7 @@ adopt_group_control() {
   child_record_index "$pid" || return 1
   index="$CHILD_RECORD_INDEX"
   [[ "${CHILD_KINDS[$index]:-ordinary}" == "ordinary" ]] || return 1
-  CHILD_KINDS[$index]="controlled-group"
+  CHILD_KINDS[index]="controlled-group"
 }
 
 release_group_control() {
@@ -317,7 +316,6 @@ release_group_control() {
   GROUP_PROTOCOL_STATE="idle"
   GROUP_TERMINAL_SEEN=0
   GROUP_ALLOW_CHILD_BEFORE_ACK=0
-  GROUP_CHILD_STATUS=""
 }
 
 validate_group_child_record() {
@@ -326,7 +324,6 @@ validate_group_child_record() {
   status="${record#"$prefix"}"
   [[ "$status" =~ ^(0|[1-9]|[1-9][0-9]|[1-9][0-9][0-9])$ ]] || return 1
   (( 10#$status <= 255 )) || return 1
-  GROUP_CHILD_STATUS="$((10#$status))"
 }
 
 read_group_exact_until() {
@@ -367,7 +364,8 @@ read_group_record() {
 }
 
 read_group_outcome() {
-  local seconds="$1" record="" deadline=$((SECONDS + seconds)) remaining read_status
+  local seconds="$1" record="" remaining read_status
+  local deadline=$((SECONDS + seconds))
   GROUP_RECORD=""
   GROUP_RECORD_INVALID=0
   (( GROUP_RESULT_OPEN == 1 )) || return 1
@@ -853,7 +851,7 @@ RUN_BOUNDED_CHILD_STATUS=""
 run_bounded() {
   local seconds="$1" stdout_file="$2" stdin_file="$3"
   shift 3
-  local supervisor_token control_ready boot_status=0 setup_status=0
+  local supervisor_token boot_status=0 setup_status=0
   local pid coproc_pid coproc_read_fd coproc_write_fd input_deadline
   local stable_result=0 stable_control=0
   [[ -z "$GROUP_CONTROL_PID" ]] || return "$EX_CLEANUP_UNPROVEN"
@@ -867,6 +865,7 @@ run_bounded() {
   # neither reopen a pathname nor read the token-bearing result stream. The
   # coprocess body immediately execs Perl, so its pid remains the exact group
   # leader through Perl -> Bash supervisor for the whole capability lifetime.
+  # shellcheck disable=SC1012,SC2026 # ANSI-C quotes belong to the nested Bash source.
   coproc S6_BOUNDED_SUPERVISOR {
     exec /usr/bin/perl -MPOSIX -e '
       $^F=9;
@@ -3319,10 +3318,11 @@ main() {
     exit 0
   fi
 
-  # Hidden EXIT-refusal polarity. No payload is forked after the injected early
-  # protocol record; both control commands refuse, so EXIT must preserve the
-  # owner and override the requested zero with exact cleanup-unproven 125. Pipe
-  # EOF then makes the durable supervisor self-retire without numeric fallback.
+  # Hidden EXIT-refusal polarity. The injected early protocol record makes the
+  # parent refuse while a TERM-resistant payload remains live; both control
+  # commands refuse, so EXIT must preserve the owner and override the requested
+  # zero with exact cleanup-unproven 125. Pipe EOF then makes the durable
+  # supervisor self-retire without numeric fallback.
   if [[ "${1:-}" == "--self-test-exit-refusal-victim" ]]; then
     REAP_GRACE_SECONDS=0
     CHILD_SETTLE_ATTEMPTS=2

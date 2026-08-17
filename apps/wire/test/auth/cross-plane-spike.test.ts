@@ -2,6 +2,8 @@
 // text of a bash script, where `${VAR}` is the shell expansion being checked, not a
 // JavaScript template placeholder. Rewriting them would stop the assertions matching
 // the source they exist to pin.
+// biome-ignore-all lint/style/useTemplate: explicit concatenation keeps the outer
+// protocol's token interpolation visually distinct from the embedded shell source.
 
 /**
  * S-6 DEPLOYED-spike harness invariants (bead asimposiumorg-vw3).
@@ -245,7 +247,62 @@ async function outerControlListener(): Promise<OuterControlListener> {
   };
 }
 
-type BoundedResult<T> = { readonly kind: "value"; readonly value: T } | { readonly kind: "elapsed" };
+interface TestSocketPair {
+  readonly parent: Socket;
+  readonly peer: Socket;
+  close(): Promise<void>;
+}
+
+/** Loopback pair used only by strict protocol parser/write plants below. */
+async function testSocketPair(): Promise<TestSocketPair> {
+  const server = createServer();
+  server.listen({ host: "127.0.0.1", port: 0, exclusive: true });
+  await once(server, "listening");
+  const address = server.address();
+  if (address === null || typeof address === "string") {
+    server.close();
+    throw new Error("test socket pair did not receive a TCP port");
+  }
+  const accepted = new Promise<Socket>((resolveAccepted) => {
+    server.once("connection", (socket) => {
+      socket.on("error", () => undefined);
+      resolveAccepted(socket);
+    });
+  });
+  const parent = createConnection({ host: "127.0.0.1", port: address.port });
+  parent.on("error", () => undefined);
+  await once(parent, "connect");
+  const acceptedPeer = await accepted;
+  const parentClosed = new Promise<void>((resolveClosed) => {
+    parent.once("close", () => resolveClosed());
+  });
+  const peerClosed = new Promise<void>((resolveClosed) => {
+    acceptedPeer.once("close", () => resolveClosed());
+  });
+  const serverClosed = new Promise<void>((resolveClosed, rejectClosed) => {
+    server.close((error) => {
+      if (error) rejectClosed(error);
+      else resolveClosed();
+    });
+  });
+  let closePromise: Promise<void> | undefined;
+  return {
+    parent,
+    peer: acceptedPeer,
+    close() {
+      closePromise ??= (async () => {
+        parent.destroy();
+        acceptedPeer.destroy();
+        await Promise.all([parentClosed, peerClosed, serverClosed]);
+      })();
+      return closePromise;
+    },
+  };
+}
+
+type BoundedResult<T> =
+  | { readonly kind: "value"; readonly value: T }
+  | { readonly kind: "elapsed" };
 
 async function within<T>(promise: Promise<T>, milliseconds: number): Promise<BoundedResult<T>> {
   let timer: ReturnType<typeof setTimeout> | undefined;
@@ -271,6 +328,7 @@ type OuterTerminal =
   | { readonly kind: "protocol-failure"; readonly error: Error };
 
 type OuterProtocolState = "connected" | "ready" | "running" | "term-sent" | "closing";
+type OuterSocketWrite = (bytes: Buffer, callback: (error?: Error | null) => void) => boolean;
 
 /**
  * Strict nonce-framed protocol over the one accepted loopback socket.
@@ -283,6 +341,7 @@ class OuterSupervisorProtocol {
   readonly closed: Promise<void>;
   private readonly socket: Socket;
   private readonly token: string;
+  private readonly socketWrite: OuterSocketWrite;
   private state: OuterProtocolState = "connected";
   private totalBytes = 0;
   private buffered = Buffer.alloc(0);
@@ -298,9 +357,10 @@ class OuterSupervisorProtocol {
       }
     | undefined;
 
-  constructor(socket: Socket, token: string) {
+  constructor(socket: Socket, token: string, socketWrite?: OuterSocketWrite) {
     this.socket = socket;
     this.token = token;
+    this.socketWrite = socketWrite ?? ((bytes, callback) => socket.write(bytes, callback));
     this.closed = new Promise<void>((resolveClosed) => {
       socket.once("close", () => resolveClosed());
     });
@@ -432,7 +492,7 @@ class OuterSupervisorProtocol {
       try {
         // The callback fires only after the complete buffer is handed off.
         // A false return is backpressure, not a partial write.
-        this.socket.write(bytes, (error) => {
+        this.socketWrite(bytes, (error) => {
           if (error) reject(error);
           else resolve();
         });
@@ -481,26 +541,16 @@ class OuterSupervisorProtocol {
 
   async bootstrap(deadlineAt: number): Promise<boolean> {
     if (this.state !== "connected") return false;
-    return this.request(
-      "BOOT\t" + this.token,
-      "outer-ready:" + this.token,
-      deadlineAt,
-      () => {
-        this.state = "ready";
-      },
-    );
+    return this.request("BOOT\t" + this.token, "outer-ready:" + this.token, deadlineAt, () => {
+      this.state = "ready";
+    });
   }
 
   async start(deadlineAt: number): Promise<boolean> {
     if (this.state !== "ready") return false;
-    return this.request(
-      "START\t" + this.token,
-      "outer-started:" + this.token,
-      deadlineAt,
-      () => {
-        this.state = "running";
-      },
-    );
+    return this.request("START\t" + this.token, "outer-started:" + this.token, deadlineAt, () => {
+      this.state = "running";
+    });
   }
 
   async signal(
@@ -544,6 +594,17 @@ class OuterSupervisorProtocol {
   }
 }
 
+function feedProtocolPlant(protocol: OuterSupervisorProtocol, chunk: string): void {
+  // This file owns the parser and its causal plants. Reaching the private byte
+  // boundary directly makes split/coalesced framing deterministic instead of
+  // depending on how the kernel happens to packetize two loopback writes.
+  (
+    protocol as unknown as {
+      acceptBytes(bytes: Buffer): void;
+    }
+  ).acceptBytes(Buffer.from(chunk, "ascii"));
+}
+
 const OUTER_SETPGRP_PROGRAM =
   "use POSIX qw(dup dup2 close); pipe(my $reader,my $writer) or die $!; " +
   "my $r=fileno($reader); my $w=fileno($writer); " +
@@ -554,8 +615,8 @@ const OUTER_SETPGRP_PROGRAM =
   "exec @ARGV or die $!;";
 
 const OUTER_SUPERVISOR_PROGRAM = [
-  'port="$1" unavailable="$2" stdout_file="$3" stderr_file="$4" ready_delay="$5" started_delay="$6" ack_delay="$7" extra_kill_record="$8"',
-  "shift 8",
+  'port="$1" unavailable="$2" stdout_file="$3" stderr_file="$4" ready_delay="$5" started_delay="$6" ack_delay="$7" extra_kill_record="$8" kill_hold_delay="$9"',
+  "shift 9",
   "set +m",
   "LC_ALL=C",
   "export LC_ALL",
@@ -567,6 +628,7 @@ const OUTER_SUPERVISOR_PROGRAM = [
   '[[ "$ready_delay" =~ ^(0|[0-9]+\\.[0-9][0-9][0-9])$ ]] || kill -KILL 0',
   '[[ "$started_delay" =~ ^(0|[0-9]+\\.[0-9][0-9][0-9])$ ]] || kill -KILL 0',
   '[[ "$ack_delay" =~ ^(0|[0-9]+\\.[0-9][0-9][0-9])$ ]] || kill -KILL 0',
+  '[[ "$kill_hold_delay" =~ ^(0|[0-9]+\\.[0-9][0-9][0-9])$ ]] || kill -KILL 0',
   '[[ "$ready_delay" == "0" ]] || { IFS= read -r -t "$ready_delay" _ <&8 || :; }',
   'printf "outer-ready:%s\\n" "$token" >&7 || kill -KILL 0',
   'IFS="$tab" read -r start_kind start_token start_extra <&7 || kill -KILL 0',
@@ -589,7 +651,7 @@ const OUTER_SUPERVISOR_PROGRAM = [
   "child_sent=0",
   "while :; do",
   "  if (( child_sent == 0 )); then",
-  '    if IFS= read -r -t 0.05 child_record <&8; then',
+  "    if IFS= read -r -t 0.05 child_record <&8; then",
   '      child_prefix="child:$token:"',
   '      [[ "$child_record" == "$child_prefix"* ]] || kill -KILL 0',
   '      child_status="${child_record#"$child_prefix"}"',
@@ -613,6 +675,7 @@ const OUTER_SUPERVISOR_PROGRAM = [
   '        [[ "$ack_delay" == "0" ]] || { IFS= read -r -t "$ack_delay" _ <&7 || :; }',
   '        printf "outer-ack:%s:KILL\\n" "$token" >&7 || kill -KILL 0',
   '        [[ "$extra_kill_record" == "1" ]] && printf "outer-ack:%s:EXTRA\\n" "$token" >&7',
+  '        [[ "$kill_hold_delay" == "0" ]] || { IFS= read -r -t "$kill_hold_delay" _ <&8 || :; }',
   "        kill -KILL 0",
   "        ;;",
   '      "DIE:")',
@@ -627,8 +690,8 @@ const OUTER_SUPERVISOR_PROGRAM = [
   "done",
 ].join("\n");
 
-const OUTER_NEVER_CONNECT_PROGRAM =
-  'trap "" TERM HUP INT; kill -STOP "$BASHPID"; exit 99';
+const OUTER_NEVER_CONNECT_PROGRAM = 'trap "" TERM HUP INT; kill -STOP "$BASHPID"; exit 99';
+const OUTER_EXIT_BEFORE_CONNECT_PROGRAM = "exit 73";
 
 interface ShellLifecycle {
   readonly cleanupUnproven: boolean;
@@ -689,8 +752,8 @@ interface ShellRun {
    * short and this controller cannot see groups it does not lead.
    */
   readonly cleanupUnproven: boolean;
-  /** True only when the outer controller actually dispatched its KILL escalation. */
-  readonly escalationFired: boolean;
+  /** True only when the TERM grace expired before a child terminal record arrived. */
+  readonly graceExpiredEscalation: boolean;
 }
 
 interface ShellRunOptions {
@@ -711,12 +774,16 @@ interface ShellRunOptions {
   readonly controlAckDelayMs?: number;
   /** Test-only duplicate record after KILL acknowledgement. */
   readonly extraRecordAfterKillAck?: boolean;
+  /** Test-only ACK(KILL)-then-hold plant; eventual self-KILL remains armed. */
+  readonly controlKillHoldMs?: number;
   /** Test-only hook after first accept and before listener sealing/token mint. */
   readonly afterControlAccept?: (port: number) => Promise<void>;
   /** Test-only post-settlement connect attempt; the sealed listener must refuse it. */
   readonly probeLateSecondConnection?: boolean;
   /** Test-only stopped helper that never opens the rendezvous. */
   readonly supervisorNeverConnect?: boolean;
+  /** Test-only builtin-only supervisor exit before rendezvous connect. */
+  readonly supervisorExitBeforeConnect?: boolean;
 }
 
 /**
@@ -853,6 +920,12 @@ async function runShell(
     // The one production work deadline begins at child launch. Connection,
     // BOOT/READY, START/STARTED, and payload lifetime all consume this same
     // budget; no protocol step receives a fresh window.
+    let supervisorProgram = OUTER_SUPERVISOR_PROGRAM;
+    if (options.supervisorNeverConnect === true) {
+      supervisorProgram = OUTER_NEVER_CONNECT_PROGRAM;
+    } else if (options.supervisorExitBeforeConnect === true) {
+      supervisorProgram = OUTER_EXIT_BEFORE_CONNECT_PROGRAM;
+    }
     deadlineAt = Date.now() + runTimeoutMs;
     const supervisorProcess = Bun.spawn({
       cmd: [
@@ -861,9 +934,7 @@ async function runShell(
         OUTER_SETPGRP_PROGRAM,
         "bash",
         "-c",
-        options.supervisorNeverConnect === true
-          ? OUTER_NEVER_CONNECT_PROGRAM
-          : OUTER_SUPERVISOR_PROGRAM,
+        supervisorProgram,
         "s6-outer-supervisor",
         String(controlListener.port),
         "126",
@@ -873,6 +944,7 @@ async function runShell(
         ((options.controlStartedDelayMs ?? 0) / 1_000).toFixed(3),
         ((options.controlAckDelayMs ?? 0) / 1_000).toFixed(3),
         options.extraRecordAfterKillAck === true ? "1" : "0",
+        ((options.controlKillHoldMs ?? 0) / 1_000).toFixed(3),
         "bash",
         script,
         ...args,
@@ -957,21 +1029,21 @@ async function runShell(
     // files read by size after exit, so no reader needs EOF.
 
     let timedOut = false;
-    let escalationFired = false;
+    let graceExpiredEscalation = false;
     const assertCapabilityIntegrity = (): void => {
       const failure = controlListener?.protocolFailure() ?? liveProtocol.protocolFailure();
       if (failure !== undefined) throw failure;
     };
-    const settleSupervisorUntil = async (cleanupDeadlineAt: number): Promise<number | undefined> => {
+    const settleSupervisorUntil = async (
+      cleanupDeadlineAt: number,
+    ): Promise<number | undefined> => {
       const remaining = Math.max(0, cleanupDeadlineAt - Date.now());
       const settled = await within(supervisorExited as Promise<number>, remaining);
       if (settled.kind === "elapsed") return undefined;
       supervisorSettled = true;
       return settled.value;
     };
-    const requireNaturalCapabilityCloseUntil = async (
-      cleanupDeadlineAt: number,
-    ): Promise<void> => {
+    const requireNaturalCapabilityCloseUntil = async (cleanupDeadlineAt: number): Promise<void> => {
       const remaining = Math.max(0, cleanupDeadlineAt - Date.now());
       const closed = await within(liveProtocol.closed, remaining);
       if (closed.kind === "elapsed") {
@@ -1026,9 +1098,7 @@ async function runShell(
       }
       if (readinessRace.kind === "supervisor-exit") {
         supervisorSettled = true;
-        throw new Error(
-          "outer supervisor exited before readiness: exit=" + readinessRace.exitCode,
-        );
+        throw new Error("outer supervisor exited before readiness: exit=" + readinessRace.exitCode);
       }
       if (!readinessRace.isReady) {
         const cleanupDeadlineAt = beginTeardownBudget(
@@ -1057,12 +1127,15 @@ async function runShell(
     }
 
     const deadline = new Promise<{ readonly kind: "deadline" }>((resolveDeadline) => {
-      deadlineTimer = setTimeout(() => {
-        // The callback only latches authority. One sequential owner below sends
-        // TERM/KILL over the live socket after the race resolves.
-        timedOut = true;
-        resolveDeadline({ kind: "deadline" });
-      }, Math.max(0, deadlineAt - Date.now()));
+      deadlineTimer = setTimeout(
+        () => {
+          // The callback only latches authority. One sequential owner below sends
+          // TERM/KILL over the live socket after the race resolves.
+          timedOut = true;
+          resolveDeadline({ kind: "deadline" });
+        },
+        Math.max(0, deadlineAt - Date.now()),
+      );
     });
     const first = await Promise.race([
       liveProtocol.terminal.then((terminal) => ({ kind: "terminal" as const, terminal })),
@@ -1106,14 +1179,7 @@ async function runShell(
         killGraceMs + (options.postKillSettleMs ?? POST_KILL_SETTLE_MS),
       );
       const termGraceDeadlineAt = Math.min(cleanupDeadlineAt, Date.now() + killGraceMs);
-      if (
-        !(await liveProtocol.signal(
-          "TERM",
-          cleanupDeadlineAt,
-          false,
-          options.onControlSignal,
-        ))
-      ) {
+      if (!(await liveProtocol.signal("TERM", cleanupDeadlineAt, false, options.onControlSignal))) {
         throw new Error("cleanup unproven: supervisor TERM command failed");
       }
       let graceTimer: ReturnType<typeof setTimeout> | undefined;
@@ -1136,7 +1202,7 @@ async function runShell(
         supervisorSettled = true;
         throw new Error("cleanup unproven: supervisor exited during TERM grace");
       } else {
-        escalationFired = true;
+        graceExpiredEscalation = true;
         exitCode = -1;
       }
 
@@ -1226,13 +1292,11 @@ async function runShell(
       timedOut,
       survivors,
       cleanupUnproven,
-      escalationFired,
+      graceExpiredEscalation,
     };
   } finally {
     let teardownFailure: Error | undefined;
-    const cleanupDeadlineAt = beginTeardownBudget(
-      options.postKillSettleMs ?? POST_KILL_SETTLE_MS,
-    );
+    const cleanupDeadlineAt = beginTeardownBudget(options.postKillSettleMs ?? POST_KILL_SETTLE_MS);
     const noteTeardownFailure = (error: unknown, fallback: string): void => {
       teardownFailure ??= error instanceof Error ? error : new Error(fallback);
     };
@@ -1270,8 +1334,7 @@ async function runShell(
         noteTeardownFailure(error, "cleanup unproven: control listener/socket close failed");
       }
     }
-    const lateProtocolFailure =
-      controlListener?.protocolFailure() ?? protocol?.protocolFailure();
+    const lateProtocolFailure = controlListener?.protocolFailure() ?? protocol?.protocolFailure();
     if (lateProtocolFailure !== undefined) {
       noteTeardownFailure(lateProtocolFailure, "outer supervisor protocol failed during close");
     }
@@ -1304,6 +1367,10 @@ async function runShell(
     } catch (error) {
       noteTeardownFailure(error, "capture descriptor release failed");
     }
+    // Cleanup ownership is stronger than a pending return or primary exception:
+    // an unclosed capability or unreaped supervisor must replace either with the
+    // typed cleanup-unproven refusal.
+    // biome-ignore lint/correctness/noUnsafeFinally: teardown failure must override earlier control flow.
     if (teardownFailure !== undefined) throw teardownFailure;
   }
 }
@@ -1741,7 +1808,7 @@ describe("the run is bounded and leaves no survivors", () => {
   test("anonymous supervisor authority exists before any payload fork", () => {
     const bounded = shellFunction(source, "run_bounded");
     const coprocess = bounded.indexOf("coproc S6_BOUNDED_SUPERVISOR");
-    const payload = bounded.indexOf('exec {$ARGV[0]} @ARGV');
+    const payload = bounded.indexOf("exec {$ARGV[0]} @ARGV");
     expect(coprocess).toBeGreaterThanOrEqual(0);
     expect(payload).toBeGreaterThan(coprocess);
     expect(bounded).toContain('register_child "$pid" "$supervisor_token" "ordinary"');
@@ -2208,18 +2275,12 @@ describe("the shell's causal self-tests actually run", () => {
       expect(stdout, diag(run)).toContain(
         '"assertion":"oversized-input-refuses-before-target","status":"pass"',
       );
-      expect(stdout, diag(run)).toContain(
-        '"assertion":"input-start-is-bounded","status":"pass"',
-      );
-      expect(stdout, diag(run)).toContain(
-        '"assertion":"input-mid-is-bounded","status":"pass"',
-      );
+      expect(stdout, diag(run)).toContain('"assertion":"input-start-is-bounded","status":"pass"');
+      expect(stdout, diag(run)).toContain('"assertion":"input-mid-is-bounded","status":"pass"');
       expect(stdout, diag(run)).toContain(
         '"assertion":"input-depart-mid-is-bounded","status":"pass"',
       );
-      expect(stdout, diag(run)).toContain(
-        '"assertion":"typed-child-status-125","status":"pass"',
-      );
+      expect(stdout, diag(run)).toContain('"assertion":"typed-child-status-125","status":"pass"');
       expect(stdout, diag(run)).toContain(
         '"assertion":"duplicate-terminal-record-fails-closed","status":"pass"',
       );
@@ -2276,6 +2337,113 @@ describe("the shell's causal self-tests actually run", () => {
   );
 });
 
+describe("the outer capability protocol is strict under stream framing", () => {
+  test("PLANTED: split READY and coalesced STARTED+CHILD parse exactly once", async () => {
+    const pair = await testSocketPair();
+    const token = "planttoken0123456789";
+    const protocol = new OuterSupervisorProtocol(pair.parent, token);
+    try {
+      const boot = protocol.bootstrap(Date.now() + 500);
+      feedProtocolPlant(protocol, "outer-rea");
+      feedProtocolPlant(protocol, `dy:${token}\n`);
+      expect(await boot).toBe(true);
+
+      const start = protocol.start(Date.now() + 500);
+      feedProtocolPlant(protocol, `outer-started:${token}\nouter-child:${token}:0\n`);
+      expect(await start).toBe(true);
+      expect(await protocol.terminal).toEqual({ kind: "child", status: 0 });
+
+      feedProtocolPlant(protocol, `outer-child:${token}:0\n`);
+      expect(protocol.protocolFailure()?.message).toContain("duplicate CHILD");
+    } finally {
+      protocol.expectClosure();
+      await pair.close();
+    }
+  });
+
+  test("PLANTED: write backpressure waits for callback and callback timeout refuses", async () => {
+    const token = "planttokenbackpressure";
+    const successPair = await testSocketPair();
+    let callbackObserved = false;
+    const delayedWrite: OuterSocketWrite = (_bytes, callback) => {
+      setTimeout(() => {
+        callbackObserved = true;
+        callback();
+      }, 10);
+      return false;
+    };
+    const successProtocol = new OuterSupervisorProtocol(successPair.parent, token, delayedWrite);
+    try {
+      const boot = successProtocol.bootstrap(Date.now() + 500);
+      feedProtocolPlant(successProtocol, `outer-ready:${token}\n`);
+      expect(await boot).toBe(true);
+      expect(callbackObserved).toBe(true);
+    } finally {
+      successProtocol.expectClosure();
+      await successPair.close();
+    }
+
+    const timeoutPair = await testSocketPair();
+    const stalledWrite: OuterSocketWrite = () => false;
+    const timeoutProtocol = new OuterSupervisorProtocol(timeoutPair.parent, token, stalledWrite);
+    try {
+      const boot = timeoutProtocol.bootstrap(Date.now() + 100);
+      feedProtocolPlant(timeoutProtocol, `outer-ready:${token}\n`);
+      expect(await boot).toBe(false);
+      expect(timeoutProtocol.protocolFailure()?.message).toContain("write callback timeout");
+    } finally {
+      timeoutProtocol.expectClosure();
+      await timeoutPair.close();
+    }
+  });
+
+  test("PLANTED: unsolicited ACK and close at each bootstrap boundary refuse", async () => {
+    const token = "planttokenbootstrap";
+    const earlyPair = await testSocketPair();
+    const earlyProtocol = new OuterSupervisorProtocol(earlyPair.parent, token);
+    try {
+      const boot = earlyProtocol.bootstrap(Date.now() + 500);
+      feedProtocolPlant(earlyProtocol, `outer-ack:${token}:TERM\n`);
+      expect(await boot).toBe(false);
+      expect(earlyProtocol.protocolFailure()?.message).toContain("out-of-order record");
+    } finally {
+      earlyProtocol.expectClosure();
+      await earlyPair.close();
+    }
+
+    const beforeReadyPair = await testSocketPair();
+    const beforeReadyProtocol = new OuterSupervisorProtocol(beforeReadyPair.parent, token);
+    try {
+      const boot = beforeReadyProtocol.bootstrap(Date.now() + 500);
+      beforeReadyPair.peer.destroy();
+      expect(await boot).toBe(false);
+      expect(beforeReadyProtocol.protocolFailure()?.message).toContain(
+        "before expected acknowledgement",
+      );
+    } finally {
+      beforeReadyProtocol.expectClosure();
+      await beforeReadyPair.close();
+    }
+
+    const beforeStartPair = await testSocketPair();
+    const beforeStartProtocol = new OuterSupervisorProtocol(beforeStartPair.parent, token);
+    try {
+      const boot = beforeStartProtocol.bootstrap(Date.now() + 500);
+      feedProtocolPlant(beforeStartProtocol, `outer-ready:${token}\n`);
+      expect(await boot).toBe(true);
+      const start = beforeStartProtocol.start(Date.now() + 500);
+      beforeStartPair.peer.destroy();
+      expect(await start).toBe(false);
+      expect(beforeStartProtocol.protocolFailure()?.message).toContain(
+        "before expected acknowledgement",
+      );
+    } finally {
+      beforeStartProtocol.expectClosure();
+      await beforeStartPair.close();
+    }
+  });
+});
+
 describe("the test harness contains what it launches", () => {
   test("it owns a live self-signalling supervisor capability", () => {
     const self = read("apps/wire/test/auth/cross-plane-spike.test.ts");
@@ -2288,7 +2456,7 @@ describe("the test harness contains what it launches", () => {
       self.indexOf("/** Failure context."),
     );
     expect(supervisor).toContain("setpgrp(0,0)");
-    expect(supervisor).toContain('/dev/tcp/127.0.0.1/$port');
+    expect(supervisor).toContain("/dev/tcp/127.0.0.1/$port");
     expect(supervisor).toContain("kill -TERM 0");
     expect(supervisor).toContain("kill -KILL 0");
     expect(supervisor).toContain("exec 3>&- 4>&- 5>&- 6>&- 7>&- 8>&- 9>&-");
@@ -2355,6 +2523,26 @@ printf '%s\\n' '{"plant":"started"}'
     expect(refusal).toBeInstanceOf(Error);
     expect((refusal as Error).message).toContain("outer supervisor did not connect");
     expect(Date.now() - started).toBeLessThan(2_000);
+  });
+
+  test("PLANTED: supervisor exit wins the pre-connect race without a signal", async () => {
+    const commands: Array<"TERM" | "KILL"> = [];
+    let refusal: unknown;
+    try {
+      await runShell([], withoutS6Env(), SCRIPT, {
+        runTimeoutMs: 500,
+        postKillSettleMs: 500,
+        supervisorExitBeforeConnect: true,
+        onControlSignal: (signal) => commands.push(signal),
+      });
+    } catch (error) {
+      refusal = error;
+    }
+    expect(refusal).toBeInstanceOf(Error);
+    expect((refusal as Error).message).toContain(
+      "outer supervisor exited before capability connect: exit=73",
+    );
+    expect(commands).toEqual([]);
   });
 
   test("PLANTED: a second accepted capability connection is a typed refusal", async () => {
@@ -2473,6 +2661,44 @@ exit 7
     expect((refusal as Error).message).toContain("outer supervisor protocol failure");
   });
 
+  test("PLANTED: KILL acknowledgement without supervisor settlement is bounded", async () => {
+    const dir = mkdtempSync(join(process.env.TMPDIR ?? tmpdir(), "s6-outer-kill-hold-"));
+    const plant = join(dir, "term-resistant.sh");
+    const ready = join(dir, "ready");
+    writeFileSync(
+      plant,
+      `#!/usr/bin/env bash
+trap '' TERM
+printf ready > "$1"
+while :; do IFS= read -r -t 30 _ || true; done
+`,
+      { mode: 0o700 },
+    );
+    const commands: Array<"TERM" | "KILL"> = [];
+    const started = Date.now();
+    let refusal: unknown;
+    try {
+      await runShell([ready], withoutS6Env(), plant, {
+        armAfterFileExists: ready,
+        runTimeoutMs: 25,
+        killGraceMs: 10,
+        postKillSettleMs: 75,
+        controlKillHoldMs: 250,
+        onControlSignal: (signal) => commands.push(signal),
+      });
+    } catch (error) {
+      refusal = error;
+    }
+    expect(refusal).toBeInstanceOf(Error);
+    expect((refusal as Error).message).toContain("cleanup unproven");
+    expect(commands).toEqual(["TERM", "KILL"]);
+    expect(Date.now() - started).toBeLessThan(1_000);
+    // The supervisor retains its own eventual self-KILL after the parent has
+    // honestly refused; let that bounded retirement finish before this plant
+    // releases its test scope.
+    await Bun.sleep(300);
+  });
+
   test("PLANTED: TERM and KILL acknowledgements share one cleanup deadline", async () => {
     const dir = mkdtempSync(join(process.env.TMPDIR ?? tmpdir(), "s6-outer-clean-budget-"));
     const plant = join(dir, "term-resistant.sh");
@@ -2507,7 +2733,7 @@ while :; do sleep 1; done
     expect(Date.now() - started).toBeLessThan(2_000);
   });
 
-  test("PLANTED: timeout TERM completion revokes the pending KILL before reap", async () => {
+  test("PLANTED: timeout TERM completion prevents grace-expiry escalation", async () => {
     const dir = mkdtempSync(join(process.env.TMPDIR ?? tmpdir(), "s6-outer-term-"));
     const plant = join(dir, "term-exit.sh");
     writeFileSync(
@@ -2529,7 +2755,7 @@ while :; do sleep 1; done
     expect(run.timedOut, diag(run)).toBe(true);
     expect(run.exitCode, diag(run)).toBe(42);
     expect(readFileSync(termObserved, "utf8"), diag(run)).toBe("term-observed");
-    expect(run.escalationFired, diag(run)).toBe(false);
+    expect(run.graceExpiredEscalation, diag(run)).toBe(false);
     expect(run.cleanupUnproven, diag(run)).toBe(true);
   });
 
@@ -2553,7 +2779,7 @@ while :; do sleep 1; done
       killGraceMs: 100,
     });
     expect(run.timedOut, diag(run)).toBe(true);
-    expect(run.escalationFired, diag(run)).toBe(true);
+    expect(run.graceExpiredEscalation, diag(run)).toBe(true);
     expect(run.cleanupUnproven, diag(run)).toBe(true);
   });
 
@@ -2587,7 +2813,9 @@ while :; do sleep 1; done
       refusal = error;
     }
     expect(refusal).toBeInstanceOf(Error);
-    expect((refusal as Error).message).toContain("cleanup unproven: supervisor KILL command failed");
+    expect((refusal as Error).message).toContain(
+      "cleanup unproven: supervisor KILL command failed",
+    );
     expect(Date.now() - started).toBeLessThan(1_000);
     expect(commands).toEqual(["TERM"]);
     expect(readFileSync(termObserved, "utf8")).toBe("term-observed");

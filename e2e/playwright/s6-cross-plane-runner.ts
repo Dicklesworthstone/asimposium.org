@@ -25,7 +25,14 @@
  * Output is exactly one NDJSON record on stdout. Exit 0 pass, 1 fail, 78 blocked.
  */
 
-import { readSync } from "node:fs";
+import {
+  closeSync,
+  constants as fsConstants,
+  fstatSync,
+  openSync,
+  readSync,
+  writeSync,
+} from "node:fs";
 import { type Browser, type BrowserContext, chromium, type Response } from "@playwright/test";
 
 const SUITE = "s6-cross-plane-browser";
@@ -39,6 +46,8 @@ const ACTION_TIMEOUT_MS = 20_000;
 const CLOSE_GRACE_MS = 10_000;
 /** The stdin configuration record is a single bounded line, never a stream. */
 const MAX_CONFIG_RECORD_BYTES = 8192;
+/** The shell accepts one canonical browser evidence record, never a transcript tail. */
+export const MAX_BROWSER_EVIDENCE_BYTES = 4096;
 
 /**
  * The EXACT session cookie name configured in `apps/web/auth.ts`.
@@ -50,15 +59,22 @@ const MAX_CONFIG_RECORD_BYTES = 8192;
  */
 const SESSION_COOKIE_NAME = "asimp.session";
 /** The public half of a join URL. The fragment after it is never matched. */
-const ENROLLMENT_ID = /ASIMP-EN-[0-9A-HJKMNP-TV-Z]{26}/;
+const ENROLLMENT_ID = /^ASIMP-EN-[0-9A-HJKMNP-TV-Z]{26}$/;
 
 interface CookieAttributes {
+  readonly issuance_count: number;
   readonly host_only: boolean;
   readonly http_only: boolean;
   readonly secure: boolean;
   readonly same_site: string | null;
   readonly scoped_to_apex: boolean;
   readonly present_for_agent_host: boolean;
+}
+
+export interface CookieProbe {
+  readonly attached: boolean;
+  readonly status: number;
+  readonly code: string | null;
 }
 
 interface Record_ {
@@ -71,21 +87,10 @@ interface Record_ {
   readonly apex_host: string | null;
   readonly agent_host: string | null;
   readonly cookie: CookieAttributes | null;
-  /**
-   * Outcome when the LOGGED-IN browser requests a Worker sponsor route.
-   *
-   * Deliberately not called "presenting the cookie": the session cookie is
-   * host-only on the apex, so the jar does not attach it to an agent-host
-   * request at all. That non-transmission is the property under test, and
-   * `cookie.present_for_agent_host` is its direct evidence. What this field
-   * records is the answer the agent host gives a browser that holds a live apex
-   * session — which must be the same answer it gives a stranger.
-   *
-   * The probe runs INSIDE the browser context so the cookie value never leaves
-   * the jar: exporting it to a shell would put a live human session into an
-   * argv, an env, or a file for the sake of testing that it is not sent.
-   */
-  readonly cookie_probe: { readonly status: number; readonly code: string | null } | null;
+  /** Natural browser behavior: the host-only session family is not eligible on Stoa. */
+  readonly cookie_omission_probe: CookieProbe | null;
+  /** Direction B: a fresh in-memory context explicitly presents the live family to Stoa. */
+  readonly cookie_present_probe: CookieProbe | null;
   /**
    * Structured origination receipt. `enrollment_id` is the PUBLIC half of the
    * join URL only — never the URL, never its `#v1.<secret>` fragment.
@@ -97,6 +102,9 @@ interface Record_ {
   readonly receipt: {
     readonly enrollment_id: string;
     readonly absent_before_action: boolean;
+    readonly dedicated_locator: boolean;
+    readonly exact_worker_origin: boolean;
+    readonly exact_join_path: boolean;
   } | null;
   /**
    * The serving edge's REQUEST identifier (`x-vercel-id`), or null.
@@ -132,8 +140,24 @@ async function latchDeadlineAndTeardown(teardownOnce: () => Promise<void>): Prom
   await teardownOnce();
 }
 
+/** Write every terminal byte synchronously before any caller can exit. */
+function writeStdoutLine(line: string): void {
+  const bytes = Buffer.from(`${line}\n`, "utf8");
+  let offset = 0;
+  while (offset < bytes.length) {
+    try {
+      const written = writeSync(1, bytes, offset, bytes.length - offset);
+      if (written <= 0) throw new Error("stdout made no write progress");
+      offset += written;
+    } catch (error) {
+      if ((error as { code?: string })?.code === "EINTR") continue;
+      throw error;
+    }
+  }
+}
+
 function emit(record: Omit<Record_, "duration_ms">): void {
-  process.stdout.write(`${JSON.stringify({ ...record, duration_ms: Date.now() - startedAt })}\n`);
+  writeStdoutLine(JSON.stringify({ ...record, duration_ms: Date.now() - startedAt }));
 }
 
 /**
@@ -167,7 +191,8 @@ function blocked(code: string, detail: string, apex: string | null = null): neve
       apex_host: apex,
       agent_host: null,
       cookie: null,
-      cookie_probe: null,
+      cookie_omission_probe: null,
+      cookie_present_probe: null,
       receipt: null,
       edge_request_id: null,
       detail,
@@ -187,7 +212,8 @@ function failed(code: string, detail: string, apex: string | null = null): never
       apex_host: apex,
       agent_host: null,
       cookie: null,
-      cookie_probe: null,
+      cookie_omission_probe: null,
+      cookie_present_probe: null,
       receipt: null,
       edge_request_id: null,
       detail,
@@ -209,16 +235,52 @@ function originHost(value: string | undefined, name: string): string {
  * header, not by what a cookie jar later reports: a jar normalises away the
  * distinction this test exists to catch.
  */
-function parseSetCookie(header: string): {
+interface SessionCookieIssuance {
   readonly hostOnly: boolean;
   readonly httpOnly: boolean;
   readonly secure: boolean;
   readonly sameSite: string | null;
-} {
+}
+
+export interface SessionCookiePolicy {
+  readonly issuanceCount: number;
+  readonly hostOnly: boolean;
+  readonly httpOnly: boolean;
+  readonly secure: boolean;
+  readonly sameSiteLax: boolean;
+}
+
+/** Match Auth.js' exact base cookie or one of its numeric chunk names. */
+function isSessionCookieName(name: string): boolean {
+  return name === SESSION_COOKIE_NAME || /^asimp\.session\.[0-9]+$/.test(name);
+}
+
+function parseSessionCookieIssuance(
+  header: string,
+  now = Date.now(),
+): SessionCookieIssuance | null | undefined {
+  if (/[\r\n\0]/.test(header)) throw new Error("invalid Set-Cookie framing");
+  const pair = header.split(";", 1)[0] ?? "";
+  const equals = pair.indexOf("=");
+  if (equals <= 0) return undefined;
+  const name = pair.slice(0, equals).trim();
+  if (!isSessionCookieName(name)) return undefined;
+  const value = pair.slice(equals + 1);
   const attributes = header
     .split(";")
     .slice(1)
     .map((part) => part.trim().toLowerCase());
+  const maxAge = attributes.find((attribute) => attribute.startsWith("max-age="));
+  const expires = attributes.find((attribute) => attribute.startsWith("expires="));
+  const maxAgeSeconds = maxAge === undefined ? undefined : Number(maxAge.slice("max-age=".length));
+  const expiresAt = expires === undefined ? undefined : Date.parse(expires.slice("expires=".length));
+  if (
+    value.length === 0 ||
+    (maxAgeSeconds !== undefined && Number.isFinite(maxAgeSeconds) && maxAgeSeconds <= 0) ||
+    (expiresAt !== undefined && Number.isFinite(expiresAt) && expiresAt <= now)
+  ) {
+    return null;
+  }
   const sameSite = attributes.find((a) => a.startsWith("samesite="));
   return {
     hostOnly: !attributes.some((a) => a.startsWith("domain=")),
@@ -228,11 +290,290 @@ function parseSetCookie(header: string): {
   };
 }
 
+function summarizeSessionCookieIssuances(
+  issuances: readonly SessionCookieIssuance[],
+): SessionCookiePolicy {
+  return {
+    issuanceCount: issuances.length,
+    hostOnly: issuances.length > 0 && issuances.every((issuance) => issuance.hostOnly),
+    httpOnly: issuances.length > 0 && issuances.every((issuance) => issuance.httpOnly),
+    secure: issuances.length > 0 && issuances.every((issuance) => issuance.secure),
+    sameSiteLax:
+      issuances.length > 0 && issuances.every((issuance) => issuance.sameSite === "lax"),
+  };
+}
+
+/** Pure causal seam: every non-deletion issuance must satisfy the policy. */
+export function sessionCookiePolicyFromHeaders(
+  headers: readonly string[],
+  now = Date.now(),
+): SessionCookiePolicy {
+  const issuances: SessionCookieIssuance[] = [];
+  for (const header of headers) {
+    const issuance = parseSessionCookieIssuance(header, now);
+    if (issuance !== undefined && issuance !== null) issuances.push(issuance);
+  }
+  return summarizeSessionCookieIssuances(issuances);
+}
+
+export function cookieDirectionIsProven(
+  omission: CookieProbe,
+  presented: CookieProbe,
+): boolean {
+  return (
+    omission.attached === false &&
+    omission.status === 403 &&
+    omission.code === "WRONG_PRINCIPAL" &&
+    presented.attached === true &&
+    presented.status === 403 &&
+    presented.code === "WRONG_PRINCIPAL"
+  );
+}
+
+export type BrowserEvidenceSelection =
+  | { readonly kind: "pass"; readonly enrollmentId: string }
+  | { readonly kind: "blocked"; readonly code: string };
+
+const BROWSER_RECORD_KEYS = [
+  "tool",
+  "package",
+  "suite",
+  "status",
+  "code",
+  "apex_host",
+  "agent_host",
+  "cookie",
+  "cookie_omission_probe",
+  "cookie_present_probe",
+  "receipt",
+  "edge_request_id",
+  "detail",
+  "duration_ms",
+] as const;
+
+function objectWithExactKeys(value: unknown, keys: readonly string[]): value is Record<string, unknown> {
+  return (
+    typeof value === "object" &&
+    value !== null &&
+    !Array.isArray(value) &&
+    Object.keys(value).length === keys.length &&
+    Object.keys(value).every((key, index) => key === keys[index])
+  );
+}
+
+function probeHasExactShape(value: unknown, attached: boolean): value is CookieProbe {
+  return (
+    objectWithExactKeys(value, ["attached", "status", "code"]) &&
+    value.attached === attached &&
+    Number.isInteger(value.status) &&
+    typeof value.code === "string"
+  );
+}
+
+function recordBaseIsExact(record: Record<string, unknown>): boolean {
+  return (
+    record.tool === "playwright" &&
+    record.package === "e2e" &&
+    record.suite === SUITE &&
+    typeof record.code === "string" &&
+    (typeof record.apex_host === "string" || record.apex_host === null) &&
+    (typeof record.agent_host === "string" || record.agent_host === null) &&
+    (typeof record.edge_request_id === "string" || record.edge_request_id === null) &&
+    typeof record.detail === "string" &&
+    record.detail.length > 0 &&
+    Number.isSafeInteger(record.duration_ms) &&
+    (record.duration_ms as number) >= 0
+  );
+}
+
+/**
+ * Strict evidence selector shared by the live runner's validator mode and the
+ * causal unit plants. Canonical JSON bytes are part of the contract: this
+ * rejects duplicate keys, reordered/extra keys, whitespace drift, malformed
+ * UTF-8, multiple records, and a missing final LF before any field is trusted.
+ */
+export function selectBrowserEvidenceBytes(
+  bytes: Uint8Array,
+  childExit: number,
+): BrowserEvidenceSelection {
+  if (bytes.byteLength === 0 || bytes.byteLength > MAX_BROWSER_EVIDENCE_BYTES) {
+    throw new Error("browser evidence byte bound violated");
+  }
+  let raw: string;
+  try {
+    raw = new TextDecoder("utf-8", { fatal: true }).decode(bytes);
+  } catch {
+    throw new Error("browser evidence is not valid UTF-8");
+  }
+  if (raw.includes("\r") || raw.includes("\0") || !raw.endsWith("\n")) {
+    throw new Error("browser evidence framing is not canonical");
+  }
+  const line = raw.slice(0, -1);
+  if (line.length === 0 || line.includes("\n")) {
+    throw new Error("browser evidence must contain exactly one LF-terminated record");
+  }
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(line);
+  } catch {
+    throw new Error("browser evidence is not JSON");
+  }
+  if (!objectWithExactKeys(parsed, BROWSER_RECORD_KEYS) || JSON.stringify(parsed) !== line) {
+    throw new Error("browser evidence is not the canonical record schema");
+  }
+  if (!recordBaseIsExact(parsed)) throw new Error("browser evidence base fields are invalid");
+
+  if (childExit === BLOCKED_EXIT && parsed.status === "blocked") {
+    if (
+      !/^[A-Z][A-Z0-9_]{0,63}$/.test(parsed.code as string) ||
+      parsed.cookie !== null ||
+      parsed.cookie_omission_probe !== null ||
+      parsed.cookie_present_probe !== null ||
+      parsed.receipt !== null
+    ) {
+      throw new Error("blocked browser evidence is not exact");
+    }
+    return { kind: "blocked", code: parsed.code as string };
+  }
+
+  if (childExit !== 0 || parsed.status !== "pass" || parsed.code !== "OK") {
+    throw new Error("browser evidence status does not match the child exit");
+  }
+  if (
+    typeof parsed.apex_host !== "string" ||
+    typeof parsed.agent_host !== "string" ||
+    parsed.apex_host === parsed.agent_host
+  ) {
+    throw new Error("browser evidence origins are invalid");
+  }
+  if (
+    !objectWithExactKeys(parsed.cookie, [
+      "issuance_count",
+      "host_only",
+      "http_only",
+      "secure",
+      "same_site",
+      "scoped_to_apex",
+      "present_for_agent_host",
+    ]) ||
+    !Number.isSafeInteger(parsed.cookie.issuance_count) ||
+    (parsed.cookie.issuance_count as number) < 1 ||
+    parsed.cookie.host_only !== true ||
+    parsed.cookie.http_only !== true ||
+    parsed.cookie.secure !== true ||
+    parsed.cookie.same_site !== "lax" ||
+    parsed.cookie.scoped_to_apex !== true ||
+    parsed.cookie.present_for_agent_host !== false
+  ) {
+    throw new Error("browser cookie evidence is invalid");
+  }
+  if (
+    !probeHasExactShape(parsed.cookie_omission_probe, false) ||
+    !probeHasExactShape(parsed.cookie_present_probe, true) ||
+    !cookieDirectionIsProven(parsed.cookie_omission_probe, parsed.cookie_present_probe)
+  ) {
+    throw new Error("browser principal-direction evidence is invalid");
+  }
+  if (
+    !objectWithExactKeys(parsed.receipt, [
+      "enrollment_id",
+      "absent_before_action",
+      "dedicated_locator",
+      "exact_worker_origin",
+      "exact_join_path",
+    ]) ||
+    typeof parsed.receipt.enrollment_id !== "string" ||
+    !/^ASIMP-EN-[0-9A-HJKMNP-TV-Z]{26}$/.test(parsed.receipt.enrollment_id) ||
+    parsed.receipt.absent_before_action !== true ||
+    parsed.receipt.dedicated_locator !== true ||
+    parsed.receipt.exact_worker_origin !== true ||
+    parsed.receipt.exact_join_path !== true
+  ) {
+    throw new Error("browser origination receipt is invalid");
+  }
+  return { kind: "pass", enrollmentId: parsed.receipt.enrollment_id };
+}
+
+function readBrowserEvidenceFile(path: string): Uint8Array {
+  const fd = openSync(path, fsConstants.O_RDONLY | fsConstants.O_NOFOLLOW);
+  try {
+    const before = fstatSync(fd);
+    if (!before.isFile() || before.size > MAX_BROWSER_EVIDENCE_BYTES) {
+      throw new Error("browser evidence file is not a bounded regular file");
+    }
+    const bytes = Buffer.allocUnsafe(before.size);
+    let offset = 0;
+    while (offset < bytes.length) {
+      const count = readSync(fd, bytes, offset, bytes.length - offset, offset);
+      if (count === 0) throw new Error("browser evidence file was short-read");
+      offset += count;
+    }
+    const after = fstatSync(fd);
+    if (
+      after.dev !== before.dev ||
+      after.ino !== before.ino ||
+      after.mode !== before.mode ||
+      after.size !== before.size
+    ) {
+      throw new Error("browser evidence file changed while read");
+    }
+    return bytes;
+  } finally {
+    closeSync(fd);
+  }
+}
+
+function browserRecordValidatorMode(): never {
+  try {
+    const statusRaw = process.argv[3];
+    const path = process.argv[4];
+    if (process.argv.length !== 5 || !/^(0|1|78)$/.test(statusRaw ?? "") || !path) {
+      throw new Error("invalid browser evidence validator invocation");
+    }
+    const selected = selectBrowserEvidenceBytes(readBrowserEvidenceFile(path), Number(statusRaw));
+    if (selected.kind === "pass") {
+      writeStdoutLine(`pass\t${selected.enrollmentId}`);
+      process.exit(0);
+    }
+    writeStdoutLine(`blocked\t${selected.code}`);
+    process.exit(BLOCKED_EXIT);
+  } catch {
+    process.exit(1);
+  }
+}
+
 function looksLikeChallenge(url: string, body: string): boolean {
   return (
     /\/challenge\/|\/signin\/rejected|captcha|deniedsigninrejected/i.test(url) ||
     /verify it.s you|couldn.t sign you in|2-step verification/i.test(body)
   );
+}
+
+function isMissingBrowserExecutable(error: unknown): boolean {
+  const code = (error as { code?: unknown })?.code;
+  const message = (error as { message?: unknown })?.message;
+  return (
+    code === "ENOENT" ||
+    (typeof message === "string" && /executable (?:doesn't exist|not found)/i.test(message))
+  );
+}
+
+async function exactProbeResult(
+  response: Response,
+  expectedUrl: string,
+  attached: boolean,
+): Promise<CookieProbe> {
+  if (new URL(response.url()).href !== new URL(expectedUrl).href) {
+    throw new Error("agent-host probe did not terminate at the exact configured URL");
+  }
+  let code: string | null = null;
+  try {
+    const parsed = (await response.json()) as { code?: unknown };
+    code = typeof parsed.code === "string" ? parsed.code : null;
+  } catch {
+    code = null;
+  }
+  return { attached, status: response.status(), code };
 }
 
 async function main(): Promise<Omit<Record_, "duration_ms">> {
@@ -319,6 +660,7 @@ async function main(): Promise<Omit<Record_, "duration_ms">> {
 
   let browser: Browser | undefined;
   let context: BrowserContext | undefined;
+  let forcedCookieContext: BrowserContext | undefined;
   // The deadline callback and `finally` share one teardown owner. Whichever
   // path arrives first starts the closes; the other joins the same promise, so
   // context/browser can never be closed concurrently by competing owners.
@@ -335,6 +677,7 @@ async function main(): Promise<Omit<Record_, "duration_ms">> {
     });
     await Promise.race([
       (async () => {
+        await forcedCookieContext?.close().catch((error: unknown) => teardown.push(error));
         await context?.close().catch((error: unknown) => teardown.push(error));
         await browser?.close().catch((error: unknown) => teardown.push(error));
       })(),
@@ -373,7 +716,8 @@ async function main(): Promise<Omit<Record_, "duration_ms">> {
           apex_host: apexHost,
           agent_host: agentHost,
           cookie: null,
-          cookie_probe: null,
+          cookie_omission_probe: null,
+          cookie_present_probe: null,
           receipt: null,
           edge_request_id: null,
           detail: `the runner exceeded its ${TOTAL_BUDGET_MS}ms budget`,
@@ -387,9 +731,16 @@ async function main(): Promise<Omit<Record_, "duration_ms">> {
     try {
       browser = await chromium.launch({ args: ["--disable-dev-shm-usage"] });
     } catch (error) {
-      blocked(
-        "PLAYWRIGHT_BROWSER_MISSING",
-        `chromium is not installed for this Playwright version: ${(error as Error)?.name ?? "Error"}`,
+      if (isMissingBrowserExecutable(error)) {
+        blocked(
+          "PLAYWRIGHT_BROWSER_MISSING",
+          "the Playwright Chromium executable is not installed for this package version",
+          apexHost,
+        );
+      }
+      failed(
+        "PLAYWRIGHT_BROWSER_LAUNCH_FAILED",
+        `Chromium launch failed with ${(error as Error)?.constructor?.name ?? "Error"}`,
         apexHost,
       );
     }
@@ -397,30 +748,48 @@ async function main(): Promise<Omit<Record_, "duration_ms">> {
     context.setDefaultNavigationTimeout(NAVIGATION_TIMEOUT_MS);
     context.setDefaultTimeout(ACTION_TIMEOUT_MS);
 
-    // Capture the session cookie exactly as the Agora origin asserted it. Only
-    // the attribute half of the header is retained; the value is dropped here
-    // and never enters a variable that is logged.
-    let observed: ReturnType<typeof parseSetCookie> | undefined;
-    // `headersArray()` is async, so each observation is tracked and drained
-    // before the assertion runs. An un-awaited async listener would let the
-    // check read `observed` before the header that sets it has been parsed —
-    // a race that would report "no Set-Cookie seen" on a correct deployment.
-    const pending: Promise<void>[] = [];
-    context.on("response", (response: Response) => {
-      if (new URL(response.url()).host.split(":")[0] !== apexHost) return;
-      pending.push(
-        (async () => {
-          for (const header of await response.headersArray()) {
-            if (header.name.toLowerCase() !== "set-cookie") continue;
-            for (const line of header.value.split("\n")) {
-              if (line.split("=")[0]?.trim() === SESSION_COOKIE_NAME) {
-                observed = parseSetCookie(line);
-              }
-            }
-          }
-        })().catch(() => undefined),
-      );
-    });
+    const previewOrigin = new URL(previewUrl).origin;
+    const workerOrigin = new URL(workerUrl).origin;
+    const consoleUrl = new URL("/console", previewUrl).href;
+    const probeUrl = new URL("/v1/enrollments/proposals", workerUrl).href;
+
+    // Every non-deletion issuance matters. A later safe header cannot erase an
+    // earlier Domain-bearing one, and an observer fault is itself a typed
+    // refusal rather than an implicit "nothing unsafe was seen".
+    const sessionIssuances: SessionCookieIssuance[] = [];
+    const cookieObservationFailures: unknown[] = [];
+    const pendingCookieObservations: Promise<void>[] = [];
+    const observeSessionCookies = (response: Response): void => {
+      let responseOrigin: string;
+      try {
+        responseOrigin = new URL(response.url()).origin;
+      } catch (error) {
+        cookieObservationFailures.push(error);
+        return;
+      }
+      if (responseOrigin !== previewOrigin) return;
+      const observation = (async () => {
+        for (const header of await response.headersArray()) {
+          if (header.name.toLowerCase() !== "set-cookie") continue;
+          const issuance = parseSessionCookieIssuance(header.value);
+          if (issuance !== undefined && issuance !== null) sessionIssuances.push(issuance);
+        }
+      })().catch((error: unknown) => {
+        cookieObservationFailures.push(error);
+      });
+      pendingCookieObservations.push(observation);
+    };
+    const drainCookieObservations = async (): Promise<void> => {
+      await Promise.all([...pendingCookieObservations]);
+      if (cookieObservationFailures.length > 0) {
+        failed(
+          "SET_COOKIE_OBSERVATION_FAILED",
+          "at least one Agora Set-Cookie response could not be observed exactly",
+          apexHost,
+        );
+      }
+    };
+    context.on("response", observeSessionCookies);
 
     const page = await context.newPage();
     // ONE honest request-correlation value: the edge's `x-vercel-id`, nullable.
@@ -431,66 +800,79 @@ async function main(): Promise<Omit<Record_, "duration_ms">> {
     // identity behind one overclaiming name. If a deployment identity is ever
     // required, it needs its own field and its own validation against a source
     // the platform supports for that purpose.
-    const consoleResponse = await page.goto(`${previewUrl.replace(/\/$/, "")}/console`);
+    const consoleResponse = await page.goto(consoleUrl);
     const edgeRequestId: string | null = consoleResponse?.headers()["x-vercel-id"] ?? null;
 
     // The console is behind Auth.js; an unauthenticated visit offers Google.
     const signIn = page.getByRole("button", { name: /sign in with google/i });
     if ((await signIn.count()) > 0) {
       await signIn.first().click();
-    }
-
-    // Real Google sign-in. Bot challenges are common and are reported as
-    // blocked, never as a failure of the seam and never as a pass.
-    try {
-      await page.waitForURL(/accounts\.google\.com/, { timeout: NAVIGATION_TIMEOUT_MS });
-      await page.locator('input[type="email"]').fill(user);
-      await page.getByRole("button", { name: /next/i }).click();
-      await page.locator('input[type="password"]').waitFor({ state: "visible" });
-      // `fill` does not log its argument; the password never reaches a record.
-      await page.locator('input[type="password"]').fill(password);
-      await page.getByRole("button", { name: /next/i }).click();
-      await page.waitForURL(new RegExp(apexHost.replace(/\./g, "\\.")), {
-        timeout: NAVIGATION_TIMEOUT_MS,
-      });
-    } catch {
-      const currentUrl = page.url();
-      const body = await page.content().catch(() => "");
-      if (looksLikeChallenge(currentUrl, body)) {
-        blocked(
-          "GOOGLE_LOGIN_CHALLENGED",
-          "Google interrupted the automated sign-in with a verification challenge; provision a test account exempt from the challenge, then re-run",
+      // Real Google sign-in. Bot challenges are common and are reported as
+      // blocked, never as a failure of the seam and never as a pass.
+      try {
+        await page.waitForURL(/accounts\.google\.com/, { timeout: NAVIGATION_TIMEOUT_MS });
+        await page.locator('input[type="email"]').fill(user);
+        await page.getByRole("button", { name: /next/i }).click();
+        await page.locator('input[type="password"]').waitFor({ state: "visible" });
+        // `fill` does not log its argument; the password never reaches a record.
+        await page.locator('input[type="password"]').fill(password);
+        await page.getByRole("button", { name: /next/i }).click();
+        await page.waitForURL(consoleUrl, { timeout: NAVIGATION_TIMEOUT_MS });
+      } catch {
+        const currentUrl = page.url();
+        const body = await page.content().catch(() => "");
+        if (looksLikeChallenge(currentUrl, body)) {
+          blocked(
+            "GOOGLE_LOGIN_CHALLENGED",
+            "Google interrupted the automated sign-in with a verification challenge; provision a test account exempt from the challenge, then re-run",
+            apexHost,
+          );
+        }
+        failed(
+          "GOOGLE_LOGIN_FAILED",
+          "the configured test account did not reach the exact Agora console URL",
           apexHost,
         );
       }
+    }
+    if (page.url() !== consoleUrl) {
       failed(
-        "GOOGLE_LOGIN_FAILED",
-        "the configured test account did not reach the Agora origin",
+        "CONSOLE_ORIGIN_OR_PATH_WRONG",
+        "the authenticated page did not finish at the exact configured Agora console URL",
         apexHost,
       );
     }
 
     // Drain every header observation before deciding what was seen.
-    await Promise.all(pending);
-
-    if (observed === undefined) {
+    await drainCookieObservations();
+    const initialPolicy = summarizeSessionCookieIssuances(sessionIssuances);
+    if (initialPolicy.issuanceCount === 0) {
       failed(
         "SET_COOKIE_NOT_OBSERVED",
-        "no session Set-Cookie header was seen from the Agora origin during sign-in",
+        "no non-deletion session Set-Cookie issuance was seen from the exact Agora origin",
         apexHost,
       );
     }
 
-    // The jar half of the claim: scoped to the apex, absent for the agent host.
-    const jar = await context.cookies();
-    const session = jar.filter((c) => c.name === SESSION_COOKIE_NAME);
+    // The jar half of the claim: every live session-family chunk is scoped to
+    // the apex and naturally ineligible for the exact Worker URL.
+    const apexJar = await context.cookies(previewUrl);
+    const session = apexJar.filter((entry) => isSessionCookieName(entry.name));
+    const naturalWorkerSession = (await context.cookies(probeUrl)).filter((entry) =>
+      isSessionCookieName(entry.name),
+    );
     const cookie: CookieAttributes = {
-      host_only: observed.hostOnly,
-      http_only: observed.httpOnly,
-      secure: observed.secure,
-      same_site: observed.sameSite,
-      scoped_to_apex: session.length === 1 && session[0]?.domain.replace(/^\./, "") === apexHost,
-      present_for_agent_host: jar.some((c) => c.domain.replace(/^\./, "") === agentHost),
+      issuance_count: initialPolicy.issuanceCount,
+      host_only: initialPolicy.hostOnly,
+      http_only: initialPolicy.httpOnly,
+      secure: initialPolicy.secure,
+      same_site: initialPolicy.sameSiteLax ? "lax" : null,
+      scoped_to_apex:
+        session.length > 0 &&
+        session.every(
+          (entry) => entry.domain.replace(/^\./, "") === apexHost && entry.path === "/",
+        ),
+      present_for_agent_host: naturalWorkerSession.length > 0,
     };
 
     const cookieOk =
@@ -512,7 +894,8 @@ async function main(): Promise<Omit<Record_, "duration_ms">> {
           apex_host: apexHost,
           agent_host: agentHost,
           cookie,
-          cookie_probe: null,
+          cookie_omission_probe: null,
+          cookie_present_probe: null,
           receipt: null,
           edge_request_id: edgeRequestId,
           detail: "the live Set-Cookie header or the resulting jar failed host-only apex scoping",
@@ -521,37 +904,229 @@ async function main(): Promise<Omit<Record_, "duration_ms">> {
       );
     }
 
-    // Ask the agent host for a sponsor route from the LOGGED-IN browser.
-    //
-    // Note precisely what this is NOT. `context.request` shares the browser jar,
-    // and the session cookie is host-only on the apex, so the jar does not
-    // attach it to an agent-host request at all — it is OMITTED, by the same
-    // machinery a real browser would use. Nothing is "presented and refused".
-    // `cookie.present_for_agent_host` is the direct evidence of that omission.
-    //
-    // The expected outcome is therefore an exact 403 WRONG_PRINCIPAL for a
-    // request carrying no credential. On its own that is also what a stranger
-    // gets, so the shell issues the identical request from a sessionless client
-    // and requires the same answer; agreement is what shows an apex session buys
-    // nothing here.
-    // Redirects are REFUSED, not followed. A 3xx to the apex would move this
-    // request onto the plane that does consult cookies, and a 403 collected
-    // there would say nothing about the agent host — it would quietly invalidate
-    // both the host-only and the non-consultation claims.
-    const probeUrl = `${workerUrl.replace(/\/$/, "")}/v1/enrollments/proposals`;
-    const probe = await context.request.get(probeUrl, {
+    // Direction A: natural browser eligibility. The live apex session family is
+    // absent for Stoa, and an exact no-redirect request is refused.
+    const omissionResponse = await context.request.get(probeUrl, {
       failOnStatusCode: false,
       maxRedirects: 0,
     });
+    let cookieOmissionProbe: CookieProbe;
+    try {
+      cookieOmissionProbe = await exactProbeResult(omissionResponse, probeUrl, false);
+    } catch {
+      failed(
+        "AGENT_HOST_OMISSION_PROBE_REDIRECTED",
+        "the natural-omission probe did not terminate at the exact configured Worker URL",
+        apexHost,
+      );
+    }
 
-    // The answer must have come from the exact configured Worker origin and
-    // route, not from wherever a redirect chain happened to land.
-    const finalUrl = new URL(probe.url());
-    const expectedUrl = new URL(probeUrl);
+    // Direction B: a separate in-memory context explicitly presents every live
+    // session-family chunk to the exact Stoa origin. Values never leave
+    // Playwright memory and are never interpolated into diagnostics or output.
+    forcedCookieContext = await browser.newContext();
+    forcedCookieContext.setDefaultTimeout(ACTION_TIMEOUT_MS);
+    await forcedCookieContext.addCookies(
+      session.map((entry) => ({
+        name: entry.name,
+        value: entry.value,
+        url: workerOrigin,
+        httpOnly: entry.httpOnly,
+        secure: entry.secure,
+        sameSite: entry.sameSite,
+        ...(entry.expires > 0 ? { expires: entry.expires } : {}),
+      })),
+    );
+    const forcedEligible = (await forcedCookieContext.cookies(probeUrl)).filter((entry) =>
+      isSessionCookieName(entry.name),
+    );
+    if (session.length === 0 || forcedEligible.length !== session.length) {
+      failed(
+        "COOKIE_PRESENTATION_SETUP_FAILED",
+        "the isolated probe context did not hold the complete live session family for Stoa",
+        apexHost,
+      );
+    }
+    const presentedResponse = await forcedCookieContext.request.get(probeUrl, {
+      failOnStatusCode: false,
+      maxRedirects: 0,
+    });
+    let cookiePresentProbe: CookieProbe;
+    try {
+      cookiePresentProbe = await exactProbeResult(presentedResponse, probeUrl, true);
+    } catch {
+      failed(
+        "AGENT_HOST_COOKIE_PRESENT_PROBE_REDIRECTED",
+        "the explicit-cookie probe did not terminate at the exact configured Worker URL",
+        apexHost,
+      );
+    }
+
+    if (!cookieDirectionIsProven(cookieOmissionProbe, cookiePresentProbe)) {
+      throw new RunnerExit(
+        {
+          tool: "playwright",
+          package: "e2e",
+          suite: SUITE,
+          status: "fail",
+          code: "WRONG_PRINCIPAL_DIRECTION_NOT_PROVEN",
+          apex_host: apexHost,
+          agent_host: agentHost,
+          cookie,
+          cookie_omission_probe: cookieOmissionProbe,
+          cookie_present_probe: cookiePresentProbe,
+          receipt: null,
+          edge_request_id: edgeRequestId,
+          detail:
+            "natural omission and explicit live-cookie presentation did not both receive exact 403 WRONG_PRINCIPAL",
+        },
+        1,
+      );
+    }
+
+    // The real Server Action, reached the way a sponsor reaches it.
+    const secondConsoleResponse = await page.goto(consoleUrl);
+    if (secondConsoleResponse === null || !secondConsoleResponse.ok() || page.url() !== consoleUrl) {
+      failed(
+        "CONSOLE_SECOND_NAVIGATION_FAILED",
+        "the second console navigation did not return successfully at the exact Agora URL",
+        apexHost,
+      );
+    }
+    const mint = page.getByRole("button", { name: /^Mint a join URL$/ });
+    if ((await mint.count()) === 0) {
+      const typedProvisioningSignal = page.getByText(
+        /^Join-URL minting is disabled because this deployment cannot prepare recoverable writes\.$/,
+      );
+      if ((await typedProvisioningSignal.count()) === 1) {
+        blocked(
+          "CONSOLE_WRITES_NOT_PROVISIONED",
+          "the console explicitly reported that recoverable writes are not provisioned",
+          apexHost,
+        );
+      }
+      failed(
+        "CONSOLE_MINT_CONTROL_MISSING",
+        "the authenticated console omitted the mint control without the exact provisioning signal",
+        apexHost,
+      );
+    }
+    if ((await mint.count()) !== 1) {
+      failed("CONSOLE_MINT_CONTROL_AMBIGUOUS", "the console exposed multiple mint controls", apexHost);
+    }
+    const joinReceipt = page.locator("pre.pasteblock.join-url");
+    let receiptCountBefore: number;
+    try {
+      receiptCountBefore = await joinReceipt.count();
+    } catch {
+      failed(
+        "MINT_RECEIPT_BASELINE_FAILED",
+        "the dedicated join receipt could not be counted before the action",
+        apexHost,
+      );
+    }
+    if (receiptCountBefore !== 0) {
+      failed(
+        "MINT_RECEIPT_PREEXISTED",
+        "the dedicated join receipt was already present before the action",
+        apexHost,
+      );
+    }
+
+    await mint.first().click();
+    await joinReceipt.waitFor({ state: "visible", timeout: ACTION_TIMEOUT_MS });
+    if ((await joinReceipt.count()) !== 1) {
+      failed(
+        "MINT_RECEIPT_AMBIGUOUS",
+        "the action did not render exactly one visible dedicated join receipt",
+        apexHost,
+      );
+    }
+    // Parsing happens inside the renderer. The credential-bearing line and its
+    // fragment never cross back into runner memory; only the public id and
+    // booleans do.
+    const receiptDescriptor = await joinReceipt.evaluate(
+      (element, contract) => {
+        const prefix = "Your join URL is  ";
+        const lines = (element.textContent ?? "").split("\n");
+        const candidates = lines.filter((line) => line.startsWith(prefix));
+        const invalid = {
+          enrollmentId: null,
+          dedicatedLocator: element.matches("pre.pasteblock.join-url"),
+          exactWorkerOrigin: false,
+          exactJoinPath: false,
+        };
+        if (candidates.length !== 1) return invalid;
+        const raw = candidates[0]?.slice(prefix.length) ?? "";
+        try {
+          const join = new URL(raw);
+          const match = new RegExp(`^/join/(${contract.enrollmentPattern.slice(1, -1)})$`).exec(
+            join.pathname,
+          );
+          return {
+            enrollmentId: match?.[1] ?? null,
+            dedicatedLocator: element.matches("pre.pasteblock.join-url"),
+            exactWorkerOrigin:
+              join.origin === contract.workerOrigin &&
+              join.username === "" &&
+              join.password === "" &&
+              join.href === raw,
+            exactJoinPath:
+              match !== null &&
+              join.search === "" &&
+              /^#v1\.[A-Za-z0-9_-]{43}$/.test(join.hash),
+          };
+        } catch {
+          return invalid;
+        }
+      },
+      { workerOrigin, enrollmentPattern: ENROLLMENT_ID.source },
+    );
     if (
-      finalUrl.host !== expectedUrl.host ||
-      finalUrl.protocol !== expectedUrl.protocol ||
-      finalUrl.pathname !== expectedUrl.pathname
+      receiptDescriptor.enrollmentId === null ||
+      !receiptDescriptor.dedicatedLocator ||
+      !receiptDescriptor.exactWorkerOrigin ||
+      !receiptDescriptor.exactJoinPath
+    ) {
+      failed(
+        "MINT_RECEIPT_INVALID",
+        "the dedicated receipt did not contain one exact trusted-origin join URL",
+        apexHost,
+      );
+    }
+
+    // Stop accepting new cookie evidence, then drain every observation already
+    // registered. Acceptance uses the final aggregate, so a late unsafe
+    // issuance cannot be hidden behind the earlier safe one.
+    context.off("response", observeSessionCookies);
+    await drainCookieObservations();
+    const finalPolicy = summarizeSessionCookieIssuances(sessionIssuances);
+    const finalApexSession = (await context.cookies(previewUrl)).filter((entry) =>
+      isSessionCookieName(entry.name),
+    );
+    const finalAgentSession = (await context.cookies(probeUrl)).filter((entry) =>
+      isSessionCookieName(entry.name),
+    );
+    const finalCookie: CookieAttributes = {
+      issuance_count: finalPolicy.issuanceCount,
+      host_only: finalPolicy.hostOnly,
+      http_only: finalPolicy.httpOnly,
+      secure: finalPolicy.secure,
+      same_site: finalPolicy.sameSiteLax ? "lax" : null,
+      scoped_to_apex:
+        finalApexSession.length > 0 &&
+        finalApexSession.every(
+          (entry) => entry.domain.replace(/^\./, "") === apexHost && entry.path === "/",
+        ),
+      present_for_agent_host: finalAgentSession.length > 0,
+    };
+    if (
+      !finalCookie.host_only ||
+      !finalCookie.http_only ||
+      !finalCookie.secure ||
+      finalCookie.same_site !== "lax" ||
+      !finalCookie.scoped_to_apex ||
+      finalCookie.present_for_agent_host
     ) {
       throw new RunnerExit(
         {
@@ -559,91 +1134,26 @@ async function main(): Promise<Omit<Record_, "duration_ms">> {
           package: "e2e",
           suite: SUITE,
           status: "fail",
-          code: "AGENT_HOST_PROBE_REDIRECTED",
+          code: "COOKIE_POLICY_CHANGED_DURING_FLOW",
           apex_host: apexHost,
           agent_host: agentHost,
-          cookie,
-          cookie_probe: { status: probe.status(), code: null },
+          cookie: finalCookie,
+          cookie_omission_probe: cookieOmissionProbe,
+          cookie_present_probe: cookiePresentProbe,
           receipt: null,
           edge_request_id: edgeRequestId,
-          detail:
-            "the agent-host probe did not terminate on the exact configured Worker origin and route",
+          detail: "the complete Agora session-cookie issuance history was not uniformly safe",
         },
         1,
       );
     }
-    let probeCode: string | null = null;
-    try {
-      const parsed = (await probe.json()) as { code?: unknown };
-      probeCode = typeof parsed.code === "string" ? parsed.code : null;
-    } catch {
-      probeCode = null;
-    }
-    const cookieProbe = { status: probe.status(), code: probeCode };
-
-    if (cookieProbe.status !== 403 || cookieProbe.code !== "WRONG_PRINCIPAL") {
-      throw new RunnerExit(
-        {
-          tool: "playwright",
-          package: "e2e",
-          suite: SUITE,
-          status: "fail",
-          code: "AGENT_HOST_NOT_REFUSED_FOR_LOGGED_IN_BROWSER",
-          apex_host: apexHost,
-          agent_host: agentHost,
-          cookie,
-          cookie_probe: cookieProbe,
-          receipt: null,
-          edge_request_id: edgeRequestId,
-          detail:
-            "a browser holding a live apex session did not receive the exact 403 WRONG_PRINCIPAL refusal from the agent host",
-        },
-        1,
-      );
-    }
-
-    // The real Server Action, reached the way a sponsor reaches it.
-    await page.goto(`${previewUrl.replace(/\/$/, "")}/console`);
-    const mint = page.getByRole("button", { name: /^Mint a join URL$/ });
-    if ((await mint.count()) === 0) {
-      blocked(
-        "CONSOLE_MINT_UNAVAILABLE",
-        "the console did not offer the mint control; the sponsor may not be bootstrapped on this deployment",
-        apexHost,
-      );
-    }
-    // Pre-action state. Without this the runner could report an enrollment that
-    // was already on the page and call it the product of its own click.
-    const before = await page
-      .locator("body")
-      .innerText()
-      .catch(() => "");
-    const beforeIds = new Set(before.match(new RegExp(ENROLLMENT_ID, "g")) ?? []);
-
-    await mint.first().click();
-
-    // Read ONLY the public enrollment id, and only one that was NOT present
-    // before the click. The join URL's `#v1.<secret>` is a credential and is
-    // never matched, captured, or emitted.
-    let enrollmentId: string | null = null;
-    const deadline = Date.now() + ACTION_TIMEOUT_MS;
-    while (Date.now() < deadline && enrollmentId === null) {
-      const text = await page
-        .locator("body")
-        .innerText()
-        .catch(() => "");
-      enrollmentId =
-        (text.match(new RegExp(ENROLLMENT_ID, "g")) ?? []).find((id) => !beforeIds.has(id)) ?? null;
-      if (enrollmentId === null) await page.waitForTimeout(500);
-    }
-    if (enrollmentId === null) {
-      failed(
-        "MINT_RECEIPT_NOT_OBSERVED",
-        "the console rendered no enrollment id that was absent before the action",
-        apexHost,
-      );
-    }
-    const receipt = { enrollment_id: enrollmentId, absent_before_action: true };
+    const receipt = {
+      enrollment_id: receiptDescriptor.enrollmentId,
+      absent_before_action: true,
+      dedicated_locator: true,
+      exact_worker_origin: true,
+      exact_join_path: true,
+    };
 
     // The pass record is RETURNED, not emitted here.
     //
@@ -659,12 +1169,13 @@ async function main(): Promise<Omit<Record_, "duration_ms">> {
       code: "OK",
       apex_host: apexHost,
       agent_host: agentHost,
-      cookie,
-      cookie_probe: cookieProbe,
+      cookie: finalCookie,
+      cookie_omission_probe: cookieOmissionProbe,
+      cookie_present_probe: cookiePresentProbe,
       receipt,
       edge_request_id: edgeRequestId,
       detail:
-        "live Set-Cookie proved host-only apex scoping, the cookie was not sent to the agent host and that request answered exactly 403 WRONG_PRINCIPAL, and the real console Server Action minted an enrollment",
+        "every live session issuance was host-only and safe, natural omission plus explicit cookie presentation both proved WRONG_PRINCIPAL at Stoa, and the dedicated console receipt proved exact-origin minting",
     };
   } finally {
     // The absolute deadline stays ARMED through teardown.
@@ -744,7 +1255,8 @@ function unexpectedOutcome(error: unknown): RunnerTerminalOutcome {
       apex_host: null,
       agent_host: null,
       cookie: null,
-      cookie_probe: null,
+      cookie_omission_probe: null,
+      cookie_present_probe: null,
       receipt: null,
       edge_request_id: null,
       // The message is withheld: it can quote page content.
@@ -765,7 +1277,8 @@ async function terminalSelectorSelfTest(): Promise<never> {
       apex_host: "preview.example.test",
       agent_host: null,
       cookie: null,
-      cookie_probe: null,
+      cookie_omission_probe: null,
+      cookie_present_probe: null,
       receipt: null,
       edge_request_id: null,
       detail: "plant",
@@ -779,13 +1292,13 @@ async function terminalSelectorSelfTest(): Promise<never> {
     teardown.record.code === "RUNNER_TEARDOWN_FAILED" &&
     teardown.record.detail.includes("blocked PLANTED_BLOCKED") &&
     clean === blockedOutcome;
-  process.stdout.write(
-    `${JSON.stringify({
+  writeStdoutLine(
+    JSON.stringify({
       suite: SUITE,
       assertion: "blocked-runner-teardown-failure-overrides",
       status: teardownPassed ? "pass" : "fail",
       self_test: true,
-    })}\n`,
+    }),
   );
 
   // Deterministic completion/deadline race. The deadline callback latches its
@@ -819,13 +1332,13 @@ async function terminalSelectorSelfTest(): Promise<never> {
     deadline.exitStatus === 1 &&
     deadline.record.status === "fail" &&
     deadline.record.code === "RUNNER_DEADLINE_EXCEEDED";
-  process.stdout.write(
-    `${JSON.stringify({
+  writeStdoutLine(
+    JSON.stringify({
       suite: SUITE,
       assertion: "runner-deadline-race-overrides-pass",
       status: deadlinePassed ? "pass" : "fail",
       self_test: true,
-    })}\n`,
+    }),
   );
   process.exit(teardownPassed && deadlinePassed ? 0 : 1);
 }
@@ -849,6 +1362,7 @@ async function runEntrypoint(): Promise<never> {
 // Importing this module for the pure planted test must never start a browser or
 // consume the test runner's stdin. Direct `bun <file>` execution still does.
 if (import.meta.main) {
+  if (process.argv[2] === "--validate-record") browserRecordValidatorMode();
   if (process.argv[2] === "--self-test-terminal-selector") await terminalSelectorSelfTest();
   await runEntrypoint();
 }
