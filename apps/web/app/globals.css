@@ -382,13 +382,17 @@
 .console .status-rows li:last-child {
   border-bottom: 0;
 }
+.console .status-rows li > span:first-child {
+  flex-shrink: 0;
+}
 .console .state {
   font-variant: small-caps;
   letter-spacing: 0.08em;
   font-size: 0.8rem;
   color: var(--color-muted);
   text-align: right;
-  white-space: nowrap;
+  min-width: 0;
+  overflow-wrap: break-word;
 }
 .console .state.live {
   color: var(--color-clay);
