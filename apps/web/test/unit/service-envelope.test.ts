@@ -23,7 +23,12 @@ import { dispatchSignedSponsorRequest } from "../../lib/stoa-sponsor.ts";
 // only that marker lets this unit file exercise the unchanged public server
 // API; no production test seam or client import is introduced.
 mock.module("server-only", () => ({}));
-const { stoaConfigured, stoaMintEnrollment } = await import("../../lib/stoa.ts");
+const {
+  operatorPrincipalIsAllowed,
+  stoaConfigured,
+  stoaMintEnrollment,
+  stoaOperatorOverrideFellowCap,
+} = await import("../../lib/stoa.ts");
 
 /**
  * S-6 cross-plane auth, apex signing side (asimposiumorg-vw3).
@@ -69,6 +74,7 @@ const STOA_ENVIRONMENT_KEYS = [
   "HOST",
   "X_FORWARDED_HOST",
   "X_FORWARDED_PROTO",
+  "OPERATOR_PRINCIPAL_IDS",
 ] as const;
 
 type StoaEnvironmentKey = (typeof STOA_ENVIRONMENT_KEYS)[number];
@@ -561,6 +567,73 @@ describe("public Agora Stoa origin binding", () => {
       expect(fetchSpy.mock.calls.map(([input]) => String(input))).toEqual([
         `${staging}/v1/enrollments`,
       ]);
+    } finally {
+      fetchSpy.mockRestore();
+    }
+  });
+
+  test("operator dispatch is allowlisted twice and signs the distinct operator envelope", async () => {
+    const operatorId = "usr_operator_fixture";
+    const sponsorId = "usr_target_fixture";
+    const fetchSpy = spyOn(globalThis, "fetch").mockResolvedValue(
+      new Response(
+        JSON.stringify({
+          acknowledged: true,
+          audit_event_id: `OFC-${"A".repeat(26)}`,
+          sponsor_id: sponsorId,
+          sponsor_seq: 1,
+          previous_active_fellow_limit: 5,
+          active_fellow_limit: 6,
+          step_up_authenticated_at: 1_786_000_000,
+          signer_kid: "origin-runtime-test",
+          effective_at: 1_786_000_000,
+        }),
+        { status: 200, headers: { "content-type": "application/json" } },
+      ),
+    );
+
+    try {
+      expect(operatorPrincipalIsAllowed(operatorId, operatorId)).toBe(true);
+      expect(operatorPrincipalIsAllowed(operatorId, `${operatorId},${operatorId}`)).toBe(false);
+      await withStoaEnvironment(
+        {
+          ...signingEnvironment,
+          STOA_ORIGIN: staging,
+          OPERATOR_PRINCIPAL_IDS: operatorId,
+        },
+        async () => {
+          await expect(
+            stoaOperatorOverrideFellowCap(
+              operatorId,
+              {
+                sponsor_id: sponsorId,
+                expected_active_fellow_limit: 5,
+                expected_sponsor_seq: 0,
+                active_fellow_limit: 6,
+                reason: "Capacity was reviewed for the active Fellows.",
+                confirm: "override-fellow-cap",
+                step_up_authenticated_at: 1_786_000_000,
+              },
+              "console-operator-runtime-1",
+            ),
+          ).resolves.toMatchObject({ ok: true, data: { sponsor_seq: 1 } });
+        },
+      );
+
+      const firstCall = fetchSpy.mock.calls[0];
+      expect(firstCall).toBeDefined();
+      expect(String(firstCall?.[0])).toBe(`${staging}/v1/operators/fellow-cap`);
+      const headers = new Headers((firstCall?.[1] as RequestInit | undefined)?.headers);
+      const signed = JSON.parse(headers.get(SERVICE_ENVELOPE_HEADER) ?? "{}") as {
+        readonly claims?: ServiceEnvelopeClaims;
+      };
+      expect(signed.claims).toMatchObject({
+        method: "POST",
+        route: "/v1/operators/fellow-cap",
+        action: "operator.fellow-cap.override",
+        principal_id: operatorId,
+        principal_type: "operator",
+      });
     } finally {
       fetchSpy.mockRestore();
     }

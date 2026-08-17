@@ -369,6 +369,88 @@ test("mintJoinUrl returns the exact Stoa authority when revalidation throws, wit
   });
 });
 
+test("operator Fellow-cap action rejects browser auth-time and signs only current Google auth evidence", async () => {
+  const operatorId = "usr_operator_fixture";
+  const targetSponsorId = "usr_target_fixture";
+  const authIssuedAt = Math.floor(Date.now() / 1_000);
+  const receipt = {
+    acknowledged: true as const,
+    audit_event_id: `OFC-${"A".repeat(26)}`,
+    sponsor_id: targetSponsorId,
+    sponsor_seq: 1,
+    previous_active_fellow_limit: 5,
+    active_fellow_limit: 6,
+    step_up_authenticated_at: authIssuedAt,
+    signer_kid: "operator-test",
+    effective_at: authIssuedAt,
+  };
+  const cleanIntent = {
+    sponsor_id: targetSponsorId,
+    expected_active_fellow_limit: 5,
+    expected_sponsor_seq: 0,
+    active_fellow_limit: 6,
+    reason: "Capacity was reviewed for the active Fellows.",
+    confirm: "override-fellow-cap" as const,
+  };
+  let dispatched: unknown;
+  let revalidations = 0;
+
+  mock.module("server-only", () => ({}));
+  const realStoa = { ...(await import("../../lib/stoa.ts")) };
+  const realCache = { ...(await import("next/cache")) };
+  const realAuth = { ...(await import("../../auth.ts")) };
+  mock.module("next/cache", () => ({
+    revalidatePath: () => {
+      revalidations += 1;
+    },
+  }));
+  mock.module("@/auth", () => ({
+    auth: async () => ({ user: { id: operatorId }, authIssuedAt }),
+  }));
+  mock.module("@/lib/stoa", () => ({
+    ...realStoa,
+    operatorPrincipalIsAllowed: (candidate: string) => candidate === operatorId,
+    stoaOperatorOverrideFellowCap: async (
+      candidateOperatorId: string,
+      command: unknown,
+      idempotencyKey: string,
+    ) => {
+      dispatched = { candidateOperatorId, command, idempotencyKey };
+      return { ok: true as const, data: receipt };
+    },
+  }));
+
+  try {
+    const hermeticSpecifier = "../../app/console/actions.ts?hermetic-operator-fellow-cap";
+    const { overrideOperatorFellowCap } = (await import(
+      hermeticSpecifier
+    )) as typeof import("../../app/console/actions.ts");
+
+    // `step_up_authenticated_at` is absent from the browser intent shape. A
+    // supplied stale value must be rejected before the signing client runs.
+    const forged = await overrideOperatorFellowCap(
+      { ...cleanIntent, step_up_authenticated_at: 1 },
+      "console-operator-cap-forged",
+    );
+    expect(forged).toEqual({ ok: false, message: "The operator Fellow-cap command is invalid." });
+    expect(dispatched).toBeUndefined();
+
+    const accepted = await overrideOperatorFellowCap(cleanIntent, "console-operator-cap-clean");
+    expect(accepted).toEqual({ ok: true, receipt });
+  } finally {
+    mock.module("@/lib/stoa", () => realStoa);
+    mock.module("next/cache", () => realCache);
+    mock.module("@/auth", () => realAuth);
+  }
+
+  expect(dispatched).toEqual({
+    candidateOperatorId: operatorId,
+    command: { ...cleanIntent, step_up_authenticated_at: authIssuedAt },
+    idempotencyKey: "console-operator-cap-clean",
+  });
+  expect(revalidations).toBe(1);
+});
+
 /**
  * The restore above is load-bearing, so every part of it is asserted rather than
  * trusted. A leaked mock does not fail loudly — it makes a sibling suite pass

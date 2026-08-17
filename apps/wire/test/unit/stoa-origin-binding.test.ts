@@ -3,6 +3,7 @@ import { describe, expect, test } from "bun:test";
 import { readdirSync, readFileSync } from "node:fs";
 import { resolve } from "node:path";
 import {
+  OperatorFellowCapAuditPageResponseSchema,
   OperatorFellowCapOverrideResponseSchema,
   PRODUCTION_STOA_ORIGIN,
   STAGING_STOA_ORIGIN,
@@ -463,6 +464,29 @@ describe("operator Fellow-cap ingress is separately authenticated and allowliste
     });
   }
 
+  async function signedOperatorHistoryRequest(
+    privateKey: CryptoKey,
+    kid: string,
+    operatorId = OPERATOR_ID,
+  ): Promise<Request> {
+    const now = Math.floor(Date.now() / 1_000);
+    const path = `/v1/operators/sponsors/${SPONSOR_ID}/fellow-cap/history`;
+    const envelope = await mintServiceEnvelope({
+      privateKey,
+      kid,
+      now,
+      method: "GET",
+      route: "/v1/operators/sponsors/:sponsorId/fellow-cap/history",
+      action: "operator.fellow-cap.history",
+      principalId: operatorId,
+      principalType: "operator",
+      body: "",
+    });
+    return new Request(`https://a.asimposium.org${path}`, {
+      headers: serviceEnvelopeHeaders(envelope),
+    });
+  }
+
   test("a signed allowlisted operator reaches the D1 audit command, while a cache rebind denies the same identity", async () => {
     const { db, sqlite } = latestD1();
     sqlite
@@ -501,6 +525,27 @@ describe("operator Fellow-cap ingress is separately authenticated and allowliste
       sponsor_seq: 1,
       previous_active_fellow_limit: 5,
       active_fellow_limit: 6,
+    });
+
+    // This uses the full createApp ingress, not the router in isolation. It
+    // proves the dynamic history path stays owned by the enrollment auth stack
+    // and returns a receipt ordered by its causal sponsor sequence.
+    const history = await app.fetch(
+      await signedOperatorHistoryRequest(keypair.privateKey, kid),
+      allowedEnv as never,
+      ctx,
+    );
+    expect(history.status).toBe(200);
+    expect(OperatorFellowCapAuditPageResponseSchema.parse(await history.json())).toMatchObject({
+      audit_events: [
+        {
+          sponsor_id: SPONSOR_ID,
+          sponsor_seq: 1,
+          previous_active_fellow_limit: 5,
+          active_fellow_limit: 6,
+        },
+      ],
+      next_cursor: null,
     });
 
     // Same isolate and D1 handle, only the allowlist changes. If the cache key

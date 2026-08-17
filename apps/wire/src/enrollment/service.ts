@@ -19,12 +19,12 @@ import {
   isTrustedStoaOrigin,
   type MintEnrollmentRequest,
   MintEnrollmentRequestSchema,
+  OPERATOR_FELLOW_CAP_AUDIT_PAGE_SIZE,
+  type OperatorFellowCapAuditCursorKey,
   type OperatorFellowCapOverrideRequest,
   OperatorFellowCapOverrideRequestSchema,
   type OperatorFellowCapOverrideResponse,
   OperatorFellowCapOverrideResponseSchema,
-  OPERATOR_FELLOW_CAP_AUDIT_PAGE_SIZE,
-  type OperatorFellowCapAuditCursorKey,
   PENDING_PROPOSAL_TTL_MS,
   type RequestedScope,
   SPONSOR_FELLOW_PAGE_SIZE,
@@ -1823,7 +1823,9 @@ export class InMemoryEnrollmentStore implements EnrollmentStore {
       const final = auditEvents.at(-1);
       return {
         auditEvents,
-        ...(hasNext && final !== undefined ? { nextCursor: { sponsor_seq: final.sponsorSeq } } : {}),
+        ...(hasNext && final !== undefined
+          ? { nextCursor: { sponsor_seq: final.sponsorSeq } }
+          : {}),
       };
     });
   }
@@ -2999,6 +3001,10 @@ export class EnrollmentService {
     if (!/^usr_[A-Za-z0-9_-]{1,60}$/.test(sponsorId)) {
       throw new EnrollmentError("OPERATOR_FELLOW_CAP_NOT_CURRENT");
     }
+    // Keep D1 and in-memory behavior identical: an operator may distinguish
+    // an empty immutable history from an unknown sponsor only after the same
+    // explicit sponsor-state lookup used by the compare-and-set preflight.
+    await this.#store.sponsorFellowCap(sponsorId);
     return this.#store.sponsorFellowCapAudit(sponsorId, after);
   }
 
