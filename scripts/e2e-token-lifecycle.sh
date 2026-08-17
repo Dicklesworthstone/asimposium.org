@@ -59,6 +59,7 @@ readonly -a EXPECTED_MIGRATIONS=(
 )
 
 STATE_DIR=""
+PROBE_DIR=""
 SERVER_PID=""
 SERVER_PGID=""
 CONTROLLER_PGID=""
@@ -71,7 +72,13 @@ SERVER_SUPERVISOR_GO=""
 SERVER_SUPERVISOR_CHALLENGE=""
 SERVER_SUPERVISOR_RESPONSE=""
 SERVER_SUPERVISOR_STARTED=""
+SERVER_SUPERVISOR_FAULT=""
+SERVER_SUPERVISOR_RETIREMENT=""
 SERVER_TARGET_GATE_OPENED=0
+SUPERVISOR_PLANT_DIRECT_PID=""
+SUPERVISOR_PLANT_DESCENDANT_PID=""
+SUPERVISOR_PLANT_DIRECT_IDENTITY=""
+SUPERVISOR_PLANT_DESCENDANT_IDENTITY=""
 RESPONDER_PID=""
 RESPONDER_IDENTITY=""
 BUSY_PORT_PID=""
@@ -83,6 +90,7 @@ PLANTED_DETACHED_MARKER=""
 AUX_REUSE_PID=""
 AUX_REUSE_IDENTITY=""
 AUX_REUSE_MARKER=""
+STATE_CENSUS_NONCE=""
 SOURCE_CLOSURE_BEFORE=""
 SOURCE_CLOSURE_AFTER=""
 LOG_CANARY_BEARER=""
@@ -313,27 +321,169 @@ process_identity() {
   raw_process_identity "$1"
 }
 
+file_byte_size() {
+  local size
+  size="$(perl -e 'my $size = -s $ARGV[0]; exit 1 unless defined($size); print $size;' "$1")" || return 1
+  [[ "${size}" =~ ^[0-9]+$ ]] || return 1
+  printf '%s\n' "${size}"
+}
+
+prepare_probe_files() {
+  : >"$1" && : >"$2" && chmod 600 "$1" "$2"
+}
+
 listener_pids() {
-  "${LSOF}" -nP -iTCP:"${PORT}" -sTCP:LISTEN -t 2>/dev/null | awk 'NF { print }' | sort -n -u
+  local phase="${1:-runtime}" normalized status stderr_bytes stderr_path stdout_bytes stdout_path
+  stdout_path="${PROBE_DIR}/listener-probe.stdout"
+  stderr_path="${PROBE_DIR}/listener-probe.stderr"
+  prepare_probe_files "${stdout_path}" "${stderr_path}" || return 2
+  if [[ "${phase}" == "final" \
+    && "${TOKEN_LIFECYCLE_TEST_LISTENER_EXIT_ZERO_EMPTY:-0}" == "1" ]]; then
+    status=0
+  elif [[ "${phase}" == "final" \
+    && "${TOKEN_LIFECYCLE_TEST_LISTENER_STDOUT_NEWLINE:-0}" == "1" ]]; then
+    printf '\n' >"${stdout_path}"
+    status=1
+  elif [[ "${phase}" == "final" \
+    && "${TOKEN_LIFECYCLE_TEST_LISTENER_STDERR_NEWLINE:-0}" == "1" ]]; then
+    printf '\n' >"${stderr_path}"
+    status=1
+  elif [[ "${phase}" == "final" \
+    && "${TOKEN_LIFECYCLE_TEST_LISTENER_DIAGNOSTIC:-0}" == "1" ]]; then
+    printf '%s\n' "planted-listener-diagnostic" >"${stderr_path}"
+    status=1
+  elif "${LSOF}" -nP -iTCP:"${PORT}" -sTCP:LISTEN -t \
+    >"${stdout_path}" 2>"${stderr_path}"; then
+    status=0
+  else
+    status=$?
+  fi
+  stdout_bytes="$(file_byte_size "${stdout_path}")" || return 2
+  stderr_bytes="$(file_byte_size "${stderr_path}")" || return 2
+  if (( status == 0 )); then
+    (( stdout_bytes > 0 && stderr_bytes == 0 )) || return 2
+    normalized="$(awk '
+      NF != 1 || $1 !~ /^[0-9]+$/ { exit 2 }
+      { print $1 }
+    ' "${stdout_path}" | sort -n -u)" || return 2
+    [[ -n "${normalized}" ]] || return 2
+    printf '%s\n' "${normalized}"
+    return 0
+  fi
+  [[ "${status}" == "1" && "${stdout_bytes}" == "0" && "${stderr_bytes}" == "0" ]] || return 2
+  return 1
+}
+
+bounded_process_snapshot() {
+  local budget remaining
+  remaining="$(remaining_seconds)" || return 1
+  budget=2
+  (( remaining < budget )) && budget="${remaining}"
+  TOKEN_LIFECYCLE_PS_BUDGET="${budget}" \
+    TOKEN_LIFECYCLE_STATE_CENSUS_NONCE="${STATE_CENSUS_NONCE}" \
+    TOKEN_LIFECYCLE_CONTROLLER_PID="$$" \
+    TOKEN_LIFECYCLE_CONTROLLER_PGID="${CONTROLLER_PGID}" \
+    TOKEN_LIFECYCLE_TEST_STATE_CENSUS_PARTIAL="${TOKEN_LIFECYCLE_TEST_STATE_CENSUS_PARTIAL:-0}" \
+    perl -MDigest::SHA=sha256_hex -e '
+    my $child = open(my $processes, "-|", "/bin/ps", "-eo", "pid=,pgid=,command=");
+    exit 2 unless defined($child) && $child > 0;
+    my $retire_capture = sub {
+      my ($code) = @_;
+      kill "KILL", $child;
+      waitpid($child, 0);
+      exit $code;
+    };
+    $SIG{"ALRM"} = sub { $retire_capture->(124); };
+    alarm(int($ENV{"TOKEN_LIFECYCLE_PS_BUDGET"}));
+    my @lines;
+    my $bytes = 0;
+    while (my $line = <$processes>) {
+      $bytes += length($line);
+      $retire_capture->(125) if $bytes > 4_194_304 || @lines >= 100_000;
+      push @lines, $line;
+    }
+    close($processes) or exit 3;
+    alarm(0);
+    my $nonce = $ENV{"TOKEN_LIFECYCLE_STATE_CENSUS_NONCE"};
+    print "TOKEN_LIFECYCLE_STATE_CENSUS_V1_BEGIN\t$nonce\n";
+    if ($ENV{"TOKEN_LIFECYCLE_TEST_STATE_CENSUS_PARTIAL"} eq "1") {
+      my $wanted_pid = $ENV{"TOKEN_LIFECYCLE_CONTROLLER_PID"};
+      my $wanted_pgid = $ENV{"TOKEN_LIFECYCLE_CONTROLLER_PGID"};
+      for my $line (@lines) {
+        if ($line =~ /^\s*(\d+)\s+(\d+)\s+/ && $1 eq $wanted_pid && $2 eq $wanted_pgid) {
+          print $line;
+          exit 0;
+        }
+      }
+      exit 4;
+    }
+    print @lines;
+    print join("\t", "TOKEN_LIFECYCLE_STATE_CENSUS_V1_END", $nonce, scalar(@lines), sha256_hex(join("", @lines))) . "\n";
+  '
 }
 
 state_owned_processes() {
+  local snapshot
   [[ -n "${STATE_DIR}" ]] || return 0
-  ps -eo pid=,pgid=,command= 2>/dev/null | TOKEN_LIFECYCLE_STATE_SCAN="${STATE_DIR}" awk '
-    BEGIN { state = ENVIRON["TOKEN_LIFECYCLE_STATE_SCAN"] }
-    index($0, state) { print $1 " " $2 }
-  '
+  snapshot="$(bounded_process_snapshot)" || return 1
+  TOKEN_LIFECYCLE_STATE_SCAN="${STATE_DIR}" \
+    TOKEN_LIFECYCLE_STATE_CENSUS_NONCE="${STATE_CENSUS_NONCE}" \
+    TOKEN_LIFECYCLE_CONTROLLER_PID="$$" \
+    TOKEN_LIFECYCLE_CONTROLLER_PGID="${CONTROLLER_PGID}" \
+    perl -MDigest::SHA=sha256_hex -e '
+      my @framed = <STDIN>;
+      exit 2 if @framed < 2;
+      my $begin = shift @framed;
+      my $end = pop @framed;
+      chomp($begin, $end);
+      my $nonce = $ENV{"TOKEN_LIFECYCLE_STATE_CENSUS_NONCE"};
+      exit 3 unless $begin eq "TOKEN_LIFECYCLE_STATE_CENSUS_V1_BEGIN\t$nonce";
+      my ($marker, $seen_nonce, $seen_rows, $seen_digest, @extra) = split(/\t/, $end, -1);
+      exit 4 unless $marker eq "TOKEN_LIFECYCLE_STATE_CENSUS_V1_END" &&
+        $seen_nonce eq $nonce && $seen_rows =~ /^\d+$/ && $seen_rows == @framed &&
+        $seen_digest eq sha256_hex(join("", @framed)) && @extra == 0;
+      my $controller_rows = 0;
+      my $wanted_pid = $ENV{"TOKEN_LIFECYCLE_CONTROLLER_PID"};
+      my $wanted_pgid = $ENV{"TOKEN_LIFECYCLE_CONTROLLER_PGID"};
+      for my $line (@framed) {
+        next unless $line =~ /^\s*(\d+)\s+(\d+)\s+/;
+        $controller_rows += 1 if $1 eq $wanted_pid && $2 eq $wanted_pgid;
+        print "$1 $2\n" if index($line, $ENV{"TOKEN_LIFECYCLE_STATE_SCAN"}) >= 0;
+      }
+      exit 5 unless $controller_rows == 1;
+    ' <<<"${snapshot}"
 }
 
 state_fds_are_closed() {
   [[ -n "${STATE_DIR}" ]] || return 0
-  local opened
-  opened="$("${LSOF}" +D "${STATE_DIR}" 2>/dev/null || true)"
-  [[ -z "${opened}" ]]
+  local status stderr_bytes stderr_path stdout_bytes stdout_path
+  stdout_path="${PROBE_DIR}/state-fd.stdout"
+  stderr_path="${PROBE_DIR}/state-fd.stderr"
+  prepare_probe_files "${stdout_path}" "${stderr_path}" || return 2
+  if "${LSOF}" +D "${STATE_DIR}" >"${stdout_path}" 2>"${stderr_path}"; then
+    status=0
+  else
+    status=$?
+  fi
+  stdout_bytes="$(file_byte_size "${stdout_path}")" || return 2
+  stderr_bytes="$(file_byte_size "${stderr_path}")" || return 2
+  if (( status == 0 )); then
+    (( stdout_bytes > 0 && stderr_bytes == 0 )) || return 2
+    return 1
+  fi
+  [[ "${status}" == "1" && "${stdout_bytes}" == "0" && "${stderr_bytes}" == "0" ]] || return 2
+  return 0
 }
 
 port_is_free() {
-  [[ -z "$(listener_pids)" ]]
+  local phase="${1:-runtime}" status
+  if listener_pids "${phase}" >/dev/null; then
+    return 1
+  else
+    status=$?
+  fi
+  [[ "${status}" == "1" ]] || return 2
+  return 0
 }
 
 capture_responder_identity() {
@@ -351,9 +501,11 @@ capture_responder_identity() {
 }
 
 responder_identity_is_current() {
+  local listeners
   [[ -n "${RESPONDER_PID}" && -n "${RESPONDER_IDENTITY}" ]] || return 1
   [[ "$(process_identity "${RESPONDER_PID}")" == "${RESPONDER_IDENTITY}" ]] || return 1
-  [[ "$(listener_pids)" == "${RESPONDER_PID}" ]] || return 1
+  listeners="$(listener_pids)" || return 1
+  [[ "${listeners}" == "${RESPONDER_PID}" ]] || return 1
   [[ "$(process_identity "${SERVER_PID}")" == "${SERVER_LEADER_IDENTITY}" ]]
 }
 
@@ -578,6 +730,7 @@ scan_retained_logs() {
 }
 
 start_busy_port_plant() {
+  local deadline listener_status
   [[ "${TOKEN_LIFECYCLE_TEST_BUSY_PORT:-0}" == "1" ]] || return 0
   BUSY_PORT_MARKER="token-lifecycle-busy-port-$(${BUN} --eval 'console.log(crypto.randomUUID())')"
   TOKEN_LIFECYCLE_BUSY_PORT="${PORT}" "${BUN}" --eval '
@@ -590,10 +743,18 @@ start_busy_port_plant() {
     fail "TOKEN_LIFECYCLE_BUSY_PORT_IDENTITY_UNAVAILABLE"
     return 1
   }
-  local deadline=$((SECONDS + CLEANUP_GRACE_SECONDS))
+  deadline=$((SECONDS + CLEANUP_GRACE_SECONDS))
   (( deadline > SCRIPT_DEADLINE )) && deadline="${SCRIPT_DEADLINE}"
   while (( SECONDS < deadline )); do
-    [[ -n "$(listener_pids)" ]] && return 0
+    if listener_pids >/dev/null; then
+      return 0
+    else
+      listener_status=$?
+      (( listener_status == 1 )) || {
+        fail "TOKEN_LIFECYCLE_LISTENER_INSPECTION_UNAVAILABLE"
+        return 1
+      }
+    fi
     sleep 0.1
   done
   fail "TOKEN_LIFECYCLE_BUSY_PORT_PLANT_UNAVAILABLE"
@@ -601,6 +762,7 @@ start_busy_port_plant() {
 }
 
 start_detached_state_plant() {
+  local deadline state_processes
   [[ "${TOKEN_LIFECYCLE_TEST_DETACHED:-0}" == "1" ]] || return 0
   PLANTED_DETACHED_MARKER="token-lifecycle-detached-$(${BUN} --eval 'console.log(crypto.randomUUID())')"
   perl -MPOSIX=setsid -e 'setsid() or die "setsid"; sleep 600' \
@@ -611,10 +773,14 @@ start_detached_state_plant() {
     fail "TOKEN_LIFECYCLE_DETACHED_IDENTITY_UNAVAILABLE"
     return 1
   }
-  local deadline=$((SECONDS + CLEANUP_GRACE_SECONDS))
+  deadline=$((SECONDS + CLEANUP_GRACE_SECONDS))
   (( deadline > SCRIPT_DEADLINE )) && deadline="${SCRIPT_DEADLINE}"
   while (( SECONDS < deadline )); do
-    if [[ -n "$(state_owned_processes)" ]]; then
+    state_processes="$(state_owned_processes)" || {
+      fail "TOKEN_LIFECYCLE_STATE_PROCESS_INSPECTION_UNAVAILABLE"
+      return 1
+    }
+    if [[ -n "${state_processes}" ]]; then
       fail "TOKEN_LIFECYCLE_DETACHED_STATE_PROCESS_DETECTED"
       return 1
     fi
@@ -681,7 +847,11 @@ run_auxiliary_pid_reuse_plant() {
 }
 
 stop_worker() {
-  local cleanup_census cleanup_deadline group_state leader_state signal_status wait_status worker_pgid
+  local cleanup_census cleanup_deadline fd_status group_state leader_state signal_status state_processes
+  local plant_descendant_state plant_direct_state retirement_descendant retirement_descendant_live
+  local port_status
+  local retirement_direct retirement_extra retirement_line retirement_nonce retirement_pgid retirement_phase
+  local retirement_worker_reaped wait_status worker_pgid
   [[ -n "${SERVER_PID}" ]] || return 0
   [[ -n "${SERVER_PGID}" ]] || {
     fail "TOKEN_LIFECYCLE_WORKER_GROUP_UNKNOWN"
@@ -821,18 +991,84 @@ stop_worker() {
   # The kernel has proved both the group and direct child absent, so Bash's
   # stored child status is now nonblocking to consume.
   wait "${SERVER_PID}" 2>/dev/null || true
-  port_is_free || {
-    fail "TOKEN_LIFECYCLE_LISTENER_SURVIVOR"
+  if [[ "${TOKEN_LIFECYCLE_TEST_SUPERVISOR_DESCENDANT_FAILURE:-0}" == "1" ]]; then
+    retirement_line="$(sed -n '2p' "${SERVER_SUPERVISOR_RETIREMENT}")" || {
+      fail "TOKEN_LIFECYCLE_SUPERVISOR_DESCENDANT_RETIREMENT_UNPROVEN"
+      return 1
+    }
+    IFS=$'\t' read -r retirement_phase retirement_direct retirement_descendant retirement_pgid \
+      retirement_nonce retirement_worker_reaped retirement_descendant_live retirement_extra \
+      <<<"${retirement_line}" || {
+      fail "TOKEN_LIFECYCLE_SUPERVISOR_DESCENDANT_RETIREMENT_UNPROVEN"
+      return 1
+    }
+    [[ "${retirement_phase}" == "term-grace" \
+      && "${retirement_direct}" == "${SUPERVISOR_PLANT_DIRECT_PID}" \
+      && "${retirement_descendant}" == "${SUPERVISOR_PLANT_DESCENDANT_PID}" \
+      && "${retirement_pgid}" == "${worker_pgid}" \
+      && "${retirement_nonce}" == "${SERVER_SUPERVISOR_NONCE}" \
+      && "${retirement_worker_reaped}" == "1" \
+      && "${retirement_descendant_live}" == "1" \
+      && -z "${retirement_extra}" ]] || {
+      fail "TOKEN_LIFECYCLE_SUPERVISOR_DESCENDANT_RETIREMENT_UNPROVEN"
+      return 1
+    }
+    plant_direct_state="$(process_liveness "${SUPERVISOR_PLANT_DIRECT_PID}")" || {
+      fail "TOKEN_LIFECYCLE_SUPERVISOR_DESCENDANT_RETIREMENT_UNPROVEN"
+      return 1
+    }
+    plant_descendant_state="$(process_liveness "${SUPERVISOR_PLANT_DESCENDANT_PID}")" || {
+      fail "TOKEN_LIFECYCLE_SUPERVISOR_DESCENDANT_RETIREMENT_UNPROVEN"
+      return 1
+    }
+    [[ "${plant_direct_state}" == "absent" && "${plant_descendant_state}" == "absent" ]] || {
+      fail "TOKEN_LIFECYCLE_SUPERVISOR_DESCENDANT_RETIREMENT_UNPROVEN"
+      return 1
+    }
+    emit "{\"suite\":\"${SUITE}\",\"assertion\":\"supervisor_term_reaped_direct_then_killed_same_group_term_ignoring_descendant\",\"status\":\"pass\"}"
+  fi
+  if port_is_free final; then
+    :
+  else
+    port_status=$?
+    if [[ "${TOKEN_LIFECYCLE_TEST_LISTENER_EXIT_ZERO_EMPTY:-0}" == "1" ]]; then
+      emit "{\"suite\":\"${SUITE}\",\"assertion\":\"listener_exit_zero_empty_refused_as_absence\",\"status\":\"pass\"}"
+    elif [[ "${TOKEN_LIFECYCLE_TEST_LISTENER_STDOUT_NEWLINE:-0}" == "1" ]]; then
+      emit "{\"suite\":\"${SUITE}\",\"assertion\":\"listener_status_one_stdout_newline_refused_as_absence\",\"status\":\"pass\"}"
+    elif [[ "${TOKEN_LIFECYCLE_TEST_LISTENER_STDERR_NEWLINE:-0}" == "1" ]]; then
+      emit "{\"suite\":\"${SUITE}\",\"assertion\":\"listener_status_one_stderr_newline_refused_as_absence\",\"status\":\"pass\"}"
+    elif [[ "${TOKEN_LIFECYCLE_TEST_LISTENER_DIAGNOSTIC:-0}" == "1" ]]; then
+      emit "{\"suite\":\"${SUITE}\",\"assertion\":\"listener_diagnostic_refused_as_absence\",\"status\":\"pass\"}"
+    fi
+    if (( port_status == 1 )); then
+      fail "TOKEN_LIFECYCLE_LISTENER_SURVIVOR"
+    else
+      fail "TOKEN_LIFECYCLE_LISTENER_INSPECTION_UNAVAILABLE"
+    fi
+    return 1
+  fi
+  state_processes="$(state_owned_processes)" || {
+    if [[ "${TOKEN_LIFECYCLE_TEST_STATE_CENSUS_PARTIAL:-0}" == "1" ]]; then
+      emit "{\"suite\":\"${SUITE}\",\"assertion\":\"state_census_exit_zero_partial_after_anchor_missing_completion_refused\",\"status\":\"pass\"}"
+    fi
+    fail "TOKEN_LIFECYCLE_STATE_PROCESS_INSPECTION_UNAVAILABLE"
     return 1
   }
-  [[ -z "$(state_owned_processes)" ]] || {
+  [[ -z "${state_processes}" ]] || {
     fail "TOKEN_LIFECYCLE_STATE_PROCESS_SURVIVOR"
     return 1
   }
-  state_fds_are_closed || {
-    fail "TOKEN_LIFECYCLE_STATE_FD_SURVIVOR"
+  if state_fds_are_closed; then
+    :
+  else
+    fd_status=$?
+    if (( fd_status == 1 )); then
+      fail "TOKEN_LIFECYCLE_STATE_FD_SURVIVOR"
+    else
+      fail "TOKEN_LIFECYCLE_STATE_FD_INSPECTION_UNAVAILABLE"
+    fi
     return 1
-  }
+  fi
   if (( SERVER_TARGET_GATE_OPENED == 0 )); then
     emit "{\"suite\":\"${SUITE}\",\"assertion\":\"startup_gate_supervisor_reaped_before_target_launch\",\"status\":\"pass\",\"wrangler_started\":false}"
   fi
@@ -840,7 +1076,9 @@ stop_worker() {
     emit "{\"suite\":\"${SUITE}\",\"assertion\":\"cleanup_census_exit_zero_empty_cannot_false_reap\",\"status\":\"pass\"}"
   fi
   if [[ "${TOKEN_LIFECYCLE_TEST_SUPERVISOR_STARTED_FAILURE:-0}" == "1" \
-    || "${TOKEN_LIFECYCLE_TEST_SUPERVISOR_CHALLENGE_FAILURE:-0}" == "1" ]]; then
+    || "${TOKEN_LIFECYCLE_TEST_SUPERVISOR_CHALLENGE_FAILURE:-0}" == "1" \
+    || "${TOKEN_LIFECYCLE_TEST_SUPERVISOR_WAITPID_FAILURE:-0}" == "1" \
+    || "${TOKEN_LIFECYCLE_TEST_SUPERVISOR_DESCENDANT_FAILURE:-0}" == "1" ]]; then
     emit "{\"suite\":\"${SUITE}\",\"assertion\":\"supervisor_postfork_control_failure_retired_exact_group\",\"status\":\"pass\"}"
   fi
   SERVER_PID=""
@@ -887,6 +1125,9 @@ readonly LSOF
 
 STATE_DIR="$(mktemp -d "${TMPDIR:-/tmp}/asimposium-token-lifecycle.XXXXXX")"
 readonly STATE_DIR
+PROBE_DIR="$(mktemp -d "${TMPDIR:-/tmp}/asimposium-token-lifecycle-probes.XXXXXX")"
+chmod 700 "${PROBE_DIR}"
+readonly PROBE_DIR
 readonly MIGRATION_LOG="${STATE_DIR}/migrations.log"
 readonly MIGRATION_JOURNAL_LOG="${STATE_DIR}/migration-journal.json"
 readonly MIGRATION_JOURNAL_ERROR_LOG="${STATE_DIR}/migration-journal.stderr"
@@ -900,6 +1141,10 @@ SERVER_SUPERVISOR_GO="${STATE_DIR}/supervisor.go"
 SERVER_SUPERVISOR_CHALLENGE="${STATE_DIR}/supervisor.challenge"
 SERVER_SUPERVISOR_RESPONSE="${STATE_DIR}/supervisor.response"
 SERVER_SUPERVISOR_STARTED="${STATE_DIR}/supervisor.started"
+SERVER_SUPERVISOR_FAULT="${STATE_DIR}/supervisor.fault"
+SERVER_SUPERVISOR_RETIREMENT="${STATE_DIR}/supervisor.retirement"
+STATE_CENSUS_NONCE="$(${BUN} --eval 'console.log(crypto.randomUUID())')"
+[[ -n "${STATE_CENSUS_NONCE}" ]] || { fail "TOKEN_LIFECYCLE_STATE_CENSUS_NONCE_UNAVAILABLE"; exit 1; }
 
 CONTROLLER_PGID="$(ps -o pgid= -p $$ 2>/dev/null | tr -d ' ')"
 [[ "${CONTROLLER_PGID}" =~ ^[0-9]+$ ]] || { fail "TOKEN_LIFECYCLE_CONTROLLER_GROUP_UNKNOWN"; exit 1; }
@@ -913,7 +1158,17 @@ server.stop();
 readonly ORIGIN="http://127.0.0.1:${PORT}"
 
 start_busy_port_plant || exit 1
-port_is_free || { fail "TOKEN_LIFECYCLE_PORT_ALREADY_BOUND"; exit 1; }
+if port_is_free preflight; then
+  :
+else
+  port_status=$?
+  if (( port_status == 1 )); then
+    fail "TOKEN_LIFECYCLE_PORT_ALREADY_BOUND"
+  else
+    fail "TOKEN_LIFECYCLE_LISTENER_INSPECTION_UNAVAILABLE"
+  fi
+  exit 1
+fi
 run_auxiliary_pid_reuse_plant || exit 1
 
 KEY_MATERIAL="$(${BUN} --eval '
@@ -979,15 +1234,21 @@ assert_migration_journal || exit 1
     TOKEN_LIFECYCLE_SUPERVISOR_CHALLENGE="${SERVER_SUPERVISOR_CHALLENGE}" \
     TOKEN_LIFECYCLE_SUPERVISOR_RESPONSE="${SERVER_SUPERVISOR_RESPONSE}" \
     TOKEN_LIFECYCLE_SUPERVISOR_STARTED="${SERVER_SUPERVISOR_STARTED}" \
+    TOKEN_LIFECYCLE_SUPERVISOR_FAULT="${SERVER_SUPERVISOR_FAULT}" \
+    TOKEN_LIFECYCLE_SUPERVISOR_RETIREMENT="${SERVER_SUPERVISOR_RETIREMENT}" \
     TOKEN_LIFECYCLE_TEST_SUPERVISOR_STARTED_FAILURE="${TOKEN_LIFECYCLE_TEST_SUPERVISOR_STARTED_FAILURE:-0}" \
     TOKEN_LIFECYCLE_TEST_SUPERVISOR_CHALLENGE_FAILURE="${TOKEN_LIFECYCLE_TEST_SUPERVISOR_CHALLENGE_FAILURE:-0}" \
-    exec perl -MPOSIX=WNOHANG -e '
+    TOKEN_LIFECYCLE_TEST_SUPERVISOR_WAITPID_FAILURE="${TOKEN_LIFECYCLE_TEST_SUPERVISOR_WAITPID_FAILURE:-0}" \
+    TOKEN_LIFECYCLE_TEST_SUPERVISOR_DESCENDANT_FAILURE="${TOKEN_LIFECYCLE_TEST_SUPERVISOR_DESCENDANT_FAILURE:-0}" \
+    exec perl -MPOSIX=WNOHANG -MIO::Handle -MTime::HiRes=time -e '
       my $marker = shift @ARGV;
       die "marker" unless $marker eq $ENV{"TOKEN_LIFECYCLE_SUPERVISOR_MARKER"};
       my $leader = $$;
       my $group = getpgrp(0);
       die "group" unless $leader == $group;
       my $worker;
+      my $planted_descendant;
+      my $worker_reaped = 0;
       my $retiring = 0;
       $SIG{"TERM"} = sub { exit 125 unless defined($worker) && $worker > 0; };
       open(my $ready, ">", $ENV{"TOKEN_LIFECYCLE_SUPERVISOR_READY"}) or die "ready";
@@ -1003,7 +1264,7 @@ assert_migration_journal || exit 1
         close($challenge_file) or die "challenge-close";
         $challenge =~ s/\s+$//;
         return if $challenge eq "" || $challenge eq $last_challenge;
-        if ($postfork && $ENV{"TOKEN_LIFECYCLE_TEST_SUPERVISOR_CHALLENGE_FAILURE"} eq "1" && !$challenge_fault_used) {
+        if ($postfork && ($ENV{"TOKEN_LIFECYCLE_TEST_SUPERVISOR_CHALLENGE_FAILURE"} eq "1" || $ENV{"TOKEN_LIFECYCLE_TEST_SUPERVISOR_DESCENDANT_FAILURE"} eq "1") && !$challenge_fault_used) {
           $challenge_fault_used = 1;
           die "planted-challenge-response";
         }
@@ -1017,39 +1278,83 @@ assert_migration_journal || exit 1
         select(undef, undef, undef, 0.01);
       }
       open(my $started, ">", $ENV{"TOKEN_LIFECYCLE_SUPERVISOR_STARTED"}) or die "started-open";
-      $worker = fork();
-      die "fork" unless defined($worker);
-      if ($worker == 0) {
-        $SIG{"TERM"} = "DEFAULT";
-        exec @ARGV or die "exec";
+      open(my $fault, ">", $ENV{"TOKEN_LIFECYCLE_SUPERVISOR_FAULT"}) or die "fault-open";
+      $fault->autoflush(1);
+      my $retirement;
+      if ($ENV{"TOKEN_LIFECYCLE_TEST_SUPERVISOR_DESCENDANT_FAILURE"} eq "1") {
+        open($retirement, ">", $ENV{"TOKEN_LIFECYCLE_SUPERVISOR_RETIREMENT"}) or die "retirement-open";
+        $retirement->autoflush(1);
       }
-      $postfork = 1;
       my $retire_group = sub {
         return if $retiring;
         $retiring = 1;
         kill "TERM", -$group;
         my $retire_deadline = time + 2;
         while (time < $retire_deadline) {
-          my $done = waitpid($worker, WNOHANG);
-          exit 125 if $done == $worker || $done < 0;
+          if (defined($worker) && $worker > 0 && !$worker_reaped) {
+            my $done = waitpid($worker, WNOHANG);
+            $worker_reaped = 1 if $done == $worker || $done < 0;
+          }
           select(undef, undef, undef, 0.01);
         }
+        if (defined($retirement)) {
+          my $descendant_live = defined($planted_descendant) && kill(0, $planted_descendant) ? 1 : 0;
+          print $retirement join("\t", "term-grace", $worker, $planted_descendant, $group, $ENV{"TOKEN_LIFECYCLE_SUPERVISOR_NONCE"}, $worker_reaped, $descendant_live) . "\n";
+          close($retirement);
+        }
         kill "KILL", -$group;
-        exit 125;
+        POSIX::_exit(125);
       };
-      if ($ENV{"TOKEN_LIFECYCLE_TEST_SUPERVISOR_STARTED_FAILURE"} eq "1") {
-        print $started join("\t", "forked", $worker) . "\n" or $retire_group->();
-        close($started) or $retire_group->();
+      $worker = fork();
+      die "fork" unless defined($worker);
+      if ($worker == 0) {
+        $SIG{"TERM"} = "DEFAULT";
+        exit 0 if $ENV{"TOKEN_LIFECYCLE_TEST_SUPERVISOR_WAITPID_FAILURE"} eq "1";
+        if ($ENV{"TOKEN_LIFECYCLE_TEST_SUPERVISOR_DESCENDANT_FAILURE"} eq "1") {
+          while (1) { select(undef, undef, undef, 1); }
+        }
+        exec @ARGV or die "exec";
+      }
+      $postfork = 1;
+      if ($ENV{"TOKEN_LIFECYCLE_TEST_SUPERVISOR_DESCENDANT_FAILURE"} eq "1") {
+        $planted_descendant = fork();
+        $retire_group->() unless defined($planted_descendant);
+        if ($planted_descendant == 0) {
+          $SIG{"TERM"} = "IGNORE";
+          while (1) { select(undef, undef, undef, 1); }
+        }
+        print $retirement join("\t", "forked", $worker, $planted_descendant, $group, $ENV{"TOKEN_LIFECYCLE_SUPERVISOR_NONCE"}) . "\n" or $retire_group->();
+      }
+      my $started_ok = eval {
+        if ($ENV{"TOKEN_LIFECYCLE_TEST_SUPERVISOR_STARTED_FAILURE"} eq "1") {
+          close($started) or die "started-plant-preclose";
+        }
+        print $started join("\t", "started", $worker) . "\n" or die "started-write";
+        close($started) or die "started-close";
+        1;
+      };
+      if (!$started_ok) {
+        print $fault join("\t", "started-publication", $worker, $group, $ENV{"TOKEN_LIFECYCLE_SUPERVISOR_NONCE"}) . "\n";
         $retire_group->();
       }
-      print $started join("\t", "started", $worker) . "\n" or $retire_group->();
-      close($started) or $retire_group->();
+      if ($ENV{"TOKEN_LIFECYCLE_TEST_SUPERVISOR_WAITPID_FAILURE"} eq "1") {
+        my $pre_reap_deadline = time + 1;
+        while (time < $pre_reap_deadline && !$worker_reaped) {
+          my $done = waitpid($worker, WNOHANG);
+          $worker_reaped = 1 if $done == $worker;
+          select(undef, undef, undef, 0.01) unless $worker_reaped;
+        }
+        $retire_group->() unless $worker_reaped;
+      }
       my $status;
       while (1) {
         eval { $answer_challenge->(); 1 } or $retire_group->();
         my $done = waitpid($worker, WNOHANG);
         if ($done == $worker) { $status = $?; last; }
-        $retire_group->() if $done < 0;
+        if ($done < 0) {
+          print $fault join("\t", "waitpid-negative", $worker, $group, $ENV{"TOKEN_LIFECYCLE_SUPERVISOR_NONCE"}) . "\n";
+          $retire_group->();
+        }
         select(undef, undef, undef, 0.01);
       }
       my $code = ($status & 127) ? 128 + ($status & 127) : $status >> 8;
@@ -1108,8 +1413,20 @@ supervisor_start_deadline=$((SECONDS + 5))
 supervisor_started_phase=""
 supervisor_worker_pid=""
 supervisor_started_extra=""
+supervisor_fault_phase=""
+supervisor_fault_pid=""
+supervisor_fault_pgid=""
+supervisor_fault_nonce=""
+supervisor_fault_extra=""
 while (( SECONDS < supervisor_start_deadline )); do
-  if [[ -s "${SERVER_SUPERVISOR_STARTED}" ]] &&
+  if [[ "${TOKEN_LIFECYCLE_TEST_SUPERVISOR_STARTED_FAILURE:-0}" == "1" \
+    && -s "${SERVER_SUPERVISOR_FAULT}" ]] &&
+    IFS=$'\t' read -r supervisor_fault_phase supervisor_fault_pid supervisor_fault_pgid \
+      supervisor_fault_nonce supervisor_fault_extra <"${SERVER_SUPERVISOR_FAULT}"; then
+    break
+  fi
+  if [[ "${TOKEN_LIFECYCLE_TEST_SUPERVISOR_STARTED_FAILURE:-0}" != "1" \
+    && -s "${SERVER_SUPERVISOR_STARTED}" ]] &&
     IFS=$'\t' read -r supervisor_started_phase supervisor_worker_pid supervisor_started_extra \
       <"${SERVER_SUPERVISOR_STARTED}"; then
     break
@@ -1117,9 +1434,11 @@ while (( SECONDS < supervisor_start_deadline )); do
   sleep 0.01
 done
 if [[ "${TOKEN_LIFECYCLE_TEST_SUPERVISOR_STARTED_FAILURE:-0}" == "1" \
-  && "${supervisor_started_phase}" == "forked" \
-  && "${supervisor_worker_pid}" =~ ^[0-9]+$ \
-  && -z "${supervisor_started_extra}" ]]; then
+  && "${supervisor_fault_phase}" == "started-publication" \
+  && "${supervisor_fault_pid}" =~ ^[0-9]+$ \
+  && "${supervisor_fault_pgid}" == "${SERVER_PGID}" \
+  && "${supervisor_fault_nonce}" == "${SERVER_SUPERVISOR_NONCE}" \
+  && -z "${supervisor_fault_extra}" ]]; then
   fail "TOKEN_LIFECYCLE_SUPERVISOR_STARTED_FAILURE_PLANT"
   exit 1
 fi
@@ -1129,6 +1448,84 @@ fi
   fail "TOKEN_LIFECYCLE_WRANGLER_LAUNCH_UNPROVEN"
   exit 1
 }
+if [[ "${TOKEN_LIFECYCLE_TEST_SUPERVISOR_WAITPID_FAILURE:-0}" == "1" ]]; then
+  supervisor_start_deadline=$((SECONDS + 5))
+  (( supervisor_start_deadline > SCRIPT_DEADLINE )) && supervisor_start_deadline="${SCRIPT_DEADLINE}"
+  while (( SECONDS < supervisor_start_deadline )); do
+    if [[ -s "${SERVER_SUPERVISOR_FAULT}" ]] &&
+      IFS=$'\t' read -r supervisor_fault_phase supervisor_fault_pid supervisor_fault_pgid \
+        supervisor_fault_nonce supervisor_fault_extra <"${SERVER_SUPERVISOR_FAULT}" &&
+      [[ "${supervisor_fault_phase}" == "waitpid-negative" \
+        && "${supervisor_fault_pid}" == "${supervisor_worker_pid}" \
+        && "${supervisor_fault_pgid}" == "${SERVER_PGID}" \
+        && "${supervisor_fault_nonce}" == "${SERVER_SUPERVISOR_NONCE}" \
+        && -z "${supervisor_fault_extra}" ]]; then
+      fail "TOKEN_LIFECYCLE_SUPERVISOR_WAITPID_FAILURE_PLANT"
+      exit 1
+    fi
+    sleep 0.01
+  done
+  fail "TOKEN_LIFECYCLE_SUPERVISOR_WAITPID_FAILURE_INACTIVE"
+  exit 1
+fi
+if [[ "${TOKEN_LIFECYCLE_TEST_SUPERVISOR_DESCENDANT_FAILURE:-0}" == "1" ]]; then
+  supervisor_start_deadline=$((SECONDS + 5))
+  (( supervisor_start_deadline > SCRIPT_DEADLINE )) && supervisor_start_deadline="${SCRIPT_DEADLINE}"
+  supervisor_retirement_phase=""
+  supervisor_retirement_direct=""
+  supervisor_retirement_descendant=""
+  supervisor_retirement_pgid=""
+  supervisor_retirement_nonce=""
+  supervisor_retirement_extra=""
+  while (( SECONDS < supervisor_start_deadline )); do
+    if [[ -s "${SERVER_SUPERVISOR_RETIREMENT}" ]] &&
+      IFS=$'\t' read -r supervisor_retirement_phase supervisor_retirement_direct \
+        supervisor_retirement_descendant supervisor_retirement_pgid supervisor_retirement_nonce \
+        supervisor_retirement_extra <"${SERVER_SUPERVISOR_RETIREMENT}" &&
+      [[ "${supervisor_retirement_phase}" == "forked" \
+        && "${supervisor_retirement_direct}" == "${supervisor_worker_pid}" \
+        && "${supervisor_retirement_descendant}" =~ ^[0-9]+$ \
+        && "${supervisor_retirement_pgid}" == "${SERVER_PGID}" \
+        && "${supervisor_retirement_nonce}" == "${SERVER_SUPERVISOR_NONCE}" \
+        && -z "${supervisor_retirement_extra}" ]]; then
+      break
+    fi
+    sleep 0.01
+  done
+  [[ "${supervisor_retirement_phase}" == "forked" \
+    && "${supervisor_retirement_direct}" == "${supervisor_worker_pid}" \
+    && "${supervisor_retirement_descendant}" =~ ^[0-9]+$ \
+    && "${supervisor_retirement_pgid}" == "${SERVER_PGID}" \
+    && "${supervisor_retirement_nonce}" == "${SERVER_SUPERVISOR_NONCE}" \
+    && -z "${supervisor_retirement_extra}" ]] || {
+    fail "TOKEN_LIFECYCLE_SUPERVISOR_DESCENDANT_IDENTITY_UNPROVEN"
+    exit 1
+  }
+  SUPERVISOR_PLANT_DIRECT_PID="${supervisor_retirement_direct}"
+  SUPERVISOR_PLANT_DESCENDANT_PID="${supervisor_retirement_descendant}"
+  SUPERVISOR_PLANT_DIRECT_IDENTITY="$(raw_process_identity "${SUPERVISOR_PLANT_DIRECT_PID}")" || {
+    fail "TOKEN_LIFECYCLE_SUPERVISOR_DESCENDANT_IDENTITY_UNPROVEN"
+    exit 1
+  }
+  SUPERVISOR_PLANT_DESCENDANT_IDENTITY="$(raw_process_identity \
+    "${SUPERVISOR_PLANT_DESCENDANT_PID}")" || {
+    fail "TOKEN_LIFECYCLE_SUPERVISOR_DESCENDANT_IDENTITY_UNPROVEN"
+    exit 1
+  }
+  [[ "${SUPERVISOR_PLANT_DIRECT_IDENTITY}" == *$'\t'"${SERVER_PGID}"$'\t'* \
+    && "${SUPERVISOR_PLANT_DESCENDANT_IDENTITY}" == *$'\t'"${SERVER_PGID}"$'\t'* \
+    && "${SUPERVISOR_PLANT_DIRECT_IDENTITY}" == *"${SERVER_SUPERVISOR_MARKER}"* \
+    && "${SUPERVISOR_PLANT_DESCENDANT_IDENTITY}" == *"${SERVER_SUPERVISOR_MARKER}"* ]] || {
+    fail "TOKEN_LIFECYCLE_SUPERVISOR_DESCENDANT_IDENTITY_UNPROVEN"
+    exit 1
+  }
+  if challenge_server_supervisor; then
+    fail "TOKEN_LIFECYCLE_SUPERVISOR_DESCENDANT_FAILURE_INACTIVE"
+    exit 1
+  fi
+  fail "TOKEN_LIFECYCLE_SUPERVISOR_DESCENDANT_FAILURE_PLANT"
+  exit 1
+fi
 if [[ "${TOKEN_LIFECYCLE_TEST_SUPERVISOR_CHALLENGE_FAILURE:-0}" == "1" ]]; then
   if challenge_server_supervisor; then
     fail "TOKEN_LIFECYCLE_SUPERVISOR_CHALLENGE_FAILURE_INACTIVE"
@@ -1157,6 +1554,26 @@ assert_responder_identity || exit 1
 emit "{\"suite\":\"${SUITE}\",\"assertion\":\"ready_workerd_responder_pid_pgid_start_and_argv_pinned\",\"status\":\"pass\"}"
 if [[ "${TOKEN_LIFECYCLE_TEST_CLEANUP_CENSUS_PARTIAL:-0}" == "1" ]]; then
   fail "TOKEN_LIFECYCLE_CLEANUP_CENSUS_PARTIAL_PLANT"
+  exit 1
+fi
+if [[ "${TOKEN_LIFECYCLE_TEST_STATE_CENSUS_PARTIAL:-0}" == "1" ]]; then
+  fail "TOKEN_LIFECYCLE_STATE_CENSUS_PARTIAL_PLANT"
+  exit 1
+fi
+if [[ "${TOKEN_LIFECYCLE_TEST_LISTENER_EXIT_ZERO_EMPTY:-0}" == "1" ]]; then
+  fail "TOKEN_LIFECYCLE_LISTENER_EXIT_ZERO_EMPTY_PLANT"
+  exit 1
+fi
+if [[ "${TOKEN_LIFECYCLE_TEST_LISTENER_STDOUT_NEWLINE:-0}" == "1" ]]; then
+  fail "TOKEN_LIFECYCLE_LISTENER_STDOUT_NEWLINE_PLANT"
+  exit 1
+fi
+if [[ "${TOKEN_LIFECYCLE_TEST_LISTENER_STDERR_NEWLINE:-0}" == "1" ]]; then
+  fail "TOKEN_LIFECYCLE_LISTENER_STDERR_NEWLINE_PLANT"
+  exit 1
+fi
+if [[ "${TOKEN_LIFECYCLE_TEST_LISTENER_DIAGNOSTIC:-0}" == "1" ]]; then
+  fail "TOKEN_LIFECYCLE_LISTENER_DIAGNOSTIC_PLANT"
   exit 1
 fi
 start_detached_state_plant || exit 1

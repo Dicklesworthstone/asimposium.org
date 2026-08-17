@@ -27,12 +27,19 @@ const FAULT_PLANTS = {
   TOKEN_LIFECYCLE_TEST_BUSY_PORT: "0",
   TOKEN_LIFECYCLE_TEST_CLEANUP_CENSUS_PARTIAL: "0",
   TOKEN_LIFECYCLE_TEST_DETACHED: "0",
+  TOKEN_LIFECYCLE_TEST_LISTENER_DIAGNOSTIC: "0",
+  TOKEN_LIFECYCLE_TEST_LISTENER_EXIT_ZERO_EMPTY: "0",
+  TOKEN_LIFECYCLE_TEST_LISTENER_STDERR_NEWLINE: "0",
+  TOKEN_LIFECYCLE_TEST_LISTENER_STDOUT_NEWLINE: "0",
   TOKEN_LIFECYCLE_TEST_LOG_LEAK: "0",
   TOKEN_LIFECYCLE_TEST_PARTIAL_PS: "0",
   TOKEN_LIFECYCLE_TEST_PID_REUSE: "0",
   TOKEN_LIFECYCLE_TEST_PRE_GO_FAILURE: "0",
+  TOKEN_LIFECYCLE_TEST_STATE_CENSUS_PARTIAL: "0",
   TOKEN_LIFECYCLE_TEST_SUPERVISOR_CHALLENGE_FAILURE: "0",
+  TOKEN_LIFECYCLE_TEST_SUPERVISOR_DESCENDANT_FAILURE: "0",
   TOKEN_LIFECYCLE_TEST_SUPERVISOR_STARTED_FAILURE: "0",
+  TOKEN_LIFECYCLE_TEST_SUPERVISOR_WAITPID_FAILURE: "0",
 } as const;
 
 async function settleWithin<Value>(
@@ -408,16 +415,52 @@ test("token lifecycle harness self-test is ordinary-unit registered and never la
   expect(script).toContain("TOKEN_LIFECYCLE_TEST_AUX_PID_REUSE");
   expect(script).toContain("TOKEN_LIFECYCLE_TEST_CLEANUP_CENSUS_PARTIAL");
   expect(script).toContain("TOKEN_LIFECYCLE_TEST_DETACHED");
+  expect(script).toContain("TOKEN_LIFECYCLE_TEST_LISTENER_DIAGNOSTIC");
+  expect(script).toContain("TOKEN_LIFECYCLE_TEST_LISTENER_EXIT_ZERO_EMPTY");
+  expect(script).toContain("TOKEN_LIFECYCLE_TEST_LISTENER_STDERR_NEWLINE");
+  expect(script).toContain("TOKEN_LIFECYCLE_TEST_LISTENER_STDOUT_NEWLINE");
   expect(script).toContain("TOKEN_LIFECYCLE_TEST_PARTIAL_PS");
   expect(script).toContain("TOKEN_LIFECYCLE_TEST_PID_REUSE");
   expect(script).toContain("TOKEN_LIFECYCLE_TEST_LOG_LEAK");
   expect(script).toContain("TOKEN_LIFECYCLE_TEST_PRE_GO_FAILURE");
+  expect(script).toContain("TOKEN_LIFECYCLE_TEST_STATE_CENSUS_PARTIAL");
   expect(script).toContain("TOKEN_LIFECYCLE_TEST_SUPERVISOR_CHALLENGE_FAILURE");
+  expect(script).toContain("TOKEN_LIFECYCLE_TEST_SUPERVISOR_DESCENDANT_FAILURE");
   expect(script).toContain("TOKEN_LIFECYCLE_TEST_SUPERVISOR_STARTED_FAILURE");
+  expect(script).toContain("TOKEN_LIFECYCLE_TEST_SUPERVISOR_WAITPID_FAILURE");
   expect(script).toContain('signal_probe_state "-${pgid}"');
   expect(script).toContain("cleanup_census_exit_zero_empty_cannot_false_reap");
+  expect(script).toContain(
+    "state_census_exit_zero_partial_after_anchor_missing_completion_refused",
+  );
+  expect(script).toContain("TOKEN_LIFECYCLE_STATE_CENSUS_V1_BEGIN");
+  expect(script).toContain("TOKEN_LIFECYCLE_STATE_CENSUS_V1_END");
+  expect(script).toContain('sha256_hex(join("", @framed))');
+  expect(script).toContain("TOKEN_LIFECYCLE_STATE_FD_INSPECTION_UNAVAILABLE");
   expect(script).toContain("auxiliary_pid_reuse_identity_drift_refused_without_signal");
   expect(script).toContain("supervisor_postfork_control_failure_retired_exact_group");
+  expect(script).toContain(
+    "supervisor_term_reaped_direct_then_killed_same_group_term_ignoring_descendant",
+  );
+  expect(script).toContain('close($started) or die "started-plant-preclose"');
+  expect(script).toContain(
+    'print $started join("\\t", "started", $worker) . "\\n" or die "started-write"',
+  );
+  expect(script.indexOf('close($started) or die "started-plant-preclose"')).toBeLessThan(
+    script.indexOf('print $started join("\\t", "started", $worker)'),
+  );
+  expect(script).not.toContain('die "planted-started-close"');
+  expect(script).toContain("port_is_free final");
+  expect(script).toContain("listener_exit_zero_empty_refused_as_absence");
+  expect(script).toContain("listener_diagnostic_refused_as_absence");
+  expect(script).toContain("listener_status_one_stdout_newline_refused_as_absence");
+  expect(script).toContain("listener_status_one_stderr_newline_refused_as_absence");
+  expect(script).toContain("listener-probe.stdout");
+  expect(script).toContain("listener-probe.stderr");
+  expect(script).toContain("state-fd.stdout");
+  expect(script).toContain("state-fd.stderr");
+  expect(script).toContain('file_byte_size "${stdout_path}"');
+  expect(script).toContain('"waitpid-negative"');
   expect(script.indexOf('open(my $started, ">"')).toBeLessThan(script.indexOf("$worker = fork()"));
   expect(script).toContain("SERVER_TARGET_GATE_OPENED=1");
   expect(script).toContain("startup_gate_supervisor_reaped_before_target_launch");
@@ -494,7 +537,8 @@ const FAULT_CASES: readonly {
   readonly plant: keyof typeof FAULT_PLANTS;
   readonly code: string;
   readonly requiresWorkerCleanup: boolean;
-  readonly cleanupAssertion?: string;
+  readonly reachesWorkerReady?: boolean;
+  readonly cleanupAssertions?: readonly string[];
 }[] = [
   {
     plant: "TOKEN_LIFECYCLE_TEST_PRE_GO_FAILURE",
@@ -510,7 +554,7 @@ const FAULT_CASES: readonly {
     plant: "TOKEN_LIFECYCLE_TEST_AUX_PID_REUSE",
     code: "TOKEN_LIFECYCLE_AUX_PID_REUSE_PLANT",
     requiresWorkerCleanup: false,
-    cleanupAssertion: "auxiliary_pid_reuse_identity_drift_refused_without_signal",
+    cleanupAssertions: ["auxiliary_pid_reuse_identity_drift_refused_without_signal"],
   },
   {
     plant: "TOKEN_LIFECYCLE_TEST_PARTIAL_PS",
@@ -521,19 +565,69 @@ const FAULT_CASES: readonly {
     plant: "TOKEN_LIFECYCLE_TEST_CLEANUP_CENSUS_PARTIAL",
     code: "TOKEN_LIFECYCLE_CLEANUP_CENSUS_PARTIAL_PLANT",
     requiresWorkerCleanup: true,
-    cleanupAssertion: "cleanup_census_exit_zero_empty_cannot_false_reap",
+    cleanupAssertions: ["cleanup_census_exit_zero_empty_cannot_false_reap"],
+  },
+  {
+    plant: "TOKEN_LIFECYCLE_TEST_STATE_CENSUS_PARTIAL",
+    code: "TOKEN_LIFECYCLE_STATE_CENSUS_PARTIAL_PLANT",
+    requiresWorkerCleanup: false,
+    reachesWorkerReady: true,
+    cleanupAssertions: ["state_census_exit_zero_partial_after_anchor_missing_completion_refused"],
+  },
+  {
+    plant: "TOKEN_LIFECYCLE_TEST_LISTENER_EXIT_ZERO_EMPTY",
+    code: "TOKEN_LIFECYCLE_LISTENER_EXIT_ZERO_EMPTY_PLANT",
+    requiresWorkerCleanup: false,
+    reachesWorkerReady: true,
+    cleanupAssertions: ["listener_exit_zero_empty_refused_as_absence"],
+  },
+  {
+    plant: "TOKEN_LIFECYCLE_TEST_LISTENER_DIAGNOSTIC",
+    code: "TOKEN_LIFECYCLE_LISTENER_DIAGNOSTIC_PLANT",
+    requiresWorkerCleanup: false,
+    reachesWorkerReady: true,
+    cleanupAssertions: ["listener_diagnostic_refused_as_absence"],
+  },
+  {
+    plant: "TOKEN_LIFECYCLE_TEST_LISTENER_STDOUT_NEWLINE",
+    code: "TOKEN_LIFECYCLE_LISTENER_STDOUT_NEWLINE_PLANT",
+    requiresWorkerCleanup: false,
+    reachesWorkerReady: true,
+    cleanupAssertions: ["listener_status_one_stdout_newline_refused_as_absence"],
+  },
+  {
+    plant: "TOKEN_LIFECYCLE_TEST_LISTENER_STDERR_NEWLINE",
+    code: "TOKEN_LIFECYCLE_LISTENER_STDERR_NEWLINE_PLANT",
+    requiresWorkerCleanup: false,
+    reachesWorkerReady: true,
+    cleanupAssertions: ["listener_status_one_stderr_newline_refused_as_absence"],
   },
   {
     plant: "TOKEN_LIFECYCLE_TEST_SUPERVISOR_STARTED_FAILURE",
     code: "TOKEN_LIFECYCLE_SUPERVISOR_STARTED_FAILURE_PLANT",
     requiresWorkerCleanup: true,
-    cleanupAssertion: "supervisor_postfork_control_failure_retired_exact_group",
+    cleanupAssertions: ["supervisor_postfork_control_failure_retired_exact_group"],
   },
   {
     plant: "TOKEN_LIFECYCLE_TEST_SUPERVISOR_CHALLENGE_FAILURE",
     code: "TOKEN_LIFECYCLE_SUPERVISOR_CHALLENGE_FAILURE_PLANT",
     requiresWorkerCleanup: true,
-    cleanupAssertion: "supervisor_postfork_control_failure_retired_exact_group",
+    cleanupAssertions: ["supervisor_postfork_control_failure_retired_exact_group"],
+  },
+  {
+    plant: "TOKEN_LIFECYCLE_TEST_SUPERVISOR_WAITPID_FAILURE",
+    code: "TOKEN_LIFECYCLE_SUPERVISOR_WAITPID_FAILURE_PLANT",
+    requiresWorkerCleanup: true,
+    cleanupAssertions: ["supervisor_postfork_control_failure_retired_exact_group"],
+  },
+  {
+    plant: "TOKEN_LIFECYCLE_TEST_SUPERVISOR_DESCENDANT_FAILURE",
+    code: "TOKEN_LIFECYCLE_SUPERVISOR_DESCENDANT_FAILURE_PLANT",
+    requiresWorkerCleanup: true,
+    cleanupAssertions: [
+      "supervisor_term_reaped_direct_then_killed_same_group_term_ignoring_descendant",
+      "supervisor_postfork_control_failure_retired_exact_group",
+    ],
   },
   {
     plant: "TOKEN_LIFECYCLE_TEST_PID_REUSE",
@@ -562,11 +656,11 @@ for (const current of FAULT_CASES) {
       expect(result.stdout).toContain(
         '"assertion":"workerd_group_descendants_listener_and_state_fds_reaped","status":"pass"',
       );
-    } else {
+    } else if (current.reachesWorkerReady !== true) {
       expect(result.stdout).not.toContain("ready_workerd_responder_pid_pgid_start_and_argv_pinned");
     }
-    if (current.cleanupAssertion !== undefined) {
-      expect(result.stdout).toContain(`"assertion":"${current.cleanupAssertion}","status":"pass"`);
+    for (const assertion of current.cleanupAssertions ?? []) {
+      expect(result.stdout).toContain(`"assertion":"${assertion}","status":"pass"`);
     }
     if (current.plant === "TOKEN_LIFECYCLE_TEST_PRE_GO_FAILURE") {
       expect(result.stdout).toContain(

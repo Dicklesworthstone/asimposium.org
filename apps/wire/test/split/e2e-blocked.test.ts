@@ -695,100 +695,15 @@ const isStringRecord = (value) =>
   );
 const isSafeIntegerAtLeast = (value, floor) =>
   Number.isSafeInteger(value) && value >= floor;
-const hasRequiredAllowedKeys = (value, required, allowed) =>
-  isRecord(value) &&
-  required.every((key) => Object.hasOwn(value, key)) &&
-  Object.keys(value).every((key) => allowed.includes(key));
-const exactUtf8Text = (value, retainedBytes) => {
-  if (typeof value !== "string" || value.includes("\uFFFD")) return false;
-  const bytes = Buffer.from(value, "utf8");
-  if (bytes.byteLength !== retainedBytes) return false;
-  try {
-    return new TextDecoder("utf-8", { fatal: true }).decode(bytes) === value;
-  } catch {
-    return false;
-  }
-};
-const outcomeFieldsValid = (value, hasExitCode, hasCleanup) => {
-  switch (value.outcome) {
-    case "exited":
-      return hasExitCode && !hasCleanup;
-    case "timeout":
-      return !Object.hasOwn(value, "signal") &&
-        !hasExitCode &&
-        hasCleanup &&
-        value.cleanupProven === true;
-    case "output-overrun":
-      return hasCleanup && value.cleanupProven === true;
-    case "descendant-leaked":
-    case "pipe-drain-unproven":
-      return hasExitCode && !hasCleanup;
-    case "inspection-unproven":
-      return hasExitCode
-        ? !hasCleanup || value.cleanupProven === false
-        : hasCleanup && value.cleanupProven === false;
-    case "ownership-unproven":
-      // Without a completed target record, every production branch carries its
-      // cleanup observation. With an exit record, cleanup may be absent or may
-      // survive a later control-channel failure as either boolean.
-      return hasExitCode || hasCleanup;
-    case "spawn-failed":
-      // Production start-failed is the supervisor's fixed fork-failure record:
-      // exit 125, signal 0, followed by a direct-child cleanup observation.
-      // Pre-lease spawn/write failures have no exit or signal and may carry only
-      // that cleanup boolean.
-      return hasExitCode
-        ? value.exitCode === 125 && !Object.hasOwn(value, "signal") && hasCleanup
-        : !Object.hasOwn(value, "signal");
-    default:
-      return false;
-  }
-};
-const isOwnedResult = (value, options) => {
-  const required = [
-    "outcome",
-    "stdout",
-    "stderr",
-    "retainedStdoutBytes",
-    "retainedStderrBytes",
-    "retainedOutputBytes",
-  ];
-  const allowed = [...required, "exitCode", "signal", "cleanupProven"];
-  if (!hasRequiredAllowedKeys(value, required, allowed) || !OWNED_OUTCOMES.has(value.outcome)) {
-    return false;
-  }
-  const hasExitCode = Object.hasOwn(value, "exitCode");
-  const hasSignal = Object.hasOwn(value, "signal");
-  const hasCleanup = Object.hasOwn(value, "cleanupProven");
-  const signalMatch =
-    hasSignal && typeof value.signal === "string"
-      ? /^SIG([1-9][0-9]{0,2})$/u.exec(value.signal)
-      : null;
-  const signalNumber = Number(signalMatch?.[1]);
-  if (
-    (hasExitCode && (!isSafeIntegerAtLeast(value.exitCode, 0) || value.exitCode > 255)) ||
-    (hasSignal &&
-      (!hasExitCode ||
-        typeof value.signal !== "string" ||
-        signalMatch === null ||
-        signalNumber > 127 ||
-        value.exitCode !== 128 + signalNumber)) ||
-    (hasCleanup && typeof value.cleanupProven !== "boolean") ||
-    !outcomeFieldsValid(value, hasExitCode, hasCleanup) ||
-    !isSafeIntegerAtLeast(value.retainedStdoutBytes, 0) ||
-    !isSafeIntegerAtLeast(value.retainedStderrBytes, 0) ||
-    !isSafeIntegerAtLeast(value.retainedOutputBytes, 0) ||
-    value.retainedStdoutBytes > options.retainedStreamBytes ||
-    value.retainedStderrBytes > options.retainedStreamBytes ||
-    value.retainedOutputBytes > options.retainedOutputBytes ||
-    value.retainedOutputBytes !== value.retainedStdoutBytes + value.retainedStderrBytes ||
-    !exactUtf8Text(value.stdout, value.retainedStdoutBytes) ||
-    !exactUtf8Text(value.stderr, value.retainedStderrBytes)
-  ) {
-    return false;
-  }
-  return true;
-};
+const ownedOutcomeFieldsValid = ${ownedOutcomeFieldsValid.toString()};
+const ownedCommandResultIsExact = ${ownedCommandResultIsExact.toString()};
+const isOwnedResult = (value, options) =>
+  ownedCommandResultIsExact(
+    value,
+    options.retainedStreamBytes,
+    options.retainedOutputBytes,
+    [...OWNED_OUTCOMES],
+  );
 const isBootstrap = (value) => {
   if (
     !hasExactKeys(value, ["nonce", "result", "directory", "directoryPath", "runnerUrl", "runnerSha256", "options"]) ||
@@ -1706,30 +1621,6 @@ function hasExactRecordKeys(
   return actual.length === expected.length && actual.every((key, index) => key === expected[index]);
 }
 
-function hasRequiredAllowedRecordKeys(
-  value: unknown,
-  required: readonly string[],
-  allowed: readonly string[],
-): value is Record<string, unknown> {
-  if (value === null || typeof value !== "object" || Array.isArray(value)) return false;
-  const record = value as Record<string, unknown>;
-  return (
-    required.every((key) => Object.hasOwn(record, key)) &&
-    Object.keys(record).every((key) => allowed.includes(key))
-  );
-}
-
-function isExactUtf8Text(value: unknown, retainedBytes: number): value is string {
-  if (typeof value !== "string" || value.includes("\uFFFD")) return false;
-  const bytes = Buffer.from(value, "utf8");
-  if (bytes.byteLength !== retainedBytes) return false;
-  try {
-    return new TextDecoder("utf-8", { fatal: true }).decode(bytes) === value;
-  } catch {
-    return false;
-  }
-}
-
 function ownedOutcomeFieldsValid(
   result: Record<string, unknown>,
   hasExitCode: boolean,
@@ -1767,11 +1658,12 @@ function ownedOutcomeFieldsValid(
   }
 }
 
-function isOwnedCommandResult(
+function ownedCommandResultIsExact(
   value: unknown,
-  retainedStreamBytes = S3_OWNED_STREAM_BYTES,
-  retainedOutputBytes = S3_OWNED_OUTPUT_BYTES,
-): value is OwnedCommandResult {
+  retainedStreamBytes: number,
+  retainedOutputBytes: number,
+  outcomes: readonly string[],
+): boolean {
   const required = [
     "outcome",
     "stdout",
@@ -1779,10 +1671,28 @@ function isOwnedCommandResult(
     "retainedStdoutBytes",
     "retainedStderrBytes",
     "retainedOutputBytes",
-  ] as const;
-  const allowed = [...required, "exitCode", "signal", "cleanupProven"] as const;
-  if (!hasRequiredAllowedRecordKeys(value, required, allowed)) return false;
+  ];
+  const allowed = [...required, "exitCode", "signal", "cleanupProven"];
+  if (
+    value === null ||
+    typeof value !== "object" ||
+    Array.isArray(value) ||
+    !Number.isSafeInteger(retainedStreamBytes) ||
+    retainedStreamBytes < 1 ||
+    !Number.isSafeInteger(retainedOutputBytes) ||
+    retainedOutputBytes < 1
+  ) {
+    return false;
+  }
   const result = value as Record<string, unknown>;
+  if (
+    !required.every((key) => Object.hasOwn(result, key)) ||
+    !Object.keys(result).every((key) => allowed.includes(key)) ||
+    typeof result.outcome !== "string" ||
+    !outcomes.includes(result.outcome)
+  ) {
+    return false;
+  }
   const hasExitCode = Object.hasOwn(result, "exitCode");
   const hasSignal = Object.hasOwn(result, "signal");
   const hasCleanup = Object.hasOwn(result, "cleanupProven");
@@ -1794,9 +1704,17 @@ function isOwnedCommandResult(
   const stdoutBytes = Number(result.retainedStdoutBytes);
   const stderrBytes = Number(result.retainedStderrBytes);
   const outputBytes = Number(result.retainedOutputBytes);
+  const exactUtf8Text = (text: unknown, retainedBytes: number): boolean => {
+    if (typeof text !== "string" || text.includes("\uFFFD")) return false;
+    const bytes = Buffer.from(text, "utf8");
+    if (bytes.byteLength !== retainedBytes) return false;
+    try {
+      return new TextDecoder("utf-8", { fatal: true }).decode(bytes) === text;
+    } catch {
+      return false;
+    }
+  };
   return (
-    typeof result.outcome === "string" &&
-    Object.hasOwn(OWNED_COMMAND_OUTCOMES, result.outcome) &&
     Number.isSafeInteger(result.retainedStdoutBytes) &&
     stdoutBytes >= 0 &&
     stdoutBytes <= retainedStreamBytes &&
@@ -1808,8 +1726,8 @@ function isOwnedCommandResult(
     outputBytes <= retainedOutputBytes &&
     Number.isSafeInteger(stdoutBytes + stderrBytes) &&
     outputBytes === stdoutBytes + stderrBytes &&
-    isExactUtf8Text(result.stdout, stdoutBytes) &&
-    isExactUtf8Text(result.stderr, stderrBytes) &&
+    exactUtf8Text(result.stdout, stdoutBytes) &&
+    exactUtf8Text(result.stderr, stderrBytes) &&
     (!hasExitCode ||
       (Number.isSafeInteger(result.exitCode) &&
         Number(result.exitCode) >= 0 &&
@@ -1821,6 +1739,28 @@ function isOwnedCommandResult(
         result.exitCode === 128 + signalNumber)) &&
     (!hasCleanup || typeof result.cleanupProven === "boolean") &&
     ownedOutcomeFieldsValid(result, hasExitCode, hasCleanup)
+  );
+}
+
+function isOwnedCommandResult(
+  value: unknown,
+  retainedStreamBytes = S3_OWNED_STREAM_BYTES,
+  retainedOutputBytes = S3_OWNED_OUTPUT_BYTES,
+): value is OwnedCommandResult {
+  return ownedCommandResultIsExact(
+    value,
+    retainedStreamBytes,
+    retainedOutputBytes,
+    Object.keys(OWNED_COMMAND_OUTCOMES),
+  );
+}
+
+function isFreshDispatcherOwnedResultForTest(value: unknown): boolean {
+  return ownedCommandResultIsExact(
+    value,
+    S3_OWNED_STREAM_BYTES,
+    S3_OWNED_OUTPUT_BYTES,
+    Object.keys(OWNED_COMMAND_OUTCOMES),
   );
 }
 
@@ -1915,12 +1855,72 @@ async function runFreshOwnedS3Command(
   }
 }
 
+interface BoundedS3ChildResult {
+  readonly stdout: string;
+  readonly stderr: string;
+  readonly exitCode: number;
+}
+
+interface BoundedS3ChildExitMismatch {
+  readonly code: "S3_CHILD_EXIT_CODE_MISMATCH";
+  readonly label: string;
+  readonly expected_exit_code: number;
+  readonly actual_exit_code: number;
+  readonly stdout_bytes: number;
+  readonly stderr_bytes: number;
+  readonly reported_codes: readonly string[];
+}
+
+function boundedS3ReportedCodes(stdout: string): readonly string[] {
+  const reportedCodes = new Set<string>();
+  for (const line of stdout.split("\n")) {
+    if (reportedCodes.size >= 8) break;
+    if (line.length === 0 || line.length > 4_096 || !line.startsWith("{")) continue;
+    try {
+      const parsed = JSON.parse(line) as { readonly code?: unknown };
+      if (typeof parsed.code === "string" && /^[A-Z][A-Z0-9_]{0,79}$/u.test(parsed.code)) {
+        reportedCodes.add(parsed.code);
+      }
+    } catch {
+      // Non-JSON product output is asserted by the caller, never reflected here.
+    }
+  }
+  return [...reportedCodes];
+}
+
+function boundedS3ChildExitMismatch(
+  result: BoundedS3ChildResult,
+  label: string,
+  expectedExitCode: number,
+): BoundedS3ChildExitMismatch | undefined {
+  if (result.exitCode === expectedExitCode) return undefined;
+  return {
+    code: "S3_CHILD_EXIT_CODE_MISMATCH",
+    label,
+    expected_exit_code: expectedExitCode,
+    actual_exit_code: result.exitCode,
+    stdout_bytes: Buffer.byteLength(result.stdout, "utf8"),
+    stderr_bytes: Buffer.byteLength(result.stderr, "utf8"),
+    reported_codes: boundedS3ReportedCodes(result.stdout),
+  };
+}
+
+function expectBoundedS3ChildExit(
+  result: BoundedS3ChildResult,
+  label: string,
+  expectedExitCode: number,
+): void {
+  // Bun prints only this bounded structured summary on mismatch. The caller
+  // retains the typed stdout/stderr for exact assertions without reflecting
+  // arbitrary child bytes into the test failure.
+  expect(boundedS3ChildExitMismatch(result, label, expectedExitCode)).toBeUndefined();
+}
+
 async function runBoundedS3Child(
   command: readonly string[],
   label: string,
-  expectedExitCode: number,
   options: S3OwnedCommandOptions,
-): Promise<{ readonly stdout: string; readonly stderr: string; readonly exitCode: number }> {
+): Promise<BoundedS3ChildResult> {
   const { result, cleanupProven } = await runFreshOwnedS3Command(command, label, options);
   if (result.outcome !== "exited") {
     throw new Error(
@@ -1928,11 +1928,27 @@ async function runBoundedS3Child(
     );
   }
   if (cleanupProven !== true) throw new Error(`${label}_CLEANUP_UNPROVEN`);
-  if (result.exitCode !== expectedExitCode) {
+  if (typeof result.exitCode !== "number") {
     throw new Error(`${label}_EXIT_CODE:${result.exitCode ?? "UNAVAILABLE"}`);
   }
-  if (result.stdout.length === 0) throw new Error(`${label}_OUTPUT_EMPTY`);
   return { stdout: result.stdout, stderr: result.stderr, exitCode: result.exitCode };
+}
+
+function s3OwnedTimeoutWithin(deadlineMs: number): number {
+  const transportMs = s3OwnedCommandTimeout({ timeoutMs: 1 }) - 1;
+  const testRunnerSettlementReserveMs = 1_000;
+  const timeoutMs = deadlineMs - transportMs - testRunnerSettlementReserveMs;
+  if (!Number.isSafeInteger(timeoutMs) || timeoutMs < 1) {
+    throw new Error(`S3_OWNED_TEST_DEADLINE_TOO_SMALL:${deadlineMs}`);
+  }
+  return timeoutMs;
+}
+
+function s3HarnessPlantCommand(environmentName: string, environmentValue: string): readonly string[] {
+  if (!/^S3_(?:PORT|SELF_TEST_[A-Z0-9_]+)$/u.test(environmentName) || environmentValue.includes("\0")) {
+    throw new Error("S3_HARNESS_PLANT_ENVIRONMENT_INVALID");
+  }
+  return ["env", `${environmentName}=${environmentValue}`, "bash", "scripts/e2e-s3-split.sh"];
 }
 
 function localWorkerBundleSentinels(bundle: string): readonly string[] {
@@ -2530,6 +2546,84 @@ test("PLANTED: fresh result parser enforces exact schema bytes and cleanup corre
       cleanupProven: true,
     }),
   ).toBe(true);
+});
+
+test("PLANTED: helper and parent reject every forbidden outcome optional-field mutation", () => {
+  const base = {
+    stdout: "",
+    stderr: "",
+    retainedStdoutBytes: 0,
+    retainedStderrBytes: 0,
+    retainedOutputBytes: 0,
+  };
+  const accepted: readonly Record<string, unknown>[] = [
+    { ...base, outcome: "exited", exitCode: 0 },
+    { ...base, outcome: "exited", exitCode: 137, signal: "SIG9" },
+    { ...base, outcome: "timeout", cleanupProven: true },
+    { ...base, outcome: "output-overrun", cleanupProven: true },
+    { ...base, outcome: "output-overrun", exitCode: 137, signal: "SIG9", cleanupProven: true },
+    { ...base, outcome: "descendant-leaked", exitCode: 0 },
+    { ...base, outcome: "descendant-leaked", exitCode: 137, signal: "SIG9" },
+    { ...base, outcome: "pipe-drain-unproven", exitCode: 0 },
+    { ...base, outcome: "inspection-unproven", cleanupProven: false },
+    { ...base, outcome: "inspection-unproven", exitCode: 0 },
+    { ...base, outcome: "inspection-unproven", exitCode: 0, cleanupProven: false },
+    { ...base, outcome: "ownership-unproven", cleanupProven: false },
+    { ...base, outcome: "ownership-unproven", cleanupProven: true },
+    { ...base, outcome: "ownership-unproven", exitCode: 0 },
+    { ...base, outcome: "ownership-unproven", exitCode: 0, cleanupProven: true },
+    { ...base, outcome: "spawn-failed" },
+    { ...base, outcome: "spawn-failed", cleanupProven: false },
+    { ...base, outcome: "spawn-failed", cleanupProven: true },
+    { ...base, outcome: "spawn-failed", exitCode: 125, cleanupProven: false },
+    { ...base, outcome: "spawn-failed", exitCode: 125, cleanupProven: true },
+  ];
+  const forbidden: readonly Record<string, unknown>[] = [
+    { ...base, outcome: "exited" },
+    { ...base, outcome: "exited", exitCode: 0, cleanupProven: false },
+    { ...base, outcome: "exited", exitCode: 256 },
+    { ...base, outcome: "exited", exitCode: 138, signal: "SIG9" },
+    { ...base, outcome: "timeout" },
+    { ...base, outcome: "timeout", cleanupProven: false },
+    { ...base, outcome: "timeout", exitCode: 0, cleanupProven: true },
+    { ...base, outcome: "output-overrun" },
+    { ...base, outcome: "output-overrun", cleanupProven: false },
+    { ...base, outcome: "output-overrun", signal: "SIG9", cleanupProven: true },
+    { ...base, outcome: "descendant-leaked" },
+    { ...base, outcome: "descendant-leaked", exitCode: 0, cleanupProven: false },
+    { ...base, outcome: "pipe-drain-unproven" },
+    { ...base, outcome: "pipe-drain-unproven", exitCode: 0, cleanupProven: true },
+    { ...base, outcome: "inspection-unproven" },
+    { ...base, outcome: "inspection-unproven", cleanupProven: true },
+    { ...base, outcome: "inspection-unproven", exitCode: 0, cleanupProven: true },
+    { ...base, outcome: "ownership-unproven" },
+    { ...base, outcome: "ownership-unproven", signal: "SIG9", cleanupProven: true },
+    {
+      ...base,
+      outcome: "spawn-failed",
+      exitCode: 137,
+      signal: "SIG9",
+      cleanupProven: true,
+    },
+    { ...base, outcome: "spawn-failed", exitCode: 125 },
+    { ...base, outcome: "spawn-failed", exitCode: 125, signal: "SIG125", cleanupProven: true },
+    { ...base, outcome: "spawn-failed", exitCode: 0, cleanupProven: true },
+    { ...base, outcome: "spawn-failed", signal: "SIG9", cleanupProven: false },
+  ];
+  for (const result of accepted) {
+    expect(isOwnedCommandResult(result)).toBe(true);
+    expect(isFreshDispatcherOwnedResultForTest(result)).toBe(true);
+  }
+  for (const result of forbidden) {
+    expect(isOwnedCommandResult(result)).toBe(false);
+    expect(isFreshDispatcherOwnedResultForTest(result)).toBe(false);
+  }
+  expect(FRESH_OWNED_COMMAND_DISPATCHER).toContain(
+    `const ownedOutcomeFieldsValid = ${ownedOutcomeFieldsValid.toString()};`,
+  );
+  expect(FRESH_OWNED_COMMAND_DISPATCHER).toContain(
+    `const ownedCommandResultIsExact = ${ownedCommandResultIsExact.toString()};`,
+  );
 });
 
 test("PLANTED: exact marker census refuses empty and truncated snapshots", () => {
