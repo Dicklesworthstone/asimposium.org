@@ -6,6 +6,7 @@ import {
   encodeSponsorFellowCursor,
   MintEnrollmentResponseSchema,
   OpaqueProblemSchema,
+  OperatorFellowCapAuditPageResponseSchema,
   OperatorFellowCapOverrideResponseSchema,
   OperatorFellowCapStateResponseSchema,
   ProblemDocumentSchema,
@@ -315,6 +316,34 @@ describe("sponsor enrollment routes", () => {
       sponsor_id: SPONSOR,
       active_fellow_limit: 6,
       sponsor_seq: 1,
+    });
+    const historyHeaders = await h.sign(
+      "",
+      "/v1/operators/sponsors/:sponsorId/fellow-cap/history",
+      "operator.fellow-cap.history",
+      "GET",
+      OPERATOR,
+      "operator",
+    );
+    const history = await h.app.fetch(
+      envelopeRequest(
+        `/v1/operators/sponsors/${SPONSOR}/fellow-cap/history`,
+        historyHeaders,
+        "GET",
+      ),
+    );
+    expect(history.status).toBe(200);
+    expect(OperatorFellowCapAuditPageResponseSchema.parse(await history.json())).toMatchObject({
+      audit_events: [
+        {
+          sponsor_id: SPONSOR,
+          operator_id: OPERATOR,
+          sponsor_seq: 1,
+          previous_active_fellow_limit: 5,
+          active_fellow_limit: 6,
+        },
+      ],
+      next_cursor: null,
     });
 
     const sponsorEnvelope = await h.sign(
