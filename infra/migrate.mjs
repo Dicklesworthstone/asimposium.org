@@ -1822,17 +1822,30 @@ async function readLocalLineageSnapshot(root, databaseName, localPersistTo = und
  * different function to the check than to the call.
  */
 /**
- * True only for a transport that declares, as its own data, that its methods
- * spawn an owned child. Read through the same own-data accessor discipline as
- * every other transport field so an inherited or getter-backed marker cannot
- * quietly buy a command the deadline cannot contain.
+ * Module-private provenance for transports whose settlement this file guarantees.
+ *
+ * A public `ownsBoundedCommand` property was FORGEABLE: any caller could set it,
+ * and the observation runner reads this to decide whether to await a command's
+ * cleanup unconditionally instead of bounding it. A forged marker therefore
+ * bought an unbounded await for a transport nothing had promised would settle —
+ * a hang, granted by a value the hanging party supplied.
+ *
+ * A `WeakSet` cannot be forged, enumerated, or reached from outside this module.
+ * Membership is added at exactly one place — the factory below, and only when it
+ * is using this module's own `runBoundedCommand`, whose TERM/KILL/reap/drain
+ * bounds are what make the await terminate. An injected runner never receives
+ * the privilege, because this file cannot promise anything about a function it
+ * did not write. Such a transport keeps the bounded, spawn-free treatment and a
+ * non-settling one is refused rather than waited on.
  */
+const SETTLEMENT_GUARANTEED_TRANSPORTS = new WeakSet();
+
 function transportOwnsBoundedCommand(transport) {
   return (
     typeof transport === "object" &&
     transport !== null &&
     !Array.isArray(transport) &&
-    Object.getOwnPropertyDescriptor(transport, "ownsBoundedCommand")?.value === true
+    SETTLEMENT_GUARANTEED_TRANSPORTS.has(transport)
   );
 }
 
@@ -1958,6 +1971,28 @@ function assertRemoteReadLimit(rows, maximum, code) {
 }
 
 /**
+ * Allocate one call's remaining monotonic budget between execution and cleanup.
+ *
+ * This tiny pure seam is exported so the exact arithmetic is testable without
+ * turning a 250 ms scheduling margin into a flaky subprocess timing oracle.
+ * The runtime below consumes this result directly. A transport backed by this
+ * module's owned runner withholds the entire composed cleanup reserve; an
+ * injected transport owns no process and receives only a bounded half-window.
+ */
+export function remoteExecutionAllocation(remainingMs, ownsBoundedCommand) {
+  if (typeof remainingMs !== "number" || !Number.isFinite(remainingMs) || remainingMs < 0) {
+    throw new TypeError("remainingMs must be a finite non-negative number");
+  }
+  const containmentReserveMs = ownsBoundedCommand
+    ? REMOTE_D1_CLEANUP_RESERVE_MS
+    : Math.min(REMOTE_D1_CLEANUP_RESERVE_MS, Math.floor(remainingMs / 2));
+  return {
+    containmentReserveMs,
+    executionMs: Math.max(0, remainingMs - containmentReserveMs),
+  };
+}
+
+/**
  * Bound one transport call in time, and flatten whatever it throws.
  *
  * A never-settling call is the failure mode a row cap cannot reach, so the
@@ -1998,9 +2033,8 @@ async function awaitBoundedRemote(budget, invoke, code, { ownsBoundedCommand = f
   // from execution rather than left for it to spend. A pure injected transport
   // may still be observed inside a deliberately tiny budget: split that evenly,
   // because it spawns nothing and its failure to settle costs no OS resource.
-  const containmentReserve = ownsBoundedCommand
-    ? REMOTE_D1_CLEANUP_RESERVE_MS
-    : Math.min(REMOTE_D1_CLEANUP_RESERVE_MS, Math.floor(remaining / 2));
+  const allocation = remoteExecutionAllocation(remaining, ownsBoundedCommand);
+  const containmentReserve = allocation.containmentReserveMs;
   const executionDeadlineAt = budget.deadlineAt - containmentReserve;
   let executionTimer;
   let containmentTimer;
@@ -2080,18 +2114,37 @@ async function awaitBoundedRemote(budget, invoke, code, { ownsBoundedCommand = f
     // result. `runBoundedCommand` returns `aborted` only after bounded cleanup,
     // and `process-reap-unproven` is preserved below.
     controller.abort();
-    const containment = await Promise.race([
-      settled,
-      timerResult(budget.deadlineAt, "containment-deadline"),
-    ]);
+    // AN OWNED COMMAND IS AWAITED, NEVER RACED.
+    //
+    // Racing the reserve against a real `runBoundedCommand` let the timer win
+    // while that command's cleanup promise was still pending: this function then
+    // returned `SETTLEMENT_UNPROVEN` — itself a statement ABOUT cleanup — while
+    // the child was still being signalled and reaped. That is the exact defect
+    // this composition exists to remove, and a bound cannot remove it, because
+    // the only thing a deadline can do once a child is running is stop
+    // OBSERVING the cleanup. It cannot stop the cleanup, and a receipt written
+    // while a child is still being reaped is a claim this process has not
+    // earned.
+    //
+    // Awaiting is bounded by construction rather than by a second timer. The
+    // pre-entry `REMOTE_D1_COMMAND_WINDOW_MS` refusal admits a command only when
+    // the whole composed cleanup tail still remains on the one monotonic
+    // deadline, and `runBoundedCommand` owns its own TERM grace, KILL, reap and
+    // pipe-drain bounds, so it always settles. If it ever did not, hanging here
+    // is still the honest outcome: this call would be waiting on a child it
+    // genuinely owns, rather than reporting a containment result it never saw.
+    //
+    // An injected transport owns no child and no OS resource, so a double that
+    // never settles is bounded by the reserve and reported as unproven below.
+    const containment = ownsBoundedCommand
+      ? await settled
+      : await Promise.race([settled, timerResult(budget.deadlineAt, "containment-deadline")]);
     if (containment.kind === "containment-deadline") {
-      // The reserve above is sized window-by-window to the worst bounded path an
-      // aborted `runBoundedCommand` can spend, so the default transport always
-      // settles inside it and never reaches here. Reaching here means an
-      // injected transport did not settle at all, and this call has therefore
-      // observed nothing about cleanup. Refuse with a code that says exactly
-      // that instead of borrowing a reap classification that was never made:
-      // a bounded refusal is honest, a fabricated containment claim is not.
+      // Unreachable for an owned command by the branch above; this is the
+      // injected-transport path only. Such a call has observed nothing about
+      // cleanup, so it refuses with a code that says exactly that instead of
+      // borrowing a reap classification that was never made: a bounded refusal
+      // is honest, a fabricated containment claim is not.
       fail(
         "REMOTE_D1_TRANSPORT_SETTLEMENT_UNPROVEN",
         "The staging D1 transport did not settle within its reserved containment window.",
@@ -2667,16 +2720,11 @@ export function createWranglerRemoteTransport({
       signal,
       toolEnvironment: minimalRemoteToolEnvironment(authority.account_id),
     });
-  return {
+  const transport = {
     // The string is deliberately a narrow capability, not a generic claim about
     // Wrangler. Only this D1-query command batch is covered by the cited D1
     // transaction documentation.
     atomicity: "d1-query-implicit-transaction-v1",
-    // Every method below spawns an owned Wrangler child. The observation runner
-    // reads this to refuse starting one whose cleanup would not fit in what is
-    // left of the shared deadline. An injected transport omits it and keeps the
-    // pure, spawn-free behaviour.
-    ownsBoundedCommand: true,
     describeTarget: async ({ signal, timeoutMs }) =>
       remoteDatabaseInfoOrRefuse(
         await run(["d1", "info", databaseId, "--json"], signal, timeoutMs),
@@ -2722,6 +2770,20 @@ export function createWranglerRemoteTransport({
       return { database_id: databaseId };
     },
   };
+  // The privilege is granted here and nowhere else, and ONLY for this module's
+  // own bounded runner. An injected `runCommand` is an arbitrary function this
+  // file cannot vouch for: granting it the unconditional-await path would let a
+  // never-settling injection hang the observation forever, which is precisely
+  // what a deadline exists to prevent. Such a transport stays on the bounded
+  // path and a non-settling one is refused as settlement-unproven.
+  // WeakSet provenance is meaningful only while the branded methods cannot be
+  // replaced. Freeze first, then grant the private capability to this exact
+  // immutable identity. Otherwise a caller could obtain a genuine transport,
+  // overwrite `describeTarget` with a never-settling function, and retain the
+  // unconditional-await privilege.
+  Object.freeze(transport);
+  if (runCommand === runBoundedCommand) SETTLEMENT_GUARANTEED_TRANSPORTS.add(transport);
+  return transport;
 }
 
 export function bootstrapInstallSql(artifact, appliedAt) {

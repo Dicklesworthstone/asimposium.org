@@ -49,6 +49,7 @@ import {
   readRemoteLineageSnapshotOrRefuse,
   readStateFile,
   redactStderr,
+  remoteExecutionAllocation,
   resolvePinnedWranglerCommand,
   runBoundedCommand,
   runMigrationCli,
@@ -466,10 +467,16 @@ function successfulRemoteInfo() {
 
 /**
  * A tiny workspace-shaped root for default-transport tests. Its pinned
- * Wrangler files exist only so path/version validation runs; the injected
- * command runner means no child process or provider is ever reached.
+ * Wrangler files exist only so path/version validation runs. Most callers
+ * inject a pure command runner; the owned-settlement plants instead replace
+ * this local entrypoint and exercise the real bounded child path. Neither form
+ * reaches a provider.
  */
-function defaultRemoteTransportRoot(name, databaseId = STAGING_DATABASE_ID) {
+function defaultRemoteTransportRoot(
+  name,
+  databaseId = STAGING_DATABASE_ID,
+  wranglerSource = "// command runner is injected by this pure fixture\n",
+) {
   const root = join(space, name);
   mkdirSync(join(root, "infra", "deploy-resolved"), { recursive: true });
   mkdirSync(join(root, "apps", "wire", "node_modules", "wrangler", "bin"), {
@@ -492,10 +499,23 @@ function defaultRemoteTransportRoot(name, databaseId = STAGING_DATABASE_ID) {
   );
   writeFileSync(
     join(root, "apps", "wire", "node_modules", "wrangler", "bin", "wrangler.js"),
-    "// command runner is injected by this pure fixture\n",
+    wranglerSource,
     "utf8",
   );
   return root;
+}
+
+async function waitForFixturePath(path, timeoutMs, label) {
+  const deadlineAt = performance.now() + timeoutMs;
+  while (!existsSync(path)) {
+    if (performance.now() >= deadlineAt) {
+      assert.fail(`${label} was not published within ${timeoutMs}ms`);
+    }
+    await new Promise((resolve) => {
+      const timer = setTimeout(resolve, 5);
+      timer.unref?.();
+    });
+  }
 }
 
 let stagingEnvironmentCache;
@@ -3402,6 +3422,206 @@ const cases = [
     },
   },
   {
+    // THE UNCONDITIONAL AWAIT IS A PRIVILEGE, AND IT MUST BE UNFORGEABLE.
+    //
+    // Awaiting an owned command's cleanup without a second timer is only safe
+    // when THIS module guarantees the command settles. A public
+    // `ownsBoundedCommand` property could be set by the caller, so a transport
+    // could hand itself the unbounded path and then never settle — a hang
+    // granted by a value the hanging party supplied. Provenance now lives in a
+    // module-private WeakSet, so both plants below must remain bounded.
+    name: "PLANTED-a-forged-owned-bounded-marker-buys-no-unbounded-await",
+    async execute() {
+      const environment = stagingEnvironment();
+
+      // A hand-built transport asserting the old marker, which never settles.
+      const forged = {
+        ownsBoundedCommand: true,
+        describeTarget: () => new Promise(() => {}),
+        query: () => new Promise(() => {}),
+      };
+      const forgedStartedAtMs = performance.now();
+      await expectAsyncFailure("forged-marker", "REMOTE_D1_TRANSPORT_SETTLEMENT_UNPROVEN", () =>
+        readRemoteLineageSnapshotOrRefuse(environment, forged, STAGING_DATABASE_ID, {
+          deadlineMs: 120,
+        }),
+      );
+      assert.ok(
+        performance.now() - forgedStartedAtMs < 5_000,
+        "a forged owned-bounded marker bought an unbounded await",
+      );
+
+      // The same forgery on the apply seam, which has its own capability gate.
+      const forgedApply = {
+        ownsBoundedCommand: true,
+        atomicity: "d1-query-implicit-transaction-v1",
+        describeTarget: () => new Promise(() => {}),
+        query: () => new Promise(() => {}),
+        execute: () => new Promise(() => {}),
+      };
+      const forgedApplyStartedAtMs = performance.now();
+      await expectAsyncFailure(
+        "forged-marker-apply",
+        "REMOTE_D1_TRANSPORT_SETTLEMENT_UNPROVEN",
+        () =>
+          applyPendingRemoteMigrationsOrRefuse(
+            environment,
+            forgedApply,
+            STAGING_DATABASE_ID,
+            [{ id: "0001_forged.sql", sequence: 1, digest: "a".repeat(64), sql: "SELECT 1;" }],
+            "2026-08-17T00:00:00.000Z",
+            { deadlineMs: 120 },
+          ),
+      );
+      assert.ok(
+        performance.now() - forgedApplyStartedAtMs < 5_000,
+        "a forged owned-bounded marker bought an unbounded apply await",
+      );
+    },
+  },
+  {
+    // The factory used to grant the privilege unconditionally, so an injected
+    // `runCommand` inherited a guarantee this module never made about it. A
+    // never-settling injected runner then hung the observation forever. The
+    // grant is now conditioned on the factory using its own bounded runner.
+    name: "PLANTED-a-factory-transport-with-an-injected-never-settling-runner-stays-bounded",
+    async execute() {
+      const environment = stagingEnvironment();
+      const root = defaultRemoteTransportRoot("injected-never-settler");
+      let runnerEntries = 0;
+      const transport = createWranglerRemoteTransport({
+        root,
+        environmentName: "staging",
+        environment,
+        resolvedDatabaseId: STAGING_DATABASE_ID,
+        runCommand: () => {
+          runnerEntries += 1;
+          return new Promise(() => {});
+        },
+      });
+
+      const startedAtMs = performance.now();
+      await expectAsyncFailure(
+        "injected-never-settler",
+        "REMOTE_D1_TRANSPORT_SETTLEMENT_UNPROVEN",
+        () =>
+          readRemoteLineageSnapshotOrRefuse(environment, transport, STAGING_DATABASE_ID, {
+            deadlineMs: 120,
+          }),
+      );
+      assert.ok(
+        performance.now() - startedAtMs < 5_000,
+        "an injected runner inherited the unconditional await and hung",
+      );
+      assert.equal(runnerEntries, 1, "the injected runner was not the thing that stalled");
+    },
+  },
+  {
+    // PRODUCTION-SHAPE CLEANUP EXHAUSTION.
+    //
+    // The rejected composition RACED the containment reserve against the owned
+    // command, so the absolute timer could return SETTLEMENT_UNPROVEN — itself a
+    // claim ABOUT cleanup — while a real `runBoundedCommand` was still
+    // signalling and reaping its child.
+    //
+    // An injected promise that resolves on abort cannot expose that: it settles
+    // instantly, so the race is never contested and the bug stays green. This
+    // plant spends the real windows instead. The child installs a SIGTERM
+    // listener that does not exit, so cleanup MUST escalate through the whole
+    // composed path — TERM, grace, KILL, reap, drain — before the real runner
+    // can settle.
+    //
+    // The assertion is an ORDERING, not a code: the outer refusal must not be
+    // observable before the owned command has settled. That is the property a
+    // deadline cannot buy, because once a child is running a timer can only stop
+    // this process OBSERVING the cleanup; it cannot stop the cleanup.
+    name: "PLANTED-an-owned-command-exhausting-real-cleanup-phases-settles-before-the-outer-refusal",
+    async execute() {
+      const environment = stagingEnvironment();
+      const readyPath = join(space, "owned-default-ready");
+      const termPath = join(space, "owned-default-term");
+      const root = defaultRemoteTransportRoot(
+        "owned-default-cleanup",
+        STAGING_DATABASE_ID,
+        `import { writeFileSync } from "node:fs";
+const readyPath = ${JSON.stringify(readyPath)};
+const termPath = ${JSON.stringify(termPath)};
+const publish = (path) => {
+  try { writeFileSync(path, String(process.pid), { flag: "wx", mode: 0o600 }); }
+  catch (error) { if (error?.code !== "EEXIST") throw error; }
+};
+process.on("SIGTERM", () => publish(termPath));
+publish(readyPath);
+await new Promise(() => {});
+`,
+      );
+      const ownedTransport = createWranglerRemoteTransport({
+        root,
+        environmentName: "staging",
+        environment,
+        resolvedDatabaseId: STAGING_DATABASE_ID,
+      });
+
+      // WeakSet provenance is safe only if this exact identity cannot have its
+      // guaranteed methods replaced after branding.
+      assert.equal(Object.isFrozen(ownedTransport), true);
+      assert.throws(() =>
+        Object.defineProperty(ownedTransport, "describeTarget", {
+          value: () => new Promise(() => {}),
+        }),
+      );
+
+      // Attach the rejection handler before the deliberate event-loop stall so
+      // the losing-promise mutation cannot surface as an unhandled rejection.
+      const observation = readRemoteLineageSnapshotOrRefuse(
+        environment,
+        ownedTransport,
+        STAGING_DATABASE_ID,
+        { deadlineMs: REMOTE_D1_COMMAND_WINDOW_MS + 1_000 },
+      ).then(
+        (value) => ({ value }),
+        (error) => ({ error }),
+      );
+
+      await waitForFixturePath(readyPath, 4_000, "default Wrangler readiness");
+      await waitForFixturePath(termPath, 4_000, "default Wrangler TERM receipt");
+      const childPid = Number(readFileSync(readyPath, "utf8"));
+      assert.equal(Number.isSafeInteger(childPid) && childPid > 1, true);
+
+      // Make the old absolute containment timer due while the real runner is
+      // still between TERM and KILL. A Promise.race implementation returns as
+      // soon as this stall ends; the fixed implementation resumes the runner,
+      // sends KILL, reaps, and only then classifies the deadline.
+      const stalledUntil = performance.now() + REMOTE_D1_CLEANUP_RESERVE_MS + 500;
+      while (performance.now() < stalledUntil) {
+        // Deliberately synchronous: this is the causal scheduler-delay plant.
+      }
+
+      const observed = await observation;
+      assert.equal(Object.hasOwn(observed, "value"), false, "an aborted observation succeeded");
+      assert.ok(observed.error instanceof MigrationError, `unexpected ${observed.error}`);
+      assert.notEqual(
+        observed.error.code,
+        "REMOTE_D1_TRANSPORT_SETTLEMENT_UNPROVEN",
+        "the outer call abandoned a real default command before cleanup settled",
+      );
+      assert.equal(observed.error.code, "REMOTE_OBSERVATION_DEADLINE_EXCEEDED");
+
+      let childStillExists = true;
+      try {
+        process.kill(childPid, 0);
+      } catch (error) {
+        assert.equal(error?.code, "ESRCH");
+        childStillExists = false;
+      }
+      assert.equal(
+        childStillExists,
+        false,
+        "the default Wrangler child was not reaped before refusal",
+      );
+    },
+  },
+  {
     // The containment reserve exists so the outer observation never emits a
     // receipt while the owned command is still cleaning up. A reserve shorter
     // than the real composed path would look correct on every fast plant and
@@ -3416,27 +3636,31 @@ const cases = [
     name: "PLANTED-a-shared-budget-spent-by-earlier-calls-refuses-a-later-default-command-before-it-starts",
     async execute() {
       const environment = stagingEnvironment();
-      let describeCalls = 0;
-      let queryCalls = 0;
-      const spent = REMOTE_D1_COMMAND_WINDOW_MS + 400;
-
-      // Declares itself command-backed exactly as the default Wrangler transport
-      // does, and burns most of the shared deadline inside its first call.
-      const transport = {
-        ownsBoundedCommand: true,
-        describeTarget: async () => {
-          describeCalls += 1;
-          await new Promise((resolve) => {
-            const timer = setTimeout(resolve, spent);
-            timer.unref?.();
-          });
-          return { database_id: STAGING_DATABASE_ID, database_name: STAGING_DATABASE_NAME };
-        },
-        query: async () => {
-          queryCalls += 1;
-          return { database_id: STAGING_DATABASE_ID, rows: [] };
-        },
-      };
+      const infoStartedPath = join(space, "shared-budget-info-started");
+      const executeStartedPath = join(space, "shared-budget-execute-started");
+      const spent = 600;
+      const root = defaultRemoteTransportRoot(
+        "shared-budget-default",
+        STAGING_DATABASE_ID,
+        `import { writeFileSync } from "node:fs";
+const args = process.argv.slice(2);
+const publish = (path) => writeFileSync(path, String(process.pid), { flag: "wx", mode: 0o600 });
+if (args.includes("info")) {
+  publish(${JSON.stringify(infoStartedPath)});
+  await Bun.sleep(${spent});
+  writeFileSync(1, ${JSON.stringify(`${JSON.stringify({ uuid: STAGING_DATABASE_ID, name: STAGING_DATABASE_NAME, read_replication: { mode: "disabled" } })}\n`)});
+} else {
+  publish(${JSON.stringify(executeStartedPath)});
+  writeFileSync(1, ${JSON.stringify(`${JSON.stringify([{ success: true, results: [], meta: { served_by_primary: true } }])}\n`)});
+}
+`,
+      );
+      const transport = createWranglerRemoteTransport({
+        root,
+        environmentName: "staging",
+        environment,
+        resolvedDatabaseId: STAGING_DATABASE_ID,
+      });
 
       await expectAsyncFailure(
         "exhausted shared budget",
@@ -3446,13 +3670,12 @@ const cases = [
             deadlineMs: spent + REMOTE_D1_COMMAND_WINDOW_MS - 200,
           }),
       );
-      assert.equal(describeCalls, 1, "the first command should still have run");
-      assert.equal(queryCalls, 0, "a later default command was started without room to contain it");
-
-      // The marker is own data only: an inherited or getter-backed one must not
-      // buy a command window, and a plain transport keeps the pure behaviour.
-      const inherited = Object.create({ ownsBoundedCommand: true });
-      assert.equal(Object.hasOwn(inherited, "ownsBoundedCommand"), false);
+      assert.equal(existsSync(infoStartedPath), true, "the first default command never ran");
+      assert.equal(
+        existsSync(executeStartedPath),
+        false,
+        "a later default command was started without room to contain it",
+      );
     },
   },
   {
@@ -3466,19 +3689,21 @@ const cases = [
     name: "PLANTED-a-microtask-that-burns-the-window-after-the-precheck-still-never-enters-the-runner",
     async execute() {
       const environment = stagingEnvironment();
-      let describeCalls = 0;
-      let queryCalls = 0;
-      const transport = {
-        ownsBoundedCommand: true,
-        describeTarget: async () => {
-          describeCalls += 1;
-          return { database_id: STAGING_DATABASE_ID, database_name: STAGING_DATABASE_NAME };
-        },
-        query: async () => {
-          queryCalls += 1;
-          return { database_id: STAGING_DATABASE_ID, rows: [] };
-        },
-      };
+      const spawnedPath = join(space, "post-precheck-default-spawned");
+      const root = defaultRemoteTransportRoot(
+        "post-precheck-default",
+        STAGING_DATABASE_ID,
+        `import { writeFileSync } from "node:fs";
+writeFileSync(${JSON.stringify(spawnedPath)}, String(process.pid), { flag: "wx", mode: 0o600 });
+writeFileSync(1, ${JSON.stringify(`${JSON.stringify({ uuid: STAGING_DATABASE_ID, name: STAGING_DATABASE_NAME, read_replication: { mode: "disabled" } })}\n`)});
+`,
+      );
+      const transport = createWranglerRemoteTransport({
+        root,
+        environmentName: "staging",
+        environment,
+        resolvedDatabaseId: STAGING_DATABASE_ID,
+      });
 
       // Queued BEFORE the synchronous entry, so the ordering is deterministic
       // rather than a race: the runner's precheck and its callback enqueue both
@@ -3507,8 +3732,11 @@ const cases = [
       // The message distinguishes the in-callback recheck from the outer
       // precheck, so this cannot pass by accidentally exercising the old path.
       assert.match(captured.message, /before the transport was entered/);
-      assert.equal(describeCalls, 0, "the default runner was entered without a containable window");
-      assert.equal(queryCalls, 0, "a query ran after the window was consumed");
+      assert.equal(
+        existsSync(spawnedPath),
+        false,
+        "the default runner spawned after its containable window was consumed",
+      );
     },
   },
   {
@@ -3517,33 +3745,36 @@ const cases = [
     // execution would be free to spend it and cleanup would run with none.
     name: "PLANTED-the-scheduling-margin-is-withheld-from-execution-not-spent-by-it",
     async execute() {
-      const environment = stagingEnvironment();
       const deadlineMs = REMOTE_D1_COMMAND_WINDOW_MS + 1_000;
-      let observedTimeoutMs;
-      const transport = {
-        ownsBoundedCommand: true,
-        describeTarget: async ({ timeoutMs }) => {
-          observedTimeoutMs = timeoutMs;
-          return { database_id: STAGING_DATABASE_ID, database_name: STAGING_DATABASE_NAME };
-        },
-        query: async () => ({ database_id: STAGING_DATABASE_ID, rows: [] }),
-      };
+      const allocation = remoteExecutionAllocation(deadlineMs, true);
 
-      await readRemoteLineageSnapshotOrRefuse(environment, transport, STAGING_DATABASE_ID, {
-        deadlineMs,
-      });
-
-      assert.ok(observedTimeoutMs !== undefined, "the transport never received an execution share");
       // The execution share may never reach into the reserved tail. Allocating
       // the margin to execution would push this above the bound and fail here.
-      assert.ok(
-        observedTimeoutMs <= deadlineMs - REMOTE_D1_CLEANUP_RESERVE_MS,
-        `execution share ${observedTimeoutMs}ms consumed the reserved cleanup tail`,
+      assert.deepEqual(
+        allocation,
+        {
+          containmentReserveMs: REMOTE_D1_CLEANUP_RESERVE_MS,
+          executionMs: deadlineMs - REMOTE_D1_CLEANUP_RESERVE_MS,
+        },
+        "the owned allocation did not withhold the exact cleanup reserve",
       );
       // ...and the floor is genuinely available, so the bound is not vacuous.
       assert.ok(
-        observedTimeoutMs >= REMOTE_D1_EXECUTION_FLOOR_MS - REMOTE_D1_SCHEDULING_MARGIN_MS,
-        `execution share ${observedTimeoutMs}ms is below the promised floor`,
+        allocation.executionMs >= REMOTE_D1_EXECUTION_FLOOR_MS,
+        `execution share ${allocation.executionMs}ms is below the promised floor`,
+      );
+      assert.equal(
+        remoteExecutionAllocation(deadlineMs, false).containmentReserveMs,
+        Math.floor(deadlineMs / 2),
+        "an injected transport accidentally inherited the owned cleanup reserve",
+      );
+
+      const source = readFileSync(new URL("./migrate.mjs", import.meta.url), "utf8");
+      assert.equal(
+        source.split("const allocation = remoteExecutionAllocation(remaining, ownsBoundedCommand);")
+          .length - 1,
+        1,
+        "the runtime stopped consuming the tested allocation seam",
       );
     },
   },
