@@ -1487,6 +1487,13 @@ watchdog_is_healthy() {
 # classifiers below: only the release gate needs a session-detached scanner.
 pre_release_supervisor_is_owned() {
   local pid="$1" pgid="$2" marker="$3" line
+  # Regression-only: model a PID/PGID identity that ceased to be authoritative
+  # after the first signal wait. The plant fails the second fresh proof before
+  # any controller-side group signal, rather than creating a foreign group.
+  if [[ "${S2_PRE_RELEASE_SECOND_KILL_AUTHORITY_CHECK:-0}" == 1 && \
+    "${S2_PLANT_PRE_RELEASE_SECOND_KILL_AUTHORITY:-none}" == recycled ]]; then
+    return 1
+  fi
   S2_DETACHED_SCAN_PHASE="supervisor"
   read_detached_process_snapshot -o pid=,pgid=,ppid=,stat=,command= -p "${pid}" || return 1
   line="${S2_DETACHED_PROCESS_SNAPSHOT}"
@@ -1619,14 +1626,30 @@ startup_journal_last_phase() {
 signal_pre_release_owned_group() {
   local signal="$1" pid="$2" pgid="$3" marker="$4"
   pre_release_supervisor_is_owned "${pid}" "${pgid}" "${marker}" || return 1
+  if [[ "${signal}" == KILL && "${S2_PLANT_PRE_RELEASE_FIRST_KILL_NOOP:-0}" == 1 && \
+    "${S2_PRE_RELEASE_FIRST_KILL_NOOP_CONSUMED:-0}" == 0 ]]; then
+    # Test-only: retain the exact direct child through the bounded wait so the
+    # second-KILL authorization path can be exercised without signalling a
+    # foreign or recycled numeric process group.
+    S2_PRE_RELEASE_FIRST_KILL_NOOP_CONSUMED=1
+    return 0
+  fi
   kill "-${signal}" -- "-${pgid}" 2>/dev/null
 }
 
 kill_pre_release_owned_group_to_zero() {
   local pid="$1" pgid="$2" marker="$3" persist="$4" port="$5" proof_scope="$6" tick
+  local second_authority_plant="${S2_PLANT_PRE_RELEASE_SECOND_KILL_AUTHORITY:-none}"
+  case "${second_authority_plant}" in
+    none|departed|recycled) ;;
+    *) return 1 ;;
+  esac
+  S2_PRE_RELEASE_SECOND_KILL_SENT=0
+  S2_PRE_RELEASE_SECOND_KILL_AUTHORITY=not-needed
   signal_pre_release_owned_group KILL "${pid}" "${pgid}" "${marker}" || return 1
   for ((tick = 0; tick < S2_TERMINATE_WAIT_TICKS; tick += 1)); do
     if ! kill -0 -- "-${pgid}" 2>/dev/null; then
+      S2_PRE_RELEASE_SECOND_KILL_AUTHORITY=departed
       wait "${pid}" 2>/dev/null || :
       if [[ "${proof_scope}" == "server" ]]; then
         assert_no_run_survivors "${persist}" "${port}" "${marker}" || return 1
@@ -1635,13 +1658,26 @@ kill_pre_release_owned_group_to_zero() {
     fi
     sleep 0.1
   done
-  # A first KILL can still take time to become observable while a process is in
-  # kernel state. The unreaped direct child still owns PID == PGID, so retrying
-  # this exact group cannot target a recycled identity. ESRCH is acceptable only
-  # when a fresh kernel check proves the group already disappeared.
-  if ! kill -KILL -- "-${pgid}" 2>/dev/null && kill -0 -- "-${pgid}" 2>/dev/null; then
+  # A numeric PID/PGID is not lasting authority. Reclassify the exact live
+  # supervisor immediately before a second group KILL; if the resample cannot
+  # establish current identity and group liveness, leave the group untouched.
+  S2_PRE_RELEASE_SECOND_KILL_AUTHORITY_CHECK=1
+  if ! pre_release_supervisor_is_owned "${pid}" "${pgid}" "${marker}"; then
+    S2_PRE_RELEASE_SECOND_KILL_AUTHORITY=unproved
+    if [[ "${second_authority_plant}" == recycled ]]; then
+      S2_PRE_RELEASE_SECOND_KILL_AUTHORITY=recycled
+    fi
+    S2_PRE_RELEASE_SECOND_KILL_AUTHORITY_CHECK=0
     return 1
   fi
+  S2_PRE_RELEASE_SECOND_KILL_AUTHORITY_CHECK=0
+  S2_PRE_RELEASE_SECOND_KILL_AUTHORITY=fresh
+  kill -KILL -- "-${pgid}" 2>/dev/null || {
+    # A vanished group after the fresh proof is a success only once the bounded
+    # disappearance/reap loop below observes it; a still-live group is refusal.
+    kill -0 -- "-${pgid}" 2>/dev/null && return 1
+  }
+  S2_PRE_RELEASE_SECOND_KILL_SENT=1
   for ((tick = 0; tick < S2_TERMINATE_WAIT_TICKS; tick += 1)); do
     if ! kill -0 -- "-${pgid}" 2>/dev/null; then
       if wait "${pid}" 2>/dev/null; then
@@ -1702,7 +1738,8 @@ start_pinned_supervisor() {
   local status_file="$1" label="$2" persist="$3" port="$4" proof_scope="$5"
   local marker pid deadline control_fifo release_fifo release_token arm_token abort_token persistent_helper_pid_file
   local persistent_helper_pid=""
-  local watchdog_pid_file watchdog_health watchdog_startup watchdog_scan_hang_armed arm_fragment_observed watchdog_pid watchdog_snapshot_status tick release_sent=0 watchdog_proved=0
+  local watchdog_pid_file watchdog_health watchdog_startup watchdog_scan_hang_armed
+  local watchdog_journal_fd6_observed arm_fragment_observed watchdog_pid watchdog_snapshot_status tick release_sent=0 watchdog_proved=0
   local plant_watchdog_exit_on_term="${S2_PLANT_WATCHDOG_EXIT_ON_TERM:-0}"
   local plant_supervisor_exit_on_term="${S2_PLANT_SUPERVISOR_EXIT_ON_TERM:-0}"
   local plant_persistent_pre_release_helper="${S2_PLANT_PERSISTENT_PRE_RELEASE_HELPER:-0}"
@@ -1714,6 +1751,7 @@ start_pinned_supervisor() {
   local plant_watchdog_checkpoint_open_failure="${S2_PLANT_WATCHDOG_CHECKPOINT_OPEN_FAILURE:-0}"
   local plant_wrong_arm_token="${S2_PLANT_WRONG_ARM_TOKEN:-0}"
   local plant_startup_journal_preexisting="${S2_PLANT_STARTUP_JOURNAL_PREEXISTING:-0}"
+  local plant_startup_journal_exact_fd6="${S2_PLANT_STARTUP_JOURNAL_EXACT_FD6:-0}"
   local plant_startup_journal_append_failure="${S2_PLANT_STARTUP_JOURNAL_APPEND_FAILURE_AFTER_ARM:-0}"
   local plant_watchdog_ps_hang="${S2_PLANT_WATCHDOG_PS_HANG:-0}"
   local plant_supervisor_signal_after_watchdog="${S2_PLANT_SUPERVISOR_SIGNAL_AFTER_WATCHDOG:-none}"
@@ -1760,6 +1798,10 @@ start_pinned_supervisor() {
     *) return 1 ;;
   esac
   case "${plant_startup_journal_preexisting}" in
+    0|1) ;;
+    *) return 1 ;;
+  esac
+  case "${plant_startup_journal_exact_fd6}" in
     0|1) ;;
     *) return 1 ;;
   esac
@@ -1848,6 +1890,8 @@ start_pinned_supervisor() {
   [[ ! -e "${watchdog_health}" && ! -L "${watchdog_health}" ]] || return 1
   watchdog_startup="${status_file}.watchdog.startup"
   [[ ! -e "${watchdog_startup}" && ! -L "${watchdog_startup}" ]] || return 1
+  watchdog_journal_fd6_observed="${status_file}.watchdog.journal-fd6-observed"
+  [[ ! -e "${watchdog_journal_fd6_observed}" && ! -L "${watchdog_journal_fd6_observed}" ]] || return 1
   watchdog_scan_hang_armed="${status_file}.watchdog.scan-hang-armed"
   [[ ! -e "${watchdog_scan_hang_armed}" && ! -L "${watchdog_scan_hang_armed}" ]] || return 1
   arm_fragment_observed="${status_file}.watchdog.arm-fragment-observed"
@@ -1873,13 +1917,32 @@ start_pinned_supervisor() {
   # creates a fresh session/process group without Bash job-control mode, which otherwise can
   # detach background jobs from the harness runner and leave their parent identity unusable.
   command -v perl >/dev/null 2>&1 || return 1
-  perl -MPOSIX=setsid,dup2 -MFcntl=:DEFAULT -e '
+  perl -MPOSIX=setsid,dup2,close -MFcntl=:DEFAULT -e '
     setsid() or exit 125;
     $SIG{HUP} = $SIG{INT} = $SIG{TERM} = "DEFAULT";
     my $journal_path = shift @ARGV;
+    my $plant_exact_fd6 = shift @ARGV;
     umask 0077;
+    if ($plant_exact_fd6) {
+      # Force the O_EXCL journal allocation onto descriptor 6. The duplicate
+      # below is dup2(6, 6), which leaves the descriptor flags unchanged.
+      # This is a causal plant for the exact FD_CLOEXEC case, not a simulated
+      # journal write.
+      POSIX::close($_) for 3 .. 6;
+      open(my $filler_three, ">", "/dev/null") or exit 73;
+      open(my $filler_four, ">", "/dev/null") or exit 73;
+      open(my $filler_five, ">", "/dev/null") or exit 73;
+    }
     sysopen(my $journal, $journal_path, O_WRONLY | O_CREAT | O_EXCL, 0600) or exit 73;
+    (!$plant_exact_fd6 || fileno($journal) == 6) or exit 73;
     dup2(fileno($journal), 6) == 6 or exit 73;
+    if (fileno($journal) == 6) {
+      # POSIX dup2 only clears FD_CLOEXEC when it creates a distinct target.
+      # Explicitly clear descriptor 6 when source and target are identical.
+      my $flags = fcntl($journal, F_GETFD, 0);
+      defined $flags or exit 73;
+      defined fcntl($journal, F_SETFD, $flags & ~FD_CLOEXEC) or exit 73;
+    }
     $^F = 6;
     exec @ARGV;
     exit 125;
@@ -1911,7 +1974,9 @@ start_pinned_supervisor() {
     plant_post_release_checkpoint_delay="${25}"
     plant_post_release_safe_barrier="${26}"
     plant_post_release_safe_barrier_abort="${27}"
-    shift 27
+    plant_startup_journal_exact_fd6="${28}"
+    watchdog_journal_fd6_observed="${29}"
+    shift 29
     supervisor_pid="$$"
     arm_fragment_observed="${status_file}.watchdog.arm-fragment-observed"
     post_release_safe_barrier="${status_file}.post-release-safe-barrier"
@@ -1926,6 +1991,15 @@ start_pinned_supervisor() {
       exec 6>&-
       exit "${signal_status}"
     }
+    if [[ "${plant_startup_journal_exact_fd6}" == 1 ]]; then
+      # This runs only after Perl exec. It observes FD 6 directly, writes a
+      # private O_EXCL sidecar, then the first startup journal phase below
+      # proves that descriptor remains writable in the supervisor.
+      [[ -e /dev/fd/6 && ! -L /dev/fd/6 ]] || exit "${checkpoint_io_status}"
+      (umask 077; set -o noclobber; \
+        printf "journal-fd6-open %s\n" "${supervisor_pid}" >"${watchdog_journal_fd6_observed}") \
+        2>/dev/null || exit "${checkpoint_io_status}"
+    fi
     record_startup_phase supervisor-started || exit "${checkpoint_io_status}"
     trap "pre_release_signal term 143" TERM
     trap "pre_release_signal hup 129" HUP
@@ -2031,11 +2105,7 @@ start_pinned_supervisor() {
     record_startup_phase arm-checkpoint-published || exit "${checkpoint_io_status}"
     record_startup_phase launch-checkpoint-attempt || exit "${checkpoint_io_status}"
     case "${plant_watchdog_checkpoint_corruption}" in
-      none)
-        printf "spawn-attempted %s\n" "${supervisor_pid}" >"${watchdog_launch_status}" || \
-          exit "${checkpoint_io_status}"
-        record_startup_phase launch-checkpoint-published || exit "${checkpoint_io_status}"
-        ;;
+      none) ;;
       empty)
         : >"${watchdog_launch_status}" || exit 125
         record_startup_phase launch-checkpoint-corrupt || :
@@ -2076,6 +2146,12 @@ start_pinned_supervisor() {
     watchdog_pid="$!"
     [[ "${watchdog_pid}" =~ ^[0-9]+$ ]] || exit 125
     printf "%s\n" "${watchdog_pid}" >"${watchdog_pid_file}" || exit 125
+    # The launch checkpoint is an observation, not an intent: it is emitted
+    # only after the watchdog has actually forked and its exact numeric PID is
+    # durably published for the parent proof.
+    printf "spawn-attempted %s\n" "${supervisor_pid}" >"${watchdog_launch_status}" || \
+      exit "${checkpoint_io_status}"
+    record_startup_phase launch-checkpoint-published || exit "${checkpoint_io_status}"
     record_startup_phase watchdog-pid-published || exit "${checkpoint_io_status}"
     if [[ "${S2_PLANT_SUPERVISOR_EXIT_AFTER_WATCHDOG:-0}" == 1 ]]; then
       exit 125
@@ -2193,6 +2269,8 @@ start_pinned_supervisor() {
     "${plant_post_release_checkpoint_delay}" \
     "${plant_post_release_safe_barrier}" \
     "${plant_post_release_safe_barrier_abort}" \
+    "${plant_startup_journal_exact_fd6}" \
+    "${watchdog_journal_fd6_observed}" \
     "$@" &
   pid=$!
   S2_LAST_SUPERVISOR_PGID="${pid}"
@@ -3519,8 +3597,16 @@ cleanup_post_release_controller() {
 }
 
 post_release_controller_refuse() {
+  local refusal_status=1
+  case "${S2_PLANT_POST_RELEASE_PARTIAL_REFUSAL_FAILURE:-0}" in
+    0) ;;
+    # This plant runs only after the exact controller cleanup succeeds. It proves that a
+    # caller cannot turn an unexpected refusal status into a terminal pass by falling through.
+    1) refusal_status=91 ;;
+    *) return 125 ;;
+  esac
   cleanup_post_release_controller || return 125
-  return 1
+  return "${refusal_status}"
 }
 
 # Spawn the raw controller with a unique argv marker and register its direct PID in the very next
@@ -3570,6 +3656,7 @@ start_post_release_controller() {
     S2_POST_RELEASE_SAFE_CONTROLLER_MARKER="${S2_POST_RELEASE_CONTROLLER_MARKER}" \
     S2_POST_RELEASE_SAFE_CONTROLLER_IDENTITY="${S2_POST_RELEASE_CONTROLLER_IDENTITY}" \
     S2_PLANT_POST_RELEASE_READY_PREDICATE="${predicate_mode}" \
+    S2_PLANT_POST_RELEASE_PARTIAL_REFUSAL_FAILURE=0 \
     bash "${BASH_SOURCE[0]}" \
       >"${controller_stdout}" 2>"${controller_stderr}" &
   # This assignment is intentionally adjacent to `$!`: an EXIT trap must already have the exact
@@ -6003,6 +6090,7 @@ run_s2_shell_regression_test() {
     local plant_partial_refusal="${S2_PLANT_POST_RELEASE_PARTIAL_REFUSAL:-0}"
     local plant_partial_pending_barrier="${S2_PLANT_POST_RELEASE_PARTIAL_PENDING_BARRIER:-0}"
     local plant_outer_term_before_pending="${S2_PLANT_POST_RELEASE_OUTER_TERM_BEFORE_PENDING:-0}"
+    local plant_partial_refusal_failure="${S2_PLANT_POST_RELEASE_PARTIAL_REFUSAL_FAILURE:-0}"
     local post_release_safe_barrier_observed=false controller_identity_attested=false
     local controller_visible_ready_predicate_samples=0
     local start_returned_before_controller_release=true
@@ -6010,9 +6098,12 @@ run_s2_shell_regression_test() {
     local partial_predicate_final_visible=true partial_predicate_observer_samples=-1
     local partial_observation_controller_reaped=false partial_controller_evidence_sealed=true
     local partial_pending_term_barrier_observed=false
+    local evidence_sealing_refused=false
     local no_exact_group_survivor=false
     [[ "${plant_partial_refusal}" == 0 || "${plant_partial_refusal}" == 1 ]] || return 1
     [[ "${plant_partial_pending_barrier}" == "${plant_partial_refusal}" ]] || return 1
+    [[ "${plant_partial_refusal_failure}" == 0 || "${plant_partial_refusal_failure}" == 1 ]] || return 1
+    [[ "${plant_partial_refusal_failure}" == 0 || "${plant_partial_refusal}" == 1 ]] || return 1
     [[ "${plant_outer_term_before_pending}" == 0 || \
       ( "${plant_outer_term_before_pending}" == 1 && \
         "${plant_partial_refusal}" == 0 && "${plant_partial_pending_barrier}" == 0 ) ]] || return 1
@@ -6231,7 +6322,11 @@ run_s2_shell_regression_test() {
       post_release_controller_refuse
       return $?
     fi
-    partial_predicate_final_visible=false
+    if [[ -e "${controller_predicate}.1" || -L "${controller_predicate}.1" ]]; then
+      partial_predicate_final_visible=true
+    else
+      partial_predicate_final_visible=false
+    fi
     partial_predicate_observer_samples="${S2_POST_RELEASE_READY_PREDICATE_SAMPLES}"
     if [[ "${plant_partial_refusal}" == 1 ]]; then
       if [[ "${plant_partial_pending_barrier}" == 1 ]]; then
@@ -6246,27 +6341,52 @@ run_s2_shell_regression_test() {
       # this state directly from pending-without-final, so an external TERM in this interval
       # cannot make either process seal a manifest.
       S2_EVIDENCE_SEALING_REFUSED_FOR_PARTIAL_OBSERVATION=1
-      post_release_controller_refuse
-      cleanup_status=$?
-      [[ ${cleanup_status} -eq 1 && \
-        "${S2_POST_RELEASE_CONTROLLER_CLEANUP_STAGE}" == complete && \
-        -z "${S2_POST_RELEASE_CONTROLLER_PID}" && \
-        ! -e "${partial_child_run_dir}/${S2_COST_MANIFEST_RELATIVE_PATH}" && \
-        ! -L "${partial_child_run_dir}/${S2_COST_MANIFEST_RELATIVE_PATH}" ]] || return 125
-      partial_observation_controller_reaped=true
+      if post_release_controller_refuse; then
+        cleanup_status=0
+      else
+        cleanup_status=$?
+      fi
+      if [[ ${cleanup_status} -ne 1 ]]; then
+        emit "{\"tool\":\"bash+ps+lsof\",\"package\":\"apps/wire\",\"suite\":\"s2-krater-shell\",\"status\":\"fail\",\"code\":\"S2_POST_RELEASE_PARTIAL_REFUSAL_UNEXPECTED_STATUS\",\"refusal_status\":$(json_decimal_or_null "${cleanup_status}"),\"reproduce\":\"S2_SHELL_REGRESSION_TEST=post-release-safe-checkpoint S2_PLANT_POST_RELEASE_PARTIAL_REFUSAL=1 S2_PLANT_POST_RELEASE_PARTIAL_REFUSAL_FAILURE=1 scripts/e2e-s2-krater.sh\"}"
+        [[ ${cleanup_status} -ne 0 ]] || return 125
+        return "${cleanup_status}"
+      fi
+      partial_observation_controller_reaped=false
+      if [[ "${S2_POST_RELEASE_CONTROLLER_CLEANUP_STAGE}" == complete && \
+        -z "${S2_POST_RELEASE_CONTROLLER_PID}" ]]; then
+        partial_observation_controller_reaped=true
+      fi
       partial_controller_evidence_sealed=false
-      emit "{\"tool\":\"bash+ps+lsof\",\"package\":\"apps/wire\",\"suite\":\"s2-krater-shell\",\"status\":\"refused\",\"terminal\":true,\"scenario\":\"partial-post-release-predicate-is-never-a-ready-observation\",\"code\":\"S2_POST_RELEASE_PARTIAL_OBSERVATION_REFUSED\",\"partial_predicate_final_visible\":$(json_bool "${partial_predicate_final_visible}"),\"partial_predicate_observer_samples\":$(json_decimal_or_null "${partial_predicate_observer_samples}"),\"partial_pending_term_barrier_observed\":$(json_bool "${partial_pending_term_barrier_observed}"),\"partial_observation_controller_reaped\":$(json_bool "${partial_observation_controller_reaped}"),\"partial_controller_evidence_sealed\":$(json_bool "${partial_controller_evidence_sealed}"),\"evidence_sealing_refused\":true,\"reproduce\":\"S2_SHELL_REGRESSION_TEST=post-release-safe-checkpoint S2_PLANT_POST_RELEASE_PARTIAL_REFUSAL=1 S2_PLANT_POST_RELEASE_PARTIAL_PENDING_BARRIER=1 scripts/e2e-s2-krater.sh\"}"
+      if [[ -e "${partial_child_run_dir}/${S2_COST_MANIFEST_RELATIVE_PATH}" || \
+        -L "${partial_child_run_dir}/${S2_COST_MANIFEST_RELATIVE_PATH}" ]]; then
+        partial_controller_evidence_sealed=true
+      fi
+      if [[ "${S2_EVIDENCE_SEALING_REFUSED_FOR_PARTIAL_OBSERVATION}" == 1 ]]; then
+        evidence_sealing_refused=true
+      fi
+      [[ "${partial_predicate_final_visible}" == false && \
+        ${partial_predicate_observer_samples} -eq 0 && \
+        "${partial_observation_controller_reaped}" == true && \
+        "${partial_controller_evidence_sealed}" == false && \
+        "${evidence_sealing_refused}" == true ]] || return 125
+      emit "{\"tool\":\"bash+ps+lsof\",\"package\":\"apps/wire\",\"suite\":\"s2-krater-shell\",\"status\":\"refused\",\"terminal\":true,\"scenario\":\"partial-post-release-predicate-is-never-a-ready-observation\",\"code\":\"S2_POST_RELEASE_PARTIAL_OBSERVATION_REFUSED\",\"partial_predicate_final_visible\":$(json_bool "${partial_predicate_final_visible}"),\"partial_predicate_observer_samples\":$(json_decimal_or_null "${partial_predicate_observer_samples}"),\"partial_pending_term_barrier_observed\":$(json_bool "${partial_pending_term_barrier_observed}"),\"partial_observation_controller_reaped\":$(json_bool "${partial_observation_controller_reaped}"),\"partial_controller_evidence_sealed\":$(json_bool "${partial_controller_evidence_sealed}"),\"evidence_sealing_refused\":$(json_bool "${evidence_sealing_refused}"),\"reproduce\":\"S2_SHELL_REGRESSION_TEST=post-release-safe-checkpoint S2_PLANT_POST_RELEASE_PARTIAL_REFUSAL=1 S2_PLANT_POST_RELEASE_PARTIAL_PENDING_BARRIER=1 scripts/e2e-s2-krater.sh\"}"
       return 1
     fi
     cleanup_post_release_controller || return 1
-    [[ "${S2_POST_RELEASE_CONTROLLER_CLEANUP_STAGE}" == complete && \
-      -z "${S2_POST_RELEASE_CONTROLLER_PID}" ]] || return 1
-    partial_observation_controller_reaped=true
-    if [[ ! -e "${partial_child_run_dir}/${S2_COST_MANIFEST_RELATIVE_PATH}" && \
-      ! -L "${partial_child_run_dir}/${S2_COST_MANIFEST_RELATIVE_PATH}" ]]; then
-      partial_controller_evidence_sealed=false
+    partial_observation_controller_reaped=false
+    if [[ "${S2_POST_RELEASE_CONTROLLER_CLEANUP_STAGE}" == complete && \
+      -z "${S2_POST_RELEASE_CONTROLLER_PID}" ]]; then
+      partial_observation_controller_reaped=true
     fi
-    [[ "${partial_controller_evidence_sealed}" == false ]] || return 1
+    partial_controller_evidence_sealed=false
+    if [[ -e "${partial_child_run_dir}/${S2_COST_MANIFEST_RELATIVE_PATH}" || \
+      -L "${partial_child_run_dir}/${S2_COST_MANIFEST_RELATIVE_PATH}" ]]; then
+      partial_controller_evidence_sealed=true
+    fi
+    [[ "${partial_predicate_final_visible}" == false && \
+      ${partial_predicate_observer_samples} -eq 0 && \
+      "${partial_observation_controller_reaped}" == true && \
+      "${partial_controller_evidence_sealed}" == false ]] || return 1
 
     safe_status_file="${S2_STATE_DIR}/post-release-safe-checkpoint-abort-$(random_hex 8).status"
     if S2_PLANT_POST_RELEASE_SAFE_BARRIER=1 \
@@ -6283,7 +6403,7 @@ run_s2_shell_regression_test() {
     kill -0 -- "-${S2_LAST_SUPERVISOR_PGID}" 2>/dev/null && return 1
     assert_no_run_survivors "${S2_STATE_DIR}" "${S2_PORT}" "${S2_LAST_SUPERVISOR_MARKER}" || return 1
     no_exact_group_survivor=true
-    emit '{"tool":"bash+ps","package":"apps/wire","suite":"s2-krater-shell","status":"refused","code":"S2_POST_RELEASE_SAFE_CHECKPOINT_TERMINATED","start_failure_stage":"post-release-safe-checkpoint","no_exact_group_survivor":true,"reproduce":"S2_SHELL_REGRESSION_TEST=post-release-safe-checkpoint scripts/e2e-s2-krater.sh"}'
+    emit "{\"tool\":\"bash+ps\",\"package\":\"apps/wire\",\"suite\":\"s2-krater-shell\",\"status\":\"refused\",\"code\":\"S2_POST_RELEASE_SAFE_CHECKPOINT_TERMINATED\",\"start_failure_stage\":\"post-release-safe-checkpoint\",\"no_exact_group_survivor\":$(json_bool "${no_exact_group_survivor}"),\"reproduce\":\"S2_SHELL_REGRESSION_TEST=post-release-safe-checkpoint scripts/e2e-s2-krater.sh\"}"
     emit "{\"tool\":\"bash+ps+lsof\",\"package\":\"apps/wire\",\"suite\":\"s2-krater-shell\",\"status\":\"pass\",\"terminal\":true,\"scenario\":\"release-consumption-is-not-ready-until-final-traps-and-canonical-post-release-checkpoint\",\"post_release_safe_barrier_observed\":$(json_bool "${post_release_safe_barrier_observed}"),\"controller_identity_attested\":$(json_bool "${controller_identity_attested}"),\"controller_visible_ready_predicate_samples\":$(json_decimal_or_null "${controller_visible_ready_predicate_samples}"),\"start_returned_before_controller_release\":$(json_bool "${start_returned_before_controller_release}"),\"parser_early_return_controller_reaped\":$(json_bool "${parser_early_return_controller_reaped}"),\"partial_predicate_final_visible\":$(json_bool "${partial_predicate_final_visible}"),\"partial_predicate_observer_samples\":$(json_decimal_or_null "${partial_predicate_observer_samples}"),\"partial_observation_controller_reaped\":$(json_bool "${partial_observation_controller_reaped}"),\"partial_controller_evidence_sealed\":$(json_bool "${partial_controller_evidence_sealed}"),\"no_exact_group_survivor\":$(json_bool "${no_exact_group_survivor}"),\"reproduce\":\"S2_SHELL_REGRESSION_TEST=post-release-safe-checkpoint scripts/e2e-s2-krater.sh\"}"
     return 0
   fi
@@ -6292,7 +6412,7 @@ run_s2_shell_regression_test() {
     local fixture expected_status expected_phase expected_stage payload_started_file signal_name fixture_started_at fixture_elapsed
     for fixture in \
       preexisting-journal wrong-arm signal-hup signal-int signal-term \
-      append-failure checkpoint-open-failure signal-term-hung-watchdog-scan; do
+      append-failure checkpoint-open-failure exact-fd6-cloexec signal-term-hung-watchdog-scan; do
       status_file="${S2_STATE_DIR}/watchdog-startup-${fixture}-$(random_hex 8).status"
       payload_started_file="${S2_STATE_DIR}/watchdog-startup-${fixture}-$(random_hex 8).payload"
       expected_phase=""
@@ -6384,6 +6504,21 @@ run_s2_shell_regression_test() {
             return 1
           fi
           ;;
+        exact-fd6-cloexec)
+          expected_status=143
+          expected_phase=signal-term
+          if S2_PLANT_STARTUP_JOURNAL_EXACT_FD6=1 \
+            S2_PLANT_SUPERVISOR_SIGNAL_AFTER_ARM=TERM \
+            start_pinned_supervisor "${status_file}" "watchdog-startup-${fixture}" \
+              "${S2_STATE_DIR}" "${S2_PORT}" client \
+              bash -c 'printf started >"$1"' s2-watchdog-startup-payload \
+                "${payload_started_file}"; then
+            return 1
+          fi
+          checkpoint_file_matches \
+            "${status_file}.watchdog.journal-fd6-observed" journal-fd6-open \
+            "${S2_LAST_SUPERVISOR_PGID}" || return 1
+          ;;
         *) return 1 ;;
       esac
       [[ "${S2_START_SUPERVISOR_EXIT_STATUS}" == "${expected_status}" && \
@@ -6421,7 +6556,7 @@ run_s2_shell_regression_test() {
       "${S2_STARTED_WATCHDOG_PID}" "${S2_STARTED_WATCHDOG_HEALTH}" \
       "${S2_STATE_DIR}" "${S2_PORT}" client || return 1
     kill -0 -- "-${S2_STARTED_PGID}" 2>/dev/null && return 1
-    emit '{"tool":"bash+fifo","package":"apps/wire","suite":"s2-krater-shell","status":"pass","scenario":"preopened-startup-journal-types-create-gate-signal-append-and-fragmented-read-outcomes","journal_mode":"0600","startup_create_status":73,"gate_mismatch_status":65,"signal_hup_status":129,"signal_int_status":130,"signal_term_status":143,"append_failure_status":74,"watchdog_scan_deadline_seconds":1,"fragmented_arm_token_accepted":true,"payload_release_refused_for_failures":true,"no_exact_group_survivor":true,"reproduce":"S2_SHELL_REGRESSION_TEST=watchdog-startup-diagnostics scripts/e2e-s2-krater.sh"}'
+    emit '{"tool":"bash+fifo","package":"apps/wire","suite":"s2-krater-shell","status":"pass","scenario":"preopened-startup-journal-types-create-gate-signal-append-exact-fd6-cloexec-and-fragmented-read-outcomes","journal_mode":"0600","startup_create_status":73,"gate_mismatch_status":65,"signal_hup_status":129,"signal_int_status":130,"signal_term_status":143,"append_failure_status":74,"exact_fd6_cloexec_causally_observed":true,"watchdog_scan_deadline_seconds":1,"fragmented_arm_token_accepted":true,"payload_release_refused_for_failures":true,"no_exact_group_survivor":true,"reproduce":"S2_SHELL_REGRESSION_TEST=watchdog-startup-diagnostics scripts/e2e-s2-krater.sh"}'
     return 0
   fi
 
@@ -6474,16 +6609,13 @@ run_s2_shell_regression_test() {
     fi
     [[ "${S2_START_FAILURE_STAGE}" == "watchdog-publication" && \
       "${S2_START_SUPERVISOR_EXIT_STATUS}" == 125 && \
-      -f "${status_file}.watchdog.launch" && ! -L "${status_file}.watchdog.launch" && \
+      ! -e "${status_file}.watchdog.launch" && ! -L "${status_file}.watchdog.launch" && \
       ! -e "${status_file}.watchdog.pid" && ! -L "${status_file}.watchdog.pid" && \
       ! -e "${payload_started_file}" && ! -L "${payload_started_file}" ]] || return 1
-    checkpoint_file_matches \
-      "${status_file}.watchdog.launch" spawn-attempted \
-      "${S2_LAST_SUPERVISOR_PGID}" || return 1
     kill -0 -- "-${S2_LAST_SUPERVISOR_PGID}" 2>/dev/null && return 1
     assert_no_run_survivors \
       "${S2_STATE_DIR}" "${S2_PORT}" "${S2_LAST_SUPERVISOR_MARKER}" || return 1
-    emit '{"tool":"bash+ps","package":"apps/wire","suite":"s2-krater-shell","status":"pass","scenario":"supervisor-exit-before-watchdog-pid-publication-is-typed-bounded-and-never-releases-payload","start_failure_stage":"watchdog-publication","supervisor_exit_status":125,"payload_release_refused":true,"no_exact_group_survivor":true,"reproduce":"S2_SHELL_REGRESSION_TEST=watchdog-pre-publication-exit scripts/e2e-s2-krater.sh"}'
+    emit '{"tool":"bash+ps","package":"apps/wire","suite":"s2-krater-shell","status":"pass","scenario":"supervisor-exit-before-watchdog-spawn-is-typed-bounded-and-never-releases-payload","start_failure_stage":"watchdog-publication","supervisor_exit_status":125,"spawn_attempted":false,"watchdog_pid_published":false,"payload_release_refused":true,"no_exact_group_survivor":true,"reproduce":"S2_SHELL_REGRESSION_TEST=watchdog-pre-publication-exit scripts/e2e-s2-krater.sh"}'
     return 0
   fi
 

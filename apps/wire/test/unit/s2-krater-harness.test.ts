@@ -1408,6 +1408,10 @@ describe("S2 to S7 normalized cost receipt", () => {
     );
     expect(postReleaseCheckpoint).toContain("S2_PLANT_POST_RELEASE_PARTIAL_REFUSAL");
     expect(postReleaseCheckpoint).toContain("S2_POST_RELEASE_PARTIAL_OBSERVATION_REFUSED");
+    expect(postReleaseCheckpoint).toContain("S2_POST_RELEASE_PARTIAL_REFUSAL_UNEXPECTED_STATUS");
+    expect(postReleaseCheckpoint).toContain("S2_PLANT_POST_RELEASE_PARTIAL_REFUSAL_FAILURE");
+    expect(postReleaseCheckpoint).toContain("if post_release_controller_refuse; then");
+    expect(postReleaseCheckpoint).toContain('return "$' + '{cleanup_status}"');
     // A bare OR-list call recreates the original false green: the outer dispatcher invokes this
     // function in an `if`, so Bash suppresses errexit throughout the function body.
     expect(postReleaseCheckpoint).not.toMatch(/\|\|\s*post_release_controller_refuse(?:\s|$)/u);
@@ -1435,6 +1439,26 @@ describe("S2 to S7 normalized cost receipt", () => {
     expect(termInterrupt).toContain("reap_parent_terminated_supervisor_residual");
     expect(termInterrupt).toContain("S2_PARENT_TERM_OLD_HOOK_RESIDUAL_REAPED");
     expect(termInterrupt).toContain("assert_no_run_survivors");
+
+    const regressionGuard = 'if [[ "$' + '{S2_SHELL_REGRESSION_TEST:-none}" != "none" ]]; then';
+    const regressionDispatchStart = shell.lastIndexOf(regressionGuard);
+    const regressionDispatch = shell.slice(
+      regressionDispatchStart,
+      shell.indexOf("launch_lifecycle_child() {", regressionDispatchStart),
+    );
+    expect(regressionDispatchStart).toBeGreaterThanOrEqual(0);
+    expect(regressionDispatch).toContain(regressionGuard);
+    const noneFallthrough = spawnSync(
+      "bash",
+      ["-c", `${regressionDispatch}\nprintf 'real-product-fallthrough\\n'`],
+      {
+        cwd: REPOSITORY_ROOT,
+        encoding: "utf8",
+        env: { ...process.env, S2_SHELL_REGRESSION_TEST: "none" },
+      },
+    );
+    expect(noneFallthrough.status).toBe(0);
+    expect(noneFallthrough.stdout).toBe("real-product-fallthrough\n");
   });
 });
 
@@ -2095,8 +2119,19 @@ describe("registered S2 shell and lifecycle regressions", () => {
               '"code":"S2_EVIDENCE_PUBLICATION_SKIPPED_UNPROVEN_CLEANUP"',
             );
           } else if (mode === "post-release-safe-checkpoint") {
-            expect(run.stdout).toContain('"code":"S2_POST_RELEASE_SAFE_CHECKPOINT_TERMINATED"');
-            const terminalProofs = ndjsonRecords(run).filter(
+            const records = ndjsonRecords(run);
+            expect(records).toContainEqual({
+              tool: "bash+ps",
+              package: "apps/wire",
+              suite: "s2-krater-shell",
+              status: "refused",
+              code: "S2_POST_RELEASE_SAFE_CHECKPOINT_TERMINATED",
+              start_failure_stage: "post-release-safe-checkpoint",
+              no_exact_group_survivor: true,
+              reproduce:
+                "S2_SHELL_REGRESSION_TEST=post-release-safe-checkpoint scripts/e2e-s2-krater.sh",
+            });
+            const terminalProofs = records.filter(
               (record) =>
                 record.suite === "s2-krater-shell" &&
                 record.status === "pass" &&
@@ -2283,6 +2318,60 @@ describe("registered S2 shell and lifecycle regressions", () => {
           ).toBe(false);
           expect(run.stdout).not.toContain('"code":"S2_CLEANUP_OWNERSHIP_UNPROVEN"');
           expect(run.stdout).not.toContain('"code":"S2_POST_RELEASE_CONTROLLER_CLEANUP_UNPROVEN"');
+        },
+        () => liveS2LifecycleProcesses(runId),
+      );
+    },
+    S2_SHELL_REGRESSION_TEST_TIMEOUT_MS,
+  );
+
+  test(
+    "PLANTED: a post-cleanup partial-refusal failure exits red instead of falling through",
+    () => {
+      const runId = `s2u-${randomUUID().replaceAll("-", "").slice(0, 24)}`;
+      const run = runHarnessSync(
+        {
+          S2_RUN_ID: runId,
+          S2_SHELL_REGRESSION_TEST: "post-release-safe-checkpoint",
+          S2_PLANT_POST_RELEASE_PARTIAL_REFUSAL: "1",
+          S2_PLANT_POST_RELEASE_PARTIAL_PENDING_BARRIER: "1",
+          S2_PLANT_POST_RELEASE_PARTIAL_REFUSAL_FAILURE: "1",
+        },
+        S2_SHELL_REGRESSION_WATCHDOG_MS,
+      );
+      assertS2RunThenScanForSurvivors(
+        "post-release-partial-refusal-propagates-unexpected-status",
+        () => {
+          const records = ndjsonRecords(run);
+          expect(run.exitCode).toBe(91);
+          expect(records).toContainEqual(
+            expect.objectContaining({
+              suite: "s2-krater-shell",
+              status: "fail",
+              code: "S2_POST_RELEASE_PARTIAL_REFUSAL_UNEXPECTED_STATUS",
+              refusal_status: 91,
+            }),
+          );
+          expect(records).toContainEqual(
+            expect.objectContaining({
+              suite: "s2-krater-shell",
+              status: "fail",
+              code: "S2_SHELL_REGRESSION_FAILED",
+              scenario: "post-release-safe-checkpoint",
+              exit_code: 91,
+            }),
+          );
+          expect(
+            records.some(
+              (record) =>
+                record.suite === "s2-krater-shell" &&
+                record.status === "pass" &&
+                record.terminal === true,
+            ),
+          ).toBe(false);
+          expect(
+            existsSync(resolve(REPOSITORY_ROOT, "e2e/artifacts/s2-krater", runId, "manifest.json")),
+          ).toBe(false);
         },
         () => liveS2LifecycleProcesses(runId),
       );
