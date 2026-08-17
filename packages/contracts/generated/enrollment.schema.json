@@ -1608,6 +1608,281 @@
       ],
       "additionalProperties": false
     },
+    "operator_fellow_cap_override_request": {
+      "type": "object",
+      "properties": {
+        "sponsor_id": {
+          "type": "string",
+          "allOf": [
+            {
+              "pattern": "^[^\\u0000]*$"
+            },
+            {
+              "pattern": "^usr_[A-Za-z0-9_-]{1,60}$"
+            }
+          ]
+        },
+        "expected_active_fellow_limit": {
+          "type": "integer",
+          "minimum": 5,
+          "maximum": 500
+        },
+        "expected_sponsor_seq": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 9007199254740991
+        },
+        "active_fellow_limit": {
+          "type": "integer",
+          "minimum": 5,
+          "maximum": 500
+        },
+        "reason": {
+          "type": "string",
+          "allOf": [
+            {
+              "pattern": "^[^\\u0000]*$"
+            },
+            {
+              "pattern": "^\\s*(?=\\S)(?:[\\s\\S]){9,999}\\S\\s*$"
+            }
+          ]
+        },
+        "confirm": {
+          "type": "string",
+          "const": "override-fellow-cap"
+        },
+        "step_up_authenticated_at": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 9007199254740991
+        }
+      },
+      "required": [
+        "sponsor_id",
+        "expected_active_fellow_limit",
+        "expected_sponsor_seq",
+        "active_fellow_limit",
+        "reason",
+        "confirm",
+        "step_up_authenticated_at"
+      ],
+      "additionalProperties": false
+    },
+    "operator_fellow_cap_override_response": {
+      "type": "object",
+      "properties": {
+        "acknowledged": {
+          "type": "boolean",
+          "const": true
+        },
+        "audit_event_id": {
+          "type": "string",
+          "pattern": "^OFC-[0-9A-HJKMNP-TV-Z]{26}$"
+        },
+        "sponsor_id": {
+          "type": "string",
+          "allOf": [
+            {
+              "pattern": "^[^\\u0000]*$"
+            },
+            {
+              "pattern": "^usr_[A-Za-z0-9_-]{1,60}$"
+            }
+          ]
+        },
+        "sponsor_seq": {
+          "type": "integer",
+          "exclusiveMinimum": 0,
+          "maximum": 9007199254740991
+        },
+        "previous_active_fellow_limit": {
+          "type": "integer",
+          "minimum": 5,
+          "maximum": 500
+        },
+        "active_fellow_limit": {
+          "type": "integer",
+          "minimum": 5,
+          "maximum": 500
+        },
+        "step_up_authenticated_at": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 9007199254740991
+        },
+        "signer_kid": {
+          "type": "string",
+          "pattern": "^[A-Za-z0-9._-]{1,64}$"
+        },
+        "effective_at": {
+          "type": "integer",
+          "exclusiveMinimum": 0,
+          "maximum": 9007199254740991
+        }
+      },
+      "required": [
+        "acknowledged",
+        "audit_event_id",
+        "sponsor_id",
+        "sponsor_seq",
+        "previous_active_fellow_limit",
+        "active_fellow_limit",
+        "step_up_authenticated_at",
+        "signer_kid",
+        "effective_at"
+      ],
+      "additionalProperties": false
+    },
+    "operator_fellow_cap_state_response": {
+      "type": "object",
+      "properties": {
+        "sponsor_id": {
+          "type": "string",
+          "allOf": [
+            {
+              "pattern": "^[^\\u0000]*$"
+            },
+            {
+              "pattern": "^usr_[A-Za-z0-9_-]{1,60}$"
+            }
+          ]
+        },
+        "active_fellow_limit": {
+          "type": "integer",
+          "minimum": 5,
+          "maximum": 500
+        },
+        "sponsor_seq": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 9007199254740991
+        }
+      },
+      "required": [
+        "sponsor_id",
+        "active_fellow_limit",
+        "sponsor_seq"
+      ],
+      "additionalProperties": false
+    },
+    "operator_fellow_cap_audit_cursor": {
+      "type": "string",
+      "maxLength": 128,
+      "pattern": "^oc1\\.[A-Za-z0-9_-]+$",
+      "description": "Bounded oc1 base64url transport spelling. Runtime additionally requires a canonical UTF-8 v1 length-prefixed sponsor_seq frame."
+    },
+    "operator_fellow_cap_audit_page_response": {
+      "type": "object",
+      "properties": {
+        "audit_events": {
+          "maxItems": 100,
+          "type": "array",
+          "items": {
+            "type": "object",
+            "properties": {
+              "audit_event_id": {
+                "type": "string",
+                "pattern": "^OFC-[0-9A-HJKMNP-TV-Z]{26}$"
+              },
+              "sponsor_id": {
+                "type": "string",
+                "allOf": [
+                  {
+                    "pattern": "^[^\\u0000]*$"
+                  },
+                  {
+                    "pattern": "^usr_[A-Za-z0-9_-]{1,60}$"
+                  }
+                ]
+              },
+              "operator_id": {
+                "type": "string",
+                "allOf": [
+                  {
+                    "pattern": "^[^\\u0000]*$"
+                  },
+                  {
+                    "pattern": "^usr_[A-Za-z0-9_-]{1,60}$"
+                  }
+                ]
+              },
+              "sponsor_seq": {
+                "type": "integer",
+                "exclusiveMinimum": 0,
+                "maximum": 9007199254740991
+              },
+              "previous_active_fellow_limit": {
+                "type": "integer",
+                "minimum": 5,
+                "maximum": 500
+              },
+              "active_fellow_limit": {
+                "type": "integer",
+                "minimum": 5,
+                "maximum": 500
+              },
+              "reason": {
+                "type": "string",
+                "allOf": [
+                  {
+                    "pattern": "^[^\\u0000]*$"
+                  },
+                  {
+                    "pattern": "^(?:[\\s\\S]){10,1000}$"
+                  }
+                ]
+              },
+              "step_up_authenticated_at": {
+                "type": "integer",
+                "minimum": 0,
+                "maximum": 9007199254740991
+              },
+              "signer_kid": {
+                "type": "string",
+                "pattern": "^[A-Za-z0-9._-]{1,64}$"
+              },
+              "effective_at": {
+                "type": "integer",
+                "exclusiveMinimum": 0,
+                "maximum": 9007199254740991
+              }
+            },
+            "required": [
+              "audit_event_id",
+              "sponsor_id",
+              "operator_id",
+              "sponsor_seq",
+              "previous_active_fellow_limit",
+              "active_fellow_limit",
+              "reason",
+              "step_up_authenticated_at",
+              "signer_kid",
+              "effective_at"
+            ],
+            "additionalProperties": false
+          }
+        },
+        "next_cursor": {
+          "anyOf": [
+            {
+              "type": "string",
+              "maxLength": 128,
+              "pattern": "^oc1\\.[A-Za-z0-9_-]+$",
+              "description": "Bounded oc1 base64url transport spelling. Runtime additionally requires a canonical UTF-8 v1 length-prefixed sponsor_seq frame."
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      },
+      "required": [
+        "audit_events",
+        "next_cursor"
+      ],
+      "additionalProperties": false
+    },
     "sponsor_enrollment_decision_response": {
       "type": "object",
       "properties": {
@@ -2180,6 +2455,11 @@
     "sponsor_fellow_lifecycle_response",
     "sponsor_panic_request",
     "sponsor_panic_response",
+    "operator_fellow_cap_override_request",
+    "operator_fellow_cap_override_response",
+    "operator_fellow_cap_state_response",
+    "operator_fellow_cap_audit_cursor",
+    "operator_fellow_cap_audit_page_response",
     "sponsor_enrollment_decision_response",
     "sponsor_bootstrap_request",
     "sponsor_bootstrap_response",

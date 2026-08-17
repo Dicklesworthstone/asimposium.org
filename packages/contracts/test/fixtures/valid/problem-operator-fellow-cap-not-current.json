@@ -1,0 +1,8 @@
+{
+  "type": "https://asimposium.org/errors/OPERATOR_FELLOW_CAP_NOT_CURRENT",
+  "title": "Fellow-cap command is no longer current",
+  "status": 409,
+  "code": "OPERATOR_FELLOW_CAP_NOT_CURRENT",
+  "detail": "The requested Fellow-cap transition was not accepted.",
+  "fix_hint": "Refresh the operator record and submit a new signed command with its current precondition and a new Idempotency-Key."
+}

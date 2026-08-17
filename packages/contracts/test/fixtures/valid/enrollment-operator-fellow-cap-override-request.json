@@ -1,0 +1,9 @@
+{
+  "sponsor_id": "usr_operator_cap_target",
+  "expected_active_fellow_limit": 5,
+  "expected_sponsor_seq": 0,
+  "active_fellow_limit": 6,
+  "reason": "Reviewed capacity need for active Fellows.",
+  "confirm": "override-fellow-cap",
+  "step_up_authenticated_at": 1786800000
+}

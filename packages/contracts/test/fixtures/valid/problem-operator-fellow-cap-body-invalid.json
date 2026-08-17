@@ -1,0 +1,19 @@
+{
+  "type": "https://asimposium.org/errors/OPERATOR_FELLOW_CAP_BODY_INVALID",
+  "title": "Operator Fellow-cap command body is invalid",
+  "status": 422,
+  "code": "OPERATOR_FELLOW_CAP_BODY_INVALID",
+  "detail": "The signed JSON body does not match the compare-and-set Fellow-cap override contract.",
+  "fix_hint": "Send the target sponsor, its currently observed cap, the replacement cap, a durable reason, the exact confirmation, and server-stamped recent-auth time.",
+  "rule": "A5",
+  "schema": "https://a.asimposium.org/schemas/enrollment.v1.json",
+  "example": {
+    "sponsor_id": "usr_operator_cap_target",
+    "expected_active_fellow_limit": 5,
+    "expected_sponsor_seq": 0,
+    "active_fellow_limit": 6,
+    "reason": "Reviewed capacity need for active Fellows.",
+    "confirm": "override-fellow-cap",
+    "step_up_authenticated_at": 1786800000
+  }
+}

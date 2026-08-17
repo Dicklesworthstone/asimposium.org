@@ -6,12 +6,18 @@ import {
   DeviceLookupRequestSchema,
   EnrollmentFlowPollRequestSchema,
   EnrollmentSecretSchema,
+  encodeOperatorFellowCapAuditCursor,
   encodeSponsorFellowCursor,
   FellowNameSchema,
   FellowRegistrationCredentialFieldsSchema,
   FellowRegistrationRequestSchema,
   MintEnrollmentRequestSchema,
   MintEnrollmentResponseSchema,
+  OperatorFellowCapOverrideRequestSchema,
+  OperatorFellowCapOverrideResponseSchema,
+  OperatorFellowCapAuditPageResponseSchema,
+  OperatorFellowCapStateResponseSchema,
+  parseOperatorFellowCapAuditCursor,
   parseSponsorFellowCursor,
   SponsorBootstrapRequestSchema,
   SponsorCredentialRevokeRequestSchema,
@@ -85,6 +91,18 @@ const INVALID_LIFECYCLE_FIXTURE = new URL(
   "../fixtures/invalid/enrollment-lifecycle.json",
   import.meta.url,
 );
+const VALID_OPERATOR_FELLOW_CAP_OVERRIDE_REQUEST_FIXTURE = new URL(
+  "../fixtures/valid/enrollment-operator-fellow-cap-override-request.json",
+  import.meta.url,
+);
+const VALID_OPERATOR_FELLOW_CAP_OVERRIDE_RESPONSE_FIXTURE = new URL(
+  "../fixtures/valid/enrollment-operator-fellow-cap-override-response.json",
+  import.meta.url,
+);
+const INVALID_OPERATOR_FELLOW_CAP_OVERRIDE_FIXTURE = new URL(
+  "../fixtures/invalid/enrollment-operator-fellow-cap-override-missing-expected.json",
+  import.meta.url,
+);
 
 /** The synthetic enrollment every decision fixture in this suite decides. */
 const DECISION_TARGET = "ASIMP-EN-01JXYZ4K6Q";
@@ -125,6 +143,115 @@ test("the generated enrollment registry exposes the exact strict sponsor bootstr
     properties: {},
     additionalProperties: false,
   });
+});
+
+test("operator Fellow-cap override fixtures carry the compare-and-set and immutable receipt", async () => {
+  const request = await fixture(VALID_OPERATOR_FELLOW_CAP_OVERRIDE_REQUEST_FIXTURE);
+  const response = await fixture(VALID_OPERATOR_FELLOW_CAP_OVERRIDE_RESPONSE_FIXTURE);
+  const invalid = await fixture(INVALID_OPERATOR_FELLOW_CAP_OVERRIDE_FIXTURE);
+  const generated = (await fixture(GENERATED_ENROLLMENT_SCHEMA)) as {
+    readonly required?: readonly string[];
+    readonly properties?: Record<string, unknown>;
+  };
+
+  expect(OperatorFellowCapOverrideRequestSchema.safeParse(request).success).toBe(true);
+  expect(OperatorFellowCapOverrideResponseSchema.safeParse(response).success).toBe(true);
+  expect(
+    OperatorFellowCapStateResponseSchema.safeParse({
+      sponsor_id: "usr_operator_cap_target",
+      active_fellow_limit: 6,
+      sponsor_seq: 1,
+    }).success,
+  ).toBe(true);
+  expect(OperatorFellowCapOverrideRequestSchema.safeParse(invalid).success).toBe(false);
+  expect(generated.required).toEqual(
+    expect.arrayContaining([
+      "operator_fellow_cap_override_request",
+      "operator_fellow_cap_override_response",
+      "operator_fellow_cap_state_response",
+      "operator_fellow_cap_audit_cursor",
+      "operator_fellow_cap_audit_page_response",
+    ]),
+  );
+  expect(generated.properties?.operator_fellow_cap_override_request).toBeDefined();
+  expect(generated.properties?.operator_fellow_cap_override_response).toBeDefined();
+  expect(generated.properties?.operator_fellow_cap_state_response).toBeDefined();
+  expect(generated.properties?.operator_fellow_cap_audit_cursor).toBeDefined();
+  expect(generated.properties?.operator_fellow_cap_audit_page_response).toBeDefined();
+});
+
+test("operator Fellow-cap reasons use SQLite's code-point length, not UTF-16 length", () => {
+  const request = {
+    sponsor_id: "usr_operator_cap_target",
+    expected_active_fellow_limit: 5,
+    expected_sponsor_seq: 0,
+    active_fellow_limit: 6,
+    confirm: "override-fellow-cap",
+    step_up_authenticated_at: 1_786_800_000,
+  } as const;
+  expect(
+    OperatorFellowCapOverrideRequestSchema.safeParse({ ...request, reason: "😀".repeat(5) })
+      .success,
+  ).toBe(false);
+  expect(
+    OperatorFellowCapOverrideRequestSchema.safeParse({ ...request, reason: "😀".repeat(600) })
+      .success,
+  ).toBe(true);
+  expect(
+    OperatorFellowCapOverrideRequestSchema.safeParse({ ...request, reason: "😀".repeat(1001) })
+      .success,
+  ).toBe(false);
+});
+
+test("operator Fellow-cap reason JSON Schema has the same trim and Unicode semantics as Zod", async () => {
+  const request = {
+    sponsor_id: "usr_operator_cap_target",
+    expected_active_fellow_limit: 5,
+    expected_sponsor_seq: 0,
+    active_fellow_limit: 6,
+    confirm: "override-fellow-cap",
+    step_up_authenticated_at: 1_786_800_000,
+  } as const;
+  const generated = (await fixture(GENERATED_ENROLLMENT_SCHEMA)) as {
+    readonly properties?: Record<
+      string,
+      {
+        readonly properties?: Record<
+          string,
+          { readonly allOf?: readonly { readonly pattern?: unknown }[] }
+        >;
+      }
+    >;
+  };
+  const pattern = generated.properties?.operator_fellow_cap_override_request?.properties?.reason?.allOf?.at(
+    -1,
+  )?.pattern;
+  expect(typeof pattern).toBe("string");
+  const jsonSchemaReason = new RegExp(pattern as string, "u");
+  const cases = [
+    [" \t1234567890\t ", true],
+    [" \t123456789\t ", false],
+    ["😀".repeat(5), false],
+    ["😀".repeat(600), true],
+  ] as const;
+  for (const [reason, accepted] of cases) {
+    expect(jsonSchemaReason.test(reason), reason).toBe(accepted);
+    expect(OperatorFellowCapOverrideRequestSchema.safeParse({ ...request, reason }).success).toBe(
+      accepted,
+    );
+  }
+});
+
+test("operator Fellow-cap audit cursors are bounded and byte-canonical", () => {
+  const cursor = encodeOperatorFellowCapAuditCursor({ sponsor_seq: 42 });
+  expect(parseOperatorFellowCapAuditCursor(cursor)).toEqual({ sponsor_seq: 42 });
+  expect(parseOperatorFellowCapAuditCursor(`${cursor}=`)).toBeUndefined();
+  expect(
+    OperatorFellowCapAuditPageResponseSchema.safeParse({
+      audit_events: [],
+      next_cursor: cursor,
+    }).success,
+  ).toBe(true);
 });
 
 test("lifecycle request and acknowledgement fixtures stay strict and secret-free", async () => {

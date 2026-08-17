@@ -62,6 +62,25 @@ const VALID_ADDITIONAL_PROBLEMS = [
   ["problem-lifecycle-busy.json", "LIFECYCLE_BUSY", 429, "opaque"],
   ["problem-fellow-cap-reached.json", "FELLOW_CAP_REACHED", 409, "opaque"],
   [
+    "problem-operator-fellow-cap-body-invalid.json",
+    "OPERATOR_FELLOW_CAP_BODY_INVALID",
+    422,
+    "contract",
+  ],
+  [
+    "problem-operator-fellow-cap-history-cursor-invalid.json",
+    "OPERATOR_FELLOW_CAP_HISTORY_CURSOR_INVALID",
+    422,
+    "contract",
+  ],
+  [
+    "problem-operator-fellow-cap-not-current.json",
+    "OPERATOR_FELLOW_CAP_NOT_CURRENT",
+    409,
+    "opaque",
+  ],
+  ["problem-operator-auth-unavailable.json", "OPERATOR_AUTH_UNAVAILABLE", 503, "opaque"],
+  [
     "problem-sponsor-enrollment-rate-limited.json",
     "SPONSOR_ENROLLMENT_RATE_LIMITED",
     429,

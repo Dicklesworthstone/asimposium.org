@@ -304,6 +304,11 @@ export const FellowIdSchema = EnrollmentSqlTextSchema.min(1).max(80);
 /** Non-secret credential row identity. This is never the bearer or its hash. */
 export const FellowCredentialIdSchema = EnrollmentSqlTextSchema.min(1).max(160);
 export const EnrollmentDeclaredRuntimeSchema = EnrollmentSqlTextSchema.trim().min(1).max(160);
+/** Opaque Google-subject-derived principal used for both sponsor and operator records. */
+export const SponsorIdSchema = EnrollmentSqlTextSchema.regex(
+  /^usr_[A-Za-z0-9_-]{1,60}$/,
+  "invalid sponsor id",
+);
 
 /** Sponsor inventory pages are deliberately bounded even when its history is not. */
 export const SPONSOR_FELLOW_PAGE_SIZE = 500;
@@ -444,6 +449,78 @@ export const SponsorFellowCursorSchema = z
   .refine(
     (value) => parseSponsorFellowCursor(value) !== undefined,
     "must be a canonical Fellow cursor",
+  );
+
+/** Operator audit pages are deliberately smaller than inventory pages. */
+export const OPERATOR_FELLOW_CAP_AUDIT_PAGE_SIZE = 100;
+/** Bounded path transport for one immutable per-sponsor audit sequence. */
+export const OPERATOR_FELLOW_CAP_AUDIT_CURSOR_MAX_LENGTH = 128;
+
+/** The unique immutable key immediately after an operator audit page. */
+export const OperatorFellowCapAuditCursorKeySchema = z
+  .object({ sponsor_seq: z.number().int().safe().positive() })
+  .strict();
+
+const OPERATOR_FELLOW_CAP_AUDIT_CURSOR_PREFIX = "oc1.";
+const OPERATOR_FELLOW_CAP_AUDIT_CURSOR_FRAME_PREFIX = "v1|";
+
+function operatorFellowCapAuditCursorFrame(key: OperatorFellowCapAuditCursorKey): Uint8Array {
+  const sponsorSeq = String(key.sponsor_seq);
+  return cursorEncoder.encode(
+    `${OPERATOR_FELLOW_CAP_AUDIT_CURSOR_FRAME_PREFIX}${sponsorSeq.length}:${sponsorSeq}`,
+  );
+}
+
+/** Encode the exact keyset boundary for a descending per-sponsor audit page. */
+export function encodeOperatorFellowCapAuditCursor(key: OperatorFellowCapAuditCursorKey): string {
+  const parsed = OperatorFellowCapAuditCursorKeySchema.parse(key);
+  return `${OPERATOR_FELLOW_CAP_AUDIT_CURSOR_PREFIX}${cursorBase64Url(
+    operatorFellowCapAuditCursorFrame(parsed),
+  )}`;
+}
+
+/** Parse only one byte-canonical operator Fellow-cap audit cursor spelling. */
+export function parseOperatorFellowCapAuditCursor(
+  value: unknown,
+): OperatorFellowCapAuditCursorKey | undefined {
+  if (
+    typeof value !== "string" ||
+    value.length > OPERATOR_FELLOW_CAP_AUDIT_CURSOR_MAX_LENGTH ||
+    !value.startsWith(OPERATOR_FELLOW_CAP_AUDIT_CURSOR_PREFIX)
+  ) {
+    return undefined;
+  }
+  const bytes = cursorBase64UrlBytes(value.slice(OPERATOR_FELLOW_CAP_AUDIT_CURSOR_PREFIX.length));
+  if (bytes === undefined) return undefined;
+  const prefix = cursorEncoder.encode(OPERATOR_FELLOW_CAP_AUDIT_CURSOR_FRAME_PREFIX);
+  if (!equalCursorBytes(bytes.slice(0, prefix.length), prefix)) return undefined;
+  const sponsorSeqField = readCursorField(bytes, prefix.length);
+  if (sponsorSeqField === undefined || sponsorSeqField.offset !== bytes.length) return undefined;
+  let sponsorSeqText: string;
+  try {
+    sponsorSeqText = cursorDecoder.decode(sponsorSeqField.value);
+  } catch {
+    return undefined;
+  }
+  if (!/^[1-9][0-9]{0,15}$/.test(sponsorSeqText)) return undefined;
+  const parsed = OperatorFellowCapAuditCursorKeySchema.safeParse({
+    sponsor_seq: Number(sponsorSeqText),
+  });
+  if (!parsed.success || String(parsed.data.sponsor_seq) !== sponsorSeqText) return undefined;
+  return encodeOperatorFellowCapAuditCursor(parsed.data) === value ? parsed.data : undefined;
+}
+
+const OPERATOR_FELLOW_CAP_AUDIT_CURSOR_SCHEMA_DESCRIPTION =
+  "Bounded oc1 base64url transport spelling. Runtime additionally requires a canonical UTF-8 v1 length-prefixed sponsor_seq frame.";
+
+export const OperatorFellowCapAuditCursorSchema = z
+  .string()
+  .max(OPERATOR_FELLOW_CAP_AUDIT_CURSOR_MAX_LENGTH)
+  .regex(/^oc1\.[A-Za-z0-9_-]+$/)
+  .describe(OPERATOR_FELLOW_CAP_AUDIT_CURSOR_SCHEMA_DESCRIPTION)
+  .refine(
+    (value) => parseOperatorFellowCapAuditCursor(value) !== undefined,
+    "must be a canonical operator Fellow-cap audit cursor",
   );
 
 export const EnrollmentFirstDirectiveSchema = EnrollmentSqlTextSchema.trim().min(1).max(2_000);
@@ -906,6 +983,93 @@ export const SponsorPanicResponseSchema = z
   })
   .strict();
 
+/** An immutable audit identity for an operator's sponsor-cap decision. */
+export const OperatorFellowCapAuditEventIdSchema = z
+  .string()
+  .regex(/^OFC-[0-9A-HJKMNP-TV-Z]{26}$/, "invalid operator Fellow-cap audit event id");
+
+/** Public key id that signed the audited Agora-to-Worker authorization. */
+export const OperatorFellowCapSignerKidSchema = z
+  .string()
+  .regex(/^[A-Za-z0-9._-]{1,64}$/, "invalid operator Fellow-cap signer key id");
+
+/**
+ * Operator-only per-sponsor capacity command. The reason is durable audit
+ * material, so it is bounded, non-empty, and cannot contain SQLite's NUL
+ * boundary. `step_up_authenticated_at` is stamped by Agora, not trusted from
+ * a browser request.
+ */
+export const OperatorFellowCapOverrideRequestSchema = z
+  .object({
+    sponsor_id: SponsorIdSchema,
+    /** Both facts form the CAS precondition; either alone permits an ABA overwrite. */
+    expected_active_fellow_limit: z.number().int().min(5).max(500),
+    expected_sponsor_seq: z.number().int().nonnegative(),
+    active_fellow_limit: z.number().int().min(5).max(500),
+    // JavaScript string min/max count UTF-16 code units while SQLite length()
+    // counts Unicode code points. This Unicode-mode expression makes the Zod
+    // acceptance rule match the immutable-audit CHECK exactly, including astral
+    // characters; it also survives into the generated schema as a pattern.
+    // JSON Schema validates the original JSON bytes while Zod stores the
+    // trimmed durable value. This pattern recognizes exactly the strings whose
+    // JavaScript trim() result has 10-1000 Unicode code points (including
+    // astral characters), so external schema validation cannot admit a body
+    // the Worker later rejects solely because of leading/trailing whitespace.
+    reason: EnrollmentSqlTextSchema.trim().regex(/^\s*(?=\S)(?:[\s\S]){9,999}\S\s*$/u),
+    confirm: z.literal("override-fellow-cap"),
+    step_up_authenticated_at: z.number().int().nonnegative(),
+  })
+  .strict();
+
+export const OperatorFellowCapOverrideResponseSchema = z
+  .object({
+    acknowledged: z.literal(true),
+    audit_event_id: OperatorFellowCapAuditEventIdSchema,
+    sponsor_id: SponsorIdSchema,
+    /** Dedicated monotonic sequence for the sponsor Fellow-cap audit scope. */
+    sponsor_seq: z.number().int().positive(),
+    previous_active_fellow_limit: z.number().int().min(5).max(500),
+    active_fellow_limit: z.number().int().min(5).max(500),
+    /** Durable authorization evidence, retained in the immutable audit row. */
+    step_up_authenticated_at: z.number().int().nonnegative(),
+    signer_kid: OperatorFellowCapSignerKidSchema,
+    effective_at: z.number().int().positive(),
+  })
+  .strict();
+
+/** Authenticated operator read used to obtain the exact next CAS precondition. */
+export const OperatorFellowCapStateResponseSchema = z
+  .object({
+    sponsor_id: SponsorIdSchema,
+    active_fellow_limit: z.number().int().min(5).max(500),
+    sponsor_seq: z.number().int().nonnegative(),
+  })
+  .strict();
+
+/** One immutable operator Fellow-cap authorization receipt. */
+export const OperatorFellowCapAuditEventSchema = z
+  .object({
+    audit_event_id: OperatorFellowCapAuditEventIdSchema,
+    sponsor_id: SponsorIdSchema,
+    operator_id: SponsorIdSchema,
+    sponsor_seq: z.number().int().positive(),
+    previous_active_fellow_limit: z.number().int().min(5).max(500),
+    active_fellow_limit: z.number().int().min(5).max(500),
+    reason: EnrollmentSqlTextSchema.regex(/^(?:[\s\S]){10,1000}$/u),
+    step_up_authenticated_at: z.number().int().nonnegative(),
+    signer_kid: OperatorFellowCapSignerKidSchema,
+    effective_at: z.number().int().positive(),
+  })
+  .strict();
+
+/** Operator-only immutable audit history, ordered newest sequence first. */
+export const OperatorFellowCapAuditPageResponseSchema = z
+  .object({
+    audit_events: z.array(OperatorFellowCapAuditEventSchema).max(OPERATOR_FELLOW_CAP_AUDIT_PAGE_SIZE),
+    next_cursor: OperatorFellowCapAuditCursorSchema.nullable(),
+  })
+  .strict();
+
 /**
  * Decision acknowledgement. Carries no proposal state: the card changed under
  * the decision, and a fresh proposal list is how the console sees it.
@@ -989,6 +1153,11 @@ export const EnrollmentContractsSchema = z
     sponsor_fellow_lifecycle_response: SponsorFellowLifecycleResponseSchema,
     sponsor_panic_request: SponsorPanicRequestSchema,
     sponsor_panic_response: SponsorPanicResponseSchema,
+    operator_fellow_cap_override_request: OperatorFellowCapOverrideRequestSchema,
+    operator_fellow_cap_override_response: OperatorFellowCapOverrideResponseSchema,
+    operator_fellow_cap_state_response: OperatorFellowCapStateResponseSchema,
+    operator_fellow_cap_audit_cursor: OperatorFellowCapAuditCursorSchema,
+    operator_fellow_cap_audit_page_response: OperatorFellowCapAuditPageResponseSchema,
     sponsor_enrollment_decision_response: SponsorEnrollmentDecisionResponseSchema,
     sponsor_bootstrap_request: SponsorBootstrapRequestSchema,
     sponsor_bootstrap_response: SponsorBootstrapResponseSchema,
@@ -1017,6 +1186,8 @@ export type FellowLifecycleEventId = z.infer<typeof FellowLifecycleEventIdSchema
 export type FellowCredentialProfile = z.infer<typeof FellowCredentialProfileSchema>;
 export type SponsorFellowCursorKey = z.infer<typeof SponsorFellowCursorKeySchema>;
 export type SponsorFellowCursor = z.infer<typeof SponsorFellowCursorSchema>;
+export type OperatorFellowCapAuditCursorKey = z.infer<typeof OperatorFellowCapAuditCursorKeySchema>;
+export type OperatorFellowCapAuditCursor = z.infer<typeof OperatorFellowCapAuditCursorSchema>;
 export type FellowRegistrationRequest = z.infer<typeof FellowRegistrationRequestSchema>;
 export type EnrollmentApprovalCard = z.infer<typeof EnrollmentApprovalCardSchema>;
 export type EnrollmentCapsuleProjection = z.infer<typeof EnrollmentCapsuleProjectionSchema>;
@@ -1040,6 +1211,19 @@ export type SponsorFellowLifecycleRequest = z.infer<typeof SponsorFellowLifecycl
 export type SponsorFellowLifecycleResponse = z.infer<typeof SponsorFellowLifecycleResponseSchema>;
 export type SponsorPanicRequest = z.infer<typeof SponsorPanicRequestSchema>;
 export type SponsorPanicResponse = z.infer<typeof SponsorPanicResponseSchema>;
+export type OperatorFellowCapAuditEventId = z.infer<typeof OperatorFellowCapAuditEventIdSchema>;
+export type OperatorFellowCapSignerKid = z.infer<typeof OperatorFellowCapSignerKidSchema>;
+export type OperatorFellowCapOverrideRequest = z.infer<
+  typeof OperatorFellowCapOverrideRequestSchema
+>;
+export type OperatorFellowCapOverrideResponse = z.infer<
+  typeof OperatorFellowCapOverrideResponseSchema
+>;
+export type OperatorFellowCapStateResponse = z.infer<typeof OperatorFellowCapStateResponseSchema>;
+export type OperatorFellowCapAuditEvent = z.infer<typeof OperatorFellowCapAuditEventSchema>;
+export type OperatorFellowCapAuditPageResponse = z.infer<
+  typeof OperatorFellowCapAuditPageResponseSchema
+>;
 export type SponsorEnrollmentDecisionResponse = z.infer<
   typeof SponsorEnrollmentDecisionResponseSchema
 >;

@@ -1,0 +1,14 @@
+{
+  "type": "https://asimposium.org/errors/OPERATOR_FELLOW_CAP_HISTORY_CURSOR_INVALID",
+  "title": "Operator Fellow-cap audit cursor is invalid",
+  "status": 422,
+  "code": "OPERATOR_FELLOW_CAP_HISTORY_CURSOR_INVALID",
+  "detail": "The audit-history page cursor is not a canonical cursor from this sponsor's cap history.",
+  "fix_hint": "Start at the operator audit-history route, then follow next_cursor exactly as a path segment.",
+  "rule": "A5",
+  "schema": "https://a.asimposium.org/schemas/enrollment.v1.json",
+  "example": {
+    "method": "GET",
+    "path": "/v1/operators/sponsors/usr_operator_cap_target/fellow-cap/history/after/oc1.<cursor>"
+  }
+}

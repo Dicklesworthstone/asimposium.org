@@ -53,6 +53,8 @@
                     "CREDENTIAL_REVOKE_BODY_INVALID",
                     "FELLOW_LIFECYCLE_BODY_INVALID",
                     "FELLOW_LIST_CURSOR_INVALID",
+                    "OPERATOR_FELLOW_CAP_BODY_INVALID",
+                    "OPERATOR_FELLOW_CAP_HISTORY_CURSOR_INVALID",
                     "SPONSOR_PANIC_BODY_INVALID"
                   ]
                 },
@@ -218,6 +220,8 @@
                 "FELLOW_CAP_REACHED",
                 "FELLOW_TOKEN_INVALID",
                 "FELLOW_LIFECYCLE_NOT_CURRENT",
+                "OPERATOR_AUTH_UNAVAILABLE",
+                "OPERATOR_FELLOW_CAP_NOT_CURRENT",
                 "FLOW_INVALID",
                 "INTERNAL_ERROR",
                 "LIFECYCLE_BUSY",
@@ -302,6 +306,8 @@
                 "CREDENTIAL_REVOKE_BODY_INVALID",
                 "FELLOW_LIFECYCLE_BODY_INVALID",
                 "FELLOW_LIST_CURSOR_INVALID",
+                "OPERATOR_FELLOW_CAP_BODY_INVALID",
+                "OPERATOR_FELLOW_CAP_HISTORY_CURSOR_INVALID",
                 "SPONSOR_PANIC_BODY_INVALID"
               ]
             },
@@ -467,6 +473,8 @@
             "FELLOW_CAP_REACHED",
             "FELLOW_TOKEN_INVALID",
             "FELLOW_LIFECYCLE_NOT_CURRENT",
+            "OPERATOR_AUTH_UNAVAILABLE",
+            "OPERATOR_FELLOW_CAP_NOT_CURRENT",
             "FLOW_INVALID",
             "INTERNAL_ERROR",
             "LIFECYCLE_BUSY",
@@ -529,6 +537,8 @@
         "CREDENTIAL_REVOKE_BODY_INVALID",
         "FELLOW_LIFECYCLE_BODY_INVALID",
         "FELLOW_LIST_CURSOR_INVALID",
+        "OPERATOR_FELLOW_CAP_BODY_INVALID",
+        "OPERATOR_FELLOW_CAP_HISTORY_CURSOR_INVALID",
         "SPONSOR_PANIC_BODY_INVALID",
         "UNKNOWN_FORMAT",
         "AUTH_REPLAY_STORE_UNAVAILABLE",
@@ -540,6 +550,8 @@
         "FELLOW_CAP_REACHED",
         "FELLOW_TOKEN_INVALID",
         "FELLOW_LIFECYCLE_NOT_CURRENT",
+        "OPERATOR_AUTH_UNAVAILABLE",
+        "OPERATOR_FELLOW_CAP_NOT_CURRENT",
         "FLOW_INVALID",
         "INTERNAL_ERROR",
         "LIFECYCLE_BUSY",

@@ -1,0 +1,11 @@
+{
+  "acknowledged": true,
+  "audit_event_id": "OFC-01JXYZ4K6Q8M2N3P4R5S6T7V8W",
+  "sponsor_id": "usr_operator_cap_target",
+  "sponsor_seq": 1,
+  "previous_active_fellow_limit": 5,
+  "active_fellow_limit": 6,
+  "step_up_authenticated_at": 1786800000,
+  "signer_kid": "agora-operator-2026-08",
+  "effective_at": 1786800000
+}

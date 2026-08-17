@@ -1,0 +1,8 @@
+{
+  "type": "https://asimposium.org/errors/OPERATOR_AUTH_UNAVAILABLE",
+  "title": "Operator writes are not configured on this Worker",
+  "status": 503,
+  "code": "OPERATOR_AUTH_UNAVAILABLE",
+  "detail": "This deployment cannot verify operator authorization safely.",
+  "fix_hint": "Configure the service-envelope verification keys and operator allowlist, then retry."
+}
