@@ -1,5 +1,11 @@
 import { describe, expect, test } from "bun:test";
 import {
+  ScreeningCoarseCategorySchema,
+  ScreeningDecisionPathSchema,
+  ScreeningOutcomeSchema,
+  ScreeningProviderStatusSchema,
+} from "@asimposium/contracts";
+import {
   aggregateScreeningRun,
   type PolicyCategory,
   S4_THRESHOLDS,
@@ -8,6 +14,14 @@ import {
   type ScreeningRunIdentity,
   screenWithProvider,
 } from "../../src/screening";
+// Imported from the module rather than the barrel: this suite is asserting what
+// `types.ts` itself publishes, so it must not read those values through a
+// re-export that could be satisfied from somewhere else.
+import {
+  POLICY_CATEGORIES,
+  PROVIDER_STATUSES,
+  SCREENING_DECISIONS,
+} from "../../src/screening/types.ts";
 
 const identity: ScreeningRunIdentity = {
   corpus_revision: "s4-test-corpus-v1",
@@ -854,5 +868,98 @@ describe("S-4 deterministic outcome aggregation", () => {
         "quarantine-hold": 0,
       },
     });
+  });
+});
+
+/**
+ * S-4 G0 contract-drift closure.
+ *
+ * `types.ts` used to restate the decision, provider-status, and category
+ * vocabularies as its own literals. Three copies of one vocabulary agreed by
+ * hand and nothing kept them agreeing, which is what AGENTS.md forbids under
+ * "do not hand-write a second schema". These assertions are the machine-checkable
+ * statement that the wire module now *reads* the contract rather than echoing it.
+ *
+ * Each vocabulary is checked twice on purpose. The parity arm catches wire
+ * diverging from the contract. The frozen arm catches the contract itself
+ * gaining or losing a literal, because a vocabulary that moves on both sides at
+ * once would satisfy parity while silently changing what this Worker screens.
+ */
+describe("screening vocabularies are read from the contract, not transcribed", () => {
+  const sameVocabulary = (left: readonly string[], right: readonly string[]): boolean =>
+    left.length === right.length && left.every((value, index) => value === right[index]);
+
+  test("wire vocabularies are the contract enums, member for member and in order", () => {
+    expect(sameVocabulary(SCREENING_DECISIONS, ScreeningOutcomeSchema.options)).toBe(true);
+    expect(sameVocabulary(PROVIDER_STATUSES, ScreeningProviderStatusSchema.options)).toBe(true);
+    expect(sameVocabulary(POLICY_CATEGORIES, ScreeningCoarseCategorySchema.options)).toBe(true);
+  });
+
+  test("the frozen S-4 vocabulary is exactly what both sides carry today", () => {
+    expect([...SCREENING_DECISIONS]).toEqual([
+      "pass",
+      "allow-with-warning",
+      "quarantine",
+      "reject",
+    ]);
+    expect([...PROVIDER_STATUSES]).toEqual(["ok", "timeout", "error"]);
+    expect([...POLICY_CATEGORIES]).toEqual([
+      "benign-context",
+      "spam-commercial",
+      "injection",
+      "dual-use-boundary",
+      "operational-harm",
+      "harassment",
+      "sexual-content",
+      "provider-unavailable",
+    ]);
+    expect([...ScreeningDecisionPathSchema.options]).toEqual([
+      "provider",
+      "provider-contextual-hold",
+      "direct-content-hold",
+      "direct-content-reject",
+      "direct-content-warning",
+      "provider-timeout-fail-closed",
+      "provider-error-fail-closed",
+      "benign-outage-degraded",
+    ]);
+  });
+
+  test("PLANTED DRIFT: one extra literal on either side is a mismatch", () => {
+    expect(
+      sameVocabulary(
+        [...SCREENING_DECISIONS, "silently-published"],
+        ScreeningOutcomeSchema.options,
+      ),
+    ).toBe(false);
+    expect(
+      sameVocabulary(SCREENING_DECISIONS, [
+        ...ScreeningOutcomeSchema.options,
+        "silently-published",
+      ]),
+    ).toBe(false);
+    expect(
+      sameVocabulary([...POLICY_CATEGORIES, "off-scope"], ScreeningCoarseCategorySchema.options),
+    ).toBe(false);
+  });
+
+  test("PLANTED DRIFT: one missing literal on either side is a mismatch", () => {
+    expect(sameVocabulary(SCREENING_DECISIONS.slice(0, -1), ScreeningOutcomeSchema.options)).toBe(
+      false,
+    );
+    expect(sameVocabulary(POLICY_CATEGORIES, ScreeningCoarseCategorySchema.options.slice(1))).toBe(
+      false,
+    );
+    expect(
+      sameVocabulary(PROVIDER_STATUSES.slice(0, 2), ScreeningProviderStatusSchema.options),
+    ).toBe(false);
+  });
+
+  test("PLANTED DRIFT: a renamed literal is a mismatch even at equal length", () => {
+    const renamed = POLICY_CATEGORIES.map((value) =>
+      value === "dual-use-boundary" ? "dual-use" : value,
+    );
+    expect(renamed.length).toBe(POLICY_CATEGORIES.length);
+    expect(sameVocabulary(renamed, ScreeningCoarseCategorySchema.options)).toBe(false);
   });
 });

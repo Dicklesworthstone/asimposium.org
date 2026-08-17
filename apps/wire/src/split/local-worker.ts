@@ -15,6 +15,18 @@
  */
 
 import {
+  SCREENING_PROMOTION_DECISION_PROVENANCE_VERSION,
+  ScreeningCoarseCategorySchema,
+  ScreeningDecisionPathSchema,
+  ScreeningOutcomeSchema,
+  type ScreeningPromotionDecisionProvenance,
+  ScreeningPromotionDecisionProvenanceSchema,
+  ScreeningProviderStatusSchema,
+  ScreeningPublicActionSchema,
+  ScreeningPublicationActionSchema,
+  ScreeningPublicNoticeSchema,
+} from "@asimposium/contracts";
+import {
   FACE_FORMATS,
   type FaceFormat,
   MEDIA_TYPES,
@@ -114,7 +126,7 @@ interface ScreeningReplayRow {
   readonly expires_at: number;
 }
 
-interface ScreeningDecisionReceiptRow {
+export interface ScreeningDecisionReceiptRow {
   readonly receipt_id: string;
   readonly input_digest: string;
   readonly model_version: string;
@@ -130,13 +142,26 @@ interface ScreeningDecisionReceiptRow {
   readonly public_action: string;
   readonly public_notice: string;
   readonly deduplicated_from_receipt_id: string | null;
+  /**
+   * Selected on every read path so a stored receipt can be reconstructed in
+   * full. A reconstruction missing its own instant would be validated against a
+   * value this process invented, which is not the row.
+   */
+  readonly created_at: number;
 }
 
 interface NegativeDedupRow extends ScreeningDecisionReceiptRow {
   readonly source_receipt_id: string;
 }
 
-interface PublicScreeningActionRow {
+/** The receipt's own face, carried alongside its projection so the two can be compared. */
+export interface JoinedReceiptProjection {
+  readonly receipt_coarse_category: string;
+  readonly receipt_public_action: string;
+  readonly receipt_public_notice: string;
+}
+
+export interface PublicScreeningActionRow {
   readonly receipt_id: string;
   readonly coarse_category: string;
   readonly public_action: string;
@@ -372,7 +397,7 @@ function stringField(body: Record<string, unknown>, key: string): string | undef
   return typeof value === "string" ? value : undefined;
 }
 
-class LocalS3PublicShapeError extends Error {
+export class LocalS3PublicShapeError extends Error {
   constructor(shape: string) {
     super(`S3_LOCAL_PUBLIC_SHAPE_INVALID:${shape}`);
     this.name = "LocalS3PublicShapeError";
@@ -759,49 +784,34 @@ async function localS4Identity() {
   } as const;
 }
 
+const LOCAL_S4_POLICY_CATEGORIES = new Set<PolicyCategory>(ScreeningCoarseCategorySchema.options);
+
 function localPolicyCategory(value: string): PolicyCategory {
-  const allowed = new Set<PolicyCategory>([
-    "benign-context",
-    "spam-commercial",
-    "injection",
-    "dual-use-boundary",
-    "operational-harm",
-    "harassment",
-    "sexual-content",
-    "provider-unavailable",
-  ]);
-  return allowed.has(value as PolicyCategory) ? (value as PolicyCategory) : "provider-unavailable";
+  return LOCAL_S4_POLICY_CATEGORIES.has(value as PolicyCategory)
+    ? (value as PolicyCategory)
+    : "provider-unavailable";
 }
 
-const LOCAL_S4_DECISIONS = new Set<LocalScreeningDecision["decision"]>([
-  "pass",
-  "allow-with-warning",
-  "quarantine",
-  "reject",
-]);
-const LOCAL_S4_PROVIDER_STATUSES = new Set(["ok", "timeout", "error"]);
+/**
+ * Every vocabulary this harness recognises is read from `@asimposium/contracts`
+ * rather than transcribed. These sets validate rows read back out of local D1,
+ * so a transcription here would let a stored row disagree with the contract and
+ * still pass its own read check — the exact drift the receipt validation below
+ * exists to make impossible on the way in.
+ */
+const LOCAL_S4_DECISIONS = new Set<LocalScreeningDecision["decision"]>(
+  ScreeningOutcomeSchema.options,
+);
+const LOCAL_S4_PROVIDER_STATUSES = new Set<string>(ScreeningProviderStatusSchema.options);
+const LOCAL_S4_DECISION_PATHS = new Set<string>(ScreeningDecisionPathSchema.options);
+const LOCAL_S4_PUBLIC_ACTIONS = new Set<string>(ScreeningPublicationActionSchema.options);
+const LOCAL_S4_PUBLIC_NOTICES = new Set<string>(ScreeningPublicNoticeSchema.options);
+/** Not a contract vocabulary: these are this harness's own transport codes. */
 const LOCAL_S4_STATUS_CODES = new Set([
   "SCREENED",
   "SCREENING_PROVIDER_TIMEOUT",
   "SCREENING_PROVIDER_ERROR",
 ]);
-const LOCAL_S4_DECISION_PATHS = new Set([
-  "provider",
-  "provider-contextual-hold",
-  "direct-content-hold",
-  "direct-content-reject",
-  "direct-content-warning",
-  "provider-timeout-fail-closed",
-  "provider-error-fail-closed",
-  "benign-outage-degraded",
-]);
-const LOCAL_S4_PUBLIC_ACTIONS = new Set([
-  "published",
-  "published-with-warning",
-  "quarantined",
-  "rejected",
-]);
-const LOCAL_S4_PUBLIC_NOTICES = new Set(["none", "screening-warning", "screening-degraded"]);
 const SHA256_DIGEST = /^sha256:[0-9a-f]{64}$/u;
 
 function publicActionForScreening(result: LocalScreeningDecision): string {
@@ -822,6 +832,119 @@ function publicNoticeForScreening(result: LocalScreeningDecision): string {
   return result.decision_path === "benign-outage-degraded"
     ? "screening-degraded"
     : "screening-warning";
+}
+
+/**
+ * A receipt that does not satisfy the contract is refused rather than stored.
+ *
+ * The error carries a fixed code and nothing else. A validation failure here is
+ * a failure about a screening decision, and Zod's issue list would quote the
+ * offending values back — categories, digests, versions — into a diagnostic that
+ * the harness's disclosure suites otherwise guarantee stays clean.
+ */
+export class LocalS4ReceiptContractError extends Error {
+  constructor() {
+    super("LOCAL_S4_RECEIPT_CONTRACT_VIOLATION");
+    this.name = "LocalS4ReceiptContractError";
+  }
+}
+
+/**
+ * This harness stores digests `sha256:`-prefixed; the contract's digest is bare
+ * lowercase hex. Strip a prefix when it is there and otherwise pass the value
+ * through untouched, so the schema stays the single authority on what a digest
+ * is — a second regex here would be one more thing to keep in agreement.
+ */
+function contractDigest(value: string): string {
+  return value.startsWith("sha256:") ? value.slice("sha256:".length) : value;
+}
+
+/** Invalid instants become an empty string the schema refuses, never a throw. */
+function contractDecidedAt(seconds: number): string {
+  if (!Number.isSafeInteger(seconds) || seconds < 0 || seconds > 253_402_300_799) return "";
+  return new Date(seconds * 1000).toISOString();
+}
+
+export interface LocalPromotionReceiptInput {
+  readonly decision: string;
+  readonly coarseCategory: string;
+  readonly providerStatus: string;
+  readonly decisionPath: string;
+  readonly statusCode: string;
+  readonly publicAction: string;
+  readonly publicNotice: string;
+  readonly inputDigest: string;
+  readonly configurationDigest: string;
+  readonly contextFrontierDigest: string;
+  readonly contextOmissionCount: number;
+  readonly modelVersion: string;
+  readonly policyVersion: string;
+  readonly decidedAtSeconds: number;
+}
+
+/**
+ * `status_code` is this harness's transport code, so the contract union has no
+ * opinion about it and a membership test was all that ever guarded it. That let
+ * a fully coherent contract receipt carry a status code from a different
+ * outcome — `pass · benign-context · ok · provider · published · none` stored
+ * with `SCREENING_PROVIDER_TIMEOUT`, every member valid, the pair impossible.
+ *
+ * The producers make this a total function rather than a loose association:
+ * every `ok` result is written `SCREENED`, every timeout `SCREENING_PROVIDER_TIMEOUT`,
+ * every error `SCREENING_PROVIDER_ERROR`. Deriving the expected code and
+ * requiring equality therefore adds a real discriminator without inventing a
+ * rule the write path does not already obey.
+ */
+const LOCAL_S4_STATUS_CODE_FOR_PROVIDER_STATUS: Readonly<Record<string, string>> = {
+  ok: "SCREENED",
+  timeout: "SCREENING_PROVIDER_TIMEOUT",
+  error: "SCREENING_PROVIDER_ERROR",
+};
+
+/**
+ * The write boundary for a local promotion-decision receipt (S-4, Fable §9.1).
+ *
+ * Every persisted receipt is parsed by the contract package's own schema before
+ * its D1 batch is prepared, so the 44 matched `{public_action, operator_receipt}`
+ * families are what this harness can store, rather than what it happens to
+ * assemble. `reviewer_state` is derived, not supplied: a quarantine waits for
+ * trained operator review and nothing else opens that queue, which is exactly
+ * the contract's own pairing and is therefore not an independent choice.
+ *
+ * This validates a *provenance* record. It is not a canonical ledger event, it
+ * mints no public claim, and it runs only in the local workerd harness.
+ */
+export function localPromotionReceiptContract(
+  input: LocalPromotionReceiptInput,
+): ScreeningPromotionDecisionProvenance {
+  const candidate = {
+    version: SCREENING_PROMOTION_DECISION_PROVENANCE_VERSION,
+    scope: "promotion",
+    input_digest: contractDigest(input.inputDigest),
+    context_frontier_digest: contractDigest(input.contextFrontierDigest),
+    context_omission_count: input.contextOmissionCount,
+    model_version: input.modelVersion,
+    policy_version: input.policyVersion,
+    configuration_digest: contractDigest(input.configurationDigest),
+    decided_at: contractDecidedAt(input.decidedAtSeconds),
+    outcome: input.decision,
+    public_action: {
+      category: input.coarseCategory,
+      action: input.publicAction,
+      notice: input.publicNotice,
+    },
+    provider_status: input.providerStatus,
+    decision_path: input.decisionPath,
+    reviewer_state: input.decision === "quarantine" ? "pending-operator-review" : "not-required",
+  };
+  const parsed = ScreeningPromotionDecisionProvenanceSchema.safeParse(candidate);
+  if (!parsed.success) throw new LocalS4ReceiptContractError();
+  // Checked against the parsed provider status rather than the raw input, so
+  // this cannot be satisfied by a status the union itself would have rejected.
+  if (LOCAL_S4_STATUS_CODE_FOR_PROVIDER_STATUS[parsed.data.provider_status] !== input.statusCode) {
+    throw new LocalS4ReceiptContractError();
+  }
+  return parsed.data;
 }
 
 function safeScreeningResponse(result: LocalScreeningDecision): {
@@ -1174,7 +1297,29 @@ function localS4SafeLabel(value: string): boolean {
   return /^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/u.test(value);
 }
 
-function assertLocalS4ReceiptSafe(row: ScreeningDecisionReceiptRow): void {
+/**
+ * Strict read-back for a stored receipt.
+ *
+ * The per-field checks below are necessary but not sufficient, and the gap is
+ * the whole point of this function. Every member of
+ * `quarantine · direct-content-hold · ok · published · none` is individually a
+ * valid enum value, yet no contract family admits that combination: a
+ * quarantine's public face is `quarantined`, never `published`. A forged or
+ * stale row assembled only from valid literals would therefore have satisfied
+ * field-by-field validation and travelled through replay, negative dedup,
+ * diagnostics, and the public action face unchallenged.
+ *
+ * So the row is reconstructed in full and parsed by the same contract union the
+ * write boundary uses. Field checks run first because they establish the shapes
+ * the reconstruction depends on — digests, labels, a finite instant — and the
+ * union then decides whether those parts form a receipt that could ever have
+ * been produced.
+ *
+ * The refusal is fixed and reflects nothing: no field, value, or schema issue
+ * from the offending row reaches the caller. This is a local harness read path
+ * and carries no production or canonical-ledger meaning.
+ */
+export function assertLocalS4ReceiptSafe(row: ScreeningDecisionReceiptRow): void {
   if (
     !validId(row.receipt_id) ||
     !SHA256_DIGEST.test(row.input_digest) ||
@@ -1193,6 +1338,29 @@ function assertLocalS4ReceiptSafe(row: ScreeningDecisionReceiptRow): void {
     !LOCAL_S4_PUBLIC_NOTICES.has(row.public_notice) ||
     (row.deduplicated_from_receipt_id !== null && !validId(row.deduplicated_from_receipt_id))
   ) {
+    throw new ContextualScreeningInputError("local screening receipt diagnostics are invalid.");
+  }
+  try {
+    localPromotionReceiptContract({
+      decision: row.decision,
+      coarseCategory: row.coarse_category,
+      providerStatus: row.provider_status,
+      decisionPath: row.decision_path,
+      statusCode: row.status_code,
+      publicAction: row.public_action,
+      publicNotice: row.public_notice,
+      inputDigest: row.input_digest,
+      configurationDigest: row.configuration_digest,
+      contextFrontierDigest: row.context_frontier_digest,
+      contextOmissionCount: row.context_omission_count,
+      modelVersion: row.model_version,
+      policyVersion: row.policy_version,
+      decidedAtSeconds: row.created_at,
+    });
+  } catch {
+    // Collapsed to the same fixed refusal as the field checks. A distinct
+    // message here would tell a caller which half rejected the row, which is a
+    // free oracle for assembling one that passes.
     throw new ContextualScreeningInputError("local screening receipt diagnostics are invalid.");
   }
 }
@@ -1223,6 +1391,30 @@ function promotionResponse(event: PromotionEventRow, publicNotice: string): Resp
   return json(publicNotice === "none" ? base : { ...base, screening_notice: publicNotice }, 201);
 }
 
+/** The exact column list every receipt read path shares, so none can drift narrower. */
+const LOCAL_S4_RECEIPT_COLUMNS = `receipt_id, input_digest, model_version, policy_version,
+        configuration_digest, decision, coarse_category, provider_status, decision_path,
+        status_code, context_frontier_digest, context_omission_count, public_action,
+        public_notice, deduplicated_from_receipt_id, created_at`;
+
+/**
+ * Load and fully validate the receipt a replay row points at. A missing receipt
+ * is refused for the same reason an invalid one is: a replay whose provenance
+ * cannot be produced is not a replay of anything.
+ */
+async function assertLocalS4ReplayReceipt(env: LocalSplitEnv, receiptId: string): Promise<void> {
+  const receipt = await env.DB.prepare(
+    `SELECT ${LOCAL_S4_RECEIPT_COLUMNS}
+     FROM s4_local_screening_decision_receipts WHERE receipt_id = ?1`,
+  )
+    .bind(receiptId)
+    .first<ScreeningDecisionReceiptRow>();
+  if (receipt === null) {
+    throw new ContextualScreeningInputError("local screening receipt diagnostics are invalid.");
+  }
+  assertLocalS4ReceiptSafe(receipt);
+}
+
 async function replayedScreeningDecision(
   env: LocalSplitEnv,
   workshop: WorkshopRow,
@@ -1240,6 +1432,11 @@ async function replayedScreeningDecision(
   if (replay === null || replay.expires_at <= nowSeconds) return undefined;
   if (replay.request_digest !== requestDigest) return localS4ReplayConflict();
   if (replay.response_kind === "screening" && replay.response_body !== null) {
+    // Persisted bytes are not self-authenticating. Replaying them before the
+    // receipt behind them is validated would let a forged row's stored response
+    // be served verbatim, which is the one path where strict read-back could be
+    // walked around entirely rather than defeated.
+    await assertLocalS4ReplayReceipt(env, replay.receipt_id);
     return new Response(replay.response_body, {
       status: replay.response_status,
       headers: {
@@ -1265,7 +1462,7 @@ async function replayedScreeningDecision(
       `SELECT receipt_id, input_digest, model_version, policy_version, configuration_digest,
               decision, coarse_category, provider_status, decision_path, status_code,
               context_frontier_digest, context_omission_count, public_action, public_notice,
-              deduplicated_from_receipt_id
+              deduplicated_from_receipt_id, created_at
        FROM s4_local_screening_decision_receipts WHERE receipt_id = ?1`,
     )
       .bind(replay.receipt_id)
@@ -1294,7 +1491,7 @@ async function negativeContextDeduplication(
             receipt.provider_status, receipt.decision_path, receipt.status_code,
             receipt.context_frontier_digest, receipt.context_omission_count, receipt.public_action,
             receipt.public_notice,
-            receipt.deduplicated_from_receipt_id, dedup.source_receipt_id
+            receipt.deduplicated_from_receipt_id, receipt.created_at, dedup.source_receipt_id
      FROM s4_local_negative_context_dedup AS dedup
      JOIN s4_local_screening_decision_receipts AS receipt ON receipt.receipt_id = dedup.source_receipt_id
      WHERE dedup.problem_id = ?1 AND dedup.fellow_id = ?2 AND dedup.input_digest = ?3
@@ -1330,6 +1527,24 @@ async function persistNonPublishingScreeningDecision(
   const receiptId = `DR-${nextMonotonicUlid()}`;
   const action = publicActionForScreening(result);
   const notice = publicNoticeForScreening(result);
+  // Refuse an uncontractable receipt before any statement is prepared, so a
+  // decision that cannot be recorded honestly is never recorded at all.
+  localPromotionReceiptContract({
+    decision: result.decision,
+    coarseCategory: result.coarse_category,
+    providerStatus: result.provider_status,
+    decisionPath: result.decision_path,
+    statusCode: result.status_code,
+    publicAction: action,
+    publicNotice: notice,
+    inputDigest: result.input_digest,
+    configurationDigest: result.configuration_digest,
+    contextFrontierDigest: frontierDigest,
+    contextOmissionCount: contextOmissionCount,
+    modelVersion: result.model_version,
+    policyVersion: result.policy_version,
+    decidedAtSeconds: nowSeconds,
+  });
   const expiresAt = nowSeconds + LOCAL_S4_REPLAY_WINDOW_SECONDS;
   const negativeExpiresAt = nowSeconds + LOCAL_S4_NEGATIVE_DEDUP_WINDOW_SECONDS;
   const negative = result.decision === "quarantine" || result.decision === "reject";
@@ -1960,6 +2175,25 @@ async function promoteWorkshop(request: Request, env: LocalSplitEnv): Promise<Re
     const receiptId = `DR-${nextMonotonicUlid()}`;
     const publicAction = publicActionForScreening(result);
     const publicNotice = publicNoticeForScreening(result);
+    // Validated before the R2 put, not merely before the D1 batch. A CAS object
+    // written for a receipt that cannot be recorded would be exactly the
+    // unreachable orphan this harness exists to keep honest.
+    localPromotionReceiptContract({
+      decision: result.decision,
+      coarseCategory: result.coarse_category,
+      providerStatus: result.provider_status,
+      decisionPath: result.decision_path,
+      statusCode: result.status_code,
+      publicAction,
+      publicNotice,
+      inputDigest: result.input_digest,
+      configurationDigest: result.configuration_digest,
+      contextFrontierDigest: context.frontier_digest,
+      contextOmissionCount: context.omitted_context_count,
+      modelVersion: result.model_version,
+      policyVersion: result.policy_version,
+      decidedAtSeconds: nowSeconds,
+    });
     await env.ARTIFACTS.put(publicObjectKey, publicArtifactMd, {
       httpMetadata: { contentType: "text/markdown; charset=utf-8" },
       customMetadata: {
@@ -2234,13 +2468,31 @@ async function publicProjection(
   return projection;
 }
 
-function assertLocalS4PublicActionRows(rows: readonly PublicScreeningActionRow[]): void {
+/**
+ * The public face carries the strictest version of the same rule, because this
+ * is the one read path whose output leaves the harness. Three individually
+ * valid literals still do not make a publishable triple: `injection · published
+ * · none` claims a hard policy category was published clean, and
+ * `benign-context · published-with-warning · screening-warning` claims a
+ * warning face over a category the contract only ever publishes plainly.
+ * `ScreeningPublicActionSchema` is the five-member union that decides which
+ * triples exist, so it is asked directly rather than approximated by three
+ * membership tests.
+ */
+export function assertLocalS4PublicActionRows(rows: readonly PublicScreeningActionRow[]): void {
   for (const row of rows) {
     if (
       localPolicyCategory(row.coarse_category) !== row.coarse_category ||
       !LOCAL_S4_PUBLIC_ACTIONS.has(row.public_action) ||
-      !LOCAL_S4_PUBLIC_NOTICES.has(row.public_notice)
+      !LOCAL_S4_PUBLIC_NOTICES.has(row.public_notice) ||
+      !ScreeningPublicActionSchema.safeParse({
+        category: row.coarse_category,
+        action: row.public_action,
+        notice: row.public_notice,
+      }).success
     ) {
+      // The existing fixed label is retained: it names the row kind and nothing
+      // about which member or combination failed.
       throw new LocalS3PublicShapeError("screening-action-row");
     }
   }
@@ -2257,15 +2509,50 @@ async function publicScreeningActions(
   problemId: string,
 ): Promise<Response> {
   throwIfRouteBindingPoisoned(request, env);
+  // Joined, not read detached. An action row is a projection of a receipt, and
+  // validating it alone only ever proved the projection was well-formed — a
+  // forged receipt paired with a perfectly legal action row published cleanly.
+  // The join makes the receipt a precondition for emitting its own projection,
+  // and INNER JOIN means an action row whose receipt has vanished disappears
+  // from the page rather than standing on its own.
   const actions = await env.DB.prepare(
-    `SELECT receipt_id, coarse_category, public_action, public_notice
-     FROM s4_local_public_screening_actions
-     WHERE problem_id = ?1 ORDER BY receipt_id ASC`,
+    `SELECT action.receipt_id, action.coarse_category, action.public_action, action.public_notice,
+            receipt.coarse_category AS receipt_coarse_category,
+            receipt.public_action AS receipt_public_action,
+            receipt.public_notice AS receipt_public_notice,
+            receipt.input_digest, receipt.model_version, receipt.policy_version,
+            receipt.configuration_digest, receipt.decision, receipt.provider_status,
+            receipt.decision_path, receipt.status_code, receipt.context_frontier_digest,
+            receipt.context_omission_count, receipt.deduplicated_from_receipt_id,
+            receipt.created_at
+     FROM s4_local_public_screening_actions AS action
+     JOIN s4_local_screening_decision_receipts AS receipt
+       ON receipt.receipt_id = action.receipt_id
+     WHERE action.problem_id = ?1 ORDER BY action.receipt_id ASC`,
   )
     .bind(problemId)
-    .all<PublicScreeningActionRow>();
+    .all<PublicScreeningActionRow & ScreeningDecisionReceiptRow & JoinedReceiptProjection>();
   if (actions.results.length === 0) return notFound();
   assertLocalS4PublicActionRows(actions.results);
+  for (const row of actions.results) {
+    // The receipt must itself be producible, and the projection must be the
+    // receipt's own face rather than a second, independently forged claim about
+    // it. Both are required: a valid receipt beside a mismatched action row is
+    // exactly the detached-projection forgery.
+    assertLocalS4ReceiptSafe({
+      ...row,
+      coarse_category: row.receipt_coarse_category,
+      public_action: row.receipt_public_action,
+      public_notice: row.receipt_public_notice,
+    });
+    if (
+      row.coarse_category !== row.receipt_coarse_category ||
+      row.public_action !== row.receipt_public_action ||
+      row.public_notice !== row.receipt_public_notice
+    ) {
+      throw new LocalS3PublicShapeError("screening-action-row");
+    }
+  }
   const body = JSON.stringify({
     schema: "asimposium.s4-public-actions.v1",
     actions: actions.results.map((action) => ({
@@ -2290,7 +2577,7 @@ async function localS4Diagnostics(
     `SELECT receipt_id, input_digest, model_version, policy_version, configuration_digest,
             decision, coarse_category, provider_status, decision_path, status_code,
             context_frontier_digest, context_omission_count, public_action, public_notice,
-            deduplicated_from_receipt_id
+            deduplicated_from_receipt_id, created_at
      FROM s4_local_screening_decision_receipts
      WHERE problem_id = ?1 ORDER BY receipt_id ASC`,
   )
@@ -2316,6 +2603,117 @@ async function localS4Diagnostics(
       deduplicated_from_receipt_id: row.deduplicated_from_receipt_id,
     })),
   });
+}
+
+/**
+ * Causal plant for the strict read-back: write a receipt row and its public
+ * action row straight into D1, bypassing the write boundary entirely.
+ *
+ * Every field is required to be an individually valid enum member, so this
+ * route cannot inject an arbitrary string — it can only assemble a combination
+ * out of literals that each pass field-by-field validation. That restriction is
+ * the experiment: a plant that could smuggle junk would prove only that the
+ * per-field checks work, which was never in doubt. What needs proving is that a
+ * row made entirely of legal parts is still refused when the parts cannot
+ * co-occur, and that the refusal happens on read rather than at the write
+ * boundary this plant never touches.
+ *
+ * Local harness only, fixture authority required, and it asserts nothing about
+ * production behaviour or a canonical ledger.
+ */
+async function plantForgedLocalS4Receipt(
+  request: Request,
+  env: LocalSplitEnv,
+  problemId: string,
+): Promise<Response> {
+  throwIfRouteBindingPoisoned(request, env);
+  if (!localS4FixtureAuthorized(request, env)) return notFound();
+  let body: unknown;
+  try {
+    body = await request.json();
+  } catch {
+    return json({ code: "LOCAL_S4_FORGED_PLANT_MALFORMED" }, 400);
+  }
+  if (body === null || typeof body !== "object" || Array.isArray(body)) {
+    return json({ code: "LOCAL_S4_FORGED_PLANT_MALFORMED" }, 400);
+  }
+  const field = (key: string, allowed: ReadonlySet<string>): string | undefined => {
+    const value = (body as Record<string, unknown>)[key];
+    return typeof value === "string" && allowed.has(value) ? value : undefined;
+  };
+  const decision = field("decision", LOCAL_S4_DECISIONS as ReadonlySet<string>);
+  const coarseCategory = field(
+    "coarse_category",
+    LOCAL_S4_POLICY_CATEGORIES as ReadonlySet<string>,
+  );
+  const providerStatus = field("provider_status", LOCAL_S4_PROVIDER_STATUSES);
+  const decisionPath = field("decision_path", LOCAL_S4_DECISION_PATHS);
+  const statusCode = field("status_code", LOCAL_S4_STATUS_CODES);
+  const publicAction = field("public_action", LOCAL_S4_PUBLIC_ACTIONS);
+  const publicNotice = field("public_notice", LOCAL_S4_PUBLIC_NOTICES);
+  if (
+    decision === undefined ||
+    coarseCategory === undefined ||
+    providerStatus === undefined ||
+    decisionPath === undefined ||
+    statusCode === undefined ||
+    publicAction === undefined ||
+    publicNotice === undefined
+  ) {
+    // Refused precisely because a plant may only use valid enum members.
+    return json({ code: "LOCAL_S4_FORGED_PLANT_REQUIRES_VALID_MEMBERS" }, 400);
+  }
+
+  // Optional independent projection values, so a plant can pair a *valid*
+  // receipt with a *valid* but different action row. That is the detached
+  // forgery: neither row is individually wrong, and only comparing them catches
+  // it. Absent, the projection mirrors the receipt.
+  const actionCategory =
+    field("action_coarse_category", LOCAL_S4_POLICY_CATEGORIES as ReadonlySet<string>) ??
+    coarseCategory;
+  const actionPublicAction = field("action_public_action", LOCAL_S4_PUBLIC_ACTIONS) ?? publicAction;
+  const actionPublicNotice = field("action_public_notice", LOCAL_S4_PUBLIC_NOTICES) ?? publicNotice;
+
+  const receiptId = `DR-${nextMonotonicUlid()}`;
+  const identity = await localS4Identity();
+  const digest = `sha256:${await sha256Hex(`forged-${receiptId}`)}`;
+  const frontier = `sha256:${await sha256Hex(`forged-frontier-${receiptId}`)}`;
+  await env.DB.batch([
+    env.DB.prepare(
+      `INSERT INTO s4_local_screening_decision_receipts
+         (receipt_id, problem_id, fellow_id, idempotency_key_digest, request_digest, input_digest,
+          model_version, policy_version, configuration_digest, decision, coarse_category,
+          provider_status, decision_path, status_code, appeal_code, context_frontier_digest,
+          context_omission_count, public_action, public_notice, deduplicated_from_receipt_id, created_at)
+       VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, 0, ?17, ?18, NULL, ?19)`,
+    ).bind(
+      receiptId,
+      problemId,
+      LOCAL_FELLOW_ID,
+      digest.slice("sha256:".length),
+      digest.slice("sha256:".length),
+      digest,
+      identity.model_version,
+      identity.policy_version,
+      identity.configuration_digest,
+      decision,
+      coarseCategory,
+      providerStatus,
+      decisionPath,
+      statusCode,
+      LOCAL_S4_APPEAL_CODE,
+      frontier,
+      publicAction,
+      publicNotice,
+      1_770_000_000,
+    ),
+    env.DB.prepare(
+      `INSERT INTO s4_local_public_screening_actions
+         (receipt_id, problem_id, coarse_category, public_action, public_notice)
+       VALUES (?1, ?2, ?3, ?4, ?5)`,
+    ).bind(receiptId, problemId, actionCategory, actionPublicAction, actionPublicNotice),
+  ]);
+  return json({ status: "planted", receipt_id: receiptId }, 201);
 }
 
 function resetLocalS4FixtureRoute(request: Request, env: LocalSplitEnv): Response {
@@ -2549,6 +2947,13 @@ export default {
         );
       if (request.method === "POST" && oversizedHistorySeedMatch?.[1] !== undefined) {
         return await seedOversizedS4History(request, env, oversizedHistorySeedMatch[1]);
+      }
+      const forgedReceiptPlantMatch =
+        /^\/__s3\/s4\/fixtures\/forged-receipt\/([A-Za-z0-9][A-Za-z0-9._-]{0,63})$/u.exec(
+          url.pathname,
+        );
+      if (request.method === "POST" && forgedReceiptPlantMatch?.[1] !== undefined) {
+        return await plantForgedLocalS4Receipt(request, env, forgedReceiptPlantMatch[1]);
       }
       const privateMatch = /^\/__s3\/private\/([A-Za-z0-9][A-Za-z0-9._-]{0,63})$/u.exec(
         url.pathname,

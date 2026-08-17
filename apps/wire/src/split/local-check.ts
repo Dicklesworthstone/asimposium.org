@@ -1893,6 +1893,132 @@ async function main(): Promise<void> {
     `seed ${oversizedHistorySeedDenied.response.status}/${oversizedHistorySeed.response.status} promotion ${oversizedHistoryPromotion.response.status} omissions ${String(oversizedHistoryOmissions)}`,
   );
 
+  // ---------------------------------------------------------------------
+  // S-4 strict read-back, driven causally through real local D1.
+  //
+  // The forged rows below are written straight into D1 by the fixture route,
+  // bypassing the write boundary entirely, and every field is an individually
+  // valid enum member. That is the whole experiment: field-by-field validation
+  // accepts each of these rows, so if the read endpoints still answer with data
+  // then the read paths are not validating combinations. Pure-function tests
+  // cannot establish this — they never touch a stored row, a JOIN, or a
+  // persisted replay body.
+  // ---------------------------------------------------------------------
+  const forgedProblemId = "P-s4-forged-readback";
+  // The third element says whether the *receipt itself* is forged. When it is,
+  // every receipt-bearing read path must refuse. The detached case is different
+  // on purpose: its receipt is entirely valid and only the public projection
+  // lies, so the operator diagnostic legitimately still serves that receipt and
+  // demanding otherwise would be asserting a bug rather than a guarantee. What
+  // must hold in every case is that the public face refuses and emits nothing.
+  const forgedCombinations: readonly (readonly [
+    string,
+    Readonly<Record<string, string>>,
+    boolean,
+  ])[] = [
+    [
+      "quarantine_published",
+      {
+        decision: "quarantine",
+        coarse_category: "dual-use-boundary",
+        provider_status: "ok",
+        decision_path: "direct-content-hold",
+        status_code: "SCREENED",
+        public_action: "published",
+        public_notice: "none",
+      },
+      true,
+    ],
+    [
+      "status_code_from_another_outcome",
+      {
+        decision: "pass",
+        coarse_category: "benign-context",
+        provider_status: "ok",
+        decision_path: "provider",
+        status_code: "SCREENING_PROVIDER_TIMEOUT",
+        public_action: "published",
+        public_notice: "none",
+      },
+      true,
+    ],
+    [
+      "hard_category_published_clean",
+      {
+        decision: "pass",
+        coarse_category: "injection",
+        provider_status: "ok",
+        decision_path: "provider",
+        status_code: "SCREENED",
+        public_action: "published",
+        public_notice: "none",
+      },
+      true,
+    ],
+    [
+      // The detached forgery: the receipt is entirely valid and the action row
+      // is entirely valid, but the action row is not this receipt's own face.
+      // Only comparing the two rows rejects it.
+      "detached_action_projection",
+      {
+        decision: "quarantine",
+        coarse_category: "dual-use-boundary",
+        provider_status: "ok",
+        decision_path: "direct-content-hold",
+        status_code: "SCREENED",
+        public_action: "quarantined",
+        public_notice: "none",
+        action_coarse_category: "benign-context",
+        action_public_action: "published",
+        action_public_notice: "none",
+      },
+      false,
+    ],
+  ];
+
+  for (const [label, combination, receiptItselfForged] of forgedCombinations) {
+    const planted = await requestJson(
+      `/__s3/s4/fixtures/forged-receipt/${forgedProblemId}-${label}`,
+      {
+        method: "POST",
+        headers: { ...s4FixtureHeaders(`IK-forged-${label}`), "content-type": "application/json" },
+        body: JSON.stringify(combination),
+      },
+    );
+    const publicFace = await snapshot(
+      await localFetch(`${origin}/__s3/public/${forgedProblemId}-${label}/screening.json`, {
+        headers: s4FixtureHeaders(`IK-forged-public-${label}`),
+      }),
+    );
+    const diagnostics = await snapshot(
+      await localFetch(`${origin}/__s3/s4/diagnostics/${forgedProblemId}-${label}`, {
+        headers: s4FixtureHeaders(`IK-forged-diag-${label}`),
+      }),
+    );
+    // The plant must land — a plant that silently failed would make every
+    // assertion below pass for the wrong reason.
+    const plantedOk = planted.response.status === 201;
+    // The public face is the invariant that holds for every plant: it must
+    // refuse, and its body must carry nothing from the planted row. Reflection
+    // is measured on the public body alone, because the operator diagnostic is
+    // permitted to show a receipt that is genuinely valid.
+    const publicRefused = publicFace.response.status >= 400;
+    const publicReflectsForgery = Object.values(combination).some(
+      (value) => value !== "none" && value !== "ok" && publicFace.body.includes(value),
+    );
+    // A forged *receipt* must additionally be refused by the receipt-bearing
+    // diagnostic. A merely detached projection leaves its receipt legitimate,
+    // so that read stays available and only the public projection is withheld.
+    const diagnosticsAsExpected = receiptItselfForged
+      ? diagnostics.response.status >= 400
+      : diagnostics.response.status === 200;
+    check(
+      `S4_forged_${label}_never_reaches_the_public_face_and_reflects_nothing`,
+      plantedOk && publicRefused && diagnosticsAsExpected && !publicReflectsForgery,
+      `plant ${planted.response.status} public ${publicFace.response.status} diagnostics ${diagnostics.response.status} receipt_forged ${String(receiptItselfForged)} reflected ${String(publicReflectsForgery)}`,
+    );
+  }
+
   emit({
     assertion: "local_binding_summary",
     status: failures === 0 ? "pass" : "fail",

@@ -2,25 +2,64 @@
  * S-4 screening records deliberately contain no submitted body, detector prompt,
  * pattern, raw score, token, or OAuth material. A caller retains the body in the
  * write path; this module receives only a digest and coarse, review-safe facts.
+ *
+ * The decision, provider-status, category, and decision-path vocabularies are
+ * NOT restated here. They are read from `@asimposium/contracts`, which is the
+ * source of truth (AGENTS.md, "Contracts Before Endpoints"). An earlier revision
+ * transcribed them as local literals; three copies of one vocabulary agreed only
+ * by hand, and nothing made them keep agreeing. Reading the enums means a literal
+ * added or removed in `packages/contracts/src/screening.ts` reaches this module
+ * in the same change or fails to compile.
  */
 
-export const SCREENING_DECISIONS = ["pass", "allow-with-warning", "quarantine", "reject"] as const;
-export type ScreeningDecision = (typeof SCREENING_DECISIONS)[number];
+import {
+  type ScreeningCoarseCategory,
+  ScreeningCoarseCategorySchema,
+  type ScreeningDecisionPath,
+  type ScreeningOutcome,
+  ScreeningOutcomeSchema,
+  type ScreeningProviderStatus,
+  ScreeningProviderStatusSchema,
+} from "@asimposium/contracts";
 
-export const PROVIDER_STATUSES = ["ok", "timeout", "error"] as const;
-export type ProviderStatus = (typeof PROVIDER_STATUSES)[number];
+export const SCREENING_DECISIONS = ScreeningOutcomeSchema.options;
+export type ScreeningDecision = ScreeningOutcome;
 
-export const POLICY_CATEGORIES = [
-  "benign-context",
-  "spam-commercial",
-  "injection",
-  "dual-use-boundary",
-  "operational-harm",
-  "harassment",
-  "sexual-content",
-  "provider-unavailable",
-] as const;
-export type PolicyCategory = (typeof POLICY_CATEGORIES)[number];
+export const PROVIDER_STATUSES = ScreeningProviderStatusSchema.options;
+export type ProviderStatus = ScreeningProviderStatus;
+
+export const POLICY_CATEGORIES = ScreeningCoarseCategorySchema.options;
+export type PolicyCategory = ScreeningCoarseCategory;
+
+/**
+ * The two decision-path sets below are deliberately *narrower* than the contract
+ * enum, and each is written as an `Extract` over it rather than as a fresh union.
+ * Naming a path the contract does not have collapses that member to `never` and
+ * breaks compilation at the assignment; dropping one from the contract drops it
+ * here too. Narrowing stays a decision this module makes, and stays legible as
+ * one, without the member spellings becoming a second source of truth.
+ */
+export type ObservationDecisionPath = Extract<
+  ScreeningDecisionPath,
+  "provider" | "provider-timeout-fail-closed" | "provider-error-fail-closed"
+>;
+
+/**
+ * Every contract path except `benign-outage-degraded`, which is not a decision
+ * this seam can reach: publishing during an outage is a harness-fixture path
+ * layered on top of a fail-closed result, never something the provider seam
+ * returns on its own.
+ */
+export type ContextualDecisionPath = Extract<
+  ScreeningDecisionPath,
+  | "provider"
+  | "provider-contextual-hold"
+  | "direct-content-hold"
+  | "direct-content-reject"
+  | "direct-content-warning"
+  | "provider-timeout-fail-closed"
+  | "provider-error-fail-closed"
+>;
 
 /**
  * `quarantine` is a measured class, not a leftover. Its correct outcome is a
@@ -110,10 +149,7 @@ export interface ScreeningObservation {
   readonly policy_version: string;
   readonly configuration_digest: string;
   readonly provider_status: ProviderStatus;
-  readonly decision_path:
-    | "provider"
-    | "provider-timeout-fail-closed"
-    | "provider-error-fail-closed";
+  readonly decision_path: ObservationDecisionPath;
   readonly status_code: "SCREENED" | "SCREENING_PROVIDER_TIMEOUT" | "SCREENING_PROVIDER_ERROR";
   readonly latency_ms: number;
   readonly retry_count: number;
@@ -209,17 +245,10 @@ export interface ContextualScreeningResult {
   readonly model_version: string;
   readonly policy_version: string;
   readonly configuration_digest: string;
-  readonly decision: "pass" | "allow-with-warning" | "quarantine" | "reject";
+  readonly decision: ScreeningDecision;
   readonly coarse_category: PolicyCategory;
   readonly provider_status: ProviderStatus;
-  readonly decision_path:
-    | "provider"
-    | "provider-contextual-hold"
-    | "direct-content-hold"
-    | "direct-content-reject"
-    | "direct-content-warning"
-    | "provider-timeout-fail-closed"
-    | "provider-error-fail-closed";
+  readonly decision_path: ContextualDecisionPath;
   readonly status_code: "SCREENED" | "SCREENING_PROVIDER_TIMEOUT" | "SCREENING_PROVIDER_ERROR";
 }
 
