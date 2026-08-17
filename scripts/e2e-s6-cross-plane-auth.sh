@@ -220,6 +220,11 @@ CLEANED_UP=0
 CLEANUP_IN_PROGRESS=0
 CLEANUP_SECOND_SIGNAL=0
 SIGNAL_CLEANUP_MARKER=""
+LIFECYCLE_TERMINAL_PUBLISHED=0
+SPAWN_REGISTRATION_ACTIVE=0
+LATCHED_SIGNAL=""
+SPAWN_REGISTRATION_READY_MARKER=""
+SPAWN_REGISTRATION_RELEASE_MARKER=""
 
 # Playwright launches Chromium as a grandchild and the minter can fork, so each
 # payload runs beneath a same-group supervisor. The parent never signals a
@@ -404,7 +409,7 @@ request_group_signal() {
   (( GROUP_CONTROL_OPEN == 1 )) || return 1
   case "$signal" in TERM|KILL|DIE) ;; *) return 1 ;; esac
   case "$signal:$GROUP_PROTOCOL_STATE" in
-    TERM:running|TERM:terminal|KILL:running|KILL:terminal|DIE:terminal) ;;
+    TERM:ready|TERM:running|TERM:terminal|KILL:ready|KILL:running|KILL:terminal|DIE:terminal) ;;
     *) return 1 ;;
   esac
   if (( SIGNAL_TERM_FAILURE_PLANT == 1 )) && [[ "$signal" == "TERM" ]]; then return 1; fi
@@ -634,10 +639,29 @@ reap_children() {
   done
 }
 
+# Positive lifecycle evidence is emitted only after the owner set itself is
+# empty. This proves the registered same-process-groups created by this script;
+# it deliberately makes no claim about an arbitrary payload that detached into
+# a new session or process group.
+publish_lifecycle_settled() {
+  (( LIFECYCLE_TERMINAL_PUBLISHED == 0 )) || return 0
+  (( REAP_SURVIVORS == 0 && ${#CHILD_PIDS[@]} == 0 )) || return 1
+  [[ -z "$GROUP_CONTROL_PID" ]] || return 1
+  emit "{\"suite\":\"${SUITE}\",\"record_type\":\"lifecycle-terminal\",\"status\":\"pass\",\"owned_same_process_groups\":\"settled\"}"
+  LIFECYCLE_TERMINAL_PUBLISHED=1
+}
+
 # shellcheck disable=SC2329 # Invoked by the EXIT trap.
 on_exit() {
   local status=$?
-  (( CLEANED_UP == 1 )) && return
+  if (( CLEANED_UP == 1 )); then
+    publish_lifecycle_settled || {
+      emit "{\"suite\":\"${SUITE}\",\"assertion\":\"no-child-survivors\",\"status\":\"fail\",\"detail\":\"owned process-group settlement was not proven\",\"reproduce\":\"${REPRODUCE}\"}"
+      trap - EXIT
+      exit "$EX_CLEANUP_UNPROVEN"
+    }
+    return
+  fi
   CLEANUP_IN_PROGRESS=1
   trap 'CLEANUP_SECOND_SIGNAL=1' INT TERM
   reap_children
@@ -649,6 +673,10 @@ on_exit() {
     exit "$EX_CLEANUP_UNPROVEN"
   fi
   CLEANED_UP=1
+  publish_lifecycle_settled || {
+    trap - EXIT
+    exit "$EX_CLEANUP_UNPROVEN"
+  }
   trap - EXIT
   exit "$status"
 }
@@ -656,6 +684,14 @@ on_exit() {
 # shellcheck disable=SC2329 # Invoked by the INT and TERM traps.
 on_signal() {
   local signal="$1"
+  if (( SPAWN_REGISTRATION_ACTIVE == 1 )); then
+    if [[ -z "$LATCHED_SIGNAL" ]]; then
+      LATCHED_SIGNAL="$signal"
+    else
+      CLEANUP_SECOND_SIGNAL=1
+    fi
+    return
+  fi
   if (( CLEANUP_IN_PROGRESS == 1 )); then
     CLEANUP_SECOND_SIGNAL=1
     return
@@ -681,8 +717,18 @@ on_signal() {
   fi
   blocked_record "INTERRUPTED" "the run received SIG${signal} and every child process group was reaped"
   CLEANED_UP=1
-  trap - EXIT
   exit "$EX_FAIL"
+}
+
+# Close the launch window only once the provisional child has either become an
+# authenticated controlled owner or has been boundedly settled. Clearing the
+# latch before dispatch is deliberate: a later signal enters normal cleanup,
+# while an earlier one is already stored in `pending`.
+end_spawn_registration_window() {
+  local pending="$LATCHED_SIGNAL"
+  SPAWN_REGISTRATION_ACTIVE=0
+  LATCHED_SIGNAL=""
+  if [[ -n "$pending" ]]; then on_signal "$pending"; fi
 }
 
 trap 'on_exit' EXIT
@@ -855,6 +901,7 @@ run_bounded() {
   local pid coproc_pid coproc_read_fd coproc_write_fd input_deadline
   local stable_result=0 stable_control=0
   [[ -z "$GROUP_CONTROL_PID" ]] || return "$EX_CLEANUP_UNPROVEN"
+  (( SPAWN_REGISTRATION_ACTIVE == 0 )) || return "$EX_CLEANUP_UNPROVEN"
   RUN_BOUNDED_OUTCOME="unavailable"
   RUN_BOUNDED_CHILD_STATUS=""
   mint_owner_token "supervisor"
@@ -866,6 +913,8 @@ run_bounded() {
   # coprocess body immediately execs Perl, so its pid remains the exact group
   # leader through Perl -> Bash supervisor for the whole capability lifetime.
   # shellcheck disable=SC1012,SC2026 # ANSI-C quotes belong to the nested Bash source.
+  SPAWN_REGISTRATION_ACTIVE=1
+  LATCHED_SIGNAL=""
   coproc S6_BOUNDED_SUPERVISOR {
     exec /usr/bin/perl -MPOSIX -e '
       $^F=9;
@@ -907,7 +956,21 @@ run_bounded() {
         printf "control-ready:%s\n" "$token" >&5 || exit "$unavailable"
 
         input_mode="" input_record="" start_frame=""
-        IFS= read -r start_frame <&7 || kill -KILL 0
+        # READY is already an authenticated retirement capability. A signal
+        # latched between coproc spawn and parent adoption is drained before
+        # START, so no payload is forked merely to make cleanup possible.
+        while :; do
+          IFS= read -r start_frame <&7 || kill -KILL 0
+          if [[ "$start_frame" == "SIGNAL${tab}${token}${tab}TERM" ]]; then
+            printf "control-ack:%s:TERM\n" "$token" >&5 || kill -KILL 0
+            continue
+          fi
+          if [[ "$start_frame" == "SIGNAL${tab}${token}${tab}KILL" ]]; then
+            printf "control-ack:%s:KILL\n" "$token" >&5 || kill -KILL 0
+            kill -KILL 0
+          fi
+          break
+        done
         if [[ "$start_frame" == "START-NONE${tab}${token}" ]]; then
           input_mode="none"
           printf "input-ready:%s\n" "$token" >&5 || kill -KILL 0
@@ -1059,9 +1122,20 @@ run_bounded() {
       "$SUPERVISOR_EXTRA_RECORD_PLANT" "$@"
   }
   pid=$!
+  if [[ -n "$SPAWN_REGISTRATION_READY_MARKER" ]]; then
+    printf 'ready' >"$SPAWN_REGISTRATION_READY_MARKER" 2>/dev/null || true
+    while [[ -n "$SPAWN_REGISTRATION_RELEASE_MARKER" &&
+             ! -e "$SPAWN_REGISTRATION_RELEASE_MARKER" ]]; do
+      IFS= read -r -t 0.05 _ || true
+    done
+  fi
   coproc_pid="${S6_BOUNDED_SUPERVISOR_PID:-}"
   coproc_read_fd="${S6_BOUNDED_SUPERVISOR[0]:-}"
   coproc_write_fd="${S6_BOUNDED_SUPERVISOR[1]:-}"
+  if [[ ! "$pid" =~ ^[0-9]+$ ]]; then
+    end_spawn_registration_window
+    return "$EX_WATCHDOG_UNAVAILABLE"
+  fi
   register_child "$pid" "$supervisor_token" "ordinary"
   [[ "$pid" =~ ^[0-9]+$ && "$coproc_pid" == "$pid" ]] || setup_status=1
   [[ "$coproc_read_fd" =~ ^[0-9]+$ && "$coproc_write_fd" =~ ^[0-9]+$ ]] || setup_status=1
@@ -1080,13 +1154,16 @@ run_bounded() {
        settle_provisional_owner_from_result \
          "$pid" "$supervisor_token" "$((SECONDS + 2))" 0; then
       exec 5<&- 2>/dev/null || true
+      end_spawn_registration_window
       return "$EX_WATCHDOG_UNAVAILABLE"
     fi
     if (( stable_result == 0 )) && direct_child_settled_before_wait "$pid"; then
       wait "$pid" 2>/dev/null || true
       unregister_child "$pid"
+      end_spawn_registration_window
       return "$EX_WATCHDOG_UNAVAILABLE"
     fi
+    end_spawn_registration_window
     return "$EX_CLEANUP_UNPROVEN"
   fi
   if ! prepare_group_control "$pid" "$supervisor_token"; then
@@ -1095,8 +1172,10 @@ run_bounded() {
     if settle_provisional_owner_from_result \
       "$pid" "$supervisor_token" "$((SECONDS + 2))" 0; then
       exec 5<&- 2>/dev/null || true
+      end_spawn_registration_window
       return "$EX_WATCHDOG_UNAVAILABLE"
     fi
+    end_spawn_registration_window
     return "$EX_CLEANUP_UNPROVEN"
   fi
   send_group_frame_until $'BOOT\t'"${supervisor_token}" \
@@ -1106,19 +1185,25 @@ run_bounded() {
     GROUP_CONTROL_OPEN=0
     if settle_provisional_owner_from_result \
       "$pid" "$supervisor_token" "$((SECONDS + 2))" 1; then
+      end_spawn_registration_window
       return "$EX_WATCHDOG_UNAVAILABLE"
     fi
+    end_spawn_registration_window
     return "$EX_CLEANUP_UNPROVEN"
   fi
+  GROUP_PROTOCOL_STATE="ready"
   if ! adopt_group_control "$pid" "$supervisor_token"; then
     exec 6>&- 2>/dev/null || true
     GROUP_CONTROL_OPEN=0
     if settle_provisional_owner_from_result \
       "$pid" "$supervisor_token" "$((SECONDS + 2))" 0; then
+      end_spawn_registration_window
       return "$EX_WATCHDOG_UNAVAILABLE"
     fi
+    end_spawn_registration_window
     return "$EX_CLEANUP_UNPROVEN"
   fi
+  end_spawn_registration_window
   GROUP_PROTOCOL_STATE="input"
   if ! send_group_input "$pid" "$stdin_file" "$input_deadline"; then
     exec 6>&- 2>/dev/null || true
@@ -1562,11 +1647,12 @@ run_browser_leg() {
     buffer_browser_blocked "BROWSER_RUNNER_MISSING" "the browser leg requires ${PLAYWRIGHT_RUNNER}"
     return 1
   fi
-  local status=0 transport_status=0
+  local status=0 transport_status=0 validator_status=0 validator_transport_status=0
   # `run_bounded` runs in the PARENT shell and writes to a file, so its pid and
   # process group stay registered where the EXIT trap can reach them. Capturing
   # it with `$( )` would strand Chromium's group in a dead subshell.
   local out_file="${RUN_STATE_DIR}/browser.out"
+  local validator_file="${RUN_STATE_DIR}/browser.validated"
   local bound
   bound="$(phase_budget "$BROWSER_TIMEOUT_SECONDS")"
   if (( bound <= 0 )); then
@@ -1582,7 +1668,7 @@ run_browser_leg() {
   # Nothing secret is in argv or environ, so Chromium cannot inherit any of it.
   local config_record
   config_record="$(printf '{"previewUrl":"%s","workerUrl":"%s","user":"%s","password":"%s"}' \
-    "$(json_string "$ASIMP_S6_PREVIEW_URL")" "$(json_string "$ASIMP_S6_WORKER_URL")" \
+    "$(json_string "$ASIMP_S6_PREVIEW_URL")" "$(json_string "$worker")" \
     "$(json_string "$ASIMP_S6_TEST_GOOGLE_USER")" "$(json_string "$ASIMP_S6_TEST_GOOGLE_PASS")")"
   minimal_env_command bun "$PLAYWRIGHT_RUNNER"
   run_bounded "$bound" "$out_file" "$config_record" "${MINIMAL_CMD[@]}" \
@@ -1593,80 +1679,72 @@ run_browser_leg() {
     status="$transport_status"
   fi
 
-  # STATUS FIRST, before the record is even looked at.
-  #
-  # A runner that printed a well-formed pass record and then timed out (124),
-  # left cleanup unproven (125) or could not be bounded (126) would otherwise
-  # have its record parsed and its claims accepted. The exit status is part of
-  # the evidence, not a footnote to it.
+  # STATUS FIRST. A convincing record followed by timeout, cleanup refusal or a
+  # fault is never parsed as evidence.
   if [[ "$status" -ne 0 && "$status" -ne "$EX_CONFIG" ]]; then
     fail_record "browser-leg" "the browser leg exited ${status}; its output is not evidence"
     return 1
   fi
 
-  local record
-  record="$(grep -F '"suite":"s6-cross-plane-browser"' "$out_file" 2>/dev/null | tail -1)"
-  if [[ -z "$record" ]]; then
-    fail_record "browser-leg" "the browser runner produced no record (status ${status})"
+  # The runner owns the one JSON contract tree. Its validator reads a bounded
+  # regular file with fatal UTF-8, requires exactly one canonical LF-terminated
+  # record, validates every top-level and nested key/type/cross-field, and binds
+  # status=pass/code=OK to exit 0 (or a typed blocked record to exit 78). The
+  # shell consumes only the fixed normalized line; grep/tail/substrings/sed can
+  # no longer green on a convincing fragment or a later duplicate.
+  local validator_bound normalized="" extra="" first_read=0 second_read=0
+  validator_bound="$(phase_budget 10)"
+  if (( validator_bound <= 0 )); then
+    fail_record "browser-leg" "no budget remained to validate the browser evidence"
+    return 1
+  fi
+  minimal_env_command bun "$PLAYWRIGHT_RUNNER" --validate-record "$status" "$out_file"
+  run_bounded "$validator_bound" "$validator_file" - "${MINIMAL_CMD[@]}" \
+    2>"${RUN_STATE_DIR}/browser-validator.err" || validator_transport_status=$?
+  if [[ "$RUN_BOUNDED_OUTCOME" == "child" ]]; then
+    validator_status="$RUN_BOUNDED_CHILD_STATUS"
+  else
+    validator_status="$validator_transport_status"
+  fi
+  if [[ "$validator_status" -ne "$status" ]]; then
+    fail_record "browser-leg" "the strict browser evidence validator refused the exit/status pairing"
+    return 1
+  fi
+  if ! exec 7<"$validator_file"; then
+    fail_record "browser-leg" "the strict browser evidence validator produced no readable result"
+    return 1
+  fi
+  IFS= read -r normalized <&7 || first_read=$?
+  IFS= read -r extra <&7 || second_read=$?
+  exec 7<&-
+  if (( first_read != 0 || second_read != 1 )) || [[ -n "$extra" ]]; then
+    fail_record "browser-leg" "the browser evidence validator did not produce exactly one LF-terminated normalized line"
     return 1
   fi
 
   if [[ "$status" -eq "$EX_CONFIG" ]]; then
-    buffer_browser_blocked "BROWSER_LEG_BLOCKED" "the browser leg could not run: $(problem_code "$record")"
+    local blocked_code="${normalized#$'blocked\t'}"
+    if [[ "$normalized" != $'blocked\t'"$blocked_code" ||
+          ! "$blocked_code" =~ ^[A-Z][A-Z0-9_]{0,63}$ ]]; then
+      fail_record "browser-leg" "the normalized blocked browser evidence was malformed"
+      return 1
+    fi
+    buffer_browser_blocked "$blocked_code" "the browser leg reported a typed provisioning or environment blocker"
     return 1
   fi
 
-  # Attribute assertions are made here, against the runner's typed record, so
-  # this script's own report carries them rather than pointing at another tool.
-  if [[ "$record" == *'"host_only":true'* && "$record" == *'"http_only":true'* &&
-    "$record" == *'"secure":true'* && "$record" == *'"same_site":"lax"'* &&
-    "$record" == *'"scoped_to_apex":true'* && "$record" == *'"present_for_agent_host":false'* ]]; then
-    pass_record "cookie-host-only-live" "the live Set-Cookie header from the Agora origin carried no Domain attribute and the jar scoped it to the apex alone"
-  else
-    fail_record "cookie-host-only-live" "the live Set-Cookie header did not prove host-only apex scoping"
-  fi
-
-  # Direction B of WRONG_PRINCIPAL.
-  #
-  # State this one exactly, because the obvious wording is false. The session
-  # cookie is host-only on the apex, so the browser NEVER attaches it to a
-  # request for the agent host — that non-transmission is precisely what
-  # host-only means, and `present_for_agent_host:false` above is its direct
-  # evidence. The probe therefore does not present a cookie and get refused; it
-  # carries no credential at all, and the agent host answers 403 WRONG_PRINCIPAL.
-  # Claiming "a live cookie was refused" would describe a weaker world than the
-  # one proved, in which the cookie reached `a.` and was merely rejected there.
-  if [[ "$record" == *'"cookie_probe":{"status":403,"code":"WRONG_PRINCIPAL"}'* ]]; then
-    pass_record "cookie-not-sent-to-agent-host" "the live host-only cookie was not sent to the agent host; that request carried no credential and ${ROUTE_PROPOSALS} answered exactly 403 WRONG_PRINCIPAL"
-  else
-    fail_record "cookie-not-sent-to-agent-host" "the agent-host request from the logged-in browser did not answer exactly 403 WRONG_PRINCIPAL"
-  fi
-
-  # Request correlation, matching the runner's `edge_request_id` field EXACTLY.
-  #
-  # This parsed `"deployment"` after the runner had been renamed, so the field
-  # never matched and every otherwise-green live run failed here — a silent
-  # cross-file drift that no local gate could see, because neither file is wrong
-  # on its own. The TS suite now pins both halves of this contract together.
-  local edge_request_id
-  edge_request_id="$(printf '%s' "$record" | sed -n 's/.*"edge_request_id":"\([^"]\{1,200\}\)".*/\1/p')"
-  # NOT AN ASSERTION. Fable S-6 does not require `x-vercel-id`, the runner types
-  # the field as nullable, and its absence proves nothing — so no success claim
-  # depends on it and it does not inflate the assertion count either way. When an
-  # edge supplies it, it is logged for correlation and nothing more.
-  if [[ -n "$edge_request_id" ]]; then
-    log "${SUITE}: edge request id ${edge_request_id} (correlation only; not a deployment or revision pin)"
-  fi
-
-  # The receipt is accepted only in its exact structured form, and only when the
-  # runner proved the id was absent before the action. A bare id would be a
-  # reading of the page, not a receipt for the write.
-  RECEIPT="$(printf '%s' "$record" | sed -n 's/.*"receipt":{"enrollment_id":"\(ASIMP-EN-[0-9A-HJKMNP-TV-Z]\{26\}\)","absent_before_action":true}.*/\1/p')"
-  if [[ -z "$RECEIPT" ]]; then
-    fail_record "agora-origination" "the browser leg reported no structured receipt proven absent before the action"
+  RECEIPT="${normalized#$'pass\t'}"
+  if [[ "$normalized" != $'pass\t'"$RECEIPT" ||
+        ! "$RECEIPT" =~ ^ASIMP-EN-[0-9A-HJKMNP-TV-Z]{26}$ ]]; then
+    fail_record "browser-leg" "the normalized pass receipt was malformed"
     return 1
   fi
-  pass_record "agora-origination" "the real console Server Action minted an enrollment absent before the click, through the signed envelope path"
+  pass_record "cookie-host-only-live" "every observed non-deletion session issuance was host-only, HttpOnly, Secure and SameSite=Lax, and the live family remained apex-scoped"
+  pass_record "cookie-not-sent-to-agent-host" "natural browser eligibility omitted the live host-only session family at Stoa and the exact no-redirect request answered 403 WRONG_PRINCIPAL"
+  # Fable direction B: unlike the natural-omission observation above, this fresh
+  # Playwright context explicitly presented the live session family in memory.
+  pass_record "cookie-presented-to-agent-host-refused" "the exact Worker route refused the explicitly presented live session family with 403 WRONG_PRINCIPAL"
+  pass_record "agora-origination" "the exact Agora console action rendered one dedicated absent-before receipt whose join URL had the exact Worker origin and join path"
   return 0
 }
 
@@ -2743,6 +2821,43 @@ self_test() {
   sweep_plant "error-exit-sweeps-group" "exit 9" 10
   sweep_plant "timeout-sweeps-group" "sleep 45" 1
 
+  # Deterministic spawn/register race: the nested launcher pauses after `$!`
+  # but before registration. TERM must latch, ownership must then be adopted,
+  # and cleanup must retire the READY supervisor before START forks the payload.
+  local prereg_capture prereg_ready prereg_release prereg_payload
+  local prereg_status=0 prereg_ready_seen="" prereg_last="" prereg_line=""
+  prereg_capture="$(new_marker "prereg-capture")" || prereg_capture=""
+  prereg_ready="$(new_marker "prereg-ready")" || prereg_ready=""
+  prereg_release="$(new_marker "prereg-release")" || prereg_release=""
+  prereg_payload="$(new_marker "prereg-payload")" || prereg_payload=""
+  if [[ -n "$prereg_capture" && -n "$prereg_ready" && -n "$prereg_release" &&
+        -n "$prereg_payload" ]]; then
+    bash "$SCRIPT_SELF" --self-test-pre-registration-signal-victim \
+      "$prereg_ready" "$prereg_release" "$prereg_payload" >"$prereg_capture" 2>&1 &
+    local prereg_pid=$!
+    register_selftest_child "$prereg_pid"
+    if await_marker_value "$prereg_ready" ready; then
+      prereg_ready_seen="$marker_value"
+      kill -TERM "$prereg_pid" 2>/dev/null || true
+      printf 'release' >"$prereg_release"
+    fi
+    if direct_child_settled_before_wait "$prereg_pid"; then
+      wait "$prereg_pid" 2>/dev/null || prereg_status=$?
+      unregister_child "$prereg_pid"
+    else
+      prereg_status="$EX_CLEANUP_UNPROVEN"
+    fi
+    while IFS= read -r prereg_line; do prereg_last="$prereg_line"; done <"$prereg_capture"
+  else
+    prereg_status="$EX_FAIL"
+  fi
+  check "pre-registration-signal-barrier-armed" "$prereg_ready_seen" "ready"
+  check "pre-registration-signal-is-interruption" "$prereg_status" "$EX_FAIL"
+  check "pre-registration-signal-prevents-payload-fork" \
+    "$([[ -e "$prereg_payload" ]] && printf started || printf absent)" "absent"
+  check "pre-registration-signal-publishes-positive-lifecycle" "$prereg_last" \
+    "{\"suite\":\"${SUITE}\",\"record_type\":\"lifecycle-terminal\",\"status\":\"pass\",\"owned_same_process_groups\":\"settled\"}"
+
   # Causal: the TERM trap must reap a live descendant. A nested instance holds a
   # sleeper and waits; signalling it exercises on_signal against a real group.
   local signal_marker signal_terminated
@@ -3315,6 +3430,20 @@ main() {
     # retires the descendant group without any direct-child numeric signal.
     run_bounded 45 /dev/null - \
       bash "$SCRIPT_SELF" --self-test-ack-victim "$victim_marker" "$terminated_marker" || true
+    exit 0
+  fi
+
+  # Hidden launcher-window polarity. The production hook pauses after `$!` but
+  # before provisional registration; the parent sends TERM while the trap can
+  # only latch it. Adoption then drains the latch before START, so this payload
+  # marker must remain absent.
+  if [[ "${1:-}" == "--self-test-pre-registration-signal-victim" ]]; then
+    SPAWN_REGISTRATION_READY_MARKER="${2:?ready marker required}"
+    SPAWN_REGISTRATION_RELEASE_MARKER="${3:?release marker required}"
+    local prereg_payload_marker="${4:?payload marker required}"
+    run_bounded 45 /dev/null - \
+      bash -c 'printf started >"$1"; while :; do IFS= read -r -t 30 _ || true; done' \
+      _ "$prereg_payload_marker" || true
     exit 0
   fi
 
