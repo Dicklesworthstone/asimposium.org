@@ -1,19 +1,211 @@
 {
-  "matrix_version": "1.0.0",
+  "matrix_version": "1.1.0",
+  "prepared_at": "2026-08-17",
   "consumer": "W12.2 real sharpening and famous-problem guardrail entry",
   "gate": "asimposiumorg-4kz W12.P2 source-preparation contract",
   "observed_defect_class": "conflated mathematical variants, unanchored or source-drifted claims, missing per-source license/right boundaries, unsupported current-status wording, and unbounded flagship tasks",
   "deletion_condition": "Replace only after W12.2 has ingested reviewed source material through the real sharpening machinery and its runtime validator has equivalent coverage; never delete it merely because a prose page exists.",
   "dossiers": [
-    { "id": "SP4D", "checks": { "exact_formulation": "required", "variant_distinctions": "required", "primary_anchors": "required", "falsifier": "required", "settlement_and_no_claim": "required", "bounded_subgoals": "required", "safety": "required", "freshness": "required", "external_expert_gate": "required", "rendered_face": "required" } },
-    { "id": "KZD-POST-GARDAM", "checks": { "exact_formulation": "required", "variant_distinctions": "required", "primary_anchors": "required", "falsifier": "required", "settlement_and_no_claim": "required", "bounded_subgoals": "required", "safety": "required", "freshness": "required", "external_expert_gate": "required", "rendered_face": "required" } },
-    { "id": "UNION-CLOSED-GILMER", "checks": { "exact_formulation": "required", "variant_distinctions": "required", "primary_anchors": "required", "falsifier": "required", "settlement_and_no_claim": "required", "bounded_subgoals": "required", "safety": "required", "freshness": "required", "external_expert_gate": "required", "rendered_face": "required" } },
-    { "id": "ERDOS-STRAUS-BOUNDED", "checks": { "exact_formulation": "required", "variant_distinctions": "required", "primary_anchors": "required", "falsifier": "required", "settlement_and_no_claim": "required", "bounded_subgoals": "required", "safety": "required", "freshness": "required", "external_expert_gate": "required", "rendered_face": "required" } },
-    { "id": "THREE-CUBES", "checks": { "exact_formulation": "required", "variant_distinctions": "required", "primary_anchors": "required", "falsifier": "required", "settlement_and_no_claim": "required", "bounded_subgoals": "required", "safety": "required", "freshness": "required", "external_expert_gate": "required", "rendered_face": "required" } },
-    { "id": "SENDOV-DEGREE-AUDIT", "checks": { "exact_formulation": "required", "variant_distinctions": "required", "primary_anchors": "required", "falsifier": "required", "settlement_and_no_claim": "required", "bounded_subgoals": "required", "safety": "required", "freshness": "required", "external_expert_gate": "required", "rendered_face": "required" } },
-    { "id": "LONELY-RUNNER-SMALL-K", "checks": { "exact_formulation": "required", "variant_distinctions": "required", "primary_anchors": "required", "falsifier": "required", "settlement_and_no_claim": "required", "bounded_subgoals": "required", "safety": "required", "freshness": "required", "external_expert_gate": "required", "rendered_face": "required" } },
-    { "id": "BB6-LOWER-BOUND", "checks": { "exact_formulation": "required", "variant_distinctions": "required", "primary_anchors": "required", "falsifier": "required", "settlement_and_no_claim": "required", "bounded_subgoals": "required", "safety": "required", "freshness": "required", "external_expert_gate": "required", "rendered_face": "required" } },
-    { "id": "QUANTUM-CHANNEL-ADDITIVITY", "checks": { "exact_formulation": "required", "variant_distinctions": "required", "primary_anchors": "required", "falsifier": "required", "settlement_and_no_claim": "required", "bounded_subgoals": "required", "safety": "required", "freshness": "required", "external_expert_gate": "required", "rendered_face": "required" } },
-    { "id": "NAVIER-STOKES-BOUNDED", "checks": { "exact_formulation": "required", "variant_distinctions": "required", "primary_anchors": "required", "falsifier": "required", "settlement_and_no_claim": "required", "bounded_subgoals": "required", "safety": "required", "freshness": "required", "external_expert_gate": "required", "rendered_face": "required" } }
+    {
+      "id": "SP4D",
+      "checks": {
+        "exact_formulation": "required",
+        "variant_distinctions": "required",
+        "primary_anchors": "required",
+        "falsifier": "required",
+        "settlement_and_no_claim": "required",
+        "bounded_subgoals": "required",
+        "safety": "required",
+        "freshness": "required",
+        "external_expert_gate": "required",
+        "rendered_face": "required"
+      }
+    },
+    {
+      "id": "KZD-POST-GARDAM",
+      "checks": {
+        "exact_formulation": "required",
+        "variant_distinctions": "required",
+        "primary_anchors": "required",
+        "falsifier": "required",
+        "settlement_and_no_claim": "required",
+        "bounded_subgoals": "required",
+        "safety": "required",
+        "freshness": "required",
+        "external_expert_gate": "required",
+        "rendered_face": "required"
+      }
+    },
+    {
+      "id": "UNION-CLOSED-GILMER",
+      "checks": {
+        "exact_formulation": "required",
+        "variant_distinctions": "required",
+        "primary_anchors": "required",
+        "falsifier": "required",
+        "settlement_and_no_claim": "required",
+        "bounded_subgoals": "required",
+        "safety": "required",
+        "freshness": "required",
+        "external_expert_gate": "required",
+        "rendered_face": "required"
+      }
+    },
+    {
+      "id": "ERDOS-STRAUS-BOUNDED",
+      "checks": {
+        "exact_formulation": "required",
+        "variant_distinctions": "required",
+        "primary_anchors": "required",
+        "falsifier": "required",
+        "settlement_and_no_claim": "required",
+        "bounded_subgoals": "required",
+        "safety": "required",
+        "freshness": "required",
+        "external_expert_gate": "required",
+        "rendered_face": "required"
+      }
+    },
+    {
+      "id": "THREE-CUBES",
+      "checks": {
+        "exact_formulation": "required",
+        "variant_distinctions": "required",
+        "primary_anchors": "required",
+        "falsifier": "required",
+        "settlement_and_no_claim": "required",
+        "bounded_subgoals": "required",
+        "safety": "required",
+        "freshness": "required",
+        "external_expert_gate": "required",
+        "rendered_face": "required"
+      }
+    },
+    {
+      "id": "SENDOV-DEGREE-AUDIT",
+      "checks": {
+        "exact_formulation": "required",
+        "variant_distinctions": "required",
+        "primary_anchors": "required",
+        "falsifier": "required",
+        "settlement_and_no_claim": "required",
+        "bounded_subgoals": "required",
+        "safety": "required",
+        "freshness": "required",
+        "external_expert_gate": "required",
+        "rendered_face": "required"
+      }
+    },
+    {
+      "id": "LONELY-RUNNER-SMALL-K",
+      "checks": {
+        "exact_formulation": "required",
+        "variant_distinctions": "required",
+        "primary_anchors": "required",
+        "falsifier": "required",
+        "settlement_and_no_claim": "required",
+        "bounded_subgoals": "required",
+        "safety": "required",
+        "freshness": "required",
+        "external_expert_gate": "required",
+        "rendered_face": "required"
+      }
+    },
+    {
+      "id": "BB6-LOWER-BOUND",
+      "checks": {
+        "exact_formulation": "required",
+        "variant_distinctions": "required",
+        "primary_anchors": "required",
+        "falsifier": "required",
+        "settlement_and_no_claim": "required",
+        "bounded_subgoals": "required",
+        "safety": "required",
+        "freshness": "required",
+        "external_expert_gate": "required",
+        "rendered_face": "required"
+      }
+    },
+    {
+      "id": "QUANTUM-CHANNEL-ADDITIVITY",
+      "checks": {
+        "exact_formulation": "required",
+        "variant_distinctions": "required",
+        "primary_anchors": "required",
+        "falsifier": "required",
+        "settlement_and_no_claim": "required",
+        "bounded_subgoals": "required",
+        "safety": "required",
+        "freshness": "required",
+        "external_expert_gate": "required",
+        "rendered_face": "required"
+      }
+    },
+    {
+      "id": "NAVIER-STOKES-BOUNDED",
+      "checks": {
+        "exact_formulation": "required",
+        "variant_distinctions": "required",
+        "primary_anchors": "required",
+        "falsifier": "required",
+        "settlement_and_no_claim": "required",
+        "bounded_subgoals": "required",
+        "safety": "required",
+        "freshness": "required",
+        "external_expert_gate": "required",
+        "rendered_face": "required"
+      }
+    }
+  ],
+  "source_digests": {
+    "docs/seed/sp4d/dossier.json": "6e33f0b0e4c5c3c45506e211dcdacc592bc3ae8b693426e53824c79636e3463d",
+    "docs/seed/sp4d/SP4D.md": "18a98737dd0ed3119e5f98f1e813ace60833ee43d3bde88f251f15c7b37e618d",
+    "docs/seed/frontier-slate/dossiers.json": "8e2a50b6baaf562e2f06df57af7d2bbf8873897fa290e0e7d0ad2560db1b95c9"
+  },
+  "dossier_digests": {
+    "SP4D": "a982bc621f7b1362653cc9bf69c05e8744965a2d281a436ce1e1f54842488415",
+    "KZD-POST-GARDAM": "c0d49f561169d2dccb529003aadadc6e4f1854c96ad1688c23ec6c848276a204",
+    "UNION-CLOSED-GILMER": "3c3c69bf6e78fc2ed35eb16156ea98715b4302a8e7ce09b51fe2adc75425fb34",
+    "ERDOS-STRAUS-BOUNDED": "e1f38340b23b57535b7b9ccd3e4d6e999017aa5e5975dc5c61eecc658ac32a4e",
+    "THREE-CUBES": "9ff149419050d30e853a9cad66dee2c492f4fd1b207601b3fb57b4c0f0579bca",
+    "SENDOV-DEGREE-AUDIT": "5df373b81ffe2a90839a288cc342f1cfdf1d555040d1432bbf2b11a0f1afa2f3",
+    "LONELY-RUNNER-SMALL-K": "0ee1184f5af657de2e4572fd508bfc2cd0f3cd57ceb10f677ad51e75e8571897",
+    "BB6-LOWER-BOUND": "6e0898e9e79761262ea8e413ead7990f79f3b27fac4368d79638361f316976bd",
+    "QUANTUM-CHANNEL-ADDITIVITY": "935198eb1ec22684a44a8f87cd939c6d0dc3125e489f1d89f877e8e304d417bc",
+    "NAVIER-STOKES-BOUNDED": "0bb920999a766319adf8dfaf2f5a0df76e0264e9028a03ef2b8793b8f0436b29"
+  },
+  "review_state": {
+    "approval_state": "external_review_pending",
+    "independence_requirement": "Each external reviewer must be independent of the authorship of the dossier they review: no co-authorship of the cited anchors, no supervisory or institutional reporting relationship with the source-preparation author, and no participation in drafting the formulation or variant firewall under review. A reviewer must record which anchors and which category distinctions they personally checked, and must state separately whether they are checking source fidelity or mathematical validity.",
+    "reviewer_records": [
+      {
+        "reviewer": "W12.P2 source-preparation author",
+        "expertise": "Documentation-contract implementation and source-anchor hygiene. This is not a mathematical specialty review and is not offered as one.",
+        "independence": "Not independent: this reviewer authored the material under review.",
+        "approval_state": "no_mathematical_validation_issued",
+        "checked": "Locator-to-prose agreement, per-source rights records, schema conformance, and digest freshness only."
+      },
+      {
+        "reviewer": "External smooth-4-manifold specialist (unfilled)",
+        "expertise": "Smooth four-manifold topology, including the topological/PL/smooth category boundary and trisection conventions.",
+        "independence": "Required to be independent under the requirement above; no candidate has been approached, named, or engaged.",
+        "approval_state": "not_started",
+        "checked": "Nothing. This record exists to make the unfilled seat visible rather than implied."
+      },
+      {
+        "reviewer": "External subfield specialist per frontier dossier (unfilled)",
+        "expertise": "Subfield relevant to each rung-6 dossier, assigned per dossier rather than as one generalist review.",
+        "independence": "Required to be independent under the requirement above; no candidate has been approached, named, or engaged.",
+        "approval_state": "not_started",
+        "checked": "Nothing."
+      }
+    ]
+  },
+  "unresolved_questions": [
+    "No field-wide adjudicated status registry was reachable in this pass, so no dossier carries a current-status determination and every one requires a dated refresh immediately before publication.",
+    "The SP4D category distinctions and all five primary locators require confirmation by an independent smooth-4-manifold specialist; source-fidelity checking here does not substitute for that.",
+    "Each rung-6 dossier needs its own subfield reviewer; whether a single reviewer may cover more than one dossier without losing independence is undecided.",
+    "The rung-7 new-theory template has not been exercised against a real submission, so its prediction and consistency requirements are untested in practice.",
+    "Whether the bounded SP4D subgoals are the right three, as opposed to a larger set, is a scientific judgement this source pass did not make."
   ]
 }

@@ -1,11 +1,14 @@
 {
-  "report_version": "1.0.0",
-  "prepared_at": "2026-08-13",
+  "report_version": "1.1.0",
+  "prepared_at": "2026-08-17",
   "scope": "Source-preparation review only; this record is not an external mathematical review or publication approval.",
   "source_digests": {
-    "docs/seed/sp4d/dossier.json": "128579b07e7a95bfbd2d35c47e3ca9ffd096082e1e0272c226d4fddbec77131b",
-    "docs/seed/sp4d/SP4D.md": "e36750c3dfcc55ab6c5e4fc4bc5db6a8ffd22928981e42e53cb787bf25b62fa9",
-    "docs/seed/frontier-slate/dossiers.json": "88f7c332527a2d3016e4d4ab5e13ae7895b3cc044b7a2db669907862a0a57b18"
+    "docs/seed/sp4d/dossier.json": "6e33f0b0e4c5c3c45506e211dcdacc592bc3ae8b693426e53824c79636e3463d",
+    "docs/seed/sp4d/SP4D.md": "18a98737dd0ed3119e5f98f1e813ace60833ee43d3bde88f251f15c7b37e618d",
+    "docs/seed/frontier-slate/dossiers.json": "8e2a50b6baaf562e2f06df57af7d2bbf8873897fa290e0e7d0ad2560db1b95c9",
+    "docs/seed/sp4d/review-matrix.json": "1ecc89c857f55bbb762ef9225843f1ca85c6a10d9a3520df9cc601ea0a438733",
+    "docs/seed/sp4d/check.mjs": "f2c9de36a2d7c89b507d73b3d0f44bc3b2fbdeab5c69b5facde0b7f87b9d96b7",
+    "docs/seed/sp4d/check.test.mjs": "24db3ab28eaba2fcec5e1addc1f8e84117ba7cb571c396f37a02d21d537b74de"
   },
   "reviewer_record": [
     {
@@ -17,7 +20,10 @@
   ],
   "external_review": {
     "required": true,
-    "required_expertise": ["smooth four-manifold topology", "relevant subfield expertise for each frontier dossier"],
+    "required_expertise": [
+      "smooth four-manifold topology",
+      "relevant subfield expertise for each frontier dossier"
+    ],
     "independence_requirement": "Reviewers must be independent of the contribution they review and must identify the source anchors and techniques they checked.",
     "gate": "No dossier may be described as publication-ready, mathematically validated, resolved, or current until this review occurs."
   },
@@ -30,7 +36,14 @@
     "Corrected the SP4D prose DOI to the same Donaldson record used by the structured dossier and made that agreement executable.",
     "Replaced an unrelated five-state Busy Beaver paper with the official machine-convention anchor; no six-state record or exact value is asserted.",
     "Corrected the group-ring source identifier to match the linked author record and marked the withdrawn Sendov record as a warning anchor rather than proof support.",
-    "Added per-source license/right and reuse-boundary records, rendered them, and planted checks for missing rights and prose-anchor drift."
+    "Added per-source license/right and reuse-boundary records, rendered them, and planted checks for missing rights and prose-anchor drift.",
+    "2026-08-17: the rendered SP4D face had drifted from all five declared locators after the dossier was revised. Rewrote the anchor set as a list carrying each locator verbatim, with no markdown inside the locator strings, so the reader and the citation checker read the same string rather than a paraphrase of it.",
+    "2026-08-17: the review matrix predated the current dossiers by four days and carried no prepared_at, source digests, dossier digests, review_state, or unresolved questions. Added all five; the ten dossier digests and three source digests are recomputed from the files as they now stand.",
+    "2026-08-17: the reviewer record previously listed only the source-preparation author, which made the two unfilled external seats invisible. Both are now explicit records with approval_state not_started and a checked field that explicitly records that nothing was checked, so an unstaffed review reads as unstaffed rather than absent.",
+    "2026-08-17 (independent audit REJECT of the checker): the face rule bound only the heading, the reference URLs, and the locators, all of which a paraphrase preserves. A face could therefore keep every anchor intact while restating the formulation in the wrong category, dropping the external-review gate, and announcing a resolution. The rendered face is now generated from the dossier and required to equal those bytes, so formulation, each variant distinction, each bounded subgoal with its falsifier, the no-resolution language, the expert gate, and every locator and licence bind at once and cannot drift independently.",
+    "2026-08-17: added an assertive resolution-claim scan over the face and over every dossier, including the slate. Only affirmative wording is matched; the declared no_resolution_language is excised before scanning, because that field names the outcome in order to deny it and a scanner that refused it would make honest disclaiming impossible.",
+    "2026-08-17: the review record now pins the machinery as well as the material. review-matrix.json, check.mjs, and check.test.mjs carry recorded digests, so a weakened rule or a deleted matrix row can no longer leave the report reading as a complete account of what was checked. review-matrix.json is pinned in this report rather than in itself, since no file can contain its own digest.",
+    "2026-08-17: the render check asserted that the generated face contained the headings renderDossier hardcodes, which is true of any input. It now asserts that the dossier's own formulation, first locator, and expert gate reach the face."
   ],
   "approval_state": "external_review_pending"
 }
