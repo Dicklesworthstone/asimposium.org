@@ -104,7 +104,8 @@ function readBounded(path: string): string {
 interface OuterControlListener {
   readonly port: number;
   readonly connected: Promise<Socket>;
-  close(): void;
+  readonly protocolFailure: () => Error | undefined;
+  close(): Promise<void>;
 }
 
 /**
@@ -117,7 +118,7 @@ interface OuterControlListener {
  */
 async function outerControlListener(): Promise<OuterControlListener> {
   const server = createServer();
-  server.listen(0, "127.0.0.1");
+  server.listen({ host: "127.0.0.1", port: 0, exclusive: true });
   await once(server, "listening");
   const address = server.address();
   if (address === null || typeof address === "string") {
@@ -126,41 +127,86 @@ async function outerControlListener(): Promise<OuterControlListener> {
   }
 
   let parentSide: Socket | undefined;
-  let closed = false;
-  const connected = new Promise<Socket>((resolveConnection, rejectConnection) => {
-    const fail = (error: Error): void => rejectConnection(error);
-    server.once("error", fail);
-    server.once("connection", (socket) => {
-      server.off("error", fail);
+  let connectionSettled = false;
+  let disposed = false;
+  let failure: Error | undefined;
+  let rejectConnection: ((error: Error) => void) | undefined;
+  let resolveServerClosed: (() => void) | undefined;
+  const serverClosed = new Promise<void>((resolve) => {
+    resolveServerClosed = resolve;
+  });
+  let serverCloseStarted = false;
+  const stopAccepting = (): void => {
+    if (serverCloseStarted) return;
+    serverCloseStarted = true;
+    server.close(() => {
+      resolveServerClosed?.();
+      resolveServerClosed = undefined;
+    });
+  };
+  const connected = new Promise<Socket>((resolveConnection, rejectConnected) => {
+    rejectConnection = rejectConnected;
+    server.on("connection", (socket) => {
+      socket.setNoDelay(true);
+      if (parentSide !== undefined || disposed) {
+        failure ??= new Error("multiple supervisor capability connections");
+        socket.destroy();
+        parentSide?.destroy();
+        if (!connectionSettled) {
+          connectionSettled = true;
+          rejectConnected(failure);
+        }
+        return;
+      }
       parentSide = socket;
-      closed = true;
-      server.close();
+      connectionSettled = true;
+      stopAccepting();
       resolveConnection(socket);
     });
+  });
+  server.on("error", (error) => {
+    failure ??= error;
+    if (!connectionSettled) {
+      connectionSettled = true;
+      rejectConnection?.(error);
+    }
+    parentSide?.destroy();
   });
   return {
     port: address.port,
     connected,
-    close() {
-      if (!closed) {
-        closed = true;
-        server.close();
+    protocolFailure: () => failure,
+    async close() {
+      if (disposed) return;
+      disposed = true;
+      if (!connectionSettled) {
+        connectionSettled = true;
+        rejectConnection?.(new Error("supervisor capability listener closed before connect"));
       }
+      stopAccepting();
+      const socketClosed =
+        parentSide === undefined || parentSide.destroyed
+          ? Promise.resolve()
+          : once(parentSide, "close").then(() => undefined);
       parentSide?.destroy();
+      await Promise.all([serverClosed, socketClosed]);
     },
   };
 }
 
 async function within<T>(promise: Promise<T>, milliseconds: number): Promise<T | undefined> {
   let timer: ReturnType<typeof setTimeout> | undefined;
-  const result = await Promise.race([
-    promise.then((value) => ({ kind: "value" as const, value })),
-    new Promise<{ kind: "elapsed" }>((resolveElapsed) => {
-      timer = setTimeout(() => resolveElapsed({ kind: "elapsed" }), Math.max(0, milliseconds));
-    }),
-  ]);
-  if (timer !== undefined) clearTimeout(timer);
-  return result.kind === "value" ? result.value : undefined;
+  try {
+    const result = await Promise.race([
+      promise.then((value) => ({ kind: "value" as const, value })),
+      new Promise<{ kind: "elapsed" }>((resolveElapsed) => {
+        timer = setTimeout(() => resolveElapsed({ kind: "elapsed" }), Math.max(0, milliseconds));
+      }),
+    ]);
+    return result.kind === "value" ? result.value : undefined;
+  } finally {
+    if (timer !== undefined) clearTimeout(timer);
+  }
 }
 
 interface ShellLifecycle {
