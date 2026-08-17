@@ -611,6 +611,41 @@ test(
   { timeout: 15_000 },
 );
 
+test(
+  "PLANTED: a live recursive lsof holder can vanish only between broad and exact recheck",
+  async () => {
+    const child = Bun.spawn({
+      cmd: ["bash", "scripts/e2e-s3-split.sh"],
+      cwd: root,
+      env: {
+        PATH: process.env.PATH ?? "",
+        HOME: process.env.HOME ?? "",
+        S3_SELF_TEST_STATE_HOLDER_RECHECK: "1",
+      },
+      stdout: "pipe",
+      stderr: "pipe",
+    });
+    const [stdout, stderr, exitCode] = await Promise.all([
+      new Response(child.stdout).text(),
+      new Response(child.stderr).text(),
+      child.exited,
+    ]);
+    expect(exitCode).toBe(0);
+    expect(stdout).toContain(
+      '"assertion":"live_recursive_lsof_holder_released_after_broad_scan_is_rechecked_to_no_match"',
+    );
+    expect(stdout).toContain(
+      '"assertion":"confirmed_recursive_lsof_holder_remains_a_cleanup_refusal"',
+    );
+    expect(stdout).toContain('"assertion":"released_recursive_lsof_holder_converges_to_no_match"');
+    expect(stdout).toContain(
+      '"assertion":"recursive_lsof_warning_and_malformed_output_fail_closed"',
+    );
+    expect(`${stdout}\n${stderr}`).not.toContain('"status":"fail"');
+  },
+  { timeout: 20_000 },
+);
+
 for (const window of [
   "background_spawn",
   "scratch_assignment",

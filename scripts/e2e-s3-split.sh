@@ -161,6 +161,10 @@ TEST_PROVISIONAL_REAL_STARTED_AT=""
 TEST_PROVISIONAL_REAL_TOKEN=""
 TEST_PROVISIONAL_RECOVERY=0
 TEST_EXACT_CHECK_FAILURES_REMAINING=0
+TEST_STATE_HOLDER_RELEASE_AFTER_BROAD_PID=""
+TEST_STATE_HOLDER_RELEASE_AFTER_BROAD_FILE=""
+TEST_STATE_HOLDER_RELEASED_AFTER_BROAD_FILE=""
+TEST_STATE_HOLDER_BROAD_ERROR_PLANT=""
 CLEANUP_ATTEMPTS_USED=0
 SERVER_SUPERVISOR_LIFECYCLE_STATUS="not_started"
 SERVER_PAYLOAD_LIFECYCLE_STATUS="not_started"
@@ -568,16 +572,67 @@ listener_pids_are_in_group() {
 }
 
 state_holder_pids() {
-  local pids pid status
+  local pids pid status rechecked recheck_status confirmed="" released_line=""
+  local -a candidates=()
   command -v lsof >/dev/null 2>&1 || return 2
-  pids="$(lsof -t +D "${STATE_DIR}" 2>/dev/null)"
-  status=$?
-  if (( status > 1 )) || { (( status == 1 )) && [[ -n "${pids}" ]]; }; then return 2; fi
+  case "${TEST_STATE_HOLDER_BROAD_ERROR_PLANT}" in
+    "") pids="$(lsof -nP -t +w +D "${STATE_DIR}" 2>&1)"; status=$? ;;
+    warning) pids="planted lsof traversal warning"; status=1 ;;
+    malformed) pids="not-a-pid"; status=0 ;;
+    *) return 2 ;;
+  esac
+  # macOS lsof may return 1 while still printing numeric matches when warnings
+  # are enabled. Numeric-only output is therefore a candidate set for either
+  # documented status; only status 1 with empty output proves no match.
+  if (( status == 1 )) && [[ -z "${pids}" ]]; then return 0; fi
+  (( status == 0 || status == 1 )) && [[ -n "${pids}" ]] || return 2
   while IFS= read -r pid; do
     [[ -z "${pid}" ]] && continue
     [[ "${pid}" =~ ^[0-9]+$ ]] || return 2
+    candidates+=("${pid}")
   done <<<"${pids}"
-  if [[ -n "${pids}" ]]; then printf '%s\n' "${pids}"; fi
+  (( ${#candidates[@]} > 0 )) || return 2
+
+  if [[ -n "${TEST_STATE_HOLDER_RELEASE_AFTER_BROAD_PID}" ]]; then
+    [[ "${TEST_STATE_HOLDER_RELEASE_AFTER_BROAD_PID}" =~ ^[0-9]+$ && \
+      " ${candidates[*]} " == *" ${TEST_STATE_HOLDER_RELEASE_AFTER_BROAD_PID} "* && \
+      -n "${TEST_STATE_HOLDER_RELEASE_AFTER_BROAD_FILE}" && \
+      -n "${TEST_STATE_HOLDER_RELEASED_AFTER_BROAD_FILE}" && \
+      ! -e "${TEST_STATE_HOLDER_RELEASE_AFTER_BROAD_FILE}" && \
+      ! -L "${TEST_STATE_HOLDER_RELEASE_AFTER_BROAD_FILE}" ]] || return 2
+    (umask 077; set -o noclobber; \
+      printf 'release %s\n' "${TEST_STATE_HOLDER_RELEASE_AFTER_BROAD_PID}" \
+        >"${TEST_STATE_HOLDER_RELEASE_AFTER_BROAD_FILE}") 2>/dev/null || return 2
+    for _ in $(seq 1 100); do
+      if [[ -f "${TEST_STATE_HOLDER_RELEASED_AFTER_BROAD_FILE}" && \
+        ! -L "${TEST_STATE_HOLDER_RELEASED_AFTER_BROAD_FILE}" ]]; then
+        {
+          IFS= read -r released_line || released_line=""
+          if IFS= read -r _; then released_line=""; fi
+        } <"${TEST_STATE_HOLDER_RELEASED_AFTER_BROAD_FILE}"
+        [[ "${released_line}" == \
+          "released ${TEST_STATE_HOLDER_RELEASE_AFTER_BROAD_PID}" ]] && break
+      fi
+      sleep 0.05
+    done
+    [[ "${released_line}" == \
+      "released ${TEST_STATE_HOLDER_RELEASE_AFTER_BROAD_PID}" ]] || return 2
+  elif [[ -n "${TEST_STATE_HOLDER_RELEASE_AFTER_BROAD_FILE}" || \
+    -n "${TEST_STATE_HOLDER_RELEASED_AFTER_BROAD_FILE}" ]]; then
+    return 2
+  fi
+
+  for pid in "${candidates[@]}"; do
+    rechecked="$(lsof -nP -t +w -a -p "${pid}" +D "${STATE_DIR}" 2>&1)"
+    recheck_status=$?
+    if (( recheck_status == 1 )) && [[ -z "${rechecked}" ]]; then
+      continue
+    fi
+    (( recheck_status == 0 || recheck_status == 1 )) && \
+      [[ "${rechecked}" == "${pid}" ]] || return 2
+    confirmed="${confirmed}${confirmed:+$'\n'}${pid}"
+  done
+  if [[ -n "${confirmed}" ]]; then printf '%s\n' "${confirmed}"; fi
   return 0
 }
 
@@ -1381,6 +1436,108 @@ run_post_reap_inspection_failure_self_test() {
   emit '{"tool":"bash","package":"@asimposium/wire","suite":"s3-local-bindings","assertion":"post_reap_retry_has_zero_state_fd_survivors","status":"pass","reproduce":"bash scripts/e2e-s3-split.sh"}'
 }
 
+run_state_holder_recheck_self_test() {
+  local holders status holder_pid ready_line holder_status
+  local held_file ready_file release_file released_file prefix
+
+  start_state_holder_recheck_child() {
+    prefix="$1"
+    held_file="${STATE_DIR}/state-holder-recheck-${prefix}.held"
+    ready_file="${STATE_DIR}/state-holder-recheck-${prefix}.ready"
+    release_file="${STATE_DIR}/state-holder-recheck-${prefix}.release"
+    released_file="${STATE_DIR}/state-holder-recheck-${prefix}.released"
+    [[ ! -e "${held_file}" && ! -L "${held_file}" && \
+      ! -e "${ready_file}" && ! -L "${ready_file}" && \
+      ! -e "${release_file}" && ! -L "${release_file}" && \
+      ! -e "${released_file}" && ! -L "${released_file}" ]] || return 1
+    bash -c '
+    held_file="$1"
+    ready_file="$2"
+    release_file="$3"
+    released_file="$4"
+    exec 9>"${held_file}" || exit 125
+    printf "ready %s\n" "$$" >"${ready_file}" || exit 125
+    deadline=$((SECONDS + 10))
+    while (( SECONDS < deadline )); do
+      if [[ -f "${release_file}" && ! -L "${release_file}" ]] && \
+        IFS= read -r release_line <"${release_file}" && \
+        [[ "${release_line}" == "release $$" ]]; then
+        exec 9>&-
+        printf "released %s\n" "$$" >"${released_file}" || exit 125
+        exit 0
+      fi
+      sleep 0.05
+    done
+    exit 124
+    ' s3-state-holder-recheck "${held_file}" "${ready_file}" "${release_file}" \
+      "${released_file}" &
+    holder_pid=$!
+    ready_line=""
+    for _ in $(seq 1 100); do
+      if [[ -f "${ready_file}" && ! -L "${ready_file}" ]]; then
+        {
+          IFS= read -r ready_line || ready_line=""
+          if IFS= read -r _; then ready_line=""; fi
+        } <"${ready_file}"
+        [[ "${ready_line}" == "ready ${holder_pid}" ]] && return 0
+      fi
+      sleep 0.05
+    done
+    return 1
+  }
+
+  release_state_holder_recheck_child() {
+    if [[ ! -e "${release_file}" && ! -L "${release_file}" ]]; then
+      (umask 077; set -o noclobber; printf 'release %s\n' "${holder_pid}" \
+        >"${release_file}") 2>/dev/null || :
+    fi
+    if wait "${holder_pid}" 2>/dev/null; then holder_status=0; else holder_status=$?; fi
+    (( holder_status == 0 ))
+  }
+
+  start_state_holder_recheck_child transient || {
+    [[ -n "${holder_pid:-}" ]] && release_state_holder_recheck_child || :
+    return 1
+  }
+  TEST_STATE_HOLDER_RELEASE_AFTER_BROAD_PID="${holder_pid}"
+  TEST_STATE_HOLDER_RELEASE_AFTER_BROAD_FILE="${release_file}"
+  TEST_STATE_HOLDER_RELEASED_AFTER_BROAD_FILE="${released_file}"
+  holders="$(state_holder_pids)"; status=$?
+  if ! release_state_holder_recheck_child || (( status != 0 )) || [[ -n "${holders}" ]]; then
+    return 1
+  fi
+  TEST_STATE_HOLDER_RELEASE_AFTER_BROAD_PID=""
+  TEST_STATE_HOLDER_RELEASE_AFTER_BROAD_FILE=""
+  TEST_STATE_HOLDER_RELEASED_AFTER_BROAD_FILE=""
+  emit '{"tool":"bash+lsof","package":"@asimposium/wire","suite":"s3-local-bindings","assertion":"live_recursive_lsof_holder_released_after_broad_scan_is_rechecked_to_no_match","status":"pass","reproduce":"bash scripts/e2e-s3-split.sh"}'
+
+  start_state_holder_recheck_child persistent || {
+    [[ -n "${holder_pid:-}" ]] && release_state_holder_recheck_child || :
+    return 1
+  }
+  holders="$(state_holder_pids)"; status=$?
+  if (( status != 0 )) || [[ "${holders}" != "${holder_pid}" ]] || \
+    assert_state_holders_empty; then
+    release_state_holder_recheck_child || :
+    return 1
+  fi
+  emit '{"tool":"bash+lsof","package":"@asimposium/wire","suite":"s3-local-bindings","assertion":"confirmed_recursive_lsof_holder_remains_a_cleanup_refusal","status":"pass","reproduce":"bash scripts/e2e-s3-split.sh"}'
+
+  release_state_holder_recheck_child || return 1
+  holders="$(state_holder_pids)"; status=$?
+  if (( status != 0 )) || [[ -n "${holders}" ]]; then return 1; fi
+  emit '{"tool":"bash+lsof","package":"@asimposium/wire","suite":"s3-local-bindings","assertion":"released_recursive_lsof_holder_converges_to_no_match","status":"pass","reproduce":"bash scripts/e2e-s3-split.sh"}'
+
+  TEST_STATE_HOLDER_BROAD_ERROR_PLANT=warning
+  if state_holder_pids >/dev/null; then return 1; else status=$?; fi
+  (( status == 2 )) || return 1
+  TEST_STATE_HOLDER_BROAD_ERROR_PLANT=malformed
+  if state_holder_pids >/dev/null; then return 1; else status=$?; fi
+  (( status == 2 )) || return 1
+  TEST_STATE_HOLDER_BROAD_ERROR_PLANT=""
+  emit '{"tool":"bash+lsof","package":"@asimposium/wire","suite":"s3-local-bindings","assertion":"recursive_lsof_warning_and_malformed_output_fail_closed","status":"pass","reproduce":"bash scripts/e2e-s3-split.sh"}'
+}
+
 term_mode="${S3_SELF_TEST_TERM_RESISTANT_CHILD:-0}"
 identity_mode="${S3_SELF_TEST_IDENTITY_MISMATCH:-0}"
 second_signal_mode="${S3_SELF_TEST_SECOND_SIGNAL_DURING_CLEANUP:-0}"
@@ -1390,17 +1547,20 @@ pid_reuse_mode="${S3_SELF_TEST_PID_REUSE:-0}"
 checker_timeout_mode="${S3_SELF_TEST_CHECKER_TIMEOUT:-0}"
 checker_containment_mode="${S3_SELF_TEST_CHECKER_CONTAINMENT_FAILURE:-0}"
 checker_exit_one_mode="${S3_SELF_TEST_CHECKER_EXIT_1:-0}"
+state_holder_recheck_mode="${S3_SELF_TEST_STATE_HOLDER_RECHECK:-0}"
 TEST_DISPATCH_STARTUP_SIGNAL_OWNER="${S3_SELF_TEST_DISPATCH_STARTUP_SIGNAL:-}"
 TEST_STARTUP_SIGNAL_WINDOW="${S3_SELF_TEST_STARTUP_SIGNAL_WINDOW:-}"
 if [[ ! "${term_mode}" =~ ^[01]$ || ! "${identity_mode}" =~ ^[01]$ || \
   ! "${second_signal_mode}" =~ ^[01]$ || ! "${post_reap_inspection_mode}" =~ ^[01]$ || \
   ! "${provisional_exact_mode}" =~ ^[01]$ || \
   ! "${pid_reuse_mode}" =~ ^[01]$ || ! "${checker_timeout_mode}" =~ ^[01]$ || \
-  ! "${checker_containment_mode}" =~ ^[01]$ || ! "${checker_exit_one_mode}" =~ ^[01]$ ]] || \
+  ! "${checker_containment_mode}" =~ ^[01]$ || ! "${checker_exit_one_mode}" =~ ^[01]$ || \
+  ! "${state_holder_recheck_mode}" =~ ^[01]$ ]] || \
   { [[ -n "${TEST_DISPATCH_STARTUP_SIGNAL_OWNER}" ]] && [[ ! "${TEST_DISPATCH_STARTUP_SIGNAL_OWNER}" =~ ^(server|checker)$ ]]; } || \
   { [[ -n "${TEST_STARTUP_SIGNAL_WINDOW}" ]] && [[ ! "${TEST_STARTUP_SIGNAL_WINDOW}" =~ ^(background_spawn|scratch_assignment|stop_proof|adoption|cont_release|return)$ ]]; } || \
   (( term_mode + identity_mode + second_signal_mode + post_reap_inspection_mode + provisional_exact_mode + \
     pid_reuse_mode + checker_timeout_mode + checker_containment_mode + checker_exit_one_mode + \
+    state_holder_recheck_mode + \
     (${#TEST_STARTUP_SIGNAL_WINDOW} > 0) + (${#TEST_DISPATCH_STARTUP_SIGNAL_OWNER} > 0) > 1 )); then
   emit '{"tool":"bash","package":"@asimposium/wire","suite":"s3-local-bindings","status":"fail","code":"S3_SELF_TEST_MODE_INVALID","reproduce":"bash scripts/e2e-s3-split.sh"}'
   exit 1
@@ -1420,6 +1580,10 @@ if (( second_signal_mode == 1 )); then
 fi
 if (( post_reap_inspection_mode == 1 )); then
   run_post_reap_inspection_failure_self_test || exit 1
+  exit 0
+fi
+if (( state_holder_recheck_mode == 1 )); then
+  run_state_holder_recheck_self_test || exit 1
   exit 0
 fi
 if (( provisional_exact_mode == 1 )); then
