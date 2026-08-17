@@ -103,6 +103,7 @@ readonly -a S2_SOURCE_PATHS=(
   db/migrations/0013_sponsor_fellow_cap.sql
   db/migrations/0014_sponsor_enrollment_rate_limit.sql
   db/migrations/0015_sponsor_enrollment_bootstrap_invariant.sql
+  db/migrations/0016_operator_fellow_cap_override.sql
   scripts/verify-cost-model.ts
   scripts/verify-cost-model.test.ts
   # `verify-cost-model.ts` imports these at runtime. They were absent while every
@@ -153,6 +154,7 @@ readonly -a S2_EXPECTED_MIGRATION_JOURNAL=(
   0013_sponsor_fellow_cap.sql
   0014_sponsor_enrollment_rate_limit.sql
   0015_sponsor_enrollment_bootstrap_invariant.sql
+  0016_operator_fellow_cap_override.sql
 )
 
 # Source provenance is part of the cost-receipt claim. Run each local command under a parent
@@ -1371,6 +1373,13 @@ S2_PRE_RELEASE_SECOND_KILL_AUTHORITY=not-needed
 S2_PRE_RELEASE_SECOND_KILL_AUTHORITY_CHECK=0
 S2_DETACHED_PROCESS_TABLE=""
 S2_DETACHED_SCAN_PHASE=""
+# The legacy leader-loss postcondition plants are deliberately confined to the
+# post-KILL state-fd scan. They let the harness prove that incomplete lsof/ps
+# observations stay unknown without weakening the real scanner path.
+S2_LEGACY_POSTCONDITION_STATE_HOLDER_PLANT=none
+S2_LEGACY_POSTCONDITION_STATE_HOLDER_PLANT_ARMED=0
+S2_LEGACY_POSTCONDITION_PS_FAILURE_PLANT_CONSUMED=0
+S2_LEGACY_POSTCONDITION_HOLDER_PGID=""
 # This packed record is published before any release write. It closes the caller-assignment
 # gap: an EXIT trap can still prove and release the exact newest supervisor while a caller is
 # between start_pinned_supervisor and its Worker/lifecycle bookkeeping. Fields are PID, PGID,
@@ -2820,9 +2829,29 @@ lsof_scan_has_no_matches() {
 # malformed rows, warnings, and scanner errors fail immediately, while a persistent real holder
 # remains confirmed through the final sample.
 lsof_scan_reaches_no_matches() {
-  local attempt line candidate_output candidate_status candidate_lines candidate_gone
+  local attempt line candidate_output candidate_status candidate_lines candidate_gone arg
   local confirmed confirmed_output confirmed_status
+  local state_fd_scan=0
   local -a candidates=()
+  # This narrow causal plant is armed only after legacy_reap_leader_lost_group
+  # has observed the exact group disappear following its KILL and crossed the
+  # postcondition barrier. It feeds the ordinary state-fd refusal path rather
+  # than bypassing either the KILL authority or the survivor assertion.
+  if [[ "${S2_LEGACY_POSTCONDITION_STATE_HOLDER_PLANT_ARMED:-0}" == 1 && \
+    "${S2_LEGACY_POSTCONDITION_STATE_HOLDER_PLANT:-none}" != none ]]; then
+    for arg in "$@"; do
+      [[ "${arg}" == "+D" ]] && state_fd_scan=1
+    done
+    if [[ ${state_fd_scan} -eq 1 ]]; then
+      case "${S2_LEGACY_POSTCONDITION_STATE_HOLDER_PLANT:-none}" in
+        malformed-lsof) S2_LSOF_LAST_OUTPUT="not-a-numeric-pid" ;;
+        ps-failure) S2_LSOF_LAST_OUTPUT="${S2_PARENT_PID}" ;;
+        *) return 1 ;;
+      esac
+      S2_LSOF_LAST_STATUS=1
+      return 1
+    fi
+  fi
   if lsof_scan_has_no_matches "$@"; then return 0; fi
   [[ "${S2_LSOF_LAST_STATUS}" == 0 || "${S2_LSOF_LAST_STATUS}" == 1 ]] || return 1
   [[ -n "${S2_LSOF_LAST_OUTPUT}" ]] || return 1
@@ -3085,12 +3114,68 @@ legacy_postcondition_load_barrier() {
   return 1
 }
 
+# Store each observation separately so the failure record never turns an
+# unobserved property into false. The complete lsof PID set is buffered and
+# validated before either the count or controller field becomes measured. A
+# later ps/PGID lookup failure cannot undo those independent observations, but
+# it keeps exact_group_holds_state unknown because membership was not proved
+# for every holder.
+legacy_measure_postcondition_state_holders() {
+  local pgid="$1" holder_output="$2" holder_line holder_pid known_pid
+  local controller_holds_state=false exact_group_holds_state=false
+  local -a holder_pids=()
+
+  S2_LEGACY_POSTCONDITION_HOLDER_COUNT=""
+  S2_LEGACY_POSTCONDITION_CONTROLLER_HOLDS_STATE=""
+  S2_LEGACY_POSTCONDITION_EXACT_GROUP_HOLDS_STATE=""
+  [[ -n "${holder_output}" ]] || return 1
+  while IFS= read -r holder_line; do
+    [[ -n "${holder_line}" ]] || continue
+    is_decimal "${holder_line}" || return 1
+    for known_pid in "${holder_pids[@]}"; do
+      [[ "${known_pid}" != "${holder_line}" ]] || return 1
+    done
+    holder_pids+=("${holder_line}")
+  done <<<"${holder_output}"
+  (( ${#holder_pids[@]} > 0 )) || return 1
+
+  S2_LEGACY_POSTCONDITION_HOLDER_COUNT="${#holder_pids[@]}"
+  for holder_pid in "${holder_pids[@]}"; do
+    [[ "${holder_pid}" == "${S2_PARENT_PID}" ]] && controller_holds_state=true
+  done
+  S2_LEGACY_POSTCONDITION_CONTROLLER_HOLDS_STATE="${controller_holds_state}"
+
+  for holder_pid in "${holder_pids[@]}"; do
+    S2_LEGACY_POSTCONDITION_HOLDER_PGID=""
+    # This one-shot plant represents the ps lookup itself failing after lsof
+    # supplied a numeric holder. It reaches the same refusal edge as a real
+    # ps error and is consumed only in this causal postcondition measurement.
+    if [[ "${S2_LEGACY_POSTCONDITION_STATE_HOLDER_PLANT:-none}" == "ps-failure" && \
+      "${S2_LEGACY_POSTCONDITION_PS_FAILURE_PLANT_CONSUMED:-0}" == 0 ]]; then
+      S2_LEGACY_POSTCONDITION_PS_FAILURE_PLANT_CONSUMED=1
+      S2_LEGACY_POSTCONDITION_EXACT_GROUP_HOLDS_STATE=""
+      return 1
+    fi
+    if ! S2_LEGACY_POSTCONDITION_HOLDER_PGID="$(LC_ALL=C ps -o pgid= -p "${holder_pid}" 2>/dev/null)"; then
+      S2_LEGACY_POSTCONDITION_EXACT_GROUP_HOLDS_STATE=""
+      return 1
+    fi
+    if [[ ! "${S2_LEGACY_POSTCONDITION_HOLDER_PGID}" =~ ^[[:space:]]*([0-9]+)[[:space:]]*$ ]]; then
+      S2_LEGACY_POSTCONDITION_EXACT_GROUP_HOLDS_STATE=""
+      return 1
+    fi
+    [[ "${BASH_REMATCH[1]}" == "${pgid}" ]] && exact_group_holds_state=true
+  done
+  S2_LEGACY_POSTCONDITION_EXACT_GROUP_HOLDS_STATE="${exact_group_holds_state}"
+  return 0
+}
+
 legacy_reap_leader_lost_group() {
   local pid="$1" pgid="$2" marker="$3" persist="$4" port="$5" tick kill_tick
-  # Unknown until the state-fd scan actually runs. These were previously seeded
-  # to 0/false and emitted verbatim on a listener-scan failure, which published
-  # three observations nobody had made.
-  local holder_line holder_pid observed_holder_pgid holder_count=""
+  # Unknown until the state-fd scan actually runs. A malformed holder set keeps
+  # all three fields unknown; a failed per-holder PGID lookup leaves only the
+  # independently measured count/controller fields available.
+  local holder_count=""
   local controller_holds_state="" exact_group_holds_state=""
   for ((tick = 0; tick < S2_LEGACY_STOP_INSPECTION_TICKS; tick += 1)); do
     if ! kill -0 -- "-${pgid}" 2>/dev/null; then
@@ -3116,29 +3201,20 @@ legacy_reap_leader_lost_group() {
             emit '{"tool":"bash","package":"apps/wire","suite":"s2-krater-local-d1-upgrade","status":"fail","code":"S2_LEGACY_POSTCONDITION_BARRIER_FAILED","reproduce":"scripts/e2e-s2-krater.sh"}'
             return 1
           fi
+          S2_LEGACY_POSTCONDITION_STATE_HOLDER_PLANT_ARMED=1
           if ! assert_no_run_survivors "${persist}" "${port}" "${marker}"; then
+            S2_LEGACY_POSTCONDITION_STATE_HOLDER_PLANT_ARMED=0
             if [[ "${S2_SURVIVOR_ASSERTION_FAILURE:-}" == "state-fd-scan" ]]; then
-              # Only inside this branch are the three fields measured, so only
-              # here do they stop being null.
-              holder_count=0
-              controller_holds_state=false
-              exact_group_holds_state=false
-              while IFS= read -r holder_line; do
-                [[ -n "${holder_line}" ]] || continue
-                if [[ ! "${holder_line}" =~ ^([0-9]+)$ ]]; then
-                  holder_count=-1
-                  break
-                fi
-                holder_pid="${BASH_REMATCH[1]}"
-                holder_count=$((holder_count + 1))
-                [[ "${holder_pid}" == "$$" ]] && controller_holds_state=true
-                observed_holder_pgid="$(LC_ALL=C ps -o pgid= -p "${holder_pid}" 2>/dev/null | tr -d '[:space:]')" || observed_holder_pgid=""
-                [[ "${observed_holder_pgid}" == "${pgid}" ]] && exact_group_holds_state=true
-              done <<<"${S2_LSOF_LAST_OUTPUT}"
+              legacy_measure_postcondition_state_holders \
+                "${pgid}" "${S2_LSOF_LAST_OUTPUT}" || :
+              holder_count="${S2_LEGACY_POSTCONDITION_HOLDER_COUNT}"
+              controller_holds_state="${S2_LEGACY_POSTCONDITION_CONTROLLER_HOLDS_STATE}"
+              exact_group_holds_state="${S2_LEGACY_POSTCONDITION_EXACT_GROUP_HOLDS_STATE}"
             fi
             emit "{\"tool\":\"bash+lsof+ps\",\"package\":\"apps/wire\",\"suite\":\"s2-krater-local-d1-upgrade\",\"status\":\"fail\",\"code\":\"S2_LEGACY_EXACT_RESIDUAL_POSTCONDITION_UNPROVEN\",\"check\":\"${S2_SURVIVOR_ASSERTION_FAILURE:-unknown}\",\"state_holder_count\":$(json_decimal_or_null "${holder_count}"),\"controller_holds_state\":$(json_bool_or_null "${controller_holds_state}"),\"exact_group_holds_state\":$(json_bool_or_null "${exact_group_holds_state}"),\"foreign_listener_pids\":\"${S2_SURVIVOR_FOREIGN_LISTENERS:-}\",\"reproduce\":\"scripts/e2e-s2-krater.sh\"}"
             return 1
           fi
+          S2_LEGACY_POSTCONDITION_STATE_HOLDER_PLANT_ARMED=0
           S2_LEGACY_STOP_REAPED_UNCERTAIN=1
           S2_LEGACY_STOP_EXACT_RESIDUAL_POSTCONDITION_PROVED=1
           return 1
@@ -6726,9 +6802,9 @@ run_s2_shell_regression_test() {
     journal_valid="${S2_STATE_DIR}/journal-valid-$(random_hex 8).json"
     journal_alternate="${S2_STATE_DIR}/journal-alternate-$(random_hex 8).json"
     journal_invalid="${S2_STATE_DIR}/journal-invalid-$(random_hex 8).json"
-    printf '%s\n' '[{"success":true,"results":[{"id":1,"name":"0001_krater_v0.sql","applied_at":"2026-08-14 09:25:35.123456"},{"id":2,"name":"0002_enrollment_g0.sql","applied_at":"2026-08-14 09:25:37"},{"id":3,"name":"0003_auth_nonce_replay.sql","applied_at":"2026-08-14 09:25:37"},{"id":4,"name":"0004_krater_integrity_v1.sql","applied_at":"2026-08-14 09:25:37"},{"id":5,"name":"0005_krater_undigested_index.sql","applied_at":"2026-08-14 09:25:37"},{"id":6,"name":"0006_fellow_credential_lifecycle.sql","applied_at":"2026-08-14 09:25:37"},{"id":7,"name":"0007_outbox_quarantine_state.sql","applied_at":"2026-08-14 09:25:37"},{"id":8,"name":"0008_sponsors_bootstrap.sql","applied_at":"2026-08-14 09:25:37"},{"id":9,"name":"0009_device_flow.sql","applied_at":"2026-08-14 09:25:37"},{"id":10,"name":"0010_device_flow_hardening.sql","applied_at":"2026-08-14 09:25:37"},{"id":11,"name":"0011_fellow_credential_hardening.sql","applied_at":"2026-08-14 09:25:37"},{"id":12,"name":"0012_fellow_lifecycle_commands.sql","applied_at":"2026-08-14 09:25:37"},{"id":13,"name":"0013_sponsor_fellow_cap.sql","applied_at":"2026-08-14 09:25:37"},{"id":14,"name":"0014_sponsor_enrollment_rate_limit.sql","applied_at":"2026-08-14 09:25:37"},{"id":15,"name":"0015_sponsor_enrollment_bootstrap_invariant.sql","applied_at":"2026-08-14 09:25:37"}]}]' >"${journal_valid}"
-    printf '%s\n' '[{"success":true,"results":[{"id":1,"name":"0001_krater_v0.sql","applied_at":"2026-08-14 10:25:35"},{"id":2,"name":"0002_enrollment_g0.sql","applied_at":"2026-08-14 10:25:37"},{"id":3,"name":"0003_auth_nonce_replay.sql","applied_at":"2026-08-14 10:25:37"},{"id":4,"name":"0004_krater_integrity_v1.sql","applied_at":"2026-08-14 10:25:37"},{"id":5,"name":"0005_krater_undigested_index.sql","applied_at":"2026-08-14 10:25:37"},{"id":6,"name":"0006_fellow_credential_lifecycle.sql","applied_at":"2026-08-14 10:25:37"},{"id":7,"name":"0007_outbox_quarantine_state.sql","applied_at":"2026-08-14 10:25:37"},{"id":8,"name":"0008_sponsors_bootstrap.sql","applied_at":"2026-08-14 10:25:37"},{"id":9,"name":"0009_device_flow.sql","applied_at":"2026-08-14 10:25:37"},{"id":10,"name":"0010_device_flow_hardening.sql","applied_at":"2026-08-14 10:25:37"},{"id":11,"name":"0011_fellow_credential_hardening.sql","applied_at":"2026-08-14 10:25:37"},{"id":12,"name":"0012_fellow_lifecycle_commands.sql","applied_at":"2026-08-14 10:25:37"},{"id":13,"name":"0013_sponsor_fellow_cap.sql","applied_at":"2026-08-14 10:25:37"},{"id":14,"name":"0014_sponsor_enrollment_rate_limit.sql","applied_at":"2026-08-14 10:25:37"},{"id":15,"name":"0015_sponsor_enrollment_bootstrap_invariant.sql","applied_at":"2026-08-14 10:25:37"}]}]' >"${journal_alternate}"
-    printf '%s\n' '[{"success":true,"results":[{"id":1,"name":"0001_krater_v0.sql","applied_at":"2026/08/14 09:25:35"},{"id":2,"name":"0002_enrollment_g0.sql","applied_at":"2026-08-14 09:25:37"},{"id":3,"name":"0003_auth_nonce_replay.sql","applied_at":"2026-08-14 09:25:37"},{"id":4,"name":"0004_krater_integrity_v1.sql","applied_at":"2026-08-14 09:25:37"},{"id":5,"name":"0005_krater_undigested_index.sql","applied_at":"2026-08-14 09:25:37"},{"id":6,"name":"0006_fellow_credential_lifecycle.sql","applied_at":"2026-08-14 09:25:37"},{"id":7,"name":"0007_outbox_quarantine_state.sql","applied_at":"2026-08-14 09:25:37"},{"id":8,"name":"0008_sponsors_bootstrap.sql","applied_at":"2026-08-14 09:25:37"},{"id":9,"name":"0009_device_flow.sql","applied_at":"2026-08-14 09:25:37"},{"id":10,"name":"0010_device_flow_hardening.sql","applied_at":"2026-08-14 09:25:37"},{"id":11,"name":"0011_fellow_credential_hardening.sql","applied_at":"2026-08-14 09:25:37"},{"id":12,"name":"0012_fellow_lifecycle_commands.sql","applied_at":"2026-08-14 09:25:37"},{"id":13,"name":"0013_sponsor_fellow_cap.sql","applied_at":"2026-08-14 09:25:37"},{"id":14,"name":"0014_sponsor_enrollment_rate_limit.sql","applied_at":"2026-08-14 09:25:37"},{"id":15,"name":"0015_sponsor_enrollment_bootstrap_invariant.sql","applied_at":"2026-08-14 09:25:37"}]}]' >"${journal_invalid}"
+    printf '%s\n' '[{"success":true,"results":[{"id":1,"name":"0001_krater_v0.sql","applied_at":"2026-08-14 09:25:35.123456"},{"id":2,"name":"0002_enrollment_g0.sql","applied_at":"2026-08-14 09:25:37"},{"id":3,"name":"0003_auth_nonce_replay.sql","applied_at":"2026-08-14 09:25:37"},{"id":4,"name":"0004_krater_integrity_v1.sql","applied_at":"2026-08-14 09:25:37"},{"id":5,"name":"0005_krater_undigested_index.sql","applied_at":"2026-08-14 09:25:37"},{"id":6,"name":"0006_fellow_credential_lifecycle.sql","applied_at":"2026-08-14 09:25:37"},{"id":7,"name":"0007_outbox_quarantine_state.sql","applied_at":"2026-08-14 09:25:37"},{"id":8,"name":"0008_sponsors_bootstrap.sql","applied_at":"2026-08-14 09:25:37"},{"id":9,"name":"0009_device_flow.sql","applied_at":"2026-08-14 09:25:37"},{"id":10,"name":"0010_device_flow_hardening.sql","applied_at":"2026-08-14 09:25:37"},{"id":11,"name":"0011_fellow_credential_hardening.sql","applied_at":"2026-08-14 09:25:37"},{"id":12,"name":"0012_fellow_lifecycle_commands.sql","applied_at":"2026-08-14 09:25:37"},{"id":13,"name":"0013_sponsor_fellow_cap.sql","applied_at":"2026-08-14 09:25:37"},{"id":14,"name":"0014_sponsor_enrollment_rate_limit.sql","applied_at":"2026-08-14 09:25:37"},{"id":15,"name":"0015_sponsor_enrollment_bootstrap_invariant.sql","applied_at":"2026-08-14 09:25:37"},{"id":16,"name":"0016_operator_fellow_cap_override.sql","applied_at":"2026-08-14 09:25:37"}]}]' >"${journal_valid}"
+    printf '%s\n' '[{"success":true,"results":[{"id":1,"name":"0001_krater_v0.sql","applied_at":"2026-08-14 10:25:35"},{"id":2,"name":"0002_enrollment_g0.sql","applied_at":"2026-08-14 10:25:37"},{"id":3,"name":"0003_auth_nonce_replay.sql","applied_at":"2026-08-14 10:25:37"},{"id":4,"name":"0004_krater_integrity_v1.sql","applied_at":"2026-08-14 10:25:37"},{"id":5,"name":"0005_krater_undigested_index.sql","applied_at":"2026-08-14 10:25:37"},{"id":6,"name":"0006_fellow_credential_lifecycle.sql","applied_at":"2026-08-14 10:25:37"},{"id":7,"name":"0007_outbox_quarantine_state.sql","applied_at":"2026-08-14 10:25:37"},{"id":8,"name":"0008_sponsors_bootstrap.sql","applied_at":"2026-08-14 10:25:37"},{"id":9,"name":"0009_device_flow.sql","applied_at":"2026-08-14 10:25:37"},{"id":10,"name":"0010_device_flow_hardening.sql","applied_at":"2026-08-14 10:25:37"},{"id":11,"name":"0011_fellow_credential_hardening.sql","applied_at":"2026-08-14 10:25:37"},{"id":12,"name":"0012_fellow_lifecycle_commands.sql","applied_at":"2026-08-14 10:25:37"},{"id":13,"name":"0013_sponsor_fellow_cap.sql","applied_at":"2026-08-14 10:25:37"},{"id":14,"name":"0014_sponsor_enrollment_rate_limit.sql","applied_at":"2026-08-14 10:25:37"},{"id":15,"name":"0015_sponsor_enrollment_bootstrap_invariant.sql","applied_at":"2026-08-14 10:25:37"},{"id":16,"name":"0016_operator_fellow_cap_override.sql","applied_at":"2026-08-14 10:25:37"}]}]' >"${journal_alternate}"
+    printf '%s\n' '[{"success":true,"results":[{"id":1,"name":"0001_krater_v0.sql","applied_at":"2026/08/14 09:25:35"},{"id":2,"name":"0002_enrollment_g0.sql","applied_at":"2026-08-14 09:25:37"},{"id":3,"name":"0003_auth_nonce_replay.sql","applied_at":"2026-08-14 09:25:37"},{"id":4,"name":"0004_krater_integrity_v1.sql","applied_at":"2026-08-14 09:25:37"},{"id":5,"name":"0005_krater_undigested_index.sql","applied_at":"2026-08-14 09:25:37"},{"id":6,"name":"0006_fellow_credential_lifecycle.sql","applied_at":"2026-08-14 09:25:37"},{"id":7,"name":"0007_outbox_quarantine_state.sql","applied_at":"2026-08-14 09:25:37"},{"id":8,"name":"0008_sponsors_bootstrap.sql","applied_at":"2026-08-14 09:25:37"},{"id":9,"name":"0009_device_flow.sql","applied_at":"2026-08-14 09:25:37"},{"id":10,"name":"0010_device_flow_hardening.sql","applied_at":"2026-08-14 09:25:37"},{"id":11,"name":"0011_fellow_credential_hardening.sql","applied_at":"2026-08-14 09:25:37"},{"id":12,"name":"0012_fellow_lifecycle_commands.sql","applied_at":"2026-08-14 09:25:37"},{"id":13,"name":"0013_sponsor_fellow_cap.sql","applied_at":"2026-08-14 09:25:37"},{"id":14,"name":"0014_sponsor_enrollment_rate_limit.sql","applied_at":"2026-08-14 09:25:37"},{"id":15,"name":"0015_sponsor_enrollment_bootstrap_invariant.sql","applied_at":"2026-08-14 09:25:37"},{"id":16,"name":"0016_operator_fellow_cap_override.sql","applied_at":"2026-08-14 09:25:37"}]}]' >"${journal_invalid}"
     if valid_output="$(validate_current_migration_journal "${journal_valid}" journal-timestamp-valid)"; then :; else return 1; fi
     if alternate_output="$(validate_current_migration_journal "${journal_alternate}" journal-timestamp-alternate)"; then :; else return 1; fi
     if invalid_output="$(validate_current_migration_journal "${journal_invalid}" journal-timestamp-invalid)"; then return 1; fi
@@ -6949,6 +7025,7 @@ run_s2_shell_regression_test() {
   if [[ "${mode}" == "legacy-leader-loss" || \
     "${mode}" == "legacy-leader-loss-transient-ps" || \
     "${mode}" == "legacy-leader-loss-transient-post-arm-ps" ]]; then
+    local state_holder_plant="${S2_PLANT_LEGACY_POSTCONDITION_STATE_HOLDER:-none}"
     status_file="${S2_STATE_DIR}/legacy-leader-loss-$(random_hex 8).status"
     payload_ready_file="${S2_STATE_DIR}/legacy-leader-loss-$(random_hex 8).ready"
     payload_state_file="${S2_STATE_DIR}/legacy-leader-loss-$(random_hex 8).held-open"
@@ -6957,6 +7034,16 @@ run_s2_shell_regression_test() {
       emit '{"tool":"bash","package":"apps/wire","suite":"s2-krater-shell","status":"fail","code":"S2_LEGACY_LEADER_LOSS_PLANT_INVALID","reproduce":"S2_SHELL_REGRESSION_TEST=legacy-leader-loss scripts/e2e-s2-krater.sh"}'
       return 2
     fi
+    case "${state_holder_plant}" in
+      none|malformed-lsof|ps-failure) ;;
+      *)
+        emit '{"tool":"bash","package":"apps/wire","suite":"s2-krater-shell","status":"fail","code":"S2_LEGACY_POSTCONDITION_STATE_HOLDER_PLANT_INVALID","reproduce":"S2_SHELL_REGRESSION_TEST=legacy-leader-loss scripts/e2e-s2-krater.sh"}'
+        return 2
+        ;;
+    esac
+    S2_LEGACY_POSTCONDITION_STATE_HOLDER_PLANT="${state_holder_plant}"
+    S2_LEGACY_POSTCONDITION_STATE_HOLDER_PLANT_ARMED=0
+    S2_LEGACY_POSTCONDITION_PS_FAILURE_PLANT_CONSUMED=0
     [[ ! -e "${payload_ready_file}" && ! -L "${payload_ready_file}" && \
       ! -e "${payload_state_file}" && ! -L "${payload_state_file}" ]] || return 1
     payload_behavior="resist-term"

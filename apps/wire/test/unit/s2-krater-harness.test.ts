@@ -2843,6 +2843,104 @@ describe("registered S2 shell and lifecycle regressions", () => {
   );
 
   test(
+    "PLANTED: malformed post-KILL lsof holders leave every measured-state field unknown",
+    () => {
+      const runId = `s2u-${randomUUID().replaceAll("-", "").slice(0, 24)}`;
+      const run = runHarnessSync(
+        {
+          S2_RUN_ID: runId,
+          S2_SHELL_REGRESSION_TEST: "legacy-leader-loss",
+          S2_PLANT_LEGACY_POSTCONDITION_STATE_HOLDER: "malformed-lsof",
+        },
+        S2_SHELL_REGRESSION_WATCHDOG_MS,
+      );
+      assertS2RunThenScanForSurvivors(
+        "legacy-leader-loss-malformed-postcondition-lsof",
+        () => {
+          expect(run.exitCode).toBe(1);
+          expect(run.stdout).toContain('"action":"kill-exact-residual-group"');
+          expect(ndjsonRecords(run)).toContainEqual(
+            expect.objectContaining({
+              tool: "bash+lsof+ps",
+              suite: "s2-krater-local-d1-upgrade",
+              status: "fail",
+              code: "S2_LEGACY_EXACT_RESIDUAL_POSTCONDITION_UNPROVEN",
+              check: "state-fd-scan",
+              state_holder_count: null,
+              controller_holds_state: null,
+              exact_group_holds_state: null,
+            }),
+          );
+          expect(ndjsonRecords(run)).toContainEqual(
+            expect.objectContaining({
+              suite: "s2-krater-evidence",
+              status: "fail",
+              evidence_retention_status: "pass",
+              captured_exit_code: 1,
+              captured_run_status: "fail",
+            }),
+          );
+          expect(run.stdout).toContain('"code":"S2_SHELL_REGRESSION_FAILED"');
+          expect(run.stdout).not.toContain(
+            "legacy-term-leader-loss-bounds-inspection-publishes-uncertainty-and-kills-only-exact-residual-group",
+          );
+        },
+        () => liveS2LifecycleProcesses(runId),
+      );
+    },
+    S2_SHELL_REGRESSION_TEST_TIMEOUT_MS,
+  );
+
+  test(
+    "PLANTED: failed post-KILL holder PGID lookup leaves exact-group state unknown",
+    () => {
+      const runId = `s2u-${randomUUID().replaceAll("-", "").slice(0, 24)}`;
+      const run = runHarnessSync(
+        {
+          S2_RUN_ID: runId,
+          S2_SHELL_REGRESSION_TEST: "legacy-leader-loss",
+          S2_PLANT_LEGACY_POSTCONDITION_STATE_HOLDER: "ps-failure",
+        },
+        S2_SHELL_REGRESSION_WATCHDOG_MS,
+      );
+      assertS2RunThenScanForSurvivors(
+        "legacy-leader-loss-postcondition-holder-ps-failure",
+        () => {
+          expect(run.exitCode).toBe(1);
+          expect(run.stdout).toContain('"action":"kill-exact-residual-group"');
+          expect(ndjsonRecords(run)).toContainEqual(
+            expect.objectContaining({
+              tool: "bash+lsof+ps",
+              suite: "s2-krater-local-d1-upgrade",
+              status: "fail",
+              code: "S2_LEGACY_EXACT_RESIDUAL_POSTCONDITION_UNPROVEN",
+              check: "state-fd-scan",
+              state_holder_count: 1,
+              controller_holds_state: true,
+              exact_group_holds_state: null,
+            }),
+          );
+          expect(ndjsonRecords(run)).toContainEqual(
+            expect.objectContaining({
+              suite: "s2-krater-evidence",
+              status: "fail",
+              evidence_retention_status: "pass",
+              captured_exit_code: 1,
+              captured_run_status: "fail",
+            }),
+          );
+          expect(run.stdout).toContain('"code":"S2_SHELL_REGRESSION_FAILED"');
+          expect(run.stdout).not.toContain(
+            "legacy-term-leader-loss-bounds-inspection-publishes-uncertainty-and-kills-only-exact-residual-group",
+          );
+        },
+        () => liveS2LifecycleProcesses(runId),
+      );
+    },
+    S2_SHELL_REGRESSION_TEST_TIMEOUT_MS,
+  );
+
+  test(
     "PLANTED: a legacy supervisor exit before watchdog spawn reports no launch observation",
     () => {
       const runId = `s2u-${randomUUID().replaceAll("-", "").slice(0, 24)}`;
@@ -3362,7 +3460,7 @@ describe("registered S2 shell and lifecycle regressions", () => {
 
   test("the declared source list is closed over every executed import graph", () => {
     const listed = new Set(declaredSourcePaths());
-    const walk = spawnSync(
+    const walk = runCaptured(
       "bun",
       [
         "--eval",
@@ -3522,9 +3620,12 @@ describe("registered S2 shell and lifecycle regressions", () => {
         process.stdout.write([...seen].map((p) => relative(repoRoot, p)).sort().join("\\n"));
         `,
       ],
-      { cwd: REPOSITORY_ROOT, encoding: "utf8" },
+      {},
+      S2_SHELL_REGRESSION_TEST_TIMEOUT_MS,
     );
-    expect(walk.status).toBe(0);
+    expect(walk.exitCode).toBe(0);
+    expect(walk.stderr).toContain(`retained_logs=${walk.retainedLogs}`);
+    expect(walk.stdout).not.toBe("");
     const reached = walk.stdout.split("\n").filter(Boolean);
     // A vacuous walk would make the closure assertion trivially true, so the
     // cost-model and Worker halves are both required to be present.
@@ -3805,7 +3906,7 @@ describe("registered S2 shell and lifecycle regressions", () => {
       .filter((name) => name.endsWith(".sql"))
       .sort();
     expect(declaredMigrationJournal()).toEqual(onDisk);
-    expect(onDisk).toContain("0015_sponsor_enrollment_bootstrap_invariant.sql");
+    expect(onDisk).toContain("0016_operator_fellow_cap_override.sql");
     const listed = new Set(declaredSourcePaths());
     for (const name of onDisk) expect(listed.has(`db/migrations/${name}`)).toBe(true);
   });
