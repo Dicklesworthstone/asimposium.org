@@ -1944,11 +1944,28 @@ function s3OwnedTimeoutWithin(deadlineMs: number): number {
   return timeoutMs;
 }
 
-function s3HarnessPlantCommand(environmentName: string, environmentValue: string): readonly string[] {
-  if (!/^S3_(?:PORT|SELF_TEST_[A-Z0-9_]+)$/u.test(environmentName) || environmentValue.includes("\0")) {
+function s3HarnessPlantCommand(
+  environmentName: string,
+  environmentValue: string,
+): readonly string[] {
+  if (
+    !/^S3_(?:PORT|SELF_TEST_[A-Z0-9_]+)$/u.test(environmentName) ||
+    environmentValue.includes("\0")
+  ) {
     throw new Error("S3_HARNESS_PLANT_ENVIRONMENT_INVALID");
   }
   return ["env", `${environmentName}=${environmentValue}`, "bash", "scripts/e2e-s3-split.sh"];
+}
+
+async function runS3HarnessPlant(
+  environmentName: string,
+  environmentValue: string,
+  label: string,
+  deadlineMs: number,
+): Promise<BoundedS3ChildResult> {
+  return await runBoundedS3Child(s3HarnessPlantCommand(environmentName, environmentValue), label, {
+    timeoutMs: s3OwnedTimeoutWithin(deadlineMs),
+  });
 }
 
 function localWorkerBundleSentinels(bundle: string): readonly string[] {
@@ -2037,12 +2054,9 @@ async function isolatedProductionBundle(
   const { stdout, stderr, exitCode } = await runBoundedS3Child(
     ["bun", "-e", ISOLATED_BUILD_SCRIPT, mode, productionEntrypoint, localWorkerEntrypoint],
     "S3_ISOLATED_BUILD",
-    0,
     { timeoutMs: S3_BUNDLE_TIMEOUT_MS },
   );
-  if (exitCode !== 0) {
-    throw new Error(`S3_ISOLATED_BUILD_FAILED:${mode}:${exitCode}\n${stderr}`);
-  }
+  expectBoundedS3ChildExit({ stdout, stderr, exitCode }, `S3_ISOLATED_BUILD_${mode}`, 0);
   if (stdout.length === 0) {
     throw new Error(`S3_ISOLATED_BUILD_OUTPUT_EMPTY:${mode}`);
   }
@@ -3550,8 +3564,14 @@ test("the S-3 harness binds readiness to its child and excludes the deployed ent
     "? localWorkshopSponsorId(request, env)\n    : ANONYMOUS_PRIVATE_LOOKUP_SPONSOR_ID",
   );
   expect(occurrences(privateArtifactSource, "env.DB.prepare(")).toBe(1);
-  expect(privateArtifactSource).toContain("WHERE id = ?1 AND sponsor_id = ?2 AND session_id = ?3");
-  expect(privateArtifactSource).toContain(".bind(workshopId, sponsorId, LOCAL_SESSION_ID)");
+  expect(privateArtifactSource).toContain("JOIN s3_local_sessions AS session");
+  expect(privateArtifactSource).toContain(
+    "ON session.id = workshop.session_id AND session.sponsor_id = workshop.sponsor_id",
+  );
+  expect(privateArtifactSource).toContain("WHERE workshop.id = ?1 AND workshop.sponsor_id = ?2");
+  expect(privateArtifactSource).toContain(".bind(workshopId, sponsorId)");
+  expect(privateArtifactSource).not.toContain("session_id = ?3");
+  expect(privateArtifactSource).not.toContain("LOCAL_SESSION_ID");
   expect(privateArtifactSource.indexOf("if (workshop === null) return notFound();")).toBeLessThan(
     privateArtifactSource.indexOf("await env.ARTIFACTS.get(workshop.body_key)"),
   );
@@ -3895,23 +3915,14 @@ test(
       fetch: () => new Response('{"status":"ok"}\n'),
     });
     try {
-      const child = Bun.spawn({
-        cmd: ["bash", "scripts/e2e-s3-split.sh"],
-        cwd: root,
-        env: {
-          PATH: process.env.PATH ?? "",
-          HOME: process.env.HOME ?? "",
-          S3_PORT: String(listener.port),
-        },
-        stdout: "pipe",
-        stderr: "pipe",
-      });
-      const [stdout, stderr, exitCode] = await Promise.all([
-        new Response(child.stdout).text(),
-        new Response(child.stderr).text(),
-        child.exited,
-      ]);
-      expect(exitCode).toBe(1);
+      const result = await runS3HarnessPlant(
+        "S3_PORT",
+        String(listener.port),
+        "S3_PORT_OCCUPIED_PLANT",
+        10_000,
+      );
+      expectBoundedS3ChildExit(result, "S3_PORT_OCCUPIED_PLANT", 1);
+      const { stdout, stderr } = result;
       expect(stdout).toContain('"code":"S3_PORT_OCCUPIED"');
       expect(`${stdout}\n${stderr}`).not.toContain('"status":"pass"');
     } finally {
@@ -3924,23 +3935,14 @@ test(
 test(
   "PLANTED: a failed provisional exact check sends no signal and retains ownership for retry",
   async () => {
-    const child = Bun.spawn({
-      cmd: ["bash", "scripts/e2e-s3-split.sh"],
-      cwd: root,
-      env: {
-        PATH: process.env.PATH ?? "",
-        HOME: process.env.HOME ?? "",
-        S3_SELF_TEST_PROVISIONAL_EXACT_FAILURE: "1",
-      },
-      stdout: "pipe",
-      stderr: "pipe",
-    });
-    const [stdout, stderr, exitCode] = await Promise.all([
-      new Response(child.stdout).text(),
-      new Response(child.stderr).text(),
-      child.exited,
-    ]);
-    expect(exitCode).toBe(0);
+    const result = await runS3HarnessPlant(
+      "S3_SELF_TEST_PROVISIONAL_EXACT_FAILURE",
+      "1",
+      "S3_PROVISIONAL_EXACT_PLANT",
+      15_000,
+    );
+    expectBoundedS3ChildExit(result, "S3_PROVISIONAL_EXACT_PLANT", 0);
+    const { stdout, stderr } = result;
     expect(stdout).toContain(
       '"assertion":"provisional_exact_check_failure_sent_no_signal_retained_ownership_and_retried"',
     );
@@ -3952,23 +3954,14 @@ test(
 test(
   "PLANTED: a live recursive lsof holder can vanish only between broad and exact recheck",
   async () => {
-    const child = Bun.spawn({
-      cmd: ["bash", "scripts/e2e-s3-split.sh"],
-      cwd: root,
-      env: {
-        PATH: process.env.PATH ?? "",
-        HOME: process.env.HOME ?? "",
-        S3_SELF_TEST_STATE_HOLDER_RECHECK: "1",
-      },
-      stdout: "pipe",
-      stderr: "pipe",
-    });
-    const [stdout, stderr, exitCode] = await Promise.all([
-      new Response(child.stdout).text(),
-      new Response(child.stderr).text(),
-      child.exited,
-    ]);
-    expect(exitCode).toBe(0);
+    const result = await runS3HarnessPlant(
+      "S3_SELF_TEST_STATE_HOLDER_RECHECK",
+      "1",
+      "S3_STATE_HOLDER_RECHECK_PLANT",
+      20_000,
+    );
+    expectBoundedS3ChildExit(result, "S3_STATE_HOLDER_RECHECK_PLANT", 0);
+    const { stdout, stderr } = result;
     expect(stdout).toContain(
       '"assertion":"live_recursive_lsof_holder_released_after_broad_scan_is_rechecked_to_no_match"',
     );
@@ -3995,23 +3988,15 @@ for (const window of [
   test(
     `PLANTED: startup signal window ${window} retains exact ownership`,
     async () => {
-      const child = Bun.spawn({
-        cmd: ["bash", "scripts/e2e-s3-split.sh"],
-        cwd: root,
-        env: {
-          PATH: process.env.PATH ?? "",
-          HOME: process.env.HOME ?? "",
-          S3_SELF_TEST_STARTUP_SIGNAL_WINDOW: window,
-        },
-        stdout: "pipe",
-        stderr: "pipe",
-      });
-      const [stdout, stderr, exitCode] = await Promise.all([
-        new Response(child.stdout).text(),
-        new Response(child.stderr).text(),
-        child.exited,
-      ]);
-      expect(exitCode).toBe(129);
+      const label = `S3_STARTUP_SIGNAL_${window}`;
+      const result = await runS3HarnessPlant(
+        "S3_SELF_TEST_STARTUP_SIGNAL_WINDOW",
+        window,
+        label,
+        120_000,
+      );
+      expectBoundedS3ChildExit(result, label, 129);
+      const { stdout, stderr } = result;
       expect(stdout).toContain(
         `"assertion":"startup_signal_window_${window}_retained_exact_ownership"`,
       );
@@ -4028,24 +4013,16 @@ for (const owner of ["server", "checker"] as const) {
     `PLANTED: the production ${owner} dispatch preserves a retained startup HUP`,
     async () => {
       const startedAt = performance.now();
-      const child = Bun.spawn({
-        cmd: ["bash", "scripts/e2e-s3-split.sh"],
-        cwd: root,
-        env: {
-          PATH: process.env.PATH ?? "",
-          HOME: process.env.HOME ?? "",
-          S3_SELF_TEST_DISPATCH_STARTUP_SIGNAL: owner,
-        },
-        stdout: "pipe",
-        stderr: "pipe",
-      });
-      const [stdout, stderr, exitCode] = await Promise.all([
-        new Response(child.stdout).text(),
-        new Response(child.stderr).text(),
-        child.exited,
-      ]);
+      const label = `S3_DISPATCH_STARTUP_SIGNAL_${owner}`;
+      const result = await runS3HarnessPlant(
+        "S3_SELF_TEST_DISPATCH_STARTUP_SIGNAL",
+        owner,
+        label,
+        30_000,
+      );
+      expectBoundedS3ChildExit(result, label, 129);
+      const { stdout, stderr } = result;
       const combined = `${stdout}\n${stderr}`;
-      expect(exitCode).toBe(129);
       expect(performance.now() - startedAt).toBeLessThan(30_000);
       expect(stdout).toContain(`"assertion":"dispatch_startup_signal_${owner}_preserves_exit_129"`);
       expect(combined).not.toContain('"code":"LOCAL_WORKER_SUPERVISOR_UNAVAILABLE"');
@@ -4060,23 +4037,14 @@ for (const owner of ["server", "checker"] as const) {
 test(
   "PLANTED: checker timeout reaps its exact group, descendants, listener, and state FD",
   async () => {
-    const child = Bun.spawn({
-      cmd: ["bash", "scripts/e2e-s3-split.sh"],
-      cwd: root,
-      env: {
-        PATH: process.env.PATH ?? "",
-        HOME: process.env.HOME ?? "",
-        S3_SELF_TEST_CHECKER_TIMEOUT: "1",
-      },
-      stdout: "pipe",
-      stderr: "pipe",
-    });
-    const [stdout, stderr, exitCode] = await Promise.all([
-      new Response(child.stdout).text(),
-      new Response(child.stderr).text(),
-      child.exited,
-    ]);
-    expect(exitCode).toBe(0);
+    const result = await runS3HarnessPlant(
+      "S3_SELF_TEST_CHECKER_TIMEOUT",
+      "1",
+      "S3_CHECKER_TIMEOUT_PLANT",
+      120_000,
+    );
+    expectBoundedS3ChildExit(result, "S3_CHECKER_TIMEOUT_PLANT", 0);
+    const { stdout, stderr } = result;
     for (const assertion of [
       "checker_timeout_uses_exact_bounded_term_kill_and_wait",
       "checker_timeout_has_zero_group_or_descendant_survivors",
@@ -4097,23 +4065,14 @@ async function runCheckerContainmentPlant(): Promise<{
   readonly durationMs: number;
 }> {
   const startedAt = performance.now();
-  const child = Bun.spawn({
-    cmd: ["bash", "scripts/e2e-s3-split.sh"],
-    cwd: root,
-    env: {
-      PATH: process.env.PATH ?? "",
-      HOME: process.env.HOME ?? "",
-      S3_SELF_TEST_CHECKER_CONTAINMENT_FAILURE: "1",
-    },
-    stdout: "pipe",
-    stderr: "pipe",
-  });
-  const [stdout, stderr, exitCode] = await Promise.all([
-    new Response(child.stdout).text(),
-    new Response(child.stderr).text(),
-    child.exited,
-  ]);
-  return { stdout, stderr, exitCode, durationMs: performance.now() - startedAt };
+  const result = await runS3HarnessPlant(
+    "S3_SELF_TEST_CHECKER_CONTAINMENT_FAILURE",
+    "1",
+    "S3_CHECKER_CONTAINMENT_PLANT",
+    30_000,
+  );
+  expectBoundedS3ChildExit(result, "S3_CHECKER_CONTAINMENT_PLANT", 1);
+  return { ...result, durationMs: performance.now() - startedAt };
 }
 
 function expectCheckerContainmentPlant(result: {
@@ -4122,7 +4081,6 @@ function expectCheckerContainmentPlant(result: {
   readonly exitCode: number;
   readonly durationMs: number;
 }): void {
-  expect(result.exitCode).toBe(1);
   expect(result.durationMs).toBeLessThan(30_000);
   expect(result.stdout).toContain('"code":"LOCAL_SPLIT_CHECKER_CONTAINMENT_FAILED"');
   for (const assertion of [
@@ -4168,24 +4126,15 @@ test(
   "PLANTED: a real checker exit 1 reports safely without waiting for its 90-second timeout",
   async () => {
     const startedAt = performance.now();
-    const child = Bun.spawn({
-      cmd: ["bash", "scripts/e2e-s3-split.sh"],
-      cwd: root,
-      env: {
-        PATH: process.env.PATH ?? "",
-        HOME: process.env.HOME ?? "",
-        S3_SELF_TEST_CHECKER_EXIT_1: "1",
-      },
-      stdout: "pipe",
-      stderr: "pipe",
-    });
-    const [stdout, stderr, exitCode] = await Promise.all([
-      new Response(child.stdout).text(),
-      new Response(child.stderr).text(),
-      child.exited,
-    ]);
+    const result = await runS3HarnessPlant(
+      "S3_SELF_TEST_CHECKER_EXIT_1",
+      "1",
+      "S3_CHECKER_EXIT_ONE_PLANT",
+      30_000,
+    );
+    expectBoundedS3ChildExit(result, "S3_CHECKER_EXIT_ONE_PLANT", 1);
+    const { stdout, stderr } = result;
     const combined = `${stdout}\n${stderr}`;
-    expect(exitCode).toBe(1);
     expect(performance.now() - startedAt).toBeLessThan(30_000);
     expect(stdout).toContain('"code":"LOCAL_SPLIT_ASSERTION_FAILED"');
     expect(stdout).toContain('"checker_exit_status":1');
@@ -4202,23 +4151,14 @@ test(
 test(
   "PLANTED: simulated PID reuse with a different marker and lstart sends no signal",
   async () => {
-    const child = Bun.spawn({
-      cmd: ["bash", "scripts/e2e-s3-split.sh"],
-      cwd: root,
-      env: {
-        PATH: process.env.PATH ?? "",
-        HOME: process.env.HOME ?? "",
-        S3_SELF_TEST_PID_REUSE: "1",
-      },
-      stdout: "pipe",
-      stderr: "pipe",
-    });
-    const [stdout, stderr, exitCode] = await Promise.all([
-      new Response(child.stdout).text(),
-      new Response(child.stderr).text(),
-      child.exited,
-    ]);
-    expect(exitCode).toBe(0);
+    const result = await runS3HarnessPlant(
+      "S3_SELF_TEST_PID_REUSE",
+      "1",
+      "S3_PID_REUSE_PLANT",
+      15_000,
+    );
+    expectBoundedS3ChildExit(result, "S3_PID_REUSE_PLANT", 0);
+    const { stdout, stderr } = result;
     expect(stdout).toContain('"assertion":"planted_pid_reuse_lstart_mismatch_sent_no_signal"');
     expect(`${stdout}\n${stderr}`).not.toContain('"status":"fail"');
   },
@@ -4228,23 +4168,14 @@ test(
 test(
   "PLANTED: a payload leader exits under TERM while the pinned supervisor retains resistant descendants",
   async () => {
-    const child = Bun.spawn({
-      cmd: ["bash", "scripts/e2e-s3-split.sh"],
-      cwd: root,
-      env: {
-        PATH: process.env.PATH ?? "",
-        HOME: process.env.HOME ?? "",
-        S3_SELF_TEST_TERM_RESISTANT_CHILD: "1",
-      },
-      stdout: "pipe",
-      stderr: "pipe",
-    });
-    const [stdout, stderr, exitCode] = await Promise.all([
-      new Response(child.stdout).text(),
-      new Response(child.stderr).text(),
-      child.exited,
-    ]);
-    expect(exitCode).toBe(0);
+    const result = await runS3HarnessPlant(
+      "S3_SELF_TEST_TERM_RESISTANT_CHILD",
+      "1",
+      "S3_TERM_RESISTANT_PLANT",
+      15_000,
+    );
+    expectBoundedS3ChildExit(result, "S3_TERM_RESISTANT_PLANT", 0);
+    const { stdout, stderr } = result;
     for (const assertion of [
       "payload_leader_exits_while_pinned_supervisor_and_resistant_descendant_remain",
       "term_resistant_supervisor_reaped_before_group_zero_scan",
@@ -4262,23 +4193,14 @@ test(
 test(
   "PLANTED: a post-reap inspection failure retries without re-signalling the remembered PGID",
   async () => {
-    const child = Bun.spawn({
-      cmd: ["bash", "scripts/e2e-s3-split.sh"],
-      cwd: root,
-      env: {
-        PATH: process.env.PATH ?? "",
-        HOME: process.env.HOME ?? "",
-        S3_SELF_TEST_POST_REAP_INSPECTION_FAILURE: "1",
-      },
-      stdout: "pipe",
-      stderr: "pipe",
-    });
-    const [stdout, stderr, exitCode] = await Promise.all([
-      new Response(child.stdout).text(),
-      new Response(child.stderr).text(),
-      child.exited,
-    ]);
-    expect(exitCode).toBe(0);
+    const result = await runS3HarnessPlant(
+      "S3_SELF_TEST_POST_REAP_INSPECTION_FAILURE",
+      "1",
+      "S3_POST_REAP_INSPECTION_PLANT",
+      15_000,
+    );
+    expectBoundedS3ChildExit(result, "S3_POST_REAP_INSPECTION_PLANT", 0);
+    const { stdout, stderr } = result;
     for (const assertion of [
       "post_reap_inspection_failure_retains_inspection_only_ownership",
       "post_reap_retry_inspects_without_resignalling_remembered_pgid",
@@ -4296,23 +4218,14 @@ test(
 test(
   "PLANTED: a marker-only mismatch with the real lstart refuses group signals and reports cleanup failure",
   async () => {
-    const child = Bun.spawn({
-      cmd: ["bash", "scripts/e2e-s3-split.sh"],
-      cwd: root,
-      env: {
-        PATH: process.env.PATH ?? "",
-        HOME: process.env.HOME ?? "",
-        S3_SELF_TEST_IDENTITY_MISMATCH: "1",
-      },
-      stdout: "pipe",
-      stderr: "pipe",
-    });
-    const [stdout, stderr, exitCode] = await Promise.all([
-      new Response(child.stdout).text(),
-      new Response(child.stderr).text(),
-      child.exited,
-    ]);
-    expect(exitCode).toBe(19);
+    const result = await runS3HarnessPlant(
+      "S3_SELF_TEST_IDENTITY_MISMATCH",
+      "1",
+      "S3_IDENTITY_MISMATCH_PLANT",
+      15_000,
+    );
+    expectBoundedS3ChildExit(result, "S3_IDENTITY_MISMATCH_PLANT", 19);
+    const { stdout, stderr } = result;
     expect(stdout).toContain('"code":"LOCAL_WORKER_CLEANUP_FAILED"');
     expect(stdout).toContain('"original_status":19');
     expect(stdout).toContain(
@@ -4326,23 +4239,14 @@ test(
 test(
   "PLANTED: HUP INT and TERM are masked throughout a retained-identity EXIT cleanup retry",
   async () => {
-    const child = Bun.spawn({
-      cmd: ["bash", "scripts/e2e-s3-split.sh"],
-      cwd: root,
-      env: {
-        PATH: process.env.PATH ?? "",
-        HOME: process.env.HOME ?? "",
-        S3_SELF_TEST_SECOND_SIGNAL_DURING_CLEANUP: "1",
-      },
-      stdout: "pipe",
-      stderr: "pipe",
-    });
-    const [stdout, stderr, exitCode] = await Promise.all([
-      new Response(child.stdout).text(),
-      new Response(child.stderr).text(),
-      child.exited,
-    ]);
-    expect(exitCode).toBe(0);
+    const result = await runS3HarnessPlant(
+      "S3_SELF_TEST_SECOND_SIGNAL_DURING_CLEANUP",
+      "1",
+      "S3_SECOND_SIGNAL_CLEANUP_PLANT",
+      15_000,
+    );
+    expectBoundedS3ChildExit(result, "S3_SECOND_SIGNAL_CLEANUP_PLANT", 0);
+    const { stdout, stderr } = result;
     expect(stdout).toContain(
       '"assertion":"second_signals_are_masked_during_bounded_exit_cleanup_retry"',
     );
@@ -4361,9 +4265,9 @@ test(
     const { stdout, stderr, exitCode } = await runBoundedS3Child(
       ["bash", "scripts/e2e-s3-split.sh"],
       "S3_COMMAND",
-      78,
       { timeoutMs: S3_OWNED_COMMAND_TIMEOUT_MS },
     );
+    expectBoundedS3ChildExit({ stdout, stderr, exitCode }, "S3_COMMAND", 78);
     if (stdout.length === 0) {
       throw new Error("S3_COMMAND_OUTPUT_EMPTY");
     }
@@ -4398,7 +4302,6 @@ test(
         record.assertion !== "local_binding_summary",
     );
 
-    expect(exitCode).toBe(78);
     expect(local).toMatchObject({
       tool: "wrangler+bun",
       package: "@asimposium/wire",

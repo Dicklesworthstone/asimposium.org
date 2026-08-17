@@ -66,9 +66,9 @@
 # fragments, payload bodies, screenshots or raw browser traces.
 
 set -u -o pipefail
-# Job control puts every background job in its own process group whose id equals
-# the job's pid. That is what makes `kill -- -PID` reach Chromium and every other
-# descendant, rather than only the direct child this script forked.
+# Job control puts every background job in its own process group. A live
+# same-group supervisor receives nonce-bound commands over a private pipe and
+# self-signals that group; the parent never targets a numeric pid or pgid.
 set -m
 
 readonly SUITE="s6-cross-plane-auth"
@@ -77,16 +77,11 @@ readonly EX_FAIL=1
 # A child could not be reaped, or its process group could not be proven empty.
 # Distinct from a plain failure so no caller can read it as success.
 readonly EX_CLEANUP_UNPROVEN=125
-# The bound could not be armed, because no private directory was available for
-# the watchdog's timeout flag. (There is deliberately no group-leadership
-# precondition: a fast child's group is legitimately gone by then, and requiring
-# it turned every quick success into this failure.) Fail closed — an unbounded
-# child is never acceptable.
+# The bounded supervisor or its authenticated result channel was unavailable.
+# Fail closed: an unbounded child or an untyped terminal record is never green.
 readonly EX_WATCHDOG_UNAVAILABLE=126
-# A secret writer did not publish its completion before the fixed rendezvous
-# bound. This is distinct from the command's own timeout: the child may already
-# be reaped while the writer is still blocked opening its FIFO.
-readonly EX_SECRET_WRITER_UNAVAILABLE=127
+# The supervisor could not validate and acknowledge the bounded input bootstrap.
+readonly EX_INPUT_BOOTSTRAP_UNAVAILABLE=127
 readonly REPRODUCE="bash scripts/e2e-s6-cross-plane-auth.sh"
 
 # One monotonic budget for the whole run, measured from a single start stamp so
@@ -98,7 +93,7 @@ readonly HTTP_CONNECT_TIMEOUT_SECONDS=10
 readonly HTTP_TOTAL_TIMEOUT_SECONDS=30
 readonly MINTER_TIMEOUT_SECONDS=30
 readonly BROWSER_TIMEOUT_SECONDS=240
-readonly SECRET_WRITER_WAIT_SECONDS=3
+readonly INPUT_BOOTSTRAP_WAIT_SECONDS=3
 # ONE absolute deadline, expressed against bash's own `SECONDS` counter, which
 # starts at shell start and is never reassigned here. Every phase reads its
 # bound from `remaining_budget`, so no phase can begin with its full nominal
@@ -207,31 +202,23 @@ publish_buffered_browser_blocked() {
 
 CLEANED_UP=0
 
-# Signal a whole process GROUP, not one pid.
-#
-# Playwright launches Chromium as a grandchild and the minter can fork; killing
-# only the direct pid leaves those descendants running. `set -m` puts each
-# background job in its own group whose id equals the job's pid, which is what
-# makes the negative-pid form address every descendant.
-# GROUP ONLY, never a bare pid.
-#
-# Every child this script tracks is a backgrounded job under `set -m`, so each
-# is its own group leader and `-PID` addresses it exactly. A bare-pid fallback
-# would fire in precisely the dangerous case: the group has already gone, the
-# record has not yet been removed, and the number now belongs to something else.
-# If the group is gone there is nothing left to signal, and that is the correct
-# outcome rather than a second guess.
+# Playwright launches Chromium as a grandchild and the minter can fork, so each
+# payload runs beneath a same-group supervisor. The parent never signals a
+# numeric pid or pgid. It writes a nonce-bound command to the sole live listener;
+# that supervisor self-signals group zero. Once the listener dies, EPIPE closes
+# the authority rather than letting a recycled number become a target.
 SIGNAL_KILL_FAILURE_PLANT=0
 SIGNAL_KILL_NO_SETTLE_PLANT=0
-SIGNAL_RECYCLED_GROUP_PLANT=0
-SIGNAL_RECYCLED_GROUP_HIT=0
-NUMERIC_GROUP_SIGNAL_COUNT=0
 OWNER_TOKEN_COUNTER=0
 OWNER_TOKEN=""
 GROUP_CONTROL_PID=""
 GROUP_CONTROL_TOKEN=""
-GROUP_CONTROL_ACK_DIR=""
 GROUP_CONTROL_OPEN=0
+GROUP_RESULT_OPEN=0
+GROUP_RECORD=""
+GROUP_RECORD_INVALID=0
+GROUP_PENDING_CHILD_RECORD=""
+GROUP_QUEUED_CHILD_RECORDS=0
 
 mint_owner_token() {
   local label="$1"
@@ -244,7 +231,6 @@ mint_owner_token() {
 
 register_child() {
   local pid="$1" token="$2" kind="${3:-ordinary}"
-  [[ "$pid" =~ ^[0-9]+$ && -n "$token" ]] || return 1
   local index="${#CHILD_PIDS[@]}"
   CHILD_PIDS+=("$pid")
   CHILD_OWNER_TOKENS[$index]="$token"
@@ -271,74 +257,123 @@ child_record_is_kind() {
 }
 
 adopt_group_control() {
-  local pid="$1" token="$2" ack_dir="$3"
+  local pid="$1" token="$2"
   # FD 6 is the write-only end of the anonymous process-substitution pipe. The
   # in-group supervisor owns the only read end, so supervisor death makes writes
   # fail with EPIPE. No RDWR FIFO or parent-side reader can mask that death.
   GROUP_CONTROL_PID="$pid"
   GROUP_CONTROL_TOKEN="$token"
-  GROUP_CONTROL_ACK_DIR="$ack_dir"
   GROUP_CONTROL_OPEN=1
+  GROUP_RESULT_OPEN=1
+  GROUP_PENDING_CHILD_RECORD=""
 }
 
 release_group_control() {
   local pid="$1"
   [[ "$GROUP_CONTROL_PID" == "$pid" ]] || return 0
   if (( GROUP_CONTROL_OPEN == 1 )); then exec 6>&-; fi
+  if (( GROUP_RESULT_OPEN == 1 )); then exec 5>&-; fi
   GROUP_CONTROL_PID=""
   GROUP_CONTROL_TOKEN=""
-  GROUP_CONTROL_ACK_DIR=""
   GROUP_CONTROL_OPEN=0
+  GROUP_RESULT_OPEN=0
+  GROUP_PENDING_CHILD_RECORD=""
+}
+
+read_group_record() {
+  local expected="$1" record="" deadline=$((SECONDS + 2)) remaining
+  GROUP_RECORD=""
+  (( GROUP_RESULT_OPEN == 1 )) || return 1
+  while (( SECONDS < deadline )); do
+    remaining=$((deadline - SECONDS))
+    IFS= read -r -t "$remaining" record <&5 || return 1
+    if [[ "$record" == "$expected" ]]; then
+      GROUP_RECORD="$record"
+      return 0
+    fi
+    # A timeout can race the payload result into the shared channel. The
+    # timeout verdict is already latched, but consuming that one record must not
+    # hide the following typed control acknowledgement.
+    if [[ "$record" == child:* ]]; then
+      [[ "$record" == "child:${GROUP_CONTROL_TOKEN}:"* ]] || return 1
+      [[ -z "$GROUP_PENDING_CHILD_RECORD" ]] || return 1
+      GROUP_PENDING_CHILD_RECORD="$record"
+      GROUP_QUEUED_CHILD_RECORDS=$((GROUP_QUEUED_CHILD_RECORDS + 1))
+      continue
+    fi
+    # A late readiness record is harmless during pre-ready retirement.
+    if [[ "$record" == control-ready:* ]]; then
+      continue
+    fi
+    # No other control record is legitimate while an exact requested ack is
+    # outstanding. Treat unsolicited or out-of-order acks as protocol drift.
+    [[ "$record" != control-ack:* && "$record" != control-closed:* ]] || return 1
+    return 1
+  done
+  return 1
+}
+
+read_group_outcome() {
+  local seconds="$1" record="" deadline=$((SECONDS + seconds)) remaining read_status
+  GROUP_RECORD=""
+  GROUP_RECORD_INVALID=0
+  (( GROUP_RESULT_OPEN == 1 )) || return 1
+  if [[ -n "$GROUP_PENDING_CHILD_RECORD" ]]; then
+    GROUP_RECORD="$GROUP_PENDING_CHILD_RECORD"
+    GROUP_PENDING_CHILD_RECORD=""
+    return 0
+  fi
+  while (( SECONDS < deadline )); do
+    remaining=$((deadline - SECONDS))
+    IFS= read -r -t "$remaining" record <&5
+    read_status=$?
+    (( read_status == 0 )) || return "$read_status"
+    if [[ "$record" == child:* ]]; then
+      if [[ "$record" != "child:${GROUP_CONTROL_TOKEN}:"* ]]; then
+        GROUP_RECORD_INVALID=1
+        return 1
+      fi
+      GROUP_RECORD="$record"
+      return 0
+    fi
+    # No signal has been requested while the main outcome is pending. A control
+    # ack/close here is unsolicited and must make the run fail closed.
+    if [[ "$record" == control-ack:* || "$record" == control-closed:* ]]; then
+      GROUP_RECORD_INVALID=1
+      return 1
+    fi
+    GROUP_RECORD_INVALID=1
+    return 1
+  done
+  # Reaching the absolute deadline without another read is the same typed
+  # timeout as Bash read -t (128 + SIGALRM on supported Bash versions).
+  return 142
 }
 
 request_group_signal() {
-  local pid="$1" signal="$2" index token status ack_slot ack_path expected waited=0
+  local pid="$1" signal="$2" index token status expected
   child_record_index "$pid" || return 1
   index="$CHILD_RECORD_INDEX"
   token="${CHILD_OWNER_TOKENS[$index]:-}"
   [[ "${CHILD_KINDS[$index]:-ordinary}" == "controlled-group" ]] || return 1
   [[ "$GROUP_CONTROL_PID" == "$pid" && "$GROUP_CONTROL_TOKEN" == "$token" ]] || return 1
-  [[ -n "$GROUP_CONTROL_ACK_DIR" ]] || return 1
   (( GROUP_CONTROL_OPEN == 1 )) || return 1
   case "$signal" in TERM|KILL|DIE) ;; *) return 1 ;; esac
   if (( SIGNAL_KILL_FAILURE_PLANT == 1 )) && [[ "$signal" == "KILL" ]]; then return 1; fi
   if (( SIGNAL_KILL_NO_SETTLE_PLANT == 1 )) && [[ "$signal" == "KILL" ]]; then return 0; fi
-  ack_slot="$(mktemp -d "${GROUP_CONTROL_ACK_DIR}/request.XXXXXX" 2>/dev/null)" || return 1
-  ack_path="${ack_slot}/ack"
   if [[ "$signal" == "DIE" ]]; then
-    expected="listener-closed:${token}"
+    expected="control-closed:${token}"
   else
-    expected="accepted:${token}:${signal}"
+    expected="control-ack:${token}:${signal}"
   fi
   # Ignore PIPE only around the builtin write. A dead same-group supervisor
   # makes this fail; no parent-side numeric signal or fallback exists.
   trap '' PIPE
-  printf '%s\t%s\t%s\n' "$token" "$signal" "$ack_path" >&6 2>/dev/null
+  printf 'SIGNAL\t%s\t%s\n' "$token" "$signal" >&6 2>/dev/null
   status=$?
   trap - PIPE
   (( status == 0 )) || return 1
-  while (( waited < 40 )); do
-    if [[ -f "$ack_path" ]] && [[ "$(cat "$ack_path" 2>/dev/null || printf '')" == "$expected" ]]; then
-      return 0
-    fi
-    sleep 0.05
-    waited=$((waited + 1))
-  done
-  return 1
-}
-
-# A direct child pid remains kernel-owned until this shell waits for it. This is
-# not a fallback from a failed group signal: it is used only for the tiny
-# anonymous-pipe producer, which has no descendants and is registered as such.
-signal_owned_direct_child() {
-  local pid="$1" signal="$2"
-  child_record_is_kind "$pid" "direct-child" || return 1
-  if (( SIGNAL_KILL_FAILURE_PLANT == 1 )) && [[ "$signal" == "KILL" ]]; then return 1; fi
-  if (( SIGNAL_RECYCLED_GROUP_PLANT == 1 )); then
-    SIGNAL_RECYCLED_GROUP_HIT=1
-    return 1
-  fi
-  kill "-${signal}" "$pid" 2>/dev/null
+  read_group_record "$expected"
 }
 
 # Bounded, PRE-REAP settlement proof. The direct leader is still registered for
@@ -389,14 +424,13 @@ direct_child_settled_before_wait() {
 # value containing glob or regex characters can never match another entry.
 # NOTE ON A REJECTED DESIGN: no pgid ledger.
 #
-# `set -m` puts each of this script's jobs in its own process group, which an
-# outer harness knowing only this shell's pgid cannot reach if this shell's trap
-# is cut short. Publishing those pgids to a file was tried and removed: bare
-# pgids are not identity, so signalling from such a list risks killing a recycled
-# group, and censusing it is fail-open — an unwritten row hides a survivor while a
-# recycled one invents a false alarm. Containment across that boundary needs live
-# nonce-bearing supervisors, which this pass does not build. The outer harness
-# therefore reports its hard-kill path as cleanup-unproven instead of claiming it.
+# `set -m` puts each payload in its own process group. Publishing those pgids to
+# a file was tried and removed: bare pgids are not identity, so signalling from
+# such a list risks killing a recycled group, and censusing it is fail-open. Each
+# invocation now has a live nonce-bearing supervisor whose pipe EOF self-retires
+# its group if this shell is killed. An outer harness that had to kill this shell
+# still cannot receive the supervisor's settlement proof, however, so that
+# boundary remains explicitly cleanup-unproven rather than claiming containment.
 
 unregister_child() {
   local pid="$1" kept=() kept_tokens=() kept_kinds=() current index
@@ -427,9 +461,9 @@ REAP_SURVIVORS=0
 REAP_GRACE_SECONDS=5
 
 reap_children() {
-  # Every child this script starts is recorded, its whole group is signalled,
-  # then verified gone. A harness that leaves a browser behind turns the next
-  # run's timing into somebody else's problem.
+  # Every production child is represented by its durable supervisor, commanded
+  # through the capability channel, and verified gone before wait. Test-only
+  # ordinary helpers must settle themselves and are never signalled here.
   local pid
   REAP_SURVIVORS=0
   for pid in ${CHILD_PIDS[@]+"${CHILD_PIDS[@]}"}; do
@@ -459,25 +493,6 @@ reap_children() {
       if group_settled_before_wait "$pid"; then
         wait "$pid" 2>/dev/null || true
         unregister_child "$pid"
-      else
-        REAP_SURVIVORS=1
-      fi
-      continue
-    fi
-
-    if child_record_is_kind "$pid" "direct-child"; then
-      # The anonymous-pipe producer is one exact direct child with no
-      # descendants. Its unreaped pid is safe authority; a failed KILL is
-      # followed only by another bounded settlement proof, never a fallback.
-      if ! direct_child_settled_before_wait "$pid"; then
-        signal_owned_direct_child "$pid" KILL || true
-      fi
-      if direct_child_settled_before_wait "$pid"; then
-        wait "$pid" 2>/dev/null || true
-        unregister_child "$pid"
-        if [[ "${SECRET_WRITER_PID:-}" == "$pid" ]]; then
-          SECRET_WRITER_PID=""
-        fi
       else
         REAP_SURVIVORS=1
       fi
@@ -580,103 +595,64 @@ minimal_env_command() {
   )
 }
 
-# Deliver ONE bounded record through an anonymous pipe, then close its write end
-# before the payload exists. The parent opens and retains FD 3's read end first,
-# so the tiny builtin write cannot block waiting for a consumer. Its 4097-byte
-# maximum is below the platform pipe capacity; the producer has no descendants,
-# argv secret, environment secret, filesystem payload, or FIFO-open rendezvous.
-# The payload later duplicates FD 3 onto stdin and observes exact EOF.
-SECRET_WRITER_PID=""
-SECRET_WRITER_DONE_MARKER=""
-SECRET_WRITER_EXIT_MARKER=""
-SECRET_INPUT_OPEN=0
-SECRET_WRITER_STOP_BEFORE_COMPLETION_PLANT=0
-SECRET_WRITER_STOP_AFTER_COMPLETION_PLANT=0
-start_secret_writer() {
-  local record="$1" owner_token marker_dir
-  (( SECRET_INPUT_OPEN == 0 )) || return 1
-  (( ${#record} <= 4096 )) || return 1
-  marker_dir="$(mktemp -d "${RUN_STATE_DIR:-${TMPDIR:-/tmp}}/s6-secret-pipe.XXXXXX" 2>/dev/null)" || return 1
-  chmod 700 "$marker_dir" 2>/dev/null || true
-  SECRET_WRITER_DONE_MARKER="${marker_dir}/write-complete"
-  SECRET_WRITER_EXIT_MARKER="${marker_dir}/exit-ready"
-  mint_owner_token "writer"
-  owner_token="$OWNER_TOKEN"
-  # Process substitution gives the parent a read-only descriptor. The producer
-  # owns the only write end and uses only Bash builtins, so the record is never
-  # materialised or exposed as an argument.
-  exec 3< <(
-    export ASIMP_S6_CHILD_OWNER_TOKEN="$owner_token"
-    if (( SECRET_WRITER_STOP_BEFORE_COMPLETION_PLANT == 1 )); then
-      kill -STOP "$BASHPID"
-    fi
-    printf '%s\n' "$record" || exit 1
-    printf 'ok' > "$SECRET_WRITER_DONE_MARKER" || exit 1
-    if (( SECRET_WRITER_STOP_AFTER_COMPLETION_PLANT == 1 )); then
-      kill -STOP "$BASHPID"
-    fi
-    # The exact next operation is process exit. A parent waits only after this
-    # token and an exact direct-child zombie/absence proof.
-    printf 'exit-ready' > "$SECRET_WRITER_EXIT_MARKER" || exit 1
-  )
-  SECRET_WRITER_PID=$!
-  SECRET_INPUT_OPEN=1
-  register_child "$SECRET_WRITER_PID" "$owner_token" "direct-child" || return 1
-}
-
-# Reap the producer before launching the consumer. The buffered record remains
-# on FD 3, but every writer is gone, so a read-to-EOF consumer cannot hang.
-finish_secret_writer() {
-  [[ -n "$SECRET_WRITER_PID" ]] || return 0
-  local waited=0 completion="" exit_ready="" writer_status=0
-  while (( waited < SECRET_WRITER_WAIT_SECONDS * 20 )); do
-    [[ -f "$SECRET_WRITER_DONE_MARKER" ]] && completion="$(cat "$SECRET_WRITER_DONE_MARKER" 2>/dev/null || printf '')"
-    [[ "$completion" == "ok" ]] && break
-    sleep 0.05
-    waited=$((waited + 1))
-  done
-  if [[ "$completion" != "ok" ]]; then
-    if ! signal_owned_direct_child "$SECRET_WRITER_PID" KILL; then
-      return "$EX_CLEANUP_UNPROVEN"
-    fi
-    if ! direct_child_settled_before_wait "$SECRET_WRITER_PID"; then
-      return "$EX_CLEANUP_UNPROVEN"
-    fi
-    wait "$SECRET_WRITER_PID" 2>/dev/null || true
-    unregister_child "$SECRET_WRITER_PID"
-    SECRET_WRITER_PID=""
-    return "$EX_SECRET_WRITER_UNAVAILABLE"
+# Bootstrap one exact bounded stdin record over the same private capability pipe
+# that later carries lifecycle commands. No writer child or FIFO exists. The
+# group leader validates the nonce, line count and byte count before it forks
+# the payload, then reconstructs the record into an in-group anonymous pipe.
+send_group_input() {
+  local pid="$1" record="$2" index token status=0 remaining line count=1 bytes
+  local LC_ALL=C
+  child_record_index "$pid" || return 1
+  index="$CHILD_RECORD_INDEX"
+  token="${CHILD_OWNER_TOKENS[$index]:-}"
+  [[ "${CHILD_KINDS[$index]:-ordinary}" == "controlled-group" ]] || return 1
+  [[ "$GROUP_CONTROL_PID" == "$pid" && "$GROUP_CONTROL_TOKEN" == "$token" ]] || return 1
+  (( GROUP_CONTROL_OPEN == 1 )) || return 1
+  trap '' PIPE
+  if [[ "$record" == "-" ]]; then
+    printf 'START-NONE\t%s\n' "$token" >&6 2>/dev/null || status=$?
+  else
+    (( ${#record} <= 4096 )) || status=1
+    remaining="$record"
+    while (( status == 0 )) && [[ "$remaining" == *$'\n'* ]]; do
+      count=$((count + 1))
+      remaining="${remaining#*$'\n'}"
+    done
+    (( count <= 128 )) || status=1
+    bytes="${#record}"
+    (( status != 0 )) || printf 'START-DATA\t%s\t%s\t%s\n' "$token" "$count" "$bytes" >&6 2>/dev/null || status=$?
+    remaining="$record"
+    while (( status == 0 )); do
+      if [[ "$remaining" == *$'\n'* ]]; then
+        line="${remaining%%$'\n'*}"
+        remaining="${remaining#*$'\n'}"
+      else
+        line="$remaining"
+        remaining=""
+      fi
+      printf 'DATA\t%s\t%s\n' "$token" "$line" >&6 2>/dev/null || status=$?
+      [[ -n "$remaining" || "$record" == *$'\n' ]] || break
+      if [[ -z "$remaining" && "$record" == *$'\n' ]]; then
+        # Preserve one final empty line when the shell value itself ends in LF.
+        printf 'DATA\t%s\t\n' "$token" >&6 2>/dev/null || status=$?
+        break
+      fi
+    done
+    (( status != 0 )) || printf 'END-DATA\t%s\n' "$token" >&6 2>/dev/null || status=$?
   fi
-
-  # A write-complete token alone is not settlement: the causal plant stops here.
-  # Require the second token and exact direct-child settlement before `wait`.
-  waited=0
-  while (( waited < SECRET_WRITER_WAIT_SECONDS * 20 )); do
-    [[ -f "$SECRET_WRITER_EXIT_MARKER" ]] && exit_ready="$(cat "$SECRET_WRITER_EXIT_MARKER" 2>/dev/null || printf '')"
-    [[ "$exit_ready" == "exit-ready" ]] && break
-    sleep 0.05
-    waited=$((waited + 1))
-  done
-  [[ "$exit_ready" == "exit-ready" ]] || return "$EX_CLEANUP_UNPROVEN"
-  direct_child_settled_before_wait "$SECRET_WRITER_PID" || return "$EX_CLEANUP_UNPROVEN"
-  wait "$SECRET_WRITER_PID" 2>/dev/null || writer_status=$?
-  unregister_child "$SECRET_WRITER_PID"
-  SECRET_WRITER_PID=""
-  (( writer_status == 0 )) || return "$EX_SECRET_WRITER_UNAVAILABLE"
-  return 0
+  trap - PIPE
+  (( status == 0 )) || return 1
+  read_group_record "input-ready:${token}"
 }
 
-close_secret_input() {
-  if (( SECRET_INPUT_OPEN == 1 )); then exec 3<&-; fi
-  SECRET_INPUT_OPEN=0
-  SECRET_WRITER_DONE_MARKER=""
-  SECRET_WRITER_EXIT_MARKER=""
-}
-
-# Regression-only in-process fault. It is assigned only by `self_test`; no
-# environment variable or live invocation can switch it on.
-WATCHDOG_FLAG_WRITE_PLANT=0
+# Regression-only in-process faults. They are assigned only by `self_test`; no
+# environment variable or live invocation can switch them on.
 SUPERVISOR_READY_WRITE_PLANT=0
+SUPERVISOR_DEPART_AFTER_RESULT_PLANT=0
+SUPERVISOR_EARLY_ACK_PLANT=0
+SUPERVISOR_CHILD_BEFORE_ACK_PLANT=0
+SUPERVISOR_CHILD_STATUS_PLANT=""
+DEAD_LISTENER_WRITE_REFUSAL_OBSERVED=0
 
 # run_bounded <seconds> <stdout_file> <stdin_file|-> <command...>
 #
@@ -697,16 +673,18 @@ run_bounded() {
   # Allocate every control object BEFORE the payload exists. An allocation
   # failure therefore leaves no unbounded child to recover and no stale numeric
   # identity to signal after a reap.
-  local dog_dir flag result_fifo ack_dir supervisor_token control_ready
+  local dog_dir result_fifo order_fifo="-" supervisor_token control_ready boot_status=0
   [[ -z "$GROUP_CONTROL_PID" ]] || return "$EX_CLEANUP_UNPROVEN"
   dog_dir="$(mktemp -d "${TMPDIR:-/tmp}/s6-watchdog.XXXXXX" 2>/dev/null)" || return "$EX_WATCHDOG_UNAVAILABLE"
-  flag="${dog_dir}/timed-out"
   result_fifo="${dog_dir}/result"
-  ack_dir="${dog_dir}/acks"
-  mkdir -m 700 "$ack_dir" 2>/dev/null || return "$EX_WATCHDOG_UNAVAILABLE"
   mkfifo -m 600 "$result_fifo" 2>/dev/null || return "$EX_WATCHDOG_UNAVAILABLE"
-  # FD 5 carries readiness and exactly one child result. RDWR removes FIFO
-  # open-order races; it carries no secret and is closed on every return path.
+  if (( SUPERVISOR_CHILD_BEFORE_ACK_PLANT == 1 )); then
+    order_fifo="${dog_dir}/recorded"
+    mkfifo -m 600 "$order_fifo" 2>/dev/null || return "$EX_WATCHDOG_UNAVAILABLE"
+  fi
+  # FD 5 multiplexes token-bound readiness, input-ready, terminal and control-
+  # acknowledgement records. RDWR removes FIFO open-order races; it carries no
+  # secret and is closed with the control capability on every return path.
   exec 5<>"$result_fifo" || return "$EX_WATCHDOG_UNAVAILABLE"
   mint_owner_token "supervisor"
   supervisor_token="$OWNER_TOKEN"
@@ -714,58 +692,140 @@ run_bounded() {
   # FD 6 is a write-only anonymous pipe created by process substitution. The
   # Perl prelude makes its sole reader the process-group leader before exec.
   # That same supervisor remains the listener for its whole lifetime; payloads
-  # receive /dev/null or FD 3 on stdin and explicitly close every control fd.
+  # receive /dev/null or an in-group anonymous pipe and close every control fd.
   # TERM/KILL are data here, and only the live leader turns them into `kill 0`.
   exec 6> >(
-    ASIMP_S6_CHILD_OWNER_TOKEN="$supervisor_token" /usr/bin/perl -e \
+    /usr/bin/perl -e \
       'setpgrp(0,0) or die $!; exec @ARGV or die $!;' \
       bash -c '
-        token="$1" ack_dir="$2" stdout_file="$3" stdin_file="$4" unavailable="$5" ready_plant="$6"
-        shift 6
+        stdout_file="$1" unavailable="$2" ready_plant="$3" early_ack_plant="$4" child_before_ack_plant="$5" child_status_plant="$6" order_fifo="$7"
+        shift 7
         set +m
+        LC_ALL=C
+        export LC_ALL
         trap "" TERM HUP INT
+        exec 7<&0
+        exec </dev/null
+        tab="$(printf "\t")"
+        IFS="$tab" read -r boot_kind token boot_extra <&7 || exit "$unavailable"
+        [[ "$boot_kind" == "BOOT" && -n "$token" && -z "$boot_extra" ]] || exit "$unavailable"
+        if [[ "$child_before_ack_plant" == "1" ]]; then
+          exec 8<>"$order_fifo" || exit "$unavailable"
+        fi
         if [[ "$ready_plant" == "1" ]]; then exit "$unavailable"; fi
         printf "control-ready:%s\n" "$token" >&5 || exit "$unavailable"
+
+        input_mode="" input_record="" start_frame=""
+        IFS= read -r start_frame <&7 || kill -KILL 0
+        if [[ "$start_frame" == "START-NONE${tab}${token}" ]]; then
+          input_mode="none"
+        else
+          start_prefix="START-DATA${tab}${token}${tab}"
+          [[ "$start_frame" == "$start_prefix"* ]] || kill -KILL 0
+          metadata="${start_frame#"$start_prefix"}"
+          line_count="${metadata%%"$tab"*}"
+          byte_count="${metadata#*"$tab"}"
+          [[ "$line_count" =~ ^[0-9]+$ && "$byte_count" =~ ^[0-9]+$ ]] || kill -KILL 0
+          (( line_count >= 1 && line_count <= 128 && byte_count <= 4096 )) || kill -KILL 0
+          newline="$(printf "\nx")"
+          newline="${newline%x}"
+          data_prefix="DATA${tab}${token}${tab}"
+          index=0
+          while (( index < line_count )); do
+            IFS= read -r data_frame <&7 || kill -KILL 0
+            [[ "$data_frame" == "$data_prefix"* ]] || kill -KILL 0
+            data="${data_frame#"$data_prefix"}"
+            if (( index == 0 )); then
+              input_record="$data"
+            else
+              input_record="${input_record}${newline}${data}"
+            fi
+            index=$((index + 1))
+          done
+          IFS= read -r end_frame <&7 || kill -KILL 0
+          [[ "$end_frame" == "END-DATA${tab}${token}" ]] || kill -KILL 0
+          (( ${#input_record} == byte_count )) || kill -KILL 0
+          input_mode="record"
+        fi
+        printf "input-ready:%s\n" "$token" >&5 || kill -KILL 0
+        if [[ "$early_ack_plant" == "1" ]]; then
+          printf "control-ack:%s:EARLY\n" "$token" >&5 || kill -KILL 0
+        fi
+
+        # The recorder retains the supervisors ignored dispositions so TERM can
+        # never prevent it publishing the terminal record. The nested payload
+        # resets TERM/HUP/INT immediately before exec; real curl/Bun/browser
+        # children therefore remain cooperative instead of inheriting ignores.
         (
+          exec 7<&-
           command_status=0
-          if [[ "$stdin_file" == "@secret-fd" ]]; then
-            "$@" <&3 3<&- 4>&- 5>&- 6>&- 7>&- 8>&- 9>&- >"$stdout_file" || command_status=$?
-          else
-            "$@" 3<&- 4>&- 5>&- 6>&- 7>&- 8>&- 9>&- >"$stdout_file" </dev/null || command_status=$?
+          (
+            trap - TERM HUP INT
+            if [[ "$input_mode" == "record" ]]; then
+              exec 0< <(exec 0<&- 5>&- 6>&- 7>&-; printf "%s\n" "$input_record")
+            else
+              exec </dev/null
+            fi
+            exec "$@" 3<&- 4>&- 5>&- 6>&- 7>&- 8>&- 9>&- >"$stdout_file"
+          ) || command_status=$?
+          if [[ -n "$child_status_plant" ]]; then command_status="$child_status_plant"; fi
+          printf "child:%s:%s\n" "$token" "$command_status" >&5 || kill -KILL 0
+          if [[ "$child_before_ack_plant" == "1" ]]; then
+            printf "recorded:%s\n" "$token" >&8 || kill -KILL 0
           fi
-          printf "child:%s\n" "$command_status" >&5 || kill -KILL 0
         ) &
-        while IFS="$(printf "\t")" read -r request_token request_signal ack_path; do
-          [[ "$request_token" == "$token" ]] || kill -KILL 0
-          case "$ack_path" in "$ack_dir"/request.*/ack) ;; *) kill -KILL 0 ;; esac
-          [[ ! -e "$ack_path" && ! -L "$ack_path" ]] || kill -KILL 0
+        while IFS="$tab" read -r request_kind request_token request_signal <&7; do
+          [[ "$request_kind" == "SIGNAL" && "$request_token" == "$token" ]] || kill -KILL 0
           case "$request_signal" in
             TERM)
-              printf "accepted:%s:TERM" "$token" > "$ack_path" || kill -KILL 0
-              kill -TERM 0 2>/dev/null || kill -KILL 0
+              if [[ "$child_before_ack_plant" == "1" ]]; then
+                # Test-only deterministic ordering handshake. The planted
+                # payload exits from TERM, then its signal-resistant recorder
+                # writes the real child record before the exact token marker.
+                # The target closes FD8 and cannot forge this ordering proof.
+                kill -TERM 0 2>/dev/null || kill -KILL 0
+                IFS= read -r -t 1 recorded <&8 || kill -KILL 0
+                [[ "$recorded" == "recorded:${token}" ]] || kill -KILL 0
+                printf "control-ack:%s:TERM\n" "$token" >&5 || kill -KILL 0
+              else
+                printf "control-ack:%s:TERM\n" "$token" >&5 || kill -KILL 0
+                kill -TERM 0 2>/dev/null || kill -KILL 0
+              fi
               ;;
             KILL)
-              printf "accepted:%s:KILL" "$token" > "$ack_path" || kill -KILL 0
+              printf "control-ack:%s:KILL\n" "$token" >&5 || kill -KILL 0
               kill -KILL 0
               ;;
             DIE)
               # Self-test only. Closing the sole read end before publishing the
-              # marker makes the next parent write causally fail with EPIPE.
-              exec </dev/null
-              printf "listener-closed:%s" "$token" > "$ack_path" || exit "$unavailable"
+              # ack makes the next parent write causally fail with EPIPE.
+              exec 7<&-
+              printf "control-closed:%s\n" "$token" >&5 || exit "$unavailable"
               exit 0
               ;;
             *) kill -KILL 0 ;;
           esac
         done
         kill -KILL 0
-      ' "s6-bounded-supervisor:${supervisor_token}" \
-      "$supervisor_token" "$ack_dir" "$stdout_file" "$stdin_file" \
-      "$EX_WATCHDOG_UNAVAILABLE" "$SUPERVISOR_READY_WRITE_PLANT" "$@"
+      ' "s6-bounded-supervisor" "$stdout_file" \
+      "$EX_WATCHDOG_UNAVAILABLE" "$SUPERVISOR_READY_WRITE_PLANT" \
+      "$SUPERVISOR_EARLY_ACK_PLANT" "$SUPERVISOR_CHILD_BEFORE_ACK_PLANT" \
+      "$SUPERVISOR_CHILD_STATUS_PLANT" "$order_fifo" "$@"
   )
   local pid=$!
-  register_child "$pid" "$supervisor_token" "controlled-group" || { exec 5>&-; exec 6>&-; return "$EX_CLEANUP_UNPROVEN"; }
-  adopt_group_control "$pid" "$supervisor_token" "$ack_dir"
+  register_child "$pid" "$supervisor_token" "controlled-group"
+  adopt_group_control "$pid" "$supervisor_token"
+  trap '' PIPE
+  printf 'BOOT\t%s\n' "$supervisor_token" >&6 2>/dev/null || boot_status=$?
+  trap - PIPE
+  if (( boot_status != 0 )); then
+    if group_settled_before_wait "$pid"; then
+      wait "$pid" 2>/dev/null || true
+      unregister_child "$pid"
+      return "$EX_WATCHDOG_UNAVAILABLE"
+    fi
+    return "$EX_CLEANUP_UNPROVEN"
+  fi
   IFS= read -r -t 2 control_ready <&5 || control_ready=""
   if [[ "$control_ready" != "control-ready:${supervisor_token}" ]]; then
     # The channel is adopted before readiness. If the leader is live it accepts
@@ -775,37 +835,68 @@ run_bounded() {
     if group_settled_before_wait "$pid"; then
       wait "$pid" 2>/dev/null || true
       unregister_child "$pid"
-      exec 5>&-
       return "$EX_WATCHDOG_UNAVAILABLE"
     fi
-    exec 5>&-
+    return "$EX_CLEANUP_UNPROVEN"
+  fi
+  if ! send_group_input "$pid" "$stdin_file"; then
+    request_group_signal "$pid" KILL || true
+    if group_settled_before_wait "$pid"; then
+      wait "$pid" 2>/dev/null || true
+      unregister_child "$pid"
+      return "$EX_INPUT_BOOTSTRAP_UNAVAILABLE"
+    fi
     return "$EX_CLEANUP_UNPROVEN"
   fi
 
   # The parent builtin owns the sole wall-clock deadline. There is no watchdog
   # child to stop, orphan, or reap: one timeout read races the payload result,
   # then the still-live supervisor accepts the TERM/KILL sequence itself.
-  local outcome="" status="$EX_WATCHDOG_UNAVAILABLE" cleanup_unproven=0 timed_out=0
-  if IFS= read -r -t "$seconds" outcome <&5; then
-    case "$outcome" in
-      child:[0-9]|child:[0-9][0-9]|child:[12][0-9][0-9]) status="${outcome#child:}" ;;
-      *) status="$EX_WATCHDOG_UNAVAILABLE" ;;
-    esac
-  else
-    timed_out=1
-    # The flag-write result is authoritative before teardown starts. A
-    # TERM-cooperative zero exit cannot overwrite this typed refusal.
-    if (( WATCHDOG_FLAG_WRITE_PLANT == 1 )) || ! printf 'x' > "$flag" 2>/dev/null; then
-      status="$EX_WATCHDOG_UNAVAILABLE"
+  local outcome="" child_status="" status="$EX_WATCHDOG_UNAVAILABLE"
+  local cleanup_unproven=0 timed_out=0 read_status=0
+  if read_group_outcome "$seconds"; then
+    outcome="$GROUP_RECORD"
+    child_status="${outcome#"child:${supervisor_token}:"}"
+    if [[ "$outcome" == "child:${supervisor_token}:${child_status}" &&
+          "$child_status" =~ ^(0|[1-9]|[1-9][0-9]|[1-9][0-9][0-9])$ ]] &&
+       (( 10#$child_status <= 255 )); then
+      status="$((10#$child_status))"
     else
-      status=124
+      status="$EX_WATCHDOG_UNAVAILABLE"
     fi
+  else
+    read_status=$?
+    if (( GROUP_RECORD_INVALID == 1 )); then
+      status="$EX_WATCHDOG_UNAVAILABLE"
+    elif (( read_status > 128 )); then
+      # The parent-memory latch is authoritative before teardown starts. There
+      # is no target-writable flag path to forge, redirect, or chmod.
+      timed_out=1
+      status=124
+    else
+      status="$EX_WATCHDOG_UNAVAILABLE"
+    fi
+  fi
+
+  if (( SUPERVISOR_DEPART_AFTER_RESULT_PLANT == 1 && timed_out == 0 )); then
+    # Causal recycled-PGID polarity: make the sole reader close, prove the group
+    # gone, reap its leader (so the number is now reusable), then write only to
+    # the stale nonce channel. EPIPE/EBADF is the required outcome; there is no
+    # numeric signal or probe after the wait.
+    if ! request_group_signal "$pid" DIE || ! group_settled_before_wait "$pid"; then
+      return "$EX_CLEANUP_UNPROVEN"
+    fi
+    wait "$pid" 2>/dev/null || true
+    if ! request_group_signal "$pid" TERM; then
+      DEAD_LISTENER_WRITE_REFUSAL_OBSERVED=1
+    fi
+    unregister_child "$pid"
+    return "$status"
   fi
 
   if ! request_group_signal "$pid" TERM; then cleanup_unproven=1; fi
   if (( timed_out == 1 )); then sleep 3; else sleep 0.2; fi
   if ! request_group_signal "$pid" KILL; then cleanup_unproven=1; fi
-  exec 5>&-
 
   # A write or typed-ack refusal never falls into a wait. The unreaped leader
   # and its open control channel remain registered for the outer cleanup owner.
@@ -896,14 +987,6 @@ http_request() {
   chmod 700 "$out_dir" 2>/dev/null || true
   out_file="${out_dir}/response"
 
-  start_secret_writer "$config" || return "$EX_SECRET_WRITER_UNAVAILABLE"
-  local writer_status=0
-  finish_secret_writer || writer_status=$?
-  if (( writer_status != 0 )); then
-    close_secret_input
-    return "$writer_status"
-  fi
-
   minimal_env_command curl "${args[@]}" "$url"
   # The bound is the request's own max-time plus a small settling margin, so a
   # wedged curl is retired by the owner rather than by its internal timer.
@@ -912,8 +995,7 @@ http_request() {
   # or could not be bounded (126) still handed its partial bytes to the caller
   # and the phase went green on them.
   local rc=0
-  run_bounded "$((max_time + 5))" "$out_file" "@secret-fd" "${MINIMAL_CMD[@]}" 2>/dev/null || rc=$?
-  close_secret_input
+  run_bounded "$((max_time + 5))" "$out_file" "$config" "${MINIMAL_CMD[@]}" 2>/dev/null || rc=$?
   if (( rc != 0 )); then
     HTTP_RESPONSE=""
     return "$rc"
@@ -1088,26 +1170,13 @@ mint_envelope_config() {
   # unset in the subshell that becomes that child.
   # The signing key and kid travel as ONE bounded record on stdin, so they are
   # in neither the child's argv nor its environ.
-  start_secret_writer "$(printf '%s\t%s' "$ASIMP_S6_SIGNING_KEY_HEX" "$ASIMP_S6_SIGNING_KID")" || {
-    exec 9>&-
-    exec 8<&-
-    return 1
-  }
-  local writer_status=0
-  finish_secret_writer || writer_status=$?
-  if (( writer_status != 0 )); then
-    close_secret_input
-    exec 9>&-
-    exec 8<&-
-    return 1
-  fi
+  local secret_record="${ASIMP_S6_SIGNING_KEY_HEX}"$'\t'"${ASIMP_S6_SIGNING_KID}"
 
   minimal_env_command bun "${RUN_STATE_DIR}/mint-envelope.mjs" \
     "$method" "$route" "$action" "$principal" "$body" "$skew"
   local status=0
-  run_bounded "$bound" "$fifo" "@secret-fd" "${MINIMAL_CMD[@]}" \
+  run_bounded "$bound" "$fifo" "$secret_record" "${MINIMAL_CMD[@]}" \
     2>>"${RUN_STATE_DIR}/mint.err" || status=$?
-  close_secret_input
   # Drop the guard writer now the child is done, so EOF is reachable.
   exec 9>&-
   if (( status != 0 )); then
@@ -1191,22 +1260,9 @@ run_browser_leg() {
   config_record="$(printf '{"previewUrl":"%s","workerUrl":"%s","user":"%s","password":"%s"}' \
     "$(json_string "$ASIMP_S6_PREVIEW_URL")" "$(json_string "$ASIMP_S6_WORKER_URL")" \
     "$(json_string "$ASIMP_S6_TEST_GOOGLE_USER")" "$(json_string "$ASIMP_S6_TEST_GOOGLE_PASS")")"
-  start_secret_writer "$config_record" || {
-    fail_record "browser-leg" "the bounded secret writer could not start"
-    return 1
-  }
-  local writer_status=0
-  finish_secret_writer || writer_status=$?
-  if (( writer_status != 0 )); then
-    close_secret_input
-    fail_record "browser-leg" "the bounded secret writer could not settle"
-    return 1
-  fi
-
   minimal_env_command bun "$PLAYWRIGHT_RUNNER"
-  run_bounded "$bound" "$out_file" "@secret-fd" "${MINIMAL_CMD[@]}" \
+  run_bounded "$bound" "$out_file" "$config_record" "${MINIMAL_CMD[@]}" \
     2>"${RUN_STATE_DIR}/browser.err" || status=$?
-  close_secret_input
 
   # STATUS FIRST, before the record is even looked at.
   #
@@ -1654,6 +1710,27 @@ self_test() {
     fi
   }
 
+  # Test-only children settle through the same bounded pre-wait rule. On expiry
+  # their ownership record is retained and the assertion fails; no helper can
+  # strand this self-test in a bare `wait`.
+  settle_selftest_child() {
+    local name="$1" pid="$2"
+    if ! direct_child_settled_before_wait "$pid"; then
+      failures=$((failures + 1))
+      emit "{\"suite\":\"${SUITE}\",\"assertion\":\"$(json_string "$name")\",\"status\":\"fail\",\"detail\":\"test child did not settle within the bounded pre-wait window; owner retained\"}"
+      return 1
+    fi
+    wait "$pid" 2>/dev/null || true
+    unregister_child "$pid"
+    return 0
+  }
+
+  register_selftest_child() {
+    local pid="$1"
+    mint_owner_token "selftest"
+    register_child "$pid" "$OWNER_TOKEN" "ordinary"
+  }
+
   valid_https_origin "https://p.vercel.app" && r=yes || r=no
   check "origin-accepts-https" "$r" "yes"
   valid_https_origin "http://p.vercel.app" && r=yes || r=no
@@ -1673,48 +1750,31 @@ self_test() {
   check "json-string-escapes-quote" "$(json_string 'a"b')" 'a\"b'
   check "secret-vars-declared" "${#SECRET_VARS[@]}" "3"
 
-  # Causal: the reaper must actually terminate a live child and report zero
-  # survivors. A cleanup path asserted only by reading the source is not a
-  # cleanup path.
+  # Secret bootstrap creates no independent writer owner. The same durable
+  # supervisor receives two exact lines, feeds them to the payload, then
+  # self-signals and is reaped as the only ownership record.
   clear_child_records
-  local reaper_plant_dir reaper_ready reaper_term
-  reaper_plant_dir="$(mktemp -d "${TMPDIR:-/tmp}/s6-reaper-plant.XXXXXX" 2>/dev/null)" || reaper_plant_dir=""
-  reaper_ready="${reaper_plant_dir}/ready"
-  reaper_term="${reaper_plant_dir}/term-observed"
-  bash "$SCRIPT_SELF" --self-test-ack-victim "$reaper_ready" "$reaper_term" &
-  local victim=$!
-  CHILD_PIDS+=("$victim")
-  local reaper_ready_deadline=$((SECONDS + 5))
-  while [[ ! -f "$reaper_ready" ]] && (( SECONDS < reaper_ready_deadline )); do sleep 0.05; done
-  reap_children
-  check "reaper-reports-no-survivors" "$REAP_SURVIVORS" "0"
-  if [[ "$(cat "$reaper_term" 2>/dev/null || printf '')" != "term-observed" ]]; then
-    failures=$((failures + 1))
-    emit "{\"suite\":\"${SUITE}\",\"assertion\":\"reaper-actually-kills\",\"status\":\"fail\",\"detail\":\"the armed child published no TERM acknowledgement\"}"
-  else
-    emit "{\"suite\":\"${SUITE}\",\"assertion\":\"reaper-actually-kills\",\"status\":\"pass\",\"detail\":\"self-test\"}"
-  fi
+  local bootstrap_out="${TMPDIR:-/tmp}/s6-bootstrap.$$" bootstrap_status=0 bootstrap_value=""
+  run_bounded 10 "$bootstrap_out" $'line-one\nline-two' \
+    bash -c 'IFS= read -r first; IFS= read -r second; printf "%s|%s" "$first" "$second"' \
+    || bootstrap_status=$?
+  [[ -f "$bootstrap_out" ]] && bootstrap_value="$(cat "$bootstrap_out" 2>/dev/null || printf '')"
+  check "reaper-reports-no-survivors" "${bootstrap_status}:${#CHILD_PIDS[@]}" "0:0"
+  check "reaper-actually-kills" "$bootstrap_value" "line-one|line-two"
+  check "secret-bootstrap-has-no-independent-writer-owner" "${bootstrap_status}:${#CHILD_PIDS[@]}" "0:0"
 
   # A successful KILL dispatch is not settlement proof. This child is already
   # stopped, and the injected signal seam reports success without changing it.
   # The reaper must return cleanup-unproven within the settlement window while
   # retaining ownership; a real disarmed KILL then performs the only wait.
   clear_child_records
-  local stopped_reaper_dir stopped_reaper_ready stopped_reaper_status stopped_reaper_records
-  stopped_reaper_dir="$(mktemp -d "${TMPDIR:-/tmp}/s6-stopped-reaper.XXXXXX" 2>/dev/null)" || stopped_reaper_dir=""
-  stopped_reaper_ready="${stopped_reaper_dir}/ready"
-  bash "$SCRIPT_SELF" --self-test-stopped-victim "$stopped_reaper_ready" &
-  local stopped_reaper=$!
-  CHILD_PIDS+=("$stopped_reaper")
-  local stopped_reaper_deadline=$((SECONDS + 5))
-  while [[ ! -s "$stopped_reaper_ready" ]] && (( SECONDS < stopped_reaper_deadline )); do sleep 0.05; done
+  local stopped_reaper_status=0 stopped_reaper_records
   SIGNAL_KILL_NO_SETTLE_PLANT=1
-  reap_children
-  stopped_reaper_status="$REAP_SURVIVORS"
+  run_bounded 10 "${TMPDIR:-/tmp}/s6-stopped-reaper.$$" - true || stopped_reaper_status=$?
   stopped_reaper_records="${#CHILD_PIDS[@]}"
   SIGNAL_KILL_NO_SETTLE_PLANT=0
   reap_children
-  check "reaper-successful-kill-without-settlement-is-explicit" "$stopped_reaper_status" "1"
+  check "reaper-successful-kill-without-settlement-is-explicit" "$stopped_reaper_status" "$EX_CLEANUP_UNPROVEN"
   check "reaper-stopped-child-retains-owner" "$stopped_reaper_records" "1"
   check "reaper-stopped-child-retry-reaps-owner" "${REAP_SURVIVORS}:${#CHILD_PIDS[@]}" "0:0"
 
@@ -1753,26 +1813,40 @@ self_test() {
     emit "{\"suite\":\"${SUITE}\",\"assertion\":\"run-bounded-honours-wall-clock\",\"status\":\"fail\",\"detail\":\"a 1s bound took ${bounded_elapsed}s; the bound is not wall-clock\"}"
   fi
 
-  # Exact watchdog-publication race. The child proves its TERM trap is armed,
-  # then exits 0 when the watchdog fires. With the old parent-cancels-watchdog
-  # shape, that exit masked the watchdog's pending status 3 and returned green.
-  local watchdog_plant_dir watchdog_ready watchdog_term watchdog_status=0
-  watchdog_plant_dir="$(mktemp -d "${TMPDIR:-/tmp}/s6-watchdog-plant.XXXXXX" 2>/dev/null)" || watchdog_plant_dir=""
-  if [[ -n "$watchdog_plant_dir" ]]; then
-    watchdog_ready="${watchdog_plant_dir}/ready"
-    watchdog_term="${watchdog_plant_dir}/term-observed"
-    WATCHDOG_FLAG_WRITE_PLANT=1
+  # The builtin read timeout is latched in parent memory before teardown. A
+  # cooperative payload exits zero from its TERM trap, but that later terminal
+  # status cannot override the already-authoritative 124.
+  local deadline_plant_dir deadline_ready deadline_term deadline_status=0
+  deadline_plant_dir="$(mktemp -d "${TMPDIR:-/tmp}/s6-deadline-plant.XXXXXX" 2>/dev/null)" || deadline_plant_dir=""
+  if [[ -n "$deadline_plant_dir" ]]; then
+    deadline_ready="${deadline_plant_dir}/ready"
+    deadline_term="${deadline_plant_dir}/term-observed"
     run_bounded 1 "$bounded_out" - \
-      bash -c "trap 'printf term-observed > \"\$2\"; exit 0' TERM; printf ready > \"\$1\"; while :; do sleep 1; done" \
-      _ "$watchdog_ready" "$watchdog_term" || watchdog_status=$?
-    WATCHDOG_FLAG_WRITE_PLANT=0
+      bash -c "trap 'printf term-observed > \"\$2\"; exit 0' TERM; printf ready > \"\$1\"; while :; do sleep 30; done" \
+      _ "$deadline_ready" "$deadline_term" || deadline_status=$?
   fi
-  local watchdog_ready_value="" watchdog_term_value=""
-  [[ -f "${watchdog_ready:-}" ]] && watchdog_ready_value="$(cat "$watchdog_ready" 2>/dev/null || printf '')"
-  [[ -f "${watchdog_term:-}" ]] && watchdog_term_value="$(cat "$watchdog_term" 2>/dev/null || printf '')"
-  check "watchdog-flag-write-failure-ready" "$watchdog_ready_value" "ready"
-  check "watchdog-flag-write-failure-child-exits-zero" "$watchdog_term_value" "term-observed"
-  check "watchdog-flag-write-failure-is-authoritative" "$watchdog_status" "$EX_WATCHDOG_UNAVAILABLE"
+  local deadline_ready_value="" deadline_term_value=""
+  [[ -f "${deadline_ready:-}" ]] && deadline_ready_value="$(cat "$deadline_ready" 2>/dev/null || printf '')"
+  [[ -f "${deadline_term:-}" ]] && deadline_term_value="$(cat "$deadline_term" 2>/dev/null || printf '')"
+  check "parent-deadline-cooperative-term-ready" "$deadline_ready_value" "ready"
+  check "parent-deadline-cooperative-term-observed" "$deadline_term_value" "term-observed"
+  check "parent-deadline-exact-124-overrides-child-zero" "$deadline_status" "124"
+
+  # Opposite polarity: this target deliberately ignores TERM. Its endless
+  # builtin loop can settle only when the supervisor executes self-KILL; status
+  # 124 with no retained owner therefore proves the resistant branch completed.
+  clear_child_records
+  local resistant_dir resistant_ready resistant_status=0 resistant_ready_value=""
+  resistant_dir="$(mktemp -d "${TMPDIR:-/tmp}/s6-resistant-plant.XXXXXX" 2>/dev/null)" || resistant_dir=""
+  if [[ -n "$resistant_dir" ]]; then
+    resistant_ready="${resistant_dir}/ready"
+    run_bounded 1 "$bounded_out" - \
+      bash -c 'trap "" TERM; printf ready > "$1"; while :; do IFS= read -r -t 30 _ || true; done' \
+      _ "$resistant_ready" || resistant_status=$?
+  fi
+  [[ -f "${resistant_ready:-}" ]] && resistant_ready_value="$(cat "$resistant_ready" 2>/dev/null || printf '')"
+  check "parent-deadline-resistant-kill-ready" "$resistant_ready_value" "ready"
+  check "parent-deadline-resistant-kill-settles" "${resistant_status}:${#CHILD_PIDS[@]}" "124:0"
 
   # Causal KILL-dispatch failure. The watchdog's final KILL is rejected while
   # the supervisor is still live. `run_bounded` must return cleanup-unproven on
@@ -1810,18 +1884,105 @@ self_test() {
     emit "{\"suite\":\"${SUITE}\",\"assertion\":\"watchdog-kill-dispatch-failure-is-bounded\",\"status\":\"fail\",\"detail\":\"the injected KILL refusal took ${kill_failure_elapsed}s\"}"
   fi
 
-  # Handshake then STOP: the watchdog publishes completion but never exits.
-  # Its wait must expire cleanup-unproven with both live owners retained.
+  # Pre-ready failure: the process-substitution leader departs before publishing
+  # readiness. The already-adopted write-only channel either retires it or fails
+  # with EPIPE; bounded group absence is required before the direct wait.
   clear_child_records
-  local stopped_watchdog_status=0 stopped_watchdog_records
-  WATCHDOG_STOP_AFTER_HANDSHAKE_PLANT=1
-  run_bounded 10 "$bounded_out" - true || stopped_watchdog_status=$?
-  WATCHDOG_STOP_AFTER_HANDSHAKE_PLANT=0
-  stopped_watchdog_records="${#CHILD_PIDS[@]}"
-  reap_children
-  check "stopped-watchdog-handshake-status" "$stopped_watchdog_status" "$EX_CLEANUP_UNPROVEN"
-  check "stopped-watchdog-handshake-retains-owners" "$stopped_watchdog_records" "2"
-  check "stopped-watchdog-retry-reaps-owners" "${REAP_SURVIVORS}:${#CHILD_PIDS[@]}" "0:0"
+  local pre_ready_status=0
+  SUPERVISOR_READY_WRITE_PLANT=1
+  run_bounded 10 "$bounded_out" - true || pre_ready_status=$?
+  SUPERVISOR_READY_WRITE_PLANT=0
+  check "pre-ready-supervisor-failure-status" "$pre_ready_status" "$EX_WATCHDOG_UNAVAILABLE"
+  check "pre-ready-supervisor-failure-reaped" "${#CHILD_PIDS[@]}:${GROUP_CONTROL_PID}" "0:"
+
+  # The payload must not inherit either side of the supervisor channel. FD 6 is
+  # the parent writer and the supervisor read side is FD7; the payload gets
+  # /dev/null and sees result/control/order FDs 5 through 8 closed.
+  clear_child_records
+  local fd_status=0 fd_record=""
+  run_bounded 10 "$bounded_out" - \
+    bash -c 'if { : >&5; } 2>/dev/null || { : >&6; } 2>/dev/null || { : <&7; } 2>/dev/null || { : >&8; } 2>/dev/null; then printf inherited; else printf closed; fi' \
+    || fd_status=$?
+  [[ -f "$bounded_out" ]] && fd_record="$(cat "$bounded_out" 2>/dev/null || printf '')"
+  check "supervisor-control-fd-not-inherited" "${fd_status}:${fd_record}" "0:closed"
+
+  # An unsolicited control acknowledgement cannot occur before the parent has
+  # requested any signal. Inject it before payload fork; the main outcome reader
+  # must refuse rather than queue it and later publish a false success.
+  clear_child_records
+  local early_ack_status=0
+  SUPERVISOR_EARLY_ACK_PLANT=1
+  run_bounded 10 "$bounded_out" - true || early_ack_status=$?
+  SUPERVISOR_EARLY_ACK_PLANT=0
+  check "unsolicited-control-ack-fails-closed" "$early_ack_status" "$EX_WATCHDOG_UNAVAILABLE"
+
+  # Legitimate opposite order: after timeout, a child terminal record may reach
+  # fd5 immediately before the requested TERM ack. The ack reader must retain the
+  # child record, consume the exact ack, and still finish the authoritative 124.
+  clear_child_records
+  local child_before_ack_dir child_before_ack_ready child_before_ack_ready_value=""
+  local child_before_ack_status=0 child_queue_before="$GROUP_QUEUED_CHILD_RECORDS"
+  child_before_ack_dir="$(mktemp -d "${TMPDIR:-/tmp}/s6-child-before-ack.XXXXXX" 2>/dev/null)" || child_before_ack_dir=""
+  if [[ -n "$child_before_ack_dir" ]]; then
+    child_before_ack_ready="${child_before_ack_dir}/ready"
+    SUPERVISOR_CHILD_BEFORE_ACK_PLANT=1
+    run_bounded 1 "$bounded_out" - \
+      bash -c 'trap "exit 0" TERM; printf ready > "$1"; while :; do sleep 30; done' \
+      _ "$child_before_ack_ready" || child_before_ack_status=$?
+    SUPERVISOR_CHILD_BEFORE_ACK_PLANT=0
+  else
+    child_before_ack_status="$EX_WATCHDOG_UNAVAILABLE"
+  fi
+  [[ -n "${child_before_ack_ready:-}" && -f "$child_before_ack_ready" ]] && \
+    child_before_ack_ready_value="$(cat "$child_before_ack_ready" 2>/dev/null || printf '')"
+  check "child-terminal-before-control-ack-ready" "$child_before_ack_ready_value" "ready"
+  check "child-terminal-before-control-ack-is-retained" \
+    "${child_before_ack_status}:$((GROUP_QUEUED_CHILD_RECORDS - child_queue_before))" "124:1"
+
+  # A supervisor terminal status is canonical decimal in [0,255]. Token binding
+  # alone must not make malformed 256 (or a leading-zero drift) acceptable.
+  clear_child_records
+  local malformed_child_status=0 leading_zero_child_status=0
+  SUPERVISOR_CHILD_STATUS_PLANT=256
+  run_bounded 10 "$bounded_out" - true || malformed_child_status=$?
+  SUPERVISOR_CHILD_STATUS_PLANT=00
+  run_bounded 10 "$bounded_out" - true || leading_zero_child_status=$?
+  SUPERVISOR_CHILD_STATUS_PLANT=""
+  check "token-bound-child-status-above-255-is-refused" "$malformed_child_status" "$EX_WATCHDOG_UNAVAILABLE"
+  check "token-bound-child-status-leading-zero-is-refused" "$leading_zero_child_status" "$EX_WATCHDOG_UNAVAILABLE"
+
+  # Same-UID hostile target: discover the predictable result FIFO without being
+  # told its exact path and inject the formerly accepted unkeyed `child:0` before
+  # exiting nonzero. The private token is never in target argv/env/fds, so the
+  # forged record must turn the run red rather than green.
+  clear_child_records
+  local forged_root forged_status=0
+  forged_root="$(mktemp -d "${TMPDIR:-/tmp}/s6-forged-result-root.XXXXXX" 2>/dev/null)" || forged_root=""
+  forged_result_plant() {
+    local TMPDIR="$1"
+    run_bounded 10 "$bounded_out" - \
+      bash "$SCRIPT_SELF" --self-test-forge-result "$TMPDIR"
+  }
+  if [[ -n "$forged_root" ]]; then
+    forged_result_plant "$forged_root" || forged_status=$?
+  else
+    forged_status="$EX_WATCHDOG_UNAVAILABLE"
+  fi
+  check "unkeyed-forged-child-zero-cannot-green" "$forged_status" "$EX_WATCHDOG_UNAVAILABLE"
+
+  # Force the sole listener to close and its leader to be reaped, making the old
+  # numeric PGID reusable. A subsequent capability write must fail through the
+  # dead pipe; there is structurally no numeric signal fallback.
+  clear_child_records
+  local dead_listener_status=0
+  DEAD_LISTENER_WRITE_REFUSAL_OBSERVED=0
+  SUPERVISOR_DEPART_AFTER_RESULT_PLANT=1
+  run_bounded 10 "$bounded_out" - true || dead_listener_status=$?
+  SUPERVISOR_DEPART_AFTER_RESULT_PLANT=0
+  check "dead-listener-write-is-refused" \
+    "${dead_listener_status}:${DEAD_LISTENER_WRITE_REFUSAL_OBSERVED}" "0:1"
+  check "departed-listener-never-signals-recycled-pgid" \
+    "$DEAD_LISTENER_WRITE_REFUSAL_OBSERVED" "1"
 
   # Supervisor KILL reports success but deliberately leaves the group live.
   # `run_bounded` must prove settlement before its supervisor wait, retain that
@@ -1837,79 +1998,65 @@ self_test() {
   check "successful-supervisor-kill-without-settlement-retains-owner" "$stopped_supervisor_records" "1"
   check "stopped-supervisor-retry-reaps-owner" "${REAP_SURVIVORS}:${#CHILD_PIDS[@]}" "0:0"
 
-  # Child-before-open: no consumer ever opens the secret FIFO. The completion
-  # handshake must bound `finish_secret_writer`, KILL the still-pinned writer,
-  # reap it and remove its active ownership record.
+  # The old child-before-open failure is structurally absent: no independent
+  # writer or input FIFO exists. Drive the real bootstrap and require exact bytes plus zero
+  # ownership records after the one supervisor settles.
   clear_child_records
-  local writer_plant_status=0 writer_plant_started=$SECONDS writer_plant_elapsed
-  if new_secret_fifo && start_secret_writer "$SECRET_FIFO" "planted-secret-writer-record"; then
-    finish_secret_writer || writer_plant_status=$?
-  else
-    writer_plant_status="$EX_SECRET_WRITER_UNAVAILABLE"
-  fi
-  writer_plant_elapsed=$((SECONDS - writer_plant_started))
-  check "secret-writer-child-before-open-status" "$writer_plant_status" "$EX_SECRET_WRITER_UNAVAILABLE"
-  check "secret-writer-child-before-open-disarmed" "${#CHILD_PIDS[@]}" "0"
-  if (( writer_plant_elapsed <= SECRET_WRITER_WAIT_SECONDS + 2 )); then
-    emit "{\"suite\":\"${SUITE}\",\"assertion\":\"secret-writer-child-before-open-is-bounded\",\"status\":\"pass\",\"detail\":\"the writer returned in ${writer_plant_elapsed}s without a FIFO reader\"}"
+  local bootstrap_plant_status=0 bootstrap_plant_started=$SECONDS bootstrap_plant_elapsed bootstrap_plant_payload=""
+  run_bounded 10 "$bounded_out" "planted-input-bootstrap-record" \
+    bash -c 'IFS= read -r value; printf "%s" "$value"' || bootstrap_plant_status=$?
+  [[ -f "$bounded_out" ]] && bootstrap_plant_payload="$(cat "$bounded_out" 2>/dev/null || printf '')"
+  bootstrap_plant_elapsed=$((SECONDS - bootstrap_plant_started))
+  check "input-bootstrap-exact-record-status" "${bootstrap_plant_status}:${bootstrap_plant_payload}" "0:planted-input-bootstrap-record"
+  check "input-bootstrap-has-one-disarmed-owner" "${#CHILD_PIDS[@]}" "0"
+  if (( bootstrap_plant_elapsed <= INPUT_BOOTSTRAP_WAIT_SECONDS + 2 )); then
+    emit "{\"suite\":\"${SUITE}\",\"assertion\":\"input-bootstrap-is-bounded\",\"status\":\"pass\",\"detail\":\"the writer-free bootstrap returned in ${bootstrap_plant_elapsed}s\"}"
   else
     failures=$((failures + 1))
-    emit "{\"suite\":\"${SUITE}\",\"assertion\":\"secret-writer-child-before-open-is-bounded\",\"status\":\"fail\",\"detail\":\"the writer took ${writer_plant_elapsed}s without a FIFO reader\"}"
+    emit "{\"suite\":\"${SUITE}\",\"assertion\":\"input-bootstrap-is-bounded\",\"status\":\"fail\",\"detail\":\"the writer-free bootstrap took ${bootstrap_plant_elapsed}s\"}"
   fi
 
-  # The same no-reader plant with its group KILL rejected. The timed-out writer
-  # is still live and blocked in FIFO open, so `finish_secret_writer` must
-  # return cleanup-unproven without waiting, retain the active owner, and let a
-  # later disarmed reaper perform the only wait/unregister.
+  # Drive a KILL refusal after the real secret bootstrap. There is exactly one
+  # durable supervisor owner; refusal retains it and a disarmed reaper retires it.
   clear_child_records
-  local writer_kill_status=0 writer_kill_started=$SECONDS writer_kill_elapsed
+  local bootstrap_kill_status=0 bootstrap_kill_started=$SECONDS bootstrap_kill_elapsed
   SIGNAL_KILL_FAILURE_PLANT=1
-  if new_secret_fifo && start_secret_writer "$SECRET_FIFO" "planted-secret-writer-kill-refusal"; then
-    finish_secret_writer || writer_kill_status=$?
-  else
-    writer_kill_status="$EX_SECRET_WRITER_UNAVAILABLE"
-  fi
-  writer_kill_elapsed=$((SECONDS - writer_kill_started))
-  local writer_kill_records="${#CHILD_PIDS[@]}"
+  run_bounded 1 "$bounded_out" "planted-bootstrap-kill-refusal" sleep 30 || bootstrap_kill_status=$?
+  bootstrap_kill_elapsed=$((SECONDS - bootstrap_kill_started))
+  local bootstrap_kill_records="${#CHILD_PIDS[@]}"
   SIGNAL_KILL_FAILURE_PLANT=0
   reap_children
-  check "secret-writer-kill-dispatch-failure-status" "$writer_kill_status" "$EX_CLEANUP_UNPROVEN"
-  check "secret-writer-kill-dispatch-failure-retains-owner" "$writer_kill_records" "1"
-  check "secret-writer-kill-dispatch-retry-reaps-owner" \
-    "${REAP_SURVIVORS}:${#CHILD_PIDS[@]}:${SECRET_WRITER_PID}" "0:0:"
-  if (( writer_kill_elapsed <= SECRET_WRITER_WAIT_SECONDS + 2 )); then
-    emit "{\"suite\":\"${SUITE}\",\"assertion\":\"secret-writer-kill-dispatch-failure-is-bounded\",\"status\":\"pass\",\"detail\":\"the injected KILL refusal returned in ${writer_kill_elapsed}s with its owner retained\"}"
+  # Keep these two historical record names: the TypeScript adapter requires
+  # both, so deleting the former writer/KILL causal boundary cannot false-green.
+  check "secret-writer-kill-dispatch-failure-status" "$bootstrap_kill_status" "$EX_CLEANUP_UNPROVEN"
+  check "input-bootstrap-kill-dispatch-failure-retains-owner" "$bootstrap_kill_records" "1"
+  check "input-bootstrap-kill-dispatch-retry-reaps-owner" \
+    "${REAP_SURVIVORS}:${#CHILD_PIDS[@]}" "0:0"
+  if (( bootstrap_kill_elapsed <= INPUT_BOOTSTRAP_WAIT_SECONDS + 2 )); then
+    emit "{\"suite\":\"${SUITE}\",\"assertion\":\"secret-writer-kill-dispatch-failure-is-bounded\",\"status\":\"pass\",\"detail\":\"the injected KILL refusal returned in ${bootstrap_kill_elapsed}s with its owner retained\"}"
   else
     failures=$((failures + 1))
-    emit "{\"suite\":\"${SUITE}\",\"assertion\":\"secret-writer-kill-dispatch-failure-is-bounded\",\"status\":\"fail\",\"detail\":\"the injected KILL refusal took ${writer_kill_elapsed}s\"}"
+    emit "{\"suite\":\"${SUITE}\",\"assertion\":\"secret-writer-kill-dispatch-failure-is-bounded\",\"status\":\"fail\",\"detail\":\"the injected KILL refusal took ${bootstrap_kill_elapsed}s\"}"
   fi
 
-  # Completion token then STOP: the FIFO bytes and `ok` handshake arrive, but
-  # the writer remains live before exit. A token is not settlement proof, so
-  # `finish_secret_writer` must refuse within the settlement bound and retain
-  # the owner until a disarmed reaper proves its exit.
+  # Input-ready then successful-but-nonsettling KILL. The bootstrap ack is not a
+  # cleanup proof; the single supervisor stays owned until a real retry settles.
   clear_child_records
-  local stopped_writer_status=0 stopped_writer_records stopped_writer_payload=""
-  if new_secret_fifo && exec 7<>"$SECRET_FIFO"; then
-    SECRET_WRITER_STOP_AFTER_COMPLETION_PLANT=1
-    if start_secret_writer "$SECRET_FIFO" "planted-stopped-writer" && \
-      IFS= read -r -t 2 stopped_writer_payload <&7; then
-      finish_secret_writer || stopped_writer_status=$?
-    else
-      stopped_writer_status="$EX_SECRET_WRITER_UNAVAILABLE"
-    fi
-    SECRET_WRITER_STOP_AFTER_COMPLETION_PLANT=0
-    exec 7>&-
-  else
-    stopped_writer_status="$EX_SECRET_WRITER_UNAVAILABLE"
-  fi
-  stopped_writer_records="${#CHILD_PIDS[@]}"
+  local stopped_bootstrap_status=0 stopped_bootstrap_records
+  SIGNAL_KILL_NO_SETTLE_PLANT=1
+  run_bounded 10 "$bounded_out" "planted-stopped-bootstrap" true || stopped_bootstrap_status=$?
+  SIGNAL_KILL_NO_SETTLE_PLANT=0
+  stopped_bootstrap_records="${#CHILD_PIDS[@]}"
   reap_children
-  check "stopped-secret-writer-payload-arrived" "$stopped_writer_payload" "planted-stopped-writer"
-  check "stopped-secret-writer-completion-status" "$stopped_writer_status" "$EX_CLEANUP_UNPROVEN"
-  check "stopped-secret-writer-retains-owner" "$stopped_writer_records" "1"
-  check "stopped-secret-writer-retry-reaps-owner" \
-    "${REAP_SURVIVORS}:${#CHILD_PIDS[@]}:${SECRET_WRITER_PID}" "0:0:"
+  check "stopped-input-bootstrap-completion-status" "$stopped_bootstrap_status" "$EX_CLEANUP_UNPROVEN"
+  check "stopped-input-bootstrap-retains-owner" "$stopped_bootstrap_records" "1"
+  check "stopped-input-bootstrap-retry-reaps-owner" \
+    "${REAP_SURVIVORS}:${#CHILD_PIDS[@]}" "0:0"
+
+  # The shared dead-listener plant above covers this former writer boundary too:
+  # after leader reap, the capability write refused and no numeric seam fired.
+  check "departed-bootstrap-refuses-recycled-pid-signal" \
+    "$DEAD_LISTENER_WRITE_REFUSAL_OBSERVED" "1"
 
   # A browser blocked record is buffered as data and produces zero bytes until
   # the post-cleanup publisher is invoked.
@@ -2024,20 +2171,17 @@ self_test() {
   marker="$(new_marker "group")" || marker=""
   group_terminated="$(new_marker "group-terminated")" || group_terminated=""
   # shellcheck disable=SC2016 # The inner shell expands its own arguments.
-  bash -c 'bash "$1" --self-test-ack-victim "$2" "$3" & wait' \
-    _ "$SCRIPT_SELF" "$marker" "$group_terminated" &
-  local group_leader=$!
-  CHILD_PIDS+=("$group_leader")
+  run_bounded 10 "$bounded_out" - \
+    bash -c 'bash "$1" --self-test-ack-victim "$2" "$3" & wait' \
+    _ "$SCRIPT_SELF" "$marker" "$group_terminated" || true
   local grandchild=""
-  if await_planted_pid "$marker" && kill -0 "$plant_pid" 2>/dev/null; then
+  if await_planted_pid "$marker"; then
     grandchild="$plant_pid"
   fi
   if [[ -z "$grandchild" ]]; then
     failures=$((failures + 1))
     emit "{\"suite\":\"${SUITE}\",\"assertion\":\"reaper-kills-descendants\",\"status\":\"fail\",\"detail\":\"the descendant was never live before the reap, so the plant proved nothing\"}"
-    reap_children
   else
-    reap_children
     judge_plant "reaper-kills-descendants" "$grandchild" "$group_terminated"
   fi
 
@@ -2058,18 +2202,19 @@ self_test() {
 
   # Directly: a registered pid is dropped once its reap is proven.
   clear_child_records
-  sleep 5 &
+  true &
   local reg_victim=$!
-  CHILD_PIDS+=("$reg_victim")
+  register_selftest_child "$reg_victim"
   local armed="${#CHILD_PIDS[@]}"
-  kill -KILL "$reg_victim" 2>/dev/null || true
-  wait "$reg_victim" 2>/dev/null || true
-  unregister_child "$reg_victim"
+  settle_selftest_child "registered-child-bounded-settlement" "$reg_victim" || true
   check "child-record-armed-then-disarmed" "${armed}:${#CHILD_PIDS[@]}" "1:0"
 
   # Negative: unregister must remove ONLY the exact numeric pid. A value with
   # glob or regex characters must not match, and must not remove a real entry.
+  clear_child_records
   CHILD_PIDS=(101 102 103)
+  CHILD_OWNER_TOKENS=(a b c)
+  CHILD_KINDS=(ordinary ordinary ordinary)
   unregister_child "10*"
   local glob_kept="${#CHILD_PIDS[@]}"
   unregister_child "102"
@@ -2083,10 +2228,8 @@ self_test() {
   # armed is a failure rather than a quiet pass.
   #
   # `run_bounded` is run in the FOREGROUND here, exactly as production calls it.
-  # Backgrounding the plant would put `run_bounded` in a subshell where job
-  # control assigns no fresh process group, so `kill -- -PID` would address the
-  # wrong group and the plant would fail for a reason the production path does
-  # not have.
+  # Backgrounding the plant would put all parent-side ownership mutations in a
+  # throwaway subshell and the real EXIT trap would retain no capability record.
   #
   # Liveness is therefore proven by the CHILD, which only writes the marker once
   # it has confirmed its own descendant is running. A marker holding a numeric
@@ -2121,12 +2264,13 @@ self_test() {
   signal_terminated="$(new_marker "signal-terminated")" || signal_terminated=""
   bash "$SCRIPT_SELF" --self-test-signal-victim "$signal_marker" "$signal_terminated" >/dev/null 2>&1 &
   local victim=$!
+  register_selftest_child "$victim"
   local signal_child=""
   if await_planted_pid "$signal_marker" && kill -0 "$plant_pid" 2>/dev/null; then
     signal_child="$plant_pid"
   fi
   kill -TERM "$victim" 2>/dev/null || true
-  wait "$victim" 2>/dev/null || true
+  settle_selftest_child "term-signal-victim-bounded-settlement" "$victim" || true
   judge_plant "term-signal-reaps-descendants" "$signal_child" "$signal_terminated"
 
   # Planted: while a child is HELD past exec, no secret may appear in the argv of
@@ -2182,7 +2326,7 @@ self_test() {
     ASIMP_S6_TEST_GOOGLE_PASS="planted-pass-canary-0123456789abcdef" \
       "${launch[@]}" &
     local launcher=$!
-    CHILD_PIDS+=("$launcher")
+    register_selftest_child "$launcher"
     # Defence in depth: with the child HELD past exec, nothing in its group may
     # show a canary either. This cannot replace the array check above — it runs
     # after exec — but it catches a launcher that keeps a secret in a live argv.
@@ -2198,8 +2342,7 @@ self_test() {
       fi
     fi
     printf 'go' > "$release"
-    kill -TERM "$launcher" 2>/dev/null || true
-    wait "$launcher" 2>/dev/null || true
+    settle_selftest_child "${name}-bounded-settlement" "$launcher" || true
     check "$name" "$verdict" "$expect"
   }
 
@@ -2379,7 +2522,7 @@ self_test() {
       /bin/sh -c "$body" _ "$hold" "$count_file" "$release" "$pattern" &
     fi
     local helper=$!
-    CHILD_PIDS+=("$helper")
+    register_selftest_child "$helper"
     await_planted_pid "$hold" || true
     local observed="" waited=0
     while (( waited < 40 )); do
@@ -2389,8 +2532,7 @@ self_test() {
       waited=$((waited + 1))
     done
     printf 'go' > "$release"
-    wait "$helper" 2>/dev/null || true
-    unregister_child "$helper"
+    settle_selftest_child "${name}-bounded-settlement" "$helper" || true
     if [[ "$observed" =~ ^[0-9]+$ ]]; then
       if (( observed == 0 )); then verdict="absent"; else verdict="present"; fi
     fi
@@ -2428,7 +2570,7 @@ self_test() {
       S6_SCAN_HOLD="$scan_hold" S6_SCAN_RELEASE="$scan_release" \
         scan_regular_files_for "planted-needle-canary" "$scan_dir" &
       local scan_runner=$!
-      CHILD_PIDS+=("$scan_runner")
+      register_selftest_child "$scan_runner"
       if await_planted_pid "$scan_hold"; then
         local scan_argv
         scan_argv="$(/bin/ps -o args= -p "$plant_pid" 2>/dev/null || printf '')"
@@ -2439,8 +2581,7 @@ self_test() {
         fi
       fi
       printf 'go' > "$scan_release"
-      wait "$scan_runner" 2>/dev/null || true
-      unregister_child "$scan_runner"
+      settle_selftest_child "scan-runner-bounded-settlement" "$scan_runner" || true
       SCAN_GREP="$saved_scan_grep"
     fi
     # Unsafe control: the same inspection must SEE a needle placed in argv.
@@ -2451,7 +2592,7 @@ self_test() {
       S6_SCAN_HOLD="$ctl_argv_hold" S6_SCAN_RELEASE="$ctl_argv_release" \
         "$scan_wrapper" -qF -- "planted-needle-canary" "${scan_dir}/target" &
       local ctl_scan=$!
-      CHILD_PIDS+=("$ctl_scan")
+      register_selftest_child "$ctl_scan"
       if await_planted_pid "$ctl_argv_hold"; then
         local ctl_scan_argv
         ctl_scan_argv="$(/bin/ps -o args= -p "$plant_pid" 2>/dev/null || printf '')"
@@ -2462,8 +2603,7 @@ self_test() {
         fi
       fi
       printf 'go' > "$ctl_argv_release"
-      wait "$ctl_scan" 2>/dev/null || true
-      unregister_child "$ctl_scan"
+      settle_selftest_child "scan-control-bounded-settlement" "$ctl_scan" || true
     fi
   fi
   check "leak-scan-needle-not-in-argv" "$scan_verdict" "clean"
@@ -2583,6 +2723,19 @@ main() {
     while :; do IFS= read -r -t 3600 _ <&6 || true; done
   fi
 
+  # Hidden hostile-target mode. It receives only a non-secret search root,
+  # discovers the result FIFO by name, writes the obsolete unkeyed success
+  # record, and then really exits nonzero. A tokenless parser would false-green.
+  if [[ "${1:-}" == "--self-test-forge-result" ]]; then
+    local search_root="${2:?search root required}" candidate wrote=0
+    for candidate in "$search_root"/s6-watchdog.*/result; do
+      [[ -p "$candidate" ]] || continue
+      if printf 'child:0\n' > "$candidate" 2>/dev/null; then wrote=1; fi
+    done
+    (( wrote == 1 )) || exit 97
+    exit 9
+  fi
+
   # Hidden mode used only by the signal plant: hold a live descendant and wait
   # to be signalled, so the INT/TERM trap can be exercised against a real group.
   if [[ "${1:-}" == "--self-test-signal-victim" ]]; then
@@ -2592,10 +2745,11 @@ main() {
     # a TERM acknowledgement, so the production five-second grace is unrelated
     # to what this plant proves.
     REAP_GRACE_SECONDS=0.2
-    bash "$SCRIPT_SELF" --self-test-ack-victim "$victim_marker" "$terminated_marker" &
-    local sleeper=$!
-    CHILD_PIDS+=("$sleeper")
-    sleep 45
+    # Foreground the production supervisor. If this shell receives TERM while
+    # its bounded read is active, on_signal owns the same nonce channel and
+    # retires the descendant group without any direct-child numeric signal.
+    run_bounded 45 /dev/null - \
+      bash "$SCRIPT_SELF" --self-test-ack-victim "$victim_marker" "$terminated_marker" || true
     exit 0
   fi
 

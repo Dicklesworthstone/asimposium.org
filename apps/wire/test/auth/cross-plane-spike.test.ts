@@ -22,6 +22,8 @@
  */
 
 import { describe, expect, test } from "bun:test";
+import { randomBytes } from "node:crypto";
+import { once } from "node:events";
 import {
   closeSync,
   mkdtempSync,
@@ -31,6 +33,7 @@ import {
   statSync,
   writeFileSync,
 } from "node:fs";
+import { createServer, type Socket } from "node:net";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 
@@ -68,6 +71,10 @@ const MAX_CAPTURE_BYTES = 1_048_576;
 const RUN_TIMEOUT_MS = 100_000;
 /** Maximum wait after an outer SIGKILL attempt before cleanup is unproven. */
 const POST_KILL_SETTLE_MS = 2_000;
+/** Supervisor capability records are tiny; refuse a runaway/forged stream. */
+const OUTER_CONTROL_MAX_BYTES = 65_536;
+/** Connect/bootstrap/control acknowledgements each have a fixed local bound. */
+const OUTER_CONTROL_STEP_MS = 2_000;
 
 class OverCapture extends Error {}
 
@@ -92,6 +99,68 @@ function readBounded(path: string): string {
   } finally {
     closeSync(fd);
   }
+}
+
+interface OuterControlListener {
+  readonly port: number;
+  readonly connected: Promise<Socket>;
+  close(): void;
+}
+
+/**
+ * One loopback TCP rendezvous, created before the supervisor and closed on the
+ * first accept. This deliberately follows the repo-proven S1 socket transport:
+ * nested Bun stdio pipes have lost bytes and thrown EPIPE under `bun test`.
+ * A TCP port is not authority. The accepted duplex socket becomes authority only
+ * after the parent bootstraps its secret nonce, before the supervisor forks the
+ * target; the target then closes that descriptor.
+ */
+async function outerControlListener(): Promise<OuterControlListener> {
+  const server = createServer();
+  server.listen(0, "127.0.0.1");
+  await once(server, "listening");
+  const address = server.address();
+  if (address === null || typeof address === "string") {
+    server.close();
+    throw new Error("expected a loopback TCP supervisor listener");
+  }
+
+  let parentSide: Socket | undefined;
+  let closed = false;
+  const connected = new Promise<Socket>((resolveConnection, rejectConnection) => {
+    const fail = (error: Error): void => rejectConnection(error);
+    server.once("error", fail);
+    server.once("connection", (socket) => {
+      server.off("error", fail);
+      parentSide = socket;
+      closed = true;
+      server.close();
+      resolveConnection(socket);
+    });
+  });
+  return {
+    port: address.port,
+    connected,
+    close() {
+      if (!closed) {
+        closed = true;
+        server.close();
+      }
+      parentSide?.destroy();
+    },
+  };
+}
+
+async function within<T>(promise: Promise<T>, milliseconds: number): Promise<T | undefined> {
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  const result = await Promise.race([
+    promise.then((value) => ({ kind: "value" as const, value })),
+    new Promise<{ kind: "elapsed" }>((resolveElapsed) => {
+      timer = setTimeout(() => resolveElapsed({ kind: "elapsed" }), Math.max(0, milliseconds));
+    }),
+  ]);
+  if (timer !== undefined) clearTimeout(timer);
+  return result.kind === "value" ? result.value : undefined;
 }
 
 interface ShellLifecycle {
@@ -163,8 +232,10 @@ interface ShellRunOptions {
   readonly postKillSettleMs?: number;
   /** Test-only causal barrier: arm the deadline only after this file exists. */
   readonly armAfterFileExists?: string;
-  /** Test-only injected group SIGKILL dispatch refusal. */
+  /** Test-only injected supervisor KILL-command refusal. */
   readonly failKillDispatch?: boolean;
+  /** Test-only observer called after a signal command is written to the live capability. */
+  readonly onControlSignal?: (signal: "TERM" | "KILL") => void;
 }
 
 /**
