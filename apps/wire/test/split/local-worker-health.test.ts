@@ -53,9 +53,9 @@ describe("the local Workerd readiness face never becomes authority", () => {
  * public claim, and reachable only from the local workerd harness.
  */
 describe("a local promotion receipt is refused unless the contract admits it", () => {
-  const DIGEST = "sha256:" + "a".repeat(64);
-  const FRONTIER = "sha256:" + "b".repeat(64);
-  const CONFIG = "sha256:" + "c".repeat(64);
+  const DIGEST = `sha256:${"a".repeat(64)}`;
+  const FRONTIER = `sha256:${"b".repeat(64)}`;
+  const CONFIG = `sha256:${"c".repeat(64)}`;
   const DECIDED_AT_SECONDS = 1_770_000_000;
 
   const receipt = (overrides: Partial<LocalPromotionReceiptInput> = {}) =>
@@ -223,7 +223,7 @@ describe("a local promotion receipt is refused unless the contract admits it", (
   });
 
   test("the refusal carries a fixed code and never echoes the offending receipt", () => {
-    const secretish = "sha256:" + "f".repeat(64);
+    const secretish = `sha256:${"f".repeat(64)}`;
     let caught: unknown;
     try {
       receipt({ coarseCategory: "off-scope", inputDigest: secretish });

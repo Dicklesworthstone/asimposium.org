@@ -257,6 +257,20 @@ const SCHEMA = [
     promoted_event_id TEXT UNIQUE,
     UNIQUE (problem_id, fellow_id, workshop_seq)
   )`,
+  // Sessions were previously a constant stamped onto every workshop row, which
+  // made the split's first stage decorative: nothing had to be opened before a
+  // push, so the sequence could not be exercised. A real row makes the ordering
+  // causal — a push must name a session that exists for that exact (fellow,
+  // problem) pair. This is the local harness's own table, not W4: it carries no
+  // protocol version, pack budget, handback, or idle-close semantics.
+  `CREATE TABLE IF NOT EXISTS s3_local_sessions (
+    id TEXT PRIMARY KEY,
+    problem_id TEXT NOT NULL,
+    fellow_id TEXT NOT NULL,
+    sponsor_id TEXT NOT NULL,
+    opened_at INTEGER NOT NULL,
+    UNIQUE (problem_id, fellow_id, id)
+  )`,
   `CREATE TABLE IF NOT EXISTS s3_local_workshop_cursors (
     problem_id TEXT NOT NULL,
     fellow_id TEXT NOT NULL,
@@ -1824,6 +1838,122 @@ async function publicBytes(
   return new Response(body, { headers });
 }
 
+interface LocalSessionRow {
+  readonly id: string;
+  readonly problem_id: string;
+  readonly fellow_id: string;
+  readonly sponsor_id: string;
+}
+
+/**
+ * Stage 1 of the split sequence: open a session.
+ *
+ * Server-allocated, like every other identifier in this harness — a caller that
+ * supplies its own `session_id` is refused for the same reason it cannot choose
+ * a workshop or claim id. The response carries both cursors at open time so a
+ * caller can record a genuine "before" without a second read.
+ */
+async function openLocalSession(request: Request, env: LocalSplitEnv): Promise<Response> {
+  throwIfRouteBindingPoisoned(request, env);
+  const body = await requestBody(request);
+  if (body === undefined) return json({ code: "LOCAL_INPUT_INVALID" }, 400);
+  if (body.session_id !== undefined) {
+    return json({ code: "CALLER_OWNED_ID_FORBIDDEN", field: "session_id" }, 400);
+  }
+  const problemId = stringField(body, "problem_id");
+  if (!validId(problemId)) return json({ code: "LOCAL_INPUT_INVALID" }, 400);
+
+  const fellowId = localWorkshopFellowId(request, env);
+  const sponsorId = localWorkshopSponsorId(request, env);
+  const sessionId = `S-${nextMonotonicUlid()}`;
+  await env.DB.prepare(
+    `INSERT INTO s3_local_sessions (id, problem_id, fellow_id, sponsor_id, opened_at)
+     VALUES (?1, ?2, ?3, ?4, ?5)`,
+  )
+    .bind(sessionId, problemId, fellowId, sponsorId, localS4NowSeconds(request, env))
+    .run();
+
+  const cursors = await localSequenceCursors(env, problemId, fellowId);
+  return json(
+    {
+      session_id: sessionId,
+      problem_id: problemId,
+      public_seq: cursors.public_seq,
+      workshop_seq: cursors.workshop_seq,
+    },
+    201,
+  );
+}
+
+/** Both cursors for one (problem, fellow), zero when no row has been allocated yet. */
+async function localSequenceCursors(
+  env: LocalSplitEnv,
+  problemId: string,
+  fellowId: string,
+): Promise<{ readonly public_seq: number; readonly workshop_seq: number }> {
+  const [publicRow, workshopRow] = await Promise.all([
+    env.DB.prepare(`SELECT public_seq FROM s3_local_public_cursors WHERE problem_id = ?1`)
+      .bind(problemId)
+      .first<{ public_seq: number }>(),
+    env.DB.prepare(
+      `SELECT workshop_seq FROM s3_local_workshop_cursors WHERE problem_id = ?1 AND fellow_id = ?2`,
+    )
+      .bind(problemId, fellowId)
+      .first<{ workshop_seq: number }>(),
+  ]);
+  return {
+    public_seq: publicRow === null ? 0 : publicRow.public_seq,
+    workshop_seq: workshopRow === null ? 0 : workshopRow.workshop_seq,
+  };
+}
+
+/**
+ * Stage 2: the authenticated working pack.
+ *
+ * Deliberately a *stand-in*, not W4's pack. It carries no profile grammar,
+ * budget, stable-prefix ordering, `next_actions`, or handback, and it says so in
+ * `omitted`. What it does carry is the property this spike exists to prove: the
+ * session's own Fellow sees its workshop count and both cursors, and nobody else
+ * can tell the session apart from one that never existed.
+ *
+ * Never returns a body, extract, title, or digest — a pack that leaked those
+ * would defeat the very separation the following stages assert.
+ */
+async function localWorkingPack(
+  request: Request,
+  env: LocalSplitEnv,
+  sessionId: string,
+): Promise<Response> {
+  throwIfRouteBindingPoisoned(request, env);
+  const session = await env.DB.prepare(
+    `SELECT id, problem_id, fellow_id, sponsor_id FROM s3_local_sessions WHERE id = ?1`,
+  )
+    .bind(sessionId)
+    .first<LocalSessionRow>();
+  // Absence and wrong-principal are one response: an unauthorized caller must
+  // not learn that this session id is real.
+  if (session === null) return notFound();
+  if (localWorkshopFellowId(request, env) !== session.fellow_id) return notFound();
+
+  const cursors = await localSequenceCursors(env, session.problem_id, session.fellow_id);
+  const owned = await env.DB.prepare(
+    `SELECT COUNT(*) AS n FROM s3_local_workshops WHERE problem_id = ?1 AND fellow_id = ?2`,
+  )
+    .bind(session.problem_id, session.fellow_id)
+    .first<{ n: number }>();
+  return json({
+    session_id: session.id,
+    problem_id: session.problem_id,
+    public_seq: cursors.public_seq,
+    workshop_seq: cursors.workshop_seq,
+    own_workshop_count: owned === null ? 0 : owned.n,
+    omitted: [
+      "workshop bodies, titles, extracts, and digests are never packed",
+      "W4 pack profiles, budgets, next_actions, and handbacks do not exist here",
+    ],
+  });
+}
+
 async function pushWorkshop(request: Request, env: LocalSplitEnv): Promise<Response> {
   throwIfRouteBindingPoisoned(request, env);
   const body = await requestBody(request);
@@ -1841,6 +1971,20 @@ async function pushWorkshop(request: Request, env: LocalSplitEnv): Promise<Respo
   }
   const fellowId = localWorkshopFellowId(request, env);
   const sponsorId = localWorkshopSponsorId(request, env);
+
+  // A push must name a session this Fellow actually opened on this problem.
+  // Matching all three columns is what makes stage 1 causally required: a
+  // fabricated id, another Fellow's session, or a session opened on a different
+  // problem are each refused identically, so the refusal teaches nothing about
+  // which of the three was wrong.
+  const sessionId = stringField(body, "session_id");
+  if (!validId(sessionId)) return json({ code: "LOCAL_SESSION_REQUIRED" }, 400);
+  const session = await env.DB.prepare(
+    `SELECT id FROM s3_local_sessions WHERE id = ?1 AND problem_id = ?2 AND fellow_id = ?3`,
+  )
+    .bind(sessionId, problemId, fellowId)
+    .first<{ id: string }>();
+  if (session === null) return json({ code: "LOCAL_SESSION_REQUIRED" }, 400);
 
   const digest = await sha256Hex(bodyMd);
   const bodyKey = stagedPrivateKey(digest);
@@ -1886,7 +2030,7 @@ async function pushWorkshop(request: Request, env: LocalSplitEnv): Promise<Respo
        FROM s3_local_fellow_workshop_ids AS ids
        JOIN s3_local_workshop_cursors AS cursor ON cursor.fellow_id = ids.fellow_id
        WHERE ids.fellow_id = ?2 AND cursor.problem_id = ?1`,
-    ).bind(problemId, fellowId, sponsorId, LOCAL_SESSION_ID, bodyKey, digest),
+    ).bind(problemId, fellowId, sponsorId, sessionId, bodyKey, digest),
   ];
   if (d1FaultRequested(request, env)) {
     // Deliberately trip D1's real primary-key constraint after R2 PUT. D1's
@@ -1928,13 +2072,20 @@ async function privateArtifact(
   const sponsorId = hasLocalHarnessAuthority(request, env, "x-asimp-local-sponsor")
     ? localWorkshopSponsorId(request, env)
     : ANONYMOUS_PRIVATE_LOOKUP_SPONSOR_ID;
+  // The session predicate used to compare against a constant every row already
+  // carried, so it excluded nothing. Joining the session table makes it a real
+  // check: the sponsor reads this workshop only if the session it was pushed
+  // under is one of *their* sessions.
   const workshop = await env.DB.prepare(
-    `SELECT id, problem_id, fellow_id, sponsor_id, session_id, workshop_seq, body_key, body_digest,
-            promoted_event_id
-     FROM s3_local_workshops
-     WHERE id = ?1 AND sponsor_id = ?2 AND session_id = ?3`,
+    `SELECT workshop.id, workshop.problem_id, workshop.fellow_id, workshop.sponsor_id,
+            workshop.session_id, workshop.workshop_seq, workshop.body_key, workshop.body_digest,
+            workshop.promoted_event_id
+     FROM s3_local_workshops AS workshop
+     JOIN s3_local_sessions AS session
+       ON session.id = workshop.session_id AND session.sponsor_id = workshop.sponsor_id
+     WHERE workshop.id = ?1 AND workshop.sponsor_id = ?2`,
   )
-    .bind(workshopId, sponsorId, LOCAL_SESSION_ID)
+    .bind(workshopId, sponsorId)
     .first<WorkshopRow>();
   throwIfRouteBindingPoisoned(request, env);
   if (workshop === null) return notFound();
@@ -2746,8 +2897,16 @@ async function seedOversizedS4History(
     httpMetadata: { contentType: "text/markdown; charset=utf-8" },
     customMetadata: { body_sha256: artifactDigest, storage_scope: "public-candidate" },
   });
+  // The seeded row needs a session that really exists, so the sponsor-visibility
+  // join above holds for fixture history exactly as it does for a pushed row.
+  const seededSessionId = `S-${LOCAL_SESSION_ID}-${problemId}`;
   try {
     await env.DB.batch([
+      env.DB.prepare(
+        `INSERT INTO s3_local_sessions (id, problem_id, fellow_id, sponsor_id, opened_at)
+         VALUES (?1, ?2, ?3, ?4, 0)
+         ON CONFLICT(id) DO NOTHING`,
+      ).bind(seededSessionId, problemId, LOCAL_FELLOW_ID, LOCAL_SPONSOR_ID),
       env.DB.prepare(
         `INSERT INTO s3_local_workshops
            (id, problem_id, fellow_id, sponsor_id, session_id, workshop_seq, body_key, body_digest,
@@ -2758,7 +2917,7 @@ async function seedOversizedS4History(
         problemId,
         LOCAL_FELLOW_ID,
         LOCAL_SPONSOR_ID,
-        LOCAL_SESSION_ID,
+        seededSessionId,
         objectKey,
         artifactDigest,
         eventId,
@@ -2931,6 +3090,15 @@ export default {
           bindings: ["DB", "ARTIFACTS"],
           readiness_nonce: readinessNonce,
         });
+      }
+      if (request.method === "POST" && url.pathname === "/__s3/sessions") {
+        return await openLocalSession(request, env);
+      }
+      const workingPackMatch = /^\/__s3\/sessions\/([A-Za-z0-9][A-Za-z0-9._-]{0,63})\/pack$/u.exec(
+        url.pathname,
+      );
+      if (request.method === "GET" && workingPackMatch?.[1] !== undefined) {
+        return await localWorkingPack(request, env, workingPackMatch[1]);
       }
       if (request.method === "POST" && url.pathname === "/__s3/workshops") {
         return await pushWorkshop(request, env);

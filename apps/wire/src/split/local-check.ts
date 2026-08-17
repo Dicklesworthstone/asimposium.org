@@ -46,6 +46,15 @@ const mainProblemId = "P-s3-local";
 const privateCanary = `S3-R2-PRIVATE-CANARY-${"private-body".repeat(160)}`;
 const sponsorVisiblePrivateProblemId = "P-s3-sponsor-private";
 const sponsorVisiblePrivateFellowId = "s3-sponsor-visible-fellow";
+/**
+ * The two synthetic principals used to walk the complete S-3 sequence. Both are
+ * harness fixtures; neither names a real Fellow, and both appear in retained
+ * evidence, so they must stay recognisably synthetic.
+ */
+const localSequenceFellowId = "s3-sequence-fellow";
+const localCounterFellowId = "s3-sequence-counter-fellow";
+/** Large enough to cross the private spill threshold, like the other canaries. */
+const sequenceSpillBody = `S3-SEQUENCE-PRIVATE-CANARY-${"sequence-private-body".repeat(128)}`;
 const sponsorVisiblePrivateCanary = `S3-SPONSOR-PRIVATE-CANARY-${"sponsor-private-body".repeat(128)}`;
 const publicStatement = "Every bounded local example has the recorded public property.";
 const publicArtifact = "A deliberately public local artifact for the one promoted claim.";
@@ -96,9 +105,70 @@ function emit(record: Record<string, unknown>): void {
   );
 }
 
-function check(assertion: string, ok: boolean, detail: string): void {
+/**
+ * Bounded, redacted evidence carried alongside an assertion.
+ *
+ * Retained records used to say only *that* something passed. That is not
+ * evidence — it cannot distinguish a real observation from an assertion that
+ * never ran, and it cannot be re-read later to see what was actually seen. Every
+ * field below is an identifier, a route template, an integer, or a fixed code:
+ * shapes that can be published without disclosing what the split exists to keep
+ * private. Bodies, extracts, titles, digests, tokens, cookies, fragments, and
+ * raw query strings have no field here and must never acquire one.
+ */
+interface AssertionEvidence {
+  /** Synthetic principals only — harness fixtures, never a real identity. */
+  readonly principal?: string;
+  readonly counter_principal?: string;
+  readonly problem_id?: string;
+  readonly workshop_id?: string;
+  readonly session_id?: string;
+  /** Route *template*, never the filled path: a filled path can carry an id. */
+  readonly route?: string;
+  readonly public_seq_before?: number;
+  readonly public_seq_after?: number;
+  readonly workshop_seq_before?: number;
+  readonly workshop_seq_after?: number;
+  readonly request_id?: string;
+  readonly event_id?: string;
+  /** The decision or refusal code observed, never a message or body. */
+  readonly code?: string;
+  /** Outcome of a cache/search/export probe, as a fixed word. */
+  readonly cache_search_export?: "absent" | "present" | "not-probed";
+  readonly duration_ms?: number;
+}
+
+/** Bounded so a malformed fixture cannot smuggle a body through an id field. */
+const MAX_EVIDENCE_FIELD_BYTES = 128;
+
+function boundedEvidence(evidence: AssertionEvidence): Record<string, unknown> {
+  const bounded: Record<string, unknown> = {};
+  for (const [key, value] of Object.entries(evidence)) {
+    if (value === undefined) continue;
+    if (typeof value === "number") {
+      if (Number.isSafeInteger(value) && value >= 0) bounded[key] = value;
+      continue;
+    }
+    if (typeof value === "string" && value.length > 0 && value.length <= MAX_EVIDENCE_FIELD_BYTES) {
+      bounded[key] = value;
+    }
+  }
+  return bounded;
+}
+
+function check(
+  assertion: string,
+  ok: boolean,
+  detail: string,
+  evidence: AssertionEvidence = {},
+): void {
   if (!ok) failures += 1;
-  emit({ assertion, status: ok ? "pass" : "fail", detail: ok ? "as expected" : detail });
+  emit({
+    assertion,
+    status: ok ? "pass" : "fail",
+    detail: ok ? "as expected" : detail,
+    ...boundedEvidence(evidence),
+  });
 }
 
 function recordField(body: Record<string, unknown>, key: string): string | undefined {
@@ -187,15 +257,45 @@ function isExactLocalS3BindingFailure(output: Snapshot): boolean {
   );
 }
 
+/** Stage 1 of the sequence. Same principal headers as the push that follows it. */
+async function openSession(
+  problemId: string,
+  extraHeaders: Readonly<Record<string, string>> = {},
+): Promise<JsonResult> {
+  return requestJson("/__s3/sessions", {
+    method: "POST",
+    headers: { "content-type": "application/json", ...extraHeaders },
+    body: JSON.stringify({ problem_id: problemId }),
+  });
+}
+
+/**
+ * A push now requires a session. Callers that do not care which one may omit it
+ * and get a freshly opened session for the same principal, so the ordering is
+ * enforced by the Worker for every existing scenario without each of them
+ * having to restate it. The explicit sequence block below opens its own session
+ * and asserts what happens when that step is skipped or borrowed.
+ */
 async function pushWorkshop(
   problemId: string,
   bodyMd: string,
   extraHeaders: Readonly<Record<string, string>> = {},
+  sessionId?: string,
 ): Promise<JsonResult> {
+  let session = sessionId;
+  if (session === undefined) {
+    const opened = await openSession(problemId, extraHeaders);
+    session = recordField(opened.body, "session_id");
+  }
   return requestJson("/__s3/workshops", {
     method: "POST",
     headers: { "content-type": "application/json", ...extraHeaders },
-    body: JSON.stringify({ body_md: bodyMd, problem_id: problemId, title: "Private local spill" }),
+    body: JSON.stringify({
+      body_md: bodyMd,
+      problem_id: problemId,
+      session_id: session,
+      title: "Private local spill",
+    }),
   });
 }
 
@@ -765,6 +865,12 @@ async function main(): Promise<void> {
   }
 
   const routeBindingProbes: readonly RouteBindingProbe[] = [
+    { id: "sessions.open", method: "POST", path: `${origin}/__s3/sessions`, jsonBody: "{}" },
+    {
+      id: "sessions.working-pack",
+      method: "GET",
+      path: `${origin}/__s3/sessions/${workshopId}/pack`,
+    },
     { id: "workshops.push", method: "POST", path: `${origin}/__s3/workshops`, jsonBody: "{}" },
     { id: "promote", method: "POST", path: `${origin}/__s3/promote`, jsonBody: "{}" },
     { id: "private.artifact", method: "GET", path: `${origin}/__s3/private/${workshopId}` },
@@ -872,8 +978,8 @@ async function main(): Promise<void> {
     routeBindingPoisonSnapshots(nonemptyRouteBindingPoisonHeaders),
   ]);
   check(
-    "all_twelve_async_route_entry_faults_return_one_exact_nonreflective_binding_failure",
-    routeBindingPoisoned.length === 12 &&
+    "all_fourteen_async_route_entry_faults_return_one_exact_nonreflective_binding_failure",
+    routeBindingPoisoned.length === 14 &&
       routeBindingPoisoned.every(isExactLocalS3BindingFailure) &&
       routeBindingPoisoned.every((response) =>
         hasNoPrivateMaterial(response, [...forbiddenMain, poisonedPrivateLocator]),
@@ -884,7 +990,7 @@ async function main(): Promise<void> {
     "readiness_nonce_or_nonempty_route_binding_poison_headers_are_byte_for_byte_inert_on_every_async_route",
     [readinessNonceRouteBindingPoisoned, nonemptyRouteBindingPoisoned].every(
       (responses) =>
-        responses.length === 12 &&
+        responses.length === 14 &&
         responses.every(
           (response, index) =>
             response.response.status === routeBindingBaseline[index]?.response.status &&
@@ -901,6 +1007,8 @@ async function main(): Promise<void> {
    * about which requests were issued and no response can establish it.
    */
   const EXPECTED_ROUTE_BINDING_PROBE_SIGNATURES: readonly string[] = [
+    `sessions.open POST ${origin}/__s3/sessions {}`,
+    `sessions.working-pack GET ${origin}/__s3/sessions/${workshopId}/pack`,
     `workshops.push POST ${origin}/__s3/workshops {}`,
     `promote POST ${origin}/__s3/promote {}`,
     `private.artifact GET ${origin}/__s3/private/${workshopId}`,
@@ -2145,6 +2253,245 @@ async function main(): Promise<void> {
       `plant ${planted.response.status} public ${publicFace.response.status} diagnostics ${diagnostics.response.status} receipt_forged ${String(receiptItselfForged)} reflected ${String(publicReflectsForgery)}`,
     );
   }
+
+  // ---------------------------------------------------------------------
+  // The complete S-3 sequence, walked once end to end with two principals.
+  //
+  // Fable §17.1 states S-3 as "session open → working pack → workshop push →
+  // promote → public delta". The stages after the push were already proven; the
+  // first two were not reachable, because a session was a constant stamped onto
+  // every row and no pack surface existed. Walking the whole sequence in one
+  // block, with the counter-principal probing at each stage, is what makes the
+  // ordering itself an observable property rather than an arrangement of
+  // separately-passing parts.
+  //
+  // NO-CLAIM: this is the local workerd D1/R2 harness. It is not W4, not a
+  // deployed plane, and not OAuth or browser evidence.
+  // ---------------------------------------------------------------------
+  const sequenceProblemId = "P-s3-full-sequence";
+  const sponsorFellowHeaders: Readonly<Record<string, string>> = {
+    [localS4FellowAuthorityHeader]: localAuthorityToken,
+    [localS4FellowIdHeader]: localSequenceFellowId,
+  };
+  const counterFellowHeaders: Readonly<Record<string, string>> = {
+    [localS4FellowAuthorityHeader]: localAuthorityToken,
+    [localS4FellowIdHeader]: localCounterFellowId,
+  };
+  const sequenceStarted = Date.now();
+  const sequenceCursorsBefore = await requestJson(`/__s3/public/${sequenceProblemId}`, {});
+  const openedSession = await openSession(sequenceProblemId, sponsorFellowHeaders);
+  const sequenceSessionId = recordField(openedSession.body, "session_id");
+  const openedPublicSeq = numberField(openedSession.body, "public_seq");
+  const openedWorkshopSeq = numberField(openedSession.body, "workshop_seq");
+  check(
+    "S3_sequence_1_session_open_allocates_a_server_owned_id_and_reports_both_cursors",
+    openedSession.response.status === 201 &&
+      sequenceSessionId !== undefined &&
+      sequenceSessionId.startsWith("S-") &&
+      openedPublicSeq === 0 &&
+      openedWorkshopSeq === 0 &&
+      sequenceCursorsBefore.response.status === 404,
+    `open ${openedSession.response.status}`,
+    {
+      principal: localSequenceFellowId,
+      problem_id: sequenceProblemId,
+      session_id: sequenceSessionId,
+      route: "POST /__s3/sessions",
+      public_seq_after: openedPublicSeq,
+      workshop_seq_after: openedWorkshopSeq,
+      code: "OPENED",
+      cache_search_export: "not-probed",
+      duration_ms: Date.now() - sequenceStarted,
+    },
+  );
+
+  const callerChosenSession = await requestJson("/__s3/sessions", {
+    method: "POST",
+    headers: { "content-type": "application/json", ...sponsorFellowHeaders },
+    body: JSON.stringify({ problem_id: sequenceProblemId, session_id: "S-caller-chosen" }),
+  });
+  check(
+    "S3_sequence_1b_caller_cannot_choose_a_session_identifier",
+    callerChosenSession.response.status === 400 &&
+      recordField(callerChosenSession.body, "code") === "CALLER_OWNED_ID_FORBIDDEN",
+    `status ${callerChosenSession.response.status}`,
+    {
+      principal: localSequenceFellowId,
+      problem_id: sequenceProblemId,
+      route: "POST /__s3/sessions",
+      code: recordField(callerChosenSession.body, "code") ?? "none",
+      cache_search_export: "not-probed",
+    },
+  );
+
+  const packStarted = Date.now();
+  const ownPack = await requestJson(`/__s3/sessions/${sequenceSessionId ?? "missing"}/pack`, {
+    headers: sponsorFellowHeaders,
+  });
+  const strangerPack = await requestJson(`/__s3/sessions/${sequenceSessionId ?? "missing"}/pack`, {
+    headers: counterFellowHeaders,
+  });
+  const anonymousPack = await requestJson(
+    `/__s3/sessions/${sequenceSessionId ?? "missing"}/pack`,
+    {},
+  );
+  check(
+    "S3_sequence_2_working_pack_is_authenticated_and_carries_no_private_material",
+    ownPack.response.status === 200 &&
+      numberField(ownPack.body, "own_workshop_count") === 0 &&
+      Array.isArray(ownPack.body.omitted) &&
+      hasNoPrivateMaterial(
+        { response: ownPack.response, body: JSON.stringify(ownPack.body), headers: "" },
+        forbiddenMain,
+      ) &&
+      // A stranger and an anonymous caller receive the same NOT_FOUND: the pack
+      // must not confirm that this session id exists.
+      strangerPack.response.status === 404 &&
+      anonymousPack.response.status === 404 &&
+      JSON.stringify(strangerPack.body) === JSON.stringify(anonymousPack.body),
+    `own ${ownPack.response.status} stranger ${strangerPack.response.status} anon ${anonymousPack.response.status}`,
+    {
+      principal: localSequenceFellowId,
+      counter_principal: localCounterFellowId,
+      problem_id: sequenceProblemId,
+      session_id: sequenceSessionId,
+      route: "GET /__s3/sessions/:id/pack",
+      public_seq_before: numberField(ownPack.body, "public_seq"),
+      workshop_seq_before: numberField(ownPack.body, "workshop_seq"),
+      code: "PACKED",
+      cache_search_export: "absent",
+      duration_ms: Date.now() - packStarted,
+    },
+  );
+
+  const unopenedPush = await requestJson("/__s3/workshops", {
+    method: "POST",
+    headers: { "content-type": "application/json", ...sponsorFellowHeaders },
+    body: JSON.stringify({
+      body_md: sequenceSpillBody,
+      problem_id: sequenceProblemId,
+      session_id: "S-never-opened",
+      title: "Private local spill",
+    }),
+  });
+  const borrowedPush = await requestJson("/__s3/workshops", {
+    method: "POST",
+    headers: { "content-type": "application/json", ...counterFellowHeaders },
+    body: JSON.stringify({
+      body_md: sequenceSpillBody,
+      problem_id: sequenceProblemId,
+      session_id: sequenceSessionId,
+      title: "Private local spill",
+    }),
+  });
+  check(
+    "S3_sequence_3a_a_push_requires_a_session_this_fellow_opened_on_this_problem",
+    unopenedPush.response.status === 400 &&
+      recordField(unopenedPush.body, "code") === "LOCAL_SESSION_REQUIRED" &&
+      // Borrowing another Fellow's real session is refused identically, so the
+      // refusal cannot be used to discover whether a session id exists.
+      borrowedPush.response.status === 400 &&
+      recordField(borrowedPush.body, "code") === "LOCAL_SESSION_REQUIRED" &&
+      JSON.stringify(unopenedPush.body) === JSON.stringify(borrowedPush.body),
+    `unopened ${unopenedPush.response.status} borrowed ${borrowedPush.response.status}`,
+    {
+      principal: localSequenceFellowId,
+      counter_principal: localCounterFellowId,
+      problem_id: sequenceProblemId,
+      session_id: sequenceSessionId,
+      route: "POST /__s3/workshops",
+      code: recordField(unopenedPush.body, "code") ?? "none",
+      cache_search_export: "not-probed",
+    },
+  );
+
+  const pushStarted = Date.now();
+  const sequencePush = await pushWorkshop(
+    sequenceProblemId,
+    sequenceSpillBody,
+    sponsorFellowHeaders,
+    sequenceSessionId,
+  );
+  const sequenceWorkshopId = recordField(sequencePush.body, "workshop_id");
+  const packAfterPush = await requestJson(`/__s3/sessions/${sequenceSessionId ?? "missing"}/pack`, {
+    headers: sponsorFellowHeaders,
+  });
+  const anonymousDuringWorkshop = await snapshot(
+    await localFetch(`${origin}/__s3/public/${sequenceProblemId}`),
+  );
+  check(
+    "S3_sequence_3b_workshop_push_moves_only_the_workshop_cursor_and_stays_invisible_publicly",
+    sequencePush.response.status === 201 &&
+      sequenceWorkshopId !== undefined &&
+      numberField(sequencePush.body, "workshop_seq") === 1 &&
+      numberField(packAfterPush.body, "own_workshop_count") === 1 &&
+      numberField(packAfterPush.body, "workshop_seq") === 1 &&
+      // The public cursor has not moved: a workshop push is not a publication.
+      numberField(packAfterPush.body, "public_seq") === 0 &&
+      anonymousDuringWorkshop.response.status === 404,
+    `push ${sequencePush.response.status} anon ${anonymousDuringWorkshop.response.status}`,
+    {
+      principal: localSequenceFellowId,
+      problem_id: sequenceProblemId,
+      session_id: sequenceSessionId,
+      workshop_id: sequenceWorkshopId,
+      route: "POST /__s3/workshops",
+      public_seq_before: 0,
+      public_seq_after: numberField(packAfterPush.body, "public_seq"),
+      workshop_seq_before: 0,
+      workshop_seq_after: numberField(packAfterPush.body, "workshop_seq"),
+      code: "PUSHED",
+      cache_search_export: "absent",
+      duration_ms: Date.now() - pushStarted,
+    },
+  );
+
+  const promoteStarted = Date.now();
+  const sequencePromotion = await requestJson(
+    "/__s3/promote",
+    promotionRequest(
+      sequenceWorkshopId ?? "missing",
+      "The complete local S3 sequence promotes exactly one public event.",
+      "Public artifact for the complete local S3 sequence.",
+      {},
+      sponsorFellowHeaders,
+    ),
+  );
+  const sequenceEventId = recordField(sequencePromotion.body, "event_id");
+  const packAfterPromotion = await requestJson(
+    `/__s3/sessions/${sequenceSessionId ?? "missing"}/pack`,
+    { headers: sponsorFellowHeaders },
+  );
+  const publicAfterPromotion = await snapshot(
+    await localFetch(`${origin}/__s3/public/${sequenceProblemId}`),
+  );
+  check(
+    "S3_sequence_4_promotion_moves_the_public_cursor_exactly_once_and_the_public_delta_appears",
+    sequencePromotion.response.status === 201 &&
+      sequenceEventId !== undefined &&
+      numberField(packAfterPromotion.body, "public_seq") === 1 &&
+      // The workshop cursor is untouched by promotion: the two sequences are
+      // allocated separately, which is the mechanical invariant of the split.
+      numberField(packAfterPromotion.body, "workshop_seq") === 1 &&
+      publicAfterPromotion.response.status === 200 &&
+      hasNoPrivateMaterial(publicAfterPromotion, forbiddenMain),
+    `promote ${sequencePromotion.response.status} public ${publicAfterPromotion.response.status}`,
+    {
+      principal: localSequenceFellowId,
+      problem_id: sequenceProblemId,
+      session_id: sequenceSessionId,
+      workshop_id: sequenceWorkshopId,
+      event_id: sequenceEventId,
+      route: "POST /__s3/promote",
+      public_seq_before: 0,
+      public_seq_after: numberField(packAfterPromotion.body, "public_seq"),
+      workshop_seq_before: 1,
+      workshop_seq_after: numberField(packAfterPromotion.body, "workshop_seq"),
+      code: "PROMOTED",
+      cache_search_export: "present",
+      duration_ms: Date.now() - promoteStarted,
+    },
+  );
 
   emit({
     assertion: "local_binding_summary",

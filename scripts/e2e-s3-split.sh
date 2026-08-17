@@ -1029,14 +1029,63 @@ emit_checked_checker_jsonl() {
         process.exit(1);
       }
       seen.add(record.assertion);
-      process.stdout.write(
-        JSON.stringify({
-          suite: record.suite,
-          reproduce: record.reproduce,
-          assertion: record.assertion,
-          status: record.status,
-        }) + "\n",
-      );
+      // Evidence fields are re-published only after being validated here. The
+      // allowlist is exhaustive and the shapes are narrow — identifiers, route
+      // templates, non-negative integers, and one fixed word — so a body,
+      // token, cookie, fragment, extract, or raw query cannot pass through a
+      // field that is only supposed to carry an id. A record that carries an
+      // unknown key, or a known key with the wrong shape, fails the run rather
+      // than being quietly dropped: silently stripping evidence is how the
+      // retained log stopped being evidence in the first place.
+      const STRING_EVIDENCE = [
+        "principal",
+        "counter_principal",
+        "problem_id",
+        "workshop_id",
+        "session_id",
+        "route",
+        "request_id",
+        "event_id",
+        "code",
+      ];
+      const INTEGER_EVIDENCE = [
+        "public_seq_before",
+        "public_seq_after",
+        "workshop_seq_before",
+        "workshop_seq_after",
+        "duration_ms",
+      ];
+      const SAFE_EVIDENCE_STRING = /^[A-Za-z0-9][A-Za-z0-9._:/ -]{0,127}$/u;
+      const published = {
+        suite: record.suite,
+        reproduce: record.reproduce,
+        assertion: record.assertion,
+        status: record.status,
+      };
+      for (const [key, value] of Object.entries(record)) {
+        // `detail` and `scope` are prose. They were never republished and still
+        // are not: only shaped evidence crosses this boundary.
+        if (["suite", "reproduce", "assertion", "status", "detail", "scope"].includes(key)) {
+          continue;
+        }
+        if (STRING_EVIDENCE.includes(key)) {
+          if (typeof value !== "string" || !SAFE_EVIDENCE_STRING.test(value)) process.exit(1);
+          published[key] = value;
+          continue;
+        }
+        if (INTEGER_EVIDENCE.includes(key)) {
+          if (!Number.isSafeInteger(value) || value < 0) process.exit(1);
+          published[key] = value;
+          continue;
+        }
+        if (key === "cache_search_export") {
+          if (!["absent", "present", "not-probed"].includes(value)) process.exit(1);
+          published[key] = value;
+          continue;
+        }
+        process.exit(1);
+      }
+      process.stdout.write(JSON.stringify(published) + "\n");
     }
   '
 }

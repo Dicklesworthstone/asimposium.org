@@ -1,17 +1,21 @@
 import { expect, test } from "bun:test";
 import { spawnSync } from "node:child_process";
+import { createHash } from "node:crypto";
 import {
   chmodSync,
   closeSync,
   constants,
   fchmodSync,
   fstatSync,
+  fsyncSync,
   lstatSync,
   mkdtempSync,
   openSync,
   readFileSync,
   readSync,
   realpathSync,
+  symlinkSync,
+  unlinkSync,
   writeSync,
 } from "node:fs";
 import { tmpdir } from "node:os";
@@ -36,6 +40,12 @@ const root = resolve(import.meta.dir, "../../../..");
  */
 const EXPECTED_LOCAL_BINDING_ASSERTIONS: string[] = [
   "R2_put_then_D1_failure_leaves_an_unreachable_orphan_and_retry_binds_without_a_cursor_burn",
+  "S3_sequence_1_session_open_allocates_a_server_owned_id_and_reports_both_cursors",
+  "S3_sequence_1b_caller_cannot_choose_a_session_identifier",
+  "S3_sequence_2_working_pack_is_authenticated_and_carries_no_private_material",
+  "S3_sequence_3a_a_push_requires_a_session_this_fellow_opened_on_this_problem",
+  "S3_sequence_3b_workshop_push_moves_only_the_workshop_cursor_and_stays_invisible_publicly",
+  "S3_sequence_4_promotion_moves_the_public_cursor_exactly_once_and_the_public_delta_appears",
   "S4_allow_with_warning_publishes_a_safe_category_action_notice_without_provider_detail",
   "S4_authorized_benign_outage_fixture_degrades_to_a_public_warning_notice_not_a_silent_pass",
   "S4_concurrent_same_key_publishing_replays_the_exact_201_and_commits_one_event_action_and_receipt",
@@ -58,7 +68,7 @@ const EXPECTED_LOCAL_BINDING_ASSERTIONS: string[] = [
   "S4_replay_map_expires_after_24_hours_without_erasing_immutable_decision_history",
   "S4_statement_history_field_reaches_contextual_provider_without_public_effect",
   "S4_title_history_field_reaches_contextual_provider_without_public_effect",
-  "all_twelve_async_route_entry_faults_return_one_exact_nonreflective_binding_failure",
+  "all_fourteen_async_route_entry_faults_return_one_exact_nonreflective_binding_failure",
   "anonymous_or_stale_private_authority_is_not_found_without_a_private_cache_entry",
   "async_route_poison_roster_is_the_exact_ordered_unique_descriptor_signature_list",
   "authenticated_cross_sponsor_private_authority_is_indistinguishable_from_anonymous",
@@ -119,6 +129,7 @@ const S3_FRESH_RUNTIME_FIXED_GRACE_MS = 5_000;
 const S3_FRESH_RUNTIME_RESULT_MAX_BYTES = 3 * S3_OWNED_OUTPUT_BYTES;
 const S3_FRESH_RUNTIME_DIAGNOSTIC_MAX_BYTES = 1_024;
 const S3_FRESH_RUNTIME_BOOTSTRAP_MAX_BYTES = 64 * 1024;
+const S3_FRESH_RUNTIME_BOOTSTRAP_NAME = "bootstrap.json";
 const S3_FRESH_RUNTIME_BOOTSTRAP_EXIT_CODE = 97;
 const S3_FRESH_RUNTIME_RETAINED_COLLISION_EXIT_CODE = 92;
 const S3_FRESH_RUNTIME_BOOTSTRAP_READY = Buffer.from("S3_FRESH_RUNTIME_BOOTSTRAP_READY\n", "utf8");
@@ -161,7 +172,9 @@ interface S3OwnedCommandOptions {
     | "partial"
     | "overrun"
     | "eof"
-    | "flush-stall";
+    | "tamper"
+    | "symlink"
+    | "path-swap";
 }
 
 function s3OwnedEnvironment(): Record<string, string> {
@@ -177,6 +190,10 @@ interface FreshRuntimeInvocation {
   readonly directoryFd: number;
   readonly directoryIdentity: ExactInodeIdentity;
   directoryFdClosed: boolean;
+  readonly bootstrapPath: string;
+  readonly bootstrapFd: number;
+  readonly bootstrapIdentity: ExactFileIdentity;
+  bootstrapFdClosed: boolean;
   readonly resultPath: string;
   readonly resultFd: number;
   readonly resultIdentity: ExactInodeIdentity;
@@ -226,6 +243,10 @@ interface ExactInodeIdentity {
   readonly ino: string;
   readonly mode: string;
   readonly nlink: string;
+}
+
+interface ExactFileIdentity extends ExactInodeIdentity {
+  readonly size: string;
 }
 
 interface FreshRuntimeBootstrap {
@@ -296,6 +317,13 @@ function exactInodeIdentity(stat: ExactBigIntStat): ExactInodeIdentity {
   };
 }
 
+function exactFileIdentity(stat: ExactBigIntStat): ExactFileIdentity {
+  return {
+    ...exactInodeIdentity(stat),
+    size: stat.size.toString(10),
+  };
+}
+
 function isCanonicalDecimal(value: string): boolean {
   return /^(?:0|[1-9][0-9]*)$/u.test(value);
 }
@@ -315,6 +343,10 @@ function sameExactIdentity(stat: ExactBigIntStat, identity: ExactInodeIdentity):
     stat.mode.toString(10) === identity.mode &&
     stat.nlink.toString(10) === identity.nlink
   );
+}
+
+function sameExactFileIdentity(stat: ExactBigIntStat, identity: ExactFileIdentity): boolean {
+  return sameExactIdentity(stat, identity) && stat.size.toString(10) === identity.size;
 }
 
 function sameIdentityExceptNlink(
@@ -359,6 +391,9 @@ function makeFreshRuntimeDirectory(): {
   readonly directory: string;
   readonly directoryFd: number;
   readonly directoryIdentity: ExactInodeIdentity;
+  readonly bootstrapPath: string;
+  readonly bootstrapFd: number;
+  readonly bootstrapCreationIdentity: ExactInodeIdentity;
   readonly resultPath: string;
   readonly resultFd: number;
   readonly resultIdentity: ExactInodeIdentity;
@@ -375,42 +410,74 @@ function makeFreshRuntimeDirectory(): {
     }
     const directoryIdentity = exactInodeIdentity(directoryStat);
     assertCanonicalIdentity(directoryIdentity, "S3_FRESH_RUNTIME_DIRECTORY");
-    const resultPath = join(directory, "result.json");
-    let resultFd: number | undefined;
-    let resultOwned = false;
+    const bootstrapPath = join(directory, S3_FRESH_RUNTIME_BOOTSTRAP_NAME);
+    let bootstrapFd: number | undefined;
+    let bootstrapOwned = false;
     try {
-      resultFd = openSync(
-        resultPath,
+      bootstrapFd = openSync(
+        bootstrapPath,
         constants.O_RDWR | constants.O_CREAT | constants.O_EXCL | constants.O_NOFOLLOW,
         0o600,
       );
-      resultOwned = true;
-      fchmodSync(resultFd, 0o600);
-      const result = fstatSync(resultFd, { bigint: true }) as ExactBigIntStat;
+      bootstrapOwned = true;
+      fchmodSync(bootstrapFd, 0o600);
+      const bootstrap = fstatSync(bootstrapFd, { bigint: true }) as ExactBigIntStat;
       if (
-        !result.isFile() ||
-        (result.mode & 0o777n) !== 0o600n ||
-        result.size !== 0n ||
-        result.nlink !== 1n
+        !bootstrap.isFile() ||
+        (bootstrap.mode & 0o777n) !== 0o600n ||
+        bootstrap.size !== 0n ||
+        bootstrap.nlink !== 1n
       ) {
-        throw new Error("S3_FRESH_RUNTIME_RESULT_CREATE_UNPROVEN");
+        throw new Error("S3_FRESH_RUNTIME_BOOTSTRAP_CREATE_UNPROVEN");
       }
-      const resultIdentity = exactInodeIdentity(result);
-      assertCanonicalIdentity(resultIdentity, "S3_FRESH_RUNTIME_RESULT");
-      const created = {
-        directory,
-        directoryFd,
-        directoryIdentity,
-        resultPath,
-        resultFd,
-        resultIdentity,
-      };
-      resultOwned = false;
-      directoryOwned = false;
-      return created;
+      const bootstrapCreationIdentity = exactInodeIdentity(bootstrap);
+      assertCanonicalIdentity(bootstrapCreationIdentity, "S3_FRESH_RUNTIME_BOOTSTRAP");
+
+      const resultPath = join(directory, "result.json");
+      let resultFd: number | undefined;
+      let resultOwned = false;
+      try {
+        resultFd = openSync(
+          resultPath,
+          constants.O_RDWR | constants.O_CREAT | constants.O_EXCL | constants.O_NOFOLLOW,
+          0o600,
+        );
+        resultOwned = true;
+        fchmodSync(resultFd, 0o600);
+        const result = fstatSync(resultFd, { bigint: true }) as ExactBigIntStat;
+        if (
+          !result.isFile() ||
+          (result.mode & 0o777n) !== 0o600n ||
+          result.size !== 0n ||
+          result.nlink !== 1n
+        ) {
+          throw new Error("S3_FRESH_RUNTIME_RESULT_CREATE_UNPROVEN");
+        }
+        const resultIdentity = exactInodeIdentity(result);
+        assertCanonicalIdentity(resultIdentity, "S3_FRESH_RUNTIME_RESULT");
+        const created = {
+          directory,
+          directoryFd,
+          directoryIdentity,
+          bootstrapPath,
+          bootstrapFd,
+          bootstrapCreationIdentity,
+          resultPath,
+          resultFd,
+          resultIdentity,
+        };
+        resultOwned = false;
+        bootstrapOwned = false;
+        directoryOwned = false;
+        return created;
+      } finally {
+        if (resultOwned && resultFd !== undefined) {
+          closeSync(resultFd);
+        }
+      }
     } finally {
-      if (resultOwned && resultFd !== undefined) {
-        closeSync(resultFd);
+      if (bootstrapOwned && bootstrapFd !== undefined) {
+        closeSync(bootstrapFd);
       }
     }
   } finally {
@@ -420,7 +487,110 @@ function makeFreshRuntimeDirectory(): {
   }
 }
 
+function writeAllAt(fd: number, bytes: Buffer, label: string): void {
+  let offset = 0;
+  while (offset < bytes.byteLength) {
+    const written = writeSync(fd, bytes, offset, bytes.byteLength - offset, offset);
+    if (written <= 0) throw new Error(`${label}_PARTIAL_WRITE:${offset}`);
+    offset += written;
+  }
+}
+
+function pinFreshRuntimeBootstrap(
+  bootstrapFd: number,
+  creationIdentity: ExactInodeIdentity,
+  bytes: Buffer,
+): ExactFileIdentity {
+  writeAllAt(bootstrapFd, bytes, "S3_FRESH_RUNTIME_BOOTSTRAP");
+  fsyncSync(bootstrapFd);
+  const pinned = fstatSync(bootstrapFd, { bigint: true }) as ExactBigIntStat;
+  if (
+    !pinned.isFile() ||
+    !sameExactIdentity(pinned, creationIdentity) ||
+    (pinned.mode & 0o777n) !== 0o600n ||
+    pinned.nlink !== 1n ||
+    pinned.size !== BigInt(bytes.byteLength)
+  ) {
+    throw new Error("S3_FRESH_RUNTIME_BOOTSTRAP_PIN_UNPROVEN");
+  }
+  const identity = exactFileIdentity(pinned);
+  assertCanonicalIdentity(identity, "S3_FRESH_RUNTIME_BOOTSTRAP");
+  return identity;
+}
+
+function freshRuntimeBootstrapDigest(bytes: Buffer): string {
+  return createHash("sha256").update(bytes).digest("hex");
+}
+
+function applyFreshRuntimeBootstrapPlant(
+  path: string,
+  fd: number,
+  identity: ExactFileIdentity,
+  canonicalBytes: Buffer,
+  plant: S3OwnedCommandOptions["bootstrapPlant"],
+): void {
+  if (plant === "tamper") {
+    const noncePrefix = Buffer.from('"nonce":"', "utf8");
+    const nonceOffset = canonicalBytes.indexOf(noncePrefix) + noncePrefix.byteLength;
+    if (nonceOffset < noncePrefix.byteLength || nonceOffset >= canonicalBytes.byteLength) {
+      throw new Error("S3_FRESH_RUNTIME_BOOTSTRAP_TAMPER_SETUP_UNPROVEN");
+    }
+    const replacement = Buffer.from([canonicalBytes[nonceOffset] === 0x61 ? 0x62 : 0x61]);
+    if (writeSync(fd, replacement, 0, replacement.byteLength, nonceOffset) !== 1) {
+      throw new Error("S3_FRESH_RUNTIME_BOOTSTRAP_TAMPER_WRITE_UNPROVEN");
+    }
+    fsyncSync(fd);
+    const tampered = fstatSync(fd, { bigint: true }) as ExactBigIntStat;
+    if (!sameExactFileIdentity(tampered, identity)) {
+      throw new Error("S3_FRESH_RUNTIME_BOOTSTRAP_TAMPER_IDENTITY_CHANGED");
+    }
+    return;
+  }
+  if (plant !== "symlink" && plant !== "path-swap") return;
+
+  unlinkSync(path);
+  if (plant === "symlink") {
+    symlinkSync("result.json", path);
+  } else {
+    const replacementFd = openSync(
+      path,
+      constants.O_RDWR | constants.O_CREAT | constants.O_EXCL | constants.O_NOFOLLOW,
+      0o600,
+    );
+    try {
+      fchmodSync(replacementFd, 0o600);
+      writeAllAt(replacementFd, canonicalBytes, "S3_FRESH_RUNTIME_BOOTSTRAP_PATH_SWAP");
+      fsyncSync(replacementFd);
+    } finally {
+      closeSync(replacementFd);
+    }
+  }
+  const original = fstatSync(fd, { bigint: true }) as ExactBigIntStat;
+  if (
+    !sameIdentityExceptNlink(original, identity, 0n) ||
+    original.size.toString(10) !== identity.size
+  ) {
+    throw new Error("S3_FRESH_RUNTIME_BOOTSTRAP_PATH_SWAP_SETUP_UNPROVEN");
+  }
+}
+
+function freshRuntimeDispatcherEnvironment(
+  identity: ExactFileIdentity,
+  digest: string,
+): Record<string, string> {
+  return {
+    ...s3OwnedEnvironment(),
+    S3_FRESH_RUNTIME_BOOTSTRAP_DEV: identity.dev,
+    S3_FRESH_RUNTIME_BOOTSTRAP_INO: identity.ino,
+    S3_FRESH_RUNTIME_BOOTSTRAP_MODE: identity.mode,
+    S3_FRESH_RUNTIME_BOOTSTRAP_NLINK: identity.nlink,
+    S3_FRESH_RUNTIME_BOOTSTRAP_SIZE: identity.size,
+    S3_FRESH_RUNTIME_BOOTSTRAP_SHA256: digest,
+  };
+}
+
 const FRESH_OWNED_COMMAND_DISPATCHER = String.raw`
+import { createHash } from "node:crypto";
 import {
   closeSync,
   constants,
@@ -429,6 +599,7 @@ import {
   fsyncSync,
   lstatSync,
   openSync,
+  readSync,
   unlinkSync,
   writeSync,
 } from "node:fs";
@@ -438,9 +609,13 @@ const BOOTSTRAP_MAX_BYTES = 65536;
 const RESULT_MAX_BYTES = ${S3_FRESH_RUNTIME_RESULT_MAX_BYTES};
 const BOOTSTRAP_EXIT_CODE = ${S3_FRESH_RUNTIME_BOOTSTRAP_EXIT_CODE};
 const RETAINED_COLLISION_EXIT_CODE = 92;
+const BOOTSTRAP_NAME = "${S3_FRESH_RUNTIME_BOOTSTRAP_NAME}";
 const RESULT_NAME = "result.json";
+const RUNNER_URL = ${JSON.stringify(S3_OWNED_COMMAND_RUNNER_URL)};
 const STARTUP_READY = Buffer.from("S3_FRESH_RUNTIME_BOOTSTRAP_READY\n", "utf8");
 const decimal = /^(?:0|[1-9][0-9]*)$/u;
+const sha256 = /^[0-9a-f]{64}$/u;
+let bootstrapFd;
 let resultFd;
 let retainedFd;
 const closeQuietly = (fd) => {
@@ -450,6 +625,7 @@ const closeQuietly = (fd) => {
 const failClosed = (code = 1) => {
   closeQuietly(retainedFd);
   closeQuietly(resultFd);
+  closeQuietly(bootstrapFd);
   process.exit(code);
 };
 const writeAllAt = (fd, bytes) => {
@@ -500,46 +676,155 @@ const verifiesNamedDirectory = (directoryPath, identity) => {
     closeQuietly(directoryFd);
   }
 };
-const readBootstrap = async () => {
-  const chunks = [];
-  let size = 0;
-  for await (const chunk of process.stdin) {
-    const bytes = Buffer.from(chunk);
-    size += bytes.byteLength;
-    if (size > BOOTSTRAP_MAX_BYTES) throw new Error("bootstrap overrun");
-    chunks.push(bytes);
-  }
-  if (size === 0) throw new Error("bootstrap eof");
-  const bytes = Buffer.concat(chunks, size);
-  if (bytes.at(-1) !== 0x0a || bytes.subarray(0, -1).includes(0x0a) || bytes.includes(0x0d)) {
-    throw new Error("bootstrap record framing");
-  }
-  const text = new TextDecoder("utf-8", { fatal: true }).decode(bytes);
-  const value = JSON.parse(text);
-  const canonical = Buffer.from(JSON.stringify(value) + "\n", "utf8");
-  if (!canonical.equals(bytes)) throw new Error("bootstrap noncanonical");
-  return value;
-};
-try {
-  const bootstrap = await readBootstrap();
-  const identity = bootstrap?.result;
-  const directory = bootstrap?.directory;
-  const directoryPath = bootstrap?.directoryPath;
+const isRecord = (value) => value !== null && typeof value === "object" && !Array.isArray(value);
+const hasExactKeys = (value, keys) =>
+  isRecord(value) &&
+  Object.keys(value).sort().join("\u0000") === [...keys].sort().join("\u0000");
+const isIdentity = (value) =>
+  hasExactKeys(value, ["dev", "ino", "mode", "nlink"]) &&
+  ["dev", "ino", "mode", "nlink"].every((field) => decimal.test(value[field]));
+const isStringRecord = (value) =>
+  isRecord(value) &&
+  Object.entries(value).every(
+    ([key, entry]) =>
+      key.length > 0 && !key.includes("\u0000") && !key.includes("=") && typeof entry === "string",
+  );
+const isSafeIntegerAtLeast = (value, floor) =>
+  Number.isSafeInteger(value) && value >= floor;
+const isBootstrap = (value) => {
   if (
-    typeof bootstrap?.nonce !== "string" ||
-    typeof bootstrap?.runnerUrl !== "string" ||
-    bootstrap?.options === null ||
-    typeof bootstrap?.options !== "object" ||
-    identity === null ||
-    typeof identity !== "object" ||
-    directory === null ||
-    typeof directory !== "object" ||
-    typeof directoryPath !== "string" ||
-    !["dev", "ino", "mode", "nlink"].every((field) => decimal.test(identity[field])) ||
-    !["dev", "ino", "mode", "nlink"].every((field) => decimal.test(directory[field]))
+    !hasExactKeys(value, ["nonce", "result", "directory", "directoryPath", "runnerUrl", "options"]) ||
+    typeof value.nonce !== "string" ||
+    !/^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/u.test(value.nonce) ||
+    value.runnerUrl !== RUNNER_URL ||
+    typeof value.directoryPath !== "string" ||
+    !isAbsolute(value.directoryPath) ||
+    !isIdentity(value.result) ||
+    !isIdentity(value.directory) ||
+    !hasExactKeys(value.options, [
+      "command",
+      "cwd",
+      "env",
+      "timeoutMs",
+      "termGraceMs",
+      "killReapMs",
+      "pipeDrainMs",
+      "retainedStreamBytes",
+      "retainedOutputBytes",
+    ])
+  ) {
+    return false;
+  }
+  const options = value.options;
+  return (
+    Array.isArray(options.command) &&
+    options.command.length > 0 &&
+    options.command.every((part) => typeof part === "string" && !part.includes("\u0000")) &&
+    typeof options.cwd === "string" &&
+    isAbsolute(options.cwd) &&
+    isStringRecord(options.env) &&
+    isSafeIntegerAtLeast(options.timeoutMs, 1) &&
+    isSafeIntegerAtLeast(options.termGraceMs, 0) &&
+    isSafeIntegerAtLeast(options.killReapMs, 0) &&
+    isSafeIntegerAtLeast(options.pipeDrainMs, 0) &&
+    isSafeIntegerAtLeast(options.retainedStreamBytes, 0) &&
+    isSafeIntegerAtLeast(options.retainedOutputBytes, 0)
+  );
+};
+const expectedBootstrapIdentity = () => {
+  const identity = {
+    dev: process.env.S3_FRESH_RUNTIME_BOOTSTRAP_DEV,
+    ino: process.env.S3_FRESH_RUNTIME_BOOTSTRAP_INO,
+    mode: process.env.S3_FRESH_RUNTIME_BOOTSTRAP_MODE,
+    nlink: process.env.S3_FRESH_RUNTIME_BOOTSTRAP_NLINK,
+    size: process.env.S3_FRESH_RUNTIME_BOOTSTRAP_SIZE,
+  };
+  const digest = process.env.S3_FRESH_RUNTIME_BOOTSTRAP_SHA256;
+  if (
+    !["dev", "ino", "mode", "nlink", "size"].every((field) => decimal.test(identity[field])) ||
+    !sha256.test(digest ?? "")
   ) {
     failClosed(BOOTSTRAP_EXIT_CODE);
   }
+  return { identity, digest };
+};
+const readBootstrap = () => {
+  const expected = expectedBootstrapIdentity();
+  try {
+    bootstrapFd = openSync(BOOTSTRAP_NAME, constants.O_RDONLY | constants.O_NOFOLLOW);
+  } catch {
+    failClosed(BOOTSTRAP_EXIT_CODE);
+  }
+  const opened = fstatSync(bootstrapFd, { bigint: true });
+  if (
+    !opened.isFile() ||
+    opened.dev.toString(10) !== expected.identity.dev ||
+    opened.ino.toString(10) !== expected.identity.ino ||
+    opened.mode.toString(10) !== expected.identity.mode ||
+    opened.nlink.toString(10) !== expected.identity.nlink ||
+    opened.size.toString(10) !== expected.identity.size ||
+    (opened.mode & 0o777n) !== 0o600n ||
+    opened.nlink !== 1n ||
+    opened.size <= 0n ||
+    opened.size > BigInt(BOOTSTRAP_MAX_BYTES)
+  ) {
+    failClosed(BOOTSTRAP_EXIT_CODE);
+  }
+  const size = Number(opened.size);
+  const bytes = Buffer.alloc(size);
+  let offset = 0;
+  while (offset < size) {
+    const read = readSync(bootstrapFd, bytes, offset, size - offset, offset);
+    if (read <= 0) failClosed(BOOTSTRAP_EXIT_CODE);
+    offset += read;
+  }
+  const reread = fstatSync(bootstrapFd, { bigint: true });
+  if (
+    !reread.isFile() ||
+    reread.dev !== opened.dev ||
+    reread.ino !== opened.ino ||
+    reread.mode !== opened.mode ||
+    reread.nlink !== opened.nlink ||
+    reread.size !== opened.size
+  ) {
+    failClosed(BOOTSTRAP_EXIT_CODE);
+  }
+  unlinkSync(BOOTSTRAP_NAME);
+  const unlinked = fstatSync(bootstrapFd, { bigint: true });
+  if (
+    !unlinked.isFile() ||
+    unlinked.dev !== opened.dev ||
+    unlinked.ino !== opened.ino ||
+    unlinked.mode !== opened.mode ||
+    unlinked.nlink !== 0n ||
+    unlinked.size !== opened.size
+  ) {
+    failClosed(BOOTSTRAP_EXIT_CODE);
+  }
+  closeQuietly(bootstrapFd);
+  bootstrapFd = undefined;
+  if (createHash("sha256").update(bytes).digest("hex") !== expected.digest) {
+    failClosed(BOOTSTRAP_EXIT_CODE);
+  }
+  if (bytes.at(-1) !== 0x0a || bytes.subarray(0, -1).includes(0x0a) || bytes.includes(0x0d)) {
+    failClosed(BOOTSTRAP_EXIT_CODE);
+  }
+  let value;
+  try {
+    const text = new TextDecoder("utf-8", { fatal: true }).decode(bytes);
+    value = JSON.parse(text);
+  } catch {
+    failClosed(BOOTSTRAP_EXIT_CODE);
+  }
+  const canonical = Buffer.from(JSON.stringify(value) + "\n", "utf8");
+  if (!canonical.equals(bytes) || !isBootstrap(value)) failClosed(BOOTSTRAP_EXIT_CODE);
+  return value;
+};
+try {
+  const bootstrap = readBootstrap();
+  const identity = bootstrap?.result;
+  const directory = bootstrap?.directory;
+  const directoryPath = bootstrap?.directoryPath;
   resultFd = openSync(RESULT_NAME, constants.O_RDWR | constants.O_NOFOLLOW);
   const opened = fstatSync(resultFd, { bigint: true });
   if (
@@ -738,11 +1023,19 @@ function beginFreshRuntimePipeCapture(
   };
 }
 
-function closeFreshRuntimeCreationFds(resultFd: number, directoryFd: number): void {
+function closeFreshRuntimeCreationFds(
+  bootstrapFd: number,
+  resultFd: number,
+  directoryFd: number,
+): void {
   try {
-    closeSync(resultFd);
+    closeSync(bootstrapFd);
   } finally {
-    closeSync(directoryFd);
+    try {
+      closeSync(resultFd);
+    } finally {
+      closeSync(directoryFd);
+    }
   }
 }
 
@@ -2379,7 +2672,7 @@ test("the S-3 harness binds readiness to its child and excludes the deployed ent
   const publicShapePoisonAssertionSource = sourceRegion(
     checker,
     '"post_promotion_public_projection_search_and_export_apply_shape_guards",',
-    '  check(\n    "all_twelve_async_route_entry_faults_return_one_exact_nonreflective_binding_failure",',
+    '  check(\n    "all_fourteen_async_route_entry_faults_return_one_exact_nonreflective_binding_failure",',
   );
   const readinessLoopSource = sourceRegion(script, "ready=0\n", `if [[ \${ready} -ne 1 ]]`);
   const healthHandlerSource = sourceRegion(
@@ -2543,6 +2836,8 @@ test("the S-3 harness binds readiness to its child and excludes the deployed ent
   // dropping one fails this guard without needing any route to answer
   // differently from another.
   for (const probeId of [
+    "sessions.open",
+    "sessions.working-pack",
     "workshops.push",
     "promote",
     "private.artifact",
@@ -2574,6 +2869,58 @@ test("the S-3 harness binds readiness to its child and excludes the deployed ent
       "`s4.fixtures.forged-receipt POST ${origin}/__s3/s4/fixtures/forged-receipt/${mainProblemId} {}`",
     ),
   ).toBe(1);
+  // The complete S-3 sequence must be pinned as source structure, not merely
+  // present. Each stage is asserted once, in order, so deleting a stage or
+  // reordering the walk fails here rather than silently shortening the sequence
+  // the bead exists to prove.
+  const s3SequenceStages = [
+    '"S3_sequence_1_session_open_allocates_a_server_owned_id_and_reports_both_cursors"',
+    '"S3_sequence_1b_caller_cannot_choose_a_session_identifier"',
+    '"S3_sequence_2_working_pack_is_authenticated_and_carries_no_private_material"',
+    '"S3_sequence_3a_a_push_requires_a_session_this_fellow_opened_on_this_problem"',
+    '"S3_sequence_3b_workshop_push_moves_only_the_workshop_cursor_and_stays_invisible_publicly"',
+    '"S3_sequence_4_promotion_moves_the_public_cursor_exactly_once_and_the_public_delta_appears"',
+  ];
+  let previousStageIndex = -1;
+  for (const stage of s3SequenceStages) {
+    expect(occurrences(checker, stage)).toBe(1);
+    const stageIndex = checker.indexOf(stage);
+    expect(stageIndex).toBeGreaterThan(previousStageIndex);
+    previousStageIndex = stageIndex;
+  }
+  // PLANTED OMISSION: every sequence record must carry the evidence fields.
+  // Dropping the cursor pair, the identifiers, or the timing from any stage
+  // removes one of these and fails.
+  for (const evidenceField of [
+    "principal: localSequenceFellowId,",
+    "counter_principal: localCounterFellowId,",
+    "problem_id: sequenceProblemId,",
+    "session_id: sequenceSessionId,",
+    "workshop_id: sequenceWorkshopId,",
+    "event_id: sequenceEventId,",
+    "route: ",
+    "public_seq_before: ",
+    "public_seq_after: ",
+    "workshop_seq_before: ",
+    "workshop_seq_after: ",
+    "cache_search_export: ",
+    "duration_ms: ",
+  ]) {
+    expect(checker.includes(evidenceField)).toBe(true);
+  }
+  // PLANTED SWAPPED IDENTITY: the counter-principal must be a genuinely
+  // different synthetic Fellow, and the pack/push refusals must be checked
+  // against it. If the two ids were ever made equal, the cross-principal
+  // assertions would pass vacuously.
+  expect(checker).toContain('const localSequenceFellowId = "s3-sequence-fellow"');
+  expect(checker).toContain('const localCounterFellowId = "s3-sequence-counter-fellow"');
+  expect(checker).toContain("localS4FellowIdHeader]: localCounterFellowId,");
+  expect(checker).toContain("counterFellowHeaders");
+  // The shell must re-publish evidence rather than strip it back to four fields.
+  expect(script).toContain("const STRING_EVIDENCE = [");
+  expect(script).toContain("const INTEGER_EVIDENCE = [");
+  expect(script).toContain("SAFE_EVIDENCE_STRING");
+  expect(script).toContain("published[key] = value;");
   expect(checker).toContain("const routeBindingSignatures = routeBindingProbes.map(");
   expect(checker).toContain("new Set(routeBindingProbes.map((probe) => probe.path)).size");
   // The roster guards above constrain descriptors only. They stay green if the
@@ -2633,10 +2980,12 @@ test("the S-3 harness binds readiness to its child and excludes the deployed ent
     "return await plantForgedLocalS4Receipt(request, env, forgedReceiptPlantMatch[1]);",
     "return await publicExport(request, env, exportMatch[1]);",
     "return await publicFace(request, env, publicMatch[1]);",
+    "return await openLocalSession(request, env);",
+    "return await localWorkingPack(request, env, workingPackMatch[1]);",
   ]) {
     expect(occurrences(fetchSource, dispatch)).toBe(1);
   }
-  expect(occurrences(fetchSource, "return await ")).toBe(12);
+  expect(occurrences(fetchSource, "return await ")).toBe(14);
   expect(worker).toContain("token-gated\n      // NOT_FOUND existence behavior");
   expect(worker).not.toContain('LOCAL_SPONSOR_ID = "local-sponsor"');
   expect(worker).not.toContain('RECOVERY_AUDIT_HEADER = "local-recovery-audit"');
