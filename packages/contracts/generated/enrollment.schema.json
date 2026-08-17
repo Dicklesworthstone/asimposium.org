@@ -1990,7 +1990,7 @@
         },
         "verification_url": {
           "type": "string",
-          "const": "https://asimposium.org/approve"
+          "pattern": "^(?:https:\\/\\/asimposium\\.org|https:\\/\\/staging\\.asimposium\\.org)\\/approve$"
         },
         "interval_seconds": {
           "type": "integer",

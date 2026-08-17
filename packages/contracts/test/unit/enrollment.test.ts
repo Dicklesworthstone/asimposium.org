@@ -714,3 +714,37 @@ test("the device start schema admits a lowercase name the naming law will screen
     }).success,
   ).toBe(false);
 });
+
+test("the device verification URL accepts only trusted Agora origins plus /approve", () => {
+  const base = {
+    device_code: "flow_v1.ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopq",
+    user_code: "ABCD-2345",
+    interval_seconds: 5,
+    expires_in_seconds: 900,
+  };
+  expect(
+    DeviceCodeStartResponseSchema.safeParse({
+      ...base,
+      verification_url: "https://asimposium.org/approve",
+    }).success,
+  ).toBe(true);
+  expect(
+    DeviceCodeStartResponseSchema.safeParse({
+      ...base,
+      verification_url: "https://staging.asimposium.org/approve",
+    }).success,
+  ).toBe(true);
+  // A lookalike host or a different path fails closed.
+  expect(
+    DeviceCodeStartResponseSchema.safeParse({
+      ...base,
+      verification_url: "https://asimposium.org.evil.test/approve",
+    }).success,
+  ).toBe(false);
+  expect(
+    DeviceCodeStartResponseSchema.safeParse({
+      ...base,
+      verification_url: "https://asimposium.org/approve-other",
+    }).success,
+  ).toBe(false);
+});
