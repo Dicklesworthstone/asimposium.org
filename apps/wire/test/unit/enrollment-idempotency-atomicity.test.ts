@@ -5991,6 +5991,23 @@ describe("0012 sponsor lifecycle commands", () => {
     return { minted, claimed };
   }
 
+  async function issuedLifecycleServiceCredential(
+    fixture: ReturnType<typeof lifecycleServiceFixture>,
+    name: string,
+  ): Promise<{ readonly fellowId: string; readonly credentialId: string }> {
+    const approved = await approvedLifecycleServiceFellow(fixture, name);
+    const issued = await fixture.service.poll({ flow_handle: approved.claimed.flowHandle });
+    if (issued.status !== "approved") throw new Error("fixture token was not issued");
+    const fellow = (await fixture.service.fellows(fixture.sponsor)).find(
+      (candidate) => candidate.name === name,
+    );
+    const credential = fellow?.credentials.find((candidate) => candidate.active);
+    if (fellow === undefined || credential === undefined) {
+      throw new Error("fixture credential was not listed");
+    }
+    return { fellowId: fellow.fellowId, credentialId: credential.credentialId };
+  }
+
   function seededLifecycleCommandDatabase(): Database {
     const sqlite = lifecycleCommandDatabase();
     sqlite
@@ -6332,6 +6349,180 @@ describe("0012 sponsor lifecycle commands", () => {
         .prepare<{ n: number }, []>("SELECT COUNT(*) AS n FROM enrollment_idempotency")
         .get()?.n,
     ).toBe(1);
+  });
+
+  test("PLANTED: same-key same-body revoke contenders wait at replay preflight and recover one byte-identical receipt", async () => {
+    let preflightReaders = 0;
+    let barrierArmed = false;
+    let releasePreflights: (() => void) | undefined;
+    let bothPreflightsRead: (() => void) | undefined;
+    const preflightsMayContinue = new Promise<void>((resolve) => {
+      releasePreflights = resolve;
+    });
+    const bothPreflightsObserved = new Promise<void>((resolve) => {
+      bothPreflightsRead = resolve;
+    });
+    const fixture = lifecycleServiceFixture({
+      serializeBatches: true,
+      afterFirstRead: async (query) => {
+        if (!barrierArmed || !query.includes("FROM enrollment_idempotency")) return;
+        preflightReaders += 1;
+        if (preflightReaders === 2) {
+          barrierArmed = false;
+          bothPreflightsRead?.();
+        }
+        await preflightsMayContinue;
+      },
+    });
+    const target = await issuedLifecycleServiceCredential(fixture, "d1-revoke-race-same-body");
+    const request = {
+      fellow_id: target.fellowId,
+      credential_id: target.credentialId,
+      confirm: "revoke-credential" as const,
+      step_up_authenticated_at: Math.floor(fixture.clock.value / 1_000),
+    };
+    const options = { idempotencyKey: "d1-revoke-race-same-body" } as const;
+
+    barrierArmed = true;
+    const first = fixture.service.revokeCredential(fixture.sponsor, request, options);
+    const second = fixture.service.revokeCredential(fixture.sponsor, request, options);
+    await Promise.race([
+      bothPreflightsObserved,
+      Bun.sleep(1_000).then(() => {
+        throw new Error("both revoke contenders did not reach replay preflight");
+      }),
+    ]);
+    releasePreflights?.();
+    const [left, right] = await Promise.all([first, second]);
+
+    expect(preflightReaders).toBe(2);
+    expect(JSON.stringify(right)).toBe(JSON.stringify(left));
+    expect(
+      fixture.sqlite
+        .prepare<{ n: number }, []>(
+          "SELECT COUNT(*) AS n FROM fellow_lifecycle_events WHERE action = 'credential-revoked'",
+        )
+        .get()?.n,
+    ).toBe(1);
+    expect(
+      fixture.sqlite
+        .prepare<{ n: number }, [string]>(
+          "SELECT COUNT(*) AS n FROM enrollment_idempotency WHERE scope = 'credential-revoke' AND idempotency_key = ?",
+        )
+        .get(options.idempotencyKey)?.n,
+    ).toBe(1);
+    expect(
+      fixture.sqlite
+        .prepare<{ lifecycle_seq: number }, [string]>(
+          "SELECT lifecycle_seq FROM sponsors WHERE sponsor_id = ?",
+        )
+        .get(fixture.sponsor.sponsorId)?.lifecycle_seq,
+    ).toBe(1);
+    await expect(
+      fixture.service.revokeCredential(fixture.sponsor, request, options),
+    ).resolves.toEqual(left);
+  });
+
+  test("PLANTED: same-key different-body revoke contenders wait at replay preflight, commit one event, and conflict the loser", async () => {
+    let preflightReaders = 0;
+    let barrierArmed = false;
+    let releasePreflights: (() => void) | undefined;
+    let bothPreflightsRead: (() => void) | undefined;
+    const preflightsMayContinue = new Promise<void>((resolve) => {
+      releasePreflights = resolve;
+    });
+    const bothPreflightsObserved = new Promise<void>((resolve) => {
+      bothPreflightsRead = resolve;
+    });
+    const fixture = lifecycleServiceFixture({
+      serializeBatches: true,
+      afterFirstRead: async (query) => {
+        if (!barrierArmed || !query.includes("FROM enrollment_idempotency")) return;
+        preflightReaders += 1;
+        if (preflightReaders === 2) {
+          barrierArmed = false;
+          bothPreflightsRead?.();
+        }
+        await preflightsMayContinue;
+      },
+    });
+    const firstTarget = await issuedLifecycleServiceCredential(fixture, "d1-revoke-race-first");
+    const secondTarget = await issuedLifecycleServiceCredential(fixture, "d1-revoke-race-second");
+    const requests = [
+      {
+        fellow_id: firstTarget.fellowId,
+        credential_id: firstTarget.credentialId,
+        confirm: "revoke-credential" as const,
+        step_up_authenticated_at: Math.floor(fixture.clock.value / 1_000),
+      },
+      {
+        fellow_id: secondTarget.fellowId,
+        credential_id: secondTarget.credentialId,
+        confirm: "revoke-credential" as const,
+        step_up_authenticated_at: Math.floor(fixture.clock.value / 1_000),
+      },
+    ] as const;
+    const options = { idempotencyKey: "d1-revoke-race-different-body" } as const;
+
+    barrierArmed = true;
+    const first = fixture.service.revokeCredential(fixture.sponsor, requests[0], options);
+    const second = fixture.service.revokeCredential(fixture.sponsor, requests[1], options);
+    await Promise.race([
+      bothPreflightsObserved,
+      Bun.sleep(1_000).then(() => {
+        throw new Error("both revoke contenders did not reach replay preflight");
+      }),
+    ]);
+    releasePreflights?.();
+    const outcomes = await Promise.allSettled([first, second]);
+
+    expect(preflightReaders).toBe(2);
+    expect(outcomes.filter((outcome) => outcome.status === "fulfilled")).toHaveLength(1);
+    const loser = outcomes.find((outcome) => outcome.status === "rejected");
+    expect(loser?.status).toBe("rejected");
+    if (loser?.status === "rejected") {
+      expect(loser.reason).toBeInstanceOf(EnrollmentError);
+      expect((loser.reason as EnrollmentError).code).toBe("IDEMPOTENCY_CONFLICT");
+    }
+    const winnerIndex = outcomes.findIndex((outcome) => outcome.status === "fulfilled");
+    const winner = outcomes.at(winnerIndex);
+    const winningRequest = requests.at(winnerIndex);
+    if (winner?.status !== "fulfilled" || winningRequest === undefined) {
+      throw new Error("same-key revoke race did not retain a winning receipt");
+    }
+    const losingRequest = requests[winnerIndex === 0 ? 1 : 0];
+    expect(winner.value).toMatchObject({
+      fellow_id: winningRequest.fellow_id,
+      credential_id: winningRequest.credential_id,
+      sponsor_seq: 1,
+    });
+    expect(
+      fixture.sqlite
+        .prepare<{ n: number }, []>(
+          "SELECT COUNT(*) AS n FROM fellow_lifecycle_events WHERE action = 'credential-revoked'",
+        )
+        .get()?.n,
+    ).toBe(1);
+    expect(
+      fixture.sqlite
+        .prepare<{ n: number }, [string]>(
+          "SELECT COUNT(*) AS n FROM enrollment_idempotency WHERE scope = 'credential-revoke' AND idempotency_key = ?",
+        )
+        .get(options.idempotencyKey)?.n,
+    ).toBe(1);
+    expect(
+      fixture.sqlite
+        .prepare<{ lifecycle_seq: number }, [string]>(
+          "SELECT lifecycle_seq FROM sponsors WHERE sponsor_id = ?",
+        )
+        .get(fixture.sponsor.sponsorId)?.lifecycle_seq,
+    ).toBe(1);
+    await expect(
+      fixture.service.revokeCredential(fixture.sponsor, winningRequest, options),
+    ).resolves.toEqual(winner.value);
+    await expect(
+      fixture.service.revokeCredential(fixture.sponsor, losingRequest, options),
+    ).rejects.toMatchObject({ code: "IDEMPOTENCY_CONFLICT" });
   });
 
   test("D1 sponsor panic prevents delayed issuance from a pre-panic approval", async () => {

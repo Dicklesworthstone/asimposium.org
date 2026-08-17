@@ -20,6 +20,8 @@
     "test:contract": "bun scripts/suites.ts contract",
     "test:integration": "bun scripts/suites.ts integration",
     "test:integration:s2-real": "S2_RUN_REAL_BINDING_INTEGRATION=1 bun test /dev/null --timeout=120000 test/integration/s2-krater-real-bindings.test.ts",
+    "test:token-lifecycle:self": "bash ../../scripts/e2e-token-lifecycle.sh --self-test",
+    "test:token-lifecycle:local": "bun test --timeout 180000 test/unit/token-lifecycle-harness.test.ts",
     "test:security": "bun scripts/suites.ts security",
     "test:performance": "bun scripts/suites.ts performance",
     "suites": "bun scripts/suites.ts list",

@@ -12,6 +12,7 @@ import { createEnrollmentRouter } from "./enrollment/router";
 import {
   EnrollmentReplayConfigurationError,
   EnrollmentService,
+  type EnrollmentStore,
   enrollmentReplayProtectorFromBase64Url,
 } from "./enrollment/service";
 import type { Env } from "./env";
@@ -41,10 +42,21 @@ interface EnrollmentStack {
   readonly router: Hono;
 }
 
+/**
+ * Construction seam for local binding proofs. Production calls `createApp()`
+ * without a factory, so the deployed entrypoint always uses D1EnrollmentStore.
+ */
+export type EnrollmentStoreFactory = (env: Env) => EnrollmentStore;
+
+export interface CreateAppOptions {
+  readonly createEnrollmentStore?: EnrollmentStoreFactory;
+}
+
 interface CachedEnrollmentStack {
   /** D1 bindings are capabilities: equal credentials do not make two handles interchangeable. */
   readonly db: Env["DB"];
   readonly credentialKey: string;
+  readonly storeFactory: EnrollmentStoreFactory | undefined;
   readonly stack: EnrollmentStack;
 }
 
@@ -395,7 +407,7 @@ function stoaOriginUnavailable(): Response {
   });
 }
 
-function enrollmentStack(env: Env): EnrollmentStack | Response {
+function enrollmentStack(env: Env, options: CreateAppOptions): EnrollmentStack | Response {
   // Parse the origin before anything is constructed. Every enrollment URL this
   // stack emits names it, so an untrusted or absent value must disable the
   // surface rather than reach a builder that would have to refuse it later —
@@ -411,7 +423,12 @@ function enrollmentStack(env: Env): EnrollmentStack | Response {
     env.OPERATOR_PRINCIPAL_IDS ?? "",
     stoaOrigin,
   ]);
-  if (cached !== undefined && cached.db === env.DB && cached.credentialKey === credentialKey) {
+  if (
+    cached !== undefined &&
+    cached.db === env.DB &&
+    cached.credentialKey === credentialKey &&
+    cached.storeFactory === options.createEnrollmentStore
+  ) {
     return cached.stack;
   }
 
@@ -419,7 +436,7 @@ function enrollmentStack(env: Env): EnrollmentStack | Response {
   try {
     service = new EnrollmentService({
       stoaOrigin,
-      store: new D1EnrollmentStore(env.DB),
+      store: options.createEnrollmentStore?.(env) ?? new D1EnrollmentStore(env.DB),
       replayProtector: enrollmentReplayProtectorFromBase64Url(env.ENROLLMENT_REPLAY_KEY),
     });
   } catch (error) {
@@ -520,11 +537,11 @@ function enrollmentStack(env: Env): EnrollmentStack | Response {
       }),
   );
   const stack: EnrollmentStack = { router };
-  cached = { db: env.DB, credentialKey, stack };
+  cached = { db: env.DB, credentialKey, storeFactory: options.createEnrollmentStore, stack };
   return stack;
 }
 
-export function createApp(): Hono<{ Bindings: Env }> {
+export function createApp(options: CreateAppOptions = {}): Hono<{ Bindings: Env }> {
   const app = new Hono<{ Bindings: Env }>();
 
   for (const route of PUBLIC_TEXT_ROUTES) {
@@ -574,7 +591,7 @@ export function createApp(): Hono<{ Bindings: Env }> {
       await next();
       return;
     }
-    const stack = enrollmentStack(c.env);
+    const stack = enrollmentStack(c.env, options);
     if (stack instanceof Response) return stack;
     const response = await stack.router.fetch(c.req.raw, c.env);
     return response.headers.get(ROUTER_MISS_HEADER) === "1"

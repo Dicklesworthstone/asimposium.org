@@ -1,0 +1,35 @@
+name = "asimposium-token-lifecycle-local"
+main = "token-lifecycle-local-worker.ts"
+compatibility_date = "2026-08-13"
+compatibility_flags = ["nodejs_compat"]
+workers_dev = false
+
+# This file is the only configuration that mounts the revoke-race witness.
+# infra/wrangler.toml keeps the production entrypoint and has no local control route.
+[vars]
+TOKEN_LIFECYCLE_LOCAL_HARNESS = "enabled"
+
+[dev]
+local_protocol = "http"
+
+[[d1_databases]]
+binding = "DB"
+database_name = "asimposium-token-lifecycle-local"
+database_id = "00000000-0000-0000-0000-000000000000"
+migrations_dir = "../../../../db/migrations"
+
+[[r2_buckets]]
+binding = "ARTIFACTS"
+bucket_name = "asimposium-artifacts-local"
+
+[[r2_buckets]]
+binding = "PUBLIC_ARTIFACTS"
+bucket_name = "asimposium-public-local"
+
+[[durable_objects.bindings]]
+name = "KRATER_OUTBOX"
+class_name = "KraterOutboxDrainer"
+
+[exports.KraterOutboxDrainer]
+type = "durable-object"
+storage = "sqlite"
