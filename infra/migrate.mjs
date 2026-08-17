@@ -1151,12 +1151,9 @@ function captureBoundedPipe(stream, maximumBytes) {
  */
 function cancelBoundedPipes(pipes) {
   const cancellation = Promise.all([pipes.stdout.cancel(), pipes.stderr.cancel()]);
-  // Each pipe swallows its own cancellation error. Keep this final release as a
-  // second chance for a reader whose parked read only unlocked asynchronously.
-  void cancellation.finally(() => {
-    pipes.stdout.release();
-    pipes.stderr.release();
-  });
+  // Each pipe swallows its own cancellation error. The caller includes this
+  // promise in its existing bounded drain observation; do not detach an
+  // unbounded completion that might retain a reader lock after return.
   pipes.stdout.release();
   pipes.stderr.release();
   return cancellation;
@@ -1166,6 +1163,23 @@ function cancelBoundedPipes(pipes) {
 function releaseBoundedPipes(pipes) {
   pipes.stdout.release();
   pipes.stderr.release();
+}
+
+function completeBoundedPipes(pipes, cancellation) {
+  if (cancellation === undefined) {
+    return Promise.all([pipes.stdout.done, pipes.stderr.done]);
+  }
+  return Promise.all([pipes.stdout.done, pipes.stderr.done, cancellation]).then(
+    ([stdout, stderr]) => [stdout, stderr],
+  );
+}
+
+async function observeBoundedPipesOrAbort(pipes, cancellation, timeoutMs, aborted) {
+  const drained = within(completeBoundedPipes(pipes, cancellation), timeoutMs).then((result) => ({
+    kind: "pipes",
+    result,
+  }));
+  return aborted === undefined ? drained : Promise.race([drained, aborted]);
 }
 
 function signalOwnedProcessGroup(child, signal) {
@@ -1211,6 +1225,7 @@ async function groupGoneWithin(child, groupExists, timeoutMs) {
 async function terminateOwnedProcessGroup(
   child,
   pipes,
+  pipeCancellation,
   signalGroup,
   groupExists,
   termGraceMs,
@@ -1236,7 +1251,7 @@ async function terminateOwnedProcessGroup(
       reaped = await groupGoneWithin(child, groupExists, killReapMs);
     }
   }
-  const drained = await within(Promise.all([pipes.stdout.done, pipes.stderr.done]), killReapMs);
+  const drained = await within(completeBoundedPipes(pipes, pipeCancellation), killReapMs);
   return { directExit, pipesDrained: drained.settled, reaped };
 }
 
@@ -1259,62 +1274,126 @@ export async function runBoundedCommand({
   signalGroup = signalOwnedProcessGroup,
   groupExists = ownedProcessGroupExists,
   platform = process.platform,
+  signal = undefined,
 }) {
-  let child;
-  try {
-    child = spawn({
-      cmd,
-      cwd,
-      stdin: "ignore",
-      stdout: "pipe",
-      stderr: "pipe",
-      detached: true,
-      env: minimalLocalToolEnvironment(),
+  const containmentScope = platform === "win32" ? "direct-child-only" : "process-group-only";
+  const abortedResult = () => ({
+    containment_scope: containmentScope,
+    outcome: "aborted",
+    stderr: "",
+    stdout: "",
+  });
+  if (signal?.aborted) return abortedResult();
+
+  let resolveAbort;
+  let abortListener;
+  let aborted;
+  if (signal !== undefined) {
+    aborted = new Promise((resolve) => {
+      resolveAbort = resolve;
     });
-  } catch {
-    return { outcome: "spawn-failed", stderr: "", stdout: "" };
+    abortListener = () => resolveAbort({ kind: "aborted" });
+    signal.addEventListener("abort", abortListener, { once: true });
+    // An abort between the first check and listener installation is still a
+    // pre-spawn abort. Never create a child after observing it.
+    if (signal.aborted) abortListener();
   }
 
-  const pipes = {
-    stderr: captureBoundedPipe(child.stderr, stderrMaxBytes),
-    stdout: captureBoundedPipe(child.stdout, stdoutMaxBytes),
-  };
-  const containmentScope = platform === "win32" ? "direct-child-only" : "process-group-only";
-  let pipeCancellation;
-  const cancelPipes = () => {
-    if (pipeCancellation === undefined) {
-      pipeCancellation = cancelBoundedPipes(pipes);
-    }
-    return pipeCancellation;
-  };
   let deadlineTimer;
-  const deadline = new Promise((resolve) => {
-    deadlineTimer = setTimeout(() => resolve({ kind: "timeout" }), timeoutMs);
-  });
-  const first = await Promise.race([
-    child.exited.then((exitCode) => ({ kind: "exited", exitCode })),
-    pipes.stdout.failure.then(() => ({ kind: "pipe-drain-unproven" })),
-    pipes.stderr.failure.then(() => ({ kind: "pipe-drain-unproven" })),
-    pipes.stdout.overrun.then(() => ({ kind: "output-overrun" })),
-    pipes.stderr.overrun.then(() => ({ kind: "output-overrun" })),
-    deadline,
-  ]);
-  clearTimeout(deadlineTimer);
+  let child;
+  try {
+    if (signal?.aborted) return abortedResult();
+    try {
+      child = spawn({
+        cmd,
+        cwd,
+        stdin: "ignore",
+        stdout: "pipe",
+        stderr: "pipe",
+        detached: true,
+        env: minimalLocalToolEnvironment(),
+      });
+    } catch {
+      return { outcome: "spawn-failed", stderr: "", stdout: "" };
+    }
 
-  let outcome = "exited";
-  let exitCode;
-  if (first.kind === "exited") {
-    exitCode = first.exitCode;
-    const drained = await within(Promise.all([pipes.stdout.done, pipes.stderr.done]), pipeDrainMs);
-    // This can observe only the owned process group. It cannot establish that
-    // a grandchild which called setsid() has exited; in particular, a later
-    // pipe close is not proof about that escaped process.
-    const processGroupMemberRemains = platform === "win32" ? false : groupExists(child);
-    if (!drained.settled || processGroupMemberRemains) {
-      cancelPipes();
+    const pipes = {
+      stderr: captureBoundedPipe(child.stderr, stderrMaxBytes),
+      stdout: captureBoundedPipe(child.stdout, stdoutMaxBytes),
+    };
+    let pipeCancellation;
+    const cancelPipes = () => {
+      if (pipeCancellation === undefined) {
+        pipeCancellation = cancelBoundedPipes(pipes);
+      }
+      return pipeCancellation;
+    };
+    const deadlineAt = performance.now() + timeoutMs;
+    const deadline = new Promise((resolve) => {
+      deadlineTimer = setTimeout(
+        () => resolve({ kind: "timeout" }),
+        Math.max(0, deadlineAt - performance.now()),
+      );
+    });
+    let first = await Promise.race([
+      child.exited.then((exitCode) => ({ kind: "exited", exitCode })),
+      pipes.stdout.failure.then(() => ({ kind: "pipe-drain-unproven" })),
+      pipes.stderr.failure.then(() => ({ kind: "pipe-drain-unproven" })),
+      pipes.stdout.overrun.then(() => ({ kind: "output-overrun" })),
+      pipes.stderr.overrun.then(() => ({ kind: "output-overrun" })),
+      deadline,
+      ...(aborted === undefined ? [] : [aborted]),
+    ]);
+    clearTimeout(deadlineTimer);
+    deadlineTimer = undefined;
+
+    let outcome = "exited";
+    let exitCode;
+    if (first.kind === "exited") {
+      exitCode = first.exitCode;
+      const pipeObservation = await observeBoundedPipesOrAbort(
+        pipes,
+        pipeCancellation,
+        pipeDrainMs,
+        aborted,
+      );
+      if (pipeObservation.kind === "aborted") {
+        first = pipeObservation;
+      } else {
+        const drained = pipeObservation.result;
+        // This can observe only the owned process group. It cannot establish that
+        // a grandchild which called setsid() has exited; in particular, a later
+        // pipe close is not proof about that escaped process.
+        const processGroupMemberRemains = platform === "win32" ? false : groupExists(child);
+        if (!drained.settled || processGroupMemberRemains) {
+          const cancellation = cancelPipes();
+          const termination = await terminateOwnedProcessGroup(
+            child,
+            pipes,
+            cancellation,
+            signalGroup,
+            groupExists,
+            termGraceMs,
+            killReapMs,
+            platform,
+          );
+          if (!termination.reaped) {
+            outcome = platform === "win32" ? "direct-child-reap-unproven" : "process-reap-unproven";
+          } else if (!termination.pipesDrained) outcome = "pipe-drain-unproven";
+          else if (processGroupMemberRemains) outcome = "process-group-survivor-observed";
+          else outcome = "pipe-drain-unproven";
+        }
+      }
+    }
+    // `first` can change from an initial direct-child exit to an abort while
+    // the inherited pipes are still draining. That abort has the same owned
+    // process-group cleanup obligation as every other non-exit trigger.
+    if (first.kind !== "exited") {
+      const cancellation = cancelPipes();
       const termination = await terminateOwnedProcessGroup(
         child,
         pipes,
+        cancellation,
         signalGroup,
         groupExists,
         termGraceMs,
@@ -1324,58 +1403,42 @@ export async function runBoundedCommand({
       if (!termination.reaped) {
         outcome = platform === "win32" ? "direct-child-reap-unproven" : "process-reap-unproven";
       } else if (!termination.pipesDrained) outcome = "pipe-drain-unproven";
-      else if (processGroupMemberRemains) outcome = "process-group-survivor-observed";
-      else outcome = "pipe-drain-unproven";
+      else outcome = first.kind;
+      if (termination.directExit?.settled) exitCode = termination.directExit.value;
+      else if (platform !== "win32") {
+        const exited = await within(child.exited, killReapMs);
+        if (exited.settled) exitCode = exited.value;
+      }
     }
-  } else {
-    cancelPipes();
-    const termination = await terminateOwnedProcessGroup(
-      child,
-      pipes,
-      signalGroup,
-      groupExists,
-      termGraceMs,
-      killReapMs,
-      platform,
-    );
-    if (!termination.reaped) {
-      outcome = platform === "win32" ? "direct-child-reap-unproven" : "process-reap-unproven";
-    } else if (!termination.pipesDrained) outcome = "pipe-drain-unproven";
-    else outcome = first.kind;
-    if (termination.directExit?.settled) exitCode = termination.directExit.value;
-    else if (platform !== "win32") {
-      const exited = await within(child.exited, killReapMs);
-      if (exited.settled) exitCode = exited.value;
-    }
-  }
 
-  const settledPipes = await within(
-    Promise.all([pipes.stdout.done, pipes.stderr.done]),
-    pipeDrainMs,
-  );
-  if (!settledPipes.settled) {
-    if (outcome === "exited") outcome = "pipe-drain-unproven";
-    // The drains are still parked. This is the exit that used to strand them.
-    cancelPipes();
+    const settledPipes = await within(completeBoundedPipes(pipes, pipeCancellation), pipeDrainMs);
+    if (!settledPipes.settled) {
+      if (outcome === "exited") outcome = "pipe-drain-unproven";
+      // The drains are still parked. This is the exit that used to strand them.
+      cancelPipes();
+      return {
+        containment_scope: containmentScope,
+        exitCode,
+        outcome,
+        stderr: "",
+        stdout: "",
+      };
+    }
+    const [stdout, stderr] = settledPipes.value;
+    if ((stdout.failed || stderr.failed) && outcome === "exited") outcome = "pipe-drain-unproven";
+    if (outcome === "exited") releaseBoundedPipes(pipes);
+    else cancelPipes();
     return {
       containment_scope: containmentScope,
       exitCode,
       outcome,
-      stderr: "",
-      stdout: "",
+      stderr: stderr.text,
+      stdout: stdout.text,
     };
+  } finally {
+    if (deadlineTimer !== undefined) clearTimeout(deadlineTimer);
+    if (abortListener !== undefined) signal.removeEventListener("abort", abortListener);
   }
-  const [stdout, stderr] = settledPipes.value;
-  if ((stdout.failed || stderr.failed) && outcome === "exited") outcome = "pipe-drain-unproven";
-  if (outcome === "exited") releaseBoundedPipes(pipes);
-  else cancelPipes();
-  return {
-    containment_scope: containmentScope,
-    exitCode,
-    outcome,
-    stderr: stderr.text,
-    stdout: stdout.text,
-  };
 }
 
 /**

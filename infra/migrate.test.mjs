@@ -247,10 +247,11 @@ function unprovenPipe() {
  * sits inside `read()` until something cancels the reader; the underlying
  * `cancel` hook is the only way that can be observed from outside.
  */
-function parkedPipe() {
+function parkedPipe(onPull = undefined) {
   const state = { cancelCount: 0 };
   state.stream = new ReadableStream({
     pull() {
+      onPull?.();
       return new Promise(() => {});
     },
     cancel() {
@@ -1367,6 +1368,368 @@ const cases = [
         },
       });
       assert.equal(clean.outcome, "pipe-drain-unproven");
+    },
+  },
+  {
+    name: "AbortSignal bounded-command cleanup is causal, contained, and ordered",
+    async execute() {
+      const bounds = {
+        timeoutMs: 80,
+        termGraceMs: 10,
+        killReapMs: 10,
+        pipeDrainMs: 10,
+      };
+      const platforms = [
+        { platform: "linux", containmentScope: "process-group-only" },
+        { platform: "win32", containmentScope: "direct-child-only" },
+      ];
+      const trackedAbort = () => {
+        const controller = new AbortController();
+        let added = 0;
+        let removed = 0;
+        return {
+          controller,
+          listenerCounts: () => ({ added, removed }),
+          signal: {
+            get aborted() {
+              return controller.signal.aborted;
+            },
+            addEventListener(...args) {
+              added += 1;
+              controller.signal.addEventListener(...args);
+            },
+            removeEventListener(...args) {
+              removed += 1;
+              controller.signal.removeEventListener(...args);
+            },
+          },
+        };
+      };
+      const assertBounded = (startedAt, label) => {
+        assert.ok(
+          performance.now() - startedAt < bounds.timeoutMs + bounds.termGraceMs + 100,
+          `${label} exceeded its single command deadline plus bounded cleanup`,
+        );
+      };
+
+      // A signal already aborted at entry must not even create the otherwise
+      // detached child. This is distinct from a post-spawn abort, whose cleanup
+      // obligation is established below.
+      for (const { platform, containmentScope } of platforms) {
+        const tracked = trackedAbort();
+        tracked.controller.abort();
+        let spawned = 0;
+        const result = await runBoundedCommand({
+          cmd: ["fixture"],
+          cwd: repositoryRoot,
+          ...bounds,
+          platform,
+          signal: tracked.signal,
+          spawn() {
+            spawned += 1;
+            assert.fail("a pre-aborted signal must refuse before spawn");
+          },
+        });
+        assert.equal(spawned, 0);
+        assert.equal(result.outcome, "aborted");
+        assert.equal(result.containment_scope, containmentScope);
+        assert.deepEqual(tracked.listenerCounts(), { added: 0, removed: 0 });
+      }
+
+      // TERM-responsive child: abort is reported only after both owned readers
+      // were cancelled and the platform's honest containment scope has reaped.
+      for (const { platform, containmentScope } of platforms) {
+        const tracked = trackedAbort();
+        const stdout = parkedPipe();
+        const stderr = parkedPipe();
+        const signals = [];
+        let groupLive = true;
+        let groupInspections = 0;
+        let resolveExit;
+        const started = performance.now();
+        const result = await runBoundedCommand({
+          cmd: ["fixture"],
+          cwd: repositoryRoot,
+          ...bounds,
+          platform,
+          signal: tracked.signal,
+          spawn() {
+            const child = {
+              pid: 61,
+              exited: new Promise((resolve) => {
+                resolveExit = resolve;
+              }),
+              stderr: stderr.stream,
+              stdout: stdout.stream,
+            };
+            queueMicrotask(() => tracked.controller.abort());
+            return child;
+          },
+          signalGroup(_child, signal) {
+            signals.push(signal);
+            if (signal === "SIGTERM") {
+              groupLive = false;
+              resolveExit(143);
+            }
+          },
+          groupExists() {
+            groupInspections += 1;
+            return groupLive;
+          },
+        });
+        assertBounded(started, `${platform} TERM-responsive abort`);
+        assert.equal(result.outcome, "aborted");
+        assert.equal(result.containment_scope, containmentScope);
+        assert.deepEqual(signals, ["SIGTERM"]);
+        assert.equal(stdout.cancelCount, 1);
+        assert.equal(stderr.cancelCount, 1);
+        assert.equal(stdout.stream.locked, false);
+        assert.equal(stderr.stream.locked, false);
+        assert.equal(groupInspections === 0, platform === "win32");
+        assert.deepEqual(tracked.listenerCounts(), { added: 1, removed: 1 });
+      }
+
+      // The same injected child resists TERM. KILL is then the one and only
+      // escalation, and its reaping proof permits the typed abort outcome.
+      for (const { platform, containmentScope } of platforms) {
+        const tracked = trackedAbort();
+        const signals = [];
+        let groupLive = true;
+        let groupInspections = 0;
+        let resolveExit;
+        const started = performance.now();
+        const result = await runBoundedCommand({
+          cmd: ["fixture"],
+          cwd: repositoryRoot,
+          ...bounds,
+          platform,
+          signal: tracked.signal,
+          spawn() {
+            const child = {
+              pid: 62,
+              exited: new Promise((resolve) => {
+                resolveExit = resolve;
+              }),
+              stderr: closedPipe(),
+              stdout: closedPipe(),
+            };
+            queueMicrotask(() => tracked.controller.abort());
+            return child;
+          },
+          signalGroup(_child, signal) {
+            signals.push(signal);
+            if (signal === "SIGKILL") {
+              groupLive = false;
+              resolveExit(137);
+            }
+          },
+          groupExists() {
+            groupInspections += 1;
+            return groupLive;
+          },
+        });
+        assertBounded(started, `${platform} TERM-resistant abort`);
+        assert.equal(result.outcome, "aborted");
+        assert.equal(result.containment_scope, containmentScope);
+        assert.deepEqual(signals, ["SIGTERM", "SIGKILL"]);
+        assert.equal(groupInspections === 0, platform === "win32");
+        assert.deepEqual(tracked.listenerCounts(), { added: 1, removed: 1 });
+      }
+
+      // The direct wrapper exits before its descendant closes either inherited
+      // pipe. Resolve that exit from the second parked read, then delay abort
+      // by three microtasks: child exit reaction, first-race reaction, and the
+      // exited-first continuation that begins pipe observation. An old
+      // `if/else` skipped TERM/KILL here after `first` changed during that
+      // observation, leaving the direct-exit descendant outside teardown.
+      for (const directExitCase of [
+        { label: "reaped", expectedOutcome: "aborted", groupNeverReaps: false },
+        {
+          label: "unreaped",
+          expectedOutcome: "process-reap-unproven",
+          groupNeverReaps: true,
+        },
+      ]) {
+        const tracked = trackedAbort();
+        const signals = [];
+        let groupLive = true;
+        let parkedPulls = 0;
+        let resolveDirectExit;
+        const releaseDirectExit = () => {
+          if (++parkedPulls !== 2) return;
+          resolveDirectExit(0);
+          queueMicrotask(() => {
+            queueMicrotask(() => {
+              queueMicrotask(() => tracked.controller.abort());
+            });
+          });
+        };
+        const stdout = parkedPipe(releaseDirectExit);
+        const stderr = parkedPipe(releaseDirectExit);
+        const started = performance.now();
+        const result = await runBoundedCommand({
+          cmd: ["fixture"],
+          cwd: repositoryRoot,
+          ...bounds,
+          platform: "linux",
+          signal: tracked.signal,
+          spawn() {
+            return {
+              pid: 621,
+              exited: new Promise((resolve) => {
+                resolveDirectExit = resolve;
+              }),
+              stderr: stderr.stream,
+              stdout: stdout.stream,
+            };
+          },
+          signalGroup(_child, signal) {
+            signals.push(signal);
+            if (signal === "SIGKILL" && !directExitCase.groupNeverReaps) groupLive = false;
+          },
+          groupExists() {
+            return groupLive;
+          },
+        });
+        assertBounded(started, `direct-exit parked-descendant ${directExitCase.label}`);
+        assert.equal(parkedPulls, 2, "both inherited pipes must park before direct exit");
+        assert.equal(result.outcome, directExitCase.expectedOutcome);
+        assert.equal(result.containment_scope, "process-group-only");
+        assert.equal(result.exitCode, 0);
+        assert.deepEqual(signals, ["SIGTERM", "SIGKILL"]);
+        assert.equal(stdout.cancelCount, 1);
+        assert.equal(stderr.cancelCount, 1);
+        assert.equal(stdout.stream.locked, false);
+        assert.equal(stderr.stream.locked, false);
+        assert.deepEqual(tracked.listenerCounts(), { added: 1, removed: 1 });
+      }
+
+      // Abort never claims success when the owned scope cannot be reaped. POSIX
+      // and Windows deliberately report different, equally conservative facts.
+      for (const { platform, containmentScope } of platforms) {
+        const tracked = trackedAbort();
+        const stdout = parkedPipe();
+        const stderr = parkedPipe();
+        const signals = [];
+        let groupInspections = 0;
+        const started = performance.now();
+        const result = await runBoundedCommand({
+          cmd: ["fixture"],
+          cwd: repositoryRoot,
+          ...bounds,
+          platform,
+          signal: tracked.signal,
+          spawn() {
+            queueMicrotask(() => tracked.controller.abort());
+            return {
+              pid: 63,
+              exited: new Promise(() => {}),
+              stderr: stderr.stream,
+              stdout: stdout.stream,
+            };
+          },
+          signalGroup(_child, signal) {
+            signals.push(signal);
+          },
+          groupExists() {
+            groupInspections += 1;
+            return true;
+          },
+        });
+        assertBounded(started, `${platform} unreaped abort`);
+        assert.equal(
+          result.outcome,
+          platform === "win32" ? "direct-child-reap-unproven" : "process-reap-unproven",
+        );
+        assert.equal(result.containment_scope, containmentScope);
+        assert.deepEqual(signals, ["SIGTERM", "SIGKILL"]);
+        assert.equal(groupInspections === 0, platform === "win32");
+        assert.equal(stdout.cancelCount, 1);
+        assert.equal(stderr.cancelCount, 1);
+        assert.equal(stdout.stream.locked, false);
+        assert.equal(stderr.stream.locked, false);
+        assert.deepEqual(tracked.listenerCounts(), { added: 1, removed: 1 });
+      }
+
+      // Timeout wins when the abort is triggered by its own cleanup signal;
+      // abort wins when it is already observed after the child exists. Neither
+      // ordering may start a second TERM/KILL sequence.
+      for (const { platform, containmentScope } of platforms) {
+        const timeoutTracked = trackedAbort();
+        const timeoutSignals = [];
+        let timeoutGroupLive = true;
+        let resolveTimeoutExit;
+        const timeoutResult = await runBoundedCommand({
+          cmd: ["fixture"],
+          cwd: repositoryRoot,
+          ...bounds,
+          platform,
+          signal: timeoutTracked.signal,
+          spawn() {
+            return {
+              pid: 64,
+              exited: new Promise((resolve) => {
+                resolveTimeoutExit = resolve;
+              }),
+              stderr: closedPipe(),
+              stdout: closedPipe(),
+            };
+          },
+          signalGroup(_child, signal) {
+            timeoutSignals.push(signal);
+            if (signal === "SIGTERM") {
+              timeoutTracked.controller.abort();
+              timeoutGroupLive = false;
+              resolveTimeoutExit(143);
+            }
+          },
+          groupExists() {
+            return timeoutGroupLive;
+          },
+        });
+        assert.equal(timeoutResult.outcome, "timeout");
+        assert.equal(timeoutResult.containment_scope, containmentScope);
+        assert.deepEqual(timeoutSignals, ["SIGTERM"]);
+        assert.deepEqual(timeoutTracked.listenerCounts(), { added: 1, removed: 1 });
+
+        const abortTracked = trackedAbort();
+        const abortSignals = [];
+        let abortGroupLive = true;
+        let resolveAbortExit;
+        const abortResult = await runBoundedCommand({
+          cmd: ["fixture"],
+          cwd: repositoryRoot,
+          ...bounds,
+          platform,
+          signal: abortTracked.signal,
+          spawn() {
+            const child = {
+              pid: 65,
+              exited: new Promise((resolve) => {
+                resolveAbortExit = resolve;
+              }),
+              stderr: closedPipe(),
+              stdout: closedPipe(),
+            };
+            abortTracked.controller.abort();
+            return child;
+          },
+          signalGroup(_child, signal) {
+            abortSignals.push(signal);
+            if (signal === "SIGTERM") {
+              abortGroupLive = false;
+              resolveAbortExit(143);
+            }
+          },
+          groupExists() {
+            return abortGroupLive;
+          },
+        });
+        assert.equal(abortResult.outcome, "aborted");
+        assert.equal(abortResult.containment_scope, containmentScope);
+        assert.deepEqual(abortSignals, ["SIGTERM"]);
+        assert.deepEqual(abortTracked.listenerCounts(), { added: 1, removed: 1 });
+      }
     },
   },
   {
