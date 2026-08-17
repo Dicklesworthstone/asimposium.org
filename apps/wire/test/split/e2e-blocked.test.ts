@@ -336,6 +336,38 @@ async function runBoundedS3Child(
   }
 }
 
+test(
+  "PLANTED: a TERM-resistant child is group-KILLed before its S-3 harness timeout reports",
+  async () => {
+    await expect(
+      runBoundedS3Child(
+        [
+          process.execPath,
+          "-e",
+          'process.on("SIGTERM", () => {}); setInterval(() => {}, 1_000);',
+        ],
+        "S3_PLANTED_TIMEOUT",
+        { limits: { timeoutMs: 250, termGraceMs: 100, killGraceMs: 250 } },
+      ),
+    ).rejects.toThrow("S3_PLANTED_TIMEOUT_TIMEOUT:250");
+  },
+  { timeout: 5_000 },
+);
+
+test(
+  "PLANTED: an over-cap child report is rejected instead of becoming a truncated bundle",
+  async () => {
+    await expect(
+      runBoundedS3Child(
+        [process.execPath, "-e", 'process.stdout.write("x".repeat(65));'],
+        "S3_PLANTED_OVERRUN",
+        { limits: { timeoutMs: 1_000, maxBufferBytes: 64, termGraceMs: 100, killGraceMs: 250 } },
+      ),
+    ).rejects.toThrow("S3_PLANTED_OVERRUN_REPORT_OUTPUT_OVERRUN");
+  },
+  { timeout: 5_000 },
+);
+
 function localWorkerBundleSentinels(bundle: string): readonly string[] {
   return LOCAL_WORKER_BUNDLE_SENTINELS.filter((sentinel) => bundle.includes(sentinel));
 }
@@ -1297,9 +1329,12 @@ test(
     if (stdout.length === 0) {
       throw new Error("S3_COMMAND_OUTPUT_EMPTY");
     }
-    const records = stdout
-      .split("\n")
-      .filter((line) => line.length > 0)
+    const outputLines = stdout.split("\n").filter((line) => line.length > 0);
+    const nonRecordLines = outputLines.filter((line) => !line.startsWith("{"));
+    expect(nonRecordLines).toHaveLength(1);
+    expect(nonRecordLines[0]).toContain("BLOCKED s3-staging-paired-principal");
+    const records = outputLines
+      .filter((line) => line.startsWith("{"))
       .map((line) => JSON.parse(line) as Record<string, unknown>);
     const local = records.find(
       (record) => record.suite === "s3-local-bindings" && record.status === "pass",
@@ -1347,7 +1382,7 @@ test(
     expect(new Set(assertionNames).size).toBe(assertionNames.length);
     expect(assertionNames).toEqual(EXPECTED_LOCAL_BINDING_ASSERTIONS);
     expect(assertions.every((record) => record.status === "pass")).toBe(true);
-    expect(stderr).toContain("BLOCKED s3-staging-paired-principal");
+    expect(`${stdout}\n${stderr}`).toContain("BLOCKED s3-staging-paired-principal");
     expect(`${stdout}\n${stderr}`).not.toContain(root);
     expect(`${stdout}\n${stderr}`).not.toContain("/Users/");
     expect(`${stdout}\n${stderr}`).not.toMatch(/asimp_ag_[A-Za-z0-9_-]{4,}/);
