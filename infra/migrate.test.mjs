@@ -15,6 +15,7 @@ import { fileURLToPath } from "node:url";
 import { REDACTED_TOKEN } from "@asimposium/contracts/diagnostic-safety";
 import {
   applyPendingLocalMigrationsOrRefuse,
+  applyPendingRemoteMigrationsOrRefuse,
   assertReadLimit,
   assertReadOnlySql,
   assertRehearsalIsNotAnApplication,
@@ -22,15 +23,25 @@ import {
   bootstrapTargetDisposition,
   catalogFingerprint,
   classifySchemaLineage,
+  createWranglerRemoteTransport,
   declaresDestructive,
   describeDestructiveStatements,
   digestOf,
+  LOCAL_D1_KILL_REAP_MS,
+  LOCAL_D1_PIPE_DRAIN_MS,
+  LOCAL_D1_TERM_GRACE_MS,
   localPlanState,
   MAX_REMOTE_RESPONSE_BYTES,
   MAX_REMOTE_STRING_BYTES,
   MigrationError,
   migrationCommandSql,
   planMigrations,
+  REMOTE_D1_CLEANUP_RESERVE_MS,
+  REMOTE_D1_COMMAND_WINDOW_MS,
+  REMOTE_D1_CONTAINMENT_RESERVE_MS,
+  REMOTE_D1_EXECUTION_FLOOR_MS,
+  REMOTE_D1_SCHEDULING_MARGIN_MS,
+  REMOTE_D1_STDOUT_MAX_BYTES,
   REMOTE_OBSERVATION_DEADLINE_MS,
   readBootstrapManifest,
   readBootstrapSnapshotOrRefuse,
@@ -40,6 +51,7 @@ import {
   redactStderr,
   resolvePinnedWranglerCommand,
   runBoundedCommand,
+  runMigrationCli,
 } from "./migrate.mjs";
 import {
   maskAbsolutePaths,
@@ -222,23 +234,33 @@ function neverClosingPipe() {
   return new ReadableStream({ start() {} });
 }
 
-/** A reader whose pending drain and cancellation both remain unproven. */
-function unprovenPipe() {
-  return {
-    getReader() {
-      return {
-        cancel() {
-          return new Promise(() => {});
-        },
-        read() {
-          return new Promise(() => {});
-        },
-        releaseLock() {
-          throw new TypeError("fixture reader remains locked");
-        },
-      };
+/**
+ * A REAL `ReadableStream` whose underlying `cancel` hook never settles.
+ *
+ * This is the production-relevant shape, and it is deliberately not a
+ * hand-written reader. Per the Streams standard, `reader.cancel()` closes the
+ * stream while *initiating* cancellation: pending reads are fulfilled with
+ * `{done: true}` before the source hook is awaited. A hand-rolled fake that
+ * keeps its read parked until its cancel promise settles couples two things the
+ * platform keeps separate, and would "prove" a stranded lock that a real stream
+ * cannot produce. Here only the outer cancellation promise stays pending, which
+ * is exactly what the bounded cleanup window exists to stop waiting on.
+ */
+function neverSettlingCancelPipe() {
+  const state = { cancelCount: 0 };
+  state.stream = new ReadableStream({
+    pull() {
+      // Park the drain inside read() until cancellation closes the stream.
+      return new Promise(() => {});
     },
-  };
+    cancel() {
+      state.cancelCount += 1;
+      // The source never acknowledges. The reader's pending read is already
+      // fulfilled by this point; only this promise is left outstanding.
+      return new Promise(() => {});
+    },
+  });
+  return state;
 }
 
 /**
@@ -326,6 +348,8 @@ async function expectAsyncFailure(label, expectedCode, fn) {
 const STAGING_DATABASE_ID = "00000000-0000-4000-8000-000000000001";
 const OTHER_DATABASE_ID = "00000000-0000-4000-8000-000000000002";
 const STAGING_DATABASE_NAME = "asimposium-staging";
+const STAGING_ACCOUNT_ID = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+const OTHER_ACCOUNT_ID = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
 
 const remoteCatalogRow = (type, name, sql) => ({ type, name, tbl_name: name, sql });
 
@@ -403,6 +427,77 @@ function forbiddenTransport() {
   };
 }
 
+/** A writer-capable in-memory transport for the forward-only seam. */
+function recordingRemoteApplyTransport(options = {}) {
+  const transport = recordingTransport(options);
+  const executions = [];
+  return Object.assign(transport, {
+    atomicity: "d1-query-implicit-transaction-v1",
+    executions,
+    execute: async (request) => {
+      executions.push(request);
+      if (options.onExecute !== undefined) return options.onExecute(request);
+      return { database_id: STAGING_DATABASE_ID };
+    },
+  });
+}
+
+function successfulRemoteCommand(rows) {
+  return {
+    outcome: "exited",
+    exitCode: 0,
+    stdout: JSON.stringify([{ success: true, results: rows, meta: { served_by_primary: true } }]),
+    stderr: "",
+  };
+}
+
+function successfulRemoteInfo() {
+  return {
+    outcome: "exited",
+    exitCode: 0,
+    stdout: JSON.stringify({
+      uuid: STAGING_DATABASE_ID,
+      name: STAGING_DATABASE_NAME,
+      read_replication: { mode: "disabled" },
+    }),
+    stderr: "",
+  };
+}
+
+/**
+ * A tiny workspace-shaped root for default-transport tests. Its pinned
+ * Wrangler files exist only so path/version validation runs; the injected
+ * command runner means no child process or provider is ever reached.
+ */
+function defaultRemoteTransportRoot(name, databaseId = STAGING_DATABASE_ID) {
+  const root = join(space, name);
+  mkdirSync(join(root, "infra", "deploy-resolved"), { recursive: true });
+  mkdirSync(join(root, "apps", "wire", "node_modules", "wrangler", "bin"), {
+    recursive: true,
+  });
+  writeFileSync(
+    join(root, "infra", "deploy-resolved", "staging.wrangler.toml"),
+    `account_id = "${STAGING_ACCOUNT_ID}"\n\n[[d1_databases]]\nbinding = "DB"\ndatabase_name = "${STAGING_DATABASE_NAME}"\ndatabase_id = "${databaseId}"\n`,
+    "utf8",
+  );
+  writeFileSync(
+    join(root, "apps", "wire", "package.json"),
+    JSON.stringify({ devDependencies: { wrangler: "4.123.0" } }),
+    "utf8",
+  );
+  writeFileSync(
+    join(root, "apps", "wire", "node_modules", "wrangler", "package.json"),
+    JSON.stringify({ version: "4.123.0" }),
+    "utf8",
+  );
+  writeFileSync(
+    join(root, "apps", "wire", "node_modules", "wrangler", "bin", "wrangler.js"),
+    "// command runner is injected by this pure fixture\n",
+    "utf8",
+  );
+  return root;
+}
+
 let stagingEnvironmentCache;
 function stagingEnvironment() {
   // The real validated topology, not a hand-built stand-in: the reader depends
@@ -452,6 +547,92 @@ const bootstrapLineageRow = (schemaDigest) => ({
   schema_digest: schemaDigest,
   empty_guard: 1,
 });
+
+/**
+ * A real `runMigrationCli` fixture root: its first fifteen migration bytes are
+ * copied from the repository so the immutable historical pins still bind, and
+ * its forward migration is the current production 0016 byte. Only the catalog
+ * returned by the inert transport is synthetic; this plant proves CLI receipt,
+ * re-observation, and idempotence orchestration rather than a provider write.
+ */
+function remoteCliApplyFixtureRoot(name) {
+  const root = join(space, name);
+  const migrationRoot = join(root, "db", "migrations");
+  const bootstrapRoot = join(root, "db", "bootstrap");
+  mkdirSync(migrationRoot, { recursive: true });
+  mkdirSync(bootstrapRoot, { recursive: true });
+
+  const productionMigrations = readMigrationDirectory(join(repositoryRoot, "db", "migrations"));
+  const migrations = productionMigrations.filter((migration) => migration.sequence <= 16);
+  assert.equal(migrations.length, 16, "the current real 0016 migration must be present");
+  assert.equal(migrations.at(-1)?.id, "0016_operator_fellow_cap_override.sql");
+  for (const migration of migrations) {
+    writeFileSync(
+      join(migrationRoot, migration.id),
+      readFileSync(join(repositoryRoot, "db", "migrations", migration.id), "utf8"),
+      "utf8",
+    );
+  }
+
+  const artifactSql = readFileSync(
+    join(repositoryRoot, "db", "bootstrap", "0015_final_schema_v1.sql"),
+    "utf8",
+  );
+  writeFileSync(join(bootstrapRoot, "0015_final_schema_v1.sql"), artifactSql, "utf8");
+  const baselineProduct = {
+    type: "table",
+    name: "remote_cli_baseline",
+    table: "remote_cli_baseline",
+    sql: "CREATE TABLE remote_cli_baseline (id TEXT PRIMARY KEY);",
+  };
+  const forwardProduct = {
+    type: "table",
+    name: "remote_cli_forward_0016",
+    table: "remote_cli_forward_0016",
+    sql: "CREATE TABLE remote_cli_forward_0016 (id TEXT PRIMARY KEY);",
+  };
+  const baselineDigest = catalogFingerprint([baselineProduct]);
+  const forwardDigest = catalogFingerprint([baselineProduct, forwardProduct]);
+  writeFileSync(
+    join(bootstrapRoot, "manifest.json"),
+    JSON.stringify({
+      version: 1,
+      default_artifact_id: "0015-final-schema-v1",
+      artifacts: [
+        {
+          id: "0015-final-schema-v1",
+          file: "0015_final_schema_v1.sql",
+          head_sequence: 15,
+          digest: digestOf(artifactSql),
+          schema_digest: baselineDigest,
+          legacy_0009_schema_digest: "b".repeat(64),
+        },
+      ],
+      historical_migrations: HISTORICAL_0015_GOLDEN_PINS,
+      schema_heads: [
+        { sequence: 15, schema_digest: baselineDigest },
+        { sequence: 16, schema_digest: forwardDigest },
+      ],
+    }),
+    "utf8",
+  );
+  const rawCatalog = (products) => [
+    ...products.map(({ type, name: objectName, table, sql }) => ({
+      type,
+      name: objectName,
+      tbl_name: table,
+      sql,
+    })),
+    remoteCatalogRow("table", runnerLedgerCatalog.name, runnerLedgerCatalog.sql),
+  ];
+  return {
+    root,
+    migrations,
+    forward: migrations.at(-1),
+    beforeCatalog: rawCatalog([baselineProduct]),
+    afterCatalog: rawCatalog([baselineProduct, forwardProduct]),
+  };
+}
 
 const cases = [
   {
@@ -1001,30 +1182,73 @@ const cases = [
         assert.equal(output.stdout, "");
 
         const pipeSignals = [];
-        const pipe = await runBoundedCommand({
+        const heldPipe = neverSettlingCancelPipe();
+        let pipeReceiptIssued = false;
+        const runningPipe = runBoundedCommand({
           cmd: ["fixture"],
           cwd: repositoryRoot,
           timeoutMs: 10,
           termGraceMs: 1,
           killReapMs: 1,
-          pipeDrainMs: 1,
+          // Deliberately generous: if anything still awaited the never-settling
+          // source hook, the receipt could only arrive when this bound expired.
+          // A prompt receipt is therefore evidence that nothing depends on it.
+          pipeDrainMs: 400,
           spawn() {
             return {
               pid: 42,
               exited: Promise.resolve(0),
               stderr: closedPipe(),
-              stdout: unprovenPipe(),
+              stdout: heldPipe.stream,
             };
           },
           signalGroup(_child, signal) {
             pipeSignals.push(signal);
           },
           groupExists() {
-            return pipeSignals.length < 2;
+            return false;
           },
+        }).then((result) => {
+          pipeReceiptIssued = true;
+          return result;
         });
+
+        // PLANTED: a real stream whose source `cancel` hook never settles.
+        //
+        // The previous version of this case used a hand-written reader and
+        // called `finishCancellation()` before awaiting, which masked the hang:
+        // the runner awaited cancellation unbounded, so a source that never
+        // acknowledges withheld the receipt forever. Both halves are now fixed —
+        // the wait is bounded, and the fixture is a stream the platform can
+        // actually produce.
+        const heldStartedAtMs = performance.now();
+        const pipe = await runningPipe;
+        const heldElapsedMs = performance.now() - heldStartedAtMs;
+        assert.equal(pipeReceiptIssued, true, "a never-settling source cancel hung the run");
+        // ONE window, not two. The first 400ms window is the legitimate drain
+        // observation, which this parked stream cannot satisfy until cancel
+        // closes it. What must not happen is a SECOND 400ms window spent
+        // waiting on the never-settling source hook: cancellation is only
+        // initiated, never awaited, so cleanup resolves on `done` alone.
+        assert.ok(
+          heldElapsedMs < 2 * 400,
+          `the receipt waited ${Math.round(heldElapsedMs)}ms, i.e. a second window spent awaiting the source cancel`,
+        );
         assert.equal(pipe.outcome, "pipe-drain-unproven");
-        assert.deepEqual(pipeSignals, ["SIGTERM", "SIGKILL"]);
+        assert.deepEqual(pipeSignals, ["SIGTERM"]);
+        // Causal, observable close: cancellation was initiated, the standard
+        // fulfilled the parked read, the drain finalizer released the reader,
+        // and no lock survives the bounded receipt. This is the handle-release
+        // proof — not a bounded return alone.
+        assert.equal(heldPipe.cancelCount, 1, "the held reader was never cancelled");
+        // Cancellation is initiated exactly once — never retried — so a hostile
+        // hook accumulates one reaction, not one per cleanup attempt.
+        assert.equal(heldPipe.cancelCount, 1, "cancellation was initiated more than once");
+        assert.equal(
+          heldPipe.stream.locked,
+          false,
+          "a reader lock survived the bounded cleanup receipt",
+        );
 
         const lockedPipeSignals = [];
         const lockedPipe = await runBoundedCommand({
@@ -3129,8 +3353,11 @@ const cases = [
   },
   {
     // A never-settling call is the failure a row cap cannot reach. The deadline
-    // is monotonic and the abort signal is the cooperative half.
-    name: "PLANTED-a-never-settling-transport-is-bounded-and-cancelled",
+    // is monotonic and the abort signal is the cooperative half. A transport
+    // that never settles has produced no containment observation at all, so it
+    // receives neither the softer observation-deadline receipt nor a reap
+    // classification it never earned: the refusal names the missing settlement.
+    name: "PLANTED-a-never-settling-transport-is-bounded-cancelled-and-settlement-unproven",
     async execute() {
       const environment = stagingEnvironment();
       const stall = () => new Promise(() => {});
@@ -3140,7 +3367,7 @@ const cases = [
         ["query", { onQuery: stall }],
       ]) {
         const startedAtMs = performance.now();
-        await expectAsyncFailure(label, "REMOTE_OBSERVATION_DEADLINE_EXCEEDED", () =>
+        await expectAsyncFailure(label, "REMOTE_D1_TRANSPORT_SETTLEMENT_UNPROVEN", () =>
           readRemoteLineageSnapshotOrRefuse(
             environment,
             recordingTransport(options),
@@ -3154,7 +3381,7 @@ const cases = [
 
       // Cancellation reaches the transport, so a cooperative one can stop work.
       let observed;
-      await expectAsyncFailure("cancelled", "REMOTE_OBSERVATION_DEADLINE_EXCEEDED", () =>
+      await expectAsyncFailure("cancelled", "REMOTE_D1_TRANSPORT_SETTLEMENT_UNPROVEN", () =>
         readRemoteLineageSnapshotOrRefuse(
           environment,
           recordingTransport({
@@ -3172,6 +3399,247 @@ const cases = [
 
       // The clamp only tightens: an absurd request cannot extend the ceiling.
       assert.ok(MAX_REMOTE_STRING_BYTES > 0 && REMOTE_OBSERVATION_DEADLINE_MS === 15_000);
+    },
+  },
+  {
+    // The containment reserve exists so the outer observation never emits a
+    // receipt while the owned command is still cleaning up. A reserve shorter
+    // than the real composed path would look correct on every fast plant and
+    // fail only against a command that actually spends its windows, so this
+    // plant composes the real production windows end to end and asserts the
+    // ordering directly: the receipt may not precede the command's settlement.
+    // A budget is shared by describe plus every query. Earlier calls spend it,
+    // so a later one can find too little left to both run and clean up. Starting
+    // a real child there is unrecoverable: the outer expires, reports settlement
+    // unproven, and the child keeps cleaning after the receipt. The only fix is
+    // to refuse BEFORE the spawn, which is what this plant pins.
+    name: "PLANTED-a-shared-budget-spent-by-earlier-calls-refuses-a-later-default-command-before-it-starts",
+    async execute() {
+      const environment = stagingEnvironment();
+      let describeCalls = 0;
+      let queryCalls = 0;
+      const spent = REMOTE_D1_COMMAND_WINDOW_MS + 400;
+
+      // Declares itself command-backed exactly as the default Wrangler transport
+      // does, and burns most of the shared deadline inside its first call.
+      const transport = {
+        ownsBoundedCommand: true,
+        describeTarget: async () => {
+          describeCalls += 1;
+          await new Promise((resolve) => {
+            const timer = setTimeout(resolve, spent);
+            timer.unref?.();
+          });
+          return { database_id: STAGING_DATABASE_ID, database_name: STAGING_DATABASE_NAME };
+        },
+        query: async () => {
+          queryCalls += 1;
+          return { database_id: STAGING_DATABASE_ID, rows: [] };
+        },
+      };
+
+      await expectAsyncFailure(
+        "exhausted shared budget",
+        "REMOTE_D1_COMMAND_WINDOW_EXHAUSTED",
+        () =>
+          readRemoteLineageSnapshotOrRefuse(environment, transport, STAGING_DATABASE_ID, {
+            deadlineMs: spent + REMOTE_D1_COMMAND_WINDOW_MS - 200,
+          }),
+      );
+      assert.equal(describeCalls, 1, "the first command should still have run");
+      assert.equal(queryCalls, 0, "a later default command was started without room to contain it");
+
+      // The marker is own data only: an inherited or getter-backed one must not
+      // buy a command window, and a plain transport keeps the pure behaviour.
+      const inherited = Object.create({ ownsBoundedCommand: true });
+      assert.equal(Object.hasOwn(inherited, "ownsBoundedCommand"), false);
+    },
+  },
+  {
+    // The precheck and the deferred invocation are separated by a microtask
+    // checkpoint. The engine drains the whole microtask queue, running each job
+    // to completion, before any timer fires — so a job queued ahead of the
+    // invocation callback can burn the window after the precheck already passed.
+    // Neither the abort controller (macrotask) nor `runBoundedCommand` (no
+    // zero-timeout guard) would stop the spawn, so only a recheck inside the
+    // callback closes it.
+    name: "PLANTED-a-microtask-that-burns-the-window-after-the-precheck-still-never-enters-the-runner",
+    async execute() {
+      const environment = stagingEnvironment();
+      let describeCalls = 0;
+      let queryCalls = 0;
+      const transport = {
+        ownsBoundedCommand: true,
+        describeTarget: async () => {
+          describeCalls += 1;
+          return { database_id: STAGING_DATABASE_ID, database_name: STAGING_DATABASE_NAME };
+        },
+        query: async () => {
+          queryCalls += 1;
+          return { database_id: STAGING_DATABASE_ID, rows: [] };
+        },
+      };
+
+      // Queued BEFORE the synchronous entry, so the ordering is deterministic
+      // rather than a race: the runner's precheck and its callback enqueue both
+      // happen synchronously first, then this job runs, then the callback.
+      const burnMs = 400;
+      queueMicrotask(() => {
+        const until = performance.now() + burnMs;
+        while (performance.now() < until) {
+          // Deliberately blocking: a microtask cannot be pre-empted, which is
+          // precisely why the precheck alone is not sufficient.
+        }
+      });
+
+      let captured;
+      try {
+        await readRemoteLineageSnapshotOrRefuse(environment, transport, STAGING_DATABASE_ID, {
+          // Passes the precheck with room to spare, and cannot survive the burn.
+          deadlineMs: REMOTE_D1_COMMAND_WINDOW_MS + 200,
+        });
+        assert.fail("a command was started after its window was consumed");
+      } catch (error) {
+        captured = error;
+      }
+      assert.ok(captured instanceof MigrationError, `unexpected ${captured}`);
+      assert.equal(captured.code, "REMOTE_D1_COMMAND_WINDOW_EXHAUSTED");
+      // The message distinguishes the in-callback recheck from the outer
+      // precheck, so this cannot pass by accidentally exercising the old path.
+      assert.match(captured.message, /before the transport was entered/);
+      assert.equal(describeCalls, 0, "the default runner was entered without a containable window");
+      assert.equal(queryCalls, 0, "a query ran after the window was consumed");
+    },
+  },
+  {
+    // The composed windows are lower bounds, so the reserve must also carry the
+    // scheduling margin. If the margin were added only to the pre-start check,
+    // execution would be free to spend it and cleanup would run with none.
+    name: "PLANTED-the-scheduling-margin-is-withheld-from-execution-not-spent-by-it",
+    async execute() {
+      const environment = stagingEnvironment();
+      const deadlineMs = REMOTE_D1_COMMAND_WINDOW_MS + 1_000;
+      let observedTimeoutMs;
+      const transport = {
+        ownsBoundedCommand: true,
+        describeTarget: async ({ timeoutMs }) => {
+          observedTimeoutMs = timeoutMs;
+          return { database_id: STAGING_DATABASE_ID, database_name: STAGING_DATABASE_NAME };
+        },
+        query: async () => ({ database_id: STAGING_DATABASE_ID, rows: [] }),
+      };
+
+      await readRemoteLineageSnapshotOrRefuse(environment, transport, STAGING_DATABASE_ID, {
+        deadlineMs,
+      });
+
+      assert.ok(observedTimeoutMs !== undefined, "the transport never received an execution share");
+      // The execution share may never reach into the reserved tail. Allocating
+      // the margin to execution would push this above the bound and fail here.
+      assert.ok(
+        observedTimeoutMs <= deadlineMs - REMOTE_D1_CLEANUP_RESERVE_MS,
+        `execution share ${observedTimeoutMs}ms consumed the reserved cleanup tail`,
+      );
+      // ...and the floor is genuinely available, so the bound is not vacuous.
+      assert.ok(
+        observedTimeoutMs >= REMOTE_D1_EXECUTION_FLOOR_MS - REMOTE_D1_SCHEDULING_MARGIN_MS,
+        `execution share ${observedTimeoutMs}ms is below the promised floor`,
+      );
+    },
+  },
+  {
+    name: "PLANTED-the-reserve-covers-the-real-composed-cleanup-and-no-receipt-precedes-settlement",
+    async execute() {
+      const environment = stagingEnvironment();
+
+      // Window-by-window, exactly what an aborted `runBoundedCommand` spends:
+      // TERM grace, SIGKILL reap, termination drain, post-termination
+      // `child.exited`, and the final pipe settlement.
+      // Composition, not a magic number: retuning any window must move the
+      // reserve with it, and a literal would silently decouple the two.
+      assert.equal(
+        REMOTE_D1_CONTAINMENT_RESERVE_MS,
+        LOCAL_D1_TERM_GRACE_MS + LOCAL_D1_KILL_REAP_MS * 3 + LOCAL_D1_PIPE_DRAIN_MS * 2,
+        "the reserve no longer matches the composed cleanup path",
+      );
+      // Six windows, not five: the bounded cancellation wait is the sixth and is
+      // reachable from both the failed-drain and settled-drain non-exit tails.
+      assert.equal(
+        REMOTE_D1_CONTAINMENT_RESERVE_MS,
+        LOCAL_D1_TERM_GRACE_MS +
+          LOCAL_D1_KILL_REAP_MS + // TERM grace, then SIGKILL reap
+          LOCAL_D1_KILL_REAP_MS + // termination drain
+          LOCAL_D1_KILL_REAP_MS + // post-termination child.exited
+          LOCAL_D1_PIPE_DRAIN_MS + // final drain observation
+          LOCAL_D1_PIPE_DRAIN_MS, // bounded cancellation settlement
+        "the reserve does not count all six post-abort waits",
+      );
+      // The margin belongs to cleanup, and the floor is required on top of it.
+      assert.equal(
+        REMOTE_D1_CLEANUP_RESERVE_MS,
+        REMOTE_D1_CONTAINMENT_RESERVE_MS + REMOTE_D1_SCHEDULING_MARGIN_MS,
+        "the scheduling margin is not withheld inside the cleanup tail",
+      );
+      assert.equal(
+        REMOTE_D1_COMMAND_WINDOW_MS,
+        REMOTE_D1_CLEANUP_RESERVE_MS + REMOTE_D1_EXECUTION_FLOOR_MS,
+        "the start window does not require an execution floor above the cleanup tail",
+      );
+      assert.ok(REMOTE_D1_SCHEDULING_MARGIN_MS > 0 && REMOTE_D1_EXECUTION_FLOOR_MS > 0);
+
+      // Half the deadline must be at least the full reserve, otherwise the
+      // observation tightens it and this plant would not exhaust the real path.
+      const deadlineMs = REMOTE_D1_CONTAINMENT_RESERVE_MS * 2;
+      // Settle inside the reserve but after the whole composed path would have
+      // begun: the command ignores cancellation until its cleanup budget is
+      // nearly spent, which is precisely the case a 2s reserve truncated.
+      const settleAfterAbortMs = REMOTE_D1_CONTAINMENT_RESERVE_MS - 100;
+
+      let abortedAtMs;
+      let settledAtMs;
+      let receiptAtMs;
+      let captured;
+      try {
+        await readRemoteLineageSnapshotOrRefuse(
+          environment,
+          recordingTransport({
+            onDescribe: (request) =>
+              new Promise((resolve) => {
+                request.signal.addEventListener("abort", () => {
+                  abortedAtMs = performance.now();
+                  const timer = setTimeout(() => {
+                    settledAtMs = performance.now();
+                    // A value returned after abort proves nothing about
+                    // containment; the outer must still refuse. What this
+                    // plant fixes in place is the ORDER of that refusal.
+                    resolve({ result: [] });
+                  }, settleAfterAbortMs);
+                  timer.unref?.();
+                });
+              }),
+          }),
+          STAGING_DATABASE_ID,
+          { deadlineMs },
+        );
+        assert.fail("composed cleanup: expected REMOTE_D1_TRANSPORT_REAP_UNPROVEN");
+      } catch (error) {
+        receiptAtMs = performance.now();
+        captured = error;
+      }
+      assert.ok(captured instanceof MigrationError, `composed cleanup: unexpected ${captured}`);
+      assert.equal(captured.code, "REMOTE_D1_TRANSPORT_REAP_UNPROVEN", captured.message);
+
+      assert.ok(abortedAtMs !== undefined, "the command was never cancelled");
+      assert.ok(settledAtMs !== undefined, "the receipt was emitted before the command settled");
+      assert.ok(
+        receiptAtMs >= settledAtMs,
+        "a remote receipt preceded command settlement inside the reserve",
+      );
+      // The reserve was genuinely exercised, not skipped by an early return.
+      assert.ok(
+        settledAtMs - abortedAtMs >= settleAfterAbortMs - 50,
+        "the composed cleanup window was not actually spent",
+      );
     },
   },
   {
@@ -3207,6 +3675,696 @@ const cases = [
         readRemoteLineageSnapshotOrRefuse(environment, reached, STAGING_DATABASE_ID),
       );
       assert.equal(reached.calls.describe, 1, "the resolved path never reached the transport");
+    },
+  },
+  {
+    name: "PLANTED-default-Wrangler-commands-capture-account-and-UUID-before-a-resolved-config-rewrite",
+    async execute() {
+      const environment = stagingEnvironment();
+      const root = defaultRemoteTransportRoot("default-remote-transport");
+      const commands = [];
+      const resolvedConfig = join(root, "infra", "deploy-resolved", "staging.wrangler.toml");
+      let rewroteResolvedConfig = false;
+      const transport = createWranglerRemoteTransport({
+        root,
+        environmentName: "staging",
+        environment,
+        resolvedDatabaseId: STAGING_DATABASE_ID,
+        runCommand: async (command) => {
+          commands.push(command);
+          if (command.cmd.includes("info")) {
+            // Causal race: another resolver rewrites the shared artifact between
+            // the identity operation and the next Wrangler child. The command
+            // must retain its captured account and UUID, never name this path.
+            writeFileSync(
+              resolvedConfig,
+              `account_id = "${OTHER_ACCOUNT_ID}"\n\n[[d1_databases]]\nbinding = "DB"\ndatabase_name = "other-database"\ndatabase_id = "${OTHER_DATABASE_ID}"\n`,
+              "utf8",
+            );
+            rewroteResolvedConfig = true;
+          }
+          return command.cmd.includes("info")
+            ? successfulRemoteInfo()
+            : successfulRemoteCommand([]);
+        },
+      });
+
+      const snapshot = await readRemoteLineageSnapshotOrRefuse(
+        environment,
+        transport,
+        STAGING_DATABASE_ID,
+      );
+      assert.deepEqual(snapshot.catalog, []);
+      assert.equal(commands.length, 2, "identity plus an empty catalog require two remote calls");
+      const [identity, command] = commands;
+      assert.ok(identity.cmd.includes("info"));
+      assert.ok(identity.cmd.includes(STAGING_DATABASE_ID));
+      assert.ok(command.cmd.includes("--remote"));
+      assert.ok(
+        command.cmd.includes(STAGING_DATABASE_ID),
+        "the resolved UUID is not the command target",
+      );
+      assert.equal(rewroteResolvedConfig, true, "the config-rewrite plant never ran");
+      for (const request of commands) {
+        const configFlag = request.cmd.indexOf("--config");
+        assert.notEqual(configFlag, -1, "the child was allowed to discover workspace config");
+        assert.equal(
+          request.cmd[configFlag + 1],
+          "/dev/null",
+          "a child received the mutable resolved config path",
+        );
+        assert.equal(
+          request.cwd,
+          root,
+          "the explicit immutable config must make the workspace cwd irrelevant",
+        );
+        assert.equal(
+          request.toolEnvironment.CLOUDFLARE_ACCOUNT_ID,
+          STAGING_ACCOUNT_ID,
+          "a config rewrite or ambient account altered captured child authority",
+        );
+      }
+      assert.equal(command.cmd.includes("--file"), false, "no file-import atomicity claim is used");
+      assert.equal(command.cmd.at(-1).trimStart().startsWith("SELECT"), true);
+      assert.equal(command.timeoutMs > 0, true, "the shared remaining deadline was not passed");
+      assert.equal(command.stdoutMaxBytes, REMOTE_D1_STDOUT_MAX_BYTES);
+      assert.equal(
+        Object.keys(command.toolEnvironment).every((key) =>
+          [
+            "LANG",
+            "LC_ALL",
+            "PATH",
+            "TZ",
+            "SystemRoot",
+            "HOME",
+            "USERPROFILE",
+            "XDG_CONFIG_HOME",
+            "CLOUDFLARE_API_TOKEN",
+            "CLOUDFLARE_ACCOUNT_ID",
+          ].includes(key),
+        ),
+        true,
+        "the default remote transport inherited an ambient environment variable",
+      );
+
+      // Subsequent independent plants need a valid construction artifact; the
+      // race proof above has already captured and inspected its rewritten bytes.
+      writeFileSync(
+        resolvedConfig,
+        `account_id = "${STAGING_ACCOUNT_ID}"\n\n[[d1_databases]]\nbinding = "DB"\ndatabase_name = "${STAGING_DATABASE_NAME}"\ndatabase_id = "${STAGING_DATABASE_ID}"\n`,
+        "utf8",
+      );
+
+      // The exact same injected runner must remain untouched for an unresolved
+      // id; this proves target validation precedes config and command setup.
+      let unreachable = 0;
+      expectFailure("unresolved-default-id", "REMOTE_TARGET_ID_UNRESOLVED", () =>
+        createWranglerRemoteTransport({
+          root,
+          environmentName: "staging",
+          environment,
+          // biome-ignore lint/suspicious/noTemplateCurlyInString: this is the unexpanded CI placeholder from environments.toml, asserted verbatim as an id that must be refused; interpolating it would delete the case.
+          resolvedDatabaseId: "${ASIMP_D1_DATABASE_ID_STAGING}",
+          runCommand: async () => {
+            unreachable += 1;
+            return successfulRemoteCommand([]);
+          },
+        }),
+      );
+      assert.equal(unreachable, 0);
+
+      const replica = createWranglerRemoteTransport({
+        root,
+        environmentName: "staging",
+        environment,
+        resolvedDatabaseId: STAGING_DATABASE_ID,
+        runCommand: async (request) =>
+          request.cmd.includes("info")
+            ? successfulRemoteInfo()
+            : {
+                ...successfulRemoteCommand([]),
+                stdout: JSON.stringify([
+                  { success: true, results: [], meta: { served_by_primary: false } },
+                ]),
+              },
+      });
+      await expectAsyncFailure("replica-read", "REMOTE_D1_CATALOG_UNREADABLE", () =>
+        readRemoteLineageSnapshotOrRefuse(environment, replica, STAGING_DATABASE_ID),
+      );
+      await expectAsyncFailure("replica-apply", "REMOTE_D1_REPLICA_REFUSED", () =>
+        replica.execute({
+          sql: "CREATE TABLE remote_apply_replica_fixture (id TEXT PRIMARY KEY);",
+          database_id: STAGING_DATABASE_ID,
+          signal: new AbortController().signal,
+          timeoutMs: 100,
+        }),
+      );
+
+      // The injected command runner is a trust boundary too. Required fields
+      // must be own data properties, not inherited values or getters.
+      const inheritedResult = Object.create({
+        outcome: "exited",
+        exitCode: 0,
+        stdout: JSON.stringify([{ success: true, results: [], meta: { served_by_primary: true } }]),
+      });
+      const inherited = createWranglerRemoteTransport({
+        root,
+        environmentName: "staging",
+        environment,
+        resolvedDatabaseId: STAGING_DATABASE_ID,
+        runCommand: async () => inheritedResult,
+      });
+      await expectAsyncFailure("inherited-command-result", "REMOTE_D1_TRANSPORT_FAILED", () =>
+        inherited.query({
+          sql: "SELECT 1;",
+          database_id: STAGING_DATABASE_ID,
+          signal: new AbortController().signal,
+          timeoutMs: 100,
+        }),
+      );
+
+      const accessorResult = { exitCode: 0, stdout: "{}" };
+      Object.defineProperty(accessorResult, "outcome", {
+        get() {
+          return "exited";
+        },
+      });
+      const accessor = createWranglerRemoteTransport({
+        root,
+        environmentName: "staging",
+        environment,
+        resolvedDatabaseId: STAGING_DATABASE_ID,
+        runCommand: async () => accessorResult,
+      });
+      await expectAsyncFailure("accessor-command-result", "REMOTE_D1_TRANSPORT_FAILED", () =>
+        accessor.query({
+          sql: "SELECT 1;",
+          database_id: STAGING_DATABASE_ID,
+          signal: new AbortController().signal,
+          timeoutMs: 100,
+        }),
+      );
+    },
+  },
+  {
+    name: "PLANTED-default-Wrangler-transport-hides-provider-output-and-cancels-the-owned-command",
+    async execute() {
+      const environment = stagingEnvironment();
+      const root = defaultRemoteTransportRoot("default-remote-transport-diagnostics");
+      const secret = "asimp_ag_LIVEabc123XYZdefg456";
+      const absolute = "/Users/planted-operator/.cloudflare/credentials";
+      const failed = createWranglerRemoteTransport({
+        root,
+        environmentName: "staging",
+        environment,
+        resolvedDatabaseId: STAGING_DATABASE_ID,
+        runCommand: async () => ({
+          outcome: "exited",
+          exitCode: 1,
+          stdout: `${secret} ${absolute}`,
+          stderr: `${secret} ${absolute}`,
+        }),
+      });
+      let received;
+      try {
+        await failed.query({
+          sql: "SELECT 1;",
+          database_id: STAGING_DATABASE_ID,
+          signal: new AbortController().signal,
+          timeoutMs: 100,
+        });
+        assert.fail("failed command was accepted");
+      } catch (error) {
+        received = error;
+      }
+      assert.ok(received instanceof MigrationError);
+      assert.equal(received.code, "REMOTE_D1_TRANSPORT_FAILED");
+      assert.equal(received.message.includes(secret), false);
+      assert.equal(received.message.includes("planted-operator"), false);
+
+      let abortSignal;
+      const stalled = createWranglerRemoteTransport({
+        root,
+        environmentName: "staging",
+        environment,
+        resolvedDatabaseId: STAGING_DATABASE_ID,
+        runCommand: ({ signal }) =>
+          new Promise((resolve) => {
+            abortSignal = signal;
+            signal.addEventListener(
+              "abort",
+              () => resolve({ outcome: "aborted", stdout: "", stderr: "" }),
+              { once: true },
+            );
+          }),
+      });
+      await expectAsyncFailure(
+        "default-command-timeout",
+        "REMOTE_OBSERVATION_DEADLINE_EXCEEDED",
+        () =>
+          readRemoteLineageSnapshotOrRefuse(environment, stalled, STAGING_DATABASE_ID, {
+            // A command-backed transport is refused before it starts unless the
+            // whole start window remains, so this case must supply one to reach
+            // the timeout path it is actually about. Composed, never a literal.
+            deadlineMs: REMOTE_D1_COMMAND_WINDOW_MS + 100,
+          }),
+      );
+      assert.ok(abortSignal !== undefined, "the owned command did not receive an abort signal");
+      assert.equal(abortSignal.aborted, true, "the owned command was not cancelled");
+      // `runBoundedCommand` has separate POSIX/Windows plants above that prove
+      // the signal reaps its owned child/process group before it reports
+      // `aborted`; this transport maps that proven outcome to a fixed refusal.
+    },
+  },
+  {
+    // This composes the default transport with the actual bounded command runner
+    // and deliberately held pipes. It is not an injected runner that reports
+    // `aborted` immediately when its signal flips: only `runBoundedCommand` can
+    // release the readers and establish (or refuse) owned-group containment.
+    name: "PLANTED-default-runner-timeout-reaps-held-pipes-before-the-observation-deadline-receipt",
+    async execute() {
+      const environment = stagingEnvironment();
+      const root = defaultRemoteTransportRoot("default-runner-timeout-composition");
+      for (const [label, groupNeverReaps, expectedCode] of [
+        ["reaped", false, "REMOTE_OBSERVATION_DEADLINE_EXCEEDED"],
+        ["unreaped", true, "REMOTE_D1_TRANSPORT_REAP_UNPROVEN"],
+      ]) {
+        const stdout = parkedPipe();
+        const stderr = parkedPipe();
+        const signals = [];
+        let groupLive = true;
+        let resolveExit;
+        let cleanupObservedBeforeReceipt = false;
+        const transport = createWranglerRemoteTransport({
+          root,
+          environmentName: "staging",
+          environment,
+          resolvedDatabaseId: STAGING_DATABASE_ID,
+          runCommand: (request) =>
+            runBoundedCommand({
+              ...request,
+              termGraceMs: 1,
+              killReapMs: 1,
+              pipeDrainMs: 1,
+              spawn() {
+                return {
+                  pid: groupNeverReaps ? 78 : 77,
+                  exited: new Promise((resolve) => {
+                    resolveExit = resolve;
+                  }),
+                  stderr: stderr.stream,
+                  stdout: stdout.stream,
+                };
+              },
+              signalGroup(_child, signal) {
+                signals.push(signal);
+                if (signal === "SIGTERM" && !groupNeverReaps) {
+                  groupLive = false;
+                  resolveExit(143);
+                }
+              },
+              groupExists() {
+                return groupLive;
+              },
+            }).then((result) => {
+              cleanupObservedBeforeReceipt =
+                stdout.cancelCount === 1 &&
+                stderr.cancelCount === 1 &&
+                stdout.stream.locked === false &&
+                stderr.stream.locked === false;
+              return result;
+            }),
+        });
+
+        await expectAsyncFailure(label, expectedCode, () =>
+          readRemoteLineageSnapshotOrRefuse(environment, transport, STAGING_DATABASE_ID, {
+            // Enough room for the actual runner's owned-reader cancellation
+            // and process-group census, while the command still has no route
+            // to a real provider. A command-backed transport is refused before
+            // it starts unless the whole start window remains, so this is
+            // composed from that window rather than an independent literal.
+            deadlineMs: REMOTE_D1_COMMAND_WINDOW_MS + 100,
+          }),
+        );
+        assert.ok(signals.includes("SIGTERM"), `${label}: default runner never began containment`);
+        assert.equal(stdout.cancelCount, 1, `${label}: stdout reader was not cancelled`);
+        assert.equal(stderr.cancelCount, 1, `${label}: stderr reader was not cancelled`);
+        assert.equal(stdout.stream.locked, false, `${label}: stdout remained locked`);
+        assert.equal(stderr.stream.locked, false, `${label}: stderr remained locked`);
+        assert.equal(
+          cleanupObservedBeforeReceipt,
+          true,
+          `${label}: observation receipt preceded bounded default-runner cleanup`,
+        );
+        if (groupNeverReaps) assert.deepEqual(signals, ["SIGTERM", "SIGKILL"]);
+      }
+    },
+  },
+  {
+    name: "PLANTED-remote-apply-is-forward-only-transaction-capability-gated-and-records-the-journal-in-the-same-command",
+    async execute() {
+      const environment = stagingEnvironment();
+      const migration = {
+        id: "0017_remote_forward_fixture.sql",
+        sequence: 17,
+        sql: "CREATE TABLE remote_forward_fixture (id TEXT PRIMARY KEY);\n",
+        digest: digestOf("CREATE TABLE remote_forward_fixture (id TEXT PRIMARY KEY);\n"),
+      };
+      const transport = recordingRemoteApplyTransport();
+      const applied = await applyPendingRemoteMigrationsOrRefuse(
+        environment,
+        transport,
+        STAGING_DATABASE_ID,
+        [migration],
+        "2026-08-17T00:00:00.000Z",
+      );
+      assert.deepEqual(applied, [{ id: migration.id, digest: migration.digest }]);
+      assert.equal(transport.executions.length, 1);
+      const sql = transport.executions[0].sql;
+      assert.ok(sql.includes(migration.sql.trim()));
+      assert.ok(sql.includes("INSERT INTO _asimposium_migrations"));
+      assert.equal(transport.executions[0].database_id, STAGING_DATABASE_ID);
+
+      const unsupported = recordingTransport();
+      await expectAsyncFailure("unsupported-atomicity", "REMOTE_APPLY_ATOMICITY_UNSUPPORTED", () =>
+        applyPendingRemoteMigrationsOrRefuse(
+          environment,
+          unsupported,
+          STAGING_DATABASE_ID,
+          [migration],
+          "2026-08-17T00:00:00.000Z",
+        ),
+      );
+      assert.equal(unsupported.calls.describe, 0);
+      assert.equal(unsupported.calls.query, 0);
+
+      const productionDirect = recordingRemoteApplyTransport();
+      await expectAsyncFailure("production-direct", "REMOTE_APPLY_PRODUCTION_REFUSED", () =>
+        applyPendingRemoteMigrationsOrRefuse(
+          { ...environment, is_preview: false, may_hold_production_keys: true },
+          productionDirect,
+          STAGING_DATABASE_ID,
+          [migration],
+          "2026-08-17T00:00:00.000Z",
+        ),
+      );
+      assert.equal(productionDirect.executions.length, 0);
+    },
+  },
+  {
+    name: "PLANTED-CLI-remote-observation-is-read-only-and-refuses-unresolved-production-and-unknown-targets-before-apply",
+    async execute() {
+      const capture = () => {
+        const stdout = [];
+        const stderr = [];
+        return {
+          stdout,
+          stderr,
+          dependencies: {
+            stdout: (line) => stdout.push(line),
+            stderr: (line) => stderr.push(line),
+            now: () => "2026-08-17T00:00:00.000Z",
+          },
+        };
+      };
+
+      // These are actual argv runs through the CLI orchestration, not direct
+      // parser calls. If either missing operand were silently stored as
+      // `undefined`, the local path would reach this injected runner before it
+      // could refuse; all three counters therefore prove no read, bootstrap, or
+      // apply seam was touched.
+      for (const flag of ["--state-file", "--bootstrap"]) {
+        const missingOperand = capture();
+        const localCalls = { read: 0, bootstrap: 0, apply: 0 };
+        const exit = await runMigrationCli(["--env", "local", "--apply", flag], {
+          ...missingOperand.dependencies,
+          localReadLineageSnapshot: async () => {
+            localCalls.read += 1;
+            throw new Error("missing operand reached local snapshot runner");
+          },
+          localBootstrapSchema: async () => {
+            localCalls.bootstrap += 1;
+            throw new Error("missing operand reached local bootstrap runner");
+          },
+          localApplyMigration: async () => {
+            localCalls.apply += 1;
+            throw new Error("missing operand reached local apply runner");
+          },
+        });
+        assert.equal(exit, 1, `${flag} must refuse`);
+        assert.equal(JSON.parse(missingOperand.stderr.join("").trim()).code, "INVALID_ARGUMENT");
+        assert.deepEqual(localCalls, { read: 0, bootstrap: 0, apply: 0 });
+      }
+
+      const successful = capture();
+      const observer = recordingTransport({ catalog: [] });
+      let factoryCalls = 0;
+      const planExit = await runMigrationCli(
+        ["--env", "staging", "--resolved-database-id", STAGING_DATABASE_ID],
+        {
+          ...successful.dependencies,
+          remoteTransportFactory: (request) => {
+            factoryCalls += 1;
+            assert.equal(request.resolvedDatabaseId, STAGING_DATABASE_ID);
+            return observer;
+          },
+        },
+      );
+      // A truly pristine remote target is deliberately not an implicit historic
+      // install: current 0010 is marked destructive and its historical byte
+      // lacks the required marker. The relevant CLI property here is that it
+      // reached the real remote-observation/planner route using SELECTs only,
+      // then refused before any execute transport existed.
+      assert.equal(planExit, 1);
+      assert.equal(factoryCalls, 1);
+      assert.equal(successful.stdout.length, 0);
+      const planDiagnostic = JSON.parse(successful.stderr.join("").trim());
+      assert.equal(planDiagnostic.phase, "plan");
+      assert.equal(planDiagnostic.code, "UNDECLARED_DESTRUCTIVE_MIGRATION");
+      assert.ok(observer.statements.length >= 1);
+      for (const statement of observer.statements) assertReadOnlySql(statement);
+
+      // This is the complete remote CLI apply route, using current 0001-0016
+      // bytes under a temporary fixture root and an inert stateful transport.
+      // The production topology is validated from the real workspace; the
+      // fixture supplies only a small catalog whose exact head digests are
+      // pinned in its manifest. No network, Wrangler child, or D1 is opened.
+      const applyFixture = remoteCliApplyFixtureRoot("remote-cli-apply");
+      const journal = applyFixture.migrations.slice(0, 15).map(record);
+      const catalog = [...applyFixture.beforeCatalog];
+      let remoteFactoryCalls = 0;
+      let executeCalls = 0;
+      let executeRequest;
+      // `capture()` pins the CLI clock, so the command the CLI must send is a
+      // fixed byte string rather than a shape. Comparing against it is the whole
+      // point of this fake: a fake that mutates its catalog and journal for
+      // whatever SQL it receives proves the CLI called something, not that the
+      // CLI sent the migration. Substring checks have the same hole, because
+      // they pass for a command carrying extra statements around the real ones.
+      const FIXED_APPLIED_AT = "2026-08-17T00:00:00.000Z";
+      const expectedApplySql = migrationCommandSql(applyFixture.forward, FIXED_APPLIED_AT);
+      let executeMutations = 0;
+      // The guard is a named seam so the planted negatives below can exercise
+      // the exact comparison the successful run depends on.
+      const applyExecuteGuard = (request) => {
+        if (request.sql !== expectedApplySql) {
+          throw new Error("REMOTE_CLI_APPLY_SQL_MISMATCH");
+        }
+        executeMutations += 1;
+        catalog.splice(0, catalog.length, ...applyFixture.afterCatalog);
+        journal.push(record(applyFixture.forward));
+        return { database_id: STAGING_DATABASE_ID };
+      };
+      const applyTransport = recordingRemoteApplyTransport({
+        catalog,
+        journal,
+        onExecute(request) {
+          executeCalls += 1;
+          executeRequest = request;
+          // Strict equality is checked before any state moves: a mismatched
+          // command must leave the catalog and journal exactly as they were.
+          return applyExecuteGuard(request);
+        },
+      });
+      const applyCapture = capture();
+      const validatedTopology = validateEnvironments(repositoryRoot);
+      const applyExit = await runMigrationCli(
+        ["--env", "staging", "--resolved-database-id", STAGING_DATABASE_ID, "--apply"],
+        {
+          ...applyCapture.dependencies,
+          root: applyFixture.root,
+          environmentValidator: () => validatedTopology,
+          remoteTransportFactory(request) {
+            remoteFactoryCalls += 1;
+            assert.equal(request.root, applyFixture.root);
+            assert.equal(request.environmentName, "staging");
+            assert.equal(request.resolvedDatabaseId, STAGING_DATABASE_ID);
+            return applyTransport;
+          },
+        },
+      );
+      assert.equal(applyExit, 0, applyCapture.stderr.join(""));
+      assert.equal(applyCapture.stderr.length, 0);
+      const applyReceipt = JSON.parse(applyCapture.stdout.join("").trim());
+      assert.equal(applyReceipt.phase, "apply");
+      assert.equal(applyReceipt.environment, "staging");
+      assert.equal(applyReceipt.resolved_database_id, STAGING_DATABASE_ID);
+      assert.equal(applyReceipt.head_before, 15);
+      assert.deepEqual(applyReceipt.applied, [
+        { id: applyFixture.forward.id, digest: applyFixture.forward.digest },
+      ]);
+      assert.equal(applyReceipt.second_plan_idempotent, true);
+      assert.equal(remoteFactoryCalls, 1);
+      assert.equal(executeCalls, 1);
+      assert.equal(executeRequest.database_id, STAGING_DATABASE_ID);
+      assert.equal(
+        executeRequest.sql,
+        expectedApplySql,
+        "the CLI apply command was not byte-equal to migrationCommandSql(forward, fixedAppliedAt)",
+      );
+      assert.equal(
+        executeMutations,
+        1,
+        "the apply fake mutated state exactly once, after the check",
+      );
+      // One describe/catalog/journal observation occurs before apply and a
+      // second occurs afterwards. The receipt must therefore follow an actual
+      // reclassification of the state the execute seam just mutated.
+      assert.equal(applyTransport.calls.describe, 2);
+      assert.ok(applyTransport.calls.query >= 4);
+      assert.deepEqual(journal, applyFixture.migrations.map(record));
+      assert.deepEqual(catalog, applyFixture.afterCatalog);
+
+      // INDEPENDENT ORACLE: the equality above compares the CLI against
+      // `migrationCommandSql`, so it pins the caller but not the helper — a
+      // format change inside the helper moves both sides together and stays
+      // invisible. These bytes are written out by hand instead: a planted
+      // migration with fixed inputs, and the exact command it must produce,
+      // including the journal column order and every literal. Derived from the
+      // contract, never from the function under test.
+      const plantedOracleMigration = {
+        id: "0001_planted_oracle.sql",
+        sequence: 1,
+        digest: "a".repeat(64),
+        sql: "CREATE TABLE planted_oracle (id TEXT);",
+      };
+      const plantedOracleSql =
+        "CREATE TABLE planted_oracle (id TEXT);\n" +
+        "INSERT INTO _asimposium_migrations (id, sequence, digest, applied_at) VALUES " +
+        `('0001_planted_oracle.sql', 1, '${"a".repeat(64)}', '${FIXED_APPLIED_AT}');`;
+      // A golden digest of those exact bytes, so a whitespace or ordering drift
+      // that survives a careless edit to the literal above still fails here.
+      const PLANTED_ORACLE_SHA256 =
+        "80694c32f32ef98d04365ff9405bb9f2098a299005b7e02439d83993febf8cfc";
+      assert.equal(digestOf(plantedOracleSql), PLANTED_ORACLE_SHA256);
+      assert.equal(
+        migrationCommandSql(plantedOracleMigration, FIXED_APPLIED_AT),
+        plantedOracleSql,
+        "migrationCommandSql no longer produces the pinned canonical command bytes",
+      );
+      // The oracle is discriminating: appending a statement or moving a byte
+      // must break it, exactly as it must break the CLI comparison above.
+      assert.notEqual(digestOf(`${plantedOracleSql}\nSELECT 1;`), PLANTED_ORACLE_SHA256);
+      assert.notEqual(
+        digestOf(plantedOracleSql.replace("planted_oracle (id TEXT)", "planted_oracle (id TEXTX)")),
+        PLANTED_ORACLE_SHA256,
+      );
+
+      // PLANTED NEGATIVES: the equality above must be capable of failing, and it
+      // must fail before the fake moves any state. Without these, a guard that
+      // accepted anything would look identical on a green run.
+      const forwardDigest = applyFixture.forward.digest;
+      const flippedDigest = `${forwardDigest.slice(0, -1)}${forwardDigest.endsWith("0") ? "1" : "0"}`;
+      for (const [label, tamperedSql] of [
+        // Exactly one byte changed, inside the digest this command records in the
+        // ledger: the shape is identical and only the recorded fact differs.
+        ["changed byte", expectedApplySql.replace(forwardDigest, flippedDigest)],
+        // The exact expected command plus one appended statement: this is the
+        // case every substring assertion accepts.
+        ["appended extra statement", `${expectedApplySql}\nSELECT 1;`],
+      ]) {
+        const journalBefore = [...journal];
+        const catalogBefore = [...catalog];
+        const mutationsBefore = executeMutations;
+        assert.notEqual(tamperedSql, expectedApplySql, `${label} plant was not actually tampered`);
+        assert.throws(
+          () => applyExecuteGuard({ database_id: STAGING_DATABASE_ID, sql: tamperedSql }),
+          /REMOTE_CLI_APPLY_SQL_MISMATCH/,
+          `${label} was accepted by the apply guard`,
+        );
+        assert.equal(executeMutations, mutationsBefore, `${label} moved the mutation counter`);
+        assert.deepEqual(journal, journalBefore, `${label} appended to the journal`);
+        assert.deepEqual(catalog, catalogBefore, `${label} rewrote the catalog`);
+      }
+      // The guard still accepts the exact command, so the negatives above proved
+      // discrimination rather than a permanently closed door.
+      assert.equal(executeMutations, 1);
+
+      const idempotentCapture = capture();
+      const idempotentExit = await runMigrationCli(
+        ["--env", "staging", "--resolved-database-id", STAGING_DATABASE_ID],
+        {
+          ...idempotentCapture.dependencies,
+          root: applyFixture.root,
+          environmentValidator: () => validatedTopology,
+          remoteTransportFactory: () => applyTransport,
+        },
+      );
+      assert.equal(idempotentExit, 0);
+      assert.equal(idempotentCapture.stderr.length, 0);
+      const secondReceipt = JSON.parse(idempotentCapture.stdout.join("").trim());
+      assert.equal(secondReceipt.phase, "plan");
+      assert.equal(secondReceipt.idempotent, true);
+      assert.deepEqual(secondReceipt.to_apply, []);
+      assert.equal(executeCalls, 1, "the second CLI plan must remain read-only");
+
+      const unresolved = capture();
+      let unresolvedFactoryCalls = 0;
+      const unresolvedExit = await runMigrationCli(["--env", "staging"], {
+        ...unresolved.dependencies,
+        remoteTransportFactory: () => {
+          unresolvedFactoryCalls += 1;
+          throw new Error("unresolved id reached remote transport factory");
+        },
+      });
+      assert.equal(unresolvedExit, 1);
+      assert.equal(unresolvedFactoryCalls, 0);
+      assert.equal(
+        JSON.parse(unresolved.stderr.join("").trim()).code,
+        "REMOTE_TARGET_ID_UNRESOLVED",
+      );
+
+      const production = capture();
+      let productionFactoryCalls = 0;
+      const productionExit = await runMigrationCli(["--env", "production", "--apply"], {
+        ...production.dependencies,
+        remoteTransportFactory: () => {
+          productionFactoryCalls += 1;
+          throw new Error("production reached remote transport factory");
+        },
+      });
+      assert.equal(productionExit, 1);
+      assert.equal(productionFactoryCalls, 0);
+      assert.equal(
+        JSON.parse(production.stderr.join("").trim()).code,
+        "REMOTE_APPLY_PRODUCTION_REFUSED",
+      );
+
+      const contaminated = capture();
+      const contaminatedTransport = recordingTransport({
+        catalog: [remoteCatalogRow("table", "counterfeit", "CREATE TABLE counterfeit (id TEXT);")],
+      });
+      const contaminatedExit = await runMigrationCli(
+        ["--env", "staging", "--resolved-database-id", STAGING_DATABASE_ID, "--apply"],
+        {
+          ...contaminated.dependencies,
+          remoteTransportFactory: () => contaminatedTransport,
+        },
+      );
+      assert.equal(contaminatedExit, 1);
+      assert.equal(JSON.parse(contaminated.stderr.join("").trim()).code, "SCHEMA_LINEAGE_REFUSED");
+      assert.equal(contaminatedTransport.calls.describe, 1);
+      assert.ok(contaminatedTransport.calls.query >= 1);
     },
   },
 ];

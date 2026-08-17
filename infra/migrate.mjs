@@ -75,6 +75,66 @@ export const LOCAL_D1_KILL_REAP_MS = 500;
 export const LOCAL_D1_PIPE_DRAIN_MS = 500;
 export const LOCAL_D1_STDOUT_MAX_BYTES = 1_048_576;
 export const LOCAL_D1_STDERR_MAX_BYTES = 65_536;
+export const REMOTE_D1_STDOUT_MAX_BYTES = 256 * 1024;
+export const REMOTE_D1_STDERR_MAX_BYTES = 65_536;
+// A remote command is given its execution window before this reserve. The
+// reserve is the worst bounded path an aborted `runBoundedCommand` can spend
+// after `controller.abort()`, counted window by window against that function
+// rather than approximated, because a reserve shorter than the real path lets
+// the outer call emit a receipt while the owned child is still cleaning up:
+//   1. `terminateOwnedProcessGroup` TERM grace ............ termGraceMs
+//   2. `terminateOwnedProcessGroup` SIGKILL reap .......... killReapMs
+//   3. `terminateOwnedProcessGroup` termination drain ..... killReapMs
+//   4. post-termination `within(child.exited, killReapMs)`  killReapMs
+//   5. final `within(completeBoundedPipes(...), pipeDrainMs)` pipeDrainMs
+//   6. `settleBoundedPipeCleanup(...)` bounded cancellation  pipeDrainMs
+// Window 6 is reachable from BOTH tails: the failed-drain branch always spends
+// it, and the settled-drain non-exit branch spends it too. Bounding the
+// cancellation wait was necessary to stop a hang, but it is a real window and
+// must be counted here — an uncounted wait is how the outer race comes back.
+// It is part of the one observation deadline, not a second deadline after it.
+export const REMOTE_D1_CONTAINMENT_RESERVE_MS =
+  LOCAL_D1_TERM_GRACE_MS + LOCAL_D1_KILL_REAP_MS * 3 + LOCAL_D1_PIPE_DRAIN_MS * 2;
+// The smallest execution window worth spawning a child for. Below this, starting
+// a command only guarantees it will be aborted before it can answer.
+export const REMOTE_D1_EXECUTION_FLOOR_MS = 1_000;
+// Timers fire no earlier than their delay and the event loop is shared, so each
+// composed window above is a LOWER bound on real elapsed time. The margin must
+// therefore sit inside the reserved cleanup tail, not merely inside the
+// pre-start check: if it were only added to the start window, execution would be
+// free to consume it and cleanup would still be allocated exactly the composed
+// sum with no slack, so one late timer re-creates the outer race this reserve
+// exists to remove.
+export const REMOTE_D1_SCHEDULING_MARGIN_MS = 250;
+/** What is actually withheld from execution: the composed windows plus slack. */
+export const REMOTE_D1_CLEANUP_RESERVE_MS =
+  REMOTE_D1_CONTAINMENT_RESERVE_MS + REMOTE_D1_SCHEDULING_MARGIN_MS;
+// A default command may only START if this whole window still remains on the one
+// absolute deadline: the cleanup tail, plus an execution floor ON TOP of it. A
+// budget shared across describe plus N queries shrinks as it is spent, and a
+// later call that starts with a truncated reserve is exactly how a real child
+// outlives the outer receipt: the outer expires, reports settlement unproven,
+// and the child keeps cleaning. Refusing before the spawn is the only point at
+// which that is still preventable.
+export const REMOTE_D1_COMMAND_WINDOW_MS =
+  REMOTE_D1_CLEANUP_RESERVE_MS + REMOTE_D1_EXECUTION_FLOOR_MS;
+const RESOLVED_STAGING_WRANGLER_CONFIG = "infra/deploy-resolved/staging.wrangler.toml";
+
+function immutableEmptyWranglerConfigOrRefuse() {
+  // Wrangler's parser treats this extensionless POSIX character device as an
+  // empty configuration. Passing it explicitly prevents parent-directory
+  // discovery of a workspace config while the captured account id below selects
+  // the account. Windows has no equivalent path with this exact parser contract,
+  // so the default remote transport refuses there rather than silently falling
+  // back to a mutable config search.
+  if (process.platform === "win32") {
+    fail(
+      "REMOTE_IMMUTABLE_CONFIG_UNAVAILABLE",
+      "The default remote D1 transport requires an immutable empty Wrangler configuration on this platform.",
+    );
+  }
+  return "/dev/null";
+}
 
 function minimalLocalToolEnvironment() {
   // The command and pinned Wrangler entry are absolute, so neither a Cloudflare
@@ -96,6 +156,25 @@ function minimalLocalToolEnvironment() {
     PATH: "/usr/local/bin:/usr/bin:/bin",
     TZ: "UTC",
   };
+}
+
+/**
+ * The one remote tool environment is deliberately smaller than the parent
+ * environment, but retains the two documented Wrangler authentication paths:
+ * an explicit API token or Wrangler's credential store under HOME. No diagnostic
+ * ever serialises this object or a child's raw output.
+ */
+function minimalRemoteToolEnvironment(accountId) {
+  const environment = minimalLocalToolEnvironment();
+  for (const key of ["HOME", "USERPROFILE", "XDG_CONFIG_HOME", "CLOUDFLARE_API_TOKEN"]) {
+    const value = process.env[key];
+    if (typeof value === "string" && value !== "") environment[key] = value;
+  }
+  // The resolved staging artifact is consumed once at transport construction.
+  // Every child receives this captured authority, not an account selected from a
+  // mutable Wrangler config or from the ambient process environment.
+  environment.CLOUDFLARE_ACCOUNT_ID = accountId;
+  return environment;
 }
 
 /**
@@ -1048,10 +1127,27 @@ function within(promise, timeoutMs) {
  * makes that report complete rather than merely honest.
  *
  * `cancel` is idempotent, safe before the reader exists (a stream whose
- * `getReader()` threw), and safe after `done` has already released. It starts
- * cleanup but never becomes another deadline: the caller lets the existing
- * drain window observe `done` while cancellation unwinds the parked read.
+ * `getReader()` threw), and safe after `done` has already released. The normal
+ * drain window remains bounded, but a failed drain does not receive a receipt
+ * until cancellation has actually unwound the parked read and released its
+ * lock. Returning while that promise is still pending would leave a detached
+ * OS-pipe holder behind after an ostensibly contained command.
  */
+/**
+ * One shared, capture-free rejection handler for cancel promises.
+ *
+ * Attaching a rejection reaction to an arbitrary promise is unavoidable —
+ * omitting it turns a rejecting source hook into a late unhandled rejection —
+ * and no JavaScript API detaches one. What IS controllable is what that
+ * reaction keeps alive. Because this function is module-level and closes over
+ * nothing, a hostile never-settling hook retains a pointer to this one global
+ * and to no reader, pipe, command, run, or OS resource.
+ */
+const ignoreCancellationRejection = () => undefined;
+
+/** Cancellation is represented as "initiated", never as "settled". */
+const CANCELLATION_INITIATED = Promise.resolve();
+
 function captureBoundedPipe(stream, maximumBytes) {
   let resolveOverrun;
   const overrun = new Promise((resolve) => {
@@ -1075,23 +1171,77 @@ function captureBoundedPipe(stream, maximumBytes) {
       // cancellation completion path below retries this exact release.
     }
   };
+  /**
+   * Release the handle after a cancellation promise that did not settle, and
+   * report honestly whether it worked. It is deliberately not called "force":
+   * nothing here can force a stream, and none is needed.
+   *
+   * Per the Streams standard, `reader.cancel()` closes the stream as part of
+   * *initiating* cancellation: every pending read request is fulfilled with
+   * `{done: true}` right then, before the underlying source's `cancel` hook is
+   * awaited. So a source hook that never settles leaves only the outer
+   * cancellation promise pending — the parked read has already been freed, the
+   * drain loop has already broken out, and its finalizer has already released
+   * the lock. That is why bounding the wait on that promise strands nothing.
+   *
+   * This remains as the honest belt-and-braces for that expiry path: retry the
+   * lock release and report the result rather than asserting a release that may
+   * not have happened. It deliberately does NOT retry `stream.cancel()` — a
+   * second call would attach a second reaction to another externally rooted
+   * promise for no gain, since cancellation has already been initiated once.
+   * `settleBoundedPipeCleanup` returns this report instead of claiming
+   * containment.
+   */
+  const releaseHandleOrReport = () => {
+    release();
+    return released;
+  };
+  /**
+   * Initiate cancellation WITHOUT taking a dependency on its promise.
+   *
+   * `reader.cancel()` returns a promise resolved by the underlying source's
+   * `cancel` hook, which is arbitrary code that may never settle. Awaiting it —
+   * even inside a bounded observation — creates a reaction record on that
+   * promise that cannot be detached, and `Promise.all` in
+   * `completeBoundedPipes` then retains it for the process lifetime. The bound
+   * limits how long the caller *waits*; it does not release what the wait
+   * retained.
+   *
+   * Nothing needs that promise. Per the Streams standard, `cancel()` closes the
+   * stream while initiating: pending reads are fulfilled with `{done: true}`
+   * before the source hook is invoked. So the drain loop exits and its
+   * finalizer releases the lock on the strength of `done` alone.
+   *
+   * The guarantee this makes is therefore narrow and exact. It calls
+   * `reader.cancel()` once, attaches only the module-level capture-free
+   * rejection handler, releases the lock immediately, and returns a resolved
+   * module sentinel meaning CANCELLATION WAS INITIATED — never that it settled.
+   * The hook's promise is not stored, not awaited, and never enters a
+   * `Promise.all`, so no completion path depends on it and `done` remains the
+   * only thing a caller bounds.
+   *
+   * What that does not claim: a hostile never-settling hook still holds one
+   * reaction record pointing at `ignoreCancellationRejection`. That is
+   * unavoidable, and it retains no reader, pipe, command, run context, or OS
+   * resource — which is the whole of the claim.
+   */
   const cancel = () => {
     if (cancellation !== undefined) return cancellation;
-    cancellation = (async () => {
-      if (reader === undefined || drainFinished) return;
+    if (reader !== undefined && !drainFinished) {
       try {
-        // Rejects the parked read, which unwinds the drain loop below.
-        await reader.cancel();
+        const initiated = reader.cancel();
+        if (initiated !== null && typeof initiated?.then === "function") {
+          // Rejection safety only. Never stored, awaited, or composed.
+          void initiated.then(undefined, ignoreCancellationRejection);
+        }
       } catch {
-        // The caller preserves its pre-existing typed refusal; cancellation is
-        // cleanup and must not replace it with an unbounded exception.
-      } finally {
-        release();
+        // A synchronous throw is cleanup noise; the caller keeps its own refusal.
       }
-    })();
-    // An already-idle reader can be released synchronously. A parked read
-    // throws here, then the bounded cancellation completion retries it.
+    }
+    // The standard has already fulfilled any parked read, so this either
+    // succeeds now or succeeds in the drain finalizer that `done` awaits.
     release();
+    cancellation = CANCELLATION_INITIATED;
     return cancellation;
   };
   const done = (async () => {
@@ -1140,14 +1290,37 @@ function captureBoundedPipe(stream, maximumBytes) {
     }
     return { failed, overrun: exceeded, text: new TextDecoder().decode(bytes) };
   })();
-  return { cancel, done, failure, overrun, release };
+  return { cancel, done, failure, overrun, release, releaseHandleOrReport };
 }
 
 /**
- * Start cancellation of both owned readers without adding a second deadline.
- * The existing pipe-drain observation remains the only time budget for the
- * caller. A malformed stream may leave its cancellation promise unresolved,
- * but it cannot make `runBoundedCommand` wait beyond that pre-existing window.
+ * Bound the cleanup that follows a failed drain.
+ *
+ * Awaiting cancellation without a bound was the previous behaviour and it is a
+ * hang: a source whose `cancel` hook never settles never returns a receipt at
+ * all. A command that cannot answer is strictly worse than one that answers
+ * "unproven", so this settles in bounded time and reports which happened.
+ *
+ * What expiry does and does not mean is precise. Cancelling a standards stream
+ * fulfils its pending reads immediately, so by this point the drain loops have
+ * already exited and released their locks; only the source hook's promise is
+ * still outstanding. The retry below therefore normally confirms an already
+ * released handle rather than rescuing a held one. The boolean is returned, not
+ * asserted, so a caller never records cleanup it did not observe.
+ */
+async function settleBoundedPipeCleanup(pipes, cancellation, timeoutMs) {
+  const settled = await within(completeBoundedPipes(pipes, cancellation), timeoutMs);
+  if (settled.settled) return true;
+  const stdoutReleased = pipes.stdout.releaseHandleOrReport();
+  const stderrReleased = pipes.stderr.releaseHandleOrReport();
+  return stdoutReleased && stderrReleased;
+}
+
+/**
+ * Start cancellation of both owned readers. The caller may use a bounded
+ * observation to decide that draining is unproven, but it must await this
+ * completion before returning a command receipt: otherwise a losing cleanup
+ * promise can retain a reader lock after the process result was reported.
  */
 function cancelBoundedPipes(pipes) {
   const cancellation = Promise.all([pipes.stdout.cancel(), pipes.stderr.cancel()]);
@@ -1275,6 +1448,7 @@ export async function runBoundedCommand({
   groupExists = ownedProcessGroupExists,
   platform = process.platform,
   signal = undefined,
+  toolEnvironment = minimalLocalToolEnvironment(),
 }) {
   const containmentScope = platform === "win32" ? "direct-child-only" : "process-group-only";
   const abortedResult = () => ({
@@ -1311,7 +1485,7 @@ export async function runBoundedCommand({
         stdout: "pipe",
         stderr: "pipe",
         detached: true,
-        env: minimalLocalToolEnvironment(),
+        env: toolEnvironment,
       });
     } catch {
       return { outcome: "spawn-failed", stderr: "", stdout: "" };
@@ -1414,8 +1588,16 @@ export async function runBoundedCommand({
     const settledPipes = await within(completeBoundedPipes(pipes, pipeCancellation), pipeDrainMs);
     if (!settledPipes.settled) {
       if (outcome === "exited") outcome = "pipe-drain-unproven";
-      // The drains are still parked. This is the exit that used to strand them.
-      cancelPipes();
+      // The bounded observation above establishes only that the drains were not
+      // timely. Cancellation is then given its own bounded window rather than an
+      // unbounded await: a stream that never honours `cancel()` must not be able
+      // to withhold the receipt forever, because a command that never answers is
+      // worse than one that answers `pipe-drain-unproven`. The outcome here is
+      // already an unproven one, so nothing below claims cleanup was observed.
+      // Cancelling a standards stream frees its pending reads at initiation, so
+      // the locks are already released by the drain finalizers by this point;
+      // what the bound gives up on is the source hook's promise, not a handle.
+      await settleBoundedPipeCleanup(pipes, cancelPipes(), pipeDrainMs);
       return {
         containment_scope: containmentScope,
         exitCode,
@@ -1427,7 +1609,11 @@ export async function runBoundedCommand({
     const [stdout, stderr] = settledPipes.value;
     if ((stdout.failed || stderr.failed) && outcome === "exited") outcome = "pipe-drain-unproven";
     if (outcome === "exited") releaseBoundedPipes(pipes);
-    else cancelPipes();
+    // Same bound on the non-exit path: the drains settled, but cancellation is
+    // still a promise that a hostile stream can park forever.
+    else if (!(await settleBoundedPipeCleanup(pipes, cancelPipes(), pipeDrainMs))) {
+      if (outcome === "exited") outcome = "pipe-drain-unproven";
+    }
     return {
       containment_scope: containmentScope,
       exitCode,
@@ -1611,31 +1797,45 @@ async function readLocalLineageSnapshot(root, databaseName, localPersistTo = und
  *
  * `readLocalLineageSnapshot` above needs no credential, because Wrangler's local
  * D1 is workerd's own SQLite. A remote target has neither that property nor a
- * safe default, so this reader takes its transport as an argument and has **no
- * default transport at all**: there is no path through this file that can reach
- * Cloudflare on its own. A caller that has not supplied one gets a typed
- * refusal, never a network call and never a silent downgrade to local.
+ * local fallback, so this reader takes an explicit transport. The CLI later
+ * constructs the one default transport only for a resolved staging artifact;
+ * direct callers without a transport get a typed refusal, never a silent
+ * downgrade to local.
  *
- * Scope is deliberately observation only. Nothing here applies a migration or
- * writes a journal row. The remote apply path and its atomicity question — can
- * `migration; INSERT INTO ledger` be made atomic over the D1 HTTP API, or does
- * it need a reconciled two-phase journal — are open and must not be inferred
- * from the existence of this reader.
+ * Scope here is deliberately observation only. The separately capability-gated
+ * remote apply seam below is the only writer and cites the D1 query-transaction
+ * contract it relies on; bootstrap remains local-only.
  */
 
 /**
  * The transport contract, validated before use.
  *
- * `describeTarget({signal})` answers which database responded; `query({sql,
- * database_id, signal})` runs one read against a named target and returns the
- * identity that served it. Both are required: a transport that could answer
- * queries without attributing them would leave the per-result identity check
- * below with nothing to compare.
+ * `describeTarget({signal})` returns provider-supplied database identity. A
+ * `query({sql, database_id, signal})` runs one read against the named target
+ * and returns the transport's immutable request-target assertion alongside its
+ * rows. D1 query responses do not contain a database UUID, so this field is not
+ * mislabelled as a provider echo; the default transport binds it by captured
+ * account + UUID command operands before Wrangler starts.
  *
  * The methods must be **own data properties**. `typeof transport.query` also
  * accepts an inherited method or an accessor, and an accessor can hand a
  * different function to the check than to the call.
  */
+/**
+ * True only for a transport that declares, as its own data, that its methods
+ * spawn an owned child. Read through the same own-data accessor discipline as
+ * every other transport field so an inherited or getter-backed marker cannot
+ * quietly buy a command the deadline cannot contain.
+ */
+function transportOwnsBoundedCommand(transport) {
+  return (
+    typeof transport === "object" &&
+    transport !== null &&
+    !Array.isArray(transport) &&
+    Object.getOwnPropertyDescriptor(transport, "ownsBoundedCommand")?.value === true
+  );
+}
+
 function assertRemoteTransport(transport) {
   assertRemotePlainObject(transport, "REMOTE_TRANSPORT_UNAVAILABLE");
   for (const method of ["describeTarget", "query"]) {
@@ -1761,54 +1961,191 @@ function assertRemoteReadLimit(rows, maximum, code) {
  * Bound one transport call in time, and flatten whatever it throws.
  *
  * A never-settling call is the failure mode a row cap cannot reach, so the
- * deadline is enforced here rather than trusted to the transport. The abort
- * signal is the cooperative half: a transport that honours it stops work, and
- * one that ignores it is abandoned anyway.
+ * deadline is enforced here rather than trusted to the transport. A default
+ * Wrangler child receives the execution share of that deadline, leaving the
+ * containment reserve for its TERM/KILL/group/pipe proof. On expiry the runner
+ * aborts, then waits only through the already-reserved remainder. It never
+ * emits a deadline receipt while the owned child is still reaping; a transport
+ * that cannot settle within that remainder is a typed reap-unproven refusal.
  *
  * The caught value is discarded deliberately. A transport failure is data from
  * outside this process and may carry a provider message, a credential, or an
  * absolute path; replacing it with a fixed code is the only way to guarantee
  * none of that reaches a diagnostic.
  */
-async function awaitBoundedRemote(budget, invoke, code) {
+async function awaitBoundedRemote(budget, invoke, code, { ownsBoundedCommand = false } = {}) {
   if (performance.now() >= budget.deadlineAt) {
     fail(
       "REMOTE_OBSERVATION_DEADLINE_EXCEEDED",
       "The remote observation exceeded its fixed deadline.",
     );
   }
+  const remaining = Math.max(0, budget.deadlineAt - performance.now());
+  // Refuse BEFORE the transport is entered, so no owned child is ever spawned
+  // into a window that cannot also hold its cleanup. This is checked against the
+  // one absolute deadline every call on this budget shares, which is what makes
+  // a late call safe: earlier describes and queries have already spent part of
+  // it, and the remainder — not a fresh fraction of it — is what is available.
+  if (ownsBoundedCommand && remaining < REMOTE_D1_COMMAND_WINDOW_MS) {
+    fail(
+      "REMOTE_D1_COMMAND_WINDOW_EXHAUSTED",
+      "The remote observation has too little of its deadline left to start and contain another command.",
+    );
+  }
   const controller = new AbortController();
-  let timer;
-  // An explicit flag, not a second clock reading. Re-comparing `performance.now()`
-  // against the deadline in the catch misattributed an expiry whenever timer
-  // granularity left the clock a fraction below it, reporting a transport failure
-  // for what was actually a deadline.
-  let expired = false;
+  // A command-backed call is guaranteed the full cleanup tail — composed windows
+  // AND the scheduling margin — by the refusal above, so the margin is withheld
+  // from execution rather than left for it to spend. A pure injected transport
+  // may still be observed inside a deliberately tiny budget: split that evenly,
+  // because it spawns nothing and its failure to settle costs no OS resource.
+  const containmentReserve = ownsBoundedCommand
+    ? REMOTE_D1_CLEANUP_RESERVE_MS
+    : Math.min(REMOTE_D1_CLEANUP_RESERVE_MS, Math.floor(remaining / 2));
+  const executionDeadlineAt = budget.deadlineAt - containmentReserve;
+  let executionTimer;
+  let containmentTimer;
+  const timerResult = (deadlineAt, kind) =>
+    new Promise((resolve) => {
+      const timer = setTimeout(
+        () => resolve({ kind }),
+        Math.max(0, deadlineAt - performance.now()),
+      );
+      timer.unref?.();
+      if (kind === "execution-deadline") executionTimer = timer;
+      else containmentTimer = timer;
+    });
+  const preserveContainmentRefusal = (error) =>
+    error instanceof MigrationError &&
+    [
+      "REMOTE_D1_TRANSPORT_TIMEOUT",
+      "REMOTE_D1_TRANSPORT_ABORTED",
+      "REMOTE_D1_TRANSPORT_OUTPUT_OVERRUN",
+      "REMOTE_D1_TRANSPORT_REAP_UNPROVEN",
+      // The in-callback window recheck rejects before the transport is entered.
+      // It must reach the caller as itself: flattening it into the generic
+      // "did not complete" code would hide a refusal that spawned nothing.
+      "REMOTE_D1_COMMAND_WINDOW_EXHAUSTED",
+    ].includes(error.code);
+  // Set exactly when the command promise settles, so every classification below
+  // can be proven to happen after settlement rather than merely intended to.
+  let commandSettled = false;
   try {
-    return await Promise.race([
-      (async () => invoke(controller.signal))(),
-      new Promise((_resolve, reject) => {
-        timer = setTimeout(
-          () => {
-            expired = true;
-            controller.abort();
-            reject(new Error("remote-observation-deadline"));
-          },
-          Math.max(0, budget.deadlineAt - performance.now()),
-        );
-        timer.unref?.();
-      }),
+    // Set the timer before calling the transport. A synchronously hostile test
+    // double still cannot be pre-empted by JavaScript, but it cannot delay timer
+    // creation until after it has been entered either.
+    const settled = Promise.resolve()
+      .then(() => {
+        // The precheck above and this callback are separated by a microtask
+        // checkpoint, and the engine drains the whole microtask queue — running
+        // each job to completion — before any timer fires. An already-queued job
+        // can therefore burn the window AFTER the precheck passed, and neither
+        // the abort controller (whose timer is a macrotask) nor
+        // `runBoundedCommand` (which has no zero-timeout guard) would stop the
+        // spawn. Re-checking here is what makes the guarantee atomic with
+        // respect to entering the transport: this is the last instruction before
+        // it, so nothing can intervene between the check and the call.
+        if (ownsBoundedCommand) {
+          const beforeInvoke = Math.max(0, budget.deadlineAt - performance.now());
+          if (beforeInvoke < REMOTE_D1_COMMAND_WINDOW_MS) {
+            fail(
+              "REMOTE_D1_COMMAND_WINDOW_EXHAUSTED",
+              "The remote observation lost its command window before the transport was entered.",
+            );
+          }
+        }
+        return invoke(controller.signal, Math.max(0, executionDeadlineAt - performance.now()));
+      })
+      .then(
+        (value) => {
+          commandSettled = true;
+          return { kind: "settled", value };
+        },
+        (error) => {
+          commandSettled = true;
+          return { kind: "rejected", error };
+        },
+      );
+    const first = await Promise.race([
+      settled,
+      timerResult(executionDeadlineAt, "execution-deadline"),
     ]);
-  } catch {
-    if (expired) {
+    if (first.kind === "settled") return first.value;
+    if (first.kind === "rejected") {
+      if (preserveContainmentRefusal(first.error)) throw first.error;
+      fail(code, "A remote D1 metadata call did not complete.");
+    }
+
+    // The execution share expired. Do not abandon the losing command promise:
+    // the reserved part of this exact monotonic deadline is for its containment
+    // result. `runBoundedCommand` returns `aborted` only after bounded cleanup,
+    // and `process-reap-unproven` is preserved below.
+    controller.abort();
+    const containment = await Promise.race([
+      settled,
+      timerResult(budget.deadlineAt, "containment-deadline"),
+    ]);
+    if (containment.kind === "containment-deadline") {
+      // The reserve above is sized window-by-window to the worst bounded path an
+      // aborted `runBoundedCommand` can spend, so the default transport always
+      // settles inside it and never reaches here. Reaching here means an
+      // injected transport did not settle at all, and this call has therefore
+      // observed nothing about cleanup. Refuse with a code that says exactly
+      // that instead of borrowing a reap classification that was never made:
+      // a bounded refusal is honest, a fabricated containment claim is not.
       fail(
-        "REMOTE_OBSERVATION_DEADLINE_EXCEEDED",
-        "The remote observation exceeded its fixed deadline.",
+        "REMOTE_D1_TRANSPORT_SETTLEMENT_UNPROVEN",
+        "The staging D1 transport did not settle within its reserved containment window.",
       );
     }
-    fail(code, "A remote D1 metadata call did not complete.");
+    if (!commandSettled) {
+      // Defensive: every branch below classifies a settled command. If this ever
+      // trips, the race above admitted a receipt while the command was still
+      // running, which is the exact defect this reserve exists to prevent.
+      fail(
+        "REMOTE_D1_TRANSPORT_SETTLEMENT_UNPROVEN",
+        "The staging D1 transport was classified before it settled.",
+      );
+    }
+    if (containment.kind === "settled") {
+      // A successful value after abort has no evidence that a generic injected
+      // transport contained anything. The default runner instead rejects with
+      // one of the typed outcomes handled below after its owned child is reaped.
+      fail(
+        "REMOTE_D1_TRANSPORT_REAP_UNPROVEN",
+        "The staging D1 transport could not prove cleanup before the observation deadline.",
+      );
+    }
+    if (containment.kind === "rejected") {
+      if (containment.error instanceof MigrationError) {
+        if (containment.error.code === "REMOTE_D1_TRANSPORT_REAP_UNPROVEN") {
+          throw containment.error;
+        }
+        if (
+          containment.error.code === "REMOTE_D1_TRANSPORT_ABORTED" ||
+          containment.error.code === "REMOTE_D1_TRANSPORT_TIMEOUT"
+        ) {
+          fail(
+            "REMOTE_OBSERVATION_DEADLINE_EXCEEDED",
+            "The remote observation exceeded its fixed deadline after bounded transport cleanup.",
+          );
+        }
+      }
+      fail(
+        "REMOTE_D1_TRANSPORT_REAP_UNPROVEN",
+        "The staging D1 transport did not prove cleanup before the observation deadline.",
+      );
+    }
+    // Every `containment.kind` is handled above. This is an exhaustiveness guard,
+    // not a cleanup observation, so it must not borrow the reap wording: saying
+    // "did not prove cleanup" here would report a containment result for a state
+    // in which none was ever computed.
+    fail(
+      "REMOTE_D1_TRANSPORT_SETTLEMENT_UNPROVEN",
+      "The staging D1 transport produced an unhandled containment state.",
+    );
   } finally {
-    clearTimeout(timer);
+    clearTimeout(executionTimer);
+    clearTimeout(containmentTimer);
   }
 }
 
@@ -1842,6 +2179,7 @@ export function assertReadOnlySql(sql) {
  * borrow one regular expression.
  */
 const REMOTE_DATABASE_ID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/;
+const REMOTE_ACCOUNT_ID = /^[0-9a-f]{32}$/i;
 
 /**
  * Bind the database that answered to the one deploy resolution chose, before a
@@ -1902,12 +2240,11 @@ export function assertRemoteTargetIdentity(
 /**
  * One bounded read, bound to the resolved identity in both directions.
  *
- * Checking `describeTarget()` once and then trusting independent queries is
- * split-brain: a transport can describe staging, then serve every subsequent row
- * from a different database, and nothing downstream would notice. The resolved
- * id therefore travels *into* each request and the identity that served it is
- * required *back* on each response, so every row is attributable to the target
- * that was authorized rather than to whichever one answered first.
+ * Checking `describeTarget()` once and then letting an independent query choose
+ * its own target is split-brain. The resolved id therefore travels *into* every
+ * request and is required back as the transport's own immutable request-target
+ * assertion. This confirms the default seam did not lose its captured operand;
+ * provider identity itself is established by the separate D1-info response.
  */
 async function readRemoteRows(transport, budget, sql, resolvedDatabaseId, unreadableCode) {
   // Outside the bounded call on purpose: a read-only violation is this runner's
@@ -1916,14 +2253,16 @@ async function readRemoteRows(transport, budget, sql, resolvedDatabaseId, unread
   const statement = assertReadOnlySql(sql);
   const response = await awaitBoundedRemote(
     budget,
-    (signal) => transport.query({ sql: statement, database_id: resolvedDatabaseId, signal }),
+    (signal, timeoutMs) =>
+      transport.query({ sql: statement, database_id: resolvedDatabaseId, signal, timeoutMs }),
     unreadableCode,
+    { ownsBoundedCommand: transportOwnsBoundedCommand(transport) },
   );
   assertExactOwnKeys(response, ["database_id", "rows"], unreadableCode);
   if (ownBoundedString(response, "database_id", budget, unreadableCode) !== resolvedDatabaseId) {
     fail(
       "REMOTE_TARGET_IDENTITY_MISMATCH",
-      "A remote result was served by a database other than the resolved target.",
+      "A remote result was not issued with the resolved target identity.",
     );
   }
   const rows = ownDataValue(response, "rows", unreadableCode);
@@ -1992,8 +2331,9 @@ export async function readRemoteLineageSnapshotOrRefuse(
     environment,
     await awaitBoundedRemote(
       budget,
-      (signal) => transport.describeTarget({ signal }),
+      (signal, timeoutMs) => transport.describeTarget({ signal, timeoutMs }),
       "REMOTE_TARGET_UNDESCRIBED",
+      { ownsBoundedCommand: transportOwnsBoundedCommand(transport) },
     ),
     targetId,
     budget,
@@ -2073,6 +2413,315 @@ export async function readRemoteLineageSnapshotOrRefuse(
   });
 
   return { catalog, journal, lineage, target };
+}
+
+/**
+ * The checked-in topology deliberately carries a staging placeholder. The
+ * resolver writes the real staging account and D1 id into this ignored artifact.
+ * The default transport reads it once as an authority source, then passes neither
+ * its path nor its mutable D1 binding to a child. In particular, callers cannot
+ * substitute a production configuration, an account, or a database name for the
+ * captured UUID authority.
+ */
+function readResolvedStagingAuthority(root, environmentName, environment, resolvedDatabaseId) {
+  if (
+    environmentName !== "staging" ||
+    environment.kind !== "remote" ||
+    environment.is_preview !== true ||
+    environment.may_hold_production_keys !== false
+  ) {
+    fail(
+      "REMOTE_STAGING_ONLY",
+      "The default remote D1 transport is restricted to the resolved staging preview target.",
+    );
+  }
+  const configPath = assertRepositoryContained(
+    root,
+    RESOLVED_STAGING_WRANGLER_CONFIG,
+    "The resolved staging Wrangler configuration",
+  );
+  if (!existsSync(configPath)) {
+    fail(
+      "REMOTE_RESOLVED_CONFIG_UNAVAILABLE",
+      "The resolved staging Wrangler configuration is unavailable; resolve staging before remote observation.",
+    );
+  }
+  const stat = lstatSync(configPath);
+  if (stat.isSymbolicLink() || !stat.isFile() || stat.size > REMOTE_D1_STDOUT_MAX_BYTES) {
+    fail(
+      "REMOTE_RESOLVED_CONFIG_INVALID",
+      "The resolved staging Wrangler configuration is not a bounded regular file.",
+    );
+  }
+  let parsed;
+  try {
+    parsed = Bun.TOML.parse(readFileSync(configPath, "utf8"));
+  } catch {
+    fail(
+      "REMOTE_RESOLVED_CONFIG_INVALID",
+      "The resolved staging Wrangler configuration is not valid TOML.",
+    );
+  }
+  const databases = parsed?.d1_databases;
+  const database = Array.isArray(databases) && databases.length === 1 ? databases[0] : undefined;
+  const accountId = parsed?.account_id;
+  if (
+    database === null ||
+    typeof database !== "object" ||
+    database.binding !== environment.d1.binding ||
+    database.database_name !== environment.d1.database_name ||
+    database.database_id !== resolvedDatabaseId ||
+    typeof accountId !== "string" ||
+    !REMOTE_ACCOUNT_ID.test(accountId)
+  ) {
+    fail(
+      "REMOTE_RESOLVED_CONFIG_INVALID",
+      "The resolved staging configuration does not bind the selected account and D1 identity exactly.",
+    );
+  }
+  return { account_id: accountId };
+}
+
+function remoteCommandJsonOrRefuse(result) {
+  const code = "REMOTE_D1_TRANSPORT_FAILED";
+  // `runCommand` is injectable for causal plants. Do not let an inherited
+  // outcome/stdout/exitCode or an accessor turn that test seam into ambient
+  // authority at the default transport boundary.
+  assertRemotePlainObject(result, code);
+  const outcome = ownDataValue(result, "outcome", code);
+  if (outcome === "timeout") {
+    fail("REMOTE_D1_TRANSPORT_TIMEOUT", "The staging D1 transport exceeded its fixed deadline.");
+  }
+  if (outcome === "aborted") {
+    fail("REMOTE_D1_TRANSPORT_ABORTED", "The staging D1 transport was cancelled and reaped.");
+  }
+  if (outcome === "output-overrun") {
+    fail(
+      "REMOTE_D1_TRANSPORT_OUTPUT_OVERRUN",
+      "The staging D1 transport exceeded its fixed output limit.",
+    );
+  }
+  if (
+    outcome === "pipe-drain-unproven" ||
+    outcome === "process-reap-unproven" ||
+    outcome === "direct-child-reap-unproven" ||
+    outcome === "process-group-survivor-observed"
+  ) {
+    fail(
+      "REMOTE_D1_TRANSPORT_REAP_UNPROVEN",
+      "The staging D1 transport could not be reaped safely.",
+    );
+  }
+  const exitCode = ownDataValue(result, "exitCode", code);
+  const stdout = ownDataValue(result, "stdout", code);
+  if (outcome !== "exited" || exitCode !== 0 || typeof stdout !== "string") {
+    // Provider output and child stderr are intentionally not attached. A
+    // Wrangler/API diagnostic may echo credentials; this fixed refusal is safe
+    // even when the transport boundary is hostile.
+    fail("REMOTE_D1_TRANSPORT_FAILED", "The staging D1 transport did not complete.");
+  }
+  if (Buffer.byteLength(stdout, "utf8") > REMOTE_D1_STDOUT_MAX_BYTES) {
+    fail(
+      "REMOTE_D1_TRANSPORT_OUTPUT_OVERRUN",
+      "The staging D1 transport exceeded its fixed output limit.",
+    );
+  }
+  let parsed;
+  try {
+    parsed = JSON.parse(stdout);
+  } catch {
+    fail("REMOTE_D1_TRANSPORT_FAILED", "The staging D1 transport did not return JSON rows.");
+  }
+  return parsed;
+}
+
+function remoteCommandResultsOrRefuse(result) {
+  const parsed = remoteCommandJsonOrRefuse(result);
+  if (!Array.isArray(parsed) || parsed.length === 0) {
+    fail(
+      "REMOTE_D1_TRANSPORT_FAILED",
+      "The staging D1 transport returned an unexpected result shape.",
+    );
+  }
+  for (const entry of parsed) {
+    if (entry === null || typeof entry !== "object" || Array.isArray(entry)) {
+      fail(
+        "REMOTE_D1_TRANSPORT_FAILED",
+        "The staging D1 transport returned an unsuccessful result.",
+      );
+    }
+    const success = ownDataValue(entry, "success", "REMOTE_D1_TRANSPORT_FAILED");
+    const rows = ownDataValue(entry, "results", "REMOTE_D1_TRANSPORT_FAILED");
+    if (success !== true || !Array.isArray(rows)) {
+      fail(
+        "REMOTE_D1_TRANSPORT_FAILED",
+        "The staging D1 transport returned an unsuccessful result.",
+      );
+    }
+  }
+  return parsed;
+}
+
+function remoteDatabaseInfoOrRefuse(result, resolvedDatabaseId, expectedName) {
+  const info = remoteCommandJsonOrRefuse(result);
+  if (info === null || typeof info !== "object" || Array.isArray(info)) {
+    fail(
+      "REMOTE_TARGET_UNDESCRIBED",
+      "The staging D1 identity transport returned an unexpected result.",
+    );
+  }
+  const uuid = ownDataValue(info, "uuid", "REMOTE_TARGET_UNDESCRIBED");
+  const name = ownDataValue(info, "name", "REMOTE_TARGET_UNDESCRIBED");
+  const replication = ownDataValue(info, "read_replication", "REMOTE_TARGET_UNDESCRIBED");
+  if (
+    uuid !== resolvedDatabaseId ||
+    name !== expectedName ||
+    replication === null ||
+    typeof replication !== "object" ||
+    Array.isArray(replication) ||
+    ownDataValue(replication, "mode", "REMOTE_TARGET_UNDESCRIBED") !== "disabled"
+  ) {
+    fail(
+      "REMOTE_TARGET_IDENTITY_MISMATCH",
+      "The staging D1 identity or read-replication mode does not match the resolved target.",
+    );
+  }
+  return { database_id: uuid, database_name: name };
+}
+
+function remotePrimaryRowsOrRefuse(result) {
+  const results = remoteCommandResultsOrRefuse(result);
+  if (results.length !== 1) {
+    fail(
+      "REMOTE_D1_TRANSPORT_FAILED",
+      "The staging D1 read transport returned multiple result sets.",
+    );
+  }
+  const meta = ownDataValue(results[0], "meta", "REMOTE_D1_TRANSPORT_FAILED");
+  if (
+    meta === null ||
+    typeof meta !== "object" ||
+    Array.isArray(meta) ||
+    ownDataValue(meta, "served_by_primary", "REMOTE_D1_TRANSPORT_FAILED") !== true
+  ) {
+    fail(
+      "REMOTE_D1_REPLICA_REFUSED",
+      "The staging D1 operation was not confirmed by the primary database.",
+    );
+  }
+  return results[0].results;
+}
+
+/**
+ * Build the only default remote transport. It is staging-only and consumes the
+ * locally resolved authority exactly once before a child process is started.
+ * Each child receives the captured account id in its deliberately minimal
+ * environment and the captured D1 UUID as Wrangler's positional operand. It is
+ * given the immutable empty config device, never the mutable resolved config
+ * path, so a concurrent deploy resolver can rewrite that path after
+ * `describeTarget()` without changing any later child target.
+ *
+ * D1 query responses do not echo a database UUID. `describeTarget` obtains the
+ * documented D1-info UUID/name and requires replication disabled; the query
+ * result's `database_id` below is explicitly a transport assertion about the
+ * immutable request operand, not a provider-returned identity field.
+ *
+ * Cloudflare documents that the D1 query endpoint accepts semicolon-joined SQL
+ * as a batch and that each D1 query is an implicit transaction:
+ * https://developers.cloudflare.com/api/resources/d1/subresources/database/methods/query/
+ * https://developers.cloudflare.com/d1/sql-api/foreign-keys/
+ * This seam therefore submits one `--command` batch for a forward migration and
+ * its journal row. It does not use, or claim anything about, Wrangler file
+ * import atomicity. Remote bootstrap remains separately refused until its empty
+ * catalog race has a dedicated disposable-D1 proof.
+ */
+export function createWranglerRemoteTransport({
+  root,
+  environmentName = "staging",
+  environment,
+  resolvedDatabaseId,
+  runCommand = runBoundedCommand,
+}) {
+  // This order is a security property: a placeholder or malformed id must fail
+  // before config parsing, pinned-Wrangler resolution, or any transport call.
+  const databaseId = assertResolvedDatabaseId(resolvedDatabaseId);
+  const authority = readResolvedStagingAuthority(root, environmentName, environment, databaseId);
+  const pinnedWranglerCommand = resolvePinnedWranglerCommand(root);
+  const immutableConfig = immutableEmptyWranglerConfigOrRefuse();
+  const run = async (args, signal, timeoutMs) =>
+    await runCommand({
+      cmd: [
+        ...pinnedWranglerCommand,
+        // Do not pass the resolved config to a separate child. The explicit
+        // empty config prevents discovery; Wrangler resolves this UUID through
+        // the captured account authority, so a resolver rewrite cannot redirect
+        // a binding between operations.
+        "--config",
+        immutableConfig,
+        ...args,
+      ],
+      cwd: root,
+      timeoutMs,
+      stdoutMaxBytes: REMOTE_D1_STDOUT_MAX_BYTES,
+      stderrMaxBytes: REMOTE_D1_STDERR_MAX_BYTES,
+      signal,
+      toolEnvironment: minimalRemoteToolEnvironment(authority.account_id),
+    });
+  return {
+    // The string is deliberately a narrow capability, not a generic claim about
+    // Wrangler. Only this D1-query command batch is covered by the cited D1
+    // transaction documentation.
+    atomicity: "d1-query-implicit-transaction-v1",
+    // Every method below spawns an owned Wrangler child. The observation runner
+    // reads this to refuse starting one whose cleanup would not fit in what is
+    // left of the shared deadline. An injected transport omits it and keeps the
+    // pure, spawn-free behaviour.
+    ownsBoundedCommand: true,
+    describeTarget: async ({ signal, timeoutMs }) =>
+      remoteDatabaseInfoOrRefuse(
+        await run(["d1", "info", databaseId, "--json"], signal, timeoutMs),
+        databaseId,
+        environment.d1.database_name,
+      ),
+    query: async ({ sql, database_id, signal, timeoutMs }) => {
+      if (database_id !== databaseId) {
+        fail(
+          "REMOTE_TARGET_IDENTITY_MISMATCH",
+          "The remote query target was not the resolved staging identity.",
+        );
+      }
+      assertReadOnlySql(sql);
+      return {
+        database_id: databaseId,
+        rows: remotePrimaryRowsOrRefuse(
+          await run(
+            ["d1", "execute", databaseId, "--remote", "--yes", "--json", "--command", sql],
+            signal,
+            timeoutMs,
+          ),
+        ),
+      };
+    },
+    execute: async ({ sql, database_id, signal, timeoutMs }) => {
+      if (database_id !== databaseId) {
+        fail(
+          "REMOTE_TARGET_IDENTITY_MISMATCH",
+          "The remote apply target was not the resolved staging identity.",
+        );
+      }
+      // A successful result envelope is insufficient: REST reads can be served
+      // by replicas, and the apply receipt must not claim a forward write unless
+      // Wrangler's result metadata confirms the primary.
+      remotePrimaryRowsOrRefuse(
+        await run(
+          ["d1", "execute", databaseId, "--remote", "--yes", "--json", "--command", sql],
+          signal,
+          timeoutMs,
+        ),
+      );
+      return { database_id: databaseId };
+    },
+  };
 }
 
 export function bootstrapInstallSql(artifact, appliedAt) {
@@ -2164,6 +2813,81 @@ export async function applyPendingLocalMigrationsOrRefuse(
   const applied = [];
   for (const migration of pending) {
     await observeLocalMigration(migration);
+    applied.push({ id: migration.id, digest: migration.digest });
+  }
+  return applied;
+}
+
+/**
+ * Forward-only remote application is intentionally narrower than the local
+ * executor: it needs the D1-query transaction capability and an own `execute`
+ * method in addition to the observation methods. An injected observer cannot
+ * accidentally become a writer merely because somebody passed `--apply`.
+ */
+function assertRemoteApplyTransport(transport) {
+  assertRemoteTransport(transport);
+  if (
+    ownDataValue(transport, "atomicity", "REMOTE_APPLY_ATOMICITY_UNSUPPORTED") !==
+      "d1-query-implicit-transaction-v1" ||
+    typeof ownDataValue(transport, "execute", "REMOTE_APPLY_ATOMICITY_UNSUPPORTED") !== "function"
+  ) {
+    fail(
+      "REMOTE_APPLY_ATOMICITY_UNSUPPORTED",
+      "Remote application requires the verified D1 query-transaction transport capability.",
+    );
+  }
+}
+
+/**
+ * Apply each forward migration as one D1 query batch containing both its SQL and
+ * the durable migration-record insert. The Cloudflare D1 query transaction
+ * documentation cited at `createWranglerRemoteTransport` is the authority for
+ * this one seam; callers with any other transport get a typed refusal.
+ */
+export async function applyPendingRemoteMigrationsOrRefuse(
+  environment,
+  transport,
+  resolvedDatabaseId,
+  pending,
+  appliedAt,
+  { deadlineMs = REMOTE_OBSERVATION_DEADLINE_MS } = {},
+) {
+  if (environment.kind !== "remote") {
+    fail(
+      "REMOTE_APPLY_WRONG_TARGET",
+      "Remote migration application requires a remote staging target.",
+    );
+  }
+  if (environment.is_preview !== true || environment.may_hold_production_keys !== false) {
+    fail(
+      "REMOTE_APPLY_PRODUCTION_REFUSED",
+      "Remote migration application is restricted to a non-production staging preview target.",
+    );
+  }
+  const targetId = assertResolvedDatabaseId(resolvedDatabaseId);
+  assertRemoteApplyTransport(transport);
+  const budget = createRemoteBudget(deadlineMs);
+  const applied = [];
+  for (const migration of pending) {
+    const response = await awaitBoundedRemote(
+      budget,
+      (signal, timeoutMs) =>
+        transport.execute({
+          sql: migrationCommandSql(migration, appliedAt),
+          database_id: targetId,
+          signal,
+          timeoutMs,
+        }),
+      "REMOTE_D1_APPLY_FAILED",
+      { ownsBoundedCommand: transportOwnsBoundedCommand(transport) },
+    );
+    assertExactOwnKeys(response, ["database_id"], "REMOTE_D1_APPLY_FAILED");
+    if (ownBoundedString(response, "database_id", budget, "REMOTE_D1_APPLY_FAILED") !== targetId) {
+      fail(
+        "REMOTE_TARGET_IDENTITY_MISMATCH",
+        "A remote application result was not served by the resolved staging target.",
+      );
+    }
     applied.push({ id: migration.id, digest: migration.digest });
   }
   return applied;
@@ -2282,6 +3006,7 @@ function parseArguments(argv) {
     bootstrap: undefined,
     localPersistTo: undefined,
     confirmProduction: false,
+    resolvedDatabaseId: undefined,
   };
   for (let index = 0; index < argv.length; index += 1) {
     const argument = argv[index];
@@ -2289,12 +3014,20 @@ function parseArguments(argv) {
       options.env = argv[index + 1];
       index += 1;
     } else if (argument === "--state-file") {
-      options.state = argv[index + 1];
+      const state = argv[index + 1];
+      if (typeof state !== "string" || state === "" || state.startsWith("--")) {
+        fail("INVALID_ARGUMENT", "--state-file requires one non-option path argument.");
+      }
+      options.state = state;
       index += 1;
     } else if (argument === "--apply") {
       options.apply = true;
     } else if (argument === "--bootstrap") {
-      options.bootstrap = argv[index + 1];
+      const artifact = argv[index + 1];
+      if (typeof artifact !== "string" || artifact === "" || artifact.startsWith("--")) {
+        fail("INVALID_ARGUMENT", "--bootstrap requires one non-option artifact id argument.");
+      }
+      options.bootstrap = artifact;
       index += 1;
     } else if (argument === "--local-persist-to") {
       const directory = argv[index + 1];
@@ -2303,12 +3036,22 @@ function parseArguments(argv) {
       }
       options.localPersistTo = directory;
       index += 1;
+    } else if (argument === "--resolved-database-id") {
+      const databaseId = argv[index + 1];
+      if (typeof databaseId !== "string" || databaseId === "" || databaseId.startsWith("--")) {
+        fail(
+          "INVALID_ARGUMENT",
+          "--resolved-database-id requires one non-option D1 UUID argument.",
+        );
+      }
+      options.resolvedDatabaseId = databaseId;
+      index += 1;
     } else if (argument === "--i-understand-this-is-production") {
       options.confirmProduction = true;
     } else {
       fail(
         "INVALID_ARGUMENT",
-        "Usage: bun infra/migrate.mjs --env <local|staging|production> [--state-file <path>] [--bootstrap <artifact-id>] [--local-persist-to <directory>] [--apply]",
+        "Usage: bun infra/migrate.mjs --env <local|staging|production> [--state-file <path>] [--bootstrap <artifact-id>] [--local-persist-to <directory>] [--resolved-database-id <uuid>] [--apply]",
       );
     }
   }
@@ -2329,17 +3072,34 @@ function diagnostic(status, startedAt, phase, details = {}) {
   };
 }
 
-async function main() {
+/**
+ * CLI orchestration is injectable so its remote safety ordering is proven
+ * without a provider call. The executable entrypoint below supplies only the
+ * default staging Wrangler transport; tests supply an inert recording transport.
+ */
+export async function runMigrationCli(
+  argv = process.argv.slice(2),
+  {
+    root = resolve(dirname(fileURLToPath(import.meta.url)), ".."),
+    environmentValidator = validateEnvironments,
+    remoteTransportFactory = createWranglerRemoteTransport,
+    localReadLineageSnapshot = readLocalLineageSnapshot,
+    localBootstrapSchema = bootstrapLocalSchema,
+    localApplyMigration = applyLocalMigration,
+    stdout = (line) => process.stdout.write(line),
+    stderr = (line) => process.stderr.write(line),
+    now = () => new Date().toISOString(),
+  } = {},
+) {
   const startedAt = performance.now();
   let phase = "arguments";
   try {
-    const options = parseArguments(process.argv.slice(2));
-    const root = resolve(dirname(fileURLToPath(import.meta.url)), "..");
+    const options = parseArguments(argv);
 
     assertRehearsalIsNotAnApplication(options);
 
     phase = "environment";
-    const report = validateEnvironments(root);
+    const report = environmentValidator(root);
     // Explicit selection: there is no default environment, so no command can
     // reach production by omission.
     const environment = selectEnvironment(report, options.env);
@@ -2347,6 +3107,15 @@ async function main() {
       fail(
         "LOCAL_PERSISTENCE_REMOTE_REFUSED",
         "--local-persist-to is available only for the explicitly selected local environment.",
+      );
+    }
+    // Production is not a fallback for a stale staging id. It is refused before
+    // constructing a transport, resolving an id, or observing a remote catalog;
+    // the legacy production-confirmation flag intentionally cannot override it.
+    if (options.apply && options.env === "production") {
+      fail(
+        "REMOTE_APPLY_PRODUCTION_REFUSED",
+        "Remote migration application is staging-only; production is never an apply target for this runner.",
       );
     }
 
@@ -2367,11 +3136,11 @@ async function main() {
         );
       }
       const snapshot = await readBootstrapSnapshotOrRefuse(environment, () =>
-        readLocalLineageSnapshot(root, localDatabase, options.localPersistTo),
+        localReadLineageSnapshot(root, localDatabase, options.localPersistTo),
       );
       const lineage = classifySchemaLineage({ ...snapshot, migrations, manifest });
       if (bootstrapTargetDisposition(lineage) === "idempotent") {
-        process.stdout.write(
+        stdout(
           `${JSON.stringify(
             diagnostic("pass", startedAt, "bootstrap", {
               environment: options.env,
@@ -2382,10 +3151,10 @@ async function main() {
             }),
           )}\n`,
         );
-        return;
+        return 0;
       }
       if (!options.apply) {
-        process.stdout.write(
+        stdout(
           `${JSON.stringify(
             diagnostic("pass", startedAt, "bootstrap-plan", {
               environment: options.env,
@@ -2395,17 +3164,11 @@ async function main() {
             }),
           )}\n`,
         );
-        return;
+        return 0;
       }
-      await bootstrapLocalSchema(
-        root,
-        localDatabase,
-        artifact,
-        new Date().toISOString(),
-        options.localPersistTo,
-      );
+      await localBootstrapSchema(root, localDatabase, artifact, now(), options.localPersistTo);
       const after = classifySchemaLineage({
-        ...(await readLocalLineageSnapshot(root, localDatabase, options.localPersistTo)),
+        ...(await localReadLineageSnapshot(root, localDatabase, options.localPersistTo)),
         migrations,
         manifest,
       });
@@ -2415,7 +3178,7 @@ async function main() {
           "Bootstrap completed without the expected durable baseline lineage.",
         );
       }
-      process.stdout.write(
+      stdout(
         `${JSON.stringify(
           diagnostic("pass", startedAt, "bootstrap", {
             environment: options.env,
@@ -2426,17 +3189,42 @@ async function main() {
           }),
         )}\n`,
       );
-      return;
+      return 0;
     }
 
     let localSnapshot;
     let localManifest;
     let localPlan;
+    let remoteSnapshot;
+    let remoteManifest;
+    let remotePlan;
+    let remoteTransport;
+    let remoteDatabaseId;
     if (localDatabase !== undefined && options.state === undefined) {
       localManifest = readBootstrapManifest(root);
-      localSnapshot = await readLocalLineageSnapshot(root, localDatabase, options.localPersistTo);
+      localSnapshot = await localReadLineageSnapshot(root, localDatabase, options.localPersistTo);
       localPlan = localPlanState(localSnapshot, migrations, localManifest);
       baseline = localPlan.baseline;
+    } else if (environment.kind === "remote" && options.state === undefined) {
+      // Validate before the factory: an injected factory is a transport boundary
+      // too, so an unresolved id must not even reach a pure test double.
+      remoteDatabaseId = assertResolvedDatabaseId(options.resolvedDatabaseId);
+      remoteManifest = readBootstrapManifest(root);
+      remoteTransport = remoteTransportFactory({
+        root,
+        environmentName: options.env,
+        environment,
+        resolvedDatabaseId: remoteDatabaseId,
+      });
+      remoteSnapshot = await readRemoteLineageSnapshotOrRefuse(
+        environment,
+        remoteTransport,
+        remoteDatabaseId,
+      );
+      // This is deliberately the same classifier used for local D1. A remote
+      // catalog is not allowed to claim a weaker or a second authority model.
+      remotePlan = localPlanState(remoteSnapshot, migrations, remoteManifest);
+      baseline = remotePlan.baseline;
     }
     // A local environment has a real (miniflare) D1 available with no
     // credential, so its applied-records come from the database itself rather
@@ -2446,7 +3234,7 @@ async function main() {
         ? readStateFile(assertRepositoryContained(root, options.state, "The state file path"))
         : localDatabase !== undefined
           ? localPlan.applied
-          : [];
+          : remotePlan.applied;
     const plan = planMigrations(migrations, applied, {
       environmentName: options.env,
       // The configured flag, not a guess re-derived from the environment name.
@@ -2457,65 +3245,96 @@ async function main() {
     });
 
     if (localManifest !== undefined) assertForwardHeadsRegistered(plan, localManifest);
+    if (remoteManifest !== undefined) assertForwardHeadsRegistered(plan, remoteManifest);
 
     if (!options.apply) {
-      process.stdout.write(
+      stdout(
         `${JSON.stringify(
           diagnostic("pass", startedAt, "plan", {
             environment: options.env,
             environment_kind: environment.kind,
             is_preview: environment.is_preview,
-            d1_binding: environment.d1_binding,
-            key_ids: environment.key_ids,
+            d1_binding: environment.d1.binding,
+            ...(remoteDatabaseId === undefined ? {} : { resolved_database_id: remoteDatabaseId }),
             migrations_discovered: migrations.length,
             ...plan,
           }),
         )}\n`,
       );
-      return;
+      return 0;
     }
 
     phase = "apply";
-    // Destructive-target guard: naming production is not the same as intending
-    // it, so the intent must be stated separately from the target.
-    if (options.env === "production" && !options.confirmProduction) {
-      fail(
-        "PRODUCTION_CONFIRMATION_REQUIRED",
-        "Applying to production requires --i-understand-this-is-production in addition to --env production.",
-      );
-    }
     // Local is genuinely available: Wrangler's local D1 is workerd's own
     // SQLite, needs no account, and is not a mock of D1.
-    const appliedAt = new Date().toISOString();
-    const appliedNow = await applyPendingLocalMigrationsOrRefuse(
-      environment,
-      plan.to_apply,
-      async (pending) => {
-        const migration = migrations.find((candidate) => candidate.id === pending.id);
-        await applyLocalMigration(
-          root,
-          localDatabase,
-          migration,
-          appliedAt,
-          options.localPersistTo,
+    const appliedAt = now();
+    let appliedNow;
+    let afterSnapshot;
+    let afterLineage;
+    if (environment.kind === "local") {
+      appliedNow = await applyPendingLocalMigrationsOrRefuse(
+        environment,
+        plan.to_apply,
+        async (pending) => {
+          const migration = migrations.find((candidate) => candidate.id === pending.id);
+          await localApplyMigration(
+            root,
+            localDatabase,
+            migration,
+            appliedAt,
+            options.localPersistTo,
+          );
+        },
+      );
+      afterSnapshot = await localReadLineageSnapshot(root, localDatabase, options.localPersistTo);
+      afterLineage = classifySchemaLineage({
+        ...afterSnapshot,
+        migrations,
+        manifest: localManifest,
+      });
+    } else {
+      // `plan.to_apply` is an audit receipt shape (id, sequence, digest), not
+      // executable SQL. Bind each approved receipt back to the exact discovered
+      // migration byte before crossing the remote write seam; otherwise a
+      // successful CLI --apply reaches `migrationCommandSql` with no SQL and
+      // fails only as an opaque transport error.
+      const pendingMigrations = plan.to_apply.map((pending) => {
+        const migration = migrations.find(
+          (candidate) =>
+            candidate.id === pending.id &&
+            candidate.sequence === pending.sequence &&
+            candidate.digest === pending.digest,
         );
-      },
-    );
-
-    const afterSnapshot = await readLocalLineageSnapshot(
-      root,
-      localDatabase,
-      options.localPersistTo,
-    );
-    const afterLineage = classifySchemaLineage({
-      ...afterSnapshot,
-      migrations,
-      manifest: localManifest,
-    });
+        if (migration === undefined) {
+          fail(
+            "MIGRATION_PLAN_UNRESOLVED",
+            "The approved remote migration plan does not map to an exact discovered migration byte.",
+          );
+        }
+        return migration;
+      });
+      appliedNow = await applyPendingRemoteMigrationsOrRefuse(
+        environment,
+        remoteTransport,
+        remoteDatabaseId,
+        pendingMigrations,
+        appliedAt,
+      );
+      afterSnapshot = await readRemoteLineageSnapshotOrRefuse(
+        environment,
+        remoteTransport,
+        remoteDatabaseId,
+      );
+      afterLineage = classifySchemaLineage({
+        ...afterSnapshot,
+        migrations,
+        manifest: remoteManifest,
+      });
+    }
     if (afterLineage.kind === "unknown-or-contaminated") {
       fail(
         "SCHEMA_LINEAGE_UNVERIFIED",
-        "Applied migrations did not leave an exact reclassifiable local schema lineage.",
+        "Applied migrations did not leave an exact reclassifiable schema lineage.",
       );
     }
     const secondPlan = planMigrations(migrations, afterSnapshot.journal, {
@@ -2530,19 +3349,21 @@ async function main() {
       );
     }
 
-    process.stdout.write(
+    stdout(
       `${JSON.stringify(
         diagnostic("pass", startedAt, "apply", {
           environment: options.env,
           environment_kind: environment.kind,
-          d1_binding: environment.d1_binding,
-          key_ids: environment.key_ids,
+          d1_binding: environment.d1.binding,
+          ...(remoteDatabaseId === undefined ? {} : { resolved_database_id: remoteDatabaseId }),
           applied: appliedNow,
           skipped: plan.skipped,
           head_before: plan.head,
+          second_plan_idempotent: true,
         }),
       )}\n`,
     );
+    return 0;
   } catch (error) {
     const details =
       error instanceof MigrationError || error instanceof EnvironmentValidationError
@@ -2559,11 +3380,11 @@ async function main() {
               : {}),
           }
         : { code: "UNEXPECTED", detail: "Unexpected migration failure." };
-    process.stderr.write(`${JSON.stringify(diagnostic("fail", startedAt, phase, details))}\n`);
-    process.exitCode = 1;
+    stderr(`${JSON.stringify(diagnostic("fail", startedAt, phase, details))}\n`);
+    return 1;
   }
 }
 
 if (process.argv[1] === fileURLToPath(import.meta.url)) {
-  await main();
+  process.exitCode = await runMigrationCli();
 }
