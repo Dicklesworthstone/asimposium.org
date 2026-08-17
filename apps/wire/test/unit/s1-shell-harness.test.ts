@@ -1,7 +1,14 @@
 import { describe, expect, test } from "bun:test";
-import { spawn } from "node:child_process";
+import { spawn, spawnSync } from "node:child_process";
 import { once } from "node:events";
-import { existsSync, mkdtempSync, readdirSync, readFileSync, writeFileSync } from "node:fs";
+import {
+  existsSync,
+  mkdirSync,
+  mkdtempSync,
+  readdirSync,
+  readFileSync,
+  writeFileSync,
+} from "node:fs";
 import { createConnection, createServer, type Socket } from "node:net";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
@@ -37,6 +44,41 @@ import {
 const REPO_ROOT = resolve(import.meta.dir, "../../../..");
 const SCRIPT = "scripts/e2e-s1-cold-enrollment.sh";
 const WRANGLER = resolve(REPO_ROOT, "apps/wire/node_modules/.bin/wrangler");
+const TRUSTED_ENV = "/usr/bin/env";
+const STARTUP_CONTROL_NAMES = [
+  "BASH_ENV",
+  "ENV",
+  "SHELLOPTS",
+  "BASHOPTS",
+  "BASH_XTRACEFD",
+  "PS4",
+] as const;
+const CAPTURE_TARGET_FUNCTION_HANDOFFS = [
+  ["BASH_FUNC_printf%%", "S1_CAPTURE_TARGET_BASH_FUNC_PRINTF"],
+  ["BASH_FUNC_set%%", "S1_CAPTURE_TARGET_BASH_FUNC_SET"],
+] as const;
+const TRUSTED_BASH_CANDIDATES = [
+  "/opt/homebrew/bin/bash",
+  "/usr/local/bin/bash",
+  "/usr/bin/bash",
+  "/bin/bash",
+] as const;
+
+function scrubStartupControls(environment: NodeJS.ProcessEnv): NodeJS.ProcessEnv {
+  const scrubbed = { ...environment };
+  for (const name of STARTUP_CONTROL_NAMES) delete scrubbed[name];
+  return scrubbed;
+}
+
+const locatedTrustedBash = TRUSTED_BASH_CANDIDATES.find(
+  (candidate) =>
+    spawnSync(candidate, ["-c", `test "\${BASH_VERSINFO[0]:-0}" -ge 4`], {
+      env: scrubStartupControls(process.env),
+      stdio: "ignore",
+    }).status === 0,
+);
+if (locatedTrustedBash === undefined) throw new Error("S1_TEST_BASH_4_REQUIRED");
+const TRUSTED_BASH: string = locatedTrustedBash;
 
 interface Run {
   exitCode: number;
@@ -277,6 +319,123 @@ async function runScript(
     await terminateExactChild(child);
     harness.closeCaptures();
   }
+}
+
+async function runCapturedProcess(
+  command: string,
+  args: readonly string[],
+  env: Record<string, string> = {},
+  privilegedCapture = true,
+): Promise<Run> {
+  const [stdoutCapture, stderrCapture] = await Promise.all([socketCapture(), socketCapture()]);
+  const targetEnvironment = { ...process.env, ...env };
+  const captureEnvironment = scrubStartupControls(targetEnvironment);
+  for (const name of STARTUP_CONTROL_NAMES) {
+    const value = targetEnvironment[name];
+    const handoffName = `S1_CAPTURE_TARGET_${name}`;
+    if (value === undefined) delete captureEnvironment[handoffName];
+    else captureEnvironment[handoffName] = value;
+  }
+  for (const [functionName, handoffName] of CAPTURE_TARGET_FUNCTION_HANDOFFS) {
+    const value = targetEnvironment[functionName];
+    if (value === undefined) delete captureEnvironment[handoffName];
+    else captureEnvironment[handoffName] = value;
+    // A privileged Bash may preserve an unimported BASH_FUNC_* variable for
+    // its child. Remove the raw name so the target proof depends only on Perl's
+    // explicit reintroduction; the false-green control remains unprivileged.
+    if (privilegedCapture) delete captureEnvironment[functionName];
+  }
+  const launch = `set -e
+exec 3<>"/dev/tcp/127.0.0.1/$1"
+exec 4<>"/dev/tcp/127.0.0.1/$2"
+exec 1>&3 2>&4
+shift 2
+exec /usr/bin/perl -e '
+  my @names = qw(BASH_ENV ENV SHELLOPTS BASHOPTS BASH_XTRACEFD PS4);
+  for my $name (@names) {
+    my $handoff = "S1_CAPTURE_TARGET_$name";
+    if (exists $ENV{$handoff}) { $ENV{$name} = $ENV{$handoff}; }
+    else { delete $ENV{$name}; }
+    delete $ENV{$handoff};
+  }
+  my @function_handoffs = (
+    ["S1_CAPTURE_TARGET_BASH_FUNC_PRINTF", "BASH_FUNC_printf%%"],
+    ["S1_CAPTURE_TARGET_BASH_FUNC_SET", "BASH_FUNC_set%%"],
+  );
+  for my $function_handoff (@function_handoffs) {
+    my ($handoff, $name) = @$function_handoff;
+    if (exists $ENV{$handoff}) { $ENV{$name} = $ENV{$handoff}; }
+    else { delete $ENV{$name}; }
+    delete $ENV{$handoff};
+  }
+  exec { $ARGV[0] } @ARGV or die "S1_CAPTURE_TARGET_EXEC_FAILED\\n";
+' "$@"`;
+  const subprocess = spawn(
+    TRUSTED_ENV,
+    [
+      "-u",
+      "BASH_ENV",
+      "-u",
+      "ENV",
+      "-u",
+      "SHELLOPTS",
+      "-u",
+      "BASHOPTS",
+      "-u",
+      "BASH_XTRACEFD",
+      "-u",
+      "PS4",
+      TRUSTED_BASH,
+      ...(privilegedCapture ? ["-p"] : []),
+      "-c",
+      launch,
+      "s1-prestart-capture",
+      String(stdoutCapture.port),
+      String(stderrCapture.port),
+      command,
+      ...args,
+    ],
+    {
+      cwd: REPO_ROOT,
+      env: captureEnvironment,
+      stdio: ["ignore", "inherit", "inherit"],
+    },
+  );
+  const exited = new Promise<number>((resolveExit, rejectExit) => {
+    subprocess.once("error", rejectExit);
+    subprocess.once("exit", (code, signal) => {
+      resolveExit(code ?? (signal === null ? 1 : 128));
+    });
+  });
+  const child: SpawnedHarness = {
+    exited,
+    get exitCode() {
+      return subprocess.exitCode;
+    },
+    kill(signal) {
+      return subprocess.kill(signal);
+    },
+  };
+  try {
+    const exitCode = await waitForExitBefore(child.exited, RUN_SCRIPT_TIMEOUT_MS);
+    if (exitCode === undefined) {
+      await terminateExactChild(child);
+      throw new Error("S1_DIRECT_SCRIPT_TIMEOUT");
+    }
+    const [stdout, stderr] = await Promise.all([
+      settleSocketCapture(stdoutCapture),
+      settleSocketCapture(stderrCapture),
+    ]);
+    return { exitCode, stdout, stderr };
+  } finally {
+    await terminateExactChild(child);
+    stdoutCapture.close();
+    stderrCapture.close();
+  }
+}
+
+function runDirectScript(args: readonly string[], env: Record<string, string> = {}): Promise<Run> {
+  return runCapturedProcess(SCRIPT, args, env);
 }
 
 /** The runner's own NDJSON record, which is the last JSON line it prints. */
@@ -970,6 +1129,163 @@ describe("the self-test and the blocked external proof", () => {
       server.stop(true);
     }
   });
+
+  test("S1 PLANTED: trusted direct bootstrap scrubs startup hooks, xtrace, and PATH", async () => {
+    const probeDir = mkdtempSync(join(tmpdir(), "s1-prestart-env-probe-"));
+    const hostileBashEnv = join(probeDir, "hostile-bash-env");
+    const hostileEnv = join(probeDir, "hostile-env");
+    const hostileBin = join(probeDir, "hostile-bin");
+    const hostileBash = join(hostileBin, "bash");
+    const controlBashLeak = join(probeDir, "unsanitized-bash-env-leak");
+    const controlPathLeak = join(probeDir, "unsanitized-path-leak");
+    const directBashLeak = join(probeDir, "direct-bash-env-leak");
+    const directEnvLeak = join(probeDir, "direct-env-leak");
+    const directPathLeak = join(probeDir, "direct-path-leak");
+    const controlFunctionLeak = join(probeDir, "unsanitized-function-leak");
+    const directFunctionLeak = join(probeDir, "direct-function-leak");
+    const controlCaptureSetLeak = join(probeDir, "unsanitized-capture-set-leak");
+    const directCaptureSetLeak = join(probeDir, "direct-capture-set-leak");
+    const captureHandoffPrintfLeak = join(probeDir, "privileged-capture-printf-handoff-leak");
+    const captureHandoffSetLeak = join(probeDir, "privileged-capture-set-handoff-leak");
+    const fragment = `v1.${"P".repeat(43)}`;
+    const joinUrl = `http://127.0.0.1:1/join/ASIMP-EN-7F3K9M2Q8R#${fragment}`;
+    const hostilePrintfFunction = `() { command printf "%s" "\${ASIMP_S1_JOIN_URL:-}" > "\${S1_PRESTART_FUNCTION_SENTINEL:?}"; command printf "$@"; }`;
+    const hostileSetFunction = `() { command printf "%s" "\${ASIMP_S1_JOIN_URL:-}" > "\${S1_PRESTART_CAPTURE_SET_SENTINEL:?}"; builtin set "$@"; }`;
+    writeFileSync(
+      hostileBashEnv,
+      `: "\${PS4:?}"\nprintf "%s" "\${ASIMP_S1_JOIN_URL:-}" > "\${S1_PRESTART_BASH_ENV_SENTINEL:?}"\n`,
+      { encoding: "utf8", mode: 0o600 },
+    );
+    // Bash's documented noninteractive hook is BASH_ENV. ENV is still
+    // scrubbed by the direct bootstrap, but this is not a claim that Bash
+    // would source it as a positive control.
+    writeFileSync(
+      hostileEnv,
+      `printf "%s" "\${ASIMP_S1_JOIN_URL:-}" > "\${S1_PRESTART_ENV_SENTINEL:?}"\n`,
+      { encoding: "utf8", mode: 0o600 },
+    );
+    mkdirSync(hostileBin, { mode: 0o700 });
+    writeFileSync(
+      hostileBash,
+      `#!/bin/sh\nprintf "%s" "\${ASIMP_S1_JOIN_URL:-}" > "\${S1_PRESTART_PATH_SENTINEL:?}"\nexit 97\n`,
+      { encoding: "utf8", mode: 0o700 },
+    );
+    const sharedEnvironment = {
+      ASIMP_S1_JOIN_URL: joinUrl,
+      ASIMP_S1_FELLOW_NAME: "orchid-vector",
+      ASIMP_S1_MODEL: "test-model",
+      ASIMP_S1_HARNESS: "codex",
+      BASH_ENV: hostileBashEnv,
+      ENV: hostileEnv,
+      SHELLOPTS: "xtrace",
+      BASHOPTS: "extglob",
+      BASH_XTRACEFD: "2",
+      PS4: `prestart-${fragment} `,
+      // This scalar would have bypassed the prior BASH_VERSION-only gate when
+      // /bin/sh was not Bash. The supported path must still re-exec Bash >=4.
+      BASH_VERSION: "5.999.999",
+      "BASH_FUNC_printf%%": hostilePrintfFunction,
+      "BASH_FUNC_set%%": hostileSetFunction,
+      PATH: `${hostileBin}:${process.env.PATH ?? "/usr/bin:/bin"}`,
+    };
+
+    // The unprivileged capture wrapper starts with `set -e` before its socket
+    // redirections. An imported function can write the exact URL and retain
+    // wrapper behavior through `builtin set "$@"`. The production capture
+    // path below always starts its Bash with -p instead.
+    const captureSetControl = await runCapturedProcess(
+      TRUSTED_BASH,
+      ["-c", ":"],
+      {
+        ASIMP_S1_JOIN_URL: joinUrl,
+        "BASH_FUNC_set%%": hostileSetFunction,
+        S1_PRESTART_CAPTURE_SET_SENTINEL: controlCaptureSetLeak,
+      },
+      false,
+    );
+    expect(captureSetControl.exitCode).toBe(0);
+    expect(readFileSync(controlCaptureSetLeak, "utf8") === joinUrl).toBe(true);
+
+    // The production wrapper is privileged, so imported functions do not run
+    // in it. Its neutral handoffs must nevertheless restore each exact
+    // BASH_FUNC_* entry for the unprivileged target immediately before exec.
+    const captureFunctionHandoffControl = await runCapturedProcess(
+      TRUSTED_BASH,
+      ["-c", 'set -e\nprintf ""'],
+      {
+        ASIMP_S1_JOIN_URL: joinUrl,
+        "BASH_FUNC_printf%%": hostilePrintfFunction,
+        "BASH_FUNC_set%%": hostileSetFunction,
+        S1_PRESTART_FUNCTION_SENTINEL: captureHandoffPrintfLeak,
+        S1_PRESTART_CAPTURE_SET_SENTINEL: captureHandoffSetLeak,
+      },
+    );
+    expect(captureFunctionHandoffControl.exitCode).toBe(0);
+    expect(readFileSync(captureHandoffPrintfLeak, "utf8") === joinUrl).toBe(true);
+    expect(readFileSync(captureHandoffSetLeak, "utf8") === joinUrl).toBe(true);
+
+    // This explicit Bash control is unsupported. It proves the BASH_ENV hook
+    // and inherited xtrace can read and emit the fragment before source lines.
+    const hookControl = await runCapturedProcess(TRUSTED_BASH, [SCRIPT, "--self-test"], {
+      ...sharedEnvironment,
+      S1_PRESTART_BASH_ENV_SENTINEL: controlBashLeak,
+      S1_PRESTART_ENV_SENTINEL: join(probeDir, "unsanitized-control-env-leak"),
+      S1_PRESTART_FUNCTION_SENTINEL: controlFunctionLeak,
+      "BASH_FUNC_set%%": "",
+    });
+    expect(hookControl.exitCode).toBe(0);
+    expect(record(hookControl).code).toBe("SELF_TEST_PASSED");
+    expect(existsSync(controlBashLeak)).toBe(true);
+    expect(readFileSync(controlBashLeak, "utf8") === joinUrl).toBe(true);
+    expect(readFileSync(controlFunctionLeak, "utf8") === joinUrl).toBe(true);
+    expect(hookControl.stderr.includes(fragment)).toBe(true);
+
+    // A bare PATH lookup invokes the fake interpreter and leaks the exact URL.
+    // The supported direct path below must never touch that executable.
+    const pathControl = await runCapturedProcess(TRUSTED_ENV, ["bash", SCRIPT, "--self-test"], {
+      ...sharedEnvironment,
+      BASH_ENV: "",
+      ENV: "",
+      SHELLOPTS: "",
+      BASHOPTS: "",
+      BASH_XTRACEFD: "",
+      PS4: "",
+      "BASH_FUNC_printf%%": "",
+      "BASH_FUNC_set%%": "",
+      S1_PRESTART_PATH_SENTINEL: controlPathLeak,
+    });
+    expect(readFileSync(controlPathLeak, "utf8") === joinUrl).toBe(true);
+    expect(pathControl.exitCode).toBe(97);
+
+    const started = performance.now();
+    const direct = await runDirectScript(["--self-test"], {
+      ...sharedEnvironment,
+      S1_PRESTART_BASH_ENV_SENTINEL: directBashLeak,
+      S1_PRESTART_ENV_SENTINEL: directEnvLeak,
+      S1_PRESTART_PATH_SENTINEL: directPathLeak,
+      S1_PRESTART_FUNCTION_SENTINEL: directFunctionLeak,
+      S1_PRESTART_CAPTURE_SET_SENTINEL: directCaptureSetLeak,
+    });
+    expect(performance.now() - started).toBeLessThan(RUN_SCRIPT_TIMEOUT_MS);
+    expect(direct.exitCode).toBe(0);
+    expect(record(direct).code).toBe("SELF_TEST_PASSED");
+    expect(existsSync(directBashLeak)).toBe(false);
+    expect(existsSync(directEnvLeak)).toBe(false);
+    expect(existsSync(directPathLeak)).toBe(false);
+    expect(existsSync(directFunctionLeak)).toBe(false);
+    expect(existsSync(directCaptureSetLeak)).toBe(false);
+    expect(direct.stdout).not.toContain(fragment);
+    expect(direct.stderr).not.toContain(fragment);
+    const scriptSource = readFileSync(resolve(REPO_ROOT, SCRIPT), "utf8");
+    expect(
+      scriptSource.startsWith(
+        "#!/usr/bin/env -S -u BASH_ENV -u ENV -u SHELLOPTS -u BASHOPTS -u BASH_XTRACEFD -u PS4 /bin/sh -p\n# shellcheck shell=bash\n",
+      ),
+    ).toBe(true);
+    expect(
+      readFileSync(resolve(REPO_ROOT, "apps/wire/test/unit/s1-shell-harness.test.ts"), "utf8"),
+    ).toContain('...(privilegedCapture ? ["-p"] : []),');
+  }, 30_000);
 
   for (const scenario of [
     {
@@ -2259,6 +2575,18 @@ describe("lifecycle: process-group cleanup reaches descendants, not just the lea
     const phases = readFileSync(`${stateDir}/phases.log`, "utf8");
     expect(phases).toContain("lifecycle-pinned-supervisor");
     expect(phases).toContain("lifecycle-group-retired");
+    const runtimeRootsReady = phases.indexOf("runtime-roots-ready");
+    expect(runtimeRootsReady).toBeGreaterThanOrEqual(0);
+    for (const phase of [
+      "fixture-held-before-cont",
+      "fixture-cont-authorized",
+      "fixture-adopted",
+      "fixture-started",
+    ]) {
+      const phaseIndex = phases.indexOf(phase);
+      expect(phaseIndex).toBeGreaterThanOrEqual(0);
+      expect(runtimeRootsReady).toBeLessThan(phaseIndex);
+    }
     expect(phases.includes("AAAAAAAA")).toBe(false);
   }, 60_000);
 

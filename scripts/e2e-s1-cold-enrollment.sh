@@ -1,9 +1,33 @@
-#!/usr/bin/env bash
+#!/usr/bin/env -S -u BASH_ENV -u ENV -u SHELLOPTS -u BASHOPTS -u BASH_XTRACEFD -u PS4 /bin/sh -p
+# shellcheck shell=bash
+# The direct secret-bearing entry starts in an absolute POSIX shell only after
+# its startup hooks and xtrace controls have been removed. It then chooses an
+# absolute Bash >=4 from this fixed set; it never resolves `bash` via PATH.
+# The isolated eval is POSIX-safe at parse time. It can succeed only in a
+# running Bash whose real BASH_VERSINFO array reports major >=4: a caller's
+# scalar BASH_VERSION cannot satisfy this probe under another /bin/sh.
+if ! (eval '(( BASH_VERSINFO[0] >= 4 ))') >/dev/null 2>&1; then
+  for asimp_s1_bash in /opt/homebrew/bin/bash /usr/local/bin/bash /usr/bin/bash /bin/bash; do
+    if [ -x "$asimp_s1_bash" ] && "$asimp_s1_bash" --noprofile --norc -p -c "test \"\${BASH_VERSINFO[0]:-0}\" -ge 4" >/dev/null 2>&1; then
+      # -p rejects imported BASH_FUNC_* definitions before this script resolves
+      # its later tools, while --noprofile/--norc removes interactive startup.
+      exec "$asimp_s1_bash" --noprofile --norc -p "$0" "$@"
+    fi
+  done
+  printf '%s\n' 'BLOCKED s1-cold-enrollment: BASH_4_REQUIRED' >&2
+  exit 78
+fi
 # Fable §5.2 / S-1 cold-enrollment runner.
 #
 # This script deliberately keeps credentials in process memory and JSON POST
 # bodies. It retains local-state artifacts, but a token, fragment secret, or flow
 # handle must never become a path, query string, log, or retained test result.
+#
+# Direct execution is the supported secret-bearing entry. `/usr/bin/env` clears
+# non-interactive startup hooks and xtrace controls before `/bin/sh` or the
+# fixed-set Bash interpreter sees `ASIMP_S1_JOIN_URL`. An explicit
+# `bash scripts/e2e-s1-cold-enrollment.sh` bypasses this bootstrap and is not a
+# supported secret-bearing invocation.
 #
 # ## Lifecycle contract for the local-D1 mode
 #
@@ -1869,11 +1893,11 @@ start_pinned_supervisor() {
   fi
   PROVISIONAL_PGID="$PROVISIONAL_PID"
   lifecycle_checkpoint "after-identity-proof"
+  log_phase "${label}-held-before-cont" "pid=$PROVISIONAL_PID payload=not-started"
   # These two planted modes need the production direct reaper while the payload
   # is still genuinely behind STOP. Holding here is self-test-only; normal
   # launches always continue through the exact CONT re-proof below.
   if [[ "$SELF_TEST_MODE" == "provisional-pid-reuse" || "$SELF_TEST_MODE" == "provisional-inspection-unknown" ]]; then
-    log_phase "${label}-held-before-cont" "pid=$PROVISIONAL_PID payload=not-started"
     return 0
   fi
   lifecycle_checkpoint "before-cont-reproof"
@@ -2656,10 +2680,7 @@ self_test_lifecycle() {
   local descendant_deadline status_deadline observation_deadline
   local liveness=0
 
-  STATE_DIR="$(mktemp -d -t asimposium-s1-lifecycle)"
-  [[ -d "$STATE_DIR" && ! -L "$STATE_DIR" ]] || failed "LIFECYCLE_STATE_DIR_INVALID"
-  PHASE_LOG="$STATE_DIR/phases.log"
-  : >"$PHASE_LOG"
+  lifecycle_state_dir "lifecycle"
   pid_file="$STATE_DIR/descendant.pid"
   log_phase "lifecycle-state-retained" "dir=$STATE_DIR mode=$mode"
 
