@@ -328,6 +328,37 @@ publish_control("\036ASIMPOSIUM_SUITE_CONTROL $nonce exited $exit $signal $$ -1\
 while (1) { sleep 1; }
 `;
 
+function stubbornReleaseSupervisor(supervisorPidPath: string): string {
+  return String.raw`
+use strict;
+use warnings;
+use Fcntl qw(F_SETFD FD_CLOEXEC);
+use POSIX qw(setsid);
+my $nonce = shift @ARGV;
+my $supervisor_pid_path = ${JSON.stringify(supervisorPidPath)};
+exit 125 if !defined setsid();
+open(my $control, ">&=3") or exit 125;
+defined fcntl($control, F_SETFD, FD_CLOEXEC) or exit 125;
+open(my $supervisor_pid, ">", $supervisor_pid_path) or exit 125;
+print {$supervisor_pid} "$$\n" or exit 125;
+close($supervisor_pid) or exit 125;
+sub publish_control { my ($record) = @_; my $written = syswrite($control, $record); exit 125 if !defined $written || $written != length($record); }
+publish_control("\036ASIMPOSIUM_SUITE_CONTROL $nonce ready $$\n");
+$SIG{TERM} = sub {};
+$SIG{HUP} = sub {};
+$SIG{USR1} = sub {};
+my $target = fork();
+exit 125 if !defined $target;
+if ($target == 0) { close($control) or exit 127; exec @ARGV or exit 127; }
+waitpid($target, 0);
+my $raw = $?;
+my $signal = $raw & 127;
+my $exit = $signal ? 128 + $signal : $raw >> 8;
+publish_control("\036ASIMPOSIUM_SUITE_CONTROL $nonce exited $exit $signal $$ -1\n");
+while (1) { sleep 1; }
+`;
+}
+
 const FRAGMENTED_CONTROL_SUPERVISOR = String.raw`
 use strict;
 use warnings;
@@ -876,6 +907,60 @@ describe("owned session launcher", () => {
       expect(performance.now() - startedAt).toBeLessThan(3_000);
       expect(processTable()).toContain(marker);
     } finally {
+      stopDetachedFixture(marker);
+    }
+    await Bun.sleep(30);
+    expect(processTable()).not.toContain(marker);
+  });
+
+  test("a failed supervisor reap cancels detached inherited pipes before its typed refusal", async () => {
+    const marker = `suite-reap-failure-pipe-boundary-${crypto.randomUUID()}`;
+    const supervisorPidPath = capturePath("stubborn-release-supervisor.pid");
+    const holderPidPath = capturePath("stubborn-release-holder.pid");
+    const cancelled: ("stdout" | "stderr")[] = [];
+    try {
+      const startedAt = performance.now();
+      const result = await runOwnedCommand({
+        command: [
+          "perl",
+          "-MPOSIX=setsid",
+          "-e",
+          `use POSIX qw(_exit); my $marker = "${marker}"; my $holder_pid_path = ${JSON.stringify(holderPidPath)}; pipe(my $read, my $write) or die; my $child = fork(); die unless defined $child; if ($child == 0) { close $read; setsid(); $SIG{HUP} = sub {}; $SIG{TERM} = sub {}; open(my $holder_pid, ">", $holder_pid_path) or _exit(127); print {$holder_pid} "$$\\n" or _exit(127); close($holder_pid) or _exit(127); syswrite($write, 'r'); close $write; while (1) { sleep 1; } } close $write; read($read, my $ready, 1); close $read; _exit(0);`,
+        ],
+        cwd: process.cwd(),
+        env: childEnvironment(),
+        timeoutMs: 2_000,
+        termGraceMs: 40,
+        killReapMs: 40,
+        pipeDrainMs: 5_000,
+        supervisorScript: stubbornReleaseSupervisor(supervisorPidPath),
+        onPipeCancelRequested: (pipe) => cancelled.push(pipe),
+      });
+
+      expect(result.outcome).toBe("ownership-unproven");
+      // This custom supervisor is not authority for a clean owned-session exit.
+      // A false green here would conceal the failed direct-child reap.
+      expect(result.cleanupProven).not.toBe(true);
+      expect(cancelled.sort()).toEqual(["stderr", "stdout"]);
+      // The release signal was ignored, so the dispatcher must return from its
+      // bounded direct-child reap instead of waiting for the escaped pipe FD.
+      expect(performance.now() - startedAt).toBeLessThan(3_000);
+      const supervisorPid = Number(readFileSync(supervisorPidPath, "utf8").trim());
+      const holderPid = Number(readFileSync(holderPidPath, "utf8").trim());
+      expect(Number.isSafeInteger(supervisorPid)).toBe(true);
+      expect(Number.isSafeInteger(holderPid)).toBe(true);
+      expect(supervisorPid).toBeGreaterThan(1);
+      expect(holderPid).toBeGreaterThan(1);
+      // The exact supervisor group (whose leader is the direct child) is gone.
+      // This deliberately fails if the owned supervisor leaks, independently of
+      // whether the detached holder still carries the same marker in its argv.
+      expect(ownedGroupPids(supervisorPid)).toEqual([]);
+      // The only remaining process with this marker is the recorded holder PID.
+      // It proves the dispatcher neither claimed nor killed the detached process.
+      expect(processIdsForMarker(marker)).toEqual([holderPid]);
+    } finally {
+      // Test-only cleanup of the uniquely identified escaped fixture. It never
+      // self-retires and is intentionally outside the dispatcher-owned group.
       stopDetachedFixture(marker);
     }
     await Bun.sleep(30);
