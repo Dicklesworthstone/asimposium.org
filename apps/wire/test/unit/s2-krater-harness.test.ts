@@ -559,7 +559,16 @@ interface ProcessTableCapture {
   readonly stdout: string;
 }
 
-function parseS2LifecycleProcessTable(runId: string, snapshot: ProcessTableCapture): string[] {
+interface S2LifecycleProcessRow {
+  readonly pid: number;
+  readonly pgid: number;
+  readonly parentPid: number;
+  readonly status: string;
+  readonly command: string;
+  readonly identity: string;
+}
+
+function parseS2LifecycleProcessRows(snapshot: ProcessTableCapture): S2LifecycleProcessRow[] {
   const errorCode =
     snapshot.error !== undefined &&
     "code" in snapshot.error &&
@@ -575,11 +584,41 @@ function parseS2LifecycleProcessTable(runId: string, snapshot: ProcessTableCaptu
   if (lines.length === 0) {
     throw new Error("S2 lifecycle process scan failed: process-table output empty");
   }
+  return lines.map((line) => {
+    const [pidText, pgidText, parentPidText, status, ...commandParts] = line.trim().split(/\s+/u);
+    const pid = Number(pidText);
+    const pgid = Number(pgidText);
+    const parentPid = Number(parentPidText);
+    if (
+      !Number.isSafeInteger(pid) ||
+      pid <= 0 ||
+      !Number.isSafeInteger(pgid) ||
+      pgid <= 0 ||
+      !Number.isSafeInteger(parentPid) ||
+      parentPid < 0 ||
+      status === undefined ||
+      status === "" ||
+      commandParts.length === 0
+    ) {
+      throw new Error("S2 lifecycle process scan failed: malformed process-table row");
+    }
+    return {
+      pid,
+      pgid,
+      parentPid,
+      status,
+      command: commandParts.join(" "),
+      identity: `${pid} ${pgid} ${parentPid} ${status}`,
+    };
+  });
+}
+
+function parseS2LifecycleProcessTable(runId: string, snapshot: ProcessTableCapture): string[] {
   // Command text proves ownership but can also contain caller-supplied arguments.
   // Return only the non-sensitive process identity fields used in diagnostics.
-  return lines
-    .filter((line) => line.includes(`e2e/artifacts/s2-krater/${runId}/`))
-    .map((line) => line.trim().split(/\s+/u).slice(0, 4).join(" "));
+  return parseS2LifecycleProcessRows(snapshot)
+    .filter((row) => row.command.includes(`e2e/artifacts/s2-krater/${runId}/`))
+    .map((row) => row.identity);
 }
 
 function captureS2LifecycleProcessTable(): ProcessTableCapture {
@@ -598,20 +637,218 @@ function liveS2LifecycleProcesses(runId: string): string[] {
   return parseS2LifecycleProcessTable(runId, captureS2LifecycleProcessTable());
 }
 
-function retainedPostReleaseControllerRunIds(runId: string): string[] {
+interface RetainedPostReleaseControllerOwner {
+  readonly controllerPid: number;
+  readonly parentPid: number;
+  readonly childRunId: string;
+  readonly marker: string;
+}
+
+interface RetainedPostReleaseControllerOwners {
+  readonly owners: RetainedPostReleaseControllerOwner[];
+  readonly failures: Error[];
+}
+
+function collectRetainedPostReleaseControllerOwners(
+  runId: string,
+): RetainedPostReleaseControllerOwners {
   const main = resolve(REPOSITORY_ROOT, "e2e/artifacts/s2-krater", runId, "main");
-  return readdirSync(main)
-    .filter((name) => name.endsWith(".status.controller-owner"))
-    .map((name) => {
-      const owner = readFileSync(resolve(main, name), "utf8");
+  const owners: RetainedPostReleaseControllerOwner[] = [];
+  const failures: Error[] = [];
+  let ownerNames: string[] = [];
+  try {
+    const mainStat = lstatSync(main);
+    if (!mainStat.isDirectory() || mainStat.isSymbolicLink()) {
+      throw new Error(`retained controller state is not a regular directory: ${runId}`);
+    }
+    ownerNames = readdirSync(main)
+      .filter((name) => name.endsWith(".status.controller-owner"))
+      .sort();
+  } catch (error) {
+    failures.push(error instanceof Error ? error : new Error(String(error)));
+  }
+  for (const name of ownerNames) {
+    try {
+      const ownerPath = resolve(main, name);
+      const ownerStat = lstatSync(ownerPath);
+      if (!ownerStat.isFile() || ownerStat.isSymbolicLink()) {
+        throw new Error(`retained controller owner is not a regular file: ${runId}/${name}`);
+      }
       const match =
-        /^controller-owner [0-9]+ [0-9]+ s2-post-release-controller-(s2u-[a-f0-9]{48})\n$/u.exec(
-          owner,
+        /^controller-owner ([1-9][0-9]*) ([1-9][0-9]*) (s2-post-release-controller-(s2u-[a-f0-9]{48}))\n$/u.exec(
+          readFileSync(ownerPath, "utf8"),
         );
-      const childRunId = match?.[1];
-      if (childRunId === undefined) throw new Error("malformed retained controller owner record");
-      return childRunId;
-    });
+      const controllerPid = Number(match?.[1]);
+      const parentPid = Number(match?.[2]);
+      const marker = match?.[3];
+      const childRunId = match?.[4];
+      if (
+        match === null ||
+        !Number.isSafeInteger(controllerPid) ||
+        controllerPid <= 0 ||
+        !Number.isSafeInteger(parentPid) ||
+        parentPid <= 0 ||
+        marker === undefined ||
+        childRunId === undefined
+      ) {
+        throw new Error(`malformed retained controller owner record: ${runId}/${name}`);
+      }
+      owners.push({ controllerPid, parentPid, childRunId, marker });
+    } catch (error) {
+      failures.push(error instanceof Error ? error : new Error(String(error)));
+    }
+  }
+  return { owners, failures };
+}
+
+function retainedPostReleaseControllerRunIds(runId: string): string[] {
+  const retained = collectRetainedPostReleaseControllerOwners(runId);
+  if (retained.failures.length !== 0) {
+    throw new AggregateError(
+      retained.failures,
+      `retained controller owner parsing failed: ${runId}`,
+    );
+  }
+  return retained.owners.map((owner) => owner.childRunId);
+}
+
+interface S2LifecycleProcessSelector {
+  readonly label: string;
+  readonly matches: (row: S2LifecycleProcessRow) => boolean;
+}
+
+function s2FixtureSurvivorSelectors(
+  runId: string,
+  owners: readonly RetainedPostReleaseControllerOwner[],
+  ready: ExitRaceLoadReadyRecord | undefined,
+): S2LifecycleProcessSelector[] {
+  const selectors: S2LifecycleProcessSelector[] = [
+    {
+      label: `parent-run:${runId}`,
+      matches: (row) => row.command.includes(`e2e/artifacts/s2-krater/${runId}/`),
+    },
+  ];
+  for (const owner of owners) {
+    selectors.push(
+      {
+        label: `child-run:${owner.childRunId}`,
+        matches: (row) => row.command.includes(`e2e/artifacts/s2-krater/${owner.childRunId}/`),
+      },
+      {
+        label: `controller-marker:${owner.marker}`,
+        matches: (row) => row.command.includes(owner.marker),
+      },
+      {
+        label: `controller-pid:${owner.controllerPid}`,
+        matches: (row) => row.pid === owner.controllerPid,
+      },
+    );
+  }
+  if (ready !== undefined) {
+    selectors.push(
+      {
+        label: `ready-controller-pid:${ready.controllerPid}`,
+        matches: (row) => row.pid === ready.controllerPid,
+      },
+      {
+        label: `ready-parent-pid:${ready.parentPid}`,
+        matches: (row) => row.pid === ready.parentPid,
+      },
+    );
+  }
+  return selectors;
+}
+
+function matchS2FixtureSurvivors(
+  rows: readonly S2LifecycleProcessRow[],
+  selectors: readonly S2LifecycleProcessSelector[],
+): string[] {
+  return Array.from(
+    new Set(
+      selectors.flatMap((selector) =>
+        rows
+          .filter((row) => selector.matches(row))
+          .map((row) => `${selector.label}=${row.identity}`),
+      ),
+    ),
+  );
+}
+
+function scanS2FixtureAndRetainedControllersForSurvivors(
+  runId: string,
+  sharedRows: readonly S2LifecycleProcessRow[],
+  ready: ExitRaceLoadReadyRecord | undefined,
+  sharedSnapshotFailure?: Error,
+): string[] {
+  const retained = collectRetainedPostReleaseControllerOwners(runId);
+  const failures = [...retained.failures];
+  if (retained.owners.length !== 1) {
+    failures.push(
+      new Error(
+        `expected one retained controller owner record: run_id=${runId} observed=${retained.owners.length}`,
+      ),
+    );
+  }
+
+  const survivors =
+    sharedSnapshotFailure === undefined
+      ? matchS2FixtureSurvivors(
+          sharedRows,
+          s2FixtureSurvivorSelectors(runId, retained.owners, ready),
+        )
+      : [];
+  if (sharedSnapshotFailure !== undefined) failures.push(sharedSnapshotFailure);
+  if (failures.length !== 0) {
+    if (survivors.length !== 0) {
+      failures.push(new Error(`S2 shell regression left survivors: ${survivors.join(" | ")}`));
+    }
+    throw new AggregateError(
+      failures,
+      `retained controller survivor proof failed: run_id=${runId}; ` +
+        `survivors=${survivors.join(" | ") || "none"}`,
+    );
+  }
+  return survivors;
+}
+
+function assertRetainedControllerOwnerMatchesReadyRecord(
+  runId: string,
+  ready: ExitRaceLoadReadyRecord | undefined,
+): void {
+  const retained = collectRetainedPostReleaseControllerOwners(runId);
+  const failures = [...retained.failures];
+  if (ready === undefined) {
+    failures.push(new Error(`exit-race ready record missing: run_id=${runId}`));
+  }
+  if (retained.owners.length !== 1) {
+    failures.push(
+      new Error(
+        `expected one retained controller owner record: run_id=${runId} observed=${retained.owners.length}`,
+      ),
+    );
+  }
+  const owner = retained.owners[0];
+  if (owner !== undefined && ready !== undefined) {
+    if (owner.controllerPid !== ready.controllerPid) {
+      failures.push(
+        new Error(
+          `retained controller PID differs from ready record: run_id=${runId} ` +
+            `owner=${owner.controllerPid} ready=${ready.controllerPid}`,
+        ),
+      );
+    }
+    if (owner.parentPid !== ready.parentPid) {
+      failures.push(
+        new Error(
+          `retained parent PID differs from ready record: run_id=${runId} ` +
+            `owner=${owner.parentPid} ready=${ready.parentPid}`,
+        ),
+      );
+    }
+  }
+  if (failures.length !== 0) {
+    throw new AggregateError(failures, `retained controller owner binding failed: ${runId}`);
+  }
 }
 
 function liveProcessesContainingMarker(marker: string): string[] {
@@ -1246,6 +1483,74 @@ describe("registered S2 shell and lifecycle regressions", () => {
     ]);
   });
 
+  test("PLANTED: external controller scans cover retained and partial-ready identities", () => {
+    const runId = "s2u-parent-survivor-fixture";
+    const childRunId = `s2u-${"a".repeat(48)}`;
+    const marker = `s2-post-release-controller-${childRunId}`;
+    const owner: RetainedPostReleaseControllerOwner = {
+      controllerPid: 4201,
+      parentPid: 4101,
+      childRunId,
+      marker,
+    };
+    const ready: ExitRaceLoadReadyRecord = {
+      controllerPid: owner.controllerPid,
+      parentPid: owner.parentPid,
+      token: ["fixture", "ready", "fallback"].join("-"),
+      size: 4,
+    };
+    const rows: S2LifecycleProcessRow[] = [
+      {
+        pid: owner.parentPid,
+        pgid: owner.parentPid,
+        parentPid: 1,
+        status: "S",
+        command: `bash e2e/artifacts/s2-krater/${runId}/main/outer`,
+        identity: `${owner.parentPid} ${owner.parentPid} 1 S`,
+      },
+      {
+        pid: owner.controllerPid,
+        pgid: owner.controllerPid,
+        parentPid: owner.parentPid,
+        status: "S",
+        command: "bash scripts/e2e-s2-krater.sh",
+        identity: `${owner.controllerPid} ${owner.controllerPid} ${owner.parentPid} S`,
+      },
+      {
+        pid: 4301,
+        pgid: 4301,
+        parentPid: owner.controllerPid,
+        status: "S",
+        command: `bash e2e/artifacts/s2-krater/${childRunId}/main/child`,
+        identity: `4301 4301 ${owner.controllerPid} S`,
+      },
+      {
+        pid: 4302,
+        pgid: 4302,
+        parentPid: owner.controllerPid,
+        status: "S",
+        command: `bash ${marker}`,
+        identity: `4302 4302 ${owner.controllerPid} S`,
+      },
+    ];
+
+    expect(
+      matchS2FixtureSurvivors(rows, s2FixtureSurvivorSelectors(runId, [owner], ready)),
+    ).toEqual([
+      `parent-run:${runId}=${owner.parentPid} ${owner.parentPid} 1 S`,
+      `child-run:${childRunId}=4301 4301 ${owner.controllerPid} S`,
+      `controller-marker:${marker}=4302 4302 ${owner.controllerPid} S`,
+      `controller-pid:${owner.controllerPid}=${owner.controllerPid} ${owner.controllerPid} ${owner.parentPid} S`,
+      `ready-controller-pid:${owner.controllerPid}=${owner.controllerPid} ${owner.controllerPid} ${owner.parentPid} S`,
+      `ready-parent-pid:${owner.parentPid}=${owner.parentPid} ${owner.parentPid} 1 S`,
+    ]);
+    expect(matchS2FixtureSurvivors(rows, s2FixtureSurvivorSelectors(runId, [], ready))).toEqual([
+      `parent-run:${runId}=${owner.parentPid} ${owner.parentPid} 1 S`,
+      `ready-controller-pid:${owner.controllerPid}=${owner.controllerPid} ${owner.controllerPid} ${owner.parentPid} S`,
+      `ready-parent-pid:${owner.parentPid}=${owner.parentPid} ${owner.parentPid} 1 S`,
+    ]);
+  });
+
   test("PLANTED: process scans are bounded, non-empty, and never expose scanner error text", () => {
     const runId = "s2u-process-scan-fixture";
     const scanner = " 4242 4242 1 R /bin/ps -axo pid=,pgid=,ppid=,stat=,command=";
@@ -1819,6 +2124,7 @@ describe("registered S2 shell and lifecycle regressions", () => {
         }),
       );
       let barrierFailure: Error | undefined;
+      const readyRecordsByToken = new Map<string, ExitRaceLoadReadyRecord>();
       let releasePublished = false;
       try {
         const readyRecords = await waitForExitRaceLoadReadyRecords(
@@ -1826,6 +2132,9 @@ describe("registered S2 shell and lifecycle regressions", () => {
           fixtures.map((fixture) => fixture.barrierToken),
           EXIT_RACE_LOAD_BARRIER_WAIT_MS,
         );
+        for (const readyRecord of readyRecords) {
+          readyRecordsByToken.set(readyRecord.token, readyRecord);
+        }
         expect(readyRecords).toHaveLength(fixtures.length);
         expect(new Set(readyRecords.map((record) => record.controllerPid)).size).toBe(
           fixtures.length,
@@ -1898,13 +2207,49 @@ describe("registered S2 shell and lifecycle regressions", () => {
       }
 
       const runs = await Promise.all(runPromises);
+      const partialReadyFailures = collectAllFixtureVerificationFailures(fixtures, (fixture) => {
+        const readyRecord = readExitRaceLoadReadyRecord(
+          barrierRoot,
+          fixture.barrierToken,
+          fixtures.length,
+        );
+        if (readyRecord !== undefined) {
+          readyRecordsByToken.set(fixture.barrierToken, readyRecord);
+        }
+      });
+      if (partialReadyFailures.length !== 0) {
+        const partialReadyFailure = new AggregateError(
+          partialReadyFailures.map((failure) => failure.error),
+          `partial exit-race ready-record parsing failed: fixtures=${partialReadyFailures
+            .map((failure) => failure.index)
+            .join(",")}`,
+        );
+        barrierFailure =
+          barrierFailure === undefined
+            ? partialReadyFailure
+            : new AggregateError(
+                [barrierFailure, partialReadyFailure],
+                "exit-race barrier and partial ready-record parsing both failed",
+              );
+      }
       const survivorSnapshot = captureS2LifecycleProcessTable();
+      let survivorRows: S2LifecycleProcessRow[] = [];
+      let survivorSnapshotFailure: Error | undefined;
+      try {
+        survivorRows = parseS2LifecycleProcessRows(survivorSnapshot);
+      } catch (error) {
+        survivorSnapshotFailure = error instanceof Error ? error : new Error(String(error));
+      }
       const failures = collectAllFixtureVerificationFailures(fixtures, (fixture, index) => {
         const run = runs[index];
-        if (run === undefined) throw new Error(`missing concurrent exit-race run ${index}`);
         assertS2RunThenScanForSurvivors(
           `term-identity-exit-race-${fixture.index}`,
           () => {
+            if (run === undefined) throw new Error(`missing concurrent exit-race run ${index}`);
+            assertRetainedControllerOwnerMatchesReadyRecord(
+              fixture.runId,
+              readyRecordsByToken.get(fixture.barrierToken),
+            );
             expect(releasePublished).toBe(true);
             expect(run.exitCode).toBe(0);
             expect(ndjsonRecords(run)).toContainEqual(
@@ -1924,7 +2269,13 @@ describe("registered S2 shell and lifecycle regressions", () => {
               '"code":"S2_POST_RELEASE_CONTROLLER_CLEANUP_UNPROVEN"',
             );
           },
-          () => parseS2LifecycleProcessTable(fixture.runId, survivorSnapshot),
+          () =>
+            scanS2FixtureAndRetainedControllersForSurvivors(
+              fixture.runId,
+              survivorRows,
+              readyRecordsByToken.get(fixture.barrierToken),
+              survivorSnapshotFailure,
+            ),
         );
       });
       const allFailures = [
