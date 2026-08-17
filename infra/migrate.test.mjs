@@ -14,9 +14,9 @@ import { performance } from "node:perf_hooks";
 import { fileURLToPath } from "node:url";
 import { REDACTED_TOKEN } from "@asimposium/contracts/diagnostic-safety";
 import {
+  applyPendingLocalMigrationsOrRefuse,
   assertReadLimit,
   assertRehearsalIsNotAnApplication,
-  applyPendingLocalMigrationsOrRefuse,
   bootstrapTargetDisposition,
   catalogFingerprint,
   classifySchemaLineage,
@@ -632,7 +632,11 @@ const cases = [
       assert.equal(actual0016.id, "0016_operator_fellow_cap_override.sql");
       const productionManifest = readBootstrapManifest(repositoryRoot);
       const schemaHead16 = productionManifest.schema_heads.filter((head) => head.sequence === 16);
-      assert.equal(schemaHead16.length, 1, "the production manifest must register exactly one head 16");
+      assert.equal(
+        schemaHead16.length,
+        1,
+        "the production manifest must register exactly one head 16",
+      );
       const migrationsThrough0016 = productionMigrations.filter(
         (migration) => migration.sequence <= actual0016.sequence,
       );
@@ -800,7 +804,6 @@ const cases = [
           0,
           `${environment} ordinary apply refusal must precede every local-D1 observation`,
         );
-
       }
     },
   },

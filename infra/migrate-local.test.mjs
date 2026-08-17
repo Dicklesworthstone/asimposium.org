@@ -201,15 +201,13 @@ async function localJson(databaseName, command, label) {
 }
 
 async function runnerConfigJson(command, label) {
-  const raw = await localD1(
-    root,
-    "asimposium-local",
-    ["--command", command],
-    persistenceRoot,
-  );
+  const raw = await localD1(root, "asimposium-local", ["--command", command], persistenceRoot);
   try {
     const parsed = JSON.parse(raw);
-    assert.ok(Array.isArray(parsed), `runner-config local D1 ${label} must return a JSON result array`);
+    assert.ok(
+      Array.isArray(parsed),
+      `runner-config local D1 ${label} must return a JSON result array`,
+    );
     return parsed;
   } catch (error) {
     if (error instanceof assert.AssertionError) throw error;
@@ -220,7 +218,10 @@ async function runnerConfigJson(command, label) {
 async function runActualLocalMigrationCli(args, label) {
   const deadline = commandDeadline(label);
   const executionWindowMs = remainingBefore(deadline, label) - COMMAND_REAP_RESERVE_MS;
-  assert.ok(executionWindowMs > 0, `actual local CLI ${label} lacks time for bounded child reaping`);
+  assert.ok(
+    executionWindowMs > 0,
+    `actual local CLI ${label} lacks time for bounded child reaping`,
+  );
   const result = await runBoundedCommand({
     cmd: [process.execPath, "infra/migrate.mjs", ...args],
     cwd: root,
@@ -363,9 +364,17 @@ function stableCurrent0016Inputs() {
       "the production migration command must use the exact current 0016 bytes",
     );
     const schemaHead16 = currentManifest.schema_heads.filter((head) => head.sequence === 16);
-    assert.equal(schemaHead16.length, 1, "the production manifest must register exactly one head 16");
+    assert.equal(
+      schemaHead16.length,
+      1,
+      "the production manifest must register exactly one head 16",
+    );
     const migrationsThrough0016 = currentMigrations.filter((migration) => migration.sequence <= 16);
-    assert.equal(migrationsThrough0016.length, 16, "the current proof requires contiguous 0001-0016");
+    assert.equal(
+      migrationsThrough0016.length,
+      16,
+      "the current proof requires contiguous 0001-0016",
+    );
     return {
       migration0016,
       migrationsThrough0016,
@@ -379,7 +388,9 @@ function stableCurrent0016Inputs() {
 
 function assertCurrent0016InputsUnchanged(inputs) {
   assert.equal(
-    digestOf(readFileSync(resolve(root, "db/migrations/0016_operator_fellow_cap_override.sql"), "utf8")),
+    digestOf(
+      readFileSync(resolve(root, "db/migrations/0016_operator_fellow_cap_override.sql"), "utf8"),
+    ),
     inputs.sourceDigests.migration,
     "W3 migration 0016 moved during the local proof; reject the mixed snapshot",
   );

@@ -1458,10 +1458,15 @@ function parseLocalD1Rows(raw, unreadableCode) {
 /** Read-only catalog snapshot used before any bootstrap metadata exists. */
 async function readLocalCatalog(root, databaseName, localPersistTo = undefined) {
   const rows = parseLocalD1Rows(
-    await localD1(root, databaseName, [
-      "--command",
-      `SELECT type, name, tbl_name, sql FROM sqlite_schema ORDER BY type, name LIMIT ${MAX_CATALOG_ROWS + 1};`,
-    ], localPersistTo),
+    await localD1(
+      root,
+      databaseName,
+      [
+        "--command",
+        `SELECT type, name, tbl_name, sql FROM sqlite_schema ORDER BY type, name LIMIT ${MAX_CATALOG_ROWS + 1};`,
+      ],
+      localPersistTo,
+    ),
     "LOCAL_D1_CATALOG_UNREADABLE",
   );
   return assertReadLimit(rows, MAX_CATALOG_ROWS, "LOCAL_D1_CATALOG_OVERRUN").map((row) => ({
@@ -1485,10 +1490,12 @@ async function readOptionalLocalRows(
   if (!catalog.some((entry) => entry.type === "table" && entry.name === table)) return [];
   return assertReadLimit(
     parseLocalD1Rows(
-      await localD1(root, databaseName, [
-        "--command",
-        `SELECT ${columns} FROM ${table} ORDER BY 1 LIMIT ${maximum + 1};`,
-      ], localPersistTo),
+      await localD1(
+        root,
+        databaseName,
+        ["--command", `SELECT ${columns} FROM ${table} ORDER BY 1 LIMIT ${maximum + 1};`],
+        localPersistTo,
+      ),
       "LOCAL_D1_CATALOG_UNREADABLE",
     ),
     maximum,
@@ -1760,10 +1767,7 @@ function parseArguments(argv) {
     } else if (argument === "--local-persist-to") {
       const directory = argv[index + 1];
       if (typeof directory !== "string" || directory === "" || directory.startsWith("--")) {
-        fail(
-          "INVALID_ARGUMENT",
-          "--local-persist-to requires one non-option directory argument.",
-        );
+        fail("INVALID_ARGUMENT", "--local-persist-to requires one non-option directory argument.");
       }
       options.localPersistTo = directory;
       index += 1;
