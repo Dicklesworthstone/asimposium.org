@@ -8,8 +8,9 @@
  */
 
 import { describe, expect, test } from "bun:test";
-import { existsSync } from "node:fs";
-import { homedir } from "node:os";
+import { spawnSync } from "node:child_process";
+import { closeSync, existsSync, mkdtempSync, openSync, readFileSync } from "node:fs";
+import { homedir, tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { runOwnedCommand, suiteExecutionLimits } from "./cli.ts";
@@ -177,7 +178,19 @@ function stopDetachedFixture(marker: string): void {
   }
 }
 
+let parentLeaseCheckpointRoot: string | undefined;
+
+function parentLeaseFixtureRoot(): string {
+  parentLeaseCheckpointRoot ??= mkdtempSync(join(tmpdir(), "asimposium-suite-parent-lease-"));
+  return parentLeaseCheckpointRoot;
+}
+
+function newParentLeaseCheckpointPath(): string {
+  return join(parentLeaseFixtureRoot(), `${crypto.randomUUID()}.checkpoint`);
+}
+
 function spawnCrashableOwnedCommand(checkpoint: "ready" | "completed", targetSource: string) {
+  const checkpointPath = newParentLeaseCheckpointPath();
   const helperSource = `
     import { runOwnedCommand } from ${JSON.stringify(pathToFileURL(CLI).href)};
     await runOwnedCommand({
@@ -187,79 +200,92 @@ function spawnCrashableOwnedCommand(checkpoint: "ready" | "completed", targetSou
       timeoutMs: 30_000,
       onLifecycleCheckpoint: async (phase, supervisorPid) => {
         if (phase !== ${JSON.stringify(checkpoint)}) return;
-        process.stdout.write("checkpoint " + phase + " " + supervisorPid + "\\n");
+        await Bun.write(
+          ${JSON.stringify(checkpointPath)},
+          "checkpoint " + phase + " " + supervisorPid + "\\n",
+        );
         await Bun.sleep(30_000);
       },
     });
   `;
-  return Bun.spawn({
+  const helper = Bun.spawn({
     cmd: ["bun", "-e", helperSource],
     env: childEnvironment(),
     stdin: "ignore",
-    stdout: "pipe",
-    stderr: "pipe",
+    stdout: "ignore",
+    stderr: "ignore",
   });
+  return { helper, checkpointPath };
 }
 
 async function waitForLifecycleCheckpoint(
   helper: ReturnType<typeof Bun.spawn>,
+  checkpointPath: string,
   expected: "ready" | "completed",
   timeoutMs = 30_000,
 ): Promise<number> {
-  const reader = (helper.stdout as ReadableStream<Uint8Array>).getReader();
-  const observation = (async (): Promise<string> => {
-    let captured = "";
-    while (!captured.includes("\n")) {
-      const next = await reader.read();
-      if (next.done) {
-        const exitCode = await helper.exited;
-        const detail = await new Response(helper.stderr).text();
-        throw new Error(
-          `checkpoint helper exited ${exitCode} before publishing readiness: ${detail.slice(0, 1_024)}`,
-        );
+  const deadline = performance.now() + timeoutMs;
+  while (performance.now() < deadline) {
+    if (existsSync(checkpointPath)) {
+      const line = readFileSync(checkpointPath, "utf8");
+      const match = /^checkpoint (ready|completed) ([1-9][0-9]*)\n$/u.exec(line);
+      const supervisorPid = Number(match?.[2]);
+      if (match?.[1] !== expected || !Number.isSafeInteger(supervisorPid) || supervisorPid <= 1) {
+        throw new Error(`malformed checkpoint helper output for ${expected}`);
       }
-      captured += new TextDecoder().decode(next.value);
-      if (Buffer.byteLength(captured) > 256) {
-        throw new Error("checkpoint helper output exceeded 256 bytes");
-      }
+      return supervisorPid;
     }
-    return captured;
-  })();
-  const line = await Promise.race([observation, Bun.sleep(timeoutMs).then(() => undefined)]);
-  if (line === undefined) {
-    await reader.cancel();
-    throw new Error(`checkpoint helper timed out before ${expected}`);
+    const exitCode = await Promise.race([helper.exited, Bun.sleep(20).then(() => undefined)]);
+    if (exitCode !== undefined) {
+      throw new Error(`checkpoint helper exited ${exitCode} before ${expected}`);
+    }
   }
-  reader.releaseLock();
-  const match = /^checkpoint (ready|completed) ([1-9][0-9]*)\n$/u.exec(line);
-  const supervisorPid = Number(match?.[2]);
-  if (match?.[1] !== expected || !Number.isSafeInteger(supervisorPid) || supervisorPid <= 1) {
-    throw new Error(`malformed checkpoint helper output for ${expected}`);
-  }
-  return supervisorPid;
+  throw new Error(`checkpoint helper timed out before ${expected}`);
 }
 
-async function ownedGroupPids(pgid: number, timeoutMs = 1_000): Promise<number[]> {
-  const child = Bun.spawn({
-    cmd: ["/usr/bin/pgrep", "-g", String(pgid), ".*"],
-    env: childEnvironment(),
-    stdin: "ignore",
-    stdout: "pipe",
-    stderr: "pipe",
-  });
-  const stdout = new Response(child.stdout).text();
-  const stderr = new Response(child.stderr).text();
-  const exitCode = await Promise.race([child.exited, Bun.sleep(timeoutMs).then(() => undefined)]);
-  if (exitCode === undefined) {
-    child.kill("SIGKILL");
-    await child.exited;
+function ownedGroupPids(pgid: number, timeoutMs = 1_000): number[] {
+  const root = parentLeaseFixtureRoot();
+  const stdoutPath = join(root, "pgrep.stdout");
+  const stderrPath = join(root, "pgrep.stderr");
+  const stdoutFd = openSync(stdoutPath, "w", 0o600);
+  const stderrFd = openSync(stderrPath, "w", 0o600);
+  const child = (() => {
+    try {
+      return spawnSync(
+        "bash",
+        [
+          "-c",
+          'stdout_path="$1"; stderr_path="$2"; shift 2; exec "$@" >"$stdout_path" 2>"$stderr_path"',
+          "suite-owned-group-inspector",
+          stdoutPath,
+          stderrPath,
+          "/usr/bin/pgrep",
+          "-g",
+          String(pgid),
+          ".*",
+        ],
+        {
+          env: childEnvironment(),
+          timeout: timeoutMs,
+          stdio: "ignore",
+        },
+      );
+    } finally {
+      closeSync(stdoutFd);
+      closeSync(stderrFd);
+    }
+  })();
+  const stdoutText = readFileSync(stdoutPath, "utf8");
+  const stderrText = readFileSync(stderrPath, "utf8");
+  const errorCode =
+    child.error === undefined || !("code" in child.error) ? undefined : child.error.code;
+  if (child.status === null || child.signal !== null || errorCode !== undefined) {
     throw new Error(`owned group ${pgid} inspection timed out`);
   }
-  const [stdoutText, stderrText] = await Promise.all([stdout, stderr]);
-  if (stderrText !== "" || (exitCode !== 0 && exitCode !== 1)) {
+  if (stderrText !== "" || (child.status !== 0 && child.status !== 1)) {
     throw new Error(`owned group ${pgid} inspection was unproven`);
   }
-  if (exitCode === 1) {
+  if (child.status === 1) {
     if (stdoutText !== "") throw new Error(`owned group ${pgid} empty census had output`);
     return [];
   }
@@ -273,7 +299,9 @@ async function ownedGroupPids(pgid: number, timeoutMs = 1_000): Promise<number[]
     pids.some((pid) => !Number.isSafeInteger(pid)) ||
     new Set(pids).size !== pids.length
   ) {
-    throw new Error(`owned group ${pgid} census was malformed`);
+    throw new Error(
+      `owned group ${pgid} census was malformed: ${JSON.stringify(stdoutText.slice(0, 4_096))}`,
+    );
   }
   return pids;
 }
@@ -282,7 +310,7 @@ async function waitForOwnedGroupEmpty(pgid: number, timeoutMs = 15_000): Promise
   const deadline = performance.now() + timeoutMs;
   let lastPids: number[] = [];
   while (performance.now() < deadline) {
-    lastPids = await ownedGroupPids(pgid);
+    lastPids = ownedGroupPids(pgid);
     if (lastPids.length === 0) return;
     await Bun.sleep(20);
   }
@@ -467,14 +495,15 @@ describe("owned session launcher", () => {
 
   test("dispatcher death retires a still-running target through the parent lease", async () => {
     let supervisorPid: number | undefined;
-    const helper = spawnCrashableOwnedCommand(
+    const { helper, checkpointPath } = spawnCrashableOwnedCommand(
       "ready",
       "$SIG{TERM} = sub {}; $SIG{HUP} = sub {}; while (1) { sleep 1; }",
     );
     try {
-      supervisorPid = await waitForLifecycleCheckpoint(helper, "ready");
-      expect(await ownedGroupPids(supervisorPid)).toEqual(expect.arrayContaining([supervisorPid]));
-      expect((await ownedGroupPids(supervisorPid)).length).toBeGreaterThanOrEqual(2);
+      supervisorPid = await waitForLifecycleCheckpoint(helper, checkpointPath, "ready");
+      const groupPids = ownedGroupPids(supervisorPid);
+      expect(groupPids).toEqual(expect.arrayContaining([supervisorPid]));
+      expect(groupPids.length).toBeGreaterThanOrEqual(2);
 
       helper.kill("SIGKILL");
       await helper.exited;
@@ -491,10 +520,10 @@ describe("owned session launcher", () => {
 
   test("dispatcher death retires a supervisor parked after target exit", async () => {
     let supervisorPid: number | undefined;
-    const helper = spawnCrashableOwnedCommand("completed", "exit 0;");
+    const { helper, checkpointPath } = spawnCrashableOwnedCommand("completed", "exit 0;");
     try {
-      supervisorPid = await waitForLifecycleCheckpoint(helper, "completed");
-      expect(await ownedGroupPids(supervisorPid)).toEqual([supervisorPid]);
+      supervisorPid = await waitForLifecycleCheckpoint(helper, checkpointPath, "completed");
+      expect(ownedGroupPids(supervisorPid)).toEqual([supervisorPid]);
 
       helper.kill("SIGKILL");
       await helper.exited;
