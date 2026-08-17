@@ -42,12 +42,14 @@ export const STAGING_TEMPLATE_PATH = "infra/environments/staging.wrangler.toml";
 export const STAGING_OUTPUT_PATH = "infra/deploy-resolved/staging.wrangler.toml";
 export const STAGING_D1_INPUT = "ASIMP_D1_DATABASE_ID_STAGING";
 export const STAGING_SERVICE_KEYS_INPUT = "ASIMP_STAGING_SERVICE_ENVELOPE_KEYS";
+export const STAGING_ACCOUNT_INPUT = "ASIMP_ACCOUNT_ID";
 
 const STAGING_D1_PLACEHOLDER = "$" + "{ASIMP_D1_DATABASE_ID_STAGING}";
 const MAX_SERVICE_KEYS_BYTES = 2_048;
 const MAX_ARTIFACT_BYTES = 64 * 1024;
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/;
 const HEX = /^[0-9a-f]{64}$/;
+const ACCOUNT_ID = /^[0-9a-f]{32}$/i;
 const KID = /^[A-Za-z0-9._-]{1,64}$/;
 const CANONICAL_HOSTNAME =
   /^(?=.{1,253}$)[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?(?:\.[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?)+$/;
@@ -202,10 +204,11 @@ export function assertStagingTemplate(report, contents) {
   }
   if (
     !isRecord(parsed.vars) ||
-    Object.keys(parsed.vars).length !== 1 ||
-    parsed.vars.STOA_ORIGIN !== staging.worker_origin
+    Object.keys(parsed.vars).length !== 2 ||
+    parsed.vars.STOA_ORIGIN !== staging.worker_origin ||
+    parsed.vars.AGORA_ORIGIN !== staging.agora_origin
   ) {
-    fail("STAGING_ORIGIN_INVALID", "The staging template origin is not topology-derived.");
+    fail("STAGING_ORIGIN_INVALID", "The staging template origins are not topology-derived.");
   }
   if (parsed.routes !== undefined) {
     fail(
@@ -235,6 +238,13 @@ export function assertStagingTemplate(report, contents) {
     );
   }
   return { parsed, staging };
+}
+
+function canonicalAccountId(value) {
+  if (typeof value !== "string" || !ACCOUNT_ID.test(value)) {
+    fail("STAGING_ACCOUNT_ID_INVALID", "The staging account id is invalid.");
+  }
+  return value.toLowerCase();
 }
 
 function canonicalD1DatabaseId(value) {
@@ -352,6 +362,7 @@ export function canonicalServiceEnvelopeKeys(serialized, staging) {
 export function readStagingDeployInputs(environment = process.env) {
   return {
     d1DatabaseId: environment[STAGING_D1_INPUT],
+    accountId: environment[STAGING_ACCOUNT_INPUT],
     serviceEnvelopeKeys: environment[STAGING_SERVICE_KEYS_INPUT],
   };
 }
@@ -440,6 +451,7 @@ export function requireStagingPublicDeliveryBucket(staging) {
 export function resolveStagingArtifact(root, inputs) {
   const { contents: template, staging } = validatedGeneratedTemplate(root);
   const d1DatabaseId = canonicalD1DatabaseId(inputs?.d1DatabaseId);
+  const accountId = canonicalAccountId(inputs?.accountId);
   const serviceEnvelopeKeys = canonicalServiceEnvelopeKeys(inputs?.serviceEnvelopeKeys, staging);
   const workerHost = workerRouteOrigin(staging.worker_origin);
 
@@ -464,7 +476,7 @@ export function resolveStagingArtifact(root, inputs) {
   resolved = replaceExactly(
     resolved,
     "workers_dev = false\n",
-    `workers_dev = false\n\n# Worker custom domain, derived only from staging worker_origin.\nroutes = [\n  { pattern = ${tomlString(workerHost)}, custom_domain = true },\n]\n`,
+    `workers_dev = false\n\n# The one Cloudflare account this staging artifact may bind.\naccount_id = ${tomlString(accountId)}\n\n# Worker custom domain, derived only from staging worker_origin.\nroutes = [\n  { pattern = ${tomlString(workerHost)}, custom_domain = true },\n]\n`,
     "GENERATED_STAGING_CONFIG_INVALID",
   );
   resolved = replaceExactly(

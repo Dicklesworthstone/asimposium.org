@@ -24,6 +24,7 @@ import {
   requireStagingPublicDeliveryBucket,
   resolutionDiagnostic,
   resolveStagingArtifact,
+  STAGING_ACCOUNT_INPUT,
   STAGING_D1_INPUT,
   STAGING_OUTPUT_PATH,
   STAGING_SERVICE_KEYS_INPUT,
@@ -50,6 +51,7 @@ const productionOverlay = readFileSync(
 );
 
 const d1DatabaseId = "11111111-2222-4333-8444-555555555555";
+const accountId = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
 const expectedKids = ["staging-svc-2026-08", "staging-svc-2026-07"];
 const keyRecords = [
   { kid: expectedKids[0], publicKeyHex: "1".repeat(64), notBefore: 200 },
@@ -91,6 +93,7 @@ function fixture(name) {
 function inputs(overrides = {}) {
   return {
     d1DatabaseId,
+    accountId,
     serviceEnvelopeKeys: keyInput,
     ...overrides,
   };
@@ -136,6 +139,7 @@ const cases = [
       const root = fixture("deterministic");
       const environment = {
         [STAGING_D1_INPUT]: d1DatabaseId,
+        [STAGING_ACCOUNT_INPUT]: accountId,
         [STAGING_SERVICE_KEYS_INPUT]: JSON.stringify([...keyRecords].reverse(), null, 2),
         STOA_ORIGIN: "https://ambient.example.invalid",
         ASIMP_STAGING_ROUTE: "r2.example.invalid",
@@ -144,6 +148,7 @@ const cases = [
       const loaded = readStagingDeployInputs(environment);
       assert.deepEqual(loaded, {
         d1DatabaseId,
+        accountId,
         serviceEnvelopeKeys: environment[STAGING_SERVICE_KEYS_INPUT],
       });
       const fromAmbient = resolveStagingArtifact(root, loaded);
@@ -366,6 +371,39 @@ const cases = [
           assert.equal(error.message.includes(invalid), false);
         }
       }
+    },
+  },
+  {
+    name: "PLANTED-malformed-and-secret-shaped-account-identifiers-are-refused-without-echo",
+    execute() {
+      const root = fixture("invalid-account");
+      for (const invalid of [
+        "",
+        "not-an-account-id",
+        "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "asimp_ag_sensitive-value",
+      ]) {
+        try {
+          resolveStagingArtifact(root, inputs({ accountId: invalid }));
+          assert.fail("expected account refusal");
+        } catch (error) {
+          assert.ok(error instanceof DeployResolutionError);
+          assert.equal(error.code, "STAGING_ACCOUNT_ID_INVALID");
+          if (invalid.length > 0) assert.equal(error.message.includes(invalid), false);
+        }
+      }
+    },
+  },
+  {
+    name: "resolved-artifact-binds-the-declared-account-exactly-once",
+    execute() {
+      const root = fixture("account-binding");
+      const resolved = resolveStagingArtifact(root, inputs());
+      assert.equal((resolved.match(/account_id = /g) ?? []).length, 1);
+      assert.equal(resolved.includes(`account_id = "${accountId}"`), true);
+      const parsed = Bun.TOML.parse(resolved);
+      assert.equal(parsed.account_id, accountId);
     },
   },
   {
