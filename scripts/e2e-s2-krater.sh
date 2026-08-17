@@ -124,6 +124,7 @@ readonly -a S2_SOURCE_PATHS=(
   packages/contracts/src/ledger.ts
   packages/contracts/src/problem.ts
   packages/contracts/src/schema.ts
+  packages/contracts/src/screening.ts
   # Reachable from the listed `packages/contracts/test/unit/schema.test.ts`. It
   # is not in the executed graph, but this array attests test sources as well as
   # executed ones, and a listed file whose own imports escape the set leaves the

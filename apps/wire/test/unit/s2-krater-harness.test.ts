@@ -1481,16 +1481,18 @@ describe("S2 to S7 normalized cost receipt", () => {
     );
     expect(regressionDispatchStart).toBeGreaterThanOrEqual(0);
     expect(regressionDispatch).toContain(regressionGuard);
-    const noneFallthrough = spawnSync(
+    // Capture through files. Bun's in-process spawnSync pipe can return a
+    // misleading empty/failed observation under the parallel suite; this
+    // assertion proves the real `none` fallthrough with the same bounded,
+    // retained diagnostics used by the lifecycle plants.
+    const noneFallthrough = runCaptured(
       "bash",
       ["-c", `${regressionDispatch}\nprintf 'real-product-fallthrough\\n'`],
-      {
-        cwd: REPOSITORY_ROOT,
-        encoding: "utf8",
-        env: { ...process.env, S2_SHELL_REGRESSION_TEST: "none" },
-      },
+      { S2_SHELL_REGRESSION_TEST: "none" },
+      S2_SHELL_REGRESSION_TEST_TIMEOUT_MS,
     );
-    expect(noneFallthrough.status).toBe(0);
+    expect(noneFallthrough.exitCode).toBe(0);
+    expect(noneFallthrough.stderr).toContain(`retained_logs=${noneFallthrough.retainedLogs}`);
     expect(noneFallthrough.stdout).toBe("real-product-fallthrough\n");
   });
 });
@@ -3635,6 +3637,7 @@ describe("registered S2 shell and lifecycle regressions", () => {
     expect(reached).toContain("apps/wire/src/krater/krater.ts");
     expect(reached).toContain("apps/wire/src/krater/outbox-do.ts");
     expect(reached).toContain("apps/wire/src/krater/s2-client.ts");
+    expect(reached).toContain("packages/contracts/src/screening.ts");
     expect(reached.length).toBeGreaterThan(10);
     expect(reached.filter((path) => !listed.has(path))).toEqual([]);
   });
@@ -3786,7 +3789,10 @@ describe("registered S2 shell and lifecycle regressions", () => {
         ),
       ).toBe(false);
 
-      const independent = spawnSync(
+      // Keep this independent walker file-backed too. Under Bun's test
+      // runner, raw spawnSync pipes can report an empty stdout despite the
+      // child exiting zero, which would make this causal plant nondeterministic.
+      const independent = runCaptured(
         "bun",
         [
           "--eval",
@@ -3845,10 +3851,11 @@ describe("registered S2 shell and lifecycle regressions", () => {
           "--",
           `e2e/artifacts/s2-krater/${runId}/main/closure-dynamic-import.ts`,
         ],
-        { cwd: REPOSITORY_ROOT, encoding: "utf8" },
+        {},
+        S2_SHELL_REGRESSION_TEST_TIMEOUT_MS,
       );
-      expect(independent.status).toBe(0);
-      expect(independent.stderr).toBe("");
+      expect(independent.exitCode).toBe(0);
+      expect(independent.stderr).toContain(`retained_logs=${independent.retainedLogs}`);
       expect(independent.stdout).toBe("dynamic-import");
     },
     S2_SHELL_REGRESSION_TEST_TIMEOUT_MS,
@@ -3864,6 +3871,10 @@ describe("registered S2 shell and lifecycle regressions", () => {
     // closure verdict. An omission here could not have been detected at all.
     ["apps/wire/src/krater/krater.ts"],
     ["apps/wire/src/krater/outbox-do.ts"],
+    // The S-4 contract barrel now makes this a real Worker dependency. Keep
+    // the source-closure plant causal: deleting it from the attested set must
+    // refuse before a local D1 or Workerd phase can start.
+    ["packages/contracts/src/screening.ts"],
   ])(
     "PLANTED: omitting the live dependency %s from the list is refused before any run",
     (omitted) => {

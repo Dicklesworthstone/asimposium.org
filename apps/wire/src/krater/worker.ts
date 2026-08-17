@@ -64,6 +64,13 @@ const HARNESS_RUN_ID_PATTERN = /^[a-f0-9]{32}$/;
 const HARNESS_REQUEST_ID_PATTERN = /^[A-Za-z0-9][A-Za-z0-9._-]{0,79}$/;
 const MAX_ABORT_OBSERVATIONS = 64;
 const UNSAFE_D1_SEQUENCE_LITERAL = "9007199254740993";
+const S2_LATE_OUTBOX_ROLLBACK_TRIGGER = "s2_late_outbox_rollback";
+const S2_UNARMED_LATE_OUTBOX_IDENTITY_TRIGGER = "s2_unarmed_late_outbox_identity";
+const S2_LATE_OUTBOX_CLEANUP_MISSING_TRIGGER = "s2_late_outbox_cleanup_missing";
+const S2_LATE_OUTBOX_ROLLBACK_ERROR = "S2_LATE_OUTBOX_ROLLBACK";
+const S2_LOCAL_LATE_OUTBOX_ROLLBACK_CODE = "S2_LOCAL_LATE_OUTBOX_ROLLBACK";
+const S2_LOCAL_LATE_OUTBOX_ROLLBACK_CLEANUP_FAILED_CODE =
+  "S2_LOCAL_LATE_OUTBOX_ROLLBACK_CLEANUP_FAILED";
 
 interface AbortBeforeCommitObservation {
   requestId: string;
@@ -448,6 +455,48 @@ function harnessBoolean(body: Record<string, unknown>, key: string): boolean {
   return value;
 }
 
+/**
+ * This is deliberately narrower than the generic D1 face. The fixed marker is
+ * emitted only by the local trigger below; a coincidental longer token must
+ * not certify the late-outbox fault.
+ */
+function isLateOutboxRollbackFailure(error: unknown): boolean {
+  return error instanceof Error && /\bS2_LATE_OUTBOX_ROLLBACK\b/.test(error.message);
+}
+
+/**
+ * The local harness must never let a cleanup error escape a `finally` and replace a
+ * classified write failure. For the causal cleanup plant, the first DROP is deliberately
+ * aimed at a missing local name; the following target DROP proves the real trigger is
+ * still removed. No database error text crosses this local response boundary.
+ */
+async function cleanupHarnessTrigger(
+  db: D1Database,
+  triggerName: string,
+  plantDropFailure = false,
+): Promise<boolean> {
+  let cleanupFailed = false;
+  if (plantDropFailure) {
+    try {
+      await db.prepare(`DROP TRIGGER ${S2_LATE_OUTBOX_CLEANUP_MISSING_TRIGGER}`).run();
+    } catch (_error) {
+      cleanupFailed = true;
+    }
+  }
+  try {
+    await db.prepare(`DROP TRIGGER ${triggerName}`).run();
+  } catch (_error) {
+    cleanupFailed = true;
+    try {
+      await db.prepare(`DROP TRIGGER IF EXISTS ${triggerName}`).run();
+    } catch (_recoveryError) {
+      // The caller refuses the local success witness below. Its next ordinary write
+      // is the causal residue probe, without exposing the engine's error text.
+    }
+  }
+  return cleanupFailed;
+}
+
 function harnessSeedSequence(body: Record<string, unknown>): number | "unsafe-persisted" | null {
   const value = body.s2_seed_public_seq;
   const unsafePersisted = body.s2_seed_unsafe_persisted_sequence;
@@ -610,6 +659,18 @@ async function handleHarnessRequest(
       const deferOutboxNudge = harnessBoolean(body, "s2_defer_outbox_nudge");
       const failOutboxNudge = harnessBoolean(body, "s2_fail_outbox_nudge");
       const forceLateOutboxRollback = harnessBoolean(body, "s2_force_late_outbox_rollback");
+      const plantUnarmedLateOutboxIdentity = harnessBoolean(
+        body,
+        "s2_plant_unarmed_late_outbox_identity",
+      );
+      const plantArmedNonLateOutboxFailure = harnessBoolean(
+        body,
+        "s2_plant_armed_nonlate_outbox_failure",
+      );
+      const plantLateOutboxCleanupFailure = harnessBoolean(
+        body,
+        "s2_plant_late_outbox_cleanup_failure",
+      );
       const competingInput = competingWriteInput(body);
       if (abortBeforeCommit) recordAbortBeforeCommitObservation(harnessRequestId(body));
       if (preCommitDelayMs > 0) await waitForHarnessDelay(preCommitDelayMs);
@@ -624,6 +685,21 @@ async function handleHarnessRequest(
         );
       }
       const input = writeInput(body);
+      if (plantUnarmedLateOutboxIdentity && forceLateOutboxRollback) {
+        throw new KraterValidationError(
+          "s2_plant_unarmed_late_outbox_identity cannot also force the late-outbox trigger.",
+        );
+      }
+      if (plantArmedNonLateOutboxFailure && !forceLateOutboxRollback) {
+        throw new KraterValidationError(
+          "s2_plant_armed_nonlate_outbox_failure requires s2_force_late_outbox_rollback.",
+        );
+      }
+      if (plantLateOutboxCleanupFailure && !forceLateOutboxRollback) {
+        throw new KraterValidationError(
+          "s2_plant_late_outbox_cleanup_failure requires s2_force_late_outbox_rollback.",
+        );
+      }
       if (competingInput !== null && competingInput.problemId !== input.problemId) {
         throw new KraterValidationError(
           "s2_after_head_competing_write must target the same problem as the outer write.",
@@ -631,16 +707,21 @@ async function handleHarnessRequest(
       }
       let competingWriteCompleted = false;
       let lateOutboxRollbackArmed = false;
+      let unarmedLateOutboxIdentityArmed = false;
+      let classifiedLateOutboxRollback = false;
+      let writeFailed = false;
+      let writeFailure: unknown;
+      let cleanupFailed = false;
       // This D1 trigger is a local-only fault injection. It aborts at the outbox
       // statement, after event_content and FTS have been attempted in the same
       // canonical batch. The finally block removes only the trigger this request
       // created, so a failed transaction cannot contaminate later harness cases.
-      let result: Awaited<ReturnType<typeof writeClaim>>;
+      let result: Awaited<ReturnType<typeof writeClaim>> | null = null;
       try {
         result = await writeClaim(
           env.DB,
           input,
-          !forceLateOutboxRollback && competingInput === null
+          !forceLateOutboxRollback && !plantUnarmedLateOutboxIdentity && competingInput === null
             ? undefined
             : {
                 afterReadHead: async () => {
@@ -648,21 +729,66 @@ async function handleHarnessRequest(
                     competingWriteCompleted = true;
                     await writeClaim(env.DB, competingInput);
                   }
-                  if (forceLateOutboxRollback && !lateOutboxRollbackArmed) {
+                  if (plantUnarmedLateOutboxIdentity && !unarmedLateOutboxIdentityArmed) {
+                    // Causal classifier negative: this is a real D1 abort with the
+                    // expected marker, but the late-outbox trigger itself was never
+                    // created. It must retain the generic failure face.
                     await env.DB.prepare(
-                      `CREATE TRIGGER s2_late_outbox_rollback
+                      `CREATE TRIGGER ${S2_UNARMED_LATE_OUTBOX_IDENTITY_TRIGGER}
+                         BEFORE INSERT ON events
+                         BEGIN SELECT RAISE(ABORT, '${S2_LATE_OUTBOX_ROLLBACK_ERROR}'); END`,
+                    ).run();
+                    unarmedLateOutboxIdentityArmed = true;
+                  }
+                  if (forceLateOutboxRollback && !lateOutboxRollbackArmed) {
+                    const abortMessage = plantArmedNonLateOutboxFailure
+                      ? "S2_UNRELATED_OUTBOX_ABORT"
+                      : S2_LATE_OUTBOX_ROLLBACK_ERROR;
+                    await env.DB.prepare(
+                      `CREATE TRIGGER ${S2_LATE_OUTBOX_ROLLBACK_TRIGGER}
                          BEFORE INSERT ON outbox
-                         BEGIN SELECT RAISE(ABORT, 'S2_LATE_OUTBOX_ROLLBACK'); END`,
+                         BEGIN SELECT RAISE(ABORT, '${abortMessage}'); END`,
                     ).run();
                     lateOutboxRollbackArmed = true;
                   }
                 },
               },
         );
+      } catch (error) {
+        // This fixed response is a local harness witness, not a public D1 error
+        // mapping. Both facts are required: the exact outbox trigger completed
+        // creation, and D1 returned that trigger's fixed abort marker. The two
+        // causal plants below prove neither side may be broadened.
+        if (lateOutboxRollbackArmed && isLateOutboxRollbackFailure(error)) {
+          classifiedLateOutboxRollback = true;
+        } else {
+          writeFailed = true;
+          writeFailure = error;
+        }
       } finally {
         if (lateOutboxRollbackArmed) {
-          await env.DB.prepare("DROP TRIGGER s2_late_outbox_rollback").run();
+          cleanupFailed =
+            (await cleanupHarnessTrigger(
+              env.DB,
+              S2_LATE_OUTBOX_ROLLBACK_TRIGGER,
+              plantLateOutboxCleanupFailure,
+            )) || cleanupFailed;
         }
+        if (unarmedLateOutboxIdentityArmed) {
+          cleanupFailed =
+            (await cleanupHarnessTrigger(env.DB, S2_UNARMED_LATE_OUTBOX_IDENTITY_TRIGGER)) ||
+            cleanupFailed;
+        }
+      }
+      if (classifiedLateOutboxRollback) {
+        if (cleanupFailed) {
+          return response({ code: S2_LOCAL_LATE_OUTBOX_ROLLBACK_CLEANUP_FAILED_CODE }, 409);
+        }
+        return response({ code: S2_LOCAL_LATE_OUTBOX_ROLLBACK_CODE }, 409);
+      }
+      if (writeFailed) throw writeFailure;
+      if (result === null) {
+        throw new KraterValidationError("local S2 write completed without a result.");
       }
       let outboxHandoff: "armed" | "deferred" | "unavailable" = "deferred";
       if (!deferOutboxNudge) {

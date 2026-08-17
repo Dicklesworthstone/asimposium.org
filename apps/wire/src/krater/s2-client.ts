@@ -914,7 +914,11 @@ async function deterministicAllocationAndRollback(): Promise<void> {
 
   await seed(ROLLBACK_PROBLEM, "rollback-two-writer-seed");
   const firstRollbackWrite = writeBody(1, ROLLBACK_PROBLEM, "Deterministic rollback winner.");
-  const rollbackNeedle = "Deterministic late outbox rollback needle.";
+  // This query is sent directly to FTS5 after the deliberately aborted write.
+  // Keep it a single plain term: punctuation in the old sentence made the
+  // rollback postcondition fail at query parsing (HTTP 400) rather than prove
+  // that the late outbox abort left no searchable partial row.
+  const rollbackNeedle = "lateoutboxrollbackneedle";
   const secondRollbackWrite = writeBody(2, ROLLBACK_PROBLEM, rollbackNeedle);
   const failedRollbackEventId = stringAt(secondRollbackWrite, "event_id");
   const rollbackResponse = await request("POST", "/__s2/write", "rollback-two-writer", {
@@ -926,7 +930,7 @@ async function deterministicAllocationAndRollback(): Promise<void> {
   assertEqual(rollbackResponse.status, 409, "S2_ROLLBACK_REJECTION_STATUS_INVALID");
   assertEqual(
     rollbackResponse.body.code,
-    "KRATER_WRITE_FAILED",
+    "S2_LOCAL_LATE_OUTBOX_ROLLBACK",
     "S2_ROLLBACK_REJECTION_CODE_INVALID",
   );
   const rollbackStateResponse = await request(
@@ -966,7 +970,146 @@ async function deterministicAllocationAndRollback(): Promise<void> {
     0,
     "S2_ROLLBACK_FTS_PARTIAL_BATCH_COMMIT",
   );
-  await assertReplay(ROLLBACK_PROBLEM, 1, "rollback-two-writer-replay");
+
+  // These two requests are classifier plants, not substitute rollback proof.
+  // The normal late-outbox plant above still owns the full cursor/count/FTS
+  // residue checks. Here, an unarmed D1 error with the right marker and an
+  // armed D1 error with the wrong marker must both retain the generic face.
+  // Removing either half of the worker's identity predicate turns one of these
+  // expected generic failures into the local witness and fails this client.
+  const classifierStateBefore = canonicalState(rollbackState);
+  const unarmedIdentityWrite = writeBody(
+    3,
+    ROLLBACK_PROBLEM,
+    "Unarmed late outbox identity classifier plant.",
+  );
+  const unarmedIdentity = await request(
+    "POST",
+    "/__s2/write",
+    "rollback-unarmed-identity-classifier-negative",
+    {
+      ...unarmedIdentityWrite,
+      s2_defer_outbox_nudge: true,
+      s2_plant_unarmed_late_outbox_identity: true,
+    },
+  );
+  assertEqual(unarmedIdentity.status, 409, "S2_UNARMED_ROLLBACK_CLASSIFIER_STATUS_INVALID");
+  assertEqual(
+    unarmedIdentity.body.code,
+    "KRATER_WRITE_FAILED",
+    "S2_UNARMED_ROLLBACK_CLASSIFIER_WITNESS_ESCAPED",
+  );
+  const unarmedIdentityState = await state(
+    ROLLBACK_PROBLEM,
+    "rollback-unarmed-identity-classifier-state",
+  );
+  assertEqual(
+    canonicalState(unarmedIdentityState),
+    classifierStateBefore,
+    "S2_UNARMED_ROLLBACK_CLASSIFIER_PARTIAL_COMMIT",
+  );
+
+  const armedNonLateNeedle = "armednonlateoutboxneedle";
+  const armedNonLateWrite = writeBody(4, ROLLBACK_PROBLEM, armedNonLateNeedle);
+  const armedNonLate = await request(
+    "POST",
+    "/__s2/write",
+    "rollback-armed-nonlate-classifier-negative",
+    {
+      ...armedNonLateWrite,
+      s2_defer_outbox_nudge: true,
+      s2_force_late_outbox_rollback: true,
+      s2_plant_armed_nonlate_outbox_failure: true,
+    },
+  );
+  assertEqual(armedNonLate.status, 409, "S2_ARMED_NONLATE_ROLLBACK_CLASSIFIER_STATUS_INVALID");
+  assertEqual(
+    armedNonLate.body.code,
+    "KRATER_WRITE_FAILED",
+    "S2_ARMED_NONLATE_ROLLBACK_CLASSIFIER_WITNESS_ESCAPED",
+  );
+  const armedNonLateState = await state(
+    ROLLBACK_PROBLEM,
+    "rollback-armed-nonlate-classifier-state",
+  );
+  assertEqual(
+    canonicalState(armedNonLateState),
+    classifierStateBefore,
+    "S2_ARMED_NONLATE_ROLLBACK_CLASSIFIER_PARTIAL_COMMIT",
+  );
+  const armedNonLateSearch = await request(
+    "GET",
+    `/__s2/search?q=${encodeURIComponent(armedNonLateNeedle)}`,
+    "rollback-armed-nonlate-fts-state",
+  );
+  assertEqual(armedNonLateSearch.status, 200, "S2_ARMED_NONLATE_ROLLBACK_FTS_READ_FAILED");
+  assertEqual(
+    Array.isArray(armedNonLateSearch.body.matches) ? armedNonLateSearch.body.matches.length : -1,
+    0,
+    "S2_ARMED_NONLATE_ROLLBACK_FTS_PARTIAL_BATCH_COMMIT",
+  );
+
+  // This plant makes the first local cleanup DROP fail after the normal late-outbox
+  // classification. It must refuse the ordinary witness, recover the actual trigger,
+  // and leave the next ordinary write free of stale trigger contamination.
+  const cleanupFailureStateBefore = classifierStateBefore;
+  const cleanupFailureWrite = writeBody(
+    5,
+    ROLLBACK_PROBLEM,
+    "Late outbox cleanup failure classifier plant.",
+  );
+  const cleanupFailure = await request(
+    "POST",
+    "/__s2/write",
+    "rollback-late-outbox-cleanup-failure",
+    {
+      ...cleanupFailureWrite,
+      s2_defer_outbox_nudge: true,
+      s2_force_late_outbox_rollback: true,
+      s2_plant_late_outbox_cleanup_failure: true,
+    },
+  );
+  assertEqual(cleanupFailure.status, 409, "S2_ROLLBACK_CLEANUP_FAILURE_STATUS_INVALID");
+  assertEqual(
+    cleanupFailure.body.code,
+    "S2_LOCAL_LATE_OUTBOX_ROLLBACK_CLEANUP_FAILED",
+    "S2_ROLLBACK_CLEANUP_FAILURE_FALSE_WITNESS",
+  );
+  const cleanupFailureState = await state(
+    ROLLBACK_PROBLEM,
+    "rollback-late-outbox-cleanup-failure-state",
+  );
+  assertEqual(
+    canonicalState(cleanupFailureState),
+    cleanupFailureStateBefore,
+    "S2_ROLLBACK_CLEANUP_FAILURE_PARTIAL_COMMIT",
+  );
+
+  const cleanupRecoveryNeedle = "lateoutboxcleanuprecoverneedle";
+  const cleanupRecovery = await request(
+    "POST",
+    "/__s2/write",
+    "rollback-late-outbox-cleanup-recovery",
+    {
+      ...writeBody(6, ROLLBACK_PROBLEM, cleanupRecoveryNeedle),
+      s2_defer_outbox_nudge: true,
+    },
+  );
+  assertEqual(cleanupRecovery.status, 200, "S2_ROLLBACK_CLEANUP_STALE_TRIGGER_CONTAMINATION");
+  const cleanupRecoverySearch = await request(
+    "GET",
+    `/__s2/search?q=${encodeURIComponent(cleanupRecoveryNeedle)}`,
+    "rollback-late-outbox-cleanup-recovery-search",
+  );
+  assertEqual(cleanupRecoverySearch.status, 200, "S2_ROLLBACK_CLEANUP_RECOVERY_FTS_READ_FAILED");
+  assertEqual(
+    Array.isArray(cleanupRecoverySearch.body.matches)
+      ? cleanupRecoverySearch.body.matches.length
+      : -1,
+    1,
+    "S2_ROLLBACK_CLEANUP_STALE_TRIGGER_FTS_CONTAMINATION",
+  );
+  await assertReplay(ROLLBACK_PROBLEM, 2, "rollback-two-writer-replay");
 
   for (const since of [Number.MAX_SAFE_INTEGER - 1, Number.MAX_SAFE_INTEGER]) {
     const safeCursor = await request(
