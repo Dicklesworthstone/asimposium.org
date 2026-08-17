@@ -26,6 +26,8 @@ import { randomBytes } from "node:crypto";
 import { once } from "node:events";
 import {
   closeSync,
+  constants as fsConstants,
+  fstatSync,
   mkdtempSync,
   openSync,
   readFileSync,
@@ -33,7 +35,7 @@ import {
   statSync,
   writeFileSync,
 } from "node:fs";
-import { createServer, type Socket } from "node:net";
+import { createConnection, createServer, type Socket } from "node:net";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 
@@ -72,8 +74,8 @@ const RUN_TIMEOUT_MS = 100_000;
 /** Maximum wait after an outer SIGKILL attempt before cleanup is unproven. */
 const POST_KILL_SETTLE_MS = 2_000;
 /** Supervisor capability records are tiny; refuse a runaway/forged stream. */
-const OUTER_CONTROL_MAX_BYTES = 65_536;
-/** Connect/bootstrap/control acknowledgements each have a fixed local bound. */
+const OUTER_CONTROL_MAX_BYTES = 4_096;
+/** Per-operation cap; every operation also consumes its caller's one absolute deadline. */
 const OUTER_CONTROL_STEP_MS = 2_000;
 
 class OverCapture extends Error {}
@@ -85,19 +87,55 @@ class OverCapture extends Error {}
  * prefix of a runaway capture would let a test pass on the first megabyte of
  * output that went wrong after it.
  */
-function readBounded(path: string): string {
-  const size = statSync(path).size;
+interface CaptureIdentity {
+  readonly dev: number;
+  readonly ino: number;
+  readonly mode: number;
+}
+
+function captureIdentity(fd: number): CaptureIdentity {
+  const stat = fstatSync(fd);
+  if (!stat.isFile() || (stat.mode & 0o777) !== 0o600) {
+    throw new Error("capture descriptor is not a mode-600 regular file");
+  }
+  return { dev: stat.dev, ino: stat.ino, mode: stat.mode };
+}
+
+function readBounded(fd: number, path: string, identity: CaptureIdentity): string {
+  const before = fstatSync(fd);
+  if (
+    !before.isFile() ||
+    before.dev !== identity.dev ||
+    before.ino !== identity.ino ||
+    before.mode !== identity.mode ||
+    (before.mode & 0o777) !== 0o600
+  ) {
+    throw new Error(`capture identity or mode changed at ${path}`);
+  }
+  const size = before.size;
   if (size > MAX_CAPTURE_BYTES) {
     throw new OverCapture(`capture exceeded ${MAX_CAPTURE_BYTES} bytes (${size})`);
   }
-  if (size === 0) return "";
-  const fd = openSync(path, "r");
+  const buffer = Buffer.allocUnsafe(size);
+  let offset = 0;
+  while (offset < size) {
+    const read = readSync(fd, buffer, offset, size - offset, offset);
+    if (read === 0) throw new Error(`capture short read at ${path}: ${offset}/${size}`);
+    offset += read;
+  }
+  const after = fstatSync(fd);
+  if (
+    after.dev !== before.dev ||
+    after.ino !== before.ino ||
+    after.mode !== before.mode ||
+    after.size !== before.size
+  ) {
+    throw new Error(`capture changed while being read at ${path}`);
+  }
   try {
-    const buffer = Buffer.allocUnsafe(size);
-    const read = readSync(fd, buffer, 0, size, 0);
-    return buffer.subarray(0, read).toString("utf8");
-  } finally {
-    closeSync(fd);
+    return new TextDecoder("utf-8", { fatal: true }).decode(buffer);
+  } catch {
+    throw new Error(`capture is not canonical UTF-8 at ${path}`);
   }
 }
 
@@ -105,12 +143,14 @@ interface OuterControlListener {
   readonly port: number;
   readonly connected: Promise<Socket>;
   readonly protocolFailure: () => Error | undefined;
+  seal(): void;
   close(): Promise<void>;
 }
 
 /**
- * One loopback TCP rendezvous, created before the supervisor and closed on the
- * first accept. This deliberately follows the repo-proven S1 socket transport:
+ * One loopback TCP rendezvous, created before the supervisor and sealed after
+ * the first candidate (plus the explicit exact-one test seam). This deliberately
+ * follows the repo-proven S1 socket transport:
  * nested Bun stdio pipes have lost bytes and thrown EPIPE under `bun test`.
  * A TCP port is not authority. The accepted duplex socket becomes authority only
  * after the parent bootstraps its secret nonce, before the supervisor forks the
@@ -127,8 +167,10 @@ async function outerControlListener(): Promise<OuterControlListener> {
   }
 
   let parentSide: Socket | undefined;
+  let parentClosed = Promise.resolve();
   let connectionSettled = false;
   let disposed = false;
+  let closePromise: Promise<void> | undefined;
   let failure: Error | undefined;
   let rejectConnection: ((error: Error) => void) | undefined;
   let resolveServerClosed: (() => void) | undefined;
@@ -159,8 +201,14 @@ async function outerControlListener(): Promise<OuterControlListener> {
         return;
       }
       parentSide = socket;
+      parentClosed = new Promise<void>((resolveClosed) => {
+        socket.once("close", () => resolveClosed());
+      });
+      socket.on("error", (error) => {
+        failure ??= error;
+        socket.destroy();
+      });
       connectionSettled = true;
-      stopAccepting();
       resolveConnection(socket);
     });
   });
@@ -172,29 +220,34 @@ async function outerControlListener(): Promise<OuterControlListener> {
     }
     parentSide?.destroy();
   });
+  // `Bun.spawn` can throw before the caller starts its connection race. Keep a
+  // close-triggered rejection observed even on that pre-spawn path.
+  void connected.catch(() => undefined);
   return {
     port: address.port,
     connected,
     protocolFailure: () => failure,
-    async close() {
-      if (disposed) return;
-      disposed = true;
-      if (!connectionSettled) {
-        connectionSettled = true;
-        rejectConnection?.(new Error("supervisor capability listener closed before connect"));
-      }
-      stopAccepting();
-      const socketClosed =
-        parentSide === undefined || parentSide.destroyed
-          ? Promise.resolve()
-          : once(parentSide, "close").then(() => undefined);
-      parentSide?.destroy();
-      await Promise.all([serverClosed, socketClosed]);
+    seal: stopAccepting,
+    close() {
+      if (closePromise !== undefined) return closePromise;
+      closePromise = (async () => {
+        disposed = true;
+        if (!connectionSettled) {
+          connectionSettled = true;
+          rejectConnection?.(new Error("supervisor capability listener closed before connect"));
+        }
+        stopAccepting();
+        parentSide?.destroy();
+        await Promise.all([serverClosed, parentClosed]);
+      })();
+      return closePromise;
     },
   };
 }
 
-async function within<T>(promise: Promise<T>, milliseconds: number): Promise<T | undefined> {
+type BoundedResult<T> = { readonly kind: "value"; readonly value: T } | { readonly kind: "elapsed" };
+
+async function within<T>(promise: Promise<T>, milliseconds: number): Promise<BoundedResult<T>> {
   let timer: ReturnType<typeof setTimeout> | undefined;
   try {
     const result = await Promise.race([
@@ -203,11 +256,379 @@ async function within<T>(promise: Promise<T>, milliseconds: number): Promise<T |
         timer = setTimeout(() => resolveElapsed({ kind: "elapsed" }), Math.max(0, milliseconds));
       }),
     ]);
-    return result.kind === "value" ? result.value : undefined;
+    return result;
   } finally {
     if (timer !== undefined) clearTimeout(timer);
   }
 }
+
+function controlStepRemaining(deadlineAt: number): number {
+  return Math.max(0, Math.min(OUTER_CONTROL_STEP_MS, deadlineAt - Date.now()));
+}
+
+type OuterTerminal =
+  | { readonly kind: "child"; readonly status: number }
+  | { readonly kind: "protocol-failure"; readonly error: Error };
+
+type OuterProtocolState = "connected" | "ready" | "running" | "term-sent" | "closing";
+
+/**
+ * Strict nonce-framed protocol over the one accepted loopback socket.
+ *
+ * The supervisor is the sole socket writer. Its payload recorder reaches it
+ * over an anonymous pipe, so CHILD and ACK records cannot interleave bytes.
+ */
+class OuterSupervisorProtocol {
+  readonly terminal: Promise<OuterTerminal>;
+  readonly closed: Promise<void>;
+  private readonly socket: Socket;
+  private readonly token: string;
+  private state: OuterProtocolState = "connected";
+  private totalBytes = 0;
+  private buffered = Buffer.alloc(0);
+  private failure: Error | undefined;
+  private terminalSeen = false;
+  private closureExpected = false;
+  private resolveTerminal: ((terminal: OuterTerminal) => void) | undefined;
+  private expected:
+    | {
+        readonly record: string;
+        readonly onMatch?: () => void;
+        readonly resolve: (matched: boolean) => void;
+      }
+    | undefined;
+
+  constructor(socket: Socket, token: string) {
+    this.socket = socket;
+    this.token = token;
+    this.closed = new Promise<void>((resolveClosed) => {
+      socket.once("close", () => resolveClosed());
+    });
+    this.terminal = new Promise<OuterTerminal>((resolve) => {
+      this.resolveTerminal = resolve;
+    });
+    socket.on("data", (chunk: Buffer) => this.acceptBytes(chunk));
+    socket.once("end", () => this.acceptClose("ended"));
+    socket.once("close", () => this.acceptClose("closed"));
+    socket.once("error", () => this.acceptClose("errored"));
+  }
+
+  protocolFailure(): Error | undefined {
+    return this.failure;
+  }
+
+  private fail(reason: string): void {
+    if (this.failure !== undefined) return;
+    this.failure = new Error("outer supervisor protocol failure: " + reason);
+    this.expected?.resolve(false);
+    this.expected = undefined;
+    if (!this.terminalSeen) {
+      this.resolveTerminal?.({ kind: "protocol-failure", error: this.failure });
+      this.resolveTerminal = undefined;
+    }
+    this.socket.destroy();
+  }
+
+  private acceptClose(reason: string): void {
+    if (this.buffered.byteLength !== 0) {
+      this.fail("trailing partial frame");
+      return;
+    }
+    if (this.expected !== undefined) {
+      this.fail("socket " + reason + " before expected acknowledgement");
+      return;
+    }
+    if (!this.closureExpected) this.fail("socket " + reason + " unexpectedly");
+  }
+
+  private acceptBytes(chunk: Buffer): void {
+    if (this.failure !== undefined) return;
+    this.totalBytes += chunk.byteLength;
+    if (this.totalBytes > OUTER_CONTROL_MAX_BYTES) {
+      this.fail("byte limit exceeded");
+      return;
+    }
+    for (const byte of chunk) {
+      if (byte > 0x7f || byte === 0 || byte === 0x0d) {
+        this.fail("non-canonical byte");
+        return;
+      }
+    }
+    this.buffered = Buffer.concat([this.buffered, chunk]);
+    while (true) {
+      const newline = this.buffered.indexOf(0x0a);
+      if (newline === -1) {
+        if (this.buffered.byteLength > 511) this.fail("frame length exceeded");
+        return;
+      }
+      if (newline > 511) {
+        this.fail("frame length exceeded");
+        return;
+      }
+      const line = this.buffered.subarray(0, newline).toString("ascii");
+      this.buffered = this.buffered.subarray(newline + 1);
+      this.acceptRecord(line);
+      if (this.failure !== undefined) return;
+    }
+  }
+
+  private acceptRecord(record: string): void {
+    const childPrefix = "outer-child:" + this.token + ":";
+    if (record.startsWith(childPrefix)) {
+      if (this.state !== "running" && this.state !== "term-sent") {
+        this.fail("CHILD before STARTED");
+        return;
+      }
+      if (this.terminalSeen) {
+        this.fail("duplicate CHILD");
+        return;
+      }
+      const statusText = record.slice(childPrefix.length);
+      if (!/^(0|[1-9]|[1-9][0-9]|[1-9][0-9][0-9])$/.test(statusText)) {
+        this.fail("non-canonical CHILD status");
+        return;
+      }
+      const status = Number(statusText);
+      if (status > 255) {
+        this.fail("CHILD status out of range");
+        return;
+      }
+      this.terminalSeen = true;
+      this.resolveTerminal?.({ kind: "child", status });
+      this.resolveTerminal = undefined;
+      return;
+    }
+    if (this.expected?.record === record) {
+      this.expected.onMatch?.();
+      const resolve = this.expected.resolve;
+      this.expected = undefined;
+      resolve(true);
+      return;
+    }
+    this.fail("unknown, duplicate, or out-of-order record");
+  }
+
+  private expectRecord(record: string, onMatch?: () => void): Promise<boolean> {
+    if (this.failure !== undefined || this.expected !== undefined) return Promise.resolve(false);
+    return new Promise<boolean>((resolve) => {
+      this.expected = { record, onMatch, resolve };
+    });
+  }
+
+  private cancelExpected(): void {
+    this.expected?.resolve(false);
+    this.expected = undefined;
+  }
+
+  private async writeFrame(frame: string, deadlineAt: number): Promise<boolean> {
+    if (this.failure !== undefined || this.socket.destroyed) return false;
+    const writeBudget = controlStepRemaining(deadlineAt);
+    if (writeBudget === 0) {
+      this.fail("absolute deadline elapsed before write");
+      return false;
+    }
+    const bytes = Buffer.from(frame + "\n", "ascii");
+    const written = new Promise<void>((resolve, reject) => {
+      try {
+        // The callback fires only after the complete buffer is handed off.
+        // A false return is backpressure, not a partial write.
+        this.socket.write(bytes, (error) => {
+          if (error) reject(error);
+          else resolve();
+        });
+      } catch (error) {
+        reject(error);
+      }
+    });
+    try {
+      const result = await within(written, writeBudget);
+      if (result.kind === "elapsed") {
+        this.fail("write callback timeout");
+        return false;
+      }
+      return true;
+    } catch {
+      this.fail("write callback failure");
+      return false;
+    }
+  }
+
+  private async request(
+    frame: string,
+    expected: string,
+    deadlineAt: number,
+    onMatch?: () => void,
+  ): Promise<boolean> {
+    const acknowledgement = this.expectRecord(expected, onMatch);
+    if (!(await this.writeFrame(frame, deadlineAt))) {
+      this.cancelExpected();
+      return false;
+    }
+    const acknowledgementBudget = controlStepRemaining(deadlineAt);
+    if (acknowledgementBudget === 0) {
+      this.cancelExpected();
+      this.fail("absolute deadline elapsed before acknowledgement");
+      return false;
+    }
+    const result = await within(acknowledgement, acknowledgementBudget);
+    if (result.kind === "elapsed") {
+      this.cancelExpected();
+      this.fail("acknowledgement timeout");
+      return false;
+    }
+    return result.value;
+  }
+
+  async bootstrap(deadlineAt: number): Promise<boolean> {
+    if (this.state !== "connected") return false;
+    return this.request(
+      "BOOT\t" + this.token,
+      "outer-ready:" + this.token,
+      deadlineAt,
+      () => {
+        this.state = "ready";
+      },
+    );
+  }
+
+  async start(deadlineAt: number): Promise<boolean> {
+    if (this.state !== "ready") return false;
+    return this.request(
+      "START\t" + this.token,
+      "outer-started:" + this.token,
+      deadlineAt,
+      () => {
+        this.state = "running";
+      },
+    );
+  }
+
+  async signal(
+    signal: "TERM" | "KILL",
+    cleanupDeadlineAt: number,
+    failKillDispatch: boolean,
+    onControlSignal?: (signal: "TERM" | "KILL") => void,
+  ): Promise<boolean> {
+    if (
+      (this.state !== "running" && this.state !== "term-sent") ||
+      (signal === "KILL" && failKillDispatch)
+    ) {
+      return false;
+    }
+    if (signal === "KILL") this.closureExpected = true;
+    const ok = await this.request(
+      "SIGNAL\t" + this.token + "\t" + signal,
+      "outer-ack:" + this.token + ":" + signal,
+      cleanupDeadlineAt,
+    );
+    if (!ok) return false;
+    onControlSignal?.(signal);
+    this.state = signal === "TERM" ? "term-sent" : "closing";
+    return true;
+  }
+
+  async die(cleanupDeadlineAt: number): Promise<boolean> {
+    if (this.state !== "running" && this.state !== "term-sent") return false;
+    this.closureExpected = true;
+    const ok = await this.request(
+      "DIE\t" + this.token,
+      "outer-closed:" + this.token,
+      cleanupDeadlineAt,
+    );
+    if (ok) this.state = "closing";
+    return ok;
+  }
+
+  expectClosure(): void {
+    this.closureExpected = true;
+  }
+}
+
+const OUTER_SETPGRP_PROGRAM =
+  "use POSIX qw(dup dup2 close); pipe(my $reader,my $writer) or die $!; " +
+  "my $r=fileno($reader); my $w=fileno($writer); " +
+  "if ($r==9 && $w!=9) { $r=dup($r); die $! if $r<0; } " +
+  "dup2($w,9) unless $w==9; dup2($r,8) unless $r==8; " +
+  "close($r) if $r!=8 && $r!=9; " +
+  "close($w) if $w!=8 && $w!=9; $^F=9; setpgrp(0,0) or die $!; " +
+  "exec @ARGV or die $!;";
+
+const OUTER_SUPERVISOR_PROGRAM = [
+  'port="$1" unavailable="$2" stdout_file="$3" stderr_file="$4" ready_delay="$5" started_delay="$6" ack_delay="$7" extra_kill_record="$8"',
+  "shift 8",
+  "set +m",
+  "LC_ALL=C",
+  "export LC_ALL",
+  "trap '' TERM HUP INT PIPE",
+  'exec 7<>"/dev/tcp/127.0.0.1/$port" || exit "$unavailable"',
+  "tab=$'\\t'",
+  'IFS="$tab" read -r boot_kind token boot_extra <&7 || kill -KILL 0',
+  '[[ "$boot_kind" == "BOOT" && -n "$token" && -z "$boot_extra" ]] || kill -KILL 0',
+  '[[ "$ready_delay" =~ ^(0|[0-9]+\\.[0-9][0-9][0-9])$ ]] || kill -KILL 0',
+  '[[ "$started_delay" =~ ^(0|[0-9]+\\.[0-9][0-9][0-9])$ ]] || kill -KILL 0',
+  '[[ "$ack_delay" =~ ^(0|[0-9]+\\.[0-9][0-9][0-9])$ ]] || kill -KILL 0',
+  '[[ "$ready_delay" == "0" ]] || { IFS= read -r -t "$ready_delay" _ <&8 || :; }',
+  'printf "outer-ready:%s\\n" "$token" >&7 || kill -KILL 0',
+  'IFS="$tab" read -r start_kind start_token start_extra <&7 || kill -KILL 0',
+  '[[ "$start_kind" == "START" && "$start_token" == "$token" && -z "$start_extra" ]] || kill -KILL 0',
+  '[[ "$started_delay" == "0" ]] || { IFS= read -r -t "$started_delay" _ <&8 || :; }',
+  'printf "outer-started:%s\\n" "$token" >&7 || kill -KILL 0',
+  "(",
+  "  exec 8<&-",
+  "  command_status=0",
+  "  (",
+  "    trap - TERM HUP INT PIPE",
+  "    unset token boot_kind start_token",
+  "    exec 3>&- 4>&- 5>&- 6>&- 7>&- 8>&- 9>&-",
+  '    exec "$@" </dev/null >"$stdout_file" 2>"$stderr_file"',
+  "  ) || command_status=$?",
+  '  printf "child:%s:%s\\n" "$token" "$command_status" >&9 || kill -KILL 0',
+  "  exec 9>&-",
+  ") &",
+  "exec 9>&-",
+  "child_sent=0",
+  "while :; do",
+  "  if (( child_sent == 0 )); then",
+  '    if IFS= read -r -t 0.05 child_record <&8; then',
+  '      child_prefix="child:$token:"',
+  '      [[ "$child_record" == "$child_prefix"* ]] || kill -KILL 0',
+  '      child_status="${child_record#"$child_prefix"}"',
+  '      [[ "$child_status" =~ ^(0|[1-9]|[1-9][0-9]|[1-9][0-9][0-9])$ ]] || kill -KILL 0',
+  "      (( 10#$child_status <= 255 )) || kill -KILL 0",
+  '      printf "outer-child:%s:%s\\n" "$token" "$child_status" >&7 || kill -KILL 0',
+  "      child_sent=1",
+  "    fi",
+  "  fi",
+  "  request_status=0",
+  '  IFS="$tab" read -r -t 0.05 request_kind request_token request_signal request_extra <&7 || request_status=$?',
+  "  if (( request_status == 0 )); then",
+  '    [[ "$request_token" == "$token" && -z "$request_extra" ]] || kill -KILL 0',
+  '    case "$request_kind:$request_signal" in',
+  '      "SIGNAL:TERM")',
+  '        [[ "$ack_delay" == "0" ]] || { IFS= read -r -t "$ack_delay" _ <&7 || :; }',
+  '        printf "outer-ack:%s:TERM\\n" "$token" >&7 || kill -KILL 0',
+  "        kill -TERM 0 2>/dev/null || kill -KILL 0",
+  "        ;;",
+  '      "SIGNAL:KILL")',
+  '        [[ "$ack_delay" == "0" ]] || { IFS= read -r -t "$ack_delay" _ <&7 || :; }',
+  '        printf "outer-ack:%s:KILL\\n" "$token" >&7 || kill -KILL 0',
+  '        [[ "$extra_kill_record" == "1" ]] && printf "outer-ack:%s:EXTRA\\n" "$token" >&7',
+  "        kill -KILL 0",
+  "        ;;",
+  '      "DIE:")',
+  '        printf "outer-closed:%s\\n" "$token" >&7 || kill -KILL 0',
+  "        kill -KILL 0",
+  "        ;;",
+  "      *) kill -KILL 0 ;;",
+  "    esac",
+  "  elif (( request_status == 1 )); then",
+  "    kill -KILL 0",
+  "  fi",
+  "done",
+].join("\n");
+
+const OUTER_NEVER_CONNECT_PROGRAM =
+  'trap "" TERM HUP INT; kill -STOP "$BASHPID"; exit 99';
 
 interface ShellLifecycle {
   readonly cleanupUnproven: boolean;
@@ -282,6 +703,20 @@ interface ShellRunOptions {
   readonly failKillDispatch?: boolean;
   /** Test-only observer called after a signal command is written to the live capability. */
   readonly onControlSignal?: (signal: "TERM" | "KILL") => void;
+  /** Test-only cumulative BOOT/READY delay in the real supervisor. */
+  readonly controlReadyDelayMs?: number;
+  /** Test-only cumulative START/STARTED delay in the real supervisor. */
+  readonly controlStartedDelayMs?: number;
+  /** Test-only delay for each TERM/KILL application acknowledgement. */
+  readonly controlAckDelayMs?: number;
+  /** Test-only duplicate record after KILL acknowledgement. */
+  readonly extraRecordAfterKillAck?: boolean;
+  /** Test-only hook after first accept and before listener sealing/token mint. */
+  readonly afterControlAccept?: (port: number) => Promise<void>;
+  /** Test-only post-settlement connect attempt; the sealed listener must refuse it. */
+  readonly probeLateSecondConnection?: boolean;
+  /** Test-only stopped helper that never opens the rendezvous. */
+  readonly supervisorNeverConnect?: boolean;
 }
 
 /**
@@ -308,23 +743,15 @@ async function runShell(
   script = SCRIPT,
   options: ShellRunOptions = {},
 ): Promise<ShellRun> {
+  const runTimeoutMs = options.runTimeoutMs ?? RUN_TIMEOUT_MS;
   const dir = mkdtempSync(join(process.env.TMPDIR ?? tmpdir(), "s6-run-"));
   const stdoutPath = join(dir, "stdout");
   const stderrPath = join(dir, "stderr");
-  // NO OWNERSHIP LEDGER, and no claim of zero-survivor containment.
-  //
-  // `set -m` puts each of the script's jobs in its own process group, so this
-  // controller — which knows only the script's pgid — cannot reach them if the
-  // script's trap is prevented from finishing. A pgid ledger was tried and
-  // removed: bare pgids are not identity, so signalling from them risks killing a
-  // recycled group, and censusing them is fail-open (a missing or unwritten row
-  // hides a survivor, a recycled row invents one). Proving containment here would
-  // need live nonce-bearing supervisors pinning each nested group, which this
-  // pass does not build. The hard-kill path is therefore reported as
-  // CLEANUP-UNPROVEN rather than described as contained.
-  const stdoutFd = openSync(stdoutPath, "w", 0o600);
-  const stderrFd = openSync(stderrPath, "w", 0o600);
-
+  // NO OWNERSHIP LEDGER. The outer supervisor is a live capability: after one
+  // loopback accept, a parent-memory nonce authenticates its duplex socket before
+  // target fork. The supervisor self-signals group zero; this parent never names
+  // a pid or pgid. A timed-out run remains cleanup-unproven because killing the
+  // outer shell cuts short its nested-group settlement report.
   // TOTAL descriptor ownership, released exactly once.
   //
   // Holding the descriptors until the child exits fixed the lost-output race,
@@ -337,8 +764,10 @@ async function runShell(
   // swallowed every error, so a real close refusal leaked silently while the
   // suite went green — and a stdout failure meant stderr was never retried.
   // EINTR is retried; anything else is aggregated and thrown so the test fails.
-  let stdoutOpen = true;
-  let stderrOpen = true;
+  let stdoutFd = -1;
+  let stderrFd = -1;
+  let stdoutOpen = false;
+  let stderrOpen = false;
   const releaseCaptureFds = (): void => {
     const failures: string[] = [];
     const close = (fd: number, label: string, clear: () => void): void => {
@@ -376,22 +805,74 @@ async function runShell(
     }
   };
 
+  let stdoutCaptureIdentity: CaptureIdentity | undefined;
+  let stderrCaptureIdentity: CaptureIdentity | undefined;
+  const captureOpenFlags =
+    fsConstants.O_RDWR | fsConstants.O_CREAT | fsConstants.O_EXCL | fsConstants.O_NOFOLLOW;
   try {
-    // A REAL separate process group, so `child.pid` genuinely IS the pgid.
-    //
-    // `bash -c 'set -m; …'` did not do this: job control changes the groups of
-    // the jobs that shell starts, not the group of the shell itself, so
-    // `process.kill(-child.pid, …)` was addressing a group this process did not
-    // lead — and the bare-pid fallback then fired, which after the reap can hit a
-    // reused number. `setpgrp(0,0)` before `exec` makes the child a group leader
-    // for real, and macOS has no `setsid(1)` to do it with.
-    const child = Bun.spawn({
+    stdoutFd = openSync(stdoutPath, captureOpenFlags, 0o600);
+    stdoutOpen = true;
+    stdoutCaptureIdentity = captureIdentity(stdoutFd);
+    stderrFd = openSync(stderrPath, captureOpenFlags, 0o600);
+    stderrOpen = true;
+    stderrCaptureIdentity = captureIdentity(stderrFd);
+  } catch (openError) {
+    try {
+      releaseCaptureFds();
+    } catch (closeError) {
+      throw new AggregateError(
+        [openError, closeError],
+        "capture construction failed and partial descriptor release also failed",
+      );
+    }
+    throw openError;
+  }
+  if (stdoutCaptureIdentity === undefined || stderrCaptureIdentity === undefined) {
+    releaseCaptureFds();
+    throw new Error("capture descriptor identity was not established");
+  }
+
+  let controlListener: OuterControlListener | undefined;
+  let protocol: OuterSupervisorProtocol | undefined;
+  let supervisorExited: Promise<number> | undefined;
+  let supervisorSettled = false;
+  let capabilityEstablished = false;
+  let retirePreCapabilitySupervisor: ((cleanupDeadlineAt: number) => Promise<void>) | undefined;
+  let deadlineTimer: ReturnType<typeof setTimeout> | undefined;
+  let deadlineAt = 0;
+  let teardownDeadlineAt: number | undefined;
+  const beginTeardownBudget = (milliseconds: number): number => {
+    teardownDeadlineAt ??= Date.now() + milliseconds;
+    return teardownDeadlineAt;
+  };
+  try {
+    controlListener = await outerControlListener();
+    // Perl creates the anonymous recorder pipe and the real process group, then
+    // Bash opens the loopback capability as FD7 before it reads BOOT. No Bun
+    // child stdio pipe and no numeric pid/pgid authority exists in the parent.
+    // The one production work deadline begins at child launch. Connection,
+    // BOOT/READY, START/STARTED, and payload lifetime all consume this same
+    // budget; no protocol step receives a fresh window.
+    deadlineAt = Date.now() + runTimeoutMs;
+    const supervisorProcess = Bun.spawn({
       cmd: [
         "/usr/bin/perl",
         "-e",
-        'setpgrp(0,0) or die $!; my $stdout = shift @ARGV; my $stderr = shift @ARGV; open STDOUT, ">", $stdout or die $!; open STDERR, ">", $stderr or die $!; exec @ARGV or die $!;',
+        OUTER_SETPGRP_PROGRAM,
+        "bash",
+        "-c",
+        options.supervisorNeverConnect === true
+          ? OUTER_NEVER_CONNECT_PROGRAM
+          : OUTER_SUPERVISOR_PROGRAM,
+        "s6-outer-supervisor",
+        String(controlListener.port),
+        "126",
         stdoutPath,
         stderrPath,
+        ((options.controlReadyDelayMs ?? 0) / 1_000).toFixed(3),
+        ((options.controlStartedDelayMs ?? 0) / 1_000).toFixed(3),
+        ((options.controlAckDelayMs ?? 0) / 1_000).toFixed(3),
+        options.extraRecordAfterKillAck === true ? "1" : "0",
         "bash",
         script,
         ...args,
@@ -402,6 +883,70 @@ async function runShell(
       stdout: "ignore",
       stderr: "ignore",
     });
+    supervisorExited = supervisorProcess.exited;
+    retirePreCapabilitySupervisor = async (cleanupDeadlineAt: number): Promise<void> => {
+      if (capabilityEstablished || supervisorSettled) return;
+      try {
+        // Before authenticated READY no payload can have been forked. The
+        // unreaped Bun subprocess handle is the only retirement authority; no
+        // numeric pid or process-group value is ever exposed or reused.
+        supervisorProcess.kill("SIGKILL");
+      } catch {
+        // Settlement below is authoritative. A dispatch error cannot green.
+      }
+      const remaining = Math.max(0, cleanupDeadlineAt - Date.now());
+      const settled = await within(supervisorExited as Promise<number>, remaining);
+      if (settled.kind === "elapsed") {
+        throw new Error("cleanup unproven: pre-capability supervisor did not settle");
+      }
+      supervisorSettled = true;
+    };
+    const connection = await within(
+      Promise.race([
+        controlListener.connected.then((socket) => ({ kind: "connected" as const, socket })),
+        supervisorExited.then((exitCode) => ({ kind: "exited" as const, exitCode })),
+      ]),
+      Math.min(OUTER_CONTROL_STEP_MS, Math.max(0, deadlineAt - Date.now())),
+    );
+    if (connection.kind === "elapsed") {
+      throw new Error("cleanup unproven: outer supervisor did not connect at " + stdoutPath);
+    }
+    if (connection.value.kind === "exited") {
+      supervisorSettled = true;
+      throw new Error(
+        "outer supervisor exited before capability connect: exit=" + connection.value.exitCode,
+      );
+    }
+    if (controlListener.protocolFailure() !== undefined) {
+      throw controlListener.protocolFailure();
+    }
+    if (options.afterControlAccept !== undefined) {
+      const hook = await within(
+        options.afterControlAccept(controlListener.port),
+        controlStepRemaining(deadlineAt),
+      );
+      if (hook.kind === "elapsed") {
+        throw new Error("cleanup unproven: post-accept capability hook timed out");
+      }
+    }
+    // Keep accepting only through the test-only exact-one polarity above. In
+    // production the first candidate is sealed before the nonce is minted, so
+    // no queued/late connection can silently replace the authenticated socket.
+    controlListener.seal();
+    if (controlListener.protocolFailure() !== undefined) {
+      throw controlListener.protocolFailure();
+    }
+    // Mint only after accept. The non-secret port is rendezvous, never authority.
+    const supervisorToken = randomBytes(24).toString("hex");
+    protocol = new OuterSupervisorProtocol(connection.value.socket, supervisorToken);
+    if (!(await protocol.bootstrap(deadlineAt))) {
+      throw new Error("cleanup unproven: outer supervisor BOOT/READY failed at " + stdoutPath);
+    }
+    capabilityEstablished = true;
+    if (!(await protocol.start(deadlineAt))) {
+      throw new Error("cleanup unproven: outer supervisor START/STARTED failed at " + stdoutPath);
+    }
+    const liveProtocol = protocol;
     // The parent's descriptors are held until the child has EXITED.
     //
     // Closing them immediately after `Bun.spawn` returned lost the child's output
@@ -413,55 +958,28 @@ async function runShell(
 
     let timedOut = false;
     let escalationFired = false;
-    let killDispatchFailed = false;
-    let groupSignalAuthorized = true;
-    let timer: ReturnType<typeof setTimeout> | undefined;
-    let killTimer: ReturnType<typeof setTimeout> | undefined;
-    const exited = child.exited.then((exitCode) => {
-      // Revocation is part of the exit promise itself, before any waiter can
-      // resume and before the timer queue runs again. Thus an escalation
-      // callback can never use the numeric pgid after the reap made it reusable.
-      groupSignalAuthorized = false;
-      if (timer !== undefined) clearTimeout(timer);
-      if (killTimer !== undefined) clearTimeout(killTimer);
-      return exitCode;
-    });
-
-    /** Is the child's group still present? */
-    const groupAlive = (): boolean => {
-      try {
-        process.kill(-child.pid, 0);
-        return true;
-      } catch {
-        return false;
-      }
+    const assertCapabilityIntegrity = (): void => {
+      const failure = controlListener?.protocolFailure() ?? liveProtocol.protocolFailure();
+      if (failure !== undefined) throw failure;
     };
-
-    /**
-     * GROUP-ONLY. No bare-pid fallback: once the leader has been reaped its number
-     * can belong to anything, and the fallback fired in exactly that window.
-     */
-    const signalGroup = (signal: NodeJS.Signals): boolean => {
-      if (signal === "SIGKILL" && options.failKillDispatch === true) return false;
-      try {
-        process.kill(-child.pid, signal);
-        return true;
-      } catch {
-        // The group is gone. Nothing to signal, which is the correct outcome.
-        return false;
-      }
+    const settleSupervisorUntil = async (cleanupDeadlineAt: number): Promise<number | undefined> => {
+      const remaining = Math.max(0, cleanupDeadlineAt - Date.now());
+      const settled = await within(supervisorExited as Promise<number>, remaining);
+      if (settled.kind === "elapsed") return undefined;
+      supervisorSettled = true;
+      return settled.value;
     };
-
-    const awaitExitWithin = async (milliseconds: number): Promise<number | undefined> => {
-      let settleTimer: ReturnType<typeof setTimeout> | undefined;
-      const result = await Promise.race([
-        exited.then((exitCode) => ({ kind: "exited" as const, exitCode })),
-        new Promise<{ kind: "elapsed" }>((resolveElapsed) => {
-          settleTimer = setTimeout(() => resolveElapsed({ kind: "elapsed" }), milliseconds);
-        }),
-      ]);
-      if (settleTimer !== undefined) clearTimeout(settleTimer);
-      return result.kind === "exited" ? result.exitCode : undefined;
+    const requireNaturalCapabilityCloseUntil = async (
+      cleanupDeadlineAt: number,
+    ): Promise<void> => {
+      const remaining = Math.max(0, cleanupDeadlineAt - Date.now());
+      const closed = await within(liveProtocol.closed, remaining);
+      if (closed.kind === "elapsed") {
+        throw new Error("cleanup unproven: supervisor capability did not close naturally");
+      }
+      // TCP delivers data before close. This recheck therefore covers every
+      // late/duplicate frame emitted before supervisor departure.
+      assertCapabilityIntegrity();
     };
 
     if (options.armAfterFileExists !== undefined) {
@@ -472,89 +990,208 @@ async function runShell(
           return false;
         }
       };
-      const readinessDeadline = Date.now() + 5_000;
-      while (!ready() && Date.now() < readinessDeadline) {
-        await new Promise<void>((resolveReady) => setTimeout(resolveReady, 10));
-      }
-      if (!ready()) {
-        // The leader is still unreaped, so this is the final authorized use of
-        // its numeric group id. No dangling plant is left behind on refusal.
-        if (!signalGroup("SIGKILL")) {
-          throw new Error(
-            `cleanup unproven: readiness failed and group SIGKILL dispatch failed at ${stdoutPath}`,
-          );
+      let polling = true;
+      const readiness = (async (): Promise<boolean> => {
+        const readinessDeadline = Date.now() + 5_000;
+        while (polling && !ready() && Date.now() < readinessDeadline) {
+          await Bun.sleep(10);
         }
+        return ready();
+      })();
+      const readinessRace = await Promise.race([
+        readiness.then((isReady) => ({ kind: "ready" as const, isReady })),
+        liveProtocol.terminal.then((terminal) => ({ kind: "terminal" as const, terminal })),
+        supervisorExited.then((exitCode) => ({ kind: "supervisor-exit" as const, exitCode })),
+      ]);
+      polling = false;
+      if (readinessRace.kind === "terminal") {
+        if (readinessRace.terminal.kind === "protocol-failure") {
+          throw readinessRace.terminal.error;
+        }
+        // The payload is already terminal. DIE retires only the still-live
+        // supervisor through its capability and emits no TERM/KILL command.
+        const cleanupDeadlineAt = beginTeardownBudget(
+          options.postKillSettleMs ?? POST_KILL_SETTLE_MS,
+        );
+        if (!(await liveProtocol.die(cleanupDeadlineAt))) {
+          throw new Error("cleanup unproven: early terminal supervisor retirement failed");
+        }
+        if ((await settleSupervisorUntil(cleanupDeadlineAt)) === undefined) {
+          throw new Error("cleanup unproven: early terminal supervisor did not settle");
+        }
+        await requireNaturalCapabilityCloseUntil(cleanupDeadlineAt);
+        throw new Error(
+          "deadline plant exited before readiness: exit=" + readinessRace.terminal.status,
+        );
+      }
+      if (readinessRace.kind === "supervisor-exit") {
+        supervisorSettled = true;
+        throw new Error(
+          "outer supervisor exited before readiness: exit=" + readinessRace.exitCode,
+        );
+      }
+      if (!readinessRace.isReady) {
+        const cleanupDeadlineAt = beginTeardownBudget(
+          options.postKillSettleMs ?? POST_KILL_SETTLE_MS,
+        );
         if (
-          (await awaitExitWithin(options.postKillSettleMs ?? POST_KILL_SETTLE_MS)) === undefined
+          !(await liveProtocol.signal(
+            "KILL",
+            cleanupDeadlineAt,
+            options.failKillDispatch === true,
+            options.onControlSignal,
+          ))
         ) {
-          throw new Error(
-            `cleanup unproven: readiness failed and the KILLed group did not exit at ${stdoutPath}`,
-          );
+          throw new Error("cleanup unproven: readiness supervisor KILL command failed");
         }
-        throw new Error(`deadline plant never reached readiness barrier: ${stdoutPath}`);
+        if ((await settleSupervisorUntil(cleanupDeadlineAt)) === undefined) {
+          throw new Error("cleanup unproven: readiness KILLed supervisor did not settle");
+        }
+        await requireNaturalCapabilityCloseUntil(cleanupDeadlineAt);
+        throw new Error("deadline plant never reached readiness barrier: " + stdoutPath);
       }
+      // Test-only barrier semantics: its short deadline starts at causal target
+      // readiness. Production has no barrier and retains the exact spawn-time
+      // 100-second deadline.
+      deadlineAt = Date.now() + runTimeoutMs;
     }
 
-    const deadline = new Promise<void>((resolve) => {
-      timer = setTimeout(() => {
-        if (!groupSignalAuthorized) {
-          resolve();
-          return;
-        }
+    const deadline = new Promise<{ readonly kind: "deadline" }>((resolveDeadline) => {
+      deadlineTimer = setTimeout(() => {
+        // The callback only latches authority. One sequential owner below sends
+        // TERM/KILL over the live socket after the race resolves.
         timedOut = true;
-        // TERM first so the script's own trap reaps its descendants, then KILL.
-        // Only the group this controller leads is signalled; the script's nested
-        // groups are outside its authority, which is why a hard-killed run is
-        // reported as cleanup-unproven rather than contained.
-        signalGroup("SIGTERM");
-        killTimer = setTimeout(() => {
-          if (!groupSignalAuthorized) return;
-          escalationFired = true;
-          if (!signalGroup("SIGKILL")) killDispatchFailed = true;
-        }, options.killGraceMs ?? 2_000);
-        killTimer.unref?.();
-        resolve();
-      }, options.runTimeoutMs ?? RUN_TIMEOUT_MS);
+        resolveDeadline({ kind: "deadline" });
+      }, Math.max(0, deadlineAt - Date.now()));
     });
-
-    const raced = await Promise.race([
-      exited.then(() => "exited" as const),
-      deadline.then(() => "deadline" as const),
+    const first = await Promise.race([
+      liveProtocol.terminal.then((terminal) => ({ kind: "terminal" as const, terminal })),
+      supervisorExited.then((exitCode) => ({ kind: "supervisor-exit" as const, exitCode })),
+      deadline,
     ]);
 
-    // PRE-REAP CENSUS. This is the only instant at which an outside process may
-    // name this group honestly.
-    //
-    // On the deadline path the leader has NOT been reaped yet, so `-child.pid`
-    // is pinned to our group and cannot be a recycled number. Censusing after
-    // the reap — which is what this did — was unsound in the same way a
-    // post-reap signal is: once the number is unpinned, even `kill(pgid, 0)`
-    // can name a group that merely inherited it.
-    const pinnedSurvivors = raced === "deadline" && groupSignalAuthorized ? groupAlive() : false;
-
-    // Always reap within a fixed post-escalation reserve. A failed group KILL
-    // while the leader is still live cannot fall into an unbounded `await`.
-    // On refusal the leader remains unreaped (and therefore still pins the
-    // group identity), and the error explicitly preserves cleanup-unproven.
-    const exitCode =
-      raced === "exited"
-        ? await exited
-        : await awaitExitWithin(
-            (options.killGraceMs ?? 2_000) + (options.postKillSettleMs ?? POST_KILL_SETTLE_MS),
-          );
-    if (exitCode === undefined) {
-      throw new Error(
-        `cleanup unproven: ${killDispatchFailed ? "group SIGKILL dispatch failed" : "the escalated group did not exit"} at ${stdoutPath}`,
+    let exitCode: number;
+    if (first.kind === "terminal") {
+      if (deadlineTimer !== undefined) clearTimeout(deadlineTimer);
+      deadlineTimer = undefined;
+      if (first.terminal.kind === "protocol-failure") throw first.terminal.error;
+      exitCode = first.terminal.status;
+      const cleanupDeadlineAt = beginTeardownBudget(
+        options.postKillSettleMs ?? POST_KILL_SETTLE_MS,
       );
+      // The payload is terminal but may have left same-group descendants. The
+      // still-live authenticated supervisor performs one group self-KILL.
+      if (
+        !(await liveProtocol.signal(
+          "KILL",
+          cleanupDeadlineAt,
+          options.failKillDispatch === true,
+          options.onControlSignal,
+        ))
+      ) {
+        throw new Error("cleanup unproven: terminal supervisor KILL command failed");
+      }
+      if ((await settleSupervisorUntil(cleanupDeadlineAt)) === undefined) {
+        throw new Error("cleanup unproven: terminal KILLed supervisor did not settle");
+      }
+      await requireNaturalCapabilityCloseUntil(cleanupDeadlineAt);
+    } else if (first.kind === "supervisor-exit") {
+      if (deadlineTimer !== undefined) clearTimeout(deadlineTimer);
+      deadlineTimer = undefined;
+      supervisorSettled = true;
+      throw new Error("cleanup unproven: supervisor exited before CHILD");
+    } else {
+      const killGraceMs = options.killGraceMs ?? 2_000;
+      const cleanupDeadlineAt = beginTeardownBudget(
+        killGraceMs + (options.postKillSettleMs ?? POST_KILL_SETTLE_MS),
+      );
+      const termGraceDeadlineAt = Math.min(cleanupDeadlineAt, Date.now() + killGraceMs);
+      if (
+        !(await liveProtocol.signal(
+          "TERM",
+          cleanupDeadlineAt,
+          false,
+          options.onControlSignal,
+        ))
+      ) {
+        throw new Error("cleanup unproven: supervisor TERM command failed");
+      }
+      let graceTimer: ReturnType<typeof setTimeout> | undefined;
+      const grace = new Promise<{ readonly kind: "grace" }>((resolveGrace) => {
+        graceTimer = setTimeout(
+          () => resolveGrace({ kind: "grace" }),
+          Math.max(0, termGraceDeadlineAt - Date.now()),
+        );
+      });
+      const afterTerm = await Promise.race([
+        liveProtocol.terminal.then((terminal) => ({ kind: "terminal" as const, terminal })),
+        supervisorExited.then((exitCode) => ({ kind: "supervisor-exit" as const, exitCode })),
+        grace,
+      ]);
+      if (graceTimer !== undefined) clearTimeout(graceTimer);
+      if (afterTerm.kind === "terminal") {
+        if (afterTerm.terminal.kind === "protocol-failure") throw afterTerm.terminal.error;
+        exitCode = afterTerm.terminal.status;
+      } else if (afterTerm.kind === "supervisor-exit") {
+        supervisorSettled = true;
+        throw new Error("cleanup unproven: supervisor exited during TERM grace");
+      } else {
+        escalationFired = true;
+        exitCode = -1;
+      }
+
+      if (
+        !(await liveProtocol.signal(
+          "KILL",
+          cleanupDeadlineAt,
+          options.failKillDispatch === true,
+          options.onControlSignal,
+        ))
+      ) {
+        throw new Error("cleanup unproven: supervisor KILL command failed");
+      }
+      const killedExit = await settleSupervisorUntil(cleanupDeadlineAt);
+      if (killedExit === undefined) {
+        throw new Error("cleanup unproven: KILLed supervisor did not settle");
+      }
+      await requireNaturalCapabilityCloseUntil(cleanupDeadlineAt);
+      if (exitCode === -1) exitCode = killedExit;
     }
 
-    // NOTHING BELOW MAY USE THE PGID — not a signal, and not a probe.
-    //
-    // Only now are the parent's descriptors released.
-    releaseCaptureFds();
+    if (options.probeLateSecondConnection === true) {
+      const lateSocket = createConnection({ host: "127.0.0.1", port: controlListener.port });
+      const lateClosed = new Promise<void>((resolveClosed) => {
+        lateSocket.once("close", () => resolveClosed());
+      });
+      const lateOutcome = new Promise<"connected" | "refused">((resolveLate) => {
+        lateSocket.once("connect", () => resolveLate("connected"));
+        lateSocket.once("error", () => resolveLate("refused"));
+      });
+      const lateBudget = Math.max(0, (teardownDeadlineAt ?? Date.now()) - Date.now());
+      const late = await within(lateOutcome, lateBudget);
+      lateSocket.destroy();
+      const lateClose = await within(
+        lateClosed,
+        Math.max(0, (teardownDeadlineAt ?? Date.now()) - Date.now()),
+      );
+      if (lateClose.kind === "elapsed") {
+        throw new Error("cleanup unproven: late capability socket did not close");
+      }
+      if (late.kind === "elapsed") {
+        throw new Error("cleanup unproven: late capability connection did not settle");
+      }
+      if (late.value === "connected") {
+        throw new Error("outer supervisor capability accepted a late second connection");
+      }
+    }
 
-    const stdout = readBounded(stdoutPath);
-    const stderr = readBounded(stderrPath);
+    // Only after bounded supervisor settlement and an intact exactly-one
+    // capability transcript are the original held capture inodes read. Paths
+    // are retained diagnostics, never post-target authority.
+    assertCapabilityIntegrity();
+    const stdout = readBounded(stdoutFd, stdoutPath, stdoutCaptureIdentity);
+    const stderr = readBounded(stderrFd, stderrPath, stderrCaptureIdentity);
+    releaseCaptureFds();
 
     // A run we had to hard-kill cannot claim its nested groups were reaped: the
     // script's trap was cut short, and this controller cannot see those groups.
@@ -564,12 +1201,9 @@ async function runShell(
     const shellLifecycle = shellLifecycleFromRecords(stdout, exitCode);
     const cleanupUnproven = timedOut || shellLifecycle.cleanupUnproven;
 
-    // The normally-exited run takes its survivor answer from the script's OWN
-    // record. Its EXIT trap reaps its nested groups from the inside, where those
-    // pgids are still pinned, and fails the run with `no-child-survivors` if any
-    // lived. That is strictly better evidence than an outside probe, and unlike
-    // the probe it needs no pgid after the reap.
-    const survivors = raced === "deadline" ? pinnedSurvivors : shellLifecycle.survivors;
+    // Any outer timeout remains cleanup-unproven. An in-budget run takes its
+    // nested survivor verdict only from the shell's exact typed terminal.
+    const survivors = timedOut || shellLifecycle.survivors;
 
     // AN EMPTY CAPTURE CAN NEVER PASS FOR A SUCCESSFUL RUN.
     //
@@ -595,7 +1229,82 @@ async function runShell(
       escalationFired,
     };
   } finally {
-    releaseCaptureFds();
+    let teardownFailure: Error | undefined;
+    const cleanupDeadlineAt = beginTeardownBudget(
+      options.postKillSettleMs ?? POST_KILL_SETTLE_MS,
+    );
+    const noteTeardownFailure = (error: unknown, fallback: string): void => {
+      teardownFailure ??= error instanceof Error ? error : new Error(fallback);
+    };
+    if (deadlineTimer !== undefined) clearTimeout(deadlineTimer);
+    protocol?.expectClosure();
+    let listenerClosing: Promise<void> | undefined;
+    if (controlListener !== undefined) {
+      try {
+        // Calling close synchronously revokes new accepts before a
+        // pre-capability helper is retired below. Awaiting it is deliberately
+        // deferred so socket closure cannot consume the retirement budget.
+        listenerClosing = controlListener.close();
+      } catch (error) {
+        noteTeardownFailure(error, "cleanup unproven: control listener/socket close failed");
+      }
+    }
+    if (!capabilityEstablished && retirePreCapabilitySupervisor !== undefined) {
+      try {
+        await retirePreCapabilitySupervisor(cleanupDeadlineAt);
+      } catch (error) {
+        noteTeardownFailure(error, "cleanup unproven: pre-capability retirement failed");
+      }
+    }
+    if (listenerClosing !== undefined) {
+      try {
+        const closeRemaining = Math.max(0, cleanupDeadlineAt - Date.now());
+        const closed = await within(listenerClosing, closeRemaining);
+        if (closed.kind === "elapsed") {
+          noteTeardownFailure(
+            new Error("cleanup unproven: control listener/socket did not close"),
+            "control listener/socket did not close",
+          );
+        }
+      } catch (error) {
+        noteTeardownFailure(error, "cleanup unproven: control listener/socket close failed");
+      }
+    }
+    const lateProtocolFailure =
+      controlListener?.protocolFailure() ?? protocol?.protocolFailure();
+    if (lateProtocolFailure !== undefined) {
+      noteTeardownFailure(lateProtocolFailure, "outer supervisor protocol failed during close");
+    }
+    if (supervisorExited !== undefined && !supervisorSettled) {
+      try {
+        const settleRemaining = Math.max(0, cleanupDeadlineAt - Date.now());
+        const settled = await within(supervisorExited, settleRemaining);
+        if (settled.kind === "elapsed") {
+          noteTeardownFailure(
+            new Error("cleanup unproven: supervisor did not settle after revoke"),
+            "supervisor did not settle after revoke",
+          );
+        } else {
+          supervisorSettled = true;
+        }
+      } catch (error) {
+        noteTeardownFailure(error, "cleanup unproven: supervisor settlement failed");
+      }
+    }
+    const postSettlementProtocolFailure =
+      controlListener?.protocolFailure() ?? protocol?.protocolFailure();
+    if (postSettlementProtocolFailure !== undefined) {
+      noteTeardownFailure(
+        postSettlementProtocolFailure,
+        "outer supervisor protocol failed after settlement",
+      );
+    }
+    try {
+      releaseCaptureFds();
+    } catch (error) {
+      noteTeardownFailure(error, "capture descriptor release failed");
+    }
+    if (teardownFailure !== undefined) throw teardownFailure;
   }
 }
 
@@ -1029,15 +1738,23 @@ describe("the run is bounded and leaves no survivors", () => {
     );
   });
 
-  test("watchdog allocation completes before any payload identity exists", () => {
+  test("anonymous supervisor authority exists before any payload fork", () => {
     const bounded = shellFunction(source, "run_bounded");
-    const allocation = bounded.indexOf('dog_dir="$(mktemp -d');
-    const spawn = bounded.indexOf('if [[ "$stdin_file" == "-" ]]');
-    expect(allocation).toBeGreaterThanOrEqual(0);
-    expect(spawn).toBeGreaterThanOrEqual(0);
-    expect(allocation).toBeLessThan(spawn);
-    expect(bounded.slice(0, spawn)).toContain('return "$EX_WATCHDOG_UNAVAILABLE"');
-    expect(bounded.slice(0, spawn)).not.toContain("CHILD_PIDS+=(");
+    const coprocess = bounded.indexOf("coproc S6_BOUNDED_SUPERVISOR");
+    const payload = bounded.indexOf('exec {$ARGV[0]} @ARGV');
+    expect(coprocess).toBeGreaterThanOrEqual(0);
+    expect(payload).toBeGreaterThan(coprocess);
+    expect(bounded).toContain('register_child "$pid" "$supervisor_token" "ordinary"');
+    expect(bounded).toContain('prepare_group_control "$pid" "$supervisor_token"');
+    expect(bounded).toContain('adopt_group_control "$pid" "$supervisor_token"');
+    expect(bounded.indexOf("prepare_group_control")).toBeLessThan(
+      bounded.indexOf("send_group_frame_until $'BOOT"),
+    );
+    expect(bounded.indexOf("send_group_frame_until $'BOOT")).toBeLessThan(
+      bounded.indexOf("adopt_group_control"),
+    );
+    expect(bounded).not.toContain("result_fifo");
+    expect(bounded).not.toContain("mkfifo");
   });
 
   test("one monotonic deadline is computed from a single start stamp", () => {
@@ -1056,11 +1773,18 @@ describe("the run is bounded and leaves no survivors", () => {
     expect(source).toContain("trap 'on_signal TERM' TERM");
   });
 
-  test("children are TERMed, then KILLed, then counted", () => {
+  test("children are TERMed, grace-drained, KILLed, then settled", () => {
     const reaper = shellFunction(source, "reap_children");
-    expect(reaper).toContain("signal_group");
-    expect(reaper).toContain("TERM");
-    expect(reaper).toContain("KILL");
+    const term = reaper.indexOf('request_group_signal "$pid" TERM');
+    const grace = reaper.indexOf("consume_group_terminal_during_grace");
+    const kill = reaper.indexOf('request_group_signal "$pid" KILL');
+    const settled = reaper.indexOf('group_settled_before_wait "$pid"');
+    expect(term).toBeGreaterThanOrEqual(0);
+    expect(grace).toBeGreaterThan(term);
+    expect(kill).toBeGreaterThan(grace);
+    expect(settled).toBeGreaterThan(kill);
+    expect(reaper).toContain("GROUP_ALLOW_CHILD_BEFORE_ACK=1");
+    expect(reaper).toContain("verify_group_result_eof");
     // The verdict is a global, not a printed value, so callers cannot reap in
     // a subshell by capturing it.
     expect(reaper).toContain("REAP_SURVIVORS");
@@ -1071,41 +1795,32 @@ describe("the run is bounded and leaves no survivors", () => {
     expect(shellFunction(source, "mint_envelope_config")).toContain("$MINTER_TIMEOUT_SECONDS");
   });
 
-  test("the bound is an owned watchdog, with no liveness polling at all", () => {
+  test("the bound is parent-latched and lifecycle commands use the live capability", () => {
     const bounded = shellFunction(source, "run_bounded");
-    // The watchdog's bounded builtin read races a completion token. The parent
-    // waits for the watchdog's authoritative status before reaping the pinned
-    // supervisor, so no cancellation signal can mask exit 3.
-    expect(bounded).toContain('read -r -t "$seconds" completion <&4');
-    expect(bounded).toContain("watchdog:%s");
-    expect(bounded).toContain("timed-out");
-    const waitDog = bounded.indexOf('wait "$dog"');
-    const waitSupervisor = bounded.indexOf('wait "$pid"');
-    expect(waitDog).toBeGreaterThanOrEqual(0);
-    expect(waitSupervisor).toBeGreaterThanOrEqual(0);
-    expect(waitDog).toBeLessThan(waitSupervisor);
-    // No liveness polling loop. A kill(0) exists only as the still-pinned
-    // dispatch-failure discriminator; it cannot drive a clock or a reap.
-    expect(bounded).not.toContain("child_running");
+    expect(bounded).toContain('read_group_outcome "$seconds"');
+    expect(bounded).toContain("timed_out=1");
+    expect(bounded).toContain("GROUP_ALLOW_CHILD_BEFORE_ACK=1");
+    expect(bounded).toContain('request_group_signal "$pid" TERM');
+    expect(bounded).toContain("consume_group_terminal_during_grace");
+    expect(bounded).toContain('request_group_signal "$pid" KILL');
+    expect(bounded).toContain("verify_group_result_eof");
     expect(bounded).not.toContain("date +%s");
     expect(bounded).not.toContain("limit=$((seconds * 10))");
-    // Arming failure is typed and fail-closed, never an unbounded child.
     expect(bounded).toContain("EX_WATCHDOG_UNAVAILABLE");
-    // Ownership is surrendered only after a still-pinned group KILL and reap.
     expect(bounded).toContain("EX_CLEANUP_UNPROVEN");
-    expect(bounded.indexOf('signal_group "$pid" KILL')).toBeLessThan(waitSupervisor);
+    const waitSupervisor = bounded.lastIndexOf('wait "$pid"');
     const cleanupRefusal = bounded.indexOf(
       '(( cleanup_unproven == 0 )) || return "$EX_CLEANUP_UNPROVEN"',
     );
     expect(cleanupRefusal).toBeGreaterThanOrEqual(0);
     expect(cleanupRefusal).toBeLessThan(waitSupervisor);
-    expect(bounded.indexOf('unregister_child "$pid"')).toBeGreaterThan(waitSupervisor);
+    expect(bounded.slice(waitSupervisor)).toContain('unregister_child "$pid"');
     const reaper = shellFunction(source, "reap_children");
     expect(reaper).toContain("REAP_SURVIVORS=1");
     expect(reaper).toContain("continue");
   });
 
-  test("every production wait is gated by bounded group disappearance", () => {
+  test("every controlled wait is gated by settlement and exact result EOF", () => {
     const settlement = shellFunction(source, "group_settled_before_wait");
     expect(settlement).toContain('kill -0 -- "-${pid}"');
     // A partial process-list snapshot is not authority to enter a blocking
@@ -1124,45 +1839,34 @@ describe("the run is bounded and leaves no survivors", () => {
       'wait "$pid"',
     );
     const bounded = shellFunction(source, "run_bounded");
-    ordered(bounded, 'group_settled_before_wait "$dog"', 'wait "$dog"');
     ordered(bounded, 'group_settled_before_wait "$pid"', 'wait "$pid"');
-
-    const writer = shellFunction(source, "finish_secret_writer");
-    let cursor = 0;
-    for (let branch = 0; branch < 2; branch++) {
-      const settled = writer.indexOf('group_settled_before_wait "$SECRET_WRITER_PID"', cursor);
-      const waited = writer.indexOf('wait "$SECRET_WRITER_PID"', settled);
-      expect(settled).toBeGreaterThanOrEqual(cursor);
-      expect(waited).toBeGreaterThan(settled);
-      cursor = waited + 1;
-    }
+    expect(bounded).toContain("settle_provisional_owner_from_result");
+    const provisional = shellFunction(source, "settle_provisional_owner_from_result");
+    expect(provisional).toContain('read -r -t "$remaining" record <&5');
+    expect(provisional.indexOf('direct_child_settled_before_wait "$pid"')).toBeLessThan(
+      provisional.indexOf('wait "$pid"'),
+    );
+    expect(bounded).toContain("verify_group_result_eof");
   });
 
-  test("lifecycle signalling and census are group-only", () => {
-    // A bare-pid fallback fires in exactly the dangerous case: the group has
-    // gone, the record has not yet been dropped, and the number now belongs to
-    // something else.
-    const signal = shellFunction(source, "signal_group");
-    expect(signal).toContain('-- "-${pid}"');
-    expect(signal).not.toMatch(/kill "-\$\{signal\}" "\$pid"/);
-    // The watchdog is retired by the completion FIFO, never by a numeric signal.
+  test("lifecycle signalling is capability-only", () => {
+    const signal = shellFunction(source, "request_group_signal");
+    expect(signal).toContain("printf 'SIGNAL\\t%s\\t%s\\n'");
+    expect(signal).toContain('read_group_record "$expected"');
+    expect(signal).not.toMatch(/kill\s+[^0]/);
     const bounded = shellFunction(source, "run_bounded");
-    expect(bounded).toContain("printf 'done\\n' >&4");
-    expect(bounded).not.toMatch(/kill -(TERM|KILL).*\$dog/);
-    // The supervisor itself is still never signalled by bare pid.
     expect(bounded).not.toMatch(/kill -(TERM|KILL) "\$pid"/);
-    // Its only existence discriminator runs before the supervisor reap and is
-    // group-only. A dead helper would not prove the active path.
-    expect(bounded).toContain('kill -0 -- "-${pid}"');
-    expect(bounded).not.toMatch(/kill -0 "\$pid"/);
+    expect(bounded).toContain("kill -TERM 0");
+    expect(bounded).toContain("kill -KILL 0");
+    expect(bounded).not.toContain("result_fifo");
   });
 
   test("cleanup reaches descendants, not only the direct child", () => {
-    // Playwright launches Chromium as a grandchild; killing one pid leaves it.
     expect(source).toContain("set -m");
-    const group = shellFunction(source, "signal_group");
-    expect(group).toContain('-- "-${pid}"');
-    expect(shellFunction(source, "run_bounded")).toContain("signal_group");
+    const bounded = shellFunction(source, "run_bounded");
+    expect(bounded).toContain("kill -TERM 0");
+    expect(bounded).toContain("kill -KILL 0");
+    expect(bounded).toContain('request_group_signal "$pid"');
   });
 
   test("pid ownership is registered in the parent shell, not a subshell", () => {
@@ -1193,15 +1897,14 @@ describe("the run is bounded and leaves no survivors", () => {
     // A child can exit cleanly and still leave Chromium behind; waiting on the
     // direct pid alone would call that success.
     const bounded = shellFunction(source, "run_bounded");
-    expect(bounded).toContain("trap ':' HUP INT TERM");
-    const term = bounded.lastIndexOf('signal_group "$pid" TERM');
-    const kill = bounded.lastIndexOf('signal_group "$pid" KILL');
-    const reap = bounded.indexOf('wait "$pid"');
+    const term = bounded.lastIndexOf('request_group_signal "$pid" TERM');
+    const kill = bounded.lastIndexOf('request_group_signal "$pid" KILL');
+    const reap = bounded.lastIndexOf('wait "$pid"');
     expect(term).toBeGreaterThanOrEqual(0);
     expect(kill).toBeGreaterThan(term);
     expect(reap).toBeGreaterThan(kill);
     const afterReap = bounded.slice(reap);
-    expect(afterReap).not.toContain('signal_group "$pid"');
+    expect(afterReap).not.toContain('request_group_signal "$pid"');
     expect(afterReap).not.toContain('kill -0 -- "-${pid}"');
   });
 });
@@ -1370,7 +2073,8 @@ describe("every child gets a minimal environment", () => {
     // The key must reach the child as a bounded stdin record, never in argv
     // (process table) and never in environ (inherited by descendants).
     expect(minter).toContain("minimal_env_command");
-    expect(minter).toContain("new_secret_fifo");
+    expect(minter).toContain("run_bounded");
+    expect(minter).toContain("$secret_record");
     expect(minter).not.toContain("ASIMP_S6_SIGNING_KEY_HEX=");
     expect(minter).not.toContain("ASIMP_S6_FELLOW_TOKEN");
   });
@@ -1378,7 +2082,8 @@ describe("every child gets a minimal environment", () => {
   test("the browser gets a minimal env and its config over stdin", () => {
     const browser = shellFunction(source, "run_browser_leg");
     expect(browser).toContain("minimal_env_command");
-    expect(browser).toContain("new_secret_fifo");
+    expect(browser).toContain("run_bounded");
+    expect(browser).toContain("$config_record");
     // Chromium inherits this process's environment, so nothing secret may be in it.
     expect(browser).not.toContain('ASIMP_S6_TEST_GOOGLE_PASS="$ASIMP');
     expect(browser).not.toContain("ASIMP_S6_SIGNING_KEY_HEX=");
@@ -1463,13 +2168,16 @@ describe("the shell's causal self-tests actually run", () => {
         '"assertion":"child-record-armed-then-disarmed","status":"pass"',
       );
       expect(stdout, diag(run)).toContain(
+        '"assertion":"clear-child-records-refuses-live-owner","status":"pass"',
+      );
+      expect(stdout, diag(run)).toContain(
         '"assertion":"unregister-is-exact-not-glob","status":"pass"',
       );
       expect(stdout, diag(run)).toContain(
         '"assertion":"run-bounded-fast-exit-is-prompt","status":"pass"',
       );
       expect(stdout, diag(run)).toContain(
-        '"assertion":"watchdog-flag-write-failure-is-authoritative","status":"pass"',
+        '"assertion":"bash-4.1-is-minimum-supported","status":"pass"',
       );
       expect(stdout, diag(run)).toContain(
         '"assertion":"watchdog-kill-dispatch-failure-is-bounded","status":"pass"',
@@ -1481,13 +2189,7 @@ describe("the shell's causal self-tests actually run", () => {
         '"assertion":"reaper-successful-kill-without-settlement-is-explicit","status":"pass"',
       );
       expect(stdout, diag(run)).toContain(
-        '"assertion":"stopped-watchdog-handshake-status","status":"pass"',
-      );
-      expect(stdout, diag(run)).toContain(
         '"assertion":"successful-supervisor-kill-without-settlement-status","status":"pass"',
-      );
-      expect(stdout, diag(run)).toContain(
-        '"assertion":"secret-writer-child-before-open-is-bounded","status":"pass"',
       );
       // Both causal KILL-refusal outputs are mandatory. Removing either the
       // typed status check or its clock-bound proof must break this file.
@@ -1498,7 +2200,43 @@ describe("the shell's causal self-tests actually run", () => {
         '"assertion":"secret-writer-kill-dispatch-failure-is-bounded","status":"pass"',
       );
       expect(stdout, diag(run)).toContain(
-        '"assertion":"stopped-secret-writer-completion-status","status":"pass"',
+        '"assertion":"all-nonstandard-fds-not-inherited","status":"pass"',
+      );
+      expect(stdout, diag(run)).toContain(
+        '"assertion":"maximum-input-record-is-byte-exact","status":"pass"',
+      );
+      expect(stdout, diag(run)).toContain(
+        '"assertion":"oversized-input-refuses-before-target","status":"pass"',
+      );
+      expect(stdout, diag(run)).toContain(
+        '"assertion":"input-start-is-bounded","status":"pass"',
+      );
+      expect(stdout, diag(run)).toContain(
+        '"assertion":"input-mid-is-bounded","status":"pass"',
+      );
+      expect(stdout, diag(run)).toContain(
+        '"assertion":"input-depart-mid-is-bounded","status":"pass"',
+      );
+      expect(stdout, diag(run)).toContain(
+        '"assertion":"typed-child-status-125","status":"pass"',
+      );
+      expect(stdout, diag(run)).toContain(
+        '"assertion":"duplicate-terminal-record-fails-closed","status":"pass"',
+      );
+      expect(stdout, diag(run)).toContain(
+        '"assertion":"duplicate-terminal-owner-reaped-after-refusal","status":"pass"',
+      );
+      expect(stdout, diag(run)).toContain(
+        '"assertion":"reaper-child-before-ack-is-retired","status":"pass"',
+      );
+      expect(stdout, diag(run)).toContain(
+        '"assertion":"exit-cleanup-refusal-is-exact-125","status":"pass"',
+      );
+      expect(stdout, diag(run)).toContain(
+        '"assertion":"second-signal-during-cleanup-is-exact-125","status":"pass"',
+      );
+      expect(stdout, diag(run)).toContain(
+        '"assertion":"result-token-theft-replay-cannot-green","status":"pass"',
       );
       expect(stdout, diag(run)).toContain(
         '"assertion":"browser-blocked-record-is-buffered","status":"pass"',
@@ -1539,50 +2277,234 @@ describe("the shell's causal self-tests actually run", () => {
 });
 
 describe("the test harness contains what it launches", () => {
-  test("it owns a REAL process group and censuses it", () => {
+  test("it owns a live self-signalling supervisor capability", () => {
     const self = read("apps/wire/test/auth/cross-plane-spike.test.ts");
-    // `bash -c 'set -m; …'` changes the groups of the jobs that shell starts,
-    // not the group of the shell itself, so `kill(-child.pid)` was addressing a
-    // group this process did not lead. `setpgrp(0,0)` before exec is real.
-    // Sliced to the spawn itself. A whole-file ban would be self-referential:
-    // the assertion string would live in the very file it reads.
-    // Bounded by the spawn call itself. `closeSync(stdoutFd)` is no longer a
-    // valid end marker: it now appears in `releaseCaptureFds` ABOVE the spawn,
-    // so the slice inverted and matched nothing.
-    const spawn = self.slice(
-      self.indexOf("const child = Bun.spawn({"),
-      self.indexOf("/** Is the child's group still present?"),
+    const supervisor = self.slice(
+      self.indexOf("const OUTER_SETPGRP_PROGRAM"),
+      self.indexOf("interface ShellLifecycle"),
     );
-    // Every check is scoped to the CONTROLLER. Whole-file bans here are
-    // self-referential: the forbidden string would live in the assertion itself.
     const controller = self.slice(
       self.indexOf("async function runShell("),
       self.indexOf("/** Failure context."),
     );
-    expect(spawn).toContain("setpgrp(0,0)");
-    expect(spawn).not.toContain("set -m");
-    expect(controller).toContain("process.kill(-child.pid");
-    expect(controller).toContain('signalGroup("SIGTERM")');
-    // Group-only: no bare-pid fallback that can hit a reused number.
-    expect(controller).not.toContain("child.kill(");
-    // The escalation timer is owned, cancelled and drained.
-    expect(controller).toContain("clearTimeout(killTimer)");
-    expect(controller).toContain("if (!groupSignalAuthorized) return;");
-    // NO POST-REAP PGID USE AT ALL — neither a signal nor an existence probe.
-    // After `await child.exited` the number is unpinned, so `kill(pgid, 0)` can
-    // name a recycled group exactly as a SIGKILL can hit one. The census is taken
-    // on the deadline path only, where the leader is still unreaped and the pgid
-    // is therefore pinned to us.
-    expect(controller).toContain(
-      'raced === "deadline" && groupSignalAuthorized ? groupAlive() : false;',
-    );
-    expect(controller).toContain("awaitExitWithin(");
+    expect(supervisor).toContain("setpgrp(0,0)");
+    expect(supervisor).toContain('/dev/tcp/127.0.0.1/$port');
+    expect(supervisor).toContain("kill -TERM 0");
+    expect(supervisor).toContain("kill -KILL 0");
+    expect(supervisor).toContain("exec 3>&- 4>&- 5>&- 6>&- 7>&- 8>&- 9>&-");
+    expect(supervisor).toContain("unset token");
+    expect(controller).toContain("await outerControlListener()");
+    expect(controller).toContain("randomBytes(24)");
+    expect(controller).toContain("liveProtocol.signal(");
+    expect(controller).toContain("assertCapabilityIntegrity()");
+    expect(self).toContain("controlStepRemaining(deadlineAt)");
     expect(controller).toContain("cleanup unproven:");
-    const reapIndex = controller.indexOf("const cleanupUnproven = timedOut;");
-    expect(reapIndex).toBeGreaterThanOrEqual(0);
-    const afterReap = controller.slice(reapIndex);
-    expect(afterReap).not.toContain("signalGroup(");
-    expect(afterReap).not.toContain("groupAlive(");
+    for (const forbidden of [
+      ["process", "kill"],
+      ["child", "pid"],
+      ["child", "kill"],
+    ]) {
+      expect(controller).not.toContain(forbidden.join("."));
+    }
+    expect(controller).not.toContain("kill(-");
+    expect(controller).not.toContain(".pid");
+  });
+
+  test("PLANTED: BOOT and START share one absolute child deadline", async () => {
+    const dir = mkdtempSync(join(process.env.TMPDIR ?? tmpdir(), "s6-outer-start-budget-"));
+    const plant = join(dir, "started.sh");
+    const startedMarker = join(dir, "target-started");
+    writeFileSync(
+      plant,
+      `#!/usr/bin/env bash
+printf started > "$1"
+printf '%s\\n' '{"plant":"started"}'
+`,
+      { mode: 0o700 },
+    );
+    let refusal: unknown;
+    try {
+      await runShell([startedMarker], withoutS6Env(), plant, {
+        runTimeoutMs: 300,
+        controlReadyDelayMs: 200,
+        controlStartedDelayMs: 200,
+        postKillSettleMs: 500,
+      });
+    } catch (error) {
+      refusal = error;
+    }
+    expect(refusal).toBeInstanceOf(Error);
+    expect((refusal as Error).message).toMatch(
+      /BOOT\/READY|START\/STARTED|outer supervisor protocol failure/,
+    );
+    expect(() => statSync(startedMarker)).toThrow();
+  });
+
+  test("PLANTED: a never-connect supervisor is directly retired before capability", async () => {
+    const started = Date.now();
+    let refusal: unknown;
+    try {
+      await runShell([], withoutS6Env(), SCRIPT, {
+        runTimeoutMs: 100,
+        postKillSettleMs: 500,
+        supervisorNeverConnect: true,
+      });
+    } catch (error) {
+      refusal = error;
+    }
+    expect(refusal).toBeInstanceOf(Error);
+    expect((refusal as Error).message).toContain("outer supervisor did not connect");
+    expect(Date.now() - started).toBeLessThan(2_000);
+  });
+
+  test("PLANTED: a second accepted capability connection is a typed refusal", async () => {
+    const dir = mkdtempSync(join(process.env.TMPDIR ?? tmpdir(), "s6-outer-second-"));
+    const plant = join(dir, "would-pass.sh");
+    writeFileSync(plant, `#!/usr/bin/env bash\nprintf '%s\\n' '{"plant":"pass"}'\n`, {
+      mode: 0o700,
+    });
+    let refusal: unknown;
+    try {
+      await runShell([], withoutS6Env(), plant, {
+        runTimeoutMs: 2_000,
+        postKillSettleMs: 500,
+        afterControlAccept: async (port) => {
+          const second = createConnection({ host: "127.0.0.1", port });
+          try {
+            await once(second, "connect");
+          } finally {
+            second.destroy();
+          }
+        },
+      });
+    } catch (error) {
+      refusal = error;
+    }
+    expect(refusal).toBeInstanceOf(Error);
+    expect((refusal as Error).message).toContain("multiple supervisor capability connections");
+  });
+
+  test("PLANTED: the sealed listener refuses a late post-settlement connection", async () => {
+    const dir = mkdtempSync(join(process.env.TMPDIR ?? tmpdir(), "s6-outer-late-second-"));
+    const plant = join(dir, "would-pass.sh");
+    writeFileSync(plant, `#!/usr/bin/env bash\nprintf '%s\\n' '{"plant":"pass"}'\n`, {
+      mode: 0o700,
+    });
+    const run = await runShell([], withoutS6Env(), plant, {
+      runTimeoutMs: 2_000,
+      postKillSettleMs: 1_000,
+      probeLateSecondConnection: true,
+    });
+    expect(run.exitCode, diag(run)).toBe(0);
+    expect(run.stdout, diag(run)).toContain('{"plant":"pass"}');
+  });
+
+  test("PLANTED: target receives no capability fd or nonce-bearing variable", async () => {
+    const dir = mkdtempSync(join(process.env.TMPDIR ?? tmpdir(), "s6-outer-fd-"));
+    const plant = join(dir, "inspect-fds.sh");
+    writeFileSync(
+      plant,
+      `#!/usr/bin/env bash
+for fd in 3 4 5 6 7 8 9; do
+  if eval ": <&\${fd}" 2>/dev/null || eval ": >&\${fd}" 2>/dev/null; then
+    printf '%s\\n' '{"plant":"fd-leaked"}'
+    exit 41
+  fi
+done
+if [[ -n "\${token+x}" || -n "\${boot_kind+x}" || -n "\${start_token+x}" ]]; then
+  printf '%s\\n' '{"plant":"token-variable-leaked"}'
+  exit 42
+fi
+printf '%s\\n' '{"plant":"isolated"}'
+`,
+      { mode: 0o700 },
+    );
+    const run = await runShell([], withoutS6Env(), plant, { runTimeoutMs: 2_000 });
+    expect(run.exitCode, diag(run)).toBe(0);
+    expect(run.stdout, diag(run)).toContain('{"plant":"isolated"}');
+  });
+
+  test("PLANTED: an early payload exit before readiness emits no TERM/KILL", async () => {
+    const dir = mkdtempSync(join(process.env.TMPDIR ?? tmpdir(), "s6-outer-early-exit-"));
+    const plant = join(dir, "early-exit.sh");
+    const missingReady = join(dir, "never-ready");
+    writeFileSync(
+      plant,
+      `#!/usr/bin/env bash
+printf '%s\\n' '{"plant":"early-exit"}'
+exit 7
+`,
+      { mode: 0o700 },
+    );
+    const commands: Array<"TERM" | "KILL"> = [];
+    let refusal: unknown;
+    try {
+      await runShell([], withoutS6Env(), plant, {
+        armAfterFileExists: missingReady,
+        runTimeoutMs: 50,
+        postKillSettleMs: 500,
+        onControlSignal: (signal) => commands.push(signal),
+      });
+    } catch (error) {
+      refusal = error;
+    }
+    expect(refusal).toBeInstanceOf(Error);
+    expect((refusal as Error).message).toContain("deadline plant exited before readiness: exit=7");
+    expect(commands).toEqual([]);
+  });
+
+  test("PLANTED: a late extra record after KILL acknowledgement cannot green", async () => {
+    const dir = mkdtempSync(join(process.env.TMPDIR ?? tmpdir(), "s6-outer-extra-"));
+    const plant = join(dir, "extra-record.sh");
+    writeFileSync(plant, `#!/usr/bin/env bash\nprintf '%s\\n' '{"plant":"pass"}'\n`, {
+      mode: 0o700,
+    });
+    let refusal: unknown;
+    try {
+      await runShell([], withoutS6Env(), plant, {
+        runTimeoutMs: 2_000,
+        postKillSettleMs: 500,
+        extraRecordAfterKillAck: true,
+      });
+    } catch (error) {
+      refusal = error;
+    }
+    expect(refusal).toBeInstanceOf(Error);
+    expect((refusal as Error).message).toContain("outer supervisor protocol failure");
+  });
+
+  test("PLANTED: TERM and KILL acknowledgements share one cleanup deadline", async () => {
+    const dir = mkdtempSync(join(process.env.TMPDIR ?? tmpdir(), "s6-outer-clean-budget-"));
+    const plant = join(dir, "term-resistant.sh");
+    const ready = join(dir, "ready");
+    writeFileSync(
+      plant,
+      `#!/usr/bin/env bash
+trap '' TERM
+printf ready > "$1"
+while :; do sleep 1; done
+`,
+      { mode: 0o700 },
+    );
+    const commands: Array<"TERM" | "KILL"> = [];
+    const started = Date.now();
+    let refusal: unknown;
+    try {
+      await runShell([ready], withoutS6Env(), plant, {
+        armAfterFileExists: ready,
+        runTimeoutMs: 25,
+        killGraceMs: 20,
+        postKillSettleMs: 180,
+        controlAckDelayMs: 120,
+        onControlSignal: (signal) => commands.push(signal),
+      });
+    } catch (error) {
+      refusal = error;
+    }
+    expect(refusal).toBeInstanceOf(Error);
+    expect((refusal as Error).message).toMatch(/KILL command failed|acknowledgement timeout/);
+    expect(commands).toEqual(["TERM"]);
+    expect(Date.now() - started).toBeLessThan(2_000);
   });
 
   test("PLANTED: timeout TERM completion revokes the pending KILL before reap", async () => {
@@ -1641,46 +2563,34 @@ while :; do sleep 1; done
     writeFileSync(
       plant,
       `#!/usr/bin/env bash
-trap '' TERM
+trap 'printf term-observed > "$2"' TERM
 printf ready > "$1"
-sleep 0.5
-printf self-exited > "$2"
-exit 42
+while :; do sleep 1; done
 `,
       { mode: 0o700 },
     );
     const ready = join(dir, "ready");
-    const selfExited = join(dir, "self-exited");
+    const termObserved = join(dir, "term-observed");
+    const commands: Array<"TERM" | "KILL"> = [];
     const started = Date.now();
     let refusal: unknown;
     try {
-      await runShell([ready, selfExited], withoutS6Env(), plant, {
+      await runShell([ready, termObserved], withoutS6Env(), plant, {
         armAfterFileExists: ready,
         runTimeoutMs: 50,
         killGraceMs: 50,
         postKillSettleMs: 100,
         failKillDispatch: true,
+        onControlSignal: (signal) => commands.push(signal),
       });
     } catch (error) {
       refusal = error;
     }
     expect(refusal).toBeInstanceOf(Error);
-    expect((refusal as Error).message).toContain("cleanup unproven: group SIGKILL dispatch failed");
+    expect((refusal as Error).message).toContain("cleanup unproven: supervisor KILL command failed");
     expect(Date.now() - started).toBeLessThan(1_000);
-
-    // The plant self-terminates so the injected syscall failure itself cannot
-    // leave a process behind. This is observation through a sidecar, never a
-    // signal or numeric probe after the controller refused.
-    const selfExitDeadline = Date.now() + 1_000;
-    while (Date.now() < selfExitDeadline) {
-      try {
-        if (readFileSync(selfExited, "utf8") === "self-exited") break;
-      } catch {
-        // The child has not reached its deliberate self-exit yet.
-      }
-      await new Promise<void>((resolveWait) => setTimeout(resolveWait, 10));
-    }
-    expect(readFileSync(selfExited, "utf8")).toBe("self-exited");
+    expect(commands).toEqual(["TERM"]);
+    expect(readFileSync(termObserved, "utf8")).toBe("term-observed");
   });
 
   test("PLANTED: exact typed lifecycle records are wired in both polarities", () => {
@@ -1736,6 +2646,28 @@ exit 42
     const self = read("apps/wire/test/auth/cross-plane-spike.test.ts");
     expect(self).toContain("class OverCapture");
     expect(self).toContain("capture exceeded");
+  });
+
+  test("capture authority stays on the original held inode", () => {
+    const self = read("apps/wire/test/auth/cross-plane-spike.test.ts");
+    const reader = self.slice(
+      self.indexOf("function readBounded("),
+      self.indexOf("interface OuterControlListener"),
+    );
+    const controller = self.slice(
+      self.indexOf("async function runShell("),
+      self.indexOf("/** Failure context."),
+    );
+    expect(controller).toContain("fsConstants.O_EXCL");
+    expect(controller).toContain("fsConstants.O_NOFOLLOW");
+    expect(controller).toContain("readBounded(stdoutFd, stdoutPath, stdoutCaptureIdentity)");
+    expect(reader).toContain("while (offset < size)");
+    expect(reader).toContain("after.size !== before.size");
+    expect(reader).toContain('new TextDecoder("utf-8", { fatal: true })');
+    expect(reader).not.toContain("statSync(path)");
+    expect(controller.indexOf("readBounded(stdoutFd")).toBeLessThan(
+      controller.indexOf("releaseCaptureFds()", controller.indexOf("readBounded(stdoutFd")),
+    );
   });
 
   test(
