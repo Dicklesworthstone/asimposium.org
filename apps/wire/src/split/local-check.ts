@@ -421,6 +421,11 @@ async function main(): Promise<void> {
       },
     }),
   );
+  const sameSponsorMissingPrivate = await snapshot(
+    await localFetch(`${origin}/__s3/private/${missingPrivateWorkshopId}`, {
+      headers: { "x-asimp-local-sponsor": localAuthorityToken },
+    }),
+  );
   check(
     "anonymous_or_stale_private_authority_is_not_found_without_a_private_cache_entry",
     anonymousPrivate.response.status === 404 &&
@@ -485,6 +490,23 @@ async function main(): Promise<void> {
         missingPrivateWorkshopId,
       ]),
     "a missing private identifier reveals cross-sponsor authority or reaches private material",
+  );
+  check(
+    "missing_private_id_same_sponsor_authority_is_indistinguishable_from_anonymous",
+    sameSponsorMissingPrivate.response.status === 404 &&
+      sameSponsorMissingPrivate.response.headers.get("cache-control") === "no-store" &&
+      sameSponsorMissingPrivate.body === anonymousMissingPrivate.body &&
+      sameSponsorMissingPrivate.headers === anonymousMissingPrivate.headers &&
+      hasNoPrivateMaterial(sameSponsorMissingPrivate, [
+        privateCanary,
+        workshopId,
+        privateDigest,
+        privateBodyKey,
+        localSponsorId,
+        missingPrivateWorkshopId,
+        localAuthorityToken,
+      ]),
+    "a same-sponsor missing private identifier reveals authority, an identifier, or private material",
   );
   check(
     "private_not_found_response_is_invariant_across_existence_classes_for_each_principal",

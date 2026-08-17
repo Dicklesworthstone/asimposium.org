@@ -65,6 +65,7 @@ const EXPECTED_LOCAL_BINDING_ASSERTIONS: string[] = [
   "large_workshop_body_spills_to_R2_and_gets_a_server_owned_workshop_id",
   "local_workerd_reports_D1_and_R2_bindings_with_a_public_readiness_nonce_but_never_authority",
   "missing_private_id_cross_sponsor_authority_is_indistinguishable_from_anonymous",
+  "missing_private_id_same_sponsor_authority_is_indistinguishable_from_anonymous",
   "missing_problem_never_fabricates_an_empty_public_projection",
   "near_duplicate_promotion_is_refused_citing_P11_without_a_cursor_burn",
   "one_promotion_atomically_allocates_the_first_public_claim_and_binds_its_public_artifact",
