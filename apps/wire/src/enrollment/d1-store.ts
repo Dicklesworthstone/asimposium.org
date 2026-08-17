@@ -7,12 +7,12 @@ import {
   type FellowLifecycleStatus,
   FellowNameSchema,
   OPERATOR_FELLOW_CAP_AUDIT_PAGE_SIZE,
+  type OperatorFellowCapAuditCursorKey,
   OperatorFellowCapAuditEventSchema,
   type RequestedScope,
   RequestedScopeSchema,
   SPONSOR_FELLOW_PAGE_SIZE,
   type SponsorFellowCursorKey,
-  type OperatorFellowCapAuditCursorKey,
 } from "@asimposium/contracts";
 // D1 proves JSON syntax; these schemas prove that stored authority still obeys
 // the public scope vocabulary and resource bounds when it is read back.
@@ -44,10 +44,10 @@ import {
   isStrictEnrollmentScopeReduction,
   type LifecycleCommandResult,
   nextEnrollmentPollPacing,
-  type OperatorFellowCapOverrideAttempt,
-  type OperatorFellowCapOverrideResult,
   type OperatorFellowCapAuditPage,
   type OperatorFellowCapAuditRecord,
+  type OperatorFellowCapOverrideAttempt,
+  type OperatorFellowCapOverrideResult,
   type OperatorFellowCapState,
   type PollAttempt,
   type PollDecision,

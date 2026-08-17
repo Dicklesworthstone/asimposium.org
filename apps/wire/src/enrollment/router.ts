@@ -8,14 +8,14 @@ import {
   encodeSponsorFellowCursor,
   MintEnrollmentRequestSchema,
   MintEnrollmentResponseSchema,
+  OperatorFellowCapAuditPageResponseSchema,
   OperatorFellowCapOverrideRequestSchema,
   OperatorFellowCapOverrideResponseSchema,
-  OperatorFellowCapAuditPageResponseSchema,
   OperatorFellowCapStateResponseSchema,
   type ProblemCode,
   ProblemDocumentSchema,
-  parseSponsorFellowCursor,
   parseOperatorFellowCapAuditCursor,
+  parseSponsorFellowCursor,
   SponsorBootstrapRequestSchema,
   SponsorBootstrapResponseSchema,
   SponsorCredentialRevokeRequestSchema,
@@ -1459,7 +1459,9 @@ function mountSponsorRoutes(app: Hono, options: EnrollmentRouterOptions): void {
             effective_at: event.effectiveAt,
           })),
           next_cursor:
-            page.nextCursor === undefined ? null : encodeOperatorFellowCapAuditCursor(page.nextCursor),
+            page.nextCursor === undefined
+              ? null
+              : encodeOperatorFellowCapAuditCursor(page.nextCursor),
         }),
         200,
         { "cache-control": "no-store" },
@@ -1522,7 +1524,9 @@ function mountSponsorRoutes(app: Hono, options: EnrollmentRouterOptions): void {
             effective_at: event.effectiveAt,
           })),
           next_cursor:
-            page.nextCursor === undefined ? null : encodeOperatorFellowCapAuditCursor(page.nextCursor),
+            page.nextCursor === undefined
+              ? null
+              : encodeOperatorFellowCapAuditCursor(page.nextCursor),
         }),
         200,
         { "cache-control": "no-store" },
