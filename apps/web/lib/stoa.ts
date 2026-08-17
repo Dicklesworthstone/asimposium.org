@@ -7,6 +7,16 @@ import {
   type MintEnrollmentRequest,
   type MintEnrollmentResponse,
   MintEnrollmentResponseSchema,
+  type OperatorFellowCapAuditCursor,
+  OperatorFellowCapAuditCursorSchema,
+  type OperatorFellowCapAuditPageResponse,
+  OperatorFellowCapAuditPageResponseSchema,
+  type OperatorFellowCapOverrideRequest,
+  OperatorFellowCapOverrideRequestSchema,
+  type OperatorFellowCapOverrideResponse,
+  OperatorFellowCapOverrideResponseSchema,
+  type OperatorFellowCapStateResponse,
+  OperatorFellowCapStateResponseSchema,
   type ProblemCode,
   ProblemDocumentSchema,
   parseStoaJoinUrl,
@@ -60,6 +70,11 @@ const ROUTE_FELLOW_LIFECYCLE = "/v1/fellows/lifecycle";
 const ROUTE_SPONSOR_PANIC = "/v1/sponsors/panic";
 const ROUTE_BOOTSTRAP = "/v1/sponsors/bootstrap";
 const ROUTE_DEVICE_LOOKUP = "/v1/device-lookup";
+const ROUTE_OPERATOR_FELLOW_CAP = "/v1/operators/fellow-cap";
+const ROUTE_OPERATOR_FELLOW_CAP_STATE = "/v1/operators/sponsors/:sponsorId/fellow-cap";
+const ROUTE_OPERATOR_FELLOW_CAP_HISTORY = "/v1/operators/sponsors/:sponsorId/fellow-cap/history";
+const ROUTE_OPERATOR_FELLOW_CAP_HISTORY_AFTER =
+  "/v1/operators/sponsors/:sponsorId/fellow-cap/history/after/:cursor";
 
 const ACTION_MINT = "enrollment.mint";
 const ACTION_PROPOSALS = "enrollment.proposals.list";
@@ -70,6 +85,9 @@ const ACTION_FELLOW_LIFECYCLE = "fellow.lifecycle.change";
 const ACTION_SPONSOR_PANIC = "sponsor.panic";
 const ACTION_BOOTSTRAP = "sponsor.bootstrap";
 const ACTION_DEVICE_LOOKUP = "enrollment.device.lookup";
+const ACTION_OPERATOR_FELLOW_CAP_OVERRIDE = "operator.fellow-cap.override";
+const ACTION_OPERATOR_FELLOW_CAP_READ = "operator.fellow-cap.read";
+const ACTION_OPERATOR_FELLOW_CAP_HISTORY = "operator.fellow-cap.history";
 
 export type StoaCall<T> =
   | { readonly ok: true; readonly data: T }
@@ -85,6 +103,22 @@ export type StoaCall<T> =
 interface StoaSigningConfig {
   readonly privateKey: CryptoKey;
   readonly kid: string;
+}
+
+/**
+ * The Apex repeats the Worker allowlist before it spends a signing nonce or
+ * dispatches an operator command. The Worker remains authoritative, but this
+ * closes a stale console session before it becomes a cross-plane mutation.
+ */
+export function operatorPrincipalIsAllowed(
+  principalId: string,
+  configured = process.env.OPERATOR_PRINCIPAL_IDS,
+): boolean {
+  if (!isCanonicalSponsorId(principalId) || configured === undefined) return false;
+  const ids = configured.split(",").map((value) => value.trim());
+  if (ids.length === 0 || ids.some((id) => !isCanonicalSponsorId(id))) return false;
+  const unique = new Set(ids);
+  return unique.size === ids.length && unique.has(principalId);
 }
 
 /**
@@ -145,6 +179,7 @@ async function callStoa<T>(options: {
   readonly path: string;
   readonly action: string;
   readonly principalId: string;
+  readonly principalType?: "sponsor" | "operator";
   /** The exact body bytes — signed and sent, never reserialized. */
   readonly body: string;
   readonly idempotencyKey?: string;
@@ -152,6 +187,12 @@ async function callStoa<T>(options: {
   readonly parse: (value: unknown, stoaOrigin: string) => T;
 }): Promise<StoaCall<T>> {
   if (!isCanonicalSponsorId(options.principalId)) {
+    return { ok: false, reason: "unconfigured" };
+  }
+  if (
+    options.principalType === "operator" &&
+    !operatorPrincipalIsAllowed(options.principalId)
+  ) {
     return { ok: false, reason: "unconfigured" };
   }
   const stoaOrigin = configuredStoaOrigin();
@@ -167,6 +208,7 @@ async function callStoa<T>(options: {
       route: options.route,
       action: options.action,
       sponsorId: options.principalId,
+      ...(options.principalType === undefined ? {} : { principalType: options.principalType }),
       rawBody: options.body,
       privateKey: config.privateKey,
       kid: config.kid,
@@ -300,6 +342,66 @@ export function stoaFellows(
     principalId,
     body: "",
     parse: (value) => SponsorFellowListResponseSchema.parse(value),
+  });
+}
+
+/** Operator-only read of the exact precondition for a cap compare-and-set. */
+export function stoaOperatorFellowCapState(
+  operatorId: string,
+  sponsorId: string,
+): Promise<StoaCall<OperatorFellowCapStateResponse>> {
+  return callStoa({
+    method: "GET",
+    route: ROUTE_OPERATOR_FELLOW_CAP_STATE,
+    path: `/v1/operators/sponsors/${sponsorId}/fellow-cap`,
+    action: ACTION_OPERATOR_FELLOW_CAP_READ,
+    principalId: operatorId,
+    principalType: "operator",
+    body: "",
+    parse: (value) => OperatorFellowCapStateResponseSchema.parse(value),
+  });
+}
+
+/** Operator-only immutable audit history, using the exact Worker keyset cursor. */
+export function stoaOperatorFellowCapAudit(
+  operatorId: string,
+  sponsorId: string,
+  after?: OperatorFellowCapAuditCursor,
+): Promise<StoaCall<OperatorFellowCapAuditPageResponse>> {
+  const cursor =
+    after === undefined ? undefined : OperatorFellowCapAuditCursorSchema.parse(after);
+  return callStoa({
+    method: "GET",
+    route: cursor === undefined ? ROUTE_OPERATOR_FELLOW_CAP_HISTORY : ROUTE_OPERATOR_FELLOW_CAP_HISTORY_AFTER,
+    path:
+      cursor === undefined
+        ? `/v1/operators/sponsors/${sponsorId}/fellow-cap/history`
+        : `/v1/operators/sponsors/${sponsorId}/fellow-cap/history/after/${cursor}`,
+    action: ACTION_OPERATOR_FELLOW_CAP_HISTORY,
+    principalId: operatorId,
+    principalType: "operator",
+    body: "",
+    parse: (value) => OperatorFellowCapAuditPageResponseSchema.parse(value),
+  });
+}
+
+/** Operator-only signed cap override. The server action stamps recent-auth evidence. */
+export function stoaOperatorOverrideFellowCap(
+  operatorId: string,
+  request: OperatorFellowCapOverrideRequest,
+  idempotencyKey: string,
+): Promise<StoaCall<OperatorFellowCapOverrideResponse>> {
+  const command = OperatorFellowCapOverrideRequestSchema.parse(request);
+  return callStoa({
+    method: "POST",
+    route: ROUTE_OPERATOR_FELLOW_CAP,
+    path: ROUTE_OPERATOR_FELLOW_CAP,
+    action: ACTION_OPERATOR_FELLOW_CAP_OVERRIDE,
+    principalId: operatorId,
+    principalType: "operator",
+    body: JSON.stringify(command),
+    idempotencyKey,
+    parse: (value) => OperatorFellowCapOverrideResponseSchema.parse(value),
   });
 }
 

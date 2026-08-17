@@ -3,6 +3,9 @@
 import type {
   EnrollmentApprovalCard,
   MintEnrollmentRequest,
+  OperatorFellowCapOverrideRequest,
+  OperatorFellowCapOverrideResponse,
+  OperatorFellowCapStateResponse,
   SponsorCredentialRevokeRequest,
   SponsorEnrollmentDecision,
   SponsorFellowLifecycleRequest,
@@ -11,6 +14,7 @@ import type {
 } from "@asimposium/contracts";
 import {
   MintEnrollmentRequestSchema,
+  OperatorFellowCapOverrideRequestSchema,
   SponsorCredentialRevokeRequestSchema,
   SponsorEnrollmentDecisionCommandSchema,
   SponsorEnrollmentDecisionSchema,
@@ -35,6 +39,9 @@ import {
   stoaDeviceLookup,
   stoaEnrollmentRecoveryOwner,
   stoaMintEnrollment,
+  operatorPrincipalIsAllowed,
+  stoaOperatorFellowCapState,
+  stoaOperatorOverrideFellowCap,
   stoaPanicSponsor,
   stoaRevokeCredential,
   stoaTransitionFellow,
@@ -56,6 +63,14 @@ export type MintResult =
 
 export type DeviceLookupResult =
   | { readonly ok: true; readonly card: EnrollmentApprovalCard }
+  | { readonly ok: false; readonly message: string };
+
+export type OperatorFellowCapResult =
+  | { readonly ok: true; readonly receipt: OperatorFellowCapOverrideResponse }
+  | { readonly ok: false; readonly message: string };
+
+export type OperatorFellowCapStateResult =
+  | { readonly ok: true; readonly state: OperatorFellowCapStateResponse }
   | { readonly ok: false; readonly message: string };
 
 /** W3.5: find a pending device proposal by its human code. Read-only; decisions go through decideProposal with the recent-auth gate. */
@@ -236,6 +251,95 @@ async function requireSponsorId(): Promise<
     sponsorId: session.user.id,
     authIssuedAt: session.authIssuedAt,
   };
+}
+
+/** Operator actions are both Apex-allowlisted and rechecked by the Worker. */
+async function requireOperatorId(): Promise<
+  | { readonly ok: true; readonly operatorId: string; readonly authIssuedAt?: number }
+  | { readonly ok: false; readonly message: string }
+> {
+  const session = await auth();
+  if (session?.user === undefined || !isCanonicalSponsorId(session.user.id)) {
+    return { ok: false, message: "Not signed in." };
+  }
+  if (!operatorPrincipalIsAllowed(session.user.id)) {
+    return { ok: false, message: "This signed-in account is not authorized for operator actions." };
+  }
+  return { ok: true, operatorId: session.user.id, authIssuedAt: session.authIssuedAt };
+}
+
+/** Read the exact cap/sequence precondition before an operator compare-and-set. */
+export async function operatorFellowCapState(
+  sponsorId: unknown,
+): Promise<OperatorFellowCapStateResult> {
+  const operator = await requireOperatorId();
+  if (!operator.ok) return operator;
+  if (!isCanonicalSponsorId(sponsorId)) {
+    return { ok: false, message: "The target sponsor identity is invalid." };
+  }
+  const result = await stoaOperatorFellowCapState(operator.operatorId, sponsorId);
+  if (!result.ok) {
+    return {
+      ok: false,
+      message:
+        result.reason === "unconfigured"
+          ? "This deployment cannot dispatch operator reads safely."
+          : result.reason === "unreachable"
+            ? "The agent host did not answer. Try again in a moment."
+            : (result.detail ?? "The operator state was not available."),
+    };
+  }
+  return { ok: true, state: result.data };
+}
+
+/**
+ * Operator-only capacity mutation. `auth_time` comes only from the current
+ * server session projection; callers cannot supply or retain that evidence.
+ */
+export async function overrideOperatorFellowCap(
+  request: unknown,
+  idempotencyKey: unknown,
+): Promise<OperatorFellowCapResult> {
+  const operator = await requireOperatorId();
+  if (!operator.ok) return operator;
+  if (
+    typeof idempotencyKey !== "string" ||
+    !/^console-[A-Za-z0-9._-]{1,152}$/.test(idempotencyKey)
+  ) {
+    return { ok: false, message: "The operator idempotency key is invalid." };
+  }
+  const intent = OperatorFellowCapOverrideRequestSchema.omit({
+    step_up_authenticated_at: true,
+  }).safeParse(request);
+  if (!intent.success) {
+    return { ok: false, message: "The operator Fellow-cap command is invalid." };
+  }
+  const stepUpAuthenticatedAt = operator.authIssuedAt;
+  if (typeof stepUpAuthenticatedAt !== "number" || !recentAuthOk(stepUpAuthenticatedAt)) {
+    return {
+      ok: false,
+      message:
+        "Operator capacity changes need a Google authentication time from the last 15 minutes. Reauthenticate, then retry this exact command.",
+    };
+  }
+  const command: OperatorFellowCapOverrideRequest = OperatorFellowCapOverrideRequestSchema.parse({
+    ...intent.data,
+    step_up_authenticated_at: stepUpAuthenticatedAt,
+  });
+  const result = await stoaOperatorOverrideFellowCap(operator.operatorId, command, idempotencyKey);
+  if (!result.ok) {
+    return {
+      ok: false,
+      message:
+        result.reason === "unconfigured"
+          ? "This deployment cannot dispatch operator writes safely."
+          : result.reason === "unreachable"
+            ? "The agent host did not confirm the operator command. Retry it unchanged with the same Idempotency-Key."
+            : (result.detail ?? "The operator Fellow-cap command was not accepted."),
+    };
+  }
+  bestEffortEnrollmentCacheInvalidation(() => revalidatePath("/console"));
+  return { ok: true, receipt: result.data };
 }
 
 /**

@@ -46,6 +46,8 @@ export interface DispatchSignedSponsorRequestOptions {
   action: string;
   /** Canonical opaque Worker sponsor id; never email, Google subject, or cookie. */
   sponsorId: string;
+  /** Defaults to sponsor; operator routes must make their distinct authority explicit. */
+  principalType?: "sponsor" | "operator";
   /**
    * Exact JSON bytes sent to Stoa and signed by the envelope.
    *
@@ -244,6 +246,7 @@ export async function dispatchSignedSponsorRequest(
         route: options.route,
         action: options.action,
         principalId: options.sponsorId,
+        ...(options.principalType === undefined ? {} : { principalType: options.principalType }),
         body: rawBody,
       }),
       deadline,
