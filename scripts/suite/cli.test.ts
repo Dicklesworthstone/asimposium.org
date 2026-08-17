@@ -11,7 +11,7 @@ import { describe, expect, test } from "bun:test";
 import { existsSync } from "node:fs";
 import { homedir } from "node:os";
 import { join } from "node:path";
-import { fileURLToPath } from "node:url";
+import { fileURLToPath, pathToFileURL } from "node:url";
 import { runOwnedCommand, suiteExecutionLimits } from "./cli.ts";
 import {
   blockedCommand,
@@ -151,25 +151,63 @@ function processTable(): string {
   return new TextDecoder().decode(snapshot.stdout);
 }
 
-function processIdForMarker(marker: string): number | undefined {
+function processIdsForMarker(marker: string): number[] {
   const snapshot = Bun.spawnSync({
     cmd: ["/bin/ps", "-axo", "pid=,command="],
     stdout: "pipe",
     stderr: "pipe",
   });
   expect(snapshot.exitCode).toBe(0);
+  const pids: number[] = [];
   for (const line of new TextDecoder().decode(snapshot.stdout).split("\n")) {
     const match = line.trim().match(/^(\d+)\s+(.*)$/);
     const command = match?.[2];
-    if (match !== null && command?.includes(marker)) return Number(match[1]);
+    if (match !== null && command?.includes(marker)) pids.push(Number(match[1]));
   }
-  return undefined;
+  return pids;
+}
+
+async function waitForMarkerProcesses(
+  marker: string,
+  accepts: (pids: readonly number[]) => boolean,
+  timeoutMs = 10_000,
+): Promise<number[]> {
+  const deadline = performance.now() + timeoutMs;
+  while (performance.now() < deadline) {
+    const pids = processIdsForMarker(marker);
+    if (accepts(pids)) return pids;
+    await Bun.sleep(20);
+  }
+  throw new Error(`marker process observation timed out: ${marker}`);
 }
 
 function stopDetachedFixture(marker: string): void {
-  const pid = processIdForMarker(marker);
-  if (pid === undefined) return;
-  process.kill(pid, "SIGKILL");
+  for (const pid of processIdsForMarker(marker)) {
+    try {
+      process.kill(pid, "SIGKILL");
+    } catch {
+      // Test-only cleanup races a fixture's bounded self-retirement.
+    }
+  }
+}
+
+function spawnCrashableOwnedCommand(marker: string, targetSource: string) {
+  const helperSource = `
+    import { runOwnedCommand } from ${JSON.stringify(pathToFileURL(CLI).href)};
+    await runOwnedCommand({
+      command: ["perl", "-e", ${JSON.stringify(targetSource)}],
+      cwd: ${JSON.stringify(process.cwd())},
+      env: ${JSON.stringify(childEnvironment())},
+      timeoutMs: 30_000,
+    });
+  `;
+  return Bun.spawn({
+    cmd: ["bun", "-e", helperSource, marker],
+    env: childEnvironment(),
+    stdin: "ignore",
+    stdout: "ignore",
+    stderr: "ignore",
+  });
 }
 
 function aggregateOutputCommand(totalCapturedBytes: number, includeExitedControl: boolean): string {
@@ -337,6 +375,58 @@ describe("owned session launcher", () => {
     expect(result.outcome).toBe("exited");
     expect(result.exitCode).toBe(0);
   });
+
+  test("dispatcher death retires a still-running target through the parent lease", async () => {
+    const marker = `suite-parent-lease-live-${crypto.randomUUID()}`;
+    const helper = spawnCrashableOwnedCommand(
+      marker,
+      `my $marker = ${JSON.stringify(marker)}; $SIG{TERM} = sub {}; $SIG{HUP} = sub {}; while (1) { sleep 1; }`,
+    );
+    try {
+      const live = await waitForMarkerProcesses(marker, (pids) => pids.length >= 3);
+      expect(live).toContain(helper.pid);
+
+      helper.kill("SIGKILL");
+      await helper.exited;
+      expect(await waitForMarkerProcesses(marker, (pids) => pids.length === 0)).toEqual([]);
+    } finally {
+      try {
+        helper.kill("SIGKILL");
+      } catch {
+        // The planted dispatcher is expected to be gone.
+      }
+      stopDetachedFixture(marker);
+    }
+  }, 20_000);
+
+  test("dispatcher death retires a supervisor parked after target exit", async () => {
+    const marker = `suite-parent-lease-parked-${crypto.randomUUID()}`;
+    const helper = spawnCrashableOwnedCommand(
+      marker,
+      `my $marker = ${JSON.stringify(marker)}; select undef, undef, undef, 1; exit 0;`,
+    );
+    try {
+      expect(await waitForMarkerProcesses(marker, (pids) => pids.length >= 3)).toContain(
+        helper.pid,
+      );
+      const parked = await waitForMarkerProcesses(
+        marker,
+        (pids) => pids.length === 2 && pids.includes(helper.pid),
+      );
+      expect(parked).toContain(helper.pid);
+
+      helper.kill("SIGKILL");
+      await helper.exited;
+      expect(await waitForMarkerProcesses(marker, (pids) => pids.length === 0)).toEqual([]);
+    } finally {
+      try {
+        helper.kill("SIGKILL");
+      } catch {
+        // The planted dispatcher is expected to be gone.
+      }
+      stopDetachedFixture(marker);
+    }
+  }, 20_000);
 
   test.each([
     ["exit 1 with stdout", 'print "999\\n"; exit 1;'],

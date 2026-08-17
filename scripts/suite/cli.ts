@@ -442,7 +442,7 @@ async function valueBefore<T>(promise: Promise<T>, milliseconds: number): Promis
 const OWNED_SESSION_SUPERVISOR = String.raw`
 use strict;
 use warnings;
-use POSIX qw(setsid);
+use POSIX qw(setsid WNOHANG _exit);
 my $nonce = shift @ARGV;
 if (!defined setsid()) {
   print STDERR "\036ASIMPOSIUM_SUITE_CONTROL $nonce start-failed 125 0 $$ -1\n";
@@ -451,17 +451,47 @@ if (!defined setsid()) {
 print STDERR "\036ASIMPOSIUM_SUITE_CONTROL $nonce ready $$\n";
 $SIG{TERM} = sub {};
 $SIG{HUP} = sub {};
+
+sub parent_lease_is_open {
+  my $readable = "";
+  vec($readable, fileno(STDIN), 1) = 1;
+  my $selected = select($readable, undef, undef, 0);
+  return 0 if !defined $selected;
+  return 1 if $selected == 0;
+  my $bytes = sysread(STDIN, my $unexpected, 1);
+  # The dispatcher never writes this pipe. EOF means its writer disappeared;
+  # any byte or read error is likewise a fail-closed lease violation.
+  return 0 if !defined $bytes || $bytes == 0;
+  return 0;
+}
+
+sub retire_orphaned_group {
+  kill "KILL", -$$;
+  _exit(125);
+}
+
 my $target = fork();
 if (!defined $target) {
   print STDERR "\036ASIMPOSIUM_SUITE_CONTROL $nonce start-failed 125 0 $$ -1\n";
   exit 125;
 }
 if ($target == 0) {
+  # Package commands historically receive /dev/null on stdin. Reopen it here so
+  # the target cannot consume the supervisor's private parent-liveness lease.
+  open STDIN, "<", "/dev/null" or exit 127;
   exec @ARGV;
   exit 127;
 }
-waitpid($target, 0);
-my $raw = $?;
+my $raw;
+while (1) {
+  my $waited = waitpid($target, WNOHANG);
+  if ($waited == $target) {
+    $raw = $?;
+    last;
+  }
+  retire_orphaned_group() if $waited == -1 || !parent_lease_is_open();
+  select undef, undef, undef, 0.05;
+}
 my $signal = $raw & 127;
 my $exit = $signal ? 128 + $signal : $raw >> 8;
 my $members = -1;
@@ -476,7 +506,8 @@ if ($snapshot_pid) {
 }
 $SIG{USR1} = sub { exit $exit; };
 print STDERR "\036ASIMPOSIUM_SUITE_CONTROL $nonce exited $exit $signal $$ $members\n";
-while (1) { sleep 1; }
+while (parent_lease_is_open()) { select undef, undef, undef, 0.05; }
+retire_orphaned_group();
 `;
 
 interface OwnedSessionMember {
@@ -1094,7 +1125,10 @@ export async function runOwnedCommand(options: OwnedCommandOptions): Promise<Own
       ],
       cwd: options.cwd,
       env: options.env,
-      stdin: "ignore",
+      // This write end is a kernel-backed parent-liveness lease. The supervisor
+      // monitors EOF while the target runs and while it awaits normal SIGUSR1
+      // release, so dispatcher death cannot leave an orphaned owned group.
+      stdin: "pipe",
       stdout: "pipe",
       stderr: "pipe",
     });
@@ -1109,6 +1143,7 @@ export async function runOwnedCommand(options: OwnedCommandOptions): Promise<Own
     };
   }
 
+  const ownershipLease = child.stdin;
   const stdout = captureBoundedPipe(
     child.stdout as ReadableStream<Uint8Array>,
     streamLimitBytes,
@@ -1259,7 +1294,7 @@ export async function runOwnedCommand(options: OwnedCommandOptions): Promise<Own
   } else if (outcome === "exited" && !drained) {
     outcome = "pipe-drain-unproven";
   }
-  return {
+  const result = {
     outcome,
     ...(exitCode === undefined ? {} : { exitCode }),
     ...(signal === undefined ? {} : { signal }),
@@ -1270,6 +1305,10 @@ export async function runOwnedCommand(options: OwnedCommandOptions): Promise<Own
     retainedOutputBytes: budget.retainedBytes,
     ...(cleanupProven === undefined ? {} : { cleanupProven }),
   };
+  // Normal release has already reaped the supervisor. Closing the writer here
+  // also makes any fail-closed return unable to park a lease-waiting leader.
+  ownershipLease.end();
+  return result;
 }
 
 async function runToolchainIntegrationStep(
