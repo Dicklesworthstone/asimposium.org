@@ -1262,9 +1262,9 @@ function operatorAuthUnavailableResponse(): Response {
   return problem(
     503,
     "OPERATOR_AUTH_UNAVAILABLE",
-    "Operator authentication is temporarily unavailable",
-    "The Worker could not verify this operator request safely.",
-    "Retry later. If the failure persists, check the service-envelope keyring, operator allowlist, and nonce store before re-signing the request.",
+    "Operator writes are not configured on this Worker",
+    "This deployment cannot verify operator authorization safely.",
+    "Configure the service-envelope verification keys and operator allowlist, then retry.",
   );
 }
 

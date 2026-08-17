@@ -48,7 +48,15 @@ const TEST_STOA_ORIGIN = "https://a.asimposium.org";
 const SPONSOR = "usr_01JXYZSPONSOR0000000000";
 const FOREIGN_SPONSOR = "usr_01JXYZFOREIGN000000000";
 const OPERATOR = "usr_01JXYZOPERATOR000000000";
+const OPERATOR_AUTH_UNAVAILABLE_FIXTURE = new URL(
+  "../../../../packages/contracts/test/fixtures/valid/problem-operator-auth-unavailable.json",
+  import.meta.url,
+);
 let signedRequestSequence = 0;
+
+async function fixture(url: URL): Promise<unknown> {
+  return JSON.parse(await Bun.file(url).text()) as unknown;
+}
 
 interface Harness {
   app: Hono;
@@ -394,9 +402,9 @@ describe("sponsor enrollment routes", () => {
       }),
     );
     expect(response.status).toBe(503);
-    expect(OpaqueProblemSchema.parse(await response.json())).toMatchObject({
-      code: "OPERATOR_AUTH_UNAVAILABLE",
-    });
+    expect(OpaqueProblemSchema.parse(await response.json())).toEqual(
+      OpaqueProblemSchema.parse(await fixture(OPERATOR_AUTH_UNAVAILABLE_FIXTURE)),
+    );
   });
 
   test("an invalid decision-path id teaches before sponsor auth or state lookup", async () => {

@@ -24,6 +24,15 @@ import {
   type FellowRegistrationRequest,
   type FellowToken,
   type MintEnrollmentRequest,
+  type OperatorFellowCapAuditCursor,
+  type OperatorFellowCapAuditCursorKey,
+  type OperatorFellowCapAuditEvent,
+  type OperatorFellowCapAuditEventId,
+  type OperatorFellowCapAuditPageResponse,
+  type OperatorFellowCapOverrideRequest,
+  type OperatorFellowCapOverrideResponse,
+  type OperatorFellowCapSignerKid,
+  type OperatorFellowCapStateResponse,
   type RequestedScope,
   type SponsorCredentialRevokeRequest,
   type SponsorCredentialRevokeResponse,
@@ -160,6 +169,15 @@ function generatedEnrollmentTypes(): string {
     "FellowLifecycleEventId",
     "FellowToken",
     "MintEnrollmentRequest",
+    "OperatorFellowCapAuditCursor",
+    "OperatorFellowCapAuditCursorKey",
+    "OperatorFellowCapAuditEvent",
+    "OperatorFellowCapAuditEventId",
+    "OperatorFellowCapAuditPageResponse",
+    "OperatorFellowCapOverrideRequest",
+    "OperatorFellowCapOverrideResponse",
+    "OperatorFellowCapSignerKid",
+    "OperatorFellowCapStateResponse",
     "RequestedScope",
     "SponsorEnrollmentDecision",
     "SponsorEnrollmentDecisionCommand",
@@ -192,6 +210,15 @@ function generatedEnrollmentTypes(): string {
     FellowRegistrationRequest: FellowRegistrationRequest;
     FellowToken: FellowToken;
     MintEnrollmentRequest: MintEnrollmentRequest;
+    OperatorFellowCapAuditCursor: OperatorFellowCapAuditCursor;
+    OperatorFellowCapAuditCursorKey: OperatorFellowCapAuditCursorKey;
+    OperatorFellowCapAuditEvent: OperatorFellowCapAuditEvent;
+    OperatorFellowCapAuditEventId: OperatorFellowCapAuditEventId;
+    OperatorFellowCapAuditPageResponse: OperatorFellowCapAuditPageResponse;
+    OperatorFellowCapOverrideRequest: OperatorFellowCapOverrideRequest;
+    OperatorFellowCapOverrideResponse: OperatorFellowCapOverrideResponse;
+    OperatorFellowCapSignerKid: OperatorFellowCapSignerKid;
+    OperatorFellowCapStateResponse: OperatorFellowCapStateResponse;
     RequestedScope: RequestedScope;
     SponsorEnrollmentDecision: SponsorEnrollmentDecision;
     SponsorEnrollmentDecisionCommand: SponsorEnrollmentDecisionCommand;

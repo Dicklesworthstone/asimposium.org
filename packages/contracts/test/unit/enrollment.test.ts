@@ -83,6 +83,7 @@ const GENERATED_ENROLLMENT_SCHEMA = new URL(
   "../../generated/enrollment.schema.json",
   import.meta.url,
 );
+const GENERATED_ENROLLMENT_TYPES = new URL("../../generated/enrollment.types.ts", import.meta.url);
 const VALID_LIFECYCLE_FIXTURE = new URL(
   "../fixtures/valid/enrollment-lifecycle.json",
   import.meta.url,
@@ -180,6 +181,24 @@ test("operator Fellow-cap override fixtures carry the compare-and-set and immuta
   expect(generated.properties?.operator_fellow_cap_audit_page_response).toBeDefined();
 });
 
+test("generated enrollment types export the complete operator Fellow-cap surface", async () => {
+  const artifact = await Bun.file(GENERATED_ENROLLMENT_TYPES).text();
+  const exported = artifact.match(/^export type \{ (.*) \} from /m)?.[1]?.split(", ");
+  expect(exported).toEqual(
+    expect.arrayContaining([
+      "OperatorFellowCapAuditEventId",
+      "OperatorFellowCapSignerKid",
+      "OperatorFellowCapOverrideRequest",
+      "OperatorFellowCapOverrideResponse",
+      "OperatorFellowCapStateResponse",
+      "OperatorFellowCapAuditCursorKey",
+      "OperatorFellowCapAuditCursor",
+      "OperatorFellowCapAuditEvent",
+      "OperatorFellowCapAuditPageResponse",
+    ]),
+  );
+});
+
 test("operator Fellow-cap reasons use SQLite's code-point length, not UTF-16 length", () => {
   const request = {
     sponsor_id: "usr_operator_cap_target",
@@ -238,6 +257,9 @@ test("operator Fellow-cap reason JSON Schema has the same Unicode and whitespace
     ["1234567890\n", false],
     ["\u00a01234567890", false],
     [`${"a".repeat(10)}\u3000`, false],
+    [`\ud800${"a".repeat(9)}`, false],
+    [`\udc00${"a".repeat(9)}`, false],
+    [`😀${"a".repeat(9)}`, true],
     ["😀".repeat(5), false],
     ["😀".repeat(600), true],
   ] as const;

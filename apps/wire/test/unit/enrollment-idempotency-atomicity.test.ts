@@ -7673,9 +7673,25 @@ describe("0016 operator Fellow-cap override audit", () => {
     }
     await service.bootstrapSponsor(sponsor);
 
+    // A JavaScript lone surrogate cannot be represented faithfully in D1's
+    // UTF-8 binding. Reject it before the signed/idempotent intent can differ
+    // from the durable reason; a valid astral scalar still reaches D1.
+    for (const reason of [`\ud800${"a".repeat(9)}`, `\udc00${"a".repeat(9)}`]) {
+      await expect(
+        service.overrideSponsorFellowCap(operator, overrideRequest(6, 5, 0, reason), {
+          idempotencyKey: `operator-cap-lone-surrogate-${reason.charCodeAt(0)}`,
+        }),
+      ).rejects.toMatchObject({ code: "OPERATOR_FELLOW_CAP_BODY_INVALID" });
+    }
+    expect(
+      sqlite
+        .prepare<{ n: number }, []>("SELECT COUNT(*) AS n FROM sponsor_fellow_cap_audit_events")
+        .get()?.n,
+    ).toBe(0);
+
     const receipt = await service.overrideSponsorFellowCap(
       operator,
-      overrideRequest(6, 5, 0, "a".repeat(10)),
+      overrideRequest(6, 5, 0, `😀${"a".repeat(9)}`),
       { idempotencyKey: "operator-cap-first" },
     );
 
@@ -7853,7 +7869,7 @@ describe("0016 operator Fellow-cap override audit", () => {
     // attempt adds neither audit nor replay state.
     clock.value += (SPONSOR_STEP_UP_WINDOW_SECONDS + 1) * 1_000;
     await expect(
-      service.overrideSponsorFellowCap(operator, overrideRequest(6, 5, 0, "a".repeat(10)), {
+      service.overrideSponsorFellowCap(operator, overrideRequest(6, 5, 0, `😀${"a".repeat(9)}`), {
         idempotencyKey: "operator-cap-first",
       }),
     ).resolves.toEqual(receipt);
@@ -8036,6 +8052,248 @@ describe("0016 operator Fellow-cap override audit", () => {
         )
         .get()?.n,
     ).toBe(1);
+  });
+
+  test("same-key different-body contenders commit one immutable receipt and conflict the loser", async () => {
+    let preflightReaders = 0;
+    let releasePreflights: (() => void) | undefined;
+    let bothPreflightsRead: (() => void) | undefined;
+    const preflightsMayContinue = new Promise<void>((resolve) => {
+      releasePreflights = resolve;
+    });
+    const bothPreflightsObserved = new Promise<void>((resolve) => {
+      bothPreflightsRead = resolve;
+    });
+    let barrierEnabled = false;
+    const { sqlite, service } = serviceFixture({
+      serializeBatches: true,
+      afterFirstRead: async (query) => {
+        if (!barrierEnabled || !query.includes("FROM enrollment_idempotency")) return;
+        preflightReaders += 1;
+        if (preflightReaders === 2) {
+          barrierEnabled = false;
+          bothPreflightsRead?.();
+        }
+        await preflightsMayContinue;
+      },
+    });
+    await service.bootstrapSponsor(sponsor);
+    const options = { idempotencyKey: "operator-cap-same-key-different-body-race" } as const;
+
+    barrierEnabled = true;
+    const requests = [
+      overrideRequest(6, 5, 0, "first same-key intent must be durable"),
+      overrideRequest(7, 5, 0, "second same-key intent must conflict"),
+    ] as const;
+    const first = service.overrideSponsorFellowCap(operator, requests[0], options);
+    const second = service.overrideSponsorFellowCap(operator, requests[1], options);
+    await bothPreflightsObserved;
+    releasePreflights?.();
+    const outcomes = await Promise.allSettled([first, second]);
+
+    expect(preflightReaders).toBe(2);
+    expect(outcomes.filter((outcome) => outcome.status === "fulfilled")).toHaveLength(1);
+    const rejected = outcomes.find((outcome) => outcome.status === "rejected");
+    expect(rejected?.status).toBe("rejected");
+    if (rejected?.status === "rejected") {
+      expect(rejected.reason).toBeInstanceOf(EnrollmentError);
+      expect((rejected.reason as EnrollmentError).code).toBe("IDEMPOTENCY_CONFLICT");
+    }
+    const winnerIndex = outcomes.findIndex((outcome) => outcome.status === "fulfilled");
+    expect(winnerIndex).toBeGreaterThanOrEqual(0);
+    const winner = outcomes.at(winnerIndex);
+    const winningRequest = requests.at(winnerIndex);
+    if (winner?.status !== "fulfilled" || winningRequest === undefined) {
+      throw new Error("same-key race did not retain a winning immutable receipt");
+    }
+    const losingRequest = requests[winnerIndex === 0 ? 1 : 0];
+    expect(winner.value).toMatchObject({
+      active_fellow_limit: winningRequest.active_fellow_limit,
+      sponsor_seq: winningRequest.expected_sponsor_seq + 1,
+    });
+    expect(
+      sqlite
+        .prepare<{ active_fellow_limit: number; fellow_cap_seq: number }, [string]>(
+          "SELECT active_fellow_limit, fellow_cap_seq FROM sponsors WHERE sponsor_id = ?",
+        )
+        .get(sponsorId),
+    ).toEqual({
+      active_fellow_limit: winningRequest.active_fellow_limit,
+      fellow_cap_seq: winningRequest.expected_sponsor_seq + 1,
+    });
+    expect(
+      sqlite
+        .prepare<{ n: number }, []>("SELECT COUNT(*) AS n FROM sponsor_fellow_cap_audit_events")
+        .get()?.n,
+    ).toBe(1);
+    expect(
+      sqlite
+        .prepare<{ n: number }, [string]>(
+          "SELECT COUNT(*) AS n FROM enrollment_idempotency WHERE idempotency_key = ?",
+        )
+        .get(options.idempotencyKey)?.n,
+    ).toBe(1);
+    await expect(
+      service.overrideSponsorFellowCap(operator, winningRequest, options),
+    ).resolves.toEqual(winner.value);
+    await expect(
+      service.overrideSponsorFellowCap(operator, losingRequest, options),
+    ).rejects.toMatchObject({ code: "IDEMPOTENCY_CONFLICT" });
+  });
+
+  test("cap lowering and paused-Fellow activation serialize to one lawful capacity state", async () => {
+    const observed = new Set<"lower" | "activate">();
+    let armed = false;
+    let releaseObservations: (() => void) | undefined;
+    let bothObservations: (() => void) | undefined;
+    const observationsMayContinue = new Promise<void>((resolve) => {
+      releaseObservations = resolve;
+    });
+    const bothObservationsReached = new Promise<void>((resolve) => {
+      bothObservations = resolve;
+    });
+    const { clock, sqlite, service } = serviceFixture({
+      serializeBatches: true,
+      afterFirstRead: async (query) => {
+        if (!armed) return;
+        let observation: "lower" | "activate" | undefined;
+        if (query.includes("SELECT active_fellow_limit, fellow_cap_seq")) {
+          observation = "lower";
+        } else if (
+          query.includes("SELECT sponsor.lifecycle_seq") &&
+          query.includes("fellow.status")
+        ) {
+          observation = "activate";
+        }
+        if (observation === undefined) return;
+        observed.add(observation);
+        if (observed.size === 2) {
+          armed = false;
+          bothObservations?.();
+        }
+        await observationsMayContinue;
+      },
+    });
+    await service.bootstrapSponsor(sponsor);
+    await service.overrideSponsorFellowCap(
+      operator,
+      overrideRequest(6, 5, 0, "raise once to prepare capacity race"),
+      { idempotencyKey: "operator-cap-lower-activation-raise" },
+    );
+    for (let ordinal = 1; ordinal <= 6; ordinal += 1) {
+      const minted = await service.mint(sponsor, { requested_scopes: ["review"] });
+      await service.claim({
+        enrollment_id: minted.enrollmentId,
+        secret: minted.secret,
+        name: `operator-cap-activation-${ordinal}`,
+        model: "test-model",
+        harness: "test-harness",
+      });
+      await service.decide(
+        sponsor,
+        minted.enrollmentId,
+        {
+          enrollment_id: minted.enrollmentId,
+          decision: "approve",
+          step_up_authenticated_at: Math.floor(clock.value / 1_000),
+        },
+        { idempotencyKey: `operator-cap-lower-activation-approve-${ordinal}` },
+      );
+    }
+    const paused = (await service.fellows(sponsor))[0];
+    if (paused === undefined) throw new Error("capacity-race Fellow was not listed");
+    await service.transitionFellow(
+      sponsor,
+      {
+        fellow_id: paused.fellowId,
+        status: "paused",
+        confirm: "change-fellow-lifecycle",
+        step_up_authenticated_at: Math.floor(clock.value / 1_000),
+      },
+      { idempotencyKey: "operator-cap-lower-activation-pause" },
+    );
+
+    armed = true;
+    const lowering = service.overrideSponsorFellowCap(
+      operator,
+      overrideRequest(5, 6, 1, "lowering must not overrun active Fellows"),
+      { idempotencyKey: "operator-cap-lower-activation-lower" },
+    );
+    const activation = service.transitionFellow(
+      sponsor,
+      {
+        fellow_id: paused.fellowId,
+        status: "active",
+        confirm: "change-fellow-lifecycle",
+        step_up_authenticated_at: Math.floor(clock.value / 1_000),
+      },
+      { idempotencyKey: "operator-cap-lower-activation-resume" },
+    );
+    await bothObservationsReached;
+    releaseObservations?.();
+    const [loweringOutcome, activationOutcome] = await Promise.allSettled([lowering, activation]);
+
+    expect(observed).toEqual(new Set(["lower", "activate"]));
+    expect(
+      [loweringOutcome, activationOutcome].filter((outcome) => outcome.status === "fulfilled"),
+    ).toHaveLength(1);
+    const loweringCommitted = loweringOutcome.status === "fulfilled";
+    if (loweringCommitted) {
+      expect(activationOutcome.status).toBe("rejected");
+      if (activationOutcome.status === "rejected") {
+        expect(activationOutcome.reason).toMatchObject({ code: "FELLOW_CAP_REACHED" });
+      }
+    } else {
+      expect(loweringOutcome.status).toBe("rejected");
+      if (loweringOutcome.status === "rejected") {
+        expect(loweringOutcome.reason).toMatchObject({ code: "OPERATOR_FELLOW_CAP_NOT_CURRENT" });
+      }
+      expect(activationOutcome.status).toBe("fulfilled");
+    }
+
+    const current = sqlite
+      .prepare<{ active_fellow_limit: number; fellow_cap_seq: number }, [string]>(
+        "SELECT active_fellow_limit, fellow_cap_seq FROM sponsors WHERE sponsor_id = ?",
+      )
+      .get(sponsorId);
+    const activeFellows = sqlite
+      .prepare<{ n: number }, [string]>(
+        `SELECT COUNT(*) AS n FROM enrollment_fellows
+          WHERE sponsor_id = ? AND status IN ('active', 'suspicious_review')`,
+      )
+      .get(sponsorId)?.n;
+    expect(activeFellows).toBeLessThanOrEqual(current?.active_fellow_limit ?? -1);
+    expect(current).toEqual(
+      loweringCommitted
+        ? { active_fellow_limit: 5, fellow_cap_seq: 2 }
+        : { active_fellow_limit: 6, fellow_cap_seq: 1 },
+    );
+    expect(
+      sqlite
+        .prepare<{ n: number }, []>("SELECT COUNT(*) AS n FROM sponsor_fellow_cap_audit_events")
+        .get()?.n,
+    ).toBe(loweringCommitted ? 2 : 1);
+    expect(
+      sqlite
+        .prepare<{ n: number }, [string]>(
+          "SELECT COUNT(*) AS n FROM sponsor_fellow_cap_audit_events WHERE reason = ?",
+        )
+        .get("lowering must not overrun active Fellows")?.n,
+    ).toBe(loweringCommitted ? 1 : 0);
+    expect(
+      sqlite
+        .prepare<{ n: number }, [string]>(
+          "SELECT COUNT(*) AS n FROM enrollment_idempotency WHERE idempotency_key = ?",
+        )
+        .get("operator-cap-lower-activation-lower")?.n,
+    ).toBe(loweringCommitted ? 1 : 0);
+    expect(
+      sqlite
+        .prepare<{ n: number }, [string]>(
+          "SELECT COUNT(*) AS n FROM enrollment_idempotency WHERE idempotency_key = ?",
+        )
+        .get("operator-cap-lower-activation-resume")?.n,
+    ).toBe(loweringCommitted ? 0 : 1);
   });
 
   test("audit history uses bounded descending sequence keysets across same-time inserts", async () => {

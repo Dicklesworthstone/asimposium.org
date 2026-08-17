@@ -32,6 +32,14 @@ import { EnrollmentService } from "../../src/enrollment/service.ts";
  */
 
 const LOOPBACK = "http://127.0.0.1:8787";
+const OPERATOR_AUTH_UNAVAILABLE_FIXTURE = new URL(
+  "../../../../packages/contracts/test/fixtures/valid/problem-operator-auth-unavailable.json",
+  import.meta.url,
+);
+
+async function fixture(url: URL): Promise<unknown> {
+  return JSON.parse(await Bun.file(url).text()) as unknown;
+}
 
 /**
  * `HeadersInit` is a DOM lib type and the Worker tsconfig has no DOM. Derive
@@ -598,7 +606,7 @@ describe("operator Fellow-cap ingress is separately authenticated and allowliste
       ctx,
     );
     expect(response.status).toBe(503);
-    expect(await response.json()).toMatchObject({ code: "OPERATOR_AUTH_UNAVAILABLE" });
+    expect(await response.json()).toEqual(await fixture(OPERATOR_AUTH_UNAVAILABLE_FIXTURE));
     expect(
       sqlite
         .prepare<{ n: number }, []>("SELECT COUNT(*) AS n FROM sponsor_fellow_cap_audit_events")

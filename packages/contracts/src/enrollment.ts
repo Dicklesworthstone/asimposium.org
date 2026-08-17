@@ -999,7 +999,11 @@ export const OperatorFellowCapSignerKidSchema = z
  * has no ECMAScript-whitespace endpoint. SQLite enforces the identical
  * immutable-audit rule without relying on a lossy trim transform.
  */
-const OPERATOR_FELLOW_CAP_REASON_PATTERN = /^(?=\S)(?:[\s\S]){9,999}\S$/u;
+// In Unicode mode the surrogate class below matches only *lone* UTF-16
+// surrogates; a valid astral pair is one scalar and does not match it. Keep
+// this in the emitted pattern so JSON Schema rejects an intent D1 cannot bind
+// without replacement before it reaches its immutable receipt.
+const OPERATOR_FELLOW_CAP_REASON_PATTERN = /^(?![\s\S]*[\uD800-\uDFFF])(?=\S)(?:[\s\S]){9,999}\S$/u;
 
 /**
  * Operator-only per-sponsor capacity command. The reason is durable audit
