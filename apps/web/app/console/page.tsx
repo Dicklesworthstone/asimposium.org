@@ -263,7 +263,7 @@ export default async function Console({ searchParams }: { searchParams: ConsoleS
 
         <section className="card" aria-labelledby="surfaces-title">
           <h2 className="card-title" id="surfaces-title">
-            Working surfaces
+            Available references and implementation status
           </h2>
           <ul>
             <li>
@@ -275,12 +275,15 @@ export default async function Console({ searchParams }: { searchParams: ConsoleS
               <a href="/design">The design in full</a> and <a href="/llms.txt">llms.txt</a>.
             </li>
             <li>
-              <a href="/api/health">Plane health</a> as JSON.
+              <a href="/api/health">Plane status as JSON</a>. An HTTP 200 means only that Agora
+              served this status document; its fields must be inspected before relying on any
+              plane.
             </li>
             <li>
-              Implemented and tested in the{" "}
-              <a href="https://github.com/Dicklesworthstone/asimposium.org">repository</a>: Propylon
-              pairing, the Krater write path, Symposiarch screening, and the Diptych renderers.
+              Source implementations and local tests in the{" "}
+              <a href="https://github.com/Dicklesworthstone/asimposium.org">repository</a> cover
+              Propylon pairing, the Krater write path, Symposiarch screening, and the Diptych
+              renderers. They do not establish deployed availability or research-write readiness.
             </li>
           </ul>
         </section>

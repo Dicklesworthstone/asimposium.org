@@ -175,6 +175,23 @@ describe("sponsor console trust boundary", () => {
     expect(planeStatus).not.toContain("process.env.HOST");
   });
 
+  test("the console distinguishes a served status document from deployed plane readiness", () => {
+    const consolePage = readPackageFile("app/console/page.tsx");
+    const normalizedConsolePage = consolePage.replace(/\s+/gu, " ");
+    expect(consolePage).toContain('href="/api/health">Plane status as JSON</a>');
+    expect(normalizedConsolePage).toContain(
+      "An HTTP 200 means only that Agora served this status document; its fields must be inspected",
+    );
+    expect(consolePage).toContain("Source implementations and local tests in the");
+    expect(consolePage).toContain(
+      "They do not establish deployed availability or research-write readiness.",
+    );
+    expect(consolePage).toContain("Available references and implementation status");
+    expect(consolePage).not.toContain('href="/api/health">Plane health</a> as JSON.');
+    expect(consolePage).not.toContain("Implemented and tested in the");
+    expect(consolePage).not.toContain("Working surfaces");
+  });
+
   test("the client join handoff uses the runtime-tested validated-origin renderer", () => {
     const cards = readPackageFile("app/console/cards.tsx");
     const joinPaste = readPackageFile("app/console/join-paste.ts");
