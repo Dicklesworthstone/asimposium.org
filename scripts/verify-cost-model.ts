@@ -147,6 +147,25 @@ export interface FableBurstInput {
   readonly occurrences_per_day: number;
 }
 
+/**
+ * What §10.1's 1,000-Fellow sizing line does and does not account for.
+ *
+ * The line is a pack-read figure. Every other request class the same population
+ * would generate is absent from it, so the ~45M/mo row cannot be decomposed into
+ * "scenario + leftover". Naming the omissions is what keeps that from looking
+ * like an oversight instead of the reason a headroom number is withheld.
+ */
+export const SIZING_LINE_ENUMERATED_REQUEST_CLASSES: readonly string[] = ["pack_reads"];
+
+export const SIZING_LINE_UNENUMERATED_REQUEST_CLASSES: readonly string[] = [
+  "workshop_pushes",
+  "promotions",
+  "cursor_polls",
+  "session_opens_and_closes",
+  "promotion_validation_reads",
+  "public_face_reads",
+];
+
 export interface FableWorkedExampleInput {
   readonly problems: number;
   readonly working_fellows: number;
@@ -156,6 +175,23 @@ export interface FableWorkedExampleInput {
   readonly promotions_per_fellow_day: number;
   readonly lurkers: number;
   readonly cursor_poll_seconds: number;
+  /**
+   * The rate §15 prints beside its own cadence. An input, not a constant: a
+   * caller checking a different scenario must be able to state that scenario's
+   * printed rate, and a hard-coded 100 would silently compare every workload
+   * against the default's prose.
+   */
+  readonly fable_stated_cursor_requests_per_second: number;
+  /**
+   * The ROUNDED figures §15 displays, kept separately from the exact arithmetic
+   * they approximate. The bead adds these three to reach 29,800 and calls that
+   * the base load; the exact components sum to 29,600. Declaring the displayed
+   * values as inputs is what lets the verifier state that difference instead of
+   * silently preferring one of the two numbers.
+   */
+  readonly fable_displayed_pack_reads_per_day: number;
+  readonly fable_displayed_workshop_pushes_per_day: number;
+  readonly fable_displayed_promotions_per_day: number;
   /**
    * Omitted until an operator accepts a burst shape. Absent is a reported state,
    * never a default: a peak with no duration reconciles with any monthly total.
@@ -169,6 +205,15 @@ export interface FableWorkedExampleInput {
   readonly sizing_line_fellows: number;
   readonly sizing_line_active_seconds_per_fellow_day: number;
   readonly fable_table_requests_per_month: number;
+  /**
+   * Which request classes the sizing line accounts for, and which it omits.
+   *
+   * Inputs rather than constants so an operator who later supplies a complete
+   * scenario can clear the storm-room gap by declaring the enumeration, instead
+   * of the verifier deciding on their behalf that it has been closed.
+   */
+  readonly sizing_line_enumerated_request_classes: readonly string[];
+  readonly sizing_line_unenumerated_request_classes: readonly string[];
 }
 
 /** The implicit four active hours are explicit so Fable's approximations reproduce exactly. */
@@ -181,6 +226,13 @@ export const FABLE_WORKED_EXAMPLE: FableWorkedExampleInput = {
   promotions_per_fellow_day: 10,
   lurkers: 10_000,
   cursor_poll_seconds: 10,
+  fable_stated_cursor_requests_per_second: 100,
+  // §15 prints these to one significant figure; 19,200 and 9,600 are what its
+  // own cadences produce. Both are recorded so neither can be quietly adopted
+  // as the other.
+  fable_displayed_pack_reads_per_day: 19_000,
+  fable_displayed_workshop_pushes_per_day: 10_000,
+  fable_displayed_promotions_per_day: 800,
   // No `burst`: Fable states no duration or frequency, and inventing one here
   // would manufacture the reconciliation this bead exists to withhold.
   sizing_line_fellows: 1_000,
@@ -189,6 +241,8 @@ export const FABLE_WORKED_EXAMPLE: FableWorkedExampleInput = {
   // is what makes the mismatch with §15's four-hour example computable.
   sizing_line_active_seconds_per_fellow_day: 86_400,
   fable_table_requests_per_month: 45_000_000,
+  sizing_line_enumerated_request_classes: SIZING_LINE_ENUMERATED_REQUEST_CLASSES,
+  sizing_line_unenumerated_request_classes: SIZING_LINE_UNENUMERATED_REQUEST_CLASSES,
 };
 
 export interface CostModelAssumption {
@@ -225,23 +279,53 @@ export interface FableWorkloadArithmetic {
   /** Sustained-at-peak totals, stated so the 45M row can be compared against them. */
   readonly cursor_requests_per_30_days_at_computed_peak: number;
   readonly cursor_requests_per_30_days_at_stated_rate: number;
-  /** The §15 worked example's own base load, at its inferred four active hours. */
+  /**
+   * The §15 worked example's own base load: 19,200 + 9,600 + 800 = 29,600,
+   * computed from the declared cadences. This is the exact figure.
+   */
   readonly base_load_per_day: number;
+  /**
+   * The sum of the ROUNDED values §15 displays: 19,000 + 10,000 + 800 = 29,800.
+   * Reported so the bead's 29,800 is visible as what it is — a sum of rounded
+   * display figures — and never mistaken for the exact base load above.
+   */
+  readonly fable_displayed_base_load_per_day: number;
+  /** The individual rounded values §15 prints, kept beside their exact counterparts. */
+  readonly fable_displayed_pack_reads_per_day: number;
+  readonly fable_displayed_workshop_pushes_per_day: number;
+  readonly fable_displayed_promotions_per_day: number;
   /** What the §15 table figure implies per day. */
   readonly fable_table_requests_per_day: number;
   /**
    * The §10.1 line the table figure comes from, at its own implied duty cycle,
    * and the same population at §15's four-hour one. These differ by ~6x, which
    * is the whole of the duty-cycle discrepancy.
+   *
+   * Both count PACK READS ONLY. The sizing line names no other request class,
+   * which is precisely why nothing here is subtracted from the table row.
    */
   readonly sizing_line_requests_per_day: number;
   readonly sizing_line_requests_per_day_at_worked_example_duty_cycle: number;
-  /** What is left of the table figure once the sizing line it names is paid for. */
-  readonly storm_room_per_day: number;
-  readonly storm_seconds_per_day_at_computed_peak: number;
+  /**
+   * The request classes the §10.1 sizing line actually enumerates, and those it
+   * does not. Recorded because the missing classes are the reason no storm room,
+   * burst duration, or headroom figure is published: a remainder computed from
+   * an incomplete enumeration is not a measurement of what is left over.
+   */
+  readonly sizing_line_enumerated_request_classes: readonly string[];
+  readonly sizing_line_unenumerated_request_classes: readonly string[];
+  /**
+   * The duty cycles the two scenarios imply, carried here so discrepancy
+   * detection reads this workload rather than the module's default constant.
+   */
+  readonly worked_example_active_seconds_per_fellow_day: number;
+  readonly sizing_line_active_seconds_per_fellow_day: number;
   /**
    * Present only when an operator has accepted a burst shape. `undefined` means
    * the reconciliation is still open — it never means zero.
+   *
+   * Even when present this is only the burst's own volume; it is NOT compared
+   * against any headroom, because no accepted headroom figure exists.
    */
   readonly declared_burst_requests_per_day?: number;
 }
@@ -336,11 +420,15 @@ export interface CostVerificationResult {
 }
 
 /**
- * Three independent defects, deliberately not merged into one.
+ * Six independent findings, deliberately not merged.
  *
- * Correcting the 10x cursor slip does not reconcile the table, and correcting
- * the table does not settle which duty cycle the plan means. A single code
- * would let one fix look like three.
+ * Correcting the 10x cursor slip does not reconcile the table; correcting the
+ * table does not settle which duty cycle the plan means; settling the duty
+ * cycle does not supply a burst shape; and none of those makes the ~45M row
+ * decomposable into storm room. The rounded-display mismatch is separate again:
+ * it is a labelling defect, not an arithmetic one. A single code would let one
+ * fix look like six, and each of these is cleared by a different input — which
+ * the independence test asserts one at a time.
  */
 export type SourceDiscrepancy =
   | {
@@ -361,7 +449,6 @@ export type SourceDiscrepancy =
       readonly table_requests_per_day: number;
       readonly sizing_line_requests_per_day: number;
       readonly worked_example_base_load_per_day: number;
-      readonly storm_room_per_day: number;
       readonly unit: "requests / day";
     }
   | {
@@ -386,8 +473,58 @@ export type SourceDiscrepancy =
       readonly code: "FABLE_BURST_SHAPE_UNDECLARED";
       readonly computed_peak_requests_per_second: number;
       readonly required_operator_inputs: readonly ["seconds_per_occurrence", "occurrences_per_day"];
-      readonly storm_room_per_day: number;
-      readonly storm_seconds_per_day_at_computed_peak: number;
+    }
+  | {
+      /**
+       * Why no storm room, burst duration, or headroom number is published.
+       *
+       * The ~45M/mo row is §10.1's 1,000-Fellow sizing line, and that line
+       * enumerates PACK READS ONLY — it states nothing about workshop pushes,
+       * promotions, cursor polls, session opens, or promotion validation for
+       * that population. Subtracting it from the row therefore does not yield
+       * "room for the storm"; it yields the row minus one unnamed fraction of
+       * its own scenario.
+       *
+       * Both candidate figures are refused for that reason: 60,000/day (row
+       * minus the pack-read line) and 1,470,200/day (row minus the §15 worked
+       * example, a different and smaller scenario). Each is arithmetically
+       * derivable and neither is a headroom, so the verifier reports the
+       * decision as outstanding instead of picking one.
+       */
+      readonly code: "FABLE_STORM_ROOM_UNRESOLVED";
+      readonly table_requests_per_day: number;
+      readonly sizing_line_requests_per_day: number;
+      readonly enumerated_request_classes: readonly string[];
+      readonly unenumerated_request_classes: readonly string[];
+      readonly reason: string;
+      readonly required_operator_inputs: readonly [
+        "accepted_scenario_with_complete_request_class_enumeration",
+      ];
+    }
+  | {
+      /**
+       * §15 displays rounded figures; the bead sums those and reports 29,800.
+       * The exact cadences give 29,600. Neither number is wrong for what it is,
+       * and the 200/day gap is small — but it is the difference between a sum of
+       * display values and a computed base load, and the acceptance criterion
+       * currently encodes the former as if it were the latter.
+       */
+      readonly code: "FABLE_ROUNDED_DISPLAY_BASE_LOAD_MISMATCH";
+      readonly exact_base_load_per_day: number;
+      readonly rounded_display_sum_per_day: number;
+      readonly difference_per_day: number;
+      readonly exact_components: {
+        readonly pack_reads_per_day: number;
+        readonly workshop_pushes_per_day: number;
+        readonly promotions_per_day: number;
+      };
+      readonly rounded_display_components: {
+        readonly pack_reads_per_day: number;
+        readonly workshop_pushes_per_day: number;
+        readonly promotions_per_day: number;
+      };
+      readonly authority: "exact_components";
+      readonly unit: "requests / day";
     };
 
 export class CostVerifierError extends Error {
@@ -431,6 +568,21 @@ function checkedProduct(left: number, right: number, field: string): number {
     );
   }
   return product;
+}
+
+/**
+ * Request-class names are compared and reported, so a malformed list must fail
+ * loudly rather than reach a discrepancy record as `undefined` entries that
+ * would silently shorten the "what is missing" census.
+ */
+function requireRequestClasses(value: unknown, field: string): readonly string[] {
+  if (!Array.isArray(value) || value.some((entry) => typeof entry !== "string" || entry === "")) {
+    throw new CostVerifierError(
+      "WORKLOAD_INPUT_INVALID",
+      `${field} must be an array of non-empty strings.`,
+    );
+  }
+  return [...(value as readonly string[])];
 }
 
 function exactQuotient(numerator: number, denominator: number, field: string): number {
@@ -489,6 +641,22 @@ export function calculateFableWorkload(input: FableWorkedExampleInput): FableWor
   );
   const lurkers = requireNonNegativeInteger(input.lurkers, "lurkers");
   const cursorPoll = requirePositiveInteger(input.cursor_poll_seconds, "cursor_poll_seconds");
+  const statedCursorRate = requireNonNegativeInteger(
+    input.fable_stated_cursor_requests_per_second,
+    "fable_stated_cursor_requests_per_second",
+  );
+  const displayedPackReads = requireNonNegativeInteger(
+    input.fable_displayed_pack_reads_per_day,
+    "fable_displayed_pack_reads_per_day",
+  );
+  const displayedWorkshopPushes = requireNonNegativeInteger(
+    input.fable_displayed_workshop_pushes_per_day,
+    "fable_displayed_workshop_pushes_per_day",
+  );
+  const displayedPromotions = requireNonNegativeInteger(
+    input.fable_displayed_promotions_per_day,
+    "fable_displayed_promotions_per_day",
+  );
 
   const sizingFellows = requirePositiveInteger(input.sizing_line_fellows, "sizing_line_fellows");
   const sizingActiveSeconds = requirePositiveInteger(
@@ -525,15 +693,10 @@ export function calculateFableWorkload(input: FableWorkedExampleInput): FableWor
     packCadence,
     "sizing_line_requests_per_day",
   );
-  // What the table figure leaves once the sizing line it actually names is paid
-  // for. Negative would mean the row cannot even cover its own scenario.
-  const stormRoomPerDay = tablePerDay - sizingPerDay;
-  if (stormRoomPerDay < 0) {
-    throw new CostVerifierError(
-      "WORKLOAD_INPUT_INVALID",
-      "The stated table figure is smaller than the sizing line it is derived from.",
-    );
-  }
+  // No storm-room subtraction is performed. `tablePerDay - sizingPerDay` is
+  // arithmetically available and deliberately not taken: the sizing line
+  // enumerates one request class, so the remainder is not headroom. See
+  // FABLE_STORM_ROOM_UNRESOLVED.
   return {
     problems,
     pack_reads_per_day: exactQuotient(activeFellowSeconds, packCadence, "pack_reads_per_day"),
@@ -548,18 +711,23 @@ export function calculateFableWorkload(input: FableWorkedExampleInput): FableWor
       "working_fellows × promotions_per_fellow_day",
     ),
     cursor_requests_per_second: cursorPerSecond,
-    fable_stated_cursor_requests_per_second: 100,
+    fable_stated_cursor_requests_per_second: statedCursorRate,
     cursor_requests_per_30_days_at_computed_peak: checkedProduct(
       checkedProduct(cursorPerSecond, SECONDS_PER_DAY, "peak × seconds/day"),
       DAYS_PER_MONTH,
       "peak × seconds/day × days",
     ),
     cursor_requests_per_30_days_at_stated_rate: checkedProduct(
-      checkedProduct(100, SECONDS_PER_DAY, "stated × seconds/day"),
+      checkedProduct(statedCursorRate, SECONDS_PER_DAY, "stated × seconds/day"),
       DAYS_PER_MONTH,
       "stated × seconds/day × days",
     ),
     base_load_per_day: baseLoadPerDay,
+    fable_displayed_base_load_per_day:
+      displayedPackReads + displayedWorkshopPushes + displayedPromotions,
+    fable_displayed_pack_reads_per_day: displayedPackReads,
+    fable_displayed_workshop_pushes_per_day: displayedWorkshopPushes,
+    fable_displayed_promotions_per_day: displayedPromotions,
     fable_table_requests_per_day: tablePerDay,
     sizing_line_requests_per_day: sizingPerDay,
     sizing_line_requests_per_day_at_worked_example_duty_cycle: exactQuotient(
@@ -567,13 +735,16 @@ export function calculateFableWorkload(input: FableWorkedExampleInput): FableWor
       packCadence,
       "sizing_line_requests_per_day_at_worked_example_duty_cycle",
     ),
-    storm_room_per_day: stormRoomPerDay,
-    // Integer seconds only; a rounded headline would hide how small this is.
-    storm_seconds_per_day_at_computed_peak: exactQuotient(
-      stormRoomPerDay,
-      cursorPerSecond,
-      "storm_seconds_per_day_at_computed_peak",
+    sizing_line_enumerated_request_classes: requireRequestClasses(
+      input.sizing_line_enumerated_request_classes,
+      "sizing_line_enumerated_request_classes",
     ),
+    sizing_line_unenumerated_request_classes: requireRequestClasses(
+      input.sizing_line_unenumerated_request_classes,
+      "sizing_line_unenumerated_request_classes",
+    ),
+    worked_example_active_seconds_per_fellow_day: activeSeconds,
+    sizing_line_active_seconds_per_fellow_day: sizingActiveSeconds,
     ...(burst === undefined
       ? {}
       : {
@@ -604,18 +775,19 @@ function sourceDiscrepancies(workload: FableWorkloadArithmetic): readonly Source
       table_requests_per_day: workload.fable_table_requests_per_day,
       sizing_line_requests_per_day: workload.sizing_line_requests_per_day,
       worked_example_base_load_per_day: workload.base_load_per_day,
-      storm_room_per_day: workload.storm_room_per_day,
       unit: "requests / day",
     });
   }
+  // Read from the workload, never from the module default: a caller checking a
+  // non-default scenario must be told about THAT scenario's duty cycles.
   if (
     workload.sizing_line_requests_per_day !==
     workload.sizing_line_requests_per_day_at_worked_example_duty_cycle
   ) {
     found.push({
       code: "FABLE_DUTY_CYCLE_MISMATCH",
-      worked_example_active_seconds: FABLE_WORKED_EXAMPLE.active_seconds_per_fellow_day,
-      sizing_line_active_seconds: FABLE_WORKED_EXAMPLE.sizing_line_active_seconds_per_fellow_day,
+      worked_example_active_seconds: workload.worked_example_active_seconds_per_fellow_day,
+      sizing_line_active_seconds: workload.sizing_line_active_seconds_per_fellow_day,
       sizing_line_requests_per_day: workload.sizing_line_requests_per_day,
       sizing_line_requests_per_day_at_worked_example_duty_cycle:
         workload.sizing_line_requests_per_day_at_worked_example_duty_cycle,
@@ -627,14 +799,47 @@ function sourceDiscrepancies(workload: FableWorkloadArithmetic): readonly Source
       code: "FABLE_BURST_SHAPE_UNDECLARED",
       computed_peak_requests_per_second: workload.cursor_requests_per_second,
       required_operator_inputs: ["seconds_per_occurrence", "occurrences_per_day"],
-      storm_room_per_day: workload.storm_room_per_day,
-      storm_seconds_per_day_at_computed_peak: workload.storm_seconds_per_day_at_computed_peak,
+    });
+  }
+  // Raised whenever the sizing line leaves request classes unaccounted for. It
+  // does not depend on the burst shape: even a fully declared burst would not
+  // make the row decomposable, so declaring one must not clear this.
+  if (workload.sizing_line_unenumerated_request_classes.length > 0) {
+    found.push({
+      code: "FABLE_STORM_ROOM_UNRESOLVED",
+      table_requests_per_day: workload.fable_table_requests_per_day,
+      sizing_line_requests_per_day: workload.sizing_line_requests_per_day,
+      enumerated_request_classes: workload.sizing_line_enumerated_request_classes,
+      unenumerated_request_classes: workload.sizing_line_unenumerated_request_classes,
+      reason:
+        "The ~45M/mo row is a 1,000-Fellow sizing line that enumerates pack reads only, so subtracting it from the row does not yield storm room. No storm-room, burst-duration, or headroom figure is established until an operator supplies an internally complete scenario.",
+      required_operator_inputs: ["accepted_scenario_with_complete_request_class_enumeration"],
+    });
+  }
+  if (workload.fable_displayed_base_load_per_day !== workload.base_load_per_day) {
+    found.push({
+      code: "FABLE_ROUNDED_DISPLAY_BASE_LOAD_MISMATCH",
+      exact_base_load_per_day: workload.base_load_per_day,
+      rounded_display_sum_per_day: workload.fable_displayed_base_load_per_day,
+      difference_per_day: workload.fable_displayed_base_load_per_day - workload.base_load_per_day,
+      exact_components: {
+        pack_reads_per_day: workload.pack_reads_per_day,
+        workshop_pushes_per_day: workload.workshop_pushes_per_day,
+        promotions_per_day: workload.promotions_per_day,
+      },
+      rounded_display_components: {
+        pack_reads_per_day: workload.fable_displayed_pack_reads_per_day,
+        workshop_pushes_per_day: workload.fable_displayed_workshop_pushes_per_day,
+        promotions_per_day: workload.fable_displayed_promotions_per_day,
+      },
+      authority: "exact_components",
+      unit: "requests / day",
     });
   }
   return found;
 }
 
-/** Exposed so the independence of the three arithmetic defects is testable. */
+/** Exposed so each finding's independence can be cleared and asserted separately. */
 export function costModelSourceDiscrepancies(
   workload: FableWorkloadArithmetic,
 ): readonly SourceDiscrepancy[] {
@@ -713,6 +918,12 @@ const COST_MODEL_UNKNOWNS = [
   // One bead-mandated URL no longer resolves to primary text; see
   // COST_MODEL_PINNED_SOURCES.
   "mandated_source_primary_text_unverified",
+  // Withheld, not zero. The ~45M/mo row enumerates one request class, so no
+  // remainder computed from it is a headroom; and with no accepted burst
+  // duration or frequency, no sustainable-duration figure exists either.
+  "storm_room_per_day",
+  "burst_duration_and_frequency",
+  "monthly_request_headroom",
   "complete_write_row_totals",
   "pack_delta_and_cursor_rows",
   "worker_cpu_ms",
@@ -1178,8 +1389,62 @@ export function runCostVerifierCli(
   return buildCostVerifierDiagnostic(result);
 }
 
+/**
+ * The transport boundary between this process and whoever captures it.
+ *
+ * `process.stdout.write` on a pipe is buffered and may be flushed after the
+ * runtime decides the event loop is empty, so a process that sets an exit code
+ * and returns can die with a partial line still queued. A reader then sees
+ * exit 78 next to unparseable bytes and reports a verifier defect that is
+ * really a lost write.
+ *
+ * This awaits the stdout completion callback before returning, so the process
+ * cannot exit while bytes are still queued. The callback is itself bounded: a
+ * reader that never drains stdout must produce a typed write failure rather
+ * than park or spin this CLI forever.
+ */
+export type DiagnosticLineWriter = (line: string, callback: (error?: Error | null) => void) => void;
+
+const stdoutDiagnosticLineWriter: DiagnosticLineWriter = (line, callback) => {
+  process.stdout.write(line, callback);
+};
+
+export async function writeDiagnosticLine(
+  line: string,
+  timeoutMs = 2_000,
+  write: DiagnosticLineWriter = stdoutDiagnosticLineWriter,
+): Promise<number> {
+  const bytes = Buffer.byteLength(line, "utf8");
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  try {
+    await Promise.race([
+      new Promise<void>((resolve, reject) => {
+        write(line, (error) => {
+          if (error === null || error === undefined) resolve();
+          else reject(error);
+        });
+      }),
+      new Promise<never>((_, reject) => {
+        timer = setTimeout(
+          () =>
+            reject(
+              new CostVerifierError(
+                "COST_MODEL_DIAGNOSTIC_WRITE_FAILED",
+                "diagnostic line did not drain within its fixed deadline.",
+              ),
+            ),
+          timeoutMs,
+        );
+      }),
+    ]);
+  } finally {
+    if (timer !== undefined) clearTimeout(timer);
+  }
+  return bytes;
+}
+
 if (import.meta.main) {
   const diagnostic = runCostVerifierCli();
-  process.stdout.write(`${JSON.stringify(diagnostic)}\n`);
+  await writeDiagnosticLine(`${JSON.stringify(diagnostic)}\n`);
   process.exitCode = 78;
 }
