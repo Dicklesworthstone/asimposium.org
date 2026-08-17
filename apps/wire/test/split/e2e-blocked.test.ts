@@ -42,6 +42,10 @@ const EXPECTED_LOCAL_BINDING_ASSERTIONS: string[] = [
   "S4_contextual_aggregation_reads_all_four_D1_authorized_public_fields_and_holds_without_public_effect",
   "S4_direct_content_reject_is_not_downgraded_by_contextual_screening",
   "S4_extract_history_field_reaches_contextual_provider_without_public_effect",
+  "S4_forged_detached_action_projection_never_reaches_the_public_face_and_reflects_nothing",
+  "S4_forged_hard_category_published_clean_never_reaches_the_public_face_and_reflects_nothing",
+  "S4_forged_quarantine_published_never_reaches_the_public_face_and_reflects_nothing",
+  "S4_forged_status_code_from_another_outcome_never_reaches_the_public_face_and_reflects_nothing",
   "S4_frontier_receipts_revalidate_same_fellow_history_but_do_not_spuriously_invalidate_another_fellow",
   "S4_negative_content_context_dedup_is_expiring_receipted_and_never_leaks_into_public_projection",
   "S4_oversized_context_fails_closed_without_response_R2_event_or_export_canary_leakage",
@@ -54,14 +58,17 @@ const EXPECTED_LOCAL_BINDING_ASSERTIONS: string[] = [
   "S4_replay_map_expires_after_24_hours_without_erasing_immutable_decision_history",
   "S4_statement_history_field_reaches_contextual_provider_without_public_effect",
   "S4_title_history_field_reaches_contextual_provider_without_public_effect",
-  "all_eleven_async_route_entry_faults_return_one_exact_nonreflective_binding_failure",
+  "all_twelve_async_route_entry_faults_return_one_exact_nonreflective_binding_failure",
   "anonymous_or_stale_private_authority_is_not_found_without_a_private_cache_entry",
+  "async_route_poison_roster_is_the_exact_ordered_unique_descriptor_signature_list",
   "authenticated_cross_sponsor_private_authority_is_indistinguishable_from_anonymous",
   "caller_cannot_choose_a_claim_identifier",
   "caller_cannot_choose_a_workshop_identifier",
   "concurrent_promotions_allocate_server_claim_ids_and_D1_RETURNING_public_sequences_without_burns",
   "concurrent_workshop_pushes_use_D1_RETURNING_sequences_without_duplicates_or_burns",
   "duplicate_and_P2_P4_refusals_leave_the_public_projection_at_its_original_cursor",
+  "forged_receipt_route_poison_gate_precedes_both_fixture_authority_and_body_read",
+  "forged_receipt_route_poison_outranks_the_body_read_under_valid_fixture_authority",
   "large_workshop_body_spills_to_R2_and_gets_a_server_owned_workshop_id",
   "local_workerd_reports_D1_and_R2_bindings_with_a_public_readiness_nonce_but_never_authority",
   "missing_private_id_cross_sponsor_authority_is_indistinguishable_from_anonymous",
@@ -71,6 +78,7 @@ const EXPECTED_LOCAL_BINDING_ASSERTIONS: string[] = [
   "one_promotion_atomically_allocates_the_first_public_claim_and_binds_its_public_artifact",
   "only_the_explicitly_published_public_artifact_is_readable_after_complete_D1_binding",
   "owner_private_read_crosses_R2_and_revalidates_the_D1_binding",
+  "poisoned_results_are_produced_from_that_roster_one_result_per_descriptor",
   "post_promotion_face_validators_are_representation_specific",
   "post_promotion_html-fragment_is_a_private-free_rendered_face_with_a_representation_etag",
   "post_promotion_html-fragment_matching_validator_returns_a_private-free_304",
@@ -2371,7 +2379,7 @@ test("the S-3 harness binds readiness to its child and excludes the deployed ent
   const publicShapePoisonAssertionSource = sourceRegion(
     checker,
     '"post_promotion_public_projection_search_and_export_apply_shape_guards",',
-    '  check(\n    "all_eleven_async_route_entry_faults_return_one_exact_nonreflective_binding_failure",',
+    '  check(\n    "all_twelve_async_route_entry_faults_return_one_exact_nonreflective_binding_failure",',
   );
   const readinessLoopSource = sourceRegion(script, "ready=0\n", `if [[ \${ready} -ne 1 ]]`);
   const healthHandlerSource = sourceRegion(
@@ -2528,6 +2536,88 @@ test("the S-3 harness binds readiness to its child and excludes the deployed ent
     "readiness_nonce_or_nonempty_route_binding_poison_headers_are_byte_for_byte_inert_on_every_async_route",
   );
   expect(checker).toContain("routeBindingPoisonSnapshots({})");
+  // The poison sweep's coverage is a claim about issued requests, so it is
+  // guarded here as source structure rather than as behaviour. Every id appears
+  // exactly twice — once in the executed descriptor, once in the expected
+  // signature list — so duplicating a descriptor, relabelling a duplicate, or
+  // dropping one fails this guard without needing any route to answer
+  // differently from another.
+  for (const probeId of [
+    "workshops.push",
+    "promote",
+    "private.artifact",
+    "recovery.audit",
+    "public.artifact",
+    "public.search",
+    "public.screening-actions",
+    "s4.diagnostics",
+    "s4.fixtures.oversized-history",
+    "s4.fixtures.forged-receipt",
+    "public.export",
+    "public.face",
+  ]) {
+    // Anchored on the backtick that opens the signature template, so this
+    // counts signature entries rather than any prose that mentions the id.
+    expect(occurrences(checker, `\`${probeId} `)).toBe(1);
+    expect(occurrences(checker, `id: "${probeId}"`)).toBe(1);
+  }
+  // The executed path and method of the twelfth route, pinned literally: a
+  // descriptor that keeps the id but points somewhere else fails here, and the
+  // runtime signature assertion fails in the same direction.
+  expect(checker).toContain('id: "s4.fixtures.forged-receipt",');
+  // biome-ignore lint/suspicious/noTemplateCurlyInString: asserting on checker source text that literally contains this template.
+  expect(checker).toContain("path: `${origin}/__s3/s4/fixtures/forged-receipt/${mainProblemId}`,");
+  expect(
+    occurrences(
+      checker,
+      // biome-ignore lint/suspicious/noTemplateCurlyInString: same — this is the checker's literal source, not an interpolation.
+      "`s4.fixtures.forged-receipt POST ${origin}/__s3/s4/fixtures/forged-receipt/${mainProblemId} {}`",
+    ),
+  ).toBe(1);
+  expect(checker).toContain("const routeBindingSignatures = routeBindingProbes.map(");
+  expect(checker).toContain("new Set(routeBindingProbes.map((probe) => probe.path)).size");
+  // The roster guards above constrain descriptors only. They stay green if the
+  // runner ignores them — hard-coding one request for all twelve descriptors
+  // leaves signatures exact, poison universally 500, baselines inert, and the
+  // gate-order pairs intact. So the consumption itself is pinned here: the
+  // signature must be built from id/method/path/jsonBody, the runner must issue
+  // path/method/jsonBody, and the sweep must map the roster through that runner.
+  // Assertions are ordered within one compact region, so a mutation that drops
+  // or reorders a consumption breaks this guard rather than sliding past it.
+  const routeBindingRunnerSource = sourceRegion(
+    checker,
+    "  /** Derived from the fields the runner actually executes, never from a label alone. */",
+    "  const [unpoisonedPublic,",
+  );
+  const routeBindingConsumptions = [
+    // signature consumes all four descriptor fields
+    // biome-ignore lint/suspicious/noTemplateCurlyInString: checker source text, not an interpolation.
+    '`${probe.id} ${probe.method} ${probe.path}${probe.jsonBody === undefined ? "" : ` ${probe.jsonBody}`}`',
+    // runner consumes path, then method, then jsonBody twice (headers and body)
+    "await localFetch(probe.path, {",
+    "method: probe.method,",
+    "probe.jsonBody === undefined\n            ? headers",
+    "...(probe.jsonBody === undefined ? {} : { body: probe.jsonBody }),",
+    // the sweep executes the roster through that runner
+    "routeBindingProbes.map((probe) => runRouteBindingProbe(probe, headers))",
+  ];
+  let previousConsumptionIndex = -1;
+  for (const consumption of routeBindingConsumptions) {
+    expect(occurrences(routeBindingRunnerSource, consumption)).toBe(1);
+    const consumptionIndex = routeBindingRunnerSource.indexOf(consumption);
+    expect(consumptionIndex).toBeGreaterThan(previousConsumptionIndex);
+    previousConsumptionIndex = consumptionIndex;
+  }
+  // Gate order needs both pairs: the unauthorized/valid-body pair only outranks
+  // the authority check, so the authorized/malformed-body pair must exist too.
+  expect(checker).toContain('body: "{ not-json",');
+  expect(checker).toContain('s4FixtureHeaders("IK-forged-gate-order")');
+  expect(checker).toContain(
+    's4FixtureHeaders("IK-forged-gate-order-poisoned", routeBindingPoisonHeaders)',
+  );
+  expect(checker).toContain(
+    'authorizedMalformedBody.body.includes("LOCAL_S4_FORGED_PLANT_MALFORMED")',
+  );
   expect(checker).toContain("response.body === routeBindingBaseline[index]?.body");
   expect(checker).toContain("response.headers === routeBindingBaseline[index]?.headers");
   for (const dispatch of [
@@ -2540,12 +2630,13 @@ test("the S-3 harness binds readiness to its child and excludes the deployed ent
     "return await publicScreeningActions(request, env, screeningActionsMatch[1]);",
     "return await localS4Diagnostics(request, env, s4DiagnosticsMatch[1]);",
     "return await seedOversizedS4History(request, env, oversizedHistorySeedMatch[1]);",
+    "return await plantForgedLocalS4Receipt(request, env, forgedReceiptPlantMatch[1]);",
     "return await publicExport(request, env, exportMatch[1]);",
     "return await publicFace(request, env, publicMatch[1]);",
   ]) {
     expect(occurrences(fetchSource, dispatch)).toBe(1);
   }
-  expect(occurrences(fetchSource, "return await ")).toBe(11);
+  expect(occurrences(fetchSource, "return await ")).toBe(12);
   expect(worker).toContain("token-gated\n      // NOT_FOUND existence behavior");
   expect(worker).not.toContain('LOCAL_SPONSOR_ID = "local-sponsor"');
   expect(worker).not.toContain('RECOVERY_AUDIT_HEADER = "local-recovery-audit"');

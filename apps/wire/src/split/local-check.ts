@@ -740,69 +740,91 @@ async function main(): Promise<void> {
   const nonemptyRouteBindingPoisonHeaders = {
     "x-asimp-local-route-binding-poison": "nonempty",
   };
+  /**
+   * The async-route poison sweep, as data rather than as a list of closures.
+   *
+   * An earlier revision counted its entries and, when that proved too weak,
+   * compared responses at a fixed index. Both are unfalsifiable here: every
+   * poisoned route returns the *same* exact binding failure by design, and two
+   * unauthorized fixture routes return the same NOT_FOUND bytes, so duplicating
+   * one entry into another's slot leaves both comparisons green.
+   *
+   * Identity therefore has to come from the request, not the response. Each
+   * descriptor carries the exact method, path, and body that one generic runner
+   * executes, and the asserted signature is computed from those same fields. A
+   * descriptor cannot hide behind a stale label: changing the executed path
+   * changes the signature, and a duplicated descriptor collides on both its id
+   * and its path regardless of what either route answers.
+   */
+  interface RouteBindingProbe {
+    readonly id: string;
+    readonly method: "GET" | "POST";
+    readonly path: string;
+    /** Presence adds the JSON content type and sends this exact body. */
+    readonly jsonBody?: string;
+  }
+
+  const routeBindingProbes: readonly RouteBindingProbe[] = [
+    { id: "workshops.push", method: "POST", path: `${origin}/__s3/workshops`, jsonBody: "{}" },
+    { id: "promote", method: "POST", path: `${origin}/__s3/promote`, jsonBody: "{}" },
+    { id: "private.artifact", method: "GET", path: `${origin}/__s3/private/${workshopId}` },
+    {
+      id: "recovery.audit",
+      method: "GET",
+      path: `${origin}/__s3/recovery/sha256/${privateDigest}`,
+    },
+    { id: "public.artifact", method: "GET", path: `${origin}/sha256/${publicDigest}` },
+    { id: "public.search", method: "GET", path: `${origin}/__s3/public/${mainProblemId}/search` },
+    {
+      id: "public.screening-actions",
+      method: "GET",
+      path: `${origin}/__s3/public/${mainProblemId}/screening.json`,
+    },
+    { id: "s4.diagnostics", method: "GET", path: `${origin}/__s3/s4/diagnostics/${mainProblemId}` },
+    {
+      id: "s4.fixtures.oversized-history",
+      method: "POST",
+      path: `${origin}/__s3/s4/fixtures/oversized-history/${mainProblemId}`,
+    },
+    {
+      // The poison gate runs before fixture authority and before the body is
+      // read, so an empty object suffices: unpoisoned this stops at the
+      // authority gate and performs no forged-receipt write, poisoned it
+      // reaches neither. Pre-routing `ensureSchema` is outside that claim.
+      id: "s4.fixtures.forged-receipt",
+      method: "POST",
+      path: `${origin}/__s3/s4/fixtures/forged-receipt/${mainProblemId}`,
+      jsonBody: "{}",
+    },
+    {
+      id: "public.export",
+      method: "GET",
+      path: `${origin}/__s3/public/${mainProblemId}/export.jsonl`,
+    },
+    { id: "public.face", method: "GET", path: `${origin}/__s3/public/${mainProblemId}` },
+  ];
+
+  /** Derived from the fields the runner actually executes, never from a label alone. */
+  const routeBindingProbeSignature = (probe: RouteBindingProbe): string =>
+    `${probe.id} ${probe.method} ${probe.path}${probe.jsonBody === undefined ? "" : ` ${probe.jsonBody}`}`;
+
+  const runRouteBindingProbe = async (
+    probe: RouteBindingProbe,
+    headers: Readonly<Record<string, string>>,
+  ): Promise<Snapshot> =>
+    snapshot(
+      await localFetch(probe.path, {
+        method: probe.method,
+        headers:
+          probe.jsonBody === undefined
+            ? headers
+            : { "content-type": "application/json", ...headers },
+        ...(probe.jsonBody === undefined ? {} : { body: probe.jsonBody }),
+      }),
+    );
+
   const routeBindingPoisonSnapshots = async (headers: Readonly<Record<string, string>>) =>
-    Promise.all([
-      snapshot(
-        await localFetch(`${origin}/__s3/workshops`, {
-          method: "POST",
-          headers: { "content-type": "application/json", ...headers },
-          body: "{}",
-        }),
-      ),
-      snapshot(
-        await localFetch(`${origin}/__s3/promote`, {
-          method: "POST",
-          headers: { "content-type": "application/json", ...headers },
-          body: "{}",
-        }),
-      ),
-      snapshot(
-        await localFetch(`${origin}/__s3/private/${workshopId}`, {
-          headers,
-        }),
-      ),
-      snapshot(
-        await localFetch(`${origin}/__s3/recovery/sha256/${privateDigest}`, {
-          headers,
-        }),
-      ),
-      snapshot(
-        await localFetch(`${origin}/sha256/${publicDigest}`, {
-          headers,
-        }),
-      ),
-      snapshot(
-        await localFetch(`${origin}/__s3/public/${mainProblemId}/search`, {
-          headers,
-        }),
-      ),
-      snapshot(
-        await localFetch(`${origin}/__s3/public/${mainProblemId}/screening.json`, {
-          headers,
-        }),
-      ),
-      snapshot(
-        await localFetch(`${origin}/__s3/s4/diagnostics/${mainProblemId}`, {
-          headers,
-        }),
-      ),
-      snapshot(
-        await localFetch(`${origin}/__s3/s4/fixtures/oversized-history/${mainProblemId}`, {
-          method: "POST",
-          headers,
-        }),
-      ),
-      snapshot(
-        await localFetch(`${origin}/__s3/public/${mainProblemId}/export.jsonl`, {
-          headers,
-        }),
-      ),
-      snapshot(
-        await localFetch(`${origin}/__s3/public/${mainProblemId}`, {
-          headers,
-        }),
-      ),
-    ]);
+    Promise.all(routeBindingProbes.map((probe) => runRouteBindingProbe(probe, headers)));
   const [unpoisonedPublic, poisonedPublic, readinessNoncePoisonedPublic, nonemptyPoisonedPublic] =
     await Promise.all([
       poisonProbeSnapshots({}),
@@ -850,8 +872,8 @@ async function main(): Promise<void> {
     routeBindingPoisonSnapshots(nonemptyRouteBindingPoisonHeaders),
   ]);
   check(
-    "all_eleven_async_route_entry_faults_return_one_exact_nonreflective_binding_failure",
-    routeBindingPoisoned.length === 11 &&
+    "all_twelve_async_route_entry_faults_return_one_exact_nonreflective_binding_failure",
+    routeBindingPoisoned.length === 12 &&
       routeBindingPoisoned.every(isExactLocalS3BindingFailure) &&
       routeBindingPoisoned.every((response) =>
         hasNoPrivateMaterial(response, [...forbiddenMain, poisonedPrivateLocator]),
@@ -862,7 +884,7 @@ async function main(): Promise<void> {
     "readiness_nonce_or_nonempty_route_binding_poison_headers_are_byte_for_byte_inert_on_every_async_route",
     [readinessNonceRouteBindingPoisoned, nonemptyRouteBindingPoisoned].every(
       (responses) =>
-        responses.length === 11 &&
+        responses.length === 12 &&
         responses.every(
           (response, index) =>
             response.response.status === routeBindingBaseline[index]?.response.status &&
@@ -872,6 +894,111 @@ async function main(): Promise<void> {
         ),
     ),
     "a non-authoritative route-binding poison header changed an async route response",
+  );
+
+  /**
+   * The roster is asserted before its results are, because coverage is a claim
+   * about which requests were issued and no response can establish it.
+   */
+  const EXPECTED_ROUTE_BINDING_PROBE_SIGNATURES: readonly string[] = [
+    `workshops.push POST ${origin}/__s3/workshops {}`,
+    `promote POST ${origin}/__s3/promote {}`,
+    `private.artifact GET ${origin}/__s3/private/${workshopId}`,
+    `recovery.audit GET ${origin}/__s3/recovery/sha256/${privateDigest}`,
+    `public.artifact GET ${origin}/sha256/${publicDigest}`,
+    `public.search GET ${origin}/__s3/public/${mainProblemId}/search`,
+    `public.screening-actions GET ${origin}/__s3/public/${mainProblemId}/screening.json`,
+    `s4.diagnostics GET ${origin}/__s3/s4/diagnostics/${mainProblemId}`,
+    `s4.fixtures.oversized-history POST ${origin}/__s3/s4/fixtures/oversized-history/${mainProblemId}`,
+    `s4.fixtures.forged-receipt POST ${origin}/__s3/s4/fixtures/forged-receipt/${mainProblemId} {}`,
+    `public.export GET ${origin}/__s3/public/${mainProblemId}/export.jsonl`,
+    `public.face GET ${origin}/__s3/public/${mainProblemId}`,
+  ];
+  const routeBindingSignatures = routeBindingProbes.map(routeBindingProbeSignature);
+  check(
+    "async_route_poison_roster_is_the_exact_ordered_unique_descriptor_signature_list",
+    routeBindingSignatures.length === EXPECTED_ROUTE_BINDING_PROBE_SIGNATURES.length &&
+      routeBindingSignatures.every(
+        (signature, index) => signature === EXPECTED_ROUTE_BINDING_PROBE_SIGNATURES[index],
+      ) &&
+      // Uniqueness on both axes: a duplicated descriptor collides on its id even
+      // if relabelled, and on its executed path even if the label is changed.
+      new Set(routeBindingSignatures).size === routeBindingSignatures.length &&
+      new Set(routeBindingProbes.map((probe) => probe.id)).size === routeBindingProbes.length &&
+      new Set(routeBindingProbes.map((probe) => probe.path)).size === routeBindingProbes.length,
+    "the async-route poison roster is not the exact ordered set of distinct routes it claims to sweep",
+  );
+  check(
+    "poisoned_results_are_produced_from_that_roster_one_result_per_descriptor",
+    routeBindingBaseline.length === routeBindingProbes.length &&
+      routeBindingPoisoned.length === routeBindingProbes.length,
+    "the poison sweep produced a result count that does not correspond to its roster",
+  );
+  /**
+   * Runtime proof of gate *order*, which needs two pairs rather than one.
+   *
+   * The unauthorized pair alone only pins poison ahead of the authority gate:
+   * the roster body is valid JSON, so a gate sitting between `request.json()`
+   * and the authority check would produce the same 404/500 split. The second
+   * pair supplies real fixture authority and deliberately malformed bytes, so
+   * the unpoisoned call must get far enough to parse and refuse the body, while
+   * the poisoned call on identical bytes must still fail closed. Only a gate
+   * ahead of both the authority check and the body read satisfies all four.
+   *
+   * Scope, stated exactly: `ensureSchema` runs at the top of the Worker's fetch
+   * handler, before routing, so a poisoned request has already touched D1 by the
+   * time any route is selected. What these pairs establish is narrower and is
+   * the thing that matters here — this *route's* forged-receipt mutation never
+   * runs behind poison. They are not a claim that no D1 access occurs.
+   */
+  const forgedReceiptIndex = routeBindingSignatures.findIndex((signature) =>
+    signature.startsWith("s4.fixtures.forged-receipt "),
+  );
+  const forgedReceiptBaseline = routeBindingBaseline[forgedReceiptIndex];
+  const forgedReceiptPoisoned = routeBindingPoisoned[forgedReceiptIndex];
+  const forgedReceiptMalformedBodyProbe = async (
+    headers: Readonly<Record<string, string>>,
+  ): Promise<Snapshot> =>
+    snapshot(
+      await localFetch(`${origin}/__s3/s4/fixtures/forged-receipt/${mainProblemId}`, {
+        method: "POST",
+        headers: { "content-type": "application/json", ...headers },
+        // Malformed on purpose, and refused before any row is written.
+        body: "{ not-json",
+      }),
+    );
+  const [authorizedMalformedBody, authorizedMalformedBodyPoisoned] = await Promise.all([
+    forgedReceiptMalformedBodyProbe(s4FixtureHeaders("IK-forged-gate-order")),
+    forgedReceiptMalformedBodyProbe(
+      s4FixtureHeaders("IK-forged-gate-order-poisoned", routeBindingPoisonHeaders),
+    ),
+  ]);
+  check(
+    "forged_receipt_route_poison_gate_precedes_both_fixture_authority_and_body_read",
+    forgedReceiptIndex >= 0 &&
+      forgedReceiptBaseline !== undefined &&
+      forgedReceiptPoisoned !== undefined &&
+      // Pair one: no authority, valid body. Poison outranks the authority gate.
+      forgedReceiptBaseline.response.status === 404 &&
+      isExactLocalS3BindingFailure(forgedReceiptPoisoned) &&
+      forgedReceiptBaseline.response.status !== forgedReceiptPoisoned.response.status &&
+      hasNoPrivateMaterial(forgedReceiptPoisoned, [...forbiddenMain, poisonedPrivateLocator]),
+    "the forged-receipt route did not fail closed on poison before its authority gate",
+  );
+  check(
+    "forged_receipt_route_poison_outranks_the_body_read_under_valid_fixture_authority",
+    // Pair two: real authority, malformed body. Unpoisoned the route must reach
+    // its own body refusal, proving the body is genuinely read on this path;
+    // poisoned, the identical bytes must never get that far.
+    authorizedMalformedBody.response.status === 400 &&
+      authorizedMalformedBody.body.includes("LOCAL_S4_FORGED_PLANT_MALFORMED") &&
+      isExactLocalS3BindingFailure(authorizedMalformedBodyPoisoned) &&
+      authorizedMalformedBody.response.status !== authorizedMalformedBodyPoisoned.response.status &&
+      hasNoPrivateMaterial(authorizedMalformedBodyPoisoned, [
+        ...forbiddenMain,
+        poisonedPrivateLocator,
+      ]),
+    "an authorized malformed-body request did not distinguish the body refusal from the poison boundary",
   );
 
   const postFaces = await assertFaceSet(mainProblemId, forbiddenMain, "post_promotion");
