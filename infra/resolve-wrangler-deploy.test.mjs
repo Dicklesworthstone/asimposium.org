@@ -692,7 +692,10 @@ const cases = [
         Bun.spawn = originalSpawn;
       }
       assert.equal(commandCalls, 0);
-      assert.equal(existsSync(join(repositoryRoot, STAGING_OUTPUT_PATH)), false);
+      // The pure function must not publish anywhere — assert against the
+      // fixture root it was given. The real repository may legitimately hold
+      // a resolved artifact from an operator's ` --write` run.
+      assert.equal(existsSync(join(root, STAGING_OUTPUT_PATH)), false);
     },
   },
   {
