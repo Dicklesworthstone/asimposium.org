@@ -1365,6 +1365,10 @@ S2_PRE_RELEASE_MAX_GROUP_MEMBER_COUNT=0
 S2_PRE_RELEASE_REAPED_PGID=""
 S2_PRE_RELEASE_EXPECTED_HELPER_PID=""
 S2_PRE_RELEASE_EXPECTED_HELPER_REJECTED_SAMPLES=0
+S2_PRE_RELEASE_FIRST_KILL_NOOP_CONSUMED=0
+S2_PRE_RELEASE_SECOND_KILL_SENT=0
+S2_PRE_RELEASE_SECOND_KILL_AUTHORITY=not-needed
+S2_PRE_RELEASE_SECOND_KILL_AUTHORITY_CHECK=0
 S2_DETACHED_PROCESS_TABLE=""
 S2_DETACHED_SCAN_PHASE=""
 # This packed record is published before any release write. It closes the caller-assignment
@@ -1922,6 +1926,7 @@ start_pinned_supervisor() {
     $SIG{HUP} = $SIG{INT} = $SIG{TERM} = "DEFAULT";
     my $journal_path = shift @ARGV;
     my $plant_exact_fd6 = shift @ARGV;
+    my ($filler_three, $filler_four, $filler_five);
     umask 0077;
     if ($plant_exact_fd6) {
       # Force the O_EXCL journal allocation onto descriptor 6. The duplicate
@@ -1929,9 +1934,9 @@ start_pinned_supervisor() {
       # This is a causal plant for the exact FD_CLOEXEC case, not a simulated
       # journal write.
       POSIX::close($_) for 3 .. 6;
-      open(my $filler_three, ">", "/dev/null") or exit 73;
-      open(my $filler_four, ">", "/dev/null") or exit 73;
-      open(my $filler_five, ">", "/dev/null") or exit 73;
+      open($filler_three, ">", "/dev/null") or exit 73;
+      open($filler_four, ">", "/dev/null") or exit 73;
+      open($filler_five, ">", "/dev/null") or exit 73;
     }
     sysopen(my $journal, $journal_path, O_WRONLY | O_CREAT | O_EXCL, 0600) or exit 73;
     (!$plant_exact_fd6 || fileno($journal) == 6) or exit 73;
@@ -1946,7 +1951,7 @@ start_pinned_supervisor() {
     $^F = 6;
     exec @ARGV;
     exit 125;
-  ' -- "${watchdog_startup}" bash -c '
+  ' -- "${watchdog_startup}" "${plant_startup_journal_exact_fd6}" bash -c '
     marker="$1"
     status_file="$2"
     owner_pid="$3"
@@ -1995,7 +2000,7 @@ start_pinned_supervisor() {
       # This runs only after Perl exec. It observes FD 6 directly, writes a
       # private O_EXCL sidecar, then the first startup journal phase below
       # proves that descriptor remains writable in the supervisor.
-      [[ -e /dev/fd/6 && ! -L /dev/fd/6 ]] || exit "${checkpoint_io_status}"
+      [[ -e /dev/fd/6 ]] || exit "${checkpoint_io_status}"
       (umask 077; set -o noclobber; \
         printf "journal-fd6-open %s\n" "${supervisor_pid}" >"${watchdog_journal_fd6_observed}") \
         2>/dev/null || exit "${checkpoint_io_status}"
@@ -5103,6 +5108,73 @@ run_s2_shell_regression_test() {
   if [[ ! "${mode}" =~ ^[a-z0-9][a-z0-9-]{0,63}$ ]]; then
     emit '{"tool":"bash","package":"apps/wire","suite":"s2-krater-shell","status":"fail","code":"S2_SHELL_REGRESSION_TEST_INVALID","reproduce":"scripts/e2e-s2-krater.sh"}'
     return 2
+  fi
+
+  if [[ "${mode}" == "pre-release-second-kill-authority" ]]; then
+    local fixture second_kill_fixture_marker second_kill_fixture_pid second_kill_fixture_pgid
+    local departed_before_second_kill=false recycled_authority_refused=false
+    for fixture in departed recycled; do
+      second_kill_fixture_marker="second-kill-authority-${fixture}-$(random_hex 8)" || return 1
+      perl -MPOSIX=setsid -e 'setsid() or exit 125; exec @ARGV' -- \
+        bash -c 'exec -a "$1" sleep 30' s2-second-kill-authority \
+          "s2-pinned-supervisor-${second_kill_fixture_marker}" &
+      second_kill_fixture_pid=$!
+      second_kill_fixture_pgid="${second_kill_fixture_pid}"
+      deadline="$(s2_deadline_at "${S2_READY_DEADLINE_SECONDS}")"
+      while ! pre_release_supervisor_is_owned \
+        "${second_kill_fixture_pid}" "${second_kill_fixture_pgid}" \
+        "${second_kill_fixture_marker}"; do
+        (( SECONDS < deadline )) || return 1
+        sleep 0.05
+      done
+      S2_PRE_RELEASE_FIRST_KILL_NOOP_CONSUMED=0
+      S2_PRE_RELEASE_SECOND_KILL_SENT=0
+      S2_PRE_RELEASE_SECOND_KILL_AUTHORITY_CHECK=0
+      case "${fixture}" in
+        departed)
+          S2_PLANT_PRE_RELEASE_SECOND_KILL_AUTHORITY=departed \
+            kill_pre_release_owned_group_to_zero \
+              "${second_kill_fixture_pid}" "${second_kill_fixture_pgid}" \
+              "${second_kill_fixture_marker}" "${S2_STATE_DIR}" "${S2_PORT}" client || return 1
+          [[ "${S2_PRE_RELEASE_SECOND_KILL_AUTHORITY}" == departed && \
+            "${S2_PRE_RELEASE_SECOND_KILL_SENT}" == 0 ]] || return 1
+          departed_before_second_kill=true
+          ;;
+        recycled)
+          if S2_PLANT_PRE_RELEASE_FIRST_KILL_NOOP=1 \
+            S2_PLANT_PRE_RELEASE_SECOND_KILL_AUTHORITY=recycled \
+            kill_pre_release_owned_group_to_zero \
+              "${second_kill_fixture_pid}" "${second_kill_fixture_pgid}" \
+              "${second_kill_fixture_marker}" "${S2_STATE_DIR}" "${S2_PORT}" client; then
+            return 1
+          fi
+          [[ "${S2_PRE_RELEASE_FIRST_KILL_NOOP_CONSUMED}" == 1 && \
+            "${S2_PRE_RELEASE_SECOND_KILL_AUTHORITY}" == recycled && \
+            "${S2_PRE_RELEASE_SECOND_KILL_SENT}" == 0 ]] || return 1
+          # The synthetic recycled-identity resample refused before any second
+          # signal. Teardown now obtains a fresh real proof for this retained
+          # direct child and signals only that still-owned group.
+          signal_pre_release_owned_group KILL \
+            "${second_kill_fixture_pid}" "${second_kill_fixture_pgid}" \
+            "${second_kill_fixture_marker}" || return 1
+          deadline="$(s2_deadline_at "${S2_READY_DEADLINE_SECONDS}")"
+          while kill -0 -- "-${second_kill_fixture_pgid}" 2>/dev/null; do
+            (( SECONDS < deadline )) || return 1
+            sleep 0.05
+          done
+          wait "${second_kill_fixture_pid}" 2>/dev/null || :
+          recycled_authority_refused=true
+          ;;
+        *) return 1 ;;
+      esac
+      kill -0 -- "-${second_kill_fixture_pgid}" 2>/dev/null && return 1
+      assert_no_run_survivors \
+        "${S2_STATE_DIR}" "${S2_PORT}" "${second_kill_fixture_marker}" || return 1
+    done
+    [[ "${departed_before_second_kill}" == true && \
+      "${recycled_authority_refused}" == true ]] || return 1
+    emit '{"tool":"bash+ps","package":"apps/wire","suite":"s2-krater-shell","status":"pass","scenario":"second-pre-release-group-kill-requires-fresh-live-authority","departed_before_second_kill":true,"recycled_authority_refused":true,"second_kill_sent_to_recycled_authority":false,"no_exact_group_survivor":true,"reproduce":"S2_SHELL_REGRESSION_TEST=pre-release-second-kill-authority scripts/e2e-s2-krater.sh"}'
+    return 0
   fi
 
   # Both wrapper plants call the real `s2_run_owned_deadline` /

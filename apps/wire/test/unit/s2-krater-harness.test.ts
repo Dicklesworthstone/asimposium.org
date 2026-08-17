@@ -1333,6 +1333,21 @@ describe("S2 to S7 normalized cost receipt", () => {
     expect(shell).toContain("S2_MAIN_DEADLINE_AT");
     expect(shell).not.toContain("S2_PLANT_SOURCE_PROVENANCE_DRIFT");
     expect(shell).toContain("S2_TERM_RESISTANT_START_FAILED");
+    const preReleaseSecondKill = shell.slice(
+      shell.indexOf("kill_pre_release_owned_group_to_zero() {"),
+      shell.indexOf("abort_pre_release_supervisor_to_zero() {"),
+    );
+    const freshSecondKillProof =
+      'if ! pre_release_supervisor_is_owned "$' + '{pid}" "$' + '{pgid}" "$' + '{marker}"; then';
+    const secondKillDispatch = 'kill -KILL -- "-$' + '{pgid}"';
+    expect(preReleaseSecondKill).toContain("S2_PLANT_PRE_RELEASE_SECOND_KILL_AUTHORITY");
+    expect(preReleaseSecondKill).toContain(freshSecondKillProof);
+    expect(preReleaseSecondKill).toContain(secondKillDispatch);
+    expect(preReleaseSecondKill.indexOf(freshSecondKillProof)).toBeLessThan(
+      preReleaseSecondKill.indexOf(secondKillDispatch),
+    );
+    expect(shell).toContain("pre-release-second-kill-authority");
+    expect(shell).toContain("recycled_authority_refused");
     const postReleaseController = shell.slice(
       shell.indexOf("post_release_controller_identity_matches() {"),
       shell.indexOf("most_recent_supervisor_is_tracked()"),
@@ -1402,6 +1417,24 @@ describe("S2 to S7 normalized cost receipt", () => {
     // biome-ignore lint/suspicious/noTemplateCurlyInString: rejects append-visible predicate ledgers.
     expect(postReleaseStart).not.toContain('>>"${post_release_ready_predicate}');
     expect(postReleaseStart).toContain("S2_PLANT_POST_RELEASE_READY_PREDICATE");
+    expect(postReleaseStart).toContain("S2_PLANT_STARTUP_JOURNAL_EXACT_FD6");
+    expect(postReleaseStart).toContain("POSIX::close($_) for 3 .. 6");
+    expect(postReleaseStart).toContain("fileno($journal) == 6");
+    expect(postReleaseStart).toContain("F_SETFD, $flags & ~FD_CLOEXEC");
+    expect(postReleaseStart).toContain("journal-fd6-open");
+    const watchdogLaunch = postReleaseStart.slice(
+      postReleaseStart.indexOf("record_startup_phase launch-checkpoint-attempt"),
+      postReleaseStart.indexOf("post_watchdog_signal() {"),
+    );
+    const watchdogPidPublication =
+      'printf "%s\\n" "$' + '{watchdog_pid}" >"$' + '{watchdog_pid_file}"';
+    const watchdogSpawnObservation = 'printf "spawn-attempted %s\\n" "$' + '{supervisor_pid}"';
+    expect(watchdogLaunch.indexOf(watchdogPidPublication)).toBeLessThan(
+      watchdogLaunch.indexOf(watchdogSpawnObservation),
+    );
+    expect(watchdogLaunch.indexOf(watchdogSpawnObservation)).toBeLessThan(
+      watchdogLaunch.indexOf("record_startup_phase launch-checkpoint-published"),
+    );
     const postReleaseCheckpoint = shell.slice(
       shell.indexOf(modeBranch("post-release-safe-checkpoint")),
       shell.indexOf(modeBranch("watchdog-startup-diagnostics")),
@@ -1464,6 +1497,7 @@ describe("S2 to S7 normalized cost receipt", () => {
 
 const S2_SHELL_REGRESSION_MODES = [
   "pre-release-helper-classification",
+  "pre-release-second-kill-authority",
   "detached-ps-failure",
   "pre-arm-owner-loss",
   "release-race",
@@ -2055,6 +2089,36 @@ describe("registered S2 shell and lifecycle regressions", () => {
             expect(run.stdout).toContain('"action":"kill-exact-residual-group"');
             expect(run.stdout).not.toContain('"code":"S2_LEGACY_REAPED_HANDOFF_STALE"');
             expect(run.stdout).not.toContain('"code":"S2_CLEANUP_OWNERSHIP_UNPROVEN"');
+          } else if (mode === "pre-release-second-kill-authority") {
+            expect(ndjsonRecords(run)).toContainEqual(
+              expect.objectContaining({
+                suite: "s2-krater-shell",
+                status: "pass",
+                scenario: "second-pre-release-group-kill-requires-fresh-live-authority",
+                departed_before_second_kill: true,
+                recycled_authority_refused: true,
+                second_kill_sent_to_recycled_authority: false,
+                no_exact_group_survivor: true,
+              }),
+            );
+          } else if (mode === "watchdog-startup-diagnostics") {
+            expect(ndjsonRecords(run)).toContainEqual(
+              expect.objectContaining({
+                suite: "s2-krater-shell",
+                status: "pass",
+                exact_fd6_cloexec_causally_observed: true,
+              }),
+            );
+          } else if (mode === "watchdog-pre-publication-exit") {
+            expect(ndjsonRecords(run)).toContainEqual(
+              expect.objectContaining({
+                suite: "s2-krater-shell",
+                status: "pass",
+                start_failure_stage: "watchdog-publication",
+                spawn_attempted: false,
+                watchdog_pid_published: false,
+              }),
+            );
           } else if (mode === "lsof-scan-failure") {
             expect(ndjsonRecords(run)).toContainEqual(
               expect.objectContaining({
@@ -2779,7 +2843,7 @@ describe("registered S2 shell and lifecycle regressions", () => {
   );
 
   test(
-    "PLANTED: a legacy supervisor exit after arm reports its exact publication checkpoint",
+    "PLANTED: a legacy supervisor exit before watchdog spawn reports no launch observation",
     () => {
       const runId = `s2u-${randomUUID().replaceAll("-", "").slice(0, 24)}`;
       const run = runHarnessSync(
@@ -2801,7 +2865,7 @@ describe("registered S2 shell and lifecycle regressions", () => {
               code: "S2_LEGACY_LEADER_LOSS_START_FAILED",
               start_failure_stage: "watchdog-publication",
               arm_consumed: true,
-              spawn_attempted: true,
+              spawn_attempted: false,
               watchdog_pid_published: false,
               supervisor_exit_status: 125,
             }),
