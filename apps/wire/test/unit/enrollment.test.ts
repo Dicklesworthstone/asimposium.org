@@ -1,9 +1,10 @@
 import { describe, expect, test } from "bun:test";
 import { Buffer } from "node:buffer";
-import type { MintEnrollmentRequest } from "@asimposium/contracts";
+import { ProblemDocumentSchema, type MintEnrollmentRequest } from "@asimposium/contracts";
 
 import {
   AesGcmEnrollmentReplayProtector,
+  authorizeFellowWrite,
   DEVICE_CODE_TTL_MS,
   DEVICE_LOOKUP_LOCKOUT_WINDOW_MS,
   DEVICE_START_RATE_LIMIT_ATTEMPTS,
@@ -14,7 +15,16 @@ import {
   EnrollmentReplayConfigurationError,
   EnrollmentService,
   type EnrollmentStore,
+  enrollmentCryptoForTests,
+  type FellowAuthorizationRefusalReason,
+  type FellowCredentialBinding,
+  type FellowExistingProblemTarget,
+  type FellowNewProblemTarget,
+  type FellowWriteEffect,
+  type FellowWriteGrantUsage,
+  fellowAuthorizationResponse,
   InMemoryEnrollmentStore,
+  inspectFellowWriteAuthorization,
   SPONSOR_STEP_UP_CLOCK_SKEW_SECONDS,
   SPONSOR_STEP_UP_WINDOW_SECONDS,
   safeEnrollmentDiagnostic,
@@ -64,6 +74,7 @@ function serviceFixture() {
     store,
     service: new EnrollmentService({
       stoaOrigin: trustedTestStoaOrigin,
+      agoraOrigin: "https://asimposium.org",
       clock,
       store,
       random,
@@ -145,6 +156,7 @@ describe("S-1 enrollment state machine", () => {
     const tailThenLow = new TailThenLowRandom();
     const sampled = new EnrollmentService({
       stoaOrigin: trustedTestStoaOrigin,
+      agoraOrigin: "https://asimposium.org",
       store: new InMemoryEnrollmentStore(),
       random: tailThenLow,
       replayProtector: new AesGcmEnrollmentReplayProtector(new Uint8Array(32)),
@@ -156,6 +168,7 @@ describe("S-1 enrollment state machine", () => {
     const broken: EnrollmentRandom = { bytes: (length) => new Uint8Array(length).fill(255) };
     const unavailable = new EnrollmentService({
       stoaOrigin: trustedTestStoaOrigin,
+      agoraOrigin: "https://asimposium.org",
       store: new InMemoryEnrollmentStore(),
       random: broken,
       replayProtector: new AesGcmEnrollmentReplayProtector(new Uint8Array(32)),
@@ -179,6 +192,7 @@ describe("S-1 enrollment state machine", () => {
     const random = new SameUserCodeRandom();
     const service = new EnrollmentService({
       stoaOrigin: trustedTestStoaOrigin,
+      agoraOrigin: "https://asimposium.org",
       store: new InMemoryEnrollmentStore(),
       random,
       replayProtector: new AesGcmEnrollmentReplayProtector(new Uint8Array(32)),
@@ -248,6 +262,7 @@ describe("S-1 enrollment state machine", () => {
     });
     const service = new EnrollmentService({
       stoaOrigin: trustedTestStoaOrigin,
+      agoraOrigin: "https://asimposium.org",
       store,
       random: new DeterministicRandom(),
       replayProtector: new AesGcmEnrollmentReplayProtector(new Uint8Array(32)),
@@ -332,6 +347,7 @@ describe("S-1 enrollment state machine", () => {
     });
     const service = new EnrollmentService({
       stoaOrigin: trustedTestStoaOrigin,
+      agoraOrigin: "https://asimposium.org",
       clock,
       store,
       random: new DeterministicRandom(),
@@ -425,6 +441,7 @@ describe("S-1 enrollment state machine", () => {
     });
     const service = new EnrollmentService({
       stoaOrigin: trustedTestStoaOrigin,
+      agoraOrigin: "https://asimposium.org",
       clock,
       store,
       random: new DeterministicRandom(),
@@ -735,6 +752,7 @@ describe("S-1 enrollment state machine", () => {
     const clock = new MutableClock();
     const service = new EnrollmentService({
       stoaOrigin: trustedTestStoaOrigin,
+      agoraOrigin: "https://asimposium.org",
       clock,
       store,
       random,
@@ -1023,6 +1041,7 @@ describe("S-1 enrollment state machine", () => {
     });
     const service = new EnrollmentService({
       stoaOrigin: trustedTestStoaOrigin,
+      agoraOrigin: "https://asimposium.org",
       clock,
       store,
       random: new DeterministicRandom(),
@@ -1107,6 +1126,7 @@ describe("S-1 enrollment state machine", () => {
     const clock = new MutableClock();
     const service = new EnrollmentService({
       stoaOrigin: trustedTestStoaOrigin,
+      agoraOrigin: "https://asimposium.org",
       clock,
       store,
       random: new DeterministicRandom(),
@@ -1152,6 +1172,7 @@ describe("S-1 enrollment state machine", () => {
     const clock = new MutableClock();
     const service = new EnrollmentService({
       stoaOrigin: trustedTestStoaOrigin,
+      agoraOrigin: "https://asimposium.org",
       clock,
       store,
       random: new DeterministicRandom(),
@@ -1179,7 +1200,7 @@ describe("S-1 enrollment state machine", () => {
   });
 
   test("replay protection is required, stable across isolates, and decrypt failure is operational", async () => {
-    expect(() => new EnrollmentService({ stoaOrigin: trustedTestStoaOrigin })).toThrow(
+    expect(() => new EnrollmentService({ stoaOrigin: trustedTestStoaOrigin, agoraOrigin: "https://asimposium.org" })).toThrow(
       EnrollmentReplayConfigurationError,
     );
 
@@ -1188,6 +1209,7 @@ describe("S-1 enrollment state machine", () => {
     const key = Uint8Array.from({ length: 32 }, (_value, index) => index + 1);
     const first = new EnrollmentService({
       stoaOrigin: trustedTestStoaOrigin,
+      agoraOrigin: "https://asimposium.org",
       clock,
       store,
       random: new DeterministicRandom(),
@@ -1195,6 +1217,7 @@ describe("S-1 enrollment state machine", () => {
     });
     const replayedBySecondIsolate = new EnrollmentService({
       stoaOrigin: trustedTestStoaOrigin,
+      agoraOrigin: "https://asimposium.org",
       clock,
       store,
       random: new DeterministicRandom(),
@@ -1208,6 +1231,7 @@ describe("S-1 enrollment state machine", () => {
 
     const wrongKeyIsolate = new EnrollmentService({
       stoaOrigin: trustedTestStoaOrigin,
+      agoraOrigin: "https://asimposium.org",
       clock,
       store,
       random: new DeterministicRandom(),
@@ -1754,5 +1778,429 @@ describe("S-1 enrollment state machine", () => {
       code: "FLOW_INVALID",
       reproduce: "cd apps/wire && bun run test:unit",
     });
+  });
+});
+
+describe("centralized Fellow write authorization", () => {
+  const NOW = 1_700_000_000_000;
+
+  function binding(overrides: Partial<FellowCredentialBinding> = {}): FellowCredentialBinding {
+    return {
+      fellowId: "F-alpha",
+      credentialId: "CRED-alpha",
+      sponsorId: "S-alpha",
+      name: "alpha",
+      model: "claude-opus-5",
+      harness: "claude-code",
+      grantedScopes: ["promote", "review", "propose-problems", "upload-artifacts"],
+      grantedResources: {},
+      tokenHash: "a".repeat(64),
+      issuedAt: NOW - 1_000,
+      expiresAt: NOW + 1_000_000,
+      credentialProfile: "bearer",
+      fellowStatus: "active",
+      ...overrides,
+    };
+  }
+
+  function existingTarget(
+    overrides: Partial<FellowExistingProblemTarget> = {},
+  ): FellowExistingProblemTarget {
+    return {
+      kind: "existing-problem",
+      problemId: "P-1",
+      publication: "published",
+      unlisted: false,
+      membershipRole: "contributor",
+      ...overrides,
+    };
+  }
+
+  function newProblemTarget(
+    overrides: Partial<FellowNewProblemTarget> = {},
+  ): FellowNewProblemTarget {
+    return {
+      kind: "new-problem",
+      initialPublication: "private-draft",
+      unlisted: false,
+      ...overrides,
+    };
+  }
+
+  function usage(overrides: Partial<FellowWriteGrantUsage> = {}): FellowWriteGrantUsage {
+    return { eventsRecorded: 0, artifactBytesRecorded: 0, ...overrides };
+  }
+
+  type AuthorizationInput = Parameters<typeof authorizeFellowWrite>[0];
+  type DecisionOverrides = {
+    credential?: Partial<FellowCredentialBinding>;
+    target?: AuthorizationInput["target"];
+    usage?: Partial<FellowWriteGrantUsage>;
+    effect?: FellowWriteEffect;
+    artifactBytesRequested?: number;
+    now?: number;
+  };
+
+  function input(overrides: DecisionOverrides = {}): AuthorizationInput {
+    const effect = overrides.effect ?? "promote";
+    return {
+      effect,
+      credential: binding(overrides.credential),
+      target: overrides.target ?? existingTarget(),
+      usage: usage(overrides.usage),
+      ...(effect === "upload-artifacts"
+        ? { artifactBytesRequested: overrides.artifactBytesRequested ?? 1 }
+        : overrides.artifactBytesRequested === undefined
+          ? {}
+          : { artifactBytesRequested: overrides.artifactBytesRequested }),
+      now: overrides.now ?? NOW,
+    };
+  }
+
+  function decide(
+    overrides: DecisionOverrides = {},
+  ) {
+    return authorizeFellowWrite(input(overrides));
+  }
+
+  function inspect(overrides: DecisionOverrides = {}) {
+    return inspectFellowWriteAuthorization(input(overrides));
+  }
+
+  test("the happy paths follow effect-specific Fable semantics", () => {
+    expect(
+      decide({
+        effect: "workshop.push",
+        credential: { grantedScopes: [] },
+        target: existingTarget({ membershipRole: "observer", publication: "private-draft" }),
+      }),
+    ).toEqual({ decision: "allow", effect: "workshop.push" });
+    expect(decide({ effect: "promote" })).toEqual({ decision: "allow", effect: "promote" });
+    expect(
+      decide({ effect: "review", target: existingTarget({ membershipRole: "observer" }) }),
+    ).toEqual({ decision: "allow", effect: "review" });
+    expect(
+      decide({
+        effect: "upload-artifacts",
+        target: existingTarget({ membershipRole: "observer", publication: "private-draft" }),
+        artifactBytesRequested: 512,
+      }),
+    ).toEqual({ decision: "allow", effect: "upload-artifacts" });
+    expect(decide({ effect: "propose-problems", target: newProblemTarget() })).toEqual({
+      decision: "allow",
+      effect: "propose-problems",
+    });
+  });
+
+  test("the refusal matrix is type-exhaustive, deterministic, and caller-opaque", () => {
+    // This mapped type is the exhaustiveness mechanism. Adding a refusal
+    // reason without a causal plant is a compile error; an array + Set size
+    // check would only prove that the array contains itself.
+    const matrix: Record<FellowAuthorizationRefusalReason, DecisionOverrides> = {
+      credential_revoked: { credential: { revokedAt: NOW - 1 } },
+      credential_not_yet_valid: { credential: { issuedAt: NOW + 1 } },
+      credential_expired: { credential: { expiresAt: NOW } },
+      fellow_status_not_writable: { credential: { fellowStatus: "paused" } },
+      scope_not_granted: { credential: { grantedScopes: ["review"] }, effect: "promote" },
+      grant_expired: { credential: { grantedResources: { fellowGrantExpiresAt: NOW } } },
+      problem_binding_mismatch: {
+        credential: { grantedResources: { problemBinding: "P-other" } },
+      },
+      not_a_member: { target: existingTarget({ membershipRole: undefined }) },
+      role_not_permitted: { target: existingTarget({ membershipRole: "observer" }) },
+      target_not_writable: {
+        effect: "propose-problems",
+        target: newProblemTarget({ initialPublication: "published" }),
+      },
+      event_budget_exhausted: {
+        credential: { grantedResources: { eventBudget: 3 } },
+        usage: { eventsRecorded: 3 },
+      },
+      artifact_budget_unverifiable: {
+        effect: "upload-artifacts",
+        artifactBytesRequested: -1,
+      },
+      artifact_budget_exhausted: {
+        effect: "upload-artifacts",
+        credential: { grantedResources: { artifactBudgetBytes: 100 } },
+        usage: { artifactBytesRecorded: 91 },
+        artifactBytesRequested: 10,
+      },
+    };
+
+    const callerFaces = new Set<string>();
+    for (const [reason, overrides] of Object.entries(matrix) as [
+      FellowAuthorizationRefusalReason,
+      DecisionOverrides,
+    ][]) {
+      const first = inspect(overrides);
+      const second = inspect(overrides);
+      expect(first.operatorReason).toBe(reason);
+      expect(second).toEqual(first);
+      expect(first.decision.decision).toBe("refuse");
+      if (first.decision.decision !== "refuse") throw new Error("refusal plant authorized");
+      const callerProblem = fellowAuthorizationResponse(first.decision);
+      expect(callerProblem).toBeDefined();
+      const parsed = ProblemDocumentSchema.parse(callerProblem);
+      expect(parsed).toEqual({
+        type: "https://asimposium.org/errors/UNAUTHORIZED",
+        title: "Authorization was not accepted",
+        status: 401,
+        code: "UNAUTHORIZED",
+        detail: "The request did not include an authorization accepted by this route.",
+        fix_hint: "Obtain a fresh sponsor authorization and retry the request.",
+      });
+      expect(Object.keys(parsed).sort()).toEqual(
+        ["code", "detail", "fix_hint", "status", "title", "type"].sort(),
+      );
+      expect(JSON.stringify(first.decision)).not.toContain(reason);
+      expect("operatorReason" in first.decision).toBe(false);
+      callerFaces.add(JSON.stringify(callerProblem));
+    }
+    expect(callerFaces.size).toBe(1);
+  });
+
+  test("PLANTED: problem bindings, roles, and scope escalation do not authorize", () => {
+    expect(
+      inspect({
+        credential: { grantedResources: { problemBinding: "P-1" } },
+        target: existingTarget({ problemId: "P-2", membershipRole: "steward" }),
+      }).operatorReason,
+    ).toBe("problem_binding_mismatch");
+
+    expect(
+      inspect({ credential: { grantedScopes: ["review"] }, effect: "promote" }).operatorReason,
+    ).toBe("scope_not_granted");
+
+    expect(
+      inspect({ target: existingTarget({ membershipRole: "observer" }) }).operatorReason,
+    ).toBe("role_not_permitted");
+
+    expect(inspect({ target: existingTarget({ membershipRole: undefined }) }).operatorReason).toBe(
+      "not_a_member",
+    );
+  });
+
+  test("PLANTED: stale, revoked and expired credentials are refused before scope", () => {
+    // Each of these also lacks the scope, so if ordering regressed the reason
+    // would change. Pinning the earlier reason pins the order.
+    const scopeless = { grantedScopes: ["review" as const] };
+    expect(
+      inspect({ credential: { ...scopeless, revokedAt: NOW - 1 }, effect: "promote" })
+        .operatorReason,
+    ).toBe("credential_revoked");
+    expect(
+      inspect({ credential: { ...scopeless, expiresAt: NOW }, effect: "promote" }).operatorReason,
+    ).toBe("credential_expired");
+    expect(
+      inspect({ credential: { ...scopeless, fellowStatus: "revoked" }, effect: "promote" })
+        .operatorReason,
+    ).toBe("fellow_status_not_writable");
+  });
+
+  test("PLANTED: suspicious-review quarantines otherwise-authorized writes", () => {
+    const quarantined = inspect({ credential: { fellowStatus: "suspicious_review" } });
+    expect(quarantined).toEqual({
+      decision: {
+        decision: "quarantine",
+        effect: "promote",
+        handling: "hold-for-operator-review",
+      },
+      operatorReason: "suspicious_review_quarantine",
+    });
+    expect(fellowAuthorizationResponse(quarantined.decision)).toBeUndefined();
+
+    // Quarantine cannot become a way to submit an ungranted write.
+    const invalid = inspect({
+      credential: { fellowStatus: "suspicious_review", grantedScopes: ["review"] },
+      effect: "promote",
+    });
+    expect(invalid.operatorReason).toBe("scope_not_granted");
+    expect(invalid.decision.decision).toBe("refuse");
+
+    for (const fellowStatus of ["pending", "paused", "revoked", "compromised", "archived"] as const) {
+      expect(inspect({ credential: { fellowStatus } }).operatorReason).toBe(
+        "fellow_status_not_writable",
+      );
+    }
+  });
+
+  test("PLANTED: unscoped workshop writes share the central lifecycle gate", () => {
+    const workshop = {
+      effect: "workshop.push" as const,
+      credential: { grantedScopes: [] as const },
+      target: existingTarget({ publication: "private-draft", membershipRole: "observer" }),
+    };
+
+    expect(decide(workshop)).toEqual({ decision: "allow", effect: "workshop.push" });
+    expect(inspect({ ...workshop, credential: { ...workshop.credential, fellowStatus: "suspicious_review" } })).toEqual({
+      decision: {
+        decision: "quarantine",
+        effect: "workshop.push",
+        handling: "hold-for-operator-review",
+      },
+      operatorReason: "suspicious_review_quarantine",
+    });
+
+    for (const fellowStatus of ["paused", "revoked", "compromised"] as const) {
+      const refusal = inspect({
+        ...workshop,
+        credential: { ...workshop.credential, fellowStatus },
+      });
+      expect(refusal.decision.decision).toBe("refuse");
+      expect(refusal.operatorReason).toBe("fellow_status_not_writable");
+    }
+  });
+
+  test("PLANTED: private-draft creation and orthogonal unlisted discovery are exact", () => {
+    expect(decide({ effect: "propose-problems", target: newProblemTarget() })).toEqual({
+      decision: "allow",
+      effect: "propose-problems",
+    });
+    expect(
+      inspect({
+        effect: "propose-problems",
+        target: newProblemTarget({ initialPublication: "published" }),
+      }).operatorReason,
+    ).toBe("target_not_writable");
+    expect(
+      inspect({
+        effect: "propose-problems",
+        credential: { grantedResources: { problemBinding: "P-1" } },
+        target: newProblemTarget(),
+      }).operatorReason,
+    ).toBe("problem_binding_mismatch");
+
+    for (const effect of ["promote", "review", "upload-artifacts", "workshop.push"] as const) {
+      const listed = decide({ effect, target: existingTarget({ unlisted: false }) });
+      const unlisted = decide({ effect, target: existingTarget({ unlisted: true }) });
+      expect(unlisted).toEqual(listed);
+    }
+    expect(
+      inspect({ target: existingTarget({ publication: "private-draft" }) }).operatorReason,
+    ).toBe("target_not_writable");
+  });
+
+  test("PLANTED: contributor/steward promote, observers review but cannot promote", () => {
+    for (const membershipRole of ["contributor", "steward"] as const) {
+      expect(decide({ target: existingTarget({ membershipRole }) })).toEqual({
+        decision: "allow",
+        effect: "promote",
+      });
+    }
+    expect(
+      inspect({ target: existingTarget({ membershipRole: "observer" }) }).operatorReason,
+    ).toBe("role_not_permitted");
+    expect(
+      decide({ effect: "review", target: existingTarget({ membershipRole: "observer" }) }),
+    ).toEqual({ decision: "allow", effect: "review" });
+  });
+
+  test("PLANTED: event and artifact budgets are independent and boundary-exact", () => {
+    expect(
+      decide({
+        credential: { grantedResources: { eventBudget: 3 } },
+        usage: { eventsRecorded: 2 },
+      }),
+    ).toMatchObject({ decision: "allow" });
+    expect(
+      inspect({
+        credential: { grantedResources: { eventBudget: 3 } },
+        usage: { eventsRecorded: 3 },
+      }).operatorReason,
+    ).toBe("event_budget_exhausted");
+
+    const artifactGrant = { artifactBudgetBytes: 100 };
+    expect(
+      decide({
+        effect: "upload-artifacts",
+        credential: { grantedResources: artifactGrant },
+        usage: { artifactBytesRecorded: 90 },
+        artifactBytesRequested: 10,
+      }),
+    ).toMatchObject({ decision: "allow" });
+    expect(
+      inspect({
+        effect: "upload-artifacts",
+        credential: { grantedResources: artifactGrant },
+        usage: { artifactBytesRecorded: 91 },
+        artifactBytesRequested: 10,
+      }).operatorReason,
+    ).toBe("artifact_budget_exhausted");
+    expect(
+      inspect({
+        effect: "upload-artifacts",
+        credential: { grantedResources: artifactGrant },
+        artifactBytesRequested: -1,
+      }).operatorReason,
+    ).toBe("artifact_budget_unverifiable");
+  });
+
+  test("PLANTED: the decision never reads or returns token material", () => {
+    // The binding carries a tokenHash. Authorization must not consult it, and
+    // must not echo it: a decision record is diagnostic input, and the hash is
+    // the one field in the binding that is credential material.
+    const tokenHash = "f".repeat(64);
+    for (const refuse of [false, true]) {
+      const decision = decide({
+        credential: { tokenHash },
+        ...(refuse ? { target: existingTarget({ membershipRole: undefined }) } : {}),
+      });
+      expect(JSON.stringify(decision)).not.toContain(tokenHash);
+      const callerProblem = fellowAuthorizationResponse(decision);
+      if (callerProblem !== undefined) {
+        expect(JSON.stringify(callerProblem)).not.toContain(tokenHash);
+      }
+    }
+  });
+
+  test("bearer acceptance is digest-keyed, so there is no secret comparison to time", async () => {
+    // Structural, not chronometric. A wall-clock assertion on a shared runner
+    // measures the host; these assertions measure the code.
+    const { sha256Hex } = enrollmentCryptoForTests;
+    const raw = `asimp_ag_${"0".repeat(26)}_${"a".repeat(43)}`;
+    const digest = await sha256Hex(raw);
+
+    // 1. The digest is not the token: what is stored cannot be replayed.
+    expect(digest).not.toBe(raw);
+    expect(digest).toMatch(/^[0-9a-f]{64}$/);
+
+    // 2. The store's authentication entry point takes a hash, not a token, so
+    //    a raw secret cannot reach the lookup even by mistake.
+    const store = new InMemoryEnrollmentStore();
+    expect(await store.authenticateCredential(digest, Date.now(), "bearer")).toBeUndefined();
+    expect(await store.authenticateCredential(raw, Date.now(), "bearer")).toBeUndefined();
+
+    // 3. Uniform miss: a well-formed unknown token and a malformed one are both
+    //    `undefined`, so the response shape is not an existence oracle. (They
+    //    differ in time because the shape gate precedes hashing; the shape is
+    //    published in the contract and the prefix is deliberately scannable.)
+    const service = new EnrollmentService({
+      stoaOrigin: "https://a.asimposium.org",
+      agoraOrigin: "https://asimposium.org",
+      store,
+      replayProtector: new AesGcmEnrollmentReplayProtector(new Uint8Array(32)),
+    });
+    expect(await service.credentialBinding(raw)).toBeUndefined();
+    expect(await service.credentialBinding("not-a-token")).toBeUndefined();
+    expect(await service.credentialBinding("")).toBeUndefined();
+  });
+
+  test("the decision is pure: identical inputs, identical output, no clock read", () => {
+    const input = {
+      effect: "promote" as const,
+      credential: binding(),
+      target: existingTarget(),
+      usage: usage(),
+      now: NOW,
+    };
+    const first = authorizeFellowWrite(input);
+    const second = authorizeFellowWrite(input);
+    expect(first).toEqual(second);
+    // Advancing only `now` past expiry flips the decision, proving the function
+    // takes time as an input rather than reading a clock of its own.
+    expect(
+      inspectFellowWriteAuthorization({ ...input, now: input.credential.expiresAt }).operatorReason,
+    ).toBe("credential_expired");
   });
 });

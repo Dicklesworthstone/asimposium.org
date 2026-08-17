@@ -43,6 +43,7 @@ function routerFixture() {
   const clock = new FixedClock();
   const service = new EnrollmentService({
     stoaOrigin: TEST_STOA_ORIGIN,
+    agoraOrigin: "https://asimposium.org",
     clock,
     random,
     store: new InMemoryEnrollmentStore(),

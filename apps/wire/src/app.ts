@@ -1,4 +1,4 @@
-import { isTrustedStoaOrigin, SponsorIdSchema } from "@asimposium/contracts";
+import { isTrustedAgoraOrigin, isTrustedStoaOrigin, SponsorIdSchema } from "@asimposium/contracts";
 import { listPublicSchemas, type PublicSchemaDocument } from "@asimposium/contracts/public-schemas";
 import { type DocumentId, getDocument, sha256Hex } from "@asimposium/protocol";
 import { Hono } from "hono";
@@ -407,6 +407,16 @@ function stoaOriginUnavailable(): Response {
   });
 }
 
+function agoraOriginUnavailable(): Response {
+  return problem({
+    status: 503,
+    code: "ENROLLMENT_UNAVAILABLE",
+    title: "Enrollment is not configured on this Worker",
+    detail: "The Agora origin binding is missing or is not a trusted origin.",
+    fixHint: "Set the Agora origin for this environment and retry.",
+  });
+}
+
 function enrollmentStack(env: Env, options: CreateAppOptions): EnrollmentStack | Response {
   // Parse the origin before anything is constructed. Every enrollment URL this
   // stack emits names it, so an untrusted or absent value must disable the
@@ -415,6 +425,8 @@ function enrollmentStack(env: Env, options: CreateAppOptions): EnrollmentStack |
   // must never be replayed for another.
   const stoaOrigin = env.STOA_ORIGIN;
   if (!isTrustedStoaOrigin(stoaOrigin)) return stoaOriginUnavailable();
+  const agoraOrigin = env.AGORA_ORIGIN;
+  if (!isTrustedAgoraOrigin(agoraOrigin)) return agoraOriginUnavailable();
 
   // A tuple encoding is unambiguous even when one credential contains spaces.
   const credentialKey = JSON.stringify([
@@ -422,6 +434,7 @@ function enrollmentStack(env: Env, options: CreateAppOptions): EnrollmentStack |
     env.SERVICE_ENVELOPE_KEYS ?? "",
     env.OPERATOR_PRINCIPAL_IDS ?? "",
     stoaOrigin,
+    agoraOrigin,
   ]);
   if (
     cached !== undefined &&
@@ -436,6 +449,7 @@ function enrollmentStack(env: Env, options: CreateAppOptions): EnrollmentStack |
   try {
     service = new EnrollmentService({
       stoaOrigin,
+      agoraOrigin,
       store: options.createEnrollmentStore?.(env) ?? new D1EnrollmentStore(env.DB),
       replayProtector: enrollmentReplayProtectorFromBase64Url(env.ENROLLMENT_REPLAY_KEY),
     });

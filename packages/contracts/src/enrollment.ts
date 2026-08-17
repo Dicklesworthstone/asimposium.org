@@ -152,6 +152,12 @@ const TRUSTED_AGORA_ORIGIN_ALTERNATION = `(?:${literalForPattern(PRODUCTION_AGOR
 /** JSON-Schema-visible spelling of the trusted Agora origin set. */
 export const AGORA_ORIGIN_PATTERN = `^${TRUSTED_AGORA_ORIGIN_ALTERNATION}$`;
 
+/**
+ * The device-flow verification URL: a trusted Agora origin plus the `/approve`
+ * path Fable §5.3 names. Pattern-level, so the published schema shows it.
+ */
+export const DEVICE_VERIFICATION_URL_PATTERN = `^${TRUSTED_AGORA_ORIGIN_ALTERNATION}/approve$`;
+
 export const AgoraOriginSchema = z
   .string()
   .regex(new RegExp(AGORA_ORIGIN_PATTERN))
@@ -799,7 +805,11 @@ export const DeviceCodeStartResponseSchema = z
   .object({
     device_code: EnrollmentFlowHandleSchema,
     user_code: z.string().regex(DEVICE_USER_CODE_PATTERN),
-    verification_url: z.literal("https://asimposium.org/approve"),
+    // Fable §5.3 writes the sponsor destination as the path `/approve`; the
+    // origin is a per-environment binding from the trusted Agora set, never
+    // request-derived. The pattern keeps that visible in the published
+    // JSON Schema rather than as a bare string.
+    verification_url: z.string().regex(new RegExp(DEVICE_VERIFICATION_URL_PATTERN)),
     interval_seconds: z.number().int().positive().max(60),
     expires_in_seconds: z.number().int().positive().max(3_600),
   })

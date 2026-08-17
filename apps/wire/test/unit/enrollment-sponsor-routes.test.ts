@@ -93,6 +93,7 @@ async function harness(options?: {
   const nonces = new MemoryNonceStore();
   const service = new EnrollmentService({
     stoaOrigin: TEST_STOA_ORIGIN,
+    agoraOrigin: "https://asimposium.org",
     store: options?.store ?? new InMemoryEnrollmentStore(),
     replayProtector: enrollmentReplayProtectorFromBase64Url(
       "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",

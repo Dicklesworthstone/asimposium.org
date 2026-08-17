@@ -53,6 +53,11 @@ export interface Env {
    * disables enrollment with a typed 503 rather than falling back.
    */
   STOA_ORIGIN?: string;
+  /**
+   * The Agora origin the device flow's verification URL names. Validated at
+   * stack build; absent or untrusted disables enrollment with a typed 503.
+   */
+  AGORA_ORIGIN?: string;
 }
 
 export const REQUIRED_BINDINGS = ["DB", "ARTIFACTS", "PUBLIC_ARTIFACTS", "KRATER_OUTBOX"] as const;

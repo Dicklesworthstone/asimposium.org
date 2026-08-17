@@ -16,10 +16,13 @@ import {
   FellowNameSchema,
   FellowRegistrationCredentialFieldsSchema,
   FellowRegistrationRequestSchema,
+  isTrustedAgoraOrigin,
   isTrustedStoaOrigin,
   type MintEnrollmentRequest,
   MintEnrollmentRequestSchema,
   OPERATOR_FELLOW_CAP_AUDIT_PAGE_SIZE,
+  type ProblemDocument,
+  ProblemDocumentSchema,
   type OperatorFellowCapAuditCursorKey,
   type OperatorFellowCapOverrideRequest,
   OperatorFellowCapOverrideRequestSchema,
@@ -249,6 +252,17 @@ export class EnrollmentStoaOriginError extends Error {
   constructor() {
     super("enrollment stoa origin is unavailable");
     this.name = "EnrollmentStoaOriginError";
+  }
+}
+
+/**
+ * The configured Agora origin is absent or untrusted, the apex twin of the
+ * Stoa binding error. Same operator-facing 503 face; different named cause.
+ */
+export class EnrollmentAgoraOriginError extends Error {
+  constructor() {
+    super("enrollment agora origin is unavailable");
+    this.name = "EnrollmentAgoraOriginError";
   }
 }
 
@@ -483,6 +497,271 @@ export interface FellowCredentialBinding {
   readonly revokedAt?: number;
   readonly credentialProfile: FellowCredentialProfile;
   readonly fellowStatus: FellowLifecycleStatus;
+}
+
+/**
+ * The one place Fellow effectful-write authorization is decided (Fable §5,
+ * "authorization is computed by centralized policy functions over (account
+ * state, scopes, grants, membership, target visibility), never by role checks
+ * scattered through route files").
+ *
+ * Deliberately PURE: no clock, no store, no request. `now` and every input are
+ * supplied by the caller, so W4 and W5 route owners can call it without this
+ * module having to know their routes exist, and so the whole allow/refuse
+ * matrix is testable without mounting anything.
+ *
+ * The effect vocabulary is the granted-scope vocabulary plus the one unscoped
+ * write Fable names explicitly: `workshop.push`. Keeping that write in this
+ * same decision is what lets suspicious-review quarantine every write without
+ * inventing a scope the sponsor never approved.
+ */
+export type FellowWriteEffect = RequestedScope | "workshop.push";
+
+/** Fable §6.8 membership roles. Only the observer promotion restriction is hard. */
+export type FellowProblemMembershipRole = "observer" | "contributor" | "steward";
+
+/**
+ * Publication and discovery are deliberately separate. Fable §6.2 says an
+ * unlisted problem is still published and guessable; it is not a third privacy
+ * state beside `published` and `private-draft`.
+ */
+export interface FellowExistingProblemTarget {
+  readonly kind: "existing-problem";
+  readonly problemId: string;
+  readonly publication: "published" | "private-draft";
+  readonly unlisted: boolean;
+  /** Undefined means the Fellow has not joined this problem. */
+  readonly membershipRole?: FellowProblemMembershipRole;
+}
+
+/** `propose-problems` creates a draft; publication remains sponsor/steward-gated. */
+export interface FellowNewProblemTarget {
+  readonly kind: "new-problem";
+  readonly initialPublication: "private-draft" | "published";
+  readonly unlisted: boolean;
+}
+
+export type FellowWriteTarget = FellowExistingProblemTarget | FellowNewProblemTarget;
+
+/** Consumption is credential-grant-wide, not merely per target problem. */
+export interface FellowWriteGrantUsage {
+  readonly eventsRecorded: number;
+  readonly artifactBytesRecorded: number;
+}
+
+/**
+ * Operator-channel only. ADR-18 / Fable §7.7: policy refusals teach minimally,
+ * because a refusal that names its trigger is an iteration oracle for the
+ * caller it just refused. This value goes to the OPS.2a diagnostic; it must
+ * never be projected into a caller-facing response.
+ */
+export type FellowAuthorizationRefusalReason =
+  | "credential_revoked"
+  | "credential_not_yet_valid"
+  | "credential_expired"
+  | "fellow_status_not_writable"
+  | "scope_not_granted"
+  | "grant_expired"
+  | "problem_binding_mismatch"
+  | "not_a_member"
+  | "role_not_permitted"
+  | "target_not_writable"
+  | "event_budget_exhausted"
+  | "artifact_budget_unverifiable"
+  | "artifact_budget_exhausted";
+
+export interface FellowAuthorizationAllow {
+  readonly decision: "allow";
+  readonly effect: FellowWriteEffect;
+}
+
+export interface FellowAuthorizationQuarantine {
+  readonly decision: "quarantine";
+  readonly effect: FellowWriteEffect;
+  readonly handling: "hold-for-operator-review";
+}
+
+export interface FellowAuthorizationRefusal {
+  readonly decision: "refuse";
+  /** Canonical strict RFC 7807 face; it carries no internal refusal reason. */
+  readonly callerProblem: ProblemDocument;
+}
+
+export type FellowAuthorizationDecision =
+  | FellowAuthorizationAllow
+  | FellowAuthorizationQuarantine
+  | FellowAuthorizationRefusal;
+
+export type FellowAuthorizationOperatorEvaluation =
+  | { readonly decision: FellowAuthorizationAllow; readonly operatorReason: null }
+  | {
+      readonly decision: FellowAuthorizationQuarantine;
+      readonly operatorReason: "suspicious_review_quarantine";
+    }
+  | {
+      readonly decision: FellowAuthorizationRefusal;
+      readonly operatorReason: FellowAuthorizationRefusalReason;
+    };
+
+const FELLOW_UNAUTHORIZED_PROBLEM = ProblemDocumentSchema.parse({
+  type: "https://asimposium.org/errors/UNAUTHORIZED",
+  title: "Authorization was not accepted",
+  status: 401,
+  code: "UNAUTHORIZED",
+  detail: "The request did not include an authorization accepted by this route.",
+  fix_hint: "Obtain a fresh sponsor authorization and retry the request.",
+});
+
+/**
+ * The caller-facing projection. Every refusal produces byte-identical output,
+ * whatever the reason was, which is what makes the coarse class real rather
+ * than merely intended.
+ */
+export function fellowAuthorizationResponse(
+  decision: FellowAuthorizationDecision,
+): ProblemDocument | undefined {
+  return decision.decision === "refuse" ? decision.callerProblem : undefined;
+}
+
+function refusalEvaluation(
+  reason: FellowAuthorizationRefusalReason,
+): FellowAuthorizationOperatorEvaluation {
+  return {
+    decision: {
+      decision: "refuse",
+      // A fresh object stops a caller mutating a module-global problem face.
+      callerProblem: { ...FELLOW_UNAUTHORIZED_PROBLEM },
+    },
+    operatorReason: reason,
+  };
+}
+
+/**
+ * Decide one Fellow effectful write.
+ *
+ * The order below is fixed so the matrix is deterministic: a credential that
+ * fails several conditions always reports the same first reason to the
+ * operator, and a test can therefore pin exactly one row per input. Callers
+ * see none of that ordering.
+ *
+ * Reads are not routed through this function because Fable §5 keeps them for a
+ * suspicious-review Fellow. Workshop pushes are routed here but skip only the
+ * granted-scope check: they remain writes, so account state, resource grants,
+ * membership, budgets, and suspicious-review quarantine still apply centrally.
+ */
+function evaluateFellowWriteAuthorization(input: {
+  readonly effect: FellowWriteEffect;
+  readonly credential: FellowCredentialBinding;
+  readonly target: FellowWriteTarget;
+  readonly usage: FellowWriteGrantUsage;
+  /** Required, and checked, only for `upload-artifacts`. */
+  readonly artifactBytesRequested?: number;
+  readonly now: number;
+}): FellowAuthorizationOperatorEvaluation {
+  const { credential, target, effect, usage, now } = input;
+
+  if (credential.revokedAt !== undefined && credential.revokedAt <= now) {
+    return refusalEvaluation("credential_revoked");
+  }
+  if (now < credential.issuedAt) return refusalEvaluation("credential_not_yet_valid");
+  if (now >= credential.expiresAt) return refusalEvaluation("credential_expired");
+
+  const quarantined = credential.fellowStatus === "suspicious_review";
+  if (credential.fellowStatus !== "active" && !quarantined) {
+    return refusalEvaluation("fellow_status_not_writable");
+  }
+
+  if (effect !== "workshop.push" && !credential.grantedScopes.includes(effect)) {
+    return refusalEvaluation("scope_not_granted");
+  }
+
+  const grantExpiresAt = credential.grantedResources.fellowGrantExpiresAt;
+  if (grantExpiresAt !== undefined && now >= grantExpiresAt) {
+    return refusalEvaluation("grant_expired");
+  }
+
+  const binding = credential.grantedResources.problemBinding;
+  if (effect === "propose-problems") {
+    // A scoped-to-one-existing-problem credential cannot create an unrelated
+    // problem, but an unbound credential needs no fictitious membership row.
+    if (binding !== undefined) return refusalEvaluation("problem_binding_mismatch");
+    if (target.kind !== "new-problem" || target.initialPublication !== "private-draft") {
+      return refusalEvaluation("target_not_writable");
+    }
+  } else {
+    if (target.kind !== "existing-problem") return refusalEvaluation("target_not_writable");
+    if (binding !== undefined && binding !== target.problemId) {
+      return refusalEvaluation("problem_binding_mismatch");
+    }
+    if (target.membershipRole === undefined) return refusalEvaluation("not_a_member");
+
+    // Role labels are advisory except for this one Fable §9.3 hard boundary.
+    if (effect === "promote" && target.membershipRole === "observer") {
+      return refusalEvaluation("role_not_permitted");
+    }
+
+    // Promotion and ledger review cannot make a private draft public by side
+    // effect. Artifact uploads remain allowed for a granted member because the
+    // private index, not the global CAS hash, controls visibility.
+    if (
+      target.publication === "private-draft" &&
+      (effect === "promote" || effect === "review")
+    ) {
+      return refusalEvaluation("target_not_writable");
+    }
+  }
+
+  const eventBudget = credential.grantedResources.eventBudget;
+  if (eventBudget !== undefined && usage.eventsRecorded >= eventBudget) {
+    return refusalEvaluation("event_budget_exhausted");
+  }
+
+  if (effect === "upload-artifacts") {
+    const requested = input.artifactBytesRequested;
+    if (requested === undefined || !Number.isSafeInteger(requested) || requested < 0) {
+      return refusalEvaluation("artifact_budget_unverifiable");
+    }
+    const artifactBudget = credential.grantedResources.artifactBudgetBytes;
+    if (
+      artifactBudget !== undefined &&
+      (usage.artifactBytesRecorded > artifactBudget - requested || requested > artifactBudget)
+    ) {
+      return refusalEvaluation("artifact_budget_exhausted");
+    }
+  }
+
+  if (quarantined) {
+    return {
+      decision: {
+        decision: "quarantine",
+        effect,
+        handling: "hold-for-operator-review",
+      },
+      operatorReason: "suspicious_review_quarantine",
+    };
+  }
+
+  return { decision: { decision: "allow", effect }, operatorReason: null };
+}
+
+type FellowWriteAuthorizationInput = Parameters<typeof evaluateFellowWriteAuthorization>[0];
+
+/** Caller-safe central authorization seam. No internal reason is serializable. */
+export function authorizeFellowWrite(
+  input: FellowWriteAuthorizationInput,
+): FellowAuthorizationDecision {
+  return evaluateFellowWriteAuthorization(input).decision;
+}
+
+/**
+ * Operator-only view over the same pure evaluator. Diagnostic sinks use this;
+ * HTTP callers use `authorizeFellowWrite` and therefore cannot receive the
+ * internal reason by accidentally serializing a decision.
+ */
+export function inspectFellowWriteAuthorization(
+  input: FellowWriteAuthorizationInput,
+): FellowAuthorizationOperatorEvaluation {
+  return evaluateFellowWriteAuthorization(input);
 }
 
 export interface EnrollmentStorageSnapshot {
@@ -2426,6 +2705,13 @@ export interface EnrollmentServiceOptions {
    * would look correct in every local test.
    */
   readonly stoaOrigin: string;
+  /**
+   * The trusted Agora origin the device flow's verification URL names (Fable
+   * §5.3 writes `/approve` as a path; which plane it hangs off is deployment
+   * configuration). Required for the same reason as `stoaOrigin`: an omitted
+   * origin silently emits production URLs from a staging or loopback Worker.
+   */
+  readonly agoraOrigin: string;
   readonly store?: EnrollmentStore;
   readonly clock?: EnrollmentClock;
   readonly random?: EnrollmentRandom;
@@ -2438,6 +2724,7 @@ export class EnrollmentService {
   readonly #random: EnrollmentRandom;
   readonly #replayProtector: EnrollmentReplayProtector;
   readonly #stoaOrigin: string;
+  readonly #agoraOrigin: string;
 
   constructor(options: EnrollmentServiceOptions) {
     this.#store = options.store ?? new InMemoryEnrollmentStore();
@@ -2450,12 +2737,19 @@ export class EnrollmentService {
     // already have been minted; and there is no default, so an omitted origin
     // is a construction error rather than a silent production URL.
     if (!isTrustedStoaOrigin(options.stoaOrigin)) throw new EnrollmentStoaOriginError();
+    if (!isTrustedAgoraOrigin(options.agoraOrigin)) throw new EnrollmentAgoraOriginError();
     this.#stoaOrigin = options.stoaOrigin;
+    this.#agoraOrigin = options.agoraOrigin;
   }
 
   /** The immutable origin every enrollment URL from this service names. */
   get stoaOrigin(): string {
     return this.#stoaOrigin;
+  }
+
+  /** The immutable Agora origin the device flow's verification URL names. */
+  get agoraOrigin(): string {
+    return this.#agoraOrigin;
   }
 
   async #prepareWrite<T>(
@@ -3091,7 +3385,7 @@ export class EnrollmentService {
       const result: DeviceCodeStartResponse = {
         device_code: flowHandle,
         user_code: userCode,
-        verification_url: "https://asimposium.org/approve",
+        verification_url: `${this.#agoraOrigin}/approve`,
         interval_seconds: INITIAL_POLL_INTERVAL_SECONDS,
         expires_in_seconds: DEVICE_CODE_TTL_MS / 1_000,
       };
@@ -3350,6 +3644,38 @@ export class EnrollmentService {
   /**
    * Authenticate a header-only bearer and record its successful use. Expired,
    * revoked, paused, archived and compromised authority returns one opaque miss.
+   *
+   * ON CONSTANT TIME, precisely.
+   *
+   * There is no secret comparison on this path, so there is nothing for a
+   * constant-time compare to protect. The raw token is hashed once and the
+   * digest is used as a LOOKUP KEY; the stored row holds only that digest
+   * (SHA-256 at rest). The classic timing target — walking a stored secret
+   * against a supplied one until they differ — does not exist here, and adding
+   * `timingSafeEqual` would compare two values that are already equal by
+   * construction whenever the lookup hit. That would be theatre: it would read
+   * as a hardening measure while protecting nothing.
+   *
+   * What IS observable, and why each is acceptable:
+   *
+   *  - The shape gate below returns before hashing, so a malformed token is
+   *    distinguishable in time from a well-formed one. The shape is published
+   *    in the contract and the prefix is deliberately scannable (Fable §5,
+   *    "prefix-identifiable for secret scanning"), so this leaks nothing an
+   *    attacker did not already have.
+   *  - A well-formed unknown token and a well-formed revoked/expired token are
+   *    NOT distinguished: both return `undefined` from one predicate in
+   *    `authenticateCredential`, which is the property that actually matters
+   *    for an attacker probing which credentials exist.
+   *  - `Map.get` over a digest key is not constant-time in principle, but the
+   *    key is SHA-256 of the secret, so steering bucket collisions requires a
+   *    preimage. The deployed D1 path is an indexed lookup on the same digest
+   *    and inherits the same argument.
+   *
+   * The causal tests for this live in `enrollment.test.ts` and assert the
+   * structure — digest-keyed lookup, no raw token retained, uniform miss —
+   * rather than measuring wall-clock, which on a shared runner would be a
+   * flaky assertion about the host and not about this code.
    */
   async credentialBinding(rawToken: string): Promise<FellowCredentialBinding | undefined> {
     if (!/^asimp_ag_[0-9A-HJKMNP-TV-Z]{26}_[A-Za-z0-9_-]{43}$/.test(rawToken)) return undefined;

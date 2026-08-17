@@ -423,6 +423,7 @@ function d1DeviceServiceFixture(): {
     sqlite,
     service: new EnrollmentService({
       stoaOrigin: TEST_STOA_ORIGIN,
+      agoraOrigin: "https://asimposium.org",
       clock,
       store: new D1EnrollmentStore(localD1(sqlite)),
       replayProtector: new AesGcmEnrollmentReplayProtector(new Uint8Array(32)),
@@ -1055,6 +1056,7 @@ describe("device enrollment first-decider SQL", () => {
     });
     const service = new EnrollmentService({
       stoaOrigin: TEST_STOA_ORIGIN,
+      agoraOrigin: "https://asimposium.org",
       clock,
       store: new D1EnrollmentStore(db),
       replayProtector: new AesGcmEnrollmentReplayProtector(new Uint8Array(32)),
@@ -1124,6 +1126,7 @@ describe("device enrollment first-decider SQL", () => {
     });
     const service = new EnrollmentService({
       stoaOrigin: TEST_STOA_ORIGIN,
+      agoraOrigin: "https://asimposium.org",
       clock,
       store: new D1EnrollmentStore(db),
       replayProtector: new AesGcmEnrollmentReplayProtector(new Uint8Array(32)),
@@ -1178,6 +1181,7 @@ describe("device enrollment first-decider SQL", () => {
     let predecessorIv = 0;
     const service = new EnrollmentService({
       stoaOrigin: TEST_STOA_ORIGIN,
+      agoraOrigin: "https://asimposium.org",
       clock,
       store: new D1EnrollmentStore(localD1(sqlite)),
       replayProtector: protector,
@@ -5568,6 +5572,7 @@ describe("Fellow credential lifecycle constraints and authentication", () => {
     const random = { bytes: (length: number) => new Uint8Array(length) };
     const service = new EnrollmentService({
       stoaOrigin: TEST_STOA_ORIGIN,
+      agoraOrigin: "https://asimposium.org",
       clock: { now: () => NOW + 1 },
       random,
       store,
@@ -5962,6 +5967,7 @@ describe("0012 sponsor lifecycle commands", () => {
     const sqlite = lifecycleCommandDatabase();
     const service = new EnrollmentService({
       stoaOrigin: TEST_STOA_ORIGIN,
+      agoraOrigin: "https://asimposium.org",
       clock,
       store: new D1EnrollmentStore(localD1(sqlite, options)),
       replayProtector: new AesGcmEnrollmentReplayProtector(new Uint8Array(32)),
@@ -7133,6 +7139,7 @@ describe("0012 sponsor lifecycle commands", () => {
     );
     const service = new EnrollmentService({
       stoaOrigin: TEST_STOA_ORIGIN,
+      agoraOrigin: "https://asimposium.org",
       clock,
       store,
       replayProtector: new AesGcmEnrollmentReplayProtector(new Uint8Array(32)),
@@ -7403,6 +7410,7 @@ describe("0013 sponsor Fellow capacity", () => {
         clock: memoryClock,
         service: new EnrollmentService({
           stoaOrigin: TEST_STOA_ORIGIN,
+          agoraOrigin: "https://asimposium.org",
           clock: memoryClock,
           store: new InMemoryEnrollmentStore(),
           replayProtector: new AesGcmEnrollmentReplayProtector(new Uint8Array(32)),
@@ -7413,6 +7421,7 @@ describe("0013 sponsor Fellow capacity", () => {
         clock: d1Clock,
         service: new EnrollmentService({
           stoaOrigin: TEST_STOA_ORIGIN,
+          agoraOrigin: "https://asimposium.org",
           clock: d1Clock,
           store: new D1EnrollmentStore(localD1(d1Sqlite)),
           replayProtector: new AesGcmEnrollmentReplayProtector(new Uint8Array(32)),
@@ -7590,6 +7599,7 @@ describe("0013 sponsor Fellow capacity", () => {
             );
       const service = new EnrollmentService({
         stoaOrigin: TEST_STOA_ORIGIN,
+        agoraOrigin: "https://asimposium.org",
         clock,
         store,
         replayProtector: new AesGcmEnrollmentReplayProtector(new Uint8Array(32)),
@@ -7677,6 +7687,7 @@ describe("0013 sponsor Fellow capacity", () => {
     });
     const service = new EnrollmentService({
       stoaOrigin: TEST_STOA_ORIGIN,
+      agoraOrigin: "https://asimposium.org",
       clock,
       store: new D1EnrollmentStore(
         localD1(sqlite, {
@@ -7820,6 +7831,7 @@ describe("0016 operator Fellow-cap override audit", () => {
     const clock = new DeviceTestClock();
     const service = new EnrollmentService({
       stoaOrigin: TEST_STOA_ORIGIN,
+      agoraOrigin: "https://asimposium.org",
       clock,
       store: new D1EnrollmentStore(localD1(sqlite, options)),
       replayProtector: new AesGcmEnrollmentReplayProtector(new Uint8Array(32)),
@@ -8888,6 +8900,7 @@ describe("0014 sponsor enrollment rolling-day budget", () => {
       const sqlite = fixture === "d1" ? sponsorEnrollmentRateDatabase() : undefined;
       const service = new EnrollmentService({
         stoaOrigin: TEST_STOA_ORIGIN,
+        agoraOrigin: "https://asimposium.org",
         clock,
         store:
           sqlite === undefined
@@ -9172,6 +9185,7 @@ describe("0015 sponsor enrollment bootstrap invariant", () => {
       const memoryStore = kind === "memory" ? new InMemoryEnrollmentStore() : undefined;
       const service = new EnrollmentService({
         stoaOrigin: TEST_STOA_ORIGIN,
+        agoraOrigin: "https://asimposium.org",
         clock,
         store: memoryStore ?? new D1EnrollmentStore(localD1(sqlite as Database)),
         replayProtector: new AesGcmEnrollmentReplayProtector(new Uint8Array(32)),
@@ -9412,6 +9426,7 @@ describe("0015 sponsor enrollment bootstrap invariant", () => {
     let failFellowInsert = true;
     const service = new EnrollmentService({
       stoaOrigin: TEST_STOA_ORIGIN,
+      agoraOrigin: "https://asimposium.org",
       clock,
       store: new D1EnrollmentStore(
         localD1(sqlite, {

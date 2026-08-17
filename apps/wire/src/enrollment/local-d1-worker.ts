@@ -109,6 +109,7 @@ function resolveService(env: LocalEnrollmentEnv): EnrollmentService | Response {
       // No default: an absent binding must fail service construction rather
       // than emit a URL derived from this request or a canonical environment.
       stoaOrigin: env.STOA_ORIGIN ?? "",
+      agoraOrigin: "https://asimposium.org",
       store: new D1EnrollmentStore(env.DB),
       replayProtector: enrollmentReplayProtectorFromBase64Url(env.ENROLLMENT_REPLAY_KEY),
       clock: { now: () => Date.now() + localClockOffsetMs },
