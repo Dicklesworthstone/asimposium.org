@@ -1,7 +1,24 @@
 import { expect, test } from "bun:test";
-import { readFileSync } from "node:fs";
-import { resolve } from "node:path";
+import { spawnSync } from "node:child_process";
+import {
+  chmodSync,
+  closeSync,
+  constants,
+  fchmodSync,
+  fstatSync,
+  lstatSync,
+  mkdtempSync,
+  openSync,
+  readFileSync,
+  readSync,
+  realpathSync,
+  writeSync,
+} from "node:fs";
+import { tmpdir } from "node:os";
+import { isAbsolute, join, resolve } from "node:path";
+import { pathToFileURL } from "node:url";
 
+import type { OwnedCommandResult } from "../../../../scripts/suite/cli.ts";
 import {
   assertS3PublicProjectionShape,
   assertS3PublicValueSafe,
@@ -82,291 +99,1297 @@ const LOCAL_WORKER_BUNDLE_SENTINELS = [
   "s3_local_fellow_workshop_ids",
 ] as const;
 
-const S3_CHILD_TIMEOUT_MS = 100_000;
-const S3_CHILD_MAX_BUFFER_BYTES = 1_000_000;
-const S3_CHILD_REPORT_TIMEOUT_SECONDS = "5";
-const S3_CHILD_REPORT_PATH = "/s3-child-report";
-const S3_CHILD_TERM_GRACE_MS = 500;
-const S3_CHILD_KILL_GRACE_MS = 500;
+const S3_OWNED_COMMAND_TIMEOUT_MS = 100_000;
+const S3_BUNDLE_TIMEOUT_MS = 10_000;
+const S3_OWNED_TERM_GRACE_MS = 500;
+const S3_OWNED_KILL_REAP_MS = 500;
+const S3_OWNED_PIPE_DRAIN_MS = 500;
+const S3_OWNED_STREAM_BYTES = 1_000_000;
+const S3_OWNED_OUTPUT_BYTES = 1_000_000;
+const S3_FRESH_RUNTIME_FIXED_GRACE_MS = 5_000;
+const S3_FRESH_RUNTIME_RESULT_MAX_BYTES = 3 * S3_OWNED_OUTPUT_BYTES;
+const S3_FRESH_RUNTIME_DIAGNOSTIC_MAX_BYTES = 1_024;
+const S3_FRESH_RUNTIME_BOOTSTRAP_MAX_BYTES = 64 * 1024;
+const S3_FRESH_RUNTIME_BOOTSTRAP_EXIT_CODE = 97;
+const S3_FRESH_RUNTIME_RETAINED_COLLISION_EXIT_CODE = 92;
+const S3_FRESH_RUNTIME_BOOTSTRAP_READY = Buffer.from("S3_FRESH_RUNTIME_BOOTSTRAP_READY\n", "utf8");
+// The outer fresh helper has one monotonic deadline. It is never detached: on
+// expiry the harness kills and reaps that exact helper before refusing its
+// pinned result inode. The helper itself is only a lease holder; the imported
+// runOwnedCommand remains the sole owner of the target process group.
+const S3_FRESH_RUNTIME_DIRECT_REAP_MS = 1_000;
+const S3_OUTER_DEADLINE_PLANT_MS = 2_000;
+const S3_OUTER_LEASE_RETIRE_WAIT_MS = 5_000;
+const S3_MARKER_INSPECTION_TIMEOUT_MS = 1_000;
+const S3_MARKER_CENSUS_MAX_BYTES = 1_000_000;
+const S3_OWNED_COMMAND_RUNNER_URL = pathToFileURL(resolve(root, "scripts/suite/cli.ts")).href;
 
-interface S3ChildLimits {
+const OWNED_COMMAND_OUTCOMES = {
+  exited: true,
+  timeout: true,
+  "output-overrun": true,
+  "descendant-leaked": true,
+  "pipe-drain-unproven": true,
+  "inspection-unproven": true,
+  "ownership-unproven": true,
+  "spawn-failed": true,
+} as const satisfies Record<OwnedCommandResult["outcome"], true>;
+
+interface S3OwnedCommandOptions {
   readonly timeoutMs: number;
-  readonly maxBufferBytes: number;
-  readonly termGraceMs: number;
-  readonly killGraceMs: number;
+  readonly retainedStreamBytes?: number;
+  readonly retainedOutputBytes?: number;
+  /** Test-only plant: proves a dispatcher deadline retires the inner owned group by lease EOF. */
+  readonly outerTimeoutMs?: number;
+  /** Test-only plant: target starts in the helper's private pinned result directory. */
+  readonly targetCwd?: "private";
+  /** Test-only bootstrap refusal plants; all must leave the original inode authoritative. */
+  readonly bootstrapPlant?:
+    | "malformed"
+    | "invalid-utf8"
+    | "noncanonical"
+    | "extra-record"
+    | "partial"
+    | "overrun"
+    | "eof"
+    | "flush-stall";
 }
 
-interface S3ChildOptions {
-  readonly limits?: Partial<S3ChildLimits>;
-  readonly allowedExitCodes?: readonly number[];
+function s3OwnedEnvironment(): Record<string, string> {
+  return {
+    PATH: process.env.PATH ?? "",
+    HOME: process.env.HOME ?? "",
+    TMPDIR: validatedFixtureRoot(),
+  };
 }
 
-const DEFAULT_S3_CHILD_LIMITS: S3ChildLimits = {
-  timeoutMs: S3_CHILD_TIMEOUT_MS,
-  maxBufferBytes: S3_CHILD_MAX_BUFFER_BYTES,
-  termGraceMs: S3_CHILD_TERM_GRACE_MS,
-  killGraceMs: S3_CHILD_KILL_GRACE_MS,
-};
+interface FreshRuntimeInvocation {
+  readonly directory: string;
+  readonly directoryFd: number;
+  readonly directoryIdentity: ExactInodeIdentity;
+  directoryFdClosed: boolean;
+  readonly resultPath: string;
+  readonly resultFd: number;
+  readonly resultIdentity: ExactInodeIdentity;
+  resultFdClosed: boolean;
+  readonly nonce: string;
+  readonly timeoutMs: number;
+  readonly deadlineAt: number;
+  readonly terminateAt: number;
+  readonly helper: ReturnType<typeof Bun.spawn>;
+  readonly stdoutCapture: FreshRuntimePipeCapture;
+  readonly stderrCapture: FreshRuntimePipeCapture;
+  helperKillRequested: boolean;
+  timeoutWon: boolean;
+  helperReaped: boolean;
+  exitCode: number | undefined;
+}
 
-function childLimits(overrides: Partial<S3ChildLimits> = {}): S3ChildLimits {
-  const limits = { ...DEFAULT_S3_CHILD_LIMITS, ...overrides };
+interface FreshRuntimePipeCapture {
+  readonly complete: Promise<Buffer>;
+  /** Resolves only after the helper has consumed and retired its bootstrap lease. */
+  readonly startupReady?: Promise<void>;
+  readonly cancellationRequested: () => boolean;
+  readonly cancellationIsSettled: () => boolean;
+  readonly cancellationSettled: () => Promise<void>;
+  readonly byteLength: () => number;
+  readonly cancel: () => Promise<void>;
+}
+
+interface FreshOwnedS3Result {
+  readonly result: OwnedCommandResult;
+  /** Normal exited releases are census-proven by runOwnedCommand; forced cleanup reports explicitly. */
+  readonly cleanupProven: boolean;
+}
+
+interface ExactBigIntStat {
+  readonly dev: bigint;
+  readonly ino: bigint;
+  readonly mode: bigint;
+  readonly nlink: bigint;
+  readonly size: bigint;
+  readonly isFile: () => boolean;
+  readonly isDirectory: () => boolean;
+}
+
+interface ExactInodeIdentity {
+  readonly dev: string;
+  readonly ino: string;
+  readonly mode: string;
+  readonly nlink: string;
+}
+
+interface FreshRuntimeBootstrap {
+  readonly nonce: string;
+  readonly result: ExactInodeIdentity;
+  readonly directory: ExactInodeIdentity;
+  readonly directoryPath: string;
+  readonly runnerUrl: string;
+  readonly options: {
+    readonly command: readonly string[];
+    readonly cwd: string;
+    readonly env: Record<string, string>;
+    readonly timeoutMs: number;
+    readonly termGraceMs: number;
+    readonly killReapMs: number;
+    readonly pipeDrainMs: number;
+    readonly retainedStreamBytes: number;
+    readonly retainedOutputBytes: number;
+  };
+}
+
+function s3OwnedCommandTimeout(options: S3OwnedCommandOptions): number {
+  return (
+    options.timeoutMs +
+    S3_OWNED_TERM_GRACE_MS +
+    S3_OWNED_KILL_REAP_MS +
+    S3_OWNED_PIPE_DRAIN_MS +
+    S3_FRESH_RUNTIME_FIXED_GRACE_MS
+  );
+}
+
+function validatedFixtureRoot(): string {
+  const candidates = [process.env.TMPDIR, tmpdir()];
+  for (const candidate of candidates) {
+    if (typeof candidate !== "string" || candidate.length === 0 || !isAbsolute(candidate)) continue;
+    try {
+      const canonical = realpathSync(candidate);
+      if (!isAbsolute(canonical) || resolve(canonical) !== canonical) continue;
+      const stat = lstatSync(canonical, { bigint: true }) as ExactBigIntStat;
+      if (stat.isDirectory()) return canonical;
+    } catch {
+      // Try the portable platform fallback below.
+    }
+  }
+  throw new Error("S3_FRESH_RUNTIME_TEMP_ROOT_UNAVAILABLE");
+}
+
+function makePrivateFixtureDirectory(): string {
+  const created = mkdtempSync(join(validatedFixtureRoot(), "asimposium-s3-owned-command-"));
+  chmodSync(created, 0o700);
+  const directory = realpathSync(created);
+  const stat = lstatSync(directory, { bigint: true }) as ExactBigIntStat;
+  if (!stat.isDirectory() || (stat.mode & 0o777n) !== 0o700n) {
+    throw new Error("S3_FRESH_RUNTIME_DIRECTORY_CREATE_UNPROVEN");
+  }
+  if (!isAbsolute(directory) || resolve(directory) !== directory) {
+    throw new Error("S3_FRESH_RUNTIME_DIRECTORY_NOT_CANONICAL_ABSOLUTE");
+  }
+  return directory;
+}
+
+function exactInodeIdentity(stat: ExactBigIntStat): ExactInodeIdentity {
+  return {
+    dev: stat.dev.toString(10),
+    ino: stat.ino.toString(10),
+    mode: stat.mode.toString(10),
+    nlink: stat.nlink.toString(10),
+  };
+}
+
+function isCanonicalDecimal(value: string): boolean {
+  return /^(?:0|[1-9][0-9]*)$/u.test(value);
+}
+
+function assertCanonicalIdentity(identity: ExactInodeIdentity, label: string): void {
+  for (const [field, value] of Object.entries(identity)) {
+    if (!isCanonicalDecimal(value)) {
+      throw new Error(`${label}_IDENTITY_${field.toUpperCase()}_NOT_DECIMAL`);
+    }
+  }
+}
+
+function sameExactIdentity(stat: ExactBigIntStat, identity: ExactInodeIdentity): boolean {
+  return (
+    stat.dev.toString(10) === identity.dev &&
+    stat.ino.toString(10) === identity.ino &&
+    stat.mode.toString(10) === identity.mode &&
+    stat.nlink.toString(10) === identity.nlink
+  );
+}
+
+function sameIdentityExceptNlink(
+  stat: ExactBigIntStat,
+  identity: ExactInodeIdentity,
+  nlink: bigint,
+): boolean {
+  return (
+    stat.dev.toString(10) === identity.dev &&
+    stat.ino.toString(10) === identity.ino &&
+    stat.mode.toString(10) === identity.mode &&
+    stat.nlink === nlink
+  );
+}
+
+function samePinnedDirectoryIdentity(stat: ExactBigIntStat, identity: ExactInodeIdentity): boolean {
+  return (
+    stat.dev.toString(10) === identity.dev &&
+    stat.ino.toString(10) === identity.ino &&
+    stat.mode.toString(10) === identity.mode
+  );
+}
+
+function assertPinnedFreshRuntimeDirectory(
+  invocation: FreshRuntimeInvocation,
+  label: string,
+): ExactBigIntStat {
+  const held = fstatSync(invocation.directoryFd, { bigint: true }) as ExactBigIntStat;
+  const named = lstatSync(invocation.directory, { bigint: true }) as ExactBigIntStat;
   if (
-    !Number.isSafeInteger(limits.timeoutMs) ||
-    !Number.isSafeInteger(limits.maxBufferBytes) ||
-    !Number.isSafeInteger(limits.termGraceMs) ||
-    !Number.isSafeInteger(limits.killGraceMs) ||
-    limits.timeoutMs < 1 ||
-    limits.maxBufferBytes < 1 ||
-    limits.termGraceMs < 1 ||
-    limits.killGraceMs < 1
+    !held.isDirectory() ||
+    !named.isDirectory() ||
+    !samePinnedDirectoryIdentity(held, invocation.directoryIdentity) ||
+    !samePinnedDirectoryIdentity(named, invocation.directoryIdentity)
   ) {
-    throw new Error("S3_CHILD_LIMITS_INVALID");
+    throw new Error(`${label}_FRESH_RUNTIME_DIRECTORY_IDENTITY_MISMATCH`);
   }
-  return limits;
+  return held;
 }
 
-function sleep(milliseconds: number): Promise<void> {
-  return new Promise((resolveSleep) => setTimeout(resolveSleep, milliseconds));
-}
-
-type ChildGroupCensus = "empty" | "members" | "unproven";
-
-function childGroupCensus(pgid: number): ChildGroupCensus {
+function makeFreshRuntimeDirectory(): {
+  readonly directory: string;
+  readonly directoryFd: number;
+  readonly directoryIdentity: ExactInodeIdentity;
+  readonly resultPath: string;
+  readonly resultFd: number;
+  readonly resultIdentity: ExactInodeIdentity;
+} {
+  const directory = makePrivateFixtureDirectory();
+  let directoryFd: number | undefined;
+  let directoryOwned = false;
   try {
-    process.kill(-pgid, 0);
-    return "members";
-  } catch (error) {
-    if ((error as NodeJS.ErrnoException).code === "ESRCH") return "empty";
-    return "unproven";
-  }
-}
-
-async function exitWithin(
-  exited: Promise<number>,
-  milliseconds: number,
-): Promise<number | undefined> {
-  let timeoutId: ReturnType<typeof setTimeout> | undefined;
-  try {
-    return await Promise.race([
-      exited,
-      new Promise<undefined>((resolveTimeout) => {
-        timeoutId = setTimeout(() => resolveTimeout(undefined), milliseconds);
-      }),
-    ]);
+    directoryFd = openSync(directory, constants.O_RDONLY | constants.O_DIRECTORY);
+    directoryOwned = true;
+    const directoryStat = fstatSync(directoryFd, { bigint: true }) as ExactBigIntStat;
+    if (!directoryStat.isDirectory() || (directoryStat.mode & 0o777n) !== 0o700n) {
+      throw new Error("S3_FRESH_RUNTIME_DIRECTORY_OPEN_UNPROVEN");
+    }
+    const directoryIdentity = exactInodeIdentity(directoryStat);
+    assertCanonicalIdentity(directoryIdentity, "S3_FRESH_RUNTIME_DIRECTORY");
+    const resultPath = join(directory, "result.json");
+    let resultFd: number | undefined;
+    let resultOwned = false;
+    try {
+      resultFd = openSync(
+        resultPath,
+        constants.O_RDWR | constants.O_CREAT | constants.O_EXCL | constants.O_NOFOLLOW,
+        0o600,
+      );
+      resultOwned = true;
+      fchmodSync(resultFd, 0o600);
+      const result = fstatSync(resultFd, { bigint: true }) as ExactBigIntStat;
+      if (
+        !result.isFile() ||
+        (result.mode & 0o777n) !== 0o600n ||
+        result.size !== 0n ||
+        result.nlink !== 1n
+      ) {
+        throw new Error("S3_FRESH_RUNTIME_RESULT_CREATE_UNPROVEN");
+      }
+      const resultIdentity = exactInodeIdentity(result);
+      assertCanonicalIdentity(resultIdentity, "S3_FRESH_RUNTIME_RESULT");
+      const created = {
+        directory,
+        directoryFd,
+        directoryIdentity,
+        resultPath,
+        resultFd,
+        resultIdentity,
+      };
+      resultOwned = false;
+      directoryOwned = false;
+      return created;
+    } finally {
+      if (resultOwned && resultFd !== undefined) {
+        closeSync(resultFd);
+      }
+    }
   } finally {
-    if (timeoutId !== undefined) clearTimeout(timeoutId);
+    if (directoryOwned && directoryFd !== undefined) {
+      closeSync(directoryFd);
+    }
   }
 }
 
-function signalOwnedChildGroup(pgid: number, signal: NodeJS.Signals, label: string): void {
-  if (childGroupCensus(pgid) !== "members") {
-    throw new Error(`${label}_GROUP_OWNERSHIP_UNPROVEN`);
+const FRESH_OWNED_COMMAND_DISPATCHER = String.raw`
+import {
+  closeSync,
+  constants,
+  fchmodSync,
+  fstatSync,
+  fsyncSync,
+  lstatSync,
+  openSync,
+  unlinkSync,
+  writeSync,
+} from "node:fs";
+import { isAbsolute, join } from "node:path";
+
+const BOOTSTRAP_MAX_BYTES = 65536;
+const RESULT_MAX_BYTES = ${S3_FRESH_RUNTIME_RESULT_MAX_BYTES};
+const BOOTSTRAP_EXIT_CODE = ${S3_FRESH_RUNTIME_BOOTSTRAP_EXIT_CODE};
+const RETAINED_COLLISION_EXIT_CODE = 92;
+const RESULT_NAME = "result.json";
+const STARTUP_READY = Buffer.from("S3_FRESH_RUNTIME_BOOTSTRAP_READY\n", "utf8");
+const decimal = /^(?:0|[1-9][0-9]*)$/u;
+let resultFd;
+let retainedFd;
+const closeQuietly = (fd) => {
+  if (fd === undefined) return;
+  try { closeSync(fd); } catch {}
+};
+const failClosed = (code = 1) => {
+  closeQuietly(retainedFd);
+  closeQuietly(resultFd);
+  process.exit(code);
+};
+const writeAllAt = (fd, bytes) => {
+  let offset = 0;
+  while (offset < bytes.byteLength) {
+    const written = writeSync(fd, bytes, offset, bytes.byteLength - offset, offset);
+    if (written <= 0) throw new Error("fresh owned-command record write was partial");
+    offset += written;
+  }
+};
+const writePipeAll = (fd, bytes) => {
+  let offset = 0;
+  while (offset < bytes.byteLength) {
+    const written = writeSync(fd, bytes, offset, bytes.byteLength - offset);
+    if (written <= 0) throw new Error("fresh owned-command pipe write was partial");
+    offset += written;
+  }
+};
+const verifiesNamedDirectory = (directoryPath, identity) => {
+  let directoryFd;
+  try {
+    if (!isAbsolute(directoryPath)) failClosed(BOOTSTRAP_EXIT_CODE);
+    const named = lstatSync(directoryPath, { bigint: true });
+    if (
+      !named.isDirectory() ||
+      named.dev.toString(10) !== identity.dev ||
+      named.ino.toString(10) !== identity.ino ||
+      named.mode.toString(10) !== identity.mode
+    ) {
+      failClosed(BOOTSTRAP_EXIT_CODE);
+    }
+    directoryFd = openSync(
+      directoryPath,
+      constants.O_RDONLY | constants.O_DIRECTORY | constants.O_NOFOLLOW,
+    );
+    const opened = fstatSync(directoryFd, { bigint: true });
+    if (
+      !opened.isDirectory() ||
+      opened.dev.toString(10) !== identity.dev ||
+      opened.ino.toString(10) !== identity.ino ||
+      opened.mode.toString(10) !== identity.mode
+    ) {
+      failClosed(BOOTSTRAP_EXIT_CODE);
+    }
+  } catch {
+    failClosed(BOOTSTRAP_EXIT_CODE);
+  } finally {
+    closeQuietly(directoryFd);
+  }
+};
+const readBootstrap = async () => {
+  const chunks = [];
+  let size = 0;
+  for await (const chunk of process.stdin) {
+    const bytes = Buffer.from(chunk);
+    size += bytes.byteLength;
+    if (size > BOOTSTRAP_MAX_BYTES) throw new Error("bootstrap overrun");
+    chunks.push(bytes);
+  }
+  if (size === 0) throw new Error("bootstrap eof");
+  const bytes = Buffer.concat(chunks, size);
+  if (bytes.at(-1) !== 0x0a || bytes.subarray(0, -1).includes(0x0a) || bytes.includes(0x0d)) {
+    throw new Error("bootstrap record framing");
+  }
+  const text = new TextDecoder("utf-8", { fatal: true }).decode(bytes);
+  const value = JSON.parse(text);
+  const canonical = Buffer.from(JSON.stringify(value) + "\n", "utf8");
+  if (!canonical.equals(bytes)) throw new Error("bootstrap noncanonical");
+  return value;
+};
+try {
+  const bootstrap = await readBootstrap();
+  const identity = bootstrap?.result;
+  const directory = bootstrap?.directory;
+  const directoryPath = bootstrap?.directoryPath;
+  if (
+    typeof bootstrap?.nonce !== "string" ||
+    typeof bootstrap?.runnerUrl !== "string" ||
+    bootstrap?.options === null ||
+    typeof bootstrap?.options !== "object" ||
+    identity === null ||
+    typeof identity !== "object" ||
+    directory === null ||
+    typeof directory !== "object" ||
+    typeof directoryPath !== "string" ||
+    !["dev", "ino", "mode", "nlink"].every((field) => decimal.test(identity[field])) ||
+    !["dev", "ino", "mode", "nlink"].every((field) => decimal.test(directory[field]))
+  ) {
+    failClosed(BOOTSTRAP_EXIT_CODE);
+  }
+  resultFd = openSync(RESULT_NAME, constants.O_RDWR | constants.O_NOFOLLOW);
+  const opened = fstatSync(resultFd, { bigint: true });
+  if (
+    !opened.isFile() ||
+    opened.dev.toString(10) !== identity.dev ||
+    opened.ino.toString(10) !== identity.ino ||
+    opened.mode.toString(10) !== identity.mode ||
+    opened.nlink.toString(10) !== identity.nlink ||
+    opened.size !== 0n ||
+    opened.nlink !== 1n
+  ) {
+    failClosed(BOOTSTRAP_EXIT_CODE);
+  }
+  verifiesNamedDirectory(directoryPath, directory);
+  unlinkSync(RESULT_NAME);
+  const unlinked = fstatSync(resultFd, { bigint: true });
+  if (
+    !unlinked.isFile() ||
+    unlinked.dev.toString(10) !== identity.dev ||
+    unlinked.ino.toString(10) !== identity.ino ||
+    unlinked.mode.toString(10) !== identity.mode ||
+    unlinked.nlink !== 0n ||
+    unlinked.size !== 0n
+  ) {
+    failClosed(BOOTSTRAP_EXIT_CODE);
+  }
+  // The fixed result name is gone, and the held inode has nlink zero, before
+  // this dynamic import can execute target code.
+  const module = await import(bootstrap.runnerUrl);
+  // This fixed control record confirms bootstrap EOF, identity validation,
+  // unlink+nlink-zero, and the dynamic import before the target can start.
+  writePipeAll(1, STARTUP_READY);
+  const result = await module.runOwnedCommand(bootstrap.options);
+  const cleanupProven = result.outcome === "exited" || result.cleanupProven === true;
+  const publication = Buffer.from(JSON.stringify({
+    nonce: bootstrap.nonce,
+    kind: "result",
+    result,
+    cleanupProven,
+  }) + "\n", "utf8");
+  if (publication.byteLength === 0 || publication.byteLength > RESULT_MAX_BYTES) {
+    throw new Error("result overrun");
+  }
+  writeAllAt(resultFd, publication);
+  fsyncSync(resultFd);
+  const published = fstatSync(resultFd, { bigint: true });
+  if (
+    !published.isFile() ||
+    published.dev.toString(10) !== identity.dev ||
+    published.ino.toString(10) !== identity.ino ||
+    published.mode.toString(10) !== identity.mode ||
+    published.nlink !== 0n ||
+    published.size !== BigInt(publication.byteLength)
+  ) {
+    throw new Error("result publication changed");
+  }
+  if (cleanupProven) {
+    // This is evidence only. The original unlinked inode above remains the
+    // authority channel; any replacement collision is an unparseable refusal.
+    // The target is gone. Rebind the canonical parent name and exact identity
+    // before deriving the retained path; a renamed cwd cannot redirect this.
+    verifiesNamedDirectory(directoryPath, directory);
+    try {
+      retainedFd = openSync(
+        join(directoryPath, RESULT_NAME),
+        constants.O_WRONLY | constants.O_CREAT | constants.O_EXCL | constants.O_NOFOLLOW,
+        0o600,
+      );
+    } catch {
+      failClosed(RETAINED_COLLISION_EXIT_CODE);
+    }
+    fchmodSync(retainedFd, 0o600);
+    writeAllAt(retainedFd, publication);
+    fsyncSync(retainedFd);
+    const retained = fstatSync(retainedFd, { bigint: true });
+    if (
+      !retained.isFile() ||
+      (retained.mode & 0o777n) !== 0o600n ||
+      retained.nlink !== 1n ||
+      retained.size !== BigInt(publication.byteLength)
+    ) {
+      failClosed(RETAINED_COLLISION_EXIT_CODE);
+    }
+    closeQuietly(retainedFd);
+    retainedFd = undefined;
+  }
+  closeQuietly(resultFd);
+  resultFd = undefined;
+} catch {
+  failClosed();
+}
+`;
+
+function beginFreshRuntimePipeCapture(
+  stream: ReadableStream<Uint8Array>,
+  byteCeiling: number,
+  label: string,
+  startupRecord?: Buffer,
+): FreshRuntimePipeCapture {
+  const reader = stream.getReader();
+  const chunks: Buffer[] = [];
+  let totalBytes = 0;
+  let readerReleased = false;
+  let startupSettled = startupRecord === undefined;
+  let startupObserved = Buffer.alloc(0);
+  let resolveStartup: (() => void) | undefined;
+  let rejectStartup: ((error: Error) => void) | undefined;
+  let cancellation: Promise<void> | undefined;
+  let cancellationComplete = false;
+  const startupReady =
+    startupRecord === undefined
+      ? undefined
+      : new Promise<void>((resolve, reject) => {
+          resolveStartup = resolve;
+          rejectStartup = reject;
+        });
+  const rejectStartupOnce = (detail: string) => {
+    if (startupSettled) return;
+    startupSettled = true;
+    rejectStartup?.(new Error(`${label}_${detail}`));
+  };
+  const cancel = (): Promise<void> => {
+    if (cancellation !== undefined) return cancellation;
+    if (readerReleased) {
+      cancellation = Promise.resolve();
+      cancellationComplete = true;
+      return cancellation;
+    }
+    try {
+      cancellation = reader.cancel().then(
+        () => {
+          cancellationComplete = true;
+        },
+        (error: unknown) => {
+          cancellationComplete = true;
+          throw error;
+        },
+      );
+    } catch (error) {
+      cancellation = Promise.reject(error);
+      cancellationComplete = true;
+    }
+    void cancellation.catch(() => undefined);
+    return cancellation;
+  };
+  const complete = (async (): Promise<Buffer> => {
+    try {
+      while (true) {
+        const { done, value } = await reader.read();
+        if (done) break;
+        const bytes = Buffer.from(value);
+        totalBytes += bytes.byteLength;
+        if (totalBytes > byteCeiling) {
+          void cancel();
+          throw new Error(`${label}_FRESH_RUNTIME_PIPE_OVERRUN:${totalBytes}`);
+        }
+        if (startupRecord !== undefined && !startupSettled) {
+          startupObserved = Buffer.concat(
+            [startupObserved, bytes],
+            startupObserved.byteLength + bytes.byteLength,
+          );
+          if (
+            startupObserved.byteLength > startupRecord.byteLength ||
+            !startupRecord.subarray(0, startupObserved.byteLength).equals(startupObserved)
+          ) {
+            rejectStartupOnce("FRESH_RUNTIME_STARTUP_RECORD_INVALID");
+            void cancel();
+            throw new Error(`${label}_FRESH_RUNTIME_STARTUP_RECORD_INVALID`);
+          }
+          if (startupObserved.byteLength === startupRecord.byteLength) {
+            startupSettled = true;
+            resolveStartup?.();
+          }
+        }
+        chunks.push(bytes);
+      }
+      return Buffer.concat(chunks, totalBytes);
+    } finally {
+      if (startupRecord !== undefined && !startupSettled) {
+        rejectStartupOnce("FRESH_RUNTIME_STARTUP_RECORD_MISSING");
+      }
+      readerReleased = true;
+      reader.releaseLock();
+    }
+  })();
+  void complete.catch(() => undefined);
+  void startupReady?.catch(() => undefined);
+  return {
+    complete,
+    startupReady,
+    cancellationRequested: () => cancellation !== undefined,
+    cancellationIsSettled: () => cancellationComplete,
+    cancellationSettled: () => cancellation ?? Promise.resolve(),
+    byteLength: () => totalBytes,
+    cancel,
+  };
+}
+
+function closeFreshRuntimeCreationFds(resultFd: number, directoryFd: number): void {
+  try {
+    closeSync(resultFd);
+  } finally {
+    closeSync(directoryFd);
+  }
+}
+
+async function invokeFreshOwnedS3Command(
+  command: readonly string[],
+  options: S3OwnedCommandOptions,
+): Promise<FreshRuntimeInvocation> {
+  const timeoutMs = options.outerTimeoutMs ?? s3OwnedCommandTimeout(options);
+  if (!Number.isSafeInteger(timeoutMs) || timeoutMs <= S3_FRESH_RUNTIME_DIRECT_REAP_MS) {
+    throw new Error(`S3_FRESH_RUNTIME_TIMEOUT_INVALID:${timeoutMs}`);
+  }
+  const { directory, directoryFd, directoryIdentity, resultPath, resultFd, resultIdentity } =
+    makeFreshRuntimeDirectory();
+  const nonce = crypto.randomUUID();
+  const serializable = {
+    command,
+    cwd: options.targetCwd === "private" ? directory : root,
+    env: {
+      ...s3OwnedEnvironment(),
+      S3_FRESH_RUNTIME_RESULT_DEV: resultIdentity.dev,
+      S3_FRESH_RUNTIME_RESULT_INO: resultIdentity.ino,
+    },
+    timeoutMs: options.timeoutMs,
+    termGraceMs: S3_OWNED_TERM_GRACE_MS,
+    killReapMs: S3_OWNED_KILL_REAP_MS,
+    pipeDrainMs: S3_OWNED_PIPE_DRAIN_MS,
+    retainedStreamBytes: options.retainedStreamBytes ?? S3_OWNED_STREAM_BYTES,
+    retainedOutputBytes: options.retainedOutputBytes ?? S3_OWNED_OUTPUT_BYTES,
+  };
+  let helper: ReturnType<typeof Bun.spawn> | undefined;
+  let stdoutCapture: FreshRuntimePipeCapture | undefined;
+  let stderrCapture: FreshRuntimePipeCapture | undefined;
+  const deadlineAt = performance.now() + timeoutMs;
+  const terminateAt = deadlineAt - S3_FRESH_RUNTIME_DIRECT_REAP_MS;
+  if (terminateAt <= performance.now()) {
+    closeFreshRuntimeCreationFds(resultFd, directoryFd);
+    throw new Error("S3_FRESH_RUNTIME_STARTUP_RESERVE_UNAVAILABLE");
   }
   try {
-    process.kill(-pgid, signal);
-  } catch {
-    throw new Error(`${label}_GROUP_SIGNAL_FAILED:${signal}`);
+    helper = Bun.spawn({
+      cmd: [process.execPath, "-e", FRESH_OWNED_COMMAND_DISPATCHER],
+      cwd: directory,
+      env: s3OwnedEnvironment(),
+      stdin: "pipe",
+      stdout: "pipe",
+      stderr: "pipe",
+    });
+    if (!(helper.stdout instanceof ReadableStream) || !(helper.stderr instanceof ReadableStream)) {
+      throw new Error("S3_FRESH_RUNTIME_CAPTURE_INIT_UNAVAILABLE");
+    }
+    stdoutCapture = beginFreshRuntimePipeCapture(
+      helper.stdout,
+      S3_FRESH_RUNTIME_RESULT_MAX_BYTES,
+      "S3_FRESH_RUNTIME_STDOUT",
+      S3_FRESH_RUNTIME_BOOTSTRAP_READY,
+    );
+    stderrCapture = beginFreshRuntimePipeCapture(
+      helper.stderr,
+      S3_FRESH_RUNTIME_DIAGNOSTIC_MAX_BYTES,
+      "S3_FRESH_RUNTIME_STDERR",
+    );
+    const bootstrap = freshRuntimeBootstrapBytes(
+      {
+        nonce,
+        result: resultIdentity,
+        directory: directoryIdentity,
+        directoryPath: directory,
+        runnerUrl: S3_OWNED_COMMAND_RUNNER_URL,
+        options: serializable,
+      },
+      options.bootstrapPlant,
+    );
+    // Startup consumes only the pre-reserved portion of this one monotonic
+    // deadline. The final direct-helper reap interval is never borrowed.
+    await writeFreshRuntimeBootstrap(
+      helper,
+      bootstrap,
+      terminateAt,
+      options.bootstrapPlant === "flush-stall"
+        ? () => new Promise<number>(() => undefined)
+        : undefined,
+    );
+    if (options.bootstrapPlant === undefined) {
+      if (stdoutCapture.startupReady === undefined) {
+        throw new Error("S3_FRESH_RUNTIME_STARTUP_CAPTURE_UNAVAILABLE");
+      }
+      await freshRuntimeValueBefore(
+        stdoutCapture.startupReady,
+        terminateAt,
+        "S3_FRESH_RUNTIME_STARTUP",
+      );
+    }
+    return {
+      directory,
+      directoryFd,
+      directoryIdentity,
+      directoryFdClosed: false,
+      resultPath,
+      resultFd,
+      resultIdentity,
+      resultFdClosed: false,
+      nonce,
+      timeoutMs,
+      deadlineAt,
+      terminateAt,
+      helper,
+      stdoutCapture,
+      stderrCapture,
+      helperKillRequested: false,
+      timeoutWon: false,
+      helperReaped: false,
+      exitCode: undefined,
+    };
+  } catch (error) {
+    if (helper !== undefined) {
+      try {
+        if (helper.exitCode === null && helper.signalCode === null) helper.kill("SIGKILL");
+      } catch {
+        // Bounded reap below remains authoritative.
+      }
+      const reaped = await freshRuntimeExitBefore(helper.exited, deadlineAt);
+      if (reaped === undefined) {
+        void stdoutCapture?.cancel();
+        void stderrCapture?.cancel();
+        closeFreshRuntimeCreationFds(resultFd, directoryFd);
+        throw new Error("S3_FRESH_RUNTIME_CAPTURE_INIT_REAP_UNPROVEN");
+      }
+      // A rejected or expired bootstrap flush cannot publish EOF until this
+      // exact helper is dead and reaped.
+      endFreshRuntimeBootstrapInput(helper);
+    }
+    try {
+      await settleFreshRuntimeCaptureCancellation(
+        [stdoutCapture, stderrCapture],
+        deadlineAt,
+        "S3_FRESH_RUNTIME_STARTUP_CAPTURE_CANCEL",
+      );
+    } catch {
+      closeFreshRuntimeCreationFds(resultFd, directoryFd);
+      throw new Error("S3_FRESH_RUNTIME_STARTUP_CAPTURE_CANCEL_UNPROVEN");
+    }
+    closeFreshRuntimeCreationFds(resultFd, directoryFd);
+    throw error;
   }
 }
 
-async function cleanupOwnedChildGroup(
-  exited: Promise<number>,
-  pgid: number,
-  limits: S3ChildLimits,
+function freshRuntimeBootstrapBytes(
+  bootstrap: FreshRuntimeBootstrap,
+  plant: S3OwnedCommandOptions["bootstrapPlant"],
+): Buffer {
+  const canonical = Buffer.from(`${JSON.stringify(bootstrap)}\n`, "utf8");
+  if (canonical.byteLength === 0 || canonical.byteLength > S3_FRESH_RUNTIME_BOOTSTRAP_MAX_BYTES) {
+    throw new Error("S3_FRESH_RUNTIME_BOOTSTRAP_OVERRUN");
+  }
+  switch (plant) {
+    case undefined:
+      return canonical;
+    case "malformed":
+      return Buffer.from(`{"nonce":${JSON.stringify(bootstrap.nonce)}}\n`, "utf8");
+    case "invalid-utf8":
+      return Buffer.from([0xff, 0x0a]);
+    case "noncanonical":
+      return Buffer.from(`${JSON.stringify(bootstrap)} \n`, "utf8");
+    case "extra-record":
+      return Buffer.concat([canonical, canonical]);
+    case "partial":
+      return canonical.subarray(0, -1);
+    case "overrun":
+      return Buffer.concat([canonical, Buffer.alloc(S3_FRESH_RUNTIME_BOOTSTRAP_MAX_BYTES, 0x20)]);
+    case "eof":
+      return Buffer.alloc(0);
+    case "flush-stall":
+      return canonical;
+  }
+}
+
+async function freshRuntimeValueBefore<T>(
+  value: Promise<T>,
+  deadlineAt: number,
+  label: string,
+): Promise<T> {
+  const remainingMs = deadlineAt - performance.now();
+  if (remainingMs <= 0) throw new Error(`${label}_DEADLINE`);
+  return await new Promise<T>((resolve, reject) => {
+    const timer = setTimeout(() => reject(new Error(`${label}_DEADLINE`)), remainingMs);
+    void value.then(
+      (resolved) => {
+        clearTimeout(timer);
+        resolve(resolved);
+      },
+      (error: unknown) => {
+        clearTimeout(timer);
+        reject(error);
+      },
+    );
+  });
+}
+
+async function settleFreshRuntimeCaptureCancellation(
+  captures: readonly (FreshRuntimePipeCapture | undefined)[],
+  deadlineAt: number,
   label: string,
 ): Promise<void> {
-  let census = childGroupCensus(pgid);
-  if (census === "unproven") throw new Error(`${label}_GROUP_CENSUS_UNPROVEN`);
-  if (census === "empty") {
-    const exitCode = await exitWithin(exited, limits.killGraceMs);
-    if (exitCode === undefined) throw new Error(`${label}_REAP_TIMEOUT`);
-    return;
+  const cancellation = Promise.all(
+    captures.map((capture) => capture?.cancel() ?? Promise.resolve()),
+  ).then(() => undefined);
+  if (performance.now() >= deadlineAt) {
+    if (captures.every((capture) => capture === undefined || capture.cancellationIsSettled())) {
+      await cancellation;
+      return;
+    }
+    throw new Error(`${label}_DEADLINE`);
+  }
+  await freshRuntimeValueBefore(cancellation, deadlineAt, label);
+}
+
+async function writeFreshRuntimeBootstrap(
+  helper: ReturnType<typeof Bun.spawn>,
+  bootstrap: Buffer,
+  deadlineAt: number,
+  flushOperation?: () => number | Promise<number>,
+): Promise<void> {
+  const sink = helper.stdin as {
+    write(bytes: Uint8Array): number;
+    flush(): number | Promise<number>;
+    end(): void;
+  };
+  // The caller kills and reaps the exact helper before it may end this stream
+  // after a failure. A full canonical write without EOF must not unlock import.
+  const written = sink.write(bootstrap);
+  if (written !== bootstrap.byteLength) {
+    throw new Error(`S3_FRESH_RUNTIME_BOOTSTRAP_PARTIAL_WRITE:${written}`);
+  }
+  await freshRuntimeValueBefore(
+    Promise.resolve(flushOperation?.() ?? sink.flush()),
+    deadlineAt,
+    "S3_FRESH_RUNTIME_BOOTSTRAP_FLUSH",
+  );
+  sink.end();
+}
+
+function endFreshRuntimeBootstrapInput(helper: ReturnType<typeof Bun.spawn>): void {
+  try {
+    (helper.stdin as { end(): void }).end();
+  } catch {
+    // The direct helper is already reaped; a broken pipe is expected here.
+  }
+}
+
+function closeFreshRuntimeResult(invocation: FreshRuntimeInvocation): void {
+  if (invocation.resultFdClosed) return;
+  invocation.resultFdClosed = true;
+  closeSync(invocation.resultFd);
+}
+
+function closeFreshRuntimeDirectory(invocation: FreshRuntimeInvocation): void {
+  if (invocation.directoryFdClosed) return;
+  invocation.directoryFdClosed = true;
+  closeSync(invocation.directoryFd);
+}
+
+function freshRuntimePublicationDiagnostic(invocation: FreshRuntimeInvocation): string {
+  try {
+    const stat = fstatSync(invocation.resultFd, { bigint: true }) as ExactBigIntStat;
+    return (
+      ":RESULT_HELPER_EXIT:" +
+      (invocation.exitCode ?? invocation.helper.exitCode ?? "unavailable") +
+      ":RESULT_HELPER_SIGNAL:" +
+      (invocation.helper.signalCode ?? "none") +
+      ":RESULT_MODE:" +
+      (stat.mode & 0o777n).toString(8) +
+      ":RESULT_SIZE:" +
+      stat.size +
+      ":RESULT_DEV:" +
+      stat.dev +
+      ":RESULT_INO:" +
+      stat.ino
+    );
+  } catch (error) {
+    return `:RESULT_DIAGNOSTIC_FAILED:${error instanceof Error ? error.name : "unknown"}`;
+  }
+}
+
+async function freshRuntimeExitBefore(
+  exited: Promise<number>,
+  deadlineAt: number,
+): Promise<number | undefined> {
+  const remainingMs = deadlineAt - performance.now();
+  if (remainingMs <= 0) return undefined;
+  return await new Promise<number | undefined>((resolve) => {
+    let completed = false;
+    const complete = (exitCode: number | undefined) => {
+      if (completed) return;
+      completed = true;
+      clearTimeout(timer);
+      resolve(exitCode);
+    };
+    const timer = setTimeout(() => complete(undefined), remainingMs);
+    void exited.then(
+      (exitCode) => complete(exitCode),
+      () => complete(undefined),
+    );
+  });
+}
+
+async function freshRuntimePipeBefore(
+  capture: FreshRuntimePipeCapture,
+  deadlineAt: number,
+  label: string,
+): Promise<Buffer> {
+  const remainingMs = deadlineAt - performance.now();
+  if (remainingMs <= 0) {
+    void capture.cancel();
+    throw new Error(`${label}_FRESH_RUNTIME_PIPE_DRAIN_UNPROVEN`);
+  }
+  return await new Promise<Buffer>((resolve, reject) => {
+    let completed = false;
+    const finish = (action: () => void) => {
+      if (completed) return;
+      completed = true;
+      clearTimeout(timer);
+      action();
+    };
+    const timer = setTimeout(() => {
+      void capture.cancel();
+      finish(() => reject(new Error(`${label}_FRESH_RUNTIME_PIPE_DRAIN_UNPROVEN`)));
+    }, remainingMs);
+    void capture.complete.then(
+      (content) => finish(() => resolve(content)),
+      (error) => finish(() => reject(error)),
+    );
+  });
+}
+
+type FreshRuntimeSettlement = "exited" | "timed-out" | "reap-unproven";
+
+async function settleFreshRuntime(
+  invocation: FreshRuntimeInvocation,
+): Promise<FreshRuntimeSettlement> {
+  if (invocation.helperReaped) return invocation.timeoutWon ? "timed-out" : "exited";
+  const directExit = await freshRuntimeExitBefore(invocation.helper.exited, invocation.terminateAt);
+  if (directExit !== undefined) {
+    invocation.exitCode = directExit;
+    invocation.helperReaped = true;
+    return "exited";
   }
 
-  signalOwnedChildGroup(pgid, "SIGTERM", label);
-  const termExit = await exitWithin(exited, limits.termGraceMs);
-  census = childGroupCensus(pgid);
-  if (census === "unproven") throw new Error(`${label}_GROUP_CENSUS_UNPROVEN`);
-  if (census === "members") {
-    signalOwnedChildGroup(pgid, "SIGKILL", label);
+  // The timeout wins even if a late exit races this branch: after this point no
+  // result bytes are parsed, including a late status-0 publication.
+  invocation.timeoutWon = true;
+  try {
+    if (invocation.helper.exitCode === null && invocation.helper.signalCode === null) {
+      invocation.helperKillRequested = true;
+      invocation.helper.kill("SIGKILL");
+    }
+  } catch {
+    // A concurrent direct exit is reconciled by the bounded reap below.
   }
-  const killExit = termExit ?? (await exitWithin(exited, limits.killGraceMs));
-  if (killExit === undefined) throw new Error(`${label}_REAP_TIMEOUT`);
-  census = childGroupCensus(pgid);
-  if (census === "unproven") throw new Error(`${label}_GROUP_CENSUS_UNPROVEN`);
-  if (census !== "empty") throw new Error(`${label}_GROUP_SURVIVORS`);
+  const reapedExit = await freshRuntimeExitBefore(invocation.helper.exited, invocation.deadlineAt);
+  if (reapedExit === undefined) return "reap-unproven";
+  invocation.exitCode = reapedExit;
+  invocation.helperReaped = true;
+  return "timed-out";
+}
+
+async function retireFreshRuntime(invocation: FreshRuntimeInvocation): Promise<void> {
+  try {
+    if (!invocation.helperReaped) {
+      try {
+        if (invocation.helper.exitCode === null && invocation.helper.signalCode === null) {
+          invocation.helperKillRequested = true;
+          invocation.helper.kill("SIGKILL");
+        }
+      } catch {
+        // The bounded reap below is authoritative.
+      }
+      const reapedExit = await freshRuntimeExitBefore(
+        invocation.helper.exited,
+        invocation.deadlineAt,
+      );
+      if (reapedExit !== undefined) {
+        invocation.exitCode = reapedExit;
+        invocation.helperReaped = true;
+      }
+    }
+    if (!invocation.helperReaped) throw new Error("S3_FRESH_RUNTIME_REAP_UNPROVEN");
+  } finally {
+    await settleFreshRuntimeCaptureCancellation(
+      [invocation.stdoutCapture, invocation.stderrCapture],
+      invocation.deadlineAt,
+      "S3_FRESH_RUNTIME_RETIRE_CAPTURE_CANCEL",
+    );
+  }
+}
+
+async function retireAndCloseFreshRuntime(
+  invocation: FreshRuntimeInvocation,
+  retire: (current: FreshRuntimeInvocation) => Promise<void> = retireFreshRuntime,
+): Promise<void> {
+  try {
+    await retire(invocation);
+  } finally {
+    try {
+      closeFreshRuntimeResult(invocation);
+    } finally {
+      closeFreshRuntimeDirectory(invocation);
+    }
+  }
+}
+
+async function assertFreshRuntimeExited(
+  invocation: FreshRuntimeInvocation,
+  label: string,
+): Promise<void> {
+  const settlement = await settleFreshRuntime(invocation);
+  const failure = (detail: string): never => {
+    throw new Error(`${label}_${detail}${freshRuntimePublicationDiagnostic(invocation)}`);
+  };
+  if (invocation.timeoutWon || settlement === "timed-out") {
+    failure(`FRESH_RUNTIME_DEADLINE:${invocation.timeoutMs}`);
+  }
+  if (settlement === "reap-unproven") failure("FRESH_RUNTIME_REAP_UNPROVEN");
+  if (!invocation.helperReaped) failure("FRESH_RUNTIME_REAP_UNPROVEN");
+  if (invocation.helper.signalCode !== null) {
+    failure(`FRESH_RUNTIME_SIGNAL:${invocation.helper.signalCode}`);
+  }
+  if (invocation.exitCode !== 0) {
+    if (invocation.exitCode === S3_FRESH_RUNTIME_RETAINED_COLLISION_EXIT_CODE) {
+      failure("FRESH_RUNTIME_RETAINED_REPUBLISH_REFUSED");
+    }
+    failure(`FRESH_RUNTIME_STATUS:${invocation.exitCode ?? "unavailable"}`);
+  }
+  const stdout = await freshRuntimePipeBefore(
+    invocation.stdoutCapture,
+    invocation.deadlineAt,
+    label,
+  );
+  const stderr = await freshRuntimePipeBefore(
+    invocation.stderrCapture,
+    invocation.deadlineAt,
+    label,
+  );
+  if (stderr.byteLength !== 0 || !stdout.equals(S3_FRESH_RUNTIME_BOOTSTRAP_READY)) {
+    failure(`FRESH_RUNTIME_DIAGNOSTIC_UNEXPECTED:${stderr.byteLength}:STDOUT:${stdout.byteLength}`);
+  }
+  assertPinnedFreshRuntimeDirectory(invocation, label);
+}
+
+function readFreshRuntimeAuthorityInode(invocation: FreshRuntimeInvocation, label: string): Buffer {
+  const opened = fstatSync(invocation.resultFd, { bigint: true }) as ExactBigIntStat;
+  if (
+    !opened.isFile() ||
+    !sameIdentityExceptNlink(opened, invocation.resultIdentity, 0n) ||
+    (opened.mode & 0o777n) !== 0o600n
+  ) {
+    throw new Error(`${label}_FRESH_RUNTIME_RESULT_INODE_MISMATCH`);
+  }
+  if (opened.size === 0n) {
+    throw new Error(
+      `${label}_FRESH_RUNTIME_RESULT_EMPTY${freshRuntimePublicationDiagnostic(invocation)}`,
+    );
+  }
+  if (opened.size > BigInt(S3_FRESH_RUNTIME_RESULT_MAX_BYTES)) {
+    throw new Error(`${label}_FRESH_RUNTIME_RESULT_OVERRUN:${opened.size}`);
+  }
+  const content = Buffer.alloc(Number(opened.size));
+  let offset = 0;
+  while (offset < content.byteLength) {
+    const read = readSync(
+      invocation.resultFd,
+      content,
+      offset,
+      content.byteLength - offset,
+      offset,
+    );
+    if (read <= 0) throw new Error(`${label}_FRESH_RUNTIME_RESULT_PARTIAL`);
+    offset += read;
+  }
+  const completed = fstatSync(invocation.resultFd, { bigint: true }) as ExactBigIntStat;
+  if (
+    !completed.isFile() ||
+    !sameIdentityExceptNlink(completed, invocation.resultIdentity, 0n) ||
+    (completed.mode & 0o777n) !== 0o600n ||
+    completed.size !== BigInt(content.byteLength)
+  ) {
+    throw new Error(`${label}_FRESH_RUNTIME_RESULT_CHANGED`);
+  }
+  return content;
+}
+
+function rereadRetainedFreshRuntimeResult(
+  invocation: FreshRuntimeInvocation,
+  content: Buffer,
+  label: string,
+): void {
+  assertPinnedFreshRuntimeDirectory(invocation, label);
+  const named = lstatSync(invocation.resultPath, { bigint: true }) as ExactBigIntStat;
+  if (
+    !named.isFile() ||
+    (named.mode & 0o777n) !== 0o600n ||
+    named.nlink !== 1n ||
+    named.size !== BigInt(content.byteLength) ||
+    named.dev.toString(10) !== invocation.resultIdentity.dev ||
+    named.ino.toString(10) === invocation.resultIdentity.ino
+  ) {
+    throw new Error(`${label}_FRESH_RUNTIME_RETAINED_RESULT_UNPROVEN`);
+  }
+  const retainedIdentity = exactInodeIdentity(named);
+  const retainedFd = openSync(invocation.resultPath, constants.O_RDONLY | constants.O_NOFOLLOW);
+  try {
+    const opened = fstatSync(retainedFd, { bigint: true }) as ExactBigIntStat;
+    if (
+      !opened.isFile() ||
+      !sameExactIdentity(opened, retainedIdentity) ||
+      opened.size !== BigInt(content.byteLength)
+    ) {
+      throw new Error(`${label}_FRESH_RUNTIME_RETAINED_RESULT_CHANGED`);
+    }
+    const reread = Buffer.alloc(content.byteLength);
+    let offset = 0;
+    while (offset < reread.byteLength) {
+      const read = readSync(retainedFd, reread, offset, reread.byteLength - offset, offset);
+      if (read <= 0) throw new Error(`${label}_FRESH_RUNTIME_RETAINED_RESULT_PARTIAL`);
+      offset += read;
+    }
+    const completed = fstatSync(retainedFd, { bigint: true }) as ExactBigIntStat;
+    if (
+      !sameExactIdentity(completed, retainedIdentity) ||
+      completed.size !== BigInt(content.byteLength) ||
+      !reread.equals(content)
+    ) {
+      throw new Error(`${label}_FRESH_RUNTIME_RETAINED_RESULT_REREAD_MISMATCH`);
+    }
+  } finally {
+    closeSync(retainedFd);
+  }
+  assertPinnedFreshRuntimeDirectory(invocation, label);
+}
+
+function isOwnedCommandResult(value: unknown): value is OwnedCommandResult {
+  if (value === null || typeof value !== "object") return false;
+  const result = value as Record<string, unknown>;
+  return (
+    typeof result.outcome === "string" &&
+    Object.hasOwn(OWNED_COMMAND_OUTCOMES, result.outcome) &&
+    typeof result.stdout === "string" &&
+    typeof result.stderr === "string" &&
+    Number.isSafeInteger(result.retainedStdoutBytes) &&
+    Number(result.retainedStdoutBytes) >= 0 &&
+    Number.isSafeInteger(result.retainedStderrBytes) &&
+    Number(result.retainedStderrBytes) >= 0 &&
+    Number.isSafeInteger(result.retainedOutputBytes) &&
+    Number(result.retainedOutputBytes) >= 0 &&
+    (result.exitCode === undefined || Number.isSafeInteger(result.exitCode)) &&
+    (result.signal === undefined || typeof result.signal === "string") &&
+    (result.cleanupProven === undefined || typeof result.cleanupProven === "boolean")
+  );
+}
+
+function isFreshOwnedS3ResultPayload(value: unknown): value is {
+  readonly kind: "result";
+  readonly result: OwnedCommandResult;
+  readonly cleanupProven: boolean;
+} {
+  if (value === null || typeof value !== "object") return false;
+  const record = value as Record<string, unknown>;
+  if (
+    record.kind !== "result" ||
+    !isOwnedCommandResult(record.result) ||
+    typeof record.cleanupProven !== "boolean"
+  ) {
+    return false;
+  }
+  return (
+    record.cleanupProven ===
+    (record.result.outcome === "exited" || record.result.cleanupProven === true)
+  );
+}
+
+async function readFreshOwnedS3Result(
+  invocation: FreshRuntimeInvocation,
+  label: string,
+): Promise<FreshOwnedS3Result> {
+  const content = readFreshRuntimeAuthorityInode(invocation, label);
+  if (content.byteLength > S3_FRESH_RUNTIME_RESULT_MAX_BYTES) {
+    throw new Error(`${label}_FRESH_RUNTIME_RESULT_OVERRUN:${content.byteLength}`);
+  }
+  if (content.at(-1) !== 0x0a || content.subarray(0, -1).includes(0x0a) || content.includes(0x0d)) {
+    throw new Error(`${label}_FRESH_RUNTIME_RESULT_NONCANONICAL`);
+  }
+
+  let payload: string;
+  try {
+    payload = new TextDecoder("utf-8", { fatal: true }).decode(content);
+  } catch {
+    throw new Error(`${label}_FRESH_RUNTIME_RESULT_INVALID_UTF8`);
+  }
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(payload);
+  } catch {
+    throw new Error(`${label}_FRESH_RUNTIME_RESULT_INVALID_JSON`);
+  }
+  if (parsed === null || typeof parsed !== "object") {
+    throw new Error(`${label}_FRESH_RUNTIME_RESULT_SHAPE`);
+  }
+  const record = parsed as Record<string, unknown>;
+  if (record.nonce !== invocation.nonce) {
+    throw new Error(`${label}_FRESH_RUNTIME_RESULT_NONCE_MISMATCH`);
+  }
+  if (!isFreshOwnedS3ResultPayload(record)) {
+    throw new Error(`${label}_FRESH_RUNTIME_RESULT_SHAPE`);
+  }
+  const canonical = Buffer.from(`${JSON.stringify(parsed)}\n`, "utf8");
+  if (!canonical.equals(content)) {
+    throw new Error(`${label}_FRESH_RUNTIME_RESULT_NONCANONICAL`);
+  }
+  // The retained name is only reread evidence after the unlinked authority
+  // inode has passed every UTF-8, nonce, schema, and canonicality check.
+  rereadRetainedFreshRuntimeResult(invocation, content, label);
+  return { result: record.result, cleanupProven: record.cleanupProven };
+}
+
+async function runFreshOwnedS3Command(
+  command: readonly string[],
+  label: string,
+  options: S3OwnedCommandOptions,
+): Promise<FreshOwnedS3Result> {
+  const invocation = await invokeFreshOwnedS3Command(command, options);
+  try {
+    await assertFreshRuntimeExited(invocation, label);
+    return await readFreshOwnedS3Result(invocation, label);
+  } finally {
+    await retireAndCloseFreshRuntime(invocation);
+  }
 }
 
 async function runBoundedS3Child(
   command: readonly string[],
   label: string,
-  options: S3ChildOptions = {},
-): Promise<{
-  readonly stdout: string;
-  readonly stderr: string;
-  readonly exitCode: number;
-}> {
-  const limits = childLimits(options.limits);
-  const allowedExitCodes = options.allowedExitCodes ?? [0];
-  const reportToken = crypto.randomUUID();
-  let settleReport: (result: string | Error) => void = () => {};
-  const report = new Promise<string>((resolveReport, rejectReport) => {
-    settleReport = (result) => {
-      if (result instanceof Error) rejectReport(result);
-      else resolveReport(result);
-    };
-  });
-  let reportSettled = false;
-  const settleReportOnce = (result: string | Error): void => {
-    if (reportSettled) return;
-    reportSettled = true;
-    settleReport(result);
-  };
-  const server = Bun.serve({
-    hostname: "127.0.0.1",
-    port: 0,
-    fetch: async (request) => {
-      const rejectReport = (code: string, status: number): Response => {
-        settleReportOnce(new Error(`${label}_REPORT_${code}`));
-        return new Response(null, { status });
-      };
-      if (request.method !== "POST" || new URL(request.url).pathname !== S3_CHILD_REPORT_PATH) {
-        return rejectReport("PATH_INVALID", 404);
-      }
-      if (request.headers.get("x-s3-child-report-token") !== reportToken) {
-        return rejectReport("TOKEN_INVALID", 403);
-      }
-      const contentLength = Number(request.headers.get("content-length"));
-      if (
-        !Number.isSafeInteger(contentLength) ||
-        contentLength < 1 ||
-        contentLength > limits.maxBufferBytes
-      ) {
-        return rejectReport("OUTPUT_OVERRUN", 413);
-      }
-      try {
-        const output = new Uint8Array(await request.arrayBuffer());
-        if (output.byteLength !== contentLength || output.byteLength > limits.maxBufferBytes) {
-          return rejectReport("OUTPUT_OVERRUN", 413);
-        }
-        settleReportOnce(new TextDecoder().decode(output));
-        return new Response(null, { status: 204 });
-      } catch {
-        return rejectReport("READ_FAILURE", 400);
-      }
-    },
-  });
-  const reportUrl = `http://127.0.0.1:${server.port}${S3_CHILD_REPORT_PATH}`;
-  let child: ReturnType<typeof Bun.spawn>;
-  try {
-    child = Bun.spawn({
-      cmd: [
-        "bash",
-        "-c",
-        [
-          "set -o pipefail",
-          '"$@" 2>&1 | curl --silent --show-error --fail --max-time "$S3_CHILD_REPORT_TIMEOUT_SECONDS" --request POST --header "x-s3-child-report-token: $S3_CHILD_REPORT_TOKEN" --data-binary @- "$S3_CHILD_REPORT_URL"',
-          'statuses=("${PIPESTATUS[@]}")',
-          '(( statuses[1] == 0 )) || exit 125',
-          'exit "${statuses[0]}"',
-        ].join("\n"),
-        "--",
-        ...command,
-      ],
-      cwd: root,
-      env: {
-        ...process.env,
-        S3_CHILD_REPORT_TIMEOUT_SECONDS,
-        S3_CHILD_REPORT_TOKEN: reportToken,
-        S3_CHILD_REPORT_URL: reportUrl,
-      },
-      detached: true,
-      stdout: "ignore",
-      stderr: "ignore",
-    });
-  } catch (error) {
-    server.stop(true);
+  expectedExitCode: number,
+  options: S3OwnedCommandOptions,
+): Promise<{ readonly stdout: string; readonly stderr: string; readonly exitCode: number }> {
+  const { result, cleanupProven } = await runFreshOwnedS3Command(command, label, options);
+  if (result.outcome !== "exited") {
     throw new Error(
-      `${label}_LAUNCH_ERROR:${error instanceof Error ? error.name : "UNKNOWN"}`,
+      `${label}_OUTCOME:${result.outcome}:CLEANUP:${result.cleanupProven === true}:STDOUT_BYTES:${result.retainedStdoutBytes}:STDERR_BYTES:${result.retainedStderrBytes}`,
     );
   }
-  const exited = child.exited;
-  const statusFailure = exited.then((exitCode) => {
-    if (exitCode === 129) throw new Error(`${label}_SIGNALLED:HUP`);
-    if (exitCode === 130) throw new Error(`${label}_SIGNALLED:INT`);
-    if (exitCode === 143) throw new Error(`${label}_SIGNALLED:TERM`);
-    if (!allowedExitCodes.includes(exitCode)) throw new Error(`${label}_STATUS:${exitCode}`);
-    return new Promise<never>(() => {});
-  });
-  let timeoutId: ReturnType<typeof setTimeout> | undefined;
-  let complete = false;
-  let primaryFailure: unknown;
-  try {
-    const timeout = new Promise<never>((_resolveTimeout, rejectTimeout) => {
-      timeoutId = setTimeout(() => {
-        rejectTimeout(new Error(`${label}_TIMEOUT:${limits.timeoutMs}`));
-      }, limits.timeoutMs);
-    });
-    const [stdout, exitCode] = await Promise.race([
-      Promise.all([report, exited]),
-      statusFailure,
-      timeout,
-    ]);
-    if (childGroupCensus(child.pid) !== "empty") {
-      throw new Error(`${label}_GROUP_SURVIVORS_AFTER_EXIT`);
-    }
-    complete = true;
-    return { stdout, stderr: "", exitCode };
-  } catch (error) {
-    primaryFailure = error;
-    throw error;
-  } finally {
-    if (timeoutId !== undefined) clearTimeout(timeoutId);
-    if (!complete) {
-      try {
-        await cleanupOwnedChildGroup(exited, child.pid, limits, label);
-      } catch (cleanupFailure) {
-        const primary = primaryFailure instanceof Error ? primaryFailure.message : "UNKNOWN";
-        throw new Error(
-          `${label}_CLEANUP_FAILED:${cleanupFailure instanceof Error ? cleanupFailure.message : "UNKNOWN"}:PRIMARY:${primary}`,
-        );
-      }
-    }
-    server.stop(true);
+  if (cleanupProven !== true) throw new Error(`${label}_CLEANUP_UNPROVEN`);
+  if (result.exitCode !== expectedExitCode) {
+    throw new Error(`${label}_EXIT_CODE:${result.exitCode ?? "UNAVAILABLE"}`);
   }
+  if (result.stdout.length === 0) throw new Error(`${label}_OUTPUT_EMPTY`);
+  return { stdout: result.stdout, stderr: result.stderr, exitCode: result.exitCode };
 }
-
-test(
-  "PLANTED: a TERM-resistant child is group-KILLed before its S-3 harness timeout reports",
-  async () => {
-    await expect(
-      runBoundedS3Child(
-        [
-          process.execPath,
-          "-e",
-          'process.on("SIGTERM", () => {}); setInterval(() => {}, 1_000);',
-        ],
-        "S3_PLANTED_TIMEOUT",
-        { limits: { timeoutMs: 250, termGraceMs: 100, killGraceMs: 250 } },
-      ),
-    ).rejects.toThrow("S3_PLANTED_TIMEOUT_TIMEOUT:250");
-  },
-  { timeout: 5_000 },
-);
-
-test(
-  "PLANTED: an over-cap child report is rejected instead of becoming a truncated bundle",
-  async () => {
-    await expect(
-      runBoundedS3Child(
-        [process.execPath, "-e", 'process.stdout.write("x".repeat(65));'],
-        "S3_PLANTED_OVERRUN",
-        { limits: { timeoutMs: 1_000, maxBufferBytes: 64, termGraceMs: 100, killGraceMs: 250 } },
-      ),
-    ).rejects.toThrow("S3_PLANTED_OVERRUN_REPORT_OUTPUT_OVERRUN");
-  },
-  { timeout: 5_000 },
-);
 
 function localWorkerBundleSentinels(bundle: string): readonly string[] {
   return LOCAL_WORKER_BUNDLE_SENTINELS.filter((sentinel) => bundle.includes(sentinel));
@@ -452,15 +1475,10 @@ async function isolatedProductionBundle(
   // seam is bounded because Bun test can otherwise hide a stalled child or
   // truncate an overlarge build result into a misleading empty bundle.
   const { stdout, stderr, exitCode } = await runBoundedS3Child(
-    [
-      process.execPath,
-      "-e",
-      ISOLATED_BUILD_SCRIPT,
-      mode,
-      productionEntrypoint,
-      localWorkerEntrypoint,
-    ],
+    ["bun", "-e", ISOLATED_BUILD_SCRIPT, mode, productionEntrypoint, localWorkerEntrypoint],
     "S3_ISOLATED_BUILD",
+    0,
+    { timeoutMs: S3_BUNDLE_TIMEOUT_MS },
   );
   if (exitCode !== 0) {
     throw new Error(`S3_ISOLATED_BUILD_FAILED:${mode}:${exitCode}\n${stderr}`);
@@ -470,6 +1488,796 @@ async function isolatedProductionBundle(
   }
   return stdout;
 }
+
+function createPrivateFixtureFile(directory: string, name: string): string {
+  const path = join(directory, name);
+  closeSync(
+    openSync(
+      path,
+      constants.O_WRONLY | constants.O_CREAT | constants.O_EXCL | constants.O_NOFOLLOW,
+      0o600,
+    ),
+  );
+  chmodSync(path, 0o600);
+  return path;
+}
+
+function writePrivateFixtureFile(directory: string, name: string, content: Buffer): string {
+  const path = createPrivateFixtureFile(directory, name);
+  const fd = openSync(path, constants.O_WRONLY | constants.O_NOFOLLOW);
+  try {
+    let offset = 0;
+    while (offset < content.byteLength) {
+      const written = writeSync(fd, content, offset, content.byteLength - offset, offset);
+      if (written <= 0) throw new Error("S3_PRIVATE_FIXTURE_WRITE_PARTIAL");
+      offset += written;
+    }
+  } finally {
+    closeSync(fd);
+  }
+  return path;
+}
+
+function readBoundedCensusFd(fd: number, label: string): string {
+  const opened = fstatSync(fd);
+  if (!opened.isFile() || (opened.mode & 0o777) !== 0o600) {
+    throw new Error(`${label}_CENSUS_FILE_UNPROVEN`);
+  }
+  if (opened.size > S3_MARKER_CENSUS_MAX_BYTES) {
+    throw new Error(`${label}_CENSUS_OVERRUN:${opened.size}`);
+  }
+  const content = Buffer.alloc(opened.size);
+  let offset = 0;
+  while (offset < content.length) {
+    const read = readSync(fd, content, offset, content.length - offset, offset);
+    if (read <= 0) throw new Error(`${label}_CENSUS_PARTIAL`);
+    offset += read;
+  }
+  const completed = fstatSync(fd);
+  if (!completed.isFile() || (completed.mode & 0o777) !== 0o600 || completed.size !== opened.size) {
+    throw new Error(`${label}_CENSUS_CHANGED`);
+  }
+  try {
+    return new TextDecoder("utf-8", { fatal: true }).decode(content);
+  } catch {
+    throw new Error(`${label}_CENSUS_INVALID_UTF8`);
+  }
+}
+
+function parseExactMarkerCensus(stdout: string, stderr: string, marker: string): number[] {
+  if (stderr !== "") throw new Error("S3_EXACT_MARKER_INSPECTION_STDERR");
+  if (!stdout.endsWith("\n")) throw new Error("S3_EXACT_MARKER_INSPECTION_TRUNCATED");
+  const lines = stdout.slice(0, -1).split("\n");
+  const pids: number[] = [];
+  const seenPids = new Set<number>();
+  let runnerPresent = false;
+  for (const line of lines) {
+    const match = /^\s*([1-9][0-9]*)\s+(.+)$/u.exec(line);
+    const pid = Number(match?.[1]);
+    const command = match?.[2];
+    if (
+      match === null ||
+      typeof command !== "string" ||
+      !Number.isSafeInteger(pid) ||
+      seenPids.has(pid)
+    ) {
+      throw new Error("S3_EXACT_MARKER_INSPECTION_MALFORMED");
+    }
+    seenPids.add(pid);
+    if (pid === process.pid) runnerPresent = true;
+    if (command.includes(marker)) pids.push(pid);
+  }
+  if (!runnerPresent) throw new Error("S3_EXACT_MARKER_INSPECTION_NONVACUOUS");
+  return pids;
+}
+
+function exactMarkerProcessIds(directory: string, marker: string): number[] {
+  const nonce = crypto.randomUUID();
+  const stdoutPath = createPrivateFixtureFile(directory, `marker-${nonce}.stdout`);
+  const stderrPath = createPrivateFixtureFile(directory, `marker-${nonce}.stderr`);
+  let stdoutFd: number | undefined;
+  try {
+    stdoutFd = openSync(stdoutPath, constants.O_RDWR | constants.O_TRUNC | constants.O_NOFOLLOW);
+    let stderrFd: number | undefined;
+    try {
+      stderrFd = openSync(stderrPath, constants.O_RDWR | constants.O_TRUNC | constants.O_NOFOLLOW);
+      const inspection = spawnSync("/bin/ps", ["-axww", "-o", "pid=,command="], {
+        cwd: root,
+        stdio: ["ignore", stdoutFd, stderrFd],
+        timeout: S3_MARKER_INSPECTION_TIMEOUT_MS,
+      });
+      if (inspection.error !== undefined || inspection.signal !== null || inspection.status !== 0) {
+        throw new Error("S3_EXACT_MARKER_INSPECTION_UNPROVEN");
+      }
+      const stdout = readBoundedCensusFd(stdoutFd, "S3_EXACT_MARKER_STDOUT");
+      const stderr = readBoundedCensusFd(stderrFd, "S3_EXACT_MARKER_STDERR");
+      return parseExactMarkerCensus(stdout, stderr, marker);
+    } finally {
+      if (stderrFd !== undefined) closeSync(stderrFd);
+    }
+  } finally {
+    if (stdoutFd !== undefined) closeSync(stdoutFd);
+  }
+}
+
+async function waitForExactMarkerAbsence(directory: string, marker: string): Promise<void> {
+  const deadline = performance.now() + S3_OUTER_LEASE_RETIRE_WAIT_MS;
+  let lastPids: number[] = [];
+  while (performance.now() < deadline) {
+    lastPids = exactMarkerProcessIds(directory, marker);
+    if (lastPids.length === 0) return;
+    await Bun.sleep(20);
+  }
+  throw new Error(`S3_OUTER_DEADLINE_MARKER_SURVIVED:${marker}:${lastPids.join(",")}`);
+}
+
+async function waitForExactReadyMarker(path: string, marker: string): Promise<number> {
+  const deadline = performance.now() + S3_OUTER_DEADLINE_PLANT_MS;
+  let observed = "";
+  while (performance.now() < deadline) {
+    observed = readFileSync(path, "utf8");
+    const match = new RegExp(`^${marker} ([1-9][0-9]*)\\n$`, "u").exec(observed);
+    const targetPid = Number(match?.[1]);
+    if (match !== null && Number.isSafeInteger(targetPid)) return targetPid;
+    await Bun.sleep(20);
+  }
+  throw new Error(`S3_OUTER_DEADLINE_TARGET_NOT_READY:${JSON.stringify(observed)}`);
+}
+
+test("PLANTED: fresh result parser refuses prototype outcomes and inconsistent cleanup authority", () => {
+  const exited = {
+    outcome: "exited",
+    stdout: "",
+    stderr: "",
+    retainedStdoutBytes: 0,
+    retainedStderrBytes: 0,
+    retainedOutputBytes: 0,
+  };
+  expect(
+    isOwnedCommandResult({
+      outcome: "toString",
+      stdout: "",
+      stderr: "",
+      retainedStdoutBytes: 0,
+      retainedStderrBytes: 0,
+      retainedOutputBytes: 0,
+    }),
+  ).toBe(false);
+  expect(
+    isFreshOwnedS3ResultPayload({ kind: "result", result: exited, cleanupProven: false }),
+  ).toBe(false);
+});
+
+test("PLANTED: exact marker census refuses empty and truncated snapshots", () => {
+  const marker = `s3-census-negative-${crypto.randomUUID()}`;
+  expect(() => parseExactMarkerCensus("", "", marker)).toThrow(
+    "S3_EXACT_MARKER_INSPECTION_TRUNCATED",
+  );
+  expect(() => parseExactMarkerCensus(`${process.pid} runner`, "", marker)).toThrow(
+    "S3_EXACT_MARKER_INSPECTION_TRUNCATED",
+  );
+});
+
+for (const bootstrapPlant of [
+  "malformed",
+  "invalid-utf8",
+  "noncanonical",
+  "extra-record",
+  "partial",
+  "overrun",
+  "eof",
+] as const) {
+  test(
+    `PLANTED: ${bootstrapPlant} bootstrap record fails closed without target import or authority parsing`,
+    async () => {
+      const markerDirectory = makePrivateFixtureDirectory();
+      const markerPath = join(
+        markerDirectory,
+        `bootstrap-target-ran-${bootstrapPlant}-${crypto.randomUUID()}`,
+      );
+      const invocation = await invokeFreshOwnedS3Command(
+        [
+          "perl",
+          "-e",
+          'open(my $marker, ">", $ARGV[0]) or exit 111; print {$marker} "target-ran\\n" or exit 112; close($marker) or exit 113;',
+          markerPath,
+        ],
+        {
+          timeoutMs: 2_000,
+          bootstrapPlant,
+        },
+      );
+      try {
+        expect(await settleFreshRuntime(invocation)).toBe("exited");
+        expect(invocation.helperReaped).toBe(true);
+        expect(invocation.timeoutWon).toBe(false);
+        expect(invocation.helper.signalCode).toBeNull();
+        expect(invocation.exitCode).not.toBe(0);
+        expect(
+          await freshRuntimePipeBefore(
+            invocation.stdoutCapture,
+            invocation.deadlineAt,
+            "S3_FRESH_BOOTSTRAP_STDOUT",
+          ),
+        ).toEqual(Buffer.alloc(0));
+        expect(
+          await freshRuntimePipeBefore(
+            invocation.stderrCapture,
+            invocation.deadlineAt,
+            "S3_FRESH_BOOTSTRAP_STDERR",
+          ),
+        ).toEqual(Buffer.alloc(0));
+        const original = fstatSync(invocation.resultFd, { bigint: true }) as ExactBigIntStat;
+        const named = lstatSync(invocation.resultPath, { bigint: true }) as ExactBigIntStat;
+        expect(sameExactIdentity(original, invocation.resultIdentity)).toBe(true);
+        expect(sameExactIdentity(named, invocation.resultIdentity)).toBe(true);
+        expect(original.size).toBe(0n);
+        assertPinnedFreshRuntimeDirectory(invocation, "S3_FRESH_BOOTSTRAP");
+        expect(() => lstatSync(markerPath)).toThrow();
+      } finally {
+        await retireAndCloseFreshRuntime(invocation);
+      }
+      expect(invocation.resultFdClosed).toBe(true);
+      expect(invocation.directoryFdClosed).toBe(true);
+    },
+    { timeout: 20_000 },
+  );
+}
+
+test("PLANTED: bootstrap write failure never ends stdin before its owning reaper", async () => {
+  for (const mode of ["partial-write", "flush-stall"] as const) {
+    let ended = 0;
+    let flushStarted = false;
+    const helper = {
+      stdin: {
+        write(bytes: Uint8Array): number {
+          return mode === "partial-write" ? bytes.byteLength - 1 : bytes.byteLength;
+        },
+        flush(): Promise<number> {
+          flushStarted = true;
+          return mode === "flush-stall" ? new Promise<number>(() => undefined) : Promise.resolve(0);
+        },
+        end(): void {
+          ended += 1;
+        },
+      },
+    } as unknown as ReturnType<typeof Bun.spawn>;
+    await expect(
+      writeFreshRuntimeBootstrap(
+        helper,
+        Buffer.from('{"one":"canonical-record"}\n', "utf8"),
+        performance.now() + 50,
+      ),
+    ).rejects.toThrow(
+      mode === "partial-write"
+        ? "S3_FRESH_RUNTIME_BOOTSTRAP_PARTIAL_WRITE"
+        : "S3_FRESH_RUNTIME_BOOTSTRAP_FLUSH_DEADLINE",
+    );
+    expect(flushStarted).toBe(mode === "flush-stall");
+    expect(ended).toBe(0);
+  }
+});
+
+test("PLANTED: an overrun pipe requests and settles cancellation exactly once", async () => {
+  let cancellations = 0;
+  let cancellationSettled = false;
+  const stream = new ReadableStream<Uint8Array>({
+    start(controller) {
+      controller.enqueue(new Uint8Array(129));
+    },
+    cancel() {
+      cancellations += 1;
+      cancellationSettled = true;
+    },
+  });
+  const capture = beginFreshRuntimePipeCapture(stream, 128, "S3_FRESH_RUNTIME_CANCEL");
+  await expect(capture.complete).rejects.toThrow(
+    "S3_FRESH_RUNTIME_CANCEL_FRESH_RUNTIME_PIPE_OVERRUN",
+  );
+  expect(capture.cancellationRequested()).toBe(true);
+  await expect(capture.cancellationSettled()).resolves.toBeUndefined();
+  expect(capture.cancellationIsSettled()).toBe(true);
+  expect(cancellations).toBe(1);
+  expect(cancellationSettled).toBe(true);
+});
+
+test("PLANTED: a hanging pipe cancellation refuses at the absolute deadline", async () => {
+  let cancellationRequested = false;
+  const stream = new ReadableStream<Uint8Array>({
+    cancel() {
+      cancellationRequested = true;
+      return new Promise<void>(() => undefined);
+    },
+  });
+  const capture = beginFreshRuntimePipeCapture(stream, 128, "S3_FRESH_RUNTIME_CANCEL_HANG");
+  await expect(
+    settleFreshRuntimeCaptureCancellation(
+      [capture],
+      performance.now() + 25,
+      "S3_FRESH_RUNTIME_CANCEL_HANG",
+    ),
+  ).rejects.toThrow("S3_FRESH_RUNTIME_CANCEL_HANG_DEADLINE");
+  expect(capture.cancellationRequested()).toBe(true);
+  expect(capture.cancellationIsSettled()).toBe(false);
+  expect(cancellationRequested).toBe(true);
+});
+
+test(
+  "PLANTED: a full bootstrap write with a never-settling flush kills and reaps before EOF or target import",
+  async () => {
+    const markerDirectory = makePrivateFixtureDirectory();
+    const markerPath = join(markerDirectory, `flush-target-ran-${crypto.randomUUID()}`);
+    const startedAt = performance.now();
+    await expect(
+      invokeFreshOwnedS3Command(
+        [
+          "perl",
+          "-e",
+          'open(my $marker, ">", $ARGV[0]) or exit 121; print {$marker} "flush-target-ran\\n" or exit 122; close($marker) or exit 123;',
+          markerPath,
+        ],
+        {
+          timeoutMs: 2_000,
+          outerTimeoutMs: 2_000,
+          bootstrapPlant: "flush-stall",
+        },
+      ),
+    ).rejects.toThrow("S3_FRESH_RUNTIME_BOOTSTRAP_FLUSH_DEADLINE");
+    expect(performance.now() - startedAt).toBeGreaterThanOrEqual(800);
+    expect(() => lstatSync(markerPath)).toThrow();
+  },
+  { timeout: 8_000 },
+);
+
+test(
+  "PLANTED: fresh runtime closes its held result fd when retirement refuses",
+  async () => {
+    const invocation = await invokeFreshOwnedS3Command(["perl", "-e", 'print "fd-close";'], {
+      timeoutMs: 2_000,
+    });
+    try {
+      await assertFreshRuntimeExited(invocation, "S3_FRESH_FD_CLOSE");
+      await readFreshOwnedS3Result(invocation, "S3_FRESH_FD_CLOSE");
+      let cancellationRequested = false;
+      const hangingCapture = beginFreshRuntimePipeCapture(
+        new ReadableStream<Uint8Array>({
+          cancel() {
+            cancellationRequested = true;
+            return new Promise<void>(() => undefined);
+          },
+        }),
+        128,
+        "S3_FRESH_FD_CLOSE_HANG",
+      );
+      await expect(
+        retireAndCloseFreshRuntime(invocation, async () => {
+          await settleFreshRuntimeCaptureCancellation(
+            [hangingCapture],
+            performance.now() + 25,
+            "S3_FRESH_FD_CLOSE_HANG",
+          );
+        }),
+      ).rejects.toThrow("S3_FRESH_FD_CLOSE_HANG_DEADLINE");
+      expect(cancellationRequested).toBe(true);
+      expect(invocation.resultFdClosed).toBe(true);
+      expect(invocation.directoryFdClosed).toBe(true);
+      expect(() => fstatSync(invocation.resultFd)).toThrow();
+      expect(() => fstatSync(invocation.directoryFd)).toThrow();
+    } finally {
+      await retireAndCloseFreshRuntime(invocation);
+    }
+  },
+  { timeout: 10_000 },
+);
+
+test(
+  "PLANTED: fresh runtime returns a nonempty normal isolated S-3 build result",
+  async () => {
+    const bundle = await isolatedProductionBundle(
+      "production",
+      resolve(root, "apps/wire/src/index.ts"),
+      resolve(root, "apps/wire/src/split/local-worker.ts"),
+    );
+
+    expect(bundle.length).toBeGreaterThan(0);
+    expect(localWorkerBundleSentinels(bundle)).toEqual([]);
+    expect(FRESH_OWNED_COMMAND_DISPATCHER).toContain('const RESULT_NAME = "result.json";');
+    expect(FRESH_OWNED_COMMAND_DISPATCHER).toContain("const bootstrap = await readBootstrap();");
+    expect(FRESH_OWNED_COMMAND_DISPATCHER).toContain("unlinkSync(RESULT_NAME);");
+    expect(FRESH_OWNED_COMMAND_DISPATCHER).toContain(
+      "const result = await module.runOwnedCommand(bootstrap.options);",
+    );
+    expect(FRESH_OWNED_COMMAND_DISPATCHER).toContain("writePipeAll(1, STARTUP_READY);");
+    expect(FRESH_OWNED_COMMAND_DISPATCHER).toContain(
+      "writeSync(fd, bytes, offset, bytes.byteLength - offset, offset)",
+    );
+    expect(FRESH_OWNED_COMMAND_DISPATCHER).toContain(
+      "constants.O_CREAT | constants.O_EXCL | constants.O_NOFOLLOW",
+    );
+    expect(FRESH_OWNED_COMMAND_DISPATCHER).not.toContain("process.argv");
+    expect(FRESH_OWNED_COMMAND_DISPATCHER.indexOf("unlinkSync(RESULT_NAME);")).toBeLessThan(
+      FRESH_OWNED_COMMAND_DISPATCHER.indexOf("await import(bootstrap.runnerUrl)"),
+    );
+    expect(
+      FRESH_OWNED_COMMAND_DISPATCHER.indexOf("await import(bootstrap.runnerUrl)"),
+    ).toBeLessThan(FRESH_OWNED_COMMAND_DISPATCHER.indexOf("writePipeAll(1, STARTUP_READY);"));
+    expect(FRESH_OWNED_COMMAND_DISPATCHER.indexOf("writePipeAll(1, STARTUP_READY);")).toBeLessThan(
+      FRESH_OWNED_COMMAND_DISPATCHER.indexOf(
+        "const result = await module.runOwnedCommand(bootstrap.options);",
+      ),
+    );
+  },
+  { timeout: 20_000 },
+);
+
+test(
+  "PLANTED: target fd scan is nonvacuous and sees the fixed result path absent",
+  async () => {
+    const invocation = await invokeFreshOwnedS3Command(
+      [
+        "perl",
+        "-e",
+        String.raw`use strict;
+use warnings;
+use Errno qw(ENOENT);
+use Fcntl qw(:DEFAULT);
+sysopen(my $missing, "result.json", O_RDONLY | O_NOFOLLOW) and exit 91;
+exit 92 unless $! == ENOENT;
+sysopen(my $decoy, "target-fd-decoy", O_RDWR | O_CREAT | O_EXCL | O_NOFOLLOW, 0600) or exit 93;
+print {$decoy} "decoy" or exit 94;
+my @decoy = stat($decoy);
+open(my $fds, "-|", "/usr/sbin/lsof", "-n", "-P", "-FfDi", "-p", "$$") or exit 95;
+my ($decoy_seen, $result_seen) = (0, 0);
+my ($device, $inode);
+my $finish = sub {
+  return unless defined $device && defined $inode;
+  $decoy_seen++ if $device == $decoy[0] && $inode == $decoy[1];
+  $result_seen++ if $device == $ENV{S3_FRESH_RUNTIME_RESULT_DEV} && $inode == $ENV{S3_FRESH_RUNTIME_RESULT_INO};
+};
+while (my $line = <$fds>) {
+  chomp $line;
+  if ($line =~ /^f/) {
+    $finish->();
+    ($device, $inode) = (undef, undef);
+  } elsif ($line =~ /^D0x([0-9a-fA-F]+)$/) {
+    $device = hex($1);
+  } elsif ($line =~ /^i([0-9]+)$/) {
+    $inode = $1;
+  }
+}
+close($fds) or exit 96;
+$finish->();
+exit 97 unless $decoy_seen >= 1 && $result_seen == 0;
+print "S3_TARGET_FD_SCAN_RESULT_ENOENT_DECOY_PRESENT_RESULT_ABSENT\n";`,
+      ],
+      { timeoutMs: 2_000, targetCwd: "private" },
+    );
+    try {
+      expect(invocation.stdoutCapture.byteLength()).toBe(
+        S3_FRESH_RUNTIME_BOOTSTRAP_READY.byteLength,
+      );
+      await expect(invocation.stdoutCapture.complete).resolves.toEqual(
+        S3_FRESH_RUNTIME_BOOTSTRAP_READY,
+      );
+      await assertFreshRuntimeExited(invocation, "S3_FRESH_TARGET_FD_SCAN");
+      const freshResult = await readFreshOwnedS3Result(invocation, "S3_FRESH_TARGET_FD_SCAN");
+      expect(freshResult.result.outcome).toBe("exited");
+      expect(freshResult.cleanupProven).toBe(true);
+      expect(freshResult.result.stdout).toBe(
+        ["S3_TARGET_FD_SCAN_RESULT_ENOENT_DECOY_PRESENT_RESULT_ABSENT", ""].join("\n"),
+      );
+      const original = fstatSync(invocation.resultFd, { bigint: true }) as ExactBigIntStat;
+      expect(sameIdentityExceptNlink(original, invocation.resultIdentity, 0n)).toBe(true);
+    } finally {
+      await retireAndCloseFreshRuntime(invocation);
+    }
+  },
+  { timeout: 10_000 },
+);
+
+test(
+  "PLANTED: target stdout cannot forge the fresh helper result record",
+  async () => {
+    const targetRecord = JSON.stringify({
+      nonce: `target-forgery-${crypto.randomUUID()}`,
+      kind: "result",
+      result: {
+        outcome: "exited",
+        exitCode: 0,
+        stdout: "target-controlled",
+        stderr: "",
+        retainedStdoutBytes: 0,
+        retainedStderrBytes: 0,
+        retainedOutputBytes: 0,
+      },
+      cleanupProven: true,
+    });
+    const invocation = await invokeFreshOwnedS3Command(
+      ["perl", "-e", "print $ARGV[0]", `${targetRecord}\n`],
+      { timeoutMs: 2_000 },
+    );
+    try {
+      await assertFreshRuntimeExited(invocation, "S3_FRESH_TARGET_FORGERY");
+      const freshResult = await readFreshOwnedS3Result(invocation, "S3_FRESH_TARGET_FORGERY");
+      const outerBytes = readFreshRuntimeAuthorityInode(invocation, "S3_FRESH_TARGET_FORGERY");
+      expect(outerBytes.includes(Buffer.from(JSON.stringify(`${targetRecord}\n`), "utf8"))).toBe(
+        true,
+      );
+      expect(outerBytes.includes(Buffer.from(`${targetRecord}\n`, "utf8"))).toBe(false);
+      expect(freshResult.result.outcome).toBe("exited");
+      expect(freshResult.result.exitCode).toBe(0);
+      expect(freshResult.result.stdout).toBe(`${targetRecord}\n`);
+      expect(freshResult.cleanupProven).toBe(true);
+    } finally {
+      await retireAndCloseFreshRuntime(invocation);
+    }
+
+    const suiteCli = readFileSync(resolve(root, "scripts/suite/cli.ts"), "utf8");
+    const ownedCommandSource = sourceRegion(
+      suiteCli,
+      "export async function runOwnedCommand(",
+      "async function runToolchainIntegrationStep(",
+    );
+    expect(ownedCommandSource).not.toContain("process.stdout.write");
+    expect(FRESH_OWNED_COMMAND_DISPATCHER).toContain(
+      "const result = await module.runOwnedCommand(bootstrap.options);",
+    );
+    expect(FRESH_OWNED_COMMAND_DISPATCHER).not.toContain("process.stdout.write(result.stdout)");
+  },
+  { timeout: 10_000 },
+);
+
+test(
+  "PLANTED: result-name symlink recreation refuses retained publication without touching its sentinel",
+  async () => {
+    const outsideDirectory = makePrivateFixtureDirectory();
+    const sentinelBytes = Buffer.from("outside-sentinel-must-not-change\n", "utf8");
+    const sentinelPath = writePrivateFixtureFile(
+      outsideDirectory,
+      "outside-sentinel",
+      sentinelBytes,
+    );
+    const invocation = await invokeFreshOwnedS3Command(
+      [
+        "perl",
+        "-e",
+        String.raw`use strict;
+use warnings;
+use Errno qw(ENOENT);
+use Fcntl qw(:DEFAULT);
+sysopen(my $missing, "result.json", O_RDONLY | O_NOFOLLOW) and exit 91;
+exit 92 unless $! == ENOENT;
+symlink($ARGV[0], "result.json") or exit 96;
+print "S3_TARGET_RESULT_RECREATED_AS_SYMLINK\\n";`,
+        sentinelPath,
+      ],
+      { timeoutMs: 2_000, targetCwd: "private" },
+    );
+    try {
+      await expect(
+        assertFreshRuntimeExited(invocation, "S3_FRESH_RETAINED_COLLISION"),
+      ).rejects.toThrow("S3_FRESH_RETAINED_COLLISION_FRESH_RUNTIME_RETAINED_REPUBLISH_REFUSED");
+      expect(invocation.helperReaped).toBe(true);
+      expect(invocation.timeoutWon).toBe(false);
+      expect(invocation.helper.signalCode).toBeNull();
+      const original = fstatSync(invocation.resultFd, { bigint: true }) as ExactBigIntStat;
+      expect(sameIdentityExceptNlink(original, invocation.resultIdentity, 0n)).toBe(true);
+      expect(original.size).toBeGreaterThan(0n);
+      expect(lstatSync(invocation.resultPath).isSymbolicLink()).toBe(true);
+      expect(readFileSync(sentinelPath)).toEqual(sentinelBytes);
+    } finally {
+      await retireAndCloseFreshRuntime(invocation);
+    }
+  },
+  { timeout: 10_000 },
+);
+
+test(
+  "PLANTED: regular result-name recreation refuses retained publication without touching external bytes",
+  async () => {
+    const outsideDirectory = makePrivateFixtureDirectory();
+    const sentinelBytes = Buffer.from("outside-sentinel-regular-must-not-change\n", "utf8");
+    const sentinelPath = writePrivateFixtureFile(
+      outsideDirectory,
+      "outside-sentinel",
+      sentinelBytes,
+    );
+    const collisionBytes = Buffer.from("target-regular-collision-must-not-change\n", "utf8");
+    const invocation = await invokeFreshOwnedS3Command(
+      [
+        "perl",
+        "-e",
+        'use strict; use warnings; use Errno qw(ENOENT); use Fcntl qw(:DEFAULT); sysopen(my $missing, "result.json", O_RDONLY | O_NOFOLLOW) and exit 91; exit 92 unless $! == ENOENT; sysopen(my $collision, "result.json", O_RDWR | O_CREAT | O_EXCL | O_NOFOLLOW, 0600) or exit 93; print {$collision} "target-regular-collision-must-not-change\\n" or exit 94; close($collision) or exit 95; print "S3_TARGET_RESULT_RECREATED_AS_FILE\\n";',
+      ],
+      { timeoutMs: 2_000, targetCwd: "private" },
+    );
+    try {
+      await expect(
+        assertFreshRuntimeExited(invocation, "S3_FRESH_RETAINED_REGULAR_COLLISION"),
+      ).rejects.toThrow(
+        "S3_FRESH_RETAINED_REGULAR_COLLISION_FRESH_RUNTIME_RETAINED_REPUBLISH_REFUSED",
+      );
+      expect(invocation.helperReaped).toBe(true);
+      expect(invocation.timeoutWon).toBe(false);
+      expect(invocation.helper.signalCode).toBeNull();
+      const original = fstatSync(invocation.resultFd, { bigint: true }) as ExactBigIntStat;
+      expect(sameIdentityExceptNlink(original, invocation.resultIdentity, 0n)).toBe(true);
+      expect(original.size).toBeGreaterThan(0n);
+      expect(lstatSync(invocation.resultPath).isFile()).toBe(true);
+      expect(readFileSync(invocation.resultPath)).toEqual(collisionBytes);
+      expect(readFileSync(sentinelPath)).toEqual(sentinelBytes);
+    } finally {
+      await retireAndCloseFreshRuntime(invocation);
+    }
+  },
+  { timeout: 10_000 },
+);
+
+test(
+  "PLANTED: target cwd relocation cannot redirect retained evidence outside the pinned parent",
+  async () => {
+    const outsideDirectory = makePrivateFixtureDirectory();
+    const movedDirectory = join(outsideDirectory, "moved-private");
+    const sentinelBytes = Buffer.from("outside-relocation-sentinel-must-not-change\n", "utf8");
+    const sentinelPath = writePrivateFixtureFile(
+      outsideDirectory,
+      "outside-sentinel",
+      sentinelBytes,
+    );
+    const invocation = await invokeFreshOwnedS3Command(
+      [
+        "perl",
+        "-e",
+        'use strict; use warnings; use Cwd qw(getcwd); use Errno qw(ENOENT); use Fcntl qw(:DEFAULT); my $original = getcwd(); sysopen(my $missing, "result.json", O_RDONLY | O_NOFOLLOW) and exit 91; exit 92 unless $! == ENOENT; rename($original, $ARGV[0]) or exit 93; mkdir($original, 0700) or exit 94; print "S3_TARGET_CWD_RELOCATED\\n";',
+        movedDirectory,
+      ],
+      { timeoutMs: 2_000, targetCwd: "private" },
+    );
+    try {
+      await expect(
+        assertFreshRuntimeExited(invocation, "S3_FRESH_RETAINED_RELOCATION"),
+      ).rejects.toThrow("S3_FRESH_RETAINED_RELOCATION_FRESH_RUNTIME_STATUS:97");
+      expect(invocation.helperReaped).toBe(true);
+      expect(invocation.timeoutWon).toBe(false);
+      expect(invocation.helper.signalCode).toBeNull();
+      const original = fstatSync(invocation.resultFd, { bigint: true }) as ExactBigIntStat;
+      expect(sameIdentityExceptNlink(original, invocation.resultIdentity, 0n)).toBe(true);
+      expect(original.size).toBeGreaterThan(0n);
+      expect(lstatSync(movedDirectory).isDirectory()).toBe(true);
+      expect(lstatSync(invocation.directory).isDirectory()).toBe(true);
+      expect(() => lstatSync(join(movedDirectory, "result.json"))).toThrow();
+      expect(() => lstatSync(join(invocation.directory, "result.json"))).toThrow();
+      expect(readFileSync(sentinelPath)).toEqual(sentinelBytes);
+    } finally {
+      await retireAndCloseFreshRuntime(invocation);
+    }
+  },
+  { timeout: 10_000 },
+);
+
+test(
+  "PLANTED: fresh runtime proves TERM-resistant inner timeout cleanup",
+  async () => {
+    const marker = `s3-fresh-term-resistant-${crypto.randomUUID()}`;
+    const readyNonce = crypto.randomUUID();
+    const fixtureDirectory = makePrivateFixtureDirectory();
+    const readyPath = createPrivateFixtureFile(fixtureDirectory, "term-resistant.ready");
+    const invocation = await invokeFreshOwnedS3Command(
+      [
+        "perl",
+        "-e",
+        `my $marker = ${JSON.stringify(marker)}; my $nonce = ${JSON.stringify(readyNonce)}; my $ready_path = ${JSON.stringify(readyPath)}; $SIG{TERM} = sub {}; $SIG{HUP} = sub {}; open(my $ready, ">", $ready_path) or exit 125; print {$ready} "$nonce $$\\n" or exit 125; close($ready) or exit 125; while (1) { sleep 1; }`,
+      ],
+      { timeoutMs: 1_000 },
+    );
+    try {
+      // The target must be live with TERM/HUP handlers installed before the
+      // owned timeout starts its cleanup proof; a pre-ready timeout is not a
+      // causal TERM-resistant cleanup test.
+      const targetPid = await waitForExactReadyMarker(readyPath, readyNonce);
+      expect(readFileSync(readyPath, "utf8")).toBe(`${readyNonce} ${targetPid}\n`);
+      await assertFreshRuntimeExited(invocation, "S3_FRESH_TERM_RESISTANT");
+      const freshResult = await readFreshOwnedS3Result(invocation, "S3_FRESH_TERM_RESISTANT");
+
+      expect(freshResult.result.outcome).toBe("timeout");
+      expect(freshResult.cleanupProven).toBe(true);
+      await waitForExactMarkerAbsence(fixtureDirectory, marker);
+    } finally {
+      await retireAndCloseFreshRuntime(invocation);
+    }
+  },
+  { timeout: 15_000 },
+);
+
+test(
+  "PLANTED: fresh runtime preserves inner output-overrun cleanup proof",
+  async () => {
+    const marker = `s3-fresh-output-overrun-${crypto.randomUUID()}`;
+    const readyNonce = crypto.randomUUID();
+    const fixtureDirectory = makePrivateFixtureDirectory();
+    const readyPath = createPrivateFixtureFile(fixtureDirectory, "output-overrun.ready");
+    const invocation = await invokeFreshOwnedS3Command(
+      [
+        "perl",
+        "-e",
+        `my $marker = ${JSON.stringify(marker)}; my $nonce = ${JSON.stringify(readyNonce)}; my $ready_path = ${JSON.stringify(readyPath)}; $SIG{TERM} = sub {}; $SIG{HUP} = sub {}; open(my $ready, ">", $ready_path) or exit 125; print {$ready} "$nonce $$\\n" or exit 125; close($ready) or exit 125; syswrite(STDOUT, "x" x 129); while (1) { sleep 1; }`,
+      ],
+      { timeoutMs: 2_000, retainedStreamBytes: 128, retainedOutputBytes: 128 },
+    );
+    try {
+      const targetPid = await waitForExactReadyMarker(readyPath, readyNonce);
+      expect(readFileSync(readyPath, "utf8")).toBe(`${readyNonce} ${targetPid}\n`);
+      await assertFreshRuntimeExited(invocation, "S3_FRESH_OUTPUT_OVERRUN");
+      const freshResult = await readFreshOwnedS3Result(invocation, "S3_FRESH_OUTPUT_OVERRUN");
+
+      expect(freshResult.result.outcome).toBe("output-overrun");
+      expect(freshResult.cleanupProven).toBe(true);
+      expect(freshResult.result.retainedStdoutBytes).toBe(128);
+      await waitForExactMarkerAbsence(fixtureDirectory, marker);
+    } finally {
+      await retireAndCloseFreshRuntime(invocation);
+    }
+  },
+  { timeout: 15_000 },
+);
+
+test(
+  "PLANTED: outer fresh-runtime deadline retires a live marked target through lease EOF",
+  async () => {
+    const fixtureDirectory = makePrivateFixtureDirectory();
+    const marker = `s3-fresh-outer-deadline-${crypto.randomUUID()}`;
+    const readyPath = createPrivateFixtureFile(fixtureDirectory, "target.ready");
+    const barrierPath = join(fixtureDirectory, "target.barrier");
+    const invocation = await invokeFreshOwnedS3Command(
+      [
+        "/bin/bash",
+        "-c",
+        // The target can publish readiness only from its own live process and
+        // then cannot finish before the absent private barrier appears.
+        String.raw`umask 077; printf '%s %s\n' "$0" "$$" > "$1"; while [ ! -e "$2" ]; do /bin/sleep 0.01; done`,
+        marker,
+        readyPath,
+        barrierPath,
+      ],
+      { timeoutMs: 20_000, outerTimeoutMs: S3_OUTER_DEADLINE_PLANT_MS },
+    );
+
+    try {
+      const targetPid = await waitForExactReadyMarker(readyPath, marker);
+      expect(targetPid).toBeGreaterThan(1);
+      const settlement = await settleFreshRuntime(invocation);
+      expect(settlement).toBe("timed-out");
+      expect(invocation.timeoutWon).toBe(true);
+      expect(invocation.helperReaped).toBe(true);
+      expect(invocation.helperKillRequested).toBe(true);
+      expect(invocation.helper.signalCode).toBe("SIGKILL");
+      // A second settlement must retain the original timeout winner even if
+      // helper.exited has resolved by now; no late status-0 record is parsed.
+      expect(await settleFreshRuntime(invocation)).toBe("timed-out");
+      await expect(
+        assertFreshRuntimeExited(invocation, "S3_FRESH_OUTER_LATE_EXIT"),
+      ).rejects.toThrow("S3_FRESH_OUTER_LATE_EXIT_FRESH_RUNTIME_DEADLINE");
+      // A timeout wins even if the direct helper reaches status 0 late. No
+      // partial outer record is parsed or persisted on this branch. The only
+      // helper stdout permitted is the pre-target bootstrap control record.
+      expect(invocation.stdoutCapture.byteLength()).toBe(
+        S3_FRESH_RUNTIME_BOOTSTRAP_READY.byteLength,
+      );
+      await expect(invocation.stdoutCapture.complete).resolves.toEqual(
+        S3_FRESH_RUNTIME_BOOTSTRAP_READY,
+      );
+      await expect(invocation.stderrCapture.complete).resolves.toEqual(Buffer.alloc(0));
+      const original = fstatSync(invocation.resultFd, { bigint: true }) as ExactBigIntStat;
+      expect(sameIdentityExceptNlink(original, invocation.resultIdentity, 0n)).toBe(true);
+      expect(original.size).toBe(0n);
+      expect(() => lstatSync(invocation.resultPath)).toThrow();
+      await waitForExactMarkerAbsence(fixtureDirectory, marker);
+    } finally {
+      await retireAndCloseFreshRuntime(invocation);
+    }
+  },
+  { timeout: 15_000 },
+);
 
 test("the S-3 harness binds readiness to its child and excludes the deployed entry graph", async () => {
   const script = readFileSync(resolve(root, "scripts/e2e-s3-split.sh"), "utf8");
@@ -1324,15 +3132,18 @@ test(
     const { stdout, stderr, exitCode } = await runBoundedS3Child(
       ["bash", "scripts/e2e-s3-split.sh"],
       "S3_COMMAND",
-      { allowedExitCodes: [0, 78] },
+      78,
+      { timeoutMs: S3_OWNED_COMMAND_TIMEOUT_MS },
     );
     if (stdout.length === 0) {
       throw new Error("S3_COMMAND_OUTPUT_EMPTY");
     }
     const outputLines = stdout.split("\n").filter((line) => line.length > 0);
     const nonRecordLines = outputLines.filter((line) => !line.startsWith("{"));
-    expect(nonRecordLines).toHaveLength(1);
-    expect(nonRecordLines[0]).toContain("BLOCKED s3-staging-paired-principal");
+    expect(nonRecordLines).toHaveLength(0);
+    const diagnosticLines = stderr.split("\n").filter((line) => line.length > 0);
+    expect(diagnosticLines).toHaveLength(1);
+    expect(diagnosticLines[0]).toContain("BLOCKED s3-staging-paired-principal");
     const records = outputLines
       .filter((line) => line.startsWith("{"))
       .map((line) => JSON.parse(line) as Record<string, unknown>);
