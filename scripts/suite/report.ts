@@ -38,6 +38,9 @@ export interface UnitDiagnostic {
   package_version?: string;
   script?: string;
   command?: string;
+  timeout_ms?: number;
+  retained_stream_limit_bytes?: number;
+  retained_output_limit_bytes?: number;
   exit_code?: number;
   signal?: string;
   detail?: string;
@@ -76,6 +79,9 @@ export interface PlanDiagnostic {
   code: string;
   script?: string;
   command?: string;
+  timeout_ms?: number;
+  retained_stream_limit_bytes?: number;
+  retained_output_limit_bytes?: number;
   reproduce?: string;
   detail?: string;
 }

@@ -121,6 +121,40 @@ const SUITE_TIMEOUT_MS: Readonly<Record<Suite, number>> = {
   performance: 10 * 60_000,
   e2e: 30 * 60_000,
 };
+const WIRE_UNIT_SUITE_TIMEOUT_MS = 15 * 60_000;
+const WIRE_UNIT_STREAM_RETAINED_BYTES = 512 * 1024;
+const WIRE_UNIT_OUTPUT_RETAINED_BYTES = 768 * 1024;
+
+export interface SuiteExecutionLimits {
+  readonly timeoutMs: number;
+  readonly retainedStreamBytes: number;
+  readonly retainedOutputBytes: number;
+}
+
+/**
+ * Wire's ordinary unit lane includes the bounded S1-S3 shell lifecycle
+ * regressions. Their sequential composition and bounded diagnostic output are
+ * intentionally larger than an ordinary package unit suite, so the dispatcher
+ * must sit outside both without terminating a still-healthy run at generic
+ * package limits.
+ */
+export function suiteExecutionLimits(
+  suite: Suite,
+  unit: { readonly dir: string },
+): SuiteExecutionLimits {
+  if (suite === "unit" && unit.dir === "apps/wire") {
+    return {
+      timeoutMs: WIRE_UNIT_SUITE_TIMEOUT_MS,
+      retainedStreamBytes: WIRE_UNIT_STREAM_RETAINED_BYTES,
+      retainedOutputBytes: WIRE_UNIT_OUTPUT_RETAINED_BYTES,
+    };
+  }
+  return {
+    timeoutMs: SUITE_TIMEOUT_MS[suite],
+    retainedStreamBytes: OWNED_PROCESS_STREAM_RETAINED_BYTES,
+    retainedOutputBytes: OWNED_PROCESS_AGGREGATE_RETAINED_BYTES,
+  };
+}
 
 /**
  * A suite receives platform plumbing, never ambient authority. In particular,
@@ -1619,12 +1653,16 @@ async function runUnit(
 ): Promise<UnitDiagnostic> {
   const script = unit.script as string;
   const command = `bun run ${script}`;
+  const limits = suiteExecutionLimits(suite, unit);
+  const timeoutMs = limits.timeoutMs;
   const startedAt = performance.now();
   const result = await runOwnedCommand({
     command: ["bun", "run", script],
     cwd: unit.dir === "." ? options.root : join(options.root, unit.dir),
     env: environmentForSuite(depth),
-    timeoutMs: SUITE_TIMEOUT_MS[suite],
+    timeoutMs,
+    retainedStreamBytes: limits.retainedStreamBytes,
+    retainedOutputBytes: limits.retainedOutputBytes,
   });
   if (result.stdout.length > 0) {
     // Child output belongs to the package; in --json mode stdout must stay a
@@ -1667,11 +1705,14 @@ async function runUnit(
       package_version: unit.version,
       script,
       command,
+      timeout_ms: timeoutMs,
+      retained_stream_limit_bytes: limits.retainedStreamBytes,
+      retained_output_limit_bytes: limits.retainedOutputBytes,
       ...(exitCode === undefined ? {} : { exit_code: exitCode }),
       ...(signal === undefined ? {} : { signal }),
       detail:
         result.outcome === "timeout"
-          ? `"${command}" exceeded its ${SUITE_TIMEOUT_MS[suite]}ms owned deadline; ` +
+          ? `"${command}" exceeded its ${timeoutMs}ms owned deadline; ` +
             "TERM/KILL/reap was attempted by the dispatcher."
           : result.outcome === "output-overrun"
             ? `"${command}" exceeded the dispatcher's retained-output ceiling; ` +
@@ -1717,6 +1758,9 @@ async function runUnit(
     package_version: unit.version,
     script,
     command,
+    timeout_ms: timeoutMs,
+    retained_stream_limit_bytes: limits.retainedStreamBytes,
+    retained_output_limit_bytes: limits.retainedOutputBytes,
     exit_code: exitCode,
     ...(signal !== undefined ? { signal } : {}),
     ...(status === "pass"
@@ -1907,6 +1951,7 @@ async function main(argv: string[]): Promise<number> {
 
     if (options.list) {
       for (const unit of planned) {
+        const limits = suiteExecutionLimits(suite, unit);
         const plan: PlanDiagnostic = {
           record: "plan",
           suite,
@@ -1919,6 +1964,9 @@ async function main(argv: string[]): Promise<number> {
             ? {
                 command: `bun run ${unit.script}`,
                 reproduce: reproduceCommand(unit.dir, unit.script),
+                timeout_ms: limits.timeoutMs,
+                retained_stream_limit_bytes: limits.retainedStreamBytes,
+                retained_output_limit_bytes: limits.retainedOutputBytes,
               }
             : {}),
           ...(unit.detail !== undefined ? { detail: unit.detail } : {}),

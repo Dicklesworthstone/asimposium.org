@@ -12,7 +12,7 @@ import { existsSync } from "node:fs";
 import { homedir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
-import { runOwnedCommand } from "./cli.ts";
+import { runOwnedCommand, suiteExecutionLimits } from "./cli.ts";
 import {
   blockedCommand,
   failCommand,
@@ -472,6 +472,26 @@ describe("owned session launcher", () => {
 });
 
 describe("routing to real package commands", () => {
+  test("the shell-heavy Wire unit composition has its own bounded parent deadline", () => {
+    const wire = { name: "@asimposium/wire", dir: "apps/wire" };
+
+    expect(suiteExecutionLimits("unit", wire)).toEqual({
+      timeoutMs: 15 * 60_000,
+      retainedStreamBytes: 512 * 1024,
+      retainedOutputBytes: 768 * 1024,
+    });
+    expect(suiteExecutionLimits("contract", wire)).toEqual({
+      timeoutMs: 5 * 60_000,
+      retainedStreamBytes: 64 * 1024,
+      retainedOutputBytes: 96 * 1024,
+    });
+    expect(suiteExecutionLimits("unit", { dir: "apps/web" })).toEqual({
+      timeoutMs: 5 * 60_000,
+      retainedStreamBytes: 64 * 1024,
+      retainedOutputBytes: 96 * 1024,
+    });
+  });
+
   test("a package script is executed and reported as a pass", async () => {
     const root = makeFixtureRepo({
       rootScripts: { "toolchain:test": PASS_COMMAND },
@@ -846,6 +866,13 @@ describe("secret-safe diagnostics", () => {
       expect(typeof unit.duration_ms).toBe("number");
       expect(["pass", "fail", "blocked", "missing", "skip"]).toContain(unit.status);
       expect(unit.reproduce.length).toBeGreaterThan(0);
+      expect(unit.timeout_ms).toBe(unit.dir === "apps/wire" ? 15 * 60_000 : 5 * 60_000);
+      expect(unit.retained_stream_limit_bytes).toBe(
+        unit.dir === "apps/wire" ? 512 * 1024 : 64 * 1024,
+      );
+      expect(unit.retained_output_limit_bytes).toBe(
+        unit.dir === "apps/wire" ? 768 * 1024 : 96 * 1024,
+      );
     }
   });
 
@@ -945,10 +972,36 @@ describe("--list plans without running", () => {
     const plans = result.stdout
       .split("\n")
       .filter((line) => line.trim().length > 0)
-      .map((line) => JSON.parse(line) as { record: string; action: string; dir: string });
+      .map(
+        (line) =>
+          JSON.parse(line) as {
+            record: string;
+            action: string;
+            dir: string;
+            timeout_ms?: number;
+            retained_stream_limit_bytes?: number;
+            retained_output_limit_bytes?: number;
+          },
+      );
     expect(plans.every((plan) => plan.record === "plan")).toBe(true);
-    expect(plans.find((plan) => plan.dir === "apps/wire")?.action).toBe("run");
+    expect(plans.find((plan) => plan.dir === ".")).toEqual(
+      expect.objectContaining({
+        action: "run",
+        timeout_ms: 5 * 60_000,
+        retained_stream_limit_bytes: 64 * 1024,
+        retained_output_limit_bytes: 96 * 1024,
+      }),
+    );
+    expect(plans.find((plan) => plan.dir === "apps/wire")).toEqual(
+      expect.objectContaining({
+        action: "run",
+        timeout_ms: 15 * 60_000,
+        retained_stream_limit_bytes: 512 * 1024,
+        retained_output_limit_bytes: 768 * 1024,
+      }),
+    );
     expect(plans.find((plan) => plan.dir === "packages/protocol")?.action).toBe("skip");
+    expect(plans.find((plan) => plan.dir === "packages/protocol")?.timeout_ms).toBeUndefined();
   });
 
   test("integration --list retains the root D1-before-G0 bridge without running it", async () => {
