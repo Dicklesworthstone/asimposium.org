@@ -10,7 +10,11 @@
  * parsing — whitespace, object key order, duplicate keys, escapes, and number
  * spellings — are different signed payloads unless their exact bytes match.
  */
-import { type EnvelopeVerification, verifyServiceEnvelope } from "./envelope";
+import {
+  type EnvelopeVerification,
+  type ServiceEnvelopePrincipalType,
+  verifyServiceEnvelope,
+} from "./envelope";
 import type { VerificationKeyring } from "./keyring";
 import type { NonceStore } from "./nonce";
 import { routePrincipal } from "./principal";
@@ -37,6 +41,8 @@ export interface ServiceEnvelopeIngressOptions {
   route: string;
   /** Mandatory, non-empty allowlist selected by that handler. */
   permittedActions: readonly string[];
+  /** Signed principal class accepted by this route; sponsor is the default. */
+  expectedPrincipalType?: ServiceEnvelopePrincipalType;
 }
 
 export type AuthenticatedServiceEnvelopeRequest = {
@@ -231,6 +237,7 @@ export async function authenticateServiceEnvelopeRequest(
     method: request.method,
     route: options.route,
     permittedActions: options.permittedActions,
+    expectedPrincipalType: options.expectedPrincipalType,
   });
   if (!verification.ok) {
     return { ok: false, response: envelopeRefusalProblem(verification.reason) };

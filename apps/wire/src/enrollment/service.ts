@@ -19,6 +19,12 @@ import {
   isTrustedStoaOrigin,
   type MintEnrollmentRequest,
   MintEnrollmentRequestSchema,
+  type OperatorFellowCapOverrideRequest,
+  OperatorFellowCapOverrideRequestSchema,
+  type OperatorFellowCapOverrideResponse,
+  OperatorFellowCapOverrideResponseSchema,
+  OPERATOR_FELLOW_CAP_AUDIT_PAGE_SIZE,
+  type OperatorFellowCapAuditCursorKey,
   PENDING_PROPOSAL_TTL_MS,
   type RequestedScope,
   SPONSOR_FELLOW_PAGE_SIZE,
@@ -180,6 +186,9 @@ export type EnrollmentErrorCode =
   | "CREDENTIAL_REVOKE_BODY_INVALID"
   | "FELLOW_LIFECYCLE_BODY_INVALID"
   | "FELLOW_LIFECYCLE_NOT_CURRENT"
+  | "OPERATOR_FELLOW_CAP_BODY_INVALID"
+  | "OPERATOR_FELLOW_CAP_HISTORY_CURSOR_INVALID"
+  | "OPERATOR_FELLOW_CAP_NOT_CURRENT"
   | "LIFECYCLE_BUSY"
   | "PAIRING_EXPIRED"
   | "PAIRING_INVALID"
@@ -261,6 +270,12 @@ export class EnrollmentIdentifierCollisionError extends Error {
 
 export type EnrollmentPrincipal =
   | { readonly type: "sponsor"; readonly sponsorId: string }
+  | {
+      readonly type: "operator";
+      readonly operatorId: string;
+      /** Non-secret key id from the Worker-verified service envelope. */
+      readonly serviceEnvelopeKid: string;
+    }
   | { readonly type: "fellow"; readonly fellowId: string }
   | { readonly type: "service"; readonly serviceId: string };
 
@@ -526,7 +541,8 @@ export interface IdempotencyAttempt {
     | "device-start"
     | "credential-revoke"
     | "fellow-lifecycle"
-    | "sponsor-panic";
+    | "sponsor-panic"
+    | "operator-fellow-cap";
   readonly principalScope: string;
   readonly key: string;
   readonly digest: string;
@@ -583,6 +599,56 @@ export interface SponsorPanicAttempt {
   ) => Promise<EnrollmentIdempotencyWrite | undefined>;
 }
 
+/** One operator-authenticated, append-only sponsor-cap command. */
+export interface OperatorFellowCapOverrideAttempt {
+  readonly sponsorId: string;
+  readonly operatorId: string;
+  readonly auditEventId: string;
+  readonly expectedActiveFellowLimit: number;
+  readonly expectedSponsorSeq: number;
+  readonly activeFellowLimit: number;
+  readonly reason: string;
+  readonly stepUpAuthenticatedAt: number;
+  readonly signerKid: string;
+  readonly requestId: string;
+  readonly effectiveAt: number;
+  readonly replayFor?: (
+    result: OperatorFellowCapOverrideResult,
+  ) => Promise<EnrollmentIdempotencyWrite | undefined>;
+}
+
+export interface OperatorFellowCapOverrideResult {
+  readonly sponsorSeq: number;
+  readonly previousActiveFellowLimit: number;
+  readonly activeFellowLimit: number;
+  readonly effectiveAt: number;
+}
+
+export interface OperatorFellowCapState {
+  readonly activeFellowLimit: number;
+  readonly sponsorSeq: number;
+}
+
+/** One immutable operator authorization receipt, newest sequence first. */
+export interface OperatorFellowCapAuditRecord {
+  readonly auditEventId: string;
+  readonly sponsorId: string;
+  readonly operatorId: string;
+  readonly sponsorSeq: number;
+  readonly previousActiveFellowLimit: number;
+  readonly activeFellowLimit: number;
+  readonly reason: string;
+  readonly stepUpAuthenticatedAt: number;
+  readonly signerKid: string;
+  readonly effectiveAt: number;
+}
+
+/** Bounded keyset page over immutable cap receipts. */
+export interface OperatorFellowCapAuditPage {
+  readonly auditEvents: readonly OperatorFellowCapAuditRecord[];
+  readonly nextCursor?: OperatorFellowCapAuditCursorKey;
+}
+
 export interface LifecycleCommandResult {
   readonly sponsorSeq: number;
   readonly effectiveAt: number;
@@ -630,6 +696,14 @@ export interface EnrollmentStore {
   revokeCredential(attempt: CredentialRevokeAttempt): Promise<LifecycleCommandResult>;
   transitionFellow(attempt: FellowLifecycleAttempt): Promise<LifecycleCommandResult>;
   panicSponsor(attempt: SponsorPanicAttempt): Promise<LifecycleCommandResult>;
+  overrideSponsorFellowCap(
+    attempt: OperatorFellowCapOverrideAttempt,
+  ): Promise<OperatorFellowCapOverrideResult>;
+  sponsorFellowCap(sponsorId: string): Promise<OperatorFellowCapState>;
+  sponsorFellowCapAudit(
+    sponsorId: string,
+    after?: OperatorFellowCapAuditCursorKey,
+  ): Promise<OperatorFellowCapAuditPage>;
   /** W3.5: create a device enrollment, its pending proposal, and the user-code mapping, atomically. */
   deviceCreate(input: DeviceCreateInput, idempotency?: EnrollmentIdempotencyWrite): Promise<void>;
   /**
@@ -980,6 +1054,18 @@ function assertSponsor(
   }
 }
 
+function assertOperator(
+  principal: EnrollmentPrincipal,
+): asserts principal is Extract<EnrollmentPrincipal, { type: "operator" }> {
+  if (
+    principal.type !== "operator" ||
+    principal.operatorId.length === 0 ||
+    !/^[A-Za-z0-9._-]{1,64}$/.test(principal.serviceEnvelopeKid)
+  ) {
+    throw new EnrollmentError("WRONG_PRINCIPAL");
+  }
+}
+
 export function uniqueEnrollmentScopes(
   scopes: readonly RequestedScope[],
 ): readonly RequestedScope[] {
@@ -1193,6 +1279,10 @@ export class InMemoryEnrollmentStore implements EnrollmentStore {
   readonly #lifecycleSeq = new Map<string, number>();
   readonly #lifecycleEventIds = new Set<string>();
   readonly #lifecycleRequestIds = new Set<string>();
+  readonly #operatorCapAuditEventIds = new Set<string>();
+  readonly #operatorCapAuditRequestIds = new Set<string>();
+  readonly #operatorCapSeq = new Map<string, number>();
+  readonly #operatorCapAudit = new Map<string, OperatorFellowCapAuditRecord[]>();
   readonly #reviewWindows = new Map<string, { reviewFrom: number; flaggedAt: number }>();
   readonly #sponsors = new Map<
     string,
@@ -1539,6 +1629,7 @@ export class InMemoryEnrollmentStore implements EnrollmentStore {
         lastSeenAt: now,
         activeFellowLimit: DEFAULT_SPONSOR_ACTIVE_FELLOW_LIMIT,
       });
+      this.#operatorCapSeq.set(sponsorId, 0);
       return true;
     });
   }
@@ -1653,6 +1744,87 @@ export class InMemoryEnrollmentStore implements EnrollmentStore {
       this.#sponsorPanicAt.set(attempt.sponsorId, effectiveAt);
       this.commitLifecycleEvent(attempt.sponsorId, attempt.eventId, attempt.requestId, result);
       return result;
+    });
+  }
+
+  async overrideSponsorFellowCap(
+    attempt: OperatorFellowCapOverrideAttempt,
+  ): Promise<OperatorFellowCapOverrideResult> {
+    return this.serialized(async () => {
+      const sponsor = this.#sponsors.get(attempt.sponsorId);
+      const currentSequence = this.#operatorCapSeq.get(attempt.sponsorId);
+      if (
+        sponsor === undefined ||
+        currentSequence === undefined ||
+        sponsor.activeFellowLimit !== attempt.expectedActiveFellowLimit ||
+        currentSequence !== attempt.expectedSponsorSeq ||
+        sponsor.activeFellowLimit === attempt.activeFellowLimit ||
+        this.activeFellowCount(attempt.sponsorId) > attempt.activeFellowLimit ||
+        this.#operatorCapAuditEventIds.has(attempt.auditEventId) ||
+        this.#operatorCapAuditRequestIds.has(attempt.requestId)
+      ) {
+        throw new EnrollmentError("OPERATOR_FELLOW_CAP_NOT_CURRENT");
+      }
+      const result = {
+        sponsorSeq: currentSequence + 1,
+        previousActiveFellowLimit: sponsor.activeFellowLimit,
+        activeFellowLimit: attempt.activeFellowLimit,
+        effectiveAt: attempt.effectiveAt,
+      } satisfies OperatorFellowCapOverrideResult;
+      const idempotency = await attempt.replayFor?.(result);
+      this.commitIdempotency(idempotency);
+      sponsor.activeFellowLimit = attempt.activeFellowLimit;
+      this.#operatorCapSeq.set(attempt.sponsorId, currentSequence + 1);
+      this.#operatorCapAuditEventIds.add(attempt.auditEventId);
+      this.#operatorCapAuditRequestIds.add(attempt.requestId);
+      const events = this.#operatorCapAudit.get(attempt.sponsorId) ?? [];
+      events.push({
+        auditEventId: attempt.auditEventId,
+        sponsorId: attempt.sponsorId,
+        operatorId: attempt.operatorId,
+        sponsorSeq: result.sponsorSeq,
+        previousActiveFellowLimit: result.previousActiveFellowLimit,
+        activeFellowLimit: result.activeFellowLimit,
+        reason: attempt.reason,
+        stepUpAuthenticatedAt: attempt.stepUpAuthenticatedAt,
+        signerKid: attempt.signerKid,
+        effectiveAt: result.effectiveAt,
+      });
+      this.#operatorCapAudit.set(attempt.sponsorId, events);
+      return result;
+    });
+  }
+
+  async sponsorFellowCap(sponsorId: string): Promise<OperatorFellowCapState> {
+    return this.serialized(async () => {
+      const sponsor = this.#sponsors.get(sponsorId);
+      const sponsorSeq = this.#operatorCapSeq.get(sponsorId);
+      if (sponsor === undefined || sponsorSeq === undefined) {
+        throw new EnrollmentError("OPERATOR_FELLOW_CAP_NOT_CURRENT");
+      }
+      return { activeFellowLimit: sponsor.activeFellowLimit, sponsorSeq };
+    });
+  }
+
+  async sponsorFellowCapAudit(
+    sponsorId: string,
+    after?: OperatorFellowCapAuditCursorKey,
+  ): Promise<OperatorFellowCapAuditPage> {
+    return this.serialized(() => {
+      if (!this.#sponsors.has(sponsorId)) {
+        throw new EnrollmentError("OPERATOR_FELLOW_CAP_NOT_CURRENT");
+      }
+      const ordered = [...(this.#operatorCapAudit.get(sponsorId) ?? [])]
+        .sort((left, right) => right.sponsorSeq - left.sponsorSeq)
+        .filter((event) => after === undefined || event.sponsorSeq < after.sponsor_seq);
+      const window = ordered.slice(0, OPERATOR_FELLOW_CAP_AUDIT_PAGE_SIZE + 1);
+      const hasNext = window.length > OPERATOR_FELLOW_CAP_AUDIT_PAGE_SIZE;
+      const auditEvents = hasNext ? window.slice(0, -1) : window;
+      const final = auditEvents.at(-1);
+      return {
+        auditEvents,
+        ...(hasNext && final !== undefined ? { nextCursor: { sponsor_seq: final.sponsorSeq } } : {}),
+      };
     });
   }
 
@@ -2181,6 +2353,7 @@ export class InMemoryEnrollmentStore implements EnrollmentStore {
       lastSeenAt: now,
       activeFellowLimit: DEFAULT_SPONSOR_ACTIVE_FELLOW_LIMIT,
     });
+    this.#operatorCapSeq.set(sponsorId, 0);
   }
 
   /** Test-only storage inspection; it intentionally exposes hashes but never plaintext credentials. */
@@ -2717,6 +2890,116 @@ export class EnrollmentService {
       }
       throw error;
     }
+  }
+
+  /**
+   * Operator-only capacity change. A signed operator command must carry the
+   * exact cap it observed; stale callers cannot overwrite a newer audit event.
+   * The stable request intent excludes fresh step-up evidence so a committed
+   * receipt remains recoverable after the fifteen-minute window closes.
+   */
+  async overrideSponsorFellowCap(
+    operator: EnrollmentPrincipal,
+    rawRequest: OperatorFellowCapOverrideRequest,
+    options: EnrollmentWriteOptions = {},
+  ): Promise<OperatorFellowCapOverrideResponse> {
+    assertOperator(operator);
+    const parsed = OperatorFellowCapOverrideRequestSchema.safeParse(rawRequest);
+    if (!parsed.success) throw new EnrollmentError("OPERATOR_FELLOW_CAP_BODY_INVALID");
+    const now = this.#clock.now();
+    const prepared = await this.#prepareWrite<OperatorFellowCapOverrideResponse>(
+      "operator-fellow-cap",
+      `operator:${operator.operatorId}`,
+      options.idempotencyKey,
+      {
+        operator: operator.operatorId,
+        sponsor_id: parsed.data.sponsor_id,
+        expected_active_fellow_limit: parsed.data.expected_active_fellow_limit,
+        expected_sponsor_seq: parsed.data.expected_sponsor_seq,
+        active_fellow_limit: parsed.data.active_fellow_limit,
+        reason: parsed.data.reason,
+        confirm: parsed.data.confirm,
+      },
+      now,
+    );
+    if (prepared.replay !== undefined) {
+      return OperatorFellowCapOverrideResponseSchema.parse(await prepared.replay);
+    }
+    if (prepared.attempt === undefined) throw new EnrollmentError("IDEMPOTENCY_CONFLICT");
+    if (!sponsorStepUpIsFresh(parsed.data.step_up_authenticated_at, now)) {
+      throw new EnrollmentError("STEP_UP_REQUIRED");
+    }
+    const auditEventId = `OFC-${generateUlid(now, this.#random)}`;
+    const requestId = await sha256Hex(
+      `operator-fellow-cap\0${operator.operatorId}\0${parsed.data.sponsor_id}\0${prepared.attempt.key}\0${auditEventId}`,
+    );
+    const responseFor = (result: OperatorFellowCapOverrideResult) =>
+      OperatorFellowCapOverrideResponseSchema.parse({
+        acknowledged: true,
+        audit_event_id: auditEventId,
+        sponsor_id: parsed.data.sponsor_id,
+        sponsor_seq: result.sponsorSeq,
+        previous_active_fellow_limit: result.previousActiveFellowLimit,
+        active_fellow_limit: result.activeFellowLimit,
+        step_up_authenticated_at: parsed.data.step_up_authenticated_at,
+        signer_kid: operator.serviceEnvelopeKid,
+        effective_at: result.effectiveAt,
+      });
+    try {
+      const result = await this.#store.overrideSponsorFellowCap({
+        sponsorId: parsed.data.sponsor_id,
+        operatorId: operator.operatorId,
+        auditEventId,
+        expectedActiveFellowLimit: parsed.data.expected_active_fellow_limit,
+        expectedSponsorSeq: parsed.data.expected_sponsor_seq,
+        activeFellowLimit: parsed.data.active_fellow_limit,
+        reason: parsed.data.reason,
+        stepUpAuthenticatedAt: parsed.data.step_up_authenticated_at,
+        signerKid: operator.serviceEnvelopeKid,
+        requestId,
+        effectiveAt: now,
+        replayFor: async (committed) => this.#writeReplay(prepared.attempt, responseFor(committed)),
+      });
+      return responseFor(result);
+    } catch (error) {
+      if (
+        error instanceof EnrollmentIdempotencyRaceError ||
+        (error instanceof EnrollmentError && error.code === "OPERATOR_FELLOW_CAP_NOT_CURRENT")
+      ) {
+        const replay = await this.#store.idempotencyReplay(prepared.attempt);
+        if (replay !== undefined) {
+          return OperatorFellowCapOverrideResponseSchema.parse(
+            await this.#decodeReplay<unknown>(replay),
+          );
+        }
+      }
+      throw error;
+    }
+  }
+
+  async operatorFellowCapState(
+    operator: EnrollmentPrincipal,
+    sponsorId: string,
+  ): Promise<{ sponsorId: string; activeFellowLimit: number; sponsorSeq: number }> {
+    assertOperator(operator);
+    if (!/^usr_[A-Za-z0-9_-]{1,60}$/.test(sponsorId)) {
+      throw new EnrollmentError("OPERATOR_FELLOW_CAP_NOT_CURRENT");
+    }
+    const state = await this.#store.sponsorFellowCap(sponsorId);
+    return { sponsorId, ...state };
+  }
+
+  /** Operator-only append-only audit history, ordered by the causal cap sequence. */
+  async operatorFellowCapAuditPage(
+    operator: EnrollmentPrincipal,
+    sponsorId: string,
+    after?: OperatorFellowCapAuditCursorKey,
+  ): Promise<OperatorFellowCapAuditPage> {
+    assertOperator(operator);
+    if (!/^usr_[A-Za-z0-9_-]{1,60}$/.test(sponsorId)) {
+      throw new EnrollmentError("OPERATOR_FELLOW_CAP_NOT_CURRENT");
+    }
+    return this.#store.sponsorFellowCapAudit(sponsorId, after);
   }
 
   /** W3.1: bootstrap the sponsor row; reports whether this call created it. */

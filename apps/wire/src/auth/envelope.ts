@@ -75,6 +75,9 @@ export interface AttributedPrincipal {
   kid: string;
 }
 
+/** Credential classes that a signed Agora envelope may name on this Worker. */
+export type ServiceEnvelopePrincipalType = "sponsor" | "operator";
+
 export type EnvelopeVerification =
   | { ok: true; principal: AttributedPrincipal; claims: ServiceEnvelopeClaims }
   | { ok: false; code: "UNAUTHORIZED"; reason: EnvelopeRefusalReason };
@@ -99,6 +102,12 @@ export interface VerifyOptions {
   maxLifetimeSeconds?: number;
   /** Envelope action allowlist for this exact Worker ingress. Never optional. */
   permittedActions: readonly string[];
+  /**
+   * Principal class this exact mounted route accepts. Sponsor remains the
+   * default so existing sponsor routes cannot silently broaden; an operator
+   * route must opt in explicitly after signature and body verification.
+   */
+  expectedPrincipalType?: ServiceEnvelopePrincipalType;
 }
 
 export const SERVICE_ENVELOPE_CLOCK_SKEW_SECONDS = 60;
@@ -255,11 +264,13 @@ export async function verifyServiceEnvelope(
     return refuse("payload_mismatch");
   }
 
-  // S-6 establishes only Agora sponsor actions. A valid envelope naming a
-  // different credential class cannot gain sponsor authority merely because
-  // its issuer key is otherwise trusted. Keep this after signature and body
-  // binding so an unauthenticated caller cannot influence an internal reason.
-  if (claims.principal_type !== "sponsor") return refuse("wrong_principal_type");
+  // A valid envelope naming a different credential class cannot gain this
+  // route's authority merely because its issuer key is otherwise trusted. Keep
+  // this after signature and body binding so an unauthenticated caller cannot
+  // influence an internal reason.
+  if (claims.principal_type !== (options.expectedPrincipalType ?? "sponsor")) {
+    return refuse("wrong_principal_type");
+  }
 
   // Expiry is exclusive in every nonce store: `expiresAt <= now` is no longer
   // a claim. The envelope itself remains acceptable during bounded clock skew,

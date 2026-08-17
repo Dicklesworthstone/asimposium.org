@@ -6,10 +6,13 @@ import {
   type FellowCredentialProfile,
   type FellowLifecycleStatus,
   FellowNameSchema,
+  OPERATOR_FELLOW_CAP_AUDIT_PAGE_SIZE,
+  OperatorFellowCapAuditEventSchema,
   type RequestedScope,
   RequestedScopeSchema,
   SPONSOR_FELLOW_PAGE_SIZE,
   type SponsorFellowCursorKey,
+  type OperatorFellowCapAuditCursorKey,
 } from "@asimposium/contracts";
 // D1 proves JSON syntax; these schemas prove that stored authority still obeys
 // the public scope vocabulary and resource bounds when it is read back.
@@ -41,6 +44,11 @@ import {
   isStrictEnrollmentScopeReduction,
   type LifecycleCommandResult,
   nextEnrollmentPollPacing,
+  type OperatorFellowCapOverrideAttempt,
+  type OperatorFellowCapOverrideResult,
+  type OperatorFellowCapAuditPage,
+  type OperatorFellowCapAuditRecord,
+  type OperatorFellowCapState,
   type PollAttempt,
   type PollDecision,
   reduceEnrollmentResources,
@@ -118,6 +126,24 @@ interface LifecycleFellowRow extends LifecycleSponsorRow {
   created_at: number;
   status_changed_at: number | null;
   review_from: number;
+}
+
+interface OperatorFellowCapRow {
+  active_fellow_limit: number;
+  fellow_cap_seq: number;
+}
+
+interface OperatorFellowCapAuditRow {
+  audit_event_id: string;
+  sponsor_id: string;
+  operator_id: string;
+  sponsor_seq: number;
+  previous_active_fellow_limit: number;
+  active_fellow_limit: number;
+  reason: string;
+  step_up_authenticated_at: number;
+  signer_kid: string;
+  effective_at: number;
 }
 
 interface UnboundDeviceProposalRow extends ProposalRow {
@@ -395,6 +421,15 @@ function isUniqueNameFailure(error: unknown): boolean {
 
 function isActiveFellowCapFailure(error: unknown): boolean {
   return error instanceof Error && /active Fellow cap reached/i.test(error.message);
+}
+
+function isOperatorFellowCapStateFailure(error: unknown): boolean {
+  return (
+    error instanceof Error &&
+    /operator Fellow-cap audit is stale|Fellow-cap transition requires immutable operator audit|active Fellow limit is below current use/i.test(
+      error.message,
+    )
+  );
 }
 
 function isSponsorEnrollmentRateFailure(error: unknown): boolean {
@@ -1921,6 +1956,188 @@ export class D1EnrollmentStore implements EnrollmentStore {
     } finally {
       if (!committed) await this.releaseLifecycleLease(attempt.sponsorId, attempt.eventId);
     }
+  }
+
+  async overrideSponsorFellowCap(
+    attempt: OperatorFellowCapOverrideAttempt,
+  ): Promise<OperatorFellowCapOverrideResult> {
+    let current: OperatorFellowCapRow | null;
+    try {
+      current = await sql(
+        this.#db,
+        `SELECT active_fellow_limit, fellow_cap_seq
+           FROM sponsors
+          WHERE sponsor_id = ?`,
+        attempt.sponsorId,
+      ).first<OperatorFellowCapRow>();
+    } catch {
+      throw new EnrollmentPersistenceError();
+    }
+    if (
+      current === null ||
+      !Number.isSafeInteger(current.active_fellow_limit) ||
+      current.active_fellow_limit < 5 ||
+      current.active_fellow_limit > 500 ||
+      !Number.isSafeInteger(current.fellow_cap_seq) ||
+      current.fellow_cap_seq < 0 ||
+      current.fellow_cap_seq >= Number.MAX_SAFE_INTEGER ||
+      current.active_fellow_limit !== attempt.expectedActiveFellowLimit ||
+      current.fellow_cap_seq !== attempt.expectedSponsorSeq ||
+      current.active_fellow_limit === attempt.activeFellowLimit
+    ) {
+      throw new EnrollmentError("OPERATOR_FELLOW_CAP_NOT_CURRENT");
+    }
+    const result = {
+      sponsorSeq: attempt.expectedSponsorSeq + 1,
+      previousActiveFellowLimit: current.active_fellow_limit,
+      activeFellowLimit: attempt.activeFellowLimit,
+      effectiveAt: attempt.effectiveAt,
+    } satisfies OperatorFellowCapOverrideResult;
+    const replay = await attempt.replayFor?.(result);
+    try {
+      const results = await this.#db.batch([
+        sql(
+          this.#db,
+          `INSERT INTO sponsor_fellow_cap_audit_events (
+             audit_event_id, sponsor_id, operator_id, sponsor_seq,
+             previous_active_fellow_limit, active_fellow_limit, reason,
+             step_up_authenticated_at, signer_kid, request_id, created_at
+           ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+          attempt.auditEventId,
+          attempt.sponsorId,
+          attempt.operatorId,
+          result.sponsorSeq,
+          result.previousActiveFellowLimit,
+          result.activeFellowLimit,
+          attempt.reason,
+          attempt.stepUpAuthenticatedAt,
+          attempt.signerKid,
+          attempt.requestId,
+          result.effectiveAt,
+        ),
+        ...(replay === undefined ? [] : [this.idempotencyStatement(replay)]),
+      ]);
+      if ((results[0]?.meta.changes ?? 0) < 1) {
+        await this.raceIfPresent(replay);
+        throw new EnrollmentError("OPERATOR_FELLOW_CAP_NOT_CURRENT");
+      }
+      if (replay !== undefined && (results[1]?.meta.changes ?? 0) !== 1) {
+        await this.raceIfPresent(replay);
+        throw new EnrollmentPersistenceError();
+      }
+      return result;
+    } catch (error) {
+      if (error instanceof EnrollmentError || error instanceof EnrollmentIdempotencyRaceError) {
+        throw error;
+      }
+      await this.raceIfPresent(replay);
+      if (isOperatorFellowCapStateFailure(error)) {
+        throw new EnrollmentError("OPERATOR_FELLOW_CAP_NOT_CURRENT");
+      }
+      throw new EnrollmentPersistenceError();
+    }
+  }
+
+  async sponsorFellowCap(sponsorId: string): Promise<OperatorFellowCapState> {
+    let current: OperatorFellowCapRow | null;
+    try {
+      current = await sql(
+        this.#db,
+        `SELECT active_fellow_limit, fellow_cap_seq
+           FROM sponsors
+          WHERE sponsor_id = ?`,
+        sponsorId,
+      ).first<OperatorFellowCapRow>();
+    } catch {
+      throw new EnrollmentPersistenceError();
+    }
+    if (
+      current === null ||
+      !Number.isSafeInteger(current.active_fellow_limit) ||
+      current.active_fellow_limit < 5 ||
+      current.active_fellow_limit > 500 ||
+      !Number.isSafeInteger(current.fellow_cap_seq) ||
+      current.fellow_cap_seq < 0 ||
+      current.fellow_cap_seq > Number.MAX_SAFE_INTEGER
+    ) {
+      throw new EnrollmentError("OPERATOR_FELLOW_CAP_NOT_CURRENT");
+    }
+    return {
+      activeFellowLimit: current.active_fellow_limit,
+      sponsorSeq: current.fellow_cap_seq,
+    };
+  }
+
+  async sponsorFellowCapAudit(
+    sponsorId: string,
+    after?: OperatorFellowCapAuditCursorKey,
+  ): Promise<OperatorFellowCapAuditPage> {
+    let rows: readonly OperatorFellowCapAuditRow[];
+    try {
+      const statement =
+        after === undefined
+          ? sql(
+              this.#db,
+              `SELECT audit_event_id, sponsor_id, operator_id, sponsor_seq,
+                      previous_active_fellow_limit, active_fellow_limit, reason,
+                      step_up_authenticated_at, signer_kid, created_at AS effective_at
+                 FROM sponsor_fellow_cap_audit_events INDEXED BY sponsor_fellow_cap_audit_events_sponsor_seq_idx
+                WHERE sponsor_id = ?
+                ORDER BY sponsor_seq DESC
+                LIMIT ${OPERATOR_FELLOW_CAP_AUDIT_PAGE_SIZE + 1}`,
+              sponsorId,
+            )
+          : sql(
+              this.#db,
+              `SELECT audit_event_id, sponsor_id, operator_id, sponsor_seq,
+                      previous_active_fellow_limit, active_fellow_limit, reason,
+                      step_up_authenticated_at, signer_kid, created_at AS effective_at
+                 FROM sponsor_fellow_cap_audit_events INDEXED BY sponsor_fellow_cap_audit_events_sponsor_seq_idx
+                WHERE sponsor_id = ? AND sponsor_seq < ?
+                ORDER BY sponsor_seq DESC
+                LIMIT ${OPERATOR_FELLOW_CAP_AUDIT_PAGE_SIZE + 1}`,
+              sponsorId,
+              after.sponsor_seq,
+            );
+      const result = await statement.all<OperatorFellowCapAuditRow>();
+      rows = result.results;
+    } catch {
+      throw new EnrollmentPersistenceError();
+    }
+    const window = rows.map((row): OperatorFellowCapAuditRecord => {
+      const parsed = OperatorFellowCapAuditEventSchema.safeParse({
+        audit_event_id: row.audit_event_id,
+        sponsor_id: row.sponsor_id,
+        operator_id: row.operator_id,
+        sponsor_seq: row.sponsor_seq,
+        previous_active_fellow_limit: row.previous_active_fellow_limit,
+        active_fellow_limit: row.active_fellow_limit,
+        reason: row.reason,
+        step_up_authenticated_at: row.step_up_authenticated_at,
+        signer_kid: row.signer_kid,
+        effective_at: row.effective_at,
+      });
+      if (!parsed.success) throw new EnrollmentPersistenceError();
+      return {
+        auditEventId: parsed.data.audit_event_id,
+        sponsorId: parsed.data.sponsor_id,
+        operatorId: parsed.data.operator_id,
+        sponsorSeq: parsed.data.sponsor_seq,
+        previousActiveFellowLimit: parsed.data.previous_active_fellow_limit,
+        activeFellowLimit: parsed.data.active_fellow_limit,
+        reason: parsed.data.reason,
+        stepUpAuthenticatedAt: parsed.data.step_up_authenticated_at,
+        signerKid: parsed.data.signer_kid,
+        effectiveAt: parsed.data.effective_at,
+      };
+    });
+    const hasNext = window.length > OPERATOR_FELLOW_CAP_AUDIT_PAGE_SIZE;
+    const auditEvents = hasNext ? window.slice(0, -1) : window;
+    const final = auditEvents.at(-1);
+    return {
+      auditEvents,
+      ...(hasNext && final !== undefined ? { nextCursor: { sponsor_seq: final.sponsorSeq } } : {}),
+    };
   }
 
   async capsule(enrollmentId: string, now: number): Promise<EnrollmentCapsule> {

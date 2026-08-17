@@ -1,4 +1,4 @@
-import { isTrustedStoaOrigin } from "@asimposium/contracts";
+import { isTrustedStoaOrigin, SponsorIdSchema } from "@asimposium/contracts";
 import { listPublicSchemas, type PublicSchemaDocument } from "@asimposium/contracts/public-schemas";
 import { type DocumentId, getDocument, sha256Hex } from "@asimposium/protocol";
 import { Hono } from "hono";
@@ -6,6 +6,7 @@ import { Hono } from "hono";
 import { authenticateServiceEnvelopeRequest } from "./auth/http";
 import { type VerificationKeyRecord, VerificationKeyring } from "./auth/keyring";
 import { D1NonceStore } from "./auth/nonce";
+import { envelopeRefusalProblem } from "./auth/refusal";
 import { D1EnrollmentStore } from "./enrollment/d1-store";
 import { createEnrollmentRouter } from "./enrollment/router";
 import {
@@ -61,6 +62,7 @@ const EXACT_ENROLLMENT_PATHS = new Set([
   "/v1/fellows/flow",
   "/v1/fellows/lifecycle",
   "/v1/hello",
+  "/v1/operators/fellow-cap",
   "/v1/sponsors/bootstrap",
   "/v1/sponsors/panic",
 ]);
@@ -256,7 +258,29 @@ function isEnrollmentPath(pathname: string): boolean {
         staticSlotEquals(rawSegments[0], "v1") &&
         staticSlotEquals(rawSegments[1], "fellows") &&
         staticSlotEquals(rawSegments[2], "after") &&
-        rawSegments[3] !== "")
+        rawSegments[3] !== "") ||
+      (rawSegments.length === 5 &&
+        staticSlotEquals(rawSegments[0], "v1") &&
+        staticSlotEquals(rawSegments[1], "operators") &&
+        staticSlotEquals(rawSegments[2], "sponsors") &&
+        rawSegments[3] !== "" &&
+        staticSlotEquals(rawSegments[4], "fellow-cap")) ||
+      (rawSegments.length === 6 &&
+        staticSlotEquals(rawSegments[0], "v1") &&
+        staticSlotEquals(rawSegments[1], "operators") &&
+        staticSlotEquals(rawSegments[2], "sponsors") &&
+        rawSegments[3] !== "" &&
+        staticSlotEquals(rawSegments[4], "fellow-cap") &&
+        staticSlotEquals(rawSegments[5], "history")) ||
+      (rawSegments.length === 8 &&
+        staticSlotEquals(rawSegments[0], "v1") &&
+        staticSlotEquals(rawSegments[1], "operators") &&
+        staticSlotEquals(rawSegments[2], "sponsors") &&
+        rawSegments[3] !== "" &&
+        staticSlotEquals(rawSegments[4], "fellow-cap") &&
+        staticSlotEquals(rawSegments[5], "history") &&
+        staticSlotEquals(rawSegments[6], "after") &&
+        rawSegments[7] !== "")
     );
   }
   const decodedPath = `/${segments.join("/")}`;
@@ -277,7 +301,33 @@ function isEnrollmentPath(pathname: string): boolean {
       segments[2] === "after" &&
       finalSegment !== undefined &&
       finalSegment !== "" &&
-      !finalSegment.includes("/"))
+      !finalSegment.includes("/")) ||
+    (segments.length === 5 &&
+      segments[0] === "v1" &&
+      segments[1] === "operators" &&
+      segments[2] === "sponsors" &&
+      segments[3] !== "" &&
+      !segments[3]?.includes("/") &&
+      segments[4] === "fellow-cap") ||
+    (segments.length === 6 &&
+      segments[0] === "v1" &&
+      segments[1] === "operators" &&
+      segments[2] === "sponsors" &&
+      segments[3] !== "" &&
+      !segments[3]?.includes("/") &&
+      segments[4] === "fellow-cap" &&
+      segments[5] === "history") ||
+    (segments.length === 8 &&
+      segments[0] === "v1" &&
+      segments[1] === "operators" &&
+      segments[2] === "sponsors" &&
+      segments[3] !== "" &&
+      !segments[3]?.includes("/") &&
+      segments[4] === "fellow-cap" &&
+      segments[5] === "history" &&
+      segments[6] === "after" &&
+      segments[7] !== "" &&
+      !segments[7]?.includes("/"))
   );
 }
 
@@ -308,6 +358,21 @@ function parseKeyringRecords(raw: string | undefined): VerificationKeyRecord[] |
   } catch {
     return undefined;
   }
+}
+
+/**
+ * Parse the deployment-owned operator allowlist once per cached stack. These
+ * ids are opaque, but this still fails closed: a malformed list must never turn
+ * into a broad "any signed sponsor is an operator" fallback.
+ */
+function parseOperatorPrincipalIds(raw: string | undefined): ReadonlySet<string> | undefined {
+  if (raw === undefined) return undefined;
+  const ids = raw.split(",").map((value) => value.trim());
+  if (ids.length === 0 || ids.some((id) => !SponsorIdSchema.safeParse(id).success)) {
+    return undefined;
+  }
+  const unique = new Set(ids);
+  return unique.size === ids.length ? unique : undefined;
 }
 
 /**
@@ -343,6 +408,7 @@ function enrollmentStack(env: Env): EnrollmentStack | Response {
   const credentialKey = JSON.stringify([
     env.ENROLLMENT_REPLAY_KEY ?? "",
     env.SERVICE_ENVELOPE_KEYS ?? "",
+    env.OPERATOR_PRINCIPAL_IDS ?? "",
     stoaOrigin,
   ]);
   if (cached !== undefined && cached.db === env.DB && cached.credentialKey === credentialKey) {
@@ -379,6 +445,7 @@ function enrollmentStack(env: Env): EnrollmentStack | Response {
     }
   }
   const nonces = new D1NonceStore(env.DB);
+  const operatorPrincipalIds = parseOperatorPrincipalIds(env.OPERATOR_PRINCIPAL_IDS);
 
   const router = createEnrollmentRouter({
     service,
@@ -404,6 +471,40 @@ function enrollmentStack(env: Env): EnrollmentStack | Response {
       if (!result.ok) return result.response;
       return {
         principal: { type: "sponsor", sponsorId: result.verification.principal.id } as const,
+        rawBody: result.rawBody,
+      };
+    },
+    verifiedOperator: async (request, route, action) => {
+      if (keyring === undefined || operatorPrincipalIds === undefined) {
+        return problem({
+          status: 503,
+          code: "OPERATOR_AUTH_UNAVAILABLE",
+          title: "Operator writes are not configured on this Worker",
+          detail: "This deployment cannot verify operator authorization safely.",
+          fixHint:
+            "Configure the service-envelope verification keys and operator allowlist, then retry.",
+        });
+      }
+      const result = await authenticateServiceEnvelopeRequest(request, {
+        keyring,
+        nonces,
+        now: Math.floor(Date.now() / 1_000),
+        issuer: ENVELOPE_ISSUER,
+        audience: ENVELOPE_AUDIENCE,
+        route,
+        permittedActions: [action],
+        expectedPrincipalType: "operator",
+      });
+      if (!result.ok) return result.response;
+      if (!operatorPrincipalIds.has(result.verification.principal.id)) {
+        return envelopeRefusalProblem("wrong_principal_type");
+      }
+      return {
+        principal: {
+          type: "operator",
+          operatorId: result.verification.principal.id,
+          serviceEnvelopeKid: result.verification.principal.kid,
+        } as const,
         rawBody: result.rawBody,
       };
     },

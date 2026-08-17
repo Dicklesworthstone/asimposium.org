@@ -4,12 +4,18 @@ import {
   EnrollmentClaimResponseSchema,
   EnrollmentHelloResponseSchema,
   EnrollmentIdSchema,
+  encodeOperatorFellowCapAuditCursor,
   encodeSponsorFellowCursor,
   MintEnrollmentRequestSchema,
   MintEnrollmentResponseSchema,
+  OperatorFellowCapOverrideRequestSchema,
+  OperatorFellowCapOverrideResponseSchema,
+  OperatorFellowCapAuditPageResponseSchema,
+  OperatorFellowCapStateResponseSchema,
   type ProblemCode,
   ProblemDocumentSchema,
   parseSponsorFellowCursor,
+  parseOperatorFellowCapAuditCursor,
   SponsorBootstrapRequestSchema,
   SponsorBootstrapResponseSchema,
   SponsorCredentialRevokeRequestSchema,
@@ -19,6 +25,7 @@ import {
   SponsorFellowLifecycleRequestSchema,
   SponsorFellowLifecycleResponseSchema,
   SponsorFellowListResponseSchema,
+  SponsorIdSchema,
   SponsorPanicRequestSchema,
   SponsorPanicResponseSchema,
   SponsorProposalListResponseSchema,
@@ -104,6 +111,18 @@ export interface EnrollmentRouterOptions {
    * trusting a header.
    */
   readonly verifiedSponsor?: (
+    request: Request,
+    route: string,
+    action: string,
+  ) => Promise<
+    { readonly principal: EnrollmentPrincipal; readonly rawBody: Uint8Array } | Response
+  >;
+  /**
+   * Parent-supplied operator seam. It must authenticate an `operator` envelope
+   * for this exact route/action and apply the Worker deployment's allowlist;
+   * this router never accepts a caller-selected operator header.
+   */
+  readonly verifiedOperator?: (
     request: Request,
     route: string,
     action: string,
@@ -470,6 +489,35 @@ function enrollmentErrorResponse(error: EnrollmentError, request: Request): Resp
           step_up_authenticated_at: 1_786_800_000,
         }),
       );
+    case "OPERATOR_FELLOW_CAP_BODY_INVALID":
+      return problem(
+        422,
+        error.code,
+        "Operator Fellow-cap command body is invalid",
+        "The signed JSON body does not match the compare-and-set Fellow-cap override contract.",
+        "Send the target sponsor, its currently observed cap, the replacement cap, a durable reason, the exact confirmation, and server-stamped recent-auth time.",
+        enrollmentContractFields({
+          sponsor_id: "usr_operator_cap_target",
+          expected_active_fellow_limit: 5,
+          expected_sponsor_seq: 0,
+          active_fellow_limit: 6,
+          reason: "Reviewed capacity need for active Fellows.",
+          confirm: "override-fellow-cap",
+          step_up_authenticated_at: 1_786_800_000,
+        }),
+      );
+    case "OPERATOR_FELLOW_CAP_HISTORY_CURSOR_INVALID":
+      return problem(
+        422,
+        error.code,
+        "Operator Fellow-cap audit cursor is invalid",
+        "The audit-history page cursor is not a canonical cursor from this sponsor's cap history.",
+        "Start at the operator audit-history route, then follow next_cursor exactly as a path segment.",
+        enrollmentContractFields({
+          method: "GET",
+          path: "/v1/operators/sponsors/usr_operator_cap_target/fellow-cap/history/after/oc1.<cursor>",
+        }),
+      );
     case "STEP_UP_REQUIRED":
       return problem(
         403,
@@ -493,6 +541,14 @@ function enrollmentErrorResponse(error: EnrollmentError, request: Request): Resp
         "Sponsor Fellow capacity is reached",
         "This sponsor cannot activate another Fellow at its current capacity.",
         "Pause or retire an existing Fellow, or ask the operator to raise this sponsor's limit, then retry the exact action.",
+      );
+    case "OPERATOR_FELLOW_CAP_NOT_CURRENT":
+      return problem(
+        409,
+        error.code,
+        "Fellow-cap command is no longer current",
+        "The requested Fellow-cap transition was not accepted.",
+        "Refresh the operator record and submit a new signed command with its current precondition and a new Idempotency-Key.",
       );
     case "SPONSOR_ENROLLMENT_RATE_LIMITED": {
       const response = problem(
@@ -1165,6 +1221,33 @@ async function requireSponsor(
   }
 }
 
+/** The allowlisted operator's service-envelope identity, or a typed safe refusal. */
+async function requireOperator(
+  options: EnrollmentRouterOptions,
+  request: Request,
+  route: string,
+  action: string,
+): Promise<{ readonly principal: EnrollmentPrincipal; readonly rawBody: Uint8Array } | Response> {
+  if (options.verifiedOperator === undefined) {
+    return operatorAuthUnavailableResponse();
+  }
+  try {
+    const result = await options.verifiedOperator(request, route, action);
+    if (result instanceof Response) return result;
+    if (
+      !isEnrollmentPrincipal(result?.principal) ||
+      result.principal.type !== "operator" ||
+      !/^[A-Za-z0-9._-]{1,64}$/.test(result.principal.serviceEnvelopeKid) ||
+      !(result?.rawBody instanceof Uint8Array)
+    ) {
+      return operatorAuthUnavailableResponse();
+    }
+    return result;
+  } catch {
+    return operatorAuthUnavailableResponse();
+  }
+}
+
 function sponsorAuthUnavailableResponse(): Response {
   return problem(
     503,
@@ -1175,12 +1258,29 @@ function sponsorAuthUnavailableResponse(): Response {
   );
 }
 
+function operatorAuthUnavailableResponse(): Response {
+  return problem(
+    503,
+    "OPERATOR_AUTH_UNAVAILABLE",
+    "Operator authentication is temporarily unavailable",
+    "The Worker could not verify this operator request safely.",
+    "Retry later. If the failure persists, check the service-envelope keyring, operator allowlist, and nonce store before re-signing the request.",
+  );
+}
+
 function isEnrollmentPrincipal(value: unknown): value is EnrollmentPrincipal {
   if (typeof value !== "object" || value === null) return false;
   const principal = value as Record<string, unknown>;
   switch (principal.type) {
     case "sponsor":
       return typeof principal.sponsorId === "string" && principal.sponsorId.length > 0;
+    case "operator":
+      return (
+        typeof principal.operatorId === "string" &&
+        principal.operatorId.length > 0 &&
+        typeof principal.serviceEnvelopeKid === "string" &&
+        principal.serviceEnvelopeKid.length > 0
+      );
     case "fellow":
       return typeof principal.fellowId === "string" && principal.fellowId.length > 0;
     case "service":
@@ -1274,6 +1374,227 @@ function contractFellow(record: SponsorFellowRecord): Record<string, unknown> {
  * envelope seam; a Fellow bearer is refused before the handler runs.
  */
 function mountSponsorRoutes(app: Hono, options: EnrollmentRouterOptions): void {
+  app.get("/v1/operators/sponsors/:sponsorId/fellow-cap", async (c) => {
+    if (hasQuery(c.req.raw)) {
+      return sponsorPathOnlyResponse(
+        c.req.raw,
+        "/v1/operators/sponsors/usr_operator_cap_target/fellow-cap",
+      );
+    }
+    const sponsorId = c.req.param("sponsorId");
+    if (!SponsorIdSchema.safeParse(sponsorId).success) {
+      return enrollmentErrorResponse(
+        new EnrollmentError("OPERATOR_FELLOW_CAP_NOT_CURRENT"),
+        c.req.raw,
+      );
+    }
+    const authenticated = await requireOperator(
+      options,
+      c.req.raw,
+      "/v1/operators/sponsors/:sponsorId/fellow-cap",
+      "operator.fellow-cap.read",
+    );
+    if (authenticated instanceof Response) return authenticated;
+    try {
+      const state = await options.service.operatorFellowCapState(
+        authenticated.principal,
+        sponsorId,
+      );
+      return c.json(
+        OperatorFellowCapStateResponseSchema.parse({
+          sponsor_id: state.sponsorId,
+          active_fellow_limit: state.activeFellowLimit,
+          sponsor_seq: state.sponsorSeq,
+        }),
+        200,
+        { "cache-control": "no-store" },
+      );
+    } catch (error) {
+      const operational = enrollmentOperationalFailure(error);
+      if (operational !== undefined) return operational;
+      return error instanceof EnrollmentError
+        ? enrollmentErrorResponse(error, c.req.raw)
+        : enrollmentUnavailableResponse();
+    }
+  });
+
+  app.get("/v1/operators/sponsors/:sponsorId/fellow-cap/history", async (c) => {
+    if (hasQuery(c.req.raw)) {
+      return sponsorPathOnlyResponse(
+        c.req.raw,
+        "/v1/operators/sponsors/usr_operator_cap_target/fellow-cap/history",
+      );
+    }
+    const sponsorId = c.req.param("sponsorId");
+    if (!SponsorIdSchema.safeParse(sponsorId).success) {
+      return enrollmentErrorResponse(
+        new EnrollmentError("OPERATOR_FELLOW_CAP_NOT_CURRENT"),
+        c.req.raw,
+      );
+    }
+    const authenticated = await requireOperator(
+      options,
+      c.req.raw,
+      "/v1/operators/sponsors/:sponsorId/fellow-cap/history",
+      "operator.fellow-cap.history",
+    );
+    if (authenticated instanceof Response) return authenticated;
+    try {
+      const page = await options.service.operatorFellowCapAuditPage(
+        authenticated.principal,
+        sponsorId,
+      );
+      return c.json(
+        OperatorFellowCapAuditPageResponseSchema.parse({
+          audit_events: page.auditEvents.map((event) => ({
+            audit_event_id: event.auditEventId,
+            sponsor_id: event.sponsorId,
+            operator_id: event.operatorId,
+            sponsor_seq: event.sponsorSeq,
+            previous_active_fellow_limit: event.previousActiveFellowLimit,
+            active_fellow_limit: event.activeFellowLimit,
+            reason: event.reason,
+            step_up_authenticated_at: event.stepUpAuthenticatedAt,
+            signer_kid: event.signerKid,
+            effective_at: event.effectiveAt,
+          })),
+          next_cursor:
+            page.nextCursor === undefined ? null : encodeOperatorFellowCapAuditCursor(page.nextCursor),
+        }),
+        200,
+        { "cache-control": "no-store" },
+      );
+    } catch (error) {
+      const operational = enrollmentOperationalFailure(error);
+      if (operational !== undefined) return operational;
+      return error instanceof EnrollmentError
+        ? enrollmentErrorResponse(error, c.req.raw)
+        : enrollmentUnavailableResponse();
+    }
+  });
+
+  app.get("/v1/operators/sponsors/:sponsorId/fellow-cap/history/after/:cursor", async (c) => {
+    if (hasQuery(c.req.raw)) {
+      return sponsorPathOnlyResponse(
+        c.req.raw,
+        "/v1/operators/sponsors/usr_operator_cap_target/fellow-cap/history/after/<cursor>",
+      );
+    }
+    const sponsorId = c.req.param("sponsorId");
+    if (!SponsorIdSchema.safeParse(sponsorId).success) {
+      return enrollmentErrorResponse(
+        new EnrollmentError("OPERATOR_FELLOW_CAP_NOT_CURRENT"),
+        c.req.raw,
+      );
+    }
+    const after = parseOperatorFellowCapAuditCursor(c.req.param("cursor"));
+    if (after === undefined) {
+      return enrollmentErrorResponse(
+        new EnrollmentError("OPERATOR_FELLOW_CAP_HISTORY_CURSOR_INVALID"),
+        c.req.raw,
+      );
+    }
+    const authenticated = await requireOperator(
+      options,
+      c.req.raw,
+      "/v1/operators/sponsors/:sponsorId/fellow-cap/history/after/:cursor",
+      "operator.fellow-cap.history",
+    );
+    if (authenticated instanceof Response) return authenticated;
+    try {
+      const page = await options.service.operatorFellowCapAuditPage(
+        authenticated.principal,
+        sponsorId,
+        after,
+      );
+      return c.json(
+        OperatorFellowCapAuditPageResponseSchema.parse({
+          audit_events: page.auditEvents.map((event) => ({
+            audit_event_id: event.auditEventId,
+            sponsor_id: event.sponsorId,
+            operator_id: event.operatorId,
+            sponsor_seq: event.sponsorSeq,
+            previous_active_fellow_limit: event.previousActiveFellowLimit,
+            active_fellow_limit: event.activeFellowLimit,
+            reason: event.reason,
+            step_up_authenticated_at: event.stepUpAuthenticatedAt,
+            signer_kid: event.signerKid,
+            effective_at: event.effectiveAt,
+          })),
+          next_cursor:
+            page.nextCursor === undefined ? null : encodeOperatorFellowCapAuditCursor(page.nextCursor),
+        }),
+        200,
+        { "cache-control": "no-store" },
+      );
+    } catch (error) {
+      const operational = enrollmentOperationalFailure(error);
+      if (operational !== undefined) return operational;
+      return error instanceof EnrollmentError
+        ? enrollmentErrorResponse(error, c.req.raw)
+        : enrollmentUnavailableResponse();
+    }
+  });
+
+  app.post("/v1/operators/fellow-cap", async (c) => {
+    if (hasQuery(c.req.raw)) {
+      return sponsorPathOnlyResponse(c.req.raw, "/v1/operators/fellow-cap");
+    }
+    const example = {
+      sponsor_id: "usr_operator_cap_target",
+      expected_active_fellow_limit: 5,
+      expected_sponsor_seq: 0,
+      active_fellow_limit: 6,
+      reason: "Reviewed capacity need for active Fellows.",
+      confirm: "override-fellow-cap",
+      step_up_authenticated_at: 1_786_800_000,
+    };
+    if (!hasJsonContentType(c.req.raw)) {
+      return jsonContentTypeRequiredResponse("/v1/operators/fellow-cap", example, true);
+    }
+    const authenticated = await requireOperator(
+      options,
+      c.req.raw,
+      "/v1/operators/fellow-cap",
+      "operator.fellow-cap.override",
+    );
+    if (authenticated instanceof Response) return authenticated;
+    try {
+      let body: unknown;
+      try {
+        body = verifiedJson(authenticated.rawBody);
+      } catch {
+        return enrollmentErrorResponse(
+          new EnrollmentError("OPERATOR_FELLOW_CAP_BODY_INVALID"),
+          c.req.raw,
+        );
+      }
+      const parsed = OperatorFellowCapOverrideRequestSchema.safeParse(body);
+      if (!parsed.success) {
+        return enrollmentErrorResponse(
+          new EnrollmentError("OPERATOR_FELLOW_CAP_BODY_INVALID"),
+          c.req.raw,
+        );
+      }
+      const idempotency = idempotencyOptions(c.req.raw);
+      if (idempotency instanceof Response) return idempotency;
+      const response = await options.service.overrideSponsorFellowCap(
+        authenticated.principal,
+        parsed.data,
+        idempotency,
+      );
+      return c.json(OperatorFellowCapOverrideResponseSchema.parse(response), 200, {
+        "cache-control": "no-store",
+      });
+    } catch (error) {
+      const operational = enrollmentOperationalFailure(error);
+      if (operational !== undefined) return operational;
+      return error instanceof EnrollmentError
+        ? enrollmentErrorResponse(error, c.req.raw)
+        : enrollmentUnavailableResponse();
+    }
+  });
+
   app.post("/v1/enrollments", async (c) => {
     if (hasQuery(c.req.raw)) {
       return sponsorPathOnlyResponse(c.req.raw, "/v1/enrollments");

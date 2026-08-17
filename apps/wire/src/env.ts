@@ -38,6 +38,13 @@ export interface Env {
    */
   SERVICE_ENVELOPE_KEYS?: string;
   /**
+   * Comma-separated opaque Google-subject-derived ids permitted to perform the
+   * operator Fellow-cap command. Absent, blank, duplicated, or malformed
+   * configuration fails closed for that route; it never promotes a sponsor by
+   * default.
+   */
+  OPERATOR_PRINCIPAL_IDS?: string;
+  /**
    * The trusted Stoa origin this deployment issues enrollment URLs for
    * (production, staging, or an explicit loopback). Non-secret, and
    * deliberately a binding rather than anything derived from a request:
