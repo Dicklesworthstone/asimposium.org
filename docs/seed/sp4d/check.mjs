@@ -13,6 +13,7 @@ import { dirname, relative, resolve } from "node:path";
 
 const here = dirname(fileURLToPath(import.meta.url));
 const repositoryRoot = resolve(here, "../../..");
+const SOURCE_AUDIT_DATE = "2026-08-17";
 const requiredChecks = [
   "exact_formulation",
   "variant_distinctions",
@@ -63,6 +64,43 @@ function requiredString(dossier, field, errors) {
   }
 }
 
+function canonicalize(value) {
+  if (Array.isArray(value)) return value.map(canonicalize);
+  if (value !== null && typeof value === "object") {
+    return Object.fromEntries(Object.keys(value).sort().map((key) => [key, canonicalize(value[key])]));
+  }
+  return value;
+}
+
+function digestDossier(dossier) {
+  return sha256(JSON.stringify(canonicalize(dossier)));
+}
+
+function validateStatusFreshness(dossier, errors) {
+  const freshness = dossier.status_freshness;
+  const id = dossier.id ?? "<unknown>";
+  if (freshness?.source_audit_date !== SOURCE_AUDIT_DATE || freshness?.prepublication_recheck_required !== true) {
+    errors.push(diagnostic("FRESHNESS_POLICY_INVALID", id, `Use source audit date ${SOURCE_AUDIT_DATE} and require a pre-publication recheck.`));
+    return;
+  }
+  if (!['uncertain', 'blocked'].includes(freshness.registry_access)) {
+    errors.push(diagnostic("STATUS_REGISTRY_ACCESS_INVALID", id, "registry_access must be uncertain or blocked; a draft cannot self-certify a live status."));
+  }
+  if (typeof freshness.registry_access_note !== "string" || freshness.registry_access_note.trim().length < 24) {
+    errors.push(diagnostic("STATUS_REGISTRY_ACCESS_INVALID", id, "registry_access_note must explain the uncertainty or block."));
+  }
+  if (!Array.isArray(freshness.status_source_ids) || freshness.status_source_ids.length === 0) {
+    errors.push(diagnostic("STATUS_SOURCE_BINDING_INVALID", id, "status_source_ids must name at least one anchored primary or official source."));
+    return;
+  }
+  const referenceIds = new Set((dossier.references ?? []).map((reference) => reference.id));
+  for (const sourceId of freshness.status_source_ids) {
+    if (typeof sourceId !== "string" || !referenceIds.has(sourceId)) {
+      errors.push(diagnostic("STATUS_SOURCE_BINDING_INVALID", id, `status source ${String(sourceId)} is not an anchored reference.`));
+    }
+  }
+}
+
 export function validateDossier(dossier) {
   const errors = [];
   const id = dossier.id ?? "<unknown>";
@@ -84,11 +122,12 @@ export function validateDossier(dossier) {
   if (Object.hasOwn(dossier, "current_status")) {
     errors.push(diagnostic("UNSUPPORTED_CURRENT_STATUS_FIELD", id, "Use status_freshness plus a pre-publication recheck requirement."));
   }
-  if (dossier.status_freshness?.source_audit_date !== "2026-08-13" || dossier.status_freshness?.prepublication_recheck_required !== true) {
-    errors.push(diagnostic("FRESHNESS_POLICY_INVALID", id, "A source-audit date and an explicit recheck requirement are mandatory."));
-  }
+  validateStatusFreshness(dossier, errors);
   if (!Array.isArray(dossier.variant_distinctions) || dossier.variant_distinctions.length < 2) {
     errors.push(diagnostic("MISSING_VARIANT_DISTINCTIONS", id, "At least two distinctions are required."));
+  }
+  if (id === "SP4D" && !/topological[\s\S]*PL[\s\S]*smooth|smooth[\s\S]*topological[\s\S]*PL|PL[\s\S]*topological[\s\S]*smooth/i.test(dossier.formulation ?? "")) {
+    errors.push(diagnostic("MISSING_CATEGORY_VARIANTS", id, "The exact formulation must explicitly name topological, PL, and smooth variants."));
   }
   if (variantIsConflated(dossier)) {
     errors.push(diagnostic("CONFLATED_VARIANT", id, "Category variants must be distinguished, never equated."));
@@ -180,13 +219,40 @@ function sha256(text) {
   return createHash("sha256").update(text).digest("hex");
 }
 
-function validateMatrix(matrix, ids) {
+export function validateMatrix(matrix, dossiers, sourceTexts) {
   const errors = [];
   for (const field of ["consumer", "gate", "observed_defect_class", "deletion_condition"]) {
     if (typeof matrix[field] !== "string" || matrix[field].trim().length < 8) {
       errors.push(diagnostic("MATRIX_METADATA_INVALID", "review-matrix", field));
     }
   }
+  if (matrix.prepared_at !== SOURCE_AUDIT_DATE) {
+    errors.push(diagnostic("MATRIX_METADATA_INVALID", "review-matrix", `prepared_at must be ${SOURCE_AUDIT_DATE}.`));
+  }
+  for (const [path, text] of Object.entries(sourceTexts)) {
+    if (matrix.source_digests?.[path] !== sha256(text)) {
+      errors.push(diagnostic("MATRIX_SOURCE_DIGEST_MISMATCH", "review-matrix", path));
+    }
+  }
+  for (const dossier of dossiers) {
+    if (matrix.dossier_digests?.[dossier.id] !== digestDossier(dossier)) {
+      errors.push(diagnostic("MATRIX_DOSSIER_DIGEST_MISMATCH", "review-matrix", dossier.id));
+    }
+  }
+  const reviewState = matrix.review_state;
+  if (reviewState?.approval_state !== "external_review_pending") {
+    errors.push(diagnostic("MATRIX_APPROVAL_STATE_INVALID", "review-matrix", "Source preparation cannot self-approve mathematical validity."));
+  }
+  if (typeof reviewState?.independence_requirement !== "string" || reviewState.independence_requirement.trim().length < 24) {
+    errors.push(diagnostic("MATRIX_REVIEWER_INDEPENDENCE_INVALID", "review-matrix", "An external-review independence requirement is mandatory."));
+  }
+  if (!Array.isArray(reviewState?.reviewer_records) || reviewState.reviewer_records.length === 0 || reviewState.reviewer_records.some((record) => typeof record.independence !== "string" || typeof record.approval_state !== "string")) {
+    errors.push(diagnostic("MATRIX_REVIEWER_INDEPENDENCE_INVALID", "review-matrix", "Each reviewer record must state independence and approval state."));
+  }
+  if (!Array.isArray(matrix.unresolved_questions) || matrix.unresolved_questions.length === 0) {
+    errors.push(diagnostic("MATRIX_UNRESOLVED_QUESTIONS_INVALID", "review-matrix", "At least one unresolved question is required."));
+  }
+  const ids = dossiers.map((dossier) => dossier.id);
   const rows = Array.isArray(matrix.dossiers) ? matrix.dossiers : [];
   if (rows.length !== ids.length || new Set(rows.map((row) => row.id)).size !== ids.length) {
     errors.push(diagnostic("MATRIX_COVERAGE_INVALID", "review-matrix", "Every dossier needs exactly one row."));
@@ -208,6 +274,9 @@ function validateMatrix(matrix, ids) {
 
 function validateReport(report, sourceTexts) {
   const errors = [];
+  if (report.prepared_at !== SOURCE_AUDIT_DATE) {
+    errors.push(diagnostic("REPORT_FRESHNESS_INVALID", "review-report", `prepared_at must be ${SOURCE_AUDIT_DATE}.`));
+  }
   if (report.approval_state !== "external_review_pending") {
     errors.push(diagnostic("REPORT_APPROVAL_STATE_INVALID", "review-report", "Source preparation cannot self-approve mathematical validity."));
   }
@@ -253,11 +322,14 @@ export async function runCheck({ verifyLinks: shouldVerifyLinks = false } = {}) 
   const errors = dossiers.flatMap(validateDossier);
   errors.push(...validateSp4dMarkdown(sp4dMarkdown, sp4d));
   errors.push(...validateNewTheoryTemplate(slate.new_theory_template));
-  errors.push(...validateMatrix(matrix, dossiers.map((dossier) => dossier.id)));
-  errors.push(...validateReport(report, {
+  const sourceTexts = {
     "docs/seed/sp4d/dossier.json": sp4dText,
     "docs/seed/sp4d/SP4D.md": sp4dMarkdown,
     "docs/seed/frontier-slate/dossiers.json": slateText,
+  };
+  errors.push(...validateMatrix(matrix, dossiers, sourceTexts));
+  errors.push(...validateReport(report, {
+    ...sourceTexts,
   }));
   for (const dossier of dossiers) {
     const face = renderDossier(dossier);

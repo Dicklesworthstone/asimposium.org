@@ -4,7 +4,7 @@ import test from "node:test";
 import { readFile } from "node:fs/promises";
 import { fileURLToPath } from "node:url";
 import { dirname, resolve } from "node:path";
-import { renderDossier, runCheck, sourcePaths, validateDossier, validateNewTheoryTemplate, validateSp4dMarkdown } from "./check.mjs";
+import { renderDossier, runCheck, sourcePaths, validateDossier, validateMatrix, validateNewTheoryTemplate, validateSp4dMarkdown } from "./check.mjs";
 
 const here = dirname(fileURLToPath(import.meta.url));
 
@@ -82,6 +82,37 @@ test("planted negative: a current-status field is rejected", async () => {
   const dossier = JSON.parse(await readFile(sourcePaths.sp4d, "utf8"));
   dossier.current_status = "open";
   assert.ok(validateDossier(dossier).some((error) => error.code === "UNSUPPORTED_CURRENT_STATUS_FIELD"));
+});
+
+test("planted negative: each dossier must disclose uncertain or blocked registry access", async () => {
+  const dossier = JSON.parse(await readFile(sourcePaths.sp4d, "utf8"));
+  delete dossier.status_freshness.registry_access;
+  assert.ok(validateDossier(dossier).some((error) => error.code === "STATUS_REGISTRY_ACCESS_INVALID"));
+});
+
+test("planted negative: SP4D cannot omit a topological, PL, or smooth formulation", async () => {
+  const dossier = JSON.parse(await readFile(sourcePaths.sp4d, "utf8"));
+  dossier.formulation = "A smooth target with no category comparison.";
+  assert.ok(validateDossier(dossier).some((error) => error.code === "MISSING_CATEGORY_VARIANTS"));
+});
+
+test("planted negative: the review matrix cannot self-approve or lose source/dossier bindings", async () => {
+  const [matrix, sp4dText, markdown, slateText] = await Promise.all([
+    readFile(sourcePaths.matrix, "utf8").then(JSON.parse),
+    readFile(sourcePaths.sp4d, "utf8"),
+    readFile(sourcePaths.sp4dMarkdown, "utf8"),
+    readFile(sourcePaths.slate, "utf8"),
+  ]);
+  const dossiers = [JSON.parse(sp4dText), ...JSON.parse(slateText).dossiers];
+  matrix.review_state.approval_state = "approved";
+  delete matrix.source_digests["docs/seed/sp4d/SP4D.md"];
+  const errors = validateMatrix(matrix, dossiers, {
+    "docs/seed/sp4d/dossier.json": sp4dText,
+    "docs/seed/sp4d/SP4D.md": markdown,
+    "docs/seed/frontier-slate/dossiers.json": slateText,
+  });
+  assert.ok(errors.some((error) => error.code === "MATRIX_APPROVAL_STATE_INVALID"));
+  assert.ok(errors.some((error) => error.code === "MATRIX_SOURCE_DIGEST_MISMATCH"));
 });
 
 test("rung-7 template requires predictions, bounded checks, and an external-review plan", async () => {
