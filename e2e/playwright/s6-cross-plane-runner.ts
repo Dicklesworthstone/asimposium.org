@@ -624,12 +624,13 @@ async function main(): Promise<Omit<Record_, "duration_ms">> {
     // rather than being awaited indefinitely.
     const teardown: unknown[] = [];
     let teardownTimedOut = false;
+    let teardownTimer: ReturnType<typeof setTimeout> | undefined;
     const teardownBound = new Promise<void>((resolve) => {
-      const t = setTimeout(() => {
+      teardownTimer = setTimeout(() => {
         teardownTimedOut = true;
         resolve();
       }, CLOSE_GRACE_MS);
-      t.unref?.();
+      teardownTimer.unref?.();
     });
     await Promise.race([
       (async () => {
@@ -638,6 +639,7 @@ async function main(): Promise<Omit<Record_, "duration_ms">> {
       })(),
       teardownBound,
     ]);
+    if (teardownTimer !== undefined) clearTimeout(teardownTimer);
     clearTimeout(budget);
     if (teardownTimedOut) {
       teardownFailed = -1;
@@ -650,46 +652,116 @@ async function main(): Promise<Omit<Record_, "duration_ms">> {
 /** Set by `main`'s `finally` when context/browser teardown threw. */
 let teardownFailed = 0;
 
-// The record is emitted and the status applied only after `main`'s `finally`
-// has closed the context and the browser. A `RunnerExit` thrown deep inside the
-// run therefore cannot leave Chromium behind, which an immediate `process.exit`
-// at the throw site could.
-try {
-  const passRecord = await main();
-  // Cleanup has completed by now. A teardown failure outranks the pass.
-  if (teardownFailed !== 0) {
-    emit({
-      ...passRecord,
+export interface RunnerTerminalOutcome {
+  readonly record: Omit<Record_, "duration_ms">;
+  readonly exitStatus: number;
+}
+
+/**
+ * Apply the lifecycle verdict to any product outcome.
+ *
+ * This is deliberately pure and exported so the blocked+teardown polarity is
+ * executable in the unit suite. The previous top-level catch handled
+ * `RunnerExit` before consulting `teardownFailed`, so a blocked or failed
+ * product path masked a browser-close failure while the pass path did not.
+ */
+export function resolveTerminalOutcome(
+  outcome: RunnerTerminalOutcome,
+  teardownFailureCount: number,
+): RunnerTerminalOutcome {
+  if (teardownFailureCount === 0) return outcome;
+  const timedOut = teardownFailureCount === -1;
+  return {
+    exitStatus: 1,
+    record: {
+      ...outcome.record,
       status: "fail",
-      code: teardownFailed === -1 ? "RUNNER_TEARDOWN_TIMED_OUT" : "RUNNER_TEARDOWN_FAILED",
-      detail:
-        teardownFailed === -1
-          ? `the run succeeded but teardown exceeded its ${CLOSE_GRACE_MS}ms bound; the browser may still be running`
-          : `the run succeeded but ${teardownFailed} teardown step(s) failed; the browser may still be running`,
-    });
-    process.exit(1);
+      code: timedOut ? "RUNNER_TEARDOWN_TIMED_OUT" : "RUNNER_TEARDOWN_FAILED",
+      detail: timedOut
+        ? `teardown exceeded its ${CLOSE_GRACE_MS}ms bound and superseded the ${outcome.record.status} ${outcome.record.code} outcome; the browser may still be running`
+        : `${teardownFailureCount} teardown step(s) failed and superseded the ${outcome.record.status} ${outcome.record.code} outcome; the browser may still be running`,
+    },
+  };
+}
+
+function unexpectedOutcome(error: unknown): RunnerTerminalOutcome {
+  return {
+    exitStatus: 1,
+    record: {
+      tool: "playwright",
+      package: "e2e",
+      suite: SUITE,
+      status: "fail",
+      code: "RUNNER_UNEXPECTED_FAULT",
+      apex_host: null,
+      agent_host: null,
+      cookie: null,
+      cookie_probe: null,
+      receipt: null,
+      edge_request_id: null,
+      // The message is withheld: it can quote page content.
+      detail: `the runner failed with ${(error as Error)?.constructor?.name ?? "Error"}`,
+    },
+  };
+}
+
+function terminalSelectorSelfTest(): never {
+  const blockedOutcome: RunnerTerminalOutcome = {
+    exitStatus: BLOCKED_EXIT,
+    record: {
+      tool: "playwright",
+      package: "e2e",
+      suite: SUITE,
+      status: "blocked",
+      code: "PLANTED_BLOCKED",
+      apex_host: "preview.example.test",
+      agent_host: null,
+      cookie: null,
+      cookie_probe: null,
+      receipt: null,
+      edge_request_id: null,
+      detail: "plant",
+    },
+  };
+  const teardown = resolveTerminalOutcome(blockedOutcome, 1);
+  const clean = resolveTerminalOutcome(blockedOutcome, 0);
+  const passed =
+    teardown.exitStatus === 1 &&
+    teardown.record.status === "fail" &&
+    teardown.record.code === "RUNNER_TEARDOWN_FAILED" &&
+    teardown.record.detail.includes("blocked PLANTED_BLOCKED") &&
+    clean === blockedOutcome;
+  process.stdout.write(
+    `${JSON.stringify({
+      suite: SUITE,
+      assertion: "blocked-runner-teardown-failure-overrides",
+      status: passed ? "pass" : "fail",
+      self_test: true,
+    })}\n`,
+  );
+  process.exit(passed ? 0 : 1);
+}
+
+async function runEntrypoint(): Promise<never> {
+  // Nothing is emitted until `main`'s `finally` has completed. A RunnerExit is
+  // data here, not a terminal side effect, so teardown failure can supersede it.
+  let outcome: RunnerTerminalOutcome;
+  try {
+    outcome = { record: await main(), exitStatus: 0 };
+  } catch (error) {
+    outcome =
+      error instanceof RunnerExit
+        ? { record: error.record, exitStatus: error.status }
+        : unexpectedOutcome(error);
   }
-  emit(passRecord);
-} catch (error) {
-  if (error instanceof RunnerExit) {
-    emit(error.record);
-    process.exit(error.status);
-  }
-  // An unexpected fault is still a runner failure, reported in the same shape
-  // and only after cleanup. The message is withheld: it can quote page content.
-  emit({
-    tool: "playwright",
-    package: "e2e",
-    suite: SUITE,
-    status: "fail",
-    code: "RUNNER_UNEXPECTED_FAULT",
-    apex_host: null,
-    agent_host: null,
-    cookie: null,
-    cookie_probe: null,
-    receipt: null,
-    edge_request_id: null,
-    detail: `the runner failed with ${(error as Error)?.constructor?.name ?? "Error"}`,
-  });
-  process.exit(1);
+  const terminal = resolveTerminalOutcome(outcome, teardownFailed);
+  emit(terminal.record);
+  process.exit(terminal.exitStatus);
+}
+
+// Importing this module for the pure planted test must never start a browser or
+// consume the test runner's stdin. Direct `bun <file>` execution still does.
+if (import.meta.main) {
+  if (process.argv[2] === "--self-test-terminal-selector") terminalSelectorSelfTest();
+  await runEntrypoint();
 }

@@ -616,7 +616,8 @@ assert_migration_journal || exit 1
 # explicit Wrangler switch is required for a local process environment; the
 # values never appear in argv, diagnostics, or the local D1 state tree.
 (
-  ENROLLMENT_REPLAY_KEY="${REPLAY_KEY}" STOA_ORIGIN="${ORIGIN}" \
+  AGORA_ORIGIN="https://asimposium.org" ENROLLMENT_REPLAY_KEY="${REPLAY_KEY}" \
+    STOA_ORIGIN="${ORIGIN}" \
     TOKEN_LIFECYCLE_BARRIER_CAP="${BARRIER_CAPABILITY}" \
     SERVICE_ENVELOPE_KEYS="${KEYRING_JSON}" CLOUDFLARE_INCLUDE_PROCESS_ENV=true \
     exec "${WRANGLER}" dev --config "${CONFIG}" --local --persist-to "${STATE_DIR}" --port "${PORT}" \
@@ -671,12 +672,20 @@ import {
   SponsorFellowListResponseSchema,
   SponsorPanicResponseSchema,
 } from "@asimposium/contracts";
+import { REDACTED_TOKEN, redactCredentials } from "@asimposium/contracts/diagnostic-safety";
 import { mintServiceEnvelope, serviceEnvelopeHeaders } from "./apps/web/lib/service-envelope.ts";
+import { inspectFellowWriteAuthorization } from "./apps/wire/src/enrollment/service.ts";
 
 const origin = process.env.TOKEN_LIFECYCLE_ORIGIN;
 const privateJwk = process.env.TOKEN_LIFECYCLE_PRIVATE_JWK;
 const barrierCapability = process.env.TOKEN_LIFECYCLE_BARRIER_CAPABILITY;
-if (origin === undefined || privateJwk === undefined || barrierCapability === undefined) {
+const authorizationEvidenceCanary = process.env.TOKEN_LIFECYCLE_AUTHZ_EVIDENCE_CANARY;
+if (
+  origin === undefined ||
+  privateJwk === undefined ||
+  barrierCapability === undefined ||
+  authorizationEvidenceCanary === undefined
+) {
   throw new Error("local configuration unavailable");
 }
 if (!/^[a-f0-9]{64}$/.test(barrierCapability)) throw new Error("local barrier capability unavailable");
@@ -929,6 +938,44 @@ function key(label: string) {
   return `token-lifecycle-${label}-${serial}`;
 }
 
+const AUTHORIZATION_EVIDENCE_FIELD_LIMIT = 160;
+const AUTHORIZATION_EVIDENCE_DIFF_LIMIT = 240;
+const AUTHORIZATION_EVIDENCE_RECORD_LIMIT = 2_048;
+
+function boundedEvidenceField(value: string, limit = AUTHORIZATION_EVIDENCE_FIELD_LIMIT): string {
+  return redactCredentials(value).slice(0, limit);
+}
+
+function authorizationEvidence(input: {
+  assertion: string;
+  credentialId: string;
+  sponsorId: string;
+  fellowId: string;
+  scopeOrGrant: string;
+  decision: "allow" | "quarantine" | "refuse";
+  requestId: string;
+  eventId: string;
+  assertionDiff: string;
+}): string {
+  const record = {
+    suite: boundedEvidenceField("token-lifecycle-local"),
+    record: boundedEvidenceField("authorization-decision"),
+    assertion: boundedEvidenceField(input.assertion),
+    credential_id: boundedEvidenceField(input.credentialId),
+    sponsor_id: boundedEvidenceField(input.sponsorId),
+    fellow_id: boundedEvidenceField(input.fellowId),
+    scope_or_grant: boundedEvidenceField(input.scopeOrGrant),
+    authorization_decision: boundedEvidenceField(input.decision),
+    request_id: boundedEvidenceField(input.requestId),
+    event_id: boundedEvidenceField(input.eventId),
+    assertion_diff: boundedEvidenceField(input.assertionDiff, AUTHORIZATION_EVIDENCE_DIFF_LIMIT),
+    status: boundedEvidenceField("pass"),
+  };
+  const encoded = JSON.stringify(record);
+  assert(Buffer.byteLength(encoded, "utf8") <= AUTHORIZATION_EVIDENCE_RECORD_LIMIT, "authz-evidence-bounded");
+  return encoded;
+}
+
 async function bootstrap(principalId: string) {
   const result = await sponsorRequest(
     principalId,
@@ -938,7 +985,15 @@ async function bootstrap(principalId: string) {
     "sponsor.bootstrap",
     {},
   );
-  assert(result.response.status === 201 || result.response.status === 200, "bootstrap");
+  if (result.response.status !== 201 && result.response.status !== 200) {
+    const code =
+      typeof result.payload === "object" &&
+      result.payload !== null &&
+      typeof (result.payload as Record<string, unknown>).code === "string"
+        ? (result.payload as Record<string, unknown>).code
+        : "non-problem";
+    throw new Error(`bootstrap-status-${result.response.status}-code-${code}`);
+  }
 }
 
 type Flow = { enrollmentId: string; fellowId: string; token: string };
@@ -980,6 +1035,7 @@ async function mintClaimApprove(
   const claim = EnrollmentClaimResponseSchema.parse(claimResult.payload);
 
   if (options.proveScopeRefusal === true) {
+    const escalationRequestId = key(`scope-escalation-${name}`);
     const escalation = await sponsorRequest(
       sponsorA,
       "POST",
@@ -992,7 +1048,7 @@ async function mintClaimApprove(
         reduction: { scopes: ["promote"] },
         step_up_authenticated_at: stepUp(),
       },
-      key(`scope-escalation-${name}`),
+      escalationRequestId,
     );
     expectProblem(escalation, 422, "SCOPE_ESCALATION");
   }
@@ -1170,12 +1226,77 @@ await awaitBothRevokeArrivals("same-body");
 await releaseRevokeBarrier("same-body");
 const [revoked, replayed] = await sameBodyRequests;
 assert(revoked.response.status === 200, "revoke-alpha");
-SponsorCredentialRevokeResponseSchema.parse(revoked.payload);
+const revokedReceipt = SponsorCredentialRevokeResponseSchema.parse(revoked.payload);
 assert(replayed.response.status === 200, "revoke-alpha-replay");
 SponsorCredentialRevokeResponseSchema.parse(replayed.payload);
 assert(replayed.text === revoked.text, "revoke-alpha-exact-replay");
 console.log('{"suite":"token-lifecycle-local","assertion":"concurrent_http_same_key_revoke_exact_replay","deterministic_barrier":true,"store_gate":"after_replay_preflight_before_d1_revoke","status":"pass"}');
 await assertTokenRejected(alpha.token, "individual-revoke");
+
+// OPS.2a source/local boundary: no Fellow effectful-write route is mounted yet,
+// so this cannot claim an HTTP refusal. It does invoke the one central policy
+// evaluator with identities and the durable event returned by the real D1
+// revoke above. The request id is the exact idempotency key that caused that
+// event, not a second correlation id generated for the log line.
+const postRevokeAuthorization = inspectFellowWriteAuthorization({
+  effect: "review",
+  credential: {
+    fellowId: alpha.fellowId,
+    credentialId: alphaCredential.credential_id,
+    sponsorId: sponsorA,
+    name: alphaRecord.name,
+    model: alphaRecord.model,
+    harness: alphaRecord.harness,
+    grantedScopes: alphaRecord.granted_scopes,
+    grantedResources: {
+      ...(alphaRecord.granted_resources.problem_binding === undefined
+        ? {}
+        : { problemBinding: alphaRecord.granted_resources.problem_binding }),
+      ...(alphaRecord.granted_resources.event_budget === undefined
+        ? {}
+        : { eventBudget: alphaRecord.granted_resources.event_budget }),
+      ...(alphaRecord.granted_resources.artifact_budget_bytes === undefined
+        ? {}
+        : { artifactBudgetBytes: alphaRecord.granted_resources.artifact_budget_bytes }),
+      ...(alphaRecord.granted_resources.fellow_grant_expires_at === undefined
+        ? {}
+        : { fellowGrantExpiresAt: alphaRecord.granted_resources.fellow_grant_expires_at }),
+    },
+    // Authorization never reads credential material; this diagnostic binding
+    // intentionally has none available from the sponsor-safe list response.
+    tokenHash: "not-observed-by-authorization",
+    issuedAt: alphaCredential.issued_at,
+    expiresAt: alphaCredential.expires_at,
+    revokedAt: revokedReceipt.effective_at,
+    credentialProfile: alphaCredential.profile,
+    fellowStatus: alphaRecord.status,
+  },
+  target: {
+    kind: "existing-problem",
+    problemId: "P-TOKEN-LIFECYCLE",
+    publication: "published",
+    unlisted: false,
+    membershipRole: "observer",
+  },
+  usage: { eventsRecorded: 0, artifactBytesRecorded: 0 },
+  now: revokedReceipt.effective_at,
+});
+assert(postRevokeAuthorization.decision.decision === "refuse", "central-authz-post-revoke-refuse");
+assert(postRevokeAuthorization.operatorReason === "credential_revoked", "central-authz-post-revoke-reason");
+const authorizationLine = authorizationEvidence({
+  assertion: "central_policy_post_revoke_refusal_no_mounted_effectful_route",
+  credentialId: alphaCredential.credential_id,
+  sponsorId: sponsorA,
+  fellowId: alpha.fellowId,
+  scopeOrGrant: "review",
+  decision: "refuse",
+  requestId: revokeKey,
+  eventId: revokedReceipt.event_id,
+  assertionDiff: `expected=refuse observed=${postRevokeAuthorization.decision.decision} operator=${postRevokeAuthorization.operatorReason} canary=${authorizationEvidenceCanary}`,
+});
+assert(!authorizationLine.includes(authorizationEvidenceCanary), "authz-evidence-canary-redacted");
+assert(authorizationLine.includes(REDACTED_TOKEN), "authz-evidence-canary-plant-fired");
+process.stdout.write(`${authorizationLine}\n`);
 
 function activeCredentialFor(fellowId: string) {
   const record = fellows.fellows.find((fellow) => fellow.fellow_id === fellowId);
@@ -1282,6 +1403,7 @@ BUN
 require_remaining
 TOKEN_LIFECYCLE_ORIGIN="${ORIGIN}" TOKEN_LIFECYCLE_PRIVATE_JWK="${PRIVATE_JWK}" \
   TOKEN_LIFECYCLE_BARRIER_CAPABILITY="${BARRIER_CAPABILITY}" \
+  TOKEN_LIFECYCLE_AUTHZ_EVIDENCE_CANARY="${LOG_CANARY_BEARER}" \
   TOKEN_LIFECYCLE_HTTP_TIMEOUT_MS="${HTTP_TIMEOUT_MS}" \
   "${BUN}" --eval "${CLIENT_SOURCE}" \
   >"${CLIENT_LOG}" 2>"${CLIENT_ERROR_LOG}" || { fail "TOKEN_LIFECYCLE_HTTP_PROOF_FAILED"; exit 1; }

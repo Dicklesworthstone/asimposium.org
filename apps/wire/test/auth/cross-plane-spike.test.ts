@@ -92,6 +92,18 @@ function readBounded(path: string): string {
   }
 }
 
+/**
+ * The survivor answer for a normally-exited run, read from the script's own
+ * record rather than probed from outside.
+ *
+ * Named and separate so the mapping is directly testable in both polarities: a
+ * derivation only reachable through a live shell run is one nobody can prove is
+ * wired to anything.
+ */
+function survivorsFromRecord(stdout: string): boolean {
+  return stdout.includes('"assertion":"no-child-survivors","status":"fail"');
+}
+
 interface ShellRun {
   readonly exitCode: number;
   readonly stdout: string;
@@ -109,6 +121,15 @@ interface ShellRun {
    * short and this controller cannot see groups it does not lead.
    */
   readonly cleanupUnproven: boolean;
+  /** True only when the outer controller actually dispatched its KILL escalation. */
+  readonly escalationFired: boolean;
+}
+
+interface ShellRunOptions {
+  readonly runTimeoutMs?: number;
+  readonly killGraceMs?: number;
+  /** Test-only causal barrier: arm the deadline only after this file exists. */
+  readonly armAfterFileExists?: string;
 }
 
 /**
@@ -121,7 +142,10 @@ interface ShellRun {
  * returning 78 with an empty stdout, while the identical spawn under `bun -e`
  * and a direct `bash` run both passed. Pre-opened private files have no such
  * back-pressure, and they remove the Bun-under-Bun pipe transport from the path
- * entirely — the same failure class already seen in S3/environment.
+ * entirely — the same failure class already seen in S3/environment. The
+ * process-group launcher opens the capture paths itself: nested Bun has also
+ * been observed to acknowledge a numeric stdout fd while silently discarding
+ * every byte written through it.
  *
  * Capture files are mode 600 and are deliberately RETAINED (AGENTS.md forbids
  * cleanup-by-deletion); they hold harness output only, never a credential.
@@ -130,6 +154,7 @@ async function runShell(
   args: readonly string[],
   env: Record<string, string | undefined>,
   script = SCRIPT,
+  options: ShellRunOptions = {},
 ): Promise<ShellRun> {
   const dir = mkdtempSync(join(process.env.TMPDIR ?? tmpdir(), "s6-run-"));
   const stdoutPath = join(dir, "stdout");
@@ -212,7 +237,9 @@ async function runShell(
       cmd: [
         "/usr/bin/perl",
         "-e",
-        "setpgrp(0,0) or die $!; exec @ARGV or die $!;",
+        'setpgrp(0,0) or die $!; my $stdout = shift @ARGV; my $stderr = shift @ARGV; open STDOUT, ">", $stdout or die $!; open STDERR, ">", $stderr or die $!; exec @ARGV or die $!;',
+        stdoutPath,
+        stderrPath,
         "bash",
         script,
         ...args,
@@ -220,8 +247,8 @@ async function runShell(
       cwd: root,
       env: env as Record<string, string>,
       stdin: "ignore",
-      stdout: stdoutFd,
-      stderr: stderrFd,
+      stdout: "ignore",
+      stderr: "ignore",
     });
     // The parent's descriptors are held until the child has EXITED.
     //
@@ -254,43 +281,89 @@ async function runShell(
       }
     };
 
+    if (options.armAfterFileExists !== undefined) {
+      const ready = (): boolean => {
+        try {
+          return statSync(options.armAfterFileExists as string).isFile();
+        } catch {
+          return false;
+        }
+      };
+      const readinessDeadline = Date.now() + 5_000;
+      while (!ready() && Date.now() < readinessDeadline) {
+        await new Promise<void>((resolveReady) => setTimeout(resolveReady, 10));
+      }
+      if (!ready()) {
+        // The leader is still unreaped, so this is the final authorized use of
+        // its numeric group id. No dangling plant is left behind on refusal.
+        signalGroup("SIGKILL");
+        await child.exited;
+        throw new Error(`deadline plant never reached readiness barrier: ${stdoutPath}`);
+      }
+    }
+
     let timedOut = false;
+    let escalationFired = false;
+    let groupSignalAuthorized = true;
     let timer: ReturnType<typeof setTimeout> | undefined;
     let killTimer: ReturnType<typeof setTimeout> | undefined;
+    const exited = child.exited.then((exitCode) => {
+      // Revocation is part of the exit promise itself, before any waiter can
+      // resume and before the timer queue runs again. Thus an escalation
+      // callback can never use the numeric pgid after the reap made it reusable.
+      groupSignalAuthorized = false;
+      if (timer !== undefined) clearTimeout(timer);
+      if (killTimer !== undefined) clearTimeout(killTimer);
+      return exitCode;
+    });
     const deadline = new Promise<void>((resolve) => {
       timer = setTimeout(() => {
+        if (!groupSignalAuthorized) {
+          resolve();
+          return;
+        }
         timedOut = true;
         // TERM first so the script's own trap reaps its descendants, then KILL.
         // Only the group this controller leads is signalled; the script's nested
         // groups are outside its authority, which is why a hard-killed run is
         // reported as cleanup-unproven rather than contained.
         signalGroup("SIGTERM");
-        killTimer = setTimeout(() => signalGroup("SIGKILL"), 2_000);
+        killTimer = setTimeout(() => {
+          if (!groupSignalAuthorized) return;
+          escalationFired = true;
+          signalGroup("SIGKILL");
+        }, options.killGraceMs ?? 2_000);
         killTimer.unref?.();
         resolve();
-      }, RUN_TIMEOUT_MS);
+      }, options.runTimeoutMs ?? RUN_TIMEOUT_MS);
     });
 
-    await Promise.race([child.exited, deadline]);
-    if (timer !== undefined) clearTimeout(timer);
-    // Always reap, whether it exited on its own or was killed.
-    const exitCode = await child.exited;
-    // Cancel and drain the escalation timer. Leaving it armed meant a SIGKILL
-    // could be delivered AFTER the reap, to whatever then held the number.
-    if (killTimer !== undefined) clearTimeout(killTimer);
+    const raced = await Promise.race([
+      exited.then(() => "exited" as const),
+      deadline.then(() => "deadline" as const),
+    ]);
 
-    // CENSUS ONLY. No signal is sent after the reap.
+    // PRE-REAP CENSUS. This is the only instant at which an outside process may
+    // name this group honestly.
     //
-    // Once `child.exited` has resolved, the leader is reaped and the kernel may
-    // recycle the pgid — so a post-reap SIGKILL could land on an unrelated group
-    // that merely inherited the number. Observation is still worth having and may
-    // fail closed (a recycled group can make this report a survivor that is not
-    // ours), but it cannot authorise signalling something unpinned. The pre-reap
-    // timeout path above keeps its TERM-then-KILL, where the identity is certain.
-    // Only OUR OWN group is observable here, and only as an observation.
-    const survivors = groupAlive();
+    // On the deadline path the leader has NOT been reaped yet, so `-child.pid`
+    // is pinned to our group and cannot be a recycled number. Censusing after
+    // the reap — which is what this did — was unsound in the same way a
+    // post-reap signal is: once the number is unpinned, even `kill(pgid, 0)`
+    // can name a group that merely inherited it.
+    const pinnedSurvivors = raced === "deadline" && groupSignalAuthorized ? groupAlive() : false;
+
+    // Always reap, whether it exited on its own or was killed.
+    const exitCode = await exited;
+
+    // NOTHING BELOW MAY USE THE PGID — not a signal, and not a probe.
+    //
     // A run we had to hard-kill cannot claim its nested groups were reaped: the
     // script's trap was cut short, and this controller cannot see those groups.
+    // That boundary is reported, never papered over, and no pgid ledger is kept:
+    // bare pgids are not identity, so a list of them is unsafe to signal from and
+    // fail-open to census. Real containment needs nonce-bearing supervisors,
+    // which this pass deliberately does not build.
     const cleanupUnproven = timedOut;
 
     // Only now are the parent's descriptors released.
@@ -298,6 +371,13 @@ async function runShell(
 
     const stdout = readBounded(stdoutPath);
     const stderr = readBounded(stderrPath);
+
+    // The normally-exited run takes its survivor answer from the script's OWN
+    // record. Its EXIT trap reaps its nested groups from the inside, where those
+    // pgids are still pinned, and fails the run with `no-child-survivors` if any
+    // lived. That is strictly better evidence than an outside probe, and unlike
+    // the probe it needs no pgid after the reap.
+    const survivors = raced === "deadline" ? pinnedSurvivors : survivorsFromRecord(stdout);
 
     // AN EMPTY CAPTURE CAN NEVER PASS FOR A SUCCESSFUL RUN.
     //
@@ -313,7 +393,15 @@ async function runShell(
       );
     }
 
-    return { exitCode, stdout, stderr, timedOut, survivors, cleanupUnproven };
+    return {
+      exitCode,
+      stdout,
+      stderr,
+      timedOut,
+      survivors,
+      cleanupUnproven,
+      escalationFired,
+    };
   } finally {
     releaseCaptureFds();
   }
@@ -655,11 +743,29 @@ describe("the receipt is structured, bound, and matched as a fixed string", () =
     // Emitting inside `try` published a success before `finally` closed the
     // browser, so a teardown failure could follow an already published pass.
     expect(runner).toContain("return {");
-    expect(runner).toContain("const passRecord = await main();");
+    expect(runner).toContain("record: await main()");
     expect(runner).toContain("RUNNER_TEARDOWN_FAILED");
     expect(runner).toContain("teardownFailed");
-    const tail = runner.slice(runner.indexOf("const passRecord = await main();"));
-    expect(tail.indexOf("teardownFailed > 0")).toBeLessThan(tail.indexOf("emit(passRecord)"));
+    const tail = runner.slice(runner.indexOf("async function runEntrypoint()"));
+    const select = tail.indexOf("resolveTerminalOutcome(outcome, teardownFailed)");
+    const emitTerminal = tail.indexOf("emit(terminal.record)");
+    // Both positions must exist before order is compared. The former test
+    // searched for `teardownFailed > 0` while production used `!== 0`; -1 was
+    // therefore less than the emit index and the assertion passed vacuously.
+    expect(select).toBeGreaterThanOrEqual(0);
+    expect(emitTerminal).toBeGreaterThanOrEqual(0);
+    expect(select).toBeLessThan(emitTerminal);
+  });
+
+  test("PLANTED: teardown failure supersedes a preexisting blocked RunnerExit", () => {
+    // The causal execution lives in the shell self-test, as a separate runner
+    // process. Importing/spawning Bun directly inside Bun's test process
+    // perturbs nested capture descriptors on the affected runtime.
+    const runner = read(RUNNER);
+    expect(runner).toContain("function terminalSelectorSelfTest()");
+    expect(runner).toContain("resolveTerminalOutcome(blockedOutcome, 1)");
+    expect(runner).toContain("resolveTerminalOutcome(blockedOutcome, 0)");
+    expect(runner).toContain('assertion: "blocked-runner-teardown-failure-overrides"');
   });
 
   test("neither reader spins on EAGAIN", () => {
@@ -727,13 +833,15 @@ describe("the run is bounded and leaves no survivors", () => {
     );
   });
 
-  test("the watchdog-allocation failure path surrenders only on proof", () => {
+  test("watchdog allocation completes before any payload identity exists", () => {
     const bounded = shellFunction(source, "run_bounded");
-    const arm = bounded.slice(bounded.indexOf('if [[ -z "$dog_dir" ]]'));
-    expect(arm).toContain("sweep_group");
-    expect(arm).toContain("unregister_child");
-    // Unregister must be guarded by the sweep, never unconditional.
-    expect(arm).toMatch(/if sweep_group "\$pid"; then\s+unregister_child/);
+    const allocation = bounded.indexOf('dog_dir="$(mktemp -d');
+    const spawn = bounded.indexOf('if [[ "$stdin_file" == "-" ]]');
+    expect(allocation).toBeGreaterThanOrEqual(0);
+    expect(spawn).toBeGreaterThanOrEqual(0);
+    expect(allocation).toBeLessThan(spawn);
+    expect(bounded.slice(0, spawn)).toContain('return "$EX_WATCHDOG_UNAVAILABLE"');
+    expect(bounded.slice(0, spawn)).not.toContain("CHILD_PIDS+=(");
   });
 
   test("one monotonic deadline is computed from a single start stamp", () => {
@@ -769,25 +877,28 @@ describe("the run is bounded and leaves no survivors", () => {
 
   test("the bound is an owned watchdog, with no liveness polling at all", () => {
     const bounded = shellFunction(source, "run_bounded");
-    // The parent blocks in `wait`, which reaps the instant the child exits.
-    expect(bounded).toContain('wait "$pid" || status=$?');
-    // A watchdog owns the clock and records the timeout before signalling.
-    expect(bounded).toContain('sleep "$seconds"');
+    // The watchdog's bounded builtin read races a completion token. The parent
+    // waits for the watchdog's authoritative status before reaping the pinned
+    // supervisor, so no cancellation signal can mask exit 3.
+    expect(bounded).toContain('read -r -t "$seconds" completion <&4');
+    expect(bounded).toContain("watchdog:%s");
     expect(bounded).toContain("timed-out");
-    expect(bounded).toContain("return 124");
-    // No polling of any kind. `kill -0` reports an exited-but-unreaped child as
-    // alive on macOS, so a poll loop turned every fast success into a 124;
-    // polling `ps` instead was fail-open and unbounded on every tick.
-    expect(bounded).not.toContain("kill -0");
+    const waitDog = bounded.indexOf('wait "$dog"');
+    const waitSupervisor = bounded.indexOf('wait "$pid"');
+    expect(waitDog).toBeGreaterThanOrEqual(0);
+    expect(waitSupervisor).toBeGreaterThanOrEqual(0);
+    expect(waitDog).toBeLessThan(waitSupervisor);
+    // No liveness polling loop. A kill(0) exists only as the still-pinned
+    // dispatch-failure discriminator; it cannot drive a clock or a reap.
     expect(bounded).not.toContain("child_running");
     expect(bounded).not.toContain("date +%s");
     expect(bounded).not.toContain("limit=$((seconds * 10))");
     // Arming failure is typed and fail-closed, never an unbounded child.
     expect(bounded).toContain("EX_WATCHDOG_UNAVAILABLE");
-    // Ownership is surrendered only after reap AND a proven-empty group.
+    // Ownership is surrendered only after a still-pinned group KILL and reap.
     expect(bounded).toContain("EX_CLEANUP_UNPROVEN");
-    const surrender = bounded.slice(bounded.indexOf('if sweep_group "$pid"'));
-    expect(surrender).toContain("unregister_child");
+    expect(bounded.indexOf('signal_group "$pid" KILL')).toBeLessThan(waitSupervisor);
+    expect(bounded.indexOf('unregister_child "$pid"')).toBeGreaterThan(waitSupervisor);
   });
 
   test("lifecycle signalling and census are group-only", () => {
@@ -800,14 +911,11 @@ describe("the run is bounded and leaves no survivors", () => {
     const census = shellFunction(source, "group_alive");
     expect(census).toContain('kill -0 -- "-${pid}"');
     expect(census).not.toMatch(/kill -0 "\$pid"/);
-    // The watchdog is the ONE justified direct signal: it is our own subshell,
-    // still unreaped at that instant, so its number cannot yet belong to
-    // anything else. Group-only there was a real regression — a subshell is not
-    // reliably its own group leader, so the signal missed and `wait` blocked for
-    // the watchdog's whole sleep, turning every fast child into a late 124.
+    // The watchdog is retired by the completion FIFO, never by a numeric signal.
     const bounded = shellFunction(source, "run_bounded");
-    expect(bounded).toContain('kill -TERM -- "-${dog}" 2>/dev/null || kill -TERM "$dog"');
-    // The child itself is still never signalled by bare pid.
+    expect(bounded).toContain("printf 'done\\n' >&4");
+    expect(bounded).not.toMatch(/kill -(TERM|KILL).*\$dog/);
+    // The supervisor itself is still never signalled by bare pid.
     expect(bounded).not.toMatch(/kill -(TERM|KILL) "\$pid"/);
   });
 
@@ -847,9 +955,16 @@ describe("the run is bounded and leaves no survivors", () => {
     // A child can exit cleanly and still leave Chromium behind; waiting on the
     // direct pid alone would call that success.
     const bounded = shellFunction(source, "run_bounded");
-    expect(bounded).toContain("sweep_group");
-    const afterWait = bounded.slice(bounded.indexOf('wait "$pid" || status=$?'));
-    expect(afterWait).toContain("sweep_group");
+    expect(bounded).toContain("trap ':' HUP INT TERM");
+    const term = bounded.lastIndexOf('signal_group "$pid" TERM');
+    const kill = bounded.lastIndexOf('signal_group "$pid" KILL');
+    const reap = bounded.indexOf('wait "$pid"');
+    expect(term).toBeGreaterThanOrEqual(0);
+    expect(kill).toBeGreaterThan(term);
+    expect(reap).toBeGreaterThan(kill);
+    const afterReap = bounded.slice(reap);
+    expect(afterReap).not.toContain('signal_group "$pid"');
+    expect(afterReap).not.toContain('kill -0 -- "-${pid}"');
   });
 });
 
@@ -965,9 +1080,10 @@ describe("the browser runner cannot exit before cleanup", () => {
   });
 
   test("the status is applied only after the finally has closed the browser", () => {
-    const tail = runner.slice(runner.indexOf("const passRecord = await main();"));
+    const tail = runner.slice(runner.indexOf("async function runEntrypoint()"));
     expect(tail).toContain("error instanceof RunnerExit");
-    expect(tail).toContain("process.exit(error.status)");
+    expect(tail).toContain("resolveTerminalOutcome(outcome, teardownFailed)");
+    expect(tail).toContain("process.exit(terminal.exitStatus)");
     const cleanup = runner.slice(runner.indexOf("} finally {"));
     expect(cleanup).toContain("await context?.close()");
     expect(cleanup).toContain("await browser?.close()");
@@ -1092,6 +1208,18 @@ describe("the shell's causal self-tests actually run", () => {
         '"assertion":"run-bounded-fast-exit-is-prompt","status":"pass"',
       );
       expect(stdout, diag(run)).toContain(
+        '"assertion":"watchdog-flag-write-failure-is-authoritative","status":"pass"',
+      );
+      expect(stdout, diag(run)).toContain(
+        '"assertion":"secret-writer-child-before-open-is-bounded","status":"pass"',
+      );
+      expect(stdout, diag(run)).toContain(
+        '"assertion":"browser-blocked-record-is-buffered","status":"pass"',
+      );
+      expect(stdout, diag(run)).toContain(
+        '"assertion":"blocked-runner-teardown-failure-overrides","status":"pass"',
+      );
+      expect(stdout, diag(run)).toContain(
         '"assertion":"generated-shim-executes-and-mints","status":"pass"',
       );
       expect(stdout, diag(run)).toContain('"assertion":"normal-exit-sweeps-group","status":"pass"');
@@ -1149,11 +1277,79 @@ describe("the test harness contains what it launches", () => {
     expect(controller).not.toContain("child.kill(");
     // The escalation timer is owned, cancelled and drained.
     expect(controller).toContain("clearTimeout(killTimer)");
-    // No post-reap signal at all: after the reap the pgid may be recycled, so a
-    // SIGKILL there could land on an unrelated group. Census only.
-    expect(controller).toContain("const survivors = groupAlive();");
-    const afterReap = controller.slice(controller.indexOf("const survivors = groupAlive();"));
+    expect(controller).toContain("if (!groupSignalAuthorized) return;");
+    // NO POST-REAP PGID USE AT ALL — neither a signal nor an existence probe.
+    // After `await child.exited` the number is unpinned, so `kill(pgid, 0)` can
+    // name a recycled group exactly as a SIGKILL can hit one. The census is taken
+    // on the deadline path only, where the leader is still unreaped and the pgid
+    // is therefore pinned to us.
+    expect(controller).toContain(
+      'raced === "deadline" && groupSignalAuthorized ? groupAlive() : false;',
+    );
+    const reapIndex = controller.indexOf("const exitCode = await exited;");
+    expect(reapIndex).toBeGreaterThanOrEqual(0);
+    const afterReap = controller.slice(reapIndex);
     expect(afterReap).not.toContain("signalGroup(");
+    expect(afterReap).not.toContain("groupAlive(");
+  });
+
+  test("PLANTED: timeout TERM completion revokes the pending KILL before reap", async () => {
+    const dir = mkdtempSync(join(process.env.TMPDIR ?? tmpdir(), "s6-outer-term-"));
+    const plant = join(dir, "term-exit.sh");
+    writeFileSync(
+      plant,
+      `#!/usr/bin/env bash
+trap 'printf term-observed > "$2"; exit 42' TERM
+printf ready > "$1"
+while :; do sleep 1; done
+`,
+      { mode: 0o700 },
+    );
+    const ready = join(dir, "ready");
+    const termObserved = join(dir, "term-observed");
+    const run = await runShell([ready, termObserved], withoutS6Env(), plant, {
+      armAfterFileExists: ready,
+      runTimeoutMs: 50,
+      killGraceMs: 300,
+    });
+    expect(run.timedOut, diag(run)).toBe(true);
+    expect(run.exitCode, diag(run)).toBe(42);
+    expect(readFileSync(termObserved, "utf8"), diag(run)).toBe("term-observed");
+    expect(run.escalationFired, diag(run)).toBe(false);
+    expect(run.cleanupUnproven, diag(run)).toBe(true);
+  });
+
+  test("PLANTED: a TERM-resistant timeout causally reaches KILL escalation", async () => {
+    const dir = mkdtempSync(join(process.env.TMPDIR ?? tmpdir(), "s6-outer-kill-"));
+    const plant = join(dir, "term-resistant.sh");
+    writeFileSync(
+      plant,
+      `#!/usr/bin/env bash
+trap '' TERM
+printf ready > "$1"
+printf '{"plant":"ready"}\\n'
+while :; do sleep 1; done
+`,
+      { mode: 0o700 },
+    );
+    const ready = join(dir, "ready");
+    const run = await runShell([ready], withoutS6Env(), plant, {
+      armAfterFileExists: ready,
+      runTimeoutMs: 50,
+      killGraceMs: 100,
+    });
+    expect(run.timedOut, diag(run)).toBe(true);
+    expect(run.escalationFired, diag(run)).toBe(true);
+    expect(run.cleanupUnproven, diag(run)).toBe(true);
+  });
+
+  test("PLANTED: the record-derived survivor answer is wired in both polarities", () => {
+    // Causal, not cosmetic. An inverted comparison, a hardcoded `false`, or a
+    // wrong assertion name each break exactly one of these three lines, so the
+    // normal-exit branch cannot silently stop reporting a real survivor.
+    expect(survivorsFromRecord('{"assertion":"no-child-survivors","status":"fail"}')).toBe(true);
+    expect(survivorsFromRecord('{"assertion":"no-child-survivors","status":"pass"}')).toBe(false);
+    expect(survivorsFromRecord("")).toBe(false);
   });
 
   test("an over-cap capture is rejected, not truncated", () => {
