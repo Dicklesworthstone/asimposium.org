@@ -31,3 +31,7 @@ e2e/artifacts/
 # GitHub social-preview card: uploaded via repo Settings (see ops/console-notes.md);
 # the local copy stays on disk as the source file but is not tracked.
 gh_og_share_image.png
+
+# Wrangler local secrets (never commit)
+.dev.vars
+**/.dev.vars
