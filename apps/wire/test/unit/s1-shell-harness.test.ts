@@ -339,6 +339,7 @@ const OVERSIZED_RESPONSE_SENTINEL = "S1_OVERSIZE_RESPONSE_SENTINEL";
 const OVERSIZED_RESPONSE_BYTES = new TextEncoder().encode(
   `${OVERSIZED_RESPONSE_SENTINEL}:${"x".repeat(300_000)}`,
 );
+const ARTIFACT_SCAN_EXACT_KEY_CANARY = "S1ArtifactScanCanary_0123456789abcdefghijkl";
 
 function oversizedResponse(): Response {
   return new Response(
@@ -1615,6 +1616,23 @@ describe("a pinned port is validated before anything is started", () => {
     });
     expect(phaseValue(run.stderr, "replay-key-artifact-scan", "result")).toBe("absent");
     const stateDir = phaseValue(run.stderr, "state-retained", "dir") as string;
+    for (const root of [
+      "runtime/home",
+      "runtime/tmp",
+      "runtime/cwd",
+      "runtime/xdg-config",
+      "runtime/xdg-cache",
+      "runtime/xdg-data",
+      "runtime/xdg-state",
+      "runtime/xdg-runtime",
+      "runtime/wrangler-cache",
+      "runtime/wrangler-log",
+      "runtime/bun-cache",
+    ]) {
+      expect(existsSync(`${stateDir}/${root}`), `missing confined runtime root ${root}`).toBe(true);
+    }
+    expect(run.stderr).toContain("retained-roots-reconciled phase=before-pass roots=1");
+    expect(run.stderr).toContain("retained-roots-reconciled phase=exit roots=1");
     const retained = retainedArtifacts(stateDir);
     expect(retained.files.length).toBeGreaterThanOrEqual(3);
     expect(Number(phaseValue(run.stderr, "replay-key-artifact-scan", "files"))).toBe(
@@ -1636,6 +1654,40 @@ describe("a pinned port is validated before anything is started", () => {
     expect(phaseValue(run.stderr, "replay-key-artifact-plant-refused", "artifact")).toBe(
       "nested-nul",
     );
+    expect(`${run.stdout}\n${run.stderr}`).not.toContain(ARTIFACT_SCAN_EXACT_KEY_CANARY);
+  });
+
+  test.each([
+    ["join secret", "join-secret"],
+    ["flow handle", "flow-handle"],
+    ["Fellow bearer", "bearer"],
+  ])(
+    "PLANTED: the retained-artifact scanner refuses a %s-shaped canary without echoing it",
+    async (_label, kind) => {
+      const material =
+        kind === "join-secret"
+          ? `v1.${ARTIFACT_SCAN_EXACT_KEY_CANARY}`
+          : kind === "flow-handle"
+            ? `flow_v1.${ARTIFACT_SCAN_EXACT_KEY_CANARY}`
+            : `asimp_ag_0123456789ABCDEFGHJKMNPQRS_${ARTIFACT_SCAN_EXACT_KEY_CANARY}`;
+      const run = await runScript([`--self-test-secret-material-artifact-${kind}`]);
+      expect(run.exitCode).toBe(0);
+      expect(record(run).code).toBe("SECRET_MATERIAL_ARTIFACT_SCAN_SELF_TEST_PASSED");
+      expect(phaseValue(run.stderr, "secret-material-artifact-plant-refused", "result")).toBe(
+        "detected",
+      );
+      expect(phaseValue(run.stderr, "secret-material-artifact-plant-refused", "kind")).toBe(kind);
+      expect(`${run.stdout}\n${run.stderr}`).not.toContain(material);
+    },
+  );
+
+  test("PLANTED: an out-of-root runtime canary is refused before it can be created", async () => {
+    const run = await runScript(["--self-test-runtime-root-outside"]);
+    expect(run.exitCode).toBe(0);
+    expect(record(run).code).toBe("RUNTIME_ROOT_OUTSIDE_SELF_TEST_PASSED");
+    expect(phaseValue(run.stderr, "runtime-root-outside-refused", "result")).toBe("refused");
+    expect(phaseValue(run.stderr, "runtime-root-outside-refused", "action")).toBe("not-created");
+    expect(`${run.stdout}\n${run.stderr}`).not.toContain("s1-runtime-outside-canary-");
   });
 
   /**

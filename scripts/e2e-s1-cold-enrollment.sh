@@ -45,7 +45,11 @@ readonly VERSION="1"
 readonly REPRODUCE="scripts/e2e-s1-cold-enrollment.sh"
 readonly BLOCKED_EXIT_CODE=78
 readonly HARNESS_IDENTITIES=("claude-code" "codex" "gemini-cli")
-readonly LOCAL_WRANGLER="apps/wire/node_modules/.bin/wrangler"
+readonly REPO_ROOT="$(pwd -P)"
+readonly LOCAL_WRANGLER="$REPO_ROOT/apps/wire/node_modules/.bin/wrangler"
+readonly LOCAL_WRANGLER_CONFIG="$REPO_ROOT/infra/wrangler.toml"
+readonly LOCAL_D1_WORKER="$REPO_ROOT/apps/wire/src/enrollment/local-d1-worker.ts"
+readonly LOCAL_D1_CLIENT="$REPO_ROOT/apps/wire/src/enrollment/local-d1-client.ts"
 # Per-run local replay root. It exists only in this shell and the owned Wrangler
 # process environment; retained D1 artifacts must not be decryptable with a
 # repository-known fixture key.
@@ -92,6 +96,24 @@ CLIENT_STATUS_AUTH=""
 CLIENT_LABEL=""
 STATE_DIR=""
 PHASE_LOG=""
+# Every secret-bearing local child receives an empty inherited environment and
+# these private roots only. The retained state directory is the sole declared
+# retained root; its runtime children keep HOME, TMPDIR, XDG, Wrangler, Bun, and
+# cwd writes inside that scanner boundary.
+LOCAL_RUNTIME_ROOT=""
+LOCAL_RUNTIME_HOME=""
+LOCAL_RUNTIME_TMP=""
+LOCAL_RUNTIME_CWD=""
+LOCAL_RUNTIME_XDG_CONFIG=""
+LOCAL_RUNTIME_XDG_CACHE=""
+LOCAL_RUNTIME_XDG_DATA=""
+LOCAL_RUNTIME_XDG_STATE=""
+LOCAL_RUNTIME_XDG_RUNTIME=""
+LOCAL_RUNTIME_WRANGLER_CACHE=""
+LOCAL_RUNTIME_WRANGLER_LOG=""
+LOCAL_RUNTIME_BUN_CACHE=""
+LOCAL_RUNTIME_ENV=()
+LOCAL_RETAINED_ROOTS=()
 # Resolved by `resolve_port` / `resolve_run_token`, which refuse in this shell
 # rather than inside a command substitution. See the comment on `allocate_port`.
 RESOLVED_PORT=""
@@ -228,6 +250,81 @@ failed() {
 # status observation untrusted.
 private_state_directory() {
   [[ -n "$STATE_DIR" && -d "$STATE_DIR" && ! -L "$STATE_DIR" && -O "$STATE_DIR" && -r "$STATE_DIR" && -w "$STATE_DIR" && -x "$STATE_DIR" ]]
+}
+
+# A runtime root is valid only when it is inside this invocation's retained state
+# directory and remains a private real directory. The prefix check happens before
+# mkdir, so a caller cannot turn an attempted outside root into a write.
+private_local_runtime_directory() {
+  local root="$1"
+  private_state_directory || return 1
+  [[ -n "$LOCAL_RUNTIME_ROOT" && ( "$root" == "$LOCAL_RUNTIME_ROOT" || "$root" == "$LOCAL_RUNTIME_ROOT/"* ) ]] || return 1
+  [[ -d "$root" && ! -L "$root" && -O "$root" && -r "$root" && -w "$root" && -x "$root" ]]
+}
+
+create_private_local_runtime_directory() {
+  local root="$1"
+  [[ -n "$LOCAL_RUNTIME_ROOT" && ( "$root" == "$LOCAL_RUNTIME_ROOT" || "$root" == "$LOCAL_RUNTIME_ROOT/"* ) ]] || return 1
+  mkdir -p -- "$root" || return 1
+  private_local_runtime_directory "$root"
+}
+
+prepare_local_runtime_roots() {
+  local root
+  private_state_directory || return 1
+  [[ -n "${PATH:-}" ]] || return 1
+  LOCAL_RUNTIME_ROOT="$STATE_DIR/runtime"
+  LOCAL_RUNTIME_HOME="$LOCAL_RUNTIME_ROOT/home"
+  LOCAL_RUNTIME_TMP="$LOCAL_RUNTIME_ROOT/tmp"
+  LOCAL_RUNTIME_CWD="$LOCAL_RUNTIME_ROOT/cwd"
+  LOCAL_RUNTIME_XDG_CONFIG="$LOCAL_RUNTIME_ROOT/xdg-config"
+  LOCAL_RUNTIME_XDG_CACHE="$LOCAL_RUNTIME_ROOT/xdg-cache"
+  LOCAL_RUNTIME_XDG_DATA="$LOCAL_RUNTIME_ROOT/xdg-data"
+  LOCAL_RUNTIME_XDG_STATE="$LOCAL_RUNTIME_ROOT/xdg-state"
+  LOCAL_RUNTIME_XDG_RUNTIME="$LOCAL_RUNTIME_ROOT/xdg-runtime"
+  LOCAL_RUNTIME_WRANGLER_CACHE="$LOCAL_RUNTIME_ROOT/wrangler-cache"
+  LOCAL_RUNTIME_WRANGLER_LOG="$LOCAL_RUNTIME_ROOT/wrangler-log"
+  LOCAL_RUNTIME_BUN_CACHE="$LOCAL_RUNTIME_ROOT/bun-cache"
+  for root in \
+    "$LOCAL_RUNTIME_ROOT" "$LOCAL_RUNTIME_HOME" "$LOCAL_RUNTIME_TMP" "$LOCAL_RUNTIME_CWD" \
+    "$LOCAL_RUNTIME_XDG_CONFIG" "$LOCAL_RUNTIME_XDG_CACHE" "$LOCAL_RUNTIME_XDG_DATA" \
+    "$LOCAL_RUNTIME_XDG_STATE" "$LOCAL_RUNTIME_XDG_RUNTIME" "$LOCAL_RUNTIME_WRANGLER_CACHE" \
+    "$LOCAL_RUNTIME_WRANGLER_LOG" "$LOCAL_RUNTIME_BUN_CACHE"; do
+    create_private_local_runtime_directory "$root" || return 1
+  done
+  # This is the only retention declaration. Every concrete writable runtime root
+  # is below it, so one inode-safe traversal covers the whole retained surface.
+  LOCAL_RETAINED_ROOTS=("$STATE_DIR")
+  LOCAL_RUNTIME_ENV=(
+    env -i
+    "PATH=$PATH"
+    "HOME=$LOCAL_RUNTIME_HOME"
+    "TMPDIR=$LOCAL_RUNTIME_TMP"
+    "TMP=$LOCAL_RUNTIME_TMP"
+    "TEMP=$LOCAL_RUNTIME_TMP"
+    "XDG_CONFIG_HOME=$LOCAL_RUNTIME_XDG_CONFIG"
+    "XDG_CACHE_HOME=$LOCAL_RUNTIME_XDG_CACHE"
+    "XDG_DATA_HOME=$LOCAL_RUNTIME_XDG_DATA"
+    "XDG_STATE_HOME=$LOCAL_RUNTIME_XDG_STATE"
+    "XDG_RUNTIME_DIR=$LOCAL_RUNTIME_XDG_RUNTIME"
+    "WRANGLER_CACHE_DIR=$LOCAL_RUNTIME_WRANGLER_CACHE"
+    "WRANGLER_LOG_PATH=$LOCAL_RUNTIME_WRANGLER_LOG"
+    "BUN_INSTALL_CACHE_DIR=$LOCAL_RUNTIME_BUN_CACHE"
+  )
+  reconcile_local_runtime_roots
+}
+
+reconcile_local_runtime_roots() {
+  local root
+  private_state_directory || return 1
+  [[ "${#LOCAL_RETAINED_ROOTS[@]}" -eq 1 && "${LOCAL_RETAINED_ROOTS[0]}" == "$STATE_DIR" ]] || return 1
+  for root in \
+    "$LOCAL_RUNTIME_ROOT" "$LOCAL_RUNTIME_HOME" "$LOCAL_RUNTIME_TMP" "$LOCAL_RUNTIME_CWD" \
+    "$LOCAL_RUNTIME_XDG_CONFIG" "$LOCAL_RUNTIME_XDG_CACHE" "$LOCAL_RUNTIME_XDG_DATA" \
+    "$LOCAL_RUNTIME_XDG_STATE" "$LOCAL_RUNTIME_XDG_RUNTIME" "$LOCAL_RUNTIME_WRANGLER_CACHE" \
+    "$LOCAL_RUNTIME_WRANGLER_LOG" "$LOCAL_RUNTIME_BUN_CACHE"; do
+    private_local_runtime_directory "$root" || return 1
+  done
 }
 
 # Failure-only fault injection, only for a named self-test mode. These hooks
@@ -984,12 +1081,13 @@ on_exit() {
       if ((attempt > 1)); then
         log_phase "exit-cleanup-recovered" "attempt=$attempt exit_status=$status"
       fi
-      # Every retained local-D1 tree is checked after owned processes are gone,
-      # including failures and interrupts. A prior failure record cannot excuse
-      # retaining an unchecked replay root; scan uncertainty becomes the final
-      # typed failure while the original body status remains available earlier.
-      if [[ -n "$LOCAL_REPLAY_KEY" && -n "$STATE_DIR" ]]; then
-        assert_local_replay_key_not_retained
+      # Every declared retained local-D1 root is reconciled and scanned after
+      # owned processes are gone, including success, failures, and interrupts.
+      # The success path performed the same scan before its pass record; this
+      # second pass catches late writes made while cleanup was settling.
+      if [[ -n "$STATE_DIR" && ( -n "$LOCAL_REPLAY_KEY" || "$RUN_MODE" == "local-d1" ) ]]; then
+        assert_local_replay_key_not_retained "exit"
+        LOCAL_REPLAY_KEY=""
       fi
       if [[ -n "$INTERRUPT_TERMINAL_CODE" ]]; then
         log_phase "interrupted-cleanup-recovered" "code=$INTERRUPT_TERMINAL_CODE attempt=$attempt"
@@ -1197,7 +1295,11 @@ resolve_local_replay_key() {
   entropy="$(LC_ALL=C od -An -N32 -tx1 /dev/urandom 2>/dev/null | tr -d '[:space:]')" ||
     failed "LOCAL_REPLAY_KEY_UNAVAILABLE"
   [[ "$entropy" =~ ^[a-f0-9]{64}$ ]] || failed "LOCAL_REPLAY_KEY_UNAVAILABLE"
-  key="$(bun -e '
+  key="$("${LOCAL_RUNTIME_ENV[@]}" bash -c '
+    cd -- "$1" || exit 125
+    shift
+    exec "$@"
+  ' bash "$LOCAL_RUNTIME_CWD" bun -e '
     const hex = process.argv[1];
     if (!/^[a-f0-9]{64}$/.test(hex)) process.exit(1);
     process.stdout.write(Buffer.from(hex, "hex").toString("base64url"));
@@ -1207,12 +1309,15 @@ resolve_local_replay_key() {
 }
 
 # Inspect the retained local state byte-for-byte without ever printing the
-# secret being sought. Exit 3 means a match; every other nonzero status means
-# the artifact tree could not be proved complete. The caller supplies the
-# secret over stdin so it is absent from argv and diagnostics.
+# secret being sought. Exit 3 means the exact replay root matched; exits 5, 6,
+# and 7 mean flow-handle, join-secret, and Fellow-bearer shapes respectively.
+# Every other nonzero status means the artifact tree could not be proved
+# complete. The caller supplies the replay root over stdin so it is absent from
+# argv and diagnostics.
 scan_retained_files_for_secret() {
   local root="$1" secret="$2" scan_status=0
   [[ -n "$secret" && -d "$root" && ! -L "$root" && -O "$root" ]] || return 4
+  reconcile_local_runtime_roots || return 4
   # The JavaScript is intentionally single-quoted; shell interpolation here
   # would risk placing the searched secret into generated source or output.
   # shellcheck disable=SC2016
@@ -1220,7 +1325,11 @@ scan_retained_files_for_secret() {
     $SIG{ALRM} = sub { exit 124 };
     alarm shift @ARGV;
     exec @ARGV;
-  ' "$ARTIFACT_SCAN_DEADLINE_SECONDS" bun -e '
+  ' "$ARTIFACT_SCAN_DEADLINE_SECONDS" "${LOCAL_RUNTIME_ENV[@]}" bash -c '
+    cd -- "$1" || exit 125
+    shift
+    exec "$@"
+  ' bash "$LOCAL_RUNTIME_CWD" bun -e '
     import { constants } from "node:fs";
     import { lstat, open, opendir } from "node:fs/promises";
     import { join } from "node:path";
@@ -1276,7 +1385,18 @@ scan_retained_files_for_secret() {
           total += opened.size;
           files += 1;
           if (total > MAX_TOTAL) throw new Error("byte-bound");
-          if ((await file.readFile()).includes(secret)) process.exit(3);
+          const bytes = await file.readFile();
+          if (bytes.includes(secret)) process.exit(3);
+          // The exact replay root above protects the encrypted replay boundary.
+          // These fixed wire shapes close the separate evidence gap: this parent
+          // deliberately never receives the minted join secret, bearer, or flow
+          // handle, so it cannot search for their values after Workerd exits.
+          // A local retained artifact containing any one of them is still a
+          // disclosure and must fail closed without identifying the file/value.
+          const text = Buffer.from(bytes).toString("latin1");
+          if (/flow_v1\.[A-Za-z0-9_-]{43}/.test(text)) process.exit(5);
+          if (/v1\.[A-Za-z0-9_-]{43}/.test(text)) process.exit(6);
+          if (/asimp_ag_[0-9A-HJKMNP-TV-Z]{26}_[A-Za-z0-9_-]{43}/.test(text)) process.exit(7);
         } finally {
           await file.close();
         }
@@ -1300,22 +1420,44 @@ scan_retained_files_for_secret() {
   return "$scan_status"
 }
 
+scan_declared_retained_roots_for_secret() {
+  local secret="$1" root scan_status=0 scan_summary="" files=0 bytes=0
+  local root_files root_bytes
+  [[ -n "$secret" && "${#LOCAL_RETAINED_ROOTS[@]}" -gt 0 ]] || return 4
+  for root in "${LOCAL_RETAINED_ROOTS[@]}"; do
+    scan_summary="$(scan_retained_files_for_secret "$root" "$secret")" || scan_status=$?
+    case "$scan_status" in
+      0)
+        [[ "$scan_summary" =~ ^([0-9]+)[[:space:]]([0-9]+)$ ]] || return 4
+        root_files="${BASH_REMATCH[1]}"
+        root_bytes="${BASH_REMATCH[2]}"
+        files=$((files + 10#$root_files))
+        bytes=$((bytes + 10#$root_bytes))
+        ;;
+      *) return "$scan_status" ;;
+    esac
+  done
+  printf '%s %s' "$files" "$bytes"
+}
+
 assert_local_replay_key_not_retained() {
-  local scan_status=0 scan_summary=""
-  scan_summary="$(scan_retained_files_for_secret "$STATE_DIR" "$LOCAL_REPLAY_KEY")" || scan_status=$?
+  local scan_phase="${1:-exit}" scan_status=0 scan_summary="" scan_probe
+  reconcile_local_runtime_roots || failed "LOCAL_RUNTIME_ROOTS_UNTRUSTED"
+  scan_probe="${LOCAL_REPLAY_KEY:-S1RetainedRootScanProbe_0123456789abcdefghi}"
+  scan_summary="$(scan_declared_retained_roots_for_secret "$scan_probe")" || scan_status=$?
+  log_phase "retained-roots-reconciled" \
+    "phase=$scan_phase roots=${#LOCAL_RETAINED_ROOTS[@]} scope=state-dir"
   case "$scan_status" in
     0)
       [[ "$scan_summary" =~ ^([0-9]+)[[:space:]]([0-9]+)$ ]] ||
         failed "LOCAL_REPLAY_KEY_ARTIFACT_SCAN_UNTRUSTED"
       log_phase "replay-key-artifact-scan" \
-        "result=absent scope=retained-state files=${BASH_REMATCH[1]} bytes=${BASH_REMATCH[2]} deadline_s=$ARTIFACT_SCAN_DEADLINE_SECONDS"
+        "result=absent phase=$scan_phase scope=declared-retained-roots files=${BASH_REMATCH[1]} bytes=${BASH_REMATCH[2]} deadline_s=$ARTIFACT_SCAN_DEADLINE_SECONDS"
       ;;
     3) failed "LOCAL_REPLAY_KEY_RETAINED" ;;
+    5 | 6 | 7) failed "LOCAL_SECRET_MATERIAL_RETAINED" ;;
     *) failed "LOCAL_REPLAY_KEY_ARTIFACT_SCAN_UNTRUSTED" ;;
   esac
-  # The server is gone and the retained files have been checked. Keep no
-  # unnecessary copy in the long-lived parent shell after this point.
-  LOCAL_REPLAY_KEY=""
 }
 
 # Make an opaque, per-supervisor status authenticator. It is never logged and is
@@ -2348,7 +2490,9 @@ lifecycle_state_dir() {
   PHASE_LOG="$STATE_DIR/phases.log"
   FAULT_ONCE_MARKER="$STATE_DIR/fault-once-consumed"
   : >"$PHASE_LOG"
+  prepare_local_runtime_roots || failed "LIFECYCLE_RUNTIME_ROOTS_INVALID"
   log_phase "state-retained" "dir=$STATE_DIR mode=$suffix"
+  log_phase "runtime-roots-ready" "scope=state-dir roots=home,tmp,xdg,wrangler,bun,cwd"
 }
 
 # Start an owned fixture beneath the same pinned supervisor used by client and
@@ -2755,6 +2899,64 @@ self_test_replay_artifact_scan() {
   emit "pass" "REPLAY_ARTIFACT_SCAN_SELF_TEST_PASSED"
 }
 
+# PLANTED NEGATIVES for the secret-shaped retained-artifact boundary. These are
+# fixed inert strings, not minted credentials: the scanner must reject each
+# production wire shape without echoing its bytes or naming the artifact.
+self_test_secret_material_artifact_scan() {
+  local kind="$1" material="" expected_status="" scan_status=0 scan_summary="" exact_root_probe="S1ArtifactScanExactRootNotPresent"
+  local opaque="S1ArtifactScanCanary_0123456789abcdefghijkl"
+  lifecycle_state_dir "secret-material-artifact-scan-${kind}"
+  [[ "${#opaque}" -eq 43 ]] || failed "SECRET_MATERIAL_CANARY_INVALID"
+  case "$kind" in
+    join-secret)
+      material="v1.${opaque}"
+      expected_status=6
+      [[ "$material" =~ ^v1\.[A-Za-z0-9_-]{43}$ ]] || failed "SECRET_MATERIAL_CANARY_INVALID"
+      ;;
+    flow-handle)
+      material="flow_v1.${opaque}"
+      expected_status=5
+      [[ "$material" =~ ^flow_v1\.[A-Za-z0-9_-]{43}$ ]] || failed "SECRET_MATERIAL_CANARY_INVALID"
+      ;;
+    bearer)
+      material="asimp_ag_0123456789ABCDEFGHJKMNPQRS_${opaque}"
+      expected_status=7
+      [[ "$material" =~ ^asimp_ag_[0-9A-HJKMNP-TV-Z]{26}_[A-Za-z0-9_-]{43}$ ]] ||
+        failed "SECRET_MATERIAL_CANARY_INVALID"
+      ;;
+    *) failed "SECRET_MATERIAL_CANARY_KIND_INVALID" ;;
+  esac
+  mkdir "$STATE_DIR/nested"
+  printf '\0prefix:%s:suffix\0' "$material" >"$STATE_DIR/nested/planted-${kind}-canary.bin"
+  # The replay root stays a separate nonmatching value. Detection must be due to
+  # the planted wire shape, not the exact-root branch of the shared scanner.
+  scan_summary="$(scan_retained_files_for_secret "$STATE_DIR" "$exact_root_probe")" || scan_status=$?
+  log_phase "secret-material-artifact-scan-observed" \
+    "kind=$kind scanner_status=$scan_status expected_status=$expected_status"
+  ((scan_status == expected_status)) || failed "SECRET_MATERIAL_ARTIFACT_SCAN_FALSE_NEGATIVE"
+  [[ -z "$scan_summary" ]] || failed "SECRET_MATERIAL_ARTIFACT_SCAN_SECRET_OUTPUT"
+  log_phase "secret-material-artifact-plant-refused" \
+    "result=detected kind=$kind scope=retained-state deadline_s=$ARTIFACT_SCAN_DEADLINE_SECONDS"
+  emit "pass" "SECRET_MATERIAL_ARTIFACT_SCAN_SELF_TEST_PASSED"
+}
+
+# PLANTED NEGATIVE: an escaped runtime root must be refused before mkdir can
+# create the canary. This exercises the same root declaration used by Workerd,
+# Wrangler, and the local client rather than merely checking a string afterward.
+self_test_runtime_root_outside_refusal() {
+  local escaped_root=""
+  lifecycle_state_dir "runtime-root-outside"
+  escaped_root="$STATE_DIR/../s1-runtime-outside-canary-$$-$RANDOM"
+  if create_private_local_runtime_directory "$escaped_root"; then
+    failed "LOCAL_RUNTIME_ROOT_OUTSIDE_ACCEPTED"
+  fi
+  [[ ! -e "$escaped_root" && ! -L "$escaped_root" ]] || failed "LOCAL_RUNTIME_ROOT_OUTSIDE_CREATED"
+  reconcile_local_runtime_roots || failed "LOCAL_RUNTIME_ROOTS_UNTRUSTED"
+  log_phase "runtime-root-outside-refused" \
+    "result=refused canary=outside-state action=not-created scope=runtime-root"
+  emit "pass" "RUNTIME_ROOT_OUTSIDE_SELF_TEST_PASSED"
+}
+
 # Prove that EXIT, rather than only the happy path, checks a retained tree after
 # an ordinary typed failure. The random key is never written; the expected scan
 # result is absence followed by preservation of the original failure record.
@@ -3036,17 +3238,19 @@ assert_port_ownership() {
   # retained file; the parent never waits in an unbounded command substitution.
   # shellcheck disable=SC2016
   run_named_with_deadline "ownership-query" "$OWNERSHIP_QUERY_DEADLINE_SECONDS" \
-    bash -c '
-      result="$1"
-      log="$2"
-      parser="$3"
-      shift 3
+    "${LOCAL_RUNTIME_ENV[@]}" bash -c '
+      cwd="$1"
+      result="$2"
+      log="$3"
+      parser="$4"
+      shift 4
+      cd -- "$cwd" || exit 125
       set -o pipefail
       set -C
       "$@" 2>>"$log" | bun -e "$parser" >"$result"
-    ' bash "$query_result" "$query_log" "$parser" \
-    "$LOCAL_WRANGLER" d1 execute DB --config infra/wrangler.toml --local \
-      --persist-to "$state_dir" --json \
+    ' bash "$LOCAL_RUNTIME_CWD" "$query_result" "$query_log" "$parser" \
+    "$LOCAL_WRANGLER" d1 execute DB --config "$LOCAL_WRANGLER_CONFIG" --local \
+    --persist-to "$state_dir" --json \
       --command "SELECT COUNT(*) AS n FROM enrollment_records WHERE sponsor_id = '${token}'" || query_exit=$?
   case "$query_exit" in
     0) ;;
@@ -3087,30 +3291,32 @@ run_local_d1() {
   # ends the run here — before mktemp, before migrations, before any child.
   resolve_port
   local_port="$RESOLVED_PORT"
-  resolve_run_token
-  token="$RUN_TOKEN"
-  resolve_local_replay_key
-  resolve_evidence_nonce
-  origin="http://127.0.0.1:${local_port}"
-
   STATE_DIR="$(mktemp -d -t asimposium-s1-enrollment)"
   # The state directory is intentionally retained on every exit path. It holds
   # local workerd state and phase logs; AGENTS.md forbids cleanup-by-deletion.
   [[ -d "$STATE_DIR" && ! -L "$STATE_DIR" ]] || failed "LOCAL_PERSIST_DIR_INVALID"
   PHASE_LOG="$STATE_DIR/phases.log"
   : >"$PHASE_LOG"
+  prepare_local_runtime_roots || failed "LOCAL_RUNTIME_ROOTS_INVALID"
   server_log="$STATE_DIR/wrangler.log"
   log_phase "state-retained" "dir=$STATE_DIR"
+  log_phase "runtime-roots-ready" "scope=state-dir roots=home,tmp,xdg,wrangler,bun,cwd"
   log_phase "port-allocated" "port=$local_port pinned=$([[ -n "${S1_LOCAL_PORT:-}" ]] && printf 'yes' || printf 'no')"
+  resolve_run_token
+  token="$RUN_TOKEN"
+  resolve_local_replay_key
+  resolve_evidence_nonce
+  origin="http://127.0.0.1:${local_port}"
 
   # Migrations can spawn Wrangler descendants and touch the same retained D1
   # state as the server. They therefore use the identical stopped, identity-
   # pinned supervisor contract instead of an untracked foreground process.
   # shellcheck disable=SC2016
   run_named_with_deadline "migration" "$MIGRATION_DEADLINE_SECONDS" \
-    bash -c 'log="$1"; shift; exec "$@" >"$log" 2>&1' bash "$STATE_DIR/migrations.log" \
-    "$LOCAL_WRANGLER" d1 migrations apply DB --config infra/wrangler.toml --local \
-      --persist-to "$STATE_DIR" || migration_exit=$?
+    "${LOCAL_RUNTIME_ENV[@]}" bash -c 'cwd="$1"; log="$2"; shift 2; cd -- "$cwd" || exit 125; exec "$@" >"$log" 2>&1' \
+    bash "$LOCAL_RUNTIME_CWD" "$STATE_DIR/migrations.log" \
+    "$LOCAL_WRANGLER" d1 migrations apply DB --config "$LOCAL_WRANGLER_CONFIG" --local \
+    --persist-to "$STATE_DIR" || migration_exit=$?
   case "$migration_exit" in
     0) ;;
     124) failed "LOCAL_D1_MIGRATION_TIMEOUT" ;;
@@ -3125,37 +3331,26 @@ run_local_d1() {
   # leaderless/recycled numeric PGID.
   server_status_file="$STATE_DIR/.server-exit-status"
   # Wrangler receives the ephemeral replay root and this run's exact loopback
-  # origin through a deliberately sanitized process environment, never a
-  # command-line `--var` that routine process listings or retained launch
-  # diagnostics can capture. The local Worker must name the dynamically
-  # allocated loopback port, not infra/wrangler.toml's static development port.
-  export S1_LOCAL_REPLAY_KEY="$LOCAL_REPLAY_KEY"
-  export S1_LOCAL_STOA_ORIGIN="$origin"
+  # origin through an empty inherited environment, never a command-line `--var`
+  # or a host HOME/TMPDIR/XDG/Wrangler cache. The local Worker must name the
+  # dynamically allocated loopback port, not the static development port.
   # shellcheck disable=SC2016
   if ! start_pinned_supervisor "$server_status_file" "child" \
+    "${LOCAL_RUNTIME_ENV[@]}" \
+    CLOUDFLARE_INCLUDE_PROCESS_ENV=true \
+    "ENROLLMENT_REPLAY_KEY=$LOCAL_REPLAY_KEY" \
+    "STOA_ORIGIN=$origin" \
     bash -c '
-      log="$1"; shift
-      replay_key="$S1_LOCAL_REPLAY_KEY"
-      stoa_origin="$S1_LOCAL_STOA_ORIGIN"
-      for env_name in $(compgen -e); do
-        case "$env_name" in PATH|HOME|TMPDIR) ;;
-          *) unset "$env_name" ;;
-        esac
-      done
-      export CLOUDFLARE_INCLUDE_PROCESS_ENV=true
-      export ENROLLMENT_REPLAY_KEY="$replay_key"
-      export STOA_ORIGIN="$stoa_origin"
-      unset replay_key stoa_origin
+      cwd="$1"; log="$2"; shift 2
+      cd -- "$cwd" || exit 125
       exec "$@" >>"$log" 2>&1
-    ' bash "$server_log" \
-    "$LOCAL_WRANGLER" dev apps/wire/src/enrollment/local-d1-worker.ts \
-      --config infra/wrangler.toml --local --persist-to "$STATE_DIR" --port "$local_port" \
+    ' bash "$LOCAL_RUNTIME_CWD" "$server_log" \
+    "$LOCAL_WRANGLER" dev "$LOCAL_D1_WORKER" \
+      --config "$LOCAL_WRANGLER_CONFIG" --local --persist-to "$STATE_DIR" --port "$local_port" \
       --inspector-port 0 \
       --log-level error --show-interactive-dev-session=false; then
-    unset S1_LOCAL_REPLAY_KEY S1_LOCAL_STOA_ORIGIN
     failed "LOCAL_CHILD_GROUP_UNPROVEN"
   fi
-  unset S1_LOCAL_REPLAY_KEY S1_LOCAL_STOA_ORIGIN
   if ! adopt_provisional_supervisor server; then
     finish_lifecycle_critical
     failed "LOCAL_CHILD_GROUP_UNPROVEN"
@@ -3206,10 +3401,12 @@ run_local_d1() {
   [[ ! -e "$evidence_path" && ! -L "$evidence_path" ]] ||
     failed "LOCAL_CLIENT_EVIDENCE_UNTRUSTED"
   run_with_deadline "$CLIENT_DEADLINE_SECONDS" \
-    env S1_LOCAL_ORIGIN="$origin" \
+    "${LOCAL_RUNTIME_ENV[@]}" \
+    "S1_LOCAL_ORIGIN=$origin" \
       S1_LOCAL_EVIDENCE_PATH="$evidence_path" \
       S1_LOCAL_EVIDENCE_NONCE="$EVIDENCE_NONCE" \
-      bun apps/wire/src/enrollment/local-d1-client.ts || client_exit=$?
+      bash -c 'cwd="$1"; shift; cd -- "$cwd" || exit 125; exec "$@"' \
+      bash "$LOCAL_RUNTIME_CWD" bun "$LOCAL_D1_CLIENT" || client_exit=$?
   if ((client_exit != 0)); then
     ((client_exit == 124)) && log_phase "client-deadline" "deadline_s=$CLIENT_DEADLINE_SECONDS"
     terminal_local_client_failure "$client_exit"
@@ -3227,7 +3424,7 @@ run_local_d1() {
   # something of ours is still running whatever the process table says.
   cleanup_all || failed "LOCAL_CLEANUP_INCOMPLETE"
   port_is_free "$local_port" || failed "LOCAL_PORT_STILL_HELD"
-  assert_local_replay_key_not_retained
+  assert_local_replay_key_not_retained "before-pass"
   log_phase "cleanup-verified" "port=$local_port port_free=yes children=none"
 
   emit "pass" "LOCAL_D1_ENROLLMENT_PASSED"
@@ -3359,6 +3556,16 @@ main() {
   if [[ "${1:-}" == "--self-test-replay-artifact-scan" ]]; then
     begin_self_test "replay-artifact-scan"
     self_test_replay_artifact_scan
+    return
+  fi
+  if [[ "${1:-}" =~ ^--self-test-secret-material-artifact-(join-secret|flow-handle|bearer)$ ]]; then
+    begin_self_test "secret-material-artifact-scan"
+    self_test_secret_material_artifact_scan "${BASH_REMATCH[1]}"
+    return
+  fi
+  if [[ "${1:-}" == "--self-test-runtime-root-outside" ]]; then
+    begin_self_test "runtime-root-outside"
+    self_test_runtime_root_outside_refusal
     return
   fi
   if [[ "${1:-}" == "--self-test-client-evidence-missing" ]]; then
