@@ -71,6 +71,7 @@ const CONCURRENT_CONTROLLER_SETUP_MS = 5_000;
 const CONCURRENT_PROCESS_GROUP_GRACE_MS = 2_000;
 const CONCURRENT_CAPTURE_TEST_TIMEOUT_MS = 25_000;
 const EXIT_RACE_LOAD_BARRIER_WAIT_MS = 10_000;
+const LEGACY_POSTCONDITION_LOAD_BARRIER_WAIT_MS = 20_000;
 const CONCURRENT_LEGACY_TEST_TIMEOUT_MS =
   CONCURRENT_CONTROLLER_SETUP_MS +
   S2_SHELL_REGRESSION_WATCHDOG_MS +
@@ -536,6 +537,83 @@ async function waitForExitRaceLoadReadyRecords(
   );
   throw new Error(
     `exit-race load barrier timed out: ready=${visibleTokens.length}/${tokens.length}; ` +
+      `tokens=${visibleTokens.join(",") || "none"}`,
+  );
+}
+
+interface LegacyPostconditionLoadReadyRecord {
+  readonly controllerPid: number;
+  readonly parentPid: number;
+  readonly residualPgid: number;
+  readonly token: string;
+  readonly size: number;
+}
+
+function readLegacyPostconditionLoadReadyRecord(
+  barrierRoot: string,
+  token: string,
+  size: number,
+): LegacyPostconditionLoadReadyRecord | undefined {
+  const readyPath = join(barrierRoot, `${token}.ready`);
+  if (!existsSync(readyPath)) return undefined;
+  const readyStat = lstatSync(readyPath);
+  if (!readyStat.isFile() || readyStat.isSymbolicLink()) {
+    throw new Error(`legacy postcondition ready path is not a regular file: ${token}`);
+  }
+  const match =
+    /^legacy-postcondition-ready ([1-9][0-9]*) ([1-9][0-9]*) ([1-9][0-9]*) ([A-Za-z0-9][A-Za-z0-9._-]{0,79}) ([1-9][0-9]?)\n$/u.exec(
+      readFileSync(readyPath, "utf8"),
+    );
+  const controllerPid = Number(match?.[1]);
+  const parentPid = Number(match?.[2]);
+  const residualPgid = Number(match?.[3]);
+  const observedToken = match?.[4];
+  const observedSize = Number(match?.[5]);
+  if (
+    match === null ||
+    !Number.isSafeInteger(controllerPid) ||
+    controllerPid <= 0 ||
+    !Number.isSafeInteger(parentPid) ||
+    parentPid <= 0 ||
+    !Number.isSafeInteger(residualPgid) ||
+    residualPgid <= 0 ||
+    observedToken !== token ||
+    observedSize !== size
+  ) {
+    throw new Error(`legacy postcondition ready record is malformed: ${token}`);
+  }
+  return {
+    controllerPid,
+    parentPid,
+    residualPgid,
+    token: observedToken,
+    size: observedSize,
+  };
+}
+
+async function waitForLegacyPostconditionLoadReadyRecords(
+  barrierRoot: string,
+  tokens: readonly string[],
+  deadlineMs: number,
+): Promise<LegacyPostconditionLoadReadyRecord[]> {
+  const deadline = Date.now() + deadlineMs;
+  while (Date.now() < deadline) {
+    const records = tokens.map((token) =>
+      readLegacyPostconditionLoadReadyRecord(barrierRoot, token, tokens.length),
+    );
+    if (
+      records.every((record): record is LegacyPostconditionLoadReadyRecord => record !== undefined)
+    ) {
+      return records;
+    }
+    await new Promise<void>((resolveWait) => setTimeout(resolveWait, 10));
+  }
+  const visibleTokens = tokens.filter(
+    (token) =>
+      readLegacyPostconditionLoadReadyRecord(barrierRoot, token, tokens.length) !== undefined,
+  );
+  throw new Error(
+    `legacy postcondition load barrier timed out: ready=${visibleTokens.length}/${tokens.length}; ` +
       `tokens=${visibleTokens.join(",") || "none"}`,
   );
 }
@@ -1483,6 +1561,57 @@ describe("registered S2 shell and lifecycle regressions", () => {
     ]);
   });
 
+  test("binds recursive lsof candidates to PID rechecks and splits KILL from postcondition", () => {
+    const shell = readFileSync(resolve(REPOSITORY_ROOT, SCRIPT), "utf8");
+    const lsofRetry = shell.slice(
+      shell.indexOf("lsof_scan_reaches_no_matches() {"),
+      shell.indexOf("s2_pgid_is_owned() {"),
+    );
+    // biome-ignore lint/suspicious/noTemplateCurlyInString: asserts literal shell source text.
+    expect(lsofRetry).toContain('candidate_output="$(lsof -a -p "${line}" "$@" 2>&1)"');
+    // biome-ignore lint/suspicious/noTemplateCurlyInString: asserts literal shell source text.
+    expect(lsofRetry).toContain('[[ ${candidate_status} -eq 1 && -z "${candidate_output}" ]]');
+    // biome-ignore lint/suspicious/noTemplateCurlyInString: asserts literal shell source text.
+    expect(lsofRetry).toContain("[[ ( ${candidate_status} -eq 0 || ${candidate_status} -eq 1 ) &&");
+    // biome-ignore lint/suspicious/noTemplateCurlyInString: asserts exact-PID output matching.
+    expect(lsofRetry).toContain('[[ "${candidate_output}" == "${line}" ]] || return 1');
+
+    const legacyReap = shell.slice(
+      shell.indexOf("legacy_reap_leader_lost_group() {"),
+      shell.indexOf("reap_parent_terminated_supervisor_residual() {"),
+    );
+    const killSent = legacyReap.indexOf("S2_LEGACY_STOP_EXACT_RESIDUAL_KILL_SENT=1");
+    const groupDisappeared = legacyReap.indexOf(
+      // biome-ignore lint/suspicious/noTemplateCurlyInString: asserts literal shell source text.
+      'if ! kill -0 -- "-${pgid}" 2>/dev/null; then',
+      killSent,
+    );
+    // biome-ignore lint/suspicious/noTemplateCurlyInString: asserts literal shell source text.
+    const barrier = legacyReap.indexOf('legacy_postcondition_load_barrier "${pgid}"');
+    const postcondition = legacyReap.indexOf(
+      // biome-ignore lint/suspicious/noTemplateCurlyInString: asserts literal shell source text.
+      'assert_no_run_survivors "${persist}" "${port}" "${marker}"',
+      barrier,
+    );
+    const postconditionProved = legacyReap.indexOf(
+      "S2_LEGACY_STOP_EXACT_RESIDUAL_POSTCONDITION_PROVED=1",
+    );
+    expect(killSent).toBeGreaterThanOrEqual(0);
+    expect(groupDisappeared).toBeGreaterThan(killSent);
+    expect(barrier).toBeGreaterThan(groupDisappeared);
+    expect(postcondition).toBeGreaterThan(barrier);
+    expect(postconditionProved).toBeGreaterThan(postcondition);
+
+    const legacyMode = shell.slice(
+      // biome-ignore lint/suspicious/noTemplateCurlyInString: asserts literal shell source text.
+      shell.indexOf('if [[ "${mode}" == "legacy-leader-loss" ||'),
+      // biome-ignore lint/suspicious/noTemplateCurlyInString: asserts literal shell source text.
+      shell.indexOf('if [[ "${mode}" == "watchdog-uncertainty" ]]'),
+    );
+    expect(legacyMode).toContain("S2_LEGACY_STOP_EXACT_RESIDUAL_KILL_SENT");
+    expect(legacyMode).toContain("S2_LEGACY_STOP_EXACT_RESIDUAL_POSTCONDITION_PROVED");
+  });
+
   test("PLANTED: external controller scans cover retained and partial-ready identities", () => {
     const runId = "s2u-parent-survivor-fixture";
     const childRunId = `s2u-${"a".repeat(48)}`;
@@ -1785,6 +1914,20 @@ describe("registered S2 shell and lifecycle regressions", () => {
             expect(run.stdout).toContain('"action":"kill-exact-residual-group"');
             expect(run.stdout).not.toContain('"code":"S2_LEGACY_REAPED_HANDOFF_STALE"');
             expect(run.stdout).not.toContain('"code":"S2_CLEANUP_OWNERSHIP_UNPROVEN"');
+          } else if (mode === "lsof-scan-failure") {
+            expect(ndjsonRecords(run)).toContainEqual(
+              expect.objectContaining({
+                suite: "s2-krater-shell",
+                status: "pass",
+                scenario:
+                  "lsof-empty-warning-pid-rechecked-observers-paired-real-holder-captured-scan-and-health-failure-remain-distinct",
+                observer_only_broad_scans: 2,
+                observer_only_pid_rechecks: 4,
+                paired_broad_scans: 1,
+                paired_observer_pid_rechecks: 1,
+                paired_real_holder_pid_rechecks: 20,
+              }),
+            );
           } else if (mode === "post-release-controller-term-identity-exit-race") {
             expect(ndjsonRecords(run)).toContainEqual({
               tool: "bash+ps+lsof",
@@ -2393,6 +2536,43 @@ describe("registered S2 shell and lifecycle regressions", () => {
   );
 
   test(
+    "PLANTED: a post-KILL proof refusal never masquerades as an unreached KILL branch",
+    () => {
+      const runId = `s2u-${randomUUID().replaceAll("-", "").slice(0, 24)}`;
+      const run = runHarnessSync(
+        {
+          S2_RUN_ID: runId,
+          S2_SHELL_REGRESSION_TEST: "legacy-leader-loss",
+          // Enabling the test-only barrier without its required identity tuple fails only after
+          // the exact residual KILL has been sent and the group has disappeared.
+          S2_PLANT_LEGACY_POSTCONDITION_LOAD_BARRIER: "1",
+        },
+        S2_SHELL_REGRESSION_WATCHDOG_MS,
+      );
+      assertS2RunThenScanForSurvivors(
+        "legacy-leader-loss-post-kill-proof-refusal",
+        () => {
+          expect(run.exitCode).toBe(1);
+          expect(run.stdout).toContain('"action":"kill-exact-residual-group"');
+          expect(run.stdout).toContain('"code":"S2_LEGACY_POSTCONDITION_BARRIER_FAILED"');
+          expect(run.stdout).not.toContain('"code":"S2_LEGACY_LEADER_LOSS_BRANCH_NOT_REACHED"');
+          expect(ndjsonRecords(run)).toContainEqual(
+            expect.objectContaining({
+              suite: "s2-krater-evidence",
+              status: "fail",
+              evidence_retention_status: "pass",
+              captured_exit_code: 1,
+              captured_run_status: "fail",
+            }),
+          );
+        },
+        () => liveS2LifecycleProcesses(runId),
+      );
+    },
+    S2_SHELL_REGRESSION_TEST_TIMEOUT_MS,
+  );
+
+  test(
     "PLANTED: a legacy supervisor exit after arm reports its exact publication checkpoint",
     () => {
       const runId = `s2u-${randomUUID().replaceAll("-", "").slice(0, 24)}`;
@@ -2501,9 +2681,13 @@ describe("registered S2 shell and lifecycle regressions", () => {
   test(
     "legacy leader-loss deterministically reaches exact residual cleanup under concurrent load",
     async () => {
+      const barrierRoot = mkdtempSync(join(tmpdir(), "asimposium-s2-legacy-postcondition-load-"));
+      const releasePendingPath = join(barrierRoot, "release.pending");
+      const releasePath = join(barrierRoot, "release");
       const fixtures = Array.from({ length: 6 }, (_, index) => ({
         index,
         runId: `s2u-${randomUUID().replaceAll("-", "").slice(0, 24)}`,
+        barrierToken: `fixture-${index}-${randomUUID().replaceAll("-", "").slice(0, 16)}`,
       }));
       for (const fixture of fixtures) {
         console.log(
@@ -2514,19 +2698,98 @@ describe("registered S2 shell and lifecycle regressions", () => {
           }),
         );
       }
-      const runs = await Promise.all(
-        fixtures.map((fixture) =>
-          runCapturedConcurrently(
-            "bash",
-            [SCRIPT],
-            {
-              S2_RUN_ID: fixture.runId,
-              S2_SHELL_REGRESSION_TEST: "legacy-leader-loss",
-            },
-            S2_SHELL_REGRESSION_WATCHDOG_MS,
-          ),
-        ),
+      let settledBeforeRelease = 0;
+      const runPromises = fixtures.map((fixture) =>
+        runCapturedConcurrently(
+          "bash",
+          [SCRIPT],
+          {
+            S2_RUN_ID: fixture.runId,
+            S2_SHELL_REGRESSION_TEST: "legacy-leader-loss",
+            S2_PLANT_LEGACY_POSTCONDITION_LOAD_BARRIER: "1",
+            S2_PLANT_LEGACY_POSTCONDITION_LOAD_BARRIER_ROOT: barrierRoot,
+            S2_PLANT_LEGACY_POSTCONDITION_LOAD_BARRIER_TOKEN: fixture.barrierToken,
+            S2_PLANT_LEGACY_POSTCONDITION_LOAD_BARRIER_SIZE: String(fixtures.length),
+          },
+          S2_SHELL_REGRESSION_WATCHDOG_MS,
+        ).finally(() => {
+          settledBeforeRelease += 1;
+        }),
       );
+      let barrierFailure: Error | undefined;
+      let releasePublished = false;
+      try {
+        const readyRecords = await waitForLegacyPostconditionLoadReadyRecords(
+          barrierRoot,
+          fixtures.map((fixture) => fixture.barrierToken),
+          LEGACY_POSTCONDITION_LOAD_BARRIER_WAIT_MS,
+        );
+        expect(readyRecords).toHaveLength(fixtures.length);
+        expect(new Set(readyRecords.map((record) => record.controllerPid)).size).toBe(
+          fixtures.length,
+        );
+        expect(new Set(readyRecords.map((record) => record.parentPid)).size).toBe(fixtures.length);
+        expect(
+          new Set(readyRecords.flatMap((record) => [record.controllerPid, record.parentPid])).size,
+        ).toBe(fixtures.length * 2);
+        expect(new Set(readyRecords.map((record) => record.residualPgid)).size).toBe(
+          fixtures.length,
+        );
+        expect(readyRecords.map((record) => record.token).sort()).toEqual(
+          fixtures.map((fixture) => fixture.barrierToken).sort(),
+        );
+        expect(new Set(readyRecords.map((record) => record.size))).toEqual(
+          new Set([fixtures.length]),
+        );
+        expect(settledBeforeRelease).toBe(0);
+        expect(existsSync(releasePath)).toBe(false);
+        expect(existsSync(releasePendingPath)).toBe(false);
+
+        const barrierRows = parseS2LifecycleProcessRows(captureS2LifecycleProcessTable());
+        const liveRows = barrierRows.filter((row) => !row.status.startsWith("Z"));
+        const liveRowsByPid = new Map(liveRows.map((row) => [row.pid, row] as const));
+        expect(
+          readyRecords.every((record) => {
+            const controller = liveRowsByPid.get(record.controllerPid);
+            return (
+              controller?.parentPid === record.parentPid &&
+              liveRowsByPid.has(record.parentPid) &&
+              record.controllerPid !== record.parentPid &&
+              record.residualPgid !== record.controllerPid &&
+              record.residualPgid !== record.parentPid
+            );
+          }),
+        ).toBe(true);
+        expect(
+          readyRecords.every((record) => liveRows.every((row) => row.pgid !== record.residualPgid)),
+        ).toBe(true);
+      } catch (error) {
+        barrierFailure = error instanceof Error ? error : new Error(String(error));
+      }
+
+      try {
+        writeFileSync(releasePendingPath, `legacy-postcondition-release ${fixtures.length}\n`, {
+          encoding: "utf8",
+          flag: "wx",
+          mode: 0o600,
+        });
+        linkSync(releasePendingPath, releasePath);
+        releasePublished = true;
+      } catch (error) {
+        const publicationFailure =
+          error instanceof Error
+            ? error
+            : new Error(`legacy postcondition release publication failed: ${String(error)}`);
+        barrierFailure =
+          barrierFailure === undefined
+            ? publicationFailure
+            : new AggregateError(
+                [barrierFailure, publicationFailure],
+                "legacy postcondition barrier observation and release publication both failed",
+              );
+      }
+
+      const runs = await Promise.all(runPromises);
       const survivorSnapshot = captureS2LifecycleProcessTable();
 
       const fixtureFailures = collectAllFixtureVerificationFailures(fixtures, (fixture, index) => {
@@ -2560,6 +2823,12 @@ describe("registered S2 shell and lifecycle regressions", () => {
               run.stdout.includes('"action":"kill-exact-residual-group"')
                 ? undefined
                 : "exact-kill-action",
+              !run.stdout.includes('"code":"S2_LEGACY_EXACT_RESIDUAL_POSTCONDITION_UNPROVEN"')
+                ? undefined
+                : "postcondition-refusal",
+              !run.stdout.includes('"code":"S2_LEGACY_POSTCONDITION_BARRIER_FAILED"')
+                ? undefined
+                : "barrier-refusal",
               !run.stdout.includes('"code":"S2_LEGACY_LEADER_LOSS_BRANCH_NOT_REACHED"')
                 ? undefined
                 : "ordinary-clean-stop-refusal",
@@ -2568,6 +2837,7 @@ describe("registered S2 shell and lifecycle regressions", () => {
               )
                 ? undefined
                 : "terminal-scenario",
+              releasePublished ? undefined : "shared-release",
               evidencePass ? undefined : "evidence-pass",
             ].filter((entry): entry is string => entry !== undefined);
             if (missing.length !== 0) {
@@ -2613,10 +2883,13 @@ describe("registered S2 shell and lifecycle regressions", () => {
           { cause: error },
         );
       });
-      if (failures.length !== 0) {
+      const allFailures = [...(barrierFailure === undefined ? [] : [barrierFailure]), ...failures];
+      if (allFailures.length !== 0) {
         throw new AggregateError(
-          failures,
-          `concurrent S2 legacy leader-loss verification failed: fixtures=${fixtureFailures.map(({ index }) => fixtures[index]?.index ?? index).join(",")}`,
+          allFailures,
+          `concurrent S2 legacy leader-loss verification failed: ` +
+            `barrier=${barrierFailure === undefined ? "pass" : "fail"}; ` +
+            `fixtures=${fixtureFailures.map(({ index }) => fixtures[index]?.index ?? index).join(",") || "none"}`,
         );
       }
     },

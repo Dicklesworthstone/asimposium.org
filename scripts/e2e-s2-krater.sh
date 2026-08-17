@@ -2726,24 +2726,70 @@ lsof_scan_has_no_matches() {
 }
 
 # Recursive lsof scans can briefly observe their own directory-traversal process under load.
-# Never exempt a PID class: instead, retry only well-formed machine-mode PID matches and require
-# a later actual zero-holder observation. Malformed rows, diagnostics, and scanner errors remain
-# immediate failures; a real persistent holder remains visible through the whole bounded sample.
+# Never exempt a PID class. After the broad scanner has exited, re-run the identical selector for
+# every numeric candidate, ANDed with that exact PID. Only exit 1 with no bytes proves that the
+# candidate was the departed observer. A confirmed candidate is retained across the bounded retry;
+# malformed rows, warnings, and scanner errors fail immediately, while a persistent real holder
+# remains confirmed through the final sample.
 lsof_scan_reaches_no_matches() {
-  local attempt line machine_pids
-  for attempt in 1 2 3; do
-    if lsof_scan_has_no_matches "$@"; then return 0; fi
-    [[ "${S2_LSOF_LAST_STATUS}" == 0 || "${S2_LSOF_LAST_STATUS}" == 1 ]] || return 1
-    [[ -n "${S2_LSOF_LAST_OUTPUT}" ]] || return 1
-    machine_pids=1
-    while IFS= read -r line; do
-      [[ "${line}" =~ ^[0-9]+$ ]] || { machine_pids=0; break; }
-    done <<<"${S2_LSOF_LAST_OUTPUT}"
-    [[ ${machine_pids} -eq 1 ]] || return 1
-    [[ ${attempt} -lt 3 ]] || return 1
-    sleep 0.05
+  local attempt line candidate_output candidate_status candidate_lines candidate_gone
+  local confirmed confirmed_output confirmed_status
+  local -a candidates=()
+  if lsof_scan_has_no_matches "$@"; then return 0; fi
+  [[ "${S2_LSOF_LAST_STATUS}" == 0 || "${S2_LSOF_LAST_STATUS}" == 1 ]] || return 1
+  [[ -n "${S2_LSOF_LAST_OUTPUT}" ]] || return 1
+  while IFS= read -r line; do
+    [[ "${line}" =~ ^[0-9]+$ ]] || return 1
+    candidates+=("${line}")
+  done <<<"${S2_LSOF_LAST_OUTPUT}"
+  (( ${#candidates[@]} > 0 )) || return 1
+  confirmed=0
+  confirmed_output=""
+  confirmed_status=""
+  for line in "${candidates[@]}"; do
+    candidate_gone=0
+    # Retain the broad candidate's identity. Re-running a fresh broad traversal here would create
+    # a fresh observer PID on every sample and could make three different departed scanners look
+    # like one persistent holder. Only this exact PID surviving the entire bounded targeted window is real.
+    # Use the existing bounded terminal-settlement envelope for this exact PID.
+    # A loaded recursive observer may outlive three scheduler ticks, while a
+    # real holder remains a refusal through the entire same finite window.
+    for ((attempt = 0; attempt < S2_TERMINATE_WAIT_TICKS; attempt += 1)); do
+      candidate_output=""
+      candidate_status=0
+      if candidate_output="$(lsof -a -p "${line}" "$@" 2>&1)"; then
+        candidate_status=0
+      else
+        candidate_status=$?
+      fi
+      S2_LSOF_LAST_OUTPUT="${candidate_output}"
+      S2_LSOF_LAST_STATUS="${candidate_status}"
+      if [[ ${candidate_status} -eq 1 && -z "${candidate_output}" ]]; then
+        candidate_gone=1
+        break
+      fi
+      [[ ( ${candidate_status} -eq 0 || ${candidate_status} -eq 1 ) && \
+        -n "${candidate_output}" ]] || return 1
+      candidate_lines=0
+      while IFS= read -r candidate_output; do
+        [[ "${candidate_output}" == "${line}" ]] || return 1
+        candidate_lines=$((candidate_lines + 1))
+      done <<<"${S2_LSOF_LAST_OUTPUT}"
+      (( candidate_lines > 0 )) || return 1
+      (( attempt + 1 < S2_TERMINATE_WAIT_TICKS )) && sleep 0.1
+    done
+    if [[ ${candidate_gone} -eq 0 ]]; then
+      confirmed=1
+      confirmed_output+="${line}"$'\n'
+      confirmed_status="${candidate_status}"
+    fi
   done
-  return 1
+  if (( confirmed == 1 )); then
+    S2_LSOF_LAST_OUTPUT="${confirmed_output%$'\n'}"
+    S2_LSOF_LAST_STATUS="${confirmed_status}"
+    return 1
+  fi
+  return 0
 }
 
 # Is this process group one this run created?
@@ -2901,6 +2947,56 @@ legacy_residual_group_is_exact() {
   [[ ${holder_count} -eq 1 ]]
 }
 
+# Test-only causal gate for the six-way legacy leader-loss proof. The ready record is published
+# only after the exact residual group has disappeared; the caller invokes this immediately before
+# its postcondition scan. A hard-link publication gives every fixture one immutable release edge.
+legacy_postcondition_load_barrier() {
+  local pgid="$1"
+  local enabled="${S2_PLANT_LEGACY_POSTCONDITION_LOAD_BARRIER:-0}"
+  local root="${S2_PLANT_LEGACY_POSTCONDITION_LOAD_BARRIER_ROOT:-}"
+  local token="${S2_PLANT_LEGACY_POSTCONDITION_LOAD_BARRIER_TOKEN:-}"
+  local size="${S2_PLANT_LEGACY_POSTCONDITION_LOAD_BARRIER_SIZE:-}"
+  local ready_pending ready release_pending release release_line deadline
+  [[ "${enabled}" == 0 || "${enabled}" == 1 ]] || return 1
+  if [[ "${enabled}" == 0 ]]; then
+    [[ -z "${root}" && -z "${token}" && -z "${size}" ]] || return 1
+    return 0
+  fi
+  [[ "${root}" == /* && -d "${root}" && ! -L "${root}" && \
+    "${token}" =~ ^[A-Za-z0-9][A-Za-z0-9._-]{0,79}$ && \
+    "${size}" =~ ^[1-9][0-9]?$ && ${size} -ge 2 && ${size} -le 16 && \
+    "${pgid}" =~ ^[1-9][0-9]*$ ]] || return 1
+  ready="${root}/${token}.ready"
+  ready_pending="${ready}.pending"
+  release="${root}/release"
+  release_pending="${release}.pending"
+  [[ ! -e "${ready}" && ! -L "${ready}" && \
+    ! -e "${ready_pending}" && ! -L "${ready_pending}" && \
+    ! -e "${release}" && ! -L "${release}" && \
+    ! -e "${release_pending}" && ! -L "${release_pending}" ]] || return 1
+  (umask 077; set -o noclobber; \
+    printf 'legacy-postcondition-ready %s %s %s %s %s\n' \
+      "$$" "${PPID}" "${pgid}" "${token}" "${size}" \
+      >"${ready_pending}") 2>/dev/null || return 1
+  ln "${ready_pending}" "${ready}" 2>/dev/null || return 1
+  deadline="$(s2_deadline_at "${S2_WATCHDOG_PUBLICATION_DEADLINE_SECONDS}")"
+  release_line=""
+  while (( SECONDS < deadline )); do
+    if [[ -e "${release}" || -L "${release}" ]]; then
+      [[ -f "${release}" && ! -L "${release}" ]] || return 1
+      {
+        IFS= read -r release_line || release_line=""
+        if IFS= read -r _; then release_line=""; fi
+      } <"${release}"
+      [[ "${release_line}" == "legacy-postcondition-release ${size}" ]] || return 1
+      return 0
+    fi
+    kill -0 "${PPID}" 2>/dev/null || return 1
+    sleep 0.01
+  done
+  return 1
+}
+
 legacy_reap_leader_lost_group() {
   local pid="$1" pgid="$2" marker="$3" persist="$4" port="$5" tick kill_tick
   # Unknown until the state-fd scan actually runs. These were previously seeded
@@ -2924,9 +3020,14 @@ legacy_reap_leader_lost_group() {
         emit '{"tool":"bash","package":"apps/wire","suite":"s2-krater-local-d1-upgrade","status":"fail","code":"S2_LEGACY_EXACT_RESIDUAL_KILL_FAILED","reproduce":"scripts/e2e-s2-krater.sh"}'
         return 1
       fi
+      S2_LEGACY_STOP_EXACT_RESIDUAL_KILL_SENT=1
       for ((kill_tick = 0; kill_tick < S2_TERMINATE_WAIT_TICKS; kill_tick += 1)); do
         if ! kill -0 -- "-${pgid}" 2>/dev/null; then
           wait "${pid}" 2>/dev/null || :
+          if ! legacy_postcondition_load_barrier "${pgid}"; then
+            emit '{"tool":"bash","package":"apps/wire","suite":"s2-krater-local-d1-upgrade","status":"fail","code":"S2_LEGACY_POSTCONDITION_BARRIER_FAILED","reproduce":"scripts/e2e-s2-krater.sh"}'
+            return 1
+          fi
           if ! assert_no_run_survivors "${persist}" "${port}" "${marker}"; then
             if [[ "${S2_SURVIVOR_ASSERTION_FAILURE:-}" == "state-fd-scan" ]]; then
               # Only inside this branch are the three fields measured, so only
@@ -2951,7 +3052,7 @@ legacy_reap_leader_lost_group() {
             return 1
           fi
           S2_LEGACY_STOP_REAPED_UNCERTAIN=1
-          S2_LEGACY_STOP_EXACT_RESIDUAL_KILLED=1
+          S2_LEGACY_STOP_EXACT_RESIDUAL_POSTCONDITION_PROVED=1
           return 1
         fi
         sleep 0.1
@@ -4551,10 +4652,11 @@ clear_legacy_terminal_server_state() {
 
 stop_legacy_worker_or_fail() {
   local stop_status
-  # Keep the exact residual-group KILL proof distinct from a naturally vanished group. Both
-  # outcomes remain non-clean legacy teardown, but only the former may satisfy the planted
-  # leader-loss coverage assertion.
-  S2_LEGACY_STOP_EXACT_RESIDUAL_KILLED=0
+  # Keep the exact residual-group KILL command distinct from its later terminal postcondition.
+  # Both facts are required by the planted leader-loss proof; recording only the latter made a
+  # postcondition refusal look like the KILL branch had never run.
+  S2_LEGACY_STOP_EXACT_RESIDUAL_KILL_SENT=0
+  S2_LEGACY_STOP_EXACT_RESIDUAL_POSTCONDITION_PROVED=0
   S2_LEGACY_STOP_CONTEXT=1
   if stop_worker; then
     stop_status=0
@@ -4900,6 +5002,8 @@ run_s2_shell_regression_test() {
   local child_run child_status_file child_diagnostic diagnostic_body manifest_body
   local plant_clean_stop_bypass payload_behavior payload_ready_file payload_state_file
   local payload_pid state_holders holder_status lsof_held_file lsof_transient_marker
+  local lsof_observer_trace lsof_paired_trace lsof_broad_count lsof_observer_rechecks
+  local lsof_real_rechecks
   local payload_ready_seen payload_state_regular payload_pid_valid state_holder_exact
   local group_sufficient payload_in_group lsof_observation
   local arm_consumed spawn_attempted watchdog_pid_published supervisor_exit_status_json startup_phase_json
@@ -6458,20 +6562,121 @@ run_s2_shell_regression_test() {
       "${S2_LSOF_LAST_STATUS}" == "1" && \
       "${S2_LSOF_LAST_OUTPUT}" == *'planted lsof traversal warning'* ]] || return 1
     lsof_transient_marker="${S2_STATE_DIR}/planted-lsof-transient-match-$(random_hex 8)"
+    lsof_observer_trace="${lsof_transient_marker}.trace"
+    [[ ! -e "${lsof_transient_marker}" && ! -L "${lsof_transient_marker}" && \
+      ! -e "${lsof_observer_trace}" && ! -L "${lsof_observer_trace}" ]] || return 1
+    printf '%s\n' observer-only >"${lsof_transient_marker}" || return 1
+    (umask 077; set -o noclobber; : >"${lsof_observer_trace}") 2>/dev/null || return 1
     lsof() {
-      local arg
+      local arg candidate="" candidate_marker="" expect_pid=0 health=0 constrained=0 recursive=0
+      local broad_index=0 trace_kind
       for arg in "$@"; do
-        [[ "${arg}" == "-p" ]] && { printf 'p%s\n' "$$"; return 0; }
+        if [[ ${expect_pid} -eq 1 ]]; then candidate="${arg}"; expect_pid=0; continue; fi
+        [[ "${arg}" == "-Fp" ]] && health=1
+        [[ "${arg}" == "-a" ]] && constrained=1
+        [[ "${arg}" == "+D" ]] && recursive=1
+        [[ "${arg}" == "-p" ]] && expect_pid=1
       done
-      if [[ ! -e "${lsof_transient_marker}" && ! -L "${lsof_transient_marker}" ]]; then
-        printf '%s\n' transient >"${lsof_transient_marker}" || return 2
-        printf '%s\n' "$$"
+      if [[ ${health} -eq 1 ]]; then printf 'p%s\n' "$$"; return 0; fi
+      if [[ ${recursive} -ne 1 ]]; then return 1; fi
+      if [[ ${constrained} -eq 1 ]]; then
+        [[ "${candidate}" =~ ^[0-9]+$ ]] || return 2
+        candidate_marker="${lsof_observer_trace}.${candidate}.seen"
+        printf 'observer-recheck %s\n' "${candidate}" >>"${lsof_observer_trace}" || return 2
+        if [[ ! -e "${candidate_marker}" && ! -L "${candidate_marker}" ]]; then
+          (umask 077; set -o noclobber; printf 'seen %s\n' "${candidate}" \
+            >"${candidate_marker}") 2>/dev/null || return 2
+          printf '%s\n' "${candidate}"
+        fi
         return 1
       fi
+      while read -r trace_kind _; do
+        if [[ "${trace_kind}" == broad ]]; then
+          broad_index=$((broad_index + 1))
+        fi
+      done <"${lsof_observer_trace}"
+      candidate=$((910001 + broad_index))
+      printf 'broad %s\n' "${candidate}" >>"${lsof_observer_trace}" || return 2
+      printf '%s\n' "${candidate}"
       return 1
     }
-    assert_no_run_survivors "${S2_STATE_DIR}" "${S2_PORT}" planted-lsof-transient-match || return 1
+    # Repeat the observer-only plant. Each broad call yields a fresh candidate that survives its
+    # first targeted sample and vanishes on its second. Re-running the broad selector would see a
+    # different PID forever; retaining and retrying this exact PID is what makes the proof converge.
+    if ! assert_no_run_survivors "${S2_STATE_DIR}" "${S2_PORT}" planted-lsof-transient-match; then
+      emit "{\"tool\":\"bash+lsof\",\"package\":\"apps/wire\",\"suite\":\"s2-krater-shell\",\"status\":\"fail\",\"code\":\"S2_LSOF_TRANSIENT_OBSERVER_FIRST_SAMPLE_DID_NOT_CONVERGE\",\"check\":\"${S2_SURVIVOR_ASSERTION_FAILURE:-unknown}\",\"reproduce\":\"S2_SHELL_REGRESSION_TEST=lsof-scan-failure scripts/e2e-s2-krater.sh\"}"
+      return 1
+    fi
+    if ! assert_no_run_survivors "${S2_STATE_DIR}" "${S2_PORT}" planted-lsof-transient-match; then
+      emit '{"tool":"bash+lsof","package":"apps/wire","suite":"s2-krater-shell","status":"fail","code":"S2_LSOF_TRANSIENT_OBSERVER_SECOND_SAMPLE_DID_NOT_CONVERGE","reproduce":"S2_SHELL_REGRESSION_TEST=lsof-scan-failure scripts/e2e-s2-krater.sh"}'
+      return 1
+    fi
     [[ -f "${lsof_transient_marker}" && ! -L "${lsof_transient_marker}" ]] || return 1
+    lsof_broad_count=0
+    lsof_observer_rechecks=0
+    while IFS= read -r state_holders; do
+      if [[ "${state_holders}" == broad\ * ]]; then
+        lsof_broad_count=$((lsof_broad_count + 1))
+      fi
+      if [[ "${state_holders}" == observer-recheck\ * ]]; then
+        lsof_observer_rechecks=$((lsof_observer_rechecks + 1))
+      fi
+    done <"${lsof_observer_trace}"
+    [[ ${lsof_broad_count} -eq 2 && ${lsof_observer_rechecks} -eq 4 ]] || return 1
+
+    # Pair a departed observer with one still-confirmed holder. The observer is never an exemption
+    # for the holder: every bounded targeted scan must retain and recheck the real PID.
+    lsof_paired_trace="${S2_STATE_DIR}/planted-lsof-observer-real-holder-$(random_hex 8).trace"
+    [[ ! -e "${lsof_paired_trace}" && ! -L "${lsof_paired_trace}" ]] || return 1
+    lsof() {
+      local arg candidate="" expect_pid=0 health=0 constrained=0 recursive=0
+      for arg in "$@"; do
+        if [[ ${expect_pid} -eq 1 ]]; then candidate="${arg}"; expect_pid=0; continue; fi
+        [[ "${arg}" == "-Fp" ]] && health=1
+        [[ "${arg}" == "-a" ]] && constrained=1
+        [[ "${arg}" == "+D" ]] && recursive=1
+        [[ "${arg}" == "-p" ]] && expect_pid=1
+      done
+      if [[ ${health} -eq 1 ]]; then printf 'p%s\n' "$$"; return 0; fi
+      if [[ ${recursive} -ne 1 ]]; then return 1; fi
+      if [[ ${constrained} -eq 1 ]]; then
+        if [[ "${candidate}" == 910003 ]]; then
+          printf 'observer-recheck %s\n' "${candidate}" >>"${lsof_paired_trace}" || return 2
+          return 1
+        fi
+        if [[ "${candidate}" == "$$" ]]; then
+          printf 'real-recheck %s\n' "${candidate}" >>"${lsof_paired_trace}" || return 2
+          printf '%s\n' "${candidate}"
+          return 1
+        fi
+        return 2
+      fi
+      printf '%s\n' broad >>"${lsof_paired_trace}" || return 2
+      printf '%s\n' 910003 "$$"
+      return 1
+    }
+    if assert_no_run_survivors "${S2_STATE_DIR}" "${S2_PORT}" planted-lsof-observer-real-holder; then
+      return 1
+    fi
+    [[ "${S2_SURVIVOR_ASSERTION_FAILURE}" == "state-fd-scan" && \
+      "${S2_LSOF_LAST_STATUS}" == 1 && "${S2_LSOF_LAST_OUTPUT}" == "$$" ]] || return 1
+    lsof_broad_count=0
+    lsof_observer_rechecks=0
+    lsof_real_rechecks=0
+    while IFS= read -r state_holders; do
+      if [[ "${state_holders}" == broad ]]; then
+        lsof_broad_count=$((lsof_broad_count + 1))
+      fi
+      if [[ "${state_holders}" == observer-recheck\ * ]]; then
+        lsof_observer_rechecks=$((lsof_observer_rechecks + 1))
+      fi
+      if [[ "${state_holders}" == real-recheck\ * ]]; then
+        lsof_real_rechecks=$((lsof_real_rechecks + 1))
+      fi
+    done <"${lsof_paired_trace}"
+    [[ ${lsof_broad_count} -eq 1 && ${lsof_observer_rechecks} -eq 1 && \
+      ${lsof_real_rechecks} -eq ${S2_TERMINATE_WAIT_TICKS} ]] || return 1
+
     lsof() {
       local arg
       for arg in "$@"; do
@@ -6513,7 +6718,7 @@ run_s2_shell_regression_test() {
     if lsof_scanner_is_healthy; then return 1; fi
     [[ "${S2_LSOF_LAST_STATUS}" == "2" && \
       "${S2_LSOF_LAST_OUTPUT}" == *'planted lsof health failure'* ]] || return 1
-    emit '{"tool":"bash","package":"apps/wire","suite":"s2-krater-shell","status":"pass","scenario":"lsof-empty-warning-transient-numeric-real-holder-captured-scan-and-health-failure-remain-distinct","reproduce":"S2_SHELL_REGRESSION_TEST=lsof-scan-failure scripts/e2e-s2-krater.sh"}'
+    emit "{\"tool\":\"bash\",\"package\":\"apps/wire\",\"suite\":\"s2-krater-shell\",\"status\":\"pass\",\"scenario\":\"lsof-empty-warning-pid-rechecked-observers-paired-real-holder-captured-scan-and-health-failure-remain-distinct\",\"observer_only_broad_scans\":2,\"observer_only_pid_rechecks\":4,\"paired_broad_scans\":1,\"paired_observer_pid_rechecks\":1,\"paired_real_holder_pid_rechecks\":${S2_TERMINATE_WAIT_TICKS},\"reproduce\":\"S2_SHELL_REGRESSION_TEST=lsof-scan-failure scripts/e2e-s2-krater.sh\"}"
     return 0
   fi
 
@@ -6684,9 +6889,12 @@ run_s2_shell_regression_test() {
       stop_status=$?
     fi
     unset S2_LEGACY_REQUIRED_HELD_FILE
-    if [[ ${stop_status} -eq 0 || "${S2_LEGACY_STOP_EXACT_RESIDUAL_KILLED:-0}" != 1 ]]; then
+    if [[ ${stop_status} -eq 0 || "${S2_LEGACY_STOP_EXACT_RESIDUAL_KILL_SENT:-0}" != 1 ]]; then
       assert_no_run_survivors "${S2_STATE_DIR}" "${S2_PORT}" "${S2_STARTED_MARKER}" || return 1
       emit '{"tool":"bash","package":"apps/wire","suite":"s2-krater-shell","status":"fail","code":"S2_LEGACY_LEADER_LOSS_BRANCH_NOT_REACHED","observed":"ordinary-clean-stop","expected":"inspection-uncertain-exact-residual-group","reproduce":"S2_SHELL_REGRESSION_TEST=legacy-leader-loss scripts/e2e-s2-krater.sh"}'
+      return 1
+    fi
+    if [[ "${S2_LEGACY_STOP_EXACT_RESIDUAL_POSTCONDITION_PROVED:-0}" != 1 ]]; then
       return 1
     fi
     [[ ${stop_status} -eq 1 && "${S2_ACTIVE_ORIGIN}" == "http://127.0.0.1:1" && \
