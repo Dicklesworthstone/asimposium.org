@@ -313,12 +313,13 @@ function runCaptured(
   args: readonly string[],
   env: NodeJS.ProcessEnv,
   deadlineMs: number,
+  reusableLogRoot?: string,
 ): Run {
-  const logRoot = mkdtempSync(join(tmpdir(), "asimposium-s2-shell-"));
+  const logRoot = reusableLogRoot ?? mkdtempSync(join(tmpdir(), "asimposium-s2-shell-"));
   const stdoutPath = join(logRoot, "stdout.log");
   const stderrPath = join(logRoot, "stderr.log");
-  closeSync(openSync(stdoutPath, "wx", 0o600));
-  closeSync(openSync(stderrPath, "wx", 0o600));
+  closeSync(openSync(stdoutPath, reusableLogRoot === undefined ? "wx" : "w", 0o600));
+  closeSync(openSync(stderrPath, reusableLogRoot === undefined ? "wx" : "w", 0o600));
   const child = spawnSync(
     "perl",
     [
@@ -637,6 +638,13 @@ interface ProcessTableCapture {
   readonly stdout: string;
 }
 
+let reusableProcessTableLogRoot: string | undefined;
+
+function processTableLogRoot(): string {
+  reusableProcessTableLogRoot ??= mkdtempSync(join(tmpdir(), "asimposium-s2-process-table-"));
+  return reusableProcessTableLogRoot;
+}
+
 interface S2LifecycleProcessRow {
   readonly pid: number;
   readonly pgid: number;
@@ -699,16 +707,45 @@ function parseS2LifecycleProcessTable(runId: string, snapshot: ProcessTableCaptu
     .map((row) => row.identity);
 }
 
-function captureS2LifecycleProcessTable(): ProcessTableCapture {
-  // Bun can report a zero-exit synchronous child with empty in-memory pipes.
-  // The same retained-log wrapper used for the lifecycle run makes the scan's
-  // output byte-complete before it is interpreted as zero survivors.
-  const scan = runCaptured("/bin/ps", ["-axo", "pid=,pgid=,ppid=,stat=,command="], {}, 5_000);
-  return {
+function validatedProcessTableCapture(scan: Run): ProcessTableCapture {
+  const freezeReusableSlot = () => {
+    if (scan.retainedLogs === reusableProcessTableLogRoot) {
+      reusableProcessTableLogRoot = undefined;
+    }
+  };
+  if (readFileSync(join(scan.retainedLogs, "stderr.log"), "utf8") !== "") {
+    freezeReusableSlot();
+    throw new Error("S2 lifecycle process scan failed: scanner stderr was non-empty");
+  }
+  const snapshot = {
     status: scan.exitCode,
     signal: null,
     stdout: scan.stdout,
-  };
+  } satisfies ProcessTableCapture;
+  try {
+    parseS2LifecycleProcessRows(snapshot);
+  } catch (error) {
+    // Freeze the exact failed bytes in their private directory. A later scan
+    // gets a new slot instead of overwriting the only useful failure evidence.
+    freezeReusableSlot();
+    throw error;
+  }
+  return snapshot;
+}
+
+function captureS2LifecycleProcessTable(): ProcessTableCapture {
+  // Bun can report a zero-exit synchronous child with empty in-memory pipes.
+  // One private reusable slot makes the scan byte-complete without retaining a
+  // new directory for every successful probe. Invalid bytes freeze the slot.
+  return validatedProcessTableCapture(
+    runCaptured(
+      "/bin/ps",
+      ["-axo", "pid=,pgid=,ppid=,stat=,command="],
+      {},
+      5_000,
+      processTableLogRoot(),
+    ),
+  );
 }
 
 function liveS2LifecycleProcesses(runId: string): string[] {
@@ -930,12 +967,8 @@ function assertRetainedControllerOwnerMatchesReadyRecord(
 }
 
 function liveProcessesContainingMarker(marker: string): string[] {
-  const scan = runCaptured("/bin/ps", ["-axo", "pid=,pgid=,ppid=,stat=,command="], {}, 5_000);
-  const rows = parseS2LifecycleProcessTable("marker-scan-never-matches-a-path", {
-    status: scan.exitCode,
-    signal: null,
-    stdout: scan.stdout,
-  });
+  const scan = captureS2LifecycleProcessTable();
+  const rows = parseS2LifecycleProcessTable("marker-scan-never-matches-a-path", scan);
   if (rows.length !== 0) throw new Error("generic marker scan sentinel unexpectedly matched");
   return scan.stdout
     .split("\n")
@@ -1718,6 +1751,52 @@ describe("registered S2 shell and lifecycle regressions", () => {
         stdout: " 9999 9999 1 S unrelated\n",
       }),
     ).toEqual([]);
+  });
+
+  test("PLANTED: successful process scans reuse one slot and an invalid scan freezes its bytes", () => {
+    const firstRoot = processTableLogRoot();
+    const first = runCaptured(
+      "bash",
+      ["-c", "printf ' 9999 9999 1 S unrelated\\nstale-tail\\n'; printf 'stale-error' >&2"],
+      {},
+      5_000,
+      firstRoot,
+    );
+    expect(first.retainedLogs).toBe(firstRoot);
+
+    const shorter = runCaptured(
+      "bash",
+      ["-c", "printf ' 9999 9999 1 S unrelated\\n'"],
+      {},
+      5_000,
+      processTableLogRoot(),
+    );
+    expect(shorter.retainedLogs).toBe(firstRoot);
+    expect(shorter.stdout).toBe(" 9999 9999 1 S unrelated\n");
+    expect(readdirSync(firstRoot).sort()).toEqual(["stderr.log", "stdout.log"]);
+    expect(validatedProcessTableCapture(shorter).stdout).toBe(shorter.stdout);
+
+    const malformed = runCaptured(
+      "bash",
+      ["-c", "printf 'not-a-process-table-row\\n'"],
+      {},
+      5_000,
+      processTableLogRoot(),
+    );
+    expect(() => validatedProcessTableCapture(malformed)).toThrow("malformed process-table row");
+    const frozenBytes = readFileSync(join(firstRoot, "stdout.log"), "utf8");
+    const replacementRoot = processTableLogRoot();
+    expect(replacementRoot).not.toBe(firstRoot);
+
+    const replacement = runCaptured(
+      "bash",
+      ["-c", "printf ' 9998 9998 1 S replacement\\n'"],
+      {},
+      5_000,
+      replacementRoot,
+    );
+    expect(validatedProcessTableCapture(replacement).stdout).toBe(replacement.stdout);
+    expect(readFileSync(join(firstRoot, "stdout.log"), "utf8")).toBe(frozenBytes);
   });
 
   test("PLANTED: a pure shell regression never spends or depends on a Wrangler version process", () => {
