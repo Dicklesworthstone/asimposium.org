@@ -98,8 +98,15 @@ interface Record_ {
     readonly enrollment_id: string;
     readonly absent_before_action: boolean;
   } | null;
-  /** Immutable deployment evidence, as asserted by the serving edge. */
-  readonly deployment: string | null;
+  /**
+   * The serving edge's REQUEST identifier (`x-vercel-id`), or null.
+   *
+   * Request correlation only. It is not a build, a revision, or a deployment
+   * pin, and nothing here claims otherwise: `x-vercel-id` identifies one request
+   * through one edge. A deployment identity would need its own field validated
+   * against a source the platform supports for that purpose.
+   */
+  readonly edge_request_id: string | null;
   readonly detail: string;
 }
 
@@ -142,7 +149,7 @@ function blocked(code: string, detail: string, apex: string | null = null): neve
       cookie: null,
       cookie_probe: null,
       receipt: null,
-      deployment: null,
+      edge_request_id: null,
       detail,
     },
     BLOCKED_EXIT,
@@ -162,7 +169,7 @@ function failed(code: string, detail: string, apex: string | null = null): never
       cookie: null,
       cookie_probe: null,
       receipt: null,
-      deployment: null,
+      edge_request_id: null,
       detail,
     },
     1,
@@ -208,7 +215,7 @@ function looksLikeChallenge(url: string, body: string): boolean {
   );
 }
 
-async function main(): Promise<void> {
+async function main(): Promise<Omit<Record_, "duration_ms">> {
   // Configuration arrives as ONE bounded JSON record on stdin, never through
   // argv or the environment. Chromium is spawned from this process, so anything
   // left in `process.env` would be inherited by the browser and every renderer
@@ -233,8 +240,14 @@ async function main(): Promise<void> {
       read = readSync(0, buffer, total, buffer.length - total, null);
     } catch (error) {
       const code = (error as { code?: string })?.code;
-      if (code === "EAGAIN") continue;
+      // EINTR is a genuine, bounded interruption and is retried. EAGAIN is NOT:
+      // a non-blocking descriptor would make this an unbounded CPU spin, and the
+      // runner's deadline is not armed until after this loop. Typed refusal.
+      if (code === "EINTR") continue;
       if (code === "EOF") break;
+      if (code === "EAGAIN") {
+        blocked("CONFIG_STDIN_NONBLOCKING", "stdin is non-blocking; refusing to spin on it");
+      }
       throw error;
     }
     if (read === 0) break;
@@ -310,7 +323,7 @@ async function main(): Promise<void> {
         cookie: null,
         cookie_probe: null,
         receipt: null,
-        deployment: null,
+        edge_request_id: null,
         detail: `the runner exceeded its ${TOTAL_BUDGET_MS}ms budget`,
       });
       process.exit(1);
@@ -358,15 +371,16 @@ async function main(): Promise<void> {
     });
 
     const page = await context.newPage();
-    // Immutable deployment evidence, taken from the serving edge rather than
-    // from anything this runner could choose. It pins the report to one
-    // deployment, so a green record cannot be reused to describe another.
-    let deployment: string | null = null;
+    // ONE honest request-correlation value: the edge's `x-vercel-id`, nullable.
+    //
+    // It is NOT a build or revision pin, and this makes no such claim. Earlier
+    // revisions called it "immutable deployment evidence" and also folded
+    // `x-vercel-deployment-url` into the same field — two different kinds of
+    // identity behind one overclaiming name. If a deployment identity is ever
+    // required, it needs its own field and its own validation against a source
+    // the platform supports for that purpose.
     const consoleResponse = await page.goto(`${previewUrl.replace(/\/$/, "")}/console`);
-    deployment =
-      consoleResponse?.headers()["x-vercel-id"] ??
-      consoleResponse?.headers()["x-vercel-deployment-url"] ??
-      null;
+    const edgeRequestId: string | null = consoleResponse?.headers()["x-vercel-id"] ?? null;
 
     // The console is behind Auth.js; an unauthenticated visit offers Google.
     const signIn = page.getByRole("button", { name: /sign in with google/i });
@@ -448,24 +462,26 @@ async function main(): Promise<void> {
           cookie,
           cookie_probe: null,
           receipt: null,
-          deployment,
+          edge_request_id: edgeRequestId,
           detail: "the live Set-Cookie header or the resulting jar failed host-only apex scoping",
         },
         1,
       );
     }
 
-    // Ask the agent host for a sponsor route from the LOGGED-IN browser. Note what
-    // this is not: the cookie is host-only on the apex, so `context.request`
-    // shares the browser jar, so the cookie is attached by the same machinery a
-    // real browser would use and its bytes never leave this process.
+    // Ask the agent host for a sponsor route from the LOGGED-IN browser.
     //
-    // The expected outcome is an exact 403 WRONG_PRINCIPAL: on the agent plane a
-    // cookie is not a representable credential at all, so this request is
-    // indistinguishable from one carrying no credential. The shell proves that
-    // indistinguishability by issuing the same request with nothing attached and
-    // comparing the two refusals; a cookie that changed the answer would show up
-    // there as a difference.
+    // Note precisely what this is NOT. `context.request` shares the browser jar,
+    // and the session cookie is host-only on the apex, so the jar does not
+    // attach it to an agent-host request at all — it is OMITTED, by the same
+    // machinery a real browser would use. Nothing is "presented and refused".
+    // `cookie.present_for_agent_host` is the direct evidence of that omission.
+    //
+    // The expected outcome is therefore an exact 403 WRONG_PRINCIPAL for a
+    // request carrying no credential. On its own that is also what a stranger
+    // gets, so the shell issues the identical request from a sessionless client
+    // and requires the same answer; agreement is what shows an apex session buys
+    // nothing here.
     // Redirects are REFUSED, not followed. A 3xx to the apex would move this
     // request onto the plane that does consult cookies, and a 403 collected
     // there would say nothing about the agent host — it would quietly invalidate
@@ -497,7 +513,7 @@ async function main(): Promise<void> {
           cookie,
           cookie_probe: { status: probe.status(), code: null },
           receipt: null,
-          deployment,
+          edge_request_id: edgeRequestId,
           detail:
             "the agent-host probe did not terminate on the exact configured Worker origin and route",
         },
@@ -526,7 +542,7 @@ async function main(): Promise<void> {
           cookie,
           cookie_probe: cookieProbe,
           receipt: null,
-          deployment,
+          edge_request_id: edgeRequestId,
           detail:
             "a browser holding a live apex session did not receive the exact 403 WRONG_PRINCIPAL refusal from the agent host",
         },
@@ -577,7 +593,13 @@ async function main(): Promise<void> {
     }
     const receipt = { enrollment_id: enrollmentId, absent_before_action: true };
 
-    emit({
+    // The pass record is RETURNED, not emitted here.
+    //
+    // Emitting inside `try` published a success before `finally` had closed the
+    // context and the browser, so a teardown failure could follow an already
+    // published pass — and exit 0 with Chromium still up. The caller emits it
+    // only after cleanup has actually completed.
+    return {
       tool: "playwright",
       package: "e2e",
       suite: SUITE,
@@ -588,24 +610,43 @@ async function main(): Promise<void> {
       cookie,
       cookie_probe: cookieProbe,
       receipt,
-      deployment,
+      edge_request_id: edgeRequestId,
       detail:
         "live Set-Cookie proved host-only apex scoping, the cookie was not sent to the agent host and that request answered exactly 403 WRONG_PRINCIPAL, and the real console Server Action minted an enrollment",
-    });
+    };
   } finally {
     clearTimeout(budget);
-    // Bounded teardown: a wedged browser must not outlive this process.
-    await context?.close().catch(() => undefined);
-    await browser?.close().catch(() => undefined);
+    // Bounded teardown, and its failure is NOT swallowed. A close that throws
+    // must not be reported as exit 0 with a browser still running.
+    const teardown: unknown[] = [];
+    await context?.close().catch((error: unknown) => teardown.push(error));
+    await browser?.close().catch((error: unknown) => teardown.push(error));
+    if (teardown.length > 0) {
+      teardownFailed = teardown.length;
+    }
   }
 }
+
+/** Set by `main`'s `finally` when context/browser teardown threw. */
+let teardownFailed = 0;
 
 // The record is emitted and the status applied only after `main`'s `finally`
 // has closed the context and the browser. A `RunnerExit` thrown deep inside the
 // run therefore cannot leave Chromium behind, which an immediate `process.exit`
 // at the throw site could.
 try {
-  await main();
+  const passRecord = await main();
+  // Cleanup has completed by now. A teardown failure outranks the pass.
+  if (teardownFailed > 0) {
+    emit({
+      ...passRecord,
+      status: "fail",
+      code: "RUNNER_TEARDOWN_FAILED",
+      detail: `the run succeeded but ${teardownFailed} teardown step(s) failed; the browser may still be running`,
+    });
+    process.exit(1);
+  }
+  emit(passRecord);
 } catch (error) {
   if (error instanceof RunnerExit) {
     emit(error.record);
@@ -624,7 +665,7 @@ try {
     cookie: null,
     cookie_probe: null,
     receipt: null,
-    deployment: null,
+    edge_request_id: null,
     detail: `the runner failed with ${(error as Error)?.constructor?.name ?? "Error"}`,
   });
   process.exit(1);

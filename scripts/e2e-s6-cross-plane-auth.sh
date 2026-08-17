@@ -77,8 +77,11 @@ readonly EX_FAIL=1
 # A child was reaped but its process group could not be proven empty.
 # Distinct from a plain failure so no caller can read it as success.
 readonly EX_CLEANUP_UNPROVEN=125
-# The bound could not be armed (no watchdog flag, or the child is not its own
-# group leader). Fail closed: an unbounded child is never acceptable.
+# The bound could not be armed, because no private directory was available for
+# the watchdog's timeout flag. (There is deliberately no group-leadership
+# precondition: a fast child's group is legitimately gone by then, and requiring
+# it turned every quick success into this failure.) Fail closed — an unbounded
+# child is never acceptable.
 readonly EX_WATCHDOG_UNAVAILABLE=126
 readonly REPRODUCE="bash scripts/e2e-s6-cross-plane-auth.sh"
 
@@ -419,8 +422,16 @@ run_bounded() {
   local dog_dir flag=""
   dog_dir="$(mktemp -d "${TMPDIR:-/tmp}/s6-watchdog.XXXXXX" 2>/dev/null)" || dog_dir=""
   if [[ -z "$dog_dir" ]]; then
+    # The bound cannot be armed, so the child must not be left running. It is
+    # killed and reaped, and the ownership record is surrendered ONLY once the
+    # group is proven empty — the same rule as every other exit path. Dropping
+    # the record here regardless would leave a stale pid armed for a later
+    # signal, which is how an unrelated process that reused the number gets hit.
     signal_group "$pid" KILL
     wait "$pid" 2>/dev/null || true
+    if sweep_group "$pid"; then
+      unregister_child "$pid"
+    fi
     return "$EX_WATCHDOG_UNAVAILABLE"
   fi
   flag="${dog_dir}/timed-out"
@@ -642,8 +653,16 @@ for (;;) {
   try {
     read = readSync(0, buffer, total, buffer.length - total, null);
   } catch (error) {
-    if (error?.code === "EAGAIN") continue;
+    // EINTR is a genuine, bounded interruption and is retried. EAGAIN is NOT
+    // retried: a non-blocking descriptor would turn this loop into an unbounded
+    // CPU spin, and nothing has armed a deadline yet at this point. It is a
+    // typed refusal instead.
+    if (error?.code === "EINTR") continue;
     if (error?.code === "EOF") break;
+    if (error?.code === "EAGAIN") {
+      process.stderr.write("mint-envelope: stdin is non-blocking; refusing to spin\n");
+      process.exit(2);
+    }
     throw error;
   }
   if (read === 0) break;
@@ -784,7 +803,19 @@ mint_envelope_config() {
   exec 8<&-
   (( ${#MINTED_CONFIG} <= MAX_ENVELOPE_HEADER_BYTES )) || MINTED_CONFIG=""
   [[ -n "$MINTED_CONFIG" ]] || return 1
+
+  # Retain this signature for the leak canary. `MINTED_CONFIG` is overwritten by
+  # the next mint, so scanning only that left every earlier signature — each a
+  # live credential until its nonce is consumed — unchecked. Extracted with
+  # parameter expansion so the value never reaches an argv, and never printed.
+  local tail_part="${MINTED_CONFIG##*\\\"signature\\\":\\\"}"
+  local signature="${tail_part%%\\\"*}"
+  if [[ -n "$signature" && "$signature" != "$MINTED_CONFIG" ]]; then
+    MINTED_SIGNATURES+=("$signature")
+  fi
 }
+# Every signature this run has minted. Non-exported, never printed.
+MINTED_SIGNATURES=()
 # An envelope header is a bounded record; anything larger is not one.
 readonly MAX_ENVELOPE_HEADER_BYTES=16384
 MINTED_CONFIG=""
@@ -1145,12 +1176,25 @@ EVIDENCE_PATH=""
 # 0 when the input is empty, so an empty directory reported a hit. It also would
 # open a FIFO and block once its writers closed. This loop tests each regular
 # file explicitly, so "no files" is unambiguously "no hit".
+# Absolute grep, resolved once. Internal seam only; never taken from the caller.
+SCAN_GREP="/usr/bin/grep"
 scan_regular_files_for() {
   local needle="$1"
   shift
   local file
   while IFS= read -r -d '' file; do
-    grep -qF -- "$needle" "$file" 2>/dev/null && return 0
+    # The needle travels on STDIN, never in an argv.
+    #
+    # `$SCAN_GREP` is an INTERNAL seam, never read from the caller's
+    # environment: the self-test points it at a held wrapper so the real
+    # scanner's own argv can be inspected while it runs.
+    #
+    # `grep -qF -- "$needle" file` published the secret in grep's own command
+    # line for the life of the process — the exact exposure the whole transport
+    # design exists to avoid, committed by the canary meant to detect it.
+    # `printf` is a builtin, so the value never becomes any process's argument,
+    # and `-f -` makes grep read the pattern from the pipe.
+    printf '%s' "$needle" | "$SCAN_GREP" -qFf - "$file" 2>/dev/null && return 0
   done < <(find "$@" -type f -print0 2>/dev/null)
   return 1
 }
@@ -1188,8 +1232,25 @@ assert_no_secret_escaped() {
       fail_record "no-secret-escaped" "the value of ${name} reached a retained artifact"
     fi
   done
+
+  # EVERY minted signature, not just the current one.
+  #
+  # `MINTED_CONFIG` holds only the most recent envelope, so scanning it alone
+  # left every earlier signature unchecked — and each one is a live credential
+  # until its nonce is consumed. They are retained in non-exported shell state
+  # and scanned here. Neither the array nor any element is ever printed.
+  local index=0 signature
+  for signature in ${MINTED_SIGNATURES[@]+"${MINTED_SIGNATURES[@]}"}; do
+    index=$((index + 1))
+    [[ -n "$signature" ]] || continue
+    if scan_regular_files_for "$signature" "${targets[@]}"; then
+      hits=$((hits + 1))
+      fail_record "no-secret-escaped" "a minted envelope signature (#${index}) reached a retained artifact"
+    fi
+  done
+
   if (( hits == 0 )); then
-    pass_record "no-secret-escaped" "no never-log value appears in any retained artifact"
+    pass_record "no-secret-escaped" "no never-log value and no minted signature appears in any retained artifact (${#SECRET_VARS[@]} declared secrets, ${index} minted signatures)"
   fi
 }
 
@@ -1203,11 +1264,14 @@ finish() {
   # evidence already written. Proving it here means a survivor becomes an
   # assertion failure that the verdict below must account for.
   reap_children
-  if (( REAP_SURVIVORS != 0 )); then
-    fail_record "no-child-survivors" "a child process group survived cleanup; no pass may be published"
-  fi
   # The EXIT trap must not repeat the reap it has already been given.
   CLEANED_UP=1
+  if (( REAP_SURVIVORS != 0 )); then
+    # Same rule as the blocked path: seal nothing while a survivor remains.
+    blocked_record "CLEANUP_UNPROVEN" "a child process group survived cleanup; no scan, evidence or verdict was sealed"
+    log "FAILED ${SUITE}: cleanup could not be proven; nothing was sealed."
+    exit "$EX_CLEANUP_UNPROVEN"
+  fi
 
   # Scan next, then write exactly one bundle whose counts already include both
   # the cleanup verdict and the canary's.
@@ -1633,16 +1697,46 @@ self_test() {
       # opener putting a `cat … <<SHIM` line at the top of the .mjs).
       if [[ "$shim_first" == import\ * && "$shim_first" != *"<<SHIM"* && "$shim_first" != cat\ * ]]; then
         CHILD_PIDS=()
-        if ASIMP_S6_SIGNING_KEY_HEX="$(printf '1%.0s' {1..64})" \
-           ASIMP_S6_SIGNING_KID="s6-selftest" \
-           mint_envelope_config GET "$ROUTE_PROPOSALS" "$ACTION_PROPOSALS" usr_selftest ""; then
+        # TWO real mints through the real FIFO transport. The second proves the
+        # signature array grows per mint rather than only holding the latest —
+        # deleting the extraction/append inside `mint_envelope_config` fails here.
+        local sig_before="${#MINTED_SIGNATURES[@]}" mint_ok=1
+        local selftest_key
+        selftest_key="$(printf '1%.0s' {1..64})"
+        for _ in 1 2; do
+          if ! ASIMP_S6_SIGNING_KEY_HEX="$selftest_key" \
+             ASIMP_S6_SIGNING_KID="s6-selftest" \
+             mint_envelope_config GET "$ROUTE_PROPOSALS" "$ACTION_PROPOSALS" usr_selftest ""; then
+            mint_ok=0
+            break
+          fi
+        done
+        if (( mint_ok == 0 )); then
+          shim_verdict="did-not-mint"
+        else
           case "$MINTED_CONFIG" in
             'header = "asimp-service-envelope: {'*) shim_verdict="mints" ;;
             *) shim_verdict="malformed-output" ;;
           esac
-        else
-          shim_verdict="did-not-mint"
         fi
+        local sig_delta=$(( ${#MINTED_SIGNATURES[@]} - sig_before ))
+        local sig_a="" sig_b=""
+        if (( ${#MINTED_SIGNATURES[@]} >= 2 )); then
+          sig_a="${MINTED_SIGNATURES[$(( ${#MINTED_SIGNATURES[@]} - 2 ))]}"
+          sig_b="${MINTED_SIGNATURES[$(( ${#MINTED_SIGNATURES[@]} - 1 ))]}"
+        fi
+        check "every-minted-signature-retained" "$sig_delta" "2"
+        if [[ -n "$sig_a" && -n "$sig_b" && "$sig_a" != "$sig_b" ]]; then
+          emit "{\"suite\":\"${SUITE}\",\"assertion\":\"retained-signatures-are-distinct\",\"status\":\"pass\",\"detail\":\"self-test\"}"
+        else
+          failures=$((failures + 1))
+          emit "{\"suite\":\"${SUITE}\",\"assertion\":\"retained-signatures-are-distinct\",\"status\":\"fail\",\"detail\":\"two mints did not yield two distinct non-empty signatures\"}"
+        fi
+        # Run the ACTUAL canary while RUN_STATE_DIR is still this shim dir: the
+        # signatures must be scannable and must NOT be found on disk.
+        local failures_before_scan="$FAILURES"
+        assert_no_secret_escaped
+        check "retained-signatures-not-on-disk" "$FAILURES" "$failures_before_scan"
       else
         shim_verdict="not-javascript"
       fi
@@ -1669,6 +1763,146 @@ self_test() {
     bash -c 'printf "%s\n" "{\"suite\":\"s6-cross-plane-browser\",\"status\":\"pass\"}"; exit 3' \
     || liar2_status=$?
   check "convincing-output-then-failure-is-not-success" "$liar2_status" "3"
+
+  # (A) Causal: a REAL held helper must not be able to SEE the S6 secrets.
+  #
+  # macOS `ps -E` / `ps eww` cannot read another process's environ at all — the
+  # control below caught that observer being blind — so the helper reports on its
+  # OWN environment, the only reliable observation available here. It writes a
+  # COUNT, never the values, so nothing secret reaches disk.
+  #
+  # The suite launches this self-test with the ambient S6 variables REMOVED and
+  # canaries planted in their place, so `main`'s `export -n` is the only reason
+  # the count can be zero. Deleting that line makes this fail.
+  #
+  # $1 assertion, $2 pattern to count, $3 expected verdict, $4 optional export.
+  environ_plant() {
+    local name="$1" pattern="$2" expected="$3" extra_export="${4:-}"
+    local hold count_file release verdict="unknown"
+    hold="$(new_marker "environ-hold")" || return 0
+    release="$(new_marker "environ-release")" || return 0
+    count_file="${hold}.count"
+    local body
+    # shellcheck disable=SC2016 # The inner sh expands these, not this shell.
+    body='printf "%s" "$$" >"$1"; env | grep -c "$4" >"$2" 2>/dev/null || printf 0 >"$2"; while [ ! -e "$3" ]; do sleep 0.05; done'
+    if [[ -n "$extra_export" ]]; then
+      # shellcheck disable=SC2016 # The inner sh expands $$ and $1..$4, not this shell.
+      env "S6_CTL_CANARY=${extra_export}" /bin/sh -c "$body" _ "$hold" "$count_file" "$release" "$pattern" &
+    else
+      # shellcheck disable=SC2016 # The inner sh expands $$ and $1..$4, not this shell.
+      /bin/sh -c "$body" _ "$hold" "$count_file" "$release" "$pattern" &
+    fi
+    local helper=$!
+    CHILD_PIDS+=("$helper")
+    await_planted_pid "$hold" || true
+    local observed="" waited=0
+    while (( waited < 40 )); do
+      [[ -s "$count_file" ]] && observed="$(cat "$count_file" 2>/dev/null || printf '')"
+      [[ "$observed" =~ ^[0-9]+$ ]] && break
+      sleep 0.1
+      waited=$((waited + 1))
+    done
+    printf 'go' > "$release"
+    wait "$helper" 2>/dev/null || true
+    unregister_child "$helper"
+    if [[ "$observed" =~ ^[0-9]+$ ]]; then
+      if (( observed == 0 )); then verdict="absent"; else verdict="present"; fi
+    fi
+    check "$name" "$verdict" "$expected"
+  }
+
+  # The planted secrets must be invisible to an ordinary helper.
+  environ_plant "real-helper-environ-has-no-secret" "planted-selftest" "absent"
+  # Observer-positive control: an explicitly EXPORTED canary must be visible, or
+  # "absent" above could simply mean the helper cannot read its own environment.
+  environ_plant "environ-inspection-observes-an-export" "planted-observer-canary" \
+    "present" "planted-observer-canary"
+
+  # (B) Causal: the REAL scanner's grep must never carry the needle in argv.
+  #
+  # `SCAN_GREP` is pointed at a wrapper that announces its pid, waits, then
+  # execs the real grep — so the argv inspected is the one the production
+  # function actually built. Reverting to `grep -qF -- "$needle"` fails this.
+  local scan_dir scan_wrapper scan_hold scan_release scan_verdict="unknown"
+  local scan_ctl_verdict="unknown" saved_scan_grep="$SCAN_GREP"
+  scan_dir="$(mktemp -d "${TMPDIR:-/tmp}/s6-scanseam.XXXXXX" 2>/dev/null)" || scan_dir=""
+  if [[ -n "$scan_dir" ]]; then
+    scan_hold="$(new_marker "scan-hold")" || scan_hold=""
+    scan_release="$(new_marker "scan-release")" || scan_release=""
+    scan_wrapper="${scan_dir}/grep-wrapper"
+    # shellcheck disable=SC2016 # The wrapper expands these at run time.
+    printf '%s\n' '#!/bin/sh' \
+      'printf "%s" "$$" > "$S6_SCAN_HOLD"' \
+      'while [ ! -e "$S6_SCAN_RELEASE" ]; do sleep 0.05; done' \
+      'exec /usr/bin/grep "$@"' > "$scan_wrapper"
+    chmod 700 "$scan_wrapper"
+    printf 'nothing-here\n' > "${scan_dir}/target"
+    if [[ -n "$scan_hold" && -n "$scan_release" ]]; then
+      SCAN_GREP="$scan_wrapper"
+      S6_SCAN_HOLD="$scan_hold" S6_SCAN_RELEASE="$scan_release" \
+        scan_regular_files_for "planted-needle-canary" "$scan_dir" &
+      local scan_runner=$!
+      CHILD_PIDS+=("$scan_runner")
+      if await_planted_pid "$scan_hold"; then
+        local scan_argv
+        scan_argv="$(/bin/ps -o args= -p "$plant_pid" 2>/dev/null || printf '')"
+        if [[ "$scan_argv" == *"planted-needle-canary"* ]]; then
+          scan_verdict="leaks"
+        elif [[ -n "$scan_argv" ]]; then
+          scan_verdict="clean"
+        fi
+      fi
+      printf 'go' > "$scan_release"
+      wait "$scan_runner" 2>/dev/null || true
+      unregister_child "$scan_runner"
+      SCAN_GREP="$saved_scan_grep"
+    fi
+    # Unsafe control: the same inspection must SEE a needle placed in argv.
+    local ctl_argv_hold ctl_argv_release
+    ctl_argv_hold="$(new_marker "scan-ctl-hold")" || ctl_argv_hold=""
+    ctl_argv_release="$(new_marker "scan-ctl-release")" || ctl_argv_release=""
+    if [[ -n "$ctl_argv_hold" && -n "$ctl_argv_release" ]]; then
+      S6_SCAN_HOLD="$ctl_argv_hold" S6_SCAN_RELEASE="$ctl_argv_release" \
+        "$scan_wrapper" -qF -- "planted-needle-canary" "${scan_dir}/target" &
+      local ctl_scan=$!
+      CHILD_PIDS+=("$ctl_scan")
+      if await_planted_pid "$ctl_argv_hold"; then
+        local ctl_scan_argv
+        ctl_scan_argv="$(/bin/ps -o args= -p "$plant_pid" 2>/dev/null || printf '')"
+        if [[ "$ctl_scan_argv" == *"planted-needle-canary"* ]]; then
+          scan_ctl_verdict="leaks"
+        elif [[ -n "$ctl_scan_argv" ]]; then
+          scan_ctl_verdict="clean"
+        fi
+      fi
+      printf 'go' > "$ctl_argv_release"
+      wait "$ctl_scan" 2>/dev/null || true
+      unregister_child "$ctl_scan"
+    fi
+  fi
+  check "leak-scan-needle-not-in-argv" "$scan_verdict" "clean"
+  check "argv-inspection-observes-a-needle" "$scan_ctl_verdict" "leaks"
+
+  # OWED — one causal negative remains ABSENT rather than weak.
+  #
+  # A first attempt at them was removed because each proved nothing and one hung
+  # the suite:
+  #
+  #   * real-helper environ: `sharedSelfTest` passes ambient `process.env`, where
+  #     the S6 variables are absent on an ordinary machine, so `export -n` could
+  #     be deleted and a held helper would still look clean. It needs an
+  #     S6-scrubbed env overlaid with explicit planted canaries, plus an exported
+  #     control proving `ps -E` observes them.
+  #   * leak-scan needle in argv: the attempt hand-built its own `grep`, so
+  #     `scan_regular_files_for` could regress to a needle-in-argv and the plant
+  #     would stay green. It needs a held scanner seam driving the real function.
+  #   * minted-signature retention: the attempt appended two literals to the
+  #     array, so deleting the extraction inside `mint_envelope_config` would
+  #     still pass. It needs two real mints through the FIFO and two distinct
+  #     extracted signatures.
+  #
+  # The repairs themselves are in place and statically pinned by the TS suite;
+  # only these three causal proofs are outstanding.
 
   # The production launcher itself must be clean.
   argv_plant "no-secret-in-child-argv" "clean" real
@@ -1716,6 +1950,22 @@ self_test() {
 # ---------------------------------------------------------------------------
 
 main() {
+  # FIRST BUILT-IN STEP, before any external helper runs.
+  #
+  # The operator hands these in as exported variables, so until this line every
+  # `mktemp`, `chmod`, `sleep`, `grep`, `find` and `stat` this script runs would
+  # inherit the Google password, the Fellow bearer and the signing seed in its
+  # own environ — regardless of how carefully the product children are launched.
+  # `export -n` drops the export attribute while KEEPING the shell value, so the
+  # script can still use them and no descendant can read them.
+  #
+  # The Google user is included: it identifies a real account and is treated as
+  # private here even though it is not a credential.
+  export -n ASIMP_S6_TEST_GOOGLE_PASS 2>/dev/null || true
+  export -n ASIMP_S6_TEST_GOOGLE_USER 2>/dev/null || true
+  export -n ASIMP_S6_FELLOW_TOKEN 2>/dev/null || true
+  export -n ASIMP_S6_SIGNING_KEY_HEX 2>/dev/null || true
+
   # Hidden mode used only by the signal plant: hold a live descendant and wait
   # to be signalled, so the INT/TERM trap can be exercised against a real group.
   if [[ "${1:-}" == "--self-test-signal-victim" ]]; then
@@ -1785,6 +2035,22 @@ main() {
 
   # The browser leg first: it establishes the cookie evidence and the receipt.
   if ! run_browser_leg "$worker"; then
+    # Same publication rule as `finish`: cleanup is proven BEFORE the scan, the
+    # evidence and the terminal record. This path used to publish first and reap
+    # afterwards in the EXIT trap, so a blocked or failing run could emit
+    # immutable evidence and a terminal verdict and only then discover a
+    # survivor.
+    reap_children
+    CLEANED_UP=1
+    if (( REAP_SURVIVORS != 0 )); then
+      # NOTHING is sealed while a survivor remains: no scan, no evidence
+      # artifact, no pass/fail bundle. A fixed typed refusal is the only output,
+      # because an immutable record written now would describe a run whose own
+      # cleanup is still unresolved.
+      blocked_record "CLEANUP_UNPROVEN" "a child process group survived cleanup; no scan, evidence or verdict was sealed"
+      log "FAILED ${SUITE}: cleanup could not be proven; nothing was sealed."
+      exit "$EX_CLEANUP_UNPROVEN"
+    fi
     assert_no_secret_escaped
     write_evidence_bundle
     [[ -n "$EVIDENCE_PATH" ]] && log "${SUITE}: evidence at ${EVIDENCE_PATH}"

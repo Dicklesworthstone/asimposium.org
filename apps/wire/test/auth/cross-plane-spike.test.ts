@@ -128,12 +128,23 @@ async function runShell(
   const stdoutFd = openSync(stdoutPath, "w", 0o600);
   const stderrFd = openSync(stderrPath, "w", 0o600);
 
-  // The child is launched as its OWN PROCESS-GROUP LEADER via `setsid`-like
-  // semantics from bash's job control, so the whole group can be signalled.
-  // Killing only the direct bash left the script's own children — and any
-  // browser below them — running after a timeout.
+  // A REAL separate process group, so `child.pid` genuinely IS the pgid.
+  //
+  // `bash -c 'set -m; …'` did not do this: job control changes the groups of
+  // the jobs that shell starts, not the group of the shell itself, so
+  // `process.kill(-child.pid, …)` was addressing a group this process did not
+  // lead — and the bare-pid fallback then fired, which after the reap can hit a
+  // reused number. `setpgrp(0,0)` before `exec` makes the child a group leader
+  // for real, and macOS has no `setsid(1)` to do it with.
   const child = Bun.spawn({
-    cmd: ["bash", "-c", 'set -m; exec bash "$0" "$@"', script, ...args],
+    cmd: [
+      "/usr/bin/perl",
+      "-e",
+      "setpgrp(0,0) or die $!; exec @ARGV or die $!;",
+      "bash",
+      script,
+      ...args,
+    ],
     cwd: root,
     env: env as Record<string, string>,
     stdin: "ignore",
@@ -144,27 +155,38 @@ async function runShell(
   closeSync(stdoutFd);
   closeSync(stderrFd);
 
-  /** Signal the child's whole group, falling back to the direct pid. */
+  /** Is the child's group still present? */
+  const groupAlive = (): boolean => {
+    try {
+      process.kill(-child.pid, 0);
+      return true;
+    } catch {
+      return false;
+    }
+  };
+
+  /**
+   * GROUP-ONLY. No bare-pid fallback: once the leader has been reaped its number
+   * can belong to anything, and the fallback fired in exactly that window.
+   */
   const signalGroup = (signal: NodeJS.Signals): void => {
     try {
       process.kill(-child.pid, signal);
     } catch {
-      try {
-        child.kill(signal === "SIGKILL" ? 9 : 15);
-      } catch {
-        // Already gone.
-      }
+      // The group is gone. Nothing to signal, which is the correct outcome.
     }
   };
 
   let timedOut = false;
   let timer: ReturnType<typeof setTimeout> | undefined;
+  let killTimer: ReturnType<typeof setTimeout> | undefined;
   const deadline = new Promise<void>((resolve) => {
     timer = setTimeout(() => {
       timedOut = true;
       // TERM first so the script's own trap reaps its descendants, then KILL.
       signalGroup("SIGTERM");
-      setTimeout(() => signalGroup("SIGKILL"), 2_000).unref?.();
+      killTimer = setTimeout(() => signalGroup("SIGKILL"), 2_000);
+      killTimer.unref?.();
       resolve();
     }, RUN_TIMEOUT_MS);
   });
@@ -173,16 +195,17 @@ async function runShell(
   if (timer !== undefined) clearTimeout(timer);
   // Always reap, whether it exited on its own or was killed.
   const exitCode = await child.exited;
-  // Census: on EVERY outcome, retire anything left in the group.
-  signalGroup("SIGKILL");
-  const survivors = (() => {
-    try {
-      process.kill(-child.pid, 0);
-      return true;
-    } catch {
-      return false;
-    }
-  })();
+  // Cancel and drain the escalation timer. Leaving it armed meant a SIGKILL
+  // could be delivered AFTER the reap, to whatever then held the number.
+  if (killTimer !== undefined) clearTimeout(killTimer);
+
+  // Census, then signal only if something is actually still there — never a
+  // reflexive post-reap signal.
+  let survivors = groupAlive();
+  if (survivors) {
+    signalGroup("SIGKILL");
+    survivors = groupAlive();
+  }
 
   return {
     exitCode,
@@ -208,7 +231,20 @@ function diag(run: ShellRun): string {
  */
 let selfTestRun: Promise<ShellRun> | undefined;
 function sharedSelfTest(): Promise<ShellRun> {
-  selfTestRun ??= runShell(["--self-test"], process.env);
+  // The ambient S6 variables are REMOVED and explicit canaries planted in their
+  // place. Passing `process.env` meant that on an ordinary machine — where the
+  // real variables are absent — `export -n` could be deleted and the held-helper
+  // plant would still see a clean environ. With canaries planted, that line is
+  // the only reason the helper cannot read them.
+  //
+  // The real operator secrets are never passed into the test.
+  selfTestRun ??= runShell(["--self-test"], {
+    ...withoutS6Env(),
+    ASIMP_S6_TEST_GOOGLE_PASS: "planted-selftest-pass-0123456789",
+    ASIMP_S6_TEST_GOOGLE_USER: "planted-selftest-user@example.com",
+    ASIMP_S6_FELLOW_TOKEN: "planted-selftest-bearer-0123456789",
+    ASIMP_S6_SIGNING_KEY_HEX: "planted-selftest-key-0123456789",
+  });
   return selfTestRun;
 }
 
@@ -430,7 +466,13 @@ describe("the leak canary scans every secret, including short ones", () => {
     // scan for. So: no length test may reach a `continue`, and the single
     // `continue` in the function must be the empty-value one.
     expect(canary).not.toMatch(/\$\{#value\}[\s\S]{0,80}?continue/);
-    const continues = [...canary.matchAll(/\bcontinue\b/g)];
+    // Scoped to the declared-secrets loop: the signature loop below it has its
+    // own empty-value guard, so a whole-function count would drift.
+    const secretLoop = canary.slice(
+      canary.indexOf('for name in "${SECRET_VARS[@]}"'),
+      canary.indexOf("for signature in "),
+    );
+    const continues = [...secretLoop.matchAll(/\bcontinue\b/g)];
     expect(continues.length).toBe(1);
     expect(canary).toContain('[[ -n "$value" ]] || continue');
     // A short value is reported as a weak canary and still scanned.
@@ -442,7 +484,7 @@ describe("the leak canary scans every secret, including short ones", () => {
   test("it scans regular files only, with a fixed string", () => {
     expect(canary).toContain("scan_regular_files_for");
     const scanner = shellFunction(code(SCRIPT), "scan_regular_files_for");
-    expect(scanner).toContain("grep -qF");
+    expect(scanner).toContain('"$SCAN_GREP" -qFf -');
     // A recursive grep would open the envelope FIFO and block forever once its
     // writers closed, hanging the run on its own secure transport.
     expect(scanner).toContain("-type f");
@@ -492,14 +534,104 @@ describe("the receipt is structured, bound, and matched as a fixed string", () =
     expect(runner).toContain("!beforeIds.has(id)");
   });
 
-  test("the run is pinned to an immutable deployment identifier", () => {
-    expect(read(RUNNER)).toContain("x-vercel-id");
-    expect(shellFunction(source, "run_browser_leg")).toContain("deployment-identified");
+  test("edge request id is request correlation, not a deployment claim", () => {
+    const runner = read(RUNNER);
+    expect(runner).toContain("edgeRequestId");
+    expect(runner).toContain('headers()["x-vercel-id"]');
+    // `x-vercel-id` identifies one request through one edge. Calling it
+    // immutable deployment evidence overclaimed, and folding
+    // `x-vercel-deployment-url` into the same field mixed two identities.
+    // The bans target USAGE: the comment records why the header is refused.
+    expect(runner).not.toContain('headers()["x-vercel-deployment-url"]');
+    expect(runner).not.toMatch(/let deployment\b/);
+    expect(runner).not.toMatch(/readonly deployment:/);
+  });
+
+  test("the runner emits its pass record only after cleanup", () => {
+    const runner = read(RUNNER);
+    // Emitting inside `try` published a success before `finally` closed the
+    // browser, so a teardown failure could follow an already published pass.
+    expect(runner).toContain("return {");
+    expect(runner).toContain("const passRecord = await main();");
+    expect(runner).toContain("RUNNER_TEARDOWN_FAILED");
+    expect(runner).toContain("teardownFailed");
+    const tail = runner.slice(runner.indexOf("const passRecord = await main();"));
+    expect(tail.indexOf("teardownFailed > 0")).toBeLessThan(tail.indexOf("emit(passRecord)"));
+  });
+
+  test("neither reader spins on EAGAIN", () => {
+    // An immediate EAGAIN retry is an unbounded CPU spin, and the runner's
+    // deadline is not armed until after the read loop.
+    for (const source of [read(RUNNER), code(SCRIPT)]) {
+      expect(source).not.toMatch(/EAGAIN"\)? continue/);
+      expect(source).toContain('=== "EINTR") continue');
+      expect(source).toContain("EAGAIN");
+    }
   });
 });
 
 describe("the run is bounded and leaves no survivors", () => {
   const source = code(SCRIPT);
+
+  test("secrets are de-exported at main's first built-in step", () => {
+    // Until this runs, every ordinary mktemp/chmod/sleep/grep/find/stat helper
+    // inherits the password, bearer and seed in its own environ.
+    const main = source.slice(source.indexOf("main() {"));
+    const deExport = main.indexOf("export -n ASIMP_S6_TEST_GOOGLE_PASS");
+    expect(deExport).toBeGreaterThanOrEqual(0);
+    // Before any mode dispatch or helper call.
+    expect(deExport).toBeLessThan(main.indexOf("--self-test-signal-victim"));
+    for (const name of [
+      "ASIMP_S6_TEST_GOOGLE_PASS",
+      "ASIMP_S6_TEST_GOOGLE_USER",
+      "ASIMP_S6_FELLOW_TOKEN",
+      "ASIMP_S6_SIGNING_KEY_HEX",
+    ]) {
+      expect(main).toContain(`export -n ${name}`);
+    }
+  });
+
+  test("the leak scan never puts its needle in an argv", () => {
+    const scanner = shellFunction(source, "scan_regular_files_for");
+    // `grep -qF -- "$needle" file` published the secret in grep's command line
+    // for the life of the process — by the canary meant to detect leaks.
+    expect(scanner).not.toMatch(/grep -qF -- "\$needle"/);
+    expect(scanner).toContain(`printf '%s' "$needle" | "$SCAN_GREP" -qFf -`);
+  });
+
+  test("every minted signature is retained and scanned", () => {
+    const minter = shellFunction(source, "mint_envelope_config");
+    expect(minter).toContain("MINTED_SIGNATURES+=");
+    const canary = shellFunction(source, "assert_no_secret_escaped");
+    expect(canary).toContain("MINTED_SIGNATURES");
+    // MINTED_CONFIG is overwritten by the next mint, so scanning only it left
+    // every earlier signature — each live until its nonce is consumed — unseen.
+    expect(canary).toContain("minted envelope signature");
+  });
+
+  test("nothing is sealed while a child group survives", () => {
+    // No scan, no evidence artifact, no verdict may be published with a
+    // survivor outstanding.
+    for (const marker of ["CLEANUP_UNPROVEN", "EX_CLEANUP_UNPROVEN"]) {
+      expect(source).toContain(marker);
+    }
+    const finish = shellFunction(source, "finish");
+    expect(finish.indexOf("reap_children")).toBeLessThan(
+      finish.indexOf("assert_no_secret_escaped"),
+    );
+    expect(finish.indexOf("CLEANUP_UNPROVEN")).toBeLessThan(
+      finish.indexOf("write_evidence_bundle"),
+    );
+  });
+
+  test("the watchdog-allocation failure path surrenders only on proof", () => {
+    const bounded = shellFunction(source, "run_bounded");
+    const arm = bounded.slice(bounded.indexOf('if [[ -z "$dog_dir" ]]'));
+    expect(arm).toContain("sweep_group");
+    expect(arm).toContain("unregister_child");
+    // Unregister must be guarded by the sweep, never unconditional.
+    expect(arm).toMatch(/if sweep_group "\$pid"; then\s+unregister_child/);
+  });
 
   test("one monotonic deadline is computed from a single start stamp", () => {
     expect(source).toContain("WORK_BUDGET_SECONDS=");
@@ -676,7 +808,7 @@ describe("the browser runner cannot exit before cleanup", () => {
   });
 
   test("the status is applied only after the finally has closed the browser", () => {
-    const tail = runner.slice(runner.indexOf("try {\n  await main();"));
+    const tail = runner.slice(runner.indexOf("const passRecord = await main();"));
     expect(tail).toContain("error instanceof RunnerExit");
     expect(tail).toContain("process.exit(error.status)");
     const cleanup = runner.slice(runner.indexOf("} finally {"));
@@ -832,14 +964,33 @@ describe("the shell's causal self-tests actually run", () => {
 });
 
 describe("the test harness contains what it launches", () => {
-  test("it owns a process group and censuses it", () => {
+  test("it owns a REAL process group and censuses it", () => {
     const self = read("apps/wire/test/auth/cross-plane-spike.test.ts");
-    // Killing only the direct bash left the script's children — and any browser
-    // below them — running after a timeout.
-    expect(self).toContain("set -m; exec bash");
-    expect(self).toContain("process.kill(-child.pid");
-    expect(self).toContain('signalGroup("SIGTERM")');
-    expect(self).toContain("survivors");
+    // `bash -c 'set -m; …'` changes the groups of the jobs that shell starts,
+    // not the group of the shell itself, so `kill(-child.pid)` was addressing a
+    // group this process did not lead. `setpgrp(0,0)` before exec is real.
+    // Sliced to the spawn itself. A whole-file ban would be self-referential:
+    // the assertion string would live in the very file it reads.
+    const spawn = self.slice(
+      self.indexOf("const child = Bun.spawn({"),
+      self.indexOf("closeSync(stdoutFd)"),
+    );
+    // Every check is scoped to the CONTROLLER. Whole-file bans here are
+    // self-referential: the forbidden string would live in the assertion itself.
+    const controller = self.slice(
+      self.indexOf("async function runShell("),
+      self.indexOf("/** Failure context."),
+    );
+    expect(spawn).toContain("setpgrp(0,0)");
+    expect(spawn).not.toContain("set -m");
+    expect(controller).toContain("process.kill(-child.pid");
+    expect(controller).toContain('signalGroup("SIGTERM")');
+    // Group-only: no bare-pid fallback that can hit a reused number.
+    expect(controller).not.toContain("child.kill(");
+    // The escalation timer is owned, cancelled and drained.
+    expect(controller).toContain("clearTimeout(killTimer)");
+    // No reflexive post-reap signal: census first, signal only if alive.
+    expect(controller).toContain("let survivors = groupAlive();");
   });
 
   test("an over-cap capture is rejected, not truncated", () => {
