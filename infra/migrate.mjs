@@ -1384,7 +1384,7 @@ export async function runBoundedCommand({
  * `--local` only. This function never accepts a `--remote` flag and never reads
  * a credential; a remote application is refused earlier, by the caller.
  */
-export async function localD1(root, databaseName, args) {
+export async function localD1(root, databaseName, args, localPersistTo = undefined) {
   const result = await runBoundedCommand({
     cmd: [
       ...resolvePinnedWranglerCommand(root),
@@ -1394,6 +1394,7 @@ export async function localD1(root, databaseName, args) {
       "--local",
       "--config",
       "infra/wrangler.toml",
+      ...(localPersistTo === undefined ? [] : ["--persist-to", localPersistTo]),
       "--json",
       ...args,
     ],
@@ -1455,12 +1456,12 @@ function parseLocalD1Rows(raw, unreadableCode) {
 }
 
 /** Read-only catalog snapshot used before any bootstrap metadata exists. */
-async function readLocalCatalog(root, databaseName) {
+async function readLocalCatalog(root, databaseName, localPersistTo = undefined) {
   const rows = parseLocalD1Rows(
     await localD1(root, databaseName, [
       "--command",
       `SELECT type, name, tbl_name, sql FROM sqlite_schema ORDER BY type, name LIMIT ${MAX_CATALOG_ROWS + 1};`,
-    ]),
+    ], localPersistTo),
     "LOCAL_D1_CATALOG_UNREADABLE",
   );
   return assertReadLimit(rows, MAX_CATALOG_ROWS, "LOCAL_D1_CATALOG_OVERRUN").map((row) => ({
@@ -1479,6 +1480,7 @@ async function readOptionalLocalRows(
   columns,
   maximum,
   overrunCode,
+  localPersistTo = undefined,
 ) {
   if (!catalog.some((entry) => entry.type === "table" && entry.name === table)) return [];
   return assertReadLimit(
@@ -1486,7 +1488,7 @@ async function readOptionalLocalRows(
       await localD1(root, databaseName, [
         "--command",
         `SELECT ${columns} FROM ${table} ORDER BY 1 LIMIT ${maximum + 1};`,
-      ]),
+      ], localPersistTo),
       "LOCAL_D1_CATALOG_UNREADABLE",
     ),
     maximum,
@@ -1494,8 +1496,8 @@ async function readOptionalLocalRows(
   );
 }
 
-async function readLocalLineageSnapshot(root, databaseName) {
-  const catalog = await readLocalCatalog(root, databaseName);
+async function readLocalLineageSnapshot(root, databaseName, localPersistTo = undefined) {
+  const catalog = await readLocalCatalog(root, databaseName, localPersistTo);
   const journal = (
     await readOptionalLocalRows(
       root,
@@ -1505,6 +1507,7 @@ async function readLocalLineageSnapshot(root, databaseName) {
       "id, sequence, digest",
       MAX_JOURNAL_ROWS,
       "LOCAL_D1_JOURNAL_OVERRUN",
+      localPersistTo,
     )
   ).map((row) => ({
     id: String(row.id),
@@ -1520,6 +1523,7 @@ async function readLocalLineageSnapshot(root, databaseName) {
       "singleton, lineage, artifact_id, artifact_digest, schema_digest, empty_guard",
       MAX_LINEAGE_ROWS,
       "LOCAL_D1_LINEAGE_OVERRUN",
+      localPersistTo,
     )
   ).map((row) => ({
     singleton: Number(row.singleton),
@@ -1549,8 +1553,13 @@ VALUES (1, 1, 1);`;
   return sql;
 }
 
-async function bootstrapLocalSchema(root, databaseName, artifact, appliedAt) {
-  await localD1(root, databaseName, ["--command", bootstrapInstallSql(artifact, appliedAt)]);
+async function bootstrapLocalSchema(root, databaseName, artifact, appliedAt, localPersistTo) {
+  await localD1(
+    root,
+    databaseName,
+    ["--command", bootstrapInstallSql(artifact, appliedAt)],
+    localPersistTo,
+  );
 }
 
 function assertForwardHeadsRegistered(plan, manifest) {
@@ -1586,8 +1595,39 @@ export function migrationCommandSql(migration, appliedAt) {
   return `${migration.sql}\nINSERT INTO ${LEDGER_TABLE} (id, sequence, digest, applied_at) VALUES (${sqlLiteral(migration.id)}, ${migration.sequence}, ${sqlLiteral(migration.digest)}, ${sqlLiteral(appliedAt)});`;
 }
 
-async function applyLocalMigration(root, databaseName, migration, appliedAt) {
-  await localD1(root, databaseName, ["--command", migrationCommandSql(migration, appliedAt)]);
+async function applyLocalMigration(root, databaseName, migration, appliedAt, localPersistTo) {
+  await localD1(
+    root,
+    databaseName,
+    ["--command", migrationCommandSql(migration, appliedAt)],
+    localPersistTo,
+  );
+}
+
+/**
+ * An ordinary remote application must fail before it can reach the callback
+ * that opens local D1. Keeping that observer at the actual pending-migration
+ * seam makes the no-remote-D1 property causally testable rather than inferred
+ * from a refusal string.
+ */
+export async function applyPendingLocalMigrationsOrRefuse(
+  environment,
+  pending,
+  observeLocalMigration,
+) {
+  if (environment.kind !== "local") {
+    fail(
+      "APPLY_UNAVAILABLE",
+      `Cannot apply migrations to ${environment.name}: no D1 binding or deployment credential is available in this environment. ` +
+        "Provision the environment first; this runner will not simulate an application.",
+    );
+  }
+  const applied = [];
+  for (const migration of pending) {
+    await observeLocalMigration(migration);
+    applied.push({ id: migration.id, digest: migration.digest });
+  }
+  return applied;
 }
 
 /**
@@ -1701,6 +1741,7 @@ function parseArguments(argv) {
     state: undefined,
     apply: false,
     bootstrap: undefined,
+    localPersistTo: undefined,
     confirmProduction: false,
   };
   for (let index = 0; index < argv.length; index += 1) {
@@ -1716,12 +1757,22 @@ function parseArguments(argv) {
     } else if (argument === "--bootstrap") {
       options.bootstrap = argv[index + 1];
       index += 1;
+    } else if (argument === "--local-persist-to") {
+      const directory = argv[index + 1];
+      if (typeof directory !== "string" || directory === "" || directory.startsWith("--")) {
+        fail(
+          "INVALID_ARGUMENT",
+          "--local-persist-to requires one non-option directory argument.",
+        );
+      }
+      options.localPersistTo = directory;
+      index += 1;
     } else if (argument === "--i-understand-this-is-production") {
       options.confirmProduction = true;
     } else {
       fail(
         "INVALID_ARGUMENT",
-        "Usage: bun infra/migrate.mjs --env <local|staging|production> [--state-file <path>] [--bootstrap <artifact-id>] [--apply]",
+        "Usage: bun infra/migrate.mjs --env <local|staging|production> [--state-file <path>] [--bootstrap <artifact-id>] [--local-persist-to <directory>] [--apply]",
       );
     }
   }
@@ -1756,6 +1807,12 @@ async function main() {
     // Explicit selection: there is no default environment, so no command can
     // reach production by omission.
     const environment = selectEnvironment(report, options.env);
+    if (options.localPersistTo !== undefined && environment.kind !== "local") {
+      fail(
+        "LOCAL_PERSISTENCE_REMOTE_REFUSED",
+        "--local-persist-to is available only for the explicitly selected local environment.",
+      );
+    }
 
     phase = "plan";
     const migrations = readMigrationDirectory(
@@ -1774,7 +1831,7 @@ async function main() {
         );
       }
       const snapshot = await readBootstrapSnapshotOrRefuse(environment, () =>
-        readLocalLineageSnapshot(root, localDatabase),
+        readLocalLineageSnapshot(root, localDatabase, options.localPersistTo),
       );
       const lineage = classifySchemaLineage({ ...snapshot, migrations, manifest });
       if (bootstrapTargetDisposition(lineage) === "idempotent") {
@@ -1804,9 +1861,15 @@ async function main() {
         );
         return;
       }
-      await bootstrapLocalSchema(root, localDatabase, artifact, new Date().toISOString());
+      await bootstrapLocalSchema(
+        root,
+        localDatabase,
+        artifact,
+        new Date().toISOString(),
+        options.localPersistTo,
+      );
       const after = classifySchemaLineage({
-        ...(await readLocalLineageSnapshot(root, localDatabase)),
+        ...(await readLocalLineageSnapshot(root, localDatabase, options.localPersistTo)),
         migrations,
         manifest,
       });
@@ -1835,7 +1898,7 @@ async function main() {
     let localPlan;
     if (localDatabase !== undefined && options.state === undefined) {
       localManifest = readBootstrapManifest(root);
-      localSnapshot = await readLocalLineageSnapshot(root, localDatabase);
+      localSnapshot = await readLocalLineageSnapshot(root, localDatabase, options.localPersistTo);
       localPlan = localPlanState(localSnapshot, migrations, localManifest);
       baseline = localPlan.baseline;
     }
@@ -1885,28 +1948,29 @@ async function main() {
         "Applying to production requires --i-understand-this-is-production in addition to --env production.",
       );
     }
-    if (localDatabase === undefined) {
-      // The honest wall for remote environments. Applying needs a provisioned
-      // D1 and a deployment credential; neither exists here, and inventing a
-      // success would be the exact failure this bead's criteria forbid.
-      fail(
-        "APPLY_UNAVAILABLE",
-        `Cannot apply migrations to ${options.env}: no D1 binding or deployment credential is available in this environment. ` +
-          "Provision the environment first; this runner will not simulate an application.",
-      );
-    }
-
     // Local is genuinely available: Wrangler's local D1 is workerd's own
     // SQLite, needs no account, and is not a mock of D1.
     const appliedAt = new Date().toISOString();
-    const appliedNow = [];
-    for (const pending of plan.to_apply) {
-      const migration = migrations.find((candidate) => candidate.id === pending.id);
-      await applyLocalMigration(root, localDatabase, migration, appliedAt);
-      appliedNow.push({ id: migration.id, digest: migration.digest });
-    }
+    const appliedNow = await applyPendingLocalMigrationsOrRefuse(
+      environment,
+      plan.to_apply,
+      async (pending) => {
+        const migration = migrations.find((candidate) => candidate.id === pending.id);
+        await applyLocalMigration(
+          root,
+          localDatabase,
+          migration,
+          appliedAt,
+          options.localPersistTo,
+        );
+      },
+    );
 
-    const afterSnapshot = await readLocalLineageSnapshot(root, localDatabase);
+    const afterSnapshot = await readLocalLineageSnapshot(
+      root,
+      localDatabase,
+      options.localPersistTo,
+    );
     const afterLineage = classifySchemaLineage({
       ...afterSnapshot,
       migrations,

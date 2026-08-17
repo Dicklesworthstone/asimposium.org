@@ -16,6 +16,7 @@ import { REDACTED_TOKEN } from "@asimposium/contracts/diagnostic-safety";
 import {
   assertReadLimit,
   assertRehearsalIsNotAnApplication,
+  applyPendingLocalMigrationsOrRefuse,
   bootstrapTargetDisposition,
   catalogFingerprint,
   classifySchemaLineage,
@@ -621,79 +622,35 @@ const cases = [
         "unknown-or-contaminated",
       );
 
-      const forward = {
-        id: "0016_forward.sql",
-        sequence: 16,
-        digest: "b".repeat(64),
-        sql: CREATE_B,
-      };
-      // The convergence proof models the immutable 0015 baseline plus one
-      // forward migration. It must stay independent of peers concurrently
-      // adding real post-0015 migrations to the shared repository.
-      const convergenceMigrations = migrations.filter((migration) => migration.sequence <= 15);
-      const convergenceWithForward = [...convergenceMigrations, forward];
-      const historicalPlan = planMigrations(convergenceWithForward, historical, plainOptions);
-      const baselinePlan = planMigrations(convergenceWithForward, [], {
-        ...plainOptions,
-        baseline: { head: 15 },
-      });
+      // The real local-D1 lane executes and fingerprints current 0016. This
+      // static lane only establishes that planning consumes the same W3-owned
+      // file and the production-loaded head-16 registration, not an invented
+      // migration or a duplicate in-memory schema head.
+      const productionMigrations = readMigrationDirectory(join(repositoryRoot, "db/migrations"));
+      const actual0016 = productionMigrations.find((migration) => migration.sequence === 16);
+      assert.ok(actual0016, "current migration 0016 must exist");
+      assert.equal(actual0016.id, "0016_operator_fellow_cap_override.sql");
+      const productionManifest = readBootstrapManifest(repositoryRoot);
+      const schemaHead16 = productionManifest.schema_heads.filter((head) => head.sequence === 16);
+      assert.equal(schemaHead16.length, 1, "the production manifest must register exactly one head 16");
+      const migrationsThrough0016 = productionMigrations.filter(
+        (migration) => migration.sequence <= actual0016.sequence,
+      );
+      assert.equal(migrationsThrough0016.length, 16);
+      const actualHistorical = migrationsThrough0016.slice(0, 15).map(record);
+      const forwardOptions = { environmentName: "local", destructiveAllowed: true };
       assert.deepEqual(
-        historicalPlan.to_apply.map((migration) => migration.id),
-        [forward.id],
+        planMigrations(migrationsThrough0016, actualHistorical, forwardOptions).to_apply.map(
+          (migration) => migration.id,
+        ),
+        [actual0016.id],
       );
       assert.deepEqual(
-        baselinePlan.to_apply.map((migration) => migration.id),
-        [forward.id],
-      );
-
-      // Model the completed, durable 0016 command: its DDL and its exact
-      // journal record both exist before the next classification. The new head
-      // must be registered with its post-apply raw sqlite_schema fingerprint.
-      const forwardProductCatalog = [
-        ...productCatalog,
-        { type: "table", name: "b", table: "b", sql: CREATE_B.trim() },
-      ];
-      const forwardDigest = catalogFingerprint(forwardProductCatalog);
-      const forwardManifest = {
-        ...manifest,
-        schema_heads: [
-          ...manifest.schema_heads,
-          { sequence: forward.sequence, schema_digest: forwardDigest },
-        ],
-      };
-      const historicalAfterApply = [...historical, record(forward)];
-      const historicalForward = classifySchemaLineage({
-        catalog: [...forwardProductCatalog, runnerLedgerCatalog],
-        journal: historicalAfterApply,
-        lineage: [],
-        migrations: convergenceWithForward,
-        manifest: forwardManifest,
-      });
-      assert.deepEqual(historicalForward, { kind: "historical-forward", head: 16 });
-      assert.equal(
-        planMigrations(convergenceWithForward, historicalAfterApply, plainOptions).idempotent,
-        true,
-      );
-
-      const bootstrapAfterApply = classifySchemaLineage({
-        catalog: [...forwardProductCatalog, runnerLedgerCatalog, runnerLineageCatalog],
-        journal: [record(forward)],
-        lineage: [bootstrapLineageRow(currentDigest)],
-        migrations: convergenceWithForward,
-        manifest: forwardManifest,
-      });
-      assert.deepEqual(bootstrapAfterApply, {
-        kind: "bootstrap-baseline15",
-        head: 16,
-        artifact_id: "0015-final-schema-v1",
-        journal_records: 1,
-      });
-      assert.equal(
-        planMigrations(convergenceWithForward, [record(forward)], {
-          ...plainOptions,
-          baseline: { head: bootstrapAfterApply.head },
-        }).idempotent,
-        true,
+        planMigrations(migrationsThrough0016, [], {
+          ...forwardOptions,
+          baseline: { head: 15 },
+        }).to_apply.map((migration) => migration.id),
+        [actual0016.id],
       );
 
       assert.equal(bootstrapTargetDisposition({ kind: "provably-empty" }), "ready");
@@ -814,6 +771,36 @@ const cases = [
         const refusal = refusalOf(run);
         assert.equal(refusal.code, "BOOTSTRAP_REMOTE_UNAVAILABLE");
         assert.equal(refusal.phase, "plan");
+      }
+    },
+  },
+  {
+    name: "ordinary remote apply never invokes the injected local-D1 migration observer",
+    async execute() {
+      const pending = [{ id: "0001_observer.sql", sequence: 1, digest: "a".repeat(64) }];
+      for (const environment of ["staging", "production"]) {
+        let localD1Observations = 0;
+        let injectedFailure;
+        try {
+          await applyPendingLocalMigrationsOrRefuse(
+            { kind: "remote", name: environment },
+            pending,
+            async () => {
+              localD1Observations += 1;
+              throw new Error("remote ordinary apply reached local D1 observer");
+            },
+          );
+        } catch (error) {
+          injectedFailure = error;
+        }
+        assert.ok(injectedFailure instanceof MigrationError);
+        assert.equal(injectedFailure.code, "APPLY_UNAVAILABLE");
+        assert.equal(
+          localD1Observations,
+          0,
+          `${environment} ordinary apply refusal must precede every local-D1 observation`,
+        );
+
       }
     },
   },
@@ -1602,6 +1589,11 @@ const cases = [
         [
           "open identifier quote",
           "CREATE TABLE `leaked_identifier (id TEXT);",
+          "UNTERMINATED_SQL_QUOTE",
+        ],
+        [
+          "open double-quoted identifier",
+          'CREATE TABLE "leaked_identifier (id TEXT);',
           "UNTERMINATED_SQL_QUOTE",
         ],
         [

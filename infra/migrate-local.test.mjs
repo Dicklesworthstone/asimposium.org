@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { randomUUID } from "node:crypto";
-import { mkdirSync, writeFileSync } from "node:fs";
+import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, resolve } from "node:path";
 import { performance } from "node:perf_hooks";
@@ -10,9 +10,10 @@ import {
   bootstrapInstallSql,
   catalogFingerprint,
   classifySchemaLineage,
+  digestOf,
   LEDGER_TABLE,
   LINEAGE_TABLE,
-  localPlanState,
+  localD1,
   MAX_CATALOG_ROWS,
   MAX_JOURNAL_ROWS,
   MAX_LINEAGE_ROWS,
@@ -64,20 +65,7 @@ assert.equal(
   "sequence 0015 must remain the sponsor-bootstrap invariant",
 );
 
-const syntheticForwardMigration = {
-  id: "0016_bootstrap_lineage_convergence.sql",
-  sequence: 16,
-  digest: "c".repeat(64),
-  sql: "CREATE TABLE bootstrap_lineage_forward (id TEXT PRIMARY KEY);",
-};
-// Keep the convergence fixture fixed at the immutable 0015 baseline. Other
-// agents may add real post-0015 migrations while this suite runs; their own
-// schema-head fingerprints are a separate forward-migration responsibility.
-const migrationsWithSyntheticForward = [
-  ...migrations.filter((migration) => migration.sequence <= 15),
-  syntheticForwardMigration,
-];
-const localPlanOptions = { environmentName: "local", destructiveAllowed: false };
+const localPlanOptions = { environmentName: "local", destructiveAllowed: true };
 
 const MIGRATION_OBJECTS = [
   "sponsor_enrollment_bootstrap_migration_witness",
@@ -212,6 +200,43 @@ async function localJson(databaseName, command, label) {
   }
 }
 
+async function runnerConfigJson(command, label) {
+  const raw = await localD1(
+    root,
+    "asimposium-local",
+    ["--command", command],
+    persistenceRoot,
+  );
+  try {
+    const parsed = JSON.parse(raw);
+    assert.ok(Array.isArray(parsed), `runner-config local D1 ${label} must return a JSON result array`);
+    return parsed;
+  } catch (error) {
+    if (error instanceof assert.AssertionError) throw error;
+    assert.fail(`runner-config local D1 ${label} must return parseable JSON`);
+  }
+}
+
+async function runActualLocalMigrationCli(args, label) {
+  const deadline = commandDeadline(label);
+  const executionWindowMs = remainingBefore(deadline, label) - COMMAND_REAP_RESERVE_MS;
+  assert.ok(executionWindowMs > 0, `actual local CLI ${label} lacks time for bounded child reaping`);
+  const result = await runBoundedCommand({
+    cmd: [process.execPath, "infra/migrate.mjs", ...args],
+    cwd: root,
+    timeoutMs: executionWindowMs,
+  });
+  assert.equal(result.outcome, "exited", `actual local CLI ${label} must exit normally`);
+  try {
+    return {
+      exitCode: result.exitCode,
+      diagnostic: JSON.parse((result.exitCode === 0 ? result.stdout : result.stderr).trim()),
+    };
+  } catch {
+    assert.fail(`actual local CLI ${label} must emit one JSON diagnostic`);
+  }
+}
+
 function oneRow(result, label) {
   const row = result?.find((statement) => statement?.results?.[0] !== undefined)?.results?.[0];
   assert.ok(row !== undefined && row !== null, `local D1 ${label} must return one row`);
@@ -226,9 +251,9 @@ const LEDGER_DDL = `CREATE TABLE IF NOT EXISTS ${LEDGER_TABLE} (
 );`;
 
 function migrationJournalCommand(migration) {
-  // This is byte-for-byte the runner's production command shape: migration
-  // SQL followed by the journal insert in the same Wrangler `--command` call.
-  return `${migration.sql}\nINSERT INTO ${LEDGER_TABLE} (id, sequence, digest, applied_at) VALUES (${sqlLiteral(migration.id)}, ${migration.sequence}, ${sqlLiteral(migration.digest)}, ${sqlLiteral(appliedAt)});`;
+  // Exercise the runner's actual production command seam. A local duplicate
+  // would not prove the real journal append stays coupled to the migration.
+  return migrationCommandSql(migration, appliedAt);
 }
 
 async function applyMigration(databaseName, sequence) {
@@ -313,17 +338,56 @@ async function readSnapshot(databaseName, label, includeLineage = false) {
   return snapshot;
 }
 
-function manifestWithSyntheticForward(catalog) {
-  return {
-    ...bootstrapManifest,
-    schema_heads: [
-      ...bootstrapManifest.schema_heads,
-      {
-        sequence: syntheticForwardMigration.sequence,
-        schema_digest: catalogFingerprint(catalog),
-      },
-    ],
-  };
+function stableCurrent0016Inputs() {
+  const migrationPath = resolve(root, "db/migrations/0016_operator_fellow_cap_override.sql");
+  const manifestPath = resolve(root, "db/bootstrap/manifest.json");
+  for (let attempt = 0; attempt < 3; attempt += 1) {
+    const before = {
+      migration: digestOf(readFileSync(migrationPath, "utf8")),
+      manifest: digestOf(readFileSync(manifestPath, "utf8")),
+    };
+    const currentMigrations = readMigrationDirectory(resolve(root, "db/migrations"));
+    const currentManifest = readBootstrapManifest(root);
+    const after = {
+      migration: digestOf(readFileSync(migrationPath, "utf8")),
+      manifest: digestOf(readFileSync(manifestPath, "utf8")),
+    };
+    if (before.migration !== after.migration || before.manifest !== after.manifest) continue;
+
+    const migration0016 = currentMigrations.find((migration) => migration.sequence === 16);
+    assert.ok(migration0016, "current W3 migration 0016 must exist");
+    assert.equal(migration0016.id, "0016_operator_fellow_cap_override.sql");
+    assert.equal(
+      migration0016.digest,
+      before.migration,
+      "the production migration command must use the exact current 0016 bytes",
+    );
+    const schemaHead16 = currentManifest.schema_heads.filter((head) => head.sequence === 16);
+    assert.equal(schemaHead16.length, 1, "the production manifest must register exactly one head 16");
+    const migrationsThrough0016 = currentMigrations.filter((migration) => migration.sequence <= 16);
+    assert.equal(migrationsThrough0016.length, 16, "the current proof requires contiguous 0001-0016");
+    return {
+      migration0016,
+      migrationsThrough0016,
+      manifest: currentManifest,
+      schemaHead16: schemaHead16[0],
+      sourceDigests: before,
+    };
+  }
+  assert.fail("W3-owned 0016 or bootstrap manifest moved during local-proof input capture");
+}
+
+function assertCurrent0016InputsUnchanged(inputs) {
+  assert.equal(
+    digestOf(readFileSync(resolve(root, "db/migrations/0016_operator_fellow_cap_override.sql"), "utf8")),
+    inputs.sourceDigests.migration,
+    "W3 migration 0016 moved during the local proof; reject the mixed snapshot",
+  );
+  assert.equal(
+    digestOf(readFileSync(resolve(root, "db/bootstrap/manifest.json"), "utf8")),
+    inputs.sourceDigests.manifest,
+    "W3 bootstrap manifest moved during the local proof; reject the mixed snapshot",
+  );
 }
 
 function productCatalog(catalog) {
@@ -501,31 +565,27 @@ const cases = [
     },
   },
   {
-    name: "pristine local plan state is side-effect-free and repeatable",
+    name: "actual CLI pristine local plan is side-effect-free and repeatable",
     async execute() {
-      const databaseName = uniqueDatabaseName("pristine-plan");
-      // Establish only Wrangler's own local metadata. The runner must derive
-      // an empty journal from this read-only catalog, not create its ledger.
-      await localJson(databaseName, "SELECT 1 AS ok;", "pristine-plan-platform-metadata");
-      const baselineMigrations = migrations.filter((migration) => migration.sequence <= 15);
-      let firstPlanState;
-      for (const pass of ["first", "second"]) {
-        const catalog = await readCatalog(databaseName, `pristine-plan-${pass}-catalog`);
-        const state = localPlanState(
-          { catalog, journal: [], lineage: [] },
-          baselineMigrations,
-          bootstrapManifest,
-        );
-        assert.deepEqual(state, { applied: [] }, `${pass} pristine plan state must be empty`);
-        assert.equal(
-          catalog.some((entry) => entry.name === LEDGER_TABLE || entry.name === LINEAGE_TABLE),
-          false,
-          `${pass} plan must not create runner control tables`,
-        );
-        if (firstPlanState === undefined) firstPlanState = state;
-        else
-          assert.deepEqual(state, firstPlanState, "the second pristine plan must equal the first");
-      }
+      const arguments_ = ["--env", "local", "--local-persist-to", persistenceRoot];
+      const first = await runActualLocalMigrationCli(arguments_, "pristine-plan-first");
+      const second = await runActualLocalMigrationCli(arguments_, "pristine-plan-second");
+      assert.equal(first.exitCode, 1, "the historical destructive guard must refuse before apply");
+      assert.equal(second.exitCode, 1, "the repeated pristine plan must refuse identically");
+      assert.equal(first.diagnostic.phase, "plan");
+      assert.equal(second.diagnostic.phase, "plan");
+      assert.equal(first.diagnostic.code, "UNDECLARED_DESTRUCTIVE_MIGRATION");
+      assert.equal(second.diagnostic.code, first.diagnostic.code);
+      assert.equal(second.diagnostic.detail, first.diagnostic.detail);
+      const catalogResult = await runnerConfigJson(CATALOG_QUERY, "pristine-plan-control-readback");
+      const catalog = catalogFromRows(
+        statementRows(catalogResult, 0, "pristine-plan-control-readback"),
+      );
+      assert.equal(
+        catalog.some((entry) => entry.name === LEDGER_TABLE || entry.name === LINEAGE_TABLE),
+        false,
+        "two actual CLI plan-only runs must not create runner control tables",
+      );
     },
   },
   {
@@ -906,17 +966,30 @@ END;`,
         "successful 0015 retry must retain the exact singleton witness",
       );
 
+      // Snapshot W3-owned forward bytes with an before/after stability check.
+      // Nothing in this lane writes those inputs; if they move, a mixed proof
+      // is rejected rather than asserting against a stale synthetic head.
+      const current0016 = stableCurrent0016Inputs();
+      const {
+        migration0016,
+        migrationsThrough0016,
+        manifest: currentManifest,
+        schemaHead16,
+      } = current0016;
+      const currentArtifact = currentManifest.artifacts[0];
+
       // One causal convergence case starts from the committed historical 0015
       // state, a newly installed bootstrap state, and the committed legacy
-      // 0009 shape. The later 0016 manifest is derived once from historical
-      // output and is deliberately reused for both 0016 classifications.
+      // 0009 shape. Both forward lanes execute W3's actual 0016 through the
+      // runner command seam and compare their post-apply catalogs to the
+      // production-loaded manifest head rather than manufacturing a digest.
       const { catalog: historicalCatalog, journal: historicalJournal } = await readSnapshot(
         databaseName,
         "historical-0015-snapshot",
       );
       assert.equal(
         catalogFingerprint(historicalCatalog),
-        bootstrapArtifact.schema_digest,
+        currentArtifact.schema_digest,
         "actual historical 0015 must match the committed baseline fingerprint",
       );
       assert.deepEqual(
@@ -924,8 +997,8 @@ END;`,
           catalog: historicalCatalog,
           journal: historicalJournal,
           lineage: [],
-          migrations,
-          manifest: bootstrapManifest,
+          migrations: migrationsThrough0016,
+          manifest: currentManifest,
         }),
         { kind: "historical-current-0015", head: 15 },
       );
@@ -939,7 +1012,7 @@ END;`,
       );
       assert.equal(
         catalogFingerprint(legacyCatalog),
-        bootstrapArtifact.legacy_0009_schema_digest,
+        currentArtifact.legacy_0009_schema_digest,
         "actual exact legacy 0009 must match the committed legacy fingerprint",
       );
       assert.deepEqual(
@@ -947,8 +1020,8 @@ END;`,
           catalog: legacyCatalog,
           journal: legacyJournal,
           lineage: [],
-          migrations,
-          manifest: bootstrapManifest,
+          migrations: migrationsThrough0016,
+          manifest: currentManifest,
         }),
         { kind: "legacy-0009", head: 9 },
       );
@@ -956,7 +1029,7 @@ END;`,
       const bootstrapDatabase = uniqueDatabaseName("lineage-bootstrap");
       await localJson(
         bootstrapDatabase,
-        bootstrapInstallSql(bootstrapArtifact, appliedAt),
+        bootstrapInstallSql(currentArtifact, appliedAt),
         "lineage-bootstrap-apply",
       );
       const {
@@ -964,7 +1037,7 @@ END;`,
         journal: bootstrapJournal,
         lineage: bootstrapLineage,
       } = await readSnapshot(bootstrapDatabase, "lineage-bootstrap-snapshot", true);
-      assert.equal(catalogFingerprint(bootstrapCatalog), bootstrapArtifact.schema_digest);
+      assert.equal(catalogFingerprint(bootstrapCatalog), currentArtifact.schema_digest);
       assert.deepEqual(
         wranglerPlatformMetadata(bootstrapCatalog),
         wranglerPlatformMetadata(historicalCatalog),
@@ -976,86 +1049,109 @@ END;`,
           catalog: bootstrapCatalog,
           journal: bootstrapJournal,
           lineage: bootstrapLineage,
-          migrations,
-          manifest: bootstrapManifest,
+          migrations: migrationsThrough0016,
+          manifest: currentManifest,
         }),
         {
           kind: "bootstrap-baseline15",
           head: 15,
-          artifact_id: bootstrapArtifact.id,
+          artifact_id: currentArtifact.id,
           journal_records: 0,
         },
       );
 
       assert.deepEqual(
-        planMigrations(
-          migrationsWithSyntheticForward,
-          historicalJournal,
-          localPlanOptions,
-        ).to_apply.map((migration) => migration.id),
-        [syntheticForwardMigration.id],
+        planMigrations(migrationsThrough0016, historicalJournal, localPlanOptions).to_apply.map(
+          (migration) => migration.id,
+        ),
+        [migration0016.id],
       );
       assert.deepEqual(
-        planMigrations(migrationsWithSyntheticForward, bootstrapJournal, {
+        planMigrations(migrationsThrough0016, bootstrapJournal, {
           ...localPlanOptions,
           baseline: { head: 15 },
         }).to_apply.map((migration) => migration.id),
-        [syntheticForwardMigration.id],
+        [migration0016.id],
       );
       await localJson(
         databaseName,
-        migrationJournalCommand(syntheticForwardMigration),
+        migrationJournalCommand(migration0016),
         "historical-forward-apply",
       );
       await localJson(
         bootstrapDatabase,
-        migrationJournalCommand(syntheticForwardMigration),
+        migrationJournalCommand(migration0016),
         "bootstrap-forward-apply",
       );
       const { catalog: historicalForwardCatalog, journal: historicalForwardJournal } =
         await readSnapshot(databaseName, "historical-forward-snapshot");
       const { catalog: bootstrapForwardCatalog, journal: bootstrapForwardJournal } =
         await readSnapshot(bootstrapDatabase, "bootstrap-forward-snapshot");
-      const sharedForwardManifest = manifestWithSyntheticForward(historicalForwardCatalog);
+      assertCurrent0016InputsUnchanged(current0016);
       assert.equal(
         catalogFingerprint(historicalForwardCatalog),
         catalogFingerprint(bootstrapForwardCatalog),
-        "the shared 0016 must leave byte-identical product catalog fingerprints",
+        "the actual shared 0016 must leave byte-identical product catalog fingerprints",
+      );
+      assert.equal(
+        catalogFingerprint(historicalForwardCatalog),
+        schemaHead16.schema_digest,
+        "historical 0016 must equal the production manifest's exact head-16 fingerprint",
+      );
+      assert.equal(
+        catalogFingerprint(bootstrapForwardCatalog),
+        schemaHead16.schema_digest,
+        "bootstrap 0016 must equal the production manifest's exact head-16 fingerprint",
       );
       assert.deepEqual(
         productCatalog(historicalForwardCatalog),
         productCatalog(bootstrapForwardCatalog),
         "the shared 0016 must leave byte-identical product catalog entries",
       );
+      const expectedForwardJournal = {
+        id: migration0016.id,
+        sequence: migration0016.sequence,
+        digest: migration0016.digest,
+      };
+      assert.deepEqual(
+        historicalForwardJournal.at(-1),
+        expectedForwardJournal,
+        "historical 0016 must append the exact production migration journal record",
+      );
+      assert.deepEqual(
+        bootstrapForwardJournal,
+        [expectedForwardJournal],
+        "bootstrap 0016 must append only the exact production migration journal record",
+      );
       const historicalForwardLineage = classifySchemaLineage({
         catalog: historicalForwardCatalog,
         journal: historicalForwardJournal,
         lineage: [],
-        migrations: migrationsWithSyntheticForward,
-        manifest: sharedForwardManifest,
+        migrations: migrationsThrough0016,
+        manifest: currentManifest,
       });
       assert.deepEqual(historicalForwardLineage, { kind: "historical-forward", head: 16 });
       const bootstrapForwardLineage = classifySchemaLineage({
         catalog: bootstrapForwardCatalog,
         journal: bootstrapForwardJournal,
         lineage: bootstrapLineage,
-        migrations: migrationsWithSyntheticForward,
-        manifest: sharedForwardManifest,
+        migrations: migrationsThrough0016,
+        manifest: currentManifest,
       });
       assert.deepEqual(bootstrapForwardLineage, {
         kind: "bootstrap-baseline15",
         head: 16,
-        artifact_id: bootstrapArtifact.id,
+        artifact_id: currentArtifact.id,
         journal_records: 1,
       });
       assert.equal(
-        planMigrations(migrationsWithSyntheticForward, historicalForwardJournal, localPlanOptions)
+        planMigrations(migrationsThrough0016, historicalForwardJournal, localPlanOptions)
           .idempotent,
         true,
         "historical-forward lineage must reclassify to an empty second plan",
       );
       assert.equal(
-        planMigrations(migrationsWithSyntheticForward, bootstrapForwardJournal, {
+        planMigrations(migrationsThrough0016, bootstrapForwardJournal, {
           ...localPlanOptions,
           baseline: { head: bootstrapForwardLineage.head },
         }).idempotent,
@@ -1076,8 +1172,8 @@ END;`,
           catalog: divergent.catalog,
           journal: divergent.journal,
           lineage: bootstrapLineage,
-          migrations: migrationsWithSyntheticForward,
-          manifest: sharedForwardManifest,
+          migrations: migrationsThrough0016,
+          manifest: currentManifest,
         }).kind,
         "unknown-or-contaminated",
         "divergent DDL must not ride the shared 0016 suffix",

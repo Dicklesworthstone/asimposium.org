@@ -44,6 +44,16 @@ ALTER TABLE enrollment_idempotency_with_operator_fellow_cap RENAME TO enrollment
 ALTER TABLE sponsors ADD COLUMN fellow_cap_seq INTEGER NOT NULL DEFAULT 0
   CHECK (typeof(fellow_cap_seq) = 'integer' AND fellow_cap_seq BETWEEN 0 AND 9007199254740991);
 
+-- A new sponsor begins at the public baseline. Without this trigger, a raw
+-- INSERT could smuggle a 500/42 state past the audited transition path before
+-- its first Fellow or operator command exists.
+CREATE TRIGGER sponsors_fellow_cap_initial_state
+BEFORE INSERT ON sponsors
+WHEN NEW.active_fellow_limit IS NOT 5 OR NEW.fellow_cap_seq IS NOT 0
+BEGIN
+  SELECT RAISE(ABORT, 'new sponsor Fellow-cap state must be 5/0');
+END;
+
 CREATE TABLE sponsor_fellow_cap_audit_events (
   audit_event_id TEXT PRIMARY KEY,
   sponsor_id TEXT NOT NULL REFERENCES sponsors(sponsor_id),
@@ -89,11 +99,24 @@ CREATE TABLE sponsor_fellow_cap_audit_events (
     AND active_fellow_limit <> previous_active_fellow_limit
   ),
   -- SQLite length() counts Unicode code points. The contract uses the same
-  -- metric; see its astral-character fixture beside the D1 plant.
+  -- metric and rejects exactly the same ECMAScript-whitespace boundaries;
+  -- keep raw-SQL audit receipts normalized rather than silently trimming them.
   CHECK (
     typeof(reason) = 'text'
     AND instr(reason, char(0)) = 0
-    AND length(trim(reason)) BETWEEN 10 AND 1000
+    AND length(reason) BETWEEN 10 AND 1000
+    AND substr(reason, 1, 1) NOT IN (
+      char(9), char(10), char(11), char(12), char(13), char(32), char(160),
+      char(5760), char(8192), char(8193), char(8194), char(8195), char(8196),
+      char(8197), char(8198), char(8199), char(8200), char(8201), char(8202),
+      char(8232), char(8233), char(8239), char(8287), char(12288), char(65279)
+    )
+    AND substr(reason, -1, 1) NOT IN (
+      char(9), char(10), char(11), char(12), char(13), char(32), char(160),
+      char(5760), char(8192), char(8193), char(8194), char(8195), char(8196),
+      char(8197), char(8198), char(8199), char(8200), char(8201), char(8202),
+      char(8232), char(8233), char(8239), char(8287), char(12288), char(65279)
+    )
   ),
   CHECK (
     typeof(step_up_authenticated_at) = 'integer'
