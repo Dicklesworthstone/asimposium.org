@@ -67,6 +67,86 @@ export {
 
 const SAFE_COMPONENT = /^[A-Za-z0-9][A-Za-z0-9._-]{0,79}$/;
 
+/**
+ * The official billing statements this model depends on, transcribed once with
+ * their retrieval date. They are pinned rather than fetched: this verifier makes
+ * no provider call, and a quote that can silently change is not a citation.
+ *
+ * The distinction they establish is the one Fable §15 collapses — a cache HIT
+ * still costs a request, and only CPU is avoided.
+ */
+export interface PinnedSourceRecord {
+  readonly url: string;
+  /** ISO date the page state below was established. */
+  readonly retrieved: string;
+  readonly verification: "current-primary-text" | "unverified-not-primary-text";
+  /**
+   * Verbatim and short, present ONLY for `current-primary-text`. Paraphrase is
+   * where this model's original error entered, and an unverifiable quote is
+   * worse than none: it reads as a citation while resting on nothing.
+   */
+  readonly quote?: string;
+  /** Present only when unverified. No quote is fabricated to fill the gap. */
+  readonly unverified_reason?: string;
+}
+
+export const COST_MODEL_PINNED_SOURCES: readonly PinnedSourceRecord[] = [
+  {
+    url: "https://developers.cloudflare.com/workers/platform/pricing/",
+    retrieved: "2026-08-17",
+    verification: "current-primary-text",
+    quote:
+      "When Workers Caching is enabled, requests served from the Worker's cache are billed at the same per-request rate as requests that invoke the Worker.",
+  },
+  {
+    url: "https://developers.cloudflare.com/cache/interaction-cloudflare-products/workers/",
+    retrieved: "2026-08-17",
+    verification: "current-primary-text",
+    quote: "When a request arrives, it hits the Worker before the cache is checked.",
+  },
+  {
+    url: "https://developers.cloudflare.com/workers/reference/how-the-cache-works/",
+    retrieved: "2026-08-17",
+    verification: "current-primary-text",
+    quote: "Cloudflare Workers run before the cache",
+  },
+  {
+    // Mandated by the bead, but this path now resolves to a landing/redirect
+    // rather than primary text, so the sentence the bead attributes to it could
+    // not be confirmed. Flagged, not quoted, and not silently swapped for a
+    // different page: substituting a source to keep a citation count is how an
+    // unverifiable claim survives a review.
+    url: "https://developers.cloudflare.com/workers/cache/",
+    retrieved: "2026-08-17",
+    verification: "unverified-not-primary-text",
+    unverified_reason:
+      "Resolves to a landing/redirect page; the bead's attributed sentence was not present in current primary text.",
+  },
+];
+
+/** True only when every mandated source carries confirmed primary-page text. */
+export function pinnedSourcesFullyVerified(
+  sources: readonly PinnedSourceRecord[] = COST_MODEL_PINNED_SOURCES,
+): boolean {
+  return sources.every(
+    (source) => source.verification === "current-primary-text" && source.quote !== undefined,
+  );
+}
+
+/**
+ * Peak rate is derived from the lurker count and cadence, so it is not an
+ * operator input. Duration and frequency are NOT derivable from anything in the
+ * plan, and this verifier refuses to invent them: without them a "peak rate" is
+ * an unlabelled number that reconciles with any monthly total you like.
+ *
+ * Absent burst input is therefore reported, not defaulted. See
+ * `FABLE_BURST_SHAPE_UNDECLARED`.
+ */
+export interface FableBurstInput {
+  readonly seconds_per_occurrence: number;
+  readonly occurrences_per_day: number;
+}
+
 export interface FableWorkedExampleInput {
   readonly problems: number;
   readonly working_fellows: number;
@@ -76,6 +156,19 @@ export interface FableWorkedExampleInput {
   readonly promotions_per_fellow_day: number;
   readonly lurkers: number;
   readonly cursor_poll_seconds: number;
+  /**
+   * Omitted until an operator accepts a burst shape. Absent is a reported state,
+   * never a default: a peak with no duration reconciles with any monthly total.
+   */
+  readonly burst?: FableBurstInput;
+  /**
+   * The §10.1 sizing line the §15 table figure actually comes from. Kept as an
+   * input so the table-scenario and duty-cycle discrepancies are computed from
+   * declared numbers rather than asserted in prose.
+   */
+  readonly sizing_line_fellows: number;
+  readonly sizing_line_active_seconds_per_fellow_day: number;
+  readonly fable_table_requests_per_month: number;
 }
 
 /** The implicit four active hours are explicit so Fable's approximations reproduce exactly. */
@@ -88,6 +181,14 @@ export const FABLE_WORKED_EXAMPLE: FableWorkedExampleInput = {
   promotions_per_fellow_day: 10,
   lurkers: 10_000,
   cursor_poll_seconds: 10,
+  // No `burst`: Fable states no duration or frequency, and inventing one here
+  // would manufacture the reconciliation this bead exists to withhold.
+  sizing_line_fellows: 1_000,
+  // Fable §10.1 states no active-day duration for its 1,000-Fellow line either.
+  // A full day is what its ~45M/mo figure actually requires, and recording that
+  // is what makes the mismatch with §15's four-hour example computable.
+  sizing_line_active_seconds_per_fellow_day: 86_400,
+  fable_table_requests_per_month: 45_000_000,
 };
 
 export interface CostModelAssumption {
@@ -121,6 +222,28 @@ export interface FableWorkloadArithmetic {
   readonly cursor_requests_per_second: number;
   /** Fable §15's stated approximation; retained beside the calculation, not copied into it. */
   readonly fable_stated_cursor_requests_per_second: number;
+  /** Sustained-at-peak totals, stated so the 45M row can be compared against them. */
+  readonly cursor_requests_per_30_days_at_computed_peak: number;
+  readonly cursor_requests_per_30_days_at_stated_rate: number;
+  /** The §15 worked example's own base load, at its inferred four active hours. */
+  readonly base_load_per_day: number;
+  /** What the §15 table figure implies per day. */
+  readonly fable_table_requests_per_day: number;
+  /**
+   * The §10.1 line the table figure comes from, at its own implied duty cycle,
+   * and the same population at §15's four-hour one. These differ by ~6x, which
+   * is the whole of the duty-cycle discrepancy.
+   */
+  readonly sizing_line_requests_per_day: number;
+  readonly sizing_line_requests_per_day_at_worked_example_duty_cycle: number;
+  /** What is left of the table figure once the sizing line it names is paid for. */
+  readonly storm_room_per_day: number;
+  readonly storm_seconds_per_day_at_computed_peak: number;
+  /**
+   * Present only when an operator has accepted a burst shape. `undefined` means
+   * the reconciliation is still open — it never means zero.
+   */
+  readonly declared_burst_requests_per_day?: number;
 }
 
 export interface ExpectedReceiptProvenance {
@@ -206,14 +329,66 @@ export interface CostVerificationResult {
   readonly source_discrepancies: readonly SourceDiscrepancy[];
   readonly assumptions: readonly CostModelAssumption[];
   readonly unknowns: readonly string[];
+  /** Pinned billing citations, including any that could not be verified. */
+  readonly pinned_sources: readonly PinnedSourceRecord[];
+  /** False while any mandated source lacks confirmed primary-page text. */
+  readonly pinned_sources_fully_verified: boolean;
 }
 
-export interface SourceDiscrepancy {
-  readonly code: "FABLE_CURSOR_RATE_MISMATCH";
-  readonly stated: number;
-  readonly computed: number;
-  readonly unit: "requests / second";
-}
+/**
+ * Three independent defects, deliberately not merged into one.
+ *
+ * Correcting the 10x cursor slip does not reconcile the table, and correcting
+ * the table does not settle which duty cycle the plan means. A single code
+ * would let one fix look like three.
+ */
+export type SourceDiscrepancy =
+  | {
+      /** §15 states ~100 req/s; 10,000 lurkers / 10 s is 1,000. */
+      readonly code: "FABLE_CURSOR_RATE_MISMATCH";
+      readonly stated: number;
+      readonly computed: number;
+      readonly unit: "requests / second";
+    }
+  | {
+      /**
+       * The ~45M/mo table row is §10.1's 1,000-Fellow sizing line, not the
+       * §15 worked example (20 problems / 80 Fellows). The storm never enters
+       * the table arithmetic at all, so "room inside 45M" cannot be obtained by
+       * subtracting the worked example's base load from it.
+       */
+      readonly code: "FABLE_TABLE_SCENARIO_MISMATCH";
+      readonly table_requests_per_day: number;
+      readonly sizing_line_requests_per_day: number;
+      readonly worked_example_base_load_per_day: number;
+      readonly storm_room_per_day: number;
+      readonly unit: "requests / day";
+    }
+  | {
+      /**
+       * §15's example implies four active hours; §10.1's sizing line implies a
+       * full day. The plan never states either, and the storm room swings by
+       * more than an order of magnitude depending on which is meant.
+       */
+      readonly code: "FABLE_DUTY_CYCLE_MISMATCH";
+      readonly worked_example_active_seconds: number;
+      readonly sizing_line_active_seconds: number;
+      readonly sizing_line_requests_per_day: number;
+      readonly sizing_line_requests_per_day_at_worked_example_duty_cycle: number;
+      readonly unit: "requests / day";
+    }
+  | {
+      /**
+       * Not an arithmetic error: a missing operator decision. Peak is derived,
+       * duration and frequency are not, and this verifier refuses to supply
+       * them. Until they are accepted, no monthly reconciliation exists.
+       */
+      readonly code: "FABLE_BURST_SHAPE_UNDECLARED";
+      readonly computed_peak_requests_per_second: number;
+      readonly required_operator_inputs: readonly ["seconds_per_occurrence", "occurrences_per_day"];
+      readonly storm_room_per_day: number;
+      readonly storm_seconds_per_day_at_computed_peak: number;
+    };
 
 export class CostVerifierError extends Error {
   constructor(
@@ -268,6 +443,28 @@ function exactQuotient(numerator: number, denominator: number, field: string): n
   return numerator / denominator;
 }
 
+const SECONDS_PER_DAY = 86_400;
+const DAYS_PER_MONTH = 30;
+
+/**
+ * A burst is either fully declared or absent. A half-declared one — a duration
+ * with no frequency, or the reverse — is refused rather than completed with a
+ * default, because the default would become the reconciliation.
+ */
+function requireBurstOrUndeclared(burst: FableBurstInput | undefined): FableBurstInput | undefined {
+  if (burst === undefined) return undefined;
+  return {
+    seconds_per_occurrence: requirePositiveInteger(
+      burst.seconds_per_occurrence,
+      "burst.seconds_per_occurrence",
+    ),
+    occurrences_per_day: requirePositiveInteger(
+      burst.occurrences_per_day,
+      "burst.occurrences_per_day",
+    ),
+  };
+}
+
 export function calculateFableWorkload(input: FableWorkedExampleInput): FableWorkloadArithmetic {
   const problems = requirePositiveInteger(input.problems, "problems");
   const fellows = requireNonNegativeInteger(input.working_fellows, "working_fellows");
@@ -293,11 +490,50 @@ export function calculateFableWorkload(input: FableWorkedExampleInput): FableWor
   const lurkers = requireNonNegativeInteger(input.lurkers, "lurkers");
   const cursorPoll = requirePositiveInteger(input.cursor_poll_seconds, "cursor_poll_seconds");
 
+  const sizingFellows = requirePositiveInteger(input.sizing_line_fellows, "sizing_line_fellows");
+  const sizingActiveSeconds = requirePositiveInteger(
+    input.sizing_line_active_seconds_per_fellow_day,
+    "sizing_line_active_seconds_per_fellow_day",
+  );
+  const tablePerMonth = requirePositiveInteger(
+    input.fable_table_requests_per_month,
+    "fable_table_requests_per_month",
+  );
+  const burst = requireBurstOrUndeclared(input.burst);
+
   const activeFellowSeconds = checkedProduct(
     fellows,
     activeSeconds,
     "working_fellows × active_seconds_per_fellow_day",
   );
+  const cursorPerSecond = exactQuotient(lurkers, cursorPoll, "cursor_requests_per_second");
+  const packReadsPerDay = exactQuotient(activeFellowSeconds, packCadence, "pack_reads_per_day");
+  const workshopPushesPerDay = exactQuotient(
+    activeFellowSeconds,
+    workshopCadence,
+    "workshop_pushes_per_day",
+  );
+  const promotionsPerDay = checkedProduct(
+    fellows,
+    promotionsPerFellow,
+    "working_fellows × promotions_per_fellow_day",
+  );
+  const baseLoadPerDay = packReadsPerDay + workshopPushesPerDay + promotionsPerDay;
+  const tablePerDay = exactQuotient(tablePerMonth, DAYS_PER_MONTH, "fable_table_requests_per_day");
+  const sizingPerDay = exactQuotient(
+    checkedProduct(sizingFellows, sizingActiveSeconds, "sizing fellows × sizing seconds"),
+    packCadence,
+    "sizing_line_requests_per_day",
+  );
+  // What the table figure leaves once the sizing line it actually names is paid
+  // for. Negative would mean the row cannot even cover its own scenario.
+  const stormRoomPerDay = tablePerDay - sizingPerDay;
+  if (stormRoomPerDay < 0) {
+    throw new CostVerifierError(
+      "WORKLOAD_INPUT_INVALID",
+      "The stated table figure is smaller than the sizing line it is derived from.",
+    );
+  }
   return {
     problems,
     pack_reads_per_day: exactQuotient(activeFellowSeconds, packCadence, "pack_reads_per_day"),
@@ -311,23 +547,128 @@ export function calculateFableWorkload(input: FableWorkedExampleInput): FableWor
       promotionsPerFellow,
       "working_fellows × promotions_per_fellow_day",
     ),
-    cursor_requests_per_second: exactQuotient(lurkers, cursorPoll, "cursor_requests_per_second"),
+    cursor_requests_per_second: cursorPerSecond,
     fable_stated_cursor_requests_per_second: 100,
+    cursor_requests_per_30_days_at_computed_peak: checkedProduct(
+      checkedProduct(cursorPerSecond, SECONDS_PER_DAY, "peak × seconds/day"),
+      DAYS_PER_MONTH,
+      "peak × seconds/day × days",
+    ),
+    cursor_requests_per_30_days_at_stated_rate: checkedProduct(
+      checkedProduct(100, SECONDS_PER_DAY, "stated × seconds/day"),
+      DAYS_PER_MONTH,
+      "stated × seconds/day × days",
+    ),
+    base_load_per_day: baseLoadPerDay,
+    fable_table_requests_per_day: tablePerDay,
+    sizing_line_requests_per_day: sizingPerDay,
+    sizing_line_requests_per_day_at_worked_example_duty_cycle: exactQuotient(
+      checkedProduct(sizingFellows, activeSeconds, "sizing fellows × worked-example seconds"),
+      packCadence,
+      "sizing_line_requests_per_day_at_worked_example_duty_cycle",
+    ),
+    storm_room_per_day: stormRoomPerDay,
+    // Integer seconds only; a rounded headline would hide how small this is.
+    storm_seconds_per_day_at_computed_peak: exactQuotient(
+      stormRoomPerDay,
+      cursorPerSecond,
+      "storm_seconds_per_day_at_computed_peak",
+    ),
+    ...(burst === undefined
+      ? {}
+      : {
+          declared_burst_requests_per_day: checkedProduct(
+            checkedProduct(cursorPerSecond, burst.seconds_per_occurrence, "peak × burst seconds"),
+            burst.occurrences_per_day,
+            "peak × burst seconds × occurrences",
+          ),
+        }),
   };
 }
 
 function sourceDiscrepancies(workload: FableWorkloadArithmetic): readonly SourceDiscrepancy[] {
-  if (workload.cursor_requests_per_second === workload.fable_stated_cursor_requests_per_second) {
-    return [];
-  }
-  return [
-    {
+  const found: SourceDiscrepancy[] = [];
+  if (workload.cursor_requests_per_second !== workload.fable_stated_cursor_requests_per_second) {
+    found.push({
       code: "FABLE_CURSOR_RATE_MISMATCH",
       stated: workload.fable_stated_cursor_requests_per_second,
       computed: workload.cursor_requests_per_second,
       unit: "requests / second",
-    },
-  ];
+    });
+  }
+  // The table row is the sizing line, not the worked example. Detected by the
+  // row matching the former and not the latter, rather than asserted.
+  if (workload.fable_table_requests_per_day !== workload.base_load_per_day) {
+    found.push({
+      code: "FABLE_TABLE_SCENARIO_MISMATCH",
+      table_requests_per_day: workload.fable_table_requests_per_day,
+      sizing_line_requests_per_day: workload.sizing_line_requests_per_day,
+      worked_example_base_load_per_day: workload.base_load_per_day,
+      storm_room_per_day: workload.storm_room_per_day,
+      unit: "requests / day",
+    });
+  }
+  if (
+    workload.sizing_line_requests_per_day !==
+    workload.sizing_line_requests_per_day_at_worked_example_duty_cycle
+  ) {
+    found.push({
+      code: "FABLE_DUTY_CYCLE_MISMATCH",
+      worked_example_active_seconds: FABLE_WORKED_EXAMPLE.active_seconds_per_fellow_day,
+      sizing_line_active_seconds: FABLE_WORKED_EXAMPLE.sizing_line_active_seconds_per_fellow_day,
+      sizing_line_requests_per_day: workload.sizing_line_requests_per_day,
+      sizing_line_requests_per_day_at_worked_example_duty_cycle:
+        workload.sizing_line_requests_per_day_at_worked_example_duty_cycle,
+      unit: "requests / day",
+    });
+  }
+  if (workload.declared_burst_requests_per_day === undefined) {
+    found.push({
+      code: "FABLE_BURST_SHAPE_UNDECLARED",
+      computed_peak_requests_per_second: workload.cursor_requests_per_second,
+      required_operator_inputs: ["seconds_per_occurrence", "occurrences_per_day"],
+      storm_room_per_day: workload.storm_room_per_day,
+      storm_seconds_per_day_at_computed_peak: workload.storm_seconds_per_day_at_computed_peak,
+    });
+  }
+  return found;
+}
+
+/** Exposed so the independence of the three arithmetic defects is testable. */
+export function costModelSourceDiscrepancies(
+  workload: FableWorkloadArithmetic,
+): readonly SourceDiscrepancy[] {
+  return sourceDiscrepancies(workload);
+}
+
+/**
+ * The billing identity, at the pure-arithmetic seam.
+ *
+ * A billed request is an INBOUND request to the Worker route. Cache hits and
+ * misses are billed alike; only CPU is avoided on a hit, and D1 is not read at
+ * all. So this deliberately ignores `handlerExecutions` and `d1RowsRead` — they
+ * are accepted only to make the independence explicit and checkable, and a
+ * caller that expected billing to fall with execution gets the same number.
+ *
+ * This is arithmetic over supplied counts, NOT a measurement: nothing here
+ * observes a real edge. `billed_worker_requests` and
+ * `worker_cache_hit_billing_rate` remain unknowns for exactly that reason.
+ */
+export function billedRequestsForInbound(
+  inboundRequests: number,
+  handlerExecutions: number,
+  d1RowsRead: number,
+): number {
+  const inbound = requireNonNegativeInteger(inboundRequests, "inboundRequests");
+  const executions = requireNonNegativeInteger(handlerExecutions, "handlerExecutions");
+  requireNonNegativeInteger(d1RowsRead, "d1RowsRead");
+  if (executions > inbound) {
+    throw new CostVerifierError(
+      "WORKLOAD_INPUT_INVALID",
+      "A Worker cannot execute more times than it was entered.",
+    );
+  }
+  return inbound;
 }
 
 export function receiptDigest(receiptBytes: Uint8Array): string {
@@ -359,6 +700,19 @@ function ratio(numerator: number, denominator: number): ExactObservedRatio {
 }
 
 const COST_MODEL_UNKNOWNS = [
+  // The quantity the whole reconciliation turns on. A cache HIT is still a
+  // billed request, so "it lands on the cheapest path" is true of CPU and D1
+  // and false of the request line. Listing it is the minimum honesty: the
+  // previous census had ten entries and omitted the one that is unbounded.
+  "billed_worker_requests",
+  "worker_cache_hit_billing_rate",
+  // Confirmed for requests by pinned primary text; the CPU half of the same
+  // distinction has no verified current quote, so it stays unknown rather than
+  // being asserted from a transcription.
+  "cpu_billing_on_cache_hit_primary_text",
+  // One bead-mandated URL no longer resolves to primary text; see
+  // COST_MODEL_PINNED_SOURCES.
+  "mandated_source_primary_text_unverified",
   "complete_write_row_totals",
   "pack_delta_and_cursor_rows",
   "worker_cpu_ms",
@@ -384,6 +738,8 @@ function unavailableResult(
     source_discrepancies: sourceDiscrepancies(workload),
     assumptions: FABLE_WORKED_EXAMPLE_ASSUMPTIONS,
     unknowns: COST_MODEL_UNKNOWNS,
+    pinned_sources: COST_MODEL_PINNED_SOURCES,
+    pinned_sources_fully_verified: pinnedSourcesFullyVerified(),
   };
 }
 
@@ -464,6 +820,8 @@ export function verifyCostModel(
     source_discrepancies: sourceDiscrepancies(workload),
     assumptions: FABLE_WORKED_EXAMPLE_ASSUMPTIONS,
     unknowns: COST_MODEL_UNKNOWNS,
+    pinned_sources: COST_MODEL_PINNED_SOURCES,
+    pinned_sources_fully_verified: pinnedSourcesFullyVerified(),
   };
 }
 

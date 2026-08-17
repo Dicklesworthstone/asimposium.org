@@ -10,12 +10,16 @@ import {
   type S2SettledWriteResult,
 } from "../apps/wire/src/krater/s2-client.ts";
 import {
+  billedRequestsForInbound,
   buildCostVerifierDiagnostic,
+  COST_MODEL_PINNED_SOURCES,
   calculateFableWorkload,
+  costModelSourceDiscrepancies,
   createReceiptReader,
   FABLE_WORKED_EXAMPLE,
   FABLE_WORKED_EXAMPLE_ASSUMPTIONS,
   MAX_S2_COST_RECEIPT_BYTES,
+  pinnedSourcesFullyVerified,
   REQUIRED_ROW_TOTAL_EXCLUSIONS,
   type ReceiptFileSystem,
   receiptDigest,
@@ -436,6 +440,18 @@ describe("S7 cost verifier", () => {
       promotions_per_day: 800,
       cursor_requests_per_second: 1_000,
       fable_stated_cursor_requests_per_second: 100,
+      // 10,000 / 10s sustained for 30 days, against the ~45M/mo table row.
+      cursor_requests_per_30_days_at_computed_peak: 2_592_000_000,
+      cursor_requests_per_30_days_at_stated_rate: 259_200_000,
+      base_load_per_day: 29_600,
+      fable_table_requests_per_day: 1_500_000,
+      // §10.1's 1,000 Fellows at 60s across a full day: 96% of the table row.
+      sizing_line_requests_per_day: 1_440_000,
+      // The same population at §15's inferred four hours: 6x smaller.
+      sizing_line_requests_per_day_at_worked_example_duty_cycle: 240_000,
+      storm_room_per_day: 60_000,
+      storm_seconds_per_day_at_computed_peak: 60,
+      // No declared_burst_requests_per_day: the shape is still undeclared.
     });
     expect(verifyCostModel().source_discrepancies).toEqual([
       {
@@ -444,8 +460,173 @@ describe("S7 cost verifier", () => {
         computed: 1_000,
         unit: "requests / second",
       },
+      {
+        code: "FABLE_TABLE_SCENARIO_MISMATCH",
+        table_requests_per_day: 1_500_000,
+        sizing_line_requests_per_day: 1_440_000,
+        worked_example_base_load_per_day: 29_600,
+        storm_room_per_day: 60_000,
+        unit: "requests / day",
+      },
+      {
+        code: "FABLE_DUTY_CYCLE_MISMATCH",
+        worked_example_active_seconds: 14_400,
+        sizing_line_active_seconds: 86_400,
+        sizing_line_requests_per_day: 1_440_000,
+        sizing_line_requests_per_day_at_worked_example_duty_cycle: 240_000,
+        unit: "requests / day",
+      },
+      {
+        code: "FABLE_BURST_SHAPE_UNDECLARED",
+        computed_peak_requests_per_second: 1_000,
+        required_operator_inputs: ["seconds_per_occurrence", "occurrences_per_day"],
+        storm_room_per_day: 60_000,
+        storm_seconds_per_day_at_computed_peak: 60,
+      },
     ]);
     expect(verifyCostModel().assumptions).toEqual(FABLE_WORKED_EXAMPLE_ASSUMPTIONS);
+  });
+
+  test("the three arithmetic discrepancies are independent, not one defect reported thrice", () => {
+    // Fixing the cursor slip alone leaves the table and duty-cycle defects.
+    const cursorFixed = calculateFableWorkload({ ...FABLE_WORKED_EXAMPLE, lurkers: 1_000 });
+    expect(cursorFixed.cursor_requests_per_second).toBe(100);
+    const codes = (workload: ReturnType<typeof calculateFableWorkload>) =>
+      costModelSourceDiscrepancies(workload).map((entry) => entry.code);
+    expect(codes(cursorFixed)).not.toContain("FABLE_CURSOR_RATE_MISMATCH");
+    expect(codes(cursorFixed)).toContain("FABLE_TABLE_SCENARIO_MISMATCH");
+    expect(codes(cursorFixed)).toContain("FABLE_DUTY_CYCLE_MISMATCH");
+
+    // Aligning the duty cycles clears only that one.
+    const dutyAligned = calculateFableWorkload({
+      ...FABLE_WORKED_EXAMPLE,
+      sizing_line_active_seconds_per_fellow_day: 14_400,
+    });
+    expect(codes(dutyAligned)).not.toContain("FABLE_DUTY_CYCLE_MISMATCH");
+    expect(codes(dutyAligned)).toContain("FABLE_CURSOR_RATE_MISMATCH");
+  });
+
+  test("PLANTED: a missing burst shape is refused and surfaced, never defaulted", () => {
+    // Absent: reported as a named decision the operator still owes.
+    const undeclared = calculateFableWorkload(FABLE_WORKED_EXAMPLE);
+    expect(undeclared.declared_burst_requests_per_day).toBeUndefined();
+    const gap = costModelSourceDiscrepancies(undeclared).find(
+      (entry) => entry.code === "FABLE_BURST_SHAPE_UNDECLARED",
+    );
+    expect(gap).toMatchObject({
+      computed_peak_requests_per_second: 1_000,
+      required_operator_inputs: ["seconds_per_occurrence", "occurrences_per_day"],
+    });
+
+    // Declared: computed, and the gap closes. 1,000 rps x 60s x 1/day = 60,000,
+    // exactly the room available, which is the calibration the operator needs.
+    const declared = calculateFableWorkload({
+      ...FABLE_WORKED_EXAMPLE,
+      burst: { seconds_per_occurrence: 60, occurrences_per_day: 1 },
+    });
+    expect(declared.declared_burst_requests_per_day).toBe(60_000);
+    expect(costModelSourceDiscrepancies(declared).map((entry) => entry.code)).not.toContain(
+      "FABLE_BURST_SHAPE_UNDECLARED",
+    );
+
+    // Half-declared is refused rather than completed with a default.
+    for (const half of [
+      { seconds_per_occurrence: 0, occurrences_per_day: 1 },
+      { seconds_per_occurrence: 60, occurrences_per_day: 0 },
+    ]) {
+      let error: unknown;
+      try {
+        calculateFableWorkload({ ...FABLE_WORKED_EXAMPLE, burst: half });
+      } catch (caught) {
+        error = caught;
+      }
+      expect(error).toMatchObject({ code: "WORKLOAD_INPUT_INVALID" });
+    }
+  });
+
+  test("PLANTED: suppressing every execution and D1 read does not reduce inbound billed requests", () => {
+    // The exact inference Fable §15 makes — "it lands on the cheapest path" —
+    // is true of CPU and D1 and false of the request line. This is the PURE
+    // ARITHMETIC seam: a cache hit removes the handler run, not the inbound
+    // request that is billed.
+    //
+    // BOUNDARY: there is no local /cursor harness in scope here, so this proves
+    // the identity the model relies on, NOT a measured edge hit ratio. The two
+    // measurement unknowns below stay unknown precisely because this test
+    // cannot close them.
+    const workload = calculateFableWorkload(FABLE_WORKED_EXAMPLE);
+    const inboundPerDay = workload.cursor_requests_per_second * 86_400;
+
+    for (const [label, executions, d1Rows] of [
+      ["every request executes the handler", inboundPerDay, inboundPerDay * 3],
+      ["half are served from cache", inboundPerDay / 2, (inboundPerDay / 2) * 3],
+      ["100% cache hit: no handler run, no D1 read", 0, 0],
+    ] as const) {
+      const billed = billedRequestsForInbound(inboundPerDay, executions, d1Rows);
+      // Invariant across all three: billing follows inbound, not work done.
+      expect(billed).toBe(inboundPerDay);
+      expect(billed).toBeGreaterThan(0);
+      // Where execution IS suppressed, billing must visibly diverge from it —
+      // that divergence is the defect §15's "cheapest path" wording hides.
+      if (executions < inboundPerDay) {
+        expect(billed).toBeGreaterThan(executions);
+      }
+      expect(label.length).toBeGreaterThan(0);
+    }
+    // The strongest form: zero work, full bill.
+    expect(billedRequestsForInbound(inboundPerDay, 0, 0)).toBe(inboundPerDay);
+    // And the seam refuses an impossible count rather than normalising it.
+    let overExecuted: unknown;
+    try {
+      billedRequestsForInbound(10, 11, 0);
+    } catch (caught) {
+      overExecuted = caught;
+    }
+    expect(overExecuted).toMatchObject({ code: "WORKLOAD_INPUT_INVALID" });
+
+    const result = verifyCostModel();
+    expect(result.unknowns).toContain("billed_worker_requests");
+    expect(result.unknowns).toContain("worker_cache_hit_billing_rate");
+    expect(result.status).toBe("blocked");
+  });
+
+  test("pinned sources carry current primary text, and an unverifiable one is flagged not invented", () => {
+    const result = verifyCostModel();
+    expect(result.pinned_sources).toEqual(COST_MODEL_PINNED_SOURCES);
+    for (const source of result.pinned_sources) {
+      expect(source.url.startsWith("https://developers.cloudflare.com/")).toBe(true);
+      expect(source.retrieved).toBe("2026-08-17");
+      if (source.verification === "current-primary-text") {
+        expect(typeof source.quote).toBe("string");
+        expect((source.quote ?? "").length).toBeGreaterThan(0);
+        expect(source.unverified_reason).toBeUndefined();
+      } else {
+        // No fabricated quote stands in for text that could not be confirmed.
+        expect(source.quote).toBeUndefined();
+        expect((source.unverified_reason ?? "").length).toBeGreaterThan(0);
+      }
+    }
+    // The load-bearing billed-vs-CPU sentence is quoted, not paraphrased.
+    expect(result.pinned_sources[0]?.quote).toContain(
+      "billed at the same per-request rate as requests that invoke the Worker",
+    );
+    // One mandated URL is unverifiable, so the citation set is NOT complete and
+    // the model says so rather than reporting four green sources.
+    expect(result.pinned_sources_fully_verified).toBe(false);
+    expect(pinnedSourcesFullyVerified()).toBe(false);
+    expect(result.unknowns).toContain("mandated_source_primary_text_unverified");
+    expect(result.unknowns).toContain("cpu_billing_on_cache_hit_primary_text");
+    // A hypothetical all-verified set would flip the flag, so it is not a constant.
+    expect(
+      pinnedSourcesFullyVerified([
+        {
+          url: "https://x",
+          retrieved: "2026-08-17",
+          verification: "current-primary-text",
+          quote: "q",
+        },
+      ]),
+    ).toBe(true);
   });
 
   test("rejects non-integral cadence rather than rounding", () => {
@@ -525,7 +706,13 @@ describe("S7 cost verifier", () => {
         },
         local_p95_ms: { write_phase: 20, preflight_wall: 10, write_claim_wall: 110 },
       },
-      source_discrepancies: [{ code: "FABLE_CURSOR_RATE_MISMATCH", stated: 100, computed: 1_000 }],
+      source_discrepancies: [
+        { code: "FABLE_CURSOR_RATE_MISMATCH", stated: 100, computed: 1_000 },
+        { code: "FABLE_TABLE_SCENARIO_MISMATCH", storm_room_per_day: 60_000 },
+        { code: "FABLE_DUTY_CYCLE_MISMATCH", sizing_line_requests_per_day: 1_440_000 },
+        { code: "FABLE_BURST_SHAPE_UNDECLARED", computed_peak_requests_per_second: 1_000 },
+      ],
+      pinned_sources_fully_verified: false,
     });
     expect(result.unknowns).toEqual(verifyCostModel().unknowns);
     expect(result.unknowns).toEqual(
