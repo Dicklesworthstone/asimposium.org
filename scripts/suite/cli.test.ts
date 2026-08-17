@@ -167,20 +167,6 @@ function processIdsForMarker(marker: string): number[] {
   return pids;
 }
 
-async function waitForMarkerProcesses(
-  marker: string,
-  accepts: (pids: readonly number[]) => boolean,
-  timeoutMs = 10_000,
-): Promise<number[]> {
-  const deadline = performance.now() + timeoutMs;
-  while (performance.now() < deadline) {
-    const pids = processIdsForMarker(marker);
-    if (accepts(pids)) return pids;
-    await Bun.sleep(20);
-  }
-  throw new Error(`marker process observation timed out: ${marker}`);
-}
-
 function stopDetachedFixture(marker: string): void {
   for (const pid of processIdsForMarker(marker)) {
     try {
@@ -191,7 +177,7 @@ function stopDetachedFixture(marker: string): void {
   }
 }
 
-function spawnCrashableOwnedCommand(marker: string, targetSource: string) {
+function spawnCrashableOwnedCommand(checkpoint: "ready" | "completed", targetSource: string) {
   const helperSource = `
     import { runOwnedCommand } from ${JSON.stringify(pathToFileURL(CLI).href)};
     await runOwnedCommand({
@@ -199,15 +185,118 @@ function spawnCrashableOwnedCommand(marker: string, targetSource: string) {
       cwd: ${JSON.stringify(process.cwd())},
       env: ${JSON.stringify(childEnvironment())},
       timeoutMs: 30_000,
+      onLifecycleCheckpoint: async (phase, supervisorPid) => {
+        if (phase !== ${JSON.stringify(checkpoint)}) return;
+        process.stdout.write("checkpoint " + phase + " " + supervisorPid + "\\n");
+        await Bun.sleep(30_000);
+      },
     });
   `;
   return Bun.spawn({
-    cmd: ["bun", "-e", helperSource, marker],
+    cmd: ["bun", "-e", helperSource],
     env: childEnvironment(),
     stdin: "ignore",
-    stdout: "ignore",
-    stderr: "ignore",
+    stdout: "pipe",
+    stderr: "pipe",
   });
+}
+
+async function waitForLifecycleCheckpoint(
+  helper: ReturnType<typeof Bun.spawn>,
+  expected: "ready" | "completed",
+  timeoutMs = 30_000,
+): Promise<number> {
+  const reader = (helper.stdout as ReadableStream<Uint8Array>).getReader();
+  const observation = (async (): Promise<string> => {
+    let captured = "";
+    while (!captured.includes("\n")) {
+      const next = await reader.read();
+      if (next.done) {
+        const exitCode = await helper.exited;
+        const detail = await new Response(helper.stderr).text();
+        throw new Error(
+          `checkpoint helper exited ${exitCode} before publishing readiness: ${detail.slice(0, 1_024)}`,
+        );
+      }
+      captured += new TextDecoder().decode(next.value);
+      if (Buffer.byteLength(captured) > 256) {
+        throw new Error("checkpoint helper output exceeded 256 bytes");
+      }
+    }
+    return captured;
+  })();
+  const line = await Promise.race([observation, Bun.sleep(timeoutMs).then(() => undefined)]);
+  if (line === undefined) {
+    await reader.cancel();
+    throw new Error(`checkpoint helper timed out before ${expected}`);
+  }
+  reader.releaseLock();
+  const match = /^checkpoint (ready|completed) ([1-9][0-9]*)\n$/u.exec(line);
+  const supervisorPid = Number(match?.[2]);
+  if (match?.[1] !== expected || !Number.isSafeInteger(supervisorPid) || supervisorPid <= 1) {
+    throw new Error(`malformed checkpoint helper output for ${expected}`);
+  }
+  return supervisorPid;
+}
+
+async function ownedGroupPids(pgid: number, timeoutMs = 1_000): Promise<number[]> {
+  const child = Bun.spawn({
+    cmd: ["/usr/bin/pgrep", "-g", String(pgid), ".*"],
+    env: childEnvironment(),
+    stdin: "ignore",
+    stdout: "pipe",
+    stderr: "pipe",
+  });
+  const stdout = new Response(child.stdout).text();
+  const stderr = new Response(child.stderr).text();
+  const exitCode = await Promise.race([child.exited, Bun.sleep(timeoutMs).then(() => undefined)]);
+  if (exitCode === undefined) {
+    child.kill("SIGKILL");
+    await child.exited;
+    throw new Error(`owned group ${pgid} inspection timed out`);
+  }
+  const [stdoutText, stderrText] = await Promise.all([stdout, stderr]);
+  if (stderrText !== "" || (exitCode !== 0 && exitCode !== 1)) {
+    throw new Error(`owned group ${pgid} inspection was unproven`);
+  }
+  if (exitCode === 1) {
+    if (stdoutText !== "") throw new Error(`owned group ${pgid} empty census had output`);
+    return [];
+  }
+  const lines = stdoutText.endsWith("\n")
+    ? stdoutText.slice(0, -1).split("\n")
+    : stdoutText.split("\n");
+  const pids = lines.map(Number);
+  if (
+    lines.length === 0 ||
+    lines.some((line) => !/^[1-9][0-9]*$/u.test(line)) ||
+    pids.some((pid) => !Number.isSafeInteger(pid)) ||
+    new Set(pids).size !== pids.length
+  ) {
+    throw new Error(`owned group ${pgid} census was malformed`);
+  }
+  return pids;
+}
+
+async function waitForOwnedGroupEmpty(pgid: number, timeoutMs = 15_000): Promise<void> {
+  const deadline = performance.now() + timeoutMs;
+  let lastPids: number[] = [];
+  while (performance.now() < deadline) {
+    lastPids = await ownedGroupPids(pgid);
+    if (lastPids.length === 0) return;
+    await Bun.sleep(20);
+  }
+  throw new Error(`owned group ${pgid} remained live: ${lastPids.join(",")}`);
+}
+
+async function stopOwnedFixtureGroup(pgid: number | undefined): Promise<void> {
+  if (pgid === undefined) return;
+  try {
+    process.kill(-pgid, "SIGKILL");
+  } catch {
+    // The lease normally retires the exact group before test cleanup.
+  }
+  await waitForOwnedGroupEmpty(pgid);
 }
 
 function aggregateOutputCommand(totalCapturedBytes: number, includeExitedControl: boolean): string {
@@ -377,56 +466,64 @@ describe("owned session launcher", () => {
   });
 
   test("dispatcher death retires a still-running target through the parent lease", async () => {
-    const marker = `suite-parent-lease-live-${crypto.randomUUID()}`;
+    let supervisorPid: number | undefined;
     const helper = spawnCrashableOwnedCommand(
-      marker,
-      `my $marker = ${JSON.stringify(marker)}; $SIG{TERM} = sub {}; $SIG{HUP} = sub {}; while (1) { sleep 1; }`,
+      "ready",
+      "$SIG{TERM} = sub {}; $SIG{HUP} = sub {}; while (1) { sleep 1; }",
     );
     try {
-      const live = await waitForMarkerProcesses(marker, (pids) => pids.length >= 3);
-      expect(live).toContain(helper.pid);
+      supervisorPid = await waitForLifecycleCheckpoint(helper, "ready");
+      expect(await ownedGroupPids(supervisorPid)).toEqual(expect.arrayContaining([supervisorPid]));
+      expect((await ownedGroupPids(supervisorPid)).length).toBeGreaterThanOrEqual(2);
 
       helper.kill("SIGKILL");
       await helper.exited;
-      expect(await waitForMarkerProcesses(marker, (pids) => pids.length === 0)).toEqual([]);
+      await waitForOwnedGroupEmpty(supervisorPid);
     } finally {
       try {
         helper.kill("SIGKILL");
       } catch {
         // The planted dispatcher is expected to be gone.
       }
-      stopDetachedFixture(marker);
+      await stopOwnedFixtureGroup(supervisorPid);
     }
-  }, 20_000);
+  }, 60_000);
 
   test("dispatcher death retires a supervisor parked after target exit", async () => {
-    const marker = `suite-parent-lease-parked-${crypto.randomUUID()}`;
-    const helper = spawnCrashableOwnedCommand(
-      marker,
-      `my $marker = ${JSON.stringify(marker)}; select undef, undef, undef, 1; exit 0;`,
-    );
+    let supervisorPid: number | undefined;
+    const helper = spawnCrashableOwnedCommand("completed", "exit 0;");
     try {
-      expect(await waitForMarkerProcesses(marker, (pids) => pids.length >= 3)).toContain(
-        helper.pid,
-      );
-      const parked = await waitForMarkerProcesses(
-        marker,
-        (pids) => pids.length === 2 && pids.includes(helper.pid),
-      );
-      expect(parked).toContain(helper.pid);
+      supervisorPid = await waitForLifecycleCheckpoint(helper, "completed");
+      expect(await ownedGroupPids(supervisorPid)).toEqual([supervisorPid]);
 
       helper.kill("SIGKILL");
       await helper.exited;
-      expect(await waitForMarkerProcesses(marker, (pids) => pids.length === 0)).toEqual([]);
+      await waitForOwnedGroupEmpty(supervisorPid);
     } finally {
       try {
         helper.kill("SIGKILL");
       } catch {
         // The planted dispatcher is expected to be gone.
       }
-      stopDetachedFixture(marker);
+      await stopOwnedFixtureGroup(supervisorPid);
     }
-  }, 20_000);
+  }, 60_000);
+
+  test("the target sees EOF instead of the supervisor parent lease on stdin", async () => {
+    const result = await runOwnedCommand({
+      command: [
+        "perl",
+        "-e",
+        "my $bytes = sysread(STDIN, my $body, 1); exit((defined($bytes) && $bytes == 0) ? 0 : 1);",
+      ],
+      cwd: process.cwd(),
+      env: childEnvironment(),
+      timeoutMs: 2_000,
+    });
+
+    expect(result.outcome).toBe("exited");
+    expect(result.exitCode).toBe(0);
+  });
 
   test.each([
     ["exit 1 with stdout", 'print "999\\n"; exit 1;'],

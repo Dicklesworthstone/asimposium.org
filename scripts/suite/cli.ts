@@ -222,7 +222,7 @@ export interface OwnedCommandOptions {
   pipeDrainMs?: number;
   retainedStreamBytes?: number;
   retainedOutputBytes?: number;
-  /** Test seam only: production always inspects with the absolute /bin/ps command below. */
+  /** Test seam only: production always inspects with the absolute /usr/bin/pgrep command below. */
   inspectionCommand?: readonly string[];
   inspectionTimeoutMs?: number;
   inspectionStreamBytes?: number;
@@ -1004,8 +1004,8 @@ async function releaseOrKillOwnedSession(
     return finalCensus.members.length === 0 ? undefined : "ownership-unproven";
   };
 
-  // A supervisor-side `-1` means its own post-target ps snapshot failed. It is
-  // not authority to skip the host's fresh bounded census.
+  // The supervisor intentionally emits `-1`: post-target census authority lives
+  // only in this parent's fresh, bounded, group-scoped inspection.
   void memberCount;
   const initial = await inspectOwnedSession(leaderPid, inspection, cleanupDeadlineAt);
   if (initial.state === "inspection-unproven") return abandon("inspection-unproven");
@@ -1017,9 +1017,8 @@ async function releaseOrKillOwnedSession(
     if (term === "inspection-unproven") return abandon("inspection-unproven");
     if (term !== "signalled") return abandon("ownership-unproven");
     if (!(await sleepBefore(termGraceMs, cleanupDeadlineAt))) return abandon("ownership-unproven");
-    // The nonce-bound supervisor saw this residual in its own group immediately
-    // after reaping the target. Escalate even if a host ps snapshot races it: the
-    // still-live direct leader pins the group identity until this signal is sent.
+    // The fresh bounded host census saw this residual while the still-live direct
+    // leader pinned the group identity. Escalate without trusting product bytes.
     if (hadDescendant) {
       const killed = await killOwnedGroupAndProveEmpty();
       if (killed !== undefined) return killed;
@@ -1145,169 +1144,172 @@ export async function runOwnedCommand(options: OwnedCommandOptions): Promise<Own
   const ownershipLease = child.stdin;
   try {
     const stdout = captureBoundedPipe(
-    child.stdout as ReadableStream<Uint8Array>,
-    streamLimitBytes,
-    budget,
-    undefined,
-    () => options.onPipeCancelRequested?.("stdout"),
-  );
-  const stderr = captureBoundedPipe(
-    child.stderr as ReadableStream<Uint8Array>,
-    streamLimitBytes,
-    budget,
-    controlPrefix,
-    () => options.onPipeCancelRequested?.("stderr"),
-  );
-  const termGraceMs = options.termGraceMs ?? OWNED_PROCESS_TERM_GRACE_MS;
-  const killReapMs = options.killReapMs ?? OWNED_PROCESS_KILL_REAP_MS;
-  const pipeDrainMs = options.pipeDrainMs ?? OWNED_PROCESS_PIPE_DRAIN_MS;
-  const startedAt = performance.now();
-  let outcome: OwnedCommandOutcome = "ownership-unproven";
-  let exitCode: number | undefined;
-  let signal: string | undefined;
-  let cleanupProven: boolean | undefined;
+      child.stdout as ReadableStream<Uint8Array>,
+      streamLimitBytes,
+      budget,
+      undefined,
+      () => options.onPipeCancelRequested?.("stdout"),
+    );
+    const stderr = captureBoundedPipe(
+      child.stderr as ReadableStream<Uint8Array>,
+      streamLimitBytes,
+      budget,
+      controlPrefix,
+      () => options.onPipeCancelRequested?.("stderr"),
+    );
+    const termGraceMs = options.termGraceMs ?? OWNED_PROCESS_TERM_GRACE_MS;
+    const killReapMs = options.killReapMs ?? OWNED_PROCESS_KILL_REAP_MS;
+    const pipeDrainMs = options.pipeDrainMs ?? OWNED_PROCESS_PIPE_DRAIN_MS;
+    const startedAt = performance.now();
+    let outcome: OwnedCommandOutcome = "ownership-unproven";
+    let exitCode: number | undefined;
+    let signal: string | undefined;
+    let cleanupProven: boolean | undefined;
 
-  // Product output is not authority. Even if it crosses a retained-byte ceiling
-  // first, wait for the nonce-bound ready record and pin it to Bun's direct child
-  // before any group signal can be considered owned.
-  const supervisorPid = await valueBefore(stderr.ready, options.timeoutMs);
-  if (supervisorPid !== undefined && supervisorPid === child.pid) {
-    await options.onLifecycleCheckpoint?.("ready", supervisorPid);
-  }
-  if (supervisorPid === undefined) {
-    // A command deadline may elapse while its ready record is still queued. The
-    // direct child PID is a separate OS fact: only a fresh bounded census may
-    // promote it to a cleanup target. It never promotes pre-ready product bytes
-    // into a trusted output-overrun result.
-    const cleanup = await releaseOrKillOwnedSession(
-      child,
-      child.pid,
-      termGraceMs,
-      killReapMs,
-      true,
-      undefined,
-      inspector,
-    );
-    cleanupProven = cleanup === "timeout";
-    outcome =
-      stdout.overflowed() || stderr.overflowed()
-        ? "ownership-unproven"
-        : cleanup === "timeout"
-          ? "timeout"
-          : (cleanup ?? "spawn-failed");
-  } else if (supervisorPid !== child.pid) {
-    const cleanup = await releaseOrKillOwnedSession(
-      child,
-      child.pid,
-      termGraceMs,
-      killReapMs,
-      true,
-      undefined,
-      inspector,
-    );
-    cleanupProven = cleanup === "timeout";
-    outcome = "ownership-unproven";
-  } else {
-    const finishOutputOverrun = async (): Promise<void> => {
-      const cleanup = await terminateForOutputOverrun(
+    // Product output is not authority. Even if it crosses a retained-byte ceiling
+    // first, wait for the nonce-bound ready record and pin it to Bun's direct child
+    // before any group signal can be considered owned.
+    const supervisorPid = await valueBefore(stderr.ready, options.timeoutMs);
+    if (supervisorPid !== undefined && supervisorPid === child.pid) {
+      await options.onLifecycleCheckpoint?.("ready", supervisorPid);
+    }
+    if (supervisorPid === undefined) {
+      // A command deadline may elapse while its ready record is still queued. The
+      // direct child PID is a separate OS fact: only a fresh bounded census may
+      // promote it to a cleanup target. It never promotes pre-ready product bytes
+      // into a trusted output-overrun result.
+      const cleanup = await releaseOrKillOwnedSession(
         child,
-        supervisorPid,
+        child.pid,
         termGraceMs,
         killReapMs,
+        true,
+        undefined,
         inspector,
       );
-      if (cleanup === "inspection-unproven" || cleanup === "ownership-unproven") {
-        cleanupProven = false;
-        outcome = cleanup;
-      } else {
-        cleanupProven = cleanup === "timeout";
-        outcome = "output-overrun";
-      }
-    };
-    if (stdout.overflowed() || stderr.overflowed()) {
-      await finishOutputOverrun();
-    } else {
-      const remaining = Math.max(0, options.timeoutMs - Math.round(performance.now() - startedAt));
-      const completion = await valueBefore(
-        Promise.race<CompletionObservation>([
-          stderr.completion.then((control) => ({ kind: "completed", control })),
-          stdout.overrun.then(() => ({ kind: "output-overrun" })),
-          stderr.overrun.then(() => ({ kind: "output-overrun" })),
-        ]),
-        remaining,
+      cleanupProven = cleanup === "timeout";
+      outcome =
+        stdout.overflowed() || stderr.overflowed()
+          ? "ownership-unproven"
+          : cleanup === "timeout"
+            ? "timeout"
+            : (cleanup ?? "spawn-failed");
+    } else if (supervisorPid !== child.pid) {
+      const cleanup = await releaseOrKillOwnedSession(
+        child,
+        child.pid,
+        termGraceMs,
+        killReapMs,
+        true,
+        undefined,
+        inspector,
       );
-      if (completion?.kind === "output-overrun") {
-        await finishOutputOverrun();
-      } else if (completion === undefined || completion.control === undefined) {
-        outcome =
-          (await releaseOrKillOwnedSession(
-            child,
-            supervisorPid,
-            termGraceMs,
-            killReapMs,
-            true,
-            undefined,
-            inspector,
-          )) ?? "ownership-unproven";
-      } else {
-        const control = completion.control;
-        exitCode = control.exitCode;
-        signal = control.signal;
-        if (stdout.overflowed() || stderr.overflowed()) {
-          await finishOutputOverrun();
-        } else if (control.supervisorPid !== supervisorPid || control.kind === "start-failed") {
-          const cleanup = await releaseOrKillOwnedSession(
-            child,
-            supervisorPid,
-            termGraceMs,
-            killReapMs,
-            true,
-            undefined,
-            inspector,
-          );
-          cleanupProven = cleanup === "timeout";
-          outcome = control.kind === "start-failed" ? "spawn-failed" : "ownership-unproven";
+      cleanupProven = cleanup === "timeout";
+      outcome = "ownership-unproven";
+    } else {
+      const finishOutputOverrun = async (): Promise<void> => {
+        const cleanup = await terminateForOutputOverrun(
+          child,
+          supervisorPid,
+          termGraceMs,
+          killReapMs,
+          inspector,
+        );
+        if (cleanup === "inspection-unproven" || cleanup === "ownership-unproven") {
+          cleanupProven = false;
+          outcome = cleanup;
         } else {
-          await options.onLifecycleCheckpoint?.("completed", supervisorPid);
+          cleanupProven = cleanup === "timeout";
+          outcome = "output-overrun";
+        }
+      };
+      if (stdout.overflowed() || stderr.overflowed()) {
+        await finishOutputOverrun();
+      } else {
+        const remaining = Math.max(
+          0,
+          options.timeoutMs - Math.round(performance.now() - startedAt),
+        );
+        const completion = await valueBefore(
+          Promise.race<CompletionObservation>([
+            stderr.completion.then((control) => ({ kind: "completed", control })),
+            stdout.overrun.then(() => ({ kind: "output-overrun" })),
+            stderr.overrun.then(() => ({ kind: "output-overrun" })),
+          ]),
+          remaining,
+        );
+        if (completion?.kind === "output-overrun") {
+          await finishOutputOverrun();
+        } else if (completion === undefined || completion.control === undefined) {
           outcome =
             (await releaseOrKillOwnedSession(
               child,
               supervisorPid,
               termGraceMs,
               killReapMs,
-              false,
-              control.memberCount,
+              true,
+              undefined,
               inspector,
-            )) ?? "exited";
+            )) ?? "ownership-unproven";
+        } else {
+          const control = completion.control;
+          exitCode = control.exitCode;
+          signal = control.signal;
+          if (stdout.overflowed() || stderr.overflowed()) {
+            await finishOutputOverrun();
+          } else if (control.supervisorPid !== supervisorPid || control.kind === "start-failed") {
+            const cleanup = await releaseOrKillOwnedSession(
+              child,
+              supervisorPid,
+              termGraceMs,
+              killReapMs,
+              true,
+              undefined,
+              inspector,
+            );
+            cleanupProven = cleanup === "timeout";
+            outcome = control.kind === "start-failed" ? "spawn-failed" : "ownership-unproven";
+          } else {
+            await options.onLifecycleCheckpoint?.("completed", supervisorPid);
+            outcome =
+              (await releaseOrKillOwnedSession(
+                child,
+                supervisorPid,
+                termGraceMs,
+                killReapMs,
+                false,
+                control.memberCount,
+                inspector,
+              )) ?? "exited";
+          }
         }
       }
     }
-  }
 
-  // A typed lifecycle failure never retains a local pipe reader while bounded
-  // cleanup is being assessed. `cancel()` is one-shot and never awaits a
-  // detached inheritor's pipe close; normal successful exits still get their
-  // bounded drain before release.
-  if (outcome !== "exited") {
-    cancelCapturedPipes([stdout, stderr]);
-  }
-  const drained = await drainWithin([stdout, stderr], pipeDrainMs);
-  if (outcome === "exited" && (stdout.overflowed() || stderr.overflowed())) {
-    outcome = "output-overrun";
-    cleanupProven = true;
-  } else if (outcome === "exited" && !drained) {
-    outcome = "pipe-drain-unproven";
-  }
+    // A typed lifecycle failure never retains a local pipe reader while bounded
+    // cleanup is being assessed. `cancel()` is one-shot and never awaits a
+    // detached inheritor's pipe close; normal successful exits still get their
+    // bounded drain before release.
+    if (outcome !== "exited") {
+      cancelCapturedPipes([stdout, stderr]);
+    }
+    const drained = await drainWithin([stdout, stderr], pipeDrainMs);
+    if (outcome === "exited" && (stdout.overflowed() || stderr.overflowed())) {
+      outcome = "output-overrun";
+      cleanupProven = true;
+    } else if (outcome === "exited" && !drained) {
+      outcome = "pipe-drain-unproven";
+    }
     return {
-    outcome,
-    ...(exitCode === undefined ? {} : { exitCode }),
-    ...(signal === undefined ? {} : { signal }),
-    stdout: stdout.text(),
-    stderr: withoutControlRecords(stderr.text(), nonce),
-    retainedStdoutBytes: stdout.retainedBytes(),
-    retainedStderrBytes: stderr.retainedBytes(),
-    retainedOutputBytes: budget.retainedBytes,
-    ...(cleanupProven === undefined ? {} : { cleanupProven }),
+      outcome,
+      ...(exitCode === undefined ? {} : { exitCode }),
+      ...(signal === undefined ? {} : { signal }),
+      stdout: stdout.text(),
+      stderr: withoutControlRecords(stderr.text(), nonce),
+      retainedStdoutBytes: stdout.retainedBytes(),
+      retainedStderrBytes: stderr.retainedBytes(),
+      retainedOutputBytes: budget.retainedBytes,
+      ...(cleanupProven === undefined ? {} : { cleanupProven }),
     };
   } finally {
     // Normal release has already reaped the supervisor. Closing the writer here
