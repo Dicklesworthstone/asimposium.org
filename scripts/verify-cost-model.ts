@@ -148,6 +148,40 @@ export interface FableBurstInput {
 }
 
 /**
+ * The pinned Workers Standard pricing used to cost a fully sustained peak
+ * month. Every figure is an input, never a constant: a caller checking
+ * against a different retrieval date or a contracted rate states those
+ * figures rather than inheriting these.
+ */
+export interface FableOperatorCeilingPricing {
+  /** Retrieval date of the pinned pricing page. */
+  readonly retrieved_on: string;
+  readonly monthly_base_usd: number;
+  readonly included_requests_per_month: number;
+  readonly request_usd_per_million: number;
+  readonly included_cpu_ms_per_month: number;
+  readonly cpu_usd_per_million_ms: number;
+  /**
+   * Conservative bound for a one-integer edge read; declared so a measured
+   * value can replace it rather than be silently assumed.
+   */
+  readonly assumed_cursor_cpu_ms_per_request: number;
+}
+
+/**
+ * The operator's affordability decision. A ceiling that covers a fully
+ * sustained peak month makes storm duration and frequency non-load-bearing
+ * for affordability — they remain efficiency telemetry. Absent is a reported
+ * state, never a default: with no ceiling and no burst shape, no monthly
+ * reconciliation exists.
+ */
+export interface FableOperatorCeilingInput {
+  readonly usd_per_month: number;
+  readonly accepted_on: string;
+  readonly pricing: FableOperatorCeilingPricing;
+}
+
+/**
  * What §10.1's 1,000-Fellow sizing line does and does not account for.
  *
  * The line is a pack-read figure. Every other request class the same population
@@ -198,6 +232,14 @@ export interface FableWorkedExampleInput {
    */
   readonly burst?: FableBurstInput;
   /**
+   * The operator's affordability ceiling decision (asimposiumorg-way,
+   * accepted 2026-08-17). When present, the verifier costs a fully sustained
+   * peak month at the declared pinned pricing and reconciles against the
+   * ceiling; the burst shape then remains undeclared without blocking the
+   * affordability conclusion.
+   */
+  readonly operator_ceiling?: FableOperatorCeilingInput;
+  /**
    * The §10.1 sizing line the §15 table figure actually comes from. Kept as an
    * input so the table-scenario and duty-cycle discrepancies are computed from
    * declared numbers rather than asserted in prose.
@@ -226,15 +268,34 @@ export const FABLE_WORKED_EXAMPLE: FableWorkedExampleInput = {
   promotions_per_fellow_day: 10,
   lurkers: 10_000,
   cursor_poll_seconds: 10,
-  fable_stated_cursor_requests_per_second: 100,
+  // §15 was corrected on 2026-08-17 to state the rate its own cadence
+  // arithmetic produces (10,000 lurkers / 10 s = 1,000); it previously
+  // printed 100. The check remains so a future edit cannot silently
+  // reintroduce the slip.
+  fable_stated_cursor_requests_per_second: 1_000,
   // §15 prints these to one significant figure; 19,200 and 9,600 are what its
   // own cadences produce. Both are recorded so neither can be quietly adopted
   // as the other.
   fable_displayed_pack_reads_per_day: 19_000,
   fable_displayed_workshop_pushes_per_day: 10_000,
   fable_displayed_promotions_per_day: 800,
-  // No `burst`: Fable states no duration or frequency, and inventing one here
-  // would manufacture the reconciliation this bead exists to withhold.
+  // No `burst`: the operator resolved affordability with a ceiling instead
+  // (below), so storm duration and frequency stay undeclared without blocking
+  // the reconciliation. The pricing figures are pinned in the W12.4b report
+  // with the same retrieval date.
+  operator_ceiling: {
+    usd_per_month: 1_000,
+    accepted_on: "2026-08-17",
+    pricing: {
+      retrieved_on: "2026-08-17",
+      monthly_base_usd: 5,
+      included_requests_per_month: 10_000_000,
+      request_usd_per_million: 0.3,
+      included_cpu_ms_per_month: 30_000_000,
+      cpu_usd_per_million_ms: 0.02,
+      assumed_cursor_cpu_ms_per_request: 1,
+    },
+  },
   sizing_line_fellows: 1_000,
   // Fable §10.1 states no active-day duration for its 1,000-Fellow line either.
   // A full day is what its ~45M/mo figure actually requires, and recording that
@@ -328,6 +389,18 @@ export interface FableWorkloadArithmetic {
    * against any headroom, because no accepted headroom figure exists.
    */
   readonly declared_burst_requests_per_day?: number;
+  /**
+   * Present only when an operator ceiling is declared: the Workers cost of
+   * the computed peak sustained for a full 30 days at the declared pinned
+   * pricing, in USD rounded to cents. A bound estimate for the reconciliation
+   * — never published as a forecast.
+   */
+  readonly sustained_peak_monthly_cost_usd?: number;
+  /** Echoed from the input when declared, so discrepancy checks read the workload. */
+  readonly operator_ceiling_usd_per_month?: number;
+  /** Echoed decision metadata for the resolution record. */
+  readonly operator_ceiling_accepted_on?: string;
+  readonly operator_ceiling_pricing_retrieved_on?: string;
 }
 
 export interface ExpectedReceiptProvenance {
@@ -411,6 +484,7 @@ export interface CostVerificationResult {
   readonly workload: FableWorkloadArithmetic;
   readonly s2: AcceptedLocalMeasurement | UnavailableMeasurement;
   readonly source_discrepancies: readonly SourceDiscrepancy[];
+  readonly source_resolutions: readonly SourceResolution[];
   readonly assumptions: readonly CostModelAssumption[];
   readonly unknowns: readonly string[];
   /** Pinned billing citations, including any that could not be verified. */
@@ -432,7 +506,11 @@ export interface CostVerificationResult {
  */
 export type SourceDiscrepancy =
   | {
-      /** §15 states ~100 req/s; 10,000 lurkers / 10 s is 1,000. */
+      /**
+       * §15's printed cursor rate differs from its own cadence arithmetic.
+       * §15 printed "≈100 req/s" until the 2026-08-17 correction; the check
+       * remains so the slip cannot be silently reintroduced.
+       */
       readonly code: "FABLE_CURSOR_RATE_MISMATCH";
       readonly stated: number;
       readonly computed: number;
@@ -468,11 +546,25 @@ export type SourceDiscrepancy =
       /**
        * Not an arithmetic error: a missing operator decision. Peak is derived,
        * duration and frequency are not, and this verifier refuses to supply
-       * them. Until they are accepted, no monthly reconciliation exists.
+       * them. Emitted only when no affordability alternative stands: an
+       * operator ceiling that covers a fully sustained peak month makes the
+       * burst shape non-load-bearing (recorded as a resolution, not here).
        */
       readonly code: "FABLE_BURST_SHAPE_UNDECLARED";
       readonly computed_peak_requests_per_second: number;
       readonly required_operator_inputs: readonly ["seconds_per_occurrence", "occurrences_per_day"];
+    }
+  | {
+      /**
+       * The operator accepted a ceiling that a fully sustained peak month
+       * exceeds at the declared pinned pricing. Affordability is then NOT
+       * established: a burst shape, a higher ceiling, or cheaper serving must
+       * be decided.
+       */
+      readonly code: "FABLE_OPERATOR_CEILING_EXCEEDED";
+      readonly ceiling_usd_per_month: number;
+      readonly sustained_peak_monthly_cost_usd: number;
+      readonly unit: "usd / month";
     }
   | {
       /**
@@ -526,6 +618,28 @@ export type SourceDiscrepancy =
       readonly authority: "exact_components";
       readonly unit: "requests / day";
     };
+
+/**
+ * Decisions that CLOSE a formerly open finding, recorded beside the
+ * discrepancies so the receipt shows both what is still open and what was
+ * resolved — and by whose decision, on which date, against which pinned
+ * figures.
+ */
+export type SourceResolution = {
+  /**
+   * The operator's accepted ceiling covers even a fully sustained peak month
+   * at the declared pinned pricing, so storm duration and frequency are
+   * non-load-bearing for affordability. The burst shape remains undeclared as
+   * a decision, not an oversight; it stays on the measurement obligations for
+   * efficiency telemetry.
+   */
+  readonly code: "OPERATOR_CEILING_COVERS_SUSTAINED_PEAK";
+  readonly ceiling_usd_per_month: number;
+  readonly sustained_peak_monthly_cost_usd: number;
+  readonly accepted_on: string;
+  readonly pricing_retrieved_on: string;
+  readonly unit: "usd / month";
+};
 
 export class CostVerifierError extends Error {
   constructor(
@@ -693,6 +807,37 @@ export function calculateFableWorkload(input: FableWorkedExampleInput): FableWor
     packCadence,
     "sizing_line_requests_per_day",
   );
+  const sustainedRequestsAtPeak = checkedProduct(
+    checkedProduct(cursorPerSecond, SECONDS_PER_DAY, "peak × seconds/day"),
+    DAYS_PER_MONTH,
+    "peak × seconds/day × days",
+  );
+  const ceiling = input.operator_ceiling;
+  let sustainedPeakMonthlyCostUsd: number | undefined;
+  if (ceiling !== undefined) {
+    const pricing = ceiling.pricing;
+    const excessRequests = Math.max(
+      0,
+      sustainedRequestsAtPeak - pricing.included_requests_per_month,
+    );
+    const excessCpuMs = Math.max(
+      0,
+      checkedProduct(
+        sustainedRequestsAtPeak,
+        pricing.assumed_cursor_cpu_ms_per_request,
+        "sustained requests × assumed cursor cpu ms",
+      ) - pricing.included_cpu_ms_per_month,
+    );
+    // Money is a bound estimate, not a ledger: cents rounding is declared and
+    // the figure is only ever compared against the ceiling, never published.
+    sustainedPeakMonthlyCostUsd =
+      Math.round(
+        (pricing.monthly_base_usd +
+          (excessRequests / 1_000_000) * pricing.request_usd_per_million +
+          (excessCpuMs / 1_000_000) * pricing.cpu_usd_per_million_ms) *
+          100,
+      ) / 100;
+  }
   // No storm-room subtraction is performed. `tablePerDay - sizingPerDay` is
   // arithmetically available and deliberately not taken: the sizing line
   // enumerates one request class, so the remainder is not headroom. See
@@ -712,11 +857,7 @@ export function calculateFableWorkload(input: FableWorkedExampleInput): FableWor
     ),
     cursor_requests_per_second: cursorPerSecond,
     fable_stated_cursor_requests_per_second: statedCursorRate,
-    cursor_requests_per_30_days_at_computed_peak: checkedProduct(
-      checkedProduct(cursorPerSecond, SECONDS_PER_DAY, "peak × seconds/day"),
-      DAYS_PER_MONTH,
-      "peak × seconds/day × days",
-    ),
+    cursor_requests_per_30_days_at_computed_peak: sustainedRequestsAtPeak,
     cursor_requests_per_30_days_at_stated_rate: checkedProduct(
       checkedProduct(statedCursorRate, SECONDS_PER_DAY, "stated × seconds/day"),
       DAYS_PER_MONTH,
@@ -753,6 +894,14 @@ export function calculateFableWorkload(input: FableWorkedExampleInput): FableWor
             burst.occurrences_per_day,
             "peak × burst seconds × occurrences",
           ),
+        }),
+    ...(ceiling === undefined
+      ? {}
+      : {
+          sustained_peak_monthly_cost_usd: sustainedPeakMonthlyCostUsd,
+          operator_ceiling_usd_per_month: ceiling.usd_per_month,
+          operator_ceiling_accepted_on: ceiling.accepted_on,
+          operator_ceiling_pricing_retrieved_on: ceiling.pricing.retrieved_on,
         }),
   };
 }
@@ -794,11 +943,29 @@ function sourceDiscrepancies(workload: FableWorkloadArithmetic): readonly Source
       unit: "requests / day",
     });
   }
-  if (workload.declared_burst_requests_per_day === undefined) {
+  const ceilingUsdPerMonth = workload.operator_ceiling_usd_per_month;
+  const sustainedCostUsd = workload.sustained_peak_monthly_cost_usd;
+  const ceilingCovers =
+    ceilingUsdPerMonth !== undefined &&
+    sustainedCostUsd !== undefined &&
+    sustainedCostUsd <= ceilingUsdPerMonth;
+  if (workload.declared_burst_requests_per_day === undefined && !ceilingCovers) {
     found.push({
       code: "FABLE_BURST_SHAPE_UNDECLARED",
       computed_peak_requests_per_second: workload.cursor_requests_per_second,
       required_operator_inputs: ["seconds_per_occurrence", "occurrences_per_day"],
+    });
+  }
+  if (
+    ceilingUsdPerMonth !== undefined &&
+    sustainedCostUsd !== undefined &&
+    sustainedCostUsd > ceilingUsdPerMonth
+  ) {
+    found.push({
+      code: "FABLE_OPERATOR_CEILING_EXCEEDED",
+      ceiling_usd_per_month: ceilingUsdPerMonth,
+      sustained_peak_monthly_cost_usd: sustainedCostUsd,
+      unit: "usd / month",
     });
   }
   // Raised whenever the sizing line leaves request classes unaccounted for. It
@@ -839,11 +1006,42 @@ function sourceDiscrepancies(workload: FableWorkloadArithmetic): readonly Source
   return found;
 }
 
+function sourceResolutions(workload: FableWorkloadArithmetic): readonly SourceResolution[] {
+  const ceilingUsdPerMonth = workload.operator_ceiling_usd_per_month;
+  const sustainedCostUsd = workload.sustained_peak_monthly_cost_usd;
+  if (
+    ceilingUsdPerMonth === undefined ||
+    sustainedCostUsd === undefined ||
+    sustainedCostUsd > ceilingUsdPerMonth ||
+    workload.operator_ceiling_accepted_on === undefined ||
+    workload.operator_ceiling_pricing_retrieved_on === undefined
+  ) {
+    return [];
+  }
+  return [
+    {
+      code: "OPERATOR_CEILING_COVERS_SUSTAINED_PEAK",
+      ceiling_usd_per_month: ceilingUsdPerMonth,
+      sustained_peak_monthly_cost_usd: sustainedCostUsd,
+      accepted_on: workload.operator_ceiling_accepted_on,
+      pricing_retrieved_on: workload.operator_ceiling_pricing_retrieved_on,
+      unit: "usd / month",
+    },
+  ];
+}
+
 /** Exposed so each finding's independence can be cleared and asserted separately. */
 export function costModelSourceDiscrepancies(
   workload: FableWorkloadArithmetic,
 ): readonly SourceDiscrepancy[] {
   return sourceDiscrepancies(workload);
+}
+
+/** Exposed so the resolution record can be asserted independently of the receipt. */
+export function costModelSourceResolutions(
+  workload: FableWorkloadArithmetic,
+): readonly SourceResolution[] {
+  return sourceResolutions(workload);
 }
 
 /**
@@ -947,6 +1145,7 @@ function unavailableResult(
     workload,
     s2: { state, artifact_digest: null },
     source_discrepancies: sourceDiscrepancies(workload),
+    source_resolutions: sourceResolutions(workload),
     assumptions: FABLE_WORKED_EXAMPLE_ASSUMPTIONS,
     unknowns: COST_MODEL_UNKNOWNS,
     pinned_sources: COST_MODEL_PINNED_SOURCES,
@@ -1029,6 +1228,7 @@ export function verifyCostModel(
       known_row_total_exclusions: receipt.known_row_total_exclusions,
     },
     source_discrepancies: sourceDiscrepancies(workload),
+    source_resolutions: sourceResolutions(workload),
     assumptions: FABLE_WORKED_EXAMPLE_ASSUMPTIONS,
     unknowns: COST_MODEL_UNKNOWNS,
     pinned_sources: COST_MODEL_PINNED_SOURCES,

@@ -24,9 +24,11 @@ import {
   COST_MODEL_PINNED_SOURCES,
   calculateFableWorkload,
   costModelSourceDiscrepancies,
+  costModelSourceResolutions,
   createReceiptReader,
   FABLE_WORKED_EXAMPLE,
   FABLE_WORKED_EXAMPLE_ASSUMPTIONS,
+  type FableWorkedExampleInput,
   MAX_S2_COST_RECEIPT_BYTES,
   pinnedSourcesFullyVerified,
   REQUIRED_ROW_TOTAL_EXCLUSIONS,
@@ -632,17 +634,29 @@ function assertUnreadableDiagnostic(
 }
 
 describe("S7 cost verifier", () => {
-  test("reproduces the derived worked-example arithmetic and exposes Fable's cursor mismatch", () => {
+  /**
+   * The scenario as it stood before the 2026-08-17 corrections: the 10x
+   * cursor slip still in the text and no operator affordability decision.
+   * The independence and refusal tests run against it because the corrected
+   * default no longer raises those findings — which is the point of the fix.
+   */
+  const FABLE_WORKED_EXAMPLE_PRE_DECISION: FableWorkedExampleInput = (() => {
+    const { operator_ceiling: _omitted, ...rest } = FABLE_WORKED_EXAMPLE;
+    return { ...rest, fable_stated_cursor_requests_per_second: 100 };
+  })();
+
+  test("reproduces the derived worked-example arithmetic and records the ceiling reconciliation", () => {
     expect(calculateFableWorkload(FABLE_WORKED_EXAMPLE)).toEqual({
       problems: 20,
       pack_reads_per_day: 19_200,
       workshop_pushes_per_day: 9_600,
       promotions_per_day: 800,
       cursor_requests_per_second: 1_000,
-      fable_stated_cursor_requests_per_second: 100,
+      // §15 was corrected 2026-08-17 to state the rate its cadence produces.
+      fable_stated_cursor_requests_per_second: 1_000,
       // 10,000 / 10s sustained for 30 days, against the ~45M/mo table row.
       cursor_requests_per_30_days_at_computed_peak: 2_592_000_000,
-      cursor_requests_per_30_days_at_stated_rate: 259_200_000,
+      cursor_requests_per_30_days_at_stated_rate: 2_592_000_000,
       // EXACT: 19,200 + 9,600 + 800. This is the worked-example base load.
       base_load_per_day: 29_600,
       // The sum of Fable's ROUNDED display values: 19,000 + 10,000 + 800. The
@@ -667,17 +681,19 @@ describe("S7 cost verifier", () => {
       ],
       worked_example_active_seconds_per_fellow_day: 14_400,
       sizing_line_active_seconds_per_fellow_day: 86_400,
+      // The operator-ceiling reconciliation: a fully sustained peak month at
+      // the pinned 2026-08-17 pricing. 2,582M excess requests × $0.30/M +
+      // 2,562M excess CPU-ms × $0.02/M + $5 base = $830.84.
+      sustained_peak_monthly_cost_usd: 830.84,
+      operator_ceiling_usd_per_month: 1_000,
+      operator_ceiling_accepted_on: "2026-08-17",
+      operator_ceiling_pricing_retrieved_on: "2026-08-17",
       // No storm_room_per_day and no storm_seconds_per_day_at_computed_peak:
       // neither is established, so neither is reported as a number.
-      // No declared_burst_requests_per_day: the shape is still undeclared.
+      // No declared_burst_requests_per_day: the operator resolved
+      // affordability with the ceiling, so the shape stays undeclared.
     });
     expect(verifyCostModel().source_discrepancies).toEqual([
-      {
-        code: "FABLE_CURSOR_RATE_MISMATCH",
-        stated: 100,
-        computed: 1_000,
-        unit: "requests / second",
-      },
       {
         code: "FABLE_TABLE_SCENARIO_MISMATCH",
         table_requests_per_day: 1_500_000,
@@ -692,11 +708,6 @@ describe("S7 cost verifier", () => {
         sizing_line_requests_per_day: 1_440_000,
         sizing_line_requests_per_day_at_worked_example_duty_cycle: 240_000,
         unit: "requests / day",
-      },
-      {
-        code: "FABLE_BURST_SHAPE_UNDECLARED",
-        computed_peak_requests_per_second: 1_000,
-        required_operator_inputs: ["seconds_per_occurrence", "occurrences_per_day"],
       },
       {
         code: "FABLE_STORM_ROOM_UNRESOLVED",
@@ -732,6 +743,16 @@ describe("S7 cost verifier", () => {
         },
         authority: "exact_components",
         unit: "requests / day",
+      },
+    ]);
+    expect(verifyCostModel().source_resolutions).toEqual([
+      {
+        code: "OPERATOR_CEILING_COVERS_SUSTAINED_PEAK",
+        ceiling_usd_per_month: 1_000,
+        sustained_peak_monthly_cost_usd: 830.84,
+        accepted_on: "2026-08-17",
+        pricing_retrieved_on: "2026-08-17",
+        unit: "usd / month",
       },
     ]);
     expect(verifyCostModel().assumptions).toEqual(FABLE_WORKED_EXAMPLE_ASSUMPTIONS);
@@ -773,7 +794,7 @@ describe("S7 cost verifier", () => {
     expect(exactlyDisplayed.fable_displayed_base_load_per_day).toBe(29_600);
     const clearedCodes = costModelSourceDiscrepancies(exactlyDisplayed).map((entry) => entry.code);
     expect(clearedCodes).not.toContain("FABLE_ROUNDED_DISPLAY_BASE_LOAD_MISMATCH");
-    expect(clearedCodes).toContain("FABLE_CURSOR_RATE_MISMATCH");
+    expect(clearedCodes).toContain("FABLE_STORM_ROOM_UNRESOLVED");
   });
 
   test("PLANTED: neither 60,000/day nor 1,470,200/day is published as storm room", () => {
@@ -839,8 +860,10 @@ describe("S7 cost verifier", () => {
       "FABLE_ROUNDED_DISPLAY_BASE_LOAD_MISMATCH",
     ] as const;
 
-    // The default scenario raises all six.
-    expect(codes(FABLE_WORKED_EXAMPLE).sort()).toEqual([...ALL].sort());
+    // The pre-decision scenario raises all six. The corrected default no
+    // longer raises the two the operator's decisions closed — which is what
+    // the first test asserts — so the independence proof runs here.
+    expect(codes(FABLE_WORKED_EXAMPLE_PRE_DECISION).sort()).toEqual([...ALL].sort());
 
     // Each entry is the single input change that closes exactly one of them.
     const repairs: Array<
@@ -870,7 +893,7 @@ describe("S7 cost verifier", () => {
     ];
 
     for (const [cleared, repair] of repairs) {
-      const remaining = codes({ ...FABLE_WORKED_EXAMPLE, ...repair });
+      const remaining = codes({ ...FABLE_WORKED_EXAMPLE_PRE_DECISION, ...repair });
       // The targeted defect is gone...
       expect(remaining).not.toContain(cleared);
       // ...and every other one survives untouched. A code that vanished here
@@ -915,8 +938,11 @@ describe("S7 cost verifier", () => {
   });
 
   test("PLANTED: a missing burst shape is refused and surfaced, never defaulted", () => {
-    // Absent: reported as a named decision the operator still owes.
-    const undeclared = calculateFableWorkload(FABLE_WORKED_EXAMPLE);
+    // Absent, with no affordability alternative standing: reported as a named
+    // decision the operator still owes. (The corrected default carries the
+    // operator ceiling, which covers this; the ceiling behavior has its own
+    // test below.)
+    const undeclared = calculateFableWorkload(FABLE_WORKED_EXAMPLE_PRE_DECISION);
     expect(undeclared.declared_burst_requests_per_day).toBeUndefined();
     const gap = costModelSourceDiscrepancies(undeclared).find(
       (entry) => entry.code === "FABLE_BURST_SHAPE_UNDECLARED",
@@ -952,6 +978,73 @@ describe("S7 cost verifier", () => {
       }
       expect(error).toMatchObject({ code: "WORKLOAD_INPUT_INVALID" });
     }
+  });
+
+  test("operator ceiling reconciliation: covers, exceeds, or stays open", () => {
+    // Covers (the corrected default): no burst demand, no exceedance, and the
+    // resolution record carries the exact sustained cost and decision dates.
+    const covered = calculateFableWorkload(FABLE_WORKED_EXAMPLE);
+    expect(covered.sustained_peak_monthly_cost_usd).toBe(830.84);
+    const coveredCodes = costModelSourceDiscrepancies(covered).map((entry) => entry.code);
+    expect(coveredCodes).not.toContain("FABLE_BURST_SHAPE_UNDECLARED");
+    expect(coveredCodes).not.toContain("FABLE_OPERATOR_CEILING_EXCEEDED");
+    expect(costModelSourceResolutions(covered)).toEqual([
+      {
+        code: "OPERATOR_CEILING_COVERS_SUSTAINED_PEAK",
+        ceiling_usd_per_month: 1_000,
+        sustained_peak_monthly_cost_usd: 830.84,
+        accepted_on: "2026-08-17",
+        pricing_retrieved_on: "2026-08-17",
+        unit: "usd / month",
+      },
+    ]);
+
+    // Exceeded: a ceiling below the sustained cost raises the exceedance AND
+    // keeps the burst-shape demand — a too-low ceiling is not a resolution.
+    const defaultCeiling = FABLE_WORKED_EXAMPLE.operator_ceiling;
+    if (defaultCeiling === undefined) throw new Error("the default declares the operator ceiling");
+    const exceeded = calculateFableWorkload({
+      ...FABLE_WORKED_EXAMPLE,
+      operator_ceiling: {
+        ...defaultCeiling,
+        usd_per_month: 100,
+      },
+    });
+    const exceededCodes = costModelSourceDiscrepancies(exceeded).map((entry) => entry.code);
+    expect(exceededCodes).toContain("FABLE_OPERATOR_CEILING_EXCEEDED");
+    expect(exceededCodes).toContain("FABLE_BURST_SHAPE_UNDECLARED");
+    expect(costModelSourceResolutions(exceeded)).toEqual([]);
+    const exceedance = costModelSourceDiscrepancies(exceeded).find(
+      (entry) => entry.code === "FABLE_OPERATOR_CEILING_EXCEEDED",
+    );
+    expect(exceedance).toMatchObject({
+      ceiling_usd_per_month: 100,
+      sustained_peak_monthly_cost_usd: 830.84,
+    });
+
+    // Undeclared: the pre-decision state owes the burst shape and records no
+    // resolution.
+    expect(
+      costModelSourceResolutions(calculateFableWorkload(FABLE_WORKED_EXAMPLE_PRE_DECISION)),
+    ).toEqual([]);
+
+    // Anti-vacuity: the sustained cost is computed from the declared pricing,
+    // not hard-coded. Doubling the request price doubles the request line:
+    // 2,582M × $0.60/M + 2,562M × $0.02/M + $5 = $1,605.44, over the ceiling.
+    const repriced = calculateFableWorkload({
+      ...FABLE_WORKED_EXAMPLE,
+      operator_ceiling: {
+        ...defaultCeiling,
+        pricing: {
+          ...defaultCeiling.pricing,
+          request_usd_per_million: 0.6,
+        },
+      },
+    });
+    expect(repriced.sustained_peak_monthly_cost_usd).toBe(1605.44);
+    expect(costModelSourceDiscrepancies(repriced).map((entry) => entry.code)).toContain(
+      "FABLE_OPERATOR_CEILING_EXCEEDED",
+    );
   });
 
   test("PLANTED: suppressing every execution and D1 read does not reduce inbound billed requests", () => {
@@ -1144,12 +1237,17 @@ describe("S7 cost verifier", () => {
         local_p95_ms: { write_phase: 20, preflight_wall: 10, write_claim_wall: 110 },
       },
       source_discrepancies: [
-        { code: "FABLE_CURSOR_RATE_MISMATCH", stated: 100, computed: 1_000 },
         { code: "FABLE_TABLE_SCENARIO_MISMATCH", worked_example_base_load_per_day: 29_600 },
         { code: "FABLE_DUTY_CYCLE_MISMATCH", sizing_line_requests_per_day: 1_440_000 },
-        { code: "FABLE_BURST_SHAPE_UNDECLARED", computed_peak_requests_per_second: 1_000 },
         { code: "FABLE_STORM_ROOM_UNRESOLVED", enumerated_request_classes: ["pack_reads"] },
         { code: "FABLE_ROUNDED_DISPLAY_BASE_LOAD_MISMATCH", rounded_display_sum_per_day: 29_800 },
+      ],
+      source_resolutions: [
+        {
+          code: "OPERATOR_CEILING_COVERS_SUSTAINED_PEAK",
+          ceiling_usd_per_month: 1_000,
+          sustained_peak_monthly_cost_usd: 830.84,
+        },
       ],
       pinned_sources_fully_verified: false,
     });
