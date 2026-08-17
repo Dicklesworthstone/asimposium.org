@@ -10,6 +10,7 @@ import type { D1Database, ExecutionContext } from "@cloudflare/workers-types";
 import {
   bodyEchoesBearer,
   firstSafeReadUrl,
+  isTrustedLocalD1Origin,
   SAFE_FIRST_READ_PATHS,
 } from "../../src/enrollment/local-d1-client";
 import worker from "../../src/enrollment/local-d1-worker";
@@ -90,6 +91,7 @@ const KEY_A = "A".repeat(43);
 const KEY_B = "B".repeat(43);
 const KEY_C = "C".repeat(43);
 const LOCAL_STOA_ORIGIN = "http://127.0.0.1:8787";
+const STAGING_STOA_ORIGIN = "https://a-staging.asimposium.org";
 const MISSING_STOA_ORIGIN = Symbol("missing-stoa-origin");
 const syntheticJoinSecret = (): string => `v1.${"x".repeat(43)}`;
 
@@ -126,7 +128,62 @@ async function call(
 
 const mintBody = { sponsor_id: "usr_harness_sponsor", request: { requested_scopes: ["review"] } };
 
+async function enrollmentWriteCounts(db: D1Database): Promise<{
+  readonly records: number;
+  readonly proposals: number;
+  readonly fellows: number;
+  readonly grants: number;
+  readonly credentials: number;
+  readonly idempotency: number;
+}> {
+  const counts = await db
+    .prepare(
+      `SELECT
+         (SELECT COUNT(*) FROM enrollment_records) AS records,
+         (SELECT COUNT(*) FROM enrollment_proposals) AS proposals,
+         (SELECT COUNT(*) FROM enrollment_fellows) AS fellows,
+         (SELECT COUNT(*) FROM enrollment_grants) AS grants,
+         (SELECT COUNT(*) FROM enrollment_credentials) AS credentials,
+         (SELECT COUNT(*) FROM enrollment_idempotency) AS idempotency`,
+    )
+    .bind()
+    .first<{
+      readonly records: number;
+      readonly proposals: number;
+      readonly fellows: number;
+      readonly grants: number;
+      readonly credentials: number;
+      readonly idempotency: number;
+    }>();
+  if (counts === null) throw new Error("enrollment-write-counts-unavailable");
+  return counts;
+}
+
 describe("the trusted local Stoa origin is an explicit fixture boundary", () => {
+  test.each([
+    ["default HTTP port", "http://127.0.0.1:80"],
+    ["leading-zero port", "http://127.0.0.1:08787"],
+    ["zero port", "http://127.0.0.1:0"],
+    ["out-of-range port", "http://127.0.0.1:65536"],
+  ])("PLANTED: a %s is not a trusted local D1 origin", (_label, origin) => {
+    expect(isTrustedLocalD1Origin(origin)).toBe(false);
+  });
+
+  test("a canonical high loopback port remains a trusted local D1 origin", () => {
+    expect(isTrustedLocalD1Origin("http://127.0.0.1:65535")).toBe(true);
+  });
+
+  const loopbackAliases = [
+    ["hostname alias", "http://localhost:8787"],
+    ["short IPv4 alias", "http://127.1:8787"],
+    ["IPv6 loopback alias", "http://[::1]:8787"],
+    ["integer-form IPv4 alias", "http://2130706433:8787"],
+  ] as const;
+
+  test.each(loopbackAliases)("PLANTED: a %s is not a trusted local D1 origin", (_label, origin) => {
+    expect(isTrustedLocalD1Origin(origin)).toBe(false);
+  });
+
   test.each([
     ["absent", MISSING_STOA_ORIGIN],
     ["foreign", "https://evil.test"],
@@ -137,6 +194,20 @@ describe("the trusted local Stoa origin is an explicit fixture boundary", () => 
     expect(result.body).toEqual({ code: "ENROLLMENT_UNAVAILABLE" });
     expect(result.raw).not.toContain(LOCAL_STOA_ORIGIN);
   });
+
+  test.each(loopbackAliases)(
+    "PLANTED: mounted %s leaves the D1 enrollment state unchanged and mints nothing",
+    async (_label, origin) => {
+      const db = freshDatabase();
+      const before = await enrollmentWriteCounts(db);
+
+      const result = await call(db, KEY_A, "/__s1/mint", mintBody, {}, origin);
+
+      expect(result.status).toBe(503);
+      expect(result.body).toEqual({ code: "ENROLLMENT_UNAVAILABLE" });
+      expect(await enrollmentWriteCounts(db)).toEqual(before);
+    },
+  );
 
   test("PLANTED: an invalid origin cannot reuse the same D1/key service cache entry", async () => {
     const db = freshDatabase();
@@ -413,6 +484,44 @@ describe("the public texts hello names are served by the production handler", ()
     expect(written.status).not.toBe(200);
     const neighbour = await publicRead("/protocol.md/extra");
     expect(neighbour.status).not.toBe(200);
+  });
+});
+
+/**
+ * These are source documents exercised locally. They cannot choose their
+ * origin from a request: all executable operations are relative to the issued
+ * join URL's configured origin. The production identifier remains in the
+ * canonical join-URL example, but is never a destination in staging or local
+ * onboarding instructions.
+ */
+describe("the complete local onboarding source stays same-origin", () => {
+  const onboardingDocuments = ["handbook", "skill", "llms", "capsule"] as const;
+  const relativeOperationPaths = (body: string): string[] =>
+    [...body.matchAll(/\b(?:GET|POST)\s+`?(\/[^\s`]+)/g)].map((match) => match[1] ?? "");
+
+  test.each([STAGING_STOA_ORIGIN, LOCAL_STOA_ORIGIN])(
+    "%s has no executable production destination in any onboarding document",
+    (origin) => {
+      for (const id of onboardingDocuments) {
+        const body = getDocument(id).body;
+        expect(body).not.toMatch(/\b(?:GET|POST)\s+https:\/\/a\.asimposium\.org(?:\/|\b)/);
+        expect(body).not.toMatch(/\bcurl\b[^\n]*https:\/\/a\.asimposium\.org(?:\/|\b)/);
+
+        const paths = relativeOperationPaths(body);
+        expect(paths.length).toBeGreaterThan(0);
+        for (const path of paths) {
+          expect(new URL(path, origin).origin).toBe(origin);
+        }
+      }
+    },
+  );
+
+  test("keeps the production join URL as a non-executable canonical identifier", () => {
+    const capsule = getDocument("capsule").body;
+    expect(capsule).toContain(
+      "https://a.asimposium.org/join/ASIMP-EN-<enrollment-id>#v1.<enrollment-secret>",
+    );
+    expect(capsule).toContain("STOA_ORIGIN='<origin-from-issued-join-url>'");
   });
 });
 

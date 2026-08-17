@@ -3,6 +3,7 @@ import { writeFileSync } from "node:fs";
 import {
   DeviceCodeStartResponseSchema,
   EnrollmentHelloResponseSchema,
+  isTrustedStoaOrigin,
   SponsorEnrollmentDecisionResponseSchema,
 } from "@asimposium/contracts";
 
@@ -94,6 +95,18 @@ export function createLocalEvidenceCompletionLedger(skipCase?: string) {
 
 /** Every local HTTP body is capped before a JSON or text reader can retain it. */
 export const LOCAL_RESPONSE_MAX_BYTES = 262_144;
+
+/**
+ * The local driver is narrower than the Worker: only a canonical loopback
+ * binding can exercise local D1. Reuse the public trusted-origin predicate so
+ * default, zero, out-of-range, and leading-zero ports cannot make the local
+ * harness accept an origin the enrollment surface itself would refuse.
+ */
+export function isTrustedLocalD1Origin(value: unknown): value is string {
+  return (
+    typeof value === "string" && value.startsWith("http://127.0.0.1:") && isTrustedStoaOrigin(value)
+  );
+}
 
 function responseInit(response: Response): ResponseInit {
   return {
@@ -243,7 +256,7 @@ if (!import.meta.main) {
     })}\n`,
   );
   process.exitCode = 1;
-} else if (typeof origin !== "string" || !/^http:\/\/127\.0\.0\.1:\d+$/.test(origin)) {
+} else if (!isTrustedLocalD1Origin(origin)) {
   process.stderr.write('{"status":"fail","code":"LOCAL_ORIGIN_INVALID"}\n');
   process.exitCode = 1;
 } else {

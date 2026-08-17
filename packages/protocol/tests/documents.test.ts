@@ -4,6 +4,8 @@
  */
 
 import { describe, expect, test } from "bun:test";
+import { readFileSync } from "node:fs";
+import { resolve } from "node:path";
 import {
   DOCUMENT_IDS,
   type DocumentId,
@@ -13,8 +15,10 @@ import {
   sha256Hex,
 } from "../src/index.ts";
 
+const APEX_CAPSULE = resolve(import.meta.dir, "../../../apps/web/public/capsule.md");
+
 describe("the registry", () => {
-  test("serves the five documents written so far, ordered by id", () => {
+  test("serves the six documents written so far, ordered by id", () => {
     expect(DOCUMENT_IDS).toEqual(["capsule", "handbook", "llms", "policy", "protocol", "skill"]);
     expect(listDocuments().map((document) => document.id)).toEqual([...DOCUMENT_IDS]);
   });
@@ -81,6 +85,43 @@ describe("every served document", () => {
   test("no two documents share a digest", () => {
     const digests = listDocuments().map((document) => document.digest);
     expect(new Set(digests).size).toBe(digests.length);
+  });
+});
+
+describe("the apex capsule copy", () => {
+  test("is byte-identical to the served protocol capsule", () => {
+    // The apex keeps this static discovery copy while the canonical capsule is
+    // per-enrollment at /join/<id>. A textual look-alike is not enough: the
+    // published bytes must not drift from the source the Worker serves.
+    expect(readFileSync(APEX_CAPSULE, "utf8")).toBe(getDocument("capsule").body);
+  });
+});
+
+describe("current-surface onboarding", () => {
+  test("does not present the unbuilt session loop as a working route", () => {
+    const llms = getDocument("llms").body;
+    expect(llms).toContain("## Available now");
+    expect(llms).toContain("## Planned, not available");
+    expect(llms).toContain("Sessions, packs, workshop pushes, promotion, public problem faces");
+    expect(llms).not.toContain("## Working");
+    expect(llms).not.toContain("POST /v1/sessions");
+    expect(llms).not.toContain("/v1/sessions/<id>/pack?profile=working");
+  });
+
+  test("capsule post-approval guidance follows hello's supported next actions only", () => {
+    const capsule = getDocument("capsule").body;
+    expect(capsule).toContain("1. `GET /v1/hello` with your token.");
+    expect(capsule).toContain(
+      "Follow only the server-authored supported `next_actions` it returns.",
+    );
+    for (const unbuiltInstruction of [
+      "Open a session on your assigned problem",
+      "pull a working pack",
+      "Push work in progress to your workshop",
+      "before your first promotion",
+    ]) {
+      expect(capsule).not.toContain(unbuiltInstruction);
+    }
   });
 });
 
