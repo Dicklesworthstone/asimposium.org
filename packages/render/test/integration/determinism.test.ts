@@ -9,14 +9,18 @@
  *   - a bigger budget must *extend* a pack, not reshuffle it, so a harness prompt cache
  *     hits on the unchanged prefix across repeated polls; and
  *   - a fresh process must produce the same bytes, or the goldens and any cross-run digest
- *     comparison are measuring one process's hash seed rather than the projection.
+ *     comparison are measuring one process's hash seed rather than the projection; and
+ *   - the literal criterion Fable §16.2 states — "Pack determinism: two `orient` packs at
+ *     the same cursor byte-compare" — must hold through the real `composePack` seam, not
+ *     only for a hand-built fixture projection handed straight to the renderer.
  *
  * The markdown face keeps its cacheable prefix in raw bytes, not merely inside
  * an item substring: budget-varying metadata is a post-item trailer.
  */
 
 import { describe, expect, test } from "bun:test";
-import { renderProjection } from "../../src/index.ts";
+import { composePack, renderProjection } from "../../src/index.ts";
+import type { PackCandidate, PackComposerInput } from "../../src/pack-composer.ts";
 import type { Projection } from "../../src/types.ts";
 import { safeWorkingPack } from "../_support/fixtures.ts";
 
@@ -173,5 +177,93 @@ describe("determinism across process restarts", () => {
     expect(fingerprintOf(renderInNewProcess("md", 2))).not.toBe(
       fingerprintOf(renderInNewProcess("md", 3)),
     );
+  });
+});
+
+/**
+ * The literal §16.2 criterion, through the real seam.
+ *
+ * Everything above composes its projection by hand and hands it to `renderProjection`. That
+ * proves the renderer is deterministic, which is necessary but is not the sentence the plan
+ * commits to. This block composes through `composePack` — the seam the product actually uses
+ * — from two *independently allocated* inputs, so byte-equality cannot come from having
+ * accidentally composed one shared object twice. The changed-cursor control is what makes the
+ * equality assertion falsifiable rather than decorative.
+ */
+describe("Fable §16.2: two orient packs at the same cursor byte-compare", () => {
+  const ORIENT_CURSOR = 41;
+
+  function orientCandidate(
+    id: string,
+    stablePrefix: number,
+    tokens: number,
+    overrides: Partial<PackCandidate> = {},
+  ): PackCandidate {
+    return {
+      kind: id.startsWith("S-") ? "statement" : "claim",
+      id,
+      scope: "ledger",
+      tokens,
+      untrusted: true,
+      body: `body for ${id}`,
+      why_included: `included ${id}`,
+      stable_prefix: stablePrefix,
+      ...overrides,
+    };
+  }
+
+  /** A fresh object graph on every call: no identity shared between the packs compared below. */
+  function orientInput(overrides: Partial<PackComposerInput> = {}): PackComposerInput {
+    return {
+      schema: "asimposium.pack.v1",
+      session: "SES-orient",
+      problem: "bounded-sums",
+      profile: "orient",
+      cursor: ORIENT_CURSOR,
+      requested_max_tokens: 1_500,
+      viewer: {
+        audience: "session",
+        membership: "contributor",
+        effective_permissions: ["workshop:read"],
+      },
+      candidates: [
+        orientCandidate("S-1", 0, 100, { kind: "statement" }),
+        orientCandidate("C-1", 10, 90),
+        orientCandidate("C-2", 10, 90),
+      ],
+      action_candidates: [
+        {
+          method: "GET",
+          url: "/v1/sessions/SES-orient/pack?profile=orient",
+          why: "refresh the pack",
+          public_read: false,
+        },
+      ],
+      ...overrides,
+    };
+  }
+
+  test("two independently allocated orient packs at the same cursor are byte-identical", () => {
+    const first = composePack(orientInput());
+    const second = composePack(orientInput());
+
+    // The criterion names a profile and a cursor. Assert both rather than assume them, so a
+    // future default change cannot quietly turn this into a different comparison.
+    expect(first.profile).toBe("orient");
+    expect(second.profile).toBe("orient");
+    expect(first.cursor).toBe(ORIENT_CURSOR);
+    expect(second.cursor).toBe(ORIENT_CURSOR);
+
+    expect(first.canonical_json.length).toBeGreaterThan(0);
+    expect(second.canonical_json).toBe(first.canonical_json);
+    expect(second.canonical_fingerprint).toBe(first.canonical_fingerprint);
+  });
+
+  test("CONTROL: a changed cursor changes the bytes, so the equality above is falsifiable", () => {
+    const atCursor = composePack(orientInput());
+    const atNextCursor = composePack(orientInput({ cursor: ORIENT_CURSOR + 1 }));
+
+    expect(atNextCursor.cursor).toBe(ORIENT_CURSOR + 1);
+    expect(atNextCursor.canonical_json).not.toBe(atCursor.canonical_json);
   });
 });

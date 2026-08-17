@@ -44,6 +44,9 @@ export const PROVENANCE_INPUTS: readonly string[] = [
   "packages/render/scripts/provenance.ts",
   "packages/render/test/_support/fixtures.ts",
   "packages/render/test/contract/golden.test.ts",
+  // The S-5 receipt asserts pack determinism, so the proof that establishes it is an input:
+  // if this file weakens, the digest must move rather than vouching for the old bytes.
+  "packages/render/test/integration/determinism.test.ts",
   "packages/render/test/golden/working-pack.html",
   "packages/render/test/golden/working-pack.json",
   "packages/render/test/golden/working-pack.md",

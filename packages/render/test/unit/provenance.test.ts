@@ -31,6 +31,7 @@ const REQUIRED_INPUT_STUBS: Readonly<Record<string, string>> = {
   "packages/render/scripts/provenance.ts": "export {};\n",
   "packages/render/test/_support/fixtures.ts": "export {};\n",
   "packages/render/test/contract/golden.test.ts": "export {};\n",
+  "packages/render/test/integration/determinism.test.ts": "export {};\n",
   "packages/render/test/golden/working-pack.html": "<article></article>\n",
   "packages/render/test/golden/working-pack.json": "{}\n",
   "packages/render/test/golden/working-pack.md": "# golden\n",
@@ -81,6 +82,26 @@ describe("source digest", () => {
     expect(after.digest).not.toBe(before.digest);
   });
 
+  /**
+   * Load-bearing, not decorative. The S-5 receipt asserts pack determinism, and it carries a
+   * source digest as the thing a reader reproduces the run from. If weakening the proof that
+   * establishes that criterion left the digest unchanged, the receipt would keep vouching for
+   * bytes that no longer prove it. This pins the specific file, not the input set in general.
+   */
+  test("changes when the pack-determinism proof itself changes", async () => {
+    const proof = "packages/render/test/integration/determinism.test.ts";
+    const source = { "packages/render/src/a.ts": "export const a = 1;\n" };
+    const before = await sourceDigest(fixtureTree({ ...source, [proof]: "export {};\n" }));
+    const after = await sourceDigest(
+      fixtureTree({ ...source, [proof]: "export {};\n// determinism proof weakened\n" }),
+    );
+
+    expect(after.digest).not.toBe(before.digest);
+    // …and the file is genuinely in the hashed set, so the inequality is causal rather than
+    // an artifact of some other byte differing between the two fixture trees.
+    expect(provenanceFiles(fixtureTree(source))).toContain(proof);
+  });
+
   test("covers the Worker harness as well as the renderer", () => {
     expect(PROVENANCE_INPUTS).toContain("package.json");
     expect(PROVENANCE_INPUTS).toContain("bun.lock");
@@ -94,6 +115,7 @@ describe("source digest", () => {
     expect(PROVENANCE_INPUTS).toContain("packages/render/src");
     expect(PROVENANCE_INPUTS).toContain("packages/render/scripts/diagnostics.ts");
     expect(PROVENANCE_INPUTS).toContain("packages/render/test/contract/golden.test.ts");
+    expect(PROVENANCE_INPUTS).toContain("packages/render/test/integration/determinism.test.ts");
     expect(PROVENANCE_INPUTS).toContain("packages/render/test/golden/working-pack.md");
     expect(PROVENANCE_INPUTS).toContain("infra/wrangler.toml");
     expect(PROVENANCE_INPUTS).toContain("scripts/e2e-s5-diptych.sh");
@@ -110,7 +132,7 @@ describe("source digest", () => {
       "infra/notes.md": "not an input\n",
     });
     const { files } = await sourceDigest(root);
-    expect(files).toBe(20);
+    expect(files).toBe(21);
     expect(provenanceFiles(root)).toEqual([
       "apps/wire/package.json",
       "apps/wire/src/render-face/worker.ts",
@@ -128,6 +150,7 @@ describe("source digest", () => {
       "packages/render/test/golden/working-pack.html",
       "packages/render/test/golden/working-pack.json",
       "packages/render/test/golden/working-pack.md",
+      "packages/render/test/integration/determinism.test.ts",
       "packages/render/tsconfig.json",
       "scripts/e2e-s5-diptych.sh",
       "tsconfig.base.json",

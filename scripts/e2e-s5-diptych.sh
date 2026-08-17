@@ -7,6 +7,16 @@
 #
 # Phase 1b: the checked-in golden faces, which are the byte-level drift backstop.
 #
+# Phase 1c: pack determinism, the second half of this spike's exit criterion (Fable §17.1
+# S-5, operationalized in §16.2). Goldens cannot reach it: they pin one rendering, while the
+# claim has three parts — two independently composed profile="orient" packs at the same cursor
+# byte-compare through the real composePack seam (the literal §16.2 sentence, held falsifiable
+# by a changed-cursor control), a larger budget *extends* a pack rather than reshuffling it,
+# and a fresh process reproduces the same bytes. The proof exists as an ordinary integration
+# test; running it here is what lets this spike's own receipt establish the criterion instead
+# of leaving it to a separate suite, and the proof file is a provenance input so weakening it
+# moves this receipt's source digest.
+#
 # Phase 2 (Worker-served): start real local wrangler/workerd on the unmounted harness
 # entrypoint apps/wire/src/render-face/worker.ts and compare the *served* bytes against a
 # local render — media type, ETag, If-None-Match 304, and the canary's absence on public
@@ -274,6 +284,19 @@ if [[ ${golden_status} -ne 0 ]]; then
   exit 1
 fi
 phase_record "phase1_golden_faces" "pass" "checked-in md/json/html goldens match byte for byte" 0
+
+# ── phase 1c: pack determinism ──────────────────────────────────────────────
+# The existing proof, run under this spike so the receipt below is not asserting a criterion
+# that only some other suite happened to check. No new assertions are introduced here.
+readonly DETERMINISM_LOG="${RUN_DIR}/determinism.log"
+determinism_status=0
+( cd packages/render && bun test /dev/null --timeout=120000 test/integration/determinism.test.ts ) >"${DETERMINISM_LOG}" 2>&1 || determinism_status=$?
+if [[ ${determinism_status} -ne 0 ]]; then
+  show_fixed_log_notice
+  phase_record "phase1_pack_determinism" "fail" "pack determinism no longer holds for two orient packs at one cursor, across budget buckets, or across a process restart; captured diagnostics were withheld" 0
+  exit 1
+fi
+phase_record "phase1_pack_determinism" "pass" "two independently composed profile=orient packs at the same cursor are byte-identical through the real composePack seam and a changed-cursor control differs (Fable 16.2); a larger budget extends the pack prefix instead of reshuffling it; and a fresh process reproduces the same bytes" 0
 
 # ── phase 2: Worker-served ──────────────────────────────────────────────────
 if [[ ! -x "${WRANGLER}" ]]; then
@@ -747,4 +770,4 @@ if [[ ${CHECK_EXIT} -ne 0 || ${CHECK_DIAGNOSTICS} -ne 0 ]]; then
 fi
 
 phase_record "phase2_worker_served" "pass" "served bytes, media types, ETags, 304s and canary absence all match the local render" "$((SECONDS * 1000))"
-phase_record "spike_summary" "pass" "local render, goldens and the workerd-served faces agree" "$((SECONDS * 1000))"
+phase_record "spike_summary" "pass" "local render, goldens, pack determinism and the workerd-served faces agree" "$((SECONDS * 1000))"
