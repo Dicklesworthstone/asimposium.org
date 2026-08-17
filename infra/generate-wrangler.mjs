@@ -169,6 +169,9 @@ export function renderEnvironment(name, environment, policy) {
     // Worker believes it serves.
     "[vars]",
     `STOA_ORIGIN = ${tomlString(environment.worker_origin)}`,
+    // The Agora origin the device-flow verification URL names: projected from
+    // the environment's declared `agora_origin`, never derived from requests.
+    `AGORA_ORIGIN = ${tomlString(environment.agora_origin)}`,
     "",
     "[[rules]]",
     `type = ${tomlString("Text")}`,

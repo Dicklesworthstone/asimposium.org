@@ -3,6 +3,10 @@ import { dirname, isAbsolute, relative, resolve, sep } from "node:path";
 import { performance } from "node:perf_hooks";
 import { fileURLToPath } from "node:url";
 import {
+  PRODUCTION_AGORA_ORIGIN,
+  STAGING_AGORA_ORIGIN,
+} from "@asimposium/contracts";
+import {
   containsCredentialShape,
   redactCredentials,
 } from "@asimposium/contracts/diagnostic-safety";
@@ -245,11 +249,16 @@ const POLICY_KEYS = [
   "required_bindings",
   "deferred_bindings",
   "canonical_worker_origins",
+  "canonical_agora_origins",
 ];
 const VERCEL_KEYS = ["production_environment", "preview_environment"];
+
+/** The only Agora origins the device flow may name; sourced from the contracts package. */
+const TRUSTED_AGORA_ORIGINS = new Set([PRODUCTION_AGORA_ORIGIN, STAGING_AGORA_ORIGIN]);
 const ENVIRONMENT_KEYS = [
   "kind",
   "worker_origin",
+  "agora_origin",
   "is_preview",
   "may_hold_production_keys",
   "destructive_operations_allowed",
@@ -761,6 +770,7 @@ export function validateEnvironments(
     required_bindings: policyTable.required_bindings,
     deferred_bindings: policyTable.deferred_bindings,
     canonical_worker_origins: policyTable.canonical_worker_origins,
+    canonical_agora_origins: policyTable.canonical_agora_origins,
   };
   // Each declared canonical origin must itself be a bare https origin: a value
   // carrying a port, path, query, or credentials would be projected verbatim
@@ -777,6 +787,21 @@ export function validateEnvironments(
       fail(
         "UNSAFE_CONFIG_VALUE",
         `${configWorkspacePath} policy.canonical_worker_origins.${environmentName} must be a bare https origin.`,
+      );
+    }
+  }
+  const canonicalAgoraOrigins = policy.canonical_agora_origins;
+  if (typeof canonicalAgoraOrigins !== "object" || canonicalAgoraOrigins === null) {
+    fail(
+      "MISSING_CONFIG_KEY",
+      `${configWorkspacePath} policy.canonical_agora_origins must be a table of environment name to origin.`,
+    );
+  }
+  for (const [environmentName, origin] of Object.entries(canonicalAgoraOrigins)) {
+    if (typeof origin !== "string" || !CANONICAL_WORKER_ORIGIN.test(origin)) {
+      fail(
+        "UNSAFE_CONFIG_VALUE",
+        `${configWorkspacePath} policy.canonical_agora_origins.${environmentName} must be a bare https origin.`,
       );
     }
   }
@@ -887,6 +912,32 @@ export function validateEnvironments(
         `${source} is remote but policy.canonical_worker_origins declares no origin for "${name}".`,
       );
     }
+    const agoraOrigin = requireString(
+      entry,
+      "agora_origin",
+      source,
+      CANONICAL_WORKER_ORIGIN,
+      "a bare https Agora origin from the trusted set",
+    );
+    if (!TRUSTED_AGORA_ORIGINS.has(agoraOrigin)) {
+      fail(
+        "AGORA_ORIGIN_UNTRUSTED",
+        `${source} agora_origin is "${agoraOrigin}"; the trusted set is ${[...TRUSTED_AGORA_ORIGINS].join(", ")}.`,
+      );
+    }
+    const canonicalAgora = policy.canonical_agora_origins[name];
+    if (canonicalAgora !== undefined && agoraOrigin !== canonicalAgora) {
+      fail(
+        "AGORA_ORIGIN_NOT_CANONICAL",
+        `${source} agora_origin is "${agoraOrigin}"; policy.canonical_agora_origins.${name} is "${canonicalAgora}".`,
+      );
+    }
+    if (canonicalAgora === undefined && kind !== "local") {
+      fail(
+        "AGORA_ORIGIN_NOT_CANONICAL",
+        `${source} is remote but policy.canonical_agora_origins declares no origin for "${name}".`,
+      );
+    }
     if (kind === "local" && !isCanonicalLoopbackOrigin(workerOrigin)) {
       fail(
         "UNSAFE_CONFIG_VALUE",
@@ -970,6 +1021,7 @@ export function validateEnvironments(
     environments[name] = {
       kind,
       worker_origin: workerOrigin,
+      agora_origin: agoraOrigin,
       is_preview: isPreview,
       may_hold_production_keys: mayHoldProductionKeys,
       destructive_operations_allowed: destructiveAllowed,
@@ -1097,6 +1149,7 @@ export function validateEnvironments(
           may_hold_production_keys: environment.may_hold_production_keys,
           destructive_operations_allowed: environment.destructive_operations_allowed,
           worker_origin: environment.worker_origin,
+          agora_origin: environment.agora_origin,
           d1: environment.d1,
           d1_binding: environment.d1.binding,
           r2: environment.r2,

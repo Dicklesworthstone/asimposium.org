@@ -132,7 +132,6 @@ const S3_FRESH_RUNTIME_BOOTSTRAP_MAX_BYTES = 64 * 1024;
 const S3_FRESH_RUNTIME_BOOTSTRAP_NAME = "bootstrap.json";
 const S3_FRESH_RUNTIME_BOOTSTRAP_EXIT_CODE = 97;
 const S3_FRESH_RUNTIME_RETAINED_COLLISION_EXIT_CODE = 92;
-const S3_FRESH_RUNTIME_BOOTSTRAP_READY = Buffer.from("S3_FRESH_RUNTIME_BOOTSTRAP_READY\n", "utf8");
 // The outer fresh helper has one monotonic deadline. It is never detached: on
 // expiry the harness kills and reaps that exact helper before refusing its
 // pinned result inode. The helper itself is only a lease holder; the imported
@@ -612,7 +611,6 @@ const RETAINED_COLLISION_EXIT_CODE = 92;
 const BOOTSTRAP_NAME = "${S3_FRESH_RUNTIME_BOOTSTRAP_NAME}";
 const RESULT_NAME = "result.json";
 const RUNNER_URL = ${JSON.stringify(S3_OWNED_COMMAND_RUNNER_URL)};
-const STARTUP_READY = Buffer.from("S3_FRESH_RUNTIME_BOOTSTRAP_READY\n", "utf8");
 const decimal = /^(?:0|[1-9][0-9]*)$/u;
 const sha256 = /^[0-9a-f]{64}$/u;
 let bootstrapFd;
@@ -633,14 +631,6 @@ const writeAllAt = (fd, bytes) => {
   while (offset < bytes.byteLength) {
     const written = writeSync(fd, bytes, offset, bytes.byteLength - offset, offset);
     if (written <= 0) throw new Error("fresh owned-command record write was partial");
-    offset += written;
-  }
-};
-const writePipeAll = (fd, bytes) => {
-  let offset = 0;
-  while (offset < bytes.byteLength) {
-    const written = writeSync(fd, bytes, offset, bytes.byteLength - offset);
-    if (written <= 0) throw new Error("fresh owned-command pipe write was partial");
     offset += written;
   }
 };
@@ -854,9 +844,6 @@ try {
   // The fixed result name is gone, and the held inode has nlink zero, before
   // this dynamic import can execute target code.
   const module = await import(bootstrap.runnerUrl);
-  // This fixed control record confirms bootstrap EOF, identity validation,
-  // unlink+nlink-zero, and the dynamic import before the target can start.
-  writePipeAll(1, STARTUP_READY);
   const result = await module.runOwnedCommand(bootstrap.options);
   const cleanupProven = result.outcome === "exited" || result.cleanupProven === true;
   const publication = Buffer.from(JSON.stringify({
@@ -1047,14 +1034,27 @@ async function invokeFreshOwnedS3Command(
   if (!Number.isSafeInteger(timeoutMs) || timeoutMs <= S3_FRESH_RUNTIME_DIRECT_REAP_MS) {
     throw new Error(`S3_FRESH_RUNTIME_TIMEOUT_INVALID:${timeoutMs}`);
   }
-  const { directory, directoryFd, directoryIdentity, resultPath, resultFd, resultIdentity } =
-    makeFreshRuntimeDirectory();
+  const deadlineAt = performance.now() + timeoutMs;
+  const terminateAt = deadlineAt - S3_FRESH_RUNTIME_DIRECT_REAP_MS;
+  const {
+    directory,
+    directoryFd,
+    directoryIdentity,
+    bootstrapPath,
+    bootstrapFd,
+    bootstrapCreationIdentity,
+    resultPath,
+    resultFd,
+    resultIdentity,
+  } = makeFreshRuntimeDirectory();
   const nonce = crypto.randomUUID();
   const serializable = {
     command,
     cwd: options.targetCwd === "private" ? directory : root,
     env: {
       ...s3OwnedEnvironment(),
+      S3_FRESH_RUNTIME_BOOTSTRAP_DEV: bootstrapCreationIdentity.dev,
+      S3_FRESH_RUNTIME_BOOTSTRAP_INO: bootstrapCreationIdentity.ino,
       S3_FRESH_RUNTIME_RESULT_DEV: resultIdentity.dev,
       S3_FRESH_RUNTIME_RESULT_INO: resultIdentity.ino,
     },
@@ -1068,35 +1068,7 @@ async function invokeFreshOwnedS3Command(
   let helper: ReturnType<typeof Bun.spawn> | undefined;
   let stdoutCapture: FreshRuntimePipeCapture | undefined;
   let stderrCapture: FreshRuntimePipeCapture | undefined;
-  const deadlineAt = performance.now() + timeoutMs;
-  const terminateAt = deadlineAt - S3_FRESH_RUNTIME_DIRECT_REAP_MS;
-  if (terminateAt <= performance.now()) {
-    closeFreshRuntimeCreationFds(resultFd, directoryFd);
-    throw new Error("S3_FRESH_RUNTIME_STARTUP_RESERVE_UNAVAILABLE");
-  }
   try {
-    helper = Bun.spawn({
-      cmd: [process.execPath, "-e", FRESH_OWNED_COMMAND_DISPATCHER],
-      cwd: directory,
-      env: s3OwnedEnvironment(),
-      stdin: "pipe",
-      stdout: "pipe",
-      stderr: "pipe",
-    });
-    if (!(helper.stdout instanceof ReadableStream) || !(helper.stderr instanceof ReadableStream)) {
-      throw new Error("S3_FRESH_RUNTIME_CAPTURE_INIT_UNAVAILABLE");
-    }
-    stdoutCapture = beginFreshRuntimePipeCapture(
-      helper.stdout,
-      S3_FRESH_RUNTIME_RESULT_MAX_BYTES,
-      "S3_FRESH_RUNTIME_STDOUT",
-      S3_FRESH_RUNTIME_BOOTSTRAP_READY,
-    );
-    stderrCapture = beginFreshRuntimePipeCapture(
-      helper.stderr,
-      S3_FRESH_RUNTIME_DIAGNOSTIC_MAX_BYTES,
-      "S3_FRESH_RUNTIME_STDERR",
-    );
     const bootstrap = freshRuntimeBootstrapBytes(
       {
         nonce,
@@ -1108,31 +1080,52 @@ async function invokeFreshOwnedS3Command(
       },
       options.bootstrapPlant,
     );
-    // Startup consumes only the pre-reserved portion of this one monotonic
-    // deadline. The final direct-helper reap interval is never borrowed.
-    await writeFreshRuntimeBootstrap(
-      helper,
+    const bootstrapIdentity = pinFreshRuntimeBootstrap(
+      bootstrapFd,
+      bootstrapCreationIdentity,
       bootstrap,
-      terminateAt,
-      options.bootstrapPlant === "flush-stall"
-        ? () => new Promise<number>(() => undefined)
-        : undefined,
     );
-    if (options.bootstrapPlant === undefined) {
-      if (stdoutCapture.startupReady === undefined) {
-        throw new Error("S3_FRESH_RUNTIME_STARTUP_CAPTURE_UNAVAILABLE");
-      }
-      await freshRuntimeValueBefore(
-        stdoutCapture.startupReady,
-        terminateAt,
-        "S3_FRESH_RUNTIME_STARTUP",
-      );
+    const bootstrapDigest = freshRuntimeBootstrapDigest(bootstrap);
+    applyFreshRuntimeBootstrapPlant(
+      bootstrapPath,
+      bootstrapFd,
+      bootstrapIdentity,
+      bootstrap,
+      options.bootstrapPlant,
+    );
+    if (terminateAt <= performance.now()) {
+      throw new Error("S3_FRESH_RUNTIME_STARTUP_RESERVE_UNAVAILABLE");
     }
+    helper = Bun.spawn({
+      cmd: [process.execPath, "-e", FRESH_OWNED_COMMAND_DISPATCHER],
+      cwd: directory,
+      env: freshRuntimeDispatcherEnvironment(bootstrapIdentity, bootstrapDigest),
+      stdin: "ignore",
+      stdout: "pipe",
+      stderr: "pipe",
+    });
+    if (!(helper.stdout instanceof ReadableStream) || !(helper.stderr instanceof ReadableStream)) {
+      throw new Error("S3_FRESH_RUNTIME_CAPTURE_INIT_UNAVAILABLE");
+    }
+    stdoutCapture = beginFreshRuntimePipeCapture(
+      helper.stdout,
+      S3_FRESH_RUNTIME_RESULT_MAX_BYTES,
+      "S3_FRESH_RUNTIME_STDOUT",
+    );
+    stderrCapture = beginFreshRuntimePipeCapture(
+      helper.stderr,
+      S3_FRESH_RUNTIME_DIAGNOSTIC_MAX_BYTES,
+      "S3_FRESH_RUNTIME_STDERR",
+    );
     return {
       directory,
       directoryFd,
       directoryIdentity,
       directoryFdClosed: false,
+      bootstrapPath,
+      bootstrapFd,
+      bootstrapIdentity,
+      bootstrapFdClosed: false,
       resultPath,
       resultFd,
       resultIdentity,
@@ -1160,12 +1153,9 @@ async function invokeFreshOwnedS3Command(
       if (reaped === undefined) {
         void stdoutCapture?.cancel();
         void stderrCapture?.cancel();
-        closeFreshRuntimeCreationFds(resultFd, directoryFd);
+        closeFreshRuntimeCreationFds(bootstrapFd, resultFd, directoryFd);
         throw new Error("S3_FRESH_RUNTIME_CAPTURE_INIT_REAP_UNPROVEN");
       }
-      // A rejected or expired bootstrap flush cannot publish EOF until this
-      // exact helper is dead and reaped.
-      endFreshRuntimeBootstrapInput(helper);
     }
     try {
       await settleFreshRuntimeCaptureCancellation(
@@ -1174,10 +1164,10 @@ async function invokeFreshOwnedS3Command(
         "S3_FRESH_RUNTIME_STARTUP_CAPTURE_CANCEL",
       );
     } catch {
-      closeFreshRuntimeCreationFds(resultFd, directoryFd);
+      closeFreshRuntimeCreationFds(bootstrapFd, resultFd, directoryFd);
       throw new Error("S3_FRESH_RUNTIME_STARTUP_CAPTURE_CANCEL_UNPROVEN");
     }
-    closeFreshRuntimeCreationFds(resultFd, directoryFd);
+    closeFreshRuntimeCreationFds(bootstrapFd, resultFd, directoryFd);
     throw error;
   }
 }
@@ -1207,7 +1197,9 @@ function freshRuntimeBootstrapBytes(
       return Buffer.concat([canonical, Buffer.alloc(S3_FRESH_RUNTIME_BOOTSTRAP_MAX_BYTES, 0x20)]);
     case "eof":
       return Buffer.alloc(0);
-    case "flush-stall":
+    case "tamper":
+    case "symlink":
+    case "path-swap":
       return canonical;
   }
 }
@@ -1252,37 +1244,10 @@ async function settleFreshRuntimeCaptureCancellation(
   await freshRuntimeValueBefore(cancellation, deadlineAt, label);
 }
 
-async function writeFreshRuntimeBootstrap(
-  helper: ReturnType<typeof Bun.spawn>,
-  bootstrap: Buffer,
-  deadlineAt: number,
-  flushOperation?: () => number | Promise<number>,
-): Promise<void> {
-  const sink = helper.stdin as {
-    write(bytes: Uint8Array): number;
-    flush(): number | Promise<number>;
-    end(): void;
-  };
-  // The caller kills and reaps the exact helper before it may end this stream
-  // after a failure. A full canonical write without EOF must not unlock import.
-  const written = sink.write(bootstrap);
-  if (written !== bootstrap.byteLength) {
-    throw new Error(`S3_FRESH_RUNTIME_BOOTSTRAP_PARTIAL_WRITE:${written}`);
-  }
-  await freshRuntimeValueBefore(
-    Promise.resolve(flushOperation?.() ?? sink.flush()),
-    deadlineAt,
-    "S3_FRESH_RUNTIME_BOOTSTRAP_FLUSH",
-  );
-  sink.end();
-}
-
-function endFreshRuntimeBootstrapInput(helper: ReturnType<typeof Bun.spawn>): void {
-  try {
-    (helper.stdin as { end(): void }).end();
-  } catch {
-    // The direct helper is already reaped; a broken pipe is expected here.
-  }
+function closeFreshRuntimeBootstrap(invocation: FreshRuntimeInvocation): void {
+  if (invocation.bootstrapFdClosed) return;
+  invocation.bootstrapFdClosed = true;
+  closeSync(invocation.bootstrapFd);
 }
 
 function closeFreshRuntimeResult(invocation: FreshRuntimeInvocation): void {
@@ -1439,9 +1404,13 @@ async function retireAndCloseFreshRuntime(
     await retire(invocation);
   } finally {
     try {
-      closeFreshRuntimeResult(invocation);
+      closeFreshRuntimeBootstrap(invocation);
     } finally {
-      closeFreshRuntimeDirectory(invocation);
+      try {
+        closeFreshRuntimeResult(invocation);
+      } finally {
+        closeFreshRuntimeDirectory(invocation);
+      }
     }
   }
 }
@@ -1478,8 +1447,15 @@ async function assertFreshRuntimeExited(
     invocation.deadlineAt,
     label,
   );
-  if (stderr.byteLength !== 0 || !stdout.equals(S3_FRESH_RUNTIME_BOOTSTRAP_READY)) {
+  if (stderr.byteLength !== 0 || stdout.byteLength !== 0) {
     failure(`FRESH_RUNTIME_DIAGNOSTIC_UNEXPECTED:${stderr.byteLength}:STDOUT:${stdout.byteLength}`);
+  }
+  const bootstrap = fstatSync(invocation.bootstrapFd, { bigint: true }) as ExactBigIntStat;
+  if (
+    !sameIdentityExceptNlink(bootstrap, invocation.bootstrapIdentity, 0n) ||
+    bootstrap.size.toString(10) !== invocation.bootstrapIdentity.size
+  ) {
+    failure("FRESH_RUNTIME_BOOTSTRAP_RETIREMENT_UNPROVEN");
   }
   assertPinnedFreshRuntimeDirectory(invocation, label);
 }
@@ -1820,29 +1796,32 @@ function writePrivateFixtureFile(directory: string, name: string, content: Buffe
   return path;
 }
 
-function readBoundedCensusFd(fd: number, label: string): string {
-  const opened = fstatSync(fd);
-  if (!opened.isFile() || (opened.mode & 0o777) !== 0o600) {
-    throw new Error(`${label}_CENSUS_FILE_UNPROVEN`);
+function decodeExactMarkerCensusCapture(
+  stdout: unknown,
+  stderr: unknown,
+): { readonly stdout: string; readonly stderr: string } {
+  if (!Buffer.isBuffer(stdout) || !Buffer.isBuffer(stderr)) {
+    throw new Error("S3_EXACT_MARKER_INSPECTION_CAPTURE_TYPE");
   }
-  if (opened.size > S3_MARKER_CENSUS_MAX_BYTES) {
-    throw new Error(`${label}_CENSUS_OVERRUN:${opened.size}`);
+  if (stdout.byteLength === 0) {
+    throw new Error("S3_EXACT_MARKER_INSPECTION_EMPTY");
   }
-  const content = Buffer.alloc(opened.size);
-  let offset = 0;
-  while (offset < content.length) {
-    const read = readSync(fd, content, offset, content.length - offset, offset);
-    if (read <= 0) throw new Error(`${label}_CENSUS_PARTIAL`);
-    offset += read;
-  }
-  const completed = fstatSync(fd);
-  if (!completed.isFile() || (completed.mode & 0o777) !== 0o600 || completed.size !== opened.size) {
-    throw new Error(`${label}_CENSUS_CHANGED`);
+  if (
+    stdout.byteLength > S3_MARKER_CENSUS_MAX_BYTES ||
+    stderr.byteLength > S3_MARKER_CENSUS_MAX_BYTES
+  ) {
+    throw new Error(
+      `S3_EXACT_MARKER_INSPECTION_OVERRUN:${stdout.byteLength}:${stderr.byteLength}`,
+    );
   }
   try {
-    return new TextDecoder("utf-8", { fatal: true }).decode(content);
+    const decoder = new TextDecoder("utf-8", { fatal: true });
+    return {
+      stdout: decoder.decode(stdout),
+      stderr: decoder.decode(stderr),
+    };
   } catch {
-    throw new Error(`${label}_CENSUS_INVALID_UTF8`);
+    throw new Error("S3_EXACT_MARKER_INSPECTION_INVALID_UTF8");
   }
 }
 
@@ -1873,40 +1852,31 @@ function parseExactMarkerCensus(stdout: string, stderr: string, marker: string):
   return pids;
 }
 
-function exactMarkerProcessIds(directory: string, marker: string): number[] {
-  const nonce = crypto.randomUUID();
-  const stdoutPath = createPrivateFixtureFile(directory, `marker-${nonce}.stdout`);
-  const stderrPath = createPrivateFixtureFile(directory, `marker-${nonce}.stderr`);
-  let stdoutFd: number | undefined;
-  try {
-    stdoutFd = openSync(stdoutPath, constants.O_RDWR | constants.O_TRUNC | constants.O_NOFOLLOW);
-    let stderrFd: number | undefined;
-    try {
-      stderrFd = openSync(stderrPath, constants.O_RDWR | constants.O_TRUNC | constants.O_NOFOLLOW);
-      const inspection = spawnSync("/bin/ps", ["-axww", "-o", "pid=,command="], {
-        cwd: root,
-        stdio: ["ignore", stdoutFd, stderrFd],
-        timeout: S3_MARKER_INSPECTION_TIMEOUT_MS,
-      });
-      if (inspection.error !== undefined || inspection.signal !== null || inspection.status !== 0) {
-        throw new Error("S3_EXACT_MARKER_INSPECTION_UNPROVEN");
-      }
-      const stdout = readBoundedCensusFd(stdoutFd, "S3_EXACT_MARKER_STDOUT");
-      const stderr = readBoundedCensusFd(stderrFd, "S3_EXACT_MARKER_STDERR");
-      return parseExactMarkerCensus(stdout, stderr, marker);
-    } finally {
-      if (stderrFd !== undefined) closeSync(stderrFd);
-    }
-  } finally {
-    if (stdoutFd !== undefined) closeSync(stdoutFd);
+function exactMarkerProcessIds(marker: string): number[] {
+  const inspection = spawnSync("/bin/ps", ["-axww", "-o", "pid=,command="], {
+    cwd: root,
+    encoding: "buffer",
+    maxBuffer: S3_MARKER_CENSUS_MAX_BYTES,
+    stdio: ["ignore", "pipe", "pipe"],
+    timeout: S3_MARKER_INSPECTION_TIMEOUT_MS,
+  });
+  if (
+    inspection.error !== undefined ||
+    inspection.signal !== null ||
+    !Number.isSafeInteger(inspection.status) ||
+    inspection.status !== 0
+  ) {
+    throw new Error("S3_EXACT_MARKER_INSPECTION_UNPROVEN");
   }
+  const capture = decodeExactMarkerCensusCapture(inspection.stdout, inspection.stderr);
+  return parseExactMarkerCensus(capture.stdout, capture.stderr, marker);
 }
 
-async function waitForExactMarkerAbsence(directory: string, marker: string): Promise<void> {
+async function waitForExactMarkerAbsence(marker: string): Promise<void> {
   const deadline = performance.now() + S3_OUTER_LEASE_RETIRE_WAIT_MS;
   let lastPids: number[] = [];
   while (performance.now() < deadline) {
-    lastPids = exactMarkerProcessIds(directory, marker);
+    lastPids = exactMarkerProcessIds(marker);
     if (lastPids.length === 0) return;
     await Bun.sleep(20);
   }
@@ -1960,6 +1930,28 @@ test("PLANTED: exact marker census refuses empty and truncated snapshots", () =>
   );
 });
 
+test("PLANTED: bounded exact-marker pipe capture accepts one anchored Buffer and refuses unsafe captures", () => {
+  const marker = `s3-census-capture-${crypto.randomUUID()}`;
+  const anchored = Buffer.from(`${process.pid} bun-test-census-anchor\n`, "utf8");
+  const decoded = decodeExactMarkerCensusCapture(anchored, Buffer.alloc(0));
+  expect(parseExactMarkerCensus(decoded.stdout, decoded.stderr, marker)).toEqual([]);
+  expect(() => decodeExactMarkerCensusCapture("not-a-buffer", Buffer.alloc(0))).toThrow(
+    "S3_EXACT_MARKER_INSPECTION_CAPTURE_TYPE",
+  );
+  expect(() => decodeExactMarkerCensusCapture(Buffer.alloc(0), Buffer.alloc(0))).toThrow(
+    "S3_EXACT_MARKER_INSPECTION_EMPTY",
+  );
+  expect(() =>
+    decodeExactMarkerCensusCapture(
+      Buffer.alloc(S3_MARKER_CENSUS_MAX_BYTES + 1),
+      Buffer.alloc(0),
+    ),
+  ).toThrow("S3_EXACT_MARKER_INSPECTION_OVERRUN");
+  expect(() =>
+    decodeExactMarkerCensusCapture(Buffer.from([0xff, 0x0a]), Buffer.alloc(0)),
+  ).toThrow("S3_EXACT_MARKER_INSPECTION_INVALID_UTF8");
+});
+
 for (const bootstrapPlant of [
   "malformed",
   "invalid-utf8",
@@ -1968,6 +1960,9 @@ for (const bootstrapPlant of [
   "partial",
   "overrun",
   "eof",
+  "tamper",
+  "symlink",
+  "path-swap",
 ] as const) {
   test(
     `PLANTED: ${bootstrapPlant} bootstrap record fails closed without target import or authority parsing`,
@@ -2014,51 +2009,46 @@ for (const bootstrapPlant of [
         expect(sameExactIdentity(original, invocation.resultIdentity)).toBe(true);
         expect(sameExactIdentity(named, invocation.resultIdentity)).toBe(true);
         expect(original.size).toBe(0n);
+        const bootstrapOriginal = fstatSync(invocation.bootstrapFd, {
+          bigint: true,
+        }) as ExactBigIntStat;
+        if (bootstrapPlant === "overrun" || bootstrapPlant === "eof") {
+          expect(sameExactFileIdentity(bootstrapOriginal, invocation.bootstrapIdentity)).toBe(true);
+          expect(
+            sameExactFileIdentity(
+              lstatSync(invocation.bootstrapPath, { bigint: true }) as ExactBigIntStat,
+              invocation.bootstrapIdentity,
+            ),
+          ).toBe(true);
+        } else {
+          expect(
+            sameIdentityExceptNlink(bootstrapOriginal, invocation.bootstrapIdentity, 0n),
+          ).toBe(true);
+          expect(bootstrapOriginal.size.toString(10)).toBe(invocation.bootstrapIdentity.size);
+          if (bootstrapPlant === "symlink") {
+            expect(lstatSync(invocation.bootstrapPath).isSymbolicLink()).toBe(true);
+          } else if (bootstrapPlant === "path-swap") {
+            const replacement = lstatSync(invocation.bootstrapPath, {
+              bigint: true,
+            }) as ExactBigIntStat;
+            expect(replacement.isFile()).toBe(true);
+            expect(sameExactFileIdentity(replacement, invocation.bootstrapIdentity)).toBe(false);
+          } else {
+            expect(() => lstatSync(invocation.bootstrapPath)).toThrow();
+          }
+        }
         assertPinnedFreshRuntimeDirectory(invocation, "S3_FRESH_BOOTSTRAP");
         expect(() => lstatSync(markerPath)).toThrow();
       } finally {
         await retireAndCloseFreshRuntime(invocation);
       }
+      expect(invocation.bootstrapFdClosed).toBe(true);
       expect(invocation.resultFdClosed).toBe(true);
       expect(invocation.directoryFdClosed).toBe(true);
     },
     { timeout: 20_000 },
   );
 }
-
-test("PLANTED: bootstrap write failure never ends stdin before its owning reaper", async () => {
-  for (const mode of ["partial-write", "flush-stall"] as const) {
-    let ended = 0;
-    let flushStarted = false;
-    const helper = {
-      stdin: {
-        write(bytes: Uint8Array): number {
-          return mode === "partial-write" ? bytes.byteLength - 1 : bytes.byteLength;
-        },
-        flush(): Promise<number> {
-          flushStarted = true;
-          return mode === "flush-stall" ? new Promise<number>(() => undefined) : Promise.resolve(0);
-        },
-        end(): void {
-          ended += 1;
-        },
-      },
-    } as unknown as ReturnType<typeof Bun.spawn>;
-    await expect(
-      writeFreshRuntimeBootstrap(
-        helper,
-        Buffer.from('{"one":"canonical-record"}\n', "utf8"),
-        performance.now() + 50,
-      ),
-    ).rejects.toThrow(
-      mode === "partial-write"
-        ? "S3_FRESH_RUNTIME_BOOTSTRAP_PARTIAL_WRITE"
-        : "S3_FRESH_RUNTIME_BOOTSTRAP_FLUSH_DEADLINE",
-    );
-    expect(flushStarted).toBe(mode === "flush-stall");
-    expect(ended).toBe(0);
-  }
-});
 
 test("PLANTED: an overrun pipe requests and settles cancellation exactly once", async () => {
   let cancellations = 0;
@@ -2105,34 +2095,7 @@ test("PLANTED: a hanging pipe cancellation refuses at the absolute deadline", as
 });
 
 test(
-  "PLANTED: a full bootstrap write with a never-settling flush kills and reaps before EOF or target import",
-  async () => {
-    const markerDirectory = makePrivateFixtureDirectory();
-    const markerPath = join(markerDirectory, `flush-target-ran-${crypto.randomUUID()}`);
-    const startedAt = performance.now();
-    await expect(
-      invokeFreshOwnedS3Command(
-        [
-          "perl",
-          "-e",
-          'open(my $marker, ">", $ARGV[0]) or exit 121; print {$marker} "flush-target-ran\\n" or exit 122; close($marker) or exit 123;',
-          markerPath,
-        ],
-        {
-          timeoutMs: 2_000,
-          outerTimeoutMs: 2_000,
-          bootstrapPlant: "flush-stall",
-        },
-      ),
-    ).rejects.toThrow("S3_FRESH_RUNTIME_BOOTSTRAP_FLUSH_DEADLINE");
-    expect(performance.now() - startedAt).toBeGreaterThanOrEqual(800);
-    expect(() => lstatSync(markerPath)).toThrow();
-  },
-  { timeout: 8_000 },
-);
-
-test(
-  "PLANTED: fresh runtime closes its held result fd when retirement refuses",
+  "PLANTED: fresh runtime closes its held bootstrap result and directory fds when retirement refuses",
   async () => {
     const invocation = await invokeFreshOwnedS3Command(["perl", "-e", 'print "fd-close";'], {
       timeoutMs: 2_000,
@@ -2161,8 +2124,10 @@ test(
         }),
       ).rejects.toThrow("S3_FRESH_FD_CLOSE_HANG_DEADLINE");
       expect(cancellationRequested).toBe(true);
+      expect(invocation.bootstrapFdClosed).toBe(true);
       expect(invocation.resultFdClosed).toBe(true);
       expect(invocation.directoryFdClosed).toBe(true);
+      expect(() => fstatSync(invocation.bootstrapFd)).toThrow();
       expect(() => fstatSync(invocation.resultFd)).toThrow();
       expect(() => fstatSync(invocation.directoryFd)).toThrow();
     } finally {
@@ -2183,13 +2148,14 @@ test(
 
     expect(bundle.length).toBeGreaterThan(0);
     expect(localWorkerBundleSentinels(bundle)).toEqual([]);
+    expect(FRESH_OWNED_COMMAND_DISPATCHER).toContain('const BOOTSTRAP_NAME = "bootstrap.json";');
     expect(FRESH_OWNED_COMMAND_DISPATCHER).toContain('const RESULT_NAME = "result.json";');
-    expect(FRESH_OWNED_COMMAND_DISPATCHER).toContain("const bootstrap = await readBootstrap();");
+    expect(FRESH_OWNED_COMMAND_DISPATCHER).toContain("const bootstrap = readBootstrap();");
+    expect(FRESH_OWNED_COMMAND_DISPATCHER).toContain("unlinkSync(BOOTSTRAP_NAME);");
     expect(FRESH_OWNED_COMMAND_DISPATCHER).toContain("unlinkSync(RESULT_NAME);");
     expect(FRESH_OWNED_COMMAND_DISPATCHER).toContain(
       "const result = await module.runOwnedCommand(bootstrap.options);",
     );
-    expect(FRESH_OWNED_COMMAND_DISPATCHER).toContain("writePipeAll(1, STARTUP_READY);");
     expect(FRESH_OWNED_COMMAND_DISPATCHER).toContain(
       "writeSync(fd, bytes, offset, bytes.byteLength - offset, offset)",
     );
@@ -2197,13 +2163,21 @@ test(
       "constants.O_CREAT | constants.O_EXCL | constants.O_NOFOLLOW",
     );
     expect(FRESH_OWNED_COMMAND_DISPATCHER).not.toContain("process.argv");
+    expect(FRESH_OWNED_COMMAND_DISPATCHER).not.toContain("process.stdin");
+    const bootstrapUnlink = FRESH_OWNED_COMMAND_DISPATCHER.indexOf(
+      "unlinkSync(BOOTSTRAP_NAME);",
+    );
+    const bootstrapClose = FRESH_OWNED_COMMAND_DISPATCHER.indexOf(
+      "closeQuietly(bootstrapFd);",
+      bootstrapUnlink,
+    );
+    expect(bootstrapUnlink).toBeGreaterThan(-1);
+    expect(bootstrapClose).toBeGreaterThan(bootstrapUnlink);
+    expect(bootstrapClose).toBeLessThan(FRESH_OWNED_COMMAND_DISPATCHER.indexOf("JSON.parse(text)"));
     expect(FRESH_OWNED_COMMAND_DISPATCHER.indexOf("unlinkSync(RESULT_NAME);")).toBeLessThan(
       FRESH_OWNED_COMMAND_DISPATCHER.indexOf("await import(bootstrap.runnerUrl)"),
     );
-    expect(
-      FRESH_OWNED_COMMAND_DISPATCHER.indexOf("await import(bootstrap.runnerUrl)"),
-    ).toBeLessThan(FRESH_OWNED_COMMAND_DISPATCHER.indexOf("writePipeAll(1, STARTUP_READY);"));
-    expect(FRESH_OWNED_COMMAND_DISPATCHER.indexOf("writePipeAll(1, STARTUP_READY);")).toBeLessThan(
+    expect(FRESH_OWNED_COMMAND_DISPATCHER.indexOf("await import(bootstrap.runnerUrl)")).toBeLessThan(
       FRESH_OWNED_COMMAND_DISPATCHER.indexOf(
         "const result = await module.runOwnedCommand(bootstrap.options);",
       ),
@@ -2213,28 +2187,31 @@ test(
 );
 
 test(
-  "PLANTED: target fd scan is nonvacuous and sees the fixed result path absent",
+  "PLANTED: target fd scan is nonvacuous and sees bootstrap and result authority absent",
   async () => {
     const invocation = await invokeFreshOwnedS3Command(
       [
         "perl",
         "-e",
         String.raw`use strict;
-use warnings;
-use Errno qw(ENOENT);
-use Fcntl qw(:DEFAULT);
-sysopen(my $missing, "result.json", O_RDONLY | O_NOFOLLOW) and exit 91;
-exit 92 unless $! == ENOENT;
-sysopen(my $decoy, "target-fd-decoy", O_RDWR | O_CREAT | O_EXCL | O_NOFOLLOW, 0600) or exit 93;
-print {$decoy} "decoy" or exit 94;
-my @decoy = stat($decoy);
-open(my $fds, "-|", "/usr/sbin/lsof", "-n", "-P", "-FfDi", "-p", "$$") or exit 95;
-my ($decoy_seen, $result_seen) = (0, 0);
-my ($device, $inode);
-my $finish = sub {
-  return unless defined $device && defined $inode;
-  $decoy_seen++ if $device == $decoy[0] && $inode == $decoy[1];
-  $result_seen++ if $device == $ENV{S3_FRESH_RUNTIME_RESULT_DEV} && $inode == $ENV{S3_FRESH_RUNTIME_RESULT_INO};
+	use warnings;
+	use Errno qw(ENOENT);
+	use Fcntl qw(:DEFAULT);
+	for my $name ("bootstrap.json", "result.json") {
+	  sysopen(my $missing, $name, O_RDONLY | O_NOFOLLOW) and exit 91;
+	  exit 92 unless $! == ENOENT;
+	}
+	sysopen(my $decoy, "target-fd-decoy", O_RDWR | O_CREAT | O_EXCL | O_NOFOLLOW, 0600) or exit 93;
+	print {$decoy} "decoy" or exit 94;
+	my @decoy = stat($decoy);
+	open(my $fds, "-|", "/usr/sbin/lsof", "-n", "-P", "-FfDi", "-p", "$$") or exit 95;
+	my ($decoy_seen, $bootstrap_seen, $result_seen) = (0, 0, 0);
+	my ($device, $inode);
+	my $finish = sub {
+	  return unless defined $device && defined $inode;
+	  $decoy_seen++ if $device == $decoy[0] && $inode == $decoy[1];
+	  $bootstrap_seen++ if $device == $ENV{S3_FRESH_RUNTIME_BOOTSTRAP_DEV} && $inode == $ENV{S3_FRESH_RUNTIME_BOOTSTRAP_INO};
+	  $result_seen++ if $device == $ENV{S3_FRESH_RUNTIME_RESULT_DEV} && $inode == $ENV{S3_FRESH_RUNTIME_RESULT_INO};
 };
 while (my $line = <$fds>) {
   chomp $line;
@@ -2246,28 +2223,29 @@ while (my $line = <$fds>) {
   } elsif ($line =~ /^i([0-9]+)$/) {
     $inode = $1;
   }
-}
-close($fds) or exit 96;
-$finish->();
-exit 97 unless $decoy_seen >= 1 && $result_seen == 0;
-print "S3_TARGET_FD_SCAN_RESULT_ENOENT_DECOY_PRESENT_RESULT_ABSENT\n";`,
+	}
+	close($fds) or exit 96;
+	$finish->();
+	exit 97 unless $decoy_seen >= 1 && $bootstrap_seen == 0 && $result_seen == 0;
+	print "S3_TARGET_FD_SCAN_BOTH_ENOENT_DECOY_PRESENT_AUTHORITY_ABSENT\n";`,
       ],
       { timeoutMs: 2_000, targetCwd: "private" },
     );
     try {
-      expect(invocation.stdoutCapture.byteLength()).toBe(
-        S3_FRESH_RUNTIME_BOOTSTRAP_READY.byteLength,
-      );
-      await expect(invocation.stdoutCapture.complete).resolves.toEqual(
-        S3_FRESH_RUNTIME_BOOTSTRAP_READY,
-      );
       await assertFreshRuntimeExited(invocation, "S3_FRESH_TARGET_FD_SCAN");
       const freshResult = await readFreshOwnedS3Result(invocation, "S3_FRESH_TARGET_FD_SCAN");
       expect(freshResult.result.outcome).toBe("exited");
       expect(freshResult.cleanupProven).toBe(true);
       expect(freshResult.result.stdout).toBe(
-        ["S3_TARGET_FD_SCAN_RESULT_ENOENT_DECOY_PRESENT_RESULT_ABSENT", ""].join("\n"),
+        ["S3_TARGET_FD_SCAN_BOTH_ENOENT_DECOY_PRESENT_AUTHORITY_ABSENT", ""].join("\n"),
       );
+      const bootstrapOriginal = fstatSync(invocation.bootstrapFd, {
+        bigint: true,
+      }) as ExactBigIntStat;
+      expect(
+        sameIdentityExceptNlink(bootstrapOriginal, invocation.bootstrapIdentity, 0n),
+      ).toBe(true);
+      expect(bootstrapOriginal.size.toString(10)).toBe(invocation.bootstrapIdentity.size);
       const original = fstatSync(invocation.resultFd, { bigint: true }) as ExactBigIntStat;
       expect(sameIdentityExceptNlink(original, invocation.resultIdentity, 0n)).toBe(true);
     } finally {
@@ -2483,7 +2461,7 @@ test(
 
       expect(freshResult.result.outcome).toBe("timeout");
       expect(freshResult.cleanupProven).toBe(true);
-      await waitForExactMarkerAbsence(fixtureDirectory, marker);
+      await waitForExactMarkerAbsence(marker);
     } finally {
       await retireAndCloseFreshRuntime(invocation);
     }
@@ -2515,7 +2493,7 @@ test(
       expect(freshResult.result.outcome).toBe("output-overrun");
       expect(freshResult.cleanupProven).toBe(true);
       expect(freshResult.result.retainedStdoutBytes).toBe(128);
-      await waitForExactMarkerAbsence(fixtureDirectory, marker);
+      await waitForExactMarkerAbsence(marker);
     } finally {
       await retireAndCloseFreshRuntime(invocation);
     }
@@ -2560,20 +2538,16 @@ test(
         assertFreshRuntimeExited(invocation, "S3_FRESH_OUTER_LATE_EXIT"),
       ).rejects.toThrow("S3_FRESH_OUTER_LATE_EXIT_FRESH_RUNTIME_DEADLINE");
       // A timeout wins even if the direct helper reaches status 0 late. No
-      // partial outer record is parsed or persisted on this branch. The only
-      // helper stdout permitted is the pre-target bootstrap control record.
-      expect(invocation.stdoutCapture.byteLength()).toBe(
-        S3_FRESH_RUNTIME_BOOTSTRAP_READY.byteLength,
-      );
-      await expect(invocation.stdoutCapture.complete).resolves.toEqual(
-        S3_FRESH_RUNTIME_BOOTSTRAP_READY,
-      );
+      // partial outer record is parsed or persisted on this branch. The helper
+      // has no stdout authority or startup-control protocol.
+      expect(invocation.stdoutCapture.byteLength()).toBe(0);
+      await expect(invocation.stdoutCapture.complete).resolves.toEqual(Buffer.alloc(0));
       await expect(invocation.stderrCapture.complete).resolves.toEqual(Buffer.alloc(0));
       const original = fstatSync(invocation.resultFd, { bigint: true }) as ExactBigIntStat;
       expect(sameIdentityExceptNlink(original, invocation.resultIdentity, 0n)).toBe(true);
       expect(original.size).toBe(0n);
       expect(() => lstatSync(invocation.resultPath)).toThrow();
-      await waitForExactMarkerAbsence(fixtureDirectory, marker);
+      await waitForExactMarkerAbsence(marker);
     } finally {
       await retireAndCloseFreshRuntime(invocation);
     }

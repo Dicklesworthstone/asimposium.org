@@ -58,4 +58,5 @@ fallthrough = true
 # request relocate the origin the Worker believes it serves. The Worker fails
 # closed without it.
 STOA_ORIGIN = "https://a.asimposium.org"
+AGORA_ORIGIN = "https://asimposium.org"
 SERVICE_ENVELOPE_KEYS = '[{"kid":"prod-svc-2026-08","publicKeyHex":"0b137bcd0a75c16e2a4d5f734e1f550018fc6cea15edd5693bb8b597096e5f76","notBefore":1786665600}]'

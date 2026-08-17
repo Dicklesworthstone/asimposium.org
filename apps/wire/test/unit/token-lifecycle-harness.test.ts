@@ -28,6 +28,7 @@ const FAULT_PLANTS = {
   TOKEN_LIFECYCLE_TEST_LOG_LEAK: "0",
   TOKEN_LIFECYCLE_TEST_PARTIAL_PS: "0",
   TOKEN_LIFECYCLE_TEST_PID_REUSE: "0",
+  TOKEN_LIFECYCLE_TEST_PRE_IDENTITY_FAILURE: "0",
 } as const;
 
 async function settleWithin<Value>(
@@ -118,6 +119,63 @@ async function assertOwnedLeaderCurrent(identity: OwnedProcessIdentity): Promise
   }
 }
 
+async function settleSpawnFailure(
+  child: ReturnType<typeof Bun.spawn>,
+  exited: Promise<number>,
+  identity: OwnedProcessIdentity | undefined,
+  termGraceMs: number,
+  killGraceMs: number,
+): Promise<void> {
+  let settled = await settleWithin(exited, 10);
+
+  if (identity === undefined) {
+    // Before the supervisor identity is pinned, the Bun child handle is the
+    // only authority we own. Signal that direct child only; a numeric process
+    // group that merely resembles its PID is never enough.
+    if (settled === undefined) {
+      child.kill("SIGTERM");
+      settled = await settleWithin(exited, termGraceMs);
+    }
+    if (settled === undefined) {
+      child.kill("SIGKILL");
+      settled = await settleWithin(exited, killGraceMs);
+    }
+    if (settled === undefined) {
+      throw new Error("token lifecycle provisional supervisor could not be reaped");
+    }
+    const singletonGroupEmpty = await waitUntil(
+      () => processGroupIsEmpty(child.pid),
+      killGraceMs,
+    );
+    if (!singletonGroupEmpty) {
+      throw new Error("token lifecycle unpinned supervisor left a process-group survivor");
+    }
+    return;
+  }
+
+  let groupEmpty = processGroupIsEmpty(identity.pgid);
+  if (settled !== undefined && groupEmpty) return;
+  if (!groupEmpty) {
+    await assertOwnedLeaderCurrent(identity);
+    process.kill(-identity.pgid, "SIGTERM");
+  }
+  if (settled === undefined) settled = await settleWithin(exited, termGraceMs);
+  groupEmpty = await waitUntil(() => processGroupIsEmpty(identity.pgid), termGraceMs);
+  if (settled !== undefined && groupEmpty) return;
+
+  if (!groupEmpty) {
+    // Re-authorize KILL independently. The original challenge response is not
+    // authority after a grace interval in which the leader could disappear.
+    await assertOwnedLeaderCurrent(identity);
+    process.kill(-identity.pgid, "SIGKILL");
+  }
+  if (settled === undefined) settled = await settleWithin(exited, killGraceMs);
+  groupEmpty = await waitUntil(() => processGroupIsEmpty(identity.pgid), killGraceMs);
+  if (settled === undefined || !groupEmpty) {
+    throw new Error("token lifecycle spawned supervisor did not settle after failure");
+  }
+}
+
 async function runOwnedProcess(options: {
   readonly cmd: readonly string[];
   readonly expectedCommandToken: string;
@@ -126,6 +184,8 @@ async function runOwnedProcess(options: {
   readonly liveBudgetMs: number;
   readonly termGraceMs: number;
   readonly killGraceMs: number;
+  /** Test-only causal hook: it runs after identity pinning and before go. */
+  readonly beforeGo?: (pgid: number) => void;
 }): Promise<OwnedProcessResult> {
   const captureRoot = existsSync(EXTERNAL_TMPDIR)
     ? EXTERNAL_TMPDIR
@@ -151,18 +211,20 @@ async function runOwnedProcess(options: {
   let groupEmpty = false;
   let timedOut = false;
   let exitCode = -1;
+  let child: ReturnType<typeof Bun.spawn> | undefined;
+  let exited: Promise<number> | undefined;
 
   try {
     // The Perl launcher remains the group leader while its command runs. Its
     // private ready/go files prevent a short command from exiting before the
     // parent has pinned the exact leader identity. No existing or previously
     // orphaned group is inspected as a cleanup target.
-    const child = Bun.spawn({
+    child = Bun.spawn({
       cmd: [
         "perl",
         "-MPOSIX=setsid,WNOHANG",
         "-e",
-        'setsid() or die "setsid"; my $leader = $$; my $group = getpgrp(0); open(my $ready, ">", $ENV{"TOKEN_LIFECYCLE_SUPERVISOR_READY"}) or die "ready"; print $ready join("\\t", $leader, $group, $ENV{"TOKEN_LIFECYCLE_SUPERVISOR_NONCE"}, $ENV{"TOKEN_LIFECYCLE_SUPERVISOR_COMMAND_TOKEN"}) . "\\n"; close($ready); until (-e $ENV{"TOKEN_LIFECYCLE_SUPERVISOR_GO"}) { select(undef, undef, undef, 0.01); } $SIG{"TERM"} = sub {}; my $worker = fork(); die "fork" unless defined($worker); if ($worker == 0) { $SIG{"TERM"} = "DEFAULT"; exec @ARGV or die "exec"; } my $last_challenge = ""; my $status; while (1) { if (-e $ENV{"TOKEN_LIFECYCLE_SUPERVISOR_CHALLENGE"}) { open(my $challenge_file, "<", $ENV{"TOKEN_LIFECYCLE_SUPERVISOR_CHALLENGE"}) or die "challenge"; my $challenge = <$challenge_file> // ""; close($challenge_file); $challenge =~ s/\\s+$//; if ($challenge ne "" && $challenge ne $last_challenge) { open(my $response, ">", $ENV{"TOKEN_LIFECYCLE_SUPERVISOR_RESPONSE"}) or die "response"; print $response join("\\t", $challenge, $leader, $group, $ENV{"TOKEN_LIFECYCLE_SUPERVISOR_NONCE"}, $ENV{"TOKEN_LIFECYCLE_SUPERVISOR_COMMAND_TOKEN"}) . "\\n"; close($response); $last_challenge = $challenge; } } my $done = waitpid($worker, WNOHANG); if ($done == $worker) { $status = $?; last; } die "waitpid" if $done < 0; select(undef, undef, undef, 0.01); } my $code = ($status & 127) ? 128 + ($status & 127) : $status >> 8; open(my $status_file, ">", $ENV{"TOKEN_LIFECYCLE_SUPERVISOR_STATUS"}) or die "status"; print $status_file join("\\t", $worker, $status, $code) . "\\n"; close($status_file); exit($code);',
+        'setsid() or die "setsid"; my $leader = $$; my $group = getpgrp(0); open(my $ready, ">", $ENV{"TOKEN_LIFECYCLE_SUPERVISOR_READY"}) or die "ready"; print $ready join("\\t", $leader, $group, $ENV{"TOKEN_LIFECYCLE_SUPERVISOR_NONCE"}, $ENV{"TOKEN_LIFECYCLE_SUPERVISOR_COMMAND_TOKEN"}) . "\\n"; close($ready); my $last_challenge = ""; sub answer_challenge { if (-e $ENV{"TOKEN_LIFECYCLE_SUPERVISOR_CHALLENGE"}) { open(my $challenge_file, "<", $ENV{"TOKEN_LIFECYCLE_SUPERVISOR_CHALLENGE"}) or die "challenge"; my $challenge = <$challenge_file> // ""; close($challenge_file); $challenge =~ s/\\s+$//; if ($challenge ne "" && $challenge ne $last_challenge) { open(my $response, ">", $ENV{"TOKEN_LIFECYCLE_SUPERVISOR_RESPONSE"}) or die "response"; print $response join("\\t", $challenge, $leader, $group, $ENV{"TOKEN_LIFECYCLE_SUPERVISOR_NONCE"}, $ENV{"TOKEN_LIFECYCLE_SUPERVISOR_COMMAND_TOKEN"}) . "\\n"; close($response); $last_challenge = $challenge; } } } until (-e $ENV{"TOKEN_LIFECYCLE_SUPERVISOR_GO"}) { answer_challenge(); select(undef, undef, undef, 0.01); } $SIG{"TERM"} = sub {}; my $worker = fork(); die "fork" unless defined($worker); if ($worker == 0) { $SIG{"TERM"} = "DEFAULT"; exec @ARGV or die "exec"; } my $status; while (1) { answer_challenge(); my $done = waitpid($worker, WNOHANG); if ($done == $worker) { $status = $?; last; } die "waitpid" if $done < 0; select(undef, undef, undef, 0.01); } my $code = ($status & 127) ? 128 + ($status & 127) : $status >> 8; open(my $status_file, ">", $ENV{"TOKEN_LIFECYCLE_SUPERVISOR_STATUS"}) or die "status"; print $status_file join("\\t", $worker, $status, $code) . "\\n"; close($status_file); exit($code);',
         ...options.cmd,
       ],
       cwd: ROOT,
@@ -179,7 +241,7 @@ async function runOwnedProcess(options: {
       stdout: Bun.file(stdoutPath),
       stderr: Bun.file(stderrPath),
     });
-    const exited = child.exited;
+    exited = child.exited;
     const identityReady = await waitUntil(() => {
       if (!existsSync(supervisorReadyPath)) return false;
       const [pid, pgid, nonce, commandToken] = readFileSync(supervisorReadyPath, "utf8")
@@ -206,6 +268,7 @@ async function runOwnedProcess(options: {
     if (!identityReady || identity === undefined) {
       throw new Error("token lifecycle supervisor could not pin its new group leader");
     }
+    options.beforeGo?.(identity.pgid);
     writeFileSync(supervisorGoPath, "go\n", { encoding: "utf8", flag: "wx", mode: 0o600 });
     if (
       options.readyOutput !== undefined &&
@@ -261,9 +324,23 @@ async function runOwnedProcess(options: {
         throw new Error("token lifecycle harness exited with an unreaped owned group");
       }
     }
-  } finally {
-    // Bun owns the BunFile-backed child handles. The paths themselves remain
-    // as private retained evidence; this test never deletes caller data.
+  } catch (error) {
+    if (child === undefined || exited === undefined) throw error;
+    try {
+      await settleSpawnFailure(
+        child,
+        exited,
+        identity,
+        options.termGraceMs,
+        options.killGraceMs,
+      );
+    } catch (cleanupError) {
+      throw new AggregateError(
+        [error, cleanupError],
+        "token lifecycle supervisor failed and could not prove bounded cleanup",
+      );
+    }
+    throw error;
   }
 
   return {
@@ -333,6 +410,7 @@ test("token lifecycle harness self-test is ordinary-unit registered and never la
   expect(script).toContain("TOKEN_LIFECYCLE_TEST_PARTIAL_PS");
   expect(script).toContain("TOKEN_LIFECYCLE_TEST_PID_REUSE");
   expect(script).toContain("TOKEN_LIFECYCLE_TEST_LOG_LEAK");
+  expect(script).toContain("TOKEN_LIFECYCLE_TEST_PRE_IDENTITY_FAILURE");
   expect(script).toContain("TOKEN_LIFECYCLE_BARRIER_CAPABILITY");
   expect(script).toContain('"deterministic_barrier":true');
   expect(script).toContain("panic-leaves-no-active-minted-credential");
@@ -375,12 +453,44 @@ test("PLANTED: the outer supervisor owns, TERM/KILLs, reaps, and empties only it
   expect(result.stdout).toBe("supervisor-plant-ready\n");
 });
 
+test("PLANTED: a pre-go assertion failure reaps and empties its pinned supervisor group", async () => {
+  let pinnedPgid: number | undefined;
+  let failure: unknown;
+  try {
+    await runOwnedProcess({
+      cmd: ["bash", "-c", "printf '%s\\n' should-not-run"],
+      expectedCommandToken: "token-lifecycle-pre-go-failure-plant",
+      env: { ...process.env },
+      liveBudgetMs: 1_000,
+      termGraceMs: 1_000,
+      killGraceMs: 5_000,
+      beforeGo(pgid) {
+        pinnedPgid = pgid;
+        throw new Error("causal-pre-go-failure-plant");
+      },
+    });
+  } catch (error) {
+    failure = error;
+  }
+
+  expect(failure).toBeInstanceOf(Error);
+  expect((failure as Error).message).toBe("causal-pre-go-failure-plant");
+  expect(pinnedPgid).toBeNumber();
+  if (pinnedPgid === undefined) throw new Error("pre-go plant never pinned its group");
+  expect(processGroupIsEmpty(pinnedPgid)).toBe(true);
+});
+
 test("token lifecycle fault matrix is ordinary, provider-free, and causally proves every local cleanup plant", async () => {
   const cases: readonly {
     readonly plant: keyof typeof FAULT_PLANTS;
     readonly code: string;
     readonly requiresWorkerCleanup: boolean;
   }[] = [
+    {
+      plant: "TOKEN_LIFECYCLE_TEST_PRE_IDENTITY_FAILURE",
+      code: "TOKEN_LIFECYCLE_PRE_IDENTITY_FAILURE_PLANT",
+      requiresWorkerCleanup: true,
+    },
     {
       plant: "TOKEN_LIFECYCLE_TEST_BUSY_PORT",
       code: "TOKEN_LIFECYCLE_PORT_ALREADY_BOUND",
@@ -420,6 +530,12 @@ test("token lifecycle fault matrix is ordinary, provider-free, and causally prov
     } else {
       expect(result.stdout).not.toContain("ready_workerd_responder_pid_pgid_start_and_argv_pinned");
     }
+    if (current.plant === "TOKEN_LIFECYCLE_TEST_PRE_IDENTITY_FAILURE") {
+      expect(result.stdout).toContain(
+        '"assertion":"startup_gate_supervisor_reaped_before_target_launch","status":"pass","wrangler_started":false',
+      );
+      expect(result.stdout).not.toContain("ready_workerd_responder_pid_pgid_start_and_argv_pinned");
+    }
   }
 });
 
@@ -452,6 +568,12 @@ test("token lifecycle bounded live local Workerd+D1 proof is ordinary-unit regis
   expect(authorizationRecord?.event_id).toMatch(/^LEV-[0-9A-HJKMNP-TV-Z]{26}$/);
   expect(authorizationRecord?.request_id).toMatch(/^token-lifecycle-revoke-alpha-\d+$/);
   expect(authorizationRecord?.authorization_decision).toBe("refuse");
+  expect(authorizationRecord?.auth_state).toBe("credential_revoked");
+  expect(authorizationRecord?.code).toBe("UNAUTHORIZED");
+  expect(authorizationRecord?.latency_ms).toBeNumber();
+  expect(Number.isFinite(authorizationRecord?.latency_ms)).toBe(true);
+  expect(authorizationRecord?.latency_ms).toBeGreaterThanOrEqual(0);
+  expect(authorizationRecord?.latency_ms).toBeLessThanOrEqual(60_000);
   expect(authorizationRecord?.assertion_diff).toContain("operator=credential_revoked");
   expect(authorizationRecord?.assertion_diff).toContain("canary=<redacted>");
   expect(result.stdout).toContain('"code":"W4_FELLOW_MUTATION_NOT_IMPLEMENTED"');
@@ -472,7 +594,9 @@ test("OPS.2a authorization evidence bounds and redacts every emitted string fiel
     "sponsor_id",
     "fellow_id",
     "scope_or_grant",
+    "auth_state",
     "authorization_decision",
+    "code",
     "request_id",
     "event_id",
     "assertion_diff",
@@ -485,13 +609,16 @@ test("OPS.2a authorization evidence bounds and redacts every emitted string fiel
   expect(helper).toContain("redactCredentials(value).slice(0, limit)");
   expect(helper).toContain("AUTHORIZATION_EVIDENCE_DIFF_LIMIT");
   expect(helper).toContain("AUTHORIZATION_EVIDENCE_RECORD_LIMIT");
+  expect(helper).toContain("latency_ms: boundedEvidenceLatency(input.latencyMs)");
+  expect(helper).toContain("AUTHORIZATION_EVIDENCE_LATENCY_LIMIT_MS");
+  expect(helper).toContain("Number.isFinite(value) && value >= 0");
   expect(helper).toContain('Buffer.byteLength(encoded, "utf8")');
 });
 
 test("PLANTED: actual authorization evidence invokes the central seam and binds real ids", () => {
   const script = readFileSync(SCRIPT, "utf8");
   const record = script.slice(
-    script.indexOf("const postRevokeAuthorization = inspectFellowWriteAuthorization({"),
+    script.indexOf("const authorizationStartedAt = performance.now();"),
     script.indexOf("function activeCredentialFor("),
   );
   expect(record.length).toBeGreaterThan(0);
@@ -502,6 +629,12 @@ test("PLANTED: actual authorization evidence invokes the central seam and binds 
   expect(record).toContain("fellowId: alpha.fellowId");
   expect(record).toContain("requestId: revokeKey");
   expect(record).toContain("eventId: revokedReceipt.event_id");
+  expect(record).toContain("performance.now() - authorizationStartedAt");
+  expect(record).toContain("fellowAuthorizationResponse(postRevokeAuthorization.decision)");
+  expect(record).toContain('postRevokeCallerProblem?.code === "UNAUTHORIZED"');
+  expect(record).toContain("authState: postRevokeAuthorization.operatorReason");
+  expect(record).toContain("code: postRevokeCallerProblem.code");
+  expect(record).toContain("latencyMs: authorizationLatencyMs");
   expect(record).not.toContain("requestId: key(");
   expect(record).not.toContain("eventId: null");
 });

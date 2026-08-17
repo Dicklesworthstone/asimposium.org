@@ -41,6 +41,7 @@ storage = "sqlite"
 
 [vars]
 STOA_ORIGIN = "https://a.asimposium.org"
+AGORA_ORIGIN = "https://asimposium.org"
 
 [[rules]]
 type = "Text"

@@ -60,6 +60,14 @@ deferred_bindings = ["HERALD_ROOMS"] # HeraldRoom lands with W7.
 production = "https://a.asimposium.org"
 staging = "https://a-staging.asimposium.org"
 
+# The Agora (human plane) origin each environment's device-flow verification
+# URL names. The trusted set is exactly these two (Fable §5.3 writes /approve
+# as a path); local shares the production origin deliberately — the contract
+# vocabulary has no mandate for a loopback Agora.
+[policy.canonical_agora_origins]
+production = "https://asimposium.org"
+staging = "https://staging.asimposium.org"
+
 # Which environment each Vercel deployment target calls. Preview deployments
 # must reach staging and must never reach production (Fable §13.3, ADR-2).
 [vercel]
@@ -72,6 +80,7 @@ preview_environment = "staging"
 [env.local]
 kind = "local"
 worker_origin = "http://127.0.0.1:8787"
+agora_origin = "https://asimposium.org"
 is_preview = false
 may_hold_production_keys = false
 destructive_operations_allowed = true
@@ -116,6 +125,7 @@ service_envelope_previous_kid = ""
 [env.staging]
 kind = "remote"
 worker_origin = "https://a-staging.asimposium.org"
+agora_origin = "https://staging.asimposium.org"
 is_preview = true
 may_hold_production_keys = false
 destructive_operations_allowed = true
@@ -160,6 +170,7 @@ service_envelope_previous_kid = "staging-svc-2026-07"
 [env.production]
 kind = "remote"
 worker_origin = "https://a.asimposium.org"
+agora_origin = "https://asimposium.org"
 is_preview = false
 may_hold_production_keys = true
 destructive_operations_allowed = false

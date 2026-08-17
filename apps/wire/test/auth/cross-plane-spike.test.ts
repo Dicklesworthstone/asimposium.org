@@ -66,6 +66,8 @@ function shellFunction(source: string, name: string): string {
 const MAX_CAPTURE_BYTES = 1_048_576;
 /** One absolute bound per child, independent of any assertion timeout. */
 const RUN_TIMEOUT_MS = 100_000;
+/** Maximum wait after an outer SIGKILL attempt before cleanup is unproven. */
+const POST_KILL_SETTLE_MS = 2_000;
 
 class OverCapture extends Error {}
 
@@ -128,8 +130,11 @@ interface ShellRun {
 interface ShellRunOptions {
   readonly runTimeoutMs?: number;
   readonly killGraceMs?: number;
+  readonly postKillSettleMs?: number;
   /** Test-only causal barrier: arm the deadline only after this file exists. */
   readonly armAfterFileExists?: string;
+  /** Test-only injected group SIGKILL dispatch refusal. */
+  readonly failKillDispatch?: boolean;
 }
 
 /**
@@ -259,6 +264,22 @@ async function runShell(
     // machine first. Holding the descriptors costs nothing — these are regular
     // files read by size after exit, so no reader needs EOF.
 
+    let timedOut = false;
+    let escalationFired = false;
+    let killDispatchFailed = false;
+    let groupSignalAuthorized = true;
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    let killTimer: ReturnType<typeof setTimeout> | undefined;
+    const exited = child.exited.then((exitCode) => {
+      // Revocation is part of the exit promise itself, before any waiter can
+      // resume and before the timer queue runs again. Thus an escalation
+      // callback can never use the numeric pgid after the reap made it reusable.
+      groupSignalAuthorized = false;
+      if (timer !== undefined) clearTimeout(timer);
+      if (killTimer !== undefined) clearTimeout(killTimer);
+      return exitCode;
+    });
+
     /** Is the child's group still present? */
     const groupAlive = (): boolean => {
       try {
@@ -273,12 +294,27 @@ async function runShell(
      * GROUP-ONLY. No bare-pid fallback: once the leader has been reaped its number
      * can belong to anything, and the fallback fired in exactly that window.
      */
-    const signalGroup = (signal: NodeJS.Signals): void => {
+    const signalGroup = (signal: NodeJS.Signals): boolean => {
+      if (signal === "SIGKILL" && options.failKillDispatch === true) return false;
       try {
         process.kill(-child.pid, signal);
+        return true;
       } catch {
         // The group is gone. Nothing to signal, which is the correct outcome.
+        return false;
       }
+    };
+
+    const awaitExitWithin = async (milliseconds: number): Promise<number | undefined> => {
+      let settleTimer: ReturnType<typeof setTimeout> | undefined;
+      const result = await Promise.race([
+        exited.then((exitCode) => ({ kind: "exited" as const, exitCode })),
+        new Promise<{ kind: "elapsed" }>((resolveElapsed) => {
+          settleTimer = setTimeout(() => resolveElapsed({ kind: "elapsed" }), milliseconds);
+        }),
+      ]);
+      if (settleTimer !== undefined) clearTimeout(settleTimer);
+      return result.kind === "exited" ? result.exitCode : undefined;
     };
 
     if (options.armAfterFileExists !== undefined) {
@@ -296,26 +332,22 @@ async function runShell(
       if (!ready()) {
         // The leader is still unreaped, so this is the final authorized use of
         // its numeric group id. No dangling plant is left behind on refusal.
-        signalGroup("SIGKILL");
-        await child.exited;
+        if (!signalGroup("SIGKILL")) {
+          throw new Error(
+            `cleanup unproven: readiness failed and group SIGKILL dispatch failed at ${stdoutPath}`,
+          );
+        }
+        if (
+          (await awaitExitWithin(options.postKillSettleMs ?? POST_KILL_SETTLE_MS)) === undefined
+        ) {
+          throw new Error(
+            `cleanup unproven: readiness failed and the KILLed group did not exit at ${stdoutPath}`,
+          );
+        }
         throw new Error(`deadline plant never reached readiness barrier: ${stdoutPath}`);
       }
     }
 
-    let timedOut = false;
-    let escalationFired = false;
-    let groupSignalAuthorized = true;
-    let timer: ReturnType<typeof setTimeout> | undefined;
-    let killTimer: ReturnType<typeof setTimeout> | undefined;
-    const exited = child.exited.then((exitCode) => {
-      // Revocation is part of the exit promise itself, before any waiter can
-      // resume and before the timer queue runs again. Thus an escalation
-      // callback can never use the numeric pgid after the reap made it reusable.
-      groupSignalAuthorized = false;
-      if (timer !== undefined) clearTimeout(timer);
-      if (killTimer !== undefined) clearTimeout(killTimer);
-      return exitCode;
-    });
     const deadline = new Promise<void>((resolve) => {
       timer = setTimeout(() => {
         if (!groupSignalAuthorized) {
@@ -331,7 +363,7 @@ async function runShell(
         killTimer = setTimeout(() => {
           if (!groupSignalAuthorized) return;
           escalationFired = true;
-          signalGroup("SIGKILL");
+          if (!signalGroup("SIGKILL")) killDispatchFailed = true;
         }, options.killGraceMs ?? 2_000);
         killTimer.unref?.();
         resolve();
@@ -353,8 +385,21 @@ async function runShell(
     // can name a group that merely inherited it.
     const pinnedSurvivors = raced === "deadline" && groupSignalAuthorized ? groupAlive() : false;
 
-    // Always reap, whether it exited on its own or was killed.
-    const exitCode = await exited;
+    // Always reap within a fixed post-escalation reserve. A failed group KILL
+    // while the leader is still live cannot fall into an unbounded `await`.
+    // On refusal the leader remains unreaped (and therefore still pins the
+    // group identity), and the error explicitly preserves cleanup-unproven.
+    const exitCode =
+      raced === "exited"
+        ? await exited
+        : await awaitExitWithin(
+            (options.killGraceMs ?? 2_000) + (options.postKillSettleMs ?? POST_KILL_SETTLE_MS),
+          );
+    if (exitCode === undefined) {
+      throw new Error(
+        `cleanup unproven: ${killDispatchFailed ? "group SIGKILL dispatch failed" : "the escalated group did not exit"} at ${stdoutPath}`,
+      );
+    }
 
     // NOTHING BELOW MAY USE THE PGID — not a signal, and not a probe.
     //
@@ -898,7 +943,15 @@ describe("the run is bounded and leaves no survivors", () => {
     // Ownership is surrendered only after a still-pinned group KILL and reap.
     expect(bounded).toContain("EX_CLEANUP_UNPROVEN");
     expect(bounded.indexOf('signal_group "$pid" KILL')).toBeLessThan(waitSupervisor);
+    const cleanupRefusal = bounded.indexOf(
+      '(( cleanup_unproven == 0 )) || return "$EX_CLEANUP_UNPROVEN"',
+    );
+    expect(cleanupRefusal).toBeGreaterThanOrEqual(0);
+    expect(cleanupRefusal).toBeLessThan(waitSupervisor);
     expect(bounded.indexOf('unregister_child "$pid"')).toBeGreaterThan(waitSupervisor);
+    const reaper = shellFunction(source, "reap_children");
+    expect(reaper).toContain("REAP_SURVIVORS=1");
+    expect(reaper).toContain("continue");
   });
 
   test("lifecycle signalling and census are group-only", () => {
@@ -908,15 +961,16 @@ describe("the run is bounded and leaves no survivors", () => {
     const signal = shellFunction(source, "signal_group");
     expect(signal).toContain('-- "-${pid}"');
     expect(signal).not.toMatch(/kill "-\$\{signal\}" "\$pid"/);
-    const census = shellFunction(source, "group_alive");
-    expect(census).toContain('kill -0 -- "-${pid}"');
-    expect(census).not.toMatch(/kill -0 "\$pid"/);
     // The watchdog is retired by the completion FIFO, never by a numeric signal.
     const bounded = shellFunction(source, "run_bounded");
     expect(bounded).toContain("printf 'done\\n' >&4");
     expect(bounded).not.toMatch(/kill -(TERM|KILL).*\$dog/);
     // The supervisor itself is still never signalled by bare pid.
     expect(bounded).not.toMatch(/kill -(TERM|KILL) "\$pid"/);
+    // Its only existence discriminator runs before the supervisor reap and is
+    // group-only. A dead helper would not prove the active path.
+    expect(bounded).toContain('kill -0 -- "-${pid}"');
+    expect(bounded).not.toMatch(/kill -0 "\$pid"/);
   });
 
   test("cleanup reaches descendants, not only the direct child", () => {
@@ -1211,6 +1265,12 @@ describe("the shell's causal self-tests actually run", () => {
         '"assertion":"watchdog-flag-write-failure-is-authoritative","status":"pass"',
       );
       expect(stdout, diag(run)).toContain(
+        '"assertion":"watchdog-kill-dispatch-failure-is-bounded","status":"pass"',
+      );
+      expect(stdout, diag(run)).toContain(
+        '"assertion":"reaper-kill-dispatch-failure-retains-owner","status":"pass"',
+      );
+      expect(stdout, diag(run)).toContain(
         '"assertion":"secret-writer-child-before-open-is-bounded","status":"pass"',
       );
       expect(stdout, diag(run)).toContain(
@@ -1286,7 +1346,9 @@ describe("the test harness contains what it launches", () => {
     expect(controller).toContain(
       'raced === "deadline" && groupSignalAuthorized ? groupAlive() : false;',
     );
-    const reapIndex = controller.indexOf("const exitCode = await exited;");
+    expect(controller).toContain("awaitExitWithin(");
+    expect(controller).toContain("cleanup unproven:");
+    const reapIndex = controller.indexOf("const cleanupUnproven = timedOut;");
     expect(reapIndex).toBeGreaterThanOrEqual(0);
     const afterReap = controller.slice(reapIndex);
     expect(afterReap).not.toContain("signalGroup(");
@@ -1341,6 +1403,54 @@ while :; do sleep 1; done
     expect(run.timedOut, diag(run)).toBe(true);
     expect(run.escalationFired, diag(run)).toBe(true);
     expect(run.cleanupUnproven, diag(run)).toBe(true);
+  });
+
+  test("PLANTED: a failed outer KILL dispatch refuses within a fixed bound", async () => {
+    const dir = mkdtempSync(join(process.env.TMPDIR ?? tmpdir(), "s6-outer-kill-fail-"));
+    const plant = join(dir, "kill-dispatch-failure.sh");
+    writeFileSync(
+      plant,
+      `#!/usr/bin/env bash
+trap '' TERM
+printf ready > "$1"
+sleep 0.5
+printf self-exited > "$2"
+exit 42
+`,
+      { mode: 0o700 },
+    );
+    const ready = join(dir, "ready");
+    const selfExited = join(dir, "self-exited");
+    const started = Date.now();
+    let refusal: unknown;
+    try {
+      await runShell([ready, selfExited], withoutS6Env(), plant, {
+        armAfterFileExists: ready,
+        runTimeoutMs: 50,
+        killGraceMs: 50,
+        postKillSettleMs: 100,
+        failKillDispatch: true,
+      });
+    } catch (error) {
+      refusal = error;
+    }
+    expect(refusal).toBeInstanceOf(Error);
+    expect((refusal as Error).message).toContain("cleanup unproven: group SIGKILL dispatch failed");
+    expect(Date.now() - started).toBeLessThan(1_000);
+
+    // The plant self-terminates so the injected syscall failure itself cannot
+    // leave a process behind. This is observation through a sidecar, never a
+    // signal or numeric probe after the controller refused.
+    const selfExitDeadline = Date.now() + 1_000;
+    while (Date.now() < selfExitDeadline) {
+      try {
+        if (readFileSync(selfExited, "utf8") === "self-exited") break;
+      } catch {
+        // The child has not reached its deliberate self-exit yet.
+      }
+      await new Promise<void>((resolveWait) => setTimeout(resolveWait, 10));
+    }
+    expect(readFileSync(selfExited, "utf8")).toBe("self-exited");
   });
 
   test("PLANTED: the record-derived survivor answer is wired in both polarities", () => {
