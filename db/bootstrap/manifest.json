@@ -11,10 +11,31 @@
       "legacy_0009_schema_digest": "9c181ab05292c25bd5ff5bfba72d4f4188269a0073f4e025a77d2505a3aaac2e"
     }
   ],
+  "historical_migrations": [
+    {"id": "0001_krater_v0.sql", "sha256": "d2a9964bdc0b75401d4bce52f1ddcefc195ff369690739644217bd3df9589c78"},
+    {"id": "0002_enrollment_g0.sql", "sha256": "2e2921e092912e70ce5236cb6fe6d7301169e635c69ce84d342a91ca7c765ddd"},
+    {"id": "0003_auth_nonce_replay.sql", "sha256": "36f88d5bc61099f48df7af96773aefb56f5b98c8e3d73d3229cf712d2d35574e"},
+    {"id": "0004_krater_integrity_v1.sql", "sha256": "8bdc5e6064b8792e39896805fe93ef0d9a79ff6dcac1d13d8010047f8736714d"},
+    {"id": "0005_krater_undigested_index.sql", "sha256": "db4bc775f41bc55b1c497fede98ff4f2a6a1ae103e1397435bb320de6e9bdb11"},
+    {"id": "0006_fellow_credential_lifecycle.sql", "sha256": "9637f5c7d5fddfbe45b7c105f7e5d312931f3b2a3f5dd80eb7a5bc102a890721"},
+    {"id": "0007_outbox_quarantine_state.sql", "sha256": "ae49578397bedacf96b9104ab86b1336aa79d6f22a2a969b01134091215613e5"},
+    {"id": "0008_sponsors_bootstrap.sql", "sha256": "d6f29f63b7bda0d48fd15f9a2c426d7b8cd83113214a5c54fe3444b963081f72"},
+    {"id": "0009_device_flow.sql", "sha256": "a7cfe8162cdd1cbc55fe402eab83614c0747e8e4900087d53134f83439222211"},
+    {"id": "0010_device_flow_hardening.sql", "sha256": "6df3d5ba4af806b5ebea4badff463da1ea4eca5d984435f69930b99b4714438a"},
+    {"id": "0011_fellow_credential_hardening.sql", "sha256": "65b9d1e2e1b1ab59432766f44a085e38497d9d6b729ffa49fadd4637c3105abe"},
+    {"id": "0012_fellow_lifecycle_commands.sql", "sha256": "75b302cb83bd93e9d00ff8a6b0f682b9ecd48f5c7b294606e9c306bbb954815e"},
+    {"id": "0013_sponsor_fellow_cap.sql", "sha256": "d103880cdf3cc5addf8b2e86569fc83fc13238ff05e77c8ef402f43675a372a5"},
+    {"id": "0014_sponsor_enrollment_rate_limit.sql", "sha256": "0852b831ab725f8ae59e88f11afe6fa6f663f7e4f4b978b8f7159c3c77858136"},
+    {"id": "0015_sponsor_enrollment_bootstrap_invariant.sql", "sha256": "9ecad74b937992efbb43732a9511f7bb00ab1a4064810114b7e3087a2b83d307"}
+  ],
   "schema_heads": [
     {
       "sequence": 15,
       "schema_digest": "3e8b81fc3243eccc8b2e98c71c69cf85c638f53cd7c5fa4eedd664f461b5e0a0"
+    },
+    {
+      "sequence": 16,
+      "schema_digest": "cc79798f07cd0b640d37a463462526c92fb638016cf7890c272887005c96123f"
     }
   ]
 }

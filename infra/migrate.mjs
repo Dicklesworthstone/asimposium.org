@@ -184,16 +184,32 @@ export function scanSql(sql) {
     }
     if (two === "/*") {
       const end = sql.indexOf("*/", index + 2);
-      const stop = end === -1 ? sql.length : end + 2;
+      if (end === -1) {
+        fail("UNTERMINATED_SQL_COMMENT", "A migration contains an unterminated block comment.");
+      }
+      const stop = end + 2;
       comments.push(sql.slice(index + 2, end === -1 ? sql.length : end));
       code += " ";
       index = stop;
       continue;
     }
     const character = sql[index];
+    if (character === "[") {
+      const end = sql.indexOf("]", index + 1);
+      if (end === -1) {
+        fail(
+          "UNTERMINATED_SQL_QUOTE",
+          "A migration contains an unterminated quoted literal or identifier.",
+        );
+      }
+      code += " '' ";
+      index = end + 1;
+      continue;
+    }
     if (character === "'" || character === '"' || character === "`") {
       // Consume the literal, honouring doubled-quote escaping.
       let cursor = index + 1;
+      let closed = false;
       while (cursor < sql.length) {
         if (sql[cursor] === character) {
           if (sql[cursor + 1] === character) {
@@ -201,9 +217,16 @@ export function scanSql(sql) {
             continue;
           }
           cursor += 1;
+          closed = true;
           break;
         }
         cursor += 1;
+      }
+      if (!closed) {
+        fail(
+          "UNTERMINATED_SQL_QUOTE",
+          "A migration contains an unterminated quoted literal or identifier.",
+        );
       }
       code += " '' ";
       index = cursor;
@@ -321,6 +344,10 @@ export function readMigrationDirectory(directory) {
     if (sql.trim() === "") {
       fail("EMPTY_MIGRATION", `"${entry}" is empty.`);
     }
+    // Reject lexical incompleteness while loading the file, before either a
+    // plan or an apply path can open local D1. In particular, appending the
+    // runner's journal INSERT after an open comment must never be executable.
+    scanSql(sql);
     migrations.push({ id: entry, sequence, name: match[2], sql, digest: digestOf(sql) });
   }
 
@@ -450,7 +477,27 @@ export const MAX_LINEAGE_ROWS = 8;
 
 const BOOTSTRAP_LINEAGE = "bootstrap-baseline15";
 const LEGACY_HEAD = 9;
-const RUNNER_CONTROL_CATALOG_OBJECTS = new Set([LEDGER_TABLE, LINEAGE_TABLE]);
+// `sqlite_schema.sql` records the CREATE statement without its trailing
+// semicolon and removes `IF NOT EXISTS`. Keep the stored forms explicit: the
+// classifier must distinguish runner-owned metadata from a product table that
+// only borrows a runner control name.
+const LEDGER_CATALOG_SQL = `CREATE TABLE ${LEDGER_TABLE} (
+  id TEXT PRIMARY KEY,
+  sequence INTEGER NOT NULL,
+  digest TEXT NOT NULL,
+  applied_at TEXT NOT NULL
+)`;
+const BOOTSTRAP_LEDGER_DDL = `${LEDGER_CATALOG_SQL};`;
+const LINEAGE_CATALOG_SQL = `CREATE TABLE ${LINEAGE_TABLE} (
+  singleton INTEGER PRIMARY KEY CHECK (singleton = 1),
+  lineage TEXT NOT NULL CHECK (lineage = '${BOOTSTRAP_LINEAGE}'),
+  artifact_id TEXT NOT NULL,
+  artifact_digest TEXT NOT NULL CHECK (length(artifact_digest) = 64),
+  schema_digest TEXT NOT NULL CHECK (length(schema_digest) = 64),
+  empty_guard INTEGER NOT NULL CHECK (empty_guard = 1),
+  installed_at TEXT NOT NULL
+)`;
+const BOOTSTRAP_LINEAGE_DDL = `${LINEAGE_CATALOG_SQL};`;
 const WRANGLER_LOCAL_METADATA_SQL = `CREATE TABLE _cf_METADATA (
         key INTEGER PRIMARY KEY,
         value BLOB
@@ -473,10 +520,23 @@ function isExactWranglerLocalMetadata(entry) {
   );
 }
 
+function isExactRunnerControl(entry, name, sql) {
+  return entry.type === "table" && entry.name === name && entry.table === name && entry.sql === sql;
+}
+
+function isExactLedgerControl(entry) {
+  return isExactRunnerControl(entry, LEDGER_TABLE, LEDGER_CATALOG_SQL);
+}
+
+function isExactLineageControl(entry) {
+  return isExactRunnerControl(entry, LINEAGE_TABLE, LINEAGE_CATALOG_SQL);
+}
+
 function isCatalogFingerprintControl(entry) {
   return (
     isSqliteInternalCatalogObject(entry) ||
-    RUNNER_CONTROL_CATALOG_OBJECTS.has(entry.name) ||
+    isExactLedgerControl(entry) ||
+    isExactLineageControl(entry) ||
     isExactWranglerLocalMetadata(entry)
   );
 }
@@ -558,11 +618,42 @@ function schemaHeadsDescending(manifest) {
 }
 
 /**
+ * The bootstrap artifact represents the 0015 product schema without replaying
+ * history, so its manifest must independently pin the historical bytes it
+ * intentionally does not execute. A changed or reordered 0001-0015 file is
+ * not a harmless documentation edit: it invalidates every lineage claim.
+ */
+function assertPinnedHistoricalMigrations(manifest, migrations) {
+  const pinned = manifest.historical_migrations;
+  if (migrations.length < pinned.length) {
+    fail(
+      "BOOTSTRAP_HISTORICAL_MIGRATION_DRIFT",
+      "The migration directory no longer contains the manifest-pinned historical baseline.",
+    );
+  }
+  for (const [index, expected] of pinned.entries()) {
+    const actual = migrations[index];
+    if (
+      actual === undefined ||
+      actual.id !== expected.id ||
+      actual.sequence !== index + 1 ||
+      actual.digest !== expected.sha256
+    ) {
+      fail(
+        "BOOTSTRAP_HISTORICAL_MIGRATION_DRIFT",
+        "The historical migration baseline differs from the immutable bootstrap manifest.",
+      );
+    }
+  }
+}
+
+/**
  * Classify only catalog facts read from the target. It never creates a ledger
  * while inspecting emptiness: doing so would contaminate the very target whose
  * empty-only eligibility it is deciding.
  */
 export function classifySchemaLineage({ catalog, journal, lineage, migrations, manifest }) {
+  assertPinnedHistoricalMigrations(manifest, migrations);
   // The local Wrangler table does not make an empty target nonempty. Runner
   // bookkeeping does: a lone or forged ledger/lineage table cannot be treated
   // as a fresh database, even though those tables are excluded from the
@@ -577,10 +668,8 @@ export function classifySchemaLineage({ catalog, journal, lineage, migrations, m
   if (artifact === undefined)
     fail("BOOTSTRAP_MANIFEST_INVALID", "The bootstrap manifest has no default artifact.");
 
-  const hasLineageTable = catalog.some(
-    (entry) => entry.type === "table" && entry.name === LINEAGE_TABLE,
-  );
-  const hasJournal = catalog.some((entry) => entry.type === "table" && entry.name === LEDGER_TABLE);
+  const hasLineageTable = catalog.some(isExactLineageControl);
+  const hasJournal = catalog.some(isExactLedgerControl);
   const expectedHead = artifact.head_sequence;
 
   const schemaHeads = schemaHeadsDescending(manifest);
@@ -594,9 +683,11 @@ export function classifySchemaLineage({ catalog, journal, lineage, migrations, m
     hasJournal &&
     lineage.length === 1 &&
     lineage[0].lineage === BOOTSTRAP_LINEAGE &&
+    lineage[0].singleton === 1 &&
     lineage[0].artifact_id === artifact.id &&
     lineage[0].artifact_digest === artifact.digest &&
     lineage[0].schema_digest === artifact.schema_digest &&
+    lineage[0].empty_guard === 1 &&
     bootstrapHead !== undefined
   ) {
     return {
@@ -653,6 +744,46 @@ export function bootstrapTargetDisposition(lineage) {
   );
 }
 
+/**
+ * Derive a local plan's applied records solely from the read-only snapshot.
+ * `readLocalLineageSnapshot` already returns an empty journal when the runner
+ * table is absent, so creating that table merely to plan would mutate a
+ * pristine target and make the second plan fail classification.
+ */
+export function localPlanState(snapshot, migrations, manifest) {
+  const lineage = classifySchemaLineage({ ...snapshot, migrations, manifest });
+  if (lineage.kind === "legacy-0009") {
+    fail(
+      "LEGACY_0009_BRIDGE_BLOCKED",
+      "Exact legacy 0001-0009 is recognized, but an authority bridge requires a separate operator disposition.",
+    );
+  }
+  if (lineage.kind === "unknown-or-contaminated") {
+    fail(
+      "SCHEMA_LINEAGE_REFUSED",
+      "The local D1 catalog is neither exact historical nor an authorized bootstrap lineage.",
+    );
+  }
+  return {
+    applied: snapshot.journal,
+    ...(lineage.kind === BOOTSTRAP_LINEAGE ? { baseline: { head: lineage.head } } : {}),
+  };
+}
+
+/**
+ * The local-only bootstrap boundary is testable with an injected observation.
+ * A remote target must fail before the callback that would open/read D1 runs.
+ */
+export async function readBootstrapSnapshotOrRefuse(environment, observeLocalD1) {
+  if (environment.kind !== "local") {
+    fail(
+      "BOOTSTRAP_REMOTE_UNAVAILABLE",
+      "Bootstrap is intentionally local-only until an operator authorizes a disposable remote D1 run.",
+    );
+  }
+  return observeLocalD1();
+}
+
 export function readBootstrapManifest(root) {
   const path = assertRepositoryContained(root, BOOTSTRAP_MANIFEST_PATH, "The bootstrap manifest");
   if (!existsSync(path) || lstatSync(path).isSymbolicLink() || !lstatSync(path).isFile()) {
@@ -680,6 +811,20 @@ export function readBootstrapManifest(root) {
       "The bootstrap manifest must name exactly one version-1 artifact.",
     );
   }
+  if (
+    Object.keys(manifest).some(
+      (key) =>
+        ![
+          "version",
+          "default_artifact_id",
+          "artifacts",
+          "historical_migrations",
+          "schema_heads",
+        ].includes(key),
+    )
+  ) {
+    fail("BOOTSTRAP_MANIFEST_INVALID", "The bootstrap manifest carries an unknown root key.");
+  }
   const artifact = manifest.artifacts[0];
   if (
     artifact === null ||
@@ -697,6 +842,49 @@ export function readBootstrapManifest(root) {
       "The bootstrap manifest artifact is not the exact baseline-0015 shape.",
     );
   }
+  if (
+    Object.keys(artifact).some(
+      (key) =>
+        ![
+          "id",
+          "file",
+          "head_sequence",
+          "digest",
+          "schema_digest",
+          "legacy_0009_schema_digest",
+        ].includes(key),
+    )
+  ) {
+    fail("BOOTSTRAP_MANIFEST_INVALID", "The bootstrap artifact carries an unknown key.");
+  }
+  if (
+    !Array.isArray(manifest.historical_migrations) ||
+    manifest.historical_migrations.length !== artifact.head_sequence
+  ) {
+    fail(
+      "BOOTSTRAP_MANIFEST_INVALID",
+      "The bootstrap manifest must pin every 0001-0015 historical migration.",
+    );
+  }
+  for (const [index, historical] of manifest.historical_migrations.entries()) {
+    const expectedSequence = index + 1;
+    if (
+      historical === null ||
+      typeof historical !== "object" ||
+      Array.isArray(historical) ||
+      Object.keys(historical).some((key) => !["id", "sha256"].includes(key)) ||
+      typeof historical.id !== "string" ||
+      !MIGRATION_FILENAME.test(historical.id) ||
+      Number(MIGRATION_FILENAME.exec(historical.id)?.[1]) !== expectedSequence ||
+      typeof historical.sha256 !== "string" ||
+      !DIGEST.test(historical.sha256)
+    ) {
+      fail(
+        "BOOTSTRAP_MANIFEST_INVALID",
+        "Historical bootstrap migration pins must be ordered exact id and SHA-256 pairs.",
+      );
+    }
+  }
   let previousHead = 0;
   for (const schemaHead of manifest.schema_heads) {
     if (
@@ -705,7 +893,8 @@ export function readBootstrapManifest(root) {
       Array.isArray(schemaHead) ||
       !Number.isSafeInteger(schemaHead.sequence) ||
       schemaHead.sequence <= previousHead ||
-      !DIGEST.test(schemaHead.schema_digest)
+      !DIGEST.test(schemaHead.schema_digest) ||
+      Object.keys(schemaHead).some((key) => !["sequence", "schema_digest"].includes(key))
     ) {
       fail(
         "BOOTSTRAP_MANIFEST_INVALID",
@@ -754,30 +943,6 @@ export function readBootstrapManifest(root) {
   }
   return { ...manifest, artifacts: [{ ...artifact, sql }] };
 }
-
-const LEDGER_DDL = `CREATE TABLE IF NOT EXISTS ${LEDGER_TABLE} (
-  id TEXT PRIMARY KEY,
-  sequence INTEGER NOT NULL,
-  digest TEXT NOT NULL,
-  applied_at TEXT NOT NULL
-);`;
-
-const BOOTSTRAP_LINEAGE_DDL = `CREATE TABLE ${LINEAGE_TABLE} (
-  singleton INTEGER PRIMARY KEY CHECK (singleton = 1),
-  lineage TEXT NOT NULL CHECK (lineage = '${BOOTSTRAP_LINEAGE}'),
-  artifact_id TEXT NOT NULL,
-  artifact_digest TEXT NOT NULL CHECK (length(artifact_digest) = 64),
-  schema_digest TEXT NOT NULL CHECK (length(schema_digest) = 64),
-  empty_guard INTEGER NOT NULL CHECK (empty_guard = 1),
-  installed_at TEXT NOT NULL
-);`;
-
-const BOOTSTRAP_LEDGER_DDL = `CREATE TABLE ${LEDGER_TABLE} (
-  id TEXT PRIMARY KEY,
-  sequence INTEGER NOT NULL,
-  digest TEXT NOT NULL,
-  applied_at TEXT NOT NULL
-);`;
 
 const sqlLiteral = (value) => `'${String(value).replace(/'/g, "''")}'`;
 
@@ -1277,27 +1442,6 @@ export async function localD1(root, databaseName, args) {
   return result.stdout;
 }
 
-async function readLocalLedger(root, databaseName) {
-  await localD1(root, databaseName, ["--command", LEDGER_DDL]);
-  const raw = await localD1(root, databaseName, [
-    "--command",
-    `SELECT id, sequence, digest FROM ${LEDGER_TABLE} ORDER BY sequence LIMIT ${MAX_JOURNAL_ROWS + 1};`,
-  ]);
-  let parsed;
-  try {
-    parsed = JSON.parse(raw);
-  } catch {
-    fail("LOCAL_D1_UNREADABLE", "Could not parse the local D1 response as JSON.");
-  }
-  const rows = Array.isArray(parsed) ? (parsed[0]?.results ?? []) : [];
-  assertReadLimit(rows, MAX_JOURNAL_ROWS, "LOCAL_D1_JOURNAL_OVERRUN");
-  return rows.map((row) => ({
-    id: String(row.id),
-    sequence: Number(row.sequence),
-    digest: String(row.digest),
-  }));
-}
-
 function parseLocalD1Rows(raw, unreadableCode) {
   let parsed;
   try {
@@ -1373,15 +1517,17 @@ async function readLocalLineageSnapshot(root, databaseName) {
       databaseName,
       catalog,
       LINEAGE_TABLE,
-      "lineage, artifact_id, artifact_digest, schema_digest",
+      "singleton, lineage, artifact_id, artifact_digest, schema_digest, empty_guard",
       MAX_LINEAGE_ROWS,
       "LOCAL_D1_LINEAGE_OVERRUN",
     )
   ).map((row) => ({
+    singleton: Number(row.singleton),
     lineage: String(row.lineage),
     artifact_id: String(row.artifact_id),
     artifact_digest: String(row.artifact_digest),
     schema_digest: String(row.schema_digest),
+    empty_guard: Number(row.empty_guard),
   }));
   return { catalog, journal, lineage };
 }
@@ -1392,7 +1538,7 @@ export function bootstrapInstallSql(artifact, appliedAt) {
   // the lineage table, the empty journal, the witness, and every artifact
   // statement together. D1 command batches are the transaction boundary here;
   // explicit BEGIN/COMMIT is not portable through `wrangler d1 execute`.
-  const guard = `(SELECT CASE WHEN COUNT(*) = 0 THEN 1 ELSE 0 END FROM sqlite_schema WHERE substr(name, 1, 7) <> 'sqlite_' AND name <> '${LINEAGE_TABLE}' AND NOT (type = 'table' AND name = '_cf_METADATA' AND tbl_name = '_cf_METADATA' AND sql = ${sqlLiteral(WRANGLER_LOCAL_METADATA_SQL)}))`;
+  const guard = `(SELECT CASE WHEN COUNT(*) = 0 THEN 1 ELSE 0 END FROM sqlite_schema WHERE substr(name, 1, 7) <> 'sqlite_' AND NOT ((type = 'table' AND name = ${sqlLiteral(LINEAGE_TABLE)} AND tbl_name = ${sqlLiteral(LINEAGE_TABLE)} AND sql = ${sqlLiteral(LINEAGE_CATALOG_SQL)}) OR (type = 'table' AND name = '_cf_METADATA' AND tbl_name = '_cf_METADATA' AND sql = ${sqlLiteral(WRANGLER_LOCAL_METADATA_SQL)})))`;
   const sql = `${BOOTSTRAP_LINEAGE_DDL}
 INSERT INTO ${LINEAGE_TABLE} (singleton, lineage, artifact_id, artifact_digest, schema_digest, empty_guard, installed_at)
 VALUES (1, ${sqlLiteral(BOOTSTRAP_LINEAGE)}, ${sqlLiteral(artifact.id)}, ${sqlLiteral(artifact.digest)}, ${sqlLiteral(artifact.schema_digest)}, ${guard}, ${sqlLiteral(appliedAt)});
@@ -1432,9 +1578,16 @@ function assertForwardHeadsRegistered(plan, manifest) {
  * process creates no file it would then have to remove, so it has no delete
  * path at all.
  */
+export function migrationCommandSql(migration, appliedAt) {
+  // Keep the lexical preflight at the execution seam too. Normal CLI inputs
+  // were checked by readMigrationDirectory, but this protects every direct
+  // caller and proves the journal append cannot be swallowed by malformed SQL.
+  scanSql(migration.sql);
+  return `${migration.sql}\nINSERT INTO ${LEDGER_TABLE} (id, sequence, digest, applied_at) VALUES (${sqlLiteral(migration.id)}, ${migration.sequence}, ${sqlLiteral(migration.digest)}, ${sqlLiteral(appliedAt)});`;
+}
+
 async function applyLocalMigration(root, databaseName, migration, appliedAt) {
-  const sql = `${migration.sql}\nINSERT INTO ${LEDGER_TABLE} (id, sequence, digest, applied_at) VALUES (${sqlLiteral(migration.id)}, ${migration.sequence}, ${sqlLiteral(migration.digest)}, ${sqlLiteral(appliedAt)});`;
-  await localD1(root, databaseName, ["--command", sql]);
+  await localD1(root, databaseName, ["--command", migrationCommandSql(migration, appliedAt)]);
 }
 
 /**
@@ -1612,12 +1765,6 @@ async function main() {
     let baseline;
 
     if (options.bootstrap !== undefined) {
-      if (localDatabase === undefined) {
-        fail(
-          "BOOTSTRAP_REMOTE_UNAVAILABLE",
-          "Bootstrap is intentionally local-only until an operator authorizes a disposable remote D1 run.",
-        );
-      }
       const manifest = readBootstrapManifest(root);
       const artifact = manifest.artifacts.find((candidate) => candidate.id === options.bootstrap);
       if (artifact === undefined) {
@@ -1626,7 +1773,9 @@ async function main() {
           "The requested bootstrap artifact id is not in the manifest.",
         );
       }
-      const snapshot = await readLocalLineageSnapshot(root, localDatabase);
+      const snapshot = await readBootstrapSnapshotOrRefuse(environment, () =>
+        readLocalLineageSnapshot(root, localDatabase),
+      );
       const lineage = classifySchemaLineage({ ...snapshot, migrations, manifest });
       if (bootstrapTargetDisposition(lineage) === "idempotent") {
         process.stdout.write(
@@ -1683,27 +1832,12 @@ async function main() {
 
     let localSnapshot;
     let localManifest;
+    let localPlan;
     if (localDatabase !== undefined && options.state === undefined) {
       localManifest = readBootstrapManifest(root);
       localSnapshot = await readLocalLineageSnapshot(root, localDatabase);
-      const lineage = classifySchemaLineage({
-        ...localSnapshot,
-        migrations,
-        manifest: localManifest,
-      });
-      if (lineage.kind === BOOTSTRAP_LINEAGE) baseline = { head: lineage.head };
-      if (lineage.kind === "legacy-0009") {
-        fail(
-          "LEGACY_0009_BRIDGE_BLOCKED",
-          "Exact legacy 0001-0009 is recognized, but an authority bridge requires a separate operator disposition.",
-        );
-      }
-      if (lineage.kind === "unknown-or-contaminated") {
-        fail(
-          "SCHEMA_LINEAGE_REFUSED",
-          "The local D1 catalog is neither exact historical nor an authorized bootstrap lineage.",
-        );
-      }
+      localPlan = localPlanState(localSnapshot, migrations, localManifest);
+      baseline = localPlan.baseline;
     }
     // A local environment has a real (miniflare) D1 available with no
     // credential, so its applied-records come from the database itself rather
@@ -1712,11 +1846,7 @@ async function main() {
       options.state !== undefined
         ? readStateFile(assertRepositoryContained(root, options.state, "The state file path"))
         : localDatabase !== undefined
-          ? localSnapshot?.catalog.some(
-              (entry) => entry.type === "table" && entry.name === LEDGER_TABLE,
-            )
-            ? localSnapshot.journal
-            : await readLocalLedger(root, localDatabase)
+          ? localPlan.applied
           : [];
     const plan = planMigrations(migrations, applied, {
       environmentName: options.env,

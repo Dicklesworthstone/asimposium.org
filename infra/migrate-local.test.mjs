@@ -11,10 +11,13 @@ import {
   catalogFingerprint,
   classifySchemaLineage,
   LEDGER_TABLE,
+  LINEAGE_TABLE,
+  localPlanState,
   MAX_CATALOG_ROWS,
   MAX_JOURNAL_ROWS,
   MAX_LINEAGE_ROWS,
   MigrationError,
+  migrationCommandSql,
   planMigrations,
   readBootstrapManifest,
   readMigrationDirectory,
@@ -67,7 +70,13 @@ const syntheticForwardMigration = {
   digest: "c".repeat(64),
   sql: "CREATE TABLE bootstrap_lineage_forward (id TEXT PRIMARY KEY);",
 };
-const migrationsWithSyntheticForward = [...migrations, syntheticForwardMigration];
+// Keep the convergence fixture fixed at the immutable 0015 baseline. Other
+// agents may add real post-0015 migrations while this suite runs; their own
+// schema-head fingerprints are a separate forward-migration responsibility.
+const migrationsWithSyntheticForward = [
+  ...migrations.filter((migration) => migration.sequence <= 15),
+  syntheticForwardMigration,
+];
 const localPlanOptions = { environmentName: "local", destructiveAllowed: false };
 
 const MIGRATION_OBJECTS = [
@@ -242,7 +251,7 @@ const JOURNAL_QUERY = `SELECT id, sequence, digest
   FROM ${LEDGER_TABLE}
  ORDER BY sequence
  LIMIT ${MAX_JOURNAL_ROWS + 1};`;
-const LINEAGE_QUERY = `SELECT lineage, artifact_id, artifact_digest, schema_digest
+const LINEAGE_QUERY = `SELECT singleton, lineage, artifact_id, artifact_digest, schema_digest, empty_guard
   FROM _asimposium_schema_lineage
  LIMIT ${MAX_LINEAGE_ROWS + 1};`;
 
@@ -274,10 +283,12 @@ function journalFromRows(rows) {
 
 function lineageFromRows(rows) {
   return assertReadLimit(rows, MAX_LINEAGE_ROWS, "LOCAL_D1_LINEAGE_OVERRUN").map((row) => ({
+    singleton: Number(row.singleton),
     lineage: String(row.lineage),
     artifact_id: String(row.artifact_id),
     artifact_digest: String(row.artifact_digest),
     schema_digest: String(row.schema_digest),
+    empty_guard: Number(row.empty_guard),
   }));
 }
 
@@ -490,6 +501,76 @@ const cases = [
     },
   },
   {
+    name: "pristine local plan state is side-effect-free and repeatable",
+    async execute() {
+      const databaseName = uniqueDatabaseName("pristine-plan");
+      // Establish only Wrangler's own local metadata. The runner must derive
+      // an empty journal from this read-only catalog, not create its ledger.
+      await localJson(databaseName, "SELECT 1 AS ok;", "pristine-plan-platform-metadata");
+      const baselineMigrations = migrations.filter((migration) => migration.sequence <= 15);
+      let firstPlanState;
+      for (const pass of ["first", "second"]) {
+        const catalog = await readCatalog(databaseName, `pristine-plan-${pass}-catalog`);
+        const state = localPlanState(
+          { catalog, journal: [], lineage: [] },
+          baselineMigrations,
+          bootstrapManifest,
+        );
+        assert.deepEqual(state, { applied: [] }, `${pass} pristine plan state must be empty`);
+        assert.equal(
+          catalog.some((entry) => entry.name === LEDGER_TABLE || entry.name === LINEAGE_TABLE),
+          false,
+          `${pass} plan must not create runner control tables`,
+        );
+        if (firstPlanState === undefined) firstPlanState = state;
+        else
+          assert.deepEqual(state, firstPlanState, "the second pristine plan must equal the first");
+      }
+    },
+  },
+  {
+    name: "unterminated migration SQL is rejected before local D1 can mutate",
+    async execute() {
+      const databaseName = uniqueDatabaseName("unterminated-sql");
+      await localJson(
+        databaseName,
+        "CREATE TABLE retained_sentinel (id TEXT PRIMARY KEY);",
+        "unterminated-sql-seed",
+      );
+      const malformed = "CREATE TABLE swallowed_journal (id TEXT); /*";
+      let rejected;
+      try {
+        migrationCommandSql(
+          {
+            id: "0001_unterminated.sql",
+            sequence: 1,
+            digest: "a".repeat(64),
+            sql: malformed,
+          },
+          appliedAt,
+        );
+        assert.fail("unterminated SQL must not produce an executable local D1 command");
+      } catch (error) {
+        rejected = error;
+      }
+      assert.ok(rejected instanceof MigrationError);
+      assert.equal(rejected.code, "UNTERMINATED_SQL_COMMENT");
+      const catalog = await readCatalog(databaseName, "unterminated-sql-no-residue");
+      assert.equal(
+        catalog.some((entry) => entry.name === "retained_sentinel"),
+        true,
+      );
+      assert.equal(
+        catalog.some((entry) => entry.name === "swallowed_journal"),
+        false,
+      );
+      assert.equal(
+        catalog.some((entry) => entry.name === LEDGER_TABLE),
+        false,
+      );
+    },
+  },
+  {
     name: "bootstrap baseline applies only to empty local D1 and leaves an empty journal",
     async execute() {
       const databaseName = uniqueDatabaseName("bootstrap");
@@ -658,6 +739,92 @@ const cases = [
       );
       assert.equal(Number(lookalikeResidue.objects), 1);
       assert.equal(Number(lookalikeResidue.intruder), 1);
+
+      // Model the only relevant race point inside the same atomic command: a
+      // trigger named like the lineage control object arrives after the exact
+      // lineage table is created but before its empty-CAS INSERT evaluates.
+      // A name-only exception would let this batch commit. The exact type,
+      // table, and DDL predicate must make the CHECK fail and roll back every
+      // artifact, the trigger, and both runner controls.
+      const raced = uniqueDatabaseName("bootstrap-same-name-trigger-race");
+      await localJson(raced, "SELECT 1 AS ok;", "bootstrap-race-platform-metadata");
+      const trigger = `CREATE TRIGGER ${LINEAGE_TABLE}
+AFTER INSERT ON ${LINEAGE_TABLE}
+BEGIN
+  SELECT 1;
+END;`;
+      const installer = bootstrapInstallSql(bootstrapArtifact, appliedAt);
+      const racedInstaller = installer.replace(
+        `INSERT INTO ${LINEAGE_TABLE}`,
+        `${trigger}\nINSERT INTO ${LINEAGE_TABLE}`,
+      );
+      assert.notEqual(racedInstaller, installer, "race plant must reach the atomic guard window");
+      let racedApply;
+      try {
+        await localJson(raced, racedInstaller, "bootstrap-same-name-trigger-race-refusal");
+        assert.fail("same-name trigger race must fail the atomic empty guard");
+      } catch (error) {
+        racedApply = error;
+      }
+      assertSafeCause(racedApply);
+      const racedCatalog = await readCatalog(raced, "bootstrap-same-name-trigger-race-no-residue");
+      assert.equal(
+        racedCatalog.some((entry) => entry.name === LEDGER_TABLE || entry.name === LINEAGE_TABLE),
+        false,
+        "same-name trigger race must leave no runner control residue",
+      );
+      assert.equal(
+        racedCatalog.some(
+          (entry) => entry.name === "sponsor_enrollment_bootstrap_migration_witness",
+        ),
+        false,
+        "same-name trigger race must leave no bootstrap artifact residue",
+      );
+      assert.equal(
+        racedCatalog.filter(
+          (entry) => !entry.name.startsWith("sqlite_") && entry.name !== "_cf_METADATA",
+        ).length,
+        0,
+        "same-name trigger race must roll back every non-platform object",
+      );
+    },
+  },
+  {
+    name: "counterfeit runner control tables cannot establish bootstrap lineage",
+    async execute() {
+      const databaseName = uniqueDatabaseName("bootstrap-counterfeit-controls");
+      // The prior successful bootstrap supplies exact real D1 control tables.
+      // A same-name trigger is a counterfeit control object: it must remain in
+      // the product fingerprint rather than letting the next bootstrap call
+      // no-op based solely on the table's name and one lineage row.
+      await localJson(
+        databaseName,
+        bootstrapInstallSql(bootstrapArtifact, appliedAt),
+        "bootstrap-counterfeit-control-seed",
+      );
+      await localJson(
+        databaseName,
+        `CREATE TRIGGER _asimposium_schema_lineage
+AFTER INSERT ON _asimposium_migrations
+BEGIN
+  SELECT 1;
+END;`,
+        "bootstrap-counterfeit-same-name-trigger",
+      );
+      const snapshot = await readSnapshot(
+        databaseName,
+        "bootstrap-counterfeit-control-snapshot",
+        true,
+      );
+      assert.equal(
+        classifySchemaLineage({
+          ...snapshot,
+          migrations,
+          manifest: bootstrapManifest,
+        }).kind,
+        "unknown-or-contaminated",
+        "a counterfeit control object must be product evidence, never a bootstrap no-op",
+      );
     },
   },
   {
@@ -939,8 +1106,19 @@ const cases = [
   },
 ];
 
+const requestedCaseNames = process.env.ASIMPOSIUM_MIGRATE_LOCAL_CASES?.split(",")
+  .map((name) => name.trim())
+  .filter(Boolean);
+const selectedCases =
+  requestedCaseNames === undefined
+    ? cases
+    : cases.filter((testCase) => requestedCaseNames.includes(testCase.name));
+if (requestedCaseNames !== undefined && selectedCases.length !== requestedCaseNames.length) {
+  throw new Error("ASIMPOSIUM_MIGRATE_LOCAL_CASES must name existing exact local migration cases.");
+}
+
 const failed = [];
-for (const testCase of cases) {
+for (const testCase of selectedCases) {
   try {
     await testCase.execute();
   } catch (error) {
@@ -966,7 +1144,7 @@ if (failed.length === 0) {
     `${JSON.stringify({
       ...base,
       status: "pass",
-      cases_executed: cases.map(({ name }) => name),
+      cases_executed: selectedCases.map(({ name }) => name),
       database: "unique Wrangler local D1/workerd databases; no remote resource touched",
     })}\n`,
   );

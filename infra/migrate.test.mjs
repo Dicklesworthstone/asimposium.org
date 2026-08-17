@@ -22,9 +22,12 @@ import {
   declaresDestructive,
   describeDestructiveStatements,
   digestOf,
+  localPlanState,
   MigrationError,
+  migrationCommandSql,
   planMigrations,
   readBootstrapManifest,
+  readBootstrapSnapshotOrRefuse,
   readMigrationDirectory,
   readStateFile,
   redactStderr,
@@ -58,6 +61,68 @@ const INSTALLED_WRANGLER_MANIFEST = join(
   repositoryRoot,
   "apps/wire/node_modules/wrangler/package.json",
 );
+const HISTORICAL_0015_GOLDEN_PINS = Object.freeze([
+  {
+    id: "0001_krater_v0.sql",
+    sha256: "d2a9964bdc0b75401d4bce52f1ddcefc195ff369690739644217bd3df9589c78",
+  },
+  {
+    id: "0002_enrollment_g0.sql",
+    sha256: "2e2921e092912e70ce5236cb6fe6d7301169e635c69ce84d342a91ca7c765ddd",
+  },
+  {
+    id: "0003_auth_nonce_replay.sql",
+    sha256: "36f88d5bc61099f48df7af96773aefb56f5b98c8e3d73d3229cf712d2d35574e",
+  },
+  {
+    id: "0004_krater_integrity_v1.sql",
+    sha256: "8bdc5e6064b8792e39896805fe93ef0d9a79ff6dcac1d13d8010047f8736714d",
+  },
+  {
+    id: "0005_krater_undigested_index.sql",
+    sha256: "db4bc775f41bc55b1c497fede98ff4f2a6a1ae103e1397435bb320de6e9bdb11",
+  },
+  {
+    id: "0006_fellow_credential_lifecycle.sql",
+    sha256: "9637f5c7d5fddfbe45b7c105f7e5d312931f3b2a3f5dd80eb7a5bc102a890721",
+  },
+  {
+    id: "0007_outbox_quarantine_state.sql",
+    sha256: "ae49578397bedacf96b9104ab86b1336aa79d6f22a2a969b01134091215613e5",
+  },
+  {
+    id: "0008_sponsors_bootstrap.sql",
+    sha256: "d6f29f63b7bda0d48fd15f9a2c426d7b8cd83113214a5c54fe3444b963081f72",
+  },
+  {
+    id: "0009_device_flow.sql",
+    sha256: "a7cfe8162cdd1cbc55fe402eab83614c0747e8e4900087d53134f83439222211",
+  },
+  {
+    id: "0010_device_flow_hardening.sql",
+    sha256: "6df3d5ba4af806b5ebea4badff463da1ea4eca5d984435f69930b99b4714438a",
+  },
+  {
+    id: "0011_fellow_credential_hardening.sql",
+    sha256: "65b9d1e2e1b1ab59432766f44a085e38497d9d6b729ffa49fadd4637c3105abe",
+  },
+  {
+    id: "0012_fellow_lifecycle_commands.sql",
+    sha256: "75b302cb83bd93e9d00ff8a6b0f682b9ecd48f5c7b294606e9c306bbb954815e",
+  },
+  {
+    id: "0013_sponsor_fellow_cap.sql",
+    sha256: "d103880cdf3cc5addf8b2e86569fc83fc13238ff05e77c8ef402f43675a372a5",
+  },
+  {
+    id: "0014_sponsor_enrollment_rate_limit.sql",
+    sha256: "0852b831ab725f8ae59e88f11afe6fa6f663f7e4f4b978b8f7159c3c77858136",
+  },
+  {
+    id: "0015_sponsor_enrollment_bootstrap_invariant.sql",
+    sha256: "9ecad74b937992efbb43732a9511f7bb00ab1a4064810114b7e3087a2b83d307",
+  },
+]);
 
 function pinnedWranglerFileSystem(overrides = {}) {
   return {
@@ -125,6 +190,7 @@ function bootstrapFixtureRoot(name, artifactSql, artifactDigest = digestOf(artif
           legacy_0009_schema_digest: "b".repeat(64),
         },
       ],
+      historical_migrations: HISTORICAL_0015_GOLDEN_PINS,
       schema_heads: [{ sequence: 15, schema_digest: "a".repeat(64) }],
     }),
     "utf8",
@@ -221,8 +287,61 @@ const record = (migration) => ({
   sequence: migration.sequence,
   digest: migration.digest,
 });
+const runnerLedgerCatalog = {
+  type: "table",
+  name: "_asimposium_migrations",
+  table: "_asimposium_migrations",
+  sql: `CREATE TABLE _asimposium_migrations (
+  id TEXT PRIMARY KEY,
+  sequence INTEGER NOT NULL,
+  digest TEXT NOT NULL,
+  applied_at TEXT NOT NULL
+)`,
+};
+const runnerLineageCatalog = {
+  type: "table",
+  name: "_asimposium_schema_lineage",
+  table: "_asimposium_schema_lineage",
+  sql: `CREATE TABLE _asimposium_schema_lineage (
+  singleton INTEGER PRIMARY KEY CHECK (singleton = 1),
+  lineage TEXT NOT NULL CHECK (lineage = 'bootstrap-baseline15'),
+  artifact_id TEXT NOT NULL,
+  artifact_digest TEXT NOT NULL CHECK (length(artifact_digest) = 64),
+  schema_digest TEXT NOT NULL CHECK (length(schema_digest) = 64),
+  empty_guard INTEGER NOT NULL CHECK (empty_guard = 1),
+  installed_at TEXT NOT NULL
+)`,
+};
+const bootstrapLineageRow = (schemaDigest) => ({
+  singleton: 1,
+  lineage: "bootstrap-baseline15",
+  artifact_id: "0015-final-schema-v1",
+  artifact_digest: "a".repeat(64),
+  schema_digest: schemaDigest,
+  empty_guard: 1,
+});
 
 const cases = [
+  {
+    name: "0001-0015 historical baseline has literal immutable golden pins",
+    execute() {
+      const migrations = readMigrationDirectory(join(repositoryRoot, "db", "migrations"));
+      const actual = migrations
+        .filter((migration) => migration.sequence <= 15)
+        .map((migration) => ({ id: migration.id, sha256: migration.digest }));
+      assert.deepEqual(actual, HISTORICAL_0015_GOLDEN_PINS);
+      assert.deepEqual(
+        readBootstrapManifest(repositoryRoot).historical_migrations,
+        HISTORICAL_0015_GOLDEN_PINS,
+      );
+      const pristineSnapshot = { catalog: [], journal: [], lineage: [] };
+      assert.deepEqual(
+        localPlanState(pristineSnapshot, migrations, readBootstrapManifest(repositoryRoot)),
+        { applied: [] },
+        "a pristine plan derives its empty journal from the read-only snapshot",
+      );
+    },
+  },
   {
     name: "catalog-first bootstrap lineage distinguishes empty, historical, baseline, legacy, and contamination",
     execute() {
@@ -250,6 +369,7 @@ const cases = [
             legacy_0009_schema_digest: catalogFingerprint(legacyCatalog),
           },
         ],
+        historical_migrations: HISTORICAL_0015_GOLDEN_PINS,
         schema_heads: [{ sequence: 15, schema_digest: currentDigest }],
       };
       const historical = migrations.slice(0, 15).map(record);
@@ -371,15 +491,7 @@ const cases = [
       );
       assert.equal(
         classifySchemaLineage({
-          catalog: [
-            ...productCatalog,
-            {
-              type: "table",
-              name: "_asimposium_migrations",
-              table: "_asimposium_migrations",
-              sql: "CREATE TABLE _asimposium_migrations (...);",
-            },
-          ],
+          catalog: [...productCatalog, runnerLedgerCatalog],
           journal: historical,
           lineage: [],
           migrations,
@@ -389,46 +501,100 @@ const cases = [
       );
       assert.equal(
         classifySchemaLineage({
-          catalog: [
-            ...productCatalog,
-            {
-              type: "table",
-              name: "_asimposium_migrations",
-              table: "_asimposium_migrations",
-              sql: "CREATE TABLE _asimposium_migrations (...);",
-            },
-            {
-              type: "table",
-              name: "_asimposium_schema_lineage",
-              table: "_asimposium_schema_lineage",
-              sql: "CREATE TABLE _asimposium_schema_lineage (...);",
-            },
-          ],
+          catalog: [...productCatalog, runnerLedgerCatalog, runnerLineageCatalog],
           journal: [],
-          lineage: [
-            {
-              lineage: "bootstrap-baseline15",
-              artifact_id: "0015-final-schema-v1",
-              artifact_digest: "a".repeat(64),
-              schema_digest: currentDigest,
-            },
-          ],
+          lineage: [bootstrapLineageRow(currentDigest)],
           migrations,
           manifest,
         }).kind,
         "bootstrap-baseline15",
       );
-      assert.equal(
-        classifySchemaLineage({
-          catalog: [
-            ...legacyCatalog,
+      for (const [label, catalog] of [
+        [
+          "wrong control DDL",
+          [
+            ...productCatalog,
+            { ...runnerLedgerCatalog, sql: "CREATE TABLE _asimposium_migrations (id TEXT);" },
+            runnerLineageCatalog,
+          ],
+        ],
+        [
+          "wrong control object type",
+          [
+            ...productCatalog,
             {
-              type: "table",
-              name: "_asimposium_migrations",
+              ...runnerLedgerCatalog,
+              type: "view",
+              sql: "CREATE VIEW _asimposium_migrations AS SELECT 1",
+            },
+            runnerLineageCatalog,
+          ],
+        ],
+        [
+          "same-name trigger",
+          [
+            ...productCatalog,
+            runnerLedgerCatalog,
+            runnerLineageCatalog,
+            {
+              type: "trigger",
+              name: "_asimposium_schema_lineage",
               table: "_asimposium_migrations",
-              sql: "CREATE TABLE _asimposium_migrations (...);",
+              sql: "CREATE TRIGGER _asimposium_schema_lineage AFTER INSERT ON _asimposium_migrations BEGIN SELECT 1; END",
             },
           ],
+        ],
+      ]) {
+        assert.equal(
+          classifySchemaLineage({
+            catalog,
+            journal: [],
+            lineage: [bootstrapLineageRow(currentDigest)],
+            migrations,
+            manifest,
+          }).kind,
+          "unknown-or-contaminated",
+          `${label} must be catalog evidence, never bootstrap metadata`,
+        );
+      }
+      for (const [label, lineage] of [
+        [
+          "extra control row",
+          [bootstrapLineageRow(currentDigest), bootstrapLineageRow(currentDigest)],
+        ],
+        ["wrong singleton", [{ ...bootstrapLineageRow(currentDigest), singleton: 2 }]],
+        ["wrong empty guard", [{ ...bootstrapLineageRow(currentDigest), empty_guard: 0 }]],
+      ]) {
+        assert.equal(
+          classifySchemaLineage({
+            catalog: [...productCatalog, runnerLedgerCatalog, runnerLineageCatalog],
+            journal: [],
+            lineage,
+            migrations,
+            manifest,
+          }).kind,
+          "unknown-or-contaminated",
+          `${label} must not establish bootstrap lineage`,
+        );
+      }
+      const driftedHistoryManifest = {
+        ...manifest,
+        historical_migrations: manifest.historical_migrations.map((entry, index) =>
+          index === 0 ? { ...entry, sha256: "c".repeat(64) } : entry,
+        ),
+      };
+      expectFailure("historical manifest pin", "BOOTSTRAP_HISTORICAL_MIGRATION_DRIFT", () =>
+        classifySchemaLineage({
+          catalog: [],
+          journal: [],
+          lineage: [],
+          migrations,
+          manifest: driftedHistoryManifest,
+        }),
+      );
+      assert.equal(
+        classifySchemaLineage({
+          catalog: [...legacyCatalog, runnerLedgerCatalog],
           journal: legacy,
           lineage: [],
           migrations,
@@ -461,8 +627,13 @@ const cases = [
         digest: "b".repeat(64),
         sql: CREATE_B,
       };
-      const historicalPlan = planMigrations([...migrations, forward], historical, plainOptions);
-      const baselinePlan = planMigrations([...migrations, forward], [], {
+      // The convergence proof models the immutable 0015 baseline plus one
+      // forward migration. It must stay independent of peers concurrently
+      // adding real post-0015 migrations to the shared repository.
+      const convergenceMigrations = migrations.filter((migration) => migration.sequence <= 15);
+      const convergenceWithForward = [...convergenceMigrations, forward];
+      const historicalPlan = planMigrations(convergenceWithForward, historical, plainOptions);
+      const baselinePlan = planMigrations(convergenceWithForward, [], {
         ...plainOptions,
         baseline: { head: 15 },
       });
@@ -492,52 +663,23 @@ const cases = [
       };
       const historicalAfterApply = [...historical, record(forward)];
       const historicalForward = classifySchemaLineage({
-        catalog: [
-          ...forwardProductCatalog,
-          {
-            type: "table",
-            name: "_asimposium_migrations",
-            table: "_asimposium_migrations",
-            sql: "CREATE TABLE _asimposium_migrations (...);",
-          },
-        ],
+        catalog: [...forwardProductCatalog, runnerLedgerCatalog],
         journal: historicalAfterApply,
         lineage: [],
-        migrations: [...migrations, forward],
+        migrations: convergenceWithForward,
         manifest: forwardManifest,
       });
       assert.deepEqual(historicalForward, { kind: "historical-forward", head: 16 });
       assert.equal(
-        planMigrations([...migrations, forward], historicalAfterApply, plainOptions).idempotent,
+        planMigrations(convergenceWithForward, historicalAfterApply, plainOptions).idempotent,
         true,
       );
 
       const bootstrapAfterApply = classifySchemaLineage({
-        catalog: [
-          ...forwardProductCatalog,
-          {
-            type: "table",
-            name: "_asimposium_migrations",
-            table: "_asimposium_migrations",
-            sql: "CREATE TABLE _asimposium_migrations (...);",
-          },
-          {
-            type: "table",
-            name: "_asimposium_schema_lineage",
-            table: "_asimposium_schema_lineage",
-            sql: "CREATE TABLE _asimposium_schema_lineage (...);",
-          },
-        ],
+        catalog: [...forwardProductCatalog, runnerLedgerCatalog, runnerLineageCatalog],
         journal: [record(forward)],
-        lineage: [
-          {
-            lineage: "bootstrap-baseline15",
-            artifact_id: "0015-final-schema-v1",
-            artifact_digest: "a".repeat(64),
-            schema_digest: currentDigest,
-          },
-        ],
-        migrations: [...migrations, forward],
+        lineage: [bootstrapLineageRow(currentDigest)],
+        migrations: convergenceWithForward,
         manifest: forwardManifest,
       });
       assert.deepEqual(bootstrapAfterApply, {
@@ -547,7 +689,7 @@ const cases = [
         journal_records: 1,
       });
       assert.equal(
-        planMigrations([...migrations, forward], [record(forward)], {
+        planMigrations(convergenceWithForward, [record(forward)], {
           ...plainOptions,
           baseline: { head: bootstrapAfterApply.head },
         }).idempotent,
@@ -644,6 +786,35 @@ const cases = [
           bootstrapFixtureRoot("bootstrap-digest-drift", digestDrift, "c".repeat(64)),
         ),
       );
+    },
+  },
+  {
+    name: "remote bootstrap refusal never invokes the injected D1 observation",
+    async execute() {
+      for (const environment of ["staging", "production"]) {
+        let d1Observations = 0;
+        let injectedFailure;
+        try {
+          await readBootstrapSnapshotOrRefuse({ kind: "remote", name: environment }, async () => {
+            d1Observations += 1;
+            throw new Error("remote D1 observation sentinel was reached");
+          });
+        } catch (error) {
+          injectedFailure = error;
+        }
+        assert.ok(injectedFailure instanceof MigrationError);
+        assert.equal(injectedFailure.code, "BOOTSTRAP_REMOTE_UNAVAILABLE");
+        assert.equal(d1Observations, 0, `${environment} refusal must precede every D1 observation`);
+
+        // The real CLI is still exercised for its JSON refusal contract. The
+        // injected counter above is the causal no-D1 proof; output text alone
+        // would not establish that a provider invocation never occurred.
+        const run = runCli(["--env", environment, "--bootstrap", "0015-final-schema-v1"]);
+        assert.equal(run.exitCode, 1, `${environment} bootstrap must refuse`);
+        const refusal = refusalOf(run);
+        assert.equal(refusal.code, "BOOTSTRAP_REMOTE_UNAVAILABLE");
+        assert.equal(refusal.phase, "plan");
+      }
     },
   },
   {
@@ -1415,6 +1586,43 @@ const cases = [
     },
   },
   {
+    name: "unterminated SQL comments and quotes are refused before planning or journal construction",
+    execute() {
+      for (const [label, sql, code] of [
+        [
+          "open block comment",
+          "CREATE TABLE leaked_comment (id TEXT); /*",
+          "UNTERMINATED_SQL_COMMENT",
+        ],
+        [
+          "open string quote",
+          "CREATE TABLE leaked_quote (note TEXT DEFAULT 'unterminated);",
+          "UNTERMINATED_SQL_QUOTE",
+        ],
+        [
+          "open identifier quote",
+          "CREATE TABLE `leaked_identifier (id TEXT);",
+          "UNTERMINATED_SQL_QUOTE",
+        ],
+        [
+          "open bracket identifier",
+          "CREATE TABLE [leaked_identifier (id TEXT);",
+          "UNTERMINATED_SQL_QUOTE",
+        ],
+      ]) {
+        expectFailure(label, code, () =>
+          readMigrationDirectory(directory(`unterminated-${label}`, { "0001_invalid.sql": sql })),
+        );
+        expectFailure(`${label} execution seam`, code, () =>
+          migrationCommandSql(
+            { id: "0001_invalid.sql", sequence: 1, digest: digestOf(sql), sql },
+            "2026-08-17T00:00:00.000Z",
+          ),
+        );
+      }
+    },
+  },
+  {
     name: "the-opt-in-marker-must-be-a-real-comment",
     execute() {
       assert.equal(declaresDestructive("-- asimposium:allow-destructive\nDROP TABLE a;"), true);
@@ -1506,23 +1714,31 @@ const cases = [
     },
   },
   {
-    name: "production records through 0014 and admits pending non-destructive 0015",
+    name: "production records through 0014 begins with non-destructive 0015",
     execute() {
-      const migrations = readMigrationDirectory(join(repositoryRoot, "db", "migrations"));
-      const applied = migrations.filter((migration) => migration.sequence <= 14).map(record);
-      const plan = planMigrations(migrations, applied, {
+      const historicalMigrations = readMigrationDirectory(
+        join(repositoryRoot, "db", "migrations"),
+      ).filter((migration) => migration.sequence <= 15);
+      const applied = historicalMigrations
+        .filter((migration) => migration.sequence <= 14)
+        .map(record);
+      const plan = planMigrations(historicalMigrations, applied, {
         environmentName: "production",
         destructiveAllowed: false,
       });
       assert.equal(plan.head, 14);
-      assert.deepEqual(plan.to_apply, [
+      assert.deepEqual(plan.to_apply.slice(0, 1), [
         {
           id: "0015_sponsor_enrollment_bootstrap_invariant.sql",
           sequence: 15,
-          digest: migrations.find((migration) => migration.sequence === 15)?.digest,
+          digest: historicalMigrations.find((migration) => migration.sequence === 15)?.digest,
           destructive: false,
         },
       ]);
+      assert.ok(
+        plan.to_apply.every((migration) => migration.destructive === false),
+        "a protected production plan must never admit a destructive pending migration",
+      );
     },
   },
   {
