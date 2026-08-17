@@ -9,6 +9,7 @@
 import { describe, expect, test } from "bun:test";
 import { spawnSync } from "node:child_process";
 import {
+  chmodSync,
   closeSync,
   existsSync,
   mkdirSync,
@@ -18,7 +19,7 @@ import {
   writeFileSync,
 } from "node:fs";
 import { homedir, tmpdir } from "node:os";
-import { join } from "node:path";
+import { basename, dirname, join } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { type OwnedCommandOptions, type OwnedCommandResult, suiteExecutionLimits } from "./cli.ts";
 import {
@@ -32,6 +33,7 @@ import { BLOCKED_EXIT_CODE } from "./policy.ts";
 import type { SummaryDiagnostic, UnitDiagnostic } from "./report.ts";
 
 const CLI = fileURLToPath(new URL("./cli.ts", import.meta.url));
+const REPO_ROOT = fileURLToPath(new URL("../..", import.meta.url));
 
 interface CliResult {
   exitCode: number;
@@ -112,6 +114,208 @@ function summary(result: CliResult, suite: string): SummaryDiagnostic | undefine
 function childEnvironment(): Record<string, string> {
   return process.env.PATH === undefined ? {} : { PATH: process.env.PATH };
 }
+
+/**
+ * Split a package script into the commands it actually runs.
+ *
+ * Only `&&` is treated as a separator. A `;` or `|` chain collapses into one
+ * segment and therefore fails the exact comparison below — deliberately, since
+ * failing closed on a shape this predicate does not model is safer than
+ * guessing at it.
+ */
+function commandSegments(script: string): readonly string[] {
+  return script
+    .split("&&")
+    .map((segment) => segment.trim())
+    .filter((segment) => segment !== "");
+}
+
+/**
+ * True when `script` INVOKES `target`, rather than merely mentioning it.
+ *
+ * A substring test is not a wiring proof: `echo bun run <target>` contains the
+ * name and runs nothing. A package script is a chain of commands, so the honest
+ * question is whether one whole segment IS the invocation — exact equality
+ * against `bun run <target>`, which no argument, comment, or lookalike leaf
+ * name can satisfy.
+ */
+function invokesPackageScript(script: string, target: string): boolean {
+  return commandSegments(script).includes(`bun run ${target}`);
+}
+
+interface CapturedRun {
+  readonly status: number | null;
+  readonly signal: string | null;
+  readonly error: string | null;
+  readonly output: string;
+}
+
+/**
+ * Captured runs share this file's ONE existing 0700 capture root.
+ *
+ * A `mkdtemp` per call grew the temp tree on every focused run. Nothing here
+ * deletes (Rule 1), so the fix is to stop creating rather than to start
+ * removing: `capturePath` already owns a single private root for this process,
+ * and distinct result names inside it are truncated by the `w` open flag when
+ * they recur. The shell self-test is lent a subdirectory of that same root, so
+ * a focused run adds no directory at all.
+ */
+let captureSequence = 0;
+
+/** A lent, private 0700 scratch directory for the shell self-test. */
+function shellScratchDirectory(): string {
+  const scratch = capturePath("shell-scratch");
+  mkdirSync(scratch, { recursive: true, mode: 0o700 });
+  chmodSync(scratch, 0o700);
+  return scratch;
+}
+
+/**
+ * Run one bounded child and recover its outcome through a private file.
+ *
+ * Reading a child's pipes with `spawnSync` directly has proven unreliable for
+ * these cases under `bun:test` — the same invocation succeeds from a shell and
+ * from `bun -e`, so the defect is in the in-test pipe capture, not in the child.
+ * A `bun -e` helper owns the spawn and writes a small JSON document to a 0600
+ * file in a private directory, so the outer process reads a file instead of
+ * racing a pipe. That is the seam `runOwnedCommand` below already depends on.
+ *
+ * Both children are bounded, and the outer bound is strictly the larger, so a
+ * wedged inner child surfaces as its own recorded timeout rather than as an
+ * unattributable helper failure.
+ */
+function capturedRun(
+  argv: readonly string[],
+  cwd: string,
+  timeoutMs: number,
+  extraEnvironment: Record<string, string> = {},
+): CapturedRun {
+  const [command, ...args] = argv;
+  if (command === undefined) throw new Error("capturedRun requires a command");
+  // Distinct name per call, truncated by the `w` flag if it somehow recurs.
+  captureSequence += 1;
+  const resultPath = capturePath(`captured-run-${captureSequence}.json`);
+  closeSync(openSync(resultPath, "w", 0o600));
+  const helperSource = `
+    import { spawnSync } from "node:child_process";
+    const child = spawnSync(${JSON.stringify(command)}, ${JSON.stringify(args)}, {
+      cwd: ${JSON.stringify(cwd)},
+      env: ${JSON.stringify({ ...childEnvironment(), ...extraEnvironment })},
+      encoding: "utf8",
+      timeout: ${timeoutMs},
+      maxBuffer: 4 * 1024 * 1024,
+    });
+    await Bun.write(
+      ${JSON.stringify(resultPath)},
+      JSON.stringify({
+        status: child.status,
+        signal: child.signal,
+        error: child.error === undefined ? null : child.error.message,
+        output: (child.stdout ?? "") + (child.stderr ?? ""),
+      }) + "\\n",
+    );
+  `;
+  const helper = spawnSync(process.execPath, ["-e", helperSource], {
+    env: childEnvironment(),
+    encoding: "utf8",
+    timeout: timeoutMs + 15_000,
+    maxBuffer: 1024 * 1024,
+  });
+  if (helper.error !== undefined || helper.status !== 0 || helper.signal !== null) {
+    throw new Error(
+      `captured-run helper failed: status=${helper.status}; signal=${helper.signal}; error=${helper.error?.message ?? "none"}; stderr=${helper.stderr.slice(0, 4_096)}`,
+    );
+  }
+  const raw = readFileSync(resultPath, "utf8");
+  if (raw.trim() === "") throw new Error("captured-run helper wrote no result");
+  return JSON.parse(raw) as CapturedRun;
+}
+
+describe("provider-free environment interface gate registration", () => {
+  test("PLANTED: the self-test re-enters through an absolute script path", () => {
+    const bash = Bun.which("bash");
+    if (bash === null) throw new Error("bash is required for the environment self-test");
+
+    // Invoke through a path relative to the repository's parent, from a cwd that
+    // is NOT the repository root. The script changes to REPO_ROOT before its
+    // nested self-test; a retained relative BASH_SOURCE path would therefore
+    // point at a nonexistent child path, and only an absolute SCRIPT_PATH
+    // survives the directory change.
+    const run = capturedRun(
+      [
+        bash,
+        join(basename(REPO_ROOT), "scripts", "e2e-environments.sh"),
+        "--self-test-remote-interface",
+      ],
+      dirname(REPO_ROOT),
+      30_000,
+      { ASIMPOSIUM_ENVIRONMENT_E2E_SCRATCH_DIR: shellScratchDirectory() },
+    );
+
+    expect(run.error).toBeNull();
+    expect(run.signal).toBeNull();
+    expect(run.status).toBe(0);
+    expect(run.output).toContain('"code":"REMOTE_INTERFACE_GATE_PLANT_PASSED"');
+    // The lent directory was used, so this run made none of its own.
+    expect(run.output).toContain('"retained_evidence_dir":""');
+  });
+
+  test("PLANTED: mentioning the interface script is not invoking it", () => {
+    const target = "test:environment-e2e-interface";
+    const real = `bun run test:seed && bun test /dev/null scripts/suite && bun run ${target}`;
+
+    // Planted ECHO: the name appears, the gate never runs.
+    expect(invokesPackageScript(`bun test x && echo bun run ${target}`, target)).toBe(false);
+    expect(invokesPackageScript(`bun test x && echo ${target}`, target)).toBe(false);
+    expect(invokesPackageScript(`bun test x && : ${target}`, target)).toBe(false);
+    // Planted REPLACED: a lookalike leaf that is not this gate.
+    expect(invokesPackageScript(`bun test x && bun run ${target}:skip`, target)).toBe(false);
+    expect(invokesPackageScript(`bun test x && bun run other-${target}`, target)).toBe(false);
+    expect(invokesPackageScript(`bun test x && bunx ${target}`, target)).toBe(false);
+    // Planted DELETED: gone entirely.
+    expect(invokesPackageScript("bun run test:seed && bun test x", target)).toBe(false);
+    // Only the real shape passes.
+    expect(invokesPackageScript(real, target)).toBe(true);
+  });
+
+  test("PLANTED: the root toolchain gate still invokes the registered interface script", () => {
+    const manifest = JSON.parse(readFileSync(join(REPO_ROOT, "package.json"), "utf8")) as {
+      scripts?: Record<string, string>;
+    };
+    const scripts = manifest.scripts ?? {};
+
+    // Link half, by exact command segment rather than by substring: a mention
+    // is not an invocation, and `toContain` accepted `echo bun run <target>`.
+    // Deleting the invocation, replacing it with a lookalike leaf, or reducing
+    // it to an echo all fail here — without running the suite this guards, and
+    // therefore without re-entering this test.
+    const toolchain = scripts["toolchain:test"] ?? "";
+    expect(invokesPackageScript(toolchain, "test:environment-e2e-interface")).toBe(true);
+    // The gate is the last thing the ordinary root command does, so its exact
+    // final segment is pinned rather than merely present somewhere in the chain.
+    expect(commandSegments(toolchain).at(-1)).toBe("bun run test:environment-e2e-interface");
+    const registered = scripts["test:environment-e2e-interface"] ?? "";
+    expect(registered).toContain("scripts/e2e-environments.sh");
+
+    // Causal half. A name in a manifest is not a gate: run that ONE registered
+    // script and require the shell's own credential-present witness. If the
+    // entry is wired to a stale target, a renamed flag, or a script that no
+    // longer reaches the plant, the link above still holds and this fails.
+    const run = capturedRun(
+      [process.execPath, "run", "test:environment-e2e-interface"],
+      REPO_ROOT,
+      60_000,
+      { ASIMPOSIUM_ENVIRONMENT_E2E_SCRATCH_DIR: shellScratchDirectory() },
+    );
+
+    expect(run.error).toBeNull();
+    expect(run.signal).toBeNull();
+    expect(run.status).toBe(0);
+    expect(run.output).toContain('"code":"REMOTE_INTERFACE_GATE_PLANT_PASSED"');
+    expect(run.output).not.toContain('"code":"REMOTE_INTERFACE_GATE_PLANT_FAILED"');
+    expect(run.output).not.toContain("asimp_ag_remote_e2e_canary_1234567890abcdefghijklmnop");
+  }, 90_000);
+});
 
 let ownedCommandHelperRoot: string | undefined;
 
