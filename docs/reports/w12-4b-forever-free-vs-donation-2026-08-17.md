@@ -160,6 +160,26 @@ is cheaper. It changes how large the number being offset is, and therefore how m
 "offset is small in absolute terms" argument can bear. A recommendation resting on that argument is
 correspondingly provisional.
 
+### Pinned billing sources (retrieved 2026-08-17)
+
+The billed-versus-CPU distinction is quoted, not paraphrased:
+
+1. `https://developers.cloudflare.com/workers/cache/` — "all requests to your Worker are billed at
+   the standard Workers request rate... whether the response comes from cache or from your Worker";
+   cache hits do not consume CPU time.
+2. `https://developers.cloudflare.com/workers/platform/pricing/` — "requests served from the Worker
+   cache are billed at the same per-request rate as requests that invoke the Worker"; "CPU time is
+   only billed when the Worker runs (on a cache miss or bypass)"; static assets are free and
+   unlimited.
+3. `https://developers.cloudflare.com/cache/interaction-cloudflare-products/workers/` — "When a
+   request arrives, it hits the Worker before the cache is checked."
+4. `https://developers.cloudflare.com/workers/reference/how-the-cache-works/` — "Cloudflare Workers
+   run before the cache."
+
+Consequence recorded in `asimposiumorg-way`: Worker-cache hits avoid CPU billing only; the
+per-request line item is billed on every invocation, and a zone Cache Rule cannot bypass a routed
+Worker. Cache-based reconciliation of the storm request line is refuted by these four sources.
+
 Sensitivity of the donation option itself: processor fees scale with donation volume, not with load,
 and are self-limiting. The real cost of Option B is **operator time** — bookkeeping, receipting,
 policy maintenance, and any registration upkeep — which is not on the infrastructure bill and is the
