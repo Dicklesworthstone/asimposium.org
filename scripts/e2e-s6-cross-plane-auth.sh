@@ -213,6 +213,17 @@ signal_group() {
 # Entries are removed the moment a reap is proven, on every return path.
 # Comparison is exact and numeric: the array is rebuilt by string equality, so a
 # value containing glob or regex characters can never match another entry.
+# NOTE ON A REJECTED DESIGN: no pgid ledger.
+#
+# `set -m` puts each of this script's jobs in its own process group, which an
+# outer harness knowing only this shell's pgid cannot reach if this shell's trap
+# is cut short. Publishing those pgids to a file was tried and removed: bare
+# pgids are not identity, so signalling from such a list risks killing a recycled
+# group, and censusing it is fail-open — an unwritten row hides a survivor while a
+# recycled one invents a false alarm. Containment across that boundary needs live
+# nonce-bearing supervisors, which this pass does not build. The outer harness
+# therefore reports its hard-kill path as cleanup-unproven instead of claiming it.
+
 unregister_child() {
   local pid="$1" kept=() current
   for current in ${CHILD_PIDS[@]+"${CHILD_PIDS[@]}"}; do
@@ -282,7 +293,16 @@ on_signal() {
   (( CLEANED_UP == 1 )) && exit "$EX_FAIL"
   CLEANED_UP=1
   reap_children
-  blocked_record "INTERRUPTED" "the run received SIG${signal} and terminated its children"
+  # A survivor must NOT be reported as a tidy interruption.
+  #
+  # This previously emitted INTERRUPTED unconditionally — "terminated its
+  # children" — regardless of whether anything was actually reaped. A reader
+  # would take that as a clean stop when a process group was still running.
+  if (( REAP_SURVIVORS != 0 )); then
+    blocked_record "CLEANUP_UNPROVEN" "the run received SIG${signal} and a child process group survived cleanup"
+    exit "$EX_CLEANUP_UNPROVEN"
+  fi
+  blocked_record "INTERRUPTED" "the run received SIG${signal} and every child process group was reaped"
   exit "$EX_FAIL"
 }
 
@@ -441,14 +461,26 @@ run_bounded() {
   # signalling is already safe in that case: `kill -- -PID` simply finds nothing
   # rather than addressing a reused bare pid.
 
+  # The watchdog PROVES its flag write, and its own status is evidence.
+  #
+  # Exit 0 means it fired and the flag is on disk. Exit 3 means it fired but the
+  # write FAILED — previously that was silent, so a child that then exited 0
+  # while handling the TERM made `run_bounded` return 0 for a run that had
+  # actually timed out. Killed-by-us (SIGTERM) means it never fired.
   (
     sleep "$seconds"
-    printf 'x' > "$flag"
+    if ! printf 'x' > "$flag" 2>/dev/null; then
+      kill -TERM -- "-${pid}" 2>/dev/null || true
+      sleep 3
+      kill -KILL -- "-${pid}" 2>/dev/null || true
+      exit 3
+    fi
     # GROUP ONLY. A bare-pid fallback would, once the leader has exited and been
     # reaped, address whatever process later inherited that number.
     kill -TERM -- "-${pid}" 2>/dev/null || true
     sleep 3
     kill -KILL -- "-${pid}" 2>/dev/null || true
+    exit 0
   ) &
   local dog=$!
   CHILD_PIDS+=("$dog")
@@ -466,8 +498,16 @@ run_bounded() {
   # signal missed, `wait` blocked for the watchdog's full sleep, and every fast
   # child came back 124 after ~33s.
   kill -TERM -- "-${dog}" 2>/dev/null || kill -TERM "$dog" 2>/dev/null || true
-  wait "$dog" 2>/dev/null || true
+  local dog_status=0
+  wait "$dog" 2>/dev/null || dog_status=$?
   unregister_child "$dog"
+  # Status 3 is the watchdog reporting that it fired but could NOT write its
+  # flag. The bound therefore cannot be evidenced either way, so fail closed
+  # rather than trust the child's own exit code.
+  if (( dog_status == 3 )); then
+    sweep_group "$pid" >/dev/null 2>&1 || true
+    return "$EX_WATCHDOG_UNAVAILABLE"
+  fi
 
   # The direct child is reaped; its descendants may not be. Ownership is
   # surrendered ONLY when both are proven done.
@@ -923,13 +963,20 @@ run_browser_leg() {
     fail_record "cookie-not-sent-to-agent-host" "the agent-host request from the logged-in browser did not answer exactly 403 WRONG_PRINCIPAL"
   fi
 
-  # Immutable deployment evidence pins this report to one deployment.
-  local deployment
-  deployment="$(printf '%s' "$record" | sed -n 's/.*"deployment":"\([^"]\{1,200\}\)".*/\1/p')"
-  if [[ -z "$deployment" ]]; then
-    fail_record "deployment-identified" "the browser leg reported no deployment identifier from the serving edge"
-  else
-    pass_record "deployment-identified" "the run is pinned to deployment ${deployment}"
+  # Request correlation, matching the runner's `edge_request_id` field EXACTLY.
+  #
+  # This parsed `"deployment"` after the runner had been renamed, so the field
+  # never matched and every otherwise-green live run failed here — a silent
+  # cross-file drift that no local gate could see, because neither file is wrong
+  # on its own. The TS suite now pins both halves of this contract together.
+  local edge_request_id
+  edge_request_id="$(printf '%s' "$record" | sed -n 's/.*"edge_request_id":"\([^"]\{1,200\}\)".*/\1/p')"
+  # NOT AN ASSERTION. Fable S-6 does not require `x-vercel-id`, the runner types
+  # the field as nullable, and its absence proves nothing — so no success claim
+  # depends on it and it does not inflate the assertion count either way. When an
+  # edge supplies it, it is logged for correlation and nothing more.
+  if [[ -n "$edge_request_id" ]]; then
+    log "${SUITE}: edge request id ${edge_request_id} (correlation only; not a deployment or revision pin)"
   fi
 
   # The receipt is accepted only in its exact structured form, and only when the
@@ -1883,26 +1930,27 @@ self_test() {
   check "leak-scan-needle-not-in-argv" "$scan_verdict" "clean"
   check "argv-inspection-observes-a-needle" "$scan_ctl_verdict" "leaks"
 
-  # OWED — one causal negative remains ABSENT rather than weak.
+  # The three causal proofs above are IMPLEMENTED, each with a working control.
   #
-  # A first attempt at them was removed because each proved nothing and one hung
-  # the suite:
+  # A first attempt at all three was removed because each proved nothing and one
+  # hung the suite. What replaced them, and why each control matters:
   #
-  #   * real-helper environ: `sharedSelfTest` passes ambient `process.env`, where
-  #     the S6 variables are absent on an ordinary machine, so `export -n` could
-  #     be deleted and a held helper would still look clean. It needs an
-  #     S6-scrubbed env overlaid with explicit planted canaries, plus an exported
-  #     control proving `ps -E` observes them.
-  #   * leak-scan needle in argv: the attempt hand-built its own `grep`, so
-  #     `scan_regular_files_for` could regress to a needle-in-argv and the plant
-  #     would stay green. It needs a held scanner seam driving the real function.
-  #   * minted-signature retention: the attempt appended two literals to the
-  #     array, so deleting the extraction inside `mint_envelope_config` would
-  #     still pass. It needs two real mints through the FIFO and two distinct
-  #     extracted signatures.
+  #   * `real-helper-environ-has-no-secret` — the suite launches this self-test
+  #     with the ambient S6 variables removed and canaries planted, so `export -n`
+  #     is the only reason a held helper reads none of them. The helper reports on
+  #     its OWN environ, because `environ-inspection-observes-an-export` proved
+  #     that macOS `ps -E` cannot read another process's environment at all.
+  #   * `leak-scan-needle-not-in-argv` — drives the real
+  #     `scan_regular_files_for` through the `SCAN_GREP` seam pointed at a held
+  #     wrapper, so the argv inspected is the one production built.
+  #     `argv-inspection-observes-a-needle` proves the inspection can see a leak.
+  #   * `every-minted-signature-retained` / `retained-signatures-are-distinct` /
+  #     `retained-signatures-not-on-disk` — two real mints through the real FIFO,
+  #     then the actual canary with `RUN_STATE_DIR` still set.
   #
-  # The repairs themselves are in place and statically pinned by the TS suite;
-  # only these three causal proofs are outstanding.
+  # What remains genuinely unproven is NOT in this list: containment of this
+  # script's nested process groups when an outer harness hard-kills only the
+  # group it leads. That is reported as cleanup-unproven, never as contained.
 
   # The production launcher itself must be clean.
   argv_plant "no-secret-in-child-argv" "clean" real

@@ -615,13 +615,33 @@ async function main(): Promise<Omit<Record_, "duration_ms">> {
         "live Set-Cookie proved host-only apex scoping, the cookie was not sent to the agent host and that request answered exactly 403 WRONG_PRINCIPAL, and the real console Server Action minted an enrollment",
     };
   } finally {
-    clearTimeout(budget);
-    // Bounded teardown, and its failure is NOT swallowed. A close that throws
-    // must not be reported as exit 0 with a browser still running.
+    // The absolute deadline stays ARMED through teardown.
+    //
+    // Clearing it here first left the closes unbounded: a wedged
+    // `context.close()` or `browser.close()` could hang forever with no deadline
+    // left to stop it. The budget is only cleared once teardown has finished,
+    // and a teardown that outlives its own bound is recorded as a typed failure
+    // rather than being awaited indefinitely.
     const teardown: unknown[] = [];
-    await context?.close().catch((error: unknown) => teardown.push(error));
-    await browser?.close().catch((error: unknown) => teardown.push(error));
-    if (teardown.length > 0) {
+    let teardownTimedOut = false;
+    const teardownBound = new Promise<void>((resolve) => {
+      const t = setTimeout(() => {
+        teardownTimedOut = true;
+        resolve();
+      }, CLOSE_GRACE_MS);
+      t.unref?.();
+    });
+    await Promise.race([
+      (async () => {
+        await context?.close().catch((error: unknown) => teardown.push(error));
+        await browser?.close().catch((error: unknown) => teardown.push(error));
+      })(),
+      teardownBound,
+    ]);
+    clearTimeout(budget);
+    if (teardownTimedOut) {
+      teardownFailed = -1;
+    } else if (teardown.length > 0) {
       teardownFailed = teardown.length;
     }
   }
@@ -637,12 +657,15 @@ let teardownFailed = 0;
 try {
   const passRecord = await main();
   // Cleanup has completed by now. A teardown failure outranks the pass.
-  if (teardownFailed > 0) {
+  if (teardownFailed !== 0) {
     emit({
       ...passRecord,
       status: "fail",
-      code: "RUNNER_TEARDOWN_FAILED",
-      detail: `the run succeeded but ${teardownFailed} teardown step(s) failed; the browser may still be running`,
+      code: teardownFailed === -1 ? "RUNNER_TEARDOWN_TIMED_OUT" : "RUNNER_TEARDOWN_FAILED",
+      detail:
+        teardownFailed === -1
+          ? `the run succeeded but teardown exceeded its ${CLOSE_GRACE_MS}ms bound; the browser may still be running`
+          : `the run succeeded but ${teardownFailed} teardown step(s) failed; the browser may still be running`,
     });
     process.exit(1);
   }

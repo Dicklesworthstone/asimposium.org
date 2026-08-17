@@ -100,6 +100,15 @@ interface ShellRun {
   readonly timedOut: boolean;
   /** True if anything remained in the child's process group after the census. */
   readonly survivors: boolean;
+  /**
+   * True when the run had to be hard-killed, so its nested process groups
+   * cannot be shown to have been reaped.
+   *
+   * This is NOT a containment claim in either direction — it records that the
+   * question is unanswerable for that run, because the script's trap was cut
+   * short and this controller cannot see groups it does not lead.
+   */
+  readonly cleanupUnproven: boolean;
 }
 
 /**
@@ -125,95 +134,189 @@ async function runShell(
   const dir = mkdtempSync(join(process.env.TMPDIR ?? tmpdir(), "s6-run-"));
   const stdoutPath = join(dir, "stdout");
   const stderrPath = join(dir, "stderr");
+  // NO OWNERSHIP LEDGER, and no claim of zero-survivor containment.
+  //
+  // `set -m` puts each of the script's jobs in its own process group, so this
+  // controller — which knows only the script's pgid — cannot reach them if the
+  // script's trap is prevented from finishing. A pgid ledger was tried and
+  // removed: bare pgids are not identity, so signalling from them risks killing a
+  // recycled group, and censusing them is fail-open (a missing or unwritten row
+  // hides a survivor, a recycled row invents one). Proving containment here would
+  // need live nonce-bearing supervisors pinning each nested group, which this
+  // pass does not build. The hard-kill path is therefore reported as
+  // CLEANUP-UNPROVEN rather than described as contained.
   const stdoutFd = openSync(stdoutPath, "w", 0o600);
   const stderrFd = openSync(stderrPath, "w", 0o600);
 
-  // A REAL separate process group, so `child.pid` genuinely IS the pgid.
+  // TOTAL descriptor ownership, released exactly once.
   //
-  // `bash -c 'set -m; …'` did not do this: job control changes the groups of
-  // the jobs that shell starts, not the group of the shell itself, so
-  // `process.kill(-child.pid, …)` was addressing a group this process did not
-  // lead — and the bare-pid fallback then fired, which after the reap can hit a
-  // reused number. `setpgrp(0,0)` before `exec` makes the child a group leader
-  // for real, and macOS has no `setsid(1)` to do it with.
-  const child = Bun.spawn({
-    cmd: [
-      "/usr/bin/perl",
-      "-e",
-      "setpgrp(0,0) or die $!; exec @ARGV or die $!;",
-      "bash",
-      script,
-      ...args,
-    ],
-    cwd: root,
-    env: env as Record<string, string>,
-    stdin: "ignore",
-    stdout: stdoutFd,
-    stderr: stderrFd,
-  });
-  // The child holds its own duplicates; drop ours so the files are complete.
-  closeSync(stdoutFd);
-  closeSync(stderrFd);
-
-  /** Is the child's group still present? */
-  const groupAlive = (): boolean => {
-    try {
-      process.kill(-child.pid, 0);
-      return true;
-    } catch {
-      return false;
+  // Holding the descriptors until the child exits fixed the lost-output race,
+  // but on its own it leaked them on every abnormal path: a `Bun.spawn` throw, a
+  // rejected `child.exited`, a census exception, or an `OverCapture` from the
+  // reader. The `finally` below covers all of them, and the flag makes a double
+  // release harmless.
+  // Each descriptor is tracked separately and cleared ONLY after its close
+  // actually succeeded. The previous shape set one flag before either close and
+  // swallowed every error, so a real close refusal leaked silently while the
+  // suite went green — and a stdout failure meant stderr was never retried.
+  // EINTR is retried; anything else is aggregated and thrown so the test fails.
+  let stdoutOpen = true;
+  let stderrOpen = true;
+  const releaseCaptureFds = (): void => {
+    const failures: string[] = [];
+    const close = (fd: number, label: string, clear: () => void): void => {
+      for (let attempt = 0; attempt < 4; attempt++) {
+        try {
+          closeSync(fd);
+          clear();
+          return;
+        } catch (error) {
+          const code = (error as { code?: string })?.code;
+          if (code === "EINTR") continue;
+          if (code === "EBADF") {
+            // Genuinely not open any more; that is a successful release.
+            clear();
+            return;
+          }
+          failures.push(`${label}: ${code ?? "unknown"}`);
+          return;
+        }
+      }
+      failures.push(`${label}: EINTR after 4 attempts`);
+    };
+    if (stdoutOpen) {
+      close(stdoutFd, "stdout", () => {
+        stdoutOpen = false;
+      });
+    }
+    if (stderrOpen) {
+      close(stderrFd, "stderr", () => {
+        stderrOpen = false;
+      });
+    }
+    if (failures.length > 0) {
+      throw new Error(`capture descriptors could not be released: ${failures.join("; ")}`);
     }
   };
 
-  /**
-   * GROUP-ONLY. No bare-pid fallback: once the leader has been reaped its number
-   * can belong to anything, and the fallback fired in exactly that window.
-   */
-  const signalGroup = (signal: NodeJS.Signals): void => {
-    try {
-      process.kill(-child.pid, signal);
-    } catch {
-      // The group is gone. Nothing to signal, which is the correct outcome.
+  try {
+    // A REAL separate process group, so `child.pid` genuinely IS the pgid.
+    //
+    // `bash -c 'set -m; …'` did not do this: job control changes the groups of
+    // the jobs that shell starts, not the group of the shell itself, so
+    // `process.kill(-child.pid, …)` was addressing a group this process did not
+    // lead — and the bare-pid fallback then fired, which after the reap can hit a
+    // reused number. `setpgrp(0,0)` before `exec` makes the child a group leader
+    // for real, and macOS has no `setsid(1)` to do it with.
+    const child = Bun.spawn({
+      cmd: [
+        "/usr/bin/perl",
+        "-e",
+        "setpgrp(0,0) or die $!; exec @ARGV or die $!;",
+        "bash",
+        script,
+        ...args,
+      ],
+      cwd: root,
+      env: env as Record<string, string>,
+      stdin: "ignore",
+      stdout: stdoutFd,
+      stderr: stderrFd,
+    });
+    // The parent's descriptors are held until the child has EXITED.
+    //
+    // Closing them immediately after `Bun.spawn` returned lost the child's output
+    // entirely: some runs produced `stdout=0 stderr=0` while still exiting 0 or 78,
+    // so every record assertion failed against empty captures and the exit code
+    // looked correct. It is load-sensitive, which is why it surfaced on a loaded
+    // machine first. Holding the descriptors costs nothing — these are regular
+    // files read by size after exit, so no reader needs EOF.
+
+    /** Is the child's group still present? */
+    const groupAlive = (): boolean => {
+      try {
+        process.kill(-child.pid, 0);
+        return true;
+      } catch {
+        return false;
+      }
+    };
+
+    /**
+     * GROUP-ONLY. No bare-pid fallback: once the leader has been reaped its number
+     * can belong to anything, and the fallback fired in exactly that window.
+     */
+    const signalGroup = (signal: NodeJS.Signals): void => {
+      try {
+        process.kill(-child.pid, signal);
+      } catch {
+        // The group is gone. Nothing to signal, which is the correct outcome.
+      }
+    };
+
+    let timedOut = false;
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    let killTimer: ReturnType<typeof setTimeout> | undefined;
+    const deadline = new Promise<void>((resolve) => {
+      timer = setTimeout(() => {
+        timedOut = true;
+        // TERM first so the script's own trap reaps its descendants, then KILL.
+        // Only the group this controller leads is signalled; the script's nested
+        // groups are outside its authority, which is why a hard-killed run is
+        // reported as cleanup-unproven rather than contained.
+        signalGroup("SIGTERM");
+        killTimer = setTimeout(() => signalGroup("SIGKILL"), 2_000);
+        killTimer.unref?.();
+        resolve();
+      }, RUN_TIMEOUT_MS);
+    });
+
+    await Promise.race([child.exited, deadline]);
+    if (timer !== undefined) clearTimeout(timer);
+    // Always reap, whether it exited on its own or was killed.
+    const exitCode = await child.exited;
+    // Cancel and drain the escalation timer. Leaving it armed meant a SIGKILL
+    // could be delivered AFTER the reap, to whatever then held the number.
+    if (killTimer !== undefined) clearTimeout(killTimer);
+
+    // CENSUS ONLY. No signal is sent after the reap.
+    //
+    // Once `child.exited` has resolved, the leader is reaped and the kernel may
+    // recycle the pgid — so a post-reap SIGKILL could land on an unrelated group
+    // that merely inherited the number. Observation is still worth having and may
+    // fail closed (a recycled group can make this report a survivor that is not
+    // ours), but it cannot authorise signalling something unpinned. The pre-reap
+    // timeout path above keeps its TERM-then-KILL, where the identity is certain.
+    // Only OUR OWN group is observable here, and only as an observation.
+    const survivors = groupAlive();
+    // A run we had to hard-kill cannot claim its nested groups were reaped: the
+    // script's trap was cut short, and this controller cannot see those groups.
+    const cleanupUnproven = timedOut;
+
+    // Only now are the parent's descriptors released.
+    releaseCaptureFds();
+
+    const stdout = readBounded(stdoutPath);
+    const stderr = readBounded(stderrPath);
+
+    // AN EMPTY CAPTURE CAN NEVER PASS FOR A SUCCESSFUL RUN.
+    //
+    // This script always emits at least one NDJSON record on any path it can exit
+    // 0 or 78 from. If the capture is empty on such an exit, the transport lost the
+    // output and no assertion below it means anything — so this throws rather than
+    // letting record assertions fail one by one against "". A future capture
+    // regression cannot be mistaken for a content failure.
+    if (stdout.length === 0 && (exitCode === 0 || exitCode === 78)) {
+      throw new Error(
+        `capture lost: exit=${exitCode} produced an empty stdout at ${stdoutPath}. ` +
+          `The script emits a record on every such path, so this is a transport fault, not a content failure.`,
+      );
     }
-  };
 
-  let timedOut = false;
-  let timer: ReturnType<typeof setTimeout> | undefined;
-  let killTimer: ReturnType<typeof setTimeout> | undefined;
-  const deadline = new Promise<void>((resolve) => {
-    timer = setTimeout(() => {
-      timedOut = true;
-      // TERM first so the script's own trap reaps its descendants, then KILL.
-      signalGroup("SIGTERM");
-      killTimer = setTimeout(() => signalGroup("SIGKILL"), 2_000);
-      killTimer.unref?.();
-      resolve();
-    }, RUN_TIMEOUT_MS);
-  });
-
-  await Promise.race([child.exited, deadline]);
-  if (timer !== undefined) clearTimeout(timer);
-  // Always reap, whether it exited on its own or was killed.
-  const exitCode = await child.exited;
-  // Cancel and drain the escalation timer. Leaving it armed meant a SIGKILL
-  // could be delivered AFTER the reap, to whatever then held the number.
-  if (killTimer !== undefined) clearTimeout(killTimer);
-
-  // Census, then signal only if something is actually still there — never a
-  // reflexive post-reap signal.
-  let survivors = groupAlive();
-  if (survivors) {
-    signalGroup("SIGKILL");
-    survivors = groupAlive();
+    return { exitCode, stdout, stderr, timedOut, survivors, cleanupUnproven };
+  } finally {
+    releaseCaptureFds();
   }
-
-  return {
-    exitCode,
-    stdout: readBounded(stdoutPath),
-    stderr: readBounded(stderrPath),
-    timedOut,
-    survivors,
-  };
 }
 
 /** Failure context. stderr appears here and nowhere else. */
@@ -750,6 +853,60 @@ describe("the run is bounded and leaves no survivors", () => {
   });
 });
 
+describe("the runner record and the shell parser cannot drift apart", () => {
+  const runner = read(RUNNER);
+  const shell = code(SCRIPT);
+
+  /** Field names the runner declares on its NDJSON record. */
+  const declared = [
+    ...runner
+      .slice(runner.indexOf("interface Record_ {"), runner.indexOf("const startedAt"))
+      .matchAll(/^\s+readonly ([a-z_]+)[?:]/gm),
+  ].map((m) => m[1] as string);
+
+  test("the runner declares the fields the shell reads", () => {
+    // Renaming `deployment` to `edge_request_id` in the runner left the shell
+    // parsing a field that no longer existed, so every otherwise-green live run
+    // failed on it. Neither file was wrong alone, which is why only a contract
+    // spanning both can catch it.
+    expect(declared).toContain("edge_request_id");
+    expect(declared).toContain("cookie_probe");
+    expect(declared).toContain("receipt");
+    expect(declared).not.toContain("deployment");
+  });
+
+  test("every field the shell parses out of the record is declared", () => {
+    const parsed = [...shell.matchAll(/"([a-z_]+)":\\"/g)].map((m) => m[1] as string);
+    const knownNonRecord = new Set(["suite", "status", "code", "detail", "assertion", "reproduce"]);
+    for (const field of parsed) {
+      if (knownNonRecord.has(field)) continue;
+      expect(declared, `shell parses "${field}" but the runner does not declare it`).toContain(
+        field,
+      );
+    }
+  });
+
+  test("the shell no longer claims a deployment pin", () => {
+    expect(shell).not.toContain('"deployment"');
+    expect(shell).not.toContain("deployment-identified");
+    expect(shell).toContain("edge_request_id");
+    // Wording bans: nothing may describe this as immutable or pinned.
+    expect(shell).not.toMatch(/immutable deployment/i);
+    expect(shell).not.toMatch(/pinned to deployment/i);
+  });
+
+  test("edge correlation is not an S6 gate", () => {
+    // Fable S-6 does not require `x-vercel-id`, and the runner types the field
+    // as nullable, so its absence proves nothing. No assertion may depend on it
+    // and it must not inflate the assertion count in either direction.
+    const leg = shellFunction(shell, "run_browser_leg");
+    const region = leg.slice(leg.indexOf("edge_request_id"));
+    expect(region).not.toContain('pass_record "edge-request');
+    expect(region).not.toContain('fail_record "edge-request');
+    expect(shell).not.toContain("edge-request-identified");
+  });
+});
+
 describe("stdin records are read in a way that terminates on a FIFO", () => {
   const runner = read(RUNNER);
   const shell = code(SCRIPT);
@@ -971,9 +1128,12 @@ describe("the test harness contains what it launches", () => {
     // group this process did not lead. `setpgrp(0,0)` before exec is real.
     // Sliced to the spawn itself. A whole-file ban would be self-referential:
     // the assertion string would live in the very file it reads.
+    // Bounded by the spawn call itself. `closeSync(stdoutFd)` is no longer a
+    // valid end marker: it now appears in `releaseCaptureFds` ABOVE the spawn,
+    // so the slice inverted and matched nothing.
     const spawn = self.slice(
       self.indexOf("const child = Bun.spawn({"),
-      self.indexOf("closeSync(stdoutFd)"),
+      self.indexOf("/** Is the child's group still present?"),
     );
     // Every check is scoped to the CONTROLLER. Whole-file bans here are
     // self-referential: the forbidden string would live in the assertion itself.
@@ -989,8 +1149,11 @@ describe("the test harness contains what it launches", () => {
     expect(controller).not.toContain("child.kill(");
     // The escalation timer is owned, cancelled and drained.
     expect(controller).toContain("clearTimeout(killTimer)");
-    // No reflexive post-reap signal: census first, signal only if alive.
-    expect(controller).toContain("let survivors = groupAlive();");
+    // No post-reap signal at all: after the reap the pgid may be recycled, so a
+    // SIGKILL there could land on an unrelated group. Census only.
+    expect(controller).toContain("const survivors = groupAlive();");
+    const afterReap = controller.slice(controller.indexOf("const survivors = groupAlive();"));
+    expect(afterReap).not.toContain("signalGroup(");
   });
 
   test("an over-cap capture is rejected, not truncated", () => {
@@ -1000,18 +1163,37 @@ describe("the test harness contains what it launches", () => {
   });
 
   test(
-    "every run leaves no survivor in its group",
+    "an ordinary run leaves no survivor in the group this controller leads",
     async () => {
-      // Covers the ordinary path; the timeout and signal paths are proven by
-      // the shell's own plants, which run inside this same suite.
+      // The claim is scoped to OUR group. The script's own nested groups are
+      // covered by its plants below; this controller cannot see them, and on a
+      // hard-killed run it reports `cleanupUnproven` rather than pretending to.
       const run = await sharedSelfTest();
+      expect(run.timedOut, diag(run)).toBe(false);
+      expect(run.cleanupUnproven, diag(run)).toBe(false);
       expect(run.survivors, diag(run)).toBe(false);
     },
     SHELL_TIMEOUT_MS,
   );
 
+  test("a hard-killed run is reported as cleanup-unproven, not contained", () => {
+    const self = read("apps/wire/test/auth/cross-plane-spike.test.ts");
+    // A pgid ledger was tried and removed: signalling from bare pgids risks a
+    // recycled group, and censusing them is fail-open. So the hard-kill path
+    // makes no containment claim in either direction.
+    // Scoped to the controller: a whole-file ban would match this assertion.
+    const controller = self.slice(
+      self.indexOf("async function runShell("),
+      self.indexOf("/** Failure context."),
+    );
+    expect(controller).toContain("const cleanupUnproven = timedOut;");
+    expect(controller).not.toContain("S6_PGID_LEDGER");
+    expect(controller).not.toContain("ledgerSurvivors");
+    expect(code(SCRIPT)).not.toContain("ledger_note");
+  });
+
   test(
-    "a child that exits while leaving a descendant is still contained",
+    "the script's own plants cover the descendant, timeout and signal paths",
     async () => {
       // The shell's own `normal-exit-sweeps-group` plant proves the sweep; this
       // asserts the harness reports no survivor for that same run.
