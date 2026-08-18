@@ -1004,6 +1004,8 @@ run_owned_checker() {
 }
 
 emit_checked_checker_jsonl() {
+  # The embedded Bun program must remain literal; shell expansion here would corrupt the evidence boundary.
+  # shellcheck disable=SC2016
   S3_CHECKER_LOG="${CHECK_LOG}" bun --eval '
     const text = await Bun.file(process.env.S3_CHECKER_LOG ?? "").text();
     const lines = text.split("\n").filter((line) => line.length > 0);
