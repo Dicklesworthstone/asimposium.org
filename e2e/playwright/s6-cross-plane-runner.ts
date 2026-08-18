@@ -17,10 +17,11 @@
  * ## What this file must never emit
  *
  * The cookie VALUE, the Google password, the join-URL fragment secret, any
- * bearer, any screenshot, any trace. The join URL is read only far enough to
- * recover the public enrollment id; the fragment is never captured, because
- * `ASIMP-EN-<id>#v1.<secret>` is the one string in this flow that is a
- * credential (ADR-20). Cookie evidence is reported as ATTRIBUTES, never bytes.
+ * bearer, any screenshot, any trace. The join fragment is consumed transiently
+ * in Playwright memory to make the real idempotent Fellow claim required for
+ * attribution, but it is never retained, emitted, written to disk, placed in
+ * argv/environment, or interpolated into a diagnostic. Cookie evidence is
+ * reported as ATTRIBUTES, never bytes.
  *
  * Output is exactly one NDJSON record on stdout. Exit 0 pass, 1 fail, 78 blocked.
  */
@@ -33,7 +34,21 @@ import {
   readSync,
   writeSync,
 } from "node:fs";
-import { type Browser, type BrowserContext, chromium, type Response } from "@playwright/test";
+import {
+  type APIResponse,
+  type Browser,
+  type BrowserContext,
+  chromium,
+} from "@playwright/test";
+import {
+  EnrollmentClaimResponseSchema,
+  EnrollmentHelloResponseSchema,
+  EnrollmentIdSchema,
+  FellowRegistrationRequestSchema,
+  parseStoaJoinUrl,
+  ProblemDocumentSchema,
+  SponsorProposalListResponseSchema,
+} from "@asimposium/contracts";
 
 const SUITE = "s6-cross-plane-browser";
 const BLOCKED_EXIT = 78;
@@ -48,6 +63,8 @@ const CLOSE_GRACE_MS = 10_000;
 const MAX_CONFIG_RECORD_BYTES = 8192;
 /** The shell accepts one canonical browser evidence record, never a transcript tail. */
 export const MAX_BROWSER_EVIDENCE_BYTES = 4096;
+/** One response body plus its three-digit curl status suffix. */
+export const MAX_HTTP_RESPONSE_BYTES = 65_536;
 
 /**
  * The EXACT session cookie name configured in `apps/web/auth.ts`.
@@ -58,10 +75,10 @@ export const MAX_BROWSER_EVIDENCE_BYTES = 4096;
  * middleware named `evil-asimp.session`.
  */
 const SESSION_COOKIE_NAME = "asimp.session";
-/** The public half of a join URL. The fragment after it is never matched. */
-const ENROLLMENT_ID = /^ASIMP-EN-[0-9A-HJKMNP-TV-Z]{26}$/;
+const CLAIM_MODEL = "test/no-inference";
+const CLAIM_HARNESS = "playwright";
 
-interface CookieAttributes {
+export interface CookieAttributes {
   readonly issuance_count: number;
   readonly host_only: boolean;
   readonly http_only: boolean;
@@ -140,20 +157,37 @@ async function latchDeadlineAndTeardown(teardownOnce: () => Promise<void>): Prom
   await teardownOnce();
 }
 
-/** Write every terminal byte synchronously before any caller can exit. */
-function writeStdoutLine(line: string): void {
-  const bytes = Buffer.from(`${line}\n`, "utf8");
+export type SyncByteWriter = (
+  fd: number,
+  bytes: Uint8Array,
+  offset: number,
+  length: number,
+) => number;
+
+/** Complete one synchronous byte write, retrying only EINTR. */
+export function writeAllSync(
+  fd: number,
+  bytes: Uint8Array,
+  writer: SyncByteWriter = writeSync,
+): void {
   let offset = 0;
   while (offset < bytes.length) {
     try {
-      const written = writeSync(1, bytes, offset, bytes.length - offset);
-      if (written <= 0) throw new Error("stdout made no write progress");
+      const written = writer(fd, bytes, offset, bytes.length - offset);
+      if (written <= 0 || written > bytes.length - offset) {
+        throw new Error("synchronous writer made invalid progress");
+      }
       offset += written;
     } catch (error) {
       if ((error as { code?: string })?.code === "EINTR") continue;
       throw error;
     }
   }
+}
+
+/** Write every terminal byte synchronously before any caller can exit. */
+function writeStdoutLine(line: string): void {
+  writeAllSync(1, Buffer.from(`${line}\n`, "utf8"));
 }
 
 function emit(record: Omit<Record_, "duration_ms">): void {
@@ -228,6 +262,31 @@ function originHost(value: string | undefined, name: string): string {
     blocked("ORIGIN_INVALID", `${name} must be an exact https origin`);
   }
   return new URL(value).host.split(":")[0] as string;
+}
+
+/** Pure credential-fill gate: lookalike paths and host suffixes are never Google. */
+export function isExactGoogleAccountsOrigin(value: string): boolean {
+  try {
+    const parsed = new URL(value);
+    return (
+      parsed.origin === "https://accounts.google.com" &&
+      parsed.protocol === "https:" &&
+      parsed.hostname === "accounts.google.com" &&
+      parsed.port === "" &&
+      parsed.username === "" &&
+      parsed.password === ""
+    );
+  } catch {
+    return false;
+  }
+}
+
+/** Execute a credential action only after the exact-origin predicate succeeds. */
+export function performAtExactGoogleOrigin<T>(value: string, action: () => T): T {
+  if (!isExactGoogleAccountsOrigin(value)) {
+    throw new Error("credential action refused outside the exact Google accounts origin");
+  }
+  return action();
 }
 
 /**
@@ -316,6 +375,143 @@ export function sessionCookiePolicyFromHeaders(
   return summarizeSessionCookieIssuances(issuances);
 }
 
+export interface SessionCookieHeaderSource {
+  url(): string;
+  headersArray(): Promise<readonly { readonly name: string; readonly value: string }[]>;
+}
+
+/**
+ * One append-only observer used by production and delayed-header plants.
+ * Observer faults are accumulated as data so teardown can continue closing
+ * every browser owner before the terminal selector reports the refusal.
+ */
+export class SessionCookieCollector {
+  readonly issuances: SessionCookieIssuance[] = [];
+  readonly failures: unknown[] = [];
+  private readonly pending = new Set<Promise<void>>();
+  private stopped = false;
+
+  constructor(private readonly previewOrigin: string) {}
+
+  readonly observe = (response: SessionCookieHeaderSource): void => {
+    if (this.stopped) return;
+    let responseOrigin: string;
+    try {
+      responseOrigin = new URL(response.url()).origin;
+    } catch (error) {
+      this.failures.push(error);
+      return;
+    }
+    if (responseOrigin !== this.previewOrigin) return;
+    let observation!: Promise<void>;
+    observation = (async () => {
+      for (const header of await response.headersArray()) {
+        if (header.name.toLowerCase() !== "set-cookie") continue;
+        const issuance = parseSessionCookieIssuance(header.value);
+        if (issuance !== undefined && issuance !== null) this.issuances.push(issuance);
+      }
+    })()
+      .catch((error: unknown) => {
+        this.failures.push(error);
+      })
+      .finally(() => {
+        this.pending.delete(observation);
+      });
+    this.pending.add(observation);
+  };
+
+  stop(): void {
+    this.stopped = true;
+  }
+
+  async drain(): Promise<void> {
+    while (this.pending.size > 0) {
+      await Promise.all([...this.pending]);
+    }
+  }
+
+  summarize(): SessionCookiePolicy {
+    return summarizeSessionCookieIssuances(this.issuances);
+  }
+}
+
+export interface SessionCookieFinalization<T> {
+  readonly snapshot: T | undefined;
+  readonly policy: SessionCookiePolicy;
+  readonly evidenceFailures: readonly unknown[];
+  readonly closeFailures: readonly unknown[];
+}
+
+/**
+ * Shared lifecycle seam: snapshot while open, close while observation remains
+ * attached, detach, dynamically drain, then summarize every issuance.
+ */
+export async function finalizeSessionCookieObservation<T>(args: {
+  readonly snapshotJar: () => Promise<T>;
+  readonly closeContext: () => Promise<void>;
+  readonly closeFallback: () => Promise<void>;
+  readonly stopObserving: () => void;
+  readonly drain: () => Promise<void>;
+  readonly summarize: () => SessionCookiePolicy;
+  readonly observationFailures: () => readonly unknown[];
+}): Promise<SessionCookieFinalization<T>> {
+  let snapshot: T | undefined;
+  const evidenceFailures: unknown[] = [];
+  const closeFailures: unknown[] = [];
+  try {
+    snapshot = await args.snapshotJar();
+  } catch (error) {
+    evidenceFailures.push(error);
+  }
+
+  let contextClosed = false;
+  try {
+    await args.closeContext();
+    contextClosed = true;
+  } catch (error) {
+    closeFailures.push(error);
+  }
+  if (!contextClosed) {
+    try {
+      await args.closeFallback();
+    } catch (error) {
+      closeFailures.push(error);
+    }
+  }
+  try {
+    args.stopObserving();
+  } catch (error) {
+    evidenceFailures.push(error);
+  }
+  try {
+    await args.drain();
+  } catch (error) {
+    evidenceFailures.push(error);
+  }
+  if (contextClosed) {
+    try {
+      await args.closeFallback();
+    } catch (error) {
+      closeFailures.push(error);
+    }
+  }
+  evidenceFailures.push(...args.observationFailures());
+  let policy: SessionCookiePolicy;
+  try {
+    policy = args.summarize();
+  } catch (error) {
+    evidenceFailures.push(error);
+    policy = {
+      issuanceCount: 0,
+      hostOnly: false,
+      httpOnly: false,
+      secure: false,
+      sameSiteLax: false,
+    };
+  }
+  return { snapshot, policy, evidenceFailures, closeFailures };
+}
+
 export function cookieDirectionIsProven(
   omission: CookieProbe,
   presented: CookieProbe,
@@ -333,6 +529,140 @@ export function cookieDirectionIsProven(
 export type BrowserEvidenceSelection =
   | { readonly kind: "pass"; readonly enrollmentId: string }
   | { readonly kind: "blocked"; readonly code: string };
+
+export type HttpResponseExpectation =
+  | { readonly kind: "claim" }
+  | { readonly kind: "hello" }
+  | { readonly kind: "problem"; readonly status: number; readonly code: string }
+  | {
+      readonly kind: "proposals-present";
+      readonly enrollmentId: string;
+      readonly name: string;
+      readonly model: string;
+      readonly harness: string;
+    }
+  | { readonly kind: "proposals-absent"; readonly enrollmentId: string };
+
+export type HttpResponseSelection =
+  | { readonly kind: "claim" }
+  | { readonly kind: "hello" }
+  | { readonly kind: "problem"; readonly status: number; readonly code: string }
+  | { readonly kind: "proposals-present" }
+  | { readonly kind: "proposals-absent" };
+
+function decodeCanonicalJsonBody(bytes: Uint8Array): unknown {
+  if (bytes.byteLength === 0 || bytes.byteLength > MAX_HTTP_RESPONSE_BYTES) {
+    throw new Error("HTTP response body byte bound violated");
+  }
+  let raw: string;
+  try {
+    raw = new TextDecoder("utf-8", { fatal: true }).decode(bytes);
+  } catch {
+    throw new Error("HTTP response body is not valid UTF-8");
+  }
+  if (raw.includes("\r") || raw.includes("\n") || raw.includes("\0")) {
+    throw new Error("HTTP response body framing is not canonical");
+  }
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(raw);
+  } catch {
+    throw new Error("HTTP response body is not JSON");
+  }
+  // JSON.parse is last-writer-wins for duplicate object keys. Requiring exact
+  // reserialization rejects duplicates, whitespace, and other prefix/suffix
+  // tricks before any contract field is consulted.
+  if (JSON.stringify(parsed) !== raw) {
+    throw new Error("HTTP response body is not canonical JSON");
+  }
+  return parsed;
+}
+
+/** One strict contract selector shared by browser claims, shell HTTP, and plants. */
+export function selectHttpResponseBytes(
+  bytes: Uint8Array,
+  status: number,
+  expectation: HttpResponseExpectation,
+): HttpResponseSelection {
+  if (!Number.isInteger(status) || status < 100 || status > 599) {
+    throw new Error("HTTP status is invalid");
+  }
+  const parsed = decodeCanonicalJsonBody(bytes);
+  if (expectation.kind === "problem") {
+    const problem = ProblemDocumentSchema.safeParse(parsed);
+    if (
+      !problem.success ||
+      status !== expectation.status ||
+      problem.data.status !== expectation.status ||
+      problem.data.code !== expectation.code ||
+      problem.data.type !== `https://asimposium.org/errors/${expectation.code}`
+    ) {
+      throw new Error("HTTP problem response does not match its exact contract");
+    }
+    return { kind: "problem", status, code: expectation.code };
+  }
+  if (expectation.kind === "hello") {
+    if (status !== 200 || !EnrollmentHelloResponseSchema.safeParse(parsed).success) {
+      throw new Error("HTTP hello response does not match its exact contract");
+    }
+    return { kind: "hello" };
+  }
+  if (expectation.kind === "claim") {
+    if (status !== 202 || !EnrollmentClaimResponseSchema.safeParse(parsed).success) {
+      throw new Error("HTTP claim response does not match its exact contract");
+    }
+    // The flow handle is deliberately discarded instead of being returned.
+    return { kind: "claim" };
+  }
+
+  const proposals = SponsorProposalListResponseSchema.safeParse(parsed);
+  if (status !== 200 || !proposals.success) {
+    throw new Error("HTTP proposal response does not match its exact contract");
+  }
+  const matching = proposals.data.proposals.filter(
+    (proposal) => proposal.enrollment_id === expectation.enrollmentId,
+  );
+  if (expectation.kind === "proposals-absent") {
+    if (matching.length !== 0) throw new Error("proposal was visible to the wrong sponsor");
+    return { kind: "proposals-absent" };
+  }
+  if (
+    matching.length !== 1 ||
+    matching[0]?.name !== expectation.name ||
+    matching[0]?.model !== expectation.model ||
+    matching[0]?.harness !== expectation.harness ||
+    matching[0]?.status !== "pending" ||
+    matching[0]?.effective_granted_scopes !== null ||
+    matching[0]?.effective_granted_resources !== null
+  ) {
+    throw new Error("proposal attribution card is missing, duplicated, or wrong");
+  }
+  return { kind: "proposals-present" };
+}
+
+/** Curl transcript contract: canonical JSON body, one LF, exact three-digit status. */
+export function selectHttpResponseTranscriptBytes(
+  bytes: Uint8Array,
+  expectation: HttpResponseExpectation,
+): HttpResponseSelection {
+  if (bytes.byteLength === 0 || bytes.byteLength > MAX_HTTP_RESPONSE_BYTES + 4) {
+    throw new Error("HTTP response transcript byte bound violated");
+  }
+  const newline = bytes.lastIndexOf(0x0a);
+  if (
+    newline <= 0 ||
+    newline !== bytes.byteLength - 4 ||
+    bytes.subarray(0, newline).includes(0x0a)
+  ) {
+    throw new Error("HTTP response transcript framing is invalid");
+  }
+  const statusBytes = bytes.subarray(newline + 1);
+  if (!statusBytes.every((byte) => byte >= 0x30 && byte <= 0x39)) {
+    throw new Error("HTTP response transcript status is invalid");
+  }
+  const status = Number(String.fromCharCode(...statusBytes));
+  return selectHttpResponseBytes(bytes.subarray(0, newline), status, expectation);
+}
 
 const BROWSER_RECORD_KEYS = [
   "tool",
@@ -483,7 +813,7 @@ export function selectBrowserEvidenceBytes(
       "exact_join_path",
     ]) ||
     typeof parsed.receipt.enrollment_id !== "string" ||
-    !/^ASIMP-EN-[0-9A-HJKMNP-TV-Z]{26}$/.test(parsed.receipt.enrollment_id) ||
+    !EnrollmentIdSchema.safeParse(parsed.receipt.enrollment_id).success ||
     parsed.receipt.absent_before_action !== true ||
     parsed.receipt.dedicated_locator !== true ||
     parsed.receipt.exact_worker_origin !== true ||
@@ -494,18 +824,18 @@ export function selectBrowserEvidenceBytes(
   return { kind: "pass", enrollmentId: parsed.receipt.enrollment_id };
 }
 
-function readBrowserEvidenceFile(path: string): Uint8Array {
+function readBoundedRegularFile(path: string, maximumBytes: number, purpose: string): Uint8Array {
   const fd = openSync(path, fsConstants.O_RDONLY | fsConstants.O_NOFOLLOW);
   try {
     const before = fstatSync(fd);
-    if (!before.isFile() || before.size > MAX_BROWSER_EVIDENCE_BYTES) {
-      throw new Error("browser evidence file is not a bounded regular file");
+    if (!before.isFile() || before.size > maximumBytes) {
+      throw new Error(`${purpose} is not a bounded regular file`);
     }
     const bytes = Buffer.allocUnsafe(before.size);
     let offset = 0;
     while (offset < bytes.length) {
       const count = readSync(fd, bytes, offset, bytes.length - offset, offset);
-      if (count === 0) throw new Error("browser evidence file was short-read");
+      if (count === 0) throw new Error(`${purpose} was short-read`);
       offset += count;
     }
     const after = fstatSync(fd);
@@ -515,7 +845,7 @@ function readBrowserEvidenceFile(path: string): Uint8Array {
       after.mode !== before.mode ||
       after.size !== before.size
     ) {
-      throw new Error("browser evidence file changed while read");
+      throw new Error(`${purpose} changed while read`);
     }
     return bytes;
   } finally {
@@ -530,13 +860,66 @@ function browserRecordValidatorMode(): never {
     if (process.argv.length !== 5 || !/^(0|1|78)$/.test(statusRaw ?? "") || !path) {
       throw new Error("invalid browser evidence validator invocation");
     }
-    const selected = selectBrowserEvidenceBytes(readBrowserEvidenceFile(path), Number(statusRaw));
+    const selected = selectBrowserEvidenceBytes(
+      readBoundedRegularFile(path, MAX_BROWSER_EVIDENCE_BYTES, "browser evidence file"),
+      Number(statusRaw),
+    );
     if (selected.kind === "pass") {
       writeStdoutLine(`pass\t${selected.enrollmentId}`);
       process.exit(0);
     }
     writeStdoutLine(`blocked\t${selected.code}`);
     process.exit(BLOCKED_EXIT);
+  } catch {
+    process.exit(1);
+  }
+}
+
+export function claimNameForEnrollment(enrollmentId: string): string {
+  const id = EnrollmentIdSchema.parse(enrollmentId);
+  const suffix = id.slice("ASIMP-EN-".length).toLowerCase();
+  return `s6-${suffix.slice(-29)}`;
+}
+
+function httpResponseValidatorMode(): never {
+  try {
+    const path = process.argv[3];
+    const kind = process.argv[4];
+    if (!path || !kind) throw new Error("invalid HTTP response validator invocation");
+    let expectation: HttpResponseExpectation;
+    if (kind === "problem" && process.argv.length === 7) {
+      const statusRaw = process.argv[5] ?? "";
+      const code = process.argv[6] ?? "";
+      if (!/^[1-5][0-9]{2}$/.test(statusRaw) || !/^[A-Z][A-Z0-9_]{0,63}$/.test(code)) {
+        throw new Error("invalid problem expectation");
+      }
+      expectation = { kind, status: Number(statusRaw), code };
+    } else if (kind === "hello" && process.argv.length === 5) {
+      expectation = { kind };
+    } else if (
+      (kind === "proposals-present" || kind === "proposals-absent") &&
+      process.argv.length === 6
+    ) {
+      const enrollmentId = EnrollmentIdSchema.parse(process.argv[5]);
+      expectation =
+        kind === "proposals-present"
+          ? {
+              kind,
+              enrollmentId,
+              name: claimNameForEnrollment(enrollmentId),
+              model: CLAIM_MODEL,
+              harness: CLAIM_HARNESS,
+            }
+          : { kind, enrollmentId };
+    } else {
+      throw new Error("invalid HTTP response validator invocation");
+    }
+    const selected = selectHttpResponseTranscriptBytes(
+      readBoundedRegularFile(path, MAX_HTTP_RESPONSE_BYTES + 4, "HTTP response transcript"),
+      expectation,
+    );
+    writeStdoutLine(`ok\t${selected.kind}`);
+    process.exit(0);
   } catch {
     process.exit(1);
   }
@@ -559,21 +942,107 @@ function isMissingBrowserExecutable(error: unknown): boolean {
 }
 
 async function exactProbeResult(
-  response: Response,
+  response: APIResponse,
   expectedUrl: string,
   attached: boolean,
 ): Promise<CookieProbe> {
   if (new URL(response.url()).href !== new URL(expectedUrl).href) {
     throw new Error("agent-host probe did not terminate at the exact configured URL");
   }
-  let code: string | null = null;
-  try {
-    const parsed = (await response.json()) as { code?: unknown };
-    code = typeof parsed.code === "string" ? parsed.code : null;
-  } catch {
-    code = null;
+  selectHttpResponseBytes(await response.body(), response.status(), {
+    kind: "problem",
+    status: 403,
+    code: "WRONG_PRINCIPAL",
+  });
+  return { attached, status: 403, code: "WRONG_PRINCIPAL" };
+}
+
+export interface SessionCookieJarSnapshot {
+  readonly apexFamilyCount: number;
+  readonly scopedToApex: boolean;
+  readonly agentFamilyCount: number;
+}
+
+function cookieAttributesFromFinalization(
+  policy: SessionCookiePolicy,
+  snapshot: SessionCookieJarSnapshot | undefined,
+): CookieAttributes {
+  return {
+    issuance_count: policy.issuanceCount,
+    host_only: policy.hostOnly,
+    http_only: policy.httpOnly,
+    secure: policy.secure,
+    same_site: policy.sameSiteLax ? "lax" : null,
+    scoped_to_apex:
+      snapshot !== undefined && snapshot.apexFamilyCount > 0 && snapshot.scopedToApex,
+    present_for_agent_host: snapshot === undefined || snapshot.agentFamilyCount > 0,
+  };
+}
+
+export interface SessionCookieFinalizationVerdict {
+  readonly cookie: CookieAttributes;
+  readonly failureCode: "SET_COOKIE_OBSERVATION_FAILED" | "COOKIE_POLICY_CHANGED_DURING_FLOW" | null;
+}
+
+/** Pure terminal seam shared by production and the delayed unsafe-header plant. */
+export function sessionCookieFinalizationVerdict(
+  finalization: SessionCookieFinalization<SessionCookieJarSnapshot>,
+): SessionCookieFinalizationVerdict {
+  const cookie = cookieAttributesFromFinalization(finalization.policy, finalization.snapshot);
+  if (finalization.evidenceFailures.length > 0) {
+    return { cookie, failureCode: "SET_COOKIE_OBSERVATION_FAILED" };
   }
-  return { attached, status: response.status(), code };
+  if (
+    !cookie.host_only ||
+    !cookie.http_only ||
+    !cookie.secure ||
+    cookie.same_site !== "lax" ||
+    !cookie.scoped_to_apex ||
+    cookie.present_for_agent_host
+  ) {
+    return { cookie, failureCode: "COOKIE_POLICY_CHANGED_DURING_FLOW" };
+  }
+  return { cookie, failureCode: null };
+}
+
+async function claimMintedEnrollment(
+  claimContext: BrowserContext,
+  joinUrl: string,
+  workerUrl: string,
+): Promise<{ readonly enrollmentId: string; readonly name: string }> {
+  const parsed = parseStoaJoinUrl(joinUrl);
+  const workerOrigin = new URL(workerUrl).origin;
+  if (parsed === undefined || parsed.origin !== workerOrigin) {
+    throw new Error("join receipt failed the trusted exact-origin contract");
+  }
+  const name = claimNameForEnrollment(parsed.enrollmentId);
+  const request = FellowRegistrationRequestSchema.parse({
+    enrollment_id: parsed.enrollmentId,
+    secret: parsed.secret,
+    name,
+    model: CLAIM_MODEL,
+    harness: CLAIM_HARNESS,
+  });
+  const claimUrl = new URL("/v1/fellows", workerUrl).href;
+  const response = await claimContext.request.post(claimUrl, {
+    data: request,
+    failOnStatusCode: false,
+    maxRedirects: 0,
+    headers: {
+      "content-type": "application/json",
+      "idempotency-key": `s6-claim-${parsed.enrollmentId}`,
+    },
+  });
+  if (
+    new URL(response.url()).href !== new URL(claimUrl).href ||
+    response.headers()["cache-control"] !== "no-store"
+  ) {
+    throw new Error("claim response URL or cache policy was not exact");
+  }
+  selectHttpResponseBytes(await response.body(), response.status(), { kind: "claim" });
+  // Neither the request (which contains the fragment) nor the response flow
+  // handle leaves this scope. Only public attribution fields are returned.
+  return { enrollmentId: parsed.enrollmentId, name };
 }
 
 async function main(): Promise<Omit<Record_, "duration_ms">> {
@@ -658,9 +1127,18 @@ async function main(): Promise<Omit<Record_, "duration_ms">> {
     blocked("PLANES_NOT_SPLIT", "the two origins resolve to one host", apexHost);
   }
 
+  const previewOrigin = new URL(previewUrl).origin;
+  const workerOrigin = new URL(workerUrl).origin;
+  const consoleUrl = new URL("/console", previewUrl).href;
+  const probeUrl = new URL("/v1/enrollments/proposals", workerUrl).href;
+
   let browser: Browser | undefined;
   let context: BrowserContext | undefined;
   let forcedCookieContext: BrowserContext | undefined;
+  let claimContext: BrowserContext | undefined;
+  let cookieCollector: SessionCookieCollector | undefined;
+  let cookieFinalization: SessionCookieFinalization<SessionCookieJarSnapshot> | undefined;
+  let candidateRecord: Omit<Record_, "duration_ms"> | undefined;
   // The deadline callback and `finally` share one teardown owner. Whichever
   // path arrives first starts the closes; the other joins the same promise, so
   // context/browser can never be closed concurrently by competing owners.
@@ -678,8 +1156,47 @@ async function main(): Promise<Omit<Record_, "duration_ms">> {
     await Promise.race([
       (async () => {
         await forcedCookieContext?.close().catch((error: unknown) => teardown.push(error));
-        await context?.close().catch((error: unknown) => teardown.push(error));
-        await browser?.close().catch((error: unknown) => teardown.push(error));
+        await claimContext?.close().catch((error: unknown) => teardown.push(error));
+        if (context !== undefined && cookieCollector !== undefined) {
+          const ownedContext = context;
+          const ownedBrowser = browser;
+          const ownedCollector = cookieCollector;
+          cookieFinalization = await finalizeSessionCookieObservation({
+            snapshotJar: async () => {
+              const apexFamily = (await ownedContext.cookies(previewUrl)).filter((entry) =>
+                isSessionCookieName(entry.name),
+              );
+              const agentFamily = (await ownedContext.cookies(probeUrl)).filter((entry) =>
+                isSessionCookieName(entry.name),
+              );
+              return {
+                apexFamilyCount: apexFamily.length,
+                scopedToApex:
+                  apexFamily.length > 0 &&
+                  apexFamily.every(
+                    (entry) =>
+                      entry.domain.replace(/^\./, "") === apexHost && entry.path === "/",
+                  ),
+                agentFamilyCount: agentFamily.length,
+              };
+            },
+            closeContext: () => ownedContext.close(),
+            closeFallback: async () => {
+              await ownedBrowser?.close();
+            },
+            stopObserving: () => {
+              ownedCollector.stop();
+              ownedContext.off("response", ownedCollector.observe);
+            },
+            drain: () => ownedCollector.drain(),
+            summarize: () => ownedCollector.summarize(),
+            observationFailures: () => ownedCollector.failures,
+          });
+          teardown.push(...cookieFinalization.closeFailures);
+        } else {
+          await context?.close().catch((error: unknown) => teardown.push(error));
+          await browser?.close().catch((error: unknown) => teardown.push(error));
+        }
       })(),
       teardownBound,
     ]);
@@ -748,48 +1265,11 @@ async function main(): Promise<Omit<Record_, "duration_ms">> {
     context.setDefaultNavigationTimeout(NAVIGATION_TIMEOUT_MS);
     context.setDefaultTimeout(ACTION_TIMEOUT_MS);
 
-    const previewOrigin = new URL(previewUrl).origin;
-    const workerOrigin = new URL(workerUrl).origin;
-    const consoleUrl = new URL("/console", previewUrl).href;
-    const probeUrl = new URL("/v1/enrollments/proposals", workerUrl).href;
-
     // Every non-deletion issuance matters. A later safe header cannot erase an
     // earlier Domain-bearing one, and an observer fault is itself a typed
     // refusal rather than an implicit "nothing unsafe was seen".
-    const sessionIssuances: SessionCookieIssuance[] = [];
-    const cookieObservationFailures: unknown[] = [];
-    const pendingCookieObservations: Promise<void>[] = [];
-    const observeSessionCookies = (response: Response): void => {
-      let responseOrigin: string;
-      try {
-        responseOrigin = new URL(response.url()).origin;
-      } catch (error) {
-        cookieObservationFailures.push(error);
-        return;
-      }
-      if (responseOrigin !== previewOrigin) return;
-      const observation = (async () => {
-        for (const header of await response.headersArray()) {
-          if (header.name.toLowerCase() !== "set-cookie") continue;
-          const issuance = parseSessionCookieIssuance(header.value);
-          if (issuance !== undefined && issuance !== null) sessionIssuances.push(issuance);
-        }
-      })().catch((error: unknown) => {
-        cookieObservationFailures.push(error);
-      });
-      pendingCookieObservations.push(observation);
-    };
-    const drainCookieObservations = async (): Promise<void> => {
-      await Promise.all([...pendingCookieObservations]);
-      if (cookieObservationFailures.length > 0) {
-        failed(
-          "SET_COOKIE_OBSERVATION_FAILED",
-          "at least one Agora Set-Cookie response could not be observed exactly",
-          apexHost,
-        );
-      }
-    };
-    context.on("response", observeSessionCookies);
+    cookieCollector = new SessionCookieCollector(previewOrigin);
+    context.on("response", cookieCollector.observe);
 
     const page = await context.newPage();
     // ONE honest request-correlation value: the edge's `x-vercel-id`, nullable.
@@ -810,15 +1290,30 @@ async function main(): Promise<Omit<Record_, "duration_ms">> {
       // Real Google sign-in. Bot challenges are common and are reported as
       // blocked, never as a failure of the seam and never as a pass.
       try {
-        await page.waitForURL(/accounts\.google\.com/, { timeout: NAVIGATION_TIMEOUT_MS });
-        await page.locator('input[type="email"]').fill(user);
+        await page.waitForURL((url) => isExactGoogleAccountsOrigin(url.href), {
+          timeout: NAVIGATION_TIMEOUT_MS,
+        });
+        const emailHandle = await page.locator('input[type="email"]').elementHandle();
+        const emailFrame = await emailHandle?.ownerFrame();
+        if (emailHandle === null || emailFrame !== page.mainFrame()) {
+          throw new Error("Google email input was not owned by the exact main frame");
+        }
+        await performAtExactGoogleOrigin(emailFrame.url(), () => emailHandle.fill(user));
         await page.getByRole("button", { name: /next/i }).click();
         await page.locator('input[type="password"]').waitFor({ state: "visible" });
         // `fill` does not log its argument; the password never reaches a record.
-        await page.locator('input[type="password"]').fill(password);
+        const passwordHandle = await page.locator('input[type="password"]').elementHandle();
+        const passwordFrame = await passwordHandle?.ownerFrame();
+        if (passwordHandle === null || passwordFrame !== page.mainFrame()) {
+          throw new Error("Google password input was not owned by the exact main frame");
+        }
+        await performAtExactGoogleOrigin(passwordFrame.url(), () =>
+          passwordHandle.fill(password),
+        );
         await page.getByRole("button", { name: /next/i }).click();
         await page.waitForURL(consoleUrl, { timeout: NAVIGATION_TIMEOUT_MS });
-      } catch {
+      } catch (error) {
+        if (error instanceof RunnerExit) throw error;
         const currentUrl = page.url();
         const body = await page.content().catch(() => "");
         if (looksLikeChallenge(currentUrl, body)) {
@@ -844,8 +1339,15 @@ async function main(): Promise<Omit<Record_, "duration_ms">> {
     }
 
     // Drain every header observation before deciding what was seen.
-    await drainCookieObservations();
-    const initialPolicy = summarizeSessionCookieIssuances(sessionIssuances);
+    await cookieCollector.drain();
+    if (cookieCollector.failures.length > 0) {
+      failed(
+        "SET_COOKIE_OBSERVATION_FAILED",
+        "at least one Agora Set-Cookie response could not be observed exactly",
+        apexHost,
+      );
+    }
+    const initialPolicy = cookieCollector.summarize();
     if (initialPolicy.issuanceCount === 0) {
       failed(
         "SET_COOKIE_NOT_OBSERVED",
@@ -1042,52 +1544,17 @@ async function main(): Promise<Omit<Record_, "duration_ms">> {
         apexHost,
       );
     }
-    // Parsing happens inside the renderer. The credential-bearing line and its
-    // fragment never cross back into runner memory; only the public id and
-    // booleans do.
-    const receiptDescriptor = await joinReceipt.evaluate(
-      (element, contract) => {
-        const prefix = "Your join URL is  ";
-        const lines = (element.textContent ?? "").split("\n");
-        const candidates = lines.filter((line) => line.startsWith(prefix));
-        const invalid = {
-          enrollmentId: null,
-          dedicatedLocator: element.matches("pre.pasteblock.join-url"),
-          exactWorkerOrigin: false,
-          exactJoinPath: false,
-        };
-        if (candidates.length !== 1) return invalid;
-        const raw = candidates[0]?.slice(prefix.length) ?? "";
-        try {
-          const join = new URL(raw);
-          const match = new RegExp(`^/join/(${contract.enrollmentPattern.slice(1, -1)})$`).exec(
-            join.pathname,
-          );
-          return {
-            enrollmentId: match?.[1] ?? null,
-            dedicatedLocator: element.matches("pre.pasteblock.join-url"),
-            exactWorkerOrigin:
-              join.origin === contract.workerOrigin &&
-              join.username === "" &&
-              join.password === "" &&
-              join.href === raw,
-            exactJoinPath:
-              match !== null &&
-              join.search === "" &&
-              /^#v1\.[A-Za-z0-9_-]{43}$/.test(join.hash),
-          };
-        } catch {
-          return invalid;
-        }
-      },
-      { workerOrigin, enrollmentPattern: ENROLLMENT_ID.source },
-    );
-    if (
-      receiptDescriptor.enrollmentId === null ||
-      !receiptDescriptor.dedicatedLocator ||
-      !receiptDescriptor.exactWorkerOrigin ||
-      !receiptDescriptor.exactJoinPath
-    ) {
+    // Lift the exact dedicated line into Playwright memory only long enough to
+    // consume its one-time fragment in the real Fellow claim. It is never
+    // emitted, persisted, placed in argv/environment, or quoted by an error.
+    const joinUrl = await joinReceipt.evaluate((element) => {
+      const prefix = "Your join URL is  ";
+      const lines = (element.textContent ?? "").split("\n");
+      const candidates = lines.filter((line) => line.startsWith(prefix));
+      if (!element.matches("pre.pasteblock.join-url") || candidates.length !== 1) return null;
+      return candidates[0]?.slice(prefix.length) ?? null;
+    });
+    if (joinUrl === null) {
       failed(
         "MINT_RECEIPT_INVALID",
         "the dedicated receipt did not contain one exact trusted-origin join URL",
@@ -1095,73 +1562,40 @@ async function main(): Promise<Omit<Record_, "duration_ms">> {
       );
     }
 
-    // Stop accepting new cookie evidence, then drain every observation already
-    // registered. Acceptance uses the final aggregate, so a late unsafe
-    // issuance cannot be hidden behind the earlier safe one.
-    context.off("response", observeSessionCookies);
-    await drainCookieObservations();
-    const finalPolicy = summarizeSessionCookieIssuances(sessionIssuances);
-    const finalApexSession = (await context.cookies(previewUrl)).filter((entry) =>
-      isSessionCookieName(entry.name),
-    );
-    const finalAgentSession = (await context.cookies(probeUrl)).filter((entry) =>
-      isSessionCookieName(entry.name),
-    );
-    const finalCookie: CookieAttributes = {
-      issuance_count: finalPolicy.issuanceCount,
-      host_only: finalPolicy.hostOnly,
-      http_only: finalPolicy.httpOnly,
-      secure: finalPolicy.secure,
-      same_site: finalPolicy.sameSiteLax ? "lax" : null,
-      scoped_to_apex:
-        finalApexSession.length > 0 &&
-        finalApexSession.every(
-          (entry) => entry.domain.replace(/^\./, "") === apexHost && entry.path === "/",
-        ),
-      present_for_agent_host: finalAgentSession.length > 0,
-    };
-    if (
-      !finalCookie.host_only ||
-      !finalCookie.http_only ||
-      !finalCookie.secure ||
-      finalCookie.same_site !== "lax" ||
-      !finalCookie.scoped_to_apex ||
-      finalCookie.present_for_agent_host
-    ) {
-      throw new RunnerExit(
-        {
-          tool: "playwright",
-          package: "e2e",
-          suite: SUITE,
-          status: "fail",
-          code: "COOKIE_POLICY_CHANGED_DURING_FLOW",
-          apex_host: apexHost,
-          agent_host: agentHost,
-          cookie: finalCookie,
-          cookie_omission_probe: cookieOmissionProbe,
-          cookie_present_probe: cookiePresentProbe,
-          receipt: null,
-          edge_request_id: edgeRequestId,
-          detail: "the complete Agora session-cookie issuance history was not uniformly safe",
-        },
-        1,
+    claimContext = await browser.newContext();
+    claimContext.setDefaultTimeout(ACTION_TIMEOUT_MS);
+    if ((await claimContext.cookies()).length !== 0) {
+      failed(
+        "CLAIM_CONTEXT_NOT_ISOLATED",
+        "the Fellow claim context unexpectedly contained browser credentials",
+        apexHost,
+      );
+    }
+    let claimed: { readonly enrollmentId: string; readonly name: string };
+    try {
+      claimed = await claimMintedEnrollment(claimContext, joinUrl, workerUrl);
+    } catch {
+      failed(
+        "FELLOW_CLAIM_FAILED",
+        "the transient join fragment did not produce the exact 202 Fellow claim contract",
+        apexHost,
       );
     }
     const receipt = {
-      enrollment_id: receiptDescriptor.enrollmentId,
+      enrollment_id: claimed.enrollmentId,
       absent_before_action: true,
       dedicated_locator: true,
       exact_worker_origin: true,
       exact_join_path: true,
     };
 
-    // The pass record is RETURNED, not emitted here.
+    // The pass candidate is retained, not emitted here.
     //
     // Emitting inside `try` published a success before `finally` had closed the
     // context and the browser, so a teardown failure could follow an already
     // published pass — and exit 0 with Chromium still up. The caller emits it
     // only after cleanup has actually completed.
-    return {
+    candidateRecord = {
       tool: "playwright",
       package: "e2e",
       suite: SUITE,
@@ -1169,13 +1603,13 @@ async function main(): Promise<Omit<Record_, "duration_ms">> {
       code: "OK",
       apex_host: apexHost,
       agent_host: agentHost,
-      cookie: finalCookie,
+      cookie,
       cookie_omission_probe: cookieOmissionProbe,
       cookie_present_probe: cookiePresentProbe,
       receipt,
       edge_request_id: edgeRequestId,
       detail:
-        "every live session issuance was host-only and safe, natural omission plus explicit cookie presentation both proved WRONG_PRINCIPAL at Stoa, and the dedicated console receipt proved exact-origin minting",
+        "every live session issuance was host-only and safe, natural omission plus explicit cookie presentation both proved WRONG_PRINCIPAL at Stoa, and the dedicated console receipt was claimed through the exact Worker contract",
     };
   } finally {
     // The absolute deadline stays ARMED through teardown.
@@ -1188,6 +1622,43 @@ async function main(): Promise<Omit<Record_, "duration_ms">> {
     await teardownOnce();
     clearTimeout(budget);
   }
+
+  if (candidateRecord === undefined || cookieFinalization === undefined) {
+    failed(
+      "SET_COOKIE_FINALIZATION_FAILED",
+      "the browser settled without complete post-close cookie evidence",
+      apexHost,
+    );
+  }
+  const cookieVerdict = sessionCookieFinalizationVerdict(cookieFinalization);
+  const finalCookie = cookieVerdict.cookie;
+  if (cookieVerdict.failureCode === "SET_COOKIE_OBSERVATION_FAILED") {
+    throw new RunnerExit(
+      {
+        ...candidateRecord,
+        status: "fail",
+        code: "SET_COOKIE_OBSERVATION_FAILED",
+        cookie: finalCookie,
+        receipt: null,
+        detail: "at least one Agora Set-Cookie response could not be observed exactly",
+      },
+      1,
+    );
+  }
+  if (cookieVerdict.failureCode === "COOKIE_POLICY_CHANGED_DURING_FLOW") {
+    throw new RunnerExit(
+      {
+        ...candidateRecord,
+        status: "fail",
+        code: "COOKIE_POLICY_CHANGED_DURING_FLOW",
+        cookie: finalCookie,
+        receipt: null,
+        detail: "the post-close Agora session-cookie issuance history was not uniformly safe",
+      },
+      1,
+    );
+  }
+  return { ...candidateRecord, cookie: finalCookie };
 }
 
 export interface RunnerTerminalOutcome {
@@ -1363,6 +1834,7 @@ async function runEntrypoint(): Promise<never> {
 // consume the test runner's stdin. Direct `bun <file>` execution still does.
 if (import.meta.main) {
   if (process.argv[2] === "--validate-record") browserRecordValidatorMode();
+  if (process.argv[2] === "--validate-http-response") httpResponseValidatorMode();
   if (process.argv[2] === "--self-test-terminal-selector") await terminalSelectorSelfTest();
   await runEntrypoint();
 }

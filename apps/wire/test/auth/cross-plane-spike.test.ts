@@ -40,6 +40,22 @@ import {
 import { createConnection, createServer, type Socket } from "node:net";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
+import {
+  claimNameForEnrollment,
+  cookieDirectionIsProven,
+  finalizeSessionCookieObservation,
+  isExactGoogleAccountsOrigin,
+  MAX_BROWSER_EVIDENCE_BYTES,
+  MAX_HTTP_RESPONSE_BYTES,
+  performAtExactGoogleOrigin,
+  selectBrowserEvidenceBytes,
+  selectHttpResponseBytes,
+  selectHttpResponseTranscriptBytes,
+  SessionCookieCollector,
+  sessionCookieFinalizationVerdict,
+  sessionCookiePolicyFromHeaders,
+  writeAllSync,
+} from "../../../../e2e/playwright/s6-cross-plane-runner";
 
 const root = resolve(import.meta.dir, "..", "..", "..", "..");
 const read = (relative: string): string => readFileSync(resolve(root, relative), "utf8");
@@ -151,12 +167,15 @@ interface OuterControlListener {
 
 /**
  * One loopback TCP rendezvous, created before the supervisor and sealed after
- * the first candidate (plus the explicit exact-one test seam). This deliberately
+ * the first connector (plus the explicit exact-one test seam). This deliberately
  * follows the repo-proven S1 socket transport:
  * nested Bun stdio pipes have lost bytes and thrown EPIPE under `bun test`.
- * A TCP port is not authority. The accepted duplex socket becomes authority only
- * after the parent bootstraps its secret nonce, before the supervisor forks the
- * target; the target then closes that descriptor.
+ * A TCP port is not peer authority. Under the explicit harness assumption that
+ * no competing active local connector races this private test, the nonce binds
+ * the transcript of the FIRST connector before target fork. It does not
+ * authenticate an OS peer (an ambient same-UID process could edit this workspace
+ * too); the target then closes the descriptor. Exact-one and late-connector
+ * refusal remain load-bearing transcript checks.
  */
 async function outerControlListener(): Promise<OuterControlListener> {
   const server = createServer();
@@ -695,44 +714,149 @@ const OUTER_EXIT_BEFORE_CONNECT_PROGRAM = "exit 73";
 
 interface ShellLifecycle {
   readonly cleanupUnproven: boolean;
-  readonly survivors: boolean;
+  readonly ownedSameProcessGroupsSettled: boolean;
 }
 
 /**
- * Derive the nested-group lifecycle verdict from exact shell NDJSON and exit.
- *
- * Substring matching is not evidence: the same words can occur in `detail`, a
- * different suite, or a non-terminal record. Exit 125 is independently
- * fail-closed because it is the script's reserved cleanup-unproven status; the
- * exact typed terminal record covers a captured refusal even if a wrapper
- * translates the status. Either polarity means survivors cannot be disproved.
+ * Accept the trusted shell's nested-group verdict only from one strict positive
+ * lifecycle terminal. Every byte is LF-delimited NDJSON for this suite; the
+ * terminal is exact, unique and last. Missing, malformed, duplicate, late,
+ * wrong-suite and exit-inconsistent transcripts all fail closed.
  */
 function shellLifecycleFromRecords(stdout: string, exitCode: number): ShellLifecycle {
-  let typedCleanupRefusal = false;
-  let typedSurvivorFailure = false;
-  for (const line of stdout.split("\n")) {
-    if (line.length === 0) continue;
-    let record: unknown;
-    try {
-      record = JSON.parse(line);
-    } catch {
-      continue;
-    }
-    if (record === null || Array.isArray(record) || typeof record !== "object") continue;
-    const fields = record as Record<string, unknown>;
-    if (fields.suite !== "s6-cross-plane-auth") continue;
-    if (fields.status === "blocked" && fields.code === "CLEANUP_UNPROVEN") {
-      typedCleanupRefusal = true;
-    }
-    if (fields.assertion === "no-child-survivors" && fields.status === "fail") {
-      typedSurvivorFailure = true;
-    }
+  const refused = (): ShellLifecycle => ({
+    cleanupUnproven: true,
+    ownedSameProcessGroupsSettled: false,
+  });
+  if (
+    stdout.length === 0 ||
+    !stdout.endsWith("\n") ||
+    stdout.includes("\r") ||
+    stdout.includes("\0") ||
+    exitCode === 125
+  ) {
+    return refused();
   }
-  const cleanupUnproven = exitCode === 125 || typedCleanupRefusal || typedSurvivorFailure;
-  return {
-    cleanupUnproven,
-    survivors: cleanupUnproven,
-  };
+  const lines = stdout.slice(0, -1).split("\n");
+  if (lines.length < 2 || lines.some((line) => line.length === 0)) return refused();
+  const records: Record<string, unknown>[] = [];
+  for (const line of lines) {
+    let parsed: unknown;
+    try {
+      parsed = JSON.parse(line);
+    } catch {
+      return refused();
+    }
+    if (parsed === null || Array.isArray(parsed) || typeof parsed !== "object") return refused();
+    const record = parsed as Record<string, unknown>;
+    if (record.suite !== "s6-cross-plane-auth" || JSON.stringify(record) !== line) return refused();
+    records.push(record);
+  }
+  const lifecycleIndexes = records.flatMap((record, index) =>
+    record.record_type === "lifecycle-terminal" ? [index] : [],
+  );
+  if (lifecycleIndexes.length !== 1 || lifecycleIndexes[0] !== records.length - 1) {
+    return refused();
+  }
+  const lifecycleLine = lines.at(-1) as string;
+  const lifecycle = records.at(-1) as Record<string, unknown>;
+  if (
+    JSON.stringify(lifecycle) !== lifecycleLine ||
+    JSON.stringify(Object.keys(lifecycle)) !==
+      JSON.stringify(["suite", "record_type", "status", "owned_same_process_groups"]) ||
+    lifecycle.status !== "pass" ||
+    lifecycle.owned_same_process_groups !== "settled"
+  ) {
+    return refused();
+  }
+  const keysAre = (record: Record<string, unknown>, expected: readonly string[]): boolean =>
+    JSON.stringify(Object.keys(record)) === JSON.stringify(expected);
+  const productionAssertion = (record: Record<string, unknown>): boolean =>
+    keysAre(record, ["suite", "assertion", "status", "detail", "reproduce"]) &&
+    typeof record.assertion === "string" &&
+    record.assertion.length > 0 &&
+    (record.status === "pass" || record.status === "fail") &&
+    typeof record.detail === "string" &&
+    record.detail.length > 0 &&
+    record.reproduce === "bash scripts/e2e-s6-cross-plane-auth.sh";
+  const selfTestAssertion = (record: Record<string, unknown>): boolean =>
+    keysAre(record, ["suite", "assertion", "status", "detail"]) &&
+    typeof record.assertion === "string" &&
+    record.assertion.length > 0 &&
+    (record.status === "pass" || record.status === "fail") &&
+    typeof record.detail === "string" &&
+    record.detail.length > 0;
+  const aggregateKeys = ["suite", "status", "assertions", "failures", "reproduce"] as const;
+  const selfTestKeys = ["suite", "status", "self_test", "failures"] as const;
+  const blockedKeys = ["suite", "status", "code", "bead", "detail", "reproduce"] as const;
+  const missingEnvironmentKeys = [
+    "suite",
+    "status",
+    "code",
+    "bead",
+    "missing_env",
+    "blocked_on",
+    "forbidden_substitutes",
+    "unit_coverage",
+  ] as const;
+  const hasProductTerminalShape = (record: Record<string, unknown>): boolean =>
+    [aggregateKeys, selfTestKeys, blockedKeys, missingEnvironmentKeys].some((keys) =>
+      keysAre(record, keys),
+    );
+  const productTerminal = records.at(-2) as Record<string, unknown>;
+  const assertionsBeforeTerminal = records.slice(0, -2);
+  if (assertionsBeforeTerminal.some(hasProductTerminalShape)) return refused();
+  const failureCountBeforeTerminal = assertionsBeforeTerminal.filter(
+    (record) => record.status === "fail",
+  ).length;
+  const assertions = productTerminal.assertions;
+  const failures = productTerminal.failures;
+  const aggregateTerminal =
+    keysAre(productTerminal, aggregateKeys) &&
+    assertionsBeforeTerminal.every(productionAssertion) &&
+    Number.isSafeInteger(assertions) &&
+    assertions === assertionsBeforeTerminal.length &&
+    Number.isSafeInteger(failures) &&
+    failures === failureCountBeforeTerminal &&
+    productTerminal.reproduce === "bash scripts/e2e-s6-cross-plane-auth.sh" &&
+    ((exitCode === 0 && productTerminal.status === "pass" && failures === 0) ||
+      (exitCode === 1 && productTerminal.status === "fail" && (failures as number) > 0));
+  const selfTestTerminal =
+    keysAre(productTerminal, selfTestKeys) &&
+    assertionsBeforeTerminal.every(selfTestAssertion) &&
+    productTerminal.self_test === true &&
+    Number.isSafeInteger(failures) &&
+    failures === failureCountBeforeTerminal &&
+    ((exitCode === 0 && productTerminal.status === "self_test_complete" && failures === 0) ||
+      (exitCode === 1 && productTerminal.status === "fail" && (failures as number) > 0));
+  const blockedTerminal =
+    keysAre(productTerminal, blockedKeys) &&
+    assertionsBeforeTerminal.every(productionAssertion) &&
+    productTerminal.status === "blocked" &&
+    typeof productTerminal.code === "string" &&
+    /^[A-Z][A-Z0-9_]{0,63}$/.test(productTerminal.code) &&
+    productTerminal.bead === "asimposiumorg-vw3" &&
+    typeof productTerminal.detail === "string" &&
+    productTerminal.detail.length > 0 &&
+    productTerminal.reproduce === "bash scripts/e2e-s6-cross-plane-auth.sh" &&
+    ((exitCode === 1 && productTerminal.code === "INTERRUPTED") || exitCode === 78);
+  const missingEnvironmentTerminal =
+    keysAre(productTerminal, missingEnvironmentKeys) &&
+    assertionsBeforeTerminal.length === 0 &&
+    exitCode === 78 &&
+    productTerminal.status === "blocked" &&
+    productTerminal.code === "PREVIEW_NOT_PROVISIONED" &&
+    productTerminal.bead === "asimposiumorg-vw3" &&
+    Array.isArray(productTerminal.missing_env) &&
+    productTerminal.missing_env.length > 0 &&
+    productTerminal.missing_env.every((name) => typeof name === "string" && name.length > 0) &&
+    typeof productTerminal.blocked_on === "string" &&
+    typeof productTerminal.forbidden_substitutes === "string" &&
+    typeof productTerminal.unit_coverage === "string";
+  const exitConsistent =
+    aggregateTerminal || selfTestTerminal || blockedTerminal || missingEnvironmentTerminal;
+  if (!exitConsistent) return refused();
+  return { cleanupUnproven: false, ownedSameProcessGroupsSettled: true };
 }
 
 interface ShellRun {
@@ -741,8 +865,10 @@ interface ShellRun {
   /** Diagnostics only. Never asserted on: the contract is the stdout NDJSON. */
   readonly stderr: string;
   readonly timedOut: boolean;
-  /** True if anything remained in the child's process group after the census. */
-  readonly survivors: boolean;
+  /** Retirement was acknowledged and the direct outer supervisor then settled. */
+  readonly outerSupervisorSettledAfterRetirementProtocol: boolean;
+  /** Trusted script claim; null for arbitrary custom scripts outside this boundary. */
+  readonly nestedOwnedSameProcessGroupsSettled: boolean | null;
   /**
    * True when the run had to be hard-killed, so its nested process groups
    * cannot be shown to have been reaped.
@@ -811,12 +937,14 @@ async function runShell(
   options: ShellRunOptions = {},
 ): Promise<ShellRun> {
   const runTimeoutMs = options.runTimeoutMs ?? RUN_TIMEOUT_MS;
+  const runsTrustedS6Script = resolve(root, script) === resolve(root, SCRIPT);
   const dir = mkdtempSync(join(process.env.TMPDIR ?? tmpdir(), "s6-run-"));
   const stdoutPath = join(dir, "stdout");
   const stderrPath = join(dir, "stderr");
   // NO OWNERSHIP LEDGER. The outer supervisor is a live capability: after one
-  // loopback accept, a parent-memory nonce authenticates its duplex socket before
-  // target fork. The supervisor self-signals group zero; this parent never names
+  // loopback accept, a parent-memory nonce binds the first-connector transcript
+  // before target fork under the no-competing-active-local-connector assumption.
+  // This is not peer authentication. The supervisor self-signals group zero; this parent never names
   // a pid or pgid. A timed-out run remains cleanup-unproven because killing the
   // outer shell cuts short its nested-group settlement report.
   // TOTAL descriptor ownership, released exactly once.
@@ -959,7 +1087,7 @@ async function runShell(
     retirePreCapabilitySupervisor = async (cleanupDeadlineAt: number): Promise<void> => {
       if (capabilityEstablished || supervisorSettled) return;
       try {
-        // Before authenticated READY no payload can have been forked. The
+        // Before nonce-bound READY no payload can have been forked. The
         // unreaped Bun subprocess handle is the only retirement authority; no
         // numeric pid or process-group value is ever exposed or reused.
         supervisorProcess.kill("SIGKILL");
@@ -1002,8 +1130,8 @@ async function runShell(
       }
     }
     // Keep accepting only through the test-only exact-one polarity above. In
-    // production the first candidate is sealed before the nonce is minted, so
-    // no queued/late connection can silently replace the authenticated socket.
+    // production the first connector is sealed before the nonce is minted, so
+    // no queued/late connection can silently replace the bound transcript.
     controlListener.seal();
     if (controlListener.protocolFailure() !== undefined) {
       throw controlListener.protocolFailure();
@@ -1153,7 +1281,7 @@ async function runShell(
         options.postKillSettleMs ?? POST_KILL_SETTLE_MS,
       );
       // The payload is terminal but may have left same-group descendants. The
-      // still-live authenticated supervisor performs one group self-KILL.
+      // still-live nonce-bound supervisor performs one group self-KILL.
       if (
         !(await liveProtocol.signal(
           "KILL",
@@ -1259,17 +1387,18 @@ async function runShell(
     const stderr = readBounded(stderrFd, stderrPath, stderrCaptureIdentity);
     releaseCaptureFds();
 
-    // A run we had to hard-kill cannot claim its nested groups were reaped: the
-    // script's trap was cut short, and this controller cannot see those groups.
-    // An in-budget script refusal is equally unproven and is derived from exact
-    // typed NDJSON plus the reserved exit 125, never a broad substring. No pgid
-    // ledger is kept: bare pgids are not identity.
-    const shellLifecycle = shellLifecycleFromRecords(stdout, exitCode);
-    const cleanupUnproven = timedOut || shellLifecycle.cleanupUnproven;
-
-    // Any outer timeout remains cleanup-unproven. An in-budget run takes its
-    // nested survivor verdict only from the shell's exact typed terminal.
-    const survivors = timedOut || shellLifecycle.survivors;
+    // A run we had to hard-kill cannot claim its nested owned groups settled:
+    // the script's trap was cut short. For the trusted S6 script, one strict
+    // positive lifecycle terminal is the only nested-group evidence. Arbitrary
+    // custom scripts may detach into another session and remain explicitly
+    // outside that claim; the outer capability proves only an acknowledged
+    // retirement command followed by direct supervisor settlement, not a
+    // post-kill group census or arbitrary detached-descendant absence.
+    const shellLifecycle = runsTrustedS6Script
+      ? shellLifecycleFromRecords(stdout, exitCode)
+      : undefined;
+    const cleanupUnproven =
+      timedOut || exitCode === 125 || (shellLifecycle?.cleanupUnproven ?? false);
 
     // AN EMPTY CAPTURE CAN NEVER PASS FOR A SUCCESSFUL RUN.
     //
@@ -1290,7 +1419,9 @@ async function runShell(
       stdout,
       stderr,
       timedOut,
-      survivors,
+      outerSupervisorSettledAfterRetirementProtocol: supervisorSettled,
+      nestedOwnedSameProcessGroupsSettled:
+        shellLifecycle?.ownedSameProcessGroupsSettled ?? null,
       cleanupUnproven,
       graceExpiredEscalation,
     };
@@ -1378,7 +1509,7 @@ async function runShell(
 /** Failure context. stderr appears here and nowhere else. */
 function diag(run: ShellRun): string {
   const tail = run.stderr.slice(-2_000);
-  return `exit=${run.exitCode} timedOut=${run.timedOut} survivors=${run.survivors} stderr(tail)=${tail}`;
+  return `exit=${run.exitCode} timedOut=${run.timedOut} outerSupervisorSettledAfterRetirementProtocol=${run.outerSupervisorSettledAfterRetirementProtocol} nestedGroupsSettled=${String(run.nestedOwnedSameProcessGroupsSettled)} stderr(tail)=${tail}`;
 }
 
 /**
@@ -1444,8 +1575,116 @@ describe("the cookie claim is live, not an artifact", () => {
   });
 
   test("host-only is decided from the Set-Cookie header, not from a jar", () => {
-    const parser = runner.slice(runner.indexOf("function parseSetCookie"));
+    const parser = runner.slice(
+      runner.indexOf("function parseSessionCookieIssuance"),
+      runner.indexOf("function summarizeSessionCookieIssuances"),
+    );
     expect(parser).toContain('a.startsWith("domain=")');
+    expect(parser).toContain("invalid Set-Cookie framing");
+  });
+
+  test("PLANTED: every issuance is policy-bearing in either arrival order", () => {
+    const safe = "asimp.session=safe; Path=/; HttpOnly; Secure; SameSite=Lax";
+    const domain =
+      "asimp.session=unsafe; Path=/; Domain=.asimposium.org; HttpOnly; Secure; SameSite=Lax";
+    for (const headers of [
+      [domain, safe],
+      [safe, domain],
+    ]) {
+      const policy = sessionCookiePolicyFromHeaders(headers);
+      expect(policy.issuanceCount).toBe(2);
+      expect(policy.hostOnly).toBe(false);
+      expect(policy.httpOnly).toBe(true);
+      expect(policy.secure).toBe(true);
+      expect(policy.sameSiteLax).toBe(true);
+    }
+    expect(sessionCookiePolicyFromHeaders([safe.replace("; HttpOnly", "")]).httpOnly).toBe(
+      false,
+    );
+    expect(sessionCookiePolicyFromHeaders([safe.replace("; Secure", "")]).secure).toBe(false);
+    expect(
+      sessionCookiePolicyFromHeaders([safe.replace("SameSite=Lax", "SameSite=None")])
+        .sameSiteLax,
+    ).toBe(false);
+  });
+
+  test("PLANTED: a delayed unsafe issuance during close is terminal", async () => {
+    const previewOrigin = "https://preview.example.test";
+    const safe = "asimp.session=safe; Path=/; HttpOnly; Secure; SameSite=Lax";
+    const unsafe =
+      "asimp.session=unsafe; Path=/; Domain=.example.test; HttpOnly; Secure; SameSite=Lax";
+    const collector = new SessionCookieCollector(previewOrigin);
+    collector.observe({
+      url: () => `${previewOrigin}/console`,
+      headersArray: async () => [{ name: "set-cookie", value: safe }],
+    });
+    await collector.drain();
+
+    let releaseHeaders!: () => void;
+    const headerGate = new Promise<void>((resolve) => {
+      releaseHeaders = resolve;
+    });
+    let headersRequested!: () => void;
+    const requested = new Promise<void>((resolve) => {
+      headersRequested = resolve;
+    });
+    const order: string[] = [];
+    let settled = false;
+    const finalizationPromise = finalizeSessionCookieObservation({
+      snapshotJar: async () => {
+        order.push("snapshot");
+        return { apexFamilyCount: 1, scopedToApex: true, agentFamilyCount: 0 };
+      },
+      closeContext: async () => {
+        order.push("close-context");
+        collector.observe({
+          url: () => `${previewOrigin}/late`,
+          headersArray: async () => {
+            order.push("headers-requested");
+            headersRequested();
+            await headerGate;
+            order.push("headers-complete");
+            return [{ name: "set-cookie", value: unsafe }];
+          },
+        });
+      },
+      closeFallback: async () => {
+        order.push("close-browser");
+      },
+      stopObserving: () => {
+        order.push("stop-observing");
+        collector.stop();
+      },
+      drain: async () => {
+        order.push("drain-start");
+        await collector.drain();
+        order.push("drain-finish");
+      },
+      summarize: () => collector.summarize(),
+      observationFailures: () => collector.failures,
+    }).then((result) => {
+      settled = true;
+      return result;
+    });
+    await requested;
+    await Promise.resolve();
+    expect(settled).toBe(false);
+    releaseHeaders();
+    const finalization = await finalizationPromise;
+    const verdict = sessionCookieFinalizationVerdict(finalization);
+    expect(finalization.policy.issuanceCount).toBe(2);
+    expect(finalization.policy.hostOnly).toBe(false);
+    expect(verdict.failureCode).toBe("COOKIE_POLICY_CHANGED_DURING_FLOW");
+    expect(order).toEqual([
+      "snapshot",
+      "close-context",
+      "headers-requested",
+      "stop-observing",
+      "drain-start",
+      "headers-complete",
+      "drain-finish",
+      "close-browser",
+    ]);
   });
 
   test("there is no storage-state fallback for the cookie claim", () => {
@@ -1464,6 +1703,41 @@ describe("the cookie claim is live, not an artifact", () => {
     expect(shellFunction(code(SCRIPT), "run_browser_leg")).toContain("ASIMP_S6_TEST_GOOGLE_PASS");
   });
 
+  test("PLANTED: credential fills are exact-Google-origin bound", async () => {
+    expect(isExactGoogleAccountsOrigin("https://accounts.google.com/signin/v2/identifier")).toBe(
+      true,
+    );
+    let fills = 0;
+    await performAtExactGoogleOrigin(
+      "https://accounts.google.com/signin/v2/identifier",
+      async () => {
+        fills += 1;
+      },
+    );
+    for (const decoy of [
+      "https://accounts.google.com.evil.test/",
+      "https://evil.test/accounts.google.com",
+      "https://evil.test/?next=accounts.google.com",
+      "https://accounts.google.com@evil.test/",
+      "http://accounts.google.com/",
+      "https://accounts.google.com:444/",
+      "https://accounts.google.com./",
+      "not a URL",
+    ]) {
+      expect(isExactGoogleAccountsOrigin(decoy), decoy).toBe(false);
+      expect(() => performAtExactGoogleOrigin(decoy, () => (fills += 1))).toThrow();
+    }
+    expect(fills).toBe(1);
+    const login = runner.slice(
+      runner.indexOf("const signIn ="),
+      runner.indexOf('if (page.url() !== consoleUrl)'),
+    );
+    expect(login.match(/performAtExactGoogleOrigin/g)).toHaveLength(2);
+    expect(login).toContain("emailHandle?.ownerFrame()");
+    expect(login).toContain("passwordHandle?.ownerFrame()");
+    expect(login).not.toContain("/accounts\\.google\\.com/");
+  });
+
   test("a Google challenge is blocked, never passed or failed silently", () => {
     expect(runner).toContain("GOOGLE_LOGIN_CHALLENGED");
     expect(runner).toContain("BLOCKED_EXIT");
@@ -1479,22 +1753,36 @@ describe("exactly two WRONG_PRINCIPAL legs, each exact", () => {
     expect(leg).toContain('"$code" == "WRONG_PRINCIPAL"');
   });
 
-  test("the agent-host leg requires exactly 403 WRONG_PRINCIPAL", () => {
-    // The browser measures it; the shell asserts the exact pair.
+  test("direction B is the explicit live-cookie probe", () => {
     const leg = shellFunction(source, "run_browser_leg");
-    expect(leg).toContain('"cookie_probe":{"status":403,"code":"WRONG_PRINCIPAL"}');
+    expect(leg).toContain("cookie-presented-to-agent-host-refused");
+    const runner = read(RUNNER);
+    expect(runner).toContain("forcedCookieContext.addCookies");
+    expect(runner).toContain("maxRedirects: 0");
   });
 
-  test("the evidence does not claim a cookie was presented to the agent host", () => {
-    // A host-only apex cookie is never attached to an agent-host request, so
-    // nothing is presented and nothing is refused. Saying otherwise would
-    // describe a weaker world than the one proved — one where the cookie
-    // reached `a.` and was merely rejected there.
+  test("natural omission remains distinct from explicit presentation", () => {
     const leg = shellFunction(source, "run_browser_leg");
     expect(leg).toContain("cookie-not-sent-to-agent-host");
-    expect(leg).toContain("was not sent to the agent host");
-    expect(leg).not.toContain("cookie on ${ROUTE_PROPOSALS} was refused");
-    expect(read(RUNNER)).not.toContain("the live cookie was refused");
+    expect(leg).toContain("cookie-presented-to-agent-host-refused");
+    const runner = read(RUNNER);
+    expect(runner).toContain("cookie_omission_probe");
+    expect(runner).toContain("cookie_present_probe");
+  });
+
+  test("PLANTED: anonymous refusal cannot mask explicit-cookie acceptance", () => {
+    expect(
+      cookieDirectionIsProven(
+        { attached: false, status: 403, code: "WRONG_PRINCIPAL" },
+        { attached: true, status: 403, code: "WRONG_PRINCIPAL" },
+      ),
+    ).toBe(true);
+    expect(
+      cookieDirectionIsProven(
+        { attached: false, status: 403, code: "WRONG_PRINCIPAL" },
+        { attached: true, status: 200, code: null },
+      ),
+    ).toBe(false);
   });
 
   test("no leg accepts an arbitrary non-2xx, a curl 000, a 404 or a 5xx", () => {
@@ -1521,7 +1809,9 @@ describe("exactly two WRONG_PRINCIPAL legs, each exact", () => {
   test("there are exactly two WRONG_PRINCIPAL legs", () => {
     const names = [...source.matchAll(/(?:pass|fail)_record "([a-z-]+)"/g)].map((m) => m[1]);
     const legs = names.filter(
-      (n) => n === "bearer-on-sponsor-route-refused" || n === "cookie-not-sent-to-agent-host",
+      (n) =>
+        n === "bearer-on-sponsor-route-refused" ||
+        n === "cookie-presented-to-agent-host-refused",
     );
     expect(new Set(legs).size).toBe(2);
   });
@@ -1582,11 +1872,17 @@ describe("credentials never enter argv or a child environment", () => {
     expect(shellFunction(source, "minimal_env_command")).toContain("env -i");
   });
 
-  test("the live cookie value never leaves the browser", () => {
+  test("the live cookie value is used only inside the isolated Playwright probe", () => {
     const runner = read(RUNNER);
-    expect(runner).toContain("context.request.get");
-    // Exporting the jar to the shell would put a live human session in an argv.
-    expect(runner).not.toContain("cookie.value");
+    const probe = runner.slice(
+      runner.indexOf("forcedCookieContext = await browser.newContext()"),
+      runner.indexOf("// The real Server Action"),
+    );
+    expect(probe).toContain("value: entry.value");
+    expect(probe).toContain("forcedCookieContext.request.get");
+    expect(probe).not.toContain("writeFile");
+    expect(probe).not.toContain("console.");
+    expect(probe).not.toContain("detail: entry.value");
     expect(source).not.toContain("ASIMP_S6_STORAGE_STATE");
   });
 
@@ -1602,15 +1898,15 @@ describe("credentials never enter argv or a child environment", () => {
     // host-only and the non-consultation claims. Absence of `curl -L` in the
     // shell says nothing about this — the probe is made by Playwright.
     const runner = read(RUNNER);
-    const probe = runner.slice(runner.indexOf("const probeUrl ="));
-    expect(probe).toContain("maxRedirects: 0");
-    expect(probe).toContain("AGENT_HOST_PROBE_REDIRECTED");
-    expect(probe).toContain("finalUrl.host !== expectedUrl.host");
-    expect(probe).toContain("finalUrl.pathname !== expectedUrl.pathname");
-    // The origin check must precede accepting the 403.
-    expect(probe.indexOf("AGENT_HOST_PROBE_REDIRECTED")).toBeLessThan(
-      probe.indexOf('cookieProbe.code !== "WRONG_PRINCIPAL"'),
+    const exact = runner.slice(
+      runner.indexOf("async function exactProbeResult("),
+      runner.indexOf("async function main("),
     );
+    expect(exact).toContain("new URL(response.url()).href !== new URL(expectedUrl).href");
+    const probe = runner.slice(runner.indexOf("const omissionResponse"));
+    expect(probe.match(/maxRedirects: 0/g)?.length).toBe(2);
+    expect(probe).toContain("AGENT_HOST_OMISSION_PROBE_REDIRECTED");
+    expect(probe).toContain("AGENT_HOST_COOKIE_PRESENT_PROBE_REDIRECTED");
   });
 });
 
@@ -1677,8 +1973,9 @@ describe("the receipt is structured, bound, and matched as a fixed string", () =
 
   test("only a structured receipt proven absent before the action is accepted", () => {
     const leg = shellFunction(source, "run_browser_leg");
-    expect(leg).toContain('"absent_before_action":true');
-    expect(leg).toContain("ASIMP-EN-[0-9A-HJKMNP-TV-Z]\\{26\\}");
+    expect(leg).toContain("--validate-record");
+    expect(leg).toContain("$'pass\\t'");
+    expect(leg).toContain("ASIMP-EN-[0-9A-HJKMNP-TV-Z]{26}");
   });
 
   test("attribution matching is fixed-string, never a regex", () => {
@@ -1689,8 +1986,50 @@ describe("the receipt is structured, bound, and matched as a fixed string", () =
 
   test("the runner proves the id was absent before the click", () => {
     const runner = read(RUNNER);
-    expect(runner).toContain("beforeIds");
-    expect(runner).toContain("!beforeIds.has(id)");
+    expect(runner).toContain('page.locator("pre.pasteblock.join-url")');
+    expect(runner).toContain("receiptCountBefore = await joinReceipt.count()");
+    expect(runner).toContain("MINT_RECEIPT_BASELINE_FAILED");
+    expect(runner).toContain("receiptCountBefore !== 0");
+    expect(runner).not.toContain('locator("body").innerText()');
+  });
+
+  test("the dedicated receipt is parsed in-page and bound to exact Worker origin/path", () => {
+    const runner = read(RUNNER);
+    const receipt = runner.slice(
+      runner.indexOf("const receiptDescriptor = await joinReceipt.evaluate("),
+      runner.indexOf("// Stop accepting new cookie evidence"),
+    );
+    expect(receipt).toContain('element.matches("pre.pasteblock.join-url")');
+    expect(receipt).toContain("join.origin === contract.workerOrigin");
+    expect(receipt).toContain("join.pathname");
+    expect(receipt).toContain('join.search === ""');
+    expect(receipt).toContain("/^#v1\\.[A-Za-z0-9_-]{43}$/");
+    expect(receipt).not.toContain("innerText");
+  });
+
+  test("missing mint is blocked only by the exact provisioning signal", () => {
+    const runner = read(RUNNER);
+    const mint = runner.slice(
+      runner.indexOf('const mint = page.getByRole("button"'),
+      runner.indexOf("const joinReceipt ="),
+    );
+    const signal = mint.indexOf("Join-URL minting is disabled because this deployment cannot prepare recoverable writes");
+    const blocked = mint.indexOf("CONSOLE_WRITES_NOT_PROVISIONED");
+    const failed = mint.indexOf("CONSOLE_MINT_CONTROL_MISSING");
+    expect(signal).toBeGreaterThanOrEqual(0);
+    expect(blocked).toBeGreaterThan(signal);
+    expect(failed).toBeGreaterThan(blocked);
+  });
+
+  test("browser executable absence is distinct from launch fault", () => {
+    const runner = read(RUNNER);
+    const launch = runner.slice(
+      runner.indexOf("browser = await chromium.launch"),
+      runner.indexOf("context = await browser.newContext()"),
+    );
+    expect(launch).toContain("isMissingBrowserExecutable(error)");
+    expect(launch).toContain("PLAYWRIGHT_BROWSER_MISSING");
+    expect(launch).toContain("PLAYWRIGHT_BROWSER_LAUNCH_FAILED");
   });
 
   test("edge request id is request correlation, not a deployment claim", () => {
@@ -1714,17 +2053,28 @@ describe("the receipt is structured, bound, and matched as a fixed string", () =
     expect(runner).toContain("record: await main()");
     expect(runner).toContain("RUNNER_TEARDOWN_FAILED");
     expect(runner).toContain("teardownFailed");
-    const tail = runner.slice(runner.indexOf("async function runEntrypoint()"));
-    const select = tail.indexOf(
+    const entrypointStart = runner.indexOf("async function runEntrypoint()");
+    const entrypointEnd = runner.indexOf("// Importing this module", entrypointStart);
+    const publishStart = runner.indexOf("function publishTerminal(");
+    const publishEnd = runner.indexOf("/**\n * Apply the lifecycle verdict", publishStart);
+    expect(entrypointStart).toBeGreaterThanOrEqual(0);
+    expect(entrypointEnd).toBeGreaterThan(entrypointStart);
+    expect(publishStart).toBeGreaterThanOrEqual(0);
+    expect(publishEnd).toBeGreaterThan(publishStart);
+    const entrypoint = runner.slice(entrypointStart, entrypointEnd);
+    const publish = runner.slice(publishStart, publishEnd);
+    const select = entrypoint.indexOf(
       "resolveTerminalOutcome(outcome, teardownFailed, deadlineExceeded)",
     );
-    const emitTerminal = tail.indexOf("emit(terminal.record)");
-    // Both positions must exist before order is compared. The former test
-    // searched for `teardownFailed > 0` while production used `!== 0`; -1 was
-    // therefore less than the emit index and the assertion passed vacuously.
+    const publishCall = entrypoint.indexOf("publishTerminal(terminal)");
     expect(select).toBeGreaterThanOrEqual(0);
+    expect(publishCall).toBeGreaterThanOrEqual(0);
+    expect(select).toBeLessThan(publishCall);
+    const emitTerminal = publish.indexOf("emit(terminal.record)");
+    const exitTerminal = publish.indexOf("process.exit(terminal.exitStatus)");
     expect(emitTerminal).toBeGreaterThanOrEqual(0);
-    expect(select).toBeLessThan(emitTerminal);
+    expect(exitTerminal).toBeGreaterThanOrEqual(0);
+    expect(emitTerminal).toBeLessThan(exitTerminal);
   });
 
   test("PLANTED: teardown failure supersedes a preexisting blocked RunnerExit", () => {
@@ -1751,7 +2101,7 @@ describe("the receipt is structured, bound, and matched as a fixed string", () =
   });
 });
 
-describe("the run is bounded and leaves no survivors", () => {
+describe("the run is bounded and proves its owned-group lifecycle", () => {
   const source = code(SCRIPT);
 
   test("secrets are de-exported at main's first built-in step", () => {
@@ -1797,12 +2147,16 @@ describe("the run is bounded and leaves no survivors", () => {
       expect(source).toContain(marker);
     }
     const finish = shellFunction(source, "finish");
-    expect(finish.indexOf("reap_children")).toBeLessThan(
-      finish.indexOf("assert_no_secret_escaped"),
-    );
-    expect(finish.indexOf("CLEANUP_UNPROVEN")).toBeLessThan(
-      finish.indexOf("write_evidence_bundle"),
-    );
+    const reap = finish.indexOf("reap_children");
+    const scan = finish.indexOf("assert_no_secret_escaped");
+    const refusal = finish.indexOf("CLEANUP_UNPROVEN");
+    const evidence = finish.indexOf("write_evidence_bundle");
+    expect(reap).toBeGreaterThanOrEqual(0);
+    expect(scan).toBeGreaterThanOrEqual(0);
+    expect(refusal).toBeGreaterThanOrEqual(0);
+    expect(evidence).toBeGreaterThanOrEqual(0);
+    expect(reap).toBeLessThan(scan);
+    expect(refusal).toBeLessThan(evidence);
   });
 
   test("anonymous supervisor authority exists before any payload fork", () => {
@@ -1822,6 +2176,49 @@ describe("the run is bounded and leaves no survivors", () => {
     );
     expect(bounded).not.toContain("result_fifo");
     expect(bounded).not.toContain("mkfifo");
+  });
+
+  test("INT/TERM are latched across coproc spawn, registration and READY adoption", () => {
+    const bounded = shellFunction(source, "run_bounded");
+    const active = bounded.indexOf("SPAWN_REGISTRATION_ACTIVE=1");
+    const coprocess = bounded.indexOf("coproc S6_BOUNDED_SUPERVISOR");
+    const pid = bounded.indexOf("pid=$!");
+    const register = bounded.indexOf('register_child "$pid" "$supervisor_token" "ordinary"');
+    const resultFd = bounded.indexOf('exec 5<&"$coproc_read_fd"');
+    const adopt = bounded.indexOf('adopt_group_control "$pid" "$supervisor_token"');
+    const start = bounded.indexOf('GROUP_PROTOCOL_STATE="input"', adopt);
+    const drain = bounded.lastIndexOf("end_spawn_registration_window", start);
+    for (const member of [active, coprocess, pid, register, resultFd, adopt, drain, start]) {
+      expect(member).toBeGreaterThanOrEqual(0);
+    }
+    expect(active).toBeLessThan(coprocess);
+    expect(coprocess).toBeLessThan(pid);
+    expect(pid).toBeLessThan(register);
+    expect(register).toBeLessThan(resultFd);
+    expect(resultFd).toBeLessThan(adopt);
+    expect(adopt).toBeLessThan(drain);
+    expect(drain).toBeLessThan(start);
+    const signal = shellFunction(source, "on_signal");
+    expect(signal).toContain("SPAWN_REGISTRATION_ACTIVE == 1");
+    expect(signal).toContain('LATCHED_SIGNAL="$signal"');
+    expect(source).toContain("pre-registration-signal-publishes-positive-lifecycle");
+  });
+
+  test("clean script terminals publish one exact owned-group lifecycle record", () => {
+    const lifecycle = shellFunction(source, "publish_lifecycle_settled");
+    expect(lifecycle).toContain('${#CHILD_PIDS[@]} == 0');
+    expect(lifecycle).toContain('[[ -z "$GROUP_CONTROL_PID" ]]');
+    expect(lifecycle).toContain(
+      '\\"record_type\\":\\"lifecycle-terminal\\",\\"status\\":\\"pass\\",\\"owned_same_process_groups\\":\\"settled\\"',
+    );
+    expect(shellFunction(source, "on_exit")).toContain("publish_lifecycle_settled");
+  });
+
+  test("the blocked boundary pins its distinctive forbidden-substitutes clause", () => {
+    const blocked = shellFunction(source, "emit_blocked_env_record");
+    expect(blocked).toContain(
+      "a mocked Worker or stubbed Auth.js presented as runtime proof; the in-process unit vectors relabelled as a live run; a hand-written transcript; a recorded fixture replayed as a deployment; a storage-state file presented as live cookie evidence",
+    );
   });
 
   test("one monotonic deadline is computed from a single start stamp", () => {
@@ -1979,54 +2376,107 @@ describe("the run is bounded and leaves no survivors", () => {
 describe("the runner record and the shell parser cannot drift apart", () => {
   const runner = read(RUNNER);
   const shell = code(SCRIPT);
+  const passRecord = {
+    tool: "playwright",
+    package: "e2e",
+    suite: "s6-cross-plane-browser",
+    status: "pass",
+    code: "OK",
+    apex_host: "preview.example.test",
+    agent_host: "a.example.test",
+    cookie: {
+      issuance_count: 2,
+      host_only: true,
+      http_only: true,
+      secure: true,
+      same_site: "lax",
+      scoped_to_apex: true,
+      present_for_agent_host: false,
+    },
+    cookie_omission_probe: { attached: false, status: 403, code: "WRONG_PRINCIPAL" },
+    cookie_present_probe: { attached: true, status: 403, code: "WRONG_PRINCIPAL" },
+    receipt: {
+      enrollment_id: "ASIMP-EN-01ARZ3NDEKTSV4RRFFQ69G5FAV",
+      absent_before_action: true,
+      dedicated_locator: true,
+      exact_worker_origin: true,
+      exact_join_path: true,
+    },
+    edge_request_id: null,
+    detail: "exact causal fixture",
+    duration_ms: 1,
+  } as const;
+  const encoded = (value: unknown): Buffer => Buffer.from(`${JSON.stringify(value)}\n`, "utf8");
 
-  /** Field names the runner declares on its NDJSON record. */
-  const declared = [
-    ...runner
-      .slice(runner.indexOf("interface Record_ {"), runner.indexOf("const startedAt"))
-      .matchAll(/^\s+readonly ([a-z_]+)[?:]/gm),
-  ].map((m) => m[1] as string);
-
-  test("the runner declares the fields the shell reads", () => {
-    // Renaming `deployment` to `edge_request_id` in the runner left the shell
-    // parsing a field that no longer existed, so every otherwise-green live run
-    // failed on it. Neither file was wrong alone, which is why only a contract
-    // spanning both can catch it.
-    expect(declared).toContain("edge_request_id");
-    expect(declared).toContain("cookie_probe");
-    expect(declared).toContain("receipt");
-    expect(declared).not.toContain("deployment");
+  test("one runner-owned strict validator is the shell's only parser", () => {
+    const leg = shellFunction(shell, "run_browser_leg");
+    expect(leg).toContain("--validate-record");
+    expect(runner).toContain("function browserRecordValidatorMode()");
+    expect(runner).toContain("selectBrowserEvidenceBytes(");
+    expect(leg).not.toContain("grep -F");
+    expect(leg).not.toContain("tail -");
+    expect(leg).not.toContain("sed -n");
+    expect(leg).not.toContain('"host_only":true');
   });
 
-  test("every field the shell parses out of the record is declared", () => {
-    const parsed = [...shell.matchAll(/"([a-z_]+)":\\"/g)].map((m) => m[1] as string);
-    const knownNonRecord = new Set(["suite", "status", "code", "detail", "assertion", "reproduce"]);
-    for (const field of parsed) {
-      if (knownNonRecord.has(field)) continue;
-      expect(declared, `shell parses "${field}" but the runner does not declare it`).toContain(
-        field,
-      );
-    }
+  test("PLANTED: the strict evidence selector accepts only the complete pass", () => {
+    expect(selectBrowserEvidenceBytes(encoded(passRecord), 0)).toEqual({
+      kind: "pass",
+      enrollmentId: passRecord.receipt.enrollment_id,
+    });
+    const wrongDirection = {
+      ...passRecord,
+      cookie_present_probe: { attached: true, status: 200, code: null },
+    };
+    expect(() => selectBrowserEvidenceBytes(encoded(wrongDirection), 0)).toThrow();
+    expect(() =>
+      selectBrowserEvidenceBytes(
+        encoded({ ...passRecord, receipt: { ...passRecord.receipt, exact_worker_origin: false } }),
+        0,
+      ),
+    ).toThrow();
+    expect(() => selectBrowserEvidenceBytes(encoded(passRecord), 1)).toThrow();
   });
 
-  test("the shell no longer claims a deployment pin", () => {
-    expect(shell).not.toContain('"deployment"');
-    expect(shell).not.toContain("deployment-identified");
-    expect(shell).toContain("edge_request_id");
-    // Wording bans: nothing may describe this as immutable or pinned.
+  test("PLANTED: malformed, duplicate, non-LF and over-cap transcripts refuse", () => {
+    const valid = encoded(passRecord);
+    expect(() => selectBrowserEvidenceBytes(Buffer.concat([valid, valid]), 0)).toThrow();
+    expect(() => selectBrowserEvidenceBytes(valid.subarray(0, valid.length - 1), 0)).toThrow();
+    expect(() => selectBrowserEvidenceBytes(Buffer.from([0xff, 0x0a]), 0)).toThrow();
+    expect(() =>
+      selectBrowserEvidenceBytes(Buffer.alloc(MAX_BROWSER_EVIDENCE_BYTES + 1, 0x61), 0),
+    ).toThrow();
+    const duplicateStatus = JSON.stringify(passRecord).replace(
+      '"status":"pass"',
+      '"status":"fail","status":"pass"',
+    );
+    expect(() =>
+      selectBrowserEvidenceBytes(Buffer.from(`${duplicateStatus}\n`, "utf8"), 0),
+    ).toThrow();
+    expect(() =>
+      selectBrowserEvidenceBytes(
+        encoded({ ...passRecord, extra: { status: "pass", code: "OK" } }),
+        0,
+      ),
+    ).toThrow();
+    expect(() =>
+      selectBrowserEvidenceBytes(
+        encoded({
+          ...passRecord,
+          status: "fail",
+          detail: 'misnested {"status":"pass","code":"OK"}',
+        }),
+        0,
+      ),
+    ).toThrow();
+  });
+
+  test("edge correlation remains nullable and is not a deployment gate", () => {
+    expect(runner).toContain("edge_request_id");
+    expect(runner).not.toContain('headers()["x-vercel-deployment-url"]');
+    expect(shell).not.toContain("edge-request-identified");
     expect(shell).not.toMatch(/immutable deployment/i);
     expect(shell).not.toMatch(/pinned to deployment/i);
-  });
-
-  test("edge correlation is not an S6 gate", () => {
-    // Fable S-6 does not require `x-vercel-id`, and the runner types the field
-    // as nullable, so its absence proves nothing. No assertion may depend on it
-    // and it must not inflate the assertion count in either direction.
-    const leg = shellFunction(shell, "run_browser_leg");
-    const region = leg.slice(leg.indexOf("edge_request_id"));
-    expect(region).not.toContain('pass_record "edge-request');
-    expect(region).not.toContain('fail_record "edge-request');
-    expect(shell).not.toContain("edge-request-identified");
   });
 });
 
@@ -2088,10 +2538,21 @@ describe("the browser runner cannot exit before cleanup", () => {
   });
 
   test("the status is applied only after the finally has closed the browser", () => {
-    const tail = runner.slice(runner.indexOf("async function runEntrypoint()"));
-    expect(tail).toContain("error instanceof RunnerExit");
-    expect(tail).toContain("resolveTerminalOutcome(outcome, teardownFailed, deadlineExceeded)");
-    expect(tail).toContain("process.exit(terminal.exitStatus)");
+    const entrypoint = runner.slice(
+      runner.indexOf("async function runEntrypoint()"),
+      runner.indexOf("// Importing this module"),
+    );
+    const publish = runner.slice(
+      runner.indexOf("function publishTerminal("),
+      runner.indexOf("/**\n * Apply the lifecycle verdict"),
+    );
+    expect(entrypoint).toContain("error instanceof RunnerExit");
+    expect(entrypoint).toContain(
+      "resolveTerminalOutcome(outcome, teardownFailed, deadlineExceeded)",
+    );
+    expect(entrypoint).toContain("publishTerminal(terminal)");
+    expect(publish).toContain("emit(terminal.record)");
+    expect(publish).toContain("process.exit(terminal.exitStatus)");
     const cleanup = runner.slice(runner.indexOf("} finally {"));
     expect(cleanup).toContain("await teardownOnce()");
   });
@@ -2126,9 +2587,44 @@ describe("the browser runner cannot exit before cleanup", () => {
     );
   });
 
-  test("the cookie-probe comment does not claim the cookie was presented", () => {
-    expect(runner).not.toContain("Present the LIVE session cookie");
-    expect(runner).toContain("host-only on the apex");
+  test("terminal bytes are fully synchronous before process.exit", () => {
+    const writer = runner.slice(
+      runner.indexOf("export function writeAllSync("),
+      runner.indexOf("function emit("),
+    );
+    expect(writer).toContain("while (offset < bytes.length)");
+    expect(writer).toContain("writer(fd, bytes, offset, bytes.length - offset)");
+    expect(writer).toContain('code === "EINTR"');
+    expect(writer).toContain("writeAllSync(1, Buffer.from");
+    expect(runner).not.toContain("process.stdout.write(");
+  });
+
+  test("PLANTED: terminal writes retry EINTR, resume short writes, and reject no progress", () => {
+    const calls: Array<[number, number]> = [];
+    let attempt = 0;
+    writeAllSync(7, Buffer.from("abcd"), (_fd, _bytes, offset, length) => {
+      calls.push([offset, length]);
+      attempt += 1;
+      if (attempt === 1) {
+        throw Object.assign(new Error("interrupted"), { code: "EINTR" });
+      }
+      return attempt === 2 ? 2 : length;
+    });
+    expect(calls).toEqual([
+      [0, 4],
+      [0, 4],
+      [2, 2],
+    ]);
+    expect(() => writeAllSync(7, Buffer.from("x"), () => 0)).toThrow(
+      "synchronous writer made invalid progress",
+    );
+  });
+
+  test("natural omission and explicit cookie presentation are named separately", () => {
+    expect(runner).toContain("Direction A: natural browser eligibility");
+    expect(runner).toContain("Direction B: a separate in-memory context explicitly presents");
+    expect(runner).toContain("cookie_omission_probe");
+    expect(runner).toContain("cookie_present_probe");
   });
 });
 
@@ -2297,6 +2793,18 @@ describe("the shell's causal self-tests actually run", () => {
         '"assertion":"second-signal-during-cleanup-is-exact-125","status":"pass"',
       );
       expect(stdout, diag(run)).toContain(
+        '"assertion":"pre-registration-signal-barrier-armed","status":"pass"',
+      );
+      expect(stdout, diag(run)).toContain(
+        '"assertion":"pre-registration-signal-is-interruption","status":"pass"',
+      );
+      expect(stdout, diag(run)).toContain(
+        '"assertion":"pre-registration-signal-prevents-payload-fork","status":"pass"',
+      );
+      expect(stdout, diag(run)).toContain(
+        '"assertion":"pre-registration-signal-publishes-positive-lifecycle","status":"pass"',
+      );
+      expect(stdout, diag(run)).toContain(
         '"assertion":"result-token-theft-replay-cannot-green","status":"pass"',
       );
       expect(stdout, diag(run)).toContain(
@@ -2338,6 +2846,18 @@ describe("the shell's causal self-tests actually run", () => {
 });
 
 describe("the outer capability protocol is strict under stream framing", () => {
+  test("the loopback claim is first-connector transcript binding, not peer authentication", () => {
+    const self = read("apps/wire/test/auth/cross-plane-spike.test.ts");
+    const controller = self.slice(
+      self.indexOf("async function runShell("),
+      self.indexOf("/** Failure context."),
+    );
+    expect(controller).toContain("no-competing-active-local-connector assumption");
+    expect(controller).toContain("This is not peer authentication.");
+    expect(controller).not.toContain("target-authenticated");
+    expect(controller).not.toContain("authenticated socket");
+  });
+
   test("PLANTED: split READY and coalesced STARTED+CHILD parse exactly once", async () => {
     const pair = await testSocketPair();
     const token = "planttoken0123456789";
@@ -2821,38 +3341,46 @@ while :; do sleep 1; done
     expect(readFileSync(termObserved, "utf8")).toBe("term-observed");
   });
 
-  test("PLANTED: exact typed lifecycle records are wired in both polarities", () => {
-    // A real terminal/survivor record is authoritative, while the same words in
-    // a detail field or another suite are not. Exit 125 is independently the
-    // script's reserved cleanup-unproven status.
-    expect(
-      shellLifecycleFromRecords(
-        '{"suite":"s6-cross-plane-auth","assertion":"no-child-survivors","status":"fail"}',
-        1,
-      ),
-    ).toEqual({ cleanupUnproven: true, survivors: true });
-    expect(
-      shellLifecycleFromRecords(
-        '{"suite":"s6-cross-plane-auth","status":"blocked","code":"CLEANUP_UNPROVEN"}',
-        125,
-      ),
-    ).toEqual({ cleanupUnproven: true, survivors: true });
-    expect(
-      shellLifecycleFromRecords(
-        '{"suite":"s6-cross-plane-auth","status":"pass","detail":"CLEANUP_UNPROVEN no-child-survivors fail"}',
-        0,
-      ),
-    ).toEqual({ cleanupUnproven: false, survivors: false });
-    expect(
-      shellLifecycleFromRecords(
-        '{"suite":"another-suite","status":"blocked","code":"CLEANUP_UNPROVEN"}',
-        0,
-      ),
-    ).toEqual({ cleanupUnproven: false, survivors: false });
-    expect(shellLifecycleFromRecords("", 125)).toEqual({
-      cleanupUnproven: true,
-      survivors: true,
+  test("PLANTED: only one exact positive lifecycle terminal can prove settlement", () => {
+    const assertionRecords = ["one", "two", "three"]
+      .map(
+        (assertion) =>
+          `{"suite":"s6-cross-plane-auth","assertion":"${assertion}","status":"pass","detail":"plant","reproduce":"bash scripts/e2e-s6-cross-plane-auth.sh"}`,
+      )
+      .join("\n");
+    const aggregate =
+      '{"suite":"s6-cross-plane-auth","status":"pass","assertions":3,"failures":0,"reproduce":"bash scripts/e2e-s6-cross-plane-auth.sh"}';
+    const lifecycle =
+      '{"suite":"s6-cross-plane-auth","record_type":"lifecycle-terminal","status":"pass","owned_same_process_groups":"settled"}';
+    const exact = `${assertionRecords}\n${aggregate}\n${lifecycle}\n`;
+    const refused = { cleanupUnproven: true, ownedSameProcessGroupsSettled: false };
+    expect(shellLifecycleFromRecords(exact, 0)).toEqual({
+      cleanupUnproven: false,
+      ownedSameProcessGroupsSettled: true,
     });
+    for (const transcript of [
+      `${assertionRecords}\n${aggregate}\n`,
+      `not-json\n${assertionRecords}\n${aggregate}\n${lifecycle}\n`,
+      `${assertionRecords}\n${aggregate}\n${lifecycle}`,
+      `${assertionRecords}\n${aggregate}\n${lifecycle}\n${lifecycle}\n`,
+      `${assertionRecords}\n${aggregate}\n${lifecycle}\n${aggregate}\n`,
+      `${assertionRecords}\n${aggregate}\n${lifecycle.replace(
+        "s6-cross-plane-auth",
+        "another-suite",
+      )}\n`,
+      `${assertionRecords}\n${aggregate}\n${lifecycle.replace(
+        '"owned_same_process_groups":"settled"',
+        '"owned_same_process_groups":"settled","extra":true',
+      )}\n`,
+      ` ${assertionRecords}\n${aggregate}\n${lifecycle}\n`,
+      `${assertionRecords}\n${aggregate}\n${aggregate}\n${lifecycle}\n`,
+      `${assertionRecords}\n${aggregate.replace('"assertions":3', '"assertions":4')}\n${lifecycle}\n`,
+      `{"suite":"s6-cross-plane-auth","assertion":"ordinary","status":"pass"}\n${aggregate}\n${lifecycle}\n`,
+    ]) {
+      expect(shellLifecycleFromRecords(transcript, 0)).toEqual(refused);
+    }
+    expect(shellLifecycleFromRecords(exact, 1)).toEqual(refused);
+    expect(shellLifecycleFromRecords(exact, 125)).toEqual(refused);
   });
 
   test("PLANTED: an in-budget typed cleanup refusal reaches the outer verdict", async () => {
@@ -2867,7 +3395,8 @@ while :; do sleep 1; done
     expect(run.timedOut, diag(run)).toBe(false);
     expect(run.exitCode, diag(run)).toBe(125);
     expect(run.cleanupUnproven, diag(run)).toBe(true);
-    expect(run.survivors, diag(run)).toBe(true);
+    expect(run.outerSupervisorSettledAfterRetirementProtocol, diag(run)).toBe(true);
+    expect(run.nestedOwnedSameProcessGroupsSettled, diag(run)).toBeNull();
   });
 
   test("an over-cap capture is rejected, not truncated", () => {
@@ -2899,7 +3428,7 @@ while :; do sleep 1; done
   });
 
   test(
-    "an ordinary run leaves no survivor in the group this controller leads",
+    "an ordinary trusted run proves outer and nested owned-group settlement",
     async () => {
       // The claim is scoped to OUR group. The script's own nested groups are
       // covered by its plants below; this controller cannot see them, and on a
@@ -2907,7 +3436,8 @@ while :; do sleep 1; done
       const run = await sharedSelfTest();
       expect(run.timedOut, diag(run)).toBe(false);
       expect(run.cleanupUnproven, diag(run)).toBe(false);
-      expect(run.survivors, diag(run)).toBe(false);
+      expect(run.outerSupervisorSettledAfterRetirementProtocol, diag(run)).toBe(true);
+      expect(run.nestedOwnedSameProcessGroupsSettled, diag(run)).toBe(true);
     },
     SHELL_TIMEOUT_MS,
   );
@@ -2923,7 +3453,7 @@ while :; do sleep 1; done
       self.indexOf("/** Failure context."),
     );
     expect(controller).toContain(
-      "const cleanupUnproven = timedOut || shellLifecycle.cleanupUnproven;",
+      "timedOut || exitCode === 125 || (shellLifecycle?.cleanupUnproven ?? false)",
     );
     expect(controller).toContain("shellLifecycleFromRecords(stdout, exitCode)");
     expect(controller).not.toContain("S6_PGID_LEDGER");
@@ -2944,7 +3474,7 @@ while :; do sleep 1; done
       expect(run.stdout, diag(run)).toContain(
         '"assertion":"term-signal-reaps-descendants","status":"pass"',
       );
-      expect(run.survivors, diag(run)).toBe(false);
+      expect(run.nestedOwnedSameProcessGroupsSettled, diag(run)).toBe(true);
     },
     SHELL_TIMEOUT_MS,
   );

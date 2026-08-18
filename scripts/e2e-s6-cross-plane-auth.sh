@@ -225,6 +225,8 @@ SPAWN_REGISTRATION_ACTIVE=0
 LATCHED_SIGNAL=""
 SPAWN_REGISTRATION_READY_MARKER=""
 SPAWN_REGISTRATION_RELEASE_MARKER=""
+SPAWN_HANDOFF_READY_MARKER=""
+SPAWN_HANDOFF_RELEASE_MARKER=""
 
 # Playwright launches Chromium as a grandchild and the minter can fork, so each
 # payload runs beneath a same-group supervisor. The parent never signals a
@@ -519,10 +521,29 @@ consume_group_terminal_during_grace() {
 # caller may signal or probe the numeric identity after that wait.
 CHILD_SETTLE_ATTEMPTS=80
 CHILD_SETTLE_POLL_SECONDS=0.05
+KERNEL_INSPECTION_FAILURE_PLANT=""
+
+# Return 0 live, 1 exact ESRCH absence, 2 any other inspection refusal. Bash's
+# `kill -0` status alone collapses EPERM and ESRCH, so it cannot authorize a
+# subsequent wait/unregister. The trusted Perl already required by the
+# supervisor preserves errno without signalling the target.
+kernel_identity_state() {
+  local target="$1" kind="$2"
+  if [[ "$KERNEL_INSPECTION_FAILURE_PLANT" == "$kind" ]]; then return 2; fi
+  /usr/bin/perl -MErrno=ESRCH -e '
+    my $target = 0 + $ARGV[0];
+    exit 0 if kill 0, $target;
+    exit((0 + $!) == ESRCH ? 1 : 2);
+  ' -- "$target" 2>/dev/null
+}
+
 group_settled_before_wait() {
-  local pid="$1" attempts=0
+  local pid="$1" attempts=0 state=0
   while (( attempts < CHILD_SETTLE_ATTEMPTS )); do
-    kill -0 -- "-${pid}" 2>/dev/null || return 0
+    kernel_identity_state "-${pid}" group
+    state=$?
+    (( state == 1 )) && return 0
+    (( state == 0 )) || return 1
     # A process listing is not settlement authority: a partial exit-zero
     # snapshot can omit a stopped or uninterruptible member. Only absence of
     # the still-owned process group permits the subsequent direct-child reap.
@@ -536,9 +557,12 @@ group_settled_before_wait() {
 # sufficient: there are no hidden group members, and the unreaped child still
 # pins this pid. Empty or partial ps output is never treated as settlement.
 direct_child_settled_before_wait() {
-  local pid="$1" attempts=0 state
+  local pid="$1" attempts=0 state kernel_state=0
   while (( attempts < CHILD_SETTLE_ATTEMPTS )); do
-    if ! kill -0 "$pid" 2>/dev/null; then return 0; fi
+    kernel_identity_state "$pid" direct
+    kernel_state=$?
+    (( kernel_state == 1 )) && return 0
+    (( kernel_state == 0 )) || return 1
     state="$(/bin/ps -o stat= -p "$pid" 2>/dev/null || printf '')"
     state="${state//[[:space:]]/}"
     [[ "$state" == Z* ]] && return 0
@@ -725,8 +749,15 @@ on_signal() {
 # latch before dispatch is deliberate: a later signal enters normal cleanup,
 # while an earlier one is already stored in `pending`.
 end_spawn_registration_window() {
-  local pending="$LATCHED_SIGNAL"
   SPAWN_REGISTRATION_ACTIVE=0
+  if [[ -n "$SPAWN_HANDOFF_READY_MARKER" ]]; then
+    printf 'ready' >"$SPAWN_HANDOFF_READY_MARKER" 2>/dev/null || true
+    while [[ -n "$SPAWN_HANDOFF_RELEASE_MARKER" &&
+             ! -e "$SPAWN_HANDOFF_RELEASE_MARKER" ]]; do
+      IFS= read -r -t 0.05 _ || true
+    done
+  fi
+  local pending="$LATCHED_SIGNAL"
   LATCHED_SIGNAL=""
   if [[ -n "$pending" ]]; then on_signal "$pending"; fi
 }
@@ -913,8 +944,8 @@ run_bounded() {
   # coprocess body immediately execs Perl, so its pid remains the exact group
   # leader through Perl -> Bash supervisor for the whole capability lifetime.
   # shellcheck disable=SC1012,SC2026 # ANSI-C quotes belong to the nested Bash source.
-  SPAWN_REGISTRATION_ACTIVE=1
   LATCHED_SIGNAL=""
+  SPAWN_REGISTRATION_ACTIVE=1
   coproc S6_BOUNDED_SUPERVISOR {
     exec /usr/bin/perl -MPOSIX -e '
       $^F=9;
@@ -1372,13 +1403,14 @@ http_request() {
     --request "$method"
     --connect-timeout "$connect_timeout"
     --max-time "$max_time"
+    --max-filesize 65536
     --write-out '\n%{http_code}'
     --output -
   )
   if [[ -n "$body_file" ]]; then args+=(--data-binary "@${body_file}"); fi
   args+=(--config -)
 
-  # Sets HTTP_RESPONSE, and MUST be called from the parent shell.
+  # Sets HTTP_RESPONSE_FILE, and MUST be called from the parent shell.
   #
   # This used to be `printf … | env -i curl …` inside `$( )`. Both halves of
   # that were ownership losses: the command substitution ran the call in a
@@ -1389,7 +1421,7 @@ http_request() {
   #
   # The config document (which may carry a bearer) travels on the same anonymous
   # pipe transport the minter uses: never an argv, never an environ, never disk.
-  HTTP_RESPONSE=""
+  HTTP_RESPONSE_FILE=""
   local out_dir out_file
   out_dir="$(mktemp -d "${RUN_STATE_DIR:-${TMPDIR:-/tmp}}/http.XXXXXX" 2>/dev/null)" || return 1
   chmod 700 "$out_dir" 2>/dev/null || true
@@ -1405,18 +1437,38 @@ http_request() {
   local rc=0
   run_bounded "$((max_time + 5))" "$out_file" "$config" "${MINIMAL_CMD[@]}" 2>/dev/null || rc=$?
   if (( rc != 0 )); then
-    HTTP_RESPONSE=""
     return "$rc"
   fi
-  HTTP_RESPONSE="$(cat "$out_file" 2>/dev/null || printf '')"
+  HTTP_RESPONSE_FILE="$out_file"
 }
-HTTP_RESPONSE=""
+HTTP_RESPONSE_FILE=""
 
-status_of() { printf '%s' "${1##*$'\n'}"; }
-body_of() { printf '%s' "${1%$'\n'*}"; }
+# Validate the pinned curl transcript through the runner's one contract tree.
+# Only a fixed non-secret normalized line crosses back into this shell.
+validate_http_response() {
+  [[ -n "$HTTP_RESPONSE_FILE" && -f "$PLAYWRIGHT_RUNNER" ]] || return 1
+  local kind="$1" validator_file bound transport_status=0 status=0
+  shift
+  validator_file="${RUN_STATE_DIR}/http-validator.$RANDOM.$RANDOM"
+  bound="$(phase_budget 10)"
+  (( bound > 0 )) || return 1
+  minimal_env_command bun "$PLAYWRIGHT_RUNNER" --validate-http-response \
+    "$HTTP_RESPONSE_FILE" "$kind" "$@"
+  run_bounded "$bound" "$validator_file" - "${MINIMAL_CMD[@]}" 2>/dev/null || transport_status=$?
+  if [[ "$RUN_BOUNDED_OUTCOME" == "child" ]]; then
+    status="$RUN_BOUNDED_CHILD_STATUS"
+  else
+    status="$transport_status"
+  fi
+  (( status == 0 )) || return 1
 
-problem_code() {
-  printf '%s' "$1" | sed -n 's/.*"code"[[:space:]]*:[[:space:]]*"\([A-Z_]*\)".*/\1/p' | head -1
+  local normalized="" extra="" first_read=0 second_read=0
+  exec 7<"$validator_file" || return 1
+  IFS= read -r normalized <&7 || first_read=$?
+  IFS= read -r extra <&7 || second_read=$?
+  exec 7<&-
+  (( first_read == 0 && second_read == 1 )) || return 1
+  [[ -z "$extra" && "$normalized" == $'ok\t'"$kind" ]]
 }
 
 # ---------------------------------------------------------------------------
@@ -1630,6 +1682,7 @@ MINTED_CONFIG=""
 # A GET sponsor route: proves verification and attribution without minting state.
 readonly ROUTE_PROPOSALS="/v1/enrollments/proposals"
 readonly ACTION_PROPOSALS="enrollment.proposals.list"
+readonly ROUTE_HELLO="/v1/hello"
 # A real POST sponsor route. The tamper case MUST use this: posting to a
 # GET-only route would be refused by routing with 404/405 before the envelope
 # verifier ever ran, and that refusal would prove nothing about tamper
@@ -1734,8 +1787,7 @@ run_browser_leg() {
   fi
 
   RECEIPT="${normalized#$'pass\t'}"
-  if [[ "$normalized" != $'pass\t'"$RECEIPT" ||
-        ! "$RECEIPT" =~ ^ASIMP-EN-[0-9A-HJKMNP-TV-Z]{26}$ ]]; then
+  if [[ "$normalized" != $'pass\t'"$RECEIPT" || -z "$RECEIPT" ]]; then
     fail_record "browser-leg" "the normalized pass receipt was malformed"
     return 1
   fi
@@ -1744,7 +1796,7 @@ run_browser_leg() {
   # Fable direction B: unlike the natural-omission observation above, this fresh
   # Playwright context explicitly presented the live session family in memory.
   pass_record "cookie-presented-to-agent-host-refused" "the exact Worker route refused the explicitly presented live session family with 403 WRONG_PRINCIPAL"
-  pass_record "agora-origination" "the exact Agora console action rendered one dedicated absent-before receipt whose join URL had the exact Worker origin and join path"
+  pass_record "agora-origination" "the exact Agora action rendered one absent-before receipt and its transient fragment completed the exact 202 Worker claim contract"
   return 0
 }
 
@@ -1753,20 +1805,18 @@ run_browser_leg() {
 # ---------------------------------------------------------------------------
 
 assert_worker_accepts_valid_envelope() {
-  local worker="$1" sponsor="$2" config response status
+  local worker="$1" sponsor="$2" config
   mint_envelope_config GET "$ROUTE_PROPOSALS" "$ACTION_PROPOSALS" "$sponsor" "" || {
     fail_record "worker-accepts-valid-envelope" "the product minter produced no envelope"
     return
   }
   config="$MINTED_CONFIG"
-  http_request GET "${worker}${ROUTE_PROPOSALS}" "" "$config"
-  response="$HTTP_RESPONSE"
-  status="$(status_of "$response")"
-  if [[ "$status" == "200" ]]; then
-    pass_record "worker-accepts-valid-envelope" "the deployed Worker verified a product-minted envelope and returned 200"
+  if http_request GET "${worker}${ROUTE_PROPOSALS}" "" "$config" &&
+     validate_http_response proposals-present "$RECEIPT"; then
+    pass_record "worker-accepts-valid-envelope" "the deployed Worker verified a product-minted envelope and returned one exact pending attribution card"
     VALID_ENVELOPE_HEADER="$config"
   else
-    fail_record "worker-accepts-valid-envelope" "expected 200 from ${ROUTE_PROPOSALS}, observed ${status}"
+    fail_record "worker-accepts-valid-envelope" "the signed proposal response failed its exact status/schema/attribution contract"
   fi
 }
 
@@ -1776,22 +1826,21 @@ assert_replay_refused() {
     fail_record "envelope-replay-refused" "no accepted envelope to replay"
     return
   fi
-  local response status code
-  http_request GET "${worker}${ROUTE_PROPOSALS}" "" "$VALID_ENVELOPE_HEADER"
-  response="$HTTP_RESPONSE"
-  status="$(status_of "$response")"
-  code="$(problem_code "$(body_of "$response")")"
+  http_request GET "${worker}${ROUTE_PROPOSALS}" "" "$VALID_ENVELOPE_HEADER" || {
+    fail_record "envelope-replay-refused" "the replay request did not settle cleanly"
+    return
+  }
   # Replay, tamper and expiry share one opaque 401 face on purpose (Rule A5):
   # a distinct code per failure mode would be a forgery oracle.
-  if [[ "$status" == "401" && "$code" == "UNAUTHORIZED" ]]; then
+  if validate_http_response problem 401 UNAUTHORIZED; then
     pass_record "envelope-replay-refused" "the second presentation of a single-use nonce was refused 401 UNAUTHORIZED"
   else
-    fail_record "envelope-replay-refused" "expected 401 UNAUTHORIZED on replay, observed ${status} ${code:-<no code>}"
+    fail_record "envelope-replay-refused" "the replay response failed the exact 401 UNAUTHORIZED ProblemDocument contract"
   fi
 }
 
 assert_altered_payload_refused() {
-  local worker="$1" sponsor="$2" config response status code
+  local worker="$1" sponsor="$2" config
   # The envelope binds a digest of `{}` on a route that really accepts POST, so
   # the request reaches envelope verification and the refusal is about the
   # payload digest rather than about routing.
@@ -1807,36 +1856,32 @@ assert_altered_payload_refused() {
   # JSON_CONTENT_TYPE_REQUIRED and never reaches envelope verification, so the
   # case would pass for entirely the wrong reason.
   config="${config}"$'\n''header = "content-type: application/json; charset=utf-8"'
-  http_request POST "${worker}${ROUTE_MINT}" "${RUN_STATE_DIR}/altered.json" "$config"
-  response="$HTTP_RESPONSE"
-  status="$(status_of "$response")"
-  code="$(problem_code "$(body_of "$response")")"
-  if [[ "$code" == "JSON_CONTENT_TYPE_REQUIRED" ]]; then
-    fail_record "envelope-altered-payload-refused" "the tamper request was refused for its content-type before reaching envelope verification; this case proved nothing about tamper detection"
+  http_request POST "${worker}${ROUTE_MINT}" "${RUN_STATE_DIR}/altered.json" "$config" || {
+    fail_record "envelope-altered-payload-refused" "the tamper request did not settle cleanly"
     return
-  fi
-  if [[ "$status" == "401" && "$code" == "UNAUTHORIZED" ]]; then
+  }
+  if validate_http_response problem 401 UNAUTHORIZED; then
     pass_record "envelope-altered-payload-refused" "a body whose digest differs from the signed payload_sha256 was refused 401 UNAUTHORIZED on a POST route that reaches the verifier"
   else
-    fail_record "envelope-altered-payload-refused" "expected 401 UNAUTHORIZED on altered payload, observed ${status} ${code:-<no code>}; a 404 or 405 would mean the request never reached envelope verification"
+    fail_record "envelope-altered-payload-refused" "the altered payload failed the exact 401 UNAUTHORIZED ProblemDocument contract; routing/content-type refusals are not accepted"
   fi
 }
 
 assert_expired_envelope_refused() {
-  local worker="$1" sponsor="$2" config response status code
+  local worker="$1" sponsor="$2" config
   mint_envelope_config GET "$ROUTE_PROPOSALS" "$ACTION_PROPOSALS" "$sponsor" "" -3600 || {
     fail_record "envelope-expired-refused" "the product minter produced no envelope"
     return
   }
   config="$MINTED_CONFIG"
-  http_request GET "${worker}${ROUTE_PROPOSALS}" "" "$config"
-  response="$HTTP_RESPONSE"
-  status="$(status_of "$response")"
-  code="$(problem_code "$(body_of "$response")")"
-  if [[ "$status" == "401" && "$code" == "UNAUTHORIZED" ]]; then
+  http_request GET "${worker}${ROUTE_PROPOSALS}" "" "$config" || {
+    fail_record "envelope-expired-refused" "the expired-envelope request did not settle cleanly"
+    return
+  }
+  if validate_http_response problem 401 UNAUTHORIZED; then
     pass_record "envelope-expired-refused" "an envelope one hour past its expiry was refused 401 UNAUTHORIZED"
   else
-    fail_record "envelope-expired-refused" "expected 401 UNAUTHORIZED on expired envelope, observed ${status} ${code:-<no code>}"
+    fail_record "envelope-expired-refused" "the expiry response failed the exact 401 UNAUTHORIZED ProblemDocument contract"
   fi
 }
 
@@ -1845,17 +1890,26 @@ assert_expired_envelope_refused() {
 # ---------------------------------------------------------------------------
 
 assert_bearer_on_sponsor_route_refused() {
-  local worker="$1" response status code
-  # The bearer travels in a stdin config document, never in argv.
-  http_request GET "${worker}${ROUTE_PROPOSALS}" "" \
-    "header = \"authorization: Bearer ${ASIMP_S6_FELLOW_TOKEN}\""
-  response="$HTTP_RESPONSE"
-  status="$(status_of "$response")"
-  code="$(problem_code "$(body_of "$response")")"
-  if [[ "$status" == "403" && "$code" == "WRONG_PRINCIPAL" ]]; then
-    pass_record "bearer-on-sponsor-route-refused" "a Fellow bearer on ${ROUTE_PROPOSALS} was refused with exactly 403 WRONG_PRINCIPAL"
+  local worker="$1" bearer_config
+  # The exact same bearer first has to prove it is a live Fellow credential on
+  # the mounted hello route. A shape-valid garbage token cannot green a
+  # refusal-only test. The bearer stays in the anonymous stdin config stream.
+  bearer_config="header = \"authorization: Bearer ${ASIMP_S6_FELLOW_TOKEN}\""
+  if ! http_request GET "${worker}${ROUTE_HELLO}" "" "$bearer_config" ||
+     ! validate_http_response hello; then
+    fail_record "bearer-live-on-fellow-route" "the Fellow bearer failed the exact 200 EnrollmentHelloResponse contract"
+    fail_record "bearer-on-sponsor-route-refused" "the sponsor-route refusal is not evidence because the bearer was not first proven live"
+    return
+  fi
+  pass_record "bearer-live-on-fellow-route" "the same in-memory bearer received an exact 200 EnrollmentHelloResponse on ${ROUTE_HELLO}"
+  if ! http_request GET "${worker}${ROUTE_PROPOSALS}" "" "$bearer_config"; then
+    fail_record "bearer-on-sponsor-route-refused" "the sponsor-route bearer request did not settle cleanly"
+    return
+  fi
+  if validate_http_response problem 403 WRONG_PRINCIPAL; then
+    pass_record "bearer-on-sponsor-route-refused" "that same live Fellow bearer was refused by ${ROUTE_PROPOSALS} with the exact 403 WRONG_PRINCIPAL ProblemDocument"
   else
-    fail_record "bearer-on-sponsor-route-refused" "expected 403 WRONG_PRINCIPAL, observed ${status} ${code:-<no code>}"
+    fail_record "bearer-on-sponsor-route-refused" "the sponsor-route response failed the exact 403 WRONG_PRINCIPAL ProblemDocument contract"
   fi
 }
 
@@ -1868,15 +1922,12 @@ assert_bearer_on_sponsor_route_refused() {
 # and a logged-in browser gets exactly that refusal, so holding an apex session
 # buys nothing on `a.`.
 assert_cookie_changed_nothing() {
-  local worker="$1" response status code
-  http_request GET "${worker}${ROUTE_PROPOSALS}" "" ""
-  response="$HTTP_RESPONSE"
-  status="$(status_of "$response")"
-  code="$(problem_code "$(body_of "$response")")"
-  if [[ "$status" == "403" && "$code" == "WRONG_PRINCIPAL" ]]; then
+  local worker="$1"
+  if http_request GET "${worker}${ROUTE_PROPOSALS}" "" "" &&
+     validate_http_response problem 403 WRONG_PRINCIPAL; then
     pass_record "no-credential-differential" "a sessionless client on ${ROUTE_PROPOSALS} stayed at exactly 403 WRONG_PRINCIPAL, matching the logged-in browser's agent-host result"
   else
-    fail_record "no-credential-differential" "the sessionless control returned ${status} ${code:-<no code>} instead of 403 WRONG_PRINCIPAL, so it no longer matches the browser's agent-host result"
+    fail_record "no-credential-differential" "the sessionless control failed the exact 403 WRONG_PRINCIPAL ProblemDocument contract"
   fi
 }
 
@@ -1885,26 +1936,32 @@ assert_cookie_changed_nothing() {
 # ---------------------------------------------------------------------------
 
 assert_receipt_attributed() {
-  local worker="$1" sponsor="$2" config response status
+  local worker="$1" sponsor="$2" config other_sponsor
   [[ -n "$RECEIPT" ]] || { fail_record "agora-origination-attributed" "no receipt to confirm"; return; }
   mint_envelope_config GET "$ROUTE_PROPOSALS" "$ACTION_PROPOSALS" "$sponsor" "" || {
     fail_record "agora-origination-attributed" "the product minter produced no envelope"
     return
   }
   config="$MINTED_CONFIG"
-  http_request GET "${worker}${ROUTE_PROPOSALS}" "" "$config"
-  response="$HTTP_RESPONSE"
-  status="$(status_of "$response")"
-  if [[ "$status" != "200" ]]; then
-    fail_record "agora-origination-attributed" "could not read the sponsor's proposals (status ${status})"
+  if ! http_request GET "${worker}${ROUTE_PROPOSALS}" "" "$config" ||
+     ! validate_http_response proposals-present "$RECEIPT"; then
+    fail_record "agora-origination-attributed" "the current sponsor did not receive exactly one matching pending proposal card"
     return
   fi
-  # Fixed-string, never a regex: an enrollment id is data, and treating data as
-  # a pattern is how an unexpected character silently changes what matched.
-  if printf '%s' "$(body_of "$response")" | grep -qF -- "$RECEIPT"; then
-    pass_record "agora-origination-attributed" "the enrollment minted by the real Server Action is attributed to this sponsor in deployed D1"
+  pass_record "agora-origination-attributed" "the claimed enrollment appears exactly once as a pending proposal under the minting sponsor"
+
+  other_sponsor="usr_s6_other_sponsor"
+  [[ "$other_sponsor" != "$sponsor" ]] || other_sponsor="usr_s6_other_sponsor_2"
+  mint_envelope_config GET "$ROUTE_PROPOSALS" "$ACTION_PROPOSALS" "$other_sponsor" "" || {
+    fail_record "agora-origination-not-cross-attributed" "the product minter produced no opposite-sponsor envelope"
+    return
+  }
+  config="$MINTED_CONFIG"
+  if http_request GET "${worker}${ROUTE_PROPOSALS}" "" "$config" &&
+     validate_http_response proposals-absent "$RECEIPT"; then
+    pass_record "agora-origination-not-cross-attributed" "a distinct signed sponsor received a valid proposal list with zero cards for the claimed enrollment"
   else
-    fail_record "agora-origination-attributed" "the receipted enrollment is not present under this sponsor's attribution"
+    fail_record "agora-origination-not-cross-attributed" "the opposite-sponsor list was invalid or exposed the claimed enrollment"
   fi
 }
 
@@ -2168,10 +2225,6 @@ self_test() {
   check "origin-rejects-path" "$r" "no"
 
   check "origin-host-strips-port" "$(origin_host "https://p.vercel.app:8443/")" "p.vercel.app"
-  check "problem-code-extracted" "$(problem_code '{"code":"WRONG_PRINCIPAL","status":403}')" "WRONG_PRINCIPAL"
-  check "problem-code-absent-is-empty" "$(problem_code '{"status":403}')" ""
-  check "status-split" "$(status_of $'{"a":1}\n403')" "403"
-  check "body-split" "$(body_of $'{"a":1}\n403')" '{"a":1}'
   check "json-string-escapes-quote" "$(json_string 'a"b')" 'a\"b'
   check "secret-vars-declared" "${#SECRET_VARS[@]}" "3"
 
@@ -2773,6 +2826,32 @@ self_test() {
   settle_selftest_child "registered-child-bounded-settlement" "$reg_victim" || true
   check "child-record-armed-then-disarmed" "${armed}:${#CHILD_PIDS[@]}" "1:0"
 
+  # EPERM/other inspection errors are not ESRCH. They must retain ownership and
+  # return cleanup-unproven until an exact later inspection can prove absence.
+  clear_child_records
+  true &
+  local inspection_direct_pid=$!
+  register_selftest_child "$inspection_direct_pid"
+  KERNEL_INSPECTION_FAILURE_PLANT=direct
+  local direct_inspection="accepted"
+  direct_child_settled_before_wait "$inspection_direct_pid" || direct_inspection="refused"
+  check "direct-inspection-error-refuses-settlement" \
+    "${direct_inspection}:${#CHILD_PIDS[@]}" "refused:1"
+  KERNEL_INSPECTION_FAILURE_PLANT=""
+  settle_selftest_child "direct-inspection-error-owner-eventually-reaped" \
+    "$inspection_direct_pid" || true
+
+  clear_child_records
+  KERNEL_INSPECTION_FAILURE_PLANT=group
+  local group_inspection_status=0
+  run_bounded 10 "$bounded_out" - bash -c 'exit 0' || group_inspection_status=$?
+  check "group-inspection-error-is-cleanup-unproven" "$group_inspection_status" \
+    "$EX_CLEANUP_UNPROVEN"
+  check "group-inspection-error-retains-owner" "${#CHILD_PIDS[@]}" "1"
+  KERNEL_INSPECTION_FAILURE_PLANT=""
+  reap_children
+  check "group-inspection-error-owner-eventually-reaped" "${#CHILD_PIDS[@]}" "0"
+
   # Negative: unregister must remove ONLY the exact numeric pid. A value with
   # glob or regex characters must not match, and must not remove a real entry.
   clear_child_records
@@ -2821,42 +2900,51 @@ self_test() {
   sweep_plant "error-exit-sweeps-group" "exit 9" 10
   sweep_plant "timeout-sweeps-group" "sleep 45" 1
 
-  # Deterministic spawn/register race: the nested launcher pauses after `$!`
-  # but before registration. TERM must latch, ownership must then be adopted,
-  # and cleanup must retire the READY supervisor before START forks the payload.
-  local prereg_capture prereg_ready prereg_release prereg_payload
-  local prereg_status=0 prereg_ready_seen="" prereg_last="" prereg_line=""
-  prereg_capture="$(new_marker "prereg-capture")" || prereg_capture=""
-  prereg_ready="$(new_marker "prereg-ready")" || prereg_ready=""
-  prereg_release="$(new_marker "prereg-release")" || prereg_release=""
-  prereg_payload="$(new_marker "prereg-payload")" || prereg_payload=""
-  if [[ -n "$prereg_capture" && -n "$prereg_ready" && -n "$prereg_release" &&
-        -n "$prereg_payload" ]]; then
-    bash "$SCRIPT_SELF" --self-test-pre-registration-signal-victim \
-      "$prereg_ready" "$prereg_release" "$prereg_payload" >"$prereg_capture" 2>&1 &
-    local prereg_pid=$!
-    register_selftest_child "$prereg_pid"
-    if await_marker_value "$prereg_ready" ready; then
-      prereg_ready_seen="$marker_value"
-      kill -TERM "$prereg_pid" 2>/dev/null || true
-      printf 'release' >"$prereg_release"
+  # Deterministic launcher-window plants. Each real signal is exercised both
+  # after `$!`/before provisional registration and after ACTIVE is cleared at
+  # the handoff/before the latch snapshot. Exact byte comparison requires the
+  # one INTERRUPTED record followed by the positive lifecycle terminal, with a
+  # final LF and no extra/reordered record.
+  registration_signal_plant() {
+    local seam="$1" signal="$2" capture ready release payload expected err
+    local status=0 dispatch="failed" exact="mismatch" ready_seen=""
+    capture="$(new_marker "${seam}-${signal}-capture")" || return 0
+    ready="$(new_marker "${seam}-${signal}-ready")" || return 0
+    release="$(new_marker "${seam}-${signal}-release")" || return 0
+    payload="$(new_marker "${seam}-${signal}-payload")" || return 0
+    expected="$(new_marker "${seam}-${signal}-expected")" || return 0
+    err="$(new_marker "${seam}-${signal}-err")" || return 0
+    /usr/bin/perl -e '$SIG{INT}="DEFAULT"; $SIG{TERM}="DEFAULT"; exec @ARGV or die $!' -- \
+      bash "$SCRIPT_SELF" --self-test-registration-signal-victim \
+      "$seam" "$ready" "$release" "$payload" >"$capture" 2>"$err" &
+    local victim_pid=$!
+    register_selftest_child "$victim_pid"
+    if await_marker_value "$ready" ready; then
+      ready_seen="$marker_value"
+      if kill -"$signal" "$victim_pid" 2>/dev/null; then dispatch="sent"; fi
+      printf 'release' >"$release"
     fi
-    if direct_child_settled_before_wait "$prereg_pid"; then
-      wait "$prereg_pid" 2>/dev/null || prereg_status=$?
-      unregister_child "$prereg_pid"
+    if direct_child_settled_before_wait "$victim_pid"; then
+      wait "$victim_pid" 2>/dev/null || status=$?
+      unregister_child "$victim_pid"
     else
-      prereg_status="$EX_CLEANUP_UNPROVEN"
+      status="$EX_CLEANUP_UNPROVEN"
     fi
-    while IFS= read -r prereg_line; do prereg_last="$prereg_line"; done <"$prereg_capture"
-  else
-    prereg_status="$EX_FAIL"
-  fi
-  check "pre-registration-signal-barrier-armed" "$prereg_ready_seen" "ready"
-  check "pre-registration-signal-is-interruption" "$prereg_status" "$EX_FAIL"
-  check "pre-registration-signal-prevents-payload-fork" \
-    "$([[ -e "$prereg_payload" ]] && printf started || printf absent)" "absent"
-  check "pre-registration-signal-publishes-positive-lifecycle" "$prereg_last" \
-    "{\"suite\":\"${SUITE}\",\"record_type\":\"lifecycle-terminal\",\"status\":\"pass\",\"owned_same_process_groups\":\"settled\"}"
+    printf '%s\n%s\n' \
+      "{\"suite\":\"${SUITE}\",\"status\":\"blocked\",\"code\":\"INTERRUPTED\",\"bead\":\"asimposiumorg-vw3\",\"detail\":\"the run received SIG${signal} and every child process group was reaped\",\"reproduce\":\"${REPRODUCE}\"}" \
+      "{\"suite\":\"${SUITE}\",\"record_type\":\"lifecycle-terminal\",\"status\":\"pass\",\"owned_same_process_groups\":\"settled\"}" >"$expected"
+    cmp -s "$capture" "$expected" && exact="exact"
+    check "${seam}-${signal}-registration-barrier-armed" "$ready_seen" "ready"
+    check "${seam}-${signal}-dispatch-succeeded" "$dispatch" "sent"
+    check "${seam}-${signal}-is-interruption" "$status" "$EX_FAIL"
+    check "${seam}-${signal}-prevents-payload-fork" \
+      "$([[ -e "$payload" ]] && printf started || printf absent)" "absent"
+    check "${seam}-${signal}-exact-two-record-transcript" "$exact" "exact"
+  }
+  registration_signal_plant prereg TERM
+  registration_signal_plant prereg INT
+  registration_signal_plant handoff TERM
+  registration_signal_plant handoff INT
 
   # Causal: the TERM trap must reap a live descendant. A nested instance holds a
   # sleeper and waits; signalling it exercises on_signal against a real group.
@@ -3433,14 +3521,25 @@ main() {
     exit 0
   fi
 
-  # Hidden launcher-window polarity. The production hook pauses after `$!` but
-  # before provisional registration; the parent sends TERM while the trap can
-  # only latch it. Adoption then drains the latch before START, so this payload
-  # marker must remain absent.
-  if [[ "${1:-}" == "--self-test-pre-registration-signal-victim" ]]; then
-    SPAWN_REGISTRATION_READY_MARKER="${2:?ready marker required}"
-    SPAWN_REGISTRATION_RELEASE_MARKER="${3:?release marker required}"
-    local prereg_payload_marker="${4:?payload marker required}"
+  # Hidden launcher-window polarity. `prereg` pauses after `$!` and before
+  # provisional registration; `handoff` pauses immediately after ACTIVE=0 and
+  # before the pending latch snapshot. Both occur before START can fork payload.
+  if [[ "${1:-}" == "--self-test-registration-signal-victim" ]]; then
+    local registration_seam="${2:?registration seam required}"
+    local registration_ready="${3:?ready marker required}"
+    local registration_release="${4:?release marker required}"
+    local prereg_payload_marker="${5:?payload marker required}"
+    case "$registration_seam" in
+      prereg)
+        SPAWN_REGISTRATION_READY_MARKER="$registration_ready"
+        SPAWN_REGISTRATION_RELEASE_MARKER="$registration_release"
+        ;;
+      handoff)
+        SPAWN_HANDOFF_READY_MARKER="$registration_ready"
+        SPAWN_HANDOFF_RELEASE_MARKER="$registration_release"
+        ;;
+      *) exit "$EX_FAIL" ;;
+    esac
     run_bounded 45 /dev/null - \
       bash -c 'printf started >"$1"; while :; do IFS= read -r -t 30 _ || true; done' \
       _ "$prereg_payload_marker" || true
