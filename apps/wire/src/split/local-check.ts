@@ -2338,6 +2338,7 @@ async function main(): Promise<void> {
   check(
     "S3_sequence_2_working_pack_is_authenticated_and_carries_no_private_material",
     ownPack.response.status === 200 &&
+      recordField(ownPack.body, "profile") === "working" &&
       numberField(ownPack.body, "own_workshop_count") === 0 &&
       Array.isArray(ownPack.body.omitted) &&
       hasNoPrivateMaterial(

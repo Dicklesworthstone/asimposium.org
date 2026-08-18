@@ -3724,6 +3724,10 @@ test("the S-3 harness binds readiness to its child and excludes the deployed ent
   expect(checker).toContain('const localCounterFellowId = "s3-sequence-counter-fellow"');
   expect(checker).toContain("localS4FellowIdHeader]: localCounterFellowId,");
   expect(checker).toContain("counterFellowHeaders");
+  // Fable §17.1 names this stage as the `working` pack. A generic pack that
+  // merely happens to carry omitted[] is not the named gate.
+  expect(checker).toContain('recordField(ownPack.body, "profile") === "working"');
+  expect(worker).toContain('profile: "working",');
   // The shell must re-publish evidence rather than strip it back to four fields.
   expect(script).toContain("const STRING_EVIDENCE = [");
   expect(script).toContain("const INTEGER_EVIDENCE = [");

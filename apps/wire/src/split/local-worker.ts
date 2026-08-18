@@ -1944,6 +1944,7 @@ async function localWorkingPack(
   return json({
     session_id: session.id,
     problem_id: session.problem_id,
+    profile: "working",
     public_seq: cursors.public_seq,
     workshop_seq: cursors.workshop_seq,
     own_workshop_count: owned === null ? 0 : owned.n,
