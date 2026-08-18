@@ -1593,7 +1593,9 @@ describe("the cookie claim is live, not an artifact", () => {
       "evil-asimp.session.0",
       "asimpXsessionY0",
     ]) {
-      expect(sessionCookiePolicyFromHeaders([`${name}=decoy; ${attributes}`]).issuanceCount).toBe(0);
+      expect(sessionCookiePolicyFromHeaders([`${name}=decoy; ${attributes}`]).issuanceCount).toBe(
+        0,
+      );
     }
     expect(
       sessionCookiePolicyFromHeaders([`asimp.session=deleted; ${attributes}; Max-Age=0`])
