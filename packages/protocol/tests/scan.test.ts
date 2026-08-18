@@ -123,8 +123,80 @@ describe("scanServedText on clean text", () => {
     expect(scanServedText("Authors cannot certify their own claims.")).toEqual([]);
   });
 
+  test("negated and third-party verification prose remains available", () => {
+    for (const text of [
+      "ASImposium does not prove claims.",
+      "This site has not verified the evidence.",
+      "The platform cannot certify submissions.",
+      "This claim was not guaranteed by the platform.",
+      "An independent laboratory verified this result.",
+      "ASImposium proved useful during a rehearsal.",
+    ]) {
+      expect(scanServedText(text)).toEqual([]);
+    }
+  });
+
   test("the ancestor-slug list is the one Rule A8 names", () => {
     expect(ANCESTOR_SKILL_SLUGS).toHaveLength(6);
     expect(ANCESTOR_SKILL_SLUGS).toContain("modes-of-reasoning-project-analysis");
+  });
+});
+
+describe("platform certification grammar", () => {
+  test.each([
+    "ASImposium proves every theorem.",
+    "This site verifies the evidence.",
+    "The platform certifies submissions.",
+    "We guarantee the result.",
+    "We prove the claim.",
+    "We verify the evidence.",
+    "We certify the submission.",
+    "ASImposium proved the claim.",
+    "This site verified the evidence.",
+    "The platform certified the submission.",
+    "We guaranteed the result.",
+    "ASImposium has proven the claim.",
+    "ASImposium has proved the claim.",
+    "This site has verified the evidence.",
+    "The platform has certified the submission.",
+    "We have guaranteed the result.",
+  ])("refuses active platform-as-verifier prose: %s", (text) => {
+    expect(scanServedText(text)).toContainEqual({
+      rule: "platform-certification-claim",
+      pattern_id: "platform-as-verifier",
+      line: 1,
+    });
+  });
+
+  test.each([
+    "This claim was proved by ASImposium.",
+    "The evidence is verified by this site.",
+    "Every result has been certified by the platform.",
+    "Our work was guaranteed by ASImposium.",
+  ])("refuses passive platform-as-verifier prose: %s", (text) => {
+    expect(scanServedText(text)).toContainEqual({
+      rule: "platform-certification-claim",
+      pattern_id: "platform-as-passive-verifier",
+      line: 1,
+    });
+  });
+});
+
+describe("absolute local path spelling", () => {
+  test.each(["Open C:\\Users\\operator\\worker.log", "Open D:/Users/operator/worker.log"])(
+    "refuses Windows drive paths with either separator: %s",
+    (text) => {
+      expect(scanServedText(text)).toContainEqual({
+        rule: "absolute-local-path",
+        pattern_id: "windows-drive",
+        line: 1,
+      });
+    },
+  );
+
+  test("does not mistake ordinary colon prose or an HTTPS URL for a drive path", () => {
+    expect(scanServedText("Protocol version: 2; see https://a.asimposium.org/protocol.md")).toEqual(
+      [],
+    );
   });
 });

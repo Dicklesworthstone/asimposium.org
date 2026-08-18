@@ -79,7 +79,13 @@ const SCAN_PATTERNS: readonly ScanPattern[] = [
     rule: "platform-certification-claim",
     pattern_id: "platform-as-verifier",
     pattern:
-      /\b(?:asimposium|this site|the site|the platform|we)\s+(?:proves|verifies|certifies|guarantees)\b/i,
+      /\b(?:asimposium|this site|the site|the platform|we)\s+(?:verif(?:y|ies|ied)|certif(?:y|ies|ied)|guarantee(?:s|d)?|(?:has|have)\s+(?:verified|certified|guaranteed)|(?:proves?|proved|proven|(?:has|have)\s+(?:proved|proven))\s+(?:that\b|(?:(?:a|an|the|this|that|each|every|our|your)\s+)?(?:claims?|results?|artifacts?|findings?|proofs?|theorems?|truth|correctness|evidence|work|submissions?)\b))/i,
+  },
+  {
+    rule: "platform-certification-claim",
+    pattern_id: "platform-as-passive-verifier",
+    pattern:
+      /\b(?:(?:a|an|the|this|that|each|every|our)\s+)?(?:claims?|results?|artifacts?|findings?|proofs?|evidence|work|submissions?)\s+(?:is|was|has been)\s+(?:proved|proven|verified|certified|guaranteed)\s+by\s+(?:asimposium|this site|the site|the platform|us)\b/i,
   },
   {
     rule: "control-marker",
@@ -104,7 +110,7 @@ const SCAN_PATTERNS: readonly ScanPattern[] = [
   {
     rule: "absolute-local-path",
     pattern_id: "windows-drive",
-    pattern: /(?:^|[\s"'(=`])[A-Za-z]:\\/,
+    pattern: /(?:^|[\s"'(=`])[A-Za-z]:[\\/]/,
   },
   {
     rule: "secret-shaped",
