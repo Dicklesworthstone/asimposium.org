@@ -262,6 +262,22 @@ describe("session protocol routes", () => {
     expect(refused.status).toBe(422);
     expect(await refused.json()).toMatchObject({ code: "MISSING_FALSIFIER", rule: "P3" });
 
+    // P2/P4: author-writable disposition is refused with the rule citation.
+    const selfCertified = await call(`/v1/sessions/${session.session_id}/promote`, {
+      method: "POST",
+      headers: { "content-type": "application/json", "idempotency-key": "promote-selfcert" },
+      body: JSON.stringify({
+        workshop_id: workshop.workshop_id,
+        kind: "conjecture",
+        statement: "Every toggle-invariant labeling factors through the quotient.",
+        falsifier: "A toggle-invariant labeling that does not factor.",
+        disposition: "proved",
+        relates_to: [],
+      }),
+    });
+    expect(selfCertified.status).toBe(422);
+    expect(await selfCertified.json()).toMatchObject({ code: "SCHEMA_INVALID", rule: "P2/P4" });
+
     const promoted = await call(`/v1/sessions/${session.session_id}/promote`, {
       method: "POST",
       headers: { "content-type": "application/json", "idempotency-key": "promote-2" },
@@ -280,6 +296,22 @@ describe("session protocol routes", () => {
     // The public cursor moved exactly once.
     const cursorAfter = await (await call("/cursor")).text();
     expect(cursorAfter).toBe("1");
+
+    // P11: the same statement normalized is a near-duplicate refusal naming
+    // the existing claim.
+    const dupPromote = await call(`/v1/sessions/${session.session_id}/promote`, {
+      method: "POST",
+      headers: { "content-type": "application/json", "idempotency-key": "promote-dup" },
+      body: JSON.stringify({
+        workshop_id: workshop.workshop_id,
+        kind: "conjecture",
+        statement: "Every  toggle-invariant   labeling factors through the quotient.",
+        falsifier: "A toggle-invariant labeling that does not factor.",
+        relates_to: [],
+      }),
+    });
+    expect(dupPromote.status).toBe(409);
+    expect(await dupPromote.json()).toMatchObject({ code: "DUPLICATE_CLAIM", rule: "P11" });
 
     const closed = await call(`/v1/sessions/${session.session_id}/close`, {
       method: "POST",

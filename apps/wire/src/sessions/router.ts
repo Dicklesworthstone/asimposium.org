@@ -21,6 +21,7 @@ import { authorizeFellowWrite } from "../enrollment/service";
 import type { Env } from "../env";
 import { problem } from "../http/envelope";
 import { KraterProblemNotFoundError, readCursor, writeClaim } from "../krater/krater";
+import { duplicateClaimRefusal, normHash, rejectAuthoritativeFields } from "../split/policy";
 
 /**
  * The session protocol (Fable §7): open → pack → workshop push → promote →
@@ -634,6 +635,25 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
     const key = idempotencyKeyOrRefusal(c.req.raw, c.req.path);
     if (key instanceof Response) return key;
     const rawBody = await readJsonBody(c.req.raw);
+    // The validator (P-rules; W5.4 extends this seam). P2/P4 first: a promote
+    // carrying author-writable disposition/proof/certification fields is a
+    // self-certification attempt and refuses with the rule citation, before
+    // the strict body parse runs.
+    if (rawBody !== undefined && typeof rawBody === "object" && rawBody !== null) {
+      const authoritative = rejectAuthoritativeFields(rawBody as Record<string, unknown>);
+      if (authoritative !== null) {
+        return problem({
+          status: 422,
+          code: "SCHEMA_INVALID",
+          title: "Authoritative fields are not author-writable",
+          detail:
+            "The promotion carried a disposition, proof, confidence, certification, or status-upgrade field.",
+          fixHint: authoritative.fixHint,
+          rule: "P2/P4",
+          extensions: { schema: "https://a.asimposium.org/schemas/sessions.v1.json" },
+        });
+      }
+    }
     const parsed = PromoteRequestSchema.safeParse(rawBody);
     if (!parsed.success) {
       return problem({
@@ -646,7 +666,6 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
       });
     }
 
-    // The validator (P-rules; W5.4 extends this seam).
     if (parsed.data.kind === "conjecture" && parsed.data.falsifier === undefined) {
       return problem({
         status: 422,
@@ -668,6 +687,31 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
           },
         },
       });
+    }
+
+    // P11: the norm-hash near-duplicate gate. Same normalized statement on
+    // the same problem is a refusal carrying the existing claim id.
+    const candidateHash = await normHash(parsed.data.statement);
+    const existingClaims = await db
+      .prepare("SELECT id, statement FROM claims WHERE problem_id = ?")
+      .bind(session.problem_id)
+      .all<{ id: string; statement: string }>();
+    for (const existing of existingClaims.results ?? []) {
+      if ((await normHash(existing.statement)) === candidateHash) {
+        const refusal = duplicateClaimRefusal(existing.id);
+        return problem({
+          status: 409,
+          code: refusal.code,
+          title: "A near-duplicate claim already exists",
+          detail: `The normalized statement matches ${refusal.existingId} on this problem.`,
+          fixHint: refusal.fixHint,
+          rule: refusal.rule,
+          extensions: {
+            schema: "https://a.asimposium.org/schemas/sessions.v1.json",
+            existing_claim_id: refusal.existingId,
+          },
+        });
+      }
     }
 
     const decision = authorizeFellowWrite({
