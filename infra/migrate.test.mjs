@@ -20,6 +20,7 @@ import {
   assertReadOnlySql,
   assertRehearsalIsNotAnApplication,
   assertRemoteTargetIdentity,
+  bootstrapInstallSql,
   bootstrapTargetDisposition,
   catalogFingerprint,
   classifySchemaLineage,
@@ -436,6 +437,11 @@ function recordingRemoteApplyTransport(options = {}) {
     atomicity: "d1-query-implicit-transaction-v1",
     executions,
     execute: async (request) => {
+      executions.push(request);
+      if (options.onExecute !== undefined) return options.onExecute(request);
+      return { database_id: STAGING_DATABASE_ID };
+    },
+    executeFile: async (request) => {
       executions.push(request);
       if (options.onExecute !== undefined) return options.onExecute(request);
       return { database_id: STAGING_DATABASE_ID };
@@ -1108,6 +1114,204 @@ const cases = [
         assert.equal(refusal.code, "BOOTSTRAP_REMOTE_UNAVAILABLE");
         assert.equal(refusal.phase, "plan");
       }
+    },
+  },
+  {
+    name: "hosted _cf_KV is platform metadata only in its exact catalog shape",
+    execute() {
+      const migrations = readMigrationDirectory(join(repositoryRoot, "db/migrations"));
+      const manifest = readBootstrapManifest(repositoryRoot);
+      const exactKv = {
+        type: "table",
+        name: "_cf_KV",
+        table: "_cf_KV",
+        sql: "CREATE TABLE _cf_KV (\n        key TEXT PRIMARY KEY,\n        value BLOB\n      ) WITHOUT ROWID",
+      };
+      assert.equal(
+        classifySchemaLineage({
+          catalog: [exactKv],
+          journal: [],
+          lineage: [],
+          migrations,
+          manifest,
+        }).kind,
+        "provably-empty",
+        "a fresh hosted D1 carries only the runtime's own _cf_KV",
+      );
+      assert.equal(
+        classifySchemaLineage({
+          catalog: [{ ...exactKv, sql: "CREATE TABLE _cf_KV (id TEXT);" }],
+          journal: [],
+          lineage: [],
+          migrations,
+          manifest,
+        }).kind,
+        "unknown-or-contaminated",
+        "a _cf_KV whose bytes drifted is catalog evidence, not metadata",
+      );
+      // The fingerprint must ignore the exact platform table so local and
+      // remote catalogs of the same product schema pin the same digest.
+      const product = {
+        type: "table",
+        name: "product",
+        table: "product",
+        sql: "CREATE TABLE product (id TEXT);",
+      };
+      assert.equal(catalogFingerprint([product]), catalogFingerprint([product, exactKv]));
+    },
+  },
+  {
+    name: "authorized remote bootstrap installs byte-exactly and reclassifies idempotently",
+    async execute() {
+      const capture = () => {
+        const stdout = [];
+        const stderr = [];
+        return {
+          stdout,
+          stderr,
+          dependencies: {
+            stdout: (line) => stdout.push(line),
+            stderr: (line) => stderr.push(line),
+            now: () => "2026-08-17T00:00:00.000Z",
+          },
+        };
+      };
+      const fixture = remoteCliApplyFixtureRoot("remote-cli-bootstrap");
+      const manifest = readBootstrapManifest(fixture.root);
+      const artifact = manifest.artifacts[0];
+      const FIXED_APPLIED_AT = "2026-08-17T00:00:00.000Z";
+      const expectedSql = bootstrapInstallSql(artifact, FIXED_APPLIED_AT);
+      const cfKvRow = remoteCatalogRow(
+        "table",
+        "_cf_KV",
+        "CREATE TABLE _cf_KV (\n        key TEXT PRIMARY KEY,\n        value BLOB\n      ) WITHOUT ROWID",
+      );
+      const catalog = [cfKvRow];
+      const journal = [];
+      const lineage = [];
+      let executeCalls = 0;
+      const transport = recordingRemoteApplyTransport({
+        catalog,
+        journal,
+        lineage,
+        onExecute(request) {
+          executeCalls += 1;
+          // Strict byte equality before any state moves, same discipline as
+          // the forward-apply plant.
+          if (request.sql !== expectedSql) throw new Error("REMOTE_BOOTSTRAP_SQL_MISMATCH");
+          catalog.splice(
+            0,
+            catalog.length,
+            cfKvRow,
+            ...fixture.beforeCatalog.filter((row) => row.tbl_name !== "_cf_KV"),
+            remoteCatalogRow("table", runnerLineageCatalog.name, runnerLineageCatalog.sql),
+          );
+          lineage.push({
+            ...bootstrapLineageRow(artifact.schema_digest),
+            artifact_digest: artifact.digest,
+          });
+          return { database_id: STAGING_DATABASE_ID };
+        },
+      });
+      const runCapture = capture();
+      const validatedTopology = validateEnvironments(repositoryRoot);
+      const args = [
+        "--env",
+        "staging",
+        "--resolved-database-id",
+        STAGING_DATABASE_ID,
+        "--bootstrap",
+        "0015-final-schema-v1",
+        "--i-authorize-disposable-remote-bootstrap",
+        "--apply",
+      ];
+      const applyExit = await runMigrationCli(args, {
+        ...runCapture.dependencies,
+        root: fixture.root,
+        environmentValidator: () => validatedTopology,
+        remoteTransportFactory: () => transport,
+      });
+      assert.equal(applyExit, 0, runCapture.stderr.join(""));
+      assert.equal(executeCalls, 1, "exactly one install batch crossed the seam");
+      const receipt = JSON.parse(runCapture.stdout.join("").trim());
+      assert.equal(receipt.phase, "bootstrap");
+      assert.equal(receipt.lineage, "bootstrap-baseline15");
+      assert.equal(receipt.idempotent, false);
+
+      // A second identical run re-observes the installed lineage and applies
+      // nothing.
+      const secondCapture = capture();
+      const secondExit = await runMigrationCli(args, {
+        ...secondCapture.dependencies,
+        root: fixture.root,
+        environmentValidator: () => validatedTopology,
+        remoteTransportFactory: () => transport,
+      });
+      assert.equal(secondExit, 0, secondCapture.stderr.join(""));
+      assert.equal(executeCalls, 1, "the repeated authorized run must stay read-only");
+      const secondReceipt = JSON.parse(secondCapture.stdout.join("").trim());
+      assert.equal(secondReceipt.idempotent, true);
+
+      // Without the operator flag the same target refuses before any
+      // observation, even though authorization succeeded moments ago.
+      const flaggedOffCapture = capture();
+      const describeBefore = transport.calls.describe;
+      const flaggedOffExit = await runMigrationCli(
+        args.filter((argument) => argument !== "--i-authorize-disposable-remote-bootstrap"),
+        {
+          ...flaggedOffCapture.dependencies,
+          root: fixture.root,
+          environmentValidator: () => validatedTopology,
+          remoteTransportFactory: () => transport,
+        },
+      );
+      assert.equal(flaggedOffExit, 1);
+      assert.equal(transport.calls.describe, describeBefore, "no observation without the flag");
+      assert.equal(
+        JSON.parse(flaggedOffCapture.stderr.join("").trim()).code,
+        "BOOTSTRAP_REMOTE_UNAVAILABLE",
+      );
+
+      // The flag is scoped to the staging preview: production with the flag
+      // still refuses before a transport exists.
+      let productionFactoryCalls = 0;
+      const productionCapture = capture();
+      const productionExit = await runMigrationCli(
+        [
+          "--env",
+          "production",
+          "--resolved-database-id",
+          STAGING_DATABASE_ID,
+          "--bootstrap",
+          "0015-final-schema-v1",
+          "--i-authorize-disposable-remote-bootstrap",
+          "--apply",
+        ],
+        {
+          ...productionCapture.dependencies,
+          root: fixture.root,
+          environmentValidator: () => validatedTopology,
+          remoteTransportFactory: () => {
+            productionFactoryCalls += 1;
+            throw new Error("production reached remote transport factory");
+          },
+        },
+      );
+      assert.equal(productionExit, 1);
+      assert.equal(productionFactoryCalls, 0);
+
+      // The flag without --bootstrap is an argument error, not a silent no-op.
+      const bareFlagCapture = capture();
+      const bareFlagExit = await runMigrationCli(
+        ["--env", "staging", "--i-authorize-disposable-remote-bootstrap"],
+        {
+          ...bareFlagCapture.dependencies,
+          root: fixture.root,
+          environmentValidator: () => validatedTopology,
+        },
+      );
+      assert.equal(bareFlagExit, 1);
+      assert.equal(JSON.parse(bareFlagCapture.stderr.join("").trim()).code, "INVALID_ARGUMENT");
     },
   },
   {

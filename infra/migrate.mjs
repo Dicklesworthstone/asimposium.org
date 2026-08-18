@@ -1,6 +1,15 @@
 import { Buffer } from "node:buffer";
 import { createHash } from "node:crypto";
-import { existsSync, lstatSync, readdirSync, readFileSync } from "node:fs";
+import {
+  existsSync,
+  lstatSync,
+  mkdtempSync,
+  readdirSync,
+  readFileSync,
+  rmSync,
+  writeFileSync,
+} from "node:fs";
+import { tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { performance } from "node:perf_hooks";
 import { fileURLToPath } from "node:url";
@@ -581,6 +590,13 @@ const WRANGLER_LOCAL_METADATA_SQL = `CREATE TABLE _cf_METADATA (
         key INTEGER PRIMARY KEY,
         value BLOB
       )`;
+// The remote (hosted) D1 runtime carries `_cf_KV` instead of `_cf_METADATA`.
+// Captured byte-exact from a freshly provisioned remote database; like the
+// local metadata table it is platform control only in this exact shape.
+const WRANGLER_REMOTE_KV_SQL = `CREATE TABLE _cf_KV (
+        key TEXT PRIMARY KEY,
+        value BLOB
+      ) WITHOUT ROWID`;
 
 function isSqliteInternalCatalogObject(entry) {
   return entry.name.startsWith("sqlite_");
@@ -596,6 +612,17 @@ function isExactWranglerLocalMetadata(entry) {
     entry.name === "_cf_METADATA" &&
     entry.table === "_cf_METADATA" &&
     entry.sql === WRANGLER_LOCAL_METADATA_SQL
+  );
+}
+
+// Same discipline for the hosted runtime's `_cf_KV`: exact bytes or it is
+// catalog evidence, never platform metadata.
+function isExactWranglerRemoteKv(entry) {
+  return (
+    entry.type === "table" &&
+    entry.name === "_cf_KV" &&
+    entry.table === "_cf_KV" &&
+    entry.sql === WRANGLER_REMOTE_KV_SQL
   );
 }
 
@@ -616,12 +643,17 @@ function isCatalogFingerprintControl(entry) {
     isSqliteInternalCatalogObject(entry) ||
     isExactLedgerControl(entry) ||
     isExactLineageControl(entry) ||
-    isExactWranglerLocalMetadata(entry)
+    isExactWranglerLocalMetadata(entry) ||
+    isExactWranglerRemoteKv(entry)
   );
 }
 
 function isEmptyTargetControl(entry) {
-  return isSqliteInternalCatalogObject(entry) || isExactWranglerLocalMetadata(entry);
+  return (
+    isSqliteInternalCatalogObject(entry) ||
+    isExactWranglerLocalMetadata(entry) ||
+    isExactWranglerRemoteKv(entry)
+  );
 }
 
 /**
@@ -851,14 +883,25 @@ export function localPlanState(snapshot, migrations, manifest) {
 
 /**
  * The local-only bootstrap boundary is testable with an injected observation.
- * A remote target must fail before the callback that would open/read D1 runs.
+ * A remote target fails before the callback that would open/read D1 runs —
+ * unless the operator has explicitly authorized a disposable remote run, in
+ * which case the caller supplies that observation here. The authorization
+ * decision (flag + staging-preview topology) is made by the caller; this
+ * function enforces only that no remote observation happens without one.
  */
-export async function readBootstrapSnapshotOrRefuse(environment, observeLocalD1) {
+export async function readBootstrapSnapshotOrRefuse(
+  environment,
+  observeLocalD1,
+  observeAuthorizedRemoteD1 = undefined,
+) {
   if (environment.kind !== "local") {
-    fail(
-      "BOOTSTRAP_REMOTE_UNAVAILABLE",
-      "Bootstrap is intentionally local-only until an operator authorizes a disposable remote D1 run.",
-    );
+    if (typeof observeAuthorizedRemoteD1 !== "function") {
+      fail(
+        "BOOTSTRAP_REMOTE_UNAVAILABLE",
+        "Bootstrap is intentionally local-only until an operator authorizes a disposable remote D1 run.",
+      );
+    }
+    return observeAuthorizedRemoteD1();
   }
   return observeLocalD1();
 }
@@ -1865,6 +1908,8 @@ function assertRemoteTransport(transport) {
 export const REMOTE_OBSERVATION_DEADLINE_MS = 15_000;
 /** Any single string a remote target may return. Generous enough for DDL. */
 export const MAX_REMOTE_STRING_BYTES = 8_192;
+/** The bootstrap install batch is an upload; bound it well past the current artifact. */
+export const REMOTE_BOOTSTRAP_SQL_MAX_BYTES = 512 * 1024;
 /** Every string across one whole observation, summed. */
 export const MAX_REMOTE_RESPONSE_BYTES = 256 * 1024;
 
@@ -2666,6 +2711,45 @@ function remotePrimaryRowsOrRefuse(result) {
 }
 
 /**
+ * File-import responses carry one summary group per upload rather than one
+ * row set per statement. Every group must be a primary-confirmed success; a
+ * failed group fails the whole install and leaves the post-install lineage
+ * reclassification to report the true catalog state.
+ *
+ * The file-import child prefixes its JSON array with an upload banner on
+ * stdout ("Checking if file needs uploading", the upload hash line). The
+ * extraction is exact: the response body begins at the first line that opens
+ * the top-level array; anything else still fails JSON validation below.
+ */
+function remotePrimaryFileResultsOrRefuse(result) {
+  if (
+    result !== null &&
+    typeof result === "object" &&
+    !Array.isArray(result) &&
+    typeof result.stdout === "string" &&
+    !result.stdout.startsWith("[")
+  ) {
+    const marker = result.stdout.indexOf("\n[");
+    if (marker >= 0) result = { ...result, stdout: result.stdout.slice(marker + 1) };
+  }
+  const results = remoteCommandResultsOrRefuse(result);
+  for (const group of results) {
+    const meta = ownDataValue(group, "meta", "REMOTE_D1_TRANSPORT_FAILED");
+    if (
+      meta === null ||
+      typeof meta !== "object" ||
+      Array.isArray(meta) ||
+      ownDataValue(meta, "served_by_primary", "REMOTE_D1_TRANSPORT_FAILED") !== true
+    ) {
+      fail(
+        "REMOTE_D1_BOOTSTRAP_FAILED",
+        "The staging D1 file import was not confirmed as a primary-served success.",
+      );
+    }
+  }
+}
+
+/**
  * Build the only default remote transport. It is staging-only and consumes the
  * locally resolved authority exactly once before a child process is started.
  * Each child receives the captured account id in its deliberately minimal
@@ -2684,9 +2768,11 @@ function remotePrimaryRowsOrRefuse(result) {
  * https://developers.cloudflare.com/api/resources/d1/subresources/database/methods/query/
  * https://developers.cloudflare.com/d1/sql-api/foreign-keys/
  * This seam therefore submits one `--command` batch for a forward migration and
- * its journal row. It does not use, or claim anything about, Wrangler file
- * import atomicity. Remote bootstrap remains separately refused until its empty
- * catalog race has a dedicated disposable-D1 proof.
+ * its journal row. The bootstrap install uses the separate file-import seam
+ * (`executeFile`): the hosted --command path mis-parses large trigger-bearing
+ * batches, and the file seam's summary groups carry the same primary-confirmation
+ * metadata. The in-batch empty guard and the post-install lineage
+ * reclassification remain the race and truth authorities for both paths.
  */
 export function createWranglerRemoteTransport({
   root,
@@ -2769,6 +2855,42 @@ export function createWranglerRemoteTransport({
       );
       return { database_id: databaseId };
     },
+    // The bootstrap install batch is far past the size at which the hosted
+    // /query --command path mis-parses trigger bodies (observed 2026-08-17:
+    // "incomplete input" on an 88KB batch that parses cleanly via upload).
+    // File import is one server-side processing unit; the in-batch empty
+    // guard remains the race authority and the post-install reclassification
+    // remains the truth check.
+    executeFile: async ({ sql, database_id, signal, timeoutMs }) => {
+      if (database_id !== databaseId) {
+        fail(
+          "REMOTE_TARGET_IDENTITY_MISMATCH",
+          "The remote bootstrap target was not the resolved staging identity.",
+        );
+      }
+      if (
+        typeof sql !== "string" ||
+        sql.length === 0 ||
+        sql.length > REMOTE_BOOTSTRAP_SQL_MAX_BYTES
+      ) {
+        fail("REMOTE_D1_BOOTSTRAP_SQL_INVALID", "The remote bootstrap batch is not bounded SQL.");
+      }
+      const directory = mkdtempSync(join(tmpdir(), "asimposium-bootstrap-"));
+      try {
+        const file = join(directory, "install.sql");
+        writeFileSync(file, sql, { mode: 0o600, flag: "wx" });
+        remotePrimaryFileResultsOrRefuse(
+          await run(
+            ["d1", "execute", databaseId, "--remote", "--yes", "--json", "--file", file],
+            signal,
+            timeoutMs,
+          ),
+        );
+        return { database_id: databaseId };
+      } finally {
+        rmSync(directory, { recursive: true, force: true });
+      }
+    },
   };
   // The privilege is granted here and nowhere else, and ONLY for this module's
   // own bounded runner. An injected `runCommand` is an arbitrary function this
@@ -2792,7 +2914,7 @@ export function bootstrapInstallSql(artifact, appliedAt) {
   // the lineage table, the empty journal, the witness, and every artifact
   // statement together. D1 command batches are the transaction boundary here;
   // explicit BEGIN/COMMIT is not portable through `wrangler d1 execute`.
-  const guard = `(SELECT CASE WHEN COUNT(*) = 0 THEN 1 ELSE 0 END FROM sqlite_schema WHERE substr(name, 1, 7) <> 'sqlite_' AND NOT ((type = 'table' AND name = ${sqlLiteral(LINEAGE_TABLE)} AND tbl_name = ${sqlLiteral(LINEAGE_TABLE)} AND sql = ${sqlLiteral(LINEAGE_CATALOG_SQL)}) OR (type = 'table' AND name = '_cf_METADATA' AND tbl_name = '_cf_METADATA' AND sql = ${sqlLiteral(WRANGLER_LOCAL_METADATA_SQL)})))`;
+  const guard = `(SELECT CASE WHEN COUNT(*) = 0 THEN 1 ELSE 0 END FROM sqlite_schema WHERE substr(name, 1, 7) <> 'sqlite_' AND NOT ((type = 'table' AND name = ${sqlLiteral(LINEAGE_TABLE)} AND tbl_name = ${sqlLiteral(LINEAGE_TABLE)} AND sql = ${sqlLiteral(LINEAGE_CATALOG_SQL)}) OR (type = 'table' AND name = '_cf_METADATA' AND tbl_name = '_cf_METADATA' AND sql = ${sqlLiteral(WRANGLER_LOCAL_METADATA_SQL)}) OR (type = 'table' AND name = '_cf_KV' AND tbl_name = '_cf_KV' AND sql = ${sqlLiteral(WRANGLER_REMOTE_KV_SQL)})))`;
   const sql = `${BOOTSTRAP_LINEAGE_DDL}
 INSERT INTO ${LINEAGE_TABLE} (singleton, lineage, artifact_id, artifact_digest, schema_digest, empty_guard, installed_at)
 VALUES (1, ${sqlLiteral(BOOTSTRAP_LINEAGE)}, ${sqlLiteral(artifact.id)}, ${sqlLiteral(artifact.digest)}, ${sqlLiteral(artifact.schema_digest)}, ${guard}, ${sqlLiteral(appliedAt)});
@@ -2898,6 +3020,68 @@ function assertRemoteApplyTransport(transport) {
       "Remote application requires the verified D1 query-transaction transport capability.",
     );
   }
+}
+
+/**
+ * Install the authorized bootstrap artifact on a disposable remote staging
+ * target as one D1 query batch (guard + lineage + ledger + artifact +
+ * witness, all-or-nothing). Same target guards as the forward path: remote
+ * staging preview only, exact resolved identity, bounded deadline.
+ */
+export async function applyRemoteBootstrapOrRefuse(
+  environment,
+  transport,
+  resolvedDatabaseId,
+  artifact,
+  appliedAt,
+  { deadlineMs = REMOTE_OBSERVATION_DEADLINE_MS } = {},
+) {
+  if (environment.kind !== "remote") {
+    fail(
+      "REMOTE_APPLY_WRONG_TARGET",
+      "Remote bootstrap application requires a remote staging target.",
+    );
+  }
+  if (environment.is_preview !== true || environment.may_hold_production_keys !== false) {
+    fail(
+      "REMOTE_APPLY_PRODUCTION_REFUSED",
+      "Remote bootstrap application is restricted to a non-production staging preview target.",
+    );
+  }
+  const targetId = assertResolvedDatabaseId(resolvedDatabaseId);
+  assertRemoteApplyTransport(transport);
+  if (
+    typeof ownDataValue(transport, "executeFile", "REMOTE_BOOTSTRAP_TRANSPORT_UNSUPPORTED") !==
+    "function"
+  ) {
+    fail(
+      "REMOTE_BOOTSTRAP_TRANSPORT_UNSUPPORTED",
+      "Remote bootstrap requires the file-import transport capability.",
+    );
+  }
+  const budget = createRemoteBudget(deadlineMs);
+  const response = await awaitBoundedRemote(
+    budget,
+    (signal, timeoutMs) =>
+      transport.executeFile({
+        sql: bootstrapInstallSql(artifact, appliedAt),
+        database_id: targetId,
+        signal,
+        timeoutMs,
+      }),
+    "REMOTE_D1_BOOTSTRAP_FAILED",
+    { ownsBoundedCommand: transportOwnsBoundedCommand(transport) },
+  );
+  assertExactOwnKeys(response, ["database_id"], "REMOTE_D1_BOOTSTRAP_FAILED");
+  if (
+    ownBoundedString(response, "database_id", budget, "REMOTE_D1_BOOTSTRAP_FAILED") !== targetId
+  ) {
+    fail(
+      "REMOTE_TARGET_IDENTITY_MISMATCH",
+      "A remote bootstrap result was not served by the resolved staging target.",
+    );
+  }
+  return { database_id: targetId };
 }
 
 /**
@@ -3091,6 +3275,11 @@ function parseArguments(argv) {
       }
       options.bootstrap = artifact;
       index += 1;
+    } else if (argument === "--i-authorize-disposable-remote-bootstrap") {
+      // The operator's explicit authorization for one disposable remote run.
+      // It never applies to production: the staging-preview topology check
+      // below and the transport's own guard both refuse it there.
+      options.authorizeDisposableRemoteBootstrap = true;
     } else if (argument === "--local-persist-to") {
       const directory = argv[index + 1];
       if (typeof directory !== "string" || directory === "" || directory.startsWith("--")) {
@@ -3113,9 +3302,15 @@ function parseArguments(argv) {
     } else {
       fail(
         "INVALID_ARGUMENT",
-        "Usage: bun infra/migrate.mjs --env <local|staging|production> [--state-file <path>] [--bootstrap <artifact-id>] [--local-persist-to <directory>] [--resolved-database-id <uuid>] [--apply]",
+        "Usage: bun infra/migrate.mjs --env <local|staging|production> [--state-file <path>] [--bootstrap <artifact-id> [--i-authorize-disposable-remote-bootstrap]] [--local-persist-to <directory>] [--resolved-database-id <uuid>] [--apply]",
       );
     }
+  }
+  if (options.authorizeDisposableRemoteBootstrap === true && options.bootstrap === undefined) {
+    fail(
+      "INVALID_ARGUMENT",
+      "--i-authorize-disposable-remote-bootstrap is meaningful only together with --bootstrap.",
+    );
   }
   return options;
 }
@@ -3147,6 +3342,7 @@ export async function runMigrationCli(
     remoteTransportFactory = createWranglerRemoteTransport,
     localReadLineageSnapshot = readLocalLineageSnapshot,
     localBootstrapSchema = bootstrapLocalSchema,
+    remoteBootstrapSchema = applyRemoteBootstrapOrRefuse,
     localApplyMigration = applyLocalMigration,
     stdout = (line) => process.stdout.write(line),
     stderr = (line) => process.stderr.write(line),
@@ -3197,8 +3393,33 @@ export async function runMigrationCli(
           "The requested bootstrap artifact id is not in the manifest.",
         );
       }
-      const snapshot = await readBootstrapSnapshotOrRefuse(environment, () =>
-        localReadLineageSnapshot(root, localDatabase, options.localPersistTo),
+      // The remote observer is constructed lazily and exists at all only when
+      // the operator's flag authorizes this disposable staging-preview run.
+      // Production never gets one: the topology fields, not the env name, are
+      // the authority on that.
+      let remoteDatabaseId;
+      let remoteTransport;
+      const observeRemote = async () => {
+        remoteDatabaseId = assertResolvedDatabaseId(options.resolvedDatabaseId);
+        remoteTransport = remoteTransportFactory({
+          root,
+          environmentName: options.env,
+          environment,
+          resolvedDatabaseId: remoteDatabaseId,
+        });
+        return readRemoteLineageSnapshotOrRefuse(environment, remoteTransport, remoteDatabaseId);
+      };
+      const authorizedRemoteObserver =
+        environment.kind === "remote" &&
+        environment.is_preview === true &&
+        environment.may_hold_production_keys === false &&
+        options.authorizeDisposableRemoteBootstrap === true
+          ? observeRemote
+          : undefined;
+      const snapshot = await readBootstrapSnapshotOrRefuse(
+        environment,
+        () => localReadLineageSnapshot(root, localDatabase, options.localPersistTo),
+        authorizedRemoteObserver,
       );
       const lineage = classifySchemaLineage({ ...snapshot, migrations, manifest });
       if (bootstrapTargetDisposition(lineage) === "idempotent") {
@@ -3228,9 +3449,23 @@ export async function runMigrationCli(
         );
         return 0;
       }
-      await localBootstrapSchema(root, localDatabase, artifact, now(), options.localPersistTo);
+      if (environment.kind === "local") {
+        await localBootstrapSchema(root, localDatabase, artifact, now(), options.localPersistTo);
+      } else {
+        await remoteBootstrapSchema(
+          environment,
+          remoteTransport,
+          remoteDatabaseId,
+          artifact,
+          now(),
+        );
+      }
+      const afterSnapshot =
+        environment.kind === "local"
+          ? await localReadLineageSnapshot(root, localDatabase, options.localPersistTo)
+          : await readRemoteLineageSnapshotOrRefuse(environment, remoteTransport, remoteDatabaseId);
       const after = classifySchemaLineage({
-        ...(await localReadLineageSnapshot(root, localDatabase, options.localPersistTo)),
+        ...afterSnapshot,
         migrations,
         manifest,
       });
