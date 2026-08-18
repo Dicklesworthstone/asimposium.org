@@ -1579,6 +1579,28 @@ describe("the cookie claim is live, not an artifact", () => {
     expect(runner).not.toContain('authjs.session-token";');
   });
 
+  test("PLANTED: only the exact base cookie and numeric chunks are session cookies", () => {
+    const attributes = "Path=/; HttpOnly; Secure; SameSite=Lax";
+    expect(
+      sessionCookiePolicyFromHeaders([`evil-asimp.session=decoy; ${attributes}`]).issuanceCount,
+    ).toBe(0);
+    expect(
+      sessionCookiePolicyFromHeaders([`asimp.session.0=chunk; ${attributes}`]).issuanceCount,
+    ).toBe(1);
+    for (const name of [
+      "asimp.session.",
+      "asimp.session.0extra",
+      "evil-asimp.session.0",
+      "asimpXsessionY0",
+    ]) {
+      expect(sessionCookiePolicyFromHeaders([`${name}=decoy; ${attributes}`]).issuanceCount).toBe(0);
+    }
+    expect(
+      sessionCookiePolicyFromHeaders([`asimp.session=deleted; ${attributes}; Max-Age=0`])
+        .issuanceCount,
+    ).toBe(0);
+  });
+
   test("host-only is decided from the Set-Cookie header, not from a jar", () => {
     const parser = runner.slice(
       runner.indexOf("function parseSessionCookieIssuance"),
