@@ -407,17 +407,17 @@ mechanical enforcement; and Invariant 10 has a CI check before any link ships.
 **This is a recommendation, not a decision.** The operator has not chosen, and I have not chosen on
 their behalf.
 
-## Decision record — to be completed by the operator
+## Decision record
 
 | Field | Value |
 |---|---|
-| Chosen option | _pending operator decision_ |
-| Decided by | _pending_ |
-| Decision date | _pending_ |
-| Reviewer | _pending_ |
-| Rationale | _pending_ |
-| Residual risk accepted | _pending_ |
-| User acceptance | _pending_ |
+| Chosen option | **A — forever-free** |
+| Decided by | the operator |
+| Decision date | 2026-08-17 |
+| Reviewer | WildMountain (analysis); operator (decision) |
+| Rationale | Operator-funded with an accepted ≈$1,000/mo ceiling, efficiency-first, viral-load-funded ("even if that happened, it would mean it had gone viral, so I probably WOULD fund that"). The ceiling reconciliation makes the donation offset provably optional (fully sustained storm worst case $830.84/mo), and Invariant 6 cannot be made structural under an ordinary wrapper — the two findings that decide it. |
+| Residual risk accepted | The A-column below: the operator carries the full gross cost with no offset, indefinitely; no contribution channel exists for people who want to help; OQ-9 may reopen under scale the current model does not predict. |
+| User acceptance | Recorded in conversation 2026-08-17: "I already said this was fine," following the ceiling framing. |
 
 **Residual risk if A is chosen:** the operator carries the full gross cost with no offset, indefinitely
 — including worst-realistic months that exceed the ≤ $30/1K-Fellow target; no contribution channel
