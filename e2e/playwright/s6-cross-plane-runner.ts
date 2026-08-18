@@ -35,20 +35,16 @@ import {
   writeSync,
 } from "node:fs";
 import {
-  type APIResponse,
-  type Browser,
-  type BrowserContext,
-  chromium,
-} from "@playwright/test";
-import {
   EnrollmentClaimResponseSchema,
   EnrollmentHelloResponseSchema,
   EnrollmentIdSchema,
+  FellowNameSchema,
   FellowRegistrationRequestSchema,
-  parseStoaJoinUrl,
   ProblemDocumentSchema,
+  parseStoaJoinUrl,
   SponsorProposalListResponseSchema,
 } from "@asimposium/contracts";
+import { type APIResponse, type Browser, type BrowserContext, chromium } from "@playwright/test";
 
 const SUITE = "s6-cross-plane-browser";
 const BLOCKED_EXIT = 78;
@@ -65,6 +61,8 @@ const MAX_CONFIG_RECORD_BYTES = 8192;
 export const MAX_BROWSER_EVIDENCE_BYTES = 4096;
 /** One response body plus its three-digit curl status suffix. */
 export const MAX_HTTP_RESPONSE_BYTES = 65_536;
+/** One canonical retained schema-v4 evidence record. */
+export const MAX_S6_EVIDENCE_BYTES = 16_384;
 
 /**
  * The EXACT session cookie name configured in `apps/web/auth.ts`.
@@ -281,12 +279,30 @@ export function isExactGoogleAccountsOrigin(value: string): boolean {
   }
 }
 
-/** Execute a credential action only after the exact-origin predicate succeeds. */
-export function performAtExactGoogleOrigin<T>(value: string, action: () => T): T {
-  if (!isExactGoogleAccountsOrigin(value)) {
+/**
+ * Resolve the element's live owner, require exact main-frame identity, and
+ * re-read that frame's URL immediately before the credential action.
+ */
+export async function performAtExactGoogleOwnerFrame<T>(
+  elementHandle: { ownerFrame(): Promise<{ url(): string } | null> },
+  expectedMainFrame: { url(): string },
+  action: () => T | Promise<T>,
+): Promise<T> {
+  const ownerFrame = await elementHandle.ownerFrame();
+  if (ownerFrame === null || ownerFrame !== expectedMainFrame) {
+    throw new Error("credential element was not owned by the exact main frame");
+  }
+  if (!isExactGoogleAccountsOrigin(ownerFrame.url())) {
     throw new Error("credential action refused outside the exact Google accounts origin");
   }
-  return action();
+  return await action();
+}
+
+export type GoogleLoginAction = "perform-google-login" | "refuse";
+
+/** A live run must begin unauthenticated and exercise the configured Google account. */
+export function selectGoogleLoginAction(signInControlCount: number): GoogleLoginAction {
+  return signInControlCount === 1 ? "perform-google-login" : "refuse";
 }
 
 /**
@@ -294,7 +310,7 @@ export function performAtExactGoogleOrigin<T>(value: string, action: () => T): T
  * header, not by what a cookie jar later reports: a jar normalises away the
  * distinction this test exists to catch.
  */
-interface SessionCookieIssuance {
+export interface SessionCookieIssuance {
   readonly hostOnly: boolean;
   readonly httpOnly: boolean;
   readonly secure: boolean;
@@ -332,7 +348,8 @@ function parseSessionCookieIssuance(
   const maxAge = attributes.find((attribute) => attribute.startsWith("max-age="));
   const expires = attributes.find((attribute) => attribute.startsWith("expires="));
   const maxAgeSeconds = maxAge === undefined ? undefined : Number(maxAge.slice("max-age=".length));
-  const expiresAt = expires === undefined ? undefined : Date.parse(expires.slice("expires=".length));
+  const expiresAt =
+    expires === undefined ? undefined : Date.parse(expires.slice("expires=".length));
   if (
     value.length === 0 ||
     (maxAgeSeconds !== undefined && Number.isFinite(maxAgeSeconds) && maxAgeSeconds <= 0) ||
@@ -357,8 +374,7 @@ function summarizeSessionCookieIssuances(
     hostOnly: issuances.length > 0 && issuances.every((issuance) => issuance.hostOnly),
     httpOnly: issuances.length > 0 && issuances.every((issuance) => issuance.httpOnly),
     secure: issuances.length > 0 && issuances.every((issuance) => issuance.secure),
-    sameSiteLax:
-      issuances.length > 0 && issuances.every((issuance) => issuance.sameSite === "lax"),
+    sameSiteLax: issuances.length > 0 && issuances.every((issuance) => issuance.sameSite === "lax"),
   };
 }
 
@@ -512,10 +528,7 @@ export async function finalizeSessionCookieObservation<T>(args: {
   return { snapshot, policy, evidenceFailures, closeFailures };
 }
 
-export function cookieDirectionIsProven(
-  omission: CookieProbe,
-  presented: CookieProbe,
-): boolean {
+export function cookieDirectionIsProven(omission: CookieProbe, presented: CookieProbe): boolean {
   return (
     omission.attached === false &&
     omission.status === 403 &&
@@ -631,6 +644,8 @@ export function selectHttpResponseBytes(
     matching[0]?.name !== expectation.name ||
     matching[0]?.model !== expectation.model ||
     matching[0]?.harness !== expectation.harness ||
+    matching[0]?.reasoning_effort !== undefined ||
+    matching[0]?.tools_note !== undefined ||
     matching[0]?.status !== "pending" ||
     matching[0]?.effective_granted_scopes !== null ||
     matching[0]?.effective_granted_resources !== null
@@ -681,7 +696,10 @@ const BROWSER_RECORD_KEYS = [
   "duration_ms",
 ] as const;
 
-function objectWithExactKeys(value: unknown, keys: readonly string[]): value is Record<string, unknown> {
+function objectWithExactKeys(
+  value: unknown,
+  keys: readonly string[],
+): value is Record<string, unknown> {
   return (
     typeof value === "object" &&
     value !== null &&
@@ -689,6 +707,251 @@ function objectWithExactKeys(value: unknown, keys: readonly string[]): value is 
     Object.keys(value).length === keys.length &&
     Object.keys(value).every((key, index) => key === keys[index])
   );
+}
+
+export interface S6EvidenceExpectedScalars {
+  readonly revision: string;
+  readonly deploymentId: string;
+  readonly agoraHost: string;
+  readonly stoaHost: string;
+  readonly kid: string;
+  readonly payloadSha256: string;
+  readonly principalPseudonym: string;
+  readonly initialLatencySeconds: number;
+  readonly replayLatencySeconds: number;
+  readonly browserLegSeconds: number;
+  readonly runSeconds: number;
+  readonly assertions: number;
+  readonly failures: number;
+}
+
+function expectedS6EvidenceV4(expected: S6EvidenceExpectedScalars): unknown {
+  return {
+    suite: "s6-cross-plane-auth",
+    schema_version: 4,
+    bead: "asimposiumorg-vw3",
+    revision: {
+      value: expected.revision,
+      source: "required_harness_input",
+      verification: "format_only",
+    },
+    deployment: {
+      id: expected.deploymentId,
+      source: "required_harness_input",
+      verification: "format_only",
+      exercised_origins: {
+        agora_host: expected.agoraHost,
+        stoa_host: expected.stoaHost,
+        source: "exercised_https_origin",
+      },
+    },
+    service_envelope: {
+      kid: expected.kid,
+      method: "GET",
+      action: "enrollment.proposals.list",
+      payload_sha256: expected.payloadSha256,
+      principal_pseudonym: { scheme: "sha256", value: expected.principalPseudonym },
+      route_template: "/v1/enrollments/proposals",
+      initial_response: {
+        status: 200,
+        code: null,
+        latency_seconds: expected.initialLatencySeconds,
+      },
+      replay_response: {
+        status: 401,
+        code: "UNAUTHORIZED",
+        latency_seconds: expected.replayLatencySeconds,
+      },
+    },
+    cookie_assertions: {
+      host_only: true,
+      http_only: true,
+      secure: true,
+      same_site: "lax",
+      scoped_to_apex: true,
+      natural_agent_host: { attached: false, status: 403, code: "WRONG_PRINCIPAL" },
+      explicit_agent_host: { attached: true, status: 403, code: "WRONG_PRINCIPAL" },
+    },
+    latency: {
+      browser_leg_seconds: expected.browserLegSeconds,
+      run_seconds: expected.runSeconds,
+    },
+    assertions: expected.assertions,
+    failures: expected.failures,
+  };
+}
+
+/** Shared exact schema validator for the retained S6 evidence bundle. */
+export function selectS6EvidenceV4(value: unknown): Record<string, unknown> {
+  if (
+    !objectWithExactKeys(value, [
+      "suite",
+      "schema_version",
+      "bead",
+      "revision",
+      "deployment",
+      "service_envelope",
+      "cookie_assertions",
+      "latency",
+      "assertions",
+      "failures",
+    ]) ||
+    value.suite !== "s6-cross-plane-auth" ||
+    value.schema_version !== 4 ||
+    value.bead !== "asimposiumorg-vw3"
+  ) {
+    throw new Error("S6 evidence top-level schema is invalid");
+  }
+  const { revision, deployment, service_envelope, cookie_assertions, latency } = value;
+  if (
+    !objectWithExactKeys(revision, ["value", "source", "verification"]) ||
+    typeof revision.value !== "string" ||
+    !/^([0-9a-f]{40}|[0-9a-f]{64})$/.test(revision.value) ||
+    revision.source !== "required_harness_input" ||
+    revision.verification !== "format_only"
+  ) {
+    throw new Error("S6 revision provenance is invalid");
+  }
+  if (
+    !objectWithExactKeys(deployment, ["id", "source", "verification", "exercised_origins"]) ||
+    typeof deployment.id !== "string" ||
+    !/^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/.test(deployment.id) ||
+    deployment.source !== "required_harness_input" ||
+    deployment.verification !== "format_only" ||
+    !objectWithExactKeys(deployment.exercised_origins, ["agora_host", "stoa_host", "source"]) ||
+    typeof deployment.exercised_origins.agora_host !== "string" ||
+    deployment.exercised_origins.agora_host.length === 0 ||
+    typeof deployment.exercised_origins.stoa_host !== "string" ||
+    deployment.exercised_origins.stoa_host.length === 0 ||
+    deployment.exercised_origins.agora_host === deployment.exercised_origins.stoa_host ||
+    deployment.exercised_origins.source !== "exercised_https_origin"
+  ) {
+    throw new Error("S6 deployment provenance is invalid");
+  }
+  if (
+    !objectWithExactKeys(service_envelope, [
+      "kid",
+      "method",
+      "action",
+      "payload_sha256",
+      "principal_pseudonym",
+      "route_template",
+      "initial_response",
+      "replay_response",
+    ]) ||
+    typeof service_envelope.kid !== "string" ||
+    service_envelope.kid.length === 0 ||
+    service_envelope.method !== "GET" ||
+    service_envelope.action !== "enrollment.proposals.list" ||
+    typeof service_envelope.payload_sha256 !== "string" ||
+    !/^[0-9a-f]{64}$/.test(service_envelope.payload_sha256) ||
+    !objectWithExactKeys(service_envelope.principal_pseudonym, ["scheme", "value"]) ||
+    service_envelope.principal_pseudonym.scheme !== "sha256" ||
+    typeof service_envelope.principal_pseudonym.value !== "string" ||
+    !/^[0-9a-f]{64}$/.test(service_envelope.principal_pseudonym.value) ||
+    service_envelope.route_template !== "/v1/enrollments/proposals" ||
+    !objectWithExactKeys(service_envelope.initial_response, [
+      "status",
+      "code",
+      "latency_seconds",
+    ]) ||
+    service_envelope.initial_response.status !== 200 ||
+    service_envelope.initial_response.code !== null ||
+    !Number.isSafeInteger(service_envelope.initial_response.latency_seconds) ||
+    (service_envelope.initial_response.latency_seconds as number) < 0 ||
+    !objectWithExactKeys(service_envelope.replay_response, ["status", "code", "latency_seconds"]) ||
+    service_envelope.replay_response.status !== 401 ||
+    service_envelope.replay_response.code !== "UNAUTHORIZED" ||
+    !Number.isSafeInteger(service_envelope.replay_response.latency_seconds) ||
+    (service_envelope.replay_response.latency_seconds as number) < 0
+  ) {
+    throw new Error("S6 envelope evidence is invalid");
+  }
+  if (
+    !objectWithExactKeys(cookie_assertions, [
+      "host_only",
+      "http_only",
+      "secure",
+      "same_site",
+      "scoped_to_apex",
+      "natural_agent_host",
+      "explicit_agent_host",
+    ]) ||
+    cookie_assertions.host_only !== true ||
+    cookie_assertions.http_only !== true ||
+    cookie_assertions.secure !== true ||
+    cookie_assertions.same_site !== "lax" ||
+    cookie_assertions.scoped_to_apex !== true ||
+    !objectWithExactKeys(cookie_assertions.natural_agent_host, ["attached", "status", "code"]) ||
+    cookie_assertions.natural_agent_host.attached !== false ||
+    cookie_assertions.natural_agent_host.status !== 403 ||
+    cookie_assertions.natural_agent_host.code !== "WRONG_PRINCIPAL" ||
+    !objectWithExactKeys(cookie_assertions.explicit_agent_host, ["attached", "status", "code"]) ||
+    cookie_assertions.explicit_agent_host.attached !== true ||
+    cookie_assertions.explicit_agent_host.status !== 403 ||
+    cookie_assertions.explicit_agent_host.code !== "WRONG_PRINCIPAL"
+  ) {
+    throw new Error("S6 cookie evidence is invalid");
+  }
+  if (
+    !objectWithExactKeys(latency, ["browser_leg_seconds", "run_seconds"]) ||
+    !Number.isSafeInteger(latency.browser_leg_seconds) ||
+    (latency.browser_leg_seconds as number) < 0 ||
+    !Number.isSafeInteger(latency.run_seconds) ||
+    (latency.run_seconds as number) < 0 ||
+    !Number.isSafeInteger(value.assertions) ||
+    (value.assertions as number) < 0 ||
+    !Number.isSafeInteger(value.failures) ||
+    (value.failures as number) < 0
+  ) {
+    throw new Error("S6 evidence counts or latency are invalid");
+  }
+  return value;
+}
+
+/** Bind every schema field to the immutable tuple captured by the shell writer. */
+export function selectS6EvidenceAgainstExpected(
+  value: unknown,
+  expected: S6EvidenceExpectedScalars,
+): void {
+  const actual = selectS6EvidenceV4(value);
+  const reconstructed = selectS6EvidenceV4(expectedS6EvidenceV4(expected));
+  if (JSON.stringify(actual) !== JSON.stringify(reconstructed)) {
+    throw new Error("S6 evidence does not match its captured expected tuple");
+  }
+}
+
+/** Canonical one-line UTF-8 framing around the exact schema-v4 object. */
+export function selectS6EvidenceBytes(
+  bytes: Uint8Array,
+  expected: S6EvidenceExpectedScalars,
+): void {
+  if (bytes.byteLength === 0 || bytes.byteLength > MAX_S6_EVIDENCE_BYTES) {
+    throw new Error("S6 evidence byte bound violated");
+  }
+  let raw: string;
+  try {
+    raw = new TextDecoder("utf-8", { fatal: true }).decode(bytes);
+  } catch {
+    throw new Error("S6 evidence is not valid UTF-8");
+  }
+  if (raw.includes("\r") || raw.includes("\0") || !raw.endsWith("\n")) {
+    throw new Error("S6 evidence framing is not canonical");
+  }
+  const line = raw.slice(0, -1);
+  if (line.length === 0 || line.includes("\n")) {
+    throw new Error("S6 evidence must contain exactly one LF-terminated record");
+  }
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(line);
+  } catch {
+    throw new Error("S6 evidence is not JSON");
+  }
+  if (JSON.stringify(parsed) !== line) {
+    throw new Error("S6 evidence is not canonical JSON");
+  }
+  selectS6EvidenceAgainstExpected(parsed, expected);
 }
 
 function probeHasExactShape(value: unknown, attached: boolean): value is CookieProbe {
@@ -875,10 +1138,56 @@ function browserRecordValidatorMode(): never {
   }
 }
 
+function evidenceValidatorMode(): never {
+  try {
+    const path = process.argv[3];
+    if (process.argv.length !== 17 || !path) {
+      throw new Error("invalid S6 evidence validator invocation");
+    }
+    const integer = (index: number): number => {
+      const raw = process.argv[index] ?? "";
+      if (!/^(0|[1-9][0-9]*)$/.test(raw)) {
+        throw new Error("invalid S6 evidence expected integer");
+      }
+      const parsed = Number(raw);
+      if (!Number.isSafeInteger(parsed)) {
+        throw new Error("S6 evidence expected integer exceeds the safe range");
+      }
+      return parsed;
+    };
+    const expected: S6EvidenceExpectedScalars = {
+      revision: process.argv[4] ?? "",
+      deploymentId: process.argv[5] ?? "",
+      agoraHost: process.argv[6] ?? "",
+      stoaHost: process.argv[7] ?? "",
+      kid: process.argv[8] ?? "",
+      payloadSha256: process.argv[9] ?? "",
+      principalPseudonym: process.argv[10] ?? "",
+      initialLatencySeconds: integer(11),
+      replayLatencySeconds: integer(12),
+      browserLegSeconds: integer(13),
+      runSeconds: integer(14),
+      assertions: integer(15),
+      failures: integer(16),
+    };
+    selectS6EvidenceBytes(
+      readBoundedRegularFile(path, MAX_S6_EVIDENCE_BYTES, "S6 evidence file"),
+      expected,
+    );
+    process.exit(0);
+  } catch {
+    process.exit(1);
+  }
+}
+
+export function enrollmentIdIsValid(enrollmentId: string): boolean {
+  return EnrollmentIdSchema.safeParse(enrollmentId).success;
+}
+
 export function claimNameForEnrollment(enrollmentId: string): string {
   const id = EnrollmentIdSchema.parse(enrollmentId);
   const suffix = id.slice("ASIMP-EN-".length).toLowerCase();
-  return `s6-${suffix.slice(-29)}`;
+  return FellowNameSchema.parse(`s6-${suffix.slice(-29)}`);
 }
 
 function httpResponseValidatorMode(): never {
@@ -973,15 +1282,17 @@ function cookieAttributesFromFinalization(
     http_only: policy.httpOnly,
     secure: policy.secure,
     same_site: policy.sameSiteLax ? "lax" : null,
-    scoped_to_apex:
-      snapshot !== undefined && snapshot.apexFamilyCount > 0 && snapshot.scopedToApex,
+    scoped_to_apex: snapshot !== undefined && snapshot.apexFamilyCount > 0 && snapshot.scopedToApex,
     present_for_agent_host: snapshot === undefined || snapshot.agentFamilyCount > 0,
   };
 }
 
 export interface SessionCookieFinalizationVerdict {
   readonly cookie: CookieAttributes;
-  readonly failureCode: "SET_COOKIE_OBSERVATION_FAILED" | "COOKIE_POLICY_CHANGED_DURING_FLOW" | null;
+  readonly failureCode:
+    | "SET_COOKIE_OBSERVATION_FAILED"
+    | "COOKIE_POLICY_CHANGED_DURING_FLOW"
+    | null;
 }
 
 /** Pure terminal seam shared by production and the delayed unsafe-header plant. */
@@ -1174,8 +1485,7 @@ async function main(): Promise<Omit<Record_, "duration_ms">> {
                 scopedToApex:
                   apexFamily.length > 0 &&
                   apexFamily.every(
-                    (entry) =>
-                      entry.domain.replace(/^\./, "") === apexHost && entry.path === "/",
+                    (entry) => entry.domain.replace(/^\./, "") === apexHost && entry.path === "/",
                   ),
                 agentFamilyCount: agentFamily.length,
               };
@@ -1285,50 +1595,51 @@ async function main(): Promise<Omit<Record_, "duration_ms">> {
 
     // The console is behind Auth.js; an unauthenticated visit offers Google.
     const signIn = page.getByRole("button", { name: /sign in with google/i });
-    if ((await signIn.count()) > 0) {
-      await signIn.first().click();
-      // Real Google sign-in. Bot challenges are common and are reported as
-      // blocked, never as a failure of the seam and never as a pass.
-      try {
-        await page.waitForURL((url) => isExactGoogleAccountsOrigin(url.href), {
-          timeout: NAVIGATION_TIMEOUT_MS,
-        });
-        const emailHandle = await page.locator('input[type="email"]').elementHandle();
-        const emailFrame = await emailHandle?.ownerFrame();
-        if (emailHandle === null || emailFrame !== page.mainFrame()) {
-          throw new Error("Google email input was not owned by the exact main frame");
-        }
-        await performAtExactGoogleOrigin(emailFrame.url(), () => emailHandle.fill(user));
-        await page.getByRole("button", { name: /next/i }).click();
-        await page.locator('input[type="password"]').waitFor({ state: "visible" });
-        // `fill` does not log its argument; the password never reaches a record.
-        const passwordHandle = await page.locator('input[type="password"]').elementHandle();
-        const passwordFrame = await passwordHandle?.ownerFrame();
-        if (passwordHandle === null || passwordFrame !== page.mainFrame()) {
-          throw new Error("Google password input was not owned by the exact main frame");
-        }
-        await performAtExactGoogleOrigin(passwordFrame.url(), () =>
-          passwordHandle.fill(password),
-        );
-        await page.getByRole("button", { name: /next/i }).click();
-        await page.waitForURL(consoleUrl, { timeout: NAVIGATION_TIMEOUT_MS });
-      } catch (error) {
-        if (error instanceof RunnerExit) throw error;
-        const currentUrl = page.url();
-        const body = await page.content().catch(() => "");
-        if (looksLikeChallenge(currentUrl, body)) {
-          blocked(
-            "GOOGLE_LOGIN_CHALLENGED",
-            "Google interrupted the automated sign-in with a verification challenge; provision a test account exempt from the challenge, then re-run",
-            apexHost,
-          );
-        }
-        failed(
-          "GOOGLE_LOGIN_FAILED",
-          "the configured test account did not reach the exact Agora console URL",
+    if (selectGoogleLoginAction(await signIn.count()) !== "perform-google-login") {
+      failed(
+        "GOOGLE_LOGIN_PRECONDITION_FAILED",
+        "the initial console page did not expose a Google sign-in control, so this run cannot prove credential use from an unauthenticated state",
+        apexHost,
+      );
+    }
+    await signIn.first().click();
+    // Real Google sign-in. Bot challenges are common and are reported as
+    // blocked, never as a failure of the seam and never as a pass.
+    try {
+      await page.waitForURL((url) => isExactGoogleAccountsOrigin(url.href), {
+        timeout: NAVIGATION_TIMEOUT_MS,
+      });
+      const emailHandle = await page.locator('input[type="email"]').elementHandle();
+      if (emailHandle === null) throw new Error("Google email input was absent");
+      await performAtExactGoogleOwnerFrame(emailHandle, page.mainFrame(), () =>
+        emailHandle.fill(user),
+      );
+      await page.getByRole("button", { name: /next/i }).click();
+      await page.locator('input[type="password"]').waitFor({ state: "visible" });
+      // `fill` does not log its argument; the password never reaches a record.
+      const passwordHandle = await page.locator('input[type="password"]').elementHandle();
+      if (passwordHandle === null) throw new Error("Google password input was absent");
+      await performAtExactGoogleOwnerFrame(passwordHandle, page.mainFrame(), () =>
+        passwordHandle.fill(password),
+      );
+      await page.getByRole("button", { name: /next/i }).click();
+      await page.waitForURL(consoleUrl, { timeout: NAVIGATION_TIMEOUT_MS });
+    } catch (error) {
+      if (error instanceof RunnerExit) throw error;
+      const currentUrl = page.url();
+      const body = await page.content().catch(() => "");
+      if (looksLikeChallenge(currentUrl, body)) {
+        blocked(
+          "GOOGLE_LOGIN_CHALLENGED",
+          "Google interrupted the automated sign-in with a verification challenge; provision a test account exempt from the challenge, then re-run",
           apexHost,
         );
       }
+      failed(
+        "GOOGLE_LOGIN_FAILED",
+        "the configured test account did not reach the exact Agora console URL",
+        apexHost,
+      );
     }
     if (page.url() !== consoleUrl) {
       failed(
@@ -1488,7 +1799,11 @@ async function main(): Promise<Omit<Record_, "duration_ms">> {
 
     // The real Server Action, reached the way a sponsor reaches it.
     const secondConsoleResponse = await page.goto(consoleUrl);
-    if (secondConsoleResponse === null || !secondConsoleResponse.ok() || page.url() !== consoleUrl) {
+    if (
+      secondConsoleResponse === null ||
+      !secondConsoleResponse.ok() ||
+      page.url() !== consoleUrl
+    ) {
       failed(
         "CONSOLE_SECOND_NAVIGATION_FAILED",
         "the second console navigation did not return successfully at the exact Agora URL",
@@ -1514,7 +1829,11 @@ async function main(): Promise<Omit<Record_, "duration_ms">> {
       );
     }
     if ((await mint.count()) !== 1) {
-      failed("CONSOLE_MINT_CONTROL_AMBIGUOUS", "the console exposed multiple mint controls", apexHost);
+      failed(
+        "CONSOLE_MINT_CONTROL_AMBIGUOUS",
+        "the console exposed multiple mint controls",
+        apexHost,
+      );
     }
     const joinReceipt = page.locator("pre.pasteblock.join-url");
     let receiptCountBefore: number;
@@ -1547,39 +1866,41 @@ async function main(): Promise<Omit<Record_, "duration_ms">> {
     // Lift the exact dedicated line into Playwright memory only long enough to
     // consume its one-time fragment in the real Fellow claim. It is never
     // emitted, persisted, placed in argv/environment, or quoted by an error.
-    const joinUrl = await joinReceipt.evaluate((element) => {
-      const prefix = "Your join URL is  ";
-      const lines = (element.textContent ?? "").split("\n");
-      const candidates = lines.filter((line) => line.startsWith(prefix));
-      if (!element.matches("pre.pasteblock.join-url") || candidates.length !== 1) return null;
-      return candidates[0]?.slice(prefix.length) ?? null;
-    });
-    if (joinUrl === null) {
-      failed(
-        "MINT_RECEIPT_INVALID",
-        "the dedicated receipt did not contain one exact trusted-origin join URL",
-        apexHost,
-      );
-    }
-
-    claimContext = await browser.newContext();
-    claimContext.setDefaultTimeout(ACTION_TIMEOUT_MS);
-    if ((await claimContext.cookies()).length !== 0) {
-      failed(
-        "CLAIM_CONTEXT_NOT_ISOLATED",
-        "the Fellow claim context unexpectedly contained browser credentials",
-        apexHost,
-      );
-    }
     let claimed: { readonly enrollmentId: string; readonly name: string };
-    try {
-      claimed = await claimMintedEnrollment(claimContext, joinUrl, workerUrl);
-    } catch {
-      failed(
-        "FELLOW_CLAIM_FAILED",
-        "the transient join fragment did not produce the exact 202 Fellow claim contract",
-        apexHost,
-      );
+    {
+      const joinUrl = await joinReceipt.evaluate((element) => {
+        const prefix = "Your join URL is  ";
+        const lines = (element.textContent ?? "").split("\n");
+        const candidates = lines.filter((line: string) => line.startsWith(prefix));
+        if (!element.matches("pre.pasteblock.join-url") || candidates.length !== 1) return null;
+        return candidates[0]?.slice(prefix.length) ?? null;
+      });
+      if (joinUrl === null) {
+        failed(
+          "MINT_RECEIPT_INVALID",
+          "the dedicated receipt did not contain one exact trusted-origin join URL",
+          apexHost,
+        );
+      }
+
+      claimContext = await browser.newContext();
+      claimContext.setDefaultTimeout(ACTION_TIMEOUT_MS);
+      if ((await claimContext.cookies()).length !== 0) {
+        failed(
+          "CLAIM_CONTEXT_NOT_ISOLATED",
+          "the Fellow claim context unexpectedly contained browser credentials",
+          apexHost,
+        );
+      }
+      try {
+        claimed = await claimMintedEnrollment(claimContext, joinUrl, workerUrl);
+      } catch {
+        failed(
+          "FELLOW_CLAIM_FAILED",
+          "the transient join fragment did not produce the exact 202 Fellow claim contract",
+          apexHost,
+        );
+      }
     }
     const receipt = {
       enrollment_id: claimed.enrollmentId,
@@ -1835,6 +2156,7 @@ async function runEntrypoint(): Promise<never> {
 if (import.meta.main) {
   if (process.argv[2] === "--validate-record") browserRecordValidatorMode();
   if (process.argv[2] === "--validate-http-response") httpResponseValidatorMode();
+  if (process.argv[2] === "--validate-evidence") evidenceValidatorMode();
   if (process.argv[2] === "--self-test-terminal-selector") await terminalSelectorSelfTest();
   await runEntrypoint();
 }

@@ -43,15 +43,21 @@ import { join, resolve } from "node:path";
 import {
   claimNameForEnrollment,
   cookieDirectionIsProven,
+  enrollmentIdIsValid,
   finalizeSessionCookieObservation,
   isExactGoogleAccountsOrigin,
   MAX_BROWSER_EVIDENCE_BYTES,
   MAX_HTTP_RESPONSE_BYTES,
-  performAtExactGoogleOrigin,
+  MAX_S6_EVIDENCE_BYTES,
+  performAtExactGoogleOwnerFrame,
+  SessionCookieCollector,
   selectBrowserEvidenceBytes,
+  selectGoogleLoginAction,
   selectHttpResponseBytes,
   selectHttpResponseTranscriptBytes,
-  SessionCookieCollector,
+  selectS6EvidenceAgainstExpected,
+  selectS6EvidenceBytes,
+  selectS6EvidenceV4,
   sessionCookieFinalizationVerdict,
   sessionCookiePolicyFromHeaders,
   writeAllSync,
@@ -630,7 +636,7 @@ const OUTER_SETPGRP_PROGRAM =
   "if ($r==9 && $w!=9) { $r=dup($r); die $! if $r<0; } " +
   "dup2($w,9) unless $w==9; dup2($r,8) unless $r==8; " +
   "close($r) if $r!=8 && $r!=9; " +
-  "close($w) if $w!=8 && $w!=9; $^F=9; setpgrp(0,0) or die $!; " +
+  "close($w) if $w!=8 && $w!=9; $^F=9; defined(setpgrp(0,0)) or die $!; " +
   "exec @ARGV or die $!;";
 
 const OUTER_SUPERVISOR_PROGRAM = [
@@ -1420,8 +1426,7 @@ async function runShell(
       stderr,
       timedOut,
       outerSupervisorSettledAfterRetirementProtocol: supervisorSettled,
-      nestedOwnedSameProcessGroupsSettled:
-        shellLifecycle?.ownedSameProcessGroupsSettled ?? null,
+      nestedOwnedSameProcessGroupsSettled: shellLifecycle?.ownedSameProcessGroupsSettled ?? null,
       cleanupUnproven,
       graceExpiredEscalation,
     };
@@ -1598,13 +1603,10 @@ describe("the cookie claim is live, not an artifact", () => {
       expect(policy.secure).toBe(true);
       expect(policy.sameSiteLax).toBe(true);
     }
-    expect(sessionCookiePolicyFromHeaders([safe.replace("; HttpOnly", "")]).httpOnly).toBe(
-      false,
-    );
+    expect(sessionCookiePolicyFromHeaders([safe.replace("; HttpOnly", "")]).httpOnly).toBe(false);
     expect(sessionCookiePolicyFromHeaders([safe.replace("; Secure", "")]).secure).toBe(false);
     expect(
-      sessionCookiePolicyFromHeaders([safe.replace("SameSite=Lax", "SameSite=None")])
-        .sameSiteLax,
+      sessionCookiePolicyFromHeaders([safe.replace("SameSite=Lax", "SameSite=None")]).sameSiteLax,
     ).toBe(false);
   });
 
@@ -1685,6 +1687,15 @@ describe("the cookie claim is live, not an artifact", () => {
       "drain-finish",
       "close-browser",
     ]);
+    const candidate = runner.indexOf("candidateRecord = {");
+    const teardown = runner.indexOf("await teardownOnce()", candidate);
+    const terminalVerdict = runner.indexOf(
+      "sessionCookieFinalizationVerdict(cookieFinalization)",
+      teardown,
+    );
+    expect(candidate).toBeGreaterThanOrEqual(0);
+    expect(teardown).toBeGreaterThan(candidate);
+    expect(terminalVerdict).toBeGreaterThan(teardown);
   });
 
   test("there is no storage-state fallback for the cookie claim", () => {
@@ -1708,12 +1719,25 @@ describe("the cookie claim is live, not an artifact", () => {
       true,
     );
     let fills = 0;
-    await performAtExactGoogleOrigin(
-      "https://accounts.google.com/signin/v2/identifier",
-      async () => {
-        fills += 1;
+    const actionOrder: string[] = [];
+    let liveOwnerFrameUrl = "https://accounts.google.com/signin/v2/identifier";
+    const expectedMainFrame = {
+      url: () => {
+        actionOrder.push("owner-frame-url");
+        return liveOwnerFrameUrl;
       },
-    );
+    };
+    const elementHandle = {
+      ownerFrame: async () => {
+        actionOrder.push("owner-frame");
+        return expectedMainFrame;
+      },
+    };
+    await performAtExactGoogleOwnerFrame(elementHandle, expectedMainFrame, async () => {
+      actionOrder.push("fill");
+      fills += 1;
+    });
+    expect(actionOrder).toEqual(["owner-frame", "owner-frame-url", "fill"]);
     for (const decoy of [
       "https://accounts.google.com.evil.test/",
       "https://evil.test/accounts.google.com",
@@ -1725,17 +1749,54 @@ describe("the cookie claim is live, not an artifact", () => {
       "not a URL",
     ]) {
       expect(isExactGoogleAccountsOrigin(decoy), decoy).toBe(false);
-      expect(() => performAtExactGoogleOrigin(decoy, () => (fills += 1))).toThrow();
+      liveOwnerFrameUrl = decoy;
+      await expect(
+        performAtExactGoogleOwnerFrame(elementHandle, expectedMainFrame, () => (fills += 1)),
+      ).rejects.toThrow();
     }
+    liveOwnerFrameUrl = "https://accounts.google.com/signin/v2/identifier";
+    await expect(
+      performAtExactGoogleOwnerFrame(
+        { ownerFrame: async () => ({ url: () => liveOwnerFrameUrl }) },
+        expectedMainFrame,
+        () => (fills += 1),
+      ),
+    ).rejects.toThrow();
+    await expect(
+      performAtExactGoogleOwnerFrame(
+        { ownerFrame: async () => null },
+        expectedMainFrame,
+        () => (fills += 1),
+      ),
+    ).rejects.toThrow();
     expect(fills).toBe(1);
     const login = runner.slice(
       runner.indexOf("const signIn ="),
-      runner.indexOf('if (page.url() !== consoleUrl)'),
+      runner.indexOf("if (page.url() !== consoleUrl)"),
     );
-    expect(login.match(/performAtExactGoogleOrigin/g)).toHaveLength(2);
-    expect(login).toContain("emailHandle?.ownerFrame()");
-    expect(login).toContain("passwordHandle?.ownerFrame()");
+    expect(login.match(/performAtExactGoogleOwnerFrame/g)).toHaveLength(2);
+    const helper = runner.slice(
+      runner.indexOf("export async function performAtExactGoogleOwnerFrame"),
+      runner.indexOf("export type GoogleLoginAction"),
+    );
+    expect(helper).toContain("await elementHandle.ownerFrame()");
+    expect(helper).toContain("ownerFrame !== expectedMainFrame");
+    expect(helper).toContain("isExactGoogleAccountsOrigin(ownerFrame.url())");
     expect(login).not.toContain("/accounts\\.google\\.com/");
+  });
+
+  test("PLANTED: a pre-authenticated or anonymous page cannot skip Google credential use", () => {
+    expect(selectGoogleLoginAction(0)).toBe("refuse");
+    expect(selectGoogleLoginAction(1)).toBe("perform-google-login");
+    expect(selectGoogleLoginAction(2)).toBe("refuse");
+    expect(selectGoogleLoginAction(Number.NaN)).toBe("refuse");
+    const login = runner.slice(
+      runner.indexOf("const signIn ="),
+      runner.indexOf("if (page.url() !== consoleUrl)"),
+    );
+    expect(login).toContain("selectGoogleLoginAction(await signIn.count())");
+    expect(login).toContain("GOOGLE_LOGIN_PRECONDITION_FAILED");
+    expect(login).not.toContain("if ((await signIn.count()) > 0)");
   });
 
   test("a Google challenge is blocked, never passed or failed silently", () => {
@@ -1747,10 +1808,36 @@ describe("the cookie claim is live, not an artifact", () => {
 describe("exactly two WRONG_PRINCIPAL legs, each exact", () => {
   const source = code(SCRIPT);
 
-  test("the bearer leg requires exactly 403 WRONG_PRINCIPAL", () => {
+  test("the bearer leg proves absent, live, then wrong-principal polarity in order", () => {
     const leg = shellFunction(source, "assert_bearer_on_sponsor_route_refused");
-    expect(leg).toContain('"$status" == "403"');
-    expect(leg).toContain('"$code" == "WRONG_PRINCIPAL"');
+    const absentHello = leg.indexOf('http_request GET "${worker}${ROUTE_HELLO}" "" ""');
+    const absentContract = leg.indexOf(
+      "validate_http_response problem 401 UNAUTHORIZED",
+      absentHello,
+    );
+    const absentPass = leg.indexOf('pass_record "hello-without-credential-refused"');
+    const bearerAssignment = leg.indexOf('bearer_config="header =');
+    const bearerHello = leg.indexOf(
+      'http_request GET "${worker}${ROUTE_HELLO}" "" "$bearer_config"',
+      bearerAssignment,
+    );
+    const helloContract = leg.indexOf("validate_http_response hello", bearerHello);
+    const helloPass = leg.indexOf('pass_record "bearer-live-on-fellow-route"', helloContract);
+    const sponsor = leg.indexOf("${worker}${ROUTE_PROPOSALS}", helloPass);
+    const refusal = leg.indexOf("validate_http_response problem 403 WRONG_PRINCIPAL", sponsor);
+    const refusalPass = leg.indexOf('pass_record "bearer-on-sponsor-route-refused"', refusal);
+    expect(absentHello).toBeGreaterThanOrEqual(0);
+    expect(absentContract).toBeGreaterThan(absentHello);
+    expect(absentPass).toBeGreaterThan(absentContract);
+    expect(bearerAssignment).toBeGreaterThan(absentPass);
+    expect(bearerHello).toBeGreaterThan(bearerAssignment);
+    expect(helloContract).toBeGreaterThan(bearerHello);
+    expect(helloPass).toBeGreaterThan(helloContract);
+    expect(sponsor).toBeGreaterThan(helloPass);
+    expect(refusal).toBeGreaterThan(sponsor);
+    expect(refusalPass).toBeGreaterThan(refusal);
+    expect(leg.match(/bearer_config/g)?.length ?? 0).toBeGreaterThanOrEqual(3);
+    expect(leg.match(/bearer_config=/g)).toHaveLength(1);
   });
 
   test("direction B is the explicit live-cookie probe", () => {
@@ -1770,19 +1857,20 @@ describe("exactly two WRONG_PRINCIPAL legs, each exact", () => {
     expect(runner).toContain("cookie_present_probe");
   });
 
-  test("PLANTED: anonymous refusal cannot mask explicit-cookie acceptance", () => {
-    expect(
-      cookieDirectionIsProven(
-        { attached: false, status: 403, code: "WRONG_PRINCIPAL" },
-        { attached: true, status: 403, code: "WRONG_PRINCIPAL" },
-      ),
-    ).toBe(true);
-    expect(
-      cookieDirectionIsProven(
-        { attached: false, status: 403, code: "WRONG_PRINCIPAL" },
-        { attached: true, status: 200, code: null },
-      ),
-    ).toBe(false);
+  test("PLANTED: every direction, status and code guard is independently causal", () => {
+    const omission = { attached: false, status: 403, code: "WRONG_PRINCIPAL" } as const;
+    const presented = { attached: true, status: 403, code: "WRONG_PRINCIPAL" } as const;
+    expect(cookieDirectionIsProven(omission, presented)).toBe(true);
+    for (const [plantedOmission, plantedPresented] of [
+      [{ ...omission, attached: true }, presented],
+      [{ ...omission, status: 200 }, presented],
+      [{ ...omission, code: "UNAUTHORIZED" }, presented],
+      [omission, { ...presented, attached: false }],
+      [omission, { ...presented, status: 200 }],
+      [omission, { ...presented, code: "UNAUTHORIZED" }],
+    ] as const) {
+      expect(cookieDirectionIsProven(plantedOmission, plantedPresented)).toBe(false);
+    }
   });
 
   test("no leg accepts an arbitrary non-2xx, a curl 000, a 404 or a 5xx", () => {
@@ -1792,7 +1880,7 @@ describe("exactly two WRONG_PRINCIPAL legs, each exact", () => {
     for (const leg of ["assert_bearer_on_sponsor_route_refused", "assert_cookie_changed_nothing"]) {
       const body = shellFunction(source, leg);
       expect(body).not.toMatch(/!=\s*"?2/);
-      expect(body).toContain("403");
+      expect(body).toContain("validate_http_response problem 403 WRONG_PRINCIPAL");
     }
   });
 
@@ -1810,10 +1898,168 @@ describe("exactly two WRONG_PRINCIPAL legs, each exact", () => {
     const names = [...source.matchAll(/(?:pass|fail)_record "([a-z-]+)"/g)].map((m) => m[1]);
     const legs = names.filter(
       (n) =>
-        n === "bearer-on-sponsor-route-refused" ||
-        n === "cookie-presented-to-agent-host-refused",
+        n === "bearer-on-sponsor-route-refused" || n === "cookie-presented-to-agent-host-refused",
     );
     expect(new Set(legs).size).toBe(2);
+  });
+});
+
+describe("one exact HTTP response contract tree", () => {
+  const enrollmentId = "ASIMP-EN-0123456789ABCDEF";
+  const name = claimNameForEnrollment(enrollmentId);
+  const problem = {
+    type: "https://asimposium.org/errors/WRONG_PRINCIPAL",
+    title: "Wrong principal",
+    status: 403,
+    code: "WRONG_PRINCIPAL",
+    detail: "This route requires a different principal.",
+    fix_hint: "Use the correct principal type.",
+  };
+  const hello = {
+    fellow: { fellow_id: "fel_s6", name, model: "test/no-inference", harness: "playwright" },
+    granted_scopes: ["promote"],
+    granted_resources: {},
+    next_actions: [],
+  };
+  const proposal = {
+    enrollment_id: enrollmentId,
+    proposal_id: "proposal-s6",
+    status: "pending",
+    name,
+    model: "test/no-inference",
+    harness: "playwright",
+    requested_scopes: ["promote"],
+    requested_resources: {},
+    effective_granted_scopes: null,
+    effective_granted_resources: null,
+    proposal_expires_at: 4_000_000_000,
+  };
+  const bytes = (value: unknown): Uint8Array => Buffer.from(JSON.stringify(value));
+
+  test("exact ProblemDocument and live hello contracts are required", () => {
+    expect(
+      selectHttpResponseBytes(bytes(problem), 403, {
+        kind: "problem",
+        status: 403,
+        code: "WRONG_PRINCIPAL",
+      }),
+    ).toEqual({ kind: "problem", status: 403, code: "WRONG_PRINCIPAL" });
+    expect(selectHttpResponseBytes(bytes(hello), 200, { kind: "hello" })).toEqual({
+      kind: "hello",
+    });
+    // A shape-valid-looking garbage bearer refusal cannot establish that the
+    // credential was first live on the Fellow route.
+    expect(() => selectHttpResponseBytes(bytes(problem), 200, { kind: "hello" })).toThrow();
+  });
+
+  test("the exact 202 claim contract discards rather than returns its flow handle", () => {
+    const claim = { flow_handle: `flow_v1.${"A".repeat(43)}` };
+    expect(selectHttpResponseBytes(bytes(claim), 202, { kind: "claim" })).toEqual({
+      kind: "claim",
+    });
+    expect(() =>
+      selectHttpResponseBytes(bytes({ ...claim, extra: true }), 202, { kind: "claim" }),
+    ).toThrow();
+    expect(() => selectHttpResponseBytes(bytes(claim), 200, { kind: "claim" })).toThrow();
+  });
+
+  test("PLANTED: nested, duplicate, malformed, wrong-code and wrong-status problems refuse", () => {
+    const expectation = { kind: "problem", status: 403, code: "WRONG_PRINCIPAL" } as const;
+    expect(() =>
+      selectHttpResponseBytes(
+        bytes({ ...problem, nested: { code: "WRONG_PRINCIPAL" } }),
+        403,
+        expectation,
+      ),
+    ).toThrow();
+    const duplicate = Buffer.from(
+      JSON.stringify(problem).replace(
+        '"code":"WRONG_PRINCIPAL"',
+        '"code":"UNAUTHORIZED","code":"WRONG_PRINCIPAL"',
+      ),
+    );
+    expect(() => selectHttpResponseBytes(duplicate, 403, expectation)).toThrow();
+    expect(() => selectHttpResponseBytes(Buffer.from("{not-json"), 403, expectation)).toThrow();
+    expect(() =>
+      selectHttpResponseBytes(bytes({ ...problem, code: "UNAUTHORIZED" }), 403, expectation),
+    ).toThrow();
+    expect(() => selectHttpResponseBytes(bytes(problem), 401, expectation)).toThrow();
+  });
+
+  test("PLANTED: proposal attribution requires one exact pending card", () => {
+    const expectation = {
+      kind: "proposals-present",
+      enrollmentId,
+      name,
+      model: "test/no-inference",
+      harness: "playwright",
+    } as const;
+    expect(selectHttpResponseBytes(bytes({ proposals: [proposal] }), 200, expectation)).toEqual({
+      kind: "proposals-present",
+    });
+    for (const proposals of [
+      [],
+      [proposal, proposal],
+      [{ ...proposal, name: "s6-wrong" }],
+      [{ ...proposal, model: "test/wrong" }],
+      [{ ...proposal, harness: "wrong" }],
+      [{ ...proposal, reasoning_effort: "high" }],
+      [{ ...proposal, tools_note: "unexpected" }],
+      [{ ...proposal, status: "approved" }],
+      [{ ...proposal, effective_granted_scopes: ["promote"] }],
+      [{ ...proposal, effective_granted_resources: {} }],
+    ]) {
+      expect(() => selectHttpResponseBytes(bytes({ proposals }), 200, expectation)).toThrow();
+    }
+    expect(
+      selectHttpResponseBytes(bytes({ proposals: [] }), 200, {
+        kind: "proposals-absent",
+        enrollmentId,
+      }),
+    ).toEqual({ kind: "proposals-absent" });
+    expect(() =>
+      selectHttpResponseBytes(bytes({ proposals: [proposal] }), 200, {
+        kind: "proposals-absent",
+        enrollmentId,
+      }),
+    ).toThrow();
+  });
+
+  test("curl transcripts are byte-bounded and exact", () => {
+    const transcript = Buffer.from(`${JSON.stringify(problem)}\n403`);
+    expect(
+      selectHttpResponseTranscriptBytes(transcript, {
+        kind: "problem",
+        status: 403,
+        code: "WRONG_PRINCIPAL",
+      }),
+    ).toEqual({ kind: "problem", status: 403, code: "WRONG_PRINCIPAL" });
+    for (const malformed of [
+      Buffer.from(`${JSON.stringify(problem)}\n403\n`),
+      Buffer.from(`${JSON.stringify(problem)}\n40x`),
+      Buffer.from(`${JSON.stringify(problem)}\n403extra`),
+      Buffer.concat([Buffer.alloc(MAX_HTTP_RESPONSE_BYTES + 1, 0x20), Buffer.from("\n403")]),
+      Buffer.from([0xff, 0x0a, 0x34, 0x30, 0x33]),
+    ]) {
+      expect(() =>
+        selectHttpResponseTranscriptBytes(malformed, {
+          kind: "problem",
+          status: 403,
+          code: "WRONG_PRINCIPAL",
+        }),
+      ).toThrow();
+    }
+  });
+
+  test("EnrollmentIdSchema boundaries replace the stale 26-character duplicate", () => {
+    for (const body of ["0".repeat(10), "0123456789ABCDEF", "A".repeat(32)]) {
+      expect(enrollmentIdIsValid(`ASIMP-EN-${body}`)).toBe(true);
+    }
+    for (const body of ["0".repeat(9), "A".repeat(33), "IIIIIIIIII", "bad_lowercase"]) {
+      expect(enrollmentIdIsValid(`ASIMP-EN-${body}`)).toBe(false);
+    }
+    expect(claimNameForEnrollment("ASIMP-EN-0123456789ABCDEF")).toBe("s6-0123456789abcdef");
+    expect(claimNameForEnrollment(`ASIMP-EN-${"A".repeat(32)}`).length).toBe(32);
   });
 });
 
@@ -1829,8 +2075,7 @@ describe("each opaque 401 is tied to its own function", () => {
   ]) {
     test(`${fn} checks 401 UNAUTHORIZED itself`, () => {
       const body = shellFunction(source, fn);
-      expect(body).toContain('"$status" == "401"');
-      expect(body).toContain('"$code" == "UNAUTHORIZED"');
+      expect(body).toContain("validate_http_response problem 401 UNAUTHORIZED");
     });
   }
 
@@ -1858,6 +2103,13 @@ describe("credentials never enter argv or a child environment", () => {
     const http = shellFunction(source, "http_request");
     expect(http).toContain("--config -");
     expect(http).not.toContain("--header");
+    expect(http).toContain("--max-filesize 65536");
+    expect(http).toContain('HTTP_RESPONSE_FILE="$out_file"');
+    expect(http).not.toContain("$(cat");
+    const validator = shellFunction(source, "validate_http_response");
+    expect(validator).toContain("--validate-http-response");
+    expect(validator).toContain("HTTP_RESPONSE_FILE");
+    expect(validator).not.toMatch(/grep|sed|head/);
   });
 
   test("the bearer is passed as a config document", () => {
@@ -1884,6 +2136,24 @@ describe("credentials never enter argv or a child environment", () => {
     expect(probe).not.toContain("console.");
     expect(probe).not.toContain("detail: entry.value");
     expect(source).not.toContain("ASIMP_S6_STORAGE_STATE");
+  });
+
+  test("the transient join secret and flow handle are never emitted or retained", () => {
+    const runner = read(RUNNER);
+    const claim = runner.slice(
+      runner.indexOf("async function claimMintedEnrollment("),
+      runner.indexOf("async function main()"),
+    );
+    expect(claim).toContain("secret: parsed.secret");
+    expect(claim).not.toMatch(/emit\(|writeStdoutLine|writeFile|console\./);
+    expect(claim).not.toContain("flow_handle");
+    const selector = runner.slice(
+      runner.indexOf("export function selectHttpResponseBytes("),
+      runner.indexOf("export function selectHttpResponseTranscriptBytes("),
+    );
+    expect(selector).toContain('return { kind: "claim" }');
+    expect(selector).not.toMatch(/return .*flow_handle/);
+    expect(source).not.toContain("#v1.");
   });
 
   test("no shell request follows a redirect", () => {
@@ -1975,13 +2245,16 @@ describe("the receipt is structured, bound, and matched as a fixed string", () =
     const leg = shellFunction(source, "run_browser_leg");
     expect(leg).toContain("--validate-record");
     expect(leg).toContain("$'pass\\t'");
-    expect(leg).toContain("ASIMP-EN-[0-9A-HJKMNP-TV-Z]{26}");
+    expect(leg).not.toContain("ASIMP-EN-");
+    expect(read(RUNNER)).toContain("EnrollmentIdSchema.safeParse");
   });
 
-  test("attribution matching is fixed-string, never a regex", () => {
+  test("attribution uses strict current- and opposite-sponsor proposal contracts", () => {
     const leg = shellFunction(source, "assert_receipt_attributed");
-    expect(leg).toContain("grep -qF");
-    expect(leg).not.toMatch(/grep -q[^F]/);
+    expect(leg).toContain('validate_http_response proposals-present "$RECEIPT"');
+    expect(leg).toContain('validate_http_response proposals-absent "$RECEIPT"');
+    expect(leg).toContain("other_sponsor");
+    expect(leg).not.toContain("grep");
   });
 
   test("the runner proves the id was absent before the click", () => {
@@ -1993,18 +2266,28 @@ describe("the receipt is structured, bound, and matched as a fixed string", () =
     expect(runner).not.toContain('locator("body").innerText()');
   });
 
-  test("the dedicated receipt is parsed in-page and bound to exact Worker origin/path", () => {
+  test("the dedicated receipt is exact-contract parsed and transiently claimed", () => {
     const runner = read(RUNNER);
     const receipt = runner.slice(
-      runner.indexOf("const receiptDescriptor = await joinReceipt.evaluate("),
-      runner.indexOf("// Stop accepting new cookie evidence"),
+      runner.indexOf("const joinUrl = await joinReceipt.evaluate("),
+      runner.indexOf("const receipt =", runner.indexOf("const joinUrl =")),
     );
     expect(receipt).toContain('element.matches("pre.pasteblock.join-url")');
-    expect(receipt).toContain("join.origin === contract.workerOrigin");
-    expect(receipt).toContain("join.pathname");
-    expect(receipt).toContain('join.search === ""');
-    expect(receipt).toContain("/^#v1\\.[A-Za-z0-9_-]{43}$/");
+    expect(receipt).toContain("claimMintedEnrollment(claimContext, joinUrl, workerUrl)");
     expect(receipt).not.toContain("innerText");
+    const claim = runner.slice(
+      runner.indexOf("async function claimMintedEnrollment("),
+      runner.indexOf("async function main()"),
+    );
+    expect(claim).toContain("parseStoaJoinUrl(joinUrl)");
+    expect(claim).toContain('new URL("/v1/fellows", workerUrl).href');
+    expect(claim).toContain("FellowRegistrationRequestSchema.parse");
+    expect(claim).toContain("maxRedirects: 0");
+    expect(claim).toContain('response.headers()["cache-control"] !== "no-store"');
+    expect(claim).toContain(
+      'selectHttpResponseBytes(await response.body(), response.status(), { kind: "claim" })',
+    );
+    expect(claim).not.toContain("console.");
   });
 
   test("missing mint is blocked only by the exact provisioning signal", () => {
@@ -2013,7 +2296,9 @@ describe("the receipt is structured, bound, and matched as a fixed string", () =
       runner.indexOf('const mint = page.getByRole("button"'),
       runner.indexOf("const joinReceipt ="),
     );
-    const signal = mint.indexOf("Join-URL minting is disabled because this deployment cannot prepare recoverable writes");
+    const signal = mint.indexOf(
+      "Join-URL minting is disabled because this deployment cannot prepare recoverable writes",
+    );
     const blocked = mint.indexOf("CONSOLE_WRITES_NOT_PROVISIONED");
     const failed = mint.indexOf("CONSOLE_MINT_CONTROL_MISSING");
     expect(signal).toBeGreaterThanOrEqual(0);
@@ -2101,6 +2386,540 @@ describe("the receipt is structured, bound, and matched as a fixed string", () =
   });
 });
 
+describe("mandatory schema-v4 evidence is exact and fail-closed", () => {
+  const source = code(SCRIPT);
+  const evidence = {
+    suite: "s6-cross-plane-auth",
+    schema_version: 4,
+    bead: "asimposiumorg-vw3",
+    revision: {
+      value: "a".repeat(64),
+      source: "required_harness_input",
+      verification: "format_only",
+    },
+    deployment: {
+      id: "s6-paired-deployment:01",
+      source: "required_harness_input",
+      verification: "format_only",
+      exercised_origins: {
+        agora_host: "preview.vercel.app",
+        stoa_host: "a-preview.asimposium.org",
+        source: "exercised_https_origin",
+      },
+    },
+    service_envelope: {
+      kid: "s6-live-kid",
+      method: "GET",
+      action: "enrollment.proposals.list",
+      payload_sha256: "b".repeat(64),
+      principal_pseudonym: { scheme: "sha256", value: "c".repeat(64) },
+      route_template: "/v1/enrollments/proposals",
+      initial_response: { status: 200, code: null, latency_seconds: 2 },
+      replay_response: { status: 401, code: "UNAUTHORIZED", latency_seconds: 3 },
+    },
+    cookie_assertions: {
+      host_only: true,
+      http_only: true,
+      secure: true,
+      same_site: "lax",
+      scoped_to_apex: true,
+      natural_agent_host: { attached: false, status: 403, code: "WRONG_PRINCIPAL" },
+      explicit_agent_host: { attached: true, status: 403, code: "WRONG_PRINCIPAL" },
+    },
+    latency: { browser_leg_seconds: 11, run_seconds: 19 },
+    assertions: 17,
+    failures: 0,
+  };
+  const expectedEvidence = {
+    revision: evidence.revision.value,
+    deploymentId: evidence.deployment.id,
+    agoraHost: evidence.deployment.exercised_origins.agora_host,
+    stoaHost: evidence.deployment.exercised_origins.stoa_host,
+    kid: evidence.service_envelope.kid,
+    payloadSha256: evidence.service_envelope.payload_sha256,
+    principalPseudonym: evidence.service_envelope.principal_pseudonym.value,
+    initialLatencySeconds: evidence.service_envelope.initial_response.latency_seconds,
+    replayLatencySeconds: evidence.service_envelope.replay_response.latency_seconds,
+    browserLegSeconds: evidence.latency.browser_leg_seconds,
+    runSeconds: evidence.latency.run_seconds,
+    assertions: evidence.assertions,
+    failures: evidence.failures,
+  };
+
+  test("the required variable set and pure missing-value rule are exact", () => {
+    const start = source.indexOf("readonly REQUIRED_VARS=(");
+    const end = source.indexOf("\n)", start);
+    expect(start).toBeGreaterThanOrEqual(0);
+    expect(end).toBeGreaterThan(start);
+    const declaration = source.slice(start, end + 2);
+    const names = [...declaration.matchAll(/^ {2}(ASIMP_S6_[A-Z0-9_]+)$/gm)].map((match) => {
+      const name = match[1];
+      if (name === undefined) throw new Error("required-variable capture was absent");
+      return name;
+    });
+    expect(names).toEqual([
+      "ASIMP_S6_PREVIEW_URL",
+      "ASIMP_S6_WORKER_URL",
+      "ASIMP_S6_TEST_GOOGLE_USER",
+      "ASIMP_S6_TEST_GOOGLE_PASS",
+      "ASIMP_S6_FELLOW_TOKEN",
+      "ASIMP_S6_SIGNING_KEY_HEX",
+      "ASIMP_S6_SIGNING_KID",
+      "ASIMP_S6_SPONSOR_ID",
+      "ASIMP_S6_REVISION",
+      "ASIMP_S6_DEPLOYMENT_ID",
+      "ASIMP_S6_EVIDENCE_DIR",
+    ]);
+    expect(source).not.toMatch(/ASIMP_S6_(?:AGORA|STOA)_DEPLOYMENT/);
+    expect(shellFunction(source, "missing_vars")).toBe(`missing_vars() {
+  local name
+  for name in "\${REQUIRED_VARS[@]}"; do
+    if [[ -z "\${!name:-}" ]]; then printf '%s\\n' "$name"; fi
+  done`);
+    const missingVars = (environment: Readonly<Record<string, string | undefined>>): string[] =>
+      names.filter((name) => !environment[name]);
+    const present = Object.fromEntries(names.map((name) => [name, "present"]));
+    expect(missingVars(present)).toEqual([]);
+    for (const name of names) {
+      expect(missingVars({ ...present, [name]: "" }), name).toEqual([name]);
+      expect(missingVars({ ...present, [name]: undefined }), name).toEqual([name]);
+    }
+  });
+
+  test("PLANTED: the exact shell path predicate matches the pure table oracle", () => {
+    const predicate = shellFunction(source, "valid_evidence_directory");
+    expect(predicate).toBe(`valid_evidence_directory() {
+  [[ "$1" == "e2e/artifacts/s6-cross-plane-auth" ]]`);
+    const accepts = (value: string): boolean => value === "e2e/artifacts/s6-cross-plane-auth";
+    expect(accepts("e2e/artifacts/s6-cross-plane-auth")).toBe(true);
+    for (const unsafe of [
+      "",
+      "/tmp/s6-cross-plane-auth",
+      "e2e/artifacts/s6-cross-plane-auth/",
+      "e2e/artifacts/s6-cross-plane-auth/../escape",
+      "e2e/artifacts/s6-cross-plane-auth-lookalike",
+    ]) {
+      expect(accepts(unsafe), unsafe).toBe(false);
+    }
+  });
+
+  test("symlink components and invalid deployment configuration have typed blockers", () => {
+    const symlinkGuard = shellFunction(source, "evidence_directory_has_symlink_component");
+    expect(symlinkGuard).toContain('[[ -L "e2e" || -L "e2e/artifacts" ||');
+    expect(symlinkGuard).toContain('-L "e2e/artifacts/s6-cross-plane-auth" ]]');
+    const main = shellFunction(source, "main");
+    const revisionCheck = main.indexOf('if [[ ! "$ASIMP_S6_REVISION" =~');
+    const revisionBlocker = main.indexOf('blocked_record "REVISION_INVALID"');
+    const deploymentCheck = main.indexOf('if [[ ! "$ASIMP_S6_DEPLOYMENT_ID" =~');
+    const deploymentBlocker = main.indexOf('blocked_record "DEPLOYMENT_ID_INVALID"');
+    const directoryCheck = main.indexOf('if ! valid_evidence_directory "$ASIMP_S6_EVIDENCE_DIR"');
+    const symlinkCheck = main.indexOf("evidence_directory_has_symlink_component", directoryCheck);
+    const directoryBlocker = main.indexOf('blocked_record "EVIDENCE_DIR_INVALID"');
+    expect(revisionCheck).toBeGreaterThanOrEqual(0);
+    expect(revisionBlocker).toBeGreaterThan(revisionCheck);
+    expect(main.slice(revisionCheck, revisionBlocker)).toContain("^([0-9a-f]{40}|[0-9a-f]{64})$");
+    expect(deploymentCheck).toBeGreaterThan(revisionBlocker);
+    expect(deploymentBlocker).toBeGreaterThan(deploymentCheck);
+    expect(main.slice(deploymentCheck, deploymentBlocker)).toContain(
+      "^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$",
+    );
+    expect(directoryCheck).toBeGreaterThan(deploymentBlocker);
+    expect(symlinkCheck).toBeGreaterThan(directoryCheck);
+    expect(directoryBlocker).toBeGreaterThan(symlinkCheck);
+
+    const writer = shellFunction(source, "write_evidence_bundle");
+    const fixedRoot = writer.indexOf('valid_evidence_directory "$dir"');
+    const beforeCreate = writer.indexOf("evidence_directory_has_symlink_component", fixedRoot);
+    const create = writer.indexOf('mkdir -p "$dir"', beforeCreate);
+    const afterCreate = writer.indexOf("evidence_directory_has_symlink_component", create);
+    const finalPath = writer.indexOf('if [[ -L "$path" ]]', afterCreate);
+    expect(fixedRoot).toBeGreaterThanOrEqual(0);
+    expect(beforeCreate).toBeGreaterThan(fixedRoot);
+    expect(create).toBeGreaterThan(beforeCreate);
+    expect(afterCreate).toBeGreaterThan(create);
+    expect(finalPath).toBeGreaterThan(afterCreate);
+  });
+
+  test("PLANTED: the shared exact schema validator rejects partial or overstated evidence", () => {
+    expect(() => selectS6EvidenceV4(evidence)).not.toThrow();
+    expect(() => selectS6EvidenceAgainstExpected(evidence, expectedEvidence)).not.toThrow();
+    const canonical = Buffer.from(`${JSON.stringify(evidence)}\n`, "utf8");
+    expect(() => selectS6EvidenceBytes(canonical, expectedEvidence)).not.toThrow();
+    const variants: unknown[] = [
+      { ...evidence, schema_version: 3 },
+      { ...evidence, extra: true },
+      { ...evidence, revision: { ...evidence.revision, verification: "verified" } },
+      { ...evidence, deployment: { ...evidence.deployment, verification: "verified" } },
+      { ...evidence, deployment: { ...evidence.deployment, id: "bad deployment id" } },
+      {
+        ...evidence,
+        deployment: {
+          ...evidence.deployment,
+          exercised_origins: {
+            ...evidence.deployment.exercised_origins,
+            stoa_host: evidence.deployment.exercised_origins.agora_host,
+          },
+        },
+      },
+      {
+        ...evidence,
+        service_envelope: { ...evidence.service_envelope, initial_response: null },
+      },
+      {
+        ...evidence,
+        service_envelope: {
+          ...evidence.service_envelope,
+          payload_sha256: "g".repeat(64),
+        },
+      },
+      {
+        ...evidence,
+        cookie_assertions: {
+          ...evidence.cookie_assertions,
+          explicit_agent_host: {
+            ...evidence.cookie_assertions.explicit_agent_host,
+            attached: false,
+          },
+        },
+      },
+      { ...evidence, latency: { ...evidence.latency, browser_leg_seconds: -1 } },
+    ];
+    const { revision: _missingRevision, ...withoutRevision } = evidence;
+    variants.push(withoutRevision);
+    for (const variant of variants) expect(() => selectS6EvidenceV4(variant)).toThrow();
+    const duplicateSchemaVersion = Buffer.from(
+      `${JSON.stringify(evidence).replace(
+        '"schema_version":4',
+        '"schema_version":3,"schema_version":4',
+      )}\n`,
+      "utf8",
+    );
+    for (const malformed of [
+      canonical.subarray(0, canonical.length - 1),
+      Buffer.concat([canonical, canonical]),
+      duplicateSchemaVersion,
+      Buffer.from(` ${JSON.stringify(evidence)}\n`, "utf8"),
+      Buffer.from(`${JSON.stringify(evidence)}\r\n`, "utf8"),
+      Buffer.from([0xff, 0x0a]),
+      Buffer.alloc(MAX_S6_EVIDENCE_BYTES + 1, 0x61),
+    ]) {
+      expect(() => selectS6EvidenceBytes(malformed, expectedEvidence)).toThrow();
+    }
+  });
+
+  test("PLANTED: every homogeneous expected-value swap is refused", () => {
+    const reject = (actual: typeof evidence): void => {
+      expect(() => selectS6EvidenceV4(actual)).not.toThrow();
+      expect(() => selectS6EvidenceAgainstExpected(actual, expectedEvidence)).toThrow();
+      expect(() =>
+        selectS6EvidenceBytes(Buffer.from(`${JSON.stringify(actual)}\n`, "utf8"), expectedEvidence),
+      ).toThrow();
+    };
+
+    const textGroups: Array<
+      Array<{
+        get(value: typeof evidence): string;
+        set(value: typeof evidence, replacement: string): void;
+      }>
+    > = [
+      [
+        {
+          get: (value) => value.revision.value,
+          set: (value, replacement) => {
+            value.revision.value = replacement;
+          },
+        },
+        {
+          get: (value) => value.service_envelope.payload_sha256,
+          set: (value, replacement) => {
+            value.service_envelope.payload_sha256 = replacement;
+          },
+        },
+        {
+          get: (value) => value.service_envelope.principal_pseudonym.value,
+          set: (value, replacement) => {
+            value.service_envelope.principal_pseudonym.value = replacement;
+          },
+        },
+      ],
+      [
+        {
+          get: (value) => value.deployment.id,
+          set: (value, replacement) => {
+            value.deployment.id = replacement;
+          },
+        },
+        {
+          get: (value) => value.deployment.exercised_origins.agora_host,
+          set: (value, replacement) => {
+            value.deployment.exercised_origins.agora_host = replacement;
+          },
+        },
+        {
+          get: (value) => value.deployment.exercised_origins.stoa_host,
+          set: (value, replacement) => {
+            value.deployment.exercised_origins.stoa_host = replacement;
+          },
+        },
+        {
+          get: (value) => value.service_envelope.kid,
+          set: (value, replacement) => {
+            value.service_envelope.kid = replacement;
+          },
+        },
+      ],
+    ];
+    for (const fields of textGroups) {
+      for (let left = 0; left < fields.length; left += 1) {
+        for (let right = left + 1; right < fields.length; right += 1) {
+          const actual = structuredClone(evidence);
+          const leftValue = fields[left]?.get(actual);
+          const rightValue = fields[right]?.get(actual);
+          if (leftValue === undefined || rightValue === undefined) throw new Error("bad plant");
+          fields[left]?.set(actual, rightValue);
+          fields[right]?.set(actual, leftValue);
+          reject(actual);
+        }
+      }
+    }
+
+    const numericFields: Array<{
+      get(value: typeof evidence): number;
+      set(value: typeof evidence, replacement: number): void;
+    }> = [
+      {
+        get: (value) => value.service_envelope.initial_response.latency_seconds,
+        set: (value, replacement) => {
+          value.service_envelope.initial_response.latency_seconds = replacement;
+        },
+      },
+      {
+        get: (value) => value.service_envelope.replay_response.latency_seconds,
+        set: (value, replacement) => {
+          value.service_envelope.replay_response.latency_seconds = replacement;
+        },
+      },
+      {
+        get: (value) => value.latency.browser_leg_seconds,
+        set: (value, replacement) => {
+          value.latency.browser_leg_seconds = replacement;
+        },
+      },
+      {
+        get: (value) => value.latency.run_seconds,
+        set: (value, replacement) => {
+          value.latency.run_seconds = replacement;
+        },
+      },
+      {
+        get: (value) => value.assertions,
+        set: (value, replacement) => {
+          value.assertions = replacement;
+        },
+      },
+      {
+        get: (value) => value.failures,
+        set: (value, replacement) => {
+          value.failures = replacement;
+        },
+      },
+    ];
+    for (let left = 0; left < numericFields.length; left += 1) {
+      for (let right = left + 1; right < numericFields.length; right += 1) {
+        const actual = structuredClone(evidence);
+        const leftValue = numericFields[left]?.get(actual);
+        const rightValue = numericFields[right]?.get(actual);
+        if (leftValue === undefined || rightValue === undefined) throw new Error("bad plant");
+        numericFields[left]?.set(actual, rightValue);
+        numericFields[right]?.set(actual, leftValue);
+        reject(actual);
+      }
+    }
+  });
+
+  test("the writer emits schema v4 from validator-latched actual tuples", () => {
+    const writer = shellFunction(source, "write_evidence_bundle");
+    const captureStart = writer.indexOf('  local -r expected_revision="$ASIMP_S6_REVISION"');
+    const captureEnd = writer.indexOf("\n  local path=", captureStart);
+    expect(captureStart).toBeGreaterThanOrEqual(0);
+    expect(captureEnd).toBeGreaterThan(captureStart);
+    expect(
+      writer.slice(captureStart, captureEnd),
+    ).toBe(`  local -r expected_revision="$ASIMP_S6_REVISION"
+  local -r expected_deployment_id="$ASIMP_S6_DEPLOYMENT_ID"
+  local -r expected_agora_host="$apex_host" expected_stoa_host="$agent_host"
+  local -r expected_kid="\${ASIMP_S6_SIGNING_KID:-}"
+  local -r expected_method="$EVIDENCE_ENVELOPE_METHOD"
+  local -r expected_action="$EVIDENCE_ENVELOPE_ACTION"
+  local -r expected_payload_sha256="$EVIDENCE_ENVELOPE_PAYLOAD_SHA256"
+  local -r expected_principal_pseudonym="$EVIDENCE_ENVELOPE_PRINCIPAL_PSEUDONYM"
+  local -r expected_route_template="$EVIDENCE_ENVELOPE_ROUTE_TEMPLATE"
+  local -r expected_initial_status="$EVIDENCE_ENVELOPE_INITIAL_STATUS"
+  local -r expected_initial_latency_seconds="$EVIDENCE_ENVELOPE_INITIAL_LATENCY_SECONDS"
+  local -r expected_replay_status="$EVIDENCE_ENVELOPE_REPLAY_STATUS"
+  local -r expected_replay_code="$EVIDENCE_ENVELOPE_REPLAY_CODE"
+  local -r expected_replay_latency_seconds="$EVIDENCE_ENVELOPE_REPLAY_LATENCY_SECONDS"
+  local -r expected_browser_leg_seconds="$BROWSER_LEG_LATENCY_SECONDS"
+  local -r expected_run_seconds="$SECONDS"
+  local -r expected_assertions="$ASSERTIONS" expected_failures="$FAILURES"`);
+    expect(writer).toContain('"schema_version":4');
+    expect(writer).toContain(
+      '"revision":{"value":"%s","source":"required_harness_input","verification":"format_only"}',
+    );
+    expect(writer).toContain(
+      '"deployment":{"id":"%s","source":"required_harness_input","verification":"format_only","exercised_origins":{"agora_host":"%s","stoa_host":"%s","source":"exercised_https_origin"}}',
+    );
+    expect(writer).toContain('"service_envelope":{"kid":"%s","method":"%s"');
+    expect(writer).toContain('"cookie_assertions":{"host_only":true');
+    expect(writer).toContain('"latency":{"browser_leg_seconds":%s,"run_seconds":%s}');
+
+    const accepted = shellFunction(source, "assert_worker_accepts_valid_envelope");
+    const acceptedContract = accepted.indexOf(
+      'validate_http_response proposals-present "$RECEIPT"',
+    );
+    const acceptedLatch = accepted.indexOf('EVIDENCE_ENVELOPE_METHOD="GET"');
+    expect(acceptedContract).toBeGreaterThanOrEqual(0);
+    expect(acceptedLatch).toBeGreaterThan(acceptedContract);
+    const replay = shellFunction(source, "assert_replay_refused");
+    const replayContract = replay.indexOf("validate_http_response problem 401 UNAUTHORIZED");
+    const replayLatch = replay.indexOf("EVIDENCE_ENVELOPE_REPLAY_STATUS=401");
+    expect(replayContract).toBeGreaterThanOrEqual(0);
+    expect(replayLatch).toBeGreaterThan(replayContract);
+    const browser = shellFunction(source, "run_browser_leg");
+    const normalizedPass = browser.indexOf('pass_record "cookie-presented-to-agent-host-refused"');
+    const cookieLatch = browser.indexOf("EVIDENCE_COOKIE_ASSERTIONS_VALIDATED=1");
+    expect(normalizedPass).toBeGreaterThanOrEqual(0);
+    expect(cookieLatch).toBeGreaterThan(normalizedPass);
+
+    const validator = shellFunction(source, "validate_evidence_bundle");
+    expect(validator).toContain('minimal_env_command bun "$PLAYWRIGHT_RUNNER" --validate-evidence');
+    expect(validator).toContain('run_bounded "$bound" "$validator_file" - "${MINIMAL_CMD[@]}"');
+    const outcome = validator.indexOf('if [[ "$RUN_BOUNDED_OUTCOME" == "child" ]]');
+    const exactSuccess = validator.indexOf("(( status == 0 )) || return 1", outcome);
+    expect(outcome).toBeGreaterThanOrEqual(0);
+    expect(exactSuccess).toBeGreaterThan(outcome);
+    expect(validator.slice(0, exactSuccess)).not.toContain("read -r");
+    const validatorInvocation = validator.slice(
+      validator.indexOf("minimal_env_command bun"),
+      validator.indexOf("run_bounded"),
+    );
+    let validatorArg = -1;
+    for (const name of [
+      "path",
+      "expected_revision",
+      "expected_deployment_id",
+      "expected_agora_host",
+      "expected_stoa_host",
+      "expected_kid",
+      "expected_payload_sha256",
+      "expected_principal_pseudonym",
+      "expected_initial_latency_seconds",
+      "expected_replay_latency_seconds",
+      "expected_browser_leg_seconds",
+      "expected_run_seconds",
+      "expected_assertions",
+      "expected_failures",
+    ]) {
+      const next = validatorInvocation.indexOf(`"$${name}"`, validatorArg + 1);
+      expect(next, name).toBeGreaterThan(validatorArg);
+      validatorArg = next;
+    }
+
+    const modeCheck = writer.indexOf('if [[ "$mode" != "600" ]]');
+    const actualValidation = writer.indexOf("validate_evidence_bundle", modeCheck);
+    const evidencePath = writer.indexOf('EVIDENCE_PATH="$path"', actualValidation);
+    expect(modeCheck).toBeGreaterThanOrEqual(0);
+    expect(actualValidation).toBeGreaterThan(modeCheck);
+    expect(evidencePath).toBeGreaterThan(actualValidation);
+    const runSecondsCapture = writer.indexOf('local -r expected_run_seconds="$SECONDS"');
+    const latencyRender = writer.indexOf(
+      '"latency":{"browser_leg_seconds":%s,"run_seconds":%s}',
+      runSecondsCapture,
+    );
+    expect(runSecondsCapture).toBeGreaterThanOrEqual(0);
+    expect(latencyRender).toBeGreaterThan(runSecondsCapture);
+    expect(actualValidation).toBeGreaterThan(latencyRender);
+    expect(writer.slice(runSecondsCapture).match(/\$SECONDS/g)).toHaveLength(1);
+    const writerInvocation = writer.slice(actualValidation, evidencePath);
+    let writerArg = -1;
+    for (const name of [
+      "path",
+      "expected_revision",
+      "expected_deployment_id",
+      "expected_agora_host",
+      "expected_stoa_host",
+      "expected_kid",
+      "expected_payload_sha256",
+      "expected_principal_pseudonym",
+      "expected_initial_latency_seconds",
+      "expected_replay_latency_seconds",
+      "expected_browser_leg_seconds",
+      "expected_run_seconds",
+      "expected_assertions",
+      "expected_failures",
+    ]) {
+      const next = writerInvocation.indexOf(`"$${name}"`, writerArg + 1);
+      expect(next, name).toBeGreaterThan(writerArg);
+      writerArg = next;
+    }
+
+    const runner = read(RUNNER);
+    const cli = runner.indexOf('if (process.argv[2] === "--validate-evidence")');
+    const readerStart = runner.indexOf("function readBoundedRegularFile(");
+    const readerEnd = runner.indexOf("function browserRecordValidatorMode()", readerStart);
+    const reader = runner.slice(readerStart, readerEnd);
+    const fileMode = runner.indexOf("function evidenceValidatorMode()");
+    expect(readerStart).toBeGreaterThanOrEqual(0);
+    expect(readerEnd).toBeGreaterThan(readerStart);
+    expect(reader).toContain("fsConstants.O_NOFOLLOW");
+    expect(reader).toContain("!before.isFile() || before.size > maximumBytes");
+    expect(reader).toContain("after.dev !== before.dev");
+    expect(reader).toContain("after.ino !== before.ino");
+    expect(reader).toContain("after.size !== before.size");
+    expect(fileMode).toBeGreaterThan(readerEnd);
+    expect(cli).toBeGreaterThan(fileMode);
+    const evidenceMode = runner.slice(fileMode, cli);
+    expect(evidenceMode).toContain(
+      'readBoundedRegularFile(path, MAX_S6_EVIDENCE_BYTES, "S6 evidence file")',
+    );
+    expect(evidenceMode).toContain("expected,");
+    for (const mapping of [
+      "revision: process.argv[4]",
+      "deploymentId: process.argv[5]",
+      "agoraHost: process.argv[6]",
+      "stoaHost: process.argv[7]",
+      "kid: process.argv[8]",
+      "payloadSha256: process.argv[9]",
+      "principalPseudonym: process.argv[10]",
+      "initialLatencySeconds: integer(11)",
+      "replayLatencySeconds: integer(12)",
+      "browserLegSeconds: integer(13)",
+      "runSeconds: integer(14)",
+      "assertions: integer(15)",
+      "failures: integer(16)",
+    ]) {
+      expect(evidenceMode).toContain(mapping);
+    }
+  });
+
+  test("finish cannot publish pass with an empty evidence path", () => {
+    const finish = shellFunction(source, "finish");
+    const write = finish.indexOf("write_evidence_bundle");
+    const empty = finish.indexOf('if [[ -z "$EVIDENCE_PATH" ]]', write);
+    const refusal = finish.indexOf('fail_record "evidence-present-before-pass"', empty);
+    const failureVerdict = finish.indexOf("if (( FAILURES > 0 ))", refusal);
+    const passVerdict = finish.indexOf(
+      'emit "{\\"suite\\":\\"${SUITE}\\",\\"status\\":\\"pass\\"',
+      failureVerdict,
+    );
+    expect(write).toBeGreaterThanOrEqual(0);
+    expect(empty).toBeGreaterThan(write);
+    expect(refusal).toBeGreaterThan(empty);
+    expect(failureVerdict).toBeGreaterThan(refusal);
+    expect(passVerdict).toBeGreaterThan(failureVerdict);
+  });
+});
+
 describe("the run is bounded and proves its owned-group lifecycle", () => {
   const source = code(SCRIPT);
 
@@ -2180,6 +2999,7 @@ describe("the run is bounded and proves its owned-group lifecycle", () => {
 
   test("INT/TERM are latched across coproc spawn, registration and READY adoption", () => {
     const bounded = shellFunction(source, "run_bounded");
+    const clearLatch = bounded.indexOf('LATCHED_SIGNAL=""');
     const active = bounded.indexOf("SPAWN_REGISTRATION_ACTIVE=1");
     const coprocess = bounded.indexOf("coproc S6_BOUNDED_SUPERVISOR");
     const pid = bounded.indexOf("pid=$!");
@@ -2188,9 +3008,20 @@ describe("the run is bounded and proves its owned-group lifecycle", () => {
     const adopt = bounded.indexOf('adopt_group_control "$pid" "$supervisor_token"');
     const start = bounded.indexOf('GROUP_PROTOCOL_STATE="input"', adopt);
     const drain = bounded.lastIndexOf("end_spawn_registration_window", start);
-    for (const member of [active, coprocess, pid, register, resultFd, adopt, drain, start]) {
+    for (const member of [
+      clearLatch,
+      active,
+      coprocess,
+      pid,
+      register,
+      resultFd,
+      adopt,
+      drain,
+      start,
+    ]) {
       expect(member).toBeGreaterThanOrEqual(0);
     }
+    expect(clearLatch).toBeLessThan(active);
     expect(active).toBeLessThan(coprocess);
     expect(coprocess).toBeLessThan(pid);
     expect(pid).toBeLessThan(register);
@@ -2201,12 +3032,23 @@ describe("the run is bounded and proves its owned-group lifecycle", () => {
     const signal = shellFunction(source, "on_signal");
     expect(signal).toContain("SPAWN_REGISTRATION_ACTIVE == 1");
     expect(signal).toContain('LATCHED_SIGNAL="$signal"');
-    expect(source).toContain("pre-registration-signal-publishes-positive-lifecycle");
+    const close = shellFunction(source, "end_spawn_registration_window");
+    const deactivate = close.indexOf("SPAWN_REGISTRATION_ACTIVE=0");
+    const snapshot = close.indexOf('local pending="$LATCHED_SIGNAL"');
+    const clear = close.indexOf('LATCHED_SIGNAL=""', snapshot);
+    expect(deactivate).toBeGreaterThanOrEqual(0);
+    expect(snapshot).toBeGreaterThan(deactivate);
+    expect(clear).toBeGreaterThan(snapshot);
+    for (const seam of ["prereg", "handoff"]) {
+      for (const dispatched of ["TERM", "INT"]) {
+        expect(source).toContain(`registration_signal_plant ${seam} ${dispatched}`);
+      }
+    }
   });
 
   test("clean script terminals publish one exact owned-group lifecycle record", () => {
     const lifecycle = shellFunction(source, "publish_lifecycle_settled");
-    expect(lifecycle).toContain('${#CHILD_PIDS[@]} == 0');
+    expect(lifecycle).toContain("${#CHILD_PIDS[@]} == 0");
     expect(lifecycle).toContain('[[ -z "$GROUP_CONTROL_PID" ]]');
     expect(lifecycle).toContain(
       '\\"record_type\\":\\"lifecycle-terminal\\",\\"status\\":\\"pass\\",\\"owned_same_process_groups\\":\\"settled\\"',
@@ -2286,7 +3128,14 @@ describe("the run is bounded and proves its owned-group lifecycle", () => {
 
   test("every controlled wait is gated by settlement and exact result EOF", () => {
     const settlement = shellFunction(source, "group_settled_before_wait");
-    expect(settlement).toContain('kill -0 -- "-${pid}"');
+    expect(settlement).toContain('kernel_identity_state "-${pid}" group');
+    expect(settlement).toContain("state == 1");
+    const errno = shellFunction(source, "kernel_identity_state");
+    expect(errno).toContain("Errno=ESRCH");
+    expect(errno).toContain("? 1 : 2");
+    const direct = shellFunction(source, "direct_child_settled_before_wait");
+    expect(direct).toContain('kernel_identity_state "$pid" direct');
+    expect(direct).toContain("kernel_state == 1");
     // A partial process-list snapshot is not authority to enter a blocking
     // wait, even when the command exits zero or reports only a zombie row.
     expect(settlement).not.toContain("/bin/ps");
@@ -2424,11 +3273,72 @@ describe("the runner record and the shell parser cannot drift apart", () => {
       kind: "pass",
       enrollmentId: passRecord.receipt.enrollment_id,
     });
-    const wrongDirection = {
-      ...passRecord,
-      cookie_present_probe: { attached: true, status: 200, code: null },
-    };
-    expect(() => selectBrowserEvidenceBytes(encoded(wrongDirection), 0)).toThrow();
+    const cookieMutations: unknown[] = [
+      { ...passRecord, cookie: { ...passRecord.cookie, issuance_count: 0 } },
+      { ...passRecord, cookie: { ...passRecord.cookie, issuance_count: 1.5 } },
+      { ...passRecord, cookie: { ...passRecord.cookie, issuance_count: "2" } },
+      { ...passRecord, cookie: { ...passRecord.cookie, host_only: false } },
+      { ...passRecord, cookie: { ...passRecord.cookie, http_only: false } },
+      { ...passRecord, cookie: { ...passRecord.cookie, secure: false } },
+      { ...passRecord, cookie: { ...passRecord.cookie, same_site: "none" } },
+      { ...passRecord, cookie: { ...passRecord.cookie, scoped_to_apex: false } },
+      { ...passRecord, cookie: { ...passRecord.cookie, present_for_agent_host: true } },
+      {
+        ...passRecord,
+        cookie: { ...passRecord.cookie, unexpected: true },
+      },
+      {
+        ...passRecord,
+        cookie_omission_probe: { attached: true, status: 403, code: "WRONG_PRINCIPAL" },
+      },
+      {
+        ...passRecord,
+        cookie_omission_probe: { attached: false, status: 200, code: "WRONG_PRINCIPAL" },
+      },
+      {
+        ...passRecord,
+        cookie_omission_probe: { attached: false, status: 403.5, code: "WRONG_PRINCIPAL" },
+      },
+      {
+        ...passRecord,
+        cookie_omission_probe: { attached: false, status: 403, code: "UNAUTHORIZED" },
+      },
+      {
+        ...passRecord,
+        cookie_omission_probe: { attached: false, status: 403, code: null },
+      },
+      {
+        ...passRecord,
+        cookie_omission_probe: { ...passRecord.cookie_omission_probe, unexpected: true },
+      },
+      {
+        ...passRecord,
+        cookie_present_probe: { attached: false, status: 403, code: "WRONG_PRINCIPAL" },
+      },
+      {
+        ...passRecord,
+        cookie_present_probe: { attached: true, status: 200, code: "WRONG_PRINCIPAL" },
+      },
+      {
+        ...passRecord,
+        cookie_present_probe: { attached: true, status: 403.5, code: "WRONG_PRINCIPAL" },
+      },
+      {
+        ...passRecord,
+        cookie_present_probe: { attached: true, status: 403, code: "UNAUTHORIZED" },
+      },
+      {
+        ...passRecord,
+        cookie_present_probe: { attached: true, status: 403, code: null },
+      },
+      {
+        ...passRecord,
+        cookie_present_probe: { ...passRecord.cookie_present_probe, unexpected: true },
+      },
+    ];
+    for (const mutation of cookieMutations) {
+      expect(() => selectBrowserEvidenceBytes(encoded(mutation), 0)).toThrow();
+    }
     expect(() =>
       selectBrowserEvidenceBytes(
         encoded({ ...passRecord, receipt: { ...passRecord.receipt, exact_worker_origin: false } }),
@@ -2682,9 +3592,11 @@ describe("the tamper case reaches the verifier", () => {
 
   test("a content-type refusal is an explicit failure, not a silent pass", () => {
     const body = shellFunction(source, "assert_altered_payload_refused");
-    expect(body).toContain("JSON_CONTENT_TYPE_REQUIRED");
-    const guard = body.slice(body.indexOf("JSON_CONTENT_TYPE_REQUIRED"));
-    expect(guard).toContain("fail_record");
+    const exact = body.indexOf("validate_http_response problem 401 UNAUTHORIZED");
+    const failure = body.indexOf("fail_record", exact);
+    expect(exact).toBeGreaterThanOrEqual(0);
+    expect(failure).toBeGreaterThan(exact);
+    expect(body).toContain("routing/content-type refusals are not accepted");
   });
 
   test("the router really checks content-type before auth", () => {
@@ -2792,18 +3704,30 @@ describe("the shell's causal self-tests actually run", () => {
       expect(stdout, diag(run)).toContain(
         '"assertion":"second-signal-during-cleanup-is-exact-125","status":"pass"',
       );
-      expect(stdout, diag(run)).toContain(
-        '"assertion":"pre-registration-signal-barrier-armed","status":"pass"',
-      );
-      expect(stdout, diag(run)).toContain(
-        '"assertion":"pre-registration-signal-is-interruption","status":"pass"',
-      );
-      expect(stdout, diag(run)).toContain(
-        '"assertion":"pre-registration-signal-prevents-payload-fork","status":"pass"',
-      );
-      expect(stdout, diag(run)).toContain(
-        '"assertion":"pre-registration-signal-publishes-positive-lifecycle","status":"pass"',
-      );
+      for (const seam of ["prereg", "handoff"]) {
+        for (const signal of ["TERM", "INT"]) {
+          for (const suffix of [
+            "registration-barrier-armed",
+            "dispatch-succeeded",
+            "is-interruption",
+            "prevents-payload-fork",
+            "exact-two-record-transcript",
+          ]) {
+            expect(stdout, diag(run)).toContain(
+              `"assertion":"${seam}-${signal}-${suffix}","status":"pass"`,
+            );
+          }
+        }
+      }
+      for (const assertion of [
+        "direct-inspection-error-refuses-settlement",
+        "direct-inspection-error-owner-eventually-reaped",
+        "group-inspection-error-is-cleanup-unproven",
+        "group-inspection-error-retains-owner",
+        "group-inspection-error-owner-eventually-reaped",
+      ]) {
+        expect(stdout, diag(run)).toContain(`"assertion":"${assertion}","status":"pass"`);
+      }
       expect(stdout, diag(run)).toContain(
         '"assertion":"result-token-theft-replay-cannot-green","status":"pass"',
       );
@@ -2975,7 +3899,9 @@ describe("the test harness contains what it launches", () => {
       self.indexOf("async function runShell("),
       self.indexOf("/** Failure context."),
     );
-    expect(supervisor).toContain("setpgrp(0,0)");
+    expect(supervisor).toContain("$^F=9; defined(setpgrp(0,0)) or die $!;");
+    expect(supervisor).not.toContain("POSIX::setpgrp");
+    expect(supervisor).not.toContain("$^F=9; setpgrp(0,0) or die $!;");
     expect(supervisor).toContain("/dev/tcp/127.0.0.1/$port");
     expect(supervisor).toContain("kill -TERM 0");
     expect(supervisor).toContain("kill -KILL 0");

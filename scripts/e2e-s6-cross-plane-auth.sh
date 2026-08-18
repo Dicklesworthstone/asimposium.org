@@ -58,12 +58,17 @@
 #                             not create.
 #   ASIMP_S6_SIGNING_KID      the matching non-secret key id
 #   ASIMP_S6_SPONSOR_ID       canonical opaque sponsor id bound by the envelope
+#   ASIMP_S6_REVISION         lowercase 40- or 64-hex source revision supplied
+#                             by the deployment harness; recorded as declared,
+#                             because neither live plane exposes revision metadata
+#   ASIMP_S6_DEPLOYMENT_ID    non-secret paired-deployment identifier supplied
+#                             by the harness and recorded as format-only input
+#   ASIMP_S6_EVIDENCE_DIR     must be exactly the repository-local destination
+#                             e2e/artifacts/s6-cross-plane-auth
 #
-# Optional:
-#   ASIMP_S6_EVIDENCE_DIR     directory for the redacted evidence bundle
-#
-# Evidence: a redacted JSON bundle. It records non-secret kid, hosts, counts and
-# durations. Never cookies, OAuth artifacts, bearer tokens, signatures, join
+# Evidence: a redacted JSON bundle. It records deployment provenance, the
+# validator-backed non-secret request/result tuple, cookie assertions and
+# latency. Never cookies, OAuth artifacts, bearer tokens, signatures, join
 # fragments, payload bodies, screenshots or raw browser traces.
 
 set -u -o pipefail
@@ -147,6 +152,9 @@ readonly REQUIRED_VARS=(
   ASIMP_S6_SIGNING_KEY_HEX
   ASIMP_S6_SIGNING_KID
   ASIMP_S6_SPONSOR_ID
+  ASIMP_S6_REVISION
+  ASIMP_S6_DEPLOYMENT_ID
+  ASIMP_S6_EVIDENCE_DIR
 )
 
 # Values that must never reach stdout, stderr, a file, an argv, or an evidence
@@ -168,6 +176,19 @@ VALID_ENVELOPE_HEADER=""
 RECEIPT=""
 BROWSER_BLOCKED_CODE=""
 BROWSER_BLOCKED_DETAIL=""
+HTTP_REQUEST_LATENCY_SECONDS=""
+BROWSER_LEG_LATENCY_SECONDS=""
+EVIDENCE_COOKIE_ASSERTIONS_VALIDATED=0
+EVIDENCE_ENVELOPE_METHOD=""
+EVIDENCE_ENVELOPE_ACTION=""
+EVIDENCE_ENVELOPE_PAYLOAD_SHA256=""
+EVIDENCE_ENVELOPE_PRINCIPAL_PSEUDONYM=""
+EVIDENCE_ENVELOPE_ROUTE_TEMPLATE=""
+EVIDENCE_ENVELOPE_INITIAL_STATUS=""
+EVIDENCE_ENVELOPE_INITIAL_LATENCY_SECONDS=""
+EVIDENCE_ENVELOPE_REPLAY_STATUS=""
+EVIDENCE_ENVELOPE_REPLAY_CODE=""
+EVIDENCE_ENVELOPE_REPLAY_LATENCY_SECONDS=""
 
 log() { printf '%s\n' "$*" >&2; }
 emit() { printf '%s\n' "$1"; }
@@ -667,6 +688,7 @@ reap_children() {
 # empty. This proves the registered same-process-groups created by this script;
 # it deliberately makes no claim about an arbitrary payload that detached into
 # a new session or process group.
+# shellcheck disable=SC2329 # Transitively invoked by the EXIT trap through on_exit.
 publish_lifecycle_settled() {
   (( LIFECYCLE_TERMINAL_PUBLISHED == 0 )) || return 0
   (( REAP_SURVIVORS == 0 && ${#CHILD_PIDS[@]} == 0 )) || return 1
@@ -911,6 +933,7 @@ SUPERVISOR_EXTRA_RECORD_PLANT=0
 DEAD_LISTENER_WRITE_REFUSAL_OBSERVED=0
 RUN_BOUNDED_OUTCOME="idle"
 RUN_BOUNDED_CHILD_STATUS=""
+RUN_BOUNDED_STAGE="idle"
 
 # run_bounded <seconds> <stdout_file> <stdin_file|-> <command...>
 #
@@ -935,6 +958,7 @@ run_bounded() {
   (( SPAWN_REGISTRATION_ACTIVE == 0 )) || return "$EX_CLEANUP_UNPROVEN"
   RUN_BOUNDED_OUTCOME="unavailable"
   RUN_BOUNDED_CHILD_STATUS=""
+  RUN_BOUNDED_STAGE="pre-coproc"
   mint_owner_token "supervisor"
   supervisor_token="$OWNER_TOKEN"
   input_deadline=$((SECONDS + INPUT_BOOTSTRAP_WAIT_SECONDS))
@@ -943,7 +967,6 @@ run_bounded() {
   # neither reopen a pathname nor read the token-bearing result stream. The
   # coprocess body immediately execs Perl, so its pid remains the exact group
   # leader through Perl -> Bash supervisor for the whole capability lifetime.
-  # shellcheck disable=SC1012,SC2026 # ANSI-C quotes belong to the nested Bash source.
   LATCHED_SIGNAL=""
   SPAWN_REGISTRATION_ACTIVE=1
   coproc S6_BOUNDED_SUPERVISOR {
@@ -967,24 +990,31 @@ run_bounded() {
       POSIX::dup2($r,8) unless $r==8;
       POSIX::close($r) if $r!=8 && $r!=9;
       POSIX::close($w) if $w!=8 && $w!=9;
-      setpgrp(0,0) or die $!;
+      defined(setpgrp(0,0)) or die $!;
       exec @ARGV or die $!;
     ' \
       bash -c '
         stdout_file="$1" unavailable="$2" ready_plant="$3" early_ack_plant="$4" child_before_ack_plant="$5" child_status_plant="$6" input_ack_plant="$7" extra_record_plant="$8"
         shift 8
+        supervisor_bootstrap_fail() {
+          printf "s6-supervisor-bootstrap:%s\n" "$1" >&2
+          exit "$unavailable"
+        }
         set +m
         LC_ALL=C
         export LC_ALL
         trap "" TERM HUP INT PIPE
-        exec 7<&0
-        exec 5>&1
+        exec 7<&0 || supervisor_bootstrap_fail control-fd
+        exec 5>&1 || supervisor_bootstrap_fail result-fd
         exec 0</dev/null 1>/dev/null
-        tab=$'"'"'"'\t'"'"'"'
-        IFS="$tab" read -r boot_kind token boot_extra <&7 || exit "$unavailable"
-        [[ "$boot_kind" == "BOOT" && -n "$token" && -z "$boot_extra" ]] || exit "$unavailable"
+        printf -v tab "\t"
+        (( ${#tab} == 1 )) || supervisor_bootstrap_fail tab-width
+        IFS="$tab" read -r boot_kind token boot_extra <&7 || supervisor_bootstrap_fail boot-read
+        [[ "$boot_kind" == "BOOT" ]] || supervisor_bootstrap_fail boot-kind
+        [[ -n "$token" ]] || supervisor_bootstrap_fail boot-token-empty
+        [[ -z "$boot_extra" ]] || supervisor_bootstrap_fail boot-extra-field
         if [[ "$ready_plant" == "1" ]]; then exit "$unavailable"; fi
-        printf "control-ready:%s\n" "$token" >&5 || exit "$unavailable"
+        printf "control-ready:%s\n" "$token" >&5 || supervisor_bootstrap_fail ready-write
 
         input_mode="" input_record="" start_frame=""
         # READY is already an authenticated retirement capability. A signal
@@ -1015,7 +1045,7 @@ run_bounded() {
           (( line_count >= 1 && line_count <= 128 && byte_count <= 4096 )) || kill -KILL 0
           [[ "$input_ack_plant" == "start" ]] || \
             printf "input-ack:%s:start\n" "$token" >&5 || kill -KILL 0
-          newline=$'"'"'"'\n'"'"'"'
+          printf -v newline "\n"
           line_index=0
           while (( line_index < line_count )); do
             line_value="" chunk_index=0 final=0
@@ -1163,6 +1193,7 @@ run_bounded() {
   coproc_pid="${S6_BOUNDED_SUPERVISOR_PID:-}"
   coproc_read_fd="${S6_BOUNDED_SUPERVISOR[0]:-}"
   coproc_write_fd="${S6_BOUNDED_SUPERVISOR[1]:-}"
+  RUN_BOUNDED_STAGE="coproc-snapshot"
   if [[ ! "$pid" =~ ^[0-9]+$ ]]; then
     end_spawn_registration_window
     return "$EX_WATCHDOG_UNAVAILABLE"
@@ -1197,6 +1228,7 @@ run_bounded() {
     end_spawn_registration_window
     return "$EX_CLEANUP_UNPROVEN"
   fi
+  RUN_BOUNDED_STAGE="fds-stable"
   if ! prepare_group_control "$pid" "$supervisor_token"; then
     exec 6>&- 2>/dev/null || true
     stable_control=0
@@ -1209,6 +1241,7 @@ run_bounded() {
     end_spawn_registration_window
     return "$EX_CLEANUP_UNPROVEN"
   fi
+  RUN_BOUNDED_STAGE="control-prepared"
   send_group_frame_until $'BOOT\t'"${supervisor_token}" \
     "control-ready:${supervisor_token}" "$input_deadline" || boot_status=$?
   if (( boot_status != 0 )); then
@@ -1223,6 +1256,7 @@ run_bounded() {
     return "$EX_CLEANUP_UNPROVEN"
   fi
   GROUP_PROTOCOL_STATE="ready"
+  RUN_BOUNDED_STAGE="boot-acknowledged"
   if ! adopt_group_control "$pid" "$supervisor_token"; then
     exec 6>&- 2>/dev/null || true
     GROUP_CONTROL_OPEN=0
@@ -1245,6 +1279,7 @@ run_bounded() {
     fi
     return "$EX_CLEANUP_UNPROVEN"
   fi
+  RUN_BOUNDED_STAGE="input-ready"
 
   # The parent builtin owns the sole wall-clock deadline. There is no watchdog
   # child to stop, orphan, or reap: one timeout read races the payload result,
@@ -1372,6 +1407,15 @@ valid_https_origin() {
   [[ "$1" =~ ^https://[A-Za-z0-9.-]+(:[0-9]{1,5})?/?$ ]]
 }
 
+valid_evidence_directory() {
+  [[ "$1" == "e2e/artifacts/s6-cross-plane-auth" ]]
+}
+
+evidence_directory_has_symlink_component() {
+  [[ -L "e2e" || -L "e2e/artifacts" ||
+     -L "e2e/artifacts/s6-cross-plane-auth" ]]
+}
+
 origin_host() {
   local value="${1#https://}"
   value="${value%%/*}"
@@ -1391,6 +1435,8 @@ origin_host() {
 # carry the credential to a host the envelope never authorised.
 http_request() {
   local method="$1" url="$2" body_file="$3" config="${4:-}"
+  local request_started="$SECONDS"
+  HTTP_REQUEST_LATENCY_SECONDS=""
   # A request may not outlive the run's remaining budget, so a late phase cannot
   # start a full 30s request with 5s of reserve left.
   local max_time
@@ -1436,6 +1482,7 @@ http_request() {
   # and the phase went green on them.
   local rc=0
   run_bounded "$((max_time + 5))" "$out_file" "$config" "${MINIMAL_CMD[@]}" 2>/dev/null || rc=$?
+  HTTP_REQUEST_LATENCY_SECONDS=$((SECONDS - request_started))
   if (( rc != 0 )); then
     return "$rc"
   fi
@@ -1471,6 +1518,38 @@ validate_http_response() {
   [[ -z "$extra" && "$normalized" == $'ok\t'"$kind" ]]
 }
 
+# Validate the retained evidence file through the runner's shared exact schema
+# tree. Success is status-only: this shell never reparses a child transcript,
+# and a timeout, cleanup refusal, nonzero exit, or unexpected stdout all refuse.
+validate_evidence_bundle() {
+  local path="$1" expected_revision="$2" expected_deployment_id="$3"
+  local expected_agora_host="$4" expected_stoa_host="$5" expected_kid="$6"
+  local expected_payload_sha256="$7" expected_principal_pseudonym="$8"
+  local expected_initial_latency_seconds="$9" expected_replay_latency_seconds="${10}"
+  local expected_browser_leg_seconds="${11}" expected_run_seconds="${12}"
+  local expected_assertions="${13}" expected_failures="${14}"
+  local validator_file bound transport_status=0 status=0
+  [[ -n "$path" && -f "$PLAYWRIGHT_RUNNER" ]] || return 1
+  validator_file="${RUN_STATE_DIR}/evidence-validator.$RANDOM.$RANDOM"
+  bound="$(phase_budget 10)"
+  (( bound > 0 )) || return 1
+  minimal_env_command bun "$PLAYWRIGHT_RUNNER" --validate-evidence \
+    "$path" "$expected_revision" "$expected_deployment_id" \
+    "$expected_agora_host" "$expected_stoa_host" "$expected_kid" \
+    "$expected_payload_sha256" "$expected_principal_pseudonym" \
+    "$expected_initial_latency_seconds" "$expected_replay_latency_seconds" \
+    "$expected_browser_leg_seconds" "$expected_run_seconds" \
+    "$expected_assertions" "$expected_failures"
+  run_bounded "$bound" "$validator_file" - "${MINIMAL_CMD[@]}" 2>/dev/null || transport_status=$?
+  if [[ "$RUN_BOUNDED_OUTCOME" == "child" ]]; then
+    status="$RUN_BOUNDED_CHILD_STATUS"
+  else
+    status="$transport_status"
+  fi
+  (( status == 0 )) || return 1
+  [[ -f "$validator_file" && ! -s "$validator_file" ]]
+}
+
 # ---------------------------------------------------------------------------
 # Envelope minting through the PRODUCT minter
 # ---------------------------------------------------------------------------
@@ -1478,6 +1557,7 @@ validate_http_response() {
 write_envelope_shim() {
   cat > "${RUN_STATE_DIR}/mint-envelope.mjs" <<SHIM
 import { readSync } from "node:fs";
+import { createHash } from "node:crypto";
 import {
   importEd25519PrivateSeedHex,
   mintServiceEnvelope,
@@ -1575,10 +1655,13 @@ try {
     kid,
     now: Math.floor(Date.now() / 1000) + skewSeconds,
   });
+  const principalPseudonym = createHash("sha256").update(principalId, "utf8").digest("hex");
   // EXACTLY one newline-terminated record. The reader waits for a newline, so a
   // bare write would hang it until its timeout and clear the result — while a
-  // probe that printed a newline passed. The record is the contract.
-  process.stdout.write(\`header = "\${SERVICE_ENVELOPE_HEADER}: \${JSON.stringify(envelope).replace(/"/g, '\\\\"')}"\n\`);
+  // probe that printed a newline passed. The two non-secret digests precede
+  // the credential-bearing config so the shell can retain the exact request
+  // tuple without parsing or persisting the envelope JSON.
+  process.stdout.write(\`\${principalPseudonym}\t\${envelope.payload_sha256}\theader = "\${SERVICE_ENVELOPE_HEADER}: \${JSON.stringify(envelope).replace(/"/g, '\\\\"')}"\n\`);
 } catch (error) {
   process.stderr.write(\`mint-envelope: \${error?.constructor?.name ?? "Error"}\n\`);
   process.exit(2);
@@ -1595,6 +1678,8 @@ mint_envelope_config() {
   # registration died there just as it did one level down. Ownership only
   # survives if the spawn happens in the parent shell.
   MINTED_CONFIG=""
+  MINTED_PRINCIPAL_PSEUDONYM=""
+  MINTED_PAYLOAD_SHA256=""
   local bound
   bound="$(phase_budget "$MINTER_TIMEOUT_SECONDS")"
   (( bound > 0 )) || return 1
@@ -1656,6 +1741,17 @@ mint_envelope_config() {
     MINTED_CONFIG=""
   fi
   exec 8<&-
+  MINTED_PRINCIPAL_PSEUDONYM="${MINTED_CONFIG%%$'\t'*}"
+  local metadata_tail="${MINTED_CONFIG#*$'\t'}"
+  MINTED_PAYLOAD_SHA256="${metadata_tail%%$'\t'*}"
+  MINTED_CONFIG="${metadata_tail#*$'\t'}"
+  if [[ ! "$MINTED_PRINCIPAL_PSEUDONYM" =~ ^[0-9a-f]{64}$ ||
+        ! "$MINTED_PAYLOAD_SHA256" =~ ^[0-9a-f]{64}$ ||
+        "$MINTED_CONFIG" != 'header = "asimp-service-envelope: {'* ]]; then
+    MINTED_CONFIG=""
+    MINTED_PRINCIPAL_PSEUDONYM=""
+    MINTED_PAYLOAD_SHA256=""
+  fi
   (( ${#MINTED_CONFIG} <= MAX_ENVELOPE_HEADER_BYTES )) || MINTED_CONFIG=""
   [[ -n "$MINTED_CONFIG" ]] || return 1
 
@@ -1674,6 +1770,8 @@ MINTED_SIGNATURES=()
 # An envelope header is a bounded record; anything larger is not one.
 readonly MAX_ENVELOPE_HEADER_BYTES=16384
 MINTED_CONFIG=""
+MINTED_PRINCIPAL_PSEUDONYM=""
+MINTED_PAYLOAD_SHA256=""
 
 # ---------------------------------------------------------------------------
 # Routes
@@ -1696,6 +1794,8 @@ readonly ACTION_MINT="enrollment.mint"
 
 run_browser_leg() {
   local worker="$1"
+  local browser_started="$SECONDS"
+  BROWSER_LEG_LATENCY_SECONDS=""
   if [[ ! -f "$PLAYWRIGHT_RUNNER" ]]; then
     buffer_browser_blocked "BROWSER_RUNNER_MISSING" "the browser leg requires ${PLAYWRIGHT_RUNNER}"
     return 1
@@ -1726,6 +1826,7 @@ run_browser_leg() {
   minimal_env_command bun "$PLAYWRIGHT_RUNNER"
   run_bounded "$bound" "$out_file" "$config_record" "${MINIMAL_CMD[@]}" \
     2>"${RUN_STATE_DIR}/browser.err" || transport_status=$?
+  BROWSER_LEG_LATENCY_SECONDS=$((SECONDS - browser_started))
   if [[ "$RUN_BOUNDED_OUTCOME" == "child" ]]; then
     status="$RUN_BOUNDED_CHILD_STATUS"
   else
@@ -1797,6 +1898,9 @@ run_browser_leg() {
   # Playwright context explicitly presented the live session family in memory.
   pass_record "cookie-presented-to-agent-host-refused" "the exact Worker route refused the explicitly presented live session family with 403 WRONG_PRINCIPAL"
   pass_record "agora-origination" "the exact Agora action rendered one absent-before receipt and its transient fragment completed the exact 202 Worker claim contract"
+  # This marker is set only after the runner's strict selector validates the
+  # complete cookie object and both exact 403 WRONG_PRINCIPAL probes.
+  EVIDENCE_COOKIE_ASSERTIONS_VALIDATED=1
   return 0
 }
 
@@ -1815,6 +1919,13 @@ assert_worker_accepts_valid_envelope() {
      validate_http_response proposals-present "$RECEIPT"; then
     pass_record "worker-accepts-valid-envelope" "the deployed Worker verified a product-minted envelope and returned one exact pending attribution card"
     VALID_ENVELOPE_HEADER="$config"
+    EVIDENCE_ENVELOPE_METHOD="GET"
+    EVIDENCE_ENVELOPE_ACTION="$ACTION_PROPOSALS"
+    EVIDENCE_ENVELOPE_PAYLOAD_SHA256="$MINTED_PAYLOAD_SHA256"
+    EVIDENCE_ENVELOPE_PRINCIPAL_PSEUDONYM="$MINTED_PRINCIPAL_PSEUDONYM"
+    EVIDENCE_ENVELOPE_ROUTE_TEMPLATE="$ROUTE_PROPOSALS"
+    EVIDENCE_ENVELOPE_INITIAL_STATUS=200
+    EVIDENCE_ENVELOPE_INITIAL_LATENCY_SECONDS="$HTTP_REQUEST_LATENCY_SECONDS"
   else
     fail_record "worker-accepts-valid-envelope" "the signed proposal response failed its exact status/schema/attribution contract"
   fi
@@ -1834,6 +1945,9 @@ assert_replay_refused() {
   # a distinct code per failure mode would be a forgery oracle.
   if validate_http_response problem 401 UNAUTHORIZED; then
     pass_record "envelope-replay-refused" "the second presentation of a single-use nonce was refused 401 UNAUTHORIZED"
+    EVIDENCE_ENVELOPE_REPLAY_STATUS=401
+    EVIDENCE_ENVELOPE_REPLAY_CODE="UNAUTHORIZED"
+    EVIDENCE_ENVELOPE_REPLAY_LATENCY_SECONDS="$HTTP_REQUEST_LATENCY_SECONDS"
   else
     fail_record "envelope-replay-refused" "the replay response failed the exact 401 UNAUTHORIZED ProblemDocument contract"
   fi
@@ -1891,6 +2005,18 @@ assert_expired_envelope_refused() {
 
 assert_bearer_on_sponsor_route_refused() {
   local worker="$1" bearer_config
+  # First prove the exact mounted Fellow route rejects an absent credential.
+  # Without this causal negative, a public or accidentally permissive hello
+  # route could make any configured bearer look live.
+  if ! http_request GET "${worker}${ROUTE_HELLO}" "" "" ||
+     ! validate_http_response problem 401 UNAUTHORIZED; then
+    fail_record "hello-without-credential-refused" "the no-credential control failed the exact 401 UNAUTHORIZED ProblemDocument contract on ${ROUTE_HELLO}"
+    fail_record "bearer-live-on-fellow-route" "the Fellow bearer liveness proof is not causal because ${ROUTE_HELLO} did not first refuse an absent credential exactly"
+    fail_record "bearer-on-sponsor-route-refused" "the sponsor-route refusal is not evidence because the Fellow bearer was not causally proven live"
+    return
+  fi
+  pass_record "hello-without-credential-refused" "the exact mounted ${ROUTE_HELLO} route refused an absent credential with the exact 401 UNAUTHORIZED ProblemDocument"
+
   # The exact same bearer first has to prove it is a live Fellow credential on
   # the mounted hello route. A shape-valid garbage token cannot green a
   # refusal-only test. The bearer stays in the anonymous stdin config stream.
@@ -1984,12 +2110,74 @@ assert_receipt_attributed() {
 # it. `noclobber` makes an existing path a refusal, never a truncation.
 write_evidence_bundle() {
   local dir="${ASIMP_S6_EVIDENCE_DIR:-}"
-  [[ -n "$dir" ]] || return 0
+  if ! valid_evidence_directory "$dir" || evidence_directory_has_symlink_component; then
+    fail_record "evidence-written" "the mandatory evidence destination was absent, outside the fixed repository artifact root, or traversed a symlink; refusing to seal evidence"
+    return 1
+  fi
+  # A typed provisioning blocker has no complete live tuple. Preserve the
+  # blocker and seal nothing; converting it into a partial evidence failure
+  # would misclassify unavailable infrastructure as an executed red test.
+  [[ -z "$BROWSER_BLOCKED_CODE" ]] || return 0
+  local apex_host agent_host
+  apex_host="$(origin_host "${ASIMP_S6_PREVIEW_URL:-}")"
+  agent_host="$(origin_host "${ASIMP_S6_WORKER_URL:-}")"
+  # Revision and provider-native deployment identity are not exposed by either
+  # deployed plane today. Preserve that boundary: accept only explicit,
+  # tightly typed harness declarations and label both format-only. The exact
+  # HTTPS hosts remain separate, observable exercised-origin fields.
+  if [[ ! "${ASIMP_S6_REVISION:-}" =~ ^([0-9a-f]{40}|[0-9a-f]{64})$ ||
+        ! "${ASIMP_S6_DEPLOYMENT_ID:-}" =~ ^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$ ]]; then
+    fail_record "evidence-written" "revision or deployment provenance was absent or failed the exact harness-input format; refusing to seal evidence"
+    return 1
+  fi
+  # Every request/result field below is latched only after the runner-owned
+  # strict validator accepts the actual response. Missing state means the run
+  # never proved the tuple and no partial evidence artifact may be written.
+  if [[ "$EVIDENCE_COOKIE_ASSERTIONS_VALIDATED" != "1" ||
+        "$EVIDENCE_ENVELOPE_METHOD" != "GET" ||
+        "$EVIDENCE_ENVELOPE_ACTION" != "$ACTION_PROPOSALS" ||
+        ! "$EVIDENCE_ENVELOPE_PAYLOAD_SHA256" =~ ^[0-9a-f]{64}$ ||
+        ! "$EVIDENCE_ENVELOPE_PRINCIPAL_PSEUDONYM" =~ ^[0-9a-f]{64}$ ||
+        "$EVIDENCE_ENVELOPE_ROUTE_TEMPLATE" != "$ROUTE_PROPOSALS" ||
+        "$EVIDENCE_ENVELOPE_INITIAL_STATUS" != "200" ||
+        ! "$EVIDENCE_ENVELOPE_INITIAL_LATENCY_SECONDS" =~ ^[0-9]+$ ||
+        "$EVIDENCE_ENVELOPE_REPLAY_STATUS" != "401" ||
+        "$EVIDENCE_ENVELOPE_REPLAY_CODE" != "UNAUTHORIZED" ||
+        ! "$EVIDENCE_ENVELOPE_REPLAY_LATENCY_SECONDS" =~ ^[0-9]+$ ||
+        ! "$BROWSER_LEG_LATENCY_SECONDS" =~ ^[0-9]+$ ]]; then
+    fail_record "evidence-written" "the validator-backed request, response, cookie, or latency tuple was incomplete; refusing to seal partial evidence"
+    return 1
+  fi
   if ! mkdir -p "$dir" 2>/dev/null; then
     fail_record "evidence-written" "the evidence directory could not be created"
     return 1
   fi
-  local path="${dir}/${SUITE}.$$.${SECONDS}.json"
+  if [[ ! -d "$dir" ]] || evidence_directory_has_symlink_component; then
+    fail_record "evidence-written" "the evidence destination was not a real repository-local directory after creation"
+    return 1
+  fi
+  # ONE immutable expected tuple feeds both rendering and validation. In
+  # particular run_seconds is captured before the validator child starts, so
+  # validator startup time cannot make the retained record disagree with its
+  # expected value.
+  local -r expected_revision="$ASIMP_S6_REVISION"
+  local -r expected_deployment_id="$ASIMP_S6_DEPLOYMENT_ID"
+  local -r expected_agora_host="$apex_host" expected_stoa_host="$agent_host"
+  local -r expected_kid="${ASIMP_S6_SIGNING_KID:-}"
+  local -r expected_method="$EVIDENCE_ENVELOPE_METHOD"
+  local -r expected_action="$EVIDENCE_ENVELOPE_ACTION"
+  local -r expected_payload_sha256="$EVIDENCE_ENVELOPE_PAYLOAD_SHA256"
+  local -r expected_principal_pseudonym="$EVIDENCE_ENVELOPE_PRINCIPAL_PSEUDONYM"
+  local -r expected_route_template="$EVIDENCE_ENVELOPE_ROUTE_TEMPLATE"
+  local -r expected_initial_status="$EVIDENCE_ENVELOPE_INITIAL_STATUS"
+  local -r expected_initial_latency_seconds="$EVIDENCE_ENVELOPE_INITIAL_LATENCY_SECONDS"
+  local -r expected_replay_status="$EVIDENCE_ENVELOPE_REPLAY_STATUS"
+  local -r expected_replay_code="$EVIDENCE_ENVELOPE_REPLAY_CODE"
+  local -r expected_replay_latency_seconds="$EVIDENCE_ENVELOPE_REPLAY_LATENCY_SECONDS"
+  local -r expected_browser_leg_seconds="$BROWSER_LEG_LATENCY_SECONDS"
+  local -r expected_run_seconds="$SECONDS"
+  local -r expected_assertions="$ASSERTIONS" expected_failures="$FAILURES"
+  local path="${dir}/${SUITE}.$$.${expected_run_seconds}.json"
   if [[ -e "$path" ]]; then
     fail_record "evidence-written" "an artifact already exists at the allocated evidence path; refusing to overwrite it"
     return 1
@@ -1999,13 +2187,29 @@ write_evidence_bundle() {
   umask 077
   (
     set -C
-    printf '{"suite":"%s","schema_version":3,"bead":"asimposiumorg-vw3","kid":"%s","apex_host":"%s","agent_host":"%s","assertions":%s,"failures":%s,"duration_seconds":%s}\n' \
-      "$SUITE" \
-      "$(json_string "${ASIMP_S6_SIGNING_KID:-}")" \
-      "$(json_string "$(origin_host "${ASIMP_S6_PREVIEW_URL:-}")")" \
-      "$(json_string "$(origin_host "${ASIMP_S6_WORKER_URL:-}")")" \
-      "$ASSERTIONS" "$FAILURES" "$SECONDS" \
-      > "$path"
+    {
+      printf '{"suite":"%s","schema_version":4,"bead":"asimposiumorg-vw3",' "$SUITE"
+      printf '"revision":{"value":"%s","source":"required_harness_input","verification":"format_only"},' \
+        "$(json_string "$expected_revision")"
+      printf '"deployment":{"id":"%s","source":"required_harness_input","verification":"format_only","exercised_origins":{"agora_host":"%s","stoa_host":"%s","source":"exercised_https_origin"}},' \
+        "$(json_string "$expected_deployment_id")" \
+        "$(json_string "$expected_agora_host")" "$(json_string "$expected_stoa_host")"
+      printf '"service_envelope":{"kid":"%s","method":"%s","action":"%s","payload_sha256":"%s","principal_pseudonym":{"scheme":"sha256","value":"%s"},"route_template":"%s",' \
+        "$(json_string "$expected_kid")" \
+        "$expected_method" \
+        "$(json_string "$expected_action")" \
+        "$expected_payload_sha256" \
+        "$expected_principal_pseudonym" \
+        "$(json_string "$expected_route_template")"
+      printf '"initial_response":{"status":%s,"code":null,"latency_seconds":%s},"replay_response":{"status":%s,"code":"%s","latency_seconds":%s}},' \
+        "$expected_initial_status" "$expected_initial_latency_seconds" \
+        "$expected_replay_status" "$expected_replay_code" \
+        "$expected_replay_latency_seconds"
+      printf '"cookie_assertions":{"host_only":true,"http_only":true,"secure":true,"same_site":"lax","scoped_to_apex":true,"natural_agent_host":{"attached":false,"status":403,"code":"WRONG_PRINCIPAL"},"explicit_agent_host":{"attached":true,"status":403,"code":"WRONG_PRINCIPAL"}},'
+      printf '"latency":{"browser_leg_seconds":%s,"run_seconds":%s},"assertions":%s,"failures":%s}\n' \
+        "$expected_browser_leg_seconds" "$expected_run_seconds" \
+        "$expected_assertions" "$expected_failures"
+    } > "$path"
   )
   local wrote=$?
   umask "$previous_umask"
@@ -2024,6 +2228,16 @@ write_evidence_bundle() {
   mode="$(/usr/bin/stat -f '%Lp' "$path" 2>/dev/null || /usr/bin/stat -c '%a' "$path" 2>/dev/null || printf '')"
   if [[ "$mode" != "600" ]]; then
     fail_record "evidence-written" "the evidence record's mode could not be confirmed as owner-only (observed '${mode:-unreadable}')"
+    return 1
+  fi
+  if ! validate_evidence_bundle \
+    "$path" "$expected_revision" "$expected_deployment_id" \
+    "$expected_agora_host" "$expected_stoa_host" "$expected_kid" \
+    "$expected_payload_sha256" "$expected_principal_pseudonym" \
+    "$expected_initial_latency_seconds" "$expected_replay_latency_seconds" \
+    "$expected_browser_leg_seconds" "$expected_run_seconds" \
+    "$expected_assertions" "$expected_failures"; then
+    fail_record "evidence-written" "the retained evidence bytes failed the bounded shared schema-v4 validator"
     return 1
   fi
   EVIDENCE_PATH="$path"
@@ -2138,6 +2352,9 @@ finish() {
   # the cleanup verdict and the canary's.
   assert_no_secret_escaped
   write_evidence_bundle
+  if [[ -z "$EVIDENCE_PATH" ]]; then
+    fail_record "evidence-present-before-pass" "the mandatory evidence bundle was not sealed; refusing to publish a pass terminal"
+  fi
   [[ -n "$EVIDENCE_PATH" ]] && log "${SUITE}: evidence at ${EVIDENCE_PATH}"
   if (( FAILURES > 0 )); then
     emit "{\"suite\":\"${SUITE}\",\"status\":\"fail\",\"assertions\":${ASSERTIONS},\"failures\":${FAILURES},\"reproduce\":\"${REPRODUCE}\"}"
@@ -2179,6 +2396,18 @@ self_test() {
   bash_version_supported 4 1 && version_41="accepted"
   check "bash-4.0-is-typed-unsupported" "$version_40" "refused"
   check "bash-4.1-is-minimum-supported" "$version_41" "accepted"
+
+  # macOS Perl does not expose POSIX::setpgrp, while the portable builtin
+  # returns numeric zero on success. Pin both halves of the bootstrap repair:
+  # unqualified lookup, and definedness rather than truthiness.
+  local supervisor_source setpgrp_source="wrong"
+  supervisor_source="$(declare -f run_bounded)"
+  if [[ "$supervisor_source" == *"defined(setpgrp(0,0)) or die"* &&
+        "$supervisor_source" != *"POSIX::setpgrp(0,0)"* ]]; then
+    setpgrp_source="portable-defined-success"
+  fi
+  check "supervisor-setpgrp-is-portable-defined-success" \
+    "$setpgrp_source" "portable-defined-success"
 
   # Test-only children settle through the same bounded pre-wait rule. On expiry
   # their ownership record is retained and the assertion fails; no helper can
@@ -2228,9 +2457,10 @@ self_test() {
   check "json-string-escapes-quote" "$(json_string 'a"b')" 'a\"b'
   check "secret-vars-declared" "${#SECRET_VARS[@]}" "3"
 
-  # Secret bootstrap creates no independent writer owner. The same durable
-  # supervisor receives two exact lines, feeds them to the payload, then
-  # self-signals and is reaped as the only ownership record.
+  # Secret bootstrap creates no independent writer owner. It is also the causal
+  # companion to the setpgrp source guard above: the same durable supervisor
+  # must cross the real Perl -> Bash bootstrap, receive two exact lines, feed
+  # them to the payload, then self-signal and be reaped as the only owner.
   clear_child_records
   local bootstrap_out="${TMPDIR:-/tmp}/s6-bootstrap.$$" bootstrap_status=0 bootstrap_value=""
   run_bounded 10 "$bootstrap_out" $'line-one\nline-two' \
@@ -2238,6 +2468,7 @@ self_test() {
     || bootstrap_status=$?
   [[ -f "$bootstrap_out" ]] && bootstrap_value="$(cat "$bootstrap_out" 2>/dev/null || printf '')"
   check "reaper-reports-no-survivors" "${bootstrap_status}:${#CHILD_PIDS[@]}" "0:0"
+  check "supervisor-portable-setpgrp-bootstrap" "$bootstrap_status" "0"
   check "reaper-actually-kills" "$bootstrap_value" "line-one|line-two"
   check "secret-bootstrap-has-no-independent-writer-owner" "${bootstrap_status}:${#CHILD_PIDS[@]}" "0:0"
 
@@ -3455,6 +3686,29 @@ main() {
   export -n ASIMP_S6_FELLOW_TOKEN 2>/dev/null || true
   export -n ASIMP_S6_SIGNING_KEY_HEX 2>/dev/null || true
 
+  # One exact, provider-free supervisor bootstrap for focused portability and
+  # fd-handoff diagnosis. It exercises the production run_bounded path without
+  # entering the full self-test or reading any live credential.
+  if [[ "${1:-}" == "--self-test-supervisor-bootstrap" ]]; then
+    local bootstrap_status=0 bootstrap_outcome bootstrap_stage
+    clear_child_records
+    run_bounded 5 /dev/null - /usr/bin/true || bootstrap_status=$?
+    bootstrap_outcome="$RUN_BOUNDED_OUTCOME"
+    bootstrap_stage="$RUN_BOUNDED_STAGE"
+    reap_children
+    if (( REAP_SURVIVORS != 0 || ${#CHILD_PIDS[@]} != 0 )); then
+      emit "{\"suite\":\"${SUITE}\",\"assertion\":\"supervisor-bootstrap-only\",\"status\":\"fail\",\"code\":\"CLEANUP_UNPROVEN\",\"run_status\":${bootstrap_status},\"outcome\":\"$(json_string "$bootstrap_outcome")\",\"stage\":\"$(json_string "$bootstrap_stage")\"}"
+      exit "$EX_CLEANUP_UNPROVEN"
+    fi
+    CLEANED_UP=1
+    if (( bootstrap_status == 0 )) && [[ "$bootstrap_outcome" == "child" ]]; then
+      emit "{\"suite\":\"${SUITE}\",\"assertion\":\"supervisor-bootstrap-only\",\"status\":\"pass\",\"run_status\":0,\"outcome\":\"child\",\"stage\":\"$(json_string "$bootstrap_stage")\"}"
+      exit 0
+    fi
+    emit "{\"suite\":\"${SUITE}\",\"assertion\":\"supervisor-bootstrap-only\",\"status\":\"fail\",\"code\":\"BOOTSTRAP_UNAVAILABLE\",\"run_status\":${bootstrap_status},\"outcome\":\"$(json_string "$bootstrap_outcome")\",\"stage\":\"$(json_string "$bootstrap_stage")\"}"
+    exit "$bootstrap_status"
+  fi
+
   # Hidden stopped child for successful-dispatch/no-settlement plants. It owns
   # its readiness marker and stops itself only after publishing the exact pid;
   # the parent never probes that number after cleanup.
@@ -3540,6 +3794,9 @@ main() {
         ;;
       *) exit "$EX_FAIL" ;;
     esac
+    # No payload has been forked at either barrier, so there is no cooperative
+    # child terminal to await during the causal plant's retirement grace.
+    REAP_GRACE_SECONDS=0
     run_bounded 45 /dev/null - \
       bash -c 'printf started >"$1"; while :; do IFS= read -r -t 30 _ || true; done' \
       _ "$prereg_payload_marker" || true
@@ -3612,6 +3869,19 @@ main() {
   agent_host="$(origin_host "$worker")"
   if [[ "$apex_host" == "$agent_host" ]]; then
     blocked_record "PLANES_NOT_SPLIT" "the Agora and Stoa origins resolve to one host"
+    CLEANED_UP=1; exit "$EX_CONFIG"
+  fi
+  if [[ ! "$ASIMP_S6_REVISION" =~ ^([0-9a-f]{40}|[0-9a-f]{64})$ ]]; then
+    blocked_record "REVISION_INVALID" "ASIMP_S6_REVISION must be one lowercase 40- or 64-hex harness-declared source revision"
+    CLEANED_UP=1; exit "$EX_CONFIG"
+  fi
+  if [[ ! "$ASIMP_S6_DEPLOYMENT_ID" =~ ^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$ ]]; then
+    blocked_record "DEPLOYMENT_ID_INVALID" "ASIMP_S6_DEPLOYMENT_ID must be one non-secret 1-128 byte harness-declared identifier using only alphanumerics, dot, underscore, colon, and hyphen"
+    CLEANED_UP=1; exit "$EX_CONFIG"
+  fi
+  if ! valid_evidence_directory "$ASIMP_S6_EVIDENCE_DIR" ||
+     evidence_directory_has_symlink_component; then
+    blocked_record "EVIDENCE_DIR_INVALID" "ASIMP_S6_EVIDENCE_DIR must be exactly e2e/artifacts/s6-cross-plane-auth with no symlink component"
     CLEANED_UP=1; exit "$EX_CONFIG"
   fi
 
