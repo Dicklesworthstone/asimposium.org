@@ -1,5 +1,5 @@
 import { Buffer } from "node:buffer";
-import { createHash } from "node:crypto";
+import { createHash, randomBytes } from "node:crypto";
 import {
   existsSync,
   lstatSync,
@@ -84,6 +84,9 @@ export const LOCAL_D1_KILL_REAP_MS = 500;
 export const LOCAL_D1_PIPE_DRAIN_MS = 500;
 export const LOCAL_D1_STDOUT_MAX_BYTES = 1_048_576;
 export const LOCAL_D1_STDERR_MAX_BYTES = 65_536;
+export const LOCAL_OWNER_LEASE_FRAME_MAX_BYTES = 128;
+export const LOCAL_OWNER_LEASE_HANDSHAKE_MS = 1_000;
+export const LOCAL_OWNER_LEASE_MAX_LIFETIME_MS = 15_000;
 export const REMOTE_D1_STDOUT_MAX_BYTES = 256 * 1024;
 export const REMOTE_D1_STDERR_MAX_BYTES = 65_536;
 // A remote command is given its execution window before this reserve. The
@@ -91,7 +94,8 @@ export const REMOTE_D1_STDERR_MAX_BYTES = 65_536;
 // after `controller.abort()`, counted window by window against that function
 // rather than approximated, because a reserve shorter than the real path lets
 // the outer call emit a receipt while the owned child is still cleaning up:
-//   1. `terminateOwnedProcessGroup` TERM grace ............ termGraceMs
+//   1. TERM grace, also the normal fd0-watchdog retirement wait
+//      before immediate fallback escalation ............... termGraceMs
 //   2. `terminateOwnedProcessGroup` SIGKILL reap .......... killReapMs
 //   3. `terminateOwnedProcessGroup` termination drain ..... killReapMs
 //   4. post-termination `within(child.exited, killReapMs)`  killReapMs
@@ -128,10 +132,16 @@ export const REMOTE_D1_CLEANUP_RESERVE_MS =
 export const REMOTE_D1_COMMAND_WINDOW_MS =
   REMOTE_D1_CLEANUP_RESERVE_MS + REMOTE_D1_EXECUTION_FLOOR_MS;
 // Local orchestration uses the same bounded executor and therefore owes the
-// same complete cleanup tail before its caller's absolute deadline. Its larger
-// floor reflects a real Wrangler/workerd startup rather than a remote HTTP
-// request. With no caller deadline, localD1 keeps its standalone fixed timeout.
-export const LOCAL_D1_CLEANUP_RESERVE_MS = REMOTE_D1_CLEANUP_RESERVE_MS;
+// same complete cleanup tail before its caller's absolute deadline. Its fd0
+// owner lease adds one sequential, bounded FileSink `end()` observation before
+// the historical cleanup path starts; admission must reserve that functional
+// wait separately instead of pretending it overlaps the six remote windows.
+export const LOCAL_D1_OWNER_LEASE_CLOSE_RESERVE_MS = LOCAL_D1_PIPE_DRAIN_MS;
+export const LOCAL_D1_CLEANUP_RESERVE_MS =
+  REMOTE_D1_CLEANUP_RESERVE_MS + LOCAL_D1_OWNER_LEASE_CLOSE_RESERVE_MS;
+// The larger floor reflects a real Wrangler/workerd startup rather than a
+// remote HTTP request. With no caller deadline, localD1 keeps its standalone
+// fixed timeout.
 export const LOCAL_D1_EXECUTION_FLOOR_MS = 3_000;
 export const LOCAL_D1_COMMAND_WINDOW_MS =
   LOCAL_D1_CLEANUP_RESERVE_MS + LOCAL_D1_EXECUTION_FLOOR_MS;
@@ -1438,15 +1448,295 @@ function signalDirectChild(child, signal) {
 export const OWNED_PROCESS_GROUP = "owned-process-group";
 export const PARENT_PROCESS_GROUP = "parent-process-group";
 
-/**
- * Prove that this process is the leader of the group an outer controller owns.
- *
- * The proof is a kernel observation, not an argv or environment assertion. A
- * deadline-bearing local CLI may place Wrangler into its current group only
- * when its own PID names that live group, which is exactly the topology created
- * when the outer bounded executor starts the CLI with `detached: true`.
- */
-export function currentProcessLeadsOwnedGroup({
+const LOCAL_OWNER_LEASE_PREFIX = "ASIMP_LOCAL_OWNER_LEASE_V1";
+const LOCAL_OWNER_WATCHDOG_PREFIX = "ASIMP_LOCAL_OWNER_WATCHDOG_V1";
+const LOCAL_OWNER_REFUSAL_PREFIX = "ASIMP_LOCAL_OWNER_REFUSED_V1";
+const LOCAL_OWNER_NONCE = /^[0-9a-f]{64}$/;
+const authenticatedLocalOwnerLeases = new WeakSet();
+
+function canonicalLocalOwnerLeaseFrame(nonce, deadlineAtMs) {
+  if (!LOCAL_OWNER_NONCE.test(nonce) || !Number.isSafeInteger(deadlineAtMs)) {
+    fail("LOCAL_D1_OWNER_LEASE_FRAME_INVALID", "The local owner lease frame is invalid.");
+  }
+  const frame = `${LOCAL_OWNER_LEASE_PREFIX} ${nonce} ${deadlineAtMs}\n`;
+  if (Buffer.byteLength(frame) > LOCAL_OWNER_LEASE_FRAME_MAX_BYTES) {
+    fail("LOCAL_D1_OWNER_LEASE_FRAME_INVALID", "The local owner lease frame is too large.");
+  }
+  return frame;
+}
+
+function localOwnerWatchdogSource() {
+  return `
+import { fstatSync } from "node:fs";
+const LEASE = ${JSON.stringify(LOCAL_OWNER_LEASE_PREFIX)};
+const READY = ${JSON.stringify(LOCAL_OWNER_WATCHDOG_PREFIX)};
+const REFUSED = ${JSON.stringify(LOCAL_OWNER_REFUSAL_PREFIX)};
+const MAX_BYTES = ${LOCAL_OWNER_LEASE_FRAME_MAX_BYTES};
+const PREAUTH_MS = ${LOCAL_OWNER_LEASE_HANDSHAKE_MS};
+const MAX_LIFETIME_MS = ${LOCAL_OWNER_LEASE_MAX_LIFETIME_MS};
+const TERM_GRACE_MS = ${LOCAL_D1_TERM_GRACE_MS};
+let terminal = false;
+process.on("SIGTERM", () => {});
+const refuse = (code) => {
+  if (terminal) return;
+  terminal = true;
+  process.stdout.write(REFUSED + " " + code + "\\n");
+  setTimeout(() => process.exit(1), 0);
+};
+const retireGroup = async () => {
+  if (terminal) return;
+  terminal = true;
+  try { process.kill(0, "SIGTERM"); } catch {}
+  await Bun.sleep(TERM_GRACE_MS);
+  try { process.kill(0, "SIGKILL"); } catch { process.exit(1); }
+};
+let stat;
+try { stat = fstatSync(0); } catch { refuse("ABSENT"); }
+if (!terminal && !stat.isFIFO()) {
+  refuse(stat.isCharacterDevice() ? "TERMINAL" : "REGULAR");
+}
+if (!terminal) {
+  const preauth = setTimeout(() => refuse("STUCK"), PREAUTH_MS);
+  const reader = Bun.stdin.stream().getReader();
+  const chunks = [];
+  let retained = 0;
+  let sawLine = false;
+  let ended = false;
+  try {
+    while (!sawLine && !terminal) {
+      const next = await reader.read();
+      if (next.done) { ended = true; break; }
+      if (next.value !== undefined) {
+        retained += next.value.byteLength;
+        if (retained > MAX_BYTES) break;
+        chunks.push(next.value);
+        sawLine = next.value.includes(10);
+      }
+    }
+  } catch { ended = true; }
+  clearTimeout(preauth);
+  if (!terminal) {
+    if (ended) refuse("DEAD");
+    else {
+      const bytes = new Uint8Array(retained);
+      let offset = 0;
+      for (const chunk of chunks) { bytes.set(chunk, offset); offset += chunk.byteLength; }
+      let frame;
+      try { frame = new TextDecoder("utf-8", { fatal: true }).decode(bytes); } catch {}
+      const match = /^(ASIMP_LOCAL_OWNER_LEASE_V1) ([0-9a-f]{64}) (0|[1-9][0-9]*)\\n$/.exec(frame ?? "");
+      const deadlineAtMs = match === null ? NaN : Number(match[3]);
+      if (match === null || !Number.isSafeInteger(deadlineAtMs)) refuse("MALFORMED");
+      else {
+        const clampedDeadlineAtMs = Math.min(deadlineAtMs, Date.now() + MAX_LIFETIME_MS);
+        setTimeout(retireGroup, Math.max(0, clampedDeadlineAtMs - Date.now()));
+        process.stdout.write(READY + " " + match[2] + " " + deadlineAtMs + "\\n");
+        for (;;) {
+          let next;
+          try { next = await reader.read(); } catch { await retireGroup(); break; }
+          if (next.done || (next.value?.byteLength ?? 0) > 0) { await retireGroup(); break; }
+        }
+      }
+    }
+  }
+}
+`;
+}
+
+async function stopLocalOwnerWatchdog(child, timeoutMs = LOCAL_D1_KILL_REAP_MS) {
+  try {
+    child.kill("SIGTERM");
+  } catch {}
+  const observeExit = async () => {
+    try {
+      const observed = await within(Promise.resolve(child.exited), timeoutMs);
+      return observed.settled;
+    } catch {
+      return false;
+    }
+  };
+  let exited = await observeExit();
+  if (!exited) {
+    try {
+      child.kill("SIGKILL");
+    } catch {}
+    exited = await observeExit();
+  }
+  return exited;
+}
+
+async function readLocalOwnerWatchdogFrame(stream, timeoutMs) {
+  if (stream === null || stream === undefined) return { kind: "dead" };
+  let reader;
+  try {
+    reader = stream.getReader();
+  } catch {
+    return { kind: "malformed" };
+  }
+  try {
+    const read = (async () => {
+      let retained = 0;
+      const chunks = [];
+      try {
+        for (;;) {
+          const next = await reader.read();
+          if (next.done) return { kind: "dead" };
+          if (next.value === undefined) continue;
+          retained += next.value.byteLength;
+          if (retained > LOCAL_OWNER_LEASE_FRAME_MAX_BYTES) return { kind: "malformed" };
+          chunks.push(next.value);
+          if (next.value.includes(10)) break;
+        }
+      } catch {
+        return { kind: "malformed" };
+      }
+      const bytes = new Uint8Array(retained);
+      let offset = 0;
+      for (const chunk of chunks) {
+        bytes.set(chunk, offset);
+        offset += chunk.byteLength;
+      }
+      try {
+        return {
+          kind: "frame",
+          text: new TextDecoder("utf-8", { fatal: true }).decode(bytes),
+        };
+      } catch {
+        return { kind: "malformed" };
+      }
+    })();
+    const observed = await within(read, timeoutMs);
+    return observed.settled ? observed.value : { kind: "stuck" };
+  } finally {
+    try {
+      const initiated = reader.cancel();
+      if (initiated !== null && typeof initiated?.then === "function") {
+        void initiated.then(undefined, ignoreCancellationRejection);
+      }
+    } catch {}
+    try {
+      reader.releaseLock();
+    } catch {}
+  }
+}
+
+export async function authenticateLocalOwnerLease(
+  deadlineAtMs,
+  {
+    spawn = Bun.spawn,
+    handshakeMs = LOCAL_OWNER_LEASE_HANDSHAKE_MS,
+    platform = process.platform,
+    processLeadsOwnedGroup = currentProcessLeadsOwnedGroup,
+    toolEnvironment = minimalLocalToolEnvironment(),
+  } = {},
+) {
+  if (!Number.isSafeInteger(deadlineAtMs)) {
+    fail("LOCAL_D1_OWNER_LEASE_MISMATCH", "The local owner lease deadline is invalid.");
+  }
+  if (platform === "win32") {
+    fail(
+      "LOCAL_D1_OWNER_LEASE_UNAVAILABLE",
+      "The deadline-bearing local owner lease requires POSIX process-group ownership.",
+    );
+  }
+  if (!processLeadsOwnedGroup()) {
+    fail(
+      "LOCAL_D1_PARENT_PROCESS_GROUP_UNPROVEN",
+      "The deadline-bearing local migration CLI is not the leader of its outer owner's process group; no watchdog was started.",
+    );
+  }
+  let watchdog;
+  try {
+    watchdog = spawn({
+      cmd: [process.execPath, "-e", localOwnerWatchdogSource()],
+      stdin: "inherit",
+      stdout: "pipe",
+      stderr: "ignore",
+      detached: false,
+      env: toolEnvironment,
+    });
+  } catch {
+    fail("LOCAL_D1_OWNER_WATCHDOG_UNAVAILABLE", "The local owner watchdog could not start.");
+  }
+
+  let observed;
+  try {
+    observed = await readLocalOwnerWatchdogFrame(watchdog.stdout, handshakeMs);
+  } catch {
+    observed = { kind: "malformed" };
+  }
+  if (observed.kind !== "frame") {
+    const reaped = await stopLocalOwnerWatchdog(watchdog);
+    if (!reaped) {
+      fail(
+        "LOCAL_D1_OWNER_WATCHDOG_REAP_UNPROVEN",
+        "The refused local owner watchdog did not settle after bounded TERM and KILL.",
+      );
+    }
+    fail(
+      observed.kind === "stuck"
+        ? "LOCAL_D1_OWNER_LEASE_STUCK"
+        : observed.kind === "dead"
+          ? "LOCAL_D1_OWNER_LEASE_DEAD"
+          : "LOCAL_D1_OWNER_LEASE_MALFORMED",
+      "The local owner lease watchdog did not authenticate one canonical frame.",
+    );
+  }
+  const refusal = new RegExp(
+    `^${LOCAL_OWNER_REFUSAL_PREFIX} (ABSENT|REGULAR|TERMINAL|MALFORMED|DEAD|STUCK)\\n$`,
+  ).exec(observed.text);
+  if (refusal !== null) {
+    const reaped = await stopLocalOwnerWatchdog(watchdog);
+    if (!reaped) {
+      fail(
+        "LOCAL_D1_OWNER_WATCHDOG_REAP_UNPROVEN",
+        "The refused local owner watchdog did not settle after bounded TERM and KILL.",
+      );
+    }
+    const code = refusal[1];
+    fail(
+      `LOCAL_D1_OWNER_LEASE_${code}`,
+      "The local owner lease watchdog refused fd0 before local work started.",
+    );
+  }
+  const authenticated = new RegExp(
+    `^${LOCAL_OWNER_WATCHDOG_PREFIX} ([0-9a-f]{64}) (0|[1-9][0-9]*)\\n$`,
+  ).exec(observed.text);
+  if (authenticated === null) {
+    const reaped = await stopLocalOwnerWatchdog(watchdog);
+    if (!reaped) {
+      fail(
+        "LOCAL_D1_OWNER_WATCHDOG_REAP_UNPROVEN",
+        "The malformed local owner watchdog did not settle after bounded TERM and KILL.",
+      );
+    }
+    fail(
+      "LOCAL_D1_OWNER_LEASE_MALFORMED",
+      "The local owner lease watchdog returned a malformed authentication frame.",
+    );
+  }
+  const echoedDeadlineAtMs = Number(authenticated[2]);
+  if (!Number.isSafeInteger(echoedDeadlineAtMs) || echoedDeadlineAtMs !== deadlineAtMs) {
+    const reaped = await stopLocalOwnerWatchdog(watchdog);
+    if (!reaped) {
+      fail(
+        "LOCAL_D1_OWNER_WATCHDOG_REAP_UNPROVEN",
+        "The mismatched local owner watchdog did not settle after bounded TERM and KILL.",
+      );
+    }
+    fail(
+      "LOCAL_D1_OWNER_LEASE_MISMATCH",
+      "The local owner lease watchdog did not echo the exact CLI deadline.",
+    );
+  }
+  try {
+    watchdog.unref();
+  } catch {}
+  const lease = Object.freeze({});
+  authenticatedLocalOwnerLeases.add(lease);
+  return lease;
+}
+
+function currentProcessLeadsOwnedGroup({
   pid = process.pid,
   platform = process.platform,
   signalGroup = process.kill,
@@ -1513,6 +1803,34 @@ async function terminateOwnedProcessGroup(
   return { directExit, pipesDrained: drained.settled, reaped };
 }
 
+async function writeLocalOwnerLease(writer, frame, timeoutMs) {
+  if (writer === null || writer === undefined) return false;
+  try {
+    const written = await within(
+      (async () => {
+        await writer.write(frame);
+        await writer.flush();
+        await writer.ref();
+        return true;
+      })(),
+      timeoutMs,
+    );
+    return written.settled && written.value === true;
+  } catch {
+    return false;
+  }
+}
+
+async function closeLocalOwnerLease(writer, timeoutMs) {
+  if (writer === null || writer === undefined) return true;
+  try {
+    const closed = await within(Promise.resolve(writer.end()), timeoutMs);
+    return closed.settled;
+  } catch {
+    return false;
+  }
+}
+
 /**
  * Execute an owned command with a wall-clock deadline, process-group teardown,
  * and bounded concurrent pipe drains. The injectable spawn and group-signal
@@ -1534,6 +1852,8 @@ export async function runBoundedCommand({
   groupExists = ownedProcessGroupExists,
   platform = process.platform,
   ownershipMode = OWNED_PROCESS_GROUP,
+  ownerLeaseDeadlineAtMs = undefined,
+  ownerLeaseNonce = () => randomBytes(32).toString("hex"),
   signal = undefined,
   toolEnvironment = minimalLocalToolEnvironment(),
 }) {
@@ -1548,6 +1868,10 @@ export async function runBoundedCommand({
       ? "direct-child-only"
       : "process-group-only";
   const terminateSignal = parentOwnsProcessGroup ? signalChild : signalGroup;
+  const ownerLeaseFrame =
+    ownerLeaseDeadlineAtMs === undefined
+      ? undefined
+      : canonicalLocalOwnerLeaseFrame(ownerLeaseNonce(), ownerLeaseDeadlineAtMs);
   const abortedResult = () => ({
     containment_scope: containmentScope,
     outcome: "aborted",
@@ -1572,13 +1896,14 @@ export async function runBoundedCommand({
 
   let deadlineTimer;
   let child;
+  const commandDeadlineAt = performance.now() + timeoutMs;
   try {
     if (signal?.aborted) return abortedResult();
     try {
       child = spawn({
         cmd,
         cwd,
-        stdin: "ignore",
+        stdin: ownerLeaseFrame === undefined ? "ignore" : "pipe",
         stdout: "pipe",
         stderr: "pipe",
         detached: !parentOwnsProcessGroup,
@@ -1592,6 +1917,7 @@ export async function runBoundedCommand({
       stderr: captureBoundedPipe(child.stderr, stderrMaxBytes),
       stdout: captureBoundedPipe(child.stdout, stdoutMaxBytes),
     };
+    const ownerLeaseWriter = ownerLeaseFrame === undefined ? undefined : child.stdin;
     let pipeCancellation;
     const cancelPipes = () => {
       if (pipeCancellation === undefined) {
@@ -1599,60 +1925,104 @@ export async function runBoundedCommand({
       }
       return pipeCancellation;
     };
-    const deadlineAt = performance.now() + timeoutMs;
     const deadline = new Promise((resolve) => {
       deadlineTimer = setTimeout(
         () => resolve({ kind: "timeout" }),
-        Math.max(0, deadlineAt - performance.now()),
+        Math.max(0, commandDeadlineAt - performance.now()),
       );
     });
-    let first = await Promise.race([
-      child.exited.then((exitCode) => ({ kind: "exited", exitCode })),
-      pipes.stdout.failure.then(() => ({ kind: "pipe-drain-unproven" })),
-      pipes.stderr.failure.then(() => ({ kind: "pipe-drain-unproven" })),
-      pipes.stdout.overrun.then(() => ({ kind: "output-overrun" })),
-      pipes.stderr.overrun.then(() => ({ kind: "output-overrun" })),
-      deadline,
-      ...(aborted === undefined ? [] : [aborted]),
-    ]);
+    const ownerLeaseWritten =
+      ownerLeaseFrame === undefined
+        ? true
+        : await writeLocalOwnerLease(
+            ownerLeaseWriter,
+            ownerLeaseFrame,
+            Math.min(pipeDrainMs, Math.max(0, commandDeadlineAt - performance.now())),
+          );
+    let first = ownerLeaseWritten
+      ? await Promise.race([
+          child.exited.then((exitCode) => ({ kind: "exited", exitCode })),
+          pipes.stdout.failure.then(() => ({ kind: "pipe-drain-unproven" })),
+          pipes.stderr.failure.then(() => ({ kind: "pipe-drain-unproven" })),
+          pipes.stdout.overrun.then(() => ({ kind: "output-overrun" })),
+          pipes.stderr.overrun.then(() => ({ kind: "output-overrun" })),
+          deadline,
+          ...(aborted === undefined ? [] : [aborted]),
+        ])
+      : { kind: "owner-lease-write-unproven" };
     clearTimeout(deadlineTimer);
     deadlineTimer = undefined;
+    const ownerLeaseClosed = await closeLocalOwnerLease(ownerLeaseWriter, pipeDrainMs);
 
     let outcome = "exited";
     let exitCode;
     if (first.kind === "exited") {
       exitCode = first.exitCode;
-      const pipeObservation = await observeBoundedPipesOrAbort(
-        pipes,
-        pipeCancellation,
-        pipeDrainMs,
-        aborted,
-      );
-      if (pipeObservation.kind === "aborted") {
-        first = pipeObservation;
-      } else {
-        const drained = pipeObservation.result;
-        // This can observe only the owned process group. It cannot establish that
-        // a grandchild which called setsid() has exited; in particular, a later
-        // pipe close is not proof about that escaped process.
-        const processGroupMemberRemains = directChildOnly ? false : groupExists(child);
-        if (!drained.settled || processGroupMemberRemains) {
+      const leaseRetirementExpected = ownerLeaseFrame !== undefined && !directChildOnly;
+      let expectedLeaseRetirementFailed = false;
+      if (leaseRetirementExpected) {
+        // Closing fd0 tells the independently armed watchdog to TERM its group,
+        // wait the same TERM grace counted by the cleanup reserve, and KILL it.
+        // The scheduling margin is already part of that reserve; this wait
+        // consumes the existing first cleanup window rather than adding one.
+        const retired = await groupGoneWithin(
+          child,
+          groupExists,
+          termGraceMs + REMOTE_D1_SCHEDULING_MARGIN_MS,
+        );
+        if (!retired) {
+          expectedLeaseRetirementFailed = true;
           const cancellation = cancelPipes();
-          const termination = await terminateOwnedProcessGroup(
+          // The watchdog has already had its full TERM grace. Re-signal TERM for
+          // deterministic polarity, then escalate immediately so the fallback
+          // does not allocate a second uncounted grace window.
+          await terminateOwnedProcessGroup(
             child,
             pipes,
             cancellation,
             terminateSignal,
             groupExists,
-            termGraceMs,
+            0,
             killReapMs,
-            directChildOnly,
+            false,
           );
-          if (!termination.reaped) {
-            outcome = directChildOnly ? "direct-child-reap-unproven" : "process-reap-unproven";
-          } else if (!termination.pipesDrained) outcome = "pipe-drain-unproven";
-          else if (processGroupMemberRemains) outcome = "process-group-survivor-observed";
-          else outcome = "pipe-drain-unproven";
+          outcome = "owner-lease-retirement-unproven";
+        }
+      }
+      if (!expectedLeaseRetirementFailed) {
+        const pipeObservation = await observeBoundedPipesOrAbort(
+          pipes,
+          pipeCancellation,
+          pipeDrainMs,
+          aborted,
+        );
+        if (pipeObservation.kind === "aborted") {
+          first = pipeObservation;
+        } else {
+          const drained = pipeObservation.result;
+          // This can observe only the owned process group. It cannot establish that
+          // a grandchild which called setsid() has exited; in particular, a later
+          // pipe close is not proof about that escaped process.
+          const processGroupMemberRemains =
+            directChildOnly || leaseRetirementExpected ? false : groupExists(child);
+          if (!drained.settled || processGroupMemberRemains) {
+            const cancellation = cancelPipes();
+            const termination = await terminateOwnedProcessGroup(
+              child,
+              pipes,
+              cancellation,
+              terminateSignal,
+              groupExists,
+              termGraceMs,
+              killReapMs,
+              directChildOnly,
+            );
+            if (!termination.reaped) {
+              outcome = directChildOnly ? "direct-child-reap-unproven" : "process-reap-unproven";
+            } else if (!termination.pipesDrained) outcome = "pipe-drain-unproven";
+            else if (processGroupMemberRemains) outcome = "process-group-survivor-observed";
+            else outcome = "pipe-drain-unproven";
+          }
         }
       }
     }
@@ -1681,6 +2051,8 @@ export async function runBoundedCommand({
         if (exited.settled) exitCode = exited.value;
       }
     }
+
+    if (!ownerLeaseClosed) outcome = "owner-lease-close-unproven";
 
     const settledPipes = await within(completeBoundedPipes(pipes, pipeCancellation), pipeDrainMs);
     if (!settledPipes.settled) {
@@ -1755,16 +2127,23 @@ export async function runLocalD1Command(
   {
     deadlineAtMs,
     observedAtMs,
+    ownerLease,
     runner = runBoundedCommand,
     processLeadsOwnedGroup = currentProcessLeadsOwnedGroup,
   } = {},
 ) {
   const timeoutMs = localD1ExecutionWindowOrRefuse(deadlineAtMs, observedAtMs);
   const ownershipMode = deadlineAtMs === undefined ? OWNED_PROCESS_GROUP : PARENT_PROCESS_GROUP;
+  if (ownershipMode === PARENT_PROCESS_GROUP && !authenticatedLocalOwnerLeases.has(ownerLease)) {
+    fail(
+      "LOCAL_D1_OWNER_LEASE_UNAUTHENTICATED",
+      "The deadline-bearing local migration CLI has no authenticated fd0 owner lease; no command was started.",
+    );
+  }
   if (ownershipMode === PARENT_PROCESS_GROUP && !processLeadsOwnedGroup()) {
     fail(
       "LOCAL_D1_PARENT_PROCESS_GROUP_UNPROVEN",
-      "The deadline-bearing local migration CLI is not the leader of the process group its outer controller must own; no command was started.",
+      "The deadline-bearing local migration CLI is not the leader of its outer owner's process group; no command was started.",
     );
   }
   return await runner({ ...command, ownershipMode, timeoutMs });
@@ -1776,6 +2155,7 @@ export async function localD1(
   args,
   localPersistTo = undefined,
   localDeadlineAtMs = undefined,
+  localOwnerLease = undefined,
 ) {
   const result = await runLocalD1Command(
     {
@@ -1793,7 +2173,7 @@ export async function localD1(
       ],
       cwd: root,
     },
-    { deadlineAtMs: localDeadlineAtMs },
+    { deadlineAtMs: localDeadlineAtMs, ownerLease: localOwnerLease },
   );
   if (result.outcome === "timeout") {
     fail("LOCAL_D1_COMMAND_TIMEOUT", "A local D1 command exceeded its fixed deadline.");
@@ -1856,6 +2236,7 @@ async function readLocalCatalog(
   databaseName,
   localPersistTo = undefined,
   localDeadlineAtMs = undefined,
+  localOwnerLease = undefined,
 ) {
   const rows = parseLocalD1Rows(
     await localD1(
@@ -1867,6 +2248,7 @@ async function readLocalCatalog(
       ],
       localPersistTo,
       localDeadlineAtMs,
+      localOwnerLease,
     ),
     "LOCAL_D1_CATALOG_UNREADABLE",
   );
@@ -1888,6 +2270,7 @@ async function readOptionalLocalRows(
   overrunCode,
   localPersistTo = undefined,
   localDeadlineAtMs = undefined,
+  localOwnerLease = undefined,
 ) {
   if (!catalog.some((entry) => entry.type === "table" && entry.name === table)) return [];
   return assertReadLimit(
@@ -1898,6 +2281,7 @@ async function readOptionalLocalRows(
         ["--command", `SELECT ${columns} FROM ${table} ORDER BY 1 LIMIT ${maximum + 1};`],
         localPersistTo,
         localDeadlineAtMs,
+        localOwnerLease,
       ),
       "LOCAL_D1_CATALOG_UNREADABLE",
     ),
@@ -1911,8 +2295,15 @@ async function readLocalLineageSnapshot(
   databaseName,
   localPersistTo = undefined,
   localDeadlineAtMs = undefined,
+  localOwnerLease = undefined,
 ) {
-  const catalog = await readLocalCatalog(root, databaseName, localPersistTo, localDeadlineAtMs);
+  const catalog = await readLocalCatalog(
+    root,
+    databaseName,
+    localPersistTo,
+    localDeadlineAtMs,
+    localOwnerLease,
+  );
   const journal = (
     await readOptionalLocalRows(
       root,
@@ -1924,6 +2315,7 @@ async function readLocalLineageSnapshot(
       "LOCAL_D1_JOURNAL_OVERRUN",
       localPersistTo,
       localDeadlineAtMs,
+      localOwnerLease,
     )
   ).map((row) => ({
     id: String(row.id),
@@ -1941,6 +2333,7 @@ async function readLocalLineageSnapshot(
       "LOCAL_D1_LINEAGE_OVERRUN",
       localPersistTo,
       localDeadlineAtMs,
+      localOwnerLease,
     )
   ).map((row) => ({
     singleton: Number(row.singleton),
@@ -3050,6 +3443,7 @@ async function bootstrapLocalSchema(
   appliedAt,
   localPersistTo,
   localDeadlineAtMs = undefined,
+  localOwnerLease = undefined,
 ) {
   await localD1(
     root,
@@ -3057,6 +3451,7 @@ async function bootstrapLocalSchema(
     ["--command", bootstrapInstallSql(artifact, appliedAt)],
     localPersistTo,
     localDeadlineAtMs,
+    localOwnerLease,
   );
 }
 
@@ -3100,6 +3495,7 @@ async function applyLocalMigration(
   appliedAt,
   localPersistTo,
   localDeadlineAtMs = undefined,
+  localOwnerLease = undefined,
 ) {
   await localD1(
     root,
@@ -3107,6 +3503,7 @@ async function applyLocalMigration(
     ["--command", migrationCommandSql(migration, appliedAt)],
     localPersistTo,
     localDeadlineAtMs,
+    localOwnerLease,
   );
 }
 
@@ -3489,6 +3886,8 @@ export async function runMigrationCli(
     localBootstrapSchema = bootstrapLocalSchema,
     remoteBootstrapSchema = applyRemoteBootstrapOrRefuse,
     localApplyMigration = applyLocalMigration,
+    ownerLeaseWatchdogSpawn = Bun.spawn,
+    localProcessLeadsOwnedGroup = currentProcessLeadsOwnedGroup,
     stdout = (line) => process.stdout.write(line),
     stderr = (line) => process.stderr.write(line),
     now = () => new Date().toISOString(),
@@ -3526,6 +3925,21 @@ export async function runMigrationCli(
         "REMOTE_APPLY_PRODUCTION_REFUSED",
         "Remote migration application is staging-only; production is never an apply target for this runner.",
       );
+    }
+
+    let localOwnerLease;
+    if (options.localDeadlineAtMs !== undefined) {
+      phase = "owner-lease";
+      if (!localProcessLeadsOwnedGroup()) {
+        fail(
+          "LOCAL_D1_PARENT_PROCESS_GROUP_UNPROVEN",
+          "The deadline-bearing local migration CLI is not the leader of its outer owner's process group; no watchdog or local command was started.",
+        );
+      }
+      localOwnerLease = await authenticateLocalOwnerLease(options.localDeadlineAtMs, {
+        processLeadsOwnedGroup: localProcessLeadsOwnedGroup,
+        spawn: ownerLeaseWatchdogSpawn,
+      });
     }
 
     phase = "plan";
@@ -3575,6 +3989,7 @@ export async function runMigrationCli(
             localDatabase,
             options.localPersistTo,
             options.localDeadlineAtMs,
+            localOwnerLease,
           ),
         authorizedRemoteObserver,
       );
@@ -3614,6 +4029,7 @@ export async function runMigrationCli(
           now(),
           options.localPersistTo,
           options.localDeadlineAtMs,
+          localOwnerLease,
         );
       } else {
         await remoteBootstrapSchema(
@@ -3631,6 +4047,7 @@ export async function runMigrationCli(
               localDatabase,
               options.localPersistTo,
               options.localDeadlineAtMs,
+              localOwnerLease,
             )
           : await readRemoteLineageSnapshotOrRefuse(environment, remoteTransport, remoteDatabaseId);
       const after = classifySchemaLineage({
@@ -3673,6 +4090,7 @@ export async function runMigrationCli(
         localDatabase,
         options.localPersistTo,
         options.localDeadlineAtMs,
+        localOwnerLease,
       );
       localPlan = localPlanState(localSnapshot, migrations, localManifest);
       baseline = localPlan.baseline;
@@ -3755,6 +4173,7 @@ export async function runMigrationCli(
             appliedAt,
             options.localPersistTo,
             options.localDeadlineAtMs,
+            localOwnerLease,
           );
         },
       );
@@ -3763,6 +4182,7 @@ export async function runMigrationCli(
         localDatabase,
         options.localPersistTo,
         options.localDeadlineAtMs,
+        localOwnerLease,
       );
       afterLineage = classifySchemaLineage({
         ...afterSnapshot,

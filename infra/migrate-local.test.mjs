@@ -7,6 +7,7 @@ import { performance } from "node:perf_hooks";
 import { fileURLToPath } from "node:url";
 import {
   assertReadLimit,
+  authenticateLocalOwnerLease,
   bootstrapInstallSql,
   REMOTE_D1_SCHEDULING_MARGIN_MS as CLEANUP_SCHEDULING_MARGIN_MS,
   catalogFingerprint,
@@ -16,6 +17,8 @@ import {
   LOCAL_D1_COMMAND_WINDOW_MS as SHIPPED_LOCAL_COMMAND_WINDOW_MS,
   LOCAL_D1_EXECUTION_FLOOR_MS as SHIPPED_LOCAL_EXECUTION_FLOOR_MS,
   LOCAL_D1_KILL_REAP_MS as KILL_REAP_MS,
+  LOCAL_D1_OWNER_LEASE_CLOSE_RESERVE_MS as OWNER_LEASE_CLOSE_RESERVE_MS,
+  LOCAL_OWNER_LEASE_HANDSHAKE_MS as OWNER_LEASE_HANDSHAKE_MS,
   LEDGER_TABLE,
   LINEAGE_TABLE,
   MAX_CATALOG_ROWS,
@@ -54,10 +57,15 @@ const persistenceRoot = resolve(
   `asimposium-migrate-local-${randomUUID().replaceAll("-", "")}`,
 );
 const PER_COMMAND_TIMEOUT_MS = 15_000;
-// Keep the same six bounded cleanup windows as `runBoundedCommand` in
-// `infra/migrate.mjs`: TERM grace; SIGKILL reap; termination drain; direct-child
-// reap; final pipe drain; and bounded pipe-cancellation settlement.
-const COMMAND_CONTAINMENT_RESERVE_MS = TERMINATE_GRACE_MS + KILL_REAP_MS * 3 + OUTPUT_DRAIN_MS * 2;
+// Keep every sequential bounded cleanup window used by `runBoundedCommand` in
+// `infra/migrate.mjs`: owner-lease FileSink close; TERM grace; SIGKILL reap;
+// termination drain; direct-child reap; final pipe drain; and bounded
+// pipe-cancellation settlement.
+const COMMAND_CONTAINMENT_RESERVE_MS =
+  OWNER_LEASE_CLOSE_RESERVE_MS +
+  TERMINATE_GRACE_MS +
+  KILL_REAP_MS * 3 +
+  OUTPUT_DRAIN_MS * 2;
 const COMMAND_REAP_RESERVE_MS = COMMAND_CONTAINMENT_RESERVE_MS + CLEANUP_SCHEDULING_MARGIN_MS;
 /**
  * The smallest execution window worth spawning a local D1 command into.
@@ -321,6 +329,7 @@ async function runActualLocalMigrationCli(args, label, commandOptions = undefine
         String(deadlineAtMs),
       ],
       cwd: root,
+      ownerLeaseDeadlineAtMs: deadlineAtMs,
     }),
     commandOptions,
   );
@@ -336,6 +345,193 @@ async function runActualLocalMigrationCli(args, label, commandOptions = undefine
 }
 
 const PARENT_OWNED_TOPOLOGY_FIXTURE = "--parent-owned-topology-fixture";
+const OWNER_LEASE_EOF_FIXTURE = "--owner-lease-eof-fixture";
+const OWNER_WATCHDOG_PREFIX = "ASIMP_LOCAL_OWNER_WATCHDOG_V1";
+const OWNER_REFUSAL_PREFIX = "ASIMP_LOCAL_OWNER_REFUSED_V1";
+
+function fakeOwnerWatchdogSpawn(frame, { observation = {}, stdout: suppliedStdout } = {}) {
+  return (options) => {
+    assert.equal(options.stdin, "inherit");
+    assert.equal(options.stdout, "pipe");
+    assert.equal(options.detached, false);
+    let resolveExit;
+    const exited = new Promise((resolve) => {
+      resolveExit = resolve;
+    });
+    const stdout =
+      suppliedStdout ??
+      new ReadableStream({
+        start(controller) {
+          if (typeof frame === "string") {
+            controller.enqueue(new TextEncoder().encode(frame));
+          } else if (frame === null) {
+            controller.close();
+          }
+        },
+      });
+    return {
+      exited,
+      stdout,
+      kill: (signal) => {
+        observation.kills ??= [];
+        observation.kills.push(signal);
+        resolveExit(1);
+      },
+      unref: () => {
+        observation.unrefs = (observation.unrefs ?? 0) + 1;
+      },
+    };
+  };
+}
+
+function authenticatedOwnerWatchdogFrame(deadlineAtMs, nonce = "a".repeat(64)) {
+  return `${OWNER_WATCHDOG_PREFIX} ${nonce} ${deadlineAtMs}\n`;
+}
+
+async function runShippedOwnerWatchdogPreauthPlant({
+  endAfterInput,
+  expectedCode,
+  expectedFrame,
+  input,
+}) {
+  let actualWatchdog;
+  let ownerWriter;
+  let writeSettled = Promise.resolve(undefined);
+  let observedStdout = "";
+  let refusal;
+  try {
+    await authenticateLocalOwnerLease(Date.now() + 5_000, {
+      handshakeMs: OWNER_LEASE_HANDSHAKE_MS + 1_000,
+      processLeadsOwnedGroup: () => true,
+      spawn: (options) => {
+        assert.equal(options.stdin, "inherit");
+        assert.equal(options.detached, false);
+        actualWatchdog = Bun.spawn({ ...options, detached: true, stdin: "pipe" });
+        ownerWriter = actualWatchdog.stdin;
+        const stdout = actualWatchdog.stdout.pipeThrough(
+          new TransformStream({
+            transform(chunk, controller) {
+              observedStdout += new TextDecoder().decode(chunk);
+              controller.enqueue(chunk);
+            },
+          }),
+        );
+        writeSettled = (async () => {
+          if (input !== "") {
+            await ownerWriter.write(input);
+            await ownerWriter.flush();
+          }
+          if (endAfterInput) await ownerWriter.end();
+        })().then(
+          () => undefined,
+          (error) => error,
+        );
+        return {
+          exited: actualWatchdog.exited,
+          kill: (signal) => actualWatchdog.kill(signal),
+          stdout,
+          unref: () => actualWatchdog.unref(),
+        };
+      },
+    });
+    assert.fail(`${expectedCode} shipped watchdog plant must refuse`);
+  } catch (error) {
+    refusal = error;
+  } finally {
+    const writeFailure = await writeSettled;
+    if (writeFailure instanceof Error && writeFailure?.code !== "EPIPE") throw writeFailure;
+    if (!endAfterInput && ownerWriter !== undefined) {
+      try {
+        await ownerWriter.end();
+      } catch {}
+    }
+  }
+  assert.ok(refusal instanceof MigrationError);
+  assert.equal(refusal.code, expectedCode);
+  assert.equal(observedStdout, expectedFrame);
+  const reaped = await Promise.race([
+    actualWatchdog.exited.then(() => true),
+    Bun.sleep(100).then(() => false),
+  ]);
+  if (!reaped) {
+    try {
+      process.kill(-actualWatchdog.pid, "SIGKILL");
+    } catch {
+      try {
+        actualWatchdog.kill("SIGKILL");
+      } catch {}
+    }
+    await Promise.race([actualWatchdog.exited, Bun.sleep(500)]);
+  }
+  assert.equal(reaped, true, `${expectedCode} watchdog was not reaped before refusal receipt`);
+}
+
+async function runOwnerLeaseWriteFailurePlant(failureMode) {
+  const events = [];
+  const stdout = new ReadableStream({
+    cancel() {
+      events.push("stdout-cancel");
+    },
+  });
+  const stderr = new ReadableStream({
+    cancel() {
+      events.push("stderr-cancel");
+    },
+  });
+  let resolveExit;
+  const exited = new Promise((resolve) => {
+    resolveExit = resolve;
+  });
+  let groupAlive = true;
+  const epipe = () => Object.assign(new Error(`synthetic ${failureMode} EPIPE`), { code: "EPIPE" });
+  const failAt = (operation) => {
+    if (failureMode === `sync-${operation}`) throw epipe();
+    if (failureMode === `async-${operation}`) return Promise.reject(epipe());
+    return undefined;
+  };
+  const writer = {
+    write() {
+      events.push("write");
+      return failAt("write");
+    },
+    flush() {
+      events.push("flush");
+      return failAt("flush");
+    },
+    ref() {
+      events.push("ref");
+      return failAt("ref");
+    },
+    end() {
+      events.push("end");
+    },
+  };
+  const result = await runBoundedCommand({
+    cmd: [process.execPath, "--version"],
+    cwd: root,
+    timeoutMs: 20,
+    termGraceMs: 0,
+    killReapMs: 10,
+    pipeDrainMs: 10,
+    ownerLeaseDeadlineAtMs: 1,
+    ownerLeaseNonce: () => "b".repeat(64),
+    spawn: (options) => {
+      assert.equal(options.stdin, "pipe");
+      assert.equal(options.detached, true);
+      return { pid: 91_101, exited, stdin: writer, stdout, stderr };
+    },
+    signalGroup: (_child, signal) => {
+      events.push(signal);
+      if (signal === "SIGKILL") {
+        groupAlive = false;
+        resolveExit(137);
+      }
+    },
+    groupExists: () => groupAlive,
+    toolEnvironment: {},
+  });
+  return { events, result, stderr, stdout };
+}
 
 function processExists(pid) {
   try {
@@ -348,6 +544,7 @@ function processExists(pid) {
 }
 
 async function runParentOwnedTopologyFixture(deadlineAtMs) {
+  const ownerLease = await authenticateLocalOwnerLease(deadlineAtMs);
   mkdirSync(persistenceRoot, { recursive: true });
   const pidRecordPath = resolve(persistenceRoot, `owned-topology-${randomUUID()}.json`);
   process.stdout.write(`${pidRecordPath}\n`);
@@ -390,7 +587,7 @@ writeFileSync(
       cwd: root,
       toolEnvironment: { ASIMP_TOPOLOGY_PID_PATH: pidRecordPath },
     },
-    { deadlineAtMs },
+    { deadlineAtMs, ownerLease },
   );
 
   const readinessDeadline = Date.now() + 3_000;
@@ -404,6 +601,56 @@ writeFileSync(
   // child, and the TERM-resistant descendant in their one owned group.
   Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 20_000);
   process.exit(124);
+}
+
+async function runOwnerLeaseEofFixture(deadlineAtMs) {
+  const ownerLease = await authenticateLocalOwnerLease(deadlineAtMs);
+  await runLocalD1Command(
+    { cmd: [process.execPath, "--version"], cwd: root },
+    {
+      deadlineAtMs,
+      ownerLease,
+      runner: (options) => {
+        assert.equal(options.ownershipMode, PARENT_PROCESS_GROUP);
+        return { outcome: "exited", exitCode: 0, stderr: "", stdout: "" };
+      },
+    },
+  );
+  const descendantSource = `
+process.on("SIGTERM", () => {});
+setTimeout(() => process.exit(124), 5_000);
+setInterval(() => {}, 1_000);
+process.stdout.write("ready\\n");
+`;
+  const descendant = Bun.spawn({
+    cmd: [process.execPath, "-e", descendantSource],
+    detached: false,
+    stdin: "ignore",
+    stdout: "pipe",
+    stderr: "ignore",
+  });
+  const reader = descendant.stdout.getReader();
+  let acknowledgement = "";
+  try {
+    while (!acknowledgement.includes("\n") && acknowledgement.length <= 16) {
+      const chunk = await reader.read();
+      if (chunk.done) break;
+      acknowledgement += new TextDecoder().decode(chunk.value);
+    }
+  } finally {
+    try {
+      await reader.cancel();
+    } catch {}
+    reader.releaseLock();
+  }
+  if (acknowledgement !== "ready\n") process.exit(125);
+  descendant.unref();
+  await new Promise((resolveWrite, rejectWrite) => {
+    process.stdout.write(`${JSON.stringify({ descendant: descendant.pid })}\n`, (error) => {
+      if (error) rejectWrite(error);
+      else resolveWrite();
+    });
+  });
 }
 
 function oneRow(result, label) {
@@ -760,7 +1007,7 @@ const cases = [
       assert.equal(runnerEntries, 0, "the seam entered the runner with a doomed window");
       assert.equal(
         refusedBeforeSpawn.message,
-        "The local D1 suite budget left 2900ms total for apply-6, providing 0ms for execution after its 3250ms cleanup reserve, below the 3000ms execution floor; no command was started.",
+        "The local D1 suite budget left 2900ms total for apply-6, providing 0ms for execution after its 3750ms cleanup reserve, below the 3000ms execution floor; no command was started.",
       );
 
       // The production deadline calculator must feed the SAME typed refusal.
@@ -789,7 +1036,7 @@ const cases = [
       assert.equal(expiredDeadlineRunnerEntries, 0);
       assert.equal(
         expiredDeadlineRefusal.message,
-        "The local D1 suite budget left 0ms total for expired-deadline, providing 0ms for execution after its 3250ms cleanup reserve, below the 3000ms execution floor; no command was started.",
+        "The local D1 suite budget left 0ms total for expired-deadline, providing 0ms for execution after its 3750ms cleanup reserve, below the 3000ms execution floor; no command was started.",
       );
 
       // POSITIVE CONTROL: the same seam DOES spawn when the budget allows, and
@@ -802,7 +1049,7 @@ const cases = [
         handedTimeoutMs = options.timeoutMs;
         return { outcome: "exited", exitCode: 0, stdout: "", stderr: "" };
       };
-      const admittedRemainingMs = 6_250;
+      const admittedRemainingMs = 6_750;
       const admittedResult = await runBoundedLocalCommand(
         "apply-6",
         { cmd: [process.execPath, "--version"], cwd: root },
@@ -833,30 +1080,187 @@ const cases = [
       assert.equal(standaloneTimeoutMs, 15_000);
       assert.equal(standaloneResult.outcome, "exited");
 
-      // An admissible deadline is not itself authority to inherit a group. The
-      // kernel-backed leader proof must fail before the nested runner starts.
-      let unprovenLeaderRunnerEntries = 0;
-      let unprovenLeaderRefusal;
+      // FD0 OWNER LEASE: only an opaque lease minted after the watchdog's exact
+      // canonical echo may admit a deadline-bearing local child.
+      const leaseDeadlineAtMs = 306_250;
+      const authenticatedWatchdogObservation = {};
+      const authenticatedLease = await authenticateLocalOwnerLease(leaseDeadlineAtMs, {
+        processLeadsOwnedGroup: () => true,
+        spawn: fakeOwnerWatchdogSpawn(authenticatedOwnerWatchdogFrame(leaseDeadlineAtMs), {
+          observation: authenticatedWatchdogObservation,
+        }),
+      });
+      assert.equal(authenticatedWatchdogObservation.unrefs, 1);
+      let leasedRunnerEntries = 0;
+      const leasedResult = await runLocalD1Command(
+        { cmd: [process.execPath, "--version"], cwd: root },
+        {
+          deadlineAtMs: leaseDeadlineAtMs,
+          observedAtMs: 300_000,
+          ownerLease: authenticatedLease,
+          processLeadsOwnedGroup: () => true,
+          runner: (options) => {
+            leasedRunnerEntries += 1;
+            assert.equal(options.ownershipMode, PARENT_PROCESS_GROUP);
+            return { outcome: "exited", exitCode: 0, stdout: "", stderr: "" };
+          },
+        },
+      );
+      assert.equal(leasedRunnerEntries, 1);
+      assert.equal(leasedResult.outcome, "exited");
+
+      let topologyRunnerEntries = 0;
+      let topologyRefusal;
       try {
         await runLocalD1Command(
           { cmd: [process.execPath, "--version"], cwd: root },
           {
-            deadlineAtMs: 306_250,
+            deadlineAtMs: leaseDeadlineAtMs,
             observedAtMs: 300_000,
+            ownerLease: authenticatedLease,
             processLeadsOwnedGroup: () => false,
             runner: () => {
-              unprovenLeaderRunnerEntries += 1;
-              throw new Error("an unproven parent-owned group reached the runner");
+              topologyRunnerEntries += 1;
+              throw new Error("an authenticated but topologically unowned command reached spawn");
             },
           },
         );
-        assert.fail("an admissible deadline without group leadership must refuse");
       } catch (error) {
-        unprovenLeaderRefusal = error;
+        topologyRefusal = error;
       }
-      assert.ok(unprovenLeaderRefusal instanceof MigrationError);
-      assert.equal(unprovenLeaderRefusal.code, "LOCAL_D1_PARENT_PROCESS_GROUP_UNPROVEN");
-      assert.equal(unprovenLeaderRunnerEntries, 0);
+      assert.ok(topologyRefusal instanceof MigrationError);
+      assert.equal(topologyRefusal.code, "LOCAL_D1_PARENT_PROCESS_GROUP_UNPROVEN");
+      assert.equal(topologyRunnerEntries, 0);
+
+      for (const [label, frame, expectedCode, handshakeMs] of [
+        ["absent", `${OWNER_REFUSAL_PREFIX} ABSENT\n`, "LOCAL_D1_OWNER_LEASE_ABSENT"],
+        ["regular", `${OWNER_REFUSAL_PREFIX} REGULAR\n`, "LOCAL_D1_OWNER_LEASE_REGULAR"],
+        ["terminal", `${OWNER_REFUSAL_PREFIX} TERMINAL\n`, "LOCAL_D1_OWNER_LEASE_TERMINAL"],
+        [
+          "forged",
+          authenticatedOwnerWatchdogFrame(leaseDeadlineAtMs, "A".repeat(64)),
+          "LOCAL_D1_OWNER_LEASE_MALFORMED",
+        ],
+        ["dead-owner", null, "LOCAL_D1_OWNER_LEASE_DEAD"],
+        ["stuck-owner", undefined, "LOCAL_D1_OWNER_LEASE_STUCK", 0],
+        [
+          "deadline-mismatch",
+          authenticatedOwnerWatchdogFrame(leaseDeadlineAtMs + 1),
+          "LOCAL_D1_OWNER_LEASE_MISMATCH",
+        ],
+      ]) {
+        let refusal;
+        try {
+          await authenticateLocalOwnerLease(leaseDeadlineAtMs, {
+            processLeadsOwnedGroup: () => true,
+            spawn: fakeOwnerWatchdogSpawn(frame),
+            ...(handshakeMs === undefined ? {} : { handshakeMs }),
+          });
+          assert.fail(`${label} owner lease must refuse`);
+        } catch (error) {
+          refusal = error;
+        }
+        assert.ok(refusal instanceof MigrationError, `${label} must be a typed refusal`);
+        assert.equal(refusal.code, expectedCode, `${label} refusal code mismatch`);
+      }
+
+      for (const preauthPlant of [
+        {
+          input: "ASIMP_LOCAL_OWNER_LEASE_V1 partial\n",
+          endAfterInput: false,
+          expectedCode: "LOCAL_D1_OWNER_LEASE_MALFORMED",
+          expectedFrame: `${OWNER_REFUSAL_PREFIX} MALFORMED\n`,
+        },
+        {
+          input: "ASIMP_LOCAL_OWNER_LEASE_V1 ",
+          endAfterInput: true,
+          expectedCode: "LOCAL_D1_OWNER_LEASE_DEAD",
+          expectedFrame: `${OWNER_REFUSAL_PREFIX} DEAD\n`,
+        },
+        {
+          input: "ASIMP_LOCAL_OWNER_LEASE_V1 ",
+          endAfterInput: false,
+          expectedCode: "LOCAL_D1_OWNER_LEASE_STUCK",
+          expectedFrame: `${OWNER_REFUSAL_PREFIX} STUCK\n`,
+        },
+      ]) {
+        await runShippedOwnerWatchdogPreauthPlant(preauthPlant);
+      }
+
+      const readerFailureObservation = { cancels: 0, releases: 0 };
+      for (const [label, stdout, readerObservation] of [
+        [
+          "get-reader-throws",
+          {
+            getReader() {
+              throw new Error("synthetic getReader failure");
+            },
+          },
+          undefined,
+        ],
+        [
+          "read-rejects",
+          {
+            getReader() {
+              const observation = readerFailureObservation;
+              return {
+                read: () => Promise.reject(new Error("synthetic read failure")),
+                cancel: () => {
+                  observation.cancels += 1;
+                  return Promise.resolve();
+                },
+                releaseLock: () => {
+                  observation.releases += 1;
+                },
+              };
+            },
+          },
+          readerFailureObservation,
+        ],
+      ]) {
+        const watchdogObservation = {};
+        let refusal;
+        try {
+          await authenticateLocalOwnerLease(leaseDeadlineAtMs, {
+            processLeadsOwnedGroup: () => true,
+            spawn: fakeOwnerWatchdogSpawn(undefined, {
+              observation: watchdogObservation,
+              stdout,
+            }),
+          });
+        } catch (error) {
+          refusal = error;
+        }
+        assert.ok(refusal instanceof MigrationError, `${label} must be a typed refusal`);
+        assert.equal(refusal.code, "LOCAL_D1_OWNER_LEASE_MALFORMED");
+        assert.deepEqual(watchdogObservation.kills, ["SIGTERM"]);
+        if (readerObservation !== undefined) {
+          assert.equal(readerObservation.cancels, 1);
+          assert.equal(readerObservation.releases, 1);
+        }
+      }
+
+      let unauthenticatedRunnerEntries = 0;
+      let unauthenticatedRefusal;
+      try {
+        await runLocalD1Command(
+          { cmd: [process.execPath, "--version"], cwd: root },
+          {
+            deadlineAtMs: leaseDeadlineAtMs,
+            observedAtMs: 300_000,
+            ownerLease: Object.freeze({}),
+            runner: () => {
+              unauthenticatedRunnerEntries += 1;
+              throw new Error("a forged opaque lease reached the runner");
+            },
+          },
+        );
+      } catch (error) {
+        unauthenticatedRefusal = error;
+      }
+      assert.ok(unauthenticatedRefusal instanceof MigrationError);
+      assert.equal(unauthenticatedRefusal.code, "LOCAL_D1_OWNER_LEASE_UNAUTHENTICATED");
+      assert.equal(unauthenticatedRunnerEntries, 0);
 
       // SECONDARY: the boundary arithmetic itself, at exact values, no clock.
       const reported = localExecutionAllocation(REPORTED_REMAINING_MS);
@@ -866,29 +1270,60 @@ const cases = [
 
       // INDEPENDENT COMPOSITION: these literal expectations prevent a wrong
       // reserve from making its own derived boundary plant pass. The canonical
-      // bounded executor has six 500ms cleanup windows plus 250ms of scheduling
+      // bounded executor has seven 500ms cleanup windows plus 250ms of scheduling
       // margin, and the local execution floor adds another 3000ms.
       assert.equal(TERMINATE_GRACE_MS, 500);
       assert.equal(KILL_REAP_MS, 500);
       assert.equal(OUTPUT_DRAIN_MS, 500);
+      assert.equal(OWNER_LEASE_CLOSE_RESERVE_MS, 500);
       assert.equal(CLEANUP_SCHEDULING_MARGIN_MS, 250);
-      assert.equal(COMMAND_CONTAINMENT_RESERVE_MS, 3_000);
-      assert.equal(COMMAND_REAP_RESERVE_MS, 3_250);
+      assert.equal(COMMAND_CONTAINMENT_RESERVE_MS, 3_500);
+      assert.equal(COMMAND_REAP_RESERVE_MS, 3_750);
       assert.equal(LOCAL_D1_EXECUTION_FLOOR_MS, 3_000);
-      assert.equal(LOCAL_D1_COMMAND_WINDOW_MS, 6_250);
+      assert.equal(LOCAL_D1_COMMAND_WINDOW_MS, 6_750);
       assert.equal(SHIPPED_LOCAL_CLEANUP_RESERVE_MS, COMMAND_REAP_RESERVE_MS);
       assert.equal(SHIPPED_LOCAL_EXECUTION_FLOOR_MS, LOCAL_D1_EXECUTION_FLOOR_MS);
       assert.equal(SHIPPED_LOCAL_COMMAND_WINDOW_MS, LOCAL_D1_COMMAND_WINDOW_MS);
 
       // Exact boundary, both sides, with no clock involved.
-      const oneMillisecondShort = localExecutionAllocation(6_249);
+      const oneMillisecondShort = localExecutionAllocation(6_749);
       assert.equal(oneMillisecondShort.kind, "budget-exhausted");
       assert.equal(oneMillisecondShort.executionWindowMs, 2_999);
-      const admitted = localExecutionAllocation(6_250);
+      const admitted = localExecutionAllocation(6_750);
       assert.equal(admitted.kind, "ok");
       // An admitted window still withholds the whole reap tail, so a command
       // that uses all of it can still be terminated inside the same budget.
       assert.equal(admitted.executionWindowMs, LOCAL_D1_EXECUTION_FLOOR_MS);
+
+      let preauthWatchdogEntries = 0;
+      let preauthLocalEntries = 0;
+      let preauthStderr = "";
+      const preauthExitCode = await runMigrationCli(
+        ["--env", "local", "--local-command-deadline-at-ms", String(leaseDeadlineAtMs)],
+        {
+          root,
+          localProcessLeadsOwnedGroup: () => false,
+          ownerLeaseWatchdogSpawn: () => {
+            preauthWatchdogEntries += 1;
+            throw new Error("unowned topology reached watchdog spawn");
+          },
+          localReadLineageSnapshot: async () => {
+            preauthLocalEntries += 1;
+            throw new Error("unowned topology reached local work");
+          },
+          stderr: (line) => {
+            preauthStderr += line;
+          },
+          stdout: () => {},
+        },
+      );
+      assert.equal(preauthExitCode, 1);
+      assert.equal(preauthWatchdogEntries, 0);
+      assert.equal(preauthLocalEntries, 0);
+      assert.equal(
+        JSON.parse(preauthStderr).code,
+        "LOCAL_D1_PARENT_PROCESS_GROUP_UNPROVEN",
+      );
 
       // ACTUAL CLI ORCHESTRATION: the deadline parsed by runMigrationCli must
       // reach the nested local-D1 pre-spawn seam. The outer controller reserves
@@ -915,11 +1350,18 @@ const cases = [
             let stdout = "";
             const exitCode = await runMigrationCli(cmd.slice(2), {
               root,
+              localProcessLeadsOwnedGroup: () => true,
+              ownerLeaseWatchdogSpawn: fakeOwnerWatchdogSpawn(
+                authenticatedOwnerWatchdogFrame(
+                  REFUSAL_EPOCH_MS + SHIPPED_LOCAL_COMMAND_WINDOW_MS - 1,
+                ),
+              ),
               localReadLineageSnapshot: async (
                 _root,
                 _databaseName,
                 _localPersistTo,
                 receivedDeadlineAtMs,
+                receivedOwnerLease,
               ) => {
                 assert.ok(Number.isSafeInteger(receivedDeadlineAtMs));
                 return await runLocalD1Command(
@@ -927,6 +1369,8 @@ const cases = [
                   {
                     deadlineAtMs: receivedDeadlineAtMs,
                     observedAtMs: REFUSAL_EPOCH_MS,
+                    ownerLease: receivedOwnerLease,
+                    processLeadsOwnedGroup: () => true,
                     runner: () => {
                       nestedRunnerEntries += 1;
                       throw new Error("an under-budget nested Wrangler command reached its runner");
@@ -974,17 +1418,25 @@ const cases = [
             let stdout = "";
             const exitCode = await runMigrationCli(cmd.slice(2), {
               root,
+              localProcessLeadsOwnedGroup: () => true,
+              ownerLeaseWatchdogSpawn: fakeOwnerWatchdogSpawn(
+                authenticatedOwnerWatchdogFrame(
+                  SETTLEMENT_EPOCH_MS + SHIPPED_LOCAL_COMMAND_WINDOW_MS,
+                ),
+              ),
               localReadLineageSnapshot: async (
                 _root,
                 _databaseName,
                 _localPersistTo,
                 receivedDeadlineAtMs,
+                receivedOwnerLease,
               ) => {
                 await runLocalD1Command(
                   { cmd: [process.execPath, "--version"], cwd: root },
                   {
                     deadlineAtMs: receivedDeadlineAtMs,
                     observedAtMs: SETTLEMENT_EPOCH_MS,
+                    ownerLease: receivedOwnerLease,
                     processLeadsOwnedGroup: () => true,
                     runner: async (options) => {
                       assert.equal(options.ownershipMode, PARENT_PROCESS_GROUP);
@@ -1016,6 +1468,35 @@ const cases = [
         settlementOrder.indexOf("cleanup-settled") < settlementOrder.indexOf("outer-receipt"),
         "the outer CLI receipt preceded nested cleanup settlement",
       );
+
+      for (const failureMode of [
+        "sync-write",
+        "async-write",
+        "sync-flush",
+        "async-flush",
+        "sync-ref",
+        "async-ref",
+      ]) {
+        const writeFailure = await runOwnerLeaseWriteFailurePlant(failureMode);
+        assert.equal(writeFailure.result.outcome, "owner-lease-write-unproven", failureMode);
+        assert.deepEqual(
+          writeFailure.events.filter((event) => event === "SIGTERM" || event === "SIGKILL"),
+          ["SIGTERM", "SIGKILL"],
+          `${failureMode} did not retire the exact owned group`,
+        );
+        assert.ok(
+          writeFailure.events.indexOf("end") < writeFailure.events.indexOf("SIGTERM"),
+          `${failureMode} signalled before closing the owner lease`,
+        );
+        assert.ok(
+          writeFailure.events.indexOf("stdout-cancel") < writeFailure.events.indexOf("SIGTERM") &&
+            writeFailure.events.indexOf("stderr-cancel") <
+              writeFailure.events.indexOf("SIGTERM"),
+          `${failureMode} signalled before cancelling both owned readers`,
+        );
+        assert.equal(writeFailure.stdout.locked, false);
+        assert.equal(writeFailure.stderr.locked, false);
+      }
 
       // MODE POLARITY: parent-owned execution must inherit the outer group and
       // signal only its direct child. Any negative-PID/group signal here could
@@ -1061,6 +1542,46 @@ const cases = [
         "parent-process-group/direct-child",
       );
 
+      // WATCHDOG-ONLY EOF RETIREMENT: the detached fixture authenticates the
+      // real fd0 capability, proves its parent-owned local seam is admitted,
+      // waits for a TERM-resistant descendant's readiness acknowledgement, and
+      // then exits normally. Closing the retained writer is the only expected
+      // retirement trigger; this outer signal seam is fallback cleanup and a
+      // causal witness that deletion of the watchdog's post-auth EOF loop is red.
+      const eofDeadlineAtMs = Date.now() + 10_000;
+      const eofFallbackSignals = [];
+      const eofResult = await runBoundedCommand({
+        cmd: [
+          process.execPath,
+          "infra/migrate-local.test.mjs",
+          OWNER_LEASE_EOF_FIXTURE,
+          String(eofDeadlineAtMs),
+        ],
+        cwd: root,
+        timeoutMs: 10_000,
+        ownerLeaseDeadlineAtMs: eofDeadlineAtMs,
+        signalGroup: (child, signal) => {
+          eofFallbackSignals.push(signal);
+          try {
+            process.kill(-child.pid, signal);
+          } catch {
+            try {
+              child.kill(signal);
+            } catch {}
+          }
+        },
+      });
+      assert.equal(eofResult.outcome, "exited");
+      assert.equal(eofResult.exitCode, 0);
+      assert.deepEqual(eofFallbackSignals, []);
+      const eofPids = JSON.parse(eofResult.stdout.trim());
+      assert.ok(Number.isSafeInteger(eofPids.descendant));
+      assert.equal(
+        processExists(eofPids.descendant),
+        false,
+        "watchdog EOF retirement left its TERM-resistant descendant alive",
+      );
+
       // REAL PROCESS TOPOLOGY: the CLI fixture is the detached leader of the
       // outer executor's owned group. Its production local-D1 seam starts a
       // non-detached direct child which starts a non-detached descendant; both
@@ -1077,6 +1598,7 @@ const cases = [
             String(deadlineAtMs),
           ],
           cwd: root,
+          ownerLeaseDeadlineAtMs: deadlineAtMs,
         }),
         {
           remainingMs: COMMAND_REAP_RESERVE_MS + SHIPPED_LOCAL_COMMAND_WINDOW_MS,
@@ -1792,7 +2314,14 @@ END;`,
 ];
 
 const topologyFixtureIndex = process.argv.indexOf(PARENT_OWNED_TOPOLOGY_FIXTURE);
-if (topologyFixtureIndex >= 0) {
+const ownerLeaseEofFixtureIndex = process.argv.indexOf(OWNER_LEASE_EOF_FIXTURE);
+if (ownerLeaseEofFixtureIndex >= 0) {
+  const deadline = process.argv[ownerLeaseEofFixtureIndex + 1];
+  if (!/^(?:0|[1-9][0-9]*)$/.test(deadline ?? "") || !Number.isSafeInteger(Number(deadline))) {
+    throw new Error("the owner-lease EOF fixture requires one exact epoch deadline");
+  }
+  await runOwnerLeaseEofFixture(Number(deadline));
+} else if (topologyFixtureIndex >= 0) {
   const deadline = process.argv[topologyFixtureIndex + 1];
   if (!/^(?:0|[1-9][0-9]*)$/.test(deadline ?? "") || !Number.isSafeInteger(Number(deadline))) {
     throw new Error("the parent-owned topology fixture requires one exact epoch deadline");
