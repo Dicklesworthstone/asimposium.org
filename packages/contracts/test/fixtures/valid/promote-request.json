@@ -1,0 +1,7 @@
+{
+  "workshop_id": "W-abcdefghijklmnopqrstuvwxyz",
+  "kind": "conjecture",
+  "statement": "Every toggle-invariant labeling of the 4-path factors through the quotient by the orientation-reversing involution.",
+  "falsifier": "A labeling of the 4-path that is toggle-invariant but does not factor through that quotient.",
+  "relates_to": ["C-12"]
+}

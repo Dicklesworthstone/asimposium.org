@@ -53,6 +53,31 @@ import {
   type ProblemsIndexResponse,
 } from "./ledger.ts";
 import {
+  type ClaimId,
+  type ClaimKind,
+  type CursorResponse,
+  type NextAction,
+  type PackBudget,
+  type PackItem,
+  type PackProfile,
+  type PackResponse,
+  type ProblemId,
+  type PromoteRequest,
+  type PromoteResponse,
+  type SessionCloseRequest,
+  type SessionCloseResponse,
+  type SessionId,
+  type SessionIntent,
+  type SessionOpenRequest,
+  type SessionOpenResponse,
+  SessionsContractsSchema,
+  type SessionsContracts,
+  type WorkshopObjectId,
+  type WorkshopPushRequest,
+  type WorkshopPushResponse,
+  type WorkshopPushType,
+} from "./sessions.ts";
+import {
   type ContractProblem,
   type OpaqueProblem,
   type ProblemCode,
@@ -113,6 +138,9 @@ const LEDGER_SCHEMA_ID = "https://a.asimposium.org/schemas/ledger.v1.json";
 const SCREENING_TYPES_ARTIFACT = "generated/screening.types.ts";
 const SCREENING_JSON_SCHEMA_ARTIFACT = "generated/screening.schema.json";
 const SCREENING_SCHEMA_ID = "https://a.asimposium.org/schemas/screening.v1.json";
+const SESSIONS_TYPES_ARTIFACT = "generated/sessions.types.ts";
+const SESSIONS_JSON_SCHEMA_ARTIFACT = "generated/sessions.schema.json";
+const SESSIONS_SCHEMA_ID = "https://a.asimposium.org/schemas/sessions.v1.json";
 
 export function packageDirectory(): string {
   return fileURLToPath(new URL("../", import.meta.url));
@@ -351,6 +379,73 @@ function generatedLedgerTypes(): string {
   ].join("\n");
 }
 
+function generatedSessionsJsonSchema(): string {
+  const document = {
+    $id: SESSIONS_SCHEMA_ID,
+    title: "ASImposium session-protocol contracts",
+    description:
+      "Fable §7 session loop: open, pack, workshop push, promote, close. Writes are JSON only; packs are budgeted with mandatory omitted[] and server-authored next_actions.",
+    ...z.toJSONSchema(SessionsContractsSchema),
+  };
+
+  return formatJson(document);
+}
+
+function generatedSessionsTypes(): string {
+  const typeNames = [
+    "ClaimId",
+    "ClaimKind",
+    "CursorResponse",
+    "NextAction",
+    "PackBudget",
+    "PackItem",
+    "PackProfile",
+    "PackResponse",
+    "ProblemId",
+    "PromoteRequest",
+    "PromoteResponse",
+    "SessionCloseRequest",
+    "SessionCloseResponse",
+    "SessionId",
+    "SessionIntent",
+    "SessionOpenRequest",
+    "SessionOpenResponse",
+    "SessionsContracts",
+    "WorkshopObjectId",
+    "WorkshopPushRequest",
+    "WorkshopPushResponse",
+    "WorkshopPushType",
+  ] as const satisfies readonly (keyof {
+    ClaimId: ClaimId;
+    ClaimKind: ClaimKind;
+    CursorResponse: CursorResponse;
+    NextAction: NextAction;
+    PackBudget: PackBudget;
+    PackItem: PackItem;
+    PackProfile: PackProfile;
+    PackResponse: PackResponse;
+    ProblemId: ProblemId;
+    PromoteRequest: PromoteRequest;
+    PromoteResponse: PromoteResponse;
+    SessionCloseRequest: SessionCloseRequest;
+    SessionCloseResponse: SessionCloseResponse;
+    SessionId: SessionId;
+    SessionIntent: SessionIntent;
+    SessionOpenRequest: SessionOpenRequest;
+    SessionOpenResponse: SessionOpenResponse;
+    SessionsContracts: SessionsContracts;
+    WorkshopObjectId: WorkshopObjectId;
+    WorkshopPushRequest: WorkshopPushRequest;
+    WorkshopPushResponse: WorkshopPushResponse;
+    WorkshopPushType: WorkshopPushType;
+  })[];
+  return [
+    "// Generated from src/sessions.ts by `bun run generate`. Do not edit.",
+    `export type { ${typeNames.join(", ")} } from "../src/sessions.ts";`,
+    "",
+  ].join("\n");
+}
+
 function generatedScreeningJsonSchema(): string {
   const document = {
     $id: SCREENING_SCHEMA_ID,
@@ -407,6 +502,8 @@ export function generatedArtifacts(): readonly GeneratedArtifact[] {
     { relativePath: PROBLEM_TYPES_ARTIFACT, content: generatedProblemTypes() },
     { relativePath: LEDGER_JSON_SCHEMA_ARTIFACT, content: generatedLedgerJsonSchema() },
     { relativePath: LEDGER_TYPES_ARTIFACT, content: generatedLedgerTypes() },
+    { relativePath: SESSIONS_JSON_SCHEMA_ARTIFACT, content: generatedSessionsJsonSchema() },
+    { relativePath: SESSIONS_TYPES_ARTIFACT, content: generatedSessionsTypes() },
     { relativePath: SCREENING_JSON_SCHEMA_ARTIFACT, content: generatedScreeningJsonSchema() },
     { relativePath: SCREENING_TYPES_ARTIFACT, content: generatedScreeningTypes() },
     {

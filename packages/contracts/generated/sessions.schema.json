@@ -1,0 +1,447 @@
+{
+  "$id": "https://a.asimposium.org/schemas/sessions.v1.json",
+  "title": "ASImposium session-protocol contracts",
+  "description": "Fable §7 session loop: open, pack, workshop push, promote, close. Writes are JSON only; packs are budgeted with mandatory omitted[] and server-authored next_actions.",
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "type": "object",
+  "properties": {
+    "session_open_request": {
+      "type": "object",
+      "properties": {
+        "problem_id": {
+          "type": "string",
+          "pattern": "^P-[A-Z0-9][A-Z0-9-]{1,30}$"
+        },
+        "intent": {
+          "type": "string",
+          "enum": [
+            "prove",
+            "refute",
+            "review",
+            "sharpen-statement",
+            "explore"
+          ]
+        }
+      },
+      "required": [
+        "problem_id"
+      ],
+      "additionalProperties": false
+    },
+    "session_open_response": {
+      "type": "object",
+      "properties": {
+        "session_id": {
+          "type": "string",
+          "pattern": "^S-[A-Za-z0-9]{26}$"
+        },
+        "problem_id": {
+          "type": "string",
+          "pattern": "^P-[A-Z0-9][A-Z0-9-]{1,30}$"
+        },
+        "intent": {
+          "anyOf": [
+            {
+              "type": "string",
+              "enum": [
+                "prove",
+                "refute",
+                "review",
+                "sharpen-statement",
+                "explore"
+              ]
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "opened_at": {
+          "type": "string",
+          "format": "date-time",
+          "pattern": "^(?:(?:\\d\\d[2468][048]|\\d\\d[13579][26]|\\d\\d0[48]|[02468][048]00|[13579][26]00)-02-29|\\d{4}-(?:(?:0[13578]|1[02])-(?:0[1-9]|[12]\\d|3[01])|(?:0[469]|11)-(?:0[1-9]|[12]\\d|30)|(?:02)-(?:0[1-9]|1\\d|2[0-8])))T(?:(?:[01]\\d|2[0-3]):[0-5]\\d(?::[0-5]\\d(?:\\.\\d+)?)?(?:Z))$"
+        },
+        "idle_close_at": {
+          "type": "string",
+          "format": "date-time",
+          "pattern": "^(?:(?:\\d\\d[2468][048]|\\d\\d[13579][26]|\\d\\d0[48]|[02468][048]00|[13579][26]00)-02-29|\\d{4}-(?:(?:0[13578]|1[02])-(?:0[1-9]|[12]\\d|3[01])|(?:0[469]|11)-(?:0[1-9]|[12]\\d|30)|(?:02)-(?:0[1-9]|1\\d|2[0-8])))T(?:(?:[01]\\d|2[0-3]):[0-5]\\d(?::[0-5]\\d(?:\\.\\d+)?)?(?:Z))$"
+        }
+      },
+      "required": [
+        "session_id",
+        "problem_id",
+        "intent",
+        "opened_at",
+        "idle_close_at"
+      ],
+      "additionalProperties": false
+    },
+    "pack_response": {
+      "type": "object",
+      "properties": {
+        "session_id": {
+          "type": "string",
+          "pattern": "^S-[A-Za-z0-9]{26}$"
+        },
+        "problem_id": {
+          "type": "string",
+          "pattern": "^P-[A-Z0-9][A-Z0-9-]{1,30}$"
+        },
+        "profile": {
+          "type": "string",
+          "enum": [
+            "hello",
+            "orient",
+            "working",
+            "claim",
+            "review",
+            "digest",
+            "graveyard",
+            "literature",
+            "formal",
+            "review-queue",
+            "claim-graph",
+            "full"
+          ]
+        },
+        "budget_tokens": {
+          "type": "integer",
+          "exclusiveMinimum": 0,
+          "maximum": 9007199254740991
+        },
+        "tokens": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 9007199254740991
+        },
+        "items": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "properties": {
+              "key": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 64
+              },
+              "kind": {
+                "type": "string",
+                "enum": [
+                  "markdown",
+                  "json"
+                ]
+              },
+              "body": {
+                "type": "string"
+              },
+              "sha256": {
+                "type": "string",
+                "pattern": "^[0-9a-f]{64}$"
+              }
+            },
+            "required": [
+              "key",
+              "kind",
+              "body",
+              "sha256"
+            ],
+            "additionalProperties": false
+          }
+        },
+        "omitted": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "properties": {
+              "key": {
+                "type": "string"
+              },
+              "reason": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "key",
+              "reason"
+            ],
+            "additionalProperties": false
+          }
+        },
+        "next_actions": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "properties": {
+              "method": {
+                "type": "string",
+                "enum": [
+                  "GET",
+                  "POST"
+                ]
+              },
+              "url": {
+                "type": "string",
+                "minLength": 1
+              },
+              "why": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 240
+              }
+            },
+            "required": [
+              "method",
+              "url",
+              "why"
+            ],
+            "additionalProperties": false
+          }
+        },
+        "cursor": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 9007199254740991
+        }
+      },
+      "required": [
+        "session_id",
+        "problem_id",
+        "profile",
+        "budget_tokens",
+        "tokens",
+        "items",
+        "omitted",
+        "next_actions",
+        "cursor"
+      ],
+      "additionalProperties": false
+    },
+    "workshop_push_request": {
+      "type": "object",
+      "properties": {
+        "type": {
+          "type": "string",
+          "enum": [
+            "note",
+            "draft",
+            "computation",
+            "dead-end",
+            "friction",
+            "artifact-ref"
+          ]
+        },
+        "title": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 200
+        },
+        "body_md": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 65536
+        },
+        "relates_to": {
+          "default": [],
+          "maxItems": 16,
+          "type": "array",
+          "items": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 64
+          }
+        },
+        "force_note": {
+          "type": "boolean",
+          "const": true
+        }
+      },
+      "required": [
+        "type",
+        "title",
+        "body_md",
+        "relates_to"
+      ],
+      "additionalProperties": false
+    },
+    "workshop_push_response": {
+      "type": "object",
+      "properties": {
+        "workshop_id": {
+          "type": "string",
+          "pattern": "^W-[A-Za-z0-9]{26}$"
+        },
+        "workshop_seq": {
+          "type": "integer",
+          "exclusiveMinimum": 0,
+          "maximum": 9007199254740991
+        }
+      },
+      "required": [
+        "workshop_id",
+        "workshop_seq"
+      ],
+      "additionalProperties": false
+    },
+    "promote_request": {
+      "type": "object",
+      "properties": {
+        "workshop_id": {
+          "type": "string",
+          "pattern": "^W-[A-Za-z0-9]{26}$"
+        },
+        "kind": {
+          "type": "string",
+          "enum": [
+            "conjecture",
+            "theorem",
+            "lemma",
+            "definition",
+            "computation",
+            "counterexample",
+            "observation"
+          ]
+        },
+        "statement": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 8192
+        },
+        "falsifier": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 4096
+        },
+        "relates_to": {
+          "default": [],
+          "maxItems": 16,
+          "type": "array",
+          "items": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 64
+          }
+        }
+      },
+      "required": [
+        "workshop_id",
+        "kind",
+        "statement",
+        "relates_to"
+      ],
+      "additionalProperties": false
+    },
+    "promote_response": {
+      "type": "object",
+      "properties": {
+        "claim_id": {
+          "type": "string",
+          "pattern": "^C-[0-9]+$"
+        },
+        "problem_id": {
+          "type": "string",
+          "pattern": "^P-[A-Z0-9][A-Z0-9-]{1,30}$"
+        },
+        "seq": {
+          "type": "integer",
+          "exclusiveMinimum": 0,
+          "maximum": 9007199254740991
+        },
+        "queue_position": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 9007199254740991
+        }
+      },
+      "required": [
+        "claim_id",
+        "problem_id",
+        "seq",
+        "queue_position"
+      ],
+      "additionalProperties": false
+    },
+    "session_close_request": {
+      "type": "object",
+      "properties": {
+        "handback": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 2000
+        },
+        "promote": {
+          "default": [],
+          "maxItems": 16,
+          "type": "array",
+          "items": {
+            "type": "string",
+            "pattern": "^W-[A-Za-z0-9]{26}$"
+          }
+        },
+        "keep": {
+          "default": [],
+          "maxItems": 64,
+          "type": "array",
+          "items": {
+            "type": "string",
+            "pattern": "^W-[A-Za-z0-9]{26}$"
+          }
+        },
+        "discard": {
+          "default": [],
+          "maxItems": 64,
+          "type": "array",
+          "items": {
+            "type": "string",
+            "pattern": "^W-[A-Za-z0-9]{26}$"
+          }
+        }
+      },
+      "required": [
+        "handback",
+        "promote",
+        "keep",
+        "discard"
+      ],
+      "additionalProperties": false
+    },
+    "session_close_response": {
+      "type": "object",
+      "properties": {
+        "session_id": {
+          "type": "string",
+          "pattern": "^S-[A-Za-z0-9]{26}$"
+        },
+        "closed_at": {
+          "type": "string",
+          "format": "date-time",
+          "pattern": "^(?:(?:\\d\\d[2468][048]|\\d\\d[13579][26]|\\d\\d0[48]|[02468][048]00|[13579][26]00)-02-29|\\d{4}-(?:(?:0[13578]|1[02])-(?:0[1-9]|[12]\\d|3[01])|(?:0[469]|11)-(?:0[1-9]|[12]\\d|30)|(?:02)-(?:0[1-9]|1\\d|2[0-8])))T(?:(?:[01]\\d|2[0-3]):[0-5]\\d(?::[0-5]\\d(?:\\.\\d+)?)?(?:Z))$"
+        },
+        "promoted": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "pattern": "^C-[0-9]+$"
+          }
+        }
+      },
+      "required": [
+        "session_id",
+        "closed_at",
+        "promoted"
+      ],
+      "additionalProperties": false
+    }
+  },
+  "required": [
+    "session_open_request",
+    "session_open_response",
+    "pack_response",
+    "workshop_push_request",
+    "workshop_push_response",
+    "promote_request",
+    "promote_response",
+    "session_close_request",
+    "session_close_response"
+  ],
+  "additionalProperties": false
+}

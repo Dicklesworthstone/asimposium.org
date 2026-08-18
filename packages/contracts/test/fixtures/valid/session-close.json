@@ -1,0 +1,6 @@
+{
+  "handback": "C-12 promoted with the falsifier attached. W-next: the odd-length case is open; do not repeat the even-length counting route, it is a dead end (see workshop W-abc).",
+  "promote": [],
+  "keep": ["W-abcdefghijklmnopqrstuvwxyz"],
+  "discard": []
+}
