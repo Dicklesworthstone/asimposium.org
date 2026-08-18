@@ -30,9 +30,7 @@ export const ProblemIdSchema = z
   .regex(/^P-[A-Z0-9][A-Z0-9-]{1,30}$/, "invalid problem id");
 export type ProblemId = z.infer<typeof ProblemIdSchema>;
 
-export const SessionIdSchema = z
-  .string()
-  .regex(/^S-[A-Za-z0-9]{26}$/, "invalid session id");
+export const SessionIdSchema = z.string().regex(/^S-[A-Za-z0-9]{26}$/, "invalid session id");
 export type SessionId = z.infer<typeof SessionIdSchema>;
 
 export const WorkshopObjectIdSchema = z
@@ -145,7 +143,10 @@ export const WorkshopPushRequestSchema = z
   .object({
     type: WorkshopPushTypeSchema,
     title: z.string().trim().min(1).max(200),
-    body_md: z.string().min(1).max(64 * 1024),
+    body_md: z
+      .string()
+      .min(1)
+      .max(64 * 1024),
     relates_to: z.array(z.string().min(1).max(64)).max(16).default([]),
     /**
      * Escape hatch when the intent classifier fires LOOKS_LIKE_CLAIM on a
@@ -186,8 +187,17 @@ export const PromoteRequestSchema = z
   .object({
     workshop_id: WorkshopObjectIdSchema,
     kind: ClaimKindSchema,
-    statement: z.string().trim().min(1).max(8 * 1024),
-    falsifier: z.string().trim().min(1).max(4 * 1024).optional(),
+    statement: z
+      .string()
+      .trim()
+      .min(1)
+      .max(8 * 1024),
+    falsifier: z
+      .string()
+      .trim()
+      .min(1)
+      .max(4 * 1024)
+      .optional(),
     relates_to: z.array(z.string().min(1).max(64)).max(16).default([]),
   })
   .strict();
