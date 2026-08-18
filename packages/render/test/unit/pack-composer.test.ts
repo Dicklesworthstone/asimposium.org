@@ -201,13 +201,22 @@ describe("stable-prefix composition", () => {
 
 describe("visibility and action affordances", () => {
   test("an unassigned session gets the non-leaking no_membership explanation", () => {
-    const pack = composePack(
+    const baseline = composePack(
       input({ viewer: { audience: "session", membership: "none", effective_permissions: [] } }),
     );
-    expect(pack.items).toEqual([]);
-    expect(pack.next_actions).toEqual([]);
-    expect(pack.omitted).toEqual([{ reason: "no_membership" }]);
-    expect(pack.canonical_json).not.toContain("W-fellow-1");
+    const withMalformedHiddenInputs = composePack(
+      input({
+        viewer: { audience: "session", membership: "none", effective_permissions: [] },
+        candidates: {} as unknown as PackComposerInput["candidates"],
+        action_candidates: null as unknown as PackComposerInput["action_candidates"],
+      }),
+    );
+
+    expect(baseline.items).toEqual([]);
+    expect(baseline.next_actions).toEqual([]);
+    expect(baseline.omitted).toEqual([{ reason: "no_membership" }]);
+    expect(baseline.canonical_json).not.toContain("W-fellow-1");
+    expect(withMalformedHiddenInputs.canonical_json).toBe(baseline.canonical_json);
   });
 
   test("a public pack removes private workshop bytes without leaking their count or identity", () => {
@@ -259,6 +268,91 @@ describe("visibility and action affordances", () => {
     expect(withWorkshop.canonical_json).toBe(withoutWorkshop.canonical_json);
     expect(withWorkshop.bytes).toBe(withoutWorkshop.bytes);
     expect(withWorkshop.omitted).not.toContainEqual({ reason: "workshop_scope_excluded" });
+  });
+
+  test("a public pack does not validate hidden workshop candidate contents or duplicate ids", () => {
+    const shared = {
+      requested_max_tokens: 4_000,
+      viewer: {
+        audience: "public" as const,
+        membership: "none" as const,
+        effective_permissions: [],
+      },
+      candidates: [candidate("C-open", 0, 100)],
+      action_candidates: [],
+    };
+    const baseline = composePack(input(shared));
+    const withMalformedWorkshop = composePack(
+      input({
+        ...shared,
+        candidates: [
+          ...shared.candidates,
+          {
+            kind: 42,
+            id: "C-open",
+            scope: "workshop",
+            tokens: 0,
+            untrusted: false,
+            body: "bad\ud800",
+            why_included: "",
+            stable_prefix: -1,
+            requires: {},
+          } as unknown as PackComposerInput["candidates"][number],
+        ],
+      }),
+    );
+
+    expect(withMalformedWorkshop.canonical_json).toBe(baseline.canonical_json);
+  });
+
+  test("public excluded actions are classified without validating their hidden fields", () => {
+    const shared = {
+      requested_max_tokens: 4_000,
+      viewer: {
+        audience: "public" as const,
+        membership: "none" as const,
+        effective_permissions: [],
+      },
+      candidates: [candidate("C-open", 0, 100)],
+    };
+    const baseline = composePack(
+      input({
+        ...shared,
+        action_candidates: [
+          { method: "POST", url: "/v1/private", why: "private write", public_read: false },
+          { method: "GET", url: "/v1/private", why: "private read", public_read: false },
+        ],
+      }),
+    );
+    const withMalformedHiddenActions = composePack(
+      input({
+        ...shared,
+        action_candidates: [
+          {
+            method: "POST",
+            url: "https://attacker.example/private",
+            why: "bad\ud800",
+            public_read: "invalid",
+            requires: {},
+          } as unknown as PackComposerInput["action_candidates"][number],
+          {
+            method: "GET",
+            url: "https://attacker.example/private",
+            why: "bad\ud800",
+            public_read: false,
+            requires: {},
+          } as unknown as PackComposerInput["action_candidates"][number],
+        ],
+      }),
+    );
+
+    expect(withMalformedHiddenActions.canonical_json).toBe(baseline.canonical_json);
+    expect(baseline.omitted).toEqual(
+      expect.arrayContaining([
+        { reason: "public_write_actions_excluded" },
+        { reason: "public_nonread_actions_excluded" },
+      ]),
+    );
   });
 
   test("public packs advertise only explicitly public unrestricted GET actions", () => {

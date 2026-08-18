@@ -159,7 +159,12 @@ interface ValidatedCandidate {
 interface ValidatedAction {
   readonly value: NextAction;
   readonly requires: readonly string[];
-  readonly public_read: boolean;
+}
+
+interface ValidatedActions {
+  readonly values: readonly ValidatedAction[];
+  readonly publicWriteActionsExcluded: number;
+  readonly publicNonreadActionsExcluded: number;
 }
 
 /**
@@ -298,7 +303,7 @@ function assertViewer(value: unknown): {
   };
 }
 
-function assertCandidates(value: unknown): readonly ValidatedCandidate[] {
+function assertCandidates(value: unknown, audience: PackAudience): readonly ValidatedCandidate[] {
   if (!Array.isArray(value)) return refuse("INVALID_INPUT", "candidates must be an array");
   const ids = new Set<string>();
   const candidates: ValidatedCandidate[] = [];
@@ -309,6 +314,14 @@ function assertCandidates(value: unknown): readonly ValidatedCandidate[] {
     }
     const candidate = raw as Record<string, unknown>;
     const scope = assertScope(candidate.scope, `candidates[${index}].scope`);
+
+    if (audience === "public" && scope === "workshop") {
+      // Workshop candidates are outside an anonymous pack's input universe.
+      // Do not inspect even their ids or bodies: validation failures, duplicate
+      // ids, and byte length must not make public output depend on private state.
+      continue;
+    }
+
     const id = assertScalarText(candidate.id, `candidates[${index}].id`);
     if (ids.has(id))
       refuse("DUPLICATE_ITEM_ID", `candidate id ${JSON.stringify(id)} appears twice`);
@@ -352,9 +365,11 @@ function assertCandidates(value: unknown): readonly ValidatedCandidate[] {
   });
 }
 
-function assertActions(value: unknown): readonly ValidatedAction[] {
+function assertActions(value: unknown, audience: PackAudience): ValidatedActions {
   if (!Array.isArray(value)) return refuse("INVALID_INPUT", "action_candidates must be an array");
   const actions: ValidatedAction[] = [];
+  let publicWriteActionsExcluded = 0;
+  let publicNonreadActionsExcluded = 0;
   for (const [index, raw] of value.entries()) {
     if (raw === null || typeof raw !== "object" || Array.isArray(raw)) {
       refuse("INVALID_ACTION", `action_candidates[${index}] must be an object`);
@@ -363,9 +378,26 @@ function assertActions(value: unknown): readonly ValidatedAction[] {
     if (action.method !== "GET" && action.method !== "POST") {
       refuse("INVALID_ACTION", `action_candidates[${index}].method must be GET or POST`);
     }
+
+    if (audience === "public" && action.method === "POST") {
+      // A public pack can never advertise a write. Classify it from the method
+      // alone, then stop: its private URL, prose, permissions, and public-read
+      // metadata are not public input and cannot be allowed to perturb output.
+      publicWriteActionsExcluded += 1;
+      continue;
+    }
+
     if (typeof action.public_read !== "boolean") {
       refuse("INVALID_ACTION", `action_candidates[${index}].public_read must be boolean`);
     }
+
+    if (audience === "public" && !action.public_read) {
+      // As above, a GET explicitly classified non-public is outside the public
+      // pack before its remaining fields are interpreted.
+      publicNonreadActionsExcluded += 1;
+      continue;
+    }
+
     const url = assertScalarText(action.url, `action_candidates[${index}].url`);
     if (!isSafeWorkerPath(url)) {
       refuse(
@@ -383,16 +415,19 @@ function assertActions(value: unknown): readonly ValidatedAction[] {
         action.requires,
         `action_candidates[${index}].requires`,
       ),
-      public_read: action.public_read,
     });
   }
-  return actions.sort((left, right) => {
-    const method = compareText(left.value.method, right.value.method);
-    if (method !== 0) return method;
-    const url = compareText(left.value.url, right.value.url);
-    if (url !== 0) return url;
-    return compareText(left.value.why, right.value.why);
-  });
+  return {
+    values: actions.sort((left, right) => {
+      const method = compareText(left.value.method, right.value.method);
+      if (method !== 0) return method;
+      const url = compareText(left.value.url, right.value.url);
+      if (url !== 0) return url;
+      return compareText(left.value.why, right.value.why);
+    }),
+    publicWriteActionsExcluded,
+    publicNonreadActionsExcluded,
+  };
 }
 
 function assertDegraded(value: unknown): readonly string[] {
@@ -513,11 +548,9 @@ export function composePack(input: PackComposerInput): ComposedPack {
     return refuse("INVALID_INPUT", "cursor must be a non-negative safe integer");
   }
 
-  const candidates = assertCandidates(source.candidates);
-  const actions = assertActions(source.action_candidates);
-
   // A session caller with no problem membership receives an informative empty
-  // pack, not a count or title that could disclose private workshop state.
+  // pack, not a count, title, or validation failure that could disclose private
+  // workshop state. Candidate and action inputs are deliberately not consulted.
   if (viewer.audience === "session" && viewer.membership === "none") {
     return finalize({
       ...common,
@@ -528,6 +561,10 @@ export function composePack(input: PackComposerInput): ComposedPack {
     });
   }
 
+  const candidates = assertCandidates(source.candidates, viewer.audience);
+  const validatedActions = assertActions(source.action_candidates, viewer.audience);
+  const actions = validatedActions.values;
+
   // A public face has no authenticated principal. Caller-supplied permissions
   // therefore have no authority there: unrestricted public GETs still pass
   // because they require nothing, while every restricted item/action is
@@ -537,12 +574,6 @@ export function composePack(input: PackComposerInput): ComposedPack {
   let itemPermissionExcluded = 0;
 
   for (const candidate of candidates) {
-    if (viewer.audience === "public" && candidate.value.scope === "workshop") {
-      // Private workshop material is outside a public pack's input universe.
-      // Do not count it or emit an omission: even the existence of an omitted
-      // workshop item is private state that anonymous callers must not learn.
-      continue;
-    }
     if (!isAuthorized(candidate.requires, permissions)) {
       itemPermissionExcluded += 1;
       continue;
@@ -551,19 +582,14 @@ export function composePack(input: PackComposerInput): ComposedPack {
   }
 
   const nextActions: NextAction[] = [];
-  let publicWriteActionsExcluded = 0;
-  let publicNonreadActionsExcluded = 0;
+  const { publicWriteActionsExcluded, publicNonreadActionsExcluded } = validatedActions;
   let actionPermissionExcluded = 0;
   for (const action of actions) {
     // Public faces have no principal. Claimed effective permissions must never
     // turn an anonymous GET into a POST affordance; writes are earned in a
     // session and are absent rather than merely expected to 403 later.
     if (viewer.audience === "public") {
-      if (action.value.method === "POST") {
-        publicWriteActionsExcluded += 1;
-      } else if (!action.public_read) {
-        publicNonreadActionsExcluded += 1;
-      } else if (action.requires.length > 0) {
+      if (action.requires.length > 0) {
         actionPermissionExcluded += 1;
       } else {
         nextActions.push(action.value);
