@@ -93,8 +93,8 @@ export function createLedgerFaceRoutes(): Hono<{ Bindings: Env }> {
 
   // W6.1: the per-problem public face. Anonymous reads only ever see public
   // projection rows — workshop content has no path here (Rule A2).
-  app.on(["GET", "HEAD"], "/p/:id.json", async (c) => {
-    const problemId = c.req.param("id");
+  app.on(["GET", "HEAD"], "/p/:id{.+\\.json$}", async (c) => {
+    const problemId = c.req.param("id").slice(0, -".json".length);
     const problemRow = await c.env.DB.prepare(
       "SELECT id, public_seq, created_at FROM problems WHERE id = ?",
     )
@@ -138,8 +138,8 @@ export function createLedgerFaceRoutes(): Hono<{ Bindings: Env }> {
     return new Response(c.req.method === "HEAD" ? null : body, { status: 200, headers });
   });
 
-  app.on(["GET", "HEAD"], "/p/:id.md", async (c) => {
-    const problemId = c.req.param("id");
+  app.on(["GET", "HEAD"], "/p/:id{.+\\.md$}", async (c) => {
+    const problemId = c.req.param("id").slice(0, -".md".length);
     const problemRow = await c.env.DB.prepare(
       "SELECT id, public_seq, created_at FROM problems WHERE id = ?",
     )
