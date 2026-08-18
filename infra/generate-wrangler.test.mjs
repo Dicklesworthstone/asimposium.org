@@ -259,10 +259,18 @@ const cases = [
       // wrong origin from the one config `--check` does not reconcile.
       assert.equal(deploy.vars.STOA_ORIGIN, report.environments.production.worker_origin);
       assert.equal(deploy.vars.STOA_ORIGIN, stoaOriginProjection(parsed.production));
-      // Exhaustive: the overlay may publish exactly these two non-secret values
-      // and nothing else. A third key here is a new disclosure on the deploy
-      // path, which no generated-config assertion would catch.
-      assert.deepEqual(Object.keys(deploy.vars).sort(), ["SERVICE_ENVELOPE_KEYS", "STOA_ORIGIN"]);
+      // Exhaustive: the overlay may publish exactly these three non-secret
+      // values and nothing else. A fourth key here is a new disclosure on the
+      // deploy path, which no generated-config assertion would catch.
+      // AGORA_ORIGIN is the trusted device-flow verification origin binding
+      // (asimposiumorg-0yt): public, non-secret, and fail-closed at service
+      // construction when absent.
+      assert.equal(deploy.vars.AGORA_ORIGIN, report.environments.production.agora_origin);
+      assert.deepEqual(Object.keys(deploy.vars).sort(), [
+        "AGORA_ORIGIN",
+        "SERVICE_ENVELOPE_KEYS",
+        "STOA_ORIGIN",
+      ]);
       // Public verification keys only: the signing key lives in Vercel env.
       const keyring = JSON.parse(deploy.vars.SERVICE_ENVELOPE_KEYS);
       assert.ok(Array.isArray(keyring) && keyring.length > 0);
@@ -319,9 +327,14 @@ const cases = [
       for (const [name, config] of Object.entries(parsed)) {
         assert.equal(config.account_id, undefined, name);
         // `vars` is not forbidden, but it is exhaustively enumerated: the only
-        // value a generated config may publish is the non-secret origin
-        // projection. Anything else appearing here is a new disclosure.
-        assert.deepEqual(Object.keys(config.vars ?? {}), ["STOA_ORIGIN"], name);
+        // values a generated config may publish are the two non-secret origin
+        // projections (Stoa self-origin and the trusted Agora origin). Anything
+        // else appearing here is a new disclosure.
+        assert.deepEqual(
+          Object.keys(config.vars ?? {}).sort(),
+          ["AGORA_ORIGIN", "STOA_ORIGIN"],
+          name,
+        );
         assert.equal(config.workers_dev, false, name);
         const id = config.d1_databases[0].database_id;
         const isSentinel = id === "00000000-0000-0000-0000-000000000000";
