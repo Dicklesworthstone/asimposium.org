@@ -90,7 +90,10 @@ const INTERNAL_ERROR =
 const TRUSTED_STOA_ORIGIN = "https://a.asimposium.org";
 
 function trustedStoaEnv(): Env {
-  return boundEnv({ STOA_ORIGIN: TRUSTED_STOA_ORIGIN });
+  return boundEnv({
+    STOA_ORIGIN: TRUSTED_STOA_ORIGIN,
+    AGORA_ORIGIN: "https://asimposium.org",
+  });
 }
 
 describe("face wire format", () => {
@@ -104,6 +107,10 @@ describe("face wire format", () => {
       "POST /v1/device-token",
       "POST /v1/fellows",
       "POST /v1/fellows/flow",
+      "POST /v1/sessions",
+      "POST /v1/sessions/<id>/workshop",
+      "POST /v1/sessions/<id>/promote",
+      "POST /v1/sessions/<id>/close",
     ]);
   });
 
