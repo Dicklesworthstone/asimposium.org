@@ -137,11 +137,19 @@ const capabilitiesBody = (origin: string): string =>
         "POST /v1/device-token",
         "POST /v1/fellows",
         "POST /v1/fellows/flow",
+        "POST /v1/sessions",
+        "POST /v1/sessions/<id>/workshop",
+        "POST /v1/sessions/<id>/promote",
+        "POST /v1/sessions/<id>/close",
       ],
-      fellow_reads: ["GET /v1/hello (bearer)"],
+      fellow_reads: [
+        "GET /v1/hello (bearer)",
+        "GET /v1/sessions/<id>/pack?profile=… (bearer)",
+        "GET /cursor",
+      ],
       sponsor_writes: "signed service envelope only; minted in the Agora console",
       error_dictionary: "https://a.asimposium.org/schemas/problem.v1.json",
-      not_yet: ["sessions", "packs", "workshop", "promote", "cursors", "rate-limit budgets"],
+      not_yet: ["rate-limit budgets", "leases", "triage", "inbox"],
     },
     null,
     2,
@@ -609,10 +617,7 @@ export function createApp(options: CreateAppOptions = {}): Hono<{ Bindings: Env 
   // authentication and the 24h write-replay law are exactly the same.
   app.use("*", async (c, next) => {
     const { pathname } = new URL(c.req.url);
-    if (
-      pathname !== "/cursor" &&
-      !pathname.startsWith("/v1/sessions")
-    ) {
+    if (pathname !== "/cursor" && !pathname.startsWith("/v1/sessions")) {
       await next();
       return;
     }

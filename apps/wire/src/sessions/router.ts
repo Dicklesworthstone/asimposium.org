@@ -1,24 +1,26 @@
 import {
+  type PackItem,
+  type PackProfile,
   PackResponseSchema,
   PromoteRequestSchema,
+  PromoteResponseSchema,
   SessionCloseRequestSchema,
+  SessionCloseResponseSchema,
   SessionOpenRequestSchema,
   SessionOpenResponseSchema,
   WorkshopPushRequestSchema,
   WorkshopPushResponseSchema,
-  SessionCloseResponseSchema,
-  PromoteResponseSchema,
-  type PackItem,
-  type PackProfile,
 } from "@asimposium/contracts";
 import { Hono } from "hono";
-
-import type { EnrollmentService, EncryptedEnrollmentReplay } from "../enrollment/service";
-import type { FellowCredentialBinding } from "../enrollment/service";
+import type {
+  EncryptedEnrollmentReplay,
+  EnrollmentService,
+  FellowCredentialBinding,
+} from "../enrollment/service";
 import { authorizeFellowWrite } from "../enrollment/service";
-import { writeClaim, readCursor, KraterProblemNotFoundError } from "../krater/krater";
-import { problem } from "../http/envelope";
 import type { Env } from "../env";
+import { problem } from "../http/envelope";
+import { KraterProblemNotFoundError, readCursor, writeClaim } from "../krater/krater";
 
 /**
  * The session protocol (Fable §7): open → pack → workshop push → promote →
@@ -167,12 +169,15 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
     return { replayed: false, value };
   }
 
-  async function authenticate(request: Request): Promise<
+  async function authenticate(
+    request: Request,
+  ): Promise<
     | { readonly ok: true; readonly binding: FellowCredentialBinding }
     | { readonly ok: false; readonly response: Response }
   > {
     const token = bearerToken(request);
-    const binding = token === undefined ? undefined : await options.service.credentialBinding(token);
+    const binding =
+      token === undefined ? undefined : await options.service.credentialBinding(token);
     if (binding === undefined) {
       return {
         ok: false,
@@ -482,7 +487,7 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
       etag,
     };
     const ifNoneMatch = c.req.header("if-none-match");
-    if (ifNoneMatch !== undefined && ifNoneMatch.split(",").some((v) => v.trim() === etag)) {
+    if (ifNoneMatch?.split(",").some((v) => v.trim() === etag)) {
       return new Response(null, { status: 304, headers });
     }
     return new Response(body, { status: 200, headers });
@@ -672,33 +677,40 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
 
     const digest = await sha256Text(JSON.stringify(parsed.data));
     try {
-      const result = await replayOrRun(db, "promote", auth.binding.fellowId, key, digest, async () => {
-        const now = new Date().toISOString();
-        // The seq is allocated by the write transaction; the claim id derives
-        // from the durable cursor so retries mint the same identity.
-        const preCursor = await readCursor(db, session.problem_id);
-        const claimId = `C-${preCursor + 1}`;
-        const write = await writeClaim(db, {
-          problemId: session.problem_id,
-          claimId,
-          eventId: mintId("E"),
-          idempotencyKey: key,
-          statement: parsed.data.statement,
-          createdAt: now,
-        });
-        // The public cursor moves exactly once per public-visible commit and
-        // never for workshop/rejected/rolled-back writes (c52's law). The
-        // event log is the truth; the cursor follows it.
-        await db
-          .prepare("UPDATE public_cursor SET cursor = cursor + 1 WHERE singleton = 1")
-          .run();
-        return PromoteResponseSchema.parse({
-          claim_id: claimId,
-          problem_id: session.problem_id,
-          seq: write.seq,
-          queue_position: 0,
-        });
-      });
+      const result = await replayOrRun(
+        db,
+        "promote",
+        auth.binding.fellowId,
+        key,
+        digest,
+        async () => {
+          const now = new Date().toISOString();
+          // The seq is allocated by the write transaction; the claim id derives
+          // from the durable cursor so retries mint the same identity.
+          const preCursor = await readCursor(db, session.problem_id);
+          const claimId = `C-${preCursor + 1}`;
+          const write = await writeClaim(db, {
+            problemId: session.problem_id,
+            claimId,
+            eventId: mintId("E"),
+            idempotencyKey: key,
+            statement: parsed.data.statement,
+            createdAt: now,
+          });
+          // The public cursor moves exactly once per public-visible commit and
+          // never for workshop/rejected/rolled-back writes (c52's law). The
+          // event log is the truth; the cursor follows it.
+          await db
+            .prepare("UPDATE public_cursor SET cursor = cursor + 1 WHERE singleton = 1")
+            .run();
+          return PromoteResponseSchema.parse({
+            claim_id: claimId,
+            problem_id: session.problem_id,
+            seq: write.seq,
+            queue_position: 0,
+          });
+        },
+      );
       return c.json(result.value, result.replayed ? 200 : 201);
     } catch (error) {
       if (error instanceof ReplayConflictError) {
@@ -794,8 +806,9 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
 
   // --- GET /cursor ---------------------------------------------------------
   app.get("/cursor", async (c) => {
-    const row = await c.env.DB.prepare("SELECT cursor FROM public_cursor WHERE singleton = 1")
-      .first<{ cursor: number }>();
+    const row = await c.env.DB.prepare(
+      "SELECT cursor FROM public_cursor WHERE singleton = 1",
+    ).first<{ cursor: number }>();
     const body = String(row?.cursor ?? 0);
     const etag = `"${await sha256Text(body)}"`;
     const headers = {
@@ -804,7 +817,7 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
       etag,
     };
     const ifNoneMatch = c.req.header("if-none-match");
-    if (ifNoneMatch !== undefined && ifNoneMatch.split(",").some((v) => v.trim() === etag)) {
+    if (ifNoneMatch?.split(",").some((v) => v.trim() === etag)) {
       return new Response(null, { status: 304, headers });
     }
     return new Response(body, { status: 200, headers });
