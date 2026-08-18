@@ -2,6 +2,7 @@ import { type ProblemsIndexResponse, ProblemsIndexResponseSchema } from "@asimpo
 import { Hono } from "hono";
 
 import type { Env } from "./env";
+import { problem as problemDocument } from "./http/envelope";
 
 /**
  * The first public ledger face (a W6.1 down payment): the problems index.
@@ -80,6 +81,92 @@ export function createLedgerFaceRoutes(): Hono<{ Bindings: Env }> {
             .map((p) => `- \`${p.id}\` — seq ${p.public_seq}, opened ${p.created_at}`)
             .join("\n");
     const body = `# Public problems\n\n${listing}\n\nomitted: ${data.omitted.join("; ")}\n`;
+    const etag = await strongEtag("markdown", body);
+    const headers = {
+      "content-type": "text/markdown; charset=utf-8",
+      "cache-control": PUBLIC_CACHE_CONTROL,
+      etag,
+    };
+    if (ifNoneMatchMatches(c.req.header("if-none-match"), etag)) return c.body(null, 304, headers);
+    return new Response(c.req.method === "HEAD" ? null : body, { status: 200, headers });
+  });
+
+  // W6.1: the per-problem public face. Anonymous reads only ever see public
+  // projection rows — workshop content has no path here (Rule A2).
+  app.on(["GET", "HEAD"], "/p/:id.json", async (c) => {
+    const problemId = c.req.param("id");
+    const problemRow = await c.env.DB.prepare(
+      "SELECT id, public_seq, created_at FROM problems WHERE id = ?",
+    )
+      .bind(problemId)
+      .first<{ id: string; public_seq: number; created_at: string }>();
+    if (problemRow === null || problemRow === undefined) {
+      return problemDocument({
+        status: 404,
+        code: "PROBLEM_NOT_FOUND",
+        title: "No such problem",
+        detail: "No public problem with this id exists.",
+        fixHint: "Check the id against GET /problems.json.",
+      });
+    }
+    const claims = await c.env.DB.prepare(
+      "SELECT id, statement, source_seq, created_at FROM claims WHERE problem_id = ? ORDER BY source_seq ASC",
+    )
+      .bind(problemId)
+      .all<{ id: string; statement: string; source_seq: number; created_at: string }>();
+    const body = JSON.stringify(
+      {
+        schema: "https://a.asimposium.org/schemas/ledger.v1.json",
+        problem: {
+          id: problemRow.id,
+          public_seq: problemRow.public_seq,
+          created_at: problemRow.created_at,
+        },
+        claims: claims.results ?? [],
+        omitted: ["dispositions, reviews, hypotheses, and citations land with W5.4/W5.8"],
+      },
+      null,
+      2,
+    );
+    const etag = await strongEtag("json", body);
+    const headers = {
+      "content-type": "application/json; charset=utf-8",
+      "cache-control": PUBLIC_CACHE_CONTROL,
+      etag,
+    };
+    if (ifNoneMatchMatches(c.req.header("if-none-match"), etag)) return c.body(null, 304, headers);
+    return new Response(c.req.method === "HEAD" ? null : body, { status: 200, headers });
+  });
+
+  app.on(["GET", "HEAD"], "/p/:id.md", async (c) => {
+    const problemId = c.req.param("id");
+    const problemRow = await c.env.DB.prepare(
+      "SELECT id, public_seq, created_at FROM problems WHERE id = ?",
+    )
+      .bind(problemId)
+      .first<{ id: string; public_seq: number; created_at: string }>();
+    if (problemRow === null || problemRow === undefined) {
+      return problemDocument({
+        status: 404,
+        code: "PROBLEM_NOT_FOUND",
+        title: "No such problem",
+        detail: "No public problem with this id exists.",
+        fixHint: "Check the id against GET /problems.json.",
+      });
+    }
+    const claims = await c.env.DB.prepare(
+      "SELECT id, statement, source_seq FROM claims WHERE problem_id = ? ORDER BY source_seq ASC",
+    )
+      .bind(problemId)
+      .all<{ id: string; statement: string; source_seq: number }>();
+    const rows = claims.results ?? [];
+    const listing =
+      rows.length === 0
+        ? "No public claims yet."
+        : rows
+            .map((claim) => `- **${claim.id}** (seq ${claim.source_seq}): ${claim.statement}`)
+            .join("\n");
+    const body = `# ${problemRow.id}\n\n${listing}\n\nomitted: dispositions, reviews, hypotheses, and citations land with W5.4/W5.8\n`;
     const etag = await strongEtag("markdown", body);
     const headers = {
       "content-type": "text/markdown; charset=utf-8",
