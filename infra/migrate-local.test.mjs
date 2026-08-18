@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { randomUUID } from "node:crypto";
-import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, resolve } from "node:path";
 import { performance } from "node:perf_hooks";
@@ -12,6 +12,9 @@ import {
   catalogFingerprint,
   classifySchemaLineage,
   digestOf,
+  LOCAL_D1_CLEANUP_RESERVE_MS as SHIPPED_LOCAL_CLEANUP_RESERVE_MS,
+  LOCAL_D1_COMMAND_WINDOW_MS as SHIPPED_LOCAL_COMMAND_WINDOW_MS,
+  LOCAL_D1_EXECUTION_FLOOR_MS as SHIPPED_LOCAL_EXECUTION_FLOOR_MS,
   LOCAL_D1_KILL_REAP_MS as KILL_REAP_MS,
   LEDGER_TABLE,
   LINEAGE_TABLE,
@@ -20,6 +23,8 @@ import {
   MAX_LINEAGE_ROWS,
   MigrationError,
   migrationCommandSql,
+  OWNED_PROCESS_GROUP,
+  PARENT_PROCESS_GROUP,
   LOCAL_D1_PIPE_DRAIN_MS as OUTPUT_DRAIN_MS,
   planMigrations,
   readBootstrapManifest,
@@ -27,6 +32,8 @@ import {
   redactStderr,
   resolvePinnedWranglerCommand,
   runBoundedCommand,
+  runLocalD1Command,
+  runMigrationCli,
   LOCAL_D1_TERM_GRACE_MS as TERMINATE_GRACE_MS,
 } from "./migrate.mjs";
 
@@ -200,18 +207,27 @@ function localExecutionWindowOrRefuse(remainingMs, label) {
  * caller, so there is no second site that could compute a window differently and
  * quietly reintroduce the truncated-window launch.
  *
- * `runner`, `remainingMs`, and `observedAt` are injectable ONLY so the boundary
- * can be driven at an exact budget with a runner that records entry. Production
- * callers pass none of them and get the real bounded executor and the real
- * shared deadline, so the seam a plant exercises is the seam that ships.
+ * `runner`, `remainingMs`, `observedAt`, and `epochNow` are injectable ONLY so
+ * the boundary can be driven at an exact budget with a runner that records
+ * entry. Production callers pass none of them and get the real bounded executor
+ * and the real shared deadline, so the seam a plant exercises is the seam that
+ * ships.
  */
-async function runBoundedLocalCommand(label, command, { runner, remainingMs, observedAt } = {}) {
+async function runBoundedLocalCommand(
+  label,
+  command,
+  { runner, remainingMs, observedAt, epochNow = Date.now } = {},
+) {
   const remaining = remainingMs ?? commandDeadline(observedAt).remainingMs;
   // The refusal happens HERE, before `runner` is named on the next line. That
   // ordering is the property under test: a plant whose runner counts entries
   // must observe zero.
   const timeoutMs = localExecutionWindowOrRefuse(remaining, label);
-  return await (runner ?? runBoundedCommand)({ ...command, timeoutMs });
+  const preparedCommand =
+    typeof command === "function"
+      ? command({ deadlineAtMs: epochNow() + timeoutMs, timeoutMs })
+      : command;
+  return await (runner ?? runBoundedCommand)({ ...preparedCommand, timeoutMs });
 }
 
 /**
@@ -293,11 +309,21 @@ async function runnerConfigJson(command, label) {
   }
 }
 
-async function runActualLocalMigrationCli(args, label) {
-  const result = await runBoundedLocalCommand(label, {
-    cmd: [process.execPath, "infra/migrate.mjs", ...args],
-    cwd: root,
-  });
+async function runActualLocalMigrationCli(args, label, commandOptions = undefined) {
+  const result = await runBoundedLocalCommand(
+    label,
+    ({ deadlineAtMs }) => ({
+      cmd: [
+        process.execPath,
+        "infra/migrate.mjs",
+        ...args,
+        "--local-command-deadline-at-ms",
+        String(deadlineAtMs),
+      ],
+      cwd: root,
+    }),
+    commandOptions,
+  );
   assert.equal(result.outcome, "exited", `actual local CLI ${label} must exit normally`);
   try {
     return {
@@ -307,6 +333,77 @@ async function runActualLocalMigrationCli(args, label) {
   } catch {
     assert.fail(`actual local CLI ${label} must emit one JSON diagnostic`);
   }
+}
+
+const PARENT_OWNED_TOPOLOGY_FIXTURE = "--parent-owned-topology-fixture";
+
+function processExists(pid) {
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch (error) {
+    if (error?.code === "ESRCH") return false;
+    throw error;
+  }
+}
+
+async function runParentOwnedTopologyFixture(deadlineAtMs) {
+  mkdirSync(persistenceRoot, { recursive: true });
+  const pidRecordPath = resolve(persistenceRoot, `owned-topology-${randomUUID()}.json`);
+  process.stdout.write(`${pidRecordPath}\n`);
+  const descendantSource = `
+process.on("SIGTERM", () => {});
+setTimeout(() => process.exit(124), 20_000);
+setInterval(() => {}, 1_000);
+process.stdout.write("ready\\n");
+`;
+  const directChildSource = `
+import { writeFileSync } from "node:fs";
+process.on("SIGTERM", () => {});
+setTimeout(() => process.exit(124), 20_000);
+setInterval(() => {}, 1_000);
+const descendant = Bun.spawn({
+  cmd: [process.execPath, "-e", ${JSON.stringify(descendantSource)}],
+  detached: false,
+  stdin: "ignore",
+  stdout: "pipe",
+  stderr: "ignore",
+});
+const reader = descendant.stdout.getReader();
+let acknowledgement = "";
+while (!acknowledgement.includes("\\n") && acknowledgement.length <= 16) {
+  const chunk = await reader.read();
+  if (chunk.done) break;
+  acknowledgement += new TextDecoder().decode(chunk.value);
+}
+reader.releaseLock();
+if (acknowledgement !== "ready\\n") process.exit(125);
+writeFileSync(
+  process.env.ASIMP_TOPOLOGY_PID_PATH,
+  JSON.stringify({ direct_child: process.pid, descendant: descendant.pid }),
+  "utf8",
+);
+`;
+  void runLocalD1Command(
+    {
+      cmd: [process.execPath, "-e", directChildSource],
+      cwd: root,
+      toolEnvironment: { ASIMP_TOPOLOGY_PID_PATH: pidRecordPath },
+    },
+    { deadlineAtMs },
+  );
+
+  const readinessDeadline = Date.now() + 3_000;
+  while (!existsSync(pidRecordPath) && Date.now() < readinessDeadline) {
+    await Bun.sleep(10);
+  }
+  if (!existsSync(pidRecordPath)) process.exit(125);
+
+  // Stall beyond both deadlines. The inner JavaScript timer cannot fire, so
+  // only the independent outer controller can retire this process, its direct
+  // child, and the TERM-resistant descendant in their one owned group.
+  Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 20_000);
+  process.exit(124);
 }
 
 function oneRow(result, label) {
@@ -715,6 +812,52 @@ const cases = [
       assert.equal(handedTimeoutMs, LOCAL_D1_EXECUTION_FLOOR_MS);
       assert.equal(admittedResult.outcome, "exited");
 
+      // STANDALONE CONTROL: callers that do not receive an outer orchestration
+      // deadline retain the shipped fixed 15s command timeout. The new shared
+      // deadline is containment supplied by the suite, not a hidden requirement
+      // for using localD1 directly.
+      let standaloneEntries = 0;
+      let standaloneTimeoutMs;
+      const standaloneResult = await runLocalD1Command(
+        { cmd: [process.execPath, "--version"], cwd: root },
+        {
+          runner: (options) => {
+            standaloneEntries += 1;
+            standaloneTimeoutMs = options.timeoutMs;
+            assert.equal(options.ownershipMode, OWNED_PROCESS_GROUP);
+            return { outcome: "exited", exitCode: 0, stdout: "", stderr: "" };
+          },
+        },
+      );
+      assert.equal(standaloneEntries, 1);
+      assert.equal(standaloneTimeoutMs, 15_000);
+      assert.equal(standaloneResult.outcome, "exited");
+
+      // An admissible deadline is not itself authority to inherit a group. The
+      // kernel-backed leader proof must fail before the nested runner starts.
+      let unprovenLeaderRunnerEntries = 0;
+      let unprovenLeaderRefusal;
+      try {
+        await runLocalD1Command(
+          { cmd: [process.execPath, "--version"], cwd: root },
+          {
+            deadlineAtMs: 306_250,
+            observedAtMs: 300_000,
+            processLeadsOwnedGroup: () => false,
+            runner: () => {
+              unprovenLeaderRunnerEntries += 1;
+              throw new Error("an unproven parent-owned group reached the runner");
+            },
+          },
+        );
+        assert.fail("an admissible deadline without group leadership must refuse");
+      } catch (error) {
+        unprovenLeaderRefusal = error;
+      }
+      assert.ok(unprovenLeaderRefusal instanceof MigrationError);
+      assert.equal(unprovenLeaderRefusal.code, "LOCAL_D1_PARENT_PROCESS_GROUP_UNPROVEN");
+      assert.equal(unprovenLeaderRunnerEntries, 0);
+
       // SECONDARY: the boundary arithmetic itself, at exact values, no clock.
       const reported = localExecutionAllocation(REPORTED_REMAINING_MS);
       assert.equal(reported.kind, "budget-exhausted");
@@ -733,6 +876,9 @@ const cases = [
       assert.equal(COMMAND_REAP_RESERVE_MS, 3_250);
       assert.equal(LOCAL_D1_EXECUTION_FLOOR_MS, 3_000);
       assert.equal(LOCAL_D1_COMMAND_WINDOW_MS, 6_250);
+      assert.equal(SHIPPED_LOCAL_CLEANUP_RESERVE_MS, COMMAND_REAP_RESERVE_MS);
+      assert.equal(SHIPPED_LOCAL_EXECUTION_FLOOR_MS, LOCAL_D1_EXECUTION_FLOOR_MS);
+      assert.equal(SHIPPED_LOCAL_COMMAND_WINDOW_MS, LOCAL_D1_COMMAND_WINDOW_MS);
 
       // Exact boundary, both sides, with no clock involved.
       const oneMillisecondShort = localExecutionAllocation(6_249);
@@ -743,6 +889,219 @@ const cases = [
       // An admitted window still withholds the whole reap tail, so a command
       // that uses all of it can still be terminated inside the same budget.
       assert.equal(admitted.executionWindowMs, LOCAL_D1_EXECUTION_FLOOR_MS);
+
+      // ACTUAL CLI ORCHESTRATION: the deadline parsed by runMigrationCli must
+      // reach the nested local-D1 pre-spawn seam. The outer controller reserves
+      // its own cleanup tail, so one millisecond below that tail plus the
+      // complete inner command window must refuse without entering the inner
+      // runner. A fixed epoch makes the exact absolute argv deadline causal too.
+      const REFUSAL_EPOCH_MS = 100_000;
+      const ACTUAL_CLI_REFUSAL_BUDGET_MS =
+        COMMAND_REAP_RESERVE_MS + SHIPPED_LOCAL_COMMAND_WINDOW_MS - 1;
+      let nestedRunnerEntries = 0;
+      const actualCliRefusal = await runActualLocalMigrationCli(
+        ["--env", "local"],
+        "nested-deadline-refusal",
+        {
+          epochNow: () => REFUSAL_EPOCH_MS,
+          remainingMs: ACTUAL_CLI_REFUSAL_BUDGET_MS,
+          runner: async ({ cmd, timeoutMs }) => {
+            assert.equal(timeoutMs, SHIPPED_LOCAL_COMMAND_WINDOW_MS - 1);
+            assert.deepEqual(cmd.slice(-2), [
+              "--local-command-deadline-at-ms",
+              String(REFUSAL_EPOCH_MS + SHIPPED_LOCAL_COMMAND_WINDOW_MS - 1),
+            ]);
+            let stderr = "";
+            let stdout = "";
+            const exitCode = await runMigrationCli(cmd.slice(2), {
+              root,
+              localReadLineageSnapshot: async (
+                _root,
+                _databaseName,
+                _localPersistTo,
+                receivedDeadlineAtMs,
+              ) => {
+                assert.ok(Number.isSafeInteger(receivedDeadlineAtMs));
+                return await runLocalD1Command(
+                  { cmd: [process.execPath, "--version"], cwd: root },
+                  {
+                    deadlineAtMs: receivedDeadlineAtMs,
+                    observedAtMs: REFUSAL_EPOCH_MS,
+                    runner: () => {
+                      nestedRunnerEntries += 1;
+                      throw new Error("an under-budget nested Wrangler command reached its runner");
+                    },
+                  },
+                );
+              },
+              stderr: (line) => {
+                stderr += line;
+              },
+              stdout: (line) => {
+                stdout += line;
+              },
+            });
+            return { outcome: "exited", exitCode, stderr, stdout };
+          },
+        },
+      );
+      assert.equal(actualCliRefusal.exitCode, 1);
+      assert.equal(nestedRunnerEntries, 0);
+      assert.equal(
+        actualCliRefusal.diagnostic.code,
+        "LOCAL_D1_ORCHESTRATION_BUDGET_EXHAUSTED",
+      );
+
+      // RECEIPT ORDER: runMigrationCli may emit only after the nested runner's
+      // promise — the production cleanup-settlement boundary — has completed.
+      const SETTLEMENT_EPOCH_MS = 200_000;
+      const ACTUAL_CLI_ADMISSION_BUDGET_MS =
+        COMMAND_REAP_RESERVE_MS + SHIPPED_LOCAL_COMMAND_WINDOW_MS;
+      const settlementOrder = [];
+      const actualCliSettlement = await runActualLocalMigrationCli(
+        ["--env", "local"],
+        "nested-cleanup-settlement",
+        {
+          epochNow: () => SETTLEMENT_EPOCH_MS,
+          remainingMs: ACTUAL_CLI_ADMISSION_BUDGET_MS,
+          runner: async ({ cmd, timeoutMs }) => {
+            assert.equal(timeoutMs, SHIPPED_LOCAL_COMMAND_WINDOW_MS);
+            assert.deepEqual(cmd.slice(-2), [
+              "--local-command-deadline-at-ms",
+              String(SETTLEMENT_EPOCH_MS + SHIPPED_LOCAL_COMMAND_WINDOW_MS),
+            ]);
+            let stderr = "";
+            let stdout = "";
+            const exitCode = await runMigrationCli(cmd.slice(2), {
+              root,
+              localReadLineageSnapshot: async (
+                _root,
+                _databaseName,
+                _localPersistTo,
+                receivedDeadlineAtMs,
+              ) => {
+                await runLocalD1Command(
+                  { cmd: [process.execPath, "--version"], cwd: root },
+                  {
+                    deadlineAtMs: receivedDeadlineAtMs,
+                    observedAtMs: SETTLEMENT_EPOCH_MS,
+                    processLeadsOwnedGroup: () => true,
+                    runner: async (options) => {
+                      assert.equal(options.ownershipMode, PARENT_PROCESS_GROUP);
+                      settlementOrder.push("cleanup-started");
+                      await Promise.resolve();
+                      settlementOrder.push("cleanup-settled");
+                      return { outcome: "exited", exitCode: 0, stderr: "", stdout: "" };
+                    },
+                  },
+                );
+                return { catalog: [], journal: [], lineage: [] };
+              },
+              stderr: (line) => {
+                settlementOrder.push("outer-receipt");
+                stderr += line;
+              },
+              stdout: (line) => {
+                settlementOrder.push("outer-receipt");
+                stdout += line;
+              },
+            });
+            return { outcome: "exited", exitCode, stderr, stdout };
+          },
+        },
+      );
+      assert.equal(actualCliSettlement.exitCode, 1);
+      assert.ok(settlementOrder.indexOf("cleanup-started") >= 0);
+      assert.ok(
+        settlementOrder.indexOf("cleanup-settled") < settlementOrder.indexOf("outer-receipt"),
+        "the outer CLI receipt preceded nested cleanup settlement",
+      );
+
+      // MODE POLARITY: parent-owned execution must inherit the outer group and
+      // signal only its direct child. Any negative-PID/group signal here could
+      // terminate the CLI that owns this executor and race its outer receipt.
+      let resolveModeChildExit;
+      const modeChildExit = new Promise((resolve) => {
+        resolveModeChildExit = resolve;
+      });
+      let modeSpawnDetached;
+      let modeGroupSignals = 0;
+      const modeChildSignals = [];
+      const parentOwnedModeResult = await runBoundedCommand({
+        cmd: [process.execPath, "--version"],
+        cwd: root,
+        timeoutMs: 0,
+        termGraceMs: 1,
+        killReapMs: 1,
+        pipeDrainMs: 1,
+        ownershipMode: PARENT_PROCESS_GROUP,
+        spawn: (options) => {
+          modeSpawnDetached = options.detached;
+          return { pid: 91_001, exited: modeChildExit, stdout: null, stderr: null };
+        },
+        signalChild: (_child, signal) => {
+          modeChildSignals.push(signal);
+          resolveModeChildExit(143);
+        },
+        signalGroup: () => {
+          modeGroupSignals += 1;
+          throw new Error("parent-owned mode signalled the outer process group");
+        },
+        groupExists: () => {
+          throw new Error("parent-owned mode inspected a group it does not own");
+        },
+        toolEnvironment: {},
+      });
+      assert.equal(modeSpawnDetached, false);
+      assert.deepEqual(modeChildSignals, ["SIGTERM"]);
+      assert.equal(modeGroupSignals, 0);
+      assert.equal(parentOwnedModeResult.outcome, "timeout");
+      assert.equal(
+        parentOwnedModeResult.containment_scope,
+        "parent-process-group/direct-child",
+      );
+
+      // REAL PROCESS TOPOLOGY: the CLI fixture is the detached leader of the
+      // outer executor's owned group. Its production local-D1 seam starts a
+      // non-detached direct child which starts a non-detached descendant; both
+      // ignore TERM, and the fixture stalls its event loop before the inner
+      // deadline can run. The outer controller must therefore escalate against
+      // its one exact group and observe both nested PIDs gone before receipt.
+      const topologyResult = await runBoundedLocalCommand(
+        "parent-owned-real-process-topology",
+        ({ deadlineAtMs }) => ({
+          cmd: [
+            process.execPath,
+            "infra/migrate-local.test.mjs",
+            PARENT_OWNED_TOPOLOGY_FIXTURE,
+            String(deadlineAtMs),
+          ],
+          cwd: root,
+        }),
+        {
+          remainingMs: COMMAND_REAP_RESERVE_MS + SHIPPED_LOCAL_COMMAND_WINDOW_MS,
+        },
+      );
+      assert.equal(topologyResult.outcome, "timeout");
+      assert.equal(topologyResult.containment_scope, "process-group-only");
+      const topologyPidRecord = topologyResult.stdout.trim();
+      assert.match(
+        topologyPidRecord,
+        /^\/[^\n]*\/asimposium-migrate-local-[A-Za-z0-9]+\/owned-topology-[0-9a-f-]+\.json$/,
+      );
+      const topologyPids = JSON.parse(readFileSync(topologyPidRecord, "utf8"));
+      assert.ok(Number.isSafeInteger(topologyPids.direct_child));
+      assert.ok(Number.isSafeInteger(topologyPids.descendant));
+      assert.equal(
+        processExists(topologyPids.direct_child),
+        false,
+        "the outer receipt left the TERM-resistant nested direct child alive",
+      );
+      assert.equal(
+        processExists(topologyPids.descendant),
+        false,
+        "the outer receipt left the TERM-resistant nested descendant alive",
+      );
 
       // The refusal is typed, and typed DISTINCTLY: reusing the command codes
       // would recreate the misattribution this plant exists to prevent.
@@ -1432,57 +1791,66 @@ END;`,
   },
 ];
 
-const requestedCaseNames = process.env.ASIMPOSIUM_MIGRATE_LOCAL_CASES?.split(",")
-  .map((name) => name.trim())
-  .filter(Boolean);
-const selectedCases =
-  requestedCaseNames === undefined
-    ? cases
-    : cases.filter((testCase) => requestedCaseNames.includes(testCase.name));
-if (requestedCaseNames !== undefined && selectedCases.length !== requestedCaseNames.length) {
-  throw new Error("ASIMPOSIUM_MIGRATE_LOCAL_CASES must name existing exact local migration cases.");
-}
-
-const failed = [];
-for (const testCase of selectedCases) {
-  try {
-    await testCase.execute();
-  } catch (error) {
-    failed.push({
-      name: testCase.name,
-      detail: error instanceof Error ? error.message : "unknown",
-    });
+const topologyFixtureIndex = process.argv.indexOf(PARENT_OWNED_TOPOLOGY_FIXTURE);
+if (topologyFixtureIndex >= 0) {
+  const deadline = process.argv[topologyFixtureIndex + 1];
+  if (!/^(?:0|[1-9][0-9]*)$/.test(deadline ?? "") || !Number.isSafeInteger(Number(deadline))) {
+    throw new Error("the parent-owned topology fixture requires one exact epoch deadline");
   }
-}
-
-const base = {
-  tool: "bun",
-  package: "infra",
-  suite: "d1-migration-local-integration",
-  version: Bun.version,
-  duration_ms: Math.round(performance.now() - startedAt),
-  reproduce,
-  migration_0015_sha256: migration0015.digest,
-};
-
-if (failed.length === 0) {
-  process.stdout.write(
-    `${JSON.stringify({
-      ...base,
-      status: "pass",
-      cases_executed: selectedCases.map(({ name }) => name),
-      database: "unique Wrangler local D1/workerd databases; no remote resource touched",
-    })}\n`,
-  );
+  await runParentOwnedTopologyFixture(Number(deadline));
 } else {
-  process.stderr.write(
-    `${JSON.stringify({
-      ...base,
-      status: "fail",
-      code: "CONTRACT_CASES_FAILED",
-      failed_cases: failed.map(({ name }) => name),
-      assertion_diff: failed,
-    })}\n`,
-  );
-  process.exitCode = 1;
+  const requestedCaseNames = process.env.ASIMPOSIUM_MIGRATE_LOCAL_CASES?.split(",")
+    .map((name) => name.trim())
+    .filter(Boolean);
+  const selectedCases =
+    requestedCaseNames === undefined
+      ? cases
+      : cases.filter((testCase) => requestedCaseNames.includes(testCase.name));
+  if (requestedCaseNames !== undefined && selectedCases.length !== requestedCaseNames.length) {
+    throw new Error("ASIMPOSIUM_MIGRATE_LOCAL_CASES must name existing exact local migration cases.");
+  }
+
+  const failed = [];
+  for (const testCase of selectedCases) {
+    try {
+      await testCase.execute();
+    } catch (error) {
+      failed.push({
+        name: testCase.name,
+        detail: error instanceof Error ? error.message : "unknown",
+      });
+    }
+  }
+
+  const base = {
+    tool: "bun",
+    package: "infra",
+    suite: "d1-migration-local-integration",
+    version: Bun.version,
+    duration_ms: Math.round(performance.now() - startedAt),
+    reproduce,
+    migration_0015_sha256: migration0015.digest,
+  };
+
+  if (failed.length === 0) {
+    process.stdout.write(
+      `${JSON.stringify({
+        ...base,
+        status: "pass",
+        cases_executed: selectedCases.map(({ name }) => name),
+        database: "unique Wrangler local D1/workerd databases; no remote resource touched",
+      })}\n`,
+    );
+  } else {
+    process.stderr.write(
+      `${JSON.stringify({
+        ...base,
+        status: "fail",
+        code: "CONTRACT_CASES_FAILED",
+        failed_cases: failed.map(({ name }) => name),
+        assertion_diff: failed,
+      })}\n`,
+    );
+    process.exitCode = 1;
+  }
 }

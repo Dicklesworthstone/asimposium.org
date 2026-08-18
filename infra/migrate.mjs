@@ -127,6 +127,14 @@ export const REMOTE_D1_CLEANUP_RESERVE_MS =
 // which that is still preventable.
 export const REMOTE_D1_COMMAND_WINDOW_MS =
   REMOTE_D1_CLEANUP_RESERVE_MS + REMOTE_D1_EXECUTION_FLOOR_MS;
+// Local orchestration uses the same bounded executor and therefore owes the
+// same complete cleanup tail before its caller's absolute deadline. Its larger
+// floor reflects a real Wrangler/workerd startup rather than a remote HTTP
+// request. With no caller deadline, localD1 keeps its standalone fixed timeout.
+export const LOCAL_D1_CLEANUP_RESERVE_MS = REMOTE_D1_CLEANUP_RESERVE_MS;
+export const LOCAL_D1_EXECUTION_FLOOR_MS = 3_000;
+export const LOCAL_D1_COMMAND_WINDOW_MS =
+  LOCAL_D1_CLEANUP_RESERVE_MS + LOCAL_D1_EXECUTION_FLOOR_MS;
 const RESOLVED_STAGING_WRANGLER_CONFIG = "infra/deploy-resolved/staging.wrangler.toml";
 
 function immutableEmptyWranglerConfigOrRefuse() {
@@ -1419,6 +1427,39 @@ function signalOwnedProcessGroup(child, signal) {
   }
 }
 
+function signalDirectChild(child, signal) {
+  try {
+    child.kill(signal);
+  } catch {
+    // Exit between the deadline and signal delivery is an expected race.
+  }
+}
+
+export const OWNED_PROCESS_GROUP = "owned-process-group";
+export const PARENT_PROCESS_GROUP = "parent-process-group";
+
+/**
+ * Prove that this process is the leader of the group an outer controller owns.
+ *
+ * The proof is a kernel observation, not an argv or environment assertion. A
+ * deadline-bearing local CLI may place Wrangler into its current group only
+ * when its own PID names that live group, which is exactly the topology created
+ * when the outer bounded executor starts the CLI with `detached: true`.
+ */
+export function currentProcessLeadsOwnedGroup({
+  pid = process.pid,
+  platform = process.platform,
+  signalGroup = process.kill,
+} = {}) {
+  if (platform === "win32") return false;
+  try {
+    signalGroup(-pid, 0);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
 function ownedProcessGroupExists(child) {
   if (process.platform === "win32") return false;
   try {
@@ -1446,14 +1487,15 @@ async function terminateOwnedProcessGroup(
   groupExists,
   termGraceMs,
   killReapMs,
-  platform,
+  directChildOnly,
 ) {
   signalGroup(child, "SIGTERM");
   let reaped;
   let directExit;
-  if (platform === "win32") {
-    // Bun has no POSIX process-group signal equivalent on Windows. This is a
-    // direct-child-only claim, and it must prove that direct child reaped.
+  if (directChildOnly) {
+    // Windows has no POSIX process-group signal equivalent. Parent-owned mode
+    // also signals only its direct child: signalling the current process group
+    // would hit the outer CLI and make nested cleanup race its owner.
     directExit = await within(child.exited, termGraceMs);
     if (!directExit.settled) {
       signalGroup(child, "SIGKILL");
@@ -1488,12 +1530,24 @@ export async function runBoundedCommand({
   stderrMaxBytes = LOCAL_D1_STDERR_MAX_BYTES,
   spawn = Bun.spawn,
   signalGroup = signalOwnedProcessGroup,
+  signalChild = signalDirectChild,
   groupExists = ownedProcessGroupExists,
   platform = process.platform,
+  ownershipMode = OWNED_PROCESS_GROUP,
   signal = undefined,
   toolEnvironment = minimalLocalToolEnvironment(),
 }) {
-  const containmentScope = platform === "win32" ? "direct-child-only" : "process-group-only";
+  if (ownershipMode !== OWNED_PROCESS_GROUP && ownershipMode !== PARENT_PROCESS_GROUP) {
+    fail("COMMAND_OWNERSHIP_MODE_INVALID", "The bounded command ownership mode is invalid.");
+  }
+  const parentOwnsProcessGroup = ownershipMode === PARENT_PROCESS_GROUP;
+  const directChildOnly = platform === "win32" || parentOwnsProcessGroup;
+  const containmentScope = parentOwnsProcessGroup
+    ? "parent-process-group/direct-child"
+    : platform === "win32"
+      ? "direct-child-only"
+      : "process-group-only";
+  const terminateSignal = parentOwnsProcessGroup ? signalChild : signalGroup;
   const abortedResult = () => ({
     containment_scope: containmentScope,
     outcome: "aborted",
@@ -1527,7 +1581,7 @@ export async function runBoundedCommand({
         stdin: "ignore",
         stdout: "pipe",
         stderr: "pipe",
-        detached: true,
+        detached: !parentOwnsProcessGroup,
         env: toolEnvironment,
       });
     } catch {
@@ -1581,21 +1635,21 @@ export async function runBoundedCommand({
         // This can observe only the owned process group. It cannot establish that
         // a grandchild which called setsid() has exited; in particular, a later
         // pipe close is not proof about that escaped process.
-        const processGroupMemberRemains = platform === "win32" ? false : groupExists(child);
+        const processGroupMemberRemains = directChildOnly ? false : groupExists(child);
         if (!drained.settled || processGroupMemberRemains) {
           const cancellation = cancelPipes();
           const termination = await terminateOwnedProcessGroup(
             child,
             pipes,
             cancellation,
-            signalGroup,
+            terminateSignal,
             groupExists,
             termGraceMs,
             killReapMs,
-            platform,
+            directChildOnly,
           );
           if (!termination.reaped) {
-            outcome = platform === "win32" ? "direct-child-reap-unproven" : "process-reap-unproven";
+            outcome = directChildOnly ? "direct-child-reap-unproven" : "process-reap-unproven";
           } else if (!termination.pipesDrained) outcome = "pipe-drain-unproven";
           else if (processGroupMemberRemains) outcome = "process-group-survivor-observed";
           else outcome = "pipe-drain-unproven";
@@ -1611,18 +1665,18 @@ export async function runBoundedCommand({
         child,
         pipes,
         cancellation,
-        signalGroup,
+        terminateSignal,
         groupExists,
         termGraceMs,
         killReapMs,
-        platform,
+        directChildOnly,
       );
       if (!termination.reaped) {
-        outcome = platform === "win32" ? "direct-child-reap-unproven" : "process-reap-unproven";
+        outcome = directChildOnly ? "direct-child-reap-unproven" : "process-reap-unproven";
       } else if (!termination.pipesDrained) outcome = "pipe-drain-unproven";
       else outcome = first.kind;
       if (termination.directExit?.settled) exitCode = termination.directExit.value;
-      else if (platform !== "win32") {
+      else if (!directChildOnly) {
         const exited = await within(child.exited, killReapMs);
         if (exited.settled) exitCode = exited.value;
       }
@@ -1676,22 +1730,71 @@ export async function runBoundedCommand({
  * `--local` only. This function never accepts a `--remote` flag and never reads
  * a credential; a remote application is refused earlier, by the caller.
  */
-export async function localD1(root, databaseName, args, localPersistTo = undefined) {
-  const result = await runBoundedCommand({
-    cmd: [
-      ...resolvePinnedWranglerCommand(root),
-      "d1",
-      "execute",
-      databaseName,
-      "--local",
-      "--config",
-      "infra/wrangler.toml",
-      ...(localPersistTo === undefined ? [] : ["--persist-to", localPersistTo]),
-      "--json",
-      ...args,
-    ],
-    cwd: root,
-  });
+export function localD1ExecutionWindowOrRefuse(deadlineAtMs, observedAtMs = Date.now()) {
+  if (deadlineAtMs === undefined) return LOCAL_D1_COMMAND_TIMEOUT_MS;
+  if (!Number.isSafeInteger(deadlineAtMs) || !Number.isSafeInteger(observedAtMs)) {
+    fail(
+      "LOCAL_D1_ORCHESTRATION_DEADLINE_INVALID",
+      "The local D1 orchestration deadline must be an absolute safe-integer epoch millisecond.",
+    );
+  }
+  const remainingMs = Math.max(0, deadlineAtMs - observedAtMs);
+  const executionWindowMs = Math.max(0, remainingMs - LOCAL_D1_CLEANUP_RESERVE_MS);
+  if (executionWindowMs < LOCAL_D1_EXECUTION_FLOOR_MS) {
+    fail(
+      "LOCAL_D1_ORCHESTRATION_BUDGET_EXHAUSTED",
+      `The local D1 orchestration budget left ${remainingMs}ms total, providing ${executionWindowMs}ms for execution after its ${LOCAL_D1_CLEANUP_RESERVE_MS}ms cleanup reserve, below the ${LOCAL_D1_EXECUTION_FLOOR_MS}ms execution floor; no command was started.`,
+    );
+  }
+  return Math.min(LOCAL_D1_COMMAND_TIMEOUT_MS, executionWindowMs);
+}
+
+/** The one local-D1 pre-spawn seam, shared by production and causal plants. */
+export async function runLocalD1Command(
+  command,
+  {
+    deadlineAtMs,
+    observedAtMs,
+    runner = runBoundedCommand,
+    processLeadsOwnedGroup = currentProcessLeadsOwnedGroup,
+  } = {},
+) {
+  const timeoutMs = localD1ExecutionWindowOrRefuse(deadlineAtMs, observedAtMs);
+  const ownershipMode = deadlineAtMs === undefined ? OWNED_PROCESS_GROUP : PARENT_PROCESS_GROUP;
+  if (ownershipMode === PARENT_PROCESS_GROUP && !processLeadsOwnedGroup()) {
+    fail(
+      "LOCAL_D1_PARENT_PROCESS_GROUP_UNPROVEN",
+      "The deadline-bearing local migration CLI is not the leader of the process group its outer controller must own; no command was started.",
+    );
+  }
+  return await runner({ ...command, ownershipMode, timeoutMs });
+}
+
+export async function localD1(
+  root,
+  databaseName,
+  args,
+  localPersistTo = undefined,
+  localDeadlineAtMs = undefined,
+) {
+  const result = await runLocalD1Command(
+    {
+      cmd: [
+        ...resolvePinnedWranglerCommand(root),
+        "d1",
+        "execute",
+        databaseName,
+        "--local",
+        "--config",
+        "infra/wrangler.toml",
+        ...(localPersistTo === undefined ? [] : ["--persist-to", localPersistTo]),
+        "--json",
+        ...args,
+      ],
+      cwd: root,
+    },
+    { deadlineAtMs: localDeadlineAtMs },
+  );
   if (result.outcome === "timeout") {
     fail("LOCAL_D1_COMMAND_TIMEOUT", "A local D1 command exceeded its fixed deadline.");
   }
@@ -1748,7 +1851,12 @@ function parseLocalD1Rows(raw, unreadableCode) {
 }
 
 /** Read-only catalog snapshot used before any bootstrap metadata exists. */
-async function readLocalCatalog(root, databaseName, localPersistTo = undefined) {
+async function readLocalCatalog(
+  root,
+  databaseName,
+  localPersistTo = undefined,
+  localDeadlineAtMs = undefined,
+) {
   const rows = parseLocalD1Rows(
     await localD1(
       root,
@@ -1758,6 +1866,7 @@ async function readLocalCatalog(root, databaseName, localPersistTo = undefined) 
         `SELECT type, name, tbl_name, sql FROM sqlite_schema ORDER BY type, name LIMIT ${MAX_CATALOG_ROWS + 1};`,
       ],
       localPersistTo,
+      localDeadlineAtMs,
     ),
     "LOCAL_D1_CATALOG_UNREADABLE",
   );
@@ -1778,6 +1887,7 @@ async function readOptionalLocalRows(
   maximum,
   overrunCode,
   localPersistTo = undefined,
+  localDeadlineAtMs = undefined,
 ) {
   if (!catalog.some((entry) => entry.type === "table" && entry.name === table)) return [];
   return assertReadLimit(
@@ -1787,6 +1897,7 @@ async function readOptionalLocalRows(
         databaseName,
         ["--command", `SELECT ${columns} FROM ${table} ORDER BY 1 LIMIT ${maximum + 1};`],
         localPersistTo,
+        localDeadlineAtMs,
       ),
       "LOCAL_D1_CATALOG_UNREADABLE",
     ),
@@ -1795,8 +1906,13 @@ async function readOptionalLocalRows(
   );
 }
 
-async function readLocalLineageSnapshot(root, databaseName, localPersistTo = undefined) {
-  const catalog = await readLocalCatalog(root, databaseName, localPersistTo);
+async function readLocalLineageSnapshot(
+  root,
+  databaseName,
+  localPersistTo = undefined,
+  localDeadlineAtMs = undefined,
+) {
+  const catalog = await readLocalCatalog(root, databaseName, localPersistTo, localDeadlineAtMs);
   const journal = (
     await readOptionalLocalRows(
       root,
@@ -1807,6 +1923,7 @@ async function readLocalLineageSnapshot(root, databaseName, localPersistTo = und
       MAX_JOURNAL_ROWS,
       "LOCAL_D1_JOURNAL_OVERRUN",
       localPersistTo,
+      localDeadlineAtMs,
     )
   ).map((row) => ({
     id: String(row.id),
@@ -1823,6 +1940,7 @@ async function readLocalLineageSnapshot(root, databaseName, localPersistTo = und
       MAX_LINEAGE_ROWS,
       "LOCAL_D1_LINEAGE_OVERRUN",
       localPersistTo,
+      localDeadlineAtMs,
     )
   ).map((row) => ({
     singleton: Number(row.singleton),
@@ -2925,12 +3043,20 @@ VALUES (1, 1, 1);`;
   return sql;
 }
 
-async function bootstrapLocalSchema(root, databaseName, artifact, appliedAt, localPersistTo) {
+async function bootstrapLocalSchema(
+  root,
+  databaseName,
+  artifact,
+  appliedAt,
+  localPersistTo,
+  localDeadlineAtMs = undefined,
+) {
   await localD1(
     root,
     databaseName,
     ["--command", bootstrapInstallSql(artifact, appliedAt)],
     localPersistTo,
+    localDeadlineAtMs,
   );
 }
 
@@ -2967,12 +3093,20 @@ export function migrationCommandSql(migration, appliedAt) {
   return `${migration.sql}\nINSERT INTO ${LEDGER_TABLE} (id, sequence, digest, applied_at) VALUES (${sqlLiteral(migration.id)}, ${migration.sequence}, ${sqlLiteral(migration.digest)}, ${sqlLiteral(appliedAt)});`;
 }
 
-async function applyLocalMigration(root, databaseName, migration, appliedAt, localPersistTo) {
+async function applyLocalMigration(
+  root,
+  databaseName,
+  migration,
+  appliedAt,
+  localPersistTo,
+  localDeadlineAtMs = undefined,
+) {
   await localD1(
     root,
     databaseName,
     ["--command", migrationCommandSql(migration, appliedAt)],
     localPersistTo,
+    localDeadlineAtMs,
   );
 }
 
@@ -3250,6 +3384,7 @@ function parseArguments(argv) {
     state: undefined,
     apply: false,
     bootstrap: undefined,
+    localDeadlineAtMs: undefined,
     localPersistTo: undefined,
     confirmProduction: false,
     resolvedDatabaseId: undefined,
@@ -3287,6 +3422,16 @@ function parseArguments(argv) {
       }
       options.localPersistTo = directory;
       index += 1;
+    } else if (argument === "--local-command-deadline-at-ms") {
+      const deadline = argv[index + 1];
+      if (!/^(?:0|[1-9][0-9]*)$/.test(deadline ?? "") || !Number.isSafeInteger(Number(deadline))) {
+        fail(
+          "INVALID_ARGUMENT",
+          "--local-command-deadline-at-ms requires one canonical safe-integer epoch millisecond.",
+        );
+      }
+      options.localDeadlineAtMs = Number(deadline);
+      index += 1;
     } else if (argument === "--resolved-database-id") {
       const databaseId = argv[index + 1];
       if (typeof databaseId !== "string" || databaseId === "" || databaseId.startsWith("--")) {
@@ -3302,7 +3447,7 @@ function parseArguments(argv) {
     } else {
       fail(
         "INVALID_ARGUMENT",
-        "Usage: bun infra/migrate.mjs --env <local|staging|production> [--state-file <path>] [--bootstrap <artifact-id> [--i-authorize-disposable-remote-bootstrap]] [--local-persist-to <directory>] [--resolved-database-id <uuid>] [--apply]",
+        "Usage: bun infra/migrate.mjs --env <local|staging|production> [--state-file <path>] [--bootstrap <artifact-id> [--i-authorize-disposable-remote-bootstrap]] [--local-persist-to <directory>] [--local-command-deadline-at-ms <epoch-ms>] [--resolved-database-id <uuid>] [--apply]",
       );
     }
   }
@@ -3367,6 +3512,12 @@ export async function runMigrationCli(
         "--local-persist-to is available only for the explicitly selected local environment.",
       );
     }
+    if (options.localDeadlineAtMs !== undefined && environment.kind !== "local") {
+      fail(
+        "LOCAL_D1_ORCHESTRATION_DEADLINE_REMOTE_REFUSED",
+        "--local-command-deadline-at-ms is available only for the explicitly selected local environment.",
+      );
+    }
     // Production is not a fallback for a stale staging id. It is refused before
     // constructing a transport, resolving an id, or observing a remote catalog;
     // the legacy production-confirmation flag intentionally cannot override it.
@@ -3418,7 +3569,13 @@ export async function runMigrationCli(
           : undefined;
       const snapshot = await readBootstrapSnapshotOrRefuse(
         environment,
-        () => localReadLineageSnapshot(root, localDatabase, options.localPersistTo),
+        () =>
+          localReadLineageSnapshot(
+            root,
+            localDatabase,
+            options.localPersistTo,
+            options.localDeadlineAtMs,
+          ),
         authorizedRemoteObserver,
       );
       const lineage = classifySchemaLineage({ ...snapshot, migrations, manifest });
@@ -3450,7 +3607,14 @@ export async function runMigrationCli(
         return 0;
       }
       if (environment.kind === "local") {
-        await localBootstrapSchema(root, localDatabase, artifact, now(), options.localPersistTo);
+        await localBootstrapSchema(
+          root,
+          localDatabase,
+          artifact,
+          now(),
+          options.localPersistTo,
+          options.localDeadlineAtMs,
+        );
       } else {
         await remoteBootstrapSchema(
           environment,
@@ -3462,7 +3626,12 @@ export async function runMigrationCli(
       }
       const afterSnapshot =
         environment.kind === "local"
-          ? await localReadLineageSnapshot(root, localDatabase, options.localPersistTo)
+          ? await localReadLineageSnapshot(
+              root,
+              localDatabase,
+              options.localPersistTo,
+              options.localDeadlineAtMs,
+            )
           : await readRemoteLineageSnapshotOrRefuse(environment, remoteTransport, remoteDatabaseId);
       const after = classifySchemaLineage({
         ...afterSnapshot,
@@ -3499,7 +3668,12 @@ export async function runMigrationCli(
     let remoteDatabaseId;
     if (localDatabase !== undefined && options.state === undefined) {
       localManifest = readBootstrapManifest(root);
-      localSnapshot = await localReadLineageSnapshot(root, localDatabase, options.localPersistTo);
+      localSnapshot = await localReadLineageSnapshot(
+        root,
+        localDatabase,
+        options.localPersistTo,
+        options.localDeadlineAtMs,
+      );
       localPlan = localPlanState(localSnapshot, migrations, localManifest);
       baseline = localPlan.baseline;
     } else if (environment.kind === "remote" && options.state === undefined) {
@@ -3580,10 +3754,16 @@ export async function runMigrationCli(
             migration,
             appliedAt,
             options.localPersistTo,
+            options.localDeadlineAtMs,
           );
         },
       );
-      afterSnapshot = await localReadLineageSnapshot(root, localDatabase, options.localPersistTo);
+      afterSnapshot = await localReadLineageSnapshot(
+        root,
+        localDatabase,
+        options.localPersistTo,
+        options.localDeadlineAtMs,
+      );
       afterLineage = classifySchemaLineage({
         ...afterSnapshot,
         migrations,
