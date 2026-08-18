@@ -125,6 +125,7 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
     key: string,
     requestDigest: string,
     run: () => Promise<T>,
+    commitWith?: readonly ReturnType<Env["DB"]["prepare"]>[],
   ): Promise<{ replayed: boolean; value: T }> {
     const now = Math.floor(Date.now() / 1_000);
     const existing = await db
@@ -151,22 +152,29 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
     }
     const value = await run();
     const sealed = await options.replayProtector.seal(JSON.stringify(value));
-    await db
-      .prepare(
-        `INSERT INTO session_write_replays
-           (scope, principal_scope, idempotency_key, request_digest, response_ciphertext, response_initialization_vector, expires_at)
-         VALUES (?, ?, ?, ?, ?, ?, ?)`,
-      )
-      .bind(
-        scope,
-        principal,
-        key,
-        requestDigest,
-        sealed.ciphertext,
-        sealed.initializationVector,
-        now + Math.floor(REPLAY_TTL_MS / 1_000),
-      )
-      .run();
+    // The replay record and any caller-supplied writes commit in ONE batch:
+    // a promote's public-cursor increment and its replay row land together or
+    // not at all. The event log remains the truth (Rule A6); on a crash
+    // before this batch, the retry re-executes and krater's own idempotency
+    // dedupes the ledger write.
+    await db.batch([
+      ...(commitWith ?? []),
+      db
+        .prepare(
+          `INSERT INTO session_write_replays
+             (scope, principal_scope, idempotency_key, request_digest, response_ciphertext, response_initialization_vector, expires_at)
+           VALUES (?, ?, ?, ?, ?, ?, ?)`,
+        )
+        .bind(
+          scope,
+          principal,
+          key,
+          requestDigest,
+          sealed.ciphertext,
+          sealed.initializationVector,
+          now + Math.floor(REPLAY_TTL_MS / 1_000),
+        ),
+    ]);
     return { replayed: false, value };
   }
 
@@ -237,6 +245,18 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
     return row;
   }
 
+  async function membershipRoleOf(
+    db: Env["DB"],
+    problemId: string,
+    fellowId: string,
+  ): Promise<"observer" | "contributor" | "steward" | undefined> {
+    const row = await db
+      .prepare("SELECT role FROM problem_memberships WHERE problem_id = ? AND fellow_id = ?")
+      .bind(problemId, fellowId)
+      .first<{ role: "observer" | "contributor" | "steward" }>();
+    return row?.role;
+  }
+
   // --- POST /v1/sessions -------------------------------------------------
   app.post("/v1/sessions", async (c) => {
     const auth = await authenticate(c.req.raw);
@@ -286,22 +306,33 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
           }
           const now = new Date();
           const sessionId = mintId("S");
-          await db
-            .prepare(
-              `INSERT INTO sessions
-                 (session_id, fellow_id, problem_id, intent, opened_at, last_heartbeat_at, idle_close_at)
-               VALUES (?, ?, ?, ?, ?, ?, ?)`,
-            )
-            .bind(
-              sessionId,
-              auth.binding.fellowId,
-              parsed.data.problem_id,
-              parsed.data.intent ?? null,
-              now.toISOString(),
-              now.toISOString(),
-              new Date(now.getTime() + SESSION_IDLE_MS).toISOString(),
-            )
-            .run();
+          // Opening a session on a problem IS joining it (§6.8): the
+          // membership is a durable fact the authorization path reads, never
+          // a route-level assumption.
+          await db.batch([
+            db
+              .prepare(
+                `INSERT INTO sessions
+                   (session_id, fellow_id, problem_id, intent, opened_at, last_heartbeat_at, idle_close_at)
+                 VALUES (?, ?, ?, ?, ?, ?, ?)`,
+              )
+              .bind(
+                sessionId,
+                auth.binding.fellowId,
+                parsed.data.problem_id,
+                parsed.data.intent ?? null,
+                now.toISOString(),
+                now.toISOString(),
+                new Date(now.getTime() + SESSION_IDLE_MS).toISOString(),
+              ),
+            db
+              .prepare(
+                `INSERT INTO problem_memberships (problem_id, fellow_id, role, joined_at)
+                 VALUES (?, ?, 'contributor', ?)
+                 ON CONFLICT(problem_id, fellow_id) DO NOTHING`,
+              )
+              .bind(parsed.data.problem_id, auth.binding.fellowId, now.toISOString()),
+          ]);
           return SessionOpenResponseSchema.parse({
             session_id: sessionId,
             problem_id: parsed.data.problem_id,
@@ -541,6 +572,7 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
         },
       });
     }
+    const membershipRole = await membershipRoleOf(db, session.problem_id, auth.binding.fellowId);
     const decision = authorizeFellowWrite({
       effect: "workshop.push",
       credential: auth.binding,
@@ -549,7 +581,7 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
         problemId: session.problem_id,
         publication: "published",
         unlisted: false,
-        membershipRole: "contributor",
+        membershipRole,
       },
       usage: { eventsRecorded: 0, artifactBytesRecorded: 0 },
       now: Date.now(),
@@ -689,6 +721,26 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
       });
     }
 
+    // The workshop object must belong to this session and this Fellow —
+    // promotion of another's draft is a contract violation, not a validator
+    // outcome.
+    const ownedWorkshop = await db
+      .prepare(
+        "SELECT workshop_id FROM workshop_objects WHERE workshop_id = ? AND session_id = ? AND fellow_id = ?",
+      )
+      .bind(parsed.data.workshop_id, session.session_id, auth.binding.fellowId)
+      .first<{ workshop_id: string }>();
+    if (ownedWorkshop === null || ownedWorkshop === undefined) {
+      return problem({
+        status: 404,
+        code: "WORKSHOP_OBJECT_NOT_FOUND",
+        title: "No such workshop object in this session",
+        detail: "The workshop id is not one this session and Fellow own.",
+        fixHint: "Promote an id from your own workshop (see your pack's workshop-heads).",
+        extensions: { schema: "https://a.asimposium.org/schemas/sessions.v1.json" },
+      });
+    }
+
     // P11: the norm-hash near-duplicate gate. Same normalized statement on
     // the same problem is a refusal carrying the existing claim id.
     const candidateHash = await normHash(parsed.data.statement);
@@ -714,6 +766,7 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
       }
     }
 
+    const membershipRole = await membershipRoleOf(db, session.problem_id, auth.binding.fellowId);
     const decision = authorizeFellowWrite({
       effect: "promote",
       credential: auth.binding,
@@ -722,7 +775,7 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
         problemId: session.problem_id,
         publication: "published",
         unlisted: false,
-        membershipRole: "contributor",
+        membershipRole,
       },
       usage: { eventsRecorded: 0, artifactBytesRecorded: 0 },
       now: Date.now(),
@@ -759,12 +812,6 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
             statement: parsed.data.statement,
             createdAt: now,
           });
-          // The public cursor moves exactly once per public-visible commit and
-          // never for workshop/rejected/rolled-back writes (c52's law). The
-          // event log is the truth; the cursor follows it.
-          await db
-            .prepare("UPDATE public_cursor SET cursor = cursor + 1 WHERE singleton = 1")
-            .run();
           return PromoteResponseSchema.parse({
             claim_id: claimId,
             problem_id: session.problem_id,
@@ -772,6 +819,10 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
             queue_position: 0,
           });
         },
+        // The public cursor moves exactly once per public-visible commit, in
+        // the same batch as the replay record — never for workshop/rejected/
+        // rolled-back writes (c52's law).
+        [db.prepare("UPDATE public_cursor SET cursor = cursor + 1 WHERE singleton = 1")],
       );
       return c.json(result.value, result.replayed ? 200 : 201);
     } catch (error) {
