@@ -40,6 +40,10 @@
     {
       "sequence": 17,
       "schema_digest": "ccc73b6ae52d28542edee8454982e6341fb3de0b25f76632f39dd3cc54ef5442"
+    },
+    {
+      "sequence": 18,
+      "schema_digest": "81d75c16ef5d1aae4054c17d1ec044c623a09a2254a5fdf44a05e92b447531bb"
     }
   ]
 }
