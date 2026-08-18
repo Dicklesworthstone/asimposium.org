@@ -386,13 +386,17 @@ stage**, for three reasons that are matters of record rather than taste:
    materially cheaper.
 3. **B's cost is obligation surface, paid before launch.** Counsel time on the characterization,
    scope, and tax/registration questions above, a new donor-PII class, vendor-agreement review, and
-   permanent enforcement of ten invariants — all incurred now, against an offset whose size is
-   unknown.
+   permanent enforcement of ten invariants — all incurred now, against an offset that is genuinely
+   optional: with the operator's ≈$1,000/mo ceiling accepted (2026-08-17), even a fully sustained
+   month-long lurker storm costs $830.84, so the donation income is not load-bearing for keeping
+   the lights on.
 
 **A reason deliberately *not* relied on:** the size of the bill being offset. The earlier
-"personal-scale" framing is withdrawn pending the storm arithmetic under "Unresolved cost question."
-Because that cost falls equally on both options, it does not change which is cheaper — but it can no
-longer be cited as evidence that the offset is not worth having.
+"personal-scale" framing was withdrawn, and the storm arithmetic has since been resolved against
+the operator's ceiling (a sustained worst case of $830.84/mo, under the ≈$1,000/mo figure). That
+cost falls equally on both options, so it never changed which is cheaper — and now that its size
+is established, it also shows the offset is optional, which strengthens A rather than arguing for
+collecting it.
 
 If the operator nonetheless wants B, the minimum conditions I would want recorded first: counsel has
 answered the characterization, scope, tax, and registration questions above; **Invariant 6 is either
