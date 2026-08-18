@@ -20,6 +20,7 @@ import { problem } from "./http/envelope";
 import { handleHealth } from "./http/health";
 import { redactPathname } from "./http/redact";
 import { createLedgerFaceRoutes } from "./ledger-face";
+import { createSessionRouter } from "./sessions/router";
 
 /**
  * The Stoa application.
@@ -40,6 +41,7 @@ const ENVELOPE_AUDIENCE = "stoa";
 
 interface EnrollmentStack {
   readonly router: Hono;
+  readonly sessionRouter?: Hono<{ Bindings: Env }>;
 }
 
 /**
@@ -446,12 +448,14 @@ function enrollmentStack(env: Env, options: CreateAppOptions): EnrollmentStack |
   }
 
   let service: EnrollmentService;
+  let replayProtector: ReturnType<typeof enrollmentReplayProtectorFromBase64Url>;
   try {
+    replayProtector = enrollmentReplayProtectorFromBase64Url(env.ENROLLMENT_REPLAY_KEY);
     service = new EnrollmentService({
       stoaOrigin,
       agoraOrigin,
       store: options.createEnrollmentStore?.(env) ?? new D1EnrollmentStore(env.DB),
-      replayProtector: enrollmentReplayProtectorFromBase64Url(env.ENROLLMENT_REPLAY_KEY),
+      replayProtector,
     });
   } catch (error) {
     if (error instanceof EnrollmentReplayConfigurationError) {
@@ -550,7 +554,10 @@ function enrollmentStack(env: Env, options: CreateAppOptions): EnrollmentStack |
         headers: { [ROUTER_MISS_HEADER]: "1" },
       }),
   );
-  const stack: EnrollmentStack = { router };
+  const stack: EnrollmentStack = {
+    router,
+    sessionRouter: createSessionRouter({ service, replayProtector }),
+  };
   cached = { db: env.DB, credentialKey, storeFactory: options.createEnrollmentStore, stack };
   return stack;
 }
@@ -596,6 +603,30 @@ export function createApp(options: CreateAppOptions = {}): Hono<{ Bindings: Env 
 
   // The public ledger faces (no auth, ever).
   app.route("/", createLedgerFaceRoutes());
+
+  // The session protocol (Fable §7) and the public cursor. The session router
+  // shares the enrollment stack's service and replay protector so fellow
+  // authentication and the 24h write-replay law are exactly the same.
+  app.use("*", async (c, next) => {
+    const { pathname } = new URL(c.req.url);
+    if (
+      pathname !== "/cursor" &&
+      !pathname.startsWith("/v1/sessions")
+    ) {
+      await next();
+      return;
+    }
+    const stack = enrollmentStack(c.env, options);
+    if (stack instanceof Response) return stack;
+    if (stack.sessionRouter === undefined) {
+      await next();
+      return;
+    }
+    const response = await stack.sessionRouter.fetch(c.req.raw, c.env);
+    return response.headers.get(ROUTER_MISS_HEADER) === "1"
+      ? routeNotFound(c.req.url, c.req.method)
+      : response;
+  });
 
   // Route only the path shapes Propylon actually owns. An unknown /join/* or
   // /v1/* path is still the canonical 404 even when enrollment is unconfigured.
