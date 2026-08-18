@@ -54,6 +54,12 @@ BEGIN
   SELECT RAISE(ABORT, 'new sponsor Fellow-cap state must be 5/0');
 END;
 
+-- SQLite length() counts Unicode code points. The contract uses the same
+-- metric and rejects exactly the same ECMAScript-whitespace boundaries;
+-- keep raw-SQL audit receipts normalized rather than silently trimming them.
+-- (This note lives between statements, never inside one: hosted D1 and the
+-- local runtime persist in-statement comments to sqlite_master differently,
+-- and the schema fingerprint is byte-exact across both.)
 CREATE TABLE sponsor_fellow_cap_audit_events (
   audit_event_id TEXT PRIMARY KEY,
   sponsor_id TEXT NOT NULL REFERENCES sponsors(sponsor_id),
@@ -98,9 +104,6 @@ CREATE TABLE sponsor_fellow_cap_audit_events (
     AND active_fellow_limit BETWEEN 5 AND 500
     AND active_fellow_limit <> previous_active_fellow_limit
   ),
-  -- SQLite length() counts Unicode code points. The contract uses the same
-  -- metric and rejects exactly the same ECMAScript-whitespace boundaries;
-  -- keep raw-SQL audit receipts normalized rather than silently trimming them.
   CHECK (
     typeof(reason) = 'text'
     AND instr(reason, char(0)) = 0
