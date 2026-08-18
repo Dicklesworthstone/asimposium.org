@@ -36,6 +36,10 @@
     {
       "sequence": 16,
       "schema_digest": "2a827e215572f3fcc45aa3b41cd071c668f913ab50357de986f51c0390e75645"
+    },
+    {
+      "sequence": 17,
+      "schema_digest": "ccc73b6ae52d28542edee8454982e6341fb3de0b25f76632f39dd3cc54ef5442"
     }
   ]
 }
