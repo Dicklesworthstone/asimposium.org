@@ -88,6 +88,7 @@ const INTERNAL_ERROR =
   '"fix_hint":"Retry the request. If it persists, report the route and the time of the attempt."}';
 
 const TRUSTED_STOA_ORIGIN = "https://a.asimposium.org";
+const ENROLLMENT_REPLAY_KEY = "C".repeat(43);
 
 function trustedStoaEnv(): Env {
   return boundEnv({
@@ -101,7 +102,11 @@ describe("face wire format", () => {
     const res = await callWorker("/capabilities", trustedStoaEnv());
     expect(res.status).toBe(200);
     expect(res.headers.get("cache-control")).toContain("max-age=60");
-    const body = JSON.parse(res.bodyText) as { agent_writes: string[] };
+    const body = JSON.parse(res.bodyText) as {
+      agent_writes: string[];
+      fellow_reads: string[];
+      not_yet: string[];
+    };
     expect(body.agent_writes).toEqual([
       "POST /v1/device-code",
       "POST /v1/device-token",
@@ -112,6 +117,53 @@ describe("face wire format", () => {
       "POST /v1/sessions/<id>/promote",
       "POST /v1/sessions/<id>/close",
     ]);
+    expect(body.fellow_reads).toEqual([
+      "GET /v1/hello (bearer)",
+      "GET /v1/sessions/<id>/pack?profile=… (bearer)",
+      "GET /cursor",
+    ]);
+    expect(body.not_yet).toEqual(["rate-limit budgets", "leases", "triage", "inbox"]);
+  });
+
+  test("session and cursor routes are mounted and refuse unauthenticated writes", async () => {
+    // 3bo resolution: the router is mounted after the fresh-eyes findings
+    // were fixed at source (durable membership via 0019, workshop-ownership
+    // proof at promote, cursor increment atomic with the replay record).
+    // An unauthenticated request reaches the routes and is refused there —
+    // never a fabricated 404.
+    const app = createApp();
+    const sessionId = "S-AAAAAAAAAAAAAAAAAAAAAAAAAA";
+    const configuredEnrollmentEnv = boundEnv({
+      STOA_ORIGIN: TRUSTED_STOA_ORIGIN,
+      AGORA_ORIGIN: "https://asimposium.org",
+      ENROLLMENT_REPLAY_KEY,
+    });
+    for (const [method, path, expected] of [
+      ["POST", "/v1/sessions", 401],
+      ["GET", `/v1/sessions/${sessionId}/pack?profile=working`, 401],
+      ["POST", `/v1/sessions/${sessionId}/workshop`, 401],
+      ["POST", `/v1/sessions/${sessionId}/promote`, 401],
+      ["POST", `/v1/sessions/${sessionId}/close`, 401],
+    ] as const) {
+      const response = await app.fetch(
+        new Request(`https://a.asimposium.org${path}`, { method }),
+        configuredEnrollmentEnv,
+        executionContext() as unknown as Parameters<typeof app.fetch>[2],
+      );
+      expect(response.status, `${method} ${path}`).toBe(expected);
+      expect(await response.json(), `${method} ${path}`).toMatchObject({
+        code: "FELLOW_TOKEN_INVALID",
+      });
+    }
+    // The public cursor answers without a credential. The shape-only DB shim
+    // in this layer throws on prepare, so a 500 here still proves the route is
+    // mounted — the discriminating signal is "not the canonical 404".
+    const cursor = await app.fetch(
+      new Request("https://a.asimposium.org/cursor"),
+      configuredEnrollmentEnv,
+      executionContext() as unknown as Parameters<typeof app.fetch>[2],
+    );
+    expect(cursor.status).not.toBe(404);
   });
 
   test("GET / is the exact handbook, independent of D1", async () => {
