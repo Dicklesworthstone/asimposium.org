@@ -36,15 +36,21 @@ const nextConfig: NextConfig = {
     // the agent face is canonical. capsule.md and llms.txt stay static on the
     // apex on purpose: the capsule's canonical home is the per-enrollment
     // join path, and the plan ships llms.txt as an apex static copy.
+    //
+    // The destination is the deployment's own Stoa origin: the staging Agora
+    // must not walk agents to the production agent host. STOA_ORIGIN is set
+    // on every Vercel environment; the production literal is the fallback so
+    // a bare local build keeps the documented production behavior.
+    const stoaOrigin = process.env.STOA_ORIGIN ?? "https://a.asimposium.org";
     return [
       {
         source: "/protocol.md",
-        destination: "https://a.asimposium.org/protocol.md",
+        destination: `${stoaOrigin}/protocol.md`,
         permanent: true,
       },
       {
         source: "/policy.md",
-        destination: "https://a.asimposium.org/policy.md",
+        destination: `${stoaOrigin}/policy.md`,
         permanent: true,
       },
     ];
