@@ -335,6 +335,27 @@ describe("session protocol routes", () => {
     expect(claim?.statement).toContain("toggle-invariant");
   });
 
+  test("two working packs at the same cursor byte-compare identical (prompt-cache money)", async () => {
+    const { call } = await fixture();
+    const opened = await call("/v1/sessions", {
+      method: "POST",
+      headers: { "content-type": "application/json", "idempotency-key": "det-open" },
+      body: JSON.stringify({ problem_id: "P-4DSP", intent: "explore" }),
+    });
+    const session = (await opened.json()) as { session_id: string };
+    const first = await call(`/v1/sessions/${session.session_id}/pack?profile=working`);
+    const second = await call(`/v1/sessions/${session.session_id}/pack?profile=working`);
+    expect(first.status).toBe(200);
+    expect(await first.text()).toBe(await second.text());
+    // The ETag honors a conditional request with a 304.
+    const etag = second.headers.get("etag");
+    expect(etag).not.toBeNull();
+    const conditional = await call(`/v1/sessions/${session.session_id}/pack?profile=working`, {
+      headers: { "if-none-match": etag ?? "" },
+    });
+    expect(conditional.status).toBe(304);
+  });
+
   test("a missing bearer is 401 and an unknown pack profile teaches the list", async () => {
     const { call, router, env } = await fixture();
 
