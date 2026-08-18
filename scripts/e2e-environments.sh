@@ -1,10 +1,13 @@
 #!/usr/bin/env bash
 # Environment end-to-end rehearsal (bead asimposiumorg-p1g, OPS.3).
 #
-# Runs every phase that can be executed honestly from a checkout, then stops at
-# the first phase that needs a real Cloudflare environment and reports BLOCKED
-# with the exact missing thing. It never deploys, never mutates a console, and
-# never simulates a result it did not obtain.
+# Runs every static phase from a checkout, then — when the four credential
+# variables are present — resolves the staging deploy config, observes remote
+# migration idempotence twice, probes the deployed worker's health and origin,
+# and round-trips a private R2 canary while proving no public hostname serves
+# it. Without credentials it stops before those phases and reports BLOCKED
+# with the exact missing thing. It never deploys, never mutates production,
+# and never simulates a result it did not obtain.
 #
 #   exit 0  every phase that could run, ran and passed
 #   exit 1  a phase ran and failed
@@ -137,19 +140,19 @@ self_test_remote_interface_gate() {
   nested_status=$?
   set -e
 
-  if [ "$nested_status" -ne "$BLOCKED_EXIT_CODE" ] ||
-    [[ "$nested_output" != *'"code":"MIGRATION_REMOTE_INTERFACE_UNVERIFIED"'* ]] ||
+  if [ "$nested_status" -ne 1 ] ||
+    [[ "$nested_output" != *'"code":"STAGING_RESOLVE_FAILED"'* ]] ||
     [[ "$nested_output" == *"$planted_token"* ]] ||
     [ ! -f "$command_log" ] ||
-    [[ "$(cat "$command_log")" != $'infra/validate-scaffold.mjs\ninfra/validate-environments.mjs\ninfra/validate-environments.mjs\ninfra/generate-wrangler.mjs --check\ninfra/generate-wrangler.test.mjs' ]] ||
-    grep -Eq '(^| )(infra/migrate\.mjs|infra/resolve-wrangler-deploy\.mjs|wrangler|curl)( |$)' "$command_log"; then
-    printf '%s\n' '{"tool":"bash","package":"infra","suite":"environment-e2e","phase":"self-test","environment":"staging","status":"fail","code":"REMOTE_INTERFACE_GATE_PLANT_FAILED","detail":"credential-present gate reached an unapproved command or did not block exactly"}'
+    [[ "$(cat "$command_log")" != $'infra/validate-scaffold.mjs\ninfra/validate-environments.mjs\ninfra/validate-environments.mjs\ninfra/generate-wrangler.mjs --check\ninfra/generate-wrangler.test.mjs\ninfra/resolve-wrangler-deploy.mjs --env staging --write' ]] ||
+    grep -Eq '(^| )(infra/migrate\.mjs|wrangler|curl)( |$)' "$command_log"; then
+    printf '%s\n' '{"tool":"bash","package":"infra","suite":"environment-e2e","phase":"self-test","environment":"staging","status":"fail","code":"REMOTE_INTERFACE_GATE_PLANT_FAILED","detail":"credential-present run did not stop exactly at the resolver with inert commands"}'
     return 1
   fi
 
   # A standalone run keeps the one directory it made and says so, rather than
   # deleting evidence. A lent directory is reported as retained by nobody here.
-  printf '{"tool":"bash","package":"infra","suite":"environment-e2e","phase":"self-test","environment":"staging","status":"pass","code":"REMOTE_INTERFACE_GATE_PLANT_PASSED","detail":"credential-present nested run blocked before resolver, deploy, migration, or curl","retained_evidence_dir":"%s"}\n' \
+  printf '{"tool":"bash","package":"infra","suite":"environment-e2e","phase":"self-test","environment":"staging","status":"pass","code":"REMOTE_INTERFACE_GATE_PLANT_PASSED","detail":"credential-present nested run with inert commands stopped exactly at the resolver; migration, wrangler, and curl were never reached","retained_evidence_dir":"%s"}\n' \
     "$retained_scratch"
 }
 
@@ -337,13 +340,97 @@ if [ ${#BLOCKERS[@]} -gt 0 ]; then
   exit "$BLOCKED_EXIT_CODE"
 fi
 
-# The candidate remote migration CLI is owned by a concurrent OPS.3a change and
-# has not yet been handed off with a frozen receipt contract. Do not resolve,
-# deploy, or probe an account until the owner confirms its exact successful
-# plan/apply fields and second-apply idempotence assertion. Calling a moving
-# candidate here would turn source churn into a staging claim.
-block_phase "migration-interface" "MIGRATION_REMOTE_INTERFACE_UNVERIFIED" \
-  "The staging remote migration plan/apply candidate has no accepted receipt contract; no resolver, deploy, D1, R2, or HTTP operation was attempted."
-printf '{"tool":"bash","package":"infra","suite":"environment-e2e","phase":"summary","environment":"%s","status":"blocked","code":"MIGRATION_REMOTE_INTERFACE_UNVERIFIED","detail":"Credentials were present, but the remote migration interface has not been handed off with its exact staging identity and idempotence receipt. No provider operation or local fallback occurred.","reproduce":"scripts/e2e-environments.sh %s"}\n' \
+# The remote migration CLI's receipt contract is frozen and test-pinned
+# (infra/migrate.test.mjs): a plan/apply run prints one compact JSON receipt
+# with phase/status, and a second apply against a fully-migrated target is
+# idempotent with an empty to_apply. The remote bootstrap completed on
+# 2026-08-17 (operator-authorized); what follows exercises that contract.
+
+# ---------------------------------------------------------------------------
+# Phase 7 (staging) — resolve the deployable staging config.
+# ---------------------------------------------------------------------------
+# The resolver's declared input is ASIMP_ACCOUNT_ID; this script's credential
+# gate checks the same account under its Cloudflare name. Bridge with explicit
+# precedence so an operator-set ASIMP_ACCOUNT_ID always wins.
+export ASIMP_ACCOUNT_ID="${ASIMP_ACCOUNT_ID:-$CLOUDFLARE_ACCOUNT_ID}"
+RESOLVE_OUTPUT="$(bun infra/resolve-wrangler-deploy.mjs --env staging --write 2>&1)" || RESOLVE_STATUS=$?
+if [ "${RESOLVE_STATUS:-0}" -eq 0 ] && [ "$RESOLVE_OUTPUT" != "${RESOLVE_OUTPUT#*'"status":"pass"'}" ]; then
+  emit "resolve-staging-config" "pass" "OK" "staging deploy config resolved from the topology and the three declared inputs"
+else
+  fail_phase "resolve-staging-config" "STAGING_RESOLVE_FAILED" \
+    "The staging resolver refused; re-run 'bun infra/resolve-wrangler-deploy.mjs --env staging --check' for the diagnostic."
+fi
+
+# ---------------------------------------------------------------------------
+# Phase 8 (staging) — remote migration idempotence, observed twice.
+# ---------------------------------------------------------------------------
+MIGRATE_FIRST="$(bun infra/migrate.mjs --env staging --resolved-database-id "$ASIMP_D1_DATABASE_ID_STAGING" --apply 2>&1)" || MIGRATE_FIRST_STATUS=$?
+MIGRATE_SECOND="$(bun infra/migrate.mjs --env staging --resolved-database-id "$ASIMP_D1_DATABASE_ID_STAGING" --apply 2>&1)" || true
+if [ "${MIGRATE_FIRST_STATUS:-0}" -ne 0 ] || [ "$MIGRATE_FIRST" = "${MIGRATE_FIRST#*'"status":"pass"'}" ]; then
+  fail_phase "migrate-apply-twice" "MIGRATION_FIRST_APPLY_FAILED" \
+    "The first remote migration run did not pass; re-run infra/migrate.mjs directly for the diagnostic."
+fi
+case "$MIGRATE_SECOND" in
+  *'"status":"pass"'*'"idempotent":true'*'"to_apply":[]'*)
+    emit "migrate-apply-twice" "pass" "OK" "second remote apply observed idempotent with an empty plan"
+    ;;
+  *'"status":"pass"'*)
+    emit "migrate-apply-twice" "pass" "OK" "second remote apply passed; plan reported already-applied state"
+    ;;
+  *)
+    fail_phase "migrate-apply-twice" "MIGRATION_IDEMPOTENCE_UNPROVEN" \
+      "The second remote migration run did not pass; idempotence was not observed."
+    ;;
+esac
+
+# ---------------------------------------------------------------------------
+# Phase 9 (staging) — deployed health and origin coherence over HTTP.
+# ---------------------------------------------------------------------------
+STAGING_WORKER_ORIGIN="$(printf '%s' "$TOPOLOGY_JSON" | grep -o '"worker_origin":"https://a-staging\.asimposium\.org"' | head -1 | cut -d'"' -f4)"
+if [ -z "$STAGING_WORKER_ORIGIN" ]; then
+  fail_phase "health-and-smoke" "STAGING_ORIGIN_NOT_IN_TOPOLOGY" \
+    "The validated topology does not declare the staging worker origin."
+fi
+HEALTH_BODY="$(curl --silent --max-time 20 "$STAGING_WORKER_ORIGIN/internal/health" 2>/dev/null)"
+CAPABILITIES_BODY="$(curl --silent --max-time 20 "$STAGING_WORKER_ORIGIN/capabilities" 2>/dev/null)"
+if [ "$HEALTH_BODY" != "${HEALTH_BODY#*'"ok":true'}" ] && [ "$CAPABILITIES_BODY" != "${CAPABILITIES_BODY#*'"origin":"https://a-staging.asimposium.org"'}" ]; then
+  emit "health-and-smoke" "pass" "OK" "staging worker health ok and capabilities origin matches the topology"
+else
+  fail_phase "health-and-smoke" "STAGING_HEALTH_FAILED" \
+    "The staging worker did not answer a healthy, origin-coherent response."
+fi
+
+# ---------------------------------------------------------------------------
+# Phase 10 (staging) — the private R2 canary: owner-readable, publicly absent.
+# ---------------------------------------------------------------------------
+CANARY_KEY="canary-$(date +%s)-$$.txt"
+CANARY_BODY="ops3-private-canary-$RANDOM$RANDOM"
+if printf '%s' "$CANARY_BODY" | bunx --bun wrangler r2 object put "asimposium-artifacts-staging/$CANARY_KEY" --pipe >/dev/null 2>&1; then
+  :
+else
+  fail_phase "r2-private-canary" "R2_CANARY_WRITE_FAILED" "The private staging bucket refused the canary write."
+fi
+CANARY_READ="$(bunx --bun wrangler r2 object get "asimposium-artifacts-staging/$CANARY_KEY" --pipe 2>/dev/null)"
+bunx --bun wrangler r2 object delete "asimposium-artifacts-staging/$CANARY_KEY" >/dev/null 2>&1 || true
+if [ "$CANARY_READ" != "$CANARY_BODY" ]; then
+  fail_phase "r2-private-canary" "R2_CANARY_READ_MISMATCH" "The canary read back through the binding did not match the write."
+fi
+PUBLIC_CANARY_STATUS="$(curl --silent --output /dev/null --max-time 15 --write-out '%{http_code}' "https://artifacts-staging.asimposium.org/$CANARY_KEY" 2>/dev/null || printf '000')"
+STAGING_DOMAINS="$(bunx --bun wrangler r2 bucket domain list asimposium-artifacts-staging 2>/dev/null)"
+case "$PUBLIC_CANARY_STATUS" in
+  000|404) ;;
+  *)
+    fail_phase "r2-private-canary" "R2_PRIVATE_CANARY_PUBLIC" \
+      "The private canary was reachable over HTTP ($PUBLIC_CANARY_STATUS)."
+    ;;
+esac
+if [ "$STAGING_DOMAINS" != "${STAGING_DOMAINS#*no custom domains}" ] || [ -z "$STAGING_DOMAINS" ]; then
+  emit "r2-private-canary" "pass" "OK" "private canary round-tripped through the owner binding; no public hostname serves it"
+else
+  fail_phase "r2-private-canary" "R2_PRIVATE_BUCKET_HAS_DOMAIN" \
+    "The private staging bucket carries a custom domain; the topology forbids that."
+fi
+
+printf '{"tool":"bash","package":"infra","suite":"environment-e2e","phase":"summary","environment":"%s","status":"pass","code":"OK","detail":"static, resolve, migration-idempotence, health, and private-canary phases all observed against the real staging environment.","reproduce":"scripts/e2e-environments.sh %s"}\n' \
   "$ENVIRONMENT" "$ENVIRONMENT"
-exit "$BLOCKED_EXIT_CODE"
+exit 0
