@@ -453,6 +453,24 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
       omitted.push({ key: "workshop-heads", reason: "profile does not include workshop state" });
     }
 
+    // Profiles whose dedicated sections are not yet composed say so in
+    // omitted[] rather than serving a silent thin pack (§7.3's mandatory
+    // omission disclosure).
+    const UNCOMPOSED: Partial<Record<PackProfile, string[]>> = {
+      claim: ["claim-detail"],
+      review: ["rubric", "author-isolation-proof"],
+      digest: ["staleness-line"],
+      graveyard: ["dead-ends", "killed-hypotheses"],
+      literature: ["citations"],
+      formal: ["proof-gaps", "verification-records"],
+      "review-queue": ["eligible-reviews"],
+      "claim-graph": ["typed-relations"],
+      full: ["paginated-export"],
+    };
+    for (const key of UNCOMPOSED[profile] ?? []) {
+      omitted.push({ key, reason: "not yet composed on this surface (W6 follow-on)" });
+    }
+
     const nextActions = [
       {
         method: "POST" as const,

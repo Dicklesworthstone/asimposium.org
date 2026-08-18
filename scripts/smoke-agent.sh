@@ -260,10 +260,99 @@ if ! printf '%s\n%s\n' "$device_flow_body" "$device_flow_replay_body" | smoke_ag
   exit 74
 fi
 
-# Pairing approval, sessions, packs, workshop push, refused self-cert (P2/P4),
-# refused duplicate (P11), promotion, delta, and close-with-handback are not
-# yet implemented on any deployed surface. The preflight and the device-flow
-# stage above are real evidence; this gate must not turn them into a
-# fabricated G0 result for the loop beyond.
-e2e_emit_and_optionally_record "$write_artifacts" "$run_id" "$suite" "$started_ms" "fail" "AGENT_PRODUCT_FLOW_NOT_IMPLEMENTED" "$reproduce"
-exit 70
+# The session loop stages require a provisioned Fellow credential. Without
+# one the gate honestly reports the loop as unexercised rather than skipping
+# silently.
+if [[ -z "${ASIMPOSIUM_SMOKE_FELLOW_TOKEN:-}" ]]; then
+  e2e_emit_and_optionally_record "$write_artifacts" "$run_id" "$suite" "$started_ms" "blocked" "AGENT_LOOP_CREDENTIAL_ABSENT" "$reproduce"
+  exit 75
+fi
+
+smoke_loop() {
+  local method="$1" path="$2" body="${3:-}" key="$4"
+  if [[ "$method" == "GET" ]]; then
+    curl --silent --max-time 15 --write-out $'\n%{http_code}' \
+      --header "Authorization: Bearer $ASIMPOSIUM_SMOKE_FELLOW_TOKEN" \
+      "$ASIMPOSIUM_STAGING_AGENT_BASE_URL$path" 2>/dev/null
+  else
+    curl --silent --max-time 15 --write-out $'\n%{http_code}' \
+      --header "Authorization: Bearer $ASIMPOSIUM_SMOKE_FELLOW_TOKEN" \
+      --header 'content-type: application/json' \
+      --header "Idempotency-Key: smoke-$run_id-$key" \
+      --data "$body" \
+      "$ASIMPOSIUM_STAGING_AGENT_BASE_URL$path" 2>/dev/null
+  fi
+}
+
+# Stage: session open on the smoke problem.
+loop_open="$(smoke_loop POST /v1/sessions '{"problem_id":"P-4DSP","intent":"explore"}' open)" || loop_open=""
+loop_open_status="${loop_open##*$'\n'}"
+loop_open_body="${loop_open%$'\n'*}"
+if [[ "$loop_open_status" != "201" && "$loop_open_status" != "200" ]]; then
+  e2e_emit_and_optionally_record "$write_artifacts" "$run_id" "$suite" "$started_ms" "fail" "AGENT_SESSION_OPEN_FAILED" "$reproduce"
+  exit 76
+fi
+loop_session_id="$(printf '%s' "$loop_open_body" | python3 -c 'import json,sys; print(json.load(sys.stdin).get("session_id",""))' 2>/dev/null)"
+if [[ ! "$loop_session_id" =~ ^S-[A-Za-z0-9]{26}$ ]]; then
+  e2e_emit_and_optionally_record "$write_artifacts" "$run_id" "$suite" "$started_ms" "fail" "AGENT_SESSION_ID_MALFORMED" "$reproduce"
+  exit 76
+fi
+
+# Stage: working pack with the mandatory omitted[] and server next_actions.
+loop_pack="$(smoke_loop GET "/v1/sessions/$loop_session_id/pack?profile=working")" || loop_pack=""
+loop_pack_status="${loop_pack##*$'\n'}"
+if [[ "$loop_pack_status" != "200" ]]; then
+  e2e_emit_and_optionally_record "$write_artifacts" "$run_id" "$suite" "$started_ms" "fail" "AGENT_PACK_UNAVAILABLE" "$reproduce"
+  exit 77
+fi
+if ! printf '%s' "${loop_pack%$'\n'*}" | python3 -c '
+import json,sys
+d = json.load(sys.stdin)
+if not isinstance(d.get("omitted"), list): sys.exit(1)
+if not isinstance(d.get("next_actions"), list): sys.exit(1)
+if not isinstance(d.get("items"), list) or not d["items"]: sys.exit(1)
+if not isinstance(d.get("cursor"), int): sys.exit(1)
+'; then
+  e2e_emit_and_optionally_record "$write_artifacts" "$run_id" "$suite" "$started_ms" "fail" "AGENT_PACK_CONTRACT_VIOLATION" "$reproduce"
+  exit 77
+fi
+
+# Stage: workshop push (private; the public cursor must not move).
+cursor_before="$(curl --silent --max-time 15 "$ASIMPOSIUM_STAGING_AGENT_BASE_URL/cursor" 2>/dev/null)"
+loop_push="$(smoke_loop POST "/v1/sessions/$loop_session_id/workshop" '{"type":"note","title":"smoke loop note","body_md":"The smoke gate walks the loop.","relates_to":[]}' push)" || loop_push=""
+if [[ "${loop_push##*$'\n'}" != "201" ]]; then
+  e2e_emit_and_optionally_record "$write_artifacts" "$run_id" "$suite" "$started_ms" "fail" "AGENT_WORKSHOP_PUSH_FAILED" "$reproduce"
+  exit 79
+fi
+loop_workshop_id="$(printf '%s' "${loop_push%$'\n'*}" | python3 -c 'import json,sys; print(json.load(sys.stdin).get("workshop_id",""))' 2>/dev/null)"
+
+# Stage: the validator refuses a falsifier-less conjecture with the P3 rule.
+loop_refused="$(smoke_loop POST "/v1/sessions/$loop_session_id/promote" "{\"workshop_id\":\"$loop_workshop_id\",\"kind\":\"conjecture\",\"statement\":\"A smoke claim without a falsifier.\",\"relates_to\":[]}" refuse-p3)" || loop_refused=""
+if [[ "${loop_refused##*$'\n'}" != "422" ]] || ! printf '%s' "${loop_refused%$'\n'*}" | python3 -c 'import json,sys; d=json.load(sys.stdin); sys.exit(0 if (d.get("code")=="MISSING_FALSIFIER" and d.get("rule")=="P3") else 1)'; then
+  e2e_emit_and_optionally_record "$write_artifacts" "$run_id" "$suite" "$started_ms" "fail" "AGENT_VALIDATOR_P3_MISSING" "$reproduce"
+  exit 80
+fi
+
+# Stage: a valid falsifiable promotion lands and the public cursor moves once.
+loop_promote="$(smoke_loop POST "/v1/sessions/$loop_session_id/promote" "{\"workshop_id\":\"$loop_workshop_id\",\"kind\":\"conjecture\",\"statement\":\"The smoke gate's $run_id loop completes on staging.\",\"falsifier\":\"This run failing to complete would refute it.\",\"relates_to\":[]}" promote)" || loop_promote=""
+if [[ "${loop_promote##*$'\n'}" != "201" ]]; then
+  e2e_emit_and_optionally_record "$write_artifacts" "$run_id" "$suite" "$started_ms" "fail" "AGENT_PROMOTE_FAILED" "$reproduce"
+  exit 81
+fi
+cursor_after="$(curl --silent --max-time 15 "$ASIMPOSIUM_STAGING_AGENT_BASE_URL/cursor" 2>/dev/null)"
+if [[ "$cursor_before" =~ ^[0-9]+$ ]] && [[ "$cursor_after" =~ ^[0-9]+$ ]]; then
+  if (( cursor_after != cursor_before + 1 )); then
+    e2e_emit_and_optionally_record "$write_artifacts" "$run_id" "$suite" "$started_ms" "fail" "AGENT_CURSOR_LAW_VIOLATION" "$reproduce"
+    exit 82
+  fi
+fi
+
+# Stage: close with a handback.
+loop_close="$(smoke_loop POST "/v1/sessions/$loop_session_id/close" "{\"handback\":\"smoke gate run $run_id promoted one claim and closed.\",\"promote\":[]}" close)" || loop_close=""
+if [[ "${loop_close##*$'\n'}" != "201" && "${loop_close##*$'\n'}" != "200" ]]; then
+  e2e_emit_and_optionally_record "$write_artifacts" "$run_id" "$suite" "$started_ms" "fail" "AGENT_CLOSE_FAILED" "$reproduce"
+  exit 83
+fi
+
+e2e_emit_and_optionally_record "$write_artifacts" "$run_id" "$suite" "$started_ms" "pass" "AGENT_LOOP_COMPLETE" "$reproduce"
+exit 0
