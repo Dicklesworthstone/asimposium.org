@@ -13,6 +13,8 @@ import {
   OUTBOX_ALARM_BASE_MS,
   OUTBOX_ALARM_MAX_MS,
   OUTBOX_DRAIN_BATCH_SIZE,
+  OUTBOX_OLDEST_PENDING_AGE_ALERT_THRESHOLD_MS,
+  oldestPendingAgeAlert,
   validateOutboxRow,
 } from "./outbox-do";
 
@@ -40,12 +42,14 @@ interface OutboxHarness {
   readonly drainer: KraterOutboxDrainer;
   readonly alarmAt: () => number | null;
   readonly storageValue: (key: string) => unknown;
+  readonly statusSnapshotQueries: () => number;
 }
 
 interface OutboxHarnessOptions {
   readonly initialStorage?: Readonly<Record<string, unknown>>;
   readonly acknowledgeFailures?: number;
   readonly acknowledgeZeroChanges?: number;
+  readonly afterStatusSnapshot?: () => void;
 }
 
 function outboxRow(id: number, valid = true, createdAt?: string): FakeOutboxRow {
@@ -65,11 +69,21 @@ function outboxRow(id: number, valid = true, createdAt?: string): FakeOutboxRow 
   };
 }
 
+function isCanonicalUtcTimestamp(value: string): boolean {
+  if (!/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z$/.test(value)) return false;
+  try {
+    return new Date(value).toISOString() === value;
+  } catch {
+    return false;
+  }
+}
+
 function outboxHarness(rows: FakeOutboxRow[], options: OutboxHarnessOptions = {}): OutboxHarness {
   const storage = new Map<string, unknown>(Object.entries(options.initialStorage ?? {}));
   let acknowledgeFailures = options.acknowledgeFailures ?? 0;
   let acknowledgeZeroChanges = options.acknowledgeZeroChanges ?? 0;
   let alarmAt: number | null = null;
+  let statusSnapshotQueries = 0;
 
   const durableState = {
     storage: {
@@ -128,6 +142,35 @@ function outboxHarness(rows: FakeOutboxRow[], options: OutboxHarnessOptions = {}
           return { results: results as T[], success: true, meta: {} };
         },
         first: async <T>() => {
+          if (
+            sql.includes("COUNT(*) AS count") &&
+            sql.includes("MIN(created_at) AS oldest") &&
+            sql.includes("invalid_timestamp_count") &&
+            sql.includes("future_timestamp_count")
+          ) {
+            const [now] = bindings;
+            if (typeof now !== "string" || !isCanonicalUtcTimestamp(now)) {
+              throw new Error("outbox status snapshot binding missing");
+            }
+            statusSnapshotQueries += 1;
+            const pendingRows = rows.filter(
+              (row) => row.state === "pending" && row.quarantined_at === null,
+            );
+            const invalidTimestampCount = pendingRows.filter(
+              (row) => !isCanonicalUtcTimestamp(row.created_at),
+            ).length;
+            const futureTimestampCount = pendingRows.filter(
+              (row) => isCanonicalUtcTimestamp(row.created_at) && row.created_at > now,
+            ).length;
+            const snapshot = {
+              count: pendingRows.length,
+              oldest: pendingRows.map((row) => row.created_at).sort().at(0) ?? null,
+              invalid_timestamp_count: invalidTimestampCount,
+              future_timestamp_count: futureTimestampCount,
+            };
+            options.afterStatusSnapshot?.();
+            return snapshot as T;
+          }
           if (
             sql.includes(
               "SELECT COUNT(*) AS count FROM outbox WHERE state = 'pending' AND quarantined_at IS NULL",
@@ -206,6 +249,7 @@ function outboxHarness(rows: FakeOutboxRow[], options: OutboxHarnessOptions = {}
     drainer: new KraterOutboxDrainer(durableState, { DB: database }),
     alarmAt: () => alarmAt,
     storageValue: (key) => storage.get(key),
+    statusSnapshotQueries: () => statusSnapshotQueries,
   };
 }
 
@@ -603,18 +647,108 @@ test("the status face exposes the oldest-pending lag metric (W2.5)", async () =>
     new Request("https://krater-outbox.internal/status", { method: "GET" }),
   );
   expect(status.status).toBe(200);
-  const body = (await status.json()) as { pending: number; oldest_pending_age_ms: number };
+  const body = (await status.json()) as {
+    pending: number;
+    oldest_pending_age_ms: number | null;
+    oldest_pending_age_status: string;
+    oldest_pending_age_alert: string;
+  };
   expect(body.pending).toBe(2);
   // The lag reflects the 5s-old row, not the fresh one (within timing slack).
   expect(body.oldest_pending_age_ms).toBeGreaterThanOrEqual(4000);
+  expect(body.oldest_pending_age_status).toBe("measured");
+  expect(body.oldest_pending_age_alert).toBe("below-threshold");
+  expect(harness.statusSnapshotQueries()).toBe(1);
 });
 
-test("an empty queue reports zero lag", async () => {
+test("an empty queue reports zero lag without raising the local threshold alert", async () => {
   const harness = outboxHarness([]);
   const status = await harness.drainer.fetch(
     new Request("https://krater-outbox.internal/status", { method: "GET" }),
   );
-  const body = (await status.json()) as { pending: number; oldest_pending_age_ms: number };
+  const body = (await status.json()) as {
+    pending: number;
+    oldest_pending_age_ms: number | null;
+    oldest_pending_age_status: string;
+    oldest_pending_age_alert: string;
+  };
   expect(body.pending).toBe(0);
   expect(body.oldest_pending_age_ms).toBe(0);
+  expect(body.oldest_pending_age_status).toBe("empty");
+  expect(body.oldest_pending_age_alert).toBe("not-pending");
+});
+
+test("PLANTED: count and oldest age come from one immutable status snapshot", async () => {
+  const rows = [outboxRow(1, true, new Date(Date.now() - 10_000).toISOString())];
+  const harness = outboxHarness(rows, {
+    afterStatusSnapshot: () => {
+      rows.push(outboxRow(2, true, new Date(Date.now() - 20_000).toISOString()));
+    },
+  });
+
+  const status = await harness.drainer.fetch(
+    new Request("https://krater-outbox.internal/status", { method: "GET" }),
+  );
+  const body = (await status.json()) as {
+    pending: number;
+    oldest_pending_age_ms: number | null;
+    oldest_pending_age_status: string;
+  };
+
+  expect(body.pending).toBe(1);
+  expect(body.oldest_pending_age_ms).toBeGreaterThanOrEqual(9000);
+  expect(body.oldest_pending_age_status).toBe("measured");
+  expect(rows).toHaveLength(2);
+  expect(harness.statusSnapshotQueries()).toBe(1);
+});
+
+test("PLANTED: noncanonical, malformed, and future storage degrades instead of reporting zero lag", async () => {
+  const cases = [
+    {
+      createdAt: "2026-08-19T00:00:00+05:00",
+      status: "degraded-invalid-timestamp",
+    },
+    {
+      createdAt: "2026-08-19",
+      status: "degraded-invalid-timestamp",
+    },
+    {
+      createdAt: "2026-02-30T00:00:00.000Z",
+      status: "degraded-invalid-timestamp",
+    },
+    {
+      createdAt: "2099-01-01T00:00:00.000Z",
+      status: "degraded-future-timestamp",
+    },
+  ] as const;
+
+  for (const fixture of cases) {
+    const harness = outboxHarness([outboxRow(1, true, fixture.createdAt)]);
+    const response = await harness.drainer.fetch(
+      new Request("https://krater-outbox.internal/status", { method: "GET" }),
+    );
+    const body = (await response.json()) as {
+      pending: number;
+      oldest_pending_age_ms: number | null;
+      oldest_pending_age_status: string;
+      oldest_pending_age_alert: string;
+    };
+    expect(body.pending).toBe(1);
+    expect(body.oldest_pending_age_ms).toBeNull();
+    expect(body.oldest_pending_age_status).toBe(fixture.status);
+    expect(body.oldest_pending_age_alert).toBe("degraded");
+  }
+});
+
+test("the declared local oldest-age threshold has below, at, and above polarity", () => {
+  expect(oldestPendingAgeAlert(OUTBOX_OLDEST_PENDING_AGE_ALERT_THRESHOLD_MS - 1, "measured")).toBe(
+    "below-threshold",
+  );
+  expect(oldestPendingAgeAlert(OUTBOX_OLDEST_PENDING_AGE_ALERT_THRESHOLD_MS, "measured")).toBe(
+    "at-or-above-threshold",
+  );
+  expect(oldestPendingAgeAlert(OUTBOX_OLDEST_PENDING_AGE_ALERT_THRESHOLD_MS + 1, "measured")).toBe(
+    "at-or-above-threshold",
+  );
+  expect(oldestPendingAgeAlert(null, "degraded-invalid-timestamp")).toBe("degraded");
 });

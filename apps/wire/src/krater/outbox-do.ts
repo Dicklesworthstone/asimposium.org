@@ -8,6 +8,12 @@ export const KRATER_OUTBOX_DO_NAME = "krater-outbox-v0";
 export const OUTBOX_DRAIN_BATCH_SIZE = 8;
 export const OUTBOX_ALARM_BASE_MS = 25;
 export const OUTBOX_ALARM_MAX_MS = 2_000;
+/**
+ * Local observability threshold for an undrained durable outbox. This is a
+ * typed status/evidence decision only; notification-provider delivery remains
+ * an external deployment concern.
+ */
+export const OUTBOX_OLDEST_PENDING_AGE_ALERT_THRESHOLD_MS = 5 * 60 * 1_000;
 
 /**
  * CONSUMER REGISTRY (W2.5 — the documented set of outbox consumers).
@@ -76,6 +82,21 @@ interface CountRow {
   count: number;
 }
 
+interface PendingOutboxSnapshot {
+  count: number;
+  oldest: string | null;
+  invalid_timestamp_count: number;
+  future_timestamp_count: number;
+}
+
+export type OldestPendingAgeStatus =
+  | "empty"
+  | "measured"
+  | "degraded-invalid-timestamp"
+  | "degraded-future-timestamp";
+
+export type OldestPendingAgeAlert = "not-pending" | "below-threshold" | "at-or-above-threshold" | "degraded";
+
 interface DurableCounters {
   owner_acquisitions: number;
   max_active: number;
@@ -93,8 +114,11 @@ interface OutboxStatus extends DurableCounters {
   active: number;
   pending: number;
   alarm_at: number | null;
-  /** Age in ms of the oldest still-pending row (0 when the queue is empty). */
-  oldest_pending_age_ms: number;
+  /** Age in ms of the oldest still-pending row; null when timestamp storage is degraded. */
+  oldest_pending_age_ms: number | null;
+  oldest_pending_age_status: OldestPendingAgeStatus;
+  oldest_pending_age_alert: OldestPendingAgeAlert;
+  oldest_pending_age_alert_threshold_ms: number;
 }
 
 interface OutboxCommand {
@@ -172,6 +196,26 @@ function emptyCounters(): DurableCounters {
 
 function isNonNegativeInteger(value: unknown): value is number {
   return typeof value === "number" && Number.isSafeInteger(value) && value >= 0;
+}
+
+function isCanonicalUtcTimestamp(value: string): boolean {
+  if (!/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z$/.test(value)) return false;
+  try {
+    return new Date(value).toISOString() === value;
+  } catch {
+    return false;
+  }
+}
+
+export function oldestPendingAgeAlert(
+  ageMs: number | null,
+  status: OldestPendingAgeStatus,
+): OldestPendingAgeAlert {
+  if (status === "empty") return "not-pending";
+  if (status !== "measured" || ageMs === null) return "degraded";
+  return ageMs >= OUTBOX_OLDEST_PENDING_AGE_ALERT_THRESHOLD_MS
+    ? "at-or-above-threshold"
+    : "below-threshold";
 }
 
 function isDurableCounters(value: unknown): value is DurableCounters {
@@ -387,20 +431,63 @@ export class KraterOutboxDrainer {
   }
 
   /**
-   * The lag metric (W2.5): the age in milliseconds of the oldest still-pending
-   * outbox row. A growing lag is the backpressure signal the alarm/alert reads;
-   * 0 when the queue is empty. Pure read of the authoritative queue.
+   * One authoritative D1 snapshot for every status face. Once timestamps pass
+   * the canonical UTC predicate, lexical MIN(created_at) is chronological. The
+   * same statement counts invalid/future rows so no corrupted pending record
+   * can be hidden behind a valid oldest row or coerced into a zero-lag report.
    */
-  private async oldestPendingAgeMs(nowMs: number): Promise<number> {
+  private async pendingSnapshot(now: string): Promise<PendingOutboxSnapshot> {
     const row = await statement(
       this.env.DB,
-      "SELECT MIN(created_at) AS oldest FROM outbox WHERE state = 'pending' AND quarantined_at IS NULL",
-    ).first<{ oldest: string | number | null }>();
-    if (row?.oldest === null || row?.oldest === undefined) return 0;
-    const oldestMs =
-      typeof row.oldest === "number" ? row.oldest : Date.parse(String(row.oldest));
-    if (!Number.isFinite(oldestMs)) return 0;
-    return Math.max(0, nowMs - oldestMs);
+      `SELECT COUNT(*) AS count,
+              MIN(created_at) AS oldest,
+              COALESCE(SUM(CASE
+                WHEN typeof(created_at) <> 'text'
+                  OR created_at NOT GLOB '????-??-??T??:??:??.???Z'
+                  OR strftime('%Y-%m-%dT%H:%M:%fZ', julianday(created_at)) IS NULL
+                  OR strftime('%Y-%m-%dT%H:%M:%fZ', julianday(created_at)) <> created_at
+                THEN 1 ELSE 0 END), 0) AS invalid_timestamp_count,
+              COALESCE(SUM(CASE
+                WHEN typeof(created_at) = 'text'
+                  AND created_at GLOB '????-??-??T??:??:??.???Z'
+                  AND strftime('%Y-%m-%dT%H:%M:%fZ', julianday(created_at)) = created_at
+                  AND created_at > ?
+                THEN 1 ELSE 0 END), 0) AS future_timestamp_count
+         FROM outbox
+         WHERE state = 'pending' AND quarantined_at IS NULL`,
+      now,
+    ).first<PendingOutboxSnapshot>();
+    if (
+      row === null ||
+      !isNonNegativeInteger(row.count) ||
+      !isNonNegativeInteger(row.invalid_timestamp_count) ||
+      !isNonNegativeInteger(row.future_timestamp_count) ||
+      (row.oldest !== null && typeof row.oldest !== "string")
+    ) {
+      throw new Error("KRATER_OUTBOX_STATUS_SNAPSHOT_INVALID");
+    }
+    return row;
+  }
+
+  private oldestPendingAge(
+    snapshot: PendingOutboxSnapshot,
+    nowMs: number,
+  ): { ageMs: number | null; status: OldestPendingAgeStatus } {
+    if (snapshot.count === 0) return { ageMs: 0, status: "empty" };
+    if (snapshot.invalid_timestamp_count > 0 || snapshot.oldest === null) {
+      return { ageMs: null, status: "degraded-invalid-timestamp" };
+    }
+    if (snapshot.future_timestamp_count > 0) {
+      return { ageMs: null, status: "degraded-future-timestamp" };
+    }
+    if (!isCanonicalUtcTimestamp(snapshot.oldest)) {
+      return { ageMs: null, status: "degraded-invalid-timestamp" };
+    }
+    const oldestMs = Date.parse(snapshot.oldest);
+    if (!Number.isSafeInteger(oldestMs) || oldestMs > nowMs) {
+      return { ageMs: null, status: "degraded-future-timestamp" };
+    }
+    return { ageMs: nowMs - oldestMs, status: "measured" };
   }
 
   private async quarantine(
@@ -598,11 +685,20 @@ export class KraterOutboxDrainer {
   }
 
   private async status(): Promise<OutboxStatus> {
+    const observedAtMs = Date.now();
+    const snapshot = await this.pendingSnapshot(new Date(observedAtMs).toISOString());
+    const oldestPendingAge = this.oldestPendingAge(snapshot, observedAtMs);
     return {
       ...(await this.counters()),
       active: (await this.state.storage.get<number>("active")) ?? 0,
-      pending: await this.pendingCount(),
-      oldest_pending_age_ms: await this.oldestPendingAgeMs(Date.now()),
+      pending: snapshot.count,
+      oldest_pending_age_ms: oldestPendingAge.ageMs,
+      oldest_pending_age_status: oldestPendingAge.status,
+      oldest_pending_age_alert: oldestPendingAgeAlert(
+        oldestPendingAge.ageMs,
+        oldestPendingAge.status,
+      ),
+      oldest_pending_age_alert_threshold_ms: OUTBOX_OLDEST_PENDING_AGE_ALERT_THRESHOLD_MS,
       alarm_at: await this.state.storage.getAlarm(),
     };
   }
