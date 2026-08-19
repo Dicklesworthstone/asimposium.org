@@ -684,7 +684,7 @@ describe("session protocol routes", () => {
       );
 
     const preparePromotion = async (
-      request: (path: string, init?: RequestInit) => Promise<Response>,
+      request: (path: string, init?: RequestInit) => Response | Promise<Response>,
       label: string,
     ) => {
       const opened = await request("/v1/sessions", {
@@ -715,7 +715,7 @@ describe("session protocol routes", () => {
     const firstStatement = "The first Fellow owns this claim.";
     const secondStatement = "The second Fellow owns a different claim.";
     const promote = (
-      request: (path: string, init?: RequestInit) => Promise<Response>,
+      request: (path: string, init?: RequestInit) => Response | Promise<Response>,
       prepared: { sessionId: string; workshopId: string },
       statement: string,
     ) =>

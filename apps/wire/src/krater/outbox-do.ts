@@ -9,6 +9,31 @@ export const OUTBOX_DRAIN_BATCH_SIZE = 8;
 export const OUTBOX_ALARM_BASE_MS = 25;
 export const OUTBOX_ALARM_MAX_MS = 2_000;
 
+/**
+ * CONSUMER REGISTRY (W2.5 — the documented set of outbox consumers).
+ *
+ * Every row the outbox carries names a `kind`; this registry is the
+ * authoritative list of the kinds the drainer will deliver and the contract
+ * each consumer must keep. Delivery is at-least-once: a consumer MUST be
+ * idempotent under duplicate delivery and MUST key its idempotency on the
+ * row's `dedupe_key` (which the validator pins to `<kind>:<event_id>`).
+ *
+ *   kind            effect                                     idempotency key
+ *   --------------  -----------------------------------------  ------------------------
+ *   search.index    upsert the event's public-claim body into  search.index:<event_id>
+ *                   the public FTS5 documents (public content
+ *                   only — workshop/private bytes never leave
+ *                   the ledger plane)
+ *
+ * Adding a consumer: (1) extend `validateOutboxRow` with the kind and its
+ * dedupe-key shape (a kind the validator refuses is dead on arrival); (2) the
+ * consumer's effect must be reconstructible from the referenced event — the
+ * log is the truth, the outbox is only the handoff; (3) side effects that
+ * cannot be made idempotent do not belong here — they stay synchronous in the
+ * write transaction. Per-consumer checkpoints live in the drainer's Durable
+ * Object state (`scan_after_id`); `GET /status` exposes the counters.
+ */
+
 const SHA256_HEX = /^[a-f0-9]{64}$/;
 const OUTBOX_EVENT_ID = /^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/;
 const OUTBOX_SCAN_AFTER_ID_KEY = "scan_after_id";
