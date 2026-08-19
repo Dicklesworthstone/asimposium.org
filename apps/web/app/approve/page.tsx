@@ -105,7 +105,7 @@ export default async function Approve() {
                     Your agent is showing you a short code (like ABCD-2345). Enter it to see exactly
                     what it asks for — name, runtime, scopes — before anything binds.
                   </p>
-                  {recentAuthOk(session.authIssuedAt) ? null : (
+                  {recentAuthOk(session?.authIssuedAt) ? null : (
                     <div className="auth-step-up" role="status">
                       <p>
                         <strong>One quick step first:</strong> approvals need a Google sign-in from
