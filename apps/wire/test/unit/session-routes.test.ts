@@ -1403,13 +1403,19 @@ describe("session protocol routes", () => {
     const priorSession = (await priorOpened.json()) as { session_id: string };
     const priorClosed = await call(`/v1/sessions/${priorSession.session_id}/close`, {
       method: "POST",
-      headers: { "content-type": "application/json", "idempotency-key": "foreign-pack-prior-close" },
+      headers: {
+        "content-type": "application/json",
+        "idempotency-key": "foreign-pack-prior-close",
+      },
       body: JSON.stringify({ handback: handbackMarker, promote: [] }),
     });
     expect(priorClosed.status).toBe(201);
     const targetOpened = await call("/v1/sessions", {
       method: "POST",
-      headers: { "content-type": "application/json", "idempotency-key": "foreign-pack-target-open" },
+      headers: {
+        "content-type": "application/json",
+        "idempotency-key": "foreign-pack-target-open",
+      },
       body: JSON.stringify({ problem_id: "P-4DSP", intent: "explore" }),
     });
     expect(targetOpened.status).toBe(201);
@@ -1496,7 +1502,9 @@ describe("session protocol routes", () => {
       );
 
     recordReads = true;
-    const foreign = await callAsForeign(`/v1/sessions/${targetSession.session_id}/pack?profile=working`);
+    const foreign = await callAsForeign(
+      `/v1/sessions/${targetSession.session_id}/pack?profile=working`,
+    );
     recordReads = false;
     expect(foreign.status).toBe(404);
     expect(foreign.headers.get("cache-control")).toBe("private, no-store");
@@ -1546,14 +1554,20 @@ describe("session protocol routes", () => {
     });
     const priorOpened = await call("/v1/sessions", {
       method: "POST",
-      headers: { "content-type": "application/json", "idempotency-key": "no-membership-prior-open" },
+      headers: {
+        "content-type": "application/json",
+        "idempotency-key": "no-membership-prior-open",
+      },
       body: JSON.stringify({ problem_id: "P-4DSP", intent: "explore" }),
     });
     expect(priorOpened.status).toBe(201);
     const priorSession = (await priorOpened.json()) as { session_id: string };
     const priorClosed = await call(`/v1/sessions/${priorSession.session_id}/close`, {
       method: "POST",
-      headers: { "content-type": "application/json", "idempotency-key": "no-membership-prior-close" },
+      headers: {
+        "content-type": "application/json",
+        "idempotency-key": "no-membership-prior-close",
+      },
       body: JSON.stringify({ handback: handbackMarker, promote: [] }),
     });
     expect(priorClosed.status).toBe(201);
@@ -1564,7 +1578,10 @@ describe("session protocol routes", () => {
 
     const targetOpened = await call("/v1/sessions", {
       method: "POST",
-      headers: { "content-type": "application/json", "idempotency-key": "no-membership-target-open" },
+      headers: {
+        "content-type": "application/json",
+        "idempotency-key": "no-membership-target-open",
+      },
       body: JSON.stringify({ problem_id: "P-4DSP", intent: "explore" }),
     });
     expect(targetOpened.status).toBe(201);
