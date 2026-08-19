@@ -33,7 +33,7 @@ describe("per-problem event export (W2.8)", () => {
     });
     const lines = ndjson.trim().split("\n");
     expect(lines).toHaveLength(5); // header + 3 events + trailer
-    const trailer = JSON.parse(lines[4]);
+    const trailer = JSON.parse(lines[4] ?? "{}");
     expect(trailer.control).toBe("export_end");
     expect(trailer.event_count).toBe(3);
     expect(trailer.final_cursor).toBe(3);
@@ -56,7 +56,7 @@ describe("per-problem event export (W2.8)", () => {
       ],
       generatedAt: "2026-08-18",
     });
-    const header = JSON.parse(ndjson.split("\n")[0]);
+    const header = JSON.parse(ndjson.split("\n")[0] ?? "{}");
     expect(header.format).toBe(EXPORT_FORMAT);
     expect(header.license).toBe(EXPORT_LICENSE);
     expect(header.checkpoints).toHaveLength(1);
@@ -73,7 +73,7 @@ describe("per-problem event export (W2.8)", () => {
     });
     const lines = ndjson.trim().split("\n");
     expect(lines).toHaveLength(2);
-    expect(JSON.parse(lines[1]).final_cursor).toBe(0);
+    expect(JSON.parse(lines[1] ?? "{}").final_cursor).toBe(0);
   });
 
   test("the header parses round-trip and rejects a foreign format", () => {
@@ -84,7 +84,7 @@ describe("per-problem event export (W2.8)", () => {
       checkpoints: [],
       generatedAt: "2026-08-18",
     });
-    const header = parseExportHeader(ndjson.split("\n")[0]);
+    const header = parseExportHeader(ndjson.split("\n")[0] ?? "");
     expect(header.ok).toBe(true);
     if (header.ok) expect(header.license).toBe(EXPORT_LICENSE);
 
