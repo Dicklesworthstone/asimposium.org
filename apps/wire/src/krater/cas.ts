@@ -393,16 +393,20 @@ export function gcEligibility(remainingClasses: readonly RetentionClass[]): GcEl
   if (preserved.length === 0) {
     return { eligible: true, reason: "no_lawful_reference_remains" };
   }
-  const reason: GcEligibility extends { eligible: false; reason: infer R } ? R : never =
-    preserved.includes("legal-hold")
-      ? "legal_hold"
-      : preserved.includes("quarantine")
-        ? "quarantine_hold"
-        : preserved.includes("public")
-          ? "public_bytes_stay_public"
-          : preserved.includes("licensed")
-            ? "licensed_reference_remains"
-            : "backup_restoration_reference_remains";
+  const reason:
+    | "public_bytes_stay_public"
+    | "licensed_reference_remains"
+    | "backup_restoration_reference_remains"
+    | "quarantine_hold"
+    | "legal_hold" = preserved.includes("legal-hold")
+    ? "legal_hold"
+    : preserved.includes("quarantine")
+      ? "quarantine_hold"
+      : preserved.includes("public")
+        ? "public_bytes_stay_public"
+        : preserved.includes("licensed")
+          ? "licensed_reference_remains"
+          : "backup_restoration_reference_remains";
   return { eligible: false, reason, preservedFor: preserved };
 }
 
