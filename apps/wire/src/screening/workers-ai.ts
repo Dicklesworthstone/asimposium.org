@@ -30,14 +30,14 @@ import { POLICY_CATEGORIES, SCREENING_DECISIONS } from "./types";
  */
 
 /** The model the staging screen runs. Small, instruct-tuned, JSON-coachable. */
-export const WORKERS_AI_MODEL = "@cf/meta/llama-3.1-8b-instruct";
+export const WORKERS_AI_MODEL = "@cf/meta/llama-3.1-8b-instruct-fp8";
 
 /**
  * The report-safe label form of the model id. Run-identity labels forbid `/`
  * and high-entropy segments (`isSafeScreeningDiagnosticLabel`), so the binding
  * id itself cannot ride on a report; this spelling can.
  */
-export const WORKERS_AI_MODEL_VERSION = "workers-ai:cf.meta.llama-3.1-8b-instruct";
+export const WORKERS_AI_MODEL_VERSION = "workers-ai:cf.meta.llama-3.1-8b-instruct-fp8";
 
 /** The policy translation the prompt encodes; bump with any prompt change. */
 export const WORKERS_AI_POLICY_VERSION = "s4-policy:workers-ai-direct-v1";
