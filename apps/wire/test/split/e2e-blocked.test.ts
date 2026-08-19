@@ -2128,6 +2128,117 @@ if (result.outputs.length === 0 || outputBytes === 0) {
 }
 process.stdout.write(JSON.stringify(outputTexts));
 `;
+const ISOLATED_BUILD_SCRIPT_SHA256 =
+  "0f23d2c50db0704ff98e926d6a3499c509a7e53b86f7d57b615e8a72cddf8719";
+
+const EXPECTED_ISOLATED_BUILD_COUNTERFACTUAL_ENTRY_SOURCE = String.raw`        contents: [
+          "import productionWorker from " + JSON.stringify(productionEntrypoint) + ";",
+          "import localWorker from " + JSON.stringify(localWorkerEntrypoint) + ";",
+          "export default {",
+          "  fetch(request: Request, env: unknown, ctx: unknown) {",
+          "    if (request.headers.get(\"x-s3-counterfactual\") === \"1\") {",
+          "      return localWorker.fetch(request, env as never, ctx as never);",
+          "    }",
+          "    return productionWorker.fetch(request, env as never, ctx as never);",
+          "  },",
+          "};",
+        ].join("\n"),`;
+
+const EXPECTED_ISOLATED_BUILD_OUTPUT_EVIDENCE_SOURCE = `const outputTexts = [];
+let outputBytes = 0;
+for (const output of result.outputs) {
+  const bytes = await output.arrayBuffer();
+  outputBytes += bytes.byteLength;
+  outputTexts.push(new TextDecoder("utf-8", { fatal: true }).decode(bytes));
+}
+if (result.outputs.length === 0 || outputBytes === 0) {
+  console.error("S3_ISOLATED_BUILD_OUTPUT_EMPTY:" + mode);
+  process.exit(1);
+}
+process.stdout.write(JSON.stringify(outputTexts));`;
+
+function exactScriptSlice(source: string, start: string, end: string): string | undefined {
+  const startIndex = source.indexOf(start);
+  if (startIndex === -1) return undefined;
+  const endIndex = source.indexOf(end, startIndex + start.length);
+  if (endIndex === -1) return undefined;
+  return source.slice(startIndex, endIndex + end.length);
+}
+
+function isolatedBuildScriptSliceFailures(script: string): string[] {
+  const failures: string[] = [];
+  const counterfactualEntry = exactScriptSlice(
+    script,
+    "        contents: [",
+    '        ].join("\\n"),',
+  );
+  if (counterfactualEntry !== EXPECTED_ISOLATED_BUILD_COUNTERFACTUAL_ENTRY_SOURCE) {
+    failures.push("COUNTERFACTUAL_ENTRY");
+  }
+  const outputEvidenceStart = script.indexOf("const outputTexts = [];");
+  const outputEvidence = outputEvidenceStart === -1 ? undefined : script.slice(outputEvidenceStart);
+  if (outputEvidence !== `${EXPECTED_ISOLATED_BUILD_OUTPUT_EVIDENCE_SOURCE}\n`) {
+    failures.push("OUTPUT_EVIDENCE_FLOW");
+  }
+  if (occurrences(script, "outputTexts =") !== 1) failures.push("OUTPUT_TEXTS_WRITE_COUNT");
+  if (occurrences(script, "outputTexts.push(") !== 1) failures.push("OUTPUT_TEXTS_PUSH_COUNT");
+  if (occurrences(script, "process.stdout.write(") !== 1) failures.push("OUTPUT_TEXTS_EMIT_COUNT");
+  if (occurrences(script, "JSON.stringify(outputTexts)") !== 1) {
+    failures.push("OUTPUT_TEXTS_JSON_COUNT");
+  }
+  if (occurrences(script, 'new TextDecoder("utf-8", { fatal: true }).decode(bytes)') !== 1) {
+    failures.push("OUTPUT_TEXTS_FATAL_DECODER_COUNT");
+  }
+  for (const sentinel of LOCAL_WORKER_BUNDLE_SENTINELS) {
+    if (script.includes(sentinel)) failures.push(`SENTINEL_LITERAL:${sentinel}`);
+  }
+  return failures;
+}
+
+function assertIsolatedBuildScriptDataflow(script: string): void {
+  const failures = isolatedBuildScriptSliceFailures(script);
+  if (createHash("sha256").update(script, "utf8").digest("hex") !== ISOLATED_BUILD_SCRIPT_SHA256) {
+    failures.push("SCRIPT_SHA256");
+  }
+  if (failures.length > 0) {
+    throw new Error(`S3_ISOLATED_BUILD_SOURCE_DATAFLOW:${failures.join(",")}`);
+  }
+}
+
+function isolatedBuildCommand(
+  mode: IsolatedProductionBuildMode,
+  productionEntrypoint: string,
+  localWorkerEntrypoint: string,
+): readonly string[] {
+  return ["bun", "-e", ISOLATED_BUILD_SCRIPT, mode, productionEntrypoint, localWorkerEntrypoint];
+}
+
+function assertIsolatedBuildChildArguments(
+  command: readonly string[],
+  mode: IsolatedProductionBuildMode,
+  productionEntrypoint: string,
+  localWorkerEntrypoint: string,
+): void {
+  const expected = [
+    "bun",
+    "-e",
+    ISOLATED_BUILD_SCRIPT,
+    mode,
+    productionEntrypoint,
+    localWorkerEntrypoint,
+  ];
+  if (
+    command.length !== expected.length ||
+    command.some((argument, index) => argument !== expected[index])
+  ) {
+    throw new Error("S3_ISOLATED_BUILD_SOURCE_CHILD_ARGUMENTS");
+  }
+  for (const sentinel of LOCAL_WORKER_BUNDLE_SENTINELS) {
+    if (command.includes(sentinel)) {
+      throw new Error(`S3_ISOLATED_BUILD_SOURCE_CHILD_SENTINEL_ARGUMENT:${sentinel}`);
+    }
+  }
+}
 
 async function isolatedProductionBundle(
   mode: IsolatedProductionBuildMode,
@@ -2138,14 +2249,7 @@ async function isolatedProductionBundle(
   // output crosses only the existing fresh-owned, pinned-result authority;
   // the parent derives every receipt field after strictly decoding that output.
   const { result, cleanupProven } = await runFreshOwnedS3Command(
-    [
-      "bun",
-      "-e",
-      ISOLATED_BUILD_SCRIPT,
-      mode,
-      productionEntrypoint,
-      localWorkerEntrypoint,
-    ],
+    isolatedBuildCommand(mode, productionEntrypoint, localWorkerEntrypoint),
     "S3_ISOLATED_BUILD",
     {
       timeoutMs: S3_BUNDLE_TIMEOUT_MS,
@@ -2220,7 +2324,9 @@ test("isolated build output evidence refuses fake fields, malformed, empty, nonc
     "S3_ISOLATED_BUILD_OUTPUT_EVIDENCE_NONCANONICAL",
   );
   const productionEvidence = decodeIsolatedProductionBuildOutputEvidence(validProductionEvidence);
-  expect(isolatedProductionBuildReceiptFromOutputEvidence("production", productionEvidence)).toEqual({
+  expect(
+    isolatedProductionBuildReceiptFromOutputEvidence("production", productionEvidence),
+  ).toEqual({
     mode: "production",
     output_count: 1,
     output_bytes: Buffer.byteLength("export default {};", "utf8"),
@@ -2240,14 +2346,80 @@ test("isolated build output evidence refuses fake fields, malformed, empty, nonc
     matched_local_worker_sentinels: [],
   });
   expect(() =>
-    isolatedProductionBuildReceiptFromOutputEvidence(
-      "production",
-      [LOCAL_WORKER_BUNDLE_SENTINELS.join("\n")],
-    ),
+    isolatedProductionBuildReceiptFromOutputEvidence("production", [
+      LOCAL_WORKER_BUNDLE_SENTINELS.join("\n"),
+    ]),
   ).toThrow("S3_ISOLATED_BUILD_OUTPUT_EVIDENCE_SENTINELS_INVALID");
   expect(() =>
     isolatedProductionBuildReceiptFromOutputEvidence("counterfactual", productionEvidence),
   ).toThrow("S3_ISOLATED_BUILD_OUTPUT_EVIDENCE_SENTINELS_INVALID");
+});
+
+test("PLANTED: shipped isolated build source binds real counterfactual output dataflow", () => {
+  expect(isolatedBuildScriptSliceFailures(ISOLATED_BUILD_SCRIPT)).toEqual([]);
+  expect(() => assertIsolatedBuildScriptDataflow(ISOLATED_BUILD_SCRIPT)).not.toThrow();
+  const childCommand = isolatedBuildCommand(
+    "counterfactual",
+    "/s3-production-entry.ts",
+    "/s3-local-worker-entry.ts",
+  );
+  expect(childCommand).toEqual([
+    "bun",
+    "-e",
+    ISOLATED_BUILD_SCRIPT,
+    "counterfactual",
+    "/s3-production-entry.ts",
+    "/s3-local-worker-entry.ts",
+  ]);
+  expect(childCommand).toHaveLength(6);
+  expect(() =>
+    assertIsolatedBuildChildArguments(
+      childCommand,
+      "counterfactual",
+      "/s3-production-entry.ts",
+      "/s3-local-worker-entry.ts",
+    ),
+  ).not.toThrow();
+
+  // One-axis valid source mutation: removing the local counterfactual import
+  // and use leaves a valid virtual entry, but it is no longer the exact entry
+  // whose bundled output establishes the counterfactual.
+  const missingLocalWorkerCounterfactualMutation = ISOLATED_BUILD_SCRIPT.replace(
+    '          "import localWorker from " + JSON.stringify(localWorkerEntrypoint) + ";",\n',
+    "",
+  ).replace(
+    '          "      return localWorker.fetch(request, env as never, ctx as never);",\n',
+    "",
+  );
+  expect(() => assertIsolatedBuildScriptDataflow(missingLocalWorkerCounterfactualMutation)).toThrow(
+    "S3_ISOLATED_BUILD_SOURCE_DATAFLOW:COUNTERFACTUAL_ENTRY",
+  );
+  // A separate valid source mutation appends a literal without altering the
+  // counterfactual entry or output loop, so it reaches the sentinel-only guard.
+  const syntheticSentinelLiteralMutation = ISOLATED_BUILD_SCRIPT.replace(
+    'const namespace = "s3-production-counterfactual";',
+    'const namespace = "s3-production-counterfactual";\nconst syntheticSentinel = "s3_local_workshops";',
+  );
+  expect(() => assertIsolatedBuildScriptDataflow(syntheticSentinelLiteralMutation)).toThrow(
+    "S3_ISOLATED_BUILD_SOURCE_DATAFLOW:SENTINEL_LITERAL:s3_local_workshops",
+  );
+  // This valid middle mutation used to preserve every slice/count/literal
+  // check: it wraps the actual fatal decoder call and dynamically appends the
+  // sentinel without putting its full literal in the child source. The
+  // whole-script digest now refuses it.
+  const dynamicSentinelMiddleMutation = ISOLATED_BUILD_SCRIPT.replace(
+    "const options = {",
+    `const originalTextDecoderDecode = TextDecoder.prototype.decode;
+TextDecoder.prototype.decode = function (...args) {
+  const decoded = originalTextDecoderDecode.apply(this, args);
+  return decoded + ["s3", "local", "workshops"].join("_");
+};
+const options = {`,
+  );
+  expect(isolatedBuildScriptSliceFailures(dynamicSentinelMiddleMutation)).toEqual([]);
+  expect(() => assertIsolatedBuildScriptDataflow(dynamicSentinelMiddleMutation)).toThrow(
+    "S3_ISOLATED_BUILD_SOURCE_DATAFLOW:SCRIPT_SHA256",
+  );
 });
 
 function createPrivateFixtureFile(directory: string, name: string): string {
@@ -3127,15 +3299,17 @@ test(
 test(
   "PLANTED: isolated S-3 build receipts preserve the production/counterfactual sentinel split",
   async () => {
+    const productionEntrypoint = resolve(root, "apps/wire/src/index.ts");
+    const localWorkerEntrypoint = resolve(root, "apps/wire/src/split/local-worker.ts");
     const productionReceipt = await isolatedProductionBundle(
       "production",
-      resolve(root, "apps/wire/src/index.ts"),
-      resolve(root, "apps/wire/src/split/local-worker.ts"),
+      productionEntrypoint,
+      localWorkerEntrypoint,
     );
     const counterfactualReceipt = await isolatedProductionBundle(
       "counterfactual",
-      resolve(root, "apps/wire/src/index.ts"),
-      resolve(root, "apps/wire/src/split/local-worker.ts"),
+      productionEntrypoint,
+      localWorkerEntrypoint,
     );
 
     expect(productionReceipt.mode).toBe("production");
@@ -3148,17 +3322,13 @@ test(
     expect(counterfactualReceipt.matched_local_worker_sentinels).toEqual(
       LOCAL_WORKER_BUNDLE_SENTINELS,
     );
-    // The child is permitted to send only the fatal-decoded Bun output texts.
-    // Count, bytes, mode, and sentinel membership are all parent derivations.
-    expect(ISOLATED_BUILD_SCRIPT).toContain("const outputTexts = [];");
-    expect(ISOLATED_BUILD_SCRIPT).toContain("const bytes = await output.arrayBuffer();");
-    expect(ISOLATED_BUILD_SCRIPT).toContain(
-      'outputTexts.push(new TextDecoder("utf-8", { fatal: true }).decode(bytes));',
+    assertIsolatedBuildScriptDataflow(ISOLATED_BUILD_SCRIPT);
+    assertIsolatedBuildChildArguments(
+      isolatedBuildCommand("production", productionEntrypoint, localWorkerEntrypoint),
+      "production",
+      productionEntrypoint,
+      localWorkerEntrypoint,
     );
-    expect(ISOLATED_BUILD_SCRIPT).toContain("process.stdout.write(JSON.stringify(outputTexts));");
-    expect(ISOLATED_BUILD_SCRIPT).not.toContain("output_count:");
-    expect(ISOLATED_BUILD_SCRIPT).not.toContain("output_bytes:");
-    expect(ISOLATED_BUILD_SCRIPT).not.toContain("matched_local_worker_sentinels:");
     expect(FRESH_OWNED_COMMAND_DISPATCHER).toContain('const BOOTSTRAP_NAME = "bootstrap.json";');
     expect(FRESH_OWNED_COMMAND_DISPATCHER).toContain('const RESULT_NAME = "result.json";');
     expect(FRESH_OWNED_COMMAND_DISPATCHER).toContain("const bootstrap = readBootstrap();");
