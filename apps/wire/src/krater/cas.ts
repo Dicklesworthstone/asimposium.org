@@ -422,3 +422,68 @@ export function duplicateUploadKeepsPublicStatus(
 ): boolean {
   return existingClasses.includes("public");
 }
+
+/**
+ * Artifact inventory reconciliation (W2.7): the periodic sweep that audits the
+ * R2 object listing against the index table and names every divergence. It
+ * never deletes — it REPORTS, so orphan cleanup is a guarded, audit-logged
+ * decision, not a blind sweep.
+ *
+ * Divergence classes (the bead's "detects every seeded divergence"):
+ *  - orphan_object: an R2 object with no index row references it. Eligible for
+ *    guarded GC review (subject to the retention classes above), never auto-
+ *    deleted.
+ *  - missing_object: an index row references a digest no R2 object has. The
+ *    binding is dangling — this is the corruption signal, surfaced loudly.
+ *  - state_mismatch: an index row's recorded upload state disagrees with the
+ *    object actually being present (a `bound` row with no object, or an
+ *    object present for a `declared` row that never uploaded).
+ */
+export interface ArtifactIndexRow {
+  readonly digest: string;
+  readonly state: UploadState;
+}
+
+export type InventoryDivergence =
+  | { readonly kind: "orphan_object"; readonly digest: string }
+  | { readonly kind: "missing_object"; readonly digest: string }
+  | { readonly kind: "state_mismatch"; readonly digest: string; readonly state: UploadState };
+
+/**
+ * Diff the index rows against the observed R2 digests. Pure over the two sets;
+ * deterministic output ordering (digests sorted) so a reconciliation report is
+ * stable and diff-able run over run.
+ */
+export function reconcileArtifactInventory(
+  indexRows: readonly ArtifactIndexRow[],
+  observedDigests: readonly string[],
+): readonly InventoryDivergence[] {
+  const indexed = new Map<string, UploadState>();
+  for (const row of indexRows) indexed.set(row.digest, row.state);
+  const observed = new Set(observedDigests);
+
+  const divergences: InventoryDivergence[] = [];
+
+  for (const digest of observed) {
+    if (!indexed.has(digest)) {
+      divergences.push({ kind: "orphan_object", digest });
+    }
+  }
+
+  for (const [digest, state] of indexed) {
+    const present = observed.has(digest);
+    if (!present && state === "bound") {
+      divergences.push({ kind: "missing_object", digest });
+    } else if (!present && (state === "verified" || state === "uploaded")) {
+      // A verified/uploaded row with no object is a partial-write divergence.
+      divergences.push({ kind: "state_mismatch", digest, state });
+    } else if (present && state === "declared") {
+      // An object exists for a row that never recorded an upload.
+      divergences.push({ kind: "state_mismatch", digest, state });
+    }
+  }
+
+  return divergences.sort((a, b) =>
+    a.digest === b.digest ? a.kind.localeCompare(b.kind) : a.digest.localeCompare(b.digest),
+  );
+}

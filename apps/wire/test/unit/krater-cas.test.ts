@@ -343,3 +343,69 @@ describe("reference-aware GC eligibility (W2.7)", () => {
     }
   });
 });
+
+import {
+  reconcileArtifactInventory,
+  type ArtifactIndexRow,
+} from "../../src/krater/cas.ts";
+
+describe("artifact inventory reconciliation (W2.7)", () => {
+  test("an empty inventory with no objects is clean", () => {
+    expect(reconcileArtifactInventory([], [])).toEqual([]);
+  });
+
+  test("an orphan object (no index row) is reported, never silently deleted", () => {
+    const divergences = reconcileArtifactInventory([], [HASH_A]);
+    expect(divergences).toEqual([{ kind: "orphan_object", digest: HASH_A }]);
+  });
+
+  test("a bound row with no object is a missing-object corruption signal", () => {
+    const rows: ArtifactIndexRow[] = [{ digest: HASH_B, state: "bound" }];
+    const divergences = reconcileArtifactInventory(rows, []);
+    expect(divergences).toEqual([{ kind: "missing_object", digest: HASH_B }]);
+  });
+
+  test("a verified/uploaded row with no object is a state mismatch", () => {
+    const rows: ArtifactIndexRow[] = [
+      { digest: HASH_A, state: "verified" },
+      { digest: HASH_B, state: "uploaded" },
+    ];
+    const divergences = reconcileArtifactInventory(rows, []);
+    expect(divergences.map((d) => d.kind)).toEqual(["state_mismatch", "state_mismatch"]);
+  });
+
+  test("an object present for a row that never uploaded is a state mismatch", () => {
+    const rows: ArtifactIndexRow[] = [{ digest: HASH_A, state: "declared" }];
+    const divergences = reconcileArtifactInventory(rows, [HASH_A]);
+    expect(divergences).toEqual([{ kind: "state_mismatch", digest: HASH_A, state: "declared" }]);
+  });
+
+  test("a consistent inventory reports nothing", () => {
+    const rows: ArtifactIndexRow[] = [
+      { digest: HASH_A, state: "bound" },
+      { digest: HASH_B, state: "declared" },
+    ];
+    expect(reconcileArtifactInventory(rows, [HASH_A])).toEqual([]);
+  });
+
+  test("every seeded divergence is detected across a mixed inventory", () => {
+    const rows: ArtifactIndexRow[] = [
+      { digest: HASH_A, state: "bound" }, // present
+      { digest: HASH_B, state: "bound" }, // missing
+    ];
+    const observed = [HASH_A, "c".repeat(64)]; // HASH_A present, orphan 'c…'
+    const divergences = reconcileArtifactInventory(rows, observed);
+    const kinds = divergences.map((d) => d.kind).sort();
+    expect(kinds).toEqual(["missing_object", "orphan_object"]);
+  });
+
+  test("the report is deterministically ordered for diffability", () => {
+    const rows: ArtifactIndexRow[] = [{ digest: HASH_B, state: "bound" }];
+    const observed = [HASH_A, "c".repeat(64)];
+    const first = reconcileArtifactInventory(rows, observed);
+    const second = reconcileArtifactInventory(rows, observed);
+    expect(first).toEqual(second);
+    const digests = first.map((d) => d.digest);
+    expect(digests).toEqual([...digests].sort());
+  });
+});
