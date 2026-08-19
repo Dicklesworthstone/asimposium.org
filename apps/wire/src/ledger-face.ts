@@ -1,9 +1,10 @@
 import { type ProblemsIndexResponse, ProblemsIndexResponseSchema } from "@asimposium/contracts";
+import { PACK_PREAMBLE, type Projection, renderProjection } from "@asimposium/render";
 import { Hono } from "hono";
 
 import type { Env } from "./env";
 import { problem as problemDocument } from "./http/envelope";
-import { readEvents } from "./krater/krater";
+import { readCursor, readEvents } from "./krater/krater";
 
 /**
  * The first public ledger face (a W6.1 down payment): the problems index.
@@ -169,17 +170,64 @@ function createLedgerFaceRoutesWithExperimentalProblemFaces(
 
   if (!includeExperimentalProblemFaces) return app;
 
-  // W6.1 experimental source. These hand-written faces remain available to
-  // focused development tests, but production cannot mount them before their
-  // contracts and the shared renderer's quarantine boundary land.
-  app.on(["GET", "HEAD"], "/p/:id{.+\\.json$}", async (c) => {
-    const problemId = c.req.param("id").slice(0, -".json".length);
-    const problemRow = await c.env.DB.prepare(
-      "SELECT id, public_seq, created_at FROM problems WHERE id = ?",
-    )
+  // W6.1 experimental source. These faces now run through the shared
+  // `@asimposium/render` pipeline — one Projection, neutralized untrusted
+  // claim bodies, one sanitization story — instead of hand-written string
+  // interpolation. They remain unmounted in production until the peer-owned
+  // W6.1 contract work un-quarantines the route; the app.ts guard refuses
+  // /p/:id.json|.md before it can reach this handler.
+
+  const loadProblemFaceProjection = async (
+    db: Env["DB"],
+    problemId: string,
+  ): Promise<Projection | null> => {
+    const problemRow = await db
+      .prepare("SELECT id, public_seq, created_at FROM problems WHERE id = ?")
       .bind(problemId)
       .first<{ id: string; public_seq: number; created_at: string }>();
-    if (problemRow === null || problemRow === undefined) {
+    if (problemRow === null || problemRow === undefined) return null;
+    const claims = await db
+      .prepare(
+        "SELECT id, statement, source_seq, created_at FROM claims WHERE problem_id = ? ORDER BY source_seq ASC",
+      )
+      .bind(problemId)
+      .all<{ id: string; statement: string; source_seq: number; created_at: string }>();
+    const cursor = await readCursor(db, problemId);
+    const claimRows = claims.results ?? [];
+    return {
+      schema: "asimposium.problem-face.v1",
+      kind: "problem-face",
+      problem: problemRow.id,
+      profile: "face",
+      cursor,
+      title: `${problemRow.id} — public ledger face`,
+      preamble: PACK_PREAMBLE,
+      items: claimRows.map((claim) => ({
+        kind: "claim",
+        id: claim.id,
+        scope: "ledger",
+        untrusted: true,
+        body: `${claim.id} (seq ${claim.source_seq}): ${claim.statement}`,
+        why_included: "a public claim on this problem in ledger sequence order",
+      })),
+      omitted: [
+        {
+          reason: "w5_4_w5_8_pending",
+          detail: "dispositions, reviews, hypotheses, and citations land with W5.4/W5.8",
+        },
+      ],
+      next_actions: [
+        { method: "GET", url: `/p/${problemRow.id}.md`, why: "the human-readable face" },
+        { method: "GET", url: "/problems.json", why: "the public problem index" },
+      ],
+      degraded: [],
+    };
+  };
+
+  app.on(["GET", "HEAD"], "/p/:id{.+\\.json$}", async (c) => {
+    const problemId = c.req.param("id").slice(0, -".json".length);
+    const projection = await loadProblemFaceProjection(c.env.DB, problemId);
+    if (projection === null) {
       return problemDocument({
         status: 404,
         code: "PROBLEM_NOT_FOUND",
@@ -188,43 +236,21 @@ function createLedgerFaceRoutesWithExperimentalProblemFaces(
         fixHint: "Check the id against GET /problems.json.",
       });
     }
-    const claims = await c.env.DB.prepare(
-      "SELECT id, statement, source_seq, created_at FROM claims WHERE problem_id = ? ORDER BY source_seq ASC",
-    )
-      .bind(problemId)
-      .all<{ id: string; statement: string; source_seq: number; created_at: string }>();
-    const body = JSON.stringify(
-      {
-        schema: "https://a.asimposium.org/schemas/ledger.v1.json",
-        problem: {
-          id: problemRow.id,
-          public_seq: problemRow.public_seq,
-          created_at: problemRow.created_at,
-        },
-        claims: claims.results ?? [],
-        omitted: ["dispositions, reviews, hypotheses, and citations land with W5.4/W5.8"],
-      },
-      null,
-      2,
-    );
-    const etag = await strongEtag("json", body);
+    const face = renderProjection(projection, "json");
+    const etag = await strongEtag("json", face.body);
     const headers = {
       "content-type": "application/json; charset=utf-8",
       "cache-control": PUBLIC_CACHE_CONTROL,
       etag,
     };
     if (ifNoneMatchMatches(c.req.header("if-none-match"), etag)) return c.body(null, 304, headers);
-    return new Response(c.req.method === "HEAD" ? null : body, { status: 200, headers });
+    return new Response(c.req.method === "HEAD" ? null : face.body, { status: 200, headers });
   });
 
   app.on(["GET", "HEAD"], "/p/:id{.+\\.md$}", async (c) => {
     const problemId = c.req.param("id").slice(0, -".md".length);
-    const problemRow = await c.env.DB.prepare(
-      "SELECT id, public_seq, created_at FROM problems WHERE id = ?",
-    )
-      .bind(problemId)
-      .first<{ id: string; public_seq: number; created_at: string }>();
-    if (problemRow === null || problemRow === undefined) {
+    const projection = await loadProblemFaceProjection(c.env.DB, problemId);
+    if (projection === null) {
       return problemDocument({
         status: 404,
         code: "PROBLEM_NOT_FOUND",
@@ -233,27 +259,15 @@ function createLedgerFaceRoutesWithExperimentalProblemFaces(
         fixHint: "Check the id against GET /problems.json.",
       });
     }
-    const claims = await c.env.DB.prepare(
-      "SELECT id, statement, source_seq FROM claims WHERE problem_id = ? ORDER BY source_seq ASC",
-    )
-      .bind(problemId)
-      .all<{ id: string; statement: string; source_seq: number }>();
-    const rows = claims.results ?? [];
-    const listing =
-      rows.length === 0
-        ? "No public claims yet."
-        : rows
-            .map((claim) => `- **${claim.id}** (seq ${claim.source_seq}): ${claim.statement}`)
-            .join("\n");
-    const body = `# ${problemRow.id}\n\n${listing}\n\nomitted: dispositions, reviews, hypotheses, and citations land with W5.4/W5.8\n`;
-    const etag = await strongEtag("markdown", body);
+    const face = renderProjection(projection, "md");
+    const etag = await strongEtag("markdown", face.body);
     const headers = {
       "content-type": "text/markdown; charset=utf-8",
       "cache-control": PUBLIC_CACHE_CONTROL,
       etag,
     };
     if (ifNoneMatchMatches(c.req.header("if-none-match"), etag)) return c.body(null, 304, headers);
-    return new Response(c.req.method === "HEAD" ? null : body, { status: 200, headers });
+    return new Response(c.req.method === "HEAD" ? null : face.body, { status: 200, headers });
   });
 
   return app;
