@@ -117,9 +117,18 @@ describe("claim machine: the full legal transition table", () => {
       // corroborated → strongly-supported via two cross-family full-write-up reviews.
       [
         "corroborated",
-        { kind: "review-verified", review: T2_REVIEW },
+        {
+          kind: "review-verified",
+          review: review({
+            review_id: "R-STRONG-B",
+            reviewer_id: "F-STRONG-B",
+            tier: "T2",
+          }),
+        },
         context({
-          verified_reviews: [review({ tier: "T2" })],
+          verified_reviews: [
+            review({ review_id: "R-STRONG-A", reviewer_id: "F-STRONG-A", tier: "T2" }),
+          ],
           recorded_refutation_attempts: 1,
         }),
         "strongly-supported",
@@ -339,7 +348,7 @@ describe("claim machine: illegal transitions refuse with exact unmet conditions"
       ["requires independence tier ≥ T2, got T1"],
     ],
     [
-      "one review id cannot be counted twice toward strong support",
+      "one reviewer's replayed review cannot complete the strong-support leg",
       "corroborated",
       {
         kind: "review-verified",
@@ -348,6 +357,23 @@ describe("claim machine: illegal transitions refuse with exact unmet conditions"
       context({
         recorded_refutation_attempts: 1,
         verified_reviews: [review({ review_id: "R-DUPLICATE", reviewer_id: "F-DUPLICATE" })],
+      }),
+      [
+        "requires a certified-class artifact or two cross-family verified reviews of a full write-up",
+      ],
+    ],
+    [
+      "one reviewer cannot use two review ids to complete the strong-support leg",
+      "corroborated",
+      {
+        kind: "review-verified",
+        review: review({ review_id: "R-SAME-REVIEWER-B", reviewer_id: "F-SAME-REVIEWER" }),
+      },
+      context({
+        recorded_refutation_attempts: 1,
+        verified_reviews: [
+          review({ review_id: "R-SAME-REVIEWER-A", reviewer_id: "F-SAME-REVIEWER" }),
+        ],
       }),
       [
         "requires a certified-class artifact or two cross-family verified reviews of a full write-up",

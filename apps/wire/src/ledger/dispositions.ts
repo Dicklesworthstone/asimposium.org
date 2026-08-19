@@ -225,10 +225,14 @@ function strongSupportUnmet(
 ): string[] {
   const unmet: string[] = [];
   const supportingReviews = distinctSupportingReviews(reviews);
-  const crossFamilyFullWriteUps = supportingReviews.filter(
-    (review) => review.cross_family && review.full_write_up,
-  ).length;
-  if (!context.has_certified_artifact && crossFamilyFullWriteUps < 2) {
+  // Independent corroboration is supplied by people/agents, not by rows: one
+  // reviewer cannot satisfy the two-review leg by filing multiple review ids.
+  const crossFamilyFullWriteUpReviewers = new Set(
+    supportingReviews
+      .filter((review) => review.cross_family && review.full_write_up)
+      .map((review) => review.reviewer_id),
+  ).size;
+  if (!context.has_certified_artifact && crossFamilyFullWriteUpReviewers < 2) {
     unmet.push(
       "requires a certified-class artifact or two cross-family verified reviews of a full write-up",
     );
