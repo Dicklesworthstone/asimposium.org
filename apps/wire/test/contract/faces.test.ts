@@ -1,4 +1,5 @@
 import { describe, expect, test } from "bun:test";
+import { readFileSync } from "node:fs";
 import { ProblemDocumentSchema } from "@asimposium/contracts";
 import { listPublicSchemas } from "@asimposium/contracts/public-schemas";
 import {
@@ -97,6 +98,44 @@ const INTERNAL_ERROR =
   '"detail":"An unexpected error occurred. Its details are not disclosed on this face.",' +
   '"fix_hint":"Retry the request. If it persists, report the route and the time of the attempt."}';
 
+/**
+ * Extract the shipped `servePublicText` body from the module text.
+ *
+ * Brace matching is sufficient because that function contains no string or
+ * comment carrying an unbalanced brace. If it ever does, this throws rather
+ * than silently matching the wrong span — a guard that quietly reads the wrong
+ * function is worse than one that fails.
+ */
+function servePublicTextBody(appSource: string): string {
+  const start = appSource.indexOf("function servePublicText(");
+  if (start === -1) throw new Error("servePublicText is no longer declared in app.ts");
+  const open = appSource.indexOf("{", start);
+  if (open === -1) throw new Error("servePublicText has no body in app.ts");
+  let depth = 0;
+  for (let index = open; index < appSource.length; index += 1) {
+    const character = appSource[index];
+    if (character === "{") depth += 1;
+    else if (character === "}") {
+      depth -= 1;
+      if (depth === 0) return appSource.slice(open, index + 1);
+    }
+  }
+  throw new Error("servePublicText has an unbalanced body in app.ts");
+}
+
+/**
+ * The production invariant: the public-text path names the gated reader, and
+ * the module never calls the ungated one anywhere. `getDocument` may still be
+ * mentioned — it is imported and handed to the gate — but a CALL to it is
+ * exactly the regression this refuses.
+ */
+function servesOnlyThroughGatedReader(appSource: string): boolean {
+  return (
+    servePublicTextBody(appSource).includes("readSafeProtocolDocument(") &&
+    !appSource.includes("getDocument(")
+  );
+}
+
 describe("the production protocol cold-path gate", () => {
   test("a hostile bundled document refuses before any public-text reader can run", () => {
     const token = ["asimp", "ag", "01JQZX9Y2K4M7P8R"].join("_");
@@ -134,6 +173,25 @@ describe("the production protocol cold-path gate", () => {
     expect(read("protocol")).toBe(getDocument("protocol"));
     expect(read("handbook")).toBe(getDocument("handbook"));
     expect(gates).toBe(1);
+  });
+
+  test("servePublicText is tied to the gated reader; a direct getDocument call is red", () => {
+    // The two tests above drive the construction seam, so a regression that
+    // pointed servePublicText straight at getDocument would leave both of them
+    // green. This one reads the shipped module and fails on exactly that edit,
+    // which is what makes the seam load-bearing rather than decorative.
+    const appSource = readFileSync(new URL("../../src/app.ts", import.meta.url), "utf8");
+
+    expect(servesOnlyThroughGatedReader(appSource)).toBe(true);
+    expect(servePublicTextBody(appSource)).toContain("readSafeProtocolDocument(");
+    // Mentioned twice (imported, then handed to the gate) but never called.
+    expect(appSource).not.toContain("getDocument(");
+
+    // CAUSAL: the same predicate must REJECT the regression it exists to catch.
+    // Without this the assertions above could pass by being unfalsifiable.
+    const regressed = appSource.replace("readSafeProtocolDocument(id)", "getDocument(id)");
+    expect(regressed).not.toBe(appSource);
+    expect(servesOnlyThroughGatedReader(regressed)).toBe(false);
   });
 });
 

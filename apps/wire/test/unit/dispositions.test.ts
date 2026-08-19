@@ -328,6 +328,17 @@ describe("claim machine: illegal transitions refuse with exact unmet conditions"
       ],
     ],
     [
+      "a statement-defect cannot lend independence to strong support",
+      "corroborated",
+      { kind: "review-verified", review: review({ tier: "T1" }) },
+      context({
+        has_certified_artifact: true,
+        recorded_refutation_attempts: 1,
+        verified_reviews: [review({ tier: "T3", finding: "statement-defect" })],
+      }),
+      ["requires independence tier ≥ T2, got T1"],
+    ],
+    [
       "one review id cannot be counted twice toward strong support",
       "corroborated",
       {

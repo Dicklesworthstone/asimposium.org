@@ -3791,6 +3791,46 @@ describe("the shell's causal self-tests actually run", () => {
     },
     SHELL_TIMEOUT_MS,
   );
+
+  test(
+    "PLANTED: the provider-free supervisor bootstrap proves run_bounded end to end",
+    async () => {
+      // Credential-free by construction: the handler returns before
+      // `missing_vars` is consulted, so no ASIMP_S6_* value is read and no
+      // provider is contacted. This is the only focused exercise of the real
+      // coproc / setpgrp / BOOT / START-NONE path.
+      const run = await runShell(["--self-test-supervisor-bootstrap"], withoutS6Env());
+      expect(run.timedOut, diag(run)).toBe(false);
+      expect(run.exitCode, diag(run)).toBe(0);
+      expect(run.cleanupUnproven, diag(run)).toBe(false);
+
+      // Exactly one record, so stray output cannot pad a passing run.
+      const lines = run.stdout.split("\n").filter((line) => line.trim().length > 0);
+      expect(lines.length, diag(run)).toBe(1);
+      const record = JSON.parse(lines[0] ?? "") as {
+        suite: string;
+        assertion: string;
+        status: string;
+        run_status: number;
+        outcome: string;
+        stage: string;
+      };
+      expect(record.suite).toBe("s6-cross-plane-auth");
+      expect(record.assertion).toBe("supervisor-bootstrap-only");
+      expect(record.status).toBe("pass");
+      // The shell's pass shape is a conjunction — run_status 0 AND a child
+      // outcome. Asserting both stops either half from carrying the verdict.
+      expect(record.run_status).toBe(0);
+      expect(record.outcome).toBe("child");
+      // Terminal stage only. An early bail reports pre-coproc, coproc-snapshot,
+      // fds-stable, control-prepared or boot-acknowledged instead, so this is
+      // the value that proves BOOT acknowledgement and START-NONE both landed.
+      expect(record.stage).toBe("input-ready");
+      // A bootstrap probe must never resemble a passing S-6 run.
+      expect(run.stdout, diag(run)).not.toContain('"status":"pass","assertions"');
+    },
+    SHELL_TIMEOUT_MS,
+  );
 });
 
 describe("the outer capability protocol is strict under stream framing", () => {
