@@ -7,7 +7,7 @@
   "oracle": {
     "data": {
       "planted_candidate": "For every natural number n, there exists a natural prime p such that n ≤ p.",
-      "smallest_counterexample": {"n": 1},
+      "smallest_counterexample": { "n": 1 },
       "expected_review_verdict": "refuted"
     }
   },

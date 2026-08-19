@@ -2,10 +2,7 @@ import { existsSync, lstatSync, readFileSync, realpathSync } from "node:fs";
 import { dirname, isAbsolute, relative, resolve, sep } from "node:path";
 import { performance } from "node:perf_hooks";
 import { fileURLToPath } from "node:url";
-import {
-  PRODUCTION_AGORA_ORIGIN,
-  STAGING_AGORA_ORIGIN,
-} from "@asimposium/contracts";
+import { PRODUCTION_AGORA_ORIGIN, STAGING_AGORA_ORIGIN } from "@asimposium/contracts";
 import {
   containsCredentialShape,
   redactCredentials,

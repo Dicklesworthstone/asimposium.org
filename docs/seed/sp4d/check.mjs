@@ -632,9 +632,7 @@ export async function runCheck({ verifyLinks: shouldVerifyLinks = false, fetchIm
       sourcePaths.checker,
       sourcePaths.checkerTest,
       sourcePaths.packageManifest,
-    ].map((path) =>
-      readFile(path, "utf8"),
-    ),
+    ].map((path) => readFile(path, "utf8")),
   );
   errors.push(
     ...validateReport(report, {

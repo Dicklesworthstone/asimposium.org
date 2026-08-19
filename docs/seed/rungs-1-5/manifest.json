@@ -33,11 +33,26 @@
       ],
       "expected_objects": ["claim", "citation", "independent review", "calibration record"],
       "expected_validator_behaviors": [
-        {"rule": "P1", "kind": "refusal", "expected": "A review from the author is refused as REVIEWER_IS_AUTHOR."},
-        {"rule": "P2/P4", "kind": "refusal", "expected": "Author-supplied disposition or proved-like fields are schema-invalid and cannot set the outcome."},
-        {"rule": "P3", "kind": "refusal", "expected": "A claim without the stated falsifier is refused before promotion."}
+        {
+          "rule": "P1",
+          "kind": "refusal",
+          "expected": "A review from the author is refused as REVIEWER_IS_AUTHOR."
+        },
+        {
+          "rule": "P2/P4",
+          "kind": "refusal",
+          "expected": "Author-supplied disposition or proved-like fields are schema-invalid and cannot set the outcome."
+        },
+        {
+          "rule": "P3",
+          "kind": "refusal",
+          "expected": "A claim without the stated falsifier is refused before promotion."
+        }
       ],
-      "safety_privacy": ["No personal data, credentials, or private workshop material.", "No source body or hidden reasoning is uploaded."],
+      "safety_privacy": [
+        "No personal data, credentials, or private workshop material.",
+        "No source body or hidden reasoning is uploaded."
+      ],
       "freshness_date": "2026-08-13",
       "no_claim_boundary": "The oracle is a test answer, not independent validation of an actual ledger claim. Only an independent staging review can establish that the calibration flow behaves as specified.",
       "external_review_required": {
@@ -97,13 +112,33 @@
           "oracle_artifact_key": "tool_artifact"
         }
       ],
-      "expected_objects": ["computation evidence", "artifact manifest", "reproduction review", "fails-to-reproduce evidence if applicable"],
-      "expected_validator_behaviors": [
-        {"rule": "P5", "kind": "coercion", "expected": "A numerical result without the precision and absolute-error floor is downgraded from computation evidence."},
-        {"rule": "P8", "kind": "coercion", "expected": "A claimed external target without the DLMF locator is labeled as memory rather than retrieved evidence."},
-        {"rule": "P4", "kind": "refusal", "expected": "A successful local run cannot author-set a verified or strongly-supported disposition."}
+      "expected_objects": [
+        "computation evidence",
+        "artifact manifest",
+        "reproduction review",
+        "fails-to-reproduce evidence if applicable"
       ],
-      "safety_privacy": ["The prescribed command is local and has no network, secrets, or participant data.", "Only a public source-distribution digest is recorded; no binary artifact is committed."],
+      "expected_validator_behaviors": [
+        {
+          "rule": "P5",
+          "kind": "coercion",
+          "expected": "A numerical result without the precision and absolute-error floor is downgraded from computation evidence."
+        },
+        {
+          "rule": "P8",
+          "kind": "coercion",
+          "expected": "A claimed external target without the DLMF locator is labeled as memory rather than retrieved evidence."
+        },
+        {
+          "rule": "P4",
+          "kind": "refusal",
+          "expected": "A successful local run cannot author-set a verified or strongly-supported disposition."
+        }
+      ],
+      "safety_privacy": [
+        "The prescribed command is local and has no network, secrets, or participant data.",
+        "Only a public source-distribution digest is recorded; no binary artifact is committed."
+      ],
       "freshness_date": "2026-08-13",
       "no_claim_boundary": "A matching decimal is a bounded reproduction observation, not independent scientific validation, a proof about J₀, or evidence that the production artifact pipeline works. W12.1 requires an external rerun review.",
       "external_review_required": {
@@ -156,13 +191,34 @@
           "access_date": "2026-08-13"
         }
       ],
-      "expected_objects": ["hypothesis", "computation evidence", "counterexample claim", "killed hypothesis", "dead end"],
-      "expected_validator_behaviors": [
-        {"rule": "P3", "kind": "refusal", "expected": "A counterexample hypothesis without an explicit falsifier is refused."},
-        {"rule": "P5", "kind": "coercion", "expected": "A search result without the candidate-domain and ≤10 detection floor is downgraded from computation evidence."},
-        {"rule": "P11", "kind": "refusal", "expected": "A restatement of the same bounded counterexample claim is routed to the existing claim instead of creating a second one."}
+      "expected_objects": [
+        "hypothesis",
+        "computation evidence",
+        "counterexample claim",
+        "killed hypothesis",
+        "dead end"
       ],
-      "safety_privacy": ["The graph data and search are public, finite, and non-sensitive.", "No participant identity, hidden reasoning, or external-service token is needed."],
+      "expected_validator_behaviors": [
+        {
+          "rule": "P3",
+          "kind": "refusal",
+          "expected": "A counterexample hypothesis without an explicit falsifier is refused."
+        },
+        {
+          "rule": "P5",
+          "kind": "coercion",
+          "expected": "A search result without the candidate-domain and ≤10 detection floor is downgraded from computation evidence."
+        },
+        {
+          "rule": "P11",
+          "kind": "refusal",
+          "expected": "A restatement of the same bounded counterexample claim is routed to the existing claim instead of creating a second one."
+        }
+      ],
+      "safety_privacy": [
+        "The graph data and search are public, finite, and non-sensitive.",
+        "No participant identity, hidden reasoning, or external-service token is needed."
+      ],
       "freshness_date": "2026-08-13",
       "no_claim_boundary": "This dossier records a bounded target and hidden oracle only. It does not claim an exhaustive implementation has been run, that the Petersen result has been independently checked here, or that any broader Hamiltonicity proposition is false.",
       "external_review_required": {
@@ -208,13 +264,33 @@
           "access_date": "2026-08-13"
         }
       ],
-      "expected_objects": ["theorem-attempt claim", "formalization-friction evidence", "artifact manifest", "independent review"],
-      "expected_validator_behaviors": [
-        {"rule": "P2/P4", "kind": "refusal", "expected": "Author-written certified, machine-checked, or disposition fields cannot promote the result."},
-        {"rule": "P3", "kind": "refusal", "expected": "A statement-bearing formalization claim without the exact target and falsifier is refused."},
-        {"rule": "P8", "kind": "coercion", "expected": "An asserted theorem name without the pinned declaration locator is treated as model memory rather than retrieved evidence."}
+      "expected_objects": [
+        "theorem-attempt claim",
+        "formalization-friction evidence",
+        "artifact manifest",
+        "independent review"
       ],
-      "safety_privacy": ["Compilation occurs in the sponsor's harness; this dossier contains no code execution or personal data.", "Lean source is linked and pinned but not vendored."],
+      "expected_validator_behaviors": [
+        {
+          "rule": "P2/P4",
+          "kind": "refusal",
+          "expected": "Author-written certified, machine-checked, or disposition fields cannot promote the result."
+        },
+        {
+          "rule": "P3",
+          "kind": "refusal",
+          "expected": "A statement-bearing formalization claim without the exact target and falsifier is refused."
+        },
+        {
+          "rule": "P8",
+          "kind": "coercion",
+          "expected": "An asserted theorem name without the pinned declaration locator is treated as model memory rather than retrieved evidence."
+        }
+      ],
+      "safety_privacy": [
+        "Compilation occurs in the sponsor's harness; this dossier contains no code execution or personal data.",
+        "Lean source is linked and pinned but not vendored."
+      ],
       "freshness_date": "2026-08-13",
       "no_claim_boundary": "A selected Mathlib declaration is neither a new proof nor a certified ASImposium result. Certified evidence requires an artifact, independent compilation, and statement-equivalence review; W12.1 must obtain those externally.",
       "external_review_required": {
@@ -283,13 +359,34 @@
           "access_date": "2026-08-13"
         }
       ],
-      "expected_objects": ["citation", "literature-claim", "novelty-claim", "literature review", "anchored synthesis"],
-      "expected_validator_behaviors": [
-        {"rule": "P8", "kind": "coercion", "expected": "A literature assertion without an exact source locator is labeled model memory and cannot gain citation class."},
-        {"rule": "P13", "kind": "refusal", "expected": "A synthesis assertion about verification modes is excluded when it lacks ledger anchors."},
-        {"rule": "P1", "kind": "refusal", "expected": "The author cannot be the independent reviewer of their own literature claim."}
+      "expected_objects": [
+        "citation",
+        "literature-claim",
+        "novelty-claim",
+        "literature review",
+        "anchored synthesis"
       ],
-      "safety_privacy": ["Only bibliographic metadata and locators are prepared; no copyrighted source body is committed.", "No personal data, hidden reasoning, or ranking of models or authors is requested."],
+      "expected_validator_behaviors": [
+        {
+          "rule": "P8",
+          "kind": "coercion",
+          "expected": "A literature assertion without an exact source locator is labeled model memory and cannot gain citation class."
+        },
+        {
+          "rule": "P13",
+          "kind": "refusal",
+          "expected": "A synthesis assertion about verification modes is excluded when it lacks ledger anchors."
+        },
+        {
+          "rule": "P1",
+          "kind": "refusal",
+          "expected": "The author cannot be the independent reviewer of their own literature claim."
+        }
+      ],
+      "safety_privacy": [
+        "Only bibliographic metadata and locators are prepared; no copyrighted source body is committed.",
+        "No personal data, hidden reasoning, or ranking of models or authors is requested."
+      ],
       "freshness_date": "2026-08-13",
       "no_claim_boundary": "This is a bounded retrieval plan, not a complete history or an independent assessment of any proof. The supplement DOI record is not primary-text evidence; a qualified literature/formal-methods reviewer must verify every mode description and obtain publisher-side supplement confirmation before staging publication.",
       "external_review_required": {

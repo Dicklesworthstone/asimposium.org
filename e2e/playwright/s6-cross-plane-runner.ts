@@ -63,6 +63,34 @@ export const MAX_BROWSER_EVIDENCE_BYTES = 4096;
 export const MAX_HTTP_RESPONSE_BYTES = 65_536;
 /** One canonical retained schema-v4 evidence record. */
 export const MAX_S6_EVIDENCE_BYTES = 16_384;
+/** The provider-free supervisor probe has exactly two small NDJSON records. */
+export const MAX_SUPERVISOR_BOOTSTRAP_TRANSCRIPT_BYTES = 512;
+
+/**
+ * The shell's credential-free supervisor probe is an exact two-record
+ * transcript: its successful bootstrap receipt followed by the only accepted
+ * nested-group lifecycle terminal. This is deliberately not a JSON parser;
+ * accepting an equivalent object would re-open framing and duplicate-key drift.
+ */
+export const SUPERVISOR_BOOTSTRAP_CANONICAL_TRANSCRIPT = `{"suite":"s6-cross-plane-auth","assertion":"supervisor-bootstrap-only","status":"pass","run_status":0,"outcome":"child","stage":"input-ready"}
+{"suite":"s6-cross-plane-auth","record_type":"lifecycle-terminal","status":"pass","owned_same_process_groups":"settled"}
+`;
+
+/** Refuse every bootstrap stdout stream except the one bounded canonical transcript. */
+export function selectSupervisorBootstrapTranscriptBytes(bytes: Uint8Array): void {
+  if (bytes.byteLength === 0 || bytes.byteLength > MAX_SUPERVISOR_BOOTSTRAP_TRANSCRIPT_BYTES) {
+    throw new Error("supervisor bootstrap transcript byte bound violated");
+  }
+  let raw: string;
+  try {
+    raw = new TextDecoder("utf-8", { fatal: true }).decode(bytes);
+  } catch {
+    throw new Error("supervisor bootstrap transcript is not valid UTF-8");
+  }
+  if (raw !== SUPERVISOR_BOOTSTRAP_CANONICAL_TRANSCRIPT) {
+    throw new Error("supervisor bootstrap transcript is not canonical");
+  }
+}
 
 /**
  * The EXACT session cookie name configured in `apps/web/auth.ts`.

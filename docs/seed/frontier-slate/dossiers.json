@@ -14,17 +14,50 @@
       "no_resolution_language": "Draft only: no sentence here asserts a current global resolution or non-resolution of Kaplansky's zero-divisor conjecture.",
       "safety": "Use public presentations and reproducible algebra only; do not substitute model memory for a cited group-theoretic implication.",
       "external_expert_requirements": "A group theorist independent of the artifact author must check the presentation, torsion-free premise, and ring convention; a second reviewer must check the distinction between unit and zero-divisor statements.",
-      "status_freshness": { "source_audit_date": "2026-08-17", "prepublication_recheck_required": true, "registry_access": "uncertain", "registry_access_note": "No independent, field-wide registry for the zero-divisor formulation was established here; Gardam's unit-conjecture result is not a zero-divisor status determination.", "status_source_ids": ["SCHWEITZER-2012", "GARDAM-2021"], "recheck_instruction": "A group theorist must recheck post-Gardam literature and the exact named conjecture before publishing any status language." },
+      "status_freshness": {
+        "source_audit_date": "2026-08-17",
+        "prepublication_recheck_required": true,
+        "registry_access": "uncertain",
+        "registry_access_note": "No independent, field-wide registry for the zero-divisor formulation was established here; Gardam's unit-conjecture result is not a zero-divisor status determination.",
+        "status_source_ids": ["SCHWEITZER-2012", "GARDAM-2021"],
+        "recheck_instruction": "A group theorist must recheck post-Gardam literature and the exact named conjecture before publishing any status language."
+      },
       "variant_distinctions": [
-        { "variant": "Unit versus zero-divisor", "distinction": "A nontrivial unit and a zero divisor answer different assertions; neither is silently substituted for the other." },
-        { "variant": "Coefficient ring", "distinction": "The coefficient field or integral domain is part of the statement; a result in one characteristic is not a result in another without a cited transfer theorem." }
+        {
+          "variant": "Unit versus zero-divisor",
+          "distinction": "A nontrivial unit and a zero divisor answer different assertions; neither is silently substituted for the other."
+        },
+        {
+          "variant": "Coefficient ring",
+          "distinction": "The coefficient field or integral domain is part of the statement; a result in one characteristic is not a result in another without a cited transfer theorem."
+        }
       ],
       "bounded_subgoals": [
-        { "id": "KZD-G1", "question": "Reproduce one named finite group-ring multiplication in the coefficient ring specified by the source.", "falsifier": "Normal-form reduction yields a nonzero product or an element is not represented as claimed.", "boundary": "One presentation and one coefficient ring only; no global conjecture claim.", "evidence_artifact": "Versioned presentation, reduction trace, independent CAS rerun, and source locator table." }
+        {
+          "id": "KZD-G1",
+          "question": "Reproduce one named finite group-ring multiplication in the coefficient ring specified by the source.",
+          "falsifier": "Normal-form reduction yields a nonzero product or an element is not represented as claimed.",
+          "boundary": "One presentation and one coefficient ring only; no global conjecture claim.",
+          "evidence_artifact": "Versioned presentation, reduction trace, independent CAS rerun, and source locator table."
+        }
       ],
       "references": [
-        { "id": "SCHWEITZER-2012", "authority": "primary", "url": "https://arxiv.org/abs/1202.6645", "locator": "Abstract and Conjecture 1; distinguish the zero-divisor formulation from adjacent conjectures.", "why_here": "Primary formulation anchor.", "license_or_rights": "License not asserted by this dossier; citation and link only, with no source text, figures, data, code, or PDF included. Verify source-owner rights before any reuse." },
-        { "id": "GARDAM-2021", "authority": "primary", "url": "https://arxiv.org/abs/2102.11818", "locator": "Abstract and stated coefficient field; it concerns the unit conjecture, not a license to conflate it with zero divisors.", "why_here": "Post-Gardam distinction anchor.", "license_or_rights": "License not asserted by this dossier; citation and link only, with no source text, figures, data, code, or PDF included. Verify source-owner rights before any reuse." }
+        {
+          "id": "SCHWEITZER-2012",
+          "authority": "primary",
+          "url": "https://arxiv.org/abs/1202.6645",
+          "locator": "Abstract and Conjecture 1; distinguish the zero-divisor formulation from adjacent conjectures.",
+          "why_here": "Primary formulation anchor.",
+          "license_or_rights": "License not asserted by this dossier; citation and link only, with no source text, figures, data, code, or PDF included. Verify source-owner rights before any reuse."
+        },
+        {
+          "id": "GARDAM-2021",
+          "authority": "primary",
+          "url": "https://arxiv.org/abs/2102.11818",
+          "locator": "Abstract and stated coefficient field; it concerns the unit conjecture, not a license to conflate it with zero divisors.",
+          "why_here": "Post-Gardam distinction anchor.",
+          "license_or_rights": "License not asserted by this dossier; citation and link only, with no source text, figures, data, code, or PDF included. Verify source-owner rights before any reuse."
+        }
       ]
     },
     {
@@ -39,16 +72,42 @@
       "no_resolution_language": "Draft only: this source makes no current-status assertion about the union-closed sets conjecture or the best known constant.",
       "safety": "Retain exact finite inputs and arithmetic; do not report approximate frequency output as a proof.",
       "external_expert_requirements": "An independent extremal-combinatorics reviewer must check the union-closure convention and theorem anchor; a second reviewer must audit any claimed reduction.",
-      "status_freshness": { "source_audit_date": "2026-08-17", "prepublication_recheck_required": true, "registry_access": "uncertain", "registry_access_note": "The retrieved primary source anchors one constant, not a complete current-best-bound registry; no best-known-constant wording is licensed from this draft.", "status_source_ids": ["GILMER-2022"], "recheck_instruction": "An extremal-combinatorics reviewer must recheck primary literature for subsequent improvements before a public statement names any bound." },
+      "status_freshness": {
+        "source_audit_date": "2026-08-17",
+        "prepublication_recheck_required": true,
+        "registry_access": "uncertain",
+        "registry_access_note": "The retrieved primary source anchors one constant, not a complete current-best-bound registry; no best-known-constant wording is licensed from this draft.",
+        "status_source_ids": ["GILMER-2022"],
+        "recheck_instruction": "An extremal-combinatorics reviewer must recheck primary literature for subsequent improvements before a public statement names any bound."
+      },
       "variant_distinctions": [
-        { "variant": "One-half conjecture versus constant lower bound", "distinction": "A positive constant lower bound is not the one-half conclusion and must be labeled with its own quantified statement." },
-        { "variant": "Finite certificate versus general theorem", "distinction": "An exhaustive computation over an encoded finite family does not become a theorem over all union-closed families." }
+        {
+          "variant": "One-half conjecture versus constant lower bound",
+          "distinction": "A positive constant lower bound is not the one-half conclusion and must be labeled with its own quantified statement."
+        },
+        {
+          "variant": "Finite certificate versus general theorem",
+          "distinction": "An exhaustive computation over an encoded finite family does not become a theorem over all union-closed families."
+        }
       ],
       "bounded_subgoals": [
-        { "id": "UC-G1", "question": "Verify union closure and exact element frequencies for one supplied finite family, then compare them with one explicitly stated bound.", "falsifier": "A union is absent, parsing changes the family, or the computed maximum frequency misses the bound.", "boundary": "One finite family and one named bound only; no global proof claim.", "evidence_artifact": "Canonical family encoding, exact rational frequency table, and independently rerun verifier." }
+        {
+          "id": "UC-G1",
+          "question": "Verify union closure and exact element frequencies for one supplied finite family, then compare them with one explicitly stated bound.",
+          "falsifier": "A union is absent, parsing changes the family, or the computed maximum frequency misses the bound.",
+          "boundary": "One finite family and one named bound only; no global proof claim.",
+          "evidence_artifact": "Canonical family encoding, exact rational frequency table, and independently rerun verifier."
+        }
       ],
       "references": [
-        { "id": "GILMER-2022", "authority": "primary", "url": "https://arxiv.org/abs/2211.09055", "locator": "Abstract and main theorem statement giving the 0.01 constant in the stated setting.", "why_here": "Primary anchor for a bounded constant, not a current-status assertion.", "license_or_rights": "License not asserted by this dossier; citation and link only, with no source text, figures, data, code, or PDF included. Verify source-owner rights before any reuse." }
+        {
+          "id": "GILMER-2022",
+          "authority": "primary",
+          "url": "https://arxiv.org/abs/2211.09055",
+          "locator": "Abstract and main theorem statement giving the 0.01 constant in the stated setting.",
+          "why_here": "Primary anchor for a bounded constant, not a current-status assertion.",
+          "license_or_rights": "License not asserted by this dossier; citation and link only, with no source text, figures, data, code, or PDF included. Verify source-owner rights before any reuse."
+        }
       ]
     },
     {
@@ -63,17 +122,50 @@
       "no_resolution_language": "Draft only: this is a finite verification design, not a claim about the current resolution status of the Erdős–Straus conjecture.",
       "safety": "Store exact integers and deterministic seeds; no performance estimate or sampled search may be presented as coverage.",
       "external_expert_requirements": "An independent number theorist must review the formulation and interval reduction; a separate reviewer must rerun the exact arithmetic verifier.",
-      "status_freshness": { "source_audit_date": "2026-08-17", "prepublication_recheck_required": true, "registry_access": "blocked", "registry_access_note": "A 2026 author preprint asserts a solution, but this source pass did not adjudicate its proof or establish independent expert review; all global-status wording is blocked.", "status_source_ids": ["BELLO-HERNANDEZ-2010", "BRADFORD-2026"], "recheck_instruction": "A number theorist must assess the 2026 author preprint, existing verification ranges, and theorem claims before any public comparison or status language." },
+      "status_freshness": {
+        "source_audit_date": "2026-08-17",
+        "prepublication_recheck_required": true,
+        "registry_access": "blocked",
+        "registry_access_note": "A 2026 author preprint asserts a solution, but this source pass did not adjudicate its proof or establish independent expert review; all global-status wording is blocked.",
+        "status_source_ids": ["BELLO-HERNANDEZ-2010", "BRADFORD-2026"],
+        "recheck_instruction": "A number theorist must assess the 2026 author preprint, existing verification ranges, and theorem claims before any public comparison or status language."
+      },
       "variant_distinctions": [
-        { "variant": "Finite range versus universal conjecture", "distinction": "Coverage up to a declared endpoint is bounded evidence, not a proof for every n." },
-        { "variant": "Exact rational identity versus numerical approximation", "distinction": "The denominator identity is checked by integers; floating-point agreement is not an accepted witness." }
+        {
+          "variant": "Finite range versus universal conjecture",
+          "distinction": "Coverage up to a declared endpoint is bounded evidence, not a proof for every n."
+        },
+        {
+          "variant": "Exact rational identity versus numerical approximation",
+          "distinction": "The denominator identity is checked by integers; floating-point agreement is not an accepted witness."
+        }
       ],
       "bounded_subgoals": [
-        { "id": "ES-G1", "question": "Produce a complete certificate for 2 <= n <= N where N is committed in the artifact manifest before execution.", "falsifier": "One uncovered n, a nonpositive denominator, or a failed integer cross-product check.", "boundary": "The fixed manifest range only; no extrapolation beyond N.", "evidence_artifact": "Sorted decomposition table, exact verifier, coverage count, and independent replay log." }
+        {
+          "id": "ES-G1",
+          "question": "Produce a complete certificate for 2 <= n <= N where N is committed in the artifact manifest before execution.",
+          "falsifier": "One uncovered n, a nonpositive denominator, or a failed integer cross-product check.",
+          "boundary": "The fixed manifest range only; no extrapolation beyond N.",
+          "evidence_artifact": "Sorted decomposition table, exact verifier, coverage count, and independent replay log."
+        }
       ],
       "references": [
-        { "id": "BELLO-HERNANDEZ-2010", "authority": "primary", "url": "https://arxiv.org/abs/1010.2035", "locator": "Introduction equation (1) and the reported finite verification statement in the abstract.", "why_here": "Primary formulation and detection-floor anchor.", "license_or_rights": "License not asserted by this dossier; citation and link only, with no source text, figures, data, code, or PDF included. Verify source-owner rights before any reuse." },
-        { "id": "BRADFORD-2026", "authority": "primary", "url": "https://arxiv.org/abs/2602.11774", "locator": "Abstract: an author preprint titled A solution to the Straus-Erdős conjecture; this is a claim record requiring independent proof review, not proof support.", "why_here": "Current status-risk anchor: it blocks reuse of stale open-problem language until external review checks the claim.", "license_or_rights": "ArXiv author record; citation and link only, with no source text, figures, data, code, or PDF included. Verify source-owner rights before any reuse." }
+        {
+          "id": "BELLO-HERNANDEZ-2010",
+          "authority": "primary",
+          "url": "https://arxiv.org/abs/1010.2035",
+          "locator": "Introduction equation (1) and the reported finite verification statement in the abstract.",
+          "why_here": "Primary formulation and detection-floor anchor.",
+          "license_or_rights": "License not asserted by this dossier; citation and link only, with no source text, figures, data, code, or PDF included. Verify source-owner rights before any reuse."
+        },
+        {
+          "id": "BRADFORD-2026",
+          "authority": "primary",
+          "url": "https://arxiv.org/abs/2602.11774",
+          "locator": "Abstract: an author preprint titled A solution to the Straus-Erdős conjecture; this is a claim record requiring independent proof review, not proof support.",
+          "why_here": "Current status-risk anchor: it blocks reuse of stale open-problem language until external review checks the claim.",
+          "license_or_rights": "ArXiv author record; citation and link only, with no source text, figures, data, code, or PDF included. Verify source-owner rights before any reuse."
+        }
       ]
     },
     {
@@ -88,16 +180,42 @@
       "no_resolution_language": "Draft only: no live list of outstanding integers and no current-status claim are asserted here.",
       "safety": "Use checked big-integer arithmetic and publish the code and bounds; no unverified distributed-compute report is evidence.",
       "external_expert_requirements": "An independent computational number theorist must check the congruence condition and search boundary; a second reviewer must run the verifier from the artifact manifest.",
-      "status_freshness": { "source_audit_date": "2026-08-17", "prepublication_recheck_required": true, "registry_access": "uncertain", "registry_access_note": "The retrieved primary record documents selected representations and a historical challenge, not an authoritative live registry of outstanding integers; the chosen k must be rechecked before it is called outstanding.", "status_source_ids": ["BOOKER-SUTHERLAND-2021"], "recheck_instruction": "A computational number theorist must recheck the selected k and source record immediately before public wording refers to an outstanding case." },
+      "status_freshness": {
+        "source_audit_date": "2026-08-17",
+        "prepublication_recheck_required": true,
+        "registry_access": "uncertain",
+        "registry_access_note": "The retrieved primary record documents selected representations and a historical challenge, not an authoritative live registry of outstanding integers; the chosen k must be rechecked before it is called outstanding.",
+        "status_source_ids": ["BOOKER-SUTHERLAND-2021"],
+        "recheck_instruction": "A computational number theorist must recheck the selected k and source record immediately before public wording refers to an outstanding case."
+      },
       "variant_distinctions": [
-        { "variant": "Witness versus bounded negative search", "distinction": "An exact triple is a witness for one k; exhausting a bounded region is not a nonexistence proof." },
-        { "variant": "Congruence obstruction versus unresolved residue", "distinction": "A modular obstruction and a case not eliminated by that obstruction are not the same logical classification." }
+        {
+          "variant": "Witness versus bounded negative search",
+          "distinction": "An exact triple is a witness for one k; exhausting a bounded region is not a nonexistence proof."
+        },
+        {
+          "variant": "Congruence obstruction versus unresolved residue",
+          "distinction": "A modular obstruction and a case not eliminated by that obstruction are not the same logical classification."
+        }
       ],
       "bounded_subgoals": [
-        { "id": "CUBES-G1", "question": "Verify one supplied triple for one declared k with arbitrary-precision arithmetic and independent implementation agreement.", "falsifier": "Exact evaluation differs from k or an input integer is altered by parsing.", "boundary": "One k and one witness only; no claim about other k values.", "evidence_artifact": "Canonical decimal inputs, two verifier outputs, and SHA-256 digests of the source artifact." }
+        {
+          "id": "CUBES-G1",
+          "question": "Verify one supplied triple for one declared k with arbitrary-precision arithmetic and independent implementation agreement.",
+          "falsifier": "Exact evaluation differs from k or an input integer is altered by parsing.",
+          "boundary": "One k and one witness only; no claim about other k values.",
+          "evidence_artifact": "Canonical decimal inputs, two verifier outputs, and SHA-256 digests of the source artifact."
+        }
       ],
       "references": [
-        { "id": "BOOKER-SUTHERLAND-2021", "authority": "primary", "url": "https://doi.org/10.1093/imrn/rnaa174", "locator": "Published article 'On a question of Mordell'; abstract and stated computational verification methodology.", "why_here": "Primary method and provenance anchor.", "license_or_rights": "License not asserted by this dossier; citation and link only, with no source text, figures, data, code, or PDF included. Verify source-owner rights before any reuse." }
+        {
+          "id": "BOOKER-SUTHERLAND-2021",
+          "authority": "primary",
+          "url": "https://doi.org/10.1093/imrn/rnaa174",
+          "locator": "Published article 'On a question of Mordell'; abstract and stated computational verification methodology.",
+          "why_here": "Primary method and provenance anchor.",
+          "license_or_rights": "License not asserted by this dossier; citation and link only, with no source text, figures, data, code, or PDF included. Verify source-owner rights before any reuse."
+        }
       ]
     },
     {
@@ -112,17 +230,50 @@
       "no_resolution_language": "Draft only: this dossier makes no current-status assertion about Sendov's conjecture or any claimed proof.",
       "safety": "Use interval or exact certification for numerical roots; label a floating-point exploration as exploratory only.",
       "external_expert_requirements": "Two independent complex analysts must review any degree-range conclusion, including one who checks the interpretation of multiple roots and the source's theorem scope.",
-      "status_freshness": { "source_audit_date": "2026-08-17", "prepublication_recheck_required": true, "registry_access": "blocked", "registry_access_note": "The source set includes a withdrawn claimed-proof record and a later author preprint discussing the conjecture; this conflict is not adjudicated here, so status language is blocked.", "status_source_ids": ["DRURY-LIN-2022", "MILLER-2025"], "recheck_instruction": "Two independent complex analysts must recheck peer review, errata, the newer source record, and the exact degree range before any public description of progress." },
+      "status_freshness": {
+        "source_audit_date": "2026-08-17",
+        "prepublication_recheck_required": true,
+        "registry_access": "blocked",
+        "registry_access_note": "The source set includes a withdrawn claimed-proof record and a later author preprint discussing the conjecture; this conflict is not adjudicated here, so status language is blocked.",
+        "status_source_ids": ["DRURY-LIN-2022", "MILLER-2025"],
+        "recheck_instruction": "Two independent complex analysts must recheck peer review, errata, the newer source record, and the exact degree range before any public description of progress."
+      },
       "variant_distinctions": [
-        { "variant": "Finite-degree case versus all degrees", "distinction": "A verified degree range is not a proof for arbitrary degree." },
-        { "variant": "Numerical proximity versus certified proximity", "distinction": "A plotted critical point is not a certificate that the required distance inequality holds." }
+        {
+          "variant": "Finite-degree case versus all degrees",
+          "distinction": "A verified degree range is not a proof for arbitrary degree."
+        },
+        {
+          "variant": "Numerical proximity versus certified proximity",
+          "distinction": "A plotted critical point is not a certificate that the required distance inequality holds."
+        }
       ],
       "bounded_subgoals": [
-        { "id": "SENDOV-G1", "question": "For a finite source-supplied polynomial family of one declared degree at least two, certify the root-to-critical-point distance inequalities.", "falsifier": "An interval enclosure excludes all critical points within distance one for an allowed root.", "boundary": "The named family and degree only, with degree at least two; no all-degree conclusion.", "evidence_artifact": "Polynomial list, certified root enclosures, critical-point enclosures, and independent checker output." }
+        {
+          "id": "SENDOV-G1",
+          "question": "For a finite source-supplied polynomial family of one declared degree at least two, certify the root-to-critical-point distance inequalities.",
+          "falsifier": "An interval enclosure excludes all critical points within distance one for an allowed root.",
+          "boundary": "The named family and degree only, with degree at least two; no all-degree conclusion.",
+          "evidence_artifact": "Polynomial list, certified root enclosures, critical-point enclosures, and independent checker output."
+        }
       ],
       "references": [
-        { "id": "DRURY-LIN-2022", "authority": "primary", "url": "https://arxiv.org/abs/2210.08720", "locator": "Withdrawal notice, abstract, and comments field; it is a withdrawn author record and cannot support a proof claim.", "why_here": "Primary author-withdrawal record and original claimed-proof anchor; the dossier uses it only to guard against converting a claim into a theorem.", "license_or_rights": "The current arXiv record reports no license for its withdrawn version; citation and link only, with no source text, figures, data, code, or PDF included. Verify source-owner rights before any reuse." },
-        { "id": "MILLER-2025", "authority": "primary", "url": "https://arxiv.org/abs/2506.12951", "locator": "Abstract: a 2025 author preprint states Sendov's conjecture and studies a proposed quadratic refinement; it is not a settlement source for this dossier.", "why_here": "Current primary record showing why a draft must not infer global status from the earlier claimed-proof record.", "license_or_rights": "ArXiv author record; citation and link only, with no source text, figures, data, code, or PDF included. Verify source-owner rights before any reuse." }
+        {
+          "id": "DRURY-LIN-2022",
+          "authority": "primary",
+          "url": "https://arxiv.org/abs/2210.08720",
+          "locator": "Withdrawal notice, abstract, and comments field; it is a withdrawn author record and cannot support a proof claim.",
+          "why_here": "Primary author-withdrawal record and original claimed-proof anchor; the dossier uses it only to guard against converting a claim into a theorem.",
+          "license_or_rights": "The current arXiv record reports no license for its withdrawn version; citation and link only, with no source text, figures, data, code, or PDF included. Verify source-owner rights before any reuse."
+        },
+        {
+          "id": "MILLER-2025",
+          "authority": "primary",
+          "url": "https://arxiv.org/abs/2506.12951",
+          "locator": "Abstract: a 2025 author preprint states Sendov's conjecture and studies a proposed quadratic refinement; it is not a settlement source for this dossier.",
+          "why_here": "Current primary record showing why a draft must not infer global status from the earlier claimed-proof record.",
+          "license_or_rights": "ArXiv author record; citation and link only, with no source text, figures, data, code, or PDF included. Verify source-owner rights before any reuse."
+        }
       ]
     },
     {
@@ -137,17 +288,50 @@
       "no_resolution_language": "Draft only: no sentence here reports a current best k or a current global status of the lonely runner conjecture.",
       "safety": "Use exact modular arithmetic or validated intervals; do not certify a threshold from a rounded plot.",
       "external_expert_requirements": "An independent specialist must check the k convention and threshold; a second reviewer must reproduce the certificate arithmetic.",
-      "status_freshness": { "source_audit_date": "2026-08-17", "prepublication_recheck_required": true, "registry_access": "uncertain", "registry_access_note": "A recent author preprint states a nine-runner result, but this source pass does not convert that record into a general-status or acceptance claim.", "status_source_ids": ["BARAJAS-SERRA-2007", "ROSENFELD-2025"], "recheck_instruction": "A discrete-geometry specialist must recheck current computer-assisted and proof literature before publishing any small-k comparison." },
+      "status_freshness": {
+        "source_audit_date": "2026-08-17",
+        "prepublication_recheck_required": true,
+        "registry_access": "uncertain",
+        "registry_access_note": "A recent author preprint states a nine-runner result, but this source pass does not convert that record into a general-status or acceptance claim.",
+        "status_source_ids": ["BARAJAS-SERRA-2007", "ROSENFELD-2025"],
+        "recheck_instruction": "A discrete-geometry specialist must recheck current computer-assisted and proof literature before publishing any small-k comparison."
+      },
       "variant_distinctions": [
-        { "variant": "Number of runners versus k parameter", "distinction": "The threshold depends on the stated convention; a source using k+1 runners is not silently relabeled as one using k runners." },
-        { "variant": "Instance certificate versus k-range theorem", "distinction": "A time witness for one velocity tuple is not a theorem for all tuples at that k." }
+        {
+          "variant": "Number of runners versus k parameter",
+          "distinction": "The threshold depends on the stated convention; a source using k+1 runners is not silently relabeled as one using k runners."
+        },
+        {
+          "variant": "Instance certificate versus k-range theorem",
+          "distinction": "A time witness for one velocity tuple is not a theorem for all tuples at that k."
+        }
       ],
       "bounded_subgoals": [
-        { "id": "LR-G1", "question": "Verify a rational-time certificate for one supplied integer velocity tuple at one declared k.", "falsifier": "Exact distance-to-nearest-integer arithmetic violates the threshold for any velocity.", "boundary": "One velocity tuple only; no coverage claim for all tuples.", "evidence_artifact": "Velocity manifest, rational time witness, exact distance table, and independent rerun." }
+        {
+          "id": "LR-G1",
+          "question": "Verify a rational-time certificate for one supplied integer velocity tuple at one declared k.",
+          "falsifier": "Exact distance-to-nearest-integer arithmetic violates the threshold for any velocity.",
+          "boundary": "One velocity tuple only; no coverage claim for all tuples.",
+          "evidence_artifact": "Velocity manifest, rational time witness, exact distance table, and independent rerun."
+        }
       ],
       "references": [
-        { "id": "BARAJAS-SERRA-2007", "authority": "primary", "url": "https://arxiv.org/abs/0710.4495", "locator": "Abstract and stated runner-count convention for the seven-runner result.", "why_here": "Primary convention and finite-case anchor.", "license_or_rights": "License not asserted by this dossier; citation and link only, with no source text, figures, data, code, or PDF included. Verify source-owner rights before any reuse." },
-        { "id": "ROSENFELD-2025", "authority": "primary", "url": "https://arxiv.org/abs/2512.01912", "locator": "Abstract: an author preprint claims the lonely runner conjecture for nine runners and describes a computer-assisted proof; exact acceptance and conventions require external review.", "why_here": "Current small-k claim record; it blocks stale best-k wording and does not license a global status claim.", "license_or_rights": "ArXiv author record; citation and link only, with no source text, figures, data, code, or PDF included. Verify source-owner rights before any reuse." }
+        {
+          "id": "BARAJAS-SERRA-2007",
+          "authority": "primary",
+          "url": "https://arxiv.org/abs/0710.4495",
+          "locator": "Abstract and stated runner-count convention for the seven-runner result.",
+          "why_here": "Primary convention and finite-case anchor.",
+          "license_or_rights": "License not asserted by this dossier; citation and link only, with no source text, figures, data, code, or PDF included. Verify source-owner rights before any reuse."
+        },
+        {
+          "id": "ROSENFELD-2025",
+          "authority": "primary",
+          "url": "https://arxiv.org/abs/2512.01912",
+          "locator": "Abstract: an author preprint claims the lonely runner conjecture for nine runners and describes a computer-assisted proof; exact acceptance and conventions require external review.",
+          "why_here": "Current small-k claim record; it blocks stale best-k wording and does not license a global status claim.",
+          "license_or_rights": "ArXiv author record; citation and link only, with no source text, figures, data, code, or PDF included. Verify source-owner rights before any reuse."
+        }
       ]
     },
     {
@@ -162,17 +346,50 @@
       "no_resolution_language": "Draft only: no current lower bound or exact status for BB(6) is asserted in this dossier.",
       "safety": "Treat all huge-number claims as untrusted until a deterministic checker reproduces them; retain no hidden compute transcript as a substitute for the artifact.",
       "external_expert_requirements": "A computability specialist must verify the exact machine convention and reduction; an independent formal-methods reviewer must check any proof-assistant correspondence claim.",
-      "status_freshness": { "source_audit_date": "2026-08-17", "prepublication_recheck_required": true, "registry_access": "uncertain", "registry_access_note": "The operator-maintained BB(6) page is dynamic and records active holdouts; it is not independent proof of any numerical bound used by a future artifact.", "status_source_ids": ["BBCHALLENGE-STORY", "BBCHALLENGE-BB6-STATUS"], "recheck_instruction": "A computability specialist must recheck the active BBChallenge record and the exact machine convention before publishing a numerical comparison." },
+      "status_freshness": {
+        "source_audit_date": "2026-08-17",
+        "prepublication_recheck_required": true,
+        "registry_access": "uncertain",
+        "registry_access_note": "The operator-maintained BB(6) page is dynamic and records active holdouts; it is not independent proof of any numerical bound used by a future artifact.",
+        "status_source_ids": ["BBCHALLENGE-STORY", "BBCHALLENGE-BB6-STATUS"],
+        "recheck_instruction": "A computability specialist must recheck the active BBChallenge record and the exact machine convention before publishing a numerical comparison."
+      },
       "variant_distinctions": [
-        { "variant": "Step function versus score function", "distinction": "A maximum halting-time convention and a maximum-ones convention are not interchangeable Busy Beaver quantities." },
-        { "variant": "Lower bound versus exact value", "distinction": "A witness machine proves only a lower bound until an upper-bound classification is independently established in the same model." }
+        {
+          "variant": "Step function versus score function",
+          "distinction": "A maximum halting-time convention and a maximum-ones convention are not interchangeable Busy Beaver quantities."
+        },
+        {
+          "variant": "Lower bound versus exact value",
+          "distinction": "A witness machine proves only a lower bound until an upper-bound classification is independently established in the same model."
+        }
       ],
       "bounded_subgoals": [
-        { "id": "BB6-G1", "question": "Replay one supplied six-state transition table to a checkpointed lower-bound threshold using a deterministic, independently implemented checker.", "falsifier": "The encodings differ, the replay fails before the threshold, or the checker reports a different state/tape convention.", "boundary": "One machine and stated lower bound only; no exact BB(6) claim.", "evidence_artifact": "Transition-table string, checkpoint hashes, verifier source digest, and independent replay receipt." }
+        {
+          "id": "BB6-G1",
+          "question": "Replay one supplied six-state transition table to a checkpointed lower-bound threshold using a deterministic, independently implemented checker.",
+          "falsifier": "The encodings differ, the replay fails before the threshold, or the checker reports a different state/tape convention.",
+          "boundary": "One machine and stated lower bound only; no exact BB(6) claim.",
+          "evidence_artifact": "Transition-table string, checkpoint hashes, verifier source digest, and independent replay receipt."
+        }
       ],
       "references": [
-        { "id": "BBCHALLENGE-STORY", "authority": "official", "url": "https://bbchallenge.org/story", "locator": "Definition of BB and machine-convention section: two symbols, state A, and an all-zero initial tape; no six-state record or exact-value claim is taken from this anchor.", "why_here": "Official convention anchor for model-fixed, checkable Busy Beaver artifacts; it replaces an unrelated five-state paper.", "license_or_rights": "License not asserted by this dossier; citation and link only, with no source text, figures, data, code, or PDF included. Verify source-owner rights before any reuse." },
-        { "id": "BBCHALLENGE-BB6-STATUS", "authority": "official", "url": "https://wiki.bbchallenge.org/wiki/BB%286%29", "locator": "Operator-maintained BB(6) page, accessed 2026-08-17: dynamic holdout and lower-bound discussion; it is a status lead, not independent proof of a numerical claim.", "why_here": "Freshness anchor for a dynamic coordination target whose values must be independently rechecked before use.", "license_or_rights": "CC BY attribution is reported by the wiki; this dossier stores only a citation and link, with no source text, data, code, or PDF included. Verify current source-owner rights before any reuse." }
+        {
+          "id": "BBCHALLENGE-STORY",
+          "authority": "official",
+          "url": "https://bbchallenge.org/story",
+          "locator": "Definition of BB and machine-convention section: two symbols, state A, and an all-zero initial tape; no six-state record or exact-value claim is taken from this anchor.",
+          "why_here": "Official convention anchor for model-fixed, checkable Busy Beaver artifacts; it replaces an unrelated five-state paper.",
+          "license_or_rights": "License not asserted by this dossier; citation and link only, with no source text, figures, data, code, or PDF included. Verify source-owner rights before any reuse."
+        },
+        {
+          "id": "BBCHALLENGE-BB6-STATUS",
+          "authority": "official",
+          "url": "https://wiki.bbchallenge.org/wiki/BB%286%29",
+          "locator": "Operator-maintained BB(6) page, accessed 2026-08-17: dynamic holdout and lower-bound discussion; it is a status lead, not independent proof of a numerical claim.",
+          "why_here": "Freshness anchor for a dynamic coordination target whose values must be independently rechecked before use.",
+          "license_or_rights": "CC BY attribution is reported by the wiki; this dossier stores only a citation and link, with no source text, data, code, or PDF included. Verify current source-owner rights before any reuse."
+        }
       ]
     },
     {
@@ -187,16 +404,42 @@
       "no_resolution_language": "Draft only: this dossier does not call a functional or channel class open, settled, additive, or nonadditive beyond a reviewed statement whose functional exactly matches its source.",
       "safety": "Document numerical conditioning and optimizer failure modes; never label an unconstrained numerical output a counterexample without certificate bounds.",
       "external_expert_requirements": "An independent quantum-information theorist must check the functional and channel conventions; a separate numerical reviewer must check certification and error analysis.",
-      "status_freshness": { "source_audit_date": "2026-08-17", "prepublication_recheck_required": true, "registry_access": "uncertain", "registry_access_note": "Hastings supplies a primary counterexample for a named additivity setting, but the draft does not use it as a registry for every functional or channel class.", "status_source_ids": ["HASTINGS-2008"], "recheck_instruction": "A quantum-information theorist must recheck the precise additivity property and known counterexamples before any public comparison." },
+      "status_freshness": {
+        "source_audit_date": "2026-08-17",
+        "prepublication_recheck_required": true,
+        "registry_access": "uncertain",
+        "registry_access_note": "Hastings supplies a primary counterexample for a named additivity setting, but the draft does not use it as a registry for every functional or channel class.",
+        "status_source_ids": ["HASTINGS-2008"],
+        "recheck_instruction": "A quantum-information theorist must recheck the precise additivity property and known counterexamples before any public comparison."
+      },
       "variant_distinctions": [
-        { "variant": "Functional-specific additivity", "distinction": "Minimum-output entropy, Holevo capacity, and other additivity statements are separate mathematical claims." },
-        { "variant": "Numerical candidate versus certified violation", "distinction": "An optimizer finding is exploratory until error bounds and channel validity certify the strict inequality." }
+        {
+          "variant": "Functional-specific additivity",
+          "distinction": "Minimum-output entropy, Holevo capacity, and other additivity statements are separate mathematical claims."
+        },
+        {
+          "variant": "Numerical candidate versus certified violation",
+          "distinction": "An optimizer finding is exploratory until error bounds and channel validity certify the strict inequality."
+        }
       ],
       "bounded_subgoals": [
-        { "id": "QCA-G1", "question": "For one declared low-dimensional channel pair and one named functional, reproduce a source-supplied inequality with certified tolerance.", "falsifier": "The maps fail CPTP checks, the functional convention changes, or the certified interval contains equality.", "boundary": "One channel pair and one functional only; no statement about all channels.", "evidence_artifact": "Kraus or Choi data, CPTP checker, optimization settings, interval certificate, and independent rerun." }
+        {
+          "id": "QCA-G1",
+          "question": "For one declared low-dimensional channel pair and one named functional, reproduce a source-supplied inequality with certified tolerance.",
+          "falsifier": "The maps fail CPTP checks, the functional convention changes, or the certified interval contains equality.",
+          "boundary": "One channel pair and one functional only; no statement about all channels.",
+          "evidence_artifact": "Kraus or Choi data, CPTP checker, optimization settings, interval certificate, and independent rerun."
+        }
       ],
       "references": [
-        { "id": "HASTINGS-2008", "authority": "primary", "url": "https://arxiv.org/abs/0809.3972", "locator": "Abstract and the named communication-capacity additivity claim; retain the functional exactly as stated.", "why_here": "Primary anchor for the distinction between an additivity question and a counterexample construction.", "license_or_rights": "License not asserted by this dossier; citation and link only, with no source text, figures, data, code, or PDF included. Verify source-owner rights before any reuse." }
+        {
+          "id": "HASTINGS-2008",
+          "authority": "primary",
+          "url": "https://arxiv.org/abs/0809.3972",
+          "locator": "Abstract and the named communication-capacity additivity claim; retain the functional exactly as stated.",
+          "why_here": "Primary anchor for the distinction between an additivity question and a counterexample construction.",
+          "license_or_rights": "License not asserted by this dossier; citation and link only, with no source text, figures, data, code, or PDF included. Verify source-owner rights before any reuse."
+        }
       ]
     },
     {
@@ -211,22 +454,57 @@
       "no_resolution_language": "Draft only: this is not a Navier–Stokes solution claim and it makes no current-status assertion about the Clay problem.",
       "safety": "Treat simulations as bounded evidence; expose precision, residuals, and instability diagnostics rather than suggesting physical or mathematical proof.",
       "external_expert_requirements": "An independent PDE analyst must check the truncation-to-PDE boundary and energy identity; a second reviewer must check the numerical certificate and parameter manifest.",
-      "status_freshness": { "source_audit_date": "2026-08-17", "prepublication_recheck_required": true, "registry_access": "uncertain", "registry_access_note": "The official Clay problem statement fixes the formulation, but this draft does not treat it as a live adjudication registry for claimed developments.", "status_source_ids": ["FEFFERMAN-CLAY"], "recheck_instruction": "A PDE analyst must recheck the official formulation and any claimed developments before wording compares this task to the global problem." },
+      "status_freshness": {
+        "source_audit_date": "2026-08-17",
+        "prepublication_recheck_required": true,
+        "registry_access": "uncertain",
+        "registry_access_note": "The official Clay problem statement fixes the formulation, but this draft does not treat it as a live adjudication registry for claimed developments.",
+        "status_source_ids": ["FEFFERMAN-CLAY"],
+        "recheck_instruction": "A PDE analyst must recheck the official formulation and any claimed developments before wording compares this task to the global problem."
+      },
       "variant_distinctions": [
-        { "variant": "Finite Galerkin system versus PDE", "distinction": "A finite-dimensional truncation is not the full Navier–Stokes equation and cannot prove global regularity by itself." },
-        { "variant": "Periodic versus whole-space formulation", "distinction": "The periodic and whole-space settings have separately stated hypotheses and are never merged in an artifact label." }
+        {
+          "variant": "Finite Galerkin system versus PDE",
+          "distinction": "A finite-dimensional truncation is not the full Navier–Stokes equation and cannot prove global regularity by itself."
+        },
+        {
+          "variant": "Periodic versus whole-space formulation",
+          "distinction": "The periodic and whole-space settings have separately stated hypotheses and are never merged in an artifact label."
+        }
       ],
       "bounded_subgoals": [
-        { "id": "NS-G1", "question": "Check a specified energy balance for one periodic Fourier-Galerkin truncation over [0,T] with declared residual tolerance.", "falsifier": "The residual certificate exceeds tolerance, divergence-free constraints fail, or a manifest parameter is missing.", "boundary": "One finite truncation and time interval only; no PDE regularity conclusion.", "evidence_artifact": "Mode manifest, solver version, interval or residual certificate, and independently rerun checker." }
+        {
+          "id": "NS-G1",
+          "question": "Check a specified energy balance for one periodic Fourier-Galerkin truncation over [0,T] with declared residual tolerance.",
+          "falsifier": "The residual certificate exceeds tolerance, divergence-free constraints fail, or a manifest parameter is missing.",
+          "boundary": "One finite truncation and time interval only; no PDE regularity conclusion.",
+          "evidence_artifact": "Mode manifest, solver version, interval or residual certificate, and independently rerun checker."
+        }
       ],
       "references": [
-        { "id": "FEFFERMAN-CLAY", "authority": "official", "url": "https://www.claymath.org/wp-content/uploads/2022/06/navierstokes.pdf", "locator": "Official problem description, alternatives (A)–(D) on pages 2–3; use it to preserve the global-problem boundary.", "why_here": "Official formulation anchor.", "license_or_rights": "License not asserted by this dossier; citation and link only, with no source text, figures, data, code, or PDF included. Verify source-owner rights before any reuse." }
+        {
+          "id": "FEFFERMAN-CLAY",
+          "authority": "official",
+          "url": "https://www.claymath.org/wp-content/uploads/2022/06/navierstokes.pdf",
+          "locator": "Official problem description, alternatives (A)–(D) on pages 2–3; use it to preserve the global-problem boundary.",
+          "why_here": "Official formulation anchor.",
+          "license_or_rights": "License not asserted by this dossier; citation and link only, with no source text, figures, data, code, or PDF included. Verify source-owner rights before any reuse."
+        }
       ]
     }
   ],
   "new_theory_template": {
     "id": "NEW-THEORY-WORKSHOP-TEMPLATE",
-    "required_fields": ["exact construction", "explicit predictions", "consistency checks", "distinction from established theory", "falsifier", "bounded first test", "safety and dual-use note", "external-expert review plan"],
+    "required_fields": [
+      "exact construction",
+      "explicit predictions",
+      "consistency checks",
+      "distinction from established theory",
+      "falsifier",
+      "bounded first test",
+      "safety and dual-use note",
+      "external-expert review plan"
+    ],
     "admission_rule": "A speculative construction is welcome only as a workshop draft until it names a falsifiable prediction, a finite first check, and a distinction from established theory.",
     "no_claim_boundary": "Novelty, correctness, physical relevance, and compatibility with established theory are separate reviewable claims; no template completion asserts any of them."
   }

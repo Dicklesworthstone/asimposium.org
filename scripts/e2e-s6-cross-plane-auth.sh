@@ -3705,7 +3705,8 @@ main() {
   # fd-handoff diagnosis. It exercises the production run_bounded path without
   # entering the full self-test or reading any live credential.
   if [[ "${1:-}" == "--self-test-supervisor-bootstrap" ]]; then
-    local bootstrap_status=0 bootstrap_outcome bootstrap_stage
+    local bootstrap_status=0 bootstrap_outcome bootstrap_stage bootstrap_record
+    local bootstrap_transcript_plant="${2:-canonical}"
     clear_child_records
     run_bounded 5 /dev/null - /usr/bin/true || bootstrap_status=$?
     bootstrap_outcome="$RUN_BOUNDED_OUTCOME"
@@ -3717,7 +3718,31 @@ main() {
     fi
     CLEANED_UP=1
     if (( bootstrap_status == 0 )) && [[ "$bootstrap_outcome" == "child" ]]; then
-      emit "{\"suite\":\"${SUITE}\",\"assertion\":\"supervisor-bootstrap-only\",\"status\":\"pass\",\"run_status\":0,\"outcome\":\"child\",\"stage\":\"$(json_string "$bootstrap_stage")\"}"
+      bootstrap_record="{\"suite\":\"${SUITE}\",\"assertion\":\"supervisor-bootstrap-only\",\"status\":\"pass\",\"run_status\":0,\"outcome\":\"child\",\"stage\":\"$(json_string "$bootstrap_stage")\"}"
+      case "$bootstrap_transcript_plant" in
+        canonical)
+          emit "$bootstrap_record"
+          ;;
+        partial)
+          printf '%s' "$bootstrap_record"
+          ;;
+        duplicate)
+          printf '%s\n%s\n' "$bootstrap_record" "$bootstrap_record"
+          ;;
+        trailing)
+          printf '%s\n\n' "$bootstrap_record"
+          ;;
+        malformed)
+          printf '\377\n'
+          ;;
+        dead-stream)
+          exec >/dev/null
+          ;;
+        *)
+          emit "{\"suite\":\"${SUITE}\",\"assertion\":\"supervisor-bootstrap-only\",\"status\":\"fail\",\"code\":\"UNKNOWN_TRANSCRIPT_PLANT\"}"
+          exit "$EX_CONFIG"
+          ;;
+      esac
       exit 0
     fi
     emit "{\"suite\":\"${SUITE}\",\"assertion\":\"supervisor-bootstrap-only\",\"status\":\"fail\",\"code\":\"BOOTSTRAP_UNAVAILABLE\",\"run_status\":${bootstrap_status},\"outcome\":\"$(json_string "$bootstrap_outcome")\",\"stage\":\"$(json_string "$bootstrap_stage")\"}"
