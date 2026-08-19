@@ -23,7 +23,7 @@ import { isCanonicalSponsorId, sponsorIdFromGoogleSubject } from "./lib/sponsor-
  * A claim is authentication evidence only as a non-negative safe integer
  * (the same bar the step-up check applies downstream).
  */
-function validAuthTime(value: unknown): number | undefined {
+export function validAuthTime(value: unknown): number | undefined {
   return typeof value === "number" && Number.isSafeInteger(value) && value >= 0
     ? value
     : undefined;
@@ -35,7 +35,7 @@ function validAuthTime(value: unknown): number | undefined {
  * beyond the one claim, and any malformed shape yields undefined (fail-closed
  * at the step-up check, not a crash).
  */
-function authTimeFromIdToken(idToken: unknown): number | undefined {
+export function authTimeFromIdToken(idToken: unknown): number | undefined {
   if (typeof idToken !== "string") return undefined;
   const segment = idToken.split(".")[1];
   if (segment === undefined) return undefined;
