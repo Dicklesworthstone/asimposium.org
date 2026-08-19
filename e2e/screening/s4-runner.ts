@@ -33,7 +33,11 @@ import {
   runLegitimateOnlyScreening,
 } from "./s4-legitimate-only";
 
-const LIVE_REQUEST_TIMEOUT_MS = 15_000;
+// The live call carries the whole evaluable corpus in one request: 150
+// provider classifications at ~4s each over the route's 16 lanes cannot fit a
+// 15s ceiling. Size the wait to the corpus rather than pretend a batch
+// measurement is a single fetch.
+const LIVE_REQUEST_TIMEOUT_MS = 180_000;
 const MAX_LIVE_JSON_BYTES = 1_048_576;
 
 class RunnerFailure extends Error {
