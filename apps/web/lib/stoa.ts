@@ -68,6 +68,7 @@ const ROUTE_FELLOWS_AFTER = "/v1/fellows/after/:cursor";
 const ROUTE_CREDENTIAL_REVOKE = "/v1/fellows/credentials/revoke";
 const ROUTE_FELLOW_LIFECYCLE = "/v1/fellows/lifecycle";
 const ROUTE_SPONSOR_PANIC = "/v1/sponsors/panic";
+const ROUTE_SPONSOR_WORKSHOP = "/v1/sponsors/workshop";
 const ROUTE_BOOTSTRAP = "/v1/sponsors/bootstrap";
 const ROUTE_DEVICE_LOOKUP = "/v1/device-lookup";
 const ROUTE_OPERATOR_FELLOW_CAP = "/v1/operators/fellow-cap";
@@ -83,6 +84,7 @@ const ACTION_FELLOWS = "fellows.list";
 const ACTION_CREDENTIAL_REVOKE = "fellow.credential.revoke";
 const ACTION_FELLOW_LIFECYCLE = "fellow.lifecycle.change";
 const ACTION_SPONSOR_PANIC = "sponsor.panic";
+const ACTION_WORKSHOP_READ = "workshop.read";
 const ACTION_BOOTSTRAP = "sponsor.bootstrap";
 const ACTION_DEVICE_LOOKUP = "enrollment.device.lookup";
 const ACTION_OPERATOR_FELLOW_CAP_OVERRIDE = "operator.fellow-cap.override";
@@ -103,6 +105,125 @@ export type StoaCall<T> =
 interface StoaSigningConfig {
   readonly privateKey: CryptoKey;
   readonly kid: string;
+}
+
+/** Default for singleton acknowledgements and bootstrap/device responses. */
+export const MAX_STOA_SUCCESS_RESPONSE_BYTES = 262_144;
+/** 100 approval cards can each carry two independently bounded resource grants. */
+export const MAX_STOA_PROPOSAL_LIST_RESPONSE_BYTES = 8 * 1024 * 1024;
+/** 500 Fellow summaries can each carry bounded grants plus three credentials. */
+export const MAX_STOA_FELLOW_LIST_RESPONSE_BYTES = 16 * 1024 * 1024;
+/** 100 immutable operator receipts can each carry a 1,000-code-point reason. */
+export const MAX_STOA_OPERATOR_AUDIT_RESPONSE_BYTES = 1024 * 1024;
+export const MAX_STOA_REFUSAL_RESPONSE_BYTES = 65_536;
+export const STOA_RESPONSE_READ_TIMEOUT_MS = 8_000;
+const INITIAL_STOA_RESPONSE_ALLOCATION_BYTES = 16_384;
+
+function discardStoaResponse(response: Response): void {
+  try {
+    void response.body?.cancel().catch(() => undefined);
+  } catch {
+    // The response is already unusable; cancellation is best-effort only.
+  }
+}
+
+/**
+ * Retain at most `maximum` response bytes before fatal UTF-8 and JSON parsing.
+ * Content-Length is only an early refusal: the streamed count is authoritative
+ * because a peer may omit or understate it.
+ */
+export async function readBoundedStoaJson(
+  response: Response,
+  maximum: number,
+  timeoutMs = STOA_RESPONSE_READ_TIMEOUT_MS,
+): Promise<unknown | undefined> {
+  if (
+    !Number.isSafeInteger(maximum) ||
+    maximum < 1 ||
+    maximum > MAX_STOA_FELLOW_LIST_RESPONSE_BYTES
+  ) {
+    throw new TypeError("Stoa response byte limit is outside the supported bounded range");
+  }
+  if (
+    !Number.isSafeInteger(timeoutMs) ||
+    timeoutMs < 1 ||
+    timeoutMs > STOA_RESPONSE_READ_TIMEOUT_MS
+  ) {
+    throw new TypeError("Stoa response read timeout is outside the supported bounded range");
+  }
+  const declaredLength = response.headers.get("content-length");
+  if (
+    declaredLength !== null &&
+    /^(?:0|[1-9][0-9]*)$/.test(declaredLength) &&
+    (!Number.isSafeInteger(Number(declaredLength)) || Number(declaredLength) > maximum)
+  ) {
+    discardStoaResponse(response);
+    return undefined;
+  }
+
+  if (response.body === null) return undefined;
+  let reader: ReadableStreamDefaultReader<Uint8Array>;
+  try {
+    reader = response.body.getReader();
+  } catch {
+    discardStoaResponse(response);
+    return undefined;
+  }
+
+  let bytes = new Uint8Array(Math.min(maximum, INITIAL_STOA_RESPONSE_ALLOCATION_BYTES));
+  let total = 0;
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  const deadlineAt = performance.now() + timeoutMs;
+  const deadline = new Promise<never>((_resolve, reject) => {
+    timer = setTimeout(() => reject(new Error("stoa-response-read-timeout")), timeoutMs);
+  });
+  try {
+    while (true) {
+      if (performance.now() >= deadlineAt) throw new Error("stoa-response-read-timeout");
+      const next = await Promise.race([reader.read(), deadline]);
+      if (next.done) break;
+      if (next.value.byteLength > maximum - total) {
+        try {
+          void reader.cancel().catch(() => undefined);
+        } catch {
+          // The overrun is already authoritative.
+        }
+        return undefined;
+      }
+      const required = total + next.value.byteLength;
+      if (required > bytes.byteLength) {
+        let capacity = bytes.byteLength;
+        while (capacity < required) capacity = Math.min(maximum, Math.max(required, capacity * 2));
+        const grown = new Uint8Array(capacity);
+        grown.set(bytes.subarray(0, total));
+        bytes = grown;
+      }
+      bytes.set(next.value, total);
+      total += next.value.byteLength;
+    }
+  } catch {
+    try {
+      void reader.cancel().catch(() => undefined);
+    } catch {
+      // The failed or expired read is already authoritative.
+    }
+    return undefined;
+  } finally {
+    if (timer !== undefined) clearTimeout(timer);
+    try {
+      reader.releaseLock();
+    } catch {
+      // A failed stream is already an invalid response.
+    }
+  }
+
+  try {
+    return JSON.parse(
+      new TextDecoder("utf-8", { fatal: true }).decode(bytes.subarray(0, total)),
+    ) as unknown;
+  } catch {
+    return undefined;
+  }
 }
 
 /**
@@ -156,9 +277,8 @@ async function refusalInfo(
   response: Response,
 ): Promise<{ readonly detail?: string; readonly problemCode?: ProblemCode }> {
   try {
-    const text = await response.text();
-    if (text.length > 65_536) return {};
-    const value: unknown = JSON.parse(text);
+    const value = await readBoundedStoaJson(response, MAX_STOA_REFUSAL_RESPONSE_BYTES);
+    if (value === undefined) return {};
     const problem = ProblemDocumentSchema.safeParse(value);
     if (!problem.success || problem.data.status !== response.status) return {};
     return {
@@ -183,16 +303,15 @@ async function callStoa<T>(options: {
   /** The exact body bytes — signed and sent, never reserialized. */
   readonly body: string;
   readonly idempotencyKey?: string;
+  /** Contract-shaped ceiling for this response kind. */
+  readonly responseMaxBytes?: number;
   /** Parse the response while retaining the exact origin used for this request. */
   readonly parse: (value: unknown, stoaOrigin: string) => T;
 }): Promise<StoaCall<T>> {
   if (!isCanonicalSponsorId(options.principalId)) {
     return { ok: false, reason: "unconfigured" };
   }
-  if (
-    options.principalType === "operator" &&
-    !operatorPrincipalIsAllowed(options.principalId)
-  ) {
+  if (options.principalType === "operator" && !operatorPrincipalIsAllowed(options.principalId)) {
     return { ok: false, reason: "unconfigured" };
   }
   const stoaOrigin = configuredStoaOrigin();
@@ -231,7 +350,12 @@ async function callStoa<T>(options: {
     };
   }
   try {
-    return { ok: true, data: options.parse(await response.json(), stoaOrigin) };
+    const value = await readBoundedStoaJson(
+      response,
+      options.responseMaxBytes ?? MAX_STOA_SUCCESS_RESPONSE_BYTES,
+    );
+    if (value === undefined) return { ok: false, reason: "unreachable" };
+    return { ok: true, data: options.parse(value, stoaOrigin) };
   } catch {
     // A 2xx that does not parse to the contract is a host failure, not data.
     return { ok: false, reason: "unreachable" };
@@ -307,7 +431,42 @@ export function stoaPendingProposals(
     action: ACTION_PROPOSALS,
     principalId,
     body: "",
+    responseMaxBytes: MAX_STOA_PROPOSAL_LIST_RESPONSE_BYTES,
     parse: (value) => SponsorProposalListResponseSchema.parse(value),
+  });
+}
+
+export interface SponsorWorkshopObject {
+  readonly workshop_id: string;
+  readonly type: string;
+  readonly title: string;
+  readonly body_md: string;
+  readonly relates_to: readonly string[];
+  readonly workshop_seq: number;
+  readonly created_at: string;
+}
+
+export interface SponsorWorkshopView {
+  readonly problem_id: string;
+  readonly fellow_id: string;
+  readonly objects: readonly SponsorWorkshopObject[];
+}
+
+/** The sponsor's live workshop view (Rule A2): envelope-verified, own fellows only. */
+export function stoaSponsorWorkshop(
+  principalId: string,
+  problemId: string,
+  fellowId: string,
+): Promise<StoaCall<SponsorWorkshopView>> {
+  return callStoa({
+    method: "GET",
+    route: ROUTE_SPONSOR_WORKSHOP,
+    path: `${ROUTE_SPONSOR_WORKSHOP}?problem_id=${encodeURIComponent(problemId)}&fellow_id=${encodeURIComponent(fellowId)}`,
+    action: ACTION_WORKSHOP_READ,
+    principalId,
+    body: "",
+    responseMaxBytes: MAX_STOA_PROPOSAL_LIST_RESPONSE_BYTES,
+    parse: (value) => value as SponsorWorkshopView,
   });
 }
 
@@ -341,6 +500,7 @@ export function stoaFellows(
     action: ACTION_FELLOWS,
     principalId,
     body: "",
+    responseMaxBytes: MAX_STOA_FELLOW_LIST_RESPONSE_BYTES,
     parse: (value) => SponsorFellowListResponseSchema.parse(value),
   });
 }
@@ -368,11 +528,13 @@ export function stoaOperatorFellowCapAudit(
   sponsorId: string,
   after?: OperatorFellowCapAuditCursor,
 ): Promise<StoaCall<OperatorFellowCapAuditPageResponse>> {
-  const cursor =
-    after === undefined ? undefined : OperatorFellowCapAuditCursorSchema.parse(after);
+  const cursor = after === undefined ? undefined : OperatorFellowCapAuditCursorSchema.parse(after);
   return callStoa({
     method: "GET",
-    route: cursor === undefined ? ROUTE_OPERATOR_FELLOW_CAP_HISTORY : ROUTE_OPERATOR_FELLOW_CAP_HISTORY_AFTER,
+    route:
+      cursor === undefined
+        ? ROUTE_OPERATOR_FELLOW_CAP_HISTORY
+        : ROUTE_OPERATOR_FELLOW_CAP_HISTORY_AFTER,
     path:
       cursor === undefined
         ? `/v1/operators/sponsors/${sponsorId}/fellow-cap/history`
@@ -381,6 +543,7 @@ export function stoaOperatorFellowCapAudit(
     principalId: operatorId,
     principalType: "operator",
     body: "",
+    responseMaxBytes: MAX_STOA_OPERATOR_AUDIT_RESPONSE_BYTES,
     parse: (value) => OperatorFellowCapAuditPageResponseSchema.parse(value),
   });
 }
