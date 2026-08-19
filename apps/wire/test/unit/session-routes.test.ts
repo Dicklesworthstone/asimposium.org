@@ -1380,4 +1380,286 @@ describe("session protocol routes", () => {
     expect(unknownProfile.status).toBe(400);
     expect(await unknownProfile.json()).toMatchObject({ code: "UNKNOWN_PROFILE" });
   });
+
+  // yn9p (P0): the promote handler used to run the P11 norm-hash duplicate
+  // gate, and the owned-workshop lookup, BEFORE authorization. An unscoped,
+  // non-member or suspicious-review credential could therefore submit a
+  // near-duplicate statement and receive 409 DUPLICATE_CLAIM carrying
+  // `existing_claim_id` — learning that a statement exists on a problem it may
+  // not write to. This pins the repaired ordering at the route boundary.
+  test("PLANTED: an unauthorized near-duplicate promote is refused before the duplicate gate", async () => {
+    const { call, db, router, env, service } = await fixture();
+    const sponsor = { type: "sponsor", sponsorId: "usr_sessionsponsor1" } as const;
+    const STATEMENT = "Every toggle-invariant labeling factors through the quotient.";
+
+    // --- Authorized control: seed the claim the unauthorized Fellow will collide with.
+    const openedA = await call("/v1/sessions", {
+      method: "POST",
+      headers: { "content-type": "application/json", "idempotency-key": "yn9p-open-a" },
+      body: JSON.stringify({ problem_id: "P-4DSP" }),
+    });
+    expect(openedA.status).toBe(201);
+    const sessionA = (await openedA.json()) as { session_id: string };
+    const pushedA = await call(`/v1/sessions/${sessionA.session_id}/workshop`, {
+      method: "POST",
+      headers: { "content-type": "application/json", "idempotency-key": "yn9p-push-a" },
+      body: JSON.stringify({
+        type: "draft",
+        title: "Quotient factorization",
+        body_md: "Working note.",
+        relates_to: [],
+      }),
+    });
+    expect(pushedA.status).toBe(201);
+    const workshopA = (await pushedA.json()) as { workshop_id: string };
+
+    // A1 — NON-VACUITY: the byte-identical promote succeeds when the scope is
+    // granted. Without this the suite would pass against a router that refuses
+    // everything. Its claim id is the secret every refusal below must withhold.
+    const allowed = await call(`/v1/sessions/${sessionA.session_id}/promote`, {
+      method: "POST",
+      headers: { "content-type": "application/json", "idempotency-key": "yn9p-promote-a" },
+      body: JSON.stringify({
+        workshop_id: workshopA.workshop_id,
+        kind: "claim",
+        statement: STATEMENT,
+        falsifier: "A toggle-invariant labeling that does not factor.",
+        relates_to: [],
+      }),
+    });
+    expect(allowed.status).toBe(201);
+    const seededClaimId = ((await allowed.json()) as { claim_id: string }).claim_id;
+    expect(typeof seededClaimId).toBe("string");
+    expect(seededClaimId.length).toBeGreaterThan(0);
+
+    // A2 — the hoist must not have disabled P11. An AUTHORIZED Fellow
+    // repeating the same statement still gets the duplicate refusal, and it
+    // still carries the existing claim id. If this ever returns 201 the
+    // duplicate gate is dead and the B-cases below would pass vacuously.
+    const authorizedDuplicate = await call(`/v1/sessions/${sessionA.session_id}/promote`, {
+      method: "POST",
+      headers: { "content-type": "application/json", "idempotency-key": "yn9p-promote-a-dup" },
+      body: JSON.stringify({
+        workshop_id: workshopA.workshop_id,
+        kind: "claim",
+        statement: STATEMENT,
+        falsifier: "A toggle-invariant labeling that does not factor.",
+        relates_to: [],
+      }),
+    });
+    expect(authorizedDuplicate.status).toBe(409);
+    const authorizedDuplicateText = await authorizedDuplicate.text();
+    expect(authorizedDuplicateText).toContain("DUPLICATE_CLAIM");
+    expect(authorizedDuplicateText).toContain(seededClaimId);
+
+    const claimsAfterControl = await db
+      .prepare("SELECT COUNT(*) AS n FROM claims WHERE problem_id = 'P-4DSP'")
+      .first<{ n: number }>();
+    const eventsAfterControl = await db
+      .prepare("SELECT COUNT(*) AS n FROM events WHERE problem_id = 'P-4DSP'")
+      .first<{ n: number }>();
+    const cursorAfterControl = await (await call("/cursor")).text();
+    expect(claimsAfterControl?.n).toBe(1);
+
+    // --- Unauthorized Fellow: the ONLY delta is the granted scope.
+    const enrollmentRouter = createEnrollmentRouter({ service });
+    const mintedB = await service.mint(sponsor, {
+      requested_scopes: ["review"],
+      problem_binding: "P-4DSP",
+    });
+    const registrationB = await enrollmentRouter.fetch(
+      new Request("https://a-staging.asimposium.org/v1/fellows", {
+        method: "POST",
+        headers: { "content-type": "application/json", "idempotency-key": "yn9p-claim-b" },
+        body: JSON.stringify({
+          enrollment_id: mintedB.enrollmentId,
+          secret: mintedB.secret,
+          name: "reviewer-only",
+          model: "test-model",
+          harness: "test-harness",
+        }),
+      }),
+    );
+    const { flow_handle: flowHandleB } = (await registrationB.json()) as { flow_handle: string };
+    await service.decide(sponsor, mintedB.enrollmentId, {
+      enrollment_id: mintedB.enrollmentId,
+      decision: "approve",
+      step_up_authenticated_at: Math.floor(Date.now() / 1_000),
+    });
+    const issuedB = await enrollmentRouter.fetch(
+      new Request("https://a-staging.asimposium.org/v1/device-token", {
+        method: "POST",
+        headers: { "content-type": "application/json", "idempotency-key": "yn9p-token-b" },
+        body: JSON.stringify({ flow_handle: flowHandleB }),
+      }),
+    );
+    const issuedBodyB = (await issuedB.json()) as { token?: string };
+    if (issuedBodyB.token === undefined) throw new Error("yn9p: fellow B token was not issued");
+    const bindingB = await service.credentialBinding(issuedBodyB.token);
+    if (bindingB === undefined) throw new Error("yn9p: fellow B binding missing");
+    expect(bindingB.grantedScopes).toEqual(["review"]);
+    await db
+      .prepare(
+        "INSERT INTO enrollment_fellows (fellow_id, sponsor_id, name, model, harness, created_at) VALUES (?, ?, ?, ?, ?, ?)",
+      )
+      .bind(
+        bindingB.fellowId,
+        bindingB.sponsorId,
+        bindingB.name,
+        bindingB.model,
+        bindingB.harness,
+        Date.now(),
+      )
+      .run();
+    const callB = (path: string, init: RequestInit = {}) =>
+      router.fetch(
+        new Request(`https://a-staging.asimposium.org${path}`, {
+          ...init,
+          headers: {
+            authorization: `Bearer ${issuedBodyB.token}`,
+            ...(init.headers ?? {}),
+          },
+        }),
+        env,
+      );
+
+    const openedB = await callB("/v1/sessions", {
+      method: "POST",
+      headers: { "content-type": "application/json", "idempotency-key": "yn9p-open-b" },
+      body: JSON.stringify({ problem_id: "P-4DSP" }),
+    });
+    expect(openedB.status).toBe(201);
+    const sessionB = (await openedB.json()) as { session_id: string };
+
+    // B must promote its OWN workshop object, and this is load-bearing for the
+    // causality rather than tidiness. Under the OLD ordering the owned-workshop
+    // lookup ran before P11, so a promote naming Fellow A's workshop id would
+    // have returned 404 and never reached the duplicate gate — the test would
+    // have passed against the very bug it exists to catch. With B's own
+    // workshop the old ordering reaches P11 and answers 409 with the seeded
+    // claim id, which is exactly the disclosure the hoist removes.
+    //
+    // The push itself must succeed: opening the session atomically joined B as
+    // a contributor (router.ts:577), and `workshop.push` is unscoped for an
+    // active member (service.ts:674), so a review-only credential may push.
+    const pushedB = await callB(`/v1/sessions/${sessionB.session_id}/workshop`, {
+      method: "POST",
+      headers: { "content-type": "application/json", "idempotency-key": "yn9p-push-b" },
+      body: JSON.stringify({
+        type: "draft",
+        title: "Reviewer's own draft",
+        body_md: "Owned by B so the promote reaches the duplicate gate.",
+        relates_to: [],
+      }),
+    });
+    expect(pushedB.status).toBe(201);
+    const workshopB = (await pushedB.json()) as { workshop_id: string };
+
+    // Counts are captured AFTER B's push, so the no-mutation assertions below
+    // isolate the unauthorized promotes rather than folding in B's legitimate
+    // workshop write.
+    const claimsBeforeUnauthorized = await db
+      .prepare("SELECT COUNT(*) AS n FROM claims WHERE problem_id = 'P-4DSP'")
+      .first<{ n: number }>();
+    const eventsBeforeUnauthorized = await db
+      .prepare("SELECT COUNT(*) AS n FROM events WHERE problem_id = 'P-4DSP'")
+      .first<{ n: number }>();
+    const cursorBeforeUnauthorized = await (await call("/cursor")).text();
+
+    // B's workshop push is private: it must not have moved the public ledger
+    // or the cursor, so the two capture points agree and the unauthorized
+    // assertions below are anchored to a ledger that only A1 ever advanced.
+    expect(claimsBeforeUnauthorized?.n).toBe(claimsAfterControl?.n);
+    expect(eventsBeforeUnauthorized?.n).toBe(eventsAfterControl?.n);
+    expect(cursorBeforeUnauthorized).toBe(cursorAfterControl);
+
+    // B1 — the near-duplicate, on B's own workshop.
+    const refused = await callB(`/v1/sessions/${sessionB.session_id}/promote`, {
+      method: "POST",
+      headers: { "content-type": "application/json", "idempotency-key": "yn9p-promote-b" },
+      body: JSON.stringify({
+        workshop_id: workshopB.workshop_id,
+        kind: "claim",
+        statement: STATEMENT,
+        falsifier: "A toggle-invariant labeling that does not factor.",
+        relates_to: [],
+      }),
+    });
+
+    // B1.1 The coarse policy face, not the duplicate gate.
+    expect(refused.status).toBe(403);
+    const refusedBody = (await refused.clone().json()) as Record<string, unknown>;
+    expect(refusedBody).toMatchObject({ code: "WRITE_REFUSED" });
+
+    // B1.2 NO ID LEAK: the seeded claim id is the secret. Assert against the
+    // WHOLE response, since a leak through any field — extensions, detail,
+    // fix_hint — discloses that this statement already exists.
+    const refusedText = await refused.text();
+    expect(refusedText).not.toContain(seededClaimId);
+    expect(refusedText).not.toContain("existing_claim_id");
+    expect(refusedText).not.toContain("DUPLICATE_CLAIM");
+    expect(refusedText).not.toContain(workshopA.workshop_id);
+    expect(refusedBody.existing_claim_id).toBeUndefined();
+
+    // B2 — THE ORACLE TEST. The same unauthorized Fellow promoting a statement
+    // that collides with nothing must produce a response byte-identical to B1.
+    // Any difference at all — status, code, body, ordering — means
+    // duplicate-ness is observable to a caller that may not write here, which
+    // is exactly the disclosure yn9p exists to close.
+    const refusedNonDuplicate = await callB(`/v1/sessions/${sessionB.session_id}/promote`, {
+      method: "POST",
+      headers: { "content-type": "application/json", "idempotency-key": "yn9p-promote-b-nondup" },
+      body: JSON.stringify({
+        workshop_id: workshopB.workshop_id,
+        kind: "claim",
+        statement: "An entirely unrelated statement that collides with no seeded claim.",
+        falsifier: "The unrelated statement holds.",
+        relates_to: [],
+      }),
+    });
+    expect(refusedNonDuplicate.status).toBe(403);
+    const refusedNonDuplicateText = await refusedNonDuplicate.text();
+    expect(refusedNonDuplicateText).toBe(refusedText);
+    expect(refusedNonDuplicateText).not.toContain(seededClaimId);
+
+    // B3 — shared-face drift, bound STRUCTURALLY rather than by a second live
+    // denial. The workshop route cannot supply one: opening the session joined
+    // B as a contributor and `workshop.push` is unscoped, so B's push is a
+    // legitimate 201 (asserted above). Asserting a workshop 403 here would be
+    // guaranteed-red and would contradict Fable §5. Instead, pin that both
+    // denial sites route through the one shared builder and that no per-route
+    // refusal body exists to drift back into.
+    const routerSource = readFileSync(
+      resolve(import.meta.dir, "../../src/sessions/router.ts"),
+      "utf8",
+    );
+    const workshopStart = routerSource.indexOf('app.post("/v1/sessions/:id/workshop"');
+    const promoteStart = routerSource.indexOf('app.post("/v1/sessions/:id/promote"');
+    const closeStart = routerSource.indexOf('app.post("/v1/sessions/:id/close"');
+    expect(workshopStart).toBeGreaterThanOrEqual(0);
+    expect(promoteStart).toBeGreaterThan(workshopStart);
+    expect(closeStart).toBeGreaterThan(promoteStart);
+    const workshopHandler = routerSource.slice(workshopStart, promoteStart);
+    const promoteHandler = routerSource.slice(promoteStart, closeStart);
+    expect(workshopHandler).toContain("return writeRefusedProblem();");
+    expect(promoteHandler).toContain("return writeRefusedProblem();");
+    // Exactly one WRITE_REFUSED literal in the file: the shared builder's.
+    expect(routerSource.split('code: "WRITE_REFUSED"').length - 1).toBe(1);
+    // And no route may hand-build a refusal that names its own cause again.
+    expect(routerSource).not.toContain("may not promote on this problem now");
+    expect(routerSource).not.toContain("may not push to the workshop now");
+    expect(routerSource).not.toContain("ask your sponsor to widen them");
+
+    // NO MUTATION from the unauthorized promotes: no claim, no event, no
+    // cursor movement against the counts taken after B's legitimate push.
+    const claimsAfter = await db
+      .prepare("SELECT COUNT(*) AS n FROM claims WHERE problem_id = 'P-4DSP'")
+      .first<{ n: number }>();
+    const eventsAfter = await db
+      .prepare("SELECT COUNT(*) AS n FROM events WHERE problem_id = 'P-4DSP'")
+      .first<{ n: number }>();
+    expect(claimsAfter?.n).toBe(claimsBeforeUnauthorized?.n);
+    expect(eventsAfter?.n).toBe(eventsBeforeUnauthorized?.n);
+    expect(await (await call("/cursor")).text()).toBe(cursorBeforeUnauthorized);
+  });
 });

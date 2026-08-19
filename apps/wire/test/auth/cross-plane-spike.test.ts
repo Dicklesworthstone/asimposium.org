@@ -3793,12 +3793,14 @@ describe("the shell's causal self-tests actually run", () => {
   );
 
   test(
-    "PLANTED: the provider-free supervisor bootstrap proves run_bounded end to end",
+    "the provider-free supervisor bootstrap reaches input-ready on the real coproc path",
     async () => {
       // Credential-free by construction: the handler returns before
       // `missing_vars` is consulted, so no ASIMP_S6_* value is read and no
-      // provider is contacted. This is the only focused exercise of the real
-      // coproc / setpgrp / BOOT / START-NONE path.
+      // provider is contacted. `--self-test` also drives `run_bounded` (it has
+      // many call sites); what is unique here is the ISOLATED single-invocation
+      // probe of coproc / setpgrp / BOOT / START-NONE, which is what makes a
+      // portability or fd-handoff failure attributable.
       const run = await runShell(["--self-test-supervisor-bootstrap"], withoutS6Env());
       expect(run.timedOut, diag(run)).toBe(false);
       expect(run.exitCode, diag(run)).toBe(0);
@@ -3807,27 +3809,27 @@ describe("the shell's causal self-tests actually run", () => {
       // Exactly one record, so stray output cannot pad a passing run.
       const lines = run.stdout.split("\n").filter((line) => line.trim().length > 0);
       expect(lines.length, diag(run)).toBe(1);
-      const record = JSON.parse(lines[0] ?? "") as {
-        suite: string;
-        assertion: string;
-        status: string;
-        run_status: number;
-        outcome: string;
-        stage: string;
-      };
-      expect(record.suite).toBe("s6-cross-plane-auth");
-      expect(record.assertion).toBe("supervisor-bootstrap-only");
-      expect(record.status).toBe("pass");
-      // The shell's pass shape is a conjunction — run_status 0 AND a child
-      // outcome. Asserting both stops either half from carrying the verdict.
-      expect(record.run_status).toBe(0);
-      expect(record.outcome).toBe("child");
-      // Terminal stage only. An early bail reports pre-coproc, coproc-snapshot,
-      // fds-stable, control-prepared or boot-acknowledged instead, so this is
-      // the value that proves BOOT acknowledgement and START-NONE both landed.
-      expect(record.stage).toBe("input-ready");
-      // A bootstrap probe must never resemble a passing S-6 run.
-      expect(run.stdout, diag(run)).not.toContain('"status":"pass","assertions"');
+      // EXACT CANONICAL BYTES, in the shell emitter's own key order.
+      //
+      // Field-wise checking cannot close this. `JSON.parse` collapses duplicate
+      // keys last-wins before `Object.keys` is ever read, so an exact key set is
+      // not duplicate protection, and counting a `"key":` needle only catches
+      // the unpadded form — an emitter regression adding a SPACED duplicate
+      // (`"status":"fail","status" :"pass"`) would parse last-wins and pass.
+      // Comparing the whole line to the exact expected bytes closes that class
+      // outright: any added, missing, reordered, retyped, respaced or duplicated
+      // key changes the bytes and fails here.
+      //
+      // `run_status` and `outcome` appear below ONLY as protocol framing. They
+      // are hardcoded literals in the pass emit, so their presence proves the
+      // record's shape, NOT that the shell's `bootstrap_status == 0 && outcome
+      // == "child"` conjunction held — that conjunction lives in the shell and
+      // is not observable from this record. `status` and `stage` remain the only
+      // fields carrying independent semantic evidence.
+      expect(lines[0] ?? "", diag(run)).toBe(
+        '{"suite":"s6-cross-plane-auth","assertion":"supervisor-bootstrap-only",' +
+          '"status":"pass","run_status":0,"outcome":"child","stage":"input-ready"}',
+      );
     },
     SHELL_TIMEOUT_MS,
   );

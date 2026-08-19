@@ -123,16 +123,33 @@ function servePublicTextBody(appSource: string): string {
   throw new Error("servePublicText has an unbalanced body in app.ts");
 }
 
+/** Import binding plus the single gate argument. A third mention is an alias. */
+const EXPECTED_GET_DOCUMENT_MENTIONS = 2;
+
+function getDocumentMentions(appSource: string): number {
+  return (appSource.match(/\bgetDocument\b/g) ?? []).length;
+}
+
 /**
- * The production invariant: the public-text path names the gated reader, and
- * the module never calls the ungated one anywhere. `getDocument` may still be
- * mentioned — it is imported and handed to the gate — but a CALL to it is
- * exactly the regression this refuses.
+ * The production invariant, in three independent clauses.
+ *
+ * 1. The public-text path names the gated reader.
+ * 2. The module never CALLS the ungated one. `getDocument` may still be
+ *    mentioned — it is imported and handed to the gate — but a call is the
+ *    regression this refuses.
+ * 3. It is mentioned exactly twice. Clause 2 tests a literal call token, so
+ *    indirection defeats it: `const raw = getDocument;` then `raw(id)` is an
+ *    ungated read that never spells `getDocument(`. Counting the binding closes
+ *    that hole, because the alias has to name it a third time to exist.
+ *
+ * Each clause is proven load-bearing by its own mutation below; a clause no
+ * mutation can flip is decoration, not a guard.
  */
 function servesOnlyThroughGatedReader(appSource: string): boolean {
   return (
     servePublicTextBody(appSource).includes("readSafeProtocolDocument(") &&
-    !appSource.includes("getDocument(")
+    !appSource.includes("getDocument(") &&
+    getDocumentMentions(appSource) === EXPECTED_GET_DOCUMENT_MENTIONS
   );
 }
 
@@ -186,12 +203,58 @@ describe("the production protocol cold-path gate", () => {
     expect(servePublicTextBody(appSource)).toContain("readSafeProtocolDocument(");
     // Mentioned twice (imported, then handed to the gate) but never called.
     expect(appSource).not.toContain("getDocument(");
+    expect(getDocumentMentions(appSource)).toBe(EXPECTED_GET_DOCUMENT_MENTIONS);
 
-    // CAUSAL: the same predicate must REJECT the regression it exists to catch.
-    // Without this the assertions above could pass by being unfalsifiable.
-    const regressed = appSource.replace("readSafeProtocolDocument(id)", "getDocument(id)");
-    expect(regressed).not.toBe(appSource);
-    expect(servesOnlyThroughGatedReader(regressed)).toBe(false);
+    // (A) is the named combined regression; (B), (C) and (D) each flip exactly
+    // one clause, so no clause can be deleted while this test stays green. A
+    // predicate whose clauses only ever flip together is one assertion wearing
+    // three hats.
+
+    // (A) direct call — the regression this guard is named for. It trips ALL
+    // THREE clauses at once (the body loses the gated reader, a literal call
+    // appears, and the mention count rises), which is why it cannot stand in
+    // for the isolating mutations below.
+    const directCall = appSource.replace("readSafeProtocolDocument(id)", "getDocument(id)");
+    expect(directCall).not.toBe(appSource);
+    expect(servePublicTextBody(directCall)).not.toContain("readSafeProtocolDocument(");
+    expect(directCall).toContain("getDocument(");
+    expect(getDocumentMentions(directCall)).toBe(EXPECTED_GET_DOCUMENT_MENTIONS + 1);
+    expect(servesOnlyThroughGatedReader(directCall)).toBe(false);
+
+    // (B) aliased read — never spells `getDocument(` and leaves the mention
+    // count at two, so ONLY the body clause can reject it.
+    const aliasedRead = appSource.replace("readSafeProtocolDocument(id)", "ungatedReader(id)");
+    expect(aliasedRead).not.toBe(appSource);
+    expect(aliasedRead).not.toContain("getDocument(");
+    expect(getDocumentMentions(aliasedRead)).toBe(EXPECTED_GET_DOCUMENT_MENTIONS);
+    expect(servesOnlyThroughGatedReader(aliasedRead)).toBe(false);
+
+    // (C) alias binding — the body still reads through the gate and nothing
+    // calls `getDocument(`, so ONLY the mention count can reject it.
+    const aliasBinding = appSource.replace(
+      "const readSafeProtocolDocument =",
+      "const ungatedReader = getDocument;\nconst readSafeProtocolDocument =",
+    );
+    expect(aliasBinding).not.toBe(appSource);
+    expect(servePublicTextBody(aliasBinding)).toContain("readSafeProtocolDocument(");
+    expect(aliasBinding).not.toContain("getDocument(");
+    expect(getDocumentMentions(aliasBinding)).toBe(EXPECTED_GET_DOCUMENT_MENTIONS + 1);
+    expect(servesOnlyThroughGatedReader(aliasBinding)).toBe(false);
+
+    // (D) called gate argument — the body still names the gated reader and the
+    // mention count is unchanged, because `getDocument()` is still one mention.
+    // ONLY the literal-call clause can reject it. The two-line anchor is
+    // required: `  getDocument,` alone also matches the import block, where
+    // `type DocumentId,` sits between the two names.
+    const calledGateArgument = appSource.replace(
+      "  assertProtocolInvariants,\n  getDocument,\n",
+      "  assertProtocolInvariants,\n  getDocument(),\n",
+    );
+    expect(calledGateArgument).not.toBe(appSource);
+    expect(servePublicTextBody(calledGateArgument)).toContain("readSafeProtocolDocument(");
+    expect(getDocumentMentions(calledGateArgument)).toBe(EXPECTED_GET_DOCUMENT_MENTIONS);
+    expect(calledGateArgument).toContain("getDocument(");
+    expect(servesOnlyThroughGatedReader(calledGateArgument)).toBe(false);
   });
 });
 
@@ -282,7 +345,7 @@ describe("face wire format", () => {
     expect(prepares).toBe(1);
   });
 
-  test("the uncontracted event-tail shape is a canonical route miss without D1 access", async () => {
+  test("uncontracted event-tail spellings are canonical route misses without D1 access", async () => {
     let prepares = 0;
     const env = trustedStoaEnv();
     env.DB = {
@@ -292,17 +355,20 @@ describe("face wire format", () => {
       },
     } as unknown as Env["DB"];
     const app = createApp();
-    const response = await app.fetch(
-      new Request("https://a.asimposium.org/p/P-4DSP.events.json?since=0"),
-      env,
-      executionContext() as unknown as Parameters<typeof app.fetch>[2],
-    );
-    expect(response.status).toBe(404);
-    expect(await response.json()).toMatchObject({
-      code: "ROUTE_NOT_FOUND",
-      detail: "This Worker serves no route at /p/P-4DSP.events.json.",
-    });
-    expect(prepares).toBe(0);
+
+    for (const pathname of ["/p/P-4DSP.events.json", "/p/P-4DSP/events.json"]) {
+      const response = await app.fetch(
+        new Request(`https://a.asimposium.org${pathname}?since=0`),
+        env,
+        executionContext() as unknown as Parameters<typeof app.fetch>[2],
+      );
+      expect(response.status, pathname).toBe(404);
+      expect(await response.json(), pathname).toMatchObject({
+        code: "ROUTE_NOT_FOUND",
+        detail: `This Worker serves no route at ${pathname}.`,
+      });
+      expect(prepares, pathname).toBe(0);
+    }
   });
 
   test("the retained event-tail experiment accepts only canonical decimal cursors", async () => {

@@ -353,6 +353,34 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
     throw new Error("session replay retry budget exhausted");
   }
 
+  /**
+   * The one coarse face for every route-reachable authorization refusal.
+   *
+   * 403, not 401, and deliberately NOT the enrollment module's
+   * `fellowAuthorizationResponse`. By the time a handler runs, `authenticate`
+   * below has already turned every credential-liveness failure — revoked,
+   * expired, not-yet-valid, paused, archived, compromised, sponsor-panicked,
+   * family-revoked, grant-expired — into 401 FELLOW_TOKEN_INVALID. What can
+   * still reach `authorizeFellowWrite` here is only the policy set:
+   * suspicious-review quarantine, scope, problem binding, membership, role.
+   * Those are all "the credential is valid and the answer is still no", which
+   * is 403. Returning the enrollment helper's 401 would tell an agent to
+   * obtain a fresh token for a scope problem no token can fix, and would make
+   * the refusal byte-identical to the auth step's own 401.
+   *
+   * Byte-identical across every route and every reason, per ADR-18 / Fable
+   * §7.7: a refusal that varies by cause is an iteration oracle for the caller
+   * it just refused. The operator reason stays on the operator channel.
+   */
+  const writeRefusedProblem = (): Response =>
+    problem({
+      status: 403,
+      code: "WRITE_REFUSED",
+      title: "The write is not authorized for this credential",
+      detail: "This credential may not perform this write now.",
+      fixHint: "Check the console for the credential state or contact your sponsor.",
+    });
+
   async function authenticate(
     request: Request,
   ): Promise<
@@ -943,15 +971,7 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
       usage: { eventsRecorded: 0, artifactBytesRecorded: 0 },
       now: Date.now(),
     });
-    if (decision.decision !== "allow") {
-      return problem({
-        status: 403,
-        code: "WRITE_REFUSED",
-        title: "The write is not authorized for this credential",
-        detail: "This credential may not push to the workshop now.",
-        fixHint: "Check the console for the credential state or contact your sponsor.",
-      });
-    }
+    if (decision.decision !== "allow") return writeRefusedProblem();
     try {
       const result = await replayOrCommit(
         db,
@@ -1134,6 +1154,38 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
     const session = await openSessionOf(db, sessionId, auth.binding.fellowId);
     if (session instanceof Response) return session;
 
+    // Authorization runs BEFORE both lookups below, and this ordering is the
+    // fix for yn9p rather than a stylistic preference.
+    //
+    // The P11 duplicate gate answers with 409 DUPLICATE_CLAIM carrying
+    // `existing_claim_id`, and the owned-workshop lookup answers differently
+    // for a workshop id that exists under another Fellow. Both are therefore
+    // existence oracles: run either one first and an unscoped, non-member or
+    // suspicious-review credential learns whether a statement or a draft
+    // exists on a problem it may not write to. Authorization depends on
+    // neither lookup — it needs only the binding, the problem id and
+    // membership — so it is both the cheapest gate and the only one safe to
+    // answer first.
+    //
+    // Replay deliberately stays ahead of this. An already-committed write must
+    // replay its receipt: revocation is not retroactive, and a completed
+    // idempotent write is a fact about the past, not a new effect.
+    const membershipRole = await membershipRoleOf(db, session.problem_id, auth.binding.fellowId);
+    const decision = authorizeFellowWrite({
+      effect: "promote",
+      credential: auth.binding,
+      target: {
+        kind: "existing-problem",
+        problemId: session.problem_id,
+        publication: "published",
+        unlisted: false,
+        membershipRole,
+      },
+      usage: { eventsRecorded: 0, artifactBytesRecorded: 0 },
+      now: Date.now(),
+    });
+    if (decision.decision !== "allow") return writeRefusedProblem();
+
     // The workshop object must belong to this session and this Fellow —
     // promotion of another's draft is a contract violation, not a validator
     // outcome.
@@ -1177,30 +1229,6 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
           },
         });
       }
-    }
-
-    const membershipRole = await membershipRoleOf(db, session.problem_id, auth.binding.fellowId);
-    const decision = authorizeFellowWrite({
-      effect: "promote",
-      credential: auth.binding,
-      target: {
-        kind: "existing-problem",
-        problemId: session.problem_id,
-        publication: "published",
-        unlisted: false,
-        membershipRole,
-      },
-      usage: { eventsRecorded: 0, artifactBytesRecorded: 0 },
-      now: Date.now(),
-    });
-    if (decision.decision !== "allow") {
-      return problem({
-        status: 403,
-        code: "WRITE_REFUSED",
-        title: "The promotion is not authorized for this credential",
-        detail: "This credential may not promote on this problem now.",
-        fixHint: "Check your granted scopes with GET /v1/hello, or ask your sponsor to widen them.",
-      });
     }
 
     try {
