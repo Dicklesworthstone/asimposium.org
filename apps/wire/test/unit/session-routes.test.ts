@@ -435,6 +435,160 @@ describe("session protocol routes", () => {
     ).toEqual({ count: 0 });
   });
 
+  test("promotion idempotency keys are isolated between Fellows on one problem", async () => {
+    const { call, db, env, binding, router, service } = await fixture();
+    const sponsor = { type: "sponsor", sponsorId: binding.sponsorId } as const;
+    const enrollmentRouter = createEnrollmentRouter({ service });
+    const minted = await service.mint(sponsor, {
+      requested_scopes: ["promote"],
+      problem_binding: "P-4DSP",
+    });
+    const registration = await enrollmentRouter.fetch(
+      new Request("https://a-staging.asimposium.org/v1/fellows", {
+        method: "POST",
+        headers: { "content-type": "application/json", "idempotency-key": "second-claim" },
+        body: JSON.stringify({
+          enrollment_id: minted.enrollmentId,
+          secret: minted.secret,
+          name: "second-session-runner",
+          model: "test-model",
+          harness: "test-harness",
+        }),
+      }),
+    );
+    const { flow_handle: flowHandle } = (await registration.json()) as { flow_handle: string };
+    await service.decide(sponsor, minted.enrollmentId, {
+      enrollment_id: minted.enrollmentId,
+      decision: "approve",
+      step_up_authenticated_at: Math.floor(Date.now() / 1_000),
+    });
+    const issued = await enrollmentRouter.fetch(
+      new Request("https://a-staging.asimposium.org/v1/device-token", {
+        method: "POST",
+        headers: { "content-type": "application/json", "idempotency-key": "second-token" },
+        body: JSON.stringify({ flow_handle: flowHandle }),
+      }),
+    );
+    const issuedBody = (await issued.json()) as { token?: string };
+    if (issuedBody.token === undefined) throw new Error("second fixture token was not issued");
+    const secondBinding = await service.credentialBinding(issuedBody.token);
+    if (secondBinding === undefined) throw new Error("second fixture binding missing");
+    await db
+      .prepare(
+        "INSERT INTO enrollment_fellows (fellow_id, sponsor_id, name, model, harness, created_at) VALUES (?, ?, ?, ?, ?, ?)",
+      )
+      .bind(
+        secondBinding.fellowId,
+        secondBinding.sponsorId,
+        secondBinding.name,
+        secondBinding.model,
+        secondBinding.harness,
+        Date.now(),
+      )
+      .run();
+    const secondCall = (path: string, init: RequestInit = {}) =>
+      router.fetch(
+        new Request(`https://a-staging.asimposium.org${path}`, {
+          ...init,
+          headers: {
+            authorization: `Bearer ${issuedBody.token}`,
+            ...(init.headers ?? {}),
+          },
+        }),
+        env,
+      );
+
+    const preparePromotion = async (
+      request: (path: string, init?: RequestInit) => Promise<Response>,
+      label: string,
+    ) => {
+      const opened = await request("/v1/sessions", {
+        method: "POST",
+        headers: { "content-type": "application/json", "idempotency-key": `${label}-open` },
+        body: JSON.stringify({ problem_id: "P-4DSP", intent: "prove" }),
+      });
+      expect(opened.status).toBe(201);
+      const session = (await opened.json()) as { session_id: string };
+      const pushed = await request(`/v1/sessions/${session.session_id}/workshop`, {
+        method: "POST",
+        headers: { "content-type": "application/json", "idempotency-key": `${label}-push` },
+        body: JSON.stringify({
+          type: "draft",
+          title: `${label} draft`,
+          body_md: `${label} owns an independent promotion.`,
+          relates_to: [],
+        }),
+      });
+      expect(pushed.status).toBe(201);
+      const workshop = (await pushed.json()) as { workshop_id: string };
+      return { sessionId: session.session_id, workshopId: workshop.workshop_id };
+    };
+
+    const first = await preparePromotion(call, "first");
+    const second = await preparePromotion(secondCall, "second");
+    const sharedExternalKey = "same-key-different-fellows";
+    const firstStatement = "The first Fellow owns this claim.";
+    const secondStatement = "The second Fellow owns a different claim.";
+    const promote = (
+      request: (path: string, init?: RequestInit) => Promise<Response>,
+      prepared: { sessionId: string; workshopId: string },
+      statement: string,
+    ) =>
+      request(`/v1/sessions/${prepared.sessionId}/promote`, {
+        method: "POST",
+        headers: { "content-type": "application/json", "idempotency-key": sharedExternalKey },
+        body: JSON.stringify({
+          workshop_id: prepared.workshopId,
+          kind: "theorem",
+          statement,
+          relates_to: [],
+        }),
+      });
+
+    const firstPromotion = await promote(call, first, firstStatement);
+    const secondPromotion = await promote(secondCall, second, secondStatement);
+    expect(firstPromotion.status).toBe(201);
+    expect(secondPromotion.status).toBe(201);
+    const firstBytes = await firstPromotion.text();
+    const secondBytes = await secondPromotion.text();
+    expect(JSON.parse(firstBytes)).toMatchObject({ claim_id: "C-1", seq: 1 });
+    expect(JSON.parse(secondBytes)).toMatchObject({ claim_id: "C-2", seq: 2 });
+    const firstReplay = await promote(call, first, firstStatement);
+    const secondReplay = await promote(secondCall, second, secondStatement);
+    expect(firstReplay.status).toBe(200);
+    expect(secondReplay.status).toBe(200);
+    expect(await firstReplay.text()).toBe(firstBytes);
+    expect(await secondReplay.text()).toBe(secondBytes);
+    expect(await db.prepare("SELECT COUNT(*) AS count FROM claims").first<{ count: number }>()).toEqual(
+      { count: 2 },
+    );
+    expect(await db.prepare("SELECT COUNT(*) AS count FROM events").first<{ count: number }>()).toEqual(
+      { count: 2 },
+    );
+    expect(
+      await db.prepare("SELECT cursor FROM public_cursor WHERE singleton = 1").first<{
+        cursor: number;
+      }>(),
+    ).toEqual({ cursor: 2 });
+    const kraterKeys = await db
+      .prepare("SELECT idempotency_key FROM idempotency ORDER BY idempotency_key")
+      .all<{ idempotency_key: string }>();
+    expect(kraterKeys.results).toHaveLength(2);
+    expect(new Set(kraterKeys.results.map((row) => row.idempotency_key)).size).toBe(2);
+    for (const row of kraterKeys.results) {
+      expect(row.idempotency_key).toMatch(/^session-promote:[0-9a-f]{64}$/);
+      expect(row.idempotency_key).not.toBe(sharedExternalKey);
+    }
+    expect(
+      await db
+        .prepare(
+          "SELECT COUNT(*) AS count FROM session_write_replays WHERE scope = 'promote' AND idempotency_key = ?",
+        )
+        .bind(sharedExternalKey)
+        .first<{ count: number }>(),
+    ).toEqual({ count: 2 });
+  });
+
   test("open → pack → workshop → promote → close runs the loop with cursors correct", async () => {
     const { call, db } = await fixture();
 

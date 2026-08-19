@@ -162,6 +162,11 @@ async function writeRequestDigest(target: string, value: unknown): Promise<strin
   return sha256Text(`${target.length}:${target}${body.length}:${body}`);
 }
 
+async function promoteKraterIdempotencyKey(principal: string, externalKey: string): Promise<string> {
+  const identity = `${principal.length}:${principal}${externalKey.length}:${externalKey}`;
+  return `session-promote:${await sha256Text(`session-promote-v1\0${identity}`)}`;
+}
+
 function idempotencyConflictProblem(): Response {
   return problem({
     status: 409,
@@ -1197,6 +1202,13 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
     try {
       const eventId = mintId("E");
       const claimToken = mintId("R");
+      // Krater's idempotency table is problem-scoped, while the public session
+      // replay contract is principal-scoped. Never let two Fellows who choose
+      // the same caller key alias one another's event or recovery cursor.
+      const kraterIdempotencyKey = await promoteKraterIdempotencyKey(
+        auth.binding.fellowId,
+        key,
+      );
       const write = await writeClaim(
         db,
         {
@@ -1206,7 +1218,7 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
           // but never reaches a composed session promotion statement.
           claimId: "C-1",
           eventId,
-          idempotencyKey: key,
+          idempotencyKey: kraterIdempotencyKey,
           statement: parsed.data.statement,
           createdAt: new Date().toISOString(),
         },
@@ -1256,7 +1268,7 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
                   expiresAt,
                   claimToken,
                   session.problem_id,
-                  key,
+                  kraterIdempotencyKey,
                   attempt.eventId,
                   attempt.sequence,
                 ),
