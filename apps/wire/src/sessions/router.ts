@@ -225,6 +225,12 @@ interface SessionRow {
   readonly handback: string | null;
 }
 
+interface PackSessionRow {
+  readonly session_id: string;
+  readonly problem_id: string;
+  readonly closed_at: string | null;
+}
+
 export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindings: Env }> {
   const app = new Hono<{ Bindings: Env }>();
 
@@ -444,6 +450,44 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
         fixHint: "Open a new session on the same problem; your previous handback is included.",
         extensions: { schema: "https://a.asimposium.org/schemas/sessions.v1.json" },
       });
+    }
+    return row;
+  }
+
+  async function packSessionOf(
+    db: Env["DB"],
+    sessionId: string,
+    fellowId: string,
+  ): Promise<PackSessionRow | Response> {
+    const row = await db
+      .prepare(
+        "SELECT session_id, problem_id, closed_at FROM sessions WHERE session_id = ? AND fellow_id = ?",
+      )
+      .bind(sessionId, fellowId)
+      .first<PackSessionRow>();
+    if (row === null || row === undefined) {
+      const response = problem({
+        status: 404,
+        code: "SESSION_NOT_FOUND",
+        title: "No such session",
+        detail: "No session with this id exists.",
+        fixHint: "Open a session with POST /v1/sessions and use the returned session_id.",
+        extensions: { schema: "https://a.asimposium.org/schemas/sessions.v1.json" },
+      });
+      response.headers.set("cache-control", "private, no-store");
+      return response;
+    }
+    if (row.closed_at !== null) {
+      const response = problem({
+        status: 409,
+        code: "SESSION_CLOSED",
+        title: "The session is closed",
+        detail: "A closed session accepts no reads or writes. Its handback is in the next pack.",
+        fixHint: "Open a new session on the same problem; your previous handback is included.",
+        extensions: { schema: "https://a.asimposium.org/schemas/sessions.v1.json" },
+      });
+      response.headers.set("cache-control", "private, no-store");
+      return response;
     }
     return row;
   }
@@ -670,7 +714,7 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
     const auth = await authenticate(c.req.raw);
     if (!auth.ok) return auth.response;
     const db = c.env.DB;
-    const session = await openSessionOf(db, c.req.param("id"), auth.binding.fellowId);
+    const session = await packSessionOf(db, c.req.param("id"), auth.binding.fellowId);
     if (session instanceof Response) return session;
     const url = new URL(c.req.url);
     const profileParam = url.searchParams.get("profile") ?? "working";
@@ -691,7 +735,51 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
     const requestedMaxTokens = packBudgetOrRefusal(url.searchParams.get("max_tokens"), profile);
     if (requestedMaxTokens instanceof Response) return requestedMaxTokens;
 
+    const membership = await membershipRoleOf(db, session.problem_id, auth.binding.fellowId);
     const cursor = await readCursor(db, session.problem_id);
+    const packResponse = async (composed: ReturnType<typeof composePack>): Promise<Response> => {
+      const rendered = renderProjection(composedPackToProjection(composed), "json");
+      const itemTokenTotal = composed.items.reduce((total, item) => total + item.tokens, 0);
+      if (
+        itemTokenTotal > composed.tokens_estimate ||
+        Math.ceil(rendered.bytes / 4) > composed.tokens_estimate
+      ) {
+        throw new Error("pack composer token estimate diverged from the canonical JSON face");
+      }
+      PackResponseSchema.parse(JSON.parse(rendered.body));
+      const body = rendered.body;
+      const etag = `"${await sha256Text(body)}"`;
+      const headers = {
+        "cache-control": "private, no-store",
+        "content-type": "application/json; charset=utf-8",
+        etag,
+      };
+      const ifNoneMatch = c.req.header("if-none-match");
+      if (ifNoneMatch?.split(",").some((v) => v.trim() === etag)) {
+        return new Response(null, { status: 304, headers });
+      }
+      return new Response(body, { status: 200, headers });
+    };
+    if (membership === undefined) {
+      return packResponse(
+        composePack({
+          schema: "asimposium.pack.v1",
+          session: session.session_id,
+          problem: session.problem_id,
+          profile,
+          cursor,
+          requested_max_tokens: requestedMaxTokens,
+          viewer: {
+            audience: "session",
+            membership: "none",
+            effective_permissions: [],
+          },
+          candidates: [],
+          action_candidates: [],
+          omitted: [{ reason: "no_membership" }],
+        }),
+      );
+    }
     const candidates: PackCandidate[] = [];
     let claimsTruncated = false;
 
@@ -836,7 +924,6 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
       "claim-graph": ["typed-relations"],
       full: ["paginated-export"],
     };
-    const membership = await membershipRoleOf(db, session.problem_id, auth.binding.fellowId);
     const actionPermissions = ["workshop:read"];
     const authorizationTarget = {
       kind: "existing-problem" as const,
@@ -909,27 +996,7 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
         })),
       ],
     });
-    const rendered = renderProjection(composedPackToProjection(composed), "json");
-    const itemTokenTotal = composed.items.reduce((total, item) => total + item.tokens, 0);
-    if (
-      itemTokenTotal > composed.tokens_estimate ||
-      Math.ceil(rendered.bytes / 4) > composed.tokens_estimate
-    ) {
-      throw new Error("pack composer token estimate diverged from the canonical JSON face");
-    }
-    PackResponseSchema.parse(JSON.parse(rendered.body));
-    const body = rendered.body;
-    const etag = `"${await sha256Text(body)}"`;
-    const headers = {
-      "cache-control": "private, no-store",
-      "content-type": "application/json; charset=utf-8",
-      etag,
-    };
-    const ifNoneMatch = c.req.header("if-none-match");
-    if (ifNoneMatch?.split(",").some((v) => v.trim() === etag)) {
-      return new Response(null, { status: 304, headers });
-    }
-    return new Response(body, { status: 200, headers });
+    return packResponse(composed);
   });
 
   // --- POST /v1/sessions/:id/workshop ------------------------------------

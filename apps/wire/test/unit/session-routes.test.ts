@@ -17,7 +17,7 @@ const MIGRATIONS = resolve(import.meta.dir, "../../../../db/migrations");
 type LocalBinding = string | number | null;
 
 interface LocalRead {
-  readonly kind: "first" | "all";
+  readonly kind: "run" | "first" | "all";
   readonly sql: string;
   readonly bindings: readonly LocalBinding[];
 }
@@ -36,12 +36,14 @@ function localD1(sqlite: Database, options: LocalD1Options = {}) {
         const statement = sqlite.prepare<unknown, LocalBinding[]>(query);
         if (/^\s*SELECT\b/i.test(query)) {
           const rows = statement.all(...values);
+          await options.afterRead?.({ kind: "run", sql: query, bindings: values });
           return {
             results: rows,
             meta: { changes: 0, rows_read: rows.length, rows_written: 0 },
           };
         }
         const result = statement.run(...values);
+        await options.afterRead?.({ kind: "run", sql: query, bindings: values });
         return {
           results: [],
           meta: { changes: result.changes, rows_read: 0, rows_written: result.changes },
@@ -1377,6 +1379,250 @@ describe("session protocol routes", () => {
       headers: { "if-none-match": etag ?? "" },
     });
     expect(conditional.status).toBe(304);
+  });
+
+  test("PLANTED: a foreign pack request uses one ownership-qualified read and stays generic", async () => {
+    const claimMarker = "FOREIGN-PACK-CLAIM-MARKER";
+    const handbackMarker = "FOREIGN-PACK-HANDBACK-MARKER";
+    const workshopMarker = "FOREIGN-PACK-WORKSHOP-MARKER";
+    const packSessionSql =
+      "SELECT session_id, problem_id, closed_at FROM sessions WHERE session_id = ? AND fellow_id = ?";
+    const observedReads: LocalRead[] = [];
+    let recordReads = false;
+    const { call, db, router, env, service, sponsor } = await fixture({
+      afterRead: async (read) => {
+        if (recordReads) observedReads.push(read);
+      },
+    });
+    const priorOpened = await call("/v1/sessions", {
+      method: "POST",
+      headers: { "content-type": "application/json", "idempotency-key": "foreign-pack-prior-open" },
+      body: JSON.stringify({ problem_id: "P-4DSP", intent: "explore" }),
+    });
+    expect(priorOpened.status).toBe(201);
+    const priorSession = (await priorOpened.json()) as { session_id: string };
+    const priorClosed = await call(`/v1/sessions/${priorSession.session_id}/close`, {
+      method: "POST",
+      headers: { "content-type": "application/json", "idempotency-key": "foreign-pack-prior-close" },
+      body: JSON.stringify({ handback: handbackMarker, promote: [] }),
+    });
+    expect(priorClosed.status).toBe(201);
+    const targetOpened = await call("/v1/sessions", {
+      method: "POST",
+      headers: { "content-type": "application/json", "idempotency-key": "foreign-pack-target-open" },
+      body: JSON.stringify({ problem_id: "P-4DSP", intent: "explore" }),
+    });
+    expect(targetOpened.status).toBe(201);
+    const targetSession = (await targetOpened.json()) as { session_id: string };
+    const workshop = await call(`/v1/sessions/${targetSession.session_id}/workshop`, {
+      method: "POST",
+      headers: { "content-type": "application/json", "idempotency-key": "foreign-pack-workshop" },
+      body: JSON.stringify({
+        type: "note",
+        title: workshopMarker,
+        body_md: workshopMarker,
+        relates_to: [],
+      }),
+    });
+    expect(workshop.status).toBe(201);
+    await db
+      .prepare(
+        "INSERT INTO claims (id, problem_id, statement, payload_sha256, source_seq, created_at) VALUES ('C-1', 'P-4DSP', ?, ?, 1, ?)",
+      )
+      .bind(claimMarker, "a".repeat(64), "2026-08-19T00:00:00.000Z")
+      .run();
+    await db.prepare("UPDATE problems SET public_seq = 1 WHERE id = 'P-4DSP'").run();
+
+    const enrollmentRouter = createEnrollmentRouter({ service });
+    const foreignMinted = await service.mint(sponsor, {
+      requested_scopes: ["promote", "review"],
+      problem_binding: "P-4DSP",
+    });
+    const foreignRegistration = await enrollmentRouter.fetch(
+      new Request("https://a-staging.asimposium.org/v1/fellows", {
+        method: "POST",
+        headers: { "content-type": "application/json", "idempotency-key": "foreign-pack-register" },
+        body: JSON.stringify({
+          enrollment_id: foreignMinted.enrollmentId,
+          secret: foreignMinted.secret,
+          name: "foreign-pack-fellow",
+          model: "test-model",
+          harness: "test-harness",
+        }),
+      }),
+      env,
+    );
+    expect(foreignRegistration.status).toBe(202);
+    const { flow_handle: foreignFlowHandle } = (await foreignRegistration.json()) as {
+      flow_handle: string;
+    };
+    await service.decide(sponsor, foreignMinted.enrollmentId, {
+      enrollment_id: foreignMinted.enrollmentId,
+      decision: "approve",
+      step_up_authenticated_at: Math.floor(Date.now() / 1_000),
+    });
+    const foreignIssued = await enrollmentRouter.fetch(
+      new Request("https://a-staging.asimposium.org/v1/device-token", {
+        method: "POST",
+        headers: { "content-type": "application/json", "idempotency-key": "foreign-pack-token" },
+        body: JSON.stringify({ flow_handle: foreignFlowHandle }),
+      }),
+      env,
+    );
+    expect(foreignIssued.status).toBe(200);
+    const foreignToken = ((await foreignIssued.json()) as { token?: string }).token;
+    if (foreignToken === undefined) throw new Error("foreign fellow token was not issued");
+    const foreignBinding = await service.credentialBinding(foreignToken);
+    if (foreignBinding === undefined) throw new Error("foreign fellow binding missing");
+    await db
+      .prepare(
+        "INSERT INTO enrollment_fellows (fellow_id, sponsor_id, name, model, harness, created_at) VALUES (?, ?, ?, ?, ?, ?)",
+      )
+      .bind(
+        foreignBinding.fellowId,
+        foreignBinding.sponsorId,
+        foreignBinding.name,
+        foreignBinding.model,
+        foreignBinding.harness,
+        Date.now(),
+      )
+      .run();
+    const callAsForeign = (path: string) =>
+      router.fetch(
+        new Request(`https://a-staging.asimposium.org${path}`, {
+          headers: { authorization: `Bearer ${foreignToken}` },
+        }),
+        env,
+      );
+
+    recordReads = true;
+    const foreign = await callAsForeign(`/v1/sessions/${targetSession.session_id}/pack?profile=working`);
+    recordReads = false;
+    expect(foreign.status).toBe(404);
+    expect(foreign.headers.get("cache-control")).toBe("private, no-store");
+    const foreignBody = await foreign.text();
+    for (const marker of [claimMarker, handbackMarker, workshopMarker]) {
+      expect(foreignBody).not.toContain(marker);
+    }
+    expect(observedReads).toEqual([
+      {
+        kind: "first",
+        sql: packSessionSql,
+        bindings: [targetSession.session_id, foreignBinding.fellowId],
+      },
+    ]);
+
+    observedReads.length = 0;
+    recordReads = true;
+    const unknown = await callAsForeign("/v1/sessions/S-UNKNOWN-PACK-SESSION/pack?profile=working");
+    recordReads = false;
+    expect(unknown.status).toBe(404);
+    expect(unknown.headers.get("cache-control")).toBe("private, no-store");
+    expect(await unknown.text()).toBe(foreignBody);
+    expect(observedReads).toEqual([
+      {
+        kind: "first",
+        sql: packSessionSql,
+        bindings: ["S-UNKNOWN-PACK-SESSION", foreignBinding.fellowId],
+      },
+    ]);
+  });
+
+  test("PLANTED: a missing membership emits only a private no_membership pack", async () => {
+    const claimMarker = "NO-MEMBERSHIP-CLAIM-MARKER";
+    const handbackMarker = "NO-MEMBERSHIP-HANDBACK-MARKER";
+    const workshopMarker = "NO-MEMBERSHIP-WORKSHOP-MARKER";
+    const packSessionSql =
+      "SELECT session_id, problem_id, closed_at FROM sessions WHERE session_id = ? AND fellow_id = ?";
+    const membershipSql =
+      "SELECT role FROM problem_memberships WHERE problem_id = ? AND fellow_id = ?";
+    const cursorSql = "SELECT public_seq FROM problems WHERE id = ?";
+    const observedReads: LocalRead[] = [];
+    let recordReads = false;
+    const { call, db, binding } = await fixture({
+      afterRead: async (read) => {
+        if (recordReads) observedReads.push(read);
+      },
+    });
+    const priorOpened = await call("/v1/sessions", {
+      method: "POST",
+      headers: { "content-type": "application/json", "idempotency-key": "no-membership-prior-open" },
+      body: JSON.stringify({ problem_id: "P-4DSP", intent: "explore" }),
+    });
+    expect(priorOpened.status).toBe(201);
+    const priorSession = (await priorOpened.json()) as { session_id: string };
+    const priorClosed = await call(`/v1/sessions/${priorSession.session_id}/close`, {
+      method: "POST",
+      headers: { "content-type": "application/json", "idempotency-key": "no-membership-prior-close" },
+      body: JSON.stringify({ handback: handbackMarker, promote: [] }),
+    });
+    expect(priorClosed.status).toBe(201);
+    const closedPack = await call(`/v1/sessions/${priorSession.session_id}/pack?profile=working`);
+    expect(closedPack.status).toBe(409);
+    expect(closedPack.headers.get("cache-control")).toBe("private, no-store");
+    expect(await closedPack.json()).toMatchObject({ code: "SESSION_CLOSED" });
+
+    const targetOpened = await call("/v1/sessions", {
+      method: "POST",
+      headers: { "content-type": "application/json", "idempotency-key": "no-membership-target-open" },
+      body: JSON.stringify({ problem_id: "P-4DSP", intent: "explore" }),
+    });
+    expect(targetOpened.status).toBe(201);
+    const targetSession = (await targetOpened.json()) as { session_id: string };
+    const workshop = await call(`/v1/sessions/${targetSession.session_id}/workshop`, {
+      method: "POST",
+      headers: { "content-type": "application/json", "idempotency-key": "no-membership-workshop" },
+      body: JSON.stringify({
+        type: "note",
+        title: workshopMarker,
+        body_md: workshopMarker,
+        relates_to: [],
+      }),
+    });
+    expect(workshop.status).toBe(201);
+    await db
+      .prepare(
+        "INSERT INTO claims (id, problem_id, statement, payload_sha256, source_seq, created_at) VALUES ('C-1', 'P-4DSP', ?, ?, 1, ?)",
+      )
+      .bind(claimMarker, "b".repeat(64), "2026-08-19T00:00:00.000Z")
+      .run();
+    await db.prepare("UPDATE problems SET public_seq = 1 WHERE id = 'P-4DSP'").run();
+    await db
+      .prepare("DELETE FROM problem_memberships WHERE problem_id = ? AND fellow_id = ?")
+      .bind("P-4DSP", binding.fellowId)
+      .run();
+
+    recordReads = true;
+    const response = await call(`/v1/sessions/${targetSession.session_id}/pack?profile=working`);
+    recordReads = false;
+    expect(response.status).toBe(200);
+    expect(response.headers.get("cache-control")).toBe("private, no-store");
+    expect(response.headers.get("etag")).toMatch(/^"[^"]+"$/);
+    const body = await response.text();
+    for (const marker of [claimMarker, handbackMarker, workshopMarker]) {
+      expect(body).not.toContain(marker);
+    }
+    const pack = PackResponseSchema.parse(JSON.parse(body));
+    expect(pack.items).toEqual([]);
+    expect(pack.omitted).toEqual([{ reason: "no_membership" }]);
+    expect(pack.viewer).toEqual({
+      audience: "session",
+      membership: "none",
+      effective_permissions: [],
+    });
+    expect(observedReads).toEqual([
+      {
+        kind: "first",
+        sql: packSessionSql,
+        bindings: [targetSession.session_id, binding.fellowId],
+      },
+      {
+        kind: "first",
+        sql: membershipSql,
+        bindings: ["P-4DSP", binding.fellowId],
+      },
+      { kind: "first", sql: cursorSql, bindings: ["P-4DSP"] },
+    ]);
   });
 
   test("PLANTED: a pack binds one captured public generation across a concurrent promotion", async () => {
