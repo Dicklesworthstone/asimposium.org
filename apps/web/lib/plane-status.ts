@@ -25,6 +25,7 @@ export const PLANE_STATUS_PUBLIC_MAX_AGE_SECONDS =
 
 const SERVICE_ENVELOPE_SEED = /^[0-9a-f]{64}$/;
 const SERVICE_ENVELOPE_KID = /^[A-Za-z0-9._-]{1,64}$/;
+const publicJsonDecoder = new TextDecoder("utf-8", { fatal: true });
 
 /**
  * The exact public object an operator uploads before marking a deployment
@@ -302,7 +303,7 @@ async function probePublicLedgerIndex(
     if (bytes === undefined) return { public_index: "oversize", public_index_entries: null };
     let value: unknown;
     try {
-      value = JSON.parse(new TextDecoder().decode(bytes));
+      value = JSON.parse(publicJsonDecoder.decode(bytes));
     } catch {
       return { public_index: "invalid_response", public_index_entries: null };
     }

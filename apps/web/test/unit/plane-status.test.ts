@@ -165,8 +165,20 @@ describe("environment-bound plane status", () => {
   });
 
   test("PLANTED: invalid and declared or chunked oversize public ledger indexes are refused", async () => {
+    const malformedUtf8 = new Uint8Array([
+      ...new TextEncoder().encode('{"problems":[{"id":"P-'),
+      0xc3,
+      0x28,
+      ...new TextEncoder().encode(
+        '","public_seq":1,"created_at":"now","updated_at":"now"}],"omitted":[]}',
+      ),
+    ]);
+    expect(JSON.parse(new TextDecoder().decode(malformedUtf8))).toMatchObject({
+      problems: [{ id: "P-�(" }],
+    });
     const cases: readonly [string, Response, string][] = [
       ["invalid", Response.json({ problems: "not-an-array", omitted: [] }), "invalid_response"],
+      ["malformed UTF-8", new Response(malformedUtf8), "invalid_response"],
       [
         "declared oversize",
         new Response(null, {

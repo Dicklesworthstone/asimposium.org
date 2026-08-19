@@ -24,10 +24,20 @@ import { dispatchSignedSponsorRequest } from "../../lib/stoa-sponsor.ts";
 // API; no production test seam or client import is introduced.
 mock.module("server-only", () => ({}));
 const {
+  MAX_STOA_FELLOW_LIST_RESPONSE_BYTES,
+  MAX_STOA_OPERATOR_AUDIT_RESPONSE_BYTES,
+  MAX_STOA_PROPOSAL_LIST_RESPONSE_BYTES,
+  MAX_STOA_REFUSAL_RESPONSE_BYTES,
+  MAX_STOA_SUCCESS_RESPONSE_BYTES,
   operatorPrincipalIsAllowed,
+  readBoundedStoaJson,
+  STOA_RESPONSE_READ_TIMEOUT_MS,
   stoaConfigured,
+  stoaFellows,
   stoaMintEnrollment,
+  stoaOperatorFellowCapAudit,
   stoaOperatorOverrideFellowCap,
+  stoaPendingProposals,
 } = await import("../../lib/stoa.ts");
 
 /**
@@ -417,12 +427,17 @@ describe("configured Stoa origin binding", () => {
   const staging = "https://a-staging.asimposium.org";
   const loopback = "http://127.0.0.1:8787";
 
-  test.each([production, staging])("dispatches only to configured trusted HTTPS %s", async (origin) => {
-    const counters: DispatchCounters = { signed: 0, destinations: [] };
-    await expect(dispatchToConfiguredOrigin(origin, counters)).resolves.toMatchObject({ status: 204 });
-    expect(counters.signed).toBe(1);
-    expect(counters.destinations).toEqual([`${origin}/v1/sponsor-probe`]);
-  });
+  test.each([production, staging])(
+    "dispatches only to configured trusted HTTPS %s",
+    async (origin) => {
+      const counters: DispatchCounters = { signed: 0, destinations: [] };
+      await expect(dispatchToConfiguredOrigin(origin, counters)).resolves.toMatchObject({
+        status: 204,
+      });
+      expect(counters.signed).toBe(1);
+      expect(counters.destinations).toEqual([`${origin}/v1/sponsor-probe`]);
+    },
+  );
 
   test("exact configured loopback still requires and accepts its explicit allowance", async () => {
     const counters: DispatchCounters = { signed: 0, destinations: [] };
@@ -470,16 +485,16 @@ describe("public Agora Stoa origin binding", () => {
   test.each([
     ["missing", undefined],
     ["malformed trailing slash", `${staging}/`],
-  ] as const)("PLANTED: %s STOA_ORIGIN refuses before crypto import or fetch", async (_label, origin) => {
-    const importKeySpy = spyOn(crypto.subtle, "importKey");
-    const fetchSpy = spyOn(globalThis, "fetch").mockRejectedValue(
-      new Error("untrusted Stoa origin must not reach fetch"),
-    );
+  ] as const)(
+    "PLANTED: %s STOA_ORIGIN refuses before crypto import or fetch",
+    async (_label, origin) => {
+      const importKeySpy = spyOn(crypto.subtle, "importKey");
+      const fetchSpy = spyOn(globalThis, "fetch").mockRejectedValue(
+        new Error("untrusted Stoa origin must not reach fetch"),
+      );
 
-    try {
-      await withStoaEnvironment(
-        { ...signingEnvironment, STOA_ORIGIN: origin },
-        async () => {
+      try {
+        await withStoaEnvironment({ ...signingEnvironment, STOA_ORIGIN: origin }, async () => {
           await expect(stoaConfigured()).resolves.toBe(false);
           await expect(
             stoaMintEnrollment(
@@ -488,20 +503,22 @@ describe("public Agora Stoa origin binding", () => {
               "origin-runtime-refusal-1",
             ),
           ).resolves.toEqual({ ok: false, reason: "unconfigured" });
-        },
-      );
+        });
 
-      expect(importKeySpy).not.toHaveBeenCalled();
-      expect(fetchSpy).not.toHaveBeenCalled();
-    } finally {
-      fetchSpy.mockRestore();
-      importKeySpy.mockRestore();
-    }
-  });
+        expect(importKeySpy).not.toHaveBeenCalled();
+        expect(fetchSpy).not.toHaveBeenCalled();
+      } finally {
+        fetchSpy.mockRestore();
+        importKeySpy.mockRestore();
+      }
+    },
+  );
 
   test("configured staging ignores hostile Host-style environment values and fetches only staging", async () => {
     const importKeySpy = spyOn(crypto.subtle, "importKey");
-    const fetchSpy = spyOn(globalThis, "fetch").mockResolvedValue(new Response(null, { status: 503 }));
+    const fetchSpy = spyOn(globalThis, "fetch").mockResolvedValue(
+      new Response(null, { status: 503 }),
+    );
 
     try {
       await withStoaEnvironment(
@@ -551,22 +568,291 @@ describe("public Agora Stoa origin binding", () => {
     );
 
     try {
-      await withStoaEnvironment(
-        { ...signingEnvironment, STOA_ORIGIN: staging },
-        async () => {
-          const result = await stoaMintEnrollment(
-            "usr_origin-runtime-test",
-            { requested_scopes: ["review"] },
-            "origin-runtime-cross-environment-1",
-          );
-          expect(result).toEqual({ ok: false, reason: "unreachable" });
-          expect("data" in result).toBe(false);
-        },
-      );
+      await withStoaEnvironment({ ...signingEnvironment, STOA_ORIGIN: staging }, async () => {
+        const result = await stoaMintEnrollment(
+          "usr_origin-runtime-test",
+          { requested_scopes: ["review"] },
+          "origin-runtime-cross-environment-1",
+        );
+        expect(result).toEqual({ ok: false, reason: "unreachable" });
+        expect("data" in result).toBe(false);
+      });
 
       expect(fetchSpy.mock.calls.map(([input]) => String(input))).toEqual([
         `${staging}/v1/enrollments`,
       ]);
+    } finally {
+      fetchSpy.mockRestore();
+    }
+  });
+
+  test("PLANTED: a streamed oversized 2xx body is refused before JSON parsing", async () => {
+    let cancelled = false;
+    const body = new ReadableStream<Uint8Array>({
+      start(controller) {
+        controller.enqueue(new Uint8Array(MAX_STOA_SUCCESS_RESPONSE_BYTES));
+        controller.enqueue(new Uint8Array([0x7b]));
+      },
+      cancel() {
+        cancelled = true;
+      },
+    });
+    const response = new Response(body, {
+      status: 200,
+      headers: { "content-type": "application/json" },
+    });
+    expect(response.headers.get("content-length")).toBeNull();
+    const fetchSpy = spyOn(globalThis, "fetch").mockResolvedValue(response);
+
+    try {
+      await withStoaEnvironment({ ...signingEnvironment, STOA_ORIGIN: staging }, async () => {
+        await expect(
+          stoaMintEnrollment(
+            "usr_origin-runtime-test",
+            { requested_scopes: ["review"] },
+            "origin-runtime-oversize-1",
+          ),
+        ).resolves.toEqual({ ok: false, reason: "unreachable" });
+      });
+      await Promise.resolve();
+      expect(cancelled).toBe(true);
+    } finally {
+      fetchSpy.mockRestore();
+    }
+  });
+
+  test("PLANTED: malformed UTF-8 in a bounded 2xx body is refused", async () => {
+    const fetchSpy = spyOn(globalThis, "fetch").mockResolvedValue(
+      new Response(new Uint8Array([0x7b, 0x22, 0x78, 0x22, 0x3a, 0x22, 0xff, 0x22, 0x7d]), {
+        status: 200,
+        headers: { "content-type": "application/json" },
+      }),
+    );
+
+    try {
+      await withStoaEnvironment({ ...signingEnvironment, STOA_ORIGIN: staging }, async () => {
+        await expect(
+          stoaMintEnrollment(
+            "usr_origin-runtime-test",
+            { requested_scopes: ["review"] },
+            "origin-runtime-invalid-utf8-1",
+          ),
+        ).resolves.toEqual({ ok: false, reason: "unreachable" });
+      });
+    } finally {
+      fetchSpy.mockRestore();
+    }
+  });
+
+  test("PLANTED: a nonterminating response body is refused by the body-read deadline", async () => {
+    let cancelled = false;
+    const response = new Response(
+      new ReadableStream<Uint8Array>({
+        start(controller) {
+          controller.enqueue(new TextEncoder().encode("{"));
+        },
+        cancel() {
+          cancelled = true;
+        },
+      }),
+    );
+
+    await expect(readBoundedStoaJson(response, 64, 5)).resolves.toBeUndefined();
+    await Promise.resolve();
+    expect(cancelled).toBe(true);
+  });
+
+  test("the response reader refuses unbounded byte and time configurations", async () => {
+    for (const maximum of [0, -1, 1.5, MAX_STOA_FELLOW_LIST_RESPONSE_BYTES + 1]) {
+      await expect(readBoundedStoaJson(new Response("{}"), maximum)).rejects.toThrow(
+        "outside the supported bounded range",
+      );
+    }
+    for (const timeout of [0, -1, 1.5, STOA_RESPONSE_READ_TIMEOUT_MS + 1]) {
+      await expect(readBoundedStoaJson(new Response("{}"), 64, timeout)).rejects.toThrow(
+        "outside the supported bounded range",
+      );
+    }
+  });
+
+  test("PLANTED: endless empty chunks cannot starve the absolute body-read deadline", async () => {
+    let cancelled = false;
+    const response = new Response(
+      new ReadableStream<Uint8Array>({
+        pull(controller) {
+          controller.enqueue(new Uint8Array());
+        },
+        cancel() {
+          cancelled = true;
+        },
+      }),
+    );
+
+    await expect(readBoundedStoaJson(response, 64, 5)).resolves.toBeUndefined();
+    await Promise.resolve();
+    expect(cancelled).toBe(true);
+  });
+
+  test("PLANTED: the bounded reader admits a contract-valid Fellow page above the small cap", async () => {
+    const controlText = "\u0001".repeat(1_000);
+    const fellow = {
+      fellow_id: "fellow-large-response",
+      name: "large-response-fellow",
+      model: "model",
+      harness: "harness",
+      status: "active",
+      granted_scopes: ["review"],
+      granted_resources: { first_directive: controlText },
+      granted_at: 1,
+      credentials: [],
+    };
+    const responseText = JSON.stringify({ fellows: Array(500).fill(fellow), next_cursor: null });
+    const responseBytes = new TextEncoder().encode(responseText).byteLength;
+    expect(responseBytes).toBeGreaterThan(MAX_STOA_SUCCESS_RESPONSE_BYTES);
+    expect(responseBytes).toBeLessThan(MAX_STOA_FELLOW_LIST_RESPONSE_BYTES);
+    const fetchSpy = spyOn(globalThis, "fetch").mockResolvedValue(
+      new Response(responseText, {
+        status: 200,
+        headers: { "content-type": "application/json" },
+      }),
+    );
+
+    try {
+      await withStoaEnvironment({ ...signingEnvironment, STOA_ORIGIN: staging }, async () => {
+        const result = await stoaFellows("usr_origin-runtime-test");
+        expect(result.ok).toBe(true);
+        if (result.ok) expect(result.data.fellows).toHaveLength(500);
+      });
+    } finally {
+      fetchSpy.mockRestore();
+    }
+  });
+
+  test("PLANTED: the proposal client admits its contract-bounded maximum page above the small cap", async () => {
+    const controlText = "\u0001";
+    const resources = {
+      problem_binding: `P-${"A".repeat(26)}`,
+      first_directive: controlText.repeat(2_000),
+      event_budget: 10_000,
+      artifact_budget_bytes: 1_073_741_824,
+      fellow_grant_expires_at: Number.MAX_SAFE_INTEGER,
+    };
+    const proposal = {
+      enrollment_id: `ASIMP-EN-${"A".repeat(32)}`,
+      proposal_id: "p".repeat(80),
+      status: "approved",
+      name: "large-proposal-response",
+      model: controlText.repeat(160),
+      harness: controlText.repeat(160),
+      reasoning_effort: controlText.repeat(80),
+      tools_note: controlText.repeat(1_000),
+      requested_scopes: ["promote", "review", "propose-problems", "upload-artifacts"],
+      requested_resources: resources,
+      effective_granted_scopes: ["promote", "review", "propose-problems", "upload-artifacts"],
+      effective_granted_resources: resources,
+      proposal_expires_at: Number.MAX_SAFE_INTEGER,
+    };
+    const responseText = JSON.stringify({ proposals: Array(100).fill(proposal) });
+    const responseBytes = new TextEncoder().encode(responseText).byteLength;
+    expect(responseBytes).toBeGreaterThan(MAX_STOA_SUCCESS_RESPONSE_BYTES);
+    expect(responseBytes).toBeLessThan(MAX_STOA_PROPOSAL_LIST_RESPONSE_BYTES);
+    const fetchSpy = spyOn(globalThis, "fetch").mockResolvedValue(
+      new Response(responseText, {
+        status: 200,
+        headers: { "content-type": "application/json" },
+      }),
+    );
+
+    try {
+      await withStoaEnvironment({ ...signingEnvironment, STOA_ORIGIN: staging }, async () => {
+        const result = await stoaPendingProposals("usr_origin-runtime-test");
+        expect(result.ok).toBe(true);
+        if (result.ok) expect(result.data.proposals).toHaveLength(100);
+      });
+    } finally {
+      fetchSpy.mockRestore();
+    }
+  });
+
+  test("PLANTED: the audit client admits its contract-bounded maximum page above the small cap", async () => {
+    const operatorId = "usr_operator_fixture";
+    const sponsorId = "usr_target_fixture";
+    const auditEvent = {
+      audit_event_id: `OFC-${"A".repeat(26)}`,
+      sponsor_id: sponsorId,
+      operator_id: operatorId,
+      sponsor_seq: Number.MAX_SAFE_INTEGER,
+      previous_active_fellow_limit: 5,
+      active_fellow_limit: 500,
+      reason: `x${"\u0001".repeat(998)}x`,
+      step_up_authenticated_at: Number.MAX_SAFE_INTEGER,
+      signer_kid: "k".repeat(64),
+      effective_at: Number.MAX_SAFE_INTEGER,
+    };
+    const responseText = JSON.stringify({
+      audit_events: Array(100).fill(auditEvent),
+      next_cursor: null,
+    });
+    const responseBytes = new TextEncoder().encode(responseText).byteLength;
+    expect(responseBytes).toBeGreaterThan(MAX_STOA_SUCCESS_RESPONSE_BYTES);
+    expect(responseBytes).toBeLessThan(MAX_STOA_OPERATOR_AUDIT_RESPONSE_BYTES);
+    const fetchSpy = spyOn(globalThis, "fetch").mockResolvedValue(
+      new Response(responseText, {
+        status: 200,
+        headers: { "content-type": "application/json" },
+      }),
+    );
+
+    try {
+      await withStoaEnvironment(
+        {
+          ...signingEnvironment,
+          STOA_ORIGIN: staging,
+          OPERATOR_PRINCIPAL_IDS: operatorId,
+        },
+        async () => {
+          const result = await stoaOperatorFellowCapAudit(operatorId, sponsorId);
+          expect(result.ok).toBe(true);
+          if (result.ok) expect(result.data.audit_events).toHaveLength(100);
+        },
+      );
+    } finally {
+      fetchSpy.mockRestore();
+    }
+  });
+
+  test("PLANTED: a declared oversized problem body is discarded before retention", async () => {
+    let cancelled = false;
+    const body = new ReadableStream<Uint8Array>({
+      start(controller) {
+        controller.enqueue(new TextEncoder().encode("{}"));
+      },
+      cancel() {
+        cancelled = true;
+      },
+    });
+    const fetchSpy = spyOn(globalThis, "fetch").mockResolvedValue(
+      new Response(body, {
+        status: 422,
+        headers: {
+          "content-length": String(MAX_STOA_REFUSAL_RESPONSE_BYTES + 1),
+          "content-type": "application/problem+json",
+        },
+      }),
+    );
+
+    try {
+      await withStoaEnvironment({ ...signingEnvironment, STOA_ORIGIN: staging }, async () => {
+        await expect(
+          stoaMintEnrollment(
+            "usr_origin-runtime-test",
+            { requested_scopes: ["review"] },
+            "origin-runtime-refusal-overrun-1",
+          ),
+        ).resolves.toEqual({ ok: false, reason: "refused", status: 422 });
+      });
+      await Promise.resolve();
+      expect(cancelled).toBe(true);
     } finally {
       fetchSpy.mockRestore();
     }

@@ -1,4 +1,19 @@
+import { isTrustedStoaOrigin, PRODUCTION_STOA_ORIGIN } from "@asimposium/contracts";
 import type { NextConfig } from "next";
+
+export function configuredRedirectStoaOrigin(
+  value: string | undefined,
+  deploymentEnvironment: string | undefined = undefined,
+): string {
+  if (value === undefined && deploymentEnvironment !== undefined) {
+    throw new Error("STOA_ORIGIN_INVALID");
+  }
+  const origin = value ?? PRODUCTION_STOA_ORIGIN;
+  if (!isTrustedStoaOrigin(origin)) {
+    throw new Error("STOA_ORIGIN_INVALID");
+  }
+  return origin;
+}
 
 /**
  * Agora build configuration.
@@ -41,7 +56,10 @@ const nextConfig: NextConfig = {
     // must not walk agents to the production agent host. STOA_ORIGIN is set
     // on every Vercel environment; the production literal is the fallback so
     // a bare local build keeps the documented production behavior.
-    const stoaOrigin = process.env.STOA_ORIGIN ?? "https://a.asimposium.org";
+    const stoaOrigin = configuredRedirectStoaOrigin(
+      process.env.STOA_ORIGIN,
+      process.env.VERCEL_ENV,
+    );
     return [
       {
         source: "/protocol.md",

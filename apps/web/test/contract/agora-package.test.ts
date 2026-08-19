@@ -9,6 +9,7 @@
 import { describe, expect, mock, test } from "bun:test";
 import { existsSync, readFileSync } from "node:fs";
 import { dirname, join } from "node:path";
+import nextConfig, { configuredRedirectStoaOrigin } from "../../next.config";
 
 // The route deliberately pulls in server-only diagnostics. Register this file's
 // own test-only marker replacement before dynamically loading the route, so the
@@ -151,16 +152,20 @@ describe("sponsor console trust boundary", () => {
     expect(stoa).toContain("isTrustedStoaOrigin");
     expect(stoa).toContain("process.env.STOA_ORIGIN");
     expect(stoa).toContain("const stoaOrigin = configuredStoaOrigin()");
-    expect(stoa).toContain("if (stoaOrigin === undefined) return { ok: false, reason: \"unconfigured\" }");
+    expect(stoa).toContain(
+      'if (stoaOrigin === undefined) return { ok: false, reason: "unconfigured" }',
+    );
     expect(stoa).toContain("stoaOrigin,");
-    expect(stoa).toContain('insecureLoopbackOrigin: stoaOrigin');
+    expect(stoa).toContain("insecureLoopbackOrigin: stoaOrigin");
     expect(stoa).toContain("parseStoaJoinUrl(response.join_url)");
     expect(stoa).toContain("parsedJoinUrl.origin !== stoaOrigin");
     expect(stoa).not.toContain("SITE.stoa");
     expect(stoaSponsor).toContain("isTrustedStoaOrigin");
     expect(stoaSponsor).not.toContain("SITE.stoa");
     expect(stoaSponsor).toContain("stoaOrigin: string");
-    expect(stoaSponsor).toContain("Insecure Stoa origin allowance must name the configured origin exactly");
+    expect(stoaSponsor).toContain(
+      "Insecure Stoa origin allowance must name the configured origin exactly",
+    );
     expect(consolePage).toContain("configuredStoaOrigin");
     expect(consolePage).toContain("resolveCachedPlaneStatus");
     expect(consolePage).toContain("Plane status, checked recently");
@@ -299,7 +304,9 @@ describe("sponsor console trust boundary", () => {
     expect(approveForm).toContain("<DecisionRecoveryList");
     expect(approveForm).toContain("onDecisionRecovered=");
     expect(approveForm).toContain("cardDecisionUnresolved || retainedDecisionUnresolved");
-    expect(rootLayout).toContain('import { reconcileEnrollmentRecoveryOwner } from "./console/actions"');
+    expect(rootLayout).toContain(
+      'import { reconcileEnrollmentRecoveryOwner } from "./console/actions"',
+    );
     expect(rootLayout).toContain(
       "<EnrollmentRecoverySentinel\n          reconcileEnrollmentRecoveryOwner={reconcileEnrollmentRecoveryOwner}",
     );
@@ -393,7 +400,7 @@ describe("sponsor console trust boundary", () => {
     const consolePage = readPackageFile("app/console/page.tsx");
 
     expect(stoa).toContain('ROUTE_FELLOWS_AFTER = "/v1/fellows/after/:cursor"');
-    expect(stoa).toContain('action: ACTION_FELLOWS');
+    expect(stoa).toContain("action: ACTION_FELLOWS");
     expect(stoa).toContain(
       `path: cursor === undefined ? ROUTE_FELLOWS : \`/v1/fellows/after/\${cursor}\``,
     );
@@ -401,7 +408,9 @@ describe("sponsor console trust boundary", () => {
     expect(consolePage).toContain("SponsorFellowCursorSchema.safeParse(value)");
     expect(consolePage).toContain("stoaFellows(sponsorId, fellowCursor)");
     expect(consolePage).toContain("nextFellowCursor = fellowResult.data.next_cursor");
-    expect(consolePage).toContain(`/console?fellow_cursor=\${encodeURIComponent(nextFellowCursor)}`);
+    expect(consolePage).toContain(
+      `/console?fellow_cursor=\${encodeURIComponent(nextFellowCursor)}`,
+    );
     expect(consolePage).toContain('href="/console"');
     expect(consolePage).toContain("<LifecycleManager");
     expect(consolePage).not.toContain("prepareAndDispatch(");
@@ -410,10 +419,7 @@ describe("sponsor console trust boundary", () => {
   test("PLANTED: a retained lifecycle retry remains actionable when the Fellows read is non-live", () => {
     const cards = readPackageFile("app/console/cards.tsx");
     const managerStart = cards.indexOf("export function LifecycleManager");
-    const recoveryControlsStart = cards.indexOf(
-      "const retainedRecoveryControls = (",
-      managerStart,
-    );
+    const recoveryControlsStart = cards.indexOf("const retainedRecoveryControls = (", managerStart);
     const nonLiveStart = cards.indexOf('if (hostState !== "live")', managerStart);
     const normalLiveReturn = cards.indexOf("\n  return (\n    <div>", nonLiveStart);
     const nonLiveBranch = cards.slice(nonLiveStart, normalLiveReturn);
@@ -421,10 +427,7 @@ describe("sponsor console trust boundary", () => {
     const settleStart = cards.indexOf("const settle = (", managerStart);
     const prepareStart = cards.indexOf("const prepareAndDispatch = (", settleStart);
     const settle = cards.slice(settleStart, prepareStart);
-    const recoverExactStart = cards.indexOf(
-      "const recoverExactAttempt = (",
-      managerStart,
-    );
+    const recoverExactStart = cards.indexOf("const recoverExactAttempt = (", managerStart);
     const recoverExact = cards.slice(recoverExactStart, recoveryControlsStart);
 
     for (const position of [
@@ -442,9 +445,7 @@ describe("sponsor console trust boundary", () => {
     expect(nonLiveBranch).toContain("{retainedRecoveryControls}");
     expect(recoveryControls).toContain("state.attempts.map((attempt) => (");
     expect(recoveryControls).toContain("recoverExactAttempt(scope, attempt)");
-    expect(recoveryControls).toContain(
-      "disabled={pending || recoveryOwner === undefined}",
-    );
+    expect(recoveryControls).toContain("disabled={pending || recoveryOwner === undefined}");
     expect(nonLiveBranch).not.toContain("fellows.map(");
     expect(nonLiveBranch).not.toContain("prepareAndDispatch(");
     expect(nonLiveBranch).not.toContain("Start sponsor panic confirmation");
@@ -575,7 +576,9 @@ describe("sponsor console trust boundary", () => {
       "recordEnrollmentRecoveryOwner(generation, result.recoveryOwner)",
     );
     const refresh = sentinel.indexOf("router.refresh();", record);
-    const ownerMatch = sentinel.indexOf("return activeRecoveryFence.allowedRecoveryOwner !== recoveryOwner;");
+    const ownerMatch = sentinel.indexOf(
+      "return activeRecoveryFence.allowedRecoveryOwner !== recoveryOwner;",
+    );
     expect(begin).toBeGreaterThanOrEqual(0);
     expect(action).toBeGreaterThan(begin);
     expect(record).toBeGreaterThan(action);
@@ -585,7 +588,9 @@ describe("sponsor console trust boundary", () => {
     expect(sentinel).not.toContain("recoveryOwner ?? null");
     expect(sentinel).toContain("if (!enabled) return false;");
     expect(sentinel).toContain('if (activeRecoveryFence.phase !== "confirmed") return true;');
-    expect(sentinel).toContain("if (activeRecoveryFence.allowedRecoveryOwner === null) return true;");
+    expect(sentinel).toContain(
+      "if (activeRecoveryFence.allowedRecoveryOwner === null) return true;",
+    );
 
     const actionStart = actions.indexOf("export async function reconcileEnrollmentRecoveryOwner()");
     const actionEnd = actions.indexOf("async function recoveryOwnerMatchesSponsor", actionStart);
@@ -593,8 +598,12 @@ describe("sponsor console trust boundary", () => {
     expect(actionStart).toBeGreaterThanOrEqual(0);
     expect(actionEnd).toBeGreaterThan(actionStart);
     expect(ownerAction).toContain("const session = await auth();");
-    expect(ownerAction).toContain("if (session?.user === undefined) return { ok: true, recoveryOwner: null };");
-    expect(ownerAction).toContain("if (!isCanonicalSponsorId(session.user.id)) return { ok: false };");
+    expect(ownerAction).toContain(
+      "if (session?.user === undefined) return { ok: true, recoveryOwner: null };",
+    );
+    expect(ownerAction).toContain(
+      "if (!isCanonicalSponsorId(session.user.id)) return { ok: false };",
+    );
     expect(ownerAction).toContain("await recoveryOwnerForSponsor(session.user.id)");
     expect(ownerAction).toContain("return recoveryOwner === undefined ? { ok: false }");
     expect(ownerAction).not.toContain("sponsorId:");
@@ -651,6 +660,74 @@ describe("sponsor console trust boundary", () => {
     expect(deviceForm).toContain('decision === "deny"');
     expect(deviceForm).toContain("Enter a different code");
     expect(deviceForm).toContain('aria-label="Device proposal"');
+  });
+});
+
+describe("apex markdown redirect origin", () => {
+  test.each([
+    [undefined, "https://a.asimposium.org"],
+    ["https://a.asimposium.org", "https://a.asimposium.org"],
+    ["https://a-staging.asimposium.org", "https://a-staging.asimposium.org"],
+    ["http://127.0.0.1:8787", "http://127.0.0.1:8787"],
+  ] as const)("selects only a trusted canonical origin: %s", (configured, expected) => {
+    expect(configuredRedirectStoaOrigin(configured)).toBe(expected);
+  });
+
+  test.each(["production", "preview", "development"])(
+    "a deployed %s build refuses a missing STOA_ORIGIN",
+    (deploymentEnvironment) => {
+      expect(() => configuredRedirectStoaOrigin(undefined, deploymentEnvironment)).toThrow(
+        "STOA_ORIGIN_INVALID",
+      );
+    },
+  );
+
+  test.each([
+    "https://a.asimposium.org.attacker.invalid",
+    "https://user@example.com",
+    "https://a.asimposium.org/path",
+    "https://a.asimposium.org?redirect=1",
+    "https://a.asimposium.org/#fragment",
+    " https://a.asimposium.org",
+    "http://a.asimposium.org",
+  ])("refuses an untrusted redirect origin without echoing it: %s", (configured) => {
+    expect(() => configuredRedirectStoaOrigin(configured)).toThrow("STOA_ORIGIN_INVALID");
+  });
+
+  test("the shipped redirect table uses the validated environment origin", async () => {
+    const originalOrigin = process.env.STOA_ORIGIN;
+    const originalVercelEnvironment = process.env.VERCEL_ENV;
+    try {
+      process.env.STOA_ORIGIN = "https://a-staging.asimposium.org";
+      process.env.VERCEL_ENV = "preview";
+      expect(typeof nextConfig.redirects).toBe("function");
+      if (typeof nextConfig.redirects !== "function") throw new Error("redirects-not-callable");
+      const redirects = await nextConfig.redirects();
+      expect(
+        redirects
+          .filter(({ source }) => source === "/protocol.md" || source === "/policy.md")
+          .map(({ destination, permanent, source }) => ({ destination, permanent, source })),
+      ).toEqual([
+        {
+          source: "/protocol.md",
+          destination: "https://a-staging.asimposium.org/protocol.md",
+          permanent: true,
+        },
+        {
+          source: "/policy.md",
+          destination: "https://a-staging.asimposium.org/policy.md",
+          permanent: true,
+        },
+      ]);
+
+      delete process.env.STOA_ORIGIN;
+      await expect(nextConfig.redirects()).rejects.toThrow("STOA_ORIGIN_INVALID");
+    } finally {
+      if (originalOrigin === undefined) delete process.env.STOA_ORIGIN;
+      else process.env.STOA_ORIGIN = originalOrigin;
+      if (originalVercelEnvironment === undefined) delete process.env.VERCEL_ENV;
+      else process.env.VERCEL_ENV = originalVercelEnvironment;
+    }
   });
 });
 
