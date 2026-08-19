@@ -1448,8 +1448,17 @@ describe("session protocol routes", () => {
       }),
     });
     expect(firstPromotionResponse.status).toBe(201);
-    expect((await firstPromotionResponse.json()) as { claim_id: string; seq: number }).toEqual({
+    expect(
+      (await firstPromotionResponse.json()) as {
+        claim_id: string;
+        problem_id: string;
+        queue_position: number;
+        seq: number;
+      },
+    ).toEqual({
       claim_id: "C-1",
+      problem_id: "P-4DSP",
+      queue_position: 0,
       seq: 1,
     });
     expect(
@@ -1490,7 +1499,7 @@ describe("session protocol routes", () => {
       }),
       env,
     );
-    expect(secondRegistration.status).toBe(201);
+    expect(secondRegistration.status).toBe(202);
     const { flow_handle: secondFlowHandle } = (await secondRegistration.json()) as {
       flow_handle: string;
     };
@@ -1507,8 +1516,8 @@ describe("session protocol routes", () => {
       }),
       env,
     );
-    expect(secondIssued.status).toBe(201);
-    const secondToken = (await secondIssued.json() as { token?: string }).token;
+    expect(secondIssued.status).toBe(200);
+    const secondToken = ((await secondIssued.json()) as { token?: string }).token;
     if (secondToken === undefined) throw new Error("second fellow token was not issued");
     const secondBinding = await service.credentialBinding(secondToken);
     if (secondBinding === undefined) throw new Error("second fellow binding missing");
@@ -1574,8 +1583,17 @@ describe("session protocol routes", () => {
         },
       );
       expect(secondPromotionResponse.status).toBe(201);
-      expect((await secondPromotionResponse.json()) as { claim_id: string; seq: number }).toEqual({
+      expect(
+        (await secondPromotionResponse.json()) as {
+          claim_id: string;
+          problem_id: string;
+          queue_position: number;
+          seq: number;
+        },
+      ).toEqual({
         claim_id: "C-2",
+        problem_id: "P-4DSP",
+        queue_position: 0,
         seq: 2,
       });
       recordReads = false;
@@ -1596,10 +1614,9 @@ describe("session protocol routes", () => {
     }
     const firstPackResponse = await firstPackRequest;
     recordReads = false;
-    const firstPackReads = observedReads.filter((read) => {
-      const sql = normalizeSql(read.sql);
-      return sql === cursorSql || sql === claimsSql;
-    });
+    const firstPackReads = observedReads
+      .map((read) => ({ ...read, sql: normalizeSql(read.sql) }))
+      .filter((read) => read.sql === cursorSql || read.sql === claimsSql);
     expect(firstPackReads).toEqual([
       { kind: "first", sql: cursorSql, bindings: ["P-4DSP"] },
       { kind: "all", sql: claimsSql, bindings: ["P-4DSP", 1, 129] },
@@ -1621,10 +1638,9 @@ describe("session protocol routes", () => {
       `/v1/sessions/${packSession.session_id}/pack?profile=working&max_tokens=8000&cursor=0`,
     );
     recordReads = false;
-    const secondPackReads = observedReads.filter((read) => {
-      const sql = normalizeSql(read.sql);
-      return sql === cursorSql || sql === claimsSql;
-    });
+    const secondPackReads = observedReads
+      .map((read) => ({ ...read, sql: normalizeSql(read.sql) }))
+      .filter((read) => read.sql === cursorSql || read.sql === claimsSql);
     expect(secondPackReads).toEqual([
       { kind: "first", sql: cursorSql, bindings: ["P-4DSP"] },
       { kind: "all", sql: claimsSql, bindings: ["P-4DSP", 2, 129] },
@@ -1633,7 +1649,9 @@ describe("session protocol routes", () => {
     const secondPack = PackResponseSchema.parse(await secondPackResponse.json());
     expect(secondPack.cursor).toBe(2);
     expect(
-      secondPack.items.filter((item) => item.id === "C-1" || item.id === "C-2").map((item) => item.id),
+      secondPack.items
+        .filter((item) => item.id === "C-1" || item.id === "C-2")
+        .map((item) => item.id),
     ).toEqual(["C-1", "C-2"]);
   });
 
