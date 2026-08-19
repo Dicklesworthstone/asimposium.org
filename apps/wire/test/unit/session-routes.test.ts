@@ -16,7 +16,14 @@ const MIGRATIONS = resolve(import.meta.dir, "../../../../db/migrations");
 
 type LocalBinding = string | number | null;
 
+interface LocalRead {
+  readonly kind: "first" | "all";
+  readonly sql: string;
+  readonly bindings: readonly LocalBinding[];
+}
+
 interface LocalD1Options {
+  readonly afterRead?: (read: LocalRead) => Promise<void>;
   readonly afterFirstRead?: (query: string) => Promise<void>;
   readonly serializeBatches?: boolean;
 }
@@ -42,11 +49,13 @@ function localD1(sqlite: Database, options: LocalD1Options = {}) {
       },
       async first<T>(): Promise<T | null> {
         const row = sqlite.prepare<T, LocalBinding[]>(query).get(...values);
+        await options.afterRead?.({ kind: "first", sql: query, bindings: values });
         await options.afterFirstRead?.(query);
         return (row ?? null) as T | null;
       },
       async all<T>(): Promise<{ results: T[]; meta: { rows_read: number } }> {
         const rows = sqlite.prepare<T, LocalBinding[]>(query).all(...values) as T[];
+        await options.afterRead?.({ kind: "all", sql: query, bindings: values });
         return { results: rows, meta: { rows_read: rows.length } };
       },
     });
@@ -248,7 +257,17 @@ async function fixture(options: LocalD1Options = {}) {
       }),
       env,
     );
-  return { call, db, token, router: sessionRouter, env, binding, service, replayProtector };
+  return {
+    call,
+    db,
+    token,
+    router: sessionRouter,
+    env,
+    binding,
+    service,
+    replayProtector,
+    sponsor,
+  };
 }
 
 describe("session protocol routes", () => {
@@ -464,11 +483,7 @@ describe("session protocol routes", () => {
     });
     const { call, db } = await fixture({
       afterFirstRead: async (query) => {
-        if (
-          armed &&
-          !observedHead &&
-          /SELECT public_seq, chain_digest FROM problems/.test(query)
-        ) {
+        if (armed && !observedHead && /SELECT public_seq, chain_digest FROM problems/.test(query)) {
           observedHead = true;
           markHeadReached();
           await headRelease;
@@ -744,12 +759,12 @@ describe("session protocol routes", () => {
     expect(secondReplay.status).toBe(200);
     expect(await firstReplay.text()).toBe(firstBytes);
     expect(await secondReplay.text()).toBe(secondBytes);
-    expect(await db.prepare("SELECT COUNT(*) AS count FROM claims").first<{ count: number }>()).toEqual(
-      { count: 2 },
-    );
-    expect(await db.prepare("SELECT COUNT(*) AS count FROM events").first<{ count: number }>()).toEqual(
-      { count: 2 },
-    );
+    expect(
+      await db.prepare("SELECT COUNT(*) AS count FROM claims").first<{ count: number }>(),
+    ).toEqual({ count: 2 });
+    expect(
+      await db.prepare("SELECT COUNT(*) AS count FROM events").first<{ count: number }>(),
+    ).toEqual({ count: 2 });
     expect(
       await db.prepare("SELECT cursor FROM public_cursor WHERE singleton = 1").first<{
         cursor: number;
@@ -822,7 +837,9 @@ describe("session protocol routes", () => {
       )
       .bind(binding.fellowId, "expiring-promote")
       .run();
-    const second = await promote("The second operation begins after the replay generation expires.");
+    const second = await promote(
+      "The second operation begins after the replay generation expires.",
+    );
     expect(second.status).toBe(201);
     const secondBytes = await second.text();
     expect(JSON.parse(secondBytes)).toMatchObject({ claim_id: "C-2", seq: 2 });
@@ -1045,6 +1062,302 @@ describe("session protocol routes", () => {
     expect(claim?.statement).toContain("toggle-invariant");
   });
 
+  test("PLANTED: session open centralizes policy before existence reads and leaves denied state untouched", async () => {
+    const { call, db, binding, env, replayProtector } = await fixture();
+    const allowed = await call("/v1/sessions", {
+      method: "POST",
+      headers: { "content-type": "application/json", "idempotency-key": "kgaa-open-allowed" },
+      body: JSON.stringify({ problem_id: "P-4DSP", intent: "prove" }),
+    });
+    expect(allowed.status).toBe(201);
+    expect(
+      await db
+        .prepare("SELECT role FROM problem_memberships WHERE problem_id = ? AND fellow_id = ?")
+        .bind("P-4DSP", binding.fellowId)
+        .first<{ role: string }>(),
+    ).toEqual({ role: "contributor" });
+
+    const state = async () => ({
+      problems: (await db.prepare("SELECT COUNT(*) AS n FROM problems").first<{ n: number }>())?.n,
+      sessions: (await db.prepare("SELECT COUNT(*) AS n FROM sessions").first<{ n: number }>())?.n,
+      memberships: (
+        await db.prepare("SELECT COUNT(*) AS n FROM problem_memberships").first<{ n: number }>()
+      )?.n,
+      replays: (
+        await db.prepare("SELECT COUNT(*) AS n FROM session_write_replays").first<{ n: number }>()
+      )?.n,
+    });
+    const beforeDenied = await state();
+    const callWithBinding = async (
+      credential: typeof binding,
+      key: string,
+      problemId: string,
+    ): Promise<{ status: number; headers: [string, string][]; body: string }> => {
+      const router = createSessionRouter({
+        service: {
+          credentialBinding: async () => credential,
+        } as unknown as EnrollmentService,
+        replayProtector,
+      });
+      const response = await router.fetch(
+        new Request("https://a-staging.asimposium.org/v1/sessions", {
+          method: "POST",
+          headers: {
+            authorization: "Bearer kgaa-policy-fixture",
+            "content-type": "application/json",
+            "idempotency-key": key,
+          },
+          body: JSON.stringify({ problem_id: problemId, intent: "prove" }),
+        }),
+        env,
+      );
+      return {
+        status: response.status,
+        headers: [...response.headers.entries()].sort(([left], [right]) =>
+          left.localeCompare(right),
+        ),
+        body: await response.text(),
+      };
+    };
+
+    const wrongBinding = {
+      ...binding,
+      grantedResources: { ...binding.grantedResources, problemBinding: "P-OTHER" },
+    };
+    const suspicious = { ...binding, fellowStatus: "suspicious_review" as const };
+    const validWrongBinding = await callWithBinding(
+      wrongBinding,
+      "kgaa-open-wrong-valid",
+      "P-4DSP",
+    );
+    const missingWrongBinding = await callWithBinding(
+      wrongBinding,
+      "kgaa-open-wrong-missing",
+      "P-MISSING",
+    );
+    const existingWrongBinding = await callWithBinding(
+      wrongBinding,
+      "kgaa-open-wrong-existing",
+      "P-4DSP",
+    );
+    const suspiciousOpen = await callWithBinding(suspicious, "kgaa-open-suspicious", "P-4DSP");
+
+    for (const refusal of [
+      validWrongBinding,
+      missingWrongBinding,
+      existingWrongBinding,
+      suspiciousOpen,
+    ]) {
+      expect(refusal).toEqual(validWrongBinding);
+      expect(refusal.status).toBe(403);
+      expect(refusal.body).toContain("WRITE_REFUSED");
+      expect(refusal.body).not.toContain("PROBLEM_NOT_FOUND");
+      expect(refusal.body).not.toContain("SESSION_EXISTS");
+    }
+    expect(await state()).toEqual(beforeDenied);
+  });
+
+  test("PLANTED: a fresh suspicious close is refused, while an active close replays after review", async () => {
+    const { call, db, binding, service, sponsor } = await fixture();
+    const opened = await call("/v1/sessions", {
+      method: "POST",
+      headers: { "content-type": "application/json", "idempotency-key": "kgaa-close-open" },
+      body: JSON.stringify({ problem_id: "P-4DSP", intent: "prove" }),
+    });
+    expect(opened.status).toBe(201);
+    const session = (await opened.json()) as { session_id: string };
+    const transition = (status: "active" | "suspicious_review", key: string) =>
+      service.transitionFellow(
+        sponsor,
+        {
+          fellow_id: binding.fellowId,
+          status,
+          confirm: "change-fellow-lifecycle",
+          step_up_authenticated_at: Math.floor(Date.now() / 1_000),
+        },
+        { idempotencyKey: key },
+      );
+
+    await transition("suspicious_review", "kgaa-close-review");
+    const freshRefusal = await call(`/v1/sessions/${session.session_id}/close`, {
+      method: "POST",
+      headers: { "content-type": "application/json", "idempotency-key": "kgaa-close-refused" },
+      body: JSON.stringify({ handback: "Awaiting operator review.", promote: [] }),
+    });
+    const freshRefusalBody = await freshRefusal.text();
+    expect(freshRefusal.status).toBe(403);
+    expect(freshRefusal.headers.get("content-type")).toBe(
+      "application/problem+json; charset=utf-8",
+    );
+    expect(freshRefusalBody).toContain("WRITE_REFUSED");
+    expect(
+      await db
+        .prepare("SELECT closed_at FROM sessions WHERE session_id = ?")
+        .bind(session.session_id)
+        .first<{ closed_at: string | null }>(),
+    ).toEqual({ closed_at: null });
+    expect(
+      await db
+        .prepare(
+          "SELECT COUNT(*) AS n FROM session_write_replays WHERE scope = 'session_close' AND idempotency_key = ?",
+        )
+        .bind("kgaa-close-refused")
+        .first<{ n: number }>(),
+    ).toEqual({ n: 0 });
+
+    await transition("active", "kgaa-close-resume");
+    const closed = await call(`/v1/sessions/${session.session_id}/close`, {
+      method: "POST",
+      headers: { "content-type": "application/json", "idempotency-key": "kgaa-close-complete" },
+      body: JSON.stringify({ handback: "Closed after review cleared.", promote: [] }),
+    });
+    expect(closed.status).toBe(201);
+    const closedBody = await closed.text();
+
+    await transition("suspicious_review", "kgaa-close-review-replay");
+    const replay = await call(`/v1/sessions/${session.session_id}/close`, {
+      method: "POST",
+      headers: { "content-type": "application/json", "idempotency-key": "kgaa-close-complete" },
+      body: JSON.stringify({ handback: "Closed after review cleared.", promote: [] }),
+    });
+    expect(replay.status).toBe(200);
+    expect(await replay.text()).toBe(closedBody);
+  });
+
+  test("PLANTED: suspicious workshop writes are blocked without a claimed held artifact", async () => {
+    const { call, db, binding, service, sponsor } = await fixture();
+    const opened = await call("/v1/sessions", {
+      method: "POST",
+      headers: { "content-type": "application/json", "idempotency-key": "kgaa-workshop-open" },
+      body: JSON.stringify({ problem_id: "P-4DSP", intent: "prove" }),
+    });
+    expect(opened.status).toBe(201);
+    const session = (await opened.json()) as { session_id: string };
+    await service.transitionFellow(
+      sponsor,
+      {
+        fellow_id: binding.fellowId,
+        status: "suspicious_review",
+        confirm: "change-fellow-lifecycle",
+        step_up_authenticated_at: Math.floor(Date.now() / 1_000),
+      },
+      { idempotencyKey: "kgaa-workshop-review" },
+    );
+    const before = {
+      workshops: (
+        await db.prepare("SELECT COUNT(*) AS n FROM workshop_objects").first<{ n: number }>()
+      )?.n,
+      replays: (
+        await db
+          .prepare("SELECT COUNT(*) AS n FROM session_write_replays WHERE scope = 'workshop_push'")
+          .first<{ n: number }>()
+      )?.n,
+    };
+    const refused = await call(`/v1/sessions/${session.session_id}/workshop`, {
+      method: "POST",
+      headers: { "content-type": "application/json", "idempotency-key": "kgaa-workshop-refused" },
+      body: JSON.stringify({
+        type: "draft",
+        title: "Blocked",
+        body_md: "No held artifact.",
+        relates_to: [],
+      }),
+    });
+    expect(refused.status).toBe(403);
+    expect(await refused.json()).toMatchObject({ code: "WRITE_REFUSED" });
+    expect({
+      workshops: (
+        await db.prepare("SELECT COUNT(*) AS n FROM workshop_objects").first<{ n: number }>()
+      )?.n,
+      replays: (
+        await db
+          .prepare("SELECT COUNT(*) AS n FROM session_write_replays WHERE scope = 'workshop_push'")
+          .first<{ n: number }>()
+      )?.n,
+    }).toEqual(before);
+  });
+
+  test("PLANTED: exact close replay remains behind authentication for non-review lifecycle states", async () => {
+    for (const status of ["paused", "revoked", "compromised"] as const) {
+      const { call, binding, service, sponsor } = await fixture();
+      const opened = await call("/v1/sessions", {
+        method: "POST",
+        headers: { "content-type": "application/json", "idempotency-key": `kgaa-${status}-open` },
+        body: JSON.stringify({ problem_id: "P-4DSP", intent: "prove" }),
+      });
+      expect(opened.status).toBe(201);
+      const session = (await opened.json()) as { session_id: string };
+      const closeKey = `kgaa-${status}-close`;
+      const body = JSON.stringify({ handback: `Closed before ${status}.`, promote: [] });
+      const closed = await call(`/v1/sessions/${session.session_id}/close`, {
+        method: "POST",
+        headers: { "content-type": "application/json", "idempotency-key": closeKey },
+        body,
+      });
+      expect(closed.status).toBe(201);
+      await service.transitionFellow(
+        sponsor,
+        {
+          fellow_id: binding.fellowId,
+          status,
+          confirm: "change-fellow-lifecycle",
+          step_up_authenticated_at: Math.floor(Date.now() / 1_000),
+        },
+        { idempotencyKey: `kgaa-${status}-transition` },
+      );
+      const replay = await call(`/v1/sessions/${session.session_id}/close`, {
+        method: "POST",
+        headers: { "content-type": "application/json", "idempotency-key": closeKey },
+        body,
+      });
+      expect(replay.status).toBe(401);
+      expect(await replay.json()).toMatchObject({ code: "FELLOW_TOKEN_INVALID" });
+    }
+  });
+
+  test("PLANTED: session policy ordering is replay, target reads, policy, then mutation", () => {
+    const routerSource = readFileSync(
+      resolve(import.meta.dir, "../../src/sessions/router.ts"),
+      "utf8",
+    );
+    const openStart = routerSource.indexOf('app.post("/v1/sessions",');
+    const packStart = routerSource.indexOf('app.get("/v1/sessions/:id/pack"');
+    const closeStart = routerSource.indexOf('app.post("/v1/sessions/:id/close"');
+    const sponsorStart = routerSource.indexOf('app.post("/v1/sponsors/workshop"');
+    expect(openStart).toBeGreaterThanOrEqual(0);
+    expect(packStart).toBeGreaterThan(openStart);
+    expect(closeStart).toBeGreaterThan(packStart);
+    expect(sponsorStart).toBeGreaterThan(closeStart);
+
+    const openHandler = routerSource.slice(openStart, packStart);
+    const openReplayAt = openHandler.indexOf("replayResponseBeforeMutablePreconditions");
+    const openAuthorizeAt = openHandler.indexOf("authorizeFellowWrite");
+    const openProblemAt = openHandler.indexOf("SELECT id FROM problems WHERE id = ?");
+    const openSessionAt = openHandler.indexOf("SELECT session_id FROM sessions");
+    const openMembershipAt = openHandler.indexOf("INSERT INTO problem_memberships");
+    expect(openReplayAt).toBeGreaterThanOrEqual(0);
+    expect(openAuthorizeAt).toBeGreaterThan(openReplayAt);
+    expect(openProblemAt).toBeGreaterThan(openAuthorizeAt);
+    expect(openSessionAt).toBeGreaterThan(openAuthorizeAt);
+    expect(openMembershipAt).toBeGreaterThan(openAuthorizeAt);
+
+    const closeHandler = routerSource.slice(closeStart, sponsorStart);
+    const closeReplayAt = closeHandler.indexOf("replayResponseBeforeMutablePreconditions");
+    const closeSessionAt = closeHandler.indexOf("const authorizationSession = await openSessionOf");
+    const closeMembershipAt = closeHandler.indexOf(
+      "const authorizationMembershipRole = await membershipRoleOf",
+    );
+    const closeAuthorizeAt = closeHandler.indexOf("authorizeFellowWrite");
+    const closeCommitAt = closeHandler.indexOf("replayOrCommit");
+    const closeMutationAt = closeHandler.indexOf("UPDATE sessions");
+    expect(closeReplayAt).toBeGreaterThanOrEqual(0);
+    expect(closeSessionAt).toBeGreaterThan(closeReplayAt);
+    expect(closeMembershipAt).toBeGreaterThan(closeSessionAt);
+    expect(closeAuthorizeAt).toBeGreaterThan(closeMembershipAt);
+    expect(closeCommitAt).toBeGreaterThan(closeAuthorizeAt);
+    expect(closeMutationAt).toBeGreaterThan(closeCommitAt);
+  });
+
   test("two working packs at the same cursor byte-compare identical (prompt-cache money)", async () => {
     const { call } = await fixture();
     const opened = await call("/v1/sessions", {
@@ -1066,6 +1379,264 @@ describe("session protocol routes", () => {
     expect(conditional.status).toBe(304);
   });
 
+  test("PLANTED: a pack binds one captured public generation across a concurrent promotion", async () => {
+    const cursorSql = "SELECT public_seq FROM problems WHERE id = ?";
+    const claimsSql =
+      "SELECT id, statement, source_seq FROM claims WHERE problem_id = ? AND source_seq <= ? ORDER BY source_seq ASC LIMIT ?";
+    const normalizeSql = (sql: string) => sql.replace(/\s+/g, " ").trim();
+    const observedReads: LocalRead[] = [];
+    let recordReads = false;
+    let barrierArmed = false;
+    let barrierHits = 0;
+    let markCursorRead: () => void = () => undefined;
+    let releaseCursor: () => void = () => undefined;
+    const cursorRead = new Promise<void>((resolve) => {
+      markCursorRead = resolve;
+    });
+    const cursorReleased = new Promise<void>((resolve) => {
+      releaseCursor = resolve;
+    });
+    const { call, db, router, env, service, sponsor } = await fixture({
+      afterRead: async (read) => {
+        if (recordReads) observedReads.push(read);
+      },
+      afterFirstRead: async (query) => {
+        if (!barrierArmed || normalizeSql(query) !== cursorSql) return;
+        barrierHits += 1;
+        if (barrierHits !== 1) throw new Error("pack cursor barrier fired more than once");
+        markCursorRead();
+        await cursorReleased;
+      },
+    });
+    const callAs = (token: string, path: string, init: RequestInit = {}) =>
+      router.fetch(
+        new Request(`https://a-staging.asimposium.org${path}`, {
+          ...init,
+          headers: { authorization: `Bearer ${token}`, ...(init.headers ?? {}) },
+        }),
+        env,
+      );
+
+    const firstOpened = await call("/v1/sessions", {
+      method: "POST",
+      headers: { "content-type": "application/json", "idempotency-key": "cut-first-open" },
+      body: JSON.stringify({ problem_id: "P-4DSP", intent: "prove" }),
+    });
+    expect(firstOpened.status).toBe(201);
+    const firstSession = (await firstOpened.json()) as { session_id: string };
+    const firstWorkshopResponse = await call(`/v1/sessions/${firstSession.session_id}/workshop`, {
+      method: "POST",
+      headers: { "content-type": "application/json", "idempotency-key": "cut-first-workshop" },
+      body: JSON.stringify({
+        type: "draft",
+        title: "First coherent cut",
+        body_md: "CUT-ONE-SENTINEL",
+        relates_to: [],
+      }),
+    });
+    expect(firstWorkshopResponse.status).toBe(201);
+    const firstWorkshop = (await firstWorkshopResponse.json()) as { workshop_id: string };
+    const firstPromotionResponse = await call(`/v1/sessions/${firstSession.session_id}/promote`, {
+      method: "POST",
+      headers: { "content-type": "application/json", "idempotency-key": "cut-first-promote" },
+      body: JSON.stringify({
+        workshop_id: firstWorkshop.workshop_id,
+        kind: "conjecture",
+        statement: "CUT-ONE-SENTINEL",
+        falsifier: "A counterexample to CUT-ONE-SENTINEL.",
+        relates_to: [],
+      }),
+    });
+    expect(firstPromotionResponse.status).toBe(201);
+    expect((await firstPromotionResponse.json()) as { claim_id: string; seq: number }).toEqual({
+      claim_id: "C-1",
+      seq: 1,
+    });
+    expect(
+      await db.prepare("SELECT public_seq FROM problems WHERE id = 'P-4DSP'").first<{
+        public_seq: number;
+      }>(),
+    ).toEqual({ public_seq: 1 });
+    const firstClosed = await call(`/v1/sessions/${firstSession.session_id}/close`, {
+      method: "POST",
+      headers: { "content-type": "application/json", "idempotency-key": "cut-first-close" },
+      body: JSON.stringify({ handback: "C-1 recorded before the cut test.", promote: [] }),
+    });
+    expect(firstClosed.status).toBe(201);
+    const packOpened = await call("/v1/sessions", {
+      method: "POST",
+      headers: { "content-type": "application/json", "idempotency-key": "cut-pack-open" },
+      body: JSON.stringify({ problem_id: "P-4DSP", intent: "review" }),
+    });
+    expect(packOpened.status).toBe(201);
+    const packSession = (await packOpened.json()) as { session_id: string };
+
+    const enrollmentRouter = createEnrollmentRouter({ service });
+    const secondMinted = await service.mint(sponsor, {
+      requested_scopes: ["promote", "review"],
+      problem_binding: "P-4DSP",
+    });
+    const secondRegistration = await enrollmentRouter.fetch(
+      new Request("https://a-staging.asimposium.org/v1/fellows", {
+        method: "POST",
+        headers: { "content-type": "application/json", "idempotency-key": "cut-second-register" },
+        body: JSON.stringify({
+          enrollment_id: secondMinted.enrollmentId,
+          secret: secondMinted.secret,
+          name: "cut-second-fellow",
+          model: "test-model",
+          harness: "test-harness",
+        }),
+      }),
+      env,
+    );
+    expect(secondRegistration.status).toBe(201);
+    const { flow_handle: secondFlowHandle } = (await secondRegistration.json()) as {
+      flow_handle: string;
+    };
+    await service.decide(sponsor, secondMinted.enrollmentId, {
+      enrollment_id: secondMinted.enrollmentId,
+      decision: "approve",
+      step_up_authenticated_at: Math.floor(Date.now() / 1_000),
+    });
+    const secondIssued = await enrollmentRouter.fetch(
+      new Request("https://a-staging.asimposium.org/v1/device-token", {
+        method: "POST",
+        headers: { "content-type": "application/json", "idempotency-key": "cut-second-token" },
+        body: JSON.stringify({ flow_handle: secondFlowHandle }),
+      }),
+      env,
+    );
+    expect(secondIssued.status).toBe(201);
+    const secondToken = (await secondIssued.json() as { token?: string }).token;
+    if (secondToken === undefined) throw new Error("second fellow token was not issued");
+    const secondBinding = await service.credentialBinding(secondToken);
+    if (secondBinding === undefined) throw new Error("second fellow binding missing");
+    await db
+      .prepare(
+        "INSERT INTO enrollment_fellows (fellow_id, sponsor_id, name, model, harness, created_at) VALUES (?, ?, ?, ?, ?, ?)",
+      )
+      .bind(
+        secondBinding.fellowId,
+        secondBinding.sponsorId,
+        secondBinding.name,
+        secondBinding.model,
+        secondBinding.harness,
+        Date.now(),
+      )
+      .run();
+    const secondOpened = await callAs(secondToken, "/v1/sessions", {
+      method: "POST",
+      headers: { "content-type": "application/json", "idempotency-key": "cut-second-open" },
+      body: JSON.stringify({ problem_id: "P-4DSP", intent: "prove" }),
+    });
+    expect(secondOpened.status).toBe(201);
+    const secondSession = (await secondOpened.json()) as { session_id: string };
+    const secondWorkshopResponse = await callAs(
+      secondToken,
+      `/v1/sessions/${secondSession.session_id}/workshop`,
+      {
+        method: "POST",
+        headers: { "content-type": "application/json", "idempotency-key": "cut-second-workshop" },
+        body: JSON.stringify({
+          type: "draft",
+          title: "Second coherent cut",
+          body_md: "CUT-TWO-SENTINEL",
+          relates_to: [],
+        }),
+      },
+    );
+    expect(secondWorkshopResponse.status).toBe(201);
+    const secondWorkshop = (await secondWorkshopResponse.json()) as { workshop_id: string };
+
+    observedReads.length = 0;
+    recordReads = true;
+    barrierArmed = true;
+    const firstPackRequest = call(
+      `/v1/sessions/${packSession.session_id}/pack?profile=working&max_tokens=8000&cursor=0`,
+    );
+    try {
+      await cursorRead;
+      expect(barrierHits).toBe(1);
+      const secondPromotionResponse = await callAs(
+        secondToken,
+        `/v1/sessions/${secondSession.session_id}/promote`,
+        {
+          method: "POST",
+          headers: { "content-type": "application/json", "idempotency-key": "cut-second-promote" },
+          body: JSON.stringify({
+            workshop_id: secondWorkshop.workshop_id,
+            kind: "conjecture",
+            statement: "CUT-TWO-SENTINEL",
+            falsifier: "A counterexample to CUT-TWO-SENTINEL.",
+            relates_to: [],
+          }),
+        },
+      );
+      expect(secondPromotionResponse.status).toBe(201);
+      expect((await secondPromotionResponse.json()) as { claim_id: string; seq: number }).toEqual({
+        claim_id: "C-2",
+        seq: 2,
+      });
+      recordReads = false;
+      expect(
+        await db.prepare("SELECT source_seq FROM claims WHERE id = 'C-2'").first<{
+          source_seq: number;
+        }>(),
+      ).toEqual({ source_seq: 2 });
+      expect(
+        await db.prepare("SELECT public_seq FROM problems WHERE id = 'P-4DSP'").first<{
+          public_seq: number;
+        }>(),
+      ).toEqual({ public_seq: 2 });
+    } finally {
+      recordReads = true;
+      barrierArmed = false;
+      releaseCursor();
+    }
+    const firstPackResponse = await firstPackRequest;
+    recordReads = false;
+    const firstPackReads = observedReads.filter((read) => {
+      const sql = normalizeSql(read.sql);
+      return sql === cursorSql || sql === claimsSql;
+    });
+    expect(firstPackReads).toEqual([
+      { kind: "first", sql: cursorSql, bindings: ["P-4DSP"] },
+      { kind: "all", sql: claimsSql, bindings: ["P-4DSP", 1, 129] },
+    ]);
+    expect(barrierHits).toBe(1);
+    expect(firstPackResponse.status).toBe(200);
+    const firstPackText = await firstPackResponse.text();
+    const firstPack = PackResponseSchema.parse(JSON.parse(firstPackText));
+    expect(firstPack.cursor).toBe(1);
+    expect(firstPack.items.filter((item) => item.id === "C-1")).toHaveLength(1);
+    expect(firstPack.items.some((item) => item.id === "C-2")).toBe(false);
+    expect(firstPackText).not.toContain("CUT-TWO-SENTINEL");
+    expect(firstPack.omitted).not.toContainEqual({ reason: "candidate_limit", detail: "claims" });
+    expect(firstPack.omitted).not.toContainEqual({ reason: "budget_exceeded" });
+
+    observedReads.length = 0;
+    recordReads = true;
+    const secondPackResponse = await call(
+      `/v1/sessions/${packSession.session_id}/pack?profile=working&max_tokens=8000&cursor=0`,
+    );
+    recordReads = false;
+    const secondPackReads = observedReads.filter((read) => {
+      const sql = normalizeSql(read.sql);
+      return sql === cursorSql || sql === claimsSql;
+    });
+    expect(secondPackReads).toEqual([
+      { kind: "first", sql: cursorSql, bindings: ["P-4DSP"] },
+      { kind: "all", sql: claimsSql, bindings: ["P-4DSP", 2, 129] },
+    ]);
+    expect(secondPackResponse.status).toBe(200);
+    const secondPack = PackResponseSchema.parse(await secondPackResponse.json());
+    expect(secondPack.cursor).toBe(2);
+    expect(
+      secondPack.items.filter((item) => item.id === "C-1" || item.id === "C-2").map((item) => item.id),
+    ).toEqual(["C-1", "C-2"]);
+  });
+
   test("mounted packs budget the exact rendered face and quarantine hostile ledger text", async () => {
     const { call, db, binding } = await fixture();
     const opened = await call("/v1/sessions", {
@@ -1085,6 +1656,7 @@ describe("session protocol routes", () => {
       )
       .bind("C-1", hostile, "a".repeat(64), 1, "2026-08-19T00:00:00.000Z")
       .run();
+    await db.prepare("UPDATE problems SET public_seq = 1 WHERE id = 'P-4DSP'").run();
     await db
       .prepare(
         `INSERT INTO enrollment_fellows
@@ -1153,6 +1725,7 @@ describe("session protocol routes", () => {
         )
         .run();
     }
+    await db.prepare("UPDATE problems SET public_seq = 12 WHERE id = 'P-4DSP'").run();
     const bounded = await call(
       `/v1/sessions/${session.session_id}/pack?profile=working&max_tokens=800`,
     );
@@ -1184,6 +1757,7 @@ describe("session protocol routes", () => {
          FROM claim_numbers`,
       )
       .run();
+    await db.prepare("UPDATE problems SET public_seq = 130 WHERE id = 'P-4DSP'").run();
     const capped = await call(
       `/v1/sessions/${session.session_id}/pack?profile=working&max_tokens=8000`,
     );
@@ -1421,7 +1995,7 @@ describe("session protocol routes", () => {
       headers: { "content-type": "application/json", "idempotency-key": "yn9p-promote-a" },
       body: JSON.stringify({
         workshop_id: workshopA.workshop_id,
-        kind: "claim",
+        kind: "conjecture",
         statement: STATEMENT,
         falsifier: "A toggle-invariant labeling that does not factor.",
         relates_to: [],
@@ -1441,7 +2015,7 @@ describe("session protocol routes", () => {
       headers: { "content-type": "application/json", "idempotency-key": "yn9p-promote-a-dup" },
       body: JSON.stringify({
         workshop_id: workshopA.workshop_id,
-        kind: "claim",
+        kind: "conjecture",
         statement: STATEMENT,
         falsifier: "A toggle-invariant labeling that does not factor.",
         relates_to: [],
@@ -1579,7 +2153,7 @@ describe("session protocol routes", () => {
       headers: { "content-type": "application/json", "idempotency-key": "yn9p-promote-b" },
       body: JSON.stringify({
         workshop_id: workshopB.workshop_id,
-        kind: "claim",
+        kind: "conjecture",
         statement: STATEMENT,
         falsifier: "A toggle-invariant labeling that does not factor.",
         relates_to: [],
@@ -1611,7 +2185,7 @@ describe("session protocol routes", () => {
       headers: { "content-type": "application/json", "idempotency-key": "yn9p-promote-b-nondup" },
       body: JSON.stringify({
         workshop_id: workshopB.workshop_id,
-        kind: "claim",
+        kind: "conjecture",
         statement: "An entirely unrelated statement that collides with no seeded claim.",
         falsifier: "The unrelated statement holds.",
         relates_to: [],
@@ -1643,6 +2217,21 @@ describe("session protocol routes", () => {
     const promoteHandler = routerSource.slice(promoteStart, closeStart);
     expect(workshopHandler).toContain("return writeRefusedProblem();");
     expect(promoteHandler).toContain("return writeRefusedProblem();");
+    // yn9p source-order guard. B1/B2 are byte-identical by construction, so no
+    // response assertion can observe a partial reorder. Pin the three-tier order
+    // structurally: replay read, then authorization, then every content-derived
+    // lookup. Moving authorization below either lookup restores an existence
+    // oracle while leaving both 403s unchanged.
+    const replayAt = promoteHandler.indexOf("replayResponseBeforeMutablePreconditions");
+    const authorizeAt = promoteHandler.indexOf("authorizeFellowWrite");
+    const ownedWorkshopAt = promoteHandler.indexOf(
+      "FROM workshop_objects WHERE workshop_id = ? AND session_id = ? AND fellow_id = ?",
+    );
+    const normHashAt = promoteHandler.indexOf("normHash");
+    expect(replayAt).toBeGreaterThanOrEqual(0);
+    expect(authorizeAt).toBeGreaterThan(replayAt);
+    expect(ownedWorkshopAt).toBeGreaterThan(authorizeAt);
+    expect(normHashAt).toBeGreaterThan(authorizeAt);
     // Exactly one WRITE_REFUSED literal in the file: the shared builder's.
     expect(routerSource.split('code: "WRITE_REFUSED"').length - 1).toBe(1);
     // And no route may hand-build a refusal that names its own cause again.

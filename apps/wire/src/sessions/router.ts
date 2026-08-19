@@ -485,6 +485,26 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
     const db = c.env.DB;
     const digest = await writeRequestDigest("POST /v1/sessions", parsed.data);
     try {
+      // Exact replay is a fact about a prior active operation, not a new
+      // admission. It stays ahead of the fresh-write policy check.
+      const replay = await replayResponseBeforeMutablePreconditions(
+        db,
+        "session_open",
+        auth.binding.fellowId,
+        key,
+        digest,
+      );
+      if (replay !== undefined) return replay;
+      const decision = authorizeFellowWrite({
+        effect: "session.open",
+        credential: auth.binding,
+        target: { kind: "session-admission", problemId: parsed.data.problem_id },
+        // Durable credential-attributed accounting belongs to wqlf. This
+        // route only supplies the existing synthetic evaluator input.
+        usage: { eventsRecorded: 0, artifactBytesRecorded: 0 },
+        now: Date.now(),
+      });
+      if (decision.decision !== "allow") return writeRefusedProblem();
       const result = await replayOrCommit(
         db,
         "session_open",
@@ -691,10 +711,10 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
       const claims = await db
         .prepare(
           `SELECT id, statement, source_seq FROM claims
-           WHERE problem_id = ? ORDER BY source_seq ASC
+           WHERE problem_id = ? AND source_seq <= ? ORDER BY source_seq ASC
            LIMIT ?`,
         )
-        .bind(session.problem_id, PACK_CLAIM_CANDIDATE_LIMIT + 1)
+        .bind(session.problem_id, cursor, PACK_CLAIM_CANDIDATE_LIMIT + 1)
         .all<{ id: string; statement: string; source_seq: number }>();
       const claimRows = claims.results ?? [];
       claimsTruncated = claimRows.length > PACK_CLAIM_CANDIDATE_LIMIT;
@@ -1357,10 +1377,7 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
         if (replayError instanceof ReplayConflictError) return idempotencyConflictProblem();
         throw replayError;
       }
-      if (
-        error instanceof ReplayConflictError ||
-        error instanceof KraterIdempotencyConflictError
-      ) {
+      if (error instanceof ReplayConflictError || error instanceof KraterIdempotencyConflictError) {
         return idempotencyConflictProblem();
       }
       if (error instanceof KraterProblemNotFoundError) {
@@ -1404,6 +1421,41 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
       parsed.data,
     );
     try {
+      // Preserve an exact completed close before evaluating a fresh close
+      // against current policy. Authentication remains earlier than replay.
+      const replay = await replayResponseBeforeMutablePreconditions(
+        db,
+        "session_close",
+        auth.binding.fellowId,
+        key,
+        digest,
+      );
+      if (replay !== undefined) return replay;
+      const authorizationSession = await openSessionOf(
+        db,
+        c.req.param("id"),
+        auth.binding.fellowId,
+      );
+      if (authorizationSession instanceof Response) return authorizationSession;
+      const authorizationMembershipRole = await membershipRoleOf(
+        db,
+        authorizationSession.problem_id,
+        auth.binding.fellowId,
+      );
+      const decision = authorizeFellowWrite({
+        effect: "session.close",
+        credential: auth.binding,
+        target: {
+          kind: "session-close",
+          problemId: authorizationSession.problem_id,
+          membershipRole: authorizationMembershipRole,
+        },
+        // Durable credential-attributed accounting belongs to wqlf. This
+        // route only supplies the existing synthetic evaluator input.
+        usage: { eventsRecorded: 0, artifactBytesRecorded: 0 },
+        now: Date.now(),
+      });
+      if (decision.decision !== "allow") return writeRefusedProblem();
       const result = await replayOrCommit(
         db,
         "session_close",

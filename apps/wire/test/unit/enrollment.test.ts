@@ -20,6 +20,8 @@ import {
   type FellowCredentialBinding,
   type FellowExistingProblemTarget,
   type FellowNewProblemTarget,
+  type FellowSessionAdmissionTarget,
+  type FellowSessionCloseTarget,
   type FellowWriteEffect,
   type FellowWriteGrantUsage,
   fellowAuthorizationResponse,
@@ -1831,6 +1833,18 @@ describe("centralized Fellow write authorization", () => {
     };
   }
 
+  function sessionAdmissionTarget(
+    overrides: Partial<FellowSessionAdmissionTarget> = {},
+  ): FellowSessionAdmissionTarget {
+    return { kind: "session-admission", problemId: "P-1", ...overrides };
+  }
+
+  function sessionCloseTarget(
+    overrides: Partial<FellowSessionCloseTarget> = {},
+  ): FellowSessionCloseTarget {
+    return { kind: "session-close", problemId: "P-1", membershipRole: "contributor", ...overrides };
+  }
+
   function usage(overrides: Partial<FellowWriteGrantUsage> = {}): FellowWriteGrantUsage {
     return { eventsRecorded: 0, artifactBytesRecorded: 0, ...overrides };
   }
@@ -1892,6 +1906,20 @@ describe("centralized Fellow write authorization", () => {
       decision: "allow",
       effect: "propose-problems",
     });
+    expect(
+      decide({
+        effect: "session.open",
+        credential: { grantedScopes: [] },
+        target: sessionAdmissionTarget(),
+      }),
+    ).toEqual({ decision: "allow", effect: "session.open" });
+    expect(
+      decide({
+        effect: "session.close",
+        credential: { grantedScopes: [] },
+        target: sessionCloseTarget(),
+      }),
+    ).toEqual({ decision: "allow", effect: "session.close" });
   });
 
   test("the refusal matrix is type-exhaustive, deterministic, and caller-opaque", () => {
@@ -1927,6 +1955,11 @@ describe("centralized Fellow write authorization", () => {
         credential: { grantedResources: { artifactBudgetBytes: 100 } },
         usage: { artifactBytesRecorded: 91 },
         artifactBytesRequested: 10,
+      },
+      suspicious_review_write_blocked: {
+        effect: "session.open",
+        target: sessionAdmissionTarget(),
+        credential: { fellowStatus: "suspicious_review", grantedScopes: [] },
       },
     };
 
@@ -2000,17 +2033,28 @@ describe("centralized Fellow write authorization", () => {
     ).toBe("fellow_status_not_writable");
   });
 
-  test("PLANTED: suspicious-review quarantines otherwise-authorized writes", () => {
+  test("PLANTED: suspicious-review blocks fresh session effects but quarantines other writes", () => {
     const quarantined = inspect({ credential: { fellowStatus: "suspicious_review" } });
     expect(quarantined).toEqual({
       decision: {
         decision: "quarantine",
         effect: "promote",
-        handling: "hold-for-operator-review",
+        handling: "blocked-pending-operator-review",
       },
       operatorReason: "suspicious_review_quarantine",
     });
     expect(fellowAuthorizationResponse(quarantined.decision)).toBeUndefined();
+    expect(JSON.stringify(quarantined.decision)).not.toContain("hold");
+
+    for (const effect of ["session.open", "session.close"] as const) {
+      const blocked = inspect({
+        effect,
+        target: effect === "session.open" ? sessionAdmissionTarget() : sessionCloseTarget(),
+        credential: { fellowStatus: "suspicious_review", grantedScopes: [] },
+      });
+      expect(blocked.operatorReason).toBe("suspicious_review_write_blocked");
+      expect(blocked.decision.decision).toBe("refuse");
+    }
 
     // Quarantine cannot become a way to submit an ungranted write.
     const invalid = inspect({
@@ -2033,6 +2077,45 @@ describe("centralized Fellow write authorization", () => {
     }
   });
 
+  test("PLANTED: internal session effects use admission/close targets without public scopes", () => {
+    const admission = sessionAdmissionTarget();
+    expect(admission).toEqual({ kind: "session-admission", problemId: "P-1" });
+    expect(
+      decide({ effect: "session.open", credential: { grantedScopes: [] }, target: admission }),
+    ).toEqual({ decision: "allow", effect: "session.open" });
+    expect(
+      inspect({
+        effect: "session.open",
+        credential: { grantedScopes: [], grantedResources: { problemBinding: "P-other" } },
+        target: admission,
+      }).operatorReason,
+    ).toBe("problem_binding_mismatch");
+    expect(
+      inspect({
+        effect: "session.open",
+        credential: { grantedScopes: [], grantedResources: { fellowGrantExpiresAt: NOW } },
+        target: admission,
+      }).operatorReason,
+    ).toBe("grant_expired");
+    // This is only the pure evaluator's synthetic input. wqlf owns durable,
+    // credential-attributed event-budget consumption and route-level races.
+    expect(
+      inspect({
+        effect: "session.open",
+        credential: { grantedScopes: [], grantedResources: { eventBudget: 1 } },
+        target: admission,
+        usage: { eventsRecorded: 1 },
+      }).operatorReason,
+    ).toBe("event_budget_exhausted");
+    expect(
+      inspect({
+        effect: "session.close",
+        credential: { grantedScopes: [] },
+        target: sessionCloseTarget({ membershipRole: undefined }),
+      }).operatorReason,
+    ).toBe("not_a_member");
+  });
+
   test("PLANTED: unscoped workshop writes share the central lifecycle gate", () => {
     const workshop = {
       effect: "workshop.push" as const,
@@ -2050,7 +2133,7 @@ describe("centralized Fellow write authorization", () => {
       decision: {
         decision: "quarantine",
         effect: "workshop.push",
-        handling: "hold-for-operator-review",
+        handling: "blocked-pending-operator-review",
       },
       operatorReason: "suspicious_review_quarantine",
     });

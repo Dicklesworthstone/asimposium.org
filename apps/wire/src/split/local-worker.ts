@@ -2187,6 +2187,12 @@ async function promoteWorkshop(request: Request, env: LocalSplitEnv): Promise<Re
     .bind(workshopId)
     .first<WorkshopRow>();
   if (workshop === null) return notFound();
+  // A workshop id is private state. Keep an existing workshop owned by another
+  // Fellow or sponsor indistinguishable from an absent id, and do this before
+  // any screening, candidate-CAS, or public-ledger work begins.
+  const fellowId = localWorkshopFellowId(request, env);
+  const sponsorId = localWorkshopSponsorId(request, env);
+  if (workshop.fellow_id !== fellowId || workshop.sponsor_id !== sponsorId) return notFound();
   const requestDigest = await localScreeningRequestDigest(workshop, currentPromotion);
   let idempotencyKeyDigest: string;
   try {

@@ -437,6 +437,7 @@ test("token lifecycle harness self-test is ordinary-unit registered and never la
   expect(script).toContain("TOKEN_LIFECYCLE_TEST_SUPERVISOR_DESCENDANT_FAILURE");
   expect(script).toContain("TOKEN_LIFECYCLE_TEST_SUPERVISOR_STARTED_FAILURE");
   expect(script).toContain("TOKEN_LIFECYCLE_TEST_SUPERVISOR_WAITPID_FAILURE");
+  // biome-ignore lint/suspicious/noTemplateCurlyInString: literal Bash parameter expansion asserted against the fixture.
   expect(script).toContain('signal_probe_state "-${pgid}"');
   expect(script).toContain("cleanup_census_exit_zero_empty_cannot_false_reap");
   expect(script).toContain(
@@ -468,6 +469,7 @@ test("token lifecycle harness self-test is ordinary-unit registered and never la
   expect(script).toContain("listener-probe.stderr");
   expect(script).toContain("state-fd.stdout");
   expect(script).toContain("state-fd.stderr");
+  // biome-ignore lint/suspicious/noTemplateCurlyInString: literal Bash parameter expansion asserted against the fixture.
   expect(script).toContain('file_byte_size "${stdout_path}"');
   expect(script).toContain('"waitpid-negative"');
   expect(script.indexOf('open(my $started, ">"')).toBeLessThan(script.indexOf("$worker = fork()"));

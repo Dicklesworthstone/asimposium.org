@@ -49,8 +49,10 @@ import {
   MAX_BROWSER_EVIDENCE_BYTES,
   MAX_HTTP_RESPONSE_BYTES,
   MAX_S6_EVIDENCE_BYTES,
+  MAX_SUPERVISOR_BOOTSTRAP_TRANSCRIPT_BYTES,
   performAtExactGoogleOwnerFrame,
   SessionCookieCollector,
+  SUPERVISOR_BOOTSTRAP_CANONICAL_TRANSCRIPT,
   selectBrowserEvidenceBytes,
   selectGoogleLoginAction,
   selectHttpResponseBytes,
@@ -58,6 +60,7 @@ import {
   selectS6EvidenceAgainstExpected,
   selectS6EvidenceBytes,
   selectS6EvidenceV4,
+  selectSupervisorBootstrapTranscriptBytes,
   sessionCookieFinalizationVerdict,
   sessionCookiePolicyFromHeaders,
   writeAllSync,
@@ -805,6 +808,14 @@ function shellLifecycleFromRecords(stdout: string, exitCode: number): ShellLifec
     "forbidden_substitutes",
     "unit_coverage",
   ] as const;
+  const supervisorBootstrapKeys = [
+    "suite",
+    "assertion",
+    "status",
+    "run_status",
+    "outcome",
+    "stage",
+  ] as const;
   const hasProductTerminalShape = (record: Record<string, unknown>): boolean =>
     [aggregateKeys, selfTestKeys, blockedKeys, missingEnvironmentKeys].some((keys) =>
       keysAre(record, keys),
@@ -859,8 +870,24 @@ function shellLifecycleFromRecords(stdout: string, exitCode: number): ShellLifec
     typeof productTerminal.blocked_on === "string" &&
     typeof productTerminal.forbidden_substitutes === "string" &&
     typeof productTerminal.unit_coverage === "string";
+  // This sole two-record mode is intentionally named and value-bound. A generic
+  // assertion record may never stand in for the product terminal, and a leading
+  // duplicate necessarily makes `assertionsBeforeTerminal` non-empty.
+  const supervisorBootstrapTerminal =
+    keysAre(productTerminal, supervisorBootstrapKeys) &&
+    assertionsBeforeTerminal.length === 0 &&
+    exitCode === 0 &&
+    productTerminal.assertion === "supervisor-bootstrap-only" &&
+    productTerminal.status === "pass" &&
+    productTerminal.run_status === 0 &&
+    productTerminal.outcome === "child" &&
+    productTerminal.stage === "input-ready";
   const exitConsistent =
-    aggregateTerminal || selfTestTerminal || blockedTerminal || missingEnvironmentTerminal;
+    aggregateTerminal ||
+    selfTestTerminal ||
+    blockedTerminal ||
+    missingEnvironmentTerminal ||
+    supervisorBootstrapTerminal;
   if (!exitConsistent) return refused();
   return { cleanupUnproven: false, ownedSameProcessGroupsSettled: true };
 }
@@ -3793,7 +3820,7 @@ describe("the shell's causal self-tests actually run", () => {
   );
 
   test(
-    "the provider-free supervisor bootstrap reaches input-ready on the real coproc path",
+    "the provider-free supervisor bootstrap accepts only the canonical lifecycle-framed transcript",
     async () => {
       // Credential-free by construction: the handler returns before
       // `missing_vars` is consulted, so no ASIMP_S6_* value is read and no
@@ -3805,31 +3832,43 @@ describe("the shell's causal self-tests actually run", () => {
       expect(run.timedOut, diag(run)).toBe(false);
       expect(run.exitCode, diag(run)).toBe(0);
       expect(run.cleanupUnproven, diag(run)).toBe(false);
+      expect(run.stdout, diag(run)).toBe(SUPERVISOR_BOOTSTRAP_CANONICAL_TRANSCRIPT);
+      expect(() =>
+        selectSupervisorBootstrapTranscriptBytes(Buffer.from(run.stdout, "utf8")),
+      ).not.toThrow();
 
-      // Exactly one record, so stray output cannot pad a passing run.
-      const lines = run.stdout.split("\n").filter((line) => line.trim().length > 0);
-      expect(lines.length, diag(run)).toBe(1);
-      // EXACT CANONICAL BYTES, in the shell emitter's own key order.
-      //
-      // Field-wise checking cannot close this. `JSON.parse` collapses duplicate
-      // keys last-wins before `Object.keys` is ever read, so an exact key set is
-      // not duplicate protection, and counting a `"key":` needle only catches
-      // the unpadded form — an emitter regression adding a SPACED duplicate
-      // (`"status":"fail","status" :"pass"`) would parse last-wins and pass.
-      // Comparing the whole line to the exact expected bytes closes that class
-      // outright: any added, missing, reordered, retyped, respaced or duplicated
-      // key changes the bytes and fails here.
-      //
-      // `run_status` and `outcome` appear below ONLY as protocol framing. They
-      // are hardcoded literals in the pass emit, so their presence proves the
-      // record's shape, NOT that the shell's `bootstrap_status == 0 && outcome
-      // == "child"` conjunction held — that conjunction lives in the shell and
-      // is not observable from this record. `status` and `stage` remain the only
-      // fields carrying independent semantic evidence.
-      expect(lines[0] ?? "", diag(run)).toBe(
-        '{"suite":"s6-cross-plane-auth","assertion":"supervisor-bootstrap-only",' +
-          '"status":"pass","run_status":0,"outcome":"child","stage":"input-ready"}',
-      );
+      // Each plant takes the same successful coproc + cleanup path and exits 0.
+      // A false-green parser can therefore only be prevented by refusing its
+      // stdout bytes, not by relying on a failure status from the shell.
+      for (const plant of ["partial", "duplicate", "trailing"] as const) {
+        const planted = await runShell(["--self-test-supervisor-bootstrap", plant], withoutS6Env());
+        expect(planted.timedOut, diag(planted)).toBe(false);
+        expect(planted.exitCode, diag(planted)).toBe(0);
+        expect(planted.outerSupervisorSettledAfterRetirementProtocol, diag(planted)).toBe(true);
+        expect(planted.cleanupUnproven, diag(planted)).toBe(true);
+        expect(() =>
+          selectSupervisorBootstrapTranscriptBytes(Buffer.from(planted.stdout, "utf8")),
+        ).toThrow();
+      }
+
+      // Invalid UTF-8 must die in the held-inode reader before an ordinary
+      // JavaScript string can substitute U+FFFD, and no-output must be a
+      // transport fault rather than a passing empty transcript.
+      await expect(
+        runShell(["--self-test-supervisor-bootstrap", "malformed"], withoutS6Env()),
+      ).rejects.toThrow("capture is not canonical UTF-8");
+      await expect(
+        runShell(["--self-test-supervisor-bootstrap", "dead-stream"], withoutS6Env()),
+      ).rejects.toThrow("capture lost");
+
+      // The shared selector is independently fatal-UTF8 and bounded too, even
+      // though the held-inode reader refuses the causal malformed stream first.
+      expect(() => selectSupervisorBootstrapTranscriptBytes(Buffer.from([0xff, 0x0a]))).toThrow();
+      expect(() =>
+        selectSupervisorBootstrapTranscriptBytes(
+          Buffer.alloc(MAX_SUPERVISOR_BOOTSTRAP_TRANSCRIPT_BYTES + 1, 0x61),
+        ),
+      ).toThrow();
     },
     SHELL_TIMEOUT_MS,
   );

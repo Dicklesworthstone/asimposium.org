@@ -510,12 +510,18 @@ export interface FellowCredentialBinding {
  * module having to know their routes exist, and so the whole allow/refuse
  * matrix is testable without mounting anything.
  *
- * The effect vocabulary is the granted-scope vocabulary plus the one unscoped
- * write Fable names explicitly: `workshop.push`. Keeping that write in this
- * same decision is what lets suspicious-review quarantine every write without
- * inventing a scope the sponsor never approved.
+ * The effect vocabulary is the granted-scope vocabulary plus internal
+ * unscoped writes. Session admission and closure are lifecycle operations, not
+ * sponsor-approved public scopes; keeping them here still makes their policy
+ * decision central without inventing a grant the sponsor never approved.
  */
-export type FellowWriteEffect = RequestedScope | "workshop.push";
+export type FellowUnscopedEffect = "workshop.push" | "session.open" | "session.close";
+
+export type FellowWriteEffect = RequestedScope | FellowUnscopedEffect;
+
+function isUnscopedEffect(effect: FellowWriteEffect): effect is FellowUnscopedEffect {
+  return effect === "workshop.push" || effect === "session.open" || effect === "session.close";
+}
 
 /** Fable §6.8 membership roles. Only the observer promotion restriction is hard. */
 export type FellowProblemMembershipRole = "observer" | "contributor" | "steward";
@@ -541,7 +547,28 @@ export interface FellowNewProblemTarget {
   readonly unlisted: boolean;
 }
 
-export type FellowWriteTarget = FellowExistingProblemTarget | FellowNewProblemTarget;
+/**
+ * A session opener has not joined yet. This target intentionally carries no
+ * membership or visibility fields, so admission can precede every
+ * existence-sensitive problem/session lookup.
+ */
+export interface FellowSessionAdmissionTarget {
+  readonly kind: "session-admission";
+  readonly problemId: string;
+}
+
+/** A close is authorized against the existing owned session and actual membership. */
+export interface FellowSessionCloseTarget {
+  readonly kind: "session-close";
+  readonly problemId: string;
+  readonly membershipRole?: FellowProblemMembershipRole;
+}
+
+export type FellowWriteTarget =
+  | FellowExistingProblemTarget
+  | FellowNewProblemTarget
+  | FellowSessionAdmissionTarget
+  | FellowSessionCloseTarget;
 
 /** Consumption is credential-grant-wide, not merely per target problem. */
 export interface FellowWriteGrantUsage {
@@ -568,7 +595,8 @@ export type FellowAuthorizationRefusalReason =
   | "target_not_writable"
   | "event_budget_exhausted"
   | "artifact_budget_unverifiable"
-  | "artifact_budget_exhausted";
+  | "artifact_budget_exhausted"
+  | "suspicious_review_write_blocked";
 
 export interface FellowAuthorizationAllow {
   readonly decision: "allow";
@@ -578,7 +606,11 @@ export interface FellowAuthorizationAllow {
 export interface FellowAuthorizationQuarantine {
   readonly decision: "quarantine";
   readonly effect: FellowWriteEffect;
-  readonly handling: "hold-for-operator-review";
+  /**
+   * A fresh write is blocked until an operator changes lifecycle state. This
+   * policy result does not create a held object, replay, or review-queue row.
+   */
+  readonly handling: "blocked-pending-operator-review";
 }
 
 export interface FellowAuthorizationRefusal {
@@ -645,9 +677,10 @@ function refusalEvaluation(
  * see none of that ordering.
  *
  * Reads are not routed through this function because Fable §5 keeps them for a
- * suspicious-review Fellow. Workshop pushes are routed here but skip only the
- * granted-scope check: they remain writes, so account state, resource grants,
- * membership, budgets, and suspicious-review quarantine still apply centrally.
+ * suspicious-review Fellow. Internal session lifecycle writes and workshop
+ * pushes skip only the granted-scope check: account state, resource grants,
+ * target constraints, budgets, and suspicious-review handling still apply
+ * centrally.
  */
 function evaluateFellowWriteAuthorization(input: {
   readonly effect: FellowWriteEffect;
@@ -671,7 +704,7 @@ function evaluateFellowWriteAuthorization(input: {
     return refusalEvaluation("fellow_status_not_writable");
   }
 
-  if (effect !== "workshop.push" && !credential.grantedScopes.includes(effect)) {
+  if (!isUnscopedEffect(effect) && !credential.grantedScopes.includes(effect)) {
     return refusalEvaluation("scope_not_granted");
   }
 
@@ -688,6 +721,17 @@ function evaluateFellowWriteAuthorization(input: {
     if (target.kind !== "new-problem" || target.initialPublication !== "private-draft") {
       return refusalEvaluation("target_not_writable");
     }
+  } else if (effect === "session.open") {
+    if (target.kind !== "session-admission") return refusalEvaluation("target_not_writable");
+    if (binding !== undefined && binding !== target.problemId) {
+      return refusalEvaluation("problem_binding_mismatch");
+    }
+  } else if (effect === "session.close") {
+    if (target.kind !== "session-close") return refusalEvaluation("target_not_writable");
+    if (binding !== undefined && binding !== target.problemId) {
+      return refusalEvaluation("problem_binding_mismatch");
+    }
+    if (target.membershipRole === undefined) return refusalEvaluation("not_a_member");
   } else {
     if (target.kind !== "existing-problem") return refusalEvaluation("target_not_writable");
     if (binding !== undefined && binding !== target.problemId) {
@@ -728,11 +772,14 @@ function evaluateFellowWriteAuthorization(input: {
   }
 
   if (quarantined) {
+    if (effect === "session.open" || effect === "session.close") {
+      return refusalEvaluation("suspicious_review_write_blocked");
+    }
     return {
       decision: {
         decision: "quarantine",
         effect,
-        handling: "hold-for-operator-review",
+        handling: "blocked-pending-operator-review",
       },
       operatorReason: "suspicious_review_quarantine",
     };

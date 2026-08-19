@@ -44,6 +44,7 @@ const EXPECTED_LOCAL_BINDING_ASSERTIONS: string[] = [
   "S3_sequence_2_working_pack_is_authenticated_and_carries_no_private_material",
   "S3_sequence_3a_a_push_requires_a_session_this_fellow_opened_on_this_problem",
   "S3_sequence_3b_workshop_push_moves_only_the_workshop_cursor_and_stays_invisible_publicly",
+  "S3_sequence_3c_known_workshop_promotion_requires_owning_fellow_and_sponsor_without_candidate_or_public_side_effects",
   "S3_sequence_4_promotion_moves_the_public_cursor_exactly_once_and_the_public_delta_appears",
   "S4_allow_with_warning_publishes_a_safe_category_action_notice_without_provider_detail",
   "S4_authorized_benign_outage_fixture_degrades_to_a_public_warning_notice_not_a_silent_pass",
@@ -124,6 +125,9 @@ const S3_OWNED_KILL_REAP_MS = 500;
 const S3_OWNED_PIPE_DRAIN_MS = 500;
 const S3_OWNED_STREAM_BYTES = 1_000_000;
 const S3_OWNED_OUTPUT_BYTES = 1_000_000;
+// Bundle bytes are evidence rather than a summary receipt. Reuse the accepted
+// owned-command ceiling; this introduces no wider retention budget.
+const S3_ISOLATED_BUILD_OUTPUT_EVIDENCE_MAX_BYTES = S3_OWNED_OUTPUT_BYTES;
 const S3_FRESH_RUNTIME_FIXED_GRACE_MS = 5_000;
 const S3_FRESH_RUNTIME_RESULT_MAX_BYTES = 3 * S3_OWNED_OUTPUT_BYTES;
 const S3_FRESH_RUNTIME_DIAGNOSTIC_MAX_BYTES = 1_024;
@@ -1968,15 +1972,85 @@ async function runS3HarnessPlant(
   });
 }
 
-function localWorkerBundleSentinels(bundle: string): readonly string[] {
-  return LOCAL_WORKER_BUNDLE_SENTINELS.filter((sentinel) => bundle.includes(sentinel));
+type IsolatedProductionBuildMode = "production" | "counterfactual";
+
+interface IsolatedProductionBuildReceipt {
+  readonly mode: IsolatedProductionBuildMode;
+  readonly output_count: number;
+  readonly output_bytes: number;
+  readonly matched_local_worker_sentinels: readonly string[];
 }
 
-function assertProductionBundleExcludesLocalWorker(bundle: string): void {
-  const localWorkerSentinels = localWorkerBundleSentinels(bundle);
-  if (localWorkerSentinels.length !== 0) {
-    throw new Error(`S3_LOCAL_WORKER_IN_PRODUCTION_BUNDLE:${localWorkerSentinels.join(",")}`);
+function expectedLocalWorkerBundleSentinels(mode: IsolatedProductionBuildMode): readonly string[] {
+  return mode === "production" ? [] : LOCAL_WORKER_BUNDLE_SENTINELS;
+}
+
+function decodeIsolatedProductionBuildOutputEvidence(stdout: string): readonly string[] {
+  const evidenceBytes = Buffer.byteLength(stdout, "utf8");
+  if (evidenceBytes > S3_ISOLATED_BUILD_OUTPUT_EVIDENCE_MAX_BYTES) {
+    throw new Error(`S3_ISOLATED_BUILD_OUTPUT_EVIDENCE_OVERRUN:${evidenceBytes}`);
   }
+
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(stdout);
+  } catch {
+    throw new Error("S3_ISOLATED_BUILD_OUTPUT_EVIDENCE_MALFORMED");
+  }
+  if (!Array.isArray(parsed)) {
+    // The child may supply only actual output text strings. In particular, a
+    // child-provided mode, count, byte total, or sentinel list is not evidence.
+    throw new Error("S3_ISOLATED_BUILD_OUTPUT_EVIDENCE_SHAPE");
+  }
+  if (parsed.length === 0) throw new Error("S3_ISOLATED_BUILD_OUTPUT_EVIDENCE_EMPTY");
+  if (!parsed.every((output) => typeof output === "string")) {
+    throw new Error("S3_ISOLATED_BUILD_OUTPUT_EVIDENCE_STRING_REQUIRED");
+  }
+  const outputTexts = parsed as string[];
+  // `ISOLATED_BUILD_SCRIPT` decodes every Bun output fatally. Rejecting the
+  // replacement character also prevents the non-fatal owned-command pipe
+  // reader from upgrading malformed child bytes into parent evidence.
+  if (outputTexts.some((output) => output.includes("\uFFFD"))) {
+    throw new Error("S3_ISOLATED_BUILD_OUTPUT_EVIDENCE_NON_UTF8");
+  }
+  if (stdout !== JSON.stringify(outputTexts)) {
+    throw new Error("S3_ISOLATED_BUILD_OUTPUT_EVIDENCE_NONCANONICAL");
+  }
+  return outputTexts;
+}
+
+function isolatedProductionBuildReceiptFromOutputEvidence(
+  mode: IsolatedProductionBuildMode,
+  outputTexts: readonly string[],
+): IsolatedProductionBuildReceipt {
+  let outputBytes = 0;
+  for (const output of outputTexts) {
+    const next = outputBytes + Buffer.byteLength(output, "utf8");
+    if (!Number.isSafeInteger(next)) {
+      throw new Error("S3_ISOLATED_BUILD_OUTPUT_EVIDENCE_BYTES_INVALID");
+    }
+    outputBytes = next;
+  }
+  if (outputTexts.length === 0 || outputBytes === 0) {
+    throw new Error("S3_ISOLATED_BUILD_OUTPUT_EVIDENCE_EMPTY");
+  }
+
+  const matchedSentinels = LOCAL_WORKER_BUNDLE_SENTINELS.filter((sentinel) =>
+    outputTexts.some((output) => output.includes(sentinel)),
+  );
+  const expectedSentinels = expectedLocalWorkerBundleSentinels(mode);
+  if (
+    matchedSentinels.length !== expectedSentinels.length ||
+    matchedSentinels.some((sentinel, index) => sentinel !== expectedSentinels[index])
+  ) {
+    throw new Error("S3_ISOLATED_BUILD_OUTPUT_EVIDENCE_SENTINELS_INVALID");
+  }
+  return {
+    mode,
+    output_count: outputTexts.length,
+    output_bytes: outputBytes,
+    matched_local_worker_sentinels: matchedSentinels,
+  };
 }
 
 function sourceRegion(source: string, start: string, nextStart: string): string {
@@ -1998,6 +2072,10 @@ const productionEntrypoint = process.argv[2];
 const localWorkerEntrypoint = process.argv[3];
 const entrypoint = "s3-production-counterfactual-entry";
 const namespace = "s3-production-counterfactual";
+if (mode !== "production" && mode !== "counterfactual") {
+  console.error("S3_ISOLATED_BUILD_MODE_INVALID:" + mode);
+  process.exit(2);
+}
 const options = {
   entrypoints: mode === "production" ? [productionEntrypoint] : [entrypoint],
   format: "esm",
@@ -2030,9 +2108,6 @@ if (mode === "counterfactual") {
       }));
     },
   }];
-} else if (mode !== "production") {
-  console.error("S3_ISOLATED_BUILD_MODE_INVALID:" + mode);
-  process.exit(2);
 }
 
 const result = await Bun.build(options);
@@ -2040,28 +2115,140 @@ if (!result.success) {
   for (const log of result.logs) console.error(String(log));
   process.exit(1);
 }
-for (const output of result.outputs) process.stdout.write(await output.text());
+const outputTexts = [];
+let outputBytes = 0;
+for (const output of result.outputs) {
+  const bytes = await output.arrayBuffer();
+  outputBytes += bytes.byteLength;
+  outputTexts.push(new TextDecoder("utf-8", { fatal: true }).decode(bytes));
+}
+if (result.outputs.length === 0 || outputBytes === 0) {
+  console.error("S3_ISOLATED_BUILD_OUTPUT_EMPTY:" + mode);
+  process.exit(1);
+}
+process.stdout.write(JSON.stringify(outputTexts));
 `;
 
 async function isolatedProductionBundle(
-  mode: "production" | "counterfactual",
+  mode: IsolatedProductionBuildMode,
   productionEntrypoint: string,
   localWorkerEntrypoint: string,
-): Promise<string> {
-  // Keep the graph proof outside Bun's long-lived test process. The child
-  // seam is bounded because Bun test can otherwise hide a stalled child or
-  // truncate an overlarge build result into a misleading empty bundle.
-  const { stdout, stderr, exitCode } = await runBoundedS3Child(
-    ["bun", "-e", ISOLATED_BUILD_SCRIPT, mode, productionEntrypoint, localWorkerEntrypoint],
+): Promise<IsolatedProductionBuildReceipt> {
+  // Keep the graph proof outside Bun's long-lived test process. Actual build
+  // output crosses only the existing fresh-owned, pinned-result authority;
+  // the parent derives every receipt field after strictly decoding that output.
+  const { result, cleanupProven } = await runFreshOwnedS3Command(
+    [
+      "bun",
+      "-e",
+      ISOLATED_BUILD_SCRIPT,
+      mode,
+      productionEntrypoint,
+      localWorkerEntrypoint,
+    ],
     "S3_ISOLATED_BUILD",
-    { timeoutMs: S3_BUNDLE_TIMEOUT_MS },
+    {
+      timeoutMs: S3_BUNDLE_TIMEOUT_MS,
+      retainedStreamBytes: S3_ISOLATED_BUILD_OUTPUT_EVIDENCE_MAX_BYTES,
+      retainedOutputBytes: S3_ISOLATED_BUILD_OUTPUT_EVIDENCE_MAX_BYTES,
+    },
   );
-  expectBoundedS3ChildExit({ stdout, stderr, exitCode }, `S3_ISOLATED_BUILD_${mode}`, 0);
-  if (stdout.length === 0) {
-    throw new Error(`S3_ISOLATED_BUILD_OUTPUT_EMPTY:${mode}`);
+  if (result.outcome !== "exited") {
+    throw new Error(
+      `S3_ISOLATED_BUILD_${mode}_OUTCOME:${result.outcome}:CLEANUP:${result.cleanupProven === true}:STDOUT_BYTES:${result.retainedStdoutBytes}:STDERR_BYTES:${result.retainedStderrBytes}`,
+    );
   }
-  return stdout;
+  if (cleanupProven !== true) throw new Error(`S3_ISOLATED_BUILD_${mode}_CLEANUP_UNPROVEN`);
+  if (result.exitCode !== 0) {
+    throw new Error(`S3_ISOLATED_BUILD_${mode}_EXIT_CODE:${result.exitCode ?? "UNAVAILABLE"}`);
+  }
+  if (result.stderr.length !== 0 || result.retainedStderrBytes !== 0) {
+    throw new Error(`S3_ISOLATED_BUILD_${mode}_STDERR_UNEXPECTED:${result.retainedStderrBytes}`);
+  }
+  const evidenceBytes = Buffer.byteLength(result.stdout, "utf8");
+  if (
+    result.retainedStdoutBytes !== evidenceBytes ||
+    result.retainedOutputBytes !== evidenceBytes
+  ) {
+    throw new Error(`S3_ISOLATED_BUILD_${mode}_OUTPUT_NON_UTF8_OR_ACCOUNTING_MISMATCH`);
+  }
+  return isolatedProductionBuildReceiptFromOutputEvidence(
+    mode,
+    decodeIsolatedProductionBuildOutputEvidence(result.stdout),
+  );
 }
+
+test("isolated build output evidence refuses fake fields, malformed, empty, noncanonical, and oversized evidence", () => {
+  const validProductionEvidence = JSON.stringify(["export default {};"]);
+  const childSuppliedFakeReceipt = JSON.stringify({
+    mode: "counterfactual",
+    output_count: 1,
+    output_bytes: 1,
+    matched_local_worker_sentinels: LOCAL_WORKER_BUNDLE_SENTINELS,
+  });
+  const childSuppliedFakeFieldsInOutputText = JSON.stringify({
+    mode: "counterfactual",
+    output_count: 999,
+    output_bytes: 999,
+    matched_local_worker_sentinels: ["not-a-local-worker-sentinel"],
+  });
+  expect(() => decodeIsolatedProductionBuildOutputEvidence("{")).toThrow(
+    "S3_ISOLATED_BUILD_OUTPUT_EVIDENCE_MALFORMED",
+  );
+  // Causal mutation: every old child-supplied receipt field is rejected before
+  // a parent can use it. The schema admits raw output strings only.
+  expect(() => decodeIsolatedProductionBuildOutputEvidence(childSuppliedFakeReceipt)).toThrow(
+    "S3_ISOLATED_BUILD_OUTPUT_EVIDENCE_SHAPE",
+  );
+  expect(() =>
+    decodeIsolatedProductionBuildOutputEvidence(
+      JSON.stringify([JSON.parse(childSuppliedFakeReceipt)]),
+    ),
+  ).toThrow("S3_ISOLATED_BUILD_OUTPUT_EVIDENCE_STRING_REQUIRED");
+  expect(() => decodeIsolatedProductionBuildOutputEvidence("[]")).toThrow(
+    "S3_ISOLATED_BUILD_OUTPUT_EVIDENCE_EMPTY",
+  );
+  expect(() => decodeIsolatedProductionBuildOutputEvidence('["\\uFFFD"]')).toThrow(
+    "S3_ISOLATED_BUILD_OUTPUT_EVIDENCE_NON_UTF8",
+  );
+  expect(() =>
+    decodeIsolatedProductionBuildOutputEvidence(
+      JSON.stringify(["x".repeat(S3_ISOLATED_BUILD_OUTPUT_EVIDENCE_MAX_BYTES)]),
+    ),
+  ).toThrow("S3_ISOLATED_BUILD_OUTPUT_EVIDENCE_OVERRUN");
+  expect(() => decodeIsolatedProductionBuildOutputEvidence('["export default {};" ]')).toThrow(
+    "S3_ISOLATED_BUILD_OUTPUT_EVIDENCE_NONCANONICAL",
+  );
+  const productionEvidence = decodeIsolatedProductionBuildOutputEvidence(validProductionEvidence);
+  expect(isolatedProductionBuildReceiptFromOutputEvidence("production", productionEvidence)).toEqual({
+    mode: "production",
+    output_count: 1,
+    output_bytes: Buffer.byteLength("export default {};", "utf8"),
+    matched_local_worker_sentinels: [],
+  });
+  // A receipt-shaped string is merely bundle text: its forged fields cannot
+  // choose the parent mode, count, byte total, or sentinel verdict.
+  const fakeFieldsEvidence = decodeIsolatedProductionBuildOutputEvidence(
+    JSON.stringify([childSuppliedFakeFieldsInOutputText]),
+  );
+  expect(
+    isolatedProductionBuildReceiptFromOutputEvidence("production", fakeFieldsEvidence),
+  ).toEqual({
+    mode: "production",
+    output_count: 1,
+    output_bytes: Buffer.byteLength(childSuppliedFakeFieldsInOutputText, "utf8"),
+    matched_local_worker_sentinels: [],
+  });
+  expect(() =>
+    isolatedProductionBuildReceiptFromOutputEvidence(
+      "production",
+      [LOCAL_WORKER_BUNDLE_SENTINELS.join("\n")],
+    ),
+  ).toThrow("S3_ISOLATED_BUILD_OUTPUT_EVIDENCE_SENTINELS_INVALID");
+  expect(() =>
+    isolatedProductionBuildReceiptFromOutputEvidence("counterfactual", productionEvidence),
+  ).toThrow("S3_ISOLATED_BUILD_OUTPUT_EVIDENCE_SENTINELS_INVALID");
+});
 
 function createPrivateFixtureFile(directory: string, name: string): string {
   const path = join(directory, name);
@@ -2938,16 +3125,40 @@ test(
 );
 
 test(
-  "PLANTED: fresh runtime returns a nonempty normal isolated S-3 build result",
+  "PLANTED: isolated S-3 build receipts preserve the production/counterfactual sentinel split",
   async () => {
-    const bundle = await isolatedProductionBundle(
+    const productionReceipt = await isolatedProductionBundle(
       "production",
       resolve(root, "apps/wire/src/index.ts"),
       resolve(root, "apps/wire/src/split/local-worker.ts"),
     );
+    const counterfactualReceipt = await isolatedProductionBundle(
+      "counterfactual",
+      resolve(root, "apps/wire/src/index.ts"),
+      resolve(root, "apps/wire/src/split/local-worker.ts"),
+    );
 
-    expect(bundle.length).toBeGreaterThan(0);
-    expect(localWorkerBundleSentinels(bundle)).toEqual([]);
+    expect(productionReceipt.mode).toBe("production");
+    expect(productionReceipt.output_count).toBeGreaterThan(0);
+    expect(productionReceipt.output_bytes).toBeGreaterThan(0);
+    expect(productionReceipt.matched_local_worker_sentinels).toEqual([]);
+    expect(counterfactualReceipt.mode).toBe("counterfactual");
+    expect(counterfactualReceipt.output_count).toBeGreaterThan(0);
+    expect(counterfactualReceipt.output_bytes).toBeGreaterThan(0);
+    expect(counterfactualReceipt.matched_local_worker_sentinels).toEqual(
+      LOCAL_WORKER_BUNDLE_SENTINELS,
+    );
+    // The child is permitted to send only the fatal-decoded Bun output texts.
+    // Count, bytes, mode, and sentinel membership are all parent derivations.
+    expect(ISOLATED_BUILD_SCRIPT).toContain("const outputTexts = [];");
+    expect(ISOLATED_BUILD_SCRIPT).toContain("const bytes = await output.arrayBuffer();");
+    expect(ISOLATED_BUILD_SCRIPT).toContain(
+      'outputTexts.push(new TextDecoder("utf-8", { fatal: true }).decode(bytes));',
+    );
+    expect(ISOLATED_BUILD_SCRIPT).toContain("process.stdout.write(JSON.stringify(outputTexts));");
+    expect(ISOLATED_BUILD_SCRIPT).not.toContain("output_count:");
+    expect(ISOLATED_BUILD_SCRIPT).not.toContain("output_bytes:");
+    expect(ISOLATED_BUILD_SCRIPT).not.toContain("matched_local_worker_sentinels:");
     expect(FRESH_OWNED_COMMAND_DISPATCHER).toContain('const BOOTSTRAP_NAME = "bootstrap.json";');
     expect(FRESH_OWNED_COMMAND_DISPATCHER).toContain('const RESULT_NAME = "result.json";');
     expect(FRESH_OWNED_COMMAND_DISPATCHER).toContain("const bootstrap = readBootstrap();");
@@ -3400,12 +3611,12 @@ test("the S-3 harness binds readiness to its child and excludes the deployed ent
   ].map((path) => readFileSync(resolve(root, path), "utf8"));
   const productionEntrypoint = resolve(root, "apps/wire/src/index.ts");
   const localWorkerEntrypoint = resolve(root, "apps/wire/src/split/local-worker.ts");
-  const productionBundleText = await isolatedProductionBundle(
+  const productionBuildReceipt = await isolatedProductionBundle(
     "production",
     productionEntrypoint,
     localWorkerEntrypoint,
   );
-  const counterfactualBundleText = await isolatedProductionBundle(
+  const counterfactualBuildReceipt = await isolatedProductionBundle(
     "counterfactual",
     productionEntrypoint,
     localWorkerEntrypoint,
@@ -3442,6 +3653,11 @@ test("the S-3 harness binds readiness to its child and excludes the deployed ent
     worker,
     "async function privateArtifact(",
     "async function duplicateClaim(",
+  );
+  const promoteSource = sourceRegion(
+    worker,
+    "async function promoteWorkshop(",
+    "async function publicProblemExists(",
   );
   const fetchSource = worker.slice(worker.indexOf("  async fetch("));
   const exactBindingFailureSource = sourceRegion(
@@ -3575,6 +3791,24 @@ test("the S-3 harness binds readiness to its child and excludes the deployed ent
   expect(privateArtifactSource.indexOf("if (workshop === null) return notFound();")).toBeLessThan(
     privateArtifactSource.indexOf("await env.ARTIFACTS.get(workshop.body_key)"),
   );
+  const promoteOwnershipGate =
+    "if (workshop.fellow_id !== fellowId || workshop.sponsor_id !== sponsorId) return notFound();";
+  expect(promoteSource).toContain("const fellowId = localWorkshopFellowId(request, env);");
+  expect(promoteSource).toContain("const sponsorId = localWorkshopSponsorId(request, env);");
+  expect(promoteSource).toContain(promoteOwnershipGate);
+  const promoteOwnershipGateIndex = promoteSource.indexOf(promoteOwnershipGate);
+  expect(promoteOwnershipGateIndex).toBeGreaterThan(
+    promoteSource.indexOf("if (workshop === null) return notFound();"),
+  );
+  for (const downstreamStep of [
+    "const requestDigest = await localScreeningRequestDigest(workshop, currentPromotion);",
+    "await replayedScreeningDecision(",
+    "const duplicate = await duplicateClaim(env, workshop.problem_id, statementDigest);",
+    "await env.ARTIFACTS.put(publicObjectKey, publicArtifactMd, {",
+    "const results = await env.DB.batch(statements);",
+  ]) {
+    expect(promoteOwnershipGateIndex).toBeLessThan(promoteSource.indexOf(downstreamStep));
+  }
   expect(faultGateSource).toContain(
     "request.headers.get(TEST_D1_BIND_FAULT_HEADER) === TEST_D1_BIND_FAULT",
   );
@@ -3637,13 +3871,26 @@ test("the S-3 harness binds readiness to its child and excludes the deployed ent
     "readiness_nonce_or_nonempty_route_binding_poison_headers_are_byte_for_byte_inert_on_every_async_route",
   );
   expect(checker).toContain("routeBindingPoisonSnapshots({})");
-  // The poison sweep's coverage is a claim about issued requests, so it is
-  // guarded here as source structure rather than as behaviour. Every id appears
-  // exactly twice — once in the executed descriptor, once in the expected
-  // signature list — so duplicating a descriptor, relabelling a duplicate, or
-  // dropping one fails this guard without needing any route to answer
-  // differently from another.
-  for (const probeId of [
+  const routeBindingProbesSource = sourceRegion(
+    checker,
+    "  const routeBindingProbes: readonly RouteBindingProbe[] = [",
+    "  /** Derived from the fields the runner actually executes, never from a label alone. */",
+  );
+  const expectedRouteBindingProbeSignaturesSource = sourceRegion(
+    checker,
+    "  const EXPECTED_ROUTE_BINDING_PROBE_SIGNATURES: readonly string[] = [",
+    "  const routeBindingSignatures = routeBindingProbes.map(routeBindingProbeSignature);",
+  );
+  const routeBindingRosterCheckSource = sourceRegion(
+    checker,
+    '  check(\n    "async_route_poison_roster_is_the_exact_ordered_unique_descriptor_signature_list",',
+    '  check(\n    "poisoned_results_are_produced_from_that_roster_one_result_per_descriptor",',
+  );
+  // The poison sweep's coverage is a claim about issued requests, so its
+  // declaration regions are pinned separately from later executable uses of
+  // the same labels. A duplicate, missing, relabeled, or extra descriptor or
+  // expected signature fails here before route behaviour can mask it.
+  const routeBindingProbeIds = [
     "sessions.open",
     "sessions.working-pack",
     "workshops.push",
@@ -3658,12 +3905,33 @@ test("the S-3 harness binds readiness to its child and excludes the deployed ent
     "s4.fixtures.forged-receipt",
     "public.export",
     "public.face",
-  ]) {
-    // Anchored on the backtick that opens the signature template, so this
-    // counts signature entries rather than any prose that mentions the id.
-    expect(occurrences(checker, `\`${probeId} `)).toBe(1);
-    expect(occurrences(checker, `id: "${probeId}"`)).toBe(1);
+  ] as const;
+  expect(occurrences(routeBindingProbesSource, "id: ")).toBe(routeBindingProbeIds.length);
+  expect(occurrences(expectedRouteBindingProbeSignaturesSource, "\n    `")).toBe(
+    routeBindingProbeIds.length,
+  );
+  for (const probeId of routeBindingProbeIds) {
+    expect(occurrences(routeBindingProbesSource, `id: "${probeId}"`)).toBe(1);
+    // Anchored on the backtick that opens an expected-signature literal, so
+    // later signature use sites cannot make this declaration check stale.
+    expect(occurrences(expectedRouteBindingProbeSignaturesSource, `\`${probeId} `)).toBe(1);
   }
+  expect(routeBindingRosterCheckSource).toContain(
+    "routeBindingSignatures.length === EXPECTED_ROUTE_BINDING_PROBE_SIGNATURES.length",
+  );
+  expect(routeBindingRosterCheckSource).toContain("routeBindingSignatures.every(");
+  expect(routeBindingRosterCheckSource).toContain(
+    "signature === EXPECTED_ROUTE_BINDING_PROBE_SIGNATURES[index]",
+  );
+  expect(routeBindingRosterCheckSource).toContain(
+    "new Set(routeBindingSignatures).size === routeBindingSignatures.length",
+  );
+  expect(routeBindingRosterCheckSource).toContain(
+    "new Set(routeBindingProbes.map((probe) => probe.id)).size === routeBindingProbes.length",
+  );
+  expect(routeBindingRosterCheckSource).toContain(
+    "new Set(routeBindingProbes.map((probe) => probe.path)).size === routeBindingProbes.length",
+  );
   // The executed path and method of the twelfth route, pinned literally: a
   // descriptor that keeps the id but points somewhere else fails here, and the
   // runtime signature assertion fails in the same direction.
@@ -3687,6 +3955,7 @@ test("the S-3 harness binds readiness to its child and excludes the deployed ent
     '"S3_sequence_2_working_pack_is_authenticated_and_carries_no_private_material"',
     '"S3_sequence_3a_a_push_requires_a_session_this_fellow_opened_on_this_problem"',
     '"S3_sequence_3b_workshop_push_moves_only_the_workshop_cursor_and_stays_invisible_publicly"',
+    '"S3_sequence_3c_known_workshop_promotion_requires_owning_fellow_and_sponsor_without_candidate_or_public_side_effects"',
     '"S3_sequence_4_promotion_moves_the_public_cursor_exactly_once_and_the_public_delta_appears"',
   ];
   let previousStageIndex = -1;
@@ -3724,6 +3993,11 @@ test("the S-3 harness binds readiness to its child and excludes the deployed ent
   expect(checker).toContain('const localCounterFellowId = "s3-sequence-counter-fellow"');
   expect(checker).toContain("localS4FellowIdHeader]: localCounterFellowId,");
   expect(checker).toContain("counterFellowHeaders");
+  expect(checker).toContain("crossSponsorFellowHeaders");
+  expect(checker).toContain("crossFellowPromotion.response.status === 404");
+  expect(checker).toContain("crossSponsorPromotion.response.status === 404");
+  expect(checker).toContain("deniedCandidatePublicRead.response.status === 404");
+  expect(checker).toContain("publicAfterCrossPrincipalRefusals.response.status === 404");
   // Fable §17.1 names this stage as the `working` pack. A generic pack that
   // merely happens to carry omitted[] is not the named gate.
   expect(checker).toContain('recordField(ownPack.body, "profile") === "working"');
@@ -3806,13 +4080,15 @@ test("the S-3 harness binds readiness to its child and excludes the deployed ent
   expect(productionIndex).not.toContain("split/local-worker");
   expect(wirePackage.exports?.["."]).toBe("./src/index.ts");
   expect(productionConfigs.every((config) => config.includes("apps/wire/src/index.ts"))).toBe(true);
-  expect(localWorkerBundleSentinels(productionBundleText)).toEqual([]);
-  expect(() => assertProductionBundleExcludesLocalWorker(productionBundleText)).not.toThrow();
-  expect(localWorkerBundleSentinels(counterfactualBundleText)).toEqual(
+  expect(productionBuildReceipt.mode).toBe("production");
+  expect(productionBuildReceipt.output_count).toBeGreaterThan(0);
+  expect(productionBuildReceipt.output_bytes).toBeGreaterThan(0);
+  expect(productionBuildReceipt.matched_local_worker_sentinels).toEqual([]);
+  expect(counterfactualBuildReceipt.mode).toBe("counterfactual");
+  expect(counterfactualBuildReceipt.output_count).toBeGreaterThan(0);
+  expect(counterfactualBuildReceipt.output_bytes).toBeGreaterThan(0);
+  expect(counterfactualBuildReceipt.matched_local_worker_sentinels).toEqual(
     LOCAL_WORKER_BUNDLE_SENTINELS,
-  );
-  expect(() => assertProductionBundleExcludesLocalWorker(counterfactualBundleText)).toThrow(
-    "S3_LOCAL_WORKER_IN_PRODUCTION_BUNDLE",
   );
   expect(checker).toContain("S3_LOCAL_ORIGIN_MUST_BE_LOOPBACK");
   expect(checker).toContain("S3_LOCAL_RUN_TOKEN_REQUIRED");

@@ -2277,6 +2277,11 @@ async function main(): Promise<void> {
     [localS4FellowAuthorityHeader]: localAuthorityToken,
     [localS4FellowIdHeader]: localCounterFellowId,
   };
+  const crossSponsorFellowHeaders: Readonly<Record<string, string>> = {
+    ...sponsorFellowHeaders,
+    [localS3SponsorAuthorityHeader]: localAuthorityToken,
+    [localS3SponsorIdHeader]: crossSponsorId,
+  };
   const sequenceStarted = Date.now();
   const sequenceCursorsBefore = await requestJson(`/__s3/public/${sequenceProblemId}`, {});
   const openedSession = await openSession(sequenceProblemId, sponsorFellowHeaders);
@@ -2444,6 +2449,71 @@ async function main(): Promise<void> {
       code: "PUSHED",
       cache_search_export: "absent",
       duration_ms: Date.now() - pushStarted,
+    },
+  );
+
+  // A known workshop id is no authority to promote. Exercise Fellow and
+  // sponsor mismatches separately, then let the owner retry the same
+  // idempotency key below. That makes the absent replay/candidate/public state
+  // causal rather than merely a second happy-path promotion.
+  const crossPrincipalPromotionStarted = Date.now();
+  const deniedPublicArtifact = "A candidate that a non-owner must never publish.";
+  const deniedPublicArtifactDigest = await sha256Hex(deniedPublicArtifact);
+  const crossFellowPromotion = await requestJson(
+    "/__s3/promote",
+    promotionRequest(
+      sequenceWorkshopId ?? "missing",
+      "A counter Fellow must not promote the known private workshop.",
+      deniedPublicArtifact,
+      {},
+      counterFellowHeaders,
+    ),
+  );
+  const crossSponsorPromotion = await requestJson(
+    "/__s3/promote",
+    promotionRequest(
+      sequenceWorkshopId ?? "missing",
+      "A counter sponsor must not promote the known private workshop.",
+      deniedPublicArtifact,
+      {},
+      crossSponsorFellowHeaders,
+    ),
+  );
+  const packAfterCrossPrincipalRefusals = await requestJson(
+    `/__s3/sessions/${sequenceSessionId ?? "missing"}/pack`,
+    { headers: sponsorFellowHeaders },
+  );
+  const deniedCandidatePublicRead = await snapshot(
+    await localFetch(`${origin}/sha256/${deniedPublicArtifactDigest}`),
+  );
+  const publicAfterCrossPrincipalRefusals = await snapshot(
+    await localFetch(`${origin}/__s3/public/${sequenceProblemId}`),
+  );
+  check(
+    "S3_sequence_3c_known_workshop_promotion_requires_owning_fellow_and_sponsor_without_candidate_or_public_side_effects",
+    crossFellowPromotion.response.status === 404 &&
+      crossSponsorPromotion.response.status === 404 &&
+      JSON.stringify(crossFellowPromotion.body) === JSON.stringify(crossSponsorPromotion.body) &&
+      numberField(packAfterCrossPrincipalRefusals.body, "public_seq") === 0 &&
+      numberField(packAfterCrossPrincipalRefusals.body, "workshop_seq") === 1 &&
+      numberField(packAfterCrossPrincipalRefusals.body, "own_workshop_count") === 1 &&
+      deniedCandidatePublicRead.response.status === 404 &&
+      publicAfterCrossPrincipalRefusals.response.status === 404,
+    `cross Fellow ${crossFellowPromotion.response.status} cross sponsor ${crossSponsorPromotion.response.status} candidate ${deniedCandidatePublicRead.response.status} public ${publicAfterCrossPrincipalRefusals.response.status}`,
+    {
+      principal: localSequenceFellowId,
+      counter_principal: localCounterFellowId,
+      problem_id: sequenceProblemId,
+      session_id: sequenceSessionId,
+      workshop_id: sequenceWorkshopId,
+      route: "POST /__s3/promote",
+      public_seq_before: 0,
+      public_seq_after: numberField(packAfterCrossPrincipalRefusals.body, "public_seq"),
+      workshop_seq_before: 1,
+      workshop_seq_after: numberField(packAfterCrossPrincipalRefusals.body, "workshop_seq"),
+      code: recordField(crossFellowPromotion.body, "code") ?? "none",
+      cache_search_export: "absent",
+      duration_ms: Date.now() - crossPrincipalPromotionStarted,
     },
   );
 
