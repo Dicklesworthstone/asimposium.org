@@ -1,9 +1,9 @@
 /**
  * Request-level ingress for Agora's signed service envelope.
  *
- * This is deliberately an unmounted adapter, not a new public product route:
- * W1 owns endpoint contracts. A future Worker route supplies its exact route
- * template and action allowlist, then consumes the verified raw bytes here.
+ * This is the shared authentication adapter mounted sponsor and operator
+ * routes call through. Each product route supplies its exact route template
+ * and action allowlist, then consumes the verified raw bytes returned here.
  *
  * Body bytes are read once through a byte-bounded stream and passed to signature
  * verification before any JSON parsing. JSON values that look equivalent after
@@ -29,7 +29,7 @@ export const SERVICE_ENVELOPE_HEADER = "asimp-service-envelope";
 const MAX_ENVELOPE_HEADER_BYTES = 8 * 1024;
 export const MAX_SERVICE_ENVELOPE_BODY_BYTES = 64 * 1024;
 const utf8 = new TextEncoder();
-const decoder = new TextDecoder();
+const jsonDecoder = new TextDecoder("utf-8", { fatal: true });
 
 export interface ServiceEnvelopeIngressOptions {
   keyring: VerificationKeyring;
@@ -252,5 +252,10 @@ export async function authenticateServiceEnvelopeRequest(
  * responses, while this auth core owns byte binding and authorization only.
  */
 export function parseAuthenticatedJsonBody(request: AuthenticatedServiceEnvelopeRequest): unknown {
-  return JSON.parse(decoder.decode(request.rawBody));
+  return parseAuthenticatedJsonBytes(request.rawBody);
+}
+
+/** Parse JSON from exact signature-verified bytes without replacing malformed UTF-8. */
+export function parseAuthenticatedJsonBytes(rawBody: Uint8Array): unknown {
+  return JSON.parse(jsonDecoder.decode(rawBody));
 }

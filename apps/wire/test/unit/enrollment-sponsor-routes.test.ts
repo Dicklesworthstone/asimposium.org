@@ -62,7 +62,7 @@ interface Harness {
   app: Hono;
   service: EnrollmentService;
   sign(
-    body: string,
+    body: string | Uint8Array,
     route: string,
     action: string,
     method?: string,
@@ -187,7 +187,12 @@ async function harness(options?: {
   return { app, service, sign };
 }
 
-function envelopeRequest(path: string, headers: Headers, method: string, body?: string): Request {
+function envelopeRequest(
+  path: string,
+  headers: Headers,
+  method: string,
+  body?: string | Uint8Array,
+): Request {
   return new Request(`${origin}${path}`, {
     method,
     headers,
@@ -693,6 +698,24 @@ describe("sponsor enrollment routes", () => {
         body: { requested_scopes: ["promote"] },
       },
     });
+  });
+
+  test("a signed malformed UTF-8 mint body cannot be rewritten into a valid directive", async () => {
+    const h = await harness();
+    const body = new Uint8Array([
+      ...new TextEncoder().encode('{"requested_scopes":["promote"],"first_directive":"'),
+      0xc3,
+      0x28,
+      ...new TextEncoder().encode('"}'),
+    ]);
+    const headers = await h.sign(body, "/v1/enrollments", "enrollment.mint");
+    const response = await h.app.fetch(envelopeRequest("/v1/enrollments", headers, "POST", body));
+
+    expect(JSON.parse(new TextDecoder().decode(body))).toMatchObject({
+      first_directive: "�(",
+    });
+    expect(response.status).toBe(422);
+    expect(await response.json()).toMatchObject({ code: "MINT_BODY_INVALID" });
   });
 
   test("a decision-time name collision gives an executable deny-and-remint recovery", async () => {

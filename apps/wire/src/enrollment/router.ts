@@ -33,6 +33,7 @@ import {
 } from "@asimposium/contracts";
 import { Hono } from "hono";
 
+import { parseAuthenticatedJsonBytes as verifiedJson } from "../auth/http.ts";
 import {
   enrollmentCapsuleHtml,
   enrollmentCapsuleMarkdown,
@@ -1288,11 +1289,6 @@ function isEnrollmentPrincipal(value: unknown): value is EnrollmentPrincipal {
     default:
       return false;
   }
-}
-
-/** Parse JSON from signature-verified bytes; the request stream is consumed by the seam. */
-function verifiedJson(rawBody: Uint8Array): unknown {
-  return JSON.parse(new TextDecoder().decode(rawBody));
 }
 
 /** Internal camelCase grants to the contract's snake_case resources object. */

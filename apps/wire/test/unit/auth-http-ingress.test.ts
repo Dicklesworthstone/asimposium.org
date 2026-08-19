@@ -32,7 +32,7 @@ const origin = "https://a.asimposium.invalid";
 interface HttpHarness {
   options: ServiceEnvelopeIngressOptions;
   makeRequest(
-    body: string,
+    body: string | Uint8Array,
     overrides?: {
       action?: string;
       principalType?: string;
@@ -213,6 +213,26 @@ describe("exact request bytes are bound before JSON parsing", () => {
       // vector demonstrates why parsed-value equality is not an auth binding.
       expect(parseAuthenticatedJsonBody(result)).toBeDefined();
     }
+  });
+
+  test("a signed malformed UTF-8 body is authenticated as bytes but never rewritten into JSON", async () => {
+    const h = await harness();
+    const malformed = new Uint8Array([
+      ...new TextEncoder().encode('{"value":"'),
+      0xc3,
+      0x28,
+      ...new TextEncoder().encode('"}'),
+    ]);
+    const result = await authenticateServiceEnvelopeRequest(
+      await h.makeRequest(malformed),
+      h.options,
+    );
+
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    expect(result.rawBody).toEqual(malformed);
+    expect(JSON.parse(new TextDecoder().decode(malformed))).toEqual({ value: "�(" });
+    expect(() => parseAuthenticatedJsonBody(result)).toThrow(TypeError);
   });
 
   test("rejects whitespace, action, route, and method substitutions", async () => {
