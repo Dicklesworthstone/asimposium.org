@@ -55,6 +55,18 @@ export interface SessionRouterOptions {
     seal(plaintext: string): Promise<EncryptedEnrollmentReplay>;
     open(encrypted: EncryptedEnrollmentReplay): Promise<string>;
   };
+  /** The same signed-envelope sponsor seam the enrollment router uses. */
+  readonly verifiedSponsor?: (
+    request: Request,
+    route: string,
+    action: string,
+  ) => Promise<
+    | {
+        readonly principal: { readonly type: "sponsor"; readonly sponsorId: string };
+        readonly rawBody: Uint8Array;
+      }
+    | Response
+  >;
 }
 
 function mintId(prefix: string): string {
@@ -915,6 +927,88 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
       }
       throw error;
     }
+  });
+
+  // --- GET /v1/sponsors/workshop -----------------------------------------
+  // The sponsor's live workshop view (Rule A2: only the sponsor of record
+  // reads a Fellow's workshop). Verified by the signed service envelope.
+  app.get("/v1/sponsors/workshop", async (c) => {
+    if (options.verifiedSponsor === undefined) {
+      return problem({
+        status: 503,
+        code: "SPONSOR_AUTH_UNAVAILABLE",
+        title: "Sponsor reads are not configured on this Worker",
+        detail: "This deployment has no service-envelope verification keyring.",
+        fixHint: "Configure the service-envelope verification keys and retry.",
+      });
+    }
+    const verified = await options.verifiedSponsor(
+      c.req.raw,
+      "/v1/sponsors/workshop",
+      "workshop.read",
+    );
+    if (verified instanceof Response) return verified;
+    const url = new URL(c.req.url);
+    const problemId = url.searchParams.get("problem_id");
+    const fellowId = url.searchParams.get("fellow_id");
+    if (problemId === null || fellowId === null) {
+      return problem({
+        status: 400,
+        code: "WORKSHOP_READ_QUERY_INVALID",
+        title: "problem_id and fellow_id are required",
+        detail: "The sponsor workshop view scopes to one Fellow on one problem.",
+        fixHint: "Send ?problem_id=P-…&fellow_id=….",
+        extensions: { schema: "https://a.asimposium.org/schemas/sessions.v1.json" },
+      });
+    }
+    // The sponsor may only read THEIR OWN fellows' workshops.
+    const fellow = await c.env.DB.prepare(
+      "SELECT fellow_id, sponsor_id FROM enrollment_fellows WHERE fellow_id = ?",
+    )
+      .bind(fellowId)
+      .first<{ fellow_id: string; sponsor_id: string }>();
+    if (
+      fellow === null ||
+      fellow === undefined ||
+      fellow.sponsor_id !== verified.principal.sponsorId
+    ) {
+      return problem({
+        status: 404,
+        code: "WORKSHOP_NOT_FOUND",
+        title: "No such workshop",
+        detail: "No workshop visible to this sponsor matches the query.",
+        fixHint: "Check the fellow id against your console's Fellows list.",
+      });
+    }
+    const objects = await c.env.DB.prepare(
+      `SELECT workshop_id, type, title, body_md, relates_to_json, workshop_seq, created_at
+         FROM workshop_objects WHERE problem_id = ? AND fellow_id = ?
+         ORDER BY workshop_seq ASC LIMIT 200`,
+    )
+      .bind(problemId, fellowId)
+      .all<{
+        workshop_id: string;
+        type: string;
+        title: string;
+        body_md: string;
+        relates_to_json: string;
+        workshop_seq: number;
+        created_at: string;
+      }>();
+    return c.json({
+      schema: "https://a.asimposium.org/schemas/sessions.v1.json",
+      problem_id: problemId,
+      fellow_id: fellowId,
+      objects: (objects.results ?? []).map((row) => ({
+        workshop_id: row.workshop_id,
+        type: row.type,
+        title: row.title,
+        body_md: row.body_md,
+        relates_to: JSON.parse(row.relates_to_json) as string[],
+        workshop_seq: row.workshop_seq,
+        created_at: row.created_at,
+      })),
+    });
   });
 
   // --- GET /cursor ---------------------------------------------------------

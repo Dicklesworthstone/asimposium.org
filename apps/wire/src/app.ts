@@ -490,33 +490,35 @@ function enrollmentStack(env: Env, options: CreateAppOptions): EnrollmentStack |
   const nonces = new D1NonceStore(env.DB);
   const operatorPrincipalIds = parseOperatorPrincipalIds(env.OPERATOR_PRINCIPAL_IDS);
 
+  const verifiedSponsor = async (request: Request, route: string, action: string) => {
+    if (keyring === undefined) {
+      return problem({
+        status: 503,
+        code: "SPONSOR_AUTH_UNAVAILABLE",
+        title: "Sponsor writes are not configured on this Worker",
+        detail: "This deployment has no service-envelope verification keyring.",
+        fixHint: "Configure the service-envelope verification keys and retry.",
+      });
+    }
+    const result = await authenticateServiceEnvelopeRequest(request, {
+      keyring,
+      nonces,
+      now: Math.floor(Date.now() / 1_000),
+      issuer: ENVELOPE_ISSUER,
+      audience: ENVELOPE_AUDIENCE,
+      route,
+      permittedActions: [action],
+    });
+    if (!result.ok) return result.response;
+    return {
+      principal: { type: "sponsor", sponsorId: result.verification.principal.id } as const,
+      rawBody: result.rawBody,
+    };
+  };
+
   const router = createEnrollmentRouter({
     service,
-    verifiedSponsor: async (request, route, action) => {
-      if (keyring === undefined) {
-        return problem({
-          status: 503,
-          code: "SPONSOR_AUTH_UNAVAILABLE",
-          title: "Sponsor writes are not configured on this Worker",
-          detail: "This deployment has no service-envelope verification keyring.",
-          fixHint: "Configure the service-envelope verification keys and retry.",
-        });
-      }
-      const result = await authenticateServiceEnvelopeRequest(request, {
-        keyring,
-        nonces,
-        now: Math.floor(Date.now() / 1_000),
-        issuer: ENVELOPE_ISSUER,
-        audience: ENVELOPE_AUDIENCE,
-        route,
-        permittedActions: [action],
-      });
-      if (!result.ok) return result.response;
-      return {
-        principal: { type: "sponsor", sponsorId: result.verification.principal.id } as const,
-        rawBody: result.rawBody,
-      };
-    },
+    verifiedSponsor,
     verifiedOperator: async (request, route, action) => {
       if (keyring === undefined || operatorPrincipalIds === undefined) {
         return problem({
@@ -564,7 +566,7 @@ function enrollmentStack(env: Env, options: CreateAppOptions): EnrollmentStack |
   );
   const stack: EnrollmentStack = {
     router,
-    sessionRouter: createSessionRouter({ service, replayProtector }),
+    sessionRouter: createSessionRouter({ service, replayProtector, verifiedSponsor }),
   };
   cached = { db: env.DB, credentialKey, storeFactory: options.createEnrollmentStore, stack };
   return stack;
@@ -617,7 +619,11 @@ export function createApp(options: CreateAppOptions = {}): Hono<{ Bindings: Env 
   // authentication and the 24h write-replay law are exactly the same.
   app.use("*", async (c, next) => {
     const { pathname } = new URL(c.req.url);
-    if (pathname !== "/cursor" && !pathname.startsWith("/v1/sessions")) {
+    if (
+      pathname !== "/cursor" &&
+      !pathname.startsWith("/v1/sessions") &&
+      pathname !== "/v1/sponsors/workshop"
+    ) {
       await next();
       return;
     }
