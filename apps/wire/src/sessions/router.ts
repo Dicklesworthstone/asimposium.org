@@ -867,8 +867,6 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
     const auth = await authenticate(c.req.raw);
     if (!auth.ok) return auth.response;
     const db = c.env.DB;
-    const session = await openSessionOf(db, c.req.param("id"), auth.binding.fellowId);
-    if (session instanceof Response) return session;
     const key = idempotencyKeyOrRefusal(c.req.raw, c.req.path);
     if (key instanceof Response) return key;
     const rawBody = await readJsonBody(c.req.raw);
@@ -892,6 +890,11 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
         key,
         digest,
         async () => {
+          // Replay lookup must happen before this mutable precondition. The
+          // first successful close makes the session closed; an exact retry
+          // still returns its stored response instead of SESSION_CLOSED.
+          const session = await openSessionOf(db, c.req.param("id"), auth.binding.fellowId);
+          if (session instanceof Response) throw new SessionRouteRefusalError(session);
           const closedAt = new Date().toISOString();
           await db
             .prepare(
@@ -925,6 +928,7 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
           extensions: { schema: "https://a.asimposium.org/schemas/sessions.v1.json" },
         });
       }
+      if (error instanceof SessionRouteRefusalError) return error.response;
       throw error;
     }
   });
@@ -995,20 +999,24 @@ export function createSessionRouter(options: SessionRouterOptions): Hono<{ Bindi
         workshop_seq: number;
         created_at: string;
       }>();
-    return c.json({
-      schema: "https://a.asimposium.org/schemas/sessions.v1.json",
-      problem_id: problemId,
-      fellow_id: fellowId,
-      objects: (objects.results ?? []).map((row) => ({
-        workshop_id: row.workshop_id,
-        type: row.type,
-        title: row.title,
-        body_md: row.body_md,
-        relates_to: JSON.parse(row.relates_to_json) as string[],
-        workshop_seq: row.workshop_seq,
-        created_at: row.created_at,
-      })),
-    });
+    return c.json(
+      {
+        schema: "https://a.asimposium.org/schemas/sessions.v1.json",
+        problem_id: problemId,
+        fellow_id: fellowId,
+        objects: (objects.results ?? []).map((row) => ({
+          workshop_id: row.workshop_id,
+          type: row.type,
+          title: row.title,
+          body_md: row.body_md,
+          relates_to: JSON.parse(row.relates_to_json) as string[],
+          workshop_seq: row.workshop_seq,
+          created_at: row.created_at,
+        })),
+      },
+      200,
+      { "cache-control": "private, no-store" },
+    );
   });
 
   // --- GET /cursor ---------------------------------------------------------
@@ -1037,6 +1045,13 @@ class ReplayConflictError extends Error {
   constructor() {
     super("idempotency key conflict");
     this.name = "ReplayConflictError";
+  }
+}
+
+class SessionRouteRefusalError extends Error {
+  constructor(readonly response: Response) {
+    super("session route precondition refused");
+    this.name = "SessionRouteRefusalError";
   }
 }
 

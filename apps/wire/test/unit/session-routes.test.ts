@@ -191,7 +191,7 @@ async function fixture() {
       }),
       env,
     );
-  return { call, db, token, router: sessionRouter, env };
+  return { call, db, token, router: sessionRouter, env, binding, service, replayProtector };
 }
 
 describe("session protocol routes", () => {
@@ -319,6 +319,15 @@ describe("session protocol routes", () => {
       body: JSON.stringify({ handback: "C-1 promoted; odd-length case open.", promote: [] }),
     });
     expect(closed.status).toBe(201);
+    const closedBody = await closed.text();
+
+    const closeReplay = await call(`/v1/sessions/${session.session_id}/close`, {
+      method: "POST",
+      headers: { "content-type": "application/json", "idempotency-key": "close-1" },
+      body: JSON.stringify({ handback: "C-1 promoted; odd-length case open.", promote: [] }),
+    });
+    expect(closeReplay.status).toBe(200);
+    expect(await closeReplay.text()).toBe(closedBody);
 
     // The closed session refuses further workshop pushes.
     const afterClose = await call(`/v1/sessions/${session.session_id}/workshop`, {
@@ -354,6 +363,49 @@ describe("session protocol routes", () => {
       headers: { "if-none-match": etag ?? "" },
     });
     expect(conditional.status).toBe(304);
+  });
+
+  test("the sponsor workshop view is private and never shared-cacheable", async () => {
+    const { call, db, binding, service, replayProtector } = await fixture();
+    const opened = await call("/v1/sessions", {
+      method: "POST",
+      headers: { "content-type": "application/json", "idempotency-key": "sponsor-open" },
+      body: JSON.stringify({ problem_id: "P-4DSP", intent: "explore" }),
+    });
+    const session = (await opened.json()) as { session_id: string };
+    const pushed = await call(`/v1/sessions/${session.session_id}/workshop`, {
+      method: "POST",
+      headers: { "content-type": "application/json", "idempotency-key": "sponsor-push" },
+      body: JSON.stringify({
+        type: "note",
+        title: "Private sponsor note",
+        body_md: "Only the Fellow and sponsor may read these bytes.",
+        relates_to: [],
+      }),
+    });
+    expect(pushed.status).toBe(201);
+
+    const sponsorRouter = createSessionRouter({
+      service,
+      replayProtector,
+      verifiedSponsor: async () => ({
+        principal: { type: "sponsor", sponsorId: binding.sponsorId },
+        rawBody: new Uint8Array(),
+      }),
+    });
+    const response = await sponsorRouter.fetch(
+      new Request(
+        `https://a-staging.asimposium.org/v1/sponsors/workshop?problem_id=P-4DSP&fellow_id=${binding.fellowId}`,
+      ),
+      { DB: db } as import("../../src/env.ts").Env,
+    );
+    expect(response.status).toBe(200);
+    expect(response.headers.get("cache-control")).toBe("private, no-store");
+    expect(await response.json()).toMatchObject({
+      problem_id: "P-4DSP",
+      fellow_id: binding.fellowId,
+      objects: [{ title: "Private sponsor note" }],
+    });
   });
 
   test("a missing bearer is 401 and an unknown pack profile teaches the list", async () => {
