@@ -172,14 +172,7 @@ describe("face wire format", () => {
       "GET /v1/sessions/<id>/pack?profile=… (bearer)",
       "GET /cursor",
     ]);
-    expect(body.not_yet).toEqual([
-      "per-problem public faces",
-      "per-problem event tails",
-      "rate-limit budgets",
-      "leases",
-      "triage",
-      "inbox",
-    ]);
+    expect(body.not_yet).toEqual(["rate-limit budgets", "leases", "triage", "inbox"]);
   });
 
   test("uncontracted per-problem faces refuse hostile source data before D1", async () => {
