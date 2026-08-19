@@ -257,3 +257,82 @@ export function archiveMemberPathIsSafe(memberPath: string): boolean {
   }
   return true;
 }
+
+/**
+ * The upload manifest lifecycle (Fable §10: "manifest → presigned PUT (15
+ * min, size-capped) → hash verification"). This is a pure state machine: the
+ * R2 binding supplies the clock and the I/O; this layer owns which moves are
+ * lawful and which are terminal, so an upload can never skip verification or
+ * resurrect from a terminal state.
+ *
+ *   declared ──presign──► presigned ──upload──► uploaded ──verify──► verified
+ *      │                    │                     │   │                 │
+ *      │                    └──expire─────────────┘   └──mismatch──► quarantined
+ *      └──expire──► expired                            (digest/size)
+ *   verified ──bind──► bound   (terminal; the index row now references it)
+ *
+ * `expired` and `quarantined` are terminal; `bound` is the only success
+ * terminal. An unverified or quarantined object can never reach `bound`, which
+ * is the property the disposition-moving-evidence rule depends on.
+ */
+export type UploadState =
+  | "declared"
+  | "presigned"
+  | "uploaded"
+  | "verified"
+  | "bound"
+  | "expired"
+  | "quarantined";
+
+export type UploadTransition =
+  | "presign"
+  | "upload"
+  | "verify"
+  | "bind"
+  | "expire"
+  | "mismatch";
+
+const TERMINAL_UPLOAD_STATES: ReadonlySet<UploadState> = new Set([
+  "bound",
+  "expired",
+  "quarantined",
+]);
+
+/** The lawful (from, transition) → to edges. Anything absent is refused. */
+const UPLOAD_EDGES: Readonly<Record<UploadTransition, Readonly<Partial<Record<UploadState, UploadState>>>>> = {
+  presign: { declared: "presigned" },
+  upload: { presigned: "uploaded" },
+  verify: { uploaded: "verified" },
+  bind: { verified: "bound" },
+  // Expiry lawfully preempts any non-terminal state; mismatch quarantines an
+  // uploaded object whose observed digest/size disagrees with the manifest.
+  expire: { declared: "expired", presigned: "expired", uploaded: "expired" },
+  mismatch: { uploaded: "quarantined" },
+};
+
+export type UploadStep =
+  | { readonly ok: true; readonly state: UploadState }
+  | { readonly ok: false; readonly code: "UPLOAD_TRANSITION_ILLEGAL"; readonly from: UploadState; readonly transition: UploadTransition };
+
+/** Advance the machine one edge. Illegal moves are refused, never coerced. */
+export function stepUpload(state: UploadState, transition: UploadTransition): UploadStep {
+  const next = UPLOAD_EDGES[transition][state];
+  if (next === undefined) {
+    return { ok: false, code: "UPLOAD_TRANSITION_ILLEGAL", from: state, transition };
+  }
+  return { ok: true, state: next };
+}
+
+/** A terminal state admits no further transition. */
+export function uploadStateIsTerminal(state: UploadState): boolean {
+  return TERMINAL_UPLOAD_STATES.has(state);
+}
+
+/**
+ * The binding gate: only a `verified` object may bind as an artifact an index
+ * row references. This is the single chokepoint the "no unverified or
+ * quarantined object binds as disposition-moving evidence" rule hangs on.
+ */
+export function uploadMayBind(state: UploadState): boolean {
+  return state === "verified";
+}

@@ -194,3 +194,86 @@ describe("archive safety bounds", () => {
     expect(archiveMemberPathIsSafe("")).toBe(false);
   });
 });
+
+import {
+  stepUpload,
+  uploadMayBind,
+  uploadStateIsTerminal,
+  type UploadState,
+  type UploadTransition,
+} from "../../src/krater/cas.ts";
+
+describe("the upload manifest state machine (W2.7)", () => {
+  test("the happy path: declared → presigned → uploaded → verified → bound", () => {
+    let state: UploadState = "declared";
+    for (const transition of ["presign", "upload", "verify", "bind"] as const) {
+      const step = stepUpload(state, transition);
+      expect(step.ok, `${transition} from ${state}`).toBe(true);
+      if (step.ok) state = step.state;
+    }
+    expect(state).toBe("bound");
+    expect(uploadStateIsTerminal(state)).toBe(true);
+  });
+
+  test("an unverified object can never bind", () => {
+    for (const state of ["declared", "presigned", "uploaded", "quarantined", "expired"] as const) {
+      expect(uploadMayBind(state), state).toBe(false);
+      expect(stepUpload(state, "bind").ok, state).toBe(false);
+    }
+    expect(uploadMayBind("verified")).toBe(true);
+  });
+
+  test("a quarantined (digest/size mismatch) object is terminal and never binds", () => {
+    const step = stepUpload("uploaded", "mismatch");
+    expect(step.ok).toBe(true);
+    if (step.ok) {
+      expect(step.state).toBe("quarantined");
+      expect(uploadStateIsTerminal(step.state)).toBe(true);
+      // No resurrection.
+      for (const t of ["presign", "upload", "verify", "bind", "expire"] as const) {
+        expect(stepUpload(step.state, t).ok, t).toBe(false);
+      }
+    }
+  });
+
+  test("expiry preempts any non-terminal state and is terminal", () => {
+    for (const state of ["declared", "presigned", "uploaded"] as const) {
+      const step = stepUpload(state, "expire");
+      expect(step.ok, state).toBe(true);
+      if (step.ok) expect(step.state).toBe("expired");
+    }
+    expect(stepUpload("expired", "presign").ok).toBe(false);
+  });
+
+  test("a verified object cannot be re-uploaded or expired", () => {
+    expect(stepUpload("verified", "upload").ok).toBe(false);
+    expect(stepUpload("verified", "expire").ok).toBe(false);
+    expect(stepUpload("verified", "verify").ok).toBe(false);
+  });
+
+  test("every non-terminal state reaches bound or a terminal refusal", () => {
+    // Model-check the small graph: from each state, BFS to a terminal.
+    const all: UploadState[] = ["declared", "presigned", "uploaded", "verified"];
+    const transitions: UploadTransition[] = ["presign", "upload", "verify", "bind", "expire", "mismatch"];
+    for (const start of all) {
+      const seen = new Set<UploadState>([start]);
+      const queue: UploadState[] = [start];
+      let reachesTerminal = false;
+      while (queue.length > 0) {
+        const current = queue.shift() as UploadState;
+        if (uploadStateIsTerminal(current)) {
+          reachesTerminal = true;
+          break;
+        }
+        for (const t of transitions) {
+          const step = stepUpload(current, t);
+          if (step.ok && !seen.has(step.state)) {
+            seen.add(step.state);
+            queue.push(step.state);
+          }
+        }
+      }
+      expect(reachesTerminal, `${start} never reaches a terminal state`).toBe(true);
+    }
+  });
+});
