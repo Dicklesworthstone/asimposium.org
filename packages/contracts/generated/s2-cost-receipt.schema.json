@@ -30,10 +30,7 @@
         },
         "dirty_state": {
           "type": "string",
-          "enum": [
-            "clean",
-            "dirty"
-          ]
+          "enum": ["clean", "dirty"]
         },
         "source_digest": {
           "type": "string",
@@ -58,11 +55,7 @@
               "type": "null"
             }
           },
-          "required": [
-            "d1",
-            "durable_object",
-            "r2"
-          ],
+          "required": ["d1", "durable_object", "r2"],
           "additionalProperties": false
         },
         "status": {
@@ -192,10 +185,7 @@
         },
         "dirty_state": {
           "type": "string",
-          "enum": [
-            "clean",
-            "dirty"
-          ]
+          "enum": ["clean", "dirty"]
         },
         "source_digest": {
           "type": "string",
@@ -211,57 +201,27 @@
           "properties": {
             "exercise": {
               "type": "string",
-              "enum": [
-                "not-run",
-                "pass",
-                "fail",
-                "interrupted"
-              ]
+              "enum": ["not-run", "pass", "fail", "interrupted"]
             },
             "restart_verify": {
               "type": "string",
-              "enum": [
-                "not-run",
-                "pass",
-                "fail",
-                "interrupted"
-              ]
+              "enum": ["not-run", "pass", "fail", "interrupted"]
             },
             "upgrade_existing": {
               "type": "string",
-              "enum": [
-                "not-run",
-                "pass",
-                "fail",
-                "interrupted"
-              ]
+              "enum": ["not-run", "pass", "fail", "interrupted"]
             },
             "upgrade_empty": {
               "type": "string",
-              "enum": [
-                "not-run",
-                "pass",
-                "fail",
-                "interrupted"
-              ]
+              "enum": ["not-run", "pass", "fail", "interrupted"]
             },
             "upgrade_journal_existing": {
               "type": "string",
-              "enum": [
-                "not-run",
-                "pass",
-                "fail",
-                "interrupted"
-              ]
+              "enum": ["not-run", "pass", "fail", "interrupted"]
             },
             "upgrade_journal_empty": {
               "type": "string",
-              "enum": [
-                "not-run",
-                "pass",
-                "fail",
-                "interrupted"
-              ]
+              "enum": ["not-run", "pass", "fail", "interrupted"]
             }
           },
           "required": [
@@ -342,10 +302,7 @@
                   "const": 2359296
                 }
               },
-              "required": [
-                "retained_names",
-                "reserved_bytes_upper_bound"
-              ],
+              "required": ["retained_names", "reserved_bytes_upper_bound"],
               "additionalProperties": false
             }
           },
@@ -379,11 +336,7 @@
                   "maximum": 9007199254740991
                 }
               },
-              "required": [
-                "path",
-                "digest",
-                "bytes"
-              ],
+              "required": ["path", "digest", "bytes"],
               "additionalProperties": false
             },
             {
@@ -409,18 +362,10 @@
               },
               "kind": {
                 "type": "string",
-                "enum": [
-                  "file",
-                  "fifo",
-                  "special"
-                ]
+                "enum": ["file", "fifo", "special"]
               }
             },
-            "required": [
-              "path",
-              "bytes",
-              "kind"
-            ],
+            "required": ["path", "bytes", "kind"],
             "additionalProperties": false
           }
         }
@@ -462,10 +407,7 @@
               "pattern": "^[0-9a-f]{64}$"
             }
           },
-          "required": [
-            "path",
-            "digest"
-          ],
+          "required": ["path", "digest"],
           "additionalProperties": false
         },
         "receipt": {
@@ -485,11 +427,7 @@
               "maximum": 9007199254740991
             }
           },
-          "required": [
-            "path",
-            "digest",
-            "bytes"
-          ],
+          "required": ["path", "digest", "bytes"],
           "additionalProperties": false
         },
         "provenance": {
@@ -505,22 +443,14 @@
             },
             "dirty_state": {
               "type": "string",
-              "enum": [
-                "clean",
-                "dirty"
-              ]
+              "enum": ["clean", "dirty"]
             },
             "source_digest": {
               "type": "string",
               "pattern": "^[0-9a-f]{64}$"
             }
           },
-          "required": [
-            "run_id",
-            "revision",
-            "dirty_state",
-            "source_digest"
-          ],
+          "required": ["run_id", "revision", "dirty_state", "source_digest"],
           "additionalProperties": false
         },
         "local_phase_status": {
@@ -595,10 +525,7 @@
               "pattern": "^[0-9a-f]{64}$"
             }
           },
-          "required": [
-            "path",
-            "digest"
-          ],
+          "required": ["path", "digest"],
           "additionalProperties": false
         },
         "receipt": {
@@ -618,11 +545,7 @@
               "maximum": 9007199254740991
             }
           },
-          "required": [
-            "path",
-            "digest",
-            "bytes"
-          ],
+          "required": ["path", "digest", "bytes"],
           "additionalProperties": false
         },
         "publication": {
@@ -637,28 +560,14 @@
               "pattern": "^[0-9a-f]{64}$"
             }
           },
-          "required": [
-            "path",
-            "digest"
-          ],
+          "required": ["path", "digest"],
           "additionalProperties": false
         }
       },
-      "required": [
-        "schema_version",
-        "record",
-        "manifest",
-        "receipt",
-        "publication"
-      ],
+      "required": ["schema_version", "record", "manifest", "receipt", "publication"],
       "additionalProperties": false
     }
   },
-  "required": [
-    "receipt",
-    "manifest",
-    "publication",
-    "publication_commit"
-  ],
+  "required": ["receipt", "manifest", "publication", "publication_commit"],
   "additionalProperties": false
 }

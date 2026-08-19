@@ -17,16 +17,36 @@ import problemSchemaModule from "../generated/problem.schema.json" with { type: 
 import screeningSchemaModule from "../generated/screening.schema.json" with { type: "text" };
 import sessionsSchemaModule from "../generated/sessions.schema.json" with { type: "text" };
 
-export const PUBLIC_SCHEMA_IDS = [
+export const PUBLIC_SCHEMA_IDS = Object.freeze([
   "enrollment",
   "enrollment-capsule",
   "ledger",
   "problem",
   "screening",
   "sessions",
-] as const;
+] as const);
+
+/**
+ * Generated schemas that intentionally have no public agent face.
+ *
+ * Keep an explicit reason beside every exclusion. The unit contract test reads
+ * the checked-in generated directory and requires it to be partitioned by this
+ * list plus the served registry, so adding a schema cannot silently disappear
+ * from the public-surface decision.
+ */
+export const PUBLIC_SCHEMA_EXCLUSIONS = Object.freeze([
+  Object.freeze({
+    id: "contracts-scaffold",
+    reason: "Generator metadata; it is not a product protocol schema.",
+  }),
+  Object.freeze({
+    id: "s2-cost-receipt",
+    reason: "Internal S-2 cost-receipt evidence; it has no public agent face.",
+  }),
+] as const);
 
 export type PublicSchemaId = (typeof PUBLIC_SCHEMA_IDS)[number];
+export type PublicSchemaExclusion = (typeof PUBLIC_SCHEMA_EXCLUSIONS)[number];
 
 export interface PublicSchemaDocument {
   readonly id: PublicSchemaId;

@@ -38,9 +38,13 @@ function arbitraryCandidate(rand: () => number, index: number): PackCandidate {
   for (let i = 0; i < bodyLength; i += 1) {
     body += String.fromCharCode(32 + Math.floor(rand() * 95));
   }
+  const kind = KINDS[Math.floor(rand() * KINDS.length)];
   const scope = SCOPES[Math.floor(rand() * SCOPES.length)];
+  if (kind === undefined || scope === undefined) {
+    throw new Error("non-empty property-test vocabularies must yield a candidate value");
+  }
   return {
-    kind: KINDS[Math.floor(rand() * KINDS.length)],
+    kind,
     id: `X-${index}-${Math.floor(rand() * 1000)}`,
     scope,
     tokens,
@@ -93,9 +97,10 @@ describe("pack composition properties (seeded, reproducible)", () => {
       };
       const a = composePack(input);
       const b = composePack(reversed);
-      expect(a.items.map((i) => i.id), `seed ${seed} order leaked into selection`).toEqual(
-        b.items.map((i) => i.id),
-      );
+      expect(
+        a.items.map((i) => i.id),
+        `seed ${seed} order leaked into selection`,
+      ).toEqual(b.items.map((i) => i.id));
       expect(a.canonical_fingerprint).toBe(b.canonical_fingerprint);
     }
   });
@@ -120,6 +125,9 @@ describe("pack composition properties (seeded, reproducible)", () => {
       for (let k = 1; k < selections.length; k += 1) {
         const smaller = selections[k - 1];
         const larger = selections[k];
+        if (smaller === undefined || larger === undefined) {
+          throw new Error("adjacent pack-budget selections must exist");
+        }
         expect(
           larger.length,
           `seed ${seed}: a larger bucket selected fewer items`,
@@ -151,7 +159,9 @@ describe("pack composition properties (seeded, reproducible)", () => {
       const pack = composePack(arbitraryInput(prng(seed), 4000));
       if (pack.items.length === 0) {
         // The Fable invariant: an empty pack with an empty omitted[] is a bug.
-        expect(pack.omitted.length, `seed ${seed}: empty pack with empty omitted`).toBeGreaterThan(0);
+        expect(pack.omitted.length, `seed ${seed}: empty pack with empty omitted`).toBeGreaterThan(
+          0,
+        );
       }
       // Every omission carries a machine-readable reason.
       for (const entry of pack.omitted) {

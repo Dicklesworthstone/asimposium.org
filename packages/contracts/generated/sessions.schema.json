@@ -14,18 +14,10 @@
         },
         "intent": {
           "type": "string",
-          "enum": [
-            "prove",
-            "refute",
-            "review",
-            "sharpen-statement",
-            "explore"
-          ]
+          "enum": ["prove", "refute", "review", "sharpen-statement", "explore"]
         }
       },
-      "required": [
-        "problem_id"
-      ],
+      "required": ["problem_id"],
       "additionalProperties": false
     },
     "session_open_response": {
@@ -43,13 +35,7 @@
           "anyOf": [
             {
               "type": "string",
-              "enum": [
-                "prove",
-                "refute",
-                "review",
-                "sharpen-statement",
-                "explore"
-              ]
+              "enum": ["prove", "refute", "review", "sharpen-statement", "explore"]
             },
             {
               "type": "null"
@@ -67,13 +53,7 @@
           "pattern": "^(?:(?:\\d\\d[2468][048]|\\d\\d[13579][26]|\\d\\d0[48]|[02468][048]00|[13579][26]00)-02-29|\\d{4}-(?:(?:0[13578]|1[02])-(?:0[1-9]|[12]\\d|3[01])|(?:0[469]|11)-(?:0[1-9]|[12]\\d|30)|(?:02)-(?:0[1-9]|1\\d|2[0-8])))T(?:(?:[01]\\d|2[0-3]):[0-5]\\d(?::[0-5]\\d(?:\\.\\d+)?)?(?:Z))$"
         }
       },
-      "required": [
-        "session_id",
-        "problem_id",
-        "intent",
-        "opened_at",
-        "idle_close_at"
-      ],
+      "required": ["session_id", "problem_id", "intent", "opened_at", "idle_close_at"],
       "additionalProperties": false
     },
     "pack_response": {
@@ -183,10 +163,7 @@
                               "maximum": 9007199254740991
                             }
                           },
-                          "required": [
-                            "marker",
-                            "count"
-                          ],
+                          "required": ["marker", "count"],
                           "additionalProperties": false
                         }
                       },
@@ -255,19 +232,13 @@
                               "maximum": 9007199254740991
                             }
                           },
-                          "required": [
-                            "marker",
-                            "count"
-                          ],
+                          "required": ["marker", "count"],
                           "additionalProperties": false
                         }
                       },
                       "scope": {
                         "type": "string",
-                        "enum": [
-                          "ledger",
-                          "workshop"
-                        ]
+                        "enum": ["ledger", "workshop"]
                       },
                       "untrusted": {
                         "type": "boolean",
@@ -303,9 +274,7 @@
                     "minLength": 1
                   }
                 },
-                "required": [
-                  "reason"
-                ],
+                "required": ["reason"],
                 "additionalProperties": false
               }
             },
@@ -316,10 +285,7 @@
                 "properties": {
                   "method": {
                     "type": "string",
-                    "enum": [
-                      "GET",
-                      "POST"
-                    ]
+                    "enum": ["GET", "POST"]
                   },
                   "url": {
                     "type": "string",
@@ -331,11 +297,7 @@
                     "maxLength": 240
                   }
                 },
-                "required": [
-                  "method",
-                  "url",
-                  "why"
-                ],
+                "required": ["method", "url", "why"],
                 "additionalProperties": false
               }
             },
@@ -481,10 +443,7 @@
                               "maximum": 9007199254740991
                             }
                           },
-                          "required": [
-                            "marker",
-                            "count"
-                          ],
+                          "required": ["marker", "count"],
                           "additionalProperties": false
                         }
                       },
@@ -553,19 +512,13 @@
                               "maximum": 9007199254740991
                             }
                           },
-                          "required": [
-                            "marker",
-                            "count"
-                          ],
+                          "required": ["marker", "count"],
                           "additionalProperties": false
                         }
                       },
                       "scope": {
                         "type": "string",
-                        "enum": [
-                          "ledger",
-                          "workshop"
-                        ]
+                        "enum": ["ledger", "workshop"]
                       },
                       "untrusted": {
                         "type": "boolean",
@@ -601,9 +554,7 @@
                     "minLength": 1
                   }
                 },
-                "required": [
-                  "reason"
-                ],
+                "required": ["reason"],
                 "additionalProperties": false
               }
             },
@@ -614,10 +565,7 @@
                 "properties": {
                   "method": {
                     "type": "string",
-                    "enum": [
-                      "GET",
-                      "POST"
-                    ]
+                    "enum": ["GET", "POST"]
                   },
                   "url": {
                     "type": "string",
@@ -629,11 +577,7 @@
                     "maxLength": 240
                   }
                 },
-                "required": [
-                  "method",
-                  "url",
-                  "why"
-                ],
+                "required": ["method", "url", "why"],
                 "additionalProperties": false
               }
             },
@@ -779,10 +723,7 @@
                               "maximum": 9007199254740991
                             }
                           },
-                          "required": [
-                            "marker",
-                            "count"
-                          ],
+                          "required": ["marker", "count"],
                           "additionalProperties": false
                         }
                       },
@@ -851,19 +792,13 @@
                               "maximum": 9007199254740991
                             }
                           },
-                          "required": [
-                            "marker",
-                            "count"
-                          ],
+                          "required": ["marker", "count"],
                           "additionalProperties": false
                         }
                       },
                       "scope": {
                         "type": "string",
-                        "enum": [
-                          "ledger",
-                          "workshop"
-                        ]
+                        "enum": ["ledger", "workshop"]
                       },
                       "untrusted": {
                         "type": "boolean",
@@ -899,9 +834,7 @@
                     "minLength": 1
                   }
                 },
-                "required": [
-                  "reason"
-                ],
+                "required": ["reason"],
                 "additionalProperties": false
               }
             },
@@ -912,10 +845,7 @@
                 "properties": {
                   "method": {
                     "type": "string",
-                    "enum": [
-                      "GET",
-                      "POST"
-                    ]
+                    "enum": ["GET", "POST"]
                   },
                   "url": {
                     "type": "string",
@@ -927,11 +857,7 @@
                     "maxLength": 240
                   }
                 },
-                "required": [
-                  "method",
-                  "url",
-                  "why"
-                ],
+                "required": ["method", "url", "why"],
                 "additionalProperties": false
               }
             },
@@ -1077,10 +1003,7 @@
                               "maximum": 9007199254740991
                             }
                           },
-                          "required": [
-                            "marker",
-                            "count"
-                          ],
+                          "required": ["marker", "count"],
                           "additionalProperties": false
                         }
                       },
@@ -1149,19 +1072,13 @@
                               "maximum": 9007199254740991
                             }
                           },
-                          "required": [
-                            "marker",
-                            "count"
-                          ],
+                          "required": ["marker", "count"],
                           "additionalProperties": false
                         }
                       },
                       "scope": {
                         "type": "string",
-                        "enum": [
-                          "ledger",
-                          "workshop"
-                        ]
+                        "enum": ["ledger", "workshop"]
                       },
                       "untrusted": {
                         "type": "boolean",
@@ -1197,9 +1114,7 @@
                     "minLength": 1
                   }
                 },
-                "required": [
-                  "reason"
-                ],
+                "required": ["reason"],
                 "additionalProperties": false
               }
             },
@@ -1210,10 +1125,7 @@
                 "properties": {
                   "method": {
                     "type": "string",
-                    "enum": [
-                      "GET",
-                      "POST"
-                    ]
+                    "enum": ["GET", "POST"]
                   },
                   "url": {
                     "type": "string",
@@ -1225,11 +1137,7 @@
                     "maxLength": 240
                   }
                 },
-                "required": [
-                  "method",
-                  "url",
-                  "why"
-                ],
+                "required": ["method", "url", "why"],
                 "additionalProperties": false
               }
             },
@@ -1375,10 +1283,7 @@
                               "maximum": 9007199254740991
                             }
                           },
-                          "required": [
-                            "marker",
-                            "count"
-                          ],
+                          "required": ["marker", "count"],
                           "additionalProperties": false
                         }
                       },
@@ -1447,19 +1352,13 @@
                               "maximum": 9007199254740991
                             }
                           },
-                          "required": [
-                            "marker",
-                            "count"
-                          ],
+                          "required": ["marker", "count"],
                           "additionalProperties": false
                         }
                       },
                       "scope": {
                         "type": "string",
-                        "enum": [
-                          "ledger",
-                          "workshop"
-                        ]
+                        "enum": ["ledger", "workshop"]
                       },
                       "untrusted": {
                         "type": "boolean",
@@ -1495,9 +1394,7 @@
                     "minLength": 1
                   }
                 },
-                "required": [
-                  "reason"
-                ],
+                "required": ["reason"],
                 "additionalProperties": false
               }
             },
@@ -1508,10 +1405,7 @@
                 "properties": {
                   "method": {
                     "type": "string",
-                    "enum": [
-                      "GET",
-                      "POST"
-                    ]
+                    "enum": ["GET", "POST"]
                   },
                   "url": {
                     "type": "string",
@@ -1523,11 +1417,7 @@
                     "maxLength": 240
                   }
                 },
-                "required": [
-                  "method",
-                  "url",
-                  "why"
-                ],
+                "required": ["method", "url", "why"],
                 "additionalProperties": false
               }
             },
@@ -1575,14 +1465,7 @@
       "properties": {
         "type": {
           "type": "string",
-          "enum": [
-            "note",
-            "draft",
-            "computation",
-            "dead-end",
-            "friction",
-            "artifact-ref"
-          ]
+          "enum": ["note", "draft", "computation", "dead-end", "friction", "artifact-ref"]
         },
         "title": {
           "type": "string",
@@ -1609,12 +1492,7 @@
           "const": true
         }
       },
-      "required": [
-        "type",
-        "title",
-        "body_md",
-        "relates_to"
-      ],
+      "required": ["type", "title", "body_md", "relates_to"],
       "additionalProperties": false
     },
     "workshop_push_response": {
@@ -1630,10 +1508,7 @@
           "maximum": 9007199254740991
         }
       },
-      "required": [
-        "workshop_id",
-        "workshop_seq"
-      ],
+      "required": ["workshop_id", "workshop_seq"],
       "additionalProperties": false
     },
     "sponsor_workshop_request": {
@@ -1650,10 +1525,7 @@
           "pattern": "^[^\\u0000]*$"
         }
       },
-      "required": [
-        "problem_id",
-        "fellow_id"
-      ],
+      "required": ["problem_id", "fellow_id"],
       "additionalProperties": false
     },
     "sponsor_workshop_view": {
@@ -1685,14 +1557,7 @@
               },
               "type": {
                 "type": "string",
-                "enum": [
-                  "note",
-                  "draft",
-                  "computation",
-                  "dead-end",
-                  "friction",
-                  "artifact-ref"
-                ]
+                "enum": ["note", "draft", "computation", "dead-end", "friction", "artifact-ref"]
               },
               "title": {
                 "type": "string",
@@ -1737,12 +1602,7 @@
           }
         }
       },
-      "required": [
-        "schema",
-        "problem_id",
-        "fellow_id",
-        "objects"
-      ],
+      "required": ["schema", "problem_id", "fellow_id", "objects"],
       "additionalProperties": false
     },
     "promote_request": {
@@ -1785,12 +1645,7 @@
           }
         }
       },
-      "required": [
-        "workshop_id",
-        "kind",
-        "statement",
-        "relates_to"
-      ],
+      "required": ["workshop_id", "kind", "statement", "relates_to"],
       "additionalProperties": false
     },
     "promote_response": {
@@ -1815,12 +1670,7 @@
           "maximum": 9007199254740991
         }
       },
-      "required": [
-        "claim_id",
-        "problem_id",
-        "seq",
-        "queue_position"
-      ],
+      "required": ["claim_id", "problem_id", "seq", "queue_position"],
       "additionalProperties": false
     },
     "session_close_request": {
@@ -1859,12 +1709,7 @@
           }
         }
       },
-      "required": [
-        "handback",
-        "promote",
-        "keep",
-        "discard"
-      ],
+      "required": ["handback", "promote", "keep", "discard"],
       "additionalProperties": false
     },
     "session_close_response": {
@@ -1887,11 +1732,7 @@
           }
         }
       },
-      "required": [
-        "session_id",
-        "closed_at",
-        "promoted"
-      ],
+      "required": ["session_id", "closed_at", "promoted"],
       "additionalProperties": false
     }
   },

@@ -29,12 +29,7 @@
           "maxLength": 40
         }
       },
-      "required": [
-        "id",
-        "public_seq",
-        "created_at",
-        "updated_at"
-      ],
+      "required": ["id", "public_seq", "created_at", "updated_at"],
       "additionalProperties": false
     },
     "problems_index_response": {
@@ -67,12 +62,7 @@
                 "maxLength": 40
               }
             },
-            "required": [
-              "id",
-              "public_seq",
-              "created_at",
-              "updated_at"
-            ],
+            "required": ["id", "public_seq", "created_at", "updated_at"],
             "additionalProperties": false
           }
         },
@@ -85,16 +75,10 @@
           }
         }
       },
-      "required": [
-        "problems",
-        "omitted"
-      ],
+      "required": ["problems", "omitted"],
       "additionalProperties": false
     }
   },
-  "required": [
-    "problem_index_entry",
-    "problems_index_response"
-  ],
+  "required": ["problem_index_entry", "problems_index_response"],
   "additionalProperties": false
 }
