@@ -607,7 +607,6 @@ describe("operator Fellow-cap ingress is separately authenticated and allowliste
         ENROLLMENT_REPLAY_KEY: REPLAY_KEY,
         STOA_ORIGIN: LOOPBACK,
         AGORA_ORIGIN: STAGING_AGORA_ORIGIN,
-      AGORA_ORIGIN: STAGING_AGORA_ORIGIN,
         SERVICE_ENVELOPE_KEYS: keyring,
         OPERATOR_PRINCIPAL_IDS: `${OPERATOR_ID},${OPERATOR_ID}`,
       } as never,
