@@ -5,6 +5,7 @@ import { join, resolve } from "node:path";
 import {
   canonicalJson,
   checkpointDigest,
+  serverAuthoredOutboxTimestamp,
   cursorMatchesEvents,
   deterministicWorkload,
   eventChainDigest,
@@ -21,6 +22,7 @@ import {
   transactionBoundaryMatches,
   UNDIGESTED_EVENT_INDEX,
   UNDIGESTED_EVENT_PROBE_SQL,
+  validateKraterIngressTimestamp,
   validateFtsReadInput,
 } from "./krater";
 
@@ -97,6 +99,32 @@ describe("Krater deterministic contracts", () => {
     expect(() => validateFtsReadInput("synthetic AND claim", 10)).not.toThrow();
     expect(() => validateFtsReadInput("", 10)).toThrow(KraterValidationError);
     expect(() => validateFtsReadInput("synthetic", 51)).toThrow(KraterValidationError);
+  });
+
+  test("PLANTED: Krater ingress rejects noncanonical and future timestamps while retaining exact UTC", () => {
+    const serverNowMs = Date.parse("2026-08-19T00:00:00.000Z");
+    const canonical = "2026-08-19T00:00:00.000Z";
+
+    expect(validateKraterIngressTimestamp(canonical, serverNowMs)).toBe(canonical);
+    for (const invalid of [
+      "2026-08-19",
+      "2026-08-19T00:00:00+00:00",
+      "2026-02-30T00:00:00.000Z",
+      "2026-08-19T00:00:00.001Z",
+    ]) {
+      expect(() => validateKraterIngressTimestamp(invalid, serverNowMs)).toThrow(
+        KraterValidationError,
+      );
+    }
+  });
+
+  test("captures a deterministic server-authored canonical UTC outbox instant", () => {
+    const serverNowMs = Date.parse("2026-08-19T00:00:00.123Z");
+
+    expect(serverAuthoredOutboxTimestamp(serverNowMs)).toBe("2026-08-19T00:00:00.123Z");
+    expect(serverAuthoredOutboxTimestamp(serverNowMs)).toBe(
+      serverAuthoredOutboxTimestamp(serverNowMs),
+    );
   });
 
   test("replays contiguous envelopes and rejects sequence gaps or mixed scopes", () => {

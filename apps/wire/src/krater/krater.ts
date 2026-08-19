@@ -6,6 +6,7 @@ const MAX_EVENT_PAGE_SIZE = 200;
 const MAX_CHAIN_RETRIES = 16;
 const MAX_INTEGRITY_BACKFILL_EVENTS = 512;
 const REDACTION_REASONS = new Set(["legal", "privacy", "severe-safety"]);
+const CANONICAL_UTC_TIMESTAMP = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z$/;
 
 export interface KraterWriteInput {
   problemId: string;
@@ -264,7 +265,48 @@ function requireIdentifier(label: string, value: string): void {
   if (!IDENTIFIER.test(value)) inputError(`${label} must be a bounded identifier.`);
 }
 
-function validateWriteInput(input: KraterWriteInput): void {
+function requireServerTimestampMillis(value: number): void {
+  if (!Number.isSafeInteger(value) || value < 0 || value > 8_640_000_000_000_000) {
+    inputError("server timestamp must be a representable nonnegative millisecond instant.");
+  }
+}
+
+/**
+ * Accept only an exact UTC instant at the trusted Krater ingress seam.
+ *
+ * `createdAt` remains the caller's already-server-authored event/session instant;
+ * the outbox uses its own server-issued timestamp below. Rejecting noncanonical and
+ * future values here keeps neither path vulnerable to a client-supplied future clock.
+ */
+export function validateKraterIngressTimestamp(createdAt: string, serverNowMs: number): string {
+  requireServerTimestampMillis(serverNowMs);
+  if (!CANONICAL_UTC_TIMESTAMP.test(createdAt)) {
+    inputError("createdAt must be an exact canonical UTC timestamp with millisecond precision.");
+  }
+  const parsed = Date.parse(createdAt);
+  if (!Number.isSafeInteger(parsed) || new Date(parsed).toISOString() !== createdAt) {
+    inputError("createdAt must name a real canonical UTC instant.");
+  }
+  if (parsed > serverNowMs) {
+    inputError("createdAt cannot be in the future relative to Krater's server clock.");
+  }
+  return createdAt;
+}
+
+/**
+ * Capture an outbox timestamp once per write before any optimistic retry. This value
+ * is server-authored, canonical UTC, and therefore cannot drift across a retry.
+ */
+export function serverAuthoredOutboxTimestamp(serverNowMs: number): string {
+  requireServerTimestampMillis(serverNowMs);
+  const timestamp = new Date(serverNowMs).toISOString();
+  if (!CANONICAL_UTC_TIMESTAMP.test(timestamp)) {
+    inputError("server clock did not produce a canonical UTC outbox timestamp.");
+  }
+  return timestamp;
+}
+
+function validateWriteInput(input: KraterWriteInput, serverNowMs: number): void {
   requireIdentifier("problemId", input.problemId);
   requireIdentifier("claimId", input.claimId);
   requireIdentifier("eventId", input.eventId);
@@ -275,9 +317,7 @@ function validateWriteInput(input: KraterWriteInput): void {
   ) {
     inputError("statement must be non-empty and within the Krater v0 byte limit.");
   }
-  if (Number.isNaN(Date.parse(input.createdAt))) {
-    inputError("createdAt must be an ISO-8601 timestamp.");
-  }
+  validateKraterIngressTimestamp(input.createdAt, serverNowMs);
 }
 
 function canonicalValue(value: unknown): string {
@@ -937,7 +977,9 @@ export async function writeClaim(
   companion?: KraterAtomicCompanion,
 ): Promise<KraterWriteResult> {
   const writeClaimStartedAt = performance.now();
-  validateWriteInput(input);
+  const serverNowMs = Date.now();
+  validateWriteInput(input, serverNowMs);
+  const outboxCreatedAt = serverAuthoredOutboxTimestamp(serverNowMs);
   const preflight = await backfillKraterIntegrity(db, input.problemId, input.createdAt);
   const companionRequestDigest = companion?.requestDigest;
   const claimIdForSequence = companion?.claimIdForSequence;
@@ -1097,7 +1139,7 @@ export async function writeClaim(
           input.problemId,
           `search.index:${input.eventId}`,
           payloadSha256,
-          input.createdAt,
+          outboxCreatedAt,
           input.problemId,
           input.idempotencyKey,
         ),
