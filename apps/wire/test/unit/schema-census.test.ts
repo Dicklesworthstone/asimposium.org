@@ -84,9 +84,7 @@ describe("W2.1 schema census", () => {
   test("the append-only triggers abort UPDATE and DELETE on event envelopes", () => {
     const db = freshMigratedDb();
     const defs = db
-      .prepare(
-        `SELECT name, sql FROM sqlite_master WHERE type = 'trigger' AND tbl_name = 'events'`,
-      )
+      .prepare(`SELECT name, sql FROM sqlite_master WHERE type = 'trigger' AND tbl_name = 'events'`)
       .all() as Array<{ name: string; sql: string }>;
     const update = defs.find((d) => d.name === "events_immutable_before_update");
     const del = defs.find((d) => d.name === "events_immutable_before_delete");
@@ -140,6 +138,34 @@ describe("W2.1 schema census", () => {
     // freshMigratedDb succeeding at all proves ordered application on fresh D1.
     const db = freshMigratedDb();
     expect(db.prepare(`SELECT COUNT(*) AS n FROM sqlite_master`).get()).not.toBeNull();
+    db.close();
+  });
+
+  test("the census names the load-bearing indexes, not just the tables", () => {
+    const db = freshMigratedDb();
+    const indexes = names(db, "index");
+    // The census tables' query paths are index-backed; a dropped index is a
+    // latent scan regression, so the census names the ones the routes depend on.
+    const required = [
+      "enrollment_credentials_token_idx",
+      "enrollment_proposals_status_idx",
+      "enrollment_fellows_sponsor_status_idx",
+    ];
+    for (const index of required) {
+      expect(indexes, `missing census index ${index}`).toContain(index);
+    }
+    // Every index serves exactly one census-known table (no orphan indexes).
+    const rows = db
+      .prepare(
+        `SELECT name, tbl_name FROM sqlite_master WHERE type = 'index' AND name NOT LIKE 'sqlite_%'`,
+      )
+      .all() as Array<{ name: string; tbl_name: string }>;
+    const tables = new Set(names(db, "table"));
+    for (const row of rows) {
+      expect(tables.has(row.tbl_name), `index ${row.name} on unknown table ${row.tbl_name}`).toBe(
+        true,
+      );
+    }
     db.close();
   });
 });
