@@ -409,7 +409,16 @@ describe("session protocol routes", () => {
       }),
     });
     expect(refused.status).toBe(500);
-    for (const table of ["claims", "events", "idempotency"] as const) {
+    for (const table of [
+      "claims",
+      "claim_projections",
+      "events",
+      "event_content",
+      "idempotency",
+      "outbox",
+      "integrity_checkpoints",
+      "public_claim_fts",
+    ] as const) {
       expect(
         await db.prepare(`SELECT COUNT(*) AS count FROM ${table}`).first<{ count: number }>(),
       ).toEqual({ count: 0 });

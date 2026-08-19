@@ -410,6 +410,15 @@ test("token lifecycle harness self-test is ordinary-unit registered and never la
   expect(script).toContain("migration closure is not exactly 0001 through 0020");
   expect(script).toContain('"wrangler_started\\":false');
   expect(script).toContain("assert_migration_journal || exit 1");
+  expect(script).toContain("assert_post_stop_d1_counts || exit 1");
+  const stopWorker = script.lastIndexOf("stop_worker || exit 1");
+  const postStopCensus = script.lastIndexOf("assert_post_stop_d1_counts || exit 1");
+  const retainedLogScan = script.lastIndexOf("scan_retained_logs || exit 1");
+  const terminalPass = script.lastIndexOf("TOKEN_LIFECYCLE_LOCAL_PASSED");
+  expect(stopWorker).toBeGreaterThanOrEqual(0);
+  expect(stopWorker).toBeLessThan(postStopCensus);
+  expect(postStopCensus).toBeLessThan(retainedLogScan);
+  expect(retainedLogScan).toBeLessThan(terminalPass);
   expect(script).toContain("assert_source_closure_unchanged || exit 1");
   expect(script).toContain("TOKEN_LIFECYCLE_TEST_BUSY_PORT");
   expect(script).toContain("TOKEN_LIFECYCLE_TEST_AUX_PID_REUSE");
@@ -693,6 +702,19 @@ test("token lifecycle bounded live local Workerd+D1 proof is ordinary-unit regis
     .trim()
     .split("\n")
     .map((line) => JSON.parse(line) as Record<string, unknown>);
+  const durableIdentity = records.filter(
+    (record) => record.record === "session-replay-durable-identity",
+  );
+  expect(durableIdentity).toHaveLength(1);
+  expect(durableIdentity[0]).toEqual({
+    suite: "token-lifecycle-local",
+    record: "session-replay-durable-identity",
+    session_id: expect.stringMatching(/^S-[A-Za-z0-9]{26}$/),
+    workshop_id: expect.stringMatching(/^W-[A-Za-z0-9]{26}$/),
+    claim_id: "C-1",
+    seq: 1,
+    status: "pass",
+  });
   const authorizationRecord = records.find((record) => record.record === "authorization-decision");
   expect(authorizationRecord).toBeDefined();
   expect(authorizationRecord?.assertion).toBe(
@@ -722,6 +744,9 @@ test("token lifecycle bounded live local Workerd+D1 proof is ordinary-unit regis
   }
   expect(result.stdout).toContain(
     '"assertion":"revoked_credential_refused_before_effectful_session_write","status":"pass"',
+  );
+  expect(result.stdout).toContain(
+    '"assertion":"post_stop_d1_exact_revoke_and_session_replay_side_effect_counts","status":"pass"',
   );
   expect(result.stdout).toContain('"assertion":"revoke_vs_effectful_domain_write","status":"pass"');
   expect(result.stdout).toContain('"code":"TOKEN_LIFECYCLE_LOCAL_PASSED"');

@@ -730,26 +730,48 @@ seed_session_problem() {
 
 assert_post_stop_d1_counts() {
   "${WRANGLER}" d1 execute DB --config "${CONFIG}" --local --persist-to "${STATE_DIR}" \
-    --command "SELECT (SELECT COUNT(*) FROM fellow_lifecycle_events WHERE action = 'credential-revoked') AS credential_revoked_events, (SELECT COUNT(*) FROM enrollment_idempotency WHERE scope = 'credential-revoke') AS credential_replays, (SELECT COUNT(*) FROM sessions WHERE problem_id = '${SESSION_PROBLEM_ID}') AS session_rows, (SELECT COUNT(*) FROM sessions WHERE problem_id = '${SESSION_PROBLEM_ID}' AND closed_at IS NOT NULL) AS closed_session_rows, (SELECT COUNT(*) FROM workshop_objects WHERE problem_id = '${SESSION_PROBLEM_ID}') AS workshop_rows, (SELECT COUNT(*) FROM session_write_replays WHERE scope IN ('session_open', 'workshop_push', 'promote', 'session_close')) AS session_replays, (SELECT COUNT(*) FROM claims WHERE problem_id = '${SESSION_PROBLEM_ID}') AS claim_rows, (SELECT COUNT(*) FROM claim_projections WHERE problem_id = '${SESSION_PROBLEM_ID}') AS claim_projection_rows, (SELECT COUNT(*) FROM events WHERE problem_id = '${SESSION_PROBLEM_ID}') AS event_rows, (SELECT COUNT(*) FROM event_content WHERE event_id IN (SELECT id FROM events WHERE problem_id = '${SESSION_PROBLEM_ID}')) AS event_content_rows, (SELECT COUNT(*) FROM idempotency WHERE problem_id = '${SESSION_PROBLEM_ID}') AS claim_idempotency_rows, (SELECT COUNT(*) FROM outbox WHERE problem_id = '${SESSION_PROBLEM_ID}') AS outbox_rows, (SELECT COUNT(*) FROM integrity_checkpoints WHERE problem_id = '${SESSION_PROBLEM_ID}') AS checkpoint_rows, (SELECT COUNT(*) FROM public_claim_fts WHERE problem_id = '${SESSION_PROBLEM_ID}') AS fts_rows, (SELECT public_seq FROM problems WHERE id = '${SESSION_PROBLEM_ID}') AS public_seq, (SELECT cursor FROM public_cursor WHERE singleton = 1) AS public_cursor" \
+    --command "SELECT (SELECT COUNT(*) FROM fellow_lifecycle_events WHERE action = 'credential-revoked') AS credential_revoked_events, (SELECT COUNT(*) FROM enrollment_idempotency WHERE scope = 'credential-revoke') AS credential_replays, (SELECT COUNT(*) FROM sessions WHERE problem_id = '${SESSION_PROBLEM_ID}') AS session_rows, (SELECT COUNT(*) FROM sessions WHERE problem_id = '${SESSION_PROBLEM_ID}' AND closed_at IS NOT NULL) AS closed_session_rows, (SELECT COUNT(*) FROM workshop_objects WHERE problem_id = '${SESSION_PROBLEM_ID}') AS workshop_rows, (SELECT COUNT(*) FROM session_write_replays WHERE scope IN ('session_open', 'workshop_push', 'promote', 'session_close')) AS session_replays, (SELECT COUNT(*) FROM session_write_replays WHERE scope = 'session_open' AND claim_token IS NOT NULL AND principal_scope = (SELECT fellow_id FROM sessions WHERE problem_id = '${SESSION_PROBLEM_ID}')) AS session_open_replays, (SELECT COUNT(*) FROM session_write_replays WHERE scope = 'workshop_push' AND claim_token IS NOT NULL AND principal_scope = (SELECT fellow_id FROM sessions WHERE problem_id = '${SESSION_PROBLEM_ID}')) AS workshop_push_replays, (SELECT COUNT(*) FROM session_write_replays WHERE scope = 'promote' AND claim_token IS NOT NULL AND principal_scope = (SELECT fellow_id FROM sessions WHERE problem_id = '${SESSION_PROBLEM_ID}')) AS promote_replays, (SELECT COUNT(*) FROM session_write_replays WHERE scope = 'session_close' AND claim_token IS NOT NULL AND principal_scope = (SELECT fellow_id FROM sessions WHERE problem_id = '${SESSION_PROBLEM_ID}')) AS session_close_replays, (SELECT COUNT(*) FROM claims WHERE problem_id = '${SESSION_PROBLEM_ID}') AS claim_rows, (SELECT COUNT(*) FROM claim_projections WHERE problem_id = '${SESSION_PROBLEM_ID}') AS claim_projection_rows, (SELECT COUNT(*) FROM events WHERE problem_id = '${SESSION_PROBLEM_ID}') AS event_rows, (SELECT COUNT(*) FROM event_content WHERE event_id IN (SELECT id FROM events WHERE problem_id = '${SESSION_PROBLEM_ID}')) AS event_content_rows, (SELECT COUNT(*) FROM idempotency WHERE problem_id = '${SESSION_PROBLEM_ID}') AS claim_idempotency_rows, (SELECT COUNT(*) FROM outbox WHERE problem_id = '${SESSION_PROBLEM_ID}') AS outbox_rows, (SELECT COUNT(*) FROM integrity_checkpoints WHERE problem_id = '${SESSION_PROBLEM_ID}') AS checkpoint_rows, (SELECT COUNT(*) FROM public_claim_fts WHERE problem_id = '${SESSION_PROBLEM_ID}') AS fts_rows, (SELECT session_id FROM sessions WHERE problem_id = '${SESSION_PROBLEM_ID}') AS session_id, (SELECT workshop_id FROM workshop_objects WHERE problem_id = '${SESSION_PROBLEM_ID}') AS workshop_id, (SELECT id FROM claims WHERE problem_id = '${SESSION_PROBLEM_ID}') AS claim_id, (SELECT source_seq FROM claims WHERE problem_id = '${SESSION_PROBLEM_ID}') AS claim_source_seq, (SELECT claim_id FROM claim_projections WHERE problem_id = '${SESSION_PROBLEM_ID}') AS projection_claim_id, (SELECT source_seq FROM claim_projections WHERE problem_id = '${SESSION_PROBLEM_ID}') AS projection_source_seq, (SELECT id FROM events WHERE problem_id = '${SESSION_PROBLEM_ID}') AS event_id, (SELECT object_id FROM events WHERE problem_id = '${SESSION_PROBLEM_ID}') AS event_claim_id, (SELECT seq FROM events WHERE problem_id = '${SESSION_PROBLEM_ID}') AS event_seq, (SELECT event_id FROM event_content WHERE event_id IN (SELECT id FROM events WHERE problem_id = '${SESSION_PROBLEM_ID}')) AS event_content_event_id, (SELECT event_id FROM idempotency WHERE problem_id = '${SESSION_PROBLEM_ID}') AS idempotency_event_id, (SELECT event_id FROM outbox WHERE problem_id = '${SESSION_PROBLEM_ID}') AS outbox_event_id, (SELECT checkpoint_seq FROM integrity_checkpoints WHERE problem_id = '${SESSION_PROBLEM_ID}') AS checkpoint_seq, (SELECT claim_id FROM public_claim_fts WHERE problem_id = '${SESSION_PROBLEM_ID}') AS fts_claim_id, (SELECT public_seq FROM problems WHERE id = '${SESSION_PROBLEM_ID}') AS public_seq, (SELECT cursor FROM public_cursor WHERE singleton = 1) AS public_cursor" \
     --json >"${POST_STOP_D1_LOG}" 2>"${POST_STOP_D1_ERROR_LOG}" || {
       fail "TOKEN_LIFECYCLE_POST_STOP_D1_UNREADABLE"
       return 1
     }
-  TOKEN_LIFECYCLE_COUNTS_PATH="${POST_STOP_D1_LOG}" "${BUN}" --eval '
+  TOKEN_LIFECYCLE_COUNTS_PATH="${POST_STOP_D1_LOG}" \
+    TOKEN_LIFECYCLE_CLIENT_PATH="${CLIENT_LOG}" "${BUN}" --eval '
     import { readFileSync } from "node:fs";
     const payload = JSON.parse(readFileSync(process.env.TOKEN_LIFECYCLE_COUNTS_PATH, "utf8"));
+    const clientRecords = readFileSync(process.env.TOKEN_LIFECYCLE_CLIENT_PATH, "utf8")
+      .trim()
+      .split("\n")
+      .map((line) => JSON.parse(line));
+    const identities = clientRecords.filter(
+      (record) => record?.record === "session-replay-durable-identity",
+    );
+    const identity = identities[0];
     const rows = Array.isArray(payload)
       ? payload.flatMap((entry) => Array.isArray(entry?.results) ? entry.results : [])
       : Array.isArray(payload?.results) ? payload.results : [];
     const row = rows[0];
     if (
       rows.length !== 1 ||
+      identities.length !== 1 ||
+      JSON.stringify(Object.keys(identity ?? {}).sort()) !==
+        JSON.stringify(["claim_id", "record", "seq", "session_id", "status", "suite", "workshop_id"]) ||
+      identity?.suite !== "token-lifecycle-local" ||
+      identity?.status !== "pass" ||
+      typeof identity?.session_id !== "string" ||
+      typeof identity?.workshop_id !== "string" ||
+      typeof identity?.claim_id !== "string" ||
+      !Number.isSafeInteger(identity?.seq) ||
       row?.credential_revoked_events !== 2 ||
       row?.credential_replays !== 2 ||
       row?.session_rows !== 1 ||
       row?.closed_session_rows !== 1 ||
       row?.workshop_rows !== 1 ||
       row?.session_replays !== 4 ||
+      row?.session_open_replays !== 1 ||
+      row?.workshop_push_replays !== 1 ||
+      row?.promote_replays !== 1 ||
+      row?.session_close_replays !== 1 ||
       row?.claim_rows !== 1 ||
       row?.claim_projection_rows !== 1 ||
       row?.event_rows !== 1 ||
@@ -758,8 +780,23 @@ assert_post_stop_d1_counts() {
       row?.outbox_rows !== 1 ||
       row?.checkpoint_rows !== 1 ||
       row?.fts_rows !== 1 ||
+      row?.session_id !== identity.session_id ||
+      row?.workshop_id !== identity.workshop_id ||
+      row?.claim_id !== identity.claim_id ||
+      row?.projection_claim_id !== identity.claim_id ||
+      row?.event_claim_id !== identity.claim_id ||
+      row?.fts_claim_id !== identity.claim_id ||
+      row?.event_content_event_id !== row?.event_id ||
+      row?.idempotency_event_id !== row?.event_id ||
+      row?.outbox_event_id !== row?.event_id ||
+      row?.claim_source_seq !== identity.seq ||
+      row?.projection_source_seq !== identity.seq ||
+      row?.event_seq !== identity.seq ||
+      row?.checkpoint_seq !== identity.seq ||
       row?.public_seq !== 1 ||
-      row?.public_cursor !== 1
+      row?.public_cursor !== 1 ||
+      row?.public_seq !== identity.seq ||
+      row?.public_cursor !== identity.seq
     ) {
       process.exit(1);
     }
@@ -2337,6 +2374,15 @@ const closed = SessionCloseResponseSchema.parse(
 );
 assert(closed.session_id === sessionOpen.session_id, "session-close-race-target");
 assert(closed.promoted.length === 0, "session-close-race-no-implicit-promotion");
+console.log(JSON.stringify({
+  suite: "token-lifecycle-local",
+  record: "session-replay-durable-identity",
+  session_id: sessionOpen.session_id,
+  workshop_id: workshopPush.workshop_id,
+  claim_id: promoted.claim_id,
+  seq: promoted.seq,
+  status: "pass",
+}));
 console.log('{"suite":"token-lifecycle-local","assertion":"real_workerd_d1_session_open_workshop_promote_close_same_key_races","status":"pass"}');
 
 function missingId(value: string): string {
