@@ -95,6 +95,20 @@ set -m
 readonly SUITE="s6-cross-plane-auth"
 readonly EX_CONFIG=78
 readonly EX_FAIL=1
+# RESERVED LIFECYCLE BAND 124..127 — contiguous by contract, not by accident.
+#
+# `run_bounded` remaps ANY child exit inside this band to `EX_FAIL` (the
+# `status >= 124 && status <= 127` guards below), so a payload can never forge a
+# lifecycle outcome; the exact child status stays readable in the typed globals.
+#
+# Two members collide with shell conventions — 126 "cannot execute" and 127
+# "command not found". That is accepted and typed, not overlooked: every branch
+# exiting with one of these also emits an NDJSON record carrying its `code` and
+# `stage`, and that record, never the bare status, is the disambiguator. A
+# harness reading only the exit code cannot tell them apart and must not try.
+#
+# Do not renumber a single member. The guards are RANGE checks, and the 123/124
+# boundary is causally planted, so moving one value silently breaks both.
 # A child could not be reaped, or its process group could not be proven empty.
 # Distinct from a plain failure so no caller can read it as success.
 readonly EX_CLEANUP_UNPROVEN=125
@@ -1299,9 +1313,10 @@ run_bounded() {
       status="$EX_WATCHDOG_UNAVAILABLE"
       RUN_BOUNDED_OUTCOME="unavailable"
     fi
-    else
-      read_status=$?
-      (( read_status == 1 )) && result_eof=1
+  else
+    # Outer branch: `read_group_outcome` did not deliver a terminal record.
+    read_status=$?
+    (( read_status == 1 )) && result_eof=1
     if (( GROUP_RECORD_INVALID == 1 )); then
       status="$EX_WATCHDOG_UNAVAILABLE"
     elif (( read_status > 128 )); then
