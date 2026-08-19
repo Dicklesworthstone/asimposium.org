@@ -15,6 +15,7 @@ import {
   MAX_ARCHIVE_EXPANSION_RATIO,
   MAX_ARTIFACT_BYTES,
   MAX_LAKE_ARCHIVE_BYTES,
+  scanBodyForSecrets,
   shouldSpillToCas,
 } from "../../src/krater/cas.ts";
 
@@ -75,7 +76,10 @@ describe("MIME admission and the forbidden-execution wall", () => {
   });
 
   test("an unrecognized type is refused, not guessed", () => {
-    const verdict = decideArtifactAdmission({ sniffedType: "application/x-msdownload", sizeBytes: 10 });
+    const verdict = decideArtifactAdmission({
+      sniffedType: "application/x-msdownload",
+      sizeBytes: 10,
+    });
     expect(verdict.admitted).toBe(false);
     if (!verdict.admitted) expect(verdict.code).toBe("ARTIFACT_TYPE_NOT_ALLOWED");
   });
@@ -136,9 +140,40 @@ describe("the P7 secret-shaped refusal", () => {
   });
 
   test("ordinary research prose is not secret-shaped", () => {
-    expect(bodyLooksSecretShaped("Every toggle-invariant labeling factors through the quotient.")).toBe(
-      false,
-    );
+    expect(
+      bodyLooksSecretShaped("Every toggle-invariant labeling factors through the quotient."),
+    ).toBe(false);
+  });
+
+  test("the scan reports the redacted location, never the value", () => {
+    const token = `asimp_ag_${"A".repeat(26)}_${"x".repeat(43)}`;
+    const body = `line one is clean\nleaked: ${token} here\nline three is clean`;
+    const findings = scanBodyForSecrets(body);
+    expect(findings.length).toBeGreaterThanOrEqual(1);
+    const first = findings[0];
+    if (first === undefined) throw new Error("expected a finding");
+    expect(first.kind).toBe("fellow-token");
+    expect(first.line).toBe(2);
+    expect(first.column).toBe(9);
+    // The finding carries no bytes of the secret.
+    expect(JSON.stringify(findings)).not.toContain(token);
+  });
+
+  test("personal email addresses are PII and refused", () => {
+    const findings = scanBodyForSecrets("reach me at researcher@example.org for the data");
+    expect(findings.some((f) => f.kind === "personal-address")).toBe(true);
+    const verdict = decideArtifactAdmission({
+      sniffedType: "text/plain",
+      sizeBytes: 40,
+      body: "contact: someone@somewhere.com",
+    });
+    expect(verdict.admitted).toBe(false);
+    if (!verdict.admitted) expect(verdict.code).toBe("ARTIFACT_SECRET_SHAPED");
+  });
+
+  test("the CAS URL shape does not trip the address detector", () => {
+    // An artifacts URL has no @, so it must not false-positive as an address.
+    expect(scanBodyForSecrets(`see ${casUrlForHash(HASH_A)}`)).toHaveLength(0);
   });
 });
 

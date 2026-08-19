@@ -47,7 +47,9 @@ const SHA256_HEX = /^[a-f0-9]{64}$/;
  * projects). Anything else is refused at admission; nothing HTML/SVG is ever
  * served under a site origin. Keys are the SNIFFED type, never the extension.
  */
-const ALLOWED_CONTENT_TYPES: Readonly<Record<string, { readonly disposition: "inline" | "attachment" }>> = {
+const ALLOWED_CONTENT_TYPES: Readonly<
+  Record<string, { readonly disposition: "inline" | "attachment" }>
+> = {
   "text/plain": { disposition: "inline" },
   "text/markdown": { disposition: "inline" },
   "text/x-lean": { disposition: "inline" },
@@ -119,15 +121,52 @@ export function casExtractFor(body: string): string {
 }
 
 /**
- * P7 secret refusal: a body carrying a credential-shaped string is refused
- * before it binds. Unlisted hashes are not secrets, so the CAS cannot be a
- * dead-drop for tokens — the scan is the wall. Prefixes mirror the redaction
- * module's known credential shapes.
+ * P7 / §9.1 secret-and-PII scan. Unlisted hashes are not secrets, so the CAS
+ * cannot be a dead-drop for tokens or personal data — the scan is the wall.
+ * Findings report the redacted LOCATION (line and column), never the detected
+ * value: echoing it would republish the leak.
  */
-const SECRET_SHAPED = /asimp_ag_[0-9A-HJKMNP-TV-Z]{26}_[A-Za-z0-9_-]{43}|asimp_[a-z]{2}_[0-9A-Za-z_-]{20,}|sk_live_[0-9A-Za-z]{16,}|-----BEGIN [A-Z ]*PRIVATE KEY-----/;
+export interface SecretFinding {
+  /** The shape class, never the bytes. */
+  readonly kind: "fellow-token" | "prefixed-grant" | "api-key" | "private-key" | "personal-address";
+  /** 1-based line of the hit. */
+  readonly line: number;
+  /** 1-based column where the sensitive run starts. */
+  readonly column: number;
+}
+
+const SECRET_PATTERNS: ReadonlyArray<{
+  readonly kind: SecretFinding["kind"];
+  readonly pattern: RegExp;
+}> = [
+  { kind: "fellow-token", pattern: /asimp_ag_[0-9A-HJKMNP-TV-Z]{26}_[A-Za-z0-9_-]{43}/ },
+  { kind: "prefixed-grant", pattern: /asimp_[a-z]{2}_[0-9A-Za-z_-]{20,}/ },
+  { kind: "api-key", pattern: /sk_live_[0-9A-Za-z]{16,}/ },
+  { kind: "private-key", pattern: /-----BEGIN [A-Z ]*PRIVATE KEY-----/ },
+  { kind: "personal-address", pattern: /[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}/ },
+];
+
+/**
+ * Scan a body for credential- and PII-shaped content. Returns every finding
+ * with its redacted location. Pure: same body, same findings.
+ */
+export function scanBodyForSecrets(body: string): readonly SecretFinding[] {
+  const findings: SecretFinding[] = [];
+  const lines = body.split("\n");
+  for (const [lineIndex, lineText] of lines.entries()) {
+    for (const { kind, pattern } of SECRET_PATTERNS) {
+      const matcher = new RegExp(pattern.source, pattern.flags);
+      const hit = matcher.exec(lineText);
+      if (hit !== null) {
+        findings.push({ kind, line: lineIndex + 1, column: hit.index + 1 });
+      }
+    }
+  }
+  return findings;
+}
 
 export function bodyLooksSecretShaped(body: string): boolean {
-  return SECRET_SHAPED.test(body);
+  return scanBodyForSecrets(body).length > 0;
 }
 
 /**
