@@ -109,3 +109,81 @@ describe("per-problem event export (W2.8)", () => {
     }
   });
 });
+
+import { verifyProblemExportChain } from "../../src/krater/export.ts";
+import { eventChainDigest, genesisChainDigest } from "../../src/krater/krater.ts";
+
+async function chainedEvent(seq: number, previous: string): Promise<{ event: KraterEvent; chain: string }> {
+  const payloadSha256 = `sha256:payload-${seq}`;
+  const chain = await eventChainDigest("P-4DSP", seq, payloadSha256, previous);
+  return {
+    chain,
+    event: {
+      eventId: `E-${seq}`,
+      problemId: "P-4DSP",
+      seq,
+      type: "claim.created",
+      objectId: `C-${seq}`,
+      payloadSha256,
+      rowDigest: `rd-${seq}`,
+      chainDigest: chain,
+      createdAt: "2026-08-18T00:00:00Z",
+    },
+  };
+}
+
+async function buildExport(eventCount: number): Promise<string> {
+  const events: KraterEvent[] = [];
+  let previous = await genesisChainDigest("P-4DSP");
+  for (let seq = 1; seq <= eventCount; seq += 1) {
+    const { event, chain } = await chainedEvent(seq, previous);
+    events.push(event);
+    previous = chain;
+  }
+  return serializeProblemExport({
+    problemId: "P-4DSP",
+    problemTitle: "t",
+    events,
+    checkpoints: [],
+    generatedAt: "2026-08-18",
+  });
+}
+
+describe("export chain verification (W2.8 tamper-evidence)", () => {
+  test("an intact export verifies end to end", async () => {
+    const ndjson = await buildExport(3);
+    const verdict = await verifyProblemExportChain(ndjson);
+    expect(verdict.intact).toBe(true);
+    if (verdict.intact) expect(verdict.eventCount).toBe(3);
+  });
+
+  test("an empty export verifies trivially", async () => {
+    const ndjson = await buildExport(0);
+    const verdict = await verifyProblemExportChain(ndjson);
+    expect(verdict.intact).toBe(true);
+  });
+
+  test("a tampered event breaks the chain at its seq", async () => {
+    const ndjson = await buildExport(3);
+    // Forge the second event's payload without recomputing the chain.
+    const forged = ndjson.replace("sha256:payload-2", "sha256:forged");
+    const verdict = await verifyProblemExportChain(forged);
+    expect(verdict.intact).toBe(false);
+    if (!verdict.intact) expect(verdict.brokenAtSeq).toBe(2);
+  });
+
+  test("a sequence gap is detected", async () => {
+    const ndjson = await buildExport(3);
+    const lines = ndjson.trim().split("\n");
+    // Remove the second event line (header + ev1 + ev3 + trailer).
+    const gapped = [lines[0], lines[1], lines[3], lines[4]].join("\n");
+    const verdict = await verifyProblemExportChain(gapped);
+    expect(verdict.intact).toBe(false);
+  });
+
+  test("a foreign-format export is refused before any chain work", async () => {
+    const verdict = await verifyProblemExportChain('{"control":"other"}\n');
+    expect(verdict.intact).toBe(false);
+    if (!verdict.intact) expect(verdict.brokenAtSeq).toBeNull();
+  });
+});

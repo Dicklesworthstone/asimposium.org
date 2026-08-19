@@ -80,8 +80,7 @@ export function serializeProblemExport(input: ProblemExportInput): string {
  */
 export function parseExportHeader(line: string):
   | { readonly ok: true; readonly format: string; readonly license: string; readonly checkpointCount: number }
-  | { readonly ok: false; readonly reason: string } {
-  let parsed: unknown;
+  | { readonly ok: false; readonly reason: string } {  let parsed: unknown;
   try {
     parsed = JSON.parse(line);
   } catch {
@@ -104,4 +103,97 @@ export function parseExportHeader(line: string):
     license: String(record.license),
     checkpointCount: checkpoints,
   };
+}
+
+/**
+ * Verify an export's integrity chain (Fable §10.2 tamper-evidence, and the
+ * restore drill's core check). Recomputes the chain over the event lines and
+ * confirms each link, then confirms the final chain digest matches the last
+ * embedded checkpoint's root. A mirror can run this offline against only the
+ * export bytes — no D1, no Worker.
+ *
+ * Returns the first broken link, or null when the chain is intact end to end.
+ * This is async because the digest is a WebCrypto SHA-256.
+ */
+export async function verifyProblemExportChain(ndjson: string): Promise<
+  | { readonly intact: true; readonly eventCount: number; readonly finalChainDigest: string }
+  | { readonly intact: false; readonly brokenAtSeq: number; readonly detail: string }
+  | { readonly intact: false; readonly brokenAtSeq: null; readonly detail: string }
+> {
+  const lines = ndjson.split("\n").filter((line) => line.length > 0);
+  const headerLine = lines[0];
+  if (headerLine === undefined) {
+    return { intact: false, brokenAtSeq: null, detail: "empty export" };
+  }
+  const header = parseExportHeader(headerLine);
+  if (!header.ok) {
+    return { intact: false, brokenAtSeq: null, detail: header.reason };
+  }
+
+  const headerRecord = JSON.parse(headerLine) as {
+    readonly problem?: string;
+    readonly checkpoints?: readonly { readonly root_chain_digest?: string }[];
+  };
+  const problemId = headerRecord.problem;
+  if (typeof problemId !== "string" || problemId.length === 0) {
+    return { intact: false, brokenAtSeq: null, detail: "header carries no problem id" };
+  }
+
+  // Event lines are everything between the header and the terminal control
+  // record. The trailer is the last line; anything after the header that is
+  // not the trailer is an event.
+  const eventLines = lines.slice(1, -1);
+  const { genesisChainDigest, eventChainDigest } = await import("./krater.ts");
+  let previous = await genesisChainDigest(problemId);
+  let expectedSeq = 1;
+
+  for (const line of eventLines) {
+    let event: Record<string, unknown>;
+    try {
+      event = JSON.parse(line) as Record<string, unknown>;
+    } catch {
+      return { intact: false, brokenAtSeq: expectedSeq, detail: "event line is not JSON" };
+    }
+    const seq = event.seq;
+    const payloadSha256 = event.payload_sha256;
+    const chainDigest = event.chain_digest;
+    if (
+      typeof seq !== "number" ||
+      typeof payloadSha256 !== "string" ||
+      typeof chainDigest !== "string"
+    ) {
+      return { intact: false, brokenAtSeq: expectedSeq, detail: "event line is missing seq or digests" };
+    }
+    if (seq !== expectedSeq) {
+      return {
+        intact: false,
+        brokenAtSeq: expectedSeq,
+        detail: `sequence gap: expected seq ${expectedSeq}, found ${seq}`,
+      };
+    }
+    const recomputed = await eventChainDigest(problemId, seq, payloadSha256, previous);
+    if (recomputed !== chainDigest) {
+      return {
+        intact: false,
+        brokenAtSeq: seq,
+        detail: `chain digest mismatch at seq ${seq} — the export is tampered or truncated`,
+      };
+    }
+    previous = chainDigest;
+    expectedSeq += 1;
+  }
+
+  // If the header embedded checkpoints, the final chain must match the last
+  // one's root. Absent checkpoints, the recomputed chain is the evidence.
+  const checkpoints = headerRecord.checkpoints ?? [];
+  const lastRoot = checkpoints[checkpoints.length - 1]?.root_chain_digest;
+  if (lastRoot !== undefined && lastRoot !== previous) {
+    return {
+      intact: false,
+      brokenAtSeq: null,
+      detail: "the final chain digest does not match the embedded checkpoint root",
+    };
+  }
+
+  return { intact: true, eventCount: eventLines.length, finalChainDigest: previous };
 }
