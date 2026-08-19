@@ -277,3 +277,69 @@ describe("the upload manifest state machine (W2.7)", () => {
     }
   });
 });
+
+import {
+  duplicateUploadKeepsPublicStatus,
+  gcEligibility,
+  type RetentionClass,
+} from "../../src/krater/cas.ts";
+
+describe("reference-aware GC eligibility (W2.7)", () => {
+  test("the bytes are collected only when no lawful reference remains", () => {
+    const eligible = gcEligibility([]);
+    expect(eligible.eligible).toBe(true);
+    const privateOnly = gcEligibility(["private"]);
+    // A private class alone is removable — its association goes, and with no
+    // lawful class surviving, the bytes go too.
+    expect(privateOnly.eligible).toBe(true);
+  });
+
+  test("public bytes are never collected, and stay public through a duplicate private upload", () => {
+    const verdict = gcEligibility(["public", "private"]);
+    expect(verdict.eligible).toBe(false);
+    if (!verdict.eligible) {
+      expect(verdict.reason).toBe("public_bytes_stay_public");
+      expect(verdict.preservedFor).toContain("public");
+    }
+    // The privacy rule: an existing public hash is not made private by a
+    // duplicate workshop upload.
+    expect(duplicateUploadKeepsPublicStatus(["public"])).toBe(true);
+    expect(duplicateUploadKeepsPublicStatus(["private"])).toBe(false);
+  });
+
+  test("a legal hold is absolute and a quarantine hold preserves the bytes", () => {
+    expect(gcEligibility(["legal-hold", "private"]).eligible).toBe(false);
+    const quarantined = gcEligibility(["quarantine"]);
+    expect(quarantined.eligible).toBe(false);
+    if (!quarantined.eligible) expect(quarantined.reason).toBe("quarantine_hold");
+  });
+
+  test("backup-restoration and licensed references each preserve the bytes", () => {
+    expect(gcEligibility(["backup-restoration"]).eligible).toBe(false);
+    expect(gcEligibility(["licensed"]).eligible).toBe(false);
+  });
+
+  test("eligibility is pure over the surviving classes — order and duplicates are irrelevant", () => {
+    const a = gcEligibility(["private", "public", "private"]);
+    const b = gcEligibility(["public", "private"]);
+    expect(a).toEqual(b);
+  });
+
+  test("every class combination is decided, never crashes", () => {
+    const classes: RetentionClass[] = [
+      "public",
+      "licensed",
+      "backup-restoration",
+      "quarantine",
+      "legal-hold",
+      "private",
+    ];
+    // The full power set: 64 combinations, each must return a lawful verdict.
+    for (let mask = 0; mask < 64; mask += 1) {
+      const subset = classes.filter((_, i) => (mask & (1 << i)) !== 0);
+      const verdict = gcEligibility(subset);
+      const hasPreserver = subset.some((c) => c !== "private");
+      expect(verdict.eligible).toBe(!hasPreserver);
+    }
+  });
+});

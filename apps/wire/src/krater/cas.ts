@@ -336,3 +336,85 @@ export function uploadStateIsTerminal(state: UploadState): boolean {
 export function uploadMayBind(state: UploadState): boolean {
   return state === "verified";
 }
+
+/**
+ * Reference-aware GC eligibility (W2.7). CAS dedup means many index rows can
+ * point at one physical object, so deleting a row NEVER deletes the bytes —
+ * the bytes go only when no lawful reference remains. The classes:
+ *
+ *  - public: a published ledger reference. Public bytes are never GC-eligible;
+ *    a duplicate private upload must not make them private either.
+ *  - licensed: a reference carrying a license obligation (e.g. a CC-BY export).
+ *  - backup-restoration: a reference a restore would need.
+ *  - quarantine: a quarantined object held for review.
+ *  - legal-hold: a legal hold; absolute.
+ *  - private: a workshop/private-draft binding — the only class whose removal
+ *    can ever free the bytes, and only when it is the LAST remaining class.
+ *
+ * The decision is pure over the surviving reference classes.
+ */
+export type RetentionClass =
+  | "public"
+  | "licensed"
+  | "backup-restoration"
+  | "quarantine"
+  | "legal-hold"
+  | "private";
+
+export type GcEligibility =
+  | { readonly eligible: true; readonly reason: "no_lawful_reference_remains" }
+  | {
+      readonly eligible: false;
+      readonly reason:
+        | "public_bytes_stay_public"
+        | "licensed_reference_remains"
+        | "backup_restoration_reference_remains"
+        | "quarantine_hold"
+        | "legal_hold";
+      readonly preservedFor: readonly RetentionClass[];
+    };
+
+const NEVER_GC_CLASSES: ReadonlySet<RetentionClass> = new Set([
+  "public",
+  "licensed",
+  "backup-restoration",
+  "quarantine",
+  "legal-hold",
+]);
+
+/**
+ * Given the retention classes that still reference an object after some
+ * binding's removal, decide whether the physical bytes may be collected. The
+ * private association is removed by the caller regardless; this decides only
+ * whether the shared bytes survive.
+ */
+export function gcEligibility(remainingClasses: readonly RetentionClass[]): GcEligibility {
+  const preserved = [...new Set(remainingClasses)].filter((c) => NEVER_GC_CLASSES.has(c));
+  if (preserved.length === 0) {
+    return { eligible: true, reason: "no_lawful_reference_remains" };
+  }
+  const reason: GcEligibility extends { eligible: false; reason: infer R } ? R : never =
+    preserved.includes("legal-hold")
+      ? "legal_hold"
+      : preserved.includes("quarantine")
+        ? "quarantine_hold"
+        : preserved.includes("public")
+          ? "public_bytes_stay_public"
+          : preserved.includes("licensed")
+            ? "licensed_reference_remains"
+            : "backup_restoration_reference_remains";
+  return { eligible: false, reason, preservedFor: preserved };
+}
+
+/**
+ * The duplicate-upload privacy rule: a hash that is already public is NOT made
+ * private by a later private/workshop upload of the same bytes. The deletion
+ * response must explain that identical public bytes remain public without
+ * revealing another private owner. This predicate is that explanation's
+ * server-side guard.
+ */
+export function duplicateUploadKeepsPublicStatus(
+  existingClasses: readonly RetentionClass[],
+): boolean {
+  return existingClasses.includes("public");
+}
